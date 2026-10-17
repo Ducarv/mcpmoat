@@ -1,0 +1,20 @@
+{
+  "mcpServers": {
+    "good": {
+      "command": "uvx",
+      "args": ["mcp-server-git"]
+    },
+    "unknown-type": {
+      "type": "websocket",
+      "url": "https://ws.example.com/mcp"
+    },
+    "empty": {},
+    "num-env": {
+      "command": "x",
+      "env": { "K": 5 }
+    },
+    "sse-no-url": {
+      "type": "sse"
+    }
+  }
+}

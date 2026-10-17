@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "broken": {
+      "command": "npx",
+      "env": { "API_KEY": mcpmoat-canary-env-7Q2xK9 }
+    }
+  }
+}

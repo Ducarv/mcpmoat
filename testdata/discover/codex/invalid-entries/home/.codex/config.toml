@@ -1,0 +1,14 @@
+[mcp_servers.good]
+command = "npx"
+args = ["-y", "mcp-docs"]
+
+[mcp_servers.num-env]
+command = "x"
+env = { K = 5 }
+
+[mcp_servers.nothing]
+cwd = "/tmp"
+
+[mcp_servers.args-str]
+command = "x"
+args = "not-a-list"

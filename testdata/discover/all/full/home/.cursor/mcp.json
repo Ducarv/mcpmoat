@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "cursor-global": {
+      "command": "uvx",
+      "args": ["cursor-global"]
+    }
+  }
+}

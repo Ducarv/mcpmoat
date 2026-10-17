@@ -1,0 +1,50 @@
+{
+  "numStartups": 3,
+  "theme": "dark",
+  "autoUpdates": true,
+  "tipsHistory": {
+    "new-user-warmup": 1,
+    "memory-command": 2
+  },
+  "mcpServers": {
+    "filesystem": {
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-filesystem", "/tmp"],
+      "env": {}
+    },
+    "remote-http": {
+      "type": "http",
+      "url": "https://mcp.example.com/mcp"
+    },
+    "remote-sse": {
+      "type": "sse",
+      "url": "https://sse.example.com/sse"
+    }
+  },
+  "projects": {
+    "/work/alpha": {
+      "allowedTools": [],
+      "hasTrustDialogAccepted": true,
+      "mcpServers": {
+        "alpha-tool": {
+          "type": "stdio",
+          "command": "node",
+          "args": ["alpha-server.js"]
+        }
+      }
+    },
+    "/work/beta": {
+      "allowedTools": [],
+      "mcpServers": {}
+    },
+    "/work/gamma": {
+      "allowedTools": [],
+      "mcpServers": {
+        "gamma-tool": {
+          "command": "python3",
+          "args": ["-m", "gamma_server"]
+        }
+      }
+    }
+  }
+}

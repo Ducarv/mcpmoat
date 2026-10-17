@@ -1,0 +1,27 @@
+model = "o3"
+approval_policy = "on-request"
+
+[model_providers.local]
+name = "Local"
+base_url = "http://localhost:11434/v1"
+
+[profiles.fast]
+model = "o4-mini"
+approval_policy = "never"
+
+[mcp_servers.docs]
+command = "npx"
+args = ["-y", "mcp-docs"]
+env = { LOG_LEVEL = "info" }
+
+[mcp_servers.remote]
+url = "https://codex.example.com/mcp"
+bearer_token_env_var = "REMOTE_KEY_VAR"
+env_http_headers = { "X-Team" = "TEAM_HEADER_VAR" }
+
+[mcp_servers.git]
+command = "uvx"
+args = ["mcp-server-git", "--repository", "."]
+cwd = "/tmp"
+enabled = false
+startup_timeout_sec = 20

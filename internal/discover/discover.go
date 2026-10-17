@@ -1,0 +1,163 @@
+package discover
+
+import (
+	"context"
+	"path/filepath"
+)
+
+// Options tells Discover where to look. The caller injects both directories,
+// so the package never reads $HOME or the current directory by itself.
+type Options struct {
+	// Home is the home directory of the user. If it is empty, Discover skips
+	// the files in the home directory. Discover cleans the path with
+	// filepath.Clean, so "/home/me/." and "/home/me/" mean "/home/me".
+	Home string
+
+	// WorkDir is the project directory. If it is empty, Discover skips the
+	// project files (.mcp.json and .cursor/mcp.json). Discover cleans the path
+	// with filepath.Clean, and the cleaned path is the ProjectPath of the
+	// project servers.
+	WorkDir string
+}
+
+// Result is what a reader or Discover found: the servers, and the problems
+// with config files or server entries.
+type Result struct {
+	// Servers are the servers found. Discover returns them in a fixed order:
+	// file order (~/.claude.json, <work>/.mcp.json, ~/.cursor/mcp.json,
+	// <work>/.cursor/mcp.json, ~/.codex/config.toml), then ProjectPath, then
+	// Name.
+	Servers []Server
+
+	// Errors are the problems found, in the same file order as Servers. Each
+	// error names its file.
+	Errors []*FileError
+}
+
+// step is one config file that Discover reads.
+type step struct {
+	// path is used for the FileError when the context is canceled before the
+	// step runs.
+	path string
+	read func() Result
+}
+
+// Discover reads the MCP server configs of Claude Code, Cursor and Codex and
+// returns the servers and the problems it found.
+//
+// It only reads config files. It never starts a server. A file that does not
+// exist is skipped without an error (FR-01). Home and WorkDir are given by the
+// caller; the package never reads $HOME. An empty value skips the files that
+// belong to it.
+//
+// The files are read in this fixed order, so the output is the same on every
+// run:
+//
+//  1. Home/.claude.json
+//  2. WorkDir/.mcp.json
+//  3. Home/.cursor/mcp.json
+//  4. WorkDir/.cursor/mcp.json (skipped if it is the same file as step 3)
+//  5. Home/.codex/config.toml
+//
+// If ctx is canceled, Discover adds one FileError with the reason "canceled"
+// and returns what it has. The error names the file that was being read, or
+// the next file if no read had started.
+func Discover(ctx context.Context, opts Options) Result {
+	return runSteps(ctx, buildSteps(ctx, opts))
+}
+
+// runSteps runs the steps in order and joins their results. It stops at the
+// first canceled error, so the result never has two of them.
+func runSteps(ctx context.Context, steps []step) Result {
+	var res Result
+	for _, s := range steps {
+		if err := ctx.Err(); err != nil {
+			res.Errors = append(res.Errors, &FileError{Path: s.path, Reason: reasonCanceled, Err: err})
+			return res
+		}
+		r := s.read()
+		res.Servers = append(res.Servers, r.Servers...)
+		res.Errors = append(res.Errors, r.Errors...)
+		// A reader reports its own canceled error when ctx ends during the read.
+		if hasCanceled(r.Errors) {
+			return res
+		}
+	}
+	return res
+}
+
+// hasCanceled reports whether errs holds a canceled error.
+func hasCanceled(errs []*FileError) bool {
+	for _, e := range errs {
+		if e.Reason == reasonCanceled {
+			return true
+		}
+	}
+	return false
+}
+
+// buildSteps lists the files to read, in order. Each step is a small closure
+// (a function that keeps the variables around it), so Discover can run all
+// steps with one loop.
+func buildSteps(ctx context.Context, opts Options) []step {
+	// Clean the paths once. filepath.Clean("") returns ".", so an empty value
+	// must stay empty: it means "skip these files".
+	opts.Home = cleanDir(opts.Home)
+	opts.WorkDir = cleanDir(opts.WorkDir)
+
+	var steps []step
+
+	if opts.Home != "" {
+		path := filepath.Join(opts.Home, ".claude.json")
+		steps = append(steps, step{path: path, read: func() Result {
+			return ReadClaudeCode(ctx, path, ScopeGlobal, "")
+		}})
+	}
+	if opts.WorkDir != "" {
+		path := filepath.Join(opts.WorkDir, ".mcp.json")
+		steps = append(steps, step{path: path, read: func() Result {
+			return ReadClaudeCode(ctx, path, ScopeProject, opts.WorkDir)
+		}})
+	}
+
+	// homeCursor stays empty when Home is empty. The Cursor project path is
+	// never empty, so it never equals an empty homeCursor.
+	var homeCursor string
+	if opts.Home != "" {
+		homeCursor = filepath.Join(opts.Home, ".cursor", "mcp.json")
+		steps = append(steps, step{path: homeCursor, read: func() Result {
+			return ReadCursor(ctx, homeCursor, ScopeGlobal, "")
+		}})
+	}
+	if opts.WorkDir != "" {
+		path := filepath.Join(opts.WorkDir, ".cursor", "mcp.json")
+		// When WorkDir is Home, this is the same file as the home Cursor
+		// config. Read it once, as a global config. Both paths are already
+		// cleaned, so a direct string compare is enough. The check is lexical:
+		// a symlinked WorkDir, or a second name for the same directory (for
+		// example /var and /private/var on macOS, or a case-insensitive file
+		// system), is not detected.
+		if path != homeCursor {
+			steps = append(steps, step{path: path, read: func() Result {
+				return ReadCursor(ctx, path, ScopeProject, opts.WorkDir)
+			}})
+		}
+	}
+
+	if opts.Home != "" {
+		path := filepath.Join(opts.Home, ".codex", "config.toml")
+		steps = append(steps, step{path: path, read: func() Result {
+			return ReadCodex(ctx, path)
+		}})
+	}
+	return steps
+}
+
+// cleanDir cleans a directory path. It keeps the empty string empty, because
+// filepath.Clean("") returns "." and that would select the current directory.
+func cleanDir(dir string) string {
+	if dir == "" {
+		return ""
+	}
+	return filepath.Clean(dir)
+}
