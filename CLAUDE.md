@@ -30,11 +30,13 @@ docs/                 PRD and other documentation
 ## Commands
 
 ```sh
+gofmt -l .                                          # must print nothing
+go mod tidy && git diff --exit-code go.mod go.sum   # module files are tidy
 go build ./...
-go test ./...
 go vet ./...
-golangci-lint run
-gofmt -l .            # must print nothing
+golangci-lint run ./...
+go test -race -shuffle=on ./...
+govulncheck ./...
 ```
 
 ## Conventions
@@ -87,20 +89,32 @@ GitHub milestones match PRD milestones: `M1 Skeleton` to `M8 Optional LLM`, plus
 ## Claude Code setup
 
 The agents and skills in `.claude/` came from
-[Nodeglade/platform](https://github.com/Nodeglade/platform/tree/main/.claude) and were adapted for Go.
-They read the project profile in [`.agents/project.md`](.agents/project.md) (commands, code style,
-agent routing, git conventions).
+[Nodeglade/platform](https://github.com/Nodeglade/platform/tree/main/.claude). The full set was
+ported to Go: same roles, Go content. The Go practices come from
+[samber/cc-skills-golang](https://github.com/samber/cc-skills-golang) and
+[eduardo-sl/go-agent-skills](https://github.com/eduardo-sl/go-agent-skills) (both MIT), Effective Go,
+Go Code Review Comments and the Google Go style guide. They read the project profile in
+[`.agents/project.md`](.agents/project.md) (commands, code style, agent routing, git conventions).
 
-Agents (`.claude/agents/`):
+Agents (`.claude/agents/`), with the Nodeglade agent each one replaces:
 
 - `research`: explores the code and splits a task into atomic, one-file tasks with dependencies.
-- `go-dev`: does one atomic task on one `.go` file (new; adapted from `typescript-dev`).
-- `unit-test`: writes table-driven Go tests and rule test cases (rewritten for Go).
-- `debugger`: finds the root cause of a failure; does not fix code.
-- `typecheck`: runs `go build ./... && go vet ./...` and reports errors.
-- `review-security`: security review of a diff, with mcpmoat-specific checks.
-- `review-logic`: correctness review of a diff (Go concurrency, errors, nil, context).
-- `review-quality`: maintainability review of a diff against Go idioms and the PRD layout.
+- `go-dev` (was `typescript-dev`): one atomic task on one `.go` file in `internal/`.
+- `cli-dev` (was `react-dev`): the user-facing layer: `flag` subcommands, `run()` pattern, exit
+  codes, stdout/stderr, colour and TTY, escaping untrusted text.
+- `datastore` (was `database`): `pins.json` format, versions and migrations, atomic writes,
+  permissions, XDG paths, `.mcpmoat-ignore`.
+- `unit-test`: table-driven Go tests, `t.Parallel` rules, fuzz targets, benchmarks, rule cases.
+- `cli-test` (was `component-test`): in-process CLI output tests with golden files and exit-code
+  tables.
+- `e2e-test` (was Playwright `e2e-test`): `testscript` (`.txtar`) journeys against the real binary
+  and fixture MCP servers.
+- `debugger`: finds the root cause of a failure with the Go toolbox (`-race`, delve, pprof);
+  does not fix code.
+- `typecheck`: runs the Go gates (`go mod tidy` check, build, vet, golangci-lint, govulncheck).
+- `review-security`: security review of a diff (gosec, govulncheck, exec, paths, secrets, NFR-01).
+- `review-logic`: correctness review of a diff (races, goroutine leaks, errors, context, nil).
+- `review-quality`: maintainability review against Go idioms and the PRD layout.
 
 Skills (`.claude/skills/`):
 
@@ -112,5 +126,4 @@ Skills (`.claude/skills/`):
 - `pr`: opens a PR with Summary, Testing and Release Notes.
 - `deai-writer`: rewrites AI-sounding prose (README, posts, launch drafts).
 
-Not imported (specific to the Nodeglade JS/TS stack): `react-dev`, `component-test`, `e2e-test`,
-`typescript-dev`, `database`.
+All skills route work to the Go agents above and run the Go gates from the profile.

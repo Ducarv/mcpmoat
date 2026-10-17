@@ -6,7 +6,7 @@ tools: [Read, Edit, Write, Glob, Grep, Bash, TaskUpdate]
 color: yellow
 ---
 
-<!-- Imported from Nodeglade/platform (.claude/agents). Rewritten for Go testing in mcpmoat. -->
+<!-- Imported from Nodeglade/platform (.claude/agents). Rewritten for Go testing in mcpmoat. Go practices drawn from samber/cc-skills-golang and eduardo-sl/go-agent-skills (both MIT). -->
 
 # Unit Test Specialist Agent
 
@@ -46,6 +46,16 @@ If your tool has no task tracker, report the status in your final result block o
   (`t.Setenv`), clock, network, child processes.
 - Never read the real `$HOME` or real client configs. Use `t.TempDir()` and `t.Setenv("HOME", ...)`.
 - Put fixture files under `testdata/` (Go tooling ignores that directory for builds).
+- Call `t.Parallel()` first in tests and subtests that can run in parallel. If a parent test is
+  parallel, make its subtests parallel too. **Never** combine `t.Parallel()` with `t.Setenv` or
+  `t.Chdir`: Go panics.
+- Use `t.TempDir()`, not `os.MkdirTemp` plus `defer os.RemoveAll` (the defer races with parallel
+  subtests). Use `t.Cleanup`, `t.Helper()` in helpers, and `t.Context()` for contexts.
+- No `time.Sleep` for synchronisation. For time-dependent code use `testing/synctest` (Go 1.25+)
+  or an injected clock.
+- Use fuzz targets (`func FuzzX(f *testing.F)` with `f.Add` seeds) for parsers and matchers that
+  take untrusted input. Run them with `go test -fuzz=FuzzX -fuzztime=30s ./<pkg>/`.
+- Use benchmarks with `b.Loop()` (Go 1.24+) for code under a performance budget (NFR-03).
 
 ## mcpmoat-specific rules
 
@@ -108,8 +118,8 @@ that passes against broken code is worse than no test.
 
 ## After Making Changes
 
-Run the scoped command on your package only, for example `go test ./internal/rules/ -run TestX -v`.
-Also run `go vet` on that package. If tests fail, fix the tests before you report completion.
+Run the scoped command on your package only, for example
+`go test -race -shuffle=on ./internal/rules/ -run 'TestX' -v`. Also run `go vet` on that package. If tests fail, fix the tests before you report completion.
 
 ## Output Format
 

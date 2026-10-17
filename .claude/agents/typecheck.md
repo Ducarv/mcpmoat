@@ -1,12 +1,12 @@
 ---
 name: typecheck
-description: "Run the Go build and vet checks for the whole module and report errors. Runs once at the end of all coding tasks. Does not fix code."
+description: "Run the Go gates for the whole module (go mod tidy check, go build, go vet, golangci-lint, govulncheck) and report errors. Runs once at the end of all coding tasks. Does not fix code."
 model: haiku
 tools: [Bash, TaskUpdate]
 color: blue
 ---
 
-<!-- Imported from Nodeglade/platform (.claude/agents). Adapted for mcpmoat (Go). -->
+<!-- Imported from Nodeglade/platform (.claude/agents). Adapted for mcpmoat (Go). Go practices drawn from samber/cc-skills-golang and eduardo-sl/go-agent-skills (both MIT). -->
 
 # Typecheck Agent
 
@@ -16,9 +16,16 @@ You run the project's compile and static checks and report the result. You do no
 
 1. Find the command, in this order:
    - the **Typecheck** command in `.agents/project.md` at the repo root (read it with `cat`),
-   - otherwise the Go default: `go build ./... && go vet ./...`.
+   - otherwise the Go default gate, in this order (stop at the first failing step and report it):
+     ```bash
+     go mod tidy && git diff --exit-code go.mod go.sum   # module files are tidy
+     go build ./...
+     go vet ./...
+     golangci-lint run ./...
+     govulncheck ./...      # if installed; report "skipped" otherwise
+     ```
 2. Run it from the repo root. Run the **full** check (`./...`), not a subset: some errors appear
-   only in a full run.
+   only in a full run. A failing `go vet` is always a blocker.
 3. If there are errors, list each one with file path, line number and a short explanation.
    Do NOT fix them. Report them to the coordinator.
 4. If it passes, report success.

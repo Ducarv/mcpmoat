@@ -15,12 +15,16 @@ The agents and skills in `.claude/` read this file. Its sections override their 
 | Purpose | Command |
 |---|---|
 | Format check | `gofmt -l .` (must print nothing) |
-| Format fix | `gofmt -w .` |
+| Format fix | `gofmt -w .` (or `golangci-lint fmt`) |
+| Module check | `go mod tidy && git diff --exit-code go.mod go.sum` |
 | Typecheck | `go build ./... && go vet ./...` |
-| Lint | `golangci-lint run` |
-| Tests (all) | `go test ./...` |
-| Tests (scoped) | `go test ./internal/<pkg>/ -run '<TestName>' -v` |
-| Race check | `go test -race ./...` |
+| Lint | `golangci-lint run ./...` (v2 config in `.golangci.yml`) |
+| Vulnerabilities | `govulncheck ./...` |
+| Tests (all) | `go test -race -shuffle=on ./...` |
+| Tests (scoped) | `go test -race ./internal/<pkg>/ -run '<TestName>' -v` |
+| E2E scenario | `go test ./cmd/mcpmoat/ -run 'TestScripts/<name>' -v` |
+| Update golden files | `go test ./<pkg>/ -update` (review the diff afterwards) |
+| Fuzz a parser | `go test -fuzz=FuzzX -fuzztime=30s ./<pkg>/` |
 
 ## Code style
 
@@ -28,7 +32,10 @@ The agents and skills in `.claude/` read this file. Its sections override their 
 - Return and wrap errors with `%w`; never panic on bad input.
 - `context.Context` first for anything that does I/O or can block.
 - Small interfaces defined by the consumer; no global mutable state.
-- Table-driven tests; `t.TempDir()` and `t.Setenv()`; fixtures under `testdata/`.
+- Table-driven tests; `t.Parallel()` where safe (never with `t.Setenv`); `t.TempDir()`,
+  `t.Context()`; fixtures under `testdata/`; no `time.Sleep` for synchronisation.
+- `os.Exit` only in `main`; stdout for data, stderr for logs and warnings.
+- `//nolint` only with the linter name and a reason.
 - Never print, log or store secret values from client configs. Print keys only.
 - No telemetry. No network calls except configured servers and, behind `--llm`, the LLM provider.
 - Minimal, pinned dependencies. Ask before adding one.
@@ -37,9 +44,12 @@ The agents and skills in `.claude/` read this file. Its sections override their 
 
 | Work | Agent |
 |---|---|
-| `.go` source files | `go-dev` |
-| `_test.go` files, `testdata/` fixtures | `unit-test` |
-| `rules/*.yaml` and their test cases | `unit-test` |
+| `internal/` logic (`.go`) | `go-dev` |
+| `cmd/mcpmoat`, `internal/report` (flags, output, exit codes) | `cli-dev` |
+| `pins.json` format and store, `.mcpmoat-ignore` | `datastore` |
+| Unit `_test.go`, `rules/*.yaml` cases, `testdata/` fixtures | `unit-test` |
+| In-process CLI output, golden files, exit-code tables | `cli-test` |
+| `testdata/script/*.txtar` journeys against the real binary | `e2e-test` |
 | Root-cause diagnosis | `debugger` |
 | Final compile and vet check | `typecheck` |
 | Security-flagged tasks after the dev agent | `review-security` |

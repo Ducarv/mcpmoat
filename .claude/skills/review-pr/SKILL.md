@@ -142,8 +142,8 @@ A delta-verify is *more concrete* scrutiny, not lighter scrutiny:
    changes, and confirm it keeps the contract the earlier panel approved. For non-trivial
    logic, spawn one `review-logic` agent to do this: the **standard** tier by default, **deep**
    for any money or auth path. Never the fast tier here, because it is the only reviewer.
-2. **Run the affected gates.** Run the tests for the touched files or packages and the
-   typecheck, using the profile's commands. **The gate run is the evidence.** Put the result
+2. **Run the affected gates.** Run the tests for the touched packages with `-race` and the
+   typecheck (`go build ./... && go vet ./...`), using the profile's commands. **The gate run is the evidence.** Put the result
    (green or red, with failing output) in the report.
 
 Then go to step 7. Skip 3b, 4 and 5.

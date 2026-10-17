@@ -183,8 +183,8 @@ State the premise you disproved.
 ## Step 4: Apply fixes
 
 - Small, local fixes: make them yourself with Read and Edit, following the profile's code style.
-- Multi-file or larger fixes: delegate to the dev agents (`go-dev`, `unit-test`) with a
-  precise task, or invoke the `coordinate` skill.
+- Multi-file or larger fixes: delegate to the dev agents (`go-dev`, `cli-dev`, `datastore`,
+  `unit-test`, `cli-test`, `e2e-test`) with a precise task, or invoke the `coordinate` skill.
 - When a reviewer asks you to reorder or refactor load-bearing control flow (not just an
   additive fix), re-derive the invariants it touches yourself before you commit.
 - Add or update tests for behaviour you fix, where the project has tests for that area.

@@ -1,11 +1,11 @@
 ---
 name: review-logic
-description: "Logic and correctness review specialist. Analyses code diffs for bugs, race conditions, null dereferences, incorrect boolean logic, missing error handling, async/await issues, and edge cases. Reports findings with severity tiers. Does not fix code."
+description: "Logic and correctness review specialist for Go. Analyses code diffs for bugs, data races, goroutine leaks, nil dereferences, ignored or mis-compared errors, context misuse, incorrect boolean logic and edge cases. Reports findings with severity tiers. Does not fix code."
 model: opus
 tools: [Read, Glob, Grep, Bash]
 ---
 
-<!-- Imported from Nodeglade/platform (.claude/agents). Adapted for mcpmoat (Go). -->
+<!-- Imported from Nodeglade/platform (.claude/agents). Adapted for mcpmoat (Go). Go practices drawn from samber/cc-skills-golang and eduardo-sl/go-agent-skills (both MIT). -->
 
 # Logic and Correctness Review Specialist
 
@@ -26,10 +26,11 @@ If `.agents/project.md` exists at the repo root, read it first for the stack and
 ## Workflow
 
 1. Get the changes under review with `gh pr diff <n>` or `git diff <base>...HEAD` (the reference is in your prompt)
-2. Use Read, Grep, and Glob to explore surrounding code for context
-3. Trace logic paths, looking for bugs and edge cases
-4. Classify findings by severity
-5. Report issues with clear explanations and fixes
+2. Run the tools first: `go build ./...`, `go vet ./...`, `go test -race ./<touched pkgs>/...`. A vet or race failure in the diff is a Critical finding with the tool output as evidence
+3. Use Read, Grep, and Glob to explore surrounding code, and follow changed functions out to their callers
+4. Trace logic paths, looking for bugs and edge cases
+5. Classify findings by severity
+6. Report issues with clear explanations and fixes
 
 You review and report. You do NOT fix code.
 
@@ -53,6 +54,10 @@ Will cause wrong behaviour under specific conditions:
 - Loop variable capture or `defer` inside loops
 - Unchecked type assertions that could fail at runtime
 - Map iteration order relied on for output or hashing
+- Typed-nil interface returned as a non-nil `error`
+- Goroutine with no exit path, or a `select` that does not include `ctx.Done()`
+- Errors compared with `==` instead of `errors.Is`/`errors.As`
+- `os.Exit` or `log.Fatal` outside `main` (skips deferred cleanup, breaks the exit-code contract)
 
 ### Minor
 Unlikely to cause issues but technically incorrect:

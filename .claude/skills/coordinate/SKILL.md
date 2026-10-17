@@ -73,8 +73,11 @@ Work in dependency order. For each batch of unblocked tasks:
 3. Wait for them to finish.
 
 **Agent selection.** Use the profile's **Agent routing** table when there is one. Defaults:
-- `.go` source files: `go-dev`
-- `_test.go` files and `testdata/` fixtures: `unit-test`
+- `internal/` logic (`.go`): `go-dev`
+- CLI and output (`cmd/mcpmoat`, `internal/report`): `cli-dev`
+- On-disk state (`pins.json` format and store, `.mcpmoat-ignore`): `datastore`
+- Tests: `unit-test` (isolated logic, rule cases, fixtures), `cli-test` (in-process command
+  output, golden files, exit codes), `e2e-test` (testscript journeys against the real binary)
 - Tasks flagged as security-sensitive: run `review-security` **after** the dev agent finishes.
 
 **Every agent prompt includes:**
@@ -129,7 +132,7 @@ When all tasks are done:
 2. If it fails, spawn dev agents to fix each error, then run typecheck again.
 3. Repeat until clean, or escalate after 3 attempts.
 4. If tests were part of the work, spawn the matching test agent to run the scoped test
-   command from the profile.
+   command from the profile, with `-race`.
 
 ### Phase 6: Report
 
