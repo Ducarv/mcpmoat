@@ -7,7 +7,7 @@ import (
 )
 
 // versionDefaults is what a build without -ldflags contains.
-var versionDefaults = buildInfo{version: "dev", commit: "none", date: "unknown"}
+var versionDefaults = buildInfo{version: defaultVersion, commit: defaultCommit, date: defaultDate}
 
 // versionFakeRead returns a read function for resolveBuildInfo. It reports the
 // given info and ok values, and sets *called when resolveBuildInfo uses it.
@@ -65,7 +65,7 @@ func TestResolveBuildInfo(t *testing.T) {
 				Settings: settings(rev40, vcsTime),
 			},
 			ok:         true,
-			want:       buildInfo{version: "v0.1.0", commit: rev40[:12], date: vcsTime},
+			want:       buildInfo{version: "v0.1.0", commit: rev40[:shortRevisionLen], date: vcsTime},
 			wantCalled: true,
 		},
 		{
@@ -76,7 +76,7 @@ func TestResolveBuildInfo(t *testing.T) {
 				Settings: settings(rev40, vcsTime),
 			},
 			ok:         true,
-			want:       buildInfo{version: "dev", commit: rev40[:12], date: vcsTime},
+			want:       buildInfo{version: "dev", commit: rev40[:shortRevisionLen], date: vcsTime},
 			wantCalled: true,
 		},
 		{
@@ -109,27 +109,27 @@ func TestResolveBuildInfo(t *testing.T) {
 			wantCalled: true,
 		},
 		{
-			name:   "revision of exactly 12 characters is kept",
+			name:   "revision of exactly the short length is kept",
 			linked: versionDefaults,
 			info: &debug.BuildInfo{
-				Settings: settings(rev40[:12], ""),
+				Settings: settings(rev40[:shortRevisionLen], ""),
 			},
 			ok:         true,
-			want:       buildInfo{version: "dev", commit: rev40[:12], date: "unknown"},
+			want:       buildInfo{version: "dev", commit: rev40[:shortRevisionLen], date: "unknown"},
 			wantCalled: true,
 		},
 		{
-			name:   "revision of 13 characters is cut to 12",
+			name:   "revision one character over the short length is cut",
 			linked: versionDefaults,
 			info: &debug.BuildInfo{
-				Settings: settings(rev40[:13], ""),
+				Settings: settings(rev40[:shortRevisionLen+1], ""),
 			},
 			ok:         true,
-			want:       buildInfo{version: "dev", commit: rev40[:12], date: "unknown"},
+			want:       buildInfo{version: "dev", commit: rev40[:shortRevisionLen], date: "unknown"},
 			wantCalled: true,
 		},
 		{
-			name:   "revision shorter than 12 characters is kept",
+			name:   "revision shorter than the short length is kept",
 			linked: versionDefaults,
 			info: &debug.BuildInfo{
 				Settings: settings("abc1234", ""),
@@ -155,7 +155,7 @@ func TestResolveBuildInfo(t *testing.T) {
 				Settings: settings(rev40, vcsTime),
 			},
 			ok:         true,
-			want:       buildInfo{version: "dev", commit: rev40[:12], date: "2020-01-01T00:00:00Z"},
+			want:       buildInfo{version: "dev", commit: rev40[:shortRevisionLen], date: "2020-01-01T00:00:00Z"},
 			wantCalled: true,
 		},
 		{

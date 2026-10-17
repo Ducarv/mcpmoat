@@ -2,10 +2,27 @@ package main
 
 import (
 	"bytes"
+	"errors"
+	"flag"
 	"slices"
 	"strings"
 	"testing"
 )
+
+// testBuild is the build information that the CLI tests inject.
+var testBuild = buildInfo{version: "1.2.3", commit: "abc123", date: "2026-01-01T00:00:00Z"}
+
+// wantVersionLine is the exact output of "mcpmoat version" for testBuild.
+const wantVersionLine = "mcpmoat 1.2.3 (commit abc123, built 2026-01-01T00:00:00Z)\n"
+
+// assertNoEscape fails the test if stdout or stderr holds a raw ESC byte.
+// Untrusted argv must never put terminal escape sequences on the terminal.
+func assertNoEscape(t *testing.T, stdout, stderr string) {
+	t.Helper()
+	if strings.Contains(stdout, "\x1b") || strings.Contains(stderr, "\x1b") {
+		t.Errorf("output has a raw ESC byte\nstdout: %q\nstderr: %q", stdout, stderr)
+	}
+}
 
 // fakeGetenv returns a getenv function that reads from a map. A missing key
 // gives an empty string, like os.Getenv.
@@ -37,14 +54,12 @@ func usageText(t *testing.T) string {
 func TestCLIRun(t *testing.T) {
 	t.Parallel()
 
-	build := buildInfo{version: "1.2.3", commit: "abc123", date: "2026-01-01T00:00:00Z"}
-	const wantVersionLine = "mcpmoat 1.2.3 (commit abc123, built 2026-01-01T00:00:00Z)\n"
-
 	tests := []struct {
 		name            string
 		args            []string
 		env             map[string]string
 		wantCode        int
+		wantStdoutExact string   // the whole stdout, checked when not empty
 		wantStdout      []string // substrings
 		wantStderr      []string // substrings
 		wantStdoutEmpty bool
@@ -105,21 +120,21 @@ func TestCLIRun(t *testing.T) {
 			name:            "version",
 			args:            []string{"version"},
 			wantCode:        exitOK,
-			wantStdout:      []string{wantVersionLine},
+			wantStdoutExact: wantVersionLine,
 			wantStderrEmpty: true,
 		},
 		{
 			name:            "global flag with two dashes",
 			args:            []string{"--no-color", "version"},
 			wantCode:        exitOK,
-			wantStdout:      []string{wantVersionLine},
+			wantStdoutExact: wantVersionLine,
 			wantStderrEmpty: true,
 		},
 		{
 			name:            "global flag with one dash",
 			args:            []string{"-no-color", "version"},
 			wantCode:        exitOK,
-			wantStdout:      []string{wantVersionLine},
+			wantStdoutExact: wantVersionLine,
 			wantStderrEmpty: true,
 		},
 		{
@@ -128,7 +143,7 @@ func TestCLIRun(t *testing.T) {
 			name:            "global flag after the command",
 			args:            []string{"version", "--no-color"},
 			wantCode:        exitError,
-			wantStderr:      []string{"mcpmoat version: unexpected arguments"},
+			wantStderr:      []string{`mcpmoat version: unexpected arguments ["--no-color"]`},
 			wantStdoutEmpty: true,
 		},
 		{
@@ -149,14 +164,14 @@ func TestCLIRun(t *testing.T) {
 			name:            "version with an extra argument",
 			args:            []string{"version", "extra"},
 			wantCode:        exitError,
-			wantStderr:      []string{"unexpected arguments"},
+			wantStderr:      []string{`mcpmoat version: unexpected arguments ["extra"]`, `Run "mcpmoat help" for usage.`},
 			wantStdoutEmpty: true,
 		},
 		{
 			name:            "help with an extra argument",
 			args:            []string{"help", "extra"},
 			wantCode:        exitError,
-			wantStderr:      []string{"mcpmoat help: unexpected arguments"},
+			wantStderr:      []string{`mcpmoat help: unexpected arguments ["extra"]`, `Run "mcpmoat help" for usage.`},
 			wantStdoutEmpty: true,
 		},
 		{
@@ -187,11 +202,14 @@ func TestCLIRun(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 
-			c, stdout, stderr := newTestCLI(fakeGetenv(tt.env), build)
-			code := c.run(tt.args)
+			c, stdout, stderr := newTestCLI(fakeGetenv(tt.env), testBuild)
+			code := c.dispatch(tt.args)
 
 			if code != tt.wantCode {
 				t.Errorf("run(%q) = %d, want %d", tt.args, code, tt.wantCode)
+			}
+			if tt.wantStdoutExact != "" && stdout.String() != tt.wantStdoutExact {
+				t.Errorf("run(%q) stdout = %q, want %q", tt.args, stdout.String(), tt.wantStdoutExact)
 			}
 			for _, want := range tt.wantStdout {
 				if !strings.Contains(stdout.String(), want) {
@@ -209,36 +227,11 @@ func TestCLIRun(t *testing.T) {
 			if tt.wantStderrEmpty && stderr.Len() != 0 {
 				t.Errorf("run(%q) stderr = %q, want empty", tt.args, stderr.String())
 			}
-			// Terminal safety: untrusted argv must never put a raw ESC byte on
-			// stdout or stderr.
-			if strings.Contains(stdout.String(), "\x1b") || strings.Contains(stderr.String(), "\x1b") {
-				t.Errorf("run(%q) wrote a raw ESC byte\nstdout: %q\nstderr: %q",
-					tt.args, stdout.String(), stderr.String())
-			}
+			assertNoEscape(t, stdout.String(), stderr.String())
 			if t.Failed() {
 				t.Logf("stdout:\n%s\nstderr:\n%s", stdout.String(), stderr.String())
 			}
 		})
-	}
-}
-
-func TestCLIRunVersionOutputIsExact(t *testing.T) {
-	t.Parallel()
-
-	build := buildInfo{version: "1.2.3", commit: "abc123", date: "2026-01-01T00:00:00Z"}
-	c, stdout, stderr := newTestCLI(fakeGetenv(nil), build)
-
-	code := c.run([]string{"version"})
-
-	if code != exitOK {
-		t.Errorf("run(version) = %d, want %d", code, exitOK)
-	}
-	const want = "mcpmoat 1.2.3 (commit abc123, built 2026-01-01T00:00:00Z)\n"
-	if got := stdout.String(); got != want {
-		t.Errorf("run(version) stdout = %q, want %q", got, want)
-	}
-	if stderr.Len() != 0 {
-		t.Errorf("run(version) stderr = %q, want empty", stderr.String())
 	}
 }
 
@@ -247,19 +240,23 @@ func TestCLIRunHelpMatchesUsage(t *testing.T) {
 
 	want := usageText(t)
 	for _, args := range [][]string{{"help"}, {"-h"}, {"--help"}} {
-		c, stdout, stderr := newTestCLI(fakeGetenv(nil), buildInfo{})
+		t.Run(strings.Join(args, " "), func(t *testing.T) {
+			t.Parallel()
 
-		code := c.run(args)
+			c, stdout, stderr := newTestCLI(fakeGetenv(nil), buildInfo{})
 
-		if code != exitOK {
-			t.Errorf("run(%q) = %d, want %d", args, code, exitOK)
-		}
-		if got := stdout.String(); got != want {
-			t.Errorf("run(%q) stdout differs from usage text\n--- got ---\n%s\n--- want ---\n%s", args, got, want)
-		}
-		if stderr.Len() != 0 {
-			t.Errorf("run(%q) stderr = %q, want empty", args, stderr.String())
-		}
+			code := c.dispatch(args)
+
+			if code != exitOK {
+				t.Errorf("run(%q) = %d, want %d", args, code, exitOK)
+			}
+			if got := stdout.String(); got != want {
+				t.Errorf("run(%q) stdout differs from usage text\n--- got ---\n%s\n--- want ---\n%s", args, got, want)
+			}
+			if stderr.Len() != 0 {
+				t.Errorf("run(%q) stderr = %q, want empty", args, stderr.String())
+			}
+		})
 	}
 }
 
@@ -269,7 +266,7 @@ func TestCLIRunNoArgsPrintsUsageOnStderr(t *testing.T) {
 	want := usageText(t)
 	c, stdout, stderr := newTestCLI(fakeGetenv(nil), buildInfo{})
 
-	code := c.run(nil)
+	code := c.dispatch(nil)
 
 	if code != exitError {
 		t.Errorf("run(nil) = %d, want %d", code, exitError)
@@ -306,21 +303,19 @@ func TestUsageContent(t *testing.T) {
 }
 
 // TestCLIRunUnknownFlagEscapesControlChars checks terminal safety for the flag
-// parse error. The flag package puts the raw flag name in its error, so cli.run
-// must quote the error text. A raw ESC byte must never reach stderr.
+// parse error. The flag package puts the raw flag name in its error, so
+// cli.dispatch must quote the error text. A raw ESC byte must never reach stderr.
 func TestCLIRunUnknownFlagEscapesControlChars(t *testing.T) {
 	t.Parallel()
 
 	c, stdout, stderr := newTestCLI(fakeGetenv(nil), buildInfo{})
 
-	code := c.run([]string{"--\x1b[31mx"})
+	code := c.dispatch([]string{"--\x1b[31mx"})
 
 	if code != exitError {
 		t.Errorf("run() = %d, want %d", code, exitError)
 	}
-	if strings.Contains(stderr.String(), "\x1b") {
-		t.Errorf("stderr contains a raw ESC byte: %q", stderr.String())
-	}
+	assertNoEscape(t, stdout.String(), stderr.String())
 	if want := `flag provided but not defined: -\x1b[31mx`; !strings.Contains(stderr.String(), want) {
 		t.Errorf("stderr does not contain the escaped form %q\nstderr: %q", want, stderr.String())
 	}
@@ -360,22 +355,82 @@ func TestColorDisabled(t *testing.T) {
 	}
 }
 
-func TestRunNoColorFromEnv(t *testing.T) {
+func TestParseGlobals(t *testing.T) {
 	t.Parallel()
 
-	build := buildInfo{version: "1.2.3", commit: "abc123", date: "2026-01-01T00:00:00Z"}
-	c, stdout, stderr := newTestCLI(fakeGetenv(map[string]string{"NO_COLOR": "1"}), build)
-
-	code := c.run([]string{"version"})
-
-	if code != exitOK {
-		t.Errorf("run(version) with NO_COLOR=1 = %d, want %d", code, exitOK)
+	tests := []struct {
+		name        string
+		args        []string
+		env         map[string]string
+		wantNoColor bool
+		wantRest    []string
+	}{
+		{name: "no flag, NO_COLOR unset", args: []string{"version"}, wantNoColor: false, wantRest: []string{"version"}},
+		{name: "two-dash flag", args: []string{"--no-color", "version"}, wantNoColor: true, wantRest: []string{"version"}},
+		{name: "one-dash flag", args: []string{"-no-color", "version"}, wantNoColor: true, wantRest: []string{"version"}},
+		{name: "NO_COLOR is 1", args: []string{"version"}, env: map[string]string{"NO_COLOR": "1"}, wantNoColor: true, wantRest: []string{"version"}},
+		// no-color.org: any non-empty value disables color, even "0".
+		{name: "NO_COLOR is 0", args: []string{"version"}, env: map[string]string{"NO_COLOR": "0"}, wantNoColor: true, wantRest: []string{"version"}},
+		{name: "NO_COLOR is empty", args: []string{"version"}, env: map[string]string{"NO_COLOR": ""}, wantNoColor: false, wantRest: []string{"version"}},
+		{
+			// Flags after the command are not global. They stay in rest.
+			name:        "flag after the command",
+			args:        []string{"version", "--no-color"},
+			wantNoColor: false,
+			wantRest:    []string{"version", "--no-color"},
+		},
+		{name: "no arguments", args: nil, wantNoColor: false, wantRest: nil},
 	}
-	if !strings.Contains(stdout.String(), "mcpmoat 1.2.3") {
-		t.Errorf("stdout = %q, want the version line", stdout.String())
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			c, _, _ := newTestCLI(fakeGetenv(tt.env), buildInfo{})
+
+			opts, rest, err := c.parseGlobals(tt.args)
+
+			if err != nil {
+				t.Fatalf("parseGlobals(%q) error = %v, want nil", tt.args, err)
+			}
+			if opts.noColor != tt.wantNoColor {
+				t.Errorf("parseGlobals(%q) noColor = %v, want %v", tt.args, opts.noColor, tt.wantNoColor)
+			}
+			if !slices.Equal(rest, tt.wantRest) {
+				t.Errorf("parseGlobals(%q) rest = %q, want %q", tt.args, rest, tt.wantRest)
+			}
+		})
 	}
-	if stderr.Len() != 0 {
-		t.Errorf("stderr = %q, want empty", stderr.String())
+}
+
+func TestParseGlobalsErrors(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		args     []string
+		wantHelp bool
+	}{
+		{name: "short help flag", args: []string{"-h"}, wantHelp: true},
+		{name: "long help flag", args: []string{"--help"}, wantHelp: true},
+		{name: "unknown flag", args: []string{"--bogus"}, wantHelp: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			c, _, _ := newTestCLI(fakeGetenv(nil), buildInfo{})
+
+			_, _, err := c.parseGlobals(tt.args)
+
+			if err == nil {
+				t.Fatalf("parseGlobals(%q) error = nil, want an error", tt.args)
+			}
+			if got := errors.Is(err, flag.ErrHelp); got != tt.wantHelp {
+				t.Errorf("parseGlobals(%q) errors.Is(err, flag.ErrHelp) = %v, want %v (err: %v)", tt.args, got, tt.wantHelp, err)
+			}
+		})
 	}
 }
 

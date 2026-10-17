@@ -15,10 +15,13 @@ import (
 //
 // run() in cli.go is the only place that reads these variables. Everything
 // else gets a buildInfo value, so tests never have to change a package variable.
+//
+// The defaults come from the constants below. -X still works, because the
+// initial value is a constant expression.
 var (
-	version = "dev"
-	commit  = "none"
-	date    = "unknown"
+	version = defaultVersion
+	commit  = defaultCommit
+	date    = defaultDate
 )
 
 // Default values of the build variables. resolveBuildInfo compares against
@@ -84,14 +87,4 @@ func resolveBuildInfo(linked buildInfo, read func() (*debug.BuildInfo, bool)) bu
 // version exactly as it was injected.
 func (b buildInfo) String() string {
 	return fmt.Sprintf("mcpmoat %s (commit %s, built %s)", b.version, b.commit, b.date)
-}
-
-// runVersion implements "mcpmoat version".
-func (c *cli) runVersion(_ options, args []string) int {
-	if len(args) > 0 {
-		fprintf(c.stderr, "mcpmoat version: unexpected arguments %q\n", args)
-		return exitError
-	}
-	fprintf(c.stdout, "%s\n", c.build)
-	return exitOK
 }

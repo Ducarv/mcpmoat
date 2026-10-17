@@ -50,7 +50,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 		getenv: os.Getenv,
 		build:  resolveBuildInfo(buildInfo{version: version, commit: commit, date: date}, debug.ReadBuildInfo),
 	}
-	return c.run(args)
+	return c.dispatch(args)
 }
 
 // commands returns the subcommands in the order that help shows them.
@@ -61,23 +61,18 @@ func run(args []string, stdout, stderr io.Writer) int {
 // global state.
 func (c *cli) commands() []command {
 	return []command{
-		{"scan", "Discover MCP servers, inspect them and report findings", c.runScan},
-		{"pin", "Accept a changed server after you review it", c.runPin},
-		{"version", "Print the version", c.runVersion},
-		{"help", "Show this help", c.runHelp},
+		{name: "scan", summary: "Discover MCP servers, inspect them and report findings", run: c.runScan},
+		{name: "pin", summary: "Accept a changed server after you review it", run: c.runPin},
+		{name: "version", summary: "Print the version", run: c.runVersion},
+		{name: "help", summary: "Show this help", run: c.runHelp},
 	}
 }
 
-// run parses the global flags, finds the command and runs it. All exit codes
-// for usage problems are chosen here, in one place.
-func (c *cli) run(args []string) int {
-	fs := flag.NewFlagSet("mcpmoat", flag.ContinueOnError)
-	// The flag package would print its own usage text on errors. We print our
-	// own, so we send the package output to io.Discard.
-	fs.SetOutput(io.Discard)
-	noColor := fs.Bool("no-color", false, "disable colored output")
-
-	if err := fs.Parse(args); err != nil {
+// dispatch parses the global flags, finds the command and runs it. All exit
+// codes for usage problems are chosen here, in one place.
+func (c *cli) dispatch(args []string) int {
+	opts, rest, err := c.parseGlobals(args)
+	if err != nil {
 		// -h and --help are not errors: show help on stdout and exit 0.
 		if errors.Is(err, flag.ErrHelp) {
 			c.usage(c.stdout)
@@ -90,15 +85,11 @@ func (c *cli) run(args []string) int {
 		return exitError
 	}
 
-	// fs.Args() holds what is left after the global flags: the command name
-	// and the arguments for that command.
-	rest := fs.Args()
 	if len(rest) == 0 {
 		c.usage(c.stderr)
 		return exitError
 	}
 
-	opts := options{noColor: colorDisabled(*noColor, c.getenv)}
 	name := rest[0]
 	for _, cmd := range c.commands() {
 		if cmd.name == name {
@@ -110,6 +101,24 @@ func (c *cli) run(args []string) int {
 	fprintf(c.stderr, "mcpmoat: unknown command %q\n\n", name)
 	c.usage(c.stderr)
 	return exitError
+}
+
+// parseGlobals parses the global flags at the start of args. It returns the
+// resolved options and what is left: the command name and its arguments.
+//
+// Parsing stops at the first argument that is not a flag, so global flags
+// must come before the command. On -h or --help the error is flag.ErrHelp.
+func (c *cli) parseGlobals(args []string) (options, []string, error) {
+	fs := flag.NewFlagSet("mcpmoat", flag.ContinueOnError)
+	// The flag package would print its own usage text on errors. We print our
+	// own, so we send the package output to io.Discard.
+	fs.SetOutput(io.Discard)
+	noColor := fs.Bool("no-color", false, "disable colored output")
+
+	if err := fs.Parse(args); err != nil {
+		return options{}, nil, err
+	}
+	return options{noColor: colorDisabled(*noColor, c.getenv)}, fs.Args(), nil
 }
 
 // colorDisabled reports whether colored output must stay off. Color is off if
@@ -146,22 +155,15 @@ func (c *cli) usage(w io.Writer) {
 	fprintf(w, "  2  execution error\n")
 }
 
-// runHelp implements "mcpmoat help".
-func (c *cli) runHelp(_ options, args []string) int {
-	if len(args) > 0 {
-		fprintf(c.stderr, "mcpmoat help: unexpected arguments %q\n", args)
-		fprintf(c.stderr, "Run \"mcpmoat help\" for usage.\n")
-		return exitError
-	}
-	c.usage(c.stdout)
-	return exitOK
-}
-
 // fprintf writes formatted text to w and ignores the write error on purpose.
 // If stdout or stderr is closed (a broken pipe, for example), there is nobody
 // left to tell, and the exit code still carries the result. Keeping the
 // "_, _ =" in this one place means the rest of the code stays short, and the
 // errcheck linter has nothing to flag.
+//
+// Use it only for help and diagnostic text. Do not use it for the findings
+// report (M6): if that write fails, the exit code must say so (exit 2), or a
+// broken pipe could look like "no findings".
 func fprintf(w io.Writer, format string, a ...any) {
 	_, _ = fmt.Fprintf(w, format, a...)
 }
