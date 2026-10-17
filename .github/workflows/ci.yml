@@ -31,7 +31,8 @@ jobs:
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: go.mod
-          # There is no go.sum yet, so key the cache on go.mod.
+          # There is no go.sum yet, so key the cache on go.mod. Change this
+          # to go.sum when the first dependency is added.
           cache-dependency-path: go.mod
 
       - name: Check formatting

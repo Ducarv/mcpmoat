@@ -30,7 +30,7 @@ docs/                 PRD and other documentation
 ## Commands
 
 ```sh
-gofmt -l .                                          # must print nothing
+gofmt -l .                                             # must print nothing
 go mod tidy && git diff --exit-code -- go.mod go.sum   # module files are tidy
 go build ./...
 go vet ./...
