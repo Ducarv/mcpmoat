@@ -1,0 +1,7 @@
+# Codex metadata. Mirrors `disable-model-invocation: true` in SKILL.md:
+# the pipeline runs only when you call it ($issue2pr), never on its own.
+interface:
+  display_name: "Issue to PR"
+  short_description: "GitHub issue to pull request pipeline"
+policy:
+  allow_implicit_invocation: false

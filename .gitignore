@@ -1,0 +1,29 @@
+# Binaries
+/mcpmoat
+*.exe
+*.dll
+*.so
+*.dylib
+*.test
+
+# Build output
+/dist/
+/bin/
+
+# Coverage
+*.out
+coverage.*
+*.coverprofile
+
+# Go workspace file
+go.work
+go.work.sum
+
+# OS and editor
+.DS_Store
+.idea/
+.vscode/
+
+# Claude Code local files
+.claude/settings.local.json
+.claude/worktrees/
