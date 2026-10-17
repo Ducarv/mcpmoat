@@ -16,7 +16,7 @@ The agents and skills in `.claude/` read this file. Its sections override their 
 |---|---|
 | Format check | `gofmt -l .` (must print nothing) |
 | Format fix | `gofmt -w .` (or `golangci-lint fmt`) |
-| Module check | `go mod tidy && git diff --exit-code go.mod go.sum` |
+| Module check | `go mod tidy && git diff --exit-code -- go.mod go.sum` |
 | Typecheck | `go build ./... && go vet ./...` |
 | Lint | `golangci-lint run ./...` (v2 config in `.golangci.yml`) |
 | Vulnerabilities | `govulncheck ./...` |

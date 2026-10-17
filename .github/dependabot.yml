@@ -1,0 +1,45 @@
+# Dependabot version updates.
+#
+# Why: mcpmoat pins its dependencies (NFR-04). Pinned versions need regular,
+# reviewed updates, or they go stale and keep known vulnerabilities.
+# Minor and patch updates come in one PR per ecosystem. Major updates stay
+# in separate PRs, so a maintainer can review each breaking change.
+# The cooldown waits 3 days after a release before Dependabot offers it, so a
+# bad or hijacked release has time to be found and pulled. Security updates
+# skip the cooldown.
+version: 2
+updates:
+  - package-ecosystem: "gomod"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 5
+    cooldown:
+      default-days: 3
+    commit-message:
+      prefix: "chore"
+      include: "scope"
+    groups:
+      go-minor-patch:
+        patterns:
+          - "*"
+        update-types:
+          - "minor"
+          - "patch"
+
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 5
+    cooldown:
+      default-days: 3
+    commit-message:
+      prefix: "chore(ci)"
+    groups:
+      actions-minor-patch:
+        patterns:
+          - "*"
+        update-types:
+          - "minor"
+          - "patch"

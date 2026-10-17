@@ -70,15 +70,58 @@ A rule without a positive and a negative case fails the build.
 
 ## Building and testing
 
-You need Go (the version is in `go.mod`) and [golangci-lint](https://golangci-lint.run/).
+### Requirements
+
+You need Go 1.27.2 or later. The `go` line in `go.mod` sets the minimum language version
+(`go 1.27.0`). The `toolchain` line sets the toolchain that builds the project and runs in CI
+(`toolchain go1.27.2`). With Go 1.21 or later and the default `GOTOOLCHAIN=auto`, the `go` command
+downloads go1.27.2 for you.
+
+`go.mod` is the source of truth. When the versions in `go.mod` change, change this section too.
+
+The project uses [golangci-lint](https://golangci-lint.run/) v2. The config is in `.golangci.yml`.
+CI pins v2.15.0. Install the same version:
 
 ```sh
-go build ./...
-go test ./...
-go vet ./...
-golangci-lint run
-gofmt -l .        # must print nothing
+go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.15.0
 ```
+
+You can also use `brew install golangci-lint`, or follow the
+[install guide](https://golangci-lint.run/welcome/install/).
+
+### Checks
+
+Run these checks before you open a pull request:
+
+```sh
+gofmt -l .                                             # must print nothing
+go mod tidy && git diff --exit-code -- go.mod go.sum   # module files are tidy
+go build ./...
+go vet ./...
+golangci-lint config verify                            # .golangci.yml is valid
+golangci-lint run ./...
+go test -race -shuffle=on ./...
+govulncheck ./...
+```
+
+`go.mod` lists the dependencies. Do not change it unless your change needs a new module.
+
+CI (`.github/workflows/ci.yml`) runs on every pull request. On Linux and macOS it runs build, vet, race
+tests, golangci-lint and the version smoke test. On Linux only it also runs the gofmt check, the
+`go mod tidy` check and govulncheck.
+
+### Build the binary
+
+```sh
+go build -ldflags "-X main.version=1.2.3" -o mcpmoat ./cmd/mcpmoat
+./mcpmoat version
+```
+
+Without `-ldflags`, a `go build` in a git checkout prints the pseudo-version that Go stores in the
+binary, with the commit and time. The version is `dev` only when Go has no such data, for example with
+`-buildvcs=false`.
+
+CI builds with `-ldflags "-X main.version=ci-smoke"` and checks that `mcpmoat version` prints that value.
 
 ## Pull requests
 
