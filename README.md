@@ -23,7 +23,22 @@ These methods will work from the first release:
 mcpmoat scan                 # discover, connect, check and report
 mcpmoat scan --no-connect    # static config analysis only; runs no server
 mcpmoat pin --accept <name>  # accept a changed server after you review it
+mcpmoat version              # print the version, commit and build date
 ```
+
+## Build from source
+
+```sh
+go build -ldflags "-X main.version=1.2.3" -o mcpmoat ./cmd/mcpmoat
+./mcpmoat version
+```
+
+Without `-ldflags`, mcpmoat reads the version, commit and date that Go stores in the binary. A plain
+`go build` in a git checkout prints a pseudo-version such as `v0.0.0-20261017181905-4091e6ff2614+dirty`.
+A build with `go install github.com/Ducarv/mcpmoat/cmd/mcpmoat@<version>` prints that module version.
+The version is `dev` only when Go has no data to store, for example with `-buildvcs=false` or outside a
+git checkout. The other ldflags variables are `main.commit` and `main.date`. The output looks like this:
+`mcpmoat 1.2.3 (commit abc123, built 2026-01-01T00:00:00Z)`.
 
 ## What this does not do
 

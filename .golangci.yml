@@ -1,0 +1,43 @@
+# golangci-lint configuration (v2 format).
+# Run locally with: golangci-lint run ./...
+# Check formatting with: golangci-lint fmt --diff
+version: "2"
+
+linters:
+  # Start from an empty set so every linter below is a deliberate choice.
+  default: none
+  enable:
+    - errcheck     # unchecked errors
+    - govet        # suspicious constructs (same checks as `go vet`)
+    - staticcheck  # bugs, deprecated APIs and simplifications (includes the old gosimple and stylecheck)
+    - ineffassign  # assignments whose value is never used
+    - unused       # unused code
+    - gosec        # security checks (exec, file permissions, weak crypto, and so on)
+    - misspell     # common spelling mistakes in comments and strings
+    - revive       # style checks (doc comments, naming, error strings)
+    - errorlint    # require %w when wrapping errors, and errors.Is/errors.As instead of ==
+    - unconvert    # unnecessary type conversions
+    - nolintlint   # keep //nolint directives honest
+
+  settings:
+    # misspell: the locale is left unset on purpose. The docs mix US and UK
+    # spellings ("color" and "colour"), so only common misspellings are
+    # reported, not US/UK differences.
+    nolintlint:
+      # A //nolint directive must name the linter and give a reason, e.g.
+      #   //nolint:gosec // path comes from a validated flag
+      require-specific: true
+      require-explanation: true
+      # Report directives that no longer suppress anything.
+      allow-unused: false
+    # gosec and revive use their default settings on purpose.
+
+formatters:
+  enable:
+    - gofmt
+    - goimports  # gofmt plus import grouping
+  settings:
+    goimports:
+      # Put this module's imports in their own group, after third-party imports.
+      local-prefixes:
+        - github.com/Ducarv/mcpmoat
