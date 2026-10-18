@@ -1,59 +1,12 @@
 package discover
 
 import (
-	"os"
 	"path/filepath"
 	"reflect"
 	"testing"
 
 	"github.com/Ducarv/mcpmoat/internal/discover/discovertest"
 )
-
-// wantCursorErr is the part of a FileError that a cursor test checks. The path is not
-// here: every error must name the file that the reader opened.
-type wantCursorErr struct {
-	Server string
-	Line   int
-	Reason string
-}
-
-// cursorErrsOf returns the wantCursorErr form of errs and checks that every error names
-// path and holds no OS error. Parse problems must not carry an Err.
-func cursorErrsOf(t *testing.T, errs []*FileError, path string) []wantCursorErr {
-	t.Helper()
-	if len(errs) == 0 {
-		return nil
-	}
-	out := make([]wantCursorErr, 0, len(errs))
-	for i, e := range errs {
-		if e.Path != path {
-			t.Errorf("errs[%d].Path = %q, want %q", i, e.Path, path)
-		}
-		if e.Err != nil {
-			t.Errorf("errs[%d].Err = %v, want nil for a parse problem", i, e.Err)
-		}
-		out = append(out, wantCursorErr{Server: e.Server, Line: e.Line, Reason: e.Reason})
-	}
-	return out
-}
-
-// checkCursorResult compares one Result with the wanted servers and errors. If quiet
-// is true the failure message holds names only, because the views hold secret
-// values.
-func checkCursorResult(t *testing.T, label, path string, got Result, want []serverView, wantErrs []wantCursorErr, quiet bool) {
-	t.Helper()
-	gotViews := viewsOf(got.Servers)
-	if !reflect.DeepEqual(gotViews, want) {
-		if quiet {
-			t.Errorf("%s servers differ from the want list; got names %v", label, serverNames(got.Servers))
-		} else {
-			t.Errorf("%s servers =\n%+v\nwant\n%+v", label, gotViews, want)
-		}
-	}
-	if gotErrs := cursorErrsOf(t, got.Errors, path); !reflect.DeepEqual(gotErrs, wantErrs) {
-		t.Errorf("%s errors = %+v, want %+v", label, gotErrs, wantErrs)
-	}
-}
 
 func TestReadCursor(t *testing.T) {
 	t.Parallel()
@@ -81,15 +34,19 @@ func TestReadCursor(t *testing.T) {
 
 	tests := []struct {
 		name string
-		// quiet hides server views in failure messages (secrets fixture).
-		quiet bool
+		// hideValues hides server views in failure messages (secrets and
+		// malformed fixtures).
+		hideValues bool
+		// canaryFiles are the fixture files, relative to the fixture
+		// directory, that must hold every canary.
+		canaryFiles []string
 		// want returns the wanted servers and errors for the global file
 		// (home) and the project file (work).
-		want func(home, work place) (hs []serverView, he []wantCursorErr, ws []serverView, we []wantCursorErr)
+		want func(home, work place) (hs []serverView, he []errWant, ws []serverView, we []errWant)
 	}{
 		{
 			name: "valid",
-			want: func(home, work place) ([]serverView, []wantCursorErr, []serverView, []wantCursorErr) {
+			want: func(home, work place) ([]serverView, []errWant, []serverView, []errWant) {
 				hs := []serverView{
 					view(home, serverView{Name: "events", Transport: TransportSSE, URL: "https://sse.example.com/sse"}),
 					view(home, serverView{Name: "git", Transport: TransportStdio, Command: "uvx", Args: []string{"mcp-server-git"}}),
@@ -103,9 +60,10 @@ func TestReadCursor(t *testing.T) {
 			},
 		},
 		{
-			name:  "secrets",
-			quiet: true,
-			want: func(home, work place) ([]serverView, []wantCursorErr, []serverView, []wantCursorErr) {
+			name:        "secrets",
+			hideValues:  true,
+			canaryFiles: []string{"home/.cursor/mcp.json", "work/.cursor/mcp.json"},
+			want: func(home, work place) ([]serverView, []errWant, []serverView, []errWant) {
 				hs := []serverView{
 					view(home, serverView{
 						Name: "local-api", Transport: TransportStdio, Command: "uvx", Args: []string{"mcp-server-api", "--token", discovertest.CanaryArgs},
@@ -131,28 +89,28 @@ func TestReadCursor(t *testing.T) {
 		},
 		{
 			name: "empty",
-			want: func(_, _ place) ([]serverView, []wantCursorErr, []serverView, []wantCursorErr) {
+			want: func(_, _ place) ([]serverView, []errWant, []serverView, []errWant) {
 				return nil, nil, nil, nil
 			},
 		},
 		{
-			name:  "malformed",
-			quiet: true,
-			want: func(_, _ place) ([]serverView, []wantCursorErr, []serverView, []wantCursorErr) {
+			name:       "malformed",
+			hideValues: true,
+			want: func(_, _ place) ([]serverView, []errWant, []serverView, []errWant) {
 				// The syntax error is on the line of "broken" in the home
 				// file (line 3) and on the env line in the work file (line 5).
-				return nil, []wantCursorErr{{Line: 3, Reason: reasonInvalidJSON}},
-					nil, []wantCursorErr{{Line: 5, Reason: reasonInvalidJSON}}
+				return nil, []errWant{{Line: 3, Reason: reasonInvalidJSON}},
+					nil, []errWant{{Line: 5, Reason: reasonInvalidJSON}}
 			},
 		},
 		{
 			name: "invalid-entries",
-			want: func(home, _ place) ([]serverView, []wantCursorErr, []serverView, []wantCursorErr) {
+			want: func(home, _ place) ([]serverView, []errWant, []serverView, []errWant) {
 				hs := []serverView{
 					view(home, serverView{Name: "good", Transport: TransportStdio, Command: "uvx", Args: []string{"mcp-server-git"}}),
 				}
 				// Errors come sorted by server name.
-				he := []wantCursorErr{
+				he := []errWant{
 					{Server: "empty", Reason: reasonNoCommandOrURL},
 					{Server: "num-env", Reason: reasonBadEntry},
 					{Server: "sse-no-url", Reason: reasonRemoteNoURL},
@@ -163,7 +121,7 @@ func TestReadCursor(t *testing.T) {
 		},
 		{
 			name: "missing",
-			want: func(_, _ place) ([]serverView, []wantCursorErr, []serverView, []wantCursorErr) {
+			want: func(_, _ place) ([]serverView, []errWant, []serverView, []errWant) {
 				return nil, nil, nil, nil
 			},
 		},
@@ -175,13 +133,14 @@ func TestReadCursor(t *testing.T) {
 			ctx := t.Context()
 
 			fixture := fixtureDir(t, "cursor", tt.name)
-			if tt.name == "secrets" {
+			if len(tt.canaryFiles) > 0 {
 				// A leak test only means something if the fixture holds the
 				// canaries, so check the repository files first.
-				assertFixtureHasCanaries(t,
-					filepath.Join(fixture, "home", ".cursor", "mcp.json"),
-					filepath.Join(fixture, "work", ".cursor", "mcp.json"),
-				)
+				var paths []string
+				for _, f := range tt.canaryFiles {
+					paths = append(paths, filepath.Join(fixture, filepath.FromSlash(f)))
+				}
+				assertFixtureHasCanaries(t, paths...)
 			}
 
 			home, work := copyFixture(t, "cursor", tt.name)
@@ -195,10 +154,12 @@ func TestReadCursor(t *testing.T) {
 				place{source: homeFile, scope: ScopeGlobal},
 				place{source: workFile, scope: ScopeProject, projectPath: work},
 			)
-			checkCursorResult(t, "global", homeFile, global, hs, he, tt.quiet)
-			checkCursorResult(t, "project", workFile, project, ws, we, tt.quiet)
+			checkServers(t, "global", global.Servers, hs, tt.hideValues)
+			checkFileErrors(t, homeFile, global.Errors, he)
+			checkServers(t, "project", project.Servers, ws, tt.hideValues)
+			checkFileErrors(t, workFile, project.Errors, we)
 
-			if tt.quiet {
+			if tt.hideValues {
 				for _, r := range []Result{global, project} {
 					assertNoLeakServers(t, r.Servers)
 					assertNoLeakErrors(t, r.Errors)
@@ -271,10 +232,7 @@ func TestReadCursorIgnoresProjects(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			dir := t.TempDir()
-			path := filepath.Join(dir, "mcp.json")
-			if err := os.WriteFile(path, []byte(tt.content), 0o600); err != nil {
-				t.Fatalf("write test file: %v", err)
-			}
+			path := writeFile(t, dir, "mcp.json", []byte(tt.content))
 
 			res := ReadCursor(t.Context(), path, ScopeProject, dir)
 			if len(res.Errors) != 0 {

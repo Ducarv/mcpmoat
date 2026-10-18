@@ -12,14 +12,6 @@ import (
 	"github.com/Ducarv/mcpmoat/internal/discover/discovertest"
 )
 
-// errWant is the part of a *FileError that a test checks. Line is the exact
-// 1-based line (0 means the error has no position).
-type errWant struct {
-	Server string
-	Reason string
-	Line   int
-}
-
 // claudeCodeCase describes the expected result of reading one fixture. The want
 // functions get the copied file paths, because Source and Path hold them.
 type claudeCodeCase struct {
@@ -27,6 +19,10 @@ type claudeCodeCase struct {
 	// hideValues is set for fixtures that hold canaries. On a mismatch the test
 	// then prints no server data, only a fixed message.
 	hideValues bool
+	// canaryFiles are the fixture files, relative to the fixture directory,
+	// that must hold every canary. The leak checks only mean something if the
+	// input holds the canaries.
+	canaryFiles []string
 
 	homeServers func(source string) []serverView
 	workServers func(source, work string) []serverView
@@ -34,8 +30,8 @@ type claudeCodeCase struct {
 	workErrs    []errWant
 }
 
-// stdioView builds the want value of a stdio server of Claude Code.
-func stdioView(name string, scope Scope, projectPath, source, command string, args []string) serverView {
+// claudeStdioView builds the want value of a stdio server of Claude Code.
+func claudeStdioView(name string, scope Scope, projectPath, source, command string, args []string) serverView {
 	return serverView{
 		Name:        name,
 		Client:      ClientClaudeCode,
@@ -48,8 +44,8 @@ func stdioView(name string, scope Scope, projectPath, source, command string, ar
 	}
 }
 
-// remoteView builds the want value of an http or sse server of Claude Code.
-func remoteView(name string, scope Scope, projectPath, source string, transport Transport, url string) serverView {
+// claudeRemoteView builds the want value of an http or sse server of Claude Code.
+func claudeRemoteView(name string, scope Scope, projectPath, source string, transport Transport, url string) serverView {
 	return serverView{
 		Name:        name,
 		Client:      ClientClaudeCode,
@@ -61,6 +57,8 @@ func remoteView(name string, scope Scope, projectPath, source string, transport 
 	}
 }
 
+// claudeCodeCases returns one case for each fixture directory under
+// testdata/discover/claude-code. Each call returns a new slice.
 func claudeCodeCases() []claudeCodeCase {
 	return []claudeCodeCase{
 		{
@@ -68,26 +66,27 @@ func claudeCodeCases() []claudeCodeCase {
 			homeServers: func(src string) []serverView {
 				// Order is (ProjectPath, Name): global servers first.
 				return []serverView{
-					stdioView("filesystem", ScopeGlobal, "", src, "npx",
+					claudeStdioView("filesystem", ScopeGlobal, "", src, "npx",
 						[]string{"-y", "@modelcontextprotocol/server-filesystem", "/tmp"}),
-					remoteView("remote-http", ScopeGlobal, "", src, TransportHTTP, "https://mcp.example.com/mcp"),
-					remoteView("remote-sse", ScopeGlobal, "", src, TransportSSE, "https://sse.example.com/sse"),
-					stdioView("alpha-tool", ScopeProject, "/work/alpha", src, "node", []string{"alpha-server.js"}),
+					claudeRemoteView("remote-http", ScopeGlobal, "", src, TransportHTTP, "https://mcp.example.com/mcp"),
+					claudeRemoteView("remote-sse", ScopeGlobal, "", src, TransportSSE, "https://sse.example.com/sse"),
+					claudeStdioView("alpha-tool", ScopeProject, "/work/alpha", src, "node", []string{"alpha-server.js"}),
 					// "type" is missing here: a command means stdio.
-					stdioView("gamma-tool", ScopeProject, "/work/gamma", src, "python3", []string{"-m", "gamma_server"}),
+					claudeStdioView("gamma-tool", ScopeProject, "/work/gamma", src, "python3", []string{"-m", "gamma_server"}),
 				}
 			},
 			workServers: func(src, work string) []serverView {
 				return []serverView{
-					stdioView("local-db", ScopeProject, work, src, "uvx",
+					claudeStdioView("local-db", ScopeProject, work, src, "uvx",
 						[]string{"mcp-server-sqlite", "--db-path", "./data.db"}),
-					remoteView("team-api", ScopeProject, work, src, TransportHTTP, "https://team.example.com/mcp"),
+					claudeRemoteView("team-api", ScopeProject, work, src, TransportHTTP, "https://team.example.com/mcp"),
 				}
 			},
 		},
 		{
-			name:       "secrets",
-			hideValues: true,
+			name:        "secrets",
+			hideValues:  true,
+			canaryFiles: []string{"home/.claude.json", "work/.mcp.json"},
 			homeServers: func(src string) []serverView {
 				return []serverView{
 					{
@@ -148,7 +147,7 @@ func claudeCodeCases() []claudeCodeCase {
 			name: "invalid-entries",
 			homeServers: func(src string) []serverView {
 				return []serverView{
-					stdioView("good", ScopeGlobal, "", src, "npx", []string{"-y", "example-server"}),
+					claudeStdioView("good", ScopeGlobal, "", src, "npx", []string{"-y", "example-server"}),
 				}
 			},
 			workServers: func(string, string) []serverView { return nil },
@@ -170,51 +169,6 @@ func claudeCodeCases() []claudeCodeCase {
 	}
 }
 
-// checkErrors compares the errors of a Result with the want list. path is the
-// config file that the readers got.
-func checkErrors(t *testing.T, got []*FileError, want []errWant, path string) {
-	t.Helper()
-	if len(got) != len(want) {
-		t.Fatalf("got %d errors, want %d: %v", len(got), len(want), got)
-	}
-	for i, w := range want {
-		e := got[i]
-		if e.Path != path {
-			t.Errorf("errors[%d].Path = %q, want %q", i, e.Path, path)
-		}
-		if e.Server != w.Server {
-			t.Errorf("errors[%d].Server = %q, want %q", i, e.Server, w.Server)
-		}
-		if e.Reason != w.Reason {
-			t.Errorf("errors[%d].Reason = %q, want %q", i, e.Reason, w.Reason)
-		}
-		if e.Line != w.Line {
-			t.Errorf("errors[%d].Line = %d, want %d", i, e.Line, w.Line)
-		}
-		if (e.Line > 0) != (e.Col > 0) {
-			t.Errorf("errors[%d] has Line %d and Col %d, want both set or both zero", i, e.Line, e.Col)
-		}
-		if e.Err != nil {
-			t.Errorf("errors[%d].Err = %v, want nil (parse problems have no OS error)", i, e.Err)
-		}
-	}
-}
-
-// checkServers compares got with want. With hide set, a mismatch prints names
-// only, because the views can hold secret values.
-func checkServers(t *testing.T, label string, got []Server, want []serverView, hide bool) {
-	t.Helper()
-	gotViews := viewsOf(got)
-	if reflect.DeepEqual(gotViews, want) {
-		return
-	}
-	if hide {
-		t.Errorf("%s: servers differ from the want list (values hidden); got names %v", label, serverNames(got))
-		return
-	}
-	t.Errorf("%s:\n got  %+v\n want %+v", label, gotViews, want)
-}
-
 func TestReadClaudeCode(t *testing.T) {
 	t.Parallel()
 	for _, tc := range claudeCodeCases() {
@@ -226,12 +180,13 @@ func TestReadClaudeCode(t *testing.T) {
 			workPath := filepath.Join(work, ".mcp.json")
 
 			// A leak test only means something if the fixture holds the canaries.
-			if tc.name == "secrets" {
+			if len(tc.canaryFiles) > 0 {
 				repo := fixtureDir(t, "claude-code", tc.name)
-				assertFixtureHasCanaries(t,
-					filepath.Join(repo, "home", ".claude.json"),
-					filepath.Join(repo, "work", ".mcp.json"),
-				)
+				var paths []string
+				for _, f := range tc.canaryFiles {
+					paths = append(paths, filepath.Join(repo, filepath.FromSlash(f)))
+				}
+				assertFixtureHasCanaries(t, paths...)
 			}
 
 			r1 := ReadClaudeCode(ctx, homePath, ScopeGlobal, "")
@@ -239,8 +194,8 @@ func TestReadClaudeCode(t *testing.T) {
 
 			checkServers(t, "~/.claude.json", r1.Servers, tc.homeServers(homePath), tc.hideValues)
 			checkServers(t, ".mcp.json", r2.Servers, tc.workServers(workPath, work), tc.hideValues)
-			checkErrors(t, r1.Errors, tc.homeErrs, homePath)
-			checkErrors(t, r2.Errors, tc.workErrs, workPath)
+			checkFileErrors(t, homePath, r1.Errors, tc.homeErrs)
+			checkFileErrors(t, workPath, r2.Errors, tc.workErrs)
 
 			// No result may hold a canary, in any form.
 			for _, r := range []Result{r1, r2} {
@@ -355,7 +310,7 @@ func TestReadClaudeCodeProjectsKeyByScope(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			path := writeJSONConfig(t, content)
+			path := writeFile(t, t.TempDir(), "config.json", []byte(content))
 
 			r := ReadClaudeCode(t.Context(), path, tt.scope, "/real/project")
 			if len(r.Errors) != 0 {
