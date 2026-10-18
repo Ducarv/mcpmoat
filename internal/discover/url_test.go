@@ -35,10 +35,6 @@ func TestURLFormatVerbs(t *testing.T) {
 	u := discover.NewURL(leakyURL)
 	redacted := discover.RedactURL(leakyURL)
 
-	// URL implements fmt.Formatter, so fmt passes every verb, even %d and %x,
-	// to URL.Format.
-	verbs := []string{"%v", "%+v", "%#v", "%s", "%q", "%x", "%X", "%d", "%p", "%T", "%10v", "%-10s"}
-
 	values := []struct {
 		name string
 		arg  any
@@ -54,7 +50,7 @@ func TestURLFormatVerbs(t *testing.T) {
 	}
 
 	for _, v := range values {
-		for _, verb := range verbs {
+		for _, verb := range fmtVerbs {
 			t.Run(v.name+"/"+verb, func(t *testing.T) {
 				t.Parallel()
 				got := fmt.Sprintf(verb, v.arg)
@@ -206,7 +202,7 @@ func TestURLSlog(t *testing.T) {
 			t.Run(h.name+"/"+a.name, func(t *testing.T) {
 				t.Parallel()
 				var buf bytes.Buffer
-				slog.New(h.make(&buf)).Info("msg", a.attr)
+				slog.New(h.newHandler(&buf)).Info("msg", a.attr)
 				got := buf.String()
 				discovertest.AssertNoLeak(t, "slog "+h.name, got, discovertest.CanaryURL)
 				for _, want := range []string{"example.com", discover.Mask} {
@@ -344,6 +340,8 @@ func TestURLUnmarshalTextCopies(t *testing.T) {
 	}
 }
 
+// ExampleURL shows that a URL prints redacted and that only Reveal gives the
+// raw URL.
 func ExampleURL() {
 	u := discover.NewURL("https://user:pw@example.com/mcp?key=abc")
 	fmt.Println(u)

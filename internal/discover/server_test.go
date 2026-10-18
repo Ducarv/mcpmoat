@@ -16,85 +16,12 @@ import (
 // TestServerNoLeak checks the issue #16 acceptance criterion: printing,
 // logging or encoding a Server never shows an env value, a header value or
 // the credentials in its URL, but still shows the key name, the URL host and
-// Mask in their place.
+// Mask in their place. serverRenders (helpers_test.go) lists the outputs.
 func TestServerNoLeak(t *testing.T) {
 	t.Parallel()
 
-	// Each render function turns a Server into the text a user could see.
-	type render func(t *testing.T, s discover.Server) string
-
-	formatRender := func(verb string) render {
-		return func(_ *testing.T, s discover.Server) string {
-			return fmt.Sprintf(verb, s)
-		}
-	}
-	jsonRender := func(t *testing.T, s discover.Server) string {
-		t.Helper()
-		out, err := json.Marshal(s)
-		if err != nil {
-			t.Fatalf("json.Marshal() error = %v", err)
-		}
-		return string(out)
-	}
-	// slogRender logs one attr with the handler that newHandler returns and
-	// gives the log text. value turns the Server into the attr value, so a
-	// test can log a Server or a *Server.
-	slogRender := func(
-		newHandler func(*bytes.Buffer) slog.Handler,
-		value func(s discover.Server) any,
-	) render {
-		return func(_ *testing.T, s discover.Server) string {
-			var buf bytes.Buffer
-			slog.New(newHandler(&buf)).Info("server found", slog.Any("server", value(s)))
-			return buf.String()
-		}
-	}
-	asValue := func(s discover.Server) any { return s }
-	asPointer := func(s discover.Server) any { return &s }
-
-	// holder keeps a Server in an exported field. fmt walks into the field
-	// by reflection and, because every field on the path is exported, it can
-	// call the Format methods of the URL and Secret fields inside it.
-	type holder struct {
-		Server discover.Server
-	}
-
-	type namedRender struct {
-		name   string
-		render render
-	}
-	renders := []namedRender{
-		{name: "%v", render: formatRender("%v")},
-		{name: "%+v", render: formatRender("%+v")},
-		{name: "%#v", render: formatRender("%#v")},
-		{name: "%s", render: formatRender("%s")},
-		{name: "json", render: jsonRender},
-		// A *Server goes through a different fmt path (fmt prints &{...}).
-		{name: "pointer %+v", render: func(_ *testing.T, s discover.Server) string {
-			return fmt.Sprintf("%+v", &s)
-		}},
-		{name: "error %+v", render: func(_ *testing.T, s discover.Server) string {
-			return fmt.Errorf("x: %+v", s).Error()
-		}},
-		{name: "slice", render: func(_ *testing.T, s discover.Server) string {
-			return fmt.Sprint([]discover.Server{s})
-		}},
-		{name: "map %+v", render: func(_ *testing.T, s discover.Server) string {
-			return fmt.Sprintf("%+v", map[string]discover.Server{s.Name: s})
-		}},
-		{name: "exported field %+v", render: func(_ *testing.T, s discover.Server) string {
-			return fmt.Sprintf("%+v", holder{Server: s})
-		}},
-	}
-	for _, h := range slogHandlers {
-		renders = append(renders,
-			namedRender{name: "slog " + h.name, render: slogRender(h.make, asValue)},
-			namedRender{name: "slog " + h.name + " pointer", render: slogRender(h.make, asPointer)},
-		)
-	}
-
 	for _, sv := range testServers() {
-		for _, r := range renders {
+		for _, r := range serverRenders() {
 			t.Run(sv.name+"/"+r.name, func(t *testing.T) {
 				t.Parallel()
 				out := r.render(t, sv.server)
@@ -232,7 +159,7 @@ func TestServerSlogNilPointer(t *testing.T) {
 			t.Parallel()
 			var buf bytes.Buffer
 			var s *discover.Server
-			slog.New(h.make(&buf)).Info("server found", slog.Any("server", s))
+			slog.New(h.newHandler(&buf)).Info("server found", slog.Any("server", s))
 			out := buf.String()
 			if strings.Contains(out, "panicked") || strings.Contains(out, "PANIC") {
 				t.Errorf("log output reports a panic; output:\n%s", out)
@@ -321,6 +248,7 @@ func TestConstantStrings(t *testing.T) {
 	}
 }
 
+// TestTransportIsRemote checks that only the HTTP and SSE transports are remote.
 func TestTransportIsRemote(t *testing.T) {
 	t.Parallel()
 

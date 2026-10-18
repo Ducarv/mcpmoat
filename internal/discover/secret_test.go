@@ -58,8 +58,6 @@ func TestSecretFormatVerbs(t *testing.T) {
 	canary := discovertest.CanaryEnv
 	val := discover.NewSecret(canary)
 
-	verbs := []string{"%v", "%+v", "%#v", "%s", "%q", "%x", "%X", "%d", "%p", "%T", "%10v", "%-10s"}
-
 	values := []struct {
 		name string
 		arg  any
@@ -82,7 +80,7 @@ func TestSecretFormatVerbs(t *testing.T) {
 	}
 
 	for _, v := range values {
-		for _, verb := range verbs {
+		for _, verb := range fmtVerbs {
 			t.Run(v.name+"/"+verb, func(t *testing.T) {
 				t.Parallel()
 				got := fmt.Sprintf(verb, v.arg)
@@ -345,7 +343,7 @@ func TestSecretSlog(t *testing.T) {
 			t.Run(h.name+"/"+a.name, func(t *testing.T) {
 				t.Parallel()
 				var buf bytes.Buffer
-				logger := slog.New(h.make(&buf))
+				logger := slog.New(h.newHandler(&buf))
 				logger.Info("msg", a.attr)
 				got := buf.String()
 				discovertest.AssertNoLeak(t, "slog "+h.name, got, canary)
@@ -511,8 +509,8 @@ func TestSecretDeepEqual(t *testing.T) {
 		{name: "different value", a: discover.NewSecret("a"), b: discover.NewSecret("b"), want: false},
 		{name: "zero and zero", a: discover.Secret{}, b: discover.Secret{}, want: true},
 		// The zero Secret holds a nil pointer and NewSecret("") a pointer
-		// to "", so DeepEqual tells them apart. Both Reveal "" (checked
-		// below).
+		// to "", so DeepEqual tells them apart. Both Reveal "" (see
+		// TestSecretZero).
 		{name: "zero vs empty", a: discover.Secret{}, b: discover.NewSecret(""), want: false},
 		{
 			name: "same SecretMap",
@@ -534,12 +532,6 @@ func TestSecretDeepEqual(t *testing.T) {
 				t.Errorf("reflect.DeepEqual() = %v, want %v", got, tt.want)
 			}
 		})
-	}
-
-	// DeepEqual sees a difference, but Reveal does not.
-	zero, empty := discover.Secret{}, discover.NewSecret("")
-	if zero.Reveal() != "" || empty.Reveal() != "" {
-		t.Errorf("Reveal() = %q and %q, want both empty", zero.Reveal(), empty.Reveal())
 	}
 }
 
@@ -565,6 +557,8 @@ func TestSecretMapUnmarshalJSONNull(t *testing.T) {
 	}
 }
 
+// ExampleSecret shows that a Secret prints as Mask and that only Reveal gives
+// the value.
 func ExampleSecret() {
 	s := discover.NewSecret("example-value")
 	fmt.Println(s)
