@@ -1,0 +1,117 @@
+package inspect
+
+import (
+	"errors"
+	"slices"
+	"strings"
+
+	"github.com/Ducarv/mcpmoat/internal/discover"
+)
+
+// errInvalidEnvName reports that a server config declares an environment
+// variable name that a child process cannot get: an empty name, or a name
+// that contains "=" or a NUL byte. The text is fixed on purpose. A bad name
+// such as "TOKEN=abc" can hold a secret, so the error never includes it.
+var errInvalidEnvName = errors.New("inspect: invalid environment variable name in server config")
+
+// errInvalidEnvValue reports that a server config declares an environment
+// variable value that contains a NUL byte. The operating system cannot pass
+// such a value to a child process. The error never includes the name or the
+// value.
+var errInvalidEnvValue = errors.New("inspect: invalid environment variable value in server config")
+
+// isBaseEnv reports whether the parent environment variable name is on the
+// allowlist that a stdio server child gets from the mcpmoat process.
+//
+// The list is the union of the default lists of the official MCP SDKs
+// (getDefaultEnvironment) and of Codex, plus LC_CTYPE. Other variables are excluded on
+// purpose, for example SSH_AUTH_SOCK, proxy variables, AWS_*, *_TOKEN,
+// LD_* and DYLD_* (loader injection) and NODE_OPTIONS (code injection into
+// node). A user who needs one of them declares it in the env of the server
+// config.
+//
+// A switch with constant cases needs no package-level variable, so the list
+// cannot change at run time. Names are case-sensitive, as on Unix.
+func isBaseEnv(name string) bool {
+	switch name {
+	case
+		"HOME",                    // runtimes find caches and config, such as ~/.npm and ~/.cache/uv
+		"LANG",                    // text encoding of stdio for Python and Node
+		"LC_ALL",                  // text encoding of stdio for Python and Node
+		"LC_CTYPE",                // text encoding of stdio for Python and Node
+		"LOGNAME",                 // user identity that some tools read; not secret
+		"PATH",                    // the child finds its own tools, for example npx starts node
+		"SHELL",                   // npm and some tools read it; in the MCP SDK default list
+		"TERM",                    // in the MCP SDK and Codex default lists; low risk
+		"TMPDIR",                  // per-user temp dir on macOS; without it tools use the shared /tmp
+		"TZ",                      // time zone; in the Codex default list
+		"USER",                    // user identity that some tools read; not secret
+		"__CF_USER_TEXT_ENCODING": // macOS CoreFoundation text encoding; in the Codex list; absent on Linux
+		return true
+	}
+	return false
+}
+
+// buildEnv returns the environment for a stdio server child process. The
+// result has the parent entries whose names pass isBaseEnv, plus all the
+// entries that the server config declares. A declared entry overrides a
+// parent entry with the same name.
+//
+// Key invariant: on success the result is never nil, also when it has no
+// entries. exec.Cmd treats a nil Env as "inherit the whole parent
+// environment", which would undo the scrub (NFR-04). An empty non-nil slice
+// gives the child an empty environment.
+//
+// parent has the form of os.Environ: "name=value" entries. Entries with no
+// "=" are skipped. If a name occurs more than once in parent, the first
+// entry wins, the same as os.Getenv on Unix.
+//
+// Declared values are passed exactly as written. buildEnv does not expand
+// ${VAR} references (that is issue #88).
+//
+// buildEnv returns errInvalidEnvName for a declared name that is empty or
+// contains "=" or a NUL byte, and errInvalidEnvValue for a declared value
+// that contains a NUL byte. It checks the declared names in sorted order, so
+// the first error is always the same for the same config.
+//
+// The result is sorted by name. It holds secret values from
+// discover.Secret.Reveal: use it only as exec.Cmd.Env. Never pass it to fmt,
+// a logger, an error or an encoder.
+func buildEnv(parent []string, declared discover.SecretMap) ([]string, error) {
+	values := make(map[string]string, len(declared)+12)
+	for _, entry := range parent {
+		name, value, ok := strings.Cut(entry, "=")
+		if !ok || !isBaseEnv(name) {
+			continue
+		}
+		if _, seen := values[name]; seen {
+			continue // the first entry wins
+		}
+		values[name] = value
+	}
+
+	for _, name := range declared.Keys() {
+		if name == "" || strings.ContainsAny(name, "=\x00") {
+			return nil, errInvalidEnvName
+		}
+		value := declared[name].Reveal()
+		if strings.IndexByte(value, 0) >= 0 {
+			return nil, errInvalidEnvValue
+		}
+		values[name] = value
+	}
+
+	// make with a capacity gives a non-nil slice even when values is empty.
+	// See the key invariant in the doc comment.
+	names := make([]string, 0, len(values))
+	for name := range values {
+		names = append(names, name)
+	}
+	slices.Sort(names)
+
+	env := make([]string, 0, len(names))
+	for _, name := range names {
+		env = append(env, name+"="+values[name])
+	}
+	return env, nil
+}

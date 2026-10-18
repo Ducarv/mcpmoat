@@ -1,0 +1,447 @@
+package inspect
+
+import (
+	"errors"
+	"reflect"
+	"slices"
+	"strings"
+	"testing"
+
+	"github.com/Ducarv/mcpmoat/internal/discover"
+	"github.com/Ducarv/mcpmoat/internal/discover/discovertest"
+)
+
+// secrets builds a discover.SecretMap from plain name and value pairs.
+func secrets(t *testing.T, kv map[string]string) discover.SecretMap {
+	t.Helper()
+	if kv == nil {
+		return nil
+	}
+	m := make(discover.SecretMap, len(kv))
+	for k, v := range kv {
+		m[k] = discover.NewSecret(v)
+	}
+	return m
+}
+
+// envKey returns the name part of a "name=value" entry.
+func envKey(entry string) string {
+	name, _, _ := strings.Cut(entry, "=")
+	return name
+}
+
+// TestIsBaseEnv checks the allowlist of parent variables: every listed name
+// passes, and names that can carry secrets or inject code do not.
+func TestIsBaseEnv(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		want bool
+	}{
+		{name: "HOME", want: true},
+		{name: "LANG", want: true},
+		{name: "LC_ALL", want: true},
+		{name: "LC_CTYPE", want: true},
+		{name: "LOGNAME", want: true},
+		{name: "PATH", want: true},
+		{name: "SHELL", want: true},
+		{name: "TERM", want: true},
+		{name: "TMPDIR", want: true},
+		{name: "TZ", want: true},
+		{name: "USER", want: true},
+		{name: "__CF_USER_TEXT_ENCODING", want: true},
+
+		{name: "AWS_SECRET_ACCESS_KEY", want: false},
+		{name: "GITHUB_TOKEN", want: false},
+		{name: "SSH_AUTH_SOCK", want: false},
+		{name: "HTTPS_PROXY", want: false},
+		{name: "http_proxy", want: false},
+		{name: "LD_PRELOAD", want: false},
+		{name: "DYLD_INSERT_LIBRARIES", want: false},
+		{name: "NODE_OPTIONS", want: false},
+		{name: "PWD", want: false},
+		{name: "XDG_RUNTIME_DIR", want: false},
+		{name: "path", want: false},
+		{name: "Home", want: false},
+		{name: "", want: false},
+		{name: "PATH ", want: false},
+		{name: " PATH", want: false},
+		{name: "PATH=", want: false},
+		{name: "LC_MESSAGES", want: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if got := isBaseEnv(tt.name); got != tt.want {
+				t.Errorf("isBaseEnv(%q) = %v, want %v", tt.name, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestBuildEnv checks the scrubbed environment for valid input: the
+// allowlist filter, declared overrides, parsing of parent entries and the
+// sort order.
+func TestBuildEnv(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		parent   []string
+		declared map[string]string
+		want     []string
+	}{
+		{
+			name: "only allowlisted parent vars kept",
+			parent: []string{
+				"PATH=/usr/bin:/bin",
+				"AWS_SECRET_ACCESS_KEY=" + discovertest.CanaryEnv,
+				"HOME=/home/u",
+				"GITHUB_TOKEN=" + discovertest.CanaryHeader,
+				"SSH_AUTH_SOCK=/tmp/agent.sock",
+				"LD_PRELOAD=/tmp/evil.so",
+				"NODE_OPTIONS=--require /tmp/evil.js",
+				"https_proxy=http://proxy",
+				"LANG=en_US.UTF-8",
+			},
+			want: []string{
+				"HOME=/home/u",
+				"LANG=en_US.UTF-8",
+				"PATH=/usr/bin:/bin",
+			},
+		},
+		{
+			name:     "declared overrides PATH and HOME",
+			parent:   []string{"PATH=/usr/bin", "HOME=/home/u", "USER=u"},
+			declared: map[string]string{"PATH": "/opt/bin", "HOME": "/srv"},
+			want:     []string{"HOME=/srv", "PATH=/opt/bin", "USER=u"},
+		},
+		{
+			name:     "declared var not in the allowlist is added",
+			parent:   []string{"PATH=/usr/bin"},
+			declared: map[string]string{"API_KEY": discovertest.CanaryEnv},
+			want:     []string{"API_KEY=" + discovertest.CanaryEnv, "PATH=/usr/bin"},
+		},
+		{
+			name:     "declared var that the parent also has but the allowlist refuses",
+			parent:   []string{"GITHUB_TOKEN=parent"},
+			declared: map[string]string{"GITHUB_TOKEN": "declared"},
+			want:     []string{"GITHUB_TOKEN=declared"},
+		},
+		{
+			name:   "first parent entry wins for duplicate keys",
+			parent: []string{"PATH=/first", "TERM=xterm", "PATH=/second", "PATH="},
+			want:   []string{"PATH=/first", "TERM=xterm"},
+		},
+		{
+			name:   "first parent entry wins also when it is empty",
+			parent: []string{"TZ=", "TZ=UTC"},
+			want:   []string{"TZ="},
+		},
+		{
+			name:   "malformed parent entries skipped",
+			parent: []string{"NOEQUALS", "PATH", "=value", "=", "", "HOME=/home/u"},
+			want:   []string{"HOME=/home/u"},
+		},
+		{
+			name: "variable references in a declared value kept literally",
+			parent: []string{
+				"HOME=/home/u",
+			},
+			declared: map[string]string{
+				"A": "${HOME}",
+				"B": "${MISSING:-x}",
+				"C": "$HOME/bin",
+			},
+			want: []string{
+				"A=${HOME}",
+				"B=${MISSING:-x}",
+				"C=$HOME/bin",
+				"HOME=/home/u",
+			},
+		},
+		{
+			name:     "empty declared value allowed",
+			declared: map[string]string{"FOO": ""},
+			want:     []string{"FOO="},
+		},
+		{
+			name:     "declared value with equals signs kept",
+			declared: map[string]string{"A": "b=c"},
+			want:     []string{"A=b=c"},
+		},
+		{
+			name:   "parent value with equals signs kept",
+			parent: []string{"TERM=a=b=c"},
+			want:   []string{"TERM=a=b=c"},
+		},
+		{
+			name:     "declared value with newline kept",
+			declared: map[string]string{"A": "line1\nline2"},
+			want:     []string{"A=line1\nline2"},
+		},
+		{
+			name:   "output sorted by key",
+			parent: []string{"USER=u", "TZ=UTC", "HOME=/h", "PATH=/p"},
+			declared: map[string]string{
+				"ZED":   "z",
+				"ALPHA": "a",
+				"MID":   "m",
+			},
+			want: []string{
+				"ALPHA=a",
+				"HOME=/h",
+				"MID=m",
+				"PATH=/p",
+				"TZ=UTC",
+				"USER=u",
+				"ZED=z",
+			},
+		},
+		{
+			// '-' sorts before '=', so a sort of the whole "name=value"
+			// strings would put "A-B=2" first. The key order puts "A" first.
+			name:     "sort uses the key and not the whole entry",
+			declared: map[string]string{"A": "1", "A-B": "2"},
+			want:     []string{"A=1", "A-B=2"},
+		},
+		{
+			name:   "no allowlisted parent vars and no declared vars",
+			parent: []string{"AWS_SECRET_ACCESS_KEY=" + discovertest.CanaryEnv},
+			want:   []string{},
+		},
+		{
+			name:     "empty non-nil inputs",
+			parent:   []string{},
+			declared: map[string]string{},
+			want:     []string{},
+		},
+		{
+			name: "nil parent and nil declared",
+			want: []string{},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got, err := buildEnv(tt.parent, secrets(t, tt.declared))
+			if err != nil {
+				t.Fatalf("buildEnv() error = %v, want nil", err)
+			}
+			// A nil Env makes exec.Cmd inherit the whole parent environment,
+			// so a nil result would undo the scrub (NFR-04).
+			if got == nil {
+				t.Fatal("buildEnv() = nil, want a non-nil slice")
+			}
+			if !slices.Equal(got, tt.want) {
+				t.Errorf("buildEnv() =\n  %q\nwant\n  %q", got, tt.want)
+			}
+		})
+	}
+}
+
+// TestBuildEnvDoesNotAliasInput checks that a change to the result does not
+// change the parent slice.
+func TestBuildEnvDoesNotAliasInput(t *testing.T) {
+	t.Parallel()
+
+	parent := []string{"HOME=/h", "PATH=/p"}
+	orig := slices.Clone(parent)
+	got, err := buildEnv(parent, nil)
+	if err != nil {
+		t.Fatalf("buildEnv() error = %v", err)
+	}
+	for i := range got {
+		got[i] = "X=changed"
+	}
+	if !slices.Equal(parent, orig) {
+		t.Errorf("parent = %q after a change to the result, want %q", parent, orig)
+	}
+}
+
+// TestBuildEnvErrors checks that an invalid declared name or value gives the
+// right sentinel error, a nil result, and an error text without the input.
+func TestBuildEnvErrors(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		parent   []string
+		declared map[string]string
+		wantErr  error
+	}{
+		{
+			name:     "empty name",
+			declared: map[string]string{"": discovertest.CanaryEnv},
+			wantErr:  errInvalidEnvName,
+		},
+		{
+			name:     "name with equals sign",
+			declared: map[string]string{"A=B": discovertest.CanaryEnv},
+			wantErr:  errInvalidEnvName,
+		},
+		{
+			name:     "name with NUL byte",
+			declared: map[string]string{"A\x00B": discovertest.CanaryEnv},
+			wantErr:  errInvalidEnvName,
+		},
+		{
+			// The part after "=" looks like a value. It must not leak.
+			name:     "name that holds a secret after an equals sign",
+			declared: map[string]string{"TOKEN=supersecret": discovertest.CanaryEnv},
+			wantErr:  errInvalidEnvName,
+		},
+		{
+			name:     "name that holds a canary after an equals sign",
+			declared: map[string]string{"TOKEN=" + discovertest.CanaryArgs: "x"},
+			wantErr:  errInvalidEnvName,
+		},
+		{
+			name:     "value with NUL byte",
+			declared: map[string]string{"API_KEY": "a\x00b"},
+			wantErr:  errInvalidEnvValue,
+		},
+		{
+			name:     "canary value with NUL byte",
+			declared: map[string]string{"API_KEY": discovertest.CanaryEnv + "\x00tail"},
+			wantErr:  errInvalidEnvValue,
+		},
+		{
+			name:     "bad name next to valid entries",
+			parent:   []string{"PATH=/usr/bin", "HOME=/h"},
+			declared: map[string]string{"GOOD": "ok", "BAD=x": "y"},
+			wantErr:  errInvalidEnvName,
+		},
+		{
+			// Names are checked in sorted order: "A=x" comes before "B", so
+			// the name error comes first on every run.
+			name:     "first error in sorted order is a name error",
+			declared: map[string]string{"A=x": "ok", "B": "a\x00b"},
+			wantErr:  errInvalidEnvName,
+		},
+		{
+			// "A" comes before "B=x", so the value error comes first.
+			name:     "first error in sorted order is a value error",
+			declared: map[string]string{"A": "a\x00b", "B=x": "ok"},
+			wantErr:  errInvalidEnvValue,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got, err := buildEnv(tt.parent, secrets(t, tt.declared))
+			if !errors.Is(err, tt.wantErr) {
+				t.Fatalf("buildEnv() error = %v, want %v", err, tt.wantErr)
+			}
+			if got != nil {
+				t.Errorf("buildEnv() = %d entries on error, want nil", len(got))
+			}
+			msg := err.Error()
+			if msg != tt.wantErr.Error() {
+				t.Errorf("error text = %q, want exactly %q", msg, tt.wantErr.Error())
+			}
+
+			var inputs []string
+			for k, v := range tt.declared {
+				inputs = append(inputs, k, v)
+				// The part after "=" in a bad name can be a secret.
+				if _, after, ok := strings.Cut(k, "="); ok {
+					inputs = append(inputs, after)
+				}
+			}
+			inputs = slices.DeleteFunc(inputs, func(s string) bool { return s == "" })
+			if len(inputs) > 0 {
+				discovertest.AssertNoLeak(t, "error", msg, inputs...)
+			}
+		})
+	}
+}
+
+// FuzzBuildEnv checks the invariants of buildEnv for arbitrary parent
+// entries and one declared entry.
+func FuzzBuildEnv(f *testing.F) {
+	f.Add("PATH=/usr/bin", "API_KEY", "value")
+	f.Add("AWS_SECRET_ACCESS_KEY=x", "PATH", "/opt/bin")
+	f.Add("NOEQUALS", "HOME", "")
+	f.Add("=value", "", "x")
+	f.Add("", "A=B", "x")
+	f.Add("HOME=/h", "A\x00B", "x")
+	f.Add("TERM=a=b", "TOKEN", "a\x00b")
+	f.Add("TZ=UTC", "A-B", "${VAR:-x}")
+	f.Add("PATH=a\x00b", "PATH", "x")
+
+	f.Fuzz(func(t *testing.T, parentEntry, key, value string) {
+		parent := []string{parentEntry, "HOME=/fixed-home", parentEntry}
+		declared := discover.SecretMap{key: discover.NewSecret(value)}
+
+		got, err := buildEnv(parent, declared)
+
+		badName := key == "" || strings.ContainsAny(key, "=\x00")
+		badValue := strings.IndexByte(value, 0) >= 0
+		if badName || badValue {
+			want := errInvalidEnvValue
+			if badName {
+				want = errInvalidEnvName
+			}
+			if !errors.Is(err, want) {
+				t.Fatalf("buildEnv() error = %v, want %v", err, want)
+			}
+			if err.Error() != want.Error() {
+				t.Fatalf("error text = %q, want exactly %q", err.Error(), want.Error())
+			}
+			if got != nil {
+				t.Fatalf("buildEnv() = %d entries on error, want nil", len(got))
+			}
+			return
+		}
+
+		if err != nil {
+			t.Fatalf("buildEnv() error = %v, want nil", err)
+		}
+		if got == nil {
+			t.Fatal("buildEnv() = nil, want a non-nil slice")
+		}
+
+		keys := make([]string, 0, len(got))
+		values := make(map[string]string, len(got))
+		for _, entry := range got {
+			k, v, ok := strings.Cut(entry, "=")
+			if !ok {
+				t.Fatalf("entry %q has no '='", entry)
+			}
+			if k != key && !isBaseEnv(k) {
+				t.Fatalf("entry key %q is neither allowlisted nor declared", k)
+			}
+			if _, dup := values[k]; dup {
+				t.Fatalf("duplicate key %q in %q", k, got)
+			}
+			keys = append(keys, k)
+			values[k] = v
+		}
+		if !slices.IsSorted(keys) {
+			t.Fatalf("keys %q are not sorted", keys)
+		}
+
+		// The declared entry is always present with its exact value.
+		if v, ok := values[key]; !ok || v != value {
+			t.Fatalf("declared %q = %q (present %v), want %q", key, v, ok, value)
+		}
+
+		// The first parent entry for each allowlisted key wins, unless the
+		// declared entry overrides it.
+		want := map[string]string{key: value}
+		for _, entry := range parent {
+			k, v, ok := strings.Cut(entry, "=")
+			if !ok || !isBaseEnv(k) {
+				continue
+			}
+			if _, seen := want[k]; !seen {
+				want[k] = v
+			}
+		}
+		if !reflect.DeepEqual(values, want) {
+			t.Fatalf("buildEnv() = %q, want entries %q", got, want)
+		}
+	})
+}
