@@ -29,14 +29,38 @@ const defaultMaxTotalBytes int64 = 64 << 20
 // response, in bytes (64 KiB). The default of net/http is 1 MiB.
 const maxResponseHeaderBytes = 64 << 10
 
-// maxRedirects is the redirect limit:
-// at most 3 redirects are followed; the 4th is refused.
+// maxRedirects is the number of redirects that the client follows. It
+// refuses the next one.
 const maxRedirects = 3
 
-// errReservedHeader means the config sets a header that mcpmoat controls, or
-// a header with an empty name. The text that wraps it holds the header name
-// (a key) and never a header value.
-var errReservedHeader = errors.New("reserved header name")
+// Timeouts and pool size of the base transport (newBaseTransport). None of
+// them bounds a whole request: the context of the request does that.
+const (
+	dialTimeout         = 10 * time.Second
+	dialKeepAlive       = 30 * time.Second
+	tlsHandshakeTimeout = 10 * time.Second
+	idleConnTimeout     = 30 * time.Second
+	maxIdleConns        = 4
+)
+
+// Sentinel errors of the HTTP layer. The round tripper, the redirect check and
+// the body cap return them, and classify recognises them with errors.Is. Their
+// texts hold no URL and no header value.
+var (
+	// errReservedHeader means the config sets a header that mcpmoat controls,
+	// or a header with an empty name. The text that wraps it holds the header
+	// name (a key) and never a header value.
+	errReservedHeader = errors.New("reserved header name")
+	// errOtherOrigin means a request went to an origin other than the
+	// configured one.
+	errOtherOrigin = errors.New("request to another origin refused")
+	// errCrossOriginRedirect means the server redirected to another origin.
+	errCrossOriginRedirect = errors.New("redirect to another origin refused")
+	// errTooManyRedirects means the server redirected too many times.
+	errTooManyRedirects = errors.New("too many redirects")
+	// errBodyTooLarge means a response body is larger than the size cap.
+	errBodyTooLarge = errors.New("response body too large")
+)
 
 // requestRecorder records what happened on the HTTP layer, because the MCP SDK
 // drops it: the status code of the last response, and the error that this
@@ -57,7 +81,8 @@ type requestRecorder struct {
 
 	// mu guards blocked.
 	mu sync.Mutex
-	// blocked is the first error that the HTTP layer raised on purpose, or nil.
+	// blocked is the first error that the HTTP layer raised on purpose since
+	// the start or since the last forgetBlocked call, or nil.
 	blocked error
 }
 
@@ -66,21 +91,26 @@ type requestRecorder struct {
 // time, but the build fails if the method set ever drifts.
 var _ transportEvents = (*requestRecorder)(nil)
 
-// lastStatus returns the status of the most recent request: the code of a
-// non-2xx response that was not a followed redirect. It returns 0 after a 2xx
-// response, after a request that got no response, or if there was no request
-// yet.
+// lastStatus implements transportEvents.
 func (r *requestRecorder) lastStatus() int {
 	return int(r.status.Load())
 }
 
-// blockedErr returns the first error that the HTTP layer raised on purpose, or
-// nil. The error wraps errOtherOrigin, errCrossOriginRedirect,
-// errTooManyRedirects or errBodyTooLarge.
+// blockedErr implements transportEvents.
 func (r *requestRecorder) blockedErr() error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	return r.blocked
+}
+
+// forgetBlocked drops the stored blocked error. Remote calls it after a
+// successful connect: the SDK recovered from any request that was blocked
+// before (for example, it falls back from server/discover to initialize after
+// any error), so that error must not label a later, unrelated failure.
+func (r *requestRecorder) forgetBlocked() {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.blocked = nil
 }
 
 // recordResponse stores the status of resp. A 2xx response stores 0, so it
@@ -130,7 +160,8 @@ type httpClientConfig struct {
 	// Base does the network I/O. A nil Base gives newBaseTransport(). Tests
 	// pass their own.
 	Base http.RoundTripper
-	// UserAgent is the User-Agent, unless Headers sets one.
+	// UserAgent is the User-Agent, unless Headers sets one. Empty means the
+	// net/http default ("Go-http-client/1.1" or "Go-http-client/2.0").
 	UserAgent string
 	// MaxBody is the size cap of one response body. A value that is not
 	// positive gives defaultMaxResponseBytes.
@@ -200,8 +231,7 @@ func newHTTPClient(cfg httpClientConfig) (*http.Client, *requestRecorder, error)
 		},
 		// The client calls CheckRedirect before it follows a redirect. via
 		// holds the requests made so far, oldest first, so len(via) is 1 on
-		// the first redirect.
-		// At most 3 redirects are followed; the 4th is refused.
+		// the first redirect, so at most maxRedirects redirects are followed.
 		// The headerTransport adds the config headers to every request it
 		// gets, redirected ones too, so without the origin check a redirect
 		// would send the secrets to another host.
@@ -227,16 +257,16 @@ func newBaseTransport() *http.Transport {
 		// proxy is user-configured, and Go never uses it for localhost.
 		Proxy: http.ProxyFromEnvironment,
 		DialContext: (&net.Dialer{
-			Timeout:   10 * time.Second,
-			KeepAlive: 30 * time.Second,
+			Timeout:   dialTimeout,
+			KeepAlive: dialKeepAlive,
 		}).DialContext,
-		TLSHandshakeTimeout: 10 * time.Second,
+		TLSHandshakeTimeout: tlsHandshakeTimeout,
 		// No ResponseHeaderTimeout: an SSE server can wait a long time before
 		// it sends the first byte.
 		TLSClientConfig:   &tls.Config{MinVersion: tls.VersionTLS12},
 		ForceAttemptHTTP2: true,
-		MaxIdleConns:      4,
-		IdleConnTimeout:   30 * time.Second,
+		MaxIdleConns:      maxIdleConns,
+		IdleConnTimeout:   idleConnTimeout,
 		// Limit the size of the response headers. A server must not make
 		// mcpmoat read a huge header block.
 		MaxResponseHeaderBytes: maxResponseHeaderBytes,
@@ -244,8 +274,9 @@ func newBaseTransport() *http.Transport {
 }
 
 // buildHeader checks the config headers and returns them as an http.Header
-// with canonical keys, plus a User-Agent (ua) if the config has none. It
-// returns an error that wraps errReservedHeader if a key is empty or reserved.
+// with canonical keys, plus a User-Agent (ua) if the config has none and ua is
+// not empty. It returns an error that wraps errReservedHeader if a key is
+// empty or reserved.
 //
 // It sets the keys in sorted order, so two keys that differ only in case
 // (x-key and X-Key) always give the same result: the last one wins.
@@ -267,7 +298,7 @@ func buildHeader(headers map[string]string, ua string) (http.Header, error) {
 		}
 		header.Set(canonical, headers[key])
 	}
-	if _, ok := header["User-Agent"]; !ok {
+	if _, ok := header["User-Agent"]; !ok && ua != "" {
 		header.Set("User-Agent", ua)
 	}
 	return header, nil
@@ -334,7 +365,7 @@ func (t *headerTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 		if req.Body != nil {
 			_ = req.Body.Close()
 		}
-		return nil, t.rec.recordBlocked(fmt.Errorf("%w", errOtherOrigin))
+		return nil, t.rec.recordBlocked(errOtherOrigin)
 	}
 
 	// A RoundTripper must not change the request that the caller gave it: the
@@ -377,6 +408,16 @@ func (t *headerTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 		}
 	}
 	return resp, nil
+}
+
+// CloseIdleConnections closes the idle connections of the base transport.
+// http.Client.CloseIdleConnections calls it only when the transport of the
+// client has this method, so without it the idle connections would stay open
+// until the idle timeout.
+func (t *headerTransport) CloseIdleConnections() {
+	if c, ok := t.base.(interface{ CloseIdleConnections() }); ok {
+		c.CloseIdleConnections()
+	}
 }
 
 // isFollowedRedirect reports whether the http.Client will follow resp: a
@@ -465,8 +506,9 @@ func (c *cappedBody) Read(p []byte) (int, error) {
 		n = int(c.remaining)
 		c.remaining = 0
 		c.fail()
-		c.charge(n) // the error is already set; only count the bytes
-		return n, c.err
+		// The same read can also use up the shared budget. Hand back only the
+		// bytes within both caps.
+		return n - int(c.charge(n)), c.err
 	}
 	c.remaining -= int64(n)
 	if over := c.charge(n); over > 0 {

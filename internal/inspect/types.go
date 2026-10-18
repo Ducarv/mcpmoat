@@ -89,7 +89,11 @@ type Resource struct {
 
 // Result is everything that inspect reads from one MCP server.
 //
-// A server that does not offer a capability gives an empty list for it.
+// A server that does not offer a capability gives an empty list for it. The
+// list is nil when the server did not declare the capability and refused the
+// list request, and empty but not nil when the server answered with an empty
+// list. A report can use the difference: a server that hides a list only from
+// some clients can look like a server without the capability.
 type Result struct {
 	// ServerName is the server name from the initialize result.
 	ServerName string

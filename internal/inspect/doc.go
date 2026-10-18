@@ -27,6 +27,15 @@
 // for example a status text or a JSON-RPC message. Callers must escape the
 // text with internal/termsafe before they print it.
 //
+// # Client identity
+//
+// The package does not tell the server that the client is mcpmoat. The
+// default User-Agent is the net/http one, and the client name in the MCP
+// initialize request is a generic one. A server that recognises the scanner
+// could show it a clean tool list and show the real clients a poisoned one.
+// A server can still tell clients apart in other ways (see docs/PRD.md,
+// section 5.5).
+//
 // # Origin pin and redirects
 //
 // Every request must go to the configured scheme, host and port. The package
@@ -59,7 +68,8 @@
 // The package honours the proxy settings from the HTTP_PROXY, HTTPS_PROXY and
 // NO_PROXY environment variables. It makes no other network access (NFR-01).
 // TLS 1.2 or newer is required, and certificates are always verified. There is
-// no option to skip the check.
+// no option to skip the check: only tests in this package can replace the
+// transport.
 //
 // # Untrusted data
 //

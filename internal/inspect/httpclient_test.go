@@ -17,6 +17,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/Ducarv/mcpmoat/internal/discover"
 )
@@ -24,6 +25,10 @@ import (
 // hcSecret is a fake header value. Tests assert that it never shows up in an
 // error text.
 const hcSecret = "VSECRET1"
+
+// hcUA is the User-Agent that most tests give to newHTTPClient. Remote gives
+// an empty one by default (see TestNewHTTPClientHeaders).
+const hcUA = "test-agent/1"
 
 // hcNew calls newHTTPClient with the common fields. The tests that need User or
 // MaxTotal build the httpClientConfig themselves.
@@ -185,7 +190,7 @@ func TestNewHTTPClientHeaders(t *testing.T) {
 		client, _, err := hcNew(hcURL(t, origin), map[string]string{
 			"x-api-key":     hcSecret,
 			"AUTHORIZATION": "Bearer VSECRET2",
-		}, stub, "mcpmoat", 0)
+		}, stub, hcUA, 0)
 		if err != nil {
 			t.Fatalf("hcNew() error = %v", err)
 		}
@@ -212,7 +217,7 @@ func TestNewHTTPClientHeaders(t *testing.T) {
 	t.Run("caller request is not modified", func(t *testing.T) {
 		t.Parallel()
 		stub := &hcStub{}
-		client, _, err := hcNew(hcURL(t, origin), map[string]string{"X-Api-Key": hcSecret}, stub, "mcpmoat", 0)
+		client, _, err := hcNew(hcURL(t, origin), map[string]string{"X-Api-Key": hcSecret}, stub, hcUA, 0)
 		if err != nil {
 			t.Fatalf("hcNew() error = %v", err)
 		}
@@ -247,7 +252,7 @@ func TestNewHTTPClientHeaders(t *testing.T) {
 	t.Run("config header wins over a caller header of the same name", func(t *testing.T) {
 		t.Parallel()
 		stub := &hcStub{}
-		client, _, err := hcNew(hcURL(t, origin), map[string]string{"X-Api-Key": hcSecret}, stub, "mcpmoat", 0)
+		client, _, err := hcNew(hcURL(t, origin), map[string]string{"X-Api-Key": hcSecret}, stub, hcUA, 0)
 		if err != nil {
 			t.Fatalf("hcNew() error = %v", err)
 		}
@@ -272,12 +277,16 @@ func TestNewHTTPClientHeaders(t *testing.T) {
 		ua      string
 		want    string
 	}{
-		{name: "default when absent", headers: nil, ua: "mcpmoat", want: "mcpmoat"},
-		{name: "given ua when absent", headers: map[string]string{"X-Other": "v"}, ua: "mcpmoat/9.9", want: "mcpmoat/9.9"},
-		{name: "config wins, canonical", headers: map[string]string{"User-Agent": "custom/1"}, ua: "mcpmoat", want: "custom/1"},
-		{name: "config wins, lower case", headers: map[string]string{"user-agent": "custom/2"}, ua: "mcpmoat", want: "custom/2"},
-		{name: "config wins, upper case", headers: map[string]string{"USER-AGENT": "custom/3"}, ua: "mcpmoat", want: "custom/3"},
-		{name: "config wins, mixed case", headers: map[string]string{"uSeR-aGeNt": "custom/4"}, ua: "mcpmoat", want: "custom/4"},
+		{name: "given ua when absent", headers: nil, ua: hcUA, want: hcUA},
+		{name: "given ua with other headers", headers: map[string]string{"X-Other": "v"}, ua: "agent/9.9", want: "agent/9.9"},
+		// An empty ua sets no User-Agent, so net/http sends its default.
+		{name: "none when ua is empty", headers: nil, ua: "", want: ""},
+		{name: "none when ua is empty with other headers", headers: map[string]string{"X-Other": "v"}, ua: "", want: ""},
+		{name: "config wins over empty ua", headers: map[string]string{"user-agent": "custom/0"}, ua: "", want: "custom/0"},
+		{name: "config wins, canonical", headers: map[string]string{"User-Agent": "custom/1"}, ua: hcUA, want: "custom/1"},
+		{name: "config wins, lower case", headers: map[string]string{"user-agent": "custom/2"}, ua: hcUA, want: "custom/2"},
+		{name: "config wins, upper case", headers: map[string]string{"USER-AGENT": "custom/3"}, ua: hcUA, want: "custom/3"},
+		{name: "config wins, mixed case", headers: map[string]string{"uSeR-aGeNt": "custom/4"}, ua: hcUA, want: "custom/4"},
 	}
 	for _, tt := range uaTests {
 		t.Run("user agent "+tt.name, func(t *testing.T) {
@@ -290,6 +299,12 @@ func TestNewHTTPClientHeaders(t *testing.T) {
 			resp := hcGet(t, client, origin)
 			_ = resp.Body.Close()
 			got := stub.header(0)["User-Agent"]
+			if tt.want == "" {
+				if got != nil {
+					t.Errorf(`header["User-Agent"] = %q, want no User-Agent key`, got)
+				}
+				return
+			}
 			if !reflect.DeepEqual(got, []string{tt.want}) {
 				t.Errorf(`header["User-Agent"] = %q, want [%q]`, got, tt.want)
 			}
@@ -302,7 +317,7 @@ func TestNewHTTPClientHeaders(t *testing.T) {
 		// wins. The result must not depend on the map iteration order.
 		for range 20 {
 			stub := &hcStub{}
-			client, _, err := hcNew(hcURL(t, origin), map[string]string{"x-key": "lower", "X-Key": "upper"}, stub, "mcpmoat", 0)
+			client, _, err := hcNew(hcURL(t, origin), map[string]string{"x-key": "lower", "X-Key": "upper"}, stub, hcUA, 0)
 			if err != nil {
 				t.Fatalf("hcNew() error = %v", err)
 			}
@@ -334,7 +349,7 @@ func TestNewHTTPClientHeaders(t *testing.T) {
 			client, rec, err := hcNew(hcURL(t, origin), map[string]string{
 				"X-Fine": "ok",
 				key:      hcSecret,
-			}, &hcStub{}, "mcpmoat", 0)
+			}, &hcStub{}, hcUA, 0)
 			if err == nil {
 				t.Fatal("hcNew() error = nil, want errReservedHeader")
 			}
@@ -359,7 +374,7 @@ func TestNewHTTPClientHeaders(t *testing.T) {
 		t.Run("allowed "+key, func(t *testing.T) {
 			t.Parallel()
 			stub := &hcStub{}
-			client, _, err := hcNew(hcURL(t, origin), map[string]string{key: hcSecret}, stub, "mcpmoat", 0)
+			client, _, err := hcNew(hcURL(t, origin), map[string]string{key: hcSecret}, stub, hcUA, 0)
 			if err != nil {
 				t.Fatalf("newHTTPClient() error = %v, want nil", err)
 			}
@@ -374,7 +389,7 @@ func TestNewHTTPClientHeaders(t *testing.T) {
 
 	t.Run("empty name refused", func(t *testing.T) {
 		t.Parallel()
-		_, _, err := hcNew(hcURL(t, origin), map[string]string{"": hcSecret}, &hcStub{}, "mcpmoat", 0)
+		_, _, err := hcNew(hcURL(t, origin), map[string]string{"": hcSecret}, &hcStub{}, hcUA, 0)
 		if !errors.Is(err, errReservedHeader) {
 			t.Fatalf("hcNew() error = %v, want errReservedHeader", err)
 		}
@@ -385,7 +400,7 @@ func TestNewHTTPClientHeaders(t *testing.T) {
 
 	t.Run("nil origin refused", func(t *testing.T) {
 		t.Parallel()
-		client, rec, err := hcNew(nil, nil, &hcStub{}, "mcpmoat", 0)
+		client, rec, err := hcNew(nil, nil, &hcStub{}, hcUA, 0)
 		if err == nil {
 			t.Fatal("hcNew(nil origin) error = nil, want error")
 		}
@@ -430,7 +445,7 @@ func TestOriginPin(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			stub := &hcStub{}
-			client, rec, err := hcNew(hcURL(t, origin), map[string]string{"X-Api-Key": hcSecret}, stub, "mcpmoat", 0)
+			client, rec, err := hcNew(hcURL(t, origin), map[string]string{"X-Api-Key": hcSecret}, stub, hcUA, 0)
 			if err != nil {
 				t.Fatalf("hcNew() error = %v", err)
 			}
@@ -470,7 +485,7 @@ func TestOriginPin(t *testing.T) {
 	t.Run("same origin is allowed", func(t *testing.T) {
 		t.Parallel()
 		stub := &hcStub{}
-		client, _, err := hcNew(hcURL(t, origin), nil, stub, "mcpmoat", 0)
+		client, _, err := hcNew(hcURL(t, origin), nil, stub, hcUA, 0)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -508,7 +523,7 @@ func TestBodyCap(t *testing.T) {
 			stub := &hcStub{respond: func(req *http.Request) *http.Response {
 				return hcResponse(req, http.StatusOK, payload, nil)
 			}}
-			client, _, err := hcNew(hcURL(t, "http://example.com"), nil, stub, "mcpmoat", tt.maxBody)
+			client, _, err := hcNew(hcURL(t, "http://example.com"), nil, stub, hcUA, tt.maxBody)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -537,7 +552,7 @@ func TestBodyCap(t *testing.T) {
 		stub := &hcStub{respond: func(req *http.Request) *http.Response {
 			return hcResponse(req, http.StatusOK, strings.Repeat("a", 50), nil)
 		}}
-		client, _, err := hcNew(hcURL(t, "http://example.com"), nil, stub, "mcpmoat", 5)
+		client, _, err := hcNew(hcURL(t, "http://example.com"), nil, stub, hcUA, 5)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -557,7 +572,7 @@ func TestBodyCap(t *testing.T) {
 		stub := &hcStub{respond: func(req *http.Request) *http.Response {
 			return hcResponse(req, http.StatusOK, "0123456789AB", nil) // 12 bytes
 		}}
-		client, _, err := hcNew(hcURL(t, "http://example.com"), nil, stub, "mcpmoat", 10)
+		client, _, err := hcNew(hcURL(t, "http://example.com"), nil, stub, hcUA, 10)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -591,7 +606,7 @@ func TestBodyCap(t *testing.T) {
 	for _, tt := range capTests {
 		t.Run("cap value: "+tt.name, func(t *testing.T) {
 			t.Parallel()
-			client, _, err := hcNew(hcURL(t, "http://example.com"), nil, &hcStub{}, "mcpmoat", tt.maxBody)
+			client, _, err := hcNew(hcURL(t, "http://example.com"), nil, &hcStub{}, hcUA, tt.maxBody)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -711,7 +726,7 @@ func TestStatusRecorder(t *testing.T) {
 				i := int(n.Add(1)) - 1
 				return hcResponse(req, tt.statuses[i], "x", tt.header.Clone())
 			}}
-			client, rec, err := hcNew(hcURL(t, "http://example.com"), nil, stub, "mcpmoat", 0)
+			client, rec, err := hcNew(hcURL(t, "http://example.com"), nil, stub, hcUA, 0)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -748,7 +763,7 @@ func TestStatusRecorder(t *testing.T) {
 			}
 			return nil, errors.New("boom")
 		})
-		client, rec, err := hcNew(hcURL(t, "http://example.com"), nil, base, "mcpmoat", 0)
+		client, rec, err := hcNew(hcURL(t, "http://example.com"), nil, base, hcUA, 0)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -783,7 +798,7 @@ func TestStatusRecorder(t *testing.T) {
 			}
 			return nil, &net.OpError{Op: "dial", Net: "tcp", Err: errors.New("connection refused")}
 		})
-		client, rec, err := hcNew(hcURL(t, "http://example.com"), nil, base, "mcpmoat", 0)
+		client, rec, err := hcNew(hcURL(t, "http://example.com"), nil, base, hcUA, 0)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -830,7 +845,7 @@ func TestStatusRecorder(t *testing.T) {
 			}
 			return hcResponse(req, http.StatusOK, "ok", nil)
 		}}
-		client, rec, err := hcNew(hcURL(t, "http://example.com"), nil, stub, "mcpmoat", 0)
+		client, rec, err := hcNew(hcURL(t, "http://example.com"), nil, stub, hcUA, 0)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -861,7 +876,7 @@ func TestStatusRecorder(t *testing.T) {
 				}
 				return hcResponse(req, http.StatusFound, "", http.Header{"Location": {"http://evil.test/"}})
 			}}
-			client, rec, err := hcNew(hcURL(t, "http://example.com"), nil, stub, "mcpmoat", 0)
+			client, rec, err := hcNew(hcURL(t, "http://example.com"), nil, stub, hcUA, 0)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -925,6 +940,43 @@ func TestRequestRecorder(t *testing.T) {
 		_ = rec.recordBlocked(errBodyTooLarge)
 		if got := rec.blockedErr(); got != errCrossOriginRedirect { //nolint:errorlint // identity check: the first recorded error must be returned unchanged
 			t.Errorf("blockedErr() = %v, want errCrossOriginRedirect", got)
+		}
+	})
+
+	t.Run("forgetBlocked drops the stored error", func(t *testing.T) {
+		t.Parallel()
+		var rec requestRecorder
+		_ = rec.recordBlocked(errCrossOriginRedirect)
+		rec.forgetBlocked()
+		if err := rec.blockedErr(); err != nil {
+			t.Fatalf("blockedErr() = %v after forgetBlocked, want nil", err)
+		}
+		// A new error after forgetBlocked is stored again, and it is the
+		// first one since then that wins.
+		_ = rec.recordBlocked(errBodyTooLarge)
+		_ = rec.recordBlocked(errOtherOrigin)
+		if got := rec.blockedErr(); got != errBodyTooLarge { //nolint:errorlint // identity check: the first error after forgetBlocked must be returned unchanged
+			t.Errorf("blockedErr() = %v, want errBodyTooLarge", got)
+		}
+	})
+
+	t.Run("forgetBlocked keeps the status", func(t *testing.T) {
+		t.Parallel()
+		var rec requestRecorder
+		rec.recordResponse(hcRecordResp(401, nil))
+		_ = rec.recordBlocked(errOtherOrigin)
+		rec.forgetBlocked()
+		if got := rec.lastStatus(); got != 401 {
+			t.Errorf("lastStatus() = %d after forgetBlocked, want 401", got)
+		}
+	})
+
+	t.Run("forgetBlocked on the zero value", func(t *testing.T) {
+		t.Parallel()
+		var rec requestRecorder
+		rec.forgetBlocked()
+		if err := rec.blockedErr(); err != nil {
+			t.Errorf("blockedErr() = %v, want nil", err)
 		}
 	})
 
@@ -1111,7 +1163,7 @@ func TestRequestRecorder(t *testing.T) {
 			client, rec, err := newHTTPClient(httpClientConfig{
 				Origin:    hcURL(t, origin),
 				Base:      stub,
-				UserAgent: "mcpmoat",
+				UserAgent: hcUA,
 				MaxBody:   tt.maxBody,
 				MaxTotal:  tt.maxTotal,
 			})
@@ -1185,7 +1237,7 @@ func TestBudgetTotal(t *testing.T) {
 			return hcResponse(req, 200, "01234567", nil) // 8 bytes
 		}}
 		client, rec, err := newHTTPClient(httpClientConfig{
-			Origin: hcURL(t, origin), Base: stub, UserAgent: "mcpmoat", MaxBody: 10, MaxTotal: 12,
+			Origin: hcURL(t, origin), Base: stub, UserAgent: hcUA, MaxBody: 10, MaxTotal: 12,
 		})
 		if err != nil {
 			t.Fatal(err)
@@ -1218,7 +1270,7 @@ func TestBudgetTotal(t *testing.T) {
 			return hcResponse(req, 200, "0123456", nil) // 7 bytes
 		}}
 		client, rec, err := newHTTPClient(httpClientConfig{
-			Origin: hcURL(t, origin), Base: stub, UserAgent: "mcpmoat", MaxBody: 7, MaxTotal: 14,
+			Origin: hcURL(t, origin), Base: stub, UserAgent: hcUA, MaxBody: 7, MaxTotal: 14,
 		})
 		if err != nil {
 			t.Fatal(err)
@@ -1238,7 +1290,7 @@ func TestBudgetTotal(t *testing.T) {
 			return hcResponse(req, 200, "0123456789", nil) // 10 bytes
 		}}
 		client, _, err := newHTTPClient(httpClientConfig{
-			Origin: hcURL(t, origin), Base: stub, UserAgent: "mcpmoat", MaxBody: 5, MaxTotal: 1000,
+			Origin: hcURL(t, origin), Base: stub, UserAgent: hcUA, MaxBody: 5, MaxTotal: 1000,
 		})
 		if err != nil {
 			t.Fatal(err)
@@ -1255,7 +1307,7 @@ func TestBudgetTotal(t *testing.T) {
 			return hcResponse(req, 200, strings.Repeat("a", 100), nil)
 		}}
 		client, rec, err := newHTTPClient(httpClientConfig{
-			Origin: hcURL(t, origin), Base: stub, UserAgent: "mcpmoat", MaxBody: 100, MaxTotal: 500,
+			Origin: hcURL(t, origin), Base: stub, UserAgent: hcUA, MaxBody: 100, MaxTotal: 500,
 		})
 		if err != nil {
 			t.Fatal(err)
@@ -1318,7 +1370,7 @@ func TestBudgetTotal(t *testing.T) {
 			t.Run(tt.name, func(t *testing.T) {
 				t.Parallel()
 				client, _, err := newHTTPClient(httpClientConfig{
-					Origin: hcURL(t, origin), Base: &hcStub{}, UserAgent: "mcpmoat",
+					Origin: hcURL(t, origin), Base: &hcStub{}, UserAgent: hcUA,
 					MaxBody: tt.maxBody, MaxTotal: tt.maxTotal,
 				})
 				if err != nil {
@@ -1364,7 +1416,7 @@ func TestBudgetHugeLimits(t *testing.T) {
 				return hcResponse(req, 200, "small body", nil)
 			}}
 			client, rec, err := newHTTPClient(httpClientConfig{
-				Origin: hcURL(t, origin), Base: stub, UserAgent: "mcpmoat",
+				Origin: hcURL(t, origin), Base: stub, UserAgent: hcUA,
 				MaxBody: tt.maxBody, MaxTotal: tt.maxTotal,
 			})
 			if err != nil {
@@ -1399,7 +1451,7 @@ func TestBudgetHugeLimits(t *testing.T) {
 			return hcResponse(req, 200, "0123456789", nil) // 10 bytes
 		}}
 		client, rec, err := newHTTPClient(httpClientConfig{
-			Origin: hcURL(t, origin), Base: stub, UserAgent: "mcpmoat", MaxBody: 1000, MaxTotal: 4,
+			Origin: hcURL(t, origin), Base: stub, UserAgent: hcUA, MaxBody: 1000, MaxTotal: 4,
 		})
 		if err != nil {
 			t.Fatal(err)
@@ -1425,7 +1477,7 @@ func TestBasicAuth(t *testing.T) {
 		stub := &hcStub{}
 		cfg.Origin = hcURL(t, origin)
 		cfg.Base = stub
-		cfg.UserAgent = "mcpmoat"
+		cfg.UserAgent = hcUA
 		client, _, err := newHTTPClient(cfg)
 		if err != nil {
 			t.Fatalf("newHTTPClient() error = %v", err)
@@ -1466,7 +1518,7 @@ func TestBasicAuth(t *testing.T) {
 		t.Parallel()
 		stub := &hcStub{}
 		client, _, err := newHTTPClient(httpClientConfig{
-			Origin: hcURL(t, origin), User: url.UserPassword("u", "p"), Base: stub, UserAgent: "mcpmoat",
+			Origin: hcURL(t, origin), User: url.UserPassword("u", "p"), Base: stub, UserAgent: hcUA,
 		})
 		if err != nil {
 			t.Fatal(err)
@@ -1494,7 +1546,7 @@ func TestBasicAuth(t *testing.T) {
 		// so one request never carries two values.
 		stub := &hcStub{}
 		client, _, err := newHTTPClient(httpClientConfig{
-			Origin: hcURL(t, origin), User: url.UserPassword("u", "p"), Base: stub, UserAgent: "mcpmoat",
+			Origin: hcURL(t, origin), User: url.UserPassword("u", "p"), Base: stub, UserAgent: hcUA,
 		})
 		if err != nil {
 			t.Fatal(err)
@@ -1524,7 +1576,7 @@ func TestBasicAuth(t *testing.T) {
 			return hcResponse(req, 200, "ok", nil)
 		}}
 		client, _, err := newHTTPClient(httpClientConfig{
-			Origin: hcURL(t, origin), User: url.UserPassword("u", "p"), Base: stub, UserAgent: "mcpmoat",
+			Origin: hcURL(t, origin), User: url.UserPassword("u", "p"), Base: stub, UserAgent: hcUA,
 		})
 		if err != nil {
 			t.Fatal(err)
@@ -1545,7 +1597,7 @@ func TestBasicAuth(t *testing.T) {
 		t.Parallel()
 		stub := &hcStub{}
 		client, _, err := newHTTPClient(httpClientConfig{
-			Origin: hcURL(t, origin), User: url.UserPassword("u", pass), Base: stub, UserAgent: "mcpmoat",
+			Origin: hcURL(t, origin), User: url.UserPassword("u", pass), Base: stub, UserAgent: hcUA,
 		})
 		if err != nil {
 			t.Fatal(err)
@@ -1596,7 +1648,7 @@ func TestNewHTTPClientBaseTransport(t *testing.T) {
 
 	t.Run("nil base uses the limited transport", func(t *testing.T) {
 		t.Parallel()
-		client, _, err := newHTTPClient(httpClientConfig{Origin: hcURL(t, "http://example.com"), UserAgent: "mcpmoat"})
+		client, _, err := newHTTPClient(httpClientConfig{Origin: hcURL(t, "http://example.com"), UserAgent: hcUA})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -1615,7 +1667,7 @@ func TestNewHTTPClientBaseTransport(t *testing.T) {
 
 	t.Run("client has no overall timeout", func(t *testing.T) {
 		t.Parallel()
-		client, _, err := newHTTPClient(httpClientConfig{Origin: hcURL(t, "http://example.com"), UserAgent: "mcpmoat"})
+		client, _, err := newHTTPClient(httpClientConfig{Origin: hcURL(t, "http://example.com"), UserAgent: hcUA})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -1634,7 +1686,7 @@ func TestNewHTTPClientBaseTransport(t *testing.T) {
 		}))
 		t.Cleanup(ts.Close)
 
-		client, _, err := newHTTPClient(httpClientConfig{Origin: hcURL(t, ts.URL), UserAgent: "mcpmoat"})
+		client, _, err := newHTTPClient(httpClientConfig{Origin: hcURL(t, ts.URL), UserAgent: hcUA})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -1753,7 +1805,7 @@ func TestRedirects(t *testing.T) {
 				t.Run("same origin "+strconv.Itoa(status), func(t *testing.T) {
 					t.Parallel()
 					ts, seen := hcChainServer(t, status, 1)
-					client, rec, err := hcNew(hcURL(t, ts.URL), headers, bk.base(ts), "mcpmoat", 0)
+					client, rec, err := hcNew(hcURL(t, ts.URL), headers, bk.base(ts), hcUA, 0)
 					if err != nil {
 						t.Fatal(err)
 					}
@@ -1774,8 +1826,8 @@ func TestRedirects(t *testing.T) {
 						if k != hcSecret {
 							t.Errorf("request %d: X-Api-Key = %q, want %q: the redirected request must carry the config header", i, k, hcSecret)
 						}
-						if uas[i] != "mcpmoat" {
-							t.Errorf("request %d: User-Agent = %q, want %q", i, uas[i], "mcpmoat")
+						if uas[i] != hcUA {
+							t.Errorf("request %d: User-Agent = %q, want %q", i, uas[i], hcUA)
 						}
 					}
 					if got := rec.lastStatus(); got != 0 {
@@ -1787,7 +1839,7 @@ func TestRedirects(t *testing.T) {
 			t.Run("three redirects are followed", func(t *testing.T) {
 				t.Parallel()
 				ts, seen := hcChainServer(t, http.StatusFound, 3)
-				client, _, err := hcNew(hcURL(t, ts.URL), headers, bk.base(ts), "mcpmoat", 0)
+				client, _, err := hcNew(hcURL(t, ts.URL), headers, bk.base(ts), hcUA, 0)
 				if err != nil {
 					t.Fatal(err)
 				}
@@ -1811,7 +1863,7 @@ func TestRedirects(t *testing.T) {
 			t.Run("four redirects are refused", func(t *testing.T) {
 				t.Parallel()
 				ts, seen := hcChainServer(t, http.StatusFound, 4)
-				client, rec, err := hcNew(hcURL(t, ts.URL), headers, bk.base(ts), "mcpmoat", 0)
+				client, rec, err := hcNew(hcURL(t, ts.URL), headers, bk.base(ts), hcUA, 0)
 				if err != nil {
 					t.Fatal(err)
 				}
@@ -1866,7 +1918,7 @@ func TestRedirects(t *testing.T) {
 					t.Fatal("test servers share a host and port")
 				}
 
-				client, rec, err := hcNew(hcURL(t, ts.URL), headers, bk.base(ts), "mcpmoat", 0)
+				client, rec, err := hcNew(hcURL(t, ts.URL), headers, bk.base(ts), hcUA, 0)
 				if err != nil {
 					t.Fatal(err)
 				}
@@ -1911,7 +1963,7 @@ func TestRedirects(t *testing.T) {
 				}))
 				t.Cleanup(ts.Close)
 
-				client, _, err := hcNew(hcURL(t, ts.URL), headers, bk.base(ts), "mcpmoat", 0)
+				client, _, err := hcNew(hcURL(t, ts.URL), headers, bk.base(ts), hcUA, 0)
 				if err != nil {
 					t.Fatal(err)
 				}
@@ -1938,4 +1990,176 @@ func TestRedirects(t *testing.T) {
 // hcOrigin returns the "http://host:port" part of the URL that r was sent to.
 func hcOrigin(r *http.Request) string {
 	return "http://" + r.Host
+}
+
+func TestBuildHeaderUserAgent(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		headers map[string]string
+		ua      string
+		want    []string // nil: no User-Agent key
+	}{
+		{name: "empty ua and no config ua sets none", headers: nil, ua: "", want: nil},
+		{name: "empty ua with other headers sets none", headers: map[string]string{"X-Api-Key": hcSecret}, ua: "", want: nil},
+		{name: "ua used when the config has none", headers: nil, ua: hcUA, want: []string{hcUA}},
+		{name: "config ua wins over ua", headers: map[string]string{"user-agent": "custom/1"}, ua: hcUA, want: []string{"custom/1"}},
+		{name: "config ua kept with empty ua", headers: map[string]string{"User-Agent": "custom/2"}, ua: "", want: []string{"custom/2"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			header, err := buildHeader(tt.headers, tt.ua)
+			if err != nil {
+				t.Fatalf("buildHeader() error = %v", err)
+			}
+			got, ok := header["User-Agent"]
+			if tt.want == nil {
+				if ok {
+					t.Errorf(`header["User-Agent"] = %q, want no User-Agent key`, got)
+				}
+				return
+			}
+			if !reflect.DeepEqual(got, tt.want) {
+				t.Errorf(`header["User-Agent"] = %q, want %q`, got, tt.want)
+			}
+		})
+	}
+}
+
+// hcIdleCloser is a base RoundTripper that counts CloseIdleConnections calls.
+type hcIdleCloser struct {
+	hcStub
+	closed atomic.Int32
+}
+
+func (c *hcIdleCloser) CloseIdleConnections() { c.closed.Add(1) }
+
+func TestHeaderTransportCloseIdleConnections(t *testing.T) {
+	t.Parallel()
+
+	t.Run("reaches the base transport", func(t *testing.T) {
+		t.Parallel()
+		base := &hcIdleCloser{}
+		client, _, err := hcNew(hcURL(t, "http://example.com"), nil, base, hcUA, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		// http.Client.CloseIdleConnections calls the method only if the
+		// client transport (the headerTransport) has it.
+		client.CloseIdleConnections()
+		if got := base.closed.Load(); got != 1 {
+			t.Errorf("base CloseIdleConnections calls = %d, want 1", got)
+		}
+		client.CloseIdleConnections()
+		if got := base.closed.Load(); got != 2 {
+			t.Errorf("base CloseIdleConnections calls = %d, want 2", got)
+		}
+	})
+
+	t.Run("base without the method does not panic", func(t *testing.T) {
+		t.Parallel()
+		base := &hcStub{}
+		client, _, err := hcNew(hcURL(t, "http://example.com"), nil, base, hcUA, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		client.CloseIdleConnections()
+		// The client still works afterwards.
+		resp := hcGet(t, client, "http://example.com/")
+		_ = resp.Body.Close()
+		if got := base.count(); got != 1 {
+			t.Errorf("base got %d request(s), want 1", got)
+		}
+	})
+
+	t.Run("closes the idle connections of the default base", func(t *testing.T) {
+		t.Parallel()
+		closed := make(chan struct{})
+		var once sync.Once
+		ts := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			_, _ = io.WriteString(w, "ok")
+		}))
+		ts.Config.ConnState = func(_ net.Conn, state http.ConnState) {
+			if state == http.StateClosed {
+				once.Do(func() { close(closed) })
+			}
+		}
+		ts.Start()
+		t.Cleanup(ts.Close)
+
+		client, _, err := hcNew(hcURL(t, ts.URL), nil, nil, hcUA, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp := hcGet(t, client, ts.URL+"/")
+		// Read the body to the end, so the connection goes back to the pool.
+		if _, err := io.ReadAll(resp.Body); err != nil {
+			t.Fatal(err)
+		}
+		_ = resp.Body.Close()
+
+		client.CloseIdleConnections()
+		select {
+		case <-closed:
+		case <-time.After(2 * time.Second):
+			t.Fatal("the idle connection is still open, want it closed")
+		}
+	})
+}
+
+func TestCappedBodySharedBudgetOnOverflow(t *testing.T) {
+	t.Parallel()
+
+	const maxTotal = 1000
+
+	tests := []struct {
+		name      string
+		remaining int64
+		used      int64 // bytes of the shared budget already used
+		bodyLen   int
+		want      int // bytes that the first Read returns
+	}{
+		// The read gets remaining+1 = 101 bytes: over the body cap. Only 10
+		// bytes of the shared budget are left, so only 10 come back.
+		{name: "budget smaller than the body cap", remaining: 100, used: maxTotal - 10, bodyLen: 200, want: 10},
+		{name: "budget used up", remaining: 100, used: maxTotal, bodyLen: 200, want: 0},
+		{name: "budget exactly the body cap", remaining: 100, used: maxTotal - 100, bodyLen: 200, want: 100},
+		{name: "budget larger than the body cap", remaining: 100, used: 0, bodyLen: 200, want: 100},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			var used atomic.Int64
+			used.Store(tt.used)
+			rec := &requestRecorder{}
+			body := &cappedBody{
+				r:         io.NopCloser(strings.NewReader(strings.Repeat("a", tt.bodyLen))),
+				remaining: tt.remaining,
+				used:      &used,
+				maxTotal:  maxTotal,
+				rec:       rec,
+			}
+
+			p := make([]byte, tt.bodyLen)
+			n, err := body.Read(p)
+			if n != tt.want {
+				t.Errorf("Read() n = %d, want %d", n, tt.want)
+			}
+			if !errors.Is(err, errBodyTooLarge) {
+				t.Errorf("Read() error = %v, want errBodyTooLarge", err)
+			}
+			if !errors.Is(rec.blockedErr(), errBodyTooLarge) {
+				t.Errorf("blockedErr() = %v, want errBodyTooLarge", rec.blockedErr())
+			}
+			// Later reads return the same error and no bytes.
+			for range 2 {
+				n, err := body.Read(p)
+				if n != 0 || !errors.Is(err, errBodyTooLarge) {
+					t.Errorf("later Read() = %d, %v; want 0, errBodyTooLarge", n, err)
+				}
+			}
+		})
+	}
 }

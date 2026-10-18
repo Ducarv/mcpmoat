@@ -156,12 +156,15 @@ var _ sessionLister = (*mcp.ClientSession)(nil)
 // A list that is too long, or that never ends, is an error. listAll never
 // returns a cut list, because the cut part could hide a malicious tool.
 //
-// raw holds the tools lists as the server sent them. A scanner must see what
-// the server sent, not what the SDK accepted: the SDK silently drops tools
-// with an invalid "x-mcp-header" annotation (see rawLists). When raw is not
-// nil, listAll reads the tools of each page from raw, and it fails if a page
-// was not captured. When raw is nil, listAll reads res.Tools as the SDK
-// returns it; only tests that use a fake session do this.
+// raw holds the tools lists as the server sent them, and must not be nil. A
+// scanner must see what the server sent, not what the SDK accepted: the SDK
+// silently drops tools with an invalid "x-mcp-header" annotation (see
+// rawLists). listAll reads the tools of each page from raw, and it fails if a
+// page was not captured.
+//
+// A list is nil when the server did not declare the capability and refused
+// the list request (see tolerateUndeclared). It is empty but not nil when the
+// server answered with an empty list.
 func listAll(ctx context.Context, cs sessionLister, caps *mcp.ServerCapabilities, raw *rawLists) (tools []Tool, prompts []Prompt, resources []Resource, err error) {
 	var declTools, declPrompts, declResources bool
 	if caps != nil {
@@ -201,7 +204,7 @@ func tolerateUndeclared(err error, declared bool) error {
 }
 
 // listTools reads all pages of tools/list and converts the tools. It reads
-// the raw tools of each page from raw when raw is not nil (see listAll).
+// the raw tools of each page from raw (see listAll).
 func listTools(ctx context.Context, cs sessionLister, raw *rawLists) ([]Tool, error) {
 	return paginate(ctx, "tools",
 		func(ctx context.Context, cursor string) ([]*mcp.Tool, string, error) {
@@ -211,9 +214,6 @@ func listTools(ctx context.Context, cs sessionLister, raw *rawLists) ([]Tool, er
 			}
 			if res == nil {
 				return nil, "", nil
-			}
-			if raw == nil {
-				return res.Tools, res.NextCursor, nil
 			}
 			page, ok := raw.take(res)
 			if !ok {

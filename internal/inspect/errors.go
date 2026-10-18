@@ -47,20 +47,6 @@ const (
 	KindProtocol ConnectKind = "protocol"
 )
 
-// Sentinel errors. The HTTP round tripper and the redirect check return them,
-// and classify recognises them with errors.Is. Their texts hold no URL.
-var (
-	// errOtherOrigin means a request went to an origin other than the
-	// configured one.
-	errOtherOrigin = errors.New("request to another origin refused")
-	// errCrossOriginRedirect means the server redirected to another origin.
-	errCrossOriginRedirect = errors.New("redirect to another origin refused")
-	// errTooManyRedirects means the server redirected too many times.
-	errTooManyRedirects = errors.New("too many redirects")
-	// errBodyTooLarge means a response body is larger than the size cap.
-	errBodyTooLarge = errors.New("response body too large")
-)
-
 // maxReasonRunes is the maximum length of scrubbed error text, in runes.
 const maxReasonRunes = 200
 
@@ -130,8 +116,9 @@ type transportEvents interface {
 	// 2xx response, after a request that got no response, or if there was
 	// no request yet.
 	lastStatus() int
-	// blockedErr is the first error that the HTTP layer raised on purpose. It
-	// wraps errOtherOrigin, errCrossOriginRedirect, errTooManyRedirects or
+	// blockedErr is the first error that the HTTP layer raised on purpose
+	// since the session connected (or since the start, during the connect).
+	// It wraps errOtherOrigin, errCrossOriginRedirect, errTooManyRedirects or
 	// errBodyTooLarge. It is nil if there was none.
 	blockedErr() error
 }
@@ -274,7 +261,7 @@ func httpReason(srv discover.Server, status int) string {
 	switch status {
 	case http.StatusUnauthorized, http.StatusForbidden:
 		keys := "none"
-		if names := srv.Headers.Keys(); len(names) > 0 {
+		if names := sentHeaderNames(srv); len(names) > 0 {
 			keys = strings.Join(names, ", ")
 		}
 		return fmt.Sprintf("server needs authentication (HTTP %d); headers sent: %s", status, keys)
@@ -287,6 +274,24 @@ func httpReason(srv discover.Server, status int) string {
 		return fmt.Sprintf("HTTP %d %s", status, text)
 	}
 	return fmt.Sprintf("HTTP %d", status)
+}
+
+// sentHeaderNames returns the names of the config headers that went to the
+// server, in the order of srv.Headers.Keys. If the URL has user info and the
+// config sets no Authorization header, the request carried a Basic
+// Authorization header built from it (see headerTransport.RoundTrip), so the
+// list names it too. It holds names only, never a value.
+func sentHeaderNames(srv discover.Server) []string {
+	names := srv.Headers.Keys()
+	for _, name := range names {
+		if http.CanonicalHeaderKey(name) == "Authorization" {
+			return names
+		}
+	}
+	if u, err := url.Parse(srv.URL.Reveal()); err == nil && u.User != nil {
+		names = append(names, "Authorization (from URL user info)")
+	}
+	return names
 }
 
 // stripURLError returns the error inside the first *url.Error in err's chain,
@@ -328,8 +333,8 @@ func safeCause(cause error, rawURL, redactedURL string, headerValues []string) e
 //   - every non-empty header value with discover.Mask, longest value first.
 //
 // For each secret it also replaces the form that %q prints (backslashes and
-// quotes escaped). It then cuts the result to 200 runes and adds "…" if it
-// cut anything. The result can still hold text that the server controls;
+// quotes escaped). It then cuts the result to maxReasonRunes runes and adds
+// "…" if it cut anything. The result can still hold text that the server controls;
 // callers must escape it with internal/termsafe before they print it.
 func scrub(text, rawURL, redactedURL string, headerValues []string) string {
 	return truncate(replaceSecrets(text, rawURL, redactedURL, headerValues))

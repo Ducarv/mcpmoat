@@ -21,36 +21,41 @@ const (
 	// --timeout comes in issue #28.
 	defaultConnectTimeout = 10 * time.Second
 
-	// defaultUserAgent is the User-Agent header when the caller sets none.
-	defaultUserAgent = "mcpmoat"
-
-	// clientName and clientVersion identify mcpmoat in the MCP initialize
-	// request. The SDK wants a non-empty name and version. cmd can pass the
-	// real version later.
-	clientName    = "mcpmoat"
-	clientVersion = "dev"
+	// clientName and clientVersion are the client identity in the MCP
+	// initialize request. The SDK wants a non-empty name and version.
+	//
+	// They do not name mcpmoat on purpose, and neither does the default
+	// User-Agent (the net/http one). A hostile server that recognises the
+	// scanner could show it a clean tool list and show the real clients a
+	// poisoned one, and the pins would never see the difference (threat T1,
+	// FR-11). A server can still fingerprint a client in other ways; see
+	// docs/PRD.md section 5.5.
+	clientName    = "mcp-client"
+	clientVersion = "1.0.0"
 )
 
 // RemoteOptions configures Remote. The zero value is ready to use.
 type RemoteOptions struct {
-	// Transport is the base HTTP transport. Nil means a fresh transport with
-	// TLS 1.2+ and the proxy settings from the environment. Intended for
-	// tests. A custom transport bypasses the TLS settings of the default
-	// transport; the origin pin and header rules still apply.
-	Transport http.RoundTripper
-
 	// AllowUntrusted lets Remote connect even when the server comes from an
 	// untrusted project file (discover.Server.Untrusted). The caller must have
 	// the explicit opt-in of the user before it sets this.
 	AllowUntrusted bool
 
 	// UserAgent is sent unless the config sets a User-Agent header. Empty
-	// means "mcpmoat".
+	// means the net/http default, which does not name mcpmoat.
 	UserAgent string
 
 	// MaxResponseBytes caps each HTTP response body (the whole SSE stream
-	// counts as one body). Zero or less means the default of 8 MiB.
+	// counts as one body). Zero or less means the default of 8 MiB. A value
+	// above the total budget for all bodies (64 MiB) is lowered to it.
 	MaxResponseBytes int64
+
+	// baseTransport replaces the base HTTP transport. Nil means a fresh
+	// transport with TLS 1.2+ and the proxy settings from the environment.
+	// Only tests in this package set it. It is unexported so that no caller
+	// can give a transport that skips the TLS checks; the origin pin and the
+	// header rules apply to any transport.
+	baseTransport http.RoundTripper
 }
 
 // Remote connects to a remote MCP server (streamable HTTP or legacy SSE, from
@@ -103,27 +108,15 @@ func Remote(ctx context.Context, srv discover.Server, opts RemoteOptions) (Resul
 	origin.RawFragment = ""
 	endpoint := origin.String()
 
-	headers := make(map[string]string, len(srv.Headers))
-	headerValues := make([]string, 0, len(srv.Headers)+4)
-	for key, secret := range srv.Headers {
-		value := secret.Reveal()
-		headers[key] = value
-		if value != "" {
-			headerValues = append(headerValues, value)
-		}
-	}
+	headers, headerValues := splitHeaders(srv.Headers)
 	headerValues = append(headerValues, userinfoSecrets(user)...)
 
-	ua := opts.UserAgent
-	if ua == "" {
-		ua = defaultUserAgent
-	}
 	httpClient, rec, err := newHTTPClient(httpClientConfig{
 		Origin:    &origin,
 		User:      user,
 		Headers:   headers,
-		Base:      opts.Transport,
-		UserAgent: ua,
+		Base:      opts.baseTransport,
+		UserAgent: opts.UserAgent,
 		MaxBody:   opts.MaxResponseBytes,
 	})
 	if err != nil {
@@ -164,6 +157,10 @@ func Remote(ctx context.Context, srv discover.Server, opts RemoteOptions) (Resul
 	if err != nil {
 		return Result{}, classify(err, srv, rec, headerValues)
 	}
+	// The session is up, so the SDK recovered from any request that the HTTP
+	// layer blocked during the connect. Such an error must not decide the
+	// kind of a later, unrelated listing error.
+	rec.forgetBlocked()
 	// Listing is finished when this runs, so the error from Close does not
 	// matter. For streamable HTTP, Close sends a DELETE that the SDK bounds.
 	defer func() { _ = cs.Close() }()
@@ -175,6 +172,32 @@ func Remote(ctx context.Context, srv discover.Server, opts RemoteOptions) (Resul
 		return Result{}, classify(errors.New("no initialize result"), srv, rec, headerValues)
 	}
 
+	result := resultFromInit(initRes)
+	result.Tools, result.Prompts, result.Resources, err = listAll(ctx, cs, initRes.Capabilities, rawTools)
+	if err != nil {
+		return Result{}, classify(err, srv, rec, headerValues)
+	}
+	return result, nil
+}
+
+// splitHeaders returns the config headers with their raw values, for the
+// HTTP client, and the non-empty values alone, for classify to remove from
+// error text.
+func splitHeaders(cfg discover.SecretMap) (headers map[string]string, values []string) {
+	headers = make(map[string]string, len(cfg))
+	for key, secret := range cfg {
+		value := secret.Reveal()
+		headers[key] = value
+		if value != "" {
+			values = append(values, value)
+		}
+	}
+	return headers, values
+}
+
+// resultFromInit returns a Result with the fields from the initialize result
+// set. The lists are not set.
+func resultFromInit(initRes *mcp.InitializeResult) Result {
 	result := Result{
 		ProtocolVersion: initRes.ProtocolVersion,
 		Instructions:    initRes.Instructions,
@@ -183,18 +206,15 @@ func Remote(ctx context.Context, srv discover.Server, opts RemoteOptions) (Resul
 		result.ServerName = initRes.ServerInfo.Name
 		result.ServerVersion = initRes.ServerInfo.Version
 	}
-
-	result.Tools, result.Prompts, result.Resources, err = listAll(ctx, cs, initRes.Capabilities, rawTools)
-	if err != nil {
-		return Result{}, classify(err, srv, rec, headerValues)
-	}
-	return result, nil
+	return result
 }
 
 // userinfoSecrets returns the secret strings that the user info of a URL
-// adds: the user name, the password, and the Basic Authorization token and
-// header value built from them. classify removes them from error text. A nil
-// user gives nil.
+// adds: the password, and the Basic Authorization token and header value
+// built from the name and the password. classify removes them from error
+// text everywhere. The user name is not in the list: replaceUserinfo removes
+// it only where it stands in a URL, so that a short name does not garble other
+// words. A nil user gives nil.
 func userinfoSecrets(user *url.Userinfo) []string {
 	if user == nil {
 		return nil
@@ -204,9 +224,6 @@ func userinfoSecrets(user *url.Userinfo) []string {
 	token := base64.StdEncoding.EncodeToString([]byte(name + ":" + password))
 
 	secrets := []string{token, "Basic " + token}
-	if name != "" {
-		secrets = append(secrets, name)
-	}
 	if password != "" {
 		secrets = append(secrets, password)
 	}

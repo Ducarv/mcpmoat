@@ -1181,3 +1181,100 @@ func TestConfigError(t *testing.T) {
 	assertNoSecrets(t, ce)
 	assertHasServerAndURL(t, ce, srv)
 }
+
+// TestHTTPReasonHeadersSent checks the header names that the 401 and 403
+// reasons list. URL user info goes out as a Basic Authorization header, so
+// the reason names it when the config sets no Authorization header. The
+// reason never holds a value.
+func TestHTTPReasonHeadersSent(t *testing.T) {
+	t.Parallel()
+
+	const (
+		plainURL    = "https://mcp.example.com/mcp"
+		userinfoURL = "https://user:pw@mcp.example.com/mcp" //nolint:gosec // G101: fake test credentials
+		fromURL     = "Authorization (from URL user info)"
+	)
+	tests := []struct {
+		name    string
+		rawURL  string
+		headers map[string]string
+		want    string // the list after "headers sent: "
+	}{
+		{name: "no user info and no headers", rawURL: plainURL, want: "none"},
+		{name: "user info and no headers", rawURL: userinfoURL, want: fromURL},
+		{name: "user name only", rawURL: "https://user@mcp.example.com/mcp", want: fromURL},
+		{name: "user info and other headers", rawURL: userinfoURL, headers: map[string]string{"X-Api-Key": testKeyValue}, want: "X-Api-Key, " + fromURL},
+		{name: "user info and config Authorization", rawURL: userinfoURL, headers: map[string]string{"Authorization": testAuthValue}, want: "Authorization"},
+		{name: "user info and lower-case config authorization", rawURL: userinfoURL, headers: map[string]string{"authorization": testAuthValue}, want: "authorization"},
+		{name: "user info and upper-case config AUTHORIZATION", rawURL: userinfoURL, headers: map[string]string{"AUTHORIZATION": testAuthValue, "X-Api-Key": testKeyValue}, want: "AUTHORIZATION, X-Api-Key"},
+		{name: "plain config headers", rawURL: plainURL, headers: map[string]string{"X-Api-Key": testKeyValue, "Authorization": testAuthValue}, want: "Authorization, X-Api-Key"},
+		{name: "unparsable url", rawURL: "https://user:pw@[bad/mcp", want: "none"},
+	}
+	for _, tt := range tests {
+		for _, status := range []int{http.StatusUnauthorized, http.StatusForbidden} {
+			t.Run(fmt.Sprintf("%s/%d", tt.name, status), func(t *testing.T) {
+				t.Parallel()
+				headers := make(discover.SecretMap, len(tt.headers))
+				for key, value := range tt.headers {
+					headers[key] = discover.NewSecret(value)
+				}
+				srv := discover.Server{
+					Name:      "remote",
+					Transport: discover.TransportHTTP,
+					URL:       discover.NewURL(tt.rawURL),
+					Headers:   headers,
+				}
+				got := httpReason(srv, status)
+				want := fmt.Sprintf("server needs authentication (HTTP %d); headers sent: %s", status, tt.want)
+				if got != want {
+					t.Errorf("httpReason() = %q, want %q", got, want)
+				}
+				for _, secret := range []string{"pw", testKeyValue, testAuthSecret} {
+					if strings.Contains(got, secret) {
+						t.Errorf("httpReason() = %q holds the secret %q", got, secret)
+					}
+				}
+			})
+		}
+	}
+}
+
+// TestClassifyShortUserName checks that a short URL user name does not garble
+// other words in the error text, while the password, the Basic token and the
+// user name in a URL authority are still masked.
+func TestClassifyShortUserName(t *testing.T) {
+	t.Parallel()
+
+	const (
+		rawURL   = "https://in:s3cr3t@host.example/mcp" //nolint:gosec // G101: fake test credentials
+		password = "s3cr3t"
+		token    = "aW46czNjcjN0" //nolint:gosec // G101: fake test credentials, base64 of "in:s3cr3t"
+	)
+	srv := discover.Server{
+		Name:      "remote",
+		Transport: discover.TransportHTTP,
+		URL:       discover.NewURL(rawURL),
+	}
+	user := url.UserPassword("in", password)
+	// Remote passes the user info secrets to classify the same way.
+	secrets := userinfoSecrets(user)
+
+	text := "initialize server in session: got " + password +
+		" from //in@host.example and //in:x@other, header Basic " + token
+	ce := classify(errors.New(text), srv, nil, secrets)
+
+	for _, has := range []string{
+		"initialize server in session",
+		"//" + discover.Mask + "@host.example",
+		"//" + discover.Mask + ":",
+	} {
+		if !strings.Contains(ce.Reason, has) {
+			t.Errorf("Reason = %q, want it to contain %q", ce.Reason, has)
+		}
+	}
+	for _, not := range []string{password, token, "//in@", "//in:"} {
+		if strings.Contains(ce.Error(), not) {
+			t.Errorf("Error() = %q, must not contain %q", ce.Error(), not)
+		}
+	}
+}

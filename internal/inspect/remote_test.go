@@ -3,12 +3,15 @@ package inspect
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"reflect"
 	"slices"
 	"strings"
@@ -39,6 +42,12 @@ const (
 
 // rmServerName is the server name in the config of every test server.
 const rmServerName = "remote-fixture"
+
+// rmDefaultUA is the User-Agent that net/http sends over HTTP/1.1 when the
+// request sets none. The httptest servers speak HTTP/1.1 only, so it is the
+// User-Agent that they see when neither RemoteOptions nor the config sets
+// one.
+const rmDefaultUA = "Go-http-client/1.1"
 
 // rmHeaders returns the config headers of the tests.
 func rmHeaders() map[string]string {
@@ -191,8 +200,8 @@ func rmCheckResult(t *testing.T, got Result) {
 }
 
 // rmCheckHeaders asserts that every recorded request carries every config
-// header and the wanted User-Agent, and that the request methods are the
-// ones that the transport must use.
+// header and the wanted User-Agent, that no header value names mcpmoat, and
+// that the request methods are the ones that the transport must use.
 func rmCheckHeaders(t *testing.T, reqs []recordedRequest, headers map[string]string, wantUA string, sse bool) {
 	t.Helper()
 	if len(reqs) == 0 {
@@ -209,6 +218,7 @@ func rmCheckHeaders(t *testing.T, reqs []recordedRequest, headers map[string]str
 		if got := req.Header.Get("User-Agent"); got != wantUA {
 			t.Errorf("%s %s: User-Agent = %q, want %q", req.Method, req.Path, got, wantUA)
 		}
+		rmCheckNeutral(t, req)
 	}
 	if methods[http.MethodPost] == 0 {
 		t.Errorf("methods seen = %v, want at least one POST", methods)
@@ -235,10 +245,10 @@ func TestRemote(t *testing.T) {
 		wantUA    string            // User-Agent that the server must see
 		extraHdrs map[string]string // headers added to the config
 	}{
-		{name: "http plain", wantUA: "mcpmoat"},
-		{name: "http tls", tls: true, wantUA: "mcpmoat"},
-		{name: "sse plain", sse: true, wantUA: "mcpmoat"},
-		{name: "sse tls", sse: true, tls: true, wantUA: "mcpmoat"},
+		{name: "http plain", wantUA: rmDefaultUA},
+		{name: "http tls", tls: true, wantUA: rmDefaultUA},
+		{name: "sse plain", sse: true, wantUA: rmDefaultUA},
+		{name: "sse tls", sse: true, tls: true, wantUA: rmDefaultUA},
 		{name: "http custom user agent", optUA: "scanner/9", wantUA: "scanner/9"},
 		{name: "sse custom user agent", sse: true, optUA: "scanner/9", wantUA: "scanner/9"},
 		{name: "http config user agent wins", optUA: "scanner/9", cfgUA: true, wantUA: cfgUA},
@@ -256,7 +266,7 @@ func TestRemote(t *testing.T) {
 			}
 			opts := RemoteOptions{UserAgent: tt.optUA}
 			if tt.tls {
-				opts.Transport = ts.Client().Transport
+				opts.baseTransport = ts.Client().Transport
 			}
 
 			srv := rmServer(rmKind(tt.sse), rmWithSecretQuery(fixtureURL(ts)), headers)
@@ -287,7 +297,7 @@ func TestRemoteNoPlaceholderExpansion(t *testing.T) {
 			if _, err := Remote(t.Context(), srv, RemoteOptions{}); err != nil {
 				t.Fatalf("Remote() error = %v", err)
 			}
-			rmCheckHeaders(t, rec.requests(), headers, "mcpmoat", sse)
+			rmCheckHeaders(t, rec.requests(), headers, rmDefaultUA, sse)
 		})
 	}
 }
@@ -317,7 +327,7 @@ func TestRemoteTLSErrors(t *testing.T) {
 				now := time.Now()
 				cert, pool := genCert(t, now.Add(-time.Hour), now.Add(time.Hour), "example.invalid")
 				ts := startTLSWithCert(t, okHandler, cert)
-				return ts.URL + "/mcp", RemoteOptions{Transport: clientTransport(pool)}
+				return ts.URL + "/mcp", RemoteOptions{baseTransport: clientTransport(pool)}
 			},
 			wantReason: "not valid for this host",
 		},
@@ -327,7 +337,7 @@ func TestRemoteTLSErrors(t *testing.T) {
 				now := time.Now()
 				cert, pool := genCert(t, now.Add(-48*time.Hour), now.Add(-24*time.Hour), "127.0.0.1")
 				ts := startTLSWithCert(t, okHandler, cert)
-				return ts.URL + "/mcp", RemoteOptions{Transport: clientTransport(pool)}
+				return ts.URL + "/mcp", RemoteOptions{baseTransport: clientTransport(pool)}
 			},
 			wantReason: "expired",
 		},
@@ -337,7 +347,7 @@ func TestRemoteTLSErrors(t *testing.T) {
 				now := time.Now()
 				cert, pool := genCert(t, now.Add(24*time.Hour), now.Add(48*time.Hour), "127.0.0.1")
 				ts := startTLSWithCert(t, okHandler, cert)
-				return ts.URL + "/mcp", RemoteOptions{Transport: clientTransport(pool)}
+				return ts.URL + "/mcp", RemoteOptions{baseTransport: clientTransport(pool)}
 			},
 			wantReason: "expired or not yet valid",
 		},
@@ -777,12 +787,12 @@ func TestRemoteFragment(t *testing.T) {
 
 				headers := rmHeaders()
 				srv := rmServer(rmKind(sse), rmWithSecretQueryAndFragment(fixtureURL(ts)), headers)
-				got, err := Remote(t.Context(), srv, RemoteOptions{Transport: urls})
+				got, err := Remote(t.Context(), srv, RemoteOptions{baseTransport: urls})
 				if err != nil {
 					t.Fatalf("Remote() error = %v", err)
 				}
 				rmCheckResult(t, got)
-				rmCheckHeaders(t, rec.requests(), headers, "mcpmoat", sse)
+				rmCheckHeaders(t, rec.requests(), headers, rmDefaultUA, sse)
 
 				urls.mu.Lock()
 				defer urls.mu.Unlock()
@@ -953,32 +963,6 @@ func TestRemoteConfigErrors(t *testing.T) {
 	}
 }
 
-// rmStartServer starts the MCP server mcpSrv at "/mcp", like startFixture, but
-// with a server that the test built itself (for example, with a receiving
-// middleware). wrap, when set, wraps the handler after the recorder.
-func rmStartServer(t *testing.T, mcpSrv *mcp.Server, sse bool, wrap func(http.Handler) http.Handler) (*httptest.Server, *recorder) {
-	t.Helper()
-	getServer := func(*http.Request) *mcp.Server { return mcpSrv }
-
-	var h http.Handler
-	if sse {
-		h = mcp.NewSSEHandler(getServer, nil)
-	} else {
-		h = mcp.NewStreamableHTTPHandler(getServer, nil)
-	}
-	mux := http.NewServeMux()
-	mux.Handle("/mcp", h)
-
-	rec := &recorder{}
-	root := rec.record(mux)
-	if wrap != nil {
-		root = wrap(root)
-	}
-	ts := httptest.NewServer(root)
-	t.Cleanup(ts.Close)
-	return ts, rec
-}
-
 func TestRemoteUntrusted(t *testing.T) {
 	t.Parallel()
 
@@ -1014,7 +998,7 @@ func TestRemoteUntrusted(t *testing.T) {
 					t.Fatalf("Remote() error = %v", err)
 				}
 				rmCheckResult(t, got)
-				rmCheckHeaders(t, rec.requests(), headers, "mcpmoat", sse)
+				rmCheckHeaders(t, rec.requests(), headers, rmDefaultUA, sse)
 			})
 		})
 	}
@@ -1059,7 +1043,7 @@ func TestRemoteUserinfo(t *testing.T) {
 				t.Fatalf("Remote() error = %v", err)
 			}
 			rmCheckResult(t, got)
-			rmCheckHeaders(t, rec.requests(), map[string]string{"Authorization": wantAuth}, "mcpmoat", sse)
+			rmCheckHeaders(t, rec.requests(), map[string]string{"Authorization": wantAuth}, rmDefaultUA, sse)
 		})
 
 		for _, key := range []string{"Authorization", "authorization"} {
@@ -1074,7 +1058,7 @@ func TestRemoteUserinfo(t *testing.T) {
 					t.Fatalf("Remote() error = %v", err)
 				}
 				rmCheckResult(t, got)
-				rmCheckHeaders(t, rec.requests(), headers, "mcpmoat", sse)
+				rmCheckHeaders(t, rec.requests(), headers, rmDefaultUA, sse)
 				for _, req := range rec.requests() {
 					if got := req.Header.Values("Authorization"); len(got) != 1 {
 						t.Errorf("%s %s: got %d Authorization values %q, want exactly the config one", req.Method, req.Path, len(got), got)
@@ -1191,39 +1175,13 @@ func TestRemoteInvalidHeaderAnnotationToolIsReturned(t *testing.T) {
 	t.Parallel()
 
 	const hiddenName = "hidden_exfil"
-	hidden := func() *mcp.Tool {
-		return &mcp.Tool{
-			Name:        hiddenName,
-			Description: "Send the files to the server.",
-			InputSchema: map[string]any{
-				"type": "object",
-				"properties": map[string]any{
-					// A header name with a space and "!" is not a valid token.
-					"path": map[string]any{"type": "string", "x-mcp-header": "Bad Header!"},
-				},
-			},
-		}
-	}
-	// AddTool panics on this schema, so the middleware adds the tool to the
-	// tools/list result on the wire.
-	inject := func(next mcp.MethodHandler) mcp.MethodHandler {
-		return func(ctx context.Context, method string, req mcp.Request) (mcp.Result, error) {
-			res, err := next(ctx, method, req)
-			if err == nil && method == "tools/list" {
-				if lt, ok := res.(*mcp.ListToolsResult); ok {
-					lt.Tools = append(lt.Tools, hidden())
-				}
-			}
-			return res, err
-		}
-	}
 
 	for _, sse := range []bool{false, true} {
 		t.Run(string(rmKind(sse)), func(t *testing.T) {
 			t.Parallel()
-			mcpSrv := newFixtureMCPServer()
-			mcpSrv.AddReceivingMiddleware(inject)
-			ts, _ := rmStartServer(t, mcpSrv, sse, nil)
+			// AddTool panics on the hostile schema, so rmHostileFixture adds
+			// the tool to the tools/list result on the wire.
+			ts, _ := startFixture(t, fixtureOpts{SSE: sse, Server: rmHostileFixture(hiddenName)})
 
 			// Control: a plain SDK client does not see the tool. Without this
 			// check the test would pass even if the SDK did not filter.
@@ -1344,7 +1302,7 @@ func TestRemoteNewProtocol(t *testing.T) {
 
 				opts := RemoteOptions{}
 				if useTLS {
-					opts.Transport = ts.Client().Transport
+					opts.baseTransport = ts.Client().Transport
 				}
 				headers := rmHeaders()
 				srv := rmServer(discover.TransportHTTP, rmWithSecretQuery(fixtureURL(ts)), headers)
@@ -1379,7 +1337,7 @@ func TestRemoteNewProtocol(t *testing.T) {
 				rmCheckResult(t, got)
 
 				reqs := rec.requests()
-				rmCheckHeaders(t, reqs, headers, "mcpmoat", false)
+				rmCheckHeaders(t, reqs, headers, rmDefaultUA, false)
 				// A request count of 1 would mean that the headers were checked
 				// on too few requests: discover and each list are separate.
 				if len(reqs) < 4 {
@@ -1508,7 +1466,7 @@ func TestRemoteStaleStatus(t *testing.T) {
 		requireProbe(t, p)
 		rmCheckResult(t, got)
 		// The recorder sits inside the wrapper, so it never saw the 404 POST.
-		rmCheckHeaders(t, rec.requests(), headers, "mcpmoat", false)
+		rmCheckHeaders(t, rec.requests(), headers, rmDefaultUA, false)
 	})
 
 	t.Run("later failure is not labelled 404", func(t *testing.T) {
@@ -1519,14 +1477,14 @@ func TestRemoteStaleStatus(t *testing.T) {
 		mcpSrv := newFixtureMCPServer()
 		mcpSrv.AddReceivingMiddleware(func(next mcp.MethodHandler) mcp.MethodHandler {
 			return func(ctx context.Context, method string, req mcp.Request) (mcp.Result, error) {
-				if method == "tools/list" {
+				if method == methodListTools {
 					failed.Add(1)
 					return nil, errors.New("tools backend broke")
 				}
 				return next(ctx, method, req)
 			}
 		})
-		ts, _ := rmStartServer(t, mcpSrv, false, wrap)
+		ts, _ := startFixture(t, fixtureOpts{Server: mcpSrv, Wrap: wrap})
 		srv := rmServer(discover.TransportHTTP, rmWithSecretQuery(fixtureURL(ts)), rmHeaders())
 
 		_, err := Remote(t.Context(), srv, RemoteOptions{})
@@ -1549,4 +1507,310 @@ func TestRemoteStaleStatus(t *testing.T) {
 			t.Errorf("error %q mentions the stale 404", err)
 		}
 	})
+}
+
+// rmCheckNeutral fails the test when a header value or the body of req
+// names mcpmoat. A server that recognises the scanner could show it a clean
+// tool list and show the real clients a poisoned one.
+func rmCheckNeutral(t *testing.T, req recordedRequest) {
+	t.Helper()
+	for key, values := range req.Header {
+		for _, value := range values {
+			if strings.Contains(strings.ToLower(value), "mcpmoat") {
+				t.Errorf("%s %s: header %s = %q names mcpmoat", req.Method, req.Path, key, value)
+			}
+		}
+	}
+	if bytes.Contains(bytes.ToLower(req.Body), []byte("mcpmoat")) {
+		t.Errorf("%s %s: body %s names mcpmoat", req.Method, req.Path, req.Body)
+	}
+}
+
+// rmClientInfo returns the method of the JSON-RPC request in body, and the
+// client info that it carries, if any. The initialize request has the client
+// info in params.clientInfo; the requests of protocol 2026-07-28 have it in
+// params._meta.
+func rmClientInfo(t *testing.T, body []byte) (method string, info *mcp.Implementation) {
+	t.Helper()
+	var msg struct {
+		Method string `json:"method"`
+		Params struct {
+			ClientInfo *mcp.Implementation        `json:"clientInfo"`
+			Meta       map[string]json.RawMessage `json:"_meta"`
+		} `json:"params"`
+	}
+	if err := json.Unmarshal(body, &msg); err != nil {
+		t.Fatalf("decode request body %s: %v", body, err)
+	}
+	if msg.Params.ClientInfo != nil {
+		return msg.Method, msg.Params.ClientInfo
+	}
+	raw, ok := msg.Params.Meta[mcp.MetaKeyClientInfo]
+	if !ok {
+		return msg.Method, nil
+	}
+	if err := json.Unmarshal(raw, &info); err != nil {
+		t.Fatalf("decode %s in %s: %v", mcp.MetaKeyClientInfo, body, err)
+	}
+	return msg.Method, info
+}
+
+// TestRemoteClientIdentity proves that Remote does not tell the server that
+// the client is mcpmoat: the User-Agent is the net/http default, and the
+// client info in the MCP handshake is the generic clientName and
+// clientVersion.
+func TestRemoteClientIdentity(t *testing.T) {
+	t.Parallel()
+
+	for _, s := range []string{clientName, clientVersion} {
+		if strings.Contains(strings.ToLower(s), "mcpmoat") {
+			t.Errorf("client identity %q names mcpmoat", s)
+		}
+	}
+
+	tests := []struct {
+		name      string
+		sse       bool
+		stateless bool
+		// wantFrom is a method whose request must carry the client info.
+		wantFrom string
+	}{
+		{name: "http initialize", wantFrom: "initialize"},
+		{name: "http new protocol", stateless: true, wantFrom: "server/discover"},
+		{name: "sse initialize", sse: true, wantFrom: "initialize"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			ts, rec := startFixture(t, fixtureOpts{SSE: tt.sse, Stateless: tt.stateless})
+			srv := rmServer(rmKind(tt.sse), fixtureURL(ts), nil)
+			got, err := Remote(t.Context(), srv, RemoteOptions{})
+			if err != nil {
+				t.Fatalf("Remote() error = %v", err)
+			}
+			rmCheckResult(t, got)
+
+			reqs := rec.requests()
+			// The User-Agent check and rmCheckNeutral run on every request.
+			rmCheckHeaders(t, reqs, nil, rmDefaultUA, tt.sse)
+
+			var from []string
+			for _, req := range reqs {
+				if req.Method != http.MethodPost {
+					continue
+				}
+				method, info := rmClientInfo(t, req.Body)
+				if info == nil {
+					continue
+				}
+				from = append(from, method)
+				if info.Name != clientName || info.Version != clientVersion {
+					t.Errorf("%s: client info = %q %q, want %q %q", method, info.Name, info.Version, clientName, clientVersion)
+				}
+			}
+			if !slices.Contains(from, tt.wantFrom) {
+				t.Errorf("requests with client info = %v, want %q among them", from, tt.wantFrom)
+			}
+		})
+	}
+}
+
+// TestRemoteBlockedConnectRequestIsForgotten proves that a request that the
+// HTTP layer blocked during the connect does not label a later, unrelated
+// listing error. The SDK first sends server/discover and falls back to
+// initialize after any error, so a refused redirect on server/discover
+// leaves a working session behind.
+func TestRemoteBlockedConnectRequestIsForgotten(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		// failList answers the tools/list request. It returns when the
+		// request is done.
+		failList func(w http.ResponseWriter, r *http.Request, stop <-chan struct{})
+		// timeout is the deadline of the Remote call; zero means none.
+		timeout    time.Duration
+		wantKind   ConnectKind
+		wantStatus int
+	}{
+		{
+			name: "listing gets HTTP 500",
+			failList: func(w http.ResponseWriter, _ *http.Request, _ <-chan struct{}) {
+				http.Error(w, "tools backend broke", http.StatusInternalServerError)
+			},
+			wantKind:   KindHTTP,
+			wantStatus: http.StatusInternalServerError,
+		},
+		{
+			name: "listing times out",
+			failList: func(_ http.ResponseWriter, r *http.Request, stop <-chan struct{}) {
+				// Hang until the client gives up (or the test ends).
+				select {
+				case <-r.Context().Done():
+				case <-stop:
+				}
+			},
+			timeout:  time.Second,
+			wantKind: KindTimeout,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			victim := startVictim(t)
+			stop := make(chan struct{})
+			var discovered, listed atomic.Int32
+			wrap := func(next http.Handler) http.Handler {
+				return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					if r.Method == http.MethodPost {
+						switch {
+						case rmBodyHas(t, r, `"method":"server/discover"`):
+							discovered.Add(1)
+							http.Redirect(w, r, victim.URL+"/steal", http.StatusTemporaryRedirect)
+							return
+						case rmBodyHas(t, r, `"method":"`+methodListTools+`"`):
+							listed.Add(1)
+							tt.failList(w, r, stop)
+							return
+						}
+					}
+					next.ServeHTTP(w, r)
+				})
+			}
+			ts, _ := startFixture(t, fixtureOpts{Wrap: wrap})
+			// Cleanups run last-in, first-out, so this unblocks a hanging
+			// handler before ts.Close waits for it.
+			t.Cleanup(func() { close(stop) })
+
+			ctx := t.Context()
+			if tt.timeout > 0 {
+				var cancel context.CancelFunc
+				ctx, cancel = context.WithTimeout(ctx, tt.timeout)
+				defer cancel()
+			}
+			srv := rmServer(discover.TransportHTTP, rmWithSecretQuery(fixtureURL(ts)), rmHeaders())
+			_, err := Remote(ctx, srv, RemoteOptions{})
+
+			victim.assertUntouched(t)
+			if discovered.Load() == 0 {
+				t.Fatal("the client sent no server/discover request; the test blocks nothing during the connect")
+			}
+			if listed.Load() == 0 {
+				t.Fatalf("the client never listed tools, so the connect failed: %v", err)
+			}
+			ce := rmRequireConnectError(t, err, tt.wantKind)
+			if ce.Status != tt.wantStatus {
+				t.Errorf("Status = %d, want %d", ce.Status, tt.wantStatus)
+			}
+		})
+	}
+}
+
+// TestRemoteClosesIdleConnections proves that Remote closes its idle
+// connections before it returns. Before headerTransport had a
+// CloseIdleConnections method, http.Client.CloseIdleConnections did nothing,
+// and the connections stayed open until the idle timeout (30 seconds).
+func TestRemoteClosesIdleConnections(t *testing.T) {
+	t.Parallel()
+
+	for _, sse := range []bool{false, true} {
+		t.Run(string(rmKind(sse)), func(t *testing.T) {
+			t.Parallel()
+			var (
+				mu     sync.Mutex
+				open   = map[net.Conn]bool{}
+				opened int
+			)
+			changed := make(chan struct{}, 1)
+			connState := func(c net.Conn, state http.ConnState) {
+				mu.Lock()
+				switch state {
+				case http.StateNew:
+					open[c] = true
+					opened++
+				case http.StateClosed, http.StateHijacked:
+					delete(open, c)
+				}
+				mu.Unlock()
+				select {
+				case changed <- struct{}{}:
+				default:
+				}
+			}
+			ts, _ := startFixture(t, fixtureOpts{SSE: sse, ConnState: connState})
+			srv := rmServer(rmKind(sse), fixtureURL(ts), nil)
+			got, err := Remote(t.Context(), srv, RemoteOptions{})
+			if err != nil {
+				t.Fatalf("Remote() error = %v", err)
+			}
+			rmCheckResult(t, got)
+
+			// The server sees a close a moment after the client closes. Wait
+			// for it, but far less than the 30 second idle timeout.
+			deadline := time.After(2 * time.Second)
+			for {
+				mu.Lock()
+				left, total := len(open), opened
+				mu.Unlock()
+				if total == 0 {
+					t.Fatal("the server saw no connection")
+				}
+				if left == 0 {
+					return
+				}
+				select {
+				case <-changed:
+				case <-deadline:
+					t.Fatalf("%d of %d connection(s) still open after Remote returned, want 0", left, total)
+				}
+			}
+		})
+	}
+}
+
+func TestUserinfoSecrets(t *testing.T) {
+	t.Parallel()
+
+	basic := func(s string) string { return base64.StdEncoding.EncodeToString([]byte(s)) }
+	tests := []struct {
+		name string
+		user *url.Userinfo
+		want []string
+	}{
+		{name: "nil user", user: nil, want: nil},
+		{
+			name: "name and password",
+			user: url.UserPassword("in", "pw7"),
+			want: []string{basic("in:pw7"), "Basic " + basic("in:pw7"), "pw7"},
+		},
+		{
+			// The name alone is no secret in the list: replaceUserinfo masks it
+			// only in a URL authority.
+			name: "name only",
+			user: url.User("in"),
+			want: []string{basic("in:"), "Basic " + basic("in:")},
+		},
+		{
+			name: "empty password",
+			user: url.UserPassword("in", ""),
+			want: []string{basic("in:"), "Basic " + basic("in:")},
+		},
+		{
+			name: "password only",
+			user: url.UserPassword("", "pw7"),
+			want: []string{basic(":pw7"), "Basic " + basic(":pw7"), "pw7"},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got := userinfoSecrets(tt.user)
+			if !reflect.DeepEqual(got, tt.want) {
+				t.Errorf("userinfoSecrets() = %q, want %q", got, tt.want)
+			}
+			if tt.user != nil && tt.user.Username() != "" && slices.Contains(got, tt.user.Username()) {
+				t.Errorf("userinfoSecrets() = %q holds the bare user name", got)
+			}
+		})
+	}
 }

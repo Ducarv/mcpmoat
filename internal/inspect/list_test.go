@@ -83,15 +83,34 @@ func methodNotFound() error {
 }
 
 // fakeLister implements sessionLister with scripted pages.
+//
+// Like a real session with the rawLists middleware, it records the tools of
+// every tools/list result in capture. Tests pass &f.capture to listAll. The
+// zero rawLists is ready to use, so a test does not have to set it. A test that
+// needs a session without capture passes a separate &rawLists{} instead.
 type fakeLister struct {
 	tools     fakeList[mcp.Tool]
 	prompts   fakeList[mcp.Prompt]
 	resources fakeList[mcp.Resource]
+
+	capture rawLists
 }
 
 var _ sessionLister = (*fakeLister)(nil)
 
+// ListTools answers one tools/list request and records the result in
+// f.capture, as the SDK sending middleware does in production.
 func (f *fakeLister) ListTools(_ context.Context, p *mcp.ListToolsParams) (*mcp.ListToolsResult, error) {
+	res, err := f.toolsPage(p)
+	if err != nil {
+		return nil, err
+	}
+	f.capture.put(res)
+	return res, nil
+}
+
+// toolsPage answers one tools/list request and records nothing.
+func (f *fakeLister) toolsPage(p *mcp.ListToolsParams) (*mcp.ListToolsResult, error) {
 	pg, err := f.tools.next(p.Cursor)
 	if err != nil {
 		return nil, err
@@ -186,7 +205,7 @@ func TestListAllCapabilities(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			f := onePage()
-			tools, prompts, resources, err := listAll(t.Context(), f, tt.caps, nil)
+			tools, prompts, resources, err := listAll(t.Context(), f, tt.caps, &f.capture)
 			if err != nil {
 				t.Fatalf("listAll() error = %v, want nil", err)
 			}
@@ -223,7 +242,7 @@ func TestListAllUndeclaredMethodNotFound(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			f := &fakeLister{}
-			tools, prompts, resources, err := listAll(t.Context(), f, tt.caps, nil)
+			tools, prompts, resources, err := listAll(t.Context(), f, tt.caps, &f.capture)
 			if err != nil {
 				t.Fatalf("listAll() error = %v, want nil", err)
 			}
@@ -246,7 +265,7 @@ func TestListAllUndeclaredMethodNotFound(t *testing.T) {
 			prompts:   fakeList[mcp.Prompt]{err: &jsonrpc.Error{Code: jsonrpc.CodeInvalidParams, Message: "bad"}},
 			resources: fakeList[mcp.Resource]{err: fmt.Errorf("wrapped: %w", methodNotFound())},
 		}
-		tools, prompts, resources, err := listAll(t.Context(), f, nil, nil)
+		tools, prompts, resources, err := listAll(t.Context(), f, nil, &f.capture)
 		if err != nil {
 			t.Fatalf("listAll() error = %v, want nil", err)
 		}
@@ -261,7 +280,7 @@ func TestListAllUndeclaredMethodNotFound(t *testing.T) {
 			prompts: fakeList[mcp.Prompt]{pages: map[string]fakePage[mcp.Prompt]{"": {items: []*mcp.Prompt{prompt("p1")}}}},
 		}
 		caps := &mcp.ServerCapabilities{Prompts: &mcp.PromptCapabilities{}}
-		tools, prompts, resources, err := listAll(t.Context(), f, caps, nil)
+		tools, prompts, resources, err := listAll(t.Context(), f, caps, &f.capture)
 		if err != nil {
 			t.Fatalf("listAll() error = %v, want nil", err)
 		}
@@ -287,7 +306,7 @@ func TestListAllUndeclaredHiddenCapability(t *testing.T) {
 			prompts:   fakeList[mcp.Prompt]{pages: map[string]fakePage[mcp.Prompt]{"": {items: []*mcp.Prompt{prompt("sneaky_p")}}}},
 			resources: fakeList[mcp.Resource]{pages: map[string]fakePage[mcp.Resource]{"": {items: []*mcp.Resource{resource("sneaky_r")}}}},
 		}
-		tools, prompts, resources, err := listAll(t.Context(), f, &mcp.ServerCapabilities{}, nil)
+		tools, prompts, resources, err := listAll(t.Context(), f, &mcp.ServerCapabilities{}, &f.capture)
 		if err != nil {
 			t.Fatalf("listAll() error = %v", err)
 		}
@@ -308,7 +327,7 @@ func TestListAllUndeclaredHiddenCapability(t *testing.T) {
 			"":   {items: []*mcp.Tool{tool("a")}, next: "c1"},
 			"c1": {items: []*mcp.Tool{tool("b")}},
 		}}}
-		tools, _, _, err := listAll(t.Context(), f, nil, nil)
+		tools, _, _, err := listAll(t.Context(), f, nil, &f.capture)
 		if err != nil {
 			t.Fatalf("listAll() error = %v", err)
 		}
@@ -460,7 +479,7 @@ func TestListAllUndeclaredErrors(t *testing.T) {
 			t.Parallel()
 			f := &fakeLister{}
 			tt.setup(f)
-			tools, prompts, resources, err := listAll(t.Context(), f, tt.caps, nil)
+			tools, prompts, resources, err := listAll(t.Context(), f, tt.caps, &f.capture)
 			if err == nil {
 				t.Fatal("listAll() error = nil, want error")
 			}
@@ -484,7 +503,7 @@ func TestListAllUndeclaredErrors(t *testing.T) {
 	t.Run("first-page error does not wrap errLaterPage", func(t *testing.T) {
 		t.Parallel()
 		f := &fakeLister{tools: fakeList[mcp.Tool]{err: boom}}
-		_, _, _, err := listAll(t.Context(), f, nil, nil)
+		_, _, _, err := listAll(t.Context(), f, nil, &f.capture)
 		if errors.Is(err, errLaterPage) {
 			t.Errorf("first-page error wraps errLaterPage: %v", err)
 		}
@@ -495,6 +514,7 @@ func TestListAllUndeclaredErrors(t *testing.T) {
 		f := &fakeLister{tools: fakeList[mcp.Tool]{pages: map[string]fakePage[mcp.Tool]{
 			"": {items: []*mcp.Tool{tool("t1")}},
 		}}}
+		// f records its pages in f.capture, not in this separate rawLists.
 		_, _, _, err := listAll(t.Context(), f, nil, &rawLists{})
 		if !errors.Is(err, errRawListMissing) {
 			t.Errorf("err = %v, want errRawListMissing", err)
@@ -506,7 +526,7 @@ func TestListAllUndeclaredErrors(t *testing.T) {
 		f := &fakeLister{tools: fakeList[mcp.Tool]{pages: map[string]fakePage[mcp.Tool]{
 			"": {items: make([]*mcp.Tool, maxItems+1)},
 		}}}
-		_, _, _, err := listAll(t.Context(), f, nil, nil)
+		_, _, _, err := listAll(t.Context(), f, nil, &f.capture)
 		if !errors.Is(err, errTooManyItems) {
 			t.Errorf("err = %v, want errTooManyItems", err)
 		}
@@ -522,7 +542,7 @@ func TestListAllDeclaredButEmpty(t *testing.T) {
 		prompts:   fakeList[mcp.Prompt]{pages: map[string]fakePage[mcp.Prompt]{"": {}}},
 		resources: fakeList[mcp.Resource]{pages: map[string]fakePage[mcp.Resource]{"": {}}},
 	}
-	tools, prompts, resources, err := listAll(t.Context(), f, allCaps(), nil)
+	tools, prompts, resources, err := listAll(t.Context(), f, allCaps(), &f.capture)
 	if err != nil {
 		t.Fatalf("listAll() error = %v", err)
 	}
@@ -534,6 +554,10 @@ func TestListAllDeclaredButEmpty(t *testing.T) {
 	}
 	if resources == nil || len(resources) != 0 {
 		t.Errorf("resources = %#v, want empty non-nil", resources)
+	}
+	// listAll takes the raw copy of every page it reads.
+	if n := len(f.capture.tools); n != 0 {
+		t.Errorf("raw map holds %d entries after listing, want 0", n)
 	}
 }
 
@@ -557,7 +581,7 @@ func TestListAllMultiPage(t *testing.T) {
 		}},
 	}
 
-	tools, prompts, resources, err := listAll(t.Context(), f, allCaps(), nil)
+	tools, prompts, resources, err := listAll(t.Context(), f, allCaps(), &f.capture)
 	if err != nil {
 		t.Fatalf("listAll() error = %v", err)
 	}
@@ -578,6 +602,9 @@ func TestListAllMultiPage(t *testing.T) {
 	}
 	if got, want := f.resources.cursors, []string{"", "rc1", "rc2"}; !reflect.DeepEqual(got, want) {
 		t.Errorf("resource cursors = %q, want %q", got, want)
+	}
+	if n := len(f.capture.tools); n != 0 {
+		t.Errorf("raw map holds %d entries after listing, want 0", n)
 	}
 }
 
@@ -602,7 +629,7 @@ func TestListAllConvertsFields(t *testing.T) {
 		}}}}},
 	}
 
-	tools, prompts, resources, err := listAll(t.Context(), f, allCaps(), nil)
+	tools, prompts, resources, err := listAll(t.Context(), f, allCaps(), &f.capture)
 	if err != nil {
 		t.Fatalf("listAll() error = %v", err)
 	}
@@ -646,7 +673,7 @@ func TestListAllNilItemsSkipped(t *testing.T) {
 		prompts:   fakeList[mcp.Prompt]{pages: map[string]fakePage[mcp.Prompt]{"": {items: []*mcp.Prompt{nil, prompt("p1")}}}},
 		resources: fakeList[mcp.Resource]{pages: map[string]fakePage[mcp.Resource]{"": {items: []*mcp.Resource{resource("r1"), nil}}}},
 	}
-	tools, prompts, resources, err := listAll(t.Context(), f, allCaps(), nil)
+	tools, prompts, resources, err := listAll(t.Context(), f, allCaps(), &f.capture)
 	if err != nil {
 		t.Fatalf("listAll() error = %v", err)
 	}
@@ -678,7 +705,7 @@ func (nilResultLister) ListResources(context.Context, *mcp.ListResourcesParams) 
 
 func TestListAllNilResult(t *testing.T) {
 	t.Parallel()
-	tools, prompts, resources, err := listAll(t.Context(), nilResultLister{}, allCaps(), nil)
+	tools, prompts, resources, err := listAll(t.Context(), nilResultLister{}, allCaps(), &rawLists{})
 	if err != nil {
 		t.Fatalf("listAll() error = %v, want nil", err)
 	}
@@ -741,7 +768,7 @@ func TestListAllSDKError(t *testing.T) {
 			t.Parallel()
 			f := &fakeLister{}
 			tt.setup(f)
-			tools, prompts, resources, err := listAll(t.Context(), f, allCaps(), nil)
+			tools, prompts, resources, err := listAll(t.Context(), f, allCaps(), &f.capture)
 			if err == nil {
 				t.Fatal("listAll() error = nil, want error")
 			}
@@ -793,7 +820,7 @@ func TestListAllRepeatedCursor(t *testing.T) {
 			t.Parallel()
 			f := &fakeLister{tools: fakeList[mcp.Tool]{pages: tt.pages}}
 			caps := &mcp.ServerCapabilities{Tools: &mcp.ToolCapabilities{}}
-			tools, _, _, err := listAll(t.Context(), f, caps, nil)
+			tools, _, _, err := listAll(t.Context(), f, caps, &f.capture)
 			if !errors.Is(err, errRepeatedCursor) {
 				t.Fatalf("err = %v, want errRepeatedCursor", err)
 			}
@@ -820,7 +847,7 @@ func TestListAllRepeatedCursorOtherLists(t *testing.T) {
 		f := &fakeLister{prompts: fakeList[mcp.Prompt]{gen: func(int, string) fakePage[mcp.Prompt] {
 			return fakePage[mcp.Prompt]{next: secretCursor}
 		}}}
-		_, _, _, err := listAll(t.Context(), f, &mcp.ServerCapabilities{Prompts: &mcp.PromptCapabilities{}}, nil)
+		_, _, _, err := listAll(t.Context(), f, &mcp.ServerCapabilities{Prompts: &mcp.PromptCapabilities{}}, &f.capture)
 		if !errors.Is(err, errRepeatedCursor) || !strings.HasPrefix(err.Error(), "list prompts:") {
 			t.Errorf("err = %v, want list prompts repeated cursor", err)
 		}
@@ -833,7 +860,7 @@ func TestListAllRepeatedCursorOtherLists(t *testing.T) {
 		f := &fakeLister{resources: fakeList[mcp.Resource]{gen: func(int, string) fakePage[mcp.Resource] {
 			return fakePage[mcp.Resource]{next: secretCursor}
 		}}}
-		_, _, _, err := listAll(t.Context(), f, &mcp.ServerCapabilities{Resources: &mcp.ResourceCapabilities{}}, nil)
+		_, _, _, err := listAll(t.Context(), f, &mcp.ServerCapabilities{Resources: &mcp.ResourceCapabilities{}}, &f.capture)
 		if !errors.Is(err, errRepeatedCursor) || !strings.HasPrefix(err.Error(), "list resources:") {
 			t.Errorf("err = %v, want list resources repeated cursor", err)
 		}
@@ -854,7 +881,7 @@ func TestListAllPageCap(t *testing.T) {
 	t.Run("never-ending list stops at maxPages", func(t *testing.T) {
 		t.Parallel()
 		f := &fakeLister{tools: fakeList[mcp.Tool]{gen: newCursorEveryPage}}
-		tools, _, _, err := listAll(t.Context(), f, &mcp.ServerCapabilities{Tools: &mcp.ToolCapabilities{}}, nil)
+		tools, _, _, err := listAll(t.Context(), f, &mcp.ServerCapabilities{Tools: &mcp.ToolCapabilities{}}, &f.capture)
 		if !errors.Is(err, errTooManyPages) {
 			t.Fatalf("err = %v, want errTooManyPages", err)
 		}
@@ -881,7 +908,7 @@ func TestListAllPageCap(t *testing.T) {
 			}
 			return p
 		}}}
-		tools, _, _, err := listAll(t.Context(), f, &mcp.ServerCapabilities{Tools: &mcp.ToolCapabilities{}}, nil)
+		tools, _, _, err := listAll(t.Context(), f, &mcp.ServerCapabilities{Tools: &mcp.ToolCapabilities{}}, &f.capture)
 		if err != nil {
 			t.Fatalf("listAll() error = %v, want nil", err)
 		}
@@ -898,7 +925,7 @@ func TestListAllPageCap(t *testing.T) {
 		f := &fakeLister{prompts: fakeList[mcp.Prompt]{gen: func(call int, _ string) fakePage[mcp.Prompt] {
 			return fakePage[mcp.Prompt]{next: fmt.Sprintf("c%d", call)}
 		}}}
-		_, _, _, err := listAll(t.Context(), f, &mcp.ServerCapabilities{Prompts: &mcp.PromptCapabilities{}}, nil)
+		_, _, _, err := listAll(t.Context(), f, &mcp.ServerCapabilities{Prompts: &mcp.PromptCapabilities{}}, &f.capture)
 		if !errors.Is(err, errTooManyPages) || f.prompts.calls != maxPages {
 			t.Errorf("err = %v, calls = %d; want errTooManyPages after %d calls", err, f.prompts.calls, maxPages)
 		}
@@ -909,7 +936,7 @@ func TestListAllPageCap(t *testing.T) {
 		f := &fakeLister{resources: fakeList[mcp.Resource]{gen: func(call int, _ string) fakePage[mcp.Resource] {
 			return fakePage[mcp.Resource]{next: fmt.Sprintf("c%d", call)}
 		}}}
-		_, _, _, err := listAll(t.Context(), f, &mcp.ServerCapabilities{Resources: &mcp.ResourceCapabilities{}}, nil)
+		_, _, _, err := listAll(t.Context(), f, &mcp.ServerCapabilities{Resources: &mcp.ResourceCapabilities{}}, &f.capture)
 		if !errors.Is(err, errTooManyPages) || f.resources.calls != maxPages {
 			t.Errorf("err = %v, calls = %d; want errTooManyPages after %d calls", err, f.resources.calls, maxPages)
 		}
@@ -978,7 +1005,7 @@ func TestListAllItemCap(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			f := &fakeLister{tools: fakeList[mcp.Tool]{pages: tt.pages}}
-			tools, _, _, err := listAll(t.Context(), f, caps, nil)
+			tools, _, _, err := listAll(t.Context(), f, caps, &f.capture)
 			if tt.wantErr {
 				if !errors.Is(err, errTooManyItems) {
 					t.Fatalf("err = %v, want errTooManyItems", err)
@@ -1012,7 +1039,7 @@ func TestListAllItemCapOtherLists(t *testing.T) {
 		f := &fakeLister{prompts: fakeList[mcp.Prompt]{pages: map[string]fakePage[mcp.Prompt]{
 			"": {items: make([]*mcp.Prompt, maxItems+1)},
 		}}}
-		_, _, _, err := listAll(t.Context(), f, &mcp.ServerCapabilities{Prompts: &mcp.PromptCapabilities{}}, nil)
+		_, _, _, err := listAll(t.Context(), f, &mcp.ServerCapabilities{Prompts: &mcp.PromptCapabilities{}}, &f.capture)
 		if !errors.Is(err, errTooManyItems) {
 			t.Errorf("err = %v, want errTooManyItems", err)
 		}
@@ -1022,7 +1049,7 @@ func TestListAllItemCapOtherLists(t *testing.T) {
 		f := &fakeLister{resources: fakeList[mcp.Resource]{pages: map[string]fakePage[mcp.Resource]{
 			"": {items: make([]*mcp.Resource, maxItems+1)},
 		}}}
-		_, _, _, err := listAll(t.Context(), f, &mcp.ServerCapabilities{Resources: &mcp.ResourceCapabilities{}}, nil)
+		_, _, _, err := listAll(t.Context(), f, &mcp.ServerCapabilities{Resources: &mcp.ResourceCapabilities{}}, &f.capture)
 		if !errors.Is(err, errTooManyItems) {
 			t.Errorf("err = %v, want errTooManyItems", err)
 		}
@@ -1042,7 +1069,7 @@ func TestListAllContextCanceled(t *testing.T) {
 			gen:    func(call int, _ string) fakePage[mcp.Tool] { return fakePage[mcp.Tool]{next: fmt.Sprintf("c%d", call)} },
 			onCall: func(int) { cancel() }, // cancel while the first page is in flight
 		}
-		tools, _, _, err := listAll(ctx, f, &mcp.ServerCapabilities{Tools: &mcp.ToolCapabilities{}}, nil)
+		tools, _, _, err := listAll(ctx, f, &mcp.ServerCapabilities{Tools: &mcp.ToolCapabilities{}}, &f.capture)
 		if !errors.Is(err, context.Canceled) {
 			t.Fatalf("err = %v, want context.Canceled", err)
 		}
@@ -1062,7 +1089,7 @@ func TestListAllContextCanceled(t *testing.T) {
 		ctx, cancel := context.WithCancel(t.Context())
 		cancel()
 		f := &fakeLister{tools: fakeList[mcp.Tool]{pages: map[string]fakePage[mcp.Tool]{"": {}}}}
-		_, _, _, err := listAll(ctx, f, &mcp.ServerCapabilities{Tools: &mcp.ToolCapabilities{}}, nil)
+		_, _, _, err := listAll(ctx, f, &mcp.ServerCapabilities{Tools: &mcp.ToolCapabilities{}}, &f.capture)
 		if !errors.Is(err, context.Canceled) {
 			t.Fatalf("err = %v, want context.Canceled", err)
 		}
@@ -1076,7 +1103,7 @@ func TestListAllContextCanceled(t *testing.T) {
 		ctx, cancel := context.WithDeadline(t.Context(), time.Unix(0, 0))
 		defer cancel()
 		f := &fakeLister{tools: fakeList[mcp.Tool]{pages: map[string]fakePage[mcp.Tool]{"": {}}}}
-		_, _, _, err := listAll(ctx, f, &mcp.ServerCapabilities{Tools: &mcp.ToolCapabilities{}}, nil)
+		_, _, _, err := listAll(ctx, f, &mcp.ServerCapabilities{Tools: &mcp.ToolCapabilities{}}, &f.capture)
 		if !errors.Is(err, context.DeadlineExceeded) {
 			t.Fatalf("err = %v, want context.DeadlineExceeded", err)
 		}
@@ -1116,7 +1143,7 @@ func TestListAllSchemaConversion(t *testing.T) {
 			f := &fakeLister{tools: fakeList[mcp.Tool]{pages: map[string]fakePage[mcp.Tool]{
 				"": {items: []*mcp.Tool{{Name: "t", InputSchema: tt.in, OutputSchema: tt.out}}},
 			}}}
-			tools, _, _, err := listAll(t.Context(), f, &mcp.ServerCapabilities{Tools: &mcp.ToolCapabilities{}}, nil)
+			tools, _, _, err := listAll(t.Context(), f, &mcp.ServerCapabilities{Tools: &mcp.ToolCapabilities{}}, &f.capture)
 			if tt.wantErrSub != "" {
 				if err == nil {
 					t.Fatal("listAll() error = nil, want error")
@@ -1251,7 +1278,7 @@ func TestMarshalSchema(t *testing.T) {
 		f := &fakeLister{tools: fakeList[mcp.Tool]{pages: map[string]fakePage[mcp.Tool]{
 			"": {items: []*mcp.Tool{{Name: "t", InputSchema: map[string]any{"description": "<IMPORTANT>&"}}}},
 		}}}
-		tools, _, _, err := listAll(t.Context(), f, toolsCaps(), nil)
+		tools, _, _, err := listAll(t.Context(), f, toolsCaps(), &f.capture)
 		if err != nil || len(tools) != 1 {
 			t.Fatalf("listAll() = %v, %v", tools, err)
 		}
@@ -1509,10 +1536,13 @@ type rawFakeLister struct {
 	call int
 }
 
-func (r *rawFakeLister) ListTools(ctx context.Context, p *mcp.ListToolsParams) (*mcp.ListToolsResult, error) {
+func (r *rawFakeLister) ListTools(_ context.Context, p *mcp.ListToolsParams) (*mcp.ListToolsResult, error) {
 	n := r.call
 	r.call++
-	res, err := r.fakeLister.ListTools(ctx, p)
+	// toolsPage, not ListTools: this fake records the raw tools in r.raw
+	// itself, so the embedded fakeLister must not record them in its capture.
+	// toolsPage is promoted from the embedded fakeLister.
+	res, err := r.toolsPage(p)
 	if err != nil || r.skip[n] {
 		return res, err
 	}
@@ -1651,10 +1681,11 @@ func TestListAllRawTools(t *testing.T) {
 		}
 	})
 
-	t.Run("raw non-nil but plain fake never captures", func(t *testing.T) {
+	t.Run("raw not hooked to the session fails closed", func(t *testing.T) {
 		t.Parallel()
-		// A session that does not run the middleware (a plain fake) must fail
-		// closed, not fall back to res.Tools.
+		// A session whose middleware does not fill the rawLists that listAll
+		// reads must fail closed, not fall back to res.Tools. f records its
+		// pages in f.capture, not in the separate rawLists below.
 		f := &fakeLister{tools: fakeList[mcp.Tool]{pages: map[string]fakePage[mcp.Tool]{
 			"": {items: []*mcp.Tool{tool("t1")}},
 		}}}
@@ -1934,20 +1965,43 @@ func toolsFromMCP(ts []*mcp.Tool) []Tool {
 	return out
 }
 
-// hostileServerSession connects an in-memory SDK client to an in-memory SDK
-// server. The server has one benign tool. Its receiving middleware appends two
-// hostile tools to every tools/list result, because server.AddTool panics on a
-// tool with an invalid "x-mcp-header" and so cannot register them:
+// connectInMemory connects a new SDK client to server over an in-memory
+// transport pair and returns the client session. When raw is not nil, the
+// client gets the rawLists middleware, so raw records every tools/list result.
+// Both sessions close when the test ends.
+func connectInMemory(t *testing.T, server *mcp.Server, raw *rawLists) *mcp.ClientSession {
+	t.Helper()
+
+	clientT, serverT := mcp.NewInMemoryTransports()
+	ss, err := server.Connect(t.Context(), serverT, nil)
+	if err != nil {
+		t.Fatalf("server.Connect() error = %v", err)
+	}
+	t.Cleanup(func() { _ = ss.Close() })
+
+	client := mcp.NewClient(&mcp.Implementation{Name: "test", Version: "1"}, nil)
+	if raw != nil {
+		client.AddSendingMiddleware(raw.middleware())
+	}
+	cs, err := client.Connect(t.Context(), clientT, nil)
+	if err != nil {
+		t.Fatalf("client.Connect() error = %v", err)
+	}
+	t.Cleanup(func() { _ = cs.Close() })
+	return cs
+}
+
+// addHiddenHeaderTools gives server one benign tool, "benign", and a receiving
+// middleware that appends two hostile tools to every tools/list result. The
+// middleware is needed because server.AddTool panics on a tool with an invalid
+// "x-mcp-header" and so cannot register them:
 //
 //   - "bad_type": a property of type object has an "x-mcp-header".
 //   - "bad_dup": two properties use the same header name (case-insensitive).
 //
-// The SDK client drops both tools from ListTools. raw is the rawLists that the
-// client middleware fills; the caller passes it to listAll.
-func hostileServerSession(t *testing.T) (cs *mcp.ClientSession, raw *rawLists) {
-	t.Helper()
-
-	server := mcp.NewServer(&mcp.Implementation{Name: "hostile", Version: "1"}, nil)
+// The SDK client drops both tools from ListTools. onList, when not nil, runs
+// once for every tools/list request that reaches the server.
+func addHiddenHeaderTools(server *mcp.Server, onList func()) {
 	server.AddTool(
 		&mcp.Tool{Name: "benign", Description: "ok", InputSchema: map[string]any{"type": "object"}},
 		func(context.Context, *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
@@ -1959,6 +2013,9 @@ func hostileServerSession(t *testing.T) (cs *mcp.ClientSession, raw *rawLists) {
 			res, err := next(ctx, method, req)
 			if err != nil || method != methodListTools {
 				return res, err
+			}
+			if onList != nil {
+				onList()
 			}
 			if lt, ok := res.(*mcp.ListToolsResult); ok {
 				lt.Tools = append(lt.Tools,
@@ -1980,24 +2037,19 @@ func hostileServerSession(t *testing.T) (cs *mcp.ClientSession, raw *rawLists) {
 			return res, nil
 		}
 	})
+}
 
-	clientT, serverT := mcp.NewInMemoryTransports()
-	ctx := t.Context()
-	ss, err := server.Connect(ctx, serverT, nil)
-	if err != nil {
-		t.Fatalf("server.Connect() error = %v", err)
-	}
-	t.Cleanup(func() { _ = ss.Close() })
+// hostileServerSession connects an in-memory SDK client to an in-memory SDK
+// server with one benign and two hostile tools (see addHiddenHeaderTools).
+// raw is the rawLists that the client middleware fills; the caller passes it
+// to listAll.
+func hostileServerSession(t *testing.T) (cs *mcp.ClientSession, raw *rawLists) {
+	t.Helper()
 
+	server := mcp.NewServer(&mcp.Implementation{Name: "hostile", Version: "1"}, nil)
+	addHiddenHeaderTools(server, nil)
 	raw = &rawLists{}
-	client := mcp.NewClient(&mcp.Implementation{Name: "test", Version: "1"}, nil)
-	client.AddSendingMiddleware(raw.middleware())
-	cs, err = client.Connect(ctx, clientT, nil)
-	if err != nil {
-		t.Fatalf("client.Connect() error = %v", err)
-	}
-	t.Cleanup(func() { _ = cs.Close() })
-	return cs, raw
+	return connectInMemory(t, server, raw), raw
 }
 
 // This is the regression test for the hidden-tool attack. The SDK client drops
@@ -2034,12 +2086,13 @@ func TestListAllRealSDKHiddenTools(t *testing.T) {
 		cs, _ := hostileServerSession(t)
 
 		// This documents why rawLists exists. If the SDK stops filtering,
-		// this subtest fails and the capture may be removed.
-		tools, _, _, err := listAll(t.Context(), cs, cs.InitializeResult().Capabilities, nil)
+		// this subtest fails and the capture may be removed. ListTools returns
+		// what the SDK accepted; the middleware copy is not read here.
+		res, err := cs.ListTools(t.Context(), nil)
 		if err != nil {
-			t.Fatalf("listAll() error = %v", err)
+			t.Fatalf("ListTools() error = %v", err)
 		}
-		if got, want := toolNames(tools), []string{"benign"}; !reflect.DeepEqual(got, want) {
+		if got, want := toolNames(toolsFromMCP(res.Tools)), []string{"benign"}; !reflect.DeepEqual(got, want) {
 			t.Errorf("tools = %v, want %v (the SDK hides the hostile tools)", got, want)
 		}
 	})
@@ -2057,7 +2110,7 @@ func TestListAllRealSDKHiddenTools(t *testing.T) {
 }
 
 // newProtocolSession connects an in-memory client to a server that offers one
-// benign and two hostile tools (see hostileServerSession), with the cache hint
+// benign and two hostile tools (see addHiddenHeaderTools), with the cache hint
 // ttlMs on every list result. The pair negotiates protocol 2026-07-28, where
 // the SDK client caches list results for a repeated cursor. When withRaw is
 // true, the client has the rawLists middleware. The returned counter holds the
@@ -2068,58 +2121,14 @@ func newProtocolSession(t *testing.T, ttlMs int, withRaw bool) (cs *mcp.ClientSe
 	server := mcp.NewServer(&mcp.Implementation{Name: "hostile", Version: "1"}, &mcp.ServerOptions{
 		SetCacheable: func(_ context.Context, _ mcp.Request, c *mcp.Cacheable) { c.TTLMs = ttlMs },
 	})
-	server.AddTool(
-		&mcp.Tool{Name: "benign", Description: "ok", InputSchema: map[string]any{"type": "object"}},
-		func(context.Context, *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-			return &mcp.CallToolResult{}, nil
-		},
-	)
 	listCalls = new(atomic.Int32)
-	server.AddReceivingMiddleware(func(next mcp.MethodHandler) mcp.MethodHandler {
-		return func(ctx context.Context, method string, req mcp.Request) (mcp.Result, error) {
-			res, err := next(ctx, method, req)
-			if err != nil || method != methodListTools {
-				return res, err
-			}
-			listCalls.Add(1)
-			if lt, ok := res.(*mcp.ListToolsResult); ok {
-				lt.Tools = append(lt.Tools,
-					&mcp.Tool{Name: "bad_type", Description: "hidden by type", InputSchema: map[string]any{
-						"type": "object",
-						"properties": map[string]any{
-							"x": map[string]any{"type": "object", "x-mcp-header": "X-A"},
-						},
-					}},
-					&mcp.Tool{Name: "bad_dup", Description: "hidden by duplicate", InputSchema: map[string]any{
-						"type": "object",
-						"properties": map[string]any{
-							"a": map[string]any{"type": "string", "x-mcp-header": "X-Dup"},
-							"b": map[string]any{"type": "string", "x-mcp-header": "x-dup"},
-						},
-					}},
-				)
-			}
-			return res, nil
-		}
-	})
+	addHiddenHeaderTools(server, func() { listCalls.Add(1) })
 
-	clientT, serverT := mcp.NewInMemoryTransports()
-	ss, err := server.Connect(t.Context(), serverT, nil)
-	if err != nil {
-		t.Fatalf("server.Connect() error = %v", err)
-	}
-	t.Cleanup(func() { _ = ss.Close() })
-
-	client := mcp.NewClient(&mcp.Implementation{Name: "test", Version: "1"}, nil)
 	if withRaw {
 		raw = &rawLists{}
-		client.AddSendingMiddleware(raw.middleware())
 	}
-	cs, err = client.Connect(t.Context(), clientT, nil)
-	if err != nil {
-		t.Fatalf("client.Connect() error = %v", err)
-	}
-	t.Cleanup(func() { _ = cs.Close() })
+	// A nil raw gives a client without the middleware.
+	cs = connectInMemory(t, server, raw)
 
 	if got := cs.InitializeResult().ProtocolVersion; got != newProtocolVersion {
 		t.Fatalf("negotiated protocol = %q, want %q; the test no longer covers the new protocol", got, newProtocolVersion)
@@ -2204,22 +2213,8 @@ func hiddenToolsSession(t *testing.T) (cs *mcp.ClientSession, raw *rawLists) {
 		}
 	})
 
-	clientT, serverT := mcp.NewInMemoryTransports()
-	ss, err := server.Connect(t.Context(), serverT, nil)
-	if err != nil {
-		t.Fatalf("server.Connect() error = %v", err)
-	}
-	t.Cleanup(func() { _ = ss.Close() })
-
 	raw = &rawLists{}
-	client := mcp.NewClient(&mcp.Implementation{Name: "test", Version: "1"}, nil)
-	client.AddSendingMiddleware(raw.middleware())
-	cs, err = client.Connect(t.Context(), clientT, nil)
-	if err != nil {
-		t.Fatalf("client.Connect() error = %v", err)
-	}
-	t.Cleanup(func() { _ = cs.Close() })
-	return cs, raw
+	return connectInMemory(t, server, raw), raw
 }
 
 // A server that leaves the tools capability out of its initialize result but

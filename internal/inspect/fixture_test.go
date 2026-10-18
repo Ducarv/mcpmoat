@@ -1,6 +1,7 @@
 package inspect
 
 import (
+	"bytes"
 	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
@@ -9,6 +10,7 @@ import (
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/json"
+	"io"
 	"math/big"
 	"net"
 	"net/http"
@@ -131,6 +133,8 @@ type recordedRequest struct {
 	Method string
 	Path   string
 	Header http.Header
+	// Body is the request body. It is empty for a request without one.
+	Body []byte
 }
 
 // recorder records the HTTP requests that reach a server. It is safe for
@@ -141,13 +145,26 @@ type recorder struct {
 }
 
 // record returns a handler that records each request and then calls next.
+// It reads the request body and puts it back, so next can read it too. Only
+// a POST carries a body; the body of an SSE GET stream is never read.
 func (r *recorder) record(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		var body []byte
+		if req.Method == http.MethodPost && req.Body != nil {
+			var err error
+			body, err = io.ReadAll(req.Body)
+			if err != nil {
+				http.Error(w, "read body", http.StatusBadRequest)
+				return
+			}
+			req.Body = io.NopCloser(bytes.NewReader(body))
+		}
 		r.mu.Lock()
 		r.reqs = append(r.reqs, recordedRequest{
 			Method: req.Method,
 			Path:   req.URL.Path,
 			Header: req.Header.Clone(),
+			Body:   body,
 		})
 		r.mu.Unlock()
 		next.ServeHTTP(w, req)
@@ -178,6 +195,9 @@ type fixtureOpts struct {
 	// Wrap, when set, wraps the handler after the recorder. Use it to
 	// reject requests, for example.
 	Wrap func(http.Handler) http.Handler
+	// ConnState, when set, is the http.Server ConnState hook. Use it to see
+	// when the client opens and closes connections.
+	ConnState func(net.Conn, http.ConnState)
 }
 
 // startFixture starts a server with the fixture MCP server at the path
@@ -207,11 +227,12 @@ func startFixture(t *testing.T, opts fixtureOpts) (*httptest.Server, *recorder) 
 		root = opts.Wrap(root)
 	}
 
-	var ts *httptest.Server
+	ts := httptest.NewUnstartedServer(root)
+	ts.Config.ConnState = opts.ConnState
 	if opts.TLS {
-		ts = httptest.NewTLSServer(root)
+		ts.StartTLS()
 	} else {
-		ts = httptest.NewServer(root)
+		ts.Start()
 	}
 	t.Cleanup(ts.Close)
 	return ts, rec
