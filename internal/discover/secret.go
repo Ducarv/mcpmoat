@@ -4,7 +4,6 @@ import (
 	"encoding"
 	"encoding/json"
 	"fmt"
-	"io"
 	"log/slog"
 	"maps"
 	"slices"
@@ -13,9 +12,7 @@ import (
 // Mask is the text that replaces a secret value in all output.
 const Mask = "********"
 
-// Compile-time interface checks. Each line assigns a value to the blank
-// identifier "_" with an interface type, so the build fails if Secret stops
-// implementing that interface. Nothing runs at run time.
+// The build fails if Secret stops implementing one of these interfaces.
 var (
 	_ fmt.Formatter            = Secret{}
 	_ fmt.Stringer             = Secret{}
@@ -39,14 +36,11 @@ var (
 // Secret is a struct and not "type Secret string", so code cannot get the
 // value with a plain string(s) conversion.
 //
-// The print and marshal methods use value receivers (s Secret), so both a
-// Secret and a *Secret have them and both give Mask. UnmarshalText uses a
-// pointer receiver (s *Secret) because it must change the receiver.
+// The output methods use value receivers, so a *Secret also gives Mask.
 type Secret struct {
-	// _ makes Secret not comparable: func values cannot be compared, so
-	// s1 == s2 is a compile error. An array of length 0 takes no memory.
-	// Without it, == would compare the pointers below (identity), not the
-	// values. reflect.DeepEqual still compares the values behind the pointers.
+	// _ makes s1 == s2 a compile error (func values are not comparable) at
+	// zero size. Without it, == would compare the pointers below, not the
+	// values.
 	_ [0]func()
 
 	// v is a pointer on purpose. When fmt prints a struct that holds a Secret
@@ -79,18 +73,19 @@ func (s Secret) String() string {
 	return Mask
 }
 
-// GoString returns Mask, so the %#v verb does not show the value. It
-// implements fmt.GoStringer.
+// GoString returns Mask. It implements fmt.GoStringer for code that calls
+// it directly; fmt itself calls Format for %#v.
 func (s Secret) GoString() string {
 	return Mask
 }
 
-// Format writes Mask for every verb and flag (%v, %+v, %#v, %s, %q, %x and
-// all others). It implements fmt.Formatter, which fmt checks before String.
-func (s Secret) Format(f fmt.State, _ rune) {
-	// fmt.State is an io.Writer. fmt has no way to report a write error from
-	// Format, so the result is discarded on purpose.
-	_, _ = io.WriteString(f, Mask)
+// Format passes the verb and flags to Mask, so only Mask reaches fmt: %q
+// and %#v quote it, a width pads it, %x prints it in hex. It implements
+// fmt.Formatter, which fmt checks before GoString and String.
+func (s Secret) Format(f fmt.State, verb rune) {
+	// fmt has no way to report a write error from Format, so the result is
+	// discarded on purpose.
+	_, _ = fmt.Fprintf(f, fmt.FormatString(f, verb), Mask)
 }
 
 // MarshalJSON returns Mask as a JSON string. It implements json.Marshaler.
@@ -117,8 +112,7 @@ func (s Secret) MarshalText() ([]byte, error) {
 // Marshalling gives Mask, so a round trip is one-way: decoding the output of
 // MarshalText or MarshalJSON gives Mask, not the original value.
 func (s *Secret) UnmarshalText(text []byte) error {
-	// string(text) copies the bytes, so later changes to the decoder's buffer
-	// do not change the stored value.
+	// Copy: the decoder may reuse the text buffer after the call.
 	value := string(text)
 	s.v = &value
 	return nil
@@ -138,10 +132,8 @@ type SecretMap map[string]Secret
 // map. For a nil or empty map it returns a non-nil empty slice, so JSON
 // output gives [] and not null.
 func (m SecretMap) Keys() []string {
-	// maps.Keys returns an iterator; AppendSeq collects it into a slice
-	// whose capacity is set up front. This is not
-	// slices.Sorted(maps.Keys(m)) because that returns nil for an empty
-	// map, and Keys must return a non-nil slice (JSON [] and not null).
+	// Not slices.Sorted(maps.Keys(m)): it returns nil for an empty map, and
+	// Keys must return a non-nil slice (JSON [] and not null).
 	keys := slices.AppendSeq(make([]string, 0, len(m)), maps.Keys(m))
 	slices.Sort(keys)
 	return keys

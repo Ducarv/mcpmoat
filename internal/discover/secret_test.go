@@ -64,7 +64,8 @@ func TestSecretFormatVerbs(t *testing.T) {
 		name string
 		arg  any
 		// direct is true when fmt can call the Secret methods, so the
-		// output must contain Mask (except for %T and %p, see below).
+		// output must contain Mask formatted with the same verb (except
+		// for %T and %p, see below).
 		direct bool
 	}{
 		{name: "Secret", arg: val, direct: true},
@@ -94,11 +95,42 @@ func TestSecretFormatVerbs(t *testing.T) {
 				// ("%!p(discover.Secret={[] 0xc000...})"). That is safe
 				// only because Secret.v is a *string, so only an address
 				// shows. Do not change v to a string.
-				if v.direct && verb != "%T" && verb != "%p" && !strings.Contains(got, discover.Mask) {
-					t.Errorf("fmt.Sprintf(%q, %s) = %q, want it to contain %q", verb, v.name, got, discover.Mask)
+				if !v.direct || verb == "%T" || verb == "%p" {
+					return
+				}
+				if want := fmt.Sprintf(verb, discover.Mask); !strings.Contains(got, want) {
+					t.Errorf("fmt.Sprintf(%q, %s) = %q, want it to contain %q", verb, v.name, got, want)
 				}
 			})
 		}
+	}
+}
+
+// TestSecretFormatFlags checks that Format passes the verb and flags on to
+// Mask.
+func TestSecretFormatFlags(t *testing.T) {
+	t.Parallel()
+
+	val := discover.NewSecret(discovertest.CanaryEnv)
+	tests := []struct {
+		format string
+		want   string
+	}{
+		{format: "%q", want: `"********"`},
+		{format: "%#v", want: `"********"`},
+		{format: "%-10v", want: "********  "},
+		{format: "%10s", want: "  ********"},
+		{format: "%x", want: "2a2a2a2a2a2a2a2a"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.format, func(t *testing.T) {
+			t.Parallel()
+			got := fmt.Sprintf(tt.format, val)
+			discovertest.AssertNoLeak(t, "fmt.Sprintf("+tt.format+")", got, discovertest.CanaryEnv)
+			if got != tt.want {
+				t.Errorf("fmt.Sprintf(%q) = %q, want %q", tt.format, got, tt.want)
+			}
+		})
 	}
 }
 
@@ -183,10 +215,6 @@ func TestSecretMethods(t *testing.T) {
 	t.Parallel()
 
 	val := discover.NewSecret(discovertest.CanaryEnv)
-	// noErr adapts a method that cannot fail to the shape of call.
-	noErr := func(f func() string) func() (string, error) {
-		return func() (string, error) { return f(), nil }
-	}
 	tests := []struct {
 		name string
 		call func() (string, error)
@@ -300,13 +328,6 @@ func TestSecretSlog(t *testing.T) {
 	canary := discovertest.CanaryEnv
 	val := discover.NewSecret(canary)
 
-	handlers := []struct {
-		name string
-		make func(*bytes.Buffer) slog.Handler
-	}{
-		{name: "text", make: func(b *bytes.Buffer) slog.Handler { return slog.NewTextHandler(b, nil) }},
-		{name: "json", make: func(b *bytes.Buffer) slog.Handler { return slog.NewJSONHandler(b, nil) }},
-	}
 	attrs := []struct {
 		name     string
 		attr     slog.Attr
@@ -319,7 +340,7 @@ func TestSecretSlog(t *testing.T) {
 		{name: "exported field", attr: slog.Any("server", withExported{Name: "n", S: val}), wantMask: true},
 		{name: "unexported field", attr: slog.Any("server", withUnexported{s: val})},
 	}
-	for _, h := range handlers {
+	for _, h := range slogHandlers {
 		for _, a := range attrs {
 			t.Run(h.name+"/"+a.name, func(t *testing.T) {
 				t.Parallel()

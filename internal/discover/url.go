@@ -4,11 +4,10 @@ import (
 	"encoding"
 	"encoding/json"
 	"fmt"
-	"io"
 	"log/slog"
 )
 
-// Compile-time interface checks, as for Secret.
+// The build fails if URL stops implementing one of these interfaces.
 var (
 	_ fmt.Formatter            = URL{}
 	_ fmt.Stringer             = URL{}
@@ -26,12 +25,15 @@ var (
 // The zero value is an empty URL and prints as "". URLs cannot be compared
 // with ==; use Reveal or reflect.DeepEqual.
 //
-// URL is built like [Secret]; see the Secret comments for the idioms (struct
-// and not a string type, the [0]func() field, the pointer field, value and
-// pointer receivers).
+// URL is built like [Secret]; the Secret comments give the reasons for the
+// struct type, the fields and the value receivers.
 type URL struct {
-	_ [0]func() // not comparable with ==, zero size (same idiom as Secret)
-	v *string   // pointer, so fmt's reflection fallback prints only an address
+	// _ makes u1 == u2 a compile error, as in Secret.
+	_ [0]func()
+
+	// v is a pointer so that fmt prints only an address when it cannot call
+	// Format (see Secret.v).
+	v *string
 }
 
 // NewURL returns a URL that holds raw.
@@ -56,25 +58,25 @@ func (u URL) String() string {
 	return RedactURL(u.Reveal())
 }
 
-// GoString returns the same text as String (not quoted), so the %#v verb
-// does not show credentials. It implements fmt.GoStringer.
+// GoString returns the same text as String. It implements fmt.GoStringer
+// for code that calls it directly; fmt itself calls Format for %#v.
 func (u URL) GoString() string {
 	return u.String()
 }
 
-// Format writes the String result for every verb and flag, so no verb can
-// show credentials. It implements fmt.Formatter.
-func (u URL) Format(f fmt.State, _ rune) {
+// Format passes the verb and flags to the String result, so only the
+// redacted URL reaches fmt: %q quotes and escapes it, a width pads it. It
+// implements fmt.Formatter.
+func (u URL) Format(f fmt.State, verb rune) {
 	// fmt has no way to report a write error from Format (see Secret.Format).
-	_, _ = io.WriteString(f, u.String())
+	_, _ = fmt.Fprintf(f, fmt.FormatString(f, verb), u.String())
 }
 
 // MarshalJSON returns the String result as a JSON string. It implements
 // json.Marshaler.
 func (u URL) MarshalJSON() ([]byte, error) {
-	// json.Marshal quotes and escapes the text, so the result is always a
-	// valid JSON string, even if the redacted URL holds a quote or a
-	// backslash.
+	// The redacted URL can hold a quote or a backslash, so it must be
+	// escaped to give valid JSON.
 	return json.Marshal(u.String())
 }
 
@@ -90,7 +92,7 @@ func (u URL) MarshalText() ([]byte, error) {
 // Marshalling gives the redacted form, so a round trip is one-way, as for
 // Secret.
 func (u *URL) UnmarshalText(text []byte) error {
-	raw := string(text) // copies the bytes
+	raw := string(text) // copy: the decoder may reuse the text buffer
 	u.v = &raw
 	return nil
 }
