@@ -14,6 +14,7 @@ import (
 	"testing"
 
 	"github.com/Ducarv/mcpmoat/internal/discover/discovertest"
+	"github.com/Ducarv/mcpmoat/internal/termsafe"
 )
 
 // TestFileErrorError checks the Error() format. The FileError values are
@@ -336,35 +337,35 @@ func TestDisplayText(t *testing.T) {
 		{name: "control character is quoted", in: "a\x1bb", want: strconv.Quote("a\x1bb")},
 		{name: "blank rune is escaped", in: "a\u3164z", want: `"a\u3164z"`},
 
-		// Long text is cut to maxDisplayRunes runes and ends with cutMark.
+		// Long text is cut to maxDisplayRunes runes and ends with termsafe.CutMarker.
 		{name: "exactly at the cap", in: strings.Repeat("a", maxDisplayRunes), want: strings.Repeat("a", maxDisplayRunes)},
-		{name: "one rune over the cap", in: strings.Repeat("a", maxDisplayRunes+1), want: strings.Repeat("a", maxDisplayRunes) + cutMark},
-		{name: "4 KiB name", in: strings.Repeat("a", 4096), want: strings.Repeat("a", maxDisplayRunes) + cutMark},
-		{name: "cap counts runes not bytes", in: strings.Repeat("\u00e9", 300), want: strings.Repeat("\u00e9", maxDisplayRunes) + cutMark},
+		{name: "one rune over the cap", in: strings.Repeat("a", maxDisplayRunes+1), want: strings.Repeat("a", maxDisplayRunes) + termsafe.CutMarker},
+		{name: "4 KiB name", in: strings.Repeat("a", 4096), want: strings.Repeat("a", maxDisplayRunes) + termsafe.CutMarker},
+		{name: "cap counts runes not bytes", in: strings.Repeat("\u00e9", 300), want: strings.Repeat("\u00e9", maxDisplayRunes) + termsafe.CutMarker},
 		{
 			// The cut is made before the quoting, so it never splits an
-			// escape, and cutMark comes after the closing quote.
+			// escape, and the marker comes after the closing quote.
 			name: "long quoted text",
 			in:   strings.Repeat("\x1b", 4096),
-			want: `"` + strings.Repeat(`\x1b`, maxDisplayRunes) + `"` + cutMark,
+			want: `"` + strings.Repeat(`\x1b`, maxDisplayRunes) + `"` + termsafe.CutMarker,
 		},
 		{
 			name: "long text with blank runes",
 			in:   strings.Repeat("\u3164", 4096),
-			want: `"` + strings.Repeat(`\u3164`, maxDisplayRunes) + `"` + cutMark,
+			want: `"` + strings.Repeat(`\u3164`, maxDisplayRunes) + `"` + termsafe.CutMarker,
 		},
 		{
 			// An invalid byte counts as one rune.
 			name: "long invalid UTF-8",
 			in:   strings.Repeat("\xff", 4096),
-			want: `"` + strings.Repeat(`\xff`, maxDisplayRunes) + `"` + cutMark,
+			want: `"` + strings.Repeat(`\xff`, maxDisplayRunes) + `"` + termsafe.CutMarker,
 		},
 		{
 			// The part after the cut is not shown, so it does not make the
 			// text quoted.
 			name: "control character after the cut",
 			in:   strings.Repeat("a", maxDisplayRunes) + "\x1b",
-			want: strings.Repeat("a", maxDisplayRunes) + cutMark,
+			want: strings.Repeat("a", maxDisplayRunes) + termsafe.CutMarker,
 		},
 	}
 	for _, tt := range tests {
@@ -437,8 +438,8 @@ func TestFileErrorLongNames(t *testing.T) {
 		},
 	}
 	// Each name or key shows at most maxDisplayRunes escapes of at most 10
-	// bytes (\U0010ffff), plus the quotes and cutMark.
-	const maxLen = 2*(maxDisplayRunes*10+2+len(cutMark)) + 100
+	// bytes (\U0010ffff), plus the quotes and the marker.
+	const maxLen = 2*(maxDisplayRunes*10+2+len(termsafe.CutMarker)) + 100
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
@@ -446,8 +447,8 @@ func TestFileErrorLongNames(t *testing.T) {
 			if len(got) > maxLen {
 				t.Errorf("len(Error()) = %d, want at most %d", len(got), maxLen)
 			}
-			if !strings.Contains(got, cutMark+": ") {
-				t.Errorf("Error() = %q, want a cut name that ends with %q", got, cutMark)
+			if !strings.Contains(got, termsafe.CutMarker+": ") {
+				t.Errorf("Error() = %q, want a cut name that ends with %q", got, termsafe.CutMarker)
 			}
 			if !strings.HasSuffix(got, reasonBadEntry) {
 				t.Errorf("Error() = %q, want it to end with the reason %q", got, reasonBadEntry)

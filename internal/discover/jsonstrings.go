@@ -126,9 +126,9 @@ func objectMembers(data []byte) ([]jsonMember, bool) {
 		if err := dec.Decode(&raw); err != nil {
 			return nil, false
 		}
-		// Between the key and the value there is only a colon and
-		// whitespace. len(data) minus the length of the rest gives the index.
-		m.valStart = len(data) - len(bytes.TrimLeft(data[m.keyEnd:], " \t\r\n:"))
+		// Between the key and the value there is only a colon and JSON
+		// white space. len(data) minus the length of the rest gives the index.
+		m.valStart = len(data) - len(bytes.TrimLeft(data[m.keyEnd:], jsonSpace+":"))
 		m.valEnd = m.valStart + len(raw)
 		members = append(members, m)
 	}

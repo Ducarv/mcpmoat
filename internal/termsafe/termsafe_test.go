@@ -172,6 +172,71 @@ func TestCutRunes(t *testing.T) {
 	}
 }
 
+func TestQuoteCut(t *testing.T) {
+	t.Parallel()
+
+	const m = termsafe.CutMarker
+	tests := []struct {
+		name string
+		in   string
+		n    int
+		want string
+	}{
+		{name: "empty", in: "", n: 3, want: ""},
+		{name: "short plain text is kept", in: "ab", n: 3, want: "ab"},
+		{name: "exactly n runes are kept", in: "abc", n: 3, want: "abc"},
+		{name: "one rune over n is cut", in: "abcd", n: 3, want: "abc" + m},
+		{name: "counts runes not bytes", in: "\u00e9\u00e9\u00e9\u00e9", n: 3, want: "\u00e9\u00e9\u00e9" + m},
+		{name: "short unsafe text is quoted, not cut", in: "a\x1bb", n: 3, want: `"a\x1bb"`},
+		{
+			// The marker comes after the closing quote, and the cut never
+			// splits an escape.
+			name: "cut text with a control character",
+			in:   "a\x1bbcd",
+			n:    3,
+			want: `"a\x1bb"` + m,
+		},
+		{name: "cut blank runes", in: "\u3164\u3164\u3164", n: 2, want: `"\u3164\u3164"` + m},
+		{name: "invalid byte counts as one rune", in: "\xff\xff\xff\xff", n: 3, want: `"\xff\xff\xff"` + m},
+		{
+			// The part after the cut is not shown, so it does not make the
+			// text quoted.
+			name: "unsafe rune after the cut",
+			in:   "abc\x1b",
+			n:    3,
+			want: "abc" + m,
+		},
+		{
+			// Content can end with "..." too: the marker is added once, after
+			// it.
+			name: "text that ends with the marker",
+			in:   "ab...x",
+			n:    5,
+			want: "ab..." + m,
+		},
+		{name: "n is zero", in: "a", n: 0, want: m},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got := termsafe.QuoteCut(tt.in, tt.n)
+			if got != tt.want {
+				t.Errorf("QuoteCut(%q, %d) = %q, want %q", tt.in, tt.n, got, tt.want)
+			}
+			assertSafe(t, tt.in, got)
+		})
+	}
+}
+
+func TestCutMarkerIsASCII(t *testing.T) {
+	t.Parallel()
+	for i := range len(termsafe.CutMarker) {
+		if c := termsafe.CutMarker[i]; c < 0x20 || c > 0x7e {
+			t.Fatalf("CutMarker = %q has the byte 0x%02x, want printable ASCII only", termsafe.CutMarker, c)
+		}
+	}
+}
+
 // assertSafe checks the output rules that hold for every input.
 func assertSafe(t *testing.T, in, out string) {
 	t.Helper()

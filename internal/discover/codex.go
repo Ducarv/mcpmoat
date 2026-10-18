@@ -5,7 +5,6 @@ import (
 	"context"
 	"errors"
 	"maps"
-	"path/filepath"
 	"slices"
 
 	"github.com/BurntSushi/toml"
@@ -178,46 +177,6 @@ func ReadCodex(ctx context.Context, path string) Result {
 		return Result{}
 	}
 	servers, errs := parseCodex(ctx, path, data)
-	return Result{Servers: servers, Errors: errs}
-}
-
-// maxUntrustedTOMLSize is the size limit of an untrusted Codex file (see
-// readUntrustedCodex): the smaller of maxTOMLSize and maxProjectConfigSize.
-const maxUntrustedTOMLSize = min(maxTOMLSize, maxProjectConfigSize)
-
-// readUntrustedCodex parses data, the content of a Codex file that the user
-// gave (for example with --config) and that is not the user's own
-// ~/.codex/config.toml. Such a file can come from a cloned repository, so
-// ReadConfig reads it as an untrusted project file, as it does for a JSON
-// file:
-//
-//   - ReadConfig reads the file once, confined to the directory of the file:
-//     a symlink that leaves that directory, or an absolute symlink, is
-//     refused with "file is outside the project". readUntrustedCodex parses
-//     those bytes and does not read the file again.
-//   - The size limit is maxUntrustedTOMLSize.
-//   - Every server gets ScopeProject and Untrusted. Its ProjectPath is the
-//     directory of the file, or the parent of that directory when it is
-//     named ".codex" (Codex keeps a project config in
-//     <project>/.codex/config.toml). The path is not made absolute.
-//   - Every error gets Untrusted.
-//
-// The other rules are the ones of ReadCodex. ReadCodex itself has no
-// untrusted mode, because Discover reads only the user's own Codex file.
-func readUntrustedCodex(ctx context.Context, path string, data []byte) Result {
-	if len(data) > maxUntrustedTOMLSize {
-		return untrustedError(readError(path, reasonTooLarge, nil))
-	}
-	servers, errs := parseCodex(ctx, path, data)
-	projectPath := filepath.Dir(path)
-	if filepath.Base(projectPath) == ".codex" {
-		projectPath = filepath.Dir(projectPath)
-	}
-	for i := range servers {
-		servers[i].Scope = ScopeProject
-		servers[i].ProjectPath = projectPath
-	}
-	markUntrusted(servers, errs)
 	return Result{Servers: servers, Errors: errs}
 }
 

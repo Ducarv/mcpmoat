@@ -23,11 +23,12 @@ const emptyServers = "No MCP servers found.\n"
 //
 // The bound: a file can hold at most 10,000 servers, and auto-discovery reads
 // up to 5 files, so the table has at most 50,000 rows. A padded row is at most
-// 3 x (80+1) + 2 x (256+1) runes plus 5 x 3 bytes of padding, about 770 bytes
-// for ASCII text ("+1" is the cut marker). So the padding stays near 40 MB in
-// the worst case. Multi-byte runes and escaping make a cell longer (a control
-// character becomes up to 10 bytes), so hostile text can reach a few hundred
-// MB. That is still bounded, and a real config is far from it.
+// 3 x (80+3) + 2 x (256+3) runes, plus 12 for the untrusted marker of SCOPE,
+// plus 5 x 3 bytes of padding: about 800 bytes for ASCII text ("+3" is the cut
+// marker). So the padding stays near 40 MB in the worst case. Multi-byte runes
+// and escaping make a cell longer (a control character becomes up to 10
+// bytes), so hostile text can reach a few hundred MB. That is still bounded,
+// and a real config is far from it.
 const (
 	// maxShortCellRunes is the cap for the short cells: NAME, CLIENT and
 	// TRANSPORT. 80 runes is more than any real server name, client or
@@ -41,11 +42,10 @@ const (
 	maxPathRunes = 256
 )
 
-// cutMarker ends a padded cell that was cut. It is added after escaping, so
-// escaping never removes it and a cut cell always shows it. Content can also
-// contain "…", so a cell that ends with it is not always cut; it can never
-// hide text, though.
-const cutMarker = "\u2026"
+// untrustedMarker follows the SCOPE cell of a server from a project file
+// (discover.Server.Untrusted), which a cloned repository can ship. It is added
+// after the cut and the quoting, so it is never cut or escaped.
+const untrustedMarker = " (untrusted)"
 
 // WriteServers writes the server table to w, or the line "No MCP servers
 // found." when servers is empty. Rows keep the order of servers.
@@ -54,11 +54,12 @@ const cutMarker = "\u2026"
 //
 //	NAME          the server name in the config
 //	CLIENT        the client whose config declared the server
-//	SCOPE         "global", or "project:" and the project path
+//	SCOPE         "global", or "project:" and the project path; a server
+//	              from a project file also shows " (untrusted)"
 //	TRANSPORT     stdio, http or sse
 //	SOURCE        the config file that declared the server
 //	COMMAND/URL   the redacted command line for stdio (see
-//	              [FormatCommand]), the redacted URL for http and sse
+//	              formatCommand), the redacted URL for http and sse
 //
 // Every cell goes through [termsafe.Quote]. Config files are untrusted, so a
 // cell can hold terminal escape sequences, bidi characters or invalid UTF-8. A
@@ -66,19 +67,19 @@ const cutMarker = "\u2026"
 // as the column separator and the newline as the row separator.
 // termsafe.Quote quotes such a cell, so the table keeps its shape.
 //
-// The padded columns are cut and a cut cell ends with "…". NAME, CLIENT and
-// TRANSPORT are cut at 80 runes. SCOPE and SOURCE hold paths and are cut at 256
-// runes, and an invalid UTF-8 byte counts as one rune ([termsafe.CutRunes]).
-// The cut is made on the raw text, before escaping, so an escaped cell can be
-// longer than the cap. These limits stop padding amplification: see
-// maxShortCellRunes and maxPathRunes. COMMAND/URL is the last column.
+// The padded columns are cut with [termsafe.QuoteCut], and a cut cell ends
+// with [termsafe.CutMarker]. NAME, CLIENT and TRANSPORT are cut at 80 runes.
+// SCOPE and SOURCE hold paths and are cut at 256 runes, and an invalid UTF-8
+// byte counts as one rune. The cut is made on the raw text, before escaping,
+// so an escaped cell can be longer than the cap. These limits stop padding
+// amplification: see maxShortCellRunes and maxPathRunes. COMMAND/URL is the last column.
 // tabwriter does not pad it, so it cannot amplify, and it is never cut. So no
 // argument is hidden from a security review.
 //
 // WriteServers never prints a value as written from Args, Env, Headers or
 // URL. It never reads Env or Headers values and never calls Reveal. The
 // COMMAND/URL cell shows the command and the args through the
-// discover.RedactArgs allowlist (see [FormatCommand]), and the URL through
+// discover.RedactArgs allowlist (see formatCommand), and the URL through
 // URL.String, which removes credentials.
 //
 // The table has no colour. The full coloured report comes in milestone M6.
@@ -125,21 +126,23 @@ func WriteServers(w io.Writer, servers []discover.Server) error {
 }
 
 // cell returns the text of one padded column cell: s cut at limit runes and
-// escaped. A cut cell ends with cutMarker, which is added after escaping.
+// escaped (see termsafe.QuoteCut).
 func cell(s string, limit int) string {
-	short, cut := termsafe.CutRunes(s, limit)
-	if cut {
-		return termsafe.Quote(short) + cutMarker
-	}
-	return termsafe.Quote(short)
+	return termsafe.QuoteCut(s, limit)
 }
 
-// scopeCell returns the SCOPE cell for s.
+// scopeCell returns the SCOPE cell for s. For an untrusted server,
+// untrustedMarker comes after the cut and quoted text.
 func scopeCell(s discover.Server) string {
+	text := string(s.Scope)
 	if s.Scope == discover.ScopeProject {
-		return cell("project:"+s.ProjectPath, maxPathRunes)
+		text = "project:" + s.ProjectPath
 	}
-	return cell(string(s.Scope), maxPathRunes)
+	c := cell(text, maxPathRunes)
+	if s.Untrusted {
+		c += untrustedMarker
+	}
+	return c
 }
 
 // commandCell returns the escaped COMMAND/URL cell for s.
@@ -149,10 +152,10 @@ func commandCell(s discover.Server) string {
 		return termsafe.Quote(s.URL.String())
 	}
 	// stdio, and any unknown transport (defensive): show the command line.
-	return FormatCommand(s.Command, s.Args)
+	return formatCommand(s.Command, s.Args)
 }
 
-// FormatCommand formats the COMMAND/URL cell of a stdio server: a command
+// formatCommand formats the COMMAND/URL cell of a stdio server: a command
 // and its arguments, as one table cell. It never shows an argument as
 // written: the command and the args go through [discover.RedactArgs]
 // together, as one command line. RedactArgs is an allowlist that fails
@@ -167,7 +170,7 @@ func commandCell(s discover.Server) string {
 // reader can still see where one argument ends and the next one starts. Parts
 // are joined with one space. Nothing is cut: the COMMAND/URL cell is the last column,
 // which is never cut.
-func FormatCommand(command string, args discover.Args) string {
+func formatCommand(command string, args discover.Args) string {
 	// Values gives the args as written. They go straight into RedactArgs and
 	// nowhere else, so only the redacted form reaches the cell. Args.String
 	// is not enough here: it joins the parts with a space, so an empty part

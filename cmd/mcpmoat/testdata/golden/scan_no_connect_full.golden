@@ -1,7 +1,7 @@
-NAME             CLIENT        SCOPE                 TRANSPORT   SOURCE                     COMMAND/URL
-cc-global        claude-code   global                stdio       $HOME/.claude.json         npx -y cc-global
-cc-alpha         claude-code   project:/work/alpha   stdio       $HOME/.claude.json         node alpha.js
-cc-project       claude-code   project:$WORK         http        $WORK/.mcp.json            https://cc-project.example.com/mcp
-cursor-global    cursor        global                stdio       $HOME/.cursor/mcp.json     uvx cursor-global
-cursor-project   cursor        project:$WORK         http        $WORK/.cursor/mcp.json     https://cursor-project.example.com/mcp
-codex-global     codex         global                stdio       $HOME/.codex/config.toml   npx -y codex-global
+NAME             CLIENT        SCOPE                       TRANSPORT   SOURCE                     COMMAND/URL
+cc-global        claude-code   global                      stdio       $HOME/.claude.json         npx -y cc-global
+cc-alpha         claude-code   project:/work/alpha         stdio       $HOME/.claude.json         node alpha.js
+cc-project       claude-code   project:$WORK (untrusted)   http        $WORK/.mcp.json            https://cc-project.example.com/mcp
+cursor-global    cursor        global                      stdio       $HOME/.cursor/mcp.json     uvx cursor-global
+cursor-project   cursor        project:$WORK (untrusted)   http        $WORK/.cursor/mcp.json     https://cursor-project.example.com/mcp
+codex-global     codex         global                      stdio       $HOME/.codex/config.toml   npx -y codex-global

@@ -31,6 +31,22 @@ type Result struct {
 	Errors []*FileError
 }
 
+// The user's own config files, relative to the home directory, with forward
+// slashes. buildSteps reads them as the global steps of Discover, and
+// globalFiles lists them for ReadConfig. homePath joins one to a home
+// directory.
+const (
+	globalClaudeCodeFile = ".claude.json"
+	globalCursorFile     = ".cursor/mcp.json"
+	globalCodexFile      = ".codex/config.toml"
+)
+
+// homePath returns the path of rel, one of the global files above, below
+// home.
+func homePath(home, rel string) string {
+	return filepath.Join(home, filepath.FromSlash(rel))
+}
+
 // step is one config file that Discover reads.
 type step struct {
 	// path is used for the FileError when the context is canceled before the
@@ -129,7 +145,7 @@ func buildSteps(opts Options) []step {
 	var steps []step
 
 	if opts.Home != "" {
-		path := filepath.Join(opts.Home, ".claude.json")
+		path := homePath(opts.Home, globalClaudeCodeFile)
 		steps = append(steps, step{path: path, read: func(ctx context.Context) Result {
 			return ReadClaudeCode(ctx, path, ScopeGlobal, "")
 		}})
@@ -145,7 +161,7 @@ func buildSteps(opts Options) []step {
 	// never empty, so it never equals an empty homeCursor.
 	var homeCursor string
 	if opts.Home != "" {
-		homeCursor = filepath.Join(opts.Home, ".cursor", "mcp.json")
+		homeCursor = homePath(opts.Home, globalCursorFile)
 		steps = append(steps, step{path: homeCursor, read: func(ctx context.Context) Result {
 			return ReadCursor(ctx, homeCursor, ScopeGlobal, "")
 		}})
@@ -164,7 +180,7 @@ func buildSteps(opts Options) []step {
 	}
 
 	if opts.Home != "" {
-		path := filepath.Join(opts.Home, ".codex", "config.toml")
+		path := homePath(opts.Home, globalCodexFile)
 		steps = append(steps, step{path: path, read: func(ctx context.Context) Result {
 			return ReadCodex(ctx, path)
 		}})

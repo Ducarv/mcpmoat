@@ -24,7 +24,9 @@ import (
 //
 // Exit codes:
 //   - 0: the table is printed, and no config file had a problem. A missing
-//     file is not a problem in auto-discovery.
+//     file is not a problem in auto-discovery. No rules run yet, so scan
+//     then prints noRulesNotice on stderr: exit code 0 does not mean that
+//     the servers are safe.
 //   - 2: a flag or usage error, no home or working directory in
 //     auto-discovery, a write error on stdout, or any problem with a config
 //     file (a discover.FileError), in auto-discovery too and also for the
@@ -35,24 +37,23 @@ import (
 //     no servers at all gives only the problems, and no table.
 func (c *cli) runScan(_ options, args []string) int {
 	fs := flag.NewFlagSet("mcpmoat scan", flag.ContinueOnError)
-	// Like parseGlobals: we print our own messages, not the flag package.
-	// So the usage strings below are never shown. scanUsage prints the help.
+	// We print our own messages and scanUsage prints the help, so the flag
+	// package prints nothing and the flags have no usage text.
 	fs.SetOutput(io.Discard)
-	noConnect := fs.Bool("no-connect", false, "list the servers in the configs; start no process and open no connection")
+	noConnect := fs.Bool("no-connect", false, "")
 
 	// fs.Func calls the function once for each time the user gives --config.
 	// An error from it becomes a flag error: exit code 2 with a clear message.
+	// An empty value is refused, so configPath != "" means --config was given.
 	var configPath string
-	configSet := false
-	fs.Func("config", "read only this file; skip auto-discovery", func(value string) error {
-		if configSet {
+	fs.Func("config", "", func(value string) error {
+		if configPath != "" {
 			return errors.New("--config given more than once")
 		}
 		if value == "" || isScanFlag(fs, value) {
 			return errors.New("--config needs a file name")
 		}
 		configPath = value
-		configSet = true
 		return nil
 	})
 
@@ -79,16 +80,8 @@ func (c *cli) runScan(_ options, args []string) int {
 	// main will pass a context that ends on Ctrl-C.
 	ctx := context.Background()
 
-	if configSet {
-		// The home directory only tells ReadConfig whether the file is one of
-		// the user's own global files. Without a home, no file is: the file is
-		// read as untrusted, the safe side. So a home error is not fatal here,
-		// and its text is not printed.
-		home, err := c.homeDir()
-		if err != nil {
-			home = ""
-		}
-		return c.listServers(discover.ReadConfig(ctx, configPath, home), true)
+	if configPath != "" {
+		return c.scanConfig(ctx, configPath)
 	}
 	return c.scanAuto(ctx)
 }
@@ -111,6 +104,28 @@ func isScanFlag(fs *flag.FlagSet, value string) bool {
 	return fs.Lookup(name) != nil || name == "h" || name == "help"
 }
 
+// scanConfig reads the one file that --config names.
+func (c *cli) scanConfig(ctx context.Context, path string) int {
+	// The home directory only tells ReadConfig whether the file is one of the
+	// user's own global files. Without a home, no file is: the file is read
+	// as untrusted, the safe side. So a home error is not fatal here, and its
+	// text is not printed.
+	home, err := c.homeDir()
+	if err != nil {
+		home = ""
+	}
+	res := discover.ReadConfig(ctx, path, home)
+
+	// A file that failed to load and gave no servers is a plain error. The
+	// "No MCP servers found." line would be wrong and misleading here, so we
+	// skip the table and print only the errors.
+	if len(res.Servers) == 0 && len(res.Errors) > 0 {
+		c.printFileErrors(res.Errors)
+		return exitError
+	}
+	return c.listServers(res)
+}
+
 // scanAuto looks for the config files of the known clients, in the home
 // directory and in the working directory.
 func (c *cli) scanAuto(ctx context.Context) int {
@@ -125,8 +140,7 @@ func (c *cli) scanAuto(ctx context.Context) int {
 		fprintf(c.stderr, "mcpmoat scan: cannot read the working directory; use --config\n")
 		return exitError
 	}
-	res := discover.Discover(ctx, discover.Options{Home: home, WorkDir: wd})
-	return c.listServers(res, false)
+	return c.listServers(discover.Discover(ctx, discover.Options{Home: home, WorkDir: wd}))
 }
 
 // configErrorHint is the line that listServers prints after the file
@@ -135,27 +149,30 @@ func (c *cli) scanAuto(ctx context.Context) int {
 const configErrorHint = "mcpmoat scan: a config file has a problem; " +
 	"the table can miss servers that the client loads"
 
+// noRulesNotice is the line that listServers prints on stderr when the scan
+// exits with 0. --no-connect applies no rules yet (they come in M4), so the
+// exit code must not read as "the servers are safe". It is a notice, not a
+// warning or an error, and it is fixed text.
+const noRulesNotice = "mcpmoat scan: no rules were applied yet; " +
+	"exit code 0 does not mean the servers are safe"
+
 // listServers prints the server table on stdout and the file problems on
 // stderr. Any problem gives exit code 2, after the table and all problems are
-// printed (see runScan). strict is true for --config: then a file that gave
-// no servers and has a problem gives only the problem, and no table.
-func (c *cli) listServers(res discover.Result, strict bool) int {
-	// With --config, a file that failed to load and gave no servers is a
-	// plain error. The "No MCP servers found." line would be wrong and
-	// misleading here, so we skip the table and print only the errors.
-	if strict && len(res.Servers) == 0 && len(res.Errors) > 0 {
-		c.printFileErrors(res.Errors)
-		return exitError
-	}
-
+// printed (see runScan). Without a problem it prints noRulesNotice and gives
+// exit code 0.
+func (c *cli) listServers(res discover.Result) int {
 	// Do not use fprintf for the table: a write error (a closed pipe, for
 	// example) must give exit code 2.
 	if err := report.WriteServers(c.stdout, res.Servers); err != nil {
 		fprintf(c.stderr, "mcpmoat scan: cannot write output\n")
+		// stderr can still work. The file problems are the reason for a
+		// failed scan, so the user must still see them.
+		c.printFileErrors(res.Errors)
 		return exitError
 	}
 
 	if len(res.Errors) == 0 {
+		fprintf(c.stderr, "%s\n", noRulesNotice)
 		return exitOK
 	}
 	// Print the problems in the order of the result, then the hint.

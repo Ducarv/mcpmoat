@@ -80,6 +80,13 @@ func jsonAllKeys() []string {
 	return keys
 }
 
+// jsonSpace holds the four bytes that JSON allows as white space: space, tab,
+// CR and LF. DetectClient, loadJSONFile and objectMembers trim only these
+// bytes.
+// bytes.TrimSpace would also trim Unicode spaces such as U+00A0, which JSON
+// does not allow.
+const jsonSpace = " \t\r\n"
+
 // jsonFile is one Claude Code or Cursor JSON config to read. ReadClaudeCode
 // and ReadCursor build it with named fields.
 type jsonFile struct {
@@ -153,13 +160,16 @@ func (f jsonFile) topProjectPath() string {
 }
 
 // projectDirOf returns the project directory of the project file at path:
-// the directory of the file, or, for a Cursor file in a directory named
-// ".cursor", the parent of that directory. Cursor keeps its project file in
-// <project>/.cursor/mcp.json. The path is not made absolute: the package
-// never reads the current directory by itself.
+// the directory of the file, or the parent of that directory when the client
+// keeps its project file in a directory of its own. That is a Cursor file in
+// a directory named ".cursor" (<project>/.cursor/mcp.json), or a Codex file
+// in a directory named ".codex" (<project>/.codex/config.toml). The path is
+// not made absolute: the package never reads the current directory by itself.
 func projectDirOf(path string, client Client) string {
 	dir := filepath.Dir(path)
-	if client == ClientCursor && inCursorDir(path) {
+	switch {
+	case client == ClientCursor && inCursorDir(path),
+		client == ClientCodex && filepath.Base(dir) == ".codex":
 		return filepath.Dir(dir)
 	}
 	return dir
@@ -251,9 +261,7 @@ func loadJSONFile(ctx context.Context, f jsonFile) (map[string]json.RawMessage, 
 	if fe != nil {
 		return nil, fe
 	}
-	// Trim only the four JSON whitespace bytes. bytes.TrimSpace would also
-	// trim Unicode spaces such as U+00A0, which JSON does not allow.
-	if !found || len(bytes.Trim(data, " \t\r\n")) == 0 {
+	if !found || len(bytes.Trim(data, jsonSpace)) == 0 {
 		return nil, nil
 	}
 

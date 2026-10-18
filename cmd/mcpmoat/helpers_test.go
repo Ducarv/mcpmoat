@@ -5,12 +5,15 @@ package main
 
 import (
 	"bytes"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"runtime"
 	"slices"
 	"strings"
 	"testing"
+
+	"github.com/Ducarv/mcpmoat/internal/discover/discovertest"
 )
 
 // fixtureDir returns the path of a fixture under the repository's
@@ -40,7 +43,8 @@ var tableHeader = []string{"NAME", "CLIENT", "SCOPE", "TRANSPORT", "SOURCE", "CO
 //
 // The NAME and CLIENT cells never hold a space, so the first two words of a
 // row are safe to use. Use a later word only when no cell before it can hold
-// a space.
+// a space. The SCOPE cell of an untrusted server ends with " (untrusted)",
+// which is one more word.
 func tableRows(t *testing.T, stdout string) [][]string {
 	t.Helper()
 	lines := strings.Split(strings.TrimSuffix(stdout, "\n"), "\n")
@@ -90,7 +94,8 @@ func assertContainsAll(t *testing.T, what, got string, wants []string) {
 
 // assertScanErrorLines fails the test if a non-empty line of stderr does not
 // start with "mcpmoat scan: ", or if it is a warning. A config problem fails
-// the scan, so scan must report it as an error and never as a warning.
+// the scan, so scan must report it as an error and never as a warning. The
+// notice noRulesNotice has the same prefix and is not a warning either.
 func assertScanErrorLines(t *testing.T, stderr string) {
 	t.Helper()
 	const prefix = "mcpmoat scan: "
@@ -99,6 +104,65 @@ func assertScanErrorLines(t *testing.T, stderr string) {
 			t.Errorf("stderr line %q must start with %q and not be a warning", line, prefix)
 		}
 	}
+}
+
+// assertNoRulesNotice fails the test unless stderr is exactly the notice
+// line that a scan with exit code 0 prints.
+func assertNoRulesNotice(t *testing.T, stderr string) {
+	t.Helper()
+	if want := noRulesNotice + "\n"; stderr != want {
+		t.Errorf("stderr = %q, want only the notice %q", stderr, want)
+	}
+}
+
+// scanWant is the expected result of one scan run, for assertScanResult.
+type scanWant struct {
+	code     int
+	stdout   []string // substrings of stdout
+	noStdout []string // strings that stdout must not contain
+	// stderr are substrings of stderr. With code exitOK, stderr must be
+	// exactly the notice line, so leave stderr empty.
+	stderr []string
+}
+
+// assertScanResult checks the exit code, stdout and stderr of a scan run
+// against want. It also checks the rules that hold for every scan:
+//   - exit code 0 prints only noRulesNotice on stderr, and exit code 2 never
+//     prints it;
+//   - every stderr line starts with "mcpmoat scan: " and is not a warning;
+//   - no canary value leaks and no raw escape byte shows.
+func assertScanResult(t *testing.T, code int, stdout, stderr string, want scanWant) {
+	t.Helper()
+	if code != want.code {
+		t.Errorf("exit code = %d, want %d\nstdout:\n%s\nstderr:\n%s", code, want.code, stdout, stderr)
+	}
+	assertContainsAll(t, "stdout", stdout, want.stdout)
+	for _, bad := range want.noStdout {
+		if strings.Contains(stdout, bad) {
+			t.Errorf("stdout contains %q\nstdout:\n%s", bad, stdout)
+		}
+	}
+	assertContainsAll(t, "stderr", stderr, want.stderr)
+	if want.code == exitOK {
+		assertNoRulesNotice(t, stderr)
+	} else if strings.Contains(stderr, noRulesNotice) {
+		t.Errorf("stderr holds the notice %q, but the scan failed\nstderr:\n%s", noRulesNotice, stderr)
+	}
+	assertScanErrorLines(t, stderr)
+	discovertest.AssertNoLeak(t, "stdout", stdout)
+	discovertest.AssertNoLeak(t, "stderr", stderr)
+	assertNoEscape(t, stdout, stderr)
+}
+
+// writeServers writes a JSON config with servers as its "mcpServers" object
+// to dir/name and returns the full path.
+func writeServers(t *testing.T, dir, name string, servers map[string]any) string {
+	t.Helper()
+	data, err := json.Marshal(map[string]any{"mcpServers": servers})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return scanWriteFile(t, dir, name, string(data))
 }
 
 // symlink makes link point to target. It creates the parent directory of

@@ -198,22 +198,11 @@ func errText(err error) string {
 // of many KiB, and one such error must not fill the terminal.
 const maxDisplayRunes = 200
 
-// cutMark ends a text that displayText cut.
-const cutMark = "..."
-
 // displayText returns a server name or a project key for a FileError
-// message. A text with more than maxDisplayRunes runes is cut to that many
-// runes (see termsafe.CutRunes), and cutMark is added at the end. The cut is
-// made before the quoting, so it never splits an escape. Then the text goes
-// through termsafe.Quote. cutMark comes after the closing quote of a quoted
-// text.
+// message: termsafe.QuoteCut with the cap maxDisplayRunes. A longer text is
+// cut, quoted when needed, and ends with termsafe.CutMarker.
 func displayText(s string) string {
-	s, cut := termsafe.CutRunes(s, maxDisplayRunes)
-	s = termsafe.Quote(s)
-	if cut {
-		s += cutMark
-	}
-	return s
+	return termsafe.QuoteCut(s, maxDisplayRunes)
 }
 
 // lineCol converts a byte offset in data to a 1-based line and a 1-based

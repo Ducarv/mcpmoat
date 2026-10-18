@@ -319,6 +319,10 @@ func TestUsageContent(t *testing.T) {
 		"  1  findings at or above --fail-on\n",
 		"  2  execution error\n",
 		"     (scan also exits 2 when a config file has a problem; a missing file is not a problem)\n",
+		"     (scan --no-connect applies no rules yet, so 0 does not mean the servers are safe)\n",
+		"Scan output:\n",
+		"  A heuristic masks secret-like arguments. Review the output before you share it.\n",
+		"  --no-connect applies no rules yet. Exit code 0 does not mean that the servers are safe.\n",
 	} {
 		if !strings.Contains(got, want) {
 			t.Errorf("usage text does not contain %q\n--- got ---\n%s", want, got)

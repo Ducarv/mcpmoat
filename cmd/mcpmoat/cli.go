@@ -164,10 +164,11 @@ func (c *cli) usage(w io.Writer) {
 	fprintf(w, "  1  findings at or above --fail-on\n")
 	fprintf(w, "  2  execution error\n")
 	fprintf(w, "     (scan also exits 2 when a config file has a problem; a missing file is not a problem)\n")
+	fprintf(w, "     (scan --no-connect applies no rules yet, so 0 does not mean the servers are safe)\n")
 }
 
-// scanUsage writes the flags of the scan command to w. usage includes it, and
-// "mcpmoat scan -h" prints it alone.
+// scanUsage writes the flags and the output notes of the scan command to w.
+// usage includes it, and "mcpmoat scan -h" prints it alone.
 func (c *cli) scanUsage(w io.Writer) {
 	fprintf(w, "Scan flags (after \"scan\"):\n")
 	// Padding 2 keeps the descriptions in one column, like the text in usage.
@@ -176,6 +177,10 @@ func (c *cli) scanUsage(w io.Writer) {
 	fprintf(tw, "  --config <file>\tRead only this file (Claude Code JSON, Cursor JSON or Codex TOML); skips auto-discovery\n")
 	fprintf(tw, "  \tA file that is not your own global config is read as an untrusted project file\n")
 	_ = tw.Flush() // the write error is ignored on purpose, see fprintf
+
+	fprintf(w, "\nScan output:\n")
+	fprintf(w, "  A heuristic masks secret-like arguments. Review the output before you share it.\n")
+	fprintf(w, "  --no-connect applies no rules yet. Exit code 0 does not mean that the servers are safe.\n")
 }
 
 // fprintf writes formatted text to w and ignores the write error on purpose.

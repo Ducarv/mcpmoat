@@ -81,9 +81,10 @@
 //   - A JSON file with a "projects" key is Claude Code.
 //   - A JSON file with only an "mcpServers" key is Cursor when the file is in a
 //     .cursor directory, and Claude Code otherwise.
-//   - A JSON object with neither key is chosen by the file name: .claude.json
-//     and .mcp.json are Claude Code, and mcp.json in a .cursor directory is
-//     Cursor. Any other name is an unknown format.
+//   - A JSON object with neither key, and a .json file with only JSON white
+//     space, are chosen by the file name: .claude.json and .mcp.json are
+//     Claude Code, and mcp.json in a .cursor directory is Cursor. Any other
+//     name is an unknown format.
 //   - Anything else is an unknown format.
 //
 // Detection has known limits: see [DetectClient].

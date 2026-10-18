@@ -36,25 +36,30 @@ func sortedWant(ss []Server) []wantServer {
 	return out
 }
 
-func TestReadConfig(t *testing.T) {
-	t.Parallel()
+// wantGlobal gives the want list of servers from one of the user's own global
+// files: ScopeGlobal and no project directory.
+func wantGlobal(names ...string) []wantServer {
+	var out []wantServer
+	for _, n := range names {
+		out = append(out, wantServer{Name: n, Scope: ScopeGlobal})
+	}
+	return out
+}
 
-	global := func(names ...string) []wantServer {
-		var out []wantServer
-		for _, n := range names {
-			out = append(out, wantServer{Name: n, Scope: ScopeGlobal})
-		}
-		return out
+// wantProject gives the want list of servers that ReadConfig reads as
+// untrusted: ScopeProject and the project directory dir.
+func wantProject(dir string, names ...string) []wantServer {
+	var out []wantServer
+	for _, n := range names {
+		out = append(out, wantServer{Name: n, Scope: ScopeProject, ProjectPath: dir})
 	}
-	// project gives the want list of servers that ReadConfig reads as
-	// untrusted: ScopeProject and the project directory dir.
-	project := func(dir string, names ...string) []wantServer {
-		var out []wantServer
-		for _, n := range names {
-			out = append(out, wantServer{Name: n, Scope: ScopeProject, ProjectPath: dir})
-		}
-		return out
-	}
+	return out
+}
+
+// TestReadConfigValid reads the valid fixture of each client, as a global
+// file and as an untrusted file, and checks the servers and their fields.
+func TestReadConfigValid(t *testing.T) {
+	t.Parallel()
 
 	valid := []struct {
 		name    string
@@ -79,7 +84,7 @@ func TestReadConfig(t *testing.T) {
 			withHome:   true,
 			wantClient: ClientClaudeCode,
 			wantServers: func(_, _ string) []wantServer {
-				return append(global("filesystem", "remote-http", "remote-sse"),
+				return append(wantGlobal("filesystem", "remote-http", "remote-sse"),
 					wantServer{"alpha-tool", ScopeProject, "/work/alpha"},
 					wantServer{"gamma-tool", ScopeProject, "/work/gamma"},
 				)
@@ -94,7 +99,7 @@ func TestReadConfig(t *testing.T) {
 			rel:        []string{".claude.json"},
 			wantClient: ClientClaudeCode,
 			wantServers: func(home, _ string) []wantServer {
-				return project(home, "filesystem", "remote-http", "remote-sse")
+				return wantProject(home, "filesystem", "remote-http", "remote-sse")
 			},
 			wantReasons: []string{reasonProjectsNotRead},
 		},
@@ -106,7 +111,7 @@ func TestReadConfig(t *testing.T) {
 			withHome:   true,
 			wantClient: ClientClaudeCode,
 			wantServers: func(_, work string) []wantServer {
-				return project(work, "local-db", "team-api")
+				return wantProject(work, "local-db", "team-api")
 			},
 		},
 		{
@@ -116,7 +121,7 @@ func TestReadConfig(t *testing.T) {
 			rel:         []string{".cursor", "mcp.json"},
 			withHome:    true,
 			wantClient:  ClientCursor,
-			wantServers: func(_, _ string) []wantServer { return global("events", "git", "remote") },
+			wantServers: func(_, _ string) []wantServer { return wantGlobal("events", "git", "remote") },
 		},
 		{
 			name:       "cursor work",
@@ -126,7 +131,7 @@ func TestReadConfig(t *testing.T) {
 			withHome:   true,
 			wantClient: ClientCursor,
 			wantServers: func(_, work string) []wantServer {
-				return project(work, "project-remote", "project-tools")
+				return wantProject(work, "project-remote", "project-tools")
 			},
 		},
 		{
@@ -136,7 +141,7 @@ func TestReadConfig(t *testing.T) {
 			rel:         []string{".codex", "config.toml"},
 			withHome:    true,
 			wantClient:  ClientCodex,
-			wantServers: func(_, _ string) []wantServer { return global("docs", "git", "remote") },
+			wantServers: func(_, _ string) []wantServer { return wantGlobal("docs", "git", "remote") },
 		},
 		{
 			// A Codex file that is not the home file gets the parent of its
@@ -147,7 +152,7 @@ func TestReadConfig(t *testing.T) {
 			rel:        []string{".codex", "config.toml"},
 			wantClient: ClientCodex,
 			wantServers: func(home, _ string) []wantServer {
-				return project(home, "docs", "git", "remote")
+				return wantProject(home, "docs", "git", "remote")
 			},
 		},
 	}
@@ -194,6 +199,31 @@ func TestReadConfig(t *testing.T) {
 			}
 		})
 	}
+
+	t.Run("upper case .TOML extension is read as codex", func(t *testing.T) {
+		t.Parallel()
+		home, _ := copyFixture(t, "codex", "valid")
+		src := filepath.Join(home, ".codex", "config.toml")
+		dst := filepath.Join(home, ".codex", "CONFIG.TOML")
+		if err := os.Rename(src, dst); err != nil {
+			t.Fatal(err)
+		}
+		res := ReadConfig(t.Context(), dst, "")
+		if len(res.Errors) != 0 || len(res.Servers) == 0 {
+			t.Fatalf("ReadConfig() = %+v, want codex servers", res)
+		}
+		for _, s := range res.Servers {
+			if s.Client != ClientCodex {
+				t.Errorf("server %q client = %q, want codex", s.Name, s.Client)
+			}
+		}
+	})
+}
+
+// TestReadConfigGlobalFile checks which path names one of the user's own
+// global files. Only such a path is read as a trusted, global file.
+func TestReadConfigGlobalFile(t *testing.T) {
+	t.Parallel()
 
 	// A second name of ~/.claude.json is the global file: os.SameFile
 	// compares the files, not the paths. ReadConfig then reads the global
@@ -293,6 +323,12 @@ func TestReadConfig(t *testing.T) {
 			t.Errorf("server = %+v, want Untrusted, ScopeProject and ProjectPath %q", s, other)
 		}
 	})
+}
+
+// TestReadConfigUntrusted checks the confinement of an untrusted file and the
+// Untrusted mark on its servers and errors.
+func TestReadConfigUntrusted(t *testing.T) {
+	t.Parallel()
 
 	t.Run("a named file is confined and untrusted", func(t *testing.T) {
 		t.Parallel()
@@ -354,24 +390,65 @@ func TestReadConfig(t *testing.T) {
 			t.Fatalf("ReadConfig() errors = %+v, want one untrusted error", res.Errors)
 		}
 	})
+}
 
-	t.Run("an untrusted codex file has the smaller size limit", func(t *testing.T) {
-		t.Parallel()
-		path := writeFile(t, t.TempDir(), "my.toml", []byte("# "+strings.Repeat("x", maxTOMLSize)+"\n"))
-		res := ReadConfig(t.Context(), path, "")
-		if len(res.Errors) != 1 || res.Errors[0].Reason != reasonTooLarge || !res.Errors[0].Untrusted {
-			t.Fatalf("ReadConfig() errors = %v, want one untrusted %q", res.Errors, reasonTooLarge)
-		}
-	})
+// TestReadConfigSizeLimits checks the size limit of an untrusted file:
+// maxProjectConfigSize for JSON, and the smaller maxTOMLSize for Codex.
+func TestReadConfigSizeLimits(t *testing.T) {
+	t.Parallel()
 
-	t.Run("an untrusted JSON file has the project size limit", func(t *testing.T) {
-		t.Parallel()
-		path := writeFile(t, t.TempDir(), ".mcp.json", []byte(`{"pad":"`+strings.Repeat("x", maxProjectConfigSize)+`"}`))
-		res := ReadConfig(t.Context(), path, "")
-		if len(res.Errors) != 1 || res.Errors[0].Reason != reasonTooLarge || !res.Errors[0].Untrusted {
-			t.Fatalf("ReadConfig() errors = %v, want one untrusted %q", res.Errors, reasonTooLarge)
-		}
-	})
+	// The Codex check comes after the read, so the read limit must be the
+	// larger one.
+	if maxTOMLSize > maxProjectConfigSize {
+		t.Fatalf("maxTOMLSize = %d is larger than maxProjectConfigSize = %d", maxTOMLSize, maxProjectConfigSize)
+	}
+
+	// codexServer is a Codex file with one server, padded with a comment to
+	// size bytes.
+	codexServer := func(size int) []byte {
+		head := "[mcp_servers.a]\ncommand = \"x\"\n# "
+		return []byte(head + strings.Repeat("x", size-len(head)-1) + "\n")
+	}
+
+	tests := []struct {
+		name string
+		file string
+		data []byte
+		// wantTooLarge expects one untrusted "file too large" error and no
+		// servers. Else the test expects one server and no errors.
+		wantTooLarge bool
+	}{
+		{"an untrusted codex file has the smaller size limit", "my.toml", []byte("# " + strings.Repeat("x", maxTOMLSize) + "\n"), true},
+		{"an untrusted codex file one byte over the limit", "my.toml", codexServer(maxTOMLSize + 1), true},
+		{"an untrusted codex file at the limit is read", "my.toml", codexServer(maxTOMLSize), false},
+		{"an untrusted JSON file has the project size limit", ".mcp.json", []byte(`{"pad":"` + strings.Repeat("x", maxProjectConfigSize) + `"}`), true},
+		{"an untrusted JSON file over the codex limit is read", ".mcp.json", []byte(`{"mcpServers":{"a":{"command":"x"}},"pad":"` + strings.Repeat("x", maxTOMLSize) + `"}`), false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			path := writeFile(t, t.TempDir(), tt.file, tt.data)
+			res := ReadConfig(t.Context(), path, "")
+			if !tt.wantTooLarge {
+				if len(res.Errors) != 0 || len(res.Servers) != 1 || !res.Servers[0].Untrusted {
+					t.Fatalf("ReadConfig() = %+v, want one untrusted server and no errors", res)
+				}
+				return
+			}
+			if len(res.Servers) != 0 {
+				t.Errorf("ReadConfig() servers = %v, want none", serverNames(res.Servers))
+			}
+			if len(res.Errors) != 1 || res.Errors[0].Reason != reasonTooLarge || res.Errors[0].Path != path || !res.Errors[0].Untrusted {
+				t.Fatalf("ReadConfig() errors = %v, want one untrusted %q for %q", res.Errors, reasonTooLarge, path)
+			}
+		})
+	}
+}
+
+// TestReadConfigReadErrors checks a path that cannot be read as a file.
+// ReadConfig reports each one, also a missing file.
+func TestReadConfigReadErrors(t *testing.T) {
+	t.Parallel()
 
 	t.Run("missing file", func(t *testing.T) {
 		t.Parallel()
@@ -437,8 +514,14 @@ func TestReadConfig(t *testing.T) {
 			t.Errorf("error = %+v, want path %q and Untrusted", fe, path)
 		}
 	})
+}
 
-	unknown := []struct {
+// TestReadConfigUnknownFormat checks files that DetectClient does not know.
+// Each gives one untrusted "unknown config format" error without config text.
+func TestReadConfigUnknownFormat(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
 		name string
 		file string
 		data string
@@ -450,13 +533,18 @@ func TestReadConfig(t *testing.T) {
 		{"empty object", "mcp.json", `{}`},
 		{"empty object as package.json", "package.json", `{}`},
 		{"empty object as settings.json", "settings.json", `{}`},
+		// An empty or white space .json file has no servers, as "{}", so
+		// only a known client file name is accepted.
+		{"empty mcp.json", "mcp.json", ""},
+		{"white space mcp.json", "mcp.json", " \n"},
+		{"white space as package.json", "package.json", " \n\t"},
 		{"array", "mcp.json", `[1]`},
 		{"null projects", "mcp.json", `{"projects":null}`},
 		{"other keys", "mcp.json", `{"theme":"dark"}`},
 		{"mcpServers with wrong case", "mcp.json", `{"MCPServers":{"a":{"command":"x"}}}`},
 	}
-	for _, tt := range unknown {
-		t.Run("unknown format "+tt.name, func(t *testing.T) {
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			path := filepath.Join(t.TempDir(), tt.file)
 			if err := os.WriteFile(path, []byte(tt.data), 0o600); err != nil {
@@ -472,51 +560,55 @@ func TestReadConfig(t *testing.T) {
 			if !res.Errors[0].Untrusted {
 				t.Error("FileError Untrusted = false, want true")
 			}
-			if tt.data != "" && strings.Contains(res.Errors[0].Error(), strings.TrimSpace(tt.data)) {
+			if text := strings.TrimSpace(tt.data); text != "" && strings.Contains(res.Errors[0].Error(), text) {
 				t.Errorf("Error() = %q holds config text", res.Errors[0].Error())
 			}
 		})
 	}
+}
 
-	t.Run("empty object in known client files has no servers and no error", func(t *testing.T) {
-		t.Parallel()
-		files := []struct {
-			rel  []string
-			data string
-		}{
-			{[]string{".claude.json"}, `{}`},
-			{[]string{".claude.json"}, `{"numStartups":1}`},
-			{[]string{".claude.json"}, `{"projects":null}`},
-			{[]string{".mcp.json"}, `{}`},
-			{[]string{".cursor", "mcp.json"}, `{}`},
-		}
-		for _, f := range files {
-			dir := t.TempDir()
-			path := filepath.Join(append([]string{dir}, f.rel...)...)
+// TestReadConfigEmpty checks the known client files with no servers: an
+// object with neither key, or only JSON white space. Each gives an empty
+// result, as Discover does for the same file.
+func TestReadConfigEmpty(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		rel  []string
+		data string
+	}{
+		{"empty object as .claude.json", []string{".claude.json"}, `{}`},
+		{"other keys as .claude.json", []string{".claude.json"}, `{"numStartups":1}`},
+		{"null projects as .claude.json", []string{".claude.json"}, `{"projects":null}`},
+		{"empty object as .mcp.json", []string{".mcp.json"}, `{}`},
+		{"empty object as .cursor/mcp.json", []string{".cursor", "mcp.json"}, `{}`},
+		{"empty .claude.json", []string{".claude.json"}, ""},
+		{"white space .mcp.json", []string{".mcp.json"}, " \n"},
+		{"white space .cursor/mcp.json", []string{".cursor", "mcp.json"}, "\r\n\t"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			path := filepath.Join(append([]string{t.TempDir()}, tt.rel...)...)
 			if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 				t.Fatal(err)
 			}
-			if err := os.WriteFile(path, []byte(f.data), 0o600); err != nil {
+			if err := os.WriteFile(path, []byte(tt.data), 0o600); err != nil {
 				t.Fatal(err)
 			}
 			res := ReadConfig(t.Context(), path, "")
 			if len(res.Servers) != 0 || len(res.Errors) != 0 {
-				t.Errorf("ReadConfig(%s with %s) = %+v, want an empty result", filepath.Join(f.rel...), f.data, res)
+				t.Errorf("ReadConfig() = %+v, want an empty result", res)
 			}
-		}
-	})
+		})
+	}
+}
 
-	t.Run("empty json file has no servers and no error", func(t *testing.T) {
-		t.Parallel()
-		path := filepath.Join(t.TempDir(), "mcp.json")
-		if err := os.WriteFile(path, []byte(" \n"), 0o600); err != nil {
-			t.Fatal(err)
-		}
-		res := ReadConfig(t.Context(), path, "")
-		if len(res.Servers) != 0 || len(res.Errors) != 0 {
-			t.Errorf("ReadConfig() = %+v, want an empty result", res)
-		}
-	})
+// TestReadConfigMalformed checks that a file with a parse error gives one
+// error with the reason and the position, and no config text.
+func TestReadConfigMalformed(t *testing.T) {
+	t.Parallel()
 
 	malformed := []struct {
 		name    string
@@ -578,27 +670,15 @@ func TestReadConfig(t *testing.T) {
 		}
 		assertNoLeakErrors(t, res.Errors)
 	})
+}
 
-	t.Run("upper case .TOML extension is read as codex", func(t *testing.T) {
-		t.Parallel()
-		home, _ := copyFixture(t, "codex", "valid")
-		src := filepath.Join(home, ".codex", "config.toml")
-		dst := filepath.Join(home, ".codex", "CONFIG.TOML")
-		if err := os.Rename(src, dst); err != nil {
-			t.Fatal(err)
-		}
-		res := ReadConfig(t.Context(), dst, "")
-		if len(res.Errors) != 0 || len(res.Servers) == 0 {
-			t.Fatalf("ReadConfig() = %+v, want codex servers", res)
-		}
-		for _, s := range res.Servers {
-			if s.Client != ClientCodex {
-				t.Errorf("server %q client = %q, want codex", s.Name, s.Client)
-			}
-		}
-	})
+// TestReadConfigSecrets reads the secrets fixture of each client, the home
+// files as global files and the work files as untrusted files, and checks
+// that no secret value shows in a server or an error.
+func TestReadConfigSecrets(t *testing.T) {
+	t.Parallel()
 
-	secrets := []struct {
+	tests := []struct {
 		name    string
 		fixture string
 		rel     [][]string // home and work files; work may be nil
@@ -608,8 +688,8 @@ func TestReadConfig(t *testing.T) {
 		{"cursor", "cursor", [][]string{{"home", ".cursor", "mcp.json"}, {"work", ".cursor", "mcp.json"}}, ClientCursor},
 		{"codex", "codex", [][]string{{"home", ".codex", "config.toml"}}, ClientCodex},
 	}
-	for _, tt := range secrets {
-		t.Run("secrets "+tt.name, func(t *testing.T) {
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			src := fixtureDir(t, tt.fixture, "secrets")
 			var srcFiles []string
@@ -645,6 +725,12 @@ func TestReadConfig(t *testing.T) {
 			assertNoLeakErrors(t, errs)
 		})
 	}
+}
+
+// TestReadConfigCanceled checks that a canceled context gives one "canceled"
+// error and no servers, also for a missing file.
+func TestReadConfigCanceled(t *testing.T) {
+	t.Parallel()
 
 	t.Run("canceled context", func(t *testing.T) {
 		t.Parallel()
@@ -803,14 +889,6 @@ func TestReadConfigReadsOnce(t *testing.T) {
 		res := readUntrustedCodex(t.Context(), filepath.Join(missing, "config.toml"), []byte("[mcp_servers.a]\ncommand = \"x\"\n"))
 		if len(res.Errors) != 0 || len(res.Servers) != 1 || !res.Servers[0].Untrusted {
 			t.Errorf("readUntrustedCodex() = %+v, want one untrusted server and no errors", res)
-		}
-	})
-
-	t.Run("codex size limit", func(t *testing.T) {
-		t.Parallel()
-		res := readUntrustedCodex(t.Context(), missing, make([]byte, maxUntrustedTOMLSize+1))
-		if len(res.Errors) != 1 || res.Errors[0].Reason != reasonTooLarge || !res.Errors[0].Untrusted {
-			t.Errorf("readUntrustedCodex() errors = %v, want one untrusted %q", res.Errors, reasonTooLarge)
 		}
 	})
 }

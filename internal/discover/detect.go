@@ -17,8 +17,6 @@ import (
 //  2. Otherwise, if the first byte that is not JSON white space (space, tab,
 //     CR or LF) is '{', or the file name ends in .json (any letter case), the
 //     file is read as JSON:
-//     - A file with only JSON white space is chosen by its path (see below)
-//     and has no servers.
 //     - A file that is not valid JSON is chosen by its path. The reader then
 //     reports the invalid JSON with the line and column.
 //     - Valid JSON that is not an object (for example an array or a string)
@@ -26,14 +24,19 @@ import (
 //     - An object with a "projects" key is Claude Code. A JSON null counts as
 //     no key.
 //     - Else an object with an "mcpServers" key is chosen by its path.
-//     - Else (an object with neither key, for example the "{}" of a fresh
-//     install) the file name decides, but only for the known client files:
-//     .claude.json and .mcp.json are Claude Code, and mcp.json in a
-//     directory named ".cursor" is Cursor. Any other file name is unknown.
+//     - Else the file is chosen by its known name (see below). This is an
+//     object with neither key, for example the "{}" of a fresh install, or a
+//     .json file with only JSON white space. The readers find no servers in
+//     both, so both follow the same rule.
 //  3. Anything else is unknown.
 //
 // "Chosen by its path" means Cursor when the parent directory is named
 // ".cursor", and Claude Code otherwise.
+//
+// "Chosen by its known name" accepts only the known client files: .claude.json
+// and .mcp.json are Claude Code, and mcp.json in a directory named ".cursor"
+// is Cursor. Any other file name, for example package.json, is unknown, so a
+// file that is not a client config does not give a clean scan.
 //
 // Known limits:
 //   - TOML is detected by the .toml extension only. A Codex file with another
@@ -47,17 +50,16 @@ func DetectClient(path string, data []byte) (client Client, ok bool) {
 		return ClientCodex, true
 	}
 
-	// Trim only the four JSON white space bytes, as loadJSONFile does.
-	// bytes.TrimSpace would also trim Unicode spaces such as U+00A0, which
-	// JSON does not allow.
-	trimmed := bytes.Trim(data, " \t\r\n")
+	// Trim only the JSON white space bytes, as loadJSONFile does (see
+	// jsonSpace).
+	trimmed := bytes.Trim(data, jsonSpace)
 	isJSON := strings.EqualFold(filepath.Ext(path), ".json") ||
 		(len(trimmed) > 0 && trimmed[0] == '{')
 	if !isJSON {
 		return "", false
 	}
 	if len(trimmed) == 0 {
-		return clientByPath(path), true
+		return clientByKnownName(path)
 	}
 
 	// Decode the top level into a map, as the readers do. Map keys are matched
@@ -67,8 +69,7 @@ func DetectClient(path string, data []byte) (client Client, ok bool) {
 	// document.
 	var top map[string]json.RawMessage
 	if err := json.Unmarshal(data, &top); err != nil {
-		var syntaxErr *json.SyntaxError
-		if errors.As(err, &syntaxErr) {
+		if _, isSyntax := errors.AsType[*json.SyntaxError](err); isSyntax {
 			return clientByPath(path), true
 		}
 		// Valid JSON of another shape, for example an array or a string.
@@ -76,19 +77,20 @@ func DetectClient(path string, data []byte) (client Client, ok bool) {
 	}
 
 	switch {
-	case hasJSONValue(top["projects"]):
+	case !isNull(top[keyProjects]):
 		return ClientClaudeCode, true
-	case hasJSONValue(top["mcpServers"]):
+	case !isNull(top[keyMCPServers]):
 		return clientByPath(path), true
 	default:
 		return clientByKnownName(path)
 	}
 }
 
-// clientByKnownName handles a JSON object with neither "projects" nor
-// "mcpServers". Discover reads such a file without an error (it has no
-// servers), so a file with a known client name is accepted. Other names, for
-// example package.json, stay unknown.
+// clientByKnownName handles a JSON file with no servers: an object with
+// neither "projects" nor "mcpServers", or a .json file with only JSON white
+// space. Discover reads such a file without an error, so a file with a known
+// client name is accepted. Other names, for example package.json, stay
+// unknown.
 func clientByKnownName(path string) (Client, bool) {
 	switch filepath.Base(path) {
 	case ".claude.json", ".mcp.json":
@@ -99,12 +101,6 @@ func clientByKnownName(path string) (Client, bool) {
 		}
 	}
 	return "", false
-}
-
-// hasJSONValue reports whether a key was present with a value that is not
-// JSON null. A missing key leaves the RawMessage empty.
-func hasJSONValue(raw json.RawMessage) bool {
-	return len(raw) > 0 && !bytes.Equal(raw, []byte("null"))
 }
 
 // clientByPath picks Cursor for a file in a directory named ".cursor", and

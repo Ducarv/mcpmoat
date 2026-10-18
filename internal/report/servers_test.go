@@ -11,9 +11,11 @@ import (
 	"github.com/Ducarv/mcpmoat/internal/discover"
 	"github.com/Ducarv/mcpmoat/internal/discover/discovertest"
 	"github.com/Ducarv/mcpmoat/internal/report"
+	"github.com/Ducarv/mcpmoat/internal/termsafe"
 )
 
 // threeServers returns one stdio, one http and one project-scope sse server.
+// The sse server comes from a project file, so it is untrusted.
 // The stdio server has a canary value in Args, the http server has canary
 // values in the URL, and the stdio and http servers have canary values in Env
 // and Headers.
@@ -49,6 +51,7 @@ func threeServers() []discover.Server {
 			Scope:       discover.ScopeProject,
 			ProjectPath: "/work/app",
 			Source:      "/work/app/.mcp.json",
+			Untrusted:   true,
 			Transport:   discover.TransportSSE,
 			URL:         discover.NewURL("https://sse.example.com/events"),
 		},
@@ -61,10 +64,10 @@ func TestWriteServersExactTable(t *testing.T) {
 	// Columns are padded to the widest cell plus 3 spaces. The last column has
 	// no padding. Secrets and credentials never show: the args go through the
 	// RedactArgs allowlist.
-	const want = "NAME     CLIENT        SCOPE               TRANSPORT   SOURCE                     COMMAND/URL\n" +
-		"fs       claude-code   global              stdio       /home/u/.claude.json       npx -y @scope/server-fs --token ******** /data\n" +
-		"remote   cursor        global              http        /home/u/.cursor/mcp.json   https://********@example.com/mcp?k=********\n" +
-		"legacy   claude-code   project:/work/app   sse         /work/app/.mcp.json        https://sse.example.com/events\n"
+	const want = "NAME     CLIENT        SCOPE                           TRANSPORT   SOURCE                     COMMAND/URL\n" +
+		"fs       claude-code   global                          stdio       /home/u/.claude.json       npx -y @scope/server-fs --token ******** /data\n" +
+		"remote   cursor        global                          http        /home/u/.cursor/mcp.json   https://********@example.com/mcp?k=********\n" +
+		"legacy   claude-code   project:/work/app (untrusted)   sse         /work/app/.mcp.json        https://sse.example.com/events\n"
 
 	var sb strings.Builder
 	if err := report.WriteServers(&sb, threeServers()); err != nil {
@@ -376,22 +379,22 @@ func TestWriteServersPaddingAmplification(t *testing.T) {
 	out := sb.String()
 	t.Logf("output size: %d bytes for %d servers", len(out), len(servers))
 
-	// A short row is about 81 + 3 + 5 + 3 + 6 + 3 + 5 + 3 + 257 + 3 + 3 + 1 = 373
-	// bytes, so 10,002 rows give about 3.7 MB. Allow up to 8 MiB.
+	// A short row is about 83 + 3 + 5 + 3 + 6 + 3 + 5 + 3 + 259 + 3 + 3 + 1 = 377
+	// bytes, so 10,002 rows give about 3.8 MB. Allow up to 8 MiB.
 	if limit := 8 << 20; len(out) >= limit {
 		t.Errorf("output is %d bytes, want less than %d", len(out), limit)
 	}
 
 	// The long name is cut, ends with the marker and has the cap plus the marker.
 	cell := firstCell(t, out, 1)
-	if !strings.HasSuffix(cell, "\u2026") {
+	if !strings.HasSuffix(cell, termsafe.CutMarker) {
 		t.Errorf("long name cell does not end with the cut marker: %q", cell)
 	}
-	if n := utf8.RuneCountInString(cell); n != maxShortCellRunes+1 {
-		t.Errorf("long name cell has %d runes, want %d", n, maxShortCellRunes+1)
+	if n, want := utf8.RuneCountInString(cell), maxShortCellRunes+len(termsafe.CutMarker); n != want {
+		t.Errorf("long name cell has %d runes, want %d", n, want)
 	}
 	// The long source path is cut at the path cap and ends with the marker.
-	wantPath := "/" + strings.Repeat("p", maxPathRunes-1) + "\u2026"
+	wantPath := "/" + strings.Repeat("p", maxPathRunes-1) + termsafe.CutMarker
 	if !strings.Contains(out, wantPath+"   ") {
 		t.Errorf("output does not hold the cut source path (%d runes + marker)", maxPathRunes)
 	}
@@ -404,7 +407,7 @@ func TestWriteServersPaddingAmplification(t *testing.T) {
 func TestWriteServersCellCap(t *testing.T) {
 	t.Parallel()
 
-	const marker = "\u2026"
+	const marker = termsafe.CutMarker
 
 	// cases returns the cut cases for a column with the given cap.
 	cases := func(limit int) []struct{ name, in, want string } {
@@ -511,7 +514,7 @@ func TestWriteServersPathColumnsKeepRealPaths(t *testing.T) {
 		t.Fatalf("WriteServers() error = %v, want nil", err)
 	}
 	out := sb.String()
-	if strings.Contains(out, "\u2026") {
+	if strings.Contains(out, termsafe.CutMarker) {
 		t.Errorf("output holds a cut marker, want none:\n%s", out)
 	}
 	if got := strings.Count(out, path); got != 2 {
@@ -543,8 +546,61 @@ func TestWriteServersLastColumnIsNeverCut(t *testing.T) {
 		if !strings.Contains(out, long) {
 			t.Errorf("%s: the COMMAND/URL cell is cut:\n%.200q", s.Name, out)
 		}
-		if strings.Contains(out, "\u2026") {
+		if strings.Contains(out, termsafe.CutMarker) {
 			t.Errorf("%s: output holds a cut marker, want none", s.Name)
 		}
+	}
+}
+
+// TestWriteServersUntrustedScope checks that the SCOPE cell of an untrusted
+// server ends with " (untrusted)". The marker comes after the cut and after
+// the closing quote, so it is never cut or escaped.
+func TestWriteServersUntrustedScope(t *testing.T) {
+	t.Parallel()
+
+	const marker = " (untrusted)"
+	long := strings.Repeat("p", 1000)
+	tests := []struct {
+		name      string
+		scope     discover.Scope
+		path      string
+		untrusted bool
+		want      string // the SCOPE cell, followed by the column gap
+	}{
+		{name: "trusted project", scope: discover.ScopeProject, path: "/w", want: "project:/w   "},
+		{name: "untrusted project", scope: discover.ScopeProject, path: "/w", untrusted: true, want: "project:/w" + marker + "   "},
+		{
+			name: "untrusted long path is cut before the marker", scope: discover.ScopeProject, path: long, untrusted: true,
+			want: "project:" + long[:maxPathRunes-len("project:")] + termsafe.CutMarker + marker + "   ",
+		},
+		{
+			name: "untrusted quoted path", scope: discover.ScopeProject, path: "/w\x1b", untrusted: true,
+			want: strconv.Quote("project:/w\x1b") + marker + "   ",
+		},
+		{
+			name: "untrusted long quoted path", scope: discover.ScopeProject, path: strings.Repeat("\x1b", 1000), untrusted: true,
+			want: strconv.Quote("project:"+strings.Repeat("\x1b", maxPathRunes-len("project:"))) + termsafe.CutMarker + marker + "   ",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			s := oneServer("srv")
+			s.Scope = tt.scope
+			s.ProjectPath = tt.path
+			s.Untrusted = tt.untrusted
+
+			var sb strings.Builder
+			if err := report.WriteServers(&sb, []discover.Server{s}); err != nil {
+				t.Fatalf("WriteServers() error = %v, want nil", err)
+			}
+			out := sb.String()
+			if !strings.Contains(out, tt.want) {
+				t.Errorf("output does not hold the SCOPE cell %.120q:\n%.400q", tt.want, out)
+			}
+			if !tt.untrusted && strings.Contains(out, marker) {
+				t.Errorf("output marks a trusted server as untrusted:\n%q", out)
+			}
+		})
 	}
 }

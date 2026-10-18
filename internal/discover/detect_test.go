@@ -100,12 +100,23 @@ func inlineDetectCases() []detectCase {
 		{"both keys null as mcp.json in .cursor", "/x/.cursor/mcp.json", `{"projects":null,"mcpServers":null}`, ClientCursor, true},
 		{"empty object with white space around it as .claude.json", "/x/.claude.json", " \n{}\n", ClientClaudeCode, true},
 
-		// Empty and white space .json files: chosen by the path, no servers.
-		{"empty .json", "/x/mcp.json", "", ClientClaudeCode, true},
-		{"white space .json", "/x/mcp.json", " \n\t\r\n", ClientClaudeCode, true},
+		// Empty and white space .json files have no servers, as "{}". So they
+		// follow the same rule: only the known client file names decide.
+		{"empty .claude.json", "/x/.claude.json", "", ClientClaudeCode, true},
+		{"white space .claude.json", "/x/.claude.json", " \n\t\r\n", ClientClaudeCode, true},
+		{"empty .mcp.json", "/x/.mcp.json", "", ClientClaudeCode, true},
+		{"white space .mcp.json", "/x/.mcp.json", "\n", ClientClaudeCode, true},
 		{"empty .json in .cursor", "/x/.cursor/mcp.json", "", ClientCursor, true},
 		{"white space .json in .cursor", "/x/.cursor/mcp.json", "\n\n", ClientCursor, true},
-		{"empty upper case .JSON", "/x/mcp.JSON", "", ClientClaudeCode, true},
+		{"empty mcp.json", "/x/mcp.json", "", "", false},
+		{"white space mcp.json", "/x/mcp.json", " \n\t\r\n", "", false},
+		{"empty package.json", "/x/package.json", "", "", false},
+		{"white space package.json", "/x/package.json", " \n", "", false},
+		{"empty other.json in .cursor", "/x/.cursor/other.json", "", "", false},
+		{"empty upper case .JSON", "/x/mcp.JSON", "", "", false},
+		{"empty upper case .MCP.JSON", "/x/.MCP.JSON", "", "", false},
+		// U+00A0 is not JSON white space, so the file is invalid JSON.
+		{"no-break space in package.json", "/x/package.json", "\u00a0", ClientClaudeCode, true},
 
 		// Invalid JSON: chosen by the path, so the reader can report the position.
 		{"bad JSON in .json", "/x/mcp.json", `{bad`, ClientClaudeCode, true},
@@ -182,8 +193,11 @@ func TestDetectClient(t *testing.T) {
 		if got, ok := DetectClient("/x/notes.txt", nil); ok || got != "" {
 			t.Errorf("DetectClient(.txt, nil) = %q, %v, want \"\", false", got, ok)
 		}
-		if got, ok := DetectClient("/x/mcp.json", nil); !ok || got != ClientClaudeCode {
-			t.Errorf("DetectClient(.json, nil) = %q, %v, want claude-code, true", got, ok)
+		if got, ok := DetectClient("/x/.mcp.json", nil); !ok || got != ClientClaudeCode {
+			t.Errorf("DetectClient(.mcp.json, nil) = %q, %v, want claude-code, true", got, ok)
+		}
+		if got, ok := DetectClient("/x/package.json", nil); ok || got != "" {
+			t.Errorf("DetectClient(package.json, nil) = %q, %v, want \"\", false", got, ok)
 		}
 	})
 

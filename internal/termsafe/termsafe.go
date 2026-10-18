@@ -15,6 +15,7 @@
 package termsafe
 
 import (
+	"fmt"
 	"strconv"
 	"strings"
 	"unicode"
@@ -46,8 +47,7 @@ import (
 // not prevent visual spoofing with look-alike letters from other scripts
 // (homoglyphs): they pass unchanged.
 //
-// Quote does not cut s. A caller that cuts the text cuts it before Quote (see
-// CutRunes), so the cut never splits an escape.
+// Quote does not cut s. Use QuoteCut to cut and quote in one step.
 func Quote(s string) string {
 	if !needsQuote(s) {
 		return s
@@ -59,7 +59,7 @@ func Quote(s string) string {
 // runes. The cut is always at a rune boundary. An invalid UTF-8 byte counts
 // as one rune, as Quote shows it as one \xNN escape.
 //
-// CutRunes adds no marker: each caller adds its own marker after Quote.
+// CutRunes adds no marker. QuoteCut cuts, quotes and adds CutMarker.
 func CutRunes(s string, n int) (string, bool) {
 	i := 0
 	for count := 0; i < len(s); count++ {
@@ -70,6 +70,26 @@ func CutRunes(s string, n int) (string, bool) {
 		i += size
 	}
 	return s, false
+}
+
+// CutMarker ends a text that QuoteCut cut. It is plain ASCII, so it shows the
+// same in every terminal. A text can also end with "..." when it was not cut,
+// but the marker can never hide text.
+const CutMarker = "..."
+
+// QuoteCut returns s cut to n runes (see CutRunes) and then quoted (see
+// Quote). When s had more than n runes, CutMarker comes after the result,
+// after the closing quote of a quoted text.
+//
+// The cut is made before Quote, so it never splits an escape, and Quote
+// never escapes the marker. The part of s after the cut is not shown, so it
+// does not make the text quoted.
+func QuoteCut(s string, n int) string {
+	short, cut := CutRunes(s, n)
+	if cut {
+		return Quote(short) + CutMarker
+	}
+	return Quote(short)
 }
 
 // needsQuote reports whether s holds invalid UTF-8 or a rune for which
@@ -145,12 +165,9 @@ func writeQuotedPart(b *strings.Builder, s string) {
 // writeRuneEscape writes r as \uXXXX, or as \UXXXXXXXX for a rune above
 // U+FFFF, with lowercase hex digits as strconv.Quote writes them.
 func writeRuneEscape(b *strings.Builder, r rune) {
-	prefix, width := `\u`, 4
 	if r > 0xffff {
-		prefix, width = `\U`, 8
+		_, _ = fmt.Fprintf(b, `\U%08x`, r) // a strings.Builder write never fails
+		return
 	}
-	hex := strconv.FormatInt(int64(r), 16)
-	b.WriteString(prefix)
-	b.WriteString(strings.Repeat("0", width-len(hex)))
-	b.WriteString(hex)
+	_, _ = fmt.Fprintf(b, `\u%04x`, r)
 }

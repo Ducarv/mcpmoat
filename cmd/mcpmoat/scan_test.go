@@ -3,10 +3,10 @@ package main
 import (
 	"bytes"
 	"cmp"
-	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
+	"maps"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -57,8 +57,7 @@ func scanWriteFile(t *testing.T, dir, name, content string) string {
 // --config never looks at the working directory.
 func scanConfigCLI(t *testing.T, home string) (*cli, *bytes.Buffer, *bytes.Buffer) {
 	t.Helper()
-	c, stdout, stderr := newTestCLI(fakeGetenv(nil), testBuild)
-	c.homeDir = func() (string, error) { return home, nil }
+	c, stdout, stderr := dirsCLI(t, home, "")
 	c.getwd = func() (string, error) {
 		t.Error("getwd was called, but --config must not read the working directory")
 		return "", errors.New("forbidden")
@@ -240,11 +239,7 @@ func TestScanHelpMatchesUsage(t *testing.T) {
 func scanNormalize(t *testing.T, out string, replacements map[string]string) string {
 	t.Helper()
 	// Replace the longer path first, in case one path is inside the other.
-	paths := make([]string, 0, len(replacements))
-	for p := range replacements {
-		paths = append(paths, p)
-	}
-	slices.SortFunc(paths, func(a, b string) int { return cmp.Compare(len(b), len(a)) })
+	paths := slices.SortedFunc(maps.Keys(replacements), func(a, b string) int { return cmp.Compare(len(b), len(a)) })
 	for _, p := range paths {
 		out = strings.ReplaceAll(out, p, replacements[p])
 	}
@@ -296,9 +291,7 @@ func TestScanNoConnectGolden(t *testing.T) {
 	if code != exitOK {
 		t.Fatalf("exit code = %d, want %d; stderr:\n%s", code, exitOK, stderr)
 	}
-	if stderr.Len() != 0 {
-		t.Errorf("stderr = %q, want empty", stderr)
-	}
+	assertNoRulesNotice(t, stderr.String())
 	got := scanNormalize(t, stdout.String(), map[string]string{home: "$HOME", work: "$WORK"})
 	assertScanGolden(t, "scan_no_connect_full", []byte(got))
 }
@@ -342,9 +335,8 @@ func TestScanEmpty(t *testing.T) {
 	if got, want := stdout.String(), "No MCP servers found.\n"; got != want {
 		t.Errorf("stdout = %q, want %q", got, want)
 	}
-	if stderr.Len() != 0 {
-		t.Errorf("stderr = %q, want empty", stderr)
-	}
+	// No rules ran, so the notice shows also when there is no server.
+	assertNoRulesNotice(t, stderr.String())
 }
 
 func TestScanConfigFormats(t *testing.T) {
@@ -364,7 +356,7 @@ func TestScanConfigFormats(t *testing.T) {
 		// the fixture copy. "" means the file is read as a global file.
 		wantProject string
 		// wantStderr are substrings of stderr. Empty means: exit code 0 and
-		// an empty stderr. Otherwise the exit code must be 2.
+		// only the notice on stderr. Otherwise the exit code must be 2.
 		wantStderr []string
 	}{
 		{
@@ -447,37 +439,38 @@ func TestScanConfigFormats(t *testing.T) {
 
 			code := c.dispatch([]string{"scan", "--no-connect", "--config", filepath.Join(root, tt.file)})
 
-			wantCode := exitOK
+			want := scanWant{code: exitOK, stderr: tt.wantStderr}
 			if len(tt.wantStderr) > 0 {
-				wantCode = exitError
+				want.code = exitError
 			}
-			if code != wantCode {
-				t.Fatalf("exit code = %d, want %d; stderr:\n%s", code, wantCode, stderr)
-			}
-			assertContainsAll(t, "stderr", stderr.String(), tt.wantStderr)
-			if len(tt.wantStderr) == 0 && stderr.Len() != 0 {
-				t.Errorf("stderr = %q, want empty", stderr)
-			}
-			assertScanErrorLines(t, stderr.String())
+			assertScanResult(t, code, stdout.String(), stderr.String(), want)
 			rows := tableRows(t, stdout.String())
-			var names []string
-			for _, row := range rows {
-				names = append(names, row[0])
-				if row[1] != tt.wantClient {
-					t.Errorf("row %q has client %q, want %q", row[0], row[1], tt.wantClient)
+			for i, client := range column(rows, 1) {
+				if client != tt.wantClient {
+					t.Errorf("row %d has client %q, want %q", i, client, tt.wantClient)
 				}
-				if tt.wantProject != "" {
-					// An untrusted file shows as a project file in SCOPE.
-					if want := "project:" + filepath.Join(root, tt.wantProject); row[2] != want {
-						t.Errorf("row %q has scope %q, want %q", row[0], row[2], want)
+			}
+			if tt.wantProject != "" {
+				// An untrusted file shows as a project file in SCOPE, with the
+				// untrusted marker. The temporary path holds no space, so word
+				// 2 is the path and word 3 the marker.
+				for i, scope := range column(rows, 2) {
+					if want := "project:" + filepath.Join(root, tt.wantProject); scope != want {
+						t.Errorf("row %d has scope %q, want %q", i, scope, want)
+					}
+				}
+				for i, marker := range column(rows, 3) {
+					if marker != "(untrusted)" {
+						t.Errorf("row %d has %q after the scope, want %q", i, marker, "(untrusted)")
 					}
 				}
 			}
+			names := column(rows, 0)
 			slices.Sort(names)
-			want := slices.Clone(tt.wantNames)
-			slices.Sort(want)
-			if !slices.Equal(names, want) {
-				t.Errorf("server names = %q, want %q", names, want)
+			wantNames := slices.Clone(tt.wantNames)
+			slices.Sort(wantNames)
+			if !slices.Equal(names, wantNames) {
+				t.Errorf("server names = %q, want %q", names, wantNames)
 			}
 		})
 	}
@@ -544,18 +537,14 @@ func TestScanConfigErrors(t *testing.T) {
 
 			code := c.dispatch([]string{"scan", "--no-connect", "--config", path})
 
-			if code != exitError {
-				t.Errorf("exit code = %d, want %d", code, exitError)
-			}
+			assertScanResult(t, code, stdout.String(), stderr.String(),
+				scanWant{code: exitError, stdout: tt.wantStdout, stderr: tt.wantStderr})
 			if tt.wantStdoutEmpty && stdout.Len() != 0 {
 				t.Errorf("stdout = %q, want empty", stdout)
 			}
-			assertContainsAll(t, "stdout", stdout.String(), tt.wantStdout)
-			assertContainsAll(t, "stderr", stderr.String(), tt.wantStderr)
 			if lines := nonEmptyLines(stderr.String()); len(lines) != tt.wantStderrLines {
 				t.Errorf("stderr has %d lines, want %d\nstderr:\n%s", len(lines), tt.wantStderrLines, stderr)
 			}
-			assertScanErrorLines(t, stderr.String())
 		})
 	}
 
@@ -634,12 +623,8 @@ func TestScanStartsNoProcess(t *testing.T) {
 		}
 		servers["script-cmd"] = map[string]any{"command": script}
 	}
-	data, err := json.Marshal(map[string]any{"mcpServers": servers})
-	if err != nil {
-		t.Fatal(err)
-	}
 	home := t.TempDir()
-	scanWriteFile(t, home, ".claude.json", string(data))
+	writeServers(t, home, ".claude.json", servers)
 	c, stdout, stderr := dirsCLI(t, home, t.TempDir())
 
 	code := c.dispatch([]string{"scan", "--no-connect"})
@@ -647,9 +632,7 @@ func TestScanStartsNoProcess(t *testing.T) {
 	if code != exitOK {
 		t.Fatalf("exit code = %d, want %d; stderr:\n%s", code, exitOK, stderr)
 	}
-	if stderr.Len() != 0 {
-		t.Errorf("stderr = %q, want empty", stderr)
-	}
+	assertNoRulesNotice(t, stderr.String())
 	for name := range servers {
 		if !strings.Contains(stdout.String(), name) {
 			t.Errorf("stdout does not list %q\nstdout:\n%s", name, stdout)
@@ -682,15 +665,8 @@ func TestScanOpensNoConnection(t *testing.T) {
 	entry := func(transport string) map[string]any {
 		return map[string]any{"type": transport, "url": rawURL}
 	}
-	write := func(dir, name string, servers map[string]any) {
-		data, err := json.Marshal(map[string]any{"mcpServers": servers})
-		if err != nil {
-			t.Fatal(err)
-		}
-		scanWriteFile(t, dir, name, string(data))
-	}
-	write(work, ".mcp.json", map[string]any{"claude-http": entry("http"), "claude-sse": entry("sse")})
-	write(home, filepath.Join(".cursor", "mcp.json"), map[string]any{"cursor-http": entry("http"), "cursor-sse": entry("sse")})
+	writeServers(t, work, ".mcp.json", map[string]any{"claude-http": entry("http"), "claude-sse": entry("sse")})
+	writeServers(t, home, filepath.Join(".cursor", "mcp.json"), map[string]any{"cursor-http": entry("http"), "cursor-sse": entry("sse")})
 
 	c, stdout, stderr := dirsCLI(t, home, work)
 
@@ -699,6 +675,7 @@ func TestScanOpensNoConnection(t *testing.T) {
 	if code != exitOK {
 		t.Fatalf("exit code = %d, want %d; stderr:\n%s", code, exitOK, stderr)
 	}
+	assertNoRulesNotice(t, stderr.String())
 	rows := tableRows(t, stdout.String())
 	if len(rows) != 4 {
 		t.Errorf("table has %d rows, want 4\nstdout:\n%s", len(rows), stdout)
@@ -808,7 +785,7 @@ func TestScanTerminalSafety(t *testing.T) {
 	// override) in an argument.
 	const config = `{"mcpServers":{"a\u001b[31mb":{"command":"echo\tx","args":["\u202e"]}}}`
 
-	// The name shows in Go quoted form (Escape uses strconv.Quote). The
+	// The name shows in Go quoted form (termsafe.Quote). The
 	// command and the args go through the RedactArgs allowlist, which masks
 	// every part with a character that is not safe.
 	wantName := strconv.Quote("a\x1b[31mb")
@@ -822,6 +799,7 @@ func TestScanTerminalSafety(t *testing.T) {
 	if code != exitOK {
 		t.Fatalf("exit code = %d, want %d; stderr:\n%s", code, exitOK, stderr)
 	}
+	assertNoRulesNotice(t, stderr.String())
 	out := stdout.String()
 	assertNoEscape(t, out, stderr.String())
 	if strings.Contains(out, "\t") {
@@ -856,7 +834,7 @@ func TestScanNoColor(t *testing.T) {
 	}
 
 	plain, plainErr, plainCode := runWith([]string{"scan", "--no-connect"}, nil)
-	if plainCode != exitOK || plainErr != "" {
+	if plainCode != exitOK || plainErr != noRulesNotice+"\n" {
 		t.Fatalf("plain run: exit code = %d, stderr = %q", plainCode, plainErr)
 	}
 
@@ -880,8 +858,8 @@ func TestScanNoColor(t *testing.T) {
 			if got != plain {
 				t.Errorf("stdout differs from the plain run\n--- got ---\n%s\n--- want ---\n%s", got, plain)
 			}
-			if gotErr != "" {
-				t.Errorf("stderr = %q, want empty", gotErr)
+			if gotErr != plainErr {
+				t.Errorf("stderr = %q, want %q", gotErr, plainErr)
 			}
 			assertNoEscape(t, got, gotErr)
 		})
@@ -900,9 +878,19 @@ func TestScanWriteError(t *testing.T) {
 	tests := []struct {
 		name    string
 		fixture []string
+		// wantProblem are substrings of the second stderr line, a config
+		// problem. Empty means: stderr has only the write error line.
+		wantProblem []string
 	}{
 		{name: "table", fixture: []string{"all", "full"}},
 		{name: "empty state line", fixture: []string{"claude-code", "missing"}},
+		{
+			// The config problem is still printed: it is a reason for the
+			// failed scan too.
+			name:        "table and a config problem",
+			fixture:     []string{"all", "partial-failure"},
+			wantProblem: []string{"mcpmoat scan: ", ".claude.json", "invalid JSON"},
+		},
 	}
 
 	for _, tt := range tests {
@@ -914,11 +902,20 @@ func TestScanWriteError(t *testing.T) {
 
 			code := c.dispatch([]string{"scan", "--no-connect"})
 
-			if code != exitError {
-				t.Errorf("exit code = %d, want %d", code, exitError)
+			assertScanResult(t, code, "", stderr.String(), scanWant{code: exitError})
+			wantLines := 1
+			if len(tt.wantProblem) > 0 {
+				wantLines = 2
 			}
-			if !strings.Contains(stderr.String(), "cannot write output") {
-				t.Errorf("stderr does not contain %q\nstderr: %s", "cannot write output", stderr)
+			lines := nonEmptyLines(stderr.String())
+			if len(lines) != wantLines {
+				t.Fatalf("stderr has %d lines, want %d\nstderr:\n%s", len(lines), wantLines, stderr)
+			}
+			if want := "mcpmoat scan: cannot write output"; lines[0] != want {
+				t.Errorf("first stderr line = %q, want %q", lines[0], want)
+			}
+			if wantLines == 2 {
+				assertContainsAll(t, "the second stderr line", lines[1], tt.wantProblem)
 			}
 		})
 	}
@@ -945,15 +942,10 @@ func TestScanArgsMasked(t *testing.T) {
 		"-p" + canary,
 		canary,
 	}
-	data, err := json.Marshal(map[string]any{
-		"mcpServers": map[string]any{"srv": map[string]any{"command": "npx", "args": args}},
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
+	servers := map[string]any{"srv": map[string]any{"command": "npx", "args": args}}
 	home, work := t.TempDir(), t.TempDir()
-	scanWriteFile(t, home, ".claude.json", string(data))
-	scanWriteFile(t, work, ".mcp.json", string(data))
+	writeServers(t, home, ".claude.json", servers)
+	writeServers(t, work, ".mcp.json", servers)
 
 	c, stdout, stderr := dirsCLI(t, home, work)
 
@@ -1115,18 +1107,8 @@ func TestScanAutoExitCodes(t *testing.T) {
 
 			code := c.dispatch([]string{"scan", "--no-connect"})
 
-			if code != tt.wantCode {
-				t.Errorf("exit code = %d, want %d\nstdout:\n%s\nstderr:\n%s", code, tt.wantCode, stdout, stderr)
-			}
-			assertContainsAll(t, "stdout", stdout.String(), tt.wantStdout)
-			assertContainsAll(t, "stderr", stderr.String(), tt.wantStderr)
-			if len(tt.wantStderr) == 0 && stderr.Len() != 0 {
-				t.Errorf("stderr = %q, want empty", stderr)
-			}
-			assertScanErrorLines(t, stderr.String())
-			discovertest.AssertNoLeak(t, "stdout", stdout.String())
-			discovertest.AssertNoLeak(t, "stderr", stderr.String())
-			assertNoEscape(t, stdout.String(), stderr.String())
+			assertScanResult(t, code, stdout.String(), stderr.String(),
+				scanWant{code: tt.wantCode, stdout: tt.wantStdout, stderr: tt.wantStderr})
 		})
 	}
 }
@@ -1240,23 +1222,9 @@ func TestScanConfigIsUntrusted(t *testing.T) {
 
 			code := c.dispatch([]string{"scan", "--no-connect", "--config", path})
 
-			if code != tt.wantCode {
-				t.Errorf("exit code = %d, want %d\nstdout:\n%s\nstderr:\n%s", code, tt.wantCode, stdout, stderr)
-			}
-			assertContainsAll(t, "stdout", stdout.String(), tt.wantStdout)
-			for _, bad := range tt.noStdout {
-				if strings.Contains(stdout.String(), bad) {
-					t.Errorf("stdout contains %q\nstdout:\n%s", bad, stdout)
-				}
-			}
-			assertContainsAll(t, "stderr", stderr.String(), tt.wantStderr)
-			if len(tt.wantStderr) == 0 && stderr.Len() != 0 {
-				t.Errorf("stderr = %q, want empty", stderr)
-			}
-			assertScanErrorLines(t, stderr.String())
-			discovertest.AssertNoLeak(t, "stdout", stdout.String())
-			discovertest.AssertNoLeak(t, "stderr", stderr.String())
-			assertNoEscape(t, stdout.String(), stderr.String())
+			assertScanResult(t, code, stdout.String(), stderr.String(), scanWant{
+				code: tt.wantCode, stdout: tt.wantStdout, noStdout: tt.noStdout, stderr: tt.wantStderr,
+			})
 		})
 	}
 

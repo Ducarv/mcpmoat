@@ -11,6 +11,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -69,7 +70,7 @@ func binaryPath(t *testing.T) string {
 		cmd := exec.Command(goTool, "build", "-o", binPath, ".") //nolint:gosec // G204: the go tool comes from the test's own toolchain, and the arguments are fixed
 		out, err := cmd.CombinedOutput()
 		if err != nil {
-			buildErr = errors.New("go build failed: " + err.Error() + "\n" + string(out))
+			buildErr = fmt.Errorf("go build failed: %w\n%s", err, out)
 		}
 	})
 	if buildErr != nil {
@@ -96,8 +97,8 @@ func runBin(t *testing.T, home, dir string, args ...string) (stdout, stderr stri
 
 	err := cmd.Run()
 	if err != nil {
-		var exitErr *exec.ExitError
-		if !errors.As(err, &exitErr) {
+		exitErr, ok := errors.AsType[*exec.ExitError](err)
+		if !ok {
 			// The process did not start or did not finish: this is a test problem.
 			t.Fatalf("run %s %v: %v", bin, args, err)
 		}
@@ -115,9 +116,7 @@ func TestE2EScanAllClients(t *testing.T) {
 	if code != exitOK {
 		t.Errorf("exit code = %d, want %d; stderr:\n%s", code, exitOK, stderr)
 	}
-	if stderr != "" {
-		t.Errorf("stderr = %q, want empty", stderr)
-	}
+	assertNoRulesNotice(t, stderr)
 	want := []string{"cc-global", "cc-alpha", "cc-project", "cursor-global", "cursor-project", "codex-global"}
 	if got := column(tableRows(t, stdout), 0); !slices.Equal(got, want) {
 		t.Errorf("server names = %v, want %v\nstdout:\n%s", got, want, stdout)
@@ -195,9 +194,7 @@ func TestE2EScanEmpty(t *testing.T) {
 	if want := "No MCP servers found.\n"; stdout != want {
 		t.Errorf("stdout = %q, want %q", stdout, want)
 	}
-	if stderr != "" {
-		t.Errorf("stderr = %q, want empty", stderr)
-	}
+	assertNoRulesNotice(t, stderr)
 }
 
 func TestE2EScanConfigFile(t *testing.T) {
@@ -213,7 +210,7 @@ func TestE2EScanConfigFile(t *testing.T) {
 		// so mcpmoat reads it as an untrusted project file.
 		otherHome bool
 		// wantStderr are substrings of stderr. Empty means: exit code 0 and
-		// an empty stderr. Otherwise the exit code must be 2.
+		// only the notice on stderr. Otherwise the exit code must be 2.
 		wantStderr []string
 	}{
 		{
@@ -269,18 +266,11 @@ func TestE2EScanConfigFile(t *testing.T) {
 
 			stdout, stderr, code := runBin(t, runHome, work, "scan", "--no-connect", "--config", file)
 
-			wantCode := exitOK
+			want := scanWant{code: exitOK, stderr: tt.wantStderr}
 			if len(tt.wantStderr) > 0 {
-				wantCode = exitError
+				want.code = exitError
 			}
-			if code != wantCode {
-				t.Errorf("exit code = %d, want %d; stderr:\n%s", code, wantCode, stderr)
-			}
-			assertContainsAll(t, "stderr", stderr, tt.wantStderr)
-			if len(tt.wantStderr) == 0 && stderr != "" {
-				t.Errorf("stderr = %q, want empty", stderr)
-			}
-			assertScanErrorLines(t, stderr)
+			assertScanResult(t, code, stdout, stderr, want)
 			// tableRows checks the header, so CLIENT and SCOPE are the second
 			// and third words.
 			rows := tableRows(t, stdout)
@@ -465,6 +455,7 @@ func TestE2EScanStartsNoProcess(t *testing.T) {
 	if code != exitOK {
 		t.Errorf("exit code = %d, want %d; stderr:\n%s", code, exitOK, stderr)
 	}
+	assertNoRulesNotice(t, stderr)
 	// Both servers are listed. json.Marshal sorts the map keys, and the
 	// reader keeps that order, but the test does not depend on the order.
 	for _, name := range []string{"marker-server", "missing-binary"} {

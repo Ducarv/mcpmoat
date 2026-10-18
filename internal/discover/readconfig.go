@@ -73,22 +73,22 @@ func ReadConfig(ctx context.Context, path, home string) Result {
 // globalFile is one of the user's own config files, and the read that
 // Discover does for it.
 type globalFile struct {
-	rel  string // path below the home directory, with forward slashes
+	rel  string // one of the global file constants, such as globalCodexFile
 	read func(ctx context.Context, path string) Result
 }
 
 // path returns the path of the global file below home.
 func (g globalFile) path(home string) string {
-	return filepath.Join(home, filepath.FromSlash(g.rel))
+	return homePath(home, g.rel)
 }
 
 // globalFiles lists the user's own config files, the global steps of
 // Discover (see buildSteps), with the reader and the scope that Discover uses
 // for each. No code writes to it.
 var globalFiles = [...]globalFile{
-	{".claude.json", readGlobalClaudeCode},
-	{".cursor/mcp.json", readGlobalCursor},
-	{".codex/config.toml", ReadCodex},
+	{globalClaudeCodeFile, readGlobalClaudeCode},
+	{globalCursorFile, readGlobalCursor},
+	{globalCodexFile, ReadCodex},
 }
 
 // readGlobalClaudeCode reads ~/.claude.json as Discover does.
@@ -142,10 +142,15 @@ func isMissingFile(path string) bool {
 
 // readUntrusted reads the file at path, which is not one of the user's own
 // global files, as an untrusted project file. It reads the file once, detects
-// the format from those bytes and parses the same bytes. See ReadConfig.
+// the format from those bytes and gives the same bytes to readUntrustedJSON
+// or readUntrustedCodex. See ReadConfig.
+//
+// This is the one place that picks the size limit of an untrusted file. The
+// read comes before the detection, so it uses maxProjectConfigSize, the limit
+// of the project JSON files. After the detection, a Codex file over the
+// smaller maxTOMLSize gets the same "file too large" error as ReadCodex gives.
+// The read also has the confinement of the project files.
 func readUntrusted(ctx context.Context, path string) Result {
-	// The read has the confinement and the size limit of the project JSON
-	// readers. readUntrustedCodex checks its smaller limit.
 	data, found, fe := readConfigFile(ctx, path, maxProjectConfigSize, confineDir(path))
 	if fe != nil {
 		return untrustedError(fe)
@@ -161,24 +166,54 @@ func readUntrusted(ctx context.Context, path string) Result {
 
 	switch client {
 	case ClientClaudeCode, ClientCursor:
-		// As ReadClaudeCode and ReadCursor with ScopeProject and an empty
-		// projectPath, but on the bytes read above.
-		servers, errs := parseJSONServers(ctx, jsonFile{
-			path:           path,
-			client:         client,
-			scope:          ScopeProject,
-			reportProjects: client == ClientClaudeCode,
-			data:           data,
-			hasData:        true,
-		})
-		return Result{Servers: servers, Errors: errs}
+		return readUntrustedJSON(ctx, path, client, data)
 	case ClientCodex:
+		if len(data) > maxTOMLSize {
+			return untrustedError(readError(path, reasonTooLarge, nil))
+		}
 		return readUntrustedCodex(ctx, path, data)
 	default:
 		// DetectClient only returns the three clients above. Keep the error
 		// fixed and free of config text if that ever changes.
 		return untrustedError(newFileError(path, reasonUnknownFormat))
 	}
+}
+
+// readUntrustedJSON parses data, the content of the untrusted Claude Code or
+// Cursor file at path, as ReadClaudeCode and ReadCursor do with ScopeProject
+// and an empty projectPath. It does not read the file again. For Claude Code
+// it also reports a "projects" section, which it does not read (see
+// ReadConfig). parseJSONServers marks every server and every error Untrusted.
+func readUntrustedJSON(ctx context.Context, path string, client Client, data []byte) Result {
+	servers, errs := parseJSONServers(ctx, jsonFile{
+		path:           path,
+		client:         client,
+		scope:          ScopeProject,
+		reportProjects: client == ClientClaudeCode,
+		data:           data,
+		hasData:        true,
+	})
+	return Result{Servers: servers, Errors: errs}
+}
+
+// readUntrustedCodex parses data, the content of the untrusted Codex file at
+// path, with the rules of ReadCodex. It does not read the file again.
+// ReadCodex itself has no untrusted mode, because Discover reads only the
+// user's own Codex file.
+//
+// Every server gets ScopeProject, and the ProjectPath that projectDirOf
+// gives: the directory of the file, or the parent of a directory named
+// ".codex" (<project>/.codex/config.toml). Every server and every error gets
+// Untrusted.
+func readUntrustedCodex(ctx context.Context, path string, data []byte) Result {
+	servers, errs := parseCodex(ctx, path, data)
+	projectPath := projectDirOf(path, ClientCodex)
+	for i := range servers {
+		servers[i].Scope = ScopeProject
+		servers[i].ProjectPath = projectPath
+	}
+	markUntrusted(servers, errs)
+	return Result{Servers: servers, Errors: errs}
 }
 
 // confineDir returns the directory that the read of the cleaned path is
