@@ -15,6 +15,7 @@ const (
 	argEnv    = discovertest.CanaryEnv
 	argHeader = discovertest.CanaryHeader
 	argURL    = discovertest.CanaryURL
+	argArgs   = discovertest.CanaryArgs
 	argMask   = discover.Mask
 
 	// argShort is a secret that is too short to look like a token, so only
@@ -202,6 +203,50 @@ func TestRedactArgsFlagValues(t *testing.T) {
 			args: []string{"--password", "--ghp_" + argShort},
 			want: []string{"--password", argMask},
 		},
+		{
+			name: "token glued to a short flag masks the next argument too",
+			args: []string{"-p" + argArgs, argShort},
+			want: []string{argMask, argMask},
+		},
+
+		// A long secret-like flag name looks like a token, so it is masked
+		// whole. Its value must still be masked.
+		{
+			name: "long secret-like flag names mask the next argument",
+			args: []string{
+				"--s3-secret-access-key", argShort,
+				"--google-oauth2-client-secret", argShort,
+				"--database-admin-password-for-prod", argShort,
+			},
+			want: []string{argMask, argMask, argMask, argMask, argMask, argMask},
+		},
+		{
+			name: "long secret-like flag with equals does not mask the next argument",
+			args: []string{"--s3-secret-access-key=" + argShort, "server.js"},
+			want: []string{argMask, "server.js"},
+		},
+		{
+			name: "long secret-like flag before another flag",
+			args: []string{"--s3-secret-access-key", "--token", argShort},
+			want: []string{argMask, "--token", argMask},
+		},
+
+		// A dash argument that is not a flag is masked whole.
+		{
+			name: "user and password glued to a short user flag",
+			args: []string{"-uadmin:" + argShort, "-u" + argShort + ":"},
+			want: []string{argMask, argMask},
+		},
+		{
+			name: "header line glued to a short header flag",
+			args: []string{"-HX-Custom:" + argShort, "-HX-Custom: " + argShort, "-HAuthorization:Bearer " + argShort},
+			want: []string{argMask, argMask, argMask},
+		},
+		{
+			name: "other dash arguments that are not flags",
+			args: []string{"--x:" + argShort, "-a/" + argShort, "-" + argShort + "@h", "--=" + argShort},
+			want: []string{argMask, argMask, argMask, argMask},
+		},
 	})
 }
 
@@ -245,6 +290,53 @@ func TestRedactArgsSecretNames(t *testing.T) {
 			args: []string{"--path", "src", "--patch", "fix.diff", "--pattern", "go", "PATH=bin"},
 			want: []string{"--path", "src", "--patch", "fix.diff", "--pattern", "go", "PATH=bin"},
 		},
+
+		// More secret words: they match anywhere in the name.
+		{
+			name: "passphrase, mnemonic, private and credential",
+			args: []string{
+				"--passphrase", argShort, "--ssh-passphrase", argShort,
+				"--mnemonic", argShort, "WALLET_MNEMONIC=" + argShort,
+				"--private-key", argShort, "PRIVATE_KEY=" + argShort,
+				"--credentials", argShort, "DB_CREDENTIAL=" + argShort,
+			},
+			want: []string{
+				"--passphrase", argMask, "--ssh-passphrase", argMask,
+				"--mnemonic", argMask, "WALLET_MNEMONIC=" + argMask,
+				"--private-key", argMask, "PRIVATE_KEY=" + argMask,
+				"--credentials", argMask, "DB_CREDENTIAL=" + argMask,
+			},
+		},
+
+		// More short forms: they match as a whole word, or at the end of an
+		// all-caps word.
+		{
+			name: "pw, pin, otp, cred and creds as whole words",
+			args: []string{
+				"--pw", argShort, "DB_PW=" + argShort, "--pin", argShort, "SIM_PIN=" + argShort,
+				"--otp", argShort, "--cred", argShort, "--creds", argShort, "AWS_CREDS=" + argShort,
+			},
+			want: []string{
+				"--pw", argMask, "DB_PW=" + argMask, "--pin", argMask, "SIM_PIN=" + argMask,
+				"--otp", argMask, "--cred", argMask, "--creds", argMask, "AWS_CREDS=" + argMask,
+			},
+		},
+		{
+			name: "all-caps glued pw and otp",
+			args: []string{"DBPW=" + argShort, "TOTP=" + argShort},
+			want: []string{"DBPW=" + argMask, "TOTP=" + argMask},
+		},
+		{
+			name: "words that contain pin, otp, opt, cred or priva",
+			args: []string{
+				"--spin", "x", "--pinned", "on", "--pinata", "y", "--option", "z",
+				"--opt", "o", "--crediting", "c", "--credit", "d", "--privacy", "strict",
+			},
+			want: []string{
+				"--spin", "x", "--pinned", "on", "--pinata", "y", "--option", "z",
+				"--opt", "o", "--crediting", "c", "--credit", "d", "--privacy", "strict",
+			},
+		},
 		{
 			name: "lower case h is help, not a header flag",
 			args: []string{"-h", "server"},
@@ -273,6 +365,32 @@ func TestRedactArgsMasksUnknownShapes(t *testing.T) {
 			name: "user and password before a host",
 			args: []string{"admin:" + argShort + "@db.example.com"},
 			want: []string{argMask},
+		},
+		{
+			name: "user and password with a colon and no host",
+			args: []string{"admin:" + argShort, "basic:" + argShort, "--auth-pair=x:" + argShort},
+			want: []string{argMask, argMask, "--auth-pair=" + argMask},
+		},
+		{
+			name: "colon in a place that is not a port or a drive",
+			args: []string{"host:123456", "host:", ":8080", "C:" + argShort, "a:1:2", "x/" + argShort + ":y"},
+			want: []string{argMask, argMask, argMask, argMask, argMask, argMask},
+		},
+		{
+			name: "Oracle connect strings",
+			args: []string{"scott/" + argShort + "@orcl", "--dsn", "user/" + argShort + "@db"},
+			want: []string{argMask, "--dsn", argMask},
+		},
+		{
+			name: "at sign in a place that is not a scope or a version",
+			args: []string{
+				"user@" + argShort, argShort + "@host", "a@b@c", "x/pkg@1.0",
+				"pkg@1.0/" + argShort, "@", "@/x", "@@x", "@a@1", "x@",
+			},
+			want: []string{
+				argMask, argMask, argMask, argMask,
+				argMask, argMask, argMask, argMask, argMask, argMask,
+			},
 		},
 		{
 			name: "semicolon list with a password",
@@ -412,9 +530,19 @@ func TestRedactArgsShowsSafeShapes(t *testing.T) {
 
 		// Plain tokens.
 		{
-			name: "host and port, package versions",
-			args: []string{"localhost:8080", "pkg@1.2.3", "@scope/pkg@latest", "1.5"},
-			want: []string{"localhost:8080", "pkg@1.2.3", "@scope/pkg@latest", "1.5"},
+			name: "host and port",
+			args: []string{"localhost:8080", "127.0.0.1:3000", "--listen=0.0.0.0:80", "HOST=db:5432"},
+			want: []string{"localhost:8080", "127.0.0.1:3000", "--listen=0.0.0.0:80", "HOST=db:5432"},
+		},
+		{
+			name: "package versions",
+			args: []string{"pkg@1.2.3", "pkg@latest", "pkg@v2", "pkg@1.0.0-rc.1", "@scope/pkg@latest", "@scope/pkg@1.2.3", "1.5"},
+			want: []string{"pkg@1.2.3", "pkg@latest", "pkg@v2", "pkg@1.0.0-rc.1", "@scope/pkg@latest", "@scope/pkg@1.2.3", "1.5"},
+		},
+		{
+			name: "scoped package in a node_modules path",
+			args: []string{"/home/me/node_modules/@scope/pkg/dist/index.js"},
+			want: []string{"/home/me/node_modules/@scope/pkg/dist/index.js"},
 		},
 		{
 			name: "flag with a plain value after equals",
@@ -430,8 +558,8 @@ func TestRedactArgsShowsSafeShapes(t *testing.T) {
 		// Path shapes.
 		{
 			name: "home, parent and Windows paths",
-			args: []string{"~/keys/a.pem", "../x", `C:\Users\me\a.txt`, "C:/x"},
-			want: []string{"~/keys/a.pem", "../x", `C:\Users\me\a.txt`, "C:/x"},
+			args: []string{"~/keys/a.pem", "../x", `C:\Users\me\a.txt`, "C:/x", `C:\x`, "C:"},
+			want: []string{"~/keys/a.pem", "../x", `C:\Users\me\a.txt`, "C:/x", `C:\x`, "C:"},
 		},
 
 		// Arguments with nothing in them.
@@ -500,6 +628,11 @@ func TestRedactArgsKnownLimits(t *testing.T) {
 			want: []string{"-p" + weak},
 		},
 		{
+			name: "number in the place of a port",
+			args: []string{"admin:1234"},
+			want: []string{"admin:1234"},
+		},
+		{
 			name: "token split by slashes into short pieces",
 			args: []string{"AbCdEfGh/IjKlMnOp"},
 			want: []string{"AbCdEfGh/IjKlMnOp"},
@@ -522,6 +655,16 @@ func TestRedactArgsKnownLimits(t *testing.T) {
 			want: []string{"--no-auth", argMask},
 		},
 		{
+			name: "boolean secret-like flag with a new secret word",
+			args: []string{"--private", "server.js"},
+			want: []string{"--private", argMask},
+		},
+		{
+			name: "boolean flag with a long token-like name masks the next argument",
+			args: []string{"--use-v2-protocol-everywhere", "server.js"},
+			want: []string{argMask, argMask},
+		},
+		{
 			name: "docker user flag",
 			args: []string{"-u", "1000:1000"},
 			want: []string{"-u", argMask},
@@ -542,14 +685,34 @@ func TestRedactArgsKnownLimits(t *testing.T) {
 			want: []string{argMask},
 		},
 		{
-			name: "image with a secret-like word before a colon",
-			args: []string{"keycloak:latest"},
+			name: "dash argument that is not a flag",
+			args: []string{"-javaagent:/x.jar"},
 			want: []string{argMask},
 		},
 		{
+			name: "image with a tag",
+			args: []string{"mcp/github:latest", "keycloak:latest"},
+			want: []string{argMask, argMask},
+		},
+		{
+			name: "IPv6 address with a port",
+			args: []string{"[::1]:8080"},
+			want: []string{argMask},
+		},
+		{
+			name: "mail address",
+			args: []string{"me@example.com"},
+			want: []string{argMask},
+		},
+		{
+			name: "version range",
+			args: []string{"pkg@^1.2", "pkg@>=1"},
+			want: []string{argMask, argMask},
+		},
+		{
 			name: "all-caps word that ends in a short form",
-			args: []string{"BYPASS=1"},
-			want: []string{"BYPASS=" + argMask},
+			args: []string{"BYPASS=1", "SPIN=1"},
+			want: []string{"BYPASS=" + argMask, "SPIN=" + argMask},
 		},
 	}
 
@@ -577,11 +740,13 @@ func FuzzRedactArgs(f *testing.F) {
 	f.Add("-\x00--", "-e\x00TOKEN=x")
 	f.Add(`{"a":"b"}`, "u:p@tcp(h)/db")
 	f.Add("C:\\x\\y", "~/a/b\x00x\u202ey")
+	f.Add("--s3-secret-access-key\x00x", "-uadmin:x\x00scott/t@orcl")
+	f.Add("@scope/pkg@1.2.3\x00localhost:8080", "a@b@c\x00-HX-K:v")
 
 	f.Fuzz(func(t *testing.T, before, after string) {
 		args := strings.Split(before, "\x00")
 		tokenAt := len(args)
-		args = append(args, "--token", argEnv)
+		args = append(args, "--token", argArgs)
 		args = append(args, strings.Split(after, "\x00")...)
 		input := slices.Clone(args)
 
@@ -603,22 +768,11 @@ func FuzzRedactArgs(f *testing.F) {
 			}
 		}
 		// The canary can reach the output only if the fuzz strings hold it.
-		if !strings.Contains(before+after, argEnv) &&
-			strings.Contains(strings.Join(got, "\x00"), argEnv) {
+		if !strings.Contains(before+after, argArgs) &&
+			strings.Contains(strings.Join(got, "\x00"), argArgs) {
 			t.Fatalf("RedactArgs(%q) = %q leaks the canary", args, got)
 		}
 	})
-}
-
-// isPrintableASCII reports whether every byte of s is printable ASCII (0x20
-// to 0x7e). It is true for "".
-func isPrintableASCII(s string) bool {
-	for i := range len(s) {
-		if s[i] < 0x20 || s[i] > 0x7e {
-			return false
-		}
-	}
-	return true
 }
 
 // ExampleRedactArgs shows a typical mcp-remote command with a token in the
