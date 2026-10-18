@@ -1,0 +1,5 @@
+{
+  "mcpServers": {
+    "broken": { "command" "uvx", "env": { "API_KEY": "mcpmoat-canary-env-7Q2xK9" } }
+  }
+}

@@ -1,0 +1,15 @@
+{
+  "mcpServers": {
+    "git": {
+      "command": "uvx",
+      "args": ["mcp-server-git"]
+    },
+    "remote": {
+      "url": "https://cursor.example.com/mcp"
+    },
+    "events": {
+      "type": "sse",
+      "url": "https://sse.example.com/sse"
+    }
+  }
+}

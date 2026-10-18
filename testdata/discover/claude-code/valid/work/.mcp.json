@@ -1,0 +1,12 @@
+{
+  "mcpServers": {
+    "local-db": {
+      "command": "uvx",
+      "args": ["mcp-server-sqlite", "--db-path", "./data.db"]
+    },
+    "team-api": {
+      "type": "http",
+      "url": "https://team.example.com/mcp"
+    }
+  }
+}

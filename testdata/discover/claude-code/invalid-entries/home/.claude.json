@@ -1,0 +1,23 @@
+{
+  "mcpServers": {
+    "good": {
+      "command": "npx",
+      "args": ["-y", "example-server"]
+    },
+    "unknown-type": {
+      "type": "websocket",
+      "url": "wss://ws.example.com/mcp"
+    },
+    "empty": {},
+    "num-env": {
+      "command": "x",
+      "env": {"K": 5}
+    },
+    "http-no-url": {
+      "type": "http"
+    },
+    "stdio-no-cmd": {
+      "type": "stdio"
+    }
+  }
+}

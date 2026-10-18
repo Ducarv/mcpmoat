@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "cc-project": {
+      "type": "http",
+      "url": "https://cc-project.example.com/mcp"
+    }
+  }
+}

@@ -85,6 +85,11 @@ type Server struct {
 	// Source is the path of the config file that declared the server.
 	Source string
 
+	// Untrusted is true for a server from a project file, which a cloned
+	// repository can ship. See the package doc, Untrusted files, for what
+	// inspect must not do with it.
+	Untrusted bool
+
 	// Transport is how mcpmoat talks to the server.
 	Transport Transport
 
@@ -96,6 +101,16 @@ type Server struct {
 	// through RedactArgs; Args.Values gives them as written (see the package
 	// doc, Secrets).
 	Args Args
+
+	// Dir is the working directory for TransportStdio when the config sets
+	// one (Codex cwd), as written. Empty means the config sets none; inspect
+	// must then not run a relative command or argument from its own
+	// directory.
+	//
+	// A relative Dir is relative to the directory where the user runs Codex,
+	// which mcpmoat does not know. inspect must not resolve it against its
+	// own working directory: it must treat a relative Dir like an empty Dir.
+	Dir string
 
 	// Env holds the environment variables for TransportStdio. The values
 	// print as Mask; Env.Keys gives the names (see the package doc, Secrets).
