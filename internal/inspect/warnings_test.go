@@ -44,8 +44,9 @@ func TestIsLoopbackHost(t *testing.T) {
 		want bool
 	}{
 		{host: "localhost", want: true},
-		{host: "LOCALHOST", want: true},
-		{host: "LocalHost", want: true},
+		// Go sends these through HTTP_PROXY: its bypass is case sensitive.
+		{host: "LOCALHOST", want: false},
+		{host: "LocalHost", want: false},
 		{host: "127.0.0.1", want: true},
 		{host: "127.0.0.2", want: true},
 		{host: "127.255.255.254", want: true},
@@ -170,6 +171,13 @@ func TestCleartextWarnings(t *testing.T) {
 			want:    []Warning{{Kind: WarnCleartextSecrets, HeaderKeys: []string{"X-Api-Key"}}},
 		},
 		{
+			// Go sends LOCALHOST through HTTP_PROXY, so it is not loopback.
+			name:    "http LOCALHOST with a header",
+			rawURL:  "http://LOCALHOST/mcp",
+			headers: header,
+			want:    []Warning{{Kind: WarnCleartextSecrets, HeaderKeys: []string{"X-Api-Key"}}},
+		},
+		{
 			name:   "http non-loopback with user info",
 			rawURL: "http://" + userinfo + "mcp.example.com/mcp",
 			want:   []Warning{{Kind: WarnCleartextSecrets, URLUserInfo: true}},
@@ -251,7 +259,6 @@ func TestCleartextWarnings(t *testing.T) {
 		{name: "http 127.0.0.1 with a header", rawURL: "http://127.0.0.1:8080/mcp", headers: header},
 		{name: "http 127.0.0.1 with user info", rawURL: "http://" + userinfo + "127.0.0.1:8080/mcp", headers: header},
 		{name: "http localhost with a header", rawURL: "http://localhost:8080/mcp", headers: header},
-		{name: "http LOCALHOST with a header", rawURL: "http://LOCALHOST/mcp", headers: header},
 		{name: "http [::1] with a header", rawURL: "http://[::1]:8080/mcp", headers: header},
 		{name: "http non-loopback without secrets", rawURL: "http://mcp.example.com/mcp"},
 		{name: "http non-loopback with empty header map", rawURL: "http://mcp.example.com/mcp", headers: map[string]string{}},

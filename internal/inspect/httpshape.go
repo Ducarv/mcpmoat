@@ -122,7 +122,7 @@ func shapeFor(req *http.Request, resp *http.Response) bodyShape {
 // The legacy SSE transport and the standalone GET stream in non-strict mode
 // do not read a non-2xx body, and an unread check costs nothing.
 func shapeForError(first *http.Request, resp *http.Response) bodyShape {
-	if first.Method == http.MethodDelete || isFollowedRedirect(resp) {
+	if isSessionDelete(first) || isFollowedRedirect(resp) {
 		return bodyShapeNone
 	}
 	switch resp.StatusCode {
@@ -132,6 +132,15 @@ func shapeForError(first *http.Request, resp *http.Response) bodyShape {
 		return bodyShapeNone
 	}
 	return bodyShapeJSON
+}
+
+// isSessionDelete reports whether req belongs to the DELETE that closes a
+// streamable session: the first request of its redirect chain is a DELETE.
+// The SDK sends DELETE for nothing else. The method of req alone is not
+// enough: http.Client turns a DELETE into a GET on a 301, 302 or 303.
+// CheckRedirect, RoundTrip and shapeForError all use it, so they agree.
+func isSessionDelete(req *http.Request) bool {
+	return firstRequest(req).Method == http.MethodDelete
 }
 
 // firstRequest returns the first request of the redirect chain of req, or

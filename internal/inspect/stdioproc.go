@@ -96,7 +96,9 @@ func startStdio(ctx context.Context, cmd *exec.Cmd) (*stdioProcess, error) {
 // eofReader has both Read and Close, so it is an io.ReadCloser, which
 // newJSONShapeReader needs. The Close of the shapeReader calls the Close of
 // eofReader, so the SDK still closes the stdout pipe when it closes the
-// connection. transport stores the shapeReader in p.shape for shapeExceeded.
+// connection. transport stores the shapeReader in p.shape for shapeExceeded,
+// so call it once per process, before Connect: a second call would replace
+// the reader that shapeExceeded reads.
 func (p *stdioProcess) transport(maxLine int) mcp.Transport {
 	p.shape = newJSONShapeReader(eofReader{p}, defaultJSONLimits(), nil)
 	return &mcp.IOTransport{

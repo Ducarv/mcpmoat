@@ -1068,6 +1068,45 @@ func TestCheckRedirectSessionDelete(t *testing.T) {
 	}
 }
 
+// TestRoundTripRedirectedSessionDelete checks that a session DELETE keeps
+// out of the record after a same-origin 302. http.Client follows the 302
+// with a GET, and that GET is still part of the session DELETE: its status
+// must not replace the status of the earlier failure.
+func TestRoundTripRedirectedSessionDelete(t *testing.T) {
+	t.Parallel()
+	base := hcRoundTripFunc(func(req *http.Request) (*http.Response, error) {
+		switch {
+		case req.Method == http.MethodDelete:
+			return hcResponse(req, http.StatusFound, "", http.Header{"Location": {"http://example.com/closed"}}), nil
+		case req.URL.Path == "/closed":
+			return hcResponse(req, http.StatusNotFound, "", nil), nil
+		}
+		return hcResponse(req, http.StatusUnauthorized, "", nil), nil
+	})
+	client, ev, err := hcNew(hcURL(t, "http://example.com"), nil, base, hcUA, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp := hcGet(t, client, "http://example.com/")
+	_ = resp.Body.Close()
+
+	req, err := http.NewRequestWithContext(t.Context(), http.MethodDelete, "http://example.com/", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp, err = client.Do(req)
+	if err != nil {
+		t.Fatalf("client.Do(DELETE) error = %v", err)
+	}
+	_ = resp.Body.Close()
+	if resp.Request.Method != http.MethodGet {
+		t.Fatalf("redirected method = %s, want GET: the test needs the 302 method change", resp.Request.Method)
+	}
+	if got := ev.fallback.lastStatus(); got != http.StatusUnauthorized {
+		t.Errorf("lastStatus() = %d after the redirected DELETE, want %d", got, http.StatusUnauthorized)
+	}
+}
+
 // TestRequestRecorderBlocked checks how the requestRecorder stores the first
 // blocked error and the connected flag.
 func TestRequestRecorderBlocked(t *testing.T) {
@@ -1104,10 +1143,6 @@ func TestRequestRecorderBlocked(t *testing.T) {
 		}
 	})
 
-	// The forgetBlocked subtests are gone with forgetBlocked (issue #100): a
-	// blocked request now sits in the record of its own call, so nothing has
-	// to be forgotten after the connect.
-
 	t.Run("zero value is not connected", func(t *testing.T) {
 		t.Parallel()
 		var ev httpEvents
@@ -1116,10 +1151,9 @@ func TestRequestRecorderBlocked(t *testing.T) {
 		}
 	})
 
-	// markConnected used to drop the blocked error. Since issue #100 it only
-	// marks the session up: a blocked error in the fallback record (for
-	// example a legacy SSE stream over the size cap) must still label later
-	// failures.
+	// markConnected only marks the session up. A blocked error in the
+	// fallback record (for example a legacy SSE stream over the size cap)
+	// must still label later failures.
 	t.Run("markConnected sets connected and keeps the blocked error", func(t *testing.T) {
 		t.Parallel()
 		var ev httpEvents

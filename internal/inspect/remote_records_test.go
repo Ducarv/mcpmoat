@@ -470,6 +470,39 @@ func TestJoinContextErr(t *testing.T) {
 	})
 }
 
+// TestFinishedRecordIgnoresLateRequests checks that a call record changes no
+// more after finishCall. The SDK sends notifications/cancelled on the context
+// of a call that timed out, so its request finds the record of that call. A
+// server that answers it with a refused redirect, a non-2xx status or a
+// transport error must not change the label of the timeout.
+func TestFinishedRecordIgnoresLateRequests(t *testing.T) {
+	t.Parallel()
+	var ev httpEvents
+	ev.markConnected()
+	rec := rrRec(http.StatusBadGateway, nil)
+	ev.finishCall(rec)
+
+	if got := rec.recordBlocked(errCrossOriginRedirect); got != errCrossOriginRedirect { //nolint:errorlint // identity check: recordBlocked must return its argument
+		t.Errorf("recordBlocked() = %v, want its argument back", got)
+	}
+	rec.recordResponse(hcRecordResp(http.StatusUnauthorized, nil))
+	if got := rec.lastStatus(); got != http.StatusBadGateway {
+		t.Errorf("lastStatus() = %d after a late response, want %d", got, http.StatusBadGateway)
+	}
+	rec.recordNoResponse()
+	if got := rec.lastStatus(); got != http.StatusBadGateway {
+		t.Errorf("lastStatus() = %d after a late transport error, want %d", got, http.StatusBadGateway)
+	}
+
+	err := &recordedError{err: fmt.Errorf("%w: calling %q", context.DeadlineExceeded, methodListTools), rec: rec}
+	if status, blocked := ev.stateFor(err); blocked != nil || status != http.StatusBadGateway {
+		t.Errorf("stateFor() = (%d, %v), want (%d, nil)", status, blocked, http.StatusBadGateway)
+	}
+	if ce := classify(err, rrClassifyServer(), &ev, nil); ce.Kind != KindTimeout {
+		t.Errorf("classify Kind = %q, want %q (reason %q)", ce.Kind, KindTimeout, ce.Reason)
+	}
+}
+
 // errRRCall, errRRFallback, errRRConnect and errRROther are distinct blocked
 // errors for the stateFor table. Each wraps a different sentinel, and the
 // table compares them by identity.

@@ -79,8 +79,6 @@ func (c *pdConn) Close() error {
 // error; every other dial returns a new pdConn. It is safe for concurrent
 // use.
 type pdDialer struct {
-	t *testing.T
-
 	mu    sync.Mutex
 	fail  map[string]error
 	dials []string
@@ -89,7 +87,7 @@ type pdDialer struct {
 
 func newPDDialer(t *testing.T) *pdDialer {
 	t.Helper()
-	d := &pdDialer{t: t, fail: map[string]error{}}
+	d := &pdDialer{fail: map[string]error{}}
 	t.Cleanup(func() {
 		d.mu.Lock()
 		defer d.mu.Unlock()
@@ -117,7 +115,7 @@ func (d *pdDialer) dial(_ context.Context, _, address string) (net.Conn, error) 
 	return c, nil
 }
 
-// setFail makes dials to the addresses fail with errRefused, and all other
+// setFail makes dials to the addresses fail with errPDRefused, and all other
 // dials succeed.
 func (d *pdDialer) setFail(addrs []string) {
 	d.mu.Lock()
@@ -244,7 +242,19 @@ func TestPinnedDialerDialContext(t *testing.T) {
 				{addrs: pdAddrs(t, "192.0.2.7", "127.0.0.1")},
 			},
 			steps: []pdStep{
-				{address: "LocalHost:8080", wantDials: []string{"127.0.0.1:8080"}, wantConn: "127.0.0.1:8080"},
+				{address: "localhost:8080", wantDials: []string{"127.0.0.1:8080"}, wantConn: "127.0.0.1:8080"},
+			},
+			wantLookups: []string{"ip"},
+		},
+		{
+			// LOCALHOST is not loopback by name (Go sends it through a
+			// proxy), so it is dialled like any other name.
+			name: "LOCALHOST dials like any name",
+			answers: []pdAnswer{
+				{addrs: pdAddrs(t, "192.0.2.7", "127.0.0.1")},
+			},
+			steps: []pdStep{
+				{address: "LOCALHOST:8080", wantDials: []string{"192.0.2.7:8080"}, wantConn: "192.0.2.7:8080"},
 			},
 			wantLookups: []string{"ip"},
 		},

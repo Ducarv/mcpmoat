@@ -16,8 +16,10 @@ import (
 //
 // Each MCP call gets its own record (see callRecords in remote.go), so a
 // request that runs at the same time as another one cannot change the label
-// of its error. httpEvents embeds one more record, the fallback, for the
+// of its error. httpEvents holds one more record, the fallback, for the
 // requests that belong to no call.
+//
+// A call record stops changing when its call returns (see finish).
 //
 // It is safe for concurrent use: a response body can be read on another
 // goroutine than the one that sent the request.
@@ -32,11 +34,24 @@ type requestRecorder struct {
 	// works. The 404 must not give a wrong label to a later, unrelated error.
 	status atomic.Int64
 
+	// finished is true after the call of the record returned (see finish).
+	finished atomic.Bool
+
 	// mu guards blocked.
 	mu sync.Mutex
 	// blocked is the first error that the HTTP layer raised on purpose for
 	// this record, or nil.
 	blocked error
+}
+
+// finish marks the call of the record as returned. After it, the record
+// changes no more. The SDK can still send a request on the context of a
+// returned call: after a call fails because ctx ended, it sends
+// notifications/cancelled on context.WithoutCancel of that ctx, and so with
+// the same record. The answer to that request must not change the label of
+// the error that the call returned.
+func (r *requestRecorder) finish() {
+	r.finished.Store(true)
 }
 
 // lastStatus returns the status of the most recent request of the record (see
@@ -57,7 +72,7 @@ func (r *requestRecorder) blockedErr() error {
 // clears an earlier failure. A followed redirect changes nothing: it is not a
 // final answer.
 func (r *requestRecorder) recordResponse(resp *http.Response) {
-	if isFollowedRedirect(resp) {
+	if r.finished.Load() || isFollowedRedirect(resp) {
 		return
 	}
 	if resp.StatusCode >= 200 && resp.StatusCode <= 299 {
@@ -71,16 +86,20 @@ func (r *requestRecorder) recordResponse(resp *http.Response) {
 // It clears the status, so that an older non-2xx status cannot outrank this
 // error.
 func (r *requestRecorder) recordNoResponse() {
+	if r.finished.Load() {
+		return
+	}
 	r.status.Store(0)
 }
 
-// recordBlocked stores err if no blocked error was stored before. The first
-// one wins, because a later error is often a result of the first one. It
-// returns err, so a caller can write: return nil, rec.recordBlocked(err).
+// recordBlocked stores err if no blocked error was stored before and the
+// record is not finished. The first one wins, because a later error is often
+// a result of the first one. It always returns err, so a caller can write:
+// return nil, rec.recordBlocked(err).
 func (r *requestRecorder) recordBlocked(err error) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	if r.blocked == nil {
+	if r.blocked == nil && !r.finished.Load() {
 		r.blocked = err
 	}
 	return err
@@ -178,14 +197,15 @@ func (ev *httpEvents) connected() bool {
 	return ev.sessionUp.Load()
 }
 
-// finishCall stores rec as the record of the call that finished last.
-// During the connect, it also keeps the first record with a blocked error in
-// connectBlocked. callRecords calls it when a call returns. A nil rec changes
-// nothing.
+// finishCall finishes rec (see requestRecorder.finish) and stores it as the
+// record of the call that finished last. During the connect, it also keeps
+// the first record with a blocked error in connectBlocked. callRecords calls
+// it when a call returns. A nil rec changes nothing.
 func (ev *httpEvents) finishCall(rec *requestRecorder) {
 	if rec == nil {
 		return
 	}
+	rec.finish()
 	ev.lastCall.Store(rec)
 	if !ev.connectDone.Load() && rec.blockedErr() != nil {
 		// CompareAndSwap stores rec only if the pointer is still nil, in one

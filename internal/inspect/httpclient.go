@@ -189,7 +189,7 @@ func newHTTPClient(cfg httpClientConfig) (*http.Client, *httpEvents, error) {
 			default:
 				return nil
 			}
-			if firstRequest(req).Method == http.MethodDelete {
+			if isSessionDelete(req) {
 				return err
 			}
 			return ev.recorderFor(req).recordBlocked(err)
@@ -423,7 +423,9 @@ func (t *headerTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 	// answer. It closes the session after a failed initialize too, and a
 	// server that never kept the session answers 404. The outcome of that
 	// DELETE must not change the label of the error that made the SDK close.
-	record := out.Method != http.MethodDelete
+	// isSessionDelete also catches a DELETE that a redirect turned into a
+	// GET.
+	record := !isSessionDelete(out)
 
 	resp, err := t.base.RoundTrip(out)
 	if err != nil {

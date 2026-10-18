@@ -164,7 +164,10 @@ func Remote(ctx context.Context, srv discover.Server, opts RemoteOptions) (Resul
 	// One SDK goroutine can outlive Remote: after a call fails because ctx
 	// ended, the SDK sends notifications/cancelled on a detached context,
 	// also bounded to 5 seconds. That is one more request to the same origin,
-	// and its connection can stay idle until idleConnTimeout.
+	// and its connection can stay idle until idleConnTimeout. The detached
+	// context keeps the record of the failed call, but that record is
+	// finished, so the answer cannot change the label of the error (see
+	// requestRecorder.finish).
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	if _, ok := ctx.Deadline(); !ok {

@@ -81,11 +81,14 @@ type ConnectError struct {
 	URL string
 
 	// Warnings are the problems with the connection that Remote found even
-	// though the inspection failed. Remote sets them when it sent secrets
-	// over plain http:// to a host that is not loopback: the secrets went out
-	// before the failure, so the user must still hear about it. A Warning
-	// holds keys only, never secret values. It is nil when there are none.
-	// Error does not print the warnings.
+	// though the inspection failed. Remote sets them on every failure after
+	// the connect started when the config sends secrets over plain http:// to
+	// a host that is not loopback: the secrets can have gone out before the
+	// failure, so the user must still hear about it. Remote does not check
+	// whether a request reached the server (a failed DNS lookup or dial
+	// sends nothing), so the warning errs on the safe side. A Warning holds
+	// keys only, never secret values. It is nil when there are none. Error
+	// does not print the warnings.
 	Warnings []Warning
 
 	// err is the cause. See Unwrap.

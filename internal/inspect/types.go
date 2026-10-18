@@ -160,8 +160,10 @@ type ResourceTemplate struct {
 // JSON output can show them, and users can match on them.
 type WarningKind string
 
-// WarnCleartextSecrets is the kind of a Warning about secrets that mcpmoat
-// sent over plain http:// to a host that is not loopback. The value
+// WarnCleartextSecrets is the kind of a Warning about secrets that the config
+// makes mcpmoat send over plain http:// to a host that is not loopback. On a
+// failed inspection, the secrets may not have gone out (see
+// ConnectError.Warnings). The value
 // "cleartext-secrets" is stable and does not change between versions.
 const WarnCleartextSecrets WarningKind = "cleartext-secrets"
 
@@ -173,16 +175,16 @@ type Warning struct {
 	Kind WarningKind
 
 	// HeaderKeys are the header keys from the client config that mcpmoat
-	// sent, as written in the config. Each key is in the list one time. The
+	// sends, as written in the config. Each key is in the list one time. The
 	// list never holds header values. The keys are config text, so callers
 	// must escape them with internal/termsafe before they print them.
 	HeaderKeys []string
 
-	// URLUserInfo is true when mcpmoat sent the user info of the server URL
+	// URLUserInfo is true when mcpmoat sends the user info of the server URL
 	// as a Basic Authorization header: the URL has user info and the config
 	// sets no non-empty Authorization header. It is false when a config
-	// Authorization header replaced the user info, because the user info
-	// then did not go out.
+	// Authorization header replaces the user info, because the user info
+	// then does not go out.
 	URLUserInfo bool
 
 	// URLSecrets is true when the query or the path of the server URL holds
