@@ -1,5 +1,6 @@
 // Package inspect connects to MCP servers and lists their tools, prompts and
-// resources (FR-04).
+// resources (FR-04). Protocol details stay behind an interface in this
+// package so that MCP spec changes stay local.
 //
 // See docs/PRD.md, FR-04 to FR-06, NFR-04 and NFR-06.
 //
@@ -54,32 +55,54 @@
 // [Options.AllowUntrusted] is true. AllowUntrusted is the explicit opt-in of
 // the user.
 //
-// # Starting a stdio server
+// # Starting stdio servers
 //
-// For a stdio server, Inspect starts the server as a child process and
-// talks MCP over its stdin and stdout (NFR-04):
+// stdioCommand builds the [os/exec.Cmd] for a stdio server (NFR-04), and
+// [SDKInspector.Inspect] starts it. It never uses a shell. The command and
+// the args go to the child byte-for-byte as configured, also argv[0].
+// Nothing expands globs, variables or quotes. The user-facing version of
+// this section is docs/stdio-servers.md.
 //
-//   - The child runs exactly the configured command with exactly the
-//     configured args. There is no shell, so shell syntax in the config
-//     (";", "|", "$(...)") stays plain text in one argument.
-//   - The environment of the child is built from scratch. It gets only PATH
-//     and HOME from the environment of mcpmoat, plus the env of the server
-//     in the client config. A configured key wins over PATH or HOME. Issue
-//     #27 adds the full allowlist of base keys.
-//   - When the server has an absolute Dir, the child runs in it. Otherwise
-//     it runs in a new, empty directory below <user cache dir>/mcpmoat/run,
-//     a directory that only the user can access, and Inspect removes it
-//     before it returns. Not below the shared temporary directory: a
-//     launcher such as npx reads files in the parent directories of its
-//     working directory. A relative Dir counts as no Dir.
-//   - Without an absolute Dir, a relative command with a directory part (for
-//     example "./server" or "bin/server") is refused with [ErrInvalidServer].
-//   - The stderr of the child is discarded, so server output never reaches
-//     the terminal unescaped.
-//   - A bare command name such as "npx" is looked up in the PATH of mcpmoat,
-//     not in the PATH of the child. So a PATH in the client config changes
-//     the PATH that the child sees, but not which program starts. Issue #27
-//     tracks this.
+// The environment is built from scratch (buildEnv). The child gets a small
+// allowlist from the mcpmoat environment, plus the variables that the server
+// config declares. isBaseEnv holds the allowlist and the reason for each
+// entry. Agent sockets, proxies, tokens, cloud keys and loader hooks are
+// excluded on purpose. A user who needs one of them declares it in the env
+// of the server config.
+//
+// A config env entry overrides an allowlist entry with the same name. A
+// ${VAR} placeholder is passed as written for now (issue #88). A bad name or
+// a NUL byte refuses the server. The error text is fixed and holds no name
+// and no value. The Env of the Cmd is never nil, because a nil Env makes the
+// child inherit the whole parent environment.
+//
+// The work directory is the config Dir (the Codex cwd) when it is absolute.
+// mcpmoat uses that Dir as written, so files in it can change what runs, the
+// same as in the client. Else Inspect makes a new, empty directory below
+// <user cache dir>/mcpmoat/run (workDir) and removes it after the stop. npm
+// and uv read files from the work directory and from all its parent
+// directories, so the run root and every parent up to "/" must be owned by
+// the user or root and must not be writable by others (defaultRunRoot,
+// checkPrivateChain). A relative command with a "/" (such as "./server")
+// needs an absolute config Dir.
+//
+// On Unix the child starts in a new session and process group; see
+// detachSysProcAttr. The stdout of the child is the MCP connection, and its
+// stderr is discarded, so server output never reaches the terminal of the
+// user unescaped.
+//
+// A bare command name (no "/") is looked up in the final PATH of the child,
+// so a PATH from the config wins. Node spawn and Rust Command do the same.
+// lookPath lists the skip rules and the PATH risks.
+//
+// A server from an untrusted project file starts only with an explicit
+// opt-in (Options.AllowUntrusted). See the discover package doc, Untrusted
+// files.
+//
+// The Cmd holds revealed secrets. Never print, log or encode cmd.String(),
+// cmd.Env or cmd.Args.
+//
+// The rules are for Unix only. Windows is a non-goal (PRD section 2.2).
 //
 // # Child lifecycle
 //
@@ -90,9 +113,11 @@
 //  2. If the child still runs after a short grace period, send SIGTERM.
 //  3. If the child still runs after one more grace period, send SIGKILL.
 //
-// When ctx is canceled or its deadline passes, the child gets SIGKILL at
-// once. The only exception is a process that the operating system cannot
-// kill.
+// When ctx is canceled or its deadline passes, the process group of the
+// child gets SIGKILL at once. After the stop, the process group gets SIGKILL
+// once more, so processes that the child started and that stayed in its
+// group stop too (for example node, started by npx). A process that left
+// the group, or that the operating system cannot kill, is the exception.
 //
 // # Limits
 //
@@ -138,9 +163,6 @@
 //
 // # Known limits
 //
-//   - Inspect stops only the child process, not the processes that the child
-//     starts (for example node, started by npx). There is no process group
-//     yet; see issue #28.
 //   - The SDK silently drops some invalid tools before mcpmoat sees them
 //     (filterValidTools in the SDK: a nil tool, or a tool with invalid
 //     x-mcp-header annotations). mcpmoat cannot read such a tool. But it

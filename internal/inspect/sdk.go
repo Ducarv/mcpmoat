@@ -4,7 +4,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
+	"os/exec"
 	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -37,18 +39,14 @@ var errNoResult = errors.New("no result")
 type SDKInspector struct {
 	opts Options
 
-	// getenv reads the environment of mcpmoat for the base keys of the
-	// child environment (see childEnv). New sets it to os.Getenv; tests in
-	// this package can replace it, so that they never read the real
-	// environment. When it is nil (a zero SDKInspector), Inspect uses
-	// os.Getenv.
-	getenv func(string) string
-
-	// runRoot returns the directory for the working directories of servers
-	// without an absolute Dir (see buildCommand). New sets it to
-	// defaultRunRoot; tests replace it, so that they never write to the
-	// cache directory of the user. When it is nil, Inspect uses
-	// defaultRunRoot.
+	// environ returns the environment of mcpmoat in the form of os.Environ,
+	// the parent of the child environment (see buildEnv). runRoot returns
+	// the directory for the work directories of servers without an
+	// absolute Dir (see workDir). When a field is nil, as in New and in a
+	// zero SDKInspector, Inspect uses os.Environ and defaultRunRoot. Tests
+	// set them, so that they never read the real environment or write to the
+	// cache directory of the user.
+	environ func() []string
 	runRoot func() (string, error)
 }
 
@@ -56,7 +54,7 @@ var _ Inspector = (*SDKInspector)(nil)
 
 // New returns an [SDKInspector] with the options opts.
 func New(opts Options) *SDKInspector {
-	return &SDKInspector{opts: opts, getenv: os.Getenv, runRoot: defaultRunRoot}
+	return &SDKInspector{opts: opts}
 }
 
 // Inspect starts the stdio server s, does the MCP handshake, lists its tools,
@@ -73,12 +71,18 @@ func New(opts Options) *SDKInspector {
 // Inspect does not start a server that is Untrusted unless
 // Options.AllowUntrusted is true. It does not connect to a remote server.
 //
+// Inspect builds the command with stdioCommand (NFR-04): no shell, a
+// scrubbed environment, a bare command name looked up in the PATH of the
+// child, and on Unix a new session and process group (detachSysProcAttr).
+//
 // Stop guarantee: when Inspect returns, on success and on every error, the
-// child process was stopped and reaped, and its temporary working directory,
-// if any, was removed. A normal stop closes stdin of the server, then sends
-// SIGTERM and SIGKILL if needed. When ctx ends, os/exec sends SIGKILL at
-// once. The only exception is a process that the operating system cannot
-// kill.
+// child process was stopped and reaped, and its work directory below the
+// run root, if any, was removed. A normal stop closes stdin of the server,
+// then sends SIGTERM and SIGKILL if needed. When ctx ends, Inspect sends
+// SIGKILL to the process group of the child at once. After the stop it
+// sends SIGKILL to the process group once more, so the processes that the
+// child started and that stayed in its group stop too. A process that left
+// the group, or that the operating system cannot kill, is the exception.
 func (i *SDKInspector) Inspect(ctx context.Context, s discover.Server) (Result, error) {
 	if s.Untrusted && !i.opts.AllowUntrusted {
 		return Result{}, fmt.Errorf("%w: not started without the explicit opt-in", ErrUntrusted)
@@ -95,27 +99,26 @@ func (i *SDKInspector) Inspect(ctx context.Context, s discover.Server) (Result, 
 	// The defers below stop things in this order:
 	//
 	//  1. cs.Close: ends the MCP session.
-	//  2. transport.close: stops the process with the steps on stopGrace and
-	//     reaps it.
-	//  3. cleanup: removes the temporary working directory, now that the
-	//     process no longer uses it.
-	//  4. cancel: cancels the ctx of exec.CommandContext. If the process
-	//     still runs at this point, os/exec kills it with SIGKILL. It is
-	//     the last resort.
+	//  2. transport.close: stops the process with the steps on stopGrace,
+	//     reaps it, and kills what is left of its process group.
+	//  3. cleanup: removes the work directory, now that the process no
+	//     longer uses it.
+	//  4. cancel: ends ctx. The kill on ctx (see closingTransport) is
+	//     already stopped at this point.
 	//
 	// The defer for cancel is registered first, so that it runs last.
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
-	getenv := i.getenv
-	if getenv == nil {
-		getenv = os.Getenv
+	environ, runRoot := os.Environ, defaultRunRoot
+	if i.environ != nil {
+		environ = i.environ
 	}
-	runRoot := i.runRoot
-	if runRoot == nil {
-		runRoot = defaultRunRoot
+	if i.runRoot != nil {
+		runRoot = i.runRoot
 	}
-	cmd, cleanup, err := buildCommand(ctx, s, getenv, runRoot)
+
+	fallback, cleanup, err := workDir(s.Dir, runRoot)
 	// cleanup is never nil, also on error, so it is safe to defer it before
 	// the error check.
 	defer cleanup()
@@ -123,8 +126,18 @@ func (i *SDKInspector) Inspect(ctx context.Context, s discover.Server) (Result, 
 		return Result{}, err
 	}
 
+	cmd, err := stdioCommand(s, stdioOptions{
+		Environ:        environ(),
+		FallbackDir:    fallback,
+		AllowUntrusted: i.opts.AllowUntrusted,
+	})
+	if err != nil {
+		return Result{}, commandError(err)
+	}
+
 	transport := &closingTransport{
 		inner: &mcp.CommandTransport{Command: cmd, TerminateDuration: stopGrace},
+		cmd:   cmd,
 	}
 	defer transport.close()
 
@@ -132,9 +145,7 @@ func (i *SDKInspector) Inspect(ctx context.Context, s discover.Server) (Result, 
 	cs, err := client.Connect(ctx, transport, nil)
 	if err != nil {
 		if transport.startErr != nil {
-			// The error of exec.Cmd.Start names the command, never
-			// the args or the env.
-			return Result{}, fmt.Errorf("%w: %w", ErrStart, err)
+			return Result{}, startError(ctx, transport.startErr)
 		}
 		return Result{}, sessionError(ctx, "handshake", err)
 	}
@@ -144,6 +155,40 @@ func (i *SDKInspector) Inspect(ctx context.Context, s discover.Server) (Result, 
 	defer func() { _ = cs.Close() }()
 
 	return inspectWatched(ctx, cs, watch)
+}
+
+// commandError maps an error of stdioCommand to a sentinel of the error
+// contract of [Inspector]. stdioCommand returns fixed sentinels with no
+// config text, so the result holds none either.
+func commandError(err error) error {
+	sentinel := ErrInvalidServer
+	switch {
+	case errors.Is(err, errNotStdio):
+		sentinel = ErrUnsupportedTransport
+	case errors.Is(err, errUntrusted):
+		sentinel = ErrUntrusted
+	case errors.Is(err, errCommandNotFound), errors.Is(err, errCommandNotRunnable), errors.Is(err, errNoWorkDir):
+		sentinel = ErrStart
+	}
+	return fmt.Errorf("%w: %w", sentinel, err)
+}
+
+// startError returns an error that wraps [ErrStart] for err, the error of
+// exec.Cmd.Start. Its text is fixed: the error of Start can hold cmd.Path or
+// cmd.Dir, which are untrusted config text (see stdioCommand). It keeps only
+// the class of err (fs.ErrNotExist or fs.ErrPermission), and the context
+// error when ctx is done.
+func startError(ctx context.Context, err error) error {
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return fmt.Errorf("%w: the server process did not start: %w", ErrStart, ctxErr)
+	}
+	switch {
+	case errors.Is(err, fs.ErrNotExist):
+		return fmt.Errorf("%w: the command or the work directory does not exist: %w", ErrStart, fs.ErrNotExist)
+	case errors.Is(err, fs.ErrPermission):
+		return fmt.Errorf("%w: no permission to run the command or to use the work directory: %w", ErrStart, fs.ErrPermission)
+	}
+	return fmt.Errorf("%w: the server process did not start", ErrStart)
 }
 
 // newClient returns a new SDK client for one call to Inspect.
@@ -203,8 +248,8 @@ func (i *SDKInspector) newClient() *mcp.Client {
 // the server, not for one kind.
 //
 // On an error, the Result is zero, also when an earlier kind was listed
-// without error. The error wraps [ErrProtocol],
-// [ErrTooManyItems] or the context error.
+// without error. The error wraps [ErrProtocol], [ErrTooManyItems] or the
+// context error.
 func inspectSession(ctx context.Context, cs *mcp.ClientSession) (Result, error) {
 	return inspectSessionBudget(ctx, cs, newByteBudget(maxBytes))
 }
@@ -312,14 +357,17 @@ func inspectSessionBudget(ctx context.Context, cs *mcp.ClientSession, budget *by
 //     does not wrap it.
 //   - Every other error wraps [ErrProtocol] once.
 //
-// err can hold text that the server sent. It never holds Args, Env, Headers
-// or URL values, because the SDK never sees them: buildCommand passes them to
-// the process only.
+// err can hold text that the server sent. mcpmoat puts no Args, Env, Headers
+// or URL values in it, because the SDK never sees them: stdioCommand passes
+// them to the process only.
 func sessionError(ctx context.Context, op string, err error) error {
 	if errors.Is(err, ErrTooManyItems) {
 		return fmt.Errorf("%s: %w", op, err)
 	}
 	if ctxErr := ctx.Err(); ctxErr != nil && !errors.Is(err, ctxErr) {
+		if errors.Is(err, ErrProtocol) {
+			return fmt.Errorf("%s: %w: %w", op, err, ctxErr)
+		}
 		return fmt.Errorf("%w: %s: %w: %w", ErrProtocol, op, err, ctxErr)
 	}
 	if errors.Is(err, ErrProtocol) {
@@ -331,13 +379,16 @@ func sessionError(ctx context.Context, op string, err error) error {
 }
 
 // closingTransport is an [mcp.Transport] around the SDK command transport. It
-// remembers what Connect did, for two reasons:
+// remembers what Connect did, for three reasons:
 //
 //   - Inspect must tell a start failure ([ErrStart]) from a handshake
 //     failure ([ErrProtocol]). Both come back from Client.Connect.
 //   - Client.Connect does not close the connection on every error path. With
 //     the connection kept here, Inspect can always close it, and so always
 //     stop and reap the process.
+//   - stdioCommand uses exec.Command, not exec.CommandContext, so os/exec
+//     does not kill the child when ctx ends. Connect arranges that kill: when
+//     ctx ends, the process group of the child gets SIGKILL at once.
 //
 // Connect returns the connection of the inner transport unchanged, not a
 // wrapper. The SDK checks the connection for optional interfaces, and a
@@ -349,6 +400,9 @@ func sessionError(ctx context.Context, op string, err error) error {
 type closingTransport struct {
 	inner mcp.Transport
 
+	// cmd is the command that inner starts in Connect.
+	cmd *exec.Cmd
+
 	// conn is the connection that inner returned, or nil.
 	conn mcp.Connection
 
@@ -356,9 +410,17 @@ type closingTransport struct {
 	// starts the process in Connect, so a non-nil startErr means that the
 	// process did not start.
 	startErr error
+
+	// pid is the PID of the child, and so its process group ID, once
+	// Connect has started it.
+	pid int
+
+	// stopKill stops the kill on ctx that Connect arranges; nil before.
+	stopKill func() bool
 }
 
-// Connect starts the server process through the inner transport.
+// Connect starts the server process through the inner transport. When ctx
+// ends after that, the process group of the child gets SIGKILL at once.
 func (t *closingTransport) Connect(ctx context.Context) (mcp.Connection, error) {
 	conn, err := t.inner.Connect(ctx)
 	if err != nil {
@@ -366,6 +428,11 @@ func (t *closingTransport) Connect(ctx context.Context) (mcp.Connection, error) 
 		return nil, err
 	}
 	t.conn = conn
+	// Start set cmd.Process in this goroutine, before the AfterFunc below
+	// exists, so the func reads pid without a race.
+	pid := t.cmd.Process.Pid
+	t.pid = pid
+	t.stopKill = context.AfterFunc(ctx, func() { killGroup(pid) })
 	return conn, nil
 }
 
@@ -375,11 +442,20 @@ func (t *closingTransport) Connect(ctx context.Context) (mcp.Connection, error) 
 // For the command transport, this is how the process stops, with the steps
 // on stopGrace. The close of the SDK connection runs only once (sync.Once);
 // a concurrent or earlier close by the SDK is fine, because a second call
-// waits for the first one to finish. So when close returns, the process has
-// exited and is reaped. The error is the exit status of the server, which
-// does not matter here, so close drops it.
+// waits for the first one to finish. So when the close returns, the process
+// has exited and is reaped. The error is the exit status of the server,
+// which does not matter here, so close drops it.
+//
+// Then close sends SIGKILL to the process group once more, for the
+// processes that the child started and that stayed in its group. The child
+// is reaped at this point, so its PID is free again. But the group ID stays
+// in use while any process of the group lives, so the signal reaches only
+// that group. If the group is empty, the signal finds no process.
 func (t *closingTransport) close() {
-	if t.conn != nil {
-		_ = t.conn.Close()
+	if t.conn == nil {
+		return
 	}
+	_ = t.conn.Close()
+	t.stopKill()
+	killGroup(t.pid)
 }

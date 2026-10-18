@@ -2,7 +2,6 @@ package inspect
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"sync/atomic"
 
@@ -17,8 +16,8 @@ import (
 // only the text that mcpmoat keeps. But the SDK client keeps the full
 // decoded page, also the fields that mcpmoat drops (_meta, icons), in its
 // list cache until the session closes. So listWatch measures each page as
-// JSON (see jsonSize) and adds the size to rawBytes,
-// for all three kinds together. When rawBytes goes over rawLimit, the
+// JSON (see jsonSize) and adds the size to rawBytes, for all three kinds
+// together. When rawBytes goes over rawLimit, the
 // middleware returns an error that wraps [ErrTooManyItems]. Then the list
 // call fails at once: the SDK does not cache that page, and collect requests
 // no more pages. The size is that of the decoded page, not the exact bytes
@@ -143,16 +142,17 @@ func (w *listWatch) spendRaw(res mcp.Result) error {
 	return nil
 }
 
-// jsonSize returns the size of v as JSON. HTML escaping is off, so "<", ">"
-// and "&" count one byte each, as a server sends them, not six. rawJSON in
-// convert.go encodes with the same settings. The encoder
-// builds the JSON in an internal buffer for a short time, so for one page
-// the memory is about twice its size; countWriter keeps none of it.
+// jsonSize returns the size of v as JSON, encoded with newJSONEncoder. So
+// "<", ">" and "&" in plain strings count one byte each, as a server sends
+// them, not six. A field type with its own MarshalJSON that calls
+// json.Marshal (for example the tool annotations of the SDK) still gets
+// HTML escapes, so it can count a little more than the server sent; the
+// error is on the safe side. The encoder builds the JSON in an internal
+// buffer for a short time, so for one page the memory is about twice its
+// size; countWriter keeps none of it.
 func jsonSize(v any) (int64, error) {
 	var c countWriter
-	enc := json.NewEncoder(&c)
-	enc.SetEscapeHTML(false)
-	if err := enc.Encode(v); err != nil {
+	if err := newJSONEncoder(&c).Encode(v); err != nil {
 		return 0, err
 	}
 	// Encode adds a newline after the value; the JSON does not have it.

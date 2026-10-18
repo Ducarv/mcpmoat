@@ -25,6 +25,10 @@
 //	-envfile path
 //	    if set, write the sorted environment, one VAR=value per line, to this
 //	    file at start (tests use it to check the scrubbed environment, NFR-04)
+//	-spawn path
+//	    if set, start a copy of this program in mode hang-init, which never
+//	    exits, and write its process ID to this file (tests use it to check
+//	    that mcpmoat stops the whole process group)
 //
 // Bad flags, an unknown mode or a file write error exit with code 2. A
 // server error other than a closed stdin or a signal exits with code 1.
@@ -40,6 +44,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"os/signal"
 	"slices"
 	"strconv"
@@ -90,6 +95,7 @@ func run(args []string, stderr io.Writer) int {
 	mode := fs.String("mode", modeOK, modeOK+" | "+modeCrash+" | "+modeHangInit+" | "+modeHangList)
 	pidFile := fs.String("pidfile", "", "write the process ID to this file")
 	envFile := fs.String("envfile", "", "write the sorted environment to this file")
+	spawnFile := fs.String("spawn", "", "start a process that never exits and write its process ID to this file")
 	if err := fs.Parse(args); err != nil {
 		return exitUsage
 	}
@@ -108,6 +114,12 @@ func run(args []string, stderr io.Writer) int {
 	if err := writeStartFiles(*pidFile, *envFile); err != nil {
 		fmt.Fprintf(stderr, "benign: %v\n", err)
 		return exitUsage
+	}
+	if *spawnFile != "" {
+		if err := spawnChild(*spawnFile); err != nil {
+			fmt.Fprintf(stderr, "benign: %v\n", err)
+			return exitUsage
+		}
 	}
 
 	switch *mode {
@@ -138,6 +150,26 @@ func run(args []string, stderr io.Writer) int {
 		return exitServe
 	}
 	return exitOK
+}
+
+// spawnChild starts a copy of this program in mode hang-init and writes its
+// process ID to pidFile. The copy stays in the process group of this
+// program, and its stdin, stdout and stderr are os.DevNull, so it does not
+// hold the MCP pipes. spawnChild does not wait for it.
+func spawnChild(pidFile string) error {
+	exe, err := os.Executable()
+	if err != nil {
+		return fmt.Errorf("find own executable: %w", err)
+	}
+	child := exec.Command(exe, "-mode", modeHangInit) //nolint:gosec // G204: runs this test fixture itself
+	if err := child.Start(); err != nil {
+		return fmt.Errorf("start child: %w", err)
+	}
+	pid := strconv.Itoa(child.Process.Pid) + "\n"
+	if err := os.WriteFile(pidFile, []byte(pid), 0o600); err != nil {
+		return fmt.Errorf("write spawn file: %w", err)
+	}
+	return nil
 }
 
 // writeStartFiles writes the process ID to pidFile and the sorted

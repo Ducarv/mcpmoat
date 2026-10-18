@@ -131,6 +131,61 @@ func TestInspectStopsChild(t *testing.T) {
 	}
 }
 
+// TestSDKInspectKillsProcessGroup checks that Inspect also stops a process
+// that the server started and that stayed in its process group, on a normal
+// stop and on a ctx deadline. The fixture starts a copy of itself that never
+// exits (-spawn). Without the process group kill, that copy keeps running
+// after Inspect returns.
+func TestSDKInspectKillsProcessGroup(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		mode    string
+		timeout time.Duration
+	}{
+		{name: "normal stop", mode: "ok", timeout: 10 * time.Second},
+		{name: "ctx deadline", mode: "hang-list", timeout: time.Second},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			spawnfile := filepath.Join(t.TempDir(), "spawn")
+			server := discover.Server{
+				Name:      "benign-spawn",
+				Transport: discover.TransportStdio,
+				Command:   inspecttest.Fixture(t, "benign"),
+				Args:      discover.NewArgs([]string{"-mode", tt.mode, "-spawn", spawnfile}),
+			}
+			ctx, cancel := context.WithTimeout(t.Context(), tt.timeout)
+			defer cancel()
+
+			_, _ = sdkNew(t, inspect.Options{}).Inspect(ctx, server)
+
+			pid := sdkReadPID(t, spawnfile)
+			// The spawned process is not a child of mcpmoat. After the
+			// SIGKILL, init (or launchd) reaps it, which can take a moment,
+			// so poll for a short time.
+			ticker := time.NewTicker(10 * time.Millisecond)
+			defer ticker.Stop()
+			deadline := time.After(5 * time.Second)
+			for {
+				err := syscall.Kill(pid, 0)
+				if errors.Is(err, syscall.ESRCH) {
+					return
+				}
+				select {
+				case <-ticker.C:
+				case <-deadline:
+					_ = syscall.Kill(pid, syscall.SIGKILL)
+					t.Fatalf("process %d that the server started still runs after Inspect returned (kill 0: %v)", pid, err)
+				}
+			}
+		})
+	}
+}
+
 // errAny is a marker for test cases that accept any non-nil error.
 var errAny = errors.New("any error")
 

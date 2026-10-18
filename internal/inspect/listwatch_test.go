@@ -12,22 +12,6 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
-// connectWatched connects a client, made with the same constructor as
-// Inspect (newWatchedClient) and the raw byte limit of Inspect, to server
-// over in-memory transports. No process and no network are involved.
-// t.Cleanup closes both sessions.
-func connectWatched(t *testing.T, server *mcp.Server) (*mcp.ClientSession, *listWatch) {
-	t.Helper()
-	return connectWatchedLimit(t, server, maxRawBytes)
-}
-
-// connectWatchedLimit is connectWatched with the raw byte limit rawLimit.
-func connectWatchedLimit(t *testing.T, server *mcp.Server, rawLimit int64) (*mcp.ClientSession, *listWatch) {
-	t.Helper()
-	client, w := New(Options{}).newWatchedClient(rawLimit)
-	return connectClient(t, server, client), w
-}
-
 // headerSchema returns an object input schema with one property p of type
 // typ that carries the x-mcp-header annotation header.
 func headerSchema(typ string, header any) map[string]any {

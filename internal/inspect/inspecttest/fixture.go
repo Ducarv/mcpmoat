@@ -1,10 +1,5 @@
 package inspecttest
 
-// Fixture builds the fixture MCP servers under testdata/servers/ into one
-// shared temp directory. Each fixture is built once per test binary, on the
-// first call for its name. TestMain calls RemoveBuilds to remove the
-// directory when all tests are done.
-
 import (
 	"context"
 	"errors"
@@ -34,8 +29,11 @@ type build struct {
 }
 
 // The state below is shared by all tests of one test binary. That is the
-// purpose of this file: a fixture is built once per test binary, not once per
-// test. mu protects dir and entries.
+// purpose of this file: Fixture builds the fixture MCP servers under
+// testdata/servers/ into one shared temp directory, once per test binary on
+// the first call for each name, not once per test. TestMain calls
+// RemoveBuilds to remove the directory when all tests are done. mu protects
+// dir and entries.
 var (
 	mu      sync.Mutex
 	dir     string                // shared build directory; "" until the first build

@@ -16,45 +16,6 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
-// connectInMemory connects the base client of production (newClient,
-// without the listWatch that newWatchedClient adds; see connectWatched) to
-// server over in-memory transports. No process and no network are
-// involved. t.Cleanup closes both sessions.
-func connectInMemory(t *testing.T, server *mcp.Server) *mcp.ClientSession {
-	t.Helper()
-	return connectClient(t, server, New(Options{}).newClient())
-}
-
-// connectClient connects client to server over in-memory transports.
-// t.Cleanup closes both sessions.
-func connectClient(t *testing.T, server *mcp.Server, client *mcp.Client) *mcp.ClientSession {
-	t.Helper()
-	ctx := t.Context()
-	ct, st := mcp.NewInMemoryTransports()
-
-	ss, err := server.Connect(ctx, st, nil)
-	if err != nil {
-		t.Fatalf("server.Connect() error = %v", err)
-	}
-	t.Cleanup(func() { _ = ss.Close() })
-
-	cs, err := client.Connect(ctx, ct, nil)
-	if err != nil {
-		t.Fatalf("client.Connect() error = %v", err)
-	}
-	t.Cleanup(func() { _ = cs.Close() })
-	return cs
-}
-
-// objectSchema is the smallest input schema that the SDK server accepts.
-func objectSchema() map[string]any {
-	return map[string]any{"type": "object"}
-}
-
-func noopTool(context.Context, *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	return &mcp.CallToolResult{}, nil
-}
-
 func noopPrompt(context.Context, *mcp.GetPromptRequest) (*mcp.GetPromptResult, error) {
 	return &mcp.GetPromptResult{}, nil
 }
@@ -70,19 +31,6 @@ func countMethod(method string, n *atomic.Int64) mcp.Middleware {
 		return func(ctx context.Context, m string, req mcp.Request) (mcp.Result, error) {
 			if m == method {
 				n.Add(1)
-			}
-			return next(ctx, m, req)
-		}
-	}
-}
-
-// onMethod returns a receiving middleware that answers method with h and
-// passes every other method on.
-func onMethod(method string, h mcp.MethodHandler) mcp.Middleware {
-	return func(next mcp.MethodHandler) mcp.MethodHandler {
-		return func(ctx context.Context, m string, req mcp.Request) (mcp.Result, error) {
-			if m == method {
-				return h(ctx, m, req)
 			}
 			return next(ctx, m, req)
 		}

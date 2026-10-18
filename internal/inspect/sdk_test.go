@@ -18,7 +18,6 @@ import (
 	"path/filepath"
 	"reflect"
 	"slices"
-	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -43,11 +42,28 @@ const (
 	sdkCommandMarker = "mcpmoat-cmd-marker-sdk-2Lp7Vy"
 )
 
-// TestMain removes the fixture builds after all tests of the package. It is
-// the only TestMain of the test binary of package inspect: the internal tests
-// (package inspect) and the external tests (package inspect_test) are
-// compiled into one binary, and only one TestMain is allowed.
+// TestMain is the only TestMain of the test binary of package inspect: the
+// internal tests (package inspect) and the external tests (package
+// inspect_test) are compiled into one binary, and only one TestMain is
+// allowed. It is here because only the external package can import
+// inspecttest.
+//
+// It implements the "re-exec the test binary" pattern of main_test.go. A
+// test starts the compiled test binary (os.Executable) as a child process
+// with EnvDumpArg as its first argument. The child sees the trigger here and
+// acts as a fixture instead of a test runner. The check must come before
+// m.Run, because the testing flag parser rejects the unknown flag. The dump
+// branch calls os.Exit so that no test runs in the child.
+//
+// After the tests, it removes the fixture builds of inspecttest.
 func TestMain(m *testing.M) {
+	if len(os.Args) >= 2 && os.Args[1] == inspect.EnvDumpArg {
+		if err := inspect.WriteEnvDump(os.Stdout); err != nil {
+			fmt.Fprintf(os.Stderr, "env dump: %v\n", err)
+			os.Exit(1)
+		}
+		os.Exit(0)
+	}
 	code := m.Run()
 	inspecttest.RemoveBuilds()
 	os.Exit(code)
@@ -62,14 +78,6 @@ func sdkBenign(t *testing.T, args ...string) discover.Server {
 		Command:   inspecttest.Fixture(t, "benign"),
 		Args:      discover.NewArgs(args),
 	}
-}
-
-// sdkNew returns an SDKInspector with opts that makes the working
-// directories of servers in a new directory of the test, never in the cache
-// directory of the user.
-func sdkNew(t *testing.T, opts inspect.Options) *inspect.SDKInspector {
-	t.Helper()
-	return inspect.NewWithRunRoot(opts, filepath.Join(t.TempDir(), "run"))
 }
 
 // sdkCtx returns a context that ends after timeout or when the test ends.
@@ -159,22 +167,6 @@ func sdkAssertNotExist(t *testing.T, path, why string) {
 	if _, err := os.Stat(path); !errors.Is(err, fs.ErrNotExist) {
 		t.Errorf("os.Stat(%q) error = %v, want fs.ErrNotExist: %s", path, err, why)
 	}
-}
-
-// sdkReadPID reads the pidfile that the fixture writes and checks that it
-// holds a positive process ID. The fixture writes it in every mode before
-// the handshake, so a missing file means that the process never started.
-func sdkReadPID(t *testing.T, path string) int {
-	t.Helper()
-	b, err := os.ReadFile(path) //nolint:gosec // G304: test reads the pidfile path that it chose under t.TempDir()
-	if err != nil {
-		t.Fatalf("read pidfile: %v (the server did not start?)", err)
-	}
-	pid, err := strconv.Atoi(strings.TrimSpace(string(b)))
-	if err != nil || pid <= 0 {
-		t.Fatalf("pidfile holds %q, want a positive process ID", b)
-	}
-	return pid
 }
 
 // TestSDKInspectBenign checks the full Result of the benign server: the
@@ -363,8 +355,10 @@ func TestSDKInspectInvalidServer(t *testing.T) {
 }
 
 // TestSDKInspectZeroValue checks that a zero SDKInspector, not made with New,
-// works and does not panic: it reads the parent environment with os.Getenv.
-// The env key is invalid, so Inspect returns before it starts anything.
+// works and does not panic: it reads the parent environment with os.Environ.
+// The env key is invalid, so Inspect returns before it starts anything. The
+// server has an absolute Dir, so Inspect needs no run root and never writes
+// to the cache directory of the user.
 func TestSDKInspectZeroValue(t *testing.T) {
 	t.Parallel()
 
@@ -372,6 +366,7 @@ func TestSDKInspectZeroValue(t *testing.T) {
 		Name:      "zero",
 		Transport: discover.TransportStdio,
 		Command:   "/bin/true",
+		Dir:       t.TempDir(),
 		Env:       sdkSecretEnv(map[string]string{"A=B": discovertest.CanaryEnv}),
 	}
 
@@ -508,21 +503,20 @@ func sdkReadEnvFile(t *testing.T, path string) (vars map[string]string, raw stri
 	return vars, string(b)
 }
 
-// TestSDKInspectScrubbedEnv checks that the child gets only PATH, HOME and
-// the configured env (NFR-04), and never other variables of the parent.
-//
-// This test is not parallel: t.Setenv changes the environment of the whole
-// test process, and Go panics if a test calls both t.Setenv and t.Parallel.
+// TestSDKInspectScrubbedEnv checks that Inspect gives the child only the
+// allowlisted parent variables and the configured env (NFR-04), and never
+// other variables of the parent. The parent environment is injected, so the
+// result is exact and the test can run in parallel.
 func TestSDKInspectScrubbedEnv(t *testing.T) {
-	// Build the fixture before t.Setenv changes HOME: go build reads its
-	// caches below HOME.
-	command := inspecttest.Fixture(t, "benign")
+	t.Parallel()
 
-	home := t.TempDir()
-	t.Setenv("HOME", home)
-	t.Setenv("AWS_SECRET_ACCESS_KEY", sdkParentCanary)
-	t.Setenv("MCPMOAT_PARENT_ONLY", sdkParentCanary)
-	parentPath := os.Getenv("PATH")
+	command := inspecttest.Fixture(t, "benign")
+	parent := []string{
+		"PATH=/usr/bin:/bin",
+		"HOME=/home/mcpmoat-test",
+		"AWS_SECRET_ACCESS_KEY=" + sdkParentCanary,
+		"MCPMOAT_PARENT_ONLY=" + sdkParentCanary,
+	}
 
 	tests := []struct {
 		name string
@@ -532,24 +526,23 @@ func TestSDKInspectScrubbedEnv(t *testing.T) {
 		{
 			name: "configured key is added",
 			env:  map[string]string{"MCPMOAT_TEST_TOKEN": discovertest.CanaryEnv},
-			want: map[string]string{"HOME": home, "PATH": parentPath, "MCPMOAT_TEST_TOKEN": discovertest.CanaryEnv},
+			want: map[string]string{"HOME": "/home/mcpmoat-test", "PATH": "/usr/bin:/bin", "MCPMOAT_TEST_TOKEN": discovertest.CanaryEnv},
 		},
 		{
 			name: "configured PATH replaces the parent PATH",
 			env:  map[string]string{"PATH": "/mcpmoat/config/bin"},
-			want: map[string]string{"HOME": home, "PATH": "/mcpmoat/config/bin"},
+			want: map[string]string{"HOME": "/home/mcpmoat-test", "PATH": "/mcpmoat/config/bin"},
 		},
 		{
 			name: "configured key with a parent name gets the configured value",
 			env:  map[string]string{"AWS_SECRET_ACCESS_KEY": discovertest.CanaryEnv},
-			want: map[string]string{"HOME": home, "PATH": parentPath, "AWS_SECRET_ACCESS_KEY": discovertest.CanaryEnv},
+			want: map[string]string{"HOME": "/home/mcpmoat-test", "PATH": "/usr/bin:/bin", "AWS_SECRET_ACCESS_KEY": discovertest.CanaryEnv},
 		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if parentPath == "" {
-				delete(tt.want, "PATH")
-			}
+			t.Parallel()
+
 			envfile := filepath.Join(t.TempDir(), "env")
 			s := discover.Server{
 				Name:      "benign",
@@ -559,7 +552,8 @@ func TestSDKInspectScrubbedEnv(t *testing.T) {
 				Env:       sdkSecretEnv(tt.env),
 			}
 
-			got, err := sdkNew(t, inspect.Options{}).Inspect(sdkCtx(t, sdkTimeout), s)
+			inspector := inspect.NewForTest(inspect.Options{}, filepath.Join(t.TempDir(), "run"), parent)
+			got, err := inspector.Inspect(sdkCtx(t, sdkTimeout), s)
 			if err != nil {
 				t.Fatalf("Inspect() error = %v, want nil", err)
 			}
@@ -603,7 +597,7 @@ func TestSDKInspectRemovesWorkDir(t *testing.T) {
 
 	command := inspecttest.Fixture(t, "benign")
 	root := filepath.Join(t.TempDir(), "run")
-	inspector := inspect.NewWithRunRoot(inspect.Options{}, root)
+	inspector := inspect.NewForTest(inspect.Options{}, root, nil)
 
 	stdio := func(args ...string) discover.Server {
 		return discover.Server{
@@ -667,7 +661,7 @@ func TestSDKInspectRemovesWorkDir(t *testing.T) {
 		pidfile := filepath.Join(t.TempDir(), "pid")
 		s := stdio("-pidfile", pidfile)
 
-		res, err := inspect.NewWithRunRoot(inspect.Options{}, filepath.Join(file, "run")).Inspect(sdkCtx(t, sdkTimeout), s)
+		res, err := inspect.NewForTest(inspect.Options{}, filepath.Join(file, "run"), nil).Inspect(sdkCtx(t, sdkTimeout), s)
 		if !errors.Is(err, inspect.ErrStart) {
 			t.Errorf("Inspect() error = %v, want errors.Is inspect.ErrStart", err)
 		}

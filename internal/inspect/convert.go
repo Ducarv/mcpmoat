@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"io"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
@@ -147,11 +148,8 @@ func rawJSON(v any) (json.RawMessage, error) {
 		return bytes.Clone(v), nil
 	}
 
-	// jsonSize in listwatch.go measures with the same settings.
 	var buf bytes.Buffer
-	enc := json.NewEncoder(&buf)
-	enc.SetEscapeHTML(false)
-	if err := enc.Encode(v); err != nil {
+	if err := newJSONEncoder(&buf).Encode(v); err != nil {
 		return nil, fmt.Errorf("%w: encode schema: %w", ErrProtocol, err)
 	}
 	// Encode adds a newline after the value; the raw JSON does not keep it.
@@ -160,6 +158,15 @@ func rawJSON(v any) (json.RawMessage, error) {
 		return nil, nil
 	}
 	return out, nil
+}
+
+// newJSONEncoder returns a JSON encoder for w with HTML escaping off. rawJSON
+// encodes schemas with it, and jsonSize measures list pages with it, so both
+// see "<", ">" and "&" the same way. Encode adds a newline after each value.
+func newJSONEncoder(w io.Writer) *json.Encoder {
+	enc := json.NewEncoder(w)
+	enc.SetEscapeHTML(false)
+	return enc
 }
 
 // isNull reports whether b is the JSON literal null, with optional white
