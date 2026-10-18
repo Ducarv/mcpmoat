@@ -30,6 +30,12 @@ import (
 // passed through exactly as configured.
 const envDumpArg = "-mcpmoat-test-envdump"
 
+// helperModeArg is the first argument that turns the test binary into one of
+// the helper-mode fixture servers of helpermodes_unix_test.go. The next
+// argument names the mode. It is an argument for the same reason as
+// envDumpArg.
+const helperModeArg = "-mcpmoat-test-helper"
+
 // TestMain runs before any test in this package.
 //
 // It implements the "re-exec the test binary" pattern. A test starts the
@@ -40,9 +46,12 @@ const envDumpArg = "-mcpmoat-test-envdump"
 // The check must come before m.Run. m.Run parses the command line with the
 // testing flag parser, and that parser rejects the unknown flag envDumpArg.
 //
-// The dump branch calls os.Exit so that no test runs in the child. Since
-// Go 1.15, TestMain may simply return after m.Run, and the test binary then
-// exits with the code that m.Run returned.
+// The dump and helper branches call os.Exit so that no test runs in the
+// child. Since Go 1.15, TestMain may simply return after m.Run, and the test
+// binary then exits with the code that m.Run returned.
+//
+// This is the only TestMain of the test binary. It also serves the external
+// test package inspect_test: Go allows one TestMain for both packages.
 func TestMain(m *testing.M) {
 	if len(os.Args) >= 2 && os.Args[1] == envDumpArg {
 		if err := writeEnvDump(os.Stdout); err != nil {
@@ -50,6 +59,9 @@ func TestMain(m *testing.M) {
 			os.Exit(1)
 		}
 		os.Exit(0)
+	}
+	if code, ok := runHelperMode(os.Args[1:]); ok {
+		os.Exit(code)
 	}
 	m.Run()
 }

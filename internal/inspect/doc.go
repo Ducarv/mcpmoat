@@ -1,8 +1,19 @@
-// Package inspect connects to MCP servers over stdio or HTTP and lists their
-// tools, prompts and resources. Protocol details stay behind an interface in
-// this package so that MCP spec changes stay local.
+// Package inspect connects to MCP servers and lists their tools, prompts and
+// resources. Protocol details stay behind the Inspector interface so that MCP
+// spec changes stay local.
 //
-// See docs/PRD.md, FR-04 to FR-06, NFR-04 and NFR-06.
+// # Running many servers
+//
+// Run inspects a list of servers through an Inspector, with a bounded pool of
+// workers and a time limit for each server (see Options, DefaultConcurrency
+// and DefaultTimeout). It returns one Outcome per server, in a stable order,
+// with a Status of ok, timeout or failed. One broken, hung or panicking server
+// does not stop the others. The Run doc has the full contract.
+//
+// An Inspector does the work for one server. Its doc lists what an
+// implementation must do: honour the context, stop its child processes, close
+// its pipes, refuse untrusted servers without an opt-in, and keep secrets out
+// of its errors.
 //
 // # Starting stdio servers
 //
@@ -50,4 +61,22 @@
 // cmd.String(), cmd.Env or cmd.Args.
 //
 // The rules are for Unix only. Windows is a non-goal (PRD section 2.2).
+//
+// # Child processes
+//
+// configureProcessGroup puts a stdio server in its own process group, and
+// killProcessGroup kills every process that is still in that group. With
+// the Setsid of stdioCommand, the new session is already that group, and
+// configureProcessGroup keeps it. The helpers are for the stdio Inspector of
+// issue #25; today only the tests call them. stdioCommand returns a Cmd made
+// with exec.Command, and exec refuses a Cancel on a Cmd without a context, so
+// that Inspector must build the Cmd with a context before it calls
+// configureProcessGroup. A process that leaves the group on purpose (with
+// setsid, setpgid or a double fork) is not killed, so this is not a sandbox.
+// The group kill works on Unix only (macOS and Linux). On other systems, only
+// the direct child is killed.
+//
+// The text of Outcome.Err is untrusted (see Outcome).
+//
+// See docs/PRD.md, FR-04 to FR-06, NFR-03, NFR-04 and NFR-06.
 package inspect
