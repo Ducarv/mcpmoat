@@ -16,12 +16,14 @@ import (
 // Contract:
 //
 //   - Run returns an error only when opts is invalid (see Options.Validate) or
-//     insp is nil. A problem with one server never becomes the returned error.
-//     It goes into that server's Outcome (FR-06).
-//   - The outcomes are in a stable order that does not depend on the order of
-//     servers, on timing or on opts.Concurrency. The order is by Client,
-//     Source, Name, Scope, ProjectPath, Transport, Command, Dir, URL and Args
-//     (NFR-03). The input slice is not changed.
+//     insp is nil. The options error is the error of Validate, as is. A
+//     problem with one server never becomes the returned error. It goes into
+//     that server's Outcome (FR-06).
+//   - The outcomes are sorted by Client, Source, Name, Scope, ProjectPath,
+//     Transport, Command, Dir, URL and Args (NFR-03). The order does not
+//     depend on timing or on opts.Concurrency. The sort is stable: servers
+//     that are equal in all these fields (they can differ only in Env, Headers
+//     or Untrusted) keep their input order. The input slice is not changed.
 //   - Every server gets an Outcome with a non-empty Status. For zero servers,
 //     Run returns a nil slice and a nil error.
 //   - At most opts.Concurrency servers are inspected at the same time. The
@@ -29,11 +31,18 @@ import (
 //     waits in the queue.
 //   - A server that returns no answer in time gets StatusTimeout. The Err of
 //     that Outcome wraps context.DeadlineExceeded.
-//   - If ctx is done, servers that have not started do not start. They get
-//     StatusFailed, and their Err wraps ctx.Err(). A server that is already
-//     running gets StatusFailed too, and its Err wraps ctx.Err() as well, so
-//     errors.Is(o.Err, context.Canceled) works.
+//   - Once Run sees that ctx is done, it starts no new server. Those servers
+//     get StatusFailed, and their Err wraps ctx.Err(). A server that is
+//     already running gets StatusFailed too, and its Err wraps ctx.Err() as
+//     well, so errors.Is(o.Err, context.Canceled) works. A server that a
+//     worker takes at the moment ctx ends can still be started with a ctx
+//     that is already done; the Inspector contract makes that call return at
+//     once.
 //   - A panic in insp.Inspect turns into StatusFailed for that server only.
+//     So does a call that ends its goroutine with runtime.Goexit (for example
+//     t.FailNow in a test fake). A Goexit also stops that worker, so the other
+//     workers inspect the rest of the queue. If every worker stops this way,
+//     the servers left in the queue get StatusFailed.
 //   - Run waits for every Inspect call to return, and it leaves no goroutine
 //     behind. An Inspector that ignores ctx therefore blocks Run (see the
 //     Inspector contract).
@@ -42,7 +51,8 @@ import (
 // layer must escape it with internal/termsafe before it prints it.
 func Run(ctx context.Context, servers []discover.Server, opts Options, insp Inspector) ([]Outcome, error) {
 	if err := opts.Validate(); err != nil {
-		return nil, fmt.Errorf("inspect: invalid options: %w", err)
+		// The text of the error already starts with "inspect:".
+		return nil, err
 	}
 	if insp == nil {
 		return nil, errors.New("inspect: nil Inspector")
@@ -59,7 +69,15 @@ func Run(ctx context.Context, servers []discover.Server, opts Options, insp Insp
 	// Distinct slice elements are distinct memory, so the writes do not race,
 	// and no mutex is needed. wg.Wait below gives the happens-before edge that
 	// makes all writes visible to this goroutine before it reads out.
+	//
+	// Every element starts as a failed Outcome, and a worker overwrites it.
+	// A runtime.Goexit inside Inspect ends the worker before the write, and
+	// recover cannot stop a Goexit. The default then stays, so no Outcome is
+	// ever left with an empty Status.
 	out := make([]Outcome, len(sorted))
+	for i := range sorted {
+		out[i] = Outcome{Server: sorted[i], Status: StatusFailed, Err: errNotFinished}
+	}
 
 	// This is a worker pool. The jobs channel is buffered for every index, so
 	// we can fill it and close it before the workers start. Each worker takes
@@ -94,6 +112,11 @@ func Run(ctx context.Context, servers []discover.Server, opts Options, insp Insp
 
 	return out, nil
 }
+
+// errNotFinished is the Err of an Outcome whose Inspect call ended its
+// goroutine without a return (runtime.Goexit), or that was never taken from the
+// queue because every worker ended that way.
+var errNotFinished = errors.New("inspect: inspection did not finish")
 
 // compareServers orders servers for a stable result order. It returns a
 // negative number, zero or a positive number, as cmp.Compare does.

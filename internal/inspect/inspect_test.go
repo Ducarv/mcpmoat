@@ -1,6 +1,7 @@
 package inspect_test
 
 import (
+	"errors"
 	"math"
 	"strings"
 	"testing"
@@ -40,6 +41,8 @@ func TestOptionsValidate(t *testing.T) {
 		wantErr []string
 		// notErr lists substrings that the error text must not contain.
 		notErr []string
+		// wantIs, if not nil, is the sentinel error that the error must wrap.
+		wantIs error
 	}{
 		{name: "defaults", opts: inspect.DefaultOptions()},
 		{name: "minimum valid values", opts: inspect.Options{Timeout: time.Nanosecond, Concurrency: 1}},
@@ -48,24 +51,28 @@ func TestOptionsValidate(t *testing.T) {
 		{name: "max timeout", opts: inspect.Options{Timeout: time.Duration(math.MaxInt64), Concurrency: 1}},
 		{
 			name:    "zero timeout",
+			wantIs:  inspect.ErrInvalidTimeout,
 			opts:    inspect.Options{Timeout: 0, Concurrency: 4},
 			wantErr: []string{"timeout"},
 			notErr:  []string{"concurrency"},
 		},
 		{
 			name:    "negative timeout",
+			wantIs:  inspect.ErrInvalidTimeout,
 			opts:    inspect.Options{Timeout: -time.Second, Concurrency: 4},
 			wantErr: []string{"timeout"},
 			notErr:  []string{"concurrency"},
 		},
 		{
 			name:    "zero concurrency",
+			wantIs:  inspect.ErrInvalidConcurrency,
 			opts:    inspect.Options{Timeout: 10 * time.Second, Concurrency: 0},
 			wantErr: []string{"concurrency"},
 			notErr:  []string{"timeout"},
 		},
 		{
 			name:    "negative concurrency",
+			wantIs:  inspect.ErrInvalidConcurrency,
 			opts:    inspect.Options{Timeout: 10 * time.Second, Concurrency: -1},
 			wantErr: []string{"concurrency"},
 			notErr:  []string{"timeout"},
@@ -73,11 +80,13 @@ func TestOptionsValidate(t *testing.T) {
 		{
 			// The timeout check runs first, so a bad timeout is reported.
 			name:    "both bad",
+			wantIs:  inspect.ErrInvalidTimeout,
 			opts:    inspect.Options{Timeout: -time.Second, Concurrency: -1},
 			wantErr: []string{"timeout"},
 		},
 		{
 			name:    "zero value Options",
+			wantIs:  inspect.ErrInvalidTimeout,
 			opts:    inspect.Options{},
 			wantErr: []string{"timeout"},
 		},
@@ -95,6 +104,9 @@ func TestOptionsValidate(t *testing.T) {
 			}
 			if err == nil {
 				t.Fatalf("Validate(%+v) = nil, want an error", tt.opts)
+			}
+			if tt.wantIs != nil && !errors.Is(err, tt.wantIs) {
+				t.Errorf("Validate(%+v) error %v, want it to wrap %v", tt.opts, err, tt.wantIs)
 			}
 			msg := strings.ToLower(err.Error())
 			for _, s := range tt.wantErr {

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"math/rand/v2"
 	"reflect"
+	"runtime"
 	"slices"
 	"strings"
 	"sync"
@@ -140,10 +141,13 @@ func fakeServers(n int) []discover.Server {
 }
 
 // describeServer describes the fields that decide the order of a server, as one
-// string. Tests use it to compare servers in a readable way. It is test code,
-// so it may read the args as written.
+// string, in the order that Run compares them. Tests use it to compare servers
+// in a readable way. It is test code, so it may read the URL and the args as
+// written.
 func describeServer(s discover.Server) string {
-	return fmt.Sprintf("%s|%s|%s|%s|%s|%q", s.Client, s.Source, s.Name, s.Scope, s.ProjectPath, s.Args.Values())
+	return fmt.Sprintf("%s|%s|%s|%s|%s|%s|%s|%s|%s|%q",
+		s.Client, s.Source, s.Name, s.Scope, s.ProjectPath,
+		s.Transport, s.Command, s.Dir, s.URL.Reveal(), s.Args.Values())
 }
 
 func describeServers(servers []discover.Server) []string {
@@ -226,10 +230,25 @@ func TestRunOrder(t *testing.T) {
 		s.Source = source
 		return s
 	}
+	// withTail sets the later tie-breakers of a server named "delta".
+	withTail := func(transport discover.Transport, command, dir, url string, args []string) discover.Server {
+		s := fakeServer("delta")
+		s.Source = "/a"
+		s.Transport = transport
+		s.Command = command
+		s.Dir = dir
+		s.URL = discover.NewURL(url)
+		s.Args = discover.NewArgs(args)
+		return s
+	}
 
 	// want is the expected order, written by hand:
 	// Client, then Source, then Name, then the tie-breakers (Scope,
-	// ProjectPath, Args).
+	// ProjectPath, Transport, Command, Dir, URL, Args).
+	//
+	// In the "delta" rows, each pair of neighbours differs first in one
+	// tie-breaker, and a later tie-breaker would order the pair the other way.
+	// So the rows also check which tie-breaker comes first.
 	want := []discover.Server{
 		in(discover.ClientClaudeCode, "/a", "alpha"),
 		withProject("/p1"),
@@ -238,6 +257,15 @@ func TestRunOrder(t *testing.T) {
 		withArgs([]string{"a"}),
 		withArgs([]string{"a", "b"}),
 		withArgs([]string{"b"}),
+		// URL decides (Args would give the other order).
+		withTail(discover.TransportHTTP, "server-cmd", "", "https://a.example/", []string{"z"}),
+		withTail(discover.TransportHTTP, "server-cmd", "", "https://b.example/", nil),
+		// Transport decides ("http" < "stdio"; Command would give the other order).
+		withTail(discover.TransportStdio, "a-cmd", "/z", "", nil),
+		// Command decides (Dir would give the other order).
+		withTail(discover.TransportStdio, "server-cmd", "", "https://z.example/", []string{"z"}),
+		// Dir decides (URL and Args would give the other order).
+		withTail(discover.TransportStdio, "server-cmd", "/d1", "", nil),
 		in(discover.ClientClaudeCode, "/a", "gamma"),
 		in(discover.ClientClaudeCode, "/b", "alpha"),
 		in(discover.ClientCodex, "/a", "alpha"),
@@ -808,13 +836,15 @@ func TestRunErrors(t *testing.T) {
 		opts    inspect.Options
 		insp    inspect.Inspector
 		wantErr bool
+		// wantIs, if not nil, is an error that the returned error must wrap.
+		wantIs error
 	}{
-		{name: "zero timeout", servers: fakeServers(2), opts: inspect.Options{Timeout: 0, Concurrency: 1}, insp: &fakeInspector{}, wantErr: true},
-		{name: "negative timeout", servers: fakeServers(2), opts: inspect.Options{Timeout: -time.Second, Concurrency: 1}, insp: &fakeInspector{}, wantErr: true},
-		{name: "zero concurrency", servers: fakeServers(2), opts: inspect.Options{Timeout: time.Second, Concurrency: 0}, insp: &fakeInspector{}, wantErr: true},
-		{name: "negative concurrency", servers: fakeServers(2), opts: inspect.Options{Timeout: time.Second, Concurrency: -1}, insp: &fakeInspector{}, wantErr: true},
-		{name: "zero options", servers: fakeServers(2), opts: inspect.Options{}, insp: &fakeInspector{}, wantErr: true},
-		{name: "invalid options with no servers", servers: nil, opts: inspect.Options{}, insp: &fakeInspector{}, wantErr: true},
+		{name: "zero timeout", servers: fakeServers(2), opts: inspect.Options{Timeout: 0, Concurrency: 1}, insp: &fakeInspector{}, wantErr: true, wantIs: inspect.ErrInvalidTimeout},
+		{name: "negative timeout", servers: fakeServers(2), opts: inspect.Options{Timeout: -time.Second, Concurrency: 1}, insp: &fakeInspector{}, wantErr: true, wantIs: inspect.ErrInvalidTimeout},
+		{name: "zero concurrency", servers: fakeServers(2), opts: inspect.Options{Timeout: time.Second, Concurrency: 0}, insp: &fakeInspector{}, wantErr: true, wantIs: inspect.ErrInvalidConcurrency},
+		{name: "negative concurrency", servers: fakeServers(2), opts: inspect.Options{Timeout: time.Second, Concurrency: -1}, insp: &fakeInspector{}, wantErr: true, wantIs: inspect.ErrInvalidConcurrency},
+		{name: "zero options", servers: fakeServers(2), opts: inspect.Options{}, insp: &fakeInspector{}, wantErr: true, wantIs: inspect.ErrInvalidTimeout},
+		{name: "invalid options with no servers", servers: nil, opts: inspect.Options{}, insp: &fakeInspector{}, wantErr: true, wantIs: inspect.ErrInvalidTimeout},
 		{name: "nil inspector", servers: fakeServers(2), opts: good, insp: nil, wantErr: true},
 		{name: "nil inspector with no servers", servers: nil, opts: good, insp: nil, wantErr: true},
 		{name: "nil servers", servers: nil, opts: good, insp: &fakeInspector{}},
@@ -826,6 +856,14 @@ func TestRunErrors(t *testing.T) {
 			outs, err := inspect.Run(t.Context(), tt.servers, tt.opts, tt.insp)
 			if (err != nil) != tt.wantErr {
 				t.Fatalf("Run() error = %v, wantErr %v", err, tt.wantErr)
+			}
+			if tt.wantIs != nil && !errors.Is(err, tt.wantIs) {
+				t.Errorf("Run() error = %v, want it to wrap %v", err, tt.wantIs)
+			}
+			if err != nil {
+				if n := strings.Count(err.Error(), "inspect:"); n != 1 {
+					t.Errorf("Run() error %q has the prefix \"inspect:\" %d times, want once", err, n)
+				}
 			}
 			if outs != nil {
 				t.Errorf("Run() outcomes = %v, want nil", outs)
@@ -883,9 +921,6 @@ func TestRunOutcomes(t *testing.T) {
 			wantServers[i] = mk(n)
 		}
 		for i, o := range outs {
-			if o.Status == "" {
-				t.Errorf("%s: Status is empty", o.Server.Name)
-			}
 			checkStatus(t, o, want[o.Server.Name])
 			if !reflect.DeepEqual(o.Server, wantServers[i]) {
 				t.Errorf("outcome %d: Server = %s, want %s", i, describeServer(o.Server), describeServer(wantServers[i]))
@@ -937,4 +972,59 @@ func TestRunInspectorSeesPerServerContext(t *testing.T) {
 			}
 		}
 	})
+}
+
+// TestRunGoexitInInspector checks that an Inspect call that ends its goroutine
+// with runtime.Goexit (as t.FailNow does) still gives every server an Outcome
+// with a non-empty Status, and that Run returns. recover cannot stop a Goexit,
+// so this path is different from a panic.
+func TestRunGoexitInInspector(t *testing.T) {
+	t.Parallel()
+
+	goexit := func(context.Context, discover.Server) (inspect.Result, error) {
+		runtime.Goexit()
+		return inspect.Result{}, errors.New("not reached")
+	}
+
+	tests := []struct {
+		name        string
+		concurrency int
+		// want is the wanted Status by server name.
+		want map[string]inspect.Status
+	}{
+		{
+			// The other worker inspects the rest of the queue.
+			name:        "another worker is left",
+			concurrency: 2,
+			want: map[string]inspect.Status{
+				"s00": inspect.StatusFailed,
+				"s01": inspect.StatusOK,
+				"s02": inspect.StatusOK,
+			},
+		},
+		{
+			// The only worker stops at the first server. The servers left in
+			// the queue are never inspected and keep the failed default.
+			name:        "the only worker stops",
+			concurrency: 1,
+			want: map[string]inspect.Status{
+				"s00": inspect.StatusFailed,
+				"s01": inspect.StatusFailed,
+				"s02": inspect.StatusFailed,
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			insp := &fakeInspector{byName: map[string]fakeBehaviour{"s00": goexit}}
+			opts := inspect.Options{Timeout: time.Second, Concurrency: tt.concurrency}
+
+			outs := mustRun(t.Context(), t, fakeServers(3), opts, insp)
+
+			for _, o := range outs {
+				checkStatus(t, o, tt.want[o.Server.Name])
+			}
+		})
+	}
 }
