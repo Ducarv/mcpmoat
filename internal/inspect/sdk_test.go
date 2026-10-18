@@ -1,0 +1,708 @@
+package inspect_test
+
+// These tests run the real SDKInspector against the benign fixture server in
+// testdata/servers/benign. They are black-box tests: they use only the
+// exported API of package inspect.
+//
+// The identifiers in this file start with "sdk", so they do not collide with
+// the other files of package inspect_test (for example stop_unix_test.go).
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io/fs"
+	"os"
+	"path/filepath"
+	"reflect"
+	"slices"
+	"strconv"
+	"strings"
+	"sync"
+	"testing"
+	"time"
+
+	"github.com/Ducarv/mcpmoat/internal/discover"
+	"github.com/Ducarv/mcpmoat/internal/discover/discovertest"
+	"github.com/Ducarv/mcpmoat/internal/inspect"
+	"github.com/Ducarv/mcpmoat/internal/inspect/inspecttest"
+)
+
+const (
+	// sdkTimeout bounds every call to Inspect, so a bug never hangs CI.
+	sdkTimeout = 10 * time.Second
+
+	// sdkStopGrace mirrors the unexported inspect.stopGrace. A stop takes
+	// at most 3*sdkStopGrace (see the doc on stopGrace in sdk.go).
+	sdkStopGrace = 2 * time.Second
+
+	// sdkParentCanary is a fake secret in the environment of the test
+	// process. It must never reach the child (NFR-04) or an error.
+	sdkParentCanary = "mcpmoat-parent-canary-sdk-6Rw4Np"
+
+	// sdkCommandMarker is a unique text in commands that inspect refuses.
+	// The error of a refused command must not contain the command.
+	sdkCommandMarker = "mcpmoat-cmd-marker-sdk-2Lp7Vy"
+)
+
+// TestMain removes the fixture builds after all tests of the package. It is
+// the only TestMain of the test binary of package inspect: the internal tests
+// (package inspect) and the external tests (package inspect_test) are
+// compiled into one binary, and only one TestMain is allowed.
+func TestMain(m *testing.M) {
+	code := m.Run()
+	inspecttest.RemoveBuilds()
+	os.Exit(code)
+}
+
+// sdkBenign returns a stdio server that runs the benign fixture with args.
+func sdkBenign(t *testing.T, args ...string) discover.Server {
+	t.Helper()
+	return discover.Server{
+		Name:      "benign",
+		Transport: discover.TransportStdio,
+		Command:   inspecttest.Fixture(t, "benign"),
+		Args:      discover.NewArgs(args),
+	}
+}
+
+// sdkCtx returns a context that ends after timeout or when the test ends.
+func sdkCtx(t *testing.T, timeout time.Duration) context.Context {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(t.Context(), timeout)
+	t.Cleanup(cancel)
+	return ctx
+}
+
+// sdkSecretEnv returns a SecretMap with one entry for each key and value.
+func sdkSecretEnv(kv map[string]string) discover.SecretMap {
+	m := make(discover.SecretMap, len(kv))
+	for k, v := range kv {
+		m[k] = discover.NewSecret(v)
+	}
+	return m
+}
+
+// sdkJSON returns v as indented JSON, for readable failure messages.
+func sdkJSON(v any) string {
+	b, err := json.MarshalIndent(v, "", "  ")
+	if err != nil {
+		return fmt.Sprintf("%#v (json error: %v)", v, err)
+	}
+	return string(b)
+}
+
+// sdkAssertResult fails the test when got is not deeply equal to want. It
+// prints both values as JSON. JSON does not show the difference between a
+// nil and an empty slice, so if the JSON is equal it prints the Go values
+// too.
+func sdkAssertResult(t *testing.T, got, want inspect.Result) {
+	t.Helper()
+	if reflect.DeepEqual(got, want) {
+		return
+	}
+	gotJSON, wantJSON := sdkJSON(got), sdkJSON(want)
+	if gotJSON == wantJSON {
+		t.Errorf("Result differs only in nil versus empty values:\ngot:  %#v\nwant: %#v", got, want)
+		return
+	}
+	t.Errorf("Result mismatch:\n--- got\n%s\n--- want\n%s", gotJSON, wantJSON)
+}
+
+// sdkAssertFailed checks the error contract of Inspect for a failed call:
+// a non-nil error, a zero Result, and an error that wraps at least one of
+// targets.
+func sdkAssertFailed(t *testing.T, res inspect.Result, err error, targets ...error) {
+	t.Helper()
+	if err == nil {
+		t.Fatalf("Inspect() error = nil, want an error that wraps one of %v", targets)
+	}
+	if !reflect.DeepEqual(res, inspect.Result{}) {
+		t.Errorf("Inspect() Result = %s, want the zero Result with an error", sdkJSON(res))
+	}
+	if sdkWrapped(err, targets...) == nil {
+		t.Errorf("Inspect() error = %q, want an error that wraps one of %v", err, targets)
+	}
+}
+
+// sdkWrapped returns the first of targets that err wraps, or nil.
+func sdkWrapped(err error, targets ...error) error {
+	for _, target := range targets {
+		if errors.Is(err, target) {
+			return target
+		}
+	}
+	return nil
+}
+
+// sdkAssertNoLeak fails the test when the error text holds any canary of
+// package discovertest, the parent canary or one of extra.
+func sdkAssertNoLeak(t *testing.T, err error, extra ...string) {
+	t.Helper()
+	if err == nil {
+		return
+	}
+	secrets := append(discovertest.Canaries(), sdkParentCanary)
+	secrets = append(secrets, extra...)
+	discovertest.AssertNoLeak(t, "error", err.Error(), secrets...)
+}
+
+// sdkAssertNotExist fails the test when path exists.
+func sdkAssertNotExist(t *testing.T, path, why string) {
+	t.Helper()
+	if _, err := os.Stat(path); !errors.Is(err, fs.ErrNotExist) {
+		t.Errorf("os.Stat(%q) error = %v, want fs.ErrNotExist: %s", path, err, why)
+	}
+}
+
+// sdkReadPID reads the pidfile that the fixture writes and checks that it
+// holds a positive process ID.
+func sdkReadPID(t *testing.T, path string) int {
+	t.Helper()
+	b, err := os.ReadFile(path) //nolint:gosec // G304: test reads the pidfile path that it chose under t.TempDir()
+	if err != nil {
+		t.Fatalf("read pidfile: %v", err)
+	}
+	pid, err := strconv.Atoi(strings.TrimSuffix(string(b), "\n"))
+	if err != nil || pid <= 0 {
+		t.Fatalf("pidfile holds %q, want a positive process ID", b)
+	}
+	return pid
+}
+
+// TestSDKInspectBenign checks the full Result of the benign server: the
+// handshake fields, both tools (the fixture has page size 1, so this needs
+// pagination), the prompt, the resource and the schema mapping.
+func TestSDKInspectBenign(t *testing.T) {
+	t.Parallel()
+
+	got, err := inspect.New(inspect.Options{}).Inspect(sdkCtx(t, sdkTimeout), sdkBenign(t))
+	if err != nil {
+		t.Fatalf("Inspect() error = %v, want nil", err)
+	}
+	want := inspecttest.BenignResult()
+	if want.ProtocolVersion != inspecttest.BenignProtocolVersion {
+		t.Fatalf("BenignResult().ProtocolVersion = %q, want %q", want.ProtocolVersion, inspecttest.BenignProtocolVersion)
+	}
+	sdkAssertResult(t, got, want)
+}
+
+// TestSDKInspectClientVersion checks that a custom ClientVersion does not
+// change what the server reports.
+func TestSDKInspectClientVersion(t *testing.T) {
+	t.Parallel()
+
+	got, err := inspect.New(inspect.Options{ClientVersion: "1.2.3"}).Inspect(sdkCtx(t, sdkTimeout), sdkBenign(t))
+	if err != nil {
+		t.Fatalf("Inspect() error = %v, want nil", err)
+	}
+	sdkAssertResult(t, got, inspecttest.BenignResult())
+}
+
+// TestSDKInspectUntrusted checks that an untrusted server never starts
+// without the opt-in, and that it works with the opt-in.
+func TestSDKInspectUntrusted(t *testing.T) {
+	t.Parallel()
+
+	t.Run("refused without opt-in", func(t *testing.T) {
+		t.Parallel()
+		pidfile := filepath.Join(t.TempDir(), "pid")
+		s := sdkBenign(t, "-pidfile", pidfile)
+		s.Untrusted = true
+		s.Env = sdkSecretEnv(map[string]string{"MCPMOAT_TEST_TOKEN": discovertest.CanaryEnv})
+
+		res, err := inspect.New(inspect.Options{}).Inspect(sdkCtx(t, sdkTimeout), s)
+
+		sdkAssertFailed(t, res, err, inspect.ErrUntrusted)
+		sdkAssertNotExist(t, pidfile, "the untrusted server must not start")
+		sdkAssertNoLeak(t, err, pidfile)
+	})
+
+	t.Run("allowed with opt-in", func(t *testing.T) {
+		t.Parallel()
+		pidfile := filepath.Join(t.TempDir(), "pid")
+		s := sdkBenign(t, "-pidfile", pidfile)
+		s.Untrusted = true
+
+		got, err := inspect.New(inspect.Options{AllowUntrusted: true}).Inspect(sdkCtx(t, sdkTimeout), s)
+		if err != nil {
+			t.Fatalf("Inspect() error = %v, want nil with AllowUntrusted", err)
+		}
+		sdkAssertResult(t, got, inspecttest.BenignResult())
+		sdkReadPID(t, pidfile)
+	})
+}
+
+// TestSDKInspectRemote checks that a remote server returns
+// ErrUnsupportedTransport and that the error does not hold the URL or the
+// header values.
+func TestSDKInspectRemote(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name      string
+		transport discover.Transport
+	}{
+		{name: "http", transport: discover.TransportHTTP},
+		{name: "sse", transport: discover.TransportSSE},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			s := discover.Server{
+				Name:      "remote",
+				Transport: tt.transport,
+				URL:       discover.NewURL("https://user:" + discovertest.CanaryURL + "@example.invalid/mcp?key=" + discovertest.CanaryURL),
+				Headers:   sdkSecretEnv(map[string]string{"Authorization": "Bearer " + discovertest.CanaryHeader}),
+			}
+
+			res, err := inspect.New(inspect.Options{AllowUntrusted: true}).Inspect(sdkCtx(t, sdkTimeout), s)
+
+			sdkAssertFailed(t, res, err, inspect.ErrUnsupportedTransport)
+			sdkAssertNoLeak(t, err, "example.invalid")
+		})
+	}
+}
+
+// TestSDKInspectCrash checks a server that exits before the handshake.
+func TestSDKInspectCrash(t *testing.T) {
+	t.Parallel()
+
+	// The fixture exits with code 2 on an unknown flag, so the canary goes
+	// in Env, which the fixture ignores, and not in Args.
+	s := sdkBenign(t, "-mode", "crash")
+	s.Env = sdkSecretEnv(map[string]string{"MCPMOAT_TEST_TOKEN": discovertest.CanaryEnv})
+
+	res, err := inspect.New(inspect.Options{}).Inspect(sdkCtx(t, sdkTimeout), s)
+
+	sdkAssertFailed(t, res, err, inspect.ErrProtocol, inspect.ErrStart)
+	t.Logf("crash mode: error wraps %q; error: %v", sdkWrapped(err, inspect.ErrProtocol, inspect.ErrStart), err)
+	sdkAssertNoLeak(t, err)
+}
+
+// TestSDKInspectStartError checks commands that cannot start. The error
+// must wrap ErrStart and must not hold the args or the env values.
+func TestSDKInspectStartError(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		command string
+	}{
+		{name: "absolute path that does not exist", command: "/nonexistent/mcpmoat-test"},
+		{name: "bare name not in PATH", command: "mcpmoat-no-such-command-sdk-9Xc"},
+		{name: "directory, not a program", command: os.TempDir()},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			s := discover.Server{
+				Name:      "missing",
+				Transport: discover.TransportStdio,
+				Command:   tt.command,
+				Args:      discover.NewArgs([]string{"--token=" + discovertest.CanaryArgs, discovertest.CanaryArgs}),
+				Env:       sdkSecretEnv(map[string]string{"MCPMOAT_TEST_TOKEN": discovertest.CanaryEnv}),
+			}
+
+			res, err := inspect.New(inspect.Options{}).Inspect(sdkCtx(t, sdkTimeout), s)
+
+			sdkAssertFailed(t, res, err, inspect.ErrStart)
+			sdkAssertNoLeak(t, err)
+		})
+	}
+}
+
+// TestSDKInspectInvalidServer checks configs that inspect refuses before it
+// starts anything. The error must wrap ErrInvalidServer and must not hold the
+// command, the args, the env keys or the env values.
+func TestSDKInspectInvalidServer(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		command string
+		dir     string
+		env     map[string]string
+	}{
+		{name: "empty command", command: ""},
+		{name: "relative command without dir", command: "./" + sdkCommandMarker},
+		{name: "relative command in subdir without dir", command: "bin/" + sdkCommandMarker},
+		{name: "relative command with relative dir", command: "./" + sdkCommandMarker, dir: "rel"},
+		{name: "NUL byte in command", command: "/bin/" + sdkCommandMarker + "\x00x"},
+		{name: "env key with equals sign", command: "/bin/true", env: map[string]string{sdkCommandMarker + "=X": discovertest.CanaryEnv}},
+		{name: "empty env key", command: "/bin/true", env: map[string]string{"": discovertest.CanaryEnv}},
+		{name: "NUL byte in env key", command: "/bin/true", env: map[string]string{sdkCommandMarker + "\x00": discovertest.CanaryEnv}},
+		{name: "NUL byte in env value", command: "/bin/true", env: map[string]string{"MCPMOAT_TEST_TOKEN": discovertest.CanaryEnv + "\x00"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			pidfile := filepath.Join(t.TempDir(), "pid")
+			s := discover.Server{
+				Name:      "invalid",
+				Transport: discover.TransportStdio,
+				Command:   tt.command,
+				Dir:       tt.dir,
+				Args:      discover.NewArgs([]string{"-pidfile", pidfile, "--token=" + discovertest.CanaryArgs}),
+				Env:       sdkSecretEnv(tt.env),
+			}
+
+			res, err := inspect.New(inspect.Options{}).Inspect(sdkCtx(t, sdkTimeout), s)
+
+			sdkAssertFailed(t, res, err, inspect.ErrInvalidServer)
+			sdkAssertNoLeak(t, err, sdkCommandMarker, pidfile)
+		})
+	}
+}
+
+// TestSDKInspectCanceledContext checks that Inspect starts nothing when ctx
+// has already ended.
+func TestSDKInspectCanceledContext(t *testing.T) {
+	t.Parallel()
+
+	pidfile := filepath.Join(t.TempDir(), "pid")
+	s := sdkBenign(t, "-pidfile", pidfile)
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+
+	res, err := inspect.New(inspect.Options{}).Inspect(ctx, s)
+
+	sdkAssertFailed(t, res, err, context.Canceled)
+	sdkAssertNotExist(t, pidfile, "a canceled ctx must not start the server")
+}
+
+// TestSDKInspectDeadline checks that Inspect honours the deadline of ctx in
+// the handshake and in a list request, and that it returns soon after the
+// deadline.
+func TestSDKInspectDeadline(t *testing.T) {
+	t.Parallel()
+
+	const deadline = time.Second
+	// The process gets SIGKILL when ctx ends, so a stop is fast. The
+	// worst case of a stop is 3*sdkStopGrace; one more second is slack
+	// for a loaded CI machine.
+	const bound = deadline + 3*sdkStopGrace + time.Second
+
+	tests := []struct {
+		name string
+		mode string
+	}{
+		{name: "server never answers the handshake", mode: "hang-init"},
+		{name: "server blocks tools/list", mode: "hang-list"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			s := sdkBenign(t, "-mode", tt.mode)
+			s.Env = sdkSecretEnv(map[string]string{"MCPMOAT_TEST_TOKEN": discovertest.CanaryEnv})
+			inspector := inspect.New(inspect.Options{})
+			ctx := sdkCtx(t, deadline)
+
+			start := time.Now()
+			res, err := inspector.Inspect(ctx, s)
+			elapsed := time.Since(start)
+
+			t.Logf("mode %s: Inspect returned after %v", tt.mode, elapsed)
+			sdkAssertFailed(t, res, err, context.DeadlineExceeded)
+			if elapsed > bound {
+				t.Errorf("Inspect() returned after %v, want at most %v", elapsed, bound)
+			}
+			sdkAssertNoLeak(t, err)
+		})
+	}
+}
+
+// TestSDKInspectArgsReachChild checks that each arg reaches the child as one
+// exact argument, with no shell. The pidfile and envfile paths hold spaces
+// and shell syntax: a shell would split them or run "$(x)" and "`id`".
+func TestSDKInspectArgsReachChild(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	weird := filepath.Join(root, "with space", "$(x);`id`|&*")
+	if err := os.MkdirAll(weird, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	pidfile := filepath.Join(weird, "pid file $HOME")
+	envfile := filepath.Join(weird, "env 'file'")
+	s := sdkBenign(t, "-pidfile", pidfile, "-envfile", envfile)
+
+	got, err := inspect.New(inspect.Options{}).Inspect(sdkCtx(t, sdkTimeout), s)
+	if err != nil {
+		t.Fatalf("Inspect() error = %v, want nil", err)
+	}
+	sdkAssertResult(t, got, inspecttest.BenignResult())
+	sdkReadPID(t, pidfile)
+	if _, err := os.Stat(envfile); err != nil {
+		t.Errorf("envfile at the exact path: %v", err)
+	}
+
+	// Nothing else must appear: no file from a split path and no output of
+	// a command substitution.
+	entries, err := os.ReadDir(weird)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var names []string
+	for _, e := range entries {
+		names = append(names, e.Name())
+	}
+	slices.Sort(names)
+	if want := []string{"env 'file'", "pid file $HOME"}; !slices.Equal(names, want) {
+		t.Errorf("files in the arg directory = %q, want %q", names, want)
+	}
+	rootEntries, err := os.ReadDir(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rootEntries) != 1 || rootEntries[0].Name() != "with space" {
+		t.Errorf("entries in the test directory = %v, want only %q", rootEntries, "with space")
+	}
+}
+
+// sdkReadEnvFile reads the envfile of the fixture and returns its entries
+// as a map from key to value.
+func sdkReadEnvFile(t *testing.T, path string) (vars map[string]string, raw string) {
+	t.Helper()
+	b, err := os.ReadFile(path) //nolint:gosec // G304: test reads the envfile path that it chose under t.TempDir()
+	if err != nil {
+		t.Fatalf("read envfile: %v", err)
+	}
+	vars = map[string]string{}
+	for line := range strings.SplitSeq(string(b), "\n") {
+		if line == "" {
+			continue
+		}
+		key, value, ok := strings.Cut(line, "=")
+		if !ok {
+			t.Fatalf("envfile line %q has no '='", line)
+		}
+		vars[key] = value
+	}
+	return vars, string(b)
+}
+
+// TestSDKInspectScrubbedEnv checks that the child gets only PATH, HOME and
+// the configured env (NFR-04), and never other variables of the parent.
+//
+// This test is not parallel: t.Setenv changes the environment of the whole
+// test process, and Go panics if a test calls both t.Setenv and t.Parallel.
+func TestSDKInspectScrubbedEnv(t *testing.T) {
+	// Build the fixture before t.Setenv changes HOME: go build reads its
+	// caches below HOME.
+	command := inspecttest.Fixture(t, "benign")
+
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("AWS_SECRET_ACCESS_KEY", sdkParentCanary)
+	t.Setenv("MCPMOAT_PARENT_ONLY", sdkParentCanary)
+	parentPath := os.Getenv("PATH")
+
+	tests := []struct {
+		name string
+		env  map[string]string
+		want map[string]string
+	}{
+		{
+			name: "configured key is added",
+			env:  map[string]string{"MCPMOAT_TEST_TOKEN": discovertest.CanaryEnv},
+			want: map[string]string{"HOME": home, "PATH": parentPath, "MCPMOAT_TEST_TOKEN": discovertest.CanaryEnv},
+		},
+		{
+			name: "configured PATH replaces the parent PATH",
+			env:  map[string]string{"PATH": "/mcpmoat/config/bin"},
+			want: map[string]string{"HOME": home, "PATH": "/mcpmoat/config/bin"},
+		},
+		{
+			name: "configured key with a parent name gets the configured value",
+			env:  map[string]string{"AWS_SECRET_ACCESS_KEY": discovertest.CanaryEnv},
+			want: map[string]string{"HOME": home, "PATH": parentPath, "AWS_SECRET_ACCESS_KEY": discovertest.CanaryEnv},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if parentPath == "" {
+				delete(tt.want, "PATH")
+			}
+			envfile := filepath.Join(t.TempDir(), "env")
+			s := discover.Server{
+				Name:      "benign",
+				Transport: discover.TransportStdio,
+				Command:   command,
+				Args:      discover.NewArgs([]string{"-envfile", envfile}),
+				Env:       sdkSecretEnv(tt.env),
+			}
+
+			got, err := inspect.New(inspect.Options{}).Inspect(sdkCtx(t, sdkTimeout), s)
+			if err != nil {
+				t.Fatalf("Inspect() error = %v, want nil", err)
+			}
+			sdkAssertResult(t, got, inspecttest.BenignResult())
+
+			vars, raw := sdkReadEnvFile(t, envfile)
+			if !reflect.DeepEqual(vars, tt.want) {
+				// Print keys only: the values hold canaries.
+				t.Errorf("child env keys = %q, want %q", sortedKeys(vars), sortedKeys(tt.want))
+				for k, v := range tt.want {
+					if vars[k] != v {
+						t.Errorf("child env %s has the wrong value", k)
+					}
+				}
+			}
+			if strings.Contains(raw, sdkParentCanary) {
+				t.Errorf("child env holds a parent-only value")
+			}
+		})
+	}
+}
+
+// sortedKeys returns the keys of m in sorted order.
+func sortedKeys(m map[string]string) []string {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	slices.Sort(keys)
+	return keys
+}
+
+// sdkServerDirs returns the names of the "mcpmoat-server-*" directories
+// in dir.
+func sdkServerDirs(t *testing.T, dir string) []string {
+	t.Helper()
+	matches, err := filepath.Glob(filepath.Join(dir, "mcpmoat-server-*"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return matches
+}
+
+// TestSDKInspectRemovesWorkDir checks that Inspect removes the temporary
+// working directory of the server, on success and on each error path.
+//
+// The test points TMPDIR to its own empty directory, so it sees only the
+// directories that Inspect makes in this test. The shared system temp
+// directory is not a good place to count: other test binaries (go test
+// runs packages at the same time) can create and remove entries there.
+//
+// This test is not parallel, because it calls t.Setenv. Go runs all
+// non-parallel top-level tests before it resumes the parallel ones, so no
+// other test of this binary calls Inspect while TMPDIR points here.
+func TestSDKInspectRemovesWorkDir(t *testing.T) {
+	// Build the fixture before t.Setenv changes TMPDIR. The shared build
+	// directory must not be inside this test's temp directory, which is
+	// removed when the test ends.
+	command := inspecttest.Fixture(t, "benign")
+
+	tmp := t.TempDir()
+	t.Setenv("TMPDIR", tmp)
+	if got := os.TempDir(); got != tmp {
+		t.Fatalf("os.TempDir() = %q after t.Setenv, want %q", got, tmp)
+	}
+
+	stdio := func(args ...string) discover.Server {
+		return discover.Server{
+			Name:      "benign",
+			Transport: discover.TransportStdio,
+			Command:   command,
+			Args:      discover.NewArgs(args),
+		}
+	}
+
+	tests := []struct {
+		name    string
+		server  discover.Server
+		timeout time.Duration
+		wantErr bool
+	}{
+		{name: "success", server: stdio(), timeout: sdkTimeout},
+		// A relative pidfile lands in the working directory, so the
+		// directory is not empty when Inspect removes it.
+		{name: "success with a file in the working directory", server: stdio("-pidfile", "pid"), timeout: sdkTimeout},
+		{name: "crash", server: stdio("-mode", "crash"), timeout: sdkTimeout, wantErr: true},
+		{name: "handshake deadline", server: stdio("-mode", "hang-init"), timeout: time.Second, wantErr: true},
+		{name: "list deadline", server: stdio("-mode", "hang-list"), timeout: time.Second, wantErr: true},
+		{
+			name: "start error",
+			server: discover.Server{
+				Name:      "missing",
+				Transport: discover.TransportStdio,
+				Command:   "/nonexistent/mcpmoat-test",
+			},
+			timeout: sdkTimeout,
+			wantErr: true,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if before := sdkServerDirs(t, tmp); len(before) != 0 {
+				t.Fatalf("server dirs before Inspect = %q, want none", before)
+			}
+
+			_, err := inspect.New(inspect.Options{}).Inspect(sdkCtx(t, tt.timeout), tt.server)
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("Inspect() error = %v, want error: %v", err, tt.wantErr)
+			}
+
+			if after := sdkServerDirs(t, tmp); len(after) != 0 {
+				t.Errorf("server dirs after Inspect = %q, want none", after)
+			}
+		})
+	}
+
+	// Proof that the test above is not empty: when TMPDIR does not exist,
+	// Inspect cannot make its working directory there. So Inspect reads
+	// TMPDIR at call time and the directory above was really made in tmp.
+	t.Run("TMPDIR is used", func(t *testing.T) {
+		t.Setenv("TMPDIR", filepath.Join(tmp, "missing"))
+		pidfile := filepath.Join(tmp, "pid")
+		s := stdio("-pidfile", pidfile)
+
+		res, err := inspect.New(inspect.Options{}).Inspect(sdkCtx(t, sdkTimeout), s)
+		if err == nil {
+			t.Fatal("Inspect() error = nil, want an error when TMPDIR does not exist")
+		}
+		if !errors.Is(err, inspect.ErrStart) {
+			t.Errorf("Inspect() error = %v, want errors.Is inspect.ErrStart", err)
+		}
+		if !reflect.DeepEqual(res, inspect.Result{}) {
+			t.Errorf("Inspect() Result = %s, want the zero Result with an error", sdkJSON(res))
+		}
+		sdkAssertNotExist(t, pidfile, "the server must not start without a working directory")
+		sdkAssertNoLeak(t, err, pidfile)
+		t.Logf("missing TMPDIR: %v", err)
+	})
+}
+
+// TestSDKInspectConcurrent checks that one SDKInspector serves several
+// goroutines at once. Run it with -race.
+func TestSDKInspectConcurrent(t *testing.T) {
+	t.Parallel()
+
+	const workers = 4
+	s := sdkBenign(t)
+	inspector := inspect.New(inspect.Options{})
+	ctx := sdkCtx(t, sdkTimeout)
+
+	var (
+		wg      sync.WaitGroup
+		results [workers]inspect.Result
+		errs    [workers]error
+	)
+	for i := range workers {
+		wg.Go(func() {
+			results[i], errs[i] = inspector.Inspect(ctx, s)
+		})
+	}
+	wg.Wait()
+
+	want := inspecttest.BenignResult()
+	for i := range workers {
+		if errs[i] != nil {
+			t.Errorf("worker %d: Inspect() error = %v, want nil", i, errs[i])
+			continue
+		}
+		sdkAssertResult(t, results[i], want)
+	}
+}
