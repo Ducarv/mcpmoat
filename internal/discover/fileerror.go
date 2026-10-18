@@ -30,6 +30,8 @@ const (
 	reasonCanceled         = "canceled"
 	reasonTooDeep          = "nesting is too deep" // too deep nesting, or a key with too many dotted parts
 	reasonTooManyServers   = "too many servers"
+	reasonNotFound         = "file not found"        // ReadConfig: a file the user named does not exist
+	reasonUnknownFormat    = "unknown config format" // ReadConfig: a file the user named has no known client format
 )
 
 // FileError describes a problem with one config file or with one server entry
@@ -103,6 +105,8 @@ func errText(err error) string {
 // displayText returns s unchanged if every rune is printable and none is a
 // format or bidi control character. Otherwise it returns s as a quoted Go
 // string, which escapes those characters.
+//
+// Keep in sync with report.Escape (checked by a test in internal/report).
 func displayText(s string) string {
 	// Ranging over bad bytes yields U+FFFD, which is printable, so check validity first.
 	if !utf8.ValidString(s) {

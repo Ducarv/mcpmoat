@@ -48,10 +48,26 @@
 // name for the same directory (for example /var and /private/var on macOS, or
 // a case-insensitive file system).
 //
-// [ReadClaudeCode], [ReadCursor] and [ReadCodex] read one file. Use them for
-// a path that the user gives, for example with --config. They do not check
-// that the file exists, because a missing file is not an error. A caller that
-// needs the file must check it first.
+// [ReadConfig] is the entry point for a file that the user names, for example
+// with --config. It detects the format with [DetectClient]:
+//
+//   - A file name that ends in .toml is Codex.
+//   - A JSON file with a "projects" key is Claude Code.
+//   - A JSON file with only an "mcpServers" key is Cursor when the file is in a
+//     .cursor directory, and Claude Code otherwise.
+//   - A JSON object with neither key is chosen by the file name: .claude.json
+//     and .mcp.json are Claude Code, and mcp.json in a .cursor directory is
+//     Cursor. Any other name is an unknown format.
+//   - Anything else is an unknown format.
+//
+// Detection has known limits: see [DetectClient].
+//
+// ReadConfig then reads the file with ScopeGlobal. Unlike [Discover], it
+// reports a missing file, with the reason "file not found".
+//
+// [ReadClaudeCode], [ReadCursor] and [ReadCodex] read one file in a known
+// format. They do not check that the file exists, because a missing file is not
+// an error for them.
 //
 // Each reader returns a [Result]. Servers come in a fixed order: file order,
 // then ProjectPath, then Name.

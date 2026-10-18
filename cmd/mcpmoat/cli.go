@@ -29,6 +29,11 @@ type cli struct {
 	stdout, stderr io.Writer
 	getenv         func(string) string
 	build          buildInfo
+	// homeDir returns the user's home directory. run sets it to os.UserHomeDir.
+	// Tests inject a fixture path.
+	homeDir func() (string, error)
+	// getwd returns the current working directory. run sets it to os.Getwd.
+	getwd func() (string, error)
 }
 
 // command is one subcommand of mcpmoat.
@@ -42,13 +47,17 @@ type command struct {
 // the exit code. main passes that code to os.Exit.
 //
 // This is the only place that reads the linker variables (version, commit and
-// date).
+// date), the home directory and the working directory.
 func run(args []string, stdout, stderr io.Writer) int {
+	// This is the only place that reads the real home and working directory.
+	// Every test injects them.
 	c := &cli{
-		stdout: stdout,
-		stderr: stderr,
-		getenv: os.Getenv,
-		build:  resolveBuildInfo(buildInfo{version: version, commit: commit, date: date}, debug.ReadBuildInfo),
+		stdout:  stdout,
+		stderr:  stderr,
+		getenv:  os.Getenv,
+		build:   resolveBuildInfo(buildInfo{version: version, commit: commit, date: date}, debug.ReadBuildInfo),
+		homeDir: os.UserHomeDir,
+		getwd:   os.Getwd,
 	}
 	return c.dispatch(args)
 }
@@ -149,10 +158,24 @@ func (c *cli) usage(w io.Writer) {
 	fprintf(w, "\nGlobal flags (before the command):\n")
 	fprintf(w, "  --no-color   Disable colored output (also set by the NO_COLOR environment variable)\n")
 
+	fprintf(w, "\n")
+	c.scanUsage(w)
+
 	fprintf(w, "\nExit codes:\n")
 	fprintf(w, "  0  no findings\n")
 	fprintf(w, "  1  findings at or above --fail-on\n")
 	fprintf(w, "  2  execution error\n")
+}
+
+// scanUsage writes the flags of the scan command to w. usage includes it, and
+// "mcpmoat scan -h" prints it alone.
+func (c *cli) scanUsage(w io.Writer) {
+	fprintf(w, "Scan flags (after \"scan\"):\n")
+	// Padding 2 keeps the descriptions in one column, like the text in usage.
+	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
+	fprintf(tw, "  --no-connect\tList the servers in the configs. Starts no process and opens no connection\n")
+	fprintf(tw, "  --config <file>\tRead only this file (Claude Code JSON, Cursor JSON or Codex TOML); skips auto-discovery\n")
+	_ = tw.Flush() // the write error is ignored on purpose, see fprintf
 }
 
 // fprintf writes formatted text to w and ignores the write error on purpose.

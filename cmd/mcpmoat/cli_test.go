@@ -32,6 +32,10 @@ func fakeGetenv(env map[string]string) func(string) string {
 
 // newTestCLI builds a cli with in-memory writers. The test reads the output
 // from the two returned buffers (stdout first, then stderr).
+//
+// homeDir and getwd return an error by default. A test that needs them must
+// set them to a fixture path. This way a test that forgets cannot read the
+// real home directory or the real working directory.
 func newTestCLI(getenv func(string) string, build buildInfo) (*cli, *bytes.Buffer, *bytes.Buffer) {
 	var stdout, stderr bytes.Buffer
 	c := &cli{
@@ -39,6 +43,12 @@ func newTestCLI(getenv func(string) string, build buildInfo) (*cli, *bytes.Buffe
 		stderr: &stderr,
 		getenv: getenv,
 		build:  build,
+		homeDir: func() (string, error) {
+			return "", errors.New("test: home not set")
+		},
+		getwd: func() (string, error) {
+			return "", errors.New("test: working directory not set")
+		},
 	}
 	return c, &stdout, &stderr
 }
@@ -183,10 +193,19 @@ func TestCLIRun(t *testing.T) {
 			wantStdoutEmpty: true,
 		},
 		{
-			name:            "scan is not implemented",
+			name:            "scan without --no-connect is not implemented",
 			args:            []string{"scan"},
 			wantCode:        exitError,
-			wantStderr:      []string{"not implemented"},
+			wantStderr:      []string{"not implemented", "use --no-connect"},
+			wantStdoutEmpty: true,
+		},
+		{
+			// With the default test cli, homeDir fails. This proves that a
+			// test (or a bug) cannot reach the real home directory.
+			name:            "scan --no-connect with no home directory",
+			args:            []string{"scan", "--no-connect"},
+			wantCode:        exitError,
+			wantStderr:      []string{"cannot find the home directory"},
 			wantStdoutEmpty: true,
 		},
 		{
@@ -291,6 +310,9 @@ func TestUsageContent(t *testing.T) {
 		"  version ",
 		"  help ",
 		"--no-color",
+		"Scan flags (after \"scan\"):\n",
+		"  --no-connect ",
+		"  --config <file> ",
 		"Exit codes:\n",
 		"  0  no findings\n",
 		"  1  findings at or above --fail-on\n",

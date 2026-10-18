@@ -48,6 +48,8 @@ var knownReasons = map[string]bool{
 	reasonCanceled:         true,
 	reasonTooDeep:          true,
 	reasonTooManyServers:   true,
+	reasonNotFound:         true,
+	reasonUnknownFormat:    true,
 }
 
 // fixtureSeeds returns the content of every fixture file with the given
