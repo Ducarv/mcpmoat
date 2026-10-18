@@ -41,10 +41,11 @@ var tableHeader = []string{"NAME", "CLIENT", "SCOPE", "TRANSPORT", "SOURCE", "CO
 // list of whitespace-separated words. It fails the test when the first line
 // is not the table header, and it drops that line.
 //
-// The NAME and CLIENT cells never hold a space, so the first two words of a
-// row are safe to use. Use a later word only when no cell before it can hold
-// a space. The SCOPE cell of an untrusted server ends with " (untrusted)",
-// which is one more word.
+// CLIENT never holds a space, and report quotes a NAME, SCOPE or SOURCE cell
+// that holds one. The test names and paths hold no space, so the first two
+// words of a row are safe to use. Use a later word only when no cell before
+// it can hold a space. The SCOPE cell of an untrusted server ends with
+// " (untrusted)", which is one more word.
 func tableRows(t *testing.T, stdout string) [][]string {
 	t.Helper()
 	lines := strings.Split(strings.TrimSuffix(stdout, "\n"), "\n")
@@ -149,9 +150,30 @@ func assertScanResult(t *testing.T, code int, stdout, stderr string, want scanWa
 		t.Errorf("stderr holds the notice %q, but the scan failed\nstderr:\n%s", noRulesNotice, stderr)
 	}
 	assertScanErrorLines(t, stderr)
+	assertNoLeakBoth(t, stdout, stderr)
+	assertNoEscape(t, stdout, stderr)
+}
+
+// assertNoLeakBoth fails the test if stdout or stderr holds any canary value
+// of discovertest.
+func assertNoLeakBoth(t *testing.T, stdout, stderr string) {
+	t.Helper()
 	discovertest.AssertNoLeak(t, "stdout", stdout)
 	discovertest.AssertNoLeak(t, "stderr", stderr)
-	assertNoEscape(t, stdout, stderr)
+}
+
+// writeTestFile writes content to dir/name and returns the full path. It
+// creates the parent directories first.
+func writeTestFile(t *testing.T, dir, name, content string) string {
+	t.Helper()
+	path := filepath.Join(dir, name)
+	if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return path
 }
 
 // writeServers writes a JSON config with servers as its "mcpServers" object
@@ -162,7 +184,7 @@ func writeServers(t *testing.T, dir, name string, servers map[string]any) string
 	if err != nil {
 		t.Fatal(err)
 	}
-	return scanWriteFile(t, dir, name, string(data))
+	return writeTestFile(t, dir, name, string(data))
 }
 
 // symlink makes link point to target. It creates the parent directory of

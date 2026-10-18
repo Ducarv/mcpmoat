@@ -329,6 +329,7 @@ var allReasons = [...]reason{
 	reasonNotFound,
 	reasonUnknownFormat,
 	reasonProjectsNotRead,
+	reasonCwdOutsideProject,
 }
 
 // codexConfigRel is the path of the Codex config file inside a home

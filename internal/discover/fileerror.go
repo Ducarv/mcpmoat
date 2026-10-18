@@ -56,6 +56,12 @@ const (
 	// values. The error makes the scan fail, so the servers that were not
 	// read do not look clean.
 	reasonProjectsNotRead = "projects section not read"
+
+	// reasonCwdOutsideProject is for a server of an untrusted Codex file
+	// named with --config (see ReadConfig) whose cwd is outside the project.
+	// An untrusted file must not choose a working directory outside its
+	// project: inspect would start the server there. The server is dropped.
+	reasonCwdOutsideProject = "working directory is outside the project"
 )
 
 // FileError describes a problem with one config file or with one server entry
@@ -181,11 +187,12 @@ func canceledError(path string, err error) *FileError {
 	return readError(path, reasonCanceled, err)
 }
 
-// errText returns the text of err for use in a FileError message.
-// An *fs.PathError prints as "op path: errno", and the path is untrusted text
+// errText returns the text of err for use in a FileError message. An
+// *fs.PathError prints as "op path: errno", and the path is untrusted text
 // that could hold terminal escape codes. So for a PathError we keep only the
 // operation and the OS error. The path is already in FileError.Path, where
-// termsafe.Quote quotes it. Other errors (for example context errors) have fixed text.
+// termsafe.Quote quotes it. Other errors (for example context errors) have
+// fixed text.
 func errText(err error) string {
 	if pe, ok := errors.AsType[*fs.PathError](err); ok && pe.Err != nil {
 		return pe.Op + ": " + pe.Err.Error()

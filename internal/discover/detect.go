@@ -50,7 +50,7 @@ func DetectClient(path string, data []byte) (client Client, ok bool) {
 		return ClientCodex, true
 	}
 
-	// Trim only the JSON white space bytes, as loadJSONFile does (see
+	// Trim only the JSON white space bytes, as decodeJSONTop does (see
 	// jsonSpace).
 	trimmed := bytes.Trim(data, jsonSpace)
 	isJSON := strings.EqualFold(filepath.Ext(path), ".json") ||
@@ -93,9 +93,9 @@ func DetectClient(path string, data []byte) (client Client, ok bool) {
 // unknown.
 func clientByKnownName(path string) (Client, bool) {
 	switch filepath.Base(path) {
-	case ".claude.json", ".mcp.json":
+	case ".claude.json", projectClaudeCodeFile:
 		return ClientClaudeCode, true
-	case "mcp.json":
+	case cursorFile:
 		if inCursorDir(path) {
 			return ClientCursor, true
 		}
@@ -113,7 +113,19 @@ func clientByPath(path string) Client {
 }
 
 // inCursorDir reports whether the parent directory of path is named
-// ".cursor", as written in path. Cursor keeps its config in .cursor/mcp.json.
+// cursorDir, as written in path. Cursor keeps its config in .cursor/mcp.json.
 func inCursorDir(path string) bool {
-	return filepath.Base(filepath.Dir(path)) == ".cursor"
+	return parentDirIs(path, cursorDir)
+}
+
+// inCodexDir reports whether the parent directory of path is named codexDir,
+// as written in path. Codex keeps its config in .codex/config.toml.
+func inCodexDir(path string) bool {
+	return parentDirIs(path, codexDir)
+}
+
+// parentDirIs reports whether the parent directory of path is named name, as
+// written in path. It does not resolve a relative path or a symlink.
+func parentDirIs(path, name string) bool {
+	return filepath.Base(filepath.Dir(path)) == name
 }

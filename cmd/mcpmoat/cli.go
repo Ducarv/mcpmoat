@@ -7,7 +7,10 @@ import (
 	"io"
 	"os"
 	"runtime/debug"
+	"strconv"
 	"text/tabwriter"
+
+	"github.com/Ducarv/mcpmoat/internal/termsafe"
 )
 
 // Exit codes (PRD FR-16). Exit code 1 means "findings at or above --fail-on".
@@ -85,9 +88,9 @@ func (c *cli) dispatch(args []string) int {
 			c.usage(c.stdout)
 			return exitOK
 		}
-		// The flag error contains untrusted argv, so it is quoted to stop
-		// terminal escape injection.
-		fprintf(c.stderr, "mcpmoat: %q\n\n", err.Error())
+		// The flag error contains untrusted argv, so termsafe.Quote escapes
+		// it to stop terminal escape injection.
+		fprintf(c.stderr, "mcpmoat: %s\n\n", termsafe.Quote(err.Error()))
 		c.usage(c.stderr)
 		return exitError
 	}
@@ -104,8 +107,8 @@ func (c *cli) dispatch(args []string) int {
 		}
 	}
 
-	// The command name comes from the user, so we print it with %q.
-	fprintf(c.stderr, "mcpmoat: unknown command %q\n\n", name)
+	// The command name comes from the user, so quoteArg escapes it.
+	fprintf(c.stderr, "mcpmoat: unknown command %s\n\n", quoteArg(name))
 	c.usage(c.stderr)
 	return exitError
 }
@@ -157,19 +160,20 @@ func (c *cli) usage(w io.Writer) {
 	fprintf(w, "  --no-color   Disable colored output (also set by the NO_COLOR environment variable)\n")
 
 	fprintf(w, "\n")
-	c.scanUsage(w)
+	scanUsage(w)
 
 	fprintf(w, "\nExit codes:\n")
 	fprintf(w, "  0  no findings\n")
 	fprintf(w, "  1  findings at or above --fail-on\n")
 	fprintf(w, "  2  execution error\n")
-	fprintf(w, "     (scan also exits 2 when a config file has a problem; a missing file is not a problem)\n")
-	fprintf(w, "     (scan --no-connect applies no rules yet, so 0 does not mean the servers are safe)\n")
+	fprintf(w, "     (scan also exits 2 when a config file has a problem; a missing file is not a problem\n")
+	fprintf(w, "     in auto-discovery, but a missing --config file is)\n")
 }
 
 // scanUsage writes the flags and the output notes of the scan command to w.
-// usage includes it, and "mcpmoat scan -h" prints it alone.
-func (c *cli) scanUsage(w io.Writer) {
+// usage includes it, and "mcpmoat scan -h" prints it alone. It is a plain
+// function: it needs nothing from the cli.
+func scanUsage(w io.Writer) {
 	fprintf(w, "Scan flags (after \"scan\"):\n")
 	// Padding 2 keeps the descriptions in one column, like the text in usage.
 	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
@@ -180,7 +184,8 @@ func (c *cli) scanUsage(w io.Writer) {
 
 	fprintf(w, "\nScan output:\n")
 	fprintf(w, "  A heuristic masks secret-like arguments. Review the output before you share it.\n")
-	fprintf(w, "  --no-connect applies no rules yet. Exit code 0 does not mean that the servers are safe.\n")
+	// The same text as the notice that a scan with exit code 0 prints.
+	fprintf(w, "  --no-connect: %s.\n", noRulesText)
 }
 
 // fprintf writes formatted text to w and ignores the write error on purpose.
@@ -194,4 +199,17 @@ func (c *cli) scanUsage(w io.Writer) {
 // broken pipe could look like "no findings".
 func fprintf(w io.Writer, format string, a ...any) {
 	_, _ = fmt.Fprintf(w, format, a...)
+}
+
+// quoteArg returns one command-line argument as a quoted string for an error
+// message. The argument comes from the user and is untrusted text.
+// termsafe.Quote escapes every rune that is not safe, which %q does not do
+// for blank runes such as U+3164. termsafe.Quote keeps a safe argument as it
+// is, so quoteArg quotes that with strconv.Quote: every argument then shows
+// in double quotes, and the reader can see where it starts and ends.
+func quoteArg(s string) string {
+	if q := termsafe.Quote(s); q != s {
+		return q
+	}
+	return strconv.Quote(s)
 }

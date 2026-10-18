@@ -1,5 +1,7 @@
 package main
 
+import "strings"
+
 // This file holds the command handlers. Each one has the signature of
 // command.run: it gets the resolved global options and its own arguments, and
 // returns the exit code.
@@ -30,12 +32,16 @@ func (c *cli) runHelp(_ options, args []string) int {
 
 // rejectArgs is for commands that take no arguments. If args is not empty, it
 // prints an error to stderr and returns true. The arguments come from the
-// user, so they are printed with %q to stop terminal escape injection.
+// user, so each one goes through quoteArg to stop terminal escape injection.
 func (c *cli) rejectArgs(name string, args []string) bool {
 	if len(args) == 0 {
 		return false
 	}
-	fprintf(c.stderr, "mcpmoat %s: unexpected arguments %q\n", name, args)
+	quoted := make([]string, len(args))
+	for i, a := range args {
+		quoted[i] = quoteArg(a)
+	}
+	fprintf(c.stderr, "mcpmoat %s: unexpected arguments [%s]\n", name, strings.Join(quoted, " "))
 	fprintf(c.stderr, "Run \"mcpmoat help\" for usage.\n")
 	return true
 }

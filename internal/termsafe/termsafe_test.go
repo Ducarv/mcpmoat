@@ -28,6 +28,9 @@ func TestQuoteUnchanged(t *testing.T) {
 		{name: "command line", in: "npx -y @scope/pkg"},
 		{name: "emoji", in: "rocket \U0001F680"},
 		{name: "quote and backslash", in: "a\"b\\c"},
+		{name: "quote at the end", in: "a\""},
+		{name: "Windows path", in: `C:\Users\me\.cursor\mcp.json`},
+		{name: "backslash first", in: `\\server\share`},
 		{name: "precomposed letter", in: "\u00e9t\u00e9"},
 	}
 	for _, tt := range tests {
@@ -43,8 +46,9 @@ func TestQuoteUnchanged(t *testing.T) {
 }
 
 // TestQuoteMatchesStrconv checks the unsafe runes that strconv.Quote already
-// escapes. For a text with no blank rune (see TestQuoteBlankRunes), Quote
-// gives the same result as strconv.Quote.
+// escapes, and a double quote at the start of the text. For a text with no
+// blank rune (see TestQuoteBlankRunes), Quote gives the same result as
+// strconv.Quote.
 func TestQuoteMatchesStrconv(t *testing.T) {
 	t.Parallel()
 
@@ -78,6 +82,13 @@ func TestQuoteMatchesStrconv(t *testing.T) {
 		{class: "invalid UTF-8", name: "invalid byte", in: "a\xffb"},
 		{class: "invalid UTF-8", name: "truncated sequence", in: "a\xe3\x81"},
 		{class: "invalid UTF-8", name: "mixed escapes", in: "\x1b[31m\"x\"\\\xff"},
+		// A text that starts with a double quote is quoted, so a plain text
+		// can never look like a quoted one.
+		{class: "leading quote", name: "quote only", in: `"`},
+		{class: "leading quote", name: "looks quoted", in: `"name"`},
+		{class: "leading quote", name: "looks quoted with an escape", in: `"a\x1bb"`},
+		{class: "leading quote", name: "looks quoted and cut", in: `"abc"...`},
+		{class: "leading quote", name: "quote and backslash", in: `"C:\x"`},
 	}
 	for _, tt := range tests {
 		t.Run(tt.class+"/"+tt.name, func(t *testing.T) {
@@ -139,39 +150,6 @@ func TestQuoteBlankRunes(t *testing.T) {
 	}
 }
 
-func TestCutRunes(t *testing.T) {
-	t.Parallel()
-
-	tests := []struct {
-		name    string
-		in      string
-		n       int
-		want    string
-		wantCut bool
-	}{
-		{name: "empty", in: "", n: 3, want: "", wantCut: false},
-		{name: "shorter than n", in: "ab", n: 3, want: "ab", wantCut: false},
-		{name: "exactly n", in: "abc", n: 3, want: "abc", wantCut: false},
-		{name: "one over n", in: "abcd", n: 3, want: "abc", wantCut: true},
-		{name: "n is zero", in: "a", n: 0, want: "", wantCut: true},
-		{name: "n is zero and empty text", in: "", n: 0, want: "", wantCut: false},
-		{name: "counts runes not bytes", in: "\u00e9\u00e9\u00e9\u00e9", n: 3, want: "\u00e9\u00e9\u00e9", wantCut: true},
-		{name: "cuts at a rune boundary", in: "a\U0001F680b", n: 2, want: "a\U0001F680", wantCut: true},
-		{name: "invalid byte counts as one rune", in: "\xff\xff\xff\xff", n: 3, want: "\xff\xff\xff", wantCut: true},
-		{name: "valid and invalid runes", in: "\u00e9\xffa\u00e9", n: 3, want: "\u00e9\xffa", wantCut: true},
-		{name: "truncated sequence counts per byte", in: "\xe3\x81a", n: 2, want: "\xe3\x81", wantCut: true},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
-			got, cut := termsafe.CutRunes(tt.in, tt.n)
-			if got != tt.want || cut != tt.wantCut {
-				t.Errorf("CutRunes(%q, %d) = %q, %v, want %q, %v", tt.in, tt.n, got, cut, tt.want, tt.wantCut)
-			}
-		})
-	}
-}
-
 func TestQuoteCut(t *testing.T) {
 	t.Parallel()
 
@@ -215,6 +193,16 @@ func TestQuoteCut(t *testing.T) {
 			want: "ab..." + m,
 		},
 		{name: "n is zero", in: "a", n: 0, want: m},
+		{name: "leading quote is quoted", in: `"ab"`, n: 5, want: `"\"ab\""`},
+		{name: "cut text with a leading quote is quoted", in: `"abcdef"`, n: 3, want: `"\"ab"` + m},
+		{
+			// The quote after the cut is not shown, so it does not make the
+			// text quoted.
+			name: "quote after the cut",
+			in:   `abc"`,
+			n:    3,
+			want: "abc" + m,
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -255,7 +243,7 @@ func FuzzQuote(f *testing.F) {
 	seeds := []string{
 		"", "plain", "a b", "caf\u00e9", "a\tb", "a\nb", "\x1b[31mred", "\u009b", "\u0085",
 		"\u202e", "\u200b", "\u00a0", "a\xffb", "a\xe3\x81", "a\x00b", "\"quoted\"", "\U0001F680",
-		"e\u0301", "\u3164", "\u2800", "a\ufe0f", "\U000e0100\xff",
+		"e\u0301", "\u3164", "\u2800", "a\ufe0f", "\U000e0100\xff", `"`, `"a"`, `C:\x\y`,
 	}
 	for _, s := range seeds {
 		f.Add(s)
@@ -276,6 +264,11 @@ func FuzzQuote(f *testing.F) {
 			t.Fatalf("Quote(%q) = %q still holds a rune that needs an escape", in, out)
 		}
 		if out == in {
+			// An unquoted output must never look like a quoted one, so the
+			// output maps back to one input only.
+			if strings.HasPrefix(out, `"`) {
+				t.Fatalf("Quote(%q) = %q is unchanged but starts with a double quote", in, out)
+			}
 			return
 		}
 		// Changed output must be a quoted string that decodes back to the input.

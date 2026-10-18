@@ -32,9 +32,22 @@ import (
 //     repository file must not choose ProjectPath values. When the file has
 //     a "projects" value that is not null (also an empty object, or a value
 //     of the wrong type), ReadConfig adds one FileError with the reason
-//     "projects section not read". The scan then fails, so the servers that
-//     were not read do not look clean. The top-level servers are still
-//     returned.
+//     "projects section not read". A key that differs from "projects" only by
+//     letter case (for example "Projects") adds one FileError with the reason
+//     "ambiguous key", as in a global file. The scan then fails, so the
+//     servers that were not read do not look clean. The top-level servers
+//     are still returned.
+//   - A Codex file must not choose a working directory outside its project:
+//     inspect would start the server there. A server whose cwd is absolute
+//     and not the ProjectPath or below it, or relative and not local (see
+//     [filepath.IsLocal], for example "../x"), is dropped. It gives a
+//     FileError for the server with the reason "working directory is outside
+//     the project". An absolute cwd always gives this error when ProjectPath
+//     is relative, because the package does not read the current directory.
+//     An empty cwd and a local relative cwd are kept as written; see
+//     [Server.Dir] for how inspect treats a relative Dir. The check is
+//     lexical: it does not follow symlinks, so a directory of the project
+//     that is a symlink can still lead out of it.
 //   - The size limit is maxProjectConfigSize (4 MiB), or the smaller
 //     maxTOMLSize (256 KiB) for a Codex file.
 //   - The file is read once. The reader parses the bytes that the detection
@@ -82,14 +95,19 @@ func (g globalFile) path(home string) string {
 	return homePath(home, g.rel)
 }
 
-// globalFiles lists the user's own config files, the global steps of
-// Discover (see buildSteps), with the reader and the scope that Discover uses
-// for each. No code writes to it.
-var globalFiles = [...]globalFile{
-	{globalClaudeCodeFile, readGlobalClaudeCode},
-	{globalCursorFile, readGlobalCursor},
-	{globalCodexFile, ReadCodex},
-}
+// The user's own config files, each with the reader and the scope that
+// Discover uses for it. buildSteps reads them as the global steps of
+// Discover, and globalFor finds them for ReadConfig, so both use one
+// definition. No code writes to them.
+var (
+	globalClaudeCode = globalFile{globalClaudeCodeFile, readGlobalClaudeCode}
+	globalCursor     = globalFile{globalCursorFile, readGlobalCursor}
+	globalCodex      = globalFile{globalCodexFile, ReadCodex}
+)
+
+// globalFiles lists the global files above, in the order of Discover. No code
+// writes to it.
+var globalFiles = [...]globalFile{globalClaudeCode, globalCursor, globalCodex}
 
 // readGlobalClaudeCode reads ~/.claude.json as Discover does.
 func readGlobalClaudeCode(ctx context.Context, path string) Result {
@@ -181,18 +199,17 @@ func readUntrusted(ctx context.Context, path string) Result {
 
 // readUntrustedJSON parses data, the content of the untrusted Claude Code or
 // Cursor file at path, as ReadClaudeCode and ReadCursor do with ScopeProject
-// and an empty projectPath. It does not read the file again. For Claude Code
-// it also reports a "projects" section, which it does not read (see
-// ReadConfig). parseJSONServers marks every server and every error Untrusted.
+// and an empty projectPath. It does not read the file again: it calls
+// parseJSONBytes, the parse step of those readers. For Claude Code it also
+// reports a "projects" section, which it does not read (see ReadConfig).
+// parseJSONBytes marks every server and every error Untrusted.
 func readUntrustedJSON(ctx context.Context, path string, client Client, data []byte) Result {
-	servers, errs := parseJSONServers(ctx, jsonFile{
+	servers, errs := parseJSONBytes(ctx, jsonFile{
 		path:           path,
 		client:         client,
 		scope:          ScopeProject,
 		reportProjects: client == ClientClaudeCode,
-		data:           data,
-		hasData:        true,
-	})
+	}, data)
 	return Result{Servers: servers, Errors: errs}
 }
 
@@ -203,17 +220,49 @@ func readUntrustedJSON(ctx context.Context, path string, client Client, data []b
 //
 // Every server gets ScopeProject, and the ProjectPath that projectDirOf
 // gives: the directory of the file, or the parent of a directory named
-// ".codex" (<project>/.codex/config.toml). Every server and every error gets
-// Untrusted.
+// codexDir (<project>/.codex/config.toml). A server whose cwd is outside that
+// ProjectPath (see dirInProject) is dropped and gives a
+// reasonCwdOutsideProject error. Every server and every error gets Untrusted.
 func readUntrustedCodex(ctx context.Context, path string, data []byte) Result {
-	servers, errs := parseCodex(ctx, path, data)
+	parsed, errs := parseCodex(ctx, path, data)
 	projectPath := projectDirOf(path, ClientCodex)
-	for i := range servers {
-		servers[i].Scope = ScopeProject
-		servers[i].ProjectPath = projectPath
+	var servers []Server
+	for _, s := range parsed {
+		if !dirInProject(s.Dir, projectPath) {
+			errs = append(errs, newFileError(path, reasonCwdOutsideProject).forServer(s.Name))
+			continue
+		}
+		s.Scope = ScopeProject
+		s.ProjectPath = projectPath
+		servers = append(servers, s)
 	}
+	// Keep the error order of parseCodex: errors for the whole file first,
+	// then by server name.
+	sortErrors(errs)
 	markUntrusted(servers, errs)
 	return Result{Servers: servers, Errors: errs}
+}
+
+// dirInProject reports whether dir, the cwd of a server in an untrusted Codex
+// file, stays in projectPath, the ProjectPath of the file. An empty dir sets
+// no working directory, and a relative dir must be local (filepath.IsLocal:
+// not absolute, not empty, no ".." that leaves it). An absolute dir must be
+// projectPath or below it; with a relative projectPath it never is, because
+// the package does not read the current directory to make projectPath
+// absolute. The check is lexical and does not follow symlinks.
+func dirInProject(dir, projectPath string) bool {
+	switch {
+	case dir == "":
+		return true
+	case filepath.IsAbs(dir):
+		if !filepath.IsAbs(projectPath) {
+			return false
+		}
+		rel, err := filepath.Rel(projectPath, dir)
+		return err == nil && filepath.IsLocal(rel)
+	default:
+		return filepath.IsLocal(dir)
+	}
 }
 
 // confineDir returns the directory that the read of the cleaned path is

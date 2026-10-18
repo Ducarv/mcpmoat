@@ -9,6 +9,7 @@ import (
 
 	"github.com/Ducarv/mcpmoat/internal/discover"
 	"github.com/Ducarv/mcpmoat/internal/report"
+	"github.com/Ducarv/mcpmoat/internal/termsafe"
 )
 
 // runScan implements "mcpmoat scan". For now it only supports --no-connect: it
@@ -59,11 +60,11 @@ func (c *cli) runScan(_ options, args []string) int {
 
 	if err := fs.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
-			c.scanUsage(c.stdout)
+			scanUsage(c.stdout)
 			return exitOK
 		}
-		// The flag error holds untrusted argv, so it is quoted.
-		fprintf(c.stderr, "mcpmoat scan: %q\n", err.Error())
+		// The flag error holds untrusted argv, so termsafe.Quote escapes it.
+		fprintf(c.stderr, "mcpmoat scan: %s\n", termsafe.Quote(err.Error()))
 		fprintf(c.stderr, "Run \"mcpmoat help\" for usage.\n")
 		return exitError
 	}
@@ -149,12 +150,15 @@ func (c *cli) scanAuto(ctx context.Context) int {
 const configErrorHint = "mcpmoat scan: a config file has a problem; " +
 	"the table can miss servers that the client loads"
 
+// noRulesText says that --no-connect applies no rules yet (they come in M4),
+// so exit code 0 must not read as "the servers are safe". noRulesNotice and
+// the "Scan output" note of scanUsage both use it, so the two say the same.
+const noRulesText = "no rules are applied yet, so exit code 0 does not mean that the servers are safe"
+
 // noRulesNotice is the line that listServers prints on stderr when the scan
-// exits with 0. --no-connect applies no rules yet (they come in M4), so the
-// exit code must not read as "the servers are safe". It is a notice, not a
-// warning or an error, and it is fixed text.
-const noRulesNotice = "mcpmoat scan: no rules were applied yet; " +
-	"exit code 0 does not mean the servers are safe"
+// exits with 0. It is a notice, not a warning or an error, and it is fixed
+// text.
+const noRulesNotice = "mcpmoat scan: " + noRulesText
 
 // listServers prints the server table on stdout and the file problems on
 // stderr. Any problem gives exit code 2, after the table and all problems are

@@ -22,9 +22,15 @@ import (
 	"unicode/utf8"
 )
 
-// Quote returns s unchanged when s is valid UTF-8 and every rune of s is safe
-// to print. Otherwise it returns s as a quoted Go string, so each unsafe
-// character shows as a visible escape such as \x1b, \u0085 or \u3164.
+// Quote returns s unchanged when s is valid UTF-8, every rune of s is safe to
+// print, and s does not start with a double quote ("). Otherwise it returns s
+// as a quoted Go string, so each unsafe character shows as a visible escape
+// such as \x1b, \u0085 or \u3164.
+//
+// A text that starts with a double quote is quoted too, and its quotes show
+// as \". So an output that starts with a double quote is always a quoted
+// text, and a plain text can never look like a quoted one. A backslash alone
+// does not make s quoted, so a Windows path stays as it is.
 //
 // A rune is not safe when it:
 //
@@ -41,7 +47,10 @@ import (
 //
 // The quoted form escapes like strconv.Quote, and it also escapes the
 // combining marks and the blank runes, which strconv.Quote keeps as they are,
-// as \uXXXX or \UXXXXXXXX. strconv.Unquote of the result gives s back.
+// as \uXXXX or \UXXXXXXXX.
+//
+// The output maps back to s in one way only: strconv.Unquote of a quoted
+// result gives s back, and an unquoted result is s itself.
 //
 // Quote prevents terminal control and makes invisible runes visible. It does
 // not prevent visual spoofing with look-alike letters from other scripts
@@ -55,12 +64,12 @@ func Quote(s string) string {
 	return quoteText(s)
 }
 
-// CutRunes returns the first n runes of s, and true if s had more than n
+// cutRunes returns the first n runes of s, and true if s had more than n
 // runes. The cut is always at a rune boundary. An invalid UTF-8 byte counts
 // as one rune, as Quote shows it as one \xNN escape.
 //
-// CutRunes adds no marker. QuoteCut cuts, quotes and adds CutMarker.
-func CutRunes(s string, n int) (string, bool) {
+// cutRunes adds no marker. QuoteCut cuts, quotes and adds CutMarker.
+func cutRunes(s string, n int) (string, bool) {
 	i := 0
 	for count := 0; i < len(s); count++ {
 		if count == n {
@@ -77,24 +86,28 @@ func CutRunes(s string, n int) (string, bool) {
 // but the marker can never hide text.
 const CutMarker = "..."
 
-// QuoteCut returns s cut to n runes (see CutRunes) and then quoted (see
-// Quote). When s had more than n runes, CutMarker comes after the result,
-// after the closing quote of a quoted text.
+// QuoteCut returns s cut to n runes and then quoted (see Quote). The cut is
+// always at a rune boundary, and an invalid UTF-8 byte counts as one rune, as
+// Quote shows it as one \xNN escape. When s had more than n runes, CutMarker
+// comes after the result, after the closing quote of a quoted text.
 //
 // The cut is made before Quote, so it never splits an escape, and Quote
 // never escapes the marker. The part of s after the cut is not shown, so it
 // does not make the text quoted.
 func QuoteCut(s string, n int) string {
-	short, cut := CutRunes(s, n)
+	short, cut := cutRunes(s, n)
 	if cut {
 		return Quote(short) + CutMarker
 	}
 	return Quote(short)
 }
 
-// needsQuote reports whether s holds invalid UTF-8 or a rune for which
-// needsEscape is true.
+// needsQuote reports whether s starts with a double quote, holds invalid
+// UTF-8, or holds a rune for which needsEscape is true.
 func needsQuote(s string) bool {
+	if strings.HasPrefix(s, `"`) {
+		return true
+	}
 	// Ranging over bad bytes yields U+FFFD, which is printable, so check
 	// validity first.
 	if !utf8.ValidString(s) {

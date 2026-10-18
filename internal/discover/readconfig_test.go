@@ -72,9 +72,13 @@ func TestReadConfigValid(t *testing.T) {
 		wantClient Client
 		// wantServers returns the want list. home and work are the fixture copy.
 		wantServers func(home, work string) []wantServer
-		// wantReasons are the reasons of the errors, in order. Each error must
-		// name the file and be Untrusted.
+		// wantReasons are the reasons of the errors for the whole file, in
+		// order. Each error must name the file and be Untrusted.
 		wantReasons []string
+		// wantServerErrs are the errors for one server, in order, after the
+		// errors of wantReasons. Each error must name the file and be
+		// Untrusted.
+		wantServerErrs []errWant
 	}{
 		{
 			name:       "claude-code ~/.claude.json with projects",
@@ -145,15 +149,17 @@ func TestReadConfigValid(t *testing.T) {
 		},
 		{
 			// A Codex file that is not the home file gets the parent of its
-			// .codex directory as the project directory.
+			// .codex directory as the project directory. The git server has
+			// cwd "/tmp", which is outside that project, so it is dropped.
 			name:       "codex that is not the home file",
 			fixture:    "codex",
 			side:       "home",
 			rel:        []string{".codex", "config.toml"},
 			wantClient: ClientCodex,
 			wantServers: func(home, _ string) []wantServer {
-				return wantProject(home, "docs", "git", "remote")
+				return wantProject(home, "docs", "remote")
 			},
+			wantServerErrs: []errWant{{Server: "git", Reason: reasonCwdOutsideProject}},
 		},
 	}
 	for _, tt := range valid {
@@ -172,12 +178,18 @@ func TestReadConfigValid(t *testing.T) {
 
 			res := ReadConfig(t.Context(), path, homeArg)
 
-			if len(res.Errors) != len(tt.wantReasons) {
-				t.Fatalf("ReadConfig() errors = %v, want reasons %q", res.Errors, tt.wantReasons)
+			if len(res.Errors) != len(tt.wantReasons)+len(tt.wantServerErrs) {
+				t.Fatalf("ReadConfig() errors = %v, want reasons %q and server errors %+v", res.Errors, tt.wantReasons, tt.wantServerErrs)
 			}
-			for i, fe := range res.Errors {
+			for i, fe := range res.Errors[:len(tt.wantReasons)] {
 				if fe.Reason != tt.wantReasons[i] || fe.Path != path || fe.Server != "" || !fe.Untrusted {
 					t.Errorf("error %d = %+v, want reason %q, path %q, no server and Untrusted", i, fe, tt.wantReasons[i], path)
+				}
+			}
+			for i, fe := range res.Errors[len(tt.wantReasons):] {
+				w := tt.wantServerErrs[i]
+				if fe.Reason != w.Reason || fe.Path != path || fe.Server != w.Server || !fe.Untrusted {
+					t.Errorf("server error %d = %+v, want reason %q, path %q, server %q and Untrusted", i, fe, w.Reason, path, w.Server)
 				}
 			}
 			want := sortedWant(toServers(tt.wantServers(home, work)))
@@ -209,8 +221,9 @@ func TestReadConfigValid(t *testing.T) {
 			t.Fatal(err)
 		}
 		res := ReadConfig(t.Context(), dst, "")
-		if len(res.Errors) != 0 || len(res.Servers) == 0 {
-			t.Fatalf("ReadConfig() = %+v, want codex servers", res)
+		// The git server of the fixture has cwd "/tmp", outside the project.
+		if len(res.Errors) != 1 || res.Errors[0].Reason != reasonCwdOutsideProject || len(res.Servers) == 0 {
+			t.Fatalf("ReadConfig() = %+v, want codex servers and one %q error", res, reasonCwdOutsideProject)
 		}
 		for _, s := range res.Servers {
 			if s.Client != ClientCodex {
@@ -790,23 +803,28 @@ func caseInsensitiveFS(t testing.TB, dir string) bool {
 // TestReadConfigProjects checks the "projects" section of an untrusted Claude
 // Code file. The section is not read. Any value that is not null, also an
 // empty object, gives one untrusted "projects section not read" error, so
-// the scan fails. The top-level servers are still returned.
+// the scan fails. A key in another letter case, such as "Projects", gives
+// one untrusted "ambiguous key" error, as in a global file. The top-level
+// servers are still returned.
 func TestReadConfigProjects(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
-		name      string
-		file      string
-		data      string
-		wantError bool
+		name        string
+		file        string
+		data        string
+		wantReasons []string
 	}{
-		{"projects with servers", ".claude.json", `{"projects":{"/p":{"mcpServers":{"p":{"command":"x"}}}},"mcpServers":{"o":{"command":"x"}}}`, true},
-		{"empty projects object", ".claude.json", `{"projects":{},"mcpServers":{"o":{"command":"x"}}}`, true},
-		{"projects of the wrong type", "backup.json", `{"projects":[1],"mcpServers":{"o":{"command":"x"}}}`, true},
-		{"projects in a file with another name", "backup.json", `{"projects":{"/p":{"mcpServers":{"p":{"command":"x"}}}},"mcpServers":{"o":{"command":"x"}}}`, true},
-		{"null projects", ".claude.json", `{"projects":null,"mcpServers":{"o":{"command":"x"}}}`, false},
-		{"no projects key", ".claude.json", `{"mcpServers":{"o":{"command":"x"}}}`, false},
-		{"projects key in another letter case", ".claude.json", `{"Projects":{"/p":{}},"mcpServers":{"o":{"command":"x"}}}`, false},
+		{"projects with servers", ".claude.json", `{"projects":{"/p":{"mcpServers":{"p":{"command":"x"}}}},"mcpServers":{"o":{"command":"x"}}}`, []string{reasonProjectsNotRead}},
+		{"empty projects object", ".claude.json", `{"projects":{},"mcpServers":{"o":{"command":"x"}}}`, []string{reasonProjectsNotRead}},
+		{"projects of the wrong type", "backup.json", `{"projects":[1],"mcpServers":{"o":{"command":"x"}}}`, []string{reasonProjectsNotRead}},
+		{"projects in a file with another name", "backup.json", `{"projects":{"/p":{"mcpServers":{"p":{"command":"x"}}}},"mcpServers":{"o":{"command":"x"}}}`, []string{reasonProjectsNotRead}},
+		{"null projects", ".claude.json", `{"projects":null,"mcpServers":{"o":{"command":"x"}}}`, nil},
+		{"no projects key", ".claude.json", `{"mcpServers":{"o":{"command":"x"}}}`, nil},
+		{"projects key in another letter case", ".claude.json", `{"Projects":{"/p":{}},"mcpServers":{"o":{"command":"x"}}}`, []string{reasonAmbiguousKey}},
+		{"null projects key in another letter case", "backup.json", `{"PROJECTS":null,"mcpServers":{"o":{"command":"x"}}}`, []string{reasonAmbiguousKey}},
+		{"projects and a case variant", ".claude.json", `{"projects":{},"Projects":{},"mcpServers":{"o":{"command":"x"}}}`, []string{reasonAmbiguousKey, reasonProjectsNotRead}},
+		{"null projects and a case variant", ".claude.json", `{"projects":null,"Projects":{},"mcpServers":{"o":{"command":"x"}}}`, []string{reasonAmbiguousKey}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -818,21 +836,17 @@ func TestReadConfigProjects(t *testing.T) {
 			if got := serverNames(res.Servers); !slices.Equal(got, []string{"o"}) {
 				t.Errorf("ReadConfig() servers = %v, want [o]", got)
 			}
-			if !tt.wantError {
-				if len(res.Errors) != 0 {
-					t.Errorf("ReadConfig() errors = %v, want none", res.Errors)
+			if len(res.Errors) != len(tt.wantReasons) {
+				t.Fatalf("ReadConfig() errors = %v, want reasons %q", res.Errors, tt.wantReasons)
+			}
+			for i, fe := range res.Errors {
+				want := tt.wantReasons[i]
+				if fe.Reason != want || fe.Path != path || fe.Server != "" || fe.ProjectPath != "" || !fe.Untrusted {
+					t.Errorf("error %d = %+v, want reason %q, path %q, no server or project and Untrusted", i, fe, want, path)
 				}
-				return
-			}
-			if len(res.Errors) != 1 {
-				t.Fatalf("ReadConfig() errors = %v, want exactly one", res.Errors)
-			}
-			fe := res.Errors[0]
-			if fe.Reason != reasonProjectsNotRead || fe.Path != path || fe.Server != "" || fe.ProjectPath != "" || !fe.Untrusted {
-				t.Errorf("error = %+v, want reason %q, path %q, no server or project and Untrusted", fe, reasonProjectsNotRead, path)
-			}
-			if want := path + ": " + reasonProjectsNotRead; fe.Error() != want {
-				t.Errorf("Error() = %q, want %q", fe.Error(), want)
+				if want := path + ": " + want; fe.Error() != want {
+					t.Errorf("Error() = %q, want %q", fe.Error(), want)
+				}
 			}
 		})
 	}
@@ -871,15 +885,9 @@ func TestReadConfigReadsOnce(t *testing.T) {
 	t.Run("json", func(t *testing.T) {
 		t.Parallel()
 		for _, client := range []Client{ClientClaudeCode, ClientCursor} {
-			servers, errs := parseJSONServers(t.Context(), jsonFile{
-				path:    filepath.Join(missing, "mcp.json"),
-				client:  client,
-				scope:   ScopeProject,
-				data:    []byte(`{"mcpServers":{"a":{"command":"x"}}}`),
-				hasData: true,
-			})
-			if len(errs) != 0 || len(servers) != 1 || !servers[0].Untrusted {
-				t.Errorf("%s: parseJSONServers() = %v, %v, want one untrusted server and no errors", client, servers, errs)
+			res := readUntrustedJSON(t.Context(), filepath.Join(missing, "mcp.json"), client, []byte(`{"mcpServers":{"a":{"command":"x"}}}`))
+			if len(res.Errors) != 0 || len(res.Servers) != 1 || !res.Servers[0].Untrusted {
+				t.Errorf("%s: readUntrustedJSON() = %+v, want one untrusted server and no errors", client, res)
 			}
 		}
 	})
@@ -961,4 +969,150 @@ func TestReadConfigCleansPath(t *testing.T) {
 			t.Errorf("server = %+v, want Source %q and ProjectPath %q", s, path, dir)
 		}
 	})
+}
+
+// TestReadConfigCodexCwd checks the cwd of a server in an untrusted Codex
+// file. An untrusted file must not choose a working directory outside its
+// project: such a server is dropped and gives an untrusted "working directory
+// is outside the project" error. An empty cwd, a local relative cwd and an
+// absolute cwd in the project are kept as written.
+func TestReadConfigCodexCwd(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		// rel is the path of the config file below the temporary directory.
+		// Its project is that directory, also for .codex/config.toml.
+		rel []string
+		// cwd returns the cwd value for the project directory proj, or ok
+		// false for an entry with no cwd key.
+		cwd     func(proj string) (cwd string, ok bool)
+		wantDir func(proj string) string // nil: the server is dropped
+	}{
+		{"root", []string{"conf.toml"}, fixed("/"), nil},
+		{"etc", []string{"conf.toml"}, fixed("/etc"), nil},
+		{"parent", []string{"conf.toml"}, fixed("../x"), nil},
+		{"parent through a subdirectory", []string{"conf.toml"}, fixed("a/../../x"), nil},
+		{"parent of a .codex project", []string{".codex", "config.toml"}, fixed(".."), nil},
+		{"absolute next to the project", []string{"conf.toml"}, func(proj string) (string, bool) {
+			return proj + "-other", true
+		}, nil},
+		{"absolute that leaves the project through ..", []string{"conf.toml"}, func(proj string) (string, bool) {
+			return filepath.Join(proj, "sub") + string(filepath.Separator) + ".." + string(filepath.Separator) + "..", true
+		}, nil},
+		{"absolute in the project", []string{"conf.toml"}, func(proj string) (string, bool) {
+			return filepath.Join(proj, "sub"), true
+		}, func(proj string) string { return filepath.Join(proj, "sub") }},
+		{"absolute project directory", []string{".codex", "config.toml"}, func(proj string) (string, bool) {
+			return proj, true
+		}, func(proj string) string { return proj }},
+		{"relative subdirectory", []string{"conf.toml"}, fixed("sub"), func(string) string { return "sub" }},
+		{"relative current directory", []string{"conf.toml"}, fixed("."), func(string) string { return "." }},
+		{"relative that stays local", []string{"conf.toml"}, fixed("a/../b"), func(string) string { return "a/../b" }},
+		{"empty", []string{"conf.toml"}, fixed(""), func(string) string { return "" }},
+		{"no cwd", []string{"conf.toml"}, func(string) (string, bool) { return "", false }, func(string) string { return "" }},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			proj := t.TempDir()
+			cwd, hasCwd := tt.cwd(proj)
+			// "ok" has no cwd, so the result also shows that one dropped
+			// server does not drop the others.
+			config := "[mcp_servers.ok]\ncommand = \"x\"\n\n[mcp_servers.x]\ncommand = \"x\"\n"
+			if hasCwd {
+				// A TOML literal string ('...') has no escapes, so a Windows
+				// path needs no change.
+				config += "cwd = '" + cwd + "'\n"
+			}
+			path := writeFile(t, proj, filepath.Join(tt.rel...), []byte(config))
+
+			res := ReadConfig(t.Context(), path, "")
+
+			if tt.wantDir == nil {
+				if got := serverNames(res.Servers); !slices.Equal(got, []string{"ok"}) {
+					t.Errorf("ReadConfig() servers = %v, want [ok]", got)
+				}
+				if len(res.Errors) != 1 {
+					t.Fatalf("ReadConfig() errors = %v, want exactly one", res.Errors)
+				}
+				fe := res.Errors[0]
+				if fe.Reason != reasonCwdOutsideProject || fe.Path != path || fe.Server != "x" || !fe.Untrusted {
+					t.Errorf("error = %+v, want reason %q, path %q, server x and Untrusted", fe, reasonCwdOutsideProject, path)
+				}
+				return
+			}
+			if len(res.Errors) != 0 || len(res.Servers) != 2 {
+				t.Fatalf("ReadConfig() = %+v, want servers ok and x and no errors", res)
+			}
+			s := res.Servers[1]
+			if want := tt.wantDir(proj); s.Name != "x" || s.Dir != want || s.ProjectPath != proj || !s.Untrusted {
+				t.Errorf("server = %+v, want x with Dir %q, ProjectPath %q and Untrusted", s, want, proj)
+			}
+		})
+	}
+
+	t.Run("the error keeps the order by server name", func(t *testing.T) {
+		t.Parallel()
+		config := "[mcp_servers.a]\ncommand = \"x\"\ncwd = '/'\n\n[mcp_servers.b]\ncommand = 5\n\n[mcp_servers.c]\ncommand = \"x\"\ncwd = '../c'\n"
+		path := writeFile(t, t.TempDir(), "conf.toml", []byte(config))
+		res := ReadConfig(t.Context(), path, "")
+		got := make([]string, 0, len(res.Errors))
+		for _, fe := range res.Errors {
+			got = append(got, fe.Server+": "+fe.Reason)
+		}
+		want := []string{"a: " + reasonCwdOutsideProject, "b: " + reasonBadEntry, "c: " + reasonCwdOutsideProject}
+		if len(res.Servers) != 0 || !slices.Equal(got, want) {
+			t.Errorf("ReadConfig() = servers %v, errors %q, want no servers and errors %q", res.Servers, got, want)
+		}
+	})
+
+	t.Run("the user's own Codex file keeps any cwd", func(t *testing.T) {
+		t.Parallel()
+		home := t.TempDir()
+		path := writeFile(t, home, filepath.Join(".codex", "config.toml"), []byte("[mcp_servers.x]\ncommand = \"x\"\ncwd = '/'\n"))
+		res := ReadConfig(t.Context(), path, home)
+		if len(res.Errors) != 0 || len(res.Servers) != 1 || res.Servers[0].Dir != "/" || res.Servers[0].Untrusted {
+			t.Errorf("ReadConfig() = %+v, want one trusted server with Dir \"/\"", res)
+		}
+	})
+}
+
+// fixed returns a cwd function of TestReadConfigCodexCwd that gives cwd for
+// every project directory.
+func fixed(cwd string) func(string) (string, bool) {
+	return func(string) (string, bool) { return cwd, true }
+}
+
+// TestDirInProject checks the cwd rule of an untrusted Codex file, also with
+// a relative ProjectPath, which ReadConfig gives for a relative path.
+func TestDirInProject(t *testing.T) {
+	t.Parallel()
+	abs := t.TempDir()
+	tests := []struct {
+		name        string
+		dir         string
+		projectPath string
+		want        bool
+	}{
+		{"empty dir", "", "proj", true},
+		{"local dir", "sub", "proj", true},
+		{"current dir", ".", "proj", true},
+		{"parent dir", "..", "proj", false},
+		{"dir that leaves through a subdirectory", "a/../../x", abs, false},
+		{"absolute root", "/", abs, false},
+		{"absolute project itself", abs, abs, true},
+		{"absolute below the project", filepath.Join(abs, "a", "b"), abs, true},
+		{"absolute with a name that starts like the project", abs + "x", abs, false},
+		{"absolute dir with a relative project", abs, "proj", false},
+		{"absolute dir with the project .", abs, ".", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if got := dirInProject(tt.dir, tt.projectPath); got != tt.want {
+				t.Errorf("dirInProject(%q, %q) = %v, want %v", tt.dir, tt.projectPath, got, tt.want)
+			}
+		})
+	}
 }

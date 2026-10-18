@@ -31,14 +31,28 @@ type Result struct {
 	Errors []*FileError
 }
 
+// The names that the clients use for their files and directories.
+const (
+	// projectClaudeCodeFile is the Claude Code project file in a project
+	// directory: <WorkDir>/.mcp.json.
+	projectClaudeCodeFile = ".mcp.json"
+	// cursorDir is the directory of a Cursor config, in the home directory
+	// and in a project directory: .cursor/mcp.json.
+	cursorDir = ".cursor"
+	// cursorFile is the name of a Cursor config in cursorDir.
+	cursorFile = "mcp.json"
+	// codexDir is the directory of a Codex config: .codex/config.toml.
+	codexDir = ".codex"
+)
+
 // The user's own config files, relative to the home directory, with forward
-// slashes. buildSteps reads them as the global steps of Discover, and
-// globalFiles lists them for ReadConfig. homePath joins one to a home
-// directory.
+// slashes. globalFiles lists them with their readers, and buildSteps reads
+// them from there as the global steps of Discover. homePath joins one to a
+// home directory.
 const (
 	globalClaudeCodeFile = ".claude.json"
-	globalCursorFile     = ".cursor/mcp.json"
-	globalCodexFile      = ".codex/config.toml"
+	globalCursorFile     = cursorDir + "/" + cursorFile
+	globalCodexFile      = codexDir + "/config.toml"
 )
 
 // homePath returns the path of rel, one of the global files above, below
@@ -135,7 +149,9 @@ func hasCanceled(errs []*FileError) bool {
 
 // buildSteps lists the files to read, in order. Each step is a small closure
 // (a function that keeps the variables around it), so Discover can run all
-// steps with one loop. runSteps passes the context to each step.
+// steps with one loop. runSteps passes the context to each step. The global
+// steps take their path and their reader from globalFiles, so ReadConfig
+// reads a global file exactly as Discover does.
 func buildSteps(opts Options) []step {
 	// Clean the paths once. filepath.Clean("") returns ".", so an empty value
 	// must stay empty: it means "skip these files".
@@ -143,15 +159,22 @@ func buildSteps(opts Options) []step {
 	opts.WorkDir = cleanDir(opts.WorkDir)
 
 	var steps []step
-
-	if opts.Home != "" {
-		path := homePath(opts.Home, globalClaudeCodeFile)
+	// addGlobal adds the step of the global file g, when Home is set, and
+	// returns its path. The path stays empty when Home is empty.
+	addGlobal := func(g globalFile) string {
+		if opts.Home == "" {
+			return ""
+		}
+		path := g.path(opts.Home)
 		steps = append(steps, step{path: path, read: func(ctx context.Context) Result {
-			return ReadClaudeCode(ctx, path, ScopeGlobal, "")
+			return g.read(ctx, path)
 		}})
+		return path
 	}
+
+	addGlobal(globalClaudeCode)
 	if opts.WorkDir != "" {
-		path := filepath.Join(opts.WorkDir, ".mcp.json")
+		path := filepath.Join(opts.WorkDir, projectClaudeCodeFile)
 		steps = append(steps, step{path: path, untrusted: true, read: func(ctx context.Context) Result {
 			return ReadClaudeCode(ctx, path, ScopeProject, opts.WorkDir)
 		}})
@@ -159,15 +182,9 @@ func buildSteps(opts Options) []step {
 
 	// homeCursor stays empty when Home is empty. The Cursor project path is
 	// never empty, so it never equals an empty homeCursor.
-	var homeCursor string
-	if opts.Home != "" {
-		homeCursor = homePath(opts.Home, globalCursorFile)
-		steps = append(steps, step{path: homeCursor, read: func(ctx context.Context) Result {
-			return ReadCursor(ctx, homeCursor, ScopeGlobal, "")
-		}})
-	}
+	homeCursor := addGlobal(globalCursor)
 	if opts.WorkDir != "" {
-		path := filepath.Join(opts.WorkDir, ".cursor", "mcp.json")
+		path := filepath.Join(opts.WorkDir, cursorDir, cursorFile)
 		// When WorkDir is Home, this is the same file as the home Cursor
 		// config: read it once, as a global config. Both paths are already
 		// cleaned, so a string compare is enough. See Discover for the limits
@@ -179,12 +196,7 @@ func buildSteps(opts Options) []step {
 		}
 	}
 
-	if opts.Home != "" {
-		path := homePath(opts.Home, globalCodexFile)
-		steps = append(steps, step{path: path, read: func(ctx context.Context) Result {
-			return ReadCodex(ctx, path)
-		}})
-	}
+	addGlobal(globalCodex)
 	return steps
 }
 

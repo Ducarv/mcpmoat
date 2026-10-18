@@ -9,7 +9,6 @@ package main
 
 import (
 	"bytes"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -158,30 +157,27 @@ func TestE2EScanPartialFailure(t *testing.T) {
 func TestE2EScanUntrustedProjectFile(t *testing.T) {
 	t.Parallel()
 	home, work, outside := t.TempDir(), t.TempDir(), t.TempDir()
-	files := map[string]string{
-		filepath.Join(home, ".claude.json"): `{"mcpServers":{"global-srv":{"command":"npx"}}}`,
-		filepath.Join(outside, "real.json"): `{"mcpServers":{"outside":{"command":"run","args":["--token","` +
-			discovertest.CanaryArgs + `"]}}}`,
-	}
-	for path, content := range files {
-		if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
-			t.Fatal(err)
-		}
-	}
-	symlink(t, filepath.Join(outside, "real.json"), filepath.Join(work, ".mcp.json"))
+	writeServers(t, home, ".claude.json", map[string]any{"global-srv": map[string]any{"command": "npx"}})
+	target := writeServers(t, outside, "real.json", outsideServers())
+	symlink(t, target, filepath.Join(work, ".mcp.json"))
 
 	stdout, stderr, code := runBin(t, home, work, "scan", "--no-connect")
 
-	if code != exitError {
-		t.Errorf("exit code = %d, want %d; stderr:\n%s", code, exitError, stderr)
-	}
+	assertScanResult(t, code, stdout, stderr, scanWant{
+		code:   exitError,
+		stderr: []string{".mcp.json: file is outside the project", configErrorHint},
+	})
 	if got := column(tableRows(t, stdout), 0); !slices.Equal(got, []string{"global-srv"}) {
 		t.Errorf("server names = %v, want [global-srv]\nstdout:\n%s", got, stdout)
 	}
-	assertContainsAll(t, "stderr", stderr, []string{".mcp.json: file is outside the project", configErrorHint})
-	assertScanErrorLines(t, stderr)
-	discovertest.AssertNoLeak(t, "stdout", stdout)
-	discovertest.AssertNoLeak(t, "stderr", stderr)
+}
+
+// outsideServers returns the servers of a config outside the project. The
+// canary in its args must never show, also when mcpmoat refuses the file.
+func outsideServers() map[string]any {
+	return map[string]any{
+		"outside": map[string]any{"command": "run", "args": []string{"--token", discovertest.CanaryArgs}},
+	}
 }
 
 func TestE2EScanEmpty(t *testing.T) {
@@ -246,12 +242,17 @@ func TestE2EScanConfigFile(t *testing.T) {
 			wantNames:  []string{"docs", "git", "remote"},
 		},
 		{
+			// The server "git" has cwd = "/tmp", outside the project of an
+			// untrusted file. It is dropped, and that fails the scan.
 			name:       "codex outside home",
 			fixture:    "codex",
 			file:       []string{".codex", "config.toml"},
 			wantClient: "codex",
-			wantNames:  []string{"docs", "git", "remote"},
+			wantNames:  []string{"docs", "remote"},
 			otherHome:  true,
+			wantStderr: []string{
+				"mcpmoat scan: ", "config.toml", "server git: working directory is outside the project", configErrorHint,
+			},
 		},
 	}
 	for _, tt := range tests {
@@ -303,27 +304,19 @@ func TestE2EScanConfigFile(t *testing.T) {
 func TestE2EScanConfigSymlinkOut(t *testing.T) {
 	t.Parallel()
 	home, repo, outside := t.TempDir(), t.TempDir(), t.TempDir()
-	target := filepath.Join(outside, "real.json")
-	content := `{"mcpServers":{"outside":{"command":"run","args":["--token","` + discovertest.CanaryArgs + `"]}}}`
-	if err := os.WriteFile(target, []byte(content), 0o600); err != nil {
-		t.Fatal(err)
-	}
+	target := writeServers(t, outside, "real.json", outsideServers())
 	link := filepath.Join(repo, ".mcp.json")
 	symlink(t, target, link)
 
 	stdout, stderr, code := runBin(t, home, repo, "scan", "--no-connect", "--config", link)
 
-	if code != exitError {
-		t.Errorf("exit code = %d, want %d; stderr:\n%s", code, exitError, stderr)
-	}
+	assertScanResult(t, code, stdout, stderr, scanWant{
+		code:   exitError,
+		stderr: []string{".mcp.json: file is outside the project"},
+	})
 	if stdout != "" {
 		t.Errorf("stdout = %q, want empty", stdout)
 	}
-	if !strings.Contains(stderr, ".mcp.json: file is outside the project") {
-		t.Errorf("stderr does not name the refused file:\n%s", stderr)
-	}
-	discovertest.AssertNoLeak(t, "stdout", stdout)
-	discovertest.AssertNoLeak(t, "stderr", stderr)
 }
 
 func TestE2EScanConfigErrors(t *testing.T) {
@@ -344,9 +337,7 @@ func TestE2EScanConfigErrors(t *testing.T) {
 			dir := t.TempDir()
 			path := filepath.Join(dir, tt.file)
 			if tt.create {
-				if err := os.WriteFile(path, []byte(tt.content), 0o600); err != nil {
-					t.Fatal(err)
-				}
+				writeTestFile(t, dir, tt.file, tt.content)
 			}
 
 			stdout, stderr, code := runBin(t, dir, dir, "scan", "--no-connect", "--config", path)
@@ -406,18 +397,17 @@ func TestE2EScanSecretsDoNotLeak(t *testing.T) {
 				{name: "config", args: []string{"scan", "--no-connect", "--config", file}},
 			}
 			for _, mode := range modes {
-				stdout, stderr, code := runBin(t, home, work, mode.args...)
+				t.Run(mode.name, func(t *testing.T) {
+					stdout, stderr, code := runBin(t, home, work, mode.args...)
 
-				if code != exitOK {
-					t.Errorf("%s: exit code = %d, want %d; stderr:\n%s", mode.name, code, exitOK, stderr)
-				}
-				// Check that the scan listed servers. Without this, an empty
-				// output would pass the leak check.
-				if len(tableRows(t, stdout)) == 0 {
-					t.Errorf("%s: stdout has no server rows:\n%s", mode.name, stdout)
-				}
-				discovertest.AssertNoLeak(t, mode.name+" stdout", stdout)
-				discovertest.AssertNoLeak(t, mode.name+" stderr", stderr)
+					// assertScanResult also checks that no canary leaks.
+					assertScanResult(t, code, stdout, stderr, scanWant{code: exitOK})
+					// Check that the scan listed servers. Without this, an
+					// empty output would pass the leak check.
+					if len(tableRows(t, stdout)) == 0 {
+						t.Errorf("stdout has no server rows:\n%s", stdout)
+					}
+				})
 			}
 		})
 	}
@@ -436,26 +426,14 @@ func TestE2EScanStartsNoProcess(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	cfg := map[string]any{
-		"mcpServers": map[string]any{
-			"marker-server":  map[string]any{"command": script},
-			"missing-binary": map[string]any{"command": "/nonexistent/mcpmoat-e2e"},
-		},
-	}
-	data, err := json.Marshal(cfg)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(home, ".claude.json"), data, 0o600); err != nil {
-		t.Fatal(err)
-	}
+	writeServers(t, home, ".claude.json", map[string]any{
+		"marker-server":  map[string]any{"command": script},
+		"missing-binary": map[string]any{"command": "/nonexistent/mcpmoat-e2e"},
+	})
 
 	stdout, stderr, code := runBin(t, home, work, "scan", "--no-connect")
 
-	if code != exitOK {
-		t.Errorf("exit code = %d, want %d; stderr:\n%s", code, exitOK, stderr)
-	}
-	assertNoRulesNotice(t, stderr)
+	assertScanResult(t, code, stdout, stderr, scanWant{code: exitOK})
 	// Both servers are listed. json.Marshal sorts the map keys, and the
 	// reader keeps that order, but the test does not depend on the order.
 	for _, name := range []string{"marker-server", "missing-binary"} {

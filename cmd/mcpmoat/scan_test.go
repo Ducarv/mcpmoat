@@ -38,19 +38,6 @@ func scanCLI(t *testing.T, fixture ...string) (c *cli, stdout, stderr *bytes.Buf
 	return c, stdout, stderr, home, work
 }
 
-// scanWriteFile writes content to dir/name and returns the full path.
-func scanWriteFile(t *testing.T, dir, name, content string) string {
-	t.Helper()
-	path := filepath.Join(dir, name)
-	if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	return path
-}
-
 // scanConfigCLI returns a cli for --config runs. Its homeDir returns home,
 // which --config uses only to tell whether the file is one of the user's own
 // global files. Its getwd fails the test when it is called: it proves that
@@ -91,7 +78,14 @@ func TestScanFlags(t *testing.T) {
 			name:       "unknown flag",
 			args:       []string{"scan", "--bogus"},
 			wantCode:   exitError,
-			wantStderr: []string{`mcpmoat scan: "flag provided but not defined: -bogus"`, `Run "mcpmoat help" for usage.`},
+			wantStderr: []string{"mcpmoat scan: flag provided but not defined: -bogus\n", `Run "mcpmoat help" for usage.`},
+		},
+		{
+			// %q keeps a blank rune as it is. termsafe.Quote escapes it.
+			name:       "unknown flag with a blank rune",
+			args:       []string{"scan", "--\u3164"},
+			wantCode:   exitError,
+			wantStderr: []string{`mcpmoat scan: "flag provided but not defined: -\u3164"`},
 		},
 		{
 			name:       "extra argument",
@@ -165,12 +159,6 @@ func TestScanFlags(t *testing.T) {
 			wantStderr: []string{"file not found"},
 		},
 		{
-			name:       "no flags",
-			args:       []string{"scan"},
-			wantCode:   exitError,
-			wantStderr: []string{"not implemented", "use --no-connect"},
-		},
-		{
 			name:       "config without --no-connect",
 			args:       []string{"scan", "--config", "x"},
 			wantCode:   exitError,
@@ -209,15 +197,15 @@ func TestScanFlags(t *testing.T) {
 func TestScanHelpMatchesUsage(t *testing.T) {
 	t.Parallel()
 
-	c, stdout, _ := newTestCLI(fakeGetenv(nil), testBuild)
-	c.scanUsage(stdout)
-	want := stdout.String()
+	var buf bytes.Buffer
+	scanUsage(&buf)
+	want := buf.String()
 
-	c2, stdout2, _ := newTestCLI(fakeGetenv(nil), testBuild)
-	if code := c2.dispatch([]string{"scan", "-h"}); code != exitOK {
+	c, stdout, _ := newTestCLI(fakeGetenv(nil), testBuild)
+	if code := c.dispatch([]string{"scan", "-h"}); code != exitOK {
 		t.Fatalf("scan -h = %d, want %d", code, exitOK)
 	}
-	if got := stdout2.String(); got != want {
+	if got := stdout.String(); got != want {
 		t.Errorf("scan -h stdout = %q, want %q", got, want)
 	}
 	if !strings.Contains(usageText(t), want) {
@@ -414,12 +402,17 @@ func TestScanConfigFormats(t *testing.T) {
 			wantNames:  []string{"docs", "remote", "git"},
 		},
 		{
+			// Not the home file: the server "git" has cwd = "/tmp", outside
+			// the project, so it is dropped and the scan fails.
 			name:        "codex config.toml in another directory",
 			fixture:     []string{"codex", "valid"},
 			file:        filepath.Join("home", ".codex", "config.toml"),
 			wantClient:  "codex",
-			wantNames:   []string{"docs", "remote", "git"},
+			wantNames:   []string{"docs", "remote"},
 			wantProject: "home",
+			wantStderr: []string{
+				"mcpmoat scan: ", "config.toml", "server git: working directory is outside the project", configErrorHint,
+			},
 		},
 	}
 
@@ -500,7 +493,7 @@ func TestScanConfigErrors(t *testing.T) {
 		{
 			name: "unknown format",
 			setup: func(t *testing.T) string {
-				return scanWriteFile(t, t.TempDir(), "notes.txt", "hello\n")
+				return writeTestFile(t, t.TempDir(), "notes.txt", "hello\n")
 			},
 			wantStdoutEmpty: true,
 			wantStderr:      []string{"mcpmoat scan: ", "notes.txt", "unknown config format"},
@@ -617,7 +610,7 @@ func TestScanStartsNoProcess(t *testing.T) {
 		"missing-cmd": map[string]any{"command": "/nonexistent/mcpmoat-test"},
 	}
 	if runtime.GOOS != "windows" {
-		script := scanWriteFile(t, dir, "server.sh", "#!/bin/sh\ntouch "+marker+"\n")
+		script := writeTestFile(t, dir, "server.sh", "#!/bin/sh\ntouch "+marker+"\n")
 		if err := os.Chmod(script, 0o700); err != nil { //nolint:gosec // G302: the test script must be executable
 			t.Fatal(err)
 		}
@@ -629,10 +622,7 @@ func TestScanStartsNoProcess(t *testing.T) {
 
 	code := c.dispatch([]string{"scan", "--no-connect"})
 
-	if code != exitOK {
-		t.Fatalf("exit code = %d, want %d; stderr:\n%s", code, exitOK, stderr)
-	}
-	assertNoRulesNotice(t, stderr.String())
+	assertScanResult(t, code, stdout.String(), stderr.String(), scanWant{code: exitOK})
 	for name := range servers {
 		if !strings.Contains(stdout.String(), name) {
 			t.Errorf("stdout does not list %q\nstdout:\n%s", name, stdout)
@@ -672,10 +662,7 @@ func TestScanOpensNoConnection(t *testing.T) {
 
 	code := c.dispatch([]string{"scan", "--no-connect"})
 
-	if code != exitOK {
-		t.Fatalf("exit code = %d, want %d; stderr:\n%s", code, exitOK, stderr)
-	}
-	assertNoRulesNotice(t, stderr.String())
+	assertScanResult(t, code, stdout.String(), stderr.String(), scanWant{code: exitOK})
 	rows := tableRows(t, stdout.String())
 	if len(rows) != 4 {
 		t.Errorf("table has %d rows, want 4\nstdout:\n%s", len(rows), stdout)
@@ -683,8 +670,6 @@ func TestScanOpensNoConnection(t *testing.T) {
 	if got := strings.Count(stdout.String(), wantURL); got != 4 {
 		t.Errorf("stdout shows the redacted URL %q %d times, want 4\nstdout:\n%s", wantURL, got, stdout)
 	}
-	discovertest.AssertNoLeak(t, "stdout", stdout.String())
-	discovertest.AssertNoLeak(t, "stderr", stderr.String())
 	if got := requests.Load(); got != 0 {
 		t.Errorf("the test server got %d requests, want 0", got)
 	}
@@ -767,8 +752,7 @@ func TestScanNoLeak(t *testing.T) {
 // key from the secrets fixtures.
 func scanAssertNoSecret(t *testing.T, stdout, stderr string) {
 	t.Helper()
-	discovertest.AssertNoLeak(t, "stdout", stdout)
-	discovertest.AssertNoLeak(t, "stderr", stderr)
+	assertNoLeakBoth(t, stdout, stderr)
 	for name, out := range map[string]string{"stdout": stdout, "stderr": stderr} {
 		if strings.Contains(out, "API_KEY") {
 			t.Errorf("%s shows the env key API_KEY, but it must show no env at all\n%s", name, out)
@@ -792,16 +776,12 @@ func TestScanTerminalSafety(t *testing.T) {
 	wantCommand := discover.Mask + " " + discover.Mask
 
 	c, stdout, stderr := scanConfigCLI(t, t.TempDir())
-	path := scanWriteFile(t, t.TempDir(), ".mcp.json", config)
+	path := writeTestFile(t, t.TempDir(), ".mcp.json", config)
 
 	code := c.dispatch([]string{"scan", "--no-connect", "--config", path})
 
-	if code != exitOK {
-		t.Fatalf("exit code = %d, want %d; stderr:\n%s", code, exitOK, stderr)
-	}
-	assertNoRulesNotice(t, stderr.String())
+	assertScanResult(t, code, stdout.String(), stderr.String(), scanWant{code: exitOK})
 	out := stdout.String()
-	assertNoEscape(t, out, stderr.String())
 	if strings.Contains(out, "\t") {
 		t.Errorf("stdout has a raw tab\n%q", out)
 	}
@@ -951,11 +931,7 @@ func TestScanArgsMasked(t *testing.T) {
 
 	code := c.dispatch([]string{"scan", "--no-connect"})
 
-	if code != exitOK {
-		t.Fatalf("exit code = %d, want %d; stderr:\n%s", code, exitOK, stderr)
-	}
-	discovertest.AssertNoLeak(t, "stdout", stdout.String())
-	discovertest.AssertNoLeak(t, "stderr", stderr.String())
+	assertScanResult(t, code, stdout.String(), stderr.String(), scanWant{code: exitOK})
 	// The safe parts stay, so the leak check is not a pass on empty output.
 	if got := strings.Count(stdout.String(), "npx -y @scope/server --token "+discover.Mask+" "); got != 2 {
 		t.Errorf("stdout shows the redacted command line %d times, want 2\nstdout:\n%s", got, stdout)
@@ -987,8 +963,8 @@ func TestScanAutoExitCodes(t *testing.T) {
 		{
 			name: ".mcp.json is a symlink out of the project",
 			setup: func(t *testing.T, home, work, outside string) {
-				scanWriteFile(t, home, ".claude.json", globalConfig)
-				symlink(t, scanWriteFile(t, outside, "real.json", outsideConfig), filepath.Join(work, ".mcp.json"))
+				writeTestFile(t, home, ".claude.json", globalConfig)
+				symlink(t, writeTestFile(t, outside, "real.json", outsideConfig), filepath.Join(work, ".mcp.json"))
 			},
 			wantCode:   exitError,
 			wantStdout: []string{"global-srv"},
@@ -997,8 +973,8 @@ func TestScanAutoExitCodes(t *testing.T) {
 		{
 			name: ".cursor/mcp.json is a symlink out of the project",
 			setup: func(t *testing.T, home, work, outside string) {
-				scanWriteFile(t, home, ".claude.json", globalConfig)
-				symlink(t, scanWriteFile(t, outside, "mcp.json", outsideConfig), filepath.Join(work, ".cursor", "mcp.json"))
+				writeTestFile(t, home, ".claude.json", globalConfig)
+				symlink(t, writeTestFile(t, outside, "mcp.json", outsideConfig), filepath.Join(work, ".cursor", "mcp.json"))
 			},
 			wantCode:   exitError,
 			wantStdout: []string{"global-srv"},
@@ -1007,8 +983,8 @@ func TestScanAutoExitCodes(t *testing.T) {
 		{
 			name: "project file is invalid JSON",
 			setup: func(t *testing.T, home, work, _ string) {
-				scanWriteFile(t, home, ".claude.json", globalConfig)
-				scanWriteFile(t, work, ".mcp.json", `{"mcpServers":`)
+				writeTestFile(t, home, ".claude.json", globalConfig)
+				writeTestFile(t, work, ".mcp.json", `{"mcpServers":`)
 			},
 			wantCode:   exitError,
 			wantStdout: []string{"global-srv"},
@@ -1017,7 +993,7 @@ func TestScanAutoExitCodes(t *testing.T) {
 		{
 			name: "no servers at all still prints the empty line first",
 			setup: func(t *testing.T, _, work, outside string) {
-				symlink(t, scanWriteFile(t, outside, "real.json", outsideConfig), filepath.Join(work, ".mcp.json"))
+				symlink(t, writeTestFile(t, outside, "real.json", outsideConfig), filepath.Join(work, ".mcp.json"))
 			},
 			wantCode:   exitError,
 			wantStdout: []string{"No MCP servers found."},
@@ -1026,7 +1002,7 @@ func TestScanAutoExitCodes(t *testing.T) {
 		{
 			name: "relative project symlink that stays inside the project is followed",
 			setup: func(t *testing.T, _, work, _ string) {
-				scanWriteFile(t, work, filepath.Join("conf", "mcp.json"), `{"mcpServers":{"inside":{"command":"npx"}}}`)
+				writeTestFile(t, work, filepath.Join("conf", "mcp.json"), `{"mcpServers":{"inside":{"command":"npx"}}}`)
 				symlink(t, filepath.Join("conf", "mcp.json"), filepath.Join(work, ".mcp.json"))
 			},
 			wantCode:   exitOK,
@@ -1037,7 +1013,7 @@ func TestScanAutoExitCodes(t *testing.T) {
 			// into the project.
 			name: "absolute project symlink is refused",
 			setup: func(t *testing.T, _, work, _ string) {
-				target := scanWriteFile(t, work, filepath.Join("conf", "mcp.json"), `{"mcpServers":{"inside":{"command":"npx"}}}`)
+				target := writeTestFile(t, work, filepath.Join("conf", "mcp.json"), `{"mcpServers":{"inside":{"command":"npx"}}}`)
 				symlink(t, target, filepath.Join(work, ".mcp.json"))
 			},
 			wantCode:   exitError,
@@ -1047,8 +1023,8 @@ func TestScanAutoExitCodes(t *testing.T) {
 		{
 			name: "global file with invalid JSON fails the scan",
 			setup: func(t *testing.T, home, work, _ string) {
-				scanWriteFile(t, home, ".claude.json", `{"mcpServers":`)
-				scanWriteFile(t, work, ".mcp.json", `{"mcpServers":{"project-srv":{"command":"npx"}}}`)
+				writeTestFile(t, home, ".claude.json", `{"mcpServers":`)
+				writeTestFile(t, work, ".mcp.json", `{"mcpServers":{"project-srv":{"command":"npx"}}}`)
 			},
 			wantCode:   exitError,
 			wantStdout: []string{"project-srv"},
@@ -1057,7 +1033,7 @@ func TestScanAutoExitCodes(t *testing.T) {
 		{
 			name: "global file with an ambiguous key fails the scan",
 			setup: func(t *testing.T, home, _, _ string) {
-				scanWriteFile(t, home, filepath.Join(".cursor", "mcp.json"),
+				writeTestFile(t, home, filepath.Join(".cursor", "mcp.json"),
 					`{"mcpServers":{"amb":{"command":"npx","Command":"evil"},"ok-srv":{"command":"uvx"}}}`)
 			},
 			wantCode:   exitError,
@@ -1067,7 +1043,7 @@ func TestScanAutoExitCodes(t *testing.T) {
 		{
 			name: "global codex file that is not valid TOML fails the scan",
 			setup: func(t *testing.T, home, _, _ string) {
-				scanWriteFile(t, home, filepath.Join(".codex", "config.toml"), "[mcp_servers.a\n")
+				writeTestFile(t, home, filepath.Join(".codex", "config.toml"), "[mcp_servers.a\n")
 			},
 			wantCode:   exitError,
 			wantStdout: []string{"No MCP servers found."},
@@ -1076,7 +1052,7 @@ func TestScanAutoExitCodes(t *testing.T) {
 		{
 			name: "missing files are not a problem",
 			setup: func(t *testing.T, home, _, _ string) {
-				scanWriteFile(t, home, ".claude.json", globalConfig)
+				writeTestFile(t, home, ".claude.json", globalConfig)
 			},
 			wantCode:   exitOK,
 			wantStdout: []string{"global-srv"},
@@ -1090,7 +1066,7 @@ func TestScanAutoExitCodes(t *testing.T) {
 		{
 			name: "global symlink out of the home directory is followed",
 			setup: func(t *testing.T, home, _, outside string) {
-				symlink(t, scanWriteFile(t, outside, "real.json", outsideConfig), filepath.Join(home, ".cursor", "mcp.json"))
+				symlink(t, writeTestFile(t, outside, "real.json", outsideConfig), filepath.Join(home, ".cursor", "mcp.json"))
 			},
 			wantCode:   exitOK,
 			wantStdout: []string{"outside", "run " + discover.Mask},
@@ -1141,7 +1117,7 @@ func TestScanConfigIsUntrusted(t *testing.T) {
 		{
 			name: "repository .mcp.json is a project file",
 			setup: func(t *testing.T, _, repo, _ string) string {
-				return scanWriteFile(t, repo, ".mcp.json", `{"mcpServers":{"repo-srv":{"command":"npx"}}}`)
+				return writeTestFile(t, repo, ".mcp.json", `{"mcpServers":{"repo-srv":{"command":"npx"}}}`)
 			},
 			wantCode:   exitOK,
 			wantStdout: []string{"repo-srv", "project:"},
@@ -1151,7 +1127,7 @@ func TestScanConfigIsUntrusted(t *testing.T) {
 			name: "symlink out of the directory is refused",
 			setup: func(t *testing.T, _, repo, outside string) string {
 				link := filepath.Join(repo, ".mcp.json")
-				symlink(t, scanWriteFile(t, outside, "real.json", outsideConfig), link)
+				symlink(t, writeTestFile(t, outside, "real.json", outsideConfig), link)
 				return link
 			},
 			wantCode:   exitError,
@@ -1161,7 +1137,7 @@ func TestScanConfigIsUntrusted(t *testing.T) {
 		{
 			name: "projects section of a .claude.json outside home is not read",
 			setup: func(t *testing.T, _, repo, _ string) string {
-				return scanWriteFile(t, repo, ".claude.json", withProjects)
+				return writeTestFile(t, repo, ".claude.json", withProjects)
 			},
 			// A section that is not read can hide servers, so the scan
 			// fails. The top-level servers still show.
@@ -1173,7 +1149,7 @@ func TestScanConfigIsUntrusted(t *testing.T) {
 		{
 			name: "the home ~/.claude.json is a global file",
 			setup: func(t *testing.T, home, _, _ string) string {
-				return scanWriteFile(t, home, ".claude.json", withProjects)
+				return writeTestFile(t, home, ".claude.json", withProjects)
 			},
 			wantCode:   exitOK,
 			wantStdout: []string{"top-srv", "global", "proj-srv", "project:/p"},
@@ -1182,7 +1158,7 @@ func TestScanConfigIsUntrusted(t *testing.T) {
 			name: "a symlink to the home ~/.claude.json is a global file",
 			setup: func(t *testing.T, home, repo, _ string) string {
 				link := filepath.Join(repo, "mine.json")
-				symlink(t, scanWriteFile(t, home, ".claude.json", withProjects), link)
+				symlink(t, writeTestFile(t, home, ".claude.json", withProjects), link)
 				return link
 			},
 			wantCode:   exitOK,
@@ -1191,16 +1167,31 @@ func TestScanConfigIsUntrusted(t *testing.T) {
 		{
 			name: "codex file outside home is a project file",
 			setup: func(t *testing.T, _, repo, _ string) string {
-				return scanWriteFile(t, repo, filepath.Join(".codex", "config.toml"), "[mcp_servers.codex-srv]\ncommand = \"npx\"\n")
+				return writeTestFile(t, repo, filepath.Join(".codex", "config.toml"), "[mcp_servers.codex-srv]\ncommand = \"npx\"\n")
 			},
 			wantCode:   exitOK,
 			wantStdout: []string{"codex-srv", "codex", "project:"},
 			noStdout:   []string{"global"},
 		},
 		{
+			// A repository Codex file must not start a server in a directory
+			// outside the project. The server is dropped and the scan fails.
+			name: "codex working directory outside the project fails the scan",
+			setup: func(t *testing.T, _, repo, _ string) string {
+				return writeTestFile(t, repo, filepath.Join(".codex", "config.toml"),
+					"[mcp_servers.out-srv]\ncommand = \"npx\"\ncwd = \"/\"\n\n[mcp_servers.ok-srv]\ncommand = \"npx\"\n")
+			},
+			wantCode:   exitError,
+			wantStdout: []string{"ok-srv", "project:"},
+			noStdout:   []string{"out-srv"},
+			wantStderr: []string{
+				"mcpmoat scan: ", "config.toml", "server out-srv: working directory is outside the project", configErrorHint,
+			},
+		},
+		{
 			name: "codex symlink out of the directory is refused",
 			setup: func(t *testing.T, _, repo, outside string) string {
-				target := scanWriteFile(t, outside, "real.toml",
+				target := writeTestFile(t, outside, "real.toml",
 					"[mcp_servers.outside]\ncommand = \"run\"\nargs = [\""+discovertest.CanaryArgs+"\"]\n")
 				link := filepath.Join(repo, ".codex", "config.toml")
 				symlink(t, target, link)
@@ -1231,7 +1222,7 @@ func TestScanConfigIsUntrusted(t *testing.T) {
 	t.Run("no home directory reads the file as untrusted", func(t *testing.T) {
 		t.Parallel()
 
-		path := scanWriteFile(t, t.TempDir(), ".claude.json", withProjects)
+		path := writeTestFile(t, t.TempDir(), ".claude.json", withProjects)
 		c, stdout, stderr := scanConfigCLI(t, "")
 		c.homeDir = func() (string, error) { return "", errors.New("no home") }
 

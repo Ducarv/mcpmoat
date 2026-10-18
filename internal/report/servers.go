@@ -6,6 +6,7 @@ import (
 	"strconv"
 	"strings"
 	"text/tabwriter"
+	"unicode/utf8"
 
 	"github.com/Ducarv/mcpmoat/internal/discover"
 	"github.com/Ducarv/mcpmoat/internal/termsafe"
@@ -62,19 +63,21 @@ const untrustedMarker = " (untrusted)"
 //	              formatCommand), the redacted URL for http and sse
 //
 // Every cell goes through [termsafe.Quote]. Config files are untrusted, so a
-// cell can hold terminal escape sequences, bidi characters or invalid UTF-8. A
-// cell also must not hold a tab or a newline, because tabwriter uses the tab
-// as the column separator and the newline as the row separator.
+// cell can hold terminal escape sequences, bidi characters or invalid UTF-8.
+// A cell also must not hold a tab or a newline, because tabwriter uses the
+// tab as the column separator and the newline as the row separator.
 // termsafe.Quote quotes such a cell, so the table keeps its shape.
 //
-// The padded columns are cut with [termsafe.QuoteCut], and a cut cell ends
-// with [termsafe.CutMarker]. NAME, CLIENT and TRANSPORT are cut at 80 runes.
-// SCOPE and SOURCE hold paths and are cut at 256 runes, and an invalid UTF-8
-// byte counts as one rune. The cut is made on the raw text, before escaping,
-// so an escaped cell can be longer than the cap. These limits stop padding
-// amplification: see maxShortCellRunes and maxPathRunes. COMMAND/URL is the last column.
-// tabwriter does not pad it, so it cannot amplify, and it is never cut. So no
-// argument is hidden from a security review.
+// The padded columns (all but COMMAND/URL) go through cell. It cuts them with
+// [termsafe.QuoteCut], and a cut cell ends with [termsafe.CutMarker]. NAME,
+// CLIENT and TRANSPORT are cut at 80 runes. SCOPE and SOURCE hold paths and
+// are cut at 256 runes, and an invalid UTF-8 byte counts as one rune. The cut
+// is made on the raw text, before escaping, so an escaped cell can be longer
+// than the cap. These limits stop padding amplification: see
+// maxShortCellRunes and maxPathRunes. A padded cell that holds an ASCII space
+// is also quoted, so a space cannot look like a column gap. COMMAND/URL is
+// the last column. tabwriter does not pad it, so it cannot amplify, and it is
+// never cut. So no argument is hidden from a security review.
 //
 // WriteServers never prints a value as written from Args, Env, Headers or
 // URL. It never reads Env or Headers values and never calls Reveal. The
@@ -126,9 +129,29 @@ func WriteServers(w io.Writer, servers []discover.Server) error {
 }
 
 // cell returns the text of one padded column cell: s cut at limit runes and
-// escaped (see termsafe.QuoteCut).
+// escaped with [termsafe.QuoteCut].
+//
+// cell adds one report rule on top of termsafe: a cell that holds an ASCII
+// space is quoted too, with strconv.Quote. tabwriter pads with spaces, so a
+// name such as "a   b" would otherwise look like two cells. termsafe.Quote
+// keeps such a text as it is, because a space is safe in a message line.
+// Like termsafe, cell cuts before it quotes, and CutMarker comes after the
+// closing quote. CLIENT and TRANSPORT hold fixed values without a space, so
+// the rule changes only NAME, SCOPE and SOURCE.
 func cell(s string, limit int) string {
-	return termsafe.QuoteCut(s, limit)
+	c := termsafe.QuoteCut(s, limit)
+	if strings.HasPrefix(c, `"`) || !strings.Contains(c, " ") {
+		return c // already quoted, or no space
+	}
+	// termsafe.QuoteCut did not quote, so c is the first limit runes of s as
+	// they are, plus CutMarker when s had more runes. Such a text is valid
+	// UTF-8 with no rune that termsafe escapes, so strconv.Quote escapes only
+	// the double quotes and the backslashes in it. utf8.RuneCountInString
+	// counts an invalid byte as one rune, the same as termsafe.QuoteCut.
+	if utf8.RuneCountInString(s) > limit {
+		return strconv.Quote(strings.TrimSuffix(c, termsafe.CutMarker)) + termsafe.CutMarker
+	}
+	return strconv.Quote(c)
 }
 
 // scopeCell returns the SCOPE cell for s. For an untrusted server,
@@ -167,9 +190,9 @@ func commandCell(s discover.Server) string {
 //
 // Each redacted part is escaped with [termsafe.Quote]. A part that is empty
 // or holds a space is also wrapped in double quotes (strconv.Quote), so the
-// reader can still see where one argument ends and the next one starts. Parts
-// are joined with one space. Nothing is cut: the COMMAND/URL cell is the last column,
-// which is never cut.
+// reader can still see where one argument ends and the next one starts.
+// Parts are joined with one space. Nothing is cut: the COMMAND/URL cell is
+// the last column, which is never cut.
 func formatCommand(command string, args discover.Args) string {
 	// Values gives the args as written. They go straight into RedactArgs and
 	// nowhere else, so only the redacted form reaches the cell. Args.String

@@ -75,19 +75,8 @@
 // ReadConfig then reads the global path as a global file, with the reader
 // that Discover uses for it. See [ReadConfig] for what "names" means.
 //
-// For any other file, ReadConfig detects the format with [DetectClient]:
-//
-//   - A file name that ends in .toml is Codex.
-//   - A JSON file with a "projects" key is Claude Code.
-//   - A JSON file with only an "mcpServers" key is Cursor when the file is in a
-//     .cursor directory, and Claude Code otherwise.
-//   - A JSON object with neither key, and a .json file with only JSON white
-//     space, are chosen by the file name: .claude.json and .mcp.json are
-//     Claude Code, and mcp.json in a .cursor directory is Cursor. Any other
-//     name is an unknown format.
-//   - Anything else is an unknown format.
-//
-// Detection has known limits: see [DetectClient].
+// For any other file, ReadConfig detects the format with [DetectClient],
+// which gives the rules and their known limits.
 //
 // Then ReadConfig parses a JSON file as [ReadClaudeCode] or [ReadCursor] do
 // with ScopeProject and an empty projectPath, and a Codex file with the
@@ -104,9 +93,9 @@
 // Each reader returns a [Result]. The servers of one file come in a fixed
 // order: by ProjectPath, then by Name. The errors of one file come in a fixed
 // order too: errors about the whole file (no server name) first, then by
-// server name. Errors with the same server name keep the order in which the reader
-// found them: in ~/.claude.json, the top level first, then the projects
-// sorted by path.
+// server name. Errors with the same server name keep the order in which the
+// reader found them: in ~/.claude.json, the top level first, then the
+// projects sorted by path.
 //
 // A problem in one file, or in one server entry, gives a [FileError]. It never
 // hides the other servers. A FileError names the file, the position when it is
@@ -158,9 +147,9 @@
 // All readers:
 //
 //   - A stdio server keeps command, args, env and, for Codex, cwd (as
-//     [Server.Dir], which tells how to treat a relative cwd). A remote server keeps url and headers. The JSON readers
-//     drop a field that does not belong to the transport; the Codex reader
-//     refuses it (see below).
+//     [Server.Dir], which tells how to treat a relative cwd). A remote
+//     server keeps url and headers. The JSON readers drop a field that does
+//     not belong to the transport; the Codex reader refuses it (see below).
 //   - A file that is not a regular file (for example a directory or a pipe) is
 //     rejected. The readers open the file first and then check its type, so
 //     a pipe cannot block the read.
@@ -256,6 +245,14 @@
 // errors of its read) and, through its internal Codex entry, on the servers
 // and errors of a Codex file. Its JSON files are parsed with ScopeProject,
 // so the JSON rule marks them, the "projects section not read" error too.
+//
+// An untrusted file must not choose a working directory outside its project,
+// because inspect would start the server there. So ReadConfig drops a server
+// of an untrusted Codex file whose cwd is outside the ProjectPath of the file
+// (an absolute path that is not the ProjectPath or below it, or a relative
+// path that is not local, such as "../x"). It reports the server with the
+// reason "working directory is outside the project". See [ReadConfig] for
+// the rules and their limits.
 //
 // The user's own files are trusted: ~/.claude.json (also the servers under
 // its projects.<path> keys, which Claude Code writes when the user adds a

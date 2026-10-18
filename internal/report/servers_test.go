@@ -424,7 +424,7 @@ func TestWriteServersCellCap(t *testing.T) {
 				want: strconv.Quote(strings.Repeat("a", limit-1)+"\x1b") + marker,
 			},
 			{
-				// An invalid byte counts as one rune (termsafe.CutRunes).
+				// An invalid byte counts as one rune (termsafe.QuoteCut).
 				name: "invalid UTF-8 is cut at the cap and quoted",
 				in:   strings.Repeat("\xff", 1000),
 				want: strconv.Quote(strings.Repeat("\xff", limit)) + marker,
@@ -602,5 +602,119 @@ func TestWriteServersUntrustedScope(t *testing.T) {
 				t.Errorf("output marks a trusted server as untrusted:\n%q", out)
 			}
 		})
+	}
+}
+
+// TestWriteServersSpaceIsQuoted checks the report rule of cell: a padded cell
+// that holds an ASCII space is quoted, so a space in a name or a path cannot
+// look like the gap between two columns. The cut comes first, and the marker
+// comes after the closing quote.
+func TestWriteServersSpaceIsQuoted(t *testing.T) {
+	t.Parallel()
+
+	const marker = termsafe.CutMarker
+	long := strings.Repeat("a b ", 100)
+	tests := []struct {
+		name string
+		set  func(s *discover.Server)
+		want string // the cell, followed by the column gap
+	}{
+		{name: "name without a space is kept", set: func(s *discover.Server) { s.Name = "my-srv" }, want: "my-srv   "},
+		{name: "name with a space", set: func(s *discover.Server) { s.Name = "a b" }, want: `"a b"   `},
+		{name: "name with three spaces", set: func(s *discover.Server) { s.Name = "a   b" }, want: `"a   b"   `},
+		{name: "name that ends with a space", set: func(s *discover.Server) { s.Name = "a " }, want: `"a "   `},
+		{name: "name with a space and a backslash", set: func(s *discover.Server) { s.Name = `a b\c` }, want: `"a b\\c"   `},
+		{name: "name with a space and a quote", set: func(s *discover.Server) { s.Name = `a "b"` }, want: `"a \"b\""   `},
+		{name: "name with a space and ESC", set: func(s *discover.Server) { s.Name = "a b\x1b" }, want: `"a b\x1b"   `},
+		{name: "name that starts with a quote", set: func(s *discover.Server) { s.Name = `"x"` }, want: `"\"x\""   `},
+		{
+			name: "long name with spaces is cut, then quoted",
+			set:  func(s *discover.Server) { s.Name = long },
+			want: strconv.Quote(long[:maxShortCellRunes]) + marker + "   ",
+		},
+		{
+			// The part after the cut is not shown, so its space does not make
+			// the cell quoted.
+			name: "space after the cut",
+			set:  func(s *discover.Server) { s.Name = strings.Repeat("n", maxShortCellRunes) + " x" },
+			want: strings.Repeat("n", maxShortCellRunes) + marker + "   ",
+		},
+		{
+			name: "long name that ends with the marker text",
+			set:  func(s *discover.Server) { s.Name = "a b..." + strings.Repeat("c", maxShortCellRunes) },
+			want: strconv.Quote("a b..."+strings.Repeat("c", maxShortCellRunes-len("a b..."))) + marker + "   ",
+		},
+		{
+			name: "project path with a space",
+			set: func(s *discover.Server) {
+				s.Scope, s.ProjectPath, s.Untrusted = discover.ScopeProject, "/my dir", true
+			},
+			want: `"project:/my dir" (untrusted)   `,
+		},
+		{
+			name: "source path with a space",
+			set:  func(s *discover.Server) { s.Source = `C:\My Files\.mcp.json` },
+			want: `"C:\\My Files\\.mcp.json"   `,
+		},
+		{
+			// termsafe.Quote keeps a Windows path without a space as it is.
+			name: "source path without a space",
+			set:  func(s *discover.Server) { s.Source = `C:\work\.mcp.json` },
+			want: `C:\work\.mcp.json   `,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			s := oneServer("srv")
+			tt.set(&s)
+
+			var sb strings.Builder
+			if err := report.WriteServers(&sb, []discover.Server{s}); err != nil {
+				t.Fatalf("WriteServers() error = %v, want nil", err)
+			}
+			out := sb.String()
+			if !strings.Contains(out, tt.want) {
+				t.Errorf("output does not hold the cell %.120q:\n%.400q", tt.want, out)
+			}
+			if strings.ContainsRune(out, 0x1b) {
+				t.Errorf("output holds a raw ESC: %q", out)
+			}
+		})
+	}
+}
+
+// TestWriteServersCellsMapBack checks that every padded cell maps back to its
+// text in one way: a quoted cell unquotes to the text, and a cell that is not
+// quoted is the text itself and has no space.
+func TestWriteServersCellsMapBack(t *testing.T) {
+	t.Parallel()
+
+	for _, name := range []string{
+		"plain", "a b", "a   b", `"a b"`, `"plain"`, `a"b`, `a\b`, `a b\`, "a\tb", "a\x1bb", "\u3164", "caf\u00e9 x", "",
+	} {
+		s := oneServer(name)
+		var sb strings.Builder
+		if err := report.WriteServers(&sb, []discover.Server{s}); err != nil {
+			t.Fatalf("WriteServers() error = %v, want nil", err)
+		}
+		// The NAME cell is the start of the row, before the column gap and
+		// the CLIENT cell.
+		row := strings.Split(sb.String(), "\n")[1]
+		got, _, ok := strings.Cut(row, "   "+string(discover.ClientCodex))
+		if !ok {
+			t.Fatalf("row %q has no CLIENT cell", row)
+		}
+		got = strings.TrimRight(got, " ")
+		if strings.HasPrefix(got, `"`) {
+			back, err := strconv.Unquote(got)
+			if err != nil || back != name {
+				t.Errorf("name %q: cell %q unquotes to %q, %v, want the name", name, got, back, err)
+			}
+			continue
+		}
+		if got != name || strings.Contains(got, " ") {
+			t.Errorf("name %q: cell %q is not quoted, want the name with no space", name, got)
+		}
 	}
 }
