@@ -1,0 +1,488 @@
+package inspect
+
+import (
+	"context"
+	"crypto/tls"
+	"crypto/x509"
+	"errors"
+	"fmt"
+	"net"
+	"net/http"
+	"net/url"
+	"slices"
+	"strconv"
+	"strings"
+
+	"github.com/Ducarv/mcpmoat/internal/discover"
+)
+
+// ConnectKind tells what kind of failure a ConnectError describes.
+//
+// The string values are a stable contract: JSON output may use them.
+type ConnectKind string
+
+// Kinds of connect failure.
+const (
+	// KindTLS is a TLS failure: untrusted, expired or wrong certificate,
+	// or a failed handshake.
+	KindTLS ConnectKind = "tls"
+	// KindTimeout is a timeout or a canceled context.
+	KindTimeout ConnectKind = "timeout"
+	// KindNetwork is a network failure, such as a refused connection or a
+	// DNS error.
+	KindNetwork ConnectKind = "network"
+	// KindHTTP is a non-2xx HTTP status. ConnectError.Status holds it.
+	KindHTTP ConnectKind = "http"
+	// KindRedirect is a redirect that mcpmoat does not follow: to another
+	// origin, or too many.
+	KindRedirect ConnectKind = "redirect"
+	// KindOrigin is a request to an origin other than the configured one.
+	KindOrigin ConnectKind = "origin"
+	// KindTooLarge is a response that is larger than the size cap.
+	KindTooLarge ConnectKind = "too-large"
+	// KindConfig is a server entry that mcpmoat cannot use, such as a URL
+	// that does not parse or a reserved header name.
+	KindConfig ConnectKind = "config"
+	// KindProtocol is any other failure, such as an invalid MCP answer.
+	KindProtocol ConnectKind = "protocol"
+)
+
+// Sentinel errors. The HTTP round tripper and the redirect check return them,
+// and classify recognises them with errors.Is. Their texts hold no URL.
+var (
+	// errOtherOrigin means a request went to an origin other than the
+	// configured one.
+	errOtherOrigin = errors.New("request to another origin refused")
+	// errCrossOriginRedirect means the server redirected to another origin.
+	errCrossOriginRedirect = errors.New("redirect to another origin refused")
+	// errTooManyRedirects means the server redirected too many times.
+	errTooManyRedirects = errors.New("too many redirects")
+	// errBodyTooLarge means a response body is larger than the size cap.
+	errBodyTooLarge = errors.New("response body too large")
+)
+
+// maxReasonRunes is the maximum length of scrubbed error text, in runes.
+const maxReasonRunes = 200
+
+// ConnectError describes why mcpmoat could not connect to a server, or why
+// the server did not answer as expected.
+//
+// Error never contains the raw URL or a header value: classify and scrub
+// remove them. Reason can contain text that the server controls (a status
+// text, a JSON-RPC message) and text from the config (Server, header names).
+// Callers must escape the result of Error with internal/termsafe before they
+// print it to a terminal.
+//
+// Unwrap gives the cause, so errors.Is can find context.DeadlineExceeded
+// and similar errors. The cause is never a *url.Error (its text holds the
+// raw URL), and classify replaces any cause whose text still holds the raw
+// URL or a header value. Even so, callers must print Error and not the
+// unwrapped cause.
+type ConnectError struct {
+	// Kind tells what kind of failure this is.
+	Kind ConnectKind
+	// Server is the server name from the config.
+	Server string
+	// Status is the HTTP status code. It is set only for KindHTTP.
+	Status int
+	// Reason is a short text that tells what went wrong.
+	Reason string
+	// URL is the redacted server URL (discover.URL.String). It can be empty.
+	URL string
+
+	// err is the cause. See Unwrap.
+	err error
+}
+
+// Error returns "<Server>: <Reason> (<URL>)". The part in parentheses is
+// left out when URL is empty.
+func (e *ConnectError) Error() string {
+	if e.URL == "" {
+		return e.Server + ": " + e.Reason
+	}
+	return e.Server + ": " + e.Reason + " (" + e.URL + ")"
+}
+
+// Unwrap returns the cause, or nil. See the ConnectError doc for what the
+// cause can and cannot hold.
+func (e *ConnectError) Unwrap() error {
+	return e.err
+}
+
+// configError returns a KindConfig error for srv. reason must be fixed text:
+// it must not hold the URL or a header value. Examples: "URL does not
+// parse", "unsupported URL scheme", "reserved header name: X-Key".
+func configError(srv discover.Server, reason string) *ConnectError {
+	return &ConnectError{
+		Kind:   KindConfig,
+		Server: srv.Name,
+		Reason: reason,
+		URL:    srv.URL.String(),
+	}
+}
+
+// transportEvents reports what the HTTP layer saw during one inspection. The
+// SDK can flatten error chains (it formats some errors with %v), so classify
+// asks the transport directly instead of relying only on errors.Is.
+type transportEvents interface {
+	// lastStatus is the HTTP status of the most recent request: the code of
+	// a non-2xx response that was not a followed redirect. It is 0 after a
+	// 2xx response, after a request that got no response, or if there was
+	// no request yet.
+	lastStatus() int
+	// blockedErr is the first error that the HTTP layer raised on purpose. It
+	// wraps errOtherOrigin, errCrossOriginRedirect, errTooManyRedirects or
+	// errBodyTooLarge. It is nil if there was none.
+	blockedErr() error
+}
+
+// classify turns err, from net/http or the MCP SDK, into a ConnectError that
+// is safe to print.
+//
+// ev tells what the HTTP layer saw: the last non-2xx status and the first
+// error that it raised on purpose. ev can be nil. If the HTTP layer blocked a
+// request on purpose, that error decides the kind, even when the SDK
+// flattened err into text. headerValues are the header values that were sent;
+// classify removes them from any error text.
+func classify(err error, srv discover.Server, ev transportEvents, headerValues []string) *ConnectError {
+	rawURL := srv.URL.Reveal()
+	redacted := srv.URL.String()
+
+	// *url.Error prints the raw URL in its Error text. Use the error inside it.
+	cause := stripURLError(err)
+
+	status := 0
+	if ev != nil {
+		status = ev.lastStatus()
+		// An error that the HTTP layer raised on purpose is more reliable
+		// than err, which the SDK may have flattened to text.
+		if blocked := stripURLError(ev.blockedErr()); isBlockedErr(blocked) {
+			cause = blocked
+		}
+	}
+
+	ce := &ConnectError{
+		Server: srv.Name,
+		URL:    redacted,
+	}
+	ce.Kind, ce.Reason, ce.Status = classifyCause(cause, srv, status, func(text string) string {
+		return scrub(text, rawURL, redacted, headerValues)
+	})
+	ce.err = safeCause(cause, rawURL, redacted, headerValues)
+	return ce
+}
+
+// isBlockedErr reports whether err wraps one of the sentinel errors that the
+// HTTP layer raises on purpose. A nil err gives false.
+func isBlockedErr(err error) bool {
+	return errors.Is(err, errOtherOrigin) ||
+		errors.Is(err, errCrossOriginRedirect) ||
+		errors.Is(err, errTooManyRedirects) ||
+		errors.Is(err, errBodyTooLarge)
+}
+
+// classifyCause finds the kind, the reason and the HTTP status of cause. It
+// is the decision table of classify. scrubText removes secrets from error
+// text.
+func classifyCause(cause error, srv discover.Server, status int, scrubText func(string) string) (ConnectKind, string, int) {
+	switch {
+	case errors.Is(cause, errOtherOrigin):
+		return KindOrigin, "server tried to send a request to another origin; request refused", 0
+	case errors.Is(cause, errCrossOriginRedirect):
+		return KindRedirect, "redirects to another origin are not followed; use the final URL in the config", 0
+	case errors.Is(cause, errTooManyRedirects):
+		return KindRedirect, "too many redirects", 0
+	case errors.Is(cause, errBodyTooLarge):
+		return KindTooLarge, "response too large", 0
+	case errors.Is(cause, context.DeadlineExceeded):
+		return KindTimeout, "timed out", 0
+	case errors.Is(cause, context.Canceled):
+		return KindTimeout, "canceled", 0
+	}
+
+	if reason, ok := tlsReason(cause); ok {
+		return KindTLS, reason, 0
+	}
+
+	if status != 0 {
+		return KindHTTP, httpReason(srv, status), status
+	}
+
+	var netErr net.Error
+	if errors.As(cause, &netErr) {
+		// Some timeouts do not wrap context.DeadlineExceeded, for example the
+		// http.Transport TLS handshake timeout. They still are timeouts.
+		if netErr.Timeout() {
+			return KindTimeout, "timed out", 0
+		}
+		return KindNetwork, "network error: " + scrubText(cause.Error()), 0
+	}
+	return KindProtocol, scrubText(cause.Error()), 0
+}
+
+// tlsReason returns the reason text for a TLS error in err's chain, and
+// whether there was one. It never suggests to skip certificate verification.
+//
+// errors.As needs a pointer to a variable of the type to look for. For an
+// error type whose Error method has a value receiver, such as
+// x509.UnknownAuthorityError, the type in the chain is the value type, so
+// the target is a pointer to a value: &x509.UnknownAuthorityError{}. For an
+// error type whose Error method has a pointer receiver, such as
+// *tls.CertificateVerificationError, the type in the chain is the pointer
+// type, so the target is a pointer to a pointer variable.
+//
+// The specific x509 cases come before the generic
+// *tls.CertificateVerificationError, because that error wraps them.
+func tlsReason(err error) (string, bool) {
+	var unknownAuth x509.UnknownAuthorityError // value type
+	if errors.As(err, &unknownAuth) {
+		return "TLS certificate not trusted: signed by an unknown authority", true
+	}
+
+	var hostname x509.HostnameError // value type
+	if errors.As(err, &hostname) {
+		return "TLS certificate is not valid for this host", true
+	}
+
+	var invalid x509.CertificateInvalidError // value type
+	if errors.As(err, &invalid) {
+		if invalid.Reason == x509.Expired {
+			return "TLS certificate expired or not yet valid", true
+		}
+		return "TLS certificate invalid", true
+	}
+
+	var verify *tls.CertificateVerificationError // pointer type
+	if errors.As(err, &verify) {
+		return "TLS certificate verification failed", true
+	}
+
+	var record tls.RecordHeaderError // value type
+	if errors.As(err, &record) {
+		return "TLS handshake failed: server did not answer with TLS", true
+	}
+
+	if errors.Is(err, http.ErrSchemeMismatch) {
+		return "TLS handshake failed: server speaks plain HTTP; use an http:// URL", true
+	}
+	return "", false
+}
+
+// httpReason returns the reason text for a non-2xx HTTP status. The status
+// text comes from the net/http table, not from the server.
+func httpReason(srv discover.Server, status int) string {
+	switch status {
+	case http.StatusUnauthorized, http.StatusForbidden:
+		keys := "none"
+		if names := srv.Headers.Keys(); len(names) > 0 {
+			keys = strings.Join(names, ", ")
+		}
+		return fmt.Sprintf("server needs authentication (HTTP %d); headers sent: %s", status, keys)
+	case http.StatusBadRequest, http.StatusNotFound, http.StatusMethodNotAllowed:
+		if srv.Transport == discover.TransportHTTP {
+			return fmt.Sprintf("HTTP %d; the server may use the legacy SSE transport; set type = sse", status)
+		}
+	}
+	if text := http.StatusText(status); text != "" {
+		return fmt.Sprintf("HTTP %d %s", status, text)
+	}
+	return fmt.Sprintf("HTTP %d", status)
+}
+
+// stripURLError returns the error inside the first *url.Error in err's chain,
+// or err if there is none. *url.Error.Error prints the raw URL, so its text
+// must not be used. It repeats, in case url.Errors are nested.
+func stripURLError(err error) error {
+	for {
+		var ue *url.Error
+		if !errors.As(err, &ue) || ue.Err == nil {
+			return err
+		}
+		err = ue.Err
+	}
+}
+
+// safeCause returns cause if its text holds no secret, and a plain error with
+// the scrubbed text otherwise. The plain error does not keep the chain, which
+// is the price for text that is safe to print. A nil cause gives nil.
+func safeCause(cause error, rawURL, redactedURL string, headerValues []string) error {
+	if cause == nil {
+		return nil
+	}
+	text := cause.Error()
+	replaced := replaceSecrets(text, rawURL, redactedURL, headerValues)
+	if replaced == text {
+		return cause
+	}
+	return errors.New(truncate(replaced))
+}
+
+// scrub removes secrets from text and shortens it, so that it is safe to
+// put in a ConnectError. It replaces:
+//
+//   - rawURL, the URL as written in the config, with redactedURL;
+//   - the raw URL without its query and fragment, with the redacted URL
+//     without its query (net/http sometimes prints this variant);
+//   - the query of rawURL, after "?", and the user name and password in the
+//     authority (in plain and in URL-escaped form), with discover.Mask;
+//   - every non-empty header value with discover.Mask, longest value first.
+//
+// For each secret it also replaces the form that %q prints (backslashes and
+// quotes escaped). It then cuts the result to 200 runes and adds "…" if it
+// cut anything. The result can still hold text that the server controls;
+// callers must escape it with internal/termsafe before they print it.
+func scrub(text, rawURL, redactedURL string, headerValues []string) string {
+	return truncate(replaceSecrets(text, rawURL, redactedURL, headerValues))
+}
+
+// replaceSecrets does the replacements that scrub describes, without the
+// cut.
+func replaceSecrets(text, rawURL, redactedURL string, headerValues []string) string {
+	if rawURL != "" {
+		text = replaceForms(text, rawURL, redactedURL)
+		text = replaceURLParts(text, rawURL, redactedURL)
+	}
+
+	// Longest first: a value that is a substring of another value must not
+	// leave pieces of the longer one behind. Header values are replaced
+	// everywhere, even the short ones: a leak is worse than a garbled word.
+	values := slices.DeleteFunc(slices.Clone(headerValues), func(v string) bool { return v == "" })
+	slices.SortFunc(values, func(a, b string) int { return len(b) - len(a) })
+	for _, v := range values {
+		text = replaceForms(text, v, discover.Mask)
+	}
+	return text
+}
+
+// replaceForms replaces old with replacement in text. It does the same for
+// the form that %q prints for both, with the outer quotes removed. That form
+// differs when the text holds a backslash, a quote or a control character.
+func replaceForms(text, old, replacement string) string {
+	if old == "" {
+		return text
+	}
+	text = strings.ReplaceAll(text, old, replacement)
+	if quotedOld := quotedInner(old); quotedOld != old {
+		text = strings.ReplaceAll(text, quotedOld, quotedInner(replacement))
+	}
+	return text
+}
+
+// quotedInner returns s as strconv.Quote prints it, without the outer quotes.
+func quotedInner(s string) string {
+	q := strconv.Quote(s)
+	return q[1 : len(q)-1]
+}
+
+// replaceURLParts replaces the variants of rawURL that net/http can print:
+// the URL without its query, the query alone and the user info. An
+// unparsable rawURL is skipped.
+func replaceURLParts(text, rawURL, redactedURL string) string {
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return text
+	}
+
+	query := u.RawQuery
+	userinfo := u.User
+	u.RawQuery = ""
+	u.ForceQuery = false
+	u.Fragment = ""
+	u.RawFragment = ""
+	u.User = nil // ignore the user info here; it is replaced below
+	base := u.String()
+
+	// The redacted URL without its query. If RedactURL gave Mask for the
+	// whole URL, there is nothing safe to show but Mask.
+	redactedBase := redactedURL
+	if before, _, found := strings.Cut(redactedURL, "?"); found {
+		redactedBase = before
+	}
+
+	// Only "?"+query is replaced, not the bare query: a short query such as
+	// "a" must not garble other words.
+	if query != "" {
+		text = replaceForms(text, "?"+query, "?"+discover.Mask)
+	}
+	// The base has no user info, so it matches only when the text has no
+	// user info either.
+	if base != "" {
+		text = replaceForms(text, base, redactedBase)
+	}
+	return replaceUserinfo(text, rawURL, userinfo)
+}
+
+// replaceUserinfo replaces the user name and the password of a URL with
+// discover.Mask. They are matched only inside the authority, as
+// "//name@", "//name:" and ":password@", so that a short name does not
+// garble other words. Go prints a URL without its password as
+// "scheme://name@host" and escapes the name, so the escaped form is replaced
+// too, and so is the user info as written in rawURL.
+func replaceUserinfo(text, rawURL string, userinfo *url.Userinfo) string {
+	rawInfo := rawUserinfo(rawURL)
+	if userinfo == nil && rawInfo == "" {
+		return text
+	}
+
+	var names, passwords []string
+	if userinfo != nil {
+		name := userinfo.Username()
+		password, hasPassword := userinfo.Password()
+		names = append(names, name, url.User(name).String())
+		if hasPassword {
+			escaped := url.UserPassword(name, password).String()
+			_, escapedPassword, _ := strings.Cut(escaped, ":")
+			passwords = append(passwords, password, escapedPassword)
+		}
+	}
+	rawName, rawPassword, _ := strings.Cut(rawInfo, ":")
+	names = append(names, rawName)
+	passwords = append(passwords, rawPassword)
+
+	// The whole user info first: it holds the name and the password.
+	if rawInfo != "" {
+		text = replaceForms(text, "//"+rawInfo+"@", "//"+discover.Mask+"@")
+	}
+	for _, name := range names {
+		if name == "" {
+			continue
+		}
+		text = replaceForms(text, "//"+name+"@", "//"+discover.Mask+"@")
+		text = replaceForms(text, "//"+name+":", "//"+discover.Mask+":")
+	}
+	for _, password := range passwords {
+		if password == "" {
+			continue
+		}
+		text = replaceForms(text, ":"+password+"@", ":"+discover.Mask+"@")
+	}
+	return text
+}
+
+// rawUserinfo returns the user info of rawURL as written, without the "@", or
+// "" if there is none. It is the part of the authority before the last "@",
+// as net/url reads it.
+func rawUserinfo(rawURL string) string {
+	_, rest, found := strings.Cut(rawURL, "//")
+	if !found {
+		return ""
+	}
+	if end := strings.IndexAny(rest, "/?#"); end >= 0 {
+		rest = rest[:end]
+	}
+	at := strings.LastIndex(rest, "@")
+	if at < 0 {
+		return ""
+	}
+	return rest[:at]
+}
+
+// truncate cuts text to maxReasonRunes runes and adds "…" if it cut
+// anything. It counts runes, so it never cuts inside a UTF-8 sequence.
+func truncate(text string) string {
+	runes := []rune(text)
+	if len(runes) <= maxReasonRunes {
+		return text
+	}
+	return string(runes[:maxReasonRunes]) + "…"
+}

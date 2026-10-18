@@ -1,0 +1,1552 @@
+package inspect
+
+import (
+	"bytes"
+	"context"
+	"errors"
+	"fmt"
+	"io"
+	"net"
+	"net/http"
+	"net/http/httptest"
+	"reflect"
+	"slices"
+	"strings"
+	"sync"
+	"sync/atomic"
+	"testing"
+	"time"
+
+	"github.com/modelcontextprotocol/go-sdk/mcp"
+
+	"github.com/Ducarv/mcpmoat/internal/discover"
+)
+
+// These tests run Remote against real httptest servers. They prove the
+// acceptance criteria of issue #26: both transports work, the config headers
+// are sent, TLS errors are clear, and no secret reaches an error text.
+
+// Fake secrets. Every error test asserts that none of them shows up in an
+// error text.
+const (
+	rmQuerySecret  = "QSECRET42"
+	rmBearerSecret = "HSECRET99"
+	rmAPIKeySecret = "KSECRET77"
+	// rmFragmentSecret goes in the URL fragment. A fragment is never sent over
+	// HTTP, but a client that keeps it could print it in an error text.
+	rmFragmentSecret = "FSECRET55"
+)
+
+// rmServerName is the server name in the config of every test server.
+const rmServerName = "remote-fixture"
+
+// rmHeaders returns the config headers of the tests.
+func rmHeaders() map[string]string {
+	return map[string]string{
+		"Authorization": "Bearer " + rmBearerSecret,
+		"X-Api-Key":     rmAPIKeySecret,
+	}
+}
+
+// rmServer builds a discover.Server for a remote transport. rawURL gets a
+// query with a secret, so every error test also checks that the query stays
+// out of the error text.
+func rmServer(kind discover.Transport, rawURL string, headers map[string]string) discover.Server {
+	secrets := make(discover.SecretMap, len(headers))
+	for key, value := range headers {
+		secrets[key] = discover.NewSecret(value)
+	}
+	return discover.Server{
+		Name:      rmServerName,
+		Transport: kind,
+		URL:       discover.NewURL(rawURL),
+		Headers:   secrets,
+	}
+}
+
+// rmWithSecretQuery adds the secret query to rawURL.
+func rmWithSecretQuery(rawURL string) string {
+	return rawURL + "?token=" + rmQuerySecret
+}
+
+// rmWithSecretQueryAndFragment adds the secret query and the secret fragment
+// to rawURL.
+func rmWithSecretQueryAndFragment(rawURL string) string {
+	return rmWithSecretQuery(rawURL) + "#" + rmFragmentSecret
+}
+
+// rmKind returns the transport kind for the sse flag.
+func rmKind(sse bool) discover.Transport {
+	if sse {
+		return discover.TransportSSE
+	}
+	return discover.TransportHTTP
+}
+
+// rmAssertNoSecrets fails the test when the text of err, or of any error in
+// its Unwrap chain, holds a secret. It also checks the common print verbs.
+func rmAssertNoSecrets(t *testing.T, err error) {
+	t.Helper()
+	secrets := []string{rmQuerySecret, rmBearerSecret, rmAPIKeySecret, rmFragmentSecret, "pw@", "dXNlcjpwdw", "user:pw"}
+	for e := err; e != nil; e = errors.Unwrap(e) {
+		texts := []string{e.Error(), fmt.Sprintf("%v", e), fmt.Sprintf("%+v", e), fmt.Sprintf("%#v", e)}
+		for _, text := range texts {
+			for _, secret := range secrets {
+				if strings.Contains(text, secret) {
+					t.Errorf("error text holds secret %q: %q", secret, text)
+				}
+			}
+		}
+	}
+}
+
+// rmRequireConnectError checks that err is a *ConnectError of the wanted
+// kind for the test server, that its text names the server and holds no
+// secret, and returns it.
+func rmRequireConnectError(t *testing.T, err error, kind ConnectKind) *ConnectError {
+	t.Helper()
+	if err == nil {
+		t.Fatalf("Remote error = nil, want a %s error", kind)
+	}
+	var ce *ConnectError
+	if !errors.As(err, &ce) {
+		t.Fatalf("Remote error = %T (%v), want *ConnectError", err, err)
+	}
+	if ce.Kind != kind {
+		t.Fatalf("Kind = %q, want %q (error: %v)", ce.Kind, kind, err)
+	}
+	if ce.Server != rmServerName || !strings.Contains(err.Error(), rmServerName) {
+		t.Errorf("error %q does not name the server %q", err.Error(), rmServerName)
+	}
+	rmAssertNoSecrets(t, err)
+	return ce
+}
+
+// rmVictim is a second server. A request that reaches it is a leak of the
+// config headers to another origin. It counts the requests and the requests
+// that carry a config header.
+type rmVictim struct {
+	*httptest.Server
+	requests atomic.Int32
+	leaked   atomic.Int32
+}
+
+// startVictim starts a plain HTTP server that counts every request.
+func startVictim(t *testing.T) *rmVictim {
+	t.Helper()
+	v := &rmVictim{}
+	v.Server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		v.requests.Add(1)
+		if r.Header.Get("Authorization") != "" || r.Header.Get("X-Api-Key") != "" {
+			v.leaked.Add(1)
+		}
+		http.Error(w, "victim", http.StatusTeapot)
+	}))
+	t.Cleanup(v.Close)
+	return v
+}
+
+// assertUntouched fails the test when the victim got a request.
+func (v *rmVictim) assertUntouched(t *testing.T) {
+	t.Helper()
+	if n := v.requests.Load(); n != 0 {
+		t.Errorf("victim server got %d request(s), want 0", n)
+	}
+	if n := v.leaked.Load(); n != 0 {
+		t.Errorf("victim server got %d request(s) with config headers, want 0", n)
+	}
+}
+
+// rmCheckResult compares got with fixtureWant, the way the fixture comment
+// asks: the protocol version must be set, and the schemas are compared by
+// their property names.
+func rmCheckResult(t *testing.T, got Result) {
+	t.Helper()
+	if got.ProtocolVersion == "" {
+		t.Error("ProtocolVersion is empty, want the negotiated version")
+	}
+	got.ProtocolVersion = ""
+
+	wantProps := map[string][]string{"add": {"a", "b"}, "echo": {"text"}}
+	if len(got.Tools) != len(wantProps) {
+		t.Fatalf("got %d tools, want %d: %+v", len(got.Tools), len(wantProps), got.Tools)
+	}
+	tools := slices.Clone(got.Tools)
+	for i := range tools {
+		want, ok := wantProps[tools[i].Name]
+		if !ok {
+			t.Fatalf("unexpected tool %q", tools[i].Name)
+		}
+		if props := schemaProps(t, tools[i].InputSchema); !reflect.DeepEqual(props, want) {
+			t.Errorf("tool %q input properties = %v, want %v", tools[i].Name, props, want)
+		}
+		tools[i].InputSchema = nil
+		tools[i].OutputSchema = nil
+	}
+	got.Tools = tools
+
+	if want := fixtureWant(); !reflect.DeepEqual(got, want) {
+		t.Errorf("Result mismatch\n got: %+v\nwant: %+v", got, want)
+	}
+}
+
+// rmCheckHeaders asserts that every recorded request carries every config
+// header and the wanted User-Agent, and that the request methods are the
+// ones that the transport must use.
+func rmCheckHeaders(t *testing.T, reqs []recordedRequest, headers map[string]string, wantUA string, sse bool) {
+	t.Helper()
+	if len(reqs) == 0 {
+		t.Fatal("the fixture server saw no request")
+	}
+	methods := map[string]int{}
+	for _, req := range reqs {
+		methods[req.Method]++
+		for key, want := range headers {
+			if got := req.Header.Get(key); got != want {
+				t.Errorf("%s %s: header %s = %q, want %q", req.Method, req.Path, key, got, want)
+			}
+		}
+		if got := req.Header.Get("User-Agent"); got != wantUA {
+			t.Errorf("%s %s: User-Agent = %q, want %q", req.Method, req.Path, got, wantUA)
+		}
+	}
+	if methods[http.MethodPost] == 0 {
+		t.Errorf("methods seen = %v, want at least one POST", methods)
+	}
+	if sse && methods[http.MethodGet] == 0 {
+		t.Errorf("SSE methods seen = %v, want a GET for the event stream", methods)
+	}
+	if !sse && methods[http.MethodGet] != 0 {
+		// DisableStandaloneSSE is set, so listing opens no GET stream.
+		t.Errorf("streamable HTTP methods seen = %v, want no GET", methods)
+	}
+}
+
+func TestRemote(t *testing.T) {
+	t.Parallel()
+
+	const cfgUA = "cfg-agent/1"
+	tests := []struct {
+		name      string
+		sse       bool
+		tls       bool
+		optUA     string            // RemoteOptions.UserAgent
+		cfgUA     bool              // the config sets User-Agent
+		wantUA    string            // User-Agent that the server must see
+		extraHdrs map[string]string // headers added to the config
+	}{
+		{name: "http plain", wantUA: "mcpmoat"},
+		{name: "http tls", tls: true, wantUA: "mcpmoat"},
+		{name: "sse plain", sse: true, wantUA: "mcpmoat"},
+		{name: "sse tls", sse: true, tls: true, wantUA: "mcpmoat"},
+		{name: "http custom user agent", optUA: "scanner/9", wantUA: "scanner/9"},
+		{name: "sse custom user agent", sse: true, optUA: "scanner/9", wantUA: "scanner/9"},
+		{name: "http config user agent wins", optUA: "scanner/9", cfgUA: true, wantUA: cfgUA},
+		{name: "sse tls config user agent wins", sse: true, tls: true, cfgUA: true, wantUA: cfgUA},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			ts, rec := startFixture(t, fixtureOpts{TLS: tt.tls, SSE: tt.sse})
+
+			headers := rmHeaders()
+			if tt.cfgUA {
+				// A lower-case key must still win over the default.
+				headers["user-agent"] = cfgUA
+			}
+			opts := RemoteOptions{UserAgent: tt.optUA}
+			if tt.tls {
+				opts.Transport = ts.Client().Transport
+			}
+
+			srv := rmServer(rmKind(tt.sse), rmWithSecretQuery(fixtureURL(ts)), headers)
+			got, err := Remote(t.Context(), srv, opts)
+			if err != nil {
+				t.Fatalf("Remote() error = %v", err)
+			}
+			rmCheckResult(t, got)
+
+			// The query is part of the configured URL, so the server sees it.
+			delete(headers, "user-agent")
+			rmCheckHeaders(t, rec.requests(), headers, tt.wantUA, tt.sse)
+		})
+	}
+}
+
+// TestRemoteNoPlaceholderExpansion proves that ${VAR} in a header goes
+// to the server as written (issue #88 will add expansion on purpose). No
+// t.Setenv here: the variable is unset, and an expansion would give "Bearer ".
+func TestRemoteNoPlaceholderExpansion(t *testing.T) {
+	t.Parallel()
+	for _, sse := range []bool{false, true} {
+		t.Run(string(rmKind(sse)), func(t *testing.T) {
+			t.Parallel()
+			ts, rec := startFixture(t, fixtureOpts{SSE: sse})
+			headers := map[string]string{"Authorization": "Bearer ${TOKEN}", "X-Env": "$HOME"}
+			srv := rmServer(rmKind(sse), fixtureURL(ts), headers)
+			if _, err := Remote(t.Context(), srv, RemoteOptions{}); err != nil {
+				t.Fatalf("Remote() error = %v", err)
+			}
+			rmCheckHeaders(t, rec.requests(), headers, "mcpmoat", sse)
+		})
+	}
+}
+
+func TestRemoteTLSErrors(t *testing.T) {
+	t.Parallel()
+
+	okHandler := http.HandlerFunc(func(http.ResponseWriter, *http.Request) {})
+	tests := []struct {
+		name       string
+		start      func(t *testing.T) (rawURL string, opts RemoteOptions)
+		wantReason string
+	}{
+		{
+			name: "untrusted CA",
+			start: func(t *testing.T) (string, RemoteOptions) {
+				// The httptest certificate is not in the system roots, and the
+				// transport is the default one.
+				ts, _ := startFixture(t, fixtureOpts{TLS: true})
+				return fixtureURL(ts), RemoteOptions{}
+			},
+			wantReason: "unknown authority",
+		},
+		{
+			name: "hostname mismatch",
+			start: func(t *testing.T) (string, RemoteOptions) {
+				now := time.Now()
+				cert, pool := genCert(t, now.Add(-time.Hour), now.Add(time.Hour), "example.invalid")
+				ts := startTLSWithCert(t, okHandler, cert)
+				return ts.URL + "/mcp", RemoteOptions{Transport: clientTransport(pool)}
+			},
+			wantReason: "not valid for this host",
+		},
+		{
+			name: "expired certificate",
+			start: func(t *testing.T) (string, RemoteOptions) {
+				now := time.Now()
+				cert, pool := genCert(t, now.Add(-48*time.Hour), now.Add(-24*time.Hour), "127.0.0.1")
+				ts := startTLSWithCert(t, okHandler, cert)
+				return ts.URL + "/mcp", RemoteOptions{Transport: clientTransport(pool)}
+			},
+			wantReason: "expired",
+		},
+		{
+			name: "not yet valid certificate",
+			start: func(t *testing.T) (string, RemoteOptions) {
+				now := time.Now()
+				cert, pool := genCert(t, now.Add(24*time.Hour), now.Add(48*time.Hour), "127.0.0.1")
+				ts := startTLSWithCert(t, okHandler, cert)
+				return ts.URL + "/mcp", RemoteOptions{Transport: clientTransport(pool)}
+			},
+			wantReason: "expired or not yet valid",
+		},
+		{
+			name: "https URL to a plain HTTP server",
+			start: func(t *testing.T) (string, RemoteOptions) {
+				ts, _ := startFixture(t, fixtureOpts{})
+				return "https://" + strings.TrimPrefix(ts.URL, "http://") + "/mcp", RemoteOptions{}
+			},
+			wantReason: "plain HTTP",
+		},
+	}
+	for _, tt := range tests {
+		for _, sse := range []bool{false, true} {
+			t.Run(tt.name+"/"+string(rmKind(sse)), func(t *testing.T) {
+				t.Parallel()
+				rawURL, opts := tt.start(t)
+				srv := rmServer(rmKind(sse), rmWithSecretQuery(rawURL), rmHeaders())
+
+				_, err := Remote(t.Context(), srv, opts)
+				ce := rmRequireConnectError(t, err, KindTLS)
+				if !strings.Contains(ce.Reason, tt.wantReason) {
+					t.Errorf("Reason = %q, want it to contain %q", ce.Reason, tt.wantReason)
+				}
+				// The message must not tell the user to skip verification.
+				lower := strings.ToLower(err.Error())
+				for _, bad := range []string{"insecure", "skip verif", "skip-verif"} {
+					if strings.Contains(lower, bad) {
+						t.Errorf("error %q suggests to skip verification (%q)", err, bad)
+					}
+				}
+			})
+		}
+	}
+}
+
+// sseEndpointHandler returns an SSE handler that announces endpoint as the
+// POST endpoint and then holds the stream open until the request ends or
+// stop closes.
+func sseEndpointHandler(endpoint string, stop <-chan struct{}) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			http.Error(w, "GET only", http.StatusMethodNotAllowed)
+			return
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.Header().Set("Cache-Control", "no-cache")
+		_, _ = fmt.Fprintf(w, "event: endpoint\ndata: %s\n\n", endpoint)
+		if f, ok := w.(http.Flusher); ok {
+			f.Flush()
+		}
+		select {
+		case <-r.Context().Done():
+		case <-stop:
+		}
+	})
+}
+
+func TestRemoteHostileOrigin(t *testing.T) {
+	t.Parallel()
+
+	t.Run("sse endpoint on another origin", func(t *testing.T) {
+		t.Parallel()
+		victim := startVictim(t)
+
+		stop := make(chan struct{})
+		ts := httptest.NewServer(sseEndpointHandler(victim.URL+"/steal", stop))
+		t.Cleanup(ts.Close)
+		// Cleanups run last in, first out: stop closes before ts.Close waits
+		// for the handler.
+		t.Cleanup(func() { close(stop) })
+
+		srv := rmServer(discover.TransportSSE, rmWithSecretQuery(ts.URL+"/sse"), rmHeaders())
+		_, err := Remote(t.Context(), srv, RemoteOptions{})
+		victim.assertUntouched(t)
+		_ = rmRequireConnectError(t, err, KindOrigin)
+	})
+
+	t.Run("sse endpoint on another port of the same host", func(t *testing.T) {
+		t.Parallel()
+		victim := startVictim(t)
+
+		stop := make(chan struct{})
+		ts := httptest.NewServer(sseEndpointHandler(victim.URL, stop))
+		t.Cleanup(ts.Close)
+		t.Cleanup(func() { close(stop) })
+
+		srv := rmServer(discover.TransportSSE, ts.URL+"/sse", rmHeaders())
+		_, err := Remote(t.Context(), srv, RemoteOptions{})
+		victim.assertUntouched(t)
+		_ = rmRequireConnectError(t, err, KindOrigin)
+	})
+
+	t.Run("cross-origin redirect", func(t *testing.T) {
+		t.Parallel()
+		victim := startVictim(t)
+
+		// Every POST goes to the victim. The SDK may try more than one request
+		// (a discover call, then initialize), so a redirect on the first POST
+		// only would not stop the connection.
+		wrap := func(next http.Handler) http.Handler {
+			return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.Method == http.MethodPost {
+					http.Redirect(w, r, victim.URL+"/steal", http.StatusTemporaryRedirect)
+					return
+				}
+				next.ServeHTTP(w, r)
+			})
+		}
+		ts, _ := startFixture(t, fixtureOpts{Wrap: wrap})
+
+		srv := rmServer(discover.TransportHTTP, rmWithSecretQuery(fixtureURL(ts)), rmHeaders())
+		_, err := Remote(t.Context(), srv, RemoteOptions{})
+		victim.assertUntouched(t)
+		_ = rmRequireConnectError(t, err, KindRedirect)
+	})
+
+	t.Run("cross-origin redirect on the first POST only", func(t *testing.T) {
+		t.Parallel()
+		victim := startVictim(t)
+
+		var once sync.Once
+		wrap := func(next http.Handler) http.Handler {
+			return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				redirected := false
+				if r.Method == http.MethodPost {
+					once.Do(func() {
+						redirected = true
+						http.Redirect(w, r, victim.URL+"/steal", http.StatusTemporaryRedirect)
+					})
+				}
+				if !redirected {
+					next.ServeHTTP(w, r)
+				}
+			})
+		}
+		ts, _ := startFixture(t, fixtureOpts{Wrap: wrap})
+
+		srv := rmServer(discover.TransportHTTP, rmWithSecretQuery(fixtureURL(ts)), rmHeaders())
+		// The SDK can retry after the refused redirect, so the call may succeed
+		// or fail. Either way, nothing must reach the victim, and an error must
+		// be safe to print.
+		if _, err := Remote(t.Context(), srv, RemoteOptions{}); err != nil {
+			rmAssertNoSecrets(t, err)
+		}
+		victim.assertUntouched(t)
+	})
+
+	t.Run("cross-origin redirect on the SSE GET", func(t *testing.T) {
+		t.Parallel()
+		victim := startVictim(t)
+		ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			http.Redirect(w, r, victim.URL+"/steal", http.StatusFound)
+		}))
+		t.Cleanup(ts.Close)
+
+		srv := rmServer(discover.TransportSSE, rmWithSecretQuery(ts.URL+"/sse"), rmHeaders())
+		_, err := Remote(t.Context(), srv, RemoteOptions{})
+		victim.assertUntouched(t)
+		_ = rmRequireConnectError(t, err, KindRedirect)
+	})
+
+	t.Run("too many redirects", func(t *testing.T) {
+		t.Parallel()
+		ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			http.Redirect(w, r, r.URL.Path+"x", http.StatusTemporaryRedirect) //nolint:gosec // G710: test server redirect to a fixed local target
+		}))
+		t.Cleanup(ts.Close)
+
+		srv := rmServer(discover.TransportHTTP, rmWithSecretQuery(ts.URL+"/mcp"), rmHeaders())
+		_, err := Remote(t.Context(), srv, RemoteOptions{})
+		_ = rmRequireConnectError(t, err, KindRedirect)
+	})
+}
+
+func TestRemoteSameOriginRedirect(t *testing.T) {
+	t.Parallel()
+
+	// The wrapper sends each POST to /mcp on to /mcp2 with a 307, and serves
+	// /mcp2 with the fixture at /mcp. It records what arrives at /mcp2.
+	var (
+		mu       sync.Mutex
+		redirect []http.Header
+	)
+	wrap := func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			switch {
+			case r.URL.Path == "/mcp" && r.Method == http.MethodPost:
+				http.Redirect(w, r, "/mcp2", http.StatusTemporaryRedirect)
+			case r.URL.Path == "/mcp2":
+				mu.Lock()
+				redirect = append(redirect, r.Header.Clone())
+				mu.Unlock()
+				r2 := r.Clone(r.Context())
+				r2.URL.Path = "/mcp"
+				next.ServeHTTP(w, r2)
+			default:
+				next.ServeHTTP(w, r)
+			}
+		})
+	}
+	ts, _ := startFixture(t, fixtureOpts{Wrap: wrap})
+
+	headers := rmHeaders()
+	srv := rmServer(discover.TransportHTTP, fixtureURL(ts), headers)
+	got, err := Remote(t.Context(), srv, RemoteOptions{})
+	if err != nil {
+		t.Fatalf("Remote() error = %v", err)
+	}
+	rmCheckResult(t, got)
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(redirect) == 0 {
+		t.Fatal("no request reached /mcp2: the redirect was not followed")
+	}
+	for i, h := range redirect {
+		for key, want := range headers {
+			if got := h.Get(key); got != want {
+				t.Errorf("redirected request %d: header %s = %q, want %q", i, key, got, want)
+			}
+		}
+	}
+}
+
+func TestRemoteLimitsAndErrors(t *testing.T) {
+	t.Parallel()
+
+	t.Run("oversized body", func(t *testing.T) {
+		t.Parallel()
+		for _, sse := range []bool{false, true} {
+			t.Run(string(rmKind(sse)), func(t *testing.T) {
+				t.Parallel()
+				ts, _ := startFixture(t, fixtureOpts{SSE: sse})
+				srv := rmServer(rmKind(sse), rmWithSecretQuery(fixtureURL(ts)), rmHeaders())
+				_, err := Remote(t.Context(), srv, RemoteOptions{MaxResponseBytes: 64})
+				_ = rmRequireConnectError(t, err, KindTooLarge)
+			})
+		}
+	})
+
+	t.Run("hanging server", func(t *testing.T) {
+		t.Parallel()
+		for _, sse := range []bool{false, true} {
+			t.Run(string(rmKind(sse)), func(t *testing.T) {
+				t.Parallel()
+				stop := make(chan struct{})
+				ts := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+					select {
+					case <-r.Context().Done():
+					case <-stop:
+					}
+				}))
+				t.Cleanup(ts.Close)
+				t.Cleanup(func() { close(stop) })
+
+				ctx, cancel := context.WithTimeout(t.Context(), 200*time.Millisecond)
+				defer cancel()
+				srv := rmServer(rmKind(sse), rmWithSecretQuery(ts.URL+"/mcp"), rmHeaders())
+				_, err := Remote(ctx, srv, RemoteOptions{})
+				_ = rmRequireConnectError(t, err, KindTimeout)
+				if !errors.Is(err, context.DeadlineExceeded) {
+					t.Errorf("errors.Is(err, context.DeadlineExceeded) = false, error: %v", err)
+				}
+			})
+		}
+	})
+
+	t.Run("canceled context", func(t *testing.T) {
+		t.Parallel()
+		ts, _ := startFixture(t, fixtureOpts{})
+		ctx, cancel := context.WithCancel(t.Context())
+		cancel()
+		srv := rmServer(discover.TransportHTTP, rmWithSecretQuery(fixtureURL(ts)), rmHeaders())
+		_, err := Remote(ctx, srv, RemoteOptions{})
+		_ = rmRequireConnectError(t, err, KindTimeout)
+		if !errors.Is(err, context.Canceled) {
+			t.Errorf("errors.Is(err, context.Canceled) = false, error: %v", err)
+		}
+	})
+
+	t.Run("401 names header keys only", func(t *testing.T) {
+		t.Parallel()
+		for _, sse := range []bool{false, true} {
+			t.Run(string(rmKind(sse)), func(t *testing.T) {
+				t.Parallel()
+				wrap := func(http.Handler) http.Handler {
+					return http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+						// A hostile server can echo secrets. The error must not
+						// repeat the body.
+						http.Error(w, "bad token "+rmBearerSecret, http.StatusUnauthorized)
+					})
+				}
+				ts, _ := startFixture(t, fixtureOpts{SSE: sse, Wrap: wrap})
+				srv := rmServer(rmKind(sse), rmWithSecretQuery(fixtureURL(ts)), rmHeaders())
+				_, err := Remote(t.Context(), srv, RemoteOptions{})
+				ce := rmRequireConnectError(t, err, KindHTTP)
+				if ce.Status != http.StatusUnauthorized {
+					t.Errorf("Status = %d, want 401", ce.Status)
+				}
+				for _, key := range []string{"Authorization", "X-Api-Key"} {
+					if !strings.Contains(ce.Reason, key) {
+						t.Errorf("Reason = %q, want it to name the header %s", ce.Reason, key)
+					}
+				}
+			})
+		}
+	})
+
+	t.Run("403 names header keys only", func(t *testing.T) {
+		t.Parallel()
+		wrap := func(http.Handler) http.Handler {
+			return http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.WriteHeader(http.StatusForbidden)
+			})
+		}
+		ts, _ := startFixture(t, fixtureOpts{Wrap: wrap})
+		srv := rmServer(discover.TransportHTTP, rmWithSecretQuery(fixtureURL(ts)), rmHeaders())
+		_, err := Remote(t.Context(), srv, RemoteOptions{})
+		ce := rmRequireConnectError(t, err, KindHTTP)
+		if ce.Status != http.StatusForbidden {
+			t.Errorf("Status = %d, want 403", ce.Status)
+		}
+	})
+
+	t.Run("500 gives no SSE hint", func(t *testing.T) {
+		t.Parallel()
+		wrap := func(http.Handler) http.Handler {
+			return http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.WriteHeader(http.StatusInternalServerError)
+			})
+		}
+		ts, _ := startFixture(t, fixtureOpts{Wrap: wrap})
+		srv := rmServer(discover.TransportHTTP, rmWithSecretQuery(fixtureURL(ts)), rmHeaders())
+		_, err := Remote(t.Context(), srv, RemoteOptions{})
+		ce := rmRequireConnectError(t, err, KindHTTP)
+		if ce.Status != http.StatusInternalServerError {
+			t.Errorf("Status = %d, want 500", ce.Status)
+		}
+		if strings.Contains(ce.Reason, "type = sse") {
+			t.Errorf("Reason = %q, want no SSE hint for a 500", ce.Reason)
+		}
+	})
+
+	t.Run("wrong transport: http against an SSE server", func(t *testing.T) {
+		t.Parallel()
+		ts, _ := startFixture(t, fixtureOpts{SSE: true})
+		srv := rmServer(discover.TransportHTTP, rmWithSecretQuery(fixtureURL(ts)), rmHeaders())
+		_, err := Remote(t.Context(), srv, RemoteOptions{})
+		ce := rmRequireConnectError(t, err, KindHTTP)
+		if !strings.Contains(ce.Reason, "type = sse") {
+			t.Errorf("Reason = %q, want the SSE hint", ce.Reason)
+		}
+	})
+
+	t.Run("wrong transport: http against 405", func(t *testing.T) {
+		t.Parallel()
+		wrap := func(http.Handler) http.Handler {
+			return http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.WriteHeader(http.StatusMethodNotAllowed)
+			})
+		}
+		ts, _ := startFixture(t, fixtureOpts{Wrap: wrap})
+		srv := rmServer(discover.TransportHTTP, rmWithSecretQuery(fixtureURL(ts)), rmHeaders())
+		_, err := Remote(t.Context(), srv, RemoteOptions{})
+		ce := rmRequireConnectError(t, err, KindHTTP)
+		if !strings.Contains(ce.Reason, "type = sse") {
+			t.Errorf("Reason = %q, want the SSE hint", ce.Reason)
+		}
+	})
+
+	t.Run("wrong transport: sse against a streamable server", func(t *testing.T) {
+		t.Parallel()
+		ts, _ := startFixture(t, fixtureOpts{})
+		srv := rmServer(discover.TransportSSE, rmWithSecretQuery(fixtureURL(ts)), rmHeaders())
+		_, err := Remote(t.Context(), srv, RemoteOptions{})
+		if err == nil {
+			t.Fatal("Remote() error = nil, want an error")
+		}
+		var ce *ConnectError
+		if !errors.As(err, &ce) {
+			t.Fatalf("error = %T, want *ConnectError", err)
+		}
+		rmAssertNoSecrets(t, err)
+	})
+
+	t.Run("connection refused", func(t *testing.T) {
+		t.Parallel()
+		l, err := net.Listen("tcp", "127.0.0.1:0")
+		if err != nil {
+			t.Fatalf("listen: %v", err)
+		}
+		addr := l.Addr().String()
+		if err := l.Close(); err != nil {
+			t.Fatalf("close listener: %v", err)
+		}
+		for _, sse := range []bool{false, true} {
+			srv := rmServer(rmKind(sse), rmWithSecretQuery("http://"+addr+"/mcp"), rmHeaders())
+			_, err := Remote(t.Context(), srv, RemoteOptions{})
+			_ = rmRequireConnectError(t, err, KindNetwork)
+		}
+	})
+}
+
+// rmURLRecorder is a base transport that notes the URL of every request and
+// then sends the request over a plain transport.
+type rmURLRecorder struct {
+	base http.RoundTripper
+
+	mu   sync.Mutex
+	urls []string
+	frag []string
+}
+
+func (r *rmURLRecorder) RoundTrip(req *http.Request) (*http.Response, error) {
+	r.mu.Lock()
+	r.urls = append(r.urls, req.URL.String())
+	r.frag = append(r.frag, req.URL.Fragment+req.URL.RawFragment)
+	r.mu.Unlock()
+	return r.base.RoundTrip(req)
+}
+
+// TestRemoteFragment proves that Remote drops the URL fragment before it gives
+// the endpoint to the SDK, so that no fragment secret can reach an error text.
+func TestRemoteFragment(t *testing.T) {
+	t.Parallel()
+
+	t.Run("success: the fragment is not on any request", func(t *testing.T) {
+		t.Parallel()
+		for _, sse := range []bool{false, true} {
+			t.Run(string(rmKind(sse)), func(t *testing.T) {
+				t.Parallel()
+				ts, rec := startFixture(t, fixtureOpts{SSE: sse})
+				base := &http.Transport{}
+				t.Cleanup(base.CloseIdleConnections)
+				urls := &rmURLRecorder{base: base}
+
+				headers := rmHeaders()
+				srv := rmServer(rmKind(sse), rmWithSecretQueryAndFragment(fixtureURL(ts)), headers)
+				got, err := Remote(t.Context(), srv, RemoteOptions{Transport: urls})
+				if err != nil {
+					t.Fatalf("Remote() error = %v", err)
+				}
+				rmCheckResult(t, got)
+				rmCheckHeaders(t, rec.requests(), headers, "mcpmoat", sse)
+
+				urls.mu.Lock()
+				defer urls.mu.Unlock()
+				if len(urls.urls) == 0 {
+					t.Fatal("the transport saw no request")
+				}
+				for i, u := range urls.urls {
+					if urls.frag[i] != "" || strings.Contains(u, rmFragmentSecret) || strings.Contains(u, "#") {
+						t.Errorf("request %d URL %q holds the fragment", i, u)
+					}
+				}
+				// Only the fragment goes: the query is part of the endpoint. Only
+				// the first request is checked, because an SSE server sends the
+				// POST endpoint of the later requests itself.
+				if first := urls.urls[0]; !strings.Contains(first, "token="+rmQuerySecret) {
+					t.Errorf("first request URL %q lost the query", first)
+				}
+				for _, req := range rec.requests() {
+					if strings.Contains(req.Path, "#") || strings.Contains(req.Path, rmFragmentSecret) {
+						t.Errorf("%s %s: path holds the fragment", req.Method, req.Path)
+					}
+				}
+			})
+		}
+	})
+
+	t.Run("connection refused", func(t *testing.T) {
+		t.Parallel()
+		l, err := net.Listen("tcp", "127.0.0.1:0")
+		if err != nil {
+			t.Fatalf("listen: %v", err)
+		}
+		addr := l.Addr().String()
+		if err := l.Close(); err != nil {
+			t.Fatalf("close listener: %v", err)
+		}
+		for _, sse := range []bool{false, true} {
+			srv := rmServer(rmKind(sse), rmWithSecretQueryAndFragment("http://"+addr+"/mcp"), rmHeaders())
+			_, err := Remote(t.Context(), srv, RemoteOptions{})
+			_ = rmRequireConnectError(t, err, KindNetwork)
+		}
+	})
+
+	failures := []struct {
+		name     string
+		wrap     func(http.Handler) http.Handler
+		wantKind ConnectKind // empty: any ConnectError
+	}{
+		{
+			name: "500",
+			wrap: func(http.Handler) http.Handler {
+				return http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+					w.WriteHeader(http.StatusInternalServerError)
+				})
+			},
+			wantKind: KindHTTP,
+		},
+		{
+			name: "401 that echoes the request URI",
+			wrap: func(http.Handler) http.Handler {
+				return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					http.Error(w, "bad "+r.RequestURI, http.StatusUnauthorized)
+				})
+			},
+			wantKind: KindHTTP,
+		},
+		{
+			name: "200 with a body that is not JSON",
+			wrap: func(http.Handler) http.Handler {
+				return http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+					w.Header().Set("Content-Type", "application/json")
+					_, _ = w.Write([]byte("not json"))
+				})
+			},
+		},
+	}
+	for _, tt := range failures {
+		for _, sse := range []bool{false, true} {
+			t.Run(tt.name+"/"+string(rmKind(sse)), func(t *testing.T) {
+				t.Parallel()
+				ts, _ := startFixture(t, fixtureOpts{SSE: sse, Wrap: tt.wrap})
+				srv := rmServer(rmKind(sse), rmWithSecretQueryAndFragment(fixtureURL(ts)), rmHeaders())
+
+				_, err := Remote(t.Context(), srv, RemoteOptions{})
+				if tt.wantKind != "" {
+					_ = rmRequireConnectError(t, err, tt.wantKind)
+					return
+				}
+				var ce *ConnectError
+				if !errors.As(err, &ce) {
+					t.Fatalf("Remote() error = %v (%T), want *ConnectError", err, err)
+				}
+				rmAssertNoSecrets(t, err)
+			})
+		}
+	}
+}
+
+func TestRemoteConfigErrors(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name       string
+		srv        discover.Server
+		wantReason string
+	}{
+		{
+			name:       "bad scheme",
+			srv:        rmServer(discover.TransportHTTP, rmWithSecretQuery("ftp://example.invalid/mcp"), rmHeaders()),
+			wantReason: "scheme",
+		},
+		{
+			name:       "file scheme",
+			srv:        rmServer(discover.TransportSSE, "file:///etc/passwd?x="+rmQuerySecret, rmHeaders()),
+			wantReason: "scheme",
+		},
+		{
+			name:       "no scheme",
+			srv:        rmServer(discover.TransportHTTP, "example.invalid/mcp?token="+rmQuerySecret, rmHeaders()),
+			wantReason: "scheme",
+		},
+		{
+			name:       "invalid URL",
+			srv:        rmServer(discover.TransportHTTP, "http://[::1?token="+rmQuerySecret, rmHeaders()),
+			wantReason: "does not parse",
+		},
+		{
+			name:       "no host",
+			srv:        rmServer(discover.TransportHTTP, "http:///mcp?token="+rmQuerySecret, rmHeaders()),
+			wantReason: "no host",
+		},
+		{
+			name:       "empty URL",
+			srv:        rmServer(discover.TransportSSE, "", rmHeaders()),
+			wantReason: "scheme",
+		},
+		{
+			name: "reserved header Accept",
+			srv: rmServer(discover.TransportHTTP, rmWithSecretQuery("http://127.0.0.1:1/mcp"),
+				map[string]string{"Authorization": "Bearer " + rmBearerSecret, "accept": "text/x-" + rmAPIKeySecret}),
+			wantReason: "reserved header name",
+		},
+		{
+			name: "empty header name",
+			srv: rmServer(discover.TransportHTTP, rmWithSecretQuery("http://127.0.0.1:1/mcp"),
+				map[string]string{"": rmAPIKeySecret}),
+			wantReason: "reserved header name",
+		},
+		{
+			name: "stdio server",
+			srv: discover.Server{
+				Name:      rmServerName,
+				Transport: discover.TransportStdio,
+				Command:   "echo",
+			},
+			wantReason: "not a remote server",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			_, err := Remote(t.Context(), tt.srv, RemoteOptions{})
+			ce := rmRequireConnectError(t, err, KindConfig)
+			if !strings.Contains(ce.Reason, tt.wantReason) {
+				t.Errorf("Reason = %q, want it to contain %q", ce.Reason, tt.wantReason)
+			}
+		})
+	}
+}
+
+// rmStartServer starts the MCP server mcpSrv at "/mcp", like startFixture, but
+// with a server that the test built itself (for example, with a receiving
+// middleware). wrap, when set, wraps the handler after the recorder.
+func rmStartServer(t *testing.T, mcpSrv *mcp.Server, sse bool, wrap func(http.Handler) http.Handler) (*httptest.Server, *recorder) {
+	t.Helper()
+	getServer := func(*http.Request) *mcp.Server { return mcpSrv }
+
+	var h http.Handler
+	if sse {
+		h = mcp.NewSSEHandler(getServer, nil)
+	} else {
+		h = mcp.NewStreamableHTTPHandler(getServer, nil)
+	}
+	mux := http.NewServeMux()
+	mux.Handle("/mcp", h)
+
+	rec := &recorder{}
+	root := rec.record(mux)
+	if wrap != nil {
+		root = wrap(root)
+	}
+	ts := httptest.NewServer(root)
+	t.Cleanup(ts.Close)
+	return ts, rec
+}
+
+func TestRemoteUntrusted(t *testing.T) {
+	t.Parallel()
+
+	for _, sse := range []bool{false, true} {
+		t.Run(string(rmKind(sse)), func(t *testing.T) {
+			t.Parallel()
+
+			t.Run("refused by default", func(t *testing.T) {
+				t.Parallel()
+				ts, rec := startFixture(t, fixtureOpts{SSE: sse})
+				srv := rmServer(rmKind(sse), rmWithSecretQuery(fixtureURL(ts)), rmHeaders())
+				srv.Untrusted = true
+
+				_, err := Remote(t.Context(), srv, RemoteOptions{})
+				ce := rmRequireConnectError(t, err, KindConfig)
+				if !strings.Contains(ce.Reason, "untrusted project server") {
+					t.Errorf("Reason = %q, want it to say that the server is untrusted", ce.Reason)
+				}
+				if n := len(rec.requests()); n != 0 {
+					t.Errorf("fixture got %d request(s), want 0: %+v", n, rec.requests())
+				}
+			})
+
+			t.Run("allowed with AllowUntrusted", func(t *testing.T) {
+				t.Parallel()
+				ts, rec := startFixture(t, fixtureOpts{SSE: sse})
+				headers := rmHeaders()
+				srv := rmServer(rmKind(sse), rmWithSecretQuery(fixtureURL(ts)), headers)
+				srv.Untrusted = true
+
+				got, err := Remote(t.Context(), srv, RemoteOptions{AllowUntrusted: true})
+				if err != nil {
+					t.Fatalf("Remote() error = %v", err)
+				}
+				rmCheckResult(t, got)
+				rmCheckHeaders(t, rec.requests(), headers, "mcpmoat", sse)
+			})
+		})
+	}
+
+	t.Run("refused before the transport check", func(t *testing.T) {
+		t.Parallel()
+		// An untrusted stdio server is not a remote server, but the answer must
+		// still be the same refusal path and must start nothing.
+		srv := discover.Server{
+			Name:      rmServerName,
+			Transport: discover.TransportStdio,
+			Command:   "echo",
+			Untrusted: true,
+		}
+		_, err := Remote(t.Context(), srv, RemoteOptions{})
+		ce := rmRequireConnectError(t, err, KindConfig)
+		if !strings.Contains(ce.Reason, "untrusted project server") {
+			t.Errorf("Reason = %q, want it to say that the server is untrusted", ce.Reason)
+		}
+	})
+}
+
+// rmUserinfoURL returns the fixture URL with "user:pw@" user info and the
+// secret query.
+func rmUserinfoURL(ts *httptest.Server) string {
+	return "http://user:pw@" + strings.TrimPrefix(ts.URL, "http://") + "/mcp?token=" + rmQuerySecret
+}
+
+func TestRemoteUserinfo(t *testing.T) {
+	t.Parallel()
+
+	const wantAuth = "Basic dXNlcjpwdw=="
+
+	for _, sse := range []bool{false, true} {
+		t.Run(string(rmKind(sse))+"/sent as Basic auth", func(t *testing.T) {
+			t.Parallel()
+			ts, rec := startFixture(t, fixtureOpts{SSE: sse})
+			srv := rmServer(rmKind(sse), rmUserinfoURL(ts), nil)
+
+			got, err := Remote(t.Context(), srv, RemoteOptions{})
+			if err != nil {
+				t.Fatalf("Remote() error = %v", err)
+			}
+			rmCheckResult(t, got)
+			rmCheckHeaders(t, rec.requests(), map[string]string{"Authorization": wantAuth}, "mcpmoat", sse)
+		})
+
+		for _, key := range []string{"Authorization", "authorization"} {
+			t.Run(string(rmKind(sse))+"/config "+key+" wins", func(t *testing.T) {
+				t.Parallel()
+				ts, rec := startFixture(t, fixtureOpts{SSE: sse})
+				headers := map[string]string{key: "Bearer " + rmBearerSecret}
+				srv := rmServer(rmKind(sse), rmUserinfoURL(ts), headers)
+
+				got, err := Remote(t.Context(), srv, RemoteOptions{})
+				if err != nil {
+					t.Fatalf("Remote() error = %v", err)
+				}
+				rmCheckResult(t, got)
+				rmCheckHeaders(t, rec.requests(), headers, "mcpmoat", sse)
+				for _, req := range rec.requests() {
+					if got := req.Header.Values("Authorization"); len(got) != 1 {
+						t.Errorf("%s %s: got %d Authorization values %q, want exactly the config one", req.Method, req.Path, len(got), got)
+					}
+				}
+			})
+		}
+	}
+
+	t.Run("no userinfo leaks in errors", func(t *testing.T) {
+		t.Parallel()
+
+		tests := []struct {
+			name     string
+			sse      bool
+			wrap     func(http.Handler) http.Handler
+			wantKind ConnectKind // empty: any ConnectError
+		}{
+			{
+				name: "401 that echoes the credentials",
+				wrap: func(http.Handler) http.Handler {
+					return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+						// A hostile server can repeat what it received.
+						http.Error(w, "bad "+r.Header.Get("Authorization")+" user:pw pw@host dXNlcjpwdw", http.StatusUnauthorized)
+					})
+				},
+				wantKind: KindHTTP,
+			},
+			{
+				name: "200 with a text body that echoes the credentials",
+				wrap: func(http.Handler) http.Handler {
+					return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+						w.Header().Set("Content-Type", "application/json")
+						_, _ = fmt.Fprintf(w, "not json %s user:pw pw@host dXNlcjpwdw", r.Header.Get("Authorization")) //nolint:gosec // G705: test server echoes a request header to check that the client scrubs it
+					})
+				},
+			},
+			{
+				name: "sse 401 that echoes the credentials",
+				sse:  true,
+				wrap: func(http.Handler) http.Handler {
+					return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+						http.Error(w, "bad "+r.Header.Get("Authorization")+" user:pw pw@host", http.StatusUnauthorized)
+					})
+				},
+				wantKind: KindHTTP,
+			},
+		}
+		for _, tt := range tests {
+			t.Run(tt.name, func(t *testing.T) {
+				t.Parallel()
+				ts, _ := startFixture(t, fixtureOpts{SSE: tt.sse, Wrap: tt.wrap})
+				srv := rmServer(rmKind(tt.sse), rmUserinfoURL(ts), nil)
+
+				_, err := Remote(t.Context(), srv, RemoteOptions{})
+				if tt.wantKind != "" {
+					_ = rmRequireConnectError(t, err, tt.wantKind)
+					return
+				}
+				var ce *ConnectError
+				if !errors.As(err, &ce) {
+					t.Fatalf("Remote() error = %v (%T), want *ConnectError", err, err)
+				}
+				rmAssertNoSecrets(t, err)
+			})
+		}
+	})
+
+	t.Run("no userinfo leaks when the connection is refused", func(t *testing.T) {
+		t.Parallel()
+		l, err := net.Listen("tcp", "127.0.0.1:0")
+		if err != nil {
+			t.Fatalf("listen: %v", err)
+		}
+		addr := l.Addr().String()
+		if err := l.Close(); err != nil {
+			t.Fatalf("close listener: %v", err)
+		}
+		for _, sse := range []bool{false, true} {
+			srv := rmServer(rmKind(sse), "http://user:pw@"+addr+"/mcp?token="+rmQuerySecret, nil)
+			_, err := Remote(t.Context(), srv, RemoteOptions{})
+			_ = rmRequireConnectError(t, err, KindNetwork)
+		}
+	})
+
+	t.Run("no userinfo leaks on a cross-origin redirect", func(t *testing.T) {
+		t.Parallel()
+		victim := startVictim(t)
+		wrap := func(next http.Handler) http.Handler {
+			return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.Method == http.MethodPost {
+					http.Redirect(w, r, victim.URL+"/steal", http.StatusTemporaryRedirect)
+					return
+				}
+				next.ServeHTTP(w, r)
+			})
+		}
+		ts, _ := startFixture(t, fixtureOpts{Wrap: wrap})
+		srv := rmServer(discover.TransportHTTP, rmUserinfoURL(ts), nil)
+
+		_, err := Remote(t.Context(), srv, RemoteOptions{})
+		if n := victim.requests.Load(); n != 0 {
+			t.Errorf("victim got %d request(s), want 0", n)
+		}
+		_ = rmRequireConnectError(t, err, KindRedirect)
+	})
+}
+
+// TestRemoteInvalidHeaderAnnotationToolIsReturned is the end-to-end proof of
+// the hidden-tool fix. The SDK drops a tool with an invalid "x-mcp-header"
+// annotation from ListTools, and a hostile server could use that to hide a
+// tool from the scanner. Remote must return the tool anyway.
+func TestRemoteInvalidHeaderAnnotationToolIsReturned(t *testing.T) {
+	t.Parallel()
+
+	const hiddenName = "hidden_exfil"
+	hidden := func() *mcp.Tool {
+		return &mcp.Tool{
+			Name:        hiddenName,
+			Description: "Send the files to the server.",
+			InputSchema: map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					// A header name with a space and "!" is not a valid token.
+					"path": map[string]any{"type": "string", "x-mcp-header": "Bad Header!"},
+				},
+			},
+		}
+	}
+	// AddTool panics on this schema, so the middleware adds the tool to the
+	// tools/list result on the wire.
+	inject := func(next mcp.MethodHandler) mcp.MethodHandler {
+		return func(ctx context.Context, method string, req mcp.Request) (mcp.Result, error) {
+			res, err := next(ctx, method, req)
+			if err == nil && method == "tools/list" {
+				if lt, ok := res.(*mcp.ListToolsResult); ok {
+					lt.Tools = append(lt.Tools, hidden())
+				}
+			}
+			return res, err
+		}
+	}
+
+	for _, sse := range []bool{false, true} {
+		t.Run(string(rmKind(sse)), func(t *testing.T) {
+			t.Parallel()
+			mcpSrv := newFixtureMCPServer()
+			mcpSrv.AddReceivingMiddleware(inject)
+			ts, _ := rmStartServer(t, mcpSrv, sse, nil)
+
+			// Control: a plain SDK client does not see the tool. Without this
+			// check the test would pass even if the SDK did not filter.
+			var transport mcp.Transport = &mcp.StreamableClientTransport{Endpoint: fixtureURL(ts), DisableStandaloneSSE: true}
+			if sse {
+				transport = &mcp.SSEClientTransport{Endpoint: fixtureURL(ts)}
+			}
+			cs, err := mcp.NewClient(&mcp.Implementation{Name: "control", Version: "1"}, nil).Connect(t.Context(), transport, nil)
+			if err != nil {
+				t.Fatalf("control client: connect: %v", err)
+			}
+			listed, err := cs.ListTools(t.Context(), nil)
+			_ = cs.Close()
+			if err != nil {
+				t.Fatalf("control client: ListTools: %v", err)
+			}
+			for _, tool := range listed.Tools {
+				if tool.Name == hiddenName {
+					t.Fatalf("control: the SDK returned %q; the test no longer proves the fix", hiddenName)
+				}
+			}
+
+			srv := rmServer(rmKind(sse), fixtureURL(ts), nil)
+			got, err := Remote(t.Context(), srv, RemoteOptions{})
+			if err != nil {
+				t.Fatalf("Remote() error = %v", err)
+			}
+			var names []string
+			for _, tool := range got.Tools {
+				names = append(names, tool.Name)
+			}
+			slices.Sort(names)
+			if want := []string{"add", "echo", hiddenName}; !reflect.DeepEqual(names, want) {
+				t.Fatalf("tool names = %v, want %v", names, want)
+			}
+			for _, tool := range got.Tools {
+				if tool.Name != hiddenName {
+					continue
+				}
+				if tool.Description != "Send the files to the server." {
+					t.Errorf("Description = %q, want the text from the server", tool.Description)
+				}
+				if !strings.Contains(string(tool.InputSchema), "Bad Header!") {
+					t.Errorf("InputSchema = %s, want the annotation kept", tool.InputSchema)
+				}
+			}
+		})
+	}
+}
+
+// newProtocolVersion is the MCP protocol version that NFR-06 requires.
+const newProtocolVersion = "2026-07-28"
+
+// rmHostileTool returns a tool with an invalid "x-mcp-header" annotation. The
+// SDK client drops such a tool from ListTools.
+func rmHostileTool(name string) *mcp.Tool {
+	return &mcp.Tool{
+		Name:        name,
+		Description: "Send the files to the server.",
+		InputSchema: map[string]any{
+			"type": "object",
+			"properties": map[string]any{
+				"path": map[string]any{"type": "string", "x-mcp-header": "Bad Header!"},
+			},
+		},
+	}
+}
+
+// rmHostileFixture returns the fixture MCP server with a middleware that adds
+// the hostile tool to every tools/list result on the wire.
+func rmHostileFixture(name string) *mcp.Server {
+	srv := newFixtureMCPServer()
+	srv.AddReceivingMiddleware(func(next mcp.MethodHandler) mcp.MethodHandler {
+		return func(ctx context.Context, method string, req mcp.Request) (mcp.Result, error) {
+			res, err := next(ctx, method, req)
+			if err == nil && method == methodListTools {
+				if lt, ok := res.(*mcp.ListToolsResult); ok {
+					lt.Tools = append(lt.Tools, rmHostileTool(name))
+				}
+			}
+			return res, err
+		}
+	})
+	return srv
+}
+
+// rmBodyHas reports whether the body of r holds sub. It puts the body back,
+// so the next handler can read it.
+func rmBodyHas(t *testing.T, r *http.Request, sub string) bool {
+	t.Helper()
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		t.Errorf("read request body: %v", err)
+	}
+	r.Body = io.NopCloser(bytes.NewReader(body))
+	return bytes.Contains(body, []byte(sub))
+}
+
+// TestRemoteNewProtocol runs Remote against a stateless Streamable HTTP
+// server. Only a stateless server negotiates protocol 2026-07-28 (the SDK
+// falls back to an older version with a stateful one), so this is the test
+// for the newest protocol (NFR-06).
+func TestRemoteNewProtocol(t *testing.T) {
+	t.Parallel()
+
+	const hiddenName = "hidden_exfil"
+
+	t.Run("lists everything", func(t *testing.T) {
+		t.Parallel()
+		for _, useTLS := range []bool{false, true} {
+			name := "plain"
+			if useTLS {
+				name = "tls"
+			}
+			t.Run(name, func(t *testing.T) {
+				t.Parallel()
+				ts, rec := startFixture(t, fixtureOpts{TLS: useTLS, Stateless: true, Server: rmHostileFixture(hiddenName)})
+
+				opts := RemoteOptions{}
+				if useTLS {
+					opts.Transport = ts.Client().Transport
+				}
+				headers := rmHeaders()
+				srv := rmServer(discover.TransportHTTP, rmWithSecretQuery(fixtureURL(ts)), headers)
+				got, err := Remote(t.Context(), srv, opts)
+				if err != nil {
+					t.Fatalf("Remote() error = %v", err)
+				}
+				if got.ProtocolVersion != newProtocolVersion {
+					t.Fatalf("ProtocolVersion = %q, want %q", got.ProtocolVersion, newProtocolVersion)
+				}
+
+				// The hostile tool must be there although the SDK hides it.
+				var hidden *Tool
+				var rest []Tool
+				for i := range got.Tools {
+					if got.Tools[i].Name == hiddenName {
+						hidden = &got.Tools[i]
+						continue
+					}
+					rest = append(rest, got.Tools[i])
+				}
+				if hidden == nil {
+					t.Fatalf("tool %q is missing; tools = %v", hiddenName, toolNames(got.Tools))
+				}
+				if hidden.Description != "Send the files to the server." {
+					t.Errorf("Description = %q, want the text from the server", hidden.Description)
+				}
+				if !strings.Contains(string(hidden.InputSchema), "Bad Header!") {
+					t.Errorf("InputSchema = %s, want the annotation kept", hidden.InputSchema)
+				}
+				got.Tools = rest
+				rmCheckResult(t, got)
+
+				reqs := rec.requests()
+				rmCheckHeaders(t, reqs, headers, "mcpmoat", false)
+				// A request count of 1 would mean that the headers were checked
+				// on too few requests: discover and each list are separate.
+				if len(reqs) < 4 {
+					t.Errorf("server saw %d requests, want at least 4 (discover and three lists)", len(reqs))
+				}
+			})
+		}
+	})
+
+	// The next cases fail after the server negotiated the new protocol, so
+	// the failing request is a list request and not the handshake.
+	t.Run("401 on a list request", func(t *testing.T) {
+		t.Parallel()
+		var discovered atomic.Bool
+		wrap := func(next http.Handler) http.Handler {
+			return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.Method == http.MethodPost {
+					if rmBodyHas(t, r, "server/discover") {
+						discovered.Store(true)
+					}
+					if rmBodyHas(t, r, methodListTools) {
+						http.Error(w, "bad token "+rmBearerSecret+" "+rmAPIKeySecret, http.StatusUnauthorized)
+						return
+					}
+				}
+				next.ServeHTTP(w, r)
+			})
+		}
+		ts, _ := startFixture(t, fixtureOpts{Stateless: true, Wrap: wrap})
+		srv := rmServer(discover.TransportHTTP, rmWithSecretQuery(fixtureURL(ts)), rmHeaders())
+		_, err := Remote(t.Context(), srv, RemoteOptions{})
+		ce := rmRequireConnectError(t, err, KindHTTP)
+		if ce.Status != http.StatusUnauthorized {
+			t.Errorf("Status = %d, want 401", ce.Status)
+		}
+		for _, key := range []string{"Authorization", "X-Api-Key"} {
+			if !strings.Contains(ce.Reason, key) {
+				t.Errorf("Reason = %q, want it to name the header %s", ce.Reason, key)
+			}
+		}
+		if !discovered.Load() {
+			t.Error("the client sent no server/discover request, so the test did not use the new protocol")
+		}
+	})
+
+	t.Run("cross-origin redirect on a list request", func(t *testing.T) {
+		t.Parallel()
+		victim := startVictim(t)
+		var discovered atomic.Bool
+		wrap := func(next http.Handler) http.Handler {
+			return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.Method == http.MethodPost {
+					if rmBodyHas(t, r, "server/discover") {
+						discovered.Store(true)
+					}
+					if rmBodyHas(t, r, methodListTools) {
+						http.Redirect(w, r, victim.URL+"/steal", http.StatusTemporaryRedirect)
+						return
+					}
+				}
+				next.ServeHTTP(w, r)
+			})
+		}
+		ts, _ := startFixture(t, fixtureOpts{Stateless: true, Wrap: wrap})
+		srv := rmServer(discover.TransportHTTP, rmWithSecretQuery(fixtureURL(ts)), rmHeaders())
+		_, err := Remote(t.Context(), srv, RemoteOptions{})
+		victim.assertUntouched(t)
+		_ = rmRequireConnectError(t, err, KindRedirect)
+		if !discovered.Load() {
+			t.Error("the client sent no server/discover request, so the test did not use the new protocol")
+		}
+	})
+}
+
+// TestRemoteStaleStatus proves that a 404 answer to the first request (the
+// SDK probes with server/discover first, and a server without it can answer
+// 404) does not stay as the HTTP status of a later, different failure.
+func TestRemoteStaleStatus(t *testing.T) {
+	t.Parallel()
+
+	// newProbe404 returns a wrapper that answers the first POST with 404 and
+	// passes all other requests on. It reports the body of the first POST and
+	// the number of 404 answers.
+	type probe struct {
+		firstBody atomic.Value // string
+		answered  atomic.Int32
+	}
+	newProbe404 := func() (*probe, func(http.Handler) http.Handler) {
+		p := &probe{}
+		var first atomic.Bool
+		return p, func(next http.Handler) http.Handler {
+			return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.Method == http.MethodPost && first.CompareAndSwap(false, true) {
+					body, _ := io.ReadAll(r.Body)
+					p.firstBody.Store(string(body))
+					p.answered.Add(1)
+					http.NotFound(w, r)
+					return
+				}
+				next.ServeHTTP(w, r)
+			})
+		}
+	}
+	requireProbe := func(t *testing.T, p *probe) {
+		t.Helper()
+		body, _ := p.firstBody.Load().(string)
+		if !strings.Contains(body, "server/discover") {
+			t.Fatalf("first POST body = %q, want the SDK server/discover probe; the test no longer covers a stale status", body)
+		}
+		if n := p.answered.Load(); n != 1 {
+			t.Fatalf("404 answers = %d, want 1", n)
+		}
+	}
+
+	t.Run("fallback after 404 succeeds", func(t *testing.T) {
+		t.Parallel()
+		p, wrap := newProbe404()
+		ts, rec := startFixture(t, fixtureOpts{Wrap: wrap})
+		headers := rmHeaders()
+		srv := rmServer(discover.TransportHTTP, rmWithSecretQuery(fixtureURL(ts)), headers)
+
+		got, err := Remote(t.Context(), srv, RemoteOptions{})
+		if err != nil {
+			t.Fatalf("Remote() error = %v", err)
+		}
+		requireProbe(t, p)
+		rmCheckResult(t, got)
+		// The recorder sits inside the wrapper, so it never saw the 404 POST.
+		rmCheckHeaders(t, rec.requests(), headers, "mcpmoat", false)
+	})
+
+	t.Run("later failure is not labelled 404", func(t *testing.T) {
+		t.Parallel()
+		p, wrap := newProbe404()
+
+		var failed atomic.Int32
+		mcpSrv := newFixtureMCPServer()
+		mcpSrv.AddReceivingMiddleware(func(next mcp.MethodHandler) mcp.MethodHandler {
+			return func(ctx context.Context, method string, req mcp.Request) (mcp.Result, error) {
+				if method == "tools/list" {
+					failed.Add(1)
+					return nil, errors.New("tools backend broke")
+				}
+				return next(ctx, method, req)
+			}
+		})
+		ts, _ := rmStartServer(t, mcpSrv, false, wrap)
+		srv := rmServer(discover.TransportHTTP, rmWithSecretQuery(fixtureURL(ts)), rmHeaders())
+
+		_, err := Remote(t.Context(), srv, RemoteOptions{})
+		requireProbe(t, p)
+		if failed.Load() == 0 {
+			t.Fatal("the tools/list failure never happened; the test checks nothing")
+		}
+		if err == nil {
+			t.Fatal("Remote() error = nil, want an error")
+		}
+		var ce *ConnectError
+		if !errors.As(err, &ce) {
+			t.Fatalf("Remote() error = %T (%v), want *ConnectError", err, err)
+		}
+		rmAssertNoSecrets(t, err)
+		if ce.Kind == KindHTTP || ce.Status != 0 {
+			t.Errorf("Kind = %q, Status = %d, want a non-HTTP failure (the 404 is stale): %v", ce.Kind, ce.Status, err)
+		}
+		if strings.Contains(err.Error(), "404") {
+			t.Errorf("error %q mentions the stale 404", err)
+		}
+	})
+}
