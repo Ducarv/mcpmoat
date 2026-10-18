@@ -156,6 +156,53 @@ func TestRedactURL(t *testing.T) {
 			want:  "https://h/mcp/" + discover.Mask,
 		},
 		{
+			name:  "segment with escaped space is kept",
+			input: "https://h/my%20server/sse",
+			want:  "https://h/my%20server/sse",
+		},
+		{
+			name:  "segment with equals sign is masked",
+			input: "https://h/login/password=hunter2/x",
+			want:  "https://h/login/" + discover.Mask + "/x",
+		},
+		{
+			name:  "segment with comma is masked",
+			input: "https://h/a,b/x",
+			want:  "https://h/" + discover.Mask + "/x",
+		},
+		{
+			name:  "segment with escaped equals sign is masked",
+			input: "https://h/pw%3Dhunter2/x",
+			want:  "https://h/" + discover.Mask + "/x",
+		},
+		{
+			name:  "segment with escaped comma is masked",
+			input: "https://h/a%2Cb",
+			want:  "https://h/" + discover.Mask,
+		},
+		{
+			// An escaped ";" is a matrix parameter that url.Parse does not
+			// split, so it is masked as one.
+			name:  "segment with escaped semicolon is masked",
+			input: "https://h/x%3Bpw/sse",
+			want:  "https://h/" + discover.Mask + "/sse",
+		},
+		{
+			name:  "escaped token prefix is masked",
+			input: "https://h/%67hp_abcdef/sse",
+			want:  "https://h/" + discover.Mask + "/sse",
+		},
+		{
+			name:  "token after an escaped slash is masked",
+			input: "https://h/a%2Fghp_abcdef/b",
+			want:  "https://h/" + discover.Mask + "/b",
+		},
+		{
+			name:  "token before an escaped slash is masked",
+			input: "https://h/ghp_abcdef%2Fa/b",
+			want:  "https://h/" + discover.Mask + "/b",
+		},
+		{
 			name:  "non-ASCII segment is escaped, then masked",
 			input: "https://h/é" + discovertest.CanaryURL,
 			want:  "https://h/" + discover.Mask,
@@ -206,6 +253,26 @@ func TestRedactURL(t *testing.T) {
 			name:  "token with known prefix as key is masked",
 			input: "https://h/x?ghp_abcdef123456=",
 			want:  "https://h/x?" + discover.Mask + "=" + discover.Mask,
+		},
+		{
+			name:  "escaped token prefix as key is masked",
+			input: "https://h/?%67hp_abcdef=1&k=2",
+			want:  "https://h/?" + discover.Mask + "=" + discover.Mask + "&k=" + discover.Mask,
+		},
+		{
+			name:  "token after an escaped slash in a key is masked",
+			input: "https://h/?a%2Fghp_abcdef=1",
+			want:  "https://h/?" + discover.Mask + "=" + discover.Mask,
+		},
+		{
+			name:  "key with a bad escape is masked",
+			input: "https://h/?%zz=1",
+			want:  "https://h/?" + discover.Mask + "=" + discover.Mask,
+		},
+		{
+			name:  "key with plus and escaped slash is kept",
+			input: "https://h/?a+b%2Fc=1",
+			want:  "https://h/?a+b%2Fc=" + discover.Mask,
 		},
 		{
 			name:  "long token as key is masked",
@@ -387,7 +454,9 @@ func TestRedactURL(t *testing.T) {
 			if got != tt.want {
 				t.Errorf("RedactURL(%q) = %q, want %q", tt.input, got, tt.want)
 			}
-			assertPrintableASCII(t, tt.input, got)
+			if !isPrintableASCII(got) {
+				t.Errorf("RedactURL(%q) = %q, want only printable ASCII", tt.input, got)
+			}
 		})
 	}
 }
@@ -410,24 +479,17 @@ func FuzzRedactURL(f *testing.F) {
 		"https://user:p@ss/word@h/mcp",
 		"https://ghp_abcdef123?x=y@h/mcp",
 		"https://h/?ghp_abcdef123456=&k=v;" + strings.Repeat("a", 32),
+		"https://h/login/password=hunter2/a,b/x%3By",
+		"https://h/%67hp_abcdef/a%2Fghp_abcdef?%67hp_x=1&%zz=2",
 	} {
 		f.Add(seed)
 	}
 	f.Fuzz(func(t *testing.T, raw string) {
-		assertPrintableASCII(t, raw, discover.RedactURL(raw))
-	})
-}
-
-// assertPrintableASCII fails the test if got has a byte outside printable
-// ASCII (0x20 to 0x7e), as promised by the RedactURL doc comment.
-func assertPrintableASCII(t *testing.T, input, got string) {
-	t.Helper()
-	for i := range len(got) {
-		if c := got[i]; c < 0x20 || c > 0x7e {
-			t.Errorf("RedactURL(%q) = %q, byte %d is 0x%02x, want printable ASCII", input, got, i, c)
-			return
+		// The RedactURL doc comment promises printable ASCII output.
+		if got := discover.RedactURL(raw); !isPrintableASCII(got) {
+			t.Errorf("RedactURL(%q) = %q, want only printable ASCII", raw, got)
 		}
-	}
+	})
 }
 
 // TestRedactURLKnownLimits records cases that RedactURL does not mask today.
@@ -456,6 +518,13 @@ func TestRedactURLKnownLimits(t *testing.T) {
 			want:  "https://h/mcp/QwErTyUiOpAsDfGhJkLz/sse",
 		},
 		{
+			// RedactURL unescapes once, so a token escaped twice is checked
+			// as "%67hp_abcdef" and passes.
+			name:  "token escaped twice in path is not masked",
+			input: "https://h/%2567hp_abcdef/sse",
+			want:  "https://h/%2567hp_abcdef/sse",
+		},
+		{
 			// RedactURL keeps the host, so a token in a subdomain stays.
 			name:  "token in subdomain is not masked",
 			input: "https://" + discovertest.CanaryURL + ".example.com/",
@@ -470,7 +539,9 @@ func TestRedactURLKnownLimits(t *testing.T) {
 			if got != tt.want {
 				t.Errorf("RedactURL(%q) = %q, want %q", tt.input, got, tt.want)
 			}
-			assertPrintableASCII(t, tt.input, got)
+			if !isPrintableASCII(got) {
+				t.Errorf("RedactURL(%q) = %q, want only printable ASCII", tt.input, got)
+			}
 		})
 	}
 }

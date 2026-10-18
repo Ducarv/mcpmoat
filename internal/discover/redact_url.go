@@ -14,27 +14,36 @@ import (
 //   - every matrix parameter in the path (each part after a ";" in a
 //     segment, for example "tok" in "/x;tok");
 //   - every query value, every bare query part with no "=", and every
-//     query key that looks like a credential by the path rules below (a
+//     query key that looks like a credential by the token rules below (a
 //     normal key such as "api_key", "token" or "k" stays);
 //   - a non-empty fragment.
 //
 // Hosted MCP providers often put the API key in the path, for example
 // https://actions.zapier.com/mcp/<key>/sse, or an account ID as a UUID
-// segment. A path segment (the escaped text between two "/", before any
-// ";") is masked when one or more of these rules is true:
+// segment. A path segment is the escaped text between two "/", before any
+// ";". RedactURL masks it when it does not unescape, when its unescaped
+// form has a "=", "," or ";" (like a query value or a matrix parameter, for
+// example "password=hunter2" or "a,b"), or when one of these texts looks
+// like a token: the escaped segment, the unescaped segment, or a piece of
+// the unescaped segment between two "/" (an escaped "%2F" gives a "/").
+// Query keys get the same token checks (url.QueryUnescape, then each piece
+// between two "/"), and a key that does not unescape is masked.
+//
+// A text looks like a token when one or more of these rules is true:
 //
 //   - it starts with a known token prefix, in any case (such as sk-, ghp_,
 //     xox, AKIA, or eyJ for a JWT), and it is longer than the prefix;
-//   - it has minMixedTokenLen (20) or more bytes, at least one ASCII letter
-//     and at least one digit;
-//   - it has minTokenLen (32) or more bytes;
-//   - it is a UUID (uuidLen bytes: 8-4-4-4-12 hex digits).
+//   - it has 20 or more bytes, at least one ASCII letter and at least one
+//     digit;
+//   - it has 32 or more bytes;
+//   - it is a UUID (36 bytes: 8-4-4-4-12 hex digits).
 //
 // The slashes stay, so the shape of the path does not change. Normal
 // segments such as "mcp", "sse", "v1", "messages" or "2024-11-05" stay as
 // written. The rules are a heuristic: a long, readable segment (such as
 // "server-sent-events-v2") is masked too, and a short token or a token with
-// only letters is not detected.
+// only letters is not detected. RedactURL unescapes only once, so a token
+// that is escaped twice ("%2567hp_...") is checked in its once-escaped form.
 //
 // It returns Mask for the whole input if raw does not parse, if raw is an
 // opaque URL (such as "mailto:x" or "localhost:8080"), if raw has no host,
@@ -63,7 +72,7 @@ import (
 // Known limits:
 //
 //   - A short token, or a token with only letters, in the path is not
-//     masked (see the path rules above).
+//     masked (see the token rules above).
 //   - A token in the host or a subdomain (for example
 //     https://<token>.example.com/) is not masked.
 //
@@ -165,12 +174,12 @@ func redactPath(u *url.URL) bool {
 }
 
 // redactPathSegment masks one escaped path segment, without its slashes.
-// The part before the first ";" is masked if it looks like a credential.
-// Each non-empty part after a ";" is a matrix parameter and is always
-// masked, as a query value is.
+// The part before the first ";" is masked if isSecretPathSegment reports
+// true for it. Each non-empty part after a ";" is a matrix parameter and is
+// always masked, as a query value is.
 func redactPathSegment(seg string) string {
 	parts := strings.Split(seg, ";")
-	if looksLikeCredential(parts[0]) {
+	if isSecretPathSegment(parts[0]) {
 		parts[0] = Mask
 	}
 	for i, p := range parts {
@@ -181,91 +190,37 @@ func redactPathSegment(seg string) string {
 	return strings.Join(parts, ";")
 }
 
-// Length thresholds for looksLikeCredential.
-const (
-	// minMixedTokenLen is the shortest text with letters and digits that
-	// counts as a token. Shorter mixed text is often a normal name, such as
-	// "v1" or "2024-11-05".
-	minMixedTokenLen = 20
-	// minTokenLen is the shortest text that counts as a token with no other
-	// sign. Readable path segments and query keys are rarely this long.
-	minTokenLen = 32
-	// uuidLen is the length of a UUID in its 8-4-4-4-12 text form.
-	uuidLen = 36
-)
-
-// looksLikeCredential reports whether s (a path segment or a query key)
-// looks like a token. The RedactURL doc comment lists the rules and their
-// limits.
-func looksLikeCredential(s string) bool {
-	if len(s) >= minTokenLen || isUUID(s) {
+// isSecretPathSegment reports whether seg, one escaped path segment with no
+// ";" part, must be masked. It fails closed: a segment that does not
+// unescape, or whose unescaped form has "=", "," or ";", is masked.
+func isSecretPathSegment(seg string) bool {
+	plain, err := url.PathUnescape(seg)
+	if err != nil {
 		return true
 	}
-	// tokenPrefixes are the starts of well-known API token formats, in
-	// lower case, so the match does not depend on case. The RedactURL doc
-	// names only some of them as examples, so it does not need an update
-	// when this list changes.
-	tokenPrefixes := [...]string{
-		"sk-", "sk_", "pk_", "rk_",
-		"ghp_", "gho_", "ghu_", "ghs_", "github_pat_",
-		"glpat-",
-		"xox",  // Slack
-		"akia", // AWS access key ID
-		"aiza", // Google API key
-		"eyj",  // JWT: base64 of `{"`
+	// A "=" or "," marks a key=value pair or a list, as in a query value or
+	// a matrix parameter. An escaped ";" ("%3B") is a hidden matrix
+	// parameter. Such text can hold a short password, so mask it.
+	if strings.ContainsAny(plain, "=,;") {
+		return true
 	}
-	lower := strings.ToLower(s)
-	for _, p := range tokenPrefixes {
-		if len(s) > len(p) && strings.HasPrefix(lower, p) {
+	return looksLikeEscapedCredential(seg, plain)
+}
+
+// looksLikeEscapedCredential reports whether escaped, plain (the unescaped
+// form of escaped), or a piece of plain between two "/", looks like a
+// token. An escaped prefix ("%67hp_x" for "ghp_x") or a token after an
+// escaped "/" ("a%2Fghp_x") is found only in the unescaped text.
+func looksLikeEscapedCredential(escaped, plain string) bool {
+	if looksLikeCredential(escaped) || looksLikeCredential(plain) {
+		return true
+	}
+	for piece := range strings.SplitSeq(plain, "/") {
+		if looksLikeCredential(piece) {
 			return true
 		}
 	}
-	if len(s) < minMixedTokenLen {
-		return false
-	}
-	hasLetter, hasDigit := false, false
-	for i := range len(s) {
-		hasLetter = hasLetter || isLetter(s[i])
-		hasDigit = hasDigit || isDigit(s[i])
-	}
-	return hasLetter && hasDigit
-}
-
-// isLetter reports whether c is an ASCII letter, a-z or A-Z.
-func isLetter(c byte) bool {
-	return ('a' <= c && c <= 'z') || ('A' <= c && c <= 'Z')
-}
-
-// isDigit reports whether c is an ASCII digit, 0-9.
-func isDigit(c byte) bool {
-	return '0' <= c && c <= '9'
-}
-
-// isUUID reports whether s has the 8-4-4-4-12 form of a UUID, with hex
-// digits in any case.
-func isUUID(s string) bool {
-	if len(s) != uuidLen {
-		return false
-	}
-	for i := range len(s) {
-		c := s[i]
-		switch i {
-		case 8, 13, 18, 23:
-			if c != '-' {
-				return false
-			}
-		default:
-			if !isHexDigit(c) {
-				return false
-			}
-		}
-	}
-	return true
-}
-
-// isHexDigit reports whether c is 0-9, a-f or A-F.
-func isHexDigit(c byte) bool {
-	return isDigit(c) || ('a' <= c && c <= 'f') || ('A' <= c && c <= 'F')
+	return false
 }
 
 // redactQuery masks every value in a raw query string. It keeps each key as
@@ -304,8 +259,10 @@ func redactQueryPart(part string) string {
 		return Mask
 	}
 	// A token used as a key (?ghp_xxx=) is a secret too. A normal key such
-	// as "api_key" or "token" is short and has no digit, so it stays.
-	if looksLikeCredential(key) {
+	// as "api_key" or "token" is short and has no digit, so it stays. A key
+	// that does not unescape fails closed.
+	plain, err := url.QueryUnescape(key)
+	if err != nil || looksLikeEscapedCredential(key, plain) {
 		return Mask + "=" + Mask
 	}
 	return escapeUnsafeBytes(key) + "=" + Mask
@@ -332,14 +289,4 @@ func escapeUnsafeBytes(s string) string {
 		b.WriteByte(hexDigits[c&0x0f])
 	}
 	return b.String()
-}
-
-// isASCII reports whether every byte of s is below 0x80.
-func isASCII(s string) bool {
-	for i := range len(s) {
-		if s[i] >= 0x80 {
-			return false
-		}
-	}
-	return true
 }
