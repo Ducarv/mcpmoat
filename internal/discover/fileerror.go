@@ -72,9 +72,11 @@ type FileError struct {
 	// context error for a canceled read. It is nil for parse problems.
 	Err error
 	// Untrusted is true when the problem is in a project file, which a cloned
-	// repository can ship. The readers set it by scope, and Discover sets it
-	// on the canceled error of a project step. See the package doc, Untrusted
-	// files. Like every FileError, it means that servers may be missing.
+	// repository can ship. The readers set it by scope, Discover sets it on
+	// the canceled error of a project step, and ReadConfig sets it for a file
+	// that is not one of the user's own global files. See the package doc,
+	// Untrusted files. Like every FileError, it means that servers may be
+	// missing.
 	Untrusted bool
 }
 
@@ -132,7 +134,7 @@ func (e *FileError) Unwrap() error {
 //	newFileError(path, reasonBadEntry).inProject(key).forServer(name)
 //
 // Use readError for an OS error and canceledError for a context error. The
-// readers set Untrusted.
+// readers and ReadConfig set Untrusted.
 func newFileError(path string, r reason) *FileError {
 	return &FileError{Path: path, Reason: string(r)}
 }

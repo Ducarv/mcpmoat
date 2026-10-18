@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"maps"
+	"path/filepath"
 	"slices"
 
 	"github.com/BurntSushi/toml"
@@ -168,13 +169,46 @@ func codexReads(e *codexEntry) []codexRead {
 //
 // See the package doc, Reading configs.
 func ReadCodex(ctx context.Context, path string) Result {
-	servers, errs := readCodex(ctx, path)
+	servers, errs := readCodex(ctx, path, maxTOMLSize, "")
 	return Result{Servers: servers, Errors: errs}
 }
 
-// readCodex does the work of ReadCodex. See ReadCodex for the rules.
-func readCodex(ctx context.Context, path string) ([]Server, []*FileError) {
-	data, found, fe := readConfigFile(ctx, path, maxTOMLSize, "")
+// readUntrustedCodex reads a Codex file that the user gave (for example with
+// --config) and that is not the user's own ~/.codex/config.toml. Such a file
+// can come from a cloned repository, so ReadConfig reads it as an untrusted
+// project file, as it does for a JSON file:
+//
+//   - The read is confined to the directory of the file: a symlink that
+//     leaves that directory, or an absolute symlink, is refused with
+//     "file is outside the project".
+//   - The size limit is the smaller of maxTOMLSize and maxProjectConfigSize.
+//   - Every server gets ScopeProject and Untrusted. Its ProjectPath is the
+//     directory of the file, or the parent of that directory when it is
+//     named ".codex" (Codex keeps a project config in
+//     <project>/.codex/config.toml). The path is not made absolute.
+//   - Every error gets Untrusted.
+//
+// The other rules are the ones of ReadCodex. ReadCodex itself has no
+// untrusted mode, because Discover reads only the user's own Codex file.
+func readUntrustedCodex(ctx context.Context, path string) Result {
+	servers, errs := readCodex(ctx, path, min(maxTOMLSize, maxProjectConfigSize), filepath.Dir(path))
+	projectPath := filepath.Dir(path)
+	if filepath.Base(projectPath) == ".codex" {
+		projectPath = filepath.Dir(projectPath)
+	}
+	for i := range servers {
+		servers[i].Scope = ScopeProject
+		servers[i].ProjectPath = projectPath
+	}
+	markUntrusted(servers, errs)
+	return Result{Servers: servers, Errors: errs}
+}
+
+// readCodex does the work of ReadCodex and readUntrustedCodex. See ReadCodex
+// for the rules. maxSize and root go to readConfigFile: root is "" for the
+// user's own file, and the directory that the read must stay in otherwise.
+func readCodex(ctx context.Context, path string, maxSize int64, root string) ([]Server, []*FileError) {
+	data, found, fe := readConfigFile(ctx, path, maxSize, root)
 	if fe != nil {
 		return nil, []*FileError{fe}
 	}

@@ -86,16 +86,14 @@ func scanNonEmptyLines(text string) []string {
 	return lines
 }
 
-// scanForbiddenDirs returns a cli whose homeDir and getwd fail the test when
-// they are called. It proves that --config never looks at the home or the
-// working directory.
-func scanForbiddenDirs(t *testing.T) (*cli, *bytes.Buffer, *bytes.Buffer) {
+// scanConfigCLI returns a cli for --config runs. Its homeDir returns home,
+// which --config uses only to tell whether the file is one of the user's own
+// global files. Its getwd fails the test when it is called: it proves that
+// --config never looks at the working directory.
+func scanConfigCLI(t *testing.T, home string) (*cli, *bytes.Buffer, *bytes.Buffer) {
 	t.Helper()
 	c, stdout, stderr := newTestCLI(fakeGetenv(nil), testBuild)
-	c.homeDir = func() (string, error) {
-		t.Error("homeDir was called, but --config must not read the home directory")
-		return "", errors.New("forbidden")
-	}
+	c.homeDir = func() (string, error) { return home, nil }
 	c.getwd = func() (string, error) {
 		t.Error("getwd was called, but --config must not read the working directory")
 		return "", errors.New("forbidden")
@@ -323,23 +321,26 @@ func TestScanAutoPartialFailure(t *testing.T) {
 
 	code := c.dispatch([]string{"scan", "--no-connect"})
 
-	if code != exitOK {
-		t.Errorf("exit code = %d, want %d (a bad file in auto mode is a warning)", code, exitOK)
+	if code != exitError {
+		t.Errorf("exit code = %d, want %d (a bad global file fails the scan)", code, exitError)
 	}
 	if rows := scanRows(t, stdout.String()); len(rows) != 4 {
 		t.Errorf("table has %d rows, want 4\nstdout:\n%s", len(rows), stdout)
 	}
 	lines := scanNonEmptyLines(stderr.String())
-	if len(lines) != 1 {
-		t.Fatalf("stderr has %d lines, want 1\nstderr:\n%s", len(lines), stderr)
+	if len(lines) != 2 {
+		t.Fatalf("stderr has %d lines, want 2 (the problem and the hint)\nstderr:\n%s", len(lines), stderr)
 	}
-	for _, want := range []string{"mcpmoat scan: warning: ", ".claude.json", "invalid JSON"} {
+	for _, want := range []string{"mcpmoat scan: ", ".claude.json", "invalid JSON"} {
 		if !strings.Contains(lines[0], want) {
 			t.Errorf("stderr line does not contain %q\nline: %s", want, lines[0])
 		}
 	}
-	if !strings.HasPrefix(lines[0], "mcpmoat scan: warning: ") {
-		t.Errorf("stderr line = %q, want the prefix %q", lines[0], "mcpmoat scan: warning: ")
+	if !strings.HasPrefix(lines[0], "mcpmoat scan: ") || strings.Contains(lines[0], "warning:") {
+		t.Errorf("stderr line = %q, want the prefix %q and no warning", lines[0], "mcpmoat scan: ")
+	}
+	if got, want := lines[1]+"\n", configErrorHint; got != want {
+		t.Errorf("last stderr line = %q, want the hint %q", got, want)
 	}
 }
 
@@ -367,39 +368,77 @@ func TestScanConfigFormats(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
-		name       string
-		fixture    []string
-		file       string // path inside the fixture copy
+		name    string
+		fixture []string
+		file    string // path inside the fixture copy
+		// homeFile makes the fixture's home directory the user's home, so a
+		// file below it is one of the user's own global files. Otherwise the
+		// home is an empty directory and the file is untrusted.
+		homeFile   bool
 		wantClient string
 		wantNames  []string
+		// wantProject is the project directory of an untrusted file, inside
+		// the fixture copy. "" means the file is read as a global file.
+		wantProject string
 	}{
 		{
-			name:       "claude code .claude.json",
+			name:       "claude code ~/.claude.json",
 			fixture:    []string{"claude-code", "valid"},
 			file:       filepath.Join("home", ".claude.json"),
+			homeFile:   true,
 			wantClient: "claude-code",
 			wantNames:  []string{"filesystem", "remote-http", "remote-sse", "alpha-tool", "gamma-tool"},
 		},
 		{
-			name:       "claude code .mcp.json",
-			fixture:    []string{"claude-code", "valid"},
-			file:       filepath.Join("work", ".mcp.json"),
-			wantClient: "claude-code",
-			wantNames:  []string{"local-db", "team-api"},
+			// Not the home file: the projects section is not read.
+			name:        "claude code .claude.json in another directory",
+			fixture:     []string{"claude-code", "valid"},
+			file:        filepath.Join("home", ".claude.json"),
+			wantClient:  "claude-code",
+			wantNames:   []string{"filesystem", "remote-http", "remote-sse"},
+			wantProject: "home",
 		},
 		{
-			name:       "cursor mcp.json",
+			name:        "claude code .mcp.json",
+			fixture:     []string{"claude-code", "valid"},
+			file:        filepath.Join("work", ".mcp.json"),
+			homeFile:    true,
+			wantClient:  "claude-code",
+			wantNames:   []string{"local-db", "team-api"},
+			wantProject: "work",
+		},
+		{
+			name:       "cursor ~/.cursor/mcp.json",
 			fixture:    []string{"cursor", "valid"},
 			file:       filepath.Join("home", ".cursor", "mcp.json"),
+			homeFile:   true,
 			wantClient: "cursor",
 			wantNames:  []string{"git", "remote", "events"},
 		},
 		{
-			name:       "codex config.toml",
+			name:        "cursor project mcp.json",
+			fixture:     []string{"cursor", "valid"},
+			file:        filepath.Join("work", ".cursor", "mcp.json"),
+			homeFile:    true,
+			wantClient:  "cursor",
+			wantNames:   []string{"project-remote", "project-tools"},
+			wantProject: "work",
+		},
+		{
+			name:       "codex ~/.codex/config.toml",
 			fixture:    []string{"codex", "valid"},
 			file:       filepath.Join("home", ".codex", "config.toml"),
+			homeFile:   true,
 			wantClient: "codex",
 			wantNames:  []string{"docs", "remote", "git"},
+		},
+		{
+			name:        "codex config.toml in another directory",
+			fixture:     []string{"codex", "valid"},
+			file:        filepath.Join("home", ".codex", "config.toml"),
+			wantClient:  "codex",
+			wantNames:   []string{"docs", "remote", "git"},
+			wantProject: "home",
 		},
 	}
 
@@ -407,11 +446,15 @@ func TestScanConfigFormats(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 
-			// The fixture copy sits in a temp directory. The forbidden
-			// homeDir and getwd prove that --config reads only the file.
-			c, stdout, stderr := scanForbiddenDirs(t)
 			home, _ := discovertest.CopyFixture(t, scanFixtureDir(tt.fixture...))
 			root := filepath.Dir(home)
+			userHome := t.TempDir()
+			if tt.homeFile {
+				userHome = home
+			}
+			// The forbidden getwd proves that --config does not read the
+			// working directory.
+			c, stdout, stderr := scanConfigCLI(t, userHome)
 
 			code := c.dispatch([]string{"scan", "--no-connect", "--config", filepath.Join(root, tt.file)})
 
@@ -427,6 +470,12 @@ func TestScanConfigFormats(t *testing.T) {
 				names = append(names, row[0])
 				if row[1] != tt.wantClient {
 					t.Errorf("row %q has client %q, want %q", row[0], row[1], tt.wantClient)
+				}
+				if tt.wantProject != "" {
+					// An untrusted file shows as a project file in SCOPE.
+					if want := "project:" + filepath.Join(root, tt.wantProject); row[2] != want {
+						t.Errorf("row %q has scope %q, want %q", row[0], row[2], want)
+					}
 				}
 			}
 			slices.Sort(names)
@@ -486,8 +535,8 @@ func TestScanConfigErrors(t *testing.T) {
 				return filepath.Join(home, ".cursor", "mcp.json")
 			},
 			wantStdout:      []string{"good"},
-			wantStderr:      []string{"mcpmoat scan: "},
-			wantStderrLines: 4,
+			wantStderr:      []string{"mcpmoat scan: ", configErrorHint},
+			wantStderrLines: 5, // 4 problems and the hint
 		},
 	}
 
@@ -495,7 +544,7 @@ func TestScanConfigErrors(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 
-			c, stdout, stderr := scanForbiddenDirs(t)
+			c, stdout, stderr := scanConfigCLI(t, t.TempDir())
 			path := tt.setup(t)
 
 			code := c.dispatch([]string{"scan", "--no-connect", "--config", path})
@@ -531,7 +580,7 @@ func TestScanConfigErrors(t *testing.T) {
 	t.Run("malformed JSON has line and column", func(t *testing.T) {
 		t.Parallel()
 
-		c, _, stderr := scanForbiddenDirs(t)
+		c, _, stderr := scanConfigCLI(t, t.TempDir())
 		home, _ := discovertest.CopyFixture(t, scanFixtureDir("claude-code", "malformed"))
 
 		code := c.dispatch([]string{"scan", "--no-connect", "--config", filepath.Join(home, ".claude.json")})
@@ -741,8 +790,10 @@ func TestScanNoLeak(t *testing.T) {
 			t.Run(tt.name+"/config/"+filepath.ToSlash(file), func(t *testing.T) {
 				t.Parallel()
 
-				c, stdout, stderr := scanForbiddenDirs(t)
 				home, _ := discovertest.CopyFixture(t, scanFixtureDir(tt.fixture...))
+				// With the fixture's home as the user's home, the home files
+				// are read as global files and the work files as untrusted.
+				c, stdout, stderr := scanConfigCLI(t, home)
 				path := filepath.Join(filepath.Dir(home), file)
 
 				code := c.dispatch([]string{"scan", "--no-connect", "--config", path})
@@ -787,7 +838,7 @@ func TestScanTerminalSafety(t *testing.T) {
 	wantName := strconv.Quote("a\x1b[31mb")
 	wantCommand := discover.Mask + " " + discover.Mask
 
-	c, stdout, stderr := scanForbiddenDirs(t)
+	c, stdout, stderr := scanConfigCLI(t, t.TempDir())
 	path := scanWriteFile(t, t.TempDir(), ".mcp.json", config)
 
 	code := c.dispatch([]string{"scan", "--no-connect", "--config", path})
@@ -946,11 +997,12 @@ func TestScanArgsMasked(t *testing.T) {
 	}
 }
 
-// TestScanUntrustedProjectFile checks the exit code for problems with the
-// project files in the working directory (FileError.Untrusted). Such a
-// problem gives exit code 2 after the table and the problems are printed. A
-// problem with a global file stays a warning with exit code 0.
-func TestScanUntrustedProjectFile(t *testing.T) {
+// TestScanAutoExitCodes checks the exit code of auto-discovery for problems
+// with config files. Any problem (a discover.FileError), with a project file
+// in the working directory or with one of the user's own global files, gives
+// exit code 2 after the table, the problems and the hint are printed. A
+// missing file is not a problem.
+func TestScanAutoExitCodes(t *testing.T) {
 	t.Parallel()
 
 	// outsideConfig is a config outside the working directory. The canary in
@@ -978,7 +1030,6 @@ func TestScanUntrustedProjectFile(t *testing.T) {
 		wantCode   int
 		wantStdout []string // substrings of stdout
 		wantStderr []string // substrings of stderr
-		noStderr   []string // substrings that must not be in stderr
 	}{
 		{
 			name: ".mcp.json is a symlink out of the project",
@@ -988,8 +1039,7 @@ func TestScanUntrustedProjectFile(t *testing.T) {
 			},
 			wantCode:   exitError,
 			wantStdout: []string{"global-srv"},
-			wantStderr: []string{"mcpmoat scan: ", ".mcp.json: file is outside the project", untrustedHint},
-			noStderr:   []string{"warning:"},
+			wantStderr: []string{"mcpmoat scan: ", ".mcp.json: file is outside the project", configErrorHint},
 		},
 		{
 			name: ".cursor/mcp.json is a symlink out of the project",
@@ -999,8 +1049,7 @@ func TestScanUntrustedProjectFile(t *testing.T) {
 			},
 			wantCode:   exitError,
 			wantStdout: []string{"global-srv"},
-			wantStderr: []string{"mcp.json: file is outside the project", untrustedHint},
-			noStderr:   []string{"warning:"},
+			wantStderr: []string{"mcp.json: file is outside the project", configErrorHint},
 		},
 		{
 			name: "project file is invalid JSON",
@@ -1010,8 +1059,7 @@ func TestScanUntrustedProjectFile(t *testing.T) {
 			},
 			wantCode:   exitError,
 			wantStdout: []string{"global-srv"},
-			wantStderr: []string{".mcp.json:1:", "invalid JSON", untrustedHint},
-			noStderr:   []string{"warning:"},
+			wantStderr: []string{".mcp.json:1:", "invalid JSON", configErrorHint},
 		},
 		{
 			name: "no servers at all still prints the empty line first",
@@ -1020,7 +1068,7 @@ func TestScanUntrustedProjectFile(t *testing.T) {
 			},
 			wantCode:   exitError,
 			wantStdout: []string{"No MCP servers found."},
-			wantStderr: []string{"file is outside the project", untrustedHint},
+			wantStderr: []string{"file is outside the project", configErrorHint},
 		},
 		{
 			name: "relative project symlink that stays inside the project is followed",
@@ -1041,18 +1089,50 @@ func TestScanUntrustedProjectFile(t *testing.T) {
 			},
 			wantCode:   exitError,
 			wantStdout: []string{"No MCP servers found."},
-			wantStderr: []string{"file is outside the project", untrustedHint},
+			wantStderr: []string{"file is outside the project", configErrorHint},
 		},
 		{
-			name: "global file error is a warning",
+			name: "global file with invalid JSON fails the scan",
 			setup: func(t *testing.T, home, work, _ string) {
 				scanWriteFile(t, home, ".claude.json", `{"mcpServers":`)
 				scanWriteFile(t, work, ".mcp.json", `{"mcpServers":{"project-srv":{"command":"npx"}}}`)
 			},
-			wantCode:   exitOK,
+			wantCode:   exitError,
 			wantStdout: []string{"project-srv"},
-			wantStderr: []string{"mcpmoat scan: warning: ", ".claude.json:1:", "invalid JSON"},
-			noStderr:   []string{untrustedHint},
+			wantStderr: []string{"mcpmoat scan: ", ".claude.json:1:", "invalid JSON", configErrorHint},
+		},
+		{
+			name: "global file with an ambiguous key fails the scan",
+			setup: func(t *testing.T, home, _, _ string) {
+				scanWriteFile(t, home, filepath.Join(".cursor", "mcp.json"),
+					`{"mcpServers":{"amb":{"command":"npx","Command":"evil"},"ok-srv":{"command":"uvx"}}}`)
+			},
+			wantCode:   exitError,
+			wantStdout: []string{"ok-srv"},
+			wantStderr: []string{"mcpmoat scan: ", "server amb", "ambiguous key", configErrorHint},
+		},
+		{
+			name: "global codex file that is not valid TOML fails the scan",
+			setup: func(t *testing.T, home, _, _ string) {
+				scanWriteFile(t, home, filepath.Join(".codex", "config.toml"), "[mcp_servers.a\n")
+			},
+			wantCode:   exitError,
+			wantStdout: []string{"No MCP servers found."},
+			wantStderr: []string{"config.toml:1:", "invalid TOML", configErrorHint},
+		},
+		{
+			name: "missing files are not a problem",
+			setup: func(t *testing.T, home, _, _ string) {
+				scanWriteFile(t, home, ".claude.json", globalConfig)
+			},
+			wantCode:   exitOK,
+			wantStdout: []string{"global-srv"},
+		},
+		{
+			name:       "no config files at all",
+			setup:      func(*testing.T, string, string, string) {},
+			wantCode:   exitOK,
+			wantStdout: []string{"No MCP servers found."},
 		},
 		{
 			name: "global symlink out of the home directory is followed",
@@ -1089,9 +1169,155 @@ func TestScanUntrustedProjectFile(t *testing.T) {
 					t.Errorf("stderr does not contain %q\nstderr:\n%s", want, stderr)
 				}
 			}
-			for _, bad := range tt.noStderr {
-				if strings.Contains(stderr.String(), bad) {
-					t.Errorf("stderr contains %q\nstderr:\n%s", bad, stderr)
+			if len(tt.wantStderr) == 0 && stderr.Len() != 0 {
+				t.Errorf("stderr = %q, want empty", stderr)
+			}
+			for _, line := range scanNonEmptyLines(stderr.String()) {
+				if !strings.HasPrefix(line, "mcpmoat scan: ") || strings.Contains(line, "warning:") {
+					t.Errorf("stderr line %q must start with %q and not be a warning", line, "mcpmoat scan: ")
+				}
+			}
+			discovertest.AssertNoLeak(t, "stdout", stdout.String())
+			discovertest.AssertNoLeak(t, "stderr", stderr.String())
+			assertNoEscape(t, stdout.String(), stderr.String())
+		})
+	}
+}
+
+// TestScanConfigIsUntrusted checks that --config reads a file as an untrusted
+// project file: the read is confined to the directory of the file, the
+// servers show as project servers, and the "projects" section of a Claude
+// Code file is not read. The exception is a path that resolves to one of the
+// user's own global files: that file is read as a global file.
+func TestScanConfigIsUntrusted(t *testing.T) {
+	t.Parallel()
+
+	// symlink makes link point to target. It skips the test when the system
+	// cannot make a symlink (Windows without the right privilege).
+	symlink := func(t *testing.T, target, link string) {
+		t.Helper()
+		if err := os.MkdirAll(filepath.Dir(link), 0o750); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(target, link); err != nil {
+			t.Skipf("symlink: %v", err)
+		}
+	}
+
+	// outsideConfig is a config outside the directory of the --config file.
+	// The canary in its args must never show.
+	outsideConfig := `{"mcpServers":{"outside":{"command":"run","args":["` + discovertest.CanaryArgs + `"]}}}`
+	const withProjects = `{"mcpServers":{"top-srv":{"command":"npx"}},` +
+		`"projects":{"/p":{"mcpServers":{"proj-srv":{"command":"npx"}}}}}`
+
+	tests := []struct {
+		name string
+		// setup writes the files and returns the --config argument. home is
+		// the user's home directory, repo a directory outside it, outside a
+		// third directory.
+		setup      func(t *testing.T, home, repo, outside string) string
+		wantCode   int
+		wantStdout []string
+		noStdout   []string
+		wantStderr []string
+	}{
+		{
+			name: "repository .mcp.json is a project file",
+			setup: func(t *testing.T, _, repo, _ string) string {
+				return scanWriteFile(t, repo, ".mcp.json", `{"mcpServers":{"repo-srv":{"command":"npx"}}}`)
+			},
+			wantCode:   exitOK,
+			wantStdout: []string{"repo-srv", "project:"},
+			noStdout:   []string{"global"},
+		},
+		{
+			name: "symlink out of the directory is refused",
+			setup: func(t *testing.T, _, repo, outside string) string {
+				link := filepath.Join(repo, ".mcp.json")
+				symlink(t, scanWriteFile(t, outside, "real.json", outsideConfig), link)
+				return link
+			},
+			wantCode:   exitError,
+			noStdout:   []string{"outside"},
+			wantStderr: []string{"mcpmoat scan: ", ".mcp.json: file is outside the project"},
+		},
+		{
+			name: "projects section of a .claude.json outside home is not read",
+			setup: func(t *testing.T, _, repo, _ string) string {
+				return scanWriteFile(t, repo, ".claude.json", withProjects)
+			},
+			wantCode:   exitOK,
+			wantStdout: []string{"top-srv", "project:"},
+			noStdout:   []string{"proj-srv"},
+		},
+		{
+			name: "the home ~/.claude.json is a global file",
+			setup: func(t *testing.T, home, _, _ string) string {
+				return scanWriteFile(t, home, ".claude.json", withProjects)
+			},
+			wantCode:   exitOK,
+			wantStdout: []string{"top-srv", "global", "proj-srv", "project:/p"},
+		},
+		{
+			name: "a symlink to the home ~/.claude.json is a global file",
+			setup: func(t *testing.T, home, repo, _ string) string {
+				link := filepath.Join(repo, "mine.json")
+				symlink(t, scanWriteFile(t, home, ".claude.json", withProjects), link)
+				return link
+			},
+			wantCode:   exitOK,
+			wantStdout: []string{"top-srv", "global", "proj-srv", "project:/p"},
+		},
+		{
+			name: "codex file outside home is a project file",
+			setup: func(t *testing.T, _, repo, _ string) string {
+				return scanWriteFile(t, repo, filepath.Join(".codex", "config.toml"), "[mcp_servers.codex-srv]\ncommand = \"npx\"\n")
+			},
+			wantCode:   exitOK,
+			wantStdout: []string{"codex-srv", "codex", "project:"},
+			noStdout:   []string{"global"},
+		},
+		{
+			name: "codex symlink out of the directory is refused",
+			setup: func(t *testing.T, _, repo, outside string) string {
+				target := scanWriteFile(t, outside, "real.toml",
+					"[mcp_servers.outside]\ncommand = \"run\"\nargs = [\""+discovertest.CanaryArgs+"\"]\n")
+				link := filepath.Join(repo, ".codex", "config.toml")
+				symlink(t, target, link)
+				return link
+			},
+			wantCode:   exitError,
+			noStdout:   []string{"outside"},
+			wantStderr: []string{"config.toml: file is outside the project"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			home, repo, outside := t.TempDir(), t.TempDir(), t.TempDir()
+			path := tt.setup(t, home, repo, outside)
+			c, stdout, stderr := scanConfigCLI(t, home)
+
+			code := c.dispatch([]string{"scan", "--no-connect", "--config", path})
+
+			if code != tt.wantCode {
+				t.Errorf("exit code = %d, want %d\nstdout:\n%s\nstderr:\n%s", code, tt.wantCode, stdout, stderr)
+			}
+			for _, want := range tt.wantStdout {
+				if !strings.Contains(stdout.String(), want) {
+					t.Errorf("stdout does not contain %q\nstdout:\n%s", want, stdout)
+				}
+			}
+			for _, bad := range tt.noStdout {
+				if strings.Contains(stdout.String(), bad) {
+					t.Errorf("stdout contains %q\nstdout:\n%s", bad, stdout)
+				}
+			}
+			for _, want := range tt.wantStderr {
+				if !strings.Contains(stderr.String(), want) {
+					t.Errorf("stderr does not contain %q\nstderr:\n%s", want, stderr)
 				}
 			}
 			if len(tt.wantStderr) == 0 && stderr.Len() != 0 {
@@ -1102,30 +1328,24 @@ func TestScanUntrustedProjectFile(t *testing.T) {
 			assertNoEscape(t, stdout.String(), stderr.String())
 		})
 	}
-}
 
-// TestScanConfigIsNotConfined checks that --config reads the named file
-// without the project confinement of auto-discovery: the user named the
-// file, so a symlink out of its directory is followed and the scan is clean.
-func TestScanConfigIsNotConfined(t *testing.T) {
-	t.Parallel()
+	t.Run("no home directory reads the file as untrusted", func(t *testing.T) {
+		t.Parallel()
 
-	target := scanWriteFile(t, t.TempDir(), "real.json", `{"mcpServers":{"outside":{"command":"npx"}}}`)
-	link := filepath.Join(t.TempDir(), ".mcp.json")
-	if err := os.Symlink(target, link); err != nil {
-		t.Skipf("symlink: %v", err)
-	}
-	c, stdout, stderr := scanForbiddenDirs(t)
+		path := scanWriteFile(t, t.TempDir(), ".claude.json", withProjects)
+		c, stdout, stderr := scanConfigCLI(t, "")
+		c.homeDir = func() (string, error) { return "", errors.New("no home") }
 
-	code := c.dispatch([]string{"scan", "--no-connect", "--config", link})
+		code := c.dispatch([]string{"scan", "--no-connect", "--config", path})
 
-	if code != exitOK {
-		t.Fatalf("exit code = %d, want %d; stderr:\n%s", code, exitOK, stderr)
-	}
-	if !strings.Contains(stdout.String(), "outside") {
-		t.Errorf("stdout does not list the server\nstdout:\n%s", stdout)
-	}
-	if stderr.Len() != 0 {
-		t.Errorf("stderr = %q, want empty", stderr)
-	}
+		if code != exitOK {
+			t.Fatalf("exit code = %d, want %d; stderr:\n%s", code, exitOK, stderr)
+		}
+		if out := stdout.String(); !strings.Contains(out, "top-srv") || strings.Contains(out, "proj-srv") {
+			t.Errorf("stdout = %q, want top-srv and no proj-srv", out)
+		}
+		if stderr.Len() != 0 {
+			t.Errorf("stderr = %q, want empty", stderr)
+		}
+	})
 }

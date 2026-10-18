@@ -167,14 +167,17 @@ func TestE2EScanAllClients(t *testing.T) {
 	}
 }
 
+// TestE2EScanPartialFailure checks that a bad global file fails the scan
+// with exit code 2. The servers of the other files are still listed, and the
+// problem and the hint go to stderr.
 func TestE2EScanPartialFailure(t *testing.T) {
 	t.Parallel()
 	home, work := discovertest.CopyFixture(t, fixtureDir("all", "partial-failure"))
 
 	stdout, stderr, code := runBin(t, home, work, "scan", "--no-connect")
 
-	if code != 0 {
-		t.Errorf("exit code = %d, want 0; stderr:\n%s", code, stderr)
+	if code != 2 {
+		t.Errorf("exit code = %d, want 2; stderr:\n%s", code, stderr)
 	}
 	want := []string{"cc-project", "cursor-global", "cursor-project", "codex-global"}
 	rows := tableRows(stdout)
@@ -186,13 +189,19 @@ func TestE2EScanPartialFailure(t *testing.T) {
 	}
 
 	lines := strings.Split(strings.TrimSuffix(stderr, "\n"), "\n")
-	if len(lines) != 1 {
-		t.Fatalf("stderr has %d lines, want 1:\n%s", len(lines), stderr)
+	if len(lines) != 2 {
+		t.Fatalf("stderr has %d lines, want 2:\n%s", len(lines), stderr)
 	}
-	for _, sub := range []string{"warning:", ".claude.json", "invalid JSON"} {
+	for _, sub := range []string{"mcpmoat scan: ", ".claude.json", "invalid JSON"} {
 		if !strings.Contains(lines[0], sub) {
-			t.Errorf("warning line %q does not contain %q", lines[0], sub)
+			t.Errorf("error line %q does not contain %q", lines[0], sub)
 		}
+	}
+	if strings.Contains(stderr, "warning:") {
+		t.Errorf("stderr shows the problem as a warning:\n%s", stderr)
+	}
+	if !strings.Contains(lines[1], "a config file has a problem") {
+		t.Errorf("last stderr line = %q, want the hint", lines[1])
 	}
 }
 
@@ -233,7 +242,7 @@ func TestE2EScanUntrustedProjectFile(t *testing.T) {
 	if got := column(tableRows(stdout), 0); !slices.Equal(got, []string{"global-srv"}) {
 		t.Errorf("server names = %v, want [global-srv]\nstdout:\n%s", got, stdout)
 	}
-	for _, want := range []string{".mcp.json: file is outside the project", "project config in the working directory"} {
+	for _, want := range []string{".mcp.json: file is outside the project", "a config file has a problem"} {
 		if !strings.Contains(stderr, want) {
 			t.Errorf("stderr does not contain %q:\n%s", want, stderr)
 		}
@@ -277,6 +286,10 @@ func TestE2EScanConfigFile(t *testing.T) {
 		fixture    string
 		wantClient string
 		wantNames  []string
+		// otherHome runs the binary with a home directory that does not
+		// exist. The file is then not one of the user's own global files,
+		// so mcpmoat reads it as an untrusted project file.
+		otherHome bool
 	}{
 		{
 			name:       "claude code",
@@ -284,6 +297,15 @@ func TestE2EScanConfigFile(t *testing.T) {
 			file:       []string{".claude.json"},
 			wantClient: "claude-code",
 			wantNames:  []string{"filesystem", "remote-http", "remote-sse", "alpha-tool", "gamma-tool"},
+		},
+		{
+			// The "projects" section of an untrusted file is not read.
+			name:       "claude code outside home",
+			fixture:    "claude-code",
+			file:       []string{".claude.json"},
+			wantClient: "claude-code",
+			wantNames:  []string{"filesystem", "remote-http", "remote-sse"},
+			otherHome:  true,
 		},
 		{
 			name:       "cursor",
@@ -299,17 +321,26 @@ func TestE2EScanConfigFile(t *testing.T) {
 			wantClient: "codex",
 			wantNames:  []string{"docs", "git", "remote"},
 		},
+		{
+			name:       "codex outside home",
+			fixture:    "codex",
+			file:       []string{".codex", "config.toml"},
+			wantClient: "codex",
+			wantNames:  []string{"docs", "git", "remote"},
+			otherHome:  true,
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			home, work := discovertest.CopyFixture(t, fixtureDir(tt.fixture, "valid"))
 			file := filepath.Join(append([]string{home}, tt.file...)...)
-			// A home directory that does not exist proves that --config does
-			// not look for the home directory.
-			noHome := filepath.Join(t.TempDir(), "does-not-exist")
+			runHome := home
+			if tt.otherHome {
+				runHome = filepath.Join(t.TempDir(), "does-not-exist")
+			}
 
-			stdout, stderr, code := runBin(t, noHome, work, "scan", "--no-connect", "--config", file)
+			stdout, stderr, code := runBin(t, runHome, work, "scan", "--no-connect", "--config", file)
 
 			if code != 0 {
 				t.Errorf("exit code = %d, want 0; stderr:\n%s", code, stderr)
@@ -321,8 +352,8 @@ func TestE2EScanConfigFile(t *testing.T) {
 			if len(rows) < 2 {
 				t.Fatalf("stdout has no server rows:\n%s", stdout)
 			}
-			if len(rows[0]) < 2 || rows[0][1] != "CLIENT" {
-				t.Errorf("header = %v, want CLIENT in the second column", rows[0])
+			if len(rows[0]) < 3 || rows[0][1] != "CLIENT" || rows[0][2] != "SCOPE" {
+				t.Errorf("header = %v, want CLIENT and SCOPE in the second and third columns", rows[0])
 			}
 			for i, got := range column(rows, 1) {
 				if got != tt.wantClient {
@@ -332,8 +363,55 @@ func TestE2EScanConfigFile(t *testing.T) {
 			if got := column(rows, 0); !slices.Equal(got, tt.wantNames) {
 				t.Errorf("server names = %v, want %v", got, tt.wantNames)
 			}
+			if tt.otherHome {
+				// An untrusted file shows as a project file in SCOPE.
+				for i, got := range column(rows, 2) {
+					if !strings.HasPrefix(got, "project:") {
+						t.Errorf("row %d: scope = %q, want a project scope", i, got)
+					}
+				}
+			}
 		})
 	}
+}
+
+// TestE2EScanConfigSymlinkOut checks that a --config file that is a symlink
+// out of its directory is refused with exit code 2, and that the content of
+// the target never shows.
+func TestE2EScanConfigSymlinkOut(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	home := filepath.Join(root, "home")
+	repo := filepath.Join(root, "repo")
+	outside := filepath.Join(root, "outside")
+	for _, dir := range []string{home, repo, outside} {
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	target := filepath.Join(outside, "real.json")
+	content := `{"mcpServers":{"outside":{"command":"run","args":["--token","` + discovertest.CanaryArgs + `"]}}}`
+	if err := os.WriteFile(target, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(repo, ".mcp.json")
+	if err := os.Symlink(target, link); err != nil {
+		t.Fatal(err)
+	}
+
+	stdout, stderr, code := runBin(t, home, repo, "scan", "--no-connect", "--config", link)
+
+	if code != 2 {
+		t.Errorf("exit code = %d, want 2; stderr:\n%s", code, stderr)
+	}
+	if stdout != "" {
+		t.Errorf("stdout = %q, want empty", stdout)
+	}
+	if !strings.Contains(stderr, ".mcp.json: file is outside the project") {
+		t.Errorf("stderr does not name the refused file:\n%s", stderr)
+	}
+	discovertest.AssertNoLeak(t, "stdout", stdout)
+	discovertest.AssertNoLeak(t, "stderr", stderr)
 }
 
 func TestE2EScanConfigErrors(t *testing.T) {

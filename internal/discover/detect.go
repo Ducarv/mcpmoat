@@ -114,8 +114,37 @@ func clientByPath(path string) Client {
 }
 
 // ReadConfig reads one config file that the user named (for example with
-// --config) and returns its servers and problems. It picks the reader with
-// [DetectClient].
+// --config) and returns its servers and problems. home is the user's home
+// directory, given by the caller as for [Options]; "" means no home.
+//
+// A file that the user names can come from anywhere, for example from a
+// cloned repository. So ReadConfig reads it as an untrusted project file,
+// as Discover reads <WorkDir>/.mcp.json:
+//
+//   - It picks the reader with [DetectClient].
+//   - The read is confined to the directory of the file: a symlink that
+//     leaves that directory, or an absolute symlink, is refused with the
+//     reason "file is outside the project". See the package doc, Symlinks.
+//   - Every server has ScopeProject and Untrusted set, and every error has
+//     Untrusted set (see the package doc, Untrusted files). The ProjectPath of
+//     the servers is the directory of the file, or the parent of that
+//     directory when it is named ".cursor" (Cursor) or ".codex" (Codex).
+//   - The "projects" section of a Claude Code file is not read.
+//   - The size limit is maxProjectConfigSize (4 MiB), or maxTOMLSize
+//     (256 KiB) for a Codex file.
+//
+// The one exception is a path that resolves to one of the user's own global
+// files: home/.claude.json, home/.cursor/mcp.json or home/.codex/config.toml.
+// ReadConfig reads that file as Discover does: with the reader of that file
+// (no format detection), ScopeGlobal, no confinement, and trusted. A
+// .claude.json then also gives the servers of its projects. "Resolves" means
+// that filepath.EvalSymlinks of the absolute path is the same as
+// filepath.EvalSymlinks of the global path. Both files must exist. For a
+// relative path, filepath.Abs uses the current directory. On any error the
+// file counts as not global, so it is read as untrusted, the safe side. The
+// compare is of text: a second name for the same file that EvalSymlinks does
+// not resolve (for example another letter case on a case-insensitive file
+// system, or a hard link) is read as untrusted too.
 //
 // Unlike [Discover], ReadConfig treats a missing file as an error, because the
 // user asked for this file: the result holds a [FileError] with the reason
@@ -123,47 +152,108 @@ func clientByPath(path string) Client {
 // reason "unknown config format". Every FileError names the file and never
 // holds config text or text from a JSON or TOML library.
 //
-// ReadConfig reads the file as global scope (ScopeGlobal), so a copy of
-// ~/.claude.json also gives the servers of its projects. The user named the
-// file, so ReadConfig does not confine it to a project directory: it follows
-// symlinks anywhere, as for the other global files, and the servers and
-// errors have Untrusted set to false.
-//
 // The file is read twice: once here to detect the format, and once by the
-// reader. The file is small, and reading it twice keeps the readers
-// unchanged. A change to the file between the two reads is harmless, because
-// the second read has its own checks and limits. The Codex reader has a
-// smaller size limit (256 KiB) than the one used here.
-func ReadConfig(ctx context.Context, path string) Result {
-	// An empty root: the file is not confined (see the doc comment above).
-	data, found, fe := readConfigFile(ctx, path, maxConfigSize, "")
+// reader. Both reads have the same confinement. The file is small, and
+// reading it twice keeps the readers unchanged. A change to the file between
+// the two reads is harmless, because the second read has its own checks and
+// limits.
+func ReadConfig(ctx context.Context, path, home string) Result {
+	if client, ok := globalClient(path, home); ok {
+		return readGlobal(ctx, path, client)
+	}
+
+	// The detection read has the confinement and the size limit of the
+	// project JSON readers. readUntrustedCodex has a smaller limit.
+	data, found, fe := readConfigFile(ctx, path, maxProjectConfigSize, filepath.Dir(path))
 	if fe != nil {
-		return Result{Errors: []*FileError{fe}}
+		return untrustedError(fe)
 	}
 	if !found {
-		return Result{Errors: []*FileError{{Path: path, Reason: reasonNotFound}}}
+		return untrustedError(newFileError(path, reasonNotFound))
 	}
 
 	client, ok := DetectClient(path, data)
 	if !ok {
-		return unknownFormat(path)
+		return untrustedError(newFileError(path, reasonUnknownFormat))
 	}
 
+	switch client {
+	case ClientClaudeCode:
+		return ReadClaudeCode(ctx, path, ScopeProject, "")
+	case ClientCursor:
+		return ReadCursor(ctx, path, ScopeProject, "")
+	case ClientCodex:
+		return readUntrustedCodex(ctx, path)
+	default:
+		// DetectClient only returns the three clients above. Keep the error
+		// fixed and free of config text if that ever changes.
+		return untrustedError(newFileError(path, reasonUnknownFormat))
+	}
+}
+
+// globalFile is one of the user's own config files, as Discover reads it.
+type globalFile struct {
+	rel    string // path below the home directory, with forward slashes
+	client Client
+}
+
+// globalFiles lists the user's own config files, the global steps of
+// Discover (see buildSteps). No code writes to it.
+var globalFiles = [...]globalFile{
+	{".claude.json", ClientClaudeCode},
+	{".cursor/mcp.json", ClientCursor},
+	{".codex/config.toml", ClientCodex},
+}
+
+// globalClient reports whether path resolves to one of the user's own global
+// files below home, and the client of that file. See ReadConfig for what
+// "resolves" means.
+func globalClient(path, home string) (Client, bool) {
+	if home == "" {
+		return "", false
+	}
+	resolved, ok := resolvePath(path)
+	if !ok {
+		return "", false
+	}
+	for _, g := range globalFiles {
+		if gr, ok := resolvePath(filepath.Join(home, filepath.FromSlash(g.rel))); ok && gr == resolved {
+			return g.client, true
+		}
+	}
+	return "", false
+}
+
+// resolvePath returns the absolute path of path with every symlink resolved.
+// ok is false when the path cannot be resolved, for example when the file
+// does not exist.
+func resolvePath(path string) (resolved string, ok bool) {
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		return "", false
+	}
+	resolved, err = filepath.EvalSymlinks(abs)
+	if err != nil {
+		return "", false
+	}
+	return resolved, true
+}
+
+// readGlobal reads one of the user's own global files with the reader and the
+// scope that Discover uses for it.
+func readGlobal(ctx context.Context, path string, client Client) Result {
 	switch client {
 	case ClientClaudeCode:
 		return ReadClaudeCode(ctx, path, ScopeGlobal, "")
 	case ClientCursor:
 		return ReadCursor(ctx, path, ScopeGlobal, "")
-	case ClientCodex:
-		return ReadCodex(ctx, path)
 	default:
-		// DetectClient only returns the three clients above. Keep the error
-		// fixed and free of config text if that ever changes.
-		return unknownFormat(path)
+		return ReadCodex(ctx, path)
 	}
 }
 
-// unknownFormat returns the result for a file whose format is not known.
-func unknownFormat(path string) Result {
-	return Result{Errors: []*FileError{{Path: path, Reason: reasonUnknownFormat}}}
+// untrustedError returns a result that holds only fe, marked Untrusted.
+func untrustedError(fe *FileError) Result {
+	fe.Untrusted = true
+	return Result{Errors: []*FileError{fe}}
 }

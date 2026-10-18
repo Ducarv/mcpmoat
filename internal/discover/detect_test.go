@@ -10,6 +10,8 @@ import (
 	"slices"
 	"strings"
 	"testing"
+
+	"github.com/Ducarv/mcpmoat/internal/discover/discovertest"
 )
 
 // detectCase is one input for DetectClient: a path, the file content and the
@@ -234,57 +236,105 @@ func TestReadConfig(t *testing.T) {
 		}
 		return out
 	}
+	// project gives the want list of servers that ReadConfig reads as
+	// untrusted: ScopeProject and the project directory dir.
+	project := func(dir string, names ...string) []wantServer {
+		var out []wantServer
+		for _, n := range names {
+			out = append(out, wantServer{Name: n, Scope: ScopeProject, ProjectPath: dir})
+		}
+		return out
+	}
 
 	valid := []struct {
-		name        string
-		fixture     string
-		side        string // "home" or "work"
-		rel         []string
-		wantClient  Client
-		wantServers []wantServer
+		name    string
+		fixture string
+		side    string // "home" or "work"
+		rel     []string
+		// withHome passes the fixture's home directory to ReadConfig. Without
+		// it, ReadConfig gets no home, so no file is a global file.
+		withHome   bool
+		wantClient Client
+		// wantServers returns the want list. home and work are the fixture copy.
+		wantServers func(home, work string) []wantServer
 	}{
 		{
 			name:       "claude-code ~/.claude.json with projects",
 			fixture:    "claude-code",
 			side:       "home",
 			rel:        []string{".claude.json"},
+			withHome:   true,
 			wantClient: ClientClaudeCode,
-			wantServers: append(global("filesystem", "remote-http", "remote-sse"),
-				wantServer{"alpha-tool", ScopeProject, "/work/alpha"},
-				wantServer{"gamma-tool", ScopeProject, "/work/gamma"},
-			),
+			wantServers: func(_, _ string) []wantServer {
+				return append(global("filesystem", "remote-http", "remote-sse"),
+					wantServer{"alpha-tool", ScopeProject, "/work/alpha"},
+					wantServer{"gamma-tool", ScopeProject, "/work/gamma"},
+				)
+			},
 		},
 		{
-			name:        "claude-code .mcp.json",
-			fixture:     "claude-code",
-			side:        "work",
-			rel:         []string{".mcp.json"},
-			wantClient:  ClientClaudeCode,
-			wantServers: global("local-db", "team-api"),
+			// The same file outside the home directory is untrusted: its
+			// "projects" section is not read.
+			name:       "claude-code .claude.json that is not the home file",
+			fixture:    "claude-code",
+			side:       "home",
+			rel:        []string{".claude.json"},
+			wantClient: ClientClaudeCode,
+			wantServers: func(home, _ string) []wantServer {
+				return project(home, "filesystem", "remote-http", "remote-sse")
+			},
+		},
+		{
+			name:       "claude-code .mcp.json",
+			fixture:    "claude-code",
+			side:       "work",
+			rel:        []string{".mcp.json"},
+			withHome:   true,
+			wantClient: ClientClaudeCode,
+			wantServers: func(_, work string) []wantServer {
+				return project(work, "local-db", "team-api")
+			},
 		},
 		{
 			name:        "cursor home",
 			fixture:     "cursor",
 			side:        "home",
 			rel:         []string{".cursor", "mcp.json"},
+			withHome:    true,
 			wantClient:  ClientCursor,
-			wantServers: global("events", "git", "remote"),
+			wantServers: func(_, _ string) []wantServer { return global("events", "git", "remote") },
 		},
 		{
-			name:        "cursor work",
-			fixture:     "cursor",
-			side:        "work",
-			rel:         []string{".cursor", "mcp.json"},
-			wantClient:  ClientCursor,
-			wantServers: global("project-remote", "project-tools"),
+			name:       "cursor work",
+			fixture:    "cursor",
+			side:       "work",
+			rel:        []string{".cursor", "mcp.json"},
+			withHome:   true,
+			wantClient: ClientCursor,
+			wantServers: func(_, work string) []wantServer {
+				return project(work, "project-remote", "project-tools")
+			},
 		},
 		{
-			name:        "codex",
+			name:        "codex home",
 			fixture:     "codex",
 			side:        "home",
 			rel:         []string{".codex", "config.toml"},
+			withHome:    true,
 			wantClient:  ClientCodex,
-			wantServers: global("docs", "git", "remote"),
+			wantServers: func(_, _ string) []wantServer { return global("docs", "git", "remote") },
+		},
+		{
+			// A Codex file that is not the home file gets the parent of its
+			// .codex directory as the project directory.
+			name:       "codex that is not the home file",
+			fixture:    "codex",
+			side:       "home",
+			rel:        []string{".codex", "config.toml"},
+			wantClient: ClientCodex,
+			wantServers: func(home, _ string) []wantServer {
+				return project(home, "docs", "git", "remote")
+			},
 		},
 	}
 	for _, tt := range valid {
@@ -296,14 +346,19 @@ func TestReadConfig(t *testing.T) {
 				dir = work
 			}
 			path := filepath.Join(append([]string{dir}, tt.rel...)...)
+			var homeArg string
+			if tt.withHome {
+				homeArg = home
+			}
 
-			res := ReadConfig(t.Context(), path)
+			res := ReadConfig(t.Context(), path, homeArg)
 
 			if len(res.Errors) != 0 {
 				t.Fatalf("ReadConfig() errors = %v, want none", res.Errors)
 			}
-			if got := sortedWant(res.Servers); !reflect.DeepEqual(got, sortedWant(toServers(tt.wantServers))) {
-				t.Errorf("ReadConfig() servers = %v, want %v", got, sortedWant(toServers(tt.wantServers)))
+			want := sortedWant(toServers(tt.wantServers(home, work)))
+			if got := sortedWant(res.Servers); !reflect.DeepEqual(got, want) {
+				t.Errorf("ReadConfig() servers = %v, want %v", got, want)
 			}
 			for _, s := range res.Servers {
 				if s.Client != tt.wantClient {
@@ -312,14 +367,168 @@ func TestReadConfig(t *testing.T) {
 				if s.Source != path {
 					t.Errorf("server %q source = %q, want %q", s.Name, s.Source, path)
 				}
+				// A server from the global file, also one of its projects,
+				// is trusted. Every other server is untrusted.
+				if wantUntrusted := !tt.withHome || tt.side == "work"; s.Untrusted != wantUntrusted {
+					t.Errorf("server %q Untrusted = %v, want %v", s.Name, s.Untrusted, wantUntrusted)
+				}
 			}
 		})
 	}
 
+	t.Run("a symlink to the home file is the global file", func(t *testing.T) {
+		t.Parallel()
+		home, _ := copyFixture(t, "claude-code", "valid")
+		link := filepath.Join(t.TempDir(), "my.json")
+		if err := os.Symlink(filepath.Join(home, ".claude.json"), link); err != nil {
+			t.Skipf("symlink: %v", err)
+		}
+		res := ReadConfig(t.Context(), link, home)
+		if len(res.Errors) != 0 {
+			t.Fatalf("ReadConfig() errors = %v, want none", res.Errors)
+		}
+		// The projects section is read, so the file was read as global.
+		names := serverNames(res.Servers)
+		if !slices.Contains(names, "alpha-tool") || !slices.Contains(names, "filesystem") {
+			t.Errorf("ReadConfig() servers = %v, want the top-level and the project servers", names)
+		}
+		for _, s := range res.Servers {
+			if s.Untrusted || s.Source != link {
+				t.Errorf("server %q: Untrusted = %v, Source = %q; want false and %q", s.Name, s.Untrusted, s.Source, link)
+			}
+		}
+	})
+
+	t.Run("a symlinked home matches its home files", func(t *testing.T) {
+		t.Parallel()
+		// Both sides are resolved, so a home path that is itself a symlink
+		// (for example /var and /private/var on macOS) still matches.
+		home, _ := copyFixture(t, "cursor", "valid")
+		homeLink := filepath.Join(t.TempDir(), "home")
+		if err := os.Symlink(home, homeLink); err != nil {
+			t.Skipf("symlink: %v", err)
+		}
+		res := ReadConfig(t.Context(), filepath.Join(home, ".cursor", "mcp.json"), homeLink)
+		if len(res.Errors) != 0 || len(res.Servers) == 0 {
+			t.Fatalf("ReadConfig() = %+v, want servers and no errors", res)
+		}
+		for _, s := range res.Servers {
+			if s.Untrusted || s.Scope != ScopeGlobal {
+				t.Errorf("server %q: Untrusted = %v, Scope = %q; want false and %q", s.Name, s.Untrusted, s.Scope, ScopeGlobal)
+			}
+		}
+	})
+
+	t.Run("a file with a global name in another directory is untrusted", func(t *testing.T) {
+		t.Parallel()
+		home := t.TempDir()
+		writeFile(t, home, ".claude.json", []byte(`{"mcpServers":{"h":{"command":"x"}}}`))
+		other := t.TempDir()
+		path := writeFile(t, other, ".claude.json", []byte(`{"projects":{"/p":{"mcpServers":{"p":{"command":"x"}}}},"mcpServers":{"o":{"command":"x"}}}`))
+		res := ReadConfig(t.Context(), path, home)
+		if len(res.Errors) != 0 {
+			t.Fatalf("ReadConfig() errors = %v, want none", res.Errors)
+		}
+		if got := serverNames(res.Servers); !slices.Equal(got, []string{"o"}) {
+			t.Fatalf("ReadConfig() servers = %v, want [o] (the projects section is not read)", got)
+		}
+		if s := res.Servers[0]; !s.Untrusted || s.Scope != ScopeProject || s.ProjectPath != other {
+			t.Errorf("server = %+v, want Untrusted, ScopeProject and ProjectPath %q", s, other)
+		}
+	})
+
+	t.Run("a named file is confined and untrusted", func(t *testing.T) {
+		t.Parallel()
+		// The file can come from a cloned repository, so ReadConfig refuses a
+		// symlink out of its directory, as Discover does for
+		// <WorkDir>/.mcp.json. The canary in the target must never show.
+		outside := t.TempDir()
+		files := []struct {
+			name   string
+			target string
+			link   []string
+			data   string
+		}{
+			{"claude-code", "real.json", []string{".mcp.json"}, `{"mcpServers":{"a":{"command":"x","args":["` + discovertest.CanaryArgs + `"]}}}`},
+			{"cursor", "real-cursor.json", []string{".cursor", "mcp.json"}, `{"mcpServers":{"a":{"command":"x"}}}`},
+			{"codex", "real.toml", []string{".codex", "config.toml"}, "[mcp_servers.a]\ncommand = \"x\"\nargs = [\"" + discovertest.CanaryArgs + "\"]\n"},
+		}
+		for _, f := range files {
+			target := writeFile(t, outside, f.target, []byte(f.data))
+			link := filepath.Join(append([]string{t.TempDir()}, f.link...)...)
+			if err := os.MkdirAll(filepath.Dir(link), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Symlink(target, link); err != nil {
+				t.Skipf("symlink: %v", err)
+			}
+			// The target is not a home file either: home is outside.
+			res := ReadConfig(t.Context(), link, outside)
+			if len(res.Servers) != 0 {
+				t.Errorf("%s: ReadConfig() servers = %v, want none", f.name, serverNames(res.Servers))
+			}
+			if len(res.Errors) != 1 {
+				t.Fatalf("%s: ReadConfig() errors = %v, want exactly one", f.name, res.Errors)
+			}
+			fe := res.Errors[0]
+			if fe.Reason != reasonOutsideProject || fe.Path != link || !fe.Untrusted {
+				t.Errorf("%s: error = %+v, want reason %q, path %q and Untrusted", f.name, fe, reasonOutsideProject, link)
+			}
+			assertNoLeakErrors(t, res.Errors)
+		}
+	})
+
+	t.Run("a symlink that stays in the directory is followed", func(t *testing.T) {
+		t.Parallel()
+		dir := t.TempDir()
+		writeFile(t, dir, "conf/codex.toml", []byte("[mcp_servers.a]\ncommand = \"x\"\n"))
+		link := filepath.Join(dir, "config.toml")
+		if err := os.Symlink(filepath.Join("conf", "codex.toml"), link); err != nil {
+			t.Skipf("symlink: %v", err)
+		}
+		res := ReadConfig(t.Context(), link, "")
+		if len(res.Errors) != 0 || len(res.Servers) != 1 {
+			t.Fatalf("ReadConfig() = %+v, want one server and no errors", res)
+		}
+		if s := res.Servers[0]; !s.Untrusted || s.Scope != ScopeProject || s.ProjectPath != dir {
+			t.Errorf("server = %+v, want Untrusted, ScopeProject and ProjectPath %q", s, dir)
+		}
+	})
+
+	t.Run("untrusted codex errors are marked", func(t *testing.T) {
+		t.Parallel()
+		path := writeFile(t, t.TempDir(), "my.toml", []byte("[mcp_servers.a]\nurl = 5\n[mcp_servers.b]\ncommand = \"x\"\n"))
+		res := ReadConfig(t.Context(), path, "")
+		if len(res.Servers) != 1 || !res.Servers[0].Untrusted {
+			t.Fatalf("ReadConfig() servers = %+v, want one untrusted server", res.Servers)
+		}
+		if len(res.Errors) != 1 || !res.Errors[0].Untrusted {
+			t.Fatalf("ReadConfig() errors = %+v, want one untrusted error", res.Errors)
+		}
+	})
+
+	t.Run("an untrusted codex file has the smaller size limit", func(t *testing.T) {
+		t.Parallel()
+		path := writeFile(t, t.TempDir(), "my.toml", []byte("# "+strings.Repeat("x", maxTOMLSize)+"\n"))
+		res := ReadConfig(t.Context(), path, "")
+		if len(res.Errors) != 1 || res.Errors[0].Reason != reasonTooLarge || !res.Errors[0].Untrusted {
+			t.Fatalf("ReadConfig() errors = %v, want one untrusted %q", res.Errors, reasonTooLarge)
+		}
+	})
+
+	t.Run("an untrusted JSON file has the project size limit", func(t *testing.T) {
+		t.Parallel()
+		path := writeFile(t, t.TempDir(), ".mcp.json", []byte(`{"pad":"`+strings.Repeat("x", maxProjectConfigSize)+`"}`))
+		res := ReadConfig(t.Context(), path, "")
+		if len(res.Errors) != 1 || res.Errors[0].Reason != reasonTooLarge || !res.Errors[0].Untrusted {
+			t.Fatalf("ReadConfig() errors = %v, want one untrusted %q", res.Errors, reasonTooLarge)
+		}
+	})
+
 	t.Run("missing file", func(t *testing.T) {
 		t.Parallel()
 		path := filepath.Join(t.TempDir(), "nope.json")
-		res := ReadConfig(t.Context(), path)
+		res := ReadConfig(t.Context(), path, "")
 		if len(res.Servers) != 0 {
 			t.Errorf("ReadConfig() servers = %v, want none", serverNames(res.Servers))
 		}
@@ -327,8 +536,8 @@ func TestReadConfig(t *testing.T) {
 			t.Fatalf("ReadConfig() errors = %v, want exactly one", res.Errors)
 		}
 		fe := res.Errors[0]
-		if fe.Reason != reasonNotFound || fe.Path != path || fe.Server != "" {
-			t.Errorf("error = %+v, want path %q and reason %q", fe, path, reasonNotFound)
+		if fe.Reason != reasonNotFound || fe.Path != path || fe.Server != "" || !fe.Untrusted {
+			t.Errorf("error = %+v, want path %q, reason %q and Untrusted", fe, path, reasonNotFound)
 		}
 		if !strings.Contains(fe.Error(), path) {
 			t.Errorf("Error() = %q, want it to name the path %q", fe.Error(), path)
@@ -338,7 +547,7 @@ func TestReadConfig(t *testing.T) {
 	t.Run("missing file with a toml name", func(t *testing.T) {
 		t.Parallel()
 		path := filepath.Join(t.TempDir(), "config.toml")
-		res := ReadConfig(t.Context(), path)
+		res := ReadConfig(t.Context(), path, "")
 		if len(res.Errors) != 1 || res.Errors[0].Reason != reasonNotFound {
 			t.Errorf("ReadConfig() errors = %v, want one %q", res.Errors, reasonNotFound)
 		}
@@ -347,7 +556,7 @@ func TestReadConfig(t *testing.T) {
 	t.Run("directory", func(t *testing.T) {
 		t.Parallel()
 		path := t.TempDir()
-		res := ReadConfig(t.Context(), path)
+		res := ReadConfig(t.Context(), path, "")
 		if len(res.Servers) != 0 {
 			t.Errorf("ReadConfig() servers = %v, want none", serverNames(res.Servers))
 		}
@@ -356,49 +565,28 @@ func TestReadConfig(t *testing.T) {
 		}
 	})
 
-	t.Run("a file used as a directory is not found", func(t *testing.T) {
+	t.Run("a file used as a directory is an error", func(t *testing.T) {
 		t.Parallel()
-		// A file used as a directory: the OS error is ENOTDIR, not ENOENT.
-		// No config file can exist below a regular file, so readConfigFile
-		// treats it as missing, and ReadConfig reports "file not found".
+		// A file used as a directory. ReadConfig confines the read to the
+		// directory of the path, here a regular file. os.OpenRoot refuses it
+		// with a "not a directory" error that has no OS error number on Unix,
+		// so the reason is "cannot read file". Another OS can report the path
+		// as missing ("file not found"). Both are one untrusted error.
 		file := filepath.Join(t.TempDir(), "file.json")
 		if err := os.WriteFile(file, []byte("{}"), 0o600); err != nil {
 			t.Fatal(err)
 		}
-		res := ReadConfig(t.Context(), filepath.Join(file, "mcp.json"))
-		if len(res.Errors) != 1 {
-			t.Fatalf("ReadConfig() errors = %v, want exactly one", res.Errors)
+		path := filepath.Join(file, "mcp.json")
+		res := ReadConfig(t.Context(), path, "")
+		if len(res.Servers) != 0 || len(res.Errors) != 1 {
+			t.Fatalf("ReadConfig() = %+v, want exactly one error", res)
 		}
-		if res.Errors[0].Reason != reasonNotFound {
-			t.Errorf("reason = %q, want %q", res.Errors[0].Reason, reasonNotFound)
+		fe := res.Errors[0]
+		if fe.Reason != reasonNotFound && fe.Reason != reasonCannotRead {
+			t.Errorf("reason = %q, want %q or %q", fe.Reason, reasonNotFound, reasonCannotRead)
 		}
-	})
-
-	t.Run("a named project file is not confined and stays trusted", func(t *testing.T) {
-		t.Parallel()
-		// The user named the file, so ReadConfig follows a symlink out of its
-		// directory (Discover refuses that for <WorkDir>/.mcp.json) and does
-		// not mark the servers or errors Untrusted.
-		target := filepath.Join(t.TempDir(), "real.json")
-		if err := os.WriteFile(target, []byte(`{"mcpServers":{"a":{"command":"x"},"b":{"type":"bogus"}}}`), 0o600); err != nil {
-			t.Fatal(err)
-		}
-		link := filepath.Join(t.TempDir(), ".mcp.json")
-		if err := os.Symlink(target, link); err != nil {
-			t.Skipf("symlink: %v", err)
-		}
-		res := ReadConfig(t.Context(), link)
-		if len(res.Servers) != 1 || res.Servers[0].Name != "a" {
-			t.Fatalf("ReadConfig() servers = %v, want [a]", serverNames(res.Servers))
-		}
-		if res.Servers[0].Untrusted {
-			t.Error("server Untrusted = true, want false")
-		}
-		if len(res.Errors) != 1 {
-			t.Fatalf("ReadConfig() errors = %v, want exactly one", res.Errors)
-		}
-		if res.Errors[0].Untrusted {
-			t.Error("FileError Untrusted = true, want false")
+		if fe.Path != path || !fe.Untrusted {
+			t.Errorf("error = %+v, want path %q and Untrusted", fe, path)
 		}
 	})
 
@@ -426,12 +614,15 @@ func TestReadConfig(t *testing.T) {
 			if err := os.WriteFile(path, []byte(tt.data), 0o600); err != nil {
 				t.Fatal(err)
 			}
-			res := ReadConfig(t.Context(), path)
+			res := ReadConfig(t.Context(), path, "")
 			if len(res.Servers) != 0 {
 				t.Errorf("ReadConfig() servers = %v, want none", serverNames(res.Servers))
 			}
 			if len(res.Errors) != 1 || res.Errors[0].Reason != reasonUnknownFormat || res.Errors[0].Path != path {
 				t.Fatalf("ReadConfig() errors = %v, want one %q for %q", res.Errors, reasonUnknownFormat, path)
+			}
+			if !res.Errors[0].Untrusted {
+				t.Error("FileError Untrusted = false, want true")
 			}
 			if tt.data != "" && strings.Contains(res.Errors[0].Error(), strings.TrimSpace(tt.data)) {
 				t.Errorf("Error() = %q holds config text", res.Errors[0].Error())
@@ -460,7 +651,7 @@ func TestReadConfig(t *testing.T) {
 			if err := os.WriteFile(path, []byte(f.data), 0o600); err != nil {
 				t.Fatal(err)
 			}
-			res := ReadConfig(t.Context(), path)
+			res := ReadConfig(t.Context(), path, "")
 			if len(res.Servers) != 0 || len(res.Errors) != 0 {
 				t.Errorf("ReadConfig(%s with %s) = %+v, want an empty result", filepath.Join(f.rel...), f.data, res)
 			}
@@ -473,7 +664,7 @@ func TestReadConfig(t *testing.T) {
 		if err := os.WriteFile(path, []byte(" \n"), 0o600); err != nil {
 			t.Fatal(err)
 		}
-		res := ReadConfig(t.Context(), path)
+		res := ReadConfig(t.Context(), path, "")
 		if len(res.Servers) != 0 || len(res.Errors) != 0 {
 			t.Errorf("ReadConfig() = %+v, want an empty result", res)
 		}
@@ -492,7 +683,7 @@ func TestReadConfig(t *testing.T) {
 			t.Parallel()
 			home, _ := copyFixture(t, tt.fixture, "malformed")
 			path := filepath.Join(append([]string{home}, tt.rel...)...)
-			res := ReadConfig(t.Context(), path)
+			res := ReadConfig(t.Context(), path, "")
 			if len(res.Servers) != 0 {
 				t.Errorf("ReadConfig() servers = %v, want none", serverNames(res.Servers))
 			}
@@ -520,7 +711,7 @@ func TestReadConfig(t *testing.T) {
 		if err := os.WriteFile(path, []byte("{\n  \"mcpServers\": {\n"), 0o600); err != nil {
 			t.Fatal(err)
 		}
-		res := ReadConfig(t.Context(), path)
+		res := ReadConfig(t.Context(), path, "")
 		if len(res.Errors) != 1 || res.Errors[0].Reason != reasonInvalidJSON {
 			t.Fatalf("ReadConfig() errors = %v, want one %q", res.Errors, reasonInvalidJSON)
 		}
@@ -533,7 +724,7 @@ func TestReadConfig(t *testing.T) {
 		t.Parallel()
 		home, _ := copyFixture(t, "codex", "malformed")
 		path := filepath.Join(home, ".codex", "config.toml")
-		res := ReadConfig(t.Context(), path)
+		res := ReadConfig(t.Context(), path, "")
 		if len(res.Errors) != 1 || res.Errors[0].Reason != reasonInvalidTOML {
 			t.Fatalf("ReadConfig() errors = %v, want one %q", res.Errors, reasonInvalidTOML)
 		}
@@ -548,7 +739,7 @@ func TestReadConfig(t *testing.T) {
 		if err := os.Rename(src, dst); err != nil {
 			t.Fatal(err)
 		}
-		res := ReadConfig(t.Context(), dst)
+		res := ReadConfig(t.Context(), dst, "")
 		if len(res.Errors) != 0 || len(res.Servers) == 0 {
 			t.Fatalf("ReadConfig() = %+v, want codex servers", res)
 		}
@@ -588,7 +779,9 @@ func TestReadConfig(t *testing.T) {
 				if r[0] == "work" {
 					dir = work
 				}
-				res := ReadConfig(t.Context(), filepath.Join(append([]string{dir}, r[1:]...)...))
+				// With the home directory, the home files are read as global
+				// files and the work files as untrusted files.
+				res := ReadConfig(t.Context(), filepath.Join(append([]string{dir}, r[1:]...)...), home)
 				servers = append(servers, res.Servers...)
 				errs = append(errs, res.Errors...)
 			}
@@ -611,7 +804,7 @@ func TestReadConfig(t *testing.T) {
 		path := filepath.Join(home, ".claude.json")
 		ctx, cancel := context.WithCancel(t.Context())
 		cancel()
-		res := ReadConfig(ctx, path)
+		res := ReadConfig(ctx, path, "")
 		if len(res.Servers) != 0 {
 			t.Errorf("ReadConfig() servers = %v, want none", serverNames(res.Servers))
 		}
@@ -627,7 +820,7 @@ func TestReadConfig(t *testing.T) {
 		t.Parallel()
 		ctx, cancel := context.WithCancel(t.Context())
 		cancel()
-		res := ReadConfig(ctx, filepath.Join(t.TempDir(), "nope.json"))
+		res := ReadConfig(ctx, filepath.Join(t.TempDir(), "nope.json"), "")
 		if len(res.Errors) != 1 {
 			t.Fatalf("ReadConfig() errors = %v, want exactly one", res.Errors)
 		}

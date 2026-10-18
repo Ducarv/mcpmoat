@@ -313,11 +313,12 @@ func TestUsageContent(t *testing.T) {
 		"Scan flags (after \"scan\"):\n",
 		"  --no-connect ",
 		"  --config <file> ",
+		"A file that is not your own global config is read as an untrusted project file\n",
 		"Exit codes:\n",
 		"  0  no findings\n",
 		"  1  findings at or above --fail-on\n",
 		"  2  execution error\n",
-		"     (scan also exits 2 when a project config in the working directory has a problem)\n",
+		"     (scan also exits 2 when a config file has a problem; a missing file is not a problem)\n",
 	} {
 		if !strings.Contains(got, want) {
 			t.Errorf("usage text does not contain %q\n--- got ---\n%s", want, got)

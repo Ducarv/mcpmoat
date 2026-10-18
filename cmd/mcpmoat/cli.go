@@ -165,7 +165,7 @@ func (c *cli) usage(w io.Writer) {
 	fprintf(w, "  0  no findings\n")
 	fprintf(w, "  1  findings at or above --fail-on\n")
 	fprintf(w, "  2  execution error\n")
-	fprintf(w, "     (scan also exits 2 when a project config in the working directory has a problem)\n")
+	fprintf(w, "     (scan also exits 2 when a config file has a problem; a missing file is not a problem)\n")
 }
 
 // scanUsage writes the flags of the scan command to w. usage includes it, and
@@ -176,6 +176,7 @@ func (c *cli) scanUsage(w io.Writer) {
 	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
 	fprintf(tw, "  --no-connect\tList the servers in the configs. Starts no process and opens no connection\n")
 	fprintf(tw, "  --config <file>\tRead only this file (Claude Code JSON, Cursor JSON or Codex TOML); skips auto-discovery\n")
+	fprintf(tw, "  \tA file that is not your own global config is read as an untrusted project file\n")
 	_ = tw.Flush() // the write error is ignored on purpose, see fprintf
 }
 
