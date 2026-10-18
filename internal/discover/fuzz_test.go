@@ -23,7 +23,8 @@ import (
 //
 // Properties checked for any input:
 //   - the reader does not panic;
-//   - no FileError text holds the env canary (a config value must not leak);
+//   - no FileError text holds the env canary (a config value must not leak),
+//     unless the server name or the project key of the error holds it;
 //   - every FileError names the file and has one of the known reasons;
 //   - every Server has Source equal to the file and a known transport.
 
@@ -31,24 +32,15 @@ import (
 // only make an iteration slow and find no new bugs.
 const maxFuzzInput = 64 << 10
 
-// knownReasons is the set of fixed reason texts a FileError may have.
-var knownReasons = map[string]bool{
-	reasonCannotRead:       true,
-	reasonNotRegular:       true,
-	reasonTooLarge:         true,
-	reasonInvalidJSON:      true,
-	reasonInvalidTOML:      true,
-	reasonBadShape:         true,
-	reasonBadServers:       true,
-	reasonBadEntry:         true,
-	reasonUnknownTransport: true,
-	reasonNoCommandOrURL:   true,
-	reasonStdioNoCommand:   true,
-	reasonRemoteNoURL:      true,
-	reasonCanceled:         true,
-	reasonTooDeep:          true,
-	reasonTooManyServers:   true,
-}
+// knownReasons is the set of fixed reason texts a FileError may have. It is
+// built from allReasons, so a new reason needs no change here.
+var knownReasons = func() map[string]bool {
+	m := make(map[string]bool, len(allReasons))
+	for _, r := range allReasons {
+		m[r] = true
+	}
+	return m
+}()
 
 // fixtureSeeds returns the content of every fixture file with the given
 // extension under testdata/discover/<dirs...>. The "missing" fixtures only
@@ -96,9 +88,11 @@ func checkFuzzResult(t *testing.T, path string, res Result) {
 		if e.Reason == "" || !knownReasons[e.Reason] {
 			t.Errorf("FileError.Reason = %q, want one of the reason constants", e.Reason)
 		}
-		// A server name comes from the file, so it can legitimately hold the
-		// canary. Everything else in the message is fixed text or the path.
-		if !strings.Contains(e.Server, discovertest.CanaryEnv) {
+		// A server name and a project key come from the file, and an error
+		// shows them by design, so they can legitimately hold the canary.
+		// Everything else in the message is fixed text or the path.
+		if !strings.Contains(e.Server, discovertest.CanaryEnv) &&
+			!strings.Contains(e.ProjectPath, discovertest.CanaryEnv) {
 			if leaks := discovertest.Leaks(e.Error(), discovertest.CanaryEnv); len(leaks) > 0 {
 				t.Errorf("FileError text leaks the env canary: %q", e.Error())
 			}
@@ -121,11 +115,7 @@ func writeFuzzInput(t *testing.T, name string, data []byte) string {
 	if len(data) > maxFuzzInput {
 		t.Skip("input larger than 64 KiB")
 	}
-	path := filepath.Join(t.TempDir(), name)
-	if err := os.WriteFile(path, data, 0o600); err != nil {
-		t.Fatalf("write fuzz input: %v", err)
-	}
-	return path
+	return writeFile(t, t.TempDir(), name, data)
 }
 
 // FuzzReadClaudeCode fuzzes the JSON reader. Cursor files have the same JSON
@@ -152,6 +142,18 @@ func FuzzReadClaudeCode(f *testing.F) {
 		`{"mcpServers":{"a":"` + c + `"}}`,
 		// Raw newline inside a string (invalid JSON), before the canary.
 		"{\"mcpServers\":{\"a\":{\"command\":\"x\\ny\n\",\"env\":{\"K\":\"" + c + "\"}}}}",
+		// Known keys in a different letter case, next to the canary.
+		`{"MCPSERVERS":{"a":{"command":"x","env":{"K":"` + c + `"}}}}`,
+		`{"mcpServers":{"a":{"Command":"x","ENV":{"K":"` + c + `"}}}}`,
+		`{"projects":{"/p":{"mcpservers":{"a":{"command":"` + c + `"}}}},"Projects":{}}`,
+		// Lone surrogates in checked and in ignored parts, next to the canary.
+		`{"mcpServers":{"a\ud800":{"command":"x","env":{"K":"` + c + `"}}}}`,
+		`{"mcpServers":{"a":{"command":"x","env":{"K\udc00":"` + c + `"}}}}`,
+		`{"projects":{"/p\udbff":{"mcpServers":{"a":{"url":"http://h/` + c + `"}}}}}`,
+		`{"projects":{"/` + c + `\ud800":{"mcpServers":{"a":{"command":"x"}}}}}`,
+		`{"projects":{"/p":{"lastPrompt":"\ud83d","mcpServers":{"a":{"command":"` + c + `"}}}}}`,
+		`{"history":[{"display":"` + c + `\ud83d"}],"mcpServers":{"a":{"command":"x"}}}`,
+		`{"mcpServers":{"a":{"command":"x\\ud800","args":["😀"]}}}`,
 	} {
 		f.Add([]byte(seed))
 	}

@@ -15,32 +15,6 @@ import (
 	"github.com/Ducarv/mcpmoat/internal/discover/discovertest"
 )
 
-// writeTestFile writes data to name in a new temporary directory and returns
-// the path.
-func writeTestFile(t *testing.T, name string, data []byte) string {
-	t.Helper()
-	path := filepath.Join(t.TempDir(), name)
-	if err := os.WriteFile(path, data, 0o600); err != nil {
-		t.Fatalf("write %s: %v", path, err)
-	}
-	return path
-}
-
-// wantFileError fails the test unless fe is a file error for path with the
-// given reason.
-func wantFileError(t *testing.T, fe *FileError, path, reason string) {
-	t.Helper()
-	if fe == nil {
-		t.Fatalf("fe = nil, want reason %q", reason)
-	}
-	if fe.Reason != reason {
-		t.Errorf("fe.Reason = %q, want %q", fe.Reason, reason)
-	}
-	if fe.Path != path {
-		t.Errorf("fe.Path = %q, want %q", fe.Path, path)
-	}
-}
-
 func TestReadConfigFile(t *testing.T) {
 	t.Parallel()
 
@@ -57,7 +31,7 @@ func TestReadConfigFile(t *testing.T) {
 		{
 			name: "regular file",
 			setup: func(t *testing.T) string {
-				return writeTestFile(t, "a.json", []byte(`{"a":1}`))
+				return writeFile(t, t.TempDir(), "a.json", []byte(`{"a":1}`))
 			},
 			maxSize:   limit * 2,
 			wantData:  `{"a":1}`,
@@ -66,7 +40,7 @@ func TestReadConfigFile(t *testing.T) {
 		{
 			name: "empty file is found",
 			setup: func(t *testing.T) string {
-				return writeTestFile(t, "empty.json", nil)
+				return writeFile(t, t.TempDir(), "empty.json", nil)
 			},
 			maxSize:   limit,
 			wantData:  "",
@@ -75,7 +49,7 @@ func TestReadConfigFile(t *testing.T) {
 		{
 			name: "size exactly at the limit",
 			setup: func(t *testing.T) string {
-				return writeTestFile(t, "exact.json", bytes.Repeat([]byte("x"), limit))
+				return writeFile(t, t.TempDir(), "exact.json", bytes.Repeat([]byte("x"), limit))
 			},
 			maxSize:   limit,
 			wantData:  "xxxxxxxx",
@@ -84,7 +58,7 @@ func TestReadConfigFile(t *testing.T) {
 		{
 			name: "size one byte over the limit",
 			setup: func(t *testing.T) string {
-				return writeTestFile(t, "big.json", bytes.Repeat([]byte("x"), limit+1))
+				return writeFile(t, t.TempDir(), "big.json", bytes.Repeat([]byte("x"), limit+1))
 			},
 			maxSize:    limit,
 			wantReason: reasonTooLarge,
@@ -104,6 +78,16 @@ func TestReadConfigFile(t *testing.T) {
 			maxSize: limit,
 		},
 		{
+			name: "parent is a regular file",
+			setup: func(t *testing.T) string {
+				// ENOTDIR: no config can exist below a regular file.
+				skipOnWindows(t)
+				parent := writeFile(t, t.TempDir(), "file", []byte("x"))
+				return filepath.Join(parent, "config.json")
+			},
+			maxSize: limit,
+		},
+		{
 			name: "directory",
 			setup: func(t *testing.T) string {
 				return t.TempDir()
@@ -115,7 +99,7 @@ func TestReadConfigFile(t *testing.T) {
 			name: "valid symlink to a regular file",
 			setup: func(t *testing.T) string {
 				skipOnWindows(t)
-				target := writeTestFile(t, "target.json", []byte("{}"))
+				target := writeFile(t, t.TempDir(), "target.json", []byte("{}"))
 				link := filepath.Join(t.TempDir(), "link.json")
 				if err := os.Symlink(target, link); err != nil {
 					t.Fatalf("symlink: %v", err)
@@ -165,10 +149,8 @@ func TestReadConfigFile(t *testing.T) {
 					t.Fatalf("fe = %v, want nil", fe)
 				}
 			} else {
-				wantFileError(t, fe, path, tt.wantReason)
-				if fe != nil && fe.Err != nil {
-					t.Errorf("fe.Err = %v, want nil for a %q problem", fe.Err, tt.wantReason)
-				}
+				// A not-regular or too-large file has no OS error in Err.
+				checkFileErrors(t, path, []*FileError{fe}, []errWant{{Reason: tt.wantReason}})
 			}
 			if found != tt.wantFound {
 				t.Errorf("found = %v, want %v", found, tt.wantFound)
@@ -183,7 +165,9 @@ func TestReadConfigFile(t *testing.T) {
 	}
 }
 
-func skipOnWindows(t *testing.T) {
+// skipOnWindows skips the test on Windows. The tests that call it use
+// symlinks, FIFOs, file modes or path errors that behave differently there.
+func skipOnWindows(t testing.TB) {
 	t.Helper()
 	if runtime.GOOS == "windows" {
 		t.Skip("not supported on windows")
@@ -221,7 +205,7 @@ func TestReadConfigFileFIFO(t *testing.T) {
 
 	select {
 	case got := <-done:
-		wantFileError(t, got.fe, path, reasonNotRegular)
+		checkFileErrors(t, path, []*FileError{got.fe}, []errWant{{Reason: reasonNotRegular}})
 		if got.found || got.data != nil {
 			t.Errorf("found = %v, data = %q, want false and nil", got.found, got.data)
 		}
@@ -237,7 +221,7 @@ func TestReadConfigFileUnreadable(t *testing.T) {
 		t.Skip("root can read files with mode 0")
 	}
 
-	path := writeTestFile(t, "locked.json", []byte(discovertest.CanaryEnv))
+	path := writeFile(t, t.TempDir(), "locked.json", []byte(discovertest.CanaryEnv))
 	if err := os.Chmod(path, 0o000); err != nil {
 		t.Fatalf("chmod: %v", err)
 	}
@@ -248,10 +232,7 @@ func TestReadConfigFileUnreadable(t *testing.T) {
 
 	data, found, fe := readConfigFile(t.Context(), path, 1024)
 
-	wantFileError(t, fe, path, reasonCannotRead)
-	if fe == nil {
-		return
-	}
+	checkFileErrors(t, path, []*FileError{fe}, []errWant{{Reason: reasonCannotRead, HasErr: true}})
 	if !errors.Is(fe, fs.ErrPermission) {
 		t.Errorf("errors.Is(fe, fs.ErrPermission) = false, fe = %v", fe)
 	}
@@ -269,14 +250,11 @@ func TestReadConfigFileTooLargeNoLeak(t *testing.T) {
 	t.Parallel()
 
 	content := []byte(discovertest.CanaryEnv + discovertest.CanaryHeader)
-	path := writeTestFile(t, "big.json", content)
+	path := writeFile(t, t.TempDir(), "big.json", content)
 
 	data, found, fe := readConfigFile(t.Context(), path, 8)
 
-	wantFileError(t, fe, path, reasonTooLarge)
-	if fe == nil {
-		return
-	}
+	checkFileErrors(t, path, []*FileError{fe}, []errWant{{Reason: reasonTooLarge}})
 	if found || data != nil {
 		t.Errorf("found = %v, data = %q, want false and nil", found, data)
 	}
@@ -293,7 +271,7 @@ func TestReadConfigFileCanceled(t *testing.T) {
 		{
 			name: "existing file is not read",
 			path: func(t *testing.T) string {
-				return writeTestFile(t, "a.json", []byte(discovertest.CanaryEnv))
+				return writeFile(t, t.TempDir(), "a.json", []byte(discovertest.CanaryEnv))
 			},
 		},
 		{
@@ -314,10 +292,7 @@ func TestReadConfigFileCanceled(t *testing.T) {
 
 			data, found, fe := readConfigFile(ctx, path, 1024)
 
-			wantFileError(t, fe, path, reasonCanceled)
-			if fe == nil {
-				return
-			}
+			checkFileErrors(t, path, []*FileError{fe}, []errWant{{Reason: reasonCanceled, HasErr: true}})
 			if !errors.Is(fe, context.Canceled) {
 				t.Errorf("errors.Is(fe, context.Canceled) = false, fe = %v", fe)
 			}
@@ -332,14 +307,14 @@ func TestReadConfigFileCanceled(t *testing.T) {
 func TestReadConfigFileDeadlineExceeded(t *testing.T) {
 	t.Parallel()
 
-	path := writeTestFile(t, "a.json", []byte("{}"))
+	path := writeFile(t, t.TempDir(), "a.json", []byte("{}"))
 	ctx, cancel := context.WithDeadline(t.Context(), time.Unix(0, 0))
 	defer cancel()
 
 	_, found, fe := readConfigFile(ctx, path, 1024)
 
-	wantFileError(t, fe, path, reasonCanceled)
-	if fe != nil && !errors.Is(fe, context.DeadlineExceeded) {
+	checkFileErrors(t, path, []*FileError{fe}, []errWant{{Reason: reasonCanceled, HasErr: true}})
+	if !errors.Is(fe, context.DeadlineExceeded) {
 		t.Errorf("errors.Is(fe, context.DeadlineExceeded) = false, fe = %v", fe)
 	}
 	if found {

@@ -5,25 +5,12 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"os"
 	"path/filepath"
 	"reflect"
 	"testing"
 
 	"github.com/Ducarv/mcpmoat/internal/discover/discovertest"
 )
-
-// writeDiscoverFile writes content to dir/rel and creates the parent directories.
-func writeDiscoverFile(t testing.TB, dir, rel, content string) {
-	t.Helper()
-	path := filepath.Join(dir, rel)
-	if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
-		t.Fatalf("create directory for %s: %v", path, err)
-	}
-	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
-		t.Fatalf("write %s: %v", path, err)
-	}
-}
 
 // assertDiscoverNoErrors fails the test if r has any error.
 func assertDiscoverNoErrors(t testing.TB, r Result) {
@@ -196,10 +183,10 @@ func TestDiscoverEmptyOptions(t *testing.T) {
 func TestDiscoverIgnoresRealHome(t *testing.T) {
 	dir := t.TempDir()
 	const jsonConfig = `{"mcpServers": {"trap": {"command": "x"}}}`
-	writeDiscoverFile(t, dir, ".claude.json", jsonConfig)
-	writeDiscoverFile(t, dir, ".mcp.json", jsonConfig)
-	writeDiscoverFile(t, dir, filepath.Join(".cursor", "mcp.json"), jsonConfig)
-	writeDiscoverFile(t, dir, filepath.Join(".codex", "config.toml"), "[mcp_servers.trap]\ncommand = \"x\"\n")
+	writeFile(t, dir, ".claude.json", []byte(jsonConfig))
+	writeFile(t, dir, ".mcp.json", []byte(jsonConfig))
+	writeFile(t, dir, ".cursor/mcp.json", []byte(jsonConfig))
+	writeFile(t, dir, codexConfigRel, []byte("[mcp_servers.trap]\ncommand = \"x\"\n"))
 	t.Setenv("HOME", dir)
 	t.Setenv("USERPROFILE", dir)
 	t.Chdir(dir)
@@ -247,10 +234,10 @@ func TestDiscoverEmptyStaysEmpty(t *testing.T) {
 	// Not parallel: t.Chdir panics in a parallel test.
 	dir := t.TempDir()
 	const jsonConfig = `{"mcpServers": {"trap": {"command": "x"}}}`
-	writeDiscoverFile(t, dir, ".claude.json", jsonConfig)
-	writeDiscoverFile(t, dir, ".mcp.json", jsonConfig)
-	writeDiscoverFile(t, dir, filepath.Join(".cursor", "mcp.json"), jsonConfig)
-	writeDiscoverFile(t, dir, filepath.Join(".codex", "config.toml"), "[mcp_servers.trap]\ncommand = \"x\"\n")
+	writeFile(t, dir, ".claude.json", []byte(jsonConfig))
+	writeFile(t, dir, ".mcp.json", []byte(jsonConfig))
+	writeFile(t, dir, ".cursor/mcp.json", []byte(jsonConfig))
+	writeFile(t, dir, codexConfigRel, []byte("[mcp_servers.trap]\ncommand = \"x\"\n"))
 	t.Chdir(dir)
 
 	r := Discover(t.Context(), Options{Home: "", WorkDir: ""})
@@ -389,10 +376,10 @@ func TestDiscoverNoLeak(t *testing.T) {
   "env": {"API_KEY": %q}
 }}}`, discovertest.CanaryEnv)
 
-	writeDiscoverFile(t, home, ".claude.json", stdioEntry)
-	writeDiscoverFile(t, home, filepath.Join(".cursor", "mcp.json"), entry("cursor-http"))
-	writeDiscoverFile(t, work, filepath.Join(".cursor", "mcp.json"), entry("cursor-project-http"))
-	writeDiscoverFile(t, home, filepath.Join(".codex", "config.toml"), fmt.Sprintf(`[mcp_servers.codex-http]
+	writeFile(t, home, ".claude.json", []byte(stdioEntry))
+	writeFile(t, home, ".cursor/mcp.json", []byte(entry("cursor-http")))
+	writeFile(t, work, ".cursor/mcp.json", []byte(entry("cursor-project-http")))
+	writeFile(t, home, codexConfigRel, []byte(fmt.Sprintf(`[mcp_servers.codex-http]
 url = "https://user:%s@example.com/mcp"
 
 [mcp_servers.codex-http.http_headers]
@@ -403,14 +390,15 @@ command = "x"
 
 [mcp_servers.codex-stdio.env]
 API_KEY = %q
-`, discovertest.CanaryURL, discovertest.CanaryHeader, discovertest.CanaryEnv))
+`, discovertest.CanaryURL, discovertest.CanaryHeader, discovertest.CanaryEnv)))
+
 	// The malformed file has the bad spot (a missing colon) before the canaries.
-	writeDiscoverFile(t, work, ".mcp.json", fmt.Sprintf(`{"mcpServers": {"bad" {
+	writeFile(t, work, ".mcp.json", []byte(fmt.Sprintf(`{"mcpServers": {"bad" {
   "command": "x",
   "env": {"API_KEY": %q},
   "headers": {"X-Key": %q},
   "url": "https://user:%s@example.com/mcp"
-}}}`, discovertest.CanaryEnv, discovertest.CanaryHeader, discovertest.CanaryURL))
+}}}`, discovertest.CanaryEnv, discovertest.CanaryHeader, discovertest.CanaryURL)))
 
 	r := Discover(t.Context(), Options{Home: home, WorkDir: work})
 

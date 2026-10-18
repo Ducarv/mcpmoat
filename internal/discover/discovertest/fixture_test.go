@@ -1,6 +1,7 @@
 package discovertest_test
 
 import (
+	"errors"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -302,7 +303,7 @@ func TestCopyFixtureWriteDoesNotChangeOriginal(t *testing.T) {
 			if string(data) != original {
 				t.Errorf("original = %q, want %q", data, original)
 			}
-			if _, err := os.Stat(filepath.Join(fixture, filepath.Dir(filepath.FromSlash(tt.rel)), "new-file.json")); !os.IsNotExist(err) {
+			if _, err := os.Stat(filepath.Join(fixture, filepath.Dir(filepath.FromSlash(tt.rel)), "new-file.json")); !errors.Is(err, fs.ErrNotExist) {
 				t.Errorf("new file in the copy appeared in the fixture (stat error = %v)", err)
 			}
 		})
