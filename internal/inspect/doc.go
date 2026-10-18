@@ -76,7 +76,89 @@
 // The group kill works on Unix only (macOS and Linux). On other systems, only
 // the direct child is killed.
 //
-// The text of Outcome.Err is untrusted (see Outcome).
+// # Remote servers
 //
-// See docs/PRD.md, FR-04 to FR-06, NFR-03, NFR-04 and NFR-06.
+// [Remote] connects to a remote server and lists its tools, prompts and
+// resources. It refuses a server from an untrusted project file unless the
+// caller sets [RemoteOptions].AllowUntrusted after the explicit opt-in of the
+// user. The config type of the server picks the transport: http is
+// streamable HTTP, and sse is the legacy HTTP+SSE transport. mcpmoat does not
+// probe the other transport. If a server answers with an error that may mean
+// the wrong transport, the error text tells the user to change the type.
+//
+// # Secrets
+//
+// The header values and the secrets in the URL (the userinfo and the query)
+// go only to the configured origin. They never appear in an error. The
+// package removes them from the error text before it builds a [ConnectError].
+// The package never gives the userinfo of the URL to the SDK. It sends the
+// userinfo as a Basic Authorization header, unless the config sets an
+// Authorization header.
+//
+// The text of a [ConnectError] can still hold text that the server controls
+// (see "Untrusted data" below).
+//
+// # Client identity
+//
+// The package does not tell the server that the client is mcpmoat. The
+// default User-Agent is the net/http one, and the client name in the MCP
+// initialize request is a generic one. A server that recognises the scanner
+// could show it a clean tool list and show the real clients a poisoned one.
+// A server can still tell clients apart in other ways (see docs/PRD.md,
+// section 5.5).
+//
+// # Origin pin and redirects
+//
+// Every request must go to the configured scheme, host and port. The package
+// refuses any other request before it sends anything. This also blocks an SSE
+// server that announces its message endpoint on another host.
+//
+// A redirect is followed only when it stays on the same origin, and at most 3
+// times. Any other redirect is an error.
+//
+// # Limits
+//
+// A hostile server can send endless data, so the package sets limits:
+//
+//   - Each HTTP response body has a size cap (8 MiB by default). The whole
+//     SSE stream counts as one body.
+//   - All bodies of one inspection share a total budget (64 MiB). Many bodies
+//     that are each below the cap cannot add up to more than the budget.
+//   - The response headers of one response have a size limit (64 KiB).
+//   - A list has a cap on the number of pages (100) and the number of items
+//     (10,000). A repeated cursor is an error.
+//   - The SDK silently drops tools that have an invalid x-mcp-header
+//     annotation. The package records the tools list as the server sent it and
+//     reports every tool, because a scanner must see what the server sent.
+//
+// A cap breach is an error. The package never cuts a list and returns the
+// rest, because the cut part could hide a malicious tool.
+//
+// The caps count bytes on the wire. The SDK decodes each page into Go values
+// before the item cap applies, and decoded JSON can take many times its wire
+// size (a schema of millions of empty objects, for example). So one page can
+// use far more memory than the body cap. Issue #101 tracks a bounded decoder.
+//
+// # Network
+//
+// The package honours the proxy settings from the HTTP_PROXY, HTTPS_PROXY and
+// NO_PROXY environment variables. It makes no other network access (NFR-01).
+// Some clients ignore these variables, so a scan can take another route than
+// the client does. Over an http:// URL, the proxy then sees the configured
+// headers.
+//
+// TLS 1.2 or newer is required, and certificates are always verified. There is
+// no option to skip the check: only tests in this package can replace the
+// transport.
+//
+// # Untrusted data
+//
+// Every string in a [Result] comes from the server, and a malicious server
+// controls it. Never execute it, never put it in a command or a format
+// string, and escape it with internal/termsafe before you print it. The same
+// is true for the text of a [ConnectError], which can hold a status text or a
+// JSON-RPC message from the server, and for the text of Outcome.Err (see
+// Outcome).
+//
+// See docs/PRD.md, FR-04 to FR-06, NFR-01, NFR-03, NFR-04 and NFR-06.
 package inspect

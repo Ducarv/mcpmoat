@@ -229,6 +229,83 @@ func redactPathSegment(seg string) string {
 	return strings.Join(parts, ";")
 }
 
+// SecretPathSegments returns the path segments of raw that RedactURL masks,
+// each in its escaped form and, when it differs, in its unescaped form. It
+// returns nil when raw does not parse or has no such segment.
+//
+// RedactURL masks a segment only as part of the whole URL. A caller that
+// scrubs other text, for example an error that holds another URL with the
+// same path prefix, uses this list to remove the segments one by one.
+func SecretPathSegments(raw string) []string {
+	u, err := url.Parse(raw)
+	if err != nil {
+		return nil
+	}
+	var segments []string
+	add := func(s string) {
+		if s == "" {
+			return
+		}
+		segments = append(segments, s)
+		if plain, err := url.PathUnescape(s); err == nil && plain != s {
+			segments = append(segments, plain)
+		}
+	}
+	for seg := range strings.SplitSeq(u.EscapedPath(), "/") {
+		if seg == "" || redactPathSegment(seg) == seg {
+			continue
+		}
+		add(seg)
+		// redactPathSegment masks each part after ";" (a matrix parameter),
+		// and the part before it when it is secret. A server can echo such a
+		// part alone, so list the masked parts too.
+		if parts := strings.Split(seg, ";"); len(parts) > 1 {
+			if isSecretPathSegment(parts[0]) {
+				add(parts[0])
+			}
+			for _, p := range parts[1:] {
+				add(p)
+			}
+		}
+	}
+	return segments
+}
+
+// SecretQueryParts returns the parts of rawQuery that RedactURL masks, one by
+// one: every value, every bare part with no "=", and every key that looks
+// like a credential (see isSecretQueryKey). Each part comes in its raw form
+// and, when it differs, unescaped. It splits on "&" and ";", as RedactURL
+// does.
+//
+// RedactURL masks the query only as part of the whole URL. A caller that
+// scrubs other text, for example an error message that echoes a query value
+// alone, uses this list to remove the parts one by one.
+func SecretQueryParts(rawQuery string) []string {
+	var parts []string
+	add := func(s string) {
+		if s == "" {
+			return
+		}
+		parts = append(parts, s)
+		if plain, err := url.QueryUnescape(s); err == nil && plain != s {
+			parts = append(parts, plain)
+		}
+	}
+	isSep := func(r rune) bool { return r == '&' || r == ';' }
+	for part := range strings.FieldsFuncSeq(rawQuery, isSep) {
+		key, value, found := strings.Cut(part, "=")
+		if !found {
+			add(part)
+			continue
+		}
+		if isSecretQueryKey(key) {
+			add(key)
+		}
+		add(value)
+	}
+	return parts
+}
+
 // isSecretPathSegment reports whether seg, one escaped path segment with no
 // ";" part, must be masked. It fails closed: a segment that does not
 // unescape, or whose unescaped form has "=", "," or ";", is masked.

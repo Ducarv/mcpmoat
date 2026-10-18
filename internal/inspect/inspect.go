@@ -21,12 +21,6 @@ const (
 	StatusFailed Status = "failed"
 )
 
-// Result holds what an inspection read from one server.
-//
-// It is a placeholder. Issue #31 adds tools, prompts and resources as
-// SDK-independent types.
-type Result struct{}
-
 // Inspector connects to one MCP server and reads its content.
 //
 // Inspect MUST honour ctx. It must return soon after ctx is done. Run waits for
