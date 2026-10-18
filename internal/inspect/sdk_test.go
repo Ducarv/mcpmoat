@@ -602,7 +602,7 @@ func TestSDKInspectRemovesWorkDir(t *testing.T) {
 			t.Fatal(err)
 		}
 		pidfile := filepath.Join(t.TempDir(), "pid")
-		s := stdio("-pidfile", pidfile)
+		s := sdkBenign(t, "-pidfile", pidfile)
 
 		res, err := inspect.NewForTest(inspect.Options{}, filepath.Join(file, "run"), nil).Inspect(sdkCtx(t, sdkTimeout), s)
 		sdkAssertFailed(t, res, err, inspect.ErrStart)

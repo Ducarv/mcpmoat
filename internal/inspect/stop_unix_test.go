@@ -183,11 +183,15 @@ func TestSDKInspectKillsProcessGroup(t *testing.T) {
 func TestSDKInspectFloodWithoutReads(t *testing.T) {
 	t.Parallel()
 
+	// Build the fixture before the timer and the ctx start, so a cold
+	// build cache does not count against the bound.
+	server := sdkBenign(t, "-mode", "flood-list")
+	inspector := sdkNew(t, inspect.Options{})
 	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
 	defer cancel()
 
 	start := time.Now()
-	res, err := sdkNew(t, inspect.Options{}).Inspect(ctx, sdkBenign(t, "-mode", "flood-list"))
+	res, err := inspector.Inspect(ctx, server)
 	elapsed := time.Since(start)
 
 	if err != nil {
