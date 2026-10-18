@@ -204,6 +204,9 @@ func TestReadCodexSecrets(t *testing.T) {
 	if s1.Env["API_KEY"].Reveal() != discovertest.CanaryEnv {
 		t.Error("s1 env API_KEY does not reveal the env canary")
 	}
+	if got := s1.Args.Values(); !reflect.DeepEqual(got, []string{"--token", discovertest.CanaryArgs}) {
+		t.Error("s1 args do not hold the args canary after --token")
+	}
 
 	s2 := r.Servers[1]
 	if s2.Transport != TransportHTTP {

@@ -13,132 +13,16 @@ import (
 	"github.com/Ducarv/mcpmoat/internal/discover/discovertest"
 )
 
-// stdioServer returns a stdio Server whose env value is a canary. Each call
-// returns a new Server, so tests can change the result safely.
-func stdioServer() discover.Server {
-	return discover.Server{
-		Name:      "fs",
-		Client:    discover.ClientClaudeCode,
-		Scope:     discover.ScopeGlobal,
-		Source:    "/tmp/x/.claude.json", // only a string: nothing reads this path
-		Transport: discover.TransportStdio,
-		Command:   "npx",
-		Args:      []string{"-y", "pkg"},
-		Env:       discover.SecretMap{"API_KEY": discover.NewSecret(discovertest.CanaryEnv)},
-	}
-}
-
-// remoteURL is the URL of httpServer. It holds the URL canary in the
-// userinfo and in a query value, so a test catches a leak of either part.
-const remoteURL = "https://user:" + discovertest.CanaryURL +
-	"@example.com/mcp?api_key=" + discovertest.CanaryURL
-
-// httpServer returns a remote Server whose URL and header value contain
-// canaries.
-func httpServer() discover.Server {
-	return discover.Server{
-		Name:      "remote",
-		Client:    discover.ClientCursor,
-		Scope:     discover.ScopeProject,
-		Source:    "/tmp/x/.cursor/mcp.json",
-		Transport: discover.TransportHTTP,
-		URL:       discover.NewURL(remoteURL),
-		Headers: discover.SecretMap{
-			"Authorization": discover.NewSecret("Bearer " + discovertest.CanaryHeader),
-		},
-	}
-}
-
 // TestServerNoLeak checks the issue #16 acceptance criterion: printing,
-// logging or encoding a Server never shows an env value, a header value or
-// the credentials in its URL, but still shows the key name, the URL host and
-// Mask in their place.
+// logging or encoding a Server never shows an env value, a header value, a
+// token in its args or the credentials in its URL, but still shows the key
+// name, the URL host and Mask in their place. serverRenders
+// (helpers_test.go) lists the outputs.
 func TestServerNoLeak(t *testing.T) {
 	t.Parallel()
 
-	// Each render function turns a Server into the text a user could see.
-	type render func(t *testing.T, s discover.Server) string
-
-	formatRender := func(verb string) render {
-		return func(_ *testing.T, s discover.Server) string {
-			return fmt.Sprintf(verb, s)
-		}
-	}
-	jsonRender := func(t *testing.T, s discover.Server) string {
-		t.Helper()
-		out, err := json.Marshal(s)
-		if err != nil {
-			t.Fatalf("json.Marshal() error = %v", err)
-		}
-		return string(out)
-	}
-	// slogRender logs one attr with the handler that newHandler returns and
-	// gives the log text. value turns the Server into the attr value, so a
-	// test can log a Server or a *Server.
-	slogRender := func(
-		newHandler func(*bytes.Buffer) slog.Handler,
-		value func(s discover.Server) any,
-	) render {
-		return func(_ *testing.T, s discover.Server) string {
-			var buf bytes.Buffer
-			slog.New(newHandler(&buf)).Info("server found", slog.Any("server", value(s)))
-			return buf.String()
-		}
-	}
-	textHandler := func(buf *bytes.Buffer) slog.Handler { return slog.NewTextHandler(buf, nil) }
-	jsonHandler := func(buf *bytes.Buffer) slog.Handler { return slog.NewJSONHandler(buf, nil) }
-	asValue := func(s discover.Server) any { return s }
-	asPointer := func(s discover.Server) any { return &s }
-
-	// holder keeps a Server in an exported field. fmt walks into the field
-	// by reflection and, because every field on the path is exported, it can
-	// call the Format methods of the URL and Secret fields inside it.
-	type holder struct {
-		Server discover.Server
-	}
-
-	servers := []struct {
-		name   string
-		server discover.Server
-		key    string // the env or header name that must stay visible
-		host   string // the URL host that must stay visible, or "" for none
-	}{
-		{name: "stdio", server: stdioServer(), key: "API_KEY"},
-		{name: "http", server: httpServer(), key: "Authorization", host: "example.com"},
-	}
-	renders := []struct {
-		name   string
-		render render
-	}{
-		{name: "%v", render: formatRender("%v")},
-		{name: "%+v", render: formatRender("%+v")},
-		{name: "%#v", render: formatRender("%#v")},
-		{name: "%s", render: formatRender("%s")},
-		{name: "json", render: jsonRender},
-		// A *Server goes through a different fmt path (fmt prints &{...}).
-		{name: "pointer %+v", render: func(_ *testing.T, s discover.Server) string {
-			return fmt.Sprintf("%+v", &s)
-		}},
-		{name: "error %+v", render: func(_ *testing.T, s discover.Server) string {
-			return fmt.Errorf("x: %+v", s).Error()
-		}},
-		{name: "slice", render: func(_ *testing.T, s discover.Server) string {
-			return fmt.Sprint([]discover.Server{s})
-		}},
-		{name: "map %+v", render: func(_ *testing.T, s discover.Server) string {
-			return fmt.Sprintf("%+v", map[string]discover.Server{s.Name: s})
-		}},
-		{name: "exported field %+v", render: func(_ *testing.T, s discover.Server) string {
-			return fmt.Sprintf("%+v", holder{Server: s})
-		}},
-		{name: "slog text", render: slogRender(textHandler, asValue)},
-		{name: "slog text pointer", render: slogRender(textHandler, asPointer)},
-		{name: "slog json", render: slogRender(jsonHandler, asValue)},
-		{name: "slog json pointer", render: slogRender(jsonHandler, asPointer)},
-	}
-
-	for _, sv := range servers {
-		for _, r := range renders {
+	for _, sv := range testServers() {
+		for _, r := range serverRenders() {
 			t.Run(sv.name+"/"+r.name, func(t *testing.T) {
 				t.Parallel()
 				out := r.render(t, sv.server)
@@ -161,23 +45,16 @@ func TestServerNoLeak(t *testing.T) {
 // TestServerUnexportedFieldNoLeak checks a Server held in an unexported
 // field of another struct. fmt cannot call methods on an unexported field
 // (reflect CanInterface is false), so it prints the Server fields by
-// reflection. URL and Secret keep their values behind a pointer, so fmt
-// prints only addresses and no canary appears.
+// reflection. URL, Secret and Args keep their values behind a pointer, so
+// fmt prints only addresses and no canary appears. Every verb is checked:
+// %s and %q on a pointer take another fmt path (badVerb) than %v.
 func TestServerUnexportedFieldNoLeak(t *testing.T) {
 	t.Parallel()
 
 	type wrapper struct{ s discover.Server }
 
-	verbs := []string{"%v", "%+v", "%#v"}
-	servers := []struct {
-		name   string
-		server discover.Server
-	}{
-		{name: "stdio", server: stdioServer()},
-		{name: "http", server: httpServer()},
-	}
-	for _, sv := range servers {
-		for _, verb := range verbs {
+	for _, sv := range testServers() {
+		for _, verb := range fmtVerbs() {
 			t.Run(sv.name+"/"+verb, func(t *testing.T) {
 				t.Parallel()
 				out := fmt.Sprintf(verb, wrapper{s: sv.server})
@@ -190,9 +67,9 @@ func TestServerUnexportedFieldNoLeak(t *testing.T) {
 // TestServerBadVerbNoLeak checks the fmt paths that skip every method. %p on
 // a struct and %w on a value that is not an error are bad verbs: fmt prints
 // "%!p(...)" or "%!w(...)" and shows the fields by reflection without
-// calling Format or String on them. Only the pointers inside URL and Secret
-// show, so no canary appears. (%p with a *Server is valid and prints only an
-// address.)
+// calling Format or String on them. Only the pointers inside URL, Secret
+// and Args show, so no canary appears. (%p with a *Server is valid and
+// prints only an address.)
 func TestServerBadVerbNoLeak(t *testing.T) {
 	t.Parallel()
 
@@ -200,14 +77,7 @@ func TestServerBadVerbNoLeak(t *testing.T) {
 	// constant "%p" or "%w" format with a Server argument, and here the bad
 	// verb is what the test checks.
 	formats := []string{"%p", "%w", "%+p", "%#w"}
-	servers := []struct {
-		name   string
-		server discover.Server
-	}{
-		{name: "stdio", server: stdioServer()},
-		{name: "http", server: httpServer()},
-	}
-	for _, sv := range servers {
+	for _, sv := range testServers() {
 		for _, format := range formats {
 			t.Run(sv.name+"/"+format, func(t *testing.T) {
 				t.Parallel()
@@ -246,7 +116,7 @@ func TestServerEmbeddedNoLeak(t *testing.T) {
 		{
 			name:   "%+v",
 			render: func() (string, error) { return fmt.Sprintf("%+v", outer{Server: httpServer(), N: 42}), nil },
-			wantIn: []string{"N:42", "URL:" + discover.RedactURL(remoteURL), discover.Mask},
+			wantIn: []string{"N:42", "URL:" + discover.RedactURL(leakyURL), discover.Mask},
 		},
 		{
 			name: "json",
@@ -280,34 +150,27 @@ func TestServerEmbeddedNoLeak(t *testing.T) {
 func TestServerSlogNilPointer(t *testing.T) {
 	t.Parallel()
 
-	handlers := []struct {
-		name     string
-		make     func(*bytes.Buffer) slog.Handler
-		wantAttr string // how the handler shows the nil pointer
-	}{
-		{
-			name:     "text",
-			make:     func(b *bytes.Buffer) slog.Handler { return slog.NewTextHandler(b, nil) },
-			wantAttr: "server=<nil>",
-		},
-		{
-			name:     "json",
-			make:     func(b *bytes.Buffer) slog.Handler { return slog.NewJSONHandler(b, nil) },
-			wantAttr: `"server":null`,
-		},
+	// wantAttr is how each handler shows the nil pointer.
+	wantAttr := map[string]string{
+		"text": "server=<nil>",
+		"json": `"server":null`,
 	}
-	for _, h := range handlers {
+	for _, h := range slogHandlers() {
 		t.Run(h.name, func(t *testing.T) {
 			t.Parallel()
 			var buf bytes.Buffer
 			var s *discover.Server
-			slog.New(h.make(&buf)).Info("server found", slog.Any("server", s))
+			slog.New(h.newHandler(&buf)).Info("server found", slog.Any("server", s))
 			out := buf.String()
 			if strings.Contains(out, "panicked") || strings.Contains(out, "PANIC") {
 				t.Errorf("log output reports a panic; output:\n%s", out)
 			}
-			if !strings.Contains(out, h.wantAttr) {
-				t.Errorf("log output does not contain %q; output:\n%s", h.wantAttr, out)
+			want, ok := wantAttr[h.name]
+			if !ok {
+				t.Fatalf("no wantAttr for handler %q", h.name)
+			}
+			if !strings.Contains(out, want) {
+				t.Errorf("log output does not contain %q; output:\n%s", want, out)
 			}
 		})
 	}
@@ -319,7 +182,7 @@ func TestServerSlogNilPointer(t *testing.T) {
 func TestServerFieldNames(t *testing.T) {
 	t.Parallel()
 
-	redactedURL := discover.RedactURL(remoteURL)
+	redactedURL := discover.RedactURL(leakyURL)
 	tests := []struct {
 		name      string
 		verb      string
@@ -386,6 +249,8 @@ func TestConstantStrings(t *testing.T) {
 	}
 }
 
+// TestTransportIsRemote checks that only the HTTP and SSE transports are
+// remote.
 func TestTransportIsRemote(t *testing.T) {
 	t.Parallel()
 
@@ -411,9 +276,9 @@ func TestTransportIsRemote(t *testing.T) {
 }
 
 // TestServerDeepEqual checks that reflect.DeepEqual compares the values
-// behind Secrets and URLs, not their addresses. Each NewSecret call stores
-// its value at a new address, so a pointer comparison would report false for
-// equal Servers.
+// behind Secrets, URLs and Args, not their addresses. Each NewSecret,
+// NewURL and NewArgs call stores its value at a new address, so a pointer
+// comparison would report false for equal Servers.
 func TestServerDeepEqual(t *testing.T) {
 	t.Parallel()
 
@@ -438,6 +303,20 @@ func TestServerDeepEqual(t *testing.T) {
 			name: "same env value, new Secret",
 			change: func(s *discover.Server) {
 				s.Env = discover.SecretMap{"API_KEY": discover.NewSecret(discovertest.CanaryEnv)}
+			},
+			want: true,
+		},
+		{
+			name: "different args",
+			change: func(s *discover.Server) {
+				s.Args = discover.NewArgs([]string{"-y", "other"})
+			},
+			want: false,
+		},
+		{
+			name: "same args, new Args",
+			change: func(s *discover.Server) {
+				s.Args = discover.NewArgs(s.Args.Values())
 			},
 			want: true,
 		},

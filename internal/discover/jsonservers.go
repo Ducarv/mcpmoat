@@ -235,7 +235,7 @@ func (p *jsonParser) newServer(name string, e jsonEntry, scope Scope, projectPat
 		srv.Headers = e.Headers
 	} else {
 		srv.Command = e.Command
-		srv.Args = e.Args
+		srv.Args = NewArgs(e.Args)
 		srv.Env = e.Env
 	}
 	return srv, ""

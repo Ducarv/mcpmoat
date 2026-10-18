@@ -1,8 +1,9 @@
 // Package discovertest has test helpers that check output for leaked secrets.
 //
-// Fixtures put the canary values below in env and header fields. Tests then
-// call AssertNoLeak on everything the code under test prints or returns
-// (text, JSON, errors, logs) to prove that no value reached the output.
+// Fixtures put the canary values below in env, header, URL and args fields.
+// Tests then call AssertNoLeak on everything the code under test prints or
+// returns (text, JSON, errors, logs) to prove that no value reached the
+// output.
 //
 // Import this package only from _test.go files, so the testing package never
 // reaches the mcpmoat binary.
@@ -16,21 +17,26 @@ import (
 	"testing"
 )
 
-// Canary values are fake secrets for fixtures and tests. Each one is unique and needs
-// no escaping in Go or JSON strings, so tests can search any output for it.
+// Canary values are fake secrets for fixtures and tests. Each one is unique
+// and needs no escaping in Go or JSON strings, so tests can search any
+// output for it.
 const (
 	// CanaryEnv is the fake value for env entries in fixtures.
 	CanaryEnv = "mcpmoat-canary-env-7Q2xK9"
 	// CanaryHeader is the fake value for HTTP header entries in fixtures.
 	CanaryHeader = "mcpmoat-canary-header-4Vb8Rt"
-	// CanaryURL is the fake value for secrets embedded in server URLs in fixtures.
+	// CanaryURL is the fake value for secrets embedded in server URLs in
+	// fixtures.
 	CanaryURL = "mcpmoat-canary-url-9Jd3Wm"
+	// CanaryArgs is the fake value for secrets in stdio command args in
+	// fixtures.
+	CanaryArgs = "mcpmoat-canary-args-5Hn6Tc"
 )
 
 // Canaries returns every canary value.
 // It returns a new slice on each call, so callers can change it safely.
 func Canaries() []string {
-	return []string{CanaryEnv, CanaryHeader, CanaryURL}
+	return []string{CanaryEnv, CanaryHeader, CanaryURL, CanaryArgs}
 }
 
 // minEncodedLen is the shortest value, in bytes, that Leaks searches for in
@@ -38,27 +44,24 @@ func Canaries() []string {
 // enough to appear in unrelated output by chance. For example, "ab" is "6162"
 // in hex and "YWI" in base64, and a false positive would fail a good test.
 // Leaks searches for a shorter value only as written and Go-quoted.
+//
+// base64Forms needs minEncodedLen >= 8: see the comment in its loop. The
+// boundary cases in the tests (7 and 8 bytes) fail if this value changes.
 const minEncodedLen = 8
 
-// minBase64Core is the shortest base64 core that Leaks searches for. A shorter
-// core could match unrelated text by chance and give a false positive.
-const minBase64Core = 8
-
-// Leaks returns each non-empty secret found in output. Empty secrets are ignored.
-// Order follows secrets. Each secret appears at most once in the result.
+// Leaks returns each non-empty secret found in output. Empty secrets are
+// ignored. Order follows secrets. Each secret appears at most once in the
+// result.
 //
 // Leaks searches for these forms of each secret:
 //   - as written, always;
 //   - Go-quoted (strconv.Quote without the outer quotes), always;
 //   - hex, lower or upper case, only if the secret has at least
-//     minEncodedLen bytes;
+//     [minEncodedLen] bytes;
 //   - base64, standard ("+/") or URL-safe ("-_") alphabet, with or without "="
 //     padding, alone or embedded in a longer encoded string (for example HTTP
 //     Basic auth, base64("user:" + secret)), only if the secret has at least
-//     minEncodedLen bytes.
-//
-// A shorter secret is not searched for in hex or base64, because its encoded
-// forms are short enough to match unrelated output by chance.
+//     [minEncodedLen] bytes.
 //
 // Leaks is made for canary-style values (letters, digits, "-") like the
 // constants in this package. Use values of that style in fixtures.
@@ -110,7 +113,7 @@ func allEmpty(values []string) bool {
 }
 
 // forms returns every encoding of s that Leaks searches for. Values shorter
-// than minEncodedLen bytes get only the raw and Go-quoted forms.
+// than [minEncodedLen] bytes get only the raw and Go-quoted forms.
 func forms(s string) []string {
 	quoted := strconv.Quote(s)
 	out := []string{
@@ -128,7 +131,7 @@ func forms(s string) []string {
 }
 
 // base64Forms returns the base64 strings that show s inside any base64 output.
-// Leaks calls it only for values of at least minEncodedLen bytes.
+// Leaks calls it only for values of at least [minEncodedLen] bytes.
 //
 // Base64 turns each group of 3 input bytes into 4 output characters. Each
 // group is encoded on its own, so an output character depends only on the
@@ -155,17 +158,15 @@ func base64Forms(s string) []string {
 		// s encoded alone, as one whole base64 string.
 		out = append(out, enc.EncodeToString([]byte(s)))
 		for off := range 3 {
+			// No length guards are needed here, because len(s) >=
+			// minEncodedLen >= 8 and k <= 2. So each core has at least
+			// 2 full groups (6 bytes), which encode to at least 8
+			// characters. A core that short cannot match unrelated output
+			// by chance, and it is never empty. A smaller minEncodedLen
+			// would need guards again: an empty core matches every output.
 			k := (3 - off) % 3
-			if k >= len(s) {
-				continue
-			}
 			n := (len(s) - k) / 3 // number of full groups inside s
-			core := enc.EncodeToString([]byte(s[k : k+3*n]))
-			// Skip short cores. An empty core would match every output.
-			if len(core) < minBase64Core {
-				continue
-			}
-			out = append(out, core)
+			out = append(out, enc.EncodeToString([]byte(s[k:k+3*n])))
 		}
 	}
 	return out

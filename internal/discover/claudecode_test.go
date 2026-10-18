@@ -92,7 +92,7 @@ func claudeCodeCases() []claudeCodeCase {
 				return []serverView{
 					{
 						Name: "with-env", Client: ClientClaudeCode, Scope: ScopeGlobal, Source: src,
-						Transport: TransportStdio, Command: "npx", Args: []string{"-y", "example-server"},
+						Transport: TransportStdio, Command: "npx", Args: []string{"-y", "example-server", "--token", discovertest.CanaryArgs},
 						Env: map[string]string{"API_KEY": discovertest.CanaryEnv},
 					},
 					{

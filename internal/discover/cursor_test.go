@@ -108,7 +108,7 @@ func TestReadCursor(t *testing.T) {
 			want: func(home, work place) ([]serverView, []wantCursorErr, []serverView, []wantCursorErr) {
 				hs := []serverView{
 					view(home, serverView{
-						Name: "local-api", Transport: TransportStdio, Command: "uvx", Args: []string{"mcp-server-api"},
+						Name: "local-api", Transport: TransportStdio, Command: "uvx", Args: []string{"mcp-server-api", "--token", discovertest.CanaryArgs},
 						Env: map[string]string{envKey: discovertest.CanaryEnv},
 					}),
 					view(home, serverView{

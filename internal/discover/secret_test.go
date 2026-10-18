@@ -58,13 +58,12 @@ func TestSecretFormatVerbs(t *testing.T) {
 	canary := discovertest.CanaryEnv
 	val := discover.NewSecret(canary)
 
-	verbs := []string{"%v", "%+v", "%#v", "%s", "%q", "%x", "%X", "%d", "%p", "%T", "%10v", "%-10s"}
-
 	values := []struct {
 		name string
 		arg  any
 		// direct is true when fmt can call the Secret methods, so the
-		// output must contain Mask (except for %T and %p, see below).
+		// output must contain Mask formatted with the same verb (except
+		// for %T and %p, see below).
 		direct bool
 	}{
 		{name: "Secret", arg: val, direct: true},
@@ -81,7 +80,7 @@ func TestSecretFormatVerbs(t *testing.T) {
 	}
 
 	for _, v := range values {
-		for _, verb := range verbs {
+		for _, verb := range fmtVerbs() {
 			t.Run(v.name+"/"+verb, func(t *testing.T) {
 				t.Parallel()
 				got := fmt.Sprintf(verb, v.arg)
@@ -94,11 +93,42 @@ func TestSecretFormatVerbs(t *testing.T) {
 				// ("%!p(discover.Secret={[] 0xc000...})"). That is safe
 				// only because Secret.v is a *string, so only an address
 				// shows. Do not change v to a string.
-				if v.direct && verb != "%T" && verb != "%p" && !strings.Contains(got, discover.Mask) {
-					t.Errorf("fmt.Sprintf(%q, %s) = %q, want it to contain %q", verb, v.name, got, discover.Mask)
+				if !v.direct || verb == "%T" || verb == "%p" {
+					return
+				}
+				if want := fmt.Sprintf(verb, discover.Mask); !strings.Contains(got, want) {
+					t.Errorf("fmt.Sprintf(%q, %s) = %q, want it to contain %q", verb, v.name, got, want)
 				}
 			})
 		}
+	}
+}
+
+// TestSecretFormatFlags checks that Format passes the verb and flags on to
+// Mask.
+func TestSecretFormatFlags(t *testing.T) {
+	t.Parallel()
+
+	val := discover.NewSecret(discovertest.CanaryEnv)
+	tests := []struct {
+		format string
+		want   string
+	}{
+		{format: "%q", want: `"********"`},
+		{format: "%#v", want: `"********"`},
+		{format: "%-10v", want: "********  "},
+		{format: "%10s", want: "  ********"},
+		{format: "%x", want: "2a2a2a2a2a2a2a2a"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.format, func(t *testing.T) {
+			t.Parallel()
+			got := fmt.Sprintf(tt.format, val)
+			discovertest.AssertNoLeak(t, "fmt.Sprintf("+tt.format+")", got, discovertest.CanaryEnv)
+			if got != tt.want {
+				t.Errorf("fmt.Sprintf(%q) = %q, want %q", tt.format, got, tt.want)
+			}
+		})
 	}
 }
 
@@ -183,10 +213,6 @@ func TestSecretMethods(t *testing.T) {
 	t.Parallel()
 
 	val := discover.NewSecret(discovertest.CanaryEnv)
-	// noErr adapts a method that cannot fail to the shape of call.
-	noErr := func(f func() string) func() (string, error) {
-		return func() (string, error) { return f(), nil }
-	}
 	tests := []struct {
 		name string
 		call func() (string, error)
@@ -194,10 +220,7 @@ func TestSecretMethods(t *testing.T) {
 		{name: "String", call: noErr(val.String)},
 		{name: "GoString", call: noErr(val.GoString)},
 		{name: "LogValue", call: noErr(func() string { return val.LogValue().String() })},
-		{name: "MarshalText", call: func() (string, error) {
-			b, err := val.MarshalText()
-			return string(b), err
-		}},
+		{name: "MarshalText", call: textOf(val)},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -300,13 +323,6 @@ func TestSecretSlog(t *testing.T) {
 	canary := discovertest.CanaryEnv
 	val := discover.NewSecret(canary)
 
-	handlers := []struct {
-		name string
-		make func(*bytes.Buffer) slog.Handler
-	}{
-		{name: "text", make: func(b *bytes.Buffer) slog.Handler { return slog.NewTextHandler(b, nil) }},
-		{name: "json", make: func(b *bytes.Buffer) slog.Handler { return slog.NewJSONHandler(b, nil) }},
-	}
 	attrs := []struct {
 		name     string
 		attr     slog.Attr
@@ -319,12 +335,12 @@ func TestSecretSlog(t *testing.T) {
 		{name: "exported field", attr: slog.Any("server", withExported{Name: "n", S: val}), wantMask: true},
 		{name: "unexported field", attr: slog.Any("server", withUnexported{s: val})},
 	}
-	for _, h := range handlers {
+	for _, h := range slogHandlers() {
 		for _, a := range attrs {
 			t.Run(h.name+"/"+a.name, func(t *testing.T) {
 				t.Parallel()
 				var buf bytes.Buffer
-				logger := slog.New(h.make(&buf))
+				logger := slog.New(h.newHandler(&buf))
 				logger.Info("msg", a.attr)
 				got := buf.String()
 				discovertest.AssertNoLeak(t, "slog "+h.name, got, canary)
@@ -490,8 +506,8 @@ func TestSecretDeepEqual(t *testing.T) {
 		{name: "different value", a: discover.NewSecret("a"), b: discover.NewSecret("b"), want: false},
 		{name: "zero and zero", a: discover.Secret{}, b: discover.Secret{}, want: true},
 		// The zero Secret holds a nil pointer and NewSecret("") a pointer
-		// to "", so DeepEqual tells them apart. Both Reveal "" (checked
-		// below).
+		// to "", so DeepEqual tells them apart. Both Reveal "" (see
+		// TestSecretZero).
 		{name: "zero vs empty", a: discover.Secret{}, b: discover.NewSecret(""), want: false},
 		{
 			name: "same SecretMap",
@@ -513,12 +529,6 @@ func TestSecretDeepEqual(t *testing.T) {
 				t.Errorf("reflect.DeepEqual() = %v, want %v", got, tt.want)
 			}
 		})
-	}
-
-	// DeepEqual sees a difference, but Reveal does not.
-	zero, empty := discover.Secret{}, discover.NewSecret("")
-	if zero.Reveal() != "" || empty.Reveal() != "" {
-		t.Errorf("Reveal() = %q and %q, want both empty", zero.Reveal(), empty.Reveal())
 	}
 }
 
@@ -544,6 +554,8 @@ func TestSecretMapUnmarshalJSONNull(t *testing.T) {
 	}
 }
 
+// ExampleSecret shows that a Secret prints as Mask and that only Reveal gives
+// the value.
 func ExampleSecret() {
 	s := discover.NewSecret("example-value")
 	fmt.Println(s)

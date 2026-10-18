@@ -168,7 +168,7 @@ func newCodexServer(path, name string, e codexEntry) (Server, string) {
 	case e.Command != "":
 		s.Transport = TransportStdio
 		s.Command = e.Command
-		s.Args = e.Args
+		s.Args = NewArgs(e.Args)
 		s.Env = e.Env
 	case e.URL.Reveal() != "":
 		s.Transport = TransportHTTP

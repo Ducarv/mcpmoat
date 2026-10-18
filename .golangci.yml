@@ -18,8 +18,20 @@ linters:
     - errorlint    # require %w when wrapping errors, and errors.Is/errors.As instead of ==
     - unconvert    # unnecessary type conversions
     - nolintlint   # keep //nolint directives honest
+    - depguard     # deny imports by path (see the rules below)
 
   settings:
+    depguard:
+      rules:
+        # discovertest imports the testing package. A non-test import would
+        # put testing (and its flags) into the mcpmoat binary.
+        discovertest-only-in-tests:
+          # "!$test" applies the rule to every file except _test.go files.
+          files:
+            - "!$test"
+          deny:
+            - pkg: github.com/Ducarv/mcpmoat/internal/discover/discovertest
+              desc: test helpers; import discovertest only from _test.go files
     # misspell: the locale is left unset on purpose. The docs mix US and UK
     # spellings ("color" and "colour"), so only common misspellings are
     # reported, not US/UK differences.
