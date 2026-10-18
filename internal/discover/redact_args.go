@@ -21,8 +21,9 @@ import (
 // or "cookie", or if one of its words is a short form such as "pass", "pw",
 // "pin", "otp", "jwt", "pat" or "cred" ("DB_PASS", "--github-pat",
 // "--pin"). An all-caps word that ends in a short form is secret-like too
-// ("PGPASS", "DBPW"). "bypass", "--path", "--spin", "--option" and
-// "--credit" are not secret-like.
+// ("PGPASS", "DBPW"). A number at the end of a word does not change this
+// ("--pass2", "REDIS_PASS1"). "bypass", "--path", "--spin", "--option",
+// "--opt2" and "--credit" are not secret-like.
 //
 // Flags. An argument "-name", "--name" or "--name=value", where name has only
 // ASCII letters, digits, "_", "-" and ".", is a flag. The flag is shown as
@@ -35,11 +36,14 @@ import (
 //     name, so no part of a badly formed line can show.
 //   - For any other flag, the part after "=" follows the value rules below.
 //     The next argument is not a value of that flag: it is a new argument.
-//   - An argument that parses as a flag is never the value of the flag
-//     before it. So a boolean flag cannot use up the mask: in
-//     "--no-auth --token S", "S" is masked. A lone "-" or "--", and a
-//     single-dash word that is longer than one letter and is not secret-like
-//     ("--password -abc"), are values, so they are masked.
+//   - Right after a flag whose value is masked, an argument "--name" or
+//     "--name=value" is a new flag, not the value. So a boolean flag cannot
+//     use up the mask: in "--no-auth --token S", "S" is masked. Of the
+//     single-dash arguments, only "-H" and "-u" are new flags there. Any
+//     other argument there is the value, and it is masked: "-", "--",
+//     "-p=x", "-x" and "-abc" in "--password -p=x". If that argument can be
+//     a flag that masks its own value too (Go-style "-token"), the argument
+//     after it is masked as well.
 //   - A flag with a name that looks like a token (see below) is masked
 //     whole. This catches a token glued to a short flag ("-p" + token), a
 //     token that starts with "-" and a long secret-like name
@@ -52,10 +56,16 @@ import (
 // Values. Every other argument is shown only in these shapes:
 //
 //  1. "NAME=value", where NAME has only ASCII letters, digits, "_", "-" and
-//     ".". NAME is shown. The value is masked if NAME is secret-like. Else
-//     the value follows rules 2 to 4, not rule 1 again. So a URL value goes
-//     through RedactURL, and other text with a second "=" is masked by
-//     rule 4, because "=" is not a safe byte.
+//     ".". The text before "=" can be a secret, not a name, so the whole
+//     argument is masked if NAME looks like a token ("ghp_abc=1", base64
+//     text such as "c2VjcmV0LXZhbHVlLTEyMzQ="), or if NAME has 16 bytes or
+//     more and the value is empty or only "=" (base64 padding). An
+//     environment name in upper case with "_" ("OTEL_EXPORTER_OTLP_ENDPOINT")
+//     is not checked for these two shapes. Else NAME is shown, and the value
+//     is masked if NAME is secret-like. Else the value follows rules 2 to 4,
+//     not rule 1 again. So a URL value goes through RedactURL, and other
+//     text with a second "=" is masked by rule 4, because "=" is not a safe
+//     byte.
 //  2. A URL (the text contains "://" or starts with "//") goes through
 //     [RedactURL].
 //  3. ":" and "@" are shown only in fixed places. Text is masked if it has
@@ -64,17 +74,21 @@ import (
 //     ("localhost:8080") or after a Windows drive letter at the start
 //     ("C:\x"). An "@" is safe at the start of a path segment, as an npm
 //     scope ("@scope/pkg"), or as one version marker in "name@version" or
-//     "@scope/name@version". The version starts with a digit ("1.2.3",
-//     "v2") or is a tag such as "latest". Text with a ":" or an "@" in any
-//     other place is masked ("admin:pw", "scott/tiger@orcl").
+//     "@scope/name@version". The version is a tag such as "latest", or
+//     numbers with at least one "." and an optional "v" before them, and an
+//     optional "-label" or "+label" after them ("1.2.3", "v2.0.1-beta.1").
+//     Text with a ":" or an "@" in any other place is masked ("admin:pw",
+//     "scott/tiger@orcl", "scott@1tiger").
 //  4. Other text is split into segments at each "/" and "\". The separators
 //     stay. A segment is shown if it is empty, or if it has only ASCII
 //     letters, digits and "._:@+-~" and does not look like a token. Every
 //     other segment becomes Mask.
 //
-// A segment looks like a token by the same rules as the path segments of
-// [RedactURL]: long random-looking words and known token prefixes such as
-// "ghp_" or "sk-".
+// A segment or a NAME looks like a token by the same rules as the path
+// segments of [RedactURL]: long random-looking words and known token
+// prefixes such as "ghp_" or "sk-". A token prefix also counts after ".",
+// "@", ":", "+" and "~" ("@ghp_abc", "x.sk-abc"). A flag name is checked in
+// the same way.
 //
 // Examples:
 //
@@ -109,21 +123,28 @@ import (
 //     ("-phunter2"), or a number in the place of a port ("admin:1234").
 //   - A token that "/" splits into short pieces (for example base64 text)
 //     is shown, because each piece is checked alone.
-//   - A secret value that starts with "--", or a single-dash word with a
-//     secret-like name ("--password -token"), is seen as a flag and is shown,
-//     unless it looks like a token.
+//   - A secret value that starts with "--" ("--password --hunter2") is seen
+//     as a flag and is shown, unless it looks like a token.
+//   - Base64 text with "=" padding is shown if the text before "=" has the
+//     form of an environment name ("ABC_DEF=") or is shorter than 16 bytes
+//     with no token sign ("abcdefgh=").
 //   - A short form glued to a lower-case word ("dbpass") is not seen as
 //     secret-like.
 //   - Some values that are not secret are masked: the argument after a
 //     boolean flag with a secret-like or token-like name ("--no-auth
-//     server.js", "--private x"), a path after a secret-like flag
-//     ("--key-file /etc/key.pem"), "-u 1000:1000" (docker), text with
-//     spaces, quotes, ",", ";", "=", "*" or "%" ("--pattern *.go", the
-//     "Application Support" folder in a path), long readable segments, a
-//     dash argument that is not a flag ("-javaagent:/x.jar"), an image tag
-//     ("mcp/github:latest"), an IPv6 address ("[::1]:8080"), a mail or SSH
-//     address ("me@example.com", "git@github.com:org/repo"), a version range
-//     ("pkg@^1.2") and all-caps names such as "BYPASS" or "SPIN".
+//     server.js", "--private x"), a single-dash flag other than "-H" and
+//     "-u" after such a flag ("--no-auth -v"; the argument after "-v" is
+//     then shown; in "--no-auth -token x" both "-token" and "x" are
+//     masked), a NAME of 32 bytes or more that is not an environment name
+//     ("management.endpoints.web.exposure.include=x"), a path after a
+//     secret-like flag ("--key-file /etc/key.pem"), "-u 1000:1000" (docker),
+//     text with spaces, quotes, ",", ";", "=", "*" or "%" ("--pattern
+//     *.go", the "Application Support" folder in a path), long readable
+//     segments, a dash argument that is not a flag ("-javaagent:/x.jar"),
+//     an image tag ("mcp/github:latest"), an IPv6 address ("[::1]:8080"), a
+//     mail or SSH address ("me@example.com", "git@github.com:org/repo"), a
+//     version range ("pkg@^1.2"), a version with no "." ("pkg@2",
+//     "pkg@v2") and all-caps names such as "BYPASS" or "SPIN".
 //
 // RedactArgs returns nil for nil input, never changes args and always
 // returns a slice of the same length as args.
@@ -137,11 +158,15 @@ func RedactArgs(args []string) []string {
 	// is the next argument, and that value is masked.
 	maskNext := false
 	for i, arg := range args {
-		// A flag is never the value of the flag before it, so a boolean
-		// flag such as "--no-auth" cannot use up the mask that a following
-		// "--token" needs.
-		if maskNext && !isFlagNotValue(arg) {
-			out[i], maskNext = Mask, false
+		// A new flag (see startsNewFlag) is not the value of the flag
+		// before it, so a boolean flag such as "--no-auth" cannot use up the
+		// mask that a following "--token" needs.
+		if maskNext && !startsNewFlag(arg) {
+			// arg can be the value, so it is masked. arg can also be a flag
+			// that masks its own value (Go-style "-token"), so if redactArg
+			// would mask the next argument, mask it here too.
+			_, maskNext = redactArg(arg)
+			out[i] = Mask
 			continue
 		}
 		out[i], maskNext = redactArg(arg)
@@ -162,7 +187,7 @@ func redactArg(arg string) (shown string, maskNext bool) {
 		return Mask, false
 	case !ok:
 		return displayValue(arg), false
-	case looksLikeCredential(name):
+	case containsToken(name):
 		// "-p" + token, a token that starts with "-", or a long secret-like
 		// name such as "--s3-secret-access-key". With no "=value", the next
 		// argument can be the value, so mask it too (fail closed).
@@ -197,22 +222,16 @@ func masksValue(name string) bool {
 	return false
 }
 
-// isFlagNotValue reports whether arg, which comes right after a flag that
-// takes a value, is a new flag and not that value. A lone "-" and "--" are
-// values. "--name" and a one-letter "-x" are flags. A longer single-dash word
-// such as "-abc" can be a password, so it is a flag only when its value is
-// masked too (Go-style "-token"). In every other case it is the value, and
-// it is masked (fail closed).
-func isFlagNotValue(arg string) bool {
+// startsNewFlag reports whether arg, which comes right after a flag whose
+// value is masked, is a new flag and not that value. A flag "--name" or
+// "--name=value" is a new flag. A single-dash argument ("-p", "-p=x",
+// "-abc", "-token") can be a password, so only "-H" and "-u", with or
+// without "=value", are new flags: they mask their own values, and a
+// one-letter password is no secret. In every other case, a lone "-" and
+// "--" included, arg is the value, and the caller masks it (fail closed).
+func startsNewFlag(arg string) bool {
 	name, _, _, ok := parseFlag(arg)
-	switch {
-	case !ok:
-		return false
-	case strings.HasPrefix(arg, "--"), len(name) == 1:
-		return true
-	default:
-		return masksValue(name)
-	}
+	return ok && (strings.HasPrefix(arg, "--") || name == "H" || name == "u")
 }
 
 // parseFlag splits an argument of the form "-name", "--name" or
@@ -232,12 +251,28 @@ func parseFlag(arg string) (name, value string, hasValue, ok bool) {
 	return name, value, hasValue, true
 }
 
+// minPaddedTokenLen is the shortest NAME in "NAME=" or "NAME==" that
+// displayValue masks as base64 text with "=" padding. Shorter names, such as
+// "DEBUG=", are usually a variable with an empty value.
+const minPaddedTokenLen = 16
+
 // displayValue returns a value for display: rule 1 of the RedactArgs doc
 // ("NAME=value"), then displayShape for the rest.
 func displayValue(s string) string {
 	name, value, found := strings.Cut(s, "=")
 	if !found || !isName(name) {
 		return displayShape(s)
+	}
+	if !isEnvName(name) {
+		// The text before "=" can be a secret and not a name: base64 text
+		// with "=" padding ("c2VjcmV0LXZhbHVlLTEyMzQ=") or a token followed
+		// by "=x" ("ghp_abc=1"). Mask all of it, NAME included.
+		if containsToken(name) {
+			return Mask
+		}
+		if strings.Trim(value, "=") == "" && len(name) >= minPaddedTokenLen {
+			return Mask
+		}
 	}
 	if isSecretName(name) {
 		return name + "=" + Mask
@@ -247,6 +282,24 @@ func displayValue(s string) string {
 	// "=" ("A=B=c") gives "A=" + Mask, because "=" is not a safe byte in a
 	// segment.
 	return name + "=" + displayShape(value)
+}
+
+// isEnvName reports whether name has the usual form of an environment
+// variable name: an upper-case letter, then only upper-case letters, digits
+// and "_", with at least one "_" ("GITHUB_TOKEN",
+// "OTEL_EXPORTER_OTLP_ENDPOINT"). Base64 text of random bytes has lower-case
+// letters, and base32 text has no "_", so such a name is not a padded token.
+// displayValue shows it even when it is long.
+func isEnvName(name string) bool {
+	if name == "" || !isUpper(name[0]) || !strings.Contains(name, "_") {
+		return false
+	}
+	for i := range len(name) {
+		if !isUpper(name[i]) && !isDigit(name[i]) && name[i] != '_' {
+			return false
+		}
+	}
+	return true
 }
 
 // displayShape applies rules 2 to 4 of the RedactArgs doc to s: it shows s
@@ -263,7 +316,7 @@ func displayShape(s string) string {
 	case hasSecretLabel(s):
 		// "x-auth-token:abc" is a header line with no space after ":".
 		return Mask
-	case !safeColon(s) || !safeAts(s):
+	case !hasSafeColon(s) || !hasSafeAts(s):
 		// "admin:pw", "scott/tiger@orcl": a ":" or "@" in a place that is
 		// not on the list.
 		return Mask
@@ -279,11 +332,11 @@ func hasSecretLabel(s string) bool {
 	return found && isSecretName(label)
 }
 
-// safeColon reports whether s has no ":", or exactly one ":" in a safe
+// hasSafeColon reports whether s has no ":", or exactly one ":" in a safe
 // place: before a port ("localhost:8080", "127.0.0.1:3000") or after a
 // Windows drive letter at the start ("C:", `C:\x`, "C:/x"). Any other ":"
 // can split a user and a password ("admin:pw"), so it is not safe.
-func safeColon(s string) bool {
+func hasSafeColon(s string) bool {
 	i := strings.IndexByte(s, ':')
 	switch {
 	case i < 0:
@@ -299,24 +352,21 @@ func safeColon(s string) bool {
 
 // isPort reports whether s is a port number: 1 to 5 ASCII digits.
 func isPort(s string) bool {
-	if s == "" || len(s) > 5 {
-		return false
-	}
-	for i := range len(s) {
-		if !isDigit(s[i]) {
-			return false
-		}
-	}
-	return true
+	return len(s) <= 5 && isNumber(s)
 }
 
-// safeAts reports whether every "@" in s is in a safe place: at the start
+// isNumber reports whether s is one or more ASCII digits.
+func isNumber(s string) bool {
+	return s != "" && strings.Trim(s, "0123456789") == ""
+}
+
+// hasSafeAts reports whether every "@" in s is in a safe place: at the start
 // of a path segment, as an npm scope ("@scope/pkg",
 // "node_modules/@scope/pkg"), or as a version marker after a package name
 // ("pkg@1.2.3", "@scope/pkg@latest"; see isPackageName and isVersion). Any
 // other "@" can end a user and a password ("scott/tiger@orcl") or join a
 // user and a host, so it is not safe.
-func safeAts(s string) bool {
+func hasSafeAts(s string) bool {
 	for i := range len(s) {
 		if s[i] != '@' {
 			continue
@@ -350,50 +400,92 @@ func isPackageName(s string) bool {
 	return name != "" && !strings.ContainsAny(name, `/\@`)
 }
 
-// isVersion reports whether s is a package version after "@": a tag such as
-// "latest", or a version that starts with a digit, with an optional "v"
-// before it ("1.2.3", "v2", "1.0.0-rc.1"). A version has only ASCII
-// letters, digits, ".", "+" and "-". A host name ("user@host") is not a
-// version.
+// isVersion reports whether s is a package version after "@": a common npm
+// dist-tag such as "latest", or a version with this form:
+//
+//	[v] NUMBER "." NUMBER ["." NUMBER]... ["-" LABEL] ["+" LABEL]
+//
+// NUMBER is one or more ASCII digits. LABEL is one or more ASCII letters,
+// digits and ".". So "1.2.3", "v2.0.1-beta.1" and "1.0.0+build.5" are
+// versions. A host name ("user@host"), a word that starts with a digit
+// ("1tiger", "1password") and a number with no "." ("1234", "v2") are not:
+// they can be a password.
 func isVersion(s string) bool {
 	// distTags are common npm dist-tags.
 	distTags := [...]string{"latest", "next", "beta", "alpha", "canary"}
 	if slices.Contains(distTags[:], s) {
 		return true
 	}
-	rest := strings.TrimPrefix(s, "v")
-	return rest != "" && isDigit(rest[0]) && onlyBytes(rest, ".+-")
+	rest, build, hasBuild := strings.Cut(s, "+")
+	if hasBuild && !isVersionLabel(build) {
+		return false
+	}
+	core, pre, hasPre := strings.Cut(rest, "-")
+	if hasPre && !isVersionLabel(pre) {
+		return false
+	}
+	numbers := strings.Split(strings.TrimPrefix(core, "v"), ".")
+	if len(numbers) < 2 {
+		return false
+	}
+	for _, n := range numbers {
+		if !isNumber(n) {
+			return false
+		}
+	}
+	return true
+}
+
+// isVersionLabel reports whether s is a prerelease or build label of a
+// version: one or more ASCII letters, digits and ".".
+func isVersionLabel(s string) bool {
+	return s != "" && onlyBytes(s, ".")
 }
 
 // maskSegments splits s at every "/" and "\", keeps the separators, and
-// passes each segment through safeSegment. A path such as
+// passes each segment through displaySegment. A path such as
 // "/data/ghp_abc123/x" keeps its shape and loses only the token.
 func maskSegments(s string) string {
 	var b strings.Builder
 	start := 0 // index of the first byte of the current segment
 	for i := range len(s) {
 		if s[i] == '/' || s[i] == '\\' {
-			b.WriteString(safeSegment(s[start:i]))
+			b.WriteString(displaySegment(s[start:i]))
 			b.WriteByte(s[i])
 			start = i + 1
 		}
 	}
-	b.WriteString(safeSegment(s[start:]))
+	b.WriteString(displaySegment(s[start:]))
 	return b.String()
 }
 
-// safeSegment returns seg if it is empty, or a plain word that does not look
-// like a token, and Mask otherwise. A plain word has only ASCII letters,
-// digits and "._:@+-~": enough for package names ("@scope", "pkg@1.2.3"),
-// host:port, file names and "~". displayShape has already checked where
-// ":" and "@" are. Every other byte (space, quote, brace, ";", ",", "=",
-// "%", "*" and every non-ASCII byte) is a sign of a shape we do not know, so
-// the segment is masked.
-func safeSegment(seg string) string {
-	if seg == "" || (onlyBytes(seg, "._:@+-~") && !looksLikeCredential(seg)) {
+// displaySegment returns seg if it is empty, or a plain word that does not
+// look like a token (see containsToken), and Mask otherwise. A plain word
+// has only ASCII letters, digits and "._:@+-~": enough for package names
+// ("@scope", "pkg@1.2.3"), host:port, file names and "~". displayShape has
+// already checked where ":" and "@" are. Every other byte (space, quote,
+// brace, ";", ",", "=", "%", "*" and every non-ASCII byte) is a sign of a
+// shape we do not know, so the segment is masked.
+func displaySegment(seg string) string {
+	if seg == "" || (onlyBytes(seg, "._:@+-~") && !containsToken(seg)) {
 		return seg
 	}
 	return Mask
+}
+
+// containsToken reports whether s looks like a token (see
+// looksLikeCredential), or whether one of its pieces starts with a known
+// token prefix. The pieces are the parts of s between ".", "@", ":", "+" and
+// "~", so a token after one of these bytes ("@ghp_abc", "x.sk-abc") is
+// found too.
+func containsToken(s string) bool {
+	if looksLikeCredential(s) {
+		return true
+	}
+	pieces := strings.FieldsFunc(s, func(r rune) bool {
+		return strings.ContainsRune(".@:+~", r)
+	})
+	return slices.ContainsFunc(pieces, hasTokenPrefix)
 }
 
 // isSecretName reports whether name looks like the name of a credential.
@@ -438,6 +530,12 @@ func isSecretName(name string) bool {
 // PostgreSQL password variable), so for them a suffix match is worth a rare
 // false positive such as "BYPASS".
 func isShortForm(word string) bool {
+	// A number at the end does not change the word: "--pass2", "DB_PW1" and
+	// "REDIS_PASS1" are secret-like too.
+	word = strings.TrimRight(word, "0123456789")
+	if word == "" {
+		return false
+	}
 	shortForms := [...]string{"pass", "pw", "pin", "otp", "jwt", "pat", "cred", "creds"}
 	lower := strings.ToLower(word)
 	allCaps := word == strings.ToUpper(word)

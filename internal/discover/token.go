@@ -3,7 +3,8 @@ package discover
 import "strings"
 
 // Length thresholds for looksLikeCredential. The RedactURL doc comment
-// states these numbers (20, 32 and 36), so change it with them.
+// refers to these constants by name, not by value, so a change here needs
+// no change there.
 const (
 	// minMixedTokenLen is the shortest text with letters and digits that
 	// counts as a token. Shorter mixed text is often a normal name, such as
@@ -20,13 +21,27 @@ const (
 // argument) looks like a token. The RedactURL doc comment lists the rules
 // and their limits.
 func looksLikeCredential(s string) bool {
-	if len(s) >= minTokenLen || isUUID(s) {
+	if len(s) >= minTokenLen || isUUID(s) || hasTokenPrefix(s) {
 		return true
 	}
-	// tokenPrefixes are the starts of well-known API token formats, in
-	// lower case, so the match does not depend on case. The RedactURL doc
-	// names only some of them as examples, so it does not need an update
-	// when this list changes.
+	if len(s) < minMixedTokenLen {
+		return false
+	}
+	hasLetter, hasDigit := false, false
+	for i := range len(s) {
+		hasLetter = hasLetter || isLetter(s[i])
+		hasDigit = hasDigit || isDigit(s[i])
+	}
+	return hasLetter && hasDigit
+}
+
+// hasTokenPrefix reports whether s starts with the prefix of a well-known
+// API token format, such as "ghp_" or "sk-", in any case, and has more text
+// after the prefix.
+func hasTokenPrefix(s string) bool {
+	// tokenPrefixes are in lower case, so the match does not depend on case.
+	// The RedactURL and RedactArgs docs name only some of them as examples,
+	// so they do not need an update when this list changes.
 	tokenPrefixes := [...]string{
 		"sk-", "sk_", "pk_", "rk_",
 		"ghp_", "gho_", "ghu_", "ghs_", "github_pat_",
@@ -42,15 +57,7 @@ func looksLikeCredential(s string) bool {
 			return true
 		}
 	}
-	if len(s) < minMixedTokenLen {
-		return false
-	}
-	hasLetter, hasDigit := false, false
-	for i := range len(s) {
-		hasLetter = hasLetter || isLetter(s[i])
-		hasDigit = hasDigit || isDigit(s[i])
-	}
-	return hasLetter && hasDigit
+	return false
 }
 
 // isUUID reports whether s has the 8-4-4-4-12 form of a UUID, with hex
