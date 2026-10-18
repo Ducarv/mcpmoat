@@ -17,16 +17,19 @@ import (
 	"testing"
 )
 
-// Canary values are fake secrets for fixtures and tests. Each one is unique and needs
-// no escaping in Go or JSON strings, so tests can search any output for it.
+// Canary values are fake secrets for fixtures and tests. Each one is unique
+// and needs no escaping in Go or JSON strings, so tests can search any
+// output for it.
 const (
 	// CanaryEnv is the fake value for env entries in fixtures.
 	CanaryEnv = "mcpmoat-canary-env-7Q2xK9"
 	// CanaryHeader is the fake value for HTTP header entries in fixtures.
 	CanaryHeader = "mcpmoat-canary-header-4Vb8Rt"
-	// CanaryURL is the fake value for secrets embedded in server URLs in fixtures.
+	// CanaryURL is the fake value for secrets embedded in server URLs in
+	// fixtures.
 	CanaryURL = "mcpmoat-canary-url-9Jd3Wm"
-	// CanaryArgs is the fake value for secrets in stdio command args in fixtures.
+	// CanaryArgs is the fake value for secrets in stdio command args in
+	// fixtures.
 	CanaryArgs = "mcpmoat-canary-args-5Hn6Tc"
 )
 
@@ -46,8 +49,9 @@ func Canaries() []string {
 // boundary cases in the tests (7 and 8 bytes) fail if this value changes.
 const minEncodedLen = 8
 
-// Leaks returns each non-empty secret found in output. Empty secrets are ignored.
-// Order follows secrets. Each secret appears at most once in the result.
+// Leaks returns each non-empty secret found in output. Empty secrets are
+// ignored. Order follows secrets. Each secret appears at most once in the
+// result.
 //
 // Leaks searches for these forms of each secret:
 //   - as written, always;

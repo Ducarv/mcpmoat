@@ -84,10 +84,7 @@ func TestURLMethods(t *testing.T) {
 		{name: "String", call: noErr(u.String)},
 		{name: "GoString", call: noErr(u.GoString)},
 		{name: "LogValue", call: noErr(func() string { return u.LogValue().String() })},
-		{name: "MarshalText", call: func() (string, error) {
-			b, err := u.MarshalText()
-			return string(b), err
-		}},
+		{name: "MarshalText", call: textOf(u)},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

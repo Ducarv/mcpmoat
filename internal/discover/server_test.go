@@ -16,7 +16,8 @@ import (
 // TestServerNoLeak checks the issue #16 acceptance criterion: printing,
 // logging or encoding a Server never shows an env value, a header value, a
 // token in its args or the credentials in its URL, but still shows the key
-// name, the URL host and Mask in their place. serverRenders (helpers_test.go) lists the outputs.
+// name, the URL host and Mask in their place. serverRenders
+// (helpers_test.go) lists the outputs.
 func TestServerNoLeak(t *testing.T) {
 	t.Parallel()
 
@@ -67,8 +68,8 @@ func TestServerUnexportedFieldNoLeak(t *testing.T) {
 // a struct and %w on a value that is not an error are bad verbs: fmt prints
 // "%!p(...)" or "%!w(...)" and shows the fields by reflection without
 // calling Format or String on them. Only the pointers inside URL, Secret
-// and Args show, so no canary appears. (%p with a *Server is valid and prints only an
-// address.)
+// and Args show, so no canary appears. (%p with a *Server is valid and
+// prints only an address.)
 func TestServerBadVerbNoLeak(t *testing.T) {
 	t.Parallel()
 
@@ -248,7 +249,8 @@ func TestConstantStrings(t *testing.T) {
 	}
 }
 
-// TestTransportIsRemote checks that only the HTTP and SSE transports are remote.
+// TestTransportIsRemote checks that only the HTTP and SSE transports are
+// remote.
 func TestTransportIsRemote(t *testing.T) {
 	t.Parallel()
 

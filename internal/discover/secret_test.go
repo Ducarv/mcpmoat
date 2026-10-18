@@ -220,10 +220,7 @@ func TestSecretMethods(t *testing.T) {
 		{name: "String", call: noErr(val.String)},
 		{name: "GoString", call: noErr(val.GoString)},
 		{name: "LogValue", call: noErr(func() string { return val.LogValue().String() })},
-		{name: "MarshalText", call: func() (string, error) {
-			b, err := val.MarshalText()
-			return string(b), err
-		}},
+		{name: "MarshalText", call: textOf(val)},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

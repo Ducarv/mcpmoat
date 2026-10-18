@@ -2,6 +2,7 @@ package discover_test
 
 import (
 	"bytes"
+	"encoding"
 	"encoding/json"
 	"fmt"
 	"log/slog"
@@ -54,6 +55,15 @@ func isPrintableASCII(s string) bool {
 // of the method tables.
 func noErr(f func() string) func() (string, error) {
 	return func() (string, error) { return f(), nil }
+}
+
+// textOf adapts m.MarshalText to the func() (string, error) shape of the
+// method tables.
+func textOf(m encoding.TextMarshaler) func() (string, error) {
+	return func() (string, error) {
+		b, err := m.MarshalText()
+		return string(b), err
+	}
 }
 
 // testServer is a Server fixture with the parts of it that must stay

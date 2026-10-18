@@ -14,13 +14,10 @@ import (
 	"github.com/Ducarv/mcpmoat/internal/discover/discovertest"
 )
 
-// argsCanary is the secret in leakyArgs.
-const argsCanary = discovertest.CanaryArgs
-
-// leakyArgs returns args with argsCanary after "--token". Each call returns
-// a new slice, so tests can change it safely.
+// leakyArgs returns args with discovertest.CanaryArgs after "--token". Each
+// call returns a new slice, so tests can change it safely.
 func leakyArgs() []string {
-	return []string{"-y", "mcp-remote", "--token", argsCanary}
+	return []string{"-y", "mcp-remote", "--token", discovertest.CanaryArgs}
 }
 
 // withExportedArgs holds Args in an exported field. fmt and the encoders can
@@ -64,7 +61,7 @@ func TestArgsFormatVerbs(t *testing.T) {
 			t.Run(v.name+"/"+verb, func(t *testing.T) {
 				t.Parallel()
 				got := fmt.Sprintf(verb, v.arg)
-				discovertest.AssertNoLeak(t, "fmt.Sprintf("+verb+")", got, argsCanary)
+				discovertest.AssertNoLeak(t, "fmt.Sprintf("+verb+")", got, discovertest.CanaryArgs)
 
 				// %T prints only the type name. %p prints an address, or for
 				// a struct it is a bad verb that prints the fields by
@@ -99,7 +96,7 @@ func TestArgsFormatFlags(t *testing.T) {
 		t.Run(tt.format, func(t *testing.T) {
 			t.Parallel()
 			got := fmt.Sprintf(tt.format, discover.NewArgs(leakyArgs()))
-			discovertest.AssertNoLeak(t, "fmt.Sprintf("+tt.format+")", got, argsCanary)
+			discovertest.AssertNoLeak(t, "fmt.Sprintf("+tt.format+")", got, discovertest.CanaryArgs)
 			if got != tt.want {
 				t.Errorf("fmt.Sprintf(%q) = %q, want %q", tt.format, got, tt.want)
 			}
@@ -123,10 +120,7 @@ func TestArgsMethods(t *testing.T) {
 	}{
 		{name: "String", call: noErr(a.String), want: joined},
 		{name: "GoString", call: noErr(a.GoString), want: fmt.Sprintf("%#v", redacted)},
-		{name: "MarshalText", call: func() (string, error) {
-			b, err := a.MarshalText()
-			return string(b), err
-		}, want: joined},
+		{name: "MarshalText", call: textOf(a), want: joined},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -135,7 +129,7 @@ func TestArgsMethods(t *testing.T) {
 			if err != nil {
 				t.Fatalf("%s() error = %v", tt.name, err)
 			}
-			discovertest.AssertNoLeak(t, tt.name+"()", got, argsCanary)
+			discovertest.AssertNoLeak(t, tt.name+"()", got, discovertest.CanaryArgs)
 			if got != tt.want {
 				t.Errorf("%s() = %q, want %q", tt.name, got, tt.want)
 			}
@@ -248,7 +242,7 @@ func TestArgsMarshalJSON(t *testing.T) {
 			if err != nil {
 				t.Fatalf("json.Marshal() error = %v", err)
 			}
-			discovertest.AssertNoLeak(t, "json.Marshal()", string(got), argsCanary)
+			discovertest.AssertNoLeak(t, "json.Marshal()", string(got), discovertest.CanaryArgs)
 			if arr := tt.array(t, got); !slices.Equal(arr, redacted) {
 				t.Errorf("json.Marshal() = %s, want the array %q", got, redacted)
 			}
@@ -286,7 +280,7 @@ func TestArgsSlog(t *testing.T) {
 				var buf bytes.Buffer
 				slog.New(h.newHandler(&buf)).Info("msg", at.attr)
 				got := buf.String()
-				discovertest.AssertNoLeak(t, "slog "+h.name, got, argsCanary)
+				discovertest.AssertNoLeak(t, "slog "+h.name, got, discovertest.CanaryArgs)
 				for _, want := range []string{"mcp-remote", discover.Mask} {
 					if !strings.Contains(got, want) {
 						t.Errorf("log output %q does not contain %q", got, want)

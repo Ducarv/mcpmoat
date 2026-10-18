@@ -87,10 +87,10 @@ func (a Args) raw() []string {
 	return **a.v
 }
 
-// display returns the form of the args that all output methods use:
+// redacted returns the form of the args that all output methods use:
 // RedactArgs of the values, or nil for the zero Args (raw gives nil, and
 // RedactArgs(nil) is nil).
-func (a Args) display() []string {
+func (a Args) redacted() []string {
 	// RedactArgs returns a new slice and does not change its input, so it
 	// can read the stored slice directly.
 	return RedactArgs(a.raw())
@@ -99,14 +99,14 @@ func (a Args) display() []string {
 // String returns the RedactArgs result joined by one space, or "" for no
 // args. It implements fmt.Stringer.
 func (a Args) String() string {
-	return strings.Join(a.display(), " ")
+	return strings.Join(a.redacted(), " ")
 }
 
 // GoString returns the RedactArgs result in Go syntax, as %#v prints a
 // []string. It implements fmt.GoStringer for code that calls it directly;
 // fmt itself calls Format for %#v.
 func (a Args) GoString() string {
-	return fmt.Sprintf("%#v", a.display())
+	return fmt.Sprintf("%#v", a.redacted())
 }
 
 // Format passes the verb and flags to the RedactArgs result, a []string, so
@@ -114,18 +114,19 @@ func (a Args) GoString() string {
 // arg and a width pads each arg. It implements fmt.Formatter.
 func (a Args) Format(f fmt.State, verb rune) {
 	// fmt has no way to report a write error from Format (see Secret.Format).
-	_, _ = fmt.Fprintf(f, fmt.FormatString(f, verb), a.display())
+	_, _ = fmt.Fprintf(f, fmt.FormatString(f, verb), a.redacted())
 }
 
 // MarshalJSON returns the RedactArgs result as a JSON array of strings, or
 // null for the zero Args (as for a nil []string). It implements
 // json.Marshaler.
 func (a Args) MarshalJSON() ([]byte, error) {
-	return json.Marshal(a.display())
+	return json.Marshal(a.redacted())
 }
 
 // MarshalText returns the String result. It implements
-// encoding.TextMarshaler (see Secret.MarshalText for the encoders that use it).
+// encoding.TextMarshaler (see Secret.MarshalText for the encoders that use
+// it).
 func (a Args) MarshalText() ([]byte, error) {
 	return []byte(a.String()), nil
 }
@@ -133,5 +134,5 @@ func (a Args) MarshalText() ([]byte, error) {
 // LogValue returns the RedactArgs result as a value. It implements
 // slog.LogValuer, so log/slog handlers never see the args as written.
 func (a Args) LogValue() slog.Value {
-	return slog.AnyValue(a.display())
+	return slog.AnyValue(a.redacted())
 }
