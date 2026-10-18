@@ -379,6 +379,7 @@ internal/inspect/     connects to servers, extracts tools, prompts, resources
 internal/rules/       loads YAML, applies regex and heuristics
 internal/pins/        hashes, diff and pins.json
 internal/report/      terminal and JSON output
+internal/termsafe/    escapes untrusted text for the terminal (used by discover and report)
 rules/                built-in rules (go:embed)
 testdata/servers/     malicious example MCP servers, for tests and demo
 ```
@@ -391,6 +392,7 @@ testdata/servers/     malicious example MCP servers, for tests and demo
 | `internal/rules` | Load and validate YAML rules; run matchers and native heuristics; ignore list | FR-07 to FR-10 |
 | `internal/pins` | Canonical hashing, `pins.json` store, change detection and diff | FR-11 to FR-13 |
 | `internal/report` | Terminal and JSON rendering; JSON schema | FR-14, FR-15, NFR-07 |
+| `internal/termsafe` | Escape untrusted text for the terminal (used by `discover` and `report`) | FR-14 |
 | `rules/` | Built-in YAML rules and their test cases | FR-09, NFR-05 |
 | `testdata/servers/` | Benign and malicious fixture servers | NFR-05 |
 

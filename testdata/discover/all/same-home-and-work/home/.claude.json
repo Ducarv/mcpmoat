@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "cc-once": {
+      "type": "stdio",
+      "command": "npx",
+      "args": ["-y", "cc-once"]
+    }
+  }
+}

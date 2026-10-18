@@ -1,0 +1,5 @@
+{
+  "mcpServers": {
+    "cc-global": {"type": "stdio" "command": "npx", "args": ["-y", "cc-global"]}
+  }
+}

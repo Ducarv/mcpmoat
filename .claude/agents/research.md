@@ -90,7 +90,7 @@ reading, and leave it out when another skill calls you. The two must never disag
 - **Agent**: from the profile's routing table. Defaults: `go-dev` (`internal/` logic), `cli-dev`
   (`cmd/mcpmoat`, `internal/report`), `datastore` (`pins.json` format and store, ignore file),
   `unit-test` (unit `_test.go`, rule cases, fixtures), `cli-test` (in-process CLI output and
-  golden files), `e2e-test` (testscript scenarios against the real binary).
+  golden files), `e2e-test` (`TestE2E*` Go tests that run the real binary).
 - **Security**: `✓` for security-sensitive tasks (see below).
 
 ## Dependency guidelines
@@ -132,7 +132,7 @@ Request: "Add the Cursor config reader (FR-01)"
 | 2 | testdata/discover/cursor/mcp.json | Add a fixture with one stdio and one http server, env values set | - | unit-test | - |
 | 3 | internal/discover/cursor_test.go | Table-driven tests: both files, missing file, malformed JSON, env values never in output | 1,2 | unit-test | - |
 | 4 | internal/discover/discover.go | Register the Cursor reader in Discover() | 1 | go-dev | - |
-| 5 | cmd/mcpmoat/testdata/script/scan_cursor.txtar | E2E: scan --no-connect lists the Cursor servers and masks env values | 4 | e2e-test | - |
+| 5 | cmd/mcpmoat/e2e_test.go | Add TestE2EScanCursor: scan --no-connect lists the Cursor servers and masks env values | 4 | e2e-test | - |
 | 6 | - | Run typecheck | 1,2,3,4,5 | typecheck | - |
 ```
 

@@ -1,0 +1,4 @@
+{
+  "numStartups": 3
+  "mcpServers": {"fs": {"command": "x", "env": {"API_KEY": "mcpmoat-canary-env-7Q2xK9"}}}
+}

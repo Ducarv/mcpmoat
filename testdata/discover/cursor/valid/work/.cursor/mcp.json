@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "project-tools": {
+      "command": "npx",
+      "args": ["-y", "example-mcp-server"]
+    },
+    "project-remote": {
+      "url": "https://project.example.com/mcp"
+    }
+  }
+}

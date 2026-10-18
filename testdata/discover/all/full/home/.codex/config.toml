@@ -1,0 +1,5 @@
+model = "o3"
+
+[mcp_servers.codex-global]
+command = "npx"
+args = ["-y", "codex-global"]

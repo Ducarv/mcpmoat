@@ -1,0 +1,3 @@
+[mcp_servers.broken]
+args = ["a"]
+command = "x" mcpmoat-canary-env-7Q2xK9

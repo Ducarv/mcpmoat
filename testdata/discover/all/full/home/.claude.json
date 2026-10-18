@@ -1,0 +1,20 @@
+{
+  "mcpServers": {
+    "cc-global": {
+      "type": "stdio",
+      "command": "npx",
+      "args": ["-y", "cc-global"]
+    }
+  },
+  "projects": {
+    "/work/alpha": {
+      "mcpServers": {
+        "cc-alpha": {
+          "type": "stdio",
+          "command": "node",
+          "args": ["alpha.js"]
+        }
+      }
+    }
+  }
+}

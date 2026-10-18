@@ -5,6 +5,7 @@ import (
 	"errors"
 	"flag"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -32,6 +33,10 @@ func fakeGetenv(env map[string]string) func(string) string {
 
 // newTestCLI builds a cli with in-memory writers. The test reads the output
 // from the two returned buffers (stdout first, then stderr).
+//
+// homeDir and getwd return an error by default. A test that needs them must
+// set them to a fixture path. This way a test that forgets cannot read the
+// real home directory or the real working directory.
 func newTestCLI(getenv func(string) string, build buildInfo) (*cli, *bytes.Buffer, *bytes.Buffer) {
 	var stdout, stderr bytes.Buffer
 	c := &cli{
@@ -39,6 +44,12 @@ func newTestCLI(getenv func(string) string, build buildInfo) (*cli, *bytes.Buffe
 		stderr: &stderr,
 		getenv: getenv,
 		build:  build,
+		homeDir: func() (string, error) {
+			return "", errors.New("test: home not set")
+		},
+		getwd: func() (string, error) {
+			return "", errors.New("test: working directory not set")
+		},
 	}
 	return c, &stdout, &stderr
 }
@@ -108,8 +119,8 @@ func TestCLIRun(t *testing.T) {
 			wantStdoutEmpty: true,
 		},
 		{
-			// The command name is untrusted. It must be quoted with %q, so a
-			// raw ESC byte never reaches the terminal.
+			// The command name is untrusted. quoteArg quotes it, so a raw ESC
+			// byte never reaches the terminal.
 			name:            "unknown command with control characters",
 			args:            []string{"bo\x1b[31mgus"},
 			wantCode:        exitError,
@@ -183,10 +194,57 @@ func TestCLIRun(t *testing.T) {
 			wantStdoutEmpty: true,
 		},
 		{
-			name:            "scan is not implemented",
+			// %q keeps a blank rune as it is. termsafe.Quote escapes it.
+			name:            "extra argument with a blank rune",
+			args:            []string{"version", "\u3164"},
+			wantCode:        exitError,
+			wantStderr:      []string{`mcpmoat version: unexpected arguments ["\u3164"]`},
+			wantStdoutEmpty: true,
+		},
+		{
+			// Each argument is quoted, so a space or an empty argument shows.
+			name:            "extra arguments with a space and an empty one",
+			args:            []string{"help", "a b", ""},
+			wantCode:        exitError,
+			wantStderr:      []string{`mcpmoat help: unexpected arguments ["a b" ""]`},
+			wantStdoutEmpty: true,
+		},
+		{
+			name:            "unknown command with a blank rune",
+			args:            []string{"\u3164"},
+			wantCode:        exitError,
+			wantStderr:      []string{`mcpmoat: unknown command "\u3164"`},
+			wantStdoutEmpty: true,
+		},
+		{
+			// A plain flag error is printed as it is.
+			name:            "unknown global flag message",
+			args:            []string{"--bogus-flag"},
+			wantCode:        exitError,
+			wantStderr:      []string{"mcpmoat: flag provided but not defined: -bogus-flag\n"},
+			wantStdoutEmpty: true,
+		},
+		{
+			name:            "unknown global flag with a blank rune",
+			args:            []string{"--\u3164"},
+			wantCode:        exitError,
+			wantStderr:      []string{`mcpmoat: "flag provided but not defined: -\u3164"`},
+			wantStdoutEmpty: true,
+		},
+		{
+			name:            "scan without --no-connect is not implemented",
 			args:            []string{"scan"},
 			wantCode:        exitError,
-			wantStderr:      []string{"not implemented"},
+			wantStderr:      []string{"not implemented", "use --no-connect"},
+			wantStdoutEmpty: true,
+		},
+		{
+			// With the default test cli, homeDir fails. This proves that a
+			// test (or a bug) cannot reach the real home directory.
+			name:            "scan --no-connect with no home directory",
+			args:            []string{"scan", "--no-connect"},
+			wantCode:        exitError,
+			wantStderr:      []string{"cannot find the home directory"},
 			wantStdoutEmpty: true,
 		},
 		{
@@ -291,20 +349,68 @@ func TestUsageContent(t *testing.T) {
 		"  version ",
 		"  help ",
 		"--no-color",
+		"Scan flags (after \"scan\"):\n",
+		"  --no-connect ",
+		"  --config <file> ",
+		"A file that is not your own global config is read as an untrusted project file\n",
 		"Exit codes:\n",
 		"  0  no findings\n",
 		"  1  findings at or above --fail-on\n",
 		"  2  execution error\n",
+		"     (scan also exits 2 when a config file has a problem; a missing file is not a problem\n" +
+			"     in auto-discovery, but a missing --config file is)\n",
+		"Scan output:\n",
+		"  A heuristic masks secret-like arguments. Review the output before you share it.\n",
+		"  --no-connect: " + noRulesText + ".\n",
 	} {
 		if !strings.Contains(got, want) {
 			t.Errorf("usage text does not contain %q\n--- got ---\n%s", want, got)
 		}
 	}
+	// The help says once that no rules are applied: in the scan notes, with
+	// the same text as the notice on stderr.
+	for _, once := range []string{noRulesText, "no rules"} {
+		if n := strings.Count(got, once); n != 1 {
+			t.Errorf("usage text holds %q %d times, want 1\n--- got ---\n%s", once, n, got)
+		}
+	}
+}
+
+func TestQuoteArg(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{name: "plain", in: "extra", want: `"extra"`},
+		{name: "empty", in: "", want: `""`},
+		{name: "space", in: "a b", want: `"a b"`},
+		{name: "quote and backslash", in: `a"b\c`, want: `"a\"b\\c"`},
+		{name: "leading quote", in: `"x"`, want: `"\"x\""`},
+		{name: "ESC", in: "a\x1b[31mb", want: `"a\x1b[31mb"`},
+		// %q keeps a Hangul filler as it is. termsafe.Quote escapes it.
+		{name: "blank rune", in: "a\u3164b", want: `"a\u3164b"`},
+		{name: "invalid UTF-8", in: "a\xffb", want: `"a\xffb"`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got := quoteArg(tt.in)
+			if got != tt.want {
+				t.Errorf("quoteArg(%q) = %q, want %q", tt.in, got, tt.want)
+			}
+			if back, err := strconv.Unquote(got); err != nil || back != tt.in {
+				t.Errorf("Unquote(quoteArg(%q)) = %q, %v, want the input", tt.in, back, err)
+			}
+		})
+	}
 }
 
 // TestCLIRunUnknownFlagEscapesControlChars checks terminal safety for the flag
 // parse error. The flag package puts the raw flag name in its error, so
-// cli.dispatch must quote the error text. A raw ESC byte must never reach stderr.
+// cli.dispatch must escape the error text with termsafe.Quote. A raw ESC byte must never reach stderr.
 func TestCLIRunUnknownFlagEscapesControlChars(t *testing.T) {
 	t.Parallel()
 
