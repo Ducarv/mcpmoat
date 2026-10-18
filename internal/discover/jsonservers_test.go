@@ -379,11 +379,11 @@ func TestParseJSONServersShapes(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
-		name         string
-		input        string
-		withProjects bool
-		wantServers  []string // names, in order
-		wantErrors   []errWant
+		name        string
+		input       string
+		projects    projectsMode
+		wantServers []string // names, in order
+		wantErrors  []errWant
 	}{
 		{name: "empty file", input: ``},
 		{name: "whitespace-only file", input: " \n\t\r\n "},
@@ -410,53 +410,53 @@ func TestParseJSONServersShapes(t *testing.T) {
 		{name: "mcpServers null", input: `{"mcpServers": null}`},
 		{name: "mcpServers empty object", input: `{"mcpServers": {}}`},
 		{
-			name:         "projects array",
-			input:        `{"projects": []}`,
-			withProjects: true,
-			wantErrors:   []errWant{{Reason: reasonBadShape}},
+			name:       "projects array",
+			input:      `{"projects": []}`,
+			projects:   projectsRead,
+			wantErrors: []errWant{{Reason: reasonBadShape}},
 		},
-		{name: "projects null", input: `{"projects": null}`, withProjects: true},
+		{name: "projects null", input: `{"projects": null}`, projects: projectsRead},
 		{
-			name:        "projects ignored when withProjects is false",
+			name:        "projects ignored with projectsSkip",
 			input:       `{"projects": {"/p": {"mcpServers": {"s": {"command": "x"}}}}, "mcpServers": {"top": {"command": "x"}}}`,
 			wantServers: []string{"top"},
 		},
 		{
-			name:         "bad projects shape is ignored when withProjects is false",
-			input:        `{"projects": []}`,
-			withProjects: false,
+			name:     "bad projects shape is ignored with projectsSkip",
+			input:    `{"projects": []}`,
+			projects: projectsSkip,
 		},
 		{
 			name: "bad project value keeps the other projects",
 			input: `{"projects": {
 				"/a": 5,
 				"/b": {"mcpServers": {"s": {"command": "x"}}}}}`,
-			withProjects: true,
-			wantServers:  []string{"s"},
-			wantErrors:   []errWant{{ProjectPath: "/a", Reason: reasonBadShape}},
+			projects:    projectsRead,
+			wantServers: []string{"s"},
+			wantErrors:  []errWant{{ProjectPath: "/a", Reason: reasonBadShape}},
 		},
 		{
 			name: "project without mcpServers",
 			input: `{"projects": {
 				"/a": {"allowedTools": []},
 				"/b": {"mcpServers": null}}}`,
-			withProjects: true,
+			projects: projectsRead,
 		},
 		{
 			name: "project mcpServers is not an object",
 			input: `{"projects": {
 				"/a": {"mcpServers": []},
 				"/b": {"mcpServers": {"s": {"command": "x"}}}}}`,
-			withProjects: true,
-			wantServers:  []string{"s"},
-			wantErrors:   []errWant{{ProjectPath: "/a", Reason: reasonBadServers}},
+			projects:    projectsRead,
+			wantServers: []string{"s"},
+			wantErrors:  []errWant{{ProjectPath: "/a", Reason: reasonBadServers}},
 		},
 		{
-			name:         "bad top-level mcpServers keeps the project servers",
-			input:        `{"mcpServers": 1, "projects": {"/b": {"mcpServers": {"s": {"command": "x"}}}}}`,
-			withProjects: true,
-			wantServers:  []string{"s"},
-			wantErrors:   []errWant{{Reason: reasonBadServers}},
+			name:        "bad top-level mcpServers keeps the project servers",
+			input:       `{"mcpServers": 1, "projects": {"/b": {"mcpServers": {"s": {"command": "x"}}}}}`,
+			projects:    projectsRead,
+			wantServers: []string{"s"},
+			wantErrors:  []errWant{{Reason: reasonBadServers}},
 		},
 	}
 
@@ -465,7 +465,7 @@ func TestParseJSONServersShapes(t *testing.T) {
 			t.Parallel()
 			path := writeFile(t, t.TempDir(), "config.json", []byte(tt.input))
 
-			servers, errs := parseJSONServers(t.Context(), jsonFile{path: path, client: ClientClaudeCode, scope: ScopeGlobal, withProjects: tt.withProjects})
+			servers, errs := parseJSONServers(t.Context(), jsonFile{path: path, client: ClientClaudeCode, scope: ScopeGlobal, projects: tt.projects})
 
 			var gotNames []string
 			if len(servers) > 0 {
@@ -532,7 +532,7 @@ func TestParseJSONServersScopeAndProjectPath(t *testing.T) {
 			},
 		},
 		{
-			// withProjects is true here, so the projects of a project file
+			// projects is projectsRead here, so the projects of a project file
 			// are read too. ReadClaudeCode never does that. Every server of
 			// a project file is untrusted.
 			name:   "project file",
@@ -581,7 +581,7 @@ func TestParseJSONServersScopeAndProjectPath(t *testing.T) {
 				projectPath = dir
 			}
 
-			servers, errs := parseJSONServers(t.Context(), jsonFile{path: path, client: tt.client, scope: tt.scope, projectPath: projectPath, withProjects: true})
+			servers, errs := parseJSONServers(t.Context(), jsonFile{path: path, client: tt.client, scope: tt.scope, projectPath: projectPath, projects: projectsRead})
 
 			if len(errs) != 0 {
 				t.Fatalf("errors = %v, want none", errs)
@@ -639,7 +639,7 @@ func TestParseJSONServersOrder(t *testing.T) {
 	}
 
 	for i := range 30 {
-		servers, errs := parseJSONServers(t.Context(), jsonFile{path: path, client: ClientClaudeCode, scope: ScopeGlobal, withProjects: true})
+		servers, errs := parseJSONServers(t.Context(), jsonFile{path: path, client: ClientClaudeCode, scope: ScopeGlobal, projects: projectsRead})
 
 		if got := serverNames(servers); !slices.Equal(got, wantNames) {
 			t.Fatalf("run %d: server names = %v, want %v", i, got, wantNames)
@@ -668,7 +668,7 @@ func TestParseJSONServersSyntaxError(t *testing.T) {
 		t.Parallel()
 		path := writeFile(t, t.TempDir(), "config.json", []byte("not json"))
 
-		_, errs := parseJSONServers(t.Context(), jsonFile{path: path, client: ClientClaudeCode, scope: ScopeGlobal, withProjects: true})
+		_, errs := parseJSONServers(t.Context(), jsonFile{path: path, client: ClientClaudeCode, scope: ScopeGlobal, projects: projectsRead})
 
 		checkFileErrors(t, path, errs, []errWant{{Reason: reasonInvalidJSON, Line: 1}})
 		if strings.Contains(errs[0].Error(), "not json") {
@@ -680,7 +680,7 @@ func TestParseJSONServersSyntaxError(t *testing.T) {
 		t.Parallel()
 		path := writeFile(t, t.TempDir(), "config.json", []byte(`{"mcpServers": {"x": {"command": "\u00zz"}}}`))
 
-		servers, errs := parseJSONServers(t.Context(), jsonFile{path: path, client: ClientClaudeCode, scope: ScopeGlobal, withProjects: true})
+		servers, errs := parseJSONServers(t.Context(), jsonFile{path: path, client: ClientClaudeCode, scope: ScopeGlobal, projects: projectsRead})
 
 		// The whole file is checked for syntax first, so a bad escape is a
 		// syntax error of the file and no server is returned.
@@ -762,7 +762,7 @@ func TestParseJSONServersNoLeak(t *testing.T) {
 			t.Parallel()
 			path := writeFile(t, t.TempDir(), "config.json", []byte(tt.input))
 
-			servers, errs := parseJSONServers(t.Context(), jsonFile{path: path, client: ClientClaudeCode, scope: ScopeGlobal, withProjects: true})
+			servers, errs := parseJSONServers(t.Context(), jsonFile{path: path, client: ClientClaudeCode, scope: ScopeGlobal, projects: projectsRead})
 
 			assertNoLeakServers(t, servers)
 			assertNoLeakErrors(t, errs)
@@ -778,7 +778,7 @@ func TestParseJSONServersCanceledContext(t *testing.T) {
 	ctx, cancel := context.WithCancel(t.Context())
 	cancel()
 
-	servers, errs := parseJSONServers(ctx, jsonFile{path: path, client: ClientClaudeCode, scope: ScopeGlobal, withProjects: true})
+	servers, errs := parseJSONServers(ctx, jsonFile{path: path, client: ClientClaudeCode, scope: ScopeGlobal, projects: projectsRead})
 
 	if len(servers) != 0 {
 		t.Errorf("servers = %v, want none", serverNames(servers))
@@ -864,7 +864,7 @@ func TestParseJSONServersSyntaxErrorPosition(t *testing.T) {
 			t.Parallel()
 			path := writeFile(t, t.TempDir(), "config.json", []byte(tt.input))
 
-			servers, errs := parseJSONServers(t.Context(), jsonFile{path: path, client: ClientClaudeCode, scope: ScopeGlobal, withProjects: true})
+			servers, errs := parseJSONServers(t.Context(), jsonFile{path: path, client: ClientClaudeCode, scope: ScopeGlobal, projects: projectsRead})
 
 			if len(servers) != 0 {
 				t.Errorf("servers = %v, want none", serverNames(servers))
@@ -965,7 +965,7 @@ func TestParseJSONServersTooManyServers(t *testing.T) {
 			t.Parallel()
 			path := writeFile(t, t.TempDir(), "config.json", []byte(tt.input))
 
-			servers, errs := parseJSONServers(t.Context(), jsonFile{path: path, client: ClientClaudeCode, scope: ScopeGlobal, withProjects: true})
+			servers, errs := parseJSONServers(t.Context(), jsonFile{path: path, client: ClientClaudeCode, scope: ScopeGlobal, projects: projectsRead})
 
 			if len(servers) != tt.wantServers {
 				t.Errorf("got %d servers, want %d", len(servers), tt.wantServers)
@@ -1230,11 +1230,11 @@ func TestParseJSONServersCaseVariantSections(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
-		name         string
-		input        string
-		withProjects bool
-		wantServers  []string // names, in order
-		wantErrors   []errWant
+		name        string
+		input       string
+		projects    projectsMode
+		wantServers []string // names, in order
+		wantErrors  []errWant
 	}{
 		{
 			// A reader that ignores case would take the second object.
@@ -1242,43 +1242,43 @@ func TestParseJSONServersCaseVariantSections(t *testing.T) {
 			input: `{"projects": {
 				"/a": {"mcpServers": {"x": {"command": "evil"}}, "MCPSERVERS": {"x": {"command": "benign"}}},
 				"/b": {"mcpServers": {"y": {"command": "y"}}}}}`,
-			withProjects: true,
-			wantServers:  []string{"y"},
-			wantErrors:   []errWant{{ProjectPath: "/a", Reason: reasonAmbiguousKey}},
+			projects:    projectsRead,
+			wantServers: []string{"y"},
+			wantErrors:  []errWant{{ProjectPath: "/a", Reason: reasonAmbiguousKey}},
 		},
 		{
-			name:         "project variant alone",
-			input:        `{"projects": {"/a": {"McpServers": {"x": {"command": "x"}}}}}`,
-			withProjects: true,
-			wantErrors:   []errWant{{ProjectPath: "/a", Reason: reasonAmbiguousKey}},
+			name:       "project variant alone",
+			input:      `{"projects": {"/a": {"McpServers": {"x": {"command": "x"}}}}}`,
+			projects:   projectsRead,
+			wantErrors: []errWant{{ProjectPath: "/a", Reason: reasonAmbiguousKey}},
 		},
 		{
 			name: "other project keys are not checked",
 			input: `{"projects": {
 				"/a": {"mcpServers": {"x": {"command": "x"}}, "allowedTools": [], "AllowedTools": []}}}`,
-			withProjects: true,
-			wantServers:  []string{"x"},
+			projects:    projectsRead,
+			wantServers: []string{"x"},
 		},
 		{
 			name: "top-level mcpServers",
 			input: `{"mcpServers": {"a": {"command": "a"}}, "MCPServers": {"b": {"command": "b"}},
 				"projects": {"/p": {"mcpServers": {"c": {"command": "c"}}}}}`,
-			withProjects: true,
-			wantServers:  []string{"c"},
-			wantErrors:   []errWant{{Reason: reasonAmbiguousKey}},
+			projects:    projectsRead,
+			wantServers: []string{"c"},
+			wantErrors:  []errWant{{Reason: reasonAmbiguousKey}},
 		},
 		{
 			name: "top-level projects",
 			input: `{"mcpServers": {"a": {"command": "a"}},
 				"projects": {"/p": {"mcpServers": {"c": {"command": "c"}}}},
 				"Projects": {"/q": {"mcpServers": {"d": {"command": "d"}}}}}`,
-			withProjects: true,
-			wantServers:  []string{"a"},
-			wantErrors:   []errWant{{Reason: reasonAmbiguousKey}},
+			projects:    projectsRead,
+			wantServers: []string{"a"},
+			wantErrors:  []errWant{{Reason: reasonAmbiguousKey}},
 		},
 		{
-			// Without withProjects the reader does not use "projects".
-			name: "top-level projects variant without withProjects",
+			// With projectsSkip the reader does not use "projects".
+			name: "top-level projects variant with projectsSkip",
 			input: `{"mcpServers": {"a": {"command": "a"}},
 				"projects": {}, "Projects": {}}`,
 			wantServers: []string{"a"},
@@ -1290,7 +1290,7 @@ func TestParseJSONServersCaseVariantSections(t *testing.T) {
 			t.Parallel()
 			path := writeFile(t, t.TempDir(), "config.json", []byte(tt.input))
 
-			servers, errs := parseJSONServers(t.Context(), jsonFile{path: path, client: ClientClaudeCode, scope: ScopeGlobal, withProjects: tt.withProjects})
+			servers, errs := parseJSONServers(t.Context(), jsonFile{path: path, client: ClientClaudeCode, scope: ScopeGlobal, projects: tt.projects})
 
 			var gotNames []string
 			if len(servers) > 0 {
@@ -1466,7 +1466,7 @@ func TestParseJSONServersLoneSurrogate(t *testing.T) {
 type badStringCase struct {
 	name        string
 	input       string
-	cursor      bool // read with withProjects=false, as for Cursor
+	cursor      bool // read with projectsSkip, as for Cursor
 	wantLine    int  // 0: the file is valid and gives wantName
 	wantCol     int
 	wantProject string
@@ -1484,7 +1484,7 @@ func runBadStringCases(t *testing.T, tests []badStringCase) {
 			t.Parallel()
 			path := writeFile(t, t.TempDir(), "config.json", []byte(tt.input))
 
-			servers, errs := parseJSONServers(t.Context(), jsonFile{path: path, client: ClientClaudeCode, scope: ScopeGlobal, withProjects: !tt.cursor})
+			servers, errs := parseJSONServers(t.Context(), jsonFile{path: path, client: ClientClaudeCode, scope: ScopeGlobal, projects: projectsIf(!tt.cursor)})
 
 			if tt.wantLine == 0 {
 				if len(errs) != 0 {
@@ -1557,7 +1557,7 @@ func TestParseJSONServersEmptyName(t *testing.T) {
 			t.Parallel()
 			path := writeFile(t, t.TempDir(), "config.json", []byte(tt.input))
 
-			servers, errs := parseJSONServers(t.Context(), jsonFile{path: path, client: ClientClaudeCode, scope: ScopeGlobal, withProjects: true})
+			servers, errs := parseJSONServers(t.Context(), jsonFile{path: path, client: ClientClaudeCode, scope: ScopeGlobal, projects: projectsRead})
 
 			var gotNames []string
 			if len(servers) > 0 {
@@ -1587,7 +1587,7 @@ func TestParseJSONServersProjectPathInErrors(t *testing.T) {
 				"/c": {"mcpServers": {"y": {"command": "c", "Command": "d"}}},
 				"/d": {"mcpServers": []}}}`))
 
-		_, errs := parseJSONServers(t.Context(), jsonFile{path: path, client: ClientClaudeCode, scope: ScopeGlobal, withProjects: true})
+		_, errs := parseJSONServers(t.Context(), jsonFile{path: path, client: ClientClaudeCode, scope: ScopeGlobal, projects: projectsRead})
 
 		// Errors without a server come first, then by server name; the same
 		// name keeps the top level first.
@@ -1740,7 +1740,7 @@ func TestParseJSONServersInvalidUTF8(t *testing.T) {
 // TestParseJSONServersUntrusted checks that every server and every error of a
 // project file is untrusted, and that nothing of a global file is, also not
 // the servers under "projects". As in ReadClaudeCode, only the global file is
-// read with withProjects.
+// read with projectsRead.
 func TestParseJSONServersUntrusted(t *testing.T) {
 	t.Parallel()
 
@@ -1789,7 +1789,7 @@ func TestParseJSONServersUntrusted(t *testing.T) {
 					projectPath = dir
 				}
 
-				servers, errs := parseJSONServers(t.Context(), jsonFile{path: path, client: ClientClaudeCode, scope: scope, projectPath: projectPath, withProjects: scope == ScopeGlobal})
+				servers, errs := parseJSONServers(t.Context(), jsonFile{path: path, client: ClientClaudeCode, scope: scope, projectPath: projectPath, projects: projectsIf(scope == ScopeGlobal)})
 
 				if len(servers) != tt.wantServers || len(errs) != tt.wantErrors {
 					t.Fatalf("got %d servers and %d errors, want %d and %d: %v",
@@ -1809,7 +1809,7 @@ func TestParseJSONServersUntrusted(t *testing.T) {
 			"/b": 5,
 			"/c": {"mcpServers": {"t": {"command": "x"}}, "MCPSERVERS": {}}}}`))
 
-		servers, errs := parseJSONServers(t.Context(), jsonFile{path: path, client: ClientClaudeCode, scope: ScopeGlobal, withProjects: true})
+		servers, errs := parseJSONServers(t.Context(), jsonFile{path: path, client: ClientClaudeCode, scope: ScopeGlobal, projects: projectsRead})
 
 		if len(servers) != 1 || len(errs) != 3 {
 			t.Fatalf("got %d servers and %d errors, want 1 and 3: %v", len(servers), len(errs), errs)
@@ -2081,10 +2081,10 @@ func TestReadJSONProjectRoot(t *testing.T) {
 }
 
 // TestReadJSONProjectPathFromFile checks the ProjectPath of a project file
-// read without a projectPath. It is the directory of the file. Only the
-// Cursor reader skips a ".cursor" directory: the servers of
-// <project>/.cursor/mcp.json get <project>, as Discover gives it. A Claude
-// Code .mcp.json is at the top of its project.
+// read without a projectPath. It is the directory of the file, or the parent
+// of a directory named ".cursor" or ".codex": the servers of
+// <project>/.cursor/mcp.json get <project>, as Discover gives it. The path
+// decides, not the reader, so both readers skip both directories.
 func TestReadJSONProjectPathFromFile(t *testing.T) {
 	t.Parallel()
 
@@ -2098,7 +2098,10 @@ func TestReadJSONProjectPathFromFile(t *testing.T) {
 		wantRel string
 	}{
 		{name: "claude-code/project file", read: ReadClaudeCode, rel: "proj/.mcp.json", wantRel: "proj"},
-		{name: "claude-code/in a .cursor directory", read: ReadClaudeCode, rel: "proj/.cursor/.mcp.json", wantRel: "proj/.cursor"},
+		{name: "claude-code/in a .cursor directory", read: ReadClaudeCode, rel: "proj/.cursor/.mcp.json", wantRel: "proj"},
+		{name: "claude-code/in a .codex directory", read: ReadClaudeCode, rel: "proj/.codex/.mcp.json", wantRel: "proj"},
+		{name: "claude-code/in a nested directory below .cursor", read: ReadClaudeCode, rel: "proj/.cursor/sub/.mcp.json", wantRel: "proj/.cursor/sub"},
+		{name: "cursor/in .codex", read: ReadCursor, rel: "proj/.codex/mcp.json", wantRel: "proj"},
 		{name: "cursor/in .cursor", read: ReadCursor, rel: "proj/.cursor/mcp.json", wantRel: "proj"},
 		{name: "cursor/in another directory", read: ReadCursor, rel: "proj/conf/mcp.json", wantRel: "proj/conf"},
 		{name: "cursor/name ends with .cursor", read: ReadCursor, rel: "proj/my.cursor/mcp.json", wantRel: "proj/my.cursor"},
@@ -2232,4 +2235,12 @@ func TestJSONKeys(t *testing.T) {
 	if !slices.Equal(jsonKnownKeys, keys) {
 		t.Errorf("jsonKnownKeys = %q, want %q", jsonKnownKeys, keys)
 	}
+}
+
+// projectsIf returns projectsRead if read is true, and projectsSkip if not.
+func projectsIf(read bool) projectsMode {
+	if read {
+		return projectsRead
+	}
+	return projectsSkip
 }

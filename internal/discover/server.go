@@ -112,8 +112,9 @@ type Server struct {
 	// own working directory: it must treat a relative Dir like an empty Dir.
 	//
 	// For an untrusted Codex file (see ReadConfig), Dir is empty, a local
-	// relative path, or an absolute path that is ProjectPath or below it. The
-	// check is lexical, so inspect must still not trust a Dir of an untrusted
+	// relative path, or an absolute path that is ProjectPath or below it, and
+	// no symlink in the project led it out at read time. The tree can change
+	// after the read, so inspect must still not trust a Dir of an untrusted
 	// server more than its command.
 	Dir string
 

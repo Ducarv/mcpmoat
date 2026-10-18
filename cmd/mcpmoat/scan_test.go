@@ -38,10 +38,11 @@ func scanCLI(t *testing.T, fixture ...string) (c *cli, stdout, stderr *bytes.Buf
 	return c, stdout, stderr, home, work
 }
 
-// scanConfigCLI returns a cli for --config runs. Its homeDir returns home,
-// which --config uses only to tell whether the file is one of the user's own
-// global files. Its getwd fails the test when it is called: it proves that
-// --config never looks at the working directory.
+// scanConfigCLI returns a cli for --config runs with an absolute path. Its
+// homeDir returns home, which --config uses only to tell whether the file is
+// one of the user's own global files. Its getwd fails the test when it is
+// called: it proves that --config with an absolute path never looks at the
+// working directory. A test with a relative path uses dirsCLI instead.
 func scanConfigCLI(t *testing.T, home string) (*cli, *bytes.Buffer, *bytes.Buffer) {
 	t.Helper()
 	c, stdout, stderr := dirsCLI(t, home, "")
@@ -297,15 +298,7 @@ func TestScanAutoPartialFailure(t *testing.T) {
 	if rows := tableRows(t, stdout.String()); len(rows) != 4 {
 		t.Errorf("table has %d rows, want 4\nstdout:\n%s", len(rows), stdout)
 	}
-	lines := nonEmptyLines(stderr.String())
-	if len(lines) != 2 {
-		t.Fatalf("stderr has %d lines, want 2 (the problem and the hint)\nstderr:\n%s", len(lines), stderr)
-	}
-	assertContainsAll(t, "the first stderr line", lines[0], []string{"mcpmoat scan: ", ".claude.json", "invalid JSON"})
-	assertScanErrorLines(t, stderr.String())
-	if got, want := lines[1], configErrorHint; got != want {
-		t.Errorf("last stderr line = %q, want the hint %q", got, want)
-	}
+	assertPartialFailureStderr(t, stderr.String())
 }
 
 func TestScanEmpty(t *testing.T) {
@@ -1238,5 +1231,103 @@ func TestScanConfigIsUntrusted(t *testing.T) {
 		}
 		assertContainsAll(t, "stderr", stderr.String(), []string{"projects section not read"})
 		assertScanErrorLines(t, stderr.String())
+	})
+}
+
+// TestScanConfigRelativePath checks that a relative --config path gives the
+// same result as the absolute path of the same file: scanConfig makes it
+// absolute from the working directory first. So the SCOPE cell does not
+// depend on the spelling, and an absolute Codex cwd inside the project is
+// accepted in both spellings.
+func TestScanConfigRelativePath(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		// rel is the --config path relative to the project directory.
+		rel string
+		// content returns the file content for the project directory.
+		content    func(project string) string
+		wantCode   int
+		wantStdout func(project string) []string
+		noStdout   []string
+	}{
+		{
+			name: "codex file with an absolute cwd inside the project",
+			rel:  filepath.Join(".codex", "config.toml"),
+			content: func(project string) string {
+				// A TOML literal string ('...') keeps a Windows backslash as
+				// it is.
+				return "[mcp_servers.in-srv]\ncommand = \"npx\"\ncwd = '" + filepath.Join(project, "sub") + "'\n"
+			},
+			wantCode: exitOK,
+			wantStdout: func(project string) []string {
+				return []string{"in-srv", "codex", "project:" + project}
+			},
+			noStdout: []string{"project:."},
+		},
+		{
+			name: "cursor file",
+			rel:  filepath.Join(".cursor", "mcp.json"),
+			content: func(string) string {
+				return `{"mcpServers":{"cur-srv":{"command":"npx"}}}`
+			},
+			wantCode: exitOK,
+			wantStdout: func(project string) []string {
+				return []string{"cur-srv", "cursor", "project:" + project}
+			},
+			noStdout: []string{"project:."},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			home, project := t.TempDir(), t.TempDir()
+			abs := writeTestFile(t, project, tt.rel, tt.content(project))
+
+			type result struct {
+				code           int
+				stdout, stderr string
+			}
+			runWith := func(path string) result {
+				t.Helper()
+				c, stdout, stderr := dirsCLI(t, home, project)
+				code := c.dispatch([]string{"scan", "--no-connect", "--config", path})
+				return result{code: code, stdout: stdout.String(), stderr: stderr.String()}
+			}
+			absRes := runWith(abs)
+			relRes := runWith(tt.rel)
+			dotRes := runWith("." + string(filepath.Separator) + tt.rel)
+
+			for _, r := range []result{absRes, relRes, dotRes} {
+				assertScanResult(t, r.code, r.stdout, r.stderr, scanWant{
+					code: tt.wantCode, stdout: tt.wantStdout(project), noStdout: tt.noStdout,
+				})
+			}
+			if relRes != absRes {
+				t.Errorf("relative path %q gives\n%+v\nwant the result of the absolute path\n%+v", tt.rel, relRes, absRes)
+			}
+			if dotRes != absRes {
+				t.Errorf("path ./%s gives\n%+v\nwant the result of the absolute path\n%+v", tt.rel, dotRes, absRes)
+			}
+		})
+	}
+
+	// Without a working directory the path stays relative. The test process
+	// runs in cmd/mcpmoat, so a fixture path relative to it still opens. The
+	// file is read as an untrusted project file, the safe side.
+	t.Run("no working directory keeps the path relative", func(t *testing.T) {
+		t.Parallel()
+
+		c, stdout, stderr := newTestCLI(fakeGetenv(nil), testBuild)
+		path := fixtureDir("claude-code", "valid", "work", ".mcp.json")
+		code := c.dispatch([]string{"scan", "--no-connect", "--config", path})
+
+		if code != exitOK {
+			t.Errorf("exit code = %d, want %d; stderr:\n%s", code, exitOK, stderr)
+		}
+		assertContainsAll(t, "stdout", stdout.String(), []string{"(untrusted)", path})
 	})
 }

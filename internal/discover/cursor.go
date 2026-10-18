@@ -8,10 +8,10 @@ import "context"
 //
 // The servers of the file get scope. With ScopeProject they get ProjectPath
 // projectPath. If projectPath is "", they get the directory of the file, or
-// for a file in a directory named ".cursor" the parent of that directory: the
-// servers of <project>/.cursor/mcp.json get <project>. With ScopeGlobal
-// projectPath is ignored and ProjectPath is "". Cursor files have no
-// "projects" section.
+// for a file in a directory named ".cursor" or ".codex" the parent of that
+// directory: the servers of <project>/.cursor/mcp.json get <project>. With
+// ScopeGlobal projectPath is ignored and ProjectPath is "". Cursor files have
+// no "projects" section.
 //
 // See the package doc, Reading configs.
 func ReadCursor(ctx context.Context, path string, scope Scope, projectPath string) Result {

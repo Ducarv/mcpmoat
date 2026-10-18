@@ -3,10 +3,8 @@ package report
 import (
 	"fmt"
 	"io"
-	"strconv"
 	"strings"
 	"text/tabwriter"
-	"unicode/utf8"
 
 	"github.com/Ducarv/mcpmoat/internal/discover"
 	"github.com/Ducarv/mcpmoat/internal/termsafe"
@@ -69,7 +67,7 @@ const untrustedMarker = " (untrusted)"
 // termsafe.Quote quotes such a cell, so the table keeps its shape.
 //
 // The padded columns (all but COMMAND/URL) go through cell. It cuts them with
-// [termsafe.QuoteCut], and a cut cell ends with [termsafe.CutMarker]. NAME,
+// [termsafe.Cut], and a cut cell ends with [termsafe.CutMarker]. NAME,
 // CLIENT and TRANSPORT are cut at 80 runes. SCOPE and SOURCE hold paths and
 // are cut at 256 runes, and an invalid UTF-8 byte counts as one rune. The cut
 // is made on the raw text, before escaping, so an escaped cell can be longer
@@ -128,30 +126,24 @@ func WriteServers(w io.Writer, servers []discover.Server) error {
 	return firstErr
 }
 
-// cell returns the text of one padded column cell: s cut at limit runes and
-// escaped with [termsafe.QuoteCut].
+// cell returns the text of one padded column cell: s cut at limit runes with
+// [termsafe.Cut], escaped, and ended with [termsafe.CutMarker] when it was
+// cut. This is the order of [termsafe.QuoteCut]: cut, quote, marker.
 //
 // cell adds one report rule on top of termsafe: a cell that holds an ASCII
-// space is quoted too, with strconv.Quote. tabwriter pads with spaces, so a
-// name such as "a   b" would otherwise look like two cells. termsafe.Quote
-// keeps such a text as it is, because a space is safe in a message line.
-// Like termsafe, cell cuts before it quotes, and CutMarker comes after the
-// closing quote. CLIENT and TRANSPORT hold fixed values without a space, so
-// the rule changes only NAME, SCOPE and SOURCE.
+// space is quoted too ([termsafe.QuoteIf] with force). tabwriter pads with
+// spaces, so a name such as "a   b" would otherwise look like two cells.
+// termsafe.Quote keeps such a text as it is, because a space is safe in a
+// message line. Only the shown part counts: a space after the cut does not
+// make the cell quoted. CLIENT and TRANSPORT hold fixed values without a
+// space, so the rule changes only NAME, SCOPE and SOURCE.
 func cell(s string, limit int) string {
-	c := termsafe.QuoteCut(s, limit)
-	if strings.HasPrefix(c, `"`) || !strings.Contains(c, " ") {
-		return c // already quoted, or no space
+	short, cut := termsafe.Cut(s, limit)
+	c := termsafe.QuoteIf(short, strings.Contains(short, " "))
+	if cut {
+		c += termsafe.CutMarker
 	}
-	// termsafe.QuoteCut did not quote, so c is the first limit runes of s as
-	// they are, plus CutMarker when s had more runes. Such a text is valid
-	// UTF-8 with no rune that termsafe escapes, so strconv.Quote escapes only
-	// the double quotes and the backslashes in it. utf8.RuneCountInString
-	// counts an invalid byte as one rune, the same as termsafe.QuoteCut.
-	if utf8.RuneCountInString(s) > limit {
-		return strconv.Quote(strings.TrimSuffix(c, termsafe.CutMarker)) + termsafe.CutMarker
-	}
-	return strconv.Quote(c)
+	return c
 }
 
 // scopeCell returns the SCOPE cell for s. For an untrusted server,
@@ -188,9 +180,9 @@ func commandCell(s discover.Server) string {
 // command path. Because the command is the first part, a command that looks
 // like a secret flag also masks the next part.
 //
-// Each redacted part is escaped with [termsafe.Quote]. A part that is empty
-// or holds a space is also wrapped in double quotes (strconv.Quote), so the
-// reader can still see where one argument ends and the next one starts.
+// Each redacted part is escaped with [termsafe.QuoteIf]. A part that is empty
+// or holds a space is quoted even when it is safe, so the reader can still
+// see where one argument ends and the next one starts.
 // Parts are joined with one space. Nothing is cut: the COMMAND/URL cell is
 // the last column, which is never cut.
 func formatCommand(command string, args discover.Args) string {
@@ -201,13 +193,7 @@ func formatCommand(command string, args discover.Args) string {
 	parts := discover.RedactArgs(append([]string{command}, args.Values()...))
 
 	for i, p := range parts {
-		escaped := termsafe.Quote(p)
-		// If termsafe.Quote changed the part, it is already quoted. Quote
-		// only a safe part that would otherwise blur the argument boundaries.
-		if escaped == p && (p == "" || strings.Contains(p, " ")) {
-			escaped = strconv.Quote(p)
-		}
-		parts[i] = escaped
+		parts[i] = termsafe.QuoteIf(p, p == "" || strings.Contains(p, " "))
 	}
 	return strings.Join(parts, " ")
 }

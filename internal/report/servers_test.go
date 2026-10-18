@@ -424,7 +424,7 @@ func TestWriteServersCellCap(t *testing.T) {
 				want: strconv.Quote(strings.Repeat("a", limit-1)+"\x1b") + marker,
 			},
 			{
-				// An invalid byte counts as one rune (termsafe.QuoteCut).
+				// An invalid byte counts as one rune (termsafe.Cut).
 				name: "invalid UTF-8 is cut at the cap and quoted",
 				in:   strings.Repeat("\xff", 1000),
 				want: strconv.Quote(strings.Repeat("\xff", limit)) + marker,

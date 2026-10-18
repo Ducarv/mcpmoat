@@ -43,6 +43,8 @@ const (
 	cursorFile = "mcp.json"
 	// codexDir is the directory of a Codex config: .codex/config.toml.
 	codexDir = ".codex"
+	// codexFile is the name of a Codex config in codexDir.
+	codexFile = "config.toml"
 )
 
 // The user's own config files, relative to the home directory, with forward
@@ -52,7 +54,7 @@ const (
 const (
 	globalClaudeCodeFile = ".claude.json"
 	globalCursorFile     = cursorDir + "/" + cursorFile
-	globalCodexFile      = codexDir + "/config.toml"
+	globalCodexFile      = codexDir + "/" + codexFile
 )
 
 // homePath returns the path of rel, one of the global files above, below
@@ -159,17 +161,15 @@ func buildSteps(opts Options) []step {
 	opts.WorkDir = cleanDir(opts.WorkDir)
 
 	var steps []step
-	// addGlobal adds the step of the global file g, when Home is set, and
-	// returns its path. The path stays empty when Home is empty.
-	addGlobal := func(g globalFile) string {
+	// addGlobal adds the step of the global file g, when Home is set.
+	addGlobal := func(g globalFile) {
 		if opts.Home == "" {
-			return ""
+			return
 		}
 		path := g.path(opts.Home)
 		steps = append(steps, step{path: path, read: func(ctx context.Context) Result {
 			return g.read(ctx, path)
 		}})
-		return path
 	}
 
 	addGlobal(globalClaudeCode)
@@ -180,10 +180,14 @@ func buildSteps(opts Options) []step {
 		}})
 	}
 
-	// homeCursor stays empty when Home is empty. The Cursor project path is
-	// never empty, so it never equals an empty homeCursor.
-	homeCursor := addGlobal(globalCursor)
+	addGlobal(globalCursor)
 	if opts.WorkDir != "" {
+		// homeCursor stays empty when Home is empty. The Cursor project path
+		// is never empty, so it never equals an empty homeCursor.
+		var homeCursor string
+		if opts.Home != "" {
+			homeCursor = globalCursor.path(opts.Home)
+		}
 		path := filepath.Join(opts.WorkDir, cursorDir, cursorFile)
 		// When WorkDir is Home, this is the same file as the home Cursor
 		// config: read it once, as a global config. Both paths are already

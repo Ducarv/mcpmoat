@@ -7,8 +7,9 @@
 //
 // This package holds the one rule for every place that prints such text.
 // internal/discover uses it for the paths, project keys and server names in a
-// FileError message, and internal/report uses it for every cell of the server
-// table. Keep the rule here only, so the two places cannot drift apart.
+// FileError message, internal/report uses it for every cell of the server
+// table, and cmd/mcpmoat uses it for the arguments in an error message. Keep
+// the rule here only, so these places cannot drift apart.
 //
 // The package uses only the standard library and imports no other package of
 // this module, so every package can import it.
@@ -58,18 +59,59 @@ import (
 //
 // Quote does not cut s. Use QuoteCut to cut and quote in one step.
 func Quote(s string) string {
-	if !needsQuote(s) {
-		return s
-	}
-	return quoteText(s)
+	return QuoteIf(s, false)
 }
 
-// cutRunes returns the first n runes of s, and true if s had more than n
-// runes. The cut is always at a rune boundary. An invalid UTF-8 byte counts
-// as one rune, as Quote shows it as one \xNN escape.
+// QuoteIf returns Quote(s), and it also quotes a safe s when force is true.
+// So the result is s unchanged only when force is false and Quote keeps s.
 //
-// cutRunes adds no marker. QuoteCut cuts, quotes and adds CutMarker.
-func cutRunes(s string, n int) (string, bool) {
+// Use it when a caller has its own reason to quote a safe text: for example,
+// to show where a command-line argument starts and ends, or to keep a table
+// cell with a space from looking like two cells. A forced result is never
+// mixed up with a plain one: it starts with a double quote, and a plain
+// result never does.
+//
+// A forced quote of a safe text escapes only the double quotes and the
+// backslashes in it. A safe text is valid UTF-8 with no rune that needs an
+// escape, so the quoted form is the same as strconv.Quote gives, and
+// strconv.Unquote gives s back. The caller does not need strconv.Quote.
+func QuoteIf(s string, force bool) string {
+	if force || needsQuote(s) {
+		return quoteText(s)
+	}
+	return s
+}
+
+// CutMarker ends a text that QuoteCut cut. It is plain ASCII, so it shows the
+// same in every terminal. A text can also end with "..." when it was not cut,
+// but the marker can never hide text.
+const CutMarker = "..."
+
+// QuoteCut returns s cut to n runes (see Cut) and then quoted (see Quote).
+// When s had more than n runes, CutMarker comes after the result, after the
+// closing quote of a quoted text.
+//
+// The cut is made before Quote, so it never splits an escape, and Quote
+// never escapes the marker. The part of s after the cut is not shown, so it
+// does not make the text quoted.
+//
+// A caller that quotes with QuoteIf cuts with Cut, and adds CutMarker itself
+// when Cut reports a cut, in the same order: cut, quote, marker.
+func QuoteCut(s string, n int) string {
+	short, cut := Cut(s, n)
+	if cut {
+		return Quote(short) + CutMarker
+	}
+	return Quote(short)
+}
+
+// Cut returns the first n runes of s, and true if s had more than n runes.
+// The cut is always at a rune boundary. An invalid UTF-8 byte counts as one
+// rune, as Quote shows it as one \xNN escape.
+//
+// Cut adds no marker and does not quote. QuoteCut cuts, quotes and adds
+// CutMarker.
+func Cut(s string, n int) (string, bool) {
 	i := 0
 	for count := 0; i < len(s); count++ {
 		if count == n {
@@ -79,27 +121,6 @@ func cutRunes(s string, n int) (string, bool) {
 		i += size
 	}
 	return s, false
-}
-
-// CutMarker ends a text that QuoteCut cut. It is plain ASCII, so it shows the
-// same in every terminal. A text can also end with "..." when it was not cut,
-// but the marker can never hide text.
-const CutMarker = "..."
-
-// QuoteCut returns s cut to n runes and then quoted (see Quote). The cut is
-// always at a rune boundary, and an invalid UTF-8 byte counts as one rune, as
-// Quote shows it as one \xNN escape. When s had more than n runes, CutMarker
-// comes after the result, after the closing quote of a quoted text.
-//
-// The cut is made before Quote, so it never splits an escape, and Quote
-// never escapes the marker. The part of s after the cut is not shown, so it
-// does not make the text quoted.
-func QuoteCut(s string, n int) string {
-	short, cut := cutRunes(s, n)
-	if cut {
-		return Quote(short) + CutMarker
-	}
-	return Quote(short)
 }
 
 // needsQuote reports whether s starts with a double quote, holds invalid

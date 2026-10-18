@@ -176,17 +176,23 @@ func ReadCodex(ctx context.Context, path string) Result {
 	case !found:
 		return Result{}
 	}
-	servers, errs := parseCodex(ctx, path, data)
+	servers, errs, _ := parseCodex(ctx, path, data)
 	return Result{Servers: servers, Errors: errs}
 }
 
 // parseCodex does the work of ReadCodex and readUntrustedCodex on data, the
 // content of the Codex file at path. See ReadCodex for the rules.
-func parseCodex(ctx context.Context, path string, data []byte) ([]Server, []*FileError) {
+//
+// noServersKey is true only for valid TOML whose top level has no
+// mcp_servers key, for example an empty file, a file with only comments or a
+// pyproject.toml. Such a file gives no servers and no errors.
+// readUntrustedCodex uses it to refuse a .toml file that is not a Codex
+// config (see ReadConfig).
+func parseCodex(ctx context.Context, path string, data []byte) (servers []Server, errs []*FileError, noServersKey bool) {
 	// Check the shape before the parser sees the data (see maxTOMLDepth and
 	// maxTOMLKeyParts).
 	if r := checkTOMLShape(data, maxTOMLDepth, maxTOMLKeyParts); r != "" {
-		return nil, []*FileError{newFileError(path, r)}
+		return nil, []*FileError{newFileError(path, r)}, false
 	}
 
 	// The file is decoded into maps and not into a struct. The TOML decoder
@@ -200,15 +206,16 @@ func parseCodex(ctx context.Context, path string, data []byte) ([]Server, []*Fil
 	var top map[string]toml.Primitive
 	md, err := toml.Decode(string(data), &top)
 	if err != nil {
-		return nil, []*FileError{codexFileError(path, data, err)}
+		return nil, []*FileError{codexFileError(path, data, err)}, false
 	}
 	tables, fe := codexServerTables(&md, path, top)
 	if fe != nil {
-		return nil, []*FileError{fe}
+		return nil, []*FileError{fe}, false
+	}
+	if _, ok := top[codexServersKey]; !ok {
+		return nil, nil, true
 	}
 
-	var servers []Server
-	var errs []*FileError
 	// Sorted names make the output the same on every run (map order is random).
 	for _, name := range slices.Sorted(maps.Keys(tables)) {
 		if err := ctx.Err(); err != nil {
@@ -225,7 +232,7 @@ func parseCodex(ctx context.Context, path string, data []byte) ([]Server, []*Fil
 	// The same order as the JSON readers: errors for the whole file (for
 	// example canceled) first, then by server name.
 	sortErrors(errs)
-	return servers, errs
+	return servers, errs, false
 }
 
 // codexServerTables returns the raw [mcp_servers.<name>] tables of the file,

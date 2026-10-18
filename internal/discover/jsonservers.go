@@ -98,15 +98,27 @@ type jsonFile struct {
 	// projectPath goes to those servers with ScopeProject (see
 	// topProjectPath). It is ignored with ScopeGlobal.
 	projectPath string
-	// withProjects reads the "projects" section too. Only ~/.claude.json has
-	// one.
-	withProjects bool
-	// reportProjects adds one reasonProjectsNotRead error when the file has a
-	// "projects" value that is not null and withProjects is false. Only
-	// ReadConfig sets it, for an untrusted Claude Code file named with
-	// --config. Discover does not set it for <WorkDir>/.mcp.json.
-	reportProjects bool
+	// projects tells what to do with the top-level "projects" section. The
+	// zero value, projectsSkip, ignores it.
+	projects projectsMode
 }
+
+// projectsMode tells a JSON reader what to do with the top-level "projects"
+// section of a Claude Code file.
+type projectsMode int
+
+const (
+	// projectsSkip ignores the section. ReadCursor uses it, and
+	// ReadClaudeCode for a project file, such as <WorkDir>/.mcp.json.
+	projectsSkip projectsMode = iota
+	// projectsRead reads the servers of the section. Only ~/.claude.json
+	// has one, so only ReadClaudeCode with ScopeGlobal uses it.
+	projectsRead
+	// projectsReport does not read the section, but adds one
+	// reasonProjectsNotRead error when it has a value that is not null. Only
+	// ReadConfig uses it, for an untrusted Claude Code file.
+	projectsReport
+)
 
 // limits returns the size limit of the file and the directory that the read
 // must stay in ("" for no such directory).
@@ -137,22 +149,22 @@ func (f jsonFile) topProjectPath() string {
 	case f.scope == ScopeGlobal:
 		return ""
 	case f.projectPath == "":
-		return projectDirOf(f.path, f.client)
+		return projectDirOf(f.path)
 	}
 	return f.projectPath
 }
 
 // projectDirOf returns the project directory of the project file at path:
-// the directory of the file, or the parent of that directory when the client
-// keeps its project file in a directory of its own. That is a Cursor file in
-// a directory named cursorDir (<project>/.cursor/mcp.json), or a Codex file
-// in a directory named codexDir (<project>/.codex/config.toml). The path is
-// not made absolute: the package never reads the current directory by itself.
-func projectDirOf(path string, client Client) string {
+// the directory of the file, or the parent of that directory when it is
+// named cursorDir or codexDir. Cursor and Codex keep their project files in a
+// directory of their own (<project>/.cursor/mcp.json and
+// <project>/.codex/config.toml). The rule looks only at the path, not at the
+// client, so a file in such a directory gets the parent for every client: a
+// wrong guess of DetectClient cannot change the ProjectPath. The path is not
+// made absolute: the package never reads the current directory by itself.
+func projectDirOf(path string) string {
 	dir := filepath.Dir(path)
-	switch {
-	case client == ClientCursor && inCursorDir(path),
-		client == ClientCodex && inCodexDir(path):
+	if inCursorDir(path) || inCodexDir(path) {
 		return filepath.Dir(dir)
 	}
 	return dir
@@ -215,7 +227,7 @@ func parseJSONServers(ctx context.Context, f jsonFile) ([]Server, []*FileError) 
 // as ScopeProject.
 //
 // The servers of the top-level "mcpServers" object get f.scope and the
-// ProjectPath of topProjectPath. If f.withProjects is true, the servers under
+// ProjectPath of topProjectPath. With projectsRead, the servers under
 // "projects.<dir>.mcpServers" are read too. They get ScopeProject and
 // ProjectPath <dir>, and an error about one of them, or about the project
 // itself, has FileError.ProjectPath <dir>. An empty <dir> is refused
@@ -278,14 +290,14 @@ func decodeJSONTop(f jsonFile, data []byte) (map[string]json.RawMessage, *FileEr
 		return nil, newFileError(f.path, reasonBadShape)
 	}
 	// The file is a valid JSON object now, which findBadServerString needs.
-	if off, project := findBadServerString(data, f.withProjects); off >= 0 {
+	if off, project := findBadServerString(data, f.projects == projectsRead); off >= 0 {
 		return nil, newFileError(f.path, reasonBadString).inProject(project).atOffset(data, off)
 	}
 	return top, nil
 }
 
-// decodeJSONSections decodes the "mcpServers" section of top and, if
-// f.withProjects is true, the "projects" section. It refuses a file over
+// decodeJSONSections decodes the "mcpServers" section of top and handles the
+// "projects" section as f.projects says. It refuses a file over
 // maxServersPerFile as a whole, as the Codex reader does, and sorts the
 // result.
 func decodeJSONSections(ctx context.Context, f jsonFile, top map[string]json.RawMessage) ([]Server, []*FileError) {
@@ -297,18 +309,20 @@ func decodeJSONSections(ctx context.Context, f jsonFile, top map[string]json.Raw
 	} else {
 		servers, errs = p.decodeServers(top[keyMCPServers], origin{scope: f.scope, projectPath: f.topProjectPath()})
 	}
-	if f.withProjects {
-		if hasCaseVariant(top, keyProjects) {
+	// A case variant such as "Projects" is ambiguous: a reader that folds
+	// case would read it as the section.
+	projectsVariant := hasCaseVariant(top, keyProjects)
+	switch f.projects {
+	case projectsRead:
+		if projectsVariant {
 			errs = append(errs, newFileError(f.path, reasonAmbiguousKey))
-		} else {
-			projServers, projErrs := p.decodeProjects(ctx, top[keyProjects])
-			servers = append(servers, projServers...)
-			errs = append(errs, projErrs...)
+			break
 		}
-	} else if f.reportProjects {
-		// A case variant such as "Projects" is ambiguous, as in a global
-		// file: a reader that folds case would read it as the section.
-		if hasCaseVariant(top, keyProjects) {
+		projServers, projErrs := p.decodeProjects(ctx, top[keyProjects])
+		servers = append(servers, projServers...)
+		errs = append(errs, projErrs...)
+	case projectsReport:
+		if projectsVariant {
 			errs = append(errs, newFileError(f.path, reasonAmbiguousKey))
 		}
 		// Any value that is not null fails closed, also an empty object or a
@@ -317,6 +331,9 @@ func decodeJSONSections(ctx context.Context, f jsonFile, top map[string]json.Raw
 		if !isNull(top[keyProjects]) {
 			errs = append(errs, newFileError(f.path, reasonProjectsNotRead))
 		}
+	case projectsSkip:
+		// A project file must not choose ProjectPath values, so the section
+		// and its case variants are ignored.
 	}
 
 	if p.full {

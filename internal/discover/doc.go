@@ -76,7 +76,10 @@
 // that Discover uses for it. See [ReadConfig] for what "names" means.
 //
 // For any other file, ReadConfig detects the format with [DetectClient],
-// which gives the rules and their known limits.
+// which gives the rules and their known limits. A file with no servers is
+// accepted only under its known client name, for JSON and for TOML: a .toml
+// file with no mcp_servers key, such as pyproject.toml, is an unknown format
+// unless it is .codex/config.toml.
 //
 // Then ReadConfig parses a JSON file as [ReadClaudeCode] or [ReadCursor] do
 // with ScopeProject and an empty projectPath, and a Codex file with the
@@ -248,11 +251,11 @@
 //
 // An untrusted file must not choose a working directory outside its project,
 // because inspect would start the server there. So ReadConfig drops a server
-// of an untrusted Codex file whose cwd is outside the ProjectPath of the file
-// (an absolute path that is not the ProjectPath or below it, or a relative
-// path that is not local, such as "../x"). It reports the server with the
-// reason "working directory is outside the project". See [ReadConfig] for
-// the rules and their limits.
+// of an untrusted Codex file whose cwd is outside the ProjectPath of the file,
+// by its text or through a symlink, and reports the server with the reason
+// "working directory is outside the project". The check sees the tree at
+// read time only, so inspect must still not trust Dir blindly. See
+// [ReadConfig] for the rules and their limits.
 //
 // The user's own files are trusted: ~/.claude.json (also the servers under
 // its projects.<path> keys, which Claude Code writes when the user adds a

@@ -31,7 +31,7 @@ import (
 // The checked parts are:
 //   - the value of every top-level "mcpServers" member: the server names and
 //     all keys and values of the entries (command, args, env, url, headers);
-//   - if withProjects is true, every key of the top-level "projects" object,
+//   - if readProjects is true, every key of the top-level "projects" object,
 //     and the value of every "mcpServers" member of every project.
 //
 // A duplicate key is checked every time it occurs, although encoding/json
@@ -42,7 +42,7 @@ import (
 // server of the file for a reason that does not matter to mcpmoat.
 //
 // data must be a valid JSON object.
-func findBadServerString(data []byte, withProjects bool) (int, string) {
+func findBadServerString(data []byte, readProjects bool) (int, string) {
 	top, _ := objectMembers(data)
 	for _, m := range top {
 		switch {
@@ -50,7 +50,7 @@ func findBadServerString(data []byte, withProjects bool) (int, string) {
 			if off := findBadString(data[m.valStart:m.valEnd]); off >= 0 {
 				return m.valStart + off, ""
 			}
-		case m.key == keyProjects && withProjects:
+		case m.key == keyProjects && readProjects:
 			if off, project := findBadProjectString(data[m.valStart:m.valEnd]); off >= 0 {
 				return m.valStart + off, project
 			}

@@ -154,6 +154,23 @@ func assertScanResult(t *testing.T, code int, stdout, stderr string, want scanWa
 	assertNoEscape(t, stdout, stderr)
 }
 
+// assertPartialFailureStderr checks the stderr of a scan of the
+// "all/partial-failure" fixture: exactly two lines, the problem of the bad
+// ~/.claude.json first and then configErrorHint, each with the scan prefix
+// and none a warning.
+func assertPartialFailureStderr(t *testing.T, stderr string) {
+	t.Helper()
+	lines := nonEmptyLines(stderr)
+	if len(lines) != 2 {
+		t.Fatalf("stderr has %d lines, want 2 (the problem and the hint):\n%s", len(lines), stderr)
+	}
+	assertContainsAll(t, "the first stderr line", lines[0], []string{"mcpmoat scan: ", ".claude.json", "invalid JSON"})
+	assertScanErrorLines(t, stderr)
+	if lines[1] != configErrorHint {
+		t.Errorf("last stderr line = %q, want the hint %q", lines[1], configErrorHint)
+	}
+}
+
 // assertNoLeakBoth fails the test if stdout or stderr holds any canary value
 // of discovertest.
 func assertNoLeakBoth(t *testing.T, stdout, stderr string) {

@@ -7,7 +7,6 @@ import (
 	"io"
 	"os"
 	"runtime/debug"
-	"strconv"
 	"text/tabwriter"
 
 	"github.com/Ducarv/mcpmoat/internal/termsafe"
@@ -88,8 +87,12 @@ func (c *cli) dispatch(args []string) int {
 			c.usage(c.stdout)
 			return exitOK
 		}
-		// The flag error contains untrusted argv, so termsafe.Quote escapes
-		// it to stop terminal escape injection.
+		// The flag error holds untrusted argv inside its own text, and the
+		// flag package gives no way to get the argument out. So
+		// termsafe.Quote escapes the whole message: it stays as it is when it
+		// is safe, and it shows quoted only when it holds an unsafe rune.
+		// quoteArg, for an argument that we hold on its own, always quotes.
+		// scan.go does the same for the scan flags.
 		fprintf(c.stderr, "mcpmoat: %s\n\n", termsafe.Quote(err.Error()))
 		c.usage(c.stderr)
 		return exitError
@@ -203,13 +206,10 @@ func fprintf(w io.Writer, format string, a ...any) {
 
 // quoteArg returns one command-line argument as a quoted string for an error
 // message. The argument comes from the user and is untrusted text.
-// termsafe.Quote escapes every rune that is not safe, which %q does not do
-// for blank runes such as U+3164. termsafe.Quote keeps a safe argument as it
-// is, so quoteArg quotes that with strconv.Quote: every argument then shows
-// in double quotes, and the reader can see where it starts and ends.
+// termsafe.QuoteIf with force escapes every rune that is not safe (which %q
+// does not do for blank runes such as U+3164), and it quotes a safe argument
+// too: every argument shows in double quotes, and the reader can see where it
+// starts and ends.
 func quoteArg(s string) string {
-	if q := termsafe.Quote(s); q != s {
-		return q
-	}
-	return strconv.Quote(s)
+	return termsafe.QuoteIf(s, true)
 }

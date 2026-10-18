@@ -7,9 +7,10 @@ import "context"
 // ScopeGlobal is read as ScopeProject.
 //
 // The servers of the top-level "mcpServers" object get scope. With
-// ScopeProject they get ProjectPath projectPath, or the directory of the file
-// if projectPath is "". With ScopeGlobal projectPath is ignored and
-// ProjectPath is "".
+// ScopeProject they get ProjectPath projectPath. If projectPath is "", they
+// get the directory of the file, or for a file in a directory named ".cursor"
+// or ".codex" the parent of that directory. With ScopeGlobal projectPath is
+// ignored and ProjectPath is "".
 //
 // An entry with no "type" is a stdio entry, as in Claude Code, so an entry
 // with a "url" and no "command" is an error: a remote entry needs "type".
@@ -21,12 +22,16 @@ import "context"
 //
 // See the package doc, Reading configs.
 func ReadClaudeCode(ctx context.Context, path string, scope Scope, projectPath string) Result {
+	projects := projectsSkip
+	if scope == ScopeGlobal {
+		projects = projectsRead
+	}
 	servers, errs := parseJSONServers(ctx, jsonFile{
-		path:         path,
-		client:       ClientClaudeCode,
-		scope:        scope,
-		projectPath:  projectPath,
-		withProjects: scope == ScopeGlobal,
+		path:        path,
+		client:      ClientClaudeCode,
+		scope:       scope,
+		projectPath: projectPath,
+		projects:    projects,
 	})
 	return Result{Servers: servers, Errors: errs}
 }

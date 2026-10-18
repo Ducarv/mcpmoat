@@ -216,6 +216,84 @@ func TestQuoteCut(t *testing.T) {
 	}
 }
 
+func TestCut(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		in      string
+		n       int
+		want    string
+		wantCut bool
+	}{
+		{name: "empty", in: "", n: 3, want: "", wantCut: false},
+		{name: "shorter than n", in: "ab", n: 3, want: "ab", wantCut: false},
+		{name: "exactly n", in: "abc", n: 3, want: "abc", wantCut: false},
+		{name: "one over n", in: "abcd", n: 3, want: "abc", wantCut: true},
+		{name: "n is zero", in: "a", n: 0, want: "", wantCut: true},
+		{name: "n is zero and empty text", in: "", n: 0, want: "", wantCut: false},
+		{name: "counts runes not bytes", in: "\u00e9\u00e9\u00e9\u00e9", n: 3, want: "\u00e9\u00e9\u00e9", wantCut: true},
+		{name: "cuts at a rune boundary", in: "a\U0001F680b", n: 2, want: "a\U0001F680", wantCut: true},
+		{name: "invalid byte counts as one rune", in: "\xff\xff\xff\xff", n: 3, want: "\xff\xff\xff", wantCut: true},
+		{name: "valid and invalid runes", in: "\u00e9\xffa\u00e9", n: 3, want: "\u00e9\xffa", wantCut: true},
+		{name: "truncated sequence counts per byte", in: "\xe3\x81a", n: 2, want: "\xe3\x81", wantCut: true},
+		{name: "adds no marker", in: "abc\x1b", n: 4, want: "abc\x1b", wantCut: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got, cut := termsafe.Cut(tt.in, tt.n)
+			if got != tt.want || cut != tt.wantCut {
+				t.Errorf("Cut(%q, %d) = %q, %v, want %q, %v", tt.in, tt.n, got, cut, tt.want, tt.wantCut)
+			}
+		})
+	}
+}
+
+func TestQuoteIf(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name  string
+		in    string
+		force bool
+		want  string
+	}{
+		{name: "safe text, no force", in: "a b", force: false, want: "a b"},
+		{name: "empty text, no force", in: "", force: false, want: ""},
+		{name: "safe text, force", in: "a b", force: true, want: `"a b"`},
+		{name: "empty text, force", in: "", force: true, want: `""`},
+		{name: "inner quote and backslash, force", in: `a"b\c`, force: true, want: `"a\"b\\c"`},
+		{name: "Windows path, force", in: `C:\x`, force: true, want: `"C:\\x"`},
+		{name: "unsafe text, no force", in: "a\x1bb", force: false, want: `"a\x1bb"`},
+		{name: "unsafe text, force", in: "a\x1bb", force: true, want: `"a\x1bb"`},
+		{name: "blank rune, force", in: "a\u3164", force: true, want: `"a\u3164"`},
+		{name: "leading quote, no force", in: `"a`, force: false, want: `"\"a"`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got := termsafe.QuoteIf(tt.in, tt.force)
+			if got != tt.want {
+				t.Errorf("QuoteIf(%q, %v) = %q, want %q", tt.in, tt.force, got, tt.want)
+			}
+			// QuoteIf with force false is Quote.
+			if !tt.force {
+				if q := termsafe.Quote(tt.in); got != q {
+					t.Errorf("QuoteIf(%q, false) = %q, but Quote gives %q", tt.in, got, q)
+				}
+			}
+			// A forced quote of a safe text is what strconv.Quote gives.
+			if tt.force && termsafe.Quote(tt.in) == tt.in {
+				if q := strconv.Quote(tt.in); got != q {
+					t.Errorf("QuoteIf(%q, true) = %q, but strconv.Quote gives %q", tt.in, got, q)
+				}
+			}
+			assertSafe(t, tt.in, got)
+		})
+	}
+}
+
 func TestCutMarkerIsASCII(t *testing.T) {
 	t.Parallel()
 	for i := range len(termsafe.CutMarker) {
@@ -249,6 +327,19 @@ func FuzzQuote(f *testing.F) {
 		f.Add(s)
 	}
 	f.Fuzz(func(t *testing.T, in string) {
+		// A forced quote always decodes back to the input and has no control
+		// byte. For a safe input it is what strconv.Quote gives.
+		forced := termsafe.QuoteIf(in, true)
+		if back, err := strconv.Unquote(forced); err != nil || back != in {
+			t.Fatalf("Unquote(QuoteIf(%q, true)) = %q, %v, want the input", in, back, err)
+		}
+		if strings.ContainsFunc(forced, func(r rune) bool { return r < 0x20 || r == 0x7f }) {
+			t.Fatalf("QuoteIf(%q, true) = %q has a control byte", in, forced)
+		}
+		if termsafe.Quote(in) == in && forced != strconv.Quote(in) {
+			t.Fatalf("QuoteIf(%q, true) = %q, want strconv.Quote %q for a safe input", in, forced, strconv.Quote(in))
+		}
+
 		out := termsafe.Quote(in)
 		if !utf8.ValidString(out) {
 			t.Fatalf("Quote(%q) = %q is not valid UTF-8", in, out)

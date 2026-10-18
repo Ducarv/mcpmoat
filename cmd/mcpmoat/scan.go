@@ -5,6 +5,7 @@ import (
 	"errors"
 	"flag"
 	"io"
+	"path/filepath"
 	"strings"
 
 	"github.com/Ducarv/mcpmoat/internal/discover"
@@ -51,7 +52,7 @@ func (c *cli) runScan(_ options, args []string) int {
 		if configPath != "" {
 			return errors.New("--config given more than once")
 		}
-		if value == "" || isScanFlag(fs, value) {
+		if value == "" || isFlagOf(fs, value) {
 			return errors.New("--config needs a file name")
 		}
 		configPath = value
@@ -63,7 +64,10 @@ func (c *cli) runScan(_ options, args []string) int {
 			scanUsage(c.stdout)
 			return exitOK
 		}
-		// The flag error holds untrusted argv, so termsafe.Quote escapes it.
+		// The flag error holds untrusted argv inside its own text, so
+		// termsafe.Quote escapes the whole message, and quotes it only when
+		// it holds an unsafe rune. See dispatch in cli.go for why this
+		// differs from quoteArg.
 		fprintf(c.stderr, "mcpmoat scan: %s\n", termsafe.Quote(err.Error()))
 		fprintf(c.stderr, "Run \"mcpmoat help\" for usage.\n")
 		return exitError
@@ -87,7 +91,7 @@ func (c *cli) runScan(_ options, args []string) int {
 	return c.scanAuto(ctx)
 }
 
-// isScanFlag reports whether value looks like a flag of fs, in any form that
+// isFlagOf reports whether value looks like a flag of fs, in any form that
 // the flag package accepts: "-name", "--name", "-name=x" or "--name=x". -h and
 // -help count too, because the flag package treats them as a help request.
 // The flag package takes the next argument as the value of --config, so
@@ -95,7 +99,7 @@ func (c *cli) runScan(_ options, args []string) int {
 // reject that case. The names come from fs, so a new scan flag is covered
 // without a second edit. A real file name that starts with "-" can be given
 // as ./-name.
-func isScanFlag(fs *flag.FlagSet, value string) bool {
+func isFlagOf(fs *flag.FlagSet, value string) bool {
 	name, ok := strings.CutPrefix(value, "-")
 	if !ok {
 		return false
@@ -106,7 +110,26 @@ func isScanFlag(fs *flag.FlagSet, value string) bool {
 }
 
 // scanConfig reads the one file that --config names.
+//
+// A relative path is made absolute first, from the working directory.
+// ReadConfig takes the project path of a project file from the file path, so
+// a relative path would give a relative project path. Then the result would
+// depend on how the user spells the path: the SCOPE cell would change, the
+// check that keeps an absolute Codex cwd inside the project would refuse
+// every such cwd, and the user's own global file would not be found.
+//
+// If the working directory is not known, the path stays relative. That is
+// the safe side: the file is read as untrusted, and an absolute Codex cwd is
+// refused. A server can be refused that the absolute path would accept, but
+// never the other way.
 func (c *cli) scanConfig(ctx context.Context, path string) int {
+	if !filepath.IsAbs(path) {
+		// The error text is not printed and not needed: see above.
+		if wd, err := c.getwd(); err == nil {
+			path = filepath.Join(wd, path)
+		}
+	}
+
 	// The home directory only tells ReadConfig whether the file is one of the
 	// user's own global files. Without a home, no file is: the file is read
 	// as untrusted, the safe side. So a home error is not fatal here, and its
@@ -161,9 +184,8 @@ const noRulesText = "no rules are applied yet, so exit code 0 does not mean that
 const noRulesNotice = "mcpmoat scan: " + noRulesText
 
 // listServers prints the server table on stdout and the file problems on
-// stderr. Any problem gives exit code 2, after the table and all problems are
-// printed (see runScan). Without a problem it prints noRulesNotice and gives
-// exit code 0.
+// stderr, and returns the exit code. The runScan doc holds the exit-code
+// contract.
 func (c *cli) listServers(res discover.Result) int {
 	// Do not use fprintf for the table: a write error (a closed pipe, for
 	// example) must give exit code 2.

@@ -13,7 +13,9 @@ import (
 //
 // It does no I/O. The rules, in this order:
 //
-//  1. A file name that ends in .toml (any letter case) is Codex.
+//  1. A file name that ends in .toml (any letter case) is Codex. DetectClient
+//     does not look at the content of a TOML file. [ReadConfig] parses it and
+//     then also applies the known-name rule below to it.
 //  2. Otherwise, if the first byte that is not JSON white space (space, tab,
 //     CR or LF) is '{', or the file name ends in .json (any letter case), the
 //     file is read as JSON:
@@ -36,7 +38,9 @@ import (
 // "Chosen by its known name" accepts only the known client files: .claude.json
 // and .mcp.json are Claude Code, and mcp.json in a directory named ".cursor"
 // is Cursor. Any other file name, for example package.json, is unknown, so a
-// file that is not a client config does not give a clean scan.
+// file that is not a client config does not give a clean scan. ReadConfig
+// uses the same rule for a .toml file with no mcp_servers key: only
+// config.toml in a directory named ".codex" is accepted.
 //
 // Known limits:
 //   - TOML is detected by the .toml extension only. A Codex file with another
@@ -44,7 +48,10 @@ import (
 //   - The ".cursor" check looks at the path as written. DetectClient does not
 //     resolve a relative path or another spelling of the directory.
 //   - A wrong guess between Claude Code and Cursor changes only the client
-//     label, because both formats share the shape of a server entry.
+//     label and the rule for an entry with "url" and no "type": Cursor reads
+//     it as http, and Claude Code refuses it with an error. The other fields
+//     of a server entry have the same shape in both formats. The ProjectPath
+//     comes from the path and not from the client (see [ReadConfig]).
 func DetectClient(path string, data []byte) (client Client, ok bool) {
 	if strings.EqualFold(filepath.Ext(path), ".toml") {
 		return ClientCodex, true
@@ -93,7 +100,7 @@ func DetectClient(path string, data []byte) (client Client, ok bool) {
 // unknown.
 func clientByKnownName(path string) (Client, bool) {
 	switch filepath.Base(path) {
-	case ".claude.json", projectClaudeCodeFile:
+	case globalClaudeCodeFile, projectClaudeCodeFile:
 		return ClientClaudeCode, true
 	case cursorFile:
 		if inCursorDir(path) {
@@ -101,6 +108,14 @@ func clientByKnownName(path string) (Client, bool) {
 		}
 	}
 	return "", false
+}
+
+// isCodexFileName reports whether path has the known name of a Codex config,
+// config.toml in a directory named codexDir, as written in path. ReadConfig
+// accepts a .toml file with no mcp_servers key only under this name, as
+// clientByKnownName does for a JSON file with no servers.
+func isCodexFileName(path string) bool {
+	return filepath.Base(path) == codexFile && inCodexDir(path)
 }
 
 // clientByPath picks Cursor for a file in a directory named ".cursor", and

@@ -112,10 +112,7 @@ func TestE2EScanAllClients(t *testing.T) {
 
 	stdout, stderr, code := runBin(t, home, work, "scan", "--no-connect")
 
-	if code != exitOK {
-		t.Errorf("exit code = %d, want %d; stderr:\n%s", code, exitOK, stderr)
-	}
-	assertNoRulesNotice(t, stderr)
+	assertScanResult(t, code, stdout, stderr, scanWant{code: exitOK})
 	want := []string{"cc-global", "cc-alpha", "cc-project", "cursor-global", "cursor-project", "codex-global"}
 	if got := column(tableRows(t, stdout), 0); !slices.Equal(got, want) {
 		t.Errorf("server names = %v, want %v\nstdout:\n%s", got, want, stdout)
@@ -139,15 +136,7 @@ func TestE2EScanPartialFailure(t *testing.T) {
 		t.Errorf("server names = %v, want %v\nstdout:\n%s", got, want, stdout)
 	}
 
-	lines := nonEmptyLines(stderr)
-	if len(lines) != 2 {
-		t.Fatalf("stderr has %d lines, want 2:\n%s", len(lines), stderr)
-	}
-	assertContainsAll(t, "the first stderr line", lines[0], []string{"mcpmoat scan: ", ".claude.json", "invalid JSON"})
-	assertScanErrorLines(t, stderr)
-	if lines[1] != configErrorHint {
-		t.Errorf("last stderr line = %q, want the hint %q", lines[1], configErrorHint)
-	}
+	assertPartialFailureStderr(t, stderr)
 }
 
 // TestE2EScanUntrustedProjectFile checks that a project .mcp.json that is a
@@ -184,13 +173,10 @@ func TestE2EScanEmpty(t *testing.T) {
 	t.Parallel()
 	stdout, stderr, code := runBin(t, t.TempDir(), t.TempDir(), "scan", "--no-connect")
 
-	if code != exitOK {
-		t.Errorf("exit code = %d, want %d; stderr:\n%s", code, exitOK, stderr)
-	}
+	assertScanResult(t, code, stdout, stderr, scanWant{code: exitOK})
 	if want := "No MCP servers found.\n"; stdout != want {
 		t.Errorf("stdout = %q, want %q", stdout, want)
 	}
-	assertNoRulesNotice(t, stderr)
 }
 
 func TestE2EScanConfigFile(t *testing.T) {
@@ -293,6 +279,60 @@ func TestE2EScanConfigFile(t *testing.T) {
 						t.Errorf("row %d: scope = %q, want a project scope", i, got)
 					}
 				}
+			}
+		})
+	}
+}
+
+// TestE2EScanConfigRelativePath runs the binary in a project directory and
+// checks that a relative --config path gives the same output and exit code as
+// the absolute path of the same file. For a Codex file, an absolute cwd
+// inside the project is accepted in both spellings. For a Cursor file, SCOPE
+// shows the same absolute project path.
+func TestE2EScanConfigRelativePath(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name    string
+		rel     string
+		content func(project string) string
+		want    func(project string) []string
+	}{
+		{
+			name: "codex",
+			rel:  filepath.Join(".codex", "config.toml"),
+			content: func(project string) string {
+				// A TOML literal string ('...') keeps a Windows backslash.
+				return "[mcp_servers.in-srv]\ncommand = \"npx\"\ncwd = '" + filepath.Join(project, "sub") + "'\n"
+			},
+			want: func(project string) []string { return []string{"in-srv", "project:" + project} },
+		},
+		{
+			name:    "cursor",
+			rel:     filepath.Join(".cursor", "mcp.json"),
+			content: func(string) string { return `{"mcpServers":{"cur-srv":{"command":"npx"}}}` },
+			want:    func(project string) []string { return []string{"cur-srv", "project:" + project} },
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			home := t.TempDir()
+			// The child process reads its working directory without symlinks
+			// (on macOS /var is a symlink to /private/var), so the test uses
+			// the resolved path too.
+			project, err := filepath.EvalSymlinks(t.TempDir())
+			if err != nil {
+				t.Fatal(err)
+			}
+			abs := writeTestFile(t, project, tt.rel, tt.content(project))
+
+			absOut, absErr, absCode := runBin(t, home, project, "scan", "--no-connect", "--config", abs)
+			relOut, relErr, relCode := runBin(t, home, project, "scan", "--no-connect", "--config", tt.rel)
+
+			assertScanResult(t, absCode, absOut, absErr, scanWant{code: exitOK, stdout: tt.want(project)})
+			if relCode != absCode || relOut != absOut || relErr != absErr {
+				t.Errorf("relative path %q gives exit code %d\nstdout:\n%s\nstderr:\n%s\nwant the result of the absolute path: exit code %d\nstdout:\n%s\nstderr:\n%s",
+					tt.rel, relCode, relOut, relErr, absCode, absOut, absErr)
 			}
 		})
 	}

@@ -555,14 +555,23 @@ func TestReadConfigUnknownFormat(t *testing.T) {
 		{"null projects", "mcp.json", `{"projects":null}`},
 		{"other keys", "mcp.json", `{"theme":"dark"}`},
 		{"mcpServers with wrong case", "mcp.json", `{"MCPServers":{"a":{"command":"x"}}}`},
+		// A .toml file with no mcp_servers key has no servers, so only the
+		// known name .codex/config.toml is accepted, as for JSON.
+		{"pyproject.toml", "pyproject.toml", "[project]\nname = \"x\"\n"},
+		{"Cargo.toml", "Cargo.toml", "[package]\nname = \"x\"\n"},
+		{"empty foo.toml", "foo.toml", ""},
+		{"white space foo.toml", "foo.toml", " \n\t\r\n"},
+		{"comments only foo.toml", "foo.toml", "# a comment\n\n# another one\n"},
+		{"config.toml outside .codex", "config.toml", "model = \"o3\"\n"},
+		{"other name in .codex", ".codex/other.toml", ""},
+		{"config.toml in a dir named .Codex", ".Codex/config.toml", ""},
+		{"upper case CONFIG.TOML in .codex", ".codex/CONFIG.TOML", ""},
+		{"config.toml in a nested dir below .codex", ".codex/sub/config.toml", ""},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			path := filepath.Join(t.TempDir(), tt.file)
-			if err := os.WriteFile(path, []byte(tt.data), 0o600); err != nil {
-				t.Fatal(err)
-			}
+			path := writeFile(t, t.TempDir(), tt.file, []byte(tt.data))
 			res := ReadConfig(t.Context(), path, "")
 			if len(res.Servers) != 0 {
 				t.Errorf("ReadConfig() servers = %v, want none", serverNames(res.Servers))
@@ -599,6 +608,11 @@ func TestReadConfigEmpty(t *testing.T) {
 		{"empty .claude.json", []string{".claude.json"}, ""},
 		{"white space .mcp.json", []string{".mcp.json"}, " \n"},
 		{"white space .cursor/mcp.json", []string{".cursor", "mcp.json"}, "\r\n\t"},
+		{"empty .codex/config.toml", []string{".codex", "config.toml"}, ""},
+		{"comments only .codex/config.toml", []string{".codex", "config.toml"}, "# a comment\n"},
+		{"other keys as .codex/config.toml", []string{".codex", "config.toml"}, "model = \"o3\"\n"},
+		// The file has the mcp_servers key, so any name is read as Codex.
+		{"empty mcp_servers table in foo.toml", []string{"foo.toml"}, "[mcp_servers]\n"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -1084,8 +1098,11 @@ func fixed(cwd string) func(string) (string, bool) {
 	return func(string) (string, bool) { return cwd, true }
 }
 
-// TestDirInProject checks the cwd rule of an untrusted Codex file, also with
-// a relative ProjectPath, which ReadConfig gives for a relative path.
+// TestDirInProject checks the lexical step of the cwd rule of an untrusted
+// Codex file, also with a relative ProjectPath, which ReadConfig gives for a
+// relative path. No dir of the cases exists, so the symlink step keeps every
+// dir that the lexical step keeps. TestReadConfigCodexCwdSymlink checks the
+// symlink step.
 func TestDirInProject(t *testing.T) {
 	t.Parallel()
 	abs := t.TempDir()
@@ -1110,9 +1127,238 @@ func TestDirInProject(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			if got := dirInProject(tt.dir, tt.projectPath); got != tt.want {
-				t.Errorf("dirInProject(%q, %q) = %v, want %v", tt.dir, tt.projectPath, got, tt.want)
+			p := openProjectDir(tt.projectPath)
+			defer p.close()
+			if got := p.holdsDir(tt.dir); got != tt.want {
+				t.Errorf("holdsDir(%q) with project %q = %v, want %v", tt.dir, tt.projectPath, got, tt.want)
 			}
 		})
 	}
+}
+
+// TestReadConfigTOMLName checks the other .toml files: a file with an
+// mcp_servers key is read as Codex under any name, and a file that is not
+// valid TOML is reported, not called an unknown format.
+func TestReadConfigTOMLName(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name        string
+		file        string
+		data        string
+		wantServers []string
+		wantReason  string // "" for no error
+	}{
+		{"servers in foo.toml", "foo.toml", "[mcp_servers.a]\ncommand = \"x\"\n", []string{"a"}, ""},
+		{"servers in pyproject.toml", "pyproject.toml", "[project]\nname = \"x\"\n\n[mcp_servers.a]\ncommand = \"x\"\n", []string{"a"}, ""},
+		{"mcp_servers of the wrong type in foo.toml", "foo.toml", "mcp_servers = 5\n", nil, reasonBadShape},
+		{"mcp_servers in another letter case in foo.toml", "foo.toml", "[MCP_Servers.a]\ncommand = \"x\"\n", nil, reasonAmbiguousKey},
+		{"invalid TOML in foo.toml", "foo.toml", "[mcp_servers\n", nil, reasonInvalidTOML},
+		{"invalid TOML in Cargo.toml", "Cargo.toml", "name = \n", nil, reasonInvalidTOML},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			path := writeFile(t, t.TempDir(), tt.file, []byte(tt.data))
+
+			res := ReadConfig(t.Context(), path, "")
+
+			if got := serverNames(res.Servers); !slices.Equal(got, tt.wantServers) {
+				t.Errorf("ReadConfig() servers = %v, want %v", got, tt.wantServers)
+			}
+			for _, s := range res.Servers {
+				if s.Client != ClientCodex || !s.Untrusted {
+					t.Errorf("server %q = %+v, want client codex and Untrusted", s.Name, s)
+				}
+			}
+			if tt.wantReason == "" {
+				if len(res.Errors) != 0 {
+					t.Errorf("ReadConfig() errors = %v, want none", res.Errors)
+				}
+				return
+			}
+			if len(res.Errors) != 1 || res.Errors[0].Reason != tt.wantReason || !res.Errors[0].Untrusted {
+				t.Errorf("ReadConfig() errors = %v, want one untrusted %q", res.Errors, tt.wantReason)
+			}
+		})
+	}
+}
+
+// TestReadConfigProjectPath checks that the path, not the detected client,
+// decides the ProjectPath: a file directly in a ".cursor" or ".codex"
+// directory gets the parent of that directory for every client.
+func TestReadConfigProjectPath(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name        string
+		rel         string // with forward slashes, below the project
+		data        string
+		wantClient  Client
+		wantReasons []string
+		// wantInDir is true when the ProjectPath is the directory of the
+		// file, and false when it is the project, the parent of that
+		// directory.
+		wantInDir bool
+	}{
+		{
+			// A "projects" key makes the file Claude Code, also in .cursor.
+			name:        "claude-code file with projects in .cursor",
+			rel:         ".cursor/mcp.json",
+			data:        `{"projects":{},"mcpServers":{"a":{"command":"x"}}}`,
+			wantClient:  ClientClaudeCode,
+			wantReasons: []string{reasonProjectsNotRead},
+		},
+		{"cursor file in .cursor", ".cursor/mcp.json", `{"mcpServers":{"a":{"command":"x"}}}`, ClientCursor, nil, false},
+		{"claude-code file in .codex", ".codex/mcp.json", `{"mcpServers":{"a":{"command":"x"}}}`, ClientClaudeCode, nil, false},
+		{"codex file in .cursor", ".cursor/config.toml", "[mcp_servers.a]\ncommand = \"x\"\n", ClientCodex, nil, false},
+		{"codex file in .codex", ".codex/config.toml", "[mcp_servers.a]\ncommand = \"x\"\n", ClientCodex, nil, false},
+		{"claude-code file in another dir", "conf/mcp.json", `{"mcpServers":{"a":{"command":"x"}}}`, ClientClaudeCode, nil, true},
+		{"codex file in another dir", "conf/x.toml", "[mcp_servers.a]\ncommand = \"x\"\n", ClientCodex, nil, true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			proj := t.TempDir()
+			path := writeFile(t, proj, tt.rel, []byte(tt.data))
+			want := proj
+			if tt.wantInDir {
+				want = filepath.Dir(path)
+			}
+
+			res := ReadConfig(t.Context(), path, "")
+
+			var got []string
+			for _, fe := range res.Errors {
+				got = append(got, fe.Reason)
+			}
+			if !slices.Equal(got, tt.wantReasons) {
+				t.Errorf("ReadConfig() errors = %v, want reasons %q", res.Errors, tt.wantReasons)
+			}
+			if len(res.Servers) != 1 {
+				t.Fatalf("ReadConfig() servers = %v, want one", serverNames(res.Servers))
+			}
+			if s := res.Servers[0]; s.Client != tt.wantClient || s.ProjectPath != want {
+				t.Errorf("server = %+v, want client %q and ProjectPath %q", s, tt.wantClient, want)
+			}
+		})
+	}
+}
+
+// TestReadConfigCodexCwdSymlink checks the symlink step of the cwd rule of an
+// untrusted Codex file. A cwd that leads out of the project through a
+// symlink, passes an absolute symlink or is not a directory is dropped. A
+// symlink that stays in the project is followed, and a cwd that does not
+// exist is kept.
+func TestReadConfigCodexCwdSymlink(t *testing.T) {
+	t.Parallel()
+
+	outside := t.TempDir()
+	tests := []struct {
+		name string
+		// setup makes the files of the case below the project proj.
+		setup func(t *testing.T, proj string)
+		// cwd returns the cwd value for proj.
+		cwd  func(proj string) string
+		keep bool
+	}{
+		{"relative symlink out of the project", func(t *testing.T, proj string) {
+			symlinkTo(t, "..", proj, "link")
+		}, relCwd("link"), false},
+		{"absolute symlink to the file system root", func(t *testing.T, proj string) {
+			symlinkTo(t, string(filepath.Separator), proj, "link")
+		}, relCwd("link"), false},
+		{"absolute symlink to another directory", func(t *testing.T, proj string) {
+			symlinkTo(t, outside, proj, "link")
+		}, relCwd("link"), false},
+		{"path below a symlink out of the project", func(t *testing.T, proj string) {
+			symlinkTo(t, outside, proj, "link")
+		}, relCwd("link/sub"), false},
+		{"absolute cwd through a symlink out of the project", func(t *testing.T, proj string) {
+			symlinkTo(t, outside, proj, "link")
+		}, func(proj string) string { return filepath.Join(proj, "link") }, false},
+		{"symlink below a subdirectory out of the project", func(t *testing.T, proj string) {
+			makeDir(t, proj, "a")
+			symlinkTo(t, "../..", proj, "a/link")
+		}, relCwd("a/link"), false},
+		{"lexically local path through a symlink", func(t *testing.T, proj string) {
+			symlinkTo(t, outside, proj, "link")
+		}, relCwd("link/../x"), false},
+		{"dangling symlink out of the project", func(t *testing.T, proj string) {
+			symlinkTo(t, "../does-not-exist", proj, "link")
+		}, relCwd("link"), false},
+		{"absolute symlink into the project", func(t *testing.T, proj string) {
+			sub := makeDir(t, proj, "sub")
+			symlinkTo(t, sub, proj, "link")
+		}, relCwd("link"), false},
+		{"regular file", func(t *testing.T, proj string) {
+			writeFile(t, proj, "file", nil)
+		}, relCwd("file"), false},
+		{"symlink to a regular file", func(t *testing.T, proj string) {
+			writeFile(t, proj, "file", nil)
+			symlinkTo(t, "file", proj, "link")
+		}, relCwd("link"), false},
+		{"symlink loop", func(t *testing.T, proj string) {
+			symlinkTo(t, "loop", proj, "loop")
+		}, relCwd("loop"), false},
+		{"relative symlink inside the project", func(t *testing.T, proj string) {
+			makeDir(t, proj, "sub")
+			symlinkTo(t, "sub", proj, "link")
+		}, relCwd("link"), true},
+		{"symlink up to the project itself", func(t *testing.T, proj string) {
+			makeDir(t, proj, "a")
+			symlinkTo(t, "..", proj, "a/link")
+		}, relCwd("a/link"), true},
+		{"absolute cwd through a symlink inside the project", func(t *testing.T, proj string) {
+			makeDir(t, proj, "sub")
+			symlinkTo(t, "sub", proj, "link")
+		}, func(proj string) string { return filepath.Join(proj, "link") }, true},
+		{"dangling symlink inside the project", func(t *testing.T, proj string) {
+			symlinkTo(t, "does-not-exist", proj, "link")
+		}, relCwd("link"), true},
+		{"directory that does not exist", func(*testing.T, string) {}, relCwd("missing/sub"), true},
+		{"existing directory", func(t *testing.T, proj string) {
+			makeDir(t, proj, "sub")
+		}, relCwd("sub"), true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			proj := t.TempDir()
+			tt.setup(t, proj)
+			cwd := tt.cwd(proj)
+			// A TOML literal string ('...') has no escapes, so a Windows path
+			// needs no change. The config is in .codex, so its project is
+			// proj, and the read of the file stays in .codex.
+			config := "[mcp_servers.x]\ncommand = \"x\"\ncwd = '" + cwd + "'\n"
+			path := writeFile(t, proj, ".codex/config.toml", []byte(config))
+
+			res := ReadConfig(t.Context(), path, "")
+
+			if tt.keep {
+				if len(res.Errors) != 0 || len(res.Servers) != 1 {
+					t.Fatalf("ReadConfig() = %+v, want server x and no errors", res)
+				}
+				if s := res.Servers[0]; s.Dir != cwd || s.ProjectPath != proj {
+					t.Errorf("server = %+v, want Dir %q and ProjectPath %q", s, cwd, proj)
+				}
+				return
+			}
+			if len(res.Servers) != 0 {
+				t.Errorf("ReadConfig() servers = %v, want none", serverNames(res.Servers))
+			}
+			if len(res.Errors) != 1 {
+				t.Fatalf("ReadConfig() errors = %v, want exactly one", res.Errors)
+			}
+			if fe := res.Errors[0]; fe.Reason != reasonCwdOutsideProject || fe.Server != "x" || !fe.Untrusted {
+				t.Errorf("error = %+v, want reason %q, server x and Untrusted", fe, reasonCwdOutsideProject)
+			}
+		})
+	}
+}
+
+// relCwd returns a cwd function of TestReadConfigCodexCwdSymlink that gives
+// the relative path p, written with forward slashes, for every project.
+func relCwd(p string) func(string) string {
+	return func(string) string { return filepath.FromSlash(p) }
 }
