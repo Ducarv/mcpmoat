@@ -41,8 +41,12 @@ const (
 	// KindTooLarge is a response that is larger than the size cap.
 	KindTooLarge ConnectKind = "too-large"
 	// KindConfig is a server entry that mcpmoat cannot use, such as a URL
-	// that does not parse or a reserved header name.
+	// that does not parse, a reserved header name, an empty stdio command or
+	// a server from an untrusted file without the opt-in.
 	KindConfig ConnectKind = "config"
+	// KindStart is a stdio server whose process did not start: the command
+	// was not found or cannot run, or the work directory cannot be made.
+	KindStart ConnectKind = "start"
 	// KindProtocol is any other failure, such as an invalid MCP answer.
 	KindProtocol ConnectKind = "protocol"
 )

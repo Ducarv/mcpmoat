@@ -1,10 +1,13 @@
 package inspect
 
 import (
+	"context"
 	"os"
 	"runtime"
 	"strings"
 	"testing"
+
+	"github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/Ducarv/mcpmoat/internal/discover"
 )
@@ -105,4 +108,60 @@ func secrets(kv map[string]string) discover.SecretMap {
 func envKey(entry string) string {
 	name, _, _ := strings.Cut(entry, "=")
 	return name
+}
+
+// objectSchema is the smallest input schema that the SDK server accepts.
+func objectSchema() map[string]any {
+	return map[string]any{"type": "object"}
+}
+
+func noopTool(context.Context, *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	return &mcp.CallToolResult{}, nil
+}
+
+// onMethod returns a receiving middleware that answers method with h and
+// passes every other method on.
+func onMethod(method string, h mcp.MethodHandler) mcp.Middleware {
+	return func(next mcp.MethodHandler) mcp.MethodHandler {
+		return func(ctx context.Context, m string, req mcp.Request) (mcp.Result, error) {
+			if m == method {
+				return h(ctx, m, req)
+			}
+			return next(ctx, m, req)
+		}
+	}
+}
+
+// connectStdio connects the client of a stdio session (newStdioClient), with
+// the raw size limit limit, to server over in-memory transports. No process
+// and no network are involved. It returns the session and the rawLists and
+// rawLimit of the client. t.Cleanup closes both sessions.
+func connectStdio(t *testing.T, server *mcp.Server, limit int64) (*mcp.ClientSession, *rawLists, *rawLimit) {
+	t.Helper()
+	ctx := t.Context()
+	ct, st := mcp.NewInMemoryTransports()
+
+	ss, err := server.Connect(ctx, st, nil)
+	if err != nil {
+		t.Fatalf("server.Connect() error = %v", err)
+	}
+	t.Cleanup(func() { _ = ss.Close() })
+
+	raw, lim := &rawLists{}, &rawLimit{limit: limit}
+	cs, err := newStdioClient(raw, lim).Connect(ctx, ct, nil)
+	if err != nil {
+		t.Fatalf("client.Connect() error = %v", err)
+	}
+	t.Cleanup(func() { _ = cs.Close() })
+	return cs, raw, lim
+}
+
+// noopPrompt is a prompt handler that returns an empty result.
+func noopPrompt(context.Context, *mcp.GetPromptRequest) (*mcp.GetPromptResult, error) {
+	return &mcp.GetPromptResult{}, nil
+}
+
+// noopResource is a resource handler that returns an empty result.
+func noopResource(context.Context, *mcp.ReadResourceRequest) (*mcp.ReadResourceResult, error) {
+	return &mcp.ReadResourceResult{}, nil
 }

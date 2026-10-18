@@ -13,7 +13,15 @@
 // An Inspector does the work for one server. Its doc lists what an
 // implementation must do: honour the context, stop its child processes, close
 // its pipes, refuse untrusted servers without an opt-in, and keep secrets out
-// of its errors.
+// of its errors. [SDKInspector] is the implementation: it starts stdio
+// servers itself and gives remote servers to [Remote]. Every error of it is a
+// [ConnectError].
+//
+// Tests in other packages must not start real servers. They use
+// [github.com/Ducarv/mcpmoat/internal/inspect/inspecttest.Fake], an
+// Inspector that returns canned results. Only this package imports the MCP
+// SDK; the depguard rule mcp-sdk-only-in-inspect in .golangci.yml enforces
+// it (NFR-06).
 //
 // # Starting stdio servers
 //
@@ -37,13 +45,18 @@
 //
 // The work directory is the config Dir (the Codex cwd) when it is absolute.
 // mcpmoat uses that Dir as written, so files in it can change what runs, the
-// same as in the client. Else the work directory is stdioOptions.FallbackDir,
-// a private, empty directory that the caller makes. npm and uv read files
-// from the work directory and from all its parent directories, so the
-// caller must follow the rules in the FallbackDir comment. A relative command
-// with a "/" (such as "./server") needs an absolute config Dir. This is a
-// fidelity limit: a client can start a project server in the project root,
-// and mcpmoat does not.
+// same as in the client. Else the work directory is stdioOptions.FallbackDir:
+// SDKInspector makes a new, empty directory below <user cache
+// dir>/mcpmoat/run (workDir) and removes it after the stop. npm and uv read
+// files from the work directory and from all its parent directories, so the
+// run root and every parent up to "/" must be owned by the user or root and
+// must not be writable by others (defaultRunRoot, checkPrivateChain). A
+// relative command with a "/" (such as "./server") needs an absolute config
+// Dir. This is a fidelity limit: a client can start a project server in the
+// project root, and mcpmoat does not. In the empty directory, "npx foo"
+// installs foo from the public registry and runs it without a prompt, where
+// the client would run the local node_modules/.bin/foo; issue #104 tracks
+// this.
 //
 // On Unix the child starts in a new session; see detachSysProcAttr. The
 // caller never connects the stdout or stderr of the child to the terminal
@@ -54,8 +67,9 @@
 // lookPath lists the skip rules and the PATH risks.
 //
 // A server from an untrusted project file starts only with an explicit
-// opt-in (stdioOptions.AllowUntrusted). See the discover package doc,
-// Untrusted files.
+// opt-in (SDKOptions.AllowUntrusted, passed on to
+// stdioOptions.AllowUntrusted). See the discover package doc, Untrusted
+// files.
 //
 // The returned Cmd holds revealed secrets. Never print, log or encode
 // cmd.String(), cmd.Env or cmd.Args.
@@ -64,17 +78,42 @@
 //
 // # Child processes
 //
-// configureProcessGroup puts a stdio server in its own process group, and
-// killProcessGroup kills every process that is still in that group. With
-// the Setsid of stdioCommand, the new session is already that group, and
-// configureProcessGroup keeps it. The helpers are for the stdio Inspector of
-// issue #25; today only the tests call them. stdioCommand returns a Cmd made
-// with exec.Command, and exec refuses a Cancel on a Cmd without a context, so
-// that Inspector must build the Cmd with a context before it calls
-// configureProcessGroup. A process that leaves the group on purpose (with
-// setsid, setpgid or a double fork) is not killed, so this is not a sandbox.
-// The group kill works on Unix only (macOS and Linux). On other systems, only
-// the direct child is killed.
+// stdioProcess runs the Cmd of stdioCommand with its own stdin and stdout
+// pipes, and gives them to the SDK as an IOTransport. It does not use the
+// SDK CommandTransport, because that transport calls cmd.Wait itself. With
+// the Setsid of stdioCommand, the child leads its own process group.
+//
+// The stop (stdioProcess.stop) closes the stdin of the server, waits up to
+// stopGrace for the server to exit, kills the process group with
+// killProcessGroup before cmd.Wait, as the Inspector contract asks, closes
+// the read end of stdout and then calls Wait. stdioCommand returns a Cmd
+// made with exec.Command, so stdioProcess does not use configureProcessGroup
+// (exec refuses a Cancel on a Cmd without a context). Instead, when ctx
+// ends, it kills the process group and closes both pipes at once.
+// SDKInspector stops the child before it closes the MCP session, because the
+// close of the session waits for replies that a server can block by not
+// reading its stdin.
+//
+// A process that leaves the group on purpose (with setsid, setpgid or a
+// double fork) is not killed, so this is not a sandbox. The group kill works
+// on Unix only (macOS and Linux). On other systems, only the direct child is
+// killed.
+//
+// # Stdio sessions
+//
+// The client of a stdio session offers no capabilities and refuses every
+// request of the server except ping (refuseServerRequests). So no request of
+// the server makes the client send a request back. The SDK still decodes the
+// params of a request before mcpmoat refuses it, and it must write each reply
+// to the stdin of the server. A server that floods requests and stops
+// reading its stdin blocks those writes until the stop or ctx ends.
+//
+// The handshake result and all list pages of one stdio session share a raw
+// size limit of 8 MiB, as JSON (rawLimit, maxRawBytes). The same value bounds
+// one frame of the transport. A server that goes over it gives KindTooLarge.
+//
+// SDKInspector removes the configured env values of at least 8 bytes from
+// the text of its errors: the server gets them and can echo them.
 //
 // # Remote servers
 //
@@ -127,6 +166,8 @@
 //   - The response headers of one response have a size limit (64 KiB).
 //   - A list has a cap on the number of pages (100) and the number of items
 //     (10,000). A repeated cursor is an error.
+//   - For a stdio server, the handshake and all lists share a raw size limit
+//     (8 MiB of JSON), which also bounds one frame (see Stdio sessions).
 //   - The SDK silently drops tools that have an invalid x-mcp-header
 //     annotation. The package records the tools list as the server sent it and
 //     reports every tool, because a scanner must see what the server sent.
@@ -159,6 +200,20 @@
 // is true for the text of a [ConnectError], which can hold a status text or a
 // JSON-RPC message from the server, and for the text of Outcome.Err (see
 // Outcome).
+//
+// # Known limits
+//
+//   - Resource templates are not listed.
+//   - Tool annotations (readOnlyHint, destructiveHint and the others) are not
+//     kept, so rules and pins do not see them; issue #99 tracks this.
+//   - The tool schemas are decoded and encoded again (see Tool.InputSchema).
+//   - A server can still tell mcpmoat apart from a real client in other ways
+//     than the name; see Client identity and issue #97.
+//   - A stdio server that floods requests during the handshake and does not
+//     read its stdin is bounded only by ctx: the SDK closes the session
+//     inside Client.Connect, before SDKInspector can stop the child.
+//   - A work directory that a process outside the group still uses stays
+//     behind below the run root.
 //
 // See docs/PRD.md, FR-04 to FR-06, NFR-01, NFR-03, NFR-04 and NFR-06.
 package inspect

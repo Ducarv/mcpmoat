@@ -64,7 +64,17 @@ func TestMain(m *testing.M) {
 		os.Exit(code)
 	}
 	m.Run()
+	if afterTests != nil {
+		afterTests()
+	}
 }
+
+// afterTests runs after all tests, before the test binary exits. The
+// external test package sets it in an init func (see SetAfterTests in
+// export_test.go) to remove the fixture builds of inspecttest: only the
+// external package can import inspecttest, because inspecttest imports this
+// package.
+var afterTests func()
 
 // envDump is what the fixture child reports about itself.
 type envDump struct {

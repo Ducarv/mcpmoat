@@ -25,8 +25,9 @@ import "syscall"
 // the terminal of the user (see stdioCommand).
 //
 // Setsid also makes the child the leader of a new process group, with a
-// group ID equal to its PID. So the caller (issues #25 and #28) can stop the
-// process group with syscall.Kill(-pid, syscall.SIGKILL). This code does not
+// group ID equal to its PID. So the caller (killProcessGroup, from
+// stdioProcess in stdioproc.go) can stop the process group with
+// syscall.Kill(-pid, syscall.SIGKILL). This code does not
 // send that signal; the caller does. The signal reaches only the processes
 // that are still in the group. That includes the descendants that stay in
 // it (for example npx, then node). A process that leaves the group on
@@ -35,8 +36,8 @@ import "syscall"
 //
 // Side effect: a Ctrl-C in the terminal sends SIGINT only to the foreground
 // process group of the terminal. The child is not in that group, so it does
-// not get the signal. The caller (issue #25) must stop the child when the
-// context is cancelled.
+// not get the signal. The caller must stop the child when the context is
+// cancelled: stdioProcess in stdioproc.go kills the process group then.
 func detachSysProcAttr() *syscall.SysProcAttr {
 	return &syscall.SysProcAttr{Setsid: true}
 }

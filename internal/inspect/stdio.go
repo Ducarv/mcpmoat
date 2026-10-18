@@ -58,8 +58,8 @@ type stdioOptions struct {
 
 	// FallbackDir is the work directory of the child when the config sets no
 	// absolute Dir. It must be absolute. The caller makes a private, empty
-	// directory and removes it after the server stops (issue #25 owns that
-	// lifecycle). stdioCommand does not check the directory on disk.
+	// directory and removes it after the server stops (workDir does both
+	// for SDKInspector.Inspect). stdioCommand does not check the directory on disk.
 	//
 	// The whole parent chain matters, not only the leaf. npm walks up the
 	// parent directories from the work directory to find a local prefix (a
@@ -101,8 +101,8 @@ type stdioOptions struct {
 }
 
 // stdioCommand builds the *exec.Cmd that starts the stdio server s
-// (NFR-04). It does not start the process. The caller (issue #25) gives the
-// result to the MCP SDK transport.
+// (NFR-04). It does not start the process. The caller
+// (SDKInspector.Inspect) gives the result to the MCP SDK transport.
 //
 // Invariants:
 //   - No shell. The child runs the configured command with the configured
@@ -159,8 +159,8 @@ type stdioOptions struct {
 // *os.PathError whose Path is cmd.Dir (Op "chdir") or cmd.Path (Op
 // "fork/exec"). The go-sdk CommandTransport.Connect calls cmd.Start and
 // returns that error unchanged. Both paths are untrusted config text and can
-// hold terminal escape sequences. So the caller (issue #25) must replace
-// such an error with fixed text and keep only its errors.Is class
+// hold terminal escape sequences. So the caller (startError in sdk.go) must
+// replace such an error with fixed text and keep only its errors.Is class
 // (fs.ErrNotExist, fs.ErrPermission). It must never print err.Error().
 func stdioCommand(s discover.Server, opts stdioOptions) (*exec.Cmd, error) {
 	if s.Transport != discover.TransportStdio {

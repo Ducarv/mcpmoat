@@ -32,6 +32,26 @@ linters:
           deny:
             - pkg: github.com/Ducarv/mcpmoat/internal/discover/discovertest
               desc: test helpers; import discovertest only from _test.go files
+        # inspecttest imports the testing package, the same as discovertest.
+        inspecttest-only-in-tests:
+          files:
+            - "!$test"
+          deny:
+            - pkg: github.com/Ducarv/mcpmoat/internal/inspect/inspecttest
+              desc: test helpers; import inspecttest only from _test.go files
+        # NFR-06: MCP protocol details stay behind the interface in
+        # internal/inspect, so a spec change stays in one package.
+        mcp-sdk-only-in-inspect:
+          # The glob "*" does not cross "/", so internal/inspect/inspecttest
+          # is denied too. golangci-lint skips testdata/, so fixture servers
+          # may import the SDK.
+          files:
+            - "$all"
+            - "!**/internal/inspect/*.go"
+          deny:
+            # A deny entry matches by prefix, so this covers every SDK package.
+            - pkg: github.com/modelcontextprotocol/go-sdk
+              desc: only internal/inspect may import the MCP SDK (NFR-06)
     # misspell: the locale is left unset on purpose. The docs mix US and UK
     # spellings ("color" and "colour"), so only common misspellings are
     # reported, not US/UK differences.
