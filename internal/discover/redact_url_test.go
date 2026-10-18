@@ -2,6 +2,7 @@ package discover_test
 
 import (
 	"fmt"
+	"strings"
 	"testing"
 
 	"github.com/Ducarv/mcpmoat/internal/discover"
@@ -33,14 +34,29 @@ func TestRedactURL(t *testing.T) {
 			want:  "http://[::1]:8080/sse",
 		},
 		{
-			name:  "at sign in path with a host is kept",
-			input: "https://h/a@b",
-			want:  "https://h/a@b",
-		},
-		{
 			name:  "empty query",
 			input: "https://h/?",
 			want:  "https://h/?",
+		},
+		{
+			name:  "normal path segments are kept",
+			input: "https://h/v1/messages",
+			want:  "https://h/v1/messages",
+		},
+		{
+			name:  "date segment is kept",
+			input: "https://h/api/2024-11-05/x",
+			want:  "https://h/api/2024-11-05/x",
+		},
+		{
+			name:  "trailing and double slashes are kept",
+			input: "https://h//mcp/",
+			want:  "https://h//mcp/",
+		},
+		{
+			name:  "token prefix alone is kept",
+			input: "https://h/sk-/xox",
+			want:  "https://h/sk-/xox",
 		},
 		{
 			name:  "empty input",
@@ -70,7 +86,90 @@ func TestRedactURL(t *testing.T) {
 			want:  "//" + discover.Mask + "@h/x",
 		},
 
+		// Path: segments that look like credentials are masked, slashes
+		// stay.
+		{
+			name:  "canary in path",
+			input: "https://h/mcp/" + discovertest.CanaryURL + "/sse",
+			want:  "https://h/mcp/" + discover.Mask + "/sse",
+		},
+		{
+			name:  "Zapier-style key in path",
+			input: "https://actions.zapier.com/mcp/sk-ak-" + discovertest.CanaryURL + "/sse",
+			want:  "https://actions.zapier.com/mcp/" + discover.Mask + "/sse",
+		},
+		{
+			name:  "short key with known prefix",
+			input: "https://h/mcp/ghp_abc/sse",
+			want:  "https://h/mcp/" + discover.Mask + "/sse",
+		},
+		{
+			name:  "known prefix in upper case",
+			input: "https://h/SK_live/x",
+			want:  "https://h/" + discover.Mask + "/x",
+		},
+		{
+			name:  "UUID segment",
+			input: "https://mcp.composio.dev/partner/123e4567-e89b-12d3-a456-426614174000/mcp",
+			want:  "https://mcp.composio.dev/partner/" + discover.Mask + "/mcp",
+		},
+		{
+			name:  "JWT segment",
+			input: "https://h/eyJhbGciOiJIUzI1NiJ9.e30.sig/sse",
+			want:  "https://h/" + discover.Mask + "/sse",
+		},
+		{
+			name:  "long segment of only letters",
+			input: "https://h/" + strings.Repeat("a", 32),
+			want:  "https://h/" + discover.Mask,
+		},
+		{
+			name:  "letters and digits from 20 bytes",
+			input: "https://h/abcdefghijklmnopqrs1/x",
+			want:  "https://h/" + discover.Mask + "/x",
+		},
+		{
+			name:  "letters only below 32 bytes is kept",
+			input: "https://h/abcdefghijklmnopqrst",
+			want:  "https://h/abcdefghijklmnopqrst",
+		},
+		{
+			name:  "matrix parameter",
+			input: "https://h/x;" + discovertest.CanaryURL + "/sse",
+			want:  "https://h/x;" + discover.Mask + "/sse",
+		},
+		{
+			name:  "matrix parameters with key and empty part",
+			input: "https://h/x;k=v;;tok",
+			want:  "https://h/x;" + discover.Mask + ";;" + discover.Mask,
+		},
+		{
+			name:  "credential segment with matrix parameter",
+			input: "https://h/" + discovertest.CanaryURL + ";a",
+			want:  "https://h/" + discover.Mask + ";" + discover.Mask,
+		},
+		{
+			name:  "escaped slash does not split a segment",
+			input: "https://h/mcp/mcpmoat%2Fcanary%2Furl%2F9Jd3Wm",
+			want:  "https://h/mcp/" + discover.Mask,
+		},
+		{
+			name:  "non-ASCII segment is escaped, then masked",
+			input: "https://h/é" + discovertest.CanaryURL,
+			want:  "https://h/" + discover.Mask,
+		},
+		{
+			name:  "path masked with userinfo, query and fragment",
+			input: "https://u:p@h/mcp/" + discovertest.CanaryURL + "?k=v#f",
+			want:  "https://" + discover.Mask + "@h/mcp/" + discover.Mask + "?k=" + discover.Mask + "#" + discover.Mask,
+		},
+
 		// Query: every value is masked, keys and separators stay.
+		{
+			name:  "at sign in a query value is masked with the value",
+			input: "https://h/x?email=a@b",
+			want:  "https://h/x?email=" + discover.Mask,
+		},
 		{
 			name:  "query values",
 			input: "https://h/x?api_key=" + discovertest.CanaryURL + "&profile=p",
@@ -151,6 +250,42 @@ func TestRedactURL(t *testing.T) {
 			want:  discover.Mask,
 		},
 		{
+			// An unescaped "/" in a userinfo token ends the authority
+			// early: url.Parse sees host "tok" and path "/en@h/x", so part
+			// of the token would print as the host. With no userinfo, an
+			// "@" in the path gives Mask.
+			name:  "slash in userinfo token",
+			input: "https://tok/en@h/x",
+			want:  discover.Mask,
+		},
+		{
+			// The same rule also masks a real path with "@". Such paths
+			// are rare in MCP URLs, so failing closed costs little.
+			name:  "at sign in path without userinfo",
+			input: "https://h/a@b",
+			want:  discover.Mask,
+		},
+		{
+			name:  "question mark in userinfo token",
+			input: "https://tok?en@h/x",
+			want:  discover.Mask,
+		},
+		{
+			name:  "question mark in userinfo token with password",
+			input: "https://tok?en:" + discovertest.CanaryURL + "@h/x",
+			want:  discover.Mask,
+		},
+		{
+			name:  "hash in userinfo token",
+			input: "https://tok#en@h/x",
+			want:  discover.Mask,
+		},
+		{
+			name:  "escaped at sign in fragment without userinfo",
+			input: "https://tok#en%40h/x",
+			want:  discover.Mask,
+		},
+		{
 			// url.Parse accepts a zone ID, and u.String writes it back as
 			// written, so the zone could carry a secret.
 			name:  "IPv6 zone ID",
@@ -213,6 +348,11 @@ func FuzzRedactURL(f *testing.F) {
 		"https://h/?k\u202e=v;\u009b",
 		"https://bücher.example/",
 		"//u@h/p%2Fq?a=1&&b",
+		"https://actions.zapier.com/mcp/sk-ak-0123456789abcdef/sse",
+		"https://h/123e4567-e89b-12d3-a456-426614174000/mcp",
+		"https://h/eyJhbGciOiJIUzI1NiJ9.e30.sig;k=v;;t/sse",
+		"https://tok/en@h/x?q#f",
+		"https://h/\u00e9%2F;\u202e/x",
 	} {
 		f.Add(seed)
 	}
@@ -235,7 +375,7 @@ func assertPrintableASCII(t *testing.T, input, got string) {
 
 // TestRedactURLKnownLimits records cases that RedactURL does not mask today.
 // The RedactURL doc comment lists them as known limits. The outputs below
-// still contain the URL canary, so this test does not call AssertNoLeak. If a
+// still contain the token, so this test does not call AssertNoLeak. If a
 // future change masks these parts, update this test on purpose.
 func TestRedactURLKnownLimits(t *testing.T) {
 	t.Parallel()
@@ -246,10 +386,17 @@ func TestRedactURLKnownLimits(t *testing.T) {
 		want  string
 	}{
 		{
-			// RedactURL keeps the path, so a token in a path segment stays.
-			name:  "token in path is not masked",
-			input: "https://h/mcp/" + discovertest.CanaryURL + "/sse",
-			want:  "https://h/mcp/" + discovertest.CanaryURL + "/sse",
+			// The path rules need a known prefix, 20 or more bytes with a
+			// digit, 32 or more bytes, or a UUID. A short token passes.
+			name:  "short token in path is not masked",
+			input: "https://h/mcp/a1b2c3d4e5/sse",
+			want:  "https://h/mcp/a1b2c3d4e5/sse",
+		},
+		{
+			// A token with only letters and fewer than 32 bytes passes.
+			name:  "letters-only token in path is not masked",
+			input: "https://h/mcp/QwErTyUiOpAsDfGhJkLz/sse",
+			want:  "https://h/mcp/QwErTyUiOpAsDfGhJkLz/sse",
 		},
 		{
 			// RedactURL keeps query keys, so a token used as a key stays.
@@ -272,6 +419,7 @@ func TestRedactURLKnownLimits(t *testing.T) {
 			if got != tt.want {
 				t.Errorf("RedactURL(%q) = %q, want %q", tt.input, got, tt.want)
 			}
+			assertPrintableASCII(t, tt.input, got)
 		})
 	}
 }

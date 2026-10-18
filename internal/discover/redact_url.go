@@ -10,16 +10,45 @@ import (
 // It replaces these parts with [Mask]:
 //
 //   - the whole userinfo (username and password);
+//   - every path segment that looks like a credential (see below);
+//   - every matrix parameter in the path (each part after a ";" in a
+//     segment, for example "tok" in "/x;tok");
 //   - every query value, and every bare query part with no "=";
 //   - a non-empty fragment.
+//
+// Hosted MCP providers often put the API key in the path, for example
+// https://actions.zapier.com/mcp/<key>/sse, or an account ID as a UUID
+// segment. A path segment (the escaped text between two "/", before any
+// ";") is masked when one or more of these rules is true:
+//
+//   - it starts with a known token prefix, in any case: sk-, sk_, pk_, rk_,
+//     ghp_, gho_, ghu_, ghs_, github_pat_, glpat-, xox, AKIA, AIza or eyJ
+//     (a JWT), and it is longer than the prefix;
+//   - it has 20 or more bytes, at least one ASCII letter and at least one
+//     digit;
+//   - it has 32 or more bytes;
+//   - it is a UUID (8-4-4-4-12 hex digits).
+//
+// The slashes stay, so the shape of the path does not change. Normal
+// segments such as "mcp", "sse", "v1", "messages" or "2024-11-05" stay as
+// written. The rules are a heuristic: a long, readable segment (such as
+// "server-sent-events-v2") is masked too, and a short token or a token with
+// only letters is not detected.
 //
 // It returns Mask for the whole input if raw does not parse, if raw is an
 // opaque URL (such as "mailto:x" or "localhost:8080"), if raw has no host,
 // or if the host has an IPv6 zone ID ("[::1%25zone]") or a non-ASCII byte
 // (such as an IDN host written as "bücher.example"). Empty input gives "".
 //
-// It keeps the scheme (url.Parse lowercases it), the host, the port, the path
-// and the query keys.
+// It also returns Mask if raw has no userinfo but has an "@" after the host:
+// in the path, in the fragment, or in the query before its first "=". An
+// unescaped "/", "?" or "#" in a userinfo token ends the authority early, so
+// https://tok/en@host/x parses with host "tok" and no userinfo, and part of
+// the token would print. A real MCP URL rarely has "@" in these places, so
+// failing closed costs little.
+//
+// It keeps the scheme (url.Parse lowercases it), the host, the port, the
+// other path segments and the query keys.
 //
 // The result holds only printable ASCII bytes (0x20 to 0x7e), so it cannot
 // hold control or bidi characters. url.Parse rejects ASCII control bytes,
@@ -29,7 +58,8 @@ import (
 //
 // Known limits:
 //
-//   - A token in the path (for example /mcp/<token>/sse) is not masked.
+//   - A short token, or a token with only letters, in the path is not
+//     masked (see the path rules above).
 //   - A token used as a query key name is not masked.
 //   - A token in the host or a subdomain (for example
 //     https://<token>.example.com/) is not masked.
@@ -64,6 +94,23 @@ func RedactURL(raw string) string {
 		return Mask
 	}
 
+	// With no userinfo, an "@" after the host means that an unescaped "/",
+	// "?" or "#" in a credential probably cut the authority short, so the
+	// host holds part of the token. Fail closed. In the query, only the text
+	// before the first "=" counts, because a value such as an email address
+	// can hold "@" and is masked anyway.
+	if u.User == nil {
+		queryHead, _, _ := strings.Cut(u.RawQuery, "=")
+		if strings.Contains(u.EscapedPath(), "@") ||
+			strings.Contains(u.Fragment, "@") ||
+			strings.Contains(queryHead, "@") {
+			return Mask
+		}
+	}
+
+	if !redactPath(u) {
+		return Mask
+	}
 	// redactQuery("") is "", so an empty query needs no special case.
 	u.RawQuery = redactQuery(u.RawQuery)
 	if u.Fragment != "" {
@@ -84,6 +131,115 @@ func RedactURL(raw string) string {
 	u.User = url.User(Mask)
 	escaped := u.User.String() + "@"
 	return strings.Replace(u.String(), escaped, Mask+"@", 1)
+}
+
+// redactPath masks the path segments of u that look like credentials, and
+// every matrix parameter. It works on the escaped path, so an escaped "/"
+// ("%2F") does not split a segment. It reports false if the new path does
+// not unescape, which cannot happen for the escaped form that url.URL
+// returns; the caller then fails closed.
+func redactPath(u *url.URL) bool {
+	escaped := u.EscapedPath()
+	segments := strings.Split(escaped, "/")
+	changed := false
+	for i, seg := range segments {
+		if r := redactPathSegment(seg); r != seg {
+			segments[i] = r
+			changed = true
+		}
+	}
+	if !changed {
+		return true
+	}
+	newPath := strings.Join(segments, "/")
+	unescaped, err := url.PathUnescape(newPath)
+	if err != nil {
+		return false
+	}
+	// u.String writes RawPath when it is a valid escaped form of Path. Mask
+	// is "*" bytes, which are valid in a path, so RawPath is used as set.
+	u.Path = unescaped
+	u.RawPath = newPath
+	return true
+}
+
+// redactPathSegment masks one escaped path segment, without its slashes.
+// The part before the first ";" is masked if it looks like a credential.
+// Each non-empty part after a ";" is a matrix parameter and is always
+// masked, as a query value is.
+func redactPathSegment(seg string) string {
+	parts := strings.Split(seg, ";")
+	if looksLikeCredential(parts[0]) {
+		parts[0] = Mask
+	}
+	for i := 1; i < len(parts); i++ {
+		if parts[i] != "" {
+			parts[i] = Mask
+		}
+	}
+	return strings.Join(parts, ";")
+}
+
+// looksLikeCredential reports whether a path segment looks like a token.
+// The RedactURL doc comment lists the rules and their limits.
+func looksLikeCredential(seg string) bool {
+	if len(seg) >= 32 || isUUID(seg) {
+		return true
+	}
+	// tokenPrefixes are the starts of well-known API token formats, in
+	// lower case, so the match does not depend on case.
+	tokenPrefixes := [...]string{
+		"sk-", "sk_", "pk_", "rk_",
+		"ghp_", "gho_", "ghu_", "ghs_", "github_pat_",
+		"glpat-",
+		"xox",  // Slack
+		"akia", // AWS access key ID
+		"aiza", // Google API key
+		"eyj",  // JWT: base64 of `{"`
+	}
+	lower := strings.ToLower(seg)
+	for _, p := range tokenPrefixes {
+		if len(seg) > len(p) && strings.HasPrefix(lower, p) {
+			return true
+		}
+	}
+	if len(seg) < 20 {
+		return false
+	}
+	hasLetter := strings.IndexFunc(seg, func(r rune) bool {
+		return ('a' <= r && r <= 'z') || ('A' <= r && r <= 'Z')
+	}) >= 0
+	hasDigit := strings.IndexFunc(seg, func(r rune) bool {
+		return '0' <= r && r <= '9'
+	}) >= 0
+	return hasLetter && hasDigit
+}
+
+// isUUID reports whether s has the 8-4-4-4-12 form of a UUID, with hex
+// digits in any case.
+func isUUID(s string) bool {
+	if len(s) != 36 {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		switch i {
+		case 8, 13, 18, 23:
+			if c != '-' {
+				return false
+			}
+		default:
+			if !isHexDigit(c) {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+// isHexDigit reports whether c is 0-9, a-f or A-F.
+func isHexDigit(c byte) bool {
+	return ('0' <= c && c <= '9') || ('a' <= c && c <= 'f') || ('A' <= c && c <= 'F')
 }
 
 // redactQuery masks every value in a raw query string and keeps the keys as

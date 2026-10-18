@@ -16,11 +16,15 @@
 // Env and header values are [Secret] values in a [SecretMap], and the
 // remote endpoint is a [URL]. Printing, logging or encoding a Secret gives
 // [Mask]; for a URL it gives [RedactURL] of the value, the display form.
-// Show the env and header names with [SecretMap.Keys].
+// RedactURL masks the userinfo, the query values, the fragment and the path
+// segments that look like credentials (by heuristic rules). Show the env and
+// header names with [SecretMap.Keys].
 //
 // Server.Args is a plain []string and prints as written, but real configs
 // often put tokens in args. Show args only through [RedactArgs], which masks
 // likely credentials by heuristic rules and sends URLs through [RedactURL].
+// The RedactArgs output is still untrusted text from the config, so display
+// code must escape it before it prints it.
 //
 // Only [Secret.Reveal] and [URL.Reveal] return the values. Call them only
 // where the value is used:
