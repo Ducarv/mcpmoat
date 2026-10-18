@@ -19,18 +19,14 @@ import (
 	"github.com/Ducarv/mcpmoat/internal/inspect"
 )
 
-// This file holds the fixture MCP servers for the inspect tests. The real MCP
-// connection does not exist yet, so a fixture "server" is the test binary
-// itself, started again in a helper mode (the os/exec helper-process pattern).
-// The mode is the first argument after the binary name. The environment
-// variable below tells TestMain to run the helper instead of the tests.
+// This file holds the test helpers for the process tests in this external
+// test package. The fixture servers themselves (the helper modes) are in
+// helpermodes_unix_test.go in package inspect, because the one TestMain of
+// the test binary is there. A command runs a mode with the arguments
+// inspect.HelperModeArg and the mode name.
 
-// helperEnv is the environment variable that switches the test binary into
-// helper mode.
-const helperEnv = "MCPMOAT_INSPECT_HELPER"
-
-// The tests that start helper processes (proctree_unix_test.go and
-// run_process_unix_test.go) do not call t.Parallel. They measure wall time,
+// The tests that start helper processes in this package (proctree_unix_test.go
+// and run_process_unix_test.go) do not call t.Parallel. They measure wall time,
 // and TestRunNoGoroutineLeak counts the goroutines of the whole test binary,
 // so no other test may run at the same time. A test that never calls
 // t.Parallel runs alone.
@@ -46,101 +42,6 @@ const (
 	reapLimit = 5 * time.Second
 )
 
-// TestMain runs the helper when helperEnv is set, and the tests otherwise.
-//
-// In helper mode it never calls m.Run, so the testing package does not parse
-// the helper arguments as test flags.
-func TestMain(m *testing.M) {
-	if os.Getenv(helperEnv) == "1" {
-		os.Exit(helperMain(os.Args[1:]))
-	}
-	os.Exit(m.Run())
-}
-
-// helperMain runs one helper mode and returns the process exit code.
-func helperMain(args []string) int {
-	if len(args) == 0 {
-		return 2
-	}
-	switch args[0] {
-	case "hang":
-		// A hung server never answers. Block until a kill ends the process.
-		return hangForever()
-	case "crash":
-		// A server that fails on start.
-		fmt.Fprintln(os.Stderr, "helper: crash on start")
-		return 3
-	case "slow":
-		// This sleep is simulated start-up work inside the fixture. It is not
-		// test synchronisation.
-		time.Sleep(time.Second)
-		fmt.Println("ready")
-		return 0
-	case "grandchild":
-		// A grandchild that stays in the process group. Its stdout is
-		// /dev/null (exec.Command with a nil Stdout).
-		if code := startGrandchild(nil); code != 0 {
-			return code
-		}
-		return hangForever()
-	case "escape":
-		// A hostile grandchild: it leaves the process group with a new
-		// session, so the group kill misses it, and it keeps the stdout pipe
-		// of the server open.
-		code := startGrandchild(func(gc *exec.Cmd) {
-			gc.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
-			gc.Stdout = os.Stdout
-		})
-		if code != 0 {
-			return code
-		}
-		return hangForever()
-	case "daemon":
-		// A server that leaves a daemon behind: the grandchild stays in the
-		// process group, and the server exits at once with success.
-		return startGrandchild(nil)
-	default:
-		return 2
-	}
-}
-
-// startGrandchild starts the test binary again in "hang" mode as a
-// grandchild and prints "PID <n>" on stdout. setup, if not nil, changes the
-// grandchild command before it starts. It returns 0, or an exit code for an
-// error.
-func startGrandchild(setup func(gc *exec.Cmd)) int {
-	exe, err := os.Executable()
-	if err != nil {
-		fmt.Fprintln(os.Stderr, "helper: executable:", err)
-		return 1
-	}
-	// Plain exec.Command, not CommandContext: the grandchild must live on
-	// unless a kill reaches it. The grandchild inherits the environment, so
-	// it also runs in helper mode.
-	gc := exec.Command(exe, "hang") //nolint:gosec // G204: the helper starts its own test binary as a fixture grandchild
-	if setup != nil {
-		setup(gc)
-	}
-	if err := gc.Start(); err != nil {
-		fmt.Fprintln(os.Stderr, "helper: start grandchild:", err)
-		return 1
-	}
-	// os.Stdout is not buffered, so the parent sees the line at once. We do
-	// not Wait for the grandchild: only a kill may end it.
-	fmt.Printf("PID %d\n", gc.Process.Pid)
-	return 0
-}
-
-// hangForever blocks until the process is killed.
-//
-// A bare select{} does not work here: with no other goroutine the Go runtime
-// sees a deadlock and exits with code 2. A pending timer avoids that.
-func hangForever() int {
-	for {
-		time.Sleep(time.Hour)
-	}
-}
-
 // helperServer returns a stdio discover.Server that runs the test binary in
 // the given helper mode.
 func helperServer(t testing.TB, name, mode string) discover.Server {
@@ -155,19 +56,20 @@ func helperServer(t testing.TB, name, mode string) discover.Server {
 		Source:    "/test/helper/.mcp.json",
 		Transport: discover.TransportStdio,
 		Command:   exe,
-		Args:      discover.NewArgs([]string{mode}),
+		Args:      discover.NewArgs([]string{inspect.HelperModeArg, mode}),
 	}
 }
 
-// helperCommand returns a command that runs the test binary at path in a
-// helper mode, in its own process group, as a stdio inspector starts a
-// server. attr is the SysProcAttr before ConfigureProcessGroup; nil means
-// none.
+// helperCommand returns a command that runs the test binary at path with
+// args, in its own process group, as a stdio inspector starts a server. For a
+// helper mode, args start with inspect.HelperModeArg. attr is the SysProcAttr
+// before ConfigureProcessGroup; nil means none.
+//
+// The child inherits the environment of the test. The scrubbed environment
+// of stdioCommand is checked in package inspect (proctree_stdio_test.go and
+// the stdio tests); the stdio Inspector of issue #25 joins the two.
 func helperCommand(ctx context.Context, path string, attr *syscall.SysProcAttr, args ...string) *exec.Cmd {
 	cmd := exec.CommandContext(ctx, path, args...) //nolint:gosec // G204: the test runs its own test binary as a fixture server
-	// The test's own environment plus the helper switch. Scrubbing the
-	// environment is issue #27.
-	cmd.Env = append(os.Environ(), helperEnv+"=1")
 	cmd.SysProcAttr = attr
 	inspect.ConfigureProcessGroup(cmd)
 	return cmd

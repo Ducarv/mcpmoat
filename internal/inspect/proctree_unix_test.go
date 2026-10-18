@@ -306,7 +306,7 @@ func startHang(t *testing.T, attr *syscall.SysProcAttr) *exec.Cmd {
 	if err != nil {
 		t.Fatalf("os.Executable() error = %v", err)
 	}
-	cmd := helperCommand(t.Context(), exe, attr, "hang")
+	cmd := helperCommand(t.Context(), exe, attr, inspect.HelperModeArg, "hang")
 	if err := cmd.Start(); err != nil {
 		t.Fatalf("Start() error = %v", err)
 	}
@@ -395,7 +395,7 @@ func TestKillProcessGroupAfterWaitSendsNothing(t *testing.T) {
 	if err != nil {
 		t.Fatalf("os.Executable() error = %v", err)
 	}
-	cmd := helperCommand(t.Context(), exe, nil, "grandchild")
+	cmd := helperCommand(t.Context(), exe, nil, inspect.HelperModeArg, "grandchild")
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
 		t.Fatalf("StdoutPipe() error = %v", err)

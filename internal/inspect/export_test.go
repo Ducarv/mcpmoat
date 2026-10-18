@@ -12,3 +12,7 @@ var KillProcessGroup = killProcessGroup
 
 // KillWaitDelay is killWaitDelay, for the tests. It sizes upper time bounds.
 const KillWaitDelay = killWaitDelay
+
+// HelperModeArg is helperModeArg, for the tests. A command with it as the
+// first argument runs the test binary as a helper-mode fixture server.
+const HelperModeArg = helperModeArg
