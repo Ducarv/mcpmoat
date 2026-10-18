@@ -781,9 +781,11 @@ func TestScanTerminalSafety(t *testing.T) {
 	// override) in an argument.
 	const config = `{"mcpServers":{"a\u001b[31mb":{"command":"echo\tx","args":["\u202e"]}}}`
 
-	// Go quoted form of the same cells. Escape uses strconv.Quote.
+	// The name shows in Go quoted form (Escape uses strconv.Quote). The
+	// command and the args go through the RedactArgs allowlist, which masks
+	// every part with a character that is not safe.
 	wantName := strconv.Quote("a\x1b[31mb")
-	wantCommand := strconv.Quote("echo\tx") + " " + strconv.Quote("\u202e")
+	wantCommand := discover.Mask + " " + discover.Mask
 
 	c, stdout, stderr := scanForbiddenDirs(t)
 	path := scanWriteFile(t, t.TempDir(), ".mcp.json", config)
@@ -803,7 +805,7 @@ func TestScanTerminalSafety(t *testing.T) {
 	}
 	for _, want := range []string{wantName, wantCommand} {
 		if !strings.Contains(out, want) {
-			t.Errorf("stdout does not contain the quoted form %s\n%q", want, out)
+			t.Errorf("stdout does not contain %s\n%q", want, out)
 		}
 	}
 	// The row must keep its shape: header line and one row line.
@@ -893,5 +895,237 @@ func TestScanWriteError(t *testing.T) {
 				t.Errorf("stderr does not contain %q\nstderr: %s", "cannot write output", stderr)
 			}
 		})
+	}
+}
+
+// TestScanArgsMasked checks that the COMMAND/URL cell never shows an argument
+// as written. The configs put the args canary in secret-like shapes, in a
+// global and in a project file.
+func TestScanArgsMasked(t *testing.T) {
+	t.Parallel()
+
+	const c = discovertest.CanaryArgs
+	args := []string{
+		"-y", "@scope/server",
+		"--token", c,
+		"--api-key=" + c,
+		"-e", "GITHUB_TOKEN=" + c,
+		"-H", "Authorization: Bearer " + c,
+		"postgres://user:" + c + "@db.example.com/app",
+		"https://h.example.com/sse?key=" + c,
+		`{"token":"` + c + `"}`,
+		"/data/" + c + "/x",
+		"admin:" + c,
+		"-p" + c,
+		c,
+	}
+	data, err := json.Marshal(map[string]any{
+		"mcpServers": map[string]any{"srv": map[string]any{"command": "npx", "args": args}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	home, work := t.TempDir(), t.TempDir()
+	scanWriteFile(t, home, ".claude.json", string(data))
+	scanWriteFile(t, work, ".mcp.json", string(data))
+
+	c2, stdout, stderr := newTestCLI(fakeGetenv(nil), testBuild)
+	c2.homeDir = func() (string, error) { return home, nil }
+	c2.getwd = func() (string, error) { return work, nil }
+
+	code := c2.dispatch([]string{"scan", "--no-connect"})
+
+	if code != exitOK {
+		t.Fatalf("exit code = %d, want %d; stderr:\n%s", code, exitOK, stderr)
+	}
+	discovertest.AssertNoLeak(t, "stdout", stdout.String())
+	discovertest.AssertNoLeak(t, "stderr", stderr.String())
+	// The safe parts stay, so the leak check is not a pass on empty output.
+	if got := strings.Count(stdout.String(), "npx -y @scope/server --token "+discover.Mask+" "); got != 2 {
+		t.Errorf("stdout shows the redacted command line %d times, want 2\nstdout:\n%s", got, stdout)
+	}
+}
+
+// TestScanUntrustedProjectFile checks the exit code for problems with the
+// project files in the working directory (FileError.Untrusted). Such a
+// problem gives exit code 2 after the table and the problems are printed. A
+// problem with a global file stays a warning with exit code 0.
+func TestScanUntrustedProjectFile(t *testing.T) {
+	t.Parallel()
+
+	// outsideConfig is a config outside the working directory. The canary in
+	// its args must never show, also when mcpmoat refuses the file.
+	outsideConfig := `{"mcpServers":{"outside":{"command":"run","args":["` + discovertest.CanaryArgs + `"]}}}`
+	const globalConfig = `{"mcpServers":{"global-srv":{"command":"npx"}}}`
+
+	// symlink makes link point to target. It skips the test when the system
+	// cannot make a symlink (Windows without the right privilege).
+	symlink := func(t *testing.T, target, link string) {
+		t.Helper()
+		if err := os.MkdirAll(filepath.Dir(link), 0o750); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(target, link); err != nil {
+			t.Skipf("symlink: %v", err)
+		}
+	}
+
+	tests := []struct {
+		name string
+		// setup writes files below home and work. outside is a directory
+		// outside both.
+		setup      func(t *testing.T, home, work, outside string)
+		wantCode   int
+		wantStdout []string // substrings of stdout
+		wantStderr []string // substrings of stderr
+		noStderr   []string // substrings that must not be in stderr
+	}{
+		{
+			name: ".mcp.json is a symlink out of the project",
+			setup: func(t *testing.T, home, work, outside string) {
+				scanWriteFile(t, home, ".claude.json", globalConfig)
+				symlink(t, scanWriteFile(t, outside, "real.json", outsideConfig), filepath.Join(work, ".mcp.json"))
+			},
+			wantCode:   exitError,
+			wantStdout: []string{"global-srv"},
+			wantStderr: []string{"mcpmoat scan: ", ".mcp.json: file is outside the project", untrustedHint},
+			noStderr:   []string{"warning:"},
+		},
+		{
+			name: ".cursor/mcp.json is a symlink out of the project",
+			setup: func(t *testing.T, home, work, outside string) {
+				scanWriteFile(t, home, ".claude.json", globalConfig)
+				symlink(t, scanWriteFile(t, outside, "mcp.json", outsideConfig), filepath.Join(work, ".cursor", "mcp.json"))
+			},
+			wantCode:   exitError,
+			wantStdout: []string{"global-srv"},
+			wantStderr: []string{"mcp.json: file is outside the project", untrustedHint},
+			noStderr:   []string{"warning:"},
+		},
+		{
+			name: "project file is invalid JSON",
+			setup: func(t *testing.T, home, work, _ string) {
+				scanWriteFile(t, home, ".claude.json", globalConfig)
+				scanWriteFile(t, work, ".mcp.json", `{"mcpServers":`)
+			},
+			wantCode:   exitError,
+			wantStdout: []string{"global-srv"},
+			wantStderr: []string{".mcp.json:1:", "invalid JSON", untrustedHint},
+			noStderr:   []string{"warning:"},
+		},
+		{
+			name: "no servers at all still prints the empty line first",
+			setup: func(t *testing.T, _, work, outside string) {
+				symlink(t, scanWriteFile(t, outside, "real.json", outsideConfig), filepath.Join(work, ".mcp.json"))
+			},
+			wantCode:   exitError,
+			wantStdout: []string{"No MCP servers found."},
+			wantStderr: []string{"file is outside the project", untrustedHint},
+		},
+		{
+			name: "relative project symlink that stays inside the project is followed",
+			setup: func(t *testing.T, _, work, _ string) {
+				scanWriteFile(t, work, filepath.Join("conf", "mcp.json"), `{"mcpServers":{"inside":{"command":"npx"}}}`)
+				symlink(t, filepath.Join("conf", "mcp.json"), filepath.Join(work, ".mcp.json"))
+			},
+			wantCode:   exitOK,
+			wantStdout: []string{"inside"},
+		},
+		{
+			// os.Root refuses every absolute symlink, also one that points
+			// into the project.
+			name: "absolute project symlink is refused",
+			setup: func(t *testing.T, _, work, _ string) {
+				target := scanWriteFile(t, work, filepath.Join("conf", "mcp.json"), `{"mcpServers":{"inside":{"command":"npx"}}}`)
+				symlink(t, target, filepath.Join(work, ".mcp.json"))
+			},
+			wantCode:   exitError,
+			wantStdout: []string{"No MCP servers found."},
+			wantStderr: []string{"file is outside the project", untrustedHint},
+		},
+		{
+			name: "global file error is a warning",
+			setup: func(t *testing.T, home, work, _ string) {
+				scanWriteFile(t, home, ".claude.json", `{"mcpServers":`)
+				scanWriteFile(t, work, ".mcp.json", `{"mcpServers":{"project-srv":{"command":"npx"}}}`)
+			},
+			wantCode:   exitOK,
+			wantStdout: []string{"project-srv"},
+			wantStderr: []string{"mcpmoat scan: warning: ", ".claude.json:1:", "invalid JSON"},
+			noStderr:   []string{untrustedHint},
+		},
+		{
+			name: "global symlink out of the home directory is followed",
+			setup: func(t *testing.T, home, _, outside string) {
+				symlink(t, scanWriteFile(t, outside, "real.json", outsideConfig), filepath.Join(home, ".cursor", "mcp.json"))
+			},
+			wantCode:   exitOK,
+			wantStdout: []string{"outside", "run " + discover.Mask},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			home, work, outside := t.TempDir(), t.TempDir(), t.TempDir()
+			tt.setup(t, home, work, outside)
+			c, stdout, stderr := newTestCLI(fakeGetenv(nil), testBuild)
+			c.homeDir = func() (string, error) { return home, nil }
+			c.getwd = func() (string, error) { return work, nil }
+
+			code := c.dispatch([]string{"scan", "--no-connect"})
+
+			if code != tt.wantCode {
+				t.Errorf("exit code = %d, want %d\nstdout:\n%s\nstderr:\n%s", code, tt.wantCode, stdout, stderr)
+			}
+			for _, want := range tt.wantStdout {
+				if !strings.Contains(stdout.String(), want) {
+					t.Errorf("stdout does not contain %q\nstdout:\n%s", want, stdout)
+				}
+			}
+			for _, want := range tt.wantStderr {
+				if !strings.Contains(stderr.String(), want) {
+					t.Errorf("stderr does not contain %q\nstderr:\n%s", want, stderr)
+				}
+			}
+			for _, bad := range tt.noStderr {
+				if strings.Contains(stderr.String(), bad) {
+					t.Errorf("stderr contains %q\nstderr:\n%s", bad, stderr)
+				}
+			}
+			if len(tt.wantStderr) == 0 && stderr.Len() != 0 {
+				t.Errorf("stderr = %q, want empty", stderr)
+			}
+			discovertest.AssertNoLeak(t, "stdout", stdout.String())
+			discovertest.AssertNoLeak(t, "stderr", stderr.String())
+			assertNoEscape(t, stdout.String(), stderr.String())
+		})
+	}
+}
+
+// TestScanConfigIsNotConfined checks that --config reads the named file
+// without the project confinement of auto-discovery: the user named the
+// file, so a symlink out of its directory is followed and the scan is clean.
+func TestScanConfigIsNotConfined(t *testing.T) {
+	t.Parallel()
+
+	target := scanWriteFile(t, t.TempDir(), "real.json", `{"mcpServers":{"outside":{"command":"npx"}}}`)
+	link := filepath.Join(t.TempDir(), ".mcp.json")
+	if err := os.Symlink(target, link); err != nil {
+		t.Skipf("symlink: %v", err)
+	}
+	c, stdout, stderr := scanForbiddenDirs(t)
+
+	code := c.dispatch([]string{"scan", "--no-connect", "--config", link})
+
+	if code != exitOK {
+		t.Fatalf("exit code = %d, want %d; stderr:\n%s", code, exitOK, stderr)
+	}
+	if !strings.Contains(stdout.String(), "outside") {
+		t.Errorf("stdout does not list the server\nstdout:\n%s", stdout)
+	}
+	if stderr.Len() != 0 {
+		t.Errorf("stderr = %q, want empty", stderr)
 	}
 }

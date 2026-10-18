@@ -317,6 +317,7 @@ func TestUsageContent(t *testing.T) {
 		"  0  no findings\n",
 		"  1  findings at or above --fail-on\n",
 		"  2  execution error\n",
+		"     (scan also exits 2 when a project config in the working directory has a problem)\n",
 	} {
 		if !strings.Contains(got, want) {
 			t.Errorf("usage text does not contain %q\n--- got ---\n%s", want, got)

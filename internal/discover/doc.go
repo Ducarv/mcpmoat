@@ -34,7 +34,10 @@
 //
 //   - in internal/inspect, for the command line and the environment of a
 //     child process, the server endpoint and HTTP request headers;
-//   - in internal/rules, for config rules.
+//   - in internal/rules, for config rules;
+//   - in internal/report, Args.Values only as the input of [RedactArgs], to
+//     show the command and the args through the allowlist as one command
+//     line.
 //
 // Never pass their results to fmt, a logger, an error or an encoder.
 //
@@ -80,7 +83,9 @@
 // Detection has known limits: see [DetectClient].
 //
 // ReadConfig then reads the file with ScopeGlobal. Unlike [Discover], it
-// reports a missing file, with the reason "file not found".
+// reports a missing file, with the reason "file not found". The user named
+// the file, so ReadConfig does not confine it to a project directory and
+// does not mark it untrusted (see Symlinks and Untrusted files below).
 //
 // [ReadClaudeCode], [ReadCursor] and [ReadCodex] read one file in a known
 // format. They do not check that the file exists, because a missing file is not

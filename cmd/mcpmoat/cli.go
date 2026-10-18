@@ -165,6 +165,7 @@ func (c *cli) usage(w io.Writer) {
 	fprintf(w, "  0  no findings\n")
 	fprintf(w, "  1  findings at or above --fail-on\n")
 	fprintf(w, "  2  execution error\n")
+	fprintf(w, "     (scan also exits 2 when a project config in the working directory has a problem)\n")
 }
 
 // scanUsage writes the flags of the scan command to w. usage includes it, and

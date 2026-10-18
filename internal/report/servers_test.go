@@ -14,8 +14,9 @@ import (
 )
 
 // threeServers returns one stdio, one http and one project-scope sse server.
-// The http server has canary values in the URL, and the stdio and http
-// servers have canary values in Env and Headers.
+// The stdio server has a canary value in Args, the http server has canary
+// values in the URL, and the stdio and http servers have canary values in Env
+// and Headers.
 func threeServers() []discover.Server {
 	return []discover.Server{
 		{
@@ -25,8 +26,10 @@ func threeServers() []discover.Server {
 			Source:    "/home/u/.claude.json",
 			Transport: discover.TransportStdio,
 			Command:   "npx",
-			Args:      []string{"-y", "@scope/server-fs", "/data"},
-			Env:       discover.SecretMap{"API_KEY": discover.NewSecret(discovertest.CanaryEnv)},
+			Args: discover.NewArgs([]string{
+				"-y", "@scope/server-fs", "--token", discovertest.CanaryArgs, "/data",
+			}),
+			Env: discover.SecretMap{"API_KEY": discover.NewSecret(discovertest.CanaryEnv)},
 		},
 		{
 			Name:      "remote",
@@ -56,9 +59,10 @@ func TestWriteServersExactTable(t *testing.T) {
 	t.Parallel()
 
 	// Columns are padded to the widest cell plus 3 spaces. The last column has
-	// no padding. Secrets and credentials never show.
+	// no padding. Secrets and credentials never show: the args go through the
+	// RedactArgs allowlist.
 	const want = "NAME     CLIENT        SCOPE               TRANSPORT   SOURCE                     COMMAND/URL\n" +
-		"fs       claude-code   global              stdio       /home/u/.claude.json       npx -y @scope/server-fs /data\n" +
+		"fs       claude-code   global              stdio       /home/u/.claude.json       npx -y @scope/server-fs --token ******** /data\n" +
 		"remote   cursor        global              http        /home/u/.cursor/mcp.json   https://********@example.com/mcp?k=********\n" +
 		"legacy   claude-code   project:/work/app   sse         /work/app/.mcp.json        https://sse.example.com/events\n"
 
@@ -98,6 +102,10 @@ func TestWriteServersEmpty(t *testing.T) {
 func TestCommand(t *testing.T) {
 	t.Parallel()
 
+	const (
+		mask = discover.Mask
+		c    = discovertest.CanaryArgs
+	)
 	tests := []struct {
 		name    string
 		command string
@@ -105,30 +113,51 @@ func TestCommand(t *testing.T) {
 		want    string
 	}{
 		{name: "plain", command: "npx", args: []string{"-y", "server"}, want: "npx -y server"},
+		{name: "npm scope and path are shown", command: "npx", args: []string{"-y", "@scope/server-fs", "/data"}, want: "npx -y @scope/server-fs /data"},
 		{name: "no args", command: "server", args: nil, want: "server"},
 		{name: "empty args slice", command: "server", args: []string{}, want: "server"},
-		{name: "arg with a space", command: "node", args: []string{"my dir/a.js"}, want: `node "my dir/a.js"`},
-		{name: "command with a space", command: "my tool", args: []string{"x"}, want: `"my tool" x`},
-		{name: "empty arg", command: "run", args: []string{"", "x"}, want: `run "" x`},
+		{name: "empty arg is quoted", command: "run", args: []string{"", "x"}, want: `run "" x`},
 		{name: "only empty arg", command: "run", args: []string{""}, want: `run ""`},
-		{name: "empty command", command: "", args: []string{"x"}, want: `"" x`},
-		{name: "arg with ESC", command: "run", args: []string{"a\x1b[2Jb"}, want: `run "a\x1b[2Jb"`},
-		{name: "arg with tab", command: "run", args: []string{"a\tb"}, want: `run "a\tb"`},
-		{name: "arg with newline", command: "run", args: []string{"a\nb"}, want: `run "a\nb"`},
-		{name: "arg with bidi override", command: "run", args: []string{"a\u202eb"}, want: `run "a\u202eb"`},
-		{name: "arg with invalid UTF-8", command: "run", args: []string{"a\xffb"}, want: `run "a\xffb"`},
-		{name: "command with ESC", command: "\x1b]0;x\a", args: []string{"y"}, want: `"\x1b]0;x\a" y`},
-		{name: "unsafe arg with a space is quoted once", command: "run", args: []string{"a b\x1b"}, want: `run "a b\x1b"`},
-		{name: "only the unsafe arg is quoted", command: "run", args: []string{"ok", "a\tb", "fine"}, want: `run ok "a\tb" fine`},
-		{name: "quote in arg is kept as is", command: "run", args: []string{`say "hi"`}, want: `run "say \"hi\""`},
-		{name: "safe quote without space is kept", command: "run", args: []string{`a"b`}, want: `run a"b`},
+		{name: "empty command is quoted", command: "", args: []string{"x"}, want: `"" x`},
+
+		// The allowlist masks every part with a shape that is not known to be
+		// safe. A space, a quote or a control character is not on the list.
+		{name: "segment with a space is masked", command: "node", args: []string{"my dir/a.js"}, want: "node " + mask + "/a.js"},
+		{name: "command with a space is masked", command: "my tool", args: []string{"x"}, want: mask + " x"},
+		{name: "arg with ESC is masked", command: "run", args: []string{"a\x1b[2Jb"}, want: "run " + mask},
+		{name: "arg with tab is masked", command: "run", args: []string{"a\tb"}, want: "run " + mask},
+		{name: "arg with newline is masked", command: "run", args: []string{"a\nb"}, want: "run " + mask},
+		{name: "arg with bidi override is masked", command: "run", args: []string{"a\u202eb"}, want: "run " + mask},
+		{name: "arg with invalid UTF-8 is masked", command: "run", args: []string{"a\xffb"}, want: "run " + mask},
+		{name: "command with ESC is masked", command: "\x1b]0;x\a", args: []string{"y"}, want: mask + " y"},
+		{name: "arg with a quote is masked", command: "run", args: []string{`a"b`}, want: "run " + mask},
+
+		// Secret-like args.
+		{name: "value of a secret flag", command: "run", args: []string{"--token", c}, want: "run --token " + mask},
+		{name: "secret flag with =", command: "run", args: []string{"--api-key=" + c}, want: "run --api-key=" + mask},
+		{name: "secret env value", command: "docker", args: []string{"run", "-e", "GITHUB_TOKEN=" + c}, want: "docker run -e GITHUB_TOKEN=" + mask},
+		{name: "header line", command: "run", args: []string{"-H", "Authorization: Bearer " + c}, want: "run -H " + mask},
+		{name: "URL credentials", command: "run", args: []string{"postgres://u:" + c + "@h/db"}, want: "run postgres://" + mask + "@h/db"},
+		{name: "URL query value", command: "run", args: []string{"https://h/sse?key=" + c}, want: "run https://h/sse?key=" + mask},
+		{name: "JSON arg", command: "run", args: []string{`{"token":"` + c + `"}`}, want: "run " + mask},
+		{name: "token in a path segment", command: "run", args: []string{"/data/" + c + "/x"}, want: "run /data/" + mask + "/x"},
+		{name: "user and password", command: "run", args: []string{"admin:" + c}, want: "run " + mask},
+		{name: "token glued to a short flag", command: "run", args: []string{"-p" + c}, want: "run " + mask},
+		{name: "positional token", command: "run", args: []string{c}, want: "run " + mask},
+
+		// The command goes through the allowlist too, as the first part.
+		{name: "token as the command", command: "ghp_abcdefghijklmnopqrstuvwxyz0123456789", args: []string{"x"}, want: mask + " x"},
+		{name: "canary as the command", command: c, args: []string{"x"}, want: mask + " x"},
+		{name: "secret flag as the command masks the next part", command: "--token", args: []string{c}, want: "--token " + mask},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			if got := report.Command(tt.command, tt.args); got != tt.want {
+			got := report.Command(tt.command, discover.NewArgs(tt.args))
+			if got != tt.want {
 				t.Errorf("Command(%q, %q) = %q, want %q", tt.command, tt.args, got, tt.want)
 			}
+			discovertest.AssertNoLeak(t, "Command()", got)
 		})
 	}
 }
@@ -167,10 +196,12 @@ func TestWriteServersEscapesEveryCell(t *testing.T) {
 			s.ProjectPath = v
 			return strconv.Quote("project:" + v)
 		}},
-		{name: "Command", set: func(s *discover.Server, v string) string { s.Command = v; return strconv.Quote(v) }},
+		// The command and the args go through the RedactArgs allowlist, which
+		// masks every part with an unsafe character.
+		{name: "Command", set: func(s *discover.Server, v string) string { s.Command = v; return discover.Mask }},
 		{name: "Args", set: func(s *discover.Server, v string) string {
-			s.Args = []string{v}
-			return strconv.Quote(v)
+			s.Args = discover.NewArgs([]string{v})
+			return discover.Mask
 		}},
 	}
 
@@ -231,9 +262,12 @@ func TestWriteServersNoLeak(t *testing.T) {
 	// AssertNoLeak checks all canaries.
 	discovertest.AssertNoLeak(t, "table", out)
 
-	// The URL host stays, so the check above is not a pass on empty output.
-	if !strings.Contains(out, "example.com") {
-		t.Errorf("output does not show the URL host:\n%s", out)
+	// The URL host and the safe args stay, so the check above is not a pass
+	// on empty output.
+	for _, want := range []string{"example.com", "npx -y @scope/server-fs --token "} {
+		if !strings.Contains(out, want) {
+			t.Errorf("output does not show %q:\n%s", want, out)
+		}
 	}
 	// The table does not show the header value (it can hold "Bearer").
 	if strings.Contains(out, "Bearer") {
@@ -480,10 +514,12 @@ func TestWriteServersPathColumnsKeepRealPaths(t *testing.T) {
 func TestWriteServersLastColumnIsNeverCut(t *testing.T) {
 	t.Parallel()
 
-	long := strings.Repeat("x", 10000)
+	// A long path of short segments: RedactArgs shows it, and RedactURL
+	// shows it in a URL path. A long random-looking word would be masked.
+	long := strings.Repeat("abc/", 2500)
 
 	stdio := oneServer("srv")
-	stdio.Args = []string{"--flag", long}
+	stdio.Args = discover.NewArgs([]string{"--flag", long})
 
 	remote := oneServer("remote")
 	remote.Transport = discover.TransportHTTP

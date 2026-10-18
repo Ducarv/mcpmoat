@@ -124,7 +124,10 @@ func clientByPath(path string) Client {
 // holds config text or text from a JSON or TOML library.
 //
 // ReadConfig reads the file as global scope (ScopeGlobal), so a copy of
-// ~/.claude.json also gives the servers of its projects.
+// ~/.claude.json also gives the servers of its projects. The user named the
+// file, so ReadConfig does not confine it to a project directory: it follows
+// symlinks anywhere, as for the other global files, and the servers and
+// errors have Untrusted set to false.
 //
 // The file is read twice: once here to detect the format, and once by the
 // reader. The file is small, and reading it twice keeps the readers
@@ -132,7 +135,8 @@ func clientByPath(path string) Client {
 // the second read has its own checks and limits. The Codex reader has a
 // smaller size limit (256 KiB) than the one used here.
 func ReadConfig(ctx context.Context, path string) Result {
-	data, found, fe := readConfigFile(ctx, path, maxConfigSize)
+	// An empty root: the file is not confined (see the doc comment above).
+	data, found, fe := readConfigFile(ctx, path, maxConfigSize, "")
 	if fe != nil {
 		return Result{Errors: []*FileError{fe}}
 	}

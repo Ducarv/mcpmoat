@@ -196,6 +196,55 @@ func TestE2EScanPartialFailure(t *testing.T) {
 	}
 }
 
+// TestE2EScanUntrustedProjectFile checks that a project .mcp.json that is a
+// symlink out of the working directory gives exit code 2. The table of the
+// global file is still printed, and the content of the refused file never
+// shows.
+func TestE2EScanUntrustedProjectFile(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	home := filepath.Join(root, "home")
+	work := filepath.Join(root, "work")
+	outside := filepath.Join(root, "outside")
+	for _, dir := range []string{home, work, outside} {
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	files := map[string]string{
+		filepath.Join(home, ".claude.json"): `{"mcpServers":{"global-srv":{"command":"npx"}}}`,
+		filepath.Join(outside, "real.json"): `{"mcpServers":{"outside":{"command":"run","args":["--token","` +
+			discovertest.CanaryArgs + `"]}}}`,
+	}
+	for path, content := range files {
+		if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.Symlink(filepath.Join(outside, "real.json"), filepath.Join(work, ".mcp.json")); err != nil {
+		t.Fatal(err)
+	}
+
+	stdout, stderr, code := runBin(t, home, work, "scan", "--no-connect")
+
+	if code != 2 {
+		t.Errorf("exit code = %d, want 2; stderr:\n%s", code, stderr)
+	}
+	if got := column(tableRows(stdout), 0); !slices.Equal(got, []string{"global-srv"}) {
+		t.Errorf("server names = %v, want [global-srv]\nstdout:\n%s", got, stdout)
+	}
+	for _, want := range []string{".mcp.json: file is outside the project", "project config in the working directory"} {
+		if !strings.Contains(stderr, want) {
+			t.Errorf("stderr does not contain %q:\n%s", want, stderr)
+		}
+	}
+	if strings.Contains(stderr, "warning:") {
+		t.Errorf("stderr shows the problem as a warning:\n%s", stderr)
+	}
+	discovertest.AssertNoLeak(t, "stdout", stdout)
+	discovertest.AssertNoLeak(t, "stderr", stderr)
+}
+
 func TestE2EScanEmpty(t *testing.T) {
 	t.Parallel()
 	root := t.TempDir()

@@ -356,9 +356,11 @@ func TestReadConfig(t *testing.T) {
 		}
 	})
 
-	t.Run("a file used as a directory is a read error", func(t *testing.T) {
+	t.Run("a file used as a directory is not found", func(t *testing.T) {
 		t.Parallel()
 		// A file used as a directory: the OS error is ENOTDIR, not ENOENT.
+		// No config file can exist below a regular file, so readConfigFile
+		// treats it as missing, and ReadConfig reports "file not found".
 		file := filepath.Join(t.TempDir(), "file.json")
 		if err := os.WriteFile(file, []byte("{}"), 0o600); err != nil {
 			t.Fatal(err)
@@ -367,8 +369,36 @@ func TestReadConfig(t *testing.T) {
 		if len(res.Errors) != 1 {
 			t.Fatalf("ReadConfig() errors = %v, want exactly one", res.Errors)
 		}
-		if res.Errors[0].Reason != reasonCannotRead {
-			t.Errorf("reason = %q, want %q", res.Errors[0].Reason, reasonCannotRead)
+		if res.Errors[0].Reason != reasonNotFound {
+			t.Errorf("reason = %q, want %q", res.Errors[0].Reason, reasonNotFound)
+		}
+	})
+
+	t.Run("a named project file is not confined and stays trusted", func(t *testing.T) {
+		t.Parallel()
+		// The user named the file, so ReadConfig follows a symlink out of its
+		// directory (Discover refuses that for <WorkDir>/.mcp.json) and does
+		// not mark the servers or errors Untrusted.
+		target := filepath.Join(t.TempDir(), "real.json")
+		if err := os.WriteFile(target, []byte(`{"mcpServers":{"a":{"command":"x"},"b":{"type":"bogus"}}}`), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		link := filepath.Join(t.TempDir(), ".mcp.json")
+		if err := os.Symlink(target, link); err != nil {
+			t.Skipf("symlink: %v", err)
+		}
+		res := ReadConfig(t.Context(), link)
+		if len(res.Servers) != 1 || res.Servers[0].Name != "a" {
+			t.Fatalf("ReadConfig() servers = %v, want [a]", serverNames(res.Servers))
+		}
+		if res.Servers[0].Untrusted {
+			t.Error("server Untrusted = true, want false")
+		}
+		if len(res.Errors) != 1 {
+			t.Fatalf("ReadConfig() errors = %v, want exactly one", res.Errors)
+		}
+		if res.Errors[0].Untrusted {
+			t.Error("FileError Untrusted = true, want false")
 		}
 	})
 

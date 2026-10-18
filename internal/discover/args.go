@@ -66,9 +66,10 @@ func NewArgs(args []string) Args {
 // zero Args. A change to the result does not change a.
 //
 // Call Values only where the args are used: in internal/inspect, to run the
-// exact configured command (NFR-04), and in internal/rules, for config
-// rules. Never pass the result to fmt, a logger, an error or an encoder; use
-// String or print a itself instead.
+// exact configured command (NFR-04), in internal/rules, for config rules,
+// and in internal/report only as the input of RedactArgs (see the package
+// doc, Secrets). Never pass the result to fmt, a logger, an error or an
+// encoder; use String or print a itself instead.
 func (a Args) Values() []string {
 	return slices.Clone(a.raw())
 }

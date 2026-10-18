@@ -55,7 +55,8 @@ const cutMarker = "\u2026"
 //	SCOPE         "global", or "project:" and the project path
 //	TRANSPORT     stdio, http or sse
 //	SOURCE        the config file that declared the server
-//	COMMAND/URL   the command line for stdio, the redacted URL for http and sse
+//	COMMAND/URL   the redacted command line for stdio (see [Command]), the
+//	              redacted URL for http and sse
 //
 // Every cell goes through [Escape]. Config files are untrusted, so a cell can
 // hold terminal escape sequences, bidi characters or invalid UTF-8. A cell
@@ -71,8 +72,11 @@ const cutMarker = "\u2026"
 // not pad it, so it cannot amplify, and it is never cut. So no argument is
 // hidden from a security review.
 //
-// WriteServers never reads Env or Headers values. It does not call Reveal on
-// any value. The URL cell uses URL.String, which removes credentials.
+// WriteServers never prints a value as written from Args, Env, Headers or
+// URL. It never reads Env or Headers values and never calls Reveal. The
+// COMMAND/URL cell shows the command and the args through the
+// discover.RedactArgs allowlist (see [Command]), and the URL through
+// URL.String, which removes credentials.
 //
 // The table has no colour. The full coloured report comes in milestone M6.
 //
@@ -166,17 +170,26 @@ func commandCell(s discover.Server) string {
 	return Command(s.Command, s.Args)
 }
 
-// Command formats a command and its arguments for one table cell.
+// Command formats a command and its arguments for one table cell. It never
+// shows an argument as written: the command and the args go through
+// [discover.RedactArgs] together, as one command line. RedactArgs is an
+// allowlist that fails closed, so every part with a shape that is not known
+// to be safe shows as [discover.Mask]. The command goes through it too:
+// Server.Command is plain text from an untrusted config, and the allowlist
+// also stops a token in the command path. Because the command is the first
+// part, a command that looks like a secret flag also masks the next part.
 //
-// Each part is escaped with [Escape]. A part that is empty or holds a space is
-// also wrapped in double quotes (strconv.Quote), so the reader can still see
-// where one argument ends and the next one starts. Parts are joined with one
-// space. Nothing is cut: Command is used for the last column, which is never
-// cut.
-func Command(command string, args []string) string {
-	parts := make([]string, 0, 1+len(args))
-	parts = append(parts, command)
-	parts = append(parts, args...)
+// Each redacted part is escaped with [Escape]. A part that is empty or holds
+// a space is also wrapped in double quotes (strconv.Quote), so the reader can
+// still see where one argument ends and the next one starts. Parts are joined
+// with one space. Nothing is cut: Command is used for the last column, which
+// is never cut.
+func Command(command string, args discover.Args) string {
+	// Values gives the args as written. They go straight into RedactArgs and
+	// nowhere else, so only the redacted form reaches the cell. Args.String
+	// is not enough here: it joins the parts with a space, so an empty part
+	// would not show.
+	parts := discover.RedactArgs(append([]string{command}, args.Values()...))
 
 	for i, p := range parts {
 		escaped := Escape(p)
