@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"runtime"
+	"slices"
 	"strings"
 	"testing"
 
@@ -84,7 +85,10 @@ func reveal(m SecretMap) map[string]string {
 
 // fixtureDir returns the absolute path of testdata/discover/<parts...> in the
 // repository. Tests run in internal/discover, so the repository root is ../..
-// It fails the test if the directory does not exist.
+// The fixtures live in the root testdata/ and not in internal/discover/testdata,
+// because the project layout (see CLAUDE.md) keeps all fixtures there: the
+// fixture MCP servers and the e2e tests use the same directory. It fails the
+// test if the directory does not exist.
 func fixtureDir(t testing.TB, parts ...string) string {
 	t.Helper()
 	rel := filepath.Join(append([]string{"..", "..", "testdata", "discover"}, parts...)...)
@@ -400,9 +404,9 @@ func runJSONFixtureCases(t *testing.T, files jsonFixtureFiles, read jsonReader, 
 			checkErrorsUntrusted(t, project.Errors, true)
 
 			// No result may hold a canary, in any form.
-			for _, r := range []Result{global, project} {
-				assertNoLeakServers(t, r.Servers)
-				assertNoLeakErrors(t, r.Errors)
+			for _, res := range []Result{global, project} {
+				assertNoLeakServers(t, res.Servers)
+				assertNoLeakErrors(t, res.Errors)
 			}
 		})
 	}
@@ -523,7 +527,7 @@ func TestHelpers(t *testing.T) {
 	t.Run("viewsOf and serverNames keep order", func(t *testing.T) {
 		t.Parallel()
 		ss := []Server{{Name: "b"}, {Name: "a"}}
-		if got := serverNames(ss); !reflect.DeepEqual(got, []string{"b", "a"}) {
+		if got := serverNames(ss); !slices.Equal(got, []string{"b", "a"}) {
 			t.Errorf("serverNames() = %v, want [b a]", got)
 		}
 		views := viewsOf(ss)
@@ -554,7 +558,7 @@ func TestHelpers(t *testing.T) {
 			URL:     NewURL("https://u:" + discovertest.CanaryURL + "@example.com/mcp"),
 		}}
 		assertNoLeakServers(t, servers)
-		assertNoLeakErrors(t, []*FileError{{Path: "/p", Server: "api", Reason: reasonBadEntry}})
+		assertNoLeakErrors(t, []*FileError{newFileError("/p", reasonBadEntry).forServer("api")})
 	})
 
 	t.Run("copyFixture returns existing directories", func(t *testing.T) {
@@ -570,9 +574,11 @@ func TestHelpers(t *testing.T) {
 	t.Run("checkFileErrors fails on each mismatch", func(t *testing.T) {
 		t.Parallel()
 		const path = "/home/u/.claude.json"
-		// good returns an error that matches want exactly.
+		// good returns an error that matches want exactly. Offset 4 of data is
+		// line 2, column 3.
+		data := []byte("{\n  x")
 		good := func() *FileError {
-			return &FileError{Path: path, ProjectPath: "/a", Server: "s", Reason: reasonBadEntry, Line: 2, Col: 3}
+			return newFileError(path, reasonBadEntry).inProject("/a").forServer("s").atOffset(data, 4)
 		}
 		want := []errWant{{ProjectPath: "/a", Server: "s", Reason: reasonBadEntry, Line: 2}}
 
@@ -589,7 +595,7 @@ func TestHelpers(t *testing.T) {
 				name: "Err set when HasErr",
 				path: path,
 				got: func() []*FileError {
-					return []*FileError{{Path: path, Reason: reasonCanceled, Err: context.Canceled}}
+					return []*FileError{canceledError(path, context.Canceled)}
 				},
 				want: []errWant{{Reason: reasonCanceled, HasErr: true}},
 			},

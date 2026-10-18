@@ -14,18 +14,18 @@ import (
 )
 
 // assertDiscoverNoErrors fails the test if r has any error.
-func assertDiscoverNoErrors(t testing.TB, r Result) {
+func assertDiscoverNoErrors(t testing.TB, res Result) {
 	t.Helper()
-	for _, e := range r.Errors {
+	for _, e := range res.Errors {
 		t.Errorf("unexpected error: %v", e)
 	}
 }
 
 // assertDiscoverNames fails the test if the server names in r are not exactly want.
-func assertDiscoverNames(t testing.TB, r Result, want []string) {
+func assertDiscoverNames(t testing.TB, res Result, want []string) {
 	t.Helper()
 	// slices.Equal treats a nil slice and an empty slice as equal.
-	if got := serverNames(r.Servers); !slices.Equal(got, want) {
+	if got := serverNames(res.Servers); !slices.Equal(got, want) {
 		t.Errorf("server names = %v, want %v", got, want)
 	}
 }
@@ -36,13 +36,13 @@ func TestDiscoverFull(t *testing.T) {
 	t.Parallel()
 	home, work := copyFixture(t, "all", "full")
 
-	r := Discover(t.Context(), Options{Home: home, WorkDir: work})
+	res := Discover(t.Context(), Options{Home: home, WorkDir: work})
 
-	assertDiscoverNoErrors(t, r)
+	assertDiscoverNoErrors(t, res)
 	wantNames := []string{"cc-global", "cc-alpha", "cc-project", "cursor-global", "cursor-project", "codex-global"}
-	assertDiscoverNames(t, r, wantNames)
-	if len(r.Servers) != len(wantNames) {
-		t.Fatalf("got %d servers, want %d", len(r.Servers), len(wantNames))
+	assertDiscoverNames(t, res, wantNames)
+	if len(res.Servers) != len(wantNames) {
+		t.Fatalf("got %d servers, want %d", len(res.Servers), len(wantNames))
 	}
 
 	want := map[string]serverView{
@@ -82,7 +82,7 @@ func TestDiscoverFull(t *testing.T) {
 			Transport: TransportStdio, Command: "npx", Args: []string{"-y", "codex-global"},
 		},
 	}
-	for _, s := range r.Servers {
+	for _, s := range res.Servers {
 		w, ok := want[s.Name]
 		if !ok {
 			t.Errorf("unexpected server %q", s.Name)
@@ -100,13 +100,13 @@ func TestDiscoverPartialFailure(t *testing.T) {
 	t.Parallel()
 	home, work := copyFixture(t, "all", "partial-failure")
 
-	r := Discover(t.Context(), Options{Home: home, WorkDir: work})
+	res := Discover(t.Context(), Options{Home: home, WorkDir: work})
 
-	assertDiscoverNames(t, r, []string{"cc-project", "cursor-global", "cursor-project", "codex-global"})
-	if len(r.Errors) != 1 {
-		t.Fatalf("got %d errors, want 1: %v", len(r.Errors), r.Errors)
+	assertDiscoverNames(t, res, []string{"cc-project", "cursor-global", "cursor-project", "codex-global"})
+	if len(res.Errors) != 1 {
+		t.Fatalf("got %d errors, want 1: %v", len(res.Errors), res.Errors)
 	}
-	e := r.Errors[0]
+	e := res.Errors[0]
 	if want := filepath.Join(home, ".claude.json"); e.Path != want {
 		t.Errorf("error Path = %q, want %q", e.Path, want)
 	}
@@ -141,13 +141,13 @@ func TestDiscoverSameHomeAndWork(t *testing.T) {
 			home, _ := copyFixture(t, "all", "same-home-and-work")
 			workDir := tt.workDir(home)
 
-			r := Discover(t.Context(), Options{Home: home, WorkDir: workDir})
+			res := Discover(t.Context(), Options{Home: home, WorkDir: workDir})
 
-			assertDiscoverNoErrors(t, r)
+			assertDiscoverNoErrors(t, res)
 			// only-once is in ~/.cursor/mcp.json. Without the dedupe it would
 			// appear twice, the second time as a project server.
-			assertDiscoverNames(t, r, []string{"cc-once", "mcp-json", "only-once"})
-			for _, s := range r.Servers {
+			assertDiscoverNames(t, res, []string{"cc-once", "mcp-json", "only-once"})
+			for _, s := range res.Servers {
 				switch s.Name {
 				case "mcp-json":
 					if s.Scope != ScopeProject {
@@ -170,10 +170,10 @@ func TestDiscoverSameHomeAndWork(t *testing.T) {
 func TestDiscoverEmptyOptions(t *testing.T) {
 	t.Parallel()
 
-	r := Discover(t.Context(), Options{})
+	res := Discover(t.Context(), Options{})
 
-	if len(r.Servers) != 0 || len(r.Errors) != 0 {
-		t.Errorf("Discover(Options{}) = %d servers, %d errors, want an empty Result", len(r.Servers), len(r.Errors))
+	if len(res.Servers) != 0 || len(res.Errors) != 0 {
+		t.Errorf("Discover(Options{}) = %d servers, %d errors, want an empty Result", len(res.Servers), len(res.Errors))
 	}
 }
 
@@ -192,15 +192,15 @@ func TestDiscoverIgnoresRealHome(t *testing.T) {
 	t.Setenv("USERPROFILE", dir)
 	t.Chdir(dir)
 
-	r := Discover(t.Context(), Options{})
+	res := Discover(t.Context(), Options{})
 
-	if len(r.Servers) != 0 || len(r.Errors) != 0 {
-		t.Errorf("Discover(Options{}) = servers %v, errors %v, want an empty Result", serverNames(r.Servers), r.Errors)
+	if len(res.Servers) != 0 || len(res.Errors) != 0 {
+		t.Errorf("Discover(Options{}) = servers %v, errors %v, want an empty Result", serverNames(res.Servers), res.Errors)
 	}
 
 	// Sanity check: the trap works. An explicit Home finds the servers.
-	r = Discover(t.Context(), Options{Home: dir})
-	if len(r.Servers) == 0 {
+	res = Discover(t.Context(), Options{Home: dir})
+	if len(res.Servers) == 0 {
 		t.Error("Discover(Options{Home: dir}) found nothing, so the trap files are not valid")
 	}
 }
@@ -213,9 +213,9 @@ func TestDiscoverUntrusted(t *testing.T) {
 	t.Parallel()
 	home, work := copyFixture(t, "all", "full")
 
-	r := Discover(t.Context(), Options{Home: home, WorkDir: work})
+	res := Discover(t.Context(), Options{Home: home, WorkDir: work})
 
-	assertDiscoverNoErrors(t, r)
+	assertDiscoverNoErrors(t, res)
 	want := map[string]bool{
 		"cc-global":      false,
 		"cc-alpha":       false,
@@ -224,7 +224,7 @@ func TestDiscoverUntrusted(t *testing.T) {
 		"cursor-project": true,
 		"codex-global":   false,
 	}
-	for _, s := range r.Servers {
+	for _, s := range res.Servers {
 		w, ok := want[s.Name]
 		if !ok {
 			t.Errorf("unexpected server %q", s.Name)
@@ -294,12 +294,12 @@ func TestDiscoverUntrustedErrors(t *testing.T) {
 			home, work := t.TempDir(), t.TempDir()
 			path := tt.setup(t, home, work)
 
-			r := Discover(t.Context(), Options{Home: home, WorkDir: work})
+			res := Discover(t.Context(), Options{Home: home, WorkDir: work})
 
-			if len(r.Errors) != 1 {
-				t.Fatalf("got %d errors, want 1: %v", len(r.Errors), r.Errors)
+			if len(res.Errors) != 1 {
+				t.Fatalf("got %d errors, want 1: %v", len(res.Errors), res.Errors)
 			}
-			e := r.Errors[0]
+			e := res.Errors[0]
 			if e.Path != path || e.Reason != tt.wantReason {
 				t.Errorf("error = {Path: %q, Reason: %q}, want {Path: %q, Reason: %q}", e.Path, e.Reason, path, tt.wantReason)
 			}
@@ -316,11 +316,11 @@ func TestDiscoverCleansWorkDir(t *testing.T) {
 	t.Parallel()
 	_, work := copyFixture(t, "all", "full")
 
-	r := Discover(t.Context(), Options{WorkDir: work + "/./"})
+	res := Discover(t.Context(), Options{WorkDir: work + "/./"})
 
-	assertDiscoverNoErrors(t, r)
+	assertDiscoverNoErrors(t, res)
 	found := false
-	for _, s := range r.Servers {
+	for _, s := range res.Servers {
 		if s.Name != "cc-project" {
 			continue
 		}
@@ -330,7 +330,7 @@ func TestDiscoverCleansWorkDir(t *testing.T) {
 		}
 	}
 	if !found {
-		t.Errorf("cc-project not found in %v", serverNames(r.Servers))
+		t.Errorf("cc-project not found in %v", serverNames(res.Servers))
 	}
 }
 
@@ -359,10 +359,10 @@ func TestDiscoverOnlyHomeOrWorkDir(t *testing.T) {
 			t.Parallel()
 			home, work := copyFixture(t, "all", "full")
 
-			r := Discover(t.Context(), tt.opts(home, work))
+			res := Discover(t.Context(), tt.opts(home, work))
 
-			assertDiscoverNoErrors(t, r)
-			assertDiscoverNames(t, r, tt.want)
+			assertDiscoverNoErrors(t, res)
+			assertDiscoverNames(t, res, tt.want)
 		})
 	}
 }
@@ -372,10 +372,10 @@ func TestDiscoverOnlyHomeOrWorkDir(t *testing.T) {
 func TestDiscoverMissingEverything(t *testing.T) {
 	t.Parallel()
 
-	r := Discover(t.Context(), Options{Home: t.TempDir(), WorkDir: t.TempDir()})
+	res := Discover(t.Context(), Options{Home: t.TempDir(), WorkDir: t.TempDir()})
 
-	if len(r.Servers) != 0 || len(r.Errors) != 0 {
-		t.Errorf("Discover() = servers %v, errors %v, want an empty Result", serverNames(r.Servers), r.Errors)
+	if len(res.Servers) != 0 || len(res.Errors) != 0 {
+		t.Errorf("Discover() = servers %v, errors %v, want an empty Result", serverNames(res.Servers), res.Errors)
 	}
 }
 
@@ -388,15 +388,15 @@ func TestDiscoverCanceled(t *testing.T) {
 	ctx, cancel := context.WithCancel(t.Context())
 	cancel()
 
-	r := Discover(ctx, Options{Home: home, WorkDir: work})
+	res := Discover(ctx, Options{Home: home, WorkDir: work})
 
-	if len(r.Servers) != 0 {
-		t.Errorf("got servers %v, want none", serverNames(r.Servers))
+	if len(res.Servers) != 0 {
+		t.Errorf("got servers %v, want none", serverNames(res.Servers))
 	}
-	if len(r.Errors) != 1 {
-		t.Fatalf("got %d errors, want 1: %v", len(r.Errors), r.Errors)
+	if len(res.Errors) != 1 {
+		t.Fatalf("got %d errors, want 1: %v", len(res.Errors), res.Errors)
 	}
-	e := r.Errors[0]
+	e := res.Errors[0]
 	if e.Reason != reasonCanceled {
 		t.Errorf("Reason = %q, want %q", e.Reason, reasonCanceled)
 	}
@@ -420,15 +420,15 @@ func TestDiscoverCanceledProjectStep(t *testing.T) {
 	cancel()
 
 	// Without Home, the first step is <WorkDir>/.mcp.json.
-	r := Discover(ctx, Options{WorkDir: work})
+	res := Discover(ctx, Options{WorkDir: work})
 
-	if len(r.Servers) != 0 {
-		t.Errorf("got servers %v, want none", serverNames(r.Servers))
+	if len(res.Servers) != 0 {
+		t.Errorf("got servers %v, want none", serverNames(res.Servers))
 	}
-	if len(r.Errors) != 1 {
-		t.Fatalf("got %d errors, want 1: %v", len(r.Errors), r.Errors)
+	if len(res.Errors) != 1 {
+		t.Fatalf("got %d errors, want 1: %v", len(res.Errors), res.Errors)
 	}
-	e := r.Errors[0]
+	e := res.Errors[0]
 	if want := filepath.Join(work, ".mcp.json"); e.Path != want || e.Reason != reasonCanceled {
 		t.Errorf("error = {Path: %q, Reason: %q}, want {Path: %q, Reason: %q}", e.Path, e.Reason, want, reasonCanceled)
 	}
@@ -463,16 +463,16 @@ func TestRunStepsCanceledBeforeStep(t *testing.T) {
 				}},
 			}
 
-			r := runSteps(ctx, steps)
+			res := runSteps(ctx, steps)
 
 			if secondRan {
 				t.Error("the second step ran after the cancel")
 			}
-			assertDiscoverNames(t, r, []string{"done"})
-			if len(r.Errors) != 1 {
-				t.Fatalf("got %d errors, want 1: %v", len(r.Errors), r.Errors)
+			assertDiscoverNames(t, res, []string{"done"})
+			if len(res.Errors) != 1 {
+				t.Fatalf("got %d errors, want 1: %v", len(res.Errors), res.Errors)
 			}
-			e := r.Errors[0]
+			e := res.Errors[0]
 			if e.Path != "second" || e.Reason != reasonCanceled {
 				t.Errorf("error = %v, want the canceled error of the second step", e)
 			}
@@ -496,7 +496,7 @@ func TestRunStepsCanceledDuringRead(t *testing.T) {
 			cancel()
 			return Result{
 				Servers: []Server{{Name: "partial"}},
-				Errors:  []*FileError{{Path: "first", Reason: reasonCanceled, Err: ctx.Err()}},
+				Errors:  []*FileError{canceledError("first", ctx.Err())},
 			}
 		}},
 		{path: "second", read: func(context.Context) Result {
@@ -505,18 +505,18 @@ func TestRunStepsCanceledDuringRead(t *testing.T) {
 		}},
 	}
 
-	r := runSteps(ctx, steps)
+	res := runSteps(ctx, steps)
 
 	if secondRan {
 		t.Error("the second step ran after the cancel")
 	}
-	if len(r.Errors) != 1 {
-		t.Fatalf("got %d errors, want 1: %v", len(r.Errors), r.Errors)
+	if len(res.Errors) != 1 {
+		t.Fatalf("got %d errors, want 1: %v", len(res.Errors), res.Errors)
 	}
-	if r.Errors[0].Path != "first" || r.Errors[0].Reason != reasonCanceled {
-		t.Errorf("error = %v, want the canceled error of the first step", r.Errors[0])
+	if res.Errors[0].Path != "first" || res.Errors[0].Reason != reasonCanceled {
+		t.Errorf("error = %v, want the canceled error of the first step", res.Errors[0])
 	}
-	assertDiscoverNames(t, r, []string{"partial"})
+	assertDiscoverNames(t, res, []string{"partial"})
 }
 
 // TestDiscoverNoLeak checks that no secret value from the config files reaches
@@ -562,26 +562,26 @@ API_KEY = %q
   "url": "https://user:%s@example.com/mcp"
 }}}`, discovertest.CanaryEnv, discovertest.CanaryHeader, discovertest.CanaryURL)))
 
-	r := Discover(t.Context(), Options{Home: home, WorkDir: work})
+	res := Discover(t.Context(), Options{Home: home, WorkDir: work})
 
 	// The test is only useful if the valid files were read and the bad file failed.
-	assertDiscoverNames(t, r, []string{"stdio-one", "cursor-http", "cursor-project-http", "codex-http", "codex-stdio"})
-	if len(r.Errors) != 1 {
-		t.Fatalf("got %d errors, want 1: %v", len(r.Errors), r.Errors)
+	assertDiscoverNames(t, res, []string{"stdio-one", "cursor-http", "cursor-project-http", "codex-http", "codex-stdio"})
+	if len(res.Errors) != 1 {
+		t.Fatalf("got %d errors, want 1: %v", len(res.Errors), res.Errors)
 	}
-	if r.Errors[0].Path != filepath.Join(work, ".mcp.json") {
-		t.Errorf("error Path = %q, want the malformed file", r.Errors[0].Path)
+	if res.Errors[0].Path != filepath.Join(work, ".mcp.json") {
+		t.Errorf("error Path = %q, want the malformed file", res.Errors[0].Path)
 	}
 	// A server holds the real secret values, so check one is really there.
-	if got := r.Servers[0].Env["API_KEY"].Reveal(); got != discovertest.CanaryEnv {
+	if got := res.Servers[0].Env["API_KEY"].Reveal(); got != discovertest.CanaryEnv {
 		t.Fatalf("env value was not read, got %q", got)
 	}
 
-	assertNoLeakServers(t, r.Servers)
-	assertNoLeakErrors(t, r.Errors)
-	discovertest.AssertNoLeak(t, "Result %+v", fmt.Sprintf("%+v", r))
-	discovertest.AssertNoLeak(t, "Result %v", fmt.Sprintf("%v", r))
-	data, err := json.Marshal(r)
+	assertNoLeakServers(t, res.Servers)
+	assertNoLeakErrors(t, res.Errors)
+	discovertest.AssertNoLeak(t, "Result %+v", fmt.Sprintf("%+v", res))
+	discovertest.AssertNoLeak(t, "Result %v", fmt.Sprintf("%v", res))
+	data, err := json.Marshal(res)
 	if err != nil {
 		t.Fatalf("json.Marshal(Result): %v", err)
 	}

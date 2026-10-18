@@ -16,6 +16,9 @@ import (
 	"github.com/Ducarv/mcpmoat/internal/discover/discovertest"
 )
 
+// TestFileErrorError checks the Error() format. The FileError values are
+// literals on purpose: some cases (Line without Col, Col without Line, a
+// negative Line) cannot be built with newFileError and its methods.
 func TestFileErrorError(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
@@ -142,6 +145,8 @@ func TestFileErrorError(t *testing.T) {
 
 func TestFileErrorErrorNoRawControlBytes(t *testing.T) {
 	t.Parallel()
+	// A literal on purpose: the test checks the Error() format of a hand-made
+	// value with Line and Col set directly.
 	fe := &FileError{
 		Path:   "/tmp/\x1b]0;pwned\x07",
 		Server: "a\r\nb\u202e",
@@ -163,11 +168,7 @@ func TestFileErrorErrorPathError(t *testing.T) {
 	t.Run("PathError path is not printed raw", func(t *testing.T) {
 		t.Parallel()
 		const path = "/tmp/\x1b[31mred"
-		fe := &FileError{
-			Path:   path,
-			Reason: reasonCannotRead,
-			Err:    &fs.PathError{Op: "open", Path: path, Err: fs.ErrPermission},
-		}
+		fe := readError(path, reasonCannotRead, &fs.PathError{Op: "open", Path: path, Err: fs.ErrPermission})
 		got := fe.Error()
 		if n := strings.Count(got, strconv.Quote(path)); n != 1 {
 			t.Errorf("Error() = %q holds the quoted path %d times, want 1", got, n)
@@ -187,7 +188,7 @@ func TestFileErrorErrorPathError(t *testing.T) {
 
 	t.Run("context error keeps its text", func(t *testing.T) {
 		t.Parallel()
-		fe := &FileError{Path: "/p", Reason: reasonCanceled, Err: context.Canceled}
+		fe := canceledError("/p", context.Canceled)
 		want := "/p: canceled: context canceled"
 		if got := fe.Error(); got != want {
 			t.Errorf("Error() = %q, want %q", got, want)
@@ -443,6 +444,9 @@ func TestDisplayPath(t *testing.T) {
 
 // TestFileErrorLongNames checks that a FileError message stays short when the
 // server name and the project key are very long.
+//
+// The FileError values are literals on purpose: the test checks the Error()
+// format of hand-made values.
 func TestFileErrorLongNames(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
@@ -492,7 +496,7 @@ func TestFileErrorUnwrap(t *testing.T) {
 
 	t.Run("errors.As finds a wrapped FileError", func(t *testing.T) {
 		t.Parallel()
-		fe := &FileError{Path: "/p", Reason: reasonInvalidJSON}
+		fe := newFileError("/p", reasonInvalidJSON)
 		wrapped := fmt.Errorf("x: %w", fe)
 		var got *FileError
 		if !errors.As(wrapped, &got) {
@@ -505,11 +509,7 @@ func TestFileErrorUnwrap(t *testing.T) {
 
 	t.Run("errors.Is reaches fs.ErrNotExist through a PathError", func(t *testing.T) {
 		t.Parallel()
-		fe := &FileError{
-			Path:   "/p",
-			Reason: reasonCannotRead,
-			Err:    &fs.PathError{Op: "open", Path: "/p", Err: fs.ErrNotExist},
-		}
+		fe := readError("/p", reasonCannotRead, &fs.PathError{Op: "open", Path: "/p", Err: fs.ErrNotExist})
 		if !errors.Is(fe, fs.ErrNotExist) {
 			t.Error("errors.Is(fe, fs.ErrNotExist) = false, want true")
 		}
@@ -524,7 +524,7 @@ func TestFileErrorUnwrap(t *testing.T) {
 
 	t.Run("errors.Is reaches context.Canceled", func(t *testing.T) {
 		t.Parallel()
-		fe := &FileError{Path: "/p", Reason: reasonCanceled, Err: context.Canceled}
+		fe := canceledError("/p", context.Canceled)
 		if !errors.Is(fe, context.Canceled) {
 			t.Error("errors.Is(fe, context.Canceled) = false, want true")
 		}
@@ -535,7 +535,7 @@ func TestFileErrorUnwrap(t *testing.T) {
 
 	t.Run("nil Err unwraps to nil", func(t *testing.T) {
 		t.Parallel()
-		fe := &FileError{Path: "/p", Reason: reasonInvalidJSON}
+		fe := newFileError("/p", reasonInvalidJSON)
 		if got := fe.Unwrap(); got != nil {
 			t.Errorf("Unwrap() = %v, want nil", got)
 		}
@@ -597,6 +597,8 @@ func TestNewFileError(t *testing.T) {
 	data := []byte("{\n  \"a\": 1\n}")
 
 	fe := newFileError(path, reasonBadEntry)
+	// The want values are literals on purpose: they are the expected output of
+	// the constructor under test.
 	want := FileError{Path: path, Reason: reasonBadEntry}
 	if *fe != want {
 		t.Fatalf("newFileError = %+v, want %+v", *fe, want)
@@ -622,6 +624,8 @@ func TestLineColNilData(t *testing.T) {
 
 func TestFileErrorHoldsNoCanary(t *testing.T) {
 	t.Parallel()
+	// Literals on purpose: the test checks the Error() text of hand-made
+	// values.
 	fe := &FileError{
 		Path:   "/home/dev/.claude.json",
 		Server: "github",
