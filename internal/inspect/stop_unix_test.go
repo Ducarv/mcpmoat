@@ -12,9 +12,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/Ducarv/mcpmoat/internal/discover"
 	"github.com/Ducarv/mcpmoat/internal/inspect"
-	"github.com/Ducarv/mcpmoat/internal/inspect/inspecttest"
 )
 
 // stopGrace is inspect.stopGrace. The SDK command transport waits this long
@@ -27,12 +25,12 @@ const stopGrace = inspect.StopGrace
 // test fails in that case too; the poll only measures the lag for the report.
 const reapLag = 100 * time.Millisecond
 
-// TestInspectStopsChild checks the stop guarantee of Inspect (issue #25): when
+// TestSDKInspectStopsChild checks the stop guarantee of Inspect (issue #25): when
 // Inspect returns, on success and on every error, the child process was
 // stopped and reaped. kill(pid, 0) answers for a running process and also for
 // a zombie (a process that exited but was not reaped by Wait), so ESRCH right
 // after Inspect returns proves that the process is gone and reaped.
-func TestInspectStopsChild(t *testing.T) {
+func TestSDKInspectStopsChild(t *testing.T) {
 	t.Parallel()
 
 	// cancelOnStart is the sentinel timeout for the cases that cancel ctx
@@ -61,12 +59,7 @@ func TestInspectStopsChild(t *testing.T) {
 			t.Parallel()
 
 			pidfile := filepath.Join(t.TempDir(), "pid")
-			server := discover.Server{
-				Name:      "benign-" + tt.mode,
-				Transport: discover.TransportStdio,
-				Command:   inspecttest.Fixture(t, "benign"),
-				Args:      discover.NewArgs([]string{"-mode", tt.mode, "-pidfile", pidfile}),
-			}
+			server := sdkBenign(t, "-mode", tt.mode, "-pidfile", pidfile)
 
 			var (
 				ctx      context.Context
@@ -152,12 +145,7 @@ func TestSDKInspectKillsProcessGroup(t *testing.T) {
 			t.Parallel()
 
 			spawnfile := filepath.Join(t.TempDir(), "spawn")
-			server := discover.Server{
-				Name:      "benign-spawn",
-				Transport: discover.TransportStdio,
-				Command:   inspecttest.Fixture(t, "benign"),
-				Args:      discover.NewArgs([]string{"-mode", tt.mode, "-spawn", spawnfile}),
-			}
+			server := sdkBenign(t, "-mode", tt.mode, "-spawn", spawnfile)
 			ctx, cancel := context.WithTimeout(t.Context(), tt.timeout)
 			defer cancel()
 
@@ -184,6 +172,37 @@ func TestSDKInspectKillsProcessGroup(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestSDKInspectFloodWithoutReads checks that Inspect returns soon after a
+// successful list, also when the server floods ping requests and then never
+// reads its stdin. The replies of the client fill the pipe and block.
+// Inspect must stop the child, which closes its stdin, before it closes the
+// MCP session, because the close of the session waits for those writes.
+// With the wrong order, Inspect returns only when ctx ends.
+func TestSDKInspectFloodWithoutReads(t *testing.T) {
+	t.Parallel()
+
+	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
+	defer cancel()
+
+	start := time.Now()
+	res, err := sdkNew(t, inspect.Options{}).Inspect(ctx, sdkBenign(t, "-mode", "flood-list"))
+	elapsed := time.Since(start)
+
+	if err != nil {
+		t.Fatalf("Inspect() error = %v, want nil", err)
+	}
+	if res.Tools == nil || len(res.Tools) != 0 {
+		t.Errorf("Inspect() Tools = %#v, want an empty, non-nil slice", res.Tools)
+	}
+	// The child ignores the close of its stdin, so the stop takes one
+	// stopGrace until SIGTERM. The bound leaves room for a slow machine,
+	// but stays far below the 30s of ctx.
+	if limit := 3*stopGrace + 5*time.Second; elapsed > limit {
+		t.Errorf("Inspect took %v, want at most %v", elapsed, limit)
+	}
+	t.Logf("Inspect returned after %v", elapsed)
 }
 
 // errAny is a marker for test cases that accept any non-nil error.

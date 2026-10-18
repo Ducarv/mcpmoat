@@ -82,8 +82,10 @@ func allowedServerMethod(method string) bool {
 // in its queue. The SDK must also write each "method not found" reply to the
 // stdin of the server. If the server floods requests and stops reading its
 // stdin, those writes block, and each blocked request keeps its goroutine and
-// its params. Only the ctx deadline (and the stop of the child) bounds this.
-// A per-server timeout (issue #28) or a custom transport is the real fix.
+// its params, until Inspect stops the child (which closes its stdin) or ctx
+// ends. Inspect stops the child before it closes the session, because the
+// close of the session waits for those writes. A per-server timeout (issue
+// #28) or a custom transport is the real fix.
 func refuseServerRequests(next mcp.MethodHandler) mcp.MethodHandler {
 	return func(ctx context.Context, method string, req mcp.Request) (mcp.Result, error) {
 		if allowedServerMethod(method) {

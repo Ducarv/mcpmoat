@@ -30,8 +30,8 @@ import (
 // passed through exactly as configured.
 const envDumpArg = "-mcpmoat-test-envdump"
 
-// TestMain of the test binary of package inspect is in sdk_test.go (package
-// inspect_test). Go allows one TestMain for the internal and the external
+// TestMain of the test binary of package inspect is in main_external_test.go
+// (package inspect_test). Go allows one TestMain for the internal and the external
 // tests together, and only the external package can import inspecttest. It
 // implements the "re-exec the test binary" pattern with envDumpArg and
 // writeEnvDump (exported to it in export_test.go).

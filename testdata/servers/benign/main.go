@@ -20,6 +20,8 @@
 //	    crash     exit with code 3 before the MCP handshake
 //	    hang-init never read stdin and never reply
 //	    hang-list complete the handshake, then block every tools/list request
+//	    flood-list complete the handshake; on tools/list, send 20000 ping
+//	              requests and an empty list, then never read stdin again
 //	-pidfile path
 //	    if set, write the process ID and a newline to this file at start
 //	-envfile path
@@ -37,6 +39,7 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"errors"
@@ -69,7 +72,15 @@ const (
 	modeCrash    = "crash"
 	modeHangInit = "hang-init"
 	modeHangList = "hang-list"
+	modeFlood    = "flood-list"
 )
+
+// modes lists the valid values of -mode, for the flag help and the check.
+var modes = []string{modeOK, modeCrash, modeHangInit, modeHangList, modeFlood}
+
+// floodPings is the number of ping requests of the flood-list mode. Their
+// replies fill the stdin pipe of this program, which it no longer reads.
+const floodPings = 20000
 
 // The input schemas are fixed JSON text, so the bytes on the wire stay the
 // same between builds. A schema that the SDK infers from Go types could change
@@ -92,7 +103,7 @@ func main() {
 func run(args []string, stderr io.Writer) int {
 	fs := flag.NewFlagSet("benign", flag.ContinueOnError)
 	fs.SetOutput(stderr)
-	mode := fs.String("mode", modeOK, modeOK+" | "+modeCrash+" | "+modeHangInit+" | "+modeHangList)
+	mode := fs.String("mode", modeOK, strings.Join(modes, " | "))
 	pidFile := fs.String("pidfile", "", "write the process ID to this file")
 	envFile := fs.String("envfile", "", "write the sorted environment to this file")
 	spawnFile := fs.String("spawn", "", "start a process that never exits and write its process ID to this file")
@@ -104,9 +115,7 @@ func run(args []string, stderr io.Writer) int {
 		return exitUsage
 	}
 
-	switch *mode {
-	case modeOK, modeCrash, modeHangInit, modeHangList:
-	default:
+	if !slices.Contains(modes, *mode) {
 		fmt.Fprintf(stderr, "benign: unknown mode %q\n", *mode)
 		return exitUsage
 	}
@@ -129,9 +138,9 @@ func run(args []string, stderr io.Writer) int {
 		// Do not use select{} here. With no other goroutines, the Go runtime
 		// sees that nothing can ever wake up, reports a deadlock and exits.
 		// A sleeping goroutine does not count as a deadlock.
-		for {
-			time.Sleep(time.Hour)
-		}
+		sleepForever()
+	case modeFlood:
+		return runFlood(os.Stdin, os.Stdout, stderr)
 	}
 
 	// The context ends on Ctrl+C or SIGTERM, so the server can stop cleanly.
@@ -152,6 +161,57 @@ func run(args []string, stderr io.Writer) int {
 	return exitOK
 }
 
+// sleepForever never returns. Do not use select{} here. With no other
+// goroutines, the Go runtime sees that nothing can ever wake up, reports a
+// deadlock and exits. A sleeping goroutine does not count as a deadlock.
+func sleepForever() {
+	for {
+		time.Sleep(time.Hour)
+	}
+}
+
+// runFlood is the flood-list mode. It speaks JSON-RPC by hand, without the
+// SDK, so it can stop reading stdin at a chosen point. It answers
+// initialize with the tools capability. On tools/list it sends floodPings
+// ping requests and then an empty tool list, and then it never reads stdin
+// again. A client that writes a reply to each ping then blocks on a full
+// pipe, until the client closes the pipe or stops this program.
+func runFlood(stdin io.Reader, stdout io.Writer, stderr io.Writer) int {
+	in := bufio.NewScanner(stdin)
+	in.Buffer(make([]byte, 0, 64<<10), 1<<20)
+	out := bufio.NewWriter(stdout)
+	for in.Scan() {
+		var msg struct {
+			ID     json.RawMessage `json:"id"`
+			Method string          `json:"method"`
+		}
+		if err := json.Unmarshal(in.Bytes(), &msg); err != nil || msg.ID == nil {
+			continue // a notification, or not JSON
+		}
+		switch msg.Method {
+		case "initialize":
+			fmt.Fprintf(out, `{"jsonrpc":"2.0","id":%s,"result":{"protocolVersion":"2025-06-18","capabilities":{"tools":{}},"serverInfo":{"name":"benign-flood","version":"1.0.0"}}}`+"\n", msg.ID)
+		case "tools/list":
+			for i := range floodPings {
+				fmt.Fprintf(out, `{"jsonrpc":"2.0","id":"ping-%d","method":"ping"}`+"\n", i)
+			}
+			fmt.Fprintf(out, `{"jsonrpc":"2.0","id":%s,"result":{"tools":[]}}`+"\n", msg.ID)
+			if err := out.Flush(); err != nil {
+				fmt.Fprintf(stderr, "benign: %v\n", err)
+				return exitServe
+			}
+			sleepForever()
+		default:
+			fmt.Fprintf(out, `{"jsonrpc":"2.0","id":%s,"error":{"code":-32601,"message":"method not found"}}`+"\n", msg.ID)
+		}
+		if err := out.Flush(); err != nil {
+			fmt.Fprintf(stderr, "benign: %v\n", err)
+			return exitServe
+		}
+	}
+	return exitOK
+}
+
 // spawnChild starts a copy of this program in mode hang-init and writes its
 // process ID to pidFile. The copy stays in the process group of this
 // program, and its stdin, stdout and stderr are os.DevNull, so it does not
@@ -165,8 +225,7 @@ func spawnChild(pidFile string) error {
 	if err := child.Start(); err != nil {
 		return fmt.Errorf("start child: %w", err)
 	}
-	pid := strconv.Itoa(child.Process.Pid) + "\n"
-	if err := os.WriteFile(pidFile, []byte(pid), 0o600); err != nil {
+	if err := writePID(pidFile, child.Process.Pid); err != nil {
 		return fmt.Errorf("write spawn file: %w", err)
 	}
 	return nil
@@ -176,8 +235,7 @@ func spawnChild(pidFile string) error {
 // environment to envFile. An empty path skips that file.
 func writeStartFiles(pidFile, envFile string) error {
 	if pidFile != "" {
-		pid := strconv.Itoa(os.Getpid()) + "\n"
-		if err := os.WriteFile(pidFile, []byte(pid), 0o600); err != nil {
+		if err := writePID(pidFile, os.Getpid()); err != nil {
 			return fmt.Errorf("write pidfile: %w", err)
 		}
 	}
@@ -320,4 +378,10 @@ func blockToolsList(next mcp.MethodHandler) mcp.MethodHandler {
 		}
 		return next(ctx, method, req)
 	}
+}
+
+// writePID writes pid and a newline to path. Tests read the newline as the
+// sign that the write is complete.
+func writePID(path string, pid int) error {
+	return os.WriteFile(path, []byte(strconv.Itoa(pid)+"\n"), 0o600)
 }

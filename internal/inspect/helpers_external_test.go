@@ -7,7 +7,9 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/Ducarv/mcpmoat/internal/discover"
 	"github.com/Ducarv/mcpmoat/internal/inspect"
+	"github.com/Ducarv/mcpmoat/internal/inspect/inspecttest"
 )
 
 // This file holds the test helpers that several external test files
@@ -36,4 +38,15 @@ func sdkReadPID(t *testing.T, path string) int {
 		t.Fatalf("pidfile holds %q, want a positive process ID", b)
 	}
 	return pid
+}
+
+// sdkBenign returns a stdio server that runs the benign fixture with args.
+func sdkBenign(t *testing.T, args ...string) discover.Server {
+	t.Helper()
+	return discover.Server{
+		Name:      "benign",
+		Transport: discover.TransportStdio,
+		Command:   inspecttest.Fixture(t, "benign"),
+		Args:      discover.NewArgs(args),
+	}
 }

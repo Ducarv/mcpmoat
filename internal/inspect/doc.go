@@ -154,8 +154,9 @@
 // short allowlist of notifications passes. The SDK still decodes the params
 // of a server request before mcpmoat refuses it, and it must write each reply
 // to the stdin of the server. A server that floods requests and stops reading
-// its stdin blocks those writes, so only the ctx deadline bounds the
-// goroutines and params that they hold (see issue #28).
+// its stdin blocks those writes. Only the stop of the child at the end of
+// Inspect, or the ctx deadline, bounds the goroutines and params that they
+// hold (see issue #28).
 //
 // Inspect lists a kind only when the server advertises its capability in the
 // handshake. The slice of a kind that the server does not advertise stays

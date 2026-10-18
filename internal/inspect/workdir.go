@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"runtime"
 )
 
 // noCleanup is the cleanup func that workDir returns when there is nothing
@@ -17,6 +16,9 @@ func noCleanup() {}
 //
 // The returned cleanup removes that directory. Call it after the process has
 // exited. cleanup is never nil, also on error. An error wraps [ErrStart].
+// cleanup drops the error of the removal: a process that left the process
+// group of the server can still use the directory, and then it stays
+// behind below the run root. It holds nothing of mcpmoat.
 func workDir(configDir string, runRoot func() (string, error)) (dir string, cleanup func(), err error) {
 	if filepath.IsAbs(configDir) {
 		return "", noCleanup, nil
@@ -86,9 +88,8 @@ func privateDir(dir string) (string, error) {
 	if !info.IsDir() {
 		return "", fmt.Errorf("%s is not a directory", resolved)
 	}
-	// Windows reports no Unix permission bits for a directory.
-	if perm := info.Mode().Perm(); runtime.GOOS != "windows" && perm&0o077 != 0 {
-		return "", fmt.Errorf("%s has mode %v, want no access for group and others", resolved, perm)
+	if err := checkPrivateMode(resolved, info); err != nil {
+		return "", err
 	}
 	return resolved, nil
 }

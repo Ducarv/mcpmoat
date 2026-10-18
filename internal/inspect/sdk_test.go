@@ -42,44 +42,6 @@ const (
 	sdkCommandMarker = "mcpmoat-cmd-marker-sdk-2Lp7Vy"
 )
 
-// TestMain is the only TestMain of the test binary of package inspect: the
-// internal tests (package inspect) and the external tests (package
-// inspect_test) are compiled into one binary, and only one TestMain is
-// allowed. It is here because only the external package can import
-// inspecttest.
-//
-// It implements the "re-exec the test binary" pattern of main_test.go. A
-// test starts the compiled test binary (os.Executable) as a child process
-// with EnvDumpArg as its first argument. The child sees the trigger here and
-// acts as a fixture instead of a test runner. The check must come before
-// m.Run, because the testing flag parser rejects the unknown flag. The dump
-// branch calls os.Exit so that no test runs in the child.
-//
-// After the tests, it removes the fixture builds of inspecttest.
-func TestMain(m *testing.M) {
-	if len(os.Args) >= 2 && os.Args[1] == inspect.EnvDumpArg {
-		if err := inspect.WriteEnvDump(os.Stdout); err != nil {
-			fmt.Fprintf(os.Stderr, "env dump: %v\n", err)
-			os.Exit(1)
-		}
-		os.Exit(0)
-	}
-	code := m.Run()
-	inspecttest.RemoveBuilds()
-	os.Exit(code)
-}
-
-// sdkBenign returns a stdio server that runs the benign fixture with args.
-func sdkBenign(t *testing.T, args ...string) discover.Server {
-	t.Helper()
-	return discover.Server{
-		Name:      "benign",
-		Transport: discover.TransportStdio,
-		Command:   inspecttest.Fixture(t, "benign"),
-		Args:      discover.NewArgs(args),
-	}
-}
-
 // sdkCtx returns a context that ends after timeout or when the test ends.
 func sdkCtx(t *testing.T, timeout time.Duration) context.Context {
 	t.Helper()
@@ -179,11 +141,7 @@ func TestSDKInspectBenign(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Inspect() error = %v, want nil", err)
 	}
-	want := inspecttest.BenignResult()
-	if want.ProtocolVersion != inspecttest.BenignProtocolVersion {
-		t.Fatalf("BenignResult().ProtocolVersion = %q, want %q", want.ProtocolVersion, inspecttest.BenignProtocolVersion)
-	}
-	sdkAssertResult(t, got, want)
+	sdkAssertResult(t, got, inspecttest.BenignResult())
 }
 
 // TestSDKInspectClientVersion checks that a custom ClientVersion does not
@@ -510,7 +468,6 @@ func sdkReadEnvFile(t *testing.T, path string) (vars map[string]string, raw stri
 func TestSDKInspectScrubbedEnv(t *testing.T) {
 	t.Parallel()
 
-	command := inspecttest.Fixture(t, "benign")
 	parent := []string{
 		"PATH=/usr/bin:/bin",
 		"HOME=/home/mcpmoat-test",
@@ -544,13 +501,8 @@ func TestSDKInspectScrubbedEnv(t *testing.T) {
 			t.Parallel()
 
 			envfile := filepath.Join(t.TempDir(), "env")
-			s := discover.Server{
-				Name:      "benign",
-				Transport: discover.TransportStdio,
-				Command:   command,
-				Args:      discover.NewArgs([]string{"-envfile", envfile}),
-				Env:       sdkSecretEnv(tt.env),
-			}
+			s := sdkBenign(t, "-envfile", envfile)
+			s.Env = sdkSecretEnv(tt.env)
 
 			inspector := inspect.NewForTest(inspect.Options{}, filepath.Join(t.TempDir(), "run"), parent)
 			got, err := inspector.Inspect(sdkCtx(t, sdkTimeout), s)
@@ -576,7 +528,7 @@ func TestSDKInspectScrubbedEnv(t *testing.T) {
 	}
 }
 
-// sdkServerDirs returns the names of the "mcpmoat-server-*" directories
+// sdkServerDirs returns the paths of the "mcpmoat-server-*" directories
 // in dir.
 func sdkServerDirs(t *testing.T, dir string) []string {
 	t.Helper()
@@ -595,18 +547,9 @@ func sdkServerDirs(t *testing.T, dir string) []string {
 func TestSDKInspectRemovesWorkDir(t *testing.T) {
 	t.Parallel()
 
-	command := inspecttest.Fixture(t, "benign")
 	root := filepath.Join(t.TempDir(), "run")
 	inspector := inspect.NewForTest(inspect.Options{}, root, nil)
-
-	stdio := func(args ...string) discover.Server {
-		return discover.Server{
-			Name:      "benign",
-			Transport: discover.TransportStdio,
-			Command:   command,
-			Args:      discover.NewArgs(args),
-		}
-	}
+	stdio := func(args ...string) discover.Server { return sdkBenign(t, args...) }
 
 	tests := []struct {
 		name    string
@@ -662,12 +605,7 @@ func TestSDKInspectRemovesWorkDir(t *testing.T) {
 		s := stdio("-pidfile", pidfile)
 
 		res, err := inspect.NewForTest(inspect.Options{}, filepath.Join(file, "run"), nil).Inspect(sdkCtx(t, sdkTimeout), s)
-		if !errors.Is(err, inspect.ErrStart) {
-			t.Errorf("Inspect() error = %v, want errors.Is inspect.ErrStart", err)
-		}
-		if !reflect.DeepEqual(res, inspect.Result{}) {
-			t.Errorf("Inspect() Result = %s, want the zero Result with an error", sdkJSON(res))
-		}
+		sdkAssertFailed(t, res, err, inspect.ErrStart)
 		sdkAssertNotExist(t, pidfile, "the server must not start without a working directory")
 		sdkAssertNoLeak(t, err, pidfile)
 	})

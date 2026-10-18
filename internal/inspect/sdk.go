@@ -25,9 +25,9 @@ const stopGrace = 2 * time.Second
 // Options.ClientVersion is empty.
 const defaultClientVersion = "dev"
 
-// errNoResult means that the SDK gave a nil result and a nil error for a
+// errNilResult means that the SDK gave a nil result and a nil error for a
 // list request. inspect treats it as a protocol error.
-var errNoResult = errors.New("no result")
+var errNilResult = errors.New("nil result")
 
 // SDKInspector is the [Inspector] that uses the official MCP Go SDK. It
 // supports stdio servers. For an http or sse server it returns
@@ -81,16 +81,24 @@ func New(opts Options) *SDKInspector {
 // then sends SIGTERM and SIGKILL if needed. When ctx ends, Inspect sends
 // SIGKILL to the process group of the child at once. After the stop it
 // sends SIGKILL to the process group once more, so the processes that the
-// child started and that stayed in its group stop too. A process that left
-// the group, or that the operating system cannot kill, is the exception.
+// child started and that stayed in its group stop too.
+//
+// The exceptions: a process that left the group; a process that the
+// operating system cannot kill (the SDK gives up one stopGrace after
+// SIGKILL, and then the child is not reaped); a work directory that a
+// process still uses, which then stays behind below the run root; and a
+// handshake that fails while the server floods requests and does not read
+// its stdin, which only ctx bounds (the SDK closes its session inside
+// Client.Connect then, before Inspect can stop the child).
 func (i *SDKInspector) Inspect(ctx context.Context, s discover.Server) (Result, error) {
 	if s.Untrusted && !i.opts.AllowUntrusted {
 		return Result{}, fmt.Errorf("%w: not started without the explicit opt-in", ErrUntrusted)
 	}
 	if s.Transport.IsRemote() {
 		// IsRemote is true only for the two known constants, so the text
-		// is "http" or "sse", not untrusted text.
-		return Result{}, fmt.Errorf("%w: %s (remote servers come with issue #26)", ErrUnsupportedTransport, s.Transport)
+		// is "http" or "sse", not untrusted text. Remote servers come with
+		// issue #26.
+		return Result{}, fmt.Errorf("%w: %s servers are not supported yet", ErrUnsupportedTransport, s.Transport)
 	}
 	if err := ctx.Err(); err != nil {
 		return Result{}, err
@@ -98,9 +106,12 @@ func (i *SDKInspector) Inspect(ctx context.Context, s discover.Server) (Result, 
 
 	// The defers below stop things in this order:
 	//
-	//  1. cs.Close: ends the MCP session.
-	//  2. transport.close: stops the process with the steps on stopGrace,
+	//  1. transport.stop: stops the process with the steps on stopGrace,
 	//     reaps it, and kills what is left of its process group.
+	//  2. cs.Close: ends the MCP session. It must come after the stop:
+	//     cs.Close waits until the SDK has written its replies to the
+	//     requests of the server, and a server that does not read its
+	//     stdin blocks those writes until its stdin is closed.
 	//  3. cleanup: removes the work directory, now that the process no
 	//     longer uses it.
 	//  4. cancel: ends ctx. The kill on ctx (see closingTransport) is
@@ -139,7 +150,9 @@ func (i *SDKInspector) Inspect(ctx context.Context, s discover.Server) (Result, 
 		inner: &mcp.CommandTransport{Command: cmd, TerminateDuration: stopGrace},
 		cmd:   cmd,
 	}
-	defer transport.close()
+	// This defer covers the paths where Client.Connect fails. On success,
+	// the defer below stops the process first; stop is idempotent.
+	defer transport.stop()
 
 	client, watch := i.newWatchedClient(maxRawBytes)
 	cs, err := client.Connect(ctx, transport, nil)
@@ -149,10 +162,12 @@ func (i *SDKInspector) Inspect(ctx context.Context, s discover.Server) (Result, 
 		}
 		return Result{}, sessionError(ctx, "handshake", err)
 	}
-	// Close is idempotent in the SDK, so a second close by transport.close
-	// does no harm. The error of Close is the exit status of the server; it
-	// does not change the result, so Inspect drops it.
-	defer func() { _ = cs.Close() }()
+	// Stop the process before cs.Close, see the stop order above. The error
+	// of Close does not change the result, so Inspect drops it.
+	defer func() {
+		transport.stop()
+		_ = cs.Close()
+	}()
 
 	return inspectWatched(ctx, cs, watch)
 }
@@ -260,7 +275,7 @@ func inspectSession(ctx context.Context, cs *mcp.ClientSession) (Result, error) 
 func inspectSessionBudget(ctx context.Context, cs *mcp.ClientSession, budget *byteBudget) (Result, error) {
 	initRes := cs.InitializeResult()
 	if initRes == nil {
-		return Result{}, sessionError(ctx, "handshake", errNoResult)
+		return Result{}, sessionError(ctx, "handshake", errNilResult)
 	}
 
 	res := Result{
@@ -295,7 +310,7 @@ func inspectSessionBudget(ctx context.Context, cs *mcp.ClientSession, budget *by
 				return nil, "", err
 			}
 			if r == nil {
-				return nil, "", errNoResult
+				return nil, "", errNilResult
 			}
 			items, err := toTools(r.Tools)
 			if err != nil {
@@ -316,7 +331,7 @@ func inspectSessionBudget(ctx context.Context, cs *mcp.ClientSession, budget *by
 				return nil, "", err
 			}
 			if r == nil {
-				return nil, "", errNoResult
+				return nil, "", errNilResult
 			}
 			return toPrompts(r.Prompts), r.NextCursor, nil
 		})
@@ -333,7 +348,7 @@ func inspectSessionBudget(ctx context.Context, cs *mcp.ClientSession, budget *by
 				return nil, "", err
 			}
 			if r == nil {
-				return nil, "", errNoResult
+				return nil, "", errNilResult
 			}
 			return toResources(r.Resources), r.NextCursor, nil
 		})
@@ -385,7 +400,7 @@ func sessionError(ctx context.Context, op string, err error) error {
 //     failure ([ErrProtocol]). Both come back from Client.Connect.
 //   - Client.Connect does not close the connection on every error path. With
 //     the connection kept here, Inspect can always close it, and so always
-//     stop and reap the process.
+//     stop and reap the process (see stop).
 //   - stdioCommand uses exec.Command, not exec.CommandContext, so os/exec
 //     does not kill the child when ctx ends. Connect arranges that kill: when
 //     ctx ends, the process group of the child gets SIGKILL at once.
@@ -417,6 +432,9 @@ type closingTransport struct {
 
 	// stopKill stops the kill on ctx that Connect arranges; nil before.
 	stopKill func() bool
+
+	// stopped is true after the first call to stop.
+	stopped bool
 }
 
 // Connect starts the server process through the inner transport. When ctx
@@ -436,25 +454,32 @@ func (t *closingTransport) Connect(ctx context.Context) (mcp.Connection, error) 
 	return conn, nil
 }
 
-// close closes the connection, if Connect made one. It does nothing if the
-// process never started.
+// stop stops the process, if Connect started one. It does nothing if the
+// process never started, and a second call does nothing.
 //
-// For the command transport, this is how the process stops, with the steps
-// on stopGrace. The close of the SDK connection runs only once (sync.Once);
-// a concurrent or earlier close by the SDK is fine, because a second call
-// waits for the first one to finish. So when the close returns, the process
-// has exited and is reaped. The error is the exit status of the server,
-// which does not matter here, so close drops it.
+// For the command transport, the close of the SDK connection is how the
+// process stops, with the steps on stopGrace: it closes the stdin of the
+// server, which also ends a write of the SDK that blocks on it, and then
+// calls cmd.Wait. That close runs only once (sync.Once); a concurrent or
+// earlier close by the SDK is fine, because a second call waits for the
+// first one to finish. In the normal case the process has then exited and
+// is reaped. The SDK gives up one stopGrace after SIGKILL ("unresponsive
+// subprocess"), or earlier when it cannot close stdin; then the process is
+// not reaped. The error does not change the result, so stop drops it.
 //
-// Then close sends SIGKILL to the process group once more, for the
-// processes that the child started and that stayed in its group. The child
-// is reaped at this point, so its PID is free again. But the group ID stays
-// in use while any process of the group lives, so the signal reaches only
-// that group. If the group is empty, the signal finds no process.
-func (t *closingTransport) close() {
-	if t.conn == nil {
+// Then stop sends SIGKILL to the process group once more, for the processes
+// that the child started and that stayed in its group. The child is reaped
+// at this point, so its PID is free again. While any process of the group
+// lives, the group ID stays in use and the signal reaches only that group.
+// The residual: when the group is empty, the kernel can give the PID to a
+// new process, and if that process leads a new group, the signal reaches
+// it. The window is the time between the reap and this call. The same holds
+// for the kill on ctx, when ctx ends in that window.
+func (t *closingTransport) stop() {
+	if t.conn == nil || t.stopped {
 		return
 	}
+	t.stopped = true
 	_ = t.conn.Close()
 	t.stopKill()
 	killGroup(t.pid)
