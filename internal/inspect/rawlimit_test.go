@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -223,6 +224,50 @@ func TestRawLimitHandshake(t *testing.T) {
 	ce := stdioFailure(stdioServer("/bin/true"), err, nil, lim.exceeded())
 	if ce.Kind != KindTooLarge || !errors.Is(ce, errRawTooLarge) {
 		t.Errorf("stdioFailure() = %v (kind %q), want KindTooLarge wrapping errRawTooLarge", ce, ce.Kind)
+	}
+}
+
+// TestStdioFailureJSONShape checks stdioFailure for a JSON shape violation:
+// KindTooLarge with the same fixed reason as for a remote server, the
+// sentinel as the cause, and a context error of the chain kept in the cause.
+// The shape violation also wins over the raw size limit.
+func TestStdioFailureJSONShape(t *testing.T) {
+	t.Parallel()
+	closed := errors.New("connection closed: server text {},{},{}")
+	tests := []struct {
+		name     string
+		err      error
+		tooLarge bool
+		wantCtx  error // context error that must stay in the chain, or nil
+	}{
+		{name: "shape violation", err: fmt.Errorf("%w: %w", errJSONTooComplex, closed)},
+		{name: "shape violation over the raw limit too", err: fmt.Errorf("%w: %w", errJSONTooComplex, closed), tooLarge: true},
+		{name: "shape violation and an ended ctx", err: fmt.Errorf("%w: %w: %w", context.DeadlineExceeded, errJSONTooComplex, closed), wantCtx: context.DeadlineExceeded},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			ce := stdioFailure(stdioServer("/bin/true"), tt.err, nil, tt.tooLarge)
+			if ce.Kind != KindTooLarge {
+				t.Errorf("Kind = %q, want %q", ce.Kind, KindTooLarge)
+			}
+			if ce.Reason != jsonTooComplexReason {
+				t.Errorf("Reason = %q, want %q", ce.Reason, jsonTooComplexReason)
+			}
+			if !errors.Is(ce, errJSONTooComplex) {
+				t.Errorf("errors.Is(ce, errJSONTooComplex) = false: %v", ce)
+			}
+			if errors.Is(ce, closed) {
+				t.Errorf("the cause holds the wrapped detail: %v", errors.Unwrap(ce))
+			}
+			if tt.wantCtx == nil {
+				if cause := errors.Unwrap(ce); cause != errJSONTooComplex { //nolint:errorlint // identity check: the cause must be the sentinel itself
+					t.Errorf("errors.Unwrap(ce) = %v, want errJSONTooComplex", cause)
+				}
+			} else if !errors.Is(ce, tt.wantCtx) {
+				t.Errorf("errors.Is(ce, %v) = false, want the context error kept", tt.wantCtx)
+			}
+		})
 	}
 }
 

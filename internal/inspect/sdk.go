@@ -254,26 +254,29 @@ func envSecrets(env discover.SecretMap) []string {
 // stdioFailure turns err, from the MCP session of a stdio server, into a
 // *ConnectError. classify gives KindTimeout for a context error and
 // KindProtocol for the rest, with the secrets removed and the text cut.
-// Then:
 //
-//   - When errJSONTooComplex is in the chain (the server sent a JSON message
-//     over a shape limit), the error becomes KindTooLarge with the fixed
-//     text of errJSONTooComplex as the reason. This also replaces a
-//     KindTooLarge reason that classify gives, so that the reason never
-//     holds the wrapped detail.
-//   - Else, when the server went over the raw size limit (tooLarge, or
-//     errRawTooLarge in the chain), a KindProtocol error becomes
-//     KindTooLarge.
+// When errJSONTooComplex is in the chain (the server sent a JSON message over
+// a shape limit), classify already gives KindTooLarge with the fixed reason
+// of blockedKinds, the same as for a remote server. As for a remote server,
+// this wins over a context error in the chain. stdioFailure then sets the
+// cause to the sentinel, plus the context error if there is one, so that the
+// cause holds no wrapped detail and errors.Is still finds the context error.
 //
-// A KindTimeout error stays as it is: an ended ctx wins (see fail in
-// inspectStdio).
+// Else, when the server went over the raw size limit (tooLarge, or
+// errRawTooLarge in the chain), a KindProtocol error becomes KindTooLarge. A
+// KindTimeout error stays as it is: an ended ctx wins.
+//
+// fail in inspectStdio adds errJSONTooComplex only when ctx has not ended, so
+// for a shape violation that only the process knows about, an ended ctx wins
+// too.
 func stdioFailure(s discover.Server, err error, secrets []string, tooLarge bool) *ConnectError {
 	ce := classify(err, s, nil, secrets)
 	switch {
-	case (ce.Kind == KindProtocol || ce.Kind == KindTooLarge) && errors.Is(err, errJSONTooComplex):
-		ce.Kind = KindTooLarge
-		ce.Reason = errJSONTooComplex.Error()
+	case errors.Is(err, errJSONTooComplex):
 		ce.err = errJSONTooComplex
+		if ctxErr := contextErr(err); ctxErr != nil {
+			ce.err = fmt.Errorf("%w: %w", errJSONTooComplex, ctxErr)
+		}
 	case ce.Kind == KindProtocol && (tooLarge || errors.Is(err, errRawTooLarge)):
 		ce.Kind = KindTooLarge
 		ce.Reason = errRawTooLarge.Error()

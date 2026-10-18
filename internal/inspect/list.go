@@ -381,8 +381,7 @@ func trueOrNil(b bool) *bool {
 	if !b {
 		return nil
 	}
-	v := true
-	return &v
+	return new(true)
 }
 
 // copyBool returns a new pointer to the value of p, or nil when p is nil. The
@@ -391,8 +390,7 @@ func copyBool(p *bool) *bool {
 	if p == nil {
 		return nil
 	}
-	v := *p
-	return &v
+	return new(*p)
 }
 
 // listPrompts reads all pages of prompts/list and converts the prompts.

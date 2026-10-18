@@ -237,6 +237,28 @@ func TestPinnedDialerDialContext(t *testing.T) {
 			wantLookups: []string{"ip", "ip"},
 		},
 		{
+			// localhost counts as loopback by its name (no cleartext
+			// warning), so only its loopback addresses are dialled.
+			name: "localhost dials loopback addresses only",
+			answers: []pdAnswer{
+				{addrs: pdAddrs(t, "192.0.2.7", "127.0.0.1")},
+			},
+			steps: []pdStep{
+				{address: "LocalHost:8080", wantDials: []string{"127.0.0.1:8080"}, wantConn: "127.0.0.1:8080"},
+			},
+			wantLookups: []string{"ip"},
+		},
+		{
+			name: "localhost without a loopback address is not found",
+			answers: []pdAnswer{
+				{addrs: pdAddrs(t, "192.0.2.7", "2001:db8::7")},
+			},
+			steps: []pdStep{
+				{address: "localhost:8080", wantNotFound: true},
+			},
+			wantLookups: []string{"ip"},
+		},
+		{
 			name: "IPv4 literal skips the lookup",
 			steps: []pdStep{
 				{address: "127.0.0.1:8080", wantDials: []string{"127.0.0.1:8080"}, wantConn: "127.0.0.1:8080"},

@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"net/netip"
 	"net/url"
+	"reflect"
 	"slices"
 	"strings"
 	"sync"
@@ -99,11 +100,17 @@ func wnServer(rawURL string, headers map[string]string) discover.Server {
 }
 
 // wnEqual reports whether got and want are the same warnings. A nil and an
-// empty HeaderKeys count as equal.
+// empty HeaderKeys count as equal. It compares whole values, so a new field
+// of Warning is compared too.
 func wnEqual(got, want []Warning) bool {
+	norm := func(w Warning) Warning {
+		if len(w.HeaderKeys) == 0 {
+			w.HeaderKeys = nil
+		}
+		return w
+	}
 	return slices.EqualFunc(got, want, func(a, b Warning) bool {
-		return a.Kind == b.Kind && a.URLUserInfo == b.URLUserInfo && a.URLSecrets == b.URLSecrets &&
-			slices.Equal(a.HeaderKeys, b.HeaderKeys)
+		return reflect.DeepEqual(norm(a), norm(b))
 	})
 }
 

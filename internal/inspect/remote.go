@@ -81,11 +81,12 @@ type RemoteOptions struct {
 // as a Basic Authorization header instead, unless the config sets an
 // Authorization header.
 //
-// If Remote sends config headers or URL user info over plain http:// to a
-// host that is not loopback, it still connects, but it adds a warning of kind
-// WarnCleartextSecrets: to Result.Warnings on success, and to
-// ConnectError.Warnings when the inspection fails after the connect started.
-// A warning holds keys only, never values.
+// If Remote sends config headers, URL user info or secrets in the URL query
+// or path over plain http:// to a host that is not loopback, it still
+// connects, but it adds a warning of kind WarnCleartextSecrets: to
+// Result.Warnings on success, and to ConnectError.Warnings when the
+// inspection fails after the connect started. A warning holds keys only,
+// never values.
 //
 // If ctx has no deadline, Remote adds a 10 second one. Closing the session
 // sends a DELETE request (streamable HTTP) that the SDK bounds to 5 seconds,
@@ -112,11 +113,6 @@ func Remote(ctx context.Context, srv discover.Server, opts RemoteOptions) (Resul
 	if reason != "" {
 		return Result{}, configError(srv, reason)
 	}
-	// warnings tell the user about secrets that go over plain http:// to a
-	// host that is not loopback (issue #98). They hold keys only. Remote
-	// returns them on success and with every error after a request could
-	// have gone out (see fail), because by then the secrets were sent.
-	warnings := cleartextWarnings(srv, u)
 	// RedactURL masks the whole URL when it cannot show it safely, for
 	// example when an unescaped "/", "?" or "#" in a credential ends the
 	// authority early, so that part of the token becomes the host. Remote
@@ -149,6 +145,14 @@ func Remote(ctx context.Context, srv discover.Server, opts RemoteOptions) (Resul
 		}
 		return Result{}, configError(srv, "invalid HTTP client settings")
 	}
+
+	// warnings tell the user about secrets that go over plain http:// to a
+	// host that is not loopback (issue #98). They hold keys only. They are
+	// computed after newHTTPClient accepted the headers, as sentHeaders
+	// expects. Remote returns them on success and with every error after a
+	// request could have gone out (see fail), because by then the secrets
+	// were sent.
+	warnings := cleartextWarnings(srv, u)
 
 	// Always derive a context that this function can cancel, so that the
 	// SDK work that uses ctx stops when Remote returns.
@@ -194,15 +198,16 @@ func Remote(ctx context.Context, srv discover.Server, opts RemoteOptions) (Resul
 	// deferred cancel has not run yet, so ctx.Err is set only by the deadline
 	// or by the caller.
 	//
-	// The *url.Error is stripped before the join: classify replaces an error
-	// that holds one with its inner error, and that would drop ctxErr.
+	// The *url.Error is stripped before the join (joinContextErr): classify
+	// replaces an error that holds one with its inner error, and that would
+	// drop ctxErr.
 	//
 	// fail also attaches warnings: the requests before the failure already
 	// carried the secrets over plain HTTP. Every return after Connect starts
 	// goes through fail, so no failure path loses the warnings.
 	fail := func(err error) (Result, error) {
 		if ctxErr := ctx.Err(); ctxErr != nil && !errors.Is(err, ctxErr) {
-			err = fmt.Errorf("%w: %w", ctxErr, stripURLError(err))
+			err = joinContextErr(ctxErr, err)
 		}
 		ce := classify(err, srv, ev, secrets)
 		ce.Warnings = warnings
@@ -263,6 +268,21 @@ func callRecords(ev *httpEvents) mcp.Middleware {
 			return res, nil
 		}
 	}
+}
+
+// joinContextErr returns err with ctxErr first in its chain, for fail in
+// Remote. It strips the *url.Error of err (see fail). That also drops the
+// *recordedError above it, which links err to the record of its MCP call, so
+// joinContextErr puts the link back. classify then reads the record of the
+// call that failed, not of the call that finished last (see
+// httpEvents.stateFor).
+func joinContextErr(ctxErr, err error) error {
+	joined := fmt.Errorf("%w: %w", ctxErr, stripURLError(err))
+	var re *recordedError
+	if errors.As(err, &re) {
+		return &recordedError{err: joined, rec: re.rec}
+	}
+	return joined
 }
 
 // splitUserinfo returns u without its user info and fragment, and the user

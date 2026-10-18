@@ -12,11 +12,6 @@ import (
 	"github.com/Ducarv/mcpmoat/internal/inspect"
 )
 
-// shapeReason is the fixed text of errJSONTooComplex (jsonshape.go). The
-// sentinel is not exported, so this external test cannot use errors.Is on
-// it. It checks the fixed reason and the unwrapped cause instead.
-const shapeReason = "server sent JSON that is too deeply nested, has too many values or has a too long string"
-
 // TestSDKInspectHugeSchema checks that the stdio inspector refuses a server
 // whose tools/list reply is small JSON text with very many values
 // (issue #101).
@@ -63,14 +58,15 @@ func TestSDKInspectHugeSchema(t *testing.T) {
 		t.Errorf("ConnectError.Server = %q, want %q", ce.Server, "huge")
 	}
 	// The reason must name the shape limit, not the raw size limit or a
-	// generic "connection closed".
-	if ce.Reason != shapeReason {
-		t.Errorf("ConnectError.Reason = %q, want %q", ce.Reason, shapeReason)
+	// generic "connection closed". It is the same reason as for a remote
+	// server.
+	if ce.Reason != inspect.JSONTooComplexReason {
+		t.Errorf("ConnectError.Reason = %q, want %q", ce.Reason, inspect.JSONTooComplexReason)
 	}
-	// The cause is the sentinel itself (stdioFailure sets it), so its text
-	// is the same fixed text.
-	if cause := errors.Unwrap(ce); cause == nil || cause.Error() != shapeReason {
-		t.Errorf("errors.Unwrap(ConnectError) = %v, want the shape sentinel %q", cause, shapeReason)
+	// The cause is the sentinel itself (stdioFailure sets it), so it holds
+	// no wrapped detail.
+	if cause := errors.Unwrap(ce); cause != inspect.ErrJSONTooComplex { //nolint:errorlint // identity check: the cause must be the sentinel itself
+		t.Errorf("errors.Unwrap(ConnectError) = %v, want the shape sentinel %v", cause, inspect.ErrJSONTooComplex)
 	}
 	// An ended ctx would win over the shape error (KindTimeout), so these
 	// must not be in the chain.

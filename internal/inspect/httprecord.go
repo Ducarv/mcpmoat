@@ -111,19 +111,18 @@ func recorderFrom(ctx context.Context) *requestRecorder {
 // implements transportEvents for classify.
 //
 // The record of each MCP call travels on the context of its requests (see
-// withRecorder). The embedded requestRecorder is the fallback record: it gets
-// the requests that carry no record of their own. These are the legacy SSE
+// withRecorder). The fallback field is the fallback record: it gets the
+// requests that carry no record of their own. These are the legacy SSE
 // GET stream (the SDK opens it with the context of Client.Connect, before any
 // call), the DELETE that closes a streamable session, and requests from a
-// direct caller such as a test. Because the record is embedded, its methods
-// (lastStatus, blockedErr and the record methods) are methods of httpEvents
-// too, and they read or write the fallback record.
+// direct caller such as a test.
 //
 // It is safe for concurrent use. Use it through a pointer only: it holds a
 // mutex, which must not be copied.
 type httpEvents struct {
-	// requestRecorder is the fallback record (see the type doc).
-	requestRecorder
+	// fallback is the record for the requests of no MCP call (see the type
+	// doc).
+	fallback requestRecorder
 
 	// sessionUp is true after the server answered the MCP handshake
 	// (markHandshake) or Remote connected the session (markConnected).
@@ -152,9 +151,8 @@ type httpEvents struct {
 	connectBlocked atomic.Pointer[requestRecorder]
 }
 
-// Compile-time check: *httpEvents must implement transportEvents. The blank
-// identifier _ throws the value away, so this line costs nothing at run time,
-// but the build fails if the method set ever drifts.
+// Compile-time check: *httpEvents must implement transportEvents (see the
+// templateLister check in list.go for how such a check works).
 var _ transportEvents = (*httpEvents)(nil)
 
 // markHandshake records that the server answered initialize or
@@ -202,7 +200,7 @@ func (ev *httpEvents) recorderFor(req *http.Request) *requestRecorder {
 	if rec := recorderFrom(req.Context()); rec != nil {
 		return rec
 	}
-	return &ev.requestRecorder
+	return &ev.fallback
 }
 
 // stateFor implements transportEvents. It finds the call record for err: the
@@ -231,10 +229,8 @@ func (ev *httpEvents) stateFor(err error) (status int, blocked error) {
 	if call != nil {
 		blocked = call.blockedErr()
 	}
-	// ev.blockedErr and ev.lastStatus are the methods of the embedded
-	// requestRecorder, so they read the fallback record.
 	if blocked == nil {
-		blocked = ev.blockedErr()
+		blocked = ev.fallback.blockedErr()
 	}
 	if blocked == nil && !ev.connectDone.Load() {
 		if rec := ev.connectBlocked.Load(); rec != nil {
@@ -245,7 +241,7 @@ func (ev *httpEvents) stateFor(err error) (status int, blocked error) {
 	if call != nil {
 		status = call.lastStatus()
 	} else {
-		status = ev.lastStatus()
+		status = ev.fallback.lastStatus()
 	}
 	return status, blocked
 }

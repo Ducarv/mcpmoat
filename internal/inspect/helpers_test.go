@@ -165,3 +165,8 @@ func noopPrompt(context.Context, *mcp.GetPromptRequest) (*mcp.GetPromptResult, e
 func noopResource(context.Context, *mcp.ReadResourceRequest) (*mcp.ReadResourceResult, error) {
 	return &mcp.ReadResourceResult{}, nil
 }
+
+// sseMessageEvent returns data as one Server-Sent Events message event.
+func sseMessageEvent(data string) string {
+	return "event: message\ndata: " + data + "\n\n"
+}

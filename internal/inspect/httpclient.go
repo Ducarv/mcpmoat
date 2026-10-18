@@ -106,9 +106,9 @@ type httpClientConfig struct {
 // redirect to another origin fails with errCrossOriginRedirect. The client
 // caps each response body at cfg.MaxBody bytes and all bodies together at
 // cfg.MaxTotal bytes, and returns errBodyTooLarge beyond either cap. It also
-// checks the JSON shape of the 2xx bodies that the SDK decodes, and returns
-// an error that wraps errJSONTooComplex for a message that is too deep, has
-// too many values or has a too long string (see shapeBody).
+// checks the JSON shape of the bodies that the SDK decodes (see shapeFor),
+// and returns an error that wraps errJSONTooComplex for a message that is
+// too deep, has too many values or has a too long string (see shapeBody).
 //
 // The returned httpEvents holds what the HTTP layer saw: a record per MCP
 // call, a fallback record for the other requests, and whether the session
@@ -171,14 +171,28 @@ func newHTTPClient(cfg httpClientConfig) (*http.Client, *httpEvents, error) {
 		// The error is also stored in the record of the request, because the
 		// SDK may hide it. The redirected request keeps the context of the
 		// first one, so it finds the same record.
+		//
+		// A session DELETE is refused the same way, but not recorded. The SDK
+		// sends it on the context of the connection, so it would land in the
+		// fallback record. The SDK also closes the session when Connect
+		// fails, before Remote classifies that error, and a server could then
+		// answer the DELETE with a redirect to change the label of the real
+		// failure (see RoundTrip, which skips the DELETE status for the same
+		// reason).
 		CheckRedirect: func(req *http.Request, via []*http.Request) error {
-			if len(via) > maxRedirects {
-				return ev.recorderFor(req).recordBlocked(errTooManyRedirects)
+			var err error
+			switch {
+			case len(via) > maxRedirects:
+				err = errTooManyRedirects
+			case !sameOrigin(req.URL, endpoint):
+				err = errCrossOriginRedirect
+			default:
+				return nil
 			}
-			if !sameOrigin(req.URL, endpoint) {
-				return ev.recorderFor(req).recordBlocked(errCrossOriginRedirect)
+			if firstRequest(req).Method == http.MethodDelete {
+				return err
 			}
-			return nil
+			return ev.recorderFor(req).recordBlocked(err)
 		},
 	}
 	return client, ev, nil
@@ -339,7 +353,7 @@ func isReservedHeader(name string) bool {
 // headerTransport is an http.RoundTripper that adds the config headers to each
 // request, but only for requests to the configured origin. It also records the
 // status of each response, caps the size of the response bodies and checks
-// the JSON shape of the 2xx bodies that the SDK decodes.
+// the JSON shape of the bodies that the SDK decodes (see shapeFor).
 type headerTransport struct {
 	// endpoint is the configured endpoint URL. Only its origin gets requests.
 	endpoint *url.URL

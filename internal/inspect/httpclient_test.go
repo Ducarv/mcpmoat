@@ -530,8 +530,8 @@ func TestOriginPin(t *testing.T) {
 			if !body.closed.Load() {
 				t.Error("request body was not closed")
 			}
-			if rec.lastStatus() != 0 {
-				t.Errorf("recorder status = %d, want 0", rec.lastStatus())
+			if rec.fallback.lastStatus() != 0 {
+				t.Errorf("recorder status = %d, want 0", rec.fallback.lastStatus())
 			}
 			if strings.Contains(err.Error(), hcSecret) {
 				t.Errorf("error text %q holds the header value", err)
@@ -759,7 +759,7 @@ func TestRequestRecorderStatus(t *testing.T) {
 				resp := hcGet(t, client, "http://example.com/")
 				_ = resp.Body.Close()
 			}
-			if got := rec.lastStatus(); got != tt.want {
+			if got := rec.fallback.lastStatus(); got != tt.want {
 				t.Errorf("lastStatus() = %d, want %d", got, tt.want)
 			}
 		})
@@ -794,7 +794,7 @@ func TestRequestRecorderStatus(t *testing.T) {
 		}
 		resp := hcGet(t, client, "http://example.com/")
 		_ = resp.Body.Close()
-		if got := rec.lastStatus(); got != 404 {
+		if got := rec.fallback.lastStatus(); got != 404 {
 			t.Fatalf("lastStatus() = %d after the 404, want 404", got)
 		}
 
@@ -809,7 +809,7 @@ func TestRequestRecorderStatus(t *testing.T) {
 		if err == nil {
 			t.Fatal("client.Do() error = nil, want the transport error")
 		}
-		if got := rec.lastStatus(); got != 0 {
+		if got := rec.fallback.lastStatus(); got != 0 {
 			t.Errorf("lastStatus() = %d after a transport error, want 0", got)
 		}
 	})
@@ -860,7 +860,7 @@ func TestRequestRecorderStatus(t *testing.T) {
 				if (err != nil) != (tt.deleteErr != nil) {
 					t.Fatalf("client.Do(DELETE) error = %v, want error: %t", err, tt.deleteErr != nil)
 				}
-				if got := rec.lastStatus(); got != tt.want {
+				if got := rec.fallback.lastStatus(); got != tt.want {
 					t.Errorf("lastStatus() = %d after the DELETE, want %d", got, tt.want)
 				}
 			})
@@ -939,7 +939,7 @@ func TestRequestRecorderStatus(t *testing.T) {
 			if stub.count() != 1 {
 				t.Errorf("Location %q: base got %d requests, want 1", loc, stub.count())
 			}
-			if got := rec.lastStatus(); got != http.StatusFound {
+			if got := rec.fallback.lastStatus(); got != http.StatusFound {
 				t.Errorf("Location %q: lastStatus() = %d, want %d", loc, got, http.StatusFound)
 			}
 		}
@@ -965,7 +965,7 @@ func TestRequestRecorderStatus(t *testing.T) {
 		if stub.count() != 2 {
 			t.Fatalf("base got %d requests, want 2", stub.count())
 		}
-		if got := rec.lastStatus(); got != 0 {
+		if got := rec.fallback.lastStatus(); got != 0 {
 			t.Errorf("lastStatus() = %d, want 0: a followed redirect is not a failure", got)
 		}
 	})
@@ -1006,7 +1006,7 @@ func TestRequestRecorderStatus(t *testing.T) {
 			if !errors.Is(err, errCrossOriginRedirect) {
 				t.Fatalf("client.Do() error = %v, want errCrossOriginRedirect", err)
 			}
-			if got := rec.lastStatus(); got != tt.prev {
+			if got := rec.fallback.lastStatus(); got != tt.prev {
 				t.Errorf("lastStatus() = %d, want %d", got, tt.prev)
 			}
 			wantReqs := 1
@@ -1015,6 +1015,54 @@ func TestRequestRecorderStatus(t *testing.T) {
 			}
 			if stub.count() != wantReqs {
 				t.Errorf("base got %d requests, want %d: the redirect target must not be requested", stub.count(), wantReqs)
+			}
+		})
+	}
+}
+
+// TestCheckRedirectSessionDelete checks that a refused redirect of the
+// session DELETE fails, but leaves no blocked error in the fallback record.
+// The SDK closes the session when Connect fails, before Remote classifies the
+// error, so a recorded DELETE redirect would change the label of the real
+// failure. A refused GET redirect without a call record still goes to the
+// fallback record.
+func TestCheckRedirectSessionDelete(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name        string
+		method      string
+		location    string // Location of every redirect
+		wantErr     error
+		wantBlocked error // blocked error of the fallback record afterwards
+	}{
+		{name: "DELETE to another origin", method: http.MethodDelete, location: "http://evil.test/", wantErr: errCrossOriginRedirect},
+		{name: "DELETE redirect loop", method: http.MethodDelete, location: "http://example.com/again", wantErr: errTooManyRedirects},
+		{name: "GET to another origin", method: http.MethodGet, location: "http://evil.test/", wantErr: errCrossOriginRedirect, wantBlocked: errCrossOriginRedirect},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			// 307 keeps the method, so a redirected DELETE stays a DELETE.
+			stub := &hcStub{respond: func(req *http.Request) *http.Response {
+				return hcResponse(req, http.StatusTemporaryRedirect, "", http.Header{"Location": {tt.location}})
+			}}
+			client, ev, err := hcNew(hcURL(t, "http://example.com"), nil, stub, hcUA, 0)
+			if err != nil {
+				t.Fatal(err)
+			}
+			req, err := http.NewRequestWithContext(t.Context(), tt.method, "http://example.com/", nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			resp, err := client.Do(req)
+			if resp != nil {
+				_ = resp.Body.Close()
+			}
+			if !errors.Is(err, tt.wantErr) {
+				t.Fatalf("client.Do(%s) error = %v, want %v", tt.method, err, tt.wantErr)
+			}
+			if got := ev.fallback.blockedErr(); !errors.Is(got, tt.wantBlocked) || (got == nil) != (tt.wantBlocked == nil) {
+				t.Errorf("fallback blockedErr() = %v, want %v", got, tt.wantBlocked)
 			}
 		})
 	}
@@ -1075,16 +1123,16 @@ func TestRequestRecorderBlocked(t *testing.T) {
 	t.Run("markConnected sets connected and keeps the blocked error", func(t *testing.T) {
 		t.Parallel()
 		var ev httpEvents
-		ev.recordResponse(hcRecordResp(404, nil))
-		_ = ev.recordBlocked(errCrossOriginRedirect)
+		ev.fallback.recordResponse(hcRecordResp(404, nil))
+		_ = ev.fallback.recordBlocked(errCrossOriginRedirect)
 		ev.markConnected()
 		if !ev.connected() {
 			t.Error("connected() = false after markConnected, want true")
 		}
-		if got := ev.blockedErr(); !errors.Is(got, errCrossOriginRedirect) {
+		if got := ev.fallback.blockedErr(); !errors.Is(got, errCrossOriginRedirect) {
 			t.Errorf("blockedErr() = %v after markConnected, want errCrossOriginRedirect", got)
 		}
-		if got := ev.lastStatus(); got != 404 {
+		if got := ev.fallback.lastStatus(); got != 404 {
 			t.Errorf("lastStatus() = %d after markConnected, want 404", got)
 		}
 	})
@@ -1092,16 +1140,16 @@ func TestRequestRecorderBlocked(t *testing.T) {
 	t.Run("markHandshake sets connected and keeps the blocked error", func(t *testing.T) {
 		t.Parallel()
 		var ev httpEvents
-		ev.recordResponse(hcRecordResp(404, nil))
-		_ = ev.recordBlocked(errCrossOriginRedirect)
+		ev.fallback.recordResponse(hcRecordResp(404, nil))
+		_ = ev.fallback.recordBlocked(errCrossOriginRedirect)
 		ev.markHandshake()
 		if !ev.connected() {
 			t.Error("connected() = false after markHandshake, want true")
 		}
-		if got := ev.blockedErr(); got != errCrossOriginRedirect { //nolint:errorlint // identity check: markHandshake must keep the stored error unchanged
+		if got := ev.fallback.blockedErr(); got != errCrossOriginRedirect { //nolint:errorlint // identity check: markHandshake must keep the stored error unchanged
 			t.Errorf("blockedErr() = %v after markHandshake, want errCrossOriginRedirect", got)
 		}
-		if got := ev.lastStatus(); got != 404 {
+		if got := ev.fallback.lastStatus(); got != 404 {
 			t.Errorf("lastStatus() = %d after markHandshake, want 404", got)
 		}
 	})
@@ -1296,7 +1344,7 @@ func TestRequestRecorderBlocked(t *testing.T) {
 			}
 			tt.act(t, client)
 
-			got := rec.blockedErr()
+			got := rec.fallback.blockedErr()
 			if tt.want == nil {
 				if got != nil {
 					t.Fatalf("blockedErr() = %v, want nil", got)
@@ -1370,7 +1418,7 @@ func TestBudgetTotal(t *testing.T) {
 		if len(first) != 8 {
 			t.Errorf("first body: %d bytes, want 8", len(first))
 		}
-		if err := rec.blockedErr(); err != nil {
+		if err := rec.fallback.blockedErr(); err != nil {
 			t.Fatalf("blockedErr() = %v after the first body, want nil", err)
 		}
 		second := hcReadAll(t, client, origin+"/", errBodyTooLarge)
@@ -1378,8 +1426,8 @@ func TestBudgetTotal(t *testing.T) {
 		if len(second) != 4 {
 			t.Errorf("second body: %d bytes, want 4 (the rest of the budget)", len(second))
 		}
-		if !errors.Is(rec.blockedErr(), errBodyTooLarge) {
-			t.Errorf("blockedErr() = %v, want errBodyTooLarge", rec.blockedErr())
+		if !errors.Is(rec.fallback.blockedErr(), errBodyTooLarge) {
+			t.Errorf("blockedErr() = %v, want errBodyTooLarge", rec.fallback.blockedErr())
 		}
 		// The budget is spent: a third body fails at once, with no bytes.
 		third := hcReadAll(t, client, origin+"/", errBodyTooLarge)
@@ -1401,7 +1449,7 @@ func TestBudgetTotal(t *testing.T) {
 		}
 		hcReadAll(t, client, origin+"/", nil)
 		hcReadAll(t, client, origin+"/", nil)
-		if err := rec.blockedErr(); err != nil {
+		if err := rec.fallback.blockedErr(); err != nil {
 			t.Errorf("blockedErr() = %v, want nil: 14 of 14 bytes is within the budget", err)
 		}
 		// One more byte is over.
@@ -1454,8 +1502,8 @@ func TestBudgetTotal(t *testing.T) {
 		if got := total.Load(); got != 500 {
 			t.Errorf("bodies handed out %d bytes together, want exactly the budget of 500", got)
 		}
-		if !errors.Is(rec.blockedErr(), errBodyTooLarge) {
-			t.Errorf("blockedErr() = %v, want errBodyTooLarge", rec.blockedErr())
+		if !errors.Is(rec.fallback.blockedErr(), errBodyTooLarge) {
+			t.Errorf("blockedErr() = %v, want errBodyTooLarge", rec.fallback.blockedErr())
 		}
 	})
 
@@ -1561,7 +1609,7 @@ func TestBudgetHugeLimits(t *testing.T) {
 					t.Errorf("read %d: body = %q, want %q", i, got, "small body")
 				}
 			}
-			if err := rec.blockedErr(); err != nil {
+			if err := rec.fallback.blockedErr(); err != nil {
 				t.Errorf("blockedErr() = %v, want nil", err)
 			}
 		})
@@ -1582,8 +1630,8 @@ func TestBudgetHugeLimits(t *testing.T) {
 		if string(got) != "0123" {
 			t.Errorf("body = %q, want %q (the total budget)", got, "0123")
 		}
-		if !errors.Is(rec.blockedErr(), errBodyTooLarge) {
-			t.Errorf("blockedErr() = %v, want errBodyTooLarge", rec.blockedErr())
+		if !errors.Is(rec.fallback.blockedErr(), errBodyTooLarge) {
+			t.Errorf("blockedErr() = %v, want errBodyTooLarge", rec.fallback.blockedErr())
 		}
 	})
 }
@@ -1981,7 +2029,7 @@ func TestRedirects(t *testing.T) {
 							t.Errorf("request %d: User-Agent = %q, want %q", i, uas[i], hcUA)
 						}
 					}
-					if got := rec.lastStatus(); got != 0 {
+					if got := rec.fallback.lastStatus(); got != 0 {
 						t.Errorf("recorder status = %d, want 0: followed redirects are not failures", got)
 					}
 				})
@@ -2036,7 +2084,7 @@ func TestRedirects(t *testing.T) {
 				if len(keys) != 4 {
 					t.Errorf("server saw %d requests, want 4 (1 + 3 followed redirects; the 4th is refused)", len(keys))
 				}
-				if got := rec.lastStatus(); got != 0 {
+				if got := rec.fallback.lastStatus(); got != 0 {
 					t.Errorf("recorder status = %d, want 0", got)
 				}
 			})
@@ -2097,7 +2145,7 @@ func TestRedirects(t *testing.T) {
 				if len(keys) != 1 {
 					t.Errorf("configured origin got %d requests, want 1", len(keys))
 				}
-				if got := rec.lastStatus(); got != 0 {
+				if got := rec.fallback.lastStatus(); got != 0 {
 					t.Errorf("recorder status = %d, want 0", got)
 				}
 			})
@@ -2826,7 +2874,7 @@ func TestHeaderTransportPerRequestRecords(t *testing.T) {
 		if got := recOK.lastStatus(); got != 0 {
 			t.Errorf("record of /ok: lastStatus() = %d, want 0", got)
 		}
-		if got := ev.lastStatus(); got != 0 {
+		if got := ev.fallback.lastStatus(); got != 0 {
 			t.Errorf("fallback lastStatus() = %d, want 0: both requests had a record", got)
 		}
 	})
@@ -2880,7 +2928,7 @@ func TestHeaderTransportPerRequestRecords(t *testing.T) {
 		if got := recRedirect.blockedErr(); !errors.Is(got, errCrossOriginRedirect) || errors.Is(got, errOtherOrigin) {
 			t.Errorf("record of the redirected request: blockedErr() = %v, want errCrossOriginRedirect only", got)
 		}
-		if got := ev.blockedErr(); got != nil {
+		if got := ev.fallback.blockedErr(); got != nil {
 			t.Errorf("fallback blockedErr() = %v, want nil: both requests had a record", got)
 		}
 	})
@@ -2903,10 +2951,10 @@ func TestHeaderTransportPerRequestRecords(t *testing.T) {
 			t.Fatal(err)
 		}
 		hcMustFail(t, client, "http://evil.test/", errOtherOrigin)
-		if got := ev.lastStatus(); got != http.StatusInternalServerError {
+		if got := ev.fallback.lastStatus(); got != http.StatusInternalServerError {
 			t.Errorf("fallback lastStatus() = %d, want 500", got)
 		}
-		if got := ev.blockedErr(); !errors.Is(got, errOtherOrigin) {
+		if got := ev.fallback.blockedErr(); !errors.Is(got, errOtherOrigin) {
 			t.Errorf("fallback blockedErr() = %v, want errOtherOrigin", got)
 		}
 
@@ -2915,7 +2963,7 @@ func TestHeaderTransportPerRequestRecords(t *testing.T) {
 		if _, err := hcDo(t, client, rec, http.MethodGet, origin+"/ok"); err != nil {
 			t.Fatal(err)
 		}
-		if got := ev.lastStatus(); got != http.StatusInternalServerError {
+		if got := ev.fallback.lastStatus(); got != http.StatusInternalServerError {
 			t.Errorf("fallback lastStatus() = %d after a request with a record, want 500", got)
 		}
 		if got := rec.lastStatus(); got != 0 {
@@ -2972,10 +3020,10 @@ func TestHeaderTransportPerRequestRecords(t *testing.T) {
 				if got := rec.lastStatus(); got != tt.status {
 					t.Errorf("record lastStatus() = %d, want %d", got, tt.status)
 				}
-				if got := ev.blockedErr(); got != nil {
+				if got := ev.fallback.blockedErr(); got != nil {
 					t.Errorf("fallback blockedErr() = %v, want nil", got)
 				}
-				if got := ev.lastStatus(); got != 0 {
+				if got := ev.fallback.lastStatus(); got != 0 {
 					t.Errorf("fallback lastStatus() = %d, want 0", got)
 				}
 			})
@@ -3001,7 +3049,7 @@ func TestHeaderTransportPerRequestRecords(t *testing.T) {
 		if got := other.blockedErr(); got != nil {
 			t.Errorf("unused record blockedErr() = %v, want nil", got)
 		}
-		if got := ev.blockedErr(); got != nil {
+		if got := ev.fallback.blockedErr(); got != nil {
 			t.Errorf("fallback blockedErr() = %v, want nil", got)
 		}
 	})
@@ -3231,11 +3279,6 @@ func hcRPCDeepID(n int) string {
 // hcRPCUnauthorized is a small, normal JSON-RPC error body of a 401 answer.
 const hcRPCUnauthorized = `{"jsonrpc":"2.0","id":1,"error":{"code":-32001,"message":"unauthorized"}}`
 
-// hcSSEEvent returns data as one SSE message event.
-func hcSSEEvent(data string) string {
-	return "event: message\ndata: " + data + "\n\n"
-}
-
 // hcServed is one answer of the test server in TestShapeBodyEndToEnd.
 type hcServed struct {
 	status   int
@@ -3261,9 +3304,9 @@ func TestShapeBodyEndToEnd(t *testing.T) {
 		"/json-over":         {status: 200, ct: "application/json", body: overLimit},
 		"/json-at":           {status: 200, ct: "application/json", body: atLimit},
 		"/json-charset-over": {status: 200, ct: "application/json; charset=utf-8", body: overLimit},
-		"/sse-over":          {status: 200, ct: "text/event-stream", body: hcSSEEvent(overLimit)},
-		"/sse-at":            {status: 200, ct: "text/event-stream", body: hcSSEEvent(atLimit)},
-		"/sse-two-at":        {status: 200, ct: "text/event-stream", body: hcSSEEvent(atLimit) + hcSSEEvent(atLimit)},
+		"/sse-over":          {status: 200, ct: "text/event-stream", body: sseMessageEvent(overLimit)},
+		"/sse-at":            {status: 200, ct: "text/event-stream", body: sseMessageEvent(atLimit)},
+		"/sse-two-at":        {status: 200, ct: "text/event-stream", body: sseMessageEvent(atLimit) + sseMessageEvent(atLimit)},
 		"/json-500-over":     {status: 500, ct: "application/json", body: overLimit},
 		"/json-404-over":     {status: 404, ct: "application/json", body: overLimit},
 		"/deep-400-over":     {status: 400, ct: "application/json", body: deepOver},
@@ -3276,7 +3319,7 @@ func TestShapeBodyEndToEnd(t *testing.T) {
 		"/unauthorized":      {status: 401, ct: "application/json", body: hcRPCUnauthorized},
 		"/plain-over":        {status: 200, ct: "text/plain", body: overLimit},
 		"/get-json-raw":      {status: 200, ct: "application/json", body: overLimit},
-		"/get-json-sse":      {status: 200, ct: "application/json", body: hcSSEEvent(overLimit)},
+		"/get-json-sse":      {status: 200, ct: "application/json", body: sseMessageEvent(overLimit)},
 		"/see-other-json":    {status: 303, location: "/json-over"},
 		"/see-other-sse":     {status: 303, location: "/sse-over"},
 		"/see-other-at":      {status: 303, location: "/json-at"},
@@ -3314,8 +3357,8 @@ func TestShapeBodyEndToEnd(t *testing.T) {
 		{name: "POST json with charset over the limit", method: "POST", path: "/json-charset-over", wantErr: true},
 		{name: "POST json at the limit", method: "POST", path: "/json-at", body: atLimit},
 		{name: "POST SSE over the limit", method: "POST", path: "/sse-over", wantErr: true},
-		{name: "POST SSE at the limit", method: "POST", path: "/sse-at", body: hcSSEEvent(atLimit)},
-		{name: "POST SSE: the limit is per event", method: "POST", path: "/sse-two-at", body: hcSSEEvent(atLimit) + hcSSEEvent(atLimit)},
+		{name: "POST SSE at the limit", method: "POST", path: "/sse-at", body: sseMessageEvent(atLimit)},
+		{name: "POST SSE: the limit is per event", method: "POST", path: "/sse-two-at", body: sseMessageEvent(atLimit) + sseMessageEvent(atLimit)},
 		{name: "GET SSE over the limit", method: "GET", path: "/sse-over", wantErr: true},
 		{name: "legacy GET with json Content-Type is checked as SSE", method: "GET", path: "/get-json-sse", wantErr: true},
 		// Not a message for the SDK: the legacy GET stream has no data
@@ -3357,7 +3400,7 @@ func TestShapeBodyEndToEnd(t *testing.T) {
 			rec := &requestRecorder{}
 			data, readErr := hcDo(t, client, rec, tt.method, ts.URL+tt.path)
 
-			if got := ev.blockedErr(); got != nil {
+			if got := ev.fallback.blockedErr(); got != nil {
 				t.Errorf("fallback blockedErr() = %v, want nil: the request had a record", got)
 			}
 			if !tt.wantErr {
@@ -3441,7 +3484,7 @@ func TestShapeBodyEndToEnd(t *testing.T) {
 		if !errors.Is(readErr, errJSONTooComplex) {
 			t.Fatalf("read body: error = %v, want errJSONTooComplex", readErr)
 		}
-		if got := ev.blockedErr(); !errors.Is(got, errJSONTooComplex) {
+		if got := ev.fallback.blockedErr(); !errors.Is(got, errJSONTooComplex) {
 			t.Errorf("fallback blockedErr() = %v, want errJSONTooComplex", got)
 		}
 		ce := classify(errors.New("flattened by the SDK"), srv, ev, nil)
@@ -3470,8 +3513,8 @@ func TestShapeBodyWrap(t *testing.T) {
 		readErr bool // reading must fail with errJSONTooComplex
 	}{
 		{name: "POST json", method: "POST", status: 200, ct: "application/json", body: `{"jsonrpc":"2.0","id":1,"result":{}}`, wrapped: true},
-		{name: "POST SSE", method: "POST", status: 200, ct: "text/event-stream", body: hcSSEEvent(`{}`), wrapped: true},
-		{name: "GET", method: "GET", status: 200, ct: "text/event-stream", body: hcSSEEvent(`{}`), wrapped: true},
+		{name: "POST SSE", method: "POST", status: 200, ct: "text/event-stream", body: sseMessageEvent(`{}`), wrapped: true},
+		{name: "GET", method: "GET", status: 200, ct: "text/event-stream", body: sseMessageEvent(`{}`), wrapped: true},
 		{name: "POST text/plain", method: "POST", status: 200, ct: "text/plain", body: "ok"},
 		{name: "POST 500 json", method: "POST", status: 500, ct: "application/json", body: overLimit},
 		{name: "POST json after a violation", method: "POST", status: 200, ct: "application/json", body: overLimit, wrapped: true, readErr: true},

@@ -248,11 +248,6 @@ type rrSSE struct {
 	triggered atomic.Bool
 }
 
-// rrSSEEvent returns data as one SSE message event.
-func rrSSEEvent(data string) string {
-	return "event: message\ndata: " + data + "\n\n"
-}
-
 // ServeHTTP implements http.Handler.
 func (s *rrSSE) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
@@ -300,7 +295,7 @@ func (s *rrSSE) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		// For tools/list, the over-cap event replaces the answer.
 		replace := trigger && msg.Method == methodListTools
 		if answer != "" && !replace {
-			s.events <- rrSSEEvent(answer)
+			s.events <- sseMessageEvent(answer)
 		}
 		if trigger && s.triggered.CompareAndSwap(false, true) {
 			s.events <- s.overCap
@@ -344,7 +339,7 @@ func TestRemoteSSEOverCapRecordedDuringConnect(t *testing.T) {
 	)
 	// overCap is one event that is larger than maxBody alone. Its data is
 	// valid JSON with a short enough string, so only the body cap trips.
-	overCap := rrSSEEvent(`{"jsonrpc":"2.0","method":"notifications/message","params":{"pad":"` +
+	overCap := sseMessageEvent(`{"jsonrpc":"2.0","method":"notifications/message","params":{"pad":"` +
 		strings.Repeat("x", 4*maxBody) + `"}}`)
 
 	tests := []struct {
@@ -382,6 +377,97 @@ func TestRemoteSSEOverCapRecordedDuringConnect(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestRemoteDeleteRedirectKeepsConnectLabel runs the attack of a server that
+// answers the session DELETE with a redirect to another origin. The server
+// fails notifications/initialized with HTTP 401, so Client.Connect fails and
+// the SDK closes the session (a DELETE) before Remote classifies the error.
+// The 401 must keep its label: the refused DELETE redirect must not turn it
+// into KindRedirect.
+func TestRemoteDeleteRedirectKeepsConnectLabel(t *testing.T) {
+	t.Parallel()
+	var deletes atomic.Int32
+	ts, _ := wnStartServer(t, false, func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			switch {
+			case r.Method == http.MethodDelete:
+				deletes.Add(1)
+				http.Redirect(w, r, "http://evil.test/mcp", http.StatusTemporaryRedirect)
+			case r.Method == http.MethodPost && rmBodyHas(t, r, `"notifications/initialized"`):
+				http.Error(w, "unauthorized", http.StatusUnauthorized)
+			default:
+				next.ServeHTTP(w, r)
+			}
+		})
+	})
+	srv := rmServer(discover.TransportHTTP, rmWithSecretQuery(ts.URL+"/mcp"), rmHeaders())
+
+	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+	defer cancel()
+	_, err := Remote(ctx, srv, RemoteOptions{})
+
+	if deletes.Load() == 0 {
+		t.Fatalf("the SDK sent no session DELETE, so the test does not cover the attack; Remote error: %v", err)
+	}
+	ce := rmRequireConnectError(t, err, KindHTTP)
+	if ce.Status != http.StatusUnauthorized {
+		t.Errorf("Status = %d, want %d", ce.Status, http.StatusUnauthorized)
+	}
+	if errors.Is(err, errCrossOriginRedirect) {
+		t.Errorf("errors.Is(err, errCrossOriginRedirect) = true, want the 401 only: %v", err)
+	}
+}
+
+// TestJoinContextErr checks that joinContextErr puts the context error first,
+// strips the *url.Error and keeps the link to the record of the call. Without
+// the link, classify reads the record of the call that finished last: here a
+// call with a blocked error, which would turn the timeout into KindOrigin.
+func TestJoinContextErr(t *testing.T) {
+	t.Parallel()
+	inner := errors.New("unexpected EOF")
+	urlErr := &url.Error{Op: "Post", URL: "http://127.0.0.1:1/mcp?token=" + rmQuerySecret, Err: inner}
+
+	t.Run("keeps the record link", func(t *testing.T) {
+		t.Parallel()
+		failed := &requestRecorder{}
+		err := joinContextErr(context.DeadlineExceeded, &recordedError{err: urlErr, rec: failed})
+
+		var re *recordedError
+		if !errors.As(err, &re) || re.rec != failed {
+			t.Fatalf("errors.As(*recordedError) gives %v, want the record of the failed call", re)
+		}
+		var ue *url.Error
+		if errors.As(err, &ue) {
+			t.Errorf("the chain still holds the *url.Error: %v", err)
+		}
+		if !errors.Is(err, context.DeadlineExceeded) || !errors.Is(err, inner) {
+			t.Errorf("errors.Is: want both the context error and the inner error in %v", err)
+		}
+
+		// Another call finished later with a blocked error.
+		var ev httpEvents
+		ev.markConnected()
+		other := &requestRecorder{}
+		_ = other.recordBlocked(errOtherOrigin)
+		ev.finishCall(failed)
+		ev.finishCall(other)
+		if ce := classify(err, rrClassifyServer(), &ev, nil); ce.Kind != KindTimeout {
+			t.Errorf("classify Kind = %q, want %q (reason %q)", ce.Kind, KindTimeout, ce.Reason)
+		}
+	})
+
+	t.Run("no record link", func(t *testing.T) {
+		t.Parallel()
+		err := joinContextErr(context.Canceled, urlErr)
+		var re *recordedError
+		if errors.As(err, &re) {
+			t.Errorf("joinContextErr added a *recordedError to a chain without one: %v", err)
+		}
+		if !errors.Is(err, context.Canceled) || !errors.Is(err, inner) {
+			t.Errorf("errors.Is: want both the context error and the inner error in %v", err)
+		}
+	})
 }
 
 // errRRCall, errRRFallback, errRRConnect and errRROther are distinct blocked
@@ -426,7 +512,7 @@ func TestStateFor(t *testing.T) {
 			name: "call record blocked wins over fallback and connect record",
 			setup: func(ev *httpEvents) error {
 				ev.finishCall(rrRec(0, errRRConnect))
-				_ = ev.recordBlocked(errRRFallback)
+				_ = ev.fallback.recordBlocked(errRRFallback)
 				rec := rrRec(0, errRRCall)
 				ev.finishCall(rec)
 				return &recordedError{err: errCall, rec: rec}
@@ -436,7 +522,7 @@ func TestStateFor(t *testing.T) {
 		{
 			name: "fallback blocked when the call record has none",
 			setup: func(ev *httpEvents) error {
-				_ = ev.recordBlocked(errRRFallback)
+				_ = ev.fallback.recordBlocked(errRRFallback)
 				rec := rrRec(http.StatusInternalServerError, nil)
 				ev.finishCall(rec)
 				return &recordedError{err: errCall, rec: rec}
@@ -448,7 +534,7 @@ func TestStateFor(t *testing.T) {
 			name: "fallback blocked wins over the connect record",
 			setup: func(ev *httpEvents) error {
 				ev.finishCall(rrRec(0, errRRConnect))
-				_ = ev.recordBlocked(errRRFallback)
+				_ = ev.fallback.recordBlocked(errRRFallback)
 				rec := rrRec(0, nil)
 				ev.finishCall(rec)
 				return &recordedError{err: errCall, rec: rec}
@@ -458,7 +544,7 @@ func TestStateFor(t *testing.T) {
 		{
 			name: "fallback blocked stays after markConnected",
 			setup: func(ev *httpEvents) error {
-				_ = ev.recordBlocked(errRRFallback)
+				_ = ev.fallback.recordBlocked(errRRFallback)
 				ev.markConnected()
 				rec := rrRec(0, nil)
 				ev.finishCall(rec)
@@ -529,7 +615,7 @@ func TestStateFor(t *testing.T) {
 		{
 			name: "status from the call record, not the fallback",
 			setup: func(ev *httpEvents) error {
-				ev.status.Store(http.StatusNotFound)
+				ev.fallback.status.Store(http.StatusNotFound)
 				rec := rrRec(http.StatusServiceUnavailable, nil)
 				ev.finishCall(rec)
 				return &recordedError{err: errCall, rec: rec}
@@ -539,7 +625,7 @@ func TestStateFor(t *testing.T) {
 		{
 			name: "call record status 0 is not replaced by the fallback status",
 			setup: func(ev *httpEvents) error {
-				ev.status.Store(http.StatusNotFound)
+				ev.fallback.status.Store(http.StatusNotFound)
 				rec := rrRec(0, nil)
 				ev.finishCall(rec)
 				return &recordedError{err: errCall, rec: rec}
@@ -548,7 +634,7 @@ func TestStateFor(t *testing.T) {
 		{
 			name: "status from the fallback when there is no call record",
 			setup: func(ev *httpEvents) error {
-				ev.status.Store(http.StatusBadGateway)
+				ev.fallback.status.Store(http.StatusBadGateway)
 				return errCall
 			},
 			wantStatus: http.StatusBadGateway,
@@ -802,7 +888,7 @@ func TestCallRecords(t *testing.T) {
 		if len(seen) != 2 || seen[0] == nil || seen[1] == nil || seen[0] == seen[1] {
 			t.Fatalf("records = %p, want two different records", seen)
 		}
-		if seen[0] == &ev.requestRecorder || seen[1] == &ev.requestRecorder {
+		if seen[0] == &ev.fallback || seen[1] == &ev.fallback {
 			t.Error("a call got the fallback record, want its own")
 		}
 		if got := ev.lastCall.Load(); got != seen[1] {
@@ -849,7 +935,7 @@ func TestCallRecords(t *testing.T) {
 		if got := re.rec.lastStatus(); got != http.StatusServiceUnavailable {
 			t.Errorf("call record status = %d, want 503", got)
 		}
-		if got := ev.lastStatus(); got != 0 {
+		if got := ev.fallback.lastStatus(); got != 0 {
 			t.Errorf("fallback record status = %d, want 0 (the request belongs to the call)", got)
 		}
 	})

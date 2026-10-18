@@ -72,9 +72,8 @@ type shapeChecker interface {
 	write(p []byte) error
 }
 
-// These lines make the compiler check that both types implement the
-// interface. The blank identifier "_" throws the value away, so they cost
-// nothing at run time.
+// Compile-time checks: both types must implement shapeChecker (see the
+// templateLister check in list.go for how such a check works).
 var (
 	_ shapeChecker = (*jsonShape)(nil)
 	_ shapeChecker = (*sseShape)(nil)
@@ -135,16 +134,12 @@ func newJSONShape(limits jsonLimits) *jsonShape {
 // It returns an error that wraps errJSONTooComplex at the first exceeded
 // limit, and the same error on every later call.
 func (s *jsonShape) write(p []byte) error {
-	if s.err != nil {
-		return s.err
-	}
 	for _, b := range p {
-		if err := s.step(b); err != nil {
-			s.err = err
+		if err := s.writeByte(b); err != nil {
 			return err
 		}
 	}
-	return nil
+	return s.err
 }
 
 // writeByte checks one more byte of the stream, as write does.

@@ -40,3 +40,10 @@ func NewForTest(opts SDKOptions, root string, environ []string, rawLimit int64) 
 	i.rawLimit = rawLimit
 	return i
 }
+
+// ErrJSONTooComplex is errJSONTooComplex, for the tests.
+var ErrJSONTooComplex = errJSONTooComplex
+
+// JSONTooComplexReason is the fixed reason of a JSON shape violation, for the
+// tests (see jsonTooComplexReason in errors_test.go).
+const JSONTooComplexReason = jsonTooComplexReason

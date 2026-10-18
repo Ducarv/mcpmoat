@@ -45,10 +45,6 @@ const (
 	// SDK decodes about 2.8 million empty objects, which needs hundreds of
 	// MB, far above this bound.
 	rsMemBound uint64 = 64 << 20
-
-	// rsReason is the fixed reason of a shape violation (blockedKinds in
-	// errors.go).
-	rsReason = "response JSON too large: too deep, too many values or a too long string"
 )
 
 // rsHugeArray returns the elements of the huge array: "{},{},...,{}," with
@@ -193,8 +189,8 @@ func rsRequireShapeError(t *testing.T, res Result, err error) {
 	if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
 		t.Errorf("err = %v, want no context error in the chain", err)
 	}
-	if ce.Reason != rsReason {
-		t.Errorf("Reason = %q, want %q", ce.Reason, rsReason)
+	if ce.Reason != jsonTooComplexReason {
+		t.Errorf("Reason = %q, want %q", ce.Reason, jsonTooComplexReason)
 	}
 	// The error text is fixed and holds no server data.
 	if msg := err.Error(); strings.Contains(msg, "{},{}") || len(msg) > 512 {

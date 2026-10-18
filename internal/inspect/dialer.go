@@ -27,7 +27,9 @@ const (
 )
 
 // Errors of the pinned dialer. Their texts hold no address, so they can reach
-// a report as they are.
+// a report as they are. The other errors of DialContext can hold the host
+// name or the dial address: the error of net.SplitHostPort, the
+// *net.DNSError of a lookup and the errors of a failed connection.
 var (
 	// errDialPort means the dial address has a port that is not a decimal
 	// number from 0 to 65535. http.Transport always gives a numeric port, so
@@ -178,8 +180,17 @@ func (d *pinnedDialer) DialContext(ctx context.Context, network, address string)
 		return nil, err
 	}
 	addrs = usableAddrs(addrs)
+	if isLoopbackHost(host) {
+		// The name "localhost" counts as loopback without a lookup, so a
+		// plain http:// URL to it gets no cleartext warning (see
+		// cleartextWarnings). Make that true whatever the resolver answers,
+		// for example from a changed /etc/hosts: dial loopback addresses
+		// only.
+		addrs = loopbackAddrs(addrs)
+	}
 	if len(addrs) == 0 {
-		// The answer was empty or held only invalid addresses.
+		// The answer was empty or held only invalid addresses, or, for
+		// localhost, no loopback address.
 		return nil, &net.DNSError{Err: "no such host", Name: host, IsNotFound: true}
 	}
 
@@ -202,6 +213,18 @@ func usableAddrs(addrs []netip.Addr) []netip.Addr {
 	for _, addr := range addrs {
 		addr = addr.Unmap()
 		if addr.IsValid() {
+			out = append(out, addr)
+		}
+	}
+	return out
+}
+
+// loopbackAddrs returns the loopback addresses of addrs, in the order of
+// addrs. addrs must be unmapped (see usableAddrs).
+func loopbackAddrs(addrs []netip.Addr) []netip.Addr {
+	var out []netip.Addr
+	for _, addr := range addrs {
+		if addr.IsLoopback() {
 			out = append(out, addr)
 		}
 	}
