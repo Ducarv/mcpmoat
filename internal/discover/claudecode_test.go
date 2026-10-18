@@ -141,9 +141,9 @@ func TestReadClaudeCodeCanaryMasking(t *testing.T) {
 	}
 }
 
-// TestReadClaudeCodeProjectPath checks that a top-level server of a global
-// file gets the projectPath of the call, while servers under "projects" keep
-// their own key.
+// TestReadClaudeCodeProjectPath checks that a global file ignores the
+// projectPath of the call: its top-level servers have no ProjectPath, and
+// servers under "projects" keep their own key.
 func TestReadClaudeCodeProjectPath(t *testing.T) {
 	t.Parallel()
 	home, _ := copyFixture(t, "claude-code", "valid")
@@ -157,10 +157,10 @@ func TestReadClaudeCodeProjectPath(t *testing.T) {
 		name, project string
 		scope         Scope
 	}{
-		// Sorted by (ProjectPath, Name): "/custom/dir" < "/work/alpha" < "/work/gamma".
-		{"filesystem", "/custom/dir", ScopeGlobal},
-		{"remote-http", "/custom/dir", ScopeGlobal},
-		{"remote-sse", "/custom/dir", ScopeGlobal},
+		// Sorted by (ProjectPath, Name): "" < "/work/alpha" < "/work/gamma".
+		{"filesystem", "", ScopeGlobal},
+		{"remote-http", "", ScopeGlobal},
+		{"remote-sse", "", ScopeGlobal},
 		{"alpha-tool", "/work/alpha", ScopeProject},
 		{"gamma-tool", "/work/gamma", ScopeProject},
 	}
@@ -195,8 +195,9 @@ func TestReadClaudeCodeProjectsKeyByScope(t *testing.T) {
 		want  []string
 	}{
 		{name: "project file ignores projects", scope: ScopeProject, want: []string{"top"}},
-		// Sorted by (ProjectPath, Name): "/attacker/chosen" < the directory.
-		{name: "global file reads projects", scope: ScopeGlobal, want: []string{"spoofed", "top"}},
+		// Sorted by (ProjectPath, Name): a global file ignores projectPath,
+		// so "top" has ProjectPath "", and "" < "/attacker/chosen".
+		{name: "global file reads projects", scope: ScopeGlobal, want: []string{"top", "spoofed"}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -247,12 +248,11 @@ func TestReadClaudeCodeErrorsAs(t *testing.T) {
 
 	for _, e := range r.Errors {
 		msg := e.Error()
-		wantPrefix := path + ": server " + e.Server + ": " + e.Reason
-		if msg != wantPrefix {
-			t.Errorf("Error() = %q, want %q", msg, wantPrefix)
-		}
-		if e.Server == "unknown-type" && strings.Contains(msg, "websocket") {
-			t.Errorf("Error() = %q, must not echo the transport type", msg)
+		// The exact compare also shows that the message does not echo a
+		// config value, for example the unknown transport type.
+		want := path + ": server " + e.Server + ": " + e.Reason
+		if msg != want {
+			t.Errorf("Error() = %q, want %q", msg, want)
 		}
 	}
 }
@@ -310,5 +310,46 @@ func TestReadClaudeCodeCanceled(t *testing.T) {
 	var pe *fs.PathError
 	if errors.As(r.Errors[0], &pe) {
 		t.Errorf("canceled error wraps a PathError: %v", pe)
+	}
+}
+
+// TestReadClaudeCodeProjectPathFromFile checks that a project file read
+// without a projectPath gives its servers the directory of the file as
+// ProjectPath. Only the Cursor reader skips a ".cursor" directory: a Claude
+// Code .mcp.json is at the top of its project.
+func TestReadClaudeCodeProjectPathFromFile(t *testing.T) {
+	t.Parallel()
+
+	const content = `{"mcpServers": {"s": {"command": "x"}}}`
+
+	tests := []struct {
+		name    string
+		rel     string // the file below the temporary directory
+		wantRel string // the wanted ProjectPath below the temporary directory
+	}{
+		{name: "project file", rel: "proj/.mcp.json", wantRel: "proj"},
+		{name: "in a .cursor directory", rel: "proj/.cursor/.mcp.json", wantRel: "proj/.cursor"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			dir := t.TempDir()
+			path := writeFile(t, dir, tt.rel, []byte(content))
+
+			r := ReadClaudeCode(t.Context(), path, ScopeProject, "")
+
+			if len(r.Errors) != 0 {
+				t.Fatalf("errors = %v, want none", r.Errors)
+			}
+			if len(r.Servers) != 1 {
+				t.Fatalf("server names = %v, want [s]", serverNames(r.Servers))
+			}
+			want := filepath.Join(dir, filepath.FromSlash(tt.wantRel))
+			if s := r.Servers[0]; s.Scope != ScopeProject || s.ProjectPath != want || !s.Untrusted {
+				t.Errorf("server %q scope=%q projectPath=%q untrusted=%v, want %q, %q and true",
+					s.Name, s.Scope, s.ProjectPath, s.Untrusted, ScopeProject, want)
+			}
+		})
 	}
 }

@@ -249,6 +249,42 @@ func writeFile(t testing.TB, dir, rel string, data []byte) string {
 	return path
 }
 
+// symlinkTo creates a symlink at dir/rel (rel with forward slashes) that
+// points to target, and returns the path of the link. It creates the parent
+// directories of the link with mode 0o700. target is stored as given, so a
+// relative target is relative to the directory of the link. It fails the test
+// if the link cannot be created.
+func symlinkTo(t testing.TB, target, dir, rel string) string {
+	t.Helper()
+	link := filepath.Join(dir, filepath.FromSlash(rel))
+	if err := os.MkdirAll(filepath.Dir(link), 0o700); err != nil {
+		t.Fatalf("create directory for %s: %v", link, err)
+	}
+	if err := os.Symlink(target, link); err != nil {
+		t.Fatalf("symlink %s: %v", link, err)
+	}
+	return link
+}
+
+// makeDir creates the directory dir/name and returns its path.
+func makeDir(t testing.TB, dir, name string) string {
+	t.Helper()
+	path := filepath.Join(dir, name)
+	if err := os.Mkdir(path, 0o700); err != nil {
+		t.Fatalf("create directory %s: %v", path, err)
+	}
+	return path
+}
+
+// skipOnWindows skips the test on Windows. The tests that call it use
+// symlinks, FIFOs, file modes or path errors that behave differently there.
+func skipOnWindows(t testing.TB) {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("not supported on windows")
+	}
+}
+
 // serverNames returns the server names in ss, in order.
 func serverNames(ss []Server) []string {
 	out := make([]string, 0, len(ss))
@@ -256,6 +292,165 @@ func serverNames(ss []Server) []string {
 		out = append(out, s.Name)
 	}
 	return out
+}
+
+// allReasons lists every reason constant of fileerror.go. Keep it in sync
+// with the constants: TestAllReasonsInSync fails when a constant is missing
+// here. It is an array, not a slice, so no test can change it. Tests use it
+// to check that a FileError has a known reason.
+var allReasons = [...]reason{
+	reasonCannotRead,
+	reasonNotRegular,
+	reasonTooLarge,
+	reasonOutsideProject,
+	reasonInvalidJSON,
+	reasonInvalidTOML,
+	reasonBadShape,
+	reasonBadServers,
+	reasonBadEntry,
+	reasonUnknownTransport,
+	reasonNoCommandOrURL,
+	reasonStdioNoCommand,
+	reasonRemoteNoURL,
+	reasonCanceled,
+	reasonTooDeep,
+	reasonKeyTooLong,
+	reasonTooManyServers,
+	reasonAmbiguousKey,
+	reasonEmptyName,
+	reasonEmptyProject,
+	reasonBadString,
+	reasonNotFound,
+	reasonUnknownFormat,
+}
+
+// codexConfigRel is the path of the Codex config file inside a home
+// directory, with forward slashes.
+const codexConfigRel = ".codex/config.toml"
+
+// keyParts returns a key with n parts separated by dots, for example "a.a.a"
+// for n = 3.
+func keyParts(n int) string {
+	return strings.TrimSuffix(strings.Repeat("a.", n), ".")
+}
+
+// jsonFixtureCase is one fixture test of a JSON reader (ReadClaudeCode or
+// ReadCursor). The fixture directory testdata/discover/<client>/<name> has a
+// home directory with the global file and a work directory with the project
+// file.
+//
+// The want servers are static. runJSONFixtureCases fills in Client, Source,
+// Scope, ProjectPath and Untrusted:
+//   - a global server (home) gets ScopeGlobal, or ScopeProject when the want
+//     sets ProjectPath (a projects.<path> server of ~/.claude.json), and
+//     Untrusted false;
+//   - a project server (work) gets ScopeProject, the work directory as
+//     ProjectPath, and Untrusted true.
+type jsonFixtureCase struct {
+	name string
+	// hideValues is set for fixtures that hold canaries or are malformed
+	// next to a canary. On a mismatch the test then prints only the server
+	// names, never the values.
+	hideValues bool
+	// canaryFiles are the fixture files, relative to the fixture directory
+	// and with forward slashes, that must hold every canary. The leak checks
+	// only mean something if the input holds the canaries.
+	canaryFiles []string
+
+	home, work         []serverView
+	homeErrs, workErrs []errWant
+}
+
+// jsonReader is the signature of ReadClaudeCode and ReadCursor.
+type jsonReader func(ctx context.Context, path string, scope Scope, projectPath string) Result
+
+// jsonFixtureFiles names the config files of one client inside the home and
+// work directories of a fixture, with forward slashes.
+type jsonFixtureFiles struct {
+	client  Client
+	fixture string // the directory under testdata/discover
+	home    string
+	work    string
+}
+
+// runJSONFixtureCases runs every case with read, on a copy of the fixture.
+// It checks the servers, the errors, Untrusted on every error, and that no
+// result holds a canary.
+func runJSONFixtureCases(t *testing.T, files jsonFixtureFiles, read jsonReader, cases []jsonFixtureCase) {
+	t.Helper()
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			ctx := t.Context()
+			if len(tc.canaryFiles) > 0 {
+				assertFixtureFilesHaveCanaries(t, fixtureDir(t, files.fixture, tc.name), tc.canaryFiles...)
+			}
+			home, work := copyFixture(t, files.fixture, tc.name)
+			homePath := filepath.Join(home, filepath.FromSlash(files.home))
+			workPath := filepath.Join(work, filepath.FromSlash(files.work))
+
+			global := read(ctx, homePath, ScopeGlobal, "")
+			project := read(ctx, workPath, ScopeProject, work)
+
+			checkServers(t, "global", global.Servers, fixtureWants(tc.home, files.client, homePath, ""), tc.hideValues)
+			checkServers(t, "project", project.Servers, fixtureWants(tc.work, files.client, workPath, work), tc.hideValues)
+			checkFileErrors(t, homePath, global.Errors, tc.homeErrs)
+			checkFileErrors(t, workPath, project.Errors, tc.workErrs)
+			checkErrorsUntrusted(t, global.Errors, false)
+			checkErrorsUntrusted(t, project.Errors, true)
+
+			// No result may hold a canary, in any form.
+			for _, r := range []Result{global, project} {
+				assertNoLeakServers(t, r.Servers)
+				assertNoLeakErrors(t, r.Errors)
+			}
+		})
+	}
+}
+
+// fixtureWants returns copies of wants with Client, Source, Scope, ProjectPath
+// and Untrusted filled in (see jsonFixtureCase). work is "" for the global
+// file and the work directory for the project file.
+func fixtureWants(wants []serverView, client Client, source, work string) []serverView {
+	out := make([]serverView, 0, len(wants))
+	for _, w := range wants {
+		w.Client = client
+		w.Source = source
+		switch {
+		case work != "":
+			w.Scope = ScopeProject
+			w.ProjectPath = work
+			w.Untrusted = true
+		case w.ProjectPath != "":
+			w.Scope = ScopeProject
+		default:
+			w.Scope = ScopeGlobal
+		}
+		out = append(out, w)
+	}
+	return out
+}
+
+// checkServersUntrusted fails the test if a server in servers has another
+// Untrusted value than want.
+func checkServersUntrusted(t testing.TB, servers []Server, want bool) {
+	t.Helper()
+	for _, s := range servers {
+		if s.Untrusted != want {
+			t.Errorf("server %q: Untrusted = %v, want %v", s.Name, s.Untrusted, want)
+		}
+	}
+}
+
+// checkErrorsUntrusted fails the test if an error in errs has another
+// Untrusted value than want.
+func checkErrorsUntrusted(t testing.TB, errs []*FileError, want bool) {
+	t.Helper()
+	for i, e := range errs {
+		if e.Untrusted != want {
+			t.Errorf("errors[%d] (%s): Untrusted = %v, want %v", i, e.Reason, e.Untrusted, want)
+		}
+	}
 }
 
 // recordTB is a testing.TB that records a failure instead of failing the

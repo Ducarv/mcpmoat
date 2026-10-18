@@ -8,7 +8,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"runtime"
 	"testing"
 	"time"
 
@@ -100,11 +99,7 @@ func TestReadConfigFile(t *testing.T) {
 			setup: func(t *testing.T) string {
 				skipOnWindows(t)
 				target := writeFile(t, t.TempDir(), "target.json", []byte("{}"))
-				link := filepath.Join(t.TempDir(), "link.json")
-				if err := os.Symlink(target, link); err != nil {
-					t.Fatalf("symlink: %v", err)
-				}
-				return link
+				return symlinkTo(t, target, t.TempDir(), "link.json")
 			},
 			maxSize:   limit,
 			wantData:  "{}",
@@ -114,11 +109,7 @@ func TestReadConfigFile(t *testing.T) {
 			name: "dangling symlink counts as missing",
 			setup: func(t *testing.T) string {
 				skipOnWindows(t)
-				link := filepath.Join(t.TempDir(), "dangling.json")
-				if err := os.Symlink(filepath.Join(t.TempDir(), "gone.json"), link); err != nil {
-					t.Fatalf("symlink: %v", err)
-				}
-				return link
+				return symlinkTo(t, filepath.Join(t.TempDir(), "gone.json"), t.TempDir(), "dangling.json")
 			},
 			maxSize: limit,
 		},
@@ -126,11 +117,7 @@ func TestReadConfigFile(t *testing.T) {
 			name: "symlink to a directory",
 			setup: func(t *testing.T) string {
 				skipOnWindows(t)
-				link := filepath.Join(t.TempDir(), "dirlink.json")
-				if err := os.Symlink(t.TempDir(), link); err != nil {
-					t.Fatalf("symlink: %v", err)
-				}
-				return link
+				return symlinkTo(t, t.TempDir(), t.TempDir(), "dirlink.json")
 			},
 			maxSize:    limit,
 			wantReason: reasonNotRegular,
@@ -151,9 +138,7 @@ func TestReadConfigFile(t *testing.T) {
 			} else {
 				// A not-regular or too-large file has no OS error in Err.
 				checkFileErrors(t, path, []*FileError{fe}, []errWant{{Reason: tt.wantReason}})
-				if fe.Untrusted {
-					t.Error("fe.Untrusted = true, want false for a read without a root")
-				}
+				checkNotMarked(t, fe)
 			}
 			if found != tt.wantFound {
 				t.Errorf("found = %v, want %v", found, tt.wantFound)
@@ -168,12 +153,12 @@ func TestReadConfigFile(t *testing.T) {
 	}
 }
 
-// skipOnWindows skips the test on Windows. The tests that call it use
-// symlinks, FIFOs, file modes or path errors that behave differently there.
-func skipOnWindows(t testing.TB) {
+// checkNotMarked fails the test if readConfigFile set fe.Untrusted. Only the
+// readers and Discover set it (see the package doc, Untrusted files).
+func checkNotMarked(t testing.TB, fe *FileError) {
 	t.Helper()
-	if runtime.GOOS == "windows" {
-		t.Skip("not supported on windows")
+	if fe != nil && fe.Untrusted {
+		t.Errorf("fe.Untrusted = true, want false: readConfigFile must not set it (fe = %v)", fe)
 	}
 }
 
@@ -230,9 +215,7 @@ func TestReadConfigFileFIFO(t *testing.T) {
 			select {
 			case got := <-done:
 				checkFileErrors(t, path, []*FileError{got.fe}, []errWant{{Reason: reasonNotRegular}})
-				if got.fe.Untrusted != tt.root {
-					t.Errorf("fe.Untrusted = %v, want %v", got.fe.Untrusted, tt.root)
-				}
+				checkNotMarked(t, got.fe)
 				if got.found || got.data != nil {
 					t.Errorf("found = %v, data = %q, want false and nil", got.found, got.data)
 				}
@@ -245,22 +228,10 @@ func TestReadConfigFileFIFO(t *testing.T) {
 
 // TestReadConfigFileInRoot checks a read of a project file through os.Root: a
 // symlink inside the project is followed, and a path or symlink that leaves
-// the project is refused. Every error has Untrusted set.
+// the project is refused. readConfigFile never sets Untrusted, also with a
+// root: the reader that calls it does.
 func TestReadConfigFileInRoot(t *testing.T) {
 	t.Parallel()
-
-	// symlink makes a symlink at dir/rel that points to target.
-	symlink := func(t *testing.T, target, dir, rel string) string {
-		t.Helper()
-		link := filepath.Join(dir, rel)
-		if err := os.MkdirAll(filepath.Dir(link), 0o700); err != nil {
-			t.Fatalf("mkdir: %v", err)
-		}
-		if err := os.Symlink(target, link); err != nil {
-			t.Fatalf("symlink: %v", err)
-		}
-		return link
-	}
 
 	tests := []struct {
 		name string
@@ -294,7 +265,7 @@ func TestReadConfigFileInRoot(t *testing.T) {
 				skipOnWindows(t)
 				root := t.TempDir()
 				writeFile(t, root, "config/real.json", []byte("{}"))
-				return root, symlink(t, filepath.Join("config", "real.json"), root, ".mcp.json")
+				return root, symlinkTo(t, filepath.Join("config", "real.json"), root, ".mcp.json")
 			},
 			wantData:  "{}",
 			wantFound: true,
@@ -306,7 +277,7 @@ func TestReadConfigFileInRoot(t *testing.T) {
 				parent := t.TempDir()
 				root := filepath.Join(parent, "project")
 				writeFile(t, parent, "secret.json", []byte(discovertest.CanaryEnv))
-				return root, symlink(t, filepath.Join("..", "secret.json"), root, ".mcp.json")
+				return root, symlinkTo(t, filepath.Join("..", "secret.json"), root, ".mcp.json")
 			},
 			wantReason: reasonOutsideProject,
 		},
@@ -316,7 +287,7 @@ func TestReadConfigFileInRoot(t *testing.T) {
 				skipOnWindows(t)
 				target := writeFile(t, t.TempDir(), "secret.json", []byte(discovertest.CanaryEnv))
 				root := t.TempDir()
-				return root, symlink(t, target, root, ".mcp.json")
+				return root, symlinkTo(t, target, root, ".mcp.json")
 			},
 			wantReason: reasonOutsideProject,
 		},
@@ -328,7 +299,7 @@ func TestReadConfigFileInRoot(t *testing.T) {
 				skipOnWindows(t)
 				root := t.TempDir()
 				target := writeFile(t, root, "real.json", []byte("{}"))
-				return root, symlink(t, target, root, ".mcp.json")
+				return root, symlinkTo(t, target, root, ".mcp.json")
 			},
 			wantReason: reasonOutsideProject,
 		},
@@ -339,7 +310,7 @@ func TestReadConfigFileInRoot(t *testing.T) {
 				outside := t.TempDir()
 				writeFile(t, outside, "mcp.json", []byte(discovertest.CanaryEnv))
 				root := t.TempDir()
-				symlink(t, outside, root, ".cursor")
+				symlinkTo(t, outside, root, ".cursor")
 				return root, filepath.Join(root, ".cursor", "mcp.json")
 			},
 			wantReason: reasonOutsideProject,
@@ -349,7 +320,7 @@ func TestReadConfigFileInRoot(t *testing.T) {
 			setup: func(t *testing.T) (string, string) {
 				skipOnWindows(t)
 				root := t.TempDir()
-				return root, symlink(t, filepath.Join("..", "gone", "x.json"), root, ".mcp.json")
+				return root, symlinkTo(t, filepath.Join("..", "gone", "x.json"), root, ".mcp.json")
 			},
 			wantReason: reasonOutsideProject,
 		},
@@ -380,7 +351,7 @@ func TestReadConfigFileInRoot(t *testing.T) {
 			setup: func(t *testing.T) (string, string) {
 				skipOnWindows(t)
 				root := t.TempDir()
-				return root, symlink(t, "gone.json", root, ".mcp.json")
+				return root, symlinkTo(t, "gone.json", root, ".mcp.json")
 			},
 		},
 		{
@@ -427,9 +398,7 @@ func TestReadConfigFileInRoot(t *testing.T) {
 				}
 			} else {
 				checkFileErrors(t, path, []*FileError{fe}, []errWant{{Reason: tt.wantReason}})
-				if !fe.Untrusted {
-					t.Error("fe.Untrusted = false, want true for a read with a root")
-				}
+				checkNotMarked(t, fe)
 				discovertest.AssertNoLeak(t, "project file error", fe.Error())
 			}
 			if found != tt.wantFound {
@@ -446,7 +415,8 @@ func TestReadConfigFileInRoot(t *testing.T) {
 }
 
 // TestReadConfigFileInRootCanceled checks that a canceled read of a project
-// file is Untrusted too.
+// file gives a canceled error, and that readConfigFile does not mark it
+// Untrusted: the reader that calls it does.
 func TestReadConfigFileInRootCanceled(t *testing.T) {
 	t.Parallel()
 	root := t.TempDir()
@@ -457,9 +427,7 @@ func TestReadConfigFileInRootCanceled(t *testing.T) {
 	_, found, fe := readConfigFile(ctx, path, 1024, root)
 
 	checkFileErrors(t, path, []*FileError{fe}, []errWant{{Reason: reasonCanceled, HasErr: true}})
-	if !fe.Untrusted {
-		t.Error("fe.Untrusted = false, want true for a read with a root")
-	}
+	checkNotMarked(t, fe)
 	if found {
 		t.Error("found = true, want false")
 	}

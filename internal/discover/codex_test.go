@@ -17,33 +17,33 @@ import (
 	"github.com/Ducarv/mcpmoat/internal/discover/discovertest"
 )
 
-// codexConfigRel is the path of the Codex config file inside a home
-// directory, with forward slashes.
-const codexConfigRel = ".codex/config.toml"
-
 // codexConfigPath returns the path of the Codex config file inside home.
 func codexConfigPath(home string) string {
 	return filepath.Join(home, filepath.FromSlash(codexConfigRel))
 }
 
-// keyParts returns a key with n parts separated by dots, for example "a.a.a"
-// for n = 3.
-func keyParts(n int) string {
-	return strings.TrimSuffix(strings.Repeat("a.", n), ".")
-}
-
+// TestReadCodexFixtures runs ReadCodex on a copy of each fixture in
+// testdata/discover/codex/<name>. It checks the servers and the errors, and
+// that no server and no error holds a canary in fmt output, in Error or in
+// JSON. The want values hold the canaries, so viewOf (which calls Reveal) is
+// the only way that a test can see them.
 func TestReadCodexFixtures(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
-		name       string
-		fixture    string
-		wantServer []serverView // Source is filled in with the copied path
+		name string // the fixture directory under testdata/discover/codex
+		// hideValues is set for fixtures that hold canaries. On a mismatch
+		// the test then prints only the server names, never the values.
+		hideValues bool
+		// canaries is set when the config file of the fixture must hold
+		// every canary. The leak checks only mean something if the input
+		// holds the canaries.
+		canaries   bool
+		wantServer []serverView // Client, Scope and Source are filled in
 		wantErrs   []errWant
 	}{
 		{
-			name:    "valid",
-			fixture: "valid",
+			name: "valid",
 			wantServer: []serverView{
 				{
 					Name:      "docs",
@@ -69,24 +69,17 @@ func TestReadCodexFixtures(t *testing.T) {
 				},
 			},
 		},
+		{name: "empty"},
+		{name: "missing"},
 		{
-			name:    "empty",
-			fixture: "empty",
-		},
-		{
-			name:    "missing",
-			fixture: "missing",
-		},
-		{
-			name:    "malformed",
-			fixture: "malformed",
+			name:       "malformed",
+			hideValues: true,
 			wantErrs: []errWant{
 				{Reason: reasonInvalidTOML, Line: 3},
 			},
 		},
 		{
-			name:    "invalid-entries",
-			fixture: "invalid-entries",
+			name: "invalid-entries",
 			wantServer: []serverView{
 				{
 					Name:      "good",
@@ -102,85 +95,51 @@ func TestReadCodexFixtures(t *testing.T) {
 				{Server: "num-env", Reason: reasonBadEntry},
 			},
 		},
+		{
+			// Every secret value is read in full and is visible only
+			// through Reveal (see viewOf).
+			name:       "secrets",
+			hideValues: true,
+			canaries:   true,
+			wantServer: []serverView{
+				{
+					Name:      "s1",
+					Transport: TransportStdio,
+					Command:   "x",
+					Args:      []string{"--token", discovertest.CanaryArgs},
+					Env:       map[string]string{"API_KEY": discovertest.CanaryEnv},
+				},
+				{
+					Name:      "s2",
+					Transport: TransportHTTP,
+					URL:       "https://user:" + discovertest.CanaryURL + "@codex.example.com/mcp?key=" + discovertest.CanaryURL,
+					Headers:   map[string]string{"Authorization": "Bearer " + discovertest.CanaryHeader},
+				},
+			},
+		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			home, _ := copyFixture(t, "codex", tt.fixture)
+			if tt.canaries {
+				assertFixtureFilesHaveCanaries(t, fixtureDir(t, "codex", tt.name), "home/"+codexConfigRel)
+			}
+			home, _ := copyFixture(t, "codex", tt.name)
 			path := codexConfigPath(home)
 
 			r := ReadCodex(t.Context(), path)
 
-			want := make([]serverView, 0, len(tt.wantServer))
-			for _, w := range tt.wantServer {
-				w.Client = ClientCodex
-				w.Scope = ScopeGlobal
-				w.ProjectPath = ""
-				w.Source = path
-				want = append(want, w)
-			}
-			checkServers(t, "servers", r.Servers, want, false)
+			// work is "": the Codex file is global, so fixtureWants sets
+			// ScopeGlobal and leaves ProjectPath and Untrusted empty.
+			want := fixtureWants(tt.wantServer, ClientCodex, path, "")
+			checkServers(t, "servers", r.Servers, want, tt.hideValues)
 			checkFileErrors(t, path, r.Errors, tt.wantErrs)
 
 			assertNoLeakErrors(t, r.Errors)
 			assertNoLeakServers(t, r.Servers)
 		})
 	}
-}
-
-func TestReadCodexSecrets(t *testing.T) {
-	t.Parallel()
-
-	dir := fixtureDir(t, "codex", "secrets")
-	assertFixtureHasCanaries(t, codexConfigPath(filepath.Join(dir, "home")))
-
-	home, _ := copyFixture(t, "codex", "secrets")
-	path := codexConfigPath(home)
-	r := ReadCodex(t.Context(), path)
-
-	checkFileErrors(t, path, r.Errors, nil)
-	if got := serverNames(r.Servers); !reflect.DeepEqual(got, []string{"s1", "s2"}) {
-		t.Fatalf("server names = %v, want [s1 s2]", got)
-	}
-
-	// The failure messages below name the field only, never the value.
-	s1 := r.Servers[0]
-	if s1.Transport != TransportStdio || s1.Command != "x" {
-		t.Errorf("s1 transport = %q, command = %q, want stdio and x", s1.Transport, s1.Command)
-	}
-	if keys := s1.Env.Keys(); !reflect.DeepEqual(keys, []string{"API_KEY"}) {
-		t.Errorf("s1 env keys = %v, want [API_KEY]", keys)
-	}
-	if s1.Env["API_KEY"].Reveal() != discovertest.CanaryEnv {
-		t.Error("s1 env API_KEY does not reveal the env canary")
-	}
-	if got := s1.Args.Values(); !reflect.DeepEqual(got, []string{"--token", discovertest.CanaryArgs}) {
-		t.Error("s1 args do not hold the args canary after --token")
-	}
-
-	s2 := r.Servers[1]
-	if s2.Transport != TransportHTTP {
-		t.Errorf("s2 transport = %q, want http", s2.Transport)
-	}
-	wantURL := "https://user:" + discovertest.CanaryURL + "@codex.example.com/mcp?key=" + discovertest.CanaryURL
-	if s2.URL.Reveal() != wantURL {
-		t.Error("s2 URL does not reveal the URL canary")
-	}
-	if keys := s2.Headers.Keys(); !reflect.DeepEqual(keys, []string{"Authorization"}) {
-		t.Errorf("s2 header keys = %v, want [Authorization]", keys)
-	}
-	if s2.Headers["Authorization"].Reveal() != "Bearer "+discovertest.CanaryHeader {
-		t.Error("s2 header Authorization does not reveal the header canary")
-	}
-	for _, s := range r.Servers {
-		if s.Client != ClientCodex || s.Scope != ScopeGlobal || s.ProjectPath != "" || s.Source != path {
-			t.Errorf("server %q has wrong client, scope, project path or source", s.Name)
-		}
-	}
-
-	assertNoLeakServers(t, r.Servers)
-	assertNoLeakErrors(t, r.Errors)
 }
 
 // TestReadCodexInline covers files that are too small for a fixture. Each
@@ -382,8 +341,8 @@ func TestReadCodexInline(t *testing.T) {
 	}
 }
 
-// TestReadCodexTransport checks the transport and the dropped fields of the
-// stdio and http paths.
+// TestReadCodexTransport checks the fields of a stdio and of an http server
+// that use every key of their own transport.
 func TestReadCodexTransport(t *testing.T) {
 	t.Parallel()
 
@@ -392,33 +351,103 @@ func TestReadCodexTransport(t *testing.T) {
 command = "c"
 args = ["a"]
 env = { K = "v1" }
-http_headers = { H = "v2" }
+env_vars = ["E"]
+cwd = "/w"
 
 [mcp_servers.web]
 url = "https://example.com/web"
 http_headers = { H = "v3" }
-args = ["dropped"]
-env = { E = "dropped" }
+env_http_headers = { X = "X_VAR" }
+bearer_token_env_var = "T_VAR"
 `
 	path := writeFile(t, t.TempDir(), codexConfigRel, []byte(config))
 	r := ReadCodex(t.Context(), path)
 	checkFileErrors(t, path, r.Errors, nil)
 
-	want := []serverView{
+	want := fixtureWants([]serverView{
 		{
-			// A stdio server never carries headers.
-			Name: "local", Client: ClientCodex, Scope: ScopeGlobal, Source: path,
-			Transport: TransportStdio, Command: "c", Args: []string{"a"},
-			Env: map[string]string{"K": "v1"},
+			// env_vars is not mapped (see codexIgnoredKeys).
+			Name: "local", Transport: TransportStdio, Command: "c",
+			Args: []string{"a"}, Env: map[string]string{"K": "v1"}, Dir: "/w",
 		},
 		{
-			// An HTTP server never carries args or env.
-			Name: "web", Client: ClientCodex, Scope: ScopeGlobal, Source: path,
-			Transport: TransportHTTP, URL: "https://example.com/web",
+			// env_http_headers and bearer_token_env_var are not mapped.
+			Name: "web", Transport: TransportHTTP, URL: "https://example.com/web",
 			Headers: map[string]string{"H": "v3"},
 		},
-	}
+	}, ClientCodex, path, "")
 	checkServers(t, "servers", r.Servers, want, false)
+}
+
+// TestReadCodexMixedTransports checks that an entry with a key of the other
+// transport gives reasonBadEntry and no server, as Codex refuses it. Only the
+// presence of the key counts: an empty value is refused too. The valid server
+// "ok" must survive next to the bad one.
+func TestReadCodexMixedTransports(t *testing.T) {
+	t.Parallel()
+
+	const (
+		stdio  = "[mcp_servers.x]\ncommand = \"c\"\n"
+		remote = "[mcp_servers.x]\nurl = \"https://example.com/mcp\"\n"
+		ok     = "\n[mcp_servers.ok]\ncommand = \"c\"\n"
+	)
+	tests := []struct {
+		name  string
+		entry string // the server x
+	}{
+		// A stdio entry with a remote key.
+		{name: "stdio with url", entry: stdio + "url = \"https://example.com/mcp\"\n"},
+		{name: "stdio with http_headers", entry: stdio + "http_headers = { H = \"v\" }\n"},
+		{name: "stdio with empty http_headers", entry: stdio + "http_headers = {}\n"},
+		{name: "stdio with env_http_headers", entry: stdio + "env_http_headers = { H = \"H_VAR\" }\n"},
+		{name: "stdio with bearer_token_env_var", entry: stdio + "bearer_token_env_var = \"T_VAR\"\n"},
+		{name: "stdio with empty bearer_token_env_var", entry: stdio + "bearer_token_env_var = \"\"\n"},
+		{name: "empty command with http_headers", entry: "[mcp_servers.x]\ncommand = \"\"\nhttp_headers = { H = \"v\" }\n"},
+		// A remote entry with a stdio key.
+		{name: "remote with args", entry: remote + "args = [\"a\"]\n"},
+		{name: "remote with empty args", entry: remote + "args = []\n"},
+		{name: "remote with env", entry: remote + "env = { K = \"v\" }\n"},
+		{name: "remote with env as a sub-table", entry: remote + "[mcp_servers.x.env]\nK = \"v\"\n"},
+		{name: "remote with env_vars", entry: remote + "env_vars = [\"E\"]\n"},
+		{name: "remote with cwd", entry: remote + "cwd = \"/w\"\n"},
+		{name: "remote with empty cwd", entry: remote + "cwd = \"\"\n"},
+		{name: "empty url with env", entry: "[mcp_servers.x]\nurl = \"\"\nenv = { K = \"v\" }\n"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			path := writeFile(t, t.TempDir(), codexConfigRel, []byte(tt.entry+ok))
+			r := ReadCodex(t.Context(), path)
+			if got := serverNames(r.Servers); !reflect.DeepEqual(got, []string{"ok"}) {
+				t.Errorf("server names = %v, want [ok]", got)
+			}
+			checkFileErrors(t, path, r.Errors, []errWant{{Server: "x", Reason: reasonBadEntry}})
+		})
+	}
+
+	// Keys that Codex allows for both transports never make a mix.
+	t.Run("shared keys", func(t *testing.T) {
+		t.Parallel()
+		shared := "enabled = true\nstartup_timeout_sec = 5\ntool_timeout_sec = 5\n"
+		config := "[mcp_servers.a]\ncommand = \"c\"\n" + shared +
+			"\n[mcp_servers.b]\nurl = \"https://example.com/mcp\"\n" + shared
+		path := writeFile(t, t.TempDir(), codexConfigRel, []byte(config))
+		r := ReadCodex(t.Context(), path)
+		checkFileErrors(t, path, r.Errors, nil)
+		if got := serverNames(r.Servers); !reflect.DeepEqual(got, []string{"a", "b"}) {
+			t.Errorf("server names = %v, want [a b]", got)
+		}
+	})
+
+	// With neither command nor url, a key of one transport is not a mix: the
+	// entry has no transport at all.
+	t.Run("no command and no url", func(t *testing.T) {
+		t.Parallel()
+		config := "[mcp_servers.x]\nargs = [\"a\"]\nhttp_headers = { H = \"v\" }\n"
+		path := writeFile(t, t.TempDir(), codexConfigRel, []byte(config))
+		r := ReadCodex(t.Context(), path)
+		checkFileErrors(t, path, r.Errors, []errWant{{Server: "x", Reason: reasonNoCommandOrURL}})
+	})
 }
 
 func TestReadCodexFileProblems(t *testing.T) {
@@ -932,8 +961,10 @@ func TestReadCodexExactKeys(t *testing.T) {
 			name: "exact keys still work",
 			config: "model = \"o3\"\nModel = \"x\"\n\n[mcp_servers.x]\ncommand = \"c\"\nargs = [\"a\"]\n" +
 				"env = { K = \"v\" }\ncwd = \"/w\"\nenabled = true\nstartup_timeout_sec = 5\ntool_timeout_sec = 5\n" +
-				"bearer_token_env_var = \"T\"\nenv_vars = [\"A\"]\ncommands = \"not a known key\"\n" + good,
-			wantNames: []string{"good", "x"},
+				"env_vars = [\"A\"]\ncommands = \"not a known key\"\n" +
+				"\n[mcp_servers.y]\nurl = \"https://example.com/mcp\"\nhttp_headers = { H = \"v\" }\n" +
+				"env_http_headers = { X = \"X_VAR\" }\nbearer_token_env_var = \"T\"\nURLs = \"not a known key\"\n" + good,
+			wantNames: []string{"good", "x", "y"},
 		},
 		{
 			// Env names are case-sensitive on Unix, so K and k are two variables.
@@ -985,7 +1016,7 @@ func TestReadCodexCwd(t *testing.T) {
 		{name: "stdio with cwd", config: "[mcp_servers.x]\ncommand = \"c\"\ncwd = \"/work/dir\"\n", wantDir: "/work/dir"},
 		{name: "relative cwd is kept as written", config: "[mcp_servers.x]\ncommand = \"c\"\ncwd = \"../w\"\n", wantDir: "../w"},
 		{name: "stdio without cwd", config: "[mcp_servers.x]\ncommand = \"c\"\n"},
-		{name: "http drops cwd", config: "[mcp_servers.x]\nurl = \"https://example.com/mcp\"\ncwd = \"/work/dir\"\n"},
+		{name: "http with cwd", config: "[mcp_servers.x]\nurl = \"https://example.com/mcp\"\ncwd = \"/work/dir\"\n", wantErrs: []errWant{{Server: "x", Reason: reasonBadEntry}}},
 		{name: "cwd is a number", config: "[mcp_servers.x]\ncommand = \"c\"\ncwd = 5\n", wantErrs: []errWant{{Server: "x", Reason: reasonBadEntry}}},
 		{name: "cwd is an array", config: "[mcp_servers.x]\ncommand = \"c\"\ncwd = [\"/a\"]\n", wantErrs: []errWant{{Server: "x", Reason: reasonBadEntry}}},
 		{name: "cwd is a table", config: "[mcp_servers.x]\ncommand = \"c\"\ncwd = { a = \"/a\" }\n", wantErrs: []errWant{{Server: "x", Reason: reasonBadEntry}}},
@@ -1164,34 +1195,55 @@ func TestTOMLBOMLen(t *testing.T) {
 	}
 }
 
-// TestCodexKeys checks that the key lists agree: codexReads reads exactly
-// codexReadKeys, in order, and no key is both read and ignored.
+// TestCodexKeys checks the key lists: every entry in codexReads has a
+// destination, codexKnownKeys holds each known key once (so no key is both
+// read and ignored), and it holds every read key and every ignored key. It
+// also checks that codexStdioKeys and codexRemoteKeys hold known keys only and
+// share no key.
 func TestCodexKeys(t *testing.T) {
 	t.Parallel()
 
+	seen := make(map[string]int, len(codexKnownKeys))
+	for _, k := range codexKnownKeys {
+		seen[k]++
+	}
+	for k, n := range seen {
+		if n > 1 {
+			t.Errorf("key %q is in codexKnownKeys %d times", k, n)
+		}
+	}
+
 	var e codexEntry
 	reads := codexReads(&e)
-	keys := make([]string, 0, len(reads))
 	for _, r := range reads {
-		keys = append(keys, r.key)
 		if r.dest == nil {
 			t.Errorf("codexReads: key %q has no destination", r.key)
 		}
+		if seen[r.key] == 0 {
+			t.Errorf("read key %q is not in codexKnownKeys", r.key)
+		}
 	}
-	if !reflect.DeepEqual(keys, codexReadKeys[:]) {
-		t.Errorf("codexReads keys = %v, want codexReadKeys %v", keys, codexReadKeys)
+	for _, k := range codexIgnoredKeys {
+		if seen[k] == 0 {
+			t.Errorf("ignored key %q is not in codexKnownKeys", k)
+		}
+	}
+	if want := len(reads) + len(codexIgnoredKeys); len(codexKnownKeys) != want {
+		t.Errorf("len(codexKnownKeys) = %d, want %d", len(codexKnownKeys), want)
 	}
 
-	known := codexKnownKeys()
-	if want := len(codexReadKeys) + len(codexIgnoredKeys); len(known) != want {
-		t.Errorf("len(codexKnownKeys()) = %d, want %d", len(known), want)
-	}
-	seen := make(map[string]bool, len(known))
-	for _, k := range known {
-		if seen[k] {
-			t.Errorf("key %q is in codexKnownKeys twice", k)
+	// The transport lists hold known keys only, and no key is in both.
+	transport := make(map[string]bool, len(codexStdioKeys)+len(codexRemoteKeys))
+	for _, list := range [][]string{codexStdioKeys[:], codexRemoteKeys[:]} {
+		for _, k := range list {
+			if seen[k] == 0 {
+				t.Errorf("transport key %q is not in codexKnownKeys", k)
+			}
+			if transport[k] {
+				t.Errorf("key %q is in codexStdioKeys and codexRemoteKeys", k)
+			}
+			transport[k] = true
 		}
-		seen[k] = true
 	}
 }
 

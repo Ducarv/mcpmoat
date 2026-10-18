@@ -85,15 +85,10 @@ type Server struct {
 	// Source is the path of the config file that declared the server.
 	Source string
 
-	// Untrusted is true for a server from a project file that Discover read
-	// from the working directory: <WorkDir>/.mcp.json or
-	// <WorkDir>/.cursor/mcp.json. A cloned repository can ship that file, so
-	// its command is not the user's choice. inspect must not start an
-	// untrusted stdio server without an explicit opt-in from the user.
-	//
-	// Untrusted is false for the user's own files: ~/.claude.json (also for
-	// the servers under its projects.<path> keys, which Claude Code writes
-	// when the user adds a server), ~/.cursor/mcp.json and the Codex file.
+	// Untrusted is true for a server from a project file, which a cloned
+	// repository can ship. inspect must not start or connect to an untrusted
+	// server, stdio or remote, without an explicit opt-in from the user. See
+	// the package doc, Untrusted files.
 	Untrusted bool
 
 	// Transport is how mcpmoat talks to the server.

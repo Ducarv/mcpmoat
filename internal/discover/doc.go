@@ -87,12 +87,30 @@
 // the file, so ReadConfig does not confine it to a project directory and
 // does not mark it untrusted (see Symlinks and Untrusted files below).
 //
-// [ReadClaudeCode], [ReadCursor] and [ReadCodex] read one file in a known
-// format. They do not check that the file exists, because a missing file is not
-// an error for them.
+// [ReadClaudeCode], [ReadCursor] and [ReadCodex] read one file. They do not
+// check that the file exists, because a missing file is not an error. A
+// caller that needs the file must check it first.
+//
+// A file that the user gives, for example with --config, can come from
+// anywhere, for example from a cloned repository. So a caller reads it as an
+// untrusted project file: [ReadClaudeCode] or [ReadCursor] with ScopeProject
+// and an empty projectPath. The read is then confined to the directory of the
+// file (see Symlinks), every server and error is Untrusted (see Untrusted
+// files), the "projects" section of a Claude Code file is not read, and the
+// size limit is maxProjectConfigSize (4 MiB). The one exception is a path
+// that resolves to the user's own global file (~/.claude.json,
+// ~/.cursor/mcp.json or ~/.codex/config.toml). The caller reads that file as
+// a global file, as Discover does. [ReadCodex] always reads a file as a
+// global file and has no untrusted mode, so a caller must not use it for a
+// Codex file that the user gives, unless the path resolves to
+// ~/.codex/config.toml.
 //
 // Each reader returns a [Result]. Servers come in a fixed order: file order,
-// then ProjectPath, then Name.
+// then ProjectPath, then Name. The errors of one file come in a fixed order
+// too: errors about the whole file (no server name) first, then by server
+// name. Errors with the same server name keep the order in which the reader
+// found them: in ~/.claude.json, the top level first, then the projects
+// sorted by path.
 //
 // A problem in one file, or in one server entry, gives a [FileError]. It never
 // hides the other servers. A FileError names the file, the position when it is
@@ -102,6 +120,12 @@
 // error (for example a permission error) or the context error of a canceled
 // read can be attached. An OS error holds an operation and an error number
 // only.
+//
+// Every FileError means that servers which the client can load may be missing
+// from the result: a refused file, project or server entry gives no servers.
+// So a caller must not treat a FileError as a harmless warning, also for a
+// global file. The scan command fails with exit code 2 when a reader returns
+// a FileError. A missing file is not an error and gives no FileError.
 //
 // Claude Code and Cursor (JSON):
 //
@@ -121,15 +145,24 @@
 //     two different names could become one. The check covers the server
 //     entries and the project keys only: a bad string in another part of the
 //     file, for example the chat history of ~/.claude.json, is not an error.
+//   - A JSON null in a server entry is an error ("invalid server entry"):
+//     as the value of type, command, url, args, env or headers, as an
+//     element of args, or as a value in env or headers.
+//   - A null server entry ("srv": null) is an error ("invalid server
+//     entry"), as a null in a server entry is.
+//   - An empty key under "projects" in ~/.claude.json is an error ("empty
+//     project path"): it names no directory. That project gives no servers,
+//     and the other projects are still read.
 //   - A file that holds only JSON whitespace (space, tab, CR and LF) gives no
 //     servers and no error. A file that holds only null is an error
 //     ("unexpected structure").
 //
 // All readers:
 //
-//   - A field that does not belong to the transport is dropped. A stdio server
-//     keeps command, args, env and, for Codex, cwd (as [Server.Dir]). A
-//     remote server keeps url and headers.
+//   - A stdio server keeps command, args, env and, for Codex, cwd (as
+//     [Server.Dir]). A remote server keeps url and headers. The JSON readers
+//     drop a field that does not belong to the transport; the Codex reader
+//     refuses it (see below).
 //   - A file that is not a regular file (for example a directory or a pipe) is
 //     rejected. The readers open the file first and then check its type, so
 //     a pipe cannot block the read.
@@ -138,7 +171,10 @@
 //     maxProjectConfigSize (4 MiB) for the project files (.mcp.json and
 //     .cursor/mcp.json) and maxTOMLSize (256 KiB) for the Codex file.
 //   - A file with more than maxServersPerFile (10,000) entries in all (servers
-//     and projects counted together) is rejected and gives no servers.
+//     and projects counted together) is rejected ("too many servers") and
+//     gives no servers. The cap bounds the result, not the decode: the
+//     readers decode the whole map of entries before they count them, and
+//     the size limits above bound that memory.
 //   - Keys are matched exactly: "Command" is not "command". A key that
 //     differs from a known key only by letter case is an error (the clients
 //     match keys exactly). The reason is "ambiguous key".
@@ -150,8 +186,11 @@
 //
 // Codex has more notes:
 //
-//   - An entry with both command and url is an error ("invalid server
-//     entry"), as in Codex. This is so also when one of the values is empty.
+//   - An entry that mixes the keys of the two transports is an error
+//     ("invalid server entry"), as in Codex: a stdio entry (with command)
+//     with url, http_headers, env_http_headers or bearer_token_env_var, or a
+//     remote entry (with url) with args, env, env_vars or cwd. Only the
+//     presence of the key counts, so an empty value is an error too.
 //   - The keys bearer_token_env_var, env_http_headers and env_vars hold the
 //     names of environment variables. The reader does not map them yet. A
 //     remote Codex server that uses only bearer_token_env_var is read without
@@ -160,37 +199,59 @@
 //     it does not read $CODEX_HOME. To read another Codex file, call
 //     [ReadCodex] with an explicit path.
 //
+// For the same reason, the package does not read $CLAUDE_CONFIG_DIR: the
+// Claude Code file is always Home/.claude.json. To read another Claude Code
+// file, call [ReadClaudeCode] with an explicit path. When the user sets
+// $CODEX_HOME or $CLAUDE_CONFIG_DIR, the client reads another file than
+// Discover, so a scan can miss servers.
+//
 // # Symlinks
 //
 // For a global file, the readers follow symlinks, so the file can point to
 // any regular file that the user can read. An error never shows the content
 // of that file.
 //
-// A project file from the working directory comes from a cloned repository,
-// so the readers open it inside the project directory (with [os.Root]). A
-// symlink that stays inside the project is followed. A symlink that leads out
-// of the project, and every absolute symlink, is refused with the reason
-// "file is outside the project". Without this rule, a repository could make
-// mcpmoat read a file of the user, for example ~/.claude.json, as its own
-// project file.
+// A project file comes from a cloned repository, so the readers open it
+// inside its project directory (with [os.Root]). For [Discover], the project
+// directory is WorkDir. For [ReadClaudeCode] and [ReadCursor] with
+// ScopeProject, it is projectPath, or the directory of the file when
+// projectPath is empty. In that last case the servers can get another
+// ProjectPath than the directory of the read: ReadCursor gives the servers of
+// <project>/.cursor/mcp.json the ProjectPath <project>, but the read stays in
+// .cursor. A symlink that stays inside the project directory is
+// followed. A symlink that leads out of it, every absolute symlink, and a
+// path that is not below it are refused with the reason "file is outside the
+// project". Without this rule, a repository could make mcpmoat read a file
+// of the user, for example ~/.claude.json, as its own project file.
 //
 // # Untrusted files
 //
-// The project files from the working directory (<WorkDir>/.mcp.json and
-// <WorkDir>/.cursor/mcp.json) are untrusted: a cloned repository can ship
-// them. Discover marks what it reads from them:
+// A project file (<WorkDir>/.mcp.json, <WorkDir>/.cursor/mcp.json, or a file
+// read with [ReadClaudeCode] or [ReadCursor] and ScopeProject) is untrusted:
+// a cloned repository can ship it. Its servers and errors are marked:
 //
-//   - Every [Server] from such a file has [Server.Untrusted] set. Package
-//     internal/inspect must not start an untrusted stdio server without an
-//     explicit opt-in from the user.
-//   - Every [FileError] about such a file has [FileError.Untrusted] set. An
-//     unreadable or refused project file can hide servers that the client
-//     still loads, so a caller must not treat the error as a harmless
-//     warning. The scan command exits with code 2 for it. An error about a
-//     global file stays a warning.
+//   - Every [Server] from such a file has [Server.Untrusted] set. Its command
+//     and its URL are not the user's choice, so package internal/inspect must
+//     not start or connect to an untrusted server, stdio or remote, without
+//     an explicit opt-in from the user. A start runs code from the
+//     repository. A connection is a network request to a host that the
+//     repository picks: it can reach a loopback, link-local or intranet
+//     address, or tell the author that the user scanned the repository (a
+//     beacon).
+//   - Every [FileError] about such a file has [FileError.Untrusted] set, a
+//     read error too. An unreadable or refused project file can hide servers
+//     that the client still loads. As for every FileError (see Reading
+//     configs), a caller must not treat the error as a harmless warning, and
+//     the scan command exits with code 2. The mark tells where the problem
+//     is: in a file that a repository can ship, not a file of the user.
+//
+// The JSON readers set Untrusted by scope: with ScopeProject they mark every
+// server and every error of the file. Discover sets it on the canceled error
+// that it adds when ctx ends before a project file is read.
 //
 // The user's own files are trusted: ~/.claude.json (also the servers under
-// its projects.<path> keys), ~/.cursor/mcp.json and the Codex file.
+// its projects.<path> keys, which Claude Code writes when the user adds a
+// server), ~/.cursor/mcp.json and the Codex file.
 //
 // # Working directory of a stdio server
 //

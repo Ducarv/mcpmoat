@@ -8,6 +8,7 @@ import (
 	"go/parser"
 	"go/token"
 	"io/fs"
+	"math"
 	"strconv"
 	"strings"
 	"testing"
@@ -239,35 +240,6 @@ func TestCanceledError(t *testing.T) {
 	}
 }
 
-// allReasons lists every reason constant of fileerror.go. Keep it in sync
-// with the constants: TestAllReasonsInSync fails when a constant is missing
-// here. It is an array, not a slice, so no test can change it. Tests use it
-// to check that a FileError has a known reason.
-var allReasons = [...]reason{
-	reasonCannotRead,
-	reasonNotRegular,
-	reasonTooLarge,
-	reasonOutsideProject,
-	reasonInvalidJSON,
-	reasonInvalidTOML,
-	reasonBadShape,
-	reasonBadServers,
-	reasonBadEntry,
-	reasonUnknownTransport,
-	reasonNoCommandOrURL,
-	reasonStdioNoCommand,
-	reasonRemoteNoURL,
-	reasonCanceled,
-	reasonTooDeep,
-	reasonKeyTooLong,
-	reasonTooManyServers,
-	reasonAmbiguousKey,
-	reasonEmptyName,
-	reasonBadString,
-	reasonNotFound,
-	reasonUnknownFormat,
-}
-
 func TestAllReasonsUnique(t *testing.T) {
 	t.Parallel()
 	seen := make(map[reason]bool, len(allReasons))
@@ -338,15 +310,13 @@ func TestAllReasonsInSync(t *testing.T) {
 
 func TestReadError(t *testing.T) {
 	t.Parallel()
-	for _, untrusted := range []bool{false, true} {
-		fe := readError("/p", untrusted, reasonCannotRead, fs.ErrPermission)
-		if fe.Path != "/p" || fe.Reason != reasonCannotRead || fe.Untrusted != untrusted {
-			t.Errorf("readError(untrusted=%v) = {Path: %q, Reason: %q, Untrusted: %v}",
-				untrusted, fe.Path, fe.Reason, fe.Untrusted)
-		}
-		if !errors.Is(fe, fs.ErrPermission) {
-			t.Errorf("readError(untrusted=%v): errors.Is(fe, fs.ErrPermission) = false", untrusted)
-		}
+	fe := readError("/p", reasonCannotRead, fs.ErrPermission)
+	if fe.Path != "/p" || fe.Reason != reasonCannotRead || fe.Untrusted {
+		t.Errorf("readError() = {Path: %q, Reason: %q, Untrusted: %v}, want {Path: %q, Reason: %q, Untrusted: false}",
+			fe.Path, fe.Reason, fe.Untrusted, "/p", reasonCannotRead)
+	}
+	if !errors.Is(fe, fs.ErrPermission) {
+		t.Error("readError(): errors.Is(fe, fs.ErrPermission) = false")
 	}
 }
 
@@ -373,12 +343,145 @@ func TestDisplayText(t *testing.T) {
 		{name: "unassigned code point", in: "a\U000e0080b", want: strconv.Quote("a\U000e0080b")},
 		{name: "invalid UTF-8 byte", in: "a\xffb", want: strconv.Quote("a\xffb")},
 		{name: "truncated UTF-8 sequence", in: "a\xe3\x81", want: strconv.Quote("a\xe3\x81")},
+
+		// Runes that unicode.IsPrint accepts but that show as nothing, or
+		// change the rune before them. strconv.Quote keeps them as they are,
+		// so displayText escapes them itself.
+		{name: "Hangul choseong filler U+115F", in: "a\u115fz", want: `"a\u115fz"`},
+		{name: "Hangul jungseong filler U+1160", in: "a\u1160z", want: `"a\u1160z"`},
+		{name: "Hangul filler U+3164", in: "a\u3164z", want: `"a\u3164z"`},
+		{name: "halfwidth Hangul filler U+FFA0", in: "a\uffa0z", want: `"a\uffa0z"`},
+		{name: "braille pattern blank U+2800", in: "a\u2800z", want: `"a\u2800z"`},
+		{name: "nonspacing mark Mn", in: "cafe\u0301", want: `"cafe\u0301"`},
+		{name: "enclosing mark Me", in: "a\u20ddz", want: `"a\u20ddz"`},
+		{name: "variation selector", in: "a\ufe0fz", want: `"a\ufe0fz"`},
+		{name: "supplementary variation selector", in: "a\U000e0100z", want: `"a\U000e0100z"`},
+		{name: "combining grapheme joiner", in: "a\u034fz", want: `"a\u034fz"`},
+		{
+			// The blank rune is escaped, and the other parts are escaped as
+			// strconv.Quote does it.
+			name: "blank rune with other escapes",
+			in:   "\x1b\u3164\"\xff\u3164é",
+			want: `"\x1b\u3164\"\xff\u3164é"`,
+		},
+
+		// Long text is cut to maxDisplayRunes runes and ends with cutMark.
+		{name: "exactly at the cap", in: strings.Repeat("a", maxDisplayRunes), want: strings.Repeat("a", maxDisplayRunes)},
+		{name: "one rune over the cap", in: strings.Repeat("a", maxDisplayRunes+1), want: strings.Repeat("a", maxDisplayRunes) + cutMark},
+		{name: "4 KiB name", in: strings.Repeat("a", 4096), want: strings.Repeat("a", maxDisplayRunes) + cutMark},
+		{name: "cap counts runes not bytes", in: strings.Repeat("é", 300), want: strings.Repeat("é", maxDisplayRunes) + cutMark},
+		{
+			// The cut is made before the quoting, so it never splits an escape.
+			name: "long quoted text",
+			in:   strings.Repeat("\x1b", 4096),
+			want: `"` + strings.Repeat(`\x1b`, maxDisplayRunes) + `"` + cutMark,
+		},
+		{
+			name: "long text with blank runes",
+			in:   strings.Repeat("\u3164", 4096),
+			want: `"` + strings.Repeat(`\u3164`, maxDisplayRunes) + `"` + cutMark,
+		},
+		{
+			// An invalid byte counts as one rune.
+			name: "long invalid UTF-8",
+			in:   strings.Repeat("\xff", 4096),
+			want: `"` + strings.Repeat(`\xff`, maxDisplayRunes) + `"` + cutMark,
+		},
+		{
+			// The part after the cut is not shown, so it does not make the
+			// text quoted.
+			name: "control character after the cut",
+			in:   strings.Repeat("a", maxDisplayRunes) + "\x1b",
+			want: strings.Repeat("a", maxDisplayRunes) + cutMark,
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			if got := displayText(tt.in); got != tt.want {
 				t.Errorf("displayText(%q) = %q, want %q", tt.in, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestDisplayTextMatchesQuote checks that displayText quotes as strconv.Quote
+// does when the text holds no blank rune (see isBlank).
+func TestDisplayTextMatchesQuote(t *testing.T) {
+	t.Parallel()
+	for _, in := range []string{"a\nb", "\x1b[31m\"x\"\\", "a\xffb\xe3\x81", "gpj.\u202eevil", "\u00a0\u3000"} {
+		if got, want := displayText(in), strconv.Quote(in); got != want {
+			t.Errorf("displayText(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+// TestDisplayPath checks that a path is quoted as displayText quotes, but is
+// never cut: the user needs the full path to find the file.
+func TestDisplayPath(t *testing.T) {
+	t.Parallel()
+	long := "/" + strings.Repeat("d", 4096)
+	tests := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{name: "plain path", in: "/tmp/config.json", want: "/tmp/config.json"},
+		{name: "long path is not cut", in: long, want: long},
+		{name: "control character", in: "/tmp/\x1b.json", want: strconv.Quote("/tmp/\x1b.json")},
+		{name: "blank rune", in: "/tmp/\u3164.json", want: `"/tmp/\u3164.json"`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if got := displayPath(tt.in); got != tt.want {
+				t.Errorf("displayPath(%q) = %q, want %q", tt.in, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestFileErrorLongNames checks that a FileError message stays short when the
+// server name and the project key are very long.
+func TestFileErrorLongNames(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		fe   *FileError
+	}{
+		{
+			name: "long server name",
+			fe:   &FileError{Path: "/w/.mcp.json", Server: strings.Repeat("s", 4096), Reason: reasonBadEntry},
+		},
+		{
+			name: "long project key",
+			fe:   &FileError{Path: "/h/.claude.json", ProjectPath: strings.Repeat("p", 4096), Reason: reasonBadEntry},
+		},
+		{
+			name: "long quoted name and key",
+			fe: &FileError{
+				Path:        "/h/.claude.json",
+				ProjectPath: strings.Repeat("\x1b", 4096),
+				Server:      strings.Repeat("\u3164", 4096),
+				Reason:      reasonBadEntry,
+			},
+		},
+	}
+	// Each name or key shows at most maxDisplayRunes escapes of at most 10
+	// bytes (\U0010ffff), plus the quotes and cutMark.
+	const maxLen = 2*(maxDisplayRunes*10+2+len(cutMark)) + 100
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got := tt.fe.Error()
+			if len(got) > maxLen {
+				t.Errorf("len(Error()) = %d, want at most %d", len(got), maxLen)
+			}
+			if !strings.Contains(got, cutMark+": ") {
+				t.Errorf("Error() = %q, want a cut name that ends with %q", got, cutMark)
+			}
+			if !strings.HasSuffix(got, reasonBadEntry) {
+				t.Errorf("Error() = %q, want it to end with the reason %q", got, reasonBadEntry)
 			}
 		})
 	}
@@ -449,7 +552,7 @@ func TestLineCol(t *testing.T) {
 	tests := []struct {
 		name     string
 		data     string
-		offset   int64
+		offset   int
 		wantLine int
 		wantCol  int
 	}{
@@ -464,7 +567,7 @@ func TestLineCol(t *testing.T) {
 		{name: "last byte", data: data, offset: 9, wantLine: 4, wantCol: 2},
 		{name: "offset equals len", data: data, offset: 10, wantLine: 4, wantCol: 3},
 		{name: "offset past len is clamped", data: data, offset: 999, wantLine: 4, wantCol: 3},
-		{name: "huge offset is clamped", data: data, offset: 1 << 62, wantLine: 4, wantCol: 3},
+		{name: "huge offset is clamped", data: data, offset: math.MaxInt, wantLine: 4, wantCol: 3},
 		{name: "negative offset is clamped", data: data, offset: -5, wantLine: 1, wantCol: 1},
 		{name: "offset equals len after trailing newline", data: "a\n", offset: 2, wantLine: 2, wantCol: 1},
 		{name: "empty data offset 0", data: "", offset: 0, wantLine: 1, wantCol: 1},
@@ -482,6 +585,30 @@ func TestLineCol(t *testing.T) {
 					tt.data, tt.offset, line, col, tt.wantLine, tt.wantCol)
 			}
 		})
+	}
+}
+
+// TestNewFileError checks that newFileError sets only Path and Reason, and
+// that inProject, forServer and atOffset set their fields and return the same
+// FileError, so the calls chain.
+func TestNewFileError(t *testing.T) {
+	t.Parallel()
+	const path = "/home/u/.claude.json"
+	data := []byte("{\n  \"a\": 1\n}")
+
+	fe := newFileError(path, reasonBadEntry)
+	want := FileError{Path: path, Reason: reasonBadEntry}
+	if *fe != want {
+		t.Fatalf("newFileError = %+v, want %+v", *fe, want)
+	}
+
+	got := fe.inProject("/p").forServer("s").atOffset(data, 4)
+	if got != fe {
+		t.Error("the chain returned another FileError, want the same pointer")
+	}
+	want = FileError{Path: path, ProjectPath: "/p", Server: "s", Line: 2, Col: 3, Reason: reasonBadEntry}
+	if *fe != want {
+		t.Errorf("after the chain = %+v, want %+v", *fe, want)
 	}
 }
 

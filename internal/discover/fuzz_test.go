@@ -33,7 +33,7 @@ import (
 const maxFuzzInput = 64 << 10
 
 // knownReasons is the set of fixed reason texts a FileError may have. It is
-// built from allReasons (fileerror_test.go), so a new reason needs no change
+// built from allReasons (helpers_internal_test.go), so a new reason needs no change
 // here.
 var knownReasons = func() map[string]bool {
 	m := make(map[string]bool, len(allReasons))
