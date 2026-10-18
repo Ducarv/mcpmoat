@@ -121,8 +121,9 @@ type transportEvents interface {
 	// It wraps errOtherOrigin, errCrossOriginRedirect, errTooManyRedirects or
 	// errBodyTooLarge. It is nil if there was none.
 	blockedErr() error
-	// connected reports whether the session was connected. An HTTP status
-	// after that comes from a server that speaks the configured transport.
+	// connected reports whether the server answered the MCP handshake. An
+	// HTTP status after that comes from a server that speaks the configured
+	// transport.
 	connected() bool
 }
 
@@ -400,8 +401,9 @@ func safeCause(cause error, rawURL, redactedURL string, secrets []string) error 
 //
 // For each secret it also replaces the form that %q prints (backslashes and
 // quotes escaped). It then cuts the result to maxReasonRunes runes and adds
-// "…" if it cut anything. The result can still hold text that the server controls;
-// callers must escape it with internal/termsafe before they print it.
+// "…" if it cut anything. The result can still hold text that the server
+// controls; callers must escape it with internal/termsafe before they print
+// it.
 func scrub(text, rawURL, redactedURL string, secrets []string) string {
 	return truncate(replaceSecrets(text, rawURL, redactedURL, secrets))
 }

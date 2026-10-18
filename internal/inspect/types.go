@@ -28,8 +28,9 @@ type Tool struct {
 	Description string
 
 	// InputSchema is the JSON Schema of the tool arguments, as raw JSON.
-	// The SDK decodes it, so this is the server's JSON encoded again. It is
-	// nil when the server sends none.
+	// The SDK decodes it, so this is the server's JSON encoded again: key
+	// order and spacing can differ, and numbers pass through float64, so an
+	// integer above 2^53 can change. It is nil when the server sends none.
 	InputSchema json.RawMessage
 
 	// OutputSchema is the JSON Schema of the tool result, with the same
@@ -91,8 +92,9 @@ type Resource struct {
 //
 // A list is nil when the server did not declare the capability and refused
 // the list request. It is empty but not nil when the server answered with an
-// empty list. In both cases the server offers no such item. A report can use the difference: a server that hides a list only from
-// some clients can look like a server without the capability.
+// empty list. In both cases the server offers no such item. A report can use
+// the difference: a server that hides a list only from some clients can look
+// like a server without the capability.
 type Result struct {
 	// ServerName is the server name from the initialize result.
 	ServerName string

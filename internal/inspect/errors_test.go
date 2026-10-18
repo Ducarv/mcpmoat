@@ -709,8 +709,6 @@ func assertHasServerAndURL(t *testing.T, ce *ConnectError, srv discover.Server) 
 	}
 }
 
-// TestClassifyRealNetworkTimeout checks the errors that the net package
-// produces for an expired context, and not only hand-made ones.
 // TestContextErr checks that contextErr finds a context error anywhere in the
 // chain and returns the bare sentinel, and nil for any other error.
 func TestContextErr(t *testing.T) {
@@ -744,6 +742,8 @@ func TestContextErr(t *testing.T) {
 	}
 }
 
+// TestClassifyRealNetworkTimeout checks the errors that the net package
+// produces for an expired context, and not only hand-made ones.
 func TestClassifyRealNetworkTimeout(t *testing.T) {
 	t.Parallel()
 

@@ -106,6 +106,14 @@ func Remote(ctx context.Context, srv discover.Server, opts RemoteOptions) (Resul
 	if reason != "" {
 		return Result{}, configError(srv, reason)
 	}
+	// RedactURL masks the whole URL when it cannot show it safely, for
+	// example when an unescaped "/", "?" or "#" in a credential ends the
+	// authority early, so that part of the token becomes the host. Remote
+	// would then send that part to the DNS resolver and put it in error
+	// text. Refuse such a URL.
+	if discover.RedactURL(raw) == discover.Mask {
+		return Result{}, configError(srv, `URL cannot be shown safely; escape "@", "/", "?" and "#" in the user info, and write the host in ASCII (punycode)`)
+	}
 
 	endpointURL, user := splitUserinfo(u)
 	endpoint := endpointURL.String()
@@ -113,7 +121,7 @@ func Remote(ctx context.Context, srv discover.Server, opts RemoteOptions) (Resul
 	// secrets are all the strings that classify removes from error text.
 	headers, secrets := splitHeaders(srv.Headers)
 	secrets = append(secrets, userinfoSecrets(user)...)
-	secrets = append(secrets, urlSecrets(raw)...)
+	secrets = append(secrets, urlSecrets(u.RawQuery, raw)...)
 
 	httpClient, rec, err := newHTTPClient(httpClientConfig{
 		Endpoint:  &endpointURL,
@@ -161,6 +169,17 @@ func Remote(ctx context.Context, srv discover.Server, opts RemoteOptions) (Resul
 	// checks in listAll. It must be added before Connect.
 	rawTools := &rawLists{}
 	mcpClient.AddSendingMiddleware(rawTools.middleware())
+	// Once the server answered initialize (or server/discover), it speaks the
+	// configured transport, even if a later request of Connect fails.
+	mcpClient.AddSendingMiddleware(func(next mcp.MethodHandler) mcp.MethodHandler {
+		return func(ctx context.Context, method string, req mcp.Request) (mcp.Result, error) {
+			res, err := next(ctx, method, req)
+			if err == nil && (method == methodInitialize || method == methodDiscover) {
+				rec.markHandshake()
+			}
+			return res, err
+		}
+	})
 
 	// fail turns err into the *ConnectError that Remote returns. The SDK
 	// formats some errors with %v, which drops the context error from the
@@ -219,19 +238,15 @@ func splitUserinfo(u *url.URL) (endpoint url.URL, user *url.Userinfo) {
 	return endpoint, u.User
 }
 
-// urlSecrets returns the secrets in the query and the path of raw, the
+// urlSecrets returns the secrets in rawQuery and in the path of raw, the
 // configured URL, for classify to remove wherever they stand in error text:
 // the parts that discover.RedactURL masks (discover.SecretQueryParts and
 // discover.SecretPathSegments), with at least minBareSecretLen bytes. In URL
 // form, classify removes the whole query and every secret segment anyway
 // (replaceURLParts); this list is for a server that echoes a part alone.
-func urlSecrets(raw string) []string {
-	u, err := url.Parse(raw)
-	if err != nil {
-		return nil
-	}
+func urlSecrets(rawQuery, raw string) []string {
 	var secrets []string
-	for _, s := range slices.Concat(discover.SecretQueryParts(u.RawQuery), discover.SecretPathSegments(raw)) {
+	for _, s := range slices.Concat(discover.SecretQueryParts(rawQuery), discover.SecretPathSegments(raw)) {
 		if len(s) >= minBareSecretLen {
 			secrets = append(secrets, s)
 		}
@@ -254,8 +269,26 @@ func splitHeaders(cfg discover.SecretMap) (headers map[string]string, secrets []
 		if cred := credentialPart(value); cred != "" {
 			secrets = append(secrets, cred)
 		}
+		secrets = append(secrets, basicSecrets(value)...)
 	}
 	return headers, secrets
+}
+
+// basicSecrets returns the secrets inside a "Basic <base64>" value: the
+// same strings that userinfoSecrets gives for the decoded name and password.
+// A server can echo the decoded password alone ("invalid password <pw>"). It
+// returns nil for any other value, and for a credential that does not decode.
+func basicSecrets(value string) []string {
+	scheme, cred, found := strings.Cut(value, " ")
+	if !found || !strings.EqualFold(scheme, "Basic") {
+		return nil
+	}
+	decoded, err := base64.StdEncoding.DecodeString(strings.TrimSpace(cred))
+	if err != nil {
+		return nil
+	}
+	name, password, _ := strings.Cut(string(decoded), ":")
+	return userinfoSecrets(url.UserPassword(name, password))
 }
 
 // credentialPart returns the part of value after an auth scheme, as in
@@ -274,19 +307,10 @@ func credentialPart(value string) string {
 	return rest
 }
 
-// isAuthScheme reports whether s can be an HTTP auth scheme name.
+// isAuthScheme reports whether s can be an HTTP auth scheme name. RFC 9110
+// (section 11.1) defines an auth-scheme as a token.
 func isAuthScheme(s string) bool {
-	if s == "" {
-		return false
-	}
-	for _, r := range s {
-		ok := r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' ||
-			r == '-' || r == '_' || r == '.'
-		if !ok {
-			return false
-		}
-	}
-	return true
+	return isHTTPToken(s)
 }
 
 // resultFromInit returns a Result with the fields from the initialize result
@@ -311,8 +335,11 @@ func resultFromInit(initRes *mcp.InitializeResult) Result {
 // The user name is in the list only when the URL has no password and the name
 // has at least minBareSecretLen bytes: then the name is the credential, as in
 // https://<token>@host/. Otherwise replaceUserinfo removes the name only where
-// it stands in a URL, so that a short name does not garble other words. A nil
-// user gives nil.
+// it stands in a URL, so that a short name does not garble other words.
+//
+// The password is in the list at any length, like a header value: a leak is
+// worse than a garbled word, and a short password is the one most likely to be
+// guessed from an echo. A nil user gives nil.
 func userinfoSecrets(user *url.Userinfo) []string {
 	if user == nil {
 		return nil

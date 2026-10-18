@@ -14,6 +14,7 @@ import (
 	"net/url"
 	"reflect"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -885,6 +886,7 @@ func TestRemoteConfigErrors(t *testing.T) {
 	tests := []struct {
 		name       string
 		srv        discover.Server
+		opts       RemoteOptions
 		wantReason string
 		// secrets are extra strings that the error must not hold.
 		secrets []string
@@ -935,7 +937,24 @@ func TestRemoteConfigErrors(t *testing.T) {
 			name: "header name that is not a token",
 			srv: rmServer(discover.TransportHTTP, rmWithSecretQuery("http://127.0.0.1:1/mcp"),
 				map[string]string{"X Key": rmAPIKeySecret}),
-			wantReason: `header name not allowed: "X Key"`,
+			wantReason: hcNotTokenErr,
+			secrets:    []string{"X Key"},
+		},
+		{
+			// A whole header line pasted as the key holds the token, so the
+			// key must not be shown.
+			name: "pasted header line as the key",
+			srv: rmServer(discover.TransportHTTP, rmWithSecretQuery("http://127.0.0.1:1/mcp"),
+				map[string]string{"Authorization: Bearer tok-NOTREAL-pasted-123": ""}),
+			wantReason: hcNotTokenErr,
+			secrets:    []string{"tok-NOTREAL-pasted-123", "Bearer"},
+		},
+		{
+			name:       "User-Agent option with CR LF",
+			srv:        rmServer(discover.TransportSSE, rmWithSecretQuery("http://127.0.0.1:1/mcp"), rmHeaders()),
+			opts:       RemoteOptions{UserAgent: "a\r\nX: y"},
+			wantReason: `header value not allowed: control character: "User-Agent"`,
+			secrets:    []string{"a\r\nX: y", `a\r\nX`, "X: y"},
 		},
 		{
 			name: "header value with CR LF",
@@ -957,7 +976,7 @@ func TestRemoteConfigErrors(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			_, err := Remote(t.Context(), tt.srv, RemoteOptions{})
+			_, err := Remote(t.Context(), tt.srv, tt.opts)
 			ce := rmRequireConnectError(t, err, KindConfig)
 			if !strings.Contains(ce.Reason, tt.wantReason) {
 				t.Errorf("Reason = %q, want it to contain %q", ce.Reason, tt.wantReason)
@@ -1850,6 +1869,9 @@ func TestIsAuthScheme(t *testing.T) {
 		{in: "Basic", want: true},
 		{in: "AWS4-HMAC-SHA256", want: true},
 		{in: "x_custom.v2", want: true},
+		// An auth-scheme is a token (RFC 9110, section 11.1), so every token
+		// punctuation byte is allowed.
+		{in: "x!#$%&'*+-.^_`|~", want: true},
 		{in: "0", want: true},
 		{in: "", want: false},
 		{in: "Bearer:", want: false},
@@ -1908,17 +1930,22 @@ func TestCredentialPart(t *testing.T) {
 }
 
 // TestSplitHeaders checks that splitHeaders gives the raw values to the HTTP
-// client and, for classify, each value and the credential part of a value
-// with an auth scheme.
+// client and, for classify, each value, the credential part of a value with
+// an auth scheme, and the decoded secrets of a Basic value.
 func TestSplitHeaders(t *testing.T) {
 	t.Parallel()
 
-	const tok = "tok-NOTREAL-1a7f"
+	const (
+		tok       = "tok-NOTREAL-1a7f"
+		basicPass = "pw-NOTREAL-split" //nolint:gosec // G101: fake test credential
+	)
+	basicTok := base64.StdEncoding.EncodeToString([]byte("user:" + basicPass))
 	cfg := discover.SecretMap{
 		"Authorization": discover.NewSecret("Bearer " + tok),
 		"X-Api-Key":     discover.NewSecret(rmAPIKeySecret),
 		"X-Short":       discover.NewSecret("Bearer short"),
 		"X-Empty":       discover.NewSecret(""),
+		"X-Basic":       discover.NewSecret("Basic " + basicTok),
 	}
 	headers, values := splitHeaders(cfg)
 
@@ -1927,12 +1954,19 @@ func TestSplitHeaders(t *testing.T) {
 		"X-Api-Key":     rmAPIKeySecret,
 		"X-Short":       "Bearer short",
 		"X-Empty":       "",
+		"X-Basic":       "Basic " + basicTok,
 	}
 	if !reflect.DeepEqual(headers, wantHeaders) {
 		t.Errorf("headers = %q, want %q", headers, wantHeaders)
 	}
 	slices.Sort(values)
-	wantValues := []string{"Bearer " + tok, "Bearer short", rmAPIKeySecret, tok}
+	wantValues := []string{
+		"Bearer " + tok, "Bearer short", rmAPIKeySecret, tok,
+		// The Basic value: the value and its credential part, then
+		// basicSecrets adds the token and the value again, and the password.
+		"Basic " + basicTok, basicTok,
+		basicTok, "Basic " + basicTok, basicPass,
+	}
 	slices.Sort(wantValues)
 	if !reflect.DeepEqual(values, wantValues) {
 		t.Errorf("values = %q, want %q", values, wantValues)
@@ -2287,7 +2321,13 @@ func TestURLSecrets(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			got := urlSecrets(tt.rawURL)
+			// Remote passes the query of the URL it parsed; an unparsable URL
+			// has none.
+			var rawQuery string
+			if u, err := url.Parse(tt.rawURL); err == nil {
+				rawQuery = u.RawQuery
+			}
+			got := urlSecrets(rawQuery, tt.rawURL)
 			slices.Sort(got)
 			want := slices.Clone(tt.want)
 			slices.Sort(want)
@@ -2536,4 +2576,317 @@ func TestRemoteBlockedConnectKeepsDeadline(t *testing.T) {
 	if !errors.Is(err, errCrossOriginRedirect) {
 		t.Errorf("errors.Is(err, errCrossOriginRedirect) = false, error: %v", err)
 	}
+}
+
+// TestBasicSecrets checks the secrets that basicSecrets finds in a
+// "Basic <base64>" header value: the same strings that userinfoSecrets gives
+// for the decoded name and password, and nil for any other value.
+func TestBasicSecrets(t *testing.T) {
+	t.Parallel()
+
+	const (
+		pass     = "pw-NOTREAL-5f1c" //nolint:gosec // G101: fake test credential
+		longName = "tok-NOTREAL-name"
+	)
+	b64 := func(s string) string { return base64.StdEncoding.EncodeToString([]byte(s)) }
+	tests := []struct {
+		name  string
+		value string
+		want  []string
+	}{
+		{name: "user and password", value: "Basic " + b64("user:"+pass), want: []string{b64("user:" + pass), "Basic " + b64("user:"+pass), pass}},
+		{name: "lower-case scheme", value: "basic " + b64("user:"+pass), want: []string{b64("user:" + pass), "Basic " + b64("user:"+pass), pass}},
+		{name: "upper-case scheme", value: "BASIC " + b64("user:"+pass), want: []string{b64("user:" + pass), "Basic " + b64("user:"+pass), pass}},
+		{name: "extra spaces around the credential", value: "Basic   " + b64("user:"+pass) + "  ", want: []string{b64("user:" + pass), "Basic " + b64("user:"+pass), pass}},
+		// A short password is a secret at any length.
+		{name: "short password", value: "Basic " + b64("u:pw"), want: []string{b64("u:pw"), "Basic " + b64("u:pw"), "pw"}},
+		// Only the first colon splits name and password.
+		{name: "password with a colon", value: "Basic " + b64("user:pa:ss"), want: []string{b64("user:pa:ss"), "Basic " + b64("user:pa:ss"), "pa:ss"}},
+		// Without a password, the name is the credential only when it is
+		// long enough (the userinfoSecrets rule).
+		{name: "long name and empty password", value: "Basic " + b64(longName+":"), want: []string{b64(longName + ":"), "Basic " + b64(longName+":"), longName}},
+		{name: "short name and empty password", value: "Basic " + b64("user:"), want: []string{b64("user:"), "Basic " + b64("user:")}},
+		{name: "long name and no colon", value: "Basic " + b64(longName), want: []string{b64(longName + ":"), "Basic " + b64(longName+":"), longName}},
+		{name: "short name and no colon", value: "Basic " + b64("user"), want: []string{b64("user:"), "Basic " + b64("user:")}},
+		{name: "bad base64", value: "Basic !!not-base64!!", want: nil},
+		{name: "base64 without padding", value: "Basic " + strings.TrimRight(b64("ab:c"), "="), want: nil},
+		{name: "URL-safe base64 alphabet", value: "Basic " + base64.URLEncoding.EncodeToString([]byte("u:\xfb\xff")), want: nil},
+		{name: "Bearer scheme", value: "Bearer " + b64("user:"+pass), want: nil},
+		{name: "scheme that starts with Basic", value: "BasicX " + b64("user:"+pass), want: nil},
+		{name: "no space after the scheme", value: "Basic" + b64("user:"+pass), want: nil},
+		{name: "tab after the scheme", value: "Basic\t" + b64("user:"+pass), want: nil},
+		{name: "bare base64", value: b64("user:" + pass), want: nil},
+		{name: "empty", value: "", want: nil},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if got := basicSecrets(tt.value); !reflect.DeepEqual(got, tt.want) {
+				t.Errorf("basicSecrets(%q) = %q, want %q", tt.value, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestRemoteBasicSecretEcho proves that a server cannot leak the password of
+// a configured "Authorization: Basic <base64>" header by echoing the decoded
+// password alone. The server answers with a JSON-RPC error that holds it.
+func TestRemoteBasicSecretEcho(t *testing.T) {
+	t.Parallel()
+
+	const pass = "pw-NOTREAL-77" //nolint:gosec // G101: fake test credential
+	basic := "Basic " + base64.StdEncoding.EncodeToString([]byte("user:"+pass))
+	for _, method := range []string{methodInitialize, methodListTools} {
+		for _, sse := range []bool{false, true} {
+			t.Run(method+"/"+string(rmKind(sse)), func(t *testing.T) {
+				t.Parallel()
+				var echoed atomic.Int32
+				mcpSrv := newFixtureMCPServer()
+				mcpSrv.AddReceivingMiddleware(func(next mcp.MethodHandler) mcp.MethodHandler {
+					return func(ctx context.Context, m string, req mcp.Request) (mcp.Result, error) {
+						if m == method {
+							echoed.Add(1)
+							return nil, fmt.Errorf("invalid password %s", pass)
+						}
+						return next(ctx, m, req)
+					}
+				})
+				ts, _ := startFixture(t, fixtureOpts{SSE: sse, Server: mcpSrv})
+				srv := rmServer(rmKind(sse), rmWithSecretQuery(fixtureURL(ts)), map[string]string{"Authorization": basic})
+
+				_, err := Remote(t.Context(), srv, RemoteOptions{})
+				if echoed.Load() == 0 {
+					t.Fatalf("the server never echoed the password; the test checks nothing (error: %v)", err)
+				}
+				ce := rmRequireConnectError(t, err, KindProtocol)
+				assertNoSecrets(t, err, pass, basic)
+				// The echo must reach the reason or the cause, masked.
+				text := ce.Reason
+				if cause := errors.Unwrap(ce); cause != nil {
+					text += " | " + cause.Error()
+				}
+				if want := "invalid password " + discover.Mask; !strings.Contains(text, want) {
+					t.Errorf("Reason and cause = %q, want them to contain %q", text, want)
+				}
+			})
+		}
+	}
+}
+
+// rmNoRequests is a base transport that must never be called. It counts the
+// calls and fails the test for each one.
+type rmNoRequests struct {
+	t     *testing.T
+	calls atomic.Int32
+}
+
+func (r *rmNoRequests) RoundTrip(req *http.Request) (*http.Response, error) {
+	r.calls.Add(1)
+	r.t.Errorf("unexpected %s request to host %q", req.Method, req.URL.Host)
+	return nil, errors.New("rmNoRequests: no request allowed")
+}
+
+// TestRemoteUnsafeURL proves that Remote refuses a URL that
+// discover.RedactURL cannot show safely, before any network I/O. In such a
+// URL an unescaped "/", "?" or "#" in the user info cuts the authority short,
+// so part of a token becomes the host: Remote would send it to the DNS
+// resolver and put it in error text. A non-ASCII host and an IPv6 zone are
+// refused for the same reason.
+func TestRemoteUnsafeURL(t *testing.T) {
+	t.Parallel()
+
+	const wantReason = `URL cannot be shown safely; escape "@", "/", "?" and "#" in the user info, and write the host in ASCII (punycode)`
+	ts, rec := startFixture(t, fixtureOpts{})
+	_, port, err := net.SplitHostPort(strings.TrimPrefix(ts.URL, "http://"))
+	if err != nil {
+		t.Fatalf("split host and port of %q: %v", ts.URL, err)
+	}
+
+	tests := []struct {
+		name   string
+		rawURL string
+		// secrets are the parts of the URL that the error must not hold.
+		secrets []string
+	}{
+		{name: "slash in the user info", rawURL: "https://ghp_NOTREALabcdef/ghi@127.0.0.1:" + port + "/mcp", secrets: []string{"ghp_NOTREALabcdef", "ghi@"}},
+		{ //nolint:gosec // G101: fake test credentials
+			name:    "at sign and slash in the password",
+			rawURL:  "https://u:p@ss/word@host/x",
+			secrets: []string{"p@ss", "ss/word", "word@", "ss"},
+		},
+		{name: "hash in the user info", rawURL: "https://ghp_NOTREALfrag#ment@127.0.0.1:" + port + "/mcp", secrets: []string{"ghp_NOTREALfrag", "ment@"}},
+		{name: "question mark in the user info", rawURL: "https://ghp_NOTREALquery?rest@127.0.0.1:" + port + "/mcp", secrets: []string{"ghp_NOTREALquery", "rest@"}},
+		{name: "non-ASCII host", rawURL: "https://bücher.example/mcp", secrets: []string{"bücher", "xn--"}},
+		{name: "IPv6 zone", rawURL: "http://[::1%25eth0]:" + port + "/mcp", secrets: []string{"eth0"}},
+	}
+	for _, tt := range tests {
+		for _, sse := range []bool{false, true} {
+			t.Run(tt.name+"/"+string(rmKind(sse)), func(t *testing.T) {
+				t.Parallel()
+				// The check must come from Remote, not from parseEndpoint.
+				if _, reason := parseEndpoint(tt.rawURL); reason != "" {
+					t.Fatalf("parseEndpoint(%q) reason = %q, want a URL that parses", tt.rawURL, reason)
+				}
+				base := &rmNoRequests{t: t}
+				srv := rmServer(rmKind(sse), tt.rawURL, rmHeaders())
+
+				_, err := Remote(t.Context(), srv, RemoteOptions{baseTransport: base})
+				ce := rmRequireConnectError(t, err, KindConfig)
+				if ce.Reason != wantReason {
+					t.Errorf("Reason = %q, want %q", ce.Reason, wantReason)
+				}
+				if ce.URL != discover.Mask {
+					t.Errorf("URL = %q, want %q", ce.URL, discover.Mask)
+				}
+				assertNoSecrets(t, err, tt.secrets...)
+				if n := base.calls.Load(); n != 0 {
+					t.Errorf("base transport got %d request(s), want 0", n)
+				}
+			})
+		}
+	}
+	t.Cleanup(func() {
+		if n := len(rec.requests()); n != 0 {
+			t.Errorf("fixture got %d request(s), want 0", n)
+		}
+	})
+}
+
+// TestRemoteEscapedUserinfoConnects proves that a URL with "/" and "@"
+// escaped in the user info is not refused as unsafe: Remote connects and
+// sends the decoded user info as a Basic Authorization header.
+func TestRemoteEscapedUserinfoConnects(t *testing.T) {
+	t.Parallel()
+
+	for _, sse := range []bool{false, true} {
+		t.Run(string(rmKind(sse)), func(t *testing.T) {
+			t.Parallel()
+			ts, rec := startFixture(t, fixtureOpts{SSE: sse})
+			host := strings.TrimPrefix(ts.URL, "http://")
+			srv := rmServer(rmKind(sse), "http://u%2Fx:p%40w@"+host+"/mcp", nil)
+
+			got, err := Remote(t.Context(), srv, RemoteOptions{})
+			if err != nil {
+				t.Fatalf("Remote() error = %v, want nil", err)
+			}
+			if got.ServerName != "fixture" {
+				t.Errorf("ServerName = %q, want %q", got.ServerName, "fixture")
+			}
+			reqs := rec.requests()
+			if len(reqs) == 0 {
+				t.Fatal("fixture got no request")
+			}
+			want := "Basic " + base64.StdEncoding.EncodeToString([]byte("u/x:p@w"))
+			for i, r := range reqs {
+				if auth := r.Header.Get("Authorization"); auth != want {
+					t.Errorf("request %d (%s) Authorization = %q, want %q", i, r.Method, auth, want)
+				}
+			}
+		})
+	}
+}
+
+// TestRemoteNoSSEHintAfterHandshake proves that the legacy SSE hint is not
+// shown once the server answered the MCP handshake (initialize or
+// server/discover), even when a later request of Connect gets HTTP 400, 404
+// or 405: the server has shown that it speaks streamable HTTP. A 404 on the
+// first request still gives the hint.
+func TestRemoteNoSSEHintAfterHandshake(t *testing.T) {
+	t.Parallel()
+
+	const hint = "set type = sse"
+
+	// failPost answers each POST whose JSON-RPC method is method with status
+	// and counts it. Other requests go to next.
+	failPost := func(method string, status int, hits *atomic.Int32) func(http.Handler) http.Handler {
+		return func(next http.Handler) http.Handler {
+			return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.Method == http.MethodPost && rmBodyHas(t, r, `"method":"`+method+`"`) {
+					hits.Add(1)
+					w.WriteHeader(status)
+					return
+				}
+				next.ServeHTTP(w, r)
+			})
+		}
+	}
+
+	t.Run("status on notifications/initialized", func(t *testing.T) {
+		t.Parallel()
+		for _, status := range []int{http.StatusBadRequest, http.StatusNotFound, http.StatusMethodNotAllowed} {
+			t.Run(strconv.Itoa(status), func(t *testing.T) {
+				t.Parallel()
+				var hits atomic.Int32
+				ts, _ := startFixture(t, fixtureOpts{Wrap: failPost("notifications/initialized", status, &hits)})
+				srv := rmServer(discover.TransportHTTP, rmWithSecretQuery(fixtureURL(ts)), rmHeaders())
+
+				_, err := Remote(t.Context(), srv, RemoteOptions{})
+				if hits.Load() == 0 {
+					t.Fatalf("the client never sent notifications/initialized; the test checks nothing (error: %v)", err)
+				}
+				ce := rmRequireConnectError(t, err, KindHTTP)
+				if ce.Status != status {
+					t.Errorf("Status = %d, want %d", ce.Status, status)
+				}
+				want := fmt.Sprintf("HTTP %d %s", status, http.StatusText(status))
+				if ce.Reason != want {
+					t.Errorf("Reason = %q, want %q (no SSE hint after the handshake)", ce.Reason, want)
+				}
+			})
+		}
+	})
+
+	t.Run("404 on initialize after server/discover answered", func(t *testing.T) {
+		t.Parallel()
+		// The server answers server/discover, but with versions older than
+		// the stateless protocol, so the SDK falls back to initialize. The
+		// initialize POST then gets 404.
+		var discovered atomic.Int32
+		mcpSrv := newFixtureMCPServer()
+		mcpSrv.AddReceivingMiddleware(func(next mcp.MethodHandler) mcp.MethodHandler {
+			return func(ctx context.Context, m string, req mcp.Request) (mcp.Result, error) {
+				res, err := next(ctx, m, req)
+				if dr, ok := res.(*mcp.DiscoverResult); ok && err == nil && m == methodDiscover {
+					discovered.Add(1)
+					dr.SupportedVersions = []string{"2025-11-25"}
+				}
+				return res, err
+			}
+		})
+		var hits atomic.Int32
+		ts, _ := startFixture(t, fixtureOpts{Stateless: true, Server: mcpSrv, Wrap: failPost(methodInitialize, http.StatusNotFound, &hits)})
+		srv := rmServer(discover.TransportHTTP, rmWithSecretQuery(fixtureURL(ts)), rmHeaders())
+
+		_, err := Remote(t.Context(), srv, RemoteOptions{})
+		if discovered.Load() == 0 || hits.Load() == 0 {
+			t.Fatalf("server/discover answered %d time(s), initialize failed %d time(s); want both; the test checks nothing (error: %v)",
+				discovered.Load(), hits.Load(), err)
+		}
+		ce := rmRequireConnectError(t, err, KindHTTP)
+		if want := "HTTP 404 Not Found"; ce.Reason != want {
+			t.Errorf("Reason = %q, want %q (no SSE hint after server/discover)", ce.Reason, want)
+		}
+	})
+
+	t.Run("404 on the first request keeps the hint", func(t *testing.T) {
+		t.Parallel()
+		var hits atomic.Int32
+		wrap := func(http.Handler) http.Handler {
+			return http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				hits.Add(1)
+				w.WriteHeader(http.StatusNotFound)
+			})
+		}
+		ts, _ := startFixture(t, fixtureOpts{Wrap: wrap})
+		srv := rmServer(discover.TransportHTTP, rmWithSecretQuery(fixtureURL(ts)), rmHeaders())
+
+		_, err := Remote(t.Context(), srv, RemoteOptions{})
+		if hits.Load() == 0 {
+			t.Fatalf("the server got no request (error: %v)", err)
+		}
+		ce := rmRequireConnectError(t, err, KindHTTP)
+		if !strings.Contains(ce.Reason, hint) {
+			t.Errorf("Reason = %q, want the SSE hint", ce.Reason)
+		}
+	})
 }

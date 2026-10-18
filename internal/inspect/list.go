@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"sync"
 
 	"github.com/modelcontextprotocol/go-sdk/jsonrpc"
@@ -48,8 +49,15 @@ var (
 	errLaterPage = errors.New("error on a later page")
 )
 
-// methodListTools is the JSON-RPC method of a tools/list request.
-const methodListTools = "tools/list"
+// JSON-RPC methods that this package watches in sending middleware.
+const (
+	// methodListTools is the method of a tools/list request.
+	methodListTools = "tools/list"
+	// methodInitialize and methodDiscover are the handshake methods. The SDK
+	// tries server/discover first and falls back to initialize.
+	methodInitialize = "initialize"
+	methodDiscover   = "server/discover"
+)
 
 // rawLists keeps the tools lists exactly as the server sent them, before the
 // SDK filters them.
@@ -99,7 +107,7 @@ func (r *rawLists) middleware() mcp.Middleware {
 
 // put stores a copy of the tools of res, before the SDK filters them.
 func (r *rawLists) put(res *mcp.ListToolsResult) {
-	tools := append([]*mcp.Tool(nil), res.Tools...)
+	tools := slices.Clone(res.Tools)
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if r.tools == nil {

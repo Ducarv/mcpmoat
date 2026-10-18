@@ -96,7 +96,8 @@ type requestRecorder struct {
 	// can be wrong: the inspection still fails.
 	status atomic.Int64
 
-	// sessionUp is true after Remote connected the session (markConnected).
+	// sessionUp is true after the server answered the MCP handshake
+	// (markHandshake) or Remote connected the session (markConnected).
 	sessionUp atomic.Bool
 
 	// mu guards blocked.
@@ -128,10 +129,16 @@ func (r *requestRecorder) connected() bool {
 	return r.sessionUp.Load()
 }
 
+// markHandshake records that the server answered initialize or
+// server/discover, so it speaks the configured transport.
+func (r *requestRecorder) markHandshake() {
+	r.sessionUp.Store(true)
+}
+
 // markConnected records that the session is up. Remote calls it after a
 // successful connect. It also calls forgetBlocked.
 func (r *requestRecorder) markConnected() {
-	r.sessionUp.Store(true)
+	r.markHandshake()
 	r.forgetBlocked()
 }
 
@@ -221,8 +228,9 @@ type httpClientConfig struct {
 // The returned requestRecorder holds the last failure status and the first
 // error that the client raised on purpose (see requestRecorder).
 //
-// The error is for a config that mcpmoat cannot use: it wraps
-// errReservedHeader and holds the header key only, never a value.
+// The error is for a config that mcpmoat cannot use. It wraps
+// errReservedHeader or errInvalidHeaderValue and holds at most a header key,
+// never a value, or it reports a nil Endpoint.
 //
 // The client has no Client.Timeout: that timeout also cuts the body read, so
 // it would end a long SSE stream. The context of each request bounds the time.
@@ -345,8 +353,13 @@ func buildHeader(headers map[string]string, ua string) (http.Header, error) {
 		if key == "" {
 			return nil, fmt.Errorf("%w: empty", errReservedHeader)
 		}
+		if !isHTTPToken(key) {
+			// The key is not printed: a key that holds a pasted header line
+			// ("Authorization: Bearer <token>") would show the token.
+			return nil, fmt.Errorf("%w: a key is not a valid HTTP token (the key is not shown, it may hold a value)", errReservedHeader)
+		}
 		canonical := http.CanonicalHeaderKey(key)
-		if isReservedHeader(canonical) || !validHeaderName(key) {
+		if isReservedHeader(canonical) {
 			return nil, fmt.Errorf("%w: %q", errReservedHeader, key)
 		}
 		if !validHeaderValue(headers[key]) {
@@ -355,19 +368,22 @@ func buildHeader(headers map[string]string, ua string) (http.Header, error) {
 		header.Set(canonical, headers[key])
 	}
 	if _, ok := header["User-Agent"]; !ok && ua != "" {
+		if !validHeaderValue(ua) {
+			return nil, fmt.Errorf("%w: %q", errInvalidHeaderValue, "User-Agent")
+		}
 		header.Set("User-Agent", ua)
 	}
 	return header, nil
 }
 
-// validHeaderName reports whether name is an HTTP token (RFC 9110, section
-// 5.6.2), as net/http requires for a header name.
-func validHeaderName(name string) bool {
-	if name == "" {
+// isHTTPToken reports whether s is an HTTP token (RFC 9110, section 5.6.2),
+// as net/http requires for a header name. An auth scheme is a token too.
+func isHTTPToken(s string) bool {
+	if s == "" {
 		return false
 	}
-	for i := range len(name) {
-		c := name[i]
+	for i := range len(s) {
+		c := s[i]
 		ok := c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' ||
 			strings.IndexByte("!#$%&'*+-.^_`|~", c) >= 0
 		if !ok {
@@ -555,10 +571,34 @@ func sameOrigin(u, origin *url.URL) bool {
 	if scheme != strings.ToLower(origin.Scheme) {
 		return false
 	}
-	if !strings.EqualFold(u.Hostname(), origin.Hostname()) {
+	if !equalFoldASCII(u.Hostname(), origin.Hostname()) {
 		return false
 	}
 	return portOrDefault(u, scheme) == portOrDefault(origin, scheme)
+}
+
+// equalFoldASCII reports whether a and b are equal when ASCII letters are
+// compared without case. Other bytes must match exactly. strings.EqualFold
+// folds Unicode too, and IDNA keeps some of those letters apart, so two
+// different host names could compare equal.
+func equalFoldASCII(a, b string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range len(a) {
+		if lowerASCII(a[i]) != lowerASCII(b[i]) {
+			return false
+		}
+	}
+	return true
+}
+
+// lowerASCII returns c in lower case if it is an ASCII letter.
+func lowerASCII(c byte) byte {
+	if c >= 'A' && c <= 'Z' {
+		return c + ('a' - 'A')
+	}
+	return c
 }
 
 // portOrDefault returns the port of u, or the default port of scheme if u has

@@ -143,6 +143,12 @@ func TestSameOrigin(t *testing.T) {
 		{name: "scheme case", a: &url.URL{Scheme: "HTTP", Host: "example.com"}, b: u("http://example.com"), want: true},
 		{name: "scheme case, both upper", a: &url.URL{Scheme: "HTTPS", Host: "example.com"}, b: &url.URL{Scheme: "Https", Host: "example.com"}, want: true},
 		{name: "host case", a: u("http://EXAMPLE.com"), b: u("http://example.com"), want: true},
+		{name: "host case, mixed both sides", a: u("http://ExAmPlE.CoM:8080"), b: u("http://eXaMpLe.cOm:8080"), want: true},
+		// strings.EqualFold folds these Unicode letters to ASCII ones, but
+		// IDNA keeps them apart, so they are other hosts.
+		{name: "Kelvin sign is not K", a: &url.URL{Scheme: "http", Host: "\u212aey.example"}, b: u("http://key.example"), want: false},
+		{name: "long s is not s", a: &url.URL{Scheme: "https", Host: "example\u017f.com"}, b: u("https://examples.com"), want: false},
+		{name: "same non-ASCII host", a: &url.URL{Scheme: "http", Host: "b\u00fccher.example"}, b: &url.URL{Scheme: "http", Host: "b\u00fccher.example"}, want: true},
 		{name: "http default port 80", a: u("http://h"), b: u("http://h:80"), want: true},
 		{name: "http default port 80, reversed", a: u("http://h:80"), b: u("http://h"), want: true},
 		{name: "https default port 443", a: u("https://h"), b: u("https://h:443"), want: true},
@@ -176,6 +182,54 @@ func TestSameOrigin(t *testing.T) {
 			t.Parallel()
 			if got := sameOrigin(tt.a, tt.b); got != tt.want {
 				t.Errorf("sameOrigin(%v, %v) = %v, want %v", tt.a, tt.b, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestEqualFoldASCII checks that equalFoldASCII ignores the case of ASCII
+// letters only, and compares every other byte exactly.
+func TestEqualFoldASCII(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		a, b string
+		want bool
+	}{
+		{name: "both empty", a: "", b: "", want: true},
+		{name: "identical", a: "example.com", b: "example.com", want: true},
+		{name: "upper and lower case", a: "EXAMPLE.COM", b: "example.com", want: true},
+		{name: "mixed case", a: "ExAmPlE", b: "eXaMpLe", want: true},
+		{name: "first and last letter", a: "Az", b: "aZ", want: true},
+		{name: "digits and punctuation", a: "a-1.b_2:80", b: "A-1.B_2:80", want: true},
+		{name: "different letter", a: "example.com", b: "examplf.com", want: false},
+		{name: "different length", a: "example.com", b: "example.co", want: false},
+		{name: "empty and not empty", a: "", b: "a", want: false},
+		// The bytes next to the letter ranges must not fold: "@" is "A"-1,
+		// "[" is "Z"+1, "`" is "a"-1 and "{" is "z"+1.
+		{name: "at sign and backtick", a: "@", b: "`", want: false},
+		{name: "brackets and braces", a: "[", b: "{", want: false},
+		{name: "Z and brace", a: "Z", b: "{", want: false},
+		{name: "A and backtick", a: "A", b: "`", want: false},
+		// Unicode case folding must not apply.
+		{name: "Kelvin sign and k", a: "\u212a", b: "k", want: false},
+		{name: "Kelvin sign and K", a: "\u212a", b: "K", want: false},
+		{name: "Greek final sigma and sigma", a: "\u03c2", b: "\u03c3", want: false},
+		{name: "Greek capital and small sigma", a: "\u03a3", b: "\u03c3", want: false},
+		{name: "long s and s", a: "\u017f", b: "s", want: false},
+		{name: "identical non-ASCII", a: "b\u00fccher", b: "b\u00fccher", want: true},
+		{name: "non-ASCII with ASCII case", a: "B\u00fcCHER", b: "b\u00fccher", want: true},
+		{name: "upper and lower u umlaut", a: "\u00dc", b: "\u00fc", want: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if got := equalFoldASCII(tt.a, tt.b); got != tt.want {
+				t.Errorf("equalFoldASCII(%q, %q) = %t, want %t", tt.a, tt.b, got, tt.want)
+			}
+			if got := equalFoldASCII(tt.b, tt.a); got != tt.want {
+				t.Errorf("equalFoldASCII(%q, %q) = %t, want %t", tt.b, tt.a, got, tt.want)
 			}
 		})
 	}
@@ -1051,6 +1105,31 @@ func TestRequestRecorderBlocked(t *testing.T) {
 		}
 	})
 
+	t.Run("markHandshake sets connected and keeps the blocked error", func(t *testing.T) {
+		t.Parallel()
+		var rec requestRecorder
+		rec.recordResponse(hcRecordResp(404, nil))
+		_ = rec.recordBlocked(errCrossOriginRedirect)
+		rec.markHandshake()
+		if !rec.connected() {
+			t.Error("connected() = false after markHandshake, want true")
+		}
+		if got := rec.blockedErr(); got != errCrossOriginRedirect { //nolint:errorlint // identity check: markHandshake must keep the stored error unchanged
+			t.Errorf("blockedErr() = %v after markHandshake, want errCrossOriginRedirect", got)
+		}
+		if got := rec.lastStatus(); got != 404 {
+			t.Errorf("lastStatus() = %d after markHandshake, want 404", got)
+		}
+		// markConnected after markHandshake still drops the blocked error.
+		rec.markConnected()
+		if err := rec.blockedErr(); err != nil {
+			t.Errorf("blockedErr() = %v after markConnected, want nil", err)
+		}
+		if !rec.connected() {
+			t.Error("connected() = false after markConnected, want true")
+		}
+	})
+
 	t.Run("forgetBlocked does not mark the session connected", func(t *testing.T) {
 		t.Parallel()
 		var rec requestRecorder
@@ -1881,7 +1960,7 @@ func (s *hcSeen) add(r *http.Request) {
 func (s *hcSeen) snapshot() (keys, uas []string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return append([]string(nil), s.keys...), append([]string(nil), s.uas...)
+	return slices.Clone(s.keys), slices.Clone(s.uas)
 }
 
 // hcChainServer starts a server where /hop/N redirects to /hop/N+1 until N is
@@ -2131,6 +2210,12 @@ func TestBuildHeaderUserAgent(t *testing.T) {
 		{name: "ua used when the config has none", headers: nil, ua: hcUA, want: []string{hcUA}},
 		{name: "config ua wins over ua", headers: map[string]string{"user-agent": "custom/1"}, ua: hcUA, want: []string{"custom/1"}},
 		{name: "config ua kept with empty ua", headers: map[string]string{"User-Agent": "custom/2"}, ua: "", want: []string{"custom/2"}},
+		// The config User-Agent wins, so a bad default is never used and not
+		// checked.
+		{name: "config ua wins over a ua with CR LF", headers: map[string]string{"User-Agent": "custom/3"}, ua: "a\r\nX: y", want: []string{"custom/3"}},
+		{name: "config ua in lower case wins over a ua with NUL", headers: map[string]string{"user-agent": "custom/4"}, ua: "ua\x00", want: []string{"custom/4"}},
+		// A tab and obs-text are valid in a header value.
+		{name: "ua with a tab and UTF-8 is kept", headers: nil, ua: "client\t/é", want: []string{"client\t/é"}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -2153,28 +2238,51 @@ func TestBuildHeaderUserAgent(t *testing.T) {
 	}
 }
 
-// TestBuildHeaderErrors checks the exact text of the errors for a header name
-// that the config must not set. The text holds the key, quoted with %q so
-// that a control character in it cannot change the terminal, and never the
-// value.
+// hcNotTokenErr is the fixed error text for a header key that is not an HTTP
+// token. It does not show the key: a key can hold a pasted header line with a
+// value in it.
+const hcNotTokenErr = "header name not allowed: a key is not a valid HTTP token (the key is not shown, it may hold a value)"
+
+// TestBuildHeaderErrors checks the exact text of the errors for a header that
+// the config must not set. The text holds a reserved key, quoted with %q so
+// that a control character in it cannot change the terminal. It never holds
+// a value, and never a key that is not an HTTP token.
 func TestBuildHeaderErrors(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
 		name    string
 		headers map[string]string
-		want    string
+		// ua is the User-Agent default; empty means hcUA.
+		ua   string
+		want string
 		// wantErr is the sentinel that the error wraps; nil means
 		// errReservedHeader.
 		wantErr error
+		// secrets are extra strings that the error must not hold.
+		secrets []string
 	}{
 		{name: "empty name", headers: map[string]string{"": hcSecret}, want: "header name not allowed: empty"},
 		// A name that is not an HTTP token. net/http would refuse to send it,
-		// and a space or a colon could split the header line.
-		{name: "space in name", headers: map[string]string{"X Key": hcSecret}, want: `header name not allowed: "X Key"`},
-		{name: "colon in name", headers: map[string]string{"X-Key:": hcSecret}, want: `header name not allowed: "X-Key:"`},
-		{name: "non-ASCII name", headers: map[string]string{"X-Clé": hcSecret}, want: `header name not allowed: "X-Clé"`},
-		{name: "CR LF in name", headers: map[string]string{"X-A\r\nX-B": hcSecret}, want: `header name not allowed: "X-A\r\nX-B"`},
+		// and a space or a colon could split the header line. The text does
+		// not show the key.
+		{name: "space in name", headers: map[string]string{"X Key": hcSecret}, want: hcNotTokenErr, secrets: []string{"X Key"}},
+		{name: "colon in name", headers: map[string]string{"X-Key:": hcSecret}, want: hcNotTokenErr, secrets: []string{"X-Key:"}},
+		{name: "non-ASCII name", headers: map[string]string{"X-Clé": hcSecret}, want: hcNotTokenErr, secrets: []string{"X-Cl"}},
+		{name: "CR LF in name", headers: map[string]string{"X-A\r\nX-B": hcSecret}, want: hcNotTokenErr, secrets: []string{"X-A", "X-B"}},
+		// A pasted header line as the key: its value is in the key, so the
+		// key must not be shown.
+		{
+			name:    "pasted Authorization line as the key",
+			headers: map[string]string{"Authorization: Bearer tok-NOTREAL-pasted-123": ""},
+			want:    hcNotTokenErr,
+			secrets: []string{"tok-NOTREAL-pasted-123", "Bearer"},
+		},
+		{name: "pasted key and value as the key", headers: map[string]string{"sk-NOTREAL: x": ""}, want: hcNotTokenErr, secrets: []string{"sk-NOTREAL"}},
+		// A token key that is reserved is still named, so the user can find
+		// it, even when another key is not a token: "Accept" sorts first.
+		{name: "reserved token key sorts before a bad key", headers: map[string]string{"Accept": "x", "X Key": hcSecret}, want: `header name not allowed: "Accept"`},
+		{name: "bad key sorts before a reserved key", headers: map[string]string{"Host": "x", "Authorization: Bearer tok-NOTREAL-pasted-123": ""}, want: hcNotTokenErr, secrets: []string{"tok-NOTREAL-pasted-123"}},
 		// A value with a control character. The text names the key, never
 		// the value.
 		{name: "CR LF in value", headers: map[string]string{"X-Inject": "a\r\nInjected: " + hcSecret}, want: `header value not allowed: control character: "X-Inject"`, wantErr: errInvalidHeaderValue},
@@ -2184,14 +2292,25 @@ func TestBuildHeaderErrors(t *testing.T) {
 		{name: "bad value keeps the config case of the key", headers: map[string]string{"x-key": hcSecret + "\r"}, want: `header value not allowed: control character: "x-key"`, wantErr: errInvalidHeaderValue},
 		{name: "reserved name", headers: map[string]string{"X-Key": "ok", "Host": hcSecret}, want: `header name not allowed: "Host"`},
 		{name: "reserved name keeps the config case", headers: map[string]string{"mcp-session-id": hcSecret}, want: `header name not allowed: "mcp-session-id"`},
-		{name: "control character in name is quoted", headers: map[string]string{"Mcp-\x1b[31m": hcSecret}, want: `header name not allowed: "Mcp-\x1b[31m"`},
+		{name: "control character in name is not shown", headers: map[string]string{"Mcp-\x1b[31m": hcSecret}, want: hcNotTokenErr, secrets: []string{"\x1b", "Mcp-"}},
+		// The User-Agent default from RemoteOptions is checked like a config
+		// value when the config sets no User-Agent.
+		{name: "CR LF in the default User-Agent", headers: map[string]string{"X-Key": "ok"}, ua: "a\r\nInjected: 1", want: `header value not allowed: control character: "User-Agent"`, wantErr: errInvalidHeaderValue, secrets: []string{"a\r\n"}},
+		{name: "NUL in the default User-Agent, no config headers", headers: nil, ua: "ua\x00", want: `header value not allowed: control character: "User-Agent"`, wantErr: errInvalidHeaderValue, secrets: []string{"ua\x00"}},
+		{name: "DEL in the default User-Agent", headers: nil, ua: "ua\x7f", want: `header value not allowed: control character: "User-Agent"`, wantErr: errInvalidHeaderValue},
+		// A bad config User-Agent is named with the config case of its key.
+		{name: "bad config User-Agent", headers: map[string]string{"user-agent": "a\nb"}, want: `header value not allowed: control character: "user-agent"`, wantErr: errInvalidHeaderValue},
 		// The keys are checked in sorted order, so the error is stable.
 		{name: "first sorted key is named", headers: map[string]string{"Host": hcSecret, "Accept": hcSecret}, want: `header name not allowed: "Accept"`},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			header, err := buildHeader(tt.headers, hcUA)
+			ua := tt.ua
+			if ua == "" {
+				ua = hcUA
+			}
+			header, err := buildHeader(tt.headers, ua)
 			if err == nil {
 				t.Fatalf("buildHeader() = %v, want an error", header)
 			}
@@ -2208,6 +2327,7 @@ func TestBuildHeaderErrors(t *testing.T) {
 			if strings.Contains(err.Error(), hcSecret) || strings.Contains(err.Error(), "Injected") {
 				t.Errorf("error text %q holds the header value", err)
 			}
+			assertNoSecrets(t, err, tt.secrets...)
 		})
 	}
 }
@@ -2231,8 +2351,8 @@ func TestBuildHeaderAcceptsValidBytes(t *testing.T) {
 	}
 }
 
-// TestValidHeaderName checks the HTTP token rule (RFC 9110, section 5.6.2).
-func TestValidHeaderName(t *testing.T) {
+// TestIsHTTPToken checks the HTTP token rule (RFC 9110, section 5.6.2).
+func TestIsHTTPToken(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
@@ -2262,15 +2382,15 @@ func TestValidHeaderName(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			if got := validHeaderName(tt.in); got != tt.want {
-				t.Errorf("validHeaderName(%q) = %t, want %t", tt.in, got, tt.want)
+			if got := isHTTPToken(tt.in); got != tt.want {
+				t.Errorf("isHTTPToken(%q) = %t, want %t", tt.in, got, tt.want)
 			}
 		})
 	}
 	// Each separator alone, so that one byte that slips through is found.
 	for _, c := range "\"(),/:;<=>?@[\\]{} \t" {
-		if validHeaderName("X" + string(c)) {
-			t.Errorf("validHeaderName(%q) = true, want false", "X"+string(c))
+		if isHTTPToken("X" + string(c)) {
+			t.Errorf("isHTTPToken(%q) = true, want false", "X"+string(c))
 		}
 	}
 }
