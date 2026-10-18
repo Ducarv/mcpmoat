@@ -174,7 +174,8 @@ func helperCommand(ctx context.Context, path string, attr *syscall.SysProcAttr, 
 }
 
 // execInspector is an inspect.Inspector that runs the server as a child
-// process and waits for it to exit. It reads no MCP content. It follows the
+// process. It reads stdout to EOF, kills the process group and then waits for
+// the child. It reads no MCP content. It follows the
 // Inspector contract the way a real stdio inspector must: its own process
 // group, a pipe read that ends when ctx is done, and a group kill before Wait.
 //
@@ -186,8 +187,9 @@ type execInspector struct {
 	pids chan<- int
 }
 
-// Inspect starts the server in its own process group and waits until it exits.
-// A server killed because ctx is done gives a non-nil error.
+// Inspect starts the server in its own process group, reads its stdout to EOF,
+// kills the group and then waits for the child. A server killed because ctx is
+// done gives a non-nil error.
 func (e execInspector) Inspect(ctx context.Context, s discover.Server) (inspect.Result, error) {
 	cmd := helperCommand(ctx, s.Command, nil, s.Args.Values()...)
 

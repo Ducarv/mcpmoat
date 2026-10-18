@@ -403,6 +403,15 @@ func TestKillProcessGroupAfterWaitSendsNothing(t *testing.T) {
 	if err := cmd.Start(); err != nil {
 		t.Fatalf("Start() error = %v", err)
 	}
+	waited := false
+	t.Cleanup(func() {
+		// If the test failed before Wait, stop the child and reap it, so that
+		// no zombie and no exec goroutine are left behind.
+		if !waited {
+			_ = inspect.KillProcessGroup(cmd)
+			_ = cmd.Wait()
+		}
+	})
 
 	line, err := bufio.NewReader(stdout).ReadString('\n')
 	if err != nil {
@@ -424,6 +433,7 @@ func TestKillProcessGroupAfterWaitSendsNothing(t *testing.T) {
 		t.Fatalf("Process.Kill() error = %v", err)
 	}
 	_ = cmd.Wait() // the error is the expected "signal: killed"
+	waited = true
 
 	if err := inspect.KillProcessGroup(cmd); !errors.Is(err, os.ErrProcessDone) {
 		t.Errorf("KillProcessGroup() after Wait error = %v, want os.ErrProcessDone", err)

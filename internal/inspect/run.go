@@ -167,9 +167,12 @@ func runOne(parent context.Context, s discover.Server, opts Options, insp Inspec
 
 	// Read each context state once, so that the case that is chosen and the
 	// error that is wrapped see the same values. The parent can end at any
-	// moment.
+	// moment. Read sctx first: a parent sets its own error before it cancels
+	// its children, so when sctx has passed a deadline and the parent still
+	// has no error after that, the deadline is our own.
+	serr := sctx.Err()
 	perr := parent.Err()
-	ownDeadline := perr == nil && errors.Is(sctx.Err(), context.DeadlineExceeded)
+	ownDeadline := perr == nil && errors.Is(serr, context.DeadlineExceeded)
 
 	switch {
 	case err == nil:
