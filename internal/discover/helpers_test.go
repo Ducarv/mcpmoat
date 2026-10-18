@@ -39,6 +39,17 @@ func slogHandlers() []slogHandler {
 	}
 }
 
+// isPrintableASCII reports whether every byte of s is printable ASCII (0x20
+// to 0x7e). It is true for "".
+func isPrintableASCII(s string) bool {
+	for i := range len(s) {
+		if s[i] < 0x20 || s[i] > 0x7e {
+			return false
+		}
+	}
+	return true
+}
+
 // noErr adapts a method that cannot fail to the func() (string, error) shape
 // of the method tables.
 func noErr(f func() string) func() (string, error) {
@@ -65,7 +76,7 @@ func testServers() []testServer {
 }
 
 // stdioServer returns a stdio Server whose env value and token arg are
-// canaries. discovertest has no args canary, so the arg uses CanaryEnv.
+// canaries.
 func stdioServer() discover.Server {
 	return discover.Server{
 		Name:      "fs",
@@ -74,7 +85,7 @@ func stdioServer() discover.Server {
 		Source:    "/tmp/x/.claude.json", // only a string: nothing reads this path
 		Transport: discover.TransportStdio,
 		Command:   "npx",
-		Args:      discover.NewArgs([]string{"-y", "pkg", "--token", discovertest.CanaryEnv}),
+		Args:      discover.NewArgs([]string{"-y", "pkg", "--token", discovertest.CanaryArgs}),
 		Env:       discover.SecretMap{"API_KEY": discover.NewSecret(discovertest.CanaryEnv)},
 	}
 }

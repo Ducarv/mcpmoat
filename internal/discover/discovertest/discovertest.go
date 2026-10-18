@@ -1,8 +1,9 @@
 // Package discovertest has test helpers that check output for leaked secrets.
 //
-// Fixtures put the canary values below in env and header fields. Tests then
-// call AssertNoLeak on everything the code under test prints or returns
-// (text, JSON, errors, logs) to prove that no value reached the output.
+// Fixtures put the canary values below in env, header, URL and args fields.
+// Tests then call AssertNoLeak on everything the code under test prints or
+// returns (text, JSON, errors, logs) to prove that no value reached the
+// output.
 //
 // Import this package only from _test.go files, so the testing package never
 // reaches the mcpmoat binary.
@@ -25,12 +26,14 @@ const (
 	CanaryHeader = "mcpmoat-canary-header-4Vb8Rt"
 	// CanaryURL is the fake value for secrets embedded in server URLs in fixtures.
 	CanaryURL = "mcpmoat-canary-url-9Jd3Wm"
+	// CanaryArgs is the fake value for secrets in stdio command args in fixtures.
+	CanaryArgs = "mcpmoat-canary-args-5Hn6Tc"
 )
 
 // Canaries returns every canary value.
 // It returns a new slice on each call, so callers can change it safely.
 func Canaries() []string {
-	return []string{CanaryEnv, CanaryHeader, CanaryURL}
+	return []string{CanaryEnv, CanaryHeader, CanaryURL, CanaryArgs}
 }
 
 // minEncodedLen is the shortest value, in bytes, that Leaks searches for in

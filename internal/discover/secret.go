@@ -91,7 +91,7 @@ func (s Secret) Format(f fmt.State, verb rune) {
 
 // MarshalJSON returns Mask as a JSON string. It implements json.Marshaler.
 func (s Secret) MarshalJSON() ([]byte, error) {
-	return []byte(`"` + Mask + `"`), nil
+	return json.Marshal(Mask)
 }
 
 // MarshalText returns Mask. It implements encoding.TextMarshaler, which

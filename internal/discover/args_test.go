@@ -14,9 +14,8 @@ import (
 	"github.com/Ducarv/mcpmoat/internal/discover/discovertest"
 )
 
-// argsCanary is the secret in leakyArgs. discovertest has no args canary,
-// so the tests use the env canary.
-const argsCanary = discovertest.CanaryEnv
+// argsCanary is the secret in leakyArgs.
+const argsCanary = discovertest.CanaryArgs
 
 // leakyArgs returns args with argsCanary after "--token". Each call returns
 // a new slice, so tests can change it safely.

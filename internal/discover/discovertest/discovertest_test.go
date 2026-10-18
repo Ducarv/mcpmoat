@@ -338,9 +338,14 @@ func TestLeaks(t *testing.T) {
 func TestCanaries(t *testing.T) {
 	t.Parallel()
 
-	want := []string{discovertest.CanaryEnv, discovertest.CanaryHeader, discovertest.CanaryURL}
+	want := []string{
+		discovertest.CanaryEnv,
+		discovertest.CanaryHeader,
+		discovertest.CanaryURL,
+		discovertest.CanaryArgs,
+	}
 
-	t.Run("returns the three constants", func(t *testing.T) {
+	t.Run("returns the four constants", func(t *testing.T) {
 		t.Parallel()
 		got := discovertest.Canaries()
 		if !slices.Equal(got, want) {
@@ -454,6 +459,7 @@ func TestAssertNoLeak(t *testing.T) {
 				discovertest.CanaryEnv,
 				discovertest.CanaryHeader,
 				discovertest.CanaryURL,
+				discovertest.CanaryArgs,
 			},
 		},
 		{

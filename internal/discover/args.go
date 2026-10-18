@@ -24,6 +24,9 @@ var (
 // encoding Args always gives [RedactArgs] of the values. Only Values returns
 // the args as written. See the package doc, Secrets.
 //
+// Config readers decode args into a []string and call NewArgs (Args has no
+// decoder on purpose, because a list does not fit encoding.TextUnmarshaler).
+//
 // The zero value holds no args and prints as "" (String) or [] (%v). Args
 // cannot be compared with ==; use Values or reflect.DeepEqual.
 // reflect.DeepEqual tells the zero Args (from NewArgs(nil)) apart from
@@ -85,11 +88,9 @@ func (a Args) raw() []string {
 }
 
 // display returns the form of the args that all output methods use:
-// RedactArgs of the values, or nil for the zero Args.
+// RedactArgs of the values, or nil for the zero Args (raw gives nil, and
+// RedactArgs(nil) is nil).
 func (a Args) display() []string {
-	if a.v == nil {
-		return nil
-	}
 	// RedactArgs returns a new slice and does not change its input, so it
 	// can read the stored slice directly.
 	return RedactArgs(a.raw())
