@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/Ducarv/mcpmoat/internal/discover"
+	"github.com/Ducarv/mcpmoat/internal/inspect"
 	"github.com/Ducarv/mcpmoat/internal/report"
 	"github.com/Ducarv/mcpmoat/internal/termsafe"
 )
@@ -23,6 +24,13 @@ import (
 // file (confined to its directory, no "projects" section), unless it is the
 // user's own global config file (~/.claude.json, ~/.cursor/mcp.json or
 // ~/.codex/config.toml). The home directory is only used for that check.
+//
+// --timeout (default inspect.DefaultTimeout) is the time limit for one server.
+// --concurrency (default inspect.DefaultConcurrency) is the number of servers
+// inspected at the same time. Both are checked in both modes, also with
+// --no-connect, which does not use them yet. A value that is not valid (a
+// timeout of 0 or less, a concurrency below 1) is a usage error with exit
+// code 2, like a value that the flag package cannot parse.
 //
 // Exit codes:
 //   - 0: the table is printed, and no config file had a problem. A missing
@@ -43,6 +51,8 @@ func (c *cli) runScan(_ options, args []string) int {
 	// package prints nothing and the flags have no usage text.
 	fs.SetOutput(io.Discard)
 	noConnect := fs.Bool("no-connect", false, "")
+	timeout := fs.Duration("timeout", inspect.DefaultTimeout, "")
+	concurrency := fs.Int("concurrency", inspect.DefaultConcurrency, "")
 
 	// fs.Func calls the function once for each time the user gives --config.
 	// An error from it becomes a flag error: exit code 2 with a clear message.
@@ -73,6 +83,23 @@ func (c *cli) runScan(_ options, args []string) int {
 		return exitError
 	}
 	if c.rejectArgs("scan", fs.Args()) {
+		return exitError
+	}
+
+	// Check the values in both modes, so a bad value is a usage error even
+	// when --no-connect starts no server. The messages name the flag and do
+	// not repeat the value. inspect.Options.Validate is not used here because
+	// its messages name no flag and repeat the value. M3 passes
+	// inspect.Options{Timeout: *timeout, Concurrency: *concurrency} to
+	// inspect.Run.
+	if *timeout <= 0 {
+		fprintf(c.stderr, "mcpmoat scan: --timeout must be greater than 0\n")
+		fprintf(c.stderr, "Run \"mcpmoat help\" for usage.\n")
+		return exitError
+	}
+	if *concurrency < 1 {
+		fprintf(c.stderr, "mcpmoat scan: --concurrency must be at least 1\n")
+		fprintf(c.stderr, "Run \"mcpmoat help\" for usage.\n")
 		return exitError
 	}
 
