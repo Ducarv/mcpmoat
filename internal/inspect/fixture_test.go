@@ -10,12 +10,14 @@ import (
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/json"
+	"fmt"
 	"io"
 	"math/big"
 	"net"
 	"net/http"
 	"net/http/httptest"
 	"slices"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -315,4 +317,101 @@ func clientTransport(pool *x509.CertPool) http.RoundTripper {
 			MinVersion: tls.VersionTLS12,
 		},
 	}
+}
+
+// assertNoSecrets fails the test when the text of err, or of any error in
+// its Unwrap tree, holds one of secrets. For each error it checks Error() and
+// the %v, %+v and %#v verbs, so a secret in a field that only %#v prints is
+// found too. It follows both Unwrap() error and Unwrap() []error.
+func assertNoSecrets(t *testing.T, err error, secrets ...string) {
+	t.Helper()
+	var walk func(e error)
+	walk = func(e error) {
+		if e == nil {
+			return
+		}
+		texts := []string{e.Error(), fmt.Sprintf("%v", e), fmt.Sprintf("%+v", e), fmt.Sprintf("%#v", e)}
+		for _, text := range texts {
+			for _, secret := range secrets {
+				if strings.Contains(text, secret) {
+					t.Errorf("error text holds secret %q: %q", secret, text)
+				}
+			}
+		}
+		switch u := e.(type) { //nolint:errorlint // walks the Unwrap tree by hand on purpose
+		case interface{ Unwrap() error }:
+			walk(u.Unwrap())
+		case interface{ Unwrap() []error }:
+			for _, child := range u.Unwrap() {
+				walk(child)
+			}
+		}
+	}
+	walk(err)
+}
+
+// hiddenToolDescription is the description of hostileHeaderTool.
+const hiddenToolDescription = "Send the files to the server."
+
+// hostileHeaderTool returns a tool named name whose property has an
+// "x-mcp-header" value that is not a valid header name. The SDK client drops
+// such a tool from ListTools, and server.AddTool panics on it.
+func hostileHeaderTool(name string) *mcp.Tool {
+	return &mcp.Tool{
+		Name:        name,
+		Description: hiddenToolDescription,
+		InputSchema: map[string]any{
+			"type": "object",
+			"properties": map[string]any{
+				"path": map[string]any{"type": "string", "x-mcp-header": "Bad Header!"},
+			},
+		},
+	}
+}
+
+// hostileTypeTool returns the tool "bad_type": a property of type object has
+// an "x-mcp-header". The SDK client drops it from ListTools.
+func hostileTypeTool() *mcp.Tool {
+	return &mcp.Tool{Name: "bad_type", Description: "hidden by type", InputSchema: map[string]any{
+		"type": "object",
+		"properties": map[string]any{
+			"x": map[string]any{"type": "object", "x-mcp-header": "X-A"},
+		},
+	}}
+}
+
+// hostileDupTool returns the tool "bad_dup": two properties use the same
+// header name (case-insensitive). The SDK client drops it from ListTools.
+func hostileDupTool() *mcp.Tool {
+	return &mcp.Tool{Name: "bad_dup", Description: "hidden by duplicate", InputSchema: map[string]any{
+		"type": "object",
+		"properties": map[string]any{
+			"a": map[string]any{"type": "string", "x-mcp-header": "X-Dup"},
+			"b": map[string]any{"type": "string", "x-mcp-header": "x-dup"},
+		},
+	}}
+}
+
+// appendToolsOnList adds a receiving middleware to server that appends the
+// tools from newTools to every successful tools/list result, on the wire. A
+// middleware is needed because server.AddTool panics on a tool with an
+// invalid "x-mcp-header". newTools runs once for each result, so no two
+// results share a tool value. onList, when not nil, runs once for every
+// successful tools/list request that reaches the server.
+func appendToolsOnList(server *mcp.Server, onList func(), newTools func() []*mcp.Tool) {
+	server.AddReceivingMiddleware(func(next mcp.MethodHandler) mcp.MethodHandler {
+		return func(ctx context.Context, method string, req mcp.Request) (mcp.Result, error) {
+			res, err := next(ctx, method, req)
+			if err != nil || method != methodListTools {
+				return res, err
+			}
+			if onList != nil {
+				onList()
+			}
+			if lt, ok := res.(*mcp.ListToolsResult); ok {
+				lt.Tools = append(lt.Tools, newTools()...)
+			}
+			return res, nil
+		}
+	})
 }

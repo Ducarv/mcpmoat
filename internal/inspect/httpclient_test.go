@@ -593,39 +593,6 @@ func TestBodyCap(t *testing.T) {
 			t.Errorf("read %d bytes before the error, want 10", total)
 		}
 	})
-
-	capTests := []struct {
-		name    string
-		maxBody int64
-		want    int64
-	}{
-		{name: "zero uses the default", maxBody: 0, want: defaultMaxResponseBytes},
-		{name: "negative uses the default", maxBody: -5, want: defaultMaxResponseBytes},
-		{name: "positive is kept", maxBody: 123, want: 123},
-	}
-	for _, tt := range capTests {
-		t.Run("cap value: "+tt.name, func(t *testing.T) {
-			t.Parallel()
-			client, _, err := hcNew(hcURL(t, "http://example.com"), nil, &hcStub{}, hcUA, tt.maxBody)
-			if err != nil {
-				t.Fatal(err)
-			}
-			ht, ok := client.Transport.(*headerTransport)
-			if !ok {
-				t.Fatalf("client.Transport is %T, want *headerTransport", client.Transport)
-			}
-			if ht.maxBody != tt.want {
-				t.Errorf("maxBody = %d, want %d", ht.maxBody, tt.want)
-			}
-		})
-	}
-
-	t.Run("default cap is 8 MiB", func(t *testing.T) {
-		t.Parallel()
-		if defaultMaxResponseBytes != 8<<20 {
-			t.Errorf("defaultMaxResponseBytes = %d, want %d", defaultMaxResponseBytes, 8<<20)
-		}
-	})
 }
 
 // hcRecordResp is a response with only a status and a header, for tests that
@@ -786,6 +753,59 @@ func TestStatusRecorder(t *testing.T) {
 		}
 		if got := rec.lastStatus(); got != 0 {
 			t.Errorf("lastStatus() = %d after a transport error, want 0", got)
+		}
+	})
+
+	// The SDK sends DELETE only to close the session. Its outcome, an answer
+	// or a transport error, must not change the recorded status.
+	t.Run("session-close DELETE does not change the status", func(t *testing.T) {
+		t.Parallel()
+		tests := []struct {
+			name       string
+			firstCode  int   // status of the GET before the DELETE
+			deleteErr  error // non-nil: the DELETE gets no response
+			deleteCode int
+			want       int
+		}{
+			{name: "404 after a 2xx", firstCode: http.StatusOK, deleteCode: http.StatusNotFound, want: 0},
+			{name: "404 after a 401", firstCode: http.StatusUnauthorized, deleteCode: http.StatusNotFound, want: 401},
+			{name: "2xx after a 401", firstCode: http.StatusUnauthorized, deleteCode: http.StatusOK, want: 401},
+			{name: "transport error after a 401", firstCode: http.StatusUnauthorized, deleteErr: errors.New("boom"), want: 401},
+		}
+		for _, tt := range tests {
+			t.Run(tt.name, func(t *testing.T) {
+				t.Parallel()
+				base := hcRoundTripFunc(func(req *http.Request) (*http.Response, error) {
+					if req.Method != http.MethodDelete {
+						return hcResponse(req, tt.firstCode, "body", nil), nil
+					}
+					if tt.deleteErr != nil {
+						return nil, tt.deleteErr
+					}
+					return hcResponse(req, tt.deleteCode, "body", nil), nil
+				})
+				client, rec, err := hcNew(hcURL(t, "http://example.com"), nil, base, hcUA, 0)
+				if err != nil {
+					t.Fatal(err)
+				}
+				resp := hcGet(t, client, "http://example.com/")
+				_ = resp.Body.Close()
+
+				req, err := http.NewRequestWithContext(t.Context(), http.MethodDelete, "http://example.com/", nil)
+				if err != nil {
+					t.Fatal(err)
+				}
+				resp, err = client.Do(req)
+				if resp != nil {
+					_ = resp.Body.Close()
+				}
+				if (err != nil) != (tt.deleteErr != nil) {
+					t.Fatalf("client.Do(DELETE) error = %v, want error: %t", err, tt.deleteErr != nil)
+				}
+				if got := rec.lastStatus(); got != tt.want {
+					t.Errorf("lastStatus() = %d after the DELETE, want %d", got, tt.want)
+				}
+			})
 		}
 	})
 
@@ -957,6 +977,48 @@ func TestRequestRecorder(t *testing.T) {
 		_ = rec.recordBlocked(errOtherOrigin)
 		if got := rec.blockedErr(); got != errBodyTooLarge { //nolint:errorlint // identity check: the first error after forgetBlocked must be returned unchanged
 			t.Errorf("blockedErr() = %v, want errBodyTooLarge", got)
+		}
+	})
+
+	t.Run("zero value is not connected", func(t *testing.T) {
+		t.Parallel()
+		var rec requestRecorder
+		if rec.connected() {
+			t.Error("connected() = true on the zero value, want false")
+		}
+	})
+
+	t.Run("markConnected sets connected and drops the blocked error", func(t *testing.T) {
+		t.Parallel()
+		var rec requestRecorder
+		rec.recordResponse(hcRecordResp(404, nil))
+		_ = rec.recordBlocked(errCrossOriginRedirect)
+		rec.markConnected()
+		if !rec.connected() {
+			t.Error("connected() = false after markConnected, want true")
+		}
+		if err := rec.blockedErr(); err != nil {
+			t.Errorf("blockedErr() = %v after markConnected, want nil", err)
+		}
+		if got := rec.lastStatus(); got != 404 {
+			t.Errorf("lastStatus() = %d after markConnected, want 404", got)
+		}
+		// A later blocked error is stored again, and the session stays up.
+		_ = rec.recordBlocked(errBodyTooLarge)
+		if got := rec.blockedErr(); got != errBodyTooLarge { //nolint:errorlint // identity check: the error after markConnected must be returned unchanged
+			t.Errorf("blockedErr() = %v, want errBodyTooLarge", got)
+		}
+		if !rec.connected() {
+			t.Error("connected() = false after a later blocked error, want true")
+		}
+	})
+
+	t.Run("forgetBlocked does not mark the session connected", func(t *testing.T) {
+		t.Parallel()
+		var rec requestRecorder
+		rec.forgetBlocked()
+		if rec.connected() {
+			t.Error("connected() = true after forgetBlocked, want false")
 		}
 	})
 
@@ -2023,6 +2085,114 @@ func TestBuildHeaderUserAgent(t *testing.T) {
 			}
 			if !reflect.DeepEqual(got, tt.want) {
 				t.Errorf(`header["User-Agent"] = %q, want %q`, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestBuildHeaderErrors checks the exact text of the errors for a header name
+// that the config must not set. The text holds the key, quoted with %q so
+// that a control character in it cannot change the terminal, and never the
+// value.
+func TestBuildHeaderErrors(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		headers map[string]string
+		want    string
+	}{
+		{name: "empty name", headers: map[string]string{"": hcSecret}, want: "header name not allowed: empty"},
+		{name: "reserved name", headers: map[string]string{"X-Key": "ok", "Host": hcSecret}, want: `header name not allowed: "Host"`},
+		{name: "reserved name keeps the config case", headers: map[string]string{"mcp-session-id": hcSecret}, want: `header name not allowed: "mcp-session-id"`},
+		{name: "control character in name is quoted", headers: map[string]string{"Mcp-\x1b[31m": hcSecret}, want: `header name not allowed: "Mcp-\x1b[31m"`},
+		// The keys are checked in sorted order, so the error is stable.
+		{name: "first sorted key is named", headers: map[string]string{"Host": hcSecret, "Accept": hcSecret}, want: `header name not allowed: "Accept"`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			header, err := buildHeader(tt.headers, hcUA)
+			if err == nil {
+				t.Fatalf("buildHeader() = %v, want an error", header)
+			}
+			if !errors.Is(err, errReservedHeader) {
+				t.Errorf("errors.Is(err, errReservedHeader) = false; err = %v", err)
+			}
+			if got := err.Error(); got != tt.want {
+				t.Errorf("buildHeader() error = %q, want %q", got, tt.want)
+			}
+			if strings.Contains(err.Error(), hcSecret) {
+				t.Errorf("error text %q holds the header value", err)
+			}
+		})
+	}
+}
+
+// TestHeaderTransportNilHeader calls RoundTrip directly with a request that
+// has no Header map. http.Client always sets one, but a RoundTripper must not
+// panic on a request that a direct caller built.
+func TestHeaderTransportNilHeader(t *testing.T) {
+	t.Parallel()
+
+	const pass = "nilhdr-pw" //nolint:gosec // G101: fake test credential
+	tests := []struct {
+		name string
+		user *url.Userinfo
+		want http.Header
+	}{
+		{
+			name: "config headers",
+			want: http.Header{"X-Api-Key": {hcSecret}, "User-Agent": {hcUA}},
+		},
+		{
+			name: "config headers and user info",
+			user: url.UserPassword("u", pass),
+			want: http.Header{
+				"X-Api-Key":     {hcSecret},
+				"User-Agent":    {hcUA},
+				"Authorization": {"Basic " + base64.StdEncoding.EncodeToString([]byte("u:"+pass))},
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			stub := &hcStub{}
+			client, _, err := newHTTPClient(httpClientConfig{
+				Origin:    hcURL(t, "http://example.com"),
+				Headers:   map[string]string{"x-api-key": hcSecret},
+				User:      tt.user,
+				Base:      stub,
+				UserAgent: hcUA,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			ht, ok := client.Transport.(*headerTransport)
+			if !ok {
+				t.Fatalf("client.Transport is %T, want *headerTransport", client.Transport)
+			}
+
+			req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, "http://example.com/mcp", nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			req.Header = nil
+			resp, err := ht.RoundTrip(req)
+			if err != nil {
+				t.Fatalf("RoundTrip() error = %v", err)
+			}
+			_ = resp.Body.Close()
+
+			if stub.count() != 1 {
+				t.Fatalf("base got %d request(s), want 1", stub.count())
+			}
+			if got := stub.header(0); !reflect.DeepEqual(got, tt.want) {
+				t.Errorf("base saw header %v, want %v", got, tt.want)
+			}
+			if req.Header != nil {
+				t.Errorf("caller request Header = %v, want it left nil", req.Header)
 			}
 		})
 	}

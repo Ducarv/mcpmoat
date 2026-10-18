@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"net/url"
@@ -96,16 +97,7 @@ func Remote(ctx context.Context, srv discover.Server, opts RemoteOptions) (Resul
 		return Result{}, configError(srv, reason)
 	}
 
-	// Take the user info and the fragment out of the URL. The SDK gets an
-	// endpoint without them, so no SDK error text can hold them. A fragment is
-	// never sent over HTTP, so dropping it changes no request. url.URL.String
-	// re-encodes the URL; this is acceptable, because the result is equivalent
-	// to the configured URL minus its user info and fragment.
-	user := u.User
-	origin := *u
-	origin.User = nil
-	origin.Fragment = ""
-	origin.RawFragment = ""
+	origin, user := splitUserinfo(u)
 	endpoint := origin.String()
 
 	headers, headerValues := splitHeaders(srv.Headers)
@@ -135,7 +127,6 @@ func Remote(ctx context.Context, srv discover.Server, opts RemoteOptions) (Resul
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	if _, ok := ctx.Deadline(); !ok {
-		// A safety net only. Issue #28 owns the real per-server timeout.
 		var cancelTimeout context.CancelFunc
 		ctx, cancelTimeout = context.WithTimeout(ctx, defaultConnectTimeout)
 		defer cancelTimeout()
@@ -153,14 +144,28 @@ func Remote(ctx context.Context, srv discover.Server, opts RemoteOptions) (Resul
 	rawTools := &rawLists{}
 	mcpClient.AddSendingMiddleware(rawTools.middleware())
 
-	cs, err := mcpClient.Connect(ctx, newRemoteTransport(srv.Transport, endpoint, httpClient), nil)
-	if err != nil {
+	// fail turns err into the *ConnectError that Remote returns. The SDK
+	// formats some errors with %v, which drops the context error from the
+	// chain (the legacy SSE transport does this when the endpoint event never
+	// comes). When ctx has ended, fail puts its error first, so the kind is
+	// KindTimeout and errors.Is(err, context.DeadlineExceeded) works. The
+	// deferred cancel has not run yet, so ctx.Err is set only by the deadline
+	// or by the caller.
+	fail := func(err error) (Result, error) {
+		if ctxErr := ctx.Err(); ctxErr != nil && !errors.Is(err, ctxErr) {
+			err = fmt.Errorf("%w: %w", ctxErr, err)
+		}
 		return Result{}, classify(err, srv, rec, headerValues)
 	}
-	// The session is up, so the SDK recovered from any request that the HTTP
-	// layer blocked during the connect. Such an error must not decide the
-	// kind of a later, unrelated listing error.
-	rec.forgetBlocked()
+
+	cs, err := mcpClient.Connect(ctx, newRemoteTransport(srv.Transport, endpoint, httpClient), nil)
+	if err != nil {
+		return fail(err)
+	}
+	// The session is up: the SDK recovered from any request that the HTTP
+	// layer blocked during the connect, and the server speaks the configured
+	// transport (see requestRecorder.markConnected).
+	rec.markConnected()
 	// Listing is finished when this runs, so the error from Close does not
 	// matter. For streamable HTTP, Close sends a DELETE that the SDK bounds.
 	defer func() { _ = cs.Close() }()
@@ -169,20 +174,40 @@ func Remote(ctx context.Context, srv discover.Server, opts RemoteOptions) (Resul
 	if initRes == nil {
 		// The SDK always sets the result after a successful Connect. Guard
 		// anyway: a nil would panic below.
-		return Result{}, classify(errors.New("no initialize result"), srv, rec, headerValues)
+		return fail(errors.New("no initialize result"))
 	}
 
 	result := resultFromInit(initRes)
 	result.Tools, result.Prompts, result.Resources, err = listAll(ctx, cs, initRes.Capabilities, rawTools)
 	if err != nil {
-		return Result{}, classify(err, srv, rec, headerValues)
+		return fail(err)
 	}
 	return result, nil
 }
 
+// minBareSecretLen is the shortest part of a secret that classify removes
+// wherever it stands in error text: a token after its auth scheme, or a token
+// used as the URL user name. A server can echo such a part alone ("invalid
+// token <token>"). A shorter part is too likely to match ordinary words.
+const minBareSecretLen = 8
+
+// splitUserinfo returns u without its user info and fragment, and the user
+// info. The SDK gets an endpoint without them, so no SDK error text can hold
+// them. A fragment is never sent over HTTP, so dropping it changes no request.
+// url.URL.String re-encodes the URL; this is acceptable, because the result is
+// equivalent to the configured URL minus its user info and fragment.
+func splitUserinfo(u *url.URL) (origin url.URL, user *url.Userinfo) {
+	origin = *u
+	origin.User = nil
+	origin.Fragment = ""
+	origin.RawFragment = ""
+	return origin, u.User
+}
+
 // splitHeaders returns the config headers with their raw values, for the
-// HTTP client, and the non-empty values alone, for classify to remove from
-// error text.
+// HTTP client, and the secrets in them, for classify to remove from error
+// text: each non-empty value and, for a value with an auth scheme such as
+// "Bearer <token>", the credential part alone (see credentialPart).
 func splitHeaders(cfg discover.SecretMap) (headers map[string]string, values []string) {
 	headers = make(map[string]string, len(cfg))
 	for key, secret := range cfg {
@@ -191,8 +216,42 @@ func splitHeaders(cfg discover.SecretMap) (headers map[string]string, values []s
 		if value != "" {
 			values = append(values, value)
 		}
+		if cred := credentialPart(value); cred != "" {
+			values = append(values, cred)
+		}
 	}
 	return headers, values
+}
+
+// credentialPart returns the part of value after an auth scheme, as in
+// "Bearer <token>" or "Token <token>", when it has at least minBareSecretLen
+// bytes. It returns "" when value has no scheme prefix. A scheme is one word
+// of ASCII letters, digits, "-", "_" or ".", followed by a space.
+func credentialPart(value string) string {
+	scheme, rest, found := strings.Cut(value, " ")
+	if !found || !isAuthScheme(scheme) {
+		return ""
+	}
+	rest = strings.TrimSpace(rest)
+	if len(rest) < minBareSecretLen {
+		return ""
+	}
+	return rest
+}
+
+// isAuthScheme reports whether s can be an HTTP auth scheme name.
+func isAuthScheme(s string) bool {
+	if s == "" {
+		return false
+	}
+	for _, r := range s {
+		ok := r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' ||
+			r == '-' || r == '_' || r == '.'
+		if !ok {
+			return false
+		}
+	}
+	return true
 }
 
 // resultFromInit returns a Result with the fields from the initialize result
@@ -212,9 +271,13 @@ func resultFromInit(initRes *mcp.InitializeResult) Result {
 // userinfoSecrets returns the secret strings that the user info of a URL
 // adds: the password, and the Basic Authorization token and header value
 // built from the name and the password. classify removes them from error
-// text everywhere. The user name is not in the list: replaceUserinfo removes
-// it only where it stands in a URL, so that a short name does not garble other
-// words. A nil user gives nil.
+// text everywhere.
+//
+// The user name is in the list only when the URL has no password and the name
+// has at least minBareSecretLen bytes: then the name is the credential, as in
+// https://<token>@host/. Otherwise replaceUserinfo removes the name only where
+// it stands in a URL, so that a short name does not garble other words. A nil
+// user gives nil.
 func userinfoSecrets(user *url.Userinfo) []string {
 	if user == nil {
 		return nil
@@ -226,6 +289,8 @@ func userinfoSecrets(user *url.Userinfo) []string {
 	secrets := []string{token, "Basic " + token}
 	if password != "" {
 		secrets = append(secrets, password)
+	} else if len(name) >= minBareSecretLen {
+		secrets = append(secrets, name)
 	}
 	return secrets
 }

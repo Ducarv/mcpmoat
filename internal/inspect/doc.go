@@ -63,6 +63,11 @@
 // A cap breach is an error. The package never cuts a list and returns the
 // rest, because the cut part could hide a malicious tool.
 //
+// The caps count bytes on the wire. The SDK decodes each page into Go values
+// before the item cap applies, and decoded JSON can take many times its wire
+// size (a schema of millions of empty objects, for example). So one page can
+// use far more memory than the body cap; a fix would need hooks in the SDK.
+//
 // # Network
 //
 // The package honours the proxy settings from the HTTP_PROXY, HTTPS_PROXY and

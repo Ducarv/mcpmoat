@@ -229,6 +229,31 @@ func redactPathSegment(seg string) string {
 	return strings.Join(parts, ";")
 }
 
+// SecretPathSegments returns the path segments of raw that RedactURL masks,
+// each in its escaped form and, when it differs, in its unescaped form. It
+// returns nil when raw does not parse or has no such segment.
+//
+// RedactURL masks a segment only as part of the whole URL. A caller that
+// scrubs other text, for example an error that holds another URL with the
+// same path prefix, uses this list to remove the segments one by one.
+func SecretPathSegments(raw string) []string {
+	u, err := url.Parse(raw)
+	if err != nil {
+		return nil
+	}
+	var segments []string
+	for seg := range strings.SplitSeq(u.EscapedPath(), "/") {
+		if seg == "" || redactPathSegment(seg) == seg {
+			continue
+		}
+		segments = append(segments, seg)
+		if plain, err := url.PathUnescape(seg); err == nil && plain != seg {
+			segments = append(segments, plain)
+		}
+	}
+	return segments
+}
+
 // isSecretPathSegment reports whether seg, one escaped path segment with no
 // ";" part, must be masked. It fails closed: a segment that does not
 // unescape, or whose unescaped form has "=", "," or ";", is masked.

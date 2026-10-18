@@ -50,7 +50,7 @@ var (
 	// errReservedHeader means the config sets a header that mcpmoat controls,
 	// or a header with an empty name. The text that wraps it holds the header
 	// name (a key) and never a header value.
-	errReservedHeader = errors.New("reserved header name")
+	errReservedHeader = errors.New("header name not allowed")
 	// errOtherOrigin means a request went to an origin other than the
 	// configured one.
 	errOtherOrigin = errors.New("request to another origin refused")
@@ -77,7 +77,16 @@ type requestRecorder struct {
 	// It keeps the latest value and not the first one. The SDK can start with a
 	// request that gets a 404 and then fall back to another request that works.
 	// The 404 must not give a wrong label to a later, unrelated error.
+	//
+	// One value serves all requests of the client. If two requests run at the
+	// same time, the label of an error can come from the other request. Today
+	// the requests of one inspection run one after the other, apart from small
+	// notifications; per-request status is tracked in issue #99. Only the label
+	// can be wrong: the inspection still fails.
 	status atomic.Int64
+
+	// sessionUp is true after Remote connected the session (markConnected).
+	sessionUp atomic.Bool
 
 	// mu guards blocked.
 	mu sync.Mutex
@@ -103,10 +112,28 @@ func (r *requestRecorder) blockedErr() error {
 	return r.blocked
 }
 
-// forgetBlocked drops the stored blocked error. Remote calls it after a
-// successful connect: the SDK recovered from any request that was blocked
-// before (for example, it falls back from server/discover to initialize after
-// any error), so that error must not label a later, unrelated failure.
+// connected implements transportEvents.
+func (r *requestRecorder) connected() bool {
+	return r.sessionUp.Load()
+}
+
+// markConnected records that the session is up. Remote calls it after a
+// successful connect. It also calls forgetBlocked.
+func (r *requestRecorder) markConnected() {
+	r.sessionUp.Store(true)
+	r.forgetBlocked()
+}
+
+// forgetBlocked drops the stored blocked error. markConnected calls it: the
+// SDK recovered from any request that was blocked before (for example, it
+// falls back from server/discover to initialize after any error), so that
+// error must not label a later, unrelated failure.
+//
+// A legacy SSE stream is read by a background goroutine. If it goes over the
+// size cap in the short time between the last connect request and this call,
+// the too-large error is dropped too, and the later error is labelled as a
+// protocol error. The inspection still fails. Issue #99 tracks a per-request
+// record that would close this window.
 func (r *requestRecorder) forgetBlocked() {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -290,11 +317,11 @@ func buildHeader(headers map[string]string, ua string) (http.Header, error) {
 	header := make(http.Header, len(headers)+1)
 	for _, key := range keys {
 		if key == "" {
-			return nil, fmt.Errorf("%w: empty name", errReservedHeader)
+			return nil, fmt.Errorf("%w: empty", errReservedHeader)
 		}
 		canonical := http.CanonicalHeaderKey(key)
 		if isReservedHeader(canonical) {
-			return nil, fmt.Errorf("%w %q", errReservedHeader, key)
+			return nil, fmt.Errorf("%w: %q", errReservedHeader, key)
 		}
 		header.Set(canonical, headers[key])
 	}
@@ -373,6 +400,10 @@ func (t *headerTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 	// Clone makes a copy with its own Header map, so the header changes below touch
 	// only the copy.
 	out := req.Clone(req.Context())
+	if out.Header == nil {
+		// http.Client always sets a Header, but a direct caller may not.
+		out.Header = make(http.Header, len(t.header))
+	}
 	for key, values := range t.header {
 		out.Header[key] = slices.Clone(values)
 	}
@@ -387,17 +418,27 @@ func (t *headerTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 		}
 	}
 
+	// The SDK sends DELETE only to close the session, and it ignores the
+	// answer. It closes the session after a failed initialize too, and a
+	// server that never kept the session answers 404. The outcome of that
+	// DELETE must not change the label of the error that made the SDK close.
+	record := out.Method != http.MethodDelete
+
 	resp, err := t.base.RoundTrip(out)
 	if err != nil {
 		// No response came back. Clear an older status, so that it cannot
 		// outrank this transport error in classify.
-		t.rec.recordNoResponse()
+		if record {
+			t.rec.recordNoResponse()
+		}
 		// Return the error as is. classify unwraps the *url.Error that the
 		// http.Client adds.
 		return nil, err
 	}
 
-	t.rec.recordResponse(resp)
+	if record {
+		t.rec.recordResponse(resp)
+	}
 	if resp.Body != nil {
 		resp.Body = &cappedBody{
 			r:         resp.Body,

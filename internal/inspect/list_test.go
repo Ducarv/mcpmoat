@@ -1992,15 +1992,11 @@ func connectInMemory(t *testing.T, server *mcp.Server, raw *rawLists) *mcp.Clien
 }
 
 // addHiddenHeaderTools gives server one benign tool, "benign", and a receiving
-// middleware that appends two hostile tools to every tools/list result. The
-// middleware is needed because server.AddTool panics on a tool with an invalid
-// "x-mcp-header" and so cannot register them:
-//
-//   - "bad_type": a property of type object has an "x-mcp-header".
-//   - "bad_dup": two properties use the same header name (case-insensitive).
-//
-// The SDK client drops both tools from ListTools. onList, when not nil, runs
-// once for every tools/list request that reaches the server.
+// middleware that appends two hostile tools to every tools/list result (see
+// appendToolsOnList): "bad_type" (hostileTypeTool) and "bad_dup"
+// (hostileDupTool). The SDK client drops both tools from ListTools. onList,
+// when not nil, runs once for every tools/list request that reaches the
+// server.
 func addHiddenHeaderTools(server *mcp.Server, onList func()) {
 	server.AddTool(
 		&mcp.Tool{Name: "benign", Description: "ok", InputSchema: map[string]any{"type": "object"}},
@@ -2008,34 +2004,8 @@ func addHiddenHeaderTools(server *mcp.Server, onList func()) {
 			return &mcp.CallToolResult{}, nil
 		},
 	)
-	server.AddReceivingMiddleware(func(next mcp.MethodHandler) mcp.MethodHandler {
-		return func(ctx context.Context, method string, req mcp.Request) (mcp.Result, error) {
-			res, err := next(ctx, method, req)
-			if err != nil || method != methodListTools {
-				return res, err
-			}
-			if onList != nil {
-				onList()
-			}
-			if lt, ok := res.(*mcp.ListToolsResult); ok {
-				lt.Tools = append(lt.Tools,
-					&mcp.Tool{Name: "bad_type", Description: "hidden by type", InputSchema: map[string]any{
-						"type": "object",
-						"properties": map[string]any{
-							"x": map[string]any{"type": "object", "x-mcp-header": "X-A"},
-						},
-					}},
-					&mcp.Tool{Name: "bad_dup", Description: "hidden by duplicate", InputSchema: map[string]any{
-						"type": "object",
-						"properties": map[string]any{
-							"a": map[string]any{"type": "string", "x-mcp-header": "X-Dup"},
-							"b": map[string]any{"type": "string", "x-mcp-header": "x-dup"},
-						},
-					}},
-				)
-			}
-			return res, nil
-		}
+	appendToolsOnList(server, onList, func() []*mcp.Tool {
+		return []*mcp.Tool{hostileTypeTool(), hostileDupTool()}
 	})
 }
 

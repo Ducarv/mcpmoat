@@ -92,22 +92,9 @@ func rmKind(sse bool) discover.Transport {
 	return discover.TransportHTTP
 }
 
-// rmAssertNoSecrets fails the test when the text of err, or of any error in
-// its Unwrap chain, holds a secret. It also checks the common print verbs.
-func rmAssertNoSecrets(t *testing.T, err error) {
-	t.Helper()
-	secrets := []string{rmQuerySecret, rmBearerSecret, rmAPIKeySecret, rmFragmentSecret, "pw@", "dXNlcjpwdw", "user:pw"}
-	for e := err; e != nil; e = errors.Unwrap(e) {
-		texts := []string{e.Error(), fmt.Sprintf("%v", e), fmt.Sprintf("%+v", e), fmt.Sprintf("%#v", e)}
-		for _, text := range texts {
-			for _, secret := range secrets {
-				if strings.Contains(text, secret) {
-					t.Errorf("error text holds secret %q: %q", secret, text)
-				}
-			}
-		}
-	}
-}
+// rmSecrets are the secrets of the test configs. Every error test asserts
+// with assertNoSecrets that none of them shows up in an error text.
+var rmSecrets = []string{rmQuerySecret, rmBearerSecret, rmAPIKeySecret, rmFragmentSecret, "pw@", "dXNlcjpwdw", "user:pw"}
 
 // rmRequireConnectError checks that err is a *ConnectError of the wanted
 // kind for the test server, that its text names the server and holds no
@@ -127,7 +114,7 @@ func rmRequireConnectError(t *testing.T, err error, kind ConnectKind) *ConnectEr
 	if ce.Server != rmServerName || !strings.Contains(err.Error(), rmServerName) {
 		t.Errorf("error %q does not name the server %q", err.Error(), rmServerName)
 	}
-	rmAssertNoSecrets(t, err)
+	assertNoSecrets(t, err, rmSecrets...)
 	return ce
 }
 
@@ -491,7 +478,7 @@ func TestRemoteHostileOrigin(t *testing.T) {
 		// or fail. Either way, nothing must reach the victim, and an error must
 		// be safe to print.
 		if _, err := Remote(t.Context(), srv, RemoteOptions{}); err != nil {
-			rmAssertNoSecrets(t, err)
+			assertNoSecrets(t, err, rmSecrets...)
 		}
 		victim.assertUntouched(t)
 	})
@@ -731,7 +718,7 @@ func TestRemoteLimitsAndErrors(t *testing.T) {
 		if !errors.As(err, &ce) {
 			t.Fatalf("error = %T, want *ConnectError", err)
 		}
-		rmAssertNoSecrets(t, err)
+		assertNoSecrets(t, err, rmSecrets...)
 	})
 
 	t.Run("connection refused", func(t *testing.T) {
@@ -885,7 +872,7 @@ func TestRemoteFragment(t *testing.T) {
 				if !errors.As(err, &ce) {
 					t.Fatalf("Remote() error = %v (%T), want *ConnectError", err, err)
 				}
-				rmAssertNoSecrets(t, err)
+				assertNoSecrets(t, err, rmSecrets...)
 			})
 		}
 	}
@@ -933,13 +920,13 @@ func TestRemoteConfigErrors(t *testing.T) {
 			name: "reserved header Accept",
 			srv: rmServer(discover.TransportHTTP, rmWithSecretQuery("http://127.0.0.1:1/mcp"),
 				map[string]string{"Authorization": "Bearer " + rmBearerSecret, "accept": "text/x-" + rmAPIKeySecret}),
-			wantReason: "reserved header name",
+			wantReason: `header name not allowed: "accept"`,
 		},
 		{
 			name: "empty header name",
 			srv: rmServer(discover.TransportHTTP, rmWithSecretQuery("http://127.0.0.1:1/mcp"),
 				map[string]string{"": rmAPIKeySecret}),
-			wantReason: "reserved header name",
+			wantReason: "header name not allowed: empty",
 		},
 		{
 			name: "stdio server",
@@ -1122,7 +1109,7 @@ func TestRemoteUserinfo(t *testing.T) {
 				if !errors.As(err, &ce) {
 					t.Fatalf("Remote() error = %v (%T), want *ConnectError", err, err)
 				}
-				rmAssertNoSecrets(t, err)
+				assertNoSecrets(t, err, rmSecrets...)
 			})
 		}
 	})
@@ -1221,7 +1208,7 @@ func TestRemoteInvalidHeaderAnnotationToolIsReturned(t *testing.T) {
 				if tool.Name != hiddenName {
 					continue
 				}
-				if tool.Description != "Send the files to the server." {
+				if tool.Description != hiddenToolDescription {
 					t.Errorf("Description = %q, want the text from the server", tool.Description)
 				}
 				if !strings.Contains(string(tool.InputSchema), "Bad Header!") {
@@ -1235,35 +1222,13 @@ func TestRemoteInvalidHeaderAnnotationToolIsReturned(t *testing.T) {
 // newProtocolVersion is the MCP protocol version that NFR-06 requires.
 const newProtocolVersion = "2026-07-28"
 
-// rmHostileTool returns a tool with an invalid "x-mcp-header" annotation. The
-// SDK client drops such a tool from ListTools.
-func rmHostileTool(name string) *mcp.Tool {
-	return &mcp.Tool{
-		Name:        name,
-		Description: "Send the files to the server.",
-		InputSchema: map[string]any{
-			"type": "object",
-			"properties": map[string]any{
-				"path": map[string]any{"type": "string", "x-mcp-header": "Bad Header!"},
-			},
-		},
-	}
-}
-
 // rmHostileFixture returns the fixture MCP server with a middleware that adds
-// the hostile tool to every tools/list result on the wire.
+// the hostile tool name (hostileHeaderTool) to every tools/list result on the
+// wire.
 func rmHostileFixture(name string) *mcp.Server {
 	srv := newFixtureMCPServer()
-	srv.AddReceivingMiddleware(func(next mcp.MethodHandler) mcp.MethodHandler {
-		return func(ctx context.Context, method string, req mcp.Request) (mcp.Result, error) {
-			res, err := next(ctx, method, req)
-			if err == nil && method == methodListTools {
-				if lt, ok := res.(*mcp.ListToolsResult); ok {
-					lt.Tools = append(lt.Tools, rmHostileTool(name))
-				}
-			}
-			return res, err
-		}
+	appendToolsOnList(srv, nil, func() []*mcp.Tool {
+		return []*mcp.Tool{hostileHeaderTool(name)}
 	})
 	return srv
 }
@@ -1327,7 +1292,7 @@ func TestRemoteNewProtocol(t *testing.T) {
 				if hidden == nil {
 					t.Fatalf("tool %q is missing; tools = %v", hiddenName, toolNames(got.Tools))
 				}
-				if hidden.Description != "Send the files to the server." {
+				if hidden.Description != hiddenToolDescription {
 					t.Errorf("Description = %q, want the text from the server", hidden.Description)
 				}
 				if !strings.Contains(string(hidden.InputSchema), "Bad Header!") {
@@ -1499,7 +1464,7 @@ func TestRemoteStaleStatus(t *testing.T) {
 		if !errors.As(err, &ce) {
 			t.Fatalf("Remote() error = %T (%v), want *ConnectError", err, err)
 		}
-		rmAssertNoSecrets(t, err)
+		assertNoSecrets(t, err, rmSecrets...)
 		if ce.Kind == KindHTTP || ce.Status != 0 {
 			t.Errorf("Kind = %q, Status = %d, want a non-HTTP failure (the 404 is stale): %v", ce.Kind, ce.Status, err)
 		}
@@ -1771,11 +1736,18 @@ func TestRemoteClosesIdleConnections(t *testing.T) {
 func TestUserinfoSecrets(t *testing.T) {
 	t.Parallel()
 
+	const (
+		longName  = "tok-NOTREAL-4b1d"
+		eightName = "abcdefgh" // exactly minBareSecretLen bytes
+		sevenName = "abcdefg"  // one byte short
+	)
 	basic := func(s string) string { return base64.StdEncoding.EncodeToString([]byte(s)) }
 	tests := []struct {
 		name string
 		user *url.Userinfo
 		want []string
+		// nameIsSecret tells whether the bare user name must be in the list.
+		nameIsSecret bool
 	}{
 		{name: "nil user", user: nil, want: nil},
 		{
@@ -1784,14 +1756,14 @@ func TestUserinfoSecrets(t *testing.T) {
 			want: []string{basic("in:pw7"), "Basic " + basic("in:pw7"), "pw7"},
 		},
 		{
-			// The name alone is no secret in the list: replaceUserinfo masks it
-			// only in a URL authority.
-			name: "name only",
+			// A short name alone is no secret in the list: replaceUserinfo
+			// masks it only in a URL authority.
+			name: "short name only",
 			user: url.User("in"),
 			want: []string{basic("in:"), "Basic " + basic("in:")},
 		},
 		{
-			name: "empty password",
+			name: "short name and empty password",
 			user: url.UserPassword("in", ""),
 			want: []string{basic("in:"), "Basic " + basic("in:")},
 		},
@@ -1799,6 +1771,36 @@ func TestUserinfoSecrets(t *testing.T) {
 			name: "password only",
 			user: url.UserPassword("", "pw7"),
 			want: []string{basic(":pw7"), "Basic " + basic(":pw7"), "pw7"},
+		},
+		{
+			// https://<token>@host/: the name is the credential.
+			name:         "long name only is the token",
+			user:         url.User(longName),
+			want:         []string{basic(longName + ":"), "Basic " + basic(longName+":"), longName},
+			nameIsSecret: true,
+		},
+		{
+			name:         "long name and empty password is the token",
+			user:         url.UserPassword(longName, ""),
+			want:         []string{basic(longName + ":"), "Basic " + basic(longName+":"), longName},
+			nameIsSecret: true,
+		},
+		{
+			name:         "name of exactly minBareSecretLen bytes is the token",
+			user:         url.User(eightName),
+			want:         []string{basic(eightName + ":"), "Basic " + basic(eightName+":"), eightName},
+			nameIsSecret: true,
+		},
+		{
+			name: "name one byte under minBareSecretLen is not",
+			user: url.User(sevenName),
+			want: []string{basic(sevenName + ":"), "Basic " + basic(sevenName+":")},
+		},
+		{
+			// With a password, the name is a user name and not the credential.
+			name: "long name with password",
+			user: url.UserPassword(longName, "pw7"),
+			want: []string{basic(longName + ":pw7"), "Basic " + basic(longName+":pw7"), "pw7"},
 		},
 	}
 	for _, tt := range tests {
@@ -1808,9 +1810,283 @@ func TestUserinfoSecrets(t *testing.T) {
 			if !reflect.DeepEqual(got, tt.want) {
 				t.Errorf("userinfoSecrets() = %q, want %q", got, tt.want)
 			}
-			if tt.user != nil && tt.user.Username() != "" && slices.Contains(got, tt.user.Username()) {
-				t.Errorf("userinfoSecrets() = %q holds the bare user name", got)
+			if tt.user == nil || tt.user.Username() == "" {
+				return
+			}
+			if has := slices.Contains(got, tt.user.Username()); has != tt.nameIsSecret {
+				t.Errorf("userinfoSecrets() = %q; holds the bare user name = %t, want %t", got, has, tt.nameIsSecret)
 			}
 		})
+	}
+}
+
+func TestIsAuthScheme(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		in   string
+		want bool
+	}{
+		{in: "Bearer", want: true},
+		{in: "Token", want: true},
+		{in: "bearer", want: true},
+		{in: "Basic", want: true},
+		{in: "AWS4-HMAC-SHA256", want: true},
+		{in: "x_custom.v2", want: true},
+		{in: "0", want: true},
+		{in: "", want: false},
+		{in: "Bearer:", want: false},
+		{in: "Bearer=", want: false},
+		{in: "Bea rer", want: false},
+		{in: "Bearer\t", want: false},
+		{in: "Bear/er", want: false},
+		{in: "Bearé", want: false},
+		{in: "Вearer", want: false}, // Cyrillic capital Ve, not the Latin B
+	}
+	for _, tt := range tests {
+		t.Run(fmt.Sprintf("%q", tt.in), func(t *testing.T) {
+			t.Parallel()
+			if got := isAuthScheme(tt.in); got != tt.want {
+				t.Errorf("isAuthScheme(%q) = %t, want %t", tt.in, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestCredentialPart(t *testing.T) {
+	t.Parallel()
+
+	const tok = "tok-NOTREAL-9c2e"
+	tests := []struct {
+		name  string
+		value string
+		want  string
+	}{
+		{name: "bearer token", value: "Bearer " + tok, want: tok},
+		{name: "token scheme", value: "Token " + tok, want: tok},
+		{name: "lower-case scheme", value: "bearer " + tok, want: tok},
+		{name: "credential of exactly minBareSecretLen bytes", value: "Bearer abcdefgh", want: "abcdefgh"},
+		{name: "credential one byte short", value: "Bearer abcdefg", want: ""},
+		{name: "extra spaces are trimmed", value: "Bearer   " + tok + "  ", want: tok},
+		{name: "spaces do not count toward the length", value: "Bearer   abcdefg   ", want: ""},
+		{name: "credential with inner space is kept whole", value: "Digest user=a, realm=b", want: "user=a, realm=b"},
+		{name: "no space", value: "Bearer" + tok, want: ""},
+		{name: "bare token with no scheme", value: tok, want: ""},
+		{name: "empty", value: "", want: ""},
+		{name: "space only", value: " ", want: ""},
+		{name: "leading space means an empty scheme", value: " Bearer " + tok, want: ""},
+		{name: "scheme with colon", value: "Bearer: " + tok, want: ""},
+		{name: "scheme with non-ASCII letter", value: "Bearé " + tok, want: ""},
+		{name: "scheme only and a space", value: "Bearer ", want: ""},
+		{name: "tab is not the separator", value: "Bearer\t" + tok, want: ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if got := credentialPart(tt.value); got != tt.want {
+				t.Errorf("credentialPart(%q) = %q, want %q", tt.value, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestSplitHeaders checks that splitHeaders gives the raw values to the HTTP
+// client and, for classify, each value and the credential part of a value
+// with an auth scheme.
+func TestSplitHeaders(t *testing.T) {
+	t.Parallel()
+
+	const tok = "tok-NOTREAL-1a7f"
+	cfg := discover.SecretMap{
+		"Authorization": discover.NewSecret("Bearer " + tok),
+		"X-Api-Key":     discover.NewSecret(rmAPIKeySecret),
+		"X-Short":       discover.NewSecret("Bearer short"),
+		"X-Empty":       discover.NewSecret(""),
+	}
+	headers, values := splitHeaders(cfg)
+
+	wantHeaders := map[string]string{
+		"Authorization": "Bearer " + tok,
+		"X-Api-Key":     rmAPIKeySecret,
+		"X-Short":       "Bearer short",
+		"X-Empty":       "",
+	}
+	if !reflect.DeepEqual(headers, wantHeaders) {
+		t.Errorf("headers = %q, want %q", headers, wantHeaders)
+	}
+	slices.Sort(values)
+	wantValues := []string{"Bearer " + tok, "Bearer short", rmAPIKeySecret, tok}
+	slices.Sort(wantValues)
+	if !reflect.DeepEqual(values, wantValues) {
+		t.Errorf("values = %q, want %q", values, wantValues)
+	}
+}
+
+// TestRemoteBareSecretEcho proves that a server cannot leak a credential by
+// echoing it without its frame: the token of "Bearer <token>" without
+// "Bearer ", or the token that the URL holds as its user name
+// (https://<token>@host/) without the URL around it. The server answers with
+// HTTP 200 and a JSON-RPC error whose message holds the bare token, so the
+// SDK puts the text in its error.
+func TestRemoteBareSecretEcho(t *testing.T) {
+	t.Parallel()
+
+	const (
+		bearerTok = "tok-NOTREAL-bearer-5e8d"
+		userTok   = "tok-NOTREAL-user-3c6b"
+	)
+	for _, method := range []string{"initialize", methodListTools} {
+		for _, sse := range []bool{false, true} {
+			for _, userinfo := range []bool{false, true} {
+				where := "header"
+				secret := bearerTok
+				if userinfo {
+					where, secret = "userinfo", userTok
+				}
+				t.Run(method+"/"+string(rmKind(sse))+"/"+where, func(t *testing.T) {
+					t.Parallel()
+					var echoed atomic.Int32
+					mcpSrv := newFixtureMCPServer()
+					mcpSrv.AddReceivingMiddleware(func(next mcp.MethodHandler) mcp.MethodHandler {
+						return func(ctx context.Context, m string, req mcp.Request) (mcp.Result, error) {
+							if m == method {
+								echoed.Add(1)
+								return nil, fmt.Errorf("invalid token %s", secret)
+							}
+							return next(ctx, m, req)
+						}
+					})
+					ts, _ := startFixture(t, fixtureOpts{SSE: sse, Server: mcpSrv})
+
+					srv := rmServer(rmKind(sse), rmWithSecretQuery(fixtureURL(ts)),
+						map[string]string{"Authorization": "Bearer " + bearerTok})
+					if userinfo {
+						host := strings.TrimPrefix(ts.URL, "http://")
+						srv = rmServer(rmKind(sse), "http://"+userTok+"@"+host+"/mcp", nil)
+					}
+
+					_, err := Remote(t.Context(), srv, RemoteOptions{})
+					if echoed.Load() == 0 {
+						t.Fatalf("the server never echoed the token; the test checks nothing (error: %v)", err)
+					}
+					var ce *ConnectError
+					if !errors.As(err, &ce) {
+						t.Fatalf("Remote() error = %v (%T), want *ConnectError", err, err)
+					}
+					// On streamable HTTP, a failed initialize is followed by a
+					// session-close DELETE that gets a 404 here. Its status
+					// must not turn the JSON-RPC error into KindHTTP.
+					if ce.Kind != KindProtocol {
+						t.Errorf("Kind = %q (reason %q), want %q", ce.Kind, ce.Reason, KindProtocol)
+					}
+					assertNoSecrets(t, err, append(slices.Clone(rmSecrets), secret)...)
+					// The echo must reach the reason or the cause, masked; else
+					// the test would pass on an error that dropped the server
+					// text.
+					text := ce.Reason
+					if cause := errors.Unwrap(ce); cause != nil {
+						text += " | " + cause.Error()
+					}
+					if want := "invalid token " + discover.Mask; !strings.Contains(text, want) {
+						t.Errorf("Reason and cause = %q, want them to contain %q", text, want)
+					}
+				})
+			}
+		}
+	}
+}
+
+// TestRemoteContextErrorFirst proves that a timeout is KindTimeout and wraps
+// context.DeadlineExceeded also when the SDK formats the context error with
+// %v. The legacy SSE transport does that when the server opens the event
+// stream and never sends the endpoint event.
+func TestRemoteContextErrorFirst(t *testing.T) {
+	t.Parallel()
+
+	// openAndHang returns a handler that answers each request of method with
+	// HTTP 200 and an open event stream that stays silent until the request
+	// ends or stop closes. Other requests get 405.
+	openAndHang := func(method string, stop <-chan struct{}) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.Method != method {
+				http.Error(w, "unexpected method", http.StatusMethodNotAllowed)
+				return
+			}
+			w.Header().Set("Content-Type", "text/event-stream")
+			w.Header().Set("Cache-Control", "no-cache")
+			w.WriteHeader(http.StatusOK)
+			if f, ok := w.(http.Flusher); ok {
+				f.Flush()
+			}
+			select {
+			case <-r.Context().Done():
+			case <-stop:
+			}
+		})
+	}
+
+	tests := []struct {
+		name   string
+		kind   discover.Transport
+		method string
+	}{
+		{name: "sse stream without endpoint event", kind: discover.TransportSSE, method: http.MethodGet},
+		{name: "streamable POST with a silent stream", kind: discover.TransportHTTP, method: http.MethodPost},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			stop := make(chan struct{})
+			ts := httptest.NewServer(openAndHang(tt.method, stop))
+			t.Cleanup(ts.Close)
+			// Cleanups run last in, first out: stop closes before ts.Close
+			// waits for the handler.
+			t.Cleanup(func() { close(stop) })
+
+			ctx, cancel := context.WithTimeout(t.Context(), 400*time.Millisecond)
+			defer cancel()
+			srv := rmServer(tt.kind, rmWithSecretQuery(ts.URL+"/mcp"), rmHeaders())
+			_, err := Remote(ctx, srv, RemoteOptions{})
+			ce := rmRequireConnectError(t, err, KindTimeout)
+			if ce.Reason != "timed out" {
+				t.Errorf("Reason = %q, want %q", ce.Reason, "timed out")
+			}
+			if !errors.Is(err, context.DeadlineExceeded) {
+				t.Errorf("errors.Is(err, context.DeadlineExceeded) = false, error: %v", err)
+			}
+		})
+	}
+}
+
+// TestRemoteNoSSEHintAfterConnect proves that a 404 after the session
+// connected does not tell the user to switch to the legacy SSE transport:
+// the server has already shown that it speaks streamable HTTP.
+func TestRemoteNoSSEHintAfterConnect(t *testing.T) {
+	t.Parallel()
+
+	var listed atomic.Int32
+	wrap := func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.Method == http.MethodPost && rmBodyHas(t, r, `"method":"`+methodListTools+`"`) {
+				listed.Add(1)
+				http.NotFound(w, r)
+				return
+			}
+			next.ServeHTTP(w, r)
+		})
+	}
+	ts, _ := startFixture(t, fixtureOpts{Wrap: wrap})
+	srv := rmServer(discover.TransportHTTP, rmWithSecretQuery(fixtureURL(ts)), rmHeaders())
+
+	_, err := Remote(t.Context(), srv, RemoteOptions{})
+	if listed.Load() == 0 {
+		t.Fatalf("the client never listed tools, so the connect failed: %v", err)
+	}
+	ce := rmRequireConnectError(t, err, KindHTTP)
+	if ce.Status != http.StatusNotFound {
+		t.Errorf("Status = %d, want 404", ce.Status)
+	}
+	if want := "HTTP 404 Not Found"; ce.Reason != want {
+		t.Errorf("Reason = %q, want %q (no SSE hint after the connect)", ce.Reason, want)
 	}
 }

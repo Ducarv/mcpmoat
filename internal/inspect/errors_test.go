@@ -62,12 +62,14 @@ func (e *leakyError) Unwrap() error { return e.err }
 
 // fakeEvents is a transportEvents with fixed answers.
 type fakeEvents struct {
-	status  int
-	blocked error
+	status    int
+	blocked   error
+	sessionUp bool
 }
 
 func (f *fakeEvents) lastStatus() int   { return f.status }
 func (f *fakeEvents) blockedErr() error { return f.blocked }
+func (f *fakeEvents) connected() bool   { return f.sessionUp }
 
 // fakeNetError is a net.Error with a fixed answer for Timeout.
 type fakeNetError struct {
@@ -133,7 +135,9 @@ func TestClassify(t *testing.T) {
 		{
 			name: "tls hostname mismatch",
 			err: urlErr("Get", &tls.CertificateVerificationError{
-				Err: x509.HostnameError{Host: "h"},
+				// Error() of a HostnameError reads Certificate, as in a
+				// real handshake, so it must not be nil.
+				Err: x509.HostnameError{Certificate: &x509.Certificate{}, Host: "h"},
 			}),
 			wantKind:   KindTLS,
 			wantReason: []string{"not valid for this host"},
@@ -437,6 +441,24 @@ func TestClassify(t *testing.T) {
 			noReason:   []string{"SSE", "type = sse"},
 		},
 		{
+			name:       "404 with http transport after connect has no hint",
+			err:        errors.New("not found"),
+			transport:  discover.TransportHTTP,
+			ev:         &fakeEvents{status: http.StatusNotFound, sessionUp: true},
+			wantKind:   KindHTTP,
+			wantStatus: http.StatusNotFound,
+			wantReason: []string{"HTTP 404 Not Found"},
+			noReason:   []string{"SSE", "type = sse"},
+		},
+		{
+			name:       "401 after connect still names the headers",
+			err:        errors.New("unauthorized"),
+			ev:         &fakeEvents{status: http.StatusUnauthorized, sessionUp: true},
+			wantKind:   KindHTTP,
+			wantStatus: http.StatusUnauthorized,
+			wantReason: []string{"HTTP 401", "headers sent: Authorization, X-Api-Key"},
+		},
+		{
 			name:       "500",
 			err:        errors.New("server exploded " + leakText),
 			ev:         &fakeEvents{status: http.StatusInternalServerError},
@@ -603,25 +625,9 @@ func TestClassify(t *testing.T) {
 				tt.check(t, ce)
 			}
 
-			assertNoSecrets(t, ce)
+			assertNoSecrets(t, ce, testSecrets...)
 			assertHasServerAndURL(t, ce, srv)
 		})
-	}
-}
-
-// assertNoSecrets fails if the text of ce or of its cause holds a secret.
-func assertNoSecrets(t *testing.T, ce *ConnectError) {
-	t.Helper()
-	texts := map[string]string{"Error()": ce.Error(), "Reason": ce.Reason}
-	if cause := errors.Unwrap(ce); cause != nil {
-		texts["cause.Error()"] = cause.Error()
-	}
-	for where, text := range texts {
-		for _, secret := range testSecrets {
-			if strings.Contains(text, secret) {
-				t.Errorf("%s = %q, must not contain secret %q", where, text, secret)
-			}
-		}
 	}
 }
 
@@ -753,7 +759,7 @@ func TestClassifyRealTLSHandshakeTimeout(t *testing.T) {
 	if ce.Reason != "timed out" {
 		t.Errorf("Reason = %q, want %q", ce.Reason, "timed out")
 	}
-	assertNoSecrets(t, ce)
+	assertNoSecrets(t, ce, testSecrets...)
 	assertHasServerAndURL(t, ce, srv)
 }
 
@@ -822,9 +828,43 @@ func TestHTTPReasonNoHeaders(t *testing.T) {
 	t.Parallel()
 
 	srv := discover.Server{Name: "remote", Transport: discover.TransportHTTP}
-	got := httpReason(srv, http.StatusUnauthorized)
+	got := httpReason(srv, http.StatusUnauthorized, false)
 	if !strings.Contains(got, "headers sent: none") {
 		t.Errorf("httpReason() = %q, want it to contain %q", got, "headers sent: none")
+	}
+}
+
+// TestHTTPReasonSSEHint checks when the reason for a 400, 404 or 405 tells
+// the user to try the legacy SSE transport: only for TransportHTTP, and only
+// before the session connected. After the connect, the server has shown that
+// it speaks streamable HTTP, so the hint would be wrong.
+func TestHTTPReasonSSEHint(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		transport discover.Transport
+		connected bool
+		hint      bool
+	}{
+		{transport: discover.TransportHTTP, connected: false, hint: true},
+		{transport: discover.TransportHTTP, connected: true, hint: false},
+		{transport: discover.TransportSSE, connected: false, hint: false},
+		{transport: discover.TransportSSE, connected: true, hint: false},
+	}
+	for _, tt := range tests {
+		for _, status := range []int{http.StatusBadRequest, http.StatusNotFound, http.StatusMethodNotAllowed} {
+			t.Run(fmt.Sprintf("%s/connected=%t/%d", tt.transport, tt.connected, status), func(t *testing.T) {
+				t.Parallel()
+				srv := discover.Server{Name: "remote", Transport: tt.transport}
+				want := fmt.Sprintf("HTTP %d %s", status, http.StatusText(status))
+				if tt.hint {
+					want = fmt.Sprintf("HTTP %d; the server may use the legacy SSE transport; set type = sse", status)
+				}
+				if got := httpReason(srv, status, tt.connected); got != want {
+					t.Errorf("httpReason(%d, connected=%t) = %q, want %q", status, tt.connected, got, want)
+				}
+			})
+		}
 	}
 }
 
@@ -989,6 +1029,30 @@ func TestScrub(t *testing.T) {
 			rawURL:   quoteURL,
 			redacted: discover.NewURL(quoteURL).String(),
 			want:     fmt.Sprintf("%q", "bad ?"+m+" end"),
+		},
+		{
+			// A legacy SSE server announces its message endpoint under the
+			// same path prefix, so the token segment stands in a URL that is
+			// not the configured one.
+			name:     "secret path segment in another URL on the same origin",
+			text:     "Post https://host.example/ghp_NOTREAL0123/messages?sessionId=abc: EOF",
+			rawURL:   "https://host.example/ghp_NOTREAL0123/sse",
+			redacted: discover.NewURL("https://host.example/ghp_NOTREAL0123/sse").String(),
+			want:     "Post https://host.example/" + m + "/messages?sessionId=abc: EOF",
+		},
+		{
+			name:     "escaped secret path segment masked in both forms",
+			text:     "Post https://host.example/ghp_NOTREAL0123/messages and /%67hp_NOTREAL0123/x",
+			rawURL:   "https://host.example/%67hp_NOTREAL0123/sse",
+			redacted: discover.NewURL("https://host.example/%67hp_NOTREAL0123/sse").String(),
+			want:     "Post https://host.example/" + m + "/messages and /" + m + "/x",
+		},
+		{
+			name:     "path segment that is no secret is kept",
+			text:     "Post https://host.example/v1/messages: EOF",
+			rawURL:   "https://host.example/v1/sse",
+			redacted: discover.NewURL("https://host.example/v1/sse").String(),
+			want:     "Post https://host.example/v1/messages: EOF",
 		},
 		{
 			name:    "header value with quote masked in plain form",
@@ -1168,7 +1232,7 @@ func TestConfigError(t *testing.T) {
 	t.Parallel()
 
 	srv := testServer(discover.TransportHTTP)
-	ce := configError(srv, "reserved header name: X-Key")
+	ce := configError(srv, `header name not allowed: "X-Key"`)
 	if ce.Kind != KindConfig {
 		t.Errorf("Kind = %q, want %q", ce.Kind, KindConfig)
 	}
@@ -1178,7 +1242,7 @@ func TestConfigError(t *testing.T) {
 	if errors.Unwrap(ce) != nil {
 		t.Errorf("Unwrap() = %v, want nil", errors.Unwrap(ce))
 	}
-	assertNoSecrets(t, ce)
+	assertNoSecrets(t, ce, testSecrets...)
 	assertHasServerAndURL(t, ce, srv)
 }
 
@@ -1209,6 +1273,11 @@ func TestHTTPReasonHeadersSent(t *testing.T) {
 		{name: "user info and upper-case config AUTHORIZATION", rawURL: userinfoURL, headers: map[string]string{"AUTHORIZATION": testAuthValue, "X-Api-Key": testKeyValue}, want: "AUTHORIZATION, X-Api-Key"},
 		{name: "plain config headers", rawURL: plainURL, headers: map[string]string{"X-Api-Key": testKeyValue, "Authorization": testAuthValue}, want: "Authorization, X-Api-Key"},
 		{name: "unparsable url", rawURL: "https://user:pw@[bad/mcp", want: "none"},
+		// Keys that differ only in case go out as one header (buildHeader), so
+		// the list names it once, in the form of the first sorted key.
+		{name: "keys that differ only in case are named once", rawURL: plainURL, headers: map[string]string{"x-key": testKeyValue, "X-Key": testKeyValue}, want: "X-Key"},
+		{name: "case duplicates among other keys", rawURL: plainURL, headers: map[string]string{"x-key": testKeyValue, "Accept-Language": "en", "X-KEY": testKeyValue}, want: "Accept-Language, X-KEY"},
+		{name: "authorization keys that differ only in case with user info", rawURL: userinfoURL, headers: map[string]string{"authorization": testAuthValue, "Authorization": testAuthValue}, want: "Authorization"},
 	}
 	for _, tt := range tests {
 		for _, status := range []int{http.StatusUnauthorized, http.StatusForbidden} {
@@ -1224,7 +1293,7 @@ func TestHTTPReasonHeadersSent(t *testing.T) {
 					URL:       discover.NewURL(tt.rawURL),
 					Headers:   headers,
 				}
-				got := httpReason(srv, status)
+				got := httpReason(srv, status, false)
 				want := fmt.Sprintf("server needs authentication (HTTP %d); headers sent: %s", status, tt.want)
 				if got != want {
 					t.Errorf("httpReason() = %q, want %q", got, want)

@@ -2,6 +2,7 @@ package discover_test
 
 import (
 	"fmt"
+	"slices"
 	"strings"
 	"testing"
 
@@ -644,6 +645,112 @@ func TestRedactURLKnownLimits(t *testing.T) {
 			}
 			if !isPrintableASCII(got) {
 				t.Errorf("RedactURL(%q) = %q, want only printable ASCII", tt.input, got)
+			}
+		})
+	}
+}
+
+// TestSecretPathSegments checks the list of path segments that RedactURL
+// masks. Each segment comes in its escaped form and, when it differs, in its
+// unescaped form, so that a caller can remove both from other text.
+func TestSecretPathSegments(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name  string
+		input string
+		want  []string
+	}{
+		{
+			name:  "token segment",
+			input: "https://h/mcp/" + discovertest.CanaryURL + "/sse",
+			want:  []string{discovertest.CanaryURL},
+		},
+		{
+			name:  "token segment with user info, query and fragment",
+			input: "https://user@h/mcp/ghp_abc/sse?k=v#f",
+			want:  []string{"ghp_abc"},
+		},
+		{
+			name:  "UUID segment",
+			input: "https://mcp.composio.dev/partner/123e4567-e89b-12d3-a456-426614174000/mcp",
+			want:  []string{"123e4567-e89b-12d3-a456-426614174000"},
+		},
+		{
+			name:  "escaped token segment gives both forms",
+			input: "https://h/%67hp_abcdef/sse",
+			want:  []string{"%67hp_abcdef", "ghp_abcdef"},
+		},
+		{
+			name:  "segment with equals sign",
+			input: "https://h/key=v4lue/sse",
+			want:  []string{"key=v4lue"},
+		},
+		{
+			name:  "segment with escaped equals sign gives both forms",
+			input: "https://h/key%3Dv4lue/sse",
+			want:  []string{"key%3Dv4lue", "key=v4lue"},
+		},
+		{
+			name:  "segment with colon",
+			input: "https://h/user:p4ss/sse",
+			want:  []string{"user:p4ss"},
+		},
+		{
+			name:  "matrix parameter",
+			input: "https://h/mcp;x=y/sse",
+			want:  []string{"mcp;x=y"},
+		},
+		{
+			name:  "several secret segments in path order",
+			input: "https://h/ghp_abc/v1/key=v/" + discovertest.CanaryURL,
+			want:  []string{"ghp_abc", "key=v", discovertest.CanaryURL},
+		},
+		{
+			name:  "no secret segment",
+			input: "https://h/v1/messages",
+			want:  nil,
+		},
+		{
+			name:  "escaped segment that is no secret",
+			input: "https://h/p%2Fq/x",
+			want:  nil,
+		},
+		{
+			name:  "empty path",
+			input: "https://h",
+			want:  nil,
+		},
+		{
+			name:  "root path only",
+			input: "https://h/",
+			want:  nil,
+		},
+		{
+			name:  "empty input",
+			input: "",
+			want:  nil,
+		},
+		{
+			name:  "unparsable URL",
+			input: "http://[::1/" + discovertest.CanaryURL,
+			want:  nil,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got := discover.SecretPathSegments(tt.input)
+			if !slices.Equal(got, tt.want) || (got == nil) != (tt.want == nil) {
+				t.Errorf("SecretPathSegments(%q) = %#v, want %#v", tt.input, got, tt.want)
+			}
+			// Every returned segment is a part that RedactURL removes.
+			redacted := discover.RedactURL(tt.input)
+			for _, seg := range got {
+				if strings.Contains(redacted, "/"+seg) {
+					t.Errorf("RedactURL(%q) = %q still holds segment %q", tt.input, redacted, seg)
+				}
 			}
 		})
 	}

@@ -97,7 +97,7 @@ func (e *ConnectError) Unwrap() error {
 
 // configError returns a KindConfig error for srv. reason must be fixed text:
 // it must not hold the URL or a header value. Examples: "URL does not
-// parse", "unsupported URL scheme", "reserved header name: X-Key".
+// parse", "unsupported URL scheme", `header name not allowed: "Host"`.
 func configError(srv discover.Server, reason string) *ConnectError {
 	return &ConnectError{
 		Kind:   KindConfig,
@@ -121,6 +121,9 @@ type transportEvents interface {
 	// It wraps errOtherOrigin, errCrossOriginRedirect, errTooManyRedirects or
 	// errBodyTooLarge. It is nil if there was none.
 	blockedErr() error
+	// connected reports whether the session was connected. An HTTP status
+	// after that comes from a server that speaks the configured transport.
+	connected() bool
 }
 
 // classify turns err, from net/http or the MCP SDK, into a ConnectError that
@@ -139,8 +142,10 @@ func classify(err error, srv discover.Server, ev transportEvents, headerValues [
 	cause := stripURLError(err)
 
 	status := 0
+	connected := false
 	if ev != nil {
 		status = ev.lastStatus()
+		connected = ev.connected()
 		// An error that the HTTP layer raised on purpose is more reliable
 		// than err, which the SDK may have flattened to text.
 		if blocked := stripURLError(ev.blockedErr()); isBlockedErr(blocked) {
@@ -152,35 +157,48 @@ func classify(err error, srv discover.Server, ev transportEvents, headerValues [
 		Server: srv.Name,
 		URL:    redacted,
 	}
-	ce.Kind, ce.Reason, ce.Status = classifyCause(cause, srv, status, func(text string) string {
+	ce.Kind, ce.Reason, ce.Status = classifyCause(cause, srv, status, connected, func(text string) string {
 		return scrub(text, rawURL, redacted, headerValues)
 	})
 	ce.err = safeCause(cause, rawURL, redacted, headerValues)
 	return ce
 }
 
+// blockedKinds maps each sentinel error that the HTTP layer raises on purpose
+// to its kind and reason. isBlockedErr and classifyCause both read it, so a
+// new sentinel needs one entry here and nothing else.
+var blockedKinds = []struct {
+	err    error
+	kind   ConnectKind
+	reason string
+}{
+	{errOtherOrigin, KindOrigin, "server tried to send a request to another origin; request refused"},
+	{errCrossOriginRedirect, KindRedirect, "redirects to another origin are not followed; use the final URL in the config"},
+	{errTooManyRedirects, KindRedirect, "too many redirects"},
+	{errBodyTooLarge, KindTooLarge, "response too large"},
+}
+
 // isBlockedErr reports whether err wraps one of the sentinel errors that the
-// HTTP layer raises on purpose. A nil err gives false.
+// HTTP layer raises on purpose (blockedKinds). A nil err gives false.
 func isBlockedErr(err error) bool {
-	return errors.Is(err, errOtherOrigin) ||
-		errors.Is(err, errCrossOriginRedirect) ||
-		errors.Is(err, errTooManyRedirects) ||
-		errors.Is(err, errBodyTooLarge)
+	for _, b := range blockedKinds {
+		if errors.Is(err, b.err) {
+			return true
+		}
+	}
+	return false
 }
 
 // classifyCause finds the kind, the reason and the HTTP status of cause. It
-// is the decision table of classify. scrubText removes secrets from error
-// text.
-func classifyCause(cause error, srv discover.Server, status int, scrubText func(string) string) (ConnectKind, string, int) {
+// is the decision table of classify. connected tells whether the session was
+// connected (see transportEvents). scrubText removes secrets from error text.
+func classifyCause(cause error, srv discover.Server, status int, connected bool, scrubText func(string) string) (kind ConnectKind, reason string, httpStatus int) {
+	for _, b := range blockedKinds {
+		if errors.Is(cause, b.err) {
+			return b.kind, b.reason, 0
+		}
+	}
 	switch {
-	case errors.Is(cause, errOtherOrigin):
-		return KindOrigin, "server tried to send a request to another origin; request refused", 0
-	case errors.Is(cause, errCrossOriginRedirect):
-		return KindRedirect, "redirects to another origin are not followed; use the final URL in the config", 0
-	case errors.Is(cause, errTooManyRedirects):
-		return KindRedirect, "too many redirects", 0
-	case errors.Is(cause, errBodyTooLarge):
-		return KindTooLarge, "response too large", 0
 	case errors.Is(cause, context.DeadlineExceeded):
 		return KindTimeout, "timed out", 0
 	case errors.Is(cause, context.Canceled):
@@ -192,7 +210,7 @@ func classifyCause(cause error, srv discover.Server, status int, scrubText func(
 	}
 
 	if status != 0 {
-		return KindHTTP, httpReason(srv, status), status
+		return KindHTTP, httpReason(srv, status, connected), status
 	}
 
 	var netErr net.Error
@@ -256,8 +274,10 @@ func tlsReason(err error) (string, bool) {
 }
 
 // httpReason returns the reason text for a non-2xx HTTP status. The status
-// text comes from the net/http table, not from the server.
-func httpReason(srv discover.Server, status int) string {
+// text comes from the net/http table, not from the server. The hint about the
+// legacy SSE transport appears only before the session connected: after
+// that, the server has shown that it speaks streamable HTTP.
+func httpReason(srv discover.Server, status int, connected bool) string {
 	switch status {
 	case http.StatusUnauthorized, http.StatusForbidden:
 		keys := "none"
@@ -266,7 +286,7 @@ func httpReason(srv discover.Server, status int) string {
 		}
 		return fmt.Sprintf("server needs authentication (HTTP %d); headers sent: %s", status, keys)
 	case http.StatusBadRequest, http.StatusNotFound, http.StatusMethodNotAllowed:
-		if srv.Transport == discover.TransportHTTP {
+		if srv.Transport == discover.TransportHTTP && !connected {
 			return fmt.Sprintf("HTTP %d; the server may use the legacy SSE transport; set type = sse", status)
 		}
 	}
@@ -277,19 +297,27 @@ func httpReason(srv discover.Server, status int) string {
 }
 
 // sentHeaderNames returns the names of the config headers that went to the
-// server, in the order of srv.Headers.Keys. If the URL has user info and the
-// config sets no Authorization header, the request carried a Basic
-// Authorization header built from it (see headerTransport.RoundTrip), so the
-// list names it too. It holds names only, never a value.
+// server, in the order of srv.Headers.Keys. Keys that differ only in case
+// were sent as one header (see buildHeader), so the list names each header
+// once, in the form of the first key. If the URL has user info and the config
+// sets no Authorization header, the request carried a Basic Authorization
+// header built from it (see headerTransport.RoundTrip), so the list names it
+// too. It holds names only, never a value.
 func sentHeaderNames(srv discover.Server) []string {
-	names := srv.Headers.Keys()
-	for _, name := range names {
-		if http.CanonicalHeaderKey(name) == "Authorization" {
-			return names
+	var names []string
+	seen := make(map[string]bool)
+	for _, name := range srv.Headers.Keys() {
+		canonical := http.CanonicalHeaderKey(name)
+		if seen[canonical] {
+			continue
 		}
+		seen[canonical] = true
+		names = append(names, name)
 	}
-	if u, err := url.Parse(srv.URL.Reveal()); err == nil && u.User != nil {
-		names = append(names, "Authorization (from URL user info)")
+	if !seen["Authorization"] {
+		if u, err := url.Parse(srv.URL.Reveal()); err == nil && u.User != nil {
+			names = append(names, "Authorization (from URL user info)")
+		}
 	}
 	return names
 }
@@ -413,6 +441,13 @@ func replaceURLParts(text, rawURL, redactedURL string) string {
 	// user info either.
 	if base != "" {
 		text = replaceForms(text, base, redactedBase)
+	}
+	// A secret path segment can also stand in another URL on the same origin,
+	// for example the message endpoint that a legacy SSE server announces
+	// under the same path prefix. Replace each segment that RedactURL masks
+	// where it follows a "/".
+	for _, seg := range discover.SecretPathSegments(rawURL) {
+		text = replaceForms(text, "/"+seg, "/"+discover.Mask)
 	}
 	return replaceUserinfo(text, rawURL, userinfo)
 }

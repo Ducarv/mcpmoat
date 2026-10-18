@@ -29,8 +29,8 @@ const (
 )
 
 // Sentinel errors for the limits. Their texts are fixed and hold no server
-// data, so it is safe to print them. classify and tests recognise them with
-// errors.Is.
+// data, so it is safe to print them. classify reports them as KindProtocol
+// with their text; tests recognise them with errors.Is.
 var (
 	// errTooManyPages means a list has more than maxPages pages.
 	errTooManyPages = errors.New("too many pages")
@@ -92,8 +92,8 @@ func (r *rawLists) middleware() mcp.Middleware {
 				// Make the SDK cache treat this result as stale. On a session
 				// with protocol 2026-07-28 or later, ClientSession.ListTools
 				// serves a repeated cursor from its cache while the server TTL
-				// is positive (SDK v1.8.0 client.go:1265-1277), without calling
-				// this middleware. Then take would find no raw copy and
+				// is positive (the cache path of ClientSession.ListTools in SDK
+				// v1.8.0), without calling this middleware. Then take would find no raw copy and
 				// listTools would fail with errRawListMissing. A scanner wants
 				// fresh data anyway.
 				lt.TTLMs = 0
