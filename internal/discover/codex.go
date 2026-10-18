@@ -416,10 +416,10 @@ func codexIsTable(md *toml.MetaData, path ...string) bool {
 // bad input, and the input can hold a secret. So only the position is used
 // and the reason is fixed text.
 func codexFileError(path string, data []byte, err error) *FileError {
-	// toml.ParseError is returned as a value (not a pointer), so errors.As
-	// needs a variable of the value type.
-	var pe toml.ParseError
-	if !errors.As(err, &pe) {
+	// toml.ParseError is returned as a value (not a pointer), so the type
+	// argument is the value type.
+	pe, ok := errors.AsType[toml.ParseError](err)
+	if !ok {
 		// The syntax is fine, but the decoder could not store a value. With a
 		// map of toml.Primitive as the target this should not happen, so it
 		// is reported as a bad shape.

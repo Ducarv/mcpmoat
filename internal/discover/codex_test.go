@@ -4,9 +4,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"os"
 	"path/filepath"
-	"reflect"
+	"slices"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -128,16 +129,16 @@ func TestReadCodexFixtures(t *testing.T) {
 			home, _ := copyFixture(t, "codex", tt.name)
 			path := codexConfigPath(home)
 
-			r := ReadCodex(t.Context(), path)
+			res := ReadCodex(t.Context(), path)
 
 			// work is "": the Codex file is global, so fixtureWants sets
 			// ScopeGlobal and leaves ProjectPath and Untrusted empty.
 			want := fixtureWants(tt.wantServer, ClientCodex, path, "")
-			checkServers(t, "servers", r.Servers, want, tt.hideValues)
-			checkFileErrors(t, path, r.Errors, tt.wantErrs)
+			checkServers(t, "servers", res.Servers, want, tt.hideValues)
+			checkFileErrors(t, path, res.Errors, tt.wantErrs)
 
-			assertNoLeakErrors(t, r.Errors)
-			assertNoLeakServers(t, r.Servers)
+			assertNoLeakErrors(t, res.Errors)
+			assertNoLeakServers(t, res.Servers)
 		})
 	}
 }
@@ -318,25 +319,25 @@ func TestReadCodexInline(t *testing.T) {
 			t.Parallel()
 			path := writeFile(t, t.TempDir(), codexConfigRel, []byte(tt.config))
 
-			r := ReadCodex(t.Context(), path)
+			res := ReadCodex(t.Context(), path)
 
-			if tt.wantNames == nil && len(r.Servers) != 0 {
-				t.Errorf("server names = %v, want none", serverNames(r.Servers))
+			if tt.wantNames == nil && len(res.Servers) != 0 {
+				t.Errorf("server names = %v, want none", serverNames(res.Servers))
 			}
-			if tt.wantNames != nil && !reflect.DeepEqual(serverNames(r.Servers), tt.wantNames) {
-				t.Errorf("server names = %v, want %v", serverNames(r.Servers), tt.wantNames)
+			if tt.wantNames != nil && !slices.Equal(serverNames(res.Servers), tt.wantNames) {
+				t.Errorf("server names = %v, want %v", serverNames(res.Servers), tt.wantNames)
 			}
-			checkFileErrors(t, path, r.Errors, tt.wantErrs)
+			checkFileErrors(t, path, res.Errors, tt.wantErrs)
 
-			for i, e := range r.Errors {
+			for i, e := range res.Errors {
 				for _, leaked := range tt.wantLeaked {
 					if strings.Contains(e.Error(), leaked) {
 						t.Errorf("errs[%d].Error() = %q holds the bad value %q", i, e.Error(), leaked)
 					}
 				}
 			}
-			assertNoLeakErrors(t, r.Errors)
-			assertNoLeakServers(t, r.Servers)
+			assertNoLeakErrors(t, res.Errors)
+			assertNoLeakServers(t, res.Servers)
 		})
 	}
 }
@@ -361,8 +362,8 @@ env_http_headers = { X = "X_VAR" }
 bearer_token_env_var = "T_VAR"
 `
 	path := writeFile(t, t.TempDir(), codexConfigRel, []byte(config))
-	r := ReadCodex(t.Context(), path)
-	checkFileErrors(t, path, r.Errors, nil)
+	res := ReadCodex(t.Context(), path)
+	checkFileErrors(t, path, res.Errors, nil)
 
 	want := fixtureWants([]serverView{
 		{
@@ -376,7 +377,7 @@ bearer_token_env_var = "T_VAR"
 			Headers: map[string]string{"H": "v3"},
 		},
 	}, ClientCodex, path, "")
-	checkServers(t, "servers", r.Servers, want, false)
+	checkServers(t, "servers", res.Servers, want, false)
 }
 
 // TestReadCodexMixedTransports checks that an entry with a key of the other
@@ -417,11 +418,11 @@ func TestReadCodexMixedTransports(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			path := writeFile(t, t.TempDir(), codexConfigRel, []byte(tt.entry+ok))
-			r := ReadCodex(t.Context(), path)
-			if got := serverNames(r.Servers); !reflect.DeepEqual(got, []string{"ok"}) {
+			res := ReadCodex(t.Context(), path)
+			if got := serverNames(res.Servers); !slices.Equal(got, []string{"ok"}) {
 				t.Errorf("server names = %v, want [ok]", got)
 			}
-			checkFileErrors(t, path, r.Errors, []errWant{{Server: "x", Reason: reasonBadEntry}})
+			checkFileErrors(t, path, res.Errors, []errWant{{Server: "x", Reason: reasonBadEntry}})
 		})
 	}
 
@@ -432,9 +433,9 @@ func TestReadCodexMixedTransports(t *testing.T) {
 		config := "[mcp_servers.a]\ncommand = \"c\"\n" + shared +
 			"\n[mcp_servers.b]\nurl = \"https://example.com/mcp\"\n" + shared
 		path := writeFile(t, t.TempDir(), codexConfigRel, []byte(config))
-		r := ReadCodex(t.Context(), path)
-		checkFileErrors(t, path, r.Errors, nil)
-		if got := serverNames(r.Servers); !reflect.DeepEqual(got, []string{"a", "b"}) {
+		res := ReadCodex(t.Context(), path)
+		checkFileErrors(t, path, res.Errors, nil)
+		if got := serverNames(res.Servers); !slices.Equal(got, []string{"a", "b"}) {
 			t.Errorf("server names = %v, want [a b]", got)
 		}
 	})
@@ -445,8 +446,8 @@ func TestReadCodexMixedTransports(t *testing.T) {
 		t.Parallel()
 		config := "[mcp_servers.x]\nargs = [\"a\"]\nhttp_headers = { H = \"v\" }\n"
 		path := writeFile(t, t.TempDir(), codexConfigRel, []byte(config))
-		r := ReadCodex(t.Context(), path)
-		checkFileErrors(t, path, r.Errors, []errWant{{Server: "x", Reason: reasonNoCommandOrURL}})
+		res := ReadCodex(t.Context(), path)
+		checkFileErrors(t, path, res.Errors, []errWant{{Server: "x", Reason: reasonNoCommandOrURL}})
 	})
 }
 
@@ -455,9 +456,9 @@ func TestReadCodexFileProblems(t *testing.T) {
 
 	t.Run("missing file", func(t *testing.T) {
 		t.Parallel()
-		r := ReadCodex(t.Context(), codexConfigPath(t.TempDir()))
-		if len(r.Servers) != 0 || len(r.Errors) != 0 {
-			t.Errorf("got %d servers and %d errors, want an empty Result", len(r.Servers), len(r.Errors))
+		res := ReadCodex(t.Context(), codexConfigPath(t.TempDir()))
+		if len(res.Servers) != 0 || len(res.Errors) != 0 {
+			t.Errorf("got %d servers and %d errors, want an empty Result", len(res.Servers), len(res.Errors))
 		}
 	})
 
@@ -467,11 +468,11 @@ func TestReadCodexFileProblems(t *testing.T) {
 		if err := os.MkdirAll(path, 0o700); err != nil {
 			t.Fatal(err)
 		}
-		r := ReadCodex(t.Context(), path)
-		if len(r.Servers) != 0 {
-			t.Errorf("got %d servers, want none", len(r.Servers))
+		res := ReadCodex(t.Context(), path)
+		if len(res.Servers) != 0 {
+			t.Errorf("got %d servers, want none", len(res.Servers))
 		}
-		checkFileErrors(t, path, r.Errors, []errWant{{Reason: reasonNotRegular}})
+		checkFileErrors(t, path, res.Errors, []errWant{{Reason: reasonNotRegular}})
 	})
 
 	t.Run("canceled context", func(t *testing.T) {
@@ -479,12 +480,12 @@ func TestReadCodexFileProblems(t *testing.T) {
 		path := writeFile(t, t.TempDir(), codexConfigRel, []byte("[mcp_servers.a]\ncommand = \"c\"\n"))
 		ctx, cancel := context.WithCancel(t.Context())
 		cancel()
-		r := ReadCodex(ctx, path)
-		if len(r.Servers) != 0 {
-			t.Errorf("got %d servers, want none", len(r.Servers))
+		res := ReadCodex(ctx, path)
+		if len(res.Servers) != 0 {
+			t.Errorf("got %d servers, want none", len(res.Servers))
 		}
-		if len(r.Errors) != 1 || !errors.Is(r.Errors[0], context.Canceled) {
-			t.Errorf("errors = %v, want one error that wraps context.Canceled", r.Errors)
+		if len(res.Errors) != 1 || !errors.Is(res.Errors[0], context.Canceled) {
+			t.Errorf("errors = %v, want one error that wraps context.Canceled", res.Errors)
 		}
 	})
 }
@@ -512,17 +513,17 @@ func TestReadCodexBadShape(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			path := writeFile(t, t.TempDir(), codexConfigRel, []byte(tt.config))
-			r := ReadCodex(t.Context(), path)
-			if len(r.Servers) != 0 {
-				t.Errorf("got %d servers, want none", len(r.Servers))
+			res := ReadCodex(t.Context(), path)
+			if len(res.Servers) != 0 {
+				t.Errorf("got %d servers, want none", len(res.Servers))
 			}
-			checkFileErrors(t, path, r.Errors, []errWant{{Reason: reasonBadShape}})
-			for _, e := range r.Errors {
+			checkFileErrors(t, path, res.Errors, []errWant{{Reason: reasonBadShape}})
+			for _, e := range res.Errors {
 				if strings.Contains(e.Error(), tt.leaked) {
 					t.Errorf("Error() = %q holds the bad value", e.Error())
 				}
 			}
-			assertNoLeakErrors(t, r.Errors)
+			assertNoLeakErrors(t, res.Errors)
 		})
 	}
 }
@@ -634,11 +635,11 @@ func TestReadCodexTooDeep(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			path := writeFile(t, t.TempDir(), codexConfigRel, []byte(tt.config))
-			r := ReadCodex(t.Context(), path)
-			if len(r.Servers) != 0 {
-				t.Errorf("got %d servers, want none", len(r.Servers))
+			res := ReadCodex(t.Context(), path)
+			if len(res.Servers) != 0 {
+				t.Errorf("got %d servers, want none", len(res.Servers))
 			}
-			checkFileErrors(t, path, r.Errors, []errWant{{Reason: reasonTooDeep}})
+			checkFileErrors(t, path, res.Errors, []errWant{{Reason: reasonTooDeep}})
 		})
 	}
 
@@ -647,9 +648,9 @@ func TestReadCodexTooDeep(t *testing.T) {
 		config := "[mcp_servers.ok]\ncommand = \"c\"\n\n[x]\na = " +
 			strings.Repeat("[", maxTOMLDepth) + strings.Repeat("]", maxTOMLDepth) + "\n"
 		path := writeFile(t, t.TempDir(), codexConfigRel, []byte(config))
-		r := ReadCodex(t.Context(), path)
-		checkFileErrors(t, path, r.Errors, nil)
-		if got := serverNames(r.Servers); !reflect.DeepEqual(got, []string{"ok"}) {
+		res := ReadCodex(t.Context(), path)
+		checkFileErrors(t, path, res.Errors, nil)
+		if got := serverNames(res.Servers); !slices.Equal(got, []string{"ok"}) {
 			t.Errorf("server names = %v, want [ok]", got)
 		}
 	})
@@ -659,9 +660,9 @@ func TestReadCodexTooDeep(t *testing.T) {
 		config := "# " + strings.Repeat("[", 200) + "\n" +
 			"[mcp_servers.ok]\ncommand = \"c\"\nargs = [\"" + strings.Repeat("[", 200) + "\"]\n"
 		path := writeFile(t, t.TempDir(), codexConfigRel, []byte(config))
-		r := ReadCodex(t.Context(), path)
-		checkFileErrors(t, path, r.Errors, nil)
-		if got := serverNames(r.Servers); !reflect.DeepEqual(got, []string{"ok"}) {
+		res := ReadCodex(t.Context(), path)
+		checkFileErrors(t, path, res.Errors, nil)
+		if got := serverNames(res.Servers); !slices.Equal(got, []string{"ok"}) {
 			t.Errorf("server names = %v, want [ok]", got)
 		}
 	})
@@ -696,11 +697,11 @@ func TestReadCodexKeyParts(t *testing.T) {
 		t.Run("rejected: "+tt.name, func(t *testing.T) {
 			t.Parallel()
 			path := writeFile(t, t.TempDir(), codexConfigRel, []byte(tt.config))
-			r := ReadCodex(t.Context(), path)
-			if len(r.Servers) != 0 {
-				t.Errorf("got %d servers, want none", len(r.Servers))
+			res := ReadCodex(t.Context(), path)
+			if len(res.Servers) != 0 {
+				t.Errorf("got %d servers, want none", len(res.Servers))
 			}
-			checkFileErrors(t, path, r.Errors, []errWant{{Reason: reasonKeyTooLong}})
+			checkFileErrors(t, path, res.Errors, []errWant{{Reason: reasonKeyTooLong}})
 		})
 	}
 
@@ -722,9 +723,9 @@ func TestReadCodexKeyParts(t *testing.T) {
 		t.Run("accepted: "+tt.name, func(t *testing.T) {
 			t.Parallel()
 			path := writeFile(t, t.TempDir(), codexConfigRel, []byte(tt.config))
-			r := ReadCodex(t.Context(), path)
-			checkFileErrors(t, path, r.Errors, nil)
-			if got := serverNames(r.Servers); !reflect.DeepEqual(got, []string{"ok"}) {
+			res := ReadCodex(t.Context(), path)
+			checkFileErrors(t, path, res.Errors, nil)
+			if got := serverNames(res.Servers); !slices.Equal(got, []string{"ok"}) {
 				t.Errorf("server names = %v, want [ok]", got)
 			}
 		})
@@ -742,11 +743,11 @@ func TestReadCodexKeyParts(t *testing.T) {
 			t.Parallel()
 			path := writeFile(t, t.TempDir(), codexConfigRel, []byte(tt.config))
 			start := time.Now()
-			r := ReadCodex(t.Context(), path)
+			res := ReadCodex(t.Context(), path)
 			if d := time.Since(start); d > 10*time.Second {
 				t.Errorf("ReadCodex took %v, want less than 10s", d)
 			}
-			checkFileErrors(t, path, r.Errors, []errWant{{Reason: reasonKeyTooLong}})
+			checkFileErrors(t, path, res.Errors, []errWant{{Reason: reasonKeyTooLong}})
 		})
 	}
 }
@@ -764,19 +765,19 @@ func TestReadCodexSizeCap(t *testing.T) {
 	t.Run("just over the cap", func(t *testing.T) {
 		t.Parallel()
 		path := writeFile(t, t.TempDir(), codexConfigRel, []byte(pad(server, maxTOMLSize+1)))
-		r := ReadCodex(t.Context(), path)
-		if len(r.Servers) != 0 {
-			t.Errorf("got %d servers, want none", len(r.Servers))
+		res := ReadCodex(t.Context(), path)
+		if len(res.Servers) != 0 {
+			t.Errorf("got %d servers, want none", len(res.Servers))
 		}
-		checkFileErrors(t, path, r.Errors, []errWant{{Reason: reasonTooLarge}})
+		checkFileErrors(t, path, res.Errors, []errWant{{Reason: reasonTooLarge}})
 	})
 
 	t.Run("exactly at the cap", func(t *testing.T) {
 		t.Parallel()
 		path := writeFile(t, t.TempDir(), codexConfigRel, []byte(pad(server, maxTOMLSize)))
-		r := ReadCodex(t.Context(), path)
-		checkFileErrors(t, path, r.Errors, nil)
-		if got := serverNames(r.Servers); !reflect.DeepEqual(got, []string{"ok"}) {
+		res := ReadCodex(t.Context(), path)
+		checkFileErrors(t, path, res.Errors, nil)
+		if got := serverNames(res.Servers); !slices.Equal(got, []string{"ok"}) {
 			t.Errorf("server names = %v, want [ok]", got)
 		}
 	})
@@ -803,9 +804,9 @@ func TestReadCodexEnvNotATable(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			path := writeFile(t, t.TempDir(), codexConfigRel, []byte(tt.config+"\n[mcp_servers.good]\ncommand = \"c\"\n"))
-			r := ReadCodex(t.Context(), path)
-			checkFileErrors(t, path, r.Errors, []errWant{{Server: "bad", Reason: reasonBadEntry}})
-			if got := serverNames(r.Servers); !reflect.DeepEqual(got, []string{"good"}) {
+			res := ReadCodex(t.Context(), path)
+			checkFileErrors(t, path, res.Errors, []errWant{{Server: "bad", Reason: reasonBadEntry}})
+			if got := serverNames(res.Servers); !slices.Equal(got, []string{"good"}) {
 				t.Errorf("server names = %v, want [good]", got)
 			}
 		})
@@ -816,8 +817,8 @@ func TestReadCodexEnvNotATable(t *testing.T) {
 		config := "[mcp_servers.a]\ncommand = \"c\"\n\n[mcp_servers.a.env]\nK = \"v1\"\n\n" +
 			"[mcp_servers.b]\nurl = \"https://example.com/mcp\"\n\n[mcp_servers.b.http_headers]\nH = \"v2\"\n"
 		path := writeFile(t, t.TempDir(), codexConfigRel, []byte(config))
-		r := ReadCodex(t.Context(), path)
-		checkFileErrors(t, path, r.Errors, nil)
+		res := ReadCodex(t.Context(), path)
+		checkFileErrors(t, path, res.Errors, nil)
 		want := []serverView{
 			{
 				Name: "a", Client: ClientCodex, Scope: ScopeGlobal, Source: path,
@@ -828,7 +829,7 @@ func TestReadCodexEnvNotATable(t *testing.T) {
 				Transport: TransportHTTP, URL: "https://example.com/mcp", Headers: map[string]string{"H": "v2"},
 			},
 		}
-		checkServers(t, "servers", r.Servers, want, false)
+		checkServers(t, "servers", res.Servers, want, false)
 	})
 }
 
@@ -851,20 +852,20 @@ func TestReadCodexTooManyServers(t *testing.T) {
 	t.Run("over the cap", func(t *testing.T) {
 		t.Parallel()
 		path := writeFile(t, t.TempDir(), codexConfigRel, []byte(generate(maxServersPerFile+1)))
-		r := ReadCodex(t.Context(), path)
-		if len(r.Servers) != 0 {
-			t.Errorf("got %d servers, want none", len(r.Servers))
+		res := ReadCodex(t.Context(), path)
+		if len(res.Servers) != 0 {
+			t.Errorf("got %d servers, want none", len(res.Servers))
 		}
-		checkFileErrors(t, path, r.Errors, []errWant{{Reason: reasonTooManyServers}})
+		checkFileErrors(t, path, res.Errors, []errWant{{Reason: reasonTooManyServers}})
 	})
 
 	t.Run("at the cap", func(t *testing.T) {
 		t.Parallel()
 		path := writeFile(t, t.TempDir(), codexConfigRel, []byte(generate(maxServersPerFile)))
-		r := ReadCodex(t.Context(), path)
-		checkFileErrors(t, path, r.Errors, nil)
-		if len(r.Servers) != maxServersPerFile {
-			t.Errorf("got %d servers, want %d", len(r.Servers), maxServersPerFile)
+		res := ReadCodex(t.Context(), path)
+		checkFileErrors(t, path, res.Errors, nil)
+		if len(res.Servers) != maxServersPerFile {
+			t.Errorf("got %d servers, want %d", len(res.Servers), maxServersPerFile)
 		}
 	})
 }
@@ -977,14 +978,14 @@ func TestReadCodexExactKeys(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			path := writeFile(t, t.TempDir(), codexConfigRel, []byte(tt.config))
-			r := ReadCodex(t.Context(), path)
-			got := serverNames(r.Servers)
-			if len(got) != len(tt.wantNames) || (len(got) > 0 && !reflect.DeepEqual(got, tt.wantNames)) {
+			res := ReadCodex(t.Context(), path)
+			got := serverNames(res.Servers)
+			if !slices.Equal(got, tt.wantNames) {
 				t.Errorf("server names = %v, want %v", got, tt.wantNames)
 			}
-			checkFileErrors(t, path, r.Errors, tt.wantErrs)
-			assertNoLeakErrors(t, r.Errors)
-			assertNoLeakServers(t, r.Servers)
+			checkFileErrors(t, path, res.Errors, tt.wantErrs)
+			assertNoLeakErrors(t, res.Errors)
+			assertNoLeakServers(t, res.Servers)
 		})
 	}
 
@@ -992,14 +993,14 @@ func TestReadCodexExactKeys(t *testing.T) {
 		t.Parallel()
 		config := "[mcp_servers.x]\ncommand = \"c\"\nargs = [\"a\"]\nenv = { K = \"v\" }\n"
 		path := writeFile(t, t.TempDir(), codexConfigRel, []byte(config))
-		r := ReadCodex(t.Context(), path)
-		checkFileErrors(t, path, r.Errors, nil)
+		res := ReadCodex(t.Context(), path)
+		checkFileErrors(t, path, res.Errors, nil)
 		want := []serverView{{
 			Name: "x", Client: ClientCodex, Scope: ScopeGlobal, Source: path,
 			Transport: TransportStdio, Command: "c", Args: []string{"a"},
 			Env: map[string]string{"K": "v"},
 		}}
-		checkServers(t, "servers", r.Servers, want, false)
+		checkServers(t, "servers", res.Servers, want, false)
 	})
 }
 
@@ -1025,18 +1026,18 @@ func TestReadCodexCwd(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			path := writeFile(t, t.TempDir(), codexConfigRel, []byte(tt.config))
-			r := ReadCodex(t.Context(), path)
-			checkFileErrors(t, path, r.Errors, tt.wantErrs)
+			res := ReadCodex(t.Context(), path)
+			checkFileErrors(t, path, res.Errors, tt.wantErrs)
 			if tt.wantErrs != nil {
-				if len(r.Servers) != 0 {
-					t.Errorf("got %d servers, want none", len(r.Servers))
+				if len(res.Servers) != 0 {
+					t.Errorf("got %d servers, want none", len(res.Servers))
 				}
 				return
 			}
-			if len(r.Servers) != 1 {
-				t.Fatalf("got %d servers, want 1", len(r.Servers))
+			if len(res.Servers) != 1 {
+				t.Fatalf("got %d servers, want 1", len(res.Servers))
 			}
-			if got := r.Servers[0].Dir; got != tt.wantDir {
+			if got := res.Servers[0].Dir; got != tt.wantDir {
 				t.Errorf("Dir = %q, want %q", got, tt.wantDir)
 			}
 		})
@@ -1045,13 +1046,13 @@ func TestReadCodexCwd(t *testing.T) {
 	t.Run("valid fixture", func(t *testing.T) {
 		t.Parallel()
 		home, _ := copyFixture(t, "codex", "valid")
-		r := ReadCodex(t.Context(), codexConfigPath(home))
-		dirs := make(map[string]string, len(r.Servers))
-		for _, s := range r.Servers {
+		res := ReadCodex(t.Context(), codexConfigPath(home))
+		dirs := make(map[string]string, len(res.Servers))
+		for _, s := range res.Servers {
 			dirs[s.Name] = s.Dir
 		}
 		want := map[string]string{"docs": "", "git": "/tmp", "remote": ""}
-		if !reflect.DeepEqual(dirs, want) {
+		if !maps.Equal(dirs, want) {
 			t.Errorf("Dir by server = %v, want %v", dirs, want)
 		}
 	})
@@ -1090,17 +1091,17 @@ func TestReadCodexErrorOrder(t *testing.T) {
 	for n := range 8 {
 		ctx := &errAfterCtx{Context: t.Context()}
 		ctx.left.Store(int64(n))
-		r := ReadCodex(ctx, path)
+		res := ReadCodex(ctx, path)
 
-		for i, e := range r.Errors {
-			if i > 0 && r.Errors[i-1].Server > e.Server {
-				t.Errorf("n=%d: errors are not sorted by server: %v", n, r.Errors)
+		for i, e := range res.Errors {
+			if i > 0 && res.Errors[i-1].Server > e.Server {
+				t.Errorf("n=%d: errors are not sorted by server: %v", n, res.Errors)
 			}
 			if e.Reason == reasonCanceled {
 				if i != 0 || e.Server != "" || !errors.Is(e, context.Canceled) {
 					t.Errorf("n=%d: errs[%d] = %v, want the canceled error first, for the whole file", n, i, e)
 				}
-				if len(r.Errors) > 1 {
+				if len(res.Errors) > 1 {
 					sawCancelAfterServer = true
 				}
 			}
@@ -1112,12 +1113,12 @@ func TestReadCodexErrorOrder(t *testing.T) {
 
 	t.Run("without a cancel", func(t *testing.T) {
 		t.Parallel()
-		r := ReadCodex(t.Context(), path)
-		checkFileErrors(t, path, r.Errors, []errWant{
+		res := ReadCodex(t.Context(), path)
+		checkFileErrors(t, path, res.Errors, []errWant{
 			{Server: "a", Reason: reasonNoCommandOrURL},
 			{Server: "c", Reason: reasonBadEntry},
 		})
-		if got := serverNames(r.Servers); !reflect.DeepEqual(got, []string{"b"}) {
+		if got := serverNames(res.Servers); !slices.Equal(got, []string{"b"}) {
 			t.Errorf("server names = %v, want [b]", got)
 		}
 	})
@@ -1164,9 +1165,9 @@ func TestReadCodexBOM(t *testing.T) {
 	t.Run("valid file with a UTF-8 mark", func(t *testing.T) {
 		t.Parallel()
 		path := writeFile(t, t.TempDir(), codexConfigRel, []byte("\xef\xbb\xbf[mcp_servers.ok]\ncommand = \"c\"\n"))
-		r := ReadCodex(t.Context(), path)
-		checkFileErrors(t, path, r.Errors, nil)
-		if got := serverNames(r.Servers); !reflect.DeepEqual(got, []string{"ok"}) {
+		res := ReadCodex(t.Context(), path)
+		checkFileErrors(t, path, res.Errors, nil)
+		if got := serverNames(res.Servers); !slices.Equal(got, []string{"ok"}) {
 			t.Errorf("server names = %v, want [ok]", got)
 		}
 	})

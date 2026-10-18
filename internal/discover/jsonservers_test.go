@@ -15,15 +15,20 @@ import (
 )
 
 // TestParseJSONServersTransport checks how an entry becomes a transport, one
-// server per input, and which fields are kept or dropped.
+// server per input, and which fields are kept or dropped. Each case runs for
+// Claude Code and Cursor.
 func TestParseJSONServersTransport(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
 		name      string
 		entry     string
-		want      serverView // used when wantReason is empty
+		want      serverView // used when wantError is empty
 		wantError string     // fixed reason; empty means the server is valid
+		// claudeCodeError replaces wantError for Claude Code when it is not
+		// empty. Claude Code reads an entry with no type as stdio, so it
+		// refuses a url without a command.
+		claudeCodeError string
 	}{
 		{
 			name:  "no type with command is stdio",
@@ -36,13 +41,23 @@ func TestParseJSONServersTransport(t *testing.T) {
 			},
 		},
 		{
-			name:  "no type with url is http",
+			name:  "no type with url is http for Cursor only",
 			entry: `{"url": "https://example.com/mcp", "headers": {"X-Key": "v"}}`,
 			want: serverView{
 				Transport: TransportHTTP,
 				URL:       "https://example.com/mcp",
 				Headers:   map[string]string{"X-Key": "v"},
 			},
+			claudeCodeError: reasonBadEntry,
+		},
+		{
+			name:  "no type with url and empty command is http for Cursor only",
+			entry: `{"command": "", "url": "https://example.com/mcp"}`,
+			want: serverView{
+				Transport: TransportHTTP,
+				URL:       "https://example.com/mcp",
+			},
+			claudeCodeError: reasonBadEntry,
 		},
 		{
 			name: "no type with command and url is stdio and drops url and headers",
@@ -148,36 +163,41 @@ func TestParseJSONServersTransport(t *testing.T) {
 	}
 
 	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
-			path := writeFile(t, t.TempDir(), "config.json", []byte(`{"mcpServers": {"srv": `+tt.entry+`}}`))
+		for _, client := range []Client{ClientClaudeCode, ClientCursor} {
+			t.Run(tt.name+"/"+string(client), func(t *testing.T) {
+				t.Parallel()
+				path := writeFile(t, t.TempDir(), "config.json", []byte(`{"mcpServers": {"srv": `+tt.entry+`}}`))
 
-			servers, errs := parseJSONServers(t.Context(), jsonFile{path: path, client: ClientClaudeCode, scope: ScopeGlobal})
+				servers, errs := parseJSONServers(t.Context(), jsonFile{path: path, client: client, scope: ScopeGlobal})
 
-			if tt.wantError != "" {
-				if len(servers) != 0 {
-					t.Errorf("servers = %v, want none", serverNames(servers))
+				wantError := tt.wantError
+				if client == ClientClaudeCode && tt.claudeCodeError != "" {
+					wantError = tt.claudeCodeError
 				}
-				want := []errWant{{Server: "srv", Reason: tt.wantError}}
-				checkFileErrors(t, path, errs, want)
-				if strings.Contains(errs[0].Error(), "websocket") || strings.Contains(errs[0].Error(), "STDIO") {
-					t.Errorf("error text %q echoes the transport type value", errs[0].Error())
+				if wantError != "" {
+					if len(servers) != 0 {
+						t.Errorf("servers = %v, want none", serverNames(servers))
+					}
+					checkFileErrors(t, path, errs, []errWant{{Server: "srv", Reason: wantError}})
+					if strings.Contains(errs[0].Error(), "websocket") || strings.Contains(errs[0].Error(), "STDIO") {
+						t.Errorf("error text %q echoes the transport type value", errs[0].Error())
+					}
+					return
 				}
-				return
-			}
 
-			if len(errs) != 0 {
-				t.Fatalf("errors = %v, want none", errs)
-			}
-			want := tt.want
-			want.Name = "srv"
-			want.Client = ClientClaudeCode
-			want.Scope = ScopeGlobal
-			want.Source = path
-			if got := viewsOf(servers); !reflect.DeepEqual(got, []serverView{want}) {
-				t.Errorf("servers = %+v, want %+v", got, []serverView{want})
-			}
-		})
+				if len(errs) != 0 {
+					t.Fatalf("errors = %v, want none", errs)
+				}
+				want := tt.want
+				want.Name = "srv"
+				want.Client = client
+				want.Scope = ScopeGlobal
+				want.Source = path
+				if got := viewsOf(servers); !reflect.DeepEqual(got, []serverView{want}) {
+					t.Errorf("servers = %+v, want %+v", got, []serverView{want})
+				}
+			})
+		}
 	}
 }
 
@@ -451,7 +471,7 @@ func TestParseJSONServersShapes(t *testing.T) {
 			if len(servers) > 0 {
 				gotNames = serverNames(servers)
 			}
-			if !reflect.DeepEqual(gotNames, tt.wantServers) {
+			if !slices.Equal(gotNames, tt.wantServers) {
 				t.Errorf("servers = %v, want %v", gotNames, tt.wantServers)
 			}
 			checkFileErrors(t, path, errs, tt.wantErrors)
@@ -480,7 +500,7 @@ func TestParseJSONServersScopeAndProjectPath(t *testing.T) {
 		"mcpServers": {"top": {"command": "t"}},
 		"projects": {
 			"/work/one": {"mcpServers": {"p1": {"command": "p1"}}},
-			"/work/two": {"mcpServers": {"p2": {"url": "https://example.com/mcp"}}}
+			"/work/two": {"mcpServers": {"p2": {"type": "http", "url": "https://example.com/mcp"}}}
 		}
 	}`
 
@@ -621,14 +641,14 @@ func TestParseJSONServersOrder(t *testing.T) {
 	for i := range 30 {
 		servers, errs := parseJSONServers(t.Context(), jsonFile{path: path, client: ClientClaudeCode, scope: ScopeGlobal, withProjects: true})
 
-		if got := serverNames(servers); !reflect.DeepEqual(got, wantNames) {
+		if got := serverNames(servers); !slices.Equal(got, wantNames) {
 			t.Fatalf("run %d: server names = %v, want %v", i, got, wantNames)
 		}
 		var gotPaths []string
 		for _, s := range servers {
 			gotPaths = append(gotPaths, s.ProjectPath)
 		}
-		if !reflect.DeepEqual(gotPaths, wantPaths) {
+		if !slices.Equal(gotPaths, wantPaths) {
 			t.Fatalf("run %d: project paths = %v, want %v", i, gotPaths, wantPaths)
 		}
 		checkFileErrors(t, path, errs, wantErrors)
@@ -698,7 +718,7 @@ func TestParseJSONServersNoLeak(t *testing.T) {
 			name: "valid file",
 			input: `{"mcpServers": {
 				"a": {"command": "x", "env": {"K": "` + envCanary + `"}},
-				"b": {"url": "https://u:` + urlCanary + `@example.com/mcp?k=` + urlCanary + `",
+				"b": {"type": "http", "url": "https://u:` + urlCanary + `@example.com/mcp?k=` + urlCanary + `",
 				      "headers": {"Authorization": "` + headerCanary + `"}}}}`,
 		},
 		{
@@ -1009,7 +1029,7 @@ func TestSortServersStable(t *testing.T) {
 			for _, s := range servers {
 				got = append(got, s.Command)
 			}
-			if !reflect.DeepEqual(got, tt.want) {
+			if !slices.Equal(got, tt.want) {
 				t.Errorf("commands = %v, want %v", got, tt.want)
 			}
 		})
@@ -1276,7 +1296,7 @@ func TestParseJSONServersCaseVariantSections(t *testing.T) {
 			if len(servers) > 0 {
 				gotNames = serverNames(servers)
 			}
-			if !reflect.DeepEqual(gotNames, tt.wantServers) {
+			if !slices.Equal(gotNames, tt.wantServers) {
 				t.Errorf("servers = %v, want %v", gotNames, tt.wantServers)
 			}
 			checkFileErrors(t, path, errs, tt.wantErrors)
@@ -1470,7 +1490,7 @@ func runBadStringCases(t *testing.T, tests []badStringCase) {
 				if len(errs) != 0 {
 					t.Fatalf("errors = %v, want none", errs)
 				}
-				if got := serverNames(servers); !reflect.DeepEqual(got, []string{tt.wantName}) {
+				if got := serverNames(servers); !slices.Equal(got, []string{tt.wantName}) {
 					t.Errorf("servers = %q, want [%q]", got, tt.wantName)
 				}
 				return
@@ -1543,7 +1563,7 @@ func TestParseJSONServersEmptyName(t *testing.T) {
 			if len(servers) > 0 {
 				gotNames = serverNames(servers)
 			}
-			if !reflect.DeepEqual(gotNames, tt.wantServers) {
+			if !slices.Equal(gotNames, tt.wantServers) {
 				t.Errorf("servers = %q, want %q", gotNames, tt.wantServers)
 			}
 			checkFileErrors(t, path, errs, tt.wantErrors)
@@ -1582,7 +1602,7 @@ func TestParseJSONServersProjectPathInErrors(t *testing.T) {
 		for _, e := range errs {
 			got = append(got, e.Error())
 		}
-		if !reflect.DeepEqual(got, want) {
+		if !slices.Equal(got, want) {
 			t.Errorf("errors =\n%q\nwant\n%q", got, want)
 		}
 	})
@@ -1599,7 +1619,7 @@ func TestParseJSONServersProjectPathInErrors(t *testing.T) {
 		for _, e := range errs {
 			got = append(got, e.Error())
 		}
-		if !reflect.DeepEqual(got, want) {
+		if !slices.Equal(got, want) {
 			t.Errorf("errors = %q, want %q", got, want)
 		}
 	})
@@ -1736,7 +1756,7 @@ func TestParseJSONServersUntrusted(t *testing.T) {
 			name: "servers and entry errors",
 			input: `{"mcpServers": {
 				"good": {"command": "x"},
-				"remote": {"url": "https://example.com/mcp"},
+				"remote": {"type": "http", "url": "https://example.com/mcp"},
 				"bad": 5,
 				"": {"command": "x"},
 				"amb": {"command": "x", "Command": "y"},
@@ -2057,5 +2077,159 @@ func TestReadJSONProjectRoot(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+// TestReadJSONProjectPathFromFile checks the ProjectPath of a project file
+// read without a projectPath. It is the directory of the file. Only the
+// Cursor reader skips a ".cursor" directory: the servers of
+// <project>/.cursor/mcp.json get <project>, as Discover gives it. A Claude
+// Code .mcp.json is at the top of its project.
+func TestReadJSONProjectPathFromFile(t *testing.T) {
+	t.Parallel()
+
+	const content = `{"mcpServers": {"s": {"command": "x"}}}`
+
+	tests := []struct {
+		name string
+		read jsonReader
+		rel  string // the file below the temporary directory
+		// wantRel is the wanted ProjectPath below the temporary directory.
+		wantRel string
+	}{
+		{name: "claude-code/project file", read: ReadClaudeCode, rel: "proj/.mcp.json", wantRel: "proj"},
+		{name: "claude-code/in a .cursor directory", read: ReadClaudeCode, rel: "proj/.cursor/.mcp.json", wantRel: "proj/.cursor"},
+		{name: "cursor/in .cursor", read: ReadCursor, rel: "proj/.cursor/mcp.json", wantRel: "proj"},
+		{name: "cursor/in another directory", read: ReadCursor, rel: "proj/conf/mcp.json", wantRel: "proj/conf"},
+		{name: "cursor/name ends with .cursor", read: ReadCursor, rel: "proj/my.cursor/mcp.json", wantRel: "proj/my.cursor"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			dir := t.TempDir()
+			path := writeFile(t, dir, tt.rel, []byte(content))
+
+			res := tt.read(t.Context(), path, ScopeProject, "")
+
+			if len(res.Errors) != 0 {
+				t.Fatalf("errors = %v, want none", res.Errors)
+			}
+			if len(res.Servers) != 1 {
+				t.Fatalf("server names = %v, want [s]", serverNames(res.Servers))
+			}
+			want := filepath.Join(dir, filepath.FromSlash(tt.wantRel))
+			if s := res.Servers[0]; s.Scope != ScopeProject || s.ProjectPath != want || !s.Untrusted {
+				t.Errorf("server %q scope=%q projectPath=%q untrusted=%v, want %q, %q and true",
+					s.Name, s.Scope, s.ProjectPath, s.Untrusted, ScopeProject, want)
+			}
+		})
+	}
+}
+
+// TestReadJSONUnknownScope checks that a scope other than ScopeGlobal fails
+// closed: the readers read the file as a project file. The read stays below
+// the project directory, the smaller size limit holds, every server and
+// error is Untrusted, and the servers get ScopeProject. Claude Code does not
+// read the "projects" key of such a file.
+func TestReadJSONUnknownScope(t *testing.T) {
+	t.Parallel()
+
+	const content = `{"mcpServers": {"s": {"command": "x"}},
+		"projects": {"/attacker/chosen": {"mcpServers": {"spoofed": {"command": "y"}}}}}`
+
+	readers := []struct {
+		name string
+		read jsonReader
+		rel  string // the project file below the work directory
+	}{
+		{name: "claude-code", read: ReadClaudeCode, rel: ".mcp.json"},
+		{name: "cursor", read: ReadCursor, rel: ".cursor/mcp.json"},
+	}
+
+	tests := []struct {
+		name string
+		// setup makes the file below work, maybe as a symlink to a file in
+		// outside. It returns the path to read.
+		setup      func(t *testing.T, work, outside, rel string) string
+		wantReason string // "" means the file is read and gives server "s"
+	}{
+		{
+			name: "servers are untrusted project servers",
+			setup: func(t *testing.T, work, _, rel string) string {
+				return writeFile(t, work, rel, []byte(content))
+			},
+		},
+		{
+			name: "symlink out of the project is refused",
+			setup: func(t *testing.T, work, outside, rel string) string {
+				skipOnWindows(t)
+				return symlinkTo(t, writeFile(t, outside, "config.json", []byte(content)), work, rel)
+			},
+			wantReason: reasonOutsideProject,
+		},
+		{
+			name: "file over the project size limit is refused",
+			setup: func(t *testing.T, work, _, rel string) string {
+				data := content + strings.Repeat(" ", maxProjectConfigSize+1-len(content))
+				return writeFile(t, work, rel, []byte(data))
+			},
+			wantReason: reasonTooLarge,
+		},
+	}
+
+	for _, r := range readers {
+		for _, scope := range []Scope{"", "Project"} {
+			for _, tt := range tests {
+				t.Run(fmt.Sprintf("%s/scope %q/%s", r.name, scope, tt.name), func(t *testing.T) {
+					t.Parallel()
+					work, outside := t.TempDir(), t.TempDir()
+					path := tt.setup(t, work, outside, r.rel)
+
+					res := r.read(t.Context(), path, scope, work)
+
+					checkErrorsUntrusted(t, res.Errors, true)
+					checkServersUntrusted(t, res.Servers, true)
+					if tt.wantReason != "" {
+						if len(res.Servers) != 0 {
+							t.Errorf("servers = %v, want none", serverNames(res.Servers))
+						}
+						checkFileErrors(t, path, res.Errors, []errWant{{Reason: tt.wantReason}})
+						return
+					}
+					checkFileErrors(t, path, res.Errors, nil)
+					if got := serverNames(res.Servers); !slices.Equal(got, []string{"s"}) {
+						t.Fatalf("servers = %v, want [s]", got)
+					}
+					if s := res.Servers[0]; s.Scope != ScopeProject || s.ProjectPath != work {
+						t.Errorf("server %q scope=%q projectPath=%q, want %q and %q",
+							s.Name, s.Scope, s.ProjectPath, ScopeProject, work)
+					}
+				})
+			}
+		}
+	}
+}
+
+// TestJSONKeys checks the key list of a server entry: every entry in jsonReads
+// has a destination, no key is listed twice, and jsonKnownKeys holds the keys
+// of jsonReads in order.
+func TestJSONKeys(t *testing.T) {
+	t.Parallel()
+
+	var e jsonEntry
+	reads := jsonReads(&e)
+	keys := make([]string, 0, len(reads))
+	for _, r := range reads {
+		if r.dst == nil {
+			t.Errorf("jsonReads: key %q has no destination", r.key)
+		}
+		if slices.Contains(keys, r.key) {
+			t.Errorf("jsonReads: key %q is listed twice", r.key)
+		}
+		keys = append(keys, r.key)
+	}
+	if !slices.Equal(jsonKnownKeys, keys) {
+		t.Errorf("jsonKnownKeys = %q, want %q", jsonKnownKeys, keys)
 	}
 }

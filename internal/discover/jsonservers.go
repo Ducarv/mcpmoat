@@ -2,14 +2,12 @@ package discover
 
 import (
 	"bytes"
-	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
 	"maps"
 	"path/filepath"
 	"slices"
-	"strings"
 )
 
 // Exact keys of the Claude Code and Cursor JSON configs. The clients read the
@@ -32,13 +30,10 @@ const (
 	keyHeaders    = "headers"
 )
 
-// entryKeys lists the keys that a server entry can have. No code writes to
-// it.
-var entryKeys = [...]string{keyType, keyCommand, keyArgs, keyEnv, keyURL, keyHeaders}
-
 // jsonEntry is one server entry in a Claude Code or Cursor JSON config. Both
 // clients use the same shape. Fields that a JSON entry does not have stay at
-// their zero value. decodeJSONEntry fills it; it has no json tags on purpose.
+// their zero value. decodeJSONEntry fills it from the exact keys in
+// jsonReads; it has no json tags on purpose.
 type jsonEntry struct {
 	Type    string
 	Command string
@@ -48,12 +43,51 @@ type jsonEntry struct {
 	Headers SecretMap
 }
 
+// jsonRead is one key of a server entry that decodeJSONEntry reads, and a
+// pointer to the jsonEntry field that takes the value.
+type jsonRead struct {
+	key string
+	dst any
+}
+
+// jsonReads returns one jsonRead for each key of a server entry, with
+// pointers into e. It is the one list of these keys: jsonKnownKeys is built
+// from it.
+func jsonReads(e *jsonEntry) []jsonRead {
+	return []jsonRead{
+		{key: keyType, dst: &e.Type},
+		{key: keyCommand, dst: &e.Command},
+		{key: keyArgs, dst: &e.Args},
+		{key: keyEnv, dst: &e.Env},
+		{key: keyURL, dst: &e.URL},
+		{key: keyHeaders, dst: &e.Headers},
+	}
+}
+
+// jsonKnownKeys lists the keys of jsonReads, in order. decodeJSONEntry uses it
+// to find keys that differ from a known key only by letter case. It is built
+// once, when the package loads. No code writes to it.
+var jsonKnownKeys = jsonAllKeys()
+
+// jsonAllKeys returns the keys of jsonReads, in order. It runs once, to build
+// jsonKnownKeys.
+func jsonAllKeys() []string {
+	reads := jsonReads(&jsonEntry{})
+	keys := make([]string, 0, len(reads))
+	for _, r := range reads {
+		keys = append(keys, r.key)
+	}
+	return keys
+}
+
 // jsonFile is one Claude Code or Cursor JSON config to read. ReadClaudeCode
 // and ReadCursor build it with named fields.
 type jsonFile struct {
 	path   string
 	client Client
-	// scope goes to the servers of the top-level "mcpServers" object.
+	// scope goes to the servers of the top-level "mcpServers" object. Only
+	// ScopeGlobal is trusted: parseJSONServers reads any other value as
+	// ScopeProject.
 	scope Scope
 	// projectPath goes to those servers with ScopeProject (see
 	// topProjectPath). It is ignored with ScopeGlobal.
@@ -73,7 +107,7 @@ type jsonFile struct {
 // .cursor is refused. A symlink out of the directory and an absolute symlink
 // are refused too.
 func (f jsonFile) limits() (maxSize int64, root string) {
-	if f.scope != ScopeProject {
+	if f.scope == ScopeGlobal {
 		return maxConfigSize, ""
 	}
 	root = f.projectPath
@@ -91,7 +125,7 @@ func (f jsonFile) topProjectPath() string {
 	switch {
 	case f.scope == ScopeGlobal:
 		return ""
-	case f.scope == ScopeProject && f.projectPath == "":
+	case f.projectPath == "":
 		return projectDirOf(f.path, f.client)
 	}
 	return f.projectPath
@@ -138,6 +172,10 @@ type jsonParser struct {
 
 // parseJSONServers reads the Claude Code or Cursor JSON config f.
 //
+// Only ScopeGlobal is trusted. Any other value of f.scope, also the zero
+// Scope, is read as ScopeProject: the file is read within the project
+// limits, and its servers get ScopeProject. So a caller error fails closed.
+//
 // The servers of the top-level "mcpServers" object get f.scope and the
 // ProjectPath of topProjectPath. If f.withProjects is true, the servers under
 // "projects.<dir>.mcpServers" are read too. They get ScopeProject and
@@ -145,20 +183,35 @@ type jsonParser struct {
 // itself, has FileError.ProjectPath <dir>. An empty <dir> is refused
 // (reasonEmptyProject), and the other projects are still read.
 //
-// With ScopeProject, markUntrusted marks every server and every error.
+// For a project file, markUntrusted marks every server and every error at
+// the end.
 //
 // See the package doc, Reading configs.
 func parseJSONServers(ctx context.Context, f jsonFile) ([]Server, []*FileError) {
-	servers, errs := parseJSONFile(ctx, f)
-	if f.scope == ScopeProject {
+	if f.scope != ScopeGlobal {
+		f.scope = ScopeProject
+	}
+
+	var servers []Server
+	var errs []*FileError
+	top, fe := loadJSONFile(ctx, f)
+	switch {
+	case fe != nil:
+		errs = []*FileError{fe}
+	case top != nil:
+		servers, errs = decodeJSONSections(ctx, f, top)
+	}
+
+	if f.scope != ScopeGlobal {
 		markUntrusted(servers, errs)
 	}
 	return servers, errs
 }
 
 // markUntrusted sets Untrusted on every server and every error. For a JSON
-// file it is the only code that sets Untrusted: parseJSONFile returns every
-// error of the file, read errors from readConfigFile too, without the mark.
+// file it is the only code that sets Untrusted: the other functions return
+// every error of the file, read errors from readConfigFile too, without the
+// mark.
 func markUntrusted(servers []Server, errs []*FileError) {
 	for i := range servers {
 		servers[i].Untrusted = true
@@ -166,18 +219,6 @@ func markUntrusted(servers []Server, errs []*FileError) {
 	for _, e := range errs {
 		e.Untrusted = true
 	}
-}
-
-// parseJSONFile does the work of parseJSONServers, except Untrusted.
-func parseJSONFile(ctx context.Context, f jsonFile) ([]Server, []*FileError) {
-	top, fe := loadJSONFile(ctx, f)
-	if fe != nil {
-		return nil, []*FileError{fe}
-	}
-	if top == nil {
-		return nil, nil
-	}
-	return decodeJSONSections(ctx, f, top)
 }
 
 // loadJSONFile reads f within its limits and checks the file as a whole. It
@@ -247,8 +288,7 @@ func decodeJSONSections(ctx context.Context, f jsonFile, top map[string]json.Raw
 // topLevelError turns a decode error for the whole file into a FileError. We
 // look at the error type only and never use its text.
 func topLevelError(path string, data []byte, err error) *FileError {
-	var se *json.SyntaxError
-	if errors.As(err, &se) {
+	if se, ok := errors.AsType[*json.SyntaxError](err); ok {
 		// Offset is the number of bytes read when the error was found, so the
 		// bad byte is at index Offset-1. lineCol clamps a negative value.
 		return newFileError(path, reasonInvalidJSON).atOffset(data, int(se.Offset-1))
@@ -367,7 +407,7 @@ func (p *jsonParser) readJSONServer(name string, raw json.RawMessage, o origin) 
 }
 
 // decodeJSONEntry decodes one server entry. It reads only the exact keys in
-// entryKeys and ignores other keys. It returns reasonBadEntry if the entry is
+// jsonReads and ignores other keys. It returns reasonBadEntry if the entry is
 // null or not an object, or if a known key has a value of the wrong type or a
 // null (see decodeField), reasonAmbiguousKey if the entry has a known key in
 // a different letter case, and "" if the entry is valid.
@@ -381,20 +421,14 @@ func decodeJSONEntry(raw json.RawMessage) (jsonEntry, reason) {
 	if err := json.Unmarshal(raw, &fields); err != nil {
 		return jsonEntry{}, reasonBadEntry
 	}
-	if hasCaseVariant(fields, entryKeys[:]...) {
+	if hasCaseVariant(fields, jsonKnownKeys...) {
 		return jsonEntry{}, reasonAmbiguousKey
 	}
 	var e jsonEntry
-	err := errors.Join(
-		decodeField(fields, keyType, &e.Type),
-		decodeField(fields, keyCommand, &e.Command),
-		decodeField(fields, keyArgs, &e.Args),
-		decodeField(fields, keyEnv, &e.Env),
-		decodeField(fields, keyURL, &e.URL),
-		decodeField(fields, keyHeaders, &e.Headers),
-	)
-	if err != nil {
-		return jsonEntry{}, reasonBadEntry
+	for _, r := range jsonReads(&e) {
+		if err := decodeField(fields, r.key, r.dst); err != nil {
+			return jsonEntry{}, reasonBadEntry
+		}
 	}
 	return e, ""
 }
@@ -458,7 +492,7 @@ func hasNullItem(raw json.RawMessage) bool {
 // Fields that do not belong to the chosen transport are dropped: a stdio
 // server keeps Command, Args and Env; a remote server keeps URL and Headers.
 func (p *jsonParser) newJSONServer(name string, e jsonEntry, o origin) (Server, reason) {
-	transport, r := resolveTransport(e)
+	transport, r := resolveTransport(p.client, e)
 	if r != "" {
 		return Server{}, r
 	}
@@ -481,11 +515,13 @@ func (p *jsonParser) newJSONServer(name string, e jsonEntry, o origin) (Server, 
 	return srv, ""
 }
 
-// resolveTransport picks the transport of an entry from its "type" field. With
-// no type it infers one: a command means stdio, else a url means http. It
-// returns a reason if the entry is not valid, and "" if it is. The unknown
-// type value is never put in the reason.
-func resolveTransport(e jsonEntry) (Transport, reason) {
+// resolveTransport picks the transport of an entry of client from its "type"
+// field. With no type, a command means stdio, and a url without a command
+// means http for Cursor only. Claude Code reads an entry with no type as
+// stdio and refuses it without a command, so for any other client such an
+// entry gives reasonBadEntry. It returns a reason if the entry is not valid,
+// and "" if it is. The unknown type value is never put in the reason.
+func resolveTransport(client Client, e jsonEntry) (Transport, reason) {
 	hasURL := e.URL.Reveal() != ""
 	switch e.Type {
 	case "stdio":
@@ -498,13 +534,15 @@ func resolveTransport(e jsonEntry) (Transport, reason) {
 	case "sse":
 		return remoteTransport(TransportSSE, hasURL)
 	case "":
-		if e.Command != "" {
+		switch {
+		case e.Command != "":
 			return TransportStdio, ""
+		case !hasURL:
+			return "", reasonNoCommandOrURL
+		case client != ClientCursor:
+			return "", reasonBadEntry
 		}
-		if hasURL {
-			return TransportHTTP, ""
-		}
-		return "", reasonNoCommandOrURL
+		return TransportHTTP, ""
 	default:
 		return "", reasonUnknownTransport
 	}
@@ -526,25 +564,4 @@ func remoteTransport(t Transport, hasURL bool) (Transport, reason) {
 // only the bytes of the value there, without the whitespace around it.
 func isNull(raw json.RawMessage) bool {
 	return len(raw) == 0 || bytes.Equal(raw, []byte("null"))
-}
-
-// sortServers sorts servers by (ProjectPath, Name). The sort is stable: servers
-// with the same key keep their input order, so a top-level server comes before
-// a project server of the same name and path.
-func sortServers(servers []Server) {
-	slices.SortStableFunc(servers, func(a, b Server) int {
-		return cmp.Or(
-			strings.Compare(a.ProjectPath, b.ProjectPath),
-			strings.Compare(a.Name, b.Name),
-		)
-	})
-}
-
-// sortErrors puts file-level errors (empty Server) first, then sorts by Server
-// name. Empty sorts before every other string, so comparing the names is
-// enough. The sort is stable: errors with the same name keep their order.
-func sortErrors(errs []*FileError) {
-	slices.SortStableFunc(errs, func(a, b *FileError) int {
-		return strings.Compare(a.Server, b.Server)
-	})
 }

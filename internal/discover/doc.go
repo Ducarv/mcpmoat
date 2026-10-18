@@ -44,26 +44,14 @@
 // URL and Args is printable ASCII, but display code must still escape every
 // field before it prints it to a terminal.
 //
-// Config readers must return errors that name the file and the position in
-// it, and never a value from the config.
+// Config readers must return errors that name the file and the position when
+// it is known, and never a value from the config.
 //
 // # Reading configs
 //
-// [Discover] reads the config files of the three clients in this fixed order:
-//
-//  1. ~/.claude.json
-//  2. <WorkDir>/.mcp.json
-//  3. ~/.cursor/mcp.json
-//  4. <WorkDir>/.cursor/mcp.json
-//  5. ~/.codex/config.toml
-//
-// [Options] gives Home and WorkDir. The package never reads $HOME or the
-// current directory by itself. An empty value skips the files that belong to
-// it. If WorkDir and Home are the same directory, Discover reads the Cursor
-// file once, as a global config. This check is lexical: Discover compares the
-// cleaned paths as text. It does not detect a symlinked WorkDir, or a second
-// name for the same directory (for example /var and /private/var on macOS, or
-// a case-insensitive file system).
+// [Discover] reads the config files of the three clients in a fixed order,
+// below the Home and WorkDir directories that [Options] gives. See [Discover]
+// for the files, their order and the case where WorkDir is Home.
 //
 // [ReadClaudeCode], [ReadCursor] and [ReadCodex] read one file. They do not
 // check that the file exists, because a missing file is not an error. A
@@ -83,10 +71,10 @@
 // Codex file that the user gives, unless the path resolves to
 // ~/.codex/config.toml.
 //
-// Each reader returns a [Result]. Servers come in a fixed order: file order,
-// then ProjectPath, then Name. The errors of one file come in a fixed order
-// too: errors about the whole file (no server name) first, then by server
-// name. Errors with the same server name keep the order in which the reader
+// Each reader returns a [Result]. The servers of one file come in a fixed
+// order: by ProjectPath, then by Name. The errors of one file come in a fixed
+// order too: errors about the whole file (no server name) first, then by
+// server name. Errors with the same server name keep the order in which the reader
 // found them: in ~/.claude.json, the top level first, then the projects
 // sorted by path.
 //
@@ -109,8 +97,10 @@
 //
 //   - The "type" field is stdio, http, streamable-http or sse. The value
 //     streamable-http is the same as http. Any other value is an error.
-//   - With no "type", a server with "command" is stdio. Else a server with
-//     "url" is http. Else it is an error.
+//   - With no "type", a server with "command" is stdio. Else, for Cursor
+//     only, a server with "url" is http. Claude Code treats an entry with no
+//     "type" as stdio, so it refuses a url without "type" ("invalid server
+//     entry"). Any other entry is an error.
 //   - If a server name appears twice in one "mcpServers" object, the last entry
 //     wins. The clients do the same.
 //   - For Claude Code, the projects key is read only from a global file
@@ -138,7 +128,7 @@
 // All readers:
 //
 //   - A stdio server keeps command, args, env and, for Codex, cwd (as
-//     [Server.Dir]). A remote server keeps url and headers. The JSON readers
+//     [Server.Dir], which tells how to treat a relative cwd). A remote server keeps url and headers. The JSON readers
 //     drop a field that does not belong to the transport; the Codex reader
 //     refuses it (see below).
 //   - A file that is not a regular file (for example a directory or a pipe) is
@@ -230,13 +220,6 @@
 // The user's own files are trusted: ~/.claude.json (also the servers under
 // its projects.<path> keys, which Claude Code writes when the user adds a
 // server), ~/.cursor/mcp.json and the Codex file.
-//
-// # Working directory of a stdio server
-//
-// [Server.Dir] is the Codex cwd as written. A relative Dir is relative to
-// the directory where the user runs Codex, which mcpmoat does not know. So
-// inspect must treat a relative Dir like an empty Dir and never resolve it
-// against its own working directory.
 //
 // # Tests
 //

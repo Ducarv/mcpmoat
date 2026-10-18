@@ -102,13 +102,13 @@ func TestReadClaudeCode(t *testing.T) {
 func TestReadClaudeCodeCanaryMasking(t *testing.T) {
 	t.Parallel()
 	home, _ := copyFixture(t, "claude-code", "secrets")
-	r := ReadClaudeCode(t.Context(), filepath.Join(home, ".claude.json"), ScopeGlobal, "")
-	if len(r.Errors) != 0 {
-		t.Fatalf("errors = %v, want none", r.Errors)
+	res := ReadClaudeCode(t.Context(), filepath.Join(home, ".claude.json"), ScopeGlobal, "")
+	if len(res.Errors) != 0 {
+		t.Fatalf("errors = %v, want none", res.Errors)
 	}
 
 	var found bool
-	for _, s := range r.Servers {
+	for _, s := range res.Servers {
 		if s.Name != "with-url-secret" {
 			continue
 		}
@@ -128,16 +128,28 @@ func TestReadClaudeCodeCanaryMasking(t *testing.T) {
 		}
 	}
 	if !found {
-		t.Fatalf("server with-url-secret not found; got %v", serverNames(r.Servers))
+		t.Fatalf("server with-url-secret not found; got %v", serverNames(res.Servers))
 	}
 
 	// The keys of env and headers are kept, the values stay masked.
-	for _, s := range r.Servers {
+	var envKeys, headerKeys int
+	for _, s := range res.Servers {
 		for _, key := range s.Env.Keys() {
+			envKeys++
 			if s.Env[key].String() == s.Env[key].Reveal() {
 				t.Errorf("server %q env key %q: String() shows the value", s.Name, key)
 			}
 		}
+		for _, key := range s.Headers.Keys() {
+			headerKeys++
+			if s.Headers[key].String() == s.Headers[key].Reveal() {
+				t.Errorf("server %q header key %q: String() shows the value", s.Name, key)
+			}
+		}
+	}
+	// The fixture has env and headers values, so both loops must run.
+	if envKeys == 0 || headerKeys == 0 {
+		t.Errorf("checked %d env keys and %d header keys, want both above 0", envKeys, headerKeys)
 	}
 }
 
@@ -149,9 +161,9 @@ func TestReadClaudeCodeProjectPath(t *testing.T) {
 	home, _ := copyFixture(t, "claude-code", "valid")
 	path := filepath.Join(home, ".claude.json")
 
-	r := ReadClaudeCode(t.Context(), path, ScopeGlobal, "/custom/dir")
-	if len(r.Errors) != 0 {
-		t.Fatalf("errors = %v, want none", r.Errors)
+	res := ReadClaudeCode(t.Context(), path, ScopeGlobal, "/custom/dir")
+	if len(res.Errors) != 0 {
+		t.Fatalf("errors = %v, want none", res.Errors)
 	}
 	want := []struct {
 		name, project string
@@ -164,11 +176,11 @@ func TestReadClaudeCodeProjectPath(t *testing.T) {
 		{"alpha-tool", "/work/alpha", ScopeProject},
 		{"gamma-tool", "/work/gamma", ScopeProject},
 	}
-	if len(r.Servers) != len(want) {
-		t.Fatalf("got servers %v, want %d servers", serverNames(r.Servers), len(want))
+	if len(res.Servers) != len(want) {
+		t.Fatalf("got servers %v, want %d servers", serverNames(res.Servers), len(want))
 	}
 	for i, w := range want {
-		s := r.Servers[i]
+		s := res.Servers[i]
 		if s.Name != w.name || s.ProjectPath != w.project || s.Scope != w.scope {
 			t.Errorf("servers[%d] = {%q %q %q}, want {%q %q %q}",
 				i, s.Name, s.ProjectPath, s.Scope, w.name, w.project, w.scope)
@@ -206,14 +218,14 @@ func TestReadClaudeCodeProjectsKeyByScope(t *testing.T) {
 			dir := t.TempDir()
 			path := writeFile(t, dir, ".mcp.json", []byte(content))
 
-			r := ReadClaudeCode(t.Context(), path, tt.scope, dir)
-			if len(r.Errors) != 0 {
-				t.Fatalf("errors = %v, want none", r.Errors)
+			res := ReadClaudeCode(t.Context(), path, tt.scope, dir)
+			if len(res.Errors) != 0 {
+				t.Fatalf("errors = %v, want none", res.Errors)
 			}
-			if got := serverNames(r.Servers); !slices.Equal(got, tt.want) {
+			if got := serverNames(res.Servers); !slices.Equal(got, tt.want) {
 				t.Fatalf("servers = %v, want %v", got, tt.want)
 			}
-			for _, s := range r.Servers {
+			for _, s := range res.Servers {
 				if tt.scope == ScopeProject && s.ProjectPath != dir {
 					t.Errorf("server %q ProjectPath = %q, want %q", s.Name, s.ProjectPath, dir)
 				}
@@ -228,13 +240,13 @@ func TestReadClaudeCodeErrorsAs(t *testing.T) {
 	t.Parallel()
 	home, _ := copyFixture(t, "claude-code", "invalid-entries")
 	path := filepath.Join(home, ".claude.json")
-	r := ReadClaudeCode(t.Context(), path, ScopeGlobal, "")
-	if len(r.Errors) == 0 {
+	res := ReadClaudeCode(t.Context(), path, ScopeGlobal, "")
+	if len(res.Errors) == 0 {
 		t.Fatal("errors = none, want entry errors")
 	}
 
 	var joined []error
-	for _, e := range r.Errors {
+	for _, e := range res.Errors {
 		joined = append(joined, e)
 	}
 	err := errors.Join(joined...)
@@ -246,7 +258,7 @@ func TestReadClaudeCodeErrorsAs(t *testing.T) {
 		t.Errorf("first FileError.Server = %q, want %q", fe.Server, "empty")
 	}
 
-	for _, e := range r.Errors {
+	for _, e := range res.Errors {
 		msg := e.Error()
 		// The exact compare also shows that the message does not echo a
 		// config value, for example the unknown transport type.
@@ -263,11 +275,11 @@ func TestReadClaudeCodeMalformedMessage(t *testing.T) {
 	t.Parallel()
 	home, _ := copyFixture(t, "claude-code", "malformed")
 	path := filepath.Join(home, ".claude.json")
-	r := ReadClaudeCode(t.Context(), path, ScopeGlobal, "")
-	if len(r.Errors) != 1 {
-		t.Fatalf("got %d errors, want 1", len(r.Errors))
+	res := ReadClaudeCode(t.Context(), path, ScopeGlobal, "")
+	if len(res.Errors) != 1 {
+		t.Fatalf("got %d errors, want 1", len(res.Errors))
 	}
-	msg := r.Errors[0].Error()
+	msg := res.Errors[0].Error()
 	if !strings.HasPrefix(msg, path+":3:") {
 		t.Errorf("Error() = %q, want prefix %q", msg, path+":3:")
 	}
@@ -284,9 +296,9 @@ func TestReadClaudeCodeMalformedMessage(t *testing.T) {
 func TestReadClaudeCodeMissingPath(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
-	r := ReadClaudeCode(t.Context(), filepath.Join(dir, "no", "such", ".claude.json"), ScopeGlobal, "")
-	if len(r.Servers) != 0 || len(r.Errors) != 0 {
-		t.Errorf("Result = %d servers, %v errors; want empty", len(r.Servers), r.Errors)
+	res := ReadClaudeCode(t.Context(), filepath.Join(dir, "no", "such", ".claude.json"), ScopeGlobal, "")
+	if len(res.Servers) != 0 || len(res.Errors) != 0 {
+		t.Errorf("Result = %d servers, %v errors; want empty", len(res.Servers), res.Errors)
 	}
 }
 
@@ -297,59 +309,18 @@ func TestReadClaudeCodeCanceled(t *testing.T) {
 	home, _ := copyFixture(t, "claude-code", "valid")
 	ctx, cancel := context.WithCancel(t.Context())
 	cancel()
-	r := ReadClaudeCode(ctx, filepath.Join(home, ".claude.json"), ScopeGlobal, "")
-	if len(r.Servers) != 0 {
-		t.Errorf("servers = %v, want none", serverNames(r.Servers))
+	res := ReadClaudeCode(ctx, filepath.Join(home, ".claude.json"), ScopeGlobal, "")
+	if len(res.Servers) != 0 {
+		t.Errorf("servers = %v, want none", serverNames(res.Servers))
 	}
-	if len(r.Errors) != 1 {
-		t.Fatalf("got %d errors, want 1", len(r.Errors))
+	if len(res.Errors) != 1 {
+		t.Fatalf("got %d errors, want 1", len(res.Errors))
 	}
-	if !errors.Is(r.Errors[0], context.Canceled) {
-		t.Errorf("errors.Is(err, context.Canceled) = false for %v", r.Errors[0])
+	if !errors.Is(res.Errors[0], context.Canceled) {
+		t.Errorf("errors.Is(err, context.Canceled) = false for %v", res.Errors[0])
 	}
 	var pe *fs.PathError
-	if errors.As(r.Errors[0], &pe) {
+	if errors.As(res.Errors[0], &pe) {
 		t.Errorf("canceled error wraps a PathError: %v", pe)
-	}
-}
-
-// TestReadClaudeCodeProjectPathFromFile checks that a project file read
-// without a projectPath gives its servers the directory of the file as
-// ProjectPath. Only the Cursor reader skips a ".cursor" directory: a Claude
-// Code .mcp.json is at the top of its project.
-func TestReadClaudeCodeProjectPathFromFile(t *testing.T) {
-	t.Parallel()
-
-	const content = `{"mcpServers": {"s": {"command": "x"}}}`
-
-	tests := []struct {
-		name    string
-		rel     string // the file below the temporary directory
-		wantRel string // the wanted ProjectPath below the temporary directory
-	}{
-		{name: "project file", rel: "proj/.mcp.json", wantRel: "proj"},
-		{name: "in a .cursor directory", rel: "proj/.cursor/.mcp.json", wantRel: "proj/.cursor"},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
-			dir := t.TempDir()
-			path := writeFile(t, dir, tt.rel, []byte(content))
-
-			r := ReadClaudeCode(t.Context(), path, ScopeProject, "")
-
-			if len(r.Errors) != 0 {
-				t.Fatalf("errors = %v, want none", r.Errors)
-			}
-			if len(r.Servers) != 1 {
-				t.Fatalf("server names = %v, want [s]", serverNames(r.Servers))
-			}
-			want := filepath.Join(dir, filepath.FromSlash(tt.wantRel))
-			if s := r.Servers[0]; s.Scope != ScopeProject || s.ProjectPath != want || !s.Untrusted {
-				t.Errorf("server %q scope=%q projectPath=%q untrusted=%v, want %q, %q and true",
-					s.Name, s.Scope, s.ProjectPath, s.Untrusted, ScopeProject, want)
-			}
-		})
 	}
 }

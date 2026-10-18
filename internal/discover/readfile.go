@@ -34,8 +34,9 @@ const maxServersPerFile = 10000
 // a directory (ENOTDIR): no config file can exist below a regular file. Every
 // other problem comes back as a *FileError.
 //
-// root is the project directory for a project file, and "" for any other
-// file. With a root, the file is opened through os.Root and a path or symlink
+// root is the project directory for a project file. root == "" is only for a
+// trusted global config file (a file of the user under Home): that file is
+// opened with symlinks followed and no confinement. With a root, the file is opened through os.Root and a path or symlink
 // that leaves root is refused with reasonOutsideProject. readConfigFile never
 // sets FileError.Untrusted: the reader that calls it does. See the package
 // doc, Symlinks and Untrusted files.
@@ -97,7 +98,7 @@ func readConfigFile(ctx context.Context, path string, maxSize int64, root string
 // file and a nil error when the file is missing (see isMissing), as
 // openInRoot does.
 func openPlain(path string) (*os.File, *FileError) {
-	f, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NONBLOCK, 0) //nolint:gosec // G304: path is a config file chosen by discovery or --config.
+	f, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NONBLOCK, 0) //nolint:gosec // G304: root == "" only for a trusted global config file under Home.
 	switch {
 	case err == nil:
 		return f, nil
@@ -144,18 +145,10 @@ func openInRoot(root, path string) (*os.File, *FileError) {
 	}
 }
 
-// readError returns the FileError of a read of path with the reason r and
-// the OS error err (nil for none).
-func readError(path string, r reason, err error) *FileError {
-	fe := newFileError(path, r)
-	fe.Err = err
-	return fe
-}
-
 // isOSError reports whether err holds an OS error number.
 func isOSError(err error) bool {
-	var errno syscall.Errno
-	return errors.As(err, &errno)
+	_, ok := errors.AsType[syscall.Errno](err)
+	return ok
 }
 
 // isMissing reports whether err means that no file exists at the path: the

@@ -184,48 +184,6 @@ func TestReadCursorGlobalIgnoresProjectPath(t *testing.T) {
 	}
 }
 
-// TestReadCursorProjectPathFromFile checks the ProjectPath of a project file
-// read without a projectPath. For <project>/.cursor/mcp.json it is <project>,
-// as Discover gives it; for any other file it is the directory of the file.
-func TestReadCursorProjectPathFromFile(t *testing.T) {
-	t.Parallel()
-
-	const content = `{"mcpServers": {"s": {"command": "x"}}}`
-
-	tests := []struct {
-		name string
-		rel  string // the file below the temporary directory
-		// wantRel is the wanted ProjectPath below the temporary directory.
-		wantRel string
-	}{
-		{name: "in .cursor", rel: "proj/.cursor/mcp.json", wantRel: "proj"},
-		{name: "in another directory", rel: "proj/conf/mcp.json", wantRel: "proj/conf"},
-		{name: "name ends with .cursor", rel: "proj/my.cursor/mcp.json", wantRel: "proj/my.cursor"},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
-			dir := t.TempDir()
-			path := writeFile(t, dir, tt.rel, []byte(content))
-
-			res := ReadCursor(t.Context(), path, ScopeProject, "")
-
-			if len(res.Errors) != 0 {
-				t.Fatalf("Errors = %v, want none", res.Errors)
-			}
-			if len(res.Servers) != 1 {
-				t.Fatalf("server names = %v, want [s]", serverNames(res.Servers))
-			}
-			want := filepath.Join(dir, filepath.FromSlash(tt.wantRel))
-			if s := res.Servers[0]; s.Scope != ScopeProject || s.ProjectPath != want || !s.Untrusted {
-				t.Errorf("server %q scope=%q projectPath=%q untrusted=%v, want %q, %q and true",
-					s.Name, s.Scope, s.ProjectPath, s.Untrusted, ScopeProject, want)
-			}
-		})
-	}
-}
-
 // TestReadCursorProjectRootWithoutProjectPath checks that, without a
 // projectPath, the read of <project>/.cursor/mcp.json stays in the .cursor
 // directory, although the servers get ProjectPath <project>. A relative

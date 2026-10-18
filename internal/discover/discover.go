@@ -23,10 +23,7 @@ type Options struct {
 // Result is what a reader or Discover found: the servers, and the problems
 // with config files or server entries.
 type Result struct {
-	// Servers are the servers found. Discover returns them in a fixed order:
-	// file order (~/.claude.json, <work>/.mcp.json, ~/.cursor/mcp.json,
-	// <work>/.cursor/mcp.json, ~/.codex/config.toml), then ProjectPath, then
-	// Name.
+	// Servers are the servers found, in a fixed order. See [Discover].
 	Servers []Server
 
 	// Errors are the problems found, in the same file order as Servers. Each
@@ -64,14 +61,26 @@ type step struct {
 //  4. WorkDir/.cursor/mcp.json (skipped if it is the same file as step 3)
 //  5. Home/.codex/config.toml
 //
+// Result.Servers and Result.Errors come in this file order. Inside one file,
+// they keep the order of the reader; see the package doc, Reading configs.
+//
+// If WorkDir and Home are the same directory, step 4 is the same file as
+// step 3, so Discover reads the Cursor file once, as a global config. This
+// check is lexical: Discover compares the cleaned paths as text. It does not
+// detect a symlinked WorkDir, or a second name for the same directory (for
+// example /var and /private/var on macOS, or a case-insensitive file
+// system).
+//
 // Steps 2 and 4 read project files that a cloned repository can ship. Their
 // servers and their errors have Untrusted set, and a symlink that leaves
 // WorkDir is refused. See the package doc, Untrusted files.
 //
-// If ctx is canceled, Discover adds one FileError with the reason "canceled"
-// and returns what it has. The error names the file that was being read, or
-// the next file if no read had started. When that file is step 2 or 4, the
-// error has Untrusted set.
+// If ctx ends, Discover stops and returns what it has. It adds one FileError
+// with the reason "canceled" for the first file that it does not read because
+// ctx ended: the file that was being read, or the next file if no read had
+// started. When that file is step 2 or 4, the error has Untrusted set. When
+// ctx ends after the last read, or when there is no file to read, Discover
+// adds no error. A caller that must know can check ctx.Err().
 func Discover(ctx context.Context, opts Options) Result {
 	return runSteps(ctx, buildSteps(opts))
 }
@@ -144,11 +153,9 @@ func buildSteps(opts Options) []step {
 	if opts.WorkDir != "" {
 		path := filepath.Join(opts.WorkDir, ".cursor", "mcp.json")
 		// When WorkDir is Home, this is the same file as the home Cursor
-		// config. Read it once, as a global config. Both paths are already
-		// cleaned, so a direct string compare is enough. The check is lexical:
-		// a symlinked WorkDir, or a second name for the same directory (for
-		// example /var and /private/var on macOS, or a case-insensitive file
-		// system), is not detected.
+		// config: read it once, as a global config. Both paths are already
+		// cleaned, so a string compare is enough. See Discover for the limits
+		// of this lexical check.
 		if path != homeCursor {
 			steps = append(steps, step{path: path, untrusted: true, read: func(ctx context.Context) Result {
 				return ReadCursor(ctx, path, ScopeProject, opts.WorkDir)

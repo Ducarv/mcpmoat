@@ -3,6 +3,7 @@ package discover
 import (
 	"bytes"
 	"errors"
+	"fmt"
 	"io/fs"
 	"strconv"
 	"strings"
@@ -70,9 +71,7 @@ type FileError struct {
 	// context error for a canceled read. It is nil for parse problems.
 	Err error
 	// Untrusted is true when the problem is in a project file, which a cloned
-	// repository can ship. The readers set it by scope, and Discover sets it
-	// on the canceled error of a project step. See the package doc, Untrusted
-	// files. Like every FileError, it means that servers may be missing.
+	// repository can ship. See the package doc, Untrusted files.
 	Untrusted bool
 }
 
@@ -158,13 +157,19 @@ func (e *FileError) atOffset(data []byte, offset int) *FileError {
 	return e
 }
 
+// readError returns the FileError of a read of path with the reason r and
+// the OS error err (nil for none).
+func readError(path string, r reason, err error) *FileError {
+	fe := newFileError(path, r)
+	fe.Err = err
+	return fe
+}
+
 // canceledError returns the FileError for a read of path that stopped because
 // the context ended. err is the context error, so errors.Is(fe,
 // context.Canceled) and errors.Is(fe, context.DeadlineExceeded) work.
 func canceledError(path string, err error) *FileError {
-	fe := newFileError(path, reasonCanceled)
-	fe.Err = err
-	return fe
+	return readError(path, reasonCanceled, err)
 }
 
 // errText returns the text of err for use in a FileError message.
@@ -173,8 +178,7 @@ func canceledError(path string, err error) *FileError {
 // operation and the OS error. The path is already in FileError.Path, where
 // displayPath quotes it. Other errors (for example context errors) have fixed text.
 func errText(err error) string {
-	var pe *fs.PathError
-	if errors.As(err, &pe) && pe.Err != nil {
+	if pe, ok := errors.AsType[*fs.PathError](err); ok && pe.Err != nil {
 		return pe.Op + ": " + pe.Err.Error()
 	}
 	return err.Error()
@@ -300,14 +304,11 @@ func writeQuotedPart(b *strings.Builder, s string) {
 // writeRuneEscape writes r as \uXXXX, or as \UXXXXXXXX for a rune above
 // U+FFFF, with lowercase hex digits as strconv.Quote writes them.
 func writeRuneEscape(b *strings.Builder, r rune) {
-	prefix, width := `\u`, 4
 	if r > 0xffff {
-		prefix, width = `\U`, 8
+		fmt.Fprintf(b, `\U%08x`, r)
+		return
 	}
-	hex := strconv.FormatInt(int64(r), 16)
-	b.WriteString(prefix)
-	b.WriteString(strings.Repeat("0", width-len(hex)))
-	b.WriteString(hex)
+	fmt.Fprintf(b, `\u%04x`, r)
 }
 
 // lineCol converts a byte offset in data to a 1-based line and a 1-based

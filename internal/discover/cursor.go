@@ -3,7 +3,8 @@ package discover
 import "context"
 
 // ReadCursor reads one Cursor config file: ~/.cursor/mcp.json with
-// ScopeGlobal, or a project .cursor/mcp.json with ScopeProject.
+// ScopeGlobal, or a project .cursor/mcp.json with ScopeProject. Any scope
+// other than ScopeGlobal is read as ScopeProject.
 //
 // The servers of the file get scope. With ScopeProject they get ProjectPath
 // projectPath. If projectPath is "", they get the directory of the file, or
