@@ -9,7 +9,9 @@ import "encoding/json"
 // Every string in these types comes from the MCP server, and a malicious
 // server controls it. Treat it as untrusted text. Callers must escape it with
 // internal/termsafe before they print it to a terminal, and must never
-// execute it or put it into a command or a format string.
+// execute it or put it into a command or a format string. The one exception
+// is Warning: its strings come from the client config, not from the server.
+// Callers must still escape them with internal/termsafe.
 //
 // The types have no methods and no struct tags on purpose: output types live
 // in internal/report.
@@ -36,6 +38,49 @@ type Tool struct {
 	// OutputSchema is the JSON Schema of the tool result, with the same
 	// encoding as InputSchema. It is nil when the server sends none.
 	OutputSchema json.RawMessage
+
+	// Annotations are the behaviour hints of the tool. They are nil when the
+	// server sends none. The annotations are part of the pin hash and of the
+	// rule input (PRD FR-11), so a server that flips a hint after approval
+	// changes the pin.
+	Annotations *ToolAnnotations
+}
+
+// ToolAnnotations are the hints that a server gives about the behaviour of a
+// tool. The server sets them, so they are claims, not facts. A malicious
+// server can say that a destructive tool is read-only.
+//
+// A nil hint means that the server did not send it. The MCP SDK v1.8.0
+// decodes readOnlyHint and idempotentHint as plain bool, not as a pointer.
+// For these two hints, absent and false look the same, so nil means "absent
+// or false". False is the spec default for both. Only true is visible, so a
+// change to true is always visible.
+type ToolAnnotations struct {
+	// Title is the human-readable name of the tool from the annotations. It
+	// is empty when the server sends none. It is untrusted server text, like
+	// Tool.Description, and can carry prompt injection (threat T1).
+	Title string
+
+	// ReadOnlyHint is true when the server says that the tool does not change
+	// its environment. It is nil when the hint is absent or false (the spec
+	// default), because the SDK does not keep the difference.
+	ReadOnlyHint *bool
+
+	// DestructiveHint is true when the server says that the tool can delete
+	// or overwrite data. It is nil when the server does not send the hint.
+	// The spec default is true.
+	DestructiveHint *bool
+
+	// IdempotentHint is true when the server says that a second call with the
+	// same arguments has no additional effect. It is nil when the hint is
+	// absent or false (the spec default), because the SDK does not keep the
+	// difference.
+	IdempotentHint *bool
+
+	// OpenWorldHint is true when the server says that the tool can reach
+	// external entities, for example the web. It is nil when the server does
+	// not send the hint. The spec default is true.
+	OpenWorldHint *bool
 }
 
 // PromptArgument is one argument of a Prompt.
@@ -88,6 +133,65 @@ type Resource struct {
 	MIMEType string
 }
 
+// ResourceTemplate is one parameterized resource that a server lists with
+// resources/templates/list. All text fields are untrusted server text.
+type ResourceTemplate struct {
+	// URITemplate is the RFC 6570 URI template of the resource. mcpmoat never
+	// expands it and never opens or fetches it.
+	URITemplate string
+
+	// Name is the template name.
+	Name string
+
+	// Title is the human-readable name. It is empty when the server sends
+	// none.
+	Title string
+
+	// Description explains the template. Clients can put it in the model
+	// prompt, so it is a place for prompt injection (threat T1).
+	Description string
+
+	// MIMEType is the media type that the server declares for the resources
+	// of the template. It is empty when the server declares none.
+	MIMEType string
+}
+
+// WarningKind names the kind of a Warning. Its values are stable: reports and
+// JSON output can show them, and users can match on them.
+type WarningKind string
+
+// WarnCleartextSecrets is the kind of a Warning about secrets that mcpmoat
+// sent over plain http:// to a host that is not loopback. The value
+// "cleartext-secrets" is stable and does not change between versions.
+const WarnCleartextSecrets WarningKind = "cleartext-secrets"
+
+// Warning is a problem with the way mcpmoat connects to a server. It is not a
+// finding about the server itself. A Warning holds keys only, never secret
+// values.
+type Warning struct {
+	// Kind tells what the warning is about.
+	Kind WarningKind
+
+	// HeaderKeys are the header keys from the client config that mcpmoat
+	// sent, as written in the config. Each key is in the list one time. The
+	// list never holds header values. The keys are config text, so callers
+	// must escape them with internal/termsafe before they print them.
+	HeaderKeys []string
+
+	// URLUserInfo is true when mcpmoat sent the user info of the server URL
+	// as a Basic Authorization header: the URL has user info and the config
+	// sets no non-empty Authorization header. It is false when a config
+	// Authorization header replaced the user info, because the user info
+	// then did not go out.
+	URLUserInfo bool
+
+	// URLSecrets is true when the query or the path of the server URL holds
+	// parts that mcpmoat treats as secrets: the parts that the redacted URL
+	// masks (discover.SecretQueryParts and discover.SecretPathSegments). The
+	// Warning never holds these parts, their names or their values.
+	URLSecrets bool
+}
+
 // Result is everything that inspect reads from one MCP server.
 //
 // A list is nil when the server did not declare the capability and refused
@@ -119,4 +223,15 @@ type Result struct {
 
 	// Resources are the resources that the server lists.
 	Resources []Resource
+
+	// ResourceTemplates are the resource templates that the server lists.
+	// They follow the same nil-or-empty rule as the other lists, with one
+	// addition: a server that declares the resources capability but answers
+	// "method not found" for resources/templates/list gives an empty list,
+	// not nil.
+	ResourceTemplates []ResourceTemplate
+
+	// Warnings are the problems with the connection to the server, for
+	// example secrets sent over plain http://. It is nil when there are none.
+	Warnings []Warning
 }

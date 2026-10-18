@@ -43,8 +43,9 @@ type addInput struct {
 }
 
 // newFixtureMCPServer returns an MCP server with two tools ("echo" and
-// "add"), one prompt ("greet") and one resource ("readme"). The server is
-// benign. Tests use it as the remote end of an inspection.
+// "add"), one prompt ("greet") and one resource ("readme"), and no resource
+// templates. "echo" has annotations, so tests see that they reach Result.
+// The server is benign. Tests use it as the remote end of an inspection.
 func newFixtureMCPServer() *mcp.Server {
 	srv := mcp.NewServer(
 		&mcp.Implementation{Name: "fixture", Version: "1.2.3"},
@@ -52,7 +53,13 @@ func newFixtureMCPServer() *mcp.Server {
 	)
 
 	mcp.AddTool(srv,
-		&mcp.Tool{Name: "echo", Description: "Echo the input"},
+		&mcp.Tool{
+			Name:        "echo",
+			Description: "Echo the input",
+			// new(false) is a pointer to a new false value (Go 1.26 and
+			// later). The SDK has OpenWorldHint as *bool.
+			Annotations: &mcp.ToolAnnotations{Title: "Echo", ReadOnlyHint: true, OpenWorldHint: new(false)},
+		},
 		func(context.Context, *mcp.CallToolRequest, echoInput) (*mcp.CallToolResult, any, error) {
 			return nil, nil, nil
 		})
@@ -97,7 +104,15 @@ func fixtureWant() Result {
 		// The SDK server lists tools sorted by name.
 		Tools: []Tool{
 			{Name: "add", Description: "Add two numbers"},
-			{Name: "echo", Description: "Echo the input"},
+			{
+				Name:        "echo",
+				Description: "Echo the input",
+				Annotations: &ToolAnnotations{
+					Title:         "Echo",
+					ReadOnlyHint:  new(true),
+					OpenWorldHint: new(false),
+				},
+			},
 		},
 		Prompts: []Prompt{{
 			Name:        "greet",
@@ -109,6 +124,9 @@ func fixtureWant() Result {
 			Name:     "readme",
 			MIMEType: "text/plain",
 		}},
+		// The server declares resources and has no templates, so the list
+		// is empty, not nil.
+		ResourceTemplates: []ResourceTemplate{},
 	}
 }
 

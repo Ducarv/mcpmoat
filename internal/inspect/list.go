@@ -13,8 +13,8 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
-// This file reads the tools, prompts and resources of a connected server and
-// converts them to the SDK-independent types in types.go.
+// This file reads the tools, prompts, resources and resource templates of a
+// connected server and converts them to the SDK-independent types in types.go.
 //
 // The SDK has iterators (ClientSession.Tools and similar) but they have no
 // page cap and no check for a repeated cursor. A hostile server can page
@@ -153,7 +153,8 @@ var _ sessionLister = (*mcp.ClientSession)(nil)
 //     or a canceled context. An error response on a later page is also an
 //     error, because the earlier pages held items that we must not drop.
 //
-// Resource templates (resources/templates/list) are not listed yet.
+// listAll does not list resource templates (resources/templates/list). Use
+// listInto, which calls listAll and then lists the templates too.
 //
 // A list that is too long, or that never ends, is an error. listAll never
 // returns a cut list, because the cut part could hide a malicious tool.
@@ -190,6 +191,71 @@ func listAll(ctx context.Context, cs sessionLister, caps *mcp.ServerCapabilities
 	return tools, prompts, resources, nil
 }
 
+// templateLister is the part of *mcp.ClientSession that listResourceTemplates
+// uses. It is separate from sessionLister so that the existing fakes for
+// sessionLister stay valid. Tests pass a fake.
+type templateLister interface {
+	ListResourceTemplates(context.Context, *mcp.ListResourceTemplatesParams) (*mcp.ListResourceTemplatesResult, error)
+}
+
+// The SDK session must satisfy templateLister. This is a compile-time check:
+// it converts a typed nil pointer to the interface and throws the value away
+// (the blank identifier _). It costs nothing at run time, and the build fails
+// if an SDK update changes the method signature.
+var _ templateLister = (*mcp.ClientSession)(nil)
+
+// fullLister is everything that listInto needs: the three lists of
+// sessionLister and the templates list of templateLister. Go lets an
+// interface embed other interfaces; the method sets are joined.
+// *mcp.ClientSession satisfies it, because it satisfies both parts.
+type fullLister interface {
+	sessionLister
+	templateLister
+}
+
+// listInto reads every tool, prompt, resource and resource template that the
+// server offers and stores them in result. It sets result.Tools,
+// result.Prompts, result.Resources and result.ResourceTemplates, and no other
+// field. On error it changes nothing in result.
+//
+// Tools, prompts and resources follow listAll (see there). Templates follow
+// the same rules as resources, because the resources capability covers both:
+// listInto always sends resources/templates/list, and tolerateUndeclared
+// decides what an error means when caps does not declare resources.
+//
+// There is one more case. A server can declare the resources capability and
+// still not support templates: the spec makes resources/templates/list
+// optional. So when caps declares resources and the server answers the first
+// page with a JSON-RPC "method not found" error (-32601), the template list is
+// empty but not nil (see isMethodNotFound). Any other error is still an
+// error.
+func listInto(ctx context.Context, cs fullLister, caps *mcp.ServerCapabilities, raw *rawLists, result *Result) error {
+	tools, prompts, resources, err := listAll(ctx, cs, caps, raw)
+	if err != nil {
+		return err
+	}
+
+	declResources := caps != nil && caps.Resources != nil
+	templates, err := listResourceTemplates(ctx, cs)
+	switch {
+	case err == nil:
+	case declResources && isMethodNotFound(err):
+		templates = []ResourceTemplate{}
+	default:
+		if err = tolerateUndeclared(err, declResources); err != nil {
+			return err
+		}
+		// tolerateUndeclared returned nil, so templates is nil, as for
+		// the other lists of a server without the capability.
+	}
+
+	result.Tools = tools
+	result.Prompts = prompts
+	result.Resources = resources
+	result.ResourceTemplates = templates
+	return nil
+}
+
 // sdkErrorCodes are the JSON-RPC error codes that the SDK uses for its own
 // failures (SDK v1.8.0, internal/jsonrpc2): -32001 unknown error, -32003
 // client closing, -32004 server closing and -32005 "rejected by transport".
@@ -211,19 +277,42 @@ var sdkErrorCodes = []int64{-32001, -32003, -32004, -32005}
 // jsonrpc.Error.Is compares only the code, so errors.Is finds such a code
 // anywhere in the chain.
 func tolerateUndeclared(err error, declared bool) error {
-	if err == nil || declared || errors.Is(err, errLaterPage) {
+	if err == nil || declared || errors.Is(err, errLaterPage) || hasSDKErrorCode(err) {
 		return err
-	}
-	for _, code := range sdkErrorCodes {
-		if errors.Is(err, &jsonrpc.Error{Code: code}) {
-			return err
-		}
 	}
 	var rpcErr *jsonrpc.Error
 	if errors.As(err, &rpcErr) {
 		return nil
 	}
 	return err
+}
+
+// hasSDKErrorCode reports whether err holds, anywhere in its chain, a
+// *jsonrpc.Error with one of the sdkErrorCodes. jsonrpc.Error.Is compares only
+// the code, so errors.Is with a bare &jsonrpc.Error{Code: code} finds it.
+func hasSDKErrorCode(err error) bool {
+	for _, code := range sdkErrorCodes {
+		if errors.Is(err, &jsonrpc.Error{Code: code}) {
+			return true
+		}
+	}
+	return false
+}
+
+// isMethodNotFound reports whether err is a JSON-RPC "method not found" error
+// (jsonrpc.CodeMethodNotFound, -32601) that the server sent for the first page
+// of a list. It uses the same errors.Is code match as hasSDKErrorCode.
+//
+// It is false for an error on a later page (errLaterPage), because earlier
+// pages held items that we must not drop. It is also false when the chain
+// holds an SDK error code. For example, the SDK adds -32005 when the JSON-RPC
+// error came with a non-2xx HTTP status. This is the same fail-closed choice
+// as in tolerateUndeclared.
+func isMethodNotFound(err error) bool {
+	if err == nil || errors.Is(err, errLaterPage) || hasSDKErrorCode(err) {
+		return false
+	}
+	return errors.Is(err, &jsonrpc.Error{Code: jsonrpc.CodeMethodNotFound})
 }
 
 // listTools reads all pages of tools/list and converts the tools. It reads
@@ -259,8 +348,51 @@ func listTools(ctx context.Context, cs sessionLister, raw *rawLists) ([]Tool, er
 				Description:  t.Description,
 				InputSchema:  in,
 				OutputSchema: out,
+				Annotations:  toolAnnotations(t.Annotations),
 			}, nil
 		})
+}
+
+// toolAnnotations converts the SDK annotations of a tool. It returns nil when
+// a is nil.
+//
+// The result never shares memory with a. The SDK owns its values, so every
+// hint gets a new *bool. In SDK v1.8.0, ReadOnlyHint and IdempotentHint are
+// plain bool, so absent and false look the same. For these two hints, the
+// result is a pointer to true when the SDK has true, and nil when it has
+// false (see ToolAnnotations). DestructiveHint and OpenWorldHint are *bool in
+// the SDK, so nil stays nil and a set value is copied.
+func toolAnnotations(a *mcp.ToolAnnotations) *ToolAnnotations {
+	if a == nil {
+		return nil
+	}
+	return &ToolAnnotations{
+		Title:           a.Title,
+		ReadOnlyHint:    trueOrNil(a.ReadOnlyHint),
+		DestructiveHint: copyBool(a.DestructiveHint),
+		IdempotentHint:  trueOrNil(a.IdempotentHint),
+		OpenWorldHint:   copyBool(a.OpenWorldHint),
+	}
+}
+
+// trueOrNil returns a new pointer to true when b is true, and nil when b is
+// false.
+func trueOrNil(b bool) *bool {
+	if !b {
+		return nil
+	}
+	v := true
+	return &v
+}
+
+// copyBool returns a new pointer to the value of p, or nil when p is nil. The
+// result never aliases p.
+func copyBool(p *bool) *bool {
+	if p == nil {
+		return nil
+	}
+	v := *p
+	return &v
 }
 
 // listPrompts reads all pages of prompts/list and converts the prompts.
@@ -320,12 +452,38 @@ func listResources(ctx context.Context, cs sessionLister) ([]Resource, error) {
 		})
 }
 
+// listResourceTemplates reads all pages of resources/templates/list and
+// converts the templates. It never expands a URI template and never fetches a
+// resource.
+func listResourceTemplates(ctx context.Context, cs templateLister) ([]ResourceTemplate, error) {
+	return paginate(ctx, "resource templates",
+		func(ctx context.Context, cursor string) ([]*mcp.ResourceTemplate, string, error) {
+			res, err := cs.ListResourceTemplates(ctx, &mcp.ListResourceTemplatesParams{Cursor: cursor})
+			if err != nil {
+				return nil, "", err
+			}
+			if res == nil {
+				return nil, "", nil
+			}
+			return res.ResourceTemplates, res.NextCursor, nil
+		},
+		func(r *mcp.ResourceTemplate) (ResourceTemplate, error) {
+			return ResourceTemplate{
+				URITemplate: r.URITemplate,
+				Name:        r.Name,
+				Title:       r.Title,
+				Description: r.Description,
+				MIMEType:    r.MIMEType,
+			}, nil
+		})
+}
+
 // paginate runs the cursor loop for one list and returns the converted items.
 //
 // S and T are type parameters (a Go "generic"). S is the SDK item type and T
-// is our own type. One loop serves tools, prompts and resources: the caller
-// picks S and T, and the compiler checks that fetch and convert agree. what
-// names the list ("tools") in error texts.
+// is our own type. One loop serves tools, prompts, resources and resource
+// templates: the caller picks S and T, and the compiler checks that fetch and
+// convert agree. what names the list ("tools") in error texts.
 //
 // fetch reads one page for a cursor and returns the items and the next
 // cursor. An empty next cursor ends the loop. convert turns one non-nil SDK

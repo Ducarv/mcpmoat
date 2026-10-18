@@ -1,12 +1,13 @@
 package inspect
 
 import (
+	"context"
 	"crypto/tls"
 	"errors"
 	"fmt"
 	"io"
 	"math"
-	"net"
+	"mime"
 	"net/http"
 	"net/url"
 	"slices"
@@ -16,7 +17,9 @@ import (
 	"time"
 )
 
-// Limits of the HTTP client.
+// Limits of the HTTP client. The size caps count wire bytes. The limits on
+// the shape of the decoded JSON (depth, values, string length) are in
+// jsonshape.go: maxJSONDepth, maxJSONValues and maxJSONStringBytes.
 const (
 	// defaultMaxResponseBytes is the size cap for one HTTP response body, in
 	// bytes (8 MiB). newHTTPClient uses it when MaxBody is not positive.
@@ -73,89 +76,49 @@ var (
 	errBodyTooLarge = errors.New("response body too large")
 )
 
-// requestRecorder records what happened on the HTTP layer, because the MCP SDK
-// drops it: the status code of the last response, and the error that this
-// layer raised on purpose (a refused origin, a refused redirect or a body that
-// is too large). classify reads both through the transportEvents interface.
+// requestRecorder records what happened on the HTTP layer for one MCP call,
+// because the MCP SDK drops it: the status code of the last response, and the
+// error that this layer raised on purpose (a refused origin, a refused
+// redirect or a body that is too large). classify reads both through
+// httpEvents.stateFor.
 //
-// It is safe for concurrent use: the SDK can send requests from more than one
-// goroutine.
+// Each MCP call gets its own record (see callRecords in remote.go), so a
+// request that runs at the same time as another one cannot change the label
+// of its error. httpEvents embeds one more record, the fallback, for the
+// requests that belong to no call.
+//
+// It is safe for concurrent use: a response body can be read on another
+// goroutine than the one that sent the request.
 type requestRecorder struct {
-	// status is the status of the most recent request: the code of a non-2xx
-	// response that was not a followed redirect, and 0 after a 2xx response or
-	// after a request that got no response. An atomic value needs no mutex.
+	// status is the status of the most recent request of the record: the code
+	// of a non-2xx response that was not a followed redirect, and 0 after a
+	// 2xx response or after a request that got no response. An atomic value
+	// needs no mutex.
 	//
-	// It keeps the latest value and not the first one. The SDK can start with a
-	// request that gets a 404 and then fall back to another request that works.
-	// The 404 must not give a wrong label to a later, unrelated error.
-	//
-	// One value serves all requests of the client. If two requests run at the
-	// same time, the label of an error can come from the other request. Today
-	// the requests of one inspection run one after the other, apart from small
-	// notifications; per-request status is tracked in issue #99. Only the label
-	// can be wrong: the inspection still fails.
+	// It keeps the latest value and not the first one. The SDK can start with
+	// a request that gets a 404 and then fall back to another request that
+	// works. The 404 must not give a wrong label to a later, unrelated error.
 	status atomic.Int64
-
-	// sessionUp is true after the server answered the MCP handshake
-	// (markHandshake) or Remote connected the session (markConnected).
-	sessionUp atomic.Bool
 
 	// mu guards blocked.
 	mu sync.Mutex
-	// blocked is the first error that the HTTP layer raised on purpose since
-	// the start or since the last forgetBlocked call, or nil.
+	// blocked is the first error that the HTTP layer raised on purpose for
+	// this record, or nil.
 	blocked error
 }
 
-// Compile-time check: *requestRecorder must implement transportEvents. The
-// blank identifier _ throws the value away, so this line costs nothing at run
-// time, but the build fails if the method set ever drifts.
-var _ transportEvents = (*requestRecorder)(nil)
-
-// lastStatus implements transportEvents.
+// lastStatus returns the status of the most recent request of the record (see
+// the status field).
 func (r *requestRecorder) lastStatus() int {
 	return int(r.status.Load())
 }
 
-// blockedErr implements transportEvents.
+// blockedErr returns the first error that the HTTP layer raised on purpose
+// for this record, or nil.
 func (r *requestRecorder) blockedErr() error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	return r.blocked
-}
-
-// connected implements transportEvents.
-func (r *requestRecorder) connected() bool {
-	return r.sessionUp.Load()
-}
-
-// markHandshake records that the server answered initialize or
-// server/discover, so it speaks the configured transport.
-func (r *requestRecorder) markHandshake() {
-	r.sessionUp.Store(true)
-}
-
-// markConnected records that the session is up. Remote calls it after a
-// successful connect. It also calls forgetBlocked.
-func (r *requestRecorder) markConnected() {
-	r.markHandshake()
-	r.forgetBlocked()
-}
-
-// forgetBlocked drops the stored blocked error. markConnected calls it: the
-// SDK recovered from any request that was blocked before (for example, it
-// falls back from server/discover to initialize after any error), so that
-// error must not label a later, unrelated failure.
-//
-// A legacy SSE stream is read by a background goroutine. If it goes over the
-// size cap in the short time between the last connect request and this call,
-// the too-large error is dropped too, and the later error is labelled as a
-// protocol error. The inspection still fails. Issue #99 tracks a per-request
-// record that would close this window.
-func (r *requestRecorder) forgetBlocked() {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	r.blocked = nil
 }
 
 // recordResponse stores the status of resp. A 2xx response stores 0, so it
@@ -191,6 +154,196 @@ func (r *requestRecorder) recordBlocked(err error) error {
 	return err
 }
 
+// recorderKey is the context key for the record of one MCP call. A context
+// key must not collide with keys of other packages. An unexported type does
+// that: no other package can name recorderKey, so no other package can make
+// an equal key. The empty struct takes no memory.
+type recorderKey struct{}
+
+// withRecorder returns a copy of ctx that carries rec. The SDK passes the
+// context of a call down to http.NewRequestWithContext, so headerTransport
+// finds rec again in req.Context().
+func withRecorder(ctx context.Context, rec *requestRecorder) context.Context {
+	return context.WithValue(ctx, recorderKey{}, rec)
+}
+
+// recorderFrom returns the record that withRecorder put on ctx, or nil if
+// there is none. The two-value type assertion gives nil instead of a panic
+// when the key is absent.
+func recorderFrom(ctx context.Context) *requestRecorder {
+	rec, _ := ctx.Value(recorderKey{}).(*requestRecorder)
+	return rec
+}
+
+// httpEvents reports what the HTTP layer saw during one inspection. It
+// implements transportEvents for classify.
+//
+// The record of each MCP call travels on the context of its requests (see
+// withRecorder). The embedded requestRecorder is the fallback record: it gets
+// the requests that carry no record of their own. These are the legacy SSE
+// GET stream (the SDK opens it with the context of Client.Connect, before any
+// call), the DELETE that closes a streamable session, and requests from a
+// direct caller such as a test. Because the record is embedded, its methods
+// (lastStatus, blockedErr and the record methods) are methods of httpEvents
+// too, and they read or write the fallback record.
+//
+// It is safe for concurrent use. Use it through a pointer only: it holds a
+// mutex, which must not be copied.
+type httpEvents struct {
+	// requestRecorder is the fallback record (see the type doc).
+	requestRecorder
+
+	// sessionUp is true after the server answered the MCP handshake
+	// (markHandshake) or Remote connected the session (markConnected).
+	sessionUp atomic.Bool
+
+	// lastCall is the record of the MCP call that finished last, or nil. An
+	// atomic.Pointer loads and stores a pointer in one step, so the
+	// goroutines of the SDK can use it without a mutex. stateFor uses it for
+	// an error that is linked to no call (see stateFor).
+	lastCall atomic.Pointer[requestRecorder]
+
+	// connectDone is true after markConnected: Client.Connect succeeded.
+	connectDone atomic.Bool
+
+	// connectBlocked is the record of the first call that finished with a
+	// blocked error during the connect (before markConnected), or nil.
+	// stateFor uses it to label a failed connect only. Two cases need it:
+	//
+	//   - A failed write breaks the whole legacy SSE connection. When the
+	//     server/discover POST goes to another origin, the initialize call
+	//     after it fails before it sends any request, so its own record is
+	//     empty.
+	//   - A server that redirects server/discover to another origin and then
+	//     never answers initialize tried to send the secrets elsewhere. The
+	//     report must show that, not only a timeout.
+	connectBlocked atomic.Pointer[requestRecorder]
+}
+
+// Compile-time check: *httpEvents must implement transportEvents. The blank
+// identifier _ throws the value away, so this line costs nothing at run time,
+// but the build fails if the method set ever drifts.
+var _ transportEvents = (*httpEvents)(nil)
+
+// markHandshake records that the server answered initialize or
+// server/discover, so it speaks the configured transport.
+func (ev *httpEvents) markHandshake() {
+	ev.sessionUp.Store(true)
+}
+
+// markConnected records that the session is up. Remote calls it after a
+// successful connect. From now on stateFor ignores connectBlocked: the SDK
+// recovered from any call that was blocked during the connect (for example,
+// it falls back from server/discover to initialize after any error), so that
+// error must not label a later, unrelated failure. Nothing is cleared: a
+// blocked error in the fallback record (for example a legacy SSE stream that
+// went over the size cap at any time) still explains later failures.
+func (ev *httpEvents) markConnected() {
+	ev.sessionUp.Store(true)
+	ev.connectDone.Store(true)
+}
+
+// connected implements transportEvents.
+func (ev *httpEvents) connected() bool {
+	return ev.sessionUp.Load()
+}
+
+// finishCall stores rec as the record of the call that finished last.
+// During the connect, it also keeps the first record with a blocked error in
+// connectBlocked. callRecords calls it when a call returns. A nil rec changes
+// nothing.
+func (ev *httpEvents) finishCall(rec *requestRecorder) {
+	if rec == nil {
+		return
+	}
+	ev.lastCall.Store(rec)
+	if !ev.connectDone.Load() && rec.blockedErr() != nil {
+		// CompareAndSwap stores rec only if the pointer is still nil, in one
+		// atomic step, so the first blocked call wins.
+		ev.connectBlocked.CompareAndSwap(nil, rec)
+	}
+}
+
+// recorderFor returns the record for req: the record of its MCP call, or the
+// fallback record when the request belongs to no call.
+func (ev *httpEvents) recorderFor(req *http.Request) *requestRecorder {
+	if rec := recorderFrom(req.Context()); rec != nil {
+		return rec
+	}
+	return &ev.requestRecorder
+}
+
+// stateFor implements transportEvents. It finds the call record for err: the
+// record in a *recordedError in the chain of err, or else the record of the
+// call that finished last (for an error that mcpmoat made itself after a
+// call, or a chain that lost the *recordedError). Then it picks blocked, in
+// this order:
+//
+//  1. the blocked error of the call record;
+//  2. else the blocked error of the fallback record, because a blocked
+//     legacy SSE stream breaks every call after it;
+//  3. else, while the connect is not done, the blocked error of
+//     connectBlocked (see the field doc).
+//
+// status is the status of the call record if there is one, else the status
+// of the fallback record.
+func (ev *httpEvents) stateFor(err error) (status int, blocked error) {
+	call := ev.lastCall.Load()
+	// errors.As walks the chain of err and stops at the first *recordedError.
+	// It needs a pointer to the target variable (&re), so that it can set re.
+	var re *recordedError
+	if errors.As(err, &re) && re.rec != nil {
+		call = re.rec
+	}
+
+	if call != nil {
+		blocked = call.blockedErr()
+	}
+	// ev.blockedErr and ev.lastStatus are the methods of the embedded
+	// requestRecorder, so they read the fallback record.
+	if blocked == nil {
+		blocked = ev.blockedErr()
+	}
+	if blocked == nil && !ev.connectDone.Load() {
+		if rec := ev.connectBlocked.Load(); rec != nil {
+			blocked = rec.blockedErr()
+		}
+	}
+
+	if call != nil {
+		status = call.lastStatus()
+	} else {
+		status = ev.lastStatus()
+	}
+	return status, blocked
+}
+
+// recordedError links the error of one MCP call to the record of that call.
+// callRecords wraps each failed call in it, so that stateFor can find the
+// record later. The SDK does not return the request or the response with its
+// errors, so there is no other link.
+//
+// Its text is the text of err, so the wrap changes no message. Unwrap returns
+// err, so errors.Is and errors.As still see the whole chain below, as the SDK
+// and classify expect.
+type recordedError struct {
+	// err is the error of the call.
+	err error
+	// rec is the record of the call.
+	rec *requestRecorder
+}
+
+// Error returns the text of the wrapped error.
+func (e *recordedError) Error() string {
+	return e.err.Error()
+}
+
+// Unwrap returns the wrapped error. errors.Is and errors.As call it to walk
+// the chain.
+func (e *recordedError) Unwrap() error {
+	return e.err
+}
+
 // httpClientConfig is the input of newHTTPClient.
 type httpClientConfig struct {
 	// Endpoint is the configured endpoint URL, without user info. The client
@@ -203,7 +356,7 @@ type httpClientConfig struct {
 	User *url.Userinfo
 	// Headers are the headers from the config, with raw values.
 	Headers map[string]string
-	// Base does the network I/O. A nil Base gives newBaseTransport(). Tests
+	// Base does the network I/O. A nil Base gives newBaseTransport(nil). Tests
 	// pass their own.
 	Base http.RoundTripper
 	// UserAgent is the User-Agent, unless Headers sets one. Empty means the
@@ -223,10 +376,14 @@ type httpClientConfig struct {
 // origin fails with errOtherOrigin before anything goes on the network, and a
 // redirect to another origin fails with errCrossOriginRedirect. The client
 // caps each response body at cfg.MaxBody bytes and all bodies together at
-// cfg.MaxTotal bytes, and returns errBodyTooLarge beyond either cap.
+// cfg.MaxTotal bytes, and returns errBodyTooLarge beyond either cap. It also
+// checks the JSON shape of the 2xx bodies that the SDK decodes, and returns
+// an error that wraps errJSONTooComplex for a message that is too deep, has
+// too many values or has a too long string (see shapeBody).
 //
-// The returned requestRecorder holds the last failure status and the first
-// error that the client raised on purpose (see requestRecorder).
+// The returned httpEvents holds what the HTTP layer saw: a record per MCP
+// call, a fallback record for the other requests, and whether the session
+// is up (see httpEvents).
 //
 // The error is for a config that mcpmoat cannot use. It wraps
 // errReservedHeader or errInvalidHeaderValue and holds at most a header key,
@@ -234,7 +391,7 @@ type httpClientConfig struct {
 //
 // The client has no Client.Timeout: that timeout also cuts the body read, so
 // it would end a long SSE stream. The context of each request bounds the time.
-func newHTTPClient(cfg httpClientConfig) (*http.Client, *requestRecorder, error) {
+func newHTTPClient(cfg httpClientConfig) (*http.Client, *httpEvents, error) {
 	endpoint := cfg.Endpoint
 	if endpoint == nil {
 		return nil, nil, errors.New("no endpoint for the HTTP client")
@@ -245,7 +402,7 @@ func newHTTPClient(cfg httpClientConfig) (*http.Client, *requestRecorder, error)
 	}
 	base := cfg.Base
 	if base == nil {
-		base = newBaseTransport()
+		base = newBaseTransport(nil)
 	}
 	maxBody := cfg.MaxBody
 	if maxBody <= 0 {
@@ -265,14 +422,14 @@ func newHTTPClient(cfg httpClientConfig) (*http.Client, *requestRecorder, error)
 		maxBody = maxTotal
 	}
 
-	rec := &requestRecorder{}
+	ev := &httpEvents{}
 	client := &http.Client{
 		Transport: &headerTransport{
 			endpoint: endpoint,
 			user:     cfg.User,
 			header:   header,
 			base:     base,
-			rec:      rec,
+			events:   ev,
 			maxBody:  maxBody,
 			maxTotal: maxTotal,
 		},
@@ -282,31 +439,40 @@ func newHTTPClient(cfg httpClientConfig) (*http.Client, *requestRecorder, error)
 		// The headerTransport adds the config headers to every request it
 		// gets, redirected ones too, so without the origin check a redirect
 		// would send the secrets to another host.
-		// The error is also stored in rec, because the SDK may hide it.
+		// The error is also stored in the record of the request, because the
+		// SDK may hide it. The redirected request keeps the context of the
+		// first one, so it finds the same record.
 		CheckRedirect: func(req *http.Request, via []*http.Request) error {
 			if len(via) > maxRedirects {
-				return rec.recordBlocked(errTooManyRedirects)
+				return ev.recorderFor(req).recordBlocked(errTooManyRedirects)
 			}
 			if !sameOrigin(req.URL, endpoint) {
-				return rec.recordBlocked(errCrossOriginRedirect)
+				return ev.recorderFor(req).recordBlocked(errCrossOriginRedirect)
 			}
 			return nil
 		},
 	}
-	return client, rec, nil
+	return client, ev, nil
 }
 
 // newBaseTransport returns a new transport for the real network. It does not
 // use http.DefaultTransport, so no other code can change its settings.
-func newBaseTransport() *http.Transport {
+//
+// The transport dials through a new pinnedDialer, which keeps the first IP
+// address that each host name connects to (DNS rebinding, issue #102). Remote
+// makes one transport, and so one pin table, for each call, so a pin lasts
+// for one inspection only. The pin changes only the IP address: TLS still
+// uses the URL host for SNI and for the certificate check. With HTTP_PROXY or
+// HTTPS_PROXY, the transport dials the proxy, so the pinned address is the
+// address of the proxy, and the proxy resolves the server name itself.
+//
+// A nil lookup uses the system resolver. Tests give a stub lookup.
+func newBaseTransport(lookup lookupFunc) *http.Transport {
 	return &http.Transport{
 		// Honour the user's HTTP_PROXY, HTTPS_PROXY and NO_PROXY variables. The
 		// proxy is user-configured, and Go never uses it for localhost.
-		Proxy: proxyFromEnvironment,
-		DialContext: (&net.Dialer{
-			Timeout:   dialTimeout,
-			KeepAlive: dialKeepAlive,
-		}).DialContext,
+		Proxy:               proxyFromEnvironment,
+		DialContext:         newPinnedDialer(lookup, nil).DialContext,
 		TLSHandshakeTimeout: tlsHandshakeTimeout,
 		// No ResponseHeaderTimeout: an SSE server can wait a long time before
 		// it sends the first byte.
@@ -407,7 +573,7 @@ func validHeaderValue(value string) bool {
 // sendsBasicAuth reports whether a request with header, the built config
 // headers, gets a Basic Authorization header from user, the URL user info. A
 // non-empty Authorization header from the config wins; an empty one counts as
-// absent, as in net/http. RoundTrip and sentHeaderNames both use it.
+// absent, as in net/http. RoundTrip and sentHeaders both use it.
 func sendsBasicAuth(header http.Header, user *url.Userinfo) bool {
 	return user != nil && header.Get("Authorization") == ""
 }
@@ -443,7 +609,8 @@ func isReservedHeader(name string) bool {
 
 // headerTransport is an http.RoundTripper that adds the config headers to each
 // request, but only for requests to the configured origin. It also records the
-// status of each response and caps the size of the response bodies.
+// status of each response, caps the size of the response bodies and checks
+// the JSON shape of the 2xx bodies that the SDK decodes.
 type headerTransport struct {
 	// endpoint is the configured endpoint URL. Only its origin gets requests.
 	endpoint *url.URL
@@ -453,8 +620,10 @@ type headerTransport struct {
 	header http.Header
 	// base does the network I/O.
 	base http.RoundTripper
-	// rec records statuses and the errors raised on purpose.
-	rec *requestRecorder
+	// events holds the records of statuses and of the errors raised on
+	// purpose. Each request writes to its own record (see
+	// httpEvents.recorderFor).
+	events *httpEvents
 	// maxBody is the size cap of one response body, in bytes. It is positive.
 	maxBody int64
 	// maxTotal is the size cap of all bodies together, in bytes. It is positive.
@@ -466,14 +635,23 @@ type headerTransport struct {
 
 // RoundTrip sends req to base with the config headers added. It refuses a
 // request to another origin and sends nothing in that case.
+//
+// It wraps the response body twice. cappedBody limits the wire bytes of the
+// body and of all bodies together. On a body that the SDK decodes as JSON
+// (see shapeFor), a shapeReader then limits the depth, the number of values and
+// the string length of each JSON message (see shapeBody and jsonshape.go), so
+// that a small body cannot decode to a huge amount of memory. Both store
+// their error in the record of the request.
 func (t *headerTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	// Get the record once: every step below writes to the same one.
+	rec := t.events.recorderFor(req)
 	if !sameOrigin(req.URL, t.endpoint) {
 		// The RoundTripper contract says that RoundTrip closes the request
 		// body, also when it returns an error.
 		if req.Body != nil {
 			_ = req.Body.Close()
 		}
-		return nil, t.rec.recordBlocked(errOtherOrigin)
+		return nil, rec.recordBlocked(errOtherOrigin)
 	}
 
 	// A RoundTripper must not change the request that the caller gave it: the
@@ -509,7 +687,7 @@ func (t *headerTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 		// No response came back. Clear an older status, so that it cannot
 		// outrank this transport error in classify.
 		if record {
-			t.rec.recordNoResponse()
+			rec.recordNoResponse()
 		}
 		// Return the error as is. classify unwraps the *url.Error that the
 		// http.Client adds.
@@ -517,7 +695,7 @@ func (t *headerTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 	}
 
 	if record {
-		t.rec.recordResponse(resp)
+		rec.recordResponse(resp)
 	}
 	if resp.Body != nil {
 		resp.Body = &cappedBody{
@@ -525,10 +703,157 @@ func (t *headerTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 			remaining: t.maxBody,
 			used:      &t.used,
 			maxTotal:  t.maxTotal,
-			rec:       t.rec,
+			rec:       rec,
 		}
+		// The shape check wraps the capped body, so it sees only the bytes
+		// within the size caps. Closing the shape reader closes the capped
+		// body, which closes the real body.
+		resp.Body = shapeBody(resp.Body, out, resp, rec)
 	}
 	return resp, nil
+}
+
+// bodyShape tells which shape check a response body gets (see shapeBody).
+type bodyShape int
+
+// The shape checks of a response body.
+const (
+	// bodyShapeNone: no shape check. The SDK does not decode the body as
+	// JSON.
+	bodyShapeNone bodyShape = iota
+	// bodyShapeJSON: the body is one JSON-RPC message (for a non-2xx
+	// status, a JSON-RPC error).
+	bodyShapeJSON
+	// bodyShapeSSE: the body is a Server-Sent Events stream of JSON-RPC
+	// messages.
+	bodyShapeSSE
+)
+
+// shapeBody wraps body, the capped body of resp, in a shapeReader that
+// checks the JSON shape (jsonLimits, defaultJSONLimits in jsonshape.go)
+// before the SDK decodes it. It returns body unchanged when the SDK does not
+// decode it as JSON (see shapeFor). The SDK decodes a 2xx body as MCP
+// messages, and most non-2xx bodies as a JSON-RPC error.
+//
+// The size caps of cappedBody count wire bytes, and that is not enough. The
+// SDK decodes a message into Go values, and a small JSON text can decode to
+// much more memory: "[{},{},...]" uses 3 bytes on the wire for each empty
+// object, but each decoded object needs about 60 bytes. So a body of 8 MiB
+// can become more than 100 MiB of decoded data. The shape check limits the
+// depth, the number of values and the string length of each message, which
+// bounds the decoded size.
+//
+// At the first violation, the reader stores the error in rec, because the
+// SDK can hide the error of a body (for example, it puts only the text in a
+// new error). The error wraps errJSONTooComplex, so classify and errors.Is
+// find it.
+func shapeBody(body io.ReadCloser, req *http.Request, resp *http.Response, rec *requestRecorder) io.ReadCloser {
+	onFail := func(err error) error {
+		return rec.recordBlocked(fmt.Errorf("read response body: %w", err))
+	}
+	switch shapeFor(req, resp) {
+	case bodyShapeJSON:
+		return newJSONShapeReader(body, defaultJSONLimits(), onFail)
+	case bodyShapeSSE:
+		return newSSEShapeReader(body, defaultJSONLimits(), onFail)
+	}
+	return body
+}
+
+// shapeFor returns the shape check for resp, the response to req. It
+// follows how the SDK (go-sdk v1.8.0) reads a body:
+//
+//   - A non-2xx body gets the JSON check, whatever the Content-Type and the
+//     method (see shapeForError). The streamable transport reads such a body
+//     completely and decodes it as one JSON-RPC message to find a JSON-RPC
+//     error (checkResponse in mcp/streamable.go). It ignores the
+//     Content-Type, and the decode builds Go values for every part of the
+//     message, for example a deep "id". The check costs nothing when nobody
+//     reads the body.
+//   - A 2xx GET is an SSE stream. The legacy SSE transport parses its GET
+//     stream as SSE whatever the Content-Type (mcp/sse.go). The streamable
+//     transport reads its GET stream only when the type is
+//     text/event-stream.
+//   - For a 2xx response to another method, the SDK picks the parser by the
+//     base media type of the Content-Type (mime.ParseMediaType, as in
+//     mcp/streamable.go): application/json is one JSON message,
+//     text/event-stream is SSE. It refuses any other type without reading
+//     the body, so no check is needed. (The legacy SSE transport never reads
+//     a POST body.)
+//
+// The method is the method of the first request of a redirect chain,
+// because the SDK chose its parser for that request. A 303 redirect turns a
+// POST into a GET, and the SDK then still picks the parser by the
+// Content-Type. A server must not escape the JSON check that way.
+func shapeFor(req *http.Request, resp *http.Response) bodyShape {
+	first := firstRequest(req)
+	if resp.StatusCode < 200 || resp.StatusCode > 299 {
+		return shapeForError(first, resp)
+	}
+	if first.Method == http.MethodGet {
+		return bodyShapeSSE
+	}
+	// ParseMediaType returns the media type in lower case, without the
+	// parameters such as "; charset=utf-8". An empty or malformed value is
+	// an error: the SDK refuses that body too.
+	mediaType, _, err := mime.ParseMediaType(resp.Header.Get("Content-Type"))
+	if err != nil {
+		return bodyShapeNone
+	}
+	switch mediaType {
+	case "application/json":
+		return bodyShapeJSON
+	case "text/event-stream":
+		return bodyShapeSSE
+	}
+	return bodyShapeNone
+}
+
+// shapeForError returns the shape check for resp, a non-2xx response to a
+// request whose redirect chain starts with first. It is bodyShapeJSON,
+// except when the SDK (go-sdk v1.8.0) verifiably never decodes the body:
+//
+//   - The first request is a DELETE. The SDK sends DELETE only to close the
+//     session, and it closes the answer without reading it.
+//   - The status is 429, 500, 502, 503 or 504. checkResponse in
+//     mcp/streamable.go treats these as transient (isTransientHTTPStatus)
+//     and returns before it reads the body.
+//   - resp is a redirect that the http.Client follows (isFollowedRedirect).
+//     The client reads at most a few KiB of that body and throws them away;
+//     the SDK never gets it.
+//
+// Every other non-2xx body gets the JSON check, also for a GET: the
+// streamable transport decodes the body of a failed GET stream reconnect,
+// and of a failed standalone GET stream in strict mode, in the same way.
+// The legacy SSE transport and the standalone GET stream in non-strict mode
+// do not read a non-2xx body, and an unread check costs nothing.
+func shapeForError(first *http.Request, resp *http.Response) bodyShape {
+	if first.Method == http.MethodDelete || isFollowedRedirect(resp) {
+		return bodyShapeNone
+	}
+	switch resp.StatusCode {
+	case http.StatusTooManyRequests, http.StatusInternalServerError,
+		http.StatusBadGateway, http.StatusServiceUnavailable,
+		http.StatusGatewayTimeout:
+		return bodyShapeNone
+	}
+	return bodyShapeJSON
+}
+
+// firstRequest returns the first request of the redirect chain of req, or
+// req itself if it is not a redirect. On a redirect, http.Client sets
+// req.Response to the redirect response, and the transport sets the Request
+// of that response to the request that got it. The loop stops after
+// maxRedirects+1 steps, which is more than the client follows, so a chain
+// that a caller built by hand cannot make it loop forever.
+func firstRequest(req *http.Request) *http.Request {
+	for range maxRedirects + 1 {
+		if req.Response == nil || req.Response.Request == nil {
+			break
+		}
+		req = req.Response.Request
+	}
+	return req
 }
 
 // CloseIdleConnections closes the idle connections of the base transport.
@@ -629,7 +954,8 @@ type cappedBody struct {
 	used *atomic.Int64
 	// maxTotal is the budget for used, in bytes.
 	maxTotal int64
-	// rec stores the error that Read returns.
+	// rec is the record of the request that got this body. It stores the
+	// error that Read returns.
 	rec *requestRecorder
 	// err is set when a cap was exceeded. Every later Read returns it again.
 	err error

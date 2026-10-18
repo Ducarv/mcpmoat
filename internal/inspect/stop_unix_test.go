@@ -236,9 +236,12 @@ func cancelWhenStarted(ctx context.Context, cancel context.CancelFunc, pidfile s
 				if err != nil || !strings.HasSuffix(string(data), "\n") {
 					continue
 				}
-				at := time.Now()
+				// Send before cancel: once cancel runs, Inspect can
+				// return and the test can read done before a later
+				// send. done has room for one value, so this never
+				// blocks.
+				done <- time.Now()
 				cancel()
-				done <- at
 				return
 			}
 		}

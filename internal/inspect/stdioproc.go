@@ -25,7 +25,7 @@ const stopGrace = 2 * time.Second
 //
 // A stdioProcess is used by one call to Inspect. Only stop and the SDK
 // reads and writes run in other goroutines than the caller, and they touch
-// only the pipes and the eof channel.
+// only the pipes, the eof channel and the state of shape.
 type stdioProcess struct {
 	cmd    *exec.Cmd
 	stdin  io.WriteCloser
@@ -41,6 +41,10 @@ type stdioProcess struct {
 
 	// stopped is true after the first call to stop.
 	stopped bool
+
+	// shape checks the shape of every JSON message on stdout (see
+	// transport). It is nil until transport runs.
+	shape *shapeReader
 }
 
 // startStdio starts cmd, which stdioCommand built, with pipes for its stdin
@@ -81,12 +85,33 @@ func startStdio(ctx context.Context, cmd *exec.Cmd) (*stdioProcess, error) {
 
 // transport returns the SDK transport over the pipes of p. maxLine bounds
 // the size of one JSON-RPC frame from the server.
+//
+// The SDK reads stdout through a shapeReader, so a message that is too
+// deeply nested, has too many values or has a too long string fails before
+// the SDK decodes it (errJSONTooComplex, see jsonshape.go). The raw size
+// limit alone does not stop this: a small message such as [{},{},...] can
+// decode to many times its size in memory. The SDK reads all messages as one
+// stream, and the shapeReader counts each top-level value on its own.
+//
+// eofReader has both Read and Close, so it is an io.ReadCloser, which
+// newJSONShapeReader needs. The Close of the shapeReader calls the Close of
+// eofReader, so the SDK still closes the stdout pipe when it closes the
+// connection. transport stores the shapeReader in p.shape for shapeExceeded.
 func (p *stdioProcess) transport(maxLine int) mcp.Transport {
+	p.shape = newJSONShapeReader(eofReader{p}, defaultJSONLimits(), nil)
 	return &mcp.IOTransport{
-		Reader:        eofReader{p},
+		Reader:        p.shape,
 		Writer:        p.stdin,
 		MaxLineLength: maxLine,
 	}
+}
+
+// shapeExceeded reports whether the server sent a JSON message over a shape
+// limit (see transport). It is false before transport runs. Call it from the
+// goroutine that called transport; it is safe while the SDK reads stdout in
+// another goroutine, because shapeReader.exceeded reads an atomic flag.
+func (p *stdioProcess) shapeExceeded() bool {
+	return p.shape != nil && p.shape.exceeded()
 }
 
 // kill sends SIGKILL to the process group of the child and closes both

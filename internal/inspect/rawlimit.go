@@ -12,9 +12,9 @@ import (
 )
 
 // maxRawBytes is the limit for the JSON size of the handshake result and of
-// all list pages (tools, prompts and resources) of one stdio server, as the
-// SDK decoded them. It is also the frame limit of the stdio transport (see
-// stdioProcess), so one frame cannot be larger either.
+// all list pages (tools, prompts, resources and resource templates) of one
+// stdio server, as the SDK decoded them. It is also the frame limit of the
+// stdio transport (see stdioProcess), so one frame cannot be larger either.
 //
 // The page cap and the item cap of listAll bound the number of requests and
 // items, not the bytes: each page can be one very large frame, and the SDK
@@ -32,12 +32,12 @@ const maxRawBytes = 8 << 20 // 8 MiB
 // handshake and list data. Its text is fixed and holds no server data.
 var errRawTooLarge = errors.New("server sent more handshake and list data than the size limit")
 
-// rawLimit measures the handshake result and each tools/list, prompts/list
-// and resources/list result that the server sends, as the MCP SDK decoded
-// it, before listAll converts it. It adds the JSON size of each result to
-// used, for all of them together. When used goes over limit, the middleware
-// returns an error that wraps errRawTooLarge, so the call fails at once and
-// listAll requests no more pages.
+// rawLimit measures the handshake result and each tools/list, prompts/list,
+// resources/list and resources/templates/list result that the server sends,
+// as the MCP SDK decoded it, before it is converted. It adds the JSON size
+// of each result to used, for all of them together. When used goes over
+// limit, the middleware returns an error that wraps errRawTooLarge, so the
+// call fails at once and no more pages are requested.
 //
 // The size is that of the decoded result, not the exact bytes on the wire:
 // fields that the SDK does not know are dropped at decode, so they are not
@@ -85,8 +85,8 @@ func (r *rawLimit) exceeded() bool {
 }
 
 // measured reports whether res is a result that rawLimit measures: a
-// non-nil handshake (server/discover or initialize), tools, prompts or
-// resources result.
+// non-nil handshake (server/discover or initialize), tools, prompts,
+// resources or resource templates result.
 func measured(res mcp.Result) bool {
 	switch v := res.(type) {
 	case *mcp.DiscoverResult:
@@ -98,6 +98,8 @@ func measured(res mcp.Result) bool {
 	case *mcp.ListPromptsResult:
 		return v != nil
 	case *mcp.ListResourcesResult:
+		return v != nil
+	case *mcp.ListResourceTemplatesResult:
 		return v != nil
 	}
 	return false

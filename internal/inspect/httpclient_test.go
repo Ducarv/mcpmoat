@@ -1,6 +1,7 @@
 package inspect
 
 import (
+	"crypto/tls"
 	"encoding/base64"
 	"errors"
 	"fmt"
@@ -34,7 +35,7 @@ const hcUA = "test-agent/1"
 
 // hcNew calls newHTTPClient with the common fields. The tests that need User or
 // MaxTotal build the httpClientConfig themselves.
-func hcNew(endpoint *url.URL, headers map[string]string, base http.RoundTripper, ua string, maxBody int64) (*http.Client, *requestRecorder, error) {
+func hcNew(endpoint *url.URL, headers map[string]string, base http.RoundTripper, ua string, maxBody int64) (*http.Client, *httpEvents, error) {
 	return newHTTPClient(httpClientConfig{
 		Endpoint:  endpoint,
 		Headers:   headers,
@@ -1055,107 +1056,53 @@ func TestRequestRecorderBlocked(t *testing.T) {
 		}
 	})
 
-	t.Run("forgetBlocked drops the stored error", func(t *testing.T) {
-		t.Parallel()
-		var rec requestRecorder
-		_ = rec.recordBlocked(errCrossOriginRedirect)
-		rec.forgetBlocked()
-		if err := rec.blockedErr(); err != nil {
-			t.Fatalf("blockedErr() = %v after forgetBlocked, want nil", err)
-		}
-		// A new error after forgetBlocked is stored again, and it is the
-		// first one since then that wins.
-		_ = rec.recordBlocked(errBodyTooLarge)
-		_ = rec.recordBlocked(errOtherOrigin)
-		if got := rec.blockedErr(); got != errBodyTooLarge { //nolint:errorlint // identity check: the first error after forgetBlocked must be returned unchanged
-			t.Errorf("blockedErr() = %v, want errBodyTooLarge", got)
-		}
-	})
+	// The forgetBlocked subtests are gone with forgetBlocked (issue #100): a
+	// blocked request now sits in the record of its own call, so nothing has
+	// to be forgotten after the connect.
 
 	t.Run("zero value is not connected", func(t *testing.T) {
 		t.Parallel()
-		var rec requestRecorder
-		if rec.connected() {
+		var ev httpEvents
+		if ev.connected() {
 			t.Error("connected() = true on the zero value, want false")
 		}
 	})
 
-	t.Run("markConnected sets connected and drops the blocked error", func(t *testing.T) {
+	// markConnected used to drop the blocked error. Since issue #100 it only
+	// marks the session up: a blocked error in the fallback record (for
+	// example a legacy SSE stream over the size cap) must still label later
+	// failures.
+	t.Run("markConnected sets connected and keeps the blocked error", func(t *testing.T) {
 		t.Parallel()
-		var rec requestRecorder
-		rec.recordResponse(hcRecordResp(404, nil))
-		_ = rec.recordBlocked(errCrossOriginRedirect)
-		rec.markConnected()
-		if !rec.connected() {
+		var ev httpEvents
+		ev.recordResponse(hcRecordResp(404, nil))
+		_ = ev.recordBlocked(errCrossOriginRedirect)
+		ev.markConnected()
+		if !ev.connected() {
 			t.Error("connected() = false after markConnected, want true")
 		}
-		if err := rec.blockedErr(); err != nil {
-			t.Errorf("blockedErr() = %v after markConnected, want nil", err)
+		if got := ev.blockedErr(); !errors.Is(got, errCrossOriginRedirect) {
+			t.Errorf("blockedErr() = %v after markConnected, want errCrossOriginRedirect", got)
 		}
-		if got := rec.lastStatus(); got != 404 {
+		if got := ev.lastStatus(); got != 404 {
 			t.Errorf("lastStatus() = %d after markConnected, want 404", got)
-		}
-		// A later blocked error is stored again, and the session stays up.
-		_ = rec.recordBlocked(errBodyTooLarge)
-		if got := rec.blockedErr(); got != errBodyTooLarge { //nolint:errorlint // identity check: the error after markConnected must be returned unchanged
-			t.Errorf("blockedErr() = %v, want errBodyTooLarge", got)
-		}
-		if !rec.connected() {
-			t.Error("connected() = false after a later blocked error, want true")
 		}
 	})
 
 	t.Run("markHandshake sets connected and keeps the blocked error", func(t *testing.T) {
 		t.Parallel()
-		var rec requestRecorder
-		rec.recordResponse(hcRecordResp(404, nil))
-		_ = rec.recordBlocked(errCrossOriginRedirect)
-		rec.markHandshake()
-		if !rec.connected() {
+		var ev httpEvents
+		ev.recordResponse(hcRecordResp(404, nil))
+		_ = ev.recordBlocked(errCrossOriginRedirect)
+		ev.markHandshake()
+		if !ev.connected() {
 			t.Error("connected() = false after markHandshake, want true")
 		}
-		if got := rec.blockedErr(); got != errCrossOriginRedirect { //nolint:errorlint // identity check: markHandshake must keep the stored error unchanged
+		if got := ev.blockedErr(); got != errCrossOriginRedirect { //nolint:errorlint // identity check: markHandshake must keep the stored error unchanged
 			t.Errorf("blockedErr() = %v after markHandshake, want errCrossOriginRedirect", got)
 		}
-		if got := rec.lastStatus(); got != 404 {
+		if got := ev.lastStatus(); got != 404 {
 			t.Errorf("lastStatus() = %d after markHandshake, want 404", got)
-		}
-		// markConnected after markHandshake still drops the blocked error.
-		rec.markConnected()
-		if err := rec.blockedErr(); err != nil {
-			t.Errorf("blockedErr() = %v after markConnected, want nil", err)
-		}
-		if !rec.connected() {
-			t.Error("connected() = false after markConnected, want true")
-		}
-	})
-
-	t.Run("forgetBlocked does not mark the session connected", func(t *testing.T) {
-		t.Parallel()
-		var rec requestRecorder
-		rec.forgetBlocked()
-		if rec.connected() {
-			t.Error("connected() = true after forgetBlocked, want false")
-		}
-	})
-
-	t.Run("forgetBlocked keeps the status", func(t *testing.T) {
-		t.Parallel()
-		var rec requestRecorder
-		rec.recordResponse(hcRecordResp(401, nil))
-		_ = rec.recordBlocked(errOtherOrigin)
-		rec.forgetBlocked()
-		if got := rec.lastStatus(); got != 401 {
-			t.Errorf("lastStatus() = %d after forgetBlocked, want 401", got)
-		}
-	})
-
-	t.Run("forgetBlocked on the zero value", func(t *testing.T) {
-		t.Parallel()
-		var rec requestRecorder
-		rec.forgetBlocked()
-		if err := rec.blockedErr(); err != nil {
-			t.Errorf("blockedErr() = %v, want nil", err)
 		}
 	})
 
@@ -1825,7 +1772,7 @@ func TestNewHTTPClientBaseTransport(t *testing.T) {
 
 	t.Run("response header limit is 64 KiB", func(t *testing.T) {
 		t.Parallel()
-		if got := newBaseTransport().MaxResponseHeaderBytes; got != 64<<10 {
+		if got := newBaseTransport(nil).MaxResponseHeaderBytes; got != 64<<10 {
 			t.Errorf("MaxResponseHeaderBytes = %d, want %d", got, 64<<10)
 		}
 	})
@@ -2776,4 +2723,900 @@ func TestCappedBodySharedBudgetOnOverflow(t *testing.T) {
 			}
 		})
 	}
+}
+
+// hcDo sends a request with method to rawURL, reads the whole body and
+// closes it. A non-nil rec goes on the request context (withRecorder); a nil
+// rec sends the request without a record. It returns the bytes that were
+// read and the read error. A request error stops the test.
+func hcDo(t *testing.T, client *http.Client, rec *requestRecorder, method, rawURL string) ([]byte, error) {
+	t.Helper()
+	ctx := t.Context()
+	if rec != nil {
+		ctx = withRecorder(ctx, rec)
+	}
+	var body io.Reader
+	if method == http.MethodPost {
+		// A strings.Reader lets http.NewRequest set GetBody, so a 307
+		// redirect can send the body again.
+		body = strings.NewReader(`{"jsonrpc":"2.0","id":1,"method":"tools/list"}`)
+	}
+	req, err := http.NewRequestWithContext(ctx, method, rawURL, body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatalf("%s %s: %v", method, rawURL, err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	return io.ReadAll(resp.Body)
+}
+
+// hcWaitBoth returns a function that blocks until it was called twice, so
+// that two requests in a base RoundTripper overlap. It gives up after a
+// timeout, so a broken test fails instead of hanging.
+func hcWaitBoth() func() {
+	var n atomic.Int32
+	both := make(chan struct{})
+	return func() {
+		if n.Add(1) == 2 {
+			close(both)
+		}
+		select {
+		case <-both:
+		case <-time.After(5 * time.Second):
+		}
+	}
+}
+
+// TestHeaderTransportPerRequestRecords checks that each request writes its
+// status and its blocked error into the record on its context (issue #100),
+// and that a request without a record writes into the fallback record of
+// httpEvents.
+func TestHeaderTransportPerRequestRecords(t *testing.T) {
+	t.Parallel()
+
+	const origin = "http://example.com"
+
+	t.Run("overlapping requests keep their own status", func(t *testing.T) {
+		t.Parallel()
+		wait := hcWaitBoth()
+		stub := &hcStub{respond: func(req *http.Request) *http.Response {
+			// Both requests are in the base at the same time. With one
+			// shared record, the status of the request that ends last
+			// would show in both.
+			wait()
+			if req.URL.Path == "/fail" {
+				return hcResponse(req, http.StatusInternalServerError, "boom", nil)
+			}
+			return hcResponse(req, http.StatusOK, "ok", nil)
+		}}
+		client, ev, err := hcNew(hcURL(t, origin), nil, stub, hcUA, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		recFail, recOK := &requestRecorder{}, &requestRecorder{}
+		var wg sync.WaitGroup
+		for _, c := range []struct {
+			rec  *requestRecorder
+			path string
+		}{{recFail, "/fail"}, {recOK, "/ok"}} {
+			wg.Go(func() {
+				req, err := http.NewRequestWithContext(withRecorder(t.Context(), c.rec), http.MethodGet, origin+c.path, nil)
+				if err != nil {
+					t.Error(err)
+					return
+				}
+				resp, err := client.Do(req)
+				if err != nil {
+					t.Errorf("GET %s: %v", c.path, err)
+					return
+				}
+				_, _ = io.Copy(io.Discard, resp.Body)
+				_ = resp.Body.Close()
+			})
+		}
+		wg.Wait()
+
+		if got := recFail.lastStatus(); got != http.StatusInternalServerError {
+			t.Errorf("record of /fail: lastStatus() = %d, want 500", got)
+		}
+		if got := recOK.lastStatus(); got != 0 {
+			t.Errorf("record of /ok: lastStatus() = %d, want 0", got)
+		}
+		if got := ev.lastStatus(); got != 0 {
+			t.Errorf("fallback lastStatus() = %d, want 0: both requests had a record", got)
+		}
+	})
+
+	t.Run("overlapping requests keep their own blocked error", func(t *testing.T) {
+		t.Parallel()
+		stub := &hcStub{respond: func(req *http.Request) *http.Response {
+			return hcResponse(req, http.StatusFound, "", http.Header{"Location": {"http://evil.test/"}})
+		}}
+		client, ev, err := hcNew(hcURL(t, origin), nil, stub, hcUA, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		recOrigin, recRedirect := &requestRecorder{}, &requestRecorder{}
+		var wg sync.WaitGroup
+		wg.Go(func() {
+			// The request goes to another origin: RoundTrip refuses it.
+			req, err := http.NewRequestWithContext(withRecorder(t.Context(), recOrigin), http.MethodGet, "http://evil.test/", nil)
+			if err != nil {
+				t.Error(err)
+				return
+			}
+			if resp, err := client.Do(req); !errors.Is(err, errOtherOrigin) {
+				if resp != nil {
+					_ = resp.Body.Close()
+				}
+				t.Errorf("GET evil.test: error = %v, want errOtherOrigin", err)
+			}
+		})
+		wg.Go(func() {
+			// The request goes to the origin, which redirects elsewhere:
+			// CheckRedirect refuses it.
+			req, err := http.NewRequestWithContext(withRecorder(t.Context(), recRedirect), http.MethodGet, origin+"/", nil)
+			if err != nil {
+				t.Error(err)
+				return
+			}
+			if resp, err := client.Do(req); !errors.Is(err, errCrossOriginRedirect) {
+				if resp != nil {
+					_ = resp.Body.Close()
+				}
+				t.Errorf("GET origin: error = %v, want errCrossOriginRedirect", err)
+			}
+		})
+		wg.Wait()
+
+		if got := recOrigin.blockedErr(); !errors.Is(got, errOtherOrigin) || errors.Is(got, errCrossOriginRedirect) {
+			t.Errorf("record of the other-origin request: blockedErr() = %v, want errOtherOrigin only", got)
+		}
+		if got := recRedirect.blockedErr(); !errors.Is(got, errCrossOriginRedirect) || errors.Is(got, errOtherOrigin) {
+			t.Errorf("record of the redirected request: blockedErr() = %v, want errCrossOriginRedirect only", got)
+		}
+		if got := ev.blockedErr(); got != nil {
+			t.Errorf("fallback blockedErr() = %v, want nil: both requests had a record", got)
+		}
+	})
+
+	t.Run("request without a record uses the fallback", func(t *testing.T) {
+		t.Parallel()
+		stub := &hcStub{respond: func(req *http.Request) *http.Response {
+			if req.URL.Path == "/fail" {
+				return hcResponse(req, http.StatusInternalServerError, "boom", nil)
+			}
+			return hcResponse(req, http.StatusOK, "ok", nil)
+		}}
+		client, ev, err := hcNew(hcURL(t, origin), nil, stub, hcUA, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		// t.Context() carries no record.
+		if _, err := hcDo(t, client, nil, http.MethodGet, origin+"/fail"); err != nil {
+			t.Fatal(err)
+		}
+		hcMustFail(t, client, "http://evil.test/", errOtherOrigin)
+		if got := ev.lastStatus(); got != http.StatusInternalServerError {
+			t.Errorf("fallback lastStatus() = %d, want 500", got)
+		}
+		if got := ev.blockedErr(); !errors.Is(got, errOtherOrigin) {
+			t.Errorf("fallback blockedErr() = %v, want errOtherOrigin", got)
+		}
+
+		// A later request with a record must not touch the fallback.
+		rec := &requestRecorder{}
+		if _, err := hcDo(t, client, rec, http.MethodGet, origin+"/ok"); err != nil {
+			t.Fatal(err)
+		}
+		if got := ev.lastStatus(); got != http.StatusInternalServerError {
+			t.Errorf("fallback lastStatus() = %d after a request with a record, want 500", got)
+		}
+		if got := rec.lastStatus(); got != 0 {
+			t.Errorf("record lastStatus() = %d, want 0", got)
+		}
+		if got := rec.blockedErr(); got != nil {
+			t.Errorf("record blockedErr() = %v, want nil", got)
+		}
+	})
+
+	t.Run("redirects write into the record of the first request", func(t *testing.T) {
+		t.Parallel()
+		tests := []struct {
+			name     string
+			location string // Location of every 302; empty: 302 once, then 500
+			want     error
+			status   int
+		}{
+			{name: "cross-origin redirect", location: "http://evil.test/", want: errCrossOriginRedirect},
+			{name: "too many redirects", location: "/again", want: errTooManyRedirects},
+			{name: "same-origin redirect to a 500", status: http.StatusInternalServerError},
+		}
+		for _, tt := range tests {
+			t.Run(tt.name, func(t *testing.T) {
+				t.Parallel()
+				stub := &hcStub{respond: func(req *http.Request) *http.Response {
+					switch {
+					case tt.location != "":
+						return hcResponse(req, http.StatusFound, "", http.Header{"Location": {tt.location}})
+					case req.URL.Path == "/":
+						return hcResponse(req, http.StatusFound, "", http.Header{"Location": {"/next"}})
+					}
+					return hcResponse(req, http.StatusInternalServerError, "boom", nil)
+				}}
+				client, ev, err := hcNew(hcURL(t, origin), nil, stub, hcUA, 0)
+				if err != nil {
+					t.Fatal(err)
+				}
+				rec := &requestRecorder{}
+				req, err := http.NewRequestWithContext(withRecorder(t.Context(), rec), http.MethodGet, origin+"/", nil)
+				if err != nil {
+					t.Fatal(err)
+				}
+				resp, err := client.Do(req)
+				if resp != nil {
+					_ = resp.Body.Close()
+				}
+				if tt.want != nil && !errors.Is(err, tt.want) {
+					t.Fatalf("client.Do() error = %v, want %v", err, tt.want)
+				}
+				if got := rec.blockedErr(); !errors.Is(got, tt.want) || (tt.want == nil && got != nil) {
+					t.Errorf("record blockedErr() = %v, want %v", got, tt.want)
+				}
+				if got := rec.lastStatus(); got != tt.status {
+					t.Errorf("record lastStatus() = %d, want %d", got, tt.status)
+				}
+				if got := ev.blockedErr(); got != nil {
+					t.Errorf("fallback blockedErr() = %v, want nil", got)
+				}
+				if got := ev.lastStatus(); got != 0 {
+					t.Errorf("fallback lastStatus() = %d, want 0", got)
+				}
+			})
+		}
+	})
+
+	t.Run("body cap writes into the record of the request", func(t *testing.T) {
+		t.Parallel()
+		stub := &hcStub{respond: func(req *http.Request) *http.Response {
+			return hcResponse(req, http.StatusOK, "0123456789", nil)
+		}}
+		client, ev, err := hcNew(hcURL(t, origin), nil, stub, hcUA, 4)
+		if err != nil {
+			t.Fatal(err)
+		}
+		rec, other := &requestRecorder{}, &requestRecorder{}
+		if _, err := hcDo(t, client, rec, http.MethodGet, origin+"/"); !errors.Is(err, errBodyTooLarge) {
+			t.Fatalf("read body: error = %v, want errBodyTooLarge", err)
+		}
+		if got := rec.blockedErr(); !errors.Is(got, errBodyTooLarge) {
+			t.Errorf("record blockedErr() = %v, want errBodyTooLarge", got)
+		}
+		if got := other.blockedErr(); got != nil {
+			t.Errorf("unused record blockedErr() = %v, want nil", got)
+		}
+		if got := ev.blockedErr(); got != nil {
+			t.Errorf("fallback blockedErr() = %v, want nil", got)
+		}
+	})
+}
+
+// hcRedirectChain returns the last request of a redirect chain whose
+// requests have the given methods, oldest first. It links the requests the
+// way http.Client does: each redirected request has Response set to the
+// redirect response, and the Request of that response is the request before.
+func hcRedirectChain(t *testing.T, methods ...string) *http.Request {
+	t.Helper()
+	var prev *http.Request
+	for _, method := range methods {
+		req, err := http.NewRequestWithContext(t.Context(), method, "http://example.com/mcp", nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if prev != nil {
+			req.Response = &http.Response{StatusCode: http.StatusSeeOther, Request: prev}
+		}
+		prev = req
+	}
+	return prev
+}
+
+func TestShapeFor(t *testing.T) {
+	t.Parallel()
+
+	const noCT = "\x00none" // marker: the response has no Content-Type header
+
+	tests := []struct {
+		name     string
+		methods  []string // methods of the redirect chain, oldest first
+		status   int
+		ct       string
+		location string // Location header, for a redirect status
+		want     bodyShape
+	}{
+		{name: "POST json", methods: []string{"POST"}, status: 200, ct: "application/json", want: bodyShapeJSON},
+		{name: "POST json with charset", methods: []string{"POST"}, status: 200, ct: "application/json; charset=utf-8", want: bodyShapeJSON},
+		{name: "POST json in mixed case", methods: []string{"POST"}, status: 200, ct: "Application/JSON", want: bodyShapeJSON},
+		{name: "POST event-stream", methods: []string{"POST"}, status: 200, ct: "text/event-stream", want: bodyShapeSSE},
+		{name: "POST event-stream in upper case with charset", methods: []string{"POST"}, status: 200, ct: "TEXT/EVENT-STREAM; charset=utf-8", want: bodyShapeSSE},
+		{name: "POST text/plain", methods: []string{"POST"}, status: 200, ct: "text/plain", want: bodyShapeNone},
+		{name: "POST problem+json", methods: []string{"POST"}, status: 200, ct: "application/problem+json", want: bodyShapeNone},
+		{name: "POST json-seq", methods: []string{"POST"}, status: 200, ct: "application/json-seq", want: bodyShapeNone},
+		{name: "POST unparsable: no type", methods: []string{"POST"}, status: 200, ct: "/json", want: bodyShapeNone},
+		{name: "POST unparsable: bad parameter", methods: []string{"POST"}, status: 200, ct: "application/json; charset", want: bodyShapeNone},
+		{name: "POST empty Content-Type", methods: []string{"POST"}, status: 200, ct: "", want: bodyShapeNone},
+		{name: "POST missing Content-Type", methods: []string{"POST"}, status: 200, ct: noCT, want: bodyShapeNone},
+
+		// Status 2xx: the body is decoded as messages, by Content-Type.
+		{name: "POST 204 json", methods: []string{"POST"}, status: 204, ct: "application/json", want: bodyShapeJSON},
+		{name: "POST 299 json", methods: []string{"POST"}, status: 299, ct: "application/json", want: bodyShapeJSON},
+
+		// Non-2xx: checkResponse in the SDK reads the body and decodes it as
+		// one JSON-RPC message, whatever the Content-Type and the method
+		// (security case: a deep "id" decodes to a huge amount of memory).
+		{name: "POST 199 json", methods: []string{"POST"}, status: 199, ct: "application/json", want: bodyShapeJSON},
+		{name: "POST 300 without Location", methods: []string{"POST"}, status: 300, ct: "application/json", want: bodyShapeJSON},
+		{name: "POST 400 json", methods: []string{"POST"}, status: 400, ct: "application/json", want: bodyShapeJSON},
+		{name: "POST 400 text/plain", methods: []string{"POST"}, status: 400, ct: "text/plain", want: bodyShapeJSON},
+		{name: "POST 400 event-stream", methods: []string{"POST"}, status: 400, ct: "text/event-stream", want: bodyShapeJSON},
+		{name: "POST 401 json", methods: []string{"POST"}, status: 401, ct: "application/json", want: bodyShapeJSON},
+		{name: "POST 401 missing Content-Type", methods: []string{"POST"}, status: 401, ct: noCT, want: bodyShapeJSON},
+		{name: "POST 404 json", methods: []string{"POST"}, status: 404, ct: "application/json", want: bodyShapeJSON},
+		{name: "POST 404 unparsable Content-Type", methods: []string{"POST"}, status: 404, ct: "/json", want: bodyShapeJSON},
+		{name: "POST 405 text/html", methods: []string{"POST"}, status: 405, ct: "text/html", want: bodyShapeJSON},
+		{name: "POST 501 json", methods: []string{"POST"}, status: 501, ct: "application/json", want: bodyShapeJSON},
+		{name: "GET 400 event-stream", methods: []string{"GET"}, status: 400, ct: "text/event-stream", want: bodyShapeJSON},
+		{name: "GET 401 json", methods: []string{"GET"}, status: 401, ct: "application/json", want: bodyShapeJSON},
+		{name: "GET 404 event-stream", methods: []string{"GET"}, status: 404, ct: "text/event-stream", want: bodyShapeJSON},
+		{name: "GET 404 missing Content-Type", methods: []string{"GET"}, status: 404, ct: noCT, want: bodyShapeJSON},
+		{name: "303 POST to GET 404 text/plain", methods: []string{"POST", "GET"}, status: 404, ct: "text/plain", want: bodyShapeJSON},
+
+		// Non-2xx that the SDK never reads: the transient statuses of
+		// checkResponse (isTransientHTTPStatus in go-sdk v1.8.0).
+		{name: "POST 429 json", methods: []string{"POST"}, status: 429, ct: "application/json", want: bodyShapeNone},
+		{name: "POST 500 json", methods: []string{"POST"}, status: 500, ct: "application/json", want: bodyShapeNone},
+		{name: "POST 500 event-stream", methods: []string{"POST"}, status: 500, ct: "text/event-stream", want: bodyShapeNone},
+		{name: "POST 502 json", methods: []string{"POST"}, status: 502, ct: "application/json", want: bodyShapeNone},
+		{name: "POST 503 json", methods: []string{"POST"}, status: 503, ct: "application/json", want: bodyShapeNone},
+		{name: "POST 504 json", methods: []string{"POST"}, status: 504, ct: "application/json", want: bodyShapeNone},
+		{name: "GET 429", methods: []string{"GET"}, status: 429, ct: "text/event-stream", want: bodyShapeNone},
+		{name: "GET 500", methods: []string{"GET"}, status: 500, ct: "text/event-stream", want: bodyShapeNone},
+		{name: "GET 503", methods: []string{"GET"}, status: 503, ct: "text/event-stream", want: bodyShapeNone},
+		{name: "303 POST to GET 500", methods: []string{"POST", "GET"}, status: 500, ct: "application/json", want: bodyShapeNone},
+
+		// Non-2xx to a DELETE: the SDK closes that body without reading it.
+		// The method of the first request decides.
+		{name: "DELETE 400 json", methods: []string{"DELETE"}, status: 400, ct: "application/json", want: bodyShapeNone},
+		{name: "DELETE 404 text/plain", methods: []string{"DELETE"}, status: 404, ct: "text/plain", want: bodyShapeNone},
+		{name: "307 DELETE to DELETE 404 json", methods: []string{"DELETE", "DELETE"}, status: 404, ct: "application/json", want: bodyShapeNone},
+		{name: "303 DELETE to GET 404 json", methods: []string{"DELETE", "GET"}, status: 404, ct: "application/json", want: bodyShapeNone},
+
+		// A redirect that the http.Client follows: the SDK never gets the
+		// body.
+		{name: "POST 302 with Location", methods: []string{"POST"}, status: 302, ct: "application/json", location: "/next", want: bodyShapeNone},
+		{name: "GET 307 with Location", methods: []string{"GET"}, status: 307, ct: "application/json", location: "/next", want: bodyShapeNone},
+		{name: "POST 302 without Location", methods: []string{"POST"}, status: 302, ct: "application/json", want: bodyShapeJSON},
+
+		// 2xx DELETE: unchanged, by Content-Type.
+		{name: "DELETE 200 json", methods: []string{"DELETE"}, status: 200, ct: "application/json", want: bodyShapeJSON},
+
+		// GET: the legacy SSE transport parses its GET stream as SSE whatever
+		// the Content-Type.
+		{name: "GET event-stream", methods: []string{"GET"}, status: 200, ct: "text/event-stream", want: bodyShapeSSE},
+		{name: "legacy GET with json Content-Type", methods: []string{"GET"}, status: 200, ct: "application/json", want: bodyShapeSSE},
+		{name: "GET text/plain", methods: []string{"GET"}, status: 200, ct: "text/plain", want: bodyShapeSSE},
+		{name: "GET missing Content-Type", methods: []string{"GET"}, status: 200, ct: noCT, want: bodyShapeSSE},
+
+		// Redirects: the method of the first request decides. A 303 turns a
+		// POST into a GET, but the SDK still picks its parser by the
+		// Content-Type, so the JSON check must stay (security case).
+		{name: "303 POST to GET json", methods: []string{"POST", "GET"}, status: 200, ct: "application/json", want: bodyShapeJSON},
+		{name: "303 POST to GET event-stream", methods: []string{"POST", "GET"}, status: 200, ct: "text/event-stream", want: bodyShapeSSE},
+		{name: "303 POST to GET text/plain", methods: []string{"POST", "GET"}, status: 200, ct: "text/plain", want: bodyShapeNone},
+		{name: "303 POST to GET 500", methods: []string{"POST", "GET"}, status: 500, ct: "application/json", want: bodyShapeNone},
+		{name: "two hops POST to GET json", methods: []string{"POST", "GET", "GET"}, status: 200, ct: "application/json", want: bodyShapeJSON},
+		{name: "most hops the client follows", methods: []string{"POST", "GET", "GET", "GET"}, status: 200, ct: "application/json", want: bodyShapeJSON},
+		{name: "307 POST to POST json", methods: []string{"POST", "POST"}, status: 200, ct: "application/json", want: bodyShapeJSON},
+		{name: "redirected GET with json Content-Type", methods: []string{"GET", "GET"}, status: 200, ct: "application/json", want: bodyShapeSSE},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			req := hcRedirectChain(t, tt.methods...)
+			header := http.Header{}
+			if tt.ct != noCT {
+				header.Set("Content-Type", tt.ct)
+			}
+			if tt.location != "" {
+				header.Set("Location", tt.location)
+			}
+			resp := &http.Response{StatusCode: tt.status, Header: header, Request: req}
+			if got := shapeFor(req, resp); got != tt.want {
+				t.Errorf("shapeFor(%v, %d, %q) = %d, want %d", tt.methods, tt.status, tt.ct, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestShapeForFirstRequest(t *testing.T) {
+	t.Parallel()
+
+	t.Run("no redirect", func(t *testing.T) {
+		t.Parallel()
+		req := hcRedirectChain(t, "POST")
+		if got := firstRequest(req); got != req {
+			t.Errorf("firstRequest() = %p, want the request itself %p", got, req)
+		}
+	})
+
+	t.Run("response without a request", func(t *testing.T) {
+		t.Parallel()
+		req := hcRedirectChain(t, "GET")
+		req.Response = &http.Response{StatusCode: http.StatusSeeOther}
+		if got := firstRequest(req); got != req {
+			t.Errorf("firstRequest() = %p, want the request itself %p", got, req)
+		}
+	})
+
+	t.Run("chain of the most redirects the client follows", func(t *testing.T) {
+		t.Parallel()
+		// maxRedirects redirects give maxRedirects+1 requests.
+		methods := make([]string, maxRedirects+1)
+		for i := range methods {
+			methods[i] = http.MethodGet
+		}
+		methods[0] = http.MethodPost
+		if got := firstRequest(hcRedirectChain(t, methods...)); got.Method != http.MethodPost {
+			t.Errorf("firstRequest().Method = %s, want POST (the first request)", got.Method)
+		}
+	})
+
+	t.Run("a cycle ends", func(t *testing.T) {
+		t.Parallel()
+		// A chain built by hand can point back to itself. firstRequest must
+		// stop anyway.
+		req := hcRedirectChain(t, "POST")
+		req.Response = &http.Response{StatusCode: http.StatusSeeOther, Request: req}
+		if got := firstRequest(req); got != req {
+			t.Errorf("firstRequest() = %p, want %p", got, req)
+		}
+	})
+}
+
+// hcEnvelopeValues is the number of JSON values in the envelope that
+// hcRPCList writes around its array: the outer object, the keys jsonrpc, id,
+// result and tools, the values "2.0" and 1, the result object and the array.
+const hcEnvelopeValues = 9
+
+// hcRPCList returns a JSON-RPC response whose result.tools array has n empty
+// objects. The whole message has hcEnvelopeValues+n JSON values, about 3
+// bytes on the wire for each object.
+func hcRPCList(n int) string {
+	var b strings.Builder
+	b.WriteString(`{"jsonrpc":"2.0","id":1,"result":{"tools":[`)
+	if n > 0 {
+		b.WriteString(strings.Repeat("{},", n-1))
+		b.WriteString("{}")
+	}
+	b.WriteString("]}}")
+	return b.String()
+}
+
+// hcDeepIDEnvelopeValues is the number of JSON values in the envelope that
+// hcRPCDeepID writes around its array: the outer object, the keys jsonrpc
+// and id, the value "2.0" and the array.
+const hcDeepIDEnvelopeValues = 5
+
+// hcRPCDeepID returns a JSON-RPC message whose id is an array of n empty
+// objects: the attack body of a non-2xx answer, which the SDK decodes into a
+// struct with an "ID any" field. The whole message has
+// hcDeepIDEnvelopeValues+n JSON values.
+func hcRPCDeepID(n int) string {
+	var b strings.Builder
+	b.WriteString(`{"jsonrpc":"2.0","id":[`)
+	if n > 0 {
+		b.WriteString(strings.Repeat("{},", n-1))
+		b.WriteString("{}")
+	}
+	b.WriteString("]}")
+	return b.String()
+}
+
+// hcRPCUnauthorized is a small, normal JSON-RPC error body of a 401 answer.
+const hcRPCUnauthorized = `{"jsonrpc":"2.0","id":1,"error":{"code":-32001,"message":"unauthorized"}}`
+
+// hcSSEEvent returns data as one SSE message event.
+func hcSSEEvent(data string) string {
+	return "event: message\ndata: " + data + "\n\n"
+}
+
+// hcServed is one answer of the test server in TestShapeBodyEndToEnd.
+type hcServed struct {
+	status   int
+	ct       string
+	body     string
+	location string // for a redirect status
+}
+
+// TestShapeBodyEndToEnd runs the shape check through newHTTPClient, the real
+// base transport and an httptest server, with the real limits of jsonshape.go.
+func TestShapeBodyEndToEnd(t *testing.T) {
+	t.Parallel()
+
+	// overLimit has one value more than maxJSONValues, atLimit has exactly
+	// maxJSONValues. Both are about 300 KB, far below the 8 MiB body cap, so
+	// only the shape check can refuse them.
+	overLimit := hcRPCList(maxJSONValues - hcEnvelopeValues + 1)
+	atLimit := hcRPCList(maxJSONValues - hcEnvelopeValues)
+	deepOver := hcRPCDeepID(maxJSONValues - hcDeepIDEnvelopeValues + 1)
+	deepAt := hcRPCDeepID(maxJSONValues - hcDeepIDEnvelopeValues)
+
+	served := map[string]hcServed{
+		"/json-over":         {status: 200, ct: "application/json", body: overLimit},
+		"/json-at":           {status: 200, ct: "application/json", body: atLimit},
+		"/json-charset-over": {status: 200, ct: "application/json; charset=utf-8", body: overLimit},
+		"/sse-over":          {status: 200, ct: "text/event-stream", body: hcSSEEvent(overLimit)},
+		"/sse-at":            {status: 200, ct: "text/event-stream", body: hcSSEEvent(atLimit)},
+		"/sse-two-at":        {status: 200, ct: "text/event-stream", body: hcSSEEvent(atLimit) + hcSSEEvent(atLimit)},
+		"/json-500-over":     {status: 500, ct: "application/json", body: overLimit},
+		"/json-404-over":     {status: 404, ct: "application/json", body: overLimit},
+		"/deep-400-over":     {status: 400, ct: "application/json", body: deepOver},
+		"/deep-400-at":       {status: 400, ct: "application/json", body: deepAt},
+		"/deep-400-plain":    {status: 400, ct: "text/plain", body: deepOver},
+		"/deep-400-no-ct":    {status: 400, body: deepOver},
+		"/deep-404-sse":      {status: 404, ct: "text/event-stream", body: deepOver},
+		"/deep-429-over":     {status: 429, ct: "application/json", body: deepOver},
+		"/deep-503-over":     {status: 503, ct: "application/json", body: deepOver},
+		"/unauthorized":      {status: 401, ct: "application/json", body: hcRPCUnauthorized},
+		"/plain-over":        {status: 200, ct: "text/plain", body: overLimit},
+		"/get-json-raw":      {status: 200, ct: "application/json", body: overLimit},
+		"/get-json-sse":      {status: 200, ct: "application/json", body: hcSSEEvent(overLimit)},
+		"/see-other-json":    {status: 303, location: "/json-over"},
+		"/see-other-sse":     {status: 303, location: "/sse-over"},
+		"/see-other-at":      {status: 303, location: "/json-at"},
+		"/temporary-json":    {status: 307, location: "/json-over"},
+	}
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		s, ok := served[r.URL.Path]
+		if !ok {
+			http.NotFound(w, r)
+			return
+		}
+		_, _ = io.Copy(io.Discard, r.Body)
+		if s.location != "" {
+			w.Header().Set("Location", s.location)
+		}
+		if s.ct != "" {
+			w.Header().Set("Content-Type", s.ct)
+		}
+		w.WriteHeader(s.status)
+		_, _ = io.WriteString(w, s.body)
+	}))
+	t.Cleanup(ts.Close)
+
+	srv := discover.Server{Name: "remote", Transport: discover.TransportHTTP, URL: discover.NewURL(ts.URL)}
+
+	tests := []struct {
+		name    string
+		method  string
+		path    string
+		wantErr bool   // the read must fail with errJSONTooComplex
+		body    string // the full body when wantErr is false
+		status  int    // lastStatus of the record
+	}{
+		{name: "POST json over the limit", method: "POST", path: "/json-over", wantErr: true},
+		{name: "POST json with charset over the limit", method: "POST", path: "/json-charset-over", wantErr: true},
+		{name: "POST json at the limit", method: "POST", path: "/json-at", body: atLimit},
+		{name: "POST SSE over the limit", method: "POST", path: "/sse-over", wantErr: true},
+		{name: "POST SSE at the limit", method: "POST", path: "/sse-at", body: hcSSEEvent(atLimit)},
+		{name: "POST SSE: the limit is per event", method: "POST", path: "/sse-two-at", body: hcSSEEvent(atLimit) + hcSSEEvent(atLimit)},
+		{name: "GET SSE over the limit", method: "GET", path: "/sse-over", wantErr: true},
+		{name: "legacy GET with json Content-Type is checked as SSE", method: "GET", path: "/get-json-sse", wantErr: true},
+		// Not a message for the SDK: the legacy GET stream has no data
+		// field, so nothing is decoded and nothing is counted.
+		{name: "legacy GET with raw json is not a message", method: "GET", path: "/get-json-raw", body: overLimit},
+		// Security case: the SDK decodes a non-2xx body as one JSON-RPC
+		// message, whatever the Content-Type, so the check must stay. A
+		// deep "id" would decode to a huge amount of memory.
+		{name: "POST 400 deep id over the limit", method: "POST", path: "/deep-400-over", wantErr: true, status: 400},
+		{name: "POST 400 deep id at the limit", method: "POST", path: "/deep-400-at", body: deepAt, status: 400},
+		{name: "POST 400 text/plain deep id over the limit", method: "POST", path: "/deep-400-plain", wantErr: true, status: 400},
+		{name: "POST 400 deep id without Content-Type", method: "POST", path: "/deep-400-no-ct", wantErr: true, status: 400},
+		{name: "POST 404 json over the limit", method: "POST", path: "/json-404-over", wantErr: true, status: 404},
+		{name: "GET 404 event-stream deep id over the limit", method: "GET", path: "/deep-404-sse", wantErr: true, status: 404},
+		{name: "POST 401 small JSON-RPC error", method: "POST", path: "/unauthorized", body: hcRPCUnauthorized, status: 401},
+		// The SDK never reads these bodies: transient statuses and DELETE.
+		{name: "POST 500 is not checked", method: "POST", path: "/json-500-over", body: overLimit, status: 500},
+		{name: "POST 429 is not checked", method: "POST", path: "/deep-429-over", body: deepOver, status: 429},
+		{name: "POST 503 is not checked", method: "POST", path: "/deep-503-over", body: deepOver, status: 503},
+		// A DELETE has no record of its status (see RoundTrip).
+		{name: "DELETE 400 is not checked", method: "DELETE", path: "/deep-400-over", body: deepOver},
+		{name: "POST text/plain is not checked", method: "POST", path: "/plain-over", body: overLimit},
+		// Security case: a 303 turns the POST into a GET. The SDK still
+		// decodes the application/json body, so the check must stay.
+		{name: "303 POST to GET json over the limit", method: "POST", path: "/see-other-json", wantErr: true},
+		{name: "303 POST to GET SSE over the limit", method: "POST", path: "/see-other-sse", wantErr: true},
+		{name: "303 POST to GET json at the limit", method: "POST", path: "/see-other-at", body: atLimit},
+		{name: "307 POST to POST json over the limit", method: "POST", path: "/temporary-json", wantErr: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			// A nil Base gives the real base transport.
+			client, ev, err := newHTTPClient(httpClientConfig{Endpoint: hcURL(t, ts.URL), UserAgent: hcUA})
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(client.CloseIdleConnections)
+			rec := &requestRecorder{}
+			data, readErr := hcDo(t, client, rec, tt.method, ts.URL+tt.path)
+
+			if got := ev.blockedErr(); got != nil {
+				t.Errorf("fallback blockedErr() = %v, want nil: the request had a record", got)
+			}
+			if !tt.wantErr {
+				if readErr != nil {
+					t.Fatalf("read body: error = %v, want nil", readErr)
+				}
+				if string(data) != tt.body {
+					t.Errorf("read %d bytes, want the whole body of %d bytes", len(data), len(tt.body))
+				}
+				if got := rec.blockedErr(); got != nil {
+					t.Errorf("record blockedErr() = %v, want nil", got)
+				}
+				if got := rec.lastStatus(); got != tt.status {
+					t.Errorf("record lastStatus() = %d, want %d", got, tt.status)
+				}
+				return
+			}
+
+			if !errors.Is(readErr, errJSONTooComplex) {
+				t.Fatalf("read body: error = %v, want errJSONTooComplex", readErr)
+			}
+			// The chunk that went over the limit never reaches the reader,
+			// so the decoder never gets the whole message.
+			// For a redirect, the message is the body at its Location.
+			final := served[tt.path]
+			if final.location != "" {
+				final = served[final.location]
+			}
+			if len(data) >= len(final.body) {
+				t.Errorf("read %d bytes before the error, want fewer than the %d bytes of the message", len(data), len(final.body))
+			}
+			if got := rec.blockedErr(); !errors.Is(got, errJSONTooComplex) {
+				t.Errorf("record blockedErr() = %v, want errJSONTooComplex", got)
+			}
+			if got := rec.lastStatus(); got != tt.status {
+				t.Errorf("record lastStatus() = %d, want %d", got, tt.status)
+			}
+
+			// The SDK can flatten the error to text. callRecords links it to
+			// the record with a recordedError, and classify finds the blocked
+			// error there.
+			flat := &recordedError{err: errors.New(readErr.Error()), rec: rec}
+			ce := classify(flat, srv, ev, nil)
+			if ce.Kind != KindTooLarge {
+				t.Errorf("classify().Kind = %q, want %q (reason %q)", ce.Kind, KindTooLarge, ce.Reason)
+			}
+			if !errors.Is(ce, errJSONTooComplex) {
+				t.Errorf("errors.Is(classify(), errJSONTooComplex) = false, want true")
+			}
+		})
+	}
+
+	// No regression: a normal JSON-RPC error body of a non-2xx answer passes
+	// the check, so classify still reports the HTTP status.
+	t.Run("small 401 JSON-RPC error classifies as HTTP 401", func(t *testing.T) {
+		t.Parallel()
+		client, ev, err := newHTTPClient(httpClientConfig{Endpoint: hcURL(t, ts.URL), UserAgent: hcUA})
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(client.CloseIdleConnections)
+		rec := &requestRecorder{}
+		if _, err := hcDo(t, client, rec, http.MethodPost, ts.URL+"/unauthorized"); err != nil {
+			t.Fatalf("read body: error = %v, want nil", err)
+		}
+		flat := &recordedError{err: errors.New("Unauthorized"), rec: rec}
+		ce := classify(flat, srv, ev, nil)
+		if ce.Kind != KindHTTP || ce.Status != http.StatusUnauthorized {
+			t.Errorf("classify() = kind %q, status %d, want %q, %d (reason %q)", ce.Kind, ce.Status, KindHTTP, http.StatusUnauthorized, ce.Reason)
+		}
+	})
+
+	t.Run("request without a record blocks into the fallback", func(t *testing.T) {
+		t.Parallel()
+		client, ev, err := newHTTPClient(httpClientConfig{Endpoint: hcURL(t, ts.URL), UserAgent: hcUA})
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(client.CloseIdleConnections)
+		_, readErr := hcDo(t, client, nil, http.MethodGet, ts.URL+"/sse-over")
+		if !errors.Is(readErr, errJSONTooComplex) {
+			t.Fatalf("read body: error = %v, want errJSONTooComplex", readErr)
+		}
+		if got := ev.blockedErr(); !errors.Is(got, errJSONTooComplex) {
+			t.Errorf("fallback blockedErr() = %v, want errJSONTooComplex", got)
+		}
+		ce := classify(errors.New("flattened by the SDK"), srv, ev, nil)
+		if ce.Kind != KindTooLarge {
+			t.Errorf("classify().Kind = %q, want %q (reason %q)", ce.Kind, KindTooLarge, ce.Reason)
+		}
+	})
+}
+
+// TestShapeBodyWrap checks which bodies RoundTrip wraps in a shapeReader, and
+// that Close on the wrapped body closes the real body, also after a shape
+// violation.
+func TestShapeBodyWrap(t *testing.T) {
+	t.Parallel()
+
+	const origin = "http://example.com"
+	overLimit := hcRPCList(maxJSONValues - hcEnvelopeValues + 1)
+
+	tests := []struct {
+		name    string
+		method  string
+		status  int
+		ct      string
+		body    string
+		wrapped bool // the body must be a *shapeReader
+		readErr bool // reading must fail with errJSONTooComplex
+	}{
+		{name: "POST json", method: "POST", status: 200, ct: "application/json", body: `{"jsonrpc":"2.0","id":1,"result":{}}`, wrapped: true},
+		{name: "POST SSE", method: "POST", status: 200, ct: "text/event-stream", body: hcSSEEvent(`{}`), wrapped: true},
+		{name: "GET", method: "GET", status: 200, ct: "text/event-stream", body: hcSSEEvent(`{}`), wrapped: true},
+		{name: "POST text/plain", method: "POST", status: 200, ct: "text/plain", body: "ok"},
+		{name: "POST 500 json", method: "POST", status: 500, ct: "application/json", body: overLimit},
+		{name: "POST json after a violation", method: "POST", status: 200, ct: "application/json", body: overLimit, wrapped: true, readErr: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			realBody := &hcBody{r: strings.NewReader(tt.body)}
+			stub := &hcStub{respond: func(req *http.Request) *http.Response {
+				resp := hcResponse(req, tt.status, "", http.Header{"Content-Type": {tt.ct}})
+				resp.Body = realBody
+				return resp
+			}}
+			client, _, err := hcNew(hcURL(t, origin), nil, stub, hcUA, 0)
+			if err != nil {
+				t.Fatal(err)
+			}
+			ht, ok := client.Transport.(*headerTransport)
+			if !ok {
+				t.Fatalf("client.Transport is %T, want *headerTransport", client.Transport)
+			}
+			rec := &requestRecorder{}
+			req, err := http.NewRequestWithContext(withRecorder(t.Context(), rec), tt.method, origin+"/mcp", nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			resp, err := ht.RoundTrip(req)
+			if err != nil {
+				t.Fatalf("RoundTrip() error = %v", err)
+			}
+
+			switch b := resp.Body.(type) {
+			case *shapeReader:
+				if !tt.wrapped {
+					t.Errorf("body is a *shapeReader, want no shape check")
+				}
+				// The shape check sees only bytes within the size caps.
+				if _, ok := b.rc.(*cappedBody); !ok {
+					t.Errorf("shapeReader wraps %T, want *cappedBody", b.rc)
+				}
+			case *cappedBody:
+				if tt.wrapped {
+					t.Errorf("body is a *cappedBody, want a *shapeReader")
+				}
+			default:
+				t.Errorf("body is %T, want *shapeReader or *cappedBody", resp.Body)
+			}
+
+			data, err := io.ReadAll(resp.Body)
+			if tt.readErr {
+				if !errors.Is(err, errJSONTooComplex) {
+					t.Errorf("read body: error = %v, want errJSONTooComplex", err)
+				}
+				if !strings.HasPrefix(err.Error(), "read response body: ") {
+					t.Errorf("read body: error = %q, want the prefix %q", err, "read response body: ")
+				}
+				if got := rec.blockedErr(); got != err { //nolint:errorlint // identity check: the record must hold the error that Read returned
+					t.Errorf("record blockedErr() = %v, want the read error %v", got, err)
+				}
+			} else {
+				if err != nil {
+					t.Errorf("read body: error = %v, want nil", err)
+				}
+				if string(data) != tt.body {
+					t.Errorf("read %q, want %q", data, tt.body)
+				}
+				if got := rec.blockedErr(); got != nil {
+					t.Errorf("record blockedErr() = %v, want nil", got)
+				}
+			}
+
+			if realBody.closed.Load() {
+				t.Fatal("the real body is closed before Close")
+			}
+			if err := resp.Body.Close(); err != nil {
+				t.Errorf("Close() = %v, want nil", err)
+			}
+			if !realBody.closed.Load() {
+				t.Error("Close on the wrapped body did not close the real body")
+			}
+		})
+	}
+}
+
+// TestNewBaseTransportSettings checks that newBaseTransport with the pinned
+// dialer (issue #102) keeps the settings that it had before.
+func TestNewBaseTransportSettings(t *testing.T) {
+	t.Parallel()
+
+	tr := newBaseTransport(nil)
+	if tr.Proxy == nil {
+		t.Error("Proxy = nil, want proxyFromEnvironment")
+	}
+	if tr.DialContext == nil {
+		t.Error("DialContext = nil, want the pinned dialer")
+	}
+	if tr.TLSHandshakeTimeout != 10*time.Second {
+		t.Errorf("TLSHandshakeTimeout = %v, want 10s", tr.TLSHandshakeTimeout)
+	}
+	if tr.ResponseHeaderTimeout != 0 {
+		t.Errorf("ResponseHeaderTimeout = %v, want 0: an SSE server can wait long before the first byte", tr.ResponseHeaderTimeout)
+	}
+	if tr.TLSClientConfig == nil || tr.TLSClientConfig.MinVersion != tls.VersionTLS12 {
+		t.Errorf("TLSClientConfig = %+v, want MinVersion TLS 1.2", tr.TLSClientConfig)
+	}
+	if !tr.ForceAttemptHTTP2 {
+		t.Error("ForceAttemptHTTP2 = false, want true")
+	}
+	if tr.MaxIdleConns != 4 {
+		t.Errorf("MaxIdleConns = %d, want 4", tr.MaxIdleConns)
+	}
+	if tr.IdleConnTimeout != 30*time.Second {
+		t.Errorf("IdleConnTimeout = %v, want 30s", tr.IdleConnTimeout)
+	}
+	if tr.MaxResponseHeaderBytes != 64<<10 {
+		t.Errorf("MaxResponseHeaderBytes = %d, want %d", tr.MaxResponseHeaderBytes, 64<<10)
+	}
+	if tr.DisableCompression {
+		t.Error("DisableCompression = true, want false: net/http must decompress, so the size cap counts decoded bytes")
+	}
+
+	// Each transport has its own TLS config, so no caller can change the
+	// config of another one.
+	if other := newBaseTransport(nil); other.TLSClientConfig == tr.TLSClientConfig {
+		t.Error("two transports share one TLSClientConfig, want one each")
+	}
+
+	// Go never uses a proxy for a loopback address.
+	req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, "http://127.0.0.1/", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if proxy, err := tr.Proxy(req); proxy != nil || err != nil {
+		t.Errorf("Proxy(127.0.0.1) = %v, %v; want nil, nil", proxy, err)
+	}
+
+	// The dialer of a nil lookup dials an IP literal as is.
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = ln.Close() })
+	conn, err := tr.DialContext(t.Context(), "tcp", ln.Addr().String())
+	if err != nil {
+		t.Fatalf("DialContext(%s) error = %v", ln.Addr(), err)
+	}
+	_ = conn.Close()
 }

@@ -61,16 +61,16 @@ type leakyError struct {
 func (e *leakyError) Error() string { return e.text }
 func (e *leakyError) Unwrap() error { return e.err }
 
-// fakeEvents is a transportEvents with fixed answers.
+// fakeEvents is a transportEvents with fixed answers. stateFor gives the same
+// status and blocked error for every err.
 type fakeEvents struct {
 	status    int
 	blocked   error
 	sessionUp bool
 }
 
-func (f *fakeEvents) lastStatus() int   { return f.status }
-func (f *fakeEvents) blockedErr() error { return f.blocked }
-func (f *fakeEvents) connected() bool   { return f.sessionUp }
+func (f *fakeEvents) stateFor(error) (int, error) { return f.status, f.blocked }
+func (f *fakeEvents) connected() bool             { return f.sessionUp }
 
 // fakeNetError is a net.Error with a fixed answer for Timeout.
 type fakeNetError struct {
@@ -81,6 +81,21 @@ type fakeNetError struct {
 func (e *fakeNetError) Error() string   { return e.text }
 func (e *fakeNetError) Timeout() bool   { return e.timeout }
 func (e *fakeNetError) Temporary() bool { return false }
+
+// jsonTooComplexReason is the fixed reason for errJSONTooComplex. It is
+// written out here, not read from blockedKinds, so a change of the text
+// fails a test.
+const jsonTooComplexReason = "response JSON too large: too deep, too many values or a too long string"
+
+// wantExactReason returns a TestClassify check that Reason is exactly want.
+func wantExactReason(want string) func(t *testing.T, ce *ConnectError) {
+	return func(t *testing.T, ce *ConnectError) {
+		t.Helper()
+		if ce.Reason != want {
+			t.Errorf("Reason = %q, want %q", ce.Reason, want)
+		}
+	}
+}
 
 // urlErr wraps err in a *url.Error that holds the raw URL, as net/http does.
 func urlErr(op string, err error) error {
@@ -381,6 +396,58 @@ func TestClassify(t *testing.T) {
 			wantKind:   KindTooLarge,
 			wantReason: []string{"too large"},
 			wantIs:     []error{errBodyTooLarge},
+		},
+		// errJSONTooComplex (issue #101) is a size limit too, so it gets
+		// KindTooLarge. The reason is the fixed text from blockedKinds: the
+		// detail that a wrapper adds (here "more than 5 values") never
+		// reaches the reason.
+		{
+			name:     "json too complex bare",
+			err:      errJSONTooComplex,
+			wantKind: KindTooLarge,
+			wantIs:   []error{errJSONTooComplex},
+			notIs:    []error{errBodyTooLarge},
+			check:    wantExactReason(jsonTooComplexReason),
+		},
+		{
+			name:     "json too complex wrapped with detail",
+			err:      fmt.Errorf("%w (more than 5 values)", errJSONTooComplex),
+			wantKind: KindTooLarge,
+			wantIs:   []error{errJSONTooComplex},
+			noReason: []string{"more than 5"},
+			check:    wantExactReason(jsonTooComplexReason),
+		},
+		{
+			name:     "json too complex inside a url error",
+			err:      urlErr("Post", fmt.Errorf("%w (more than 5 values)", errJSONTooComplex)),
+			wantKind: KindTooLarge,
+			wantIs:   []error{errJSONTooComplex},
+			check:    wantExactReason(jsonTooComplexReason),
+		},
+		{
+			name:     "json too complex wins over http status",
+			err:      fmt.Errorf("%w (more than 5 values)", errJSONTooComplex),
+			ev:       &fakeEvents{status: http.StatusInternalServerError},
+			wantKind: KindTooLarge,
+			wantIs:   []error{errJSONTooComplex},
+			check:    wantExactReason(jsonTooComplexReason),
+		},
+		{
+			name:     "ev blocked json too complex wins over flattened text",
+			err:      errors.New("client is closing: unexpected EOF"),
+			ev:       &fakeEvents{blocked: fmt.Errorf("%w (more than 5 values)", errJSONTooComplex)},
+			wantKind: KindTooLarge,
+			wantIs:   []error{errJSONTooComplex},
+			check:    wantExactReason(jsonTooComplexReason),
+		},
+		{
+			name:     "ev blocked json too complex keeps the deadline of err",
+			err:      fmt.Errorf("calling tools/list: %w", context.DeadlineExceeded),
+			ev:       &fakeEvents{blocked: errJSONTooComplex},
+			wantKind: KindTooLarge,
+			wantIs:   []error{errJSONTooComplex, context.DeadlineExceeded},
+			noReason: []string{"timed out"},
+			check:    wantExactReason(jsonTooComplexReason),
 		},
 		{
 			name:       "sentinel wins over http status",
@@ -1538,5 +1605,147 @@ func TestClassifyShortUserName(t *testing.T) {
 		if strings.Contains(ce.Error(), not) {
 			t.Errorf("Error() = %q, must not contain %q", ce.Error(), not)
 		}
+	}
+}
+
+// TestSentHeaders checks the keys and the Basic flag that sentHeaders gives,
+// and that sentHeaderNames keeps its old output: the same keys, plus
+// "Authorization (from URL user info)" at the end when basic is true. The
+// result never holds a header value or a password.
+func TestSentHeaders(t *testing.T) {
+	t.Parallel()
+
+	const (
+		plainURL    = "http://mcp.example.com/mcp"
+		userinfoURL = "http://user:pa55-SECRET@mcp.example.com/mcp" //nolint:gosec // G101: fake test credentials
+		password    = "pa55-SECRET"
+		value       = "VAL-SECRET-1"
+		fromURL     = "Authorization (from URL user info)"
+	)
+	tests := []struct {
+		name    string
+		rawURL  string
+		headers map[string]string // nil gives a nil SecretMap
+		// wantNames and wantBasic are the results of sentHeaders.
+		wantNames []string
+		wantBasic bool
+		// wantList is the result of sentHeaderNames.
+		wantList []string
+	}{
+		{name: "no headers, nil map", rawURL: plainURL},
+		{name: "no headers, empty map", rawURL: plainURL, headers: map[string]string{}},
+		{
+			name: "one header", rawURL: plainURL,
+			headers:   map[string]string{"X-Api-Key": value},
+			wantNames: []string{"X-Api-Key"},
+			wantList:  []string{"X-Api-Key"},
+		},
+		{
+			name: "two headers in sorted key order", rawURL: plainURL,
+			headers:   map[string]string{"X-Api-Key": value, "Authorization": "Bearer " + value},
+			wantNames: []string{"Authorization", "X-Api-Key"},
+			wantList:  []string{"Authorization", "X-Api-Key"},
+		},
+		// Keys that differ only in case go out as one header (buildHeader).
+		// sentHeaders names it once, in the form of the first key in sorted
+		// byte order: upper case sorts before lower case.
+		{
+			name: "mixed-case duplicates are named once", rawURL: plainURL,
+			headers:   map[string]string{"x-api-key": value, "X-Api-Key": value, "X-API-KEY": value},
+			wantNames: []string{"X-API-KEY"},
+			wantList:  []string{"X-API-KEY"},
+		},
+		{
+			name: "mixed-case duplicates among other keys", rawURL: plainURL,
+			headers:   map[string]string{"accept-language": "en", "x-key": value, "X-Key": value, "Accept-Language": "en"},
+			wantNames: []string{"Accept-Language", "X-Key"},
+			wantList:  []string{"Accept-Language", "X-Key"},
+		},
+		{
+			name: "user info only", rawURL: userinfoURL,
+			wantBasic: true,
+			wantList:  []string{fromURL},
+		},
+		{
+			name: "user name only", rawURL: "http://user@mcp.example.com/mcp",
+			wantBasic: true,
+			wantList:  []string{fromURL},
+		},
+		{
+			name: "user info and a header", rawURL: userinfoURL,
+			headers:   map[string]string{"X-Api-Key": value},
+			wantNames: []string{"X-Api-Key"},
+			wantBasic: true,
+			wantList:  []string{"X-Api-Key", fromURL},
+		},
+		{
+			name: "user info and a config Authorization", rawURL: userinfoURL,
+			headers:   map[string]string{"Authorization": "Bearer " + value},
+			wantNames: []string{"Authorization"},
+			wantList:  []string{"Authorization"},
+		},
+		// An empty config Authorization counts as absent: the Basic header
+		// from the user info replaces it, so its key is not named.
+		{
+			name: "user info, empty Authorization and a header", rawURL: userinfoURL,
+			headers:   map[string]string{"Authorization": "", "X-Api-Key": value},
+			wantNames: []string{"X-Api-Key"},
+			wantBasic: true,
+			wantList:  []string{"X-Api-Key", fromURL},
+		},
+		// "authorization" sorts after "Authorization", so its non-empty value
+		// wins and no Basic header goes out.
+		{
+			name: "user info and mixed-case Authorization, last non-empty", rawURL: userinfoURL,
+			headers:   map[string]string{"Authorization": "", "authorization": "Bearer " + value},
+			wantNames: []string{"Authorization"},
+			wantList:  []string{"Authorization"},
+		},
+		// The client cannot parse such a URL, so there is no user info.
+		{
+			name: "unparsable URL", rawURL: "http://user:pa55-SECRET@[bad/mcp",
+			headers:   map[string]string{"X-Api-Key": value},
+			wantNames: []string{"X-Api-Key"},
+			wantList:  []string{"X-Api-Key"},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			var cfg discover.SecretMap
+			if tt.headers != nil {
+				cfg = make(discover.SecretMap, len(tt.headers))
+				for key, v := range tt.headers {
+					cfg[key] = discover.NewSecret(v)
+				}
+			}
+			srv := discover.Server{
+				Name:      "remote",
+				Transport: discover.TransportHTTP,
+				URL:       discover.NewURL(tt.rawURL),
+				Headers:   cfg,
+			}
+
+			names, basic := sentHeaders(srv)
+			if !slices.Equal(names, tt.wantNames) || basic != tt.wantBasic {
+				t.Errorf("sentHeaders() = %q, %t; want %q, %t", names, basic, tt.wantNames, tt.wantBasic)
+			}
+			list := sentHeaderNames(srv)
+			if !slices.Equal(list, tt.wantList) {
+				t.Errorf("sentHeaderNames() = %q, want %q", list, tt.wantList)
+			}
+			// A second call gives the same result: sentHeaderNames must not
+			// change the slice of a later sentHeaders call.
+			if again, againBasic := sentHeaders(srv); !slices.Equal(again, names) || againBasic != basic {
+				t.Errorf("second sentHeaders() = %q, %t; want %q, %t", again, againBasic, names, basic)
+			}
+
+			text := fmt.Sprintf("%#v %#v", names, list)
+			for _, secret := range []string{value, password, "Bearer"} {
+				if strings.Contains(text, secret) {
+					t.Errorf("sentHeaders output %s holds the secret %q", text, secret)
+				}
+			}
+		})
 	}
 }

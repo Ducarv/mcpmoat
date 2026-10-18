@@ -74,8 +74,11 @@ func New(opts SDKOptions) *SDKInspector {
 //   - runs the child in its absolute Dir, or else in a new, empty directory
 //     below the run root (workDir), and removes that directory at the end;
 //   - refuses every request of the server except ping (refuseServerRequests);
-//   - lists with listAll, and fails with KindTooLarge when the handshake and
-//     the lists go over maxRawBytes (rawLimit).
+//   - lists with listInto (tools, prompts, resources and resource
+//     templates), and fails with KindTooLarge when the handshake and the
+//     lists go over maxRawBytes (rawLimit), or when one JSON message from
+//     the server goes over a shape limit (errJSONTooComplex: too deeply
+//     nested, too many values or a too long string).
 //
 // Stop guarantee: when Inspect returns, on success and on every error, the
 // child was stopped and reaped (see stdioProcess.stop): stdin closed, up to
@@ -154,8 +157,19 @@ func (i *SDKInspector) inspectStdio(ctx context.Context, s discover.Server) (Res
 	// formats some errors with %v, which drops the context error from the
 	// chain. When ctx has ended, fail puts its error first, so the kind is
 	// KindTimeout and errors.Is(err, context.DeadlineExceeded) works.
+	//
+	// When the stdout of the server went over a JSON shape limit (see
+	// stdioProcess.transport), fail puts errJSONTooComplex first, so that the
+	// kind is KindTooLarge. The SDK reports the error of its reader only as a
+	// generic "connection closed" error, so errJSONTooComplex is not in the
+	// chain of err, and only proc knows about it. fail does this only when
+	// ctx has not ended: an ended ctx still wins, as for the raw size limit.
 	fail := func(err error) (Result, error) {
-		if ctxErr := ctx.Err(); ctxErr != nil && !errors.Is(err, ctxErr) {
+		ctxErr := ctx.Err()
+		if ctxErr == nil && proc.shapeExceeded() && !errors.Is(err, errJSONTooComplex) {
+			err = fmt.Errorf("%w: %w", errJSONTooComplex, err)
+		}
+		if ctxErr != nil && !errors.Is(err, ctxErr) {
 			err = fmt.Errorf("%w: %w", ctxErr, err)
 		}
 		return Result{}, stdioFailure(s, err, secrets, sizes.exceeded())
@@ -180,8 +194,7 @@ func (i *SDKInspector) inspectStdio(ctx context.Context, s discover.Server) (Res
 		return fail(errors.New("no initialize result"))
 	}
 	result := resultFromInit(initRes)
-	result.Tools, result.Prompts, result.Resources, err = listAll(ctx, cs, initRes.Capabilities, raw)
-	if err != nil {
+	if err := listInto(ctx, cs, initRes.Capabilities, raw, &result); err != nil {
 		return fail(err)
 	}
 	return result, nil
@@ -240,12 +253,28 @@ func envSecrets(env discover.SecretMap) []string {
 
 // stdioFailure turns err, from the MCP session of a stdio server, into a
 // *ConnectError. classify gives KindTimeout for a context error and
-// KindProtocol for the rest, with the secrets removed and the text cut. When
-// the server went over the raw size limit (tooLarge, or errRawTooLarge in
-// the chain), a KindProtocol error becomes KindTooLarge.
+// KindProtocol for the rest, with the secrets removed and the text cut.
+// Then:
+//
+//   - When errJSONTooComplex is in the chain (the server sent a JSON message
+//     over a shape limit), the error becomes KindTooLarge with the fixed
+//     text of errJSONTooComplex as the reason. This also replaces a
+//     KindTooLarge reason that classify gives, so that the reason never
+//     holds the wrapped detail.
+//   - Else, when the server went over the raw size limit (tooLarge, or
+//     errRawTooLarge in the chain), a KindProtocol error becomes
+//     KindTooLarge.
+//
+// A KindTimeout error stays as it is: an ended ctx wins (see fail in
+// inspectStdio).
 func stdioFailure(s discover.Server, err error, secrets []string, tooLarge bool) *ConnectError {
 	ce := classify(err, s, nil, secrets)
-	if ce.Kind == KindProtocol && (tooLarge || errors.Is(err, errRawTooLarge)) {
+	switch {
+	case (ce.Kind == KindProtocol || ce.Kind == KindTooLarge) && errors.Is(err, errJSONTooComplex):
+		ce.Kind = KindTooLarge
+		ce.Reason = errJSONTooComplex.Error()
+		ce.err = errJSONTooComplex
+	case ce.Kind == KindProtocol && (tooLarge || errors.Is(err, errRawTooLarge)):
 		ce.Kind = KindTooLarge
 		ce.Reason = errRawTooLarge.Error()
 		ce.err = errRawTooLarge

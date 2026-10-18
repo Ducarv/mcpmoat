@@ -25,7 +25,12 @@ func sampleResult() inspect.Result {
 		ServerVersion:   "1.0.0",
 		Instructions:    "Use the tools.",
 		Tools: []inspect.Tool{
-			{Name: "read_file", Description: "Reads a file.", InputSchema: json.RawMessage(`{"type":"object"}`)},
+			{
+				Name:        "read_file",
+				Description: "Reads a file.",
+				InputSchema: json.RawMessage(`{"type":"object"}`),
+				Annotations: &inspect.ToolAnnotations{Title: "Read file", ReadOnlyHint: &readOnly},
+			},
 			{Name: "write_file", Description: "Writes a file."},
 		},
 		Prompts: []inspect.Prompt{
@@ -34,8 +39,19 @@ func sampleResult() inspect.Result {
 		Resources: []inspect.Resource{
 			{URI: "file:///tmp/a.txt", Name: "a", MIMEType: "text/plain"},
 		},
+		ResourceTemplates: []inspect.ResourceTemplate{
+			{URITemplate: "file:///tmp/{name}", Name: "tmp", MIMEType: "text/plain"},
+		},
+		Warnings: []inspect.Warning{
+			{Kind: inspect.WarnCleartextSecrets, HeaderKeys: []string{"Authorization", "X-Api-Key"}},
+			{Kind: inspect.WarnCleartextSecrets, URLUserInfo: true},
+		},
 	}
 }
+
+// readOnly is the value of the ReadOnlyHint in sampleResult. Tests must not
+// change it.
+var readOnly = true
 
 func server(name string) discover.Server {
 	return discover.Server{Name: name, Transport: discover.TransportStdio}
@@ -66,6 +82,18 @@ func TestFakeInspect(t *testing.T) {
 			results:    map[string]inspect.Result{"a": {ServerName: "only-name"}},
 			server:     "a",
 			wantResult: inspect.Result{ServerName: "only-name"},
+		},
+		{
+			name: "result with empty slices stays empty, not nil",
+			results: map[string]inspect.Result{"a": {
+				ResourceTemplates: []inspect.ResourceTemplate{},
+				Warnings:          []inspect.Warning{{Kind: inspect.WarnCleartextSecrets, HeaderKeys: []string{}}},
+			}},
+			server: "a",
+			wantResult: inspect.Result{
+				ResourceTemplates: []inspect.ResourceTemplate{},
+				Warnings:          []inspect.Warning{{Kind: inspect.WarnCleartextSecrets, HeaderKeys: []string{}}},
+			},
 		},
 		{
 			name:    "error by name",
@@ -242,31 +270,61 @@ func TestFakeCalls(t *testing.T) {
 func TestFakeInspectClonesSlices(t *testing.T) {
 	t.Parallel()
 
-	f := &inspecttest.Fake{Results: map[string]inspect.Result{"a": sampleResult()}}
-
-	got, err := f.Inspect(t.Context(), server("a"))
-	if err != nil {
-		t.Fatalf("Inspect() error = %v", err)
+	// Each case changes the returned Result in one way. The change must not
+	// reach the entry in Results or the Result of the next call.
+	tests := []struct {
+		name   string
+		change func(r *inspect.Result)
+	}{
+		{name: "tool element", change: func(r *inspect.Result) { r.Tools[0].Name = "changed" }},
+		{name: "tool append", change: func(r *inspect.Result) { r.Tools = append(r.Tools, inspect.Tool{Name: "extra"}) }},
+		{name: "prompt element", change: func(r *inspect.Result) { r.Prompts[0].Name = "changed" }},
+		{name: "prompt append", change: func(r *inspect.Result) { r.Prompts = append(r.Prompts, inspect.Prompt{Name: "extra"}) }},
+		{name: "resource element", change: func(r *inspect.Result) { r.Resources[0].URI = "changed" }},
+		{name: "resource append", change: func(r *inspect.Result) {
+			r.Resources = append(r.Resources, inspect.Resource{URI: "extra"})
+		}},
+		{name: "resource template element", change: func(r *inspect.Result) {
+			r.ResourceTemplates[0].URITemplate = "changed"
+		}},
+		{name: "resource template append", change: func(r *inspect.Result) {
+			r.ResourceTemplates = append(r.ResourceTemplates, inspect.ResourceTemplate{URITemplate: "extra"})
+		}},
+		{name: "warning kind", change: func(r *inspect.Result) { r.Warnings[0].Kind = "changed" }},
+		{name: "warning user info", change: func(r *inspect.Result) { r.Warnings[1].URLUserInfo = false }},
+		{name: "warning header keys replaced", change: func(r *inspect.Result) { r.Warnings[0].HeaderKeys = nil }},
+		{name: "warning header key element", change: func(r *inspect.Result) { r.Warnings[0].HeaderKeys[0] = "changed" }},
+		{name: "warning header key append", change: func(r *inspect.Result) {
+			r.Warnings[0].HeaderKeys = append(r.Warnings[0].HeaderKeys, "Extra")
+		}},
+		{name: "warning append", change: func(r *inspect.Result) {
+			r.Warnings = append(r.Warnings, inspect.Warning{Kind: "extra"})
+		}},
 	}
 
-	// Change elements in place and append to each top-level slice.
-	got.Tools[0].Name = "changed"
-	got.Tools = append(got.Tools, inspect.Tool{Name: "extra"})
-	got.Prompts[0].Name = "changed"
-	got.Prompts = append(got.Prompts, inspect.Prompt{Name: "extra"})
-	got.Resources[0].URI = "changed"
-	got.Resources = append(got.Resources, inspect.Resource{URI: "extra"})
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
 
-	if entry := f.Results["a"]; !reflect.DeepEqual(entry, sampleResult()) {
-		t.Errorf("Results[\"a\"] after change of returned Result = %+v, want %+v", entry, sampleResult())
-	}
+			f := &inspecttest.Fake{Results: map[string]inspect.Result{"a": sampleResult()}}
 
-	again, err := f.Inspect(t.Context(), server("a"))
-	if err != nil {
-		t.Fatalf("second Inspect() error = %v", err)
-	}
-	if !reflect.DeepEqual(again, sampleResult()) {
-		t.Errorf("second Inspect() = %+v, want %+v", again, sampleResult())
+			got, err := f.Inspect(t.Context(), server("a"))
+			if err != nil {
+				t.Fatalf("Inspect() error = %v", err)
+			}
+			tt.change(&got)
+
+			if entry := f.Results["a"]; !reflect.DeepEqual(entry, sampleResult()) {
+				t.Errorf("Results[\"a\"] after change of returned Result = %+v, want %+v", entry, sampleResult())
+			}
+			again, err := f.Inspect(t.Context(), server("a"))
+			if err != nil {
+				t.Fatalf("second Inspect() error = %v", err)
+			}
+			if !reflect.DeepEqual(again, sampleResult()) {
+				t.Errorf("second Inspect() = %+v, want %+v", again, sampleResult())
+			}
+		})
 	}
 }
 
