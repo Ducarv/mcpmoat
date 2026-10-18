@@ -11,8 +11,8 @@ import (
 	"github.com/Ducarv/mcpmoat/internal/discover/discovertest"
 )
 
-// The helpers in this file have the prefix "sc" (stdioCommand), so they do
-// not clash with helpers in other test files of the package.
+// The helpers that only this file uses have the prefix "sc" (stdioCommand).
+// helpers_test.go holds the helpers that several test files share.
 
 // scServer returns a trusted global stdio server with the given command and
 // args. Tests change the other fields when they need to.
@@ -33,9 +33,9 @@ func scServer(command string, args ...string) discover.Server {
 // lookPath does.
 func scBin(t *testing.T, dir, name string) string {
 	t.Helper()
-	lpMkdir(t, dir)
+	mustMkdir(t, dir)
 	path := dir + "/" + name
-	lpWriteFile(t, path, 0o755)
+	mustWriteFile(t, path, 0o755)
 	return path
 }
 
@@ -144,10 +144,12 @@ func TestStdioCommand(t *testing.T) {
 				tool := scBin(t, bin, "tool")
 				s := scServer("tool", "serve")
 				s.Env = secrets(t, map[string]string{"PATH": bin})
+				fallback := t.TempDir()
 				return stdioCase{
 					server:   s,
-					opts:     stdioOptions{FallbackDir: t.TempDir()},
+					opts:     stdioOptions{FallbackDir: fallback},
 					wantPath: tool,
+					wantDir:  fallback,
 					wantEnv:  []string{"PATH=" + bin},
 				}
 			},
@@ -157,10 +159,12 @@ func TestStdioCommand(t *testing.T) {
 			setup: func(t *testing.T) stdioCase {
 				bin := t.TempDir() + "/bin"
 				tool := scBin(t, bin, "tool")
+				fallback := t.TempDir()
 				return stdioCase{
 					server:   scServer("tool"),
-					opts:     stdioOptions{Environ: []string{"PATH=" + bin}, FallbackDir: t.TempDir()},
+					opts:     stdioOptions{Environ: []string{"PATH=" + bin}, FallbackDir: fallback},
 					wantPath: tool,
+					wantDir:  fallback,
 					wantEnv:  []string{"PATH=" + bin},
 				}
 			},
@@ -175,10 +179,12 @@ func TestStdioCommand(t *testing.T) {
 				configTool := scBin(t, configBin, "tool")
 				s := scServer("tool")
 				s.Env = secrets(t, map[string]string{"PATH": configBin})
+				fallback := t.TempDir()
 				return stdioCase{
 					server:   s,
-					opts:     stdioOptions{Environ: []string{"PATH=" + parentBin}, FallbackDir: t.TempDir()},
+					opts:     stdioOptions{Environ: []string{"PATH=" + parentBin}, FallbackDir: fallback},
 					wantPath: configTool,
+					wantDir:  fallback,
 					wantEnv:  []string{"PATH=" + configBin},
 				}
 			},
@@ -373,9 +379,6 @@ func TestStdioCommand(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			c := tt.setup(t)
-			if c.wantDir == "" {
-				c.wantDir = c.opts.FallbackDir
-			}
 			cmd, err := stdioCommand(c.server, c.opts)
 			if err != nil {
 				t.Fatalf("stdioCommand() error = %v, want nil", err)
@@ -758,7 +761,7 @@ func TestPathFromEnv(t *testing.T) {
 		{name: "PATH with no = is not a PATH entry", env: []string{"PATH"}, want: ""},
 		{name: "lowercase path is not PATH", env: []string{"path=/x"}, want: ""},
 		{name: "longer name is not PATH", env: []string{"PATHX=/x", "MYPATH=/y"}, want: ""},
-		{name: "last PATH entry wins", env: []string{"PATH=/first", "PATH=/last"}, want: "/last"},
+		{name: "first PATH entry wins", env: []string{"PATH=/first", "PATH=/last"}, want: "/first"},
 	}
 
 	for _, tt := range tests {

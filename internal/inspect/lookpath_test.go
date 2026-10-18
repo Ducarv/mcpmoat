@@ -4,46 +4,8 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
-	"runtime"
 	"testing"
 )
-
-// skipOnWindows skips the test on Windows. Starting stdio servers is
-// Unix only, and Windows is a non-goal (PRD section 2.2).
-func skipOnWindows(t *testing.T) {
-	t.Helper()
-	if runtime.GOOS == "windows" {
-		t.Skip("starting stdio servers is Unix only; Windows is a non-goal (PRD 2.2)")
-	}
-}
-
-// lpWriteFile creates a file at path with the given mode. It sets the mode
-// with os.Chmod after the write, so the umask does not change it.
-func lpWriteFile(t *testing.T, path string, mode os.FileMode) {
-	t.Helper()
-	if err := os.WriteFile(path, []byte("#!/bin/sh\n"), mode); err != nil {
-		t.Fatalf("os.WriteFile(%q) error = %v", path, err)
-	}
-	if err := os.Chmod(path, mode); err != nil {
-		t.Fatalf("os.Chmod(%q) error = %v", path, err)
-	}
-}
-
-// lpMkdir creates the directory dir and its parents.
-func lpMkdir(t *testing.T, dir string) {
-	t.Helper()
-	if err := os.MkdirAll(dir, 0o750); err != nil {
-		t.Fatalf("os.MkdirAll(%q) error = %v", dir, err)
-	}
-}
-
-// lpSymlink creates a symlink at link that points to target.
-func lpSymlink(t *testing.T, target, link string) {
-	t.Helper()
-	if err := os.Symlink(target, link); err != nil {
-		t.Fatalf("os.Symlink(%q, %q) error = %v", target, link, err)
-	}
-}
 
 // TestLookPath checks how lookPath searches a PATH-style list. Each case
 // builds its own directory tree under t.TempDir(). The cases cover the
@@ -70,9 +32,9 @@ func TestLookPath(t *testing.T) {
 			file: "tool",
 			setup: func(t *testing.T, root string) (string, string) {
 				a, b := root+"/a", root+"/b"
-				lpMkdir(t, a)
-				lpMkdir(t, b)
-				lpWriteFile(t, a+"/tool", 0o755)
+				mustMkdir(t, a)
+				mustMkdir(t, b)
+				mustWriteFile(t, a+"/tool", 0o755)
 				return a + sep + b, a + "/tool"
 			},
 		},
@@ -81,11 +43,11 @@ func TestLookPath(t *testing.T) {
 			file: "tool",
 			setup: func(t *testing.T, root string) (string, string) {
 				a, b, c := root+"/a", root+"/b", root+"/c"
-				lpMkdir(t, a)
-				lpMkdir(t, b)
-				lpMkdir(t, c)
-				lpWriteFile(t, a+"/other", 0o755)
-				lpWriteFile(t, c+"/tool", 0o755)
+				mustMkdir(t, a)
+				mustMkdir(t, b)
+				mustMkdir(t, c)
+				mustWriteFile(t, a+"/other", 0o755)
+				mustWriteFile(t, c+"/tool", 0o755)
 				return a + sep + b + sep + c, c + "/tool"
 			},
 		},
@@ -94,10 +56,10 @@ func TestLookPath(t *testing.T) {
 			file: "tool",
 			setup: func(t *testing.T, root string) (string, string) {
 				a, b := root+"/a", root+"/b"
-				lpMkdir(t, a)
-				lpMkdir(t, b)
-				lpWriteFile(t, a+"/tool", 0o755)
-				lpWriteFile(t, b+"/tool", 0o755)
+				mustMkdir(t, a)
+				mustMkdir(t, b)
+				mustWriteFile(t, a+"/tool", 0o755)
+				mustWriteFile(t, b+"/tool", 0o755)
 				return a + sep + b, a + "/tool"
 			},
 		},
@@ -106,8 +68,8 @@ func TestLookPath(t *testing.T) {
 			file: "tool",
 			setup: func(t *testing.T, root string) (string, string) {
 				b := root + "/b"
-				lpMkdir(t, b)
-				lpWriteFile(t, b+"/tool", 0o755)
+				mustMkdir(t, b)
+				mustWriteFile(t, b+"/tool", 0o755)
 				return root + "/missing" + sep + b, b + "/tool"
 			},
 		},
@@ -116,8 +78,8 @@ func TestLookPath(t *testing.T) {
 			file: "tool",
 			setup: func(t *testing.T, root string) (string, string) {
 				a := root + "/a"
-				lpMkdir(t, a)
-				lpWriteFile(t, a+"/tool", 0o755)
+				mustMkdir(t, a)
+				mustWriteFile(t, a+"/tool", 0o755)
 				return sep + sep + a, a + "/tool"
 			},
 		},
@@ -147,8 +109,8 @@ func TestLookPath(t *testing.T) {
 			file: "tool",
 			setup: func(t *testing.T, root string) (string, string) {
 				a := root + "/a"
-				lpMkdir(t, a)
-				lpWriteFile(t, a+"/tool", 0o755)
+				mustMkdir(t, a)
+				mustWriteFile(t, a+"/tool", 0o755)
 				return "." + sep + "bin" + sep + a, a + "/tool"
 			},
 		},
@@ -160,8 +122,8 @@ func TestLookPath(t *testing.T) {
 				// real executable. This proves the skip without a chdir,
 				// which is not allowed in parallel tests.
 				a := root + "/a"
-				lpMkdir(t, a)
-				lpWriteFile(t, a+"/tool", 0o755)
+				mustMkdir(t, a)
+				mustWriteFile(t, a+"/tool", 0o755)
 				cwd, err := os.Getwd()
 				if err != nil {
 					t.Fatalf("os.Getwd() error = %v", err)
@@ -195,9 +157,9 @@ func TestLookPath(t *testing.T) {
 				// filepath.Join would clean "a/../b" to "b". lookPath keeps
 				// the directory text exactly as configured.
 				a, b := root+"/a", root+"/b"
-				lpMkdir(t, a)
-				lpMkdir(t, b)
-				lpWriteFile(t, b+"/tool", 0o755)
+				mustMkdir(t, a)
+				mustMkdir(t, b)
+				mustWriteFile(t, b+"/tool", 0o755)
 				dir := a + "/../b"
 				return dir, dir + "/tool"
 			},
@@ -207,9 +169,9 @@ func TestLookPath(t *testing.T) {
 			file: "tool",
 			setup: func(t *testing.T, root string) (string, string) {
 				a, b := root+"/a", root+"/b"
-				lpMkdir(t, a+"/tool")
-				lpMkdir(t, b)
-				lpWriteFile(t, b+"/tool", 0o755)
+				mustMkdir(t, a+"/tool")
+				mustMkdir(t, b)
+				mustWriteFile(t, b+"/tool", 0o755)
 				return a + sep + b, b + "/tool"
 			},
 		},
@@ -218,7 +180,7 @@ func TestLookPath(t *testing.T) {
 			file: "tool",
 			setup: func(t *testing.T, root string) (string, string) {
 				a := root + "/a"
-				lpMkdir(t, a+"/tool")
+				mustMkdir(t, a+"/tool")
 				return a, ""
 			},
 		},
@@ -227,10 +189,10 @@ func TestLookPath(t *testing.T) {
 			file: "tool",
 			setup: func(t *testing.T, root string) (string, string) {
 				a, b := root+"/a", root+"/b"
-				lpMkdir(t, a)
-				lpMkdir(t, b)
-				lpWriteFile(t, a+"/tool", 0o644)
-				lpWriteFile(t, b+"/tool", 0o755)
+				mustMkdir(t, a)
+				mustMkdir(t, b)
+				mustWriteFile(t, a+"/tool", 0o644)
+				mustWriteFile(t, b+"/tool", 0o755)
 				return a + sep + b, b + "/tool"
 			},
 		},
@@ -239,8 +201,8 @@ func TestLookPath(t *testing.T) {
 			file: "tool",
 			setup: func(t *testing.T, root string) (string, string) {
 				a := root + "/a"
-				lpMkdir(t, a)
-				lpWriteFile(t, a+"/tool", 0o644)
+				mustMkdir(t, a)
+				mustWriteFile(t, a+"/tool", 0o644)
 				return a, ""
 			},
 		},
@@ -249,8 +211,8 @@ func TestLookPath(t *testing.T) {
 			file: "tool",
 			setup: func(t *testing.T, root string) (string, string) {
 				a := root + "/a"
-				lpMkdir(t, a)
-				lpWriteFile(t, a+"/tool", 0o601)
+				mustMkdir(t, a)
+				mustWriteFile(t, a+"/tool", 0o601)
 				return a, a + "/tool"
 			},
 		},
@@ -259,10 +221,10 @@ func TestLookPath(t *testing.T) {
 			file: "tool",
 			setup: func(t *testing.T, root string) (string, string) {
 				realDir, a := root+"/real", root+"/a"
-				lpMkdir(t, realDir)
-				lpMkdir(t, a)
-				lpWriteFile(t, realDir+"/target", 0o755)
-				lpSymlink(t, realDir+"/target", a+"/tool")
+				mustMkdir(t, realDir)
+				mustMkdir(t, a)
+				mustWriteFile(t, realDir+"/target", 0o755)
+				mustSymlink(t, realDir+"/target", a+"/tool")
 				return a, a + "/tool"
 			},
 		},
@@ -271,10 +233,10 @@ func TestLookPath(t *testing.T) {
 			file: "tool",
 			setup: func(t *testing.T, root string) (string, string) {
 				a, b := root+"/a", root+"/b"
-				lpMkdir(t, a)
-				lpMkdir(t, b)
-				lpSymlink(t, root+"/nowhere", a+"/tool")
-				lpWriteFile(t, b+"/tool", 0o755)
+				mustMkdir(t, a)
+				mustMkdir(t, b)
+				mustSymlink(t, root+"/nowhere", a+"/tool")
+				mustWriteFile(t, b+"/tool", 0o755)
 				return a + sep + b, b + "/tool"
 			},
 		},
@@ -283,8 +245,8 @@ func TestLookPath(t *testing.T) {
 			file: "tool",
 			setup: func(t *testing.T, root string) (string, string) {
 				a := root + "/a"
-				lpMkdir(t, a)
-				lpSymlink(t, root+"/nowhere", a+"/tool")
+				mustMkdir(t, a)
+				mustSymlink(t, root+"/nowhere", a+"/tool")
 				return a, ""
 			},
 		},
@@ -293,8 +255,8 @@ func TestLookPath(t *testing.T) {
 			file: "tool",
 			setup: func(t *testing.T, root string) (string, string) {
 				a := root + "/a"
-				lpMkdir(t, a)
-				lpWriteFile(t, a+"/tool", 0o755)
+				mustMkdir(t, a)
+				mustWriteFile(t, a+"/tool", 0o755)
 				return a + "/", a + "/tool"
 			},
 		},
@@ -310,7 +272,7 @@ func TestLookPath(t *testing.T) {
 			file: "",
 			setup: func(t *testing.T, root string) (string, string) {
 				a := root + "/a"
-				lpMkdir(t, a)
+				mustMkdir(t, a)
 				return a, ""
 			},
 		},
@@ -321,8 +283,8 @@ func TestLookPath(t *testing.T) {
 				// An executable exists at root+"/a/b". lookPath must not
 				// find it, because file is not a bare name.
 				a := root + "/a"
-				lpMkdir(t, a)
-				lpWriteFile(t, a+"/b", 0o755)
+				mustMkdir(t, a)
+				mustWriteFile(t, a+"/b", 0o755)
 				return root, ""
 			},
 		},

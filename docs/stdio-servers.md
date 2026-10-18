@@ -149,9 +149,9 @@ An absolute command is used as written. For a bare command such as `npx`, mcpmoa
 `PATH` of the server, like the clients do. That is the `PATH` from the config env when it is set,
 else your `PATH`. Empty and relative entries (such as `.` or `bin`) are skipped. When no entry is
 usable, the command is not found. mcpmoat does not use a default `PATH`. When the command is a bare
-name and the environment of the server has no `PATH`, mcpmoat does not start the server. So mcpmoat finds the same file as
-your client only when the environment of the server has a `PATH`, and only when that `PATH` is the
-same as the `PATH` of your client (see the risks below).
+name and the environment of the server has no `PATH`, mcpmoat does not start the server. So
+mcpmoat finds the same file as your client only when the environment of the server has a `PATH`,
+and only when that `PATH` is the same as the `PATH` of your client (see the risks below).
 
 Risks:
 

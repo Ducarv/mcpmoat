@@ -2,7 +2,6 @@ package inspect
 
 import (
 	"errors"
-	"fmt"
 	"os/exec"
 	"path/filepath"
 	"strings"
@@ -85,10 +84,9 @@ type stdioOptions struct {
 	// HOME stays in the chain, because <cache> (~/.cache or
 	// ~/Library/Caches) is under HOME. So npm and uv can still find
 	// ~/node_modules, ~/package.json or ~/pyproject.toml. This is accepted:
-	// HOME is owned by the user, and the client sees the same files. The rule
-	// is that the work directory itself is never HOME.
+	// HOME is owned by the user, and the client sees the same files.
 	//
-	// The work directory itself is never the mcpmoat work directory, HOME, a
+	// The work directory itself is never HOME, the mcpmoat work directory, a
 	// project directory, or a directory under /tmp or os.TempDir(). In a
 	// repository directory, npx and uvx read the node_modules/.bin, .npmrc and
 	// pyproject.toml of the repository, so the repository could change what
@@ -129,7 +127,7 @@ type stdioOptions struct {
 //  2. the untrusted gate, else errUntrusted;
 //  3. the command is not empty, else errEmptyCommand; then no NUL byte in
 //     the command, in an arg or in an absolute s.Dir, else errInvalidArg;
-//  4. the environment (buildEnv), which wraps errInvalidEnvName or
+//  4. the environment (buildEnv), else errInvalidEnvName or
 //     errInvalidEnvValue;
 //  5. the work directory, else errNoWorkDir;
 //  6. the command path, else errRelativeCommand or errCommandNotFound;
@@ -174,10 +172,10 @@ func stdioCommand(s discover.Server, opts stdioOptions) (*exec.Cmd, error) {
 	if s.Command == "" {
 		return nil, errEmptyCommand
 	}
-	args := s.Args.Values()
 	if hasNUL(s.Command) {
 		return nil, errInvalidArg
 	}
+	args := s.Args.Values()
 	for _, arg := range args {
 		if hasNUL(arg) {
 			return nil, errInvalidArg
@@ -194,9 +192,9 @@ func stdioCommand(s discover.Server, opts stdioOptions) (*exec.Cmd, error) {
 
 	env, err := buildEnv(opts.Environ, s.Env)
 	if err != nil {
-		// buildEnv returns fixed sentinels only, so the wrap adds no value
-		// from the config.
-		return nil, fmt.Errorf("inspect: build server environment: %w", err)
+		// buildEnv returns fixed sentinels only, so err holds no value from
+		// the config.
+		return nil, err
 	}
 	if env == nil {
 		// buildEnv never returns nil on success. This check keeps the
@@ -276,16 +274,15 @@ func commandPath(command string, configDir bool, env []string) (string, error) {
 
 // pathFromEnv returns the value of the PATH entry in env, or "" when env has
 // no PATH entry. env comes from buildEnv: it is sorted and has unique names,
-// so it has at most one PATH entry. The loop still keeps the last match, the
-// same as a later entry that overrides an earlier one.
+// so it has at most one PATH entry. If env had more than one, the first
+// would win, the same rule as in buildEnv and os.Getenv.
 func pathFromEnv(env []string) string {
-	path := ""
 	for _, entry := range env {
 		if value, ok := strings.CutPrefix(entry, "PATH="); ok {
-			path = value
+			return value
 		}
 	}
-	return path
+	return ""
 }
 
 // hasNUL reports whether s contains a NUL byte. A string with a NUL byte

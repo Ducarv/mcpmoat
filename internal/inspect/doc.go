@@ -11,15 +11,12 @@
 // as configured, also argv[0]. Nothing expands globs, variables or quotes.
 // The user-facing version of this section is docs/stdio-servers.md.
 //
-// The environment is built from scratch. The child gets a small allowlist
-// from the mcpmoat environment, plus the variables that the server config
-// declares. The allowlist is HOME, LANG, LC_ALL, LC_CTYPE, LOGNAME, PATH,
-// SHELL, TERM, TMPDIR, TZ, USER and __CF_USER_TEXT_ENCODING. See isBaseEnv
-// for the reason of each entry. Other variables are excluded on purpose:
-// agent sockets (SSH_AUTH_SOCK), proxies (a proxy URL can hold credentials),
-// CA overrides, tokens and cloud keys (AWS_*, *_TOKEN), loader hooks (LD_*,
-// DYLD_*, NODE_OPTIONS) and PWD. A user who needs one of them declares it in
-// the env of the server config.
+// The environment is built from scratch (buildEnv). The child gets a small
+// allowlist from the mcpmoat environment, plus the variables that the server
+// config declares. isBaseEnv holds the allowlist and the reason for each
+// entry. Agent sockets, proxies, tokens, cloud keys and loader hooks are
+// excluded on purpose. A user who needs one of them declares it in the env
+// of the server config.
 //
 // A config env entry overrides an allowlist entry with the same name. A
 // ${VAR} placeholder is passed as written for now (issue #88). A bad name or
@@ -30,35 +27,20 @@
 // The work directory is the config Dir (the Codex cwd) when it is absolute.
 // mcpmoat uses that Dir as written, so files in it can change what runs, the
 // same as in the client. Else the work directory is stdioOptions.FallbackDir,
-// a private, empty directory that the caller makes. The rules below are for
-// the fallback only. npx and uvx read node_modules/.bin, .npmrc and
-// pyproject.toml from the work directory and also from its parent
-// directories, because npm and uv walk up the parent chain. So the fallback
-// itself is never the mcpmoat work directory, HOME, a project directory, or
-// any directory under /tmp or os.TempDir(). The caller makes the fallback
-// with os.MkdirTemp under a 0700 directory in os.UserCacheDir() (for example
-// <cache>/mcpmoat/). Then it checks every directory from the fallback up to
-// "/": each must be writable only by the user or root (see
-// stdioOptions.FallbackDir). HOME stays in that chain, which is accepted
-// because the user owns HOME and the client sees the same files. A relative
-// command with a "/" (such as "./server") needs an absolute config Dir. This
-// is a fidelity limit: a client can start a project server in the project
-// root, and mcpmoat does not.
+// a private, empty directory that the caller makes. npm and uv read files
+// from the work directory and from all its parent directories, so the
+// caller must follow the rules in the FallbackDir comment. A relative command
+// with a "/" (such as "./server") needs an absolute config Dir. This is a
+// fidelity limit: a client can start a project server in the project root,
+// and mcpmoat does not.
 //
 // On Unix the child starts in a new session; see detachSysProcAttr. The
 // caller never connects the stdout or stderr of the child to the terminal
 // of the user.
 //
 // A bare command name (no "/") is looked up in the final PATH of the child,
-// so a PATH from the config wins (see lookPath). Node spawn and Rust Command
-// do the same. Empty and relative PATH entries are skipped, which is stricter
-// than execvp. Risks:
-//
-//   - A directory early in PATH that others can write to is a risk. It is
-//     the same risk as in the client.
-//   - The PATH of mcpmoat can differ from the PATH of a GUI client. For
-//     example, a macOS app started from the Dock gets the launchd PATH. Then
-//     mcpmoat can run a different npx than the client.
+// so a PATH from the config wins. Node spawn and Rust Command do the same.
+// lookPath lists the skip rules and the PATH risks.
 //
 // A server from an untrusted project file starts only with an explicit
 // opt-in (stdioOptions.AllowUntrusted). See the discover package doc,

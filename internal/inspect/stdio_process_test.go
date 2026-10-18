@@ -2,6 +2,7 @@ package inspect
 
 import (
 	"errors"
+	"maps"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -130,21 +131,11 @@ func procMaskEnv(env, known []string) []string {
 // output can hold the real environment of the test process.
 func procAssertNoCanary(t *testing.T, out []byte, canaries map[string]string) {
 	t.Helper()
-	for _, name := range procSortedKeys(canaries) {
+	for _, name := range slices.Sorted(maps.Keys(canaries)) {
 		if len(discovertest.Leaks(string(out), canaries[name])) > 0 {
 			t.Errorf("child env dump contains the canary value of %s", name)
 		}
 	}
-}
-
-// procSortedKeys returns the keys of m in sorted order.
-func procSortedKeys(m map[string]string) []string {
-	keys := make([]string, 0, len(m))
-	for k := range m {
-		keys = append(keys, k)
-	}
-	slices.Sort(keys)
-	return keys
 }
 
 // TestStdioChildEnvIsScrubbed proves two acceptance criteria of issue #27
@@ -190,7 +181,7 @@ func TestStdioChildEnvIsScrubbed(t *testing.T) {
 	out, dump := procRun(t, s, opts, false)
 
 	got := procEnvMap(t, dump.Env)
-	gotKeys, wantKeys := procSortedKeys(got), procSortedKeys(want)
+	gotKeys, wantKeys := slices.Sorted(maps.Keys(got)), slices.Sorted(maps.Keys(want))
 	if !reflect.DeepEqual(gotKeys, wantKeys) {
 		t.Errorf("child env names = %q, want %q", gotKeys, wantKeys)
 	}
@@ -325,8 +316,8 @@ func TestStdioChildBareNameLookup(t *testing.T) {
 	skipOnWindows(t)
 
 	bin := t.TempDir() + "/bin"
-	lpMkdir(t, bin)
-	lpSymlink(t, envDumpExe(t), bin+"/mcpmoat-envdump")
+	mustMkdir(t, bin)
+	mustSymlink(t, envDumpExe(t), bin+"/mcpmoat-envdump")
 
 	s := procServer("mcpmoat-envdump", nil, secrets(t, map[string]string{"PATH": bin}))
 	opts := stdioOptions{Environ: []string{"PATH=/nonexistent"}, FallbackDir: t.TempDir()}
@@ -358,7 +349,7 @@ func TestStdioChildRelativeCommand(t *testing.T) {
 	skipOnWindows(t)
 
 	dir := t.TempDir()
-	lpSymlink(t, envDumpExe(t), dir+"/envdump")
+	mustSymlink(t, envDumpExe(t), dir+"/envdump")
 
 	s := procServer("./envdump", nil, nil)
 	s.Dir = dir

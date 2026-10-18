@@ -2,6 +2,7 @@ package inspect
 
 import (
 	"errors"
+	"maps"
 	"slices"
 	"strings"
 
@@ -63,11 +64,15 @@ func isBaseEnv(name string) bool {
 // gives the child an empty environment.
 //
 // parent has the form of os.Environ: "name=value" entries. Entries with no
-// "=" are skipped. If a name occurs more than once in parent, the first
-// entry wins, the same as os.Getenv on Unix.
+// "=" are skipped. Entries whose value contains a NUL byte are skipped too:
+// os.Environ cannot return them, and the operating system cannot pass them to
+// a child. If a name occurs more than once in parent, the first entry wins,
+// the same as os.Getenv on Unix.
 //
 // Declared values are passed exactly as written. buildEnv does not expand
-// ${VAR} references (that is issue #88).
+// ${VAR} references (that is issue #88). A zero discover.Secret (for example
+// from a JSON null in the config) gives the child the name with an empty
+// value.
 //
 // buildEnv returns errInvalidEnvName for a declared name that is empty or
 // contains "=" or a NUL byte, and errInvalidEnvValue for a declared value
@@ -78,10 +83,10 @@ func isBaseEnv(name string) bool {
 // discover.Secret.Reveal: use it only as exec.Cmd.Env. Never pass it to fmt,
 // a logger, an error or an encoder.
 func buildEnv(parent []string, declared discover.SecretMap) ([]string, error) {
-	values := make(map[string]string, len(declared)+12)
+	values := make(map[string]string, len(declared))
 	for _, entry := range parent {
 		name, value, ok := strings.Cut(entry, "=")
-		if !ok || !isBaseEnv(name) {
+		if !ok || !isBaseEnv(name) || hasNUL(value) {
 			continue
 		}
 		if _, seen := values[name]; seen {
@@ -95,22 +100,16 @@ func buildEnv(parent []string, declared discover.SecretMap) ([]string, error) {
 			return nil, errInvalidEnvName
 		}
 		value := declared[name].Reveal()
-		if strings.IndexByte(value, 0) >= 0 {
+		if hasNUL(value) {
 			return nil, errInvalidEnvValue
 		}
 		values[name] = value
 	}
 
-	// make with a capacity gives a non-nil slice even when values is empty.
-	// See the key invariant in the doc comment.
-	names := make([]string, 0, len(values))
-	for name := range values {
-		names = append(names, name)
-	}
-	slices.Sort(names)
-
-	env := make([]string, 0, len(names))
-	for _, name := range names {
+	// make gives a non-nil slice even when values is empty. See the key
+	// invariant in the doc comment.
+	env := make([]string, 0, len(values))
+	for _, name := range slices.Sorted(maps.Keys(values)) {
 		env = append(env, name+"="+values[name])
 	}
 	return env, nil

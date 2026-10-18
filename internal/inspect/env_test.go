@@ -11,25 +11,6 @@ import (
 	"github.com/Ducarv/mcpmoat/internal/discover/discovertest"
 )
 
-// secrets builds a discover.SecretMap from plain name and value pairs.
-func secrets(t *testing.T, kv map[string]string) discover.SecretMap {
-	t.Helper()
-	if kv == nil {
-		return nil
-	}
-	m := make(discover.SecretMap, len(kv))
-	for k, v := range kv {
-		m[k] = discover.NewSecret(v)
-	}
-	return m
-}
-
-// envKey returns the name part of a "name=value" entry.
-func envKey(entry string) string {
-	name, _, _ := strings.Cut(entry, "=")
-	return name
-}
-
 // TestIsBaseEnv checks the allowlist of parent variables: every listed name
 // passes, and names that can carry secrets or inject code do not.
 func TestIsBaseEnv(t *testing.T) {
@@ -128,6 +109,14 @@ func TestBuildEnv(t *testing.T) {
 			parent:   []string{"GITHUB_TOKEN=parent"},
 			declared: map[string]string{"GITHUB_TOKEN": "declared"},
 			want:     []string{"GITHUB_TOKEN=declared"},
+		},
+		{
+			// os.Environ cannot hold a NUL byte, but Environ is a slice
+			// from the caller. The bad entry is skipped, so the next PATH
+			// entry is the first valid one.
+			name:   "parent entry with a NUL byte in the value is skipped",
+			parent: []string{"HOME=/h\x00x", "PATH=/a\x00b", "PATH=/ok"},
+			want:   []string{"PATH=/ok"},
 		},
 		{
 			name:   "first parent entry wins for duplicate keys",
@@ -238,6 +227,23 @@ func TestBuildEnv(t *testing.T) {
 				t.Errorf("buildEnv() =\n  %q\nwant\n  %q", got, tt.want)
 			}
 		})
+	}
+}
+
+// TestBuildEnvZeroSecret pins the result for a zero discover.Secret, which
+// a JSON null env value in a config decodes to: the child gets the name with
+// an empty value, and the zero value overrides a parent entry.
+func TestBuildEnvZeroSecret(t *testing.T) {
+	t.Parallel()
+
+	declared := discover.SecretMap{"API_KEY": {}, "PATH": {}}
+	got, err := buildEnv([]string{"PATH=/usr/bin", "HOME=/h"}, declared)
+	if err != nil {
+		t.Fatalf("buildEnv() error = %v, want nil", err)
+	}
+	want := []string{"API_KEY=", "HOME=/h", "PATH="}
+	if !slices.Equal(got, want) {
+		t.Errorf("buildEnv() = %q, want %q", got, want)
 	}
 }
 
@@ -410,6 +416,9 @@ func FuzzBuildEnv(f *testing.F) {
 			if !ok {
 				t.Fatalf("entry %q has no '='", entry)
 			}
+			if strings.IndexByte(v, 0) >= 0 {
+				t.Fatalf("entry %q has a NUL byte in its value", k)
+			}
 			if k != key && !isBaseEnv(k) {
 				t.Fatalf("entry key %q is neither allowlisted nor declared", k)
 			}
@@ -429,11 +438,12 @@ func FuzzBuildEnv(f *testing.F) {
 		}
 
 		// The first parent entry for each allowlisted key wins, unless the
-		// declared entry overrides it.
+		// declared entry overrides it. A parent entry with a NUL byte in its
+		// value is skipped.
 		want := map[string]string{key: value}
 		for _, entry := range parent {
 			k, v, ok := strings.Cut(entry, "=")
-			if !ok || !isBaseEnv(k) {
+			if !ok || !isBaseEnv(k) || strings.IndexByte(v, 0) >= 0 {
 				continue
 			}
 			if _, seen := want[k]; !seen {
