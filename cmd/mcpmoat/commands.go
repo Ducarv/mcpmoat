@@ -1,6 +1,9 @@
 package main
 
-import "strings"
+import (
+	"fmt"
+	"strings"
+)
 
 // This file holds the command handlers. Each one has the signature of
 // command.run: it gets the resolved global options and its own arguments, and
@@ -41,7 +44,16 @@ func (c *cli) rejectArgs(name string, args []string) bool {
 	for i, a := range args {
 		quoted[i] = quoteArg(a)
 	}
-	fprintf(c.stderr, "mcpmoat %s: unexpected arguments [%s]\n", name, strings.Join(quoted, " "))
-	fprintf(c.stderr, "Run \"mcpmoat help\" for usage.\n")
+	c.usageError(name, "unexpected arguments [%s]", strings.Join(quoted, " "))
 	return true
+}
+
+// usageError prints "mcpmoat <name>: <message>" and the usage hint to stderr,
+// and returns exitError. The message is fmt.Sprintf(format, a...). The caller
+// must escape untrusted text in a before the call (see quoteArg and
+// termsafe.Quote).
+func (c *cli) usageError(name, format string, a ...any) int {
+	fprintf(c.stderr, "mcpmoat %s: %s\n", name, fmt.Sprintf(format, a...))
+	fprintf(c.stderr, "Run \"mcpmoat help\" for usage.\n")
+	return exitError
 }

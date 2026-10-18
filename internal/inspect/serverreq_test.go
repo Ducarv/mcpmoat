@@ -158,7 +158,7 @@ func TestServerPingSDK(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = ss.Close() })
 
-	cs, err := New(Options{}).newClient().Connect(ctx, ct, nil)
+	cs, err := newStdioClient(&rawLists{}, &rawLimit{limit: maxRawBytes}).Connect(ctx, ct, nil)
 	if err != nil {
 		t.Fatalf("client.Connect() error = %v", err)
 	}
@@ -221,7 +221,7 @@ func TestServerRequestsRefusedRaw(t *testing.T) {
 	}
 	done := make(chan connected, 1)
 	go func() {
-		cs, err := New(Options{}).newClient().Connect(ctx, ct, nil)
+		cs, err := newStdioClient(&rawLists{}, &rawLimit{limit: maxRawBytes}).Connect(ctx, ct, nil)
 		done <- connected{cs, err}
 	}()
 

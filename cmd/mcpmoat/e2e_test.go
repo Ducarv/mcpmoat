@@ -372,6 +372,64 @@ func TestE2EScanWithoutNoConnect(t *testing.T) {
 	}
 }
 
+// TestE2EScanTimeoutFlags checks --timeout and --concurrency in the real
+// binary. A bad value gives exit code 2 with a clear message and no stdout, in
+// both modes. With --no-connect, a good value changes nothing: the output is
+// the same as without the flags.
+func TestE2EScanTimeoutFlags(t *testing.T) {
+	t.Parallel()
+	const (
+		timeoutMsg     = "mcpmoat scan: --timeout must be greater than 0"
+		concurrencyMsg = "mcpmoat scan: --concurrency must be at least 1"
+		usageHint      = `Run "mcpmoat help" for usage.`
+	)
+	tests := []struct {
+		name      string
+		args      []string
+		wantError string // empty means: exit code 0 and the same output as without the flags
+	}{
+		{name: "timeout zero", args: []string{"scan", "--no-connect", "--timeout", "0"}, wantError: timeoutMsg},
+		{name: "timeout negative", args: []string{"scan", "--no-connect", "--timeout", "-1s"}, wantError: timeoutMsg},
+		{name: "concurrency zero", args: []string{"scan", "--no-connect", "--concurrency", "0"}, wantError: concurrencyMsg},
+		{name: "concurrency negative", args: []string{"scan", "--no-connect", "--concurrency", "-2"}, wantError: concurrencyMsg},
+		{name: "timeout zero with connect", args: []string{"scan", "--timeout", "0"}, wantError: timeoutMsg},
+		{name: "concurrency zero with connect", args: []string{"scan", "--concurrency", "0"}, wantError: concurrencyMsg},
+		{name: "good values", args: []string{"scan", "--no-connect", "--timeout", "3s", "--concurrency", "2"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			home, work := discovertest.CopyFixture(t, fixtureDir("all", "full"))
+
+			stdout, stderr, code := runBin(t, home, work, tt.args...)
+
+			if tt.wantError != "" {
+				// A usage error prints the problem and then the usage hint, so
+				// assertScanResult (every line has the scan prefix) does not fit.
+				if code != exitError {
+					t.Errorf("exit code = %d, want %d\nstdout:\n%s\nstderr:\n%s", code, exitError, stdout, stderr)
+				}
+				if want := tt.wantError + "\n" + usageHint + "\n"; stderr != want {
+					t.Errorf("stderr = %q, want %q", stderr, want)
+				}
+				if stdout != "" {
+					t.Errorf("stdout = %q, want empty", stdout)
+				}
+				return
+			}
+			assertScanResult(t, code, stdout, stderr, scanWant{code: exitOK})
+			if len(tableRows(t, stdout)) == 0 {
+				t.Fatalf("stdout has no server rows:\n%s", stdout)
+			}
+			baseOut, baseErr, baseCode := runBin(t, home, work, "scan", "--no-connect")
+			if code != baseCode || stdout != baseOut || stderr != baseErr {
+				t.Errorf("flags change the result: exit code %d\nstdout:\n%s\nstderr:\n%s\nwant the result without the flags: exit code %d\nstdout:\n%s\nstderr:\n%s",
+					code, stdout, stderr, baseCode, baseOut, baseErr)
+			}
+		})
+	}
+}
+
 func TestE2EScanSecretsDoNotLeak(t *testing.T) {
 	t.Parallel()
 	tests := []struct {

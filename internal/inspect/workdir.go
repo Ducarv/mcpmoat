@@ -15,7 +15,7 @@ func noCleanup() {}
 // it), else a new, empty directory below the run root that runRoot returns.
 //
 // The returned cleanup removes that directory. Call it after the process has
-// exited. cleanup is never nil, also on error. An error wraps [ErrStart].
+// exited. cleanup is never nil, also on error.
 // cleanup drops the error of the removal: a process that left the process
 // group of the server can still use the directory, and then it stays
 // behind below the run root. It holds nothing of mcpmoat.
@@ -25,13 +25,13 @@ func workDir(configDir string, runRoot func() (string, error)) (dir string, clea
 	}
 	root, err := runRoot()
 	if err != nil {
-		return "", noCleanup, fmt.Errorf("%w: work directory root: %w", ErrStart, err)
+		return "", noCleanup, fmt.Errorf("work directory root: %w", err)
 	}
 	// MkdirTemp makes a new directory with mode 0o700 and a random suffix,
 	// so no earlier run can put files in it.
 	dir, err = os.MkdirTemp(root, "mcpmoat-server-*")
 	if err != nil {
-		return "", noCleanup, fmt.Errorf("%w: create work directory: %w", ErrStart, err)
+		return "", noCleanup, fmt.Errorf("create work directory: %w", err)
 	}
 	return dir, func() { _ = os.RemoveAll(dir) }, nil
 }

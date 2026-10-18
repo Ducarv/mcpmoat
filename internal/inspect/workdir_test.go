@@ -34,7 +34,7 @@ func mkdirMode(t *testing.T, dir string, perm fs.FileMode) {
 
 // TestWorkDir checks the three outcomes of workDir: no directory for an
 // absolute Dir, a new private directory below the run root otherwise, and
-// ErrStart when the run root fails.
+// an error when the run root fails.
 func TestWorkDir(t *testing.T) {
 	t.Parallel()
 
@@ -132,8 +132,8 @@ func TestWorkDir(t *testing.T) {
 				t.Fatal("workDir() cleanup = nil, want non-nil")
 			}
 			cleanup()
-			if !errors.Is(err, ErrStart) {
-				t.Errorf("workDir() error = %v, want errors.Is ErrStart", err)
+			if err == nil {
+				t.Error("workDir() error = nil, want an error")
 			}
 			if dir != "" {
 				t.Errorf("workDir() dir = %q, want \"\" on error", dir)

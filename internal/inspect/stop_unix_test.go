@@ -15,9 +15,9 @@ import (
 	"github.com/Ducarv/mcpmoat/internal/inspect"
 )
 
-// stopGrace is inspect.stopGrace. The SDK command transport waits this long
-// after it closes stdin and again after SIGTERM, then sends SIGKILL and
-// waits once more. So a normal stop takes at most 3*stopGrace.
+// stopGrace is inspect.stopGrace. A normal stop closes stdin, waits at most
+// this long for the server to exit, and then kills the process group. The
+// time bounds below allow 3*stopGrace, to leave slack for a slow machine.
 const stopGrace = inspect.StopGrace
 
 // reapLag is how long the test polls for the process to go away when the
@@ -80,7 +80,7 @@ func TestSDKInspectStopsChild(t *testing.T) {
 			defer cancel()
 
 			start := time.Now()
-			_, err := sdkNew(t, inspect.Options{}).Inspect(ctx, server)
+			_, err := sdkNew(t, inspect.SDKOptions{}).Inspect(ctx, server)
 			end := time.Now()
 
 			// Check the process first, before anything else can give it
@@ -149,7 +149,7 @@ func TestSDKInspectKillsProcessGroup(t *testing.T) {
 			ctx, cancel := context.WithTimeout(t.Context(), tt.timeout)
 			defer cancel()
 
-			_, _ = sdkNew(t, inspect.Options{}).Inspect(ctx, server)
+			_, _ = sdkNew(t, inspect.SDKOptions{}).Inspect(ctx, server)
 
 			pid := sdkReadPID(t, spawnfile)
 			// The spawned process is not a child of mcpmoat. After the
@@ -186,7 +186,7 @@ func TestSDKInspectFloodWithoutReads(t *testing.T) {
 	// Build the fixture before the timer and the ctx start, so a cold
 	// build cache does not count against the bound.
 	server := sdkBenign(t, "-mode", "flood-list")
-	inspector := sdkNew(t, inspect.Options{})
+	inspector := sdkNew(t, inspect.SDKOptions{})
 	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
 	defer cancel()
 
@@ -201,7 +201,7 @@ func TestSDKInspectFloodWithoutReads(t *testing.T) {
 		t.Errorf("Inspect() Tools = %#v, want an empty, non-nil slice", res.Tools)
 	}
 	// The child ignores the close of its stdin, so the stop takes one
-	// stopGrace until SIGTERM. The bound leaves room for a slow machine,
+	// stopGrace until the group kill. The bound leaves room for a slow machine,
 	// but stays far below the 30s of ctx.
 	if limit := 3*stopGrace + 5*time.Second; elapsed > limit {
 		t.Errorf("Inspect took %v, want at most %v", elapsed, limit)

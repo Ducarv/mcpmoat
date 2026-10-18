@@ -148,6 +148,11 @@ hidden instructions or leak data.
 The scanner reduces risk but does not guarantee safety. Rule-based detection has false positives and
 false negatives.
 
+A remote server can show the scanner a different tool list than it shows the real clients
+(cloaking). mcpmoat does not name itself in its requests (generic User-Agent and MCP client name),
+but a server can still tell clients apart in other ways, and the pins only cover what the scanner
+sees.
+
 ---
 
 ## 6. Functional requirements (phase 1)
@@ -321,10 +326,11 @@ the machine**.
 ## 7. Non-functional requirements
 
 **NFR-01: Privacy.** No telemetry. No network connections besides configured servers and, only
-with `--llm`, the LLM provider.
+with `--llm`, the LLM provider. A proxy that the user sets in `HTTP_PROXY` or `HTTPS_PROXY` is part
+of the route to a configured server, so mcpmoat honours it (and `NO_PROXY`).
 
 - A test runs a full scan with network access denied for anything other than fixture servers, and
-  asserts no other connection is attempted.
+  asserts no other connection is attempted. The test clears the proxy variables.
 
 **NFR-02: Distribution.** Single static binary for macOS and Linux (amd64, arm64), published with
 GoReleaser, Homebrew formula in an own tap, checksums and GitHub attestation.

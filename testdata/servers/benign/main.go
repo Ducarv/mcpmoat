@@ -20,8 +20,10 @@
 //	    crash     exit with code 3 before the MCP handshake
 //	    hang-init never read stdin and never reply
 //	    hang-list complete the handshake, then block every tools/list request
-//	    flood-list complete the handshake; on tools/list, send 20000 ping
-//	              requests and an empty list, then never read stdin again
+//	    flood-list complete the handshake and answer tools/list and
+//	              prompts/list with empty lists; on resources/list, send
+//	              20000 ping requests and an empty list, then never read
+//	              stdin again
 //	-pidfile path
 //	    if set, write the process ID and a newline to this file at start
 //	-envfile path
@@ -172,10 +174,12 @@ func sleepForever() {
 
 // runFlood is the flood-list mode. It speaks JSON-RPC by hand, without the
 // SDK, so it can stop reading stdin at a chosen point. It answers
-// initialize with the tools capability. On tools/list it sends floodPings
-// ping requests and then an empty tool list, and then it never reads stdin
-// again. A client that writes a reply to each ping then blocks on a full
-// pipe, until the client closes the pipe or stops this program.
+// initialize with the tools, prompts and resources capabilities, and
+// tools/list and prompts/list with empty lists. On resources/list, the last
+// list that a client reads, it sends floodPings ping requests and then an
+// empty resource list, and then it never reads stdin again. A client that
+// writes a reply to each ping then blocks on a full pipe, until the client
+// closes the pipe or stops this program.
 func runFlood(stdin io.Reader, stdout io.Writer, stderr io.Writer) int {
 	in := bufio.NewScanner(stdin)
 	in.Buffer(make([]byte, 0, 64<<10), 1<<20)
@@ -190,12 +194,16 @@ func runFlood(stdin io.Reader, stdout io.Writer, stderr io.Writer) int {
 		}
 		switch msg.Method {
 		case "initialize":
-			fmt.Fprintf(out, `{"jsonrpc":"2.0","id":%s,"result":{"protocolVersion":"2025-06-18","capabilities":{"tools":{}},"serverInfo":{"name":"benign-flood","version":"1.0.0"}}}`+"\n", msg.ID)
+			fmt.Fprintf(out, `{"jsonrpc":"2.0","id":%s,"result":{"protocolVersion":"2025-06-18","capabilities":{"tools":{},"prompts":{},"resources":{}},"serverInfo":{"name":"benign-flood","version":"1.0.0"}}}`+"\n", msg.ID)
 		case "tools/list":
+			fmt.Fprintf(out, `{"jsonrpc":"2.0","id":%s,"result":{"tools":[]}}`+"\n", msg.ID)
+		case "prompts/list":
+			fmt.Fprintf(out, `{"jsonrpc":"2.0","id":%s,"result":{"prompts":[]}}`+"\n", msg.ID)
+		case "resources/list":
 			for i := range floodPings {
 				fmt.Fprintf(out, `{"jsonrpc":"2.0","id":"ping-%d","method":"ping"}`+"\n", i)
 			}
-			fmt.Fprintf(out, `{"jsonrpc":"2.0","id":%s,"result":{"tools":[]}}`+"\n", msg.ID)
+			fmt.Fprintf(out, `{"jsonrpc":"2.0","id":%s,"result":{"resources":[]}}`+"\n", msg.ID)
 			if err := out.Flush(); err != nil {
 				fmt.Fprintf(stderr, "benign: %v\n", err)
 				return exitServe

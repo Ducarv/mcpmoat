@@ -75,9 +75,9 @@ func TestFakeInspect(t *testing.T) {
 		},
 		{
 			name:    "wrapped error by name",
-			errs:    map[string]error{"a": fmt.Errorf("%w: exit 1", inspect.ErrStart)},
+			errs:    map[string]error{"a": fmt.Errorf("%w: exit 1", errBoom)},
 			server:  "a",
-			wantErr: inspect.ErrStart,
+			wantErr: errBoom,
 		},
 		{
 			name:    "error wins over result",

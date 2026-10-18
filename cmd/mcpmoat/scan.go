@@ -7,8 +7,10 @@ import (
 	"io"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/Ducarv/mcpmoat/internal/discover"
+	"github.com/Ducarv/mcpmoat/internal/inspect"
 	"github.com/Ducarv/mcpmoat/internal/report"
 	"github.com/Ducarv/mcpmoat/internal/termsafe"
 )
@@ -23,6 +25,13 @@ import (
 // file (confined to its directory, no "projects" section), unless it is the
 // user's own global config file (~/.claude.json, ~/.cursor/mcp.json or
 // ~/.codex/config.toml). The home directory is only used for that check.
+//
+// --timeout (default inspect.DefaultTimeout) is the time limit for one server.
+// --concurrency (default inspect.DefaultConcurrency) is the number of servers
+// inspected at the same time. Both are checked in both modes, also with
+// --no-connect, which does not use them yet. A value that is not valid (a
+// timeout of 0 or less, a concurrency below 1) is a usage error with exit
+// code 2, like a value that the flag package cannot parse.
 //
 // Exit codes:
 //   - 0: the table is printed, and no config file had a problem. A missing
@@ -43,6 +52,8 @@ func (c *cli) runScan(_ options, args []string) int {
 	// package prints nothing and the flags have no usage text.
 	fs.SetOutput(io.Discard)
 	noConnect := fs.Bool("no-connect", false, "")
+	timeout := fs.Duration("timeout", inspect.DefaultTimeout, "")
+	concurrency := fs.Int("concurrency", inspect.DefaultConcurrency, "")
 
 	// fs.Func calls the function once for each time the user gives --config.
 	// An error from it becomes a flag error: exit code 2 with a clear message.
@@ -68,12 +79,17 @@ func (c *cli) runScan(_ options, args []string) int {
 		// termsafe.Quote escapes the whole message, and quotes it only when
 		// it holds an unsafe rune. See dispatch in cli.go for why this
 		// differs from quoteArg.
-		fprintf(c.stderr, "mcpmoat scan: %s\n", termsafe.Quote(err.Error()))
-		fprintf(c.stderr, "Run \"mcpmoat help\" for usage.\n")
-		return exitError
+		return c.usageError("scan", "%s", termsafe.Quote(err.Error()))
 	}
 	if c.rejectArgs("scan", fs.Args()) {
 		return exitError
+	}
+
+	// Check the values in both modes, so a bad value is a usage error even
+	// when --no-connect starts no server. M3 passes the options to
+	// inspect.Run.
+	if _, err := connectOptions(*timeout, *concurrency); err != nil {
+		return c.usageError("scan", "%v", err)
 	}
 
 	if !*noConnect {
@@ -89,6 +105,27 @@ func (c *cli) runScan(_ options, args []string) int {
 		return c.scanConfig(ctx, configPath)
 	}
 	return c.scanAuto(ctx)
+}
+
+// connectOptions builds the inspect options from the --timeout and
+// --concurrency flags. inspect.Options.Validate holds the rules. Its messages
+// name no flag and repeat the value, so connectOptions maps each error to a
+// message that names the flag and does not repeat the value.
+func connectOptions(timeout time.Duration, concurrency int) (inspect.Options, error) {
+	opts := inspect.Options{Timeout: timeout, Concurrency: concurrency}
+	err := opts.Validate()
+	switch {
+	case err == nil:
+		return opts, nil
+	case errors.Is(err, inspect.ErrInvalidTimeout):
+		return inspect.Options{}, errors.New("--timeout must be greater than 0")
+	case errors.Is(err, inspect.ErrInvalidConcurrency):
+		return inspect.Options{}, errors.New("--concurrency must be at least 1")
+	default:
+		// A rule that Validate gets later. Its text holds only our own words
+		// and numbers.
+		return inspect.Options{}, err
+	}
 }
 
 // isFlagOf reports whether value looks like a flag of fs, in any form that

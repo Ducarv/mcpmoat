@@ -1,67 +1,34 @@
 // Package inspect connects to MCP servers and lists their tools, prompts and
-// resources (FR-04). Protocol details stay behind an interface in this
-// package so that MCP spec changes stay local.
+// resources. Protocol details stay behind the Inspector interface so that MCP
+// spec changes stay local.
 //
-// See docs/PRD.md, FR-04 to FR-06, NFR-04 and NFR-06.
+// # Running many servers
 //
-// # Overview
+// Run inspects a list of servers through an Inspector, with a bounded pool of
+// workers and a time limit for each server (see Options, DefaultConcurrency
+// and DefaultTimeout). It returns one Outcome per server, in a stable order,
+// with a Status of ok, timeout or failed. One broken, hung or panicking server
+// does not stop the others. The Run doc has the full contract.
 //
-// The rest of mcpmoat talks MCP only through the [Inspector] interface. Its
-// one method, [Inspector.Inspect], takes one [discover.Server] and returns a
-// [Result]. Result and the types it holds ([Tool], [Prompt],
-// [PromptArgument], [Resource]) do not use types from the MCP SDK, so rules,
-// pins and report do not depend on the SDK.
-//
-// [SDKInspector] is the real implementation. It uses the official MCP Go SDK
-// (github.com/modelcontextprotocol/go-sdk). Make one with [New] and
-// [Options]. Only this package imports the SDK, so MCP spec changes stay
-// here (NFR-06). The depguard rule mcp-sdk-only-in-inspect in .golangci.yml
-// enforces this.
+// An Inspector does the work for one server. Its doc lists what an
+// implementation must do: honour the context, stop its child processes, close
+// its pipes, refuse untrusted servers without an opt-in, and keep secrets out
+// of its errors. [SDKInspector] is the implementation: it starts stdio
+// servers itself and gives remote servers to [Remote]. Every error of it is a
+// [ConnectError].
 //
 // Tests in other packages must not start real servers. They use
 // [github.com/Ducarv/mcpmoat/internal/inspect/inspecttest.Fake], an
-// Inspector that returns canned results.
-//
-// # Error contract
-//
-// The full contract is on [Inspector]. In short:
-//
-//   - A non-nil error always comes with a zero Result.
-//   - An error wraps one of the sentinel errors of this package
-//     ([ErrUntrusted], [ErrUnsupportedTransport], [ErrInvalidServer],
-//     [ErrStart], [ErrProtocol], [ErrTooManyItems]) or the context error.
-//     Use errors.Is to test for them, also for context.DeadlineExceeded and
-//     context.Canceled.
-//   - mcpmoat never puts the values of Args, Env, Headers or URL of the
-//     server in the error text, because they can hold secrets. Text that
-//     the server sent can still hold them; see [Inspector].
-//   - An error means that the server was not scanned. Callers must report it
-//     as a finding about the server, never as a clean server; see
-//     [Inspector].
-//
-// # Untrusted text
-//
-// A server can send any bytes. Every string in a Result is untrusted text
-// from the server. An error text can hold text from the server too. That
-// text can hold control characters, terminal escape sequences or a prompt
-// injection. Callers must print it through package internal/termsafe, and
-// must never execute or interpolate it.
-//
-// # Untrusted servers
-//
-// A server from a project file has [discover.Server.Untrusted] set, because
-// a cloned repository can ship that file. [SDKInspector.Inspect] does not
-// start such a server and returns [ErrUntrusted], unless
-// [Options.AllowUntrusted] is true. AllowUntrusted is the explicit opt-in of
-// the user.
+// Inspector that returns canned results. Only this package imports the MCP
+// SDK; the depguard rule mcp-sdk-only-in-inspect in .golangci.yml enforces
+// it (NFR-06).
 //
 // # Starting stdio servers
 //
-// stdioCommand builds the [os/exec.Cmd] for a stdio server (NFR-04), and
-// [SDKInspector.Inspect] starts it. It never uses a shell. The command and
-// the args go to the child byte-for-byte as configured, also argv[0].
-// Nothing expands globs, variables or quotes. The user-facing version of
-// this section is docs/stdio-servers.md.
+// stdioCommand builds the [os/exec.Cmd] for a stdio server (NFR-04). It
+// never uses a shell. The command and the args go to the child byte-for-byte
+// as configured, also argv[0]. Nothing expands globs, variables or quotes.
+// The user-facing version of this section is docs/stdio-servers.md.
 //
 // The environment is built from scratch (buildEnv). The child gets a small
 // allowlist from the mcpmoat environment, plus the variables that the server
@@ -78,116 +45,175 @@
 //
 // The work directory is the config Dir (the Codex cwd) when it is absolute.
 // mcpmoat uses that Dir as written, so files in it can change what runs, the
-// same as in the client. Else Inspect makes a new, empty directory below
-// <user cache dir>/mcpmoat/run (workDir) and removes it after the stop. npm
-// and uv read files from the work directory and from all its parent
-// directories, so the run root and every parent up to "/" must be owned by
-// the user or root and must not be writable by others (defaultRunRoot,
-// checkPrivateChain). A relative command with a "/" (such as "./server")
-// needs an absolute config Dir.
+// same as in the client. Else the work directory is stdioOptions.FallbackDir:
+// SDKInspector makes a new, empty directory below <user cache
+// dir>/mcpmoat/run (workDir) and removes it after the stop. npm and uv read
+// files from the work directory and from all its parent directories, so the
+// run root and every parent up to "/" must be owned by the user or root and
+// must not be writable by others (defaultRunRoot, checkPrivateChain). A
+// relative command with a "/" (such as "./server") needs an absolute config
+// Dir. This is a fidelity limit: a client can start a project server in the
+// project root, and mcpmoat does not. In the empty directory, "npx foo"
+// installs foo from the public registry and runs it without a prompt, where
+// the client would run the local node_modules/.bin/foo; issue #104 tracks
+// this.
 //
-// On Unix the child starts in a new session and process group; see
-// detachSysProcAttr. The stdout of the child is the MCP connection, and its
-// stderr is discarded, so server output never reaches the terminal of the
-// user unescaped.
+// On Unix the child starts in a new session; see detachSysProcAttr. The
+// caller never connects the stdout or stderr of the child to the terminal
+// of the user.
 //
 // A bare command name (no "/") is looked up in the final PATH of the child,
 // so a PATH from the config wins. Node spawn and Rust Command do the same.
 // lookPath lists the skip rules and the PATH risks.
 //
 // A server from an untrusted project file starts only with an explicit
-// opt-in (Options.AllowUntrusted). See the discover package doc, Untrusted
+// opt-in (SDKOptions.AllowUntrusted, passed on to
+// stdioOptions.AllowUntrusted). See the discover package doc, Untrusted
 // files.
 //
-// The Cmd holds revealed secrets. Never print, log or encode cmd.String(),
-// cmd.Env or cmd.Args.
+// The returned Cmd holds revealed secrets. Never print, log or encode
+// cmd.String(), cmd.Env or cmd.Args.
 //
 // The rules are for Unix only. Windows is a non-goal (PRD section 2.2).
 //
-// # Child lifecycle
+// # Child processes
 //
-// When Inspect returns, on success and on every error, the child process was
-// stopped and reaped. A normal stop has these steps:
+// stdioProcess runs the Cmd of stdioCommand with its own stdin and stdout
+// pipes, and gives them to the SDK as an IOTransport. It does not use the
+// SDK CommandTransport, because that transport calls cmd.Wait itself. With
+// the Setsid of stdioCommand, the child leads its own process group.
 //
-//  1. Close the stdin of the child.
-//  2. If the child still runs after a short grace period, send SIGTERM.
-//  3. If the child still runs after one more grace period, send SIGKILL.
+// The stop (stdioProcess.stop) closes the stdin of the server, waits up to
+// stopGrace for the server to exit, kills the process group with
+// killProcessGroup before cmd.Wait, as the Inspector contract asks, closes
+// the read end of stdout and then calls Wait. stdioCommand returns a Cmd
+// made with exec.Command, so stdioProcess does not use configureProcessGroup
+// (exec refuses a Cancel on a Cmd without a context). Instead, when ctx
+// ends, it kills the process group and closes both pipes at once.
+// SDKInspector stops the child before it closes the MCP session, because the
+// close of the session waits for replies that a server can block by not
+// reading its stdin.
 //
-// When ctx is canceled or its deadline passes, the process group of the
-// child gets SIGKILL at once. After the stop, the process group gets SIGKILL
-// once more, so processes that the child started and that stayed in its
-// group stop too (for example node, started by npx). A process that left
-// the group, or that the operating system cannot kill, is the exception.
+// A process that leaves the group on purpose (with setsid, setpgid or a
+// double fork) is not killed, so this is not a sandbox. The group kill works
+// on Unix only (macOS and Linux). On other systems, only the direct child is
+// killed.
+//
+// # Stdio sessions
+//
+// The client of a stdio session offers no capabilities and refuses every
+// request of the server except ping (refuseServerRequests). So no request of
+// the server makes the client send a request back. The SDK still decodes the
+// params of a request before mcpmoat refuses it, and it must write each reply
+// to the stdin of the server. A server that floods requests and stops
+// reading its stdin blocks those writes until the stop or ctx ends.
+//
+// The handshake result and all list pages of one stdio session share a raw
+// size limit of 8 MiB, as JSON (rawLimit, maxRawBytes). The same value bounds
+// one frame of the transport. A server that goes over it gives KindTooLarge.
+//
+// SDKInspector removes the configured env values of at least 8 bytes from
+// the text of its errors: the server gets them and can echo them.
+//
+// # Remote servers
+//
+// [Remote] connects to a remote server and lists its tools, prompts and
+// resources. It refuses a server from an untrusted project file unless the
+// caller sets [RemoteOptions].AllowUntrusted after the explicit opt-in of the
+// user. The config type of the server picks the transport: http is
+// streamable HTTP, and sse is the legacy HTTP+SSE transport. mcpmoat does not
+// probe the other transport. If a server answers with an error that may mean
+// the wrong transport, the error text tells the user to change the type.
+//
+// # Secrets
+//
+// The header values and the secrets in the URL (the userinfo and the query)
+// go only to the configured origin. They never appear in an error. The
+// package removes them from the error text before it builds a [ConnectError].
+// The package never gives the userinfo of the URL to the SDK. It sends the
+// userinfo as a Basic Authorization header, unless the config sets an
+// Authorization header.
+//
+// The text of a [ConnectError] can still hold text that the server controls
+// (see "Untrusted data" below).
+//
+// # Client identity
+//
+// The package does not tell the server that the client is mcpmoat. The
+// default User-Agent is the net/http one, and the client name in the MCP
+// initialize request is a generic one. A server that recognises the scanner
+// could show it a clean tool list and show the real clients a poisoned one.
+// A server can still tell clients apart in other ways (see docs/PRD.md,
+// section 5.5).
+//
+// # Origin pin and redirects
+//
+// Every request must go to the configured scheme, host and port. The package
+// refuses any other request before it sends anything. This also blocks an SSE
+// server that announces its message endpoint on another host.
+//
+// A redirect is followed only when it stays on the same origin, and at most 3
+// times. Any other redirect is an error.
 //
 // # Limits
 //
-// A hostile server can send a next cursor forever, many items, or very long
-// pages, to make mcpmoat loop or use all its memory. So Inspect applies a
-// page cap and an item cap to each list kind (tools, prompts or resources),
-// and two byte limits per server that the three kinds share. The page cap
-// bounds the requests and the item cap bounds the items. The byte budget
-// bounds the converted text that mcpmoat keeps. The raw byte limit bounds
-// the JSON size of the pages as the SDK decoded them, also the fields that
-// mcpmoat drops (for example _meta or icons), which the SDK keeps in its
-// list cache until the session closes. Inspect stops at the first page that
-// goes over a limit, so the limits also bound the pages that the SDK decodes
-// and caches. A server that goes over a limit, or sends a cursor that it
-// sent before, gives [ErrTooManyItems].
+// A hostile server can send endless data, so the package sets limits:
 //
-// The byte limits count JSON bytes and converted text, not memory. Decoded
-// data can need many times more memory than its JSON: a page of many small
-// empty objects needs about 20 times its JSON size. So the memory that the
-// limits allow is many times the limits.
+//   - Each HTTP response body has a size cap (8 MiB by default). The whole
+//     SSE stream counts as one body.
+//   - All bodies of one inspection share a total budget (64 MiB). Many bodies
+//     that are each below the cap cannot add up to more than the budget.
+//   - The response headers of one response have a size limit (64 KiB).
+//   - A list has a cap on the number of pages (100) and the number of items
+//     (10,000). A repeated cursor is an error.
+//   - For a stdio server, the handshake and all lists share a raw size limit
+//     (8 MiB of JSON), which also bounds one frame (see Stdio sessions).
+//   - The SDK silently drops tools that have an invalid x-mcp-header
+//     annotation. The package records the tools list as the server sent it and
+//     reports every tool, because a scanner must see what the server sent.
 //
-// The residual: the SDK decodes each frame, which can be up to its line
-// limit (mcp.DefaultMaxLineLength), before mcpmoat can count it. Decoded
-// JSON can need many times its size in memory, so one hostile frame can
-// still cost a few hundred MiB. To measure a page, mcpmoat also encodes it
-// again for a short time. A firm bound on memory needs a custom transport
-// that limits the frame size and the total bytes read from the stdout of
-// the server (a follow-up).
+// A cap breach is an error. The package never cuts a list and returns the
+// rest, because the cut part could hide a malicious tool.
 //
-// The client of Inspect refuses every request of the server except ping: it
-// answers completion/complete, roots/list, sampling/createMessage,
-// elicitation/create and any other method with "method not found", at once.
-// So no request of the server makes the client send a request back. Only a
-// short allowlist of notifications passes. The SDK still decodes the params
-// of a server request before mcpmoat refuses it, and it must write each reply
-// to the stdin of the server. A server that floods requests and stops reading
-// its stdin blocks those writes. Only the stop of the child at the end of
-// Inspect, or the ctx deadline, bounds the goroutines and params that they
-// hold (see issue #28).
+// The caps count bytes on the wire. The SDK decodes each page into Go values
+// before the item cap applies, and decoded JSON can take many times its wire
+// size (a schema of millions of empty objects, for example). So one page can
+// use far more memory than the body cap. Issue #101 tracks a bounded decoder.
 //
-// Inspect lists a kind only when the server advertises its capability in the
-// handshake. The slice of a kind that the server does not advertise stays
-// nil; the slice of an advertised kind is never nil, also when it is empty.
+// # Network
+//
+// The package honours the proxy settings from the HTTP_PROXY, HTTPS_PROXY and
+// NO_PROXY environment variables. It makes no other network access (NFR-01).
+// Some clients ignore these variables, so a scan can take another route than
+// the client does. Over an http:// URL, the proxy then sees the configured
+// headers.
+//
+// TLS 1.2 or newer is required, and certificates are always verified. There is
+// no option to skip the check: only tests in this package can replace the
+// transport.
+//
+// # Untrusted data
+//
+// Every string in a [Result] comes from the server, and a malicious server
+// controls it. Never execute it, never put it in a command or a format
+// string, and escape it with internal/termsafe before you print it. The same
+// is true for the text of a [ConnectError], which can hold a status text or a
+// JSON-RPC message from the server, and for the text of Outcome.Err (see
+// Outcome).
 //
 // # Known limits
 //
-//   - The SDK silently drops some invalid tools before mcpmoat sees them
-//     (filterValidTools in the SDK: a nil tool, or a tool with invalid
-//     x-mcp-header annotations). mcpmoat cannot read such a tool. But it
-//     counts the tools in each page before the SDK filters them, so a drop
-//     is not silent: Inspect returns an error that wraps [ErrProtocol] and
-//     gives the number of dropped tools. The detection depends on where
-//     the SDK filters; a test fails if a new SDK version changes that.
-//   - A server can tell mcpmoat apart from the real client and show it a
-//     clean list: the handshake sends the client name "mcpmoat", and a
-//     server can leave out the tools capability for mcpmoat only. A nil
-//     [Result.Tools] shows the second case. See issue #97.
-//   - A server without an absolute Dir runs in an empty directory, not in
-//     the directory where the client starts it (for Claude Code, the
-//     project of a project server). A launcher that reads its working
-//     directory can then start a different program: for example "npx foo"
-//     in a project runs the local node_modules/.bin/foo, but in the empty
-//     directory npx installs foo from the public registry and runs it,
-//     without a prompt, because stdin is not a terminal. That can be a
-//     package that the user never configured. See issue #104.
 //   - Resource templates are not listed.
-//   - HTTP and SSE servers give [ErrUnsupportedTransport] until issue #26.
-//   - There is no per-server timeout yet (issue #28). Until then, callers
-//     must give a ctx with a deadline.
-//   - The SDK client decodes the tool schemas and encodes them again. So
-//     [Tool.InputSchema] and [Tool.OutputSchema] have sorted keys and
-//     numbers as float64. They are not the exact bytes that the server sent.
+//   - Tool annotations (readOnlyHint, destructiveHint and the others) are not
+//     kept, so rules and pins do not see them; issue #99 tracks this.
+//   - The tool schemas are decoded and encoded again (see Tool.InputSchema).
+//   - A server can still tell mcpmoat apart from a real client in other ways
+//     than the name; see Client identity and issue #97.
+//   - A stdio server that floods requests during the handshake and does not
+//     read its stdin is bounded only by ctx: the SDK closes the session
+//     inside Client.Connect, before SDKInspector can stop the child.
+//   - A work directory that a process outside the group still uses stays
+//     behind below the run root.
+//
+// See docs/PRD.md, FR-04 to FR-06, NFR-01, NFR-03, NFR-04 and NFR-06.
 package inspect

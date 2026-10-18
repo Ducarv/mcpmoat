@@ -86,29 +86,24 @@ func sdkAssertResult(t *testing.T, got, want inspect.Result) {
 }
 
 // sdkAssertFailed checks the error contract of Inspect for a failed call:
-// a non-nil error, a zero Result, and an error that wraps at least one of
-// targets.
-func sdkAssertFailed(t *testing.T, res inspect.Result, err error, targets ...error) {
+// a non-nil *inspect.ConnectError, a zero Result, and a Kind that is one of
+// kinds. It returns the kind and the reason of the error.
+func sdkAssertFailed(t *testing.T, res inspect.Result, err error, kinds ...inspect.ConnectKind) (inspect.ConnectKind, string) {
 	t.Helper()
 	if err == nil {
-		t.Fatalf("Inspect() error = nil, want an error that wraps one of %v", targets)
+		t.Fatalf("Inspect() error = nil, want a ConnectError of kind %v", kinds)
 	}
 	if !reflect.DeepEqual(res, inspect.Result{}) {
 		t.Errorf("Inspect() Result = %s, want the zero Result with an error", sdkJSON(res))
 	}
-	if sdkWrapped(err, targets...) == nil {
-		t.Errorf("Inspect() error = %q, want an error that wraps one of %v", err, targets)
+	var ce *inspect.ConnectError
+	if !errors.As(err, &ce) {
+		t.Fatalf("Inspect() error = %v (%T), want a *inspect.ConnectError", err, err)
 	}
-}
-
-// sdkWrapped returns the first of targets that err wraps, or nil.
-func sdkWrapped(err error, targets ...error) error {
-	for _, target := range targets {
-		if errors.Is(err, target) {
-			return target
-		}
+	if !slices.Contains(kinds, ce.Kind) {
+		t.Errorf("Inspect() error kind = %q (%v), want one of %v", ce.Kind, err, kinds)
 	}
-	return nil
+	return ce.Kind, ce.Reason
 }
 
 // sdkAssertNoLeak fails the test when the error text holds any canary of
@@ -137,19 +132,7 @@ func sdkAssertNotExist(t *testing.T, path, why string) {
 func TestSDKInspectBenign(t *testing.T) {
 	t.Parallel()
 
-	got, err := sdkNew(t, inspect.Options{}).Inspect(sdkCtx(t, sdkTimeout), sdkBenign(t))
-	if err != nil {
-		t.Fatalf("Inspect() error = %v, want nil", err)
-	}
-	sdkAssertResult(t, got, inspecttest.BenignResult())
-}
-
-// TestSDKInspectClientVersion checks that a custom ClientVersion does not
-// change what the server reports.
-func TestSDKInspectClientVersion(t *testing.T) {
-	t.Parallel()
-
-	got, err := sdkNew(t, inspect.Options{ClientVersion: "1.2.3"}).Inspect(sdkCtx(t, sdkTimeout), sdkBenign(t))
+	got, err := sdkNew(t, inspect.SDKOptions{}).Inspect(sdkCtx(t, sdkTimeout), sdkBenign(t))
 	if err != nil {
 		t.Fatalf("Inspect() error = %v, want nil", err)
 	}
@@ -168,9 +151,9 @@ func TestSDKInspectUntrusted(t *testing.T) {
 		s.Untrusted = true
 		s.Env = sdkSecretEnv(map[string]string{"MCPMOAT_TEST_TOKEN": discovertest.CanaryEnv})
 
-		res, err := sdkNew(t, inspect.Options{}).Inspect(sdkCtx(t, sdkTimeout), s)
+		res, err := sdkNew(t, inspect.SDKOptions{}).Inspect(sdkCtx(t, sdkTimeout), s)
 
-		sdkAssertFailed(t, res, err, inspect.ErrUntrusted)
+		sdkAssertFailed(t, res, err, inspect.KindConfig)
 		sdkAssertNotExist(t, pidfile, "the untrusted server must not start")
 		sdkAssertNoLeak(t, err, pidfile)
 	})
@@ -181,7 +164,7 @@ func TestSDKInspectUntrusted(t *testing.T) {
 		s := sdkBenign(t, "-pidfile", pidfile)
 		s.Untrusted = true
 
-		got, err := sdkNew(t, inspect.Options{AllowUntrusted: true}).Inspect(sdkCtx(t, sdkTimeout), s)
+		got, err := sdkNew(t, inspect.SDKOptions{AllowUntrusted: true}).Inspect(sdkCtx(t, sdkTimeout), s)
 		if err != nil {
 			t.Fatalf("Inspect() error = %v, want nil with AllowUntrusted", err)
 		}
@@ -190,8 +173,9 @@ func TestSDKInspectUntrusted(t *testing.T) {
 	})
 }
 
-// TestSDKInspectRemote checks that a remote server returns
-// ErrUnsupportedTransport and that the error does not hold the URL or the
+// TestSDKInspectRemote checks that a remote server goes to Remote. The URL
+// has an ftp scheme, which Remote refuses before any network access, so the
+// test makes no network call. The error must not hold the URL secrets or the
 // header values.
 func TestSDKInspectRemote(t *testing.T) {
 	t.Parallel()
@@ -209,14 +193,17 @@ func TestSDKInspectRemote(t *testing.T) {
 			s := discover.Server{
 				Name:      "remote",
 				Transport: tt.transport,
-				URL:       discover.NewURL("https://user:" + discovertest.CanaryURL + "@example.invalid/mcp?key=" + discovertest.CanaryURL),
+				URL:       discover.NewURL("ftp://user:" + discovertest.CanaryURL + "@example.invalid/mcp?key=" + discovertest.CanaryURL),
 				Headers:   sdkSecretEnv(map[string]string{"Authorization": "Bearer " + discovertest.CanaryHeader}),
 			}
 
-			res, err := sdkNew(t, inspect.Options{AllowUntrusted: true}).Inspect(sdkCtx(t, sdkTimeout), s)
+			res, err := sdkNew(t, inspect.SDKOptions{AllowUntrusted: true}).Inspect(sdkCtx(t, sdkTimeout), s)
 
-			sdkAssertFailed(t, res, err, inspect.ErrUnsupportedTransport)
-			sdkAssertNoLeak(t, err, "example.invalid")
+			_, reason := sdkAssertFailed(t, res, err, inspect.KindConfig)
+			if !strings.Contains(reason, "unsupported URL scheme") {
+				t.Errorf("Inspect() reason = %q, want the URL scheme error of Remote", reason)
+			}
+			sdkAssertNoLeak(t, err)
 		})
 	}
 }
@@ -230,15 +217,15 @@ func TestSDKInspectCrash(t *testing.T) {
 	s := sdkBenign(t, "-mode", "crash")
 	s.Env = sdkSecretEnv(map[string]string{"MCPMOAT_TEST_TOKEN": discovertest.CanaryEnv})
 
-	res, err := sdkNew(t, inspect.Options{}).Inspect(sdkCtx(t, sdkTimeout), s)
+	res, err := sdkNew(t, inspect.SDKOptions{}).Inspect(sdkCtx(t, sdkTimeout), s)
 
-	sdkAssertFailed(t, res, err, inspect.ErrProtocol, inspect.ErrStart)
-	t.Logf("crash mode: error wraps %q; error: %v", sdkWrapped(err, inspect.ErrProtocol, inspect.ErrStart), err)
+	kind, _ := sdkAssertFailed(t, res, err, inspect.KindProtocol, inspect.KindStart)
+	t.Logf("crash mode: kind %q; error: %v", kind, err)
 	sdkAssertNoLeak(t, err)
 }
 
 // TestSDKInspectStartError checks commands that cannot start. The error
-// must wrap ErrStart and must not hold the args or the env values.
+// must be of KindStart and must not hold the args or the env values.
 func TestSDKInspectStartError(t *testing.T) {
 	t.Parallel()
 
@@ -261,16 +248,16 @@ func TestSDKInspectStartError(t *testing.T) {
 				Env:       sdkSecretEnv(map[string]string{"MCPMOAT_TEST_TOKEN": discovertest.CanaryEnv}),
 			}
 
-			res, err := sdkNew(t, inspect.Options{}).Inspect(sdkCtx(t, sdkTimeout), s)
+			res, err := sdkNew(t, inspect.SDKOptions{}).Inspect(sdkCtx(t, sdkTimeout), s)
 
-			sdkAssertFailed(t, res, err, inspect.ErrStart)
+			sdkAssertFailed(t, res, err, inspect.KindStart)
 			sdkAssertNoLeak(t, err)
 		})
 	}
 }
 
 // TestSDKInspectInvalidServer checks configs that inspect refuses before it
-// starts anything. The error must wrap ErrInvalidServer and must not hold the
+// starts anything. The error must be of KindConfig and must not hold the
 // command, the args, the env keys or the env values.
 func TestSDKInspectInvalidServer(t *testing.T) {
 	t.Parallel()
@@ -304,9 +291,9 @@ func TestSDKInspectInvalidServer(t *testing.T) {
 				Env:       sdkSecretEnv(tt.env),
 			}
 
-			res, err := sdkNew(t, inspect.Options{}).Inspect(sdkCtx(t, sdkTimeout), s)
+			res, err := sdkNew(t, inspect.SDKOptions{}).Inspect(sdkCtx(t, sdkTimeout), s)
 
-			sdkAssertFailed(t, res, err, inspect.ErrInvalidServer)
+			sdkAssertFailed(t, res, err, inspect.KindConfig)
 			sdkAssertNoLeak(t, err, sdkCommandMarker, pidfile)
 		})
 	}
@@ -331,7 +318,7 @@ func TestSDKInspectZeroValue(t *testing.T) {
 	var zero inspect.SDKInspector
 	res, err := zero.Inspect(sdkCtx(t, sdkTimeout), s)
 
-	sdkAssertFailed(t, res, err, inspect.ErrInvalidServer)
+	sdkAssertFailed(t, res, err, inspect.KindConfig)
 }
 
 // TestSDKInspectCanceledContext checks that Inspect starts nothing when ctx
@@ -344,9 +331,12 @@ func TestSDKInspectCanceledContext(t *testing.T) {
 	ctx, cancel := context.WithCancel(t.Context())
 	cancel()
 
-	res, err := sdkNew(t, inspect.Options{}).Inspect(ctx, s)
+	res, err := sdkNew(t, inspect.SDKOptions{}).Inspect(ctx, s)
 
-	sdkAssertFailed(t, res, err, context.Canceled)
+	sdkAssertFailed(t, res, err, inspect.KindTimeout)
+	if !errors.Is(err, context.Canceled) {
+		t.Errorf("Inspect() error = %v, want errors.Is context.Canceled", err)
+	}
 	sdkAssertNotExist(t, pidfile, "a canceled ctx must not start the server")
 }
 
@@ -357,9 +347,9 @@ func TestSDKInspectDeadline(t *testing.T) {
 	t.Parallel()
 
 	const deadline = time.Second
-	// The process gets SIGKILL when ctx ends, so a stop is fast. The
-	// worst case of a stop is 3*inspect.StopGrace; one more second is slack
-	// for a loaded CI machine.
+	// The process group gets SIGKILL when ctx ends, so a stop is fast. A
+	// normal stop takes at most one inspect.StopGrace; the bound allows
+	// three, plus one second of slack for a loaded CI machine.
 	const bound = deadline + 3*inspect.StopGrace + time.Second
 
 	tests := []struct {
@@ -374,7 +364,7 @@ func TestSDKInspectDeadline(t *testing.T) {
 			t.Parallel()
 			s := sdkBenign(t, "-mode", tt.mode)
 			s.Env = sdkSecretEnv(map[string]string{"MCPMOAT_TEST_TOKEN": discovertest.CanaryEnv})
-			inspector := sdkNew(t, inspect.Options{})
+			inspector := sdkNew(t, inspect.SDKOptions{})
 			ctx := sdkCtx(t, deadline)
 
 			start := time.Now()
@@ -382,7 +372,10 @@ func TestSDKInspectDeadline(t *testing.T) {
 			elapsed := time.Since(start)
 
 			t.Logf("mode %s: Inspect returned after %v", tt.mode, elapsed)
-			sdkAssertFailed(t, res, err, context.DeadlineExceeded)
+			sdkAssertFailed(t, res, err, inspect.KindTimeout)
+			if !errors.Is(err, context.DeadlineExceeded) {
+				t.Errorf("Inspect() error = %v, want errors.Is context.DeadlineExceeded", err)
+			}
 			if elapsed > bound {
 				t.Errorf("Inspect() returned after %v, want at most %v", elapsed, bound)
 			}
@@ -406,7 +399,7 @@ func TestSDKInspectArgsReachChild(t *testing.T) {
 	envfile := filepath.Join(weird, "env 'file'")
 	s := sdkBenign(t, "-pidfile", pidfile, "-envfile", envfile)
 
-	got, err := sdkNew(t, inspect.Options{}).Inspect(sdkCtx(t, sdkTimeout), s)
+	got, err := sdkNew(t, inspect.SDKOptions{}).Inspect(sdkCtx(t, sdkTimeout), s)
 	if err != nil {
 		t.Fatalf("Inspect() error = %v, want nil", err)
 	}
@@ -504,7 +497,7 @@ func TestSDKInspectScrubbedEnv(t *testing.T) {
 			s := sdkBenign(t, "-envfile", envfile)
 			s.Env = sdkSecretEnv(tt.env)
 
-			inspector := inspect.NewForTest(inspect.Options{}, filepath.Join(t.TempDir(), "run"), parent)
+			inspector := inspect.NewForTest(inspect.SDKOptions{}, filepath.Join(t.TempDir(), "run"), parent, 0)
 			got, err := inspector.Inspect(sdkCtx(t, sdkTimeout), s)
 			if err != nil {
 				t.Fatalf("Inspect() error = %v, want nil", err)
@@ -548,7 +541,7 @@ func TestSDKInspectRemovesWorkDir(t *testing.T) {
 	t.Parallel()
 
 	root := filepath.Join(t.TempDir(), "run")
-	inspector := inspect.NewForTest(inspect.Options{}, root, nil)
+	inspector := inspect.NewForTest(inspect.SDKOptions{}, root, nil, 0)
 	stdio := func(args ...string) discover.Server { return sdkBenign(t, args...) }
 
 	tests := []struct {
@@ -604,8 +597,8 @@ func TestSDKInspectRemovesWorkDir(t *testing.T) {
 		pidfile := filepath.Join(t.TempDir(), "pid")
 		s := sdkBenign(t, "-pidfile", pidfile)
 
-		res, err := inspect.NewForTest(inspect.Options{}, filepath.Join(file, "run"), nil).Inspect(sdkCtx(t, sdkTimeout), s)
-		sdkAssertFailed(t, res, err, inspect.ErrStart)
+		res, err := inspect.NewForTest(inspect.SDKOptions{}, filepath.Join(file, "run"), nil, 0).Inspect(sdkCtx(t, sdkTimeout), s)
+		sdkAssertFailed(t, res, err, inspect.KindStart)
 		sdkAssertNotExist(t, pidfile, "the server must not start without a working directory")
 		sdkAssertNoLeak(t, err, pidfile)
 	})
@@ -618,7 +611,7 @@ func TestSDKInspectConcurrent(t *testing.T) {
 
 	const workers = 4
 	s := sdkBenign(t)
-	inspector := sdkNew(t, inspect.Options{})
+	inspector := sdkNew(t, inspect.SDKOptions{})
 	ctx := sdkCtx(t, sdkTimeout)
 
 	var (

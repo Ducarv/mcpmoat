@@ -5,128 +5,122 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"log/slog"
 	"os"
-	"os/exec"
-	"time"
+	"strings"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/Ducarv/mcpmoat/internal/discover"
 )
 
-// stopGrace is how long the SDK command transport waits at each step when it
-// stops a stdio server: after it closes the stdin of the server, and again
-// after it sends SIGTERM. After the second wait it sends SIGKILL and waits
-// once more. So a server that ignores stdin and SIGTERM stops after about
-// 2*stopGrace, and Close gives up after 3*stopGrace in the worst case.
-const stopGrace = 2 * time.Second
-
-// defaultClientVersion is the MCP client version that mcpmoat sends when
-// Options.ClientVersion is empty.
-const defaultClientVersion = "dev"
-
-// errNilResult means that the SDK gave a nil result and a nil error for a
-// list request. inspect treats it as a protocol error.
-var errNilResult = errors.New("nil result")
+// SDKOptions configures SDKInspector. The zero value is ready to use.
+type SDKOptions struct {
+	// AllowUntrusted lets Inspect start or connect to a server from an
+	// untrusted project file (discover.Server.Untrusted). The caller must
+	// have the explicit opt-in of the user before it sets this.
+	AllowUntrusted bool
+}
 
 // SDKInspector is the [Inspector] that uses the official MCP Go SDK. It
-// supports stdio servers. For an http or sse server it returns
-// [ErrUnsupportedTransport] until issue #26.
+// starts stdio servers itself (see Inspect) and gives remote servers to
+// [Remote]. So it is the one Inspector that [Run] needs.
 //
 // SDKInspector holds no mutable state: each call to Inspect makes its own
 // SDK client, process and connection. So one SDKInspector is safe for
 // concurrent use by multiple goroutines.
 type SDKInspector struct {
-	opts Options
+	opts SDKOptions
 
 	// environ returns the environment of mcpmoat in the form of os.Environ,
 	// the parent of the child environment (see buildEnv). runRoot returns
-	// the directory for the work directories of servers without an
-	// absolute Dir (see workDir). When a field is nil, as in New and in a
-	// zero SDKInspector, Inspect uses os.Environ and defaultRunRoot. Tests
-	// set them, so that they never read the real environment or write to the
-	// cache directory of the user.
-	environ func() []string
-	runRoot func() (string, error)
+	// the directory for the work directories of servers without an absolute
+	// Dir (see workDir). rawLimit is the raw size limit; 0 means
+	// maxRawBytes. When a field is zero, as in New and in a zero
+	// SDKInspector, Inspect uses the default. Tests set them, so that they
+	// never read the real environment or write to the cache directory of
+	// the user, and can go over a small limit.
+	environ  func() []string
+	runRoot  func() (string, error)
+	rawLimit int64
 }
 
 var _ Inspector = (*SDKInspector)(nil)
 
 // New returns an [SDKInspector] with the options opts.
-func New(opts Options) *SDKInspector {
+func New(opts SDKOptions) *SDKInspector {
 	return &SDKInspector{opts: opts}
 }
 
-// Inspect starts the stdio server s, does the MCP handshake, lists its tools,
-// prompts and resources, and stops the server. See the error contract on
-// [Inspector].
+// Inspect reads the tools, prompts and resources of the server s. A remote
+// server (http or sse) goes to [Remote], with opts.AllowUntrusted. A stdio
+// server is started as a child process; see the rest of this comment.
 //
-// The MCP SDK silently drops some invalid tools from a tools/list result
-// (see listWatch). When it drops one or more, Inspect returns an error that
-// wraps [ErrProtocol] and gives the count, not a Result without those tools.
-// So a server cannot hide a tool from the rules and the pins that way. The
-// same listWatch applies the raw byte limit maxRawBytes to the list pages,
-// which gives [ErrTooManyItems].
+// Every non-nil error is a *ConnectError; use errors.As to get it. Its text
+// never holds a configured env value: mcpmoat puts none there, and Inspect
+// removes the configured values of at least minBareSecretLen bytes from text
+// that the server sent (a server gets them and can echo them). It can hold
+// other text that the server controls, so callers must escape it with
+// internal/termsafe before they print it. errors.Is(err,
+// context.DeadlineExceeded) works for timeouts.
 //
-// Inspect does not start a server that is Untrusted unless
-// Options.AllowUntrusted is true. It does not connect to a remote server.
+// For a stdio server, Inspect:
 //
-// Inspect builds the command with stdioCommand (NFR-04): no shell, a
-// scrubbed environment, a bare command name looked up in the PATH of the
-// child, and on Unix a new session and process group (detachSysProcAttr).
+//   - refuses a server from an untrusted file unless opts.AllowUntrusted is
+//     set (KindConfig), and starts nothing then;
+//   - builds the command with stdioCommand (NFR-04): no shell, a scrubbed
+//     environment, a bare command name looked up in the PATH of the child,
+//     and on Unix a new session and process group;
+//   - runs the child in its absolute Dir, or else in a new, empty directory
+//     below the run root (workDir), and removes that directory at the end;
+//   - refuses every request of the server except ping (refuseServerRequests);
+//   - lists with listAll, and fails with KindTooLarge when the handshake and
+//     the lists go over maxRawBytes (rawLimit).
 //
 // Stop guarantee: when Inspect returns, on success and on every error, the
-// child process was stopped and reaped, and its work directory below the
-// run root, if any, was removed. A normal stop closes stdin of the server,
-// then sends SIGTERM and SIGKILL if needed. When ctx ends, Inspect sends
-// SIGKILL to the process group of the child at once. After the stop it
-// sends SIGKILL to the process group once more, so the processes that the
-// child started and that stayed in its group stop too.
+// child was stopped and reaped (see stdioProcess.stop): stdin closed, up to
+// stopGrace to exit, SIGKILL to the process group before cmd.Wait, then
+// Wait. When ctx ends, the process group gets SIGKILL at once. The
+// exceptions: a process that left the group; a process that the operating
+// system cannot kill, which blocks Wait; and a work directory that such a
+// process still uses, which stays behind below the run root.
 //
-// The exceptions: a process that left the group; a process that the
-// operating system cannot kill (the SDK gives up one stopGrace after
-// SIGKILL, and then the child is not reaped); a work directory that a
-// process still uses, which then stays behind below the run root; and a
-// handshake that fails while the server floods requests and does not read
-// its stdin, which only ctx bounds (the SDK closes its session inside
-// Client.Connect then, before Inspect can stop the child).
+// Inspect stops the child before it closes the MCP session. The close of
+// the session waits until the SDK has written its replies to the requests
+// of the server, and a server that does not read its stdin blocks those
+// writes until its stdin is closed. When that happens during the handshake,
+// the SDK closes the session inside Client.Connect, so only ctx bounds it.
 func (i *SDKInspector) Inspect(ctx context.Context, s discover.Server) (Result, error) {
-	if s.Untrusted && !i.opts.AllowUntrusted {
-		return Result{}, fmt.Errorf("%w: not started without the explicit opt-in", ErrUntrusted)
-	}
 	if s.Transport.IsRemote() {
-		// IsRemote is true only for the two known constants, so the text
-		// is "http" or "sse", not untrusted text. Remote servers come with
-		// issue #26.
-		return Result{}, fmt.Errorf("%w: %s servers are not supported yet", ErrUnsupportedTransport, s.Transport)
+		return Remote(ctx, s, RemoteOptions{AllowUntrusted: i.opts.AllowUntrusted})
+	}
+	return i.inspectStdio(ctx, s)
+}
+
+// inspectStdio is Inspect for a server that is not remote.
+func (i *SDKInspector) inspectStdio(ctx context.Context, s discover.Server) (Result, error) {
+	if s.Untrusted && !i.opts.AllowUntrusted {
+		return Result{}, configError(s, "untrusted project server; starting it needs explicit opt-in")
 	}
 	if err := ctx.Err(); err != nil {
-		return Result{}, err
+		return Result{}, classify(err, s, nil, nil)
 	}
 
-	// The defers below stop things in this order:
-	//
-	//  1. transport.stop: stops the process with the steps on stopGrace,
-	//     reaps it, and kills what is left of its process group.
-	//  2. cs.Close: ends the MCP session. It must come after the stop:
-	//     cs.Close waits until the SDK has written its replies to the
-	//     requests of the server, and a server that does not read its
-	//     stdin blocks those writes until its stdin is closed.
-	//  3. cleanup: removes the work directory, now that the process no
-	//     longer uses it.
-	//  4. cancel: ends ctx. The kill on ctx (see closingTransport) is
-	//     already stopped at this point.
-	//
-	// The defer for cancel is registered first, so that it runs last.
+	// The defers below run in this order: the stop of the process, the
+	// removal of the work directory, then cancel. cancel ends ctx last, so
+	// the kill on ctx (see startStdio) is already stopped then.
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
-	environ, runRoot := os.Environ, defaultRunRoot
+	environ, runRoot, limit := os.Environ, defaultRunRoot, int64(maxRawBytes)
 	if i.environ != nil {
 		environ = i.environ
 	}
 	if i.runRoot != nil {
 		runRoot = i.runRoot
+	}
+	if i.rawLimit > 0 {
+		limit = i.rawLimit
 	}
 
 	fallback, cleanup, err := workDir(s.Dir, runRoot)
@@ -134,7 +128,7 @@ func (i *SDKInspector) Inspect(ctx context.Context, s discover.Server) (Result, 
 	// the error check.
 	defer cleanup()
 	if err != nil {
-		return Result{}, err
+		return Result{}, startFailure(s, "cannot make the work directory below the user cache directory", err)
 	}
 
 	cmd, err := stdioCommand(s, stdioOptions{
@@ -143,73 +137,62 @@ func (i *SDKInspector) Inspect(ctx context.Context, s discover.Server) (Result, 
 		AllowUntrusted: i.opts.AllowUntrusted,
 	})
 	if err != nil {
-		return Result{}, commandError(err)
+		return Result{}, commandError(s, err)
 	}
 
-	transport := &closingTransport{
-		inner: &mcp.CommandTransport{Command: cmd, TerminateDuration: stopGrace},
-		cmd:   cmd,
+	proc, err := startStdio(ctx, cmd)
+	if err != nil {
+		return Result{}, startError(ctx, s, err)
 	}
 	// This defer covers the paths where Client.Connect fails. On success,
 	// the defer below stops the process first; stop is idempotent.
-	defer transport.stop()
+	defer proc.stop()
 
-	client, watch := i.newWatchedClient(maxRawBytes)
-	cs, err := client.Connect(ctx, transport, nil)
-	if err != nil {
-		if transport.startErr != nil {
-			return Result{}, startError(ctx, transport.startErr)
+	secrets := envSecrets(s.Env)
+	raw, sizes := &rawLists{}, &rawLimit{limit: limit}
+	// fail turns err into the *ConnectError that Inspect returns. The SDK
+	// formats some errors with %v, which drops the context error from the
+	// chain. When ctx has ended, fail puts its error first, so the kind is
+	// KindTimeout and errors.Is(err, context.DeadlineExceeded) works.
+	fail := func(err error) (Result, error) {
+		if ctxErr := ctx.Err(); ctxErr != nil && !errors.Is(err, ctxErr) {
+			err = fmt.Errorf("%w: %w", ctxErr, err)
 		}
-		return Result{}, sessionError(ctx, "handshake", err)
+		return Result{}, stdioFailure(s, err, secrets, sizes.exceeded())
 	}
-	// Stop the process before cs.Close, see the stop order above. The error
+
+	client := newStdioClient(raw, sizes)
+	cs, err := client.Connect(ctx, proc.transport(int(limit)), nil)
+	if err != nil {
+		return fail(err)
+	}
+	// Stop the process before cs.Close (see the doc of Inspect). The error
 	// of Close does not change the result, so Inspect drops it.
 	defer func() {
-		transport.stop()
+		proc.stop()
 		_ = cs.Close()
 	}()
 
-	return inspectWatched(ctx, cs, watch)
+	initRes := cs.InitializeResult()
+	if initRes == nil {
+		// The SDK always sets the result after a successful Connect. Guard
+		// anyway: a nil would panic below.
+		return fail(errors.New("no initialize result"))
+	}
+	result := resultFromInit(initRes)
+	result.Tools, result.Prompts, result.Resources, err = listAll(ctx, cs, initRes.Capabilities, raw)
+	if err != nil {
+		return fail(err)
+	}
+	return result, nil
 }
 
-// commandError maps an error of stdioCommand to a sentinel of the error
-// contract of [Inspector]. stdioCommand returns fixed sentinels with no
-// config text, so the result holds none either.
-func commandError(err error) error {
-	sentinel := ErrInvalidServer
-	switch {
-	case errors.Is(err, errNotStdio):
-		sentinel = ErrUnsupportedTransport
-	case errors.Is(err, errUntrusted):
-		sentinel = ErrUntrusted
-	case errors.Is(err, errCommandNotFound), errors.Is(err, errCommandNotRunnable), errors.Is(err, errNoWorkDir):
-		sentinel = ErrStart
-	}
-	return fmt.Errorf("%w: %w", sentinel, err)
-}
-
-// startError returns an error that wraps [ErrStart] for err, the error of
-// exec.Cmd.Start. Its text is fixed: the error of Start can hold cmd.Path or
-// cmd.Dir, which are untrusted config text (see stdioCommand). It keeps only
-// the class of err (fs.ErrNotExist or fs.ErrPermission), and the context
-// error when ctx is done.
-func startError(ctx context.Context, err error) error {
-	if ctxErr := ctx.Err(); ctxErr != nil {
-		return fmt.Errorf("%w: the server process did not start: %w", ErrStart, ctxErr)
-	}
-	switch {
-	case errors.Is(err, fs.ErrNotExist):
-		return fmt.Errorf("%w: the command or the work directory does not exist: %w", ErrStart, fs.ErrNotExist)
-	case errors.Is(err, fs.ErrPermission):
-		return fmt.Errorf("%w: no permission to run the command or to use the work directory: %w", ErrStart, fs.ErrPermission)
-	}
-	return fmt.Errorf("%w: the server process did not start", ErrStart)
-}
-
-// newClient returns a new SDK client for one call to Inspect.
+// newStdioClient returns a new SDK client for one stdio server.
 //
-// The client offers no capabilities to the server, and it serves no request
-// of the server except ping:
+// The client uses the same neutral identity as Remote (clientName and
+// clientVersion), so a server cannot tell mcpmoat from another client by
+// name. It offers no capabilities to the server, and it serves no request of
+// the server except ping:
 //
 //   - Capabilities is set and empty. A nil Capabilities would advertise
 //     "roots" for historical reasons.
@@ -218,269 +201,101 @@ func startError(ctx context.Context, err error) error {
 //     or elicitation.
 //   - The receiving middleware refuseServerRequests answers every server
 //     request except ping with "method not found", before the SDK handler
-//     runs: completion/complete, roots/list, sampling/createMessage,
-//     elicitation/create and any other method. Without it, the SDK would
-//     still answer roots/list (with an empty list), and it would send a
-//     completion/complete request back to the server and wait for the
-//     answer. Only a short allowlist of notifications passes; see
+//     runs. Only a short allowlist of notifications passes; see
 //     allowedServerMethod.
 //   - The multi round-trip middleware is disabled. It answers input
 //     requests from the server on tools/call, prompts/get and
-//     resources/read, which mcpmoat never sends; disabling it removes one
-//     more path for server requests.
+//     resources/read, which mcpmoat never sends.
 //
-// Logger stays nil, so the SDK logs nothing. Its logs could hold untrusted
-// server text. Inspect finds the tools that the SDK drops without the logs:
-// see newWatchedClient.
-func (i *SDKInspector) newClient() *mcp.Client {
-	version := i.opts.ClientVersion
-	if version == "" {
-		version = defaultClientVersion
-	}
+// The sending middleware of raw keeps the tools as the server sent them,
+// for listAll, and the one of limit applies the raw size limit. The logger
+// discards everything: SDK logs can hold untrusted server text.
+func newStdioClient(raw *rawLists, limit *rawLimit) *mcp.Client {
 	c := mcp.NewClient(
-		&mcp.Implementation{Name: "mcpmoat", Version: version},
+		&mcp.Implementation{Name: clientName, Version: clientVersion},
 		&mcp.ClientOptions{
 			Capabilities:   &mcp.ClientCapabilities{},
 			MultiRoundTrip: &mcp.MultiRoundTripOptions{Disabled: true},
+			Logger:         slog.New(slog.DiscardHandler),
 		},
 	)
 	c.AddReceivingMiddleware(refuseServerRequests)
+	c.AddSendingMiddleware(raw.middleware(), limit.middleware)
 	return c
 }
 
-// inspectSession reads the handshake result of cs and lists the tools,
-// prompts and resources of the server, one kind at a time.
-//
-// It lists a kind only when the server advertises its capability in the
-// handshake (tools, prompts or resources). A server without that capability
-// would answer "method not found". The slice of a kind that the server does
-// not advertise stays nil. The slice of an advertised kind is never nil, also
-// when it is empty, so callers can tell the two cases apart (issue #97).
-//
-// It uses the paged ListX calls through collect, not the SDK iterators such
-// as cs.Tools, because the iterators have no limit on pages or items. One
-// byte budget of maxBytes is shared by the three kinds, so the limit is for
-// the server, not for one kind.
-//
-// On an error, the Result is zero, also when an earlier kind was listed
-// without error. The error wraps [ErrProtocol], [ErrTooManyItems] or the
-// context error.
-func inspectSession(ctx context.Context, cs *mcp.ClientSession) (Result, error) {
-	return inspectSessionBudget(ctx, cs, newByteBudget(maxBytes))
-}
-
-// inspectSessionBudget is inspectSession with the byte budget budget, which
-// the three kinds share. Tests give a small budget, so that they can go over
-// it without sending maxBytes through the SDK.
-func inspectSessionBudget(ctx context.Context, cs *mcp.ClientSession, budget *byteBudget) (Result, error) {
-	initRes := cs.InitializeResult()
-	if initRes == nil {
-		return Result{}, sessionError(ctx, "handshake", errNilResult)
-	}
-
-	res := Result{
-		ProtocolVersion: initRes.ProtocolVersion,
-		Instructions:    initRes.Instructions,
-	}
-	if initRes.ServerInfo != nil {
-		res.ServerName = initRes.ServerInfo.Name
-		res.ServerVersion = initRes.ServerInfo.Version
-	}
-
-	// The handshake strings are text that mcpmoat keeps, so they count
-	// against the same budget as the lists.
-	n := len(res.ProtocolVersion) + len(res.Instructions) + len(res.ServerName) + len(res.ServerVersion)
-	if err := budget.spend(n); err != nil {
-		return Result{}, sessionError(ctx, "handshake", err)
-	}
-
-	caps := initRes.Capabilities
-	if caps == nil {
-		// A server that sends no capabilities offers nothing to list.
-		return res, nil
-	}
-
-	// The three blocks below differ only in the SDK call, the converter, the
-	// size function and the op text. Keep them in step: a change to the nil
-	// guard or the sessionError wrap goes into all three.
-	if caps.Tools != nil {
-		tools, err := collect(ctx, budget, toolSize, func(ctx context.Context, cursor string) ([]Tool, string, error) {
-			r, err := cs.ListTools(ctx, &mcp.ListToolsParams{Cursor: cursor})
-			if err != nil {
-				return nil, "", err
-			}
-			if r == nil {
-				return nil, "", errNilResult
-			}
-			items, err := toTools(r.Tools)
-			if err != nil {
-				return nil, "", err
-			}
-			return items, r.NextCursor, nil
-		})
-		if err != nil {
-			return Result{}, sessionError(ctx, "list tools", err)
+// envSecrets returns the configured env values of at least minBareSecretLen
+// bytes, for classify to remove from error text. A shorter value is too
+// likely to match ordinary words ("1", "true", "info"), and too short to be
+// a token.
+func envSecrets(env discover.SecretMap) []string {
+	var secrets []string
+	for _, key := range env.Keys() {
+		if v := env[key].Reveal(); len(v) >= minBareSecretLen {
+			secrets = append(secrets, v)
 		}
-		res.Tools = tools
 	}
-
-	if caps.Prompts != nil {
-		prompts, err := collect(ctx, budget, promptSize, func(ctx context.Context, cursor string) ([]Prompt, string, error) {
-			r, err := cs.ListPrompts(ctx, &mcp.ListPromptsParams{Cursor: cursor})
-			if err != nil {
-				return nil, "", err
-			}
-			if r == nil {
-				return nil, "", errNilResult
-			}
-			return toPrompts(r.Prompts), r.NextCursor, nil
-		})
-		if err != nil {
-			return Result{}, sessionError(ctx, "list prompts", err)
-		}
-		res.Prompts = prompts
-	}
-
-	if caps.Resources != nil {
-		resources, err := collect(ctx, budget, resourceSize, func(ctx context.Context, cursor string) ([]Resource, string, error) {
-			r, err := cs.ListResources(ctx, &mcp.ListResourcesParams{Cursor: cursor})
-			if err != nil {
-				return nil, "", err
-			}
-			if r == nil {
-				return nil, "", errNilResult
-			}
-			return toResources(r.Resources), r.NextCursor, nil
-		})
-		if err != nil {
-			return Result{}, sessionError(ctx, "list resources", err)
-		}
-		res.Resources = resources
-	}
-
-	return res, nil
+	return secrets
 }
 
-// sessionError wraps err, the error of the step op ("handshake" or
-// "list tools", for example), so that it follows the error contract of
-// [Inspector]:
-//
-//   - An error that wraps [ErrTooManyItems] keeps it as its only sentinel.
-//     It is a limit of mcpmoat, not a broken protocol.
-//   - When ctx is done, the error also wraps the context error, so that
-//     errors.Is(err, context.DeadlineExceeded) works even if the SDK error
-//     does not wrap it.
-//   - Every other error wraps [ErrProtocol] once.
-//
-// err can hold text that the server sent. mcpmoat puts no Args, Env, Headers
-// or URL values in it, because the SDK never sees them: stdioCommand passes
-// them to the process only.
-func sessionError(ctx context.Context, op string, err error) error {
-	if errors.Is(err, ErrTooManyItems) {
-		return fmt.Errorf("%s: %w", op, err)
+// stdioFailure turns err, from the MCP session of a stdio server, into a
+// *ConnectError. classify gives KindTimeout for a context error and
+// KindProtocol for the rest, with the secrets removed and the text cut. When
+// the server went over the raw size limit (tooLarge, or errRawTooLarge in
+// the chain), a KindProtocol error becomes KindTooLarge.
+func stdioFailure(s discover.Server, err error, secrets []string, tooLarge bool) *ConnectError {
+	ce := classify(err, s, nil, secrets)
+	if ce.Kind == KindProtocol && (tooLarge || errors.Is(err, errRawTooLarge)) {
+		ce.Kind = KindTooLarge
+		ce.Reason = errRawTooLarge.Error()
+		ce.err = errRawTooLarge
 	}
-	if ctxErr := ctx.Err(); ctxErr != nil && !errors.Is(err, ctxErr) {
-		if errors.Is(err, ErrProtocol) {
-			return fmt.Errorf("%s: %w: %w", op, err, ctxErr)
-		}
-		return fmt.Errorf("%w: %s: %w: %w", ErrProtocol, op, err, ctxErr)
-	}
-	if errors.Is(err, ErrProtocol) {
-		// For example a schema error from toTools: do not add the
-		// sentinel twice.
-		return fmt.Errorf("%s: %w", op, err)
-	}
-	return fmt.Errorf("%w: %s: %w", ErrProtocol, op, err)
+	return ce
 }
 
-// closingTransport is an [mcp.Transport] around the SDK command transport. It
-// remembers what Connect did, for three reasons:
-//
-//   - Inspect must tell a start failure ([ErrStart]) from a handshake
-//     failure ([ErrProtocol]). Both come back from Client.Connect.
-//   - Client.Connect does not close the connection on every error path. With
-//     the connection kept here, Inspect can always close it, and so always
-//     stop and reap the process (see stop).
-//   - stdioCommand uses exec.Command, not exec.CommandContext, so os/exec
-//     does not kill the child when ctx ends. Connect arranges that kill: when
-//     ctx ends, the process group of the child gets SIGKILL at once.
-//
-// Connect returns the connection of the inner transport unchanged, not a
-// wrapper. The SDK checks the connection for optional interfaces, and a
-// wrapper would hide them.
-//
-// The SDK calls Connect exactly once, in the goroutine that calls
-// Client.Connect. So Inspect can read the fields after Client.Connect
-// returns, without a mutex.
-type closingTransport struct {
-	inner mcp.Transport
-
-	// cmd is the command that inner starts in Connect.
-	cmd *exec.Cmd
-
-	// conn is the connection that inner returned, or nil.
-	conn mcp.Connection
-
-	// startErr is the error of inner.Connect, or nil. The command transport
-	// starts the process in Connect, so a non-nil startErr means that the
-	// process did not start.
-	startErr error
-
-	// pid is the PID of the child, and so its process group ID, once
-	// Connect has started it.
-	pid int
-
-	// stopKill stops the kill on ctx that Connect arranges; nil before.
-	stopKill func() bool
-
-	// stopped is true after the first call to stop.
-	stopped bool
+// commandError turns an error of stdioCommand into a *ConnectError.
+// stdioCommand returns fixed sentinels with no config text, so the reason
+// is the sentinel text. A command that cannot be found or run, or a missing
+// work directory, gives KindStart; any other error is a config that mcpmoat
+// cannot use (KindConfig).
+func commandError(s discover.Server, err error) *ConnectError {
+	kind := KindConfig
+	if errors.Is(err, errCommandNotFound) || errors.Is(err, errCommandNotRunnable) || errors.Is(err, errNoWorkDir) {
+		kind = KindStart
+	}
+	return &ConnectError{
+		Kind:   kind,
+		Server: s.Name,
+		Reason: strings.TrimPrefix(err.Error(), "inspect: "),
+		err:    err,
+	}
 }
 
-// Connect starts the server process through the inner transport. When ctx
-// ends after that, the process group of the child gets SIGKILL at once.
-func (t *closingTransport) Connect(ctx context.Context) (mcp.Connection, error) {
-	conn, err := t.inner.Connect(ctx)
-	if err != nil {
-		t.startErr = err
-		return nil, err
+// startError turns err, the error of startStdio, into a *ConnectError. The
+// error of cmd.Start can hold cmd.Path or cmd.Dir, which are untrusted config
+// text (see stdioCommand), so the reason is fixed text, and the cause keeps
+// only the class of err: fs.ErrNotExist, fs.ErrPermission or nothing. When
+// ctx is done, the result is a timeout.
+func startError(ctx context.Context, s discover.Server, err error) *ConnectError {
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return classify(ctxErr, s, nil, nil)
 	}
-	t.conn = conn
-	// Start set cmd.Process in this goroutine, before the AfterFunc below
-	// exists, so the func reads pid without a race.
-	pid := t.cmd.Process.Pid
-	t.pid = pid
-	t.stopKill = context.AfterFunc(ctx, func() { killGroup(pid) })
-	return conn, nil
+	switch {
+	case errors.Is(err, fs.ErrNotExist):
+		return startFailure(s, "the command or the work directory does not exist", fs.ErrNotExist)
+	case errors.Is(err, fs.ErrPermission):
+		return startFailure(s, "no permission to run the command or to use the work directory", fs.ErrPermission)
+	}
+	return startFailure(s, "the server process did not start", nil)
 }
 
-// stop stops the process, if Connect started one. It does nothing if the
-// process never started, and a second call does nothing.
-//
-// For the command transport, the close of the SDK connection is how the
-// process stops, with the steps on stopGrace: it closes the stdin of the
-// server, which also ends a write of the SDK that blocks on it, and then
-// calls cmd.Wait. That close runs only once (sync.Once); a concurrent or
-// earlier close by the SDK is fine, because a second call waits for the
-// first one to finish. In the normal case the process has then exited and
-// is reaped. The SDK gives up one stopGrace after SIGKILL ("unresponsive
-// subprocess"), or earlier when it cannot close stdin; then the process is
-// not reaped. The error does not change the result, so stop drops it.
-//
-// Then stop sends SIGKILL to the process group once more, for the processes
-// that the child started and that stayed in its group. The child is reaped
-// at this point, so its PID is free again. While any process of the group
-// lives, the group ID stays in use and the signal reaches only that group.
-// The residual: when the group is empty, the kernel can give the PID to a
-// new process, and if that process leads a new group, the signal reaches
-// it. The window is the time between the reap and this call. The same holds
-// for the kill on ctx, when ctx ends in that window.
-func (t *closingTransport) stop() {
-	if t.conn == nil || t.stopped {
-		return
+// startFailure returns a KindStart error for s with the fixed reason and the
+// cause err. reason must not hold config text.
+func startFailure(s discover.Server, reason string, err error) *ConnectError {
+	return &ConnectError{
+		Kind:   KindStart,
+		Server: s.Name,
+		Reason: reason,
+		err:    err,
 	}
-	t.stopped = true
-	_ = t.conn.Close()
-	t.stopKill()
-	killGroup(t.pid)
 }

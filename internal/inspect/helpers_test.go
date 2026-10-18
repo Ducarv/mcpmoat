@@ -110,36 +110,6 @@ func envKey(entry string) string {
 	return name
 }
 
-// connectInMemory connects the base client of production (newClient,
-// without the listWatch that newWatchedClient adds; see connectWatched) to
-// server over in-memory transports. No process and no network are
-// involved. t.Cleanup closes both sessions.
-func connectInMemory(t *testing.T, server *mcp.Server) *mcp.ClientSession {
-	t.Helper()
-	return connectClient(t, server, New(Options{}).newClient())
-}
-
-// connectClient connects client to server over in-memory transports.
-// t.Cleanup closes both sessions.
-func connectClient(t *testing.T, server *mcp.Server, client *mcp.Client) *mcp.ClientSession {
-	t.Helper()
-	ctx := t.Context()
-	ct, st := mcp.NewInMemoryTransports()
-
-	ss, err := server.Connect(ctx, st, nil)
-	if err != nil {
-		t.Fatalf("server.Connect() error = %v", err)
-	}
-	t.Cleanup(func() { _ = ss.Close() })
-
-	cs, err := client.Connect(ctx, ct, nil)
-	if err != nil {
-		t.Fatalf("client.Connect() error = %v", err)
-	}
-	t.Cleanup(func() { _ = cs.Close() })
-	return cs
-}
-
 // objectSchema is the smallest input schema that the SDK server accepts.
 func objectSchema() map[string]any {
 	return map[string]any{"type": "object"}
@@ -162,18 +132,36 @@ func onMethod(method string, h mcp.MethodHandler) mcp.Middleware {
 	}
 }
 
-// connectWatched connects a client, made with the same constructor as
-// Inspect (newWatchedClient) and the raw byte limit of Inspect, to server
-// over in-memory transports. No process and no network are involved.
-// t.Cleanup closes both sessions.
-func connectWatched(t *testing.T, server *mcp.Server) (*mcp.ClientSession, *listWatch) {
+// connectStdio connects the client of a stdio session (newStdioClient), with
+// the raw size limit limit, to server over in-memory transports. No process
+// and no network are involved. It returns the session and the rawLists and
+// rawLimit of the client. t.Cleanup closes both sessions.
+func connectStdio(t *testing.T, server *mcp.Server, limit int64) (*mcp.ClientSession, *rawLists, *rawLimit) {
 	t.Helper()
-	return connectWatchedLimit(t, server, maxRawBytes)
+	ctx := t.Context()
+	ct, st := mcp.NewInMemoryTransports()
+
+	ss, err := server.Connect(ctx, st, nil)
+	if err != nil {
+		t.Fatalf("server.Connect() error = %v", err)
+	}
+	t.Cleanup(func() { _ = ss.Close() })
+
+	raw, lim := &rawLists{}, &rawLimit{limit: limit}
+	cs, err := newStdioClient(raw, lim).Connect(ctx, ct, nil)
+	if err != nil {
+		t.Fatalf("client.Connect() error = %v", err)
+	}
+	t.Cleanup(func() { _ = cs.Close() })
+	return cs, raw, lim
 }
 
-// connectWatchedLimit is connectWatched with the raw byte limit rawLimit.
-func connectWatchedLimit(t *testing.T, server *mcp.Server, rawLimit int64) (*mcp.ClientSession, *listWatch) {
-	t.Helper()
-	client, w := New(Options{}).newWatchedClient(rawLimit)
-	return connectClient(t, server, client), w
+// noopPrompt is a prompt handler that returns an empty result.
+func noopPrompt(context.Context, *mcp.GetPromptRequest) (*mcp.GetPromptResult, error) {
+	return &mcp.GetPromptResult{}, nil
+}
+
+// noopResource is a resource handler that returns an empty result.
+func noopResource(context.Context, *mcp.ReadResourceRequest) (*mcp.ReadResourceResult, error) {
+	return &mcp.ReadResourceResult{}, nil
 }

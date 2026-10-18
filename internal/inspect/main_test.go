@@ -30,11 +30,51 @@ import (
 // passed through exactly as configured.
 const envDumpArg = "-mcpmoat-test-envdump"
 
-// TestMain of the test binary of package inspect is in main_external_test.go
-// (package inspect_test). Go allows one TestMain for the internal and the external
-// tests together, and only the external package can import inspecttest. It
-// implements the "re-exec the test binary" pattern with envDumpArg and
-// writeEnvDump (exported to it in export_test.go).
+// helperModeArg is the first argument that turns the test binary into one of
+// the helper-mode fixture servers of helpermodes_unix_test.go. The next
+// argument names the mode. It is an argument for the same reason as
+// envDumpArg.
+const helperModeArg = "-mcpmoat-test-helper"
+
+// TestMain runs before any test in this package.
+//
+// It implements the "re-exec the test binary" pattern. A test starts the
+// compiled test binary (os.Executable) as a child process with envDumpArg as
+// its first argument. The child sees the trigger here and acts as a fixture
+// instead of a test runner.
+//
+// The check must come before m.Run. m.Run parses the command line with the
+// testing flag parser, and that parser rejects the unknown flag envDumpArg.
+//
+// The dump and helper branches call os.Exit so that no test runs in the
+// child. Since Go 1.15, TestMain may simply return after m.Run, and the test
+// binary then exits with the code that m.Run returned.
+//
+// This is the only TestMain of the test binary. It also serves the external
+// test package inspect_test: Go allows one TestMain for both packages.
+func TestMain(m *testing.M) {
+	if len(os.Args) >= 2 && os.Args[1] == envDumpArg {
+		if err := writeEnvDump(os.Stdout); err != nil {
+			fmt.Fprintf(os.Stderr, "env dump: %v\n", err)
+			os.Exit(1)
+		}
+		os.Exit(0)
+	}
+	if code, ok := runHelperMode(os.Args[1:]); ok {
+		os.Exit(code)
+	}
+	m.Run()
+	if afterTests != nil {
+		afterTests()
+	}
+}
+
+// afterTests runs after all tests, before the test binary exits. The
+// external test package sets it in an init func (see SetAfterTests in
+// export_test.go) to remove the fixture builds of inspecttest: only the
+// external package can import inspecttest, because inspecttest imports this
+// package.
+var afterTests func()
 
 // envDump is what the fixture child reports about itself.
 type envDump struct {

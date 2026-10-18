@@ -16,12 +16,19 @@ import (
 // (package inspect_test) use. A helper that only one file uses stays in that
 // file.
 
+// init makes TestMain (main_test.go) remove the fixture builds of
+// inspecttest after all tests. TestMain is in package inspect, which cannot
+// import inspecttest, because inspecttest imports inspect.
+func init() {
+	inspect.SetAfterTests(inspecttest.RemoveBuilds)
+}
+
 // sdkNew returns an SDKInspector with opts that makes the working
 // directories of servers in a new directory of the test, never in the cache
 // directory of the user.
-func sdkNew(t *testing.T, opts inspect.Options) *inspect.SDKInspector {
+func sdkNew(t *testing.T, opts inspect.SDKOptions) *inspect.SDKInspector {
 	t.Helper()
-	return inspect.NewForTest(opts, filepath.Join(t.TempDir(), "run"), nil)
+	return inspect.NewForTest(opts, filepath.Join(t.TempDir(), "run"), nil, 0)
 }
 
 // sdkReadPID reads the pidfile that the fixture writes and checks that it
