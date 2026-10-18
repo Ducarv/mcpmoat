@@ -11,7 +11,7 @@ import (
 	"github.com/BurntSushi/toml"
 )
 
-// maxTOMLDepth is the deepest nesting of [ ] and { } that readCodex accepts.
+// maxTOMLDepth is the deepest nesting of [ ] and { } that parseCodex accepts.
 // Real Codex configs nest 3 to 4 levels. The TOML parser has no limit of its
 // own, and deep input can use gigabytes of memory or crash the whole process
 // with a stack overflow that no recover can stop.
@@ -31,7 +31,7 @@ const maxTOMLDepth = 16
 // total and not for each piece.
 const maxTOMLKeyParts = 16
 
-// maxTOMLSize is the largest Codex config file that readCodex reads: 256 KiB.
+// maxTOMLSize is the largest Codex config file that ReadCodex reads: 256 KiB.
 // Real Codex configs are a few KiB, and the TOML parser is slower than the
 // JSON one, so this cap is lower than maxConfigSize.
 const maxTOMLSize = 256 << 10
@@ -39,7 +39,7 @@ const maxTOMLSize = 256 << 10
 // codexServersKey is the top-level key that holds the servers.
 const codexServersKey = "mcp_servers"
 
-// The server keys that Codex knows. readCodex reads the first group (see
+// The server keys that Codex knows. parseCodex reads the first group (see
 // codexReads) and ignores the second (see codexIgnoredKeys).
 //
 // These constants are kept apart from the JSON key constants on purpose,
@@ -63,7 +63,7 @@ const (
 	codexKeyToolTimeoutSec    = "tool_timeout_sec"
 )
 
-// codexIgnoredKeys lists the server keys that Codex knows and readCodex
+// codexIgnoredKeys lists the server keys that Codex knows and parseCodex
 // does not map to a Server field. bearer_token_env_var, env_http_headers and
 // env_vars hold the names of environment variables, and mcpmoat does not read
 // the environment. The scanner does not need enabled, startup_timeout_sec and
@@ -87,10 +87,10 @@ var (
 )
 
 // codexKnownKeys lists every server key that Codex knows: the keys in
-// codexReads and the keys in codexIgnoredKeys. readCodex uses it to find keys
+// codexReads and the keys in codexIgnoredKeys. parseCodex uses it to find keys
 // that differ from a known key only by letter case. It is built once, when
 // the package loads, so codexReads stays the one list of the keys that
-// readCodex reads. No code writes to it.
+// parseCodex reads. No code writes to it.
 var codexKnownKeys = codexAllKeys()
 
 // codexAllKeys returns the keys of codexReads, in order, then the keys in
@@ -114,7 +114,7 @@ const (
 	tomlTypeArrayHash = "ArrayHash"
 )
 
-// codexEntry is the part of one [mcp_servers.<name>] table that readCodex
+// codexEntry is the part of one [mcp_servers.<name>] table that parseCodex
 // uses. decodeCodexEntry fills it from the exact keys in codexReads.
 //
 // Env and HTTPHeaders are SecretMap values, and URL is a URL. The TOML
@@ -129,7 +129,7 @@ type codexEntry struct {
 	Cwd         string
 }
 
-// codexRead is one key that readCodex reads: the TOML type that the value
+// codexRead is one key that parseCodex reads: the TOML type that the value
 // must have, and a pointer to the codexEntry field that takes the value.
 // PrimitiveDecode writes through the pointer.
 type codexRead struct {
@@ -138,7 +138,7 @@ type codexRead struct {
 	dest any
 }
 
-// codexReads returns one codexRead for each server key that readCodex reads,
+// codexReads returns one codexRead for each server key that parseCodex reads,
 // with pointers into e. It is the one list of these keys: codexKnownKeys is
 // built from it.
 func codexReads(e *codexEntry) []codexRead {
@@ -169,19 +169,33 @@ func codexReads(e *codexEntry) []codexRead {
 //
 // See the package doc, Reading configs.
 func ReadCodex(ctx context.Context, path string) Result {
-	servers, errs := readCodex(ctx, path, maxTOMLSize, "")
+	// root "" reads the user's own file without confinement.
+	data, found, fe := readConfigFile(ctx, path, maxTOMLSize, "")
+	switch {
+	case fe != nil:
+		return Result{Errors: []*FileError{fe}}
+	case !found:
+		return Result{}
+	}
+	servers, errs := parseCodex(ctx, path, data)
 	return Result{Servers: servers, Errors: errs}
 }
 
-// readUntrustedCodex reads a Codex file that the user gave (for example with
-// --config) and that is not the user's own ~/.codex/config.toml. Such a file
-// can come from a cloned repository, so ReadConfig reads it as an untrusted
-// project file, as it does for a JSON file:
+// maxUntrustedTOMLSize is the size limit of an untrusted Codex file (see
+// readUntrustedCodex): the smaller of maxTOMLSize and maxProjectConfigSize.
+const maxUntrustedTOMLSize = min(maxTOMLSize, maxProjectConfigSize)
+
+// readUntrustedCodex parses data, the content of a Codex file that the user
+// gave (for example with --config) and that is not the user's own
+// ~/.codex/config.toml. Such a file can come from a cloned repository, so
+// ReadConfig reads it as an untrusted project file, as it does for a JSON
+// file:
 //
-//   - The read is confined to the directory of the file: a symlink that
-//     leaves that directory, or an absolute symlink, is refused with
-//     "file is outside the project".
-//   - The size limit is the smaller of maxTOMLSize and maxProjectConfigSize.
+//   - ReadConfig reads the file once, confined to the directory of the file:
+//     a symlink that leaves that directory, or an absolute symlink, is
+//     refused with "file is outside the project". readUntrustedCodex parses
+//     those bytes and does not read the file again.
+//   - The size limit is maxUntrustedTOMLSize.
 //   - Every server gets ScopeProject and Untrusted. Its ProjectPath is the
 //     directory of the file, or the parent of that directory when it is
 //     named ".codex" (Codex keeps a project config in
@@ -190,8 +204,11 @@ func ReadCodex(ctx context.Context, path string) Result {
 //
 // The other rules are the ones of ReadCodex. ReadCodex itself has no
 // untrusted mode, because Discover reads only the user's own Codex file.
-func readUntrustedCodex(ctx context.Context, path string) Result {
-	servers, errs := readCodex(ctx, path, min(maxTOMLSize, maxProjectConfigSize), filepath.Dir(path))
+func readUntrustedCodex(ctx context.Context, path string, data []byte) Result {
+	if len(data) > maxUntrustedTOMLSize {
+		return untrustedError(readError(path, reasonTooLarge, nil))
+	}
+	servers, errs := parseCodex(ctx, path, data)
 	projectPath := filepath.Dir(path)
 	if filepath.Base(projectPath) == ".codex" {
 		projectPath = filepath.Dir(projectPath)
@@ -204,17 +221,9 @@ func readUntrustedCodex(ctx context.Context, path string) Result {
 	return Result{Servers: servers, Errors: errs}
 }
 
-// readCodex does the work of ReadCodex and readUntrustedCodex. See ReadCodex
-// for the rules. maxSize and root go to readConfigFile: root is "" for the
-// user's own file, and the directory that the read must stay in otherwise.
-func readCodex(ctx context.Context, path string, maxSize int64, root string) ([]Server, []*FileError) {
-	data, found, fe := readConfigFile(ctx, path, maxSize, root)
-	if fe != nil {
-		return nil, []*FileError{fe}
-	}
-	if !found {
-		return nil, nil
-	}
+// parseCodex does the work of ReadCodex and readUntrustedCodex on data, the
+// content of the Codex file at path. See ReadCodex for the rules.
+func parseCodex(ctx context.Context, path string, data []byte) ([]Server, []*FileError) {
 	// Check the shape before the parser sees the data (see maxTOMLDepth and
 	// maxTOMLKeyParts).
 	if r := checkTOMLShape(data, maxTOMLDepth, maxTOMLKeyParts); r != "" {

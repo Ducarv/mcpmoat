@@ -321,6 +321,9 @@ func TestReadError(t *testing.T) {
 	}
 }
 
+// TestDisplayText checks the cut policy of a server name or a project key in a
+// FileError message. The escape rules themselves are tested in
+// internal/termsafe; here a few cases only check that displayText quotes.
 func TestDisplayText(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
@@ -328,51 +331,19 @@ func TestDisplayText(t *testing.T) {
 		in   string
 		want string
 	}{
-		{name: "plain ASCII", in: "/tmp/config.json", want: "/tmp/config.json"},
+		{name: "plain ASCII", in: "github", want: "github"},
 		{name: "empty", in: "", want: ""},
-		{name: "spaces are printable", in: "my server", want: "my server"},
-		{name: "accented letters", in: "café", want: "café"},
-		{name: "CJK path", in: "/tmp/プロジェクト", want: "/tmp/プロジェクト"},
-		{name: "emoji", in: "srv-🚀", want: "srv-🚀"},
-		{name: "newline", in: "a\nb", want: strconv.Quote("a\nb")},
-		{name: "tab", in: "a\tb", want: strconv.Quote("a\tb")},
-		{name: "ANSI escape", in: "\x1b[31mred", want: strconv.Quote("\x1b[31mred")},
-		{name: "right-to-left override", in: "gpj.\u202eevil", want: strconv.Quote("gpj.\u202eevil")},
-		{name: "zero width space", in: "a\u200bb", want: strconv.Quote("a\u200bb")},
-		{name: "C1 control CSI", in: "a\u009bb", want: strconv.Quote("a\u009bb")},
-		{name: "NUL byte", in: "a\x00b", want: strconv.Quote("a\x00b")},
-		{name: "unassigned code point", in: "a\U000e0080b", want: strconv.Quote("a\U000e0080b")},
-		{name: "invalid UTF-8 byte", in: "a\xffb", want: strconv.Quote("a\xffb")},
-		{name: "truncated UTF-8 sequence", in: "a\xe3\x81", want: strconv.Quote("a\xe3\x81")},
-
-		// Runes that unicode.IsPrint accepts but that show as nothing, or
-		// change the rune before them. strconv.Quote keeps them as they are,
-		// so displayText escapes them itself.
-		{name: "Hangul choseong filler U+115F", in: "a\u115fz", want: `"a\u115fz"`},
-		{name: "Hangul jungseong filler U+1160", in: "a\u1160z", want: `"a\u1160z"`},
-		{name: "Hangul filler U+3164", in: "a\u3164z", want: `"a\u3164z"`},
-		{name: "halfwidth Hangul filler U+FFA0", in: "a\uffa0z", want: `"a\uffa0z"`},
-		{name: "braille pattern blank U+2800", in: "a\u2800z", want: `"a\u2800z"`},
-		{name: "nonspacing mark Mn", in: "cafe\u0301", want: `"cafe\u0301"`},
-		{name: "enclosing mark Me", in: "a\u20ddz", want: `"a\u20ddz"`},
-		{name: "variation selector", in: "a\ufe0fz", want: `"a\ufe0fz"`},
-		{name: "supplementary variation selector", in: "a\U000e0100z", want: `"a\U000e0100z"`},
-		{name: "combining grapheme joiner", in: "a\u034fz", want: `"a\u034fz"`},
-		{
-			// The blank rune is escaped, and the other parts are escaped as
-			// strconv.Quote does it.
-			name: "blank rune with other escapes",
-			in:   "\x1b\u3164\"\xff\u3164é",
-			want: `"\x1b\u3164\"\xff\u3164é"`,
-		},
+		{name: "control character is quoted", in: "a\x1bb", want: strconv.Quote("a\x1bb")},
+		{name: "blank rune is escaped", in: "a\u3164z", want: `"a\u3164z"`},
 
 		// Long text is cut to maxDisplayRunes runes and ends with cutMark.
 		{name: "exactly at the cap", in: strings.Repeat("a", maxDisplayRunes), want: strings.Repeat("a", maxDisplayRunes)},
 		{name: "one rune over the cap", in: strings.Repeat("a", maxDisplayRunes+1), want: strings.Repeat("a", maxDisplayRunes) + cutMark},
 		{name: "4 KiB name", in: strings.Repeat("a", 4096), want: strings.Repeat("a", maxDisplayRunes) + cutMark},
-		{name: "cap counts runes not bytes", in: strings.Repeat("é", 300), want: strings.Repeat("é", maxDisplayRunes) + cutMark},
+		{name: "cap counts runes not bytes", in: strings.Repeat("\u00e9", 300), want: strings.Repeat("\u00e9", maxDisplayRunes) + cutMark},
 		{
-			// The cut is made before the quoting, so it never splits an escape.
+			// The cut is made before the quoting, so it never splits an
+			// escape, and cutMark comes after the closing quote.
 			name: "long quoted text",
 			in:   strings.Repeat("\x1b", 4096),
 			want: `"` + strings.Repeat(`\x1b`, maxDisplayRunes) + `"` + cutMark,
@@ -406,37 +377,31 @@ func TestDisplayText(t *testing.T) {
 	}
 }
 
-// TestDisplayTextMatchesQuote checks that displayText quotes as strconv.Quote
-// does when the text holds no blank rune (see isBlank).
-func TestDisplayTextMatchesQuote(t *testing.T) {
-	t.Parallel()
-	for _, in := range []string{"a\nb", "\x1b[31m\"x\"\\", "a\xffb\xe3\x81", "gpj.\u202eevil", "\u00a0\u3000"} {
-		if got, want := displayText(in), strconv.Quote(in); got != want {
-			t.Errorf("displayText(%q) = %q, want %q", in, got, want)
-		}
-	}
-}
-
-// TestDisplayPath checks that a path is quoted as displayText quotes, but is
-// never cut: the user needs the full path to find the file.
-func TestDisplayPath(t *testing.T) {
+// TestFileErrorPathNotCut checks that the path in a FileError message is
+// quoted like a server name, but never cut: the user needs the full path to
+// find the file.
+func TestFileErrorPathNotCut(t *testing.T) {
 	t.Parallel()
 	long := "/" + strings.Repeat("d", 4096)
 	tests := []struct {
 		name string
-		in   string
+		path string
 		want string
 	}{
-		{name: "plain path", in: "/tmp/config.json", want: "/tmp/config.json"},
-		{name: "long path is not cut", in: long, want: long},
-		{name: "control character", in: "/tmp/\x1b.json", want: strconv.Quote("/tmp/\x1b.json")},
-		{name: "blank rune", in: "/tmp/\u3164.json", want: `"/tmp/\u3164.json"`},
+		{name: "long path is not cut", path: long, want: long + ": invalid JSON"},
+		{
+			name: "long quoted path is not cut",
+			path: long + "\x1b",
+			want: strconv.Quote(long+"\x1b") + ": invalid JSON",
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			if got := displayPath(tt.in); got != tt.want {
-				t.Errorf("displayPath(%q) = %q, want %q", tt.in, got, tt.want)
+			// A literal on purpose: the test checks the Error() format.
+			fe := &FileError{Path: tt.path, Reason: reasonInvalidJSON}
+			if got := fe.Error(); got != tt.want {
+				t.Errorf("Error() = %q, want %q", got, tt.want)
 			}
 		})
 	}

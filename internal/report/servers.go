@@ -6,9 +6,9 @@ import (
 	"strconv"
 	"strings"
 	"text/tabwriter"
-	"unicode/utf8"
 
 	"github.com/Ducarv/mcpmoat/internal/discover"
+	"github.com/Ducarv/mcpmoat/internal/termsafe"
 )
 
 // emptyServers is the line that WriteServers prints when there is no server.
@@ -29,8 +29,10 @@ const emptyServers = "No MCP servers found.\n"
 // character becomes up to 10 bytes), so hostile text can reach a few hundred
 // MB. That is still bounded, and a real config is far from it.
 const (
-	// maxNameRunes is the cap for NAME, CLIENT and TRANSPORT.
-	maxNameRunes = 80
+	// maxShortCellRunes is the cap for the short cells: NAME, CLIENT and
+	// TRANSPORT. 80 runes is more than any real server name, client or
+	// transport needs.
+	maxShortCellRunes = 80
 
 	// maxPathRunes is the cap for SCOPE and SOURCE, which hold file paths. 256
 	// keeps a real path readable, so the reader can see which file a server came
@@ -55,27 +57,28 @@ const cutMarker = "\u2026"
 //	SCOPE         "global", or "project:" and the project path
 //	TRANSPORT     stdio, http or sse
 //	SOURCE        the config file that declared the server
-//	COMMAND/URL   the redacted command line for stdio (see [Command]), the
-//	              redacted URL for http and sse
+//	COMMAND/URL   the redacted command line for stdio (see
+//	              [FormatCommand]), the redacted URL for http and sse
 //
-// Every cell goes through [Escape]. Config files are untrusted, so a cell can
-// hold terminal escape sequences, bidi characters or invalid UTF-8. A cell
-// also must not hold a tab or a newline, because tabwriter uses the tab as the
-// column separator and the newline as the row separator. Escape quotes such a
-// cell, so the table keeps its shape.
+// Every cell goes through [termsafe.Quote]. Config files are untrusted, so a
+// cell can hold terminal escape sequences, bidi characters or invalid UTF-8. A
+// cell also must not hold a tab or a newline, because tabwriter uses the tab
+// as the column separator and the newline as the row separator.
+// termsafe.Quote quotes such a cell, so the table keeps its shape.
 //
 // The padded columns are cut and a cut cell ends with "…". NAME, CLIENT and
 // TRANSPORT are cut at 80 runes. SCOPE and SOURCE hold paths and are cut at 256
-// runes. The cut is made on the raw text, before escaping, so an escaped cell
-// can be longer than the cap. These limits stop padding amplification: see
-// maxNameRunes and maxPathRunes. COMMAND/URL is the last column. tabwriter does
-// not pad it, so it cannot amplify, and it is never cut. So no argument is
-// hidden from a security review.
+// runes, and an invalid UTF-8 byte counts as one rune ([termsafe.CutRunes]).
+// The cut is made on the raw text, before escaping, so an escaped cell can be
+// longer than the cap. These limits stop padding amplification: see
+// maxShortCellRunes and maxPathRunes. COMMAND/URL is the last column.
+// tabwriter does not pad it, so it cannot amplify, and it is never cut. So no
+// argument is hidden from a security review.
 //
 // WriteServers never prints a value as written from Args, Env, Headers or
 // URL. It never reads Env or Headers values and never calls Reveal. The
 // COMMAND/URL cell shows the command and the args through the
-// discover.RedactArgs allowlist (see [Command]), and the URL through
+// discover.RedactArgs allowlist (see [FormatCommand]), and the URL through
 // URL.String, which removes credentials.
 //
 // The table has no colour. The full coloured report comes in milestone M6.
@@ -106,10 +109,10 @@ func WriteServers(w io.Writer, servers []discover.Server) error {
 	write("NAME\tCLIENT\tSCOPE\tTRANSPORT\tSOURCE\tCOMMAND/URL\n")
 	for _, s := range servers {
 		write("%s\t%s\t%s\t%s\t%s\t%s\n",
-			cell(s.Name, maxNameRunes),
-			cell(string(s.Client), maxNameRunes),
+			cell(s.Name, maxShortCellRunes),
+			cell(string(s.Client), maxShortCellRunes),
 			scopeCell(s),
-			cell(string(s.Transport), maxNameRunes),
+			cell(string(s.Transport), maxShortCellRunes),
 			cell(s.Source, maxPathRunes),
 			commandCell(s),
 		)
@@ -122,34 +125,13 @@ func WriteServers(w io.Writer, servers []discover.Server) error {
 }
 
 // cell returns the text of one padded column cell: s cut at limit runes and
-// escaped. A cut cell ends with "…", which is added after escaping.
+// escaped. A cut cell ends with cutMarker, which is added after escaping.
 func cell(s string, limit int) string {
-	short, cut := cutRunes(s, limit)
+	short, cut := termsafe.CutRunes(s, limit)
 	if cut {
-		return Escape(short) + cutMarker
+		return termsafe.Quote(short) + cutMarker
 	}
-	return Escape(short)
-}
-
-// cutRunes returns s cut to at most limit runes, and whether it cut anything.
-// For invalid UTF-8 there are no reliable runes, so it cuts at limit bytes. That
-// is fine: Escape quotes such a string anyway.
-func cutRunes(s string, limit int) (string, bool) {
-	if !utf8.ValidString(s) {
-		if len(s) > limit {
-			return s[:limit], true
-		}
-		return s, false
-	}
-	n := 0
-	// Ranging over a string gives the byte index of each rune.
-	for i := range s {
-		if n == limit {
-			return s[:i], true
-		}
-		n++
-	}
-	return s, false
+	return termsafe.Quote(short)
 }
 
 // scopeCell returns the SCOPE cell for s.
@@ -164,27 +146,28 @@ func scopeCell(s discover.Server) string {
 func commandCell(s discover.Server) string {
 	if s.Transport.IsRemote() {
 		// URL.String gives the redacted URL. Credentials never reach the table.
-		return Escape(s.URL.String())
+		return termsafe.Quote(s.URL.String())
 	}
 	// stdio, and any unknown transport (defensive): show the command line.
-	return Command(s.Command, s.Args)
+	return FormatCommand(s.Command, s.Args)
 }
 
-// Command formats a command and its arguments for one table cell. It never
-// shows an argument as written: the command and the args go through
-// [discover.RedactArgs] together, as one command line. RedactArgs is an
-// allowlist that fails closed, so every part with a shape that is not known
-// to be safe shows as [discover.Mask]. The command goes through it too:
-// Server.Command is plain text from an untrusted config, and the allowlist
-// also stops a token in the command path. Because the command is the first
-// part, a command that looks like a secret flag also masks the next part.
+// FormatCommand formats the COMMAND/URL cell of a stdio server: a command
+// and its arguments, as one table cell. It never shows an argument as
+// written: the command and the args go through [discover.RedactArgs]
+// together, as one command line. RedactArgs is an allowlist that fails
+// closed, so every part with a shape that is not known to be safe shows as
+// [discover.Mask]. The command goes through it too: Server.Command is plain
+// text from an untrusted config, and the allowlist also stops a token in the
+// command path. Because the command is the first part, a command that looks
+// like a secret flag also masks the next part.
 //
-// Each redacted part is escaped with [Escape]. A part that is empty or holds
-// a space is also wrapped in double quotes (strconv.Quote), so the reader can
-// still see where one argument ends and the next one starts. Parts are joined
-// with one space. Nothing is cut: Command is used for the last column, which
-// is never cut.
-func Command(command string, args discover.Args) string {
+// Each redacted part is escaped with [termsafe.Quote]. A part that is empty
+// or holds a space is also wrapped in double quotes (strconv.Quote), so the
+// reader can still see where one argument ends and the next one starts. Parts
+// are joined with one space. Nothing is cut: the COMMAND/URL cell is the last column,
+// which is never cut.
+func FormatCommand(command string, args discover.Args) string {
 	// Values gives the args as written. They go straight into RedactArgs and
 	// nowhere else, so only the redacted form reaches the cell. Args.String
 	// is not enough here: it joins the parts with a space, so an empty part
@@ -192,9 +175,9 @@ func Command(command string, args discover.Args) string {
 	parts := discover.RedactArgs(append([]string{command}, args.Values()...))
 
 	for i, p := range parts {
-		escaped := Escape(p)
-		// If Escape changed the part, it is already quoted. Quote only a safe
-		// part that would otherwise blur the argument boundaries.
+		escaped := termsafe.Quote(p)
+		// If termsafe.Quote changed the part, it is already quoted. Quote
+		// only a safe part that would otherwise blur the argument boundaries.
 		if escaped == p && (p == "" || strings.Contains(p, " ")) {
 			escaped = strconv.Quote(p)
 		}

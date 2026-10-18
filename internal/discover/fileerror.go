@@ -3,12 +3,11 @@ package discover
 import (
 	"bytes"
 	"errors"
-	"fmt"
 	"io/fs"
 	"strconv"
 	"strings"
-	"unicode"
-	"unicode/utf8"
+
+	"github.com/Ducarv/mcpmoat/internal/termsafe"
 )
 
 // reason is the type of the fixed reason texts of a FileError. Helpers that
@@ -50,6 +49,13 @@ const (
 	reasonBadString        = "invalid string"        // a lone UTF-16 surrogate escape or invalid UTF-8
 	reasonNotFound         = "file not found"        // ReadConfig: a file the user named does not exist
 	reasonUnknownFormat    = "unknown config format" // ReadConfig: a file the user named has no known client format
+
+	// reasonProjectsNotRead is for an untrusted Claude Code file named with
+	// --config (see ReadConfig) that has a "projects" section. Its projects
+	// are not read, because a repository file must not choose ProjectPath
+	// values. The error makes the scan fail, so the servers that were not
+	// read do not look clean.
+	reasonProjectsNotRead = "projects section not read"
 )
 
 // FileError describes a problem with one config file or with one server entry
@@ -81,12 +87,13 @@ var _ error = (*FileError)(nil)
 
 // Error returns the message in the form
 // "<path>[:<line>[:<col>]]: [project <path>: ][server <name>: ]<reason>[: <Err>]".
-// Path, project path and server name are untrusted text. displayPath and
-// displayText quote them when they hold characters that are not visible, and
-// displayText cuts a long project path or server name.
+// Path, project path and server name are untrusted text. termsafe.Quote
+// quotes them when they hold characters that are not visible, and displayText
+// cuts a long project path or server name first. The path is never cut: the
+// user needs it in full to find the file.
 func (e *FileError) Error() string {
 	var b strings.Builder
-	b.WriteString(displayPath(e.Path))
+	b.WriteString(termsafe.Quote(e.Path))
 	if e.Line > 0 {
 		b.WriteByte(':')
 		b.WriteString(strconv.Itoa(e.Line))
@@ -178,7 +185,7 @@ func canceledError(path string, err error) *FileError {
 // An *fs.PathError prints as "op path: errno", and the path is untrusted text
 // that could hold terminal escape codes. So for a PathError we keep only the
 // operation and the OS error. The path is already in FileError.Path, where
-// displayPath quotes it. Other errors (for example context errors) have fixed text.
+// termsafe.Quote quotes it. Other errors (for example context errors) have fixed text.
 func errText(err error) string {
 	if pe, ok := errors.AsType[*fs.PathError](err); ok && pe.Err != nil {
 		return pe.Op + ": " + pe.Err.Error()
@@ -196,121 +203,17 @@ const cutMark = "..."
 
 // displayText returns a server name or a project key for a FileError
 // message. A text with more than maxDisplayRunes runes is cut to that many
-// runes, and cutMark is added at the end. The cut is made before the quoting,
-// at a rune boundary, so it never splits an escape. Then the text is quoted
-// as displayPath does it. cutMark comes after the closing quote of a quoted
-// text. An invalid UTF-8 byte counts as one rune.
+// runes (see termsafe.CutRunes), and cutMark is added at the end. The cut is
+// made before the quoting, so it never splits an escape. Then the text goes
+// through termsafe.Quote. cutMark comes after the closing quote of a quoted
+// text.
 func displayText(s string) string {
-	s, cut := cutRunes(s, maxDisplayRunes)
-	s = displayPath(s)
+	s, cut := termsafe.CutRunes(s, maxDisplayRunes)
+	s = termsafe.Quote(s)
 	if cut {
 		s += cutMark
 	}
 	return s
-}
-
-// displayPath returns s unchanged if every rune of s is visible. Otherwise it
-// returns s as a quoted Go string in which every rune that is not visible is
-// escaped (see needsEscape). It does not cut s: the path is needed in full to
-// find the file.
-func displayPath(s string) string {
-	if !needsQuote(s) {
-		return s
-	}
-	return quoteText(s)
-}
-
-// cutRunes returns the first n runes of s, and true if s had more runes.
-// An invalid UTF-8 byte counts as one rune.
-func cutRunes(s string, n int) (string, bool) {
-	i := 0
-	for count := 0; i < len(s); count++ {
-		if count == n {
-			return s[:i], true
-		}
-		_, size := utf8.DecodeRuneInString(s[i:])
-		i += size
-	}
-	return s, false
-}
-
-// needsQuote reports whether s holds invalid UTF-8 or a rune for which
-// needsEscape is true.
-func needsQuote(s string) bool {
-	// Ranging over bad bytes yields U+FFFD, which is printable, so check validity first.
-	if !utf8.ValidString(s) {
-		return true
-	}
-	for _, r := range s {
-		if needsEscape(r) {
-			return true
-		}
-	}
-	return false
-}
-
-// needsEscape reports whether r is not visible, or can change how the text
-// around it looks: a rune that is not printable, a format or bidi control
-// character (Cf), or a rune for which isBlank is true.
-func needsEscape(r rune) bool {
-	return !unicode.IsPrint(r) || unicode.Is(unicode.Cf, r) || isBlank(r)
-}
-
-// isBlank reports whether r is printable for unicode.IsPrint but shows as
-// nothing, or changes the rune before it: a Hangul filler (U+115F, U+1160,
-// U+3164, U+FFA0), the blank braille pattern (U+2800), or a combining mark
-// (categories Mn and Me, which hold the variation selectors). strconv.Quote
-// keeps these runes as they are, so quoteText escapes them itself.
-func isBlank(r rune) bool {
-	switch r {
-	case '\u115f', '\u1160', '\u3164', '\uffa0', '\u2800':
-		return true
-	}
-	return unicode.In(r, unicode.Mn, unicode.Me)
-}
-
-// quoteText returns s as a quoted Go string. It escapes like strconv.Quote,
-// and it also escapes every rune for which isBlank is true as \uXXXX or
-// \UXXXXXXXX.
-func quoteText(s string) string {
-	var b strings.Builder
-	b.WriteByte('"')
-	start := 0 // start of the part that is not written yet
-	for i := 0; i < len(s); {
-		r, size := utf8.DecodeRuneInString(s[i:])
-		// An invalid byte gives utf8.RuneError, which isBlank rejects, so a
-		// split is always at a full rune.
-		if isBlank(r) {
-			writeQuotedPart(&b, s[start:i])
-			writeRuneEscape(&b, r)
-			start = i + size
-		}
-		i += size
-	}
-	writeQuotedPart(&b, s[start:])
-	b.WriteByte('"')
-	return b.String()
-}
-
-// writeQuotedPart writes s as strconv.Quote escapes it, without the quotes.
-// strconv.Quote escapes each rune on its own, so the parts of a text that is
-// split at rune boundaries give the same escapes as the whole text.
-func writeQuotedPart(b *strings.Builder, s string) {
-	if s == "" {
-		return
-	}
-	q := strconv.Quote(s)
-	b.WriteString(q[1 : len(q)-1])
-}
-
-// writeRuneEscape writes r as \uXXXX, or as \UXXXXXXXX for a rune above
-// U+FFFF, with lowercase hex digits as strconv.Quote writes them.
-func writeRuneEscape(b *strings.Builder, r rune) {
-	if r > 0xffff {
-		fmt.Fprintf(b, `\U%08x`, r)
-		return
-	}
-	fmt.Fprintf(b, `\u%04x`, r)
 }
 
 // lineCol converts a byte offset in data to a 1-based line and a 1-based

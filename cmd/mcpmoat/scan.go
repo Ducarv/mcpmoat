@@ -5,6 +5,7 @@ import (
 	"errors"
 	"flag"
 	"io"
+	"strings"
 
 	"github.com/Ducarv/mcpmoat/internal/discover"
 	"github.com/Ducarv/mcpmoat/internal/report"
@@ -47,7 +48,7 @@ func (c *cli) runScan(_ options, args []string) int {
 		if configSet {
 			return errors.New("--config given more than once")
 		}
-		if value == "" || isScanFlag(value) {
+		if value == "" || isScanFlag(fs, value) {
 			return errors.New("--config needs a file name")
 		}
 		configPath = value
@@ -92,16 +93,22 @@ func (c *cli) runScan(_ options, args []string) int {
 	return c.scanAuto(ctx)
 }
 
-// isScanFlag reports whether value is the name of a scan flag. The flag package
-// takes the next argument as the value of --config, so "scan --config
-// --no-connect" would use "--no-connect" as a file name. We reject that case.
-// A real file name that starts with "-" can be given as ./-name.
-func isScanFlag(value string) bool {
-	switch value {
-	case "--no-connect", "-no-connect", "--config", "-config", "-h", "-help", "--help":
-		return true
+// isScanFlag reports whether value looks like a flag of fs, in any form that
+// the flag package accepts: "-name", "--name", "-name=x" or "--name=x". -h and
+// -help count too, because the flag package treats them as a help request.
+// The flag package takes the next argument as the value of --config, so
+// "scan --config --no-connect" would use "--no-connect" as a file name. We
+// reject that case. The names come from fs, so a new scan flag is covered
+// without a second edit. A real file name that starts with "-" can be given
+// as ./-name.
+func isScanFlag(fs *flag.FlagSet, value string) bool {
+	name, ok := strings.CutPrefix(value, "-")
+	if !ok {
+		return false
 	}
-	return false
+	name = strings.TrimPrefix(name, "-")
+	name, _, _ = strings.Cut(name, "=")
+	return fs.Lookup(name) != nil || name == "h" || name == "help"
 }
 
 // scanAuto looks for the config files of the known clients, in the home
@@ -126,7 +133,7 @@ func (c *cli) scanAuto(ctx context.Context) int {
 // problems, when it printed the table. It is fixed text: it holds no path and
 // no config text.
 const configErrorHint = "mcpmoat scan: a config file has a problem; " +
-	"the table can miss servers that the client loads\n"
+	"the table can miss servers that the client loads"
 
 // listServers prints the server table on stdout and the file problems on
 // stderr. Any problem gives exit code 2, after the table and all problems are
@@ -153,7 +160,7 @@ func (c *cli) listServers(res discover.Result, strict bool) int {
 	}
 	// Print the problems in the order of the result, then the hint.
 	c.printFileErrors(res.Errors)
-	fprintf(c.stderr, "%s", configErrorHint)
+	fprintf(c.stderr, "%s\n", configErrorHint)
 	return exitError
 }
 

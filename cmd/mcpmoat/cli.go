@@ -49,8 +49,6 @@ type command struct {
 // This is the only place that reads the linker variables (version, commit and
 // date), the home directory and the working directory.
 func run(args []string, stdout, stderr io.Writer) int {
-	// This is the only place that reads the real home and working directory.
-	// Every test injects them.
 	c := &cli{
 		stdout:  stdout,
 		stderr:  stderr,

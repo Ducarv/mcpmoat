@@ -95,6 +95,27 @@ type jsonFile struct {
 	// withProjects reads the "projects" section too. Only ~/.claude.json has
 	// one.
 	withProjects bool
+	// reportProjects adds one reasonProjectsNotRead error when the file has a
+	// "projects" value that is not null and withProjects is false. Only
+	// ReadConfig sets it, for an untrusted Claude Code file named with
+	// --config. Discover does not set it for <WorkDir>/.mcp.json.
+	reportProjects bool
+	// data is the content of the file when the caller has read it already,
+	// and hasData tells that it has. ReadConfig reads the file once to detect
+	// the format, and the reader then parses those bytes: a second read could
+	// find another file, or no file. Without hasData, read reads the file.
+	data    []byte
+	hasData bool
+}
+
+// read returns the content of the file: f.data when f.hasData is true, or
+// else what readConfigFile reads within the limits of the file.
+func (f jsonFile) read(ctx context.Context) (data []byte, found bool, fe *FileError) {
+	if f.hasData {
+		return f.data, true, nil
+	}
+	maxSize, root := f.limits()
+	return readConfigFile(ctx, f.path, maxSize, root)
 }
 
 // limits returns the size limit of the file and the directory that the read
@@ -138,7 +159,7 @@ func (f jsonFile) topProjectPath() string {
 // never reads the current directory by itself.
 func projectDirOf(path string, client Client) string {
 	dir := filepath.Dir(path)
-	if client == ClientCursor && filepath.Base(dir) == ".cursor" {
+	if client == ClientCursor && inCursorDir(path) {
 		return filepath.Dir(dir)
 	}
 	return dir
@@ -221,12 +242,12 @@ func markUntrusted(servers []Server, errs []*FileError) {
 	}
 }
 
-// loadJSONFile reads f within its limits and checks the file as a whole. It
-// returns the top-level members of the file, or the one *FileError that
-// refuses the file. A missing file and an empty file give neither.
+// loadJSONFile reads f within its limits (or takes f.data, see jsonFile.read)
+// and checks the file as a whole. It returns the top-level members of the
+// file, or the one *FileError that refuses the file. A missing file and an
+// empty file give neither.
 func loadJSONFile(ctx context.Context, f jsonFile) (map[string]json.RawMessage, *FileError) {
-	maxSize, root := f.limits()
-	data, found, fe := readConfigFile(ctx, f.path, maxSize, root)
+	data, found, fe := f.read(ctx)
 	if fe != nil {
 		return nil, fe
 	}
@@ -274,6 +295,11 @@ func decodeJSONSections(ctx context.Context, f jsonFile, top map[string]json.Raw
 			servers = append(servers, projServers...)
 			errs = append(errs, projErrs...)
 		}
+	} else if f.reportProjects && !isNull(top[keyProjects]) {
+		// Any value that is not null fails closed, also an empty object or a
+		// value of the wrong type: the section is not read, so this reader
+		// cannot tell that it holds no servers.
+		errs = append(errs, newFileError(f.path, reasonProjectsNotRead))
 	}
 
 	if p.full {

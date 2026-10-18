@@ -45,7 +45,8 @@
 // and every map key (env and header names) is untrusted text from a config
 // file and can hold control, bidi and non-ASCII characters. The output of
 // URL and Args is printable ASCII, but display code must still escape every
-// field before it prints it to a terminal.
+// field before it prints it to a terminal. Use internal/termsafe for that:
+// FileError.Error and internal/report both do.
 //
 // Config readers must return errors that name the file and the position when
 // it is known, and never a value from the config.
@@ -62,15 +63,17 @@
 // project file: the read is confined to the directory of the file (see
 // Symlinks), every server has ScopeProject and every server and error is
 // Untrusted (see Untrusted files), the "projects" section of a Claude Code
-// file is not read, and the size limit is maxProjectConfigSize (4 MiB), or
-// maxTOMLSize (256 KiB) for Codex. Unlike [Discover], ReadConfig reports a
+// file is not read (a section that is there gives the error "projects
+// section not read"), and the size limit is maxProjectConfigSize (4 MiB), or
+// maxTOMLSize (256 KiB) for Codex. The file is read once, and the reader
+// parses the bytes of that read. Unlike [Discover], ReadConfig reports a
 // missing file, with the reason "file not found".
 //
-// The one exception is a path that resolves to one of the user's own global
-// files (~/.claude.json, ~/.cursor/mcp.json or ~/.codex/config.toml below the
-// home directory that the caller gives). ReadConfig reads that file as a
-// global file, with the reader that Discover uses for it. See [ReadConfig]
-// for what "resolves" means.
+// The one exception is a path that names one of the user's own global files
+// (~/.claude.json, ~/.cursor/mcp.json or ~/.codex/config.toml below the home
+// directory that the caller gives): the same file by [os.SameFile].
+// ReadConfig then reads the global path as a global file, with the reader
+// that Discover uses for it. See [ReadConfig] for what "names" means.
 //
 // For any other file, ReadConfig detects the format with [DetectClient]:
 //
@@ -85,11 +88,12 @@
 //
 // Detection has known limits: see [DetectClient].
 //
-// Then ReadConfig reads a JSON file with [ReadClaudeCode] or [ReadCursor],
-// ScopeProject and an empty projectPath. [ReadCodex] always reads a file as a
-// global file and has no untrusted mode, so ReadConfig does not use it for a
-// Codex file that is not ~/.codex/config.toml. It uses the same Codex reader
-// through an internal entry that confines the read, gives the servers
+// Then ReadConfig parses a JSON file as [ReadClaudeCode] or [ReadCursor] do
+// with ScopeProject and an empty projectPath, and a Codex file with the
+// Codex reader, through internal entries that take the bytes that ReadConfig
+// read. [ReadCodex] always reads a file as a global file and has no untrusted
+// mode, so ReadConfig does not use it for a Codex file that is not
+// ~/.codex/config.toml. Its internal Codex entry gives the servers
 // ScopeProject and marks every server and error Untrusted.
 //
 // [ReadClaudeCode], [ReadCursor] and [ReadCodex] read one file in a known
@@ -248,8 +252,9 @@
 // server and every error of the file. Discover sets it on the canceled error
 // that it adds when ctx ends before a project file is read. ReadConfig sets
 // it on its own errors ("file not found", "unknown config format" and the
-// errors of its detection read) and, through its internal Codex entry, on
-// the servers and errors of a Codex file.
+// errors of its read) and, through its internal Codex entry, on the servers
+// and errors of a Codex file. Its JSON files are parsed with ScopeProject,
+// so the JSON rule marks them, the "projects section not read" error too.
 //
 // The user's own files are trusted: ~/.claude.json (also the servers under
 // its projects.<path> keys, which Claude Code writes when the user adds a

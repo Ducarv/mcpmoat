@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"cmp"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -13,7 +14,6 @@ import (
 	"regexp"
 	"runtime"
 	"slices"
-	"sort"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -28,22 +28,13 @@ import (
 // TestScanNoConnectGolden -update", then read "git diff" before you commit.
 var update = flag.Bool("update", false, "rewrite golden files")
 
-// scanFixtureDir returns the path of a fixture under the repository's
-// testdata/discover directory. Tests run in cmd/mcpmoat, so the repository root
-// is two levels up.
-func scanFixtureDir(parts ...string) string {
-	return filepath.Join(append([]string{"..", "..", "testdata", "discover"}, parts...)...)
-}
-
 // scanCLI builds a test cli whose home and working directory are fresh copies
 // of the fixture. It returns the cli, the two output buffers and the two copy
 // paths. The tests never touch the fixture itself.
 func scanCLI(t *testing.T, fixture ...string) (c *cli, stdout, stderr *bytes.Buffer, home, work string) {
 	t.Helper()
-	home, work = discovertest.CopyFixture(t, scanFixtureDir(fixture...))
-	c, stdout, stderr = newTestCLI(fakeGetenv(nil), testBuild)
-	c.homeDir = func() (string, error) { return home, nil }
-	c.getwd = func() (string, error) { return work, nil }
+	home, work = discovertest.CopyFixture(t, fixtureDir(fixture...))
+	c, stdout, stderr = dirsCLI(t, home, work)
 	return c, stdout, stderr, home, work
 }
 
@@ -58,32 +49,6 @@ func scanWriteFile(t *testing.T, dir, name, content string) string {
 		t.Fatal(err)
 	}
 	return path
-}
-
-// scanRows splits the table on stdout into rows of whitespace-separated
-// fields. It drops the header line. Use it only when no cell holds a space.
-func scanRows(t *testing.T, stdout string) [][]string {
-	t.Helper()
-	lines := strings.Split(strings.TrimSuffix(stdout, "\n"), "\n")
-	if len(lines) == 0 || !strings.HasPrefix(lines[0], "NAME") {
-		t.Fatalf("stdout does not start with the table header:\n%s", stdout)
-	}
-	var rows [][]string
-	for _, line := range lines[1:] {
-		rows = append(rows, strings.Fields(line))
-	}
-	return rows
-}
-
-// scanNonEmptyLines returns the non-empty lines of text.
-func scanNonEmptyLines(text string) []string {
-	var lines []string
-	for line := range strings.SplitSeq(text, "\n") {
-		if line != "" {
-			lines = append(lines, line)
-		}
-	}
-	return lines
 }
 
 // scanConfigCLI returns a cli for --config runs. Its homeDir returns home,
@@ -155,6 +120,38 @@ func TestScanFlags(t *testing.T) {
 			wantStderr: []string{"--config needs a file name"},
 		},
 		{
+			name:       "config followed by a scan flag with a value",
+			args:       []string{"scan", "--config", "--no-connect=true"},
+			wantCode:   exitError,
+			wantStderr: []string{"--config needs a file name"},
+		},
+		{
+			name:       "config followed by itself with one dash and a value",
+			args:       []string{"scan", "--no-connect", "--config", "-config=x"},
+			wantCode:   exitError,
+			wantStderr: []string{"--config needs a file name"},
+		},
+		{
+			name:       "config followed by a help flag",
+			args:       []string{"scan", "--no-connect", "--config", "--h"},
+			wantCode:   exitError,
+			wantStderr: []string{"--config needs a file name"},
+		},
+		{
+			name:       "config followed by a long help flag",
+			args:       []string{"scan", "--no-connect", "--config", "-help"},
+			wantCode:   exitError,
+			wantStderr: []string{"--config needs a file name"},
+		},
+		{
+			// "-x.json" is no scan flag, so it is a file name. The file does
+			// not exist.
+			name:       "config file name that starts with a dash and is no flag",
+			args:       []string{"scan", "--no-connect", "--config", "-x.json"},
+			wantCode:   exitError,
+			wantStderr: []string{"-x.json", "file not found"},
+		},
+		{
 			name:       "config given twice",
 			args:       []string{"scan", "--no-connect", "--config", "a", "--config", "b"},
 			wantCode:   exitError,
@@ -195,16 +192,8 @@ func TestScanFlags(t *testing.T) {
 			if code != tt.wantCode {
 				t.Errorf("dispatch(%q) = %d, want %d", tt.args, code, tt.wantCode)
 			}
-			for _, want := range tt.wantStdout {
-				if !strings.Contains(stdout.String(), want) {
-					t.Errorf("stdout does not contain %q\nstdout: %s", want, stdout)
-				}
-			}
-			for _, want := range tt.wantStderr {
-				if !strings.Contains(stderr.String(), want) {
-					t.Errorf("stderr does not contain %q\nstderr: %s", want, stderr)
-				}
-			}
+			assertContainsAll(t, "stdout", stdout.String(), tt.wantStdout)
+			assertContainsAll(t, "stderr", stderr.String(), tt.wantStderr)
 			if len(tt.wantStdout) == 0 && stdout.Len() != 0 {
 				t.Errorf("stdout = %q, want empty", stdout)
 			}
@@ -255,7 +244,7 @@ func scanNormalize(t *testing.T, out string, replacements map[string]string) str
 	for p := range replacements {
 		paths = append(paths, p)
 	}
-	sort.Slice(paths, func(i, j int) bool { return len(paths[i]) > len(paths[j]) })
+	slices.SortFunc(paths, func(a, b string) int { return cmp.Compare(len(b), len(a)) })
 	for _, p := range paths {
 		out = strings.ReplaceAll(out, p, replacements[p])
 	}
@@ -324,22 +313,16 @@ func TestScanAutoPartialFailure(t *testing.T) {
 	if code != exitError {
 		t.Errorf("exit code = %d, want %d (a bad global file fails the scan)", code, exitError)
 	}
-	if rows := scanRows(t, stdout.String()); len(rows) != 4 {
+	if rows := tableRows(t, stdout.String()); len(rows) != 4 {
 		t.Errorf("table has %d rows, want 4\nstdout:\n%s", len(rows), stdout)
 	}
-	lines := scanNonEmptyLines(stderr.String())
+	lines := nonEmptyLines(stderr.String())
 	if len(lines) != 2 {
 		t.Fatalf("stderr has %d lines, want 2 (the problem and the hint)\nstderr:\n%s", len(lines), stderr)
 	}
-	for _, want := range []string{"mcpmoat scan: ", ".claude.json", "invalid JSON"} {
-		if !strings.Contains(lines[0], want) {
-			t.Errorf("stderr line does not contain %q\nline: %s", want, lines[0])
-		}
-	}
-	if !strings.HasPrefix(lines[0], "mcpmoat scan: ") || strings.Contains(lines[0], "warning:") {
-		t.Errorf("stderr line = %q, want the prefix %q and no warning", lines[0], "mcpmoat scan: ")
-	}
-	if got, want := lines[1]+"\n", configErrorHint; got != want {
+	assertContainsAll(t, "the first stderr line", lines[0], []string{"mcpmoat scan: ", ".claude.json", "invalid JSON"})
+	assertScanErrorLines(t, stderr.String())
+	if got, want := lines[1], configErrorHint; got != want {
 		t.Errorf("last stderr line = %q, want the hint %q", got, want)
 	}
 }
@@ -380,6 +363,9 @@ func TestScanConfigFormats(t *testing.T) {
 		// wantProject is the project directory of an untrusted file, inside
 		// the fixture copy. "" means the file is read as a global file.
 		wantProject string
+		// wantStderr are substrings of stderr. Empty means: exit code 0 and
+		// an empty stderr. Otherwise the exit code must be 2.
+		wantStderr []string
 	}{
 		{
 			name:       "claude code ~/.claude.json",
@@ -390,13 +376,16 @@ func TestScanConfigFormats(t *testing.T) {
 			wantNames:  []string{"filesystem", "remote-http", "remote-sse", "alpha-tool", "gamma-tool"},
 		},
 		{
-			// Not the home file: the projects section is not read.
+			// Not the home file: the projects section is not read. That is a
+			// problem, because the table can miss servers, so the exit code
+			// is 2. The top-level servers still show.
 			name:        "claude code .claude.json in another directory",
 			fixture:     []string{"claude-code", "valid"},
 			file:        filepath.Join("home", ".claude.json"),
 			wantClient:  "claude-code",
 			wantNames:   []string{"filesystem", "remote-http", "remote-sse"},
 			wantProject: "home",
+			wantStderr:  []string{"mcpmoat scan: ", ".claude.json", "projects section not read", configErrorHint},
 		},
 		{
 			name:        "claude code .mcp.json",
@@ -446,7 +435,7 @@ func TestScanConfigFormats(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 
-			home, _ := discovertest.CopyFixture(t, scanFixtureDir(tt.fixture...))
+			home, _ := discovertest.CopyFixture(t, fixtureDir(tt.fixture...))
 			root := filepath.Dir(home)
 			userHome := t.TempDir()
 			if tt.homeFile {
@@ -458,13 +447,19 @@ func TestScanConfigFormats(t *testing.T) {
 
 			code := c.dispatch([]string{"scan", "--no-connect", "--config", filepath.Join(root, tt.file)})
 
-			if code != exitOK {
-				t.Fatalf("exit code = %d, want %d; stderr:\n%s", code, exitOK, stderr)
+			wantCode := exitOK
+			if len(tt.wantStderr) > 0 {
+				wantCode = exitError
 			}
-			if stderr.Len() != 0 {
+			if code != wantCode {
+				t.Fatalf("exit code = %d, want %d; stderr:\n%s", code, wantCode, stderr)
+			}
+			assertContainsAll(t, "stderr", stderr.String(), tt.wantStderr)
+			if len(tt.wantStderr) == 0 && stderr.Len() != 0 {
 				t.Errorf("stderr = %q, want empty", stderr)
 			}
-			rows := scanRows(t, stdout.String())
+			assertScanErrorLines(t, stderr.String())
+			rows := tableRows(t, stdout.String())
 			var names []string
 			for _, row := range rows {
 				names = append(names, row[0])
@@ -521,7 +516,7 @@ func TestScanConfigErrors(t *testing.T) {
 		{
 			name: "malformed JSON",
 			setup: func(t *testing.T) string {
-				home, _ := discovertest.CopyFixture(t, scanFixtureDir("claude-code", "malformed"))
+				home, _ := discovertest.CopyFixture(t, fixtureDir("claude-code", "malformed"))
 				return filepath.Join(home, ".claude.json")
 			},
 			wantStdoutEmpty: true,
@@ -531,7 +526,7 @@ func TestScanConfigErrors(t *testing.T) {
 		{
 			name: "invalid entries",
 			setup: func(t *testing.T) string {
-				home, _ := discovertest.CopyFixture(t, scanFixtureDir("cursor", "invalid-entries"))
+				home, _ := discovertest.CopyFixture(t, fixtureDir("cursor", "invalid-entries"))
 				return filepath.Join(home, ".cursor", "mcp.json")
 			},
 			wantStdout:      []string{"good"},
@@ -555,25 +550,12 @@ func TestScanConfigErrors(t *testing.T) {
 			if tt.wantStdoutEmpty && stdout.Len() != 0 {
 				t.Errorf("stdout = %q, want empty", stdout)
 			}
-			for _, want := range tt.wantStdout {
-				if !strings.Contains(stdout.String(), want) {
-					t.Errorf("stdout does not contain %q\nstdout: %s", want, stdout)
-				}
-			}
-			for _, want := range tt.wantStderr {
-				if !strings.Contains(stderr.String(), want) {
-					t.Errorf("stderr does not contain %q\nstderr: %s", want, stderr)
-				}
-			}
-			lines := scanNonEmptyLines(stderr.String())
-			if len(lines) != tt.wantStderrLines {
+			assertContainsAll(t, "stdout", stdout.String(), tt.wantStdout)
+			assertContainsAll(t, "stderr", stderr.String(), tt.wantStderr)
+			if lines := nonEmptyLines(stderr.String()); len(lines) != tt.wantStderrLines {
 				t.Errorf("stderr has %d lines, want %d\nstderr:\n%s", len(lines), tt.wantStderrLines, stderr)
 			}
-			for _, line := range lines {
-				if !strings.HasPrefix(line, "mcpmoat scan: ") || strings.HasPrefix(line, "mcpmoat scan: warning: ") {
-					t.Errorf("stderr line %q must start with %q and not be a warning", line, "mcpmoat scan: ")
-				}
-			}
+			assertScanErrorLines(t, stderr.String())
 		})
 	}
 
@@ -581,7 +563,7 @@ func TestScanConfigErrors(t *testing.T) {
 		t.Parallel()
 
 		c, _, stderr := scanConfigCLI(t, t.TempDir())
-		home, _ := discovertest.CopyFixture(t, scanFixtureDir("claude-code", "malformed"))
+		home, _ := discovertest.CopyFixture(t, fixtureDir("claude-code", "malformed"))
 
 		code := c.dispatch([]string{"scan", "--no-connect", "--config", filepath.Join(home, ".claude.json")})
 
@@ -658,11 +640,7 @@ func TestScanStartsNoProcess(t *testing.T) {
 	}
 	home := t.TempDir()
 	scanWriteFile(t, home, ".claude.json", string(data))
-	work := t.TempDir()
-
-	c, stdout, stderr := newTestCLI(fakeGetenv(nil), testBuild)
-	c.homeDir = func() (string, error) { return home, nil }
-	c.getwd = func() (string, error) { return work, nil }
+	c, stdout, stderr := dirsCLI(t, home, t.TempDir())
 
 	code := c.dispatch([]string{"scan", "--no-connect"})
 
@@ -714,16 +692,14 @@ func TestScanOpensNoConnection(t *testing.T) {
 	write(work, ".mcp.json", map[string]any{"claude-http": entry("http"), "claude-sse": entry("sse")})
 	write(home, filepath.Join(".cursor", "mcp.json"), map[string]any{"cursor-http": entry("http"), "cursor-sse": entry("sse")})
 
-	c, stdout, stderr := newTestCLI(fakeGetenv(nil), testBuild)
-	c.homeDir = func() (string, error) { return home, nil }
-	c.getwd = func() (string, error) { return work, nil }
+	c, stdout, stderr := dirsCLI(t, home, work)
 
 	code := c.dispatch([]string{"scan", "--no-connect"})
 
 	if code != exitOK {
 		t.Fatalf("exit code = %d, want %d; stderr:\n%s", code, exitOK, stderr)
 	}
-	rows := scanRows(t, stdout.String())
+	rows := tableRows(t, stdout.String())
 	if len(rows) != 4 {
 		t.Errorf("table has %d rows, want 4\nstdout:\n%s", len(rows), stdout)
 	}
@@ -780,7 +756,7 @@ func TestScanNoLeak(t *testing.T) {
 			if code != exitOK {
 				t.Fatalf("exit code = %d, want %d; stderr:\n%s", code, exitOK, stderr)
 			}
-			if len(scanRows(t, stdout.String())) == 0 {
+			if len(tableRows(t, stdout.String())) == 0 {
 				t.Errorf("table has no rows, so the test checks nothing\nstdout:\n%s", stdout)
 			}
 			scanAssertNoSecret(t, stdout.String(), stderr.String())
@@ -790,7 +766,7 @@ func TestScanNoLeak(t *testing.T) {
 			t.Run(tt.name+"/config/"+filepath.ToSlash(file), func(t *testing.T) {
 				t.Parallel()
 
-				home, _ := discovertest.CopyFixture(t, scanFixtureDir(tt.fixture...))
+				home, _ := discovertest.CopyFixture(t, fixtureDir(tt.fixture...))
 				// With the fixture's home as the user's home, the home files
 				// are read as global files and the work files as untrusted.
 				c, stdout, stderr := scanConfigCLI(t, home)
@@ -801,7 +777,7 @@ func TestScanNoLeak(t *testing.T) {
 				if code != exitOK {
 					t.Fatalf("exit code = %d, want %d; stderr:\n%s", code, exitOK, stderr)
 				}
-				if len(scanRows(t, stdout.String())) == 0 {
+				if len(tableRows(t, stdout.String())) == 0 {
 					t.Errorf("table has no rows, so the test checks nothing\nstdout:\n%s", stdout)
 				}
 				scanAssertNoSecret(t, stdout.String(), stderr.String())
@@ -860,7 +836,7 @@ func TestScanTerminalSafety(t *testing.T) {
 		}
 	}
 	// The row must keep its shape: header line and one row line.
-	if lines := scanNonEmptyLines(out); len(lines) != 2 {
+	if lines := nonEmptyLines(out); len(lines) != 2 {
 		t.Errorf("stdout has %d lines, want 2\n%q", len(lines), out)
 	}
 }
@@ -868,14 +844,13 @@ func TestScanTerminalSafety(t *testing.T) {
 func TestScanNoColor(t *testing.T) {
 	t.Parallel()
 
-	home, work := discovertest.CopyFixture(t, scanFixtureDir("all", "full"))
+	home, work := discovertest.CopyFixture(t, fixtureDir("all", "full"))
 
 	// runWith runs the scan with one set of args and one environment on the
 	// same home and working directory copies.
 	runWith := func(args []string, env map[string]string) (string, string, int) {
-		c, stdout, stderr := newTestCLI(fakeGetenv(env), testBuild)
-		c.homeDir = func() (string, error) { return home, nil }
-		c.getwd = func() (string, error) { return work, nil }
+		c, stdout, stderr := dirsCLI(t, home, work)
+		c.getenv = fakeGetenv(env)
 		code := c.dispatch(args)
 		return stdout.String(), stderr.String(), code
 	}
@@ -955,20 +930,20 @@ func TestScanWriteError(t *testing.T) {
 func TestScanArgsMasked(t *testing.T) {
 	t.Parallel()
 
-	const c = discovertest.CanaryArgs
+	const canary = discovertest.CanaryArgs
 	args := []string{
 		"-y", "@scope/server",
-		"--token", c,
-		"--api-key=" + c,
-		"-e", "GITHUB_TOKEN=" + c,
-		"-H", "Authorization: Bearer " + c,
-		"postgres://user:" + c + "@db.example.com/app",
-		"https://h.example.com/sse?key=" + c,
-		`{"token":"` + c + `"}`,
-		"/data/" + c + "/x",
-		"admin:" + c,
-		"-p" + c,
-		c,
+		"--token", canary,
+		"--api-key=" + canary,
+		"-e", "GITHUB_TOKEN=" + canary,
+		"-H", "Authorization: Bearer " + canary,
+		"postgres://user:" + canary + "@db.example.com/app",
+		"https://h.example.com/sse?key=" + canary,
+		`{"token":"` + canary + `"}`,
+		"/data/" + canary + "/x",
+		"admin:" + canary,
+		"-p" + canary,
+		canary,
 	}
 	data, err := json.Marshal(map[string]any{
 		"mcpServers": map[string]any{"srv": map[string]any{"command": "npx", "args": args}},
@@ -980,11 +955,9 @@ func TestScanArgsMasked(t *testing.T) {
 	scanWriteFile(t, home, ".claude.json", string(data))
 	scanWriteFile(t, work, ".mcp.json", string(data))
 
-	c2, stdout, stderr := newTestCLI(fakeGetenv(nil), testBuild)
-	c2.homeDir = func() (string, error) { return home, nil }
-	c2.getwd = func() (string, error) { return work, nil }
+	c, stdout, stderr := dirsCLI(t, home, work)
 
-	code := c2.dispatch([]string{"scan", "--no-connect"})
+	code := c.dispatch([]string{"scan", "--no-connect"})
 
 	if code != exitOK {
 		t.Fatalf("exit code = %d, want %d; stderr:\n%s", code, exitOK, stderr)
@@ -1009,18 +982,6 @@ func TestScanAutoExitCodes(t *testing.T) {
 	// its args must never show, also when mcpmoat refuses the file.
 	outsideConfig := `{"mcpServers":{"outside":{"command":"run","args":["` + discovertest.CanaryArgs + `"]}}}`
 	const globalConfig = `{"mcpServers":{"global-srv":{"command":"npx"}}}`
-
-	// symlink makes link point to target. It skips the test when the system
-	// cannot make a symlink (Windows without the right privilege).
-	symlink := func(t *testing.T, target, link string) {
-		t.Helper()
-		if err := os.MkdirAll(filepath.Dir(link), 0o750); err != nil {
-			t.Fatal(err)
-		}
-		if err := os.Symlink(target, link); err != nil {
-			t.Skipf("symlink: %v", err)
-		}
-	}
 
 	tests := []struct {
 		name string
@@ -1150,33 +1111,19 @@ func TestScanAutoExitCodes(t *testing.T) {
 
 			home, work, outside := t.TempDir(), t.TempDir(), t.TempDir()
 			tt.setup(t, home, work, outside)
-			c, stdout, stderr := newTestCLI(fakeGetenv(nil), testBuild)
-			c.homeDir = func() (string, error) { return home, nil }
-			c.getwd = func() (string, error) { return work, nil }
+			c, stdout, stderr := dirsCLI(t, home, work)
 
 			code := c.dispatch([]string{"scan", "--no-connect"})
 
 			if code != tt.wantCode {
 				t.Errorf("exit code = %d, want %d\nstdout:\n%s\nstderr:\n%s", code, tt.wantCode, stdout, stderr)
 			}
-			for _, want := range tt.wantStdout {
-				if !strings.Contains(stdout.String(), want) {
-					t.Errorf("stdout does not contain %q\nstdout:\n%s", want, stdout)
-				}
-			}
-			for _, want := range tt.wantStderr {
-				if !strings.Contains(stderr.String(), want) {
-					t.Errorf("stderr does not contain %q\nstderr:\n%s", want, stderr)
-				}
-			}
+			assertContainsAll(t, "stdout", stdout.String(), tt.wantStdout)
+			assertContainsAll(t, "stderr", stderr.String(), tt.wantStderr)
 			if len(tt.wantStderr) == 0 && stderr.Len() != 0 {
 				t.Errorf("stderr = %q, want empty", stderr)
 			}
-			for _, line := range scanNonEmptyLines(stderr.String()) {
-				if !strings.HasPrefix(line, "mcpmoat scan: ") || strings.Contains(line, "warning:") {
-					t.Errorf("stderr line %q must start with %q and not be a warning", line, "mcpmoat scan: ")
-				}
-			}
+			assertScanErrorLines(t, stderr.String())
 			discovertest.AssertNoLeak(t, "stdout", stdout.String())
 			discovertest.AssertNoLeak(t, "stderr", stderr.String())
 			assertNoEscape(t, stdout.String(), stderr.String())
@@ -1191,18 +1138,6 @@ func TestScanAutoExitCodes(t *testing.T) {
 // user's own global files: that file is read as a global file.
 func TestScanConfigIsUntrusted(t *testing.T) {
 	t.Parallel()
-
-	// symlink makes link point to target. It skips the test when the system
-	// cannot make a symlink (Windows without the right privilege).
-	symlink := func(t *testing.T, target, link string) {
-		t.Helper()
-		if err := os.MkdirAll(filepath.Dir(link), 0o750); err != nil {
-			t.Fatal(err)
-		}
-		if err := os.Symlink(target, link); err != nil {
-			t.Skipf("symlink: %v", err)
-		}
-	}
 
 	// outsideConfig is a config outside the directory of the --config file.
 	// The canary in its args must never show.
@@ -1246,9 +1181,12 @@ func TestScanConfigIsUntrusted(t *testing.T) {
 			setup: func(t *testing.T, _, repo, _ string) string {
 				return scanWriteFile(t, repo, ".claude.json", withProjects)
 			},
-			wantCode:   exitOK,
+			// A section that is not read can hide servers, so the scan
+			// fails. The top-level servers still show.
+			wantCode:   exitError,
 			wantStdout: []string{"top-srv", "project:"},
 			noStdout:   []string{"proj-srv"},
+			wantStderr: []string{"mcpmoat scan: ", ".claude.json", "projects section not read", configErrorHint},
 		},
 		{
 			name: "the home ~/.claude.json is a global file",
@@ -1305,24 +1243,17 @@ func TestScanConfigIsUntrusted(t *testing.T) {
 			if code != tt.wantCode {
 				t.Errorf("exit code = %d, want %d\nstdout:\n%s\nstderr:\n%s", code, tt.wantCode, stdout, stderr)
 			}
-			for _, want := range tt.wantStdout {
-				if !strings.Contains(stdout.String(), want) {
-					t.Errorf("stdout does not contain %q\nstdout:\n%s", want, stdout)
-				}
-			}
+			assertContainsAll(t, "stdout", stdout.String(), tt.wantStdout)
 			for _, bad := range tt.noStdout {
 				if strings.Contains(stdout.String(), bad) {
 					t.Errorf("stdout contains %q\nstdout:\n%s", bad, stdout)
 				}
 			}
-			for _, want := range tt.wantStderr {
-				if !strings.Contains(stderr.String(), want) {
-					t.Errorf("stderr does not contain %q\nstderr:\n%s", want, stderr)
-				}
-			}
+			assertContainsAll(t, "stderr", stderr.String(), tt.wantStderr)
 			if len(tt.wantStderr) == 0 && stderr.Len() != 0 {
 				t.Errorf("stderr = %q, want empty", stderr)
 			}
+			assertScanErrorLines(t, stderr.String())
 			discovertest.AssertNoLeak(t, "stdout", stdout.String())
 			discovertest.AssertNoLeak(t, "stderr", stderr.String())
 			assertNoEscape(t, stdout.String(), stderr.String())
@@ -1338,14 +1269,15 @@ func TestScanConfigIsUntrusted(t *testing.T) {
 
 		code := c.dispatch([]string{"scan", "--no-connect", "--config", path})
 
-		if code != exitOK {
-			t.Fatalf("exit code = %d, want %d; stderr:\n%s", code, exitOK, stderr)
+		// The file is untrusted, so its projects section is not read, and
+		// that fails the scan (see the case above).
+		if code != exitError {
+			t.Errorf("exit code = %d, want %d; stderr:\n%s", code, exitError, stderr)
 		}
 		if out := stdout.String(); !strings.Contains(out, "top-srv") || strings.Contains(out, "proj-srv") {
 			t.Errorf("stdout = %q, want top-srv and no proj-srv", out)
 		}
-		if stderr.Len() != 0 {
-			t.Errorf("stderr = %q, want empty", stderr)
-		}
+		assertContainsAll(t, "stderr", stderr.String(), []string{"projects section not read"})
+		assertScanErrorLines(t, stderr.String())
 	})
 }

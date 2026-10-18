@@ -23,9 +23,6 @@ import (
 	"github.com/Ducarv/mcpmoat/internal/discover/discovertest"
 )
 
-// fixtureRoot is the discover fixture directory, seen from this package.
-const fixtureRoot = "../../testdata/discover"
-
 // The binary is built once, on the first call to binaryPath. TestMain removes
 // the build directory when all tests are done.
 var (
@@ -109,60 +106,20 @@ func runBin(t *testing.T, home, dir string, args ...string) (stdout, stderr stri
 	return outBuf.String(), errBuf.String(), code
 }
 
-// tableRows splits a server table into rows. Each row is its list of
-// white-space separated words. The first row is the header. The NAME and
-// CLIENT cells never hold spaces, so the first two words of a row are safe to
-// use. The later cells can hold spaces.
-func tableRows(stdout string) [][]string {
-	var rows [][]string
-	for line := range strings.Lines(stdout) {
-		rows = append(rows, strings.Fields(line))
-	}
-	return rows
-}
-
-// column returns the cells of column i (0 is NAME) of the data rows. It
-// returns nil when there are no data rows. It skips a row that is too short.
-func column(rows [][]string, i int) []string {
-	if len(rows) < 2 {
-		return nil
-	}
-	var out []string
-	for _, row := range rows[1:] {
-		if len(row) <= i {
-			continue
-		}
-		out = append(out, row[i])
-	}
-	return out
-}
-
-// fixtureDir returns the path of a fixture directory.
-func fixtureDir(parts ...string) string {
-	return filepath.Join(append([]string{fixtureRoot}, parts...)...)
-}
-
 func TestE2EScanAllClients(t *testing.T) {
 	t.Parallel()
 	home, work := discovertest.CopyFixture(t, fixtureDir("all", "full"))
 
 	stdout, stderr, code := runBin(t, home, work, "scan", "--no-connect")
 
-	if code != 0 {
-		t.Errorf("exit code = %d, want 0; stderr:\n%s", code, stderr)
+	if code != exitOK {
+		t.Errorf("exit code = %d, want %d; stderr:\n%s", code, exitOK, stderr)
 	}
 	if stderr != "" {
 		t.Errorf("stderr = %q, want empty", stderr)
 	}
-	rows := tableRows(stdout)
-	if len(rows) == 0 {
-		t.Fatalf("stdout is empty, want a table")
-	}
-	if got := rows[0][0]; got != "NAME" {
-		t.Errorf("first word of the header = %q, want %q", got, "NAME")
-	}
 	want := []string{"cc-global", "cc-alpha", "cc-project", "cursor-global", "cursor-project", "codex-global"}
-	if got := column(rows, 0); !slices.Equal(got, want) {
+	if got := column(tableRows(t, stdout), 0); !slices.Equal(got, want) {
 		t.Errorf("server names = %v, want %v\nstdout:\n%s", got, want, stdout)
 	}
 }
@@ -176,32 +133,22 @@ func TestE2EScanPartialFailure(t *testing.T) {
 
 	stdout, stderr, code := runBin(t, home, work, "scan", "--no-connect")
 
-	if code != 2 {
-		t.Errorf("exit code = %d, want 2; stderr:\n%s", code, stderr)
+	if code != exitError {
+		t.Errorf("exit code = %d, want %d; stderr:\n%s", code, exitError, stderr)
 	}
 	want := []string{"cc-project", "cursor-global", "cursor-project", "codex-global"}
-	rows := tableRows(stdout)
-	if len(rows) < 2 {
-		t.Fatalf("stdout has no server rows:\n%s", stdout)
-	}
-	if got := column(rows, 0); !slices.Equal(got, want) {
+	if got := column(tableRows(t, stdout), 0); !slices.Equal(got, want) {
 		t.Errorf("server names = %v, want %v\nstdout:\n%s", got, want, stdout)
 	}
 
-	lines := strings.Split(strings.TrimSuffix(stderr, "\n"), "\n")
+	lines := nonEmptyLines(stderr)
 	if len(lines) != 2 {
 		t.Fatalf("stderr has %d lines, want 2:\n%s", len(lines), stderr)
 	}
-	for _, sub := range []string{"mcpmoat scan: ", ".claude.json", "invalid JSON"} {
-		if !strings.Contains(lines[0], sub) {
-			t.Errorf("error line %q does not contain %q", lines[0], sub)
-		}
-	}
-	if strings.Contains(stderr, "warning:") {
-		t.Errorf("stderr shows the problem as a warning:\n%s", stderr)
-	}
-	if !strings.Contains(lines[1], "a config file has a problem") {
-		t.Errorf("last stderr line = %q, want the hint", lines[1])
+	assertContainsAll(t, "the first stderr line", lines[0], []string{"mcpmoat scan: ", ".claude.json", "invalid JSON"})
+	assertScanErrorLines(t, stderr)
+	if lines[1] != configErrorHint {
+		t.Errorf("last stderr line = %q, want the hint %q", lines[1], configErrorHint)
 	}
 }
 
@@ -211,15 +158,7 @@ func TestE2EScanPartialFailure(t *testing.T) {
 // shows.
 func TestE2EScanUntrustedProjectFile(t *testing.T) {
 	t.Parallel()
-	root := t.TempDir()
-	home := filepath.Join(root, "home")
-	work := filepath.Join(root, "work")
-	outside := filepath.Join(root, "outside")
-	for _, dir := range []string{home, work, outside} {
-		if err := os.MkdirAll(dir, 0o700); err != nil {
-			t.Fatal(err)
-		}
-	}
+	home, work, outside := t.TempDir(), t.TempDir(), t.TempDir()
 	files := map[string]string{
 		filepath.Join(home, ".claude.json"): `{"mcpServers":{"global-srv":{"command":"npx"}}}`,
 		filepath.Join(outside, "real.json"): `{"mcpServers":{"outside":{"command":"run","args":["--token","` +
@@ -230,45 +169,28 @@ func TestE2EScanUntrustedProjectFile(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if err := os.Symlink(filepath.Join(outside, "real.json"), filepath.Join(work, ".mcp.json")); err != nil {
-		t.Fatal(err)
-	}
+	symlink(t, filepath.Join(outside, "real.json"), filepath.Join(work, ".mcp.json"))
 
 	stdout, stderr, code := runBin(t, home, work, "scan", "--no-connect")
 
-	if code != 2 {
-		t.Errorf("exit code = %d, want 2; stderr:\n%s", code, stderr)
+	if code != exitError {
+		t.Errorf("exit code = %d, want %d; stderr:\n%s", code, exitError, stderr)
 	}
-	if got := column(tableRows(stdout), 0); !slices.Equal(got, []string{"global-srv"}) {
+	if got := column(tableRows(t, stdout), 0); !slices.Equal(got, []string{"global-srv"}) {
 		t.Errorf("server names = %v, want [global-srv]\nstdout:\n%s", got, stdout)
 	}
-	for _, want := range []string{".mcp.json: file is outside the project", "a config file has a problem"} {
-		if !strings.Contains(stderr, want) {
-			t.Errorf("stderr does not contain %q:\n%s", want, stderr)
-		}
-	}
-	if strings.Contains(stderr, "warning:") {
-		t.Errorf("stderr shows the problem as a warning:\n%s", stderr)
-	}
+	assertContainsAll(t, "stderr", stderr, []string{".mcp.json: file is outside the project", configErrorHint})
+	assertScanErrorLines(t, stderr)
 	discovertest.AssertNoLeak(t, "stdout", stdout)
 	discovertest.AssertNoLeak(t, "stderr", stderr)
 }
 
 func TestE2EScanEmpty(t *testing.T) {
 	t.Parallel()
-	root := t.TempDir()
-	home := filepath.Join(root, "home")
-	work := filepath.Join(root, "work")
-	for _, dir := range []string{home, work} {
-		if err := os.MkdirAll(dir, 0o700); err != nil {
-			t.Fatal(err)
-		}
-	}
+	stdout, stderr, code := runBin(t, t.TempDir(), t.TempDir(), "scan", "--no-connect")
 
-	stdout, stderr, code := runBin(t, home, work, "scan", "--no-connect")
-
-	if code != 0 {
-		t.Errorf("exit code = %d, want 0; stderr:\n%s", code, stderr)
+	if code != exitOK {
+		t.Errorf("exit code = %d, want %d; stderr:\n%s", code, exitOK, stderr)
 	}
 	if want := "No MCP servers found.\n"; stdout != want {
 		t.Errorf("stdout = %q, want %q", stdout, want)
@@ -290,6 +212,9 @@ func TestE2EScanConfigFile(t *testing.T) {
 		// exist. The file is then not one of the user's own global files,
 		// so mcpmoat reads it as an untrusted project file.
 		otherHome bool
+		// wantStderr are substrings of stderr. Empty means: exit code 0 and
+		// an empty stderr. Otherwise the exit code must be 2.
+		wantStderr []string
 	}{
 		{
 			name:       "claude code",
@@ -299,13 +224,15 @@ func TestE2EScanConfigFile(t *testing.T) {
 			wantNames:  []string{"filesystem", "remote-http", "remote-sse", "alpha-tool", "gamma-tool"},
 		},
 		{
-			// The "projects" section of an untrusted file is not read.
+			// The "projects" section of an untrusted file is not read. That
+			// fails the scan, but the top-level servers still show.
 			name:       "claude code outside home",
 			fixture:    "claude-code",
 			file:       []string{".claude.json"},
 			wantClient: "claude-code",
 			wantNames:  []string{"filesystem", "remote-http", "remote-sse"},
 			otherHome:  true,
+			wantStderr: []string{"mcpmoat scan: ", ".claude.json", "projects section not read", configErrorHint},
 		},
 		{
 			name:       "cursor",
@@ -342,18 +269,23 @@ func TestE2EScanConfigFile(t *testing.T) {
 
 			stdout, stderr, code := runBin(t, runHome, work, "scan", "--no-connect", "--config", file)
 
-			if code != 0 {
-				t.Errorf("exit code = %d, want 0; stderr:\n%s", code, stderr)
+			wantCode := exitOK
+			if len(tt.wantStderr) > 0 {
+				wantCode = exitError
 			}
-			if stderr != "" {
+			if code != wantCode {
+				t.Errorf("exit code = %d, want %d; stderr:\n%s", code, wantCode, stderr)
+			}
+			assertContainsAll(t, "stderr", stderr, tt.wantStderr)
+			if len(tt.wantStderr) == 0 && stderr != "" {
 				t.Errorf("stderr = %q, want empty", stderr)
 			}
-			rows := tableRows(stdout)
-			if len(rows) < 2 {
+			assertScanErrorLines(t, stderr)
+			// tableRows checks the header, so CLIENT and SCOPE are the second
+			// and third words.
+			rows := tableRows(t, stdout)
+			if len(rows) == 0 {
 				t.Fatalf("stdout has no server rows:\n%s", stdout)
-			}
-			if len(rows[0]) < 3 || rows[0][1] != "CLIENT" || rows[0][2] != "SCOPE" {
-				t.Errorf("header = %v, want CLIENT and SCOPE in the second and third columns", rows[0])
 			}
 			for i, got := range column(rows, 1) {
 				if got != tt.wantClient {
@@ -380,29 +312,19 @@ func TestE2EScanConfigFile(t *testing.T) {
 // the target never shows.
 func TestE2EScanConfigSymlinkOut(t *testing.T) {
 	t.Parallel()
-	root := t.TempDir()
-	home := filepath.Join(root, "home")
-	repo := filepath.Join(root, "repo")
-	outside := filepath.Join(root, "outside")
-	for _, dir := range []string{home, repo, outside} {
-		if err := os.MkdirAll(dir, 0o700); err != nil {
-			t.Fatal(err)
-		}
-	}
+	home, repo, outside := t.TempDir(), t.TempDir(), t.TempDir()
 	target := filepath.Join(outside, "real.json")
 	content := `{"mcpServers":{"outside":{"command":"run","args":["--token","` + discovertest.CanaryArgs + `"]}}}`
 	if err := os.WriteFile(target, []byte(content), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	link := filepath.Join(repo, ".mcp.json")
-	if err := os.Symlink(target, link); err != nil {
-		t.Fatal(err)
-	}
+	symlink(t, target, link)
 
 	stdout, stderr, code := runBin(t, home, repo, "scan", "--no-connect", "--config", link)
 
-	if code != 2 {
-		t.Errorf("exit code = %d, want 2; stderr:\n%s", code, stderr)
+	if code != exitError {
+		t.Errorf("exit code = %d, want %d; stderr:\n%s", code, exitError, stderr)
 	}
 	if stdout != "" {
 		t.Errorf("stdout = %q, want empty", stdout)
@@ -439,8 +361,8 @@ func TestE2EScanConfigErrors(t *testing.T) {
 
 			stdout, stderr, code := runBin(t, dir, dir, "scan", "--no-connect", "--config", path)
 
-			if code != 2 {
-				t.Errorf("exit code = %d, want 2", code)
+			if code != exitError {
+				t.Errorf("exit code = %d, want %d", code, exitError)
 			}
 			if stdout != "" {
 				t.Errorf("stdout = %q, want empty", stdout)
@@ -458,8 +380,8 @@ func TestE2EScanWithoutNoConnect(t *testing.T) {
 
 	stdout, stderr, code := runBin(t, dir, dir, "scan")
 
-	if code != 2 {
-		t.Errorf("exit code = %d, want 2", code)
+	if code != exitError {
+		t.Errorf("exit code = %d, want %d", code, exitError)
 	}
 	if stdout != "" {
 		t.Errorf("stdout = %q, want empty", stdout)
@@ -496,12 +418,12 @@ func TestE2EScanSecretsDoNotLeak(t *testing.T) {
 			for _, mode := range modes {
 				stdout, stderr, code := runBin(t, home, work, mode.args...)
 
-				if code != 0 {
-					t.Errorf("%s: exit code = %d, want 0; stderr:\n%s", mode.name, code, stderr)
+				if code != exitOK {
+					t.Errorf("%s: exit code = %d, want %d; stderr:\n%s", mode.name, code, exitOK, stderr)
 				}
 				// Check that the scan listed servers. Without this, an empty
 				// output would pass the leak check.
-				if len(tableRows(stdout)) < 2 {
+				if len(tableRows(t, stdout)) == 0 {
 					t.Errorf("%s: stdout has no server rows:\n%s", mode.name, stdout)
 				}
 				discovertest.AssertNoLeak(t, mode.name+" stdout", stdout)
@@ -513,18 +435,11 @@ func TestE2EScanSecretsDoNotLeak(t *testing.T) {
 
 func TestE2EScanStartsNoProcess(t *testing.T) {
 	t.Parallel()
-	root := t.TempDir()
-	home := filepath.Join(root, "home")
-	work := filepath.Join(root, "work")
-	for _, dir := range []string{home, work} {
-		if err := os.MkdirAll(dir, 0o700); err != nil {
-			t.Fatal(err)
-		}
-	}
+	home, work, scripts := t.TempDir(), t.TempDir(), t.TempDir()
 
 	// This script would create the marker file if the server ever started.
-	marker := filepath.Join(root, "marker")
-	script := filepath.Join(root, "server.sh")
+	marker := filepath.Join(scripts, "marker")
+	script := filepath.Join(scripts, "server.sh")
 	body := "#!/bin/sh\ntouch " + marker + "\n"
 	// The script must be executable, so a start would really work.
 	if err := os.WriteFile(script, []byte(body), 0o700); err != nil { //nolint:gosec // G306: the script must be executable
@@ -547,8 +462,8 @@ func TestE2EScanStartsNoProcess(t *testing.T) {
 
 	stdout, stderr, code := runBin(t, home, work, "scan", "--no-connect")
 
-	if code != 0 {
-		t.Errorf("exit code = %d, want 0; stderr:\n%s", code, stderr)
+	if code != exitOK {
+		t.Errorf("exit code = %d, want %d; stderr:\n%s", code, exitOK, stderr)
 	}
 	// Both servers are listed. json.Marshal sorts the map keys, and the
 	// reader keeps that order, but the test does not depend on the order.

@@ -99,7 +99,7 @@ func TestWriteServersEmpty(t *testing.T) {
 	}
 }
 
-func TestCommand(t *testing.T) {
+func TestFormatCommand(t *testing.T) {
 	t.Parallel()
 
 	const (
@@ -153,11 +153,11 @@ func TestCommand(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			got := report.Command(tt.command, discover.NewArgs(tt.args))
+			got := report.FormatCommand(tt.command, discover.NewArgs(tt.args))
 			if got != tt.want {
-				t.Errorf("Command(%q, %q) = %q, want %q", tt.command, tt.args, got, tt.want)
+				t.Errorf("FormatCommand(%q, %q) = %q, want %q", tt.command, tt.args, got, tt.want)
 			}
-			discovertest.AssertNoLeak(t, "Command()", got)
+			discovertest.AssertNoLeak(t, "FormatCommand()", got)
 		})
 	}
 }
@@ -328,8 +328,8 @@ func TestWriteServersWriteError(t *testing.T) {
 // The caps of the padded columns. They repeat the unexported constants in
 // servers.go, so a change there must change these tests on purpose.
 const (
-	maxNameRunes = 80  // NAME, CLIENT, TRANSPORT
-	maxPathRunes = 256 // SCOPE, SOURCE
+	maxShortCellRunes = 80  // NAME, CLIENT, TRANSPORT
+	maxPathRunes      = 256 // SCOPE, SOURCE
 )
 
 // firstCell returns the first cell (NAME) of line n of out, counting from 0.
@@ -387,8 +387,8 @@ func TestWriteServersPaddingAmplification(t *testing.T) {
 	if !strings.HasSuffix(cell, "\u2026") {
 		t.Errorf("long name cell does not end with the cut marker: %q", cell)
 	}
-	if n := utf8.RuneCountInString(cell); n != maxNameRunes+1 {
-		t.Errorf("long name cell has %d runes, want %d", n, maxNameRunes+1)
+	if n := utf8.RuneCountInString(cell); n != maxShortCellRunes+1 {
+		t.Errorf("long name cell has %d runes, want %d", n, maxShortCellRunes+1)
 	}
 	// The long source path is cut at the path cap and ends with the marker.
 	wantPath := "/" + strings.Repeat("p", maxPathRunes-1) + "\u2026"
@@ -421,9 +421,17 @@ func TestWriteServersCellCap(t *testing.T) {
 				want: strconv.Quote(strings.Repeat("a", limit-1)+"\x1b") + marker,
 			},
 			{
-				name: "invalid UTF-8 is cut at the cap in bytes and quoted",
+				// An invalid byte counts as one rune (termsafe.CutRunes).
+				name: "invalid UTF-8 is cut at the cap and quoted",
 				in:   strings.Repeat("\xff", 1000),
 				want: strconv.Quote(strings.Repeat("\xff", limit)) + marker,
+			},
+			{
+				// The valid runes before an invalid byte count as runes, not
+				// as bytes, so the cell keeps the whole cap.
+				name: "multi-byte runes and invalid UTF-8 are cut at the cap in runes",
+				in:   strings.Repeat("\u00e9", limit-1) + "\xff" + strings.Repeat("z", 50),
+				want: strconv.Quote(strings.Repeat("\u00e9", limit-1)+"\xff") + marker,
 			},
 			{name: "short invalid UTF-8 is quoted, not cut", in: "a\xffb", want: `"a\xffb"`},
 		}
@@ -436,7 +444,7 @@ func TestWriteServersCellCap(t *testing.T) {
 		// so set returns the prefix that the cell shows before v.
 		set func(s *discover.Server, v string) (prefix string)
 	}{
-		{name: "NAME", limit: maxNameRunes, set: func(s *discover.Server, v string) string { s.Name = v; return "" }},
+		{name: "NAME", limit: maxShortCellRunes, set: func(s *discover.Server, v string) string { s.Name = v; return "" }},
 		{name: "SOURCE", limit: maxPathRunes, set: func(s *discover.Server, v string) string { s.Source = v; return "" }},
 		{name: "SCOPE", limit: maxPathRunes, set: func(s *discover.Server, v string) string {
 			s.Scope = discover.ScopeProject
@@ -490,8 +498,8 @@ func TestWriteServersPathColumnsKeepRealPaths(t *testing.T) {
 
 	// A deep path of 150 runes is longer than the NAME cap and must show whole.
 	path := "/Users/someone/" + strings.Repeat("deep/", 27) + "mcp.json"
-	if n := len(path); n <= maxNameRunes || n >= maxPathRunes {
-		t.Fatalf("test path has %d runes, want between %d and %d", n, maxNameRunes, maxPathRunes)
+	if n := len(path); n <= maxShortCellRunes || n >= maxPathRunes {
+		t.Fatalf("test path has %d runes, want between %d and %d", n, maxShortCellRunes, maxPathRunes)
 	}
 	s := oneServer("srv")
 	s.Source = path
