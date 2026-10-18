@@ -30,7 +30,11 @@ import (
 //     opts.Timeout of a server starts when its inspection starts, not while it
 //     waits in the queue.
 //   - A server that returns no answer in time gets StatusTimeout. The Err of
-//     that Outcome wraps context.DeadlineExceeded.
+//     that Outcome wraps context.DeadlineExceeded. An Inspect call that returns
+//     an error after its own deadline has passed also gets StatusTimeout,
+//     whatever the error is: the kill at the deadline makes the call fail
+//     with an error of its own (for example "signal: killed"), so the error
+//     alone cannot show a timeout. The text of that error is not kept.
 //   - Once Run sees that ctx is done, it starts no new server. Those servers
 //     get StatusFailed, and their Err wraps ctx.Err(). A server that is
 //     already running gets StatusFailed too, and its Err wraps ctx.Err() as
@@ -161,23 +165,29 @@ func runOne(parent context.Context, s discover.Server, opts Options, insp Inspec
 
 	res, err := insp.Inspect(sctx, s)
 
+	// Read each context state once, so that the case that is chosen and the
+	// error that is wrapped see the same values. The parent can end at any
+	// moment.
+	perr := parent.Err()
+	ownDeadline := perr == nil && errors.Is(sctx.Err(), context.DeadlineExceeded)
+
 	switch {
 	case err == nil:
 		// A nil error is success, even if the deadline passed just after the
 		// inspector returned.
 		o.Status = StatusOK
 		o.Result = res
-	case parent.Err() == nil && errors.Is(sctx.Err(), context.DeadlineExceeded):
+	case ownDeadline:
 		// Only our own timeout fired. We do not wrap err here: its text is
 		// untrusted and adds nothing to "no answer in time".
 		o.Status = StatusTimeout
 		o.Err = fmt.Errorf("inspect: no answer within %s: %w", opts.Timeout, context.DeadlineExceeded)
-	case parent.Err() != nil:
+	case perr != nil:
 		// The caller cancelled or its deadline passed. Wrap the parent error
 		// too, so errors.Is works even if the inspector returned an unrelated
 		// error.
 		o.Status = StatusFailed
-		o.Err = fmt.Errorf("inspect: %w: %w", parent.Err(), err)
+		o.Err = fmt.Errorf("inspect: %w: %w", perr, err)
 	default:
 		o.Status = StatusFailed
 		o.Err = fmt.Errorf("inspect: %w", err)

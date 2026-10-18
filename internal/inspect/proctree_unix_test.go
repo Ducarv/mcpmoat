@@ -3,10 +3,14 @@
 package inspect_test
 
 import (
+	"bufio"
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"slices"
+	"strconv"
+	"strings"
 	"syscall"
 	"testing"
 	"time"
@@ -14,15 +18,8 @@ import (
 	"github.com/Ducarv/mcpmoat/internal/inspect"
 )
 
-// The tests in this file do not call t.Parallel. They start real processes
-// and measure wall time, and TestRunNoGoroutineLeak (run_process_unix_test.go)
-// counts the goroutines of the whole test binary. A test that never calls
-// t.Parallel runs alone.
-
-// processTreeSlack is added to every upper time bound of the process tests.
-// The race detector makes the helper process start slowly, so the bounds must
-// be generous.
-const processTreeSlack = 3 * time.Second
+// The tests in this file start helper processes and do not call t.Parallel.
+// helperprocess_unix_test.go explains why, and holds the time constants.
 
 // TestTimeoutKillsProcessTree is the acceptance check "no process leaks" for
 // issue 28. The server starts a grandchild that would live forever. After the
@@ -54,7 +51,37 @@ func TestTimeoutKillsProcessTree(t *testing.T) {
 		t.Fatalf("grandchild PID = %d, want a real PID", pid)
 	}
 	// The grandchild is an orphan now. init reaps it asynchronously.
-	waitProcessGone(t, pid, 5*time.Second)
+	waitProcessGone(t, pid, reapLimit)
+}
+
+// TestNormalExitKillsGroupMembers checks the cleanup on a normal close. The
+// server starts a grandchild in its process group and exits at once with
+// success. cmd.Cancel never runs, because ctx does not end. execInspector
+// kills the group before Wait, so the grandchild must be gone too.
+func TestNormalExitKillsGroupMembers(t *testing.T) {
+	pids := make(chan int, 1)
+	opts := inspect.Options{Timeout: 10 * time.Second, Concurrency: 1}
+
+	got := runModes(t, opts, execInspector{pids: pids}, namedMode{"daemon", "daemon"})
+
+	checkStatus(t, got["daemon"], inspect.StatusOK)
+	var pid int
+	select {
+	case pid = <-pids:
+	default:
+		t.Fatal("no grandchild PID was reported; the test cannot check the cleanup")
+	}
+	if pid <= 1 {
+		t.Fatalf("grandchild PID = %d, want a real PID", pid)
+	}
+	t.Cleanup(func() {
+		// Safety net if the check below fails: the grandchild would hang
+		// forever. Kill it only while it still exists.
+		if !processGone(pid) {
+			_ = syscall.Kill(pid, syscall.SIGKILL)
+		}
+	})
+	waitProcessGone(t, pid, reapLimit)
 }
 
 // TestTimeoutWithEscapedGrandchild checks the Inspector contract for pipe
@@ -77,24 +104,11 @@ func TestTimeoutWithEscapedGrandchild(t *testing.T) {
 	})
 
 	opts := inspect.Options{Timeout: 4 * time.Second, Concurrency: 1}
-	input := helperServers(t, namedMode{"escape", "escape"})
-	// The goroutine only calls Run. t.Fatal must stay in the test goroutine.
-	done := make(chan []inspect.Outcome, 1)
-	go func() {
-		outcomes, _ := inspect.Run(t.Context(), input, opts, execInspector{pids: pids})
-		done <- outcomes
-	}()
-
 	limit := opts.Timeout + inspect.KillWaitDelay + processTreeSlack
-	var outcomes []inspect.Outcome
-	select {
-	case outcomes = <-done:
-	case <-time.After(limit):
-		t.Fatalf("Run() did not return within %s: the pipe read did not end", limit)
-	}
-	if len(outcomes) != 1 {
-		t.Fatalf("Run() returned %d outcomes, want 1", len(outcomes))
-	}
+	input := helperServers(t, namedMode{"escape", "escape"})
+
+	outcomes := mustRunWithin(t, limit, input, opts, execInspector{pids: pids})
+
 	checkStatus(t, outcomes[0], inspect.StatusTimeout)
 
 	// The test is only useful if the grandchild really escaped. Peek at the
@@ -171,22 +185,24 @@ func TestConfigureProcessGroupSetsAttrs(t *testing.T) {
 
 	// setpgid(2) fails with EPERM for a session leader, so Setpgid together
 	// with Setsid makes cmd.Start fail. A new session is already a new group.
-	t.Run("keeps Setsid and does not add Setpgid", func(t *testing.T) {
-		cmd := exec.CommandContext(t.Context(), "/bin/echo")
-		cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
+	for _, setpgid := range []bool{false, true} {
+		t.Run(fmt.Sprintf("keeps Setsid and clears Setpgid %v", setpgid), func(t *testing.T) {
+			cmd := exec.CommandContext(t.Context(), "/bin/echo")
+			cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true, Setpgid: setpgid}
 
-		inspect.ConfigureProcessGroup(cmd)
+			inspect.ConfigureProcessGroup(cmd)
 
-		if !cmd.SysProcAttr.Setsid {
-			t.Error("Setsid = false, want it kept as true")
-		}
-		if cmd.SysProcAttr.Setpgid {
-			t.Error("Setpgid = true with Setsid, want false: cmd.Start would fail with EPERM")
-		}
-		if cmd.Cancel == nil {
-			t.Error("Cancel = nil, want a function")
-		}
-	})
+			if !cmd.SysProcAttr.Setsid {
+				t.Error("Setsid = false, want it kept as true")
+			}
+			if cmd.SysProcAttr.Setpgid {
+				t.Error("Setpgid = true with Setsid, want false: cmd.Start would fail with EPERM")
+			}
+			if cmd.Cancel == nil {
+				t.Error("Cancel = nil, want a function")
+			}
+		})
+	}
 
 	// A non-zero Pgid would put the child into an existing group, and the
 	// group kill would then miss it.
@@ -290,10 +306,7 @@ func startHang(t *testing.T, attr *syscall.SysProcAttr) *exec.Cmd {
 	if err != nil {
 		t.Fatalf("os.Executable() error = %v", err)
 	}
-	cmd := exec.CommandContext(t.Context(), exe, "hang") //nolint:gosec // G204: the test runs its own test binary as a fixture server
-	cmd.Env = append(os.Environ(), helperEnv+"=1")
-	cmd.SysProcAttr = attr
-	inspect.ConfigureProcessGroup(cmd)
+	cmd := helperCommand(t.Context(), exe, attr, "hang")
 	if err := cmd.Start(); err != nil {
 		t.Fatalf("Start() error = %v", err)
 	}
@@ -311,11 +324,8 @@ func startHang(t *testing.T, attr *syscall.SysProcAttr) *exec.Cmd {
 // process: the explicit KillProcessGroup and the Cancel func that exec calls.
 // It runs each path with a plain command and with a command that already asks
 // for a new session (Setsid), as the stdio command of issue #27 does. In both
-// cases the child must start and must lead its own process group.
-//
-// It never calls KillProcessGroup after Wait. After Wait the OS may reuse the
-// PID for another process, and kill(-pid) could then hit a stranger. The
-// os.ErrProcessDone mapping (ESRCH) is therefore not tested here.
+// cases the child must start and must lead its own process group. The kill
+// after Wait is checked in TestKillProcessGroupAfterWaitSendsNothing.
 func TestKillProcessGroupOnRunningProcess(t *testing.T) {
 	kills := []struct {
 		name string
@@ -372,5 +382,53 @@ func checkKilledBySIGKILL(t *testing.T, cmd *exec.Cmd, kill func(cmd *exec.Cmd) 
 	}
 	if !ws.Signaled() || ws.Signal() != syscall.SIGKILL {
 		t.Errorf("wait status = %v, want killed by SIGKILL", ws)
+	}
+}
+
+// TestKillProcessGroupAfterWaitSendsNothing checks the guard against PID
+// reuse. After Wait has reaped the child, killProcessGroup must send no signal
+// and return os.ErrProcessDone. To see whether a signal was sent, a grandchild
+// keeps the process group alive after the child is gone: a kill(-pid) would
+// still reach it.
+func TestKillProcessGroupAfterWaitSendsNothing(t *testing.T) {
+	exe, err := os.Executable()
+	if err != nil {
+		t.Fatalf("os.Executable() error = %v", err)
+	}
+	cmd := helperCommand(t.Context(), exe, nil, "grandchild")
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		t.Fatalf("StdoutPipe() error = %v", err)
+	}
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("Start() error = %v", err)
+	}
+
+	line, err := bufio.NewReader(stdout).ReadString('\n')
+	if err != nil {
+		t.Fatalf("read the grandchild PID: %v", err)
+	}
+	pid, err := strconv.Atoi(strings.TrimPrefix(strings.TrimSpace(line), "PID "))
+	if err != nil || pid <= 1 {
+		t.Fatalf("grandchild PID line = %q, want \"PID <n>\"", line)
+	}
+	t.Cleanup(func() {
+		// The grandchild hangs forever. Kill it only while it still exists.
+		if !processGone(pid) {
+			_ = syscall.Kill(pid, syscall.SIGKILL)
+		}
+	})
+
+	// End and reap only the direct child. The grandchild keeps the group.
+	if err := cmd.Process.Kill(); err != nil {
+		t.Fatalf("Process.Kill() error = %v", err)
+	}
+	_ = cmd.Wait() // the error is the expected "signal: killed"
+
+	if err := inspect.KillProcessGroup(cmd); !errors.Is(err, os.ErrProcessDone) {
+		t.Errorf("KillProcessGroup() after Wait error = %v, want os.ErrProcessDone", err)
+	}
+	if processGone(pid) {
+		t.Errorf("grandchild %d is gone after KillProcessGroup, want it alive: the call after Wait sent a signal", pid)
 	}
 }

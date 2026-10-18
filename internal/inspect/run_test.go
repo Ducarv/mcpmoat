@@ -166,6 +166,14 @@ func outcomeKeys(outs []inspect.Outcome) []string {
 	return keys
 }
 
+func serverNames(servers []discover.Server) []string {
+	names := make([]string, len(servers))
+	for i, s := range servers {
+		names[i] = s.Name
+	}
+	return names
+}
+
 func outcomeNames(outs []inspect.Outcome) []string {
 	names := make([]string, len(outs))
 	for i, o := range outs {
@@ -354,14 +362,6 @@ func TestRunDoesNotChangeInput(t *testing.T) {
 	if slices.Equal(outcomeNames(outs), serverNames(servers)) {
 		t.Errorf("outcome names %v equal the input names: the test input must be unsorted", outcomeNames(outs))
 	}
-}
-
-func serverNames(servers []discover.Server) []string {
-	names := make([]string, len(servers))
-	for i, s := range servers {
-		names[i] = s.Name
-	}
-	return names
 }
 
 func TestRunConcurrencyBound(t *testing.T) {

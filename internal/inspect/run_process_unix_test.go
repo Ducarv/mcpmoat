@@ -16,10 +16,8 @@ import (
 )
 
 // These tests run Run against real child processes (the helper modes of
-// helperprocess_unix_test.go). They measure wall time, and
-// TestRunNoGoroutineLeak counts the goroutines of the whole test binary, so
-// none of them calls t.Parallel: other tests in the process would slow them
-// down and skew the numbers. A test that never calls t.Parallel runs alone.
+// helperprocess_unix_test.go). They do not call t.Parallel;
+// helperprocess_unix_test.go explains why, and holds the time constants.
 //
 // The order of the outcomes is checked with fakes in run_test.go
 // (TestRunOrder), which covers every tie-breaker and many input orders.
@@ -42,6 +40,38 @@ func helperServers(t *testing.T, modes ...namedMode) []discover.Server {
 func runModes(t *testing.T, opts inspect.Options, insp inspect.Inspector, modes ...namedMode) map[string]inspect.Outcome {
 	t.Helper()
 	return byName(t, mustRun(t.Context(), t, helperServers(t, modes...), opts, insp))
+}
+
+// mustRunWithin is mustRun with a time limit: it fails the test if Run does
+// not return within limit. Run runs in its own goroutine, and the checks stay
+// in the test goroutine, because t.Fatal must not be called from another
+// goroutine. If Run hangs, its goroutine is left behind until the test binary
+// exits; the test has failed by then.
+func mustRunWithin(t *testing.T, limit time.Duration, servers []discover.Server, opts inspect.Options, insp inspect.Inspector) []inspect.Outcome {
+	t.Helper()
+	type result struct {
+		outcomes []inspect.Outcome
+		err      error
+	}
+	done := make(chan result, 1)
+	go func() {
+		outcomes, err := inspect.Run(t.Context(), servers, opts, insp)
+		done <- result{outcomes: outcomes, err: err}
+	}()
+
+	var res result
+	select {
+	case res = <-done:
+	case <-time.After(limit):
+		t.Fatalf("Run() did not return within %s", limit)
+	}
+	if res.err != nil {
+		t.Fatalf("Run() error = %v, want nil", res.err)
+	}
+	if len(res.outcomes) != len(servers) {
+		t.Fatalf("Run() returned %d outcomes, want %d", len(res.outcomes), len(servers))
+	}
+	return res.outcomes
 }
 
 // byName indexes outcomes by server name. It fails the test if two outcomes
@@ -145,35 +175,10 @@ func TestRunMixedIsolation(t *testing.T) {
 	opts := inspect.Options{Timeout: timeout, Concurrency: 5}
 
 	// Run must not hang. The bound is the timeout, the WaitDelay of the
-	// process-group kill and 5s of slack.
-	limit := timeout + inspect.KillWaitDelay + 5*time.Second
+	// process-group kill and the slack.
+	limit := timeout + inspect.KillWaitDelay + processTreeSlack
 
-	// The goroutine only calls Run. The checks stay in the test goroutine,
-	// because t.Fatal must not be called from another goroutine.
-	input := helperServers(t, modes...)
-	type result struct {
-		outcomes []inspect.Outcome
-		err      error
-	}
-	done := make(chan result, 1)
-	go func() {
-		outcomes, err := inspect.Run(t.Context(), input, opts, execInspector{})
-		done <- result{outcomes: outcomes, err: err}
-	}()
-
-	var res result
-	select {
-	case res = <-done:
-	case <-time.After(limit):
-		t.Fatalf("Run() did not return within %s", limit)
-	}
-	if res.err != nil {
-		t.Fatalf("Run() error = %v, want nil", res.err)
-	}
-	if len(res.outcomes) != len(servers) {
-		t.Fatalf("Run() returned %d outcomes, want %d", len(res.outcomes), len(servers))
-	}
-	got := byName(t, res.outcomes)
+	got := byName(t, mustRunWithin(t, limit, helperServers(t, modes...), opts, execInspector{}))
 
 	for name, s := range servers {
 		o, ok := got[name]
@@ -215,7 +220,7 @@ func TestRunNoGoroutineLeak(t *testing.T) {
 	// The exec package and the runtime stop their own goroutines (pipe copiers,
 	// the context watcher) a moment after Wait returns. A bounded poll is the
 	// only way to see that. This is a leak check, not synchronisation.
-	deadline := time.Now().Add(5 * time.Second)
+	deadline := time.Now().Add(reapLimit)
 	for runtime.NumGoroutine() > baseline {
 		if time.Now().After(deadline) {
 			buf := make([]byte, 1<<16)

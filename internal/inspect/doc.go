@@ -4,35 +4,27 @@
 //
 // # Running many servers
 //
-// Run inspects a list of servers through an Inspector. It uses a bounded pool
-// of workers (Options.Concurrency, default 4). Each server has its own time
-// limit (Options.Timeout, default 10s). The limit starts when the server
-// starts, not while it waits in the queue.
+// Run inspects a list of servers through an Inspector, with a bounded pool of
+// workers and a time limit for each server (see Options, DefaultConcurrency
+// and DefaultTimeout). It returns one Outcome per server, in a stable order,
+// with a Status of ok, timeout or failed. One broken, hung or panicking server
+// does not stop the others. The Run doc has the full contract.
 //
-// Run returns one Outcome per server, in a stable order: by client, source and
-// name, then by more fields. Each Outcome has a Status of ok, timeout or
-// failed. One broken, hung or panicking server does not stop the others.
-//
-// # The Inspector contract
-//
-// An Inspector must honour its context, must stop every child process it
-// started, must unblock its own pipe reads when the context is done, and must
-// be safe for concurrent use. Run calls it from several goroutines at the same
-// time. See the Inspector type for the details.
+// An Inspector does the work for one server. Its doc lists what an
+// implementation must do: honour the context, stop its child processes, close
+// its pipes, refuse untrusted servers without an opt-in, and keep secrets out
+// of its errors.
 //
 // # Child processes
 //
-// configureProcessGroup starts a stdio server in its own process group. When
-// the timeout fires, every process that is still in that group is killed, not
-// only the direct child. A process that leaves the group on purpose (with
-// setsid, setpgid or a double fork) is not killed, so this is not a sandbox.
-// killProcessGroup does the same kill on request. This works on Unix only
-// (macOS and Linux). On other systems, only the direct child is killed.
+// configureProcessGroup starts a stdio server in its own process group, and
+// killProcessGroup kills every process that is still in that group. They are
+// for the stdio Inspector of issue #25; today only the tests call them. A process that
+// leaves the group on purpose (with setsid, setpgid or a double fork) is not
+// killed, so this is not a sandbox. The group kill works on Unix only (macOS
+// and Linux). On other systems, only the direct child is killed.
 //
-// # Untrusted text
-//
-// The text of Outcome.Err can hold server output. Treat it as untrusted. Escape
-// it with internal/termsafe before you print it.
+// The text of Outcome.Err is untrusted (see Outcome).
 //
 // See docs/PRD.md, FR-04 to FR-06, NFR-03, NFR-04 and NFR-06.
 package inspect

@@ -29,6 +29,23 @@ import (
 // helper mode.
 const helperEnv = "MCPMOAT_INSPECT_HELPER"
 
+// The tests that start helper processes (proctree_unix_test.go and
+// run_process_unix_test.go) do not call t.Parallel. They measure wall time,
+// and TestRunNoGoroutineLeak counts the goroutines of the whole test binary,
+// so no other test may run at the same time. A test that never calls
+// t.Parallel runs alone.
+
+const (
+	// processTreeSlack is added to the upper time bound of a process test.
+	// The race detector makes the helper process start slowly, so the bounds
+	// must be generous.
+	processTreeSlack = 3 * time.Second
+	// reapLimit is how long a test waits for something that the operating
+	// system or the runtime does a moment later: init reaps an orphan, and
+	// exec stops its goroutines after Wait.
+	reapLimit = 5 * time.Second
+)
+
 // TestMain runs the helper when helperEnv is set, and the tests otherwise.
 //
 // In helper mode it never calls m.Run, so the testing package does not parse
@@ -62,24 +79,35 @@ func helperMain(args []string) int {
 	case "grandchild":
 		// A grandchild that stays in the process group. Its stdout is
 		// /dev/null (exec.Command with a nil Stdout).
-		return startGrandchild(nil)
+		if code := startGrandchild(nil); code != 0 {
+			return code
+		}
+		return hangForever()
 	case "escape":
 		// A hostile grandchild: it leaves the process group with a new
 		// session, so the group kill misses it, and it keeps the stdout pipe
 		// of the server open.
-		return startGrandchild(func(gc *exec.Cmd) {
+		code := startGrandchild(func(gc *exec.Cmd) {
 			gc.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
 			gc.Stdout = os.Stdout
 		})
+		if code != 0 {
+			return code
+		}
+		return hangForever()
+	case "daemon":
+		// A server that leaves a daemon behind: the grandchild stays in the
+		// process group, and the server exits at once with success.
+		return startGrandchild(nil)
 	default:
 		return 2
 	}
 }
 
 // startGrandchild starts the test binary again in "hang" mode as a
-// grandchild, prints "PID <n>" on stdout and then hangs. setup, if not nil,
-// changes the grandchild command before it starts. It returns an exit code
-// only on an error.
+// grandchild and prints "PID <n>" on stdout. setup, if not nil, changes the
+// grandchild command before it starts. It returns 0, or an exit code for an
+// error.
 func startGrandchild(setup func(gc *exec.Cmd)) int {
 	exe, err := os.Executable()
 	if err != nil {
@@ -100,7 +128,7 @@ func startGrandchild(setup func(gc *exec.Cmd)) int {
 	// os.Stdout is not buffered, so the parent sees the line at once. We do
 	// not Wait for the grandchild: only a kill may end it.
 	fmt.Printf("PID %d\n", gc.Process.Pid)
-	return hangForever()
+	return 0
 }
 
 // hangForever blocks until the process is killed.
@@ -131,10 +159,24 @@ func helperServer(t testing.TB, name, mode string) discover.Server {
 	}
 }
 
+// helperCommand returns a command that runs the test binary at path in a
+// helper mode, in its own process group, as a stdio inspector starts a
+// server. attr is the SysProcAttr before ConfigureProcessGroup; nil means
+// none.
+func helperCommand(ctx context.Context, path string, attr *syscall.SysProcAttr, args ...string) *exec.Cmd {
+	cmd := exec.CommandContext(ctx, path, args...) //nolint:gosec // G204: the test runs its own test binary as a fixture server
+	// The test's own environment plus the helper switch. Scrubbing the
+	// environment is issue #27.
+	cmd.Env = append(os.Environ(), helperEnv+"=1")
+	cmd.SysProcAttr = attr
+	inspect.ConfigureProcessGroup(cmd)
+	return cmd
+}
+
 // execInspector is an inspect.Inspector that runs the server as a child
 // process and waits for it to exit. It reads no MCP content. It follows the
 // Inspector contract the way a real stdio inspector must: its own process
-// group, and a pipe read that ends when ctx is done.
+// group, a pipe read that ends when ctx is done, and a group kill before Wait.
 //
 // It is safe for concurrent use.
 type execInspector struct {
@@ -147,11 +189,7 @@ type execInspector struct {
 // Inspect starts the server in its own process group and waits until it exits.
 // A server killed because ctx is done gives a non-nil error.
 func (e execInspector) Inspect(ctx context.Context, s discover.Server) (inspect.Result, error) {
-	cmd := exec.CommandContext(ctx, s.Command, s.Args.Values()...) //nolint:gosec // G204: the test runs its own test binary as a fixture server
-	// The test's own environment plus the helper switch. Scrubbing the
-	// environment is issue #27.
-	cmd.Env = append(os.Environ(), helperEnv+"=1")
-	inspect.ConfigureProcessGroup(cmd)
+	cmd := helperCommand(ctx, s.Command, nil, s.Args.Values()...)
 
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
@@ -187,6 +225,15 @@ func (e execInspector) Inspect(ctx context.Context, s discover.Server) (inspect.
 		default:
 		}
 	}
+
+	// Stop the members that stay in the group, for example a daemon that the
+	// server started, also when the server exited with success. Wait has not
+	// reaped the child yet, so its PID is still taken and the kill cannot
+	// reach another process. The error is not useful here: on macOS the kill
+	// fails with EPERM when only the exited child is left in the group. Wait
+	// must run in every case, or the child stays a zombie and exec leaves a
+	// goroutine behind.
+	_ = inspect.KillProcessGroup(cmd)
 
 	if err := cmd.Wait(); err != nil {
 		return inspect.Result{}, fmt.Errorf("execInspector: wait: %w", err)

@@ -29,9 +29,21 @@ type Result struct{}
 
 // Inspector connects to one MCP server and reads its content.
 //
-// Inspect MUST honour ctx. It must return soon after ctx is done, and it must
-// stop any child process it started (see configureProcessGroup). Run waits for
+// Inspect MUST honour ctx. It must return soon after ctx is done. Run waits for
 // Inspect to return and cannot abandon a call.
+//
+// Inspect must not start or connect to a server with s.Untrusted set unless
+// the user gave an explicit opt-in (see the discover package doc, Untrusted
+// files). Run does not check this: the opt-in belongs to the code that starts
+// or connects to a server.
+//
+// On every return, also on success, Inspect must stop the child processes it
+// started. For a stdio child made with configureProcessGroup, call
+// killProcessGroup before cmd.Wait, and then call Wait whatever the kill
+// returns. Until Wait reaps the child, its PID stays taken, also after the
+// child has exited, so the kill cannot reach another process. It stops the
+// members that stay in the group, for example a daemon that the server
+// started. cmd.Cancel does this only when ctx ends.
 //
 // Killing the child is not enough to return. A process that left the process
 // group of the child can still hold the write end of a stdout pipe, so a read
@@ -44,7 +56,8 @@ type Result struct{}
 //
 // Error text can hold untrusted server output. It must never hold env or
 // header values from the config. The same is true for the value of a panic in
-// Inspect, because Run puts that value into Outcome.Err.
+// Inspect, because Run puts that value into Outcome.Err. Keep the text short:
+// do not wrap the whole output of a server. The report layer prints it.
 type Inspector interface {
 	Inspect(ctx context.Context, s discover.Server) (Result, error)
 }
