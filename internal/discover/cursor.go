@@ -15,7 +15,7 @@ import "context"
 //
 // See the package doc, Reading configs.
 func ReadCursor(ctx context.Context, path string, scope Scope, projectPath string) Result {
-	servers, errs := parseJSONServers(ctx, jsonFile{
+	servers, errs := readJSONServers(ctx, jsonFile{
 		path:        path,
 		client:      ClientCursor,
 		scope:       scope,

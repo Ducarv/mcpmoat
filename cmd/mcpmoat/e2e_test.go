@@ -128,9 +128,7 @@ func TestE2EScanPartialFailure(t *testing.T) {
 
 	stdout, stderr, code := runBin(t, home, work, "scan", "--no-connect")
 
-	if code != exitError {
-		t.Errorf("exit code = %d, want %d; stderr:\n%s", code, exitError, stderr)
-	}
+	assertScanResult(t, code, stdout, stderr, scanWant{code: exitError})
 	want := []string{"cc-project", "cursor-global", "cursor-project", "codex-global"}
 	if got := column(tableRows(t, stdout), 0); !slices.Equal(got, want) {
 		t.Errorf("server names = %v, want %v\nstdout:\n%s", got, want, stdout)
@@ -158,14 +156,6 @@ func TestE2EScanUntrustedProjectFile(t *testing.T) {
 	})
 	if got := column(tableRows(t, stdout), 0); !slices.Equal(got, []string{"global-srv"}) {
 		t.Errorf("server names = %v, want [global-srv]\nstdout:\n%s", got, stdout)
-	}
-}
-
-// outsideServers returns the servers of a config outside the project. The
-// canary in its args must never show, also when mcpmoat refuses the file.
-func outsideServers() map[string]any {
-	return map[string]any{
-		"outside": map[string]any{"command": "run", "args": []string{"--token", discovertest.CanaryArgs}},
 	}
 }
 
@@ -237,7 +227,7 @@ func TestE2EScanConfigFile(t *testing.T) {
 			wantNames:  []string{"docs", "remote"},
 			otherHome:  true,
 			wantStderr: []string{
-				"mcpmoat scan: ", "config.toml", "server git: working directory is outside the project", configErrorHint,
+				"mcpmoat scan: ", "config.toml", "server git: working directory is outside the project or cannot be checked", configErrorHint,
 			},
 		},
 	}
@@ -291,29 +281,7 @@ func TestE2EScanConfigFile(t *testing.T) {
 // shows the same absolute project path.
 func TestE2EScanConfigRelativePath(t *testing.T) {
 	t.Parallel()
-	tests := []struct {
-		name    string
-		rel     string
-		content func(project string) string
-		want    func(project string) []string
-	}{
-		{
-			name: "codex",
-			rel:  filepath.Join(".codex", "config.toml"),
-			content: func(project string) string {
-				// A TOML literal string ('...') keeps a Windows backslash.
-				return "[mcp_servers.in-srv]\ncommand = \"npx\"\ncwd = '" + filepath.Join(project, "sub") + "'\n"
-			},
-			want: func(project string) []string { return []string{"in-srv", "project:" + project} },
-		},
-		{
-			name:    "cursor",
-			rel:     filepath.Join(".cursor", "mcp.json"),
-			content: func(string) string { return `{"mcpServers":{"cur-srv":{"command":"npx"}}}` },
-			want:    func(project string) []string { return []string{"cur-srv", "project:" + project} },
-		},
-	}
-	for _, tt := range tests {
+	for _, tt := range relativePathCases() {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			home := t.TempDir()
@@ -329,7 +297,9 @@ func TestE2EScanConfigRelativePath(t *testing.T) {
 			absOut, absErr, absCode := runBin(t, home, project, "scan", "--no-connect", "--config", abs)
 			relOut, relErr, relCode := runBin(t, home, project, "scan", "--no-connect", "--config", tt.rel)
 
-			assertScanResult(t, absCode, absOut, absErr, scanWant{code: exitOK, stdout: tt.want(project)})
+			assertScanResult(t, absCode, absOut, absErr, scanWant{
+				code: exitOK, stdout: tt.wantStdout(project), noStdout: []string{"project:."},
+			})
 			if relCode != absCode || relOut != absOut || relErr != absErr {
 				t.Errorf("relative path %q gives exit code %d\nstdout:\n%s\nstderr:\n%s\nwant the result of the absolute path: exit code %d\nstdout:\n%s\nstderr:\n%s",
 					tt.rel, relCode, relOut, relErr, absCode, absOut, absErr)
@@ -382,14 +352,9 @@ func TestE2EScanConfigErrors(t *testing.T) {
 
 			stdout, stderr, code := runBin(t, dir, dir, "scan", "--no-connect", "--config", path)
 
-			if code != exitError {
-				t.Errorf("exit code = %d, want %d", code, exitError)
-			}
+			assertScanResult(t, code, stdout, stderr, scanWant{code: exitError, stderr: []string{tt.wantErr}})
 			if stdout != "" {
 				t.Errorf("stdout = %q, want empty", stdout)
-			}
-			if !strings.Contains(stderr, tt.wantErr) {
-				t.Errorf("stderr = %q, want it to contain %q", stderr, tt.wantErr)
 			}
 		})
 	}
@@ -401,14 +366,9 @@ func TestE2EScanWithoutNoConnect(t *testing.T) {
 
 	stdout, stderr, code := runBin(t, dir, dir, "scan")
 
-	if code != exitError {
-		t.Errorf("exit code = %d, want %d", code, exitError)
-	}
+	assertScanResult(t, code, stdout, stderr, scanWant{code: exitError, stderr: []string{"not implemented"}})
 	if stdout != "" {
 		t.Errorf("stdout = %q, want empty", stdout)
-	}
-	if !strings.Contains(stderr, "not implemented") {
-		t.Errorf("stderr = %q, want it to contain %q", stderr, "not implemented")
 	}
 }
 
@@ -455,16 +415,8 @@ func TestE2EScanSecretsDoNotLeak(t *testing.T) {
 
 func TestE2EScanStartsNoProcess(t *testing.T) {
 	t.Parallel()
-	home, work, scripts := t.TempDir(), t.TempDir(), t.TempDir()
-
-	// This script would create the marker file if the server ever started.
-	marker := filepath.Join(scripts, "marker")
-	script := filepath.Join(scripts, "server.sh")
-	body := "#!/bin/sh\ntouch " + marker + "\n"
-	// The script must be executable, so a start would really work.
-	if err := os.WriteFile(script, []byte(body), 0o700); err != nil { //nolint:gosec // G306: the script must be executable
-		t.Fatal(err)
-	}
+	home, work := t.TempDir(), t.TempDir()
+	script, marker := writeMarkerScript(t, t.TempDir())
 
 	writeServers(t, home, ".claude.json", map[string]any{
 		"marker-server":  map[string]any{"command": script},

@@ -92,7 +92,7 @@ type jsonFile struct {
 	path   string
 	client Client
 	// scope goes to the servers of the top-level "mcpServers" object. Only
-	// ScopeGlobal is trusted: parseJSONServers reads any other value as
+	// ScopeGlobal is trusted: readJSONServers reads any other value as
 	// ScopeProject.
 	scope Scope
 	// projectPath goes to those servers with ScopeProject (see
@@ -114,9 +114,9 @@ const (
 	// projectsRead reads the servers of the section. Only ~/.claude.json
 	// has one, so only ReadClaudeCode with ScopeGlobal uses it.
 	projectsRead
-	// projectsReport does not read the section, but adds one
-	// reasonProjectsNotRead error when it has a value that is not null. Only
-	// ReadConfig uses it, for an untrusted Claude Code file.
+	// projectsReport does not read the section, but reports it (and a case
+	// variant of its key) with an error. Only ReadConfig uses it, for every
+	// untrusted JSON file. See ReadConfig.
 	projectsReport
 )
 
@@ -196,7 +196,7 @@ type jsonParser struct {
 	full bool
 }
 
-// parseJSONServers reads the Claude Code or Cursor JSON config f within its
+// readJSONServers reads the Claude Code or Cursor JSON config f within its
 // limits (see jsonFile.limits) and parses the content with parseJSONBytes. A
 // missing file gives no servers and no errors.
 //
@@ -204,7 +204,7 @@ type jsonParser struct {
 // Scope, is read as ScopeProject: the file is read within the project
 // limits, and its servers get ScopeProject. So a caller error fails closed.
 // For a project file, a read error is marked Untrusted too.
-func parseJSONServers(ctx context.Context, f jsonFile) ([]Server, []*FileError) {
+func readJSONServers(ctx context.Context, f jsonFile) ([]Server, []*FileError) {
 	maxSize, root := f.limits()
 	data, found, fe := readConfigFile(ctx, f.path, maxSize, root)
 	switch {
@@ -223,7 +223,7 @@ func parseJSONServers(ctx context.Context, f jsonFile) ([]Server, []*FileError) 
 // parseJSONBytes parses data, the content of the Claude Code or Cursor JSON
 // config f. It does no I/O. ReadConfig calls it with the bytes of its one
 // read, so a file that changes or goes away after that read cannot change the
-// result. As in parseJSONServers, any f.scope other than ScopeGlobal is read
+// result. As in readJSONServers, any f.scope other than ScopeGlobal is read
 // as ScopeProject.
 //
 // The servers of the top-level "mcpServers" object get f.scope and the
@@ -259,7 +259,7 @@ func parseJSONBytes(ctx context.Context, f jsonFile, data []byte) ([]Server, []*
 }
 
 // markUntrusted sets Untrusted on every server and every error. For a JSON
-// file it is the only code that sets Untrusted: parseJSONServers and
+// file it is the only code that sets Untrusted: readJSONServers and
 // parseJSONBytes call it, and the other functions return every error of the
 // file, read errors from readConfigFile too, without the mark.
 func markUntrusted(servers []Server, errs []*FileError) {

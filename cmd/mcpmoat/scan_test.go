@@ -404,7 +404,7 @@ func TestScanConfigFormats(t *testing.T) {
 			wantNames:   []string{"docs", "remote"},
 			wantProject: "home",
 			wantStderr: []string{
-				"mcpmoat scan: ", "config.toml", "server git: working directory is outside the project", configErrorHint,
+				"mcpmoat scan: ", "config.toml", "server git: working directory is outside the project or cannot be checked", configErrorHint,
 			},
 		},
 	}
@@ -597,16 +597,14 @@ func TestScanDirectoryErrors(t *testing.T) {
 func TestScanStartsNoProcess(t *testing.T) {
 	t.Parallel()
 
-	dir := t.TempDir()
-	marker := filepath.Join(dir, "marker")
 	servers := map[string]any{
 		"missing-cmd": map[string]any{"command": "/nonexistent/mcpmoat-test"},
 	}
+	// marker stays empty on Windows, where the test has no shell script.
+	var marker string
 	if runtime.GOOS != "windows" {
-		script := writeTestFile(t, dir, "server.sh", "#!/bin/sh\ntouch "+marker+"\n")
-		if err := os.Chmod(script, 0o700); err != nil { //nolint:gosec // G302: the test script must be executable
-			t.Fatal(err)
-		}
+		var script string
+		script, marker = writeMarkerScript(t, t.TempDir())
 		servers["script-cmd"] = map[string]any{"command": script}
 	}
 	home := t.TempDir()
@@ -621,8 +619,10 @@ func TestScanStartsNoProcess(t *testing.T) {
 			t.Errorf("stdout does not list %q\nstdout:\n%s", name, stdout)
 		}
 	}
-	if _, err := os.Stat(marker); !errors.Is(err, os.ErrNotExist) {
-		t.Errorf("marker file exists or cannot be checked (err = %v): the script ran", err)
+	if marker != "" {
+		if _, err := os.Stat(marker); !errors.Is(err, os.ErrNotExist) {
+			t.Errorf("marker file exists or cannot be checked (err = %v): the script ran", err)
+		}
 	}
 }
 
@@ -939,9 +939,6 @@ func TestScanArgsMasked(t *testing.T) {
 func TestScanAutoExitCodes(t *testing.T) {
 	t.Parallel()
 
-	// outsideConfig is a config outside the working directory. The canary in
-	// its args must never show, also when mcpmoat refuses the file.
-	outsideConfig := `{"mcpServers":{"outside":{"command":"run","args":["` + discovertest.CanaryArgs + `"]}}}`
 	const globalConfig = `{"mcpServers":{"global-srv":{"command":"npx"}}}`
 
 	tests := []struct {
@@ -957,7 +954,7 @@ func TestScanAutoExitCodes(t *testing.T) {
 			name: ".mcp.json is a symlink out of the project",
 			setup: func(t *testing.T, home, work, outside string) {
 				writeTestFile(t, home, ".claude.json", globalConfig)
-				symlink(t, writeTestFile(t, outside, "real.json", outsideConfig), filepath.Join(work, ".mcp.json"))
+				symlink(t, writeServers(t, outside, "real.json", outsideServers()), filepath.Join(work, ".mcp.json"))
 			},
 			wantCode:   exitError,
 			wantStdout: []string{"global-srv"},
@@ -967,7 +964,7 @@ func TestScanAutoExitCodes(t *testing.T) {
 			name: ".cursor/mcp.json is a symlink out of the project",
 			setup: func(t *testing.T, home, work, outside string) {
 				writeTestFile(t, home, ".claude.json", globalConfig)
-				symlink(t, writeTestFile(t, outside, "mcp.json", outsideConfig), filepath.Join(work, ".cursor", "mcp.json"))
+				symlink(t, writeServers(t, outside, "mcp.json", outsideServers()), filepath.Join(work, ".cursor", "mcp.json"))
 			},
 			wantCode:   exitError,
 			wantStdout: []string{"global-srv"},
@@ -986,7 +983,7 @@ func TestScanAutoExitCodes(t *testing.T) {
 		{
 			name: "no servers at all still prints the empty line first",
 			setup: func(t *testing.T, _, work, outside string) {
-				symlink(t, writeTestFile(t, outside, "real.json", outsideConfig), filepath.Join(work, ".mcp.json"))
+				symlink(t, writeServers(t, outside, "real.json", outsideServers()), filepath.Join(work, ".mcp.json"))
 			},
 			wantCode:   exitError,
 			wantStdout: []string{"No MCP servers found."},
@@ -1059,10 +1056,10 @@ func TestScanAutoExitCodes(t *testing.T) {
 		{
 			name: "global symlink out of the home directory is followed",
 			setup: func(t *testing.T, home, _, outside string) {
-				symlink(t, writeTestFile(t, outside, "real.json", outsideConfig), filepath.Join(home, ".cursor", "mcp.json"))
+				symlink(t, writeServers(t, outside, "real.json", outsideServers()), filepath.Join(home, ".cursor", "mcp.json"))
 			},
 			wantCode:   exitOK,
-			wantStdout: []string{"outside", "run " + discover.Mask},
+			wantStdout: []string{"outside", "run --token " + discover.Mask},
 		},
 	}
 
@@ -1090,9 +1087,6 @@ func TestScanAutoExitCodes(t *testing.T) {
 func TestScanConfigIsUntrusted(t *testing.T) {
 	t.Parallel()
 
-	// outsideConfig is a config outside the directory of the --config file.
-	// The canary in its args must never show.
-	outsideConfig := `{"mcpServers":{"outside":{"command":"run","args":["` + discovertest.CanaryArgs + `"]}}}`
 	const withProjects = `{"mcpServers":{"top-srv":{"command":"npx"}},` +
 		`"projects":{"/p":{"mcpServers":{"proj-srv":{"command":"npx"}}}}}`
 
@@ -1120,7 +1114,7 @@ func TestScanConfigIsUntrusted(t *testing.T) {
 			name: "symlink out of the directory is refused",
 			setup: func(t *testing.T, _, repo, outside string) string {
 				link := filepath.Join(repo, ".mcp.json")
-				symlink(t, writeTestFile(t, outside, "real.json", outsideConfig), link)
+				symlink(t, writeServers(t, outside, "real.json", outsideServers()), link)
 				return link
 			},
 			wantCode:   exitError,
@@ -1178,7 +1172,7 @@ func TestScanConfigIsUntrusted(t *testing.T) {
 			wantStdout: []string{"ok-srv", "project:"},
 			noStdout:   []string{"out-srv"},
 			wantStderr: []string{
-				"mcpmoat scan: ", "config.toml", "server out-srv: working directory is outside the project", configErrorHint,
+				"mcpmoat scan: ", "config.toml", "server out-srv: working directory is outside the project or cannot be checked", configErrorHint,
 			},
 		},
 		{
@@ -1242,45 +1236,7 @@ func TestScanConfigIsUntrusted(t *testing.T) {
 func TestScanConfigRelativePath(t *testing.T) {
 	t.Parallel()
 
-	tests := []struct {
-		name string
-		// rel is the --config path relative to the project directory.
-		rel string
-		// content returns the file content for the project directory.
-		content    func(project string) string
-		wantCode   int
-		wantStdout func(project string) []string
-		noStdout   []string
-	}{
-		{
-			name: "codex file with an absolute cwd inside the project",
-			rel:  filepath.Join(".codex", "config.toml"),
-			content: func(project string) string {
-				// A TOML literal string ('...') keeps a Windows backslash as
-				// it is.
-				return "[mcp_servers.in-srv]\ncommand = \"npx\"\ncwd = '" + filepath.Join(project, "sub") + "'\n"
-			},
-			wantCode: exitOK,
-			wantStdout: func(project string) []string {
-				return []string{"in-srv", "codex", "project:" + project}
-			},
-			noStdout: []string{"project:."},
-		},
-		{
-			name: "cursor file",
-			rel:  filepath.Join(".cursor", "mcp.json"),
-			content: func(string) string {
-				return `{"mcpServers":{"cur-srv":{"command":"npx"}}}`
-			},
-			wantCode: exitOK,
-			wantStdout: func(project string) []string {
-				return []string{"cur-srv", "cursor", "project:" + project}
-			},
-			noStdout: []string{"project:."},
-		},
-	}
-
-	for _, tt := range tests {
+	for _, tt := range relativePathCases() {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 
@@ -1303,7 +1259,7 @@ func TestScanConfigRelativePath(t *testing.T) {
 
 			for _, r := range []result{absRes, relRes, dotRes} {
 				assertScanResult(t, r.code, r.stdout, r.stderr, scanWant{
-					code: tt.wantCode, stdout: tt.wantStdout(project), noStdout: tt.noStdout,
+					code: exitOK, stdout: tt.wantStdout(project), noStdout: []string{"project:."},
 				})
 			}
 			if relRes != absRes {

@@ -48,20 +48,38 @@ const (
 )
 
 // The user's own config files, relative to the home directory, with forward
-// slashes. globalFiles lists them with their readers, and buildSteps reads
-// them from there as the global steps of Discover. homePath joins one to a
-// home directory.
+// slashes. The globalFile values below pair each one with its reader.
 const (
 	globalClaudeCodeFile = ".claude.json"
 	globalCursorFile     = cursorDir + "/" + cursorFile
 	globalCodexFile      = codexDir + "/" + codexFile
 )
 
-// homePath returns the path of rel, one of the global files above, below
-// home.
-func homePath(home, rel string) string {
-	return filepath.Join(home, filepath.FromSlash(rel))
+// globalFile is one of the user's own config files, and the read that
+// Discover does for it.
+type globalFile struct {
+	rel  string // one of the global file constants, such as globalCodexFile
+	read func(ctx context.Context, path string) Result
 }
+
+// path returns the path of the global file below home.
+func (g globalFile) path(home string) string {
+	return filepath.Join(home, filepath.FromSlash(g.rel))
+}
+
+// The user's own config files, each with the reader and the scope that
+// Discover uses for it. buildSteps uses them for the global steps of
+// Discover, and globalFor finds them for ReadConfig through globalFiles, so
+// both use one definition. No code writes to them.
+var (
+	globalClaudeCode = globalFile{globalClaudeCodeFile, readGlobalClaudeCode}
+	globalCursor     = globalFile{globalCursorFile, readGlobalCursor}
+	globalCodex      = globalFile{globalCodexFile, ReadCodex}
+)
+
+// globalFiles lists the global files above, in the order of the global steps
+// of Discover (TestBuildStepsGlobalFiles checks this). No code writes to it.
+var globalFiles = [...]globalFile{globalClaudeCode, globalCursor, globalCodex}
 
 // step is one config file that Discover reads.
 type step struct {
@@ -152,8 +170,9 @@ func hasCanceled(errs []*FileError) bool {
 // buildSteps lists the files to read, in order. Each step is a small closure
 // (a function that keeps the variables around it), so Discover can run all
 // steps with one loop. runSteps passes the context to each step. The global
-// steps take their path and their reader from globalFiles, so ReadConfig
-// reads a global file exactly as Discover does.
+// steps take their path and their reader from the globalFile values
+// (globalClaudeCode, globalCursor and globalCodex), so ReadConfig reads a
+// global file exactly as Discover does.
 func buildSteps(opts Options) []step {
 	// Clean the paths once. filepath.Clean("") returns ".", so an empty value
 	// must stay empty: it means "skip these files".

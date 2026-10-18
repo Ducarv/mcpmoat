@@ -26,7 +26,7 @@ func ReadClaudeCode(ctx context.Context, path string, scope Scope, projectPath s
 	if scope == ScopeGlobal {
 		projects = projectsRead
 	}
-	servers, errs := parseJSONServers(ctx, jsonFile{
+	servers, errs := readJSONServers(ctx, jsonFile{
 		path:        path,
 		client:      ClientClaudeCode,
 		scope:       scope,

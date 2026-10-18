@@ -53,14 +53,15 @@ import (
 //     of a server entry have the same shape in both formats. The ProjectPath
 //     comes from the path and not from the client (see [ReadConfig]).
 func DetectClient(path string, data []byte) (client Client, ok bool) {
-	if strings.EqualFold(filepath.Ext(path), ".toml") {
+	ext := filepath.Ext(path)
+	if strings.EqualFold(ext, ".toml") {
 		return ClientCodex, true
 	}
 
 	// Trim only the JSON white space bytes, as decodeJSONTop does (see
 	// jsonSpace).
 	trimmed := bytes.Trim(data, jsonSpace)
-	isJSON := strings.EqualFold(filepath.Ext(path), ".json") ||
+	isJSON := strings.EqualFold(ext, ".json") ||
 		(len(trimmed) > 0 && trimmed[0] == '{')
 	if !isJSON {
 		return "", false

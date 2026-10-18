@@ -14,6 +14,17 @@ import (
 	"github.com/Ducarv/mcpmoat/internal/termsafe"
 )
 
+// writeTable returns the table that report.WriteServers writes for servers.
+// It fails the test if WriteServers returns an error.
+func writeTable(t *testing.T, servers ...discover.Server) string {
+	t.Helper()
+	var sb strings.Builder
+	if err := report.WriteServers(&sb, servers); err != nil {
+		t.Fatalf("WriteServers() error = %v, want nil", err)
+	}
+	return sb.String()
+}
+
 // threeServers returns one stdio, one http and one project-scope sse server.
 // The sse server comes from a project file, so it is untrusted.
 // The stdio server has a canary value in Args, the http server has canary
@@ -69,11 +80,7 @@ func TestWriteServersExactTable(t *testing.T) {
 		"remote   cursor        global                          http        /home/u/.cursor/mcp.json   https://********@example.com/mcp?k=********\n" +
 		"legacy   claude-code   project:/work/app (untrusted)   sse         /work/app/.mcp.json        https://sse.example.com/events\n"
 
-	var sb strings.Builder
-	if err := report.WriteServers(&sb, threeServers()); err != nil {
-		t.Fatalf("WriteServers() error = %v, want nil", err)
-	}
-	if got := sb.String(); got != want {
+	if got := writeTable(t, threeServers()...); got != want {
 		t.Errorf("WriteServers() =\n%q\nwant\n%q", got, want)
 	}
 }
@@ -91,11 +98,8 @@ func TestWriteServersEmpty(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			var sb strings.Builder
-			if err := report.WriteServers(&sb, tt.servers); err != nil {
-				t.Fatalf("WriteServers() error = %v, want nil", err)
-			}
-			if got, want := sb.String(), "No MCP servers found.\n"; got != want {
+			// tt.servers... passes the slice itself, so nil stays nil.
+			if got, want := writeTable(t, tt.servers...), "No MCP servers found.\n"; got != want {
 				t.Errorf("WriteServers() = %q, want %q", got, want)
 			}
 		})
@@ -222,11 +226,7 @@ func TestWriteServersEscapesEveryCell(t *testing.T) {
 				}
 				shown := cell.set(&s, h.value)
 
-				var sb strings.Builder
-				if err := report.WriteServers(&sb, []discover.Server{s}); err != nil {
-					t.Fatalf("WriteServers() error = %v, want nil", err)
-				}
-				out := sb.String()
+				out := writeTable(t, s)
 
 				if !strings.Contains(out, shown) {
 					t.Errorf("output does not contain the quoted form %s:\n%q", shown, out)
@@ -255,11 +255,7 @@ func TestWriteServersEscapesEveryCell(t *testing.T) {
 func TestWriteServersNoLeak(t *testing.T) {
 	t.Parallel()
 
-	var sb strings.Builder
-	if err := report.WriteServers(&sb, threeServers()); err != nil {
-		t.Fatalf("WriteServers() error = %v, want nil", err)
-	}
-	out := sb.String()
+	out := writeTable(t, threeServers()...)
 
 	// No secret value shows, in any form. With no secrets passed,
 	// AssertNoLeak checks all canaries.
@@ -372,11 +368,7 @@ func TestWriteServersPaddingAmplification(t *testing.T) {
 		servers = append(servers, oneServer("s"))
 	}
 
-	var sb strings.Builder
-	if err := report.WriteServers(&sb, servers); err != nil {
-		t.Fatalf("WriteServers() error = %v, want nil", err)
-	}
-	out := sb.String()
+	out := writeTable(t, servers...)
 	t.Logf("output size: %d bytes for %d servers", len(out), len(servers))
 
 	// A short row is about 83 + 3 + 5 + 3 + 6 + 3 + 5 + 3 + 259 + 3 + 3 + 1 = 377
@@ -470,11 +462,7 @@ func TestWriteServersCellCap(t *testing.T) {
 				s := oneServer("srv")
 				prefix := col.set(&s, tt.in)
 
-				var sb strings.Builder
-				if err := report.WriteServers(&sb, []discover.Server{s}); err != nil {
-					t.Fatalf("WriteServers() error = %v, want nil", err)
-				}
-				out := sb.String()
+				out := writeTable(t, s)
 				if strings.ContainsRune(out, 0x1b) {
 					t.Errorf("output holds a raw ESC: %q", out)
 				}
@@ -509,11 +497,7 @@ func TestWriteServersPathColumnsKeepRealPaths(t *testing.T) {
 	s.Scope = discover.ScopeProject
 	s.ProjectPath = path
 
-	var sb strings.Builder
-	if err := report.WriteServers(&sb, []discover.Server{s}); err != nil {
-		t.Fatalf("WriteServers() error = %v, want nil", err)
-	}
-	out := sb.String()
+	out := writeTable(t, s)
 	if strings.Contains(out, termsafe.CutMarker) {
 		t.Errorf("output holds a cut marker, want none:\n%s", out)
 	}
@@ -538,11 +522,7 @@ func TestWriteServersLastColumnIsNeverCut(t *testing.T) {
 	remote.URL = discover.NewURL("https://example.com/" + long)
 
 	for _, s := range []discover.Server{stdio, remote} {
-		var sb strings.Builder
-		if err := report.WriteServers(&sb, []discover.Server{s}); err != nil {
-			t.Fatalf("WriteServers() error = %v, want nil", err)
-		}
-		out := sb.String()
+		out := writeTable(t, s)
 		if !strings.Contains(out, long) {
 			t.Errorf("%s: the COMMAND/URL cell is cut:\n%.200q", s.Name, out)
 		}
@@ -590,11 +570,7 @@ func TestWriteServersUntrustedScope(t *testing.T) {
 			s.ProjectPath = tt.path
 			s.Untrusted = tt.untrusted
 
-			var sb strings.Builder
-			if err := report.WriteServers(&sb, []discover.Server{s}); err != nil {
-				t.Fatalf("WriteServers() error = %v, want nil", err)
-			}
-			out := sb.String()
+			out := writeTable(t, s)
 			if !strings.Contains(out, tt.want) {
 				t.Errorf("output does not hold the SCOPE cell %.120q:\n%.400q", tt.want, out)
 			}
@@ -669,11 +645,7 @@ func TestWriteServersSpaceIsQuoted(t *testing.T) {
 			s := oneServer("srv")
 			tt.set(&s)
 
-			var sb strings.Builder
-			if err := report.WriteServers(&sb, []discover.Server{s}); err != nil {
-				t.Fatalf("WriteServers() error = %v, want nil", err)
-			}
-			out := sb.String()
+			out := writeTable(t, s)
 			if !strings.Contains(out, tt.want) {
 				t.Errorf("output does not hold the cell %.120q:\n%.400q", tt.want, out)
 			}
@@ -693,14 +665,10 @@ func TestWriteServersCellsMapBack(t *testing.T) {
 	for _, name := range []string{
 		"plain", "a b", "a   b", `"a b"`, `"plain"`, `a"b`, `a\b`, `a b\`, "a\tb", "a\x1bb", "\u3164", "caf\u00e9 x", "",
 	} {
-		s := oneServer(name)
-		var sb strings.Builder
-		if err := report.WriteServers(&sb, []discover.Server{s}); err != nil {
-			t.Fatalf("WriteServers() error = %v, want nil", err)
-		}
+		out := writeTable(t, oneServer(name))
 		// The NAME cell is the start of the row, before the column gap and
 		// the CLIENT cell.
-		row := strings.Split(sb.String(), "\n")[1]
+		row := strings.Split(out, "\n")[1]
 		got, _, ok := strings.Cut(row, "   "+string(discover.ClientCodex))
 		if !ok {
 			t.Fatalf("row %q has no CLIENT cell", row)

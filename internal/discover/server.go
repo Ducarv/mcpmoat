@@ -111,11 +111,9 @@ type Server struct {
 	// which mcpmoat does not know. inspect must not resolve it against its
 	// own working directory: it must treat a relative Dir like an empty Dir.
 	//
-	// For an untrusted Codex file (see ReadConfig), Dir is empty, a local
-	// relative path, or an absolute path that is ProjectPath or below it, and
-	// no symlink in the project led it out at read time. The tree can change
-	// after the read, so inspect must still not trust a Dir of an untrusted
-	// server more than its command.
+	// For an untrusted Codex file, Dir passed the cwd check of ReadConfig
+	// at read time only, so inspect must still not trust a Dir of an
+	// untrusted server more than its command. See ReadConfig.
 	Dir string
 
 	// Env holds the environment variables for TransportStdio. The values

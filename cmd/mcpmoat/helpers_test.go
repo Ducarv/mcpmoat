@@ -204,6 +204,71 @@ func writeServers(t *testing.T, dir, name string, servers map[string]any) string
 	return writeTestFile(t, dir, name, string(data))
 }
 
+// outsideServers returns the servers of a config outside the project, for
+// writeServers. The canary in its args must never show, also when mcpmoat
+// refuses the file.
+func outsideServers() map[string]any {
+	return map[string]any{
+		"outside": map[string]any{"command": "run", "args": []string{"--token", discovertest.CanaryArgs}},
+	}
+}
+
+// relativePathCase is one case of the tests that compare a relative --config
+// path with the absolute path of the same file.
+type relativePathCase struct {
+	name string
+	// rel is the --config path relative to the project directory.
+	rel string
+	// content returns the file content for the project directory.
+	content func(project string) string
+	// wantStdout returns substrings of stdout for the project directory.
+	wantStdout func(project string) []string
+}
+
+// relativePathCases returns the cases that TestScanConfigRelativePath and
+// TestE2EScanConfigRelativePath share. Every case gives exit code 0, and its
+// SCOPE cell shows the absolute project path, never "project:.". For the Codex
+// file, an absolute cwd inside the project is accepted.
+func relativePathCases() []relativePathCase {
+	return []relativePathCase{
+		{
+			name: "codex file with an absolute cwd inside the project",
+			rel:  filepath.Join(".codex", "config.toml"),
+			content: func(project string) string {
+				// A TOML literal string ('...') keeps a Windows backslash as
+				// it is.
+				return "[mcp_servers.in-srv]\ncommand = \"npx\"\ncwd = '" + filepath.Join(project, "sub") + "'\n"
+			},
+			wantStdout: func(project string) []string {
+				return []string{"in-srv", "codex", "project:" + project}
+			},
+		},
+		{
+			name:    "cursor file",
+			rel:     filepath.Join(".cursor", "mcp.json"),
+			content: func(string) string { return `{"mcpServers":{"cur-srv":{"command":"npx"}}}` },
+			wantStdout: func(project string) []string {
+				return []string{"cur-srv", "cursor", "project:" + project}
+			},
+		},
+	}
+}
+
+// writeMarkerScript writes the shell script dir/server.sh and returns its
+// path and the path of its marker file. The script creates the marker file
+// when it runs, so a test can prove that a configured command never started.
+// The script is executable, so a start would really work. It needs a Unix
+// shell.
+func writeMarkerScript(t *testing.T, dir string) (script, marker string) {
+	t.Helper()
+	marker = filepath.Join(dir, "marker")
+	script = filepath.Join(dir, "server.sh")
+	if err := os.WriteFile(script, []byte("#!/bin/sh\ntouch "+marker+"\n"), 0o700); err != nil { //nolint:gosec // G306: the script must be executable
+		t.Fatal(err)
+	}
+	return script, marker
+}
+
 // symlink makes link point to target. It creates the parent directory of
 // link first.
 //

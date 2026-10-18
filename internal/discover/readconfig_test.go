@@ -392,6 +392,29 @@ func TestReadConfigUntrusted(t *testing.T) {
 		}
 	})
 
+	t.Run("a symlinked directory in the path is followed", func(t *testing.T) {
+		t.Parallel()
+		// Only the file is confined to its directory. The directories in the
+		// path are the user's choice, so ReadConfig follows proj/.cursor to
+		// outside. The file is still untrusted, and the ProjectPath comes from
+		// the path as written.
+		outside := t.TempDir()
+		writeFile(t, outside, "mcp.json", []byte(`{"mcpServers":{"a":{"command":"x"}}}`))
+		proj := t.TempDir()
+		symlinkTo(t, outside, proj, ".cursor")
+		path := filepath.Join(proj, ".cursor", "mcp.json")
+
+		res := ReadConfig(t.Context(), path, "")
+
+		if len(res.Errors) != 0 || len(res.Servers) != 1 {
+			t.Fatalf("ReadConfig() = %+v, want one server and no errors", res)
+		}
+		s := res.Servers[0]
+		if !s.Untrusted || s.Scope != ScopeProject || s.ProjectPath != proj || s.Source != path || s.Client != ClientCursor {
+			t.Errorf("server = %+v, want Untrusted, ScopeProject, ProjectPath %q, Source %q and client cursor", s, proj, path)
+		}
+	})
+
 	t.Run("untrusted codex errors are marked", func(t *testing.T) {
 		t.Parallel()
 		path := writeFile(t, t.TempDir(), "my.toml", []byte("[mcp_servers.a]\nurl = 5\n[mcp_servers.b]\ncommand = \"x\"\n"))
@@ -814,8 +837,8 @@ func caseInsensitiveFS(t testing.TB, dir string) bool {
 	return err == nil && os.SameFile(want, got)
 }
 
-// TestReadConfigProjects checks the "projects" section of an untrusted Claude
-// Code file. The section is not read. Any value that is not null, also an
+// TestReadConfigProjects checks the "projects" section of an untrusted JSON
+// file, Claude Code or Cursor. The section is not read. Any value that is not null, also an
 // empty object, gives one untrusted "projects section not read" error, so
 // the scan fails. A key in another letter case, such as "Projects", gives
 // one untrusted "ambiguous key" error, as in a global file. The top-level
@@ -839,6 +862,10 @@ func TestReadConfigProjects(t *testing.T) {
 		{"null projects key in another letter case", "backup.json", `{"PROJECTS":null,"mcpServers":{"o":{"command":"x"}}}`, []string{reasonAmbiguousKey}},
 		{"projects and a case variant", ".claude.json", `{"projects":{},"Projects":{},"mcpServers":{"o":{"command":"x"}}}`, []string{reasonAmbiguousKey, reasonProjectsNotRead}},
 		{"null projects and a case variant", ".claude.json", `{"projects":null,"Projects":{},"mcpServers":{"o":{"command":"x"}}}`, []string{reasonAmbiguousKey}},
+		// DetectClient picks Cursor for these files (no "projects" key), and
+		// the rule is the same.
+		{"case variant in a cursor file", ".cursor/mcp.json", `{"Projects":{"/p":{}},"mcpServers":{"o":{"command":"x"}}}`, []string{reasonAmbiguousKey}},
+		{"null projects and a case variant in a cursor file", ".cursor/mcp.json", `{"projects":null,"PROJECTS":null,"mcpServers":{"o":{"command":"x"}}}`, []string{reasonAmbiguousKey}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -864,6 +891,17 @@ func TestReadConfigProjects(t *testing.T) {
 			}
 		})
 	}
+
+	t.Run("a cursor file is read as cursor", func(t *testing.T) {
+		t.Parallel()
+		// The cases above with .cursor/mcp.json test the Cursor client only
+		// if DetectClient picks it for them.
+		path := writeFile(t, t.TempDir(), ".cursor/mcp.json", []byte(`{"Projects":{},"mcpServers":{"o":{"command":"x"}}}`))
+		res := ReadConfig(t.Context(), path, "")
+		if len(res.Servers) != 1 || res.Servers[0].Client != ClientCursor {
+			t.Errorf("ReadConfig() servers = %+v, want one cursor server", res.Servers)
+		}
+	})
 
 	t.Run("the error comes before the server errors", func(t *testing.T) {
 		t.Parallel()
@@ -985,13 +1023,14 @@ func TestReadConfigCleansPath(t *testing.T) {
 	})
 }
 
-// TestReadConfigCodexCwd checks the cwd of a server in an untrusted Codex
-// file. An untrusted file must not choose a working directory outside its
-// project: such a server is dropped and gives an untrusted "working directory
-// is outside the project" error. An empty cwd, a local relative cwd and an
-// absolute cwd in the project are kept as written.
+// TestReadConfigCodexCwd checks the lexical step of the cwd check of an
+// untrusted Codex file through ReadConfig. A server whose cwd fails is
+// dropped and gives an untrusted reasonCwdOutsideProject error. A cwd with a
+// ".." element always fails. An empty cwd, a local relative cwd (also with a
+// "." element) and an absolute cwd in the project are kept as written.
 func TestReadConfigCodexCwd(t *testing.T) {
 	t.Parallel()
+	sep := string(filepath.Separator)
 
 	tests := []struct {
 		name string
@@ -1003,33 +1042,60 @@ func TestReadConfigCodexCwd(t *testing.T) {
 		cwd     func(proj string) (cwd string, ok bool)
 		wantDir func(proj string) string // nil: the server is dropped
 	}{
-		{"root", []string{"conf.toml"}, fixed("/"), nil},
-		{"etc", []string{"conf.toml"}, fixed("/etc"), nil},
-		{"parent", []string{"conf.toml"}, fixed("../x"), nil},
-		{"parent through a subdirectory", []string{"conf.toml"}, fixed("a/../../x"), nil},
-		{"parent of a .codex project", []string{".codex", "config.toml"}, fixed(".."), nil},
-		{"absolute next to the project", []string{"conf.toml"}, func(proj string) (string, bool) {
-			return proj + "-other", true
-		}, nil},
-		{"absolute that leaves the project through ..", []string{"conf.toml"}, func(proj string) (string, bool) {
-			return filepath.Join(proj, "sub") + string(filepath.Separator) + ".." + string(filepath.Separator) + "..", true
-		}, nil},
-		{"absolute in the project", []string{"conf.toml"}, func(proj string) (string, bool) {
-			return filepath.Join(proj, "sub"), true
-		}, func(proj string) string { return filepath.Join(proj, "sub") }},
-		{"absolute project directory", []string{".codex", "config.toml"}, func(proj string) (string, bool) {
-			return proj, true
-		}, func(proj string) string { return proj }},
-		{"relative subdirectory", []string{"conf.toml"}, fixed("sub"), func(string) string { return "sub" }},
-		{"relative current directory", []string{"conf.toml"}, fixed("."), func(string) string { return "." }},
-		{"relative that stays local", []string{"conf.toml"}, fixed("a/../b"), func(string) string { return "a/../b" }},
-		{"empty", []string{"conf.toml"}, fixed(""), func(string) string { return "" }},
-		{"no cwd", []string{"conf.toml"}, func(string) (string, bool) { return "", false }, func(string) string { return "" }},
+		{name: "root", rel: []string{"conf.toml"}, cwd: fixedCwd("/")},
+		{name: "etc", rel: []string{"conf.toml"}, cwd: fixedCwd("/etc")},
+		{name: "parent", rel: []string{"conf.toml"}, cwd: fixedCwd("../x")},
+		{name: "parent through a subdirectory", rel: []string{"conf.toml"}, cwd: fixedCwd("a/../../x")},
+		{name: "parent of a .codex project", rel: []string{".codex", "config.toml"}, cwd: fixedCwd("..")},
+		{
+			name: "absolute next to the project",
+			rel:  []string{"conf.toml"},
+			cwd:  func(proj string) (string, bool) { return proj + "-other", true },
+		},
+		{
+			name: "absolute that leaves the project through ..",
+			rel:  []string{"conf.toml"},
+			cwd:  func(proj string) (string, bool) { return proj + sep + "sub" + sep + ".." + sep + "..", true },
+		},
+		{
+			// A ".." element is refused also when the text stays in the
+			// project: the kernel resolves ".." after a symlink.
+			name: "absolute with .. that stays in the project",
+			rel:  []string{"conf.toml"},
+			cwd:  func(proj string) (string, bool) { return proj + sep + "sub" + sep + "..", true },
+		},
+		{name: "relative with .. that stays local", rel: []string{"conf.toml"}, cwd: fixedCwd("a/../b")},
+		{name: "relative with .. back to the same directory", rel: []string{"conf.toml"}, cwd: fixedCwd("sub/../sub")},
+		{
+			name:    "absolute in the project",
+			rel:     []string{"conf.toml"},
+			cwd:     func(proj string) (string, bool) { return filepath.Join(proj, "sub"), true },
+			wantDir: func(proj string) string { return filepath.Join(proj, "sub") },
+		},
+		{
+			name:    "absolute project directory",
+			rel:     []string{".codex", "config.toml"},
+			cwd:     func(proj string) (string, bool) { return proj, true },
+			wantDir: func(proj string) string { return proj },
+		},
+		{name: "relative subdirectory", rel: []string{"conf.toml"}, cwd: fixedCwd("sub"), wantDir: fixedDir("sub")},
+		{name: "relative with a . element", rel: []string{"conf.toml"}, cwd: fixedCwd("./sub"), wantDir: fixedDir("./sub")},
+		{name: "relative current directory", rel: []string{"conf.toml"}, cwd: fixedCwd("."), wantDir: fixedDir(".")},
+		{name: "empty", rel: []string{"conf.toml"}, cwd: fixedCwd(""), wantDir: fixedDir("")},
+		{
+			name:    "no cwd",
+			rel:     []string{"conf.toml"},
+			cwd:     func(string) (string, bool) { return "", false },
+			wantDir: fixedDir(""),
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			proj := t.TempDir()
+			// sub exists, so a kept cwd below it also passes the symlink step
+			// on a real directory.
+			makeDir(t, proj, "sub")
 			cwd, hasCwd := tt.cwd(proj)
 			// "ok" has no cwd, so the result also shows that one dropped
 			// server does not drop the others.
@@ -1092,18 +1158,24 @@ func TestReadConfigCodexCwd(t *testing.T) {
 	})
 }
 
-// fixed returns a cwd function of TestReadConfigCodexCwd that gives cwd for
+// fixedCwd returns a cwd function of TestReadConfigCodexCwd that gives cwd for
 // every project directory.
-func fixed(cwd string) func(string) (string, bool) {
+func fixedCwd(cwd string) func(string) (string, bool) {
 	return func(string) (string, bool) { return cwd, true }
 }
 
-// TestDirInProject checks the lexical step of the cwd rule of an untrusted
+// fixedDir returns a wantDir function of TestReadConfigCodexCwd that gives
+// dir for every project directory.
+func fixedDir(dir string) func(string) string {
+	return func(string) string { return dir }
+}
+
+// TestProjectDirHoldsDir checks the lexical step of the cwd rule of an untrusted
 // Codex file, also with a relative ProjectPath, which ReadConfig gives for a
 // relative path. No dir of the cases exists, so the symlink step keeps every
 // dir that the lexical step keeps. TestReadConfigCodexCwdSymlink checks the
 // symlink step.
-func TestDirInProject(t *testing.T) {
+func TestProjectDirHoldsDir(t *testing.T) {
 	t.Parallel()
 	abs := t.TempDir()
 	tests := []struct {
@@ -1117,6 +1189,10 @@ func TestDirInProject(t *testing.T) {
 		{"current dir", ".", "proj", true},
 		{"parent dir", "..", "proj", false},
 		{"dir that leaves through a subdirectory", "a/../../x", abs, false},
+		{"local dir with a .. element", "a/../b", "proj", false},
+		{"local dir with a . element", "./sub", "proj", true},
+		{"absolute dir with a .. element in the project", abs + string(filepath.Separator) + "a" + string(filepath.Separator) + "..", abs, false},
+		{"absolute dir with a . element", abs + string(filepath.Separator) + "." + string(filepath.Separator) + "a", abs, true},
 		{"absolute root", "/", abs, false},
 		{"absolute project itself", abs, abs, true},
 		{"absolute below the project", filepath.Join(abs, "a", "b"), abs, true},
@@ -1284,6 +1360,14 @@ func TestReadConfigCodexCwdSymlink(t *testing.T) {
 		{"lexically local path through a symlink", func(t *testing.T, proj string) {
 			symlinkTo(t, outside, proj, "link")
 		}, relCwd("link/../x"), false},
+		{"absolute cwd with .. after a symlink out of the project", func(t *testing.T, proj string) {
+			// filepath.Rel cleans "<proj>/link/.." to "." as text, but the
+			// kernel goes up from outside, the target of link.
+			symlinkTo(t, outside, proj, "link")
+		}, func(proj string) string { return filepath.Join(proj, "link") + string(filepath.Separator) + ".." }, false},
+		{"relative cwd with .. after a symlink out of the project", func(t *testing.T, proj string) {
+			symlinkTo(t, outside, proj, "link")
+		}, relCwd("link/.."), false},
 		{"dangling symlink out of the project", func(t *testing.T, proj string) {
 			symlinkTo(t, "../does-not-exist", proj, "link")
 		}, relCwd("link"), false},

@@ -60,14 +60,14 @@
 // [ReadConfig] is the entry point for a file that the user names, for example
 // with --config. A file that the user names can come from anywhere, for
 // example from a cloned repository. So ReadConfig reads it as an untrusted
-// project file: the read is confined to the directory of the file (see
+// project file: the file itself is confined to its directory (see
 // Symlinks), every server has ScopeProject and every server and error is
-// Untrusted (see Untrusted files), the "projects" section of a Claude Code
-// file is not read (a section that is there gives the error "projects
-// section not read"), and the size limit is maxProjectConfigSize (4 MiB), or
-// maxTOMLSize (256 KiB) for Codex. The file is read once, and the reader
-// parses the bytes of that read. Unlike [Discover], ReadConfig reports a
-// missing file, with the reason "file not found".
+// Untrusted (see Untrusted files), the "projects" section of a JSON file is
+// not read (a section that is there gives an error), and the size limit is
+// maxProjectConfigSize (4 MiB), or maxTOMLSize (256 KiB) for Codex. The file
+// is read once, and the reader parses the bytes of that read. Unlike
+// [Discover], ReadConfig reports a missing file, with the reason "file not
+// found". [ReadConfig] holds the full rules.
 //
 // The one exception is a path that names one of the user's own global files
 // (~/.claude.json, ~/.cursor/mcp.json or ~/.codex/config.toml below the home
@@ -203,7 +203,9 @@
 //
 // [ReadConfig] confines a file that the user names as a project file, with
 // the directory of the file as the project directory, unless the file is one
-// of the user's own global files.
+// of the user's own global files. Only the file itself is confined: a
+// symlink in a directory of the path that the user names is followed. See
+// [ReadConfig].
 //
 // A project file comes from a cloned repository, so the readers open it
 // inside its project directory (with [os.Root]). For [Discover], the project
@@ -213,10 +215,12 @@
 // ProjectPath than the directory of the read: ReadCursor gives the servers of
 // <project>/.cursor/mcp.json the ProjectPath <project>, but the read stays in
 // .cursor. A symlink that stays inside the project directory is
-// followed. A symlink that leads out of it, every absolute symlink, and a
-// path that is not below it are refused with the reason "file is outside the
-// project". Without this rule, a repository could make mcpmoat read a file
-// of the user, for example ~/.claude.json, as its own project file.
+// followed. A symlink that leads out of it, every absolute symlink below it,
+// and a path that is not below it are refused with the reason "file is
+// outside the project". Without this rule, a repository could make mcpmoat
+// read a file of the user, for example ~/.claude.json, as its own project
+// file. The project directory itself is opened as the caller gives it, so a
+// symlink in its own path is followed.
 //
 // # Untrusted files
 //
@@ -250,12 +254,10 @@
 // so the JSON rule marks them, the "projects section not read" error too.
 //
 // An untrusted file must not choose a working directory outside its project,
-// because inspect would start the server there. So ReadConfig drops a server
-// of an untrusted Codex file whose cwd is outside the ProjectPath of the file,
-// by its text or through a symlink, and reports the server with the reason
-// "working directory is outside the project". The check sees the tree at
-// read time only, so inspect must still not trust Dir blindly. See
-// [ReadConfig] for the rules and their limits.
+// because inspect would start the server there. So ReadConfig drops, with an
+// error, a server of an untrusted Codex file whose cwd fails its cwd check.
+// The check sees the tree at read time only, so inspect must still not trust
+// Dir blindly. See [ReadConfig] for the rules and their limits.
 //
 // The user's own files are trusted: ~/.claude.json (also the servers under
 // its projects.<path> keys, which Claude Code writes when the user adds a

@@ -50,18 +50,16 @@ const (
 	reasonNotFound         = "file not found"        // ReadConfig: a file the user named does not exist
 	reasonUnknownFormat    = "unknown config format" // ReadConfig: a file the user named has no known client format
 
-	// reasonProjectsNotRead is for an untrusted Claude Code file named with
-	// --config (see ReadConfig) that has a "projects" section. Its projects
-	// are not read, because a repository file must not choose ProjectPath
-	// values. The error makes the scan fail, so the servers that were not
-	// read do not look clean.
+	// reasonProjectsNotRead is for an untrusted JSON file named with
+	// --config that has a "projects" section, which is not read. See
+	// ReadConfig.
 	reasonProjectsNotRead = "projects section not read"
 
 	// reasonCwdOutsideProject is for a server of an untrusted Codex file
-	// named with --config (see ReadConfig) whose cwd is outside the project.
-	// An untrusted file must not choose a working directory outside its
-	// project: inspect would start the server there. The server is dropped.
-	reasonCwdOutsideProject = "working directory is outside the project"
+	// named with --config whose cwd fails the cwd check: it is outside the
+	// project, or it cannot be checked. The server is dropped. See
+	// ReadConfig.
+	reasonCwdOutsideProject = "working directory is outside the project or cannot be checked"
 )
 
 // FileError describes a problem with one config file or with one server entry
