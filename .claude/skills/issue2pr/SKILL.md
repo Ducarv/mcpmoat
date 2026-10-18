@@ -163,7 +163,7 @@ sub-agents.
 Run the profile's commands, scoped to what changed:
 1. format and lint (`gofmt -l .`, `golangci-lint run ./...`),
 2. typecheck (`go build ./... && go vet ./...`, and `go mod tidy` leaves `go.mod`/`go.sum` unchanged),
-3. tests for the touched packages with `-race`, plus `testdata/script` scenarios if the CLI changed.
+3. tests for the touched packages with `-race`, plus the `TestE2E*` tests in `cmd/mcpmoat` if the CLI changed.
 
 Do not swallow exit codes or truncate failing output. If a check fails:
 1. spawn `debugger` with the error output,

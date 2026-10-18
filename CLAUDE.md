@@ -108,8 +108,8 @@ Agents (`.claude/agents/`), with the Nodeglade agent each one replaces:
 - `unit-test`: table-driven Go tests, `t.Parallel` rules, fuzz targets, benchmarks, rule cases.
 - `cli-test` (was `component-test`): in-process CLI output tests with golden files and exit-code
   tables.
-- `e2e-test` (was Playwright `e2e-test`): `testscript` (`.txtar`) journeys against the real binary
-  and fixture MCP servers.
+- `e2e-test` (was Playwright `e2e-test`): `TestE2E*` Go tests that run the real binary with
+  `os/exec` (`cmd/mcpmoat/e2e_test.go`) against fixture homes and fixture MCP servers.
 - `debugger`: finds the root cause of a failure with the Go toolbox (`-race`, delve, pprof);
   does not fix code.
 - `typecheck`: runs the Go gates (`go mod tidy` check, build, vet, golangci-lint, govulncheck).

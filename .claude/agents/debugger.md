@@ -59,7 +59,7 @@ If your tool has no task tracker, report the status in your final result block o
 | Hang or deadlock | send `SIGQUIT` (`Ctrl+\`) for a goroutine dump; check every `select` for `ctx.Done()` |
 | Step through | `dlv test ./<pkg>/ -- -test.run TestX`, `dlv debug ./cmd/mcpmoat -- scan --no-connect` |
 | Slow or memory-heavy | `go test -cpuprofile cpu.out -memprofile mem.out -run TestX ./<pkg>/`, then `go tool pprof` |
-| Keep testscript work dir | `go test ./cmd/mcpmoat/ -run TestScripts/<name> -testwork` |
+| End-to-end test (real binary) | `go test ./cmd/mcpmoat/ -run 'TestE2E<Name>' -v`; the `t.TempDir()` dirs are deleted after the run, so print the paths or the output you need |
 | Regression | `git bisect run go test ./<pkg>/ -run TestX` |
 | Build error | `go build ./... 2>&1`, `go vet ./...`; check `go.mod` with `go mod tidy` |
 
