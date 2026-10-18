@@ -17,7 +17,7 @@ import (
 // only the text that mcpmoat keeps. But the SDK client keeps the full
 // decoded page, also the fields that mcpmoat drops (_meta, icons), in its
 // list cache until the session closes. So listWatch measures each page as
-// JSON (json.Marshal of the decoded result) and adds the size to rawBytes,
+// JSON (see jsonSize) and adds the size to rawBytes,
 // for all three kinds together. When rawBytes goes over rawLimit, the
 // middleware returns an error that wraps [ErrTooManyItems]. Then the list
 // call fails at once: the SDK does not cache that page, and collect requests
@@ -87,7 +87,7 @@ func (i *SDKInspector) newWatchedClient(rawLimit int64) (*mcp.Client, *listWatch
 //
 //   - that wraps [ErrTooManyItems] when the pages of the session go over
 //     rawLimit;
-//   - that wraps [ErrProtocol] when json.Marshal fails on the result.
+//   - that wraps [ErrProtocol] when the result cannot be encoded as JSON.
 //
 // The SDK returns the error of a sending middleware unchanged from ListTools,
 // ListPrompts and ListResources, so errors.Is works on it.
@@ -127,26 +127,50 @@ func (w *listWatch) middleware(next mcp.MethodHandler) mcp.MethodHandler {
 
 // spendRaw adds the JSON size of res to rawBytes. It returns an error that
 // wraps [ErrTooManyItems] when the total goes over rawLimit, and an error
-// that wraps [ErrProtocol] when res cannot be marshaled. The error texts give
+// that wraps [ErrProtocol] when res cannot be encoded. The error texts give
 // counts only, never server text.
-//
-// json.Marshal makes a copy of the page for a short time, so for one page
-// the memory is about twice its size.
 func (w *listWatch) spendRaw(res mcp.Result) error {
-	b, err := json.Marshal(res)
+	n, err := jsonSize(res)
 	if err != nil {
 		// Only the type of the error: its text can quote a value, which
 		// could be server text. A page that the SDK decoded from JSON
-		// always marshals, so this is a guard, not a normal path.
+		// always encodes, so this is a guard, not a normal path.
 		return fmt.Errorf("%w: measure list page: %T", ErrProtocol, err)
 	}
-	if total := w.rawBytes.Add(int64(len(b))); total > w.rawLimit {
+	if total := w.rawBytes.Add(n); total > w.rawLimit {
 		return fmt.Errorf("%w: server sent more than %d bytes of list data", ErrTooManyItems, w.rawLimit)
 	}
 	return nil
 }
 
-// check returns an error that wraps [ErrProtocol] when kept, the number of
+// jsonSize returns the size of v as JSON. HTML escaping is off, so "<", ">"
+// and "&" count one byte each, as a server sends them, not six. The encoder
+// builds the JSON in an internal buffer for a short time, so for one page
+// the memory is about twice its size; countWriter keeps none of it.
+func jsonSize(v any) (int64, error) {
+	var c countWriter
+	enc := json.NewEncoder(&c)
+	enc.SetEscapeHTML(false)
+	if err := enc.Encode(v); err != nil {
+		return 0, err
+	}
+	// Encode adds a newline after the value; the JSON does not have it.
+	return c.n - 1, nil
+}
+
+// countWriter is an io.Writer that counts the bytes written to it and keeps
+// none of them.
+type countWriter struct {
+	n int64
+}
+
+// Write counts p and never fails.
+func (c *countWriter) Write(p []byte) (int, error) {
+	c.n += int64(len(p))
+	return len(p), nil
+}
+
+// checkDroppedTools returns an error that wraps [ErrProtocol] when kept, the number of
 // tools in the Result, is less than the number of tools that the server
 // sent. The error text gives the count only, never a tool name or an
 // annotation, because those are untrusted server text.
@@ -155,7 +179,7 @@ func (w *listWatch) spendRaw(res mcp.Result) error {
 // request from its cache, without a request to the server. That does not
 // happen in one inspectSession, because collect never requests the same
 // cursor twice. check returns nil for it.
-func (w *listWatch) check(kept int) error {
+func (w *listWatch) checkDroppedTools(kept int) error {
 	dropped := w.sentTools.Load() - int64(kept)
 	if dropped <= 0 {
 		return nil
@@ -176,7 +200,7 @@ func inspectWatched(ctx context.Context, cs *mcp.ClientSession, w *listWatch) (R
 	if err != nil {
 		return Result{}, err
 	}
-	if err := w.check(len(res.Tools)); err != nil {
+	if err := w.checkDroppedTools(len(res.Tools)); err != nil {
 		return Result{}, err
 	}
 	return res, nil

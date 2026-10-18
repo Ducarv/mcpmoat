@@ -765,7 +765,7 @@ func TestCheckCommand(t *testing.T) {
 	}
 }
 
-func TestIsRelativePath(t *testing.T) {
+func TestIsRelativeWithDir(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
@@ -800,8 +800,8 @@ func TestIsRelativePath(t *testing.T) {
 		t.Run(tt.command, func(t *testing.T) {
 			t.Parallel()
 
-			if got := isRelativePath(tt.command); got != tt.want {
-				t.Errorf("isRelativePath(%q) = %v, want %v", tt.command, got, tt.want)
+			if got := isRelativeWithDir(tt.command); got != tt.want {
+				t.Errorf("isRelativeWithDir(%q) = %v, want %v", tt.command, got, tt.want)
 			}
 		})
 	}

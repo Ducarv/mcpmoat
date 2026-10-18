@@ -148,6 +148,12 @@
 //     clean list: the handshake sends the client name "mcpmoat", and a
 //     server can leave out the tools capability for mcpmoat only. A nil
 //     [Result.Tools] shows the second case. See issue #97.
+//   - A server without an absolute Dir runs in an empty temporary
+//     directory, not in the directory where the client starts it. A
+//     launcher that reads its working directory can then start a different
+//     program: for example "npx foo" in a project runs the local
+//     node_modules/.bin/foo, but in the temporary directory npx fetches foo
+//     from the registry.
 //   - Resource templates are not listed.
 //   - HTTP and SSE servers give [ErrUnsupportedTransport] until issue #26.
 //   - There is no per-server timeout yet (issue #28). Until then, callers

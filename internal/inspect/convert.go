@@ -124,8 +124,12 @@ func toResource(r *mcp.Resource) Resource {
 // A json.RawMessage is checked and copied, not encoded again. Any other value
 // is encoded with encoding/json: map keys come out sorted, so the same schema
 // always gives the same bytes, which pins need for a stable hash. HTML
-// escaping is off, so text such as "<IMPORTANT>" stays as the server sent it
-// and rules can match it. An error wraps [ErrProtocol].
+// escaping is off, so text such as "<IMPORTANT>" stays readable and rules
+// can match it. encoding/json still writes U+2028 and U+2029 as the escapes
+// \u2028 and \u2029, writes control characters as escapes, and replaces
+// invalid UTF-8 with U+FFFD. So the bytes are not exactly what the server
+// sent: a rule that looks for hidden characters must decode the schema
+// strings, not match the raw bytes. An error wraps [ErrProtocol].
 func rawJSON(v any) (json.RawMessage, error) {
 	switch v := v.(type) {
 	case nil:

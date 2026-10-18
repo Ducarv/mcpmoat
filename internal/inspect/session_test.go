@@ -477,6 +477,32 @@ func TestInspectSessionByteBudget(t *testing.T) {
 	}
 }
 
+// TestInspectSessionInstructionsBudget checks that the instructions of the
+// handshake count against the byte budget, so a server cannot send
+// unbounded text there.
+func TestInspectSessionInstructionsBudget(t *testing.T) {
+	t.Parallel()
+
+	const budget = 1 << 10
+
+	server := mcp.NewServer(
+		&mcp.Implementation{Name: "chatty", Version: "1"},
+		&mcp.ServerOptions{Instructions: strings.Repeat("i", budget+1)},
+	)
+	cs := connectInMemory(t, server)
+
+	got, err := inspectSessionBudget(t.Context(), cs, newByteBudget(budget))
+	if !errors.Is(err, ErrTooManyItems) {
+		t.Fatalf("inspectSessionBudget() error = %v, want ErrTooManyItems", err)
+	}
+	if !strings.Contains(err.Error(), "handshake") {
+		t.Errorf("inspectSessionBudget() error = %q, want it to name %q", err, "handshake")
+	}
+	if !reflect.DeepEqual(got, Result{}) {
+		t.Errorf("inspectSessionBudget() result = %+v, want zero Result", got)
+	}
+}
+
 // TestInspectSessionByteBudgetShared checks that tools, prompts and resources
 // share one budget: the tools fit, but the prompts that come after them go
 // over the rest of the budget. The tools are then lost too: the Result is

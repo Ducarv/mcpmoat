@@ -6,9 +6,9 @@ import "fmt"
 // its tools, prompts and resources.
 //
 // The budget counts the bytes of the text that mcpmoat keeps in a [Result]:
-// names, titles, descriptions, URIs, MIME types, schemas and prompt
-// arguments (see toolSize, promptSize and resourceSize). The instructions of
-// the handshake are not counted: they are one string in one frame.
+// the instructions of the handshake, and the names, titles, descriptions,
+// URIs, MIME types, schemas and prompt arguments of the lists (see toolSize,
+// promptSize and resourceSize).
 //
 // A page cap and an item cap alone do not bound the data: each page can be
 // one very large frame. The budget bounds the text that mcpmoat keeps.

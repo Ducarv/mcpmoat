@@ -125,17 +125,17 @@ func checkCommand(command string, hasDir bool) error {
 		return fmt.Errorf("%w: command is empty", ErrInvalidServer)
 	case strings.ContainsRune(command, 0):
 		return fmt.Errorf("%w: command contains a NUL byte", ErrInvalidServer)
-	case !hasDir && isRelativePath(command):
+	case !hasDir && isRelativeWithDir(command):
 		return fmt.Errorf("%w: relative command path needs an absolute working directory", ErrInvalidServer)
 	}
 	return nil
 }
 
-// isRelativePath reports whether command is a relative path with a directory
-// part, such as "./server" or "bin/server". A bare name such as "npx" is not
-// a path: exec looks it up in PATH. The test filepath.Base(command) !=
+// isRelativeWithDir reports whether command is a relative path with a
+// directory part, such as "./server" or "bin/server". It is false for a bare
+// name such as "npx", which exec looks up in PATH. The test filepath.Base(command) !=
 // command is the same test that exec.Command uses to decide whether to call
 // LookPath.
-func isRelativePath(command string) bool {
+func isRelativeWithDir(command string) bool {
 	return !filepath.IsAbs(command) && filepath.Base(command) != command
 }

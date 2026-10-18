@@ -295,7 +295,7 @@ func TestListWatchMiddleware(t *testing.T) {
 	}
 }
 
-func TestListWatchCheck(t *testing.T) {
+func TestListWatchCheckDroppedTools(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
@@ -316,7 +316,7 @@ func TestListWatchCheck(t *testing.T) {
 
 			w := newListWatch(maxRawBytes)
 			w.sentTools.Store(tt.sent)
-			err := w.check(tt.kept)
+			err := w.checkDroppedTools(tt.kept)
 			if tt.wantDropped == 0 {
 				if err != nil {
 					t.Errorf("check(%d) error = %v, want nil", tt.kept, err)

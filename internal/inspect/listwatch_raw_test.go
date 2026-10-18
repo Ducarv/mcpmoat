@@ -260,6 +260,28 @@ func TestListWatchMiddlewareRawLimit(t *testing.T) {
 	}
 }
 
+// TestListWatchMiddlewareNoHTMLEscape checks that "<", ">" and "&" count one
+// byte each, as a server sends them. json.Marshal would write each one as a
+// 6-byte escape, so this page would go over the limit.
+func TestListWatchMiddlewareNoHTMLEscape(t *testing.T) {
+	t.Parallel()
+
+	const markup = 1 << 10
+	page := &mcp.ListPromptsResult{Prompts: []*mcp.Prompt{{
+		Name:        "p",
+		Description: strings.Repeat("<>&", markup/3),
+	}}}
+	next := func(context.Context, string, mcp.Request) (mcp.Result, error) { return page, nil }
+
+	w := newListWatch(2 * markup)
+	if _, err := w.middleware(next)(t.Context(), "prompts/list", nil); err != nil {
+		t.Fatalf("middleware error = %v, want nil", err)
+	}
+	if n := w.rawBytes.Load(); n < markup || n > markup+100 {
+		t.Errorf("rawBytes = %d, want about %d (no HTML escapes)", n, markup)
+	}
+}
+
 func TestListWatchMiddlewareMarshalError(t *testing.T) {
 	t.Parallel()
 

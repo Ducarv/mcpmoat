@@ -88,10 +88,8 @@ func (i *SDKInspector) Inspect(ctx context.Context, s discover.Server) (Result, 
 	// The defers below stop things in this order:
 	//
 	//  1. cs.Close: ends the MCP session.
-	//  2. transport.close: closes the connection, which closes stdin of the
-	//     server and waits for the process to exit (SIGTERM and SIGKILL
-	//     after stopGrace each). It also calls cmd.Wait, so the process is
-	//     reaped.
+	//  2. transport.close: stops the process with the steps on stopGrace and
+	//     reaps it.
 	//  3. cleanup: removes the temporary working directory, now that the
 	//     process no longer uses it.
 	//  4. cancel: cancels the ctx of exec.CommandContext. If the process
@@ -209,6 +207,12 @@ func inspectSessionBudget(ctx context.Context, cs *mcp.ClientSession, budget *by
 		return Result{}, sessionError(ctx, "handshake", errNoResult)
 	}
 
+	// The instructions are text that mcpmoat keeps, so they count against
+	// the same budget as the lists.
+	if err := budget.spend(len(initRes.Instructions)); err != nil {
+		return Result{}, sessionError(ctx, "handshake", err)
+	}
+
 	res := Result{
 		ProtocolVersion: initRes.ProtocolVersion,
 		Instructions:    initRes.Instructions,
@@ -224,6 +228,9 @@ func inspectSessionBudget(ctx context.Context, cs *mcp.ClientSession, budget *by
 		return res, nil
 	}
 
+	// The three blocks below differ only in the SDK call, the converter, the
+	// size function and the op text. Keep them in step: a change to the nil
+	// guard or the sessionError wrap goes into all three.
 	if caps.Tools != nil {
 		tools, err := collect(ctx, budget, toolSize, func(ctx context.Context, cursor string) ([]Tool, string, error) {
 			r, err := cs.ListTools(ctx, &mcp.ListToolsParams{Cursor: cursor})
@@ -353,12 +360,10 @@ func (t *closingTransport) Connect(ctx context.Context) (mcp.Connection, error) 
 // close closes the connection, if Connect made one. It does nothing if the
 // process never started.
 //
-// For the command transport, this is how the process stops: the close of
-// the SDK connection runs only once (sync.Once), closes the stdin of the
-// server and calls cmd.Wait. If the process does not exit within stopGrace,
-// it sends SIGTERM, and after one more stopGrace, SIGKILL. A concurrent or
-// earlier close by the SDK is fine: a second call waits for the first one
-// to finish and returns its error. So when close returns, the process has
+// For the command transport, this is how the process stops, with the steps
+// on stopGrace. The close of the SDK connection runs only once (sync.Once);
+// a concurrent or earlier close by the SDK is fine, because a second call
+// waits for the first one to finish. So when close returns, the process has
 // exited and is reaped. The error is the exit status of the server, which
 // does not matter here, so close drops it.
 func (t *closingTransport) close() {

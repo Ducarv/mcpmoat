@@ -17,11 +17,10 @@ import (
 	"github.com/Ducarv/mcpmoat/internal/inspect/inspecttest"
 )
 
-// stopGrace mirrors the unexported constant inspect.stopGrace (sdk.go). The
-// SDK command transport waits this long after it closes stdin and again after
-// SIGTERM, then sends SIGKILL and waits once more. So a normal stop takes at
-// most 3*stopGrace. Keep the two values the same.
-const stopGrace = 2 * time.Second
+// stopGrace is inspect.stopGrace. The SDK command transport waits this long
+// after it closes stdin and again after SIGTERM, then sends SIGKILL and
+// waits once more. So a normal stop takes at most 3*stopGrace.
+const stopGrace = inspect.StopGrace
 
 // reapLag is how long the test polls for the process to go away when the
 // first check finds it. Any lag at all violates the stop contract, so the

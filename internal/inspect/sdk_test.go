@@ -34,10 +34,6 @@ const (
 	// sdkTimeout bounds every call to Inspect, so a bug never hangs CI.
 	sdkTimeout = 10 * time.Second
 
-	// sdkStopGrace mirrors the unexported inspect.stopGrace. A stop takes
-	// at most 3*sdkStopGrace (see the doc on stopGrace in sdk.go).
-	sdkStopGrace = 2 * time.Second
-
 	// sdkParentCanary is a fake secret in the environment of the test
 	// process. It must never reach the child (NFR-04) or an error.
 	sdkParentCanary = "mcpmoat-parent-canary-sdk-6Rw4Np"
@@ -401,9 +397,9 @@ func TestSDKInspectDeadline(t *testing.T) {
 
 	const deadline = time.Second
 	// The process gets SIGKILL when ctx ends, so a stop is fast. The
-	// worst case of a stop is 3*sdkStopGrace; one more second is slack
+	// worst case of a stop is 3*inspect.StopGrace; one more second is slack
 	// for a loaded CI machine.
-	const bound = deadline + 3*sdkStopGrace + time.Second
+	const bound = deadline + 3*inspect.StopGrace + time.Second
 
 	tests := []struct {
 		name string
