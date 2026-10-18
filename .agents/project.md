@@ -22,7 +22,7 @@ The agents and skills in `.claude/` read this file. Its sections override their 
 | Vulnerabilities | `govulncheck ./...` |
 | Tests (all) | `go test -race -shuffle=on ./...` |
 | Tests (scoped) | `go test -race ./internal/<pkg>/ -run '<TestName>' -v` |
-| E2E scenario | `go test ./cmd/mcpmoat/ -run 'TestScripts/<name>' -v` |
+| E2E scenario | `go test ./cmd/mcpmoat/ -run 'TestE2E<Name>' -v` |
 | Update golden files | `go test ./<pkg>/ -update` (review the diff afterwards) |
 | Fuzz a parser | `go test -fuzz=FuzzX -fuzztime=30s ./<pkg>/` |
 
@@ -49,7 +49,7 @@ The agents and skills in `.claude/` read this file. Its sections override their 
 | `pins.json` format and store, `.mcpmoat-ignore` | `datastore` |
 | Unit `_test.go`, `rules/*.yaml` cases, `testdata/` fixtures | `unit-test` |
 | In-process CLI output, golden files, exit-code tables | `cli-test` |
-| `testdata/script/*.txtar` journeys against the real binary | `e2e-test` |
+| `TestE2E*` tests in `cmd/mcpmoat/e2e_test.go` against the real binary | `e2e-test` |
 | Root-cause diagnosis | `debugger` |
 | Final compile and vet check | `typecheck` |
 | Security-flagged tasks after the dev agent | `review-security` |
