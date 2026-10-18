@@ -1651,7 +1651,9 @@ func TestRemoteBlockedConnectRequestIsForgotten(t *testing.T) {
 				case <-stop:
 				}
 			},
-			timeout:  time.Second,
+			// The deadline must leave time for server/discover, initialize and
+			// tools/list on a busy machine; only the hang waits for it.
+			timeout:  3 * time.Second,
 			wantKind: KindTimeout,
 		},
 	}
@@ -2554,7 +2556,10 @@ func TestRemoteBlockedConnectKeepsDeadline(t *testing.T) {
 	// before ts.Close waits for it.
 	t.Cleanup(func() { close(stop) })
 
-	ctx, cancel := context.WithTimeout(t.Context(), 500*time.Millisecond)
+	// The deadline must leave time for server/discover and initialize on a
+	// busy machine (the full package runs many process tests in parallel);
+	// only the hanging initialize waits for it.
+	ctx, cancel := context.WithTimeout(t.Context(), 3*time.Second)
 	defer cancel()
 	srv := rmServer(discover.TransportHTTP, rmWithSecretQuery(fixtureURL(ts)), rmHeaders())
 	_, err := Remote(ctx, srv, RemoteOptions{})
