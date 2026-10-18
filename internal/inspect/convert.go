@@ -147,6 +147,7 @@ func rawJSON(v any) (json.RawMessage, error) {
 		return bytes.Clone(v), nil
 	}
 
+	// jsonSize in listwatch.go measures with the same settings.
 	var buf bytes.Buffer
 	enc := json.NewEncoder(&buf)
 	enc.SetEscapeHTML(false)

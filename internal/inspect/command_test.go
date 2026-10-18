@@ -38,9 +38,17 @@ func stdioServer(command string, args []string, dir string) discover.Server {
 
 // mustBuild calls buildCommand and fails the test on error. It registers
 // cleanup with t.Cleanup, so a temporary directory never outlives the test.
+// testRunRoot returns a runRoot for buildCommand that uses a new directory
+// of the test, so that no test writes to the cache directory of the user.
+func testRunRoot(t *testing.T) func() (string, error) {
+	t.Helper()
+	root := filepath.Join(t.TempDir(), "run")
+	return func() (string, error) { return privateDir(root) }
+}
+
 func mustBuild(t *testing.T, s discover.Server, getenv func(string) string) *exec.Cmd {
 	t.Helper()
-	cmd, cleanup, err := buildCommand(t.Context(), s, getenv)
+	cmd, cleanup, err := buildCommand(t.Context(), s, getenv, testRunRoot(t))
 	if cleanup == nil {
 		t.Fatal("buildCommand() cleanup = nil, want non-nil")
 	}
@@ -262,7 +270,7 @@ func TestBuildCommandAbsoluteDir(t *testing.T) {
 	t.Parallel()
 
 	dir := t.TempDir()
-	cmd, cleanup, err := buildCommand(t.Context(), stdioServer(absCommand(t, "server"), nil, dir), fakeGetenv(nil))
+	cmd, cleanup, err := buildCommand(t.Context(), stdioServer(absCommand(t, "server"), nil, dir), fakeGetenv(nil), testRunRoot(t))
 	if err != nil {
 		t.Fatalf("buildCommand() error = %v, want nil", err)
 	}
@@ -294,7 +302,9 @@ func TestBuildCommandTempDir(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 
-			cmd, cleanup, err := buildCommand(t.Context(), stdioServer(absCommand(t, "server"), nil, tt.dir), fakeGetenv(nil))
+			root := filepath.Join(t.TempDir(), "run")
+			runRoot := func() (string, error) { return privateDir(root) }
+			cmd, cleanup, err := buildCommand(t.Context(), stdioServer(absCommand(t, "server"), nil, tt.dir), fakeGetenv(nil), runRoot)
 			if cleanup == nil {
 				t.Fatal("buildCommand() cleanup = nil, want non-nil")
 			}
@@ -312,8 +322,8 @@ func TestBuildCommandTempDir(t *testing.T) {
 			if base := filepath.Base(cmd.Dir); !strings.HasPrefix(base, "mcpmoat-server-") {
 				t.Errorf("filepath.Base(cmd.Dir) = %q, want prefix %q", base, "mcpmoat-server-")
 			}
-			if got, want := filepath.Dir(cmd.Dir), filepath.Clean(os.TempDir()); got != want {
-				t.Errorf("parent of cmd.Dir = %q, want os.TempDir() %q", got, want)
+			if got := filepath.Dir(cmd.Dir); got != root {
+				t.Errorf("parent of cmd.Dir = %q, want the run root %q", got, root)
 			}
 
 			info, err := os.Stat(cmd.Dir)
@@ -346,29 +356,191 @@ func TestBuildCommandTempDir(t *testing.T) {
 	}
 }
 
-// TestBuildCommandTempDirError checks that a failure to make the temporary
-// working directory wraps ErrStart, returns no command and a non-nil
-// cleanup.
-//
-// This test is not parallel, because it calls t.Setenv. It is skipped on
-// Windows, where os.TempDir reads TMP and TEMP, not TMPDIR.
+// TestBuildCommandTempDirError checks that a failure to get the run root or
+// to make the working directory in it wraps ErrStart, returns no command and
+// a non-nil cleanup.
 func TestBuildCommandTempDirError(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("os.TempDir does not read TMPDIR on Windows")
-	}
-	command := absCommand(t, "server")
-	t.Setenv("TMPDIR", filepath.Join(t.TempDir(), "missing"))
+	t.Parallel()
 
-	cmd, cleanup, err := buildCommand(t.Context(), stdioServer(command, nil, ""), fakeGetenv(nil))
-	if cleanup == nil {
-		t.Fatal("buildCommand() cleanup = nil, want non-nil")
+	errRoot := errors.New("no run root")
+	tests := []struct {
+		name    string
+		runRoot func(t *testing.T) func() (string, error)
+	}{
+		{
+			name: "run root fails",
+			runRoot: func(*testing.T) func() (string, error) {
+				return func() (string, error) { return "", errRoot }
+			},
+		},
+		{
+			name: "run root does not exist",
+			runRoot: func(t *testing.T) func() (string, error) {
+				missing := filepath.Join(t.TempDir(), "missing")
+				return func() (string, error) { return missing, nil }
+			},
+		},
 	}
-	cleanup()
-	if !errors.Is(err, ErrStart) {
-		t.Errorf("buildCommand() error = %v, want errors.Is ErrStart", err)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			cmd, cleanup, err := buildCommand(t.Context(), stdioServer(absCommand(t, "server"), nil, ""), fakeGetenv(nil), tt.runRoot(t))
+			if cleanup == nil {
+				t.Fatal("buildCommand() cleanup = nil, want non-nil")
+			}
+			cleanup()
+			if !errors.Is(err, ErrStart) {
+				t.Errorf("buildCommand() error = %v, want errors.Is ErrStart", err)
+			}
+			if cmd != nil {
+				t.Errorf("buildCommand() cmd = %v, want nil on error", cmd)
+			}
+		})
 	}
-	if cmd != nil {
-		t.Errorf("buildCommand() cmd = %v, want nil on error", cmd)
+}
+
+// TestBuildCommandAbsDirSkipsRunRoot checks that a server with an absolute
+// Dir does not need the run root.
+func TestBuildCommandAbsDirSkipsRunRoot(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	runRoot := func() (string, error) {
+		t.Error("runRoot called for a server with an absolute Dir")
+		return "", errors.New("unexpected")
+	}
+	cmd, cleanup, err := buildCommand(t.Context(), stdioServer(absCommand(t, "server"), nil, dir), fakeGetenv(nil), runRoot)
+	t.Cleanup(cleanup)
+	if err != nil {
+		t.Fatalf("buildCommand() error = %v, want nil", err)
+	}
+	if cmd.Dir != dir {
+		t.Errorf("cmd.Dir = %q, want %q", cmd.Dir, dir)
+	}
+}
+
+// TestPrivateDir checks that privateDir makes a new directory with mode
+// 0o700 and refuses a path that is not a private, real directory.
+func TestPrivateDir(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		setup   func(t *testing.T, dir string) // makes dir in some state; nil leaves it absent
+		unix    bool                           // the case needs Unix permission bits or symbolic links
+		wantErr bool
+	}{
+		{name: "new directory and parents"},
+		{name: "existing private directory", setup: func(t *testing.T, dir string) { mkdir(t, dir, 0o700) }},
+		{name: "group can read", unix: true, wantErr: true, setup: func(t *testing.T, dir string) { mkdir(t, dir, 0o750) }},
+		{name: "others can write", unix: true, wantErr: true, setup: func(t *testing.T, dir string) { mkdir(t, dir, 0o707) }},
+		{
+			name: "symbolic link to a private directory", unix: true, wantErr: true,
+			setup: func(t *testing.T, dir string) {
+				target := filepath.Join(t.TempDir(), "target")
+				mkdir(t, target, 0o700)
+				mkdir(t, filepath.Dir(dir), 0o700)
+				if err := os.Symlink(target, dir); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+		{
+			name: "regular file", wantErr: true,
+			setup: func(t *testing.T, dir string) {
+				mkdir(t, filepath.Dir(dir), 0o700)
+				if err := os.WriteFile(dir, nil, 0o600); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if tt.unix && runtime.GOOS == "windows" {
+				t.Skip("needs Unix permission bits and symbolic links")
+			}
+
+			dir := filepath.Join(t.TempDir(), "cache", "mcpmoat", "run")
+			if tt.setup != nil {
+				tt.setup(t, dir)
+			}
+
+			got, err := privateDir(dir)
+			if tt.wantErr {
+				if err == nil {
+					t.Fatalf("privateDir() = %q, want an error", got)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("privateDir() error = %v, want nil", err)
+			}
+			if got != dir {
+				t.Errorf("privateDir() = %q, want %q", got, dir)
+			}
+			info, err := os.Lstat(dir)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !info.IsDir() {
+				t.Errorf("%q is not a directory", dir)
+			}
+			if perm := info.Mode().Perm(); runtime.GOOS != "windows" && perm != 0o700 {
+				t.Errorf("mode = %v, want %v", perm, fs.FileMode(0o700))
+			}
+		})
+	}
+}
+
+// mkdir makes dir and its parents, and sets the mode of dir to perm, also
+// when the umask would clear some bits.
+func mkdir(t *testing.T, dir string, perm fs.FileMode) {
+	t.Helper()
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(dir, perm); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestDefaultRunRoot checks that the default run root is
+// <user cache dir>/mcpmoat/run and that it is private.
+//
+// This test is not parallel, because it calls t.Setenv. It sets both HOME
+// and XDG_CACHE_HOME, so os.UserCacheDir points into the test directory on
+// Linux and on macOS, never to the cache directory of the user.
+func TestDefaultRunRoot(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("os.UserCacheDir reads LocalAppData on Windows")
+	}
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CACHE_HOME", filepath.Join(home, ".cache"))
+	cache, err := os.UserCacheDir()
+	if err != nil {
+		t.Fatalf("os.UserCacheDir() error = %v", err)
+	}
+	if !strings.HasPrefix(cache, home) {
+		t.Fatalf("os.UserCacheDir() = %q, want a directory below %q", cache, home)
+	}
+
+	got, err := defaultRunRoot()
+	if err != nil {
+		t.Fatalf("defaultRunRoot() error = %v, want nil", err)
+	}
+	if want := filepath.Join(cache, "mcpmoat", "run"); got != want {
+		t.Errorf("defaultRunRoot() = %q, want %q", got, want)
+	}
+	info, err := os.Lstat(got)
+	if err != nil {
+		t.Fatalf("os.Lstat(%q) error = %v", got, err)
+	}
+	if perm := info.Mode().Perm(); perm != 0o700 {
+		t.Errorf("run root mode = %v, want %v", perm, fs.FileMode(0o700))
 	}
 }
 
@@ -394,7 +566,7 @@ func TestBuildCommandRelativeCommand(t *testing.T) {
 			t.Run(command+" refused with Dir "+dir, func(t *testing.T) {
 				t.Parallel()
 
-				cmd, cleanup, err := buildCommand(t.Context(), stdioServer(command, nil, dir), fakeGetenv(nil))
+				cmd, cleanup, err := buildCommand(t.Context(), stdioServer(command, nil, dir), fakeGetenv(nil), testRunRoot(t))
 				if cleanup == nil {
 					t.Fatal("buildCommand() cleanup = nil, want non-nil")
 				}
@@ -539,7 +711,7 @@ func TestBuildCommandErrors(t *testing.T) {
 			t.Parallel()
 
 			parent := map[string]string{"PATH": "/usr/bin", "AWS_SECRET_ACCESS_KEY": parentCanary}
-			cmd, cleanup, err := buildCommand(t.Context(), tt.server, fakeGetenv(parent))
+			cmd, cleanup, err := buildCommand(t.Context(), tt.server, fakeGetenv(parent), testRunRoot(t))
 			if cleanup == nil {
 				t.Fatal("buildCommand() cleanup = nil, want non-nil on error")
 			}

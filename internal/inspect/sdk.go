@@ -43,13 +43,20 @@ type SDKInspector struct {
 	// environment. When it is nil (a zero SDKInspector), Inspect uses
 	// os.Getenv.
 	getenv func(string) string
+
+	// runRoot returns the directory for the working directories of servers
+	// without an absolute Dir (see buildCommand). New sets it to
+	// defaultRunRoot; tests replace it, so that they never write to the
+	// cache directory of the user. When it is nil, Inspect uses
+	// defaultRunRoot.
+	runRoot func() (string, error)
 }
 
 var _ Inspector = (*SDKInspector)(nil)
 
 // New returns an [SDKInspector] with the options opts.
 func New(opts Options) *SDKInspector {
-	return &SDKInspector{opts: opts, getenv: os.Getenv}
+	return &SDKInspector{opts: opts, getenv: os.Getenv, runRoot: defaultRunRoot}
 }
 
 // Inspect starts the stdio server s, does the MCP handshake, lists its tools,
@@ -104,7 +111,11 @@ func (i *SDKInspector) Inspect(ctx context.Context, s discover.Server) (Result, 
 	if getenv == nil {
 		getenv = os.Getenv
 	}
-	cmd, cleanup, err := buildCommand(ctx, s, getenv)
+	runRoot := i.runRoot
+	if runRoot == nil {
+		runRoot = defaultRunRoot
+	}
+	cmd, cleanup, err := buildCommand(ctx, s, getenv, runRoot)
 	// cleanup is never nil, also on error, so it is safe to defer it before
 	// the error check.
 	defer cleanup()
@@ -207,12 +218,6 @@ func inspectSessionBudget(ctx context.Context, cs *mcp.ClientSession, budget *by
 		return Result{}, sessionError(ctx, "handshake", errNoResult)
 	}
 
-	// The instructions are text that mcpmoat keeps, so they count against
-	// the same budget as the lists.
-	if err := budget.spend(len(initRes.Instructions)); err != nil {
-		return Result{}, sessionError(ctx, "handshake", err)
-	}
-
 	res := Result{
 		ProtocolVersion: initRes.ProtocolVersion,
 		Instructions:    initRes.Instructions,
@@ -220,6 +225,13 @@ func inspectSessionBudget(ctx context.Context, cs *mcp.ClientSession, budget *by
 	if initRes.ServerInfo != nil {
 		res.ServerName = initRes.ServerInfo.Name
 		res.ServerVersion = initRes.ServerInfo.Version
+	}
+
+	// The handshake strings are text that mcpmoat keeps, so they count
+	// against the same budget as the lists.
+	n := len(res.ProtocolVersion) + len(res.Instructions) + len(res.ServerName) + len(res.ServerVersion)
+	if err := budget.spend(n); err != nil {
+		return Result{}, sessionError(ctx, "handshake", err)
 	}
 
 	caps := initRes.Capabilities

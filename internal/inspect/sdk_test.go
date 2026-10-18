@@ -64,6 +64,14 @@ func sdkBenign(t *testing.T, args ...string) discover.Server {
 	}
 }
 
+// sdkNew returns an SDKInspector with opts that makes the working
+// directories of servers in a new directory of the test, never in the cache
+// directory of the user.
+func sdkNew(t *testing.T, opts inspect.Options) *inspect.SDKInspector {
+	t.Helper()
+	return inspect.NewWithRunRoot(opts, filepath.Join(t.TempDir(), "run"))
+}
+
 // sdkCtx returns a context that ends after timeout or when the test ends.
 func sdkCtx(t *testing.T, timeout time.Duration) context.Context {
 	t.Helper()
@@ -175,7 +183,7 @@ func sdkReadPID(t *testing.T, path string) int {
 func TestSDKInspectBenign(t *testing.T) {
 	t.Parallel()
 
-	got, err := inspect.New(inspect.Options{}).Inspect(sdkCtx(t, sdkTimeout), sdkBenign(t))
+	got, err := sdkNew(t, inspect.Options{}).Inspect(sdkCtx(t, sdkTimeout), sdkBenign(t))
 	if err != nil {
 		t.Fatalf("Inspect() error = %v, want nil", err)
 	}
@@ -191,7 +199,7 @@ func TestSDKInspectBenign(t *testing.T) {
 func TestSDKInspectClientVersion(t *testing.T) {
 	t.Parallel()
 
-	got, err := inspect.New(inspect.Options{ClientVersion: "1.2.3"}).Inspect(sdkCtx(t, sdkTimeout), sdkBenign(t))
+	got, err := sdkNew(t, inspect.Options{ClientVersion: "1.2.3"}).Inspect(sdkCtx(t, sdkTimeout), sdkBenign(t))
 	if err != nil {
 		t.Fatalf("Inspect() error = %v, want nil", err)
 	}
@@ -210,7 +218,7 @@ func TestSDKInspectUntrusted(t *testing.T) {
 		s.Untrusted = true
 		s.Env = sdkSecretEnv(map[string]string{"MCPMOAT_TEST_TOKEN": discovertest.CanaryEnv})
 
-		res, err := inspect.New(inspect.Options{}).Inspect(sdkCtx(t, sdkTimeout), s)
+		res, err := sdkNew(t, inspect.Options{}).Inspect(sdkCtx(t, sdkTimeout), s)
 
 		sdkAssertFailed(t, res, err, inspect.ErrUntrusted)
 		sdkAssertNotExist(t, pidfile, "the untrusted server must not start")
@@ -223,7 +231,7 @@ func TestSDKInspectUntrusted(t *testing.T) {
 		s := sdkBenign(t, "-pidfile", pidfile)
 		s.Untrusted = true
 
-		got, err := inspect.New(inspect.Options{AllowUntrusted: true}).Inspect(sdkCtx(t, sdkTimeout), s)
+		got, err := sdkNew(t, inspect.Options{AllowUntrusted: true}).Inspect(sdkCtx(t, sdkTimeout), s)
 		if err != nil {
 			t.Fatalf("Inspect() error = %v, want nil with AllowUntrusted", err)
 		}
@@ -255,7 +263,7 @@ func TestSDKInspectRemote(t *testing.T) {
 				Headers:   sdkSecretEnv(map[string]string{"Authorization": "Bearer " + discovertest.CanaryHeader}),
 			}
 
-			res, err := inspect.New(inspect.Options{AllowUntrusted: true}).Inspect(sdkCtx(t, sdkTimeout), s)
+			res, err := sdkNew(t, inspect.Options{AllowUntrusted: true}).Inspect(sdkCtx(t, sdkTimeout), s)
 
 			sdkAssertFailed(t, res, err, inspect.ErrUnsupportedTransport)
 			sdkAssertNoLeak(t, err, "example.invalid")
@@ -272,7 +280,7 @@ func TestSDKInspectCrash(t *testing.T) {
 	s := sdkBenign(t, "-mode", "crash")
 	s.Env = sdkSecretEnv(map[string]string{"MCPMOAT_TEST_TOKEN": discovertest.CanaryEnv})
 
-	res, err := inspect.New(inspect.Options{}).Inspect(sdkCtx(t, sdkTimeout), s)
+	res, err := sdkNew(t, inspect.Options{}).Inspect(sdkCtx(t, sdkTimeout), s)
 
 	sdkAssertFailed(t, res, err, inspect.ErrProtocol, inspect.ErrStart)
 	t.Logf("crash mode: error wraps %q; error: %v", sdkWrapped(err, inspect.ErrProtocol, inspect.ErrStart), err)
@@ -303,7 +311,7 @@ func TestSDKInspectStartError(t *testing.T) {
 				Env:       sdkSecretEnv(map[string]string{"MCPMOAT_TEST_TOKEN": discovertest.CanaryEnv}),
 			}
 
-			res, err := inspect.New(inspect.Options{}).Inspect(sdkCtx(t, sdkTimeout), s)
+			res, err := sdkNew(t, inspect.Options{}).Inspect(sdkCtx(t, sdkTimeout), s)
 
 			sdkAssertFailed(t, res, err, inspect.ErrStart)
 			sdkAssertNoLeak(t, err)
@@ -346,7 +354,7 @@ func TestSDKInspectInvalidServer(t *testing.T) {
 				Env:       sdkSecretEnv(tt.env),
 			}
 
-			res, err := inspect.New(inspect.Options{}).Inspect(sdkCtx(t, sdkTimeout), s)
+			res, err := sdkNew(t, inspect.Options{}).Inspect(sdkCtx(t, sdkTimeout), s)
 
 			sdkAssertFailed(t, res, err, inspect.ErrInvalidServer)
 			sdkAssertNoLeak(t, err, sdkCommandMarker, pidfile)
@@ -383,7 +391,7 @@ func TestSDKInspectCanceledContext(t *testing.T) {
 	ctx, cancel := context.WithCancel(t.Context())
 	cancel()
 
-	res, err := inspect.New(inspect.Options{}).Inspect(ctx, s)
+	res, err := sdkNew(t, inspect.Options{}).Inspect(ctx, s)
 
 	sdkAssertFailed(t, res, err, context.Canceled)
 	sdkAssertNotExist(t, pidfile, "a canceled ctx must not start the server")
@@ -413,7 +421,7 @@ func TestSDKInspectDeadline(t *testing.T) {
 			t.Parallel()
 			s := sdkBenign(t, "-mode", tt.mode)
 			s.Env = sdkSecretEnv(map[string]string{"MCPMOAT_TEST_TOKEN": discovertest.CanaryEnv})
-			inspector := inspect.New(inspect.Options{})
+			inspector := sdkNew(t, inspect.Options{})
 			ctx := sdkCtx(t, deadline)
 
 			start := time.Now()
@@ -445,7 +453,7 @@ func TestSDKInspectArgsReachChild(t *testing.T) {
 	envfile := filepath.Join(weird, "env 'file'")
 	s := sdkBenign(t, "-pidfile", pidfile, "-envfile", envfile)
 
-	got, err := inspect.New(inspect.Options{}).Inspect(sdkCtx(t, sdkTimeout), s)
+	got, err := sdkNew(t, inspect.Options{}).Inspect(sdkCtx(t, sdkTimeout), s)
 	if err != nil {
 		t.Fatalf("Inspect() error = %v, want nil", err)
 	}
@@ -551,7 +559,7 @@ func TestSDKInspectScrubbedEnv(t *testing.T) {
 				Env:       sdkSecretEnv(tt.env),
 			}
 
-			got, err := inspect.New(inspect.Options{}).Inspect(sdkCtx(t, sdkTimeout), s)
+			got, err := sdkNew(t, inspect.Options{}).Inspect(sdkCtx(t, sdkTimeout), s)
 			if err != nil {
 				t.Fatalf("Inspect() error = %v, want nil", err)
 			}
@@ -588,25 +596,14 @@ func sdkServerDirs(t *testing.T, dir string) []string {
 // TestSDKInspectRemovesWorkDir checks that Inspect removes the temporary
 // working directory of the server, on success and on each error path.
 //
-// The test points TMPDIR to its own empty directory, so it sees only the
-// directories that Inspect makes in this test. The shared system temp
-// directory is not a good place to count: other test binaries (go test
-// runs packages at the same time) can create and remove entries there.
-//
-// This test is not parallel, because it calls t.Setenv. Go runs all
-// non-parallel top-level tests before it resumes the parallel ones, so no
-// other test of this binary calls Inspect while TMPDIR points here.
+// The test gives Inspect its own run root, so it sees only the directories
+// that Inspect makes in this test.
 func TestSDKInspectRemovesWorkDir(t *testing.T) {
-	// Build the fixture before t.Setenv changes TMPDIR. The shared build
-	// directory must not be inside this test's temp directory, which is
-	// removed when the test ends.
-	command := inspecttest.Fixture(t, "benign")
+	t.Parallel()
 
-	tmp := t.TempDir()
-	t.Setenv("TMPDIR", tmp)
-	if got := os.TempDir(); got != tmp {
-		t.Fatalf("os.TempDir() = %q after t.Setenv, want %q", got, tmp)
-	}
+	command := inspecttest.Fixture(t, "benign")
+	root := filepath.Join(t.TempDir(), "run")
+	inspector := inspect.NewWithRunRoot(inspect.Options{}, root)
 
 	stdio := func(args ...string) discover.Server {
 		return discover.Server{
@@ -641,35 +638,36 @@ func TestSDKInspectRemovesWorkDir(t *testing.T) {
 			wantErr: true,
 		},
 	}
+	// The cases share root, so they run one after the other.
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if before := sdkServerDirs(t, tmp); len(before) != 0 {
+			if before := sdkServerDirs(t, root); len(before) != 0 {
 				t.Fatalf("server dirs before Inspect = %q, want none", before)
 			}
 
-			_, err := inspect.New(inspect.Options{}).Inspect(sdkCtx(t, tt.timeout), tt.server)
+			_, err := inspector.Inspect(sdkCtx(t, tt.timeout), tt.server)
 			if (err != nil) != tt.wantErr {
 				t.Fatalf("Inspect() error = %v, want error: %v", err, tt.wantErr)
 			}
 
-			if after := sdkServerDirs(t, tmp); len(after) != 0 {
+			if after := sdkServerDirs(t, root); len(after) != 0 {
 				t.Errorf("server dirs after Inspect = %q, want none", after)
 			}
 		})
 	}
 
-	// Proof that the test above is not empty: when TMPDIR does not exist,
-	// Inspect cannot make its working directory there. So Inspect reads
-	// TMPDIR at call time and the directory above was really made in tmp.
-	t.Run("TMPDIR is used", func(t *testing.T) {
-		t.Setenv("TMPDIR", filepath.Join(tmp, "missing"))
-		pidfile := filepath.Join(tmp, "pid")
+	// Proof that the test above is not empty: when the run root cannot be
+	// made, Inspect cannot make the working directory, and the server does
+	// not start. So the directories above were really made in root.
+	t.Run("run root is used", func(t *testing.T) {
+		file := filepath.Join(t.TempDir(), "file")
+		if err := os.WriteFile(file, nil, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		pidfile := filepath.Join(t.TempDir(), "pid")
 		s := stdio("-pidfile", pidfile)
 
-		res, err := inspect.New(inspect.Options{}).Inspect(sdkCtx(t, sdkTimeout), s)
-		if err == nil {
-			t.Fatal("Inspect() error = nil, want an error when TMPDIR does not exist")
-		}
+		res, err := inspect.NewWithRunRoot(inspect.Options{}, filepath.Join(file, "run")).Inspect(sdkCtx(t, sdkTimeout), s)
 		if !errors.Is(err, inspect.ErrStart) {
 			t.Errorf("Inspect() error = %v, want errors.Is inspect.ErrStart", err)
 		}
@@ -678,7 +676,6 @@ func TestSDKInspectRemovesWorkDir(t *testing.T) {
 		}
 		sdkAssertNotExist(t, pidfile, "the server must not start without a working directory")
 		sdkAssertNoLeak(t, err, pidfile)
-		t.Logf("missing TMPDIR: %v", err)
 	})
 }
 
@@ -689,7 +686,7 @@ func TestSDKInspectConcurrent(t *testing.T) {
 
 	const workers = 4
 	s := sdkBenign(t)
-	inspector := inspect.New(inspect.Options{})
+	inspector := sdkNew(t, inspect.Options{})
 	ctx := sdkCtx(t, sdkTimeout)
 
 	var (

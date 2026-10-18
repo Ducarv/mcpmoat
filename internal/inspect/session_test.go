@@ -16,9 +16,10 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
-// connectInMemory connects a client, made with the same constructor as
-// production (newClient), to server over in-memory transports. No process
-// and no network are involved. t.Cleanup closes both sessions.
+// connectInMemory connects the base client of production (newClient,
+// without the listWatch that newWatchedClient adds; see connectWatched) to
+// server over in-memory transports. No process and no network are
+// involved. t.Cleanup closes both sessions.
 func connectInMemory(t *testing.T, server *mcp.Server) *mcp.ClientSession {
 	t.Helper()
 	return connectClient(t, server, New(Options{}).newClient())

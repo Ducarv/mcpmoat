@@ -31,8 +31,9 @@
 //     [ErrStart], [ErrProtocol], [ErrTooManyItems]) or the context error.
 //     Use errors.Is to test for them, also for context.DeadlineExceeded and
 //     context.Canceled.
-//   - The error text never contains the values of Args, Env, Headers or URL
-//     of the server, because they can hold secrets.
+//   - mcpmoat never puts the values of Args, Env, Headers or URL of the
+//     server in the error text, because they can hold secrets. Text that
+//     the server sent can still hold them; see [Inspector].
 //   - An error means that the server was not scanned. Callers must report it
 //     as a finding about the server, never as a clean server; see
 //     [Inspector].
@@ -66,8 +67,11 @@
 //     in the client config. A configured key wins over PATH or HOME. Issue
 //     #27 adds the full allowlist of base keys.
 //   - When the server has an absolute Dir, the child runs in it. Otherwise
-//     it runs in a new, empty temporary directory, which Inspect removes
-//     before it returns. A relative Dir counts as no Dir.
+//     it runs in a new, empty directory below <user cache dir>/mcpmoat/run,
+//     a directory that only the user can access, and Inspect removes it
+//     before it returns. Not below the shared temporary directory: a
+//     launcher such as npx reads files in the parent directories of its
+//     working directory. A relative Dir counts as no Dir.
 //   - Without an absolute Dir, a relative command with a directory part (for
 //     example "./server" or "bin/server") is refused with [ErrInvalidServer].
 //   - The stderr of the child is discarded, so server output never reaches
@@ -83,8 +87,8 @@
 // stopped and reaped. A normal stop has these steps:
 //
 //  1. Close the stdin of the child.
-//  2. If the child still runs after stopGrace, send SIGTERM.
-//  3. If the child still runs after one more stopGrace, send SIGKILL.
+//  2. If the child still runs after a short grace period, send SIGTERM.
+//  3. If the child still runs after one more grace period, send SIGKILL.
 //
 // When ctx is canceled or its deadline passes, the child gets SIGKILL at
 // once. The only exception is a process that the operating system cannot
@@ -148,12 +152,14 @@
 //     clean list: the handshake sends the client name "mcpmoat", and a
 //     server can leave out the tools capability for mcpmoat only. A nil
 //     [Result.Tools] shows the second case. See issue #97.
-//   - A server without an absolute Dir runs in an empty temporary
-//     directory, not in the directory where the client starts it. A
-//     launcher that reads its working directory can then start a different
-//     program: for example "npx foo" in a project runs the local
-//     node_modules/.bin/foo, but in the temporary directory npx fetches foo
-//     from the registry.
+//   - A server without an absolute Dir runs in an empty directory, not in
+//     the directory where the client starts it (for Claude Code, the
+//     project of a project server). A launcher that reads its working
+//     directory can then start a different program: for example "npx foo"
+//     in a project runs the local node_modules/.bin/foo, but in the empty
+//     directory npx installs foo from the public registry and runs it,
+//     without a prompt, because stdin is not a terminal. That can be a
+//     package that the user never configured. See issue #104.
 //   - Resource templates are not listed.
 //   - HTTP and SSE servers give [ErrUnsupportedTransport] until issue #26.
 //   - There is no per-server timeout yet (issue #28). Until then, callers

@@ -6,7 +6,8 @@ import "fmt"
 // its tools, prompts and resources.
 //
 // The budget counts the bytes of the text that mcpmoat keeps in a [Result]:
-// the instructions of the handshake, and the names, titles, descriptions,
+// the strings of the handshake (protocol version, instructions, server name
+// and version), and the names, titles, descriptions,
 // URIs, MIME types, schemas and prompt arguments of the lists (see toolSize,
 // promptSize and resourceSize).
 //

@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"time"
 
@@ -36,10 +37,11 @@ func noCleanup() {}
 //   - The environment is built from scratch by [childEnv] with getenv. The
 //     process does not inherit the environment of mcpmoat.
 //   - When s.Dir is absolute, the process runs in s.Dir. Otherwise it runs
-//     in a new, empty temporary directory, so a relative argument such as
-//     "./server.js" never resolves against the working directory of
-//     mcpmoat. A relative Dir counts as no Dir: it is relative to where the
-//     user runs the client, which mcpmoat does not know.
+//     in a new, empty temporary directory under runRoot (see
+//     [defaultRunRoot]), so a relative argument such as "./server.js"
+//     never resolves against the working directory of mcpmoat. A relative
+//     Dir counts as no Dir: it is relative to where the user runs the
+//     client, which mcpmoat does not know.
 //   - Without an absolute Dir, a relative command with a directory part
 //     (for example "./server" or "bin/server") is refused. It could only
 //     resolve against the temporary directory, so it cannot be the
@@ -59,10 +61,11 @@ func noCleanup() {}
 //
 // The error wraps [ErrUnsupportedTransport] for a server that is not
 // TransportStdio, [ErrInvalidServer] for a config that cannot run safely,
-// and [ErrStart] when the temporary working directory cannot be made. The
+// and [ErrStart] when runRoot fails or the temporary working directory
+// cannot be made. The
 // error text never contains the values of Args or Env, and it does not
 // contain the command.
-func buildCommand(ctx context.Context, s discover.Server, getenv func(string) string) (cmd *exec.Cmd, cleanup func(), err error) {
+func buildCommand(ctx context.Context, s discover.Server, getenv func(string) string, runRoot func() (string, error)) (cmd *exec.Cmd, cleanup func(), err error) {
 	if s.Transport != discover.TransportStdio {
 		return nil, noCleanup, fmt.Errorf("%w: not a stdio server", ErrUnsupportedTransport)
 	}
@@ -84,9 +87,15 @@ func buildCommand(ctx context.Context, s discover.Server, getenv func(string) st
 	dir := s.Dir
 	cleanup = noCleanup
 	if !hasDir {
+		root, err := runRoot()
+		if err != nil {
+			return nil, noCleanup, fmt.Errorf("%w: working directory root: %w", ErrStart, err)
+		}
 		// MkdirTemp makes a new directory with mode 0o700 and a random
-		// suffix, so no other user and no earlier run can put files in it.
-		dir, err = os.MkdirTemp("", "mcpmoat-server-*")
+		// suffix, so no earlier run can put files in it. runRoot is private
+		// too, so no other user can put files in a parent directory that a
+		// launcher reads (see defaultRunRoot).
+		dir, err = os.MkdirTemp(root, "mcpmoat-server-*")
 		if err != nil {
 			return nil, noCleanup, fmt.Errorf("%w: create working directory: %w", ErrStart, err)
 		}
@@ -114,6 +123,53 @@ func buildCommand(ctx context.Context, s discover.Server, getenv func(string) st
 	cmd.WaitDelay = waitDelay
 
 	return cmd, cleanup, nil
+}
+
+// defaultRunRoot returns <user cache dir>/mcpmoat/run, the directory in
+// which buildCommand makes the working directory of a server without an
+// absolute Dir. It makes the directory if it does not exist, and checks it
+// with [privateDir].
+//
+// Why not os.TempDir: on most Linux systems it is /tmp, which every user can
+// write. Launchers look for their config in the parent directories of their
+// working directory: npx walks up to the first directory with package.json
+// or node_modules and runs node_modules/.bin/<name> from there, and reads
+// .npmrc there; uv run walks up to pyproject.toml. So another local user
+// could put /tmp/node_modules/.bin/<name> in place, and a scan would run it
+// with the secret env of the server. The user cache dir is in the home
+// directory of the user ($XDG_CACHE_HOME or ~/.cache on Linux,
+// ~/Library/Caches on macOS), whose parents other users cannot write.
+//
+// The residual: if the user sets XDG_CACHE_HOME to a directory below a
+// shared directory such as /tmp, a parent of the root is shared again.
+func defaultRunRoot() (string, error) {
+	cache, err := os.UserCacheDir()
+	if err != nil {
+		return "", err
+	}
+	return privateDir(filepath.Join(cache, "mcpmoat", "run"))
+}
+
+// privateDir makes dir with mode 0o700 if it does not exist, and returns it.
+// It returns an error when dir is not a real directory (for example a
+// symbolic link) or when, on Unix, its group or other users have any access
+// to it. It does not change an existing directory.
+func privateDir(dir string) (string, error) {
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return "", err
+	}
+	info, err := os.Lstat(dir)
+	if err != nil {
+		return "", err
+	}
+	if !info.IsDir() {
+		return "", fmt.Errorf("%s is not a directory", dir)
+	}
+	// Windows reports no Unix permission bits for a directory.
+	if perm := info.Mode().Perm(); runtime.GOOS != "windows" && perm&0o077 != 0 {
+		return "", fmt.Errorf("%s has mode %v, want no access for group and others", dir, perm)
+	}
+	return dir, nil
 }
 
 // checkCommand reports why command cannot run safely, or nil if it can.

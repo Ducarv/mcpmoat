@@ -144,7 +144,8 @@ func (w *listWatch) spendRaw(res mcp.Result) error {
 }
 
 // jsonSize returns the size of v as JSON. HTML escaping is off, so "<", ">"
-// and "&" count one byte each, as a server sends them, not six. The encoder
+// and "&" count one byte each, as a server sends them, not six. rawJSON in
+// convert.go encodes with the same settings. The encoder
 // builds the JSON in an internal buffer for a short time, so for one page
 // the memory is about twice its size; countWriter keeps none of it.
 func jsonSize(v any) (int64, error) {
@@ -170,15 +171,15 @@ func (c *countWriter) Write(p []byte) (int, error) {
 	return len(p), nil
 }
 
-// checkDroppedTools returns an error that wraps [ErrProtocol] when kept, the number of
-// tools in the Result, is less than the number of tools that the server
-// sent. The error text gives the count only, never a tool name or an
+// checkDroppedTools returns an error that wraps [ErrProtocol] when kept, the
+// number of tools in the Result, is less than the number of tools that the
+// server sent. The error text gives the count only, never a tool name or an
 // annotation, because those are untrusted server text.
 //
 // kept can be more than sentTools only if the SDK answered a tools/list
 // request from its cache, without a request to the server. That does not
 // happen in one inspectSession, because collect never requests the same
-// cursor twice. check returns nil for it.
+// cursor twice. checkDroppedTools returns nil for it.
 func (w *listWatch) checkDroppedTools(kept int) error {
 	dropped := w.sentTools.Load() - int64(kept)
 	if dropped <= 0 {

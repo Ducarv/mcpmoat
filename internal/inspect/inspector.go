@@ -21,9 +21,11 @@ import (
 //   - An error that ctx causes can also wrap [ErrProtocol] or [ErrStart].
 //     So callers that map errors to messages must test
 //     context.DeadlineExceeded and context.Canceled first.
-//   - The error text never contains the values of Args, Env, Headers or URL
-//     of the [discover.Server], because they can hold secrets. It can contain
-//     the command name and text that the server sent. That text is
+//   - mcpmoat never puts the values of Args, Env, Headers or URL of the
+//     [discover.Server] in the error text, because they can hold secrets.
+//     But the error text can contain the command name and text that the
+//     server sent, and the server gets those values: it can echo a secret
+//     back in an error, and also in the strings of a Result. That text is
 //     untrusted and can be very long, so callers must print the error
 //     through package internal/termsafe, with termsafe.QuoteCut.
 //

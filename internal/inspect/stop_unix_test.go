@@ -87,7 +87,7 @@ func TestInspectStopsChild(t *testing.T) {
 			defer cancel()
 
 			start := time.Now()
-			_, err := inspect.New(inspect.Options{}).Inspect(ctx, server)
+			_, err := sdkNew(t, inspect.Options{}).Inspect(ctx, server)
 			end := time.Now()
 
 			// Check the process first, before anything else can give it
