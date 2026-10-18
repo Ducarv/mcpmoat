@@ -18,6 +18,10 @@
 // [Mask]; for a URL it gives [RedactURL] of the value, the display form.
 // Show the env and header names with [SecretMap.Keys].
 //
+// Server.Args is a plain []string and prints as written, but real configs
+// often put tokens in args. Show args only through [RedactArgs], which masks
+// likely credentials by heuristic rules and sends URLs through [RedactURL].
+//
 // Only [Secret.Reveal] and [URL.Reveal] return the values. Call them only
 // where the value is used:
 //

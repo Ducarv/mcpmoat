@@ -63,8 +63,9 @@ func (t Transport) IsRemote() bool {
 // and URL prints through [RedactURL] because it is a [URL]. The types do the
 // masking, so fmt (every verb, including %p, and also when a Server is in an
 // unexported field of another struct), log/slog and encoders cannot show
-// those values. Command and Args are kept and shown as written. This is a
-// known limit: a secret in the command line is not masked.
+// those values. Command and Args are plain strings: fmt shows them as written,
+// so display code must show Args through [RedactArgs], which masks likely
+// credentials (heuristic). A secret in Command itself is not masked.
 //
 // Server has no methods and no struct tags on purpose: output types live in
 // internal/report.
@@ -94,7 +95,8 @@ type Server struct {
 	// Command is the executable for TransportStdio.
 	Command string
 
-	// Args are the arguments for TransportStdio.
+	// Args are the arguments for TransportStdio, as written. They can hold
+	// credentials: display them with RedactArgs.
 	Args []string
 
 	// Env holds the environment variables for TransportStdio. Use Env.Keys

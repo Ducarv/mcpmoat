@@ -150,6 +150,44 @@ func TestRedactURL(t *testing.T) {
 			input: discovertest.CanaryURL + "%40host/x",
 			want:  discover.Mask,
 		},
+		{
+			// url.Parse accepts a zone ID, and u.String writes it back as
+			// written, so the zone could carry a secret.
+			name:  "IPv6 zone ID",
+			input: "http://[::1%25" + discovertest.CanaryURL + "]:80/",
+			want:  discover.Mask,
+		},
+		{
+			// A raw IDN host is not ASCII. Fail closed instead of
+			// converting it.
+			name:  "non-ASCII host",
+			input: "https://bücher.example/",
+			want:  discover.Mask,
+		},
+		{
+			// url.Parse unescapes the host, so an escaped IDN host is also
+			// non-ASCII after parsing.
+			name:  "percent-encoded non-ASCII host",
+			input: "https://b%C3%BCcher.example/",
+			want:  discover.Mask,
+		},
+
+		// Output is ASCII: bytes outside printable ASCII are escaped.
+		{
+			name:  "non-ASCII path is escaped by url.URL.String",
+			input: "https://h/a\u202eb",
+			want:  "https://h/a%E2%80%AEb",
+		},
+		{
+			name:  "bidi and C1 bytes in a query key are escaped",
+			input: "https://h/?k\u202e\u009b=" + discovertest.CanaryURL,
+			want:  "https://h/?k%E2%80%AE%C2%9B=" + discover.Mask,
+		},
+		{
+			name:  "existing escapes in a query key are kept",
+			input: "https://h/?a%20b=1",
+			want:  "https://h/?a%20b=" + discover.Mask,
+		},
 	}
 
 	for _, tt := range tests {
@@ -160,7 +198,38 @@ func TestRedactURL(t *testing.T) {
 			if got != tt.want {
 				t.Errorf("RedactURL(%q) = %q, want %q", tt.input, got, tt.want)
 			}
+			assertPrintableASCII(t, tt.input, got)
 		})
+	}
+}
+
+// FuzzRedactURL checks that RedactURL never panics and that its output is
+// always printable ASCII, for any input. The seeds run as a normal test;
+// "go test -fuzz=FuzzRedactURL ./internal/discover/" explores more inputs.
+func FuzzRedactURL(f *testing.F) {
+	for _, seed := range []string{
+		"https://u:p@h/x?k=v#f",
+		"http://[::1%25zone]:80/",
+		"https://h/?k\u202e=v;\u009b",
+		"https://bücher.example/",
+		"//u@h/p%2Fq?a=1&&b",
+	} {
+		f.Add(seed)
+	}
+	f.Fuzz(func(t *testing.T, raw string) {
+		assertPrintableASCII(t, raw, discover.RedactURL(raw))
+	})
+}
+
+// assertPrintableASCII fails the test if got has a byte outside printable
+// ASCII (0x20 to 0x7e), as promised by the RedactURL doc comment.
+func assertPrintableASCII(t *testing.T, input, got string) {
+	t.Helper()
+	for i := 0; i < len(got); i++ {
+		if c := got[i]; c < 0x20 || c > 0x7e {
+			t.Errorf("RedactURL(%q) = %q, byte %d is 0x%02x, want printable ASCII", input, got, i, c)
+			return
+		}
 	}
 }
 
