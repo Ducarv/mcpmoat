@@ -17,6 +17,10 @@ import (
 // same. encoding/json matches struct fields without regard to letter case, so
 // the reader never decodes into a struct with json tags: it decodes each
 // object into a map and reads these keys only.
+//
+// The JSON and Codex key names (codexKeyCommand and the others) are kept
+// apart on purpose, also where the text is the same: the two formats can
+// change on their own.
 const (
 	keyMCPServers = "mcpServers"
 	keyProjects   = "projects"
@@ -28,13 +32,13 @@ const (
 	keyHeaders    = "headers"
 )
 
-// entryKeys lists the keys that a server entry can have. It is an array, so no
-// code can change it.
+// entryKeys lists the keys that a server entry can have. No code writes to
+// it.
 var entryKeys = [...]string{keyType, keyCommand, keyArgs, keyEnv, keyURL, keyHeaders}
 
 // jsonEntry is one server entry in a Claude Code or Cursor JSON config. Both
 // clients use the same shape. Fields that a JSON entry does not have stay at
-// their zero value. decodeEntry fills it; it has no json tags on purpose.
+// their zero value. decodeJSONEntry fills it; it has no json tags on purpose.
 type jsonEntry struct {
 	Type    string
 	Command string
@@ -42,6 +46,68 @@ type jsonEntry struct {
 	Env     SecretMap
 	URL     URL
 	Headers SecretMap
+}
+
+// jsonFile is one Claude Code or Cursor JSON config to read. ReadClaudeCode
+// and ReadCursor build it with named fields.
+type jsonFile struct {
+	path   string
+	client Client
+	// scope goes to the servers of the top-level "mcpServers" object.
+	scope Scope
+	// projectPath goes to those servers with ScopeProject (see
+	// topProjectPath). It is ignored with ScopeGlobal.
+	projectPath string
+	// withProjects reads the "projects" section too. Only ~/.claude.json has
+	// one.
+	withProjects bool
+}
+
+// limits returns the size limit of the file and the directory that the read
+// must stay in ("" for no such directory).
+//
+// For a project file the directory is projectPath. If projectPath is "", it
+// is the directory of the file, also for a Cursor file in a ".cursor"
+// directory, where topProjectPath gives the parent directory. That root is
+// the smaller one, so a symlink from .cursor/mcp.json to a file next to
+// .cursor is refused. A symlink out of the directory and an absolute symlink
+// are refused too.
+func (f jsonFile) limits() (maxSize int64, root string) {
+	if f.scope != ScopeProject {
+		return maxConfigSize, ""
+	}
+	root = f.projectPath
+	if root == "" {
+		root = filepath.Dir(f.path)
+	}
+	return maxProjectConfigSize, root
+}
+
+// topProjectPath returns the ProjectPath of the servers of the top-level
+// "mcpServers" object. A global file applies to all projects, so its servers
+// get "". A project file gets projectPath, or, if projectPath is "", the
+// project directory that projectDirOf derives from the path.
+func (f jsonFile) topProjectPath() string {
+	switch {
+	case f.scope == ScopeGlobal:
+		return ""
+	case f.scope == ScopeProject && f.projectPath == "":
+		return projectDirOf(f.path, f.client)
+	}
+	return f.projectPath
+}
+
+// projectDirOf returns the project directory of the project file at path:
+// the directory of the file, or, for a Cursor file in a directory named
+// ".cursor", the parent of that directory. Cursor keeps its project file in
+// <project>/.cursor/mcp.json. The path is not made absolute: the package
+// never reads the current directory by itself.
+func projectDirOf(path string, client Client) string {
+	dir := filepath.Dir(path)
+	if client == ClientCursor && filepath.Base(dir) == ".cursor" {
+		return filepath.Dir(dir)
+	}
+	return dir
 }
 
 // origin tells where one "mcpServers" object is in the file.
@@ -65,75 +131,26 @@ type jsonParser struct {
 	// project of the file.
 	count int
 	// full is set when the file went over the cap. After that, decodeServers
-	// and decodeProjects decode nothing more, and parseJSONServers returns no
-	// servers.
+	// and decodeProjects decode nothing more, and decodeJSONSections returns
+	// no servers.
 	full bool
 }
 
-// parseJSONServers reads the Claude Code or Cursor JSON config at path.
+// parseJSONServers reads the Claude Code or Cursor JSON config f.
 //
-// The top-level "mcpServers" servers get scope. With ScopeProject they also
-// get projectPath; with ScopeGlobal projectPath is ignored and their
-// ProjectPath is "". If withProjects is true, the servers under
-// "projects.<dir>.mcpServers" are also read; they always get ScopeProject and
-// ProjectPath <dir>. Cursor files pass withProjects=false.
+// The servers of the top-level "mcpServers" object get f.scope and the
+// ProjectPath of topProjectPath. If f.withProjects is true, the servers under
+// "projects.<dir>.mcpServers" are read too. They get ScopeProject and
+// ProjectPath <dir>, and an error about one of them, or about the project
+// itself, has FileError.ProjectPath <dir>. An empty <dir> is refused
+// (reasonEmptyProject), and the other projects are still read.
 //
-// A missing file and an empty file give no servers and no error. Empty means
-// no bytes, or only the JSON whitespace bytes space, tab, CR and LF. Other
-// space characters (for example U+00A0) are not JSON whitespace, so a file of
-// them is invalid JSON. A file that holds only null is an "unexpected
-// structure" error: the clients need an object. A problem in one server entry
-// gives a *FileError for that entry; the other entries are still returned. An
-// error for an entry or a project under "projects" has FileError.ProjectPath
-// set to the project key.
+// With ScopeProject, markUntrusted marks every server and every error.
 //
-// With ScopeProject, the file is opened below projectPath, or below the
-// directory of path if projectPath is "", and markUntrusted sets Untrusted on
-// every Server and every FileError. See the package doc, Untrusted files and
-// Symlinks.
-//
-// Keys are matched exactly, as the clients do. A known key in a different
-// letter case ("Command", "MCPSERVERS") is an "ambiguous key" error: for an
-// entry, the entry gives no server; for a project, the project gives no
-// servers; for the top level, that section gives no servers.
-//
-// A lone UTF-16 surrogate escape (for example "\ud800" without a low
-// surrogate after it) or an invalid UTF-8 byte in a server entry or in a
-// project key makes the whole file an "invalid string" error, with the
-// position of the first bad spot. encoding/json turns both into U+FFFD, so
-// two names that differ for the client could become one name here. A bad
-// string in another part of the file, for example in the chat history of
-// ~/.claude.json, is not an error. See findBadServerString.
-//
-// Order: servers are sorted by (ProjectPath, Name). Errors come file-level
-// first (Server is empty), then by Server name. Errors of the same name keep
-// the order in which they were found: top-level first, then projects sorted by
-// path.
-//
-// Size limits: a file read with ScopeProject (<WorkDir>/.mcp.json and
-// <WorkDir>/.cursor/mcp.json) can be at most maxProjectConfigSize, because it
-// comes from a cloned repository and is untrusted. Any other file can be at
-// most maxConfigSize.
-//
-// A file with more than maxServersPerFile entries (server entries and projects
-// together) gives one "too many servers" error and no servers. The cap bounds
-// the result, not the decode: the map is decoded before the count, and the
-// file size caps bound that memory.
-//
-// Error messages never contain library error text. encoding/json errors can
-// quote bytes of the config, and the config can hold secrets. So the code uses
-// only the fixed reason constants and, for a syntax error or a bad string, the
-// position.
-func parseJSONServers(
-	ctx context.Context,
-	path string,
-	client Client,
-	scope Scope,
-	projectPath string,
-	withProjects bool,
-) ([]Server, []*FileError) {
-	servers, errs := parseJSONFile(ctx, path, client, scope, projectPath, withProjects)
-	if scope == ScopeProject {
+// See the package doc, Reading configs.
+func parseJSONServers(ctx context.Context, f jsonFile) ([]Server, []*FileError) {
+	servers, errs := parseJSONFile(ctx, f)
+	if f.scope == ScopeProject {
 		markUntrusted(servers, errs)
 	}
 	return servers, errs
@@ -152,35 +169,25 @@ func markUntrusted(servers []Server, errs []*FileError) {
 }
 
 // parseJSONFile does the work of parseJSONServers, except Untrusted.
-//
-// For a project file, the root of the read is projectPath. If projectPath is
-// "", the root is the directory of path, so a symlink out of that directory
-// and an absolute symlink are still refused.
-func parseJSONFile(
-	ctx context.Context,
-	path string,
-	client Client,
-	scope Scope,
-	projectPath string,
-	withProjects bool,
-) ([]Server, []*FileError) {
-	maxSize := int64(maxConfigSize)
-	root := ""
-	switch scope {
-	case ScopeProject:
-		maxSize = maxProjectConfigSize
-		root = projectPath
-		if root == "" {
-			root = filepath.Dir(path)
-		}
-	case ScopeGlobal:
-		// A global file applies to all projects, so its own servers have no
-		// ProjectPath. Servers under "projects" keep their own key.
-		projectPath = ""
-	}
-	data, found, fe := readConfigFile(ctx, path, maxSize, root)
+func parseJSONFile(ctx context.Context, f jsonFile) ([]Server, []*FileError) {
+	top, fe := loadJSONFile(ctx, f)
 	if fe != nil {
 		return nil, []*FileError{fe}
+	}
+	if top == nil {
+		return nil, nil
+	}
+	return decodeJSONSections(ctx, f, top)
+}
+
+// loadJSONFile reads f within its limits and checks the file as a whole. It
+// returns the top-level members of the file, or the one *FileError that
+// refuses the file. A missing file and an empty file give neither.
+func loadJSONFile(ctx context.Context, f jsonFile) (map[string]json.RawMessage, *FileError) {
+	maxSize, root := f.limits()
+	data, found, fe := readConfigFile(ctx, f.path, maxSize, root)
+	if fe != nil {
+		return nil, fe
 	}
 	// Trim only the four JSON whitespace bytes. bytes.TrimSpace would also
 	// trim Unicode spaces such as U+00A0, which JSON does not allow.
@@ -192,29 +199,35 @@ func parseJSONFile(
 	// so that one bad value does not stop the decoding of the others.
 	var top map[string]json.RawMessage
 	if err := json.Unmarshal(data, &top); err != nil {
-		return nil, []*FileError{topLevelError(path, data, err)}
+		return nil, topLevelError(f.path, data, err)
 	}
 	// Unmarshal of null into a map gives a nil map and no error.
 	if top == nil {
-		return nil, []*FileError{{Path: path, Reason: reasonBadShape}}
+		return nil, newFileError(f.path, reasonBadShape)
 	}
 	// The file is a valid JSON object now, which findBadServerString needs.
-	if off, project := findBadServerString(data, withProjects); off >= 0 {
-		line, col := lineCol(data, int64(off))
-		return nil, []*FileError{{Path: path, ProjectPath: project, Line: line, Col: col, Reason: reasonBadString}}
+	if off, project := findBadServerString(data, f.withProjects); off >= 0 {
+		return nil, newFileError(f.path, reasonBadString).inProject(project).atOffset(data, off)
 	}
+	return top, nil
+}
 
-	p := &jsonParser{path: path, client: client}
+// decodeJSONSections decodes the "mcpServers" section of top and, if
+// f.withProjects is true, the "projects" section. It refuses a file over
+// maxServersPerFile as a whole, as the Codex reader does, and sorts the
+// result.
+func decodeJSONSections(ctx context.Context, f jsonFile, top map[string]json.RawMessage) ([]Server, []*FileError) {
+	p := &jsonParser{path: f.path, client: f.client}
 	var servers []Server
 	var errs []*FileError
 	if hasCaseVariant(top, keyMCPServers) {
-		errs = append(errs, &FileError{Path: path, Reason: reasonAmbiguousKey})
+		errs = append(errs, newFileError(f.path, reasonAmbiguousKey))
 	} else {
-		servers, errs = p.decodeServers(top[keyMCPServers], origin{scope: scope, projectPath: projectPath})
+		servers, errs = p.decodeServers(top[keyMCPServers], origin{scope: f.scope, projectPath: f.topProjectPath()})
 	}
-	if withProjects {
+	if f.withProjects {
 		if hasCaseVariant(top, keyProjects) {
-			errs = append(errs, &FileError{Path: path, Reason: reasonAmbiguousKey})
+			errs = append(errs, newFileError(f.path, reasonAmbiguousKey))
 		} else {
 			projServers, projErrs := p.decodeProjects(ctx, top[keyProjects])
 			servers = append(servers, projServers...)
@@ -222,9 +235,8 @@ func parseJSONFile(
 		}
 	}
 
-	// A file over the cap is refused as a whole, as the Codex reader does.
 	if p.full {
-		return nil, []*FileError{{Path: path, Reason: reasonTooManyServers}}
+		return nil, []*FileError{newFileError(f.path, reasonTooManyServers)}
 	}
 
 	sortServers(servers)
@@ -239,11 +251,10 @@ func topLevelError(path string, data []byte, err error) *FileError {
 	if errors.As(err, &se) {
 		// Offset is the number of bytes read when the error was found, so the
 		// bad byte is at index Offset-1. lineCol clamps a negative value.
-		line, col := lineCol(data, se.Offset-1)
-		return &FileError{Path: path, Line: line, Col: col, Reason: reasonInvalidJSON}
+		return newFileError(path, reasonInvalidJSON).atOffset(data, int(se.Offset-1))
 	}
 	// Valid JSON of the wrong shape, for example a top-level array.
-	return &FileError{Path: path, Reason: reasonBadShape}
+	return newFileError(path, reasonBadShape)
 }
 
 // decodeProjects reads the "projects" object of ~/.claude.json. Every server
@@ -258,7 +269,7 @@ func (p *jsonParser) decodeProjects(ctx context.Context, raw json.RawMessage) ([
 	}
 	var projects map[string]json.RawMessage
 	if err := json.Unmarshal(raw, &projects); err != nil {
-		return nil, []*FileError{{Path: p.path, Reason: reasonBadShape}}
+		return nil, []*FileError{newFileError(p.path, reasonBadShape)}
 	}
 
 	var servers []Server
@@ -278,16 +289,22 @@ func (p *jsonParser) decodeProjects(ctx context.Context, raw json.RawMessage) ([
 			p.full = true
 			break
 		}
+		// An empty key names no directory, and its servers would get the
+		// ProjectPath "" of a global server.
+		if key == "" {
+			errs = append(errs, newFileError(p.path, reasonEmptyProject))
+			continue
+		}
 		// Decode each project on its own, so a bad project does not drop
 		// the other projects. A project is an object; we read only its
 		// "mcpServers" key.
 		var project map[string]json.RawMessage
 		if err := json.Unmarshal(projects[key], &project); err != nil {
-			errs = append(errs, &FileError{Path: p.path, ProjectPath: key, Reason: reasonBadShape})
+			errs = append(errs, newFileError(p.path, reasonBadShape).inProject(key))
 			continue
 		}
 		if hasCaseVariant(project, keyMCPServers) {
-			errs = append(errs, &FileError{Path: p.path, ProjectPath: key, Reason: reasonAmbiguousKey})
+			errs = append(errs, newFileError(p.path, reasonAmbiguousKey).inProject(key))
 			continue
 		}
 		s, e := p.decodeServers(project[keyMCPServers], origin{scope: ScopeProject, projectPath: key, project: key})
@@ -312,7 +329,7 @@ func (p *jsonParser) decodeServers(raw json.RawMessage, o origin) ([]Server, []*
 	}
 	var entries map[string]json.RawMessage
 	if err := json.Unmarshal(raw, &entries); err != nil {
-		return nil, []*FileError{{Path: p.path, ProjectPath: o.project, Reason: reasonBadServers}}
+		return nil, []*FileError{newFileError(p.path, reasonBadServers).inProject(o.project)}
 	}
 	if p.count+len(entries) > maxServersPerFile {
 		p.full = true
@@ -323,9 +340,9 @@ func (p *jsonParser) decodeServers(raw json.RawMessage, o origin) ([]Server, []*
 	var servers []Server
 	var errs []*FileError
 	for name, entryRaw := range entries {
-		srv, r := p.entryServer(name, entryRaw, o)
+		srv, r := p.readJSONServer(name, entryRaw, o)
 		if r != "" {
-			errs = append(errs, &FileError{Path: p.path, ProjectPath: o.project, Server: name, Reason: string(r)})
+			errs = append(errs, newFileError(p.path, r).inProject(o.project).forServer(name))
 			continue
 		}
 		servers = append(servers, srv)
@@ -333,26 +350,33 @@ func (p *jsonParser) decodeServers(raw json.RawMessage, o origin) ([]Server, []*
 	return servers, errs
 }
 
-// entryServer turns the server entry raw called name into a Server. It
-// returns a reason if the entry is not valid, and "" if it is.
-func (p *jsonParser) entryServer(name string, raw json.RawMessage, o origin) (Server, reason) {
+// readJSONServer turns the server entry raw called name into a Server. It
+// returns a reason if the entry is not valid, and "" if it is. It is the
+// JSON form of readCodexServer; it is a method because newJSONServer needs
+// the path and the client of the parser.
+func (p *jsonParser) readJSONServer(name string, raw json.RawMessage, o origin) (Server, reason) {
 	// An empty name has no use and cannot be shown in an error message.
 	if name == "" {
 		return Server{}, reasonEmptyName
 	}
-	e, r := decodeEntry(raw)
+	e, r := decodeJSONEntry(raw)
 	if r != "" {
 		return Server{}, r
 	}
-	return p.newServer(name, e, o)
+	return p.newJSONServer(name, e, o)
 }
 
-// decodeEntry decodes one server entry. It reads only the exact keys in
-// entryKeys and ignores other keys. It returns a reason if the entry is not an
-// object, if a known key has a value of the wrong type or a null (see
-// decodeField), or if the entry has a known key in a different letter case,
-// and "" if the entry is valid.
-func decodeEntry(raw json.RawMessage) (jsonEntry, reason) {
+// decodeJSONEntry decodes one server entry. It reads only the exact keys in
+// entryKeys and ignores other keys. It returns reasonBadEntry if the entry is
+// null or not an object, or if a known key has a value of the wrong type or a
+// null (see decodeField), reasonAmbiguousKey if the entry has a known key in
+// a different letter case, and "" if the entry is valid.
+func decodeJSONEntry(raw json.RawMessage) (jsonEntry, reason) {
+	// Unmarshal of null into a map gives a nil map and no error, which would
+	// make the entry an empty object. The client gets the real null.
+	if isNull(raw) {
+		return jsonEntry{}, reasonBadEntry
+	}
 	var fields map[string]json.RawMessage
 	if err := json.Unmarshal(raw, &fields); err != nil {
 		return jsonEntry{}, reasonBadEntry
@@ -375,8 +399,8 @@ func decodeEntry(raw json.RawMessage) (jsonEntry, reason) {
 	return e, ""
 }
 
-// errNull is the error of decodeField for a null value. decodeEntry turns it
-// into reasonBadEntry, so its text is never shown.
+// errNull is the error of decodeField for a null value. decodeJSONEntry turns
+// it into reasonBadEntry, so its text is never shown.
 var errNull = errors.New("null value")
 
 // decodeField decodes fields[key] into dst. An absent key leaves dst at its
@@ -427,12 +451,13 @@ func hasNullItem(raw json.RawMessage) bool {
 	return false
 }
 
-// newServer builds a Server from a decoded entry. If the entry is not valid it
-// returns a reason and the Server is not usable; else the reason is "".
+// newJSONServer builds a Server from a decoded entry. If the entry is not
+// valid it returns a reason and the Server is not usable; else the reason is
+// "".
 //
 // Fields that do not belong to the chosen transport are dropped: a stdio
 // server keeps Command, Args and Env; a remote server keeps URL and Headers.
-func (p *jsonParser) newServer(name string, e jsonEntry, o origin) (Server, reason) {
+func (p *jsonParser) newJSONServer(name string, e jsonEntry, o origin) (Server, reason) {
 	transport, r := resolveTransport(e)
 	if r != "" {
 		return Server{}, r

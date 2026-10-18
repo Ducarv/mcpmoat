@@ -2,18 +2,23 @@ package discover
 
 import "context"
 
-// ReadCursor reads one Cursor config file: ~/.cursor/mcp.json or a project
-// .cursor/mcp.json.
+// ReadCursor reads one Cursor config file: ~/.cursor/mcp.json with
+// ScopeGlobal, or a project .cursor/mcp.json with ScopeProject.
 //
-// Servers under the top-level "mcpServers" get scope. With ScopeProject they
-// also get projectPath; with ScopeGlobal projectPath is ignored and their
-// ProjectPath is "". Cursor files have no per-project section. A missing file
-// gives an empty Result. Errors never hold a config value.
+// The servers of the file get scope. With ScopeProject they get ProjectPath
+// projectPath. If projectPath is "", they get the directory of the file, or
+// for a file in a directory named ".cursor" the parent of that directory: the
+// servers of <project>/.cursor/mcp.json get <project>. With ScopeGlobal
+// projectPath is ignored and ProjectPath is "". Cursor files have no
+// "projects" section.
 //
-// With ScopeProject, the file is read below projectPath, or below the
-// directory of path if projectPath is "". See the package doc, Untrusted files
-// and Symlinks.
+// See the package doc, Reading configs.
 func ReadCursor(ctx context.Context, path string, scope Scope, projectPath string) Result {
-	servers, errs := parseJSONServers(ctx, path, ClientCursor, scope, projectPath, false)
+	servers, errs := parseJSONServers(ctx, jsonFile{
+		path:        path,
+		client:      ClientCursor,
+		scope:       scope,
+		projectPath: projectPath,
+	})
 	return Result{Servers: servers, Errors: errs}
 }

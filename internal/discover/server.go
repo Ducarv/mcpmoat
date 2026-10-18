@@ -86,9 +86,9 @@ type Server struct {
 	Source string
 
 	// Untrusted is true for a server from a project file, which a cloned
-	// repository can ship. inspect must not start an untrusted stdio server
-	// without an explicit opt-in from the user. See the package doc,
-	// Untrusted files.
+	// repository can ship. inspect must not start or connect to an untrusted
+	// server, stdio or remote, without an explicit opt-in from the user. See
+	// the package doc, Untrusted files.
 	Untrusted bool
 
 	// Transport is how mcpmoat talks to the server.

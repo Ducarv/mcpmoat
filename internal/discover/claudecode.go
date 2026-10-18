@@ -2,23 +2,27 @@ package discover
 
 import "context"
 
-// ReadClaudeCode reads one Claude Code config file: ~/.claude.json or a
-// project .mcp.json.
+// ReadClaudeCode reads one Claude Code config file: ~/.claude.json with
+// ScopeGlobal, or a project .mcp.json with ScopeProject.
 //
-// Servers under the top-level "mcpServers" get scope. With ScopeProject they
-// also get projectPath; with ScopeGlobal projectPath is ignored and their
-// ProjectPath is "". Servers under "projects.<path>.mcpServers" are read only
-// from a global file (scope ScopeGlobal, that is ~/.claude.json). They always
-// get ScopeProject, with ProjectPath set to <path>. In a project file
-// (.mcp.json) the "projects" key is ignored: that file comes from a cloned
-// repository, so it must not choose a ProjectPath. A missing file gives an
-// empty Result. Errors never hold a config value.
+// The servers of the top-level "mcpServers" object get scope. With
+// ScopeProject they get ProjectPath projectPath, or the directory of the file
+// if projectPath is "". With ScopeGlobal projectPath is ignored and
+// ProjectPath is "".
 //
-// With ScopeProject, the file is read below projectPath, or below the
-// directory of path if projectPath is "". See the package doc, Untrusted files
-// and Symlinks.
+// Only a global file has its "projects.<path>.mcpServers" servers read. They
+// get ScopeProject and ProjectPath <path>. A project .mcp.json comes from a
+// cloned repository, so its "projects" key is ignored: it must not choose a
+// ProjectPath.
+//
+// See the package doc, Reading configs.
 func ReadClaudeCode(ctx context.Context, path string, scope Scope, projectPath string) Result {
-	withProjects := scope == ScopeGlobal
-	servers, errs := parseJSONServers(ctx, path, ClientClaudeCode, scope, projectPath, withProjects)
+	servers, errs := parseJSONServers(ctx, jsonFile{
+		path:         path,
+		client:       ClientClaudeCode,
+		scope:        scope,
+		projectPath:  projectPath,
+		withProjects: scope == ScopeGlobal,
+	})
 	return Result{Servers: servers, Errors: errs}
 }

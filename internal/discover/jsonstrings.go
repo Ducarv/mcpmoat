@@ -20,7 +20,7 @@ import (
 //     (two sequences) are two names for the client, but both are "x" and two
 //     U+FFFD for encoding/json.
 //
-// parseJSONServers rejects such a file with reasonBadString. These functions
+// loadJSONFile rejects such a file with reasonBadString. These functions
 // find the position of the first bad string.
 
 // findBadServerString returns the byte offset in data of the first bad string

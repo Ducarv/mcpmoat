@@ -21,10 +21,10 @@ type reason string
 //
 // The constants are untyped on purpose. An untyped constant fits both the
 // reason type of the helpers and the string field FileError.Reason, which
-// callers outside the package read. Convert a reason value with string(r)
-// when you set FileError.Reason.
+// callers outside the package read. Do not set FileError.Reason by hand:
+// build every FileError with newFileError, which takes a reason.
 //
-// Add every new reason to allReasons in fileerror_test.go too.
+// Add every new reason to allReasons in helpers_internal_test.go too.
 const (
 	reasonCannotRead       = "cannot read file"
 	reasonNotRegular       = "not a regular file"
@@ -43,9 +43,10 @@ const (
 	reasonTooDeep          = "nesting is too deep"  // too deep nesting of [ ] and { }
 	reasonKeyTooLong       = "key path is too long" // a TOML key path with too many dotted parts
 	reasonTooManyServers   = "too many servers"
-	reasonAmbiguousKey     = "ambiguous key"     // two keys that differ only by letter case
-	reasonEmptyName        = "empty server name" // a server key that is the empty string
-	reasonBadString        = "invalid string"    // a lone UTF-16 surrogate escape or invalid UTF-8
+	reasonAmbiguousKey     = "ambiguous key"      // two keys that differ only by letter case
+	reasonEmptyName        = "empty server name"  // a server key that is the empty string
+	reasonEmptyProject     = "empty project path" // an empty key under "projects" in ~/.claude.json
+	reasonBadString        = "invalid string"     // a lone UTF-16 surrogate escape or invalid UTF-8
 )
 
 // FileError describes a problem with one config file or with one server entry
@@ -69,9 +70,9 @@ type FileError struct {
 	// context error for a canceled read. It is nil for parse problems.
 	Err error
 	// Untrusted is true when the problem is in a project file, which a cloned
-	// repository can ship. Such an error is not a harmless warning. The
-	// readers set it by scope, and Discover sets it on the canceled error of
-	// a project step. See the package doc, Untrusted files.
+	// repository can ship. The readers set it by scope, and Discover sets it
+	// on the canceled error of a project step. See the package doc, Untrusted
+	// files. Like every FileError, it means that servers may be missing.
 	Untrusted bool
 }
 
@@ -117,11 +118,53 @@ func (e *FileError) Unwrap() error {
 	return e.Err
 }
 
+// newFileError returns a FileError for the config file at path with the
+// fixed reason r. Every FileError of the package is built here, so its
+// Reason is always a fixed reason: the reason type does not accept the text
+// of a library error or a value from a config file without a conversion that
+// a reviewer can see.
+//
+// Set the other fields with the methods inProject, forServer and atOffset,
+// which chain:
+//
+//	newFileError(path, reasonBadEntry).inProject(key).forServer(name)
+//
+// Use readError for an OS error and canceledError for a context error. The
+// readers set Untrusted.
+func newFileError(path string, r reason) *FileError {
+	return &FileError{Path: path, Reason: string(r)}
+}
+
+// inProject sets ProjectPath to project, the projects.<path> key of
+// ~/.claude.json, and returns e. It changes e: call it only on a FileError
+// that newFileError just returned.
+func (e *FileError) inProject(project string) *FileError {
+	e.ProjectPath = project
+	return e
+}
+
+// forServer sets Server to name and returns e. It changes e: call it only on
+// a FileError that newFileError just returned.
+func (e *FileError) forServer(name string) *FileError {
+	e.Server = name
+	return e
+}
+
+// atOffset sets Line and Col to the position of the byte at offset in data
+// (see lineCol) and returns e. It changes e: call it only on a FileError that
+// newFileError just returned.
+func (e *FileError) atOffset(data []byte, offset int) *FileError {
+	e.Line, e.Col = lineCol(data, offset)
+	return e
+}
+
 // canceledError returns the FileError for a read of path that stopped because
 // the context ended. err is the context error, so errors.Is(fe,
 // context.Canceled) and errors.Is(fe, context.DeadlineExceeded) work.
 func canceledError(path string, err error) *FileError {
-	return &FileError{Path: path, Reason: reasonCanceled, Err: err}
+	fe := newFileError(path, reasonCanceled)
+	fe.Err = err
+	return fe
 }
 
 // errText returns the text of err for use in a FileError message.
@@ -270,15 +313,10 @@ func writeRuneEscape(b *strings.Builder, r rune) {
 // lineCol converts a byte offset in data to a 1-based line and a 1-based
 // column. The column counts bytes, not characters. An offset outside data is
 // clamped to the start or the end of data.
-func lineCol(data []byte, offset int64) (line, col int) {
-	if offset < 0 {
-		offset = 0
-	}
-	if offset > int64(len(data)) {
-		offset = int64(len(data))
-	}
+func lineCol(data []byte, offset int) (line, col int) {
+	offset = min(max(offset, 0), len(data))
 	before := data[:offset]
 	line = bytes.Count(before, []byte{'\n'}) + 1
-	col = int(offset) - (bytes.LastIndexByte(before, '\n') + 1) + 1
+	col = offset - (bytes.LastIndexByte(before, '\n') + 1) + 1
 	return line, col
 }

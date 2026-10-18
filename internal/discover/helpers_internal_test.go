@@ -266,6 +266,16 @@ func symlinkTo(t testing.TB, target, dir, rel string) string {
 	return link
 }
 
+// makeDir creates the directory dir/name and returns its path.
+func makeDir(t testing.TB, dir, name string) string {
+	t.Helper()
+	path := filepath.Join(dir, name)
+	if err := os.Mkdir(path, 0o700); err != nil {
+		t.Fatalf("create directory %s: %v", path, err)
+	}
+	return path
+}
+
 // skipOnWindows skips the test on Windows. The tests that call it use
 // symlinks, FIFOs, file modes or path errors that behave differently there.
 func skipOnWindows(t testing.TB) {
@@ -308,6 +318,7 @@ var allReasons = [...]reason{
 	reasonTooManyServers,
 	reasonAmbiguousKey,
 	reasonEmptyName,
+	reasonEmptyProject,
 	reasonBadString,
 }
 
@@ -416,6 +427,17 @@ func fixtureWants(wants []serverView, client Client, source, work string) []serv
 		out = append(out, w)
 	}
 	return out
+}
+
+// checkServersUntrusted fails the test if a server in servers has another
+// Untrusted value than want.
+func checkServersUntrusted(t testing.TB, servers []Server, want bool) {
+	t.Helper()
+	for _, s := range servers {
+		if s.Untrusted != want {
+			t.Errorf("server %q: Untrusted = %v, want %v", s.Name, s.Untrusted, want)
+		}
+	}
 }
 
 // checkErrorsUntrusted fails the test if an error in errs has another

@@ -8,6 +8,7 @@ import (
 	"go/parser"
 	"go/token"
 	"io/fs"
+	"math"
 	"strconv"
 	"strings"
 	"testing"
@@ -551,7 +552,7 @@ func TestLineCol(t *testing.T) {
 	tests := []struct {
 		name     string
 		data     string
-		offset   int64
+		offset   int
 		wantLine int
 		wantCol  int
 	}{
@@ -566,7 +567,7 @@ func TestLineCol(t *testing.T) {
 		{name: "last byte", data: data, offset: 9, wantLine: 4, wantCol: 2},
 		{name: "offset equals len", data: data, offset: 10, wantLine: 4, wantCol: 3},
 		{name: "offset past len is clamped", data: data, offset: 999, wantLine: 4, wantCol: 3},
-		{name: "huge offset is clamped", data: data, offset: 1 << 62, wantLine: 4, wantCol: 3},
+		{name: "huge offset is clamped", data: data, offset: math.MaxInt, wantLine: 4, wantCol: 3},
 		{name: "negative offset is clamped", data: data, offset: -5, wantLine: 1, wantCol: 1},
 		{name: "offset equals len after trailing newline", data: "a\n", offset: 2, wantLine: 2, wantCol: 1},
 		{name: "empty data offset 0", data: "", offset: 0, wantLine: 1, wantCol: 1},
@@ -584,6 +585,30 @@ func TestLineCol(t *testing.T) {
 					tt.data, tt.offset, line, col, tt.wantLine, tt.wantCol)
 			}
 		})
+	}
+}
+
+// TestNewFileError checks that newFileError sets only Path and Reason, and
+// that inProject, forServer and atOffset set their fields and return the same
+// FileError, so the calls chain.
+func TestNewFileError(t *testing.T) {
+	t.Parallel()
+	const path = "/home/u/.claude.json"
+	data := []byte("{\n  \"a\": 1\n}")
+
+	fe := newFileError(path, reasonBadEntry)
+	want := FileError{Path: path, Reason: reasonBadEntry}
+	if *fe != want {
+		t.Fatalf("newFileError = %+v, want %+v", *fe, want)
+	}
+
+	got := fe.inProject("/p").forServer("s").atOffset(data, 4)
+	if got != fe {
+		t.Error("the chain returned another FileError, want the same pointer")
+	}
+	want = FileError{Path: path, ProjectPath: "/p", Server: "s", Line: 2, Col: 3, Reason: reasonBadEntry}
+	if *fe != want {
+		t.Errorf("after the chain = %+v, want %+v", *fe, want)
 	}
 }
 

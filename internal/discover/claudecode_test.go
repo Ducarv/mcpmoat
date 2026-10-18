@@ -312,3 +312,44 @@ func TestReadClaudeCodeCanceled(t *testing.T) {
 		t.Errorf("canceled error wraps a PathError: %v", pe)
 	}
 }
+
+// TestReadClaudeCodeProjectPathFromFile checks that a project file read
+// without a projectPath gives its servers the directory of the file as
+// ProjectPath. Only the Cursor reader skips a ".cursor" directory: a Claude
+// Code .mcp.json is at the top of its project.
+func TestReadClaudeCodeProjectPathFromFile(t *testing.T) {
+	t.Parallel()
+
+	const content = `{"mcpServers": {"s": {"command": "x"}}}`
+
+	tests := []struct {
+		name    string
+		rel     string // the file below the temporary directory
+		wantRel string // the wanted ProjectPath below the temporary directory
+	}{
+		{name: "project file", rel: "proj/.mcp.json", wantRel: "proj"},
+		{name: "in a .cursor directory", rel: "proj/.cursor/.mcp.json", wantRel: "proj/.cursor"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			dir := t.TempDir()
+			path := writeFile(t, dir, tt.rel, []byte(content))
+
+			r := ReadClaudeCode(t.Context(), path, ScopeProject, "")
+
+			if len(r.Errors) != 0 {
+				t.Fatalf("errors = %v, want none", r.Errors)
+			}
+			if len(r.Servers) != 1 {
+				t.Fatalf("server names = %v, want [s]", serverNames(r.Servers))
+			}
+			want := filepath.Join(dir, filepath.FromSlash(tt.wantRel))
+			if s := r.Servers[0]; s.Scope != ScopeProject || s.ProjectPath != want || !s.Untrusted {
+				t.Errorf("server %q scope=%q projectPath=%q untrusted=%v, want %q, %q and true",
+					s.Name, s.Scope, s.ProjectPath, s.Untrusted, ScopeProject, want)
+			}
+		})
+	}
+}

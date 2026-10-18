@@ -22,14 +22,9 @@ const maxConfigSize = 32 << 20
 // keeps the 32 MiB cap because it holds chat history.
 const maxProjectConfigSize = 4 << 20
 
-// maxServersPerFile is the largest number of entries that one config file may
-// hold. An entry is a server, or a project in ~/.claude.json. A file can be
-// 32 MiB (maxConfigSize), and that is room for millions of tiny entries. Every
-// entry costs memory and time, so a file with more entries gets a "too many
-// servers" error and gives no servers. The cap bounds the result. It does not
-// stop the decode of the file: the readers decode the whole map of entries
-// before they count them, and the file size caps bound that memory. All
-// readers use it.
+// maxServersPerFile is the largest number of entries (servers, and projects
+// in ~/.claude.json) that one config file may hold. All readers use it. See
+// the package doc, Reading configs.
 const maxServersPerFile = 10000
 
 // readConfigFile reads the config file at path.
@@ -52,8 +47,7 @@ const maxServersPerFile = 10000
 // the path and the errno only, never file content, so they are safe to print.
 func readConfigFile(ctx context.Context, path string, maxSize int64, root string) (data []byte, found bool, fe *FileError) {
 	if err := ctx.Err(); err != nil {
-		fe = canceledError(path, err)
-		return nil, false, fe
+		return nil, false, canceledError(path, err)
 	}
 
 	// Open first, then check the open file. A check of the path before the
@@ -62,14 +56,10 @@ func readConfigFile(ctx context.Context, path string, maxSize int64, root string
 	// it; the type check below then rejects it. For a regular file the flag
 	// changes nothing.
 	var f *os.File
-	var err error
 	if root != "" {
 		f, fe = openInRoot(root, path)
 	} else {
-		f, err = os.OpenFile(path, os.O_RDONLY|syscall.O_NONBLOCK, 0) //nolint:gosec // G304: path is a config file chosen by discovery or --config.
-		if err != nil && !isMissing(err) {
-			fe = readError(path, reasonCannotRead, err)
-		}
+		f, fe = openPlain(path)
 	}
 	if fe != nil || f == nil {
 		// f is nil without an error when the file is missing.
@@ -101,6 +91,21 @@ func readConfigFile(ctx context.Context, path string, maxSize int64, root string
 		return nil, false, readError(path, reasonTooLarge, nil)
 	}
 	return data, true, nil
+}
+
+// openPlain opens path for reading, and follows symlinks. It returns a nil
+// file and a nil error when the file is missing (see isMissing), as
+// openInRoot does.
+func openPlain(path string) (*os.File, *FileError) {
+	f, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NONBLOCK, 0) //nolint:gosec // G304: path is a config file chosen by discovery or --config.
+	switch {
+	case err == nil:
+		return f, nil
+	case isMissing(err):
+		return nil, nil
+	default:
+		return nil, readError(path, reasonCannotRead, err)
+	}
 }
 
 // openInRoot opens path, which must be below the directory root, through
@@ -142,7 +147,9 @@ func openInRoot(root, path string) (*os.File, *FileError) {
 // readError returns the FileError of a read of path with the reason r and
 // the OS error err (nil for none).
 func readError(path string, r reason, err error) *FileError {
-	return &FileError{Path: path, Reason: string(r), Err: err}
+	fe := newFileError(path, r)
+	fe.Err = err
+	return fe
 }
 
 // isOSError reports whether err holds an OS error number.
