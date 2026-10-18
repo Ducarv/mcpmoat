@@ -76,9 +76,48 @@ func TestEscapeQuoted(t *testing.T) {
 	}
 }
 
+// TestEscapeBlankRunes checks the runes that strconv.Quote keeps as they are
+// but that show as nothing or change the rune before them. Escape quotes the
+// text and writes each such rune as \uXXXX or \UXXXXXXXX.
+func TestEscapeBlankRunes(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{name: "combining acute accent", in: "e\u0301", want: `"e\u0301"`},
+		{name: "Hangul filler", in: "a\u3164b", want: `"a\u3164b"`},
+		{name: "Hangul choseong filler", in: "\u115f", want: `"\u115f"`},
+		{name: "halfwidth Hangul filler", in: "\uffa0", want: `"\uffa0"`},
+		{name: "blank braille pattern", in: "x\u2800", want: `"x\u2800"`},
+		{name: "variation selector 16", in: "a\ufe0f", want: `"a\ufe0f"`},
+		{name: "variation selector supplement", in: "a\U000e0100", want: `"a\U000e0100"`},
+		{name: "enclosing circle", in: "1\u20dd", want: `"1\u20dd"`},
+		{name: "blank rune and control character", in: "\u3164\x1b", want: `"\u3164\x1b"`},
+		{name: "blank rune and invalid UTF-8", in: "\u3164\xff", want: `"\u3164\xff"`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got := report.Escape(tt.in)
+			if got != tt.want {
+				t.Errorf("Escape(%q) = %q, want %q", tt.in, got, tt.want)
+			}
+			if back, err := strconv.Unquote(got); err != nil || back != tt.in {
+				t.Errorf("Unquote(Escape(%q)) = %q, %v, want the input", tt.in, back, err)
+			}
+			assertSafe(t, tt.in, got)
+		})
+	}
+}
+
 // TestEscapeMatchesFileError checks that report.Escape and the unexported
-// displayText in internal/discover (used by FileError.Error) stay the same rule.
-// They are two copies, because discover must not import report.
+// displayPath and displayText in internal/discover (used by FileError.Error)
+// stay the same rule. displayText also cuts a long server name, so the inputs
+// here are short. They are two copies, because discover must not import
+// report.
 func TestEscapeMatchesFileError(t *testing.T) {
 	t.Parallel()
 
@@ -106,6 +145,11 @@ func TestEscapeMatchesFileError(t *testing.T) {
 		{name: "NUL", in: "a\x00b"},
 		{name: "DEL", in: "a\x7fb"},
 		{name: "combining mark", in: "e\u0301"},
+		{name: "Hangul filler", in: "a\u3164b"},
+		{name: "blank braille pattern", in: "\u2800"},
+		{name: "variation selector", in: "a\ufe0f"},
+		{name: "variation selector supplement", in: "a\U000e0100"},
+		{name: "blank rune and invalid UTF-8", in: "\u3164\xff"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -148,6 +192,7 @@ func FuzzEscape(f *testing.F) {
 	seeds := []string{
 		"", "plain", "a b", "caf\u00e9", "a\tb", "a\nb", "\x1b[31mred", "\u009b", "\u0085",
 		"\u202e", "\u200b", "\u00a0", "a\xffb", "a\xe3\x81", "a\x00b", "\"quoted\"", "\U0001F680",
+		"e\u0301", "\u3164", "\u2800", "a\ufe0f", "\U000e0100\xff",
 	}
 	for _, s := range seeds {
 		f.Add(s)
