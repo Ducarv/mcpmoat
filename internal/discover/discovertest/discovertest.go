@@ -38,11 +38,10 @@ func Canaries() []string {
 // enough to appear in unrelated output by chance. For example, "ab" is "6162"
 // in hex and "YWI" in base64, and a false positive would fail a good test.
 // Leaks searches for a shorter value only as written and Go-quoted.
+//
+// base64Forms needs minEncodedLen >= 8: see the comment in its loop. The
+// boundary cases in the tests (7 and 8 bytes) fail if this value changes.
 const minEncodedLen = 8
-
-// minBase64Core is the shortest base64 core that Leaks searches for. A shorter
-// core could match unrelated text by chance and give a false positive.
-const minBase64Core = 8
 
 // Leaks returns each non-empty secret found in output. Empty secrets are ignored.
 // Order follows secrets. Each secret appears at most once in the result.
@@ -51,14 +50,11 @@ const minBase64Core = 8
 //   - as written, always;
 //   - Go-quoted (strconv.Quote without the outer quotes), always;
 //   - hex, lower or upper case, only if the secret has at least
-//     minEncodedLen bytes;
+//     [minEncodedLen] bytes;
 //   - base64, standard ("+/") or URL-safe ("-_") alphabet, with or without "="
 //     padding, alone or embedded in a longer encoded string (for example HTTP
 //     Basic auth, base64("user:" + secret)), only if the secret has at least
-//     minEncodedLen bytes.
-//
-// A shorter secret is not searched for in hex or base64, because its encoded
-// forms are short enough to match unrelated output by chance.
+//     [minEncodedLen] bytes.
 //
 // Leaks is made for canary-style values (letters, digits, "-") like the
 // constants in this package. Use values of that style in fixtures.
@@ -110,7 +106,7 @@ func allEmpty(values []string) bool {
 }
 
 // forms returns every encoding of s that Leaks searches for. Values shorter
-// than minEncodedLen bytes get only the raw and Go-quoted forms.
+// than [minEncodedLen] bytes get only the raw and Go-quoted forms.
 func forms(s string) []string {
 	quoted := strconv.Quote(s)
 	out := []string{
@@ -128,7 +124,7 @@ func forms(s string) []string {
 }
 
 // base64Forms returns the base64 strings that show s inside any base64 output.
-// Leaks calls it only for values of at least minEncodedLen bytes.
+// Leaks calls it only for values of at least [minEncodedLen] bytes.
 //
 // Base64 turns each group of 3 input bytes into 4 output characters. Each
 // group is encoded on its own, so an output character depends only on the
@@ -155,17 +151,15 @@ func base64Forms(s string) []string {
 		// s encoded alone, as one whole base64 string.
 		out = append(out, enc.EncodeToString([]byte(s)))
 		for off := range 3 {
+			// No length guards are needed here, because len(s) >=
+			// minEncodedLen >= 8 and k <= 2. So each core has at least
+			// 2 full groups (6 bytes), which encode to at least 8
+			// characters. A core that short cannot match unrelated output
+			// by chance, and it is never empty. A smaller minEncodedLen
+			// would need guards again: an empty core matches every output.
 			k := (3 - off) % 3
-			if k >= len(s) {
-				continue
-			}
 			n := (len(s) - k) / 3 // number of full groups inside s
-			core := enc.EncodeToString([]byte(s[k : k+3*n]))
-			// Skip short cores. An empty core would match every output.
-			if len(core) < minBase64Core {
-				continue
-			}
-			out = append(out, core)
+			out = append(out, enc.EncodeToString([]byte(s[k:k+3*n])))
 		}
 	}
 	return out
