@@ -39,7 +39,12 @@ type step struct {
 	// path is used for the FileError when the context is canceled before the
 	// step runs.
 	path string
-	read func() Result
+	// untrusted is true for a project file from WorkDir. The reader marks its
+	// own errors. runSteps uses untrusted only for the canceled error that it
+	// makes before the step runs.
+	untrusted bool
+	// read reads the file with the context that runSteps passes.
+	read func(context.Context) Result
 }
 
 // Discover reads the MCP server configs of Claude Code, Cursor and Codex and
@@ -60,14 +65,15 @@ type step struct {
 //  5. Home/.codex/config.toml
 //
 // Steps 2 and 4 read project files that a cloned repository can ship. Their
-// servers and their errors have Untrusted set (see [Server.Untrusted] and
-// [FileError.Untrusted]), and a symlink that leaves WorkDir is refused.
+// servers and their errors have Untrusted set, and a symlink that leaves
+// WorkDir is refused. See the package doc, Untrusted files.
 //
 // If ctx is canceled, Discover adds one FileError with the reason "canceled"
 // and returns what it has. The error names the file that was being read, or
-// the next file if no read had started.
+// the next file if no read had started. When that file is step 2 or 4, the
+// error has Untrusted set.
 func Discover(ctx context.Context, opts Options) Result {
-	return runSteps(ctx, buildSteps(ctx, opts))
+	return runSteps(ctx, buildSteps(opts))
 }
 
 // runSteps runs the steps in order and joins their results. It stops at the
@@ -76,10 +82,12 @@ func runSteps(ctx context.Context, steps []step) Result {
 	var res Result
 	for _, s := range steps {
 		if err := ctx.Err(); err != nil {
-			res.Errors = append(res.Errors, canceledError(s.path, err))
+			fe := canceledError(s.path, err)
+			fe.Untrusted = s.untrusted
+			res.Errors = append(res.Errors, fe)
 			return res
 		}
-		r := s.read()
+		r := s.read(ctx)
 		res.Servers = append(res.Servers, r.Servers...)
 		res.Errors = append(res.Errors, r.Errors...)
 		// A reader reports its own canceled error when ctx ends during the read.
@@ -102,8 +110,8 @@ func hasCanceled(errs []*FileError) bool {
 
 // buildSteps lists the files to read, in order. Each step is a small closure
 // (a function that keeps the variables around it), so Discover can run all
-// steps with one loop.
-func buildSteps(ctx context.Context, opts Options) []step {
+// steps with one loop. runSteps passes the context to each step.
+func buildSteps(opts Options) []step {
 	// Clean the paths once. filepath.Clean("") returns ".", so an empty value
 	// must stay empty: it means "skip these files".
 	opts.Home = cleanDir(opts.Home)
@@ -113,13 +121,13 @@ func buildSteps(ctx context.Context, opts Options) []step {
 
 	if opts.Home != "" {
 		path := filepath.Join(opts.Home, ".claude.json")
-		steps = append(steps, step{path: path, read: func() Result {
+		steps = append(steps, step{path: path, read: func(ctx context.Context) Result {
 			return ReadClaudeCode(ctx, path, ScopeGlobal, "")
 		}})
 	}
 	if opts.WorkDir != "" {
 		path := filepath.Join(opts.WorkDir, ".mcp.json")
-		steps = append(steps, step{path: path, read: func() Result {
+		steps = append(steps, step{path: path, untrusted: true, read: func(ctx context.Context) Result {
 			return ReadClaudeCode(ctx, path, ScopeProject, opts.WorkDir)
 		}})
 	}
@@ -129,7 +137,7 @@ func buildSteps(ctx context.Context, opts Options) []step {
 	var homeCursor string
 	if opts.Home != "" {
 		homeCursor = filepath.Join(opts.Home, ".cursor", "mcp.json")
-		steps = append(steps, step{path: homeCursor, read: func() Result {
+		steps = append(steps, step{path: homeCursor, read: func(ctx context.Context) Result {
 			return ReadCursor(ctx, homeCursor, ScopeGlobal, "")
 		}})
 	}
@@ -142,7 +150,7 @@ func buildSteps(ctx context.Context, opts Options) []step {
 		// example /var and /private/var on macOS, or a case-insensitive file
 		// system), is not detected.
 		if path != homeCursor {
-			steps = append(steps, step{path: path, read: func() Result {
+			steps = append(steps, step{path: path, untrusted: true, read: func(ctx context.Context) Result {
 				return ReadCursor(ctx, path, ScopeProject, opts.WorkDir)
 			}})
 		}
@@ -150,7 +158,7 @@ func buildSteps(ctx context.Context, opts Options) []step {
 
 	if opts.Home != "" {
 		path := filepath.Join(opts.Home, ".codex", "config.toml")
-		steps = append(steps, step{path: path, read: func() Result {
+		steps = append(steps, step{path: path, read: func(ctx context.Context) Result {
 			return ReadCodex(ctx, path)
 		}})
 	}

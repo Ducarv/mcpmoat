@@ -141,9 +141,9 @@ func TestReadClaudeCodeCanaryMasking(t *testing.T) {
 	}
 }
 
-// TestReadClaudeCodeProjectPath checks that a top-level server of a global
-// file gets the projectPath of the call, while servers under "projects" keep
-// their own key.
+// TestReadClaudeCodeProjectPath checks that a global file ignores the
+// projectPath of the call: its top-level servers have no ProjectPath, and
+// servers under "projects" keep their own key.
 func TestReadClaudeCodeProjectPath(t *testing.T) {
 	t.Parallel()
 	home, _ := copyFixture(t, "claude-code", "valid")
@@ -157,10 +157,10 @@ func TestReadClaudeCodeProjectPath(t *testing.T) {
 		name, project string
 		scope         Scope
 	}{
-		// Sorted by (ProjectPath, Name): "/custom/dir" < "/work/alpha" < "/work/gamma".
-		{"filesystem", "/custom/dir", ScopeGlobal},
-		{"remote-http", "/custom/dir", ScopeGlobal},
-		{"remote-sse", "/custom/dir", ScopeGlobal},
+		// Sorted by (ProjectPath, Name): "" < "/work/alpha" < "/work/gamma".
+		{"filesystem", "", ScopeGlobal},
+		{"remote-http", "", ScopeGlobal},
+		{"remote-sse", "", ScopeGlobal},
 		{"alpha-tool", "/work/alpha", ScopeProject},
 		{"gamma-tool", "/work/gamma", ScopeProject},
 	}
@@ -195,8 +195,9 @@ func TestReadClaudeCodeProjectsKeyByScope(t *testing.T) {
 		want  []string
 	}{
 		{name: "project file ignores projects", scope: ScopeProject, want: []string{"top"}},
-		// Sorted by (ProjectPath, Name): "/attacker/chosen" < the directory.
-		{name: "global file reads projects", scope: ScopeGlobal, want: []string{"spoofed", "top"}},
+		// Sorted by (ProjectPath, Name): a global file ignores projectPath,
+		// so "top" has ProjectPath "", and "" < "/attacker/chosen".
+		{name: "global file reads projects", scope: ScopeGlobal, want: []string{"top", "spoofed"}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -247,12 +248,11 @@ func TestReadClaudeCodeErrorsAs(t *testing.T) {
 
 	for _, e := range r.Errors {
 		msg := e.Error()
-		wantPrefix := path + ": server " + e.Server + ": " + e.Reason
-		if msg != wantPrefix {
-			t.Errorf("Error() = %q, want %q", msg, wantPrefix)
-		}
-		if e.Server == "unknown-type" && strings.Contains(msg, "websocket") {
-			t.Errorf("Error() = %q, must not echo the transport type", msg)
+		// The exact compare also shows that the message does not echo a
+		// config value, for example the unknown transport type.
+		want := path + ": server " + e.Server + ": " + e.Reason
+		if msg != want {
+			t.Errorf("Error() = %q, want %q", msg, want)
 		}
 	}
 }

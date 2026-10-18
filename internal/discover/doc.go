@@ -100,6 +100,9 @@
 //     two different names could become one. The check covers the server
 //     entries and the project keys only: a bad string in another part of the
 //     file, for example the chat history of ~/.claude.json, is not an error.
+//   - A JSON null in a server entry is an error ("invalid server entry"):
+//     as the value of type, command, url, args, env or headers, as an
+//     element of args, or as a value in env or headers.
 //   - A file that holds only JSON whitespace (space, tab, CR and LF) gives no
 //     servers and no error. A file that holds only null is an error
 //     ("unexpected structure").
@@ -139,37 +142,50 @@
 //     it does not read $CODEX_HOME. To read another Codex file, call
 //     [ReadCodex] with an explicit path.
 //
+// For the same reason, the package does not read $CLAUDE_CONFIG_DIR: the
+// Claude Code file is always Home/.claude.json. To read another Claude Code
+// file, call [ReadClaudeCode] with an explicit path. When the user sets
+// $CODEX_HOME or $CLAUDE_CONFIG_DIR, the client reads another file than
+// Discover, so a scan can miss servers.
+//
 // # Symlinks
 //
 // For a global file, the readers follow symlinks, so the file can point to
 // any regular file that the user can read. An error never shows the content
 // of that file.
 //
-// A project file from the working directory comes from a cloned repository,
-// so the readers open it inside the project directory (with [os.Root]). A
-// symlink that stays inside the project is followed. A symlink that leads out
-// of the project, and every absolute symlink, is refused with the reason
-// "file is outside the project". Without this rule, a repository could make
-// mcpmoat read a file of the user, for example ~/.claude.json, as its own
-// project file.
+// A project file comes from a cloned repository, so the readers open it
+// inside its project directory (with [os.Root]). For [Discover], the project
+// directory is WorkDir. For [ReadClaudeCode] and [ReadCursor] with
+// ScopeProject, it is projectPath, or the directory of the file when
+// projectPath is empty. A symlink that stays inside the project directory is
+// followed. A symlink that leads out of it, every absolute symlink, and a
+// path that is not below it are refused with the reason "file is outside the
+// project". Without this rule, a repository could make mcpmoat read a file
+// of the user, for example ~/.claude.json, as its own project file.
 //
 // # Untrusted files
 //
-// The project files from the working directory (<WorkDir>/.mcp.json and
-// <WorkDir>/.cursor/mcp.json) are untrusted: a cloned repository can ship
-// them. Discover marks what it reads from them:
+// A project file (<WorkDir>/.mcp.json, <WorkDir>/.cursor/mcp.json, or a file
+// read with [ReadClaudeCode] or [ReadCursor] and ScopeProject) is untrusted:
+// a cloned repository can ship it. Its servers and errors are marked:
 //
-//   - Every [Server] from such a file has [Server.Untrusted] set. Package
-//     internal/inspect must not start an untrusted stdio server without an
-//     explicit opt-in from the user.
-//   - Every [FileError] about such a file has [FileError.Untrusted] set. An
-//     unreadable or refused project file can hide servers that the client
-//     still loads, so a caller must not treat the error as a harmless
-//     warning. The scan command exits with code 2 for it. An error about a
-//     global file stays a warning.
+//   - Every [Server] from such a file has [Server.Untrusted] set. Its command
+//     is not the user's choice, so package internal/inspect must not start
+//     an untrusted stdio server without an explicit opt-in from the user.
+//   - Every [FileError] about such a file has [FileError.Untrusted] set, a
+//     read error too. An unreadable or refused project file can hide servers
+//     that the client still loads, so a caller must not treat the error as a
+//     harmless warning. The scan command exits with code 2 for it. An error
+//     about a global file stays a warning.
+//
+// The JSON readers set Untrusted by scope: with ScopeProject they mark every
+// server and every error of the file. Discover sets it on the canceled error
+// that it adds when ctx ends before a project file is read.
 //
 // The user's own files are trusted: ~/.claude.json (also the servers under
-// its projects.<path> keys), ~/.cursor/mcp.json and the Codex file.
+// its projects.<path> keys, which Claude Code writes when the user adds a
+// server), ~/.cursor/mcp.json and the Codex file.
 //
 // # Working directory of a stdio server
 //

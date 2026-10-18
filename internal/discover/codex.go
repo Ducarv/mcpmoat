@@ -39,7 +39,7 @@ const maxTOMLSize = 256 << 10
 const codexServersKey = "mcp_servers"
 
 // The server keys that Codex knows. readCodex reads the first group (see
-// codexReadKeys) and ignores the second (see codexIgnoredKeys).
+// codexReads) and ignores the second (see codexIgnoredKeys).
 const (
 	codexKeyCommand     = "command"
 	codexKeyArgs        = "args"
@@ -59,25 +59,29 @@ const (
 	codexKeyToolTimeoutSec    = "tool_timeout_sec"
 )
 
-// codexReadKeys lists the server keys that readCodex reads. codexReads has
-// one entry for each of them (TestCodexKeys checks this). No code writes to
-// it or to codexIgnoredKeys.
-var codexReadKeys = [...]string{
-	codexKeyCommand, codexKeyArgs, codexKeyEnv, codexKeyURL, codexKeyHTTPHeaders, codexKeyCwd,
-}
-
 // codexIgnoredKeys lists the server keys that Codex knows and readCodex
-// ignores on purpose (see ReadCodex).
+// ignores on purpose (see ReadCodex). No code writes to it.
 var codexIgnoredKeys = [...]string{
 	codexKeyAuthEnvVar, codexKeyEnvHTTPHeaders, codexKeyEnvVars,
 	codexKeyEnabled, codexKeyStartupTimeoutSec, codexKeyToolTimeoutSec,
 }
 
-// codexKnownKeys returns every server key that Codex knows: the keys that
-// readCodex reads and the keys that it ignores. readCodex uses the list to
-// find keys that differ from a known key only by letter case.
-func codexKnownKeys() []string {
-	return slices.Concat(codexReadKeys[:], codexIgnoredKeys[:])
+// codexKnownKeys lists every server key that Codex knows: the keys in
+// codexReads and the keys in codexIgnoredKeys. readCodex uses it to find keys
+// that differ from a known key only by letter case. It is built once, when
+// the package loads, so codexReads stays the one list of the keys that
+// readCodex reads. No code writes to it.
+var codexKnownKeys = codexAllKeys()
+
+// codexAllKeys returns the keys of codexReads, in order, then the keys in
+// codexIgnoredKeys. It runs once, to build codexKnownKeys.
+func codexAllKeys() []string {
+	reads := codexReads(&codexEntry{})
+	keys := make([]string, 0, len(reads)+len(codexIgnoredKeys))
+	for _, r := range reads {
+		keys = append(keys, r.key)
+	}
+	return append(keys, codexIgnoredKeys[:]...)
 }
 
 // The TOML type names that md.Type returns. A table made only through a
@@ -91,7 +95,7 @@ const (
 )
 
 // codexEntry is the part of one [mcp_servers.<name>] table that readCodex
-// uses. decodeCodexEntry fills it from the exact keys in codexReadKeys.
+// uses. decodeCodexEntry fills it from the exact keys in codexReads.
 //
 // Env and HTTPHeaders are SecretMap values, and URL is a URL. The TOML
 // decoder calls their UnmarshalText methods, so the values are never held
@@ -114,8 +118,9 @@ type codexRead struct {
 	dest any
 }
 
-// codexReads returns one codexRead for each key in codexReadKeys, in the same
-// order, with pointers into e.
+// codexReads returns one codexRead for each server key that readCodex reads,
+// with pointers into e. It is the one list of these keys: codexKnownKeys is
+// built from it.
 func codexReads(e *codexEntry) []codexRead {
 	return []codexRead{
 		{key: codexKeyCommand, typ: tomlTypeString, dest: &e.Command},
@@ -127,8 +132,8 @@ func codexReads(e *codexEntry) []codexRead {
 	}
 }
 
-// ReadCodex reads one Codex CLI config file (~/.codex/config.toml). The file
-// may be at most maxTOMLSize bytes; a bigger file gives a FileError.
+// ReadCodex reads one Codex CLI config file (~/.codex/config.toml). See the
+// package doc for the limits on the file and the reasons for each error.
 //
 // It returns the servers in the [mcp_servers.<name>] tables, sorted by name.
 // Every server has ScopeGlobal, because Codex has one user-wide config. Other
@@ -164,15 +169,8 @@ func codexReads(e *codexEntry) []codexRead {
 // A missing file gives an empty Result. An empty file is valid TOML and gives
 // no servers. A file that is not valid TOML gives one FileError with the line
 // and column, and no servers. The line and column do not count a byte order
-// mark at the start of the file. A file that breaks a limit gives one
-// FileError and no servers too:
-//
-//   - nesting of [ ] and { } deeper than maxTOMLDepth levels: the reason is
-//     "nesting is too deep".
-//   - a key path with more than maxTOMLKeyParts dot-separated parts in all
-//     (the table header, the keys of the open inline tables and the key
-//     itself): the reason is "key path is too long".
-//   - more than maxServersPerFile servers: the reason is "too many servers".
+// mark at the start of the file. A file that breaks a limit (see the package
+// doc) gives one FileError and no servers too.
 //
 // A bad server entry gives one FileError that names the server; the other
 // servers are still returned. Errors for the whole file come first, then the
@@ -281,7 +279,7 @@ func readCodexServer(md *toml.MetaData, path, name string, raw toml.Primitive) (
 }
 
 // decodeCodexEntry decodes the raw table of the server called name. It reads
-// only the exact keys in codexReadKeys, and checks the TOML type of each one.
+// only the exact keys in codexReads, and checks the TOML type of each one.
 // It returns reasonAmbiguousKey for a key that differs from a known key only
 // by letter case, and reasonBadEntry for a value of the wrong type or for an
 // entry with both a command key and a url key.
@@ -296,7 +294,7 @@ func decodeCodexEntry(md *toml.MetaData, name string, raw toml.Primitive) (codex
 		// Do not use err.Error(): the TOML library can quote the input.
 		return codexEntry{}, reasonBadEntry
 	}
-	if hasCaseVariant(fields, codexKnownKeys()...) {
+	if hasCaseVariant(fields, codexKnownKeys...) {
 		return codexEntry{}, reasonAmbiguousKey
 	}
 	// Codex refuses an entry that sets both command and url ("url is not

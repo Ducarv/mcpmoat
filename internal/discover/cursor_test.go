@@ -164,3 +164,22 @@ func TestReadCursorIgnoresProjects(t *testing.T) {
 		})
 	}
 }
+
+// TestReadCursorGlobalIgnoresProjectPath checks that a global file ignores the
+// projectPath of the call: its servers have no ProjectPath.
+func TestReadCursorGlobalIgnoresProjectPath(t *testing.T) {
+	t.Parallel()
+	path := writeFile(t, t.TempDir(), "mcp.json", []byte(`{"mcpServers": {"s": {"command": "x"}}}`))
+
+	res := ReadCursor(t.Context(), path, ScopeGlobal, "/custom/dir")
+	if len(res.Errors) != 0 {
+		t.Fatalf("Errors = %v, want none", res.Errors)
+	}
+	if len(res.Servers) != 1 {
+		t.Fatalf("server names = %v, want [s]", serverNames(res.Servers))
+	}
+	if s := res.Servers[0]; s.Scope != ScopeGlobal || s.ProjectPath != "" || s.Untrusted {
+		t.Errorf("server %q scope=%q projectPath=%q untrusted=%v, want %q, \"\" and false",
+			s.Name, s.Scope, s.ProjectPath, s.Untrusted, ScopeGlobal)
+	}
+}

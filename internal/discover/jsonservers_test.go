@@ -202,10 +202,14 @@ func TestParseJSONServersBadEntries(t *testing.T) {
 			wantErrors:  []errWant{{Server: "bad", Reason: reasonBadEntry}},
 		},
 		{
-			name: "null env is an empty env",
+			// The client gets the real null, not an empty env, so the entry
+			// is refused (NFR-04).
+			name: "null env",
 			input: `{"mcpServers": {
-				"nullenv": {"command": "x", "env": null}}}`,
-			wantServers: []serverView{{Name: "nullenv", Transport: TransportStdio, Command: "x"}},
+				"bad":  {"command": "x", "env": null},
+				"good": {"command": "y"}}}`,
+			wantServers: []serverView{{Name: "good", Transport: TransportStdio, Command: "y"}},
+			wantErrors:  []errWant{{Server: "bad", Reason: reasonBadEntry}},
 		},
 		{
 			name: "string entry",
@@ -259,6 +263,83 @@ func TestParseJSONServersBadEntries(t *testing.T) {
 				t.Errorf("servers = %+v, want %+v", got, tt.wantServers)
 			}
 			checkFileErrors(t, path, errs, tt.wantErrors)
+		})
+	}
+}
+
+// TestParseJSONServersNullFields checks that an explicit null in a known field
+// of an entry makes the entry invalid. encoding/json would turn the null into
+// "" or an empty Secret, or treat the key as absent, but the client gets the
+// real null: it refuses the entry, or Node turns the null into the text
+// "null". A server built from the decoded value could then run another
+// command line than the client (NFR-04).
+func TestParseJSONServersNullFields(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name  string
+		entry string
+		// want is the server of a valid entry. It is nil when the entry
+		// must give reasonBadEntry.
+		want *serverView
+	}{
+		{name: "null type", entry: `{"type": null, "command": "x"}`},
+		{name: "null command", entry: `{"command": null}`},
+		{name: "null command with a url", entry: `{"command": null, "url": "https://example.com/mcp"}`},
+		{name: "null url", entry: `{"url": null}`},
+		{name: "null url with a command", entry: `{"command": "x", "url": null}`},
+		{name: "null args", entry: `{"command": "x", "args": null}`},
+		{name: "null args item", entry: `{"command": "x", "args": ["a", null]}`},
+		{name: "null first args item", entry: `{"command": "x", "args": [null, "a"]}`},
+		{name: "null args item with whitespace", entry: "{\"command\": \"x\", \"args\": [ \"a\" ,\n\tnull\r\n ]}"},
+		{name: "null env", entry: `{"command": "x", "env": null}`},
+		{name: "null env value", entry: `{"command": "x", "env": {"A": "1", "K": null}}`},
+		{name: "null headers", entry: `{"url": "https://example.com/mcp", "headers": null}`},
+		{name: "null headers value", entry: `{"url": "https://example.com/mcp", "headers": {"Authorization": null}}`},
+		{
+			name:  "text null is a value",
+			entry: `{"command": "x", "args": ["null"], "env": {"K": "null"}}`,
+			want: &serverView{
+				Name: "s", Transport: TransportStdio, Command: "x",
+				Args: []string{"null"}, Env: map[string]string{"K": "null"},
+			},
+		},
+		{
+			name:  "null in an unknown key is ignored",
+			entry: `{"command": "x", "args": ["a"], "other": null, "list": [null], "map": {"k": null}}`,
+			want:  &serverView{Name: "s", Transport: TransportStdio, Command: "x", Args: []string{"a"}},
+		},
+		{
+			name:  "remote entry without nulls",
+			entry: `{"type": "sse", "url": "https://example.com/sse", "headers": {"Authorization": "Bearer t"}}`,
+			want: &serverView{
+				Name: "s", Transport: TransportSSE, URL: "https://example.com/sse",
+				Headers: map[string]string{"Authorization": "Bearer t"},
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			input := `{"mcpServers": {"s": ` + tt.entry + `}}`
+			path := writeFile(t, t.TempDir(), "config.json", []byte(input))
+
+			servers, errs := parseJSONServers(t.Context(), path, ClientCursor, ScopeGlobal, "", false)
+
+			if tt.want == nil {
+				if len(servers) != 0 {
+					t.Errorf("servers = %v, want none", serverNames(servers))
+				}
+				checkFileErrors(t, path, errs, []errWant{{Server: "s", Reason: reasonBadEntry}})
+				return
+			}
+			checkFileErrors(t, path, errs, nil)
+			want := *tt.want
+			want.Client, want.Scope, want.Source = ClientCursor, ScopeGlobal, path
+			if got := viewsOf(servers); !reflect.DeepEqual(got, []serverView{want}) {
+				t.Errorf("servers = %+v, want %+v", got, []serverView{want})
+			}
 		})
 	}
 }
@@ -1500,114 +1581,6 @@ func TestParseJSONServersProjectPathInErrors(t *testing.T) {
 	})
 }
 
-// jsonFixtureCase is one fixture test of a JSON reader (ReadClaudeCode or
-// ReadCursor). The fixture directory testdata/discover/<client>/<name> has a
-// home directory with the global file and a work directory with the project
-// file.
-//
-// The want servers are static. runJSONFixtureCases fills in Client, Source,
-// Scope, ProjectPath and Untrusted:
-//   - a global server (home) gets ScopeGlobal, or ScopeProject when the want
-//     sets ProjectPath (a projects.<path> server of ~/.claude.json), and
-//     Untrusted false;
-//   - a project server (work) gets ScopeProject, the work directory as
-//     ProjectPath, and Untrusted true.
-type jsonFixtureCase struct {
-	name string
-	// hideValues is set for fixtures that hold canaries or are malformed
-	// next to a canary. On a mismatch the test then prints only the server
-	// names, never the values.
-	hideValues bool
-	// canaryFiles are the fixture files, relative to the fixture directory
-	// and with forward slashes, that must hold every canary. The leak checks
-	// only mean something if the input holds the canaries.
-	canaryFiles []string
-
-	home, work         []serverView
-	homeErrs, workErrs []errWant
-}
-
-// jsonReader is the signature of ReadClaudeCode and ReadCursor.
-type jsonReader func(ctx context.Context, path string, scope Scope, projectPath string) Result
-
-// jsonFixtureFiles names the config files of one client inside the home and
-// work directories of a fixture, with forward slashes.
-type jsonFixtureFiles struct {
-	client  Client
-	fixture string // the directory under testdata/discover
-	home    string
-	work    string
-}
-
-// runJSONFixtureCases runs every case with read, on a copy of the fixture.
-// It checks the servers, the errors, Untrusted on every error, and that no
-// result holds a canary.
-func runJSONFixtureCases(t *testing.T, files jsonFixtureFiles, read jsonReader, cases []jsonFixtureCase) {
-	t.Helper()
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			ctx := t.Context()
-			if len(tc.canaryFiles) > 0 {
-				assertFixtureFilesHaveCanaries(t, fixtureDir(t, files.fixture, tc.name), tc.canaryFiles...)
-			}
-			home, work := copyFixture(t, files.fixture, tc.name)
-			homePath := filepath.Join(home, filepath.FromSlash(files.home))
-			workPath := filepath.Join(work, filepath.FromSlash(files.work))
-
-			global := read(ctx, homePath, ScopeGlobal, "")
-			project := read(ctx, workPath, ScopeProject, work)
-
-			checkServers(t, "global", global.Servers, fixtureWants(tc.home, files.client, homePath, ""), tc.hideValues)
-			checkServers(t, "project", project.Servers, fixtureWants(tc.work, files.client, workPath, work), tc.hideValues)
-			checkFileErrors(t, homePath, global.Errors, tc.homeErrs)
-			checkFileErrors(t, workPath, project.Errors, tc.workErrs)
-			checkErrorsUntrusted(t, global.Errors, false)
-			checkErrorsUntrusted(t, project.Errors, true)
-
-			// No result may hold a canary, in any form.
-			for _, r := range []Result{global, project} {
-				assertNoLeakServers(t, r.Servers)
-				assertNoLeakErrors(t, r.Errors)
-			}
-		})
-	}
-}
-
-// fixtureWants returns copies of wants with Client, Source, Scope, ProjectPath
-// and Untrusted filled in (see jsonFixtureCase). work is "" for the global
-// file and the work directory for the project file.
-func fixtureWants(wants []serverView, client Client, source, work string) []serverView {
-	out := make([]serverView, 0, len(wants))
-	for _, w := range wants {
-		w.Client = client
-		w.Source = source
-		switch {
-		case work != "":
-			w.Scope = ScopeProject
-			w.ProjectPath = work
-			w.Untrusted = true
-		case w.ProjectPath != "":
-			w.Scope = ScopeProject
-		default:
-			w.Scope = ScopeGlobal
-		}
-		out = append(out, w)
-	}
-	return out
-}
-
-// checkErrorsUntrusted fails the test if an error in errs has another
-// Untrusted value than want.
-func checkErrorsUntrusted(t testing.TB, errs []*FileError, want bool) {
-	t.Helper()
-	for i, e := range errs {
-		if e.Untrusted != want {
-			t.Errorf("errors[%d] (%s): Untrusted = %v, want %v", i, e.Reason, e.Untrusted, want)
-		}
-	}
-}
-
 // checkServersUntrusted fails the test if a server in servers has another
 // Untrusted value than want.
 func checkServersUntrusted(t testing.TB, servers []Server, want bool) {
@@ -1914,8 +1887,9 @@ func makeDir(t testing.TB, dir, name string) string {
 }
 
 // TestReadJSONProjectRoot checks that a project file is read only from below
-// its projectPath. A cloned repository could otherwise make mcpmoat read a
-// file of the user, for example ~/.claude.json, as its own project file.
+// its projectPath, or from below its own directory when projectPath is empty.
+// A cloned repository could otherwise make mcpmoat read a file of the user,
+// for example ~/.claude.json, as its own project file.
 func TestReadJSONProjectRoot(t *testing.T) {
 	t.Parallel()
 	skipOnWindows(t)
@@ -1937,7 +1911,8 @@ func TestReadJSONProjectRoot(t *testing.T) {
 		// file in outside. It returns the path to read.
 		setup func(t *testing.T, work, outside, rel string) string
 		scope Scope
-		// noRoot passes an empty projectPath.
+		// noRoot passes an empty projectPath. The root is then the
+		// directory of the file.
 		noRoot     bool
 		wantReason string // "" means the file is read and gives server "s"
 	}{
@@ -1996,11 +1971,46 @@ func TestReadJSONProjectRoot(t *testing.T) {
 			wantReason: reasonOutsideProject,
 		},
 		{
-			// Without a projectPath there is no directory to check, but the
-			// file is still untrusted.
 			name: "symlink out without a projectPath",
 			setup: func(t *testing.T, work, outside, rel string) string {
 				return symlinkTo(t, writeFile(t, outside, "config.json", []byte(content)), work, rel)
+			},
+			scope:      ScopeProject,
+			noRoot:     true,
+			wantReason: reasonOutsideProject,
+		},
+		{
+			name: "relative symlink out without a projectPath",
+			setup: func(t *testing.T, work, outside, rel string) string {
+				target := writeFile(t, outside, "config.json", []byte(content))
+				link := filepath.Join(work, filepath.FromSlash(rel))
+				relTarget, err := filepath.Rel(filepath.Dir(link), target)
+				if err != nil {
+					t.Fatalf("relative path: %v", err)
+				}
+				return symlinkTo(t, relTarget, work, rel)
+			},
+			scope:      ScopeProject,
+			noRoot:     true,
+			wantReason: reasonOutsideProject,
+		},
+		{
+			name: "absolute symlink in the file's directory without a projectPath",
+			setup: func(t *testing.T, work, _, rel string) string {
+				dir := filepath.Dir(filepath.Join(work, filepath.FromSlash(rel)))
+				target := writeFile(t, dir, "real.json", []byte(content))
+				return symlinkTo(t, target, work, rel)
+			},
+			scope:      ScopeProject,
+			noRoot:     true,
+			wantReason: reasonOutsideProject,
+		},
+		{
+			name: "relative symlink in the file's directory without a projectPath",
+			setup: func(t *testing.T, work, _, rel string) string {
+				dir := filepath.Dir(filepath.Join(work, filepath.FromSlash(rel)))
+				writeFile(t, dir, "real.json", []byte(content))
+				return symlinkTo(t, "real.json", work, rel)
 			},
 			scope:  ScopeProject,
 			noRoot: true,
@@ -2045,19 +2055,4 @@ func TestReadJSONProjectRoot(t *testing.T) {
 			})
 		}
 	}
-}
-
-// symlinkTo creates a symlink at dir/rel (rel with forward slashes) that
-// points to target, and returns the path of the link. It creates the parent
-// directories of the link.
-func symlinkTo(t testing.TB, target, dir, rel string) string {
-	t.Helper()
-	link := filepath.Join(dir, filepath.FromSlash(rel))
-	if err := os.MkdirAll(filepath.Dir(link), 0o700); err != nil {
-		t.Fatalf("create directory for %s: %v", link, err)
-	}
-	if err := os.Symlink(target, link); err != nil {
-		t.Fatalf("symlink %s: %v", link, err)
-	}
-	return link
 }

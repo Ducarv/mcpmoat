@@ -5,9 +5,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"testing"
 
 	"github.com/Ducarv/mcpmoat/internal/discover/discovertest"
@@ -24,11 +24,8 @@ func assertDiscoverNoErrors(t testing.TB, r Result) {
 // assertDiscoverNames fails the test if the server names in r are not exactly want.
 func assertDiscoverNames(t testing.TB, r Result, want []string) {
 	t.Helper()
-	got := serverNames(r.Servers)
-	if len(want) == 0 && len(got) == 0 {
-		return
-	}
-	if !reflect.DeepEqual(got, want) {
+	// slices.Equal treats a nil slice and an empty slice as equal.
+	if got := serverNames(r.Servers); !slices.Equal(got, want) {
 		t.Errorf("server names = %v, want %v", got, want)
 	}
 }
@@ -285,11 +282,7 @@ func TestDiscoverUntrustedErrors(t *testing.T) {
 			setup: func(t *testing.T, home, work string) string {
 				skipOnWindows(t)
 				target := writeFile(t, home, ".claude.json", []byte(`{}`))
-				link := filepath.Join(work, ".mcp.json")
-				if err := os.Symlink(target, link); err != nil {
-					t.Fatalf("symlink: %v", err)
-				}
-				return link
+				return symlinkTo(t, target, work, ".mcp.json")
 			},
 			wantReason:    reasonOutsideProject,
 			wantUntrusted: true,
@@ -413,6 +406,81 @@ func TestDiscoverCanceled(t *testing.T) {
 	if want := filepath.Join(home, ".claude.json"); e.Path != want {
 		t.Errorf("Path = %q, want %q", e.Path, want)
 	}
+	if e.Untrusted {
+		t.Error("Untrusted = true, want false for ~/.claude.json")
+	}
+}
+
+// TestDiscoverCanceledProjectStep checks that the canceled error that
+// Discover adds before a WorkDir project file is read has Untrusted set.
+func TestDiscoverCanceledProjectStep(t *testing.T) {
+	t.Parallel()
+	_, work := copyFixture(t, "all", "full")
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+
+	// Without Home, the first step is <WorkDir>/.mcp.json.
+	r := Discover(ctx, Options{WorkDir: work})
+
+	if len(r.Servers) != 0 {
+		t.Errorf("got servers %v, want none", serverNames(r.Servers))
+	}
+	if len(r.Errors) != 1 {
+		t.Fatalf("got %d errors, want 1: %v", len(r.Errors), r.Errors)
+	}
+	e := r.Errors[0]
+	if want := filepath.Join(work, ".mcp.json"); e.Path != want || e.Reason != reasonCanceled {
+		t.Errorf("error = {Path: %q, Reason: %q}, want {Path: %q, Reason: %q}", e.Path, e.Reason, want, reasonCanceled)
+	}
+	if !e.Untrusted {
+		t.Error("Untrusted = false, want true for a WorkDir project file")
+	}
+	if !errors.Is(e, context.Canceled) {
+		t.Errorf("errors.Is(err, context.Canceled) = false, err = %v", e)
+	}
+}
+
+// TestRunStepsCanceledBeforeStep checks the canceled error that runSteps adds
+// when ctx ends between two steps: it names the next step and takes its
+// untrusted mark. The first step cancels ctx but reports no error itself.
+func TestRunStepsCanceledBeforeStep(t *testing.T) {
+	t.Parallel()
+
+	for _, untrusted := range []bool{false, true} {
+		t.Run(fmt.Sprintf("untrusted=%v", untrusted), func(t *testing.T) {
+			t.Parallel()
+			ctx, cancel := context.WithCancel(t.Context())
+			defer cancel()
+			secondRan := false
+			steps := []step{
+				{path: "first", read: func(context.Context) Result {
+					cancel()
+					return Result{Servers: []Server{{Name: "done"}}}
+				}},
+				{path: "second", untrusted: untrusted, read: func(context.Context) Result {
+					secondRan = true
+					return Result{}
+				}},
+			}
+
+			r := runSteps(ctx, steps)
+
+			if secondRan {
+				t.Error("the second step ran after the cancel")
+			}
+			assertDiscoverNames(t, r, []string{"done"})
+			if len(r.Errors) != 1 {
+				t.Fatalf("got %d errors, want 1: %v", len(r.Errors), r.Errors)
+			}
+			e := r.Errors[0]
+			if e.Path != "second" || e.Reason != reasonCanceled {
+				t.Errorf("error = %v, want the canceled error of the second step", e)
+			}
+			if e.Untrusted != untrusted {
+				t.Errorf("Untrusted = %v, want %v", e.Untrusted, untrusted)
+			}
+		})
+	}
 }
 
 // TestRunStepsCanceledDuringRead checks that a cancel during a read gives one
@@ -424,14 +492,14 @@ func TestRunStepsCanceledDuringRead(t *testing.T) {
 	defer cancel()
 	secondRan := false
 	steps := []step{
-		{path: "first", read: func() Result {
+		{path: "first", read: func(ctx context.Context) Result {
 			cancel()
 			return Result{
 				Servers: []Server{{Name: "partial"}},
 				Errors:  []*FileError{{Path: "first", Reason: reasonCanceled, Err: ctx.Err()}},
 			}
 		}},
-		{path: "second", read: func() Result {
+		{path: "second", read: func(context.Context) Result {
 			secondRan = true
 			return Result{}
 		}},
