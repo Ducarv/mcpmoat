@@ -145,6 +145,11 @@ func TestSameOrigin(t *testing.T) {
 		{name: "scheme case, both upper", a: &url.URL{Scheme: "HTTPS", Host: "example.com"}, b: &url.URL{Scheme: "Https", Host: "example.com"}, want: true},
 		{name: "host case", a: u("http://EXAMPLE.com"), b: u("http://example.com"), want: true},
 		{name: "host case, mixed both sides", a: u("http://ExAmPlE.CoM:8080"), b: u("http://eXaMpLe.cOm:8080"), want: true},
+		// Go skips HTTP_PROXY for "localhost" only, so the case of this
+		// name changes the network path.
+		{name: "LOCALHOST is not localhost", a: u("http://LOCALHOST:8080"), b: u("http://localhost:8080"), want: false},
+		{name: "localhost is not LOCALHOST", a: u("http://localhost:8080"), b: u("http://LOCALHOST:8080"), want: false},
+		{name: "LOCALHOST and LocalHost", a: u("http://LOCALHOST:8080"), b: u("http://LocalHost:8080"), want: true},
 		// strings.EqualFold folds these Unicode letters to ASCII ones, but
 		// IDNA keeps them apart, so they are other hosts.
 		{name: "Kelvin sign is not K", a: &url.URL{Scheme: "http", Host: "\u212aey.example"}, b: u("http://key.example"), want: false},
@@ -1065,6 +1070,77 @@ func TestCheckRedirectSessionDelete(t *testing.T) {
 				t.Errorf("fallback blockedErr() = %v, want %v", got, tt.wantBlocked)
 			}
 		})
+	}
+}
+
+// TestRoundTripSessionDeleteBody checks that the body limits of a session
+// DELETE answer write to no record either. A GET answer with the same body
+// still records errBodyTooLarge in the fallback record.
+func TestRoundTripSessionDeleteBody(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		method      string
+		wantBlocked error
+	}{
+		{method: http.MethodDelete},
+		{method: http.MethodGet, wantBlocked: errBodyTooLarge},
+	}
+	for _, tt := range tests {
+		t.Run(tt.method, func(t *testing.T) {
+			t.Parallel()
+			base := hcRoundTripFunc(func(req *http.Request) (*http.Response, error) {
+				return hcResponse(req, http.StatusOK, strings.Repeat("x", 64), nil), nil
+			})
+			client, ev, err := hcNew(hcURL(t, "http://example.com"), nil, base, hcUA, 8)
+			if err != nil {
+				t.Fatal(err)
+			}
+			req, err := http.NewRequestWithContext(t.Context(), tt.method, "http://example.com/", nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			resp, err := client.Do(req)
+			if err != nil {
+				t.Fatalf("client.Do(%s) error = %v", tt.method, err)
+			}
+			_, readErr := io.ReadAll(resp.Body)
+			_ = resp.Body.Close()
+			if !errors.Is(readErr, errBodyTooLarge) {
+				t.Fatalf("read body error = %v, want errBodyTooLarge", readErr)
+			}
+			if got := ev.fallback.blockedErr(); !errors.Is(got, tt.wantBlocked) || (got == nil) != (tt.wantBlocked == nil) {
+				t.Errorf("fallback blockedErr() = %v, want %v", got, tt.wantBlocked)
+			}
+		})
+	}
+}
+
+// TestCheckRedirectLocalhostCase checks that a redirect from a localhost
+// endpoint to LOCALHOST is refused. Go sends LOCALHOST through HTTP_PROXY,
+// so the redirected request could carry the secrets to a proxy, and the
+// endpoint got no cleartext warning.
+func TestCheckRedirectLocalhostCase(t *testing.T) {
+	t.Parallel()
+	stub := &hcStub{respond: func(req *http.Request) *http.Response {
+		return hcResponse(req, http.StatusTemporaryRedirect, "", http.Header{"Location": {"http://LOCALHOST:8080/x"}})
+	}}
+	client, _, err := hcNew(hcURL(t, "http://localhost:8080"), map[string]string{"X-Api-Key": "k"}, stub, hcUA, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req, err := http.NewRequestWithContext(t.Context(), http.MethodPost, "http://localhost:8080/mcp", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp, err := client.Do(req)
+	if resp != nil {
+		_ = resp.Body.Close()
+	}
+	if !errors.Is(err, errCrossOriginRedirect) {
+		t.Fatalf("client.Do() error = %v, want errCrossOriginRedirect", err)
+	}
+	if stub.count() != 1 {
+		t.Errorf("base got %d requests, want 1: the LOCALHOST target must not be requested", stub.count())
 	}
 }
 

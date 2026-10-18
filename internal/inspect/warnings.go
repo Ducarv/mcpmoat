@@ -82,8 +82,8 @@ func hasURLSecrets(rawQuery, raw string) bool {
 //
 // Only an exact match counts. "localhost.example.com" and
 // "127.0.0.1.nip.io" are DNS names that can point anywhere, so they are not
-// loopback. For the name "localhost", the pinned dialer dials loopback
-// addresses only, whatever the resolver answers (see
+// loopback. For the name "localhost" in any case, the pinned dialer dials
+// loopback addresses only, whatever the resolver answers (see
 // pinnedDialer.DialContext).
 func isLoopbackHost(host string) bool {
 	if host == "localhost" {

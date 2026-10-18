@@ -48,8 +48,10 @@ type requestRecorder struct {
 // changes no more. The SDK can still send a request on the context of a
 // returned call: after a call fails because ctx ended, it sends
 // notifications/cancelled on context.WithoutCancel of that ctx, and so with
-// the same record. The answer to that request must not change the label of
-// the error that the call returned.
+// the same record. An answer to that request that comes after finish cannot
+// change the label of the error that the call returned. The SDK starts that
+// request just before the call returns, so an answer within that short
+// window can still be recorded; it needs a full network round trip first.
 func (r *requestRecorder) finish() {
 	r.finished.Store(true)
 }

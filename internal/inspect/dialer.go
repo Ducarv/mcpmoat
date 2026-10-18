@@ -180,12 +180,14 @@ func (d *pinnedDialer) DialContext(ctx context.Context, network, address string)
 		return nil, err
 	}
 	addrs = usableAddrs(addrs)
-	if isLoopbackHost(host) {
+	if isLoopbackHost(key) {
 		// The name "localhost" counts as loopback without a lookup, so a
 		// plain http:// URL to it gets no cleartext warning (see
 		// cleartextWarnings), and Go sends it past HTTP_PROXY. Make that
 		// true whatever the resolver answers, for example from a changed
-		// /etc/hosts: dial loopback addresses only.
+		// /etc/hosts: dial loopback addresses only. The check uses key, so
+		// it covers every case of the name: "LOCALHOST" shares the pin of
+		// "localhost", and that pin must be a loopback address too.
 		addrs = loopbackAddrs(addrs)
 	}
 	if len(addrs) == 0 {

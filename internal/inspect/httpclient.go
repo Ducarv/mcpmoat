@@ -177,8 +177,8 @@ func newHTTPClient(cfg httpClientConfig) (*http.Client, *httpEvents, error) {
 		// fallback record. The SDK also closes the session when Connect
 		// fails, before Remote classifies that error, and a server could then
 		// answer the DELETE with a redirect to change the label of the real
-		// failure (see RoundTrip, which skips the DELETE status for the same
-		// reason).
+		// failure (see RoundTrip, which gives a session DELETE a record that
+		// nothing reads, for the same reason).
 		CheckRedirect: func(req *http.Request, via []*http.Request) error {
 			var err error
 			switch {
@@ -388,6 +388,17 @@ type headerTransport struct {
 func (t *headerTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 	// Get the record once: every step below writes to the same one.
 	rec := t.events.recorderFor(req)
+	if isSessionDelete(req) {
+		// The SDK sends DELETE only to close the session, and it ignores the
+		// answer. It closes the session after a failed Connect too, before
+		// Remote classifies that error, and a server that never kept the
+		// session answers 404. The outcome of that DELETE must not change
+		// the label of the error that made the SDK close, so its status, its
+		// transport error and its body limits go to a record that nothing
+		// reads. isSessionDelete also catches a DELETE that a redirect
+		// turned into a GET.
+		rec = &requestRecorder{}
+	}
 	if !sameOrigin(req.URL, t.endpoint) {
 		// The RoundTripper contract says that RoundTrip closes the request
 		// body, also when it returns an error.
@@ -419,29 +430,17 @@ func (t *headerTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 		out.SetBasicAuth(t.user.Username(), password)
 	}
 
-	// The SDK sends DELETE only to close the session, and it ignores the
-	// answer. It closes the session after a failed initialize too, and a
-	// server that never kept the session answers 404. The outcome of that
-	// DELETE must not change the label of the error that made the SDK close.
-	// isSessionDelete also catches a DELETE that a redirect turned into a
-	// GET.
-	record := !isSessionDelete(out)
-
 	resp, err := t.base.RoundTrip(out)
 	if err != nil {
 		// No response came back. Clear an older status, so that it cannot
 		// outrank this transport error in classify.
-		if record {
-			rec.recordNoResponse()
-		}
+		rec.recordNoResponse()
 		// Return the error as is. classify unwraps the *url.Error that the
 		// http.Client adds.
 		return nil, err
 	}
 
-	if record {
-		rec.recordResponse(resp)
-	}
+	rec.recordResponse(resp)
 	if resp.Body != nil {
 		resp.Body = &cappedBody{
 			r:         resp.Body,
@@ -490,6 +489,11 @@ func isFollowedRedirect(resp *http.Response) bool {
 // port. Scheme and host name compare without case. A missing port is the
 // default port of the scheme (80 for http, 443 for https). A nil URL is never
 // the same origin.
+//
+// One exception: the host names must also agree on isLoopbackHost. Go skips
+// HTTP_PROXY for "localhost" but not for "LOCALHOST", so a request to
+// LOCALHOST from a localhost endpoint can carry the secrets to a proxy
+// without the cleartext warning that the endpoint did not get.
 func sameOrigin(u, origin *url.URL) bool {
 	if u == nil || origin == nil {
 		return false
@@ -499,6 +503,9 @@ func sameOrigin(u, origin *url.URL) bool {
 		return false
 	}
 	if !equalFoldASCII(u.Hostname(), origin.Hostname()) {
+		return false
+	}
+	if isLoopbackHost(u.Hostname()) != isLoopbackHost(origin.Hostname()) {
 		return false
 	}
 	return portOrDefault(u, scheme) == portOrDefault(origin, scheme)

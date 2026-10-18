@@ -247,14 +247,16 @@ func TestPinnedDialerDialContext(t *testing.T) {
 			wantLookups: []string{"ip"},
 		},
 		{
-			// LOCALHOST is not loopback by name (Go sends it through a
-			// proxy), so it is dialled like any other name.
-			name: "LOCALHOST dials like any name",
+			// LOCALHOST shares the pin of localhost (the key folds the
+			// case), so it must dial loopback addresses only too. Otherwise
+			// a later localhost dial would reuse a non-loopback pin.
+			name: "LOCALHOST dials loopback only and shares the pin",
 			answers: []pdAnswer{
 				{addrs: pdAddrs(t, "192.0.2.7", "127.0.0.1")},
 			},
 			steps: []pdStep{
-				{address: "LOCALHOST:8080", wantDials: []string{"192.0.2.7:8080"}, wantConn: "192.0.2.7:8080"},
+				{address: "LOCALHOST:8080", wantDials: []string{"127.0.0.1:8080"}, wantConn: "127.0.0.1:8080"},
+				{address: "localhost:8080", wantDials: []string{"127.0.0.1:8080"}, wantConn: "127.0.0.1:8080"},
 			},
 			wantLookups: []string{"ip"},
 		},
