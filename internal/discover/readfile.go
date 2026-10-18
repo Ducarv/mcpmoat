@@ -6,6 +6,7 @@ import (
 	"io"
 	"io/fs"
 	"os"
+	"syscall"
 )
 
 // maxConfigSize is the largest config file that discovery reads: 32 MiB.
@@ -30,22 +31,23 @@ const maxServersPerFile = 10000
 // readConfigFile reads the config file at path.
 //
 // It returns found=false and no error when the file does not exist. A dangling
-// symlink counts as missing. Every other problem comes back as a *FileError.
+// symlink counts as missing, and so does a path whose parent is not a
+// directory (ENOTDIR): no config file can exist below a regular file. Every other problem comes back as a *FileError.
 //
-// maxSize is a parameter, not a global variable, so tests can use a small
-// limit. Production code passes maxConfigSize.
+// maxSize is a parameter, not a global variable, so each reader passes its
+// own limit and tests can use a small one.
 //
 // The OS errors stored in FileError.Err are *fs.PathError values. They hold
 // the path and the errno only, never file content, so they are safe to print.
 func readConfigFile(ctx context.Context, path string, maxSize int64) (data []byte, found bool, fe *FileError) {
 	if err := ctx.Err(); err != nil {
-		return nil, false, &FileError{Path: path, Reason: reasonCanceled, Err: err}
+		return nil, false, canceledError(path, err)
 	}
 
 	// os.Stat follows symlinks, so a symlink to a regular file is accepted.
 	info, err := os.Stat(path)
 	if err != nil {
-		if errors.Is(err, fs.ErrNotExist) {
+		if isMissing(err) {
 			return nil, false, nil
 		}
 		return nil, false, &FileError{Path: path, Reason: reasonCannotRead, Err: err}
@@ -65,7 +67,7 @@ func readConfigFile(ctx context.Context, path string, maxSize int64) (data []byt
 
 	f, err := os.Open(path) //nolint:gosec // G304: path is a config file chosen by discovery or --config.
 	if err != nil {
-		if errors.Is(err, fs.ErrNotExist) {
+		if isMissing(err) {
 			// The file was removed after Stat. Treat it as missing.
 			return nil, false, nil
 		}
@@ -86,4 +88,10 @@ func readConfigFile(ctx context.Context, path string, maxSize int64) (data []byt
 		return nil, false, &FileError{Path: path, Reason: reasonTooLarge}
 	}
 	return data, true, nil
+}
+
+// isMissing reports whether err means that no file exists at the path: the
+// path does not exist, or a parent in the path is not a directory (ENOTDIR).
+func isMissing(err error) bool {
+	return errors.Is(err, fs.ErrNotExist) || errors.Is(err, syscall.ENOTDIR)
 }

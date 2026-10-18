@@ -72,7 +72,7 @@ func runSteps(ctx context.Context, steps []step) Result {
 	var res Result
 	for _, s := range steps {
 		if err := ctx.Err(); err != nil {
-			res.Errors = append(res.Errors, &FileError{Path: s.path, Reason: reasonCanceled, Err: err})
+			res.Errors = append(res.Errors, canceledError(s.path, err))
 			return res
 		}
 		r := s.read()

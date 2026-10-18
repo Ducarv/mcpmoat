@@ -11,9 +11,8 @@ import (
 )
 
 // Fixed reasons for a FileError. They are plain text and never contain a value
-// from a config file, so an error message cannot leak a secret.
-//
-// fuzz_test.go keeps a list of these reasons (knownReasons); update it when you add one.
+// from a config file, so an error message cannot leak a secret. Add every new
+// reason to allReasons too.
 const (
 	reasonCannotRead       = "cannot read file"
 	reasonNotRegular       = "not a regular file"
@@ -30,7 +29,34 @@ const (
 	reasonCanceled         = "canceled"
 	reasonTooDeep          = "nesting is too deep" // too deep nesting, or a key with too many dotted parts
 	reasonTooManyServers   = "too many servers"
+	reasonAmbiguousKey     = "ambiguous key"     // two keys that differ only by letter case
+	reasonEmptyName        = "empty server name" // a server key that is the empty string
+	reasonBadString        = "invalid string"    // a lone UTF-16 surrogate escape
 )
+
+// allReasons lists every reason constant. It is an array, not a slice, so it
+// is a value that no code can change. Tests use it to check that a FileError
+// has a known reason.
+var allReasons = [...]string{
+	reasonCannotRead,
+	reasonNotRegular,
+	reasonTooLarge,
+	reasonInvalidJSON,
+	reasonInvalidTOML,
+	reasonBadShape,
+	reasonBadServers,
+	reasonBadEntry,
+	reasonUnknownTransport,
+	reasonNoCommandOrURL,
+	reasonStdioNoCommand,
+	reasonRemoteNoURL,
+	reasonCanceled,
+	reasonTooDeep,
+	reasonTooManyServers,
+	reasonAmbiguousKey,
+	reasonEmptyName,
+	reasonBadString,
+}
 
 // FileError describes a problem with one config file or with one server entry
 // in it. Its message holds the file path, an optional position, an optional
@@ -38,6 +64,9 @@ const (
 type FileError struct {
 	// Path is the config file path.
 	Path string
+	// ProjectPath is the projects.<path> key of ~/.claude.json that the
+	// entry came from. It is empty otherwise.
+	ProjectPath string
 	// Server is the server name. It is empty for a problem with the whole file.
 	Server string
 	// Line is the 1-based line of the problem, or 0 if unknown.
@@ -54,8 +83,8 @@ type FileError struct {
 var _ error = (*FileError)(nil)
 
 // Error returns the message in the form
-// "<path>[:<line>[:<col>]]: [server <name>: ]<reason>[: <Err>]".
-// Path and server name are untrusted text, so displayText quotes them when
+// "<path>[:<line>[:<col>]]: [project <path>: ][server <name>: ]<reason>[: <Err>]".
+// Path, project path and server name are untrusted text, so displayText quotes them when
 // they hold unprintable characters.
 func (e *FileError) Error() string {
 	var b strings.Builder
@@ -69,6 +98,11 @@ func (e *FileError) Error() string {
 		}
 	}
 	b.WriteString(": ")
+	if e.ProjectPath != "" {
+		b.WriteString("project ")
+		b.WriteString(displayText(e.ProjectPath))
+		b.WriteString(": ")
+	}
 	if e.Server != "" {
 		b.WriteString("server ")
 		b.WriteString(displayText(e.Server))
@@ -80,6 +114,13 @@ func (e *FileError) Error() string {
 		b.WriteString(errText(e.Err))
 	}
 	return b.String()
+}
+
+// canceledError returns the FileError for a read of path that stopped because
+// the context ended. err is the context error, so errors.Is(fe,
+// context.Canceled) and errors.Is(fe, context.DeadlineExceeded) work.
+func canceledError(path string, err error) *FileError {
+	return &FileError{Path: path, Reason: reasonCanceled, Err: err}
 }
 
 // Unwrap returns the underlying error (Err), so errors.Is and errors.As work.

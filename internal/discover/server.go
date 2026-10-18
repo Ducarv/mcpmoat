@@ -97,6 +97,12 @@ type Server struct {
 	// doc, Secrets).
 	Args Args
 
+	// Dir is the working directory for TransportStdio when the config sets
+	// one (Codex cwd), as written. Empty means the config sets none; inspect
+	// must then not run a relative command or argument from its own
+	// directory.
+	Dir string
+
 	// Env holds the environment variables for TransportStdio. The values
 	// print as Mask; Env.Keys gives the names (see the package doc, Secrets).
 	Env SecretMap

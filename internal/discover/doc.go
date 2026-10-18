@@ -92,11 +92,20 @@
 //     wins. The clients do the same.
 //   - For Claude Code, the projects key is read only from a global file
 //     (~/.claude.json); a project .mcp.json cannot add servers for other paths.
+//   - A JSON string with a lone UTF-16 surrogate escape (for example
+//     "\ud800" with no low surrogate after it) in a server entry (the server
+//     name and all keys and values of the entry) or in a project key is an
+//     error ("invalid string"), and the file gives no servers. It has no
+//     valid UTF-8 form, so two names could become one. The check covers the
+//     server entries and the project keys only: a lone surrogate in another
+//     part of the file, for example the chat history of ~/.claude.json, is
+//     not an error.
 //
 // All readers:
 //
 //   - A field that does not belong to the transport is dropped. A stdio server
-//     keeps command, args and env. A remote server keeps url and headers.
+//     keeps command, args, env and, for Codex, cwd (as [Server.Dir]). A
+//     remote server keeps url and headers.
 //   - A file that is not a regular file (for example a directory or a pipe) is
 //     rejected. The readers follow symlinks, so a project file can point to any
 //     regular file that the user can read. An error never shows the content of
@@ -104,8 +113,11 @@
 //   - A file larger than 32 MiB (~/.claude.json and the other global files),
 //     4 MiB (project files: .mcp.json and .cursor/mcp.json) or 256 KiB (Codex
 //     TOML) is rejected.
-//   - A file with more than 10,000 servers, or more than 10,000 projects, is
-//     rejected.
+//   - A file with more than 10,000 entries in all (servers and projects
+//     counted together) is rejected and gives no servers.
+//   - Keys are matched exactly: "Command" is not "command". A key that
+//     differs from a known key only by letter case is an error (the clients
+//     match keys exactly). The reason is "ambiguous key".
 //   - Codex TOML with nesting deeper than 16 levels, or a key path with more
 //     than 16 dotted parts in all, is rejected. The path counts the parts of the
 //     table header, of each open inline table key and of the key itself.
