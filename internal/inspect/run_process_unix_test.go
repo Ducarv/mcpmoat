@@ -3,11 +3,11 @@
 package inspect_test
 
 import (
-	"cmp"
 	"context"
 	"errors"
 	"fmt"
-	"slices"
+	"runtime"
+	"strings"
 	"testing"
 	"time"
 
@@ -16,9 +16,47 @@ import (
 )
 
 // These tests run Run against real child processes (the helper modes of
-// helperprocess_unix_test.go). They measure wall time, so none of them calls
-// t.Parallel: other tests in the process would slow them down and skew the
-// numbers.
+// helperprocess_unix_test.go). They measure wall time, and
+// TestRunNoGoroutineLeak counts the goroutines of the whole test binary, so
+// none of them calls t.Parallel: other tests in the process would slow them
+// down and skew the numbers. A test that never calls t.Parallel runs alone.
+//
+// The order of the outcomes is checked with fakes in run_test.go
+// (TestRunOrder), which covers every tie-breaker and many input orders.
+
+// namedMode is a fixture server: a unique name and a helper mode.
+type namedMode struct{ name, mode string }
+
+// helperServers returns one helper server per entry.
+func helperServers(t *testing.T, modes ...namedMode) []discover.Server {
+	t.Helper()
+	servers := make([]discover.Server, 0, len(modes))
+	for _, m := range modes {
+		servers = append(servers, helperServer(t, m.name, m.mode))
+	}
+	return servers
+}
+
+// runModes runs one helper server per entry through inspect.Run and returns
+// the outcomes indexed by server name. Names must be unique.
+func runModes(t *testing.T, opts inspect.Options, insp inspect.Inspector, modes ...namedMode) map[string]inspect.Outcome {
+	t.Helper()
+	return byName(t, mustRun(t.Context(), t, helperServers(t, modes...), opts, insp))
+}
+
+// byName indexes outcomes by server name. It fails the test if two outcomes
+// have the same name.
+func byName(t *testing.T, outcomes []inspect.Outcome) map[string]inspect.Outcome {
+	t.Helper()
+	m := make(map[string]inspect.Outcome, len(outcomes))
+	for _, o := range outcomes {
+		if _, dup := m[o.Server.Name]; dup {
+			t.Fatalf("duplicate outcome for server %q", o.Server.Name)
+		}
+		m[o.Server.Name] = o
+	}
+	return m
+}
 
 // TestRunTenSlowServersConcurrently is the integration test for NFR-03: ten
 // servers that each need 1s to start must finish in well under 15s.
@@ -28,27 +66,19 @@ func TestRunTenSlowServersConcurrently(t *testing.T) {
 	}
 
 	const count = 10
-	servers := make([]discover.Server, 0, count)
+	modes := make([]namedMode, 0, count)
 	for i := range count {
-		servers = append(servers, helperServer(t, fmt.Sprintf("slow-%02d", i), "slow"))
+		modes = append(modes, namedMode{fmt.Sprintf("slow-%02d", i), "slow"})
 	}
 	opts := inspect.Options{Timeout: 10 * time.Second, Concurrency: 4}
 
 	start := time.Now()
-	outcomes, err := inspect.Run(t.Context(), servers, opts, execInspector{})
+	got := runModes(t, opts, execInspector{}, modes...)
 	elapsed := time.Since(start)
 	t.Logf("%d slow servers, concurrency %d: elapsed %s", count, opts.Concurrency, elapsed)
-	if err != nil {
-		t.Fatalf("Run() error = %v, want nil", err)
-	}
 
-	if len(outcomes) != count {
-		t.Fatalf("len(outcomes) = %d, want %d", len(outcomes), count)
-	}
-	for _, o := range outcomes {
-		if o.Status != inspect.StatusOK || o.Err != nil {
-			t.Errorf("server %q: Status = %q, Err = %v, want %q and nil error", o.Server.Name, o.Status, o.Err, inspect.StatusOK)
-		}
+	for _, o := range got {
+		checkStatus(t, o, inspect.StatusOK)
 	}
 
 	// Hard limit from NFR-03.
@@ -64,82 +94,25 @@ func TestRunTenSlowServersConcurrently(t *testing.T) {
 	}
 }
 
-// procOrderKey is the part of a server that the sort order is defined on.
-type procOrderKey struct {
-	client discover.Client
-	source string
-	name   string
-}
+// TestRunHangTimesOut checks that a server that never answers ends with
+// StatusTimeout after about opts.Timeout, and that Run returns by itself.
+func TestRunHangTimesOut(t *testing.T) {
+	opts := inspect.Options{Timeout: time.Second, Concurrency: 1}
 
-func compareProcOrderKeys(a, b procOrderKey) int {
-	return cmp.Or(
-		cmp.Compare(a.client, b.client),
-		cmp.Compare(a.source, b.source),
-		cmp.Compare(a.name, b.name),
-	)
-}
+	start := time.Now()
+	got := runModes(t, opts, execInspector{}, namedMode{"hang", "hang"})
+	elapsed := time.Since(start)
 
-// TestRunOrderStableAcrossRuns checks that the order of the outcomes does not
-// depend on the order of the input servers.
-func TestRunOrderStableAcrossRuns(t *testing.T) {
-	// "crash" exits at once, so this test is fast. Every server ends with
-	// StatusFailed, but this test checks only the order.
-	mk := func(client discover.Client, source, name string) discover.Server {
-		s := helperServer(t, name, "crash")
-		s.Client = client
-		s.Source = source
-		return s
+	o := got["hang"]
+	checkStatus(t, o, inspect.StatusTimeout)
+	if !errors.Is(o.Err, context.DeadlineExceeded) {
+		t.Errorf("errors.Is(Err, context.DeadlineExceeded) = false, Err = %v", o.Err)
 	}
-	servers := []discover.Server{
-		mk(discover.ClientCursor, "/home/u/.cursor/mcp.json", "zeta"),
-		mk(discover.ClientClaudeCode, "/proj/b/.mcp.json", "alpha"),
-		mk(discover.ClientCursor, "/home/u/.cursor/mcp.json", "alpha"),
-		mk(discover.ClientClaudeCode, "/proj/a/.mcp.json", "mid"),
-		mk(discover.ClientClaudeCode, "/proj/a/.mcp.json", "alpha"),
-		mk(discover.ClientCursor, "/proj/c/.cursor/mcp.json", "beta"),
-		mk(discover.ClientClaudeCode, "/proj/b/.mcp.json", "beta"),
-		mk(discover.ClientCursor, "/home/u/.cursor/mcp.json", "mid"),
+	if elapsed < opts.Timeout {
+		t.Errorf("Run took %s, want at least the timeout %s", elapsed, opts.Timeout)
 	}
-
-	// Fixed permutations of the indexes 0..7: no random numbers, so the test
-	// is the same on every run.
-	permutations := [][]int{
-		{0, 1, 2, 3, 4, 5, 6, 7},
-		{7, 6, 5, 4, 3, 2, 1, 0},
-		{3, 0, 6, 1, 7, 4, 2, 5},
-	}
-
-	opts := inspect.Options{Timeout: 10 * time.Second, Concurrency: 4}
-	var first []procOrderKey
-	for i, perm := range permutations {
-		input := make([]discover.Server, 0, len(perm))
-		for _, idx := range perm {
-			input = append(input, servers[idx])
-		}
-
-		outcomes, err := inspect.Run(t.Context(), input, opts, execInspector{})
-		if err != nil {
-			t.Fatalf("permutation %d: Run() error = %v, want nil", i, err)
-		}
-		if len(outcomes) != len(servers) {
-			t.Fatalf("permutation %d: len(outcomes) = %d, want %d", i, len(outcomes), len(servers))
-		}
-
-		keys := make([]procOrderKey, 0, len(outcomes))
-		for _, o := range outcomes {
-			keys = append(keys, procOrderKey{client: o.Server.Client, source: o.Server.Source, name: o.Server.Name})
-		}
-
-		if !slices.IsSortedFunc(keys, compareProcOrderKeys) {
-			t.Errorf("permutation %d: outcomes are not sorted by Client, Source, Name: %v", i, keys)
-		}
-		if first == nil {
-			first = keys
-			continue
-		}
-		if !slices.Equal(keys, first) {
-			t.Errorf("permutation %d: order = %v, want the same as permutation 0: %v", i, keys, first)
-		}
+	if limit := opts.Timeout + inspect.KillWaitDelay + processTreeSlack; elapsed > limit {
+		t.Errorf("Run took %s, want at most %s", elapsed, limit)
 	}
 }
 
@@ -150,23 +123,19 @@ func TestRunMixedIsolation(t *testing.T) {
 		t.Skip("skipping the wall-time test in short mode")
 	}
 
-	want := map[string]inspect.Status{
-		"hang":   inspect.StatusTimeout,
-		"crash":  inspect.StatusFailed,
-		"slow-1": inspect.StatusOK,
-		"slow-2": inspect.StatusOK,
-		"slow-3": inspect.StatusOK,
+	servers := map[string]struct {
+		mode string
+		want inspect.Status
+	}{
+		"hang":   {mode: "hang", want: inspect.StatusTimeout},
+		"crash":  {mode: "crash", want: inspect.StatusFailed},
+		"slow-1": {mode: "slow", want: inspect.StatusOK},
+		"slow-2": {mode: "slow", want: inspect.StatusOK},
+		"slow-3": {mode: "slow", want: inspect.StatusOK},
 	}
-	modes := map[string]string{
-		"hang":   "hang",
-		"crash":  "crash",
-		"slow-1": "slow",
-		"slow-2": "slow",
-		"slow-3": "slow",
-	}
-	servers := make([]discover.Server, 0, len(modes))
-	for name, mode := range modes {
-		servers = append(servers, helperServer(t, name, mode))
+	modes := make([]namedMode, 0, len(servers))
+	for name, s := range servers {
+		modes = append(modes, namedMode{name, s.mode})
 	}
 
 	// A slow server needs 1s of work plus the start cost of the test binary,
@@ -175,20 +144,21 @@ func TestRunMixedIsolation(t *testing.T) {
 	const timeout = 5 * time.Second
 	opts := inspect.Options{Timeout: timeout, Concurrency: 5}
 
-	// Run must not hang. The bound is the timeout, the 2s WaitDelay of the
+	// Run must not hang. The bound is the timeout, the WaitDelay of the
 	// process-group kill and 5s of slack.
-	limit := timeout + 2*time.Second + 5*time.Second
+	limit := timeout + inspect.KillWaitDelay + 5*time.Second
 
+	// The goroutine only calls Run. The checks stay in the test goroutine,
+	// because t.Fatal must not be called from another goroutine.
+	input := helperServers(t, modes...)
 	type result struct {
 		outcomes []inspect.Outcome
 		err      error
-		elapsed  time.Duration
 	}
 	done := make(chan result, 1)
 	go func() {
-		start := time.Now()
-		outcomes, err := inspect.Run(t.Context(), servers, opts, execInspector{})
-		done <- result{outcomes: outcomes, err: err, elapsed: time.Since(start)}
+		outcomes, err := inspect.Run(t.Context(), input, opts, execInspector{})
+		done <- result{outcomes: outcomes, err: err}
 	}()
 
 	var res result
@@ -197,41 +167,70 @@ func TestRunMixedIsolation(t *testing.T) {
 	case <-time.After(limit):
 		t.Fatalf("Run() did not return within %s", limit)
 	}
-	t.Logf("mixed run: elapsed %s", res.elapsed)
-
 	if res.err != nil {
 		t.Fatalf("Run() error = %v, want nil", res.err)
 	}
-	if len(res.outcomes) != len(want) {
-		t.Fatalf("len(outcomes) = %d, want %d", len(res.outcomes), len(want))
+	if len(res.outcomes) != len(servers) {
+		t.Fatalf("Run() returned %d outcomes, want %d", len(res.outcomes), len(servers))
 	}
+	got := byName(t, res.outcomes)
 
-	seen := make(map[string]bool, len(want))
-	for _, o := range res.outcomes {
-		name := o.Server.Name
-		wantStatus, ok := want[name]
+	for name, s := range servers {
+		o, ok := got[name]
 		if !ok {
-			t.Errorf("unexpected outcome for server %q", name)
+			t.Errorf("no outcome for server %q", name)
 			continue
 		}
-		if seen[name] {
-			t.Errorf("duplicate outcome for server %q", name)
-		}
-		seen[name] = true
-
-		if o.Status != wantStatus {
-			t.Errorf("server %q: Status = %q, want %q (Err = %v)", name, o.Status, wantStatus, o.Err)
-		}
-		if (wantStatus == inspect.StatusOK) != (o.Err == nil) {
-			t.Errorf("server %q: Err = %v, want nil only for %q", name, o.Err, inspect.StatusOK)
-		}
-		if wantStatus == inspect.StatusTimeout && !errors.Is(o.Err, context.DeadlineExceeded) {
+		checkStatus(t, o, s.want)
+		timedOut := errors.Is(o.Err, context.DeadlineExceeded)
+		if s.want == inspect.StatusTimeout && !timedOut {
 			t.Errorf("server %q: Err = %v, want it to wrap context.DeadlineExceeded", name, o.Err)
 		}
-	}
-	for name := range want {
-		if !seen[name] {
-			t.Errorf("no outcome for server %q", name)
+		if s.want == inspect.StatusFailed && timedOut {
+			t.Errorf("server %q: Err = %v wraps DeadlineExceeded, want a plain failure", name, o.Err)
 		}
 	}
+}
+
+// TestRunNoGoroutineLeak checks that Run leaves no goroutine behind after a
+// mix of a hang, a crash and a slow server.
+func TestRunNoGoroutineLeak(t *testing.T) {
+	baseline := runtime.NumGoroutine()
+
+	opts := inspect.Options{Timeout: time.Second, Concurrency: 3}
+	got := runModes(t, opts, execInspector{},
+		namedMode{"hang", "hang"},
+		namedMode{"crash", "crash"},
+		namedMode{"slow", "slow"},
+	)
+	// Make sure the run did what the test needs: all three paths ran.
+	checkStatus(t, got["hang"], inspect.StatusTimeout)
+	checkStatus(t, got["crash"], inspect.StatusFailed)
+	// "slow" needs about 1s plus start-up time, so under -race it can hit the
+	// 1s timeout. Either result is fine for a leak check.
+	if s := got["slow"].Status; s != inspect.StatusOK && s != inspect.StatusTimeout {
+		t.Errorf("slow: Status = %q, want ok or timeout", s)
+	}
+
+	// The exec package and the runtime stop their own goroutines (pipe copiers,
+	// the context watcher) a moment after Wait returns. A bounded poll is the
+	// only way to see that. This is a leak check, not synchronisation.
+	deadline := time.Now().Add(5 * time.Second)
+	for runtime.NumGoroutine() > baseline {
+		if time.Now().After(deadline) {
+			buf := make([]byte, 1<<16)
+			buf = buf[:runtime.Stack(buf, true)]
+			t.Fatalf("goroutines = %d, want at most the baseline %d\n%s", runtime.NumGoroutine(), baseline, trimStacks(string(buf)))
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+// trimStacks keeps a goroutine dump short enough for a test log.
+func trimStacks(s string) string {
+	const limit = 6000
+	if len(s) > limit {
+		return strings.TrimSpace(s[:limit]) + "\n... (truncated)"
+	}
+	return s
 }

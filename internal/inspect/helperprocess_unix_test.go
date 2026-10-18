@@ -56,30 +56,51 @@ func helperMain(args []string) int {
 	case "slow":
 		// This sleep is simulated start-up work inside the fixture. It is not
 		// test synchronisation.
-		time.Sleep(1 * time.Second)
+		time.Sleep(time.Second)
 		fmt.Println("ready")
 		return 0
 	case "grandchild":
-		exe, err := os.Executable()
-		if err != nil {
-			fmt.Fprintln(os.Stderr, "helper: executable:", err)
-			return 1
-		}
-		// Plain exec.Command, not CommandContext: the grandchild must live on
-		// unless the kill of the whole process group reaches it. The child
-		// inherits the environment, so it also runs in helper mode.
-		gc := exec.Command(exe, "hang") //nolint:gosec // G204: the helper starts its own test binary as a fixture grandchild
-		if err := gc.Start(); err != nil {
-			fmt.Fprintln(os.Stderr, "helper: start grandchild:", err)
-			return 1
-		}
-		// os.Stdout is not buffered, so the parent sees the line at once. We
-		// do not Wait: the grandchild must outlive nothing but the group kill.
-		fmt.Printf("PID %d\n", gc.Process.Pid)
-		return hangForever()
+		// A grandchild that stays in the process group. Its stdout is
+		// /dev/null (exec.Command with a nil Stdout).
+		return startGrandchild(nil)
+	case "escape":
+		// A hostile grandchild: it leaves the process group with a new
+		// session, so the group kill misses it, and it keeps the stdout pipe
+		// of the server open.
+		return startGrandchild(func(gc *exec.Cmd) {
+			gc.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
+			gc.Stdout = os.Stdout
+		})
 	default:
 		return 2
 	}
+}
+
+// startGrandchild starts the test binary again in "hang" mode as a
+// grandchild, prints "PID <n>" on stdout and then hangs. setup, if not nil,
+// changes the grandchild command before it starts. It returns an exit code
+// only on an error.
+func startGrandchild(setup func(gc *exec.Cmd)) int {
+	exe, err := os.Executable()
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "helper: executable:", err)
+		return 1
+	}
+	// Plain exec.Command, not CommandContext: the grandchild must live on
+	// unless a kill reaches it. The grandchild inherits the environment, so
+	// it also runs in helper mode.
+	gc := exec.Command(exe, "hang") //nolint:gosec // G204: the helper starts its own test binary as a fixture grandchild
+	if setup != nil {
+		setup(gc)
+	}
+	if err := gc.Start(); err != nil {
+		fmt.Fprintln(os.Stderr, "helper: start grandchild:", err)
+		return 1
+	}
+	// os.Stdout is not buffered, so the parent sees the line at once. We do
+	// not Wait for the grandchild: only a kill may end it.
+	fmt.Printf("PID %d\n", gc.Process.Pid)
+	return hangForever()
 }
 
 // hangForever blocks until the process is killed.
@@ -111,7 +132,9 @@ func helperServer(t testing.TB, name, mode string) discover.Server {
 }
 
 // execInspector is an inspect.Inspector that runs the server as a child
-// process and waits for it to exit. It reads no MCP content.
+// process and waits for it to exit. It reads no MCP content. It follows the
+// Inspector contract the way a real stdio inspector must: its own process
+// group, and a pipe read that ends when ctx is done.
 //
 // It is safe for concurrent use.
 type execInspector struct {
@@ -138,9 +161,17 @@ func (e execInspector) Inspect(ctx context.Context, s discover.Server) (inspect.
 		return inspect.Result{}, fmt.Errorf("execInspector: start: %w", err)
 	}
 
+	// The group kill does not reach a process that left the group. Such a
+	// process can keep stdout open, and then the read below never sees EOF.
+	// So close our end of the pipe when ctx is done: the read then returns at
+	// once. stop removes the callback when Inspect returns first.
+	stop := context.AfterFunc(ctx, func() { _ = stdout.Close() })
+	defer stop()
+
 	// Read to EOF before Wait, as the exec package requires for a pipe. EOF
 	// comes when the server and all its children close stdout, or when the
-	// group kill ends them. No goroutine is left behind.
+	// group kill ends them. The read also ends when the callback above closes
+	// the pipe. No goroutine is left behind.
 	scanner := bufio.NewScanner(stdout)
 	for scanner.Scan() {
 		rest, ok := strings.CutPrefix(scanner.Text(), "PID ")

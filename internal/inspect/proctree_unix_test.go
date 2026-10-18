@@ -3,116 +3,26 @@
 package inspect_test
 
 import (
-	"context"
 	"errors"
 	"os"
 	"os/exec"
-	"runtime"
 	"slices"
-	"strings"
 	"syscall"
 	"testing"
 	"time"
 
-	"github.com/Ducarv/mcpmoat/internal/discover"
 	"github.com/Ducarv/mcpmoat/internal/inspect"
 )
 
-// The tests in this file do not call t.Parallel. TestRunNoGoroutineLeak counts
-// the goroutines of the whole test binary, so no other test may run at the same
-// time. A test that never calls t.Parallel runs alone.
+// The tests in this file do not call t.Parallel. They start real processes
+// and measure wall time, and TestRunNoGoroutineLeak (run_process_unix_test.go)
+// counts the goroutines of the whole test binary. A test that never calls
+// t.Parallel runs alone.
 
-// processTreeSlack is added to every upper time bound below. The race detector
-// makes the helper process start slowly, so the bounds must be generous.
+// processTreeSlack is added to every upper time bound of the process tests.
+// The race detector makes the helper process start slowly, so the bounds must
+// be generous.
 const processTreeSlack = 3 * time.Second
-
-// killWaitDelayForBound mirrors the unexported killWaitDelay (2s) of the
-// package under test. It only sizes an upper bound.
-const killWaitDelayForBound = 2 * time.Second
-
-// namedMode is a fixture server: a unique name and a helper mode.
-type namedMode struct{ name, mode string }
-
-// runModes runs one helper server per entry through inspect.Run and returns
-// the outcomes indexed by server name. Names must be unique.
-func runModes(t *testing.T, opts inspect.Options, insp inspect.Inspector, modes ...namedMode) map[string]inspect.Outcome {
-	t.Helper()
-	servers := make([]discover.Server, 0, len(modes))
-	for _, m := range modes {
-		servers = append(servers, helperServer(t, m.name, m.mode))
-	}
-	outcomes, err := inspect.Run(t.Context(), servers, opts, insp)
-	if err != nil {
-		t.Fatalf("Run() error = %v, want nil", err)
-	}
-	if len(outcomes) != len(modes) {
-		t.Fatalf("Run() returned %d outcomes, want %d", len(outcomes), len(modes))
-	}
-	byName := make(map[string]inspect.Outcome, len(outcomes))
-	for _, o := range outcomes {
-		byName[o.Server.Name] = o
-	}
-	if len(byName) != len(modes) {
-		t.Fatalf("outcome names are not unique: %v", outcomes)
-	}
-	return byName
-}
-
-// TestRunHangTimesOut checks that a server that never answers ends with
-// StatusTimeout after about opts.Timeout, and that Run returns by itself.
-func TestRunHangTimesOut(t *testing.T) {
-	opts := inspect.Options{Timeout: time.Second, Concurrency: 1}
-
-	start := time.Now()
-	got := runModes(t, opts, execInspector{}, namedMode{"hang", "hang"})
-	elapsed := time.Since(start)
-
-	o := got["hang"]
-	if o.Status != inspect.StatusTimeout {
-		t.Errorf("Status = %q, want %q (Err = %v)", o.Status, inspect.StatusTimeout, o.Err)
-	}
-	if !errors.Is(o.Err, context.DeadlineExceeded) {
-		t.Errorf("errors.Is(Err, context.DeadlineExceeded) = false, Err = %v", o.Err)
-	}
-	if elapsed < opts.Timeout {
-		t.Errorf("Run took %s, want at least the timeout %s", elapsed, opts.Timeout)
-	}
-	if limit := opts.Timeout + killWaitDelayForBound + processTreeSlack; elapsed > limit {
-		t.Errorf("Run took %s, want at most %s", elapsed, limit)
-	}
-}
-
-// TestRunCrashIsFailedOthersOK checks that one server that exits with an error
-// does not change the outcome of the other servers (FR-06).
-func TestRunCrashIsFailedOthersOK(t *testing.T) {
-	opts := inspect.Options{Timeout: 10 * time.Second, Concurrency: 3}
-
-	got := runModes(t, opts, execInspector{},
-		namedMode{"crash", "crash"},
-		namedMode{"slow-a", "slow"},
-		namedMode{"slow-b", "slow"},
-	)
-
-	crash := got["crash"]
-	if crash.Status != inspect.StatusFailed {
-		t.Errorf("crash: Status = %q, want %q", crash.Status, inspect.StatusFailed)
-	}
-	if crash.Err == nil {
-		t.Error("crash: Err = nil, want an error")
-	}
-	if errors.Is(crash.Err, context.DeadlineExceeded) {
-		t.Errorf("crash: Err wraps DeadlineExceeded, want a plain failure: %v", crash.Err)
-	}
-	for _, name := range []string{"slow-a", "slow-b"} {
-		o := got[name]
-		if o.Status != inspect.StatusOK {
-			t.Errorf("%s: Status = %q, want %q (Err = %v)", name, o.Status, inspect.StatusOK, o.Err)
-		}
-		if o.Err != nil {
-			t.Errorf("%s: Err = %v, want nil", name, o.Err)
-		}
-	}
-}
 
 // TestTimeoutKillsProcessTree is the acceptance check "no process leaks" for
 // issue 28. The server starts a grandchild that would live forever. After the
@@ -147,8 +57,63 @@ func TestTimeoutKillsProcessTree(t *testing.T) {
 	waitProcessGone(t, pid, 5*time.Second)
 }
 
+// TestTimeoutWithEscapedGrandchild checks the Inspector contract for pipe
+// reads. The server starts a grandchild that leaves the process group and
+// keeps the stdout pipe open, so the group kill misses it and the pipe never
+// sees EOF. execInspector closes its end of the pipe when ctx is done, so
+// Inspect, and Run, must still return at the timeout.
+func TestTimeoutWithEscapedGrandchild(t *testing.T) {
+	pids := make(chan int, 1)
+	// The escaped grandchild survives the group kill on purpose. Kill it at
+	// the end of the test, also when the test fails early.
+	t.Cleanup(func() {
+		select {
+		case pid := <-pids:
+			if pid > 1 {
+				_ = syscall.Kill(pid, syscall.SIGKILL)
+			}
+		default:
+		}
+	})
+
+	opts := inspect.Options{Timeout: 4 * time.Second, Concurrency: 1}
+	input := helperServers(t, namedMode{"escape", "escape"})
+	// The goroutine only calls Run. t.Fatal must stay in the test goroutine.
+	done := make(chan []inspect.Outcome, 1)
+	go func() {
+		outcomes, _ := inspect.Run(t.Context(), input, opts, execInspector{pids: pids})
+		done <- outcomes
+	}()
+
+	limit := opts.Timeout + inspect.KillWaitDelay + processTreeSlack
+	var outcomes []inspect.Outcome
+	select {
+	case outcomes = <-done:
+	case <-time.After(limit):
+		t.Fatalf("Run() did not return within %s: the pipe read did not end", limit)
+	}
+	if len(outcomes) != 1 {
+		t.Fatalf("Run() returned %d outcomes, want 1", len(outcomes))
+	}
+	checkStatus(t, outcomes[0], inspect.StatusTimeout)
+
+	// The test is only useful if the grandchild really escaped. Peek at the
+	// PID and put it back for the cleanup.
+	var pid int
+	select {
+	case pid = <-pids:
+		pids <- pid
+	default:
+		t.Fatal("no grandchild PID was reported before the timeout; the test cannot check the escape")
+	}
+	if processGone(pid) {
+		t.Errorf("grandchild %d is gone, want it alive: it did not leave the process group, so this test checks nothing", pid)
+	}
+}
+
 // TestConfigureProcessGroupSetsAttrs checks what ConfigureProcessGroup sets
-// and what it leaves alone.
+// and what it leaves alone. TestKillProcessGroupOnRunningProcess starts real
+// processes with these settings.
 func TestConfigureProcessGroupSetsAttrs(t *testing.T) {
 	t.Run("keeps existing SysProcAttr", func(t *testing.T) {
 		cmd := exec.CommandContext(t.Context(), "/bin/echo", "a", "b")
@@ -171,8 +136,8 @@ func TestConfigureProcessGroupSetsAttrs(t *testing.T) {
 		if cmd.Cancel == nil {
 			t.Error("Cancel = nil, want a function")
 		}
-		if cmd.WaitDelay <= time.Millisecond {
-			t.Errorf("WaitDelay = %s, want the fixed delay to replace the old value", cmd.WaitDelay)
+		if cmd.WaitDelay != inspect.KillWaitDelay {
+			t.Errorf("WaitDelay = %s, want %s to replace the old value", cmd.WaitDelay, inspect.KillWaitDelay)
 		}
 		if cmd.Path != wantPath {
 			t.Errorf("Path = %q, want %q", cmd.Path, wantPath)
@@ -199,8 +164,43 @@ func TestConfigureProcessGroupSetsAttrs(t *testing.T) {
 		if cmd.Cancel == nil {
 			t.Error("Cancel = nil, want a function")
 		}
-		if cmd.WaitDelay <= 0 {
-			t.Errorf("WaitDelay = %s, want greater than 0", cmd.WaitDelay)
+		if cmd.WaitDelay != inspect.KillWaitDelay {
+			t.Errorf("WaitDelay = %s, want %s", cmd.WaitDelay, inspect.KillWaitDelay)
+		}
+	})
+
+	// setpgid(2) fails with EPERM for a session leader, so Setpgid together
+	// with Setsid makes cmd.Start fail. A new session is already a new group.
+	t.Run("keeps Setsid and does not add Setpgid", func(t *testing.T) {
+		cmd := exec.CommandContext(t.Context(), "/bin/echo")
+		cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
+
+		inspect.ConfigureProcessGroup(cmd)
+
+		if !cmd.SysProcAttr.Setsid {
+			t.Error("Setsid = false, want it kept as true")
+		}
+		if cmd.SysProcAttr.Setpgid {
+			t.Error("Setpgid = true with Setsid, want false: cmd.Start would fail with EPERM")
+		}
+		if cmd.Cancel == nil {
+			t.Error("Cancel = nil, want a function")
+		}
+	})
+
+	// A non-zero Pgid would put the child into an existing group, and the
+	// group kill would then miss it.
+	t.Run("resets Pgid", func(t *testing.T) {
+		cmd := exec.CommandContext(t.Context(), "/bin/echo")
+		cmd.SysProcAttr = &syscall.SysProcAttr{Pgid: 12345}
+
+		inspect.ConfigureProcessGroup(cmd)
+
+		if cmd.SysProcAttr.Pgid != 0 {
+			t.Errorf("Pgid = %d, want 0", cmd.SysProcAttr.Pgid)
+		}
+		if !cmd.SysProcAttr.Setpgid {
+			t.Error("Setpgid = false, want true")
 		}
 	})
 
@@ -281,9 +281,10 @@ func findProcess(pid int) func(t *testing.T) *os.Process {
 }
 
 // startHang starts the "hang" helper in its own process group, as
-// execInspector does. The process is killed at test cleanup if the test did
-// not already do it.
-func startHang(t *testing.T) *exec.Cmd {
+// execInspector does. attr is the SysProcAttr before ConfigureProcessGroup;
+// nil means none. The process is killed at test cleanup if the test did not
+// already do it.
+func startHang(t *testing.T, attr *syscall.SysProcAttr) *exec.Cmd {
 	t.Helper()
 	exe, err := os.Executable()
 	if err != nil {
@@ -291,6 +292,7 @@ func startHang(t *testing.T) *exec.Cmd {
 	}
 	cmd := exec.CommandContext(t.Context(), exe, "hang") //nolint:gosec // G204: the test runs its own test binary as a fixture server
 	cmd.Env = append(os.Environ(), helperEnv+"=1")
+	cmd.SysProcAttr = attr
 	inspect.ConfigureProcessGroup(cmd)
 	if err := cmd.Start(); err != nil {
 		t.Fatalf("Start() error = %v", err)
@@ -307,91 +309,68 @@ func startHang(t *testing.T) *exec.Cmd {
 
 // TestKillProcessGroupOnRunningProcess checks the two kill paths on a live
 // process: the explicit KillProcessGroup and the Cancel func that exec calls.
+// It runs each path with a plain command and with a command that already asks
+// for a new session (Setsid), as the stdio command of issue #27 does. In both
+// cases the child must start and must lead its own process group.
 //
 // It never calls KillProcessGroup after Wait. After Wait the OS may reuse the
 // PID for another process, and kill(-pid) could then hit a stranger. The
 // os.ErrProcessDone mapping (ESRCH) is therefore not tested here.
 func TestKillProcessGroupOnRunningProcess(t *testing.T) {
-	tests := []struct {
+	kills := []struct {
 		name string
 		kill func(cmd *exec.Cmd) error
 	}{
 		{name: "KillProcessGroup", kill: inspect.KillProcessGroup},
 		{name: "configured Cancel", kill: func(cmd *exec.Cmd) error { return cmd.Cancel() }},
 	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			cmd := startHang(t)
+	attrs := []struct {
+		name string
+		attr func() *syscall.SysProcAttr
+	}{
+		{name: "no SysProcAttr", attr: func() *syscall.SysProcAttr { return nil }},
+		{name: "Setsid", attr: func() *syscall.SysProcAttr { return &syscall.SysProcAttr{Setsid: true} }},
+	}
+	for _, k := range kills {
+		for _, a := range attrs {
+			t.Run(k.name+" with "+a.name, func(t *testing.T) {
+				cmd := startHang(t, a.attr())
 
-			if err := tt.kill(cmd); err != nil {
-				t.Fatalf("kill error = %v, want nil", err)
-			}
+				pgid, err := syscall.Getpgid(cmd.Process.Pid)
+				if err != nil {
+					t.Fatalf("Getpgid(%d) error = %v", cmd.Process.Pid, err)
+				}
+				if pgid != cmd.Process.Pid {
+					t.Errorf("process group = %d, want the child PID %d", pgid, cmd.Process.Pid)
+				}
 
-			err := cmd.Wait()
-			if err == nil {
-				t.Fatal("Wait() error = nil, want an error for a killed process")
-			}
-			var exitErr *exec.ExitError
-			if !errors.As(err, &exitErr) {
-				t.Fatalf("Wait() error = %v, want *exec.ExitError", err)
-			}
-			ws, ok := exitErr.Sys().(syscall.WaitStatus)
-			if !ok {
-				t.Fatalf("ExitError.Sys() = %T, want syscall.WaitStatus", exitErr.Sys())
-			}
-			if !ws.Signaled() || ws.Signal() != syscall.SIGKILL {
-				t.Errorf("wait status = %v, want killed by SIGKILL", ws)
-			}
-		})
+				checkKilledBySIGKILL(t, cmd, k.kill)
+			})
+		}
 	}
 }
 
-// TestRunNoGoroutineLeak checks that Run leaves no goroutine behind after a
-// mix of a hang, a crash and a slow server.
-func TestRunNoGoroutineLeak(t *testing.T) {
-	baseline := runtime.NumGoroutine()
-
-	opts := inspect.Options{Timeout: time.Second, Concurrency: 3}
-	got := runModes(t, opts, execInspector{},
-		namedMode{"hang", "hang"},
-		namedMode{"crash", "crash"},
-		namedMode{"slow", "slow"},
-	)
-	// Make sure the run did what the test needs: all three paths ran.
-	want := map[string]inspect.Status{
-		"hang":  inspect.StatusTimeout,
-		"crash": inspect.StatusFailed,
-	}
-	for name, status := range want {
-		if got[name].Status != status {
-			t.Errorf("%s: Status = %q, want %q (Err = %v)", name, got[name].Status, status, got[name].Err)
-		}
-	}
-	// "slow" needs about 1s plus start-up time, so under -race it can hit the
-	// 1s timeout. Either result is fine for a leak check.
-	if s := got["slow"].Status; s != inspect.StatusOK && s != inspect.StatusTimeout {
-		t.Errorf("slow: Status = %q, want ok or timeout", s)
+// checkKilledBySIGKILL calls kill on the running cmd and checks that Wait
+// reports a death by SIGKILL.
+func checkKilledBySIGKILL(t *testing.T, cmd *exec.Cmd, kill func(cmd *exec.Cmd) error) {
+	t.Helper()
+	if err := kill(cmd); err != nil {
+		t.Fatalf("kill error = %v, want nil", err)
 	}
 
-	// The exec package and the runtime stop their own goroutines (pipe copiers,
-	// the context watcher) a moment after Wait returns. A bounded poll is the
-	// only way to see that. This is a leak check, not synchronisation.
-	deadline := time.Now().Add(5 * time.Second)
-	for runtime.NumGoroutine() > baseline {
-		if time.Now().After(deadline) {
-			buf := make([]byte, 1<<16)
-			buf = buf[:runtime.Stack(buf, true)]
-			t.Fatalf("goroutines = %d, want at most the baseline %d\n%s", runtime.NumGoroutine(), baseline, trimStacks(string(buf)))
-		}
-		time.Sleep(10 * time.Millisecond)
+	err := cmd.Wait()
+	if err == nil {
+		t.Fatal("Wait() error = nil, want an error for a killed process")
 	}
-}
-
-// trimStacks keeps a goroutine dump short enough for a test log.
-func trimStacks(s string) string {
-	const limit = 6000
-	if len(s) > limit {
-		return strings.TrimSpace(s[:limit]) + "\n... (truncated)"
+	var exitErr *exec.ExitError
+	if !errors.As(err, &exitErr) {
+		t.Fatalf("Wait() error = %v, want *exec.ExitError", err)
 	}
-	return s
+	ws, ok := exitErr.Sys().(syscall.WaitStatus)
+	if !ok {
+		t.Fatalf("ExitError.Sys() = %T, want syscall.WaitStatus", exitErr.Sys())
+	}
+	if !ws.Signaled() || ws.Signal() != syscall.SIGKILL {
+		t.Errorf("wait status = %v, want killed by SIGKILL", ws)
+	}
 }

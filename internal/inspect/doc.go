@@ -16,26 +16,23 @@
 // # The Inspector contract
 //
 // An Inspector must honour its context, must stop every child process it
-// started, and must be safe for concurrent use. Run calls it from several
-// goroutines at the same time.
+// started, must unblock its own pipe reads when the context is done, and must
+// be safe for concurrent use. Run calls it from several goroutines at the same
+// time. See the Inspector type for the details.
 //
 // # Child processes
 //
-// ConfigureProcessGroup starts a stdio server in its own process group. When
-// the timeout fires, the whole process tree is killed, not only the direct
-// child. KillProcessGroup does the same kill on request. This works on Unix
-// only (macOS and Linux). On other systems, only the direct child is killed.
+// configureProcessGroup starts a stdio server in its own process group. When
+// the timeout fires, every process that is still in that group is killed, not
+// only the direct child. A process that leaves the group on purpose (with
+// setsid, setpgid or a double fork) is not killed, so this is not a sandbox.
+// killProcessGroup does the same kill on request. This works on Unix only
+// (macOS and Linux). On other systems, only the direct child is killed.
 //
 // # Untrusted text
 //
 // The text of Outcome.Err can hold server output. Treat it as untrusted. Escape
 // it with internal/termsafe before you print it.
-//
-// # Still to come
-//
-// The MCP connection over stdio and HTTP with the official Go SDK, the
-// scrubbed environment for stdio servers, and result types that do not depend
-// on the SDK.
 //
 // See docs/PRD.md, FR-04 to FR-06, NFR-03, NFR-04 and NFR-06.
 package inspect
