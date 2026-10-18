@@ -80,7 +80,7 @@ func TestSecretFormatVerbs(t *testing.T) {
 	}
 
 	for _, v := range values {
-		for _, verb := range fmtVerbs {
+		for _, verb := range fmtVerbs() {
 			t.Run(v.name+"/"+verb, func(t *testing.T) {
 				t.Parallel()
 				got := fmt.Sprintf(verb, v.arg)
@@ -338,7 +338,7 @@ func TestSecretSlog(t *testing.T) {
 		{name: "exported field", attr: slog.Any("server", withExported{Name: "n", S: val}), wantMask: true},
 		{name: "unexported field", attr: slog.Any("server", withUnexported{s: val})},
 	}
-	for _, h := range slogHandlers {
+	for _, h := range slogHandlers() {
 		for _, a := range attrs {
 			t.Run(h.name+"/"+a.name, func(t *testing.T) {
 				t.Parallel()

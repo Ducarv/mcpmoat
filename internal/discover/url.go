@@ -24,6 +24,7 @@ var (
 // [RedactURL] of the value. Only Reveal returns the value as written.
 // The zero value is an empty URL and prints as "". URLs cannot be compared
 // with ==; use Reveal or reflect.DeepEqual.
+// See the package doc, Secrets.
 //
 // URL is built like [Secret]; the Secret comments give the reasons for the
 // struct type, the fields and the value receivers.

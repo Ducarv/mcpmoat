@@ -27,6 +27,7 @@ var (
 // header value. Printing, logging or encoding a Secret always gives Mask; only
 // Reveal returns the value. The zero value is an empty secret. Secrets cannot be
 // compared with ==; use Reveal or reflect.DeepEqual.
+// See the package doc, Secrets.
 //
 // reflect.DeepEqual tells the zero Secret (unset, for example decoded from a
 // JSON null) apart from NewSecret(""): the first holds a nil pointer, the

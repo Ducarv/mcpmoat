@@ -16,18 +16,27 @@ import (
 const leakyURL = "https://user:" + discovertest.CanaryURL +
 	"@example.com/mcp?api_key=" + discovertest.CanaryURL
 
-// fmtVerbs are the fmt verbs that the Secret and URL format tests print
-// with. Secret and URL implement fmt.Formatter, so fmt passes every verb,
-// even %d and %x, to their Format methods.
-var fmtVerbs = []string{"%v", "%+v", "%#v", "%s", "%q", "%x", "%X", "%d", "%p", "%T", "%10v", "%-10s"}
+// fmtVerbs returns the fmt verbs that the Secret, URL and Args format tests
+// print with. These types implement fmt.Formatter, so fmt passes every verb,
+// even %d and %x, to their Format methods. Each call returns a new slice, so
+// tests can change it safely.
+func fmtVerbs() []string {
+	return []string{"%v", "%+v", "%#v", "%s", "%q", "%x", "%X", "%d", "%p", "%T", "%10v", "%-10s"}
+}
 
-// slogHandlers are the log/slog handlers that the slog tests log through.
-var slogHandlers = []struct {
+// slogHandler is a log/slog handler that the slog tests log through.
+type slogHandler struct {
 	name       string
 	newHandler func(*bytes.Buffer) slog.Handler
-}{
-	{name: "text", newHandler: func(b *bytes.Buffer) slog.Handler { return slog.NewTextHandler(b, nil) }},
-	{name: "json", newHandler: func(b *bytes.Buffer) slog.Handler { return slog.NewJSONHandler(b, nil) }},
+}
+
+// slogHandlers returns the text and JSON slog handlers. Each call returns a
+// new slice, so tests can change it safely.
+func slogHandlers() []slogHandler {
+	return []slogHandler{
+		{name: "text", newHandler: func(b *bytes.Buffer) slog.Handler { return slog.NewTextHandler(b, nil) }},
+		{name: "json", newHandler: func(b *bytes.Buffer) slog.Handler { return slog.NewJSONHandler(b, nil) }},
+	}
 }
 
 // noErr adapts a method that cannot fail to the func() (string, error) shape
@@ -55,7 +64,8 @@ func testServers() []testServer {
 	}
 }
 
-// stdioServer returns a stdio Server whose env value is a canary.
+// stdioServer returns a stdio Server whose env value and token arg are
+// canaries. discovertest has no args canary, so the arg uses CanaryEnv.
 func stdioServer() discover.Server {
 	return discover.Server{
 		Name:      "fs",
@@ -64,7 +74,7 @@ func stdioServer() discover.Server {
 		Source:    "/tmp/x/.claude.json", // only a string: nothing reads this path
 		Transport: discover.TransportStdio,
 		Command:   "npx",
-		Args:      []string{"-y", "pkg"},
+		Args:      discover.NewArgs([]string{"-y", "pkg", "--token", discovertest.CanaryEnv}),
 		Env:       discover.SecretMap{"API_KEY": discover.NewSecret(discovertest.CanaryEnv)},
 	}
 }
@@ -162,7 +172,7 @@ func serverRenders() []namedRender {
 			return fmt.Sprintf("%+v", serverHolder{Server: s})
 		}},
 	}
-	for _, h := range slogHandlers {
+	for _, h := range slogHandlers() {
 		renders = append(renders,
 			namedRender{name: "slog " + h.name, render: slogRender(h.newHandler, asValue)},
 			namedRender{name: "slog " + h.name + " pointer", render: slogRender(h.newHandler, asPointer)},

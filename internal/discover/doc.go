@@ -13,27 +13,36 @@
 //
 // # Secrets
 //
-// Env and header values are [Secret] values in a [SecretMap], and the
-// remote endpoint is a [URL]. Printing, logging or encoding a Secret gives
-// [Mask]; for a URL it gives [RedactURL] of the value, the display form.
-// RedactURL masks the userinfo, the query values, the fragment and the path
-// segments that look like credentials (by heuristic rules). Show the env and
-// header names with [SecretMap.Keys].
+// Config values often hold credentials, so the types of the [Server] fields
+// mask them in all output: fmt (every verb, including %p, and also when the
+// value is in an unexported field of another struct), log/slog and
+// encoders.
 //
-// Server.Args is a plain []string and prints as written, but real configs
-// often put tokens in args. Show args only through [RedactArgs], which masks
-// likely credentials by heuristic rules and sends URLs through [RedactURL].
-// The RedactArgs output is still untrusted text from the config, so display
-// code must escape it before it prints it.
+//   - Env and header values are [Secret] values in a [SecretMap]. They print
+//     as [Mask]. Show the env and header names with [SecretMap.Keys].
+//   - The remote endpoint is a [URL]. It prints as [RedactURL] of the value,
+//     which masks the userinfo, the query values, the fragment and the path
+//     segments that look like credentials (by heuristic rules).
+//   - The stdio arguments are [Args]. They print as [RedactArgs] of the
+//     values. RedactArgs is an allowlist: it masks every argument whose
+//     shape is not known to be safe.
+//   - Command is a plain string and prints as written. A secret in Command
+//     itself is not masked.
 //
-// Only [Secret.Reveal] and [URL.Reveal] return the values. Call them only
-// where the value is used:
+// Only [Secret.Reveal], [URL.Reveal] and [Args.Values] return the values as
+// written. Call them only where the value is used:
 //
-//   - in internal/inspect, for the environment of a child process, the
-//     server endpoint and HTTP request headers;
+//   - in internal/inspect, for the command line and the environment of a
+//     child process, the server endpoint and HTTP request headers;
 //   - in internal/rules, for config rules.
 //
-// Never pass the result of Reveal to fmt, a logger, an error or an encoder.
+// Never pass their results to fmt, a logger, an error or an encoder.
+//
+// Masking does not make text safe to print. Every string field of a Server
+// and every map key (env and header names) is untrusted text from a config
+// file and can hold control, bidi and non-ASCII characters. The output of
+// URL and Args is printable ASCII, but display code must still escape every
+// field before it prints it to a terminal.
 //
 // Config readers must return errors that name the file and the position in
 // it, and never a value from the config.

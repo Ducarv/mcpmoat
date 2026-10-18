@@ -50,7 +50,7 @@ func TestURLFormatVerbs(t *testing.T) {
 	}
 
 	for _, v := range values {
-		for _, verb := range fmtVerbs {
+		for _, verb := range fmtVerbs() {
 			t.Run(v.name+"/"+verb, func(t *testing.T) {
 				t.Parallel()
 				got := fmt.Sprintf(verb, v.arg)
@@ -197,7 +197,7 @@ func TestURLSlog(t *testing.T) {
 		{name: "*URL", attr: slog.Any("url", &u)},
 		{name: "exported field", attr: slog.Any("server", withExportedURL{U: u})},
 	}
-	for _, h := range slogHandlers {
+	for _, h := range slogHandlers() {
 		for _, a := range attrs {
 			t.Run(h.name+"/"+a.name, func(t *testing.T) {
 				t.Parallel()

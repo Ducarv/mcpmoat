@@ -14,9 +14,9 @@ import (
 )
 
 // TestServerNoLeak checks the issue #16 acceptance criterion: printing,
-// logging or encoding a Server never shows an env value, a header value or
-// the credentials in its URL, but still shows the key name, the URL host and
-// Mask in their place. serverRenders (helpers_test.go) lists the outputs.
+// logging or encoding a Server never shows an env value, a header value, a
+// token in its args or the credentials in its URL, but still shows the key
+// name, the URL host and Mask in their place. serverRenders (helpers_test.go) lists the outputs.
 func TestServerNoLeak(t *testing.T) {
 	t.Parallel()
 
@@ -44,16 +44,16 @@ func TestServerNoLeak(t *testing.T) {
 // TestServerUnexportedFieldNoLeak checks a Server held in an unexported
 // field of another struct. fmt cannot call methods on an unexported field
 // (reflect CanInterface is false), so it prints the Server fields by
-// reflection. URL and Secret keep their values behind a pointer, so fmt
-// prints only addresses and no canary appears.
+// reflection. URL, Secret and Args keep their values behind a pointer, so
+// fmt prints only addresses and no canary appears. Every verb is checked:
+// %s and %q on a pointer take another fmt path (badVerb) than %v.
 func TestServerUnexportedFieldNoLeak(t *testing.T) {
 	t.Parallel()
 
 	type wrapper struct{ s discover.Server }
 
-	verbs := []string{"%v", "%+v", "%#v"}
 	for _, sv := range testServers() {
-		for _, verb := range verbs {
+		for _, verb := range fmtVerbs() {
 			t.Run(sv.name+"/"+verb, func(t *testing.T) {
 				t.Parallel()
 				out := fmt.Sprintf(verb, wrapper{s: sv.server})
@@ -66,8 +66,8 @@ func TestServerUnexportedFieldNoLeak(t *testing.T) {
 // TestServerBadVerbNoLeak checks the fmt paths that skip every method. %p on
 // a struct and %w on a value that is not an error are bad verbs: fmt prints
 // "%!p(...)" or "%!w(...)" and shows the fields by reflection without
-// calling Format or String on them. Only the pointers inside URL and Secret
-// show, so no canary appears. (%p with a *Server is valid and prints only an
+// calling Format or String on them. Only the pointers inside URL, Secret
+// and Args show, so no canary appears. (%p with a *Server is valid and prints only an
 // address.)
 func TestServerBadVerbNoLeak(t *testing.T) {
 	t.Parallel()
@@ -154,7 +154,7 @@ func TestServerSlogNilPointer(t *testing.T) {
 		"text": "server=<nil>",
 		"json": `"server":null`,
 	}
-	for _, h := range slogHandlers {
+	for _, h := range slogHandlers() {
 		t.Run(h.name, func(t *testing.T) {
 			t.Parallel()
 			var buf bytes.Buffer
@@ -274,9 +274,9 @@ func TestTransportIsRemote(t *testing.T) {
 }
 
 // TestServerDeepEqual checks that reflect.DeepEqual compares the values
-// behind Secrets and URLs, not their addresses. Each NewSecret call stores
-// its value at a new address, so a pointer comparison would report false for
-// equal Servers.
+// behind Secrets, URLs and Args, not their addresses. Each NewSecret,
+// NewURL and NewArgs call stores its value at a new address, so a pointer
+// comparison would report false for equal Servers.
 func TestServerDeepEqual(t *testing.T) {
 	t.Parallel()
 
@@ -301,6 +301,20 @@ func TestServerDeepEqual(t *testing.T) {
 			name: "same env value, new Secret",
 			change: func(s *discover.Server) {
 				s.Env = discover.SecretMap{"API_KEY": discover.NewSecret(discovertest.CanaryEnv)}
+			},
+			want: true,
+		},
+		{
+			name: "different args",
+			change: func(s *discover.Server) {
+				s.Args = discover.NewArgs([]string{"-y", "other"})
+			},
+			want: false,
+		},
+		{
+			name: "same args, new Args",
+			change: func(s *discover.Server) {
+				s.Args = discover.NewArgs(s.Args.Values())
 			},
 			want: true,
 		},

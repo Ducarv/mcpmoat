@@ -59,13 +59,9 @@ func (t Transport) IsRemote() bool {
 // as ${VAR} are not expanded. Command is not resolved against PATH, because
 // the scanner later runs exactly the configured command (NFR-04).
 //
-// Env and Headers values print as [Mask] because they are [Secret] values,
-// and URL prints through [RedactURL] because it is a [URL]. The types do the
-// masking, so fmt (every verb, including %p, and also when a Server is in an
-// unexported field of another struct), log/slog and encoders cannot show
-// those values. Command and Args are plain strings: fmt shows them as written,
-// so display code must show Args through [RedactArgs], which masks likely
-// credentials (heuristic). A secret in Command itself is not masked.
+// Env, Headers, URL and Args mask their values in all output, and every
+// string field is untrusted text from the config file. See the package doc,
+// Secrets.
 //
 // Server has no methods and no struct tags on purpose: output types live in
 // internal/report.
@@ -92,22 +88,26 @@ type Server struct {
 	// Transport is how mcpmoat talks to the server.
 	Transport Transport
 
-	// Command is the executable for TransportStdio.
+	// Command is the executable for TransportStdio. It is plain text and
+	// prints as written (see the package doc, Secrets).
 	Command string
 
-	// Args are the arguments for TransportStdio, as written. They can hold
-	// credentials: display them with RedactArgs.
-	Args []string
+	// Args are the arguments for TransportStdio, as written. They print
+	// through RedactArgs; Args.Values gives them as written (see the package
+	// doc, Secrets).
+	Args Args
 
-	// Env holds the environment variables for TransportStdio. Use Env.Keys
-	// to show the names.
+	// Env holds the environment variables for TransportStdio. The values
+	// print as Mask; Env.Keys gives the names (see the package doc, Secrets).
 	Env SecretMap
 
-	// URL is the endpoint for a remote transport. Use URL.Reveal only where
-	// the value is used (internal/inspect).
+	// URL is the endpoint for a remote transport. It prints through
+	// RedactURL; URL.Reveal gives it as written (see the package doc,
+	// Secrets).
 	URL URL
 
-	// Headers holds the HTTP headers for a remote transport. Use
-	// Headers.Keys to show the names.
+	// Headers holds the HTTP headers for a remote transport. The values
+	// print as Mask; Headers.Keys gives the names (see the package doc,
+	// Secrets).
 	Headers SecretMap
 }
