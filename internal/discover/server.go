@@ -110,6 +110,10 @@ type Server struct {
 	// A relative Dir is relative to the directory where the user runs Codex,
 	// which mcpmoat does not know. inspect must not resolve it against its
 	// own working directory: it must treat a relative Dir like an empty Dir.
+	//
+	// For an untrusted Codex file, Dir passed the cwd check of ReadConfig
+	// at read time only, so inspect must still not trust a Dir of an
+	// untrusted server more than its command. See ReadConfig.
 	Dir string
 
 	// Env holds the environment variables for TransportStdio. The values

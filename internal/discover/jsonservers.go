@@ -80,22 +80,45 @@ func jsonAllKeys() []string {
 	return keys
 }
 
-// jsonFile is one Claude Code or Cursor JSON config to read. ReadClaudeCode
-// and ReadCursor build it with named fields.
+// jsonSpace holds the four bytes that JSON allows as white space: space, tab,
+// CR and LF. DetectClient, decodeJSONTop and objectMembers trim only these
+// bytes. bytes.TrimSpace would also trim Unicode spaces such as U+00A0, which
+// JSON does not allow.
+const jsonSpace = " \t\r\n"
+
+// jsonFile is one Claude Code or Cursor JSON config to read. ReadClaudeCode,
+// ReadCursor and readUntrustedJSON build it with named fields.
 type jsonFile struct {
 	path   string
 	client Client
 	// scope goes to the servers of the top-level "mcpServers" object. Only
-	// ScopeGlobal is trusted: parseJSONServers reads any other value as
+	// ScopeGlobal is trusted: readJSONServers reads any other value as
 	// ScopeProject.
 	scope Scope
 	// projectPath goes to those servers with ScopeProject (see
 	// topProjectPath). It is ignored with ScopeGlobal.
 	projectPath string
-	// withProjects reads the "projects" section too. Only ~/.claude.json has
-	// one.
-	withProjects bool
+	// projects tells what to do with the top-level "projects" section. The
+	// zero value, projectsSkip, ignores it.
+	projects projectsMode
 }
+
+// projectsMode tells a JSON reader what to do with the top-level "projects"
+// section of a Claude Code file.
+type projectsMode int
+
+const (
+	// projectsSkip ignores the section. ReadCursor uses it, and
+	// ReadClaudeCode for a project file, such as <WorkDir>/.mcp.json.
+	projectsSkip projectsMode = iota
+	// projectsRead reads the servers of the section. Only ~/.claude.json
+	// has one, so only ReadClaudeCode with ScopeGlobal uses it.
+	projectsRead
+	// projectsReport does not read the section, but reports it (and a case
+	// variant of its key) with an error. Only ReadConfig uses it, for every
+	// untrusted JSON file. See ReadConfig.
+	projectsReport
+)
 
 // limits returns the size limit of the file and the directory that the read
 // must stay in ("" for no such directory).
@@ -126,19 +149,22 @@ func (f jsonFile) topProjectPath() string {
 	case f.scope == ScopeGlobal:
 		return ""
 	case f.projectPath == "":
-		return projectDirOf(f.path, f.client)
+		return projectDirOf(f.path)
 	}
 	return f.projectPath
 }
 
 // projectDirOf returns the project directory of the project file at path:
-// the directory of the file, or, for a Cursor file in a directory named
-// ".cursor", the parent of that directory. Cursor keeps its project file in
-// <project>/.cursor/mcp.json. The path is not made absolute: the package
-// never reads the current directory by itself.
-func projectDirOf(path string, client Client) string {
+// the directory of the file, or the parent of that directory when it is
+// named cursorDir or codexDir. Cursor and Codex keep their project files in a
+// directory of their own (<project>/.cursor/mcp.json and
+// <project>/.codex/config.toml). The rule looks only at the path, not at the
+// client, so a file in such a directory gets the parent for every client: a
+// wrong guess of DetectClient cannot change the ProjectPath. The path is not
+// made absolute: the package never reads the current directory by itself.
+func projectDirOf(path string) string {
 	dir := filepath.Dir(path)
-	if client == ClientCursor && filepath.Base(dir) == ".cursor" {
+	if inCursorDir(path) || inCodexDir(path) {
 		return filepath.Dir(dir)
 	}
 	return dir
@@ -170,14 +196,38 @@ type jsonParser struct {
 	full bool
 }
 
-// parseJSONServers reads the Claude Code or Cursor JSON config f.
+// readJSONServers reads the Claude Code or Cursor JSON config f within its
+// limits (see jsonFile.limits) and parses the content with parseJSONBytes. A
+// missing file gives no servers and no errors.
 //
 // Only ScopeGlobal is trusted. Any other value of f.scope, also the zero
 // Scope, is read as ScopeProject: the file is read within the project
 // limits, and its servers get ScopeProject. So a caller error fails closed.
+// For a project file, a read error is marked Untrusted too.
+func readJSONServers(ctx context.Context, f jsonFile) ([]Server, []*FileError) {
+	maxSize, root := f.limits()
+	data, found, fe := readConfigFile(ctx, f.path, maxSize, root)
+	switch {
+	case fe != nil:
+		errs := []*FileError{fe}
+		if f.scope != ScopeGlobal {
+			markUntrusted(nil, errs)
+		}
+		return nil, errs
+	case !found:
+		return nil, nil
+	}
+	return parseJSONBytes(ctx, f, data)
+}
+
+// parseJSONBytes parses data, the content of the Claude Code or Cursor JSON
+// config f. It does no I/O. ReadConfig calls it with the bytes of its one
+// read, so a file that changes or goes away after that read cannot change the
+// result. As in readJSONServers, any f.scope other than ScopeGlobal is read
+// as ScopeProject.
 //
 // The servers of the top-level "mcpServers" object get f.scope and the
-// ProjectPath of topProjectPath. If f.withProjects is true, the servers under
+// ProjectPath of topProjectPath. With projectsRead, the servers under
 // "projects.<dir>.mcpServers" are read too. They get ScopeProject and
 // ProjectPath <dir>, and an error about one of them, or about the project
 // itself, has FileError.ProjectPath <dir>. An empty <dir> is refused
@@ -187,14 +237,14 @@ type jsonParser struct {
 // the end.
 //
 // See the package doc, Reading configs.
-func parseJSONServers(ctx context.Context, f jsonFile) ([]Server, []*FileError) {
+func parseJSONBytes(ctx context.Context, f jsonFile, data []byte) ([]Server, []*FileError) {
 	if f.scope != ScopeGlobal {
 		f.scope = ScopeProject
 	}
 
 	var servers []Server
 	var errs []*FileError
-	top, fe := loadJSONFile(ctx, f)
+	top, fe := decodeJSONTop(f, data)
 	switch {
 	case fe != nil:
 		errs = []*FileError{fe}
@@ -209,9 +259,9 @@ func parseJSONServers(ctx context.Context, f jsonFile) ([]Server, []*FileError) 
 }
 
 // markUntrusted sets Untrusted on every server and every error. For a JSON
-// file it is the only code that sets Untrusted: the other functions return
-// every error of the file, read errors from readConfigFile too, without the
-// mark.
+// file it is the only code that sets Untrusted: readJSONServers and
+// parseJSONBytes call it, and the other functions return every error of the
+// file, read errors from readConfigFile too, without the mark.
 func markUntrusted(servers []Server, errs []*FileError) {
 	for i := range servers {
 		servers[i].Untrusted = true
@@ -221,18 +271,11 @@ func markUntrusted(servers []Server, errs []*FileError) {
 	}
 }
 
-// loadJSONFile reads f within its limits and checks the file as a whole. It
+// decodeJSONTop checks data, the content of the file f, as a whole. It
 // returns the top-level members of the file, or the one *FileError that
-// refuses the file. A missing file and an empty file give neither.
-func loadJSONFile(ctx context.Context, f jsonFile) (map[string]json.RawMessage, *FileError) {
-	maxSize, root := f.limits()
-	data, found, fe := readConfigFile(ctx, f.path, maxSize, root)
-	if fe != nil {
-		return nil, fe
-	}
-	// Trim only the four JSON whitespace bytes. bytes.TrimSpace would also
-	// trim Unicode spaces such as U+00A0, which JSON does not allow.
-	if !found || len(bytes.Trim(data, " \t\r\n")) == 0 {
+// refuses the file. A file that holds only JSON white space gives neither.
+func decodeJSONTop(f jsonFile, data []byte) (map[string]json.RawMessage, *FileError) {
+	if len(bytes.Trim(data, jsonSpace)) == 0 {
 		return nil, nil
 	}
 
@@ -247,14 +290,14 @@ func loadJSONFile(ctx context.Context, f jsonFile) (map[string]json.RawMessage, 
 		return nil, newFileError(f.path, reasonBadShape)
 	}
 	// The file is a valid JSON object now, which findBadServerString needs.
-	if off, project := findBadServerString(data, f.withProjects); off >= 0 {
+	if off, project := findBadServerString(data, f.projects == projectsRead); off >= 0 {
 		return nil, newFileError(f.path, reasonBadString).inProject(project).atOffset(data, off)
 	}
 	return top, nil
 }
 
-// decodeJSONSections decodes the "mcpServers" section of top and, if
-// f.withProjects is true, the "projects" section. It refuses a file over
+// decodeJSONSections decodes the "mcpServers" section of top and handles the
+// "projects" section as f.projects says. It refuses a file over
 // maxServersPerFile as a whole, as the Codex reader does, and sorts the
 // result.
 func decodeJSONSections(ctx context.Context, f jsonFile, top map[string]json.RawMessage) ([]Server, []*FileError) {
@@ -266,14 +309,31 @@ func decodeJSONSections(ctx context.Context, f jsonFile, top map[string]json.Raw
 	} else {
 		servers, errs = p.decodeServers(top[keyMCPServers], origin{scope: f.scope, projectPath: f.topProjectPath()})
 	}
-	if f.withProjects {
-		if hasCaseVariant(top, keyProjects) {
+	// A case variant such as "Projects" is ambiguous: a reader that folds
+	// case would read it as the section.
+	projectsVariant := hasCaseVariant(top, keyProjects)
+	switch f.projects {
+	case projectsRead:
+		if projectsVariant {
 			errs = append(errs, newFileError(f.path, reasonAmbiguousKey))
-		} else {
-			projServers, projErrs := p.decodeProjects(ctx, top[keyProjects])
-			servers = append(servers, projServers...)
-			errs = append(errs, projErrs...)
+			break
 		}
+		projServers, projErrs := p.decodeProjects(ctx, top[keyProjects])
+		servers = append(servers, projServers...)
+		errs = append(errs, projErrs...)
+	case projectsReport:
+		if projectsVariant {
+			errs = append(errs, newFileError(f.path, reasonAmbiguousKey))
+		}
+		// Any value that is not null fails closed, also an empty object or a
+		// value of the wrong type: the section is not read, so this reader
+		// cannot tell that it holds no servers.
+		if !isNull(top[keyProjects]) {
+			errs = append(errs, newFileError(f.path, reasonProjectsNotRead))
+		}
+	case projectsSkip:
+		// A project file must not choose ProjectPath values, so the section
+		// and its case variants are ignored.
 	}
 
 	if p.full {

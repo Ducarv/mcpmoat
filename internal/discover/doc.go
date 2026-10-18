@@ -34,7 +34,10 @@
 //
 //   - in internal/inspect, for the command line and the environment of a
 //     child process, the server endpoint and HTTP request headers;
-//   - in internal/rules, for config rules.
+//   - in internal/rules, for config rules;
+//   - in internal/report, Args.Values only as the input of [RedactArgs], to
+//     show the command and the args through the allowlist as one command
+//     line.
 //
 // Never pass their results to fmt, a logger, an error or an encoder.
 //
@@ -42,7 +45,8 @@
 // and every map key (env and header names) is untrusted text from a config
 // file and can hold control, bidi and non-ASCII characters. The output of
 // URL and Args is printable ASCII, but display code must still escape every
-// field before it prints it to a terminal.
+// field before it prints it to a terminal. Use internal/termsafe for that:
+// FileError.Error and internal/report both do.
 //
 // Config readers must return errors that name the file and the position when
 // it is known, and never a value from the config.
@@ -53,30 +57,48 @@
 // below the Home and WorkDir directories that [Options] gives. See [Discover]
 // for the files, their order and the case where WorkDir is Home.
 //
-// [ReadClaudeCode], [ReadCursor] and [ReadCodex] read one file. They do not
-// check that the file exists, because a missing file is not an error. A
-// caller that needs the file must check it first.
+// [ReadConfig] is the entry point for a file that the user names, for example
+// with --config. A file that the user names can come from anywhere, for
+// example from a cloned repository. So ReadConfig reads it as an untrusted
+// project file: the file itself is confined to its directory (see
+// Symlinks), every server has ScopeProject and every server and error is
+// Untrusted (see Untrusted files), the "projects" section of a JSON file is
+// not read (a section that is there gives an error), and the size limit is
+// maxProjectConfigSize (4 MiB), or maxTOMLSize (256 KiB) for Codex. The file
+// is read once, and the reader parses the bytes of that read. Unlike
+// [Discover], ReadConfig reports a missing file, with the reason "file not
+// found". [ReadConfig] holds the full rules.
 //
-// A file that the user gives, for example with --config, can come from
-// anywhere, for example from a cloned repository. So a caller reads it as an
-// untrusted project file: [ReadClaudeCode] or [ReadCursor] with ScopeProject
-// and an empty projectPath. The read is then confined to the directory of the
-// file (see Symlinks), every server and error is Untrusted (see Untrusted
-// files), the "projects" section of a Claude Code file is not read, and the
-// size limit is maxProjectConfigSize (4 MiB). The one exception is a path
-// that resolves to the user's own global file (~/.claude.json,
-// ~/.cursor/mcp.json or ~/.codex/config.toml). The caller reads that file as
-// a global file, as Discover does. [ReadCodex] always reads a file as a
-// global file and has no untrusted mode, so a caller must not use it for a
-// Codex file that the user gives, unless the path resolves to
-// ~/.codex/config.toml.
+// The one exception is a path that names one of the user's own global files
+// (~/.claude.json, ~/.cursor/mcp.json or ~/.codex/config.toml below the home
+// directory that the caller gives): the same file by [os.SameFile].
+// ReadConfig then reads the global path as a global file, with the reader
+// that Discover uses for it. See [ReadConfig] for what "names" means.
+//
+// For any other file, ReadConfig detects the format with [DetectClient],
+// which gives the rules and their known limits. A file with no servers is
+// accepted only under its known client name, for JSON and for TOML: a .toml
+// file with no mcp_servers key, such as pyproject.toml, is an unknown format
+// unless it is .codex/config.toml.
+//
+// Then ReadConfig parses a JSON file as [ReadClaudeCode] or [ReadCursor] do
+// with ScopeProject and an empty projectPath, and a Codex file with the
+// Codex reader, through internal entries that take the bytes that ReadConfig
+// read. [ReadCodex] always reads a file as a global file and has no untrusted
+// mode, so ReadConfig does not use it for a Codex file that is not
+// ~/.codex/config.toml. Its internal Codex entry gives the servers
+// ScopeProject and marks every server and error Untrusted.
+//
+// [ReadClaudeCode], [ReadCursor] and [ReadCodex] read one file in a known
+// format. They do not check that the file exists, because a missing file is
+// not an error for them. A caller that needs the file must check it first.
 //
 // Each reader returns a [Result]. The servers of one file come in a fixed
 // order: by ProjectPath, then by Name. The errors of one file come in a fixed
 // order too: errors about the whole file (no server name) first, then by
-// server name. Errors with the same server name keep the order in which the reader
-// found them: in ~/.claude.json, the top level first, then the projects
-// sorted by path.
+// server name. Errors with the same server name keep the order in which the
+// reader found them: in ~/.claude.json, the top level first, then the
+// projects sorted by path.
 //
 // A problem in one file, or in one server entry, gives a [FileError]. It never
 // hides the other servers. A FileError names the file, the position when it is
@@ -128,9 +150,9 @@
 // All readers:
 //
 //   - A stdio server keeps command, args, env and, for Codex, cwd (as
-//     [Server.Dir], which tells how to treat a relative cwd). A remote server keeps url and headers. The JSON readers
-//     drop a field that does not belong to the transport; the Codex reader
-//     refuses it (see below).
+//     [Server.Dir], which tells how to treat a relative cwd). A remote
+//     server keeps url and headers. The JSON readers drop a field that does
+//     not belong to the transport; the Codex reader refuses it (see below).
 //   - A file that is not a regular file (for example a directory or a pipe) is
 //     rejected. The readers open the file first and then check its type, so
 //     a pipe cannot block the read.
@@ -179,6 +201,12 @@
 // any regular file that the user can read. An error never shows the content
 // of that file.
 //
+// [ReadConfig] confines a file that the user names as a project file, with
+// the directory of the file as the project directory, unless the file is one
+// of the user's own global files. Only the file itself is confined: a
+// symlink in a directory of the path that the user names is followed. See
+// [ReadConfig].
+//
 // A project file comes from a cloned repository, so the readers open it
 // inside its project directory (with [os.Root]). For [Discover], the project
 // directory is WorkDir. For [ReadClaudeCode] and [ReadCursor] with
@@ -187,16 +215,20 @@
 // ProjectPath than the directory of the read: ReadCursor gives the servers of
 // <project>/.cursor/mcp.json the ProjectPath <project>, but the read stays in
 // .cursor. A symlink that stays inside the project directory is
-// followed. A symlink that leads out of it, every absolute symlink, and a
-// path that is not below it are refused with the reason "file is outside the
-// project". Without this rule, a repository could make mcpmoat read a file
-// of the user, for example ~/.claude.json, as its own project file.
+// followed. A symlink that leads out of it, every absolute symlink below it,
+// and a path that is not below it are refused with the reason "file is
+// outside the project". Without this rule, a repository could make mcpmoat
+// read a file of the user, for example ~/.claude.json, as its own project
+// file. The project directory itself is opened as the caller gives it, so a
+// symlink in its own path is followed.
 //
 // # Untrusted files
 //
-// A project file (<WorkDir>/.mcp.json, <WorkDir>/.cursor/mcp.json, or a file
-// read with [ReadClaudeCode] or [ReadCursor] and ScopeProject) is untrusted:
-// a cloned repository can ship it. Its servers and errors are marked:
+// A project file (<WorkDir>/.mcp.json, <WorkDir>/.cursor/mcp.json, a file
+// read with [ReadClaudeCode] or [ReadCursor] and ScopeProject, or a file
+// given to [ReadConfig] that is not one of the user's own global files) is
+// untrusted: a cloned repository can ship it. Its servers and errors are
+// marked:
 //
 //   - Every [Server] from such a file has [Server.Untrusted] set. Its command
 //     and its URL are not the user's choice, so package internal/inspect must
@@ -215,7 +247,17 @@
 //
 // The JSON readers set Untrusted by scope: with ScopeProject they mark every
 // server and every error of the file. Discover sets it on the canceled error
-// that it adds when ctx ends before a project file is read.
+// that it adds when ctx ends before a project file is read. ReadConfig sets
+// it on its own errors ("file not found", "unknown config format" and the
+// errors of its read) and, through its internal Codex entry, on the servers
+// and errors of a Codex file. Its JSON files are parsed with ScopeProject,
+// so the JSON rule marks them, the "projects section not read" error too.
+//
+// An untrusted file must not choose a working directory outside its project,
+// because inspect would start the server there. So ReadConfig drops, with an
+// error, a server of an untrusted Codex file whose cwd fails its cwd check.
+// The check sees the tree at read time only, so inspect must still not trust
+// Dir blindly. See [ReadConfig] for the rules and their limits.
 //
 // The user's own files are trusted: ~/.claude.json (also the servers under
 // its projects.<path> keys, which Claude Code writes when the user adds a

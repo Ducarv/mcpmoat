@@ -10,7 +10,7 @@ import (
 	"github.com/BurntSushi/toml"
 )
 
-// maxTOMLDepth is the deepest nesting of [ ] and { } that readCodex accepts.
+// maxTOMLDepth is the deepest nesting of [ ] and { } that parseCodex accepts.
 // Real Codex configs nest 3 to 4 levels. The TOML parser has no limit of its
 // own, and deep input can use gigabytes of memory or crash the whole process
 // with a stack overflow that no recover can stop.
@@ -30,7 +30,7 @@ const maxTOMLDepth = 16
 // total and not for each piece.
 const maxTOMLKeyParts = 16
 
-// maxTOMLSize is the largest Codex config file that readCodex reads: 256 KiB.
+// maxTOMLSize is the largest Codex config file that ReadCodex reads: 256 KiB.
 // Real Codex configs are a few KiB, and the TOML parser is slower than the
 // JSON one, so this cap is lower than maxConfigSize.
 const maxTOMLSize = 256 << 10
@@ -38,7 +38,7 @@ const maxTOMLSize = 256 << 10
 // codexServersKey is the top-level key that holds the servers.
 const codexServersKey = "mcp_servers"
 
-// The server keys that Codex knows. readCodex reads the first group (see
+// The server keys that Codex knows. parseCodex reads the first group (see
 // codexReads) and ignores the second (see codexIgnoredKeys).
 //
 // These constants are kept apart from the JSON key constants on purpose,
@@ -62,7 +62,7 @@ const (
 	codexKeyToolTimeoutSec    = "tool_timeout_sec"
 )
 
-// codexIgnoredKeys lists the server keys that Codex knows and readCodex
+// codexIgnoredKeys lists the server keys that Codex knows and parseCodex
 // does not map to a Server field. bearer_token_env_var, env_http_headers and
 // env_vars hold the names of environment variables, and mcpmoat does not read
 // the environment. The scanner does not need enabled, startup_timeout_sec and
@@ -86,10 +86,10 @@ var (
 )
 
 // codexKnownKeys lists every server key that Codex knows: the keys in
-// codexReads and the keys in codexIgnoredKeys. readCodex uses it to find keys
+// codexReads and the keys in codexIgnoredKeys. parseCodex uses it to find keys
 // that differ from a known key only by letter case. It is built once, when
 // the package loads, so codexReads stays the one list of the keys that
-// readCodex reads. No code writes to it.
+// parseCodex reads. No code writes to it.
 var codexKnownKeys = codexAllKeys()
 
 // codexAllKeys returns the keys of codexReads, in order, then the keys in
@@ -113,7 +113,7 @@ const (
 	tomlTypeArrayHash = "ArrayHash"
 )
 
-// codexEntry is the part of one [mcp_servers.<name>] table that readCodex
+// codexEntry is the part of one [mcp_servers.<name>] table that parseCodex
 // uses. decodeCodexEntry fills it from the exact keys in codexReads.
 //
 // Env and HTTPHeaders are SecretMap values, and URL is a URL. The TOML
@@ -128,7 +128,7 @@ type codexEntry struct {
 	Cwd         string
 }
 
-// codexRead is one key that readCodex reads: the TOML type that the value
+// codexRead is one key that parseCodex reads: the TOML type that the value
 // must have, and a pointer to the codexEntry field that takes the value.
 // PrimitiveDecode writes through the pointer.
 type codexRead struct {
@@ -137,7 +137,7 @@ type codexRead struct {
 	dest any
 }
 
-// codexReads returns one codexRead for each server key that readCodex reads,
+// codexReads returns one codexRead for each server key that parseCodex reads,
 // with pointers into e. It is the one list of these keys: codexKnownKeys is
 // built from it.
 func codexReads(e *codexEntry) []codexRead {
@@ -168,23 +168,31 @@ func codexReads(e *codexEntry) []codexRead {
 //
 // See the package doc, Reading configs.
 func ReadCodex(ctx context.Context, path string) Result {
-	servers, errs := readCodex(ctx, path)
+	// root "" reads the user's own file without confinement.
+	data, found, fe := readConfigFile(ctx, path, maxTOMLSize, "")
+	switch {
+	case fe != nil:
+		return Result{Errors: []*FileError{fe}}
+	case !found:
+		return Result{}
+	}
+	servers, errs, _ := parseCodex(ctx, path, data)
 	return Result{Servers: servers, Errors: errs}
 }
 
-// readCodex does the work of ReadCodex. See ReadCodex for the rules.
-func readCodex(ctx context.Context, path string) ([]Server, []*FileError) {
-	data, found, fe := readConfigFile(ctx, path, maxTOMLSize, "")
-	if fe != nil {
-		return nil, []*FileError{fe}
-	}
-	if !found {
-		return nil, nil
-	}
+// parseCodex does the work of ReadCodex and readUntrustedCodex on data, the
+// content of the Codex file at path. See ReadCodex for the rules.
+//
+// noServersKey is true only for valid TOML whose top level has no
+// mcp_servers key, for example an empty file, a file with only comments or a
+// pyproject.toml. Such a file gives no servers and no errors.
+// readUntrustedCodex uses it to refuse a .toml file that is not a Codex
+// config (see ReadConfig).
+func parseCodex(ctx context.Context, path string, data []byte) (servers []Server, errs []*FileError, noServersKey bool) {
 	// Check the shape before the parser sees the data (see maxTOMLDepth and
 	// maxTOMLKeyParts).
 	if r := checkTOMLShape(data, maxTOMLDepth, maxTOMLKeyParts); r != "" {
-		return nil, []*FileError{newFileError(path, r)}
+		return nil, []*FileError{newFileError(path, r)}, false
 	}
 
 	// The file is decoded into maps and not into a struct. The TOML decoder
@@ -198,15 +206,16 @@ func readCodex(ctx context.Context, path string) ([]Server, []*FileError) {
 	var top map[string]toml.Primitive
 	md, err := toml.Decode(string(data), &top)
 	if err != nil {
-		return nil, []*FileError{codexFileError(path, data, err)}
+		return nil, []*FileError{codexFileError(path, data, err)}, false
 	}
 	tables, fe := codexServerTables(&md, path, top)
 	if fe != nil {
-		return nil, []*FileError{fe}
+		return nil, []*FileError{fe}, false
+	}
+	if _, ok := top[codexServersKey]; !ok {
+		return nil, nil, true
 	}
 
-	var servers []Server
-	var errs []*FileError
 	// Sorted names make the output the same on every run (map order is random).
 	for _, name := range slices.Sorted(maps.Keys(tables)) {
 		if err := ctx.Err(); err != nil {
@@ -223,7 +232,7 @@ func readCodex(ctx context.Context, path string) ([]Server, []*FileError) {
 	// The same order as the JSON readers: errors for the whole file (for
 	// example canceled) first, then by server name.
 	sortErrors(errs)
-	return servers, errs
+	return servers, errs, false
 }
 
 // codexServerTables returns the raw [mcp_servers.<name>] tables of the file,

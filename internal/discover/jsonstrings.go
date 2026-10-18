@@ -20,7 +20,7 @@ import (
 //     (two sequences) are two names for the client, but both are "x" and two
 //     U+FFFD for encoding/json.
 //
-// loadJSONFile rejects such a file with reasonBadString. These functions
+// decodeJSONTop rejects such a file with reasonBadString. These functions
 // find the position of the first bad string.
 
 // findBadServerString returns the byte offset in data of the first bad string
@@ -31,7 +31,7 @@ import (
 // The checked parts are:
 //   - the value of every top-level "mcpServers" member: the server names and
 //     all keys and values of the entries (command, args, env, url, headers);
-//   - if withProjects is true, every key of the top-level "projects" object,
+//   - if readProjects is true, every key of the top-level "projects" object,
 //     and the value of every "mcpServers" member of every project.
 //
 // A duplicate key is checked every time it occurs, although encoding/json
@@ -42,7 +42,7 @@ import (
 // server of the file for a reason that does not matter to mcpmoat.
 //
 // data must be a valid JSON object.
-func findBadServerString(data []byte, withProjects bool) (int, string) {
+func findBadServerString(data []byte, readProjects bool) (int, string) {
 	top, _ := objectMembers(data)
 	for _, m := range top {
 		switch {
@@ -50,7 +50,7 @@ func findBadServerString(data []byte, withProjects bool) (int, string) {
 			if off := findBadString(data[m.valStart:m.valEnd]); off >= 0 {
 				return m.valStart + off, ""
 			}
-		case m.key == keyProjects && withProjects:
+		case m.key == keyProjects && readProjects:
 			if off, project := findBadProjectString(data[m.valStart:m.valEnd]); off >= 0 {
 				return m.valStart + off, project
 			}
@@ -126,9 +126,9 @@ func objectMembers(data []byte) ([]jsonMember, bool) {
 		if err := dec.Decode(&raw); err != nil {
 			return nil, false
 		}
-		// Between the key and the value there is only a colon and
-		// whitespace. len(data) minus the length of the rest gives the index.
-		m.valStart = len(data) - len(bytes.TrimLeft(data[m.keyEnd:], " \t\r\n:"))
+		// Between the key and the value there is only a colon and JSON
+		// white space. len(data) minus the length of the rest gives the index.
+		m.valStart = len(data) - len(bytes.TrimLeft(data[m.keyEnd:], jsonSpace+":"))
 		m.valEnd = m.valStart + len(raw)
 		members = append(members, m)
 	}

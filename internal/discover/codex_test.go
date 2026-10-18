@@ -492,7 +492,7 @@ func TestReadCodexFileProblems(t *testing.T) {
 
 // TestReadCodexBadShape checks a mcp_servers key that is not a table.
 //
-// The TOML library does not report an error for these values, so readCodex
+// The TOML library does not report an error for these values, so parseCodex
 // checks the type of the key itself. Each case must give one reasonBadShape
 // error and no servers.
 func TestReadCodexBadShape(t *testing.T) {
@@ -670,7 +670,7 @@ func TestReadCodexTooDeep(t *testing.T) {
 
 // TestReadCodexKeyParts checks the cap on the parts of a full key path (table
 // header, open inline tables and the key itself). A header with 20,000 parts
-// takes seconds and gigabytes in the TOML parser, so readCodex must reject it
+// takes seconds and gigabytes in the TOML parser, so parseCodex must reject it
 // before the parser sees it.
 func TestReadCodexKeyParts(t *testing.T) {
 	t.Parallel()
@@ -784,7 +784,7 @@ func TestReadCodexSizeCap(t *testing.T) {
 }
 
 // TestReadCodexEnvNotATable checks an env or http_headers key that is not a
-// table. The TOML decoder drops such a key without an error, so readCodex
+// table. The TOML decoder drops such a key without an error, so parseCodex
 // checks its type. The other servers must still be returned.
 func TestReadCodexEnvNotATable(t *testing.T) {
 	t.Parallel()
@@ -870,7 +870,7 @@ func TestReadCodexTooManyServers(t *testing.T) {
 	})
 }
 
-// TestReadCodexExactKeys checks that readCodex reads keys exactly, as Codex
+// TestReadCodexExactKeys checks that parseCodex reads keys exactly, as Codex
 // does. The TOML library matches struct fields without regard to letter case,
 // so a reader built on a struct would take "Command" for "command" and could
 // show a different command than the one Codex runs. A key that differs from a
@@ -1059,9 +1059,9 @@ func TestReadCodexCwd(t *testing.T) {
 }
 
 // errAfterCtx is a context whose Err method returns nil for the first calls
-// and context.Canceled after that. It lets a test stop readCodex in the middle
+// and context.Canceled after that. It lets a test stop parseCodex in the middle
 // of its loop over the servers. Done comes from the embedded context and never
-// closes; readCodex only calls Err.
+// closes; parseCodex only calls Err.
 type errAfterCtx struct {
 	context.Context
 	left atomic.Int64 // calls of Err that still return nil
@@ -1077,16 +1077,16 @@ func (c *errAfterCtx) Err() error {
 
 // TestReadCodexErrorOrder checks that errors for the whole file come first,
 // then the errors for servers, sorted by name. A cancel in the middle of the
-// loop adds a file-level error after a server error, so readCodex must sort.
+// loop adds a file-level error after a server error, so parseCodex must sort.
 func TestReadCodexErrorOrder(t *testing.T) {
 	t.Parallel()
 
-	// a and c are bad, b is good. readCodex visits them in this order.
+	// a and c are bad, b is good. parseCodex visits them in this order.
 	config := "[mcp_servers.a]\ncwd = \"/a\"\n\n[mcp_servers.b]\ncommand = \"c\"\n\n[mcp_servers.c]\ncommand = 5\n"
 	path := writeFile(t, t.TempDir(), codexConfigRel, []byte(config))
 
 	sawCancelAfterServer := false
-	// n is how many calls of Err return nil. The exact count that readCodex
+	// n is how many calls of Err return nil. The exact count that parseCodex
 	// needs before the loop is not part of the test, so try several.
 	for n := range 8 {
 		ctx := &errAfterCtx{Context: t.Context()}

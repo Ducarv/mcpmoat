@@ -519,6 +519,42 @@ func TestRunStepsCanceledDuringRead(t *testing.T) {
 	assertDiscoverNames(t, res, []string{"partial"})
 }
 
+// TestBuildStepsGlobalFiles checks that the global steps of buildSteps (the
+// trusted ones) are the files of globalFiles, in the same order, and that
+// each step reads its file with the reader of its globalFile. globalFor and
+// readGlobal use globalFiles, so ReadConfig reads a global file as Discover
+// does.
+func TestBuildStepsGlobalFiles(t *testing.T) {
+	t.Parallel()
+	home := t.TempDir()
+	writeFile(t, home, ".claude.json", []byte(`{"mcpServers":{"a":{"command":"x"}}}`))
+	writeFile(t, home, ".cursor/mcp.json", []byte(`{"mcpServers":{"a":{"command":"x"}}}`))
+	writeFile(t, home, ".codex/config.toml", []byte("[mcp_servers.a]\ncommand = \"x\"\n"))
+
+	// WorkDir is set, so the project steps sit between the global steps.
+	var global []step
+	for _, s := range buildSteps(Options{Home: home, WorkDir: t.TempDir()}) {
+		if !s.untrusted {
+			global = append(global, s)
+		}
+	}
+
+	if len(global) != len(globalFiles) {
+		t.Fatalf("buildSteps() has %d global steps, want %d", len(global), len(globalFiles))
+	}
+	for i, g := range globalFiles {
+		s := global[i]
+		if want := g.path(home); s.path != want {
+			t.Errorf("global step %d path = %q, want %q", i, s.path, want)
+			continue
+		}
+		got, want := s.read(t.Context()), g.read(t.Context(), s.path)
+		if len(got.Servers) != 1 || !reflect.DeepEqual(got, want) {
+			t.Errorf("global step %d (%s) read = %+v, want %+v", i, g.rel, got, want)
+		}
+	}
+}
+
 // TestDiscoverNoLeak checks that no secret value from the config files reaches
 // a server, an error, or their text and JSON forms.
 func TestDiscoverNoLeak(t *testing.T) {

@@ -257,7 +257,9 @@ func writeFile(t testing.TB, dir, rel string, data []byte) string {
 // points to target, and returns the path of the link. It creates the parent
 // directories of the link with mode 0o700. target is stored as given, so a
 // relative target is relative to the directory of the link. It fails the test
-// if the link cannot be created.
+// if the link cannot be created. It does not skip: the tests run on Unix
+// (CI runs Linux and macOS), where a test can always make a symlink, so a
+// failure is a real problem.
 func symlinkTo(t testing.TB, target, dir, rel string) string {
 	t.Helper()
 	link := filepath.Join(dir, filepath.FromSlash(rel))
@@ -324,6 +326,10 @@ var allReasons = [...]reason{
 	reasonEmptyName,
 	reasonEmptyProject,
 	reasonBadString,
+	reasonNotFound,
+	reasonUnknownFormat,
+	reasonProjectsNotRead,
+	reasonCwdOutsideProject,
 }
 
 // codexConfigRel is the path of the Codex config file inside a home

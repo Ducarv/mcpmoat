@@ -31,6 +31,56 @@ type Result struct {
 	Errors []*FileError
 }
 
+// The names that the clients use for their files and directories.
+const (
+	// projectClaudeCodeFile is the Claude Code project file in a project
+	// directory: <WorkDir>/.mcp.json.
+	projectClaudeCodeFile = ".mcp.json"
+	// cursorDir is the directory of a Cursor config, in the home directory
+	// and in a project directory: .cursor/mcp.json.
+	cursorDir = ".cursor"
+	// cursorFile is the name of a Cursor config in cursorDir.
+	cursorFile = "mcp.json"
+	// codexDir is the directory of a Codex config: .codex/config.toml.
+	codexDir = ".codex"
+	// codexFile is the name of a Codex config in codexDir.
+	codexFile = "config.toml"
+)
+
+// The user's own config files, relative to the home directory, with forward
+// slashes. The globalFile values below pair each one with its reader.
+const (
+	globalClaudeCodeFile = ".claude.json"
+	globalCursorFile     = cursorDir + "/" + cursorFile
+	globalCodexFile      = codexDir + "/" + codexFile
+)
+
+// globalFile is one of the user's own config files, and the read that
+// Discover does for it.
+type globalFile struct {
+	rel  string // one of the global file constants, such as globalCodexFile
+	read func(ctx context.Context, path string) Result
+}
+
+// path returns the path of the global file below home.
+func (g globalFile) path(home string) string {
+	return filepath.Join(home, filepath.FromSlash(g.rel))
+}
+
+// The user's own config files, each with the reader and the scope that
+// Discover uses for it. buildSteps uses them for the global steps of
+// Discover, and globalFor finds them for ReadConfig through globalFiles, so
+// both use one definition. No code writes to them.
+var (
+	globalClaudeCode = globalFile{globalClaudeCodeFile, readGlobalClaudeCode}
+	globalCursor     = globalFile{globalCursorFile, readGlobalCursor}
+	globalCodex      = globalFile{globalCodexFile, ReadCodex}
+)
+
+// globalFiles lists the global files above, in the order of the global steps
+// of Discover (TestBuildStepsGlobalFiles checks this). No code writes to it.
+var globalFiles = [...]globalFile{globalClaudeCode, globalCursor, globalCodex}
+
 // step is one config file that Discover reads.
 type step struct {
 	// path is used for the FileError when the context is canceled before the
@@ -119,7 +169,10 @@ func hasCanceled(errs []*FileError) bool {
 
 // buildSteps lists the files to read, in order. Each step is a small closure
 // (a function that keeps the variables around it), so Discover can run all
-// steps with one loop. runSteps passes the context to each step.
+// steps with one loop. runSteps passes the context to each step. The global
+// steps take their path and their reader from the globalFile values
+// (globalClaudeCode, globalCursor and globalCodex), so ReadConfig reads a
+// global file exactly as Discover does.
 func buildSteps(opts Options) []step {
 	// Clean the paths once. filepath.Clean("") returns ".", so an empty value
 	// must stay empty: it means "skip these files".
@@ -127,31 +180,34 @@ func buildSteps(opts Options) []step {
 	opts.WorkDir = cleanDir(opts.WorkDir)
 
 	var steps []step
-
-	if opts.Home != "" {
-		path := filepath.Join(opts.Home, ".claude.json")
+	// addGlobal adds the step of the global file g, when Home is set.
+	addGlobal := func(g globalFile) {
+		if opts.Home == "" {
+			return
+		}
+		path := g.path(opts.Home)
 		steps = append(steps, step{path: path, read: func(ctx context.Context) Result {
-			return ReadClaudeCode(ctx, path, ScopeGlobal, "")
+			return g.read(ctx, path)
 		}})
 	}
+
+	addGlobal(globalClaudeCode)
 	if opts.WorkDir != "" {
-		path := filepath.Join(opts.WorkDir, ".mcp.json")
+		path := filepath.Join(opts.WorkDir, projectClaudeCodeFile)
 		steps = append(steps, step{path: path, untrusted: true, read: func(ctx context.Context) Result {
 			return ReadClaudeCode(ctx, path, ScopeProject, opts.WorkDir)
 		}})
 	}
 
-	// homeCursor stays empty when Home is empty. The Cursor project path is
-	// never empty, so it never equals an empty homeCursor.
-	var homeCursor string
-	if opts.Home != "" {
-		homeCursor = filepath.Join(opts.Home, ".cursor", "mcp.json")
-		steps = append(steps, step{path: homeCursor, read: func(ctx context.Context) Result {
-			return ReadCursor(ctx, homeCursor, ScopeGlobal, "")
-		}})
-	}
+	addGlobal(globalCursor)
 	if opts.WorkDir != "" {
-		path := filepath.Join(opts.WorkDir, ".cursor", "mcp.json")
+		// homeCursor stays empty when Home is empty. The Cursor project path
+		// is never empty, so it never equals an empty homeCursor.
+		var homeCursor string
+		if opts.Home != "" {
+			homeCursor = globalCursor.path(opts.Home)
+		}
+		path := filepath.Join(opts.WorkDir, cursorDir, cursorFile)
 		// When WorkDir is Home, this is the same file as the home Cursor
 		// config: read it once, as a global config. Both paths are already
 		// cleaned, so a string compare is enough. See Discover for the limits
@@ -163,12 +219,7 @@ func buildSteps(opts Options) []step {
 		}
 	}
 
-	if opts.Home != "" {
-		path := filepath.Join(opts.Home, ".codex", "config.toml")
-		steps = append(steps, step{path: path, read: func(ctx context.Context) Result {
-			return ReadCodex(ctx, path)
-		}})
-	}
+	addGlobal(globalCodex)
 	return steps
 }
 
