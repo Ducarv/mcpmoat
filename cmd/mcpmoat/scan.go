@@ -78,29 +78,29 @@ func (c *cli) runScan(_ options, args []string) int {
 		// termsafe.Quote escapes the whole message, and quotes it only when
 		// it holds an unsafe rune. See dispatch in cli.go for why this
 		// differs from quoteArg.
-		fprintf(c.stderr, "mcpmoat scan: %s\n", termsafe.Quote(err.Error()))
-		fprintf(c.stderr, "Run \"mcpmoat help\" for usage.\n")
-		return exitError
+		return c.usageError("scan", "%s", termsafe.Quote(err.Error()))
 	}
 	if c.rejectArgs("scan", fs.Args()) {
 		return exitError
 	}
 
 	// Check the values in both modes, so a bad value is a usage error even
-	// when --no-connect starts no server. The messages name the flag and do
-	// not repeat the value. inspect.Options.Validate is not used here because
-	// its messages name no flag and repeat the value. M3 passes
-	// inspect.Options{Timeout: *timeout, Concurrency: *concurrency} to
-	// inspect.Run.
-	if *timeout <= 0 {
-		fprintf(c.stderr, "mcpmoat scan: --timeout must be greater than 0\n")
-		fprintf(c.stderr, "Run \"mcpmoat help\" for usage.\n")
-		return exitError
-	}
-	if *concurrency < 1 {
-		fprintf(c.stderr, "mcpmoat scan: --concurrency must be at least 1\n")
-		fprintf(c.stderr, "Run \"mcpmoat help\" for usage.\n")
-		return exitError
+	// when --no-connect starts no server. inspect.Options.Validate holds the
+	// rules. Its messages name no flag and repeat the value, so the errors.Is
+	// checks map each error to a message that names the flag and does not
+	// repeat the value. M3 passes opts to inspect.Run.
+	opts := inspect.Options{Timeout: *timeout, Concurrency: *concurrency}
+	if err := opts.Validate(); err != nil {
+		switch {
+		case errors.Is(err, inspect.ErrInvalidTimeout):
+			return c.usageError("scan", "--timeout must be greater than 0")
+		case errors.Is(err, inspect.ErrInvalidConcurrency):
+			return c.usageError("scan", "--concurrency must be at least 1")
+		default:
+			// A rule that Validate gets later. Its text holds only our own
+			// words and numbers.
+			return c.usageError("scan", "%v", err)
+		}
 	}
 
 	if !*noConnect {
