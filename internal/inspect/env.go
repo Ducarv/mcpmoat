@@ -12,7 +12,9 @@ import (
 
 // baseEnvKeys are the variables that a stdio server child process gets from
 // the environment of mcpmoat. Every other parent variable is dropped.
-var baseEnvKeys = []string{
+//
+// It is an array, not a slice, so that no code can append to it at run time.
+var baseEnvKeys = [...]string{
 	// PATH lets launchers such as npx, uvx or docker find their own
 	// helpers (for example node). The command itself is not resolved
 	// against it here: inspect runs exactly the configured command.
@@ -60,12 +62,9 @@ func childEnv(getenv func(string) string, env discover.SecretMap) ([]string, err
 	// env.Keys gives the keys in sorted order, so the position in an error
 	// is stable from run to run.
 	for i, key := range env.Keys() {
-		if err := checkEnvKey(key); err != nil {
-			return nil, fmt.Errorf("%w: env key #%d (sorted order): %w", ErrInvalidServer, i+1, err)
-		}
 		value := env[key].Reveal()
-		if strings.ContainsRune(value, 0) {
-			return nil, fmt.Errorf("%w: env key #%d (sorted order): value contains a NUL byte", ErrInvalidServer, i+1)
+		if err := checkEnvEntry(key, value); err != nil {
+			return nil, fmt.Errorf("%w: env key #%d (sorted order): %w", ErrInvalidServer, i+1, err)
 		}
 		vars[key] = value
 	}
@@ -77,9 +76,9 @@ func childEnv(getenv func(string) string, env discover.SecretMap) ([]string, err
 	return entries, nil
 }
 
-// checkEnvKey reports why key cannot be an environment variable name, or nil
-// if it can. The error text never contains the key itself.
-func checkEnvKey(key string) error {
+// checkEnvEntry reports why key and value cannot be an environment variable,
+// or nil if they can. The error text never contains the key or the value.
+func checkEnvEntry(key, value string) error {
 	switch {
 	case key == "":
 		return errors.New("key is empty")
@@ -87,6 +86,8 @@ func checkEnvKey(key string) error {
 		return errors.New("key contains '='")
 	case strings.ContainsRune(key, 0):
 		return errors.New("key contains a NUL byte")
+	case strings.ContainsRune(value, 0):
+		return errors.New("value contains a NUL byte")
 	}
 	return nil
 }

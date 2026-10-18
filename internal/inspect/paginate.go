@@ -23,9 +23,8 @@ const (
 // collect requests pages from fetch until the server sends an empty next
 // cursor, and returns all items in the order that the server sent them.
 //
-// T is a type parameter: collect works for any item type, so the same loop
-// lists tools ([]Tool), prompts ([]Prompt) and resources ([]Resource). The
-// caller picks T through the fetch and size functions that it gives.
+// The same loop lists tools, prompts and resources: the caller picks the item
+// type through the fetch and size functions that it gives.
 //
 // The first call to fetch gets the cursor "". Each next call gets the next
 // cursor of the previous page.
@@ -40,7 +39,9 @@ const (
 // more than maxPages pages or more than maxItems items, sends more bytes than
 // budget has left, or sends a cursor that it sent before. It returns the
 // context error when ctx is done before a page, and the error of fetch,
-// wrapped, when fetch fails. On an error, the items are nil.
+// wrapped, when fetch fails. On an error, the items are nil. On success, the
+// items are never nil, also when the server lists no items: a nil slice in a
+// [Result] means that the server does not advertise the kind.
 //
 // The error text never contains a cursor: a cursor is untrusted text from the
 // server and can be very long. The text gives counts only.
@@ -50,7 +51,7 @@ func collect[T any](
 	size func(T) int,
 	fetch func(ctx context.Context, cursor string) (items []T, next string, err error),
 ) ([]T, error) {
-	var all []T
+	all := []T{}
 	seen := make(map[string]struct{}) // non-empty cursors that the server sent
 	cursor := ""
 

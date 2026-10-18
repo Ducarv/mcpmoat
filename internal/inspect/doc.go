@@ -83,7 +83,7 @@
 // stopped and reaped. A normal stop has these steps:
 //
 //  1. Close the stdin of the child.
-//  2. If the child still runs after stopGrace (2 seconds), send SIGTERM.
+//  2. If the child still runs after stopGrace, send SIGTERM.
 //  3. If the child still runs after one more stopGrace, send SIGKILL.
 //
 // When ctx is canceled or its deadline passes, the child gets SIGKILL at
@@ -130,7 +130,7 @@
 //
 // Inspect lists a kind only when the server advertises its capability in the
 // handshake. The slice of a kind that the server does not advertise stays
-// nil.
+// nil; the slice of an advertised kind is never nil, also when it is empty.
 //
 // # Known limits
 //
@@ -144,6 +144,10 @@
 //     is not silent: Inspect returns an error that wraps [ErrProtocol] and
 //     gives the number of dropped tools. The detection depends on where
 //     the SDK filters; a test fails if a new SDK version changes that.
+//   - A server can tell mcpmoat apart from the real client and show it a
+//     clean list: the handshake sends the client name "mcpmoat", and a
+//     server can leave out the tools capability for mcpmoat only. A nil
+//     [Result.Tools] shows the second case. See issue #97.
 //   - Resource templates are not listed.
 //   - HTTP and SSE servers give [ErrUnsupportedTransport] until issue #26.
 //   - There is no per-server timeout yet (issue #28). Until then, callers

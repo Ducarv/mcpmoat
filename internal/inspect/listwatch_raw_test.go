@@ -22,19 +22,6 @@ const testRawLimit = 16 << 10 // 16 KiB
 // (which does not count _meta or icons) stays far from its limit.
 const bigField = 4 << 10 // 4 KiB
 
-// onMethod returns a receiving middleware that answers method with h and
-// passes every other method on.
-func onMethod(method string, h mcp.MethodHandler) mcp.Middleware {
-	return func(next mcp.MethodHandler) mcp.MethodHandler {
-		return func(ctx context.Context, m string, req mcp.Request) (mcp.Result, error) {
-			if m == method {
-				return h(ctx, m, req)
-			}
-			return next(ctx, m, req)
-		}
-	}
-}
-
 // endlessPages returns a handler that counts its requests in calls and
 // answers each one with page(next), where next is a new cursor each time.
 // So only a limit of mcpmoat stops the listing.
@@ -56,7 +43,7 @@ func bigIcons() []mcp.Icon {
 // rawServer returns a server that advertises tools, prompts and resources.
 func rawServer() *mcp.Server {
 	server := mcp.NewServer(&mcp.Implementation{Name: "raw", Version: "1"}, nil)
-	server.AddTool(valid("t"), noopTool)
+	server.AddTool(validTool("t"), noopTool)
 	server.AddPrompt(&mcp.Prompt{Name: "p"}, noopPrompt)
 	server.AddResource(&mcp.Resource{URI: "file:///r", Name: "r"}, noopResource)
 	return server
@@ -67,12 +54,12 @@ func TestInspectWatchedRawLimit(t *testing.T) {
 
 	toolsMeta := func(next string) mcp.Result {
 		return &mcp.ListToolsResult{Tools: []*mcp.Tool{{
-			Meta: bigMeta(), Name: "t", InputSchema: map[string]any{"type": "object"},
+			Meta: bigMeta(), Name: "t", InputSchema: objectSchema(),
 		}}, NextCursor: next}
 	}
 	toolsIcons := func(next string) mcp.Result {
 		return &mcp.ListToolsResult{Tools: []*mcp.Tool{{
-			Icons: bigIcons(), Name: "t", InputSchema: map[string]any{"type": "object"},
+			Icons: bigIcons(), Name: "t", InputSchema: objectSchema(),
 		}}, NextCursor: next}
 	}
 	promptsMeta := func(next string) mcp.Result {
@@ -152,7 +139,7 @@ func TestInspectWatchedRawLimitShared(t *testing.T) {
 				next = "c" + strconv.FormatInt(n, 10)
 			}
 			return &mcp.ListToolsResult{Tools: []*mcp.Tool{{
-				Meta: bigMeta(), Name: "t", InputSchema: map[string]any{"type": "object"},
+				Meta: bigMeta(), Name: "t", InputSchema: objectSchema(),
 			}}, NextCursor: next}, nil
 		}),
 		// One prompt page of about bigField: together over the limit.
@@ -191,7 +178,7 @@ func TestInspectWatchedUnderRawLimit(t *testing.T) {
 	server.AddReceivingMiddleware(
 		onMethod("tools/list", func(context.Context, string, mcp.Request) (mcp.Result, error) {
 			return &mcp.ListToolsResult{Tools: []*mcp.Tool{{
-				Meta: bigMeta(), Name: "t", InputSchema: map[string]any{"type": "object"},
+				Meta: bigMeta(), Name: "t", InputSchema: objectSchema(),
 			}}}, nil
 		}),
 		onMethod("prompts/list", func(context.Context, string, mcp.Request) (mcp.Result, error) {
@@ -279,8 +266,8 @@ func TestListWatchMiddlewareMarshalError(t *testing.T) {
 	// A decoded page always marshals; a func value is the simplest way to
 	// make json.Marshal fail. The key stands for server text.
 	page := &mcp.ListToolsResult{Tools: []*mcp.Tool{{
-		Name:        secret,
-		InputSchema: map[string]any{secret: func() {}},
+		Name:        poisonText,
+		InputSchema: map[string]any{poisonText: func() {}},
 	}}}
 	next := func(context.Context, string, mcp.Request) (mcp.Result, error) { return page, nil }
 
@@ -292,7 +279,7 @@ func TestListWatchMiddlewareMarshalError(t *testing.T) {
 	if res != nil {
 		t.Errorf("middleware result = %#v, want nil", res)
 	}
-	if strings.Contains(err.Error(), secret) {
+	if strings.Contains(err.Error(), poisonText) {
 		t.Errorf("middleware error = %q, must not contain server text", err)
 	}
 	if n := w.sentTools.Load(); n != 0 {

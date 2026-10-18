@@ -40,11 +40,11 @@ type SDKInspector struct {
 	// getenv reads the environment of mcpmoat for the base keys of the
 	// child environment (see childEnv). New sets it to os.Getenv; tests in
 	// this package can replace it, so that they never read the real
-	// environment.
+	// environment. When it is nil (a zero SDKInspector), Inspect uses
+	// os.Getenv.
 	getenv func(string) string
 }
 
-// SDKInspector must satisfy Inspector. This line makes the compiler check it.
 var _ Inspector = (*SDKInspector)(nil)
 
 // New returns an [SDKInspector] with the options opts.
@@ -85,9 +85,7 @@ func (i *SDKInspector) Inspect(ctx context.Context, s discover.Server) (Result, 
 		return Result{}, err
 	}
 
-	// About the defers below: Go runs deferred calls in the reverse order
-	// of the defer statements (last in, first out). So this function stops
-	// things in this order:
+	// The defers below stop things in this order:
 	//
 	//  1. cs.Close: ends the MCP session.
 	//  2. transport.close: closes the connection, which closes stdin of the
@@ -104,7 +102,11 @@ func (i *SDKInspector) Inspect(ctx context.Context, s discover.Server) (Result, 
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
-	cmd, cleanup, err := buildCommand(ctx, s, i.getenv)
+	getenv := i.getenv
+	if getenv == nil {
+		getenv = os.Getenv
+	}
+	cmd, cleanup, err := buildCommand(ctx, s, getenv)
 	// cleanup is never nil, also on error, so it is safe to defer it before
 	// the error check.
 	defer cleanup()
@@ -132,11 +134,7 @@ func (i *SDKInspector) Inspect(ctx context.Context, s discover.Server) (Result, 
 	// does not change the result, so Inspect drops it.
 	defer func() { _ = cs.Close() }()
 
-	res, err := inspectWatched(ctx, cs, watch)
-	if err != nil {
-		return Result{}, err
-	}
-	return res, nil
+	return inspectWatched(ctx, cs, watch)
 }
 
 // newClient returns a new SDK client for one call to Inspect.
@@ -187,7 +185,8 @@ func (i *SDKInspector) newClient() *mcp.Client {
 // It lists a kind only when the server advertises its capability in the
 // handshake (tools, prompts or resources). A server without that capability
 // would answer "method not found". The slice of a kind that the server does
-// not advertise stays nil.
+// not advertise stays nil. The slice of an advertised kind is never nil, also
+// when it is empty, so callers can tell the two cases apart (issue #97).
 //
 // It uses the paged ListX calls through collect, not the SDK iterators such
 // as cs.Tools, because the iterators have no limit on pages or items. One

@@ -26,7 +26,8 @@
 //	    if set, write the sorted environment, one VAR=value per line, to this
 //	    file at start (tests use it to check the scrubbed environment, NFR-04)
 //
-// An unknown mode or a file write error exits with code 2.
+// Bad flags, an unknown mode or a file write error exit with code 2. A
+// server error other than a closed stdin or a signal exits with code 1.
 //
 // The server writes only MCP protocol messages to stdout. Errors go to stderr.
 package main
@@ -52,8 +53,17 @@ import (
 // Exit codes of this program.
 const (
 	exitOK    = 0
+	exitServe = 1 // the MCP server stopped with an error
 	exitUsage = 2 // bad flags, unknown mode or a file write error
 	exitCrash = 3 // the crash mode
+)
+
+// The modes of the -mode flag.
+const (
+	modeOK       = "ok"
+	modeCrash    = "crash"
+	modeHangInit = "hang-init"
+	modeHangList = "hang-list"
 )
 
 // The input schemas are fixed JSON text, so the bytes on the wire stay the
@@ -77,7 +87,7 @@ func main() {
 func run(args []string, stderr io.Writer) int {
 	fs := flag.NewFlagSet("benign", flag.ContinueOnError)
 	fs.SetOutput(stderr)
-	mode := fs.String("mode", "ok", "ok | crash | hang-init | hang-list")
+	mode := fs.String("mode", modeOK, modeOK+" | "+modeCrash+" | "+modeHangInit+" | "+modeHangList)
 	pidFile := fs.String("pidfile", "", "write the process ID to this file")
 	envFile := fs.String("envfile", "", "write the sorted environment to this file")
 	if err := fs.Parse(args); err != nil {
@@ -89,37 +99,21 @@ func run(args []string, stderr io.Writer) int {
 	}
 
 	switch *mode {
-	case "ok", "crash", "hang-init", "hang-list":
+	case modeOK, modeCrash, modeHangInit, modeHangList:
 	default:
 		fmt.Fprintf(stderr, "benign: unknown mode %q\n", *mode)
 		return exitUsage
 	}
 
-	if *pidFile != "" {
-		pid := strconv.Itoa(os.Getpid()) + "\n"
-		if err := os.WriteFile(*pidFile, []byte(pid), 0o600); err != nil {
-			fmt.Fprintf(stderr, "benign: write pidfile: %v\n", err)
-			return exitUsage
-		}
-	}
-	if *envFile != "" {
-		env := os.Environ()
-		slices.Sort(env)
-		var b strings.Builder
-		for _, line := range env {
-			b.WriteString(line)
-			b.WriteString("\n")
-		}
-		if err := os.WriteFile(*envFile, []byte(b.String()), 0o600); err != nil {
-			fmt.Fprintf(stderr, "benign: write envfile: %v\n", err)
-			return exitUsage
-		}
+	if err := writeStartFiles(*pidFile, *envFile); err != nil {
+		fmt.Fprintf(stderr, "benign: %v\n", err)
+		return exitUsage
 	}
 
 	switch *mode {
-	case "crash":
+	case modeCrash:
 		return exitCrash
-	case "hang-init":
+	case modeHangInit:
 		// Do not use select{} here. With no other goroutines, the Go runtime
 		// sees that nothing can ever wake up, reports a deadlock and exits.
 		// A sleeping goroutine does not count as a deadlock.
@@ -133,7 +127,7 @@ func run(args []string, stderr io.Writer) int {
 	defer stop()
 
 	server := newServer()
-	if *mode == "hang-list" {
+	if *mode == modeHangList {
 		server.AddReceivingMiddleware(blockToolsList)
 	}
 
@@ -141,9 +135,33 @@ func run(args []string, stderr io.Writer) int {
 	// A closed stdin or a signal is a normal end for this server.
 	if err != nil && !errors.Is(err, context.Canceled) && !errors.Is(err, io.EOF) {
 		fmt.Fprintf(stderr, "benign: %v\n", err)
-		return exitUsage
+		return exitServe
 	}
 	return exitOK
+}
+
+// writeStartFiles writes the process ID to pidFile and the sorted
+// environment to envFile. An empty path skips that file.
+func writeStartFiles(pidFile, envFile string) error {
+	if pidFile != "" {
+		pid := strconv.Itoa(os.Getpid()) + "\n"
+		if err := os.WriteFile(pidFile, []byte(pid), 0o600); err != nil {
+			return fmt.Errorf("write pidfile: %w", err)
+		}
+	}
+	if envFile != "" {
+		env := os.Environ()
+		slices.Sort(env)
+		var b strings.Builder
+		for _, line := range env {
+			b.WriteString(line)
+			b.WriteString("\n")
+		}
+		if err := os.WriteFile(envFile, []byte(b.String()), 0o600); err != nil {
+			return fmt.Errorf("write envfile: %w", err)
+		}
+	}
+	return nil
 }
 
 // newServer returns the server with its tools, prompt and resource.

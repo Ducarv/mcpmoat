@@ -12,10 +12,13 @@ import (
 	"github.com/Ducarv/mcpmoat/internal/discover"
 )
 
-// waitDelay bounds how long Wait waits for the I/O pipes of a stdio server
-// after the process exits or ctx kills it. A server can start a helper
-// process that keeps the pipes open after the server itself exits. Without
-// this bound, Wait would block until that helper exits too.
+// waitDelay is a backstop for Wait after ctx is done. os/exec then kills the
+// process (cmd.Cancel). If Wait still has not returned after waitDelay, it
+// kills the process again and closes the pipes. It does not bound a normal
+// stop: stdin and stdout are pipes from StdinPipe and StdoutPipe and stderr
+// is os.DevNull, so os/exec copies nothing in a goroutine, and Wait returns
+// when the child exits, even if a process that the child started still
+// holds the pipes.
 const waitDelay = 2 * time.Second
 
 // noCleanup is the cleanup func that buildCommand returns when there is

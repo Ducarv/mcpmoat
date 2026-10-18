@@ -78,9 +78,11 @@ func TestCollect(t *testing.T) {
 			wantCursors: []string{"", "c1", "c2"},
 		},
 		{
+			// Empty, not nil: a nil slice in a Result means that the
+			// server does not advertise the kind.
 			name:        "zero items",
 			pages:       []page{{}},
-			want:        nil,
+			want:        []int{},
 			wantCursors: []string{""},
 		},
 		{

@@ -24,22 +24,8 @@ func connectWatched(t *testing.T, server *mcp.Server) (*mcp.ClientSession, *list
 // connectWatchedLimit is connectWatched with the raw byte limit rawLimit.
 func connectWatchedLimit(t *testing.T, server *mcp.Server, rawLimit int64) (*mcp.ClientSession, *listWatch) {
 	t.Helper()
-	ctx := t.Context()
-	ct, st := mcp.NewInMemoryTransports()
-
-	ss, err := server.Connect(ctx, st, nil)
-	if err != nil {
-		t.Fatalf("server.Connect() error = %v", err)
-	}
-	t.Cleanup(func() { _ = ss.Close() })
-
 	client, w := New(Options{}).newWatchedClient(rawLimit)
-	cs, err := client.Connect(ctx, ct, nil)
-	if err != nil {
-		t.Fatalf("client.Connect() error = %v", err)
-	}
-	t.Cleanup(func() { _ = cs.Close() })
-	return cs, w
+	return connectClient(t, server, client), w
 }
 
 // headerSchema returns an object input schema with one property p of type
@@ -75,12 +61,13 @@ func pagedTools(pages ...[]*mcp.Tool) mcp.MethodHandler {
 	}
 }
 
-// secret is text in the refused tools that must never reach an error text:
+// poisonText is text in the refused tools that must never reach an error text:
 // it stands for untrusted server text.
-const secret = "HIDDEN-POISON"
+const poisonText = "HIDDEN-POISON"
 
-func valid(name string) *mcp.Tool {
-	return &mcp.Tool{Name: name, InputSchema: map[string]any{"type": "object"}}
+// validTool returns a tool that the SDK accepts.
+func validTool(name string) *mcp.Tool {
+	return &mcp.Tool{Name: name, InputSchema: objectSchema()}
 }
 
 func TestInspectWatchedDroppedTools(t *testing.T) {
@@ -88,24 +75,24 @@ func TestInspectWatchedDroppedTools(t *testing.T) {
 
 	// Each refused tool is invalid for one reason that filterValidTools
 	// checks in SDK v1.8.0 (streamable_headers.go).
-	nonPrimitive := &mcp.Tool{Name: secret, Description: secret, InputSchema: headerSchema("object", "X-"+secret)}
-	emptyHeader := &mcp.Tool{Name: secret, InputSchema: headerSchema("string", "")}
-	notString := &mcp.Tool{Name: secret, InputSchema: headerSchema("string", 42)}
-	badChar := &mcp.Tool{Name: secret, InputSchema: headerSchema("string", "X "+secret)}
-	duplicate := &mcp.Tool{Name: secret, InputSchema: map[string]any{
+	nonPrimitive := &mcp.Tool{Name: poisonText, Description: poisonText, InputSchema: headerSchema("object", "X-"+poisonText)}
+	emptyHeader := &mcp.Tool{Name: poisonText, InputSchema: headerSchema("string", "")}
+	notString := &mcp.Tool{Name: poisonText, InputSchema: headerSchema("string", 42)}
+	badChar := &mcp.Tool{Name: poisonText, InputSchema: headerSchema("string", "X "+poisonText)}
+	duplicate := &mcp.Tool{Name: poisonText, InputSchema: map[string]any{
 		"type": "object",
 		"properties": map[string]any{
-			"a": map[string]any{"type": "string", "x-mcp-header": "X-" + secret},
-			"b": map[string]any{"type": "string", "x-mcp-header": "x-" + strings.ToLower(secret)},
+			"a": map[string]any{"type": "string", "x-mcp-header": "X-" + poisonText},
+			"b": map[string]any{"type": "string", "x-mcp-header": "x-" + strings.ToLower(poisonText)},
 		},
 	}}
-	nested := &mcp.Tool{Name: secret, InputSchema: map[string]any{
+	nested := &mcp.Tool{Name: poisonText, InputSchema: map[string]any{
 		"type": "object",
 		"properties": map[string]any{
 			"outer": map[string]any{
 				"type": "object",
 				"properties": map[string]any{
-					"inner": map[string]any{"type": "array", "x-mcp-header": "X-" + secret},
+					"inner": map[string]any{"type": "array", "x-mcp-header": "X-" + poisonText},
 				},
 			},
 		},
@@ -116,23 +103,23 @@ func TestInspectWatchedDroppedTools(t *testing.T) {
 		pages       [][]*mcp.Tool
 		wantDropped int
 	}{
-		{"header on non-primitive", [][]*mcp.Tool{{valid("ok"), nonPrimitive}}, 1},
-		{"empty header name", [][]*mcp.Tool{{emptyHeader, valid("ok")}}, 1},
-		{"header name not a string", [][]*mcp.Tool{{valid("ok"), notString}}, 1},
-		{"invalid header character", [][]*mcp.Tool{{valid("ok"), badChar}}, 1},
-		{"duplicate header name", [][]*mcp.Tool{{valid("ok"), duplicate}}, 1},
-		{"nested header on array", [][]*mcp.Tool{{valid("ok"), nested}}, 1},
-		{"nil tool", [][]*mcp.Tool{{valid("ok"), nil}}, 1},
+		{"header on non-primitive", [][]*mcp.Tool{{validTool("ok"), nonPrimitive}}, 1},
+		{"empty header name", [][]*mcp.Tool{{emptyHeader, validTool("ok")}}, 1},
+		{"header name not a string", [][]*mcp.Tool{{validTool("ok"), notString}}, 1},
+		{"invalid header character", [][]*mcp.Tool{{validTool("ok"), badChar}}, 1},
+		{"duplicate header name", [][]*mcp.Tool{{validTool("ok"), duplicate}}, 1},
+		{"nested header on array", [][]*mcp.Tool{{validTool("ok"), nested}}, 1},
+		{"nil tool", [][]*mcp.Tool{{validTool("ok"), nil}}, 1},
 		{"only refused tools", [][]*mcp.Tool{{nonPrimitive, badChar}}, 2},
-		{"drops on a later page", [][]*mcp.Tool{{valid("a")}, {valid("b"), duplicate, nil}, {valid("c")}}, 2},
+		{"drops on a later page", [][]*mcp.Tool{{validTool("a")}, {validTool("b"), duplicate, nil}, {validTool("c")}}, 2},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 
 			server := mcp.NewServer(&mcp.Implementation{Name: "dropper", Version: "1"}, nil)
-			server.AddTool(valid("ok"), noopTool) // advertises the tools capability
-			server.AddReceivingMiddleware(onToolsList(pagedTools(tt.pages...)))
+			server.AddTool(validTool("ok"), noopTool) // advertises the tools capability
+			server.AddReceivingMiddleware(onMethod("tools/list", pagedTools(tt.pages...)))
 
 			cs, w := connectWatched(t, server)
 
@@ -151,7 +138,7 @@ func TestInspectWatchedDroppedTools(t *testing.T) {
 			if !strings.Contains(err.Error(), want) {
 				t.Errorf("inspectWatched() error = %q, want it to contain %q", err, want)
 			}
-			if strings.Contains(strings.ToLower(err.Error()), strings.ToLower(secret)) {
+			if strings.Contains(strings.ToLower(err.Error()), strings.ToLower(poisonText)) {
 				t.Errorf("inspectWatched() error = %q, must not contain server text", err)
 			}
 		})
@@ -166,9 +153,9 @@ func TestSDKStillDropsTools(t *testing.T) {
 	t.Parallel()
 
 	server := mcp.NewServer(&mcp.Implementation{Name: "dropper", Version: "1"}, nil)
-	server.AddTool(valid("ok"), noopTool)
-	server.AddReceivingMiddleware(onToolsList(pagedTools(
-		[]*mcp.Tool{valid("ok"), {Name: secret, InputSchema: headerSchema("object", "X-P")}},
+	server.AddTool(validTool("ok"), noopTool)
+	server.AddReceivingMiddleware(onMethod("tools/list", pagedTools(
+		[]*mcp.Tool{validTool("ok"), {Name: poisonText, InputSchema: headerSchema("object", "X-P")}},
 	)))
 
 	cs := connectInMemory(t, server)
@@ -193,8 +180,8 @@ func TestInspectWatchedValidTools(t *testing.T) {
 		pages     [][]*mcp.Tool
 		wantNames []string
 	}{
-		{"one page", [][]*mcp.Tool{{valid("a"), withHeader}}, []string{"a", "with-header"}},
-		{"two pages", [][]*mcp.Tool{{valid("a")}, {valid("b")}}, []string{"a", "b"}},
+		{"one page", [][]*mcp.Tool{{validTool("a"), withHeader}}, []string{"a", "with-header"}},
+		{"two pages", [][]*mcp.Tool{{validTool("a")}, {validTool("b")}}, []string{"a", "b"}},
 		{"empty page", [][]*mcp.Tool{{}}, nil},
 	}
 	for _, tt := range tests {
@@ -202,8 +189,8 @@ func TestInspectWatchedValidTools(t *testing.T) {
 			t.Parallel()
 
 			server := mcp.NewServer(&mcp.Implementation{Name: "valid", Version: "1"}, nil)
-			server.AddTool(valid("ok"), noopTool)
-			server.AddReceivingMiddleware(onToolsList(pagedTools(tt.pages...)))
+			server.AddTool(validTool("ok"), noopTool)
+			server.AddReceivingMiddleware(onMethod("tools/list", pagedTools(tt.pages...)))
 
 			cs, w := connectWatched(t, server)
 
@@ -257,7 +244,7 @@ func TestListWatchMiddleware(t *testing.T) {
 		// res to rawBytes.
 		wantRaw bool
 	}{
-		{"tools page", &mcp.ListToolsResult{Tools: []*mcp.Tool{valid("a"), nil, valid("b")}}, nil, 3, true},
+		{"tools page", &mcp.ListToolsResult{Tools: []*mcp.Tool{validTool("a"), nil, validTool("b")}}, nil, 3, true},
 		{"empty tools page", &mcp.ListToolsResult{}, nil, 0, true},
 		{"prompts page", &mcp.ListPromptsResult{Prompts: []*mcp.Prompt{{Name: "p"}}}, nil, 0, true},
 		{"resources page", &mcp.ListResourcesResult{Resources: []*mcp.Resource{{URI: "file:///x"}}}, nil, 0, true},
@@ -272,7 +259,7 @@ func TestListWatchMiddleware(t *testing.T) {
 		{"resource templates page", &mcp.ListResourceTemplatesResult{
 			ResourceTemplates: []*mcp.ResourceTemplate{{URITemplate: "file:///{x}"}},
 		}, nil, 0, false},
-		{"error", &mcp.ListToolsResult{Tools: []*mcp.Tool{valid("a")}}, errNext, 0, false},
+		{"error", &mcp.ListToolsResult{Tools: []*mcp.Tool{validTool("a")}}, errNext, 0, false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

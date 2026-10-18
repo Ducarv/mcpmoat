@@ -30,13 +30,17 @@ type Result struct {
 	// injection.
 	Instructions string
 
-	// Tools are the tools that the server lists.
+	// Tools are the tools that the server lists. Tools is nil when the
+	// server does not advertise the tools capability, and empty but not nil
+	// when it advertises the capability and lists no tools.
 	Tools []Tool
 
-	// Prompts are the prompts that the server lists.
+	// Prompts are the prompts that the server lists. Nil and empty differ
+	// as for Tools.
 	Prompts []Prompt
 
-	// Resources are the resources that the server lists.
+	// Resources are the resources that the server lists. Nil and empty
+	// differ as for Tools.
 	Resources []Resource
 }
 

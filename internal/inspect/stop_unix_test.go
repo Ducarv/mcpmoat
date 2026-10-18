@@ -7,7 +7,6 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"syscall"
 	"testing"
@@ -95,7 +94,7 @@ func TestInspectStopsChild(t *testing.T) {
 			// Check the process first, before anything else can give it
 			// time to go away: the contract is "stopped before Inspect
 			// returns".
-			pid := readPID(t, pidfile)
+			pid := sdkReadPID(t, pidfile)
 			assertGone(t, pid, end)
 
 			elapsed := end.Sub(start)
@@ -168,22 +167,6 @@ func cancelWhenStarted(ctx context.Context, cancel context.CancelFunc, pidfile s
 		}
 	}()
 	return done
-}
-
-// readPID reads the PID that the benign fixture wrote to pidfile at start.
-// The fixture writes it in every mode before the handshake, so a missing
-// file means that the process never started.
-func readPID(t *testing.T, pidfile string) int {
-	t.Helper()
-	data, err := os.ReadFile(pidfile) //nolint:gosec // G304: pidfile is a path in t.TempDir() that the test made
-	if err != nil {
-		t.Fatalf("read pidfile: %v (the server did not start?)", err)
-	}
-	pid, err := strconv.Atoi(strings.TrimSpace(string(data)))
-	if err != nil || pid <= 0 {
-		t.Fatalf("pidfile holds %q, want a positive PID", data)
-	}
-	return pid
 }
 
 // assertGone checks that the process pid no longer exists, also not as a

@@ -31,7 +31,6 @@ import (
 // for it.
 var ErrNoResult = errors.New("inspecttest: no fake result for server")
 
-// The compiler checks here that *Fake implements inspect.Inspector.
 var _ inspect.Inspector = (*Fake)(nil)
 
 // Fake is an [inspect.Inspector] that returns canned results and records

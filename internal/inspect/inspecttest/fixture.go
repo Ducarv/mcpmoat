@@ -60,7 +60,6 @@ var (
 // when the build fails. It skips the test in short mode, because a build
 // takes a few seconds, and on Windows.
 func Fixture(t testing.TB, name string) string {
-	// t.Helper makes a failure point at the caller's line, not this one.
 	t.Helper()
 	if testing.Short() {
 		t.Skip("skipping the fixture server build in short mode")

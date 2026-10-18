@@ -13,6 +13,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"maps"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -157,14 +158,15 @@ func sdkAssertNotExist(t *testing.T, path, why string) {
 }
 
 // sdkReadPID reads the pidfile that the fixture writes and checks that it
-// holds a positive process ID.
+// holds a positive process ID. The fixture writes it in every mode before
+// the handshake, so a missing file means that the process never started.
 func sdkReadPID(t *testing.T, path string) int {
 	t.Helper()
 	b, err := os.ReadFile(path) //nolint:gosec // G304: test reads the pidfile path that it chose under t.TempDir()
 	if err != nil {
-		t.Fatalf("read pidfile: %v", err)
+		t.Fatalf("read pidfile: %v (the server did not start?)", err)
 	}
-	pid, err := strconv.Atoi(strings.TrimSuffix(string(b), "\n"))
+	pid, err := strconv.Atoi(strings.TrimSpace(string(b)))
 	if err != nil || pid <= 0 {
 		t.Fatalf("pidfile holds %q, want a positive process ID", b)
 	}
@@ -356,6 +358,25 @@ func TestSDKInspectInvalidServer(t *testing.T) {
 	}
 }
 
+// TestSDKInspectZeroValue checks that a zero SDKInspector, not made with New,
+// works and does not panic: it reads the parent environment with os.Getenv.
+// The env key is invalid, so Inspect returns before it starts anything.
+func TestSDKInspectZeroValue(t *testing.T) {
+	t.Parallel()
+
+	s := discover.Server{
+		Name:      "zero",
+		Transport: discover.TransportStdio,
+		Command:   "/bin/true",
+		Env:       sdkSecretEnv(map[string]string{"A=B": discovertest.CanaryEnv}),
+	}
+
+	var zero inspect.SDKInspector
+	res, err := zero.Inspect(sdkCtx(t, sdkTimeout), s)
+
+	sdkAssertFailed(t, res, err, inspect.ErrInvalidServer)
+}
+
 // TestSDKInspectCanceledContext checks that Inspect starts nothing when ctx
 // has already ended.
 func TestSDKInspectCanceledContext(t *testing.T) {
@@ -543,7 +564,7 @@ func TestSDKInspectScrubbedEnv(t *testing.T) {
 			vars, raw := sdkReadEnvFile(t, envfile)
 			if !reflect.DeepEqual(vars, tt.want) {
 				// Print keys only: the values hold canaries.
-				t.Errorf("child env keys = %q, want %q", sortedKeys(vars), sortedKeys(tt.want))
+				t.Errorf("child env keys = %q, want %q", slices.Sorted(maps.Keys(vars)), slices.Sorted(maps.Keys(tt.want)))
 				for k, v := range tt.want {
 					if vars[k] != v {
 						t.Errorf("child env %s has the wrong value", k)
@@ -555,16 +576,6 @@ func TestSDKInspectScrubbedEnv(t *testing.T) {
 			}
 		})
 	}
-}
-
-// sortedKeys returns the keys of m in sorted order.
-func sortedKeys(m map[string]string) []string {
-	keys := make([]string, 0, len(m))
-	for k := range m {
-		keys = append(keys, k)
-	}
-	slices.Sort(keys)
-	return keys
 }
 
 // sdkServerDirs returns the names of the "mcpmoat-server-*" directories

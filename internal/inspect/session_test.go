@@ -21,6 +21,13 @@ import (
 // and no network are involved. t.Cleanup closes both sessions.
 func connectInMemory(t *testing.T, server *mcp.Server) *mcp.ClientSession {
 	t.Helper()
+	return connectClient(t, server, New(Options{}).newClient())
+}
+
+// connectClient connects client to server over in-memory transports.
+// t.Cleanup closes both sessions.
+func connectClient(t *testing.T, server *mcp.Server, client *mcp.Client) *mcp.ClientSession {
+	t.Helper()
 	ctx := t.Context()
 	ct, st := mcp.NewInMemoryTransports()
 
@@ -30,7 +37,7 @@ func connectInMemory(t *testing.T, server *mcp.Server) *mcp.ClientSession {
 	}
 	t.Cleanup(func() { _ = ss.Close() })
 
-	cs, err := New(Options{}).newClient().Connect(ctx, ct, nil)
+	cs, err := client.Connect(ctx, ct, nil)
 	if err != nil {
 		t.Fatalf("client.Connect() error = %v", err)
 	}
@@ -68,12 +75,12 @@ func countMethod(method string, n *atomic.Int64) mcp.Middleware {
 	}
 }
 
-// onToolsList returns a receiving middleware that answers tools/list with h
-// and passes every other method on.
-func onToolsList(h mcp.MethodHandler) mcp.Middleware {
+// onMethod returns a receiving middleware that answers method with h and
+// passes every other method on.
+func onMethod(method string, h mcp.MethodHandler) mcp.Middleware {
 	return func(next mcp.MethodHandler) mcp.MethodHandler {
 		return func(ctx context.Context, m string, req mcp.Request) (mcp.Result, error) {
-			if m == "tools/list" {
+			if m == method {
 				return h(ctx, m, req)
 			}
 			return next(ctx, m, req)
@@ -229,6 +236,37 @@ func TestInspectSessionToolsOnly(t *testing.T) {
 	}
 }
 
+// TestInspectSessionAdvertisedButEmpty checks that a kind that the server
+// advertises but lists no items for gives an empty, non-nil slice, so a
+// caller can tell it from a kind that the server does not advertise (nil).
+func TestInspectSessionAdvertisedButEmpty(t *testing.T) {
+	t.Parallel()
+
+	server := mcp.NewServer(
+		&mcp.Implementation{Name: "empty", Version: "1"},
+		&mcp.ServerOptions{Capabilities: &mcp.ServerCapabilities{
+			Tools:     &mcp.ToolCapabilities{},
+			Prompts:   &mcp.PromptCapabilities{},
+			Resources: &mcp.ResourceCapabilities{},
+		}},
+	)
+	cs := connectInMemory(t, server)
+
+	got, err := inspectSession(t.Context(), cs)
+	if err != nil {
+		t.Fatalf("inspectSession() error = %v", err)
+	}
+	if got.Tools == nil || len(got.Tools) != 0 {
+		t.Errorf("Tools = %#v, want an empty, non-nil slice", got.Tools)
+	}
+	if got.Prompts == nil || len(got.Prompts) != 0 {
+		t.Errorf("Prompts = %#v, want an empty, non-nil slice", got.Prompts)
+	}
+	if got.Resources == nil || len(got.Resources) != 0 {
+		t.Errorf("Resources = %#v, want an empty, non-nil slice", got.Resources)
+	}
+}
+
 func TestInspectSessionPromptsOnly(t *testing.T) {
 	t.Parallel()
 
@@ -361,7 +399,7 @@ func TestInspectSessionPaginationCaps(t *testing.T) {
 			var calls atomic.Int64
 			server := mcp.NewServer(&mcp.Implementation{Name: "pager", Version: "1"}, nil)
 			server.AddTool(&mcp.Tool{Name: "t", InputSchema: objectSchema()}, noopTool)
-			server.AddReceivingMiddleware(onToolsList(tt.handler(&calls)))
+			server.AddReceivingMiddleware(onMethod("tools/list", tt.handler(&calls)))
 
 			cs := connectInMemory(t, server)
 
@@ -484,7 +522,7 @@ func TestInspectSessionListError(t *testing.T) {
 	server := mcp.NewServer(&mcp.Implementation{Name: "broken", Version: "1"}, nil)
 	server.AddTool(&mcp.Tool{Name: "t", InputSchema: objectSchema()}, noopTool)
 	server.AddPrompt(&mcp.Prompt{Name: "p"}, noopPrompt)
-	server.AddReceivingMiddleware(onToolsList(func(context.Context, string, mcp.Request) (mcp.Result, error) {
+	server.AddReceivingMiddleware(onMethod("tools/list", func(context.Context, string, mcp.Request) (mcp.Result, error) {
 		return nil, errors.New("boom")
 	}))
 
@@ -514,7 +552,7 @@ func TestInspectSessionCancelledDuringList(t *testing.T) {
 
 	server := mcp.NewServer(&mcp.Implementation{Name: "slow", Version: "1"}, nil)
 	server.AddTool(&mcp.Tool{Name: "t", InputSchema: objectSchema()}, noopTool)
-	server.AddReceivingMiddleware(onToolsList(func(hctx context.Context, _ string, _ mcp.Request) (mcp.Result, error) {
+	server.AddReceivingMiddleware(onMethod("tools/list", func(hctx context.Context, _ string, _ mcp.Request) (mcp.Result, error) {
 		// The request is now in flight: cancel the client ctx and block.
 		cancel()
 		select {
