@@ -473,6 +473,39 @@ func TestListAllUndeclaredErrors(t *testing.T) {
 			setup:  func(f *fakeLister) { f.tools.err = context.Canceled },
 			wantIs: context.Canceled,
 		},
+		// The SDK reports its own failures as *jsonrpc.Error too (see
+		// sdkErrorCodes). No server sent them, so they are not excused.
+		{
+			name:       "undeclared tools, SDK rejected request (HTTP 503)",
+			caps:       nil,
+			setup:      func(f *fakeLister) { f.tools.err = sdkRejected(errors.New("503")) },
+			wantIs:     &jsonrpc.Error{Code: codeRejected},
+			wantPrefix: "list tools:",
+			wantRPC:    true,
+		},
+		{
+			name: "undeclared prompts, SDK client closing",
+			caps: &mcp.ServerCapabilities{},
+			setup: func(f *fakeLister) {
+				f.tools = emptyTools
+				f.prompts.err = &jsonrpc.Error{Code: -32003, Message: "client is closing"}
+			},
+			wantIs:     &jsonrpc.Error{Code: -32003},
+			wantPrefix: "list prompts:",
+			wantRPC:    true,
+		},
+		{
+			name: "undeclared resources, SDK server closing",
+			caps: &mcp.ServerCapabilities{},
+			setup: func(f *fakeLister) {
+				f.tools = emptyTools
+				f.prompts = emptyPrompts
+				f.resources.err = fmt.Errorf("closed: %w", &jsonrpc.Error{Code: -32004, Message: "server is closing"})
+			},
+			wantIs:     &jsonrpc.Error{Code: -32004},
+			wantPrefix: "list resources:",
+			wantRPC:    true,
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -531,6 +564,87 @@ func TestListAllUndeclaredErrors(t *testing.T) {
 			t.Errorf("err = %v, want errTooManyItems", err)
 		}
 	})
+}
+
+// codeRejected is the code of the SDK error "rejected by transport"
+// (jsonrpc2.ErrRejected in SDK v1.8.0). The SDK wraps every failed HTTP
+// request with it, and HTTP 429, 500, 502, 503 and 504 too.
+const codeRejected = -32005
+
+// sdkRejected returns cause wrapped the way the SDK streamable transport
+// wraps a failed request: with the "rejected by transport" error first.
+func sdkRejected(cause error) error {
+	return fmt.Errorf("%w: %w", &jsonrpc.Error{Code: codeRejected, Message: "rejected by transport"}, cause)
+}
+
+// TestTolerateUndeclared checks which list errors mean "the server has no such
+// list". Only a JSON-RPC error response from the server, for an undeclared
+// capability, on the first page, is excused. The SDK uses *jsonrpc.Error for
+// its own failures too (sdkErrorCodes); those must stay errors, or a failed
+// request would look like a clean, empty list.
+func TestTolerateUndeclared(t *testing.T) {
+	t.Parallel()
+
+	serverErr := func(code int64) error { return &jsonrpc.Error{Code: code, Message: "server says no"} }
+	tests := []struct {
+		name     string
+		err      error
+		declared bool
+		excused  bool
+	}{
+		{name: "nil error, undeclared", err: nil, excused: true},
+		{name: "nil error, declared", err: nil, declared: true, excused: true},
+
+		// JSON-RPC error responses from the server, whatever the code.
+		{name: "method not found", err: methodNotFound(), excused: true},
+		{name: "internal error", err: serverErr(jsonrpc.CodeInternalError), excused: true},
+		{name: "invalid params", err: serverErr(jsonrpc.CodeInvalidParams), excused: true},
+		{name: "server-defined code -32000", err: serverErr(-32000), excused: true},
+		{name: "code -32002, next to the SDK codes", err: serverErr(-32002), excused: true},
+		{name: "code -32006, next to the SDK codes", err: serverErr(-32006), excused: true},
+		{name: "positive code", err: serverErr(42), excused: true},
+		{name: "wrapped method not found", err: fmt.Errorf("calling: %w", methodNotFound()), excused: true},
+
+		// The same responses for a declared capability are errors.
+		{name: "declared, method not found", err: methodNotFound(), declared: true},
+		{name: "declared, internal error", err: serverErr(jsonrpc.CodeInternalError), declared: true},
+
+		// The SDK's own codes, bare and wrapped.
+		{name: "SDK unknown error -32001", err: &jsonrpc.Error{Code: -32001, Message: "unknown error"}},
+		{name: "SDK client closing -32003", err: &jsonrpc.Error{Code: -32003}},
+		{name: "SDK server closing -32004", err: &jsonrpc.Error{Code: -32004, Message: "server is closing"}},
+		{name: "SDK rejected -32005", err: &jsonrpc.Error{Code: codeRejected}},
+		{name: "SDK rejected wrapping HTTP 503", err: sdkRejected(errors.New("503"))},
+		{name: "SDK rejected wrapping HTTP 500", err: sdkRejected(errors.New("Internal Server Error"))},
+		{name: "SDK rejected deep in the chain", err: fmt.Errorf("list: %w", fmt.Errorf("sending: %w", sdkRejected(errors.New("connection reset"))))},
+		{name: "SDK client closing wrapped", err: fmt.Errorf("calling \"tools/list\": %w", &jsonrpc.Error{Code: -32003, Message: "client is closing"})},
+		// The SDK puts the server error of a non-2xx answer next to its own
+		// "rejected" error. The HTTP failure wins.
+		{name: "server error and SDK rejected together", err: fmt.Errorf("sending: %w: %w: Bad Request", methodNotFound(), &jsonrpc.Error{Code: codeRejected})},
+		{name: "SDK rejected and server error, joined", err: errors.Join(sdkRejected(errors.New("x")), methodNotFound())},
+		{name: "SDK rejected, declared", err: sdkRejected(errors.New("503")), declared: true},
+
+		// Errors that are no JSON-RPC error at all.
+		{name: "transport error", err: errors.New("connection refused")},
+		{name: "context canceled", err: context.Canceled},
+		{name: "context deadline", err: fmt.Errorf("wait: %w", context.DeadlineExceeded)},
+		{name: "later page with a server error", err: fmt.Errorf("%w: %w", errLaterPage, methodNotFound())},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got := tolerateUndeclared(tt.err, tt.declared)
+			if tt.excused {
+				if got != nil {
+					t.Errorf("tolerateUndeclared(%v, %t) = %v, want nil", tt.err, tt.declared, got)
+				}
+				return
+			}
+			if got != tt.err { //nolint:errorlint // identity check: the error must come back unchanged
+				t.Errorf("tolerateUndeclared(%v, %t) = %v, want the error unchanged", tt.err, tt.declared, got)
+			}
+		})
+	}
 }
 
 // A declared capability with no items gives an empty, non-nil slice. This
@@ -1933,13 +2047,11 @@ func TestRawListsMiddleware(t *testing.T) {
 		const workers = 16
 		var wg sync.WaitGroup
 		for i := range workers {
-			wg.Add(1)
-			go func() {
-				defer wg.Done()
+			wg.Go(func() {
 				name := fmt.Sprintf("t%d", i)
 				res := &mcp.ListToolsResult{Tools: []*mcp.Tool{tool(name)}}
 				next, _ := handler(res, nil)
-				if _, err := raw.middleware()(next)(context.Background(), methodListTools, nil); err != nil {
+				if _, err := raw.middleware()(next)(t.Context(), methodListTools, nil); err != nil {
 					t.Error(err)
 					return
 				}
@@ -1947,7 +2059,7 @@ func TestRawListsMiddleware(t *testing.T) {
 				if !ok || len(tools) != 1 || tools[0].Name != name {
 					t.Errorf("take() = %v, %v; want [%s]", tools, ok, name)
 				}
-			}()
+			})
 		}
 		wg.Wait()
 		if n := len(raw.tools); n != 0 {

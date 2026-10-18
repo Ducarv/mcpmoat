@@ -175,11 +175,12 @@ func (r *requestRecorder) recordBlocked(err error) error {
 
 // httpClientConfig is the input of newHTTPClient.
 type httpClientConfig struct {
-	// Origin is the configured endpoint, without user info. The client sends
-	// requests only to this origin. It must not be nil.
-	Origin *url.URL
-	// User is the user info from the configured URL, or nil. Origin has no user
-	// info, so that no error text from the SDK can hold it; the client sends it
+	// Endpoint is the configured endpoint URL, without user info. The client
+	// sends requests only to its origin (scheme, host and port). It must not
+	// be nil.
+	Endpoint *url.URL
+	// User is the user info from the configured URL, or nil. Endpoint has no
+	// user info, so that no error text from the SDK can hold it; the client sends it
 	// as a Basic Authorization header instead.
 	User *url.Userinfo
 	// Headers are the headers from the config, with raw values.
@@ -198,7 +199,7 @@ type httpClientConfig struct {
 	MaxTotal int64
 }
 
-// newHTTPClient builds an HTTP client for the remote server at cfg.Origin.
+// newHTTPClient builds an HTTP client for the remote server at cfg.Endpoint.
 //
 // The client sends the config headers only to the origin. A request to another
 // origin fails with errOtherOrigin before anything goes on the network, and a
@@ -215,9 +216,9 @@ type httpClientConfig struct {
 // The client has no Client.Timeout: that timeout also cuts the body read, so
 // it would end a long SSE stream. The context of each request bounds the time.
 func newHTTPClient(cfg httpClientConfig) (*http.Client, *requestRecorder, error) {
-	origin := cfg.Origin
-	if origin == nil {
-		return nil, nil, errors.New("no origin for the HTTP client")
+	endpoint := cfg.Endpoint
+	if endpoint == nil {
+		return nil, nil, errors.New("no endpoint for the HTTP client")
 	}
 	header, err := buildHeader(cfg.Headers, cfg.UserAgent)
 	if err != nil {
@@ -248,7 +249,7 @@ func newHTTPClient(cfg httpClientConfig) (*http.Client, *requestRecorder, error)
 	rec := &requestRecorder{}
 	client := &http.Client{
 		Transport: &headerTransport{
-			origin:   origin,
+			endpoint: endpoint,
 			user:     cfg.User,
 			header:   header,
 			base:     base,
@@ -267,7 +268,7 @@ func newHTTPClient(cfg httpClientConfig) (*http.Client, *requestRecorder, error)
 			if len(via) > maxRedirects {
 				return rec.recordBlocked(errTooManyRedirects)
 			}
-			if !sameOrigin(req.URL, origin) {
+			if !sameOrigin(req.URL, endpoint) {
 				return rec.recordBlocked(errCrossOriginRedirect)
 			}
 			return nil
@@ -364,8 +365,8 @@ func isReservedHeader(name string) bool {
 // request, but only for requests to the configured origin. It also records the
 // status of each response and caps the size of the response bodies.
 type headerTransport struct {
-	// origin is the only origin that gets requests.
-	origin *url.URL
+	// endpoint is the configured endpoint URL. Only its origin gets requests.
+	endpoint *url.URL
 	// user is the user info of the configured URL, or nil.
 	user *url.Userinfo
 	// header holds the config headers and the User-Agent, in canonical form.
@@ -386,7 +387,7 @@ type headerTransport struct {
 // RoundTrip sends req to base with the config headers added. It refuses a
 // request to another origin and sends nothing in that case.
 func (t *headerTransport) RoundTrip(req *http.Request) (*http.Response, error) {
-	if !sameOrigin(req.URL, t.origin) {
+	if !sameOrigin(req.URL, t.endpoint) {
 		// The RoundTripper contract says that RoundTrip closes the request
 		// body, also when it returns an error.
 		if req.Body != nil {
@@ -409,13 +410,12 @@ func (t *headerTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 	}
 	// The configured URL had user info, and newHTTPClient got it separately so
 	// that the SDK never sees it. net/http would turn URL user info into a Basic
-	// header, so do the same here. An Authorization header from the config wins:
-	// the user chose it on purpose, and one request must not carry two.
-	if t.user != nil {
-		if _, ok := out.Header["Authorization"]; !ok {
-			password, _ := t.user.Password()
-			out.SetBasicAuth(t.user.Username(), password)
-		}
+	// header, so do the same here. A non-empty Authorization header from the
+	// config wins: the user chose it on purpose, and one request must not
+	// carry two. An empty one counts as absent, as in net/http.
+	if t.user != nil && out.Header.Get("Authorization") == "" {
+		password, _ := t.user.Password()
+		out.SetBasicAuth(t.user.Username(), password)
 	}
 
 	// The SDK sends DELETE only to close the session, and it ignores the
@@ -462,14 +462,18 @@ func (t *headerTransport) CloseIdleConnections() {
 }
 
 // isFollowedRedirect reports whether the http.Client will follow resp: a
-// redirect status with a Location header. Such a response is not a failure,
-// so the recorder ignores it. If the redirect is refused, the error from
-// CheckRedirect tells why.
+// redirect status with a Location header that parses. Such a response is not
+// a failure, so the recorder ignores it. If the redirect is refused, the
+// error from CheckRedirect tells why. The http.Client does not follow a
+// Location that does not parse, so that response is a final answer.
 func isFollowedRedirect(resp *http.Response) bool {
 	switch resp.StatusCode {
 	case http.StatusMovedPermanently, http.StatusFound, http.StatusSeeOther,
 		http.StatusTemporaryRedirect, http.StatusPermanentRedirect:
-		return resp.Header.Get("Location") != ""
+		// Location resolves the header against resp.Request.URL, as the
+		// http.Client does. An empty header gives http.ErrNoLocation.
+		_, err := resp.Location()
+		return err == nil
 	}
 	return false
 }

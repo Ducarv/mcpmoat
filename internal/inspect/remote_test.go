@@ -20,6 +20,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/modelcontextprotocol/go-sdk/jsonrpc"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/Ducarv/mcpmoat/internal/discover"
@@ -2088,5 +2089,321 @@ func TestRemoteNoSSEHintAfterConnect(t *testing.T) {
 	}
 	if want := "HTTP 404 Not Found"; ce.Reason != want {
 		t.Errorf("Reason = %q, want %q (no SSE hint after the connect)", ce.Reason, want)
+	}
+}
+
+// rmUndeclaredToolsServer returns an MCP server with no tool, so it does not
+// declare the tools capability. It answers tools/list with a JSON-RPC
+// "method not found" error, as a server without tools may do. listCalls
+// counts the tools/list requests that reach it.
+func rmUndeclaredToolsServer(listCalls *atomic.Int32) *mcp.Server {
+	srv := mcp.NewServer(&mcp.Implementation{Name: "no-tools", Version: "1"}, nil)
+	srv.AddReceivingMiddleware(func(next mcp.MethodHandler) mcp.MethodHandler {
+		return func(ctx context.Context, method string, req mcp.Request) (mcp.Result, error) {
+			if method == methodListTools {
+				listCalls.Add(1)
+				return nil, &jsonrpc.Error{Code: jsonrpc.CodeMethodNotFound, Message: "method not found"}
+			}
+			return next(ctx, method, req)
+		}
+	})
+	return srv
+}
+
+// TestRemoteUndeclaredToolsFailure proves that a failed tools/list request to
+// a server without the tools capability is an error, not an empty tool list.
+// The SDK reports a failed HTTP request as a *jsonrpc.Error with its own code
+// -32005 ("rejected by transport"): it does so when client.Do fails (a
+// refused redirect, for example) and for HTTP 429, 500, 502, 503 and 504 (SDK
+// v1.8.0). Before tolerateUndeclared checked sdkErrorCodes, Remote returned
+// err == nil and no tools for each streamable HTTP case below, so the scan
+// would report a clean server. The legacy SSE transport does not wrap its
+// POST errors that way; its cases are here as coverage.
+func TestRemoteUndeclaredToolsFailure(t *testing.T) {
+	t.Parallel()
+
+	t.Run("method not found answer is an empty list", func(t *testing.T) {
+		t.Parallel()
+		for _, sse := range []bool{false, true} {
+			t.Run(string(rmKind(sse)), func(t *testing.T) {
+				t.Parallel()
+				var listCalls atomic.Int32
+				ts, _ := startFixture(t, fixtureOpts{SSE: sse, Server: rmUndeclaredToolsServer(&listCalls)})
+				srv := rmServer(rmKind(sse), rmWithSecretQuery(fixtureURL(ts)), rmHeaders())
+				got, err := Remote(t.Context(), srv, RemoteOptions{})
+				if err != nil {
+					t.Fatalf("Remote() error = %v, want nil", err)
+				}
+				if n := listCalls.Load(); n == 0 {
+					t.Fatal("tools/list never reached the server; the test checks nothing")
+				}
+				if got.Tools != nil {
+					t.Errorf("Tools = %+v, want nil (no tools capability)", got.Tools)
+				}
+			})
+		}
+	})
+
+	tests := []struct {
+		name string
+		// answer answers the tools/list POST instead of the MCP server.
+		// victim is the URL of a server on another origin.
+		answer     func(w http.ResponseWriter, r *http.Request, victim string)
+		wantKind   ConnectKind
+		wantStatus int
+	}{
+		{
+			name:       "HTTP 503",
+			answer:     func(w http.ResponseWriter, _ *http.Request, _ string) { w.WriteHeader(http.StatusServiceUnavailable) },
+			wantKind:   KindHTTP,
+			wantStatus: http.StatusServiceUnavailable,
+		},
+		{
+			// SDK v1.8.0 counts 500 as a transient status too, so it also
+			// wraps it with -32005.
+			name: "HTTP 500",
+			answer: func(w http.ResponseWriter, _ *http.Request, _ string) {
+				http.Error(w, "tools backend broke", http.StatusInternalServerError)
+			},
+			wantKind:   KindHTTP,
+			wantStatus: http.StatusInternalServerError,
+		},
+		{
+			// The body is a JSON-RPC error response, so the SDK error holds
+			// the server error and -32005 together. The HTTP failure wins.
+			name: "HTTP 500 with a JSON-RPC error body",
+			answer: func(w http.ResponseWriter, _ *http.Request, _ string) {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusInternalServerError)
+				_, _ = io.WriteString(w, `{"jsonrpc":"2.0","id":2,"error":{"code":-32601,"message":"method not found"}}`)
+			},
+			wantKind:   KindHTTP,
+			wantStatus: http.StatusInternalServerError,
+		},
+		{
+			name: "307 redirect to another origin",
+			answer: func(w http.ResponseWriter, r *http.Request, victim string) {
+				http.Redirect(w, r, victim+"/steal", http.StatusTemporaryRedirect)
+			},
+			wantKind: KindRedirect,
+		},
+	}
+	for _, tt := range tests {
+		for _, sse := range []bool{false, true} {
+			t.Run(tt.name+"/"+string(rmKind(sse)), func(t *testing.T) {
+				t.Parallel()
+				victim := startVictim(t)
+				var listCalls, answered atomic.Int32
+				wrap := func(next http.Handler) http.Handler {
+					return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+						if r.Method == http.MethodPost && rmBodyHas(t, r, `"method":"`+methodListTools+`"`) {
+							answered.Add(1)
+							tt.answer(w, r, victim.URL)
+							return
+						}
+						next.ServeHTTP(w, r)
+					})
+				}
+				ts, _ := startFixture(t, fixtureOpts{SSE: sse, Server: rmUndeclaredToolsServer(&listCalls), Wrap: wrap})
+				srv := rmServer(rmKind(sse), rmWithSecretQuery(fixtureURL(ts)), rmHeaders())
+
+				got, err := Remote(t.Context(), srv, RemoteOptions{})
+				if answered.Load() == 0 {
+					t.Fatalf("no tools/list request reached the wrapper; the test checks nothing (error: %v)", err)
+				}
+				if err == nil {
+					t.Fatalf("Remote() = %d tools, error nil; want a %s error: a failed request must not look like an empty list", len(got.Tools), tt.wantKind)
+				}
+				ce := rmRequireConnectError(t, err, tt.wantKind)
+				if ce.Status != tt.wantStatus {
+					t.Errorf("Status = %d, want %d", ce.Status, tt.wantStatus)
+				}
+				if n := listCalls.Load(); n != 0 {
+					t.Errorf("the MCP server got %d tools/list requests, want 0 (the wrapper answers them)", n)
+				}
+				victim.assertUntouched(t)
+			})
+		}
+	}
+}
+
+// TestURLSecrets checks the query and path parts that urlSecrets gives to
+// classify. Each part must have at least minBareSecretLen bytes.
+func TestURLSecrets(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name   string
+		rawURL string
+		want   []string // in any order; nil for none
+	}{
+		{name: "no query and no secret path", rawURL: "https://h.example/v1/mcp", want: nil},
+		{name: "query value", rawURL: "https://h.example/mcp?api_key=tok-NOTREAL-q1", want: []string{"tok-NOTREAL-q1"}},
+		{name: "value of exactly minBareSecretLen bytes", rawURL: "https://h.example/mcp?k=abcdefgh", want: []string{"abcdefgh"}},
+		{name: "value one byte short is dropped", rawURL: "https://h.example/mcp?k=abcdefg", want: nil},
+		{name: "the key of a value is not a secret", rawURL: "https://h.example/mcp?access_token_name=short", want: nil},
+		{name: "repeated key gives every value", rawURL: "https://h.example/mcp?t=tok-NOTREAL-a&t=tok-NOTREAL-b&t=x", want: []string{"tok-NOTREAL-a", "tok-NOTREAL-b"}},
+		{name: "several keys", rawURL: "https://h.example/mcp?a=tok-NOTREAL-a&b=tok-NOTREAL-b", want: []string{"tok-NOTREAL-a", "tok-NOTREAL-b"}},
+		{name: "bare key is the secret", rawURL: "https://h.example/mcp?tok-NOTREAL-bare", want: []string{"tok-NOTREAL-bare"}},
+		{name: "short bare key is dropped", rawURL: "https://h.example/mcp?debug", want: nil},
+		{name: "key with = and no value counts as bare", rawURL: "https://h.example/mcp?tok-NOTREAL-eq=", want: []string{"tok-NOTREAL-eq"}},
+		{name: "escaped value in raw and unescaped form", rawURL: "https://h.example/mcp?t=tok%2FNOT+REAL", want: []string{"tok%2FNOT+REAL", "tok/NOT REAL"}},
+		{name: "empty query", rawURL: "https://h.example/mcp?", want: nil},
+		// urlSecrets splits the raw query itself: url.ParseQuery would drop a
+		// pair with ";" or a bad escape, and that value is still a secret.
+		{name: "semicolon separates pairs", rawURL: "https://h.example/mcp?a=tok-NOTREAL-a&b=tok-NOTREAL-b;c=d", want: []string{"tok-NOTREAL-a", "tok-NOTREAL-b"}},
+		{name: "bad escape kept in raw form", rawURL: "https://h.example/mcp?a=tok-NOTREAL-a&b=tok%zzNOTREAL", want: []string{"tok-NOTREAL-a", "tok%zzNOTREAL"}},
+		{name: "fragment is no query", rawURL: "https://h.example/mcp#tok-NOTREAL-frag", want: nil},
+		{name: "user info is left to userinfoSecrets", rawURL: "https://tok-NOTREAL-user:tok-NOTREAL-pass@h.example/mcp", want: nil}, //nolint:gosec // G101: fake test credentials
+		{name: "token path segment", rawURL: "https://h.example/ghp_NOTREAL0123/mcp", want: []string{"ghp_NOTREAL0123"}},
+		{name: "escaped token path segment in both forms", rawURL: "https://h.example/%67hp_NOTREAL0123/sse", want: []string{"%67hp_NOTREAL0123", "ghp_NOTREAL0123"}},
+		{name: "short secret path segment is dropped", rawURL: "https://h.example/a=b/mcp", want: nil},
+		{name: "path segment and query value", rawURL: "https://h.example/ghp_NOTREAL0123/mcp?k=tok-NOTREAL-q", want: []string{"ghp_NOTREAL0123", "tok-NOTREAL-q"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			u, err := url.Parse(tt.rawURL)
+			if err != nil {
+				t.Fatalf("url.Parse(%q) = %v", tt.rawURL, err)
+			}
+			got := urlSecrets(u)
+			slices.Sort(got)
+			want := slices.Clone(tt.want)
+			slices.Sort(want)
+			if !reflect.DeepEqual(got, want) {
+				t.Errorf("urlSecrets(%q) = %q, want %q", tt.rawURL, got, want)
+			}
+		})
+	}
+}
+
+// TestRemoteURLSecretEcho proves that a server cannot leak a secret of the
+// configured URL by echoing it without the URL around it: a query value, or a
+// token path segment without its slashes. The server answers with HTTP 200
+// and a JSON-RPC error whose message holds the bare secret, so the SDK puts
+// the text in its error. Without urlSecrets, classify masks these parts only
+// where they stand in a URL.
+func TestRemoteURLSecretEcho(t *testing.T) {
+	t.Parallel()
+
+	const (
+		queryTok = "tok-NOTREAL-query-7a1c"
+		pathTok  = "ghp_NOTREALpath0123" // isSecretPathSegment accepts the ghp_ prefix
+	)
+	for _, method := range []string{"initialize", methodListTools} {
+		for _, sse := range []bool{false, true} {
+			for _, where := range []string{"query", "path"} {
+				secret := queryTok
+				if where == "path" {
+					secret = pathTok
+				}
+				t.Run(method+"/"+string(rmKind(sse))+"/"+where, func(t *testing.T) {
+					t.Parallel()
+					var echoed atomic.Int32
+					mcpSrv := newFixtureMCPServer()
+					mcpSrv.AddReceivingMiddleware(func(next mcp.MethodHandler) mcp.MethodHandler {
+						return func(ctx context.Context, m string, req mcp.Request) (mcp.Result, error) {
+							if m == method {
+								echoed.Add(1)
+								return nil, fmt.Errorf("invalid key %s", secret)
+							}
+							return next(ctx, m, req)
+						}
+					})
+					// The wrapper serves the fixture under /<pathTok>/mcp too. The
+					// SSE message endpoint is relative to the rewritten URL, so
+					// later POSTs go to /mcp directly.
+					wrap := func(next http.Handler) http.Handler {
+						return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+							if rest, ok := strings.CutPrefix(r.URL.Path, "/"+pathTok); ok {
+								r2 := r.Clone(r.Context())
+								r2.URL.Path = rest
+								r2.URL.RawPath = ""
+								next.ServeHTTP(w, r2)
+								return
+							}
+							next.ServeHTTP(w, r)
+						})
+					}
+					ts, _ := startFixture(t, fixtureOpts{SSE: sse, Server: mcpSrv, Wrap: wrap})
+
+					rawURL := fixtureURL(ts) + "?api_key=" + queryTok
+					if where == "path" {
+						rawURL = ts.URL + "/" + pathTok + "/mcp"
+					}
+					srv := rmServer(rmKind(sse), rawURL, nil)
+
+					_, err := Remote(t.Context(), srv, RemoteOptions{})
+					if echoed.Load() == 0 {
+						t.Fatalf("the server never echoed the secret; the test checks nothing (error: %v)", err)
+					}
+					var ce *ConnectError
+					if !errors.As(err, &ce) {
+						t.Fatalf("Remote() error = %v (%T), want *ConnectError", err, err)
+					}
+					if ce.Kind != KindProtocol {
+						t.Errorf("Kind = %q (reason %q), want %q", ce.Kind, ce.Reason, KindProtocol)
+					}
+					assertNoSecrets(t, err, secret)
+					// The echo must reach the reason or the cause, masked; else
+					// the test would pass on an error that dropped the server
+					// text.
+					text := ce.Reason
+					if cause := errors.Unwrap(ce); cause != nil {
+						text += " | " + cause.Error()
+					}
+					if want := "invalid key " + discover.Mask; !strings.Contains(text, want) {
+						t.Errorf("Reason and cause = %q, want them to contain %q", text, want)
+					}
+				})
+			}
+		}
+	}
+}
+
+// TestRemoteTimeoutWithURLError proves that a deadline is KindTimeout and
+// wraps context.DeadlineExceeded also when the transport answers the end of
+// the request with an error that is not a context error. net/http puts that
+// error in a *url.Error, and classify uses the error inside a *url.Error, so
+// fail must strip the *url.Error before it puts the context error first.
+// Otherwise the context error would be dropped again and the kind would come
+// from "connection reset by peer".
+func TestRemoteTimeoutWithURLError(t *testing.T) {
+	t.Parallel()
+
+	for _, sse := range []bool{false, true} {
+		t.Run(string(rmKind(sse)), func(t *testing.T) {
+			t.Parallel()
+			var calls atomic.Int32
+			// The first request blocks until it ends, as with a server that
+			// never answers, and then reports a network failure. Later
+			// requests fail at once: after the deadline the SDK still sends a
+			// cancel notification with a context of its own (bounded to about
+			// 5 seconds), and blocking on it would only slow the test down.
+			base := hcRoundTripFunc(func(req *http.Request) (*http.Response, error) {
+				if req.Body != nil {
+					_ = req.Body.Close()
+				}
+				if calls.Add(1) == 1 {
+					<-req.Context().Done()
+				}
+				return nil, errors.New("connection reset by peer")
+			})
+			ctx, cancel := context.WithTimeout(t.Context(), 300*time.Millisecond)
+			defer cancel()
+			srv := rmServer(rmKind(sse), rmWithSecretQuery("http://127.0.0.1:9/mcp"), rmHeaders())
+			_, err := Remote(ctx, srv, RemoteOptions{baseTransport: base})
+			if calls.Load() == 0 {
+				t.Fatalf("the base transport got no request; the test checks nothing (error: %v)", err)
+			}
+			ce := rmRequireConnectError(t, err, KindTimeout)
+			if !errors.Is(err, context.DeadlineExceeded) {
+				t.Errorf("errors.Is(err, context.DeadlineExceeded) = false, error: %v", err)
+			}
+			if strings.Contains(ce.Reason, "connection reset") {
+				t.Errorf("Reason = %q, want the timeout and not the transport error", ce.Reason)
+			}
+		})
 	}
 }

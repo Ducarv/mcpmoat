@@ -33,6 +33,13 @@ const (
 	// docs/PRD.md section 5.5.
 	clientName    = "mcp-client"
 	clientVersion = "1.0.0"
+
+	// minBareSecretLen is the shortest part of a secret that classify
+	// removes wherever it stands in error text: a token after its auth
+	// scheme, a token used as the URL user name, a query value or a secret
+	// path segment. A server can echo such a part alone ("invalid token
+	// <token>"). A shorter part is too likely to match ordinary words.
+	minBareSecretLen = 8
 )
 
 // RemoteOptions configures Remote. The zero value is ready to use.
@@ -43,7 +50,9 @@ type RemoteOptions struct {
 	AllowUntrusted bool
 
 	// UserAgent is sent unless the config sets a User-Agent header. Empty
-	// means the net/http default, which does not name mcpmoat.
+	// means the net/http default, which does not name mcpmoat. Never set a
+	// value that names mcpmoat: a server could then show the scanner a clean
+	// tool list (see clientName). Set it only to match a real client.
 	UserAgent string
 
 	// MaxResponseBytes caps each HTTP response body (the whole SSE stream
@@ -92,19 +101,21 @@ func Remote(ctx context.Context, srv discover.Server, opts RemoteOptions) (Resul
 	}
 
 	raw := srv.URL.Reveal()
-	u, reason := parseOrigin(raw)
+	u, reason := parseEndpoint(raw)
 	if reason != "" {
 		return Result{}, configError(srv, reason)
 	}
 
-	origin, user := splitUserinfo(u)
-	endpoint := origin.String()
+	endpointURL, user := splitUserinfo(u)
+	endpoint := endpointURL.String()
 
-	headers, headerValues := splitHeaders(srv.Headers)
-	headerValues = append(headerValues, userinfoSecrets(user)...)
+	// secrets are all the strings that classify removes from error text.
+	headers, secrets := splitHeaders(srv.Headers)
+	secrets = append(secrets, userinfoSecrets(user)...)
+	secrets = append(secrets, urlSecrets(u)...)
 
 	httpClient, rec, err := newHTTPClient(httpClientConfig{
-		Origin:    &origin,
+		Endpoint:  &endpointURL,
 		User:      user,
 		Headers:   headers,
 		Base:      opts.baseTransport,
@@ -151,11 +162,14 @@ func Remote(ctx context.Context, srv discover.Server, opts RemoteOptions) (Resul
 	// KindTimeout and errors.Is(err, context.DeadlineExceeded) works. The
 	// deferred cancel has not run yet, so ctx.Err is set only by the deadline
 	// or by the caller.
+	//
+	// The *url.Error is stripped before the join: classify replaces an error
+	// that holds one with its inner error, and that would drop ctxErr.
 	fail := func(err error) (Result, error) {
 		if ctxErr := ctx.Err(); ctxErr != nil && !errors.Is(err, ctxErr) {
-			err = fmt.Errorf("%w: %w", ctxErr, err)
+			err = fmt.Errorf("%w: %w", ctxErr, stripURLError(err))
 		}
-		return Result{}, classify(err, srv, rec, headerValues)
+		return Result{}, classify(err, srv, rec, secrets)
 	}
 
 	cs, err := mcpClient.Connect(ctx, newRemoteTransport(srv.Transport, endpoint, httpClient), nil)
@@ -185,23 +199,52 @@ func Remote(ctx context.Context, srv discover.Server, opts RemoteOptions) (Resul
 	return result, nil
 }
 
-// minBareSecretLen is the shortest part of a secret that classify removes
-// wherever it stands in error text: a token after its auth scheme, or a token
-// used as the URL user name. A server can echo such a part alone ("invalid
-// token <token>"). A shorter part is too likely to match ordinary words.
-const minBareSecretLen = 8
-
 // splitUserinfo returns u without its user info and fragment, and the user
 // info. The SDK gets an endpoint without them, so no SDK error text can hold
 // them. A fragment is never sent over HTTP, so dropping it changes no request.
 // url.URL.String re-encodes the URL; this is acceptable, because the result is
 // equivalent to the configured URL minus its user info and fragment.
-func splitUserinfo(u *url.URL) (origin url.URL, user *url.Userinfo) {
-	origin = *u
-	origin.User = nil
-	origin.Fragment = ""
-	origin.RawFragment = ""
-	return origin, u.User
+func splitUserinfo(u *url.URL) (endpoint url.URL, user *url.Userinfo) {
+	endpoint = *u
+	endpoint.User = nil
+	endpoint.Fragment = ""
+	endpoint.RawFragment = ""
+	return endpoint, u.User
+}
+
+// urlSecrets returns the secrets in the query and the path of u, for classify
+// to remove wherever they stand in error text: every query value, every bare
+// query part (a key with an empty value or no "="), and every path segment
+// that discover.RedactURL masks (discover.SecretPathSegments). Query parts
+// come in their raw form and, when it differs, unescaped. It keeps only parts
+// with at least minBareSecretLen bytes. In URL form, classify removes the
+// whole query and every secret segment anyway (replaceURLParts).
+//
+// It splits the raw query itself, on "&" and ";": url.ParseQuery drops a pair
+// with a ";" or a bad escape, and such a value is still a secret.
+func urlSecrets(u *url.URL) []string {
+	var secrets []string
+	add := func(s string) {
+		if len(s) >= minBareSecretLen {
+			secrets = append(secrets, s)
+		}
+	}
+	isSep := func(r rune) bool { return r == '&' || r == ';' }
+	for pair := range strings.FieldsFuncSeq(u.RawQuery, isSep) {
+		key, value, _ := strings.Cut(pair, "=")
+		part := value
+		if part == "" {
+			part = key
+		}
+		add(part)
+		if plain, err := url.QueryUnescape(part); err == nil && plain != part {
+			add(plain)
+		}
+	}
+	for _, seg := range discover.SecretPathSegments(u.String()) {
+		add(seg)
+	}
+	return secrets
 }
 
 // splitHeaders returns the config headers with their raw values, for the
@@ -295,11 +338,11 @@ func userinfoSecrets(user *url.Userinfo) []string {
 	return secrets
 }
 
-// parseOrigin parses raw and checks that it is an http or https URL with a
+// parseEndpoint parses raw and checks that it is an http or https URL with a
 // host. On failure it returns a fixed reason text and a nil URL. It returns
 // no error value on purpose: url.Parse errors hold the raw URL, so they are
 // never used.
-func parseOrigin(raw string) (*url.URL, string) {
+func parseEndpoint(raw string) (*url.URL, string) {
 	u, err := url.Parse(raw)
 	if err != nil {
 		return nil, "URL does not parse"

@@ -132,9 +132,11 @@ type transportEvents interface {
 // ev tells what the HTTP layer saw: the last non-2xx status and the first
 // error that it raised on purpose. ev can be nil. If the HTTP layer blocked a
 // request on purpose, that error decides the kind, even when the SDK
-// flattened err into text. headerValues are the header values that were sent;
-// classify removes them from any error text.
-func classify(err error, srv discover.Server, ev transportEvents, headerValues []string) *ConnectError {
+// flattened err into text. secrets are all the secret strings of the server
+// entry: the header values, the credential parts of auth headers and the
+// secrets of the URL user info, query and path (see Remote). classify
+// removes them from any error text.
+func classify(err error, srv discover.Server, ev transportEvents, secrets []string) *ConnectError {
 	rawURL := srv.URL.Reveal()
 	redacted := srv.URL.String()
 
@@ -158,9 +160,9 @@ func classify(err error, srv discover.Server, ev transportEvents, headerValues [
 		URL:    redacted,
 	}
 	ce.Kind, ce.Reason, ce.Status = classifyCause(cause, srv, status, connected, func(text string) string {
-		return scrub(text, rawURL, redacted, headerValues)
+		return scrub(text, rawURL, redacted, secrets)
 	})
-	ce.err = safeCause(cause, rawURL, redacted, headerValues)
+	ce.err = safeCause(cause, rawURL, redacted, secrets)
 	return ce
 }
 
@@ -304,20 +306,35 @@ func httpReason(srv discover.Server, status int, connected bool) string {
 // header built from it (see headerTransport.RoundTrip), so the list names it
 // too. It holds names only, never a value.
 func sentHeaderNames(srv discover.Server) []string {
+	keys := srv.Headers.Keys()
+	// buildHeader sets the keys in this sorted order, so the last
+	// Authorization key gives the value. An empty value counts as absent.
+	authValue := ""
+	for _, name := range keys {
+		if http.CanonicalHeaderKey(name) == "Authorization" {
+			authValue = srv.Headers[name].Reveal()
+		}
+	}
+	basic := false
+	if authValue == "" {
+		if u, err := url.Parse(srv.URL.Reveal()); err == nil && u.User != nil {
+			basic = true
+		}
+	}
+
 	var names []string
 	seen := make(map[string]bool)
-	for _, name := range srv.Headers.Keys() {
+	for _, name := range keys {
 		canonical := http.CanonicalHeaderKey(name)
-		if seen[canonical] {
+		// With basic, the Basic header replaced the empty config value.
+		if seen[canonical] || basic && canonical == "Authorization" {
 			continue
 		}
 		seen[canonical] = true
 		names = append(names, name)
 	}
-	if !seen["Authorization"] {
-		if u, err := url.Parse(srv.URL.Reveal()); err == nil && u.User != nil {
-			names = append(names, "Authorization (from URL user info)")
-		}
+	if basic {
+		names = append(names, "Authorization (from URL user info)")
 	}
 	return names
 }
@@ -338,12 +355,12 @@ func stripURLError(err error) error {
 // safeCause returns cause if its text holds no secret, and a plain error with
 // the scrubbed text otherwise. The plain error does not keep the chain, which
 // is the price for text that is safe to print. A nil cause gives nil.
-func safeCause(cause error, rawURL, redactedURL string, headerValues []string) error {
+func safeCause(cause error, rawURL, redactedURL string, secrets []string) error {
 	if cause == nil {
 		return nil
 	}
 	text := cause.Error()
-	replaced := replaceSecrets(text, rawURL, redactedURL, headerValues)
+	replaced := replaceSecrets(text, rawURL, redactedURL, secrets)
 	if replaced == text {
 		return cause
 	}
@@ -358,19 +375,22 @@ func safeCause(cause error, rawURL, redactedURL string, headerValues []string) e
 //     without its query (net/http sometimes prints this variant);
 //   - the query of rawURL, after "?", and the user name and password in the
 //     authority (in plain and in URL-escaped form), with discover.Mask;
-//   - every non-empty header value with discover.Mask, longest value first.
+//   - every path segment of rawURL that discover.RedactURL masks, after "/",
+//     with discover.Mask;
+//   - every non-empty string in secrets with discover.Mask, longest first,
+//     wherever it stands.
 //
 // For each secret it also replaces the form that %q prints (backslashes and
 // quotes escaped). It then cuts the result to maxReasonRunes runes and adds
 // "…" if it cut anything. The result can still hold text that the server controls;
 // callers must escape it with internal/termsafe before they print it.
-func scrub(text, rawURL, redactedURL string, headerValues []string) string {
-	return truncate(replaceSecrets(text, rawURL, redactedURL, headerValues))
+func scrub(text, rawURL, redactedURL string, secrets []string) string {
+	return truncate(replaceSecrets(text, rawURL, redactedURL, secrets))
 }
 
 // replaceSecrets does the replacements that scrub describes, without the
 // cut.
-func replaceSecrets(text, rawURL, redactedURL string, headerValues []string) string {
+func replaceSecrets(text, rawURL, redactedURL string, secrets []string) string {
 	if rawURL != "" {
 		text = replaceForms(text, rawURL, redactedURL)
 		text = replaceURLParts(text, rawURL, redactedURL)
@@ -379,7 +399,7 @@ func replaceSecrets(text, rawURL, redactedURL string, headerValues []string) str
 	// Longest first: a value that is a substring of another value must not
 	// leave pieces of the longer one behind. Header values are replaced
 	// everywhere, even the short ones: a leak is worse than a garbled word.
-	values := slices.DeleteFunc(slices.Clone(headerValues), func(v string) bool { return v == "" })
+	values := slices.DeleteFunc(slices.Clone(secrets), func(v string) bool { return v == "" })
 	slices.SortFunc(values, func(a, b string) int { return len(b) - len(a) })
 	for _, v := range values {
 		text = replaceForms(text, v, discover.Mask)

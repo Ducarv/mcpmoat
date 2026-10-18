@@ -66,12 +66,15 @@
 // The caps count bytes on the wire. The SDK decodes each page into Go values
 // before the item cap applies, and decoded JSON can take many times its wire
 // size (a schema of millions of empty objects, for example). So one page can
-// use far more memory than the body cap; a fix would need hooks in the SDK.
+// use far more memory than the body cap. Issue #101 tracks a bounded decoder.
 //
 // # Network
 //
 // The package honours the proxy settings from the HTTP_PROXY, HTTPS_PROXY and
 // NO_PROXY environment variables. It makes no other network access (NFR-01).
+// Some clients ignore these variables, so a scan can take another route than
+// the client does. Over an http:// URL, the proxy then sees the configured
+// headers.
 // TLS 1.2 or newer is required, and certificates are always verified. There is
 // no option to skip the check: only tests in this package can replace the
 // transport.

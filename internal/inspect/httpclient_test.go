@@ -32,9 +32,9 @@ const hcUA = "test-agent/1"
 
 // hcNew calls newHTTPClient with the common fields. The tests that need User or
 // MaxTotal build the httpClientConfig themselves.
-func hcNew(origin *url.URL, headers map[string]string, base http.RoundTripper, ua string, maxBody int64) (*http.Client, *requestRecorder, error) {
+func hcNew(endpoint *url.URL, headers map[string]string, base http.RoundTripper, ua string, maxBody int64) (*http.Client, *requestRecorder, error) {
 	return newHTTPClient(httpClientConfig{
-		Origin:    origin,
+		Endpoint:  endpoint,
 		Headers:   headers,
 		Base:      base,
 		UserAgent: ua,
@@ -604,7 +604,9 @@ func hcRecordResp(status int, header http.Header) *http.Response {
 	return &http.Response{StatusCode: status, Header: header}
 }
 
-func TestStatusRecorder(t *testing.T) {
+// TestRequestRecorderStatus checks which HTTP status the requestRecorder keeps
+// as the last failure, both when called directly and through the client.
+func TestRequestRecorderStatus(t *testing.T) {
 	t.Parallel()
 
 	loc := http.Header{"Location": {"/next"}}
@@ -635,6 +637,7 @@ func TestStatusRecorder(t *testing.T) {
 		{name: "followed redirect keeps a failure", resp: []*http.Response{hcRecordResp(401, nil), hcRecordResp(302, loc)}, want: 401},
 		{name: "followed redirect keeps a success", resp: []*http.Response{hcRecordResp(200, nil), hcRecordResp(307, loc)}, want: 0},
 		{name: "redirect without Location is a failure", resp: []*http.Response{hcRecordResp(200, nil), hcRecordResp(302, nil)}, want: 302},
+		{name: "redirect with unparsable Location is a failure", resp: []*http.Response{hcRecordResp(200, nil), hcRecordResp(302, http.Header{"Location": {"http://[::1"}})}, want: 302},
 	}
 	for _, tt := range direct {
 		t.Run("direct: "+tt.name, func(t *testing.T) {
@@ -654,11 +657,9 @@ func TestStatusRecorder(t *testing.T) {
 		var rec requestRecorder
 		var wg sync.WaitGroup
 		for i := range 50 {
-			wg.Add(1)
-			go func() {
-				defer wg.Done()
+			wg.Go(func() {
 				rec.recordResponse(hcRecordResp(400+i, nil))
-			}()
+			})
 		}
 		wg.Wait()
 		if got := rec.lastStatus(); got < 400 || got >= 450 {
@@ -854,6 +855,39 @@ func TestStatusRecorder(t *testing.T) {
 		}
 	})
 
+	// The http.Client refuses a redirect whose Location does not parse and
+	// returns an error. The redirect response is then the last answer of the
+	// server, so the recorder must keep its status.
+	t.Run("redirect with unparsable Location is recorded", func(t *testing.T) {
+		t.Parallel()
+		for _, loc := range []string{"http://[::1", "%zz"} {
+			stub := &hcStub{respond: func(req *http.Request) *http.Response {
+				return hcResponse(req, http.StatusFound, "", http.Header{"Location": {loc}})
+			}}
+			client, rec, err := hcNew(hcURL(t, "http://example.com"), nil, stub, hcUA, 0)
+			if err != nil {
+				t.Fatal(err)
+			}
+			req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, "http://example.com/start", nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			resp, err := client.Do(req)
+			if resp != nil {
+				_ = resp.Body.Close()
+			}
+			if err == nil {
+				t.Fatalf("Location %q: client.Do() error = nil, want the Location parse error", loc)
+			}
+			if stub.count() != 1 {
+				t.Errorf("Location %q: base got %d requests, want 1", loc, stub.count())
+			}
+			if got := rec.lastStatus(); got != http.StatusFound {
+				t.Errorf("Location %q: lastStatus() = %d, want %d", loc, got, http.StatusFound)
+			}
+		}
+	})
+
 	t.Run("followed redirect is not recorded", func(t *testing.T) {
 		t.Parallel()
 		// The first response is a 307 with a Location on the same origin: the
@@ -929,7 +963,9 @@ func TestStatusRecorder(t *testing.T) {
 	}
 }
 
-func TestRequestRecorder(t *testing.T) {
+// TestRequestRecorderBlocked checks how the requestRecorder stores the first
+// blocked error and the connected flag.
+func TestRequestRecorderBlocked(t *testing.T) {
 	t.Parallel()
 
 	t.Run("zero value has no blocked error", func(t *testing.T) {
@@ -1061,11 +1097,9 @@ func TestRequestRecorder(t *testing.T) {
 		errs := []error{errOtherOrigin, errCrossOriginRedirect, errTooManyRedirects, errBodyTooLarge}
 		var wg sync.WaitGroup
 		for _, e := range errs {
-			wg.Add(1)
-			go func() {
-				defer wg.Done()
+			wg.Go(func() {
 				_ = rec.recordBlocked(e)
-			}()
+			})
 		}
 		wg.Wait()
 		got := rec.blockedErr()
@@ -1223,7 +1257,7 @@ func TestRequestRecorder(t *testing.T) {
 				return tt.respond(i, req)
 			}}
 			client, rec, err := newHTTPClient(httpClientConfig{
-				Origin:    hcURL(t, origin),
+				Endpoint:  hcURL(t, origin),
 				Base:      stub,
 				UserAgent: hcUA,
 				MaxBody:   tt.maxBody,
@@ -1299,7 +1333,7 @@ func TestBudgetTotal(t *testing.T) {
 			return hcResponse(req, 200, "01234567", nil) // 8 bytes
 		}}
 		client, rec, err := newHTTPClient(httpClientConfig{
-			Origin: hcURL(t, origin), Base: stub, UserAgent: hcUA, MaxBody: 10, MaxTotal: 12,
+			Endpoint: hcURL(t, origin), Base: stub, UserAgent: hcUA, MaxBody: 10, MaxTotal: 12,
 		})
 		if err != nil {
 			t.Fatal(err)
@@ -1332,7 +1366,7 @@ func TestBudgetTotal(t *testing.T) {
 			return hcResponse(req, 200, "0123456", nil) // 7 bytes
 		}}
 		client, rec, err := newHTTPClient(httpClientConfig{
-			Origin: hcURL(t, origin), Base: stub, UserAgent: hcUA, MaxBody: 7, MaxTotal: 14,
+			Endpoint: hcURL(t, origin), Base: stub, UserAgent: hcUA, MaxBody: 7, MaxTotal: 14,
 		})
 		if err != nil {
 			t.Fatal(err)
@@ -1352,7 +1386,7 @@ func TestBudgetTotal(t *testing.T) {
 			return hcResponse(req, 200, "0123456789", nil) // 10 bytes
 		}}
 		client, _, err := newHTTPClient(httpClientConfig{
-			Origin: hcURL(t, origin), Base: stub, UserAgent: hcUA, MaxBody: 5, MaxTotal: 1000,
+			Endpoint: hcURL(t, origin), Base: stub, UserAgent: hcUA, MaxBody: 5, MaxTotal: 1000,
 		})
 		if err != nil {
 			t.Fatal(err)
@@ -1369,7 +1403,7 @@ func TestBudgetTotal(t *testing.T) {
 			return hcResponse(req, 200, strings.Repeat("a", 100), nil)
 		}}
 		client, rec, err := newHTTPClient(httpClientConfig{
-			Origin: hcURL(t, origin), Base: stub, UserAgent: hcUA, MaxBody: 100, MaxTotal: 500,
+			Endpoint: hcURL(t, origin), Base: stub, UserAgent: hcUA, MaxBody: 100, MaxTotal: 500,
 		})
 		if err != nil {
 			t.Fatal(err)
@@ -1377,9 +1411,7 @@ func TestBudgetTotal(t *testing.T) {
 		var total atomic.Int64
 		var wg sync.WaitGroup
 		for range 10 {
-			wg.Add(1)
-			go func() {
-				defer wg.Done()
+			wg.Go(func() {
 				resp, err := client.Get(origin + "/")
 				if err != nil {
 					t.Errorf("client.Get() error = %v", err)
@@ -1388,7 +1420,7 @@ func TestBudgetTotal(t *testing.T) {
 				defer func() { _ = resp.Body.Close() }()
 				data, _ := io.ReadAll(resp.Body)
 				total.Add(int64(len(data)))
-			}()
+			})
 		}
 		wg.Wait()
 		if got := total.Load(); got != 500 {
@@ -1432,7 +1464,7 @@ func TestBudgetTotal(t *testing.T) {
 			t.Run(tt.name, func(t *testing.T) {
 				t.Parallel()
 				client, _, err := newHTTPClient(httpClientConfig{
-					Origin: hcURL(t, origin), Base: &hcStub{}, UserAgent: hcUA,
+					Endpoint: hcURL(t, origin), Base: &hcStub{}, UserAgent: hcUA,
 					MaxBody: tt.maxBody, MaxTotal: tt.maxTotal,
 				})
 				if err != nil {
@@ -1478,7 +1510,7 @@ func TestBudgetHugeLimits(t *testing.T) {
 				return hcResponse(req, 200, "small body", nil)
 			}}
 			client, rec, err := newHTTPClient(httpClientConfig{
-				Origin: hcURL(t, origin), Base: stub, UserAgent: hcUA,
+				Endpoint: hcURL(t, origin), Base: stub, UserAgent: hcUA,
 				MaxBody: tt.maxBody, MaxTotal: tt.maxTotal,
 			})
 			if err != nil {
@@ -1513,7 +1545,7 @@ func TestBudgetHugeLimits(t *testing.T) {
 			return hcResponse(req, 200, "0123456789", nil) // 10 bytes
 		}}
 		client, rec, err := newHTTPClient(httpClientConfig{
-			Origin: hcURL(t, origin), Base: stub, UserAgent: hcUA, MaxBody: 1000, MaxTotal: 4,
+			Endpoint: hcURL(t, origin), Base: stub, UserAgent: hcUA, MaxBody: 1000, MaxTotal: 4,
 		})
 		if err != nil {
 			t.Fatal(err)
@@ -1537,7 +1569,7 @@ func TestBasicAuth(t *testing.T) {
 	send := func(t *testing.T, cfg httpClientConfig, rawURL string) *hcStub {
 		t.Helper()
 		stub := &hcStub{}
-		cfg.Origin = hcURL(t, origin)
+		cfg.Endpoint = hcURL(t, origin)
 		cfg.Base = stub
 		cfg.UserAgent = hcUA
 		client, _, err := newHTTPClient(cfg)
@@ -1564,6 +1596,15 @@ func TestBasicAuth(t *testing.T) {
 		{name: "config header only", headers: map[string]string{"Authorization": "Bearer VTOKEN"}, want: []string{"Bearer VTOKEN"}},
 		{name: "other config headers do not block it", user: url.UserPassword("u", "p"), headers: map[string]string{"X-Api-Key": "k"}, want: []string{"Basic dTpw"}},
 		{name: "no user and no header", want: nil},
+		// An empty config value counts as absent, as in net/http: the Basic
+		// header from the user info replaces it.
+		{name: "empty config header gives way", user: url.UserPassword("u", "p"), headers: map[string]string{"Authorization": ""}, want: []string{"Basic dTpw"}},
+		{name: "empty config header gives way, lower case key", user: url.UserPassword("u", "p"), headers: map[string]string{"authorization": ""}, want: []string{"Basic dTpw"}},
+		// buildHeader sets the keys in sorted (byte) order, so the last key
+		// wins: "authorization" sorts after "Authorization".
+		{name: "last key empty gives way", user: url.UserPassword("u", "p"), headers: map[string]string{"Authorization": "Bearer VTOKEN", "authorization": ""}, want: []string{"Basic dTpw"}},
+		{name: "last key non-empty wins", user: url.UserPassword("u", "p"), headers: map[string]string{"Authorization": "", "authorization": "Bearer VTOKEN"}, want: []string{"Bearer VTOKEN"}},
+		{name: "empty config header without user info is sent as is", headers: map[string]string{"Authorization": ""}, want: []string{""}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -1580,7 +1621,7 @@ func TestBasicAuth(t *testing.T) {
 		t.Parallel()
 		stub := &hcStub{}
 		client, _, err := newHTTPClient(httpClientConfig{
-			Origin: hcURL(t, origin), User: url.UserPassword("u", "p"), Base: stub, UserAgent: hcUA,
+			Endpoint: hcURL(t, origin), User: url.UserPassword("u", "p"), Base: stub, UserAgent: hcUA,
 		})
 		if err != nil {
 			t.Fatal(err)
@@ -1608,7 +1649,7 @@ func TestBasicAuth(t *testing.T) {
 		// so one request never carries two values.
 		stub := &hcStub{}
 		client, _, err := newHTTPClient(httpClientConfig{
-			Origin: hcURL(t, origin), User: url.UserPassword("u", "p"), Base: stub, UserAgent: hcUA,
+			Endpoint: hcURL(t, origin), User: url.UserPassword("u", "p"), Base: stub, UserAgent: hcUA,
 		})
 		if err != nil {
 			t.Fatal(err)
@@ -1638,7 +1679,7 @@ func TestBasicAuth(t *testing.T) {
 			return hcResponse(req, 200, "ok", nil)
 		}}
 		client, _, err := newHTTPClient(httpClientConfig{
-			Origin: hcURL(t, origin), User: url.UserPassword("u", "p"), Base: stub, UserAgent: hcUA,
+			Endpoint: hcURL(t, origin), User: url.UserPassword("u", "p"), Base: stub, UserAgent: hcUA,
 		})
 		if err != nil {
 			t.Fatal(err)
@@ -1659,7 +1700,7 @@ func TestBasicAuth(t *testing.T) {
 		t.Parallel()
 		stub := &hcStub{}
 		client, _, err := newHTTPClient(httpClientConfig{
-			Origin: hcURL(t, origin), User: url.UserPassword("u", pass), Base: stub, UserAgent: hcUA,
+			Endpoint: hcURL(t, origin), User: url.UserPassword("u", pass), Base: stub, UserAgent: hcUA,
 		})
 		if err != nil {
 			t.Fatal(err)
@@ -1686,7 +1727,7 @@ func TestBasicAuth(t *testing.T) {
 	t.Run("password is not in the reserved header error", func(t *testing.T) {
 		t.Parallel()
 		_, _, err := newHTTPClient(httpClientConfig{
-			Origin: hcURL(t, origin), User: url.UserPassword("u", pass),
+			Endpoint: hcURL(t, origin), User: url.UserPassword("u", pass),
 			Headers: map[string]string{"Accept-Encoding": hcSecret}, Base: &hcStub{},
 		})
 		if !errors.Is(err, errReservedHeader) {
@@ -1710,7 +1751,7 @@ func TestNewHTTPClientBaseTransport(t *testing.T) {
 
 	t.Run("nil base uses the limited transport", func(t *testing.T) {
 		t.Parallel()
-		client, _, err := newHTTPClient(httpClientConfig{Origin: hcURL(t, "http://example.com"), UserAgent: hcUA})
+		client, _, err := newHTTPClient(httpClientConfig{Endpoint: hcURL(t, "http://example.com"), UserAgent: hcUA})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -1729,7 +1770,7 @@ func TestNewHTTPClientBaseTransport(t *testing.T) {
 
 	t.Run("client has no overall timeout", func(t *testing.T) {
 		t.Parallel()
-		client, _, err := newHTTPClient(httpClientConfig{Origin: hcURL(t, "http://example.com"), UserAgent: hcUA})
+		client, _, err := newHTTPClient(httpClientConfig{Endpoint: hcURL(t, "http://example.com"), UserAgent: hcUA})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -1748,7 +1789,7 @@ func TestNewHTTPClientBaseTransport(t *testing.T) {
 		}))
 		t.Cleanup(ts.Close)
 
-		client, _, err := newHTTPClient(httpClientConfig{Origin: hcURL(t, ts.URL), UserAgent: hcUA})
+		client, _, err := newHTTPClient(httpClientConfig{Endpoint: hcURL(t, ts.URL), UserAgent: hcUA})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -1772,10 +1813,15 @@ func TestIsFollowedRedirect(t *testing.T) {
 	t.Parallel()
 
 	loc := http.Header{"Location": {"/x"}}
+	// at returns a header with the given Location value.
+	at := func(v string) http.Header { return http.Header{"Location": {v}} }
 	tests := []struct {
 		name   string
 		status int
 		header http.Header
+		// reqURL, when set, is the URL of resp.Request. resp.Location
+		// resolves a relative Location against it.
+		reqURL string
 		want   bool
 	}{
 		{name: "301 with Location", status: 301, header: loc, want: true},
@@ -1789,11 +1835,26 @@ func TestIsFollowedRedirect(t *testing.T) {
 		{name: "304 with Location", status: 304, header: loc, want: false},
 		{name: "200 with Location", status: 200, header: loc, want: false},
 		{name: "401", status: 401, header: http.Header{}, want: false},
+		{name: "302 with absolute Location", status: 302, header: at("http://example.com/next"), want: true},
+		{name: "302 with absolute Location on another origin", status: 302, header: at("https://evil.test/steal"), want: true},
+		{name: "302 with relative Location and a request URL", status: 302, header: at("next?x=1"), reqURL: "http://example.com/a/b", want: true},
+		{name: "302 with scheme-relative Location", status: 302, header: at("//evil.test/steal"), reqURL: "http://example.com/", want: true},
+		// The http.Client does not follow a Location that does not parse; it
+		// returns an error. So the response is the final answer.
+		{name: "302 with unclosed IPv6 host", status: 302, header: at("http://[::1"), want: false},
+		{name: "307 with bad percent escape", status: 307, header: at("%zz"), want: false},
+		{name: "308 with control character", status: 308, header: at("http://example.com/\x7f"), want: false},
+		{name: "301 with unparsable Location and a request URL", status: 301, header: at("http://[::1"), reqURL: "http://example.com/", want: false},
+		{name: "500 with unparsable Location", status: 500, header: at("http://[::1"), want: false},
+		{name: "200 with absolute Location", status: 200, header: at("http://example.com/next"), want: false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			resp := &http.Response{StatusCode: tt.status, Header: tt.header}
+			if tt.reqURL != "" {
+				resp.Request = &http.Request{URL: hcURL(t, tt.reqURL)}
+			}
 			if got := isFollowedRedirect(resp); got != tt.want {
 				t.Errorf("isFollowedRedirect(%d) = %v, want %v", tt.status, got, tt.want)
 			}
@@ -2160,7 +2221,7 @@ func TestHeaderTransportNilHeader(t *testing.T) {
 			t.Parallel()
 			stub := &hcStub{}
 			client, _, err := newHTTPClient(httpClientConfig{
-				Origin:    hcURL(t, "http://example.com"),
+				Endpoint:  hcURL(t, "http://example.com"),
 				Headers:   map[string]string{"x-api-key": hcSecret},
 				User:      tt.user,
 				Base:      stub,

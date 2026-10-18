@@ -89,13 +89,7 @@ func (r *rawLists) middleware() mcp.Middleware {
 			}
 			if lt, ok := res.(*mcp.ListToolsResult); ok && lt != nil {
 				r.put(lt)
-				// Make the SDK cache treat this result as stale. On a session
-				// with protocol 2026-07-28 or later, ClientSession.ListTools
-				// serves a repeated cursor from its cache while the server TTL
-				// is positive (the cache path of ClientSession.ListTools in SDK
-				// v1.8.0), without calling this middleware. Then take would find no raw copy and
-				// listTools would fail with errRawListMissing. A scanner wants
-				// fresh data anyway.
+				// Keep the SDK from caching this result (see the rawLists doc).
 				lt.TTLMs = 0
 			}
 			return res, err
@@ -188,16 +182,37 @@ func listAll(ctx context.Context, cs sessionLister, caps *mcp.ServerCapabilities
 	return tools, prompts, resources, nil
 }
 
+// sdkErrorCodes are the JSON-RPC error codes that the SDK uses for its own
+// failures (SDK v1.8.0, internal/jsonrpc2): -32001 unknown error, -32003
+// client closing, -32004 server closing and -32005 "rejected by transport".
+// The SDK wraps every failed HTTP request, and HTTP 429, 502, 503 and 504,
+// with -32005. Such an error is a *jsonrpc.Error too, but no server sent it.
+var sdkErrorCodes = []int64{-32001, -32003, -32004, -32005}
+
 // tolerateUndeclared decides what a failed list means. It returns nil when the
 // server did not declare the capability and answered the first page with a
-// JSON-RPC error response: the list is then empty. Otherwise it returns err
-// unchanged.
+// JSON-RPC error response, whatever its code: the list is then empty.
+// Otherwise it returns err unchanged.
+//
+// An SDK failure (sdkErrorCodes) stays an error, although it is a
+// *jsonrpc.Error too: a failed request must not look like a server without
+// the capability, or the scan would report an empty list as clean. This also
+// covers a JSON-RPC error that comes with a non-2xx HTTP status, because the
+// SDK adds -32005 to it. Such an answer fails the scan: failing closed is the
+// safe choice when the server's answer is not a plain JSON-RPC error.
+// jsonrpc.Error.Is compares only the code, so errors.Is finds such a code
+// anywhere in the chain.
 func tolerateUndeclared(err error, declared bool) error {
-	if err == nil || declared {
+	if err == nil || declared || errors.Is(err, errLaterPage) {
 		return err
 	}
+	for _, code := range sdkErrorCodes {
+		if errors.Is(err, &jsonrpc.Error{Code: code}) {
+			return err
+		}
+	}
 	var rpcErr *jsonrpc.Error
-	if errors.As(err, &rpcErr) && !errors.Is(err, errLaterPage) {
+	if errors.As(err, &rpcErr) {
 		return nil
 	}
 	return err

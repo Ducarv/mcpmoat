@@ -9,6 +9,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -1278,6 +1279,16 @@ func TestHTTPReasonHeadersSent(t *testing.T) {
 		{name: "keys that differ only in case are named once", rawURL: plainURL, headers: map[string]string{"x-key": testKeyValue, "X-Key": testKeyValue}, want: "X-Key"},
 		{name: "case duplicates among other keys", rawURL: plainURL, headers: map[string]string{"x-key": testKeyValue, "Accept-Language": "en", "X-KEY": testKeyValue}, want: "Accept-Language, X-KEY"},
 		{name: "authorization keys that differ only in case with user info", rawURL: userinfoURL, headers: map[string]string{"authorization": testAuthValue, "Authorization": testAuthValue}, want: "Authorization"},
+		// An empty config Authorization counts as absent: the Basic header
+		// from the user info replaces it, so the config key is not named.
+		{name: "user info and empty config authorization", rawURL: userinfoURL, headers: map[string]string{"authorization": ""}, want: fromURL},
+		{name: "user info, empty config Authorization and other headers", rawURL: userinfoURL, headers: map[string]string{"Authorization": "", "X-Api-Key": testKeyValue}, want: "X-Api-Key, " + fromURL},
+		{name: "empty config Authorization without user info", rawURL: plainURL, headers: map[string]string{"Authorization": ""}, want: "Authorization"},
+		{name: "empty config Authorization with unparsable url", rawURL: "https://user:pw@[bad/mcp", headers: map[string]string{"Authorization": ""}, want: "Authorization"},
+		// Sorted byte order puts "authorization" after "Authorization", so the
+		// lower-case key gives the value (buildHeader: last key wins).
+		{name: "user info, last authorization key empty", rawURL: userinfoURL, headers: map[string]string{"Authorization": testAuthValue, "authorization": ""}, want: fromURL},
+		{name: "user info, last authorization key non-empty", rawURL: userinfoURL, headers: map[string]string{"Authorization": "", "authorization": testAuthValue}, want: "Authorization"},
 	}
 	for _, tt := range tests {
 		for _, status := range []int{http.StatusUnauthorized, http.StatusForbidden} {
@@ -1305,6 +1316,72 @@ func TestHTTPReasonHeadersSent(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+// TestSentHeaderNamesMatchesRoundTrip ties sentHeaderNames to what
+// headerTransport.RoundTrip really sends. The reason names the Basic header
+// from the URL user info exactly when the request carries it, and it names a
+// config Authorization key exactly when the request carries the config value.
+func TestSentHeaderNamesMatchesRoundTrip(t *testing.T) {
+	t.Parallel()
+
+	const (
+		rawURL  = "http://user:pw@example.com/mcp" //nolint:gosec // G101: fake test credentials
+		fromURL = "Authorization (from URL user info)"
+	)
+	tests := []struct {
+		name    string
+		headers map[string]string
+	}{
+		{name: "no headers"},
+		{name: "empty Authorization", headers: map[string]string{"Authorization": ""}},
+		{name: "empty lower-case authorization", headers: map[string]string{"authorization": ""}},
+		{name: "non-empty Authorization", headers: map[string]string{"Authorization": "Bearer x"}},
+		{name: "non-empty then empty", headers: map[string]string{"Authorization": "Bearer x", "authorization": ""}},
+		{name: "empty then non-empty", headers: map[string]string{"Authorization": "", "authorization": "Bearer x"}},
+		{name: "upper-case empty first", headers: map[string]string{"AUTHORIZATION": "", "Authorization": "Bearer x"}},
+		{name: "upper-case non-empty first", headers: map[string]string{"AUTHORIZATION": "Bearer x", "authorization": ""}},
+		{name: "other header only", headers: map[string]string{"X-Api-Key": "k"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			u, err := url.Parse(rawURL)
+			if err != nil {
+				t.Fatal(err)
+			}
+			endpoint, user := splitUserinfo(u)
+			stub := &hcStub{}
+			client, _, err := newHTTPClient(httpClientConfig{Endpoint: &endpoint, User: user, Headers: tt.headers, Base: stub})
+			if err != nil {
+				t.Fatalf("newHTTPClient() error = %v", err)
+			}
+			resp := hcGet(t, client, endpoint.String())
+			_ = resp.Body.Close()
+			sent := stub.header(0).Get("Authorization")
+			basicSent := strings.HasPrefix(sent, "Basic ")
+
+			cfg := make(discover.SecretMap, len(tt.headers))
+			for key, value := range tt.headers {
+				cfg[key] = discover.NewSecret(value)
+			}
+			names := sentHeaderNames(discover.Server{
+				Name:      "remote",
+				Transport: discover.TransportHTTP,
+				URL:       discover.NewURL(rawURL),
+				Headers:   cfg,
+			})
+			namesBasic := slices.Contains(names, fromURL)
+			namesConfig := slices.ContainsFunc(names, func(n string) bool { return http.CanonicalHeaderKey(n) == "Authorization" })
+
+			if namesBasic != basicSent {
+				t.Errorf("sentHeaderNames() = %q names the user info header: %t; the request carries Authorization %q", names, namesBasic, sent)
+			}
+			if want := sent != "" && !basicSent; namesConfig != want {
+				t.Errorf("sentHeaderNames() = %q names a config Authorization key: %t, want %t; the request carries Authorization %q", names, namesConfig, want, sent)
+			}
+		})
 	}
 }
 
