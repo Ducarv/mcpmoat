@@ -54,6 +54,7 @@ func stdB64(s string) string { return base64.StdEncoding.EncodeToString([]byte(s
 // urlB64 returns s in the URL-safe base64 alphabet, with padding.
 func urlB64(s string) string { return base64.URLEncoding.EncodeToString([]byte(s)) }
 
+// TestLeaks checks which secrets Leaks finds, in plain and encoded forms.
 func TestLeaks(t *testing.T) {
 	t.Parallel()
 
@@ -333,6 +334,7 @@ func TestLeaks(t *testing.T) {
 	}
 }
 
+// TestCanaries checks that Canaries returns every canary value.
 func TestCanaries(t *testing.T) {
 	t.Parallel()
 
@@ -411,6 +413,7 @@ func (f *fakeTB) Errorf(format string, args ...any) {
 	f.messages = append(f.messages, fmt.Sprintf(format, args...))
 }
 
+// TestAssertNoLeak checks the messages that AssertNoLeak reports with Errorf.
 func TestAssertNoLeak(t *testing.T) {
 	t.Parallel()
 

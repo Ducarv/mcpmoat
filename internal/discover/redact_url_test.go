@@ -9,6 +9,8 @@ import (
 	"github.com/Ducarv/mcpmoat/internal/discover/discovertest"
 )
 
+// TestRedactURL checks the masked output of RedactURL for each URL part and
+// for the inputs that fail closed.
 func TestRedactURL(t *testing.T) {
 	t.Parallel()
 
@@ -166,8 +168,8 @@ func TestRedactURL(t *testing.T) {
 
 		// Query: every value is masked, keys and separators stay.
 		{
-			name:  "at sign in a query value is masked with the value",
-			input: "https://h/x?email=a@b",
+			name:  "escaped at sign in a query value is masked with the value",
+			input: "https://h/x?email=a%40b",
 			want:  "https://h/x?email=" + discover.Mask,
 		},
 		{
@@ -194,6 +196,21 @@ func TestRedactURL(t *testing.T) {
 			name:  "value with equals sign",
 			input: "https://h/x?k=a=" + discovertest.CanaryURL,
 			want:  "https://h/x?k=" + discover.Mask,
+		},
+		{
+			name:  "normal keys are kept",
+			input: "https://h/x?api_key=1&token=2&k=3",
+			want:  "https://h/x?api_key=" + discover.Mask + "&token=" + discover.Mask + "&k=" + discover.Mask,
+		},
+		{
+			name:  "token with known prefix as key is masked",
+			input: "https://h/x?ghp_abcdef123456=",
+			want:  "https://h/x?" + discover.Mask + "=" + discover.Mask,
+		},
+		{
+			name:  "long token as key is masked",
+			input: "https://h/?" + discovertest.CanaryURL + "=1&k=2",
+			want:  "https://h/?" + discover.Mask + "=" + discover.Mask + "&k=" + discover.Mask,
 		},
 
 		// Fragment: a non-empty fragment is masked.
@@ -286,6 +303,43 @@ func TestRedactURL(t *testing.T) {
 			want:  discover.Mask,
 		},
 		{
+			// With userinfo, a "/" in the password cuts the authority too:
+			// url.Parse sees userinfo "user:p", host "ss" and path
+			// "/word@h/mcp". The "@" in the path gives Mask.
+			name:  "at sign and slash in password",
+			input: "https://user:p@" + "ss/word@h/mcp",
+			want:  discover.Mask,
+		},
+		{
+			name:  "at sign and slash in username",
+			input: "https://a@b/c@d/x",
+			want:  discover.Mask,
+		},
+		{
+			name:  "at sign in fragment with userinfo",
+			input: "https://u:p@" + "h/x#a@b",
+			want:  discover.Mask,
+		},
+		{
+			// A "?" in the token puts the rest in the query, and the "@"
+			// sits in a query value, after the first "=".
+			name:  "question mark in token with equals sign before at sign",
+			input: "https://ghp_abcdef123?x=y@h/mcp",
+			want:  discover.Mask,
+		},
+		{
+			// Any raw "@" in the query fails closed, so a real query value
+			// with "@" also gives Mask. RedactURL documents this cost.
+			name:  "at sign in a query value",
+			input: "https://h/x?email=a@b",
+			want:  discover.Mask,
+		},
+		{
+			name:  "at sign in a query value with userinfo",
+			input: "https://u:p@" + "h/x?email=a@b",
+			want:  discover.Mask,
+		},
+		{
 			// url.Parse accepts a zone ID, and u.String writes it back as
 			// written, so the zone could carry a secret.
 			name:  "IPv6 zone ID",
@@ -353,6 +407,9 @@ func FuzzRedactURL(f *testing.F) {
 		"https://h/eyJhbGciOiJIUzI1NiJ9.e30.sig;k=v;;t/sse",
 		"https://tok/en@h/x?q#f",
 		"https://h/\u00e9%2F;\u202e/x",
+		"https://user:p@ss/word@h/mcp",
+		"https://ghp_abcdef123?x=y@h/mcp",
+		"https://h/?ghp_abcdef123456=&k=v;" + strings.Repeat("a", 32),
 	} {
 		f.Add(seed)
 	}
@@ -365,7 +422,7 @@ func FuzzRedactURL(f *testing.F) {
 // ASCII (0x20 to 0x7e), as promised by the RedactURL doc comment.
 func assertPrintableASCII(t *testing.T, input, got string) {
 	t.Helper()
-	for i := 0; i < len(got); i++ {
+	for i := range len(got) {
 		if c := got[i]; c < 0x20 || c > 0x7e {
 			t.Errorf("RedactURL(%q) = %q, byte %d is 0x%02x, want printable ASCII", input, got, i, c)
 			return
@@ -399,12 +456,6 @@ func TestRedactURLKnownLimits(t *testing.T) {
 			want:  "https://h/mcp/QwErTyUiOpAsDfGhJkLz/sse",
 		},
 		{
-			// RedactURL keeps query keys, so a token used as a key stays.
-			name:  "token as query key is kept",
-			input: "https://h/?" + discovertest.CanaryURL + "=1",
-			want:  "https://h/?" + discovertest.CanaryURL + "=" + discover.Mask,
-		},
-		{
 			// RedactURL keeps the host, so a token in a subdomain stays.
 			name:  "token in subdomain is not masked",
 			input: "https://" + discovertest.CanaryURL + ".example.com/",
@@ -424,6 +475,7 @@ func TestRedactURLKnownLimits(t *testing.T) {
 	}
 }
 
+// ExampleRedactURL shows that the userinfo and the query values are masked.
 func ExampleRedactURL() {
 	fmt.Println(discover.RedactURL("https://user:pw@example.com/mcp?key=abc"))
 	// Output: https://********@example.com/mcp?key=********
