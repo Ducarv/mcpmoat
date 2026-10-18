@@ -6,16 +6,13 @@ import (
 	"fmt"
 	"log/slog"
 	"reflect"
+	"strconv"
 	"strings"
 	"testing"
 
 	"github.com/Ducarv/mcpmoat/internal/discover"
 	"github.com/Ducarv/mcpmoat/internal/discover/discovertest"
 )
-
-// leakyURL holds the URL canary in the userinfo and in a query value, so a
-// test catches a leak of either part.
-const leakyURL = "https://user:" + discovertest.CanaryURL + "@example.com/mcp?k=" + discovertest.CanaryURL
 
 // withExportedURL holds a URL in an exported field. fmt and the encoders can
 // call the field's methods, so they print the redacted URL.
@@ -36,17 +33,14 @@ func TestURLFormatVerbs(t *testing.T) {
 	t.Parallel()
 
 	u := discover.NewURL(leakyURL)
-
-	// The verbs are in a table, so each one runs as its own subtest. URL
-	// implements fmt.Formatter, so fmt passes every verb, even %d and %x, to
-	// URL.Format.
-	verbs := []string{"%v", "%+v", "%#v", "%s", "%q", "%x", "%d", "%p", "%T", "%10v"}
+	redacted := discover.RedactURL(leakyURL)
 
 	values := []struct {
 		name string
 		arg  any
 		// direct is true when fmt can call the URL methods, so the output
-		// must contain the host and Mask (except for %T and %p).
+		// must contain the redacted URL formatted with the same verb
+		// (except for %T and %p).
 		direct bool
 	}{
 		{name: "URL", arg: u, direct: true},
@@ -56,7 +50,7 @@ func TestURLFormatVerbs(t *testing.T) {
 	}
 
 	for _, v := range values {
-		for _, verb := range verbs {
+		for _, verb := range fmtVerbs() {
 			t.Run(v.name+"/"+verb, func(t *testing.T) {
 				t.Parallel()
 				got := fmt.Sprintf(verb, v.arg)
@@ -68,10 +62,8 @@ func TestURLFormatVerbs(t *testing.T) {
 				if !v.direct || verb == "%T" || verb == "%p" {
 					return
 				}
-				for _, want := range []string{"example.com", discover.Mask} {
-					if !strings.Contains(got, want) {
-						t.Errorf("fmt.Sprintf(%q, %s) = %q, want it to contain %q", verb, v.name, got, want)
-					}
+				if want := fmt.Sprintf(verb, redacted); !strings.Contains(got, want) {
+					t.Errorf("fmt.Sprintf(%q, %s) = %q, want it to contain %q", verb, v.name, got, want)
 				}
 			})
 		}
@@ -85,9 +77,6 @@ func TestURLMethods(t *testing.T) {
 
 	u := discover.NewURL(leakyURL)
 	want := discover.RedactURL(leakyURL)
-	noErr := func(f func() string) func() (string, error) {
-		return func() (string, error) { return f(), nil }
-	}
 	tests := []struct {
 		name string
 		call func() (string, error)
@@ -95,10 +84,7 @@ func TestURLMethods(t *testing.T) {
 		{name: "String", call: noErr(u.String)},
 		{name: "GoString", call: noErr(u.GoString)},
 		{name: "LogValue", call: noErr(func() string { return u.LogValue().String() })},
-		{name: "MarshalText", call: func() (string, error) {
-			b, err := u.MarshalText()
-			return string(b), err
-		}},
+		{name: "MarshalText", call: textOf(u)},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -116,6 +102,44 @@ func TestURLMethods(t *testing.T) {
 
 	if got := u.Reveal(); got != leakyURL {
 		t.Errorf("Reveal() = %q, want %q", got, leakyURL)
+	}
+}
+
+// TestURLFormatFlags checks that Format passes the verb and flags on to the
+// redacted URL: %q quotes and escapes it, and a width pads it.
+func TestURLFormatFlags(t *testing.T) {
+	t.Parallel()
+
+	// shortURL is shorter than the widths below, so the padding shows.
+	const shortURL = "https://a.example"
+	tests := []struct {
+		name   string
+		format string
+		raw    string
+		want   string
+	}{
+		{name: "q", format: "%q", raw: leakyURL, want: strconv.Quote(discover.RedactURL(leakyURL))},
+		{
+			// RedactURL keeps a printable query key as written, so %q must
+			// escape the quote and the backslash in it.
+			name:   "q escapes",
+			format: "%q",
+			raw:    `https://example.com/mcp?a"b\c=` + discovertest.CanaryURL,
+			want:   `"https://example.com/mcp?a\"b\\c=` + discover.Mask + `"`,
+		},
+		{name: "left pad", format: "%-20v", raw: shortURL, want: shortURL + "   "},
+		{name: "right pad", format: "%20s", raw: shortURL, want: "   " + shortURL},
+		{name: "wide redacted", format: "%-70v", raw: leakyURL, want: fmt.Sprintf("%-70s", discover.RedactURL(leakyURL))},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got := fmt.Sprintf(tt.format, discover.NewURL(tt.raw))
+			discovertest.AssertNoLeak(t, "fmt.Sprintf("+tt.format+")", got, discovertest.CanaryURL)
+			if got != tt.want {
+				t.Errorf("fmt.Sprintf(%q) = %q, want %q", tt.format, got, tt.want)
+			}
+		})
 	}
 }
 
@@ -162,13 +186,6 @@ func TestURLSlog(t *testing.T) {
 	t.Parallel()
 
 	u := discover.NewURL(leakyURL)
-	handlers := []struct {
-		name string
-		make func(*bytes.Buffer) slog.Handler
-	}{
-		{name: "text", make: func(b *bytes.Buffer) slog.Handler { return slog.NewTextHandler(b, nil) }},
-		{name: "json", make: func(b *bytes.Buffer) slog.Handler { return slog.NewJSONHandler(b, nil) }},
-	}
 	attrs := []struct {
 		name string
 		attr slog.Attr
@@ -177,12 +194,12 @@ func TestURLSlog(t *testing.T) {
 		{name: "*URL", attr: slog.Any("url", &u)},
 		{name: "exported field", attr: slog.Any("server", withExportedURL{U: u})},
 	}
-	for _, h := range handlers {
+	for _, h := range slogHandlers() {
 		for _, a := range attrs {
 			t.Run(h.name+"/"+a.name, func(t *testing.T) {
 				t.Parallel()
 				var buf bytes.Buffer
-				slog.New(h.make(&buf)).Info("msg", a.attr)
+				slog.New(h.newHandler(&buf)).Info("msg", a.attr)
 				got := buf.String()
 				discovertest.AssertNoLeak(t, "slog "+h.name, got, discovertest.CanaryURL)
 				for _, want := range []string{"example.com", discover.Mask} {
@@ -320,6 +337,8 @@ func TestURLUnmarshalTextCopies(t *testing.T) {
 	}
 }
 
+// ExampleURL shows that a URL prints redacted and that only Reveal gives the
+// raw URL.
 func ExampleURL() {
 	u := discover.NewURL("https://user:pw@example.com/mcp?key=abc")
 	fmt.Println(u)

@@ -35,50 +35,149 @@ const maxTOMLKeyParts = 16
 // JSON one, so this cap is lower than maxConfigSize.
 const maxTOMLSize = 256 << 10
 
+// codexServersKey is the top-level key that holds the servers.
+const codexServersKey = "mcp_servers"
+
+// The server keys that Codex knows. readCodex reads the first group (see
+// codexReadKeys) and ignores the second (see codexIgnoredKeys).
+const (
+	codexKeyCommand     = "command"
+	codexKeyArgs        = "args"
+	codexKeyEnv         = "env"
+	codexKeyURL         = "url"
+	codexKeyHTTPHeaders = "http_headers"
+	codexKeyCwd         = "cwd"
+
+	// codexKeyAuthEnvVar is bearer_token_env_var. Its name has no "token":
+	// gosec (G101) takes such a name with a string value for a hard-coded
+	// credential, but the value is only a key name.
+	codexKeyAuthEnvVar        = "bearer_token_env_var"
+	codexKeyEnvHTTPHeaders    = "env_http_headers"
+	codexKeyEnvVars           = "env_vars"
+	codexKeyEnabled           = "enabled"
+	codexKeyStartupTimeoutSec = "startup_timeout_sec"
+	codexKeyToolTimeoutSec    = "tool_timeout_sec"
+)
+
+// codexReadKeys lists the server keys that readCodex reads. codexReads has
+// one entry for each of them (TestCodexKeys checks this). No code writes to
+// it or to codexIgnoredKeys.
+var codexReadKeys = [...]string{
+	codexKeyCommand, codexKeyArgs, codexKeyEnv, codexKeyURL, codexKeyHTTPHeaders, codexKeyCwd,
+}
+
+// codexIgnoredKeys lists the server keys that Codex knows and readCodex
+// ignores on purpose (see ReadCodex).
+var codexIgnoredKeys = [...]string{
+	codexKeyAuthEnvVar, codexKeyEnvHTTPHeaders, codexKeyEnvVars,
+	codexKeyEnabled, codexKeyStartupTimeoutSec, codexKeyToolTimeoutSec,
+}
+
+// codexKnownKeys returns every server key that Codex knows: the keys that
+// readCodex reads and the keys that it ignores. readCodex uses the list to
+// find keys that differ from a known key only by letter case.
+func codexKnownKeys() []string {
+	return slices.Concat(codexReadKeys[:], codexIgnoredKeys[:])
+}
+
+// The TOML type names that md.Type returns. A table made only through a
+// header or a dotted key below it has the type "" (see codexIsTable), and
+// "ArrayHash" is an array of tables ([[name]]).
+const (
+	tomlTypeString    = "String"
+	tomlTypeArray     = "Array"
+	tomlTypeHash      = "Hash"
+	tomlTypeArrayHash = "ArrayHash"
+)
+
 // codexEntry is the part of one [mcp_servers.<name>] table that readCodex
-// uses. Keys that are not listed here are ignored by the TOML decoder.
+// uses. decodeCodexEntry fills it from the exact keys in codexReadKeys.
 //
 // Env and HTTPHeaders are SecretMap values, and URL is a URL. The TOML
 // decoder calls their UnmarshalText methods, so the values are never held
 // in a plain string map.
 type codexEntry struct {
-	Command     string    `toml:"command"`
-	Args        []string  `toml:"args"`
-	Env         SecretMap `toml:"env"`
-	URL         URL       `toml:"url"`
-	HTTPHeaders SecretMap `toml:"http_headers"`
+	Command     string
+	Args        []string
+	Env         SecretMap
+	URL         URL
+	HTTPHeaders SecretMap
+	Cwd         string
+}
+
+// codexRead is one key that readCodex reads: the TOML type that the value
+// must have, and a pointer to the codexEntry field that takes the value.
+// PrimitiveDecode writes through the pointer.
+type codexRead struct {
+	key  string
+	typ  string
+	dest any
+}
+
+// codexReads returns one codexRead for each key in codexReadKeys, in the same
+// order, with pointers into e.
+func codexReads(e *codexEntry) []codexRead {
+	return []codexRead{
+		{key: codexKeyCommand, typ: tomlTypeString, dest: &e.Command},
+		{key: codexKeyArgs, typ: tomlTypeArray, dest: &e.Args},
+		{key: codexKeyEnv, typ: tomlTypeHash, dest: &e.Env},
+		{key: codexKeyURL, typ: tomlTypeString, dest: &e.URL},
+		{key: codexKeyHTTPHeaders, typ: tomlTypeHash, dest: &e.HTTPHeaders},
+		{key: codexKeyCwd, typ: tomlTypeString, dest: &e.Cwd},
+	}
 }
 
 // ReadCodex reads one Codex CLI config file (~/.codex/config.toml). The file
-// may be at most 256 KiB; a bigger file gives a FileError.
+// may be at most maxTOMLSize bytes; a bigger file gives a FileError.
 //
 // It returns the servers in the [mcp_servers.<name>] tables, sorted by name.
 // Every server has ScopeGlobal, because Codex has one user-wide config. Other
 // sections of the file (model, profiles, model_providers and so on) are
 // ignored.
 //
-// A server with a command is a stdio server (command, args, env). A server
-// without a command but with a url is an HTTP server (url, http_headers).
-// Codex supports only streamable HTTP, so a remote server is never SSE. A
-// server with neither gives a FileError, and so does an entry whose env or
-// http_headers is not a table of strings.
+// A server with a command is a stdio server (command, args, env, and cwd as
+// Server.Dir). A server without a command but with a url is an HTTP server
+// (url, http_headers). Codex supports only streamable HTTP, so a remote server
+// is never SSE. A server with neither gives a FileError, and so does an entry
+// whose command, url or cwd is not a string, whose args is not an array of
+// strings, or whose env or http_headers is not a table of strings. An entry
+// that has both the command key and the url key (even if one is the empty
+// string) gives a FileError with the reason "invalid server entry", because
+// Codex rejects that combination.
+//
+// Keys are matched exactly, as Codex does: "Command" is not "command". A
+// server key that differs from a known key only by letter case (for example
+// Command or ENV) gives a FileError with the reason "ambiguous key" for that
+// server, and the server is not returned. A top-level key that differs from
+// mcp_servers only by case gives the same reason for the whole file, and no
+// servers. A server with the empty name ([mcp_servers.""]) gives a FileError
+// with the reason "empty server name".
 //
 // These keys are NOT mapped, on purpose: bearer_token_env_var,
 // env_http_headers and env_vars hold the NAMES of environment variables, not
 // values. mcpmoat does not read the environment of the user, so it cannot
 // build the real header or env value from them. This is a known limit: a
 // remote server that uses only bearer_token_env_var is scanned without its
-// token. The keys cwd, enabled, startup_timeout_sec and tool_timeout_sec are
+// token. The keys enabled, startup_timeout_sec and tool_timeout_sec are
 // ignored because the scanner does not need them.
 //
 // A missing file gives an empty Result. An empty file is valid TOML and gives
 // no servers. A file that is not valid TOML gives one FileError with the line
-// and column, and no servers. So does a file that nests deeper than 16 levels
-// of [ ] and { }, has a key path with more than 16 dot-separated parts in all
-// (the table header, the keys of the open inline tables and the key itself;
-// both give the reason "nesting is too deep"), or holds more than 10,000
-// servers. A bad server entry gives one FileError that names the server; the
-// other servers are still returned. No error holds text from the file (see FileError).
+// and column, and no servers. The line and column do not count a byte order
+// mark at the start of the file. A file that breaks a limit gives one
+// FileError and no servers too:
+//
+//   - nesting of [ ] and { } deeper than maxTOMLDepth levels: the reason is
+//     "nesting is too deep".
+//   - a key path with more than maxTOMLKeyParts dot-separated parts in all
+//     (the table header, the keys of the open inline tables and the key
+//     itself): the reason is "key path is too long".
+//   - more than maxServersPerFile servers: the reason is "too many servers".
+//
+// A bad server entry gives one FileError that names the server; the other
+// servers are still returned. Errors for the whole file come first, then the
+// errors for servers, sorted by server name. No error holds text from the
+// file (see FileError).
 func ReadCodex(ctx context.Context, path string) Result {
 	servers, errs := readCodex(ctx, path)
 	return Result{Servers: servers, Errors: errs}
@@ -86,7 +185,7 @@ func ReadCodex(ctx context.Context, path string) Result {
 
 // readCodex does the work of ReadCodex. See ReadCodex for the rules.
 func readCodex(ctx context.Context, path string) ([]Server, []*FileError) {
-	data, found, fe := readConfigFile(ctx, path, maxTOMLSize)
+	data, found, fe := readConfigFile(ctx, path, maxTOMLSize, "")
 	if fe != nil {
 		return nil, []*FileError{fe}
 	}
@@ -95,69 +194,140 @@ func readCodex(ctx context.Context, path string) ([]Server, []*FileError) {
 	}
 	// Check the shape before the parser sees the data (see maxTOMLDepth and
 	// maxTOMLKeyParts).
-	if !tomlShapeOK(data, maxTOMLDepth, maxTOMLKeyParts) {
-		return nil, []*FileError{{Path: path, Reason: reasonTooDeep}}
+	if r := checkTOMLShape(data, maxTOMLDepth, maxTOMLKeyParts); r != "" {
+		return nil, []*FileError{{Path: path, Reason: string(r)}}
 	}
 
+	// The file is decoded into maps and not into a struct. The TOML decoder
+	// matches struct fields without regard to letter case: a struct field for
+	// "command" also takes a key "Command". Codex reads keys exactly, so a
+	// file with both keys would show mcpmoat one command and run another.
+	//
 	// toml.Primitive keeps the raw value of a key and delays its decoding.
-	// We decode each server later, on its own, so one bad server does not
+	// Each server is decoded later, on its own, so one bad server does not
 	// make the whole file fail and the other servers are still returned.
-	var top struct {
-		MCPServers map[string]toml.Primitive `toml:"mcp_servers"`
-	}
+	var top map[string]toml.Primitive
 	md, err := toml.Decode(string(data), &top)
 	if err != nil {
 		return nil, []*FileError{codexFileError(path, data, err)}
 	}
-	// If mcp_servers is a number or a string, toml.Decode returns an error and
-	// codexFileError maps it to reasonBadShape. An array or an array of tables
-	// gets past Decode with no error and leaves the map empty, so the file would
-	// be ignored without a word. md.Type gives "Hash" for a table. It gives ""
-	// for a table that the file makes only with a header such as
-	// [mcp_servers.name], and for a key that is not in the file, so "" is valid
-	// too. Any other type is a bad shape. The error holds no value from the
-	// file.
-	if t := md.Type("mcp_servers"); t != "" && t != "Hash" {
-		return nil, []*FileError{{Path: path, Reason: reasonBadShape}}
-	}
-	if len(top.MCPServers) > maxServersPerFile {
-		return nil, []*FileError{{Path: path, Reason: reasonTooManyServers}}
+	tables, fe := codexServerTables(&md, path, top)
+	if fe != nil {
+		return nil, []*FileError{fe}
 	}
 
 	var servers []Server
 	var errs []*FileError
 	// Sorted names make the output the same on every run (map order is random).
-	for _, name := range slices.Sorted(maps.Keys(top.MCPServers)) {
+	for _, name := range slices.Sorted(maps.Keys(tables)) {
 		if err := ctx.Err(); err != nil {
-			errs = append(errs, &FileError{Path: path, Reason: reasonCanceled, Err: err})
+			errs = append(errs, canceledError(path, err))
 			break
 		}
-
-		var e codexEntry
-		if err := md.PrimitiveDecode(top.MCPServers[name], &e); err != nil {
-			// Do not use err.Error(): the TOML library can quote the input.
-			errs = append(errs, &FileError{Path: path, Server: name, Reason: reasonBadEntry})
-			continue
-		}
-		if !codexStringsOnly(md, name, e) {
-			errs = append(errs, &FileError{Path: path, Server: name, Reason: reasonBadEntry})
-			continue
-		}
-
-		s, reason := newCodexServer(path, name, e)
-		if reason != "" {
-			errs = append(errs, &FileError{Path: path, Server: name, Reason: reason})
+		s, r := readCodexServer(&md, path, name, tables[name])
+		if r != "" {
+			errs = append(errs, &FileError{Path: path, Server: name, Reason: string(r)})
 			continue
 		}
 		servers = append(servers, s)
 	}
+	// The same order as the JSON readers: errors for the whole file (for
+	// example canceled) first, then by server name.
+	sortErrors(errs)
 	return servers, errs
+}
+
+// codexServerTables returns the raw [mcp_servers.<name>] tables of the file,
+// by server name. It returns a FileError for the whole file if a top-level key
+// differs from mcp_servers only by letter case, if mcp_servers is not a table,
+// or if it holds more than maxServersPerFile servers. A file without
+// mcp_servers gives no tables and no error.
+func codexServerTables(md *toml.MetaData, path string, top map[string]toml.Primitive) (map[string]toml.Primitive, *FileError) {
+	if hasCaseVariant(top, codexServersKey) {
+		return nil, &FileError{Path: path, Reason: reasonAmbiguousKey}
+	}
+	raw, ok := top[codexServersKey]
+	if !ok {
+		return nil, nil
+	}
+	// PrimitiveDecode does not catch a mcp_servers that is a number, a string
+	// or an array: it leaves the map empty without an error, and the file
+	// would be ignored without a word. So check the type first. The error
+	// holds no value from the file.
+	if !codexIsTable(md, codexServersKey) {
+		return nil, &FileError{Path: path, Reason: reasonBadShape}
+	}
+	var tables map[string]toml.Primitive
+	if err := md.PrimitiveDecode(raw, &tables); err != nil {
+		return nil, &FileError{Path: path, Reason: reasonBadShape}
+	}
+	if len(tables) > maxServersPerFile {
+		return nil, &FileError{Path: path, Reason: reasonTooManyServers}
+	}
+	return tables, nil
+}
+
+// readCodexServer builds the Server called name from its raw table. It
+// returns a reason (and a zero Server) if the entry is not valid.
+func readCodexServer(md *toml.MetaData, path, name string, raw toml.Primitive) (Server, reason) {
+	if name == "" {
+		return Server{}, reasonEmptyName
+	}
+	e, r := decodeCodexEntry(md, name, raw)
+	if r != "" {
+		return Server{}, r
+	}
+	return newCodexServer(path, name, e)
+}
+
+// decodeCodexEntry decodes the raw table of the server called name. It reads
+// only the exact keys in codexReadKeys, and checks the TOML type of each one.
+// It returns reasonAmbiguousKey for a key that differs from a known key only
+// by letter case, and reasonBadEntry for a value of the wrong type or for an
+// entry with both a command key and a url key.
+func decodeCodexEntry(md *toml.MetaData, name string, raw toml.Primitive) (codexEntry, reason) {
+	// A server that is not a table (for example x = 5) decodes into an empty
+	// map without an error, so check its type first.
+	if !codexIsTable(md, codexServersKey, name) {
+		return codexEntry{}, reasonBadEntry
+	}
+	var fields map[string]toml.Primitive
+	if err := md.PrimitiveDecode(raw, &fields); err != nil {
+		// Do not use err.Error(): the TOML library can quote the input.
+		return codexEntry{}, reasonBadEntry
+	}
+	if hasCaseVariant(fields, codexKnownKeys()...) {
+		return codexEntry{}, reasonAmbiguousKey
+	}
+	// Codex refuses an entry that sets both command and url ("url is not
+	// supported for stdio"). It checks that the key is there, not that the
+	// value is non-empty, so this check does the same.
+	_, hasCommand := fields[codexKeyCommand]
+	_, hasURL := fields[codexKeyURL]
+	if hasCommand && hasURL {
+		return codexEntry{}, reasonBadEntry
+	}
+
+	var e codexEntry
+	for _, r := range codexReads(&e) {
+		value, ok := fields[r.key]
+		if !ok {
+			continue
+		}
+		if !codexHasType(md, r.typ, codexServersKey, name, r.key) || md.PrimitiveDecode(value, r.dest) != nil {
+			return codexEntry{}, reasonBadEntry
+		}
+	}
+	if !codexStringsOnly(md, name, e) {
+		return codexEntry{}, reasonBadEntry
+	}
+	return e, ""
 }
 
 // newCodexServer builds a Server from a decoded entry. It returns a reason (and
 // a zero Server) if the entry has neither a command nor a url. Fields that do
 // not belong to the chosen transport are dropped.
-func newCodexServer(path, name string, e codexEntry) (Server, string) {
+func newCodexServer(path, name string, e codexEntry) (Server, reason) {
 	s := Server{
 		Name:   name,
 		Client: ClientCodex,
@@ -168,7 +338,8 @@ func newCodexServer(path, name string, e codexEntry) (Server, string) {
 	case e.Command != "":
 		s.Transport = TransportStdio
 		s.Command = e.Command
-		s.Args = e.Args
+		s.Args = NewArgs(e.Args)
+		s.Dir = e.Cwd
 		s.Env = e.Env
 	case e.URL.Reveal() != "":
 		s.Transport = TransportHTTP
@@ -180,238 +351,50 @@ func newCodexServer(path, name string, e codexEntry) (Server, string) {
 	return s, ""
 }
 
-// codexStringsOnly reports whether the env and http_headers keys of the server
-// called name are tables, and whether url and every env and http_headers value
-// are TOML strings.
+// codexStringsOnly reports whether every env and http_headers value of the
+// server called name is a TOML string.
 //
-// The TOML decoder calls UnmarshalText for Secret and URL even when the TOML
-// value is a number or a boolean (it passes the text "5"). The JSON readers
-// reject such a value, so this check keeps the readers the same. The decoder
-// also drops an env or http_headers key that is a number, a string or an array
-// without an error, so the check looks at the type of the key itself.
-// md.Type gives the TOML type of a key, for example "String" or "Integer".
-func codexStringsOnly(md toml.MetaData, name string, e codexEntry) bool {
-	if e.URL.Reveal() != "" && md.Type("mcp_servers", name, "url") != "String" {
-		return false
+// The TOML decoder calls UnmarshalText for Secret even when the TOML value is
+// a number or a boolean (it passes the text "5"). The JSON readers reject such
+// a value, so this check keeps the readers the same. md.Type gives the TOML
+// type of a key, for example "String" or "Integer".
+func codexStringsOnly(md *toml.MetaData, name string, e codexEntry) bool {
+	tables := []struct {
+		key    string
+		values SecretMap
+	}{
+		{key: codexKeyEnv, values: e.Env},
+		{key: codexKeyHTTPHeaders, values: e.HTTPHeaders},
 	}
-	for _, key := range []string{"env", "http_headers"} {
-		// md.Type gives "" for a key that is not in the file, and "Hash" for a
-		// table (inline or with a header). Anything else is not a table.
-		if t := md.Type("mcp_servers", name, key); t != "" && t != "Hash" {
-			return false
-		}
-	}
-	for k := range e.Env {
-		if md.Type("mcp_servers", name, "env", k) != "String" {
-			return false
-		}
-	}
-	for k := range e.HTTPHeaders {
-		if md.Type("mcp_servers", name, "http_headers", k) != "String" {
-			return false
+	for _, t := range tables {
+		for k := range t.values {
+			if md.Type(codexServersKey, name, t.key, k) != tomlTypeString {
+				return false
+			}
 		}
 	}
 	return true
 }
 
-// tomlLevel is one open [ or { in a value, as seen by tomlShapeOK.
-type tomlLevel struct {
-	// prefix is the number of key parts of the path to this bracket: the parts
-	// of the table header, plus the parts of each key that opened an inline
-	// table above it, plus the key that holds this value.
-	prefix int
-	// table is true for { and false for [.
-	table bool
+// codexHasType reports whether the key at the path has the TOML type want, as
+// md.Type names it (tomlTypeString, tomlTypeArray and so on). For
+// tomlTypeHash it calls codexIsTable, because a table can also have the type "".
+func codexHasType(md *toml.MetaData, want string, path ...string) bool {
+	if want == tomlTypeHash {
+		return codexIsTable(md, path...)
+	}
+	return md.Type(path...) == want
 }
 
-// tomlShapeOK reports whether data stays inside two limits that protect the
-// TOML parser: the nesting of [ ] and { } never goes deeper than maxDepth, and
-// no full key path has more than maxParts dot-separated parts. Both limits
-// make the parser use too much time or memory when they are ignored.
-// readCodex gives reasonTooDeep for both.
-//
-// It is a small scanner, not a parser. It skips the places where a bracket or
-// a dot is plain text:
-//
-//   - a comment, from # to the end of the line
-//   - a basic string "..." (a backslash escapes the next byte)
-//   - a literal string '...' (no escapes)
-//   - a multi-line string, in triple double quotes or triple single quotes
-//
-// So a quoted key part such as "a.b" counts as one part.
-//
-// The key path is the sum of three things:
-//
-//  1. the parts of the table header, for example 2 for [mcp_servers.docs]. The
-//     header is the base for every key below it, until the next header.
-//  2. the parts of each key that opened a still-open inline table. In
-//     a.b = { c.d = { e = 1 } } the path of e has 2 + 2 + 1 = 5 parts. The
-//     scanner keeps these counts in a stack (a slice): it pushes at { and pops
-//     at }.
-//  3. the parts of the current key.
-//
-// If each piece had its own limit, a short line could still build a long path
-// by nesting many inline tables that each hold a long dotted key.
-//
-// An array [ in a value does not add key parts, but it counts as depth. The
-// scanner counts dots only in keys and headers, never in values (a float such
-// as 1.5 has a dot). A value that is not valid TOML may get a wrong answer
-// here, but the parser rejects it later anyway.
-func tomlShapeOK(data []byte, maxDepth, maxParts int) bool {
-	var stack []tomlLevel // the open [ and { in values
-	sectionParts := 0     // parts of the last table header
-	valueParts := 0       // parts of the path to the value that is being read
-	dots := 0             // dots in the current key; parts = dots + 1
-	headerBrackets := 0   // the [ that opened a table header; 0 if not in one
-	inValue := false      // true after '=', until the end of the value
-
-	// base is the number of key parts above the current key.
-	base := func() int {
-		if len(stack) > 0 {
-			return stack[len(stack)-1].prefix
-		}
-		return sectionParts
-	}
-	// afterSeparator resets the key state after a comma or a new line.
-	afterSeparator := func() {
-		dots = 0
-		if len(stack) == 0 {
-			inValue = false
-			return
-		}
-		top := stack[len(stack)-1]
-		inValue = !top.table // in an array the next item is a value
-		valueParts = top.prefix
-	}
-
-	for i := 0; i < len(data); {
-		switch c := data[i]; {
-		case c == '#':
-			// Comment: skip to the end of the line.
-			j := bytes.IndexByte(data[i:], '\n')
-			if j < 0 {
-				return true
-			}
-			i += j
-		case bytes.HasPrefix(data[i:], []byte(`"""`)):
-			i = skipTOMLString(data, i+3, '"', true)
-		case bytes.HasPrefix(data[i:], []byte("'''")):
-			i = skipTOMLString(data, i+3, '\'', true)
-		case c == '"' || c == '\'':
-			i = skipTOMLString(data, i+1, c, false)
-		case c == '.':
-			i++
-			if inValue {
-				continue
-			}
-			dots++
-			total := dots + 1 // a table header has no base
-			if headerBrackets == 0 {
-				total += base()
-			}
-			if total > maxParts {
-				return false
-			}
-		case c == '=':
-			i++
-			if inValue || headerBrackets > 0 {
-				continue
-			}
-			// The key ends here. Its parts become the base of the value, which
-			// may be an inline table. A key without a dot is checked here, because
-			// the check at '.' does not see it.
-			valueParts = base() + dots + 1
-			if valueParts > maxParts {
-				return false
-			}
-			dots = 0
-			inValue = true
-		case c == '[' && headerBrackets > 0:
-			// The second [ of [[array.of.tables]].
-			i++
-			headerBrackets++
-			if headerBrackets > maxDepth {
-				return false
-			}
-		case c == '[' && !inValue && len(stack) == 0:
-			// A [ where a key can start, outside any value: a table header.
-			i++
-			headerBrackets = 1
-			dots = 0
-		case c == '[' || c == '{':
-			i++
-			prefix := base()
-			if inValue {
-				prefix = valueParts
-			}
-			stack = append(stack, tomlLevel{prefix: prefix, table: c == '{'})
-			if len(stack) > maxDepth {
-				return false
-			}
-			dots = 0
-			inValue = c == '['
-		case c == ']' && headerBrackets > 0:
-			// The end of the header: its parts are the base for the keys below.
-			i++
-			sectionParts = dots + 1
-			headerBrackets = 0
-			dots = 0
-		case c == ']' || c == '}':
-			i++
-			dots = 0
-			if len(stack) > 0 {
-				stack = stack[:len(stack)-1]
-				inValue = true // a whole value is complete
-			}
-		case c == ',':
-			i++
-			afterSeparator()
-		case c == '\n':
-			i++
-			headerBrackets = 0
-			afterSeparator()
-		default:
-			i++
-		}
-	}
-	return true
-}
-
-// skipTOMLString returns the index just after the string whose body starts at
-// i (the opening quote is already behind i). quote is the quote byte, and multi
-// is true for a multi-line string. In a basic string (double quotes) a
-// backslash escapes the next byte; in a literal string (single quotes) it does
-// not.
-//
-// A single-line string ends at its closing quote or at the end of the line (a
-// string that is not closed is a syntax error that the parser reports). A
-// multi-line string ends at a run of three or more quotes; in a longer run, the
-// quotes before the last three belong to the string.
-func skipTOMLString(data []byte, i int, quote byte, multi bool) int {
-	escapes := quote == '"'
-	for i < len(data) {
-		c := data[i]
-		switch {
-		case escapes && c == '\\':
-			i += 2 // skip the backslash and the byte it escapes
-		case !multi && c == '\n':
-			return i
-		case c == quote && !multi:
-			return i + 1
-		case c == quote:
-			run := 1
-			for i+run < len(data) && data[i+run] == quote {
-				run++
-			}
-			i += run
-			if run >= 3 {
-				return i
-			}
-		default:
-			i++
-		}
-	}
-	return len(data)
+// codexIsTable reports whether the key at the path, which must be in the file,
+// is a TOML table. md.Type gives tomlTypeHash for a table. It gives "" for a
+// table that the file makes only through a header or a dotted key below it,
+// such as mcp_servers in [mcp_servers.name]. Any other type is not a table:
+// for example "Integer", tomlTypeArray or tomlTypeArrayHash (an array of
+// tables).
+func codexIsTable(md *toml.MetaData, path ...string) bool {
+	t := md.Type(path...)
+	return t == "" || t == tomlTypeHash
 }
 
 // codexFileError turns a toml.Decode error into a FileError.
@@ -424,11 +407,31 @@ func codexFileError(path string, data []byte, err error) *FileError {
 	// needs a variable of the value type.
 	var pe toml.ParseError
 	if !errors.As(err, &pe) {
-		// For example mcp_servers is not a table. The shape is wrong, but the
-		// syntax is fine.
+		// The syntax is fine, but the decoder could not store a value. With a
+		// map of toml.Primitive as the target this should not happen, so it
+		// is reported as a bad shape.
 		return &FileError{Path: path, Reason: reasonBadShape}
 	}
-	// Position.Start is a byte offset. lineCol turns it into a line and column.
-	line, col := lineCol(data, int64(pe.Position.Start))
+	// Position.Start is a byte offset in the data after the byte order mark,
+	// because the parser removes the mark before it reads (see tomlBOMLen).
+	// So count the line and column in the same data. Then a file with a mark
+	// gives the same line and column as the same file without it, which is
+	// also what an editor shows.
+	body := data[tomlBOMLen(data):]
+	line, col := lineCol(body, int64(pe.Position.Start))
 	return &FileError{Path: path, Line: line, Col: col, Reason: reasonInvalidTOML}
+}
+
+// tomlBOMLen returns the length of the byte order mark at the start of data
+// that the TOML parser removes before it reads: 3 for the UTF-8 mark, 2 for a
+// UTF-16 mark (in either byte order), or 0 if data has no mark. The checks
+// are the same as in the parser.
+func tomlBOMLen(data []byte) int {
+	switch {
+	case bytes.HasPrefix(data, []byte("\xff\xfe")), bytes.HasPrefix(data, []byte("\xfe\xff")):
+		return 2
+	case bytes.HasPrefix(data, []byte("\xef\xbb\xbf")):
+		return 3
+	}
+	return 0
 }

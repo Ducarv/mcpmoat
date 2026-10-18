@@ -23,7 +23,8 @@ import (
 //
 // Properties checked for any input:
 //   - the reader does not panic;
-//   - no FileError text holds the env canary (a config value must not leak);
+//   - no FileError text holds the env canary (a config value must not leak),
+//     unless the server name or the project key of the error holds it;
 //   - every FileError names the file and has one of the known reasons;
 //   - every Server has Source equal to the file and a known transport.
 
@@ -31,26 +32,16 @@ import (
 // only make an iteration slow and find no new bugs.
 const maxFuzzInput = 64 << 10
 
-// knownReasons is the set of fixed reason texts a FileError may have.
-var knownReasons = map[string]bool{
-	reasonCannotRead:       true,
-	reasonNotRegular:       true,
-	reasonTooLarge:         true,
-	reasonInvalidJSON:      true,
-	reasonInvalidTOML:      true,
-	reasonBadShape:         true,
-	reasonBadServers:       true,
-	reasonBadEntry:         true,
-	reasonUnknownTransport: true,
-	reasonNoCommandOrURL:   true,
-	reasonStdioNoCommand:   true,
-	reasonRemoteNoURL:      true,
-	reasonCanceled:         true,
-	reasonTooDeep:          true,
-	reasonTooManyServers:   true,
-	reasonNotFound:         true,
-	reasonUnknownFormat:    true,
-}
+// knownReasons is the set of fixed reason texts a FileError may have. It is
+// built from allReasons (fileerror_test.go), so a new reason needs no change
+// here.
+var knownReasons = func() map[string]bool {
+	m := make(map[string]bool, len(allReasons))
+	for _, r := range allReasons {
+		m[string(r)] = true
+	}
+	return m
+}()
 
 // fixtureSeeds returns the content of every fixture file with the given
 // extension under testdata/discover/<dirs...>. The "missing" fixtures only
@@ -98,9 +89,11 @@ func checkFuzzResult(t *testing.T, path string, res Result) {
 		if e.Reason == "" || !knownReasons[e.Reason] {
 			t.Errorf("FileError.Reason = %q, want one of the reason constants", e.Reason)
 		}
-		// A server name comes from the file, so it can legitimately hold the
-		// canary. Everything else in the message is fixed text or the path.
-		if !strings.Contains(e.Server, discovertest.CanaryEnv) {
+		// A server name and a project key come from the file, and an error
+		// shows them by design, so they can legitimately hold the canary.
+		// Everything else in the message is fixed text or the path.
+		if !strings.Contains(e.Server, discovertest.CanaryEnv) &&
+			!strings.Contains(e.ProjectPath, discovertest.CanaryEnv) {
 			if leaks := discovertest.Leaks(e.Error(), discovertest.CanaryEnv); len(leaks) > 0 {
 				t.Errorf("FileError text leaks the env canary: %q", e.Error())
 			}
@@ -121,13 +114,9 @@ func checkFuzzResult(t *testing.T, path string, res Result) {
 func writeFuzzInput(t *testing.T, name string, data []byte) string {
 	t.Helper()
 	if len(data) > maxFuzzInput {
-		t.Skip("input larger than 64 KiB")
+		t.Skipf("input larger than maxFuzzInput (%d bytes)", maxFuzzInput)
 	}
-	path := filepath.Join(t.TempDir(), name)
-	if err := os.WriteFile(path, data, 0o600); err != nil {
-		t.Fatalf("write fuzz input: %v", err)
-	}
-	return path
+	return writeFile(t, t.TempDir(), name, data)
 }
 
 // FuzzReadClaudeCode fuzzes the JSON reader. Cursor files have the same JSON
@@ -154,6 +143,25 @@ func FuzzReadClaudeCode(f *testing.F) {
 		`{"mcpServers":{"a":"` + c + `"}}`,
 		// Raw newline inside a string (invalid JSON), before the canary.
 		"{\"mcpServers\":{\"a\":{\"command\":\"x\\ny\n\",\"env\":{\"K\":\"" + c + "\"}}}}",
+		// Known keys in a different letter case, next to the canary.
+		`{"MCPSERVERS":{"a":{"command":"x","env":{"K":"` + c + `"}}}}`,
+		`{"mcpServers":{"a":{"Command":"x","ENV":{"K":"` + c + `"}}}}`,
+		`{"projects":{"/p":{"mcpservers":{"a":{"command":"` + c + `"}}}},"Projects":{}}`,
+		// Lone surrogates in checked and in ignored parts, next to the canary.
+		`{"mcpServers":{"a\ud800":{"command":"x","env":{"K":"` + c + `"}}}}`,
+		`{"mcpServers":{"a":{"command":"x","env":{"K\udc00":"` + c + `"}}}}`,
+		`{"projects":{"/p\udbff":{"mcpServers":{"a":{"url":"http://h/` + c + `"}}}}}`,
+		`{"projects":{"/` + c + `\ud800":{"mcpServers":{"a":{"command":"x"}}}}}`,
+		`{"projects":{"/p":{"lastPrompt":"\ud83d","mcpServers":{"a":{"command":"` + c + `"}}}}}`,
+		`{"history":[{"display":"` + c + `\ud83d"}],"mcpServers":{"a":{"command":"x"}}}`,
+		`{"mcpServers":{"a":{"command":"x\\ud800","args":["😀"]}}}`,
+		// Invalid UTF-8 in checked and in ignored parts, next to the canary.
+		"{\"mcpServers\":{\"x\xE2\x82\":{\"command\":\"x\"},\"x\xC0\xC0\":{\"command\":\"" + c + "\"}}}",
+		"{\"projects\":{\"/p\xFF\":{\"mcpServers\":{\"a\":{\"command\":\"" + c + "\"}}}}}",
+		"{\"history\":[\"\xED\xA0\x80" + c + "\"],\"mcpServers\":{\"a\":{\"command\":\"x\"}}}",
+		// Only null, and only a non-ASCII space.
+		`null`,
+		"\u00a0",
 	} {
 		f.Add([]byte(seed))
 	}
@@ -188,11 +196,11 @@ func FuzzReadCodex(f *testing.F) {
 		// Deep nesting: the reader must return reasonTooDeep, not crash.
 		"[mcp_servers.a]\ncommand = \"x\"\nargs = " + strings.Repeat("[", 100) + strings.Repeat("]", 100) + "\n",
 		"[mcp_servers.a]\ncommand = \"x\"\nenv = " + strings.Repeat("{ k = ", 100) + "1" + strings.Repeat(" }", 100) + "\n",
-		// Very long keys: the reader must return reasonTooDeep, not spend seconds.
+		// Very long keys: the reader must return reasonKeyTooLong, not spend seconds.
 		"[mcp_servers." + keyParts(200) + "]\n",
 		"mcp_servers." + keyParts(200) + " = 1\n",
 		// The key path adds up over nested inline tables: the reader must return
-		// reasonTooDeep, not spend seconds.
+		// reasonKeyTooLong, not spend seconds.
 		"x0 = " + strings.Repeat("{"+keyParts(63)+"=", 63) + "1" + strings.Repeat("}", 63) + "\n",
 		"x0 = " + strings.Repeat("{"+keyParts(8)+"=", 8) + "1" + strings.Repeat("}", 8) + "\n",
 		"[a.b.c.d.e]\nf.g.h.i = { j.k.l.m.n.o.p.q = 1 }\n",

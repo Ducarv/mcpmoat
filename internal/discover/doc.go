@@ -13,19 +13,36 @@
 //
 // # Secrets
 //
-// Env and header values are [Secret] values in a [SecretMap], and the
-// remote endpoint is a [URL]. Printing, logging or encoding a Secret gives
-// [Mask]; for a URL it gives [RedactURL] of the value, the display form.
-// Show the env and header names with [SecretMap.Keys].
+// Config values often hold credentials, so the types of the [Server] fields
+// mask them in all output: fmt (every verb, including %p, and also when the
+// value is in an unexported field of another struct), log/slog and
+// encoders.
 //
-// Only [Secret.Reveal] and [URL.Reveal] return the values. Call them only
-// where the value is used:
+//   - Env and header values are [Secret] values in a [SecretMap]. They print
+//     as [Mask]. Show the env and header names with [SecretMap.Keys].
+//   - The remote endpoint is a [URL]. It prints as [RedactURL] of the value,
+//     which masks the userinfo, the query values, the fragment and the path
+//     segments that look like credentials (by heuristic rules).
+//   - The stdio arguments are [Args]. They print as [RedactArgs] of the
+//     values. RedactArgs is an allowlist: it masks every argument whose
+//     shape is not known to be safe.
+//   - Command is a plain string and prints as written. A secret in Command
+//     itself is not masked.
 //
-//   - in internal/inspect, for the environment of a child process, the
-//     server endpoint and HTTP request headers;
+// Only [Secret.Reveal], [URL.Reveal] and [Args.Values] return the values as
+// written. Call them only where the value is used:
+//
+//   - in internal/inspect, for the command line and the environment of a
+//     child process, the server endpoint and HTTP request headers;
 //   - in internal/rules, for config rules.
 //
-// Never pass the result of Reveal to fmt, a logger, an error or an encoder.
+// Never pass their results to fmt, a logger, an error or an encoder.
+//
+// Masking does not make text safe to print. Every string field of a Server
+// and every map key (env and header names) is untrusted text from a config
+// file and can hold control, bidi and non-ASCII characters. The output of
+// URL and Args is printable ASCII, but display code must still escape every
+// field before it prints it to a terminal.
 //
 // Config readers must return errors that name the file and the position in
 // it, and never a value from the config.
@@ -91,26 +108,45 @@
 //     wins. The clients do the same.
 //   - For Claude Code, the projects key is read only from a global file
 //     (~/.claude.json); a project .mcp.json cannot add servers for other paths.
+//   - A JSON string with a lone UTF-16 surrogate escape (for example
+//     "\ud800" with no low surrogate after it) or a byte that is not valid
+//     UTF-8, in a server entry (the server name and all keys and values of
+//     the entry) or in a project key, is an error ("invalid string"), and
+//     the file gives no servers. Go replaces each bad part with U+FFFD, so
+//     two different names could become one. The check covers the server
+//     entries and the project keys only: a bad string in another part of the
+//     file, for example the chat history of ~/.claude.json, is not an error.
+//   - A file that holds only JSON whitespace (space, tab, CR and LF) gives no
+//     servers and no error. A file that holds only null is an error
+//     ("unexpected structure").
 //
 // All readers:
 //
 //   - A field that does not belong to the transport is dropped. A stdio server
-//     keeps command, args and env. A remote server keeps url and headers.
+//     keeps command, args, env and, for Codex, cwd (as [Server.Dir]). A
+//     remote server keeps url and headers.
 //   - A file that is not a regular file (for example a directory or a pipe) is
-//     rejected. The readers follow symlinks, so a project file can point to any
-//     regular file that the user can read. An error never shows the content of
-//     that file.
-//   - A file larger than 32 MiB (~/.claude.json and the other global files),
-//     4 MiB (project files: .mcp.json and .cursor/mcp.json) or 256 KiB (Codex
-//     TOML) is rejected.
-//   - A file with more than 10,000 servers, or more than 10,000 projects, is
-//     rejected.
-//   - Codex TOML with nesting deeper than 16 levels, or a key path with more
-//     than 16 dotted parts in all, is rejected. The path counts the parts of the
-//     table header, of each open inline table key and of the key itself.
+//     rejected. The readers open the file first and then check its type, so
+//     a pipe cannot block the read.
+//   - A file larger than its size limit is rejected. The limits are
+//     maxConfigSize (32 MiB) for ~/.claude.json and the other global files,
+//     maxProjectConfigSize (4 MiB) for the project files (.mcp.json and
+//     .cursor/mcp.json) and maxTOMLSize (256 KiB) for the Codex file.
+//   - A file with more than maxServersPerFile (10,000) entries in all (servers
+//     and projects counted together) is rejected and gives no servers.
+//   - Keys are matched exactly: "Command" is not "command". A key that
+//     differs from a known key only by letter case is an error (the clients
+//     match keys exactly). The reason is "ambiguous key".
+//   - Codex TOML with nesting deeper than maxTOMLDepth (16) levels is
+//     rejected ("nesting is too deep"). A key path with more than
+//     maxTOMLKeyParts (16) dotted parts in all is rejected ("key path is too
+//     long"). The path counts the parts of the table header, of each open
+//     inline table key and of the key itself.
 //
 // Codex has more notes:
 //
+//   - An entry with both command and url is an error ("invalid server
+//     entry"), as in Codex. This is so also when one of the values is empty.
 //   - The keys bearer_token_env_var, env_http_headers and env_vars hold the
 //     names of environment variables. The reader does not map them yet. A
 //     remote Codex server that uses only bearer_token_env_var is read without
@@ -118,6 +154,45 @@
 //   - The home is always ~/.codex. The package never reads the environment, so
 //     it does not read $CODEX_HOME. To read another Codex file, call
 //     [ReadCodex] with an explicit path.
+//
+// # Symlinks
+//
+// For a global file, the readers follow symlinks, so the file can point to
+// any regular file that the user can read. An error never shows the content
+// of that file.
+//
+// A project file from the working directory comes from a cloned repository,
+// so the readers open it inside the project directory (with [os.Root]). A
+// symlink that stays inside the project is followed. A symlink that leads out
+// of the project, and every absolute symlink, is refused with the reason
+// "file is outside the project". Without this rule, a repository could make
+// mcpmoat read a file of the user, for example ~/.claude.json, as its own
+// project file.
+//
+// # Untrusted files
+//
+// The project files from the working directory (<WorkDir>/.mcp.json and
+// <WorkDir>/.cursor/mcp.json) are untrusted: a cloned repository can ship
+// them. Discover marks what it reads from them:
+//
+//   - Every [Server] from such a file has [Server.Untrusted] set. Package
+//     internal/inspect must not start an untrusted stdio server without an
+//     explicit opt-in from the user.
+//   - Every [FileError] about such a file has [FileError.Untrusted] set. An
+//     unreadable or refused project file can hide servers that the client
+//     still loads, so a caller must not treat the error as a harmless
+//     warning. The scan command exits with code 2 for it. An error about a
+//     global file stays a warning.
+//
+// The user's own files are trusted: ~/.claude.json (also the servers under
+// its projects.<path> keys), ~/.cursor/mcp.json and the Codex file.
+//
+// # Working directory of a stdio server
+//
+// [Server.Dir] is the Codex cwd as written. A relative Dir is relative to
+// the directory where the user runs Codex, which mcpmoat does not know. So
+// inspect must treat a relative Dir like an empty Dir and never resolve it
+// against its own working directory.
 //
 // # Tests
 //
