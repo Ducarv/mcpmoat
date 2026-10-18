@@ -82,7 +82,8 @@ func (u URL) MarshalJSON() ([]byte, error) {
 }
 
 // MarshalText returns the String result. It implements
-// encoding.TextMarshaler (see Secret.MarshalText for the encoders that use it).
+// encoding.TextMarshaler (see Secret.MarshalText for the encoders that use
+// it).
 func (u URL) MarshalText() ([]byte, error) {
 	return []byte(u.String()), nil
 }

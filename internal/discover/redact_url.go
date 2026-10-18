@@ -14,8 +14,8 @@ import (
 //   - every matrix parameter in the path (each part after a ";" in a
 //     segment, for example "tok" in "/x;tok");
 //   - every query value, every bare query part with no "=", and every
-//     query key that looks like a credential by the token rules below (a
-//     normal key such as "api_key", "token" or "k" stays);
+//     query key that looks like a credential (see below; a normal key such
+//     as "api_key", "token" or "k" stays);
 //   - a non-empty fragment.
 //
 // Hosted MCP providers often put the API key in the path, for example
@@ -26,17 +26,22 @@ import (
 // example "password=hunter2" or "a,b"), or when one of these texts looks
 // like a token: the escaped segment, the unescaped segment, or a piece of
 // the unescaped segment between two "/" (an escaped "%2F" gives a "/").
-// Query keys get the same token checks (url.QueryUnescape, then each piece
-// between two "/"), and a key that does not unescape is masked.
+//
+// A query key is masked (Mask + "=" + Mask) when it does not unescape
+// (url.QueryUnescape), when its unescaped form has a "=", ",", ";" or ":"
+// (for example "password%3Dhunter2", "pw,hunter2" or "admin:hunter2"), or
+// when it looks like a token by the same checks as a path segment.
 //
 // A text looks like a token when one or more of these rules is true:
 //
 //   - it starts with a known token prefix, in any case (such as sk-, ghp_,
 //     xox, AKIA, or eyJ for a JWT), and it is longer than the prefix;
-//   - it has 20 or more bytes, at least one ASCII letter and at least one
-//     digit;
-//   - it has 32 or more bytes;
-//   - it is a UUID (36 bytes: 8-4-4-4-12 hex digits).
+//   - it has minMixedTokenLen or more bytes, at least one ASCII letter and
+//     at least one digit;
+//   - it has minTokenLen or more bytes;
+//   - it is a UUID (uuidLen bytes: 8-4-4-4-12 hex digits).
+//
+// The constants are in token.go.
 //
 // The slashes stay, so the shape of the path does not change. Normal
 // segments such as "mcp", "sse", "v1", "messages" or "2024-11-05" stay as
@@ -50,6 +55,16 @@ import (
 // or if the host has an IPv6 zone ID ("[::1%25zone]") or a non-ASCII byte
 // (such as an IDN host written as "bücher.example"). Empty input gives "".
 //
+// It also returns Mask if the scheme is not in a fixed allowlist (see
+// isKnownScheme): the MCP transport schemes http, https, ws and wss, and
+// the schemes of the connection strings that args often hold (postgres,
+// postgresql, mysql, redis, rediss, mongodb, mongodb+srv, amqp, amqps,
+// file, unix, tcp, git, ssh, s3 and gs). A token pasted where the scheme
+// goes, as in "sk-proj-abc123://host/x", parses as a valid scheme and
+// would print. url.Parse lowercases the scheme, so "HTTPS" is kept as
+// "https". A scheme-relative URL ("//host/x") has no scheme text and is
+// kept.
+//
 // It also returns Mask if raw has an "@" after the host: in the path, in
 // the query or in the fragment. An unescaped "/", "?" or "#" in a userinfo
 // token ends the authority early. So https://tok/en@host/x parses with host
@@ -60,8 +75,8 @@ import (
 // cost is known: a query value with an "@" (such as ?email=a@b) also gives
 // Mask, although RedactURL masks every query value anyway.
 //
-// It keeps the scheme (url.Parse lowercases it), the host, the port, the
-// other path segments and the other query keys.
+// It keeps the scheme (lowercased), the host, the port, the other path
+// segments and the other query keys.
 //
 // The result holds only printable ASCII bytes (0x20 to 0x7e), so it cannot
 // hold control or bidi characters. url.Parse rejects ASCII control bytes,
@@ -85,6 +100,11 @@ func RedactURL(raw string) string {
 	}
 	u, err := url.Parse(raw)
 	if err != nil {
+		return Mask
+	}
+	// The scheme is the text before ":", so a token can sit there too
+	// ("sk-proj-abc123://host"). Keep only schemes that we know.
+	if !isKnownScheme(u.Scheme) {
 		return Mask
 	}
 	// An opaque URL has no "//" after the scheme, for example "mailto:x" or
@@ -141,6 +161,25 @@ func RedactURL(raw string) string {
 	u.User = url.User(Mask)
 	escaped := u.User.String() + "@"
 	return strings.Replace(u.String(), escaped, Mask+"@", 1)
+}
+
+// isKnownScheme reports whether scheme, as url.Parse returns it (lower
+// case), is in the RedactURL allowlist. The empty scheme of a
+// scheme-relative URL ("//host/x") is allowed, because it prints no scheme
+// text. A switch, not a map, keeps the list constant.
+func isKnownScheme(scheme string) bool {
+	switch scheme {
+	case "",
+		// MCP transports.
+		"http", "https", "ws", "wss",
+		// Connection strings (DSNs) and other URLs that args often hold.
+		"postgres", "postgresql", "mysql", "redis", "rediss",
+		"mongodb", "mongodb+srv", "amqp", "amqps",
+		"file", "unix", "tcp", "git", "ssh", "s3", "gs":
+		return true
+	default:
+		return false
+	}
 }
 
 // redactPath masks the path segments of u that look like credentials, and
@@ -200,8 +239,9 @@ func isSecretPathSegment(seg string) bool {
 	}
 	// A "=" or "," marks a key=value pair or a list, as in a query value or
 	// a matrix parameter. An escaped ";" ("%3B") is a hidden matrix
-	// parameter. Such text can hold a short password, so mask it.
-	if strings.ContainsAny(plain, "=,;") {
+	// parameter, and a ":" can join a user and a password. Such text can
+	// hold a short password, so mask it (the same set as for query keys).
+	if strings.ContainsAny(plain, "=,;:") {
 		return true
 	}
 	return looksLikeEscapedCredential(seg, plain)
@@ -210,13 +250,15 @@ func isSecretPathSegment(seg string) bool {
 // looksLikeEscapedCredential reports whether escaped, plain (the unescaped
 // form of escaped), or a piece of plain between two "/", looks like a
 // token. An escaped prefix ("%67hp_x" for "ghp_x") or a token after an
-// escaped "/" ("a%2Fghp_x") is found only in the unescaped text.
+// escaped "/" ("a%2Fghp_x") is found only in the unescaped text. Each piece
+// is also checked for a token prefix after ".", "@", ":", "+" or "~", as in
+// RedactArgs ("v1.ghp_x").
 func looksLikeEscapedCredential(escaped, plain string) bool {
 	if looksLikeCredential(escaped) || looksLikeCredential(plain) {
 		return true
 	}
 	for piece := range strings.SplitSeq(plain, "/") {
-		if looksLikeCredential(piece) {
+		if containsToken(piece) {
 			return true
 		}
 	}
@@ -224,8 +266,8 @@ func looksLikeEscapedCredential(escaped, plain string) bool {
 }
 
 // redactQuery masks every value in a raw query string. It keeps each key as
-// written (still escaped), unless the key looks like a credential. A part
-// "key=value" becomes "key=" + Mask, or Mask + "=" + Mask for a token key,
+// written (still escaped), unless redactQueryPart masks it. A part
+// "key=value" becomes "key=" + Mask, or Mask + "=" + Mask for a secret key,
 // and a part with no "=" becomes Mask, because a bare part can itself be a
 // token. Empty parts stay empty, so the shape of the query does not change.
 //
@@ -258,14 +300,28 @@ func redactQueryPart(part string) string {
 	if !found {
 		return Mask
 	}
-	// A token used as a key (?ghp_xxx=) is a secret too. A normal key such
-	// as "api_key" or "token" is short and has no digit, so it stays. A key
-	// that does not unescape fails closed.
-	plain, err := url.QueryUnescape(key)
-	if err != nil || looksLikeEscapedCredential(key, plain) {
+	if isSecretQueryKey(key) {
 		return Mask + "=" + Mask
 	}
 	return escapeUnsafeBytes(key) + "=" + Mask
+}
+
+// isSecretQueryKey reports whether key, one escaped query key, must be
+// masked. It fails closed, as isSecretPathSegment does: a key that does not
+// unescape is masked. So is a key whose unescaped form has "=", ",", ";" or
+// ":", because such a key can hold a value or a "user:password" pair
+// ("?password%3Dhunter2=", "?pw,hunter2=x", "?admin:hunter2=1"). A token
+// used as a key (?ghp_xxx=) is a secret too. A normal key such as
+// "api_key" or "token" is short and has no digit, so it stays.
+func isSecretQueryKey(key string) bool {
+	plain, err := url.QueryUnescape(key)
+	if err != nil {
+		return true
+	}
+	if strings.ContainsAny(plain, "=,;:") {
+		return true
+	}
+	return looksLikeEscapedCredential(key, plain)
 }
 
 // escapeUnsafeBytes percent-escapes every byte of s that is not printable
@@ -280,7 +336,7 @@ func escapeUnsafeBytes(s string) string {
 	var b strings.Builder
 	for i := range len(s) {
 		c := s[i]
-		if c >= 0x20 && c < 0x7f {
+		if isPrintable(c) {
 			b.WriteByte(c)
 			continue
 		}

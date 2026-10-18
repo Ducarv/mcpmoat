@@ -181,6 +181,16 @@ func TestRedactURL(t *testing.T) {
 			want:  "https://h/" + discover.Mask,
 		},
 		{
+			name:  "segment with user:password is masked",
+			input: "https://h/admin:" + "hunter2/x",
+			want:  "https://h/" + discover.Mask + "/x",
+		},
+		{
+			name:  "token prefix after a dot in a segment is masked",
+			input: "https://h/v1.ghp_abc12/x",
+			want:  "https://h/" + discover.Mask + "/x",
+		},
+		{
 			// An escaped ";" is a matrix parameter that url.Parse does not
 			// split, so it is masked as one.
 			name:  "segment with escaped semicolon is masked",
@@ -278,6 +288,95 @@ func TestRedactURL(t *testing.T) {
 			name:  "long token as key is masked",
 			input: "https://h/?" + discovertest.CanaryURL + "=1&k=2",
 			want:  "https://h/?" + discover.Mask + "=" + discover.Mask + "&k=" + discover.Mask,
+		},
+		{
+			// The key unescapes to "password=hunter2".
+			name:  "key with escaped equals sign is masked",
+			input: "https://h/x?password%3Dhunter2=",
+			want:  "https://h/x?" + discover.Mask + "=" + discover.Mask,
+		},
+		{
+			name:  "key with colon is masked",
+			input: "https://h/x?admin:hunter2=1",
+			want:  "https://h/x?" + discover.Mask + "=" + discover.Mask,
+		},
+		{
+			name:  "key with escaped colon is masked",
+			input: "https://h/x?admin%3Ahunter2=1",
+			want:  "https://h/x?" + discover.Mask + "=" + discover.Mask,
+		},
+		{
+			name:  "key with comma is masked",
+			input: "https://h/x?pw,hunter2=x",
+			want:  "https://h/x?" + discover.Mask + "=" + discover.Mask,
+		},
+		{
+			name:  "key with escaped comma is masked",
+			input: "https://h/x?pw%2Chunter2=x",
+			want:  "https://h/x?" + discover.Mask + "=" + discover.Mask,
+		},
+		{
+			name:  "key with escaped semicolon is masked",
+			input: "https://h/x?pw%3Bhunter2=x",
+			want:  "https://h/x?" + discover.Mask + "=" + discover.Mask,
+		},
+		{
+			name:  "only the secret key is masked",
+			input: "https://h/x?a=1&admin:hunter2=2&b=3",
+			want: "https://h/x?a=" + discover.Mask + "&" + discover.Mask + "=" + discover.Mask +
+				"&b=" + discover.Mask,
+		},
+
+		// Scheme: only schemes in the allowlist are kept.
+		{
+			name:  "ws scheme is kept",
+			input: "ws://h/mcp",
+			want:  "ws://h/mcp",
+		},
+		{
+			name:  "wss scheme is kept",
+			input: "wss://h/mcp",
+			want:  "wss://h/mcp",
+		},
+		{
+			name:  "upper-case scheme is kept in lower case",
+			input: "HTTPS://h/mcp",
+			want:  "https://h/mcp",
+		},
+		{
+			name:  "DSN scheme is kept",
+			input: "postgres://u:" + discovertest.CanaryURL + "@db:5432/app",
+			want:  "postgres://" + discover.Mask + "@db:5432/app",
+		},
+		{
+			name:  "DSN scheme with plus is kept",
+			input: "mongodb+srv://h/app",
+			want:  "mongodb+srv://h/app",
+		},
+		{
+			name:  "scheme-relative URL is kept",
+			input: "//h/mcp",
+			want:  "//h/mcp",
+		},
+		{
+			name:  "token as scheme gives Mask",
+			input: "sk-proj-ABC123secretXYZ://host/x",
+			want:  discover.Mask,
+		},
+		{
+			name:  "short token as scheme gives Mask",
+			input: "token123://h",
+			want:  discover.Mask,
+		},
+		{
+			name:  "canary as scheme gives Mask",
+			input: "x" + discovertest.CanaryURL + "://h/mcp",
+			want:  discover.Mask,
+		},
+		{
+			name:  "unknown scheme gives Mask",
+			input: "ftp://h/x",
+			want:  discover.Mask,
 		},
 
 		// Fragment: a non-empty fragment is masked.
@@ -481,6 +580,10 @@ func FuzzRedactURL(f *testing.F) {
 		"https://h/?ghp_abcdef123456=&k=v;" + strings.Repeat("a", 32),
 		"https://h/login/password=hunter2/a,b/x%3By",
 		"https://h/%67hp_abcdef/a%2Fghp_abcdef?%67hp_x=1&%zz=2",
+		"sk-proj-ABC123secretXYZ://host/x",
+		"HTTPS://h/mcp",
+		"mongodb+srv://u:p@h/db",
+		"https://h/x?password%3Dhunter2=&admin:hunter2=1;pw,hunter2=x",
 	} {
 		f.Add(seed)
 	}
