@@ -16,22 +16,26 @@ import (
 	"time"
 )
 
-// defaultMaxResponseBytes is the size cap for one HTTP response body, in bytes
-// (8 MiB). newHTTPClient uses it when MaxBody is not positive.
-const defaultMaxResponseBytes int64 = 8 << 20
+// Limits of the HTTP client.
+const (
+	// defaultMaxResponseBytes is the size cap for one HTTP response body, in
+	// bytes (8 MiB). newHTTPClient uses it when MaxBody is not positive.
+	defaultMaxResponseBytes int64 = 8 << 20
 
-// defaultMaxTotalBytes is the size cap for all response bodies of one client
-// together, in bytes (64 MiB). The per-body cap alone would let a server send
-// many bodies of 8 MiB. newHTTPClient uses it when MaxTotal is not positive.
-const defaultMaxTotalBytes int64 = 64 << 20
+	// defaultMaxTotalBytes is the size cap for all response bodies of one
+	// client together, in bytes (64 MiB). The per-body cap alone would let a
+	// server send many bodies of 8 MiB. newHTTPClient uses it when MaxTotal
+	// is not positive.
+	defaultMaxTotalBytes int64 = 64 << 20
 
-// maxResponseHeaderBytes is the limit for the response headers of one
-// response, in bytes (64 KiB). The default of net/http is 1 MiB.
-const maxResponseHeaderBytes = 64 << 10
+	// maxResponseHeaderBytes is the limit for the response headers of one
+	// response, in bytes (64 KiB). The default of net/http is 1 MiB.
+	maxResponseHeaderBytes = 64 << 10
 
-// maxRedirects is the number of redirects that the client follows. It
-// refuses the next one.
-const maxRedirects = 3
+	// maxRedirects is the number of redirects that the client follows. It
+	// refuses the next one.
+	maxRedirects = 3
+)
 
 // Timeouts and pool size of the base transport (newBaseTransport). None of
 // them bounds a whole request: the context of the request does that.
@@ -48,9 +52,16 @@ const (
 // texts hold no URL and no header value.
 var (
 	// errReservedHeader means the config sets a header that mcpmoat controls,
-	// or a header with an empty name. The text that wraps it holds the header
-	// name (a key) and never a header value.
+	// or a header with an empty or invalid name. The text that wraps it holds
+	// the header name (a key) and never a header value.
 	errReservedHeader = errors.New("header name not allowed")
+	// errInvalidHeaderValue means a config header value has a control
+	// character, which net/http refuses to send. The text that wraps it holds
+	// the header name only.
+	errInvalidHeaderValue = errors.New("header value not allowed: control character")
+	// errInvalidProxy replaces any error of http.ProxyFromEnvironment with
+	// fixed text (see proxyFromEnvironment).
+	errInvalidProxy = errors.New("proxy setting from HTTP_PROXY or HTTPS_PROXY refused")
 	// errOtherOrigin means a request went to an origin other than the
 	// configured one.
 	errOtherOrigin = errors.New("request to another origin refused")
@@ -283,7 +294,7 @@ func newBaseTransport() *http.Transport {
 	return &http.Transport{
 		// Honour the user's HTTP_PROXY, HTTPS_PROXY and NO_PROXY variables. The
 		// proxy is user-configured, and Go never uses it for localhost.
-		Proxy: http.ProxyFromEnvironment,
+		Proxy: proxyFromEnvironment,
 		DialContext: (&net.Dialer{
 			Timeout:   dialTimeout,
 			KeepAlive: dialKeepAlive,
@@ -299,6 +310,20 @@ func newBaseTransport() *http.Transport {
 		// mcpmoat read a huge header block.
 		MaxResponseHeaderBytes: maxResponseHeaderBytes,
 	}
+}
+
+// proxyFromEnvironment is http.ProxyFromEnvironment with a fixed error text.
+// The proxy setting can hold a user name and a password, and classify does not
+// know that secret, so no error text from the proxy code may reach a report.
+// With Go 1.27 the only error is the refusal of HTTP_PROXY in a CGI
+// environment, and a setting that does not parse is ignored. Older x/net code
+// quoted the whole setting in its error, and that can come back.
+func proxyFromEnvironment(req *http.Request) (*url.URL, error) {
+	proxy, err := http.ProxyFromEnvironment(req)
+	if err != nil {
+		return nil, errInvalidProxy
+	}
+	return proxy, nil
 }
 
 // buildHeader checks the config headers and returns them as an http.Header
@@ -321,8 +346,11 @@ func buildHeader(headers map[string]string, ua string) (http.Header, error) {
 			return nil, fmt.Errorf("%w: empty", errReservedHeader)
 		}
 		canonical := http.CanonicalHeaderKey(key)
-		if isReservedHeader(canonical) {
+		if isReservedHeader(canonical) || !validHeaderName(key) {
 			return nil, fmt.Errorf("%w: %q", errReservedHeader, key)
+		}
+		if !validHeaderValue(headers[key]) {
+			return nil, fmt.Errorf("%w: %q", errInvalidHeaderValue, key)
 		}
 		header.Set(canonical, headers[key])
 	}
@@ -330,6 +358,42 @@ func buildHeader(headers map[string]string, ua string) (http.Header, error) {
 		header.Set("User-Agent", ua)
 	}
 	return header, nil
+}
+
+// validHeaderName reports whether name is an HTTP token (RFC 9110, section
+// 5.6.2), as net/http requires for a header name.
+func validHeaderName(name string) bool {
+	if name == "" {
+		return false
+	}
+	for i := range len(name) {
+		c := name[i]
+		ok := c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' ||
+			strings.IndexByte("!#$%&'*+-.^_`|~", c) >= 0
+		if !ok {
+			return false
+		}
+	}
+	return true
+}
+
+// validHeaderValue reports whether value has no control character other than
+// a horizontal tab, as net/http requires for a header value.
+func validHeaderValue(value string) bool {
+	for i := range len(value) {
+		if c := value[i]; c < ' ' && c != '\t' || c == 0x7f {
+			return false
+		}
+	}
+	return true
+}
+
+// sendsBasicAuth reports whether a request with header, the built config
+// headers, gets a Basic Authorization header from user, the URL user info. A
+// non-empty Authorization header from the config wins; an empty one counts as
+// absent, as in net/http. RoundTrip and sentHeaderNames both use it.
+func sendsBasicAuth(header http.Header, user *url.Userinfo) bool {
+	return user != nil && header.Get("Authorization") == ""
 }
 
 // isReservedHeader reports whether name, in canonical form, is a header that
@@ -412,8 +476,8 @@ func (t *headerTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 	// that the SDK never sees it. net/http would turn URL user info into a Basic
 	// header, so do the same here. A non-empty Authorization header from the
 	// config wins: the user chose it on purpose, and one request must not
-	// carry two. An empty one counts as absent, as in net/http.
-	if t.user != nil && out.Header.Get("Authorization") == "" {
+	// carry two (see sendsBasicAuth).
+	if sendsBasicAuth(out.Header, t.user) {
 		password, _ := t.user.Password()
 		out.SetBasicAuth(t.user.Username(), password)
 	}
@@ -464,8 +528,9 @@ func (t *headerTransport) CloseIdleConnections() {
 // isFollowedRedirect reports whether the http.Client will follow resp: a
 // redirect status with a Location header that parses. Such a response is not
 // a failure, so the recorder ignores it. If the redirect is refused, the
-// error from CheckRedirect tells why. The http.Client does not follow a
-// Location that does not parse, so that response is a final answer.
+// error from CheckRedirect tells why. For a Location that does not parse, the
+// http.Client returns an error instead of following it, so the recorder keeps
+// the redirect status as the label of that error.
 func isFollowedRedirect(resp *http.Response) bool {
 	switch resp.StatusCode {
 	case http.StatusMovedPermanently, http.StatusFound, http.StatusSeeOther,

@@ -10,6 +10,8 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
+	"os/exec"
 	"reflect"
 	"slices"
 	"strconv"
@@ -2162,8 +2164,24 @@ func TestBuildHeaderErrors(t *testing.T) {
 		name    string
 		headers map[string]string
 		want    string
+		// wantErr is the sentinel that the error wraps; nil means
+		// errReservedHeader.
+		wantErr error
 	}{
 		{name: "empty name", headers: map[string]string{"": hcSecret}, want: "header name not allowed: empty"},
+		// A name that is not an HTTP token. net/http would refuse to send it,
+		// and a space or a colon could split the header line.
+		{name: "space in name", headers: map[string]string{"X Key": hcSecret}, want: `header name not allowed: "X Key"`},
+		{name: "colon in name", headers: map[string]string{"X-Key:": hcSecret}, want: `header name not allowed: "X-Key:"`},
+		{name: "non-ASCII name", headers: map[string]string{"X-Clé": hcSecret}, want: `header name not allowed: "X-Clé"`},
+		{name: "CR LF in name", headers: map[string]string{"X-A\r\nX-B": hcSecret}, want: `header name not allowed: "X-A\r\nX-B"`},
+		// A value with a control character. The text names the key, never
+		// the value.
+		{name: "CR LF in value", headers: map[string]string{"X-Inject": "a\r\nInjected: " + hcSecret}, want: `header value not allowed: control character: "X-Inject"`, wantErr: errInvalidHeaderValue},
+		{name: "LF in value", headers: map[string]string{"X-Inject": hcSecret + "\n"}, want: `header value not allowed: control character: "X-Inject"`, wantErr: errInvalidHeaderValue},
+		{name: "NUL in value", headers: map[string]string{"X-Key": hcSecret + "\x00"}, want: `header value not allowed: control character: "X-Key"`, wantErr: errInvalidHeaderValue},
+		{name: "DEL in value", headers: map[string]string{"X-Key": "\x7f" + hcSecret}, want: `header value not allowed: control character: "X-Key"`, wantErr: errInvalidHeaderValue},
+		{name: "bad value keeps the config case of the key", headers: map[string]string{"x-key": hcSecret + "\r"}, want: `header value not allowed: control character: "x-key"`, wantErr: errInvalidHeaderValue},
 		{name: "reserved name", headers: map[string]string{"X-Key": "ok", "Host": hcSecret}, want: `header name not allowed: "Host"`},
 		{name: "reserved name keeps the config case", headers: map[string]string{"mcp-session-id": hcSecret}, want: `header name not allowed: "mcp-session-id"`},
 		{name: "control character in name is quoted", headers: map[string]string{"Mcp-\x1b[31m": hcSecret}, want: `header name not allowed: "Mcp-\x1b[31m"`},
@@ -2177,14 +2195,259 @@ func TestBuildHeaderErrors(t *testing.T) {
 			if err == nil {
 				t.Fatalf("buildHeader() = %v, want an error", header)
 			}
-			if !errors.Is(err, errReservedHeader) {
-				t.Errorf("errors.Is(err, errReservedHeader) = false; err = %v", err)
+			wantErr := tt.wantErr
+			if wantErr == nil {
+				wantErr = errReservedHeader
+			}
+			if !errors.Is(err, wantErr) {
+				t.Errorf("errors.Is(err, %v) = false; err = %v", wantErr, err)
 			}
 			if got := err.Error(); got != tt.want {
 				t.Errorf("buildHeader() error = %q, want %q", got, tt.want)
 			}
-			if strings.Contains(err.Error(), hcSecret) {
+			if strings.Contains(err.Error(), hcSecret) || strings.Contains(err.Error(), "Injected") {
 				t.Errorf("error text %q holds the header value", err)
+			}
+		})
+	}
+}
+
+// TestBuildHeaderAcceptsValidBytes checks that buildHeader keeps a name with
+// every token punctuation byte, and a value with a tab and bytes of 0x80 and
+// up (obs-text, for example UTF-8), exactly as configured.
+func TestBuildHeaderAcceptsValidBytes(t *testing.T) {
+	t.Parallel()
+
+	const (
+		name  = "X-a1!#$%&'*+.^_`|~"
+		value = "a\tb \x80\xff é ~"
+	)
+	header, err := buildHeader(map[string]string{name: value}, "")
+	if err != nil {
+		t.Fatalf("buildHeader() error = %v, want nil", err)
+	}
+	if got := header.Get(name); got != value {
+		t.Errorf("header %q = %q, want %q", name, got, value)
+	}
+}
+
+// TestValidHeaderName checks the HTTP token rule (RFC 9110, section 5.6.2).
+func TestValidHeaderName(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		in   string
+		want bool
+	}{
+		{name: "plain", in: "X-Api-Key", want: true},
+		{name: "letters and digits", in: "abcXYZ019", want: true},
+		{name: "every punctuation byte of a token", in: "!#$%&'*+-.^_`|~", want: true},
+		{name: "one byte", in: "x", want: true},
+		{name: "empty", in: "", want: false},
+		{name: "space", in: "X Key", want: false},
+		{name: "colon", in: "X-Key:", want: false},
+		{name: "tab", in: "X\tKey", want: false},
+		{name: "CR", in: "X\rKey", want: false},
+		{name: "LF", in: "X\nKey", want: false},
+		{name: "NUL", in: "X\x00", want: false},
+		{name: "DEL", in: "X\x7f", want: false},
+		{name: "non-ASCII", in: "X-Clé", want: false},
+		{name: "byte 0x80", in: "X\x80", want: false},
+		{name: "quote", in: `X"Key`, want: false},
+		{name: "slash", in: "X/Key", want: false},
+		{name: "brackets and separators", in: "(),/;<=>?@[\\]{}", want: false},
+		{name: "bad byte last", in: "X-Key ", want: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if got := validHeaderName(tt.in); got != tt.want {
+				t.Errorf("validHeaderName(%q) = %t, want %t", tt.in, got, tt.want)
+			}
+		})
+	}
+	// Each separator alone, so that one byte that slips through is found.
+	for _, c := range "\"(),/:;<=>?@[\\]{} \t" {
+		if validHeaderName("X" + string(c)) {
+			t.Errorf("validHeaderName(%q) = true, want false", "X"+string(c))
+		}
+	}
+}
+
+// TestValidHeaderValue checks that a value may hold no control byte other
+// than a horizontal tab, and no DEL. Bytes of 0x80 and up (obs-text) are
+// allowed, as net/http allows them.
+func TestValidHeaderValue(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		in   string
+		want bool
+	}{
+		{name: "empty", in: "", want: true},
+		{name: "plain", in: "Bearer tok-NOTREAL", want: true},
+		{name: "tab", in: "a\tb", want: true},
+		{name: "space and visible ASCII", in: " !~", want: true},
+		{name: "obs-text 0x80", in: "a\x80", want: true},
+		{name: "obs-text 0xff", in: "\xff", want: true},
+		{name: "UTF-8", in: "café", want: true},
+		{name: "CR", in: "a\rb", want: false},
+		{name: "LF", in: "a\nb", want: false},
+		{name: "CR LF header injection", in: "a\r\nInjected: 1", want: false},
+		{name: "NUL", in: "a\x00", want: false},
+		{name: "unit separator 0x1f", in: "\x1f", want: false},
+		{name: "DEL", in: "a\x7f", want: false},
+		{name: "bad byte first", in: "\x01abc", want: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if got := validHeaderValue(tt.in); got != tt.want {
+				t.Errorf("validHeaderValue(%q) = %t, want %t", tt.in, got, tt.want)
+			}
+		})
+	}
+	// Every control byte but the tab, one by one.
+	for c := range byte(0x20) {
+		if want := c == '\t'; validHeaderValue("a"+string(c)) != want {
+			t.Errorf("validHeaderValue(%q) = %t, want %t", "a"+string(c), !want, want)
+		}
+	}
+}
+
+// TestSendsBasicAuth checks the rule that RoundTrip and sentHeaderNames share:
+// the URL user info gives a Basic header unless the config set a non-empty
+// Authorization header.
+func TestSendsBasicAuth(t *testing.T) {
+	t.Parallel()
+
+	user := url.UserPassword("user", "pw-NOTREAL")
+	tests := []struct {
+		name   string
+		header http.Header
+		user   *url.Userinfo
+		want   bool
+	}{
+		{name: "nil user and nil header", header: nil, user: nil, want: false},
+		{name: "nil user and empty Authorization", header: http.Header{"Authorization": {""}}, user: nil, want: false},
+		{name: "nil user and no Authorization", header: http.Header{"X-Api-Key": {"k"}}, user: nil, want: false},
+		{name: "user and nil header", header: nil, user: user, want: true},
+		{name: "user name only", header: http.Header{}, user: url.User("user"), want: true},
+		{name: "user and other header only", header: http.Header{"X-Api-Key": {"k"}}, user: user, want: true},
+		{name: "user and empty Authorization", header: http.Header{"Authorization": {""}}, user: user, want: true},
+		{name: "user and non-empty Authorization", header: http.Header{"Authorization": {"Bearer x"}}, user: user, want: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if got := sendsBasicAuth(tt.header, tt.user); got != tt.want {
+				t.Errorf("sendsBasicAuth(%v, %v) = %t, want %t", tt.header, tt.user, got, tt.want)
+			}
+		})
+	}
+}
+
+// proxyHelperEnv marks the child process of TestProxyFromEnvironmentEnv.
+const proxyHelperEnv = "MCPMOAT_TEST_PROXY_HELPER"
+
+// proxyHelperPassword is the fake password in the proxy setting of the child
+// process. It must never show up in an error text.
+const proxyHelperPassword = "s3cr3t-NOTREAL-proxy"
+
+// TestProxyFromEnvironmentEnv runs TestProxyFromEnvironmentChild in a child
+// process with proxy variables that make http.ProxyFromEnvironment fail.
+// net/http reads the variables only once per process (a sync.Once), so
+// t.Setenv cannot change them inside this test binary.
+//
+// With the toolchain of go.mod, x/net/http/httpproxy drops a proxy value that
+// does not parse, so the error that the child can trigger is the refusal of
+// HTTP_PROXY in a CGI environment (REQUEST_METHOD set).
+func TestProxyFromEnvironmentEnv(t *testing.T) {
+	t.Parallel()
+	if os.Getenv(proxyHelperEnv) != "" {
+		t.Skip("this is the child process")
+	}
+
+	// os.Args[0] is this test binary; the arguments are fixed.
+	cmd := exec.CommandContext(t.Context(), os.Args[0], "-test.run=^TestProxyFromEnvironmentChild$", "-test.count=1", "-test.v") //nolint:gosec // G204: re-runs this test binary with fixed arguments
+	env := slices.DeleteFunc(os.Environ(), func(kv string) bool {
+		name, _, _ := strings.Cut(kv, "=")
+		switch strings.ToUpper(name) {
+		case "HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "REQUEST_METHOD":
+			return true
+		}
+		return false
+	})
+	cmd.Env = append(env,
+		proxyHelperEnv+"=1",
+		"REQUEST_METHOD=GET",
+		"HTTP_PROXY=http://alice:"+proxyHelperPassword+"@proxy.invalid:8080",
+		"HTTPS_PROXY=http://proxy.invalid:3128",
+	)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("child process failed: %v\n%s", err, out)
+	}
+	if !strings.Contains(string(out), "--- PASS: TestProxyFromEnvironmentChild") {
+		t.Fatalf("child process did not run TestProxyFromEnvironmentChild:\n%s", out)
+	}
+}
+
+// TestProxyFromEnvironmentChild is the child of TestProxyFromEnvironmentEnv.
+// It skips unless that test started it.
+func TestProxyFromEnvironmentChild(t *testing.T) {
+	if os.Getenv(proxyHelperEnv) == "" {
+		t.Skip("runs only as the child of TestProxyFromEnvironmentEnv")
+	}
+	plainReq, err := http.NewRequestWithContext(t.Context(), http.MethodPost, "http://127.0.0.1:1/mcp", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, goErr := http.ProxyFromEnvironment(plainReq); goErr == nil {
+		t.Fatal("http.ProxyFromEnvironment() error = nil; the environment does not trigger the error, so the test checks nothing")
+	}
+
+	t.Run("error is the fixed sentinel", func(t *testing.T) {
+		proxy, err := proxyFromEnvironment(plainReq)
+		if err != errInvalidProxy { //nolint:errorlint // the function returns the bare sentinel
+			t.Errorf("proxyFromEnvironment() error = %v, want errInvalidProxy", err)
+		}
+		if proxy != nil {
+			t.Errorf("proxyFromEnvironment() proxy = %v, want nil", proxy)
+		}
+	})
+
+	t.Run("a proxy without an error passes through", func(t *testing.T) {
+		req, err := http.NewRequestWithContext(t.Context(), http.MethodPost, "https://mcp.example.com/mcp", nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		proxy, err := proxyFromEnvironment(req)
+		if err != nil {
+			t.Fatalf("proxyFromEnvironment() error = %v, want nil", err)
+		}
+		if proxy == nil || proxy.String() != "http://proxy.invalid:3128" {
+			t.Errorf("proxyFromEnvironment() proxy = %v, want http://proxy.invalid:3128", proxy)
+		}
+	})
+
+	// Remote with the real base transport: the proxy error is a config error
+	// with a fixed reason, no request reaches the server, and no secret of
+	// the proxy setting or of the server entry is in the error.
+	for _, sse := range []bool{false, true} {
+		t.Run("Remote/"+string(rmKind(sse)), func(t *testing.T) {
+			ts, rec := startFixture(t, fixtureOpts{SSE: sse})
+			srv := rmServer(rmKind(sse), rmWithSecretQuery(fixtureURL(ts)), rmHeaders())
+			_, err := Remote(t.Context(), srv, RemoteOptions{})
+			ce := rmRequireConnectError(t, err, KindConfig)
+			if ce.Reason != errInvalidProxy.Error() {
+				t.Errorf("Reason = %q, want %q", ce.Reason, errInvalidProxy.Error())
+			}
+			assertNoSecrets(t, err, proxyHelperPassword, "alice", "proxy.invalid", "cgihttpproxy")
+			if n := len(rec.requests()); n != 0 {
+				t.Errorf("server got %d request(s), want 0", n)
 			}
 		})
 	}

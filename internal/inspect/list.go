@@ -142,7 +142,7 @@ var _ sessionLister = (*mcp.ClientSession)(nil)
 //     JSON-RPC error response on the first page ("method not found" for
 //     example) means the list is empty, and listAll goes on. Any other error is
 //     still an error: a transport failure, a limit breach, a missing raw list
-//     or a cancelled context. An error response on a later page is also an
+//     or a canceled context. An error response on a later page is also an
 //     error, because the earlier pages held items that we must not drop.
 //
 // Resource templates (resources/templates/list) are not listed yet.
@@ -185,8 +185,8 @@ func listAll(ctx context.Context, cs sessionLister, caps *mcp.ServerCapabilities
 // sdkErrorCodes are the JSON-RPC error codes that the SDK uses for its own
 // failures (SDK v1.8.0, internal/jsonrpc2): -32001 unknown error, -32003
 // client closing, -32004 server closing and -32005 "rejected by transport".
-// The SDK wraps every failed HTTP request, and HTTP 429, 502, 503 and 504,
-// with -32005. Such an error is a *jsonrpc.Error too, but no server sent it.
+// The SDK wraps every failed HTTP request, and HTTP 429, 500, 502, 503 and
+// 504, with -32005. Such an error is a *jsonrpc.Error too, but no server sent it.
 var sdkErrorCodes = []int64{-32001, -32003, -32004, -32005}
 
 // tolerateUndeclared decides what a failed list means. It returns nil when the

@@ -105,6 +105,8 @@ func TestClassify(t *testing.T) {
 		noReason []string
 		// wantIs holds errors that errors.Is must find in the cause.
 		wantIs []error
+		// notIs holds errors that errors.Is must not find in the cause.
+		notIs []error
 		// check runs extra assertions, for example errors.As.
 		check func(t *testing.T, ce *ConnectError)
 	}{
@@ -543,6 +545,36 @@ func TestClassify(t *testing.T) {
 			wantReason: []string{"too large"},
 			wantIs:     []error{errBodyTooLarge},
 		},
+		// When a blocked error decides the kind, a context error of err stays
+		// in the chain, so errors.Is(err, context.DeadlineExceeded) still
+		// works, as Remote promises.
+		{
+			name:       "ev blocked redirect keeps the deadline of err",
+			err:        fmt.Errorf("calling initialize: %w", context.DeadlineExceeded),
+			ev:         &fakeEvents{blocked: errCrossOriginRedirect},
+			wantKind:   KindRedirect,
+			wantReason: []string{"final URL"},
+			wantIs:     []error{errCrossOriginRedirect, context.DeadlineExceeded},
+			noReason:   []string{"timed out"},
+		},
+		{
+			name:       "ev blocked body too large keeps the cancel of err",
+			err:        urlErr("Post", fmt.Errorf("read: %w", context.Canceled)),
+			ev:         &fakeEvents{blocked: urlErr("Get", errBodyTooLarge)},
+			wantKind:   KindTooLarge,
+			wantReason: []string{"too large"},
+			wantIs:     []error{errBodyTooLarge, context.Canceled},
+			notIs:      []error{context.DeadlineExceeded},
+		},
+		{
+			name:       "ev blocked without a context error in err adds none",
+			err:        errors.New("client is closing: EOF"),
+			ev:         &fakeEvents{blocked: errCrossOriginRedirect},
+			wantKind:   KindRedirect,
+			wantReason: []string{"final URL"},
+			wantIs:     []error{errCrossOriginRedirect},
+			notIs:      []error{context.DeadlineExceeded, context.Canceled},
+		},
 		{
 			name:       "ev blocked error that is not a sentinel is ignored",
 			err:        errors.New("invalid MCP answer"),
@@ -572,6 +604,33 @@ func TestClassify(t *testing.T) {
 			ev:         nil,
 			wantKind:   KindProtocol,
 			wantReason: []string{"boom"},
+		},
+		{
+			name:     "invalid proxy setting is a config error with a fixed reason",
+			err:      urlErr("Post", fmt.Errorf("proxyconnect: %w", errInvalidProxy)),
+			wantKind: KindConfig,
+			wantIs:   []error{errInvalidProxy},
+			check: func(t *testing.T, ce *ConnectError) {
+				t.Helper()
+				if ce.Reason != errInvalidProxy.Error() {
+					t.Errorf("Reason = %q, want %q", ce.Reason, errInvalidProxy.Error())
+				}
+			},
+		},
+		{
+			// The SDK can wrap the transport error in text of its own; the
+			// reason is still the fixed text, so no other text gets in.
+			// safeCause drops the chain of a cause whose text holds a secret,
+			// so errors.Is is not checked here.
+			name:     "invalid proxy in a leaky wrapper keeps the fixed reason",
+			err:      &leakyError{text: "connect: " + leakText, err: errInvalidProxy},
+			wantKind: KindConfig,
+			check: func(t *testing.T, ce *ConnectError) {
+				t.Helper()
+				if ce.Reason != errInvalidProxy.Error() {
+					t.Errorf("Reason = %q, want %q", ce.Reason, errInvalidProxy.Error())
+				}
+			},
 		},
 		{
 			name: "nested url errors",
@@ -622,6 +681,11 @@ func TestClassify(t *testing.T) {
 					t.Errorf("errors.Is(ce, %v) = false, want true", target)
 				}
 			}
+			for _, target := range tt.notIs {
+				if errors.Is(ce, target) {
+					t.Errorf("errors.Is(ce, %v) = true, want false", target)
+				}
+			}
 			if tt.check != nil {
 				tt.check(t, ce)
 			}
@@ -647,6 +711,39 @@ func assertHasServerAndURL(t *testing.T, ce *ConnectError, srv discover.Server) 
 
 // TestClassifyRealNetworkTimeout checks the errors that the net package
 // produces for an expired context, and not only hand-made ones.
+// TestContextErr checks that contextErr finds a context error anywhere in the
+// chain and returns the bare sentinel, and nil for any other error.
+func TestContextErr(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		err  error
+		want error
+	}{
+		{name: "nil", err: nil, want: nil},
+		{name: "plain error", err: errors.New("EOF"), want: nil},
+		{name: "blocked sentinel", err: errCrossOriginRedirect, want: nil},
+		{name: "deadline", err: context.DeadlineExceeded, want: context.DeadlineExceeded},
+		{name: "wrapped deadline", err: fmt.Errorf("calling initialize: %w", context.DeadlineExceeded), want: context.DeadlineExceeded},
+		{name: "deadline in url error", err: urlErr("Post", context.DeadlineExceeded), want: context.DeadlineExceeded},
+		{name: "canceled", err: context.Canceled, want: context.Canceled},
+		{name: "wrapped canceled", err: fmt.Errorf("read: %w", context.Canceled), want: context.Canceled},
+		{name: "canceled in a join", err: errors.Join(errors.New("EOF"), context.Canceled), want: context.Canceled},
+		{name: "deadline wins over canceled", err: errors.Join(context.Canceled, context.DeadlineExceeded), want: context.DeadlineExceeded},
+		// The text alone is not enough: the SDK can flatten the chain.
+		{name: "flattened deadline text", err: errors.New(context.DeadlineExceeded.Error()), want: nil},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if got := contextErr(tt.err); got != tt.want { //nolint:errorlint // contextErr returns the bare sentinel, so == is the check
+				t.Errorf("contextErr(%v) = %v, want %v", tt.err, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestClassifyRealNetworkTimeout(t *testing.T) {
 	t.Parallel()
 
@@ -1119,6 +1216,25 @@ func TestScrub(t *testing.T) {
 			name: "empty text",
 			text: "",
 			want: "",
+		},
+		{
+			// The base URL must not take the redacted fragment with it: the
+			// full URL already got one, and another URL on the same origin
+			// must not get "#********" in the middle of its path.
+			name:     "fragment of the configured URL is not doubled or spread",
+			text:     "Post https://host.example/mcp#frag-NOTREAL: EOF; endpoint https://host.example/mcp/messages",
+			rawURL:   "https://host.example/mcp#frag-NOTREAL",
+			redacted: discover.NewURL("https://host.example/mcp#frag-NOTREAL").String(),
+			want:     "Post https://host.example/mcp#" + m + ": EOF; endpoint https://host.example/mcp/messages",
+			wantNot:  []string{"frag-NOTREAL", "#" + m + "#" + m, "#" + m + "/messages"},
+		},
+		{
+			name:     "fragment and query of the configured URL",
+			text:     "Post https://host.example/mcp?t=QSECRET42#frag-NOTREAL: EOF; endpoint https://host.example/mcp/messages",
+			rawURL:   "https://host.example/mcp?t=QSECRET42#frag-NOTREAL",
+			redacted: discover.NewURL("https://host.example/mcp?t=QSECRET42#frag-NOTREAL").String(),
+			want:     "Post https://host.example/mcp?t=" + m + "#" + m + ": EOF; endpoint https://host.example/mcp/messages",
+			wantNot:  []string{"frag-NOTREAL", "QSECRET42", "#" + m + "#" + m, "#" + m + "/messages"},
 		},
 		{
 			name:     "unparsable raw url still replaced as a whole",

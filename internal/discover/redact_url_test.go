@@ -699,7 +699,34 @@ func TestSecretPathSegments(t *testing.T) {
 		{
 			name:  "matrix parameter",
 			input: "https://h/mcp;x=y/sse",
-			want:  []string{"mcp;x=y"},
+			want:  []string{"mcp;x=y", "x=y"},
+		},
+		{
+			// A server can echo a matrix parameter alone, so it is listed
+			// alone too. The part before ";" is not a secret here.
+			name:  "matrix token alone",
+			input: "https://h/x;" + discovertest.CanaryURL + "/sse",
+			want:  []string{"x;" + discovertest.CanaryURL, discovertest.CanaryURL},
+		},
+		{
+			name:  "credential segment with matrix parameter lists both parts",
+			input: "https://h/" + discovertest.CanaryURL + ";a",
+			want:  []string{discovertest.CanaryURL + ";a", discovertest.CanaryURL, "a"},
+		},
+		{
+			name:  "matrix parameters skip the empty part",
+			input: "https://h/x;k=v;;tok",
+			want:  []string{"x;k=v;;tok", "k=v", "tok"},
+		},
+		{
+			name:  "escaped matrix part gives both forms",
+			input: "https://h/x;%67hp_abcdef/sse",
+			want:  []string{"x;%67hp_abcdef", "x;ghp_abcdef", "%67hp_abcdef", "ghp_abcdef"},
+		},
+		{
+			name:  "secret segment with trailing semicolon",
+			input: "https://h/ghp_abc;/sse",
+			want:  []string{"ghp_abc;", "ghp_abc"},
 		},
 		{
 			name:  "several secret segments in path order",
@@ -745,11 +772,70 @@ func TestSecretPathSegments(t *testing.T) {
 			if !slices.Equal(got, tt.want) || (got == nil) != (tt.want == nil) {
 				t.Errorf("SecretPathSegments(%q) = %#v, want %#v", tt.input, got, tt.want)
 			}
-			// Every returned segment is a part that RedactURL removes.
+			// Every returned segment is a part that RedactURL removes: a whole
+			// segment after "/", or a matrix part after ";".
 			redacted := discover.RedactURL(tt.input)
 			for _, seg := range got {
-				if strings.Contains(redacted, "/"+seg) {
+				if strings.Contains(redacted, "/"+seg) || strings.Contains(redacted, ";"+seg) {
 					t.Errorf("RedactURL(%q) = %q still holds segment %q", tt.input, redacted, seg)
+				}
+			}
+		})
+	}
+}
+
+// TestSecretQueryParts checks the list of query parts that RedactURL masks:
+// every value, every bare part and every credential-shaped key, raw and
+// unescaped, split on "&" and ";".
+func TestSecretQueryParts(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		rawQuery string
+		want     []string // in order; nil for none
+	}{
+		{name: "empty query", rawQuery: "", want: nil},
+		{name: "values in order", rawQuery: "a=tok-one&b=tok-two", want: []string{"tok-one", "tok-two"}},
+		{name: "repeated key gives every value", rawQuery: "t=tok-one&t=tok-two", want: []string{"tok-one", "tok-two"}},
+		{name: "plain key is not listed", rawQuery: "api_key=v4lue-NOTREAL", want: []string{"v4lue-NOTREAL"}},
+		{name: "bare part", rawQuery: discovertest.CanaryURL, want: []string{discovertest.CanaryURL}},
+		{name: "bare part among pairs", rawQuery: "k=v4lue&tok-bare", want: []string{"v4lue", "tok-bare"}},
+		{name: "empty value gives nothing", rawQuery: "k=", want: nil},
+		{name: "empty value next to a value", rawQuery: "k=&j=v4lue", want: []string{"v4lue"}},
+		{name: "equals sign alone", rawQuery: "=", want: nil},
+		{name: "value keeps a later equals sign", rawQuery: "k=a=b-NOTREAL", want: []string{"a=b-NOTREAL"}},
+		// Key shapes from the RedactURL query-key rows.
+		{name: "token as key", rawQuery: "ghp_abcdef123456=1", want: []string{"ghp_abcdef123456", "1"}},
+		{name: "token as key with empty value", rawQuery: "ghp_abcdef123456=", want: []string{"ghp_abcdef123456"}},
+		{name: "long canary as key", rawQuery: discovertest.CanaryURL + "=1&k=2", want: []string{discovertest.CanaryURL, "1", "2"}},
+		{name: "escaped token prefix as key gives both forms", rawQuery: "%67hp_abcdef=1", want: []string{"%67hp_abcdef", "ghp_abcdef", "1"}},
+		{name: "key with escaped equals sign gives both forms", rawQuery: "password%3Dhunter2=", want: []string{"password%3Dhunter2", "password=hunter2"}},
+		{name: "key with a bad escape is kept raw", rawQuery: "%zz=1", want: []string{"%zz", "1"}},
+		{name: "semicolon separates parts", rawQuery: "a=tok-one;b=tok-two", want: []string{"tok-one", "tok-two"}},
+		{name: "semicolon before a bare part", rawQuery: "a=tok-one;tok-bare", want: []string{"tok-one", "tok-bare"}},
+		{name: "empty parts are skipped", rawQuery: "&&a=tok-one;;&", want: []string{"tok-one"}},
+		{name: "escaped value in raw and unescaped form", rawQuery: "t=tok%2FNOT+REAL", want: []string{"tok%2FNOT+REAL", "tok/NOT REAL"}},
+		{name: "escaped bare part in raw and unescaped form", rawQuery: "tok%2Dbare", want: []string{"tok%2Dbare", "tok-bare"}},
+		{name: "bad escape in value kept raw only", rawQuery: "t=tok%zzNOTREAL", want: []string{"tok%zzNOTREAL"}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got := discover.SecretQueryParts(tt.rawQuery)
+			if !slices.Equal(got, tt.want) {
+				t.Errorf("SecretQueryParts(%q) = %#v, want %#v", tt.rawQuery, got, tt.want)
+			}
+			// Every returned part is a part that RedactURL removes.
+			input := "https://h/p?" + tt.rawQuery
+			redacted := discover.RedactURL(input)
+			if redacted == discover.Mask {
+				t.Fatalf("RedactURL(%q) = Mask; pick a query that RedactURL keeps in shape", input)
+			}
+			for _, part := range got {
+				if strings.Contains(redacted, part) {
+					t.Errorf("RedactURL(%q) = %q still holds part %q", input, redacted, part)
 				}
 			}
 		})

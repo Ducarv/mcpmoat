@@ -886,6 +886,8 @@ func TestRemoteConfigErrors(t *testing.T) {
 		name       string
 		srv        discover.Server
 		wantReason string
+		// secrets are extra strings that the error must not hold.
+		secrets []string
 	}{
 		{
 			name:       "bad scheme",
@@ -930,6 +932,19 @@ func TestRemoteConfigErrors(t *testing.T) {
 			wantReason: "header name not allowed: empty",
 		},
 		{
+			name: "header name that is not a token",
+			srv: rmServer(discover.TransportHTTP, rmWithSecretQuery("http://127.0.0.1:1/mcp"),
+				map[string]string{"X Key": rmAPIKeySecret}),
+			wantReason: `header name not allowed: "X Key"`,
+		},
+		{
+			name: "header value with CR LF",
+			srv: rmServer(discover.TransportSSE, rmWithSecretQuery("http://127.0.0.1:1/mcp"),
+				map[string]string{"Authorization": "Bearer " + rmBearerSecret, "X-Inject": "a\r\nInjected: 1"}),
+			wantReason: `header value not allowed: control character: "X-Inject"`,
+			secrets:    []string{"a\r\nInjected: 1", `a\r\nInjected`, "Injected"},
+		},
+		{
 			name: "stdio server",
 			srv: discover.Server{
 				Name:      rmServerName,
@@ -947,6 +962,7 @@ func TestRemoteConfigErrors(t *testing.T) {
 			if !strings.Contains(ce.Reason, tt.wantReason) {
 				t.Errorf("Reason = %q, want it to contain %q", ce.Reason, tt.wantReason)
 			}
+			assertNoSecrets(t, err, tt.secrets...)
 		})
 	}
 }
@@ -2246,7 +2262,11 @@ func TestURLSecrets(t *testing.T) {
 		{name: "several keys", rawURL: "https://h.example/mcp?a=tok-NOTREAL-a&b=tok-NOTREAL-b", want: []string{"tok-NOTREAL-a", "tok-NOTREAL-b"}},
 		{name: "bare key is the secret", rawURL: "https://h.example/mcp?tok-NOTREAL-bare", want: []string{"tok-NOTREAL-bare"}},
 		{name: "short bare key is dropped", rawURL: "https://h.example/mcp?debug", want: nil},
-		{name: "key with = and no value counts as bare", rawURL: "https://h.example/mcp?tok-NOTREAL-eq=", want: []string{"tok-NOTREAL-eq"}},
+		// With "=", RedactURL masks the value only, unless the key looks like
+		// a credential (see the ghp_ key row).
+		{name: "plain key with = and no value is not a secret", rawURL: "https://h.example/mcp?tok-NOTREAL-eq=", want: nil},
+		{name: "credential-shaped key", rawURL: "https://h.example/mcp?ghp_NOTREAL0123=1", want: []string{"ghp_NOTREAL0123"}},
+		{name: "matrix parameter alone", rawURL: "https://h.example/x;tok-NOTREAL-matrix/sse", want: []string{"x;tok-NOTREAL-matrix", "tok-NOTREAL-matrix"}},
 		{name: "escaped value in raw and unescaped form", rawURL: "https://h.example/mcp?t=tok%2FNOT+REAL", want: []string{"tok%2FNOT+REAL", "tok/NOT REAL"}},
 		{name: "empty query", rawURL: "https://h.example/mcp?", want: nil},
 		// urlSecrets splits the raw query itself: url.ParseQuery would drop a
@@ -2259,15 +2279,15 @@ func TestURLSecrets(t *testing.T) {
 		{name: "escaped token path segment in both forms", rawURL: "https://h.example/%67hp_NOTREAL0123/sse", want: []string{"%67hp_NOTREAL0123", "ghp_NOTREAL0123"}},
 		{name: "short secret path segment is dropped", rawURL: "https://h.example/a=b/mcp", want: nil},
 		{name: "path segment and query value", rawURL: "https://h.example/ghp_NOTREAL0123/mcp?k=tok-NOTREAL-q", want: []string{"ghp_NOTREAL0123", "tok-NOTREAL-q"}},
+		{name: "escaped credential-shaped key in both forms", rawURL: "https://h.example/mcp?%67hp_NOTREAL0123=", want: []string{"%67hp_NOTREAL0123", "ghp_NOTREAL0123"}},
+		{name: "credential segment with matrix parameter gives each part", rawURL: "https://h.example/ghp_NOTREAL0123;tok-NOTREAL-m/sse", want: []string{"ghp_NOTREAL0123;tok-NOTREAL-m", "ghp_NOTREAL0123", "tok-NOTREAL-m"}},
+		{name: "short matrix parameter alone is dropped", rawURL: "https://h.example/x;abc/sse", want: nil},
+		{name: "unparsable URL", rawURL: "http://[::1/mcp?k=tok-NOTREAL-q", want: nil},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			u, err := url.Parse(tt.rawURL)
-			if err != nil {
-				t.Fatalf("url.Parse(%q) = %v", tt.rawURL, err)
-			}
-			got := urlSecrets(u)
+			got := urlSecrets(tt.rawURL)
 			slices.Sort(got)
 			want := slices.Clone(tt.want)
 			slices.Sort(want)
@@ -2290,14 +2310,17 @@ func TestRemoteURLSecretEcho(t *testing.T) {
 	const (
 		queryTok = "tok-NOTREAL-query-7a1c"
 		pathTok  = "ghp_NOTREALpath0123" // isSecretPathSegment accepts the ghp_ prefix
+		// keyTok is a credential-shaped query key (isSecretQueryKey accepts
+		// the ghp_ prefix), so RedactURL masks the key too.
+		keyTok = "ghp_NOTREALqkey0123"
+		// matrixTok is a matrix parameter, which RedactURL always masks.
+		matrixTok = "tok-NOTREAL-matrix-3b9d"
 	)
+	secrets := map[string]string{"query": queryTok, "path": pathTok, "querykey": keyTok, "matrix": matrixTok}
 	for _, method := range []string{"initialize", methodListTools} {
 		for _, sse := range []bool{false, true} {
-			for _, where := range []string{"query", "path"} {
-				secret := queryTok
-				if where == "path" {
-					secret = pathTok
-				}
+			for _, where := range []string{"query", "path", "querykey", "matrix"} {
+				secret := secrets[where]
 				t.Run(method+"/"+string(rmKind(sse))+"/"+where, func(t *testing.T) {
 					t.Parallel()
 					var echoed atomic.Int32
@@ -2311,26 +2334,36 @@ func TestRemoteURLSecretEcho(t *testing.T) {
 							return next(ctx, m, req)
 						}
 					})
-					// The wrapper serves the fixture under /<pathTok>/mcp too. The
-					// SSE message endpoint is relative to the rewritten URL, so
-					// later POSTs go to /mcp directly.
+					// The wrapper serves the fixture under /<pathTok>/mcp and
+					// /x;<matrixTok>/mcp too. The SSE message endpoint is
+					// relative to the rewritten URL, so later POSTs go to /mcp
+					// directly.
 					wrap := func(next http.Handler) http.Handler {
 						return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-							if rest, ok := strings.CutPrefix(r.URL.Path, "/"+pathTok); ok {
-								r2 := r.Clone(r.Context())
-								r2.URL.Path = rest
-								r2.URL.RawPath = ""
-								next.ServeHTTP(w, r2)
-								return
+							for _, prefix := range []string{"/" + pathTok, "/x;" + matrixTok} {
+								if rest, ok := strings.CutPrefix(r.URL.Path, prefix); ok {
+									r2 := r.Clone(r.Context())
+									r2.URL.Path = rest
+									r2.URL.RawPath = ""
+									next.ServeHTTP(w, r2)
+									return
+								}
 							}
 							next.ServeHTTP(w, r)
 						})
 					}
 					ts, _ := startFixture(t, fixtureOpts{SSE: sse, Server: mcpSrv, Wrap: wrap})
 
-					rawURL := fixtureURL(ts) + "?api_key=" + queryTok
-					if where == "path" {
+					var rawURL string
+					switch where {
+					case "query":
+						rawURL = fixtureURL(ts) + "?api_key=" + queryTok
+					case "path":
 						rawURL = ts.URL + "/" + pathTok + "/mcp"
+					case "querykey":
+						rawURL = fixtureURL(ts) + "?" + keyTok + "=1"
+					case "matrix":
+						rawURL = ts.URL + "/x;" + matrixTok + "/mcp"
 					}
 					srv := rmServer(rmKind(sse), rawURL, nil)
 
@@ -2405,5 +2438,102 @@ func TestRemoteTimeoutWithURLError(t *testing.T) {
 				t.Errorf("Reason = %q, want the timeout and not the transport error", ce.Reason)
 			}
 		})
+	}
+}
+
+// TestRemoteInvalidProxy proves that a proxy error from the base transport is
+// a config error with the fixed reason of errInvalidProxy. The stub stands in
+// for proxyFromEnvironment, whose environment net/http reads only once per
+// process (see TestProxyFromEnvironmentEnv for the real transport).
+func TestRemoteInvalidProxy(t *testing.T) {
+	t.Parallel()
+
+	for _, sse := range []bool{false, true} {
+		t.Run(string(rmKind(sse)), func(t *testing.T) {
+			t.Parallel()
+			var calls atomic.Int32
+			base := hcRoundTripFunc(func(req *http.Request) (*http.Response, error) {
+				if req.Body != nil {
+					_ = req.Body.Close()
+				}
+				calls.Add(1)
+				return nil, errInvalidProxy
+			})
+			srv := rmServer(rmKind(sse), rmWithSecretQuery("http://127.0.0.1:9/mcp"), rmHeaders())
+			_, err := Remote(t.Context(), srv, RemoteOptions{baseTransport: base})
+			if calls.Load() == 0 {
+				t.Fatalf("the base transport got no request; the test checks nothing (error: %v)", err)
+			}
+			ce := rmRequireConnectError(t, err, KindConfig)
+			if ce.Reason != errInvalidProxy.Error() {
+				t.Errorf("Reason = %q, want %q", ce.Reason, errInvalidProxy.Error())
+			}
+			if !errors.Is(err, errInvalidProxy) {
+				t.Errorf("errors.Is(err, errInvalidProxy) = false, error: %v", err)
+			}
+		})
+	}
+}
+
+// TestRemoteBlockedConnectKeepsDeadline proves that a deadline still shows in
+// the error chain when a request that the HTTP layer blocked during the
+// connect decides the kind. The server redirects the server/discover request
+// to another origin (blocked), and then never answers initialize, so the call
+// ends at its deadline. The kind comes from the blocked redirect, and
+// errors.Is(err, context.DeadlineExceeded) must still work, as Remote
+// promises.
+func TestRemoteBlockedConnectKeepsDeadline(t *testing.T) {
+	t.Parallel()
+
+	victim := startVictim(t)
+	stop := make(chan struct{})
+	var discovered, initialized atomic.Int32
+	wrap := func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.Method == http.MethodPost {
+				switch {
+				case rmBodyHas(t, r, `"method":"server/discover"`):
+					discovered.Add(1)
+					http.Redirect(w, r, victim.URL+"/steal", http.StatusTemporaryRedirect)
+					return
+				case rmBodyHas(t, r, `"method":"initialize"`):
+					initialized.Add(1)
+					// Hang until the client gives up (or the test ends).
+					select {
+					case <-r.Context().Done():
+					case <-stop:
+					}
+					return
+				}
+			}
+			next.ServeHTTP(w, r)
+		})
+	}
+	ts, _ := startFixture(t, fixtureOpts{Wrap: wrap})
+	// Cleanups run last-in, first-out, so this unblocks a hanging handler
+	// before ts.Close waits for it.
+	t.Cleanup(func() { close(stop) })
+
+	ctx, cancel := context.WithTimeout(t.Context(), 500*time.Millisecond)
+	defer cancel()
+	srv := rmServer(discover.TransportHTTP, rmWithSecretQuery(fixtureURL(ts)), rmHeaders())
+	_, err := Remote(ctx, srv, RemoteOptions{})
+
+	victim.assertUntouched(t)
+	if discovered.Load() == 0 {
+		t.Fatal("the client sent no server/discover request; the test blocks nothing during the connect")
+	}
+	if initialized.Load() == 0 {
+		t.Fatalf("the client sent no initialize request; the call did not end at the deadline: %v", err)
+	}
+	ce := rmRequireConnectError(t, err, KindRedirect)
+	if !strings.Contains(ce.Reason, "final URL") {
+		t.Errorf("Reason = %q, want the reason of the blocked redirect", ce.Reason)
+	}
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Errorf("errors.Is(err, context.DeadlineExceeded) = false, error: %v", err)
+	}
+	if !errors.Is(err, errCrossOriginRedirect) {
+		t.Errorf("errors.Is(err, errCrossOriginRedirect) = false, error: %v", err)
 	}
 }

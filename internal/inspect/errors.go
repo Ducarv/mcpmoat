@@ -151,6 +151,11 @@ func classify(err error, srv discover.Server, ev transportEvents, secrets []stri
 		// An error that the HTTP layer raised on purpose is more reliable
 		// than err, which the SDK may have flattened to text.
 		if blocked := stripURLError(ev.blockedErr()); isBlockedErr(blocked) {
+			// Keep a context error of err in the chain, so that errors.Is(err,
+			// context.DeadlineExceeded) still works, as Remote promises.
+			if ctxErr := contextErr(cause); ctxErr != nil {
+				blocked = fmt.Errorf("%w: %w", blocked, ctxErr)
+			}
 			cause = blocked
 		}
 	}
@@ -180,6 +185,18 @@ var blockedKinds = []struct {
 	{errBodyTooLarge, KindTooLarge, "response too large"},
 }
 
+// contextErr returns context.DeadlineExceeded or context.Canceled when err
+// wraps it, and nil otherwise.
+func contextErr(err error) error {
+	switch {
+	case errors.Is(err, context.DeadlineExceeded):
+		return context.DeadlineExceeded
+	case errors.Is(err, context.Canceled):
+		return context.Canceled
+	}
+	return nil
+}
+
 // isBlockedErr reports whether err wraps one of the sentinel errors that the
 // HTTP layer raises on purpose (blockedKinds). A nil err gives false.
 func isBlockedErr(err error) bool {
@@ -201,6 +218,8 @@ func classifyCause(cause error, srv discover.Server, status int, connected bool,
 		}
 	}
 	switch {
+	case errors.Is(cause, errInvalidProxy):
+		return KindConfig, errInvalidProxy.Error(), 0
 	case errors.Is(cause, context.DeadlineExceeded):
 		return KindTimeout, "timed out", 0
 	case errors.Is(cause, context.Canceled):
@@ -306,21 +325,19 @@ func httpReason(srv discover.Server, status int, connected bool) string {
 // header built from it (see headerTransport.RoundTrip), so the list names it
 // too. It holds names only, never a value.
 func sentHeaderNames(srv discover.Server) []string {
+	// Build the headers as the client did, so that the rules (the last of two
+	// keys wins, an empty Authorization counts as absent) live in one place.
+	// classify runs only after newHTTPClient accepted the headers, so
+	// buildHeader does not fail here; on a failure, header stays nil.
+	raw, _ := splitHeaders(srv.Headers)
+	header, _ := buildHeader(raw, "")
+	var user *url.Userinfo
+	if u, err := url.Parse(srv.URL.Reveal()); err == nil {
+		user = u.User
+	}
+	basic := sendsBasicAuth(header, user)
+
 	keys := srv.Headers.Keys()
-	// buildHeader sets the keys in this sorted order, so the last
-	// Authorization key gives the value. An empty value counts as absent.
-	authValue := ""
-	for _, name := range keys {
-		if http.CanonicalHeaderKey(name) == "Authorization" {
-			authValue = srv.Headers[name].Reveal()
-		}
-	}
-	basic := false
-	if authValue == "" {
-		if u, err := url.Parse(srv.URL.Reveal()); err == nil && u.User != nil {
-			basic = true
-		}
-	}
 
 	var names []string
 	seen := make(map[string]bool)
@@ -372,7 +389,8 @@ func safeCause(cause error, rawURL, redactedURL string, secrets []string) error 
 //
 //   - rawURL, the URL as written in the config, with redactedURL;
 //   - the raw URL without its query and fragment, with the redacted URL
-//     without its query (net/http sometimes prints this variant);
+//     without its query and fragment (net/http sometimes prints this
+//     variant);
 //   - the query of rawURL, after "?", and the user name and password in the
 //     authority (in plain and in URL-escaped form), with discover.Mask;
 //   - every path segment of rawURL that discover.RedactURL masks, after "/",
@@ -445,12 +463,11 @@ func replaceURLParts(text, rawURL, redactedURL string) string {
 	u.User = nil // ignore the user info here; it is replaced below
 	base := u.String()
 
-	// The redacted URL without its query. If RedactURL gave Mask for the
-	// whole URL, there is nothing safe to show but Mask.
-	redactedBase := redactedURL
-	if before, _, found := strings.Cut(redactedURL, "?"); found {
-		redactedBase = before
-	}
+	// The redacted URL without its query and fragment, like base. If
+	// RedactURL gave Mask for the whole URL, there is nothing safe to show but
+	// Mask.
+	redactedBase, _, _ := strings.Cut(redactedURL, "#")
+	redactedBase, _, _ = strings.Cut(redactedBase, "?")
 
 	// Only "?"+query is replaced, not the bare query: a short query such as
 	// "a" must not garble other words.

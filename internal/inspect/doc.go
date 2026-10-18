@@ -23,9 +23,8 @@
 // userinfo as a Basic Authorization header, unless the config sets an
 // Authorization header.
 //
-// The text of a [ConnectError] can still hold text that the server controls,
-// for example a status text or a JSON-RPC message. Callers must escape the
-// text with internal/termsafe before they print it.
+// The text of a [ConnectError] can still hold text that the server controls
+// (see "Untrusted data" below).
 //
 // # Client identity
 //
@@ -75,6 +74,7 @@
 // Some clients ignore these variables, so a scan can take another route than
 // the client does. Over an http:// URL, the proxy then sees the configured
 // headers.
+//
 // TLS 1.2 or newer is required, and certificates are always verified. There is
 // no option to skip the check: only tests in this package can replace the
 // transport.
@@ -83,5 +83,7 @@
 //
 // Every string in a [Result] comes from the server, and a malicious server
 // controls it. Never execute it, never put it in a command or a format
-// string, and escape it with internal/termsafe before you print it.
+// string, and escape it with internal/termsafe before you print it. The same
+// is true for the text of a [ConnectError], which can hold a status text or a
+// JSON-RPC message from the server.
 package inspect

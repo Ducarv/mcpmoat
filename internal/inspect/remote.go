@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/url"
+	"slices"
 	"strings"
 	"time"
 
@@ -112,7 +113,7 @@ func Remote(ctx context.Context, srv discover.Server, opts RemoteOptions) (Resul
 	// secrets are all the strings that classify removes from error text.
 	headers, secrets := splitHeaders(srv.Headers)
 	secrets = append(secrets, userinfoSecrets(user)...)
-	secrets = append(secrets, urlSecrets(u)...)
+	secrets = append(secrets, urlSecrets(raw)...)
 
 	httpClient, rec, err := newHTTPClient(httpClientConfig{
 		Endpoint:  &endpointURL,
@@ -123,18 +124,24 @@ func Remote(ctx context.Context, srv discover.Server, opts RemoteOptions) (Resul
 		MaxBody:   opts.MaxResponseBytes,
 	})
 	if err != nil {
-		if errors.Is(err, errReservedHeader) {
+		if errors.Is(err, errReservedHeader) || errors.Is(err, errInvalidHeaderValue) {
 			// The text holds the header key only, never a value.
 			return Result{}, configError(srv, truncate(err.Error()))
 		}
 		return Result{}, configError(srv, "invalid HTTP client settings")
 	}
 
-	// Always derive a context that this function can cancel, so that a
-	// background goroutine of the SDK cannot outlive the call.
+	// Always derive a context that this function can cancel, so that the
+	// SDK work that uses ctx stops when Remote returns.
 	// Defers run last-in, first-out (LIFO). cancel is registered first, so it
-	// runs last: the session close below runs first and can still use ctx for
-	// its DELETE request, then the connections close, then ctx is canceled.
+	// runs last: the session close below runs first, then the idle
+	// connections close, then ctx is canceled. The SDK sends the session
+	// DELETE on a context of its own, bounded to 5 seconds.
+	//
+	// One SDK goroutine can outlive Remote: after a call fails because ctx
+	// ended, the SDK sends notifications/cancelled on a detached context,
+	// also bounded to 5 seconds. That is one more request to the same origin,
+	// and its connection can stay idle until idleConnTimeout.
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	if _, ok := ctx.Deadline(); !ok {
@@ -212,37 +219,22 @@ func splitUserinfo(u *url.URL) (endpoint url.URL, user *url.Userinfo) {
 	return endpoint, u.User
 }
 
-// urlSecrets returns the secrets in the query and the path of u, for classify
-// to remove wherever they stand in error text: every query value, every bare
-// query part (a key with an empty value or no "="), and every path segment
-// that discover.RedactURL masks (discover.SecretPathSegments). Query parts
-// come in their raw form and, when it differs, unescaped. It keeps only parts
-// with at least minBareSecretLen bytes. In URL form, classify removes the
-// whole query and every secret segment anyway (replaceURLParts).
-//
-// It splits the raw query itself, on "&" and ";": url.ParseQuery drops a pair
-// with a ";" or a bad escape, and such a value is still a secret.
-func urlSecrets(u *url.URL) []string {
+// urlSecrets returns the secrets in the query and the path of raw, the
+// configured URL, for classify to remove wherever they stand in error text:
+// the parts that discover.RedactURL masks (discover.SecretQueryParts and
+// discover.SecretPathSegments), with at least minBareSecretLen bytes. In URL
+// form, classify removes the whole query and every secret segment anyway
+// (replaceURLParts); this list is for a server that echoes a part alone.
+func urlSecrets(raw string) []string {
+	u, err := url.Parse(raw)
+	if err != nil {
+		return nil
+	}
 	var secrets []string
-	add := func(s string) {
+	for _, s := range slices.Concat(discover.SecretQueryParts(u.RawQuery), discover.SecretPathSegments(raw)) {
 		if len(s) >= minBareSecretLen {
 			secrets = append(secrets, s)
 		}
-	}
-	isSep := func(r rune) bool { return r == '&' || r == ';' }
-	for pair := range strings.FieldsFuncSeq(u.RawQuery, isSep) {
-		key, value, _ := strings.Cut(pair, "=")
-		part := value
-		if part == "" {
-			part = key
-		}
-		add(part)
-		if plain, err := url.QueryUnescape(part); err == nil && plain != part {
-			add(plain)
-		}
-	}
-	for _, seg := range discover.SecretPathSegments(u.String()) {
-		add(seg)
 	}
 	return secrets
 }
@@ -251,19 +243,19 @@ func urlSecrets(u *url.URL) []string {
 // HTTP client, and the secrets in them, for classify to remove from error
 // text: each non-empty value and, for a value with an auth scheme such as
 // "Bearer <token>", the credential part alone (see credentialPart).
-func splitHeaders(cfg discover.SecretMap) (headers map[string]string, values []string) {
+func splitHeaders(cfg discover.SecretMap) (headers map[string]string, secrets []string) {
 	headers = make(map[string]string, len(cfg))
 	for key, secret := range cfg {
 		value := secret.Reveal()
 		headers[key] = value
 		if value != "" {
-			values = append(values, value)
+			secrets = append(secrets, value)
 		}
 		if cred := credentialPart(value); cred != "" {
-			values = append(values, cred)
+			secrets = append(secrets, cred)
 		}
 	}
-	return headers, values
+	return headers, secrets
 }
 
 // credentialPart returns the part of value after an auth scheme, as in

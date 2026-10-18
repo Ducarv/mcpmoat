@@ -242,16 +242,68 @@ func SecretPathSegments(raw string) []string {
 		return nil
 	}
 	var segments []string
+	add := func(s string) {
+		if s == "" {
+			return
+		}
+		segments = append(segments, s)
+		if plain, err := url.PathUnescape(s); err == nil && plain != s {
+			segments = append(segments, plain)
+		}
+	}
 	for seg := range strings.SplitSeq(u.EscapedPath(), "/") {
 		if seg == "" || redactPathSegment(seg) == seg {
 			continue
 		}
-		segments = append(segments, seg)
-		if plain, err := url.PathUnescape(seg); err == nil && plain != seg {
-			segments = append(segments, plain)
+		add(seg)
+		// redactPathSegment masks each part after ";" (a matrix parameter),
+		// and the part before it when it is secret. A server can echo such a
+		// part alone, so list the masked parts too.
+		if parts := strings.Split(seg, ";"); len(parts) > 1 {
+			if isSecretPathSegment(parts[0]) {
+				add(parts[0])
+			}
+			for _, p := range parts[1:] {
+				add(p)
+			}
 		}
 	}
 	return segments
+}
+
+// SecretQueryParts returns the parts of rawQuery that RedactURL masks, one by
+// one: every value, every bare part with no "=", and every key that looks
+// like a credential (see isSecretQueryKey). Each part comes in its raw form
+// and, when it differs, unescaped. It splits on "&" and ";", as RedactURL
+// does.
+//
+// RedactURL masks the query only as part of the whole URL. A caller that
+// scrubs other text, for example an error message that echoes a query value
+// alone, uses this list to remove the parts one by one.
+func SecretQueryParts(rawQuery string) []string {
+	var parts []string
+	add := func(s string) {
+		if s == "" {
+			return
+		}
+		parts = append(parts, s)
+		if plain, err := url.QueryUnescape(s); err == nil && plain != s {
+			parts = append(parts, plain)
+		}
+	}
+	isSep := func(r rune) bool { return r == '&' || r == ';' }
+	for part := range strings.FieldsFuncSeq(rawQuery, isSep) {
+		key, value, found := strings.Cut(part, "=")
+		if !found {
+			add(part)
+			continue
+		}
+		if isSecretQueryKey(key) {
+			add(key)
+		}
+		add(value)
+	}
+	return parts
 }
 
 // isSecretPathSegment reports whether seg, one escaped path segment with no
