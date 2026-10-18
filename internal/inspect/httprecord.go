@@ -45,13 +45,23 @@ type requestRecorder struct {
 }
 
 // finish marks the call of the record as returned. After it, the record
-// changes no more. The SDK can still send a request on the context of a
+// takes no new writes. The SDK can still send a request on the context of a
 // returned call: after a call fails because ctx ended, it sends
 // notifications/cancelled on context.WithoutCancel of that ctx, and so with
 // the same record. An answer to that request that comes after finish cannot
-// change the label of the error that the call returned. The SDK starts that
-// request just before the call returns, so an answer within that short
-// window can still be recorded; it needs a full network round trip first.
+// change the label of the error that the call returned.
+//
+// This is best effort, in three ways:
+//
+//   - The SDK starts that request just before the call returns, so an answer
+//     within that short window can still be recorded. It needs a full
+//     network round trip first.
+//   - With MCPGODEBUG=blockingcancelnotify=1 in the environment of mcpmoat,
+//     the SDK sends the notification before the call returns, so its answer
+//     is always recorded. A blocked error in that answer then wins over the
+//     context error in classify. The inspection still fails.
+//   - The record methods check finished and then write, in two steps, so a
+//     write that runs at the same time as finish can still land.
 func (r *requestRecorder) finish() {
 	r.finished.Store(true)
 }
