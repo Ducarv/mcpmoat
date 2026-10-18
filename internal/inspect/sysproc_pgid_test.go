@@ -43,7 +43,7 @@ func TestStdioChildNewProcessGroup(t *testing.T) {
 	for i := range args {
 		args[i] = strings.Repeat(string(rune('a'+i)), procFillerArgSize)
 	}
-	s := procServer(envDumpExe(t), args, nil)
+	s := envDumpServer(envDumpExe(t), args, nil)
 	cmd, err := stdioCommand(s, stdioOptions{FallbackDir: t.TempDir()})
 	if err != nil {
 		t.Fatalf("stdioCommand() error = %v", err)
@@ -91,8 +91,8 @@ func TestStdioChildNewProcessGroup(t *testing.T) {
 		t.Errorf("child stdout = %d bytes, want more than %d bytes", len(out), procFillerArgs*procFillerArgSize)
 	}
 	dump := decodeEnvDump(t, out)
-	if len(dump.Args) < 2 || !reflect.DeepEqual(dump.Args[2:], args) {
+	if len(dump.Args) < 2 || dump.Args[1] != envDumpArg || !reflect.DeepEqual(dump.Args[2:], args) {
 		// Only the count: each arg is 32 KiB of filler.
-		t.Errorf("child got %d args, want envDumpArg plus %d filler args", len(dump.Args)-1, len(args))
+		t.Errorf("child got %d argv entries, want %d (argv[0], envDumpArg and %d filler args)", len(dump.Args), len(args)+2, len(args))
 	}
 }

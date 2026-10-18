@@ -203,9 +203,9 @@ func stdioCommand(s discover.Server, opts stdioOptions) (*exec.Cmd, error) {
 		env = []string{}
 	}
 
-	dir, configDir := s.Dir, true
+	dir, hasConfigDir := s.Dir, true
 	if !filepath.IsAbs(s.Dir) {
-		dir, configDir = opts.FallbackDir, false
+		dir, hasConfigDir = opts.FallbackDir, false
 		// FallbackDir comes from the caller, not the config. A NUL byte in
 		// it is a caller bug, but it gets the same fixed error.
 		if !filepath.IsAbs(dir) || hasNUL(dir) {
@@ -213,7 +213,7 @@ func stdioCommand(s discover.Server, opts stdioOptions) (*exec.Cmd, error) {
 		}
 	}
 
-	path, err := commandPath(s.Command, configDir, env)
+	path, err := commandPath(s.Command, hasConfigDir, env)
 	if err != nil {
 		return nil, err
 	}
@@ -245,7 +245,7 @@ func stdioCommand(s discover.Server, opts stdioOptions) (*exec.Cmd, error) {
 //
 //   - An absolute command is used as written.
 //   - A relative command with a "/" (such as "./server") is used as written,
-//     but only when the config sets an absolute Dir (configDir). See the
+//     but only when the config sets an absolute Dir (hasConfigDir). See the
 //     note below.
 //   - A bare name is looked up with lookPath in the PATH of the final child
 //     environment env.
@@ -259,12 +259,12 @@ func stdioCommand(s discover.Server, opts stdioOptions) (*exec.Cmd, error) {
 // absolute in the parent. (Only Windows resolves the path in Cmd.Start, and
 // Windows is a non-goal.) filepath.Join would also clean "a/.." pairs as
 // text, which can name another file than the kernel finds after a symlink.
-func commandPath(command string, configDir bool, env []string) (string, error) {
+func commandPath(command string, hasConfigDir bool, env []string) (string, error) {
 	if filepath.IsAbs(command) {
 		return command, nil
 	}
 	if strings.Contains(command, "/") {
-		if !configDir {
+		if !hasConfigDir {
 			return "", errRelativeCommand
 		}
 		return command, nil

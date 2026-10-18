@@ -214,7 +214,7 @@ func TestBuildEnv(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			got, err := buildEnv(tt.parent, secrets(t, tt.declared))
+			got, err := buildEnv(tt.parent, secrets(tt.declared))
 			if err != nil {
 				t.Fatalf("buildEnv() error = %v, want nil", err)
 			}
@@ -336,7 +336,7 @@ func TestBuildEnvErrors(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			got, err := buildEnv(tt.parent, secrets(t, tt.declared))
+			got, err := buildEnv(tt.parent, secrets(tt.declared))
 			if !errors.Is(err, tt.wantErr) {
 				t.Fatalf("buildEnv() error = %v, want %v", err, tt.wantErr)
 			}
@@ -383,8 +383,11 @@ func FuzzBuildEnv(f *testing.F) {
 
 		got, err := buildEnv(parent, declared)
 
+		// The oracle does not call hasNUL, so a bug in hasNUL cannot hide
+		// here.
+		holdsNUL := func(s string) bool { return strings.IndexByte(s, 0) >= 0 }
 		badName := key == "" || strings.ContainsAny(key, "=\x00")
-		badValue := strings.IndexByte(value, 0) >= 0
+		badValue := holdsNUL(value)
 		if badName || badValue {
 			want := errInvalidEnvValue
 			if badName {
@@ -416,7 +419,7 @@ func FuzzBuildEnv(f *testing.F) {
 			if !ok {
 				t.Fatalf("entry %q has no '='", entry)
 			}
-			if strings.IndexByte(v, 0) >= 0 {
+			if holdsNUL(v) {
 				t.Fatalf("entry %q has a NUL byte in its value", k)
 			}
 			if k != key && !isBaseEnv(k) {
@@ -443,7 +446,7 @@ func FuzzBuildEnv(f *testing.F) {
 		want := map[string]string{key: value}
 		for _, entry := range parent {
 			k, v, ok := strings.Cut(entry, "=")
-			if !ok || !isBaseEnv(k) || strings.IndexByte(v, 0) >= 0 {
+			if !ok || !isBaseEnv(k) || holdsNUL(v) {
 				continue
 			}
 			if _, seen := want[k]; !seen {

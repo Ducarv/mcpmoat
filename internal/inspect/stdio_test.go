@@ -14,31 +14,6 @@ import (
 // The helpers that only this file uses have the prefix "sc" (stdioCommand).
 // helpers_test.go holds the helpers that several test files share.
 
-// scServer returns a trusted global stdio server with the given command and
-// args. Tests change the other fields when they need to.
-func scServer(command string, args ...string) discover.Server {
-	return discover.Server{
-		Name:      "test-server",
-		Client:    discover.ClientCodex,
-		Scope:     discover.ScopeGlobal,
-		Source:    "/home/user/.codex/config.toml",
-		Transport: discover.TransportStdio,
-		Command:   command,
-		Args:      discover.NewArgs(args),
-	}
-}
-
-// scBin creates the directory dir and an executable file name in it. It
-// returns the path of the file, built with string concatenation like
-// lookPath does.
-func scBin(t *testing.T, dir, name string) string {
-	t.Helper()
-	mustMkdir(t, dir)
-	path := dir + "/" + name
-	mustWriteFile(t, path, 0o755)
-	return path
-}
-
 // scConfigInputs returns the values from the config of s and the
 // FallbackDir of opts. No error from stdioCommand may hold one of them.
 func scConfigInputs(s discover.Server, opts stdioOptions) []string {
@@ -116,7 +91,7 @@ func TestStdioCommand(t *testing.T) {
 			setup: func(t *testing.T) stdioCase {
 				fallback := t.TempDir()
 				return stdioCase{
-					server:   scServer("/opt/mcp/server", "--stdio"),
+					server:   stdioServer("/opt/mcp/server", "--stdio"),
 					opts:     stdioOptions{Environ: []string{"PATH=/usr/bin", "HOME=/home/user"}, FallbackDir: fallback},
 					wantPath: "/opt/mcp/server",
 					wantDir:  fallback,
@@ -125,12 +100,12 @@ func TestStdioCommand(t *testing.T) {
 			},
 		},
 		{
-			name: "absolute command with no args",
+			name: "absolute command with no args and an empty non-nil parent",
 			setup: func(t *testing.T) stdioCase {
 				fallback := t.TempDir()
 				return stdioCase{
-					server:   scServer("/opt/mcp/server"),
-					opts:     stdioOptions{FallbackDir: fallback},
+					server:   stdioServer("/opt/mcp/server"),
+					opts:     stdioOptions{Environ: []string{}, FallbackDir: fallback},
 					wantPath: "/opt/mcp/server",
 					wantDir:  fallback,
 					wantEnv:  []string{},
@@ -141,9 +116,9 @@ func TestStdioCommand(t *testing.T) {
 			name: "bare name found in config PATH",
 			setup: func(t *testing.T) stdioCase {
 				bin := t.TempDir() + "/bin"
-				tool := scBin(t, bin, "tool")
-				s := scServer("tool", "serve")
-				s.Env = secrets(t, map[string]string{"PATH": bin})
+				tool := mustExecutable(t, bin, "tool")
+				s := stdioServer("tool", "serve")
+				s.Env = secrets(map[string]string{"PATH": bin})
 				fallback := t.TempDir()
 				return stdioCase{
 					server:   s,
@@ -158,10 +133,10 @@ func TestStdioCommand(t *testing.T) {
 			name: "bare name found in parent PATH when config sets no PATH",
 			setup: func(t *testing.T) stdioCase {
 				bin := t.TempDir() + "/bin"
-				tool := scBin(t, bin, "tool")
+				tool := mustExecutable(t, bin, "tool")
 				fallback := t.TempDir()
 				return stdioCase{
-					server:   scServer("tool"),
+					server:   stdioServer("tool"),
 					opts:     stdioOptions{Environ: []string{"PATH=" + bin}, FallbackDir: fallback},
 					wantPath: tool,
 					wantDir:  fallback,
@@ -175,10 +150,10 @@ func TestStdioCommand(t *testing.T) {
 				root := t.TempDir()
 				parentBin := root + "/parent-bin"
 				configBin := root + "/config-bin"
-				scBin(t, parentBin, "tool")
-				configTool := scBin(t, configBin, "tool")
-				s := scServer("tool")
-				s.Env = secrets(t, map[string]string{"PATH": configBin})
+				mustExecutable(t, parentBin, "tool")
+				configTool := mustExecutable(t, configBin, "tool")
+				s := stdioServer("tool")
+				s.Env = secrets(map[string]string{"PATH": configBin})
 				fallback := t.TempDir()
 				return stdioCase{
 					server:   s,
@@ -193,7 +168,7 @@ func TestStdioCommand(t *testing.T) {
 			name: "relative command with absolute config Dir stays relative",
 			setup: func(t *testing.T) stdioCase {
 				dir := t.TempDir()
-				s := scServer("./tool", "--port", "0")
+				s := stdioServer("./tool", "--port", "0")
 				s.Dir = dir
 				return stdioCase{
 					server:   s,
@@ -208,7 +183,7 @@ func TestStdioCommand(t *testing.T) {
 			name: "relative command with a subdirectory and absolute config Dir",
 			setup: func(t *testing.T) stdioCase {
 				dir := t.TempDir()
-				s := scServer("bin/tool")
+				s := stdioServer("bin/tool")
 				s.Dir = dir
 				return stdioCase{
 					server:   s,
@@ -222,7 +197,7 @@ func TestStdioCommand(t *testing.T) {
 		{
 			name: "absolute config Dir is kept as written",
 			setup: func(t *testing.T) stdioCase {
-				s := scServer("/opt/mcp/server")
+				s := stdioServer("/opt/mcp/server")
 				s.Dir = "/srv/mcp/../app/"
 				return stdioCase{
 					server:   s,
@@ -234,23 +209,10 @@ func TestStdioCommand(t *testing.T) {
 			},
 		},
 		{
-			name: "empty Dir uses FallbackDir",
-			setup: func(t *testing.T) stdioCase {
-				fallback := t.TempDir()
-				return stdioCase{
-					server:   scServer("/opt/mcp/server"),
-					opts:     stdioOptions{FallbackDir: fallback},
-					wantPath: "/opt/mcp/server",
-					wantDir:  fallback,
-					wantEnv:  []string{},
-				}
-			},
-		},
-		{
 			name: "relative Dir uses FallbackDir",
 			setup: func(t *testing.T) stdioCase {
 				fallback := t.TempDir()
-				s := scServer("/opt/mcp/server")
+				s := stdioServer("/opt/mcp/server")
 				s.Dir = "sub"
 				return stdioCase{
 					server:   s,
@@ -267,7 +229,7 @@ func TestStdioCommand(t *testing.T) {
 			name: "relative Dir with NUL uses FallbackDir",
 			setup: func(t *testing.T) stdioCase {
 				fallback := t.TempDir()
-				s := scServer("/opt/mcp/server")
+				s := stdioServer("/opt/mcp/server")
 				s.Dir = "sub\x00dir"
 				return stdioCase{
 					server:   s,
@@ -282,7 +244,7 @@ func TestStdioCommand(t *testing.T) {
 			name: "untrusted server with opt-in",
 			setup: func(t *testing.T) stdioCase {
 				fallback := t.TempDir()
-				s := scServer("/opt/mcp/server")
+				s := stdioServer("/opt/mcp/server")
 				s.Scope = discover.ScopeProject
 				s.ProjectPath = "/home/user/project"
 				s.Untrusted = true
@@ -299,7 +261,7 @@ func TestStdioCommand(t *testing.T) {
 			name: "args with shell syntax and non-ASCII are kept exactly",
 			setup: func(t *testing.T) stdioCase {
 				fallback := t.TempDir()
-				s := scServer("/opt/mcp/server",
+				s := stdioServer("/opt/mcp/server",
 					"two words", "$HOME", "${HOME}", "$(touch x)", "`id`", ";", "a;b", "|", "&&",
 					"*", "?.go", "~", `"double"`, "'single'", `back\slash`, "", " ", "--x=",
 					"héllo", "日本語", "\t\n", discovertest.CanaryArgs,
@@ -318,7 +280,7 @@ func TestStdioCommand(t *testing.T) {
 			setup: func(t *testing.T) stdioCase {
 				fallback := t.TempDir()
 				return stdioCase{
-					server: scServer("/opt/mcp/server"),
+					server: stdioServer("/opt/mcp/server"),
 					opts: stdioOptions{
 						Environ: []string{
 							"AWS_SECRET_ACCESS_KEY=" + discovertest.CanaryEnv,
@@ -340,8 +302,8 @@ func TestStdioCommand(t *testing.T) {
 			name: "declared env is passed as written and overrides the parent",
 			setup: func(t *testing.T) stdioCase {
 				fallback := t.TempDir()
-				s := scServer("/opt/mcp/server")
-				s.Env = secrets(t, map[string]string{
+				s := stdioServer("/opt/mcp/server")
+				s.Env = secrets(map[string]string{
 					"API_KEY": discovertest.CanaryEnv,
 					"HOME":    "/override",
 					"REF":     "${HOME}/x",
@@ -361,11 +323,11 @@ func TestStdioCommand(t *testing.T) {
 			},
 		},
 		{
-			name: "nil parent and no declared env give an empty non-nil env",
+			name: "empty Dir uses FallbackDir, and a nil parent with no declared env gives an empty non-nil env",
 			setup: func(t *testing.T) stdioCase {
 				fallback := t.TempDir()
 				return stdioCase{
-					server:   scServer("/opt/mcp/server"),
+					server:   stdioServer("/opt/mcp/server"),
 					opts:     stdioOptions{Environ: nil, FallbackDir: fallback},
 					wantPath: "/opt/mcp/server",
 					wantDir:  fallback,
@@ -399,7 +361,7 @@ func TestStdioCommandParentSecretNotInEnv(t *testing.T) {
 		Environ:     []string{"AWS_SECRET_ACCESS_KEY=" + discovertest.CanaryEnv, "HOME=/home/user"},
 		FallbackDir: t.TempDir(),
 	}
-	cmd, err := stdioCommand(scServer("/opt/mcp/server", "--stdio"), opts)
+	cmd, err := stdioCommand(stdioServer("/opt/mcp/server", "--stdio"), opts)
 	if err != nil {
 		t.Fatalf("stdioCommand() error = %v, want nil", err)
 	}
@@ -430,7 +392,7 @@ func TestStdioCommandErrors(t *testing.T) {
 		{
 			name: "http transport",
 			setup: func(t *testing.T) (discover.Server, stdioOptions) {
-				s := scServer("/opt/" + canaryCmd)
+				s := stdioServer("/opt/" + canaryCmd)
 				s.Transport = discover.TransportHTTP
 				return s, stdioOptions{FallbackDir: t.TempDir()}
 			},
@@ -439,7 +401,7 @@ func TestStdioCommandErrors(t *testing.T) {
 		{
 			name: "sse transport",
 			setup: func(t *testing.T) (discover.Server, stdioOptions) {
-				s := scServer("/opt/" + canaryCmd)
+				s := stdioServer("/opt/" + canaryCmd)
 				s.Transport = discover.TransportSSE
 				return s, stdioOptions{FallbackDir: t.TempDir()}
 			},
@@ -448,7 +410,7 @@ func TestStdioCommandErrors(t *testing.T) {
 		{
 			name: "empty transport",
 			setup: func(t *testing.T) (discover.Server, stdioOptions) {
-				s := scServer("/opt/" + canaryCmd)
+				s := stdioServer("/opt/" + canaryCmd)
 				s.Transport = ""
 				return s, stdioOptions{FallbackDir: t.TempDir()}
 			},
@@ -457,7 +419,7 @@ func TestStdioCommandErrors(t *testing.T) {
 		{
 			name: "untrusted server without opt-in",
 			setup: func(t *testing.T) (discover.Server, stdioOptions) {
-				s := scServer("/opt/"+canaryCmd, discovertest.CanaryArgs)
+				s := stdioServer("/opt/"+canaryCmd, discovertest.CanaryArgs)
 				s.Untrusted = true
 				return s, stdioOptions{FallbackDir: t.TempDir()}
 			},
@@ -466,7 +428,7 @@ func TestStdioCommandErrors(t *testing.T) {
 		{
 			name: "empty command",
 			setup: func(t *testing.T) (discover.Server, stdioOptions) {
-				s := scServer("", discovertest.CanaryArgs)
+				s := stdioServer("", discovertest.CanaryArgs)
 				return s, stdioOptions{FallbackDir: t.TempDir()}
 			},
 			wantErr: errEmptyCommand,
@@ -474,14 +436,14 @@ func TestStdioCommandErrors(t *testing.T) {
 		{
 			name: "NUL in command",
 			setup: func(t *testing.T) (discover.Server, stdioOptions) {
-				return scServer("/opt/" + canaryCmd + "\x00x"), stdioOptions{FallbackDir: t.TempDir()}
+				return stdioServer("/opt/" + canaryCmd + "\x00x"), stdioOptions{FallbackDir: t.TempDir()}
 			},
 			wantErr: errInvalidArg,
 		},
 		{
 			name: "NUL in an arg",
 			setup: func(t *testing.T) (discover.Server, stdioOptions) {
-				s := scServer("/opt/"+canaryCmd, "ok", discovertest.CanaryArgs+"\x00tail")
+				s := stdioServer("/opt/"+canaryCmd, "ok", discovertest.CanaryArgs+"\x00tail")
 				return s, stdioOptions{FallbackDir: t.TempDir()}
 			},
 			wantErr: errInvalidArg,
@@ -489,7 +451,7 @@ func TestStdioCommandErrors(t *testing.T) {
 		{
 			name: "NUL in absolute Dir",
 			setup: func(t *testing.T) (discover.Server, stdioOptions) {
-				s := scServer("/opt/" + canaryCmd)
+				s := stdioServer("/opt/" + canaryCmd)
 				s.Dir = canaryDir + "\x00x"
 				return s, stdioOptions{FallbackDir: t.TempDir()}
 			},
@@ -498,35 +460,35 @@ func TestStdioCommandErrors(t *testing.T) {
 		{
 			name: "empty FallbackDir when needed",
 			setup: func(_ *testing.T) (discover.Server, stdioOptions) {
-				return scServer("/opt/"+canaryCmd, discovertest.CanaryArgs), stdioOptions{}
+				return stdioServer("/opt/"+canaryCmd, discovertest.CanaryArgs), stdioOptions{}
 			},
 			wantErr: errNoWorkDir,
 		},
 		{
 			name: "relative FallbackDir",
 			setup: func(_ *testing.T) (discover.Server, stdioOptions) {
-				return scServer("/opt/" + canaryCmd), stdioOptions{FallbackDir: "mcpmoat-canary-fallback"}
+				return stdioServer("/opt/" + canaryCmd), stdioOptions{FallbackDir: "mcpmoat-canary-fallback"}
 			},
 			wantErr: errNoWorkDir,
 		},
 		{
 			name: "FallbackDir with NUL",
 			setup: func(_ *testing.T) (discover.Server, stdioOptions) {
-				return scServer("/opt/" + canaryCmd), stdioOptions{FallbackDir: canaryDir + "\x00x"}
+				return stdioServer("/opt/" + canaryCmd), stdioOptions{FallbackDir: canaryDir + "\x00x"}
 			},
 			wantErr: errNoWorkDir,
 		},
 		{
 			name: "relative command with no config Dir",
 			setup: func(t *testing.T) (discover.Server, stdioOptions) {
-				return scServer("./" + canaryCmd), stdioOptions{FallbackDir: t.TempDir()}
+				return stdioServer("./" + canaryCmd), stdioOptions{FallbackDir: t.TempDir()}
 			},
 			wantErr: errRelativeCommand,
 		},
 		{
 			name: "relative command with relative config Dir",
 			setup: func(t *testing.T) (discover.Server, stdioOptions) {
-				s := scServer("bin/" + canaryCmd)
+				s := stdioServer("bin/" + canaryCmd)
 				s.Dir = "mcpmoat-canary-reldir"
 				return s, stdioOptions{FallbackDir: t.TempDir()}
 			},
@@ -536,8 +498,8 @@ func TestStdioCommandErrors(t *testing.T) {
 			name: "bare name not found in PATH",
 			setup: func(t *testing.T) (discover.Server, stdioOptions) {
 				empty := t.TempDir()
-				s := scServer(canaryCmd, discovertest.CanaryArgs)
-				s.Env = secrets(t, map[string]string{canaryName: discovertest.CanaryEnv})
+				s := stdioServer(canaryCmd, discovertest.CanaryArgs)
+				s.Env = secrets(map[string]string{canaryName: discovertest.CanaryEnv})
 				return s, stdioOptions{Environ: []string{"PATH=" + empty}, FallbackDir: t.TempDir()}
 			},
 			wantErr: errCommandNotFound,
@@ -548,8 +510,8 @@ func TestStdioCommandErrors(t *testing.T) {
 			name: "bare name in config Dir but not in PATH",
 			setup: func(t *testing.T) (discover.Server, stdioOptions) {
 				dir := t.TempDir()
-				scBin(t, dir, canaryCmd)
-				s := scServer(canaryCmd)
+				mustExecutable(t, dir, canaryCmd)
+				s := stdioServer(canaryCmd)
 				s.Dir = dir
 				return s, stdioOptions{Environ: []string{"PATH=" + t.TempDir()}, FallbackDir: t.TempDir()}
 			},
@@ -558,7 +520,7 @@ func TestStdioCommandErrors(t *testing.T) {
 		{
 			name: "bare name when PATH is absent everywhere",
 			setup: func(t *testing.T) (discover.Server, stdioOptions) {
-				return scServer(canaryCmd), stdioOptions{Environ: []string{"HOME=/home/user"}, FallbackDir: t.TempDir()}
+				return stdioServer(canaryCmd), stdioOptions{Environ: []string{"HOME=/home/user"}, FallbackDir: t.TempDir()}
 			},
 			wantErr: errCommandNotFound,
 		},
@@ -568,15 +530,15 @@ func TestStdioCommandErrors(t *testing.T) {
 			// sets cmd.Err.
 			name: "command is the root directory",
 			setup: func(t *testing.T) (discover.Server, stdioOptions) {
-				return scServer("/", discovertest.CanaryArgs), stdioOptions{FallbackDir: t.TempDir()}
+				return stdioServer("/", discovertest.CanaryArgs), stdioOptions{FallbackDir: t.TempDir()}
 			},
 			wantErr: errCommandNotRunnable,
 		},
 		{
 			name: "declared env name with =",
 			setup: func(t *testing.T) (discover.Server, stdioOptions) {
-				s := scServer("/opt/" + canaryCmd)
-				s.Env = secrets(t, map[string]string{"TOKEN=" + discovertest.CanaryEnv: discovertest.CanaryEnv})
+				s := stdioServer("/opt/" + canaryCmd)
+				s.Env = secrets(map[string]string{"TOKEN=" + discovertest.CanaryEnv: discovertest.CanaryEnv})
 				return s, stdioOptions{FallbackDir: t.TempDir()}
 			},
 			wantErr: errInvalidEnvName,
@@ -584,8 +546,8 @@ func TestStdioCommandErrors(t *testing.T) {
 		{
 			name: "empty declared env name",
 			setup: func(t *testing.T) (discover.Server, stdioOptions) {
-				s := scServer("/opt/" + canaryCmd)
-				s.Env = secrets(t, map[string]string{"": discovertest.CanaryEnv})
+				s := stdioServer("/opt/" + canaryCmd)
+				s.Env = secrets(map[string]string{"": discovertest.CanaryEnv})
 				return s, stdioOptions{FallbackDir: t.TempDir()}
 			},
 			wantErr: errInvalidEnvName,
@@ -593,8 +555,8 @@ func TestStdioCommandErrors(t *testing.T) {
 		{
 			name: "NUL in declared env value",
 			setup: func(t *testing.T) (discover.Server, stdioOptions) {
-				s := scServer("/opt/" + canaryCmd)
-				s.Env = secrets(t, map[string]string{canaryName: discovertest.CanaryEnv + "\x00tail"})
+				s := stdioServer("/opt/" + canaryCmd)
+				s.Env = secrets(map[string]string{canaryName: discovertest.CanaryEnv + "\x00tail"})
 				return s, stdioOptions{FallbackDir: t.TempDir()}
 			},
 			wantErr: errInvalidEnvValue,
@@ -625,7 +587,7 @@ func TestStdioCommandCheckOrder(t *testing.T) {
 
 	badName := func(t *testing.T) discover.SecretMap {
 		t.Helper()
-		return secrets(t, map[string]string{"TOKEN=" + discovertest.CanaryEnv: "x"})
+		return secrets(map[string]string{"TOKEN=" + discovertest.CanaryEnv: "x"})
 	}
 
 	tests := []struct {
@@ -636,7 +598,7 @@ func TestStdioCommandCheckOrder(t *testing.T) {
 		{
 			name: "transport before untrusted gate",
 			setup: func(t *testing.T) (discover.Server, stdioOptions) {
-				s := scServer("/opt/mcp/server")
+				s := stdioServer("/opt/mcp/server")
 				s.Transport = discover.TransportHTTP
 				s.Untrusted = true
 				return s, stdioOptions{FallbackDir: t.TempDir()}
@@ -646,7 +608,7 @@ func TestStdioCommandCheckOrder(t *testing.T) {
 		{
 			name: "untrusted gate before empty command",
 			setup: func(t *testing.T) (discover.Server, stdioOptions) {
-				s := scServer("")
+				s := stdioServer("")
 				s.Untrusted = true
 				return s, stdioOptions{FallbackDir: t.TempDir()}
 			},
@@ -655,7 +617,7 @@ func TestStdioCommandCheckOrder(t *testing.T) {
 		{
 			name: "empty command before env",
 			setup: func(t *testing.T) (discover.Server, stdioOptions) {
-				s := scServer("")
+				s := stdioServer("")
 				s.Env = badName(t)
 				return s, stdioOptions{FallbackDir: t.TempDir()}
 			},
@@ -664,7 +626,7 @@ func TestStdioCommandCheckOrder(t *testing.T) {
 		{
 			name: "NUL in arg before env",
 			setup: func(t *testing.T) (discover.Server, stdioOptions) {
-				s := scServer("/opt/mcp/server", "a\x00b")
+				s := stdioServer("/opt/mcp/server", "a\x00b")
 				s.Env = badName(t)
 				return s, stdioOptions{FallbackDir: t.TempDir()}
 			},
@@ -673,7 +635,7 @@ func TestStdioCommandCheckOrder(t *testing.T) {
 		{
 			name: "env before work directory",
 			setup: func(t *testing.T) (discover.Server, stdioOptions) {
-				s := scServer("/opt/mcp/server")
+				s := stdioServer("/opt/mcp/server")
 				s.Env = badName(t)
 				return s, stdioOptions{}
 			},
@@ -682,14 +644,14 @@ func TestStdioCommandCheckOrder(t *testing.T) {
 		{
 			name: "work directory before relative command",
 			setup: func(_ *testing.T) (discover.Server, stdioOptions) {
-				return scServer("./tool"), stdioOptions{}
+				return stdioServer("./tool"), stdioOptions{}
 			},
 			wantErr: errNoWorkDir,
 		},
 		{
 			name: "work directory before command lookup",
 			setup: func(_ *testing.T) (discover.Server, stdioOptions) {
-				return scServer("mcpmoat-no-such-tool"), stdioOptions{}
+				return stdioServer("mcpmoat-no-such-tool"), stdioOptions{}
 			},
 			wantErr: errNoWorkDir,
 		},
@@ -731,7 +693,7 @@ func TestStdioCommandFallbackOnlyWhenNeeded(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			dir := t.TempDir()
-			s := scServer("./tool", "--stdio")
+			s := stdioServer("./tool", "--stdio")
 			s.Dir = dir
 			cmd, err := stdioCommand(s, stdioOptions{FallbackDir: tt.fallback})
 			if err != nil {

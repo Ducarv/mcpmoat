@@ -45,7 +45,7 @@ func TestStdioCommandSetsSetsid(t *testing.T) {
 		{
 			name: "absolute command",
 			setup: func(t *testing.T) (discover.Server, stdioOptions) {
-				return scServer("/opt/mcp/server", "--stdio"),
+				return stdioServer("/opt/mcp/server", "--stdio"),
 					stdioOptions{FallbackDir: t.TempDir()}
 			},
 		},
@@ -53,15 +53,15 @@ func TestStdioCommandSetsSetsid(t *testing.T) {
 			name: "bare name found in the child PATH",
 			setup: func(t *testing.T) (discover.Server, stdioOptions) {
 				bin := t.TempDir() + "/bin"
-				scBin(t, bin, "mcp-server")
-				return scServer("mcp-server"),
+				mustExecutable(t, bin, "mcp-server")
+				return stdioServer("mcp-server"),
 					stdioOptions{Environ: []string{"PATH=" + bin}, FallbackDir: t.TempDir()}
 			},
 		},
 		{
 			name: "relative command with an absolute config Dir",
 			setup: func(t *testing.T) (discover.Server, stdioOptions) {
-				s := scServer("./server")
+				s := stdioServer("./server")
 				s.Dir = t.TempDir()
 				return s, stdioOptions{}
 			},

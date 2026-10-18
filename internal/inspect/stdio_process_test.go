@@ -30,21 +30,6 @@ const (
 	procCanaryGitHub = "mcpmoat-canary-github-8Wm2Qd"
 )
 
-// procServer returns a stdio server config that runs command with envDumpArg
-// as the first argument, then args, and the declared env.
-func procServer(command string, args []string, env discover.SecretMap) discover.Server {
-	argv := make([]string, 0, len(args)+1)
-	argv = append(argv, envDumpArg)
-	argv = append(argv, args...)
-	return discover.Server{
-		Name:      "envdump",
-		Transport: discover.TransportStdio,
-		Command:   command,
-		Args:      discover.NewArgs(argv),
-		Env:       env,
-	}
-}
-
 // procRun builds the command for s with stdioCommand, runs it and decodes
 // the env dump from its stdout. It reads stdout only, because the race
 // detector runtime can write to stderr.
@@ -176,7 +161,7 @@ func TestStdioChildEnvIsScrubbed(t *testing.T) {
 		want[name] = value
 	}
 
-	s := procServer(envDumpExe(t), nil, secrets(t, declared))
+	s := envDumpServer(envDumpExe(t), nil, secrets(declared))
 	opts := stdioOptions{Environ: parent, FallbackDir: t.TempDir()}
 	out, dump := procRun(t, s, opts, false)
 
@@ -219,9 +204,9 @@ func TestStdioChildEnvExact(t *testing.T) {
 		"LANG=C.UTF-8",
 		"LD_PRELOAD=/evil.so",
 	}
-	declared := secrets(t, map[string]string{"TOKEN": "t", "HOME": "/override"})
+	declared := secrets(map[string]string{"TOKEN": "t", "HOME": "/override"})
 
-	s := procServer(envDumpExe(t), nil, declared)
+	s := envDumpServer(envDumpExe(t), nil, declared)
 	opts := stdioOptions{Environ: parent, FallbackDir: t.TempDir()}
 	out, dump := procRun(t, s, opts, true)
 
@@ -240,7 +225,7 @@ func TestStdioChildEnvEmpty(t *testing.T) {
 	t.Parallel()
 	skipOnWindows(t)
 
-	s := procServer(envDumpExe(t), nil, nil)
+	s := envDumpServer(envDumpExe(t), nil, nil)
 	opts := stdioOptions{Environ: nil, FallbackDir: t.TempDir()}
 	_, dump := procRun(t, s, opts, true)
 
@@ -281,7 +266,7 @@ func TestStdioChildArgsExact(t *testing.T) {
 		"--flag=value",
 	}
 	workDir := t.TempDir()
-	s := procServer(envDumpExe(t), args, nil)
+	s := envDumpServer(envDumpExe(t), args, nil)
 	opts := stdioOptions{Environ: []string{"HOME=/home/x"}, FallbackDir: workDir}
 	_, dump := procRun(t, s, opts, true)
 
@@ -319,7 +304,7 @@ func TestStdioChildBareNameLookup(t *testing.T) {
 	mustMkdir(t, bin)
 	mustSymlink(t, envDumpExe(t), bin+"/mcpmoat-envdump")
 
-	s := procServer("mcpmoat-envdump", nil, secrets(t, map[string]string{"PATH": bin}))
+	s := envDumpServer("mcpmoat-envdump", nil, secrets(map[string]string{"PATH": bin}))
 	opts := stdioOptions{Environ: []string{"PATH=/nonexistent"}, FallbackDir: t.TempDir()}
 
 	cmd, err := stdioCommand(s, opts)
@@ -351,7 +336,7 @@ func TestStdioChildRelativeCommand(t *testing.T) {
 	dir := t.TempDir()
 	mustSymlink(t, envDumpExe(t), dir+"/envdump")
 
-	s := procServer("./envdump", nil, nil)
+	s := envDumpServer("./envdump", nil, nil)
 	s.Dir = dir
 	opts := stdioOptions{FallbackDir: t.TempDir()}
 	_, dump := procRun(t, s, opts, true)
@@ -370,7 +355,7 @@ func TestStdioChildRelativeDirUsesFallback(t *testing.T) {
 	skipOnWindows(t)
 
 	fallback := t.TempDir()
-	s := procServer(envDumpExe(t), nil, nil)
+	s := envDumpServer(envDumpExe(t), nil, nil)
 	s.Dir = "relative/sub"
 	opts := stdioOptions{FallbackDir: fallback}
 	_, dump := procRun(t, s, opts, true)
