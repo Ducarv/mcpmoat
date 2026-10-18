@@ -339,10 +339,11 @@ func TestScanConnectFlagsHelp(t *testing.T) {
 	})
 }
 
-// TestScanConnectFlagsDefaultsMatchExplicit is a guard for the default
-// values: scan with no flag and scan with the default values written out give
-// the same result.
-func TestScanConnectFlagsDefaultsMatchExplicit(t *testing.T) {
+// TestScanConnectFlagsDoNotChangeNoConnectOutput checks that valid values of
+// --timeout and --concurrency do not change the output of scan --no-connect,
+// which does not use them yet. It does not check the default values: the help
+// test and TestDefaultOptions in internal/inspect do that.
+func TestScanConnectFlagsDoNotChangeNoConnectOutput(t *testing.T) {
 	t.Parallel()
 
 	dir := t.TempDir()
@@ -356,12 +357,12 @@ func TestScanConnectFlagsDefaultsMatchExplicit(t *testing.T) {
 	}
 
 	codeA, outA, errA := run()
-	codeB, outB, errB := run("--timeout", "10s", "--concurrency", "4")
+	codeB, outB, errB := run("--timeout", "1m30s", "--concurrency", "16")
 
 	if codeA != exitOK || codeB != exitOK {
 		t.Fatalf("exit codes = %d and %d, want %d", codeA, codeB, exitOK)
 	}
 	if outA != outB || errA != errB {
-		t.Errorf("explicit defaults change the output\n--- default ---\n%s%s\n--- explicit ---\n%s%s", outA, errA, outB, errB)
+		t.Errorf("valid flag values change the output\n--- default ---\n%s%s\n--- explicit ---\n%s%s", outA, errA, outB, errB)
 	}
 }

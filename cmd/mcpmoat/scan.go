@@ -7,6 +7,7 @@ import (
 	"io"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/Ducarv/mcpmoat/internal/discover"
 	"github.com/Ducarv/mcpmoat/internal/inspect"
@@ -85,22 +86,10 @@ func (c *cli) runScan(_ options, args []string) int {
 	}
 
 	// Check the values in both modes, so a bad value is a usage error even
-	// when --no-connect starts no server. inspect.Options.Validate holds the
-	// rules. Its messages name no flag and repeat the value, so the errors.Is
-	// checks map each error to a message that names the flag and does not
-	// repeat the value. M3 passes opts to inspect.Run.
-	opts := inspect.Options{Timeout: *timeout, Concurrency: *concurrency}
-	if err := opts.Validate(); err != nil {
-		switch {
-		case errors.Is(err, inspect.ErrInvalidTimeout):
-			return c.usageError("scan", "--timeout must be greater than 0")
-		case errors.Is(err, inspect.ErrInvalidConcurrency):
-			return c.usageError("scan", "--concurrency must be at least 1")
-		default:
-			// A rule that Validate gets later. Its text holds only our own
-			// words and numbers.
-			return c.usageError("scan", "%v", err)
-		}
+	// when --no-connect starts no server. M3 passes the options to
+	// inspect.Run.
+	if _, err := connectOptions(*timeout, *concurrency); err != nil {
+		return c.usageError("scan", "%v", err)
 	}
 
 	if !*noConnect {
@@ -116,6 +105,27 @@ func (c *cli) runScan(_ options, args []string) int {
 		return c.scanConfig(ctx, configPath)
 	}
 	return c.scanAuto(ctx)
+}
+
+// connectOptions builds the inspect options from the --timeout and
+// --concurrency flags. inspect.Options.Validate holds the rules. Its messages
+// name no flag and repeat the value, so connectOptions maps each error to a
+// message that names the flag and does not repeat the value.
+func connectOptions(timeout time.Duration, concurrency int) (inspect.Options, error) {
+	opts := inspect.Options{Timeout: timeout, Concurrency: concurrency}
+	err := opts.Validate()
+	switch {
+	case err == nil:
+		return opts, nil
+	case errors.Is(err, inspect.ErrInvalidTimeout):
+		return inspect.Options{}, errors.New("--timeout must be greater than 0")
+	case errors.Is(err, inspect.ErrInvalidConcurrency):
+		return inspect.Options{}, errors.New("--concurrency must be at least 1")
+	default:
+		// A rule that Validate gets later. Its text holds only our own words
+		// and numbers.
+		return inspect.Options{}, err
+	}
 }
 
 // isFlagOf reports whether value looks like a flag of fs, in any form that
