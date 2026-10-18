@@ -10,13 +10,26 @@ import (
 	"unicode/utf8"
 )
 
+// reason is the type of the fixed reason texts of a FileError. Helpers that
+// pick a reason return a reason, not a string. Then a helper cannot return a
+// string that is not a constant, for example the text of a library error,
+// without an explicit conversion that a reviewer can see.
+type reason string
+
 // Fixed reasons for a FileError. They are plain text and never contain a value
-// from a config file, so an error message cannot leak a secret. Add every new
-// reason to allReasons too.
+// from a config file, so an error message cannot leak a secret.
+//
+// The constants are untyped on purpose. An untyped constant fits both the
+// reason type of the helpers and the string field FileError.Reason, which
+// callers outside the package read. Convert a reason value with string(r)
+// when you set FileError.Reason.
+//
+// Add every new reason to allReasons in fileerror_test.go too.
 const (
 	reasonCannotRead       = "cannot read file"
 	reasonNotRegular       = "not a regular file"
 	reasonTooLarge         = "file is too large"
+	reasonOutsideProject   = "file is outside the project" // a project file that is a symlink out of the project directory
 	reasonInvalidJSON      = "invalid JSON"
 	reasonInvalidTOML      = "invalid TOML"
 	reasonBadShape         = "unexpected structure"
@@ -27,36 +40,13 @@ const (
 	reasonStdioNoCommand   = "stdio server has no command"
 	reasonRemoteNoURL      = "remote server has no url"
 	reasonCanceled         = "canceled"
-	reasonTooDeep          = "nesting is too deep" // too deep nesting, or a key with too many dotted parts
+	reasonTooDeep          = "nesting is too deep"  // too deep nesting of [ ] and { }
+	reasonKeyTooLong       = "key path is too long" // a TOML key path with too many dotted parts
 	reasonTooManyServers   = "too many servers"
 	reasonAmbiguousKey     = "ambiguous key"     // two keys that differ only by letter case
 	reasonEmptyName        = "empty server name" // a server key that is the empty string
-	reasonBadString        = "invalid string"    // a lone UTF-16 surrogate escape
+	reasonBadString        = "invalid string"    // a lone UTF-16 surrogate escape or invalid UTF-8
 )
-
-// allReasons lists every reason constant. It is an array, not a slice, so it
-// is a value that no code can change. Tests use it to check that a FileError
-// has a known reason.
-var allReasons = [...]string{
-	reasonCannotRead,
-	reasonNotRegular,
-	reasonTooLarge,
-	reasonInvalidJSON,
-	reasonInvalidTOML,
-	reasonBadShape,
-	reasonBadServers,
-	reasonBadEntry,
-	reasonUnknownTransport,
-	reasonNoCommandOrURL,
-	reasonStdioNoCommand,
-	reasonRemoteNoURL,
-	reasonCanceled,
-	reasonTooDeep,
-	reasonTooManyServers,
-	reasonAmbiguousKey,
-	reasonEmptyName,
-	reasonBadString,
-}
 
 // FileError describes a problem with one config file or with one server entry
 // in it. Its message holds the file path, an optional position, an optional
@@ -78,6 +68,15 @@ type FileError struct {
 	// Err is the underlying error: an OS error for an IO problem, or the
 	// context error for a canceled read. It is nil for parse problems.
 	Err error
+	// Untrusted is true when the problem is in a project file that Discover
+	// read from the working directory (<WorkDir>/.mcp.json or
+	// <WorkDir>/.cursor/mcp.json). A cloned repository can ship that file. If
+	// mcpmoat cannot read it, it can hide servers that the client still loads.
+	// So a caller must not treat such an error as a harmless warning: the
+	// scan command exits with code 2. Untrusted is false for the user's own
+	// files: ~/.claude.json (also for its projects.<path> entries), the
+	// global Cursor file and the Codex file.
+	Untrusted bool
 }
 
 var _ error = (*FileError)(nil)
@@ -116,16 +115,16 @@ func (e *FileError) Error() string {
 	return b.String()
 }
 
+// Unwrap returns the underlying error (Err), so errors.Is and errors.As work.
+func (e *FileError) Unwrap() error {
+	return e.Err
+}
+
 // canceledError returns the FileError for a read of path that stopped because
 // the context ended. err is the context error, so errors.Is(fe,
 // context.Canceled) and errors.Is(fe, context.DeadlineExceeded) work.
 func canceledError(path string, err error) *FileError {
 	return &FileError{Path: path, Reason: reasonCanceled, Err: err}
-}
-
-// Unwrap returns the underlying error (Err), so errors.Is and errors.As work.
-func (e *FileError) Unwrap() error {
-	return e.Err
 }
 
 // errText returns the text of err for use in a FileError message.

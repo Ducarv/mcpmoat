@@ -5,152 +5,84 @@ import (
 	"errors"
 	"io/fs"
 	"path/filepath"
-	"reflect"
+	"slices"
 	"strings"
 	"testing"
 
 	"github.com/Ducarv/mcpmoat/internal/discover/discovertest"
 )
 
-// claudeCodeCase describes the expected result of reading one fixture. The want
-// functions get the copied file paths, because Source and Path hold them.
-type claudeCodeCase struct {
-	name string
-	// hideValues is set for fixtures that hold canaries. On a mismatch the test
-	// then prints no server data, only a fixed message.
-	hideValues bool
-	// canaryFiles are the fixture files, relative to the fixture directory,
-	// that must hold every canary. The leak checks only mean something if the
-	// input holds the canaries.
-	canaryFiles []string
+func TestReadClaudeCode(t *testing.T) {
+	t.Parallel()
 
-	homeServers func(source string) []serverView
-	workServers func(source, work string) []serverView
-	homeErrs    []errWant
-	workErrs    []errWant
-}
-
-// claudeStdioView builds the want value of a stdio server of Claude Code.
-func claudeStdioView(name string, scope Scope, projectPath, source, command string, args []string) serverView {
-	return serverView{
-		Name:        name,
-		Client:      ClientClaudeCode,
-		Scope:       scope,
-		ProjectPath: projectPath,
-		Source:      source,
-		Transport:   TransportStdio,
-		Command:     command,
-		Args:        args,
-	}
-}
-
-// claudeRemoteView builds the want value of an http or sse server of Claude Code.
-func claudeRemoteView(name string, scope Scope, projectPath, source string, transport Transport, url string) serverView {
-	return serverView{
-		Name:        name,
-		Client:      ClientClaudeCode,
-		Scope:       scope,
-		ProjectPath: projectPath,
-		Source:      source,
-		Transport:   transport,
-		URL:         url,
-	}
-}
-
-// claudeCodeCases returns one case for each fixture directory under
-// testdata/discover/claude-code. Each call returns a new slice.
-func claudeCodeCases() []claudeCodeCase {
-	return []claudeCodeCase{
+	files := jsonFixtureFiles{client: ClientClaudeCode, fixture: "claude-code", home: ".claude.json", work: ".mcp.json"}
+	runJSONFixtureCases(t, files, ReadClaudeCode, []jsonFixtureCase{
 		{
 			name: "valid",
-			homeServers: func(src string) []serverView {
-				// Order is (ProjectPath, Name): global servers first.
-				return []serverView{
-					claudeStdioView("filesystem", ScopeGlobal, "", src, "npx",
-						[]string{"-y", "@modelcontextprotocol/server-filesystem", "/tmp"}),
-					claudeRemoteView("remote-http", ScopeGlobal, "", src, TransportHTTP, "https://mcp.example.com/mcp"),
-					claudeRemoteView("remote-sse", ScopeGlobal, "", src, TransportSSE, "https://sse.example.com/sse"),
-					claudeStdioView("alpha-tool", ScopeProject, "/work/alpha", src, "node", []string{"alpha-server.js"}),
-					// "type" is missing here: a command means stdio.
-					claudeStdioView("gamma-tool", ScopeProject, "/work/gamma", src, "python3", []string{"-m", "gamma_server"}),
-				}
+			// Order is (ProjectPath, Name): global servers first. The servers
+			// with a ProjectPath come from projects.<path> of ~/.claude.json.
+			home: []serverView{
+				{Name: "filesystem", Transport: TransportStdio, Command: "npx", Args: []string{"-y", "@modelcontextprotocol/server-filesystem", "/tmp"}},
+				{Name: "remote-http", Transport: TransportHTTP, URL: "https://mcp.example.com/mcp"},
+				{Name: "remote-sse", Transport: TransportSSE, URL: "https://sse.example.com/sse"},
+				{Name: "alpha-tool", ProjectPath: "/work/alpha", Transport: TransportStdio, Command: "node", Args: []string{"alpha-server.js"}},
+				// "type" is missing here: a command means stdio.
+				{Name: "gamma-tool", ProjectPath: "/work/gamma", Transport: TransportStdio, Command: "python3", Args: []string{"-m", "gamma_server"}},
 			},
-			workServers: func(src, work string) []serverView {
-				return []serverView{
-					claudeStdioView("local-db", ScopeProject, work, src, "uvx",
-						[]string{"mcp-server-sqlite", "--db-path", "./data.db"}),
-					claudeRemoteView("team-api", ScopeProject, work, src, TransportHTTP, "https://team.example.com/mcp"),
-				}
+			work: []serverView{
+				{Name: "local-db", Transport: TransportStdio, Command: "uvx", Args: []string{"mcp-server-sqlite", "--db-path", "./data.db"}},
+				{Name: "team-api", Transport: TransportHTTP, URL: "https://team.example.com/mcp"},
 			},
 		},
 		{
 			name:        "secrets",
 			hideValues:  true,
 			canaryFiles: []string{"home/.claude.json", "work/.mcp.json"},
-			homeServers: func(src string) []serverView {
-				return []serverView{
-					{
-						Name: "with-env", Client: ClientClaudeCode, Scope: ScopeGlobal, Source: src,
-						Transport: TransportStdio, Command: "npx", Args: []string{"-y", "example-server", "--token", discovertest.CanaryArgs},
-						Env: map[string]string{"API_KEY": discovertest.CanaryEnv},
-					},
-					{
-						Name: "with-headers", Client: ClientClaudeCode, Scope: ScopeGlobal, Source: src,
-						Transport: TransportHTTP, URL: "https://mcp.example.com/mcp",
-						Headers: map[string]string{"Authorization": "Bearer " + discovertest.CanaryHeader},
-					},
-					{
-						Name: "with-url-secret", Client: ClientClaudeCode, Scope: ScopeGlobal, Source: src,
-						Transport: TransportHTTP,
-						URL: "https://user:" + discovertest.CanaryURL + "@mcp.example.com/mcp?key=" +
-							discovertest.CanaryURL,
-					},
-					{
-						Name: "project-with-env", Client: ClientClaudeCode, Scope: ScopeProject,
-						ProjectPath: "/work/secret-project", Source: src,
-						Transport: TransportStdio, Command: "node", Args: []string{"server.js"},
-						Env: map[string]string{"API_KEY": discovertest.CanaryEnv},
-					},
-				}
+			home: []serverView{
+				{
+					Name: "with-env", Transport: TransportStdio, Command: "npx",
+					Args: []string{"-y", "example-server", "--token", discovertest.CanaryArgs},
+					Env:  map[string]string{"API_KEY": discovertest.CanaryEnv},
+				},
+				{
+					Name: "with-headers", Transport: TransportHTTP, URL: "https://mcp.example.com/mcp",
+					Headers: map[string]string{"Authorization": "Bearer " + discovertest.CanaryHeader},
+				},
+				{
+					Name: "with-url-secret", Transport: TransportHTTP,
+					URL: "https://user:" + discovertest.CanaryURL + "@mcp.example.com/mcp?key=" + discovertest.CanaryURL,
+				},
+				{
+					Name: "project-with-env", ProjectPath: "/work/secret-project",
+					Transport: TransportStdio, Command: "node", Args: []string{"server.js"},
+					Env: map[string]string{"API_KEY": discovertest.CanaryEnv},
+				},
 			},
-			workServers: func(src, work string) []serverView {
-				return []serverView{
-					{
-						Name: "work-env", Client: ClientClaudeCode, Scope: ScopeProject, ProjectPath: work, Source: src,
-						Transport: TransportStdio, Command: "node", Args: []string{"server.js"},
-						Env: map[string]string{"API_KEY": discovertest.CanaryEnv},
-					},
-					{
-						Name: "work-headers", Client: ClientClaudeCode, Scope: ScopeProject, ProjectPath: work, Source: src,
-						Transport: TransportSSE, URL: "https://sse.example.com/sse",
-						Headers: map[string]string{"Authorization": "Bearer " + discovertest.CanaryHeader},
-					},
-				}
+			work: []serverView{
+				{
+					Name: "work-env", Transport: TransportStdio, Command: "node", Args: []string{"server.js"},
+					Env: map[string]string{"API_KEY": discovertest.CanaryEnv},
+				},
+				{
+					Name: "work-headers", Transport: TransportSSE, URL: "https://sse.example.com/sse",
+					Headers: map[string]string{"Authorization": "Bearer " + discovertest.CanaryHeader},
+				},
 			},
 		},
-		{
-			// Home file is "{}", work file has 0 bytes.
-			name:        "empty",
-			homeServers: func(string) []serverView { return nil },
-			workServers: func(string, string) []serverView { return nil },
-		},
+		// Home file is "{}", work file has 0 bytes.
+		{name: "empty"},
 		{
 			// The canary comes right after the bad spot in both files.
-			name:        "malformed",
-			hideValues:  true,
-			homeServers: func(string) []serverView { return nil },
-			workServers: func(string, string) []serverView { return nil },
-			homeErrs:    []errWant{{Reason: reasonInvalidJSON, Line: 3}},
-			workErrs:    []errWant{{Reason: reasonInvalidJSON, Line: 3}},
+			name:       "malformed",
+			hideValues: true,
+			homeErrs:   []errWant{{Reason: reasonInvalidJSON, Line: 3}},
+			workErrs:   []errWant{{Reason: reasonInvalidJSON, Line: 3}},
 		},
 		{
 			name: "invalid-entries",
-			homeServers: func(src string) []serverView {
-				return []serverView{
-					claudeStdioView("good", ScopeGlobal, "", src, "npx", []string{"-y", "example-server"}),
-				}
+			home: []serverView{
+				{Name: "good", Transport: TransportStdio, Command: "npx", Args: []string{"-y", "example-server"}},
 			},
-			workServers: func(string, string) []serverView { return nil },
 			// Errors are sorted by server name.
 			homeErrs: []errWant{
 				{Server: "empty", Reason: reasonNoCommandOrURL},
@@ -160,50 +92,9 @@ func claudeCodeCases() []claudeCodeCase {
 				{Server: "unknown-type", Reason: reasonUnknownTransport},
 			},
 		},
-		{
-			// The fixture has no files: both directories are empty.
-			name:        "missing",
-			homeServers: func(string) []serverView { return nil },
-			workServers: func(string, string) []serverView { return nil },
-		},
-	}
-}
-
-func TestReadClaudeCode(t *testing.T) {
-	t.Parallel()
-	for _, tc := range claudeCodeCases() {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			ctx := t.Context()
-			home, work := copyFixture(t, "claude-code", tc.name)
-			homePath := filepath.Join(home, ".claude.json")
-			workPath := filepath.Join(work, ".mcp.json")
-
-			// A leak test only means something if the fixture holds the canaries.
-			if len(tc.canaryFiles) > 0 {
-				repo := fixtureDir(t, "claude-code", tc.name)
-				var paths []string
-				for _, f := range tc.canaryFiles {
-					paths = append(paths, filepath.Join(repo, filepath.FromSlash(f)))
-				}
-				assertFixtureHasCanaries(t, paths...)
-			}
-
-			r1 := ReadClaudeCode(ctx, homePath, ScopeGlobal, "")
-			r2 := ReadClaudeCode(ctx, workPath, ScopeProject, work)
-
-			checkServers(t, "~/.claude.json", r1.Servers, tc.homeServers(homePath), tc.hideValues)
-			checkServers(t, ".mcp.json", r2.Servers, tc.workServers(workPath, work), tc.hideValues)
-			checkFileErrors(t, homePath, r1.Errors, tc.homeErrs)
-			checkFileErrors(t, workPath, r2.Errors, tc.workErrs)
-
-			// No result may hold a canary, in any form.
-			for _, r := range []Result{r1, r2} {
-				assertNoLeakServers(t, r.Servers)
-				assertNoLeakErrors(t, r.Errors)
-			}
-		})
-	}
+		// The fixture has no files: both directories are empty.
+		{name: "missing"},
+	})
 }
 
 // TestReadClaudeCodeCanaryMasking checks that the canaries are really read
@@ -304,24 +195,26 @@ func TestReadClaudeCodeProjectsKeyByScope(t *testing.T) {
 		want  []string
 	}{
 		{name: "project file ignores projects", scope: ScopeProject, want: []string{"top"}},
-		// Sorted by (ProjectPath, Name): "/attacker/chosen" < "/real/project".
+		// Sorted by (ProjectPath, Name): "/attacker/chosen" < the directory.
 		{name: "global file reads projects", scope: ScopeGlobal, want: []string{"spoofed", "top"}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			path := writeFile(t, t.TempDir(), "config.json", []byte(content))
+			// A project file must be below its projectPath.
+			dir := t.TempDir()
+			path := writeFile(t, dir, ".mcp.json", []byte(content))
 
-			r := ReadClaudeCode(t.Context(), path, tt.scope, "/real/project")
+			r := ReadClaudeCode(t.Context(), path, tt.scope, dir)
 			if len(r.Errors) != 0 {
 				t.Fatalf("errors = %v, want none", r.Errors)
 			}
-			if got := serverNames(r.Servers); !reflect.DeepEqual(got, tt.want) {
+			if got := serverNames(r.Servers); !slices.Equal(got, tt.want) {
 				t.Fatalf("servers = %v, want %v", got, tt.want)
 			}
 			for _, s := range r.Servers {
-				if tt.scope == ScopeProject && s.ProjectPath != "/real/project" {
-					t.Errorf("server %q ProjectPath = %q, want %q", s.Name, s.ProjectPath, "/real/project")
+				if tt.scope == ScopeProject && s.ProjectPath != dir {
+					t.Errorf("server %q ProjectPath = %q, want %q", s.Name, s.ProjectPath, dir)
 				}
 			}
 		})

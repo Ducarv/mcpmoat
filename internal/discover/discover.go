@@ -59,6 +59,10 @@ type step struct {
 //  4. WorkDir/.cursor/mcp.json (skipped if it is the same file as step 3)
 //  5. Home/.codex/config.toml
 //
+// Steps 2 and 4 read project files that a cloned repository can ship. Their
+// servers and their errors have Untrusted set (see [Server.Untrusted] and
+// [FileError.Untrusted]), and a symlink that leaves WorkDir is refused.
+//
 // If ctx is canceled, Discover adds one FileError with the reason "canceled"
 // and returns what it has. The error names the file that was being read, or
 // the next file if no read had started.

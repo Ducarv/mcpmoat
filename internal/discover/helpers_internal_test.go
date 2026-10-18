@@ -27,6 +27,7 @@ type serverView struct {
 	Scope       Scope
 	ProjectPath string
 	Source      string
+	Untrusted   bool
 	Transport   Transport
 	Command     string
 	Args        []string
@@ -45,6 +46,7 @@ func viewOf(s Server) serverView {
 		Scope:       s.Scope,
 		ProjectPath: s.ProjectPath,
 		Source:      s.Source,
+		Untrusted:   s.Untrusted,
 		Transport:   s.Transport,
 		Command:     s.Command,
 		Args:        s.Args.Values(),
@@ -150,6 +152,17 @@ func assertFixtureHasCanaries(t testing.TB, paths ...string) {
 			t.Fatalf("fixture files %v do not hold canary %q", paths, canary)
 		}
 	}
+}
+
+// assertFixtureFilesHaveCanaries is assertFixtureHasCanaries for the files
+// rel (with forward slashes) below the fixture directory dir.
+func assertFixtureFilesHaveCanaries(t testing.TB, dir string, rel ...string) {
+	t.Helper()
+	paths := make([]string, 0, len(rel))
+	for _, r := range rel {
+		paths = append(paths, filepath.Join(dir, filepath.FromSlash(r)))
+	}
+	assertFixtureHasCanaries(t, paths...)
 }
 
 // checkServers compares the views of got with want. A nil and an empty list
@@ -285,6 +298,7 @@ func TestHelpers(t *testing.T) {
 			Name:      "api",
 			Client:    ClientCursor,
 			Scope:     ScopeProject,
+			Untrusted: true,
 			Transport: TransportHTTP,
 			Args:      NewArgs([]string{"a"}),
 			Dir:       "/work/dir",
@@ -295,6 +309,7 @@ func TestHelpers(t *testing.T) {
 			Name:      "api",
 			Client:    ClientCursor,
 			Scope:     ScopeProject,
+			Untrusted: true,
 			Transport: TransportHTTP,
 			Args:      []string{"a"},
 			Dir:       "/work/dir",
@@ -332,10 +347,7 @@ func TestHelpers(t *testing.T) {
 			t.Errorf("fixtureDir() = %q, want an absolute path", valid)
 		}
 		secrets := fixtureDir(t, "claude-code", "secrets")
-		assertFixtureHasCanaries(t,
-			filepath.Join(secrets, "home", ".claude.json"),
-			filepath.Join(secrets, "work", ".mcp.json"),
-		)
+		assertFixtureFilesHaveCanaries(t, secrets, "home/.claude.json", "work/.mcp.json")
 	})
 
 	t.Run("no leak assertions pass on masked values", func(t *testing.T) {
@@ -435,6 +447,7 @@ func TestHelpers(t *testing.T) {
 			{name: "match", got: got, want: []serverView{{Name: "a", Command: "x", Dir: "/d"}}},
 			{name: "nil and empty are equal", got: nil, want: []serverView{}},
 			{name: "other Dir", got: got, want: []serverView{{Name: "a", Command: "x"}}, wantFail: true},
+			{name: "other Untrusted", got: got, want: []serverView{{Name: "a", Command: "x", Dir: "/d", Untrusted: true}}, wantFail: true},
 			{name: "other Command", got: got, want: []serverView{{Name: "a", Command: "y", Dir: "/d"}}, wantFail: true},
 			{name: "missing server", got: got, want: nil, wantFail: true},
 			{name: "hidden values still fail", got: got, want: nil, hideValues: true, wantFail: true},

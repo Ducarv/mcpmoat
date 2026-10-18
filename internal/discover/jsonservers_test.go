@@ -1,9 +1,11 @@
 package discover
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
 	"reflect"
 	"slices"
@@ -279,7 +281,12 @@ func TestParseJSONServersShapes(t *testing.T) {
 		{name: "top-level array", input: `[]`, wantErrors: []errWant{{Reason: reasonBadShape}}},
 		{name: "top-level number", input: `5`, wantErrors: []errWant{{Reason: reasonBadShape}}},
 		{name: "top-level string", input: `"x"`, wantErrors: []errWant{{Reason: reasonBadShape}}},
-		{name: "top-level null", input: `null`},
+		// The clients need an object, so a file of only null is an error.
+		{name: "top-level null", input: `null`, wantErrors: []errWant{{Reason: reasonBadShape}}},
+		{name: "top-level null with whitespace", input: " null\n", wantErrors: []errWant{{Reason: reasonBadShape}}},
+		// U+00A0 is a space for bytes.TrimSpace, but not JSON whitespace.
+		{name: "only no-break spaces", input: "\u00a0\u00a0", wantErrors: []errWant{{Reason: reasonInvalidJSON, Line: 1}}},
+		{name: "no-break space after the object", input: "{}\u00a0", wantErrors: []errWant{{Reason: reasonInvalidJSON, Line: 1}}},
 		{
 			name:       "mcpServers array",
 			input:      `{"mcpServers": []}`,
@@ -375,7 +382,7 @@ func TestParseJSONServersMissingFile(t *testing.T) {
 }
 
 // TestParseJSONServersScopeAndProjectPath checks the Scope, ProjectPath,
-// Source and Client of each server.
+// Source, Client and Untrusted of each server.
 func TestParseJSONServersScopeAndProjectPath(t *testing.T) {
 	t.Parallel()
 
@@ -387,12 +394,16 @@ func TestParseJSONServersScopeAndProjectPath(t *testing.T) {
 		}
 	}`
 
+	// workDirWant stands for the directory of the file in a want value. A
+	// project file must be below its projectPath, so the test uses the
+	// temporary directory as projectPath.
+	const workDirWant = "<dir>"
+
 	tests := []struct {
-		name        string
-		client      Client
-		scope       Scope
-		projectPath string
-		want        []serverView
+		name   string
+		client Client
+		scope  Scope
+		want   []serverView
 	}{
 		{
 			name:   "global",
@@ -411,22 +422,24 @@ func TestParseJSONServersScopeAndProjectPath(t *testing.T) {
 			},
 		},
 		{
-			name:        "project file",
-			client:      ClientClaudeCode,
-			scope:       ScopeProject,
-			projectPath: "/work/root",
+			// withProjects is true here, so the projects of a project file
+			// are read too. ReadClaudeCode never does that. Every server of
+			// a project file is untrusted.
+			name:   "project file",
+			client: ClientClaudeCode,
+			scope:  ScopeProject,
 			want: []serverView{
 				{
-					Name: "p1", Client: ClientClaudeCode, Scope: ScopeProject, ProjectPath: "/work/one",
-					Transport: TransportStdio, Command: "p1",
+					Name: "top", Client: ClientClaudeCode, Scope: ScopeProject, ProjectPath: workDirWant,
+					Untrusted: true, Transport: TransportStdio, Command: "t",
 				},
 				{
-					Name: "top", Client: ClientClaudeCode, Scope: ScopeProject, ProjectPath: "/work/root",
-					Transport: TransportStdio, Command: "t",
+					Name: "p1", Client: ClientClaudeCode, Scope: ScopeProject, ProjectPath: "/work/one",
+					Untrusted: true, Transport: TransportStdio, Command: "p1",
 				},
 				{
 					Name: "p2", Client: ClientClaudeCode, Scope: ScopeProject, ProjectPath: "/work/two",
-					Transport: TransportHTTP, URL: "https://example.com/mcp",
+					Untrusted: true, Transport: TransportHTTP, URL: "https://example.com/mcp",
 				},
 			},
 		},
@@ -451,16 +464,29 @@ func TestParseJSONServersScopeAndProjectPath(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			path := writeFile(t, t.TempDir(), "config.json", []byte(input))
+			dir := t.TempDir()
+			path := writeFile(t, dir, "config.json", []byte(input))
+			projectPath := ""
+			if tt.scope == ScopeProject {
+				projectPath = dir
+			}
 
-			servers, errs := parseJSONServers(t.Context(), path, tt.client, tt.scope, tt.projectPath, true)
+			servers, errs := parseJSONServers(t.Context(), path, tt.client, tt.scope, projectPath, true)
 
 			if len(errs) != 0 {
 				t.Fatalf("errors = %v, want none", errs)
 			}
 			for i := range tt.want {
 				tt.want[i].Source = path
+				if tt.want[i].ProjectPath == workDirWant {
+					tt.want[i].ProjectPath = dir
+				}
 			}
+			// The servers are sorted by (ProjectPath, Name), and dir can sort
+			// anywhere, so sort the want list the same way.
+			slices.SortStableFunc(tt.want, func(a, b serverView) int {
+				return cmp.Or(strings.Compare(a.ProjectPath, b.ProjectPath), strings.Compare(a.Name, b.Name))
+			})
 			if got := viewsOf(servers); !reflect.DeepEqual(got, tt.want) {
 				t.Errorf("servers = %+v\nwant     %+v", got, tt.want)
 			}
@@ -522,41 +548,11 @@ func TestParseJSONServersOrder(t *testing.T) {
 	}
 }
 
-// TestParseJSONServersSyntaxError checks the position of a JSON syntax error
-// and that the error text holds no part of the file.
+// TestParseJSONServersSyntaxError checks that a JSON syntax error has a
+// position and that the error text holds no part of the file. The exact
+// positions are in TestParseJSONServersSyntaxErrorPosition.
 func TestParseJSONServersSyntaxError(t *testing.T) {
 	t.Parallel()
-
-	t.Run("missing comma gives line 3", func(t *testing.T) {
-		t.Parallel()
-		path := writeFile(t, t.TempDir(), "config.json", []byte("{\n  \"a\": 1\n  \"b\": 2\n}"))
-
-		servers, errs := parseJSONServers(t.Context(), path, ClientClaudeCode, ScopeGlobal, "", true)
-
-		if len(servers) != 0 {
-			t.Errorf("servers = %v, want none", serverNames(servers))
-		}
-		checkFileErrors(t, path, errs, []errWant{{Reason: reasonInvalidJSON, Line: 3}})
-		e := errs[0]
-		// The parser finds the error at the opening quote of "b": line 3, col 3.
-		if e.Line != 3 || e.Col != 3 {
-			t.Errorf("position = %d:%d, want 3:3", e.Line, e.Col)
-		}
-	})
-
-	t.Run("truncated file", func(t *testing.T) {
-		t.Parallel()
-		const input = `{"mcpServers": {"x": {"command": "a"`
-		path := writeFile(t, t.TempDir(), "config.json", []byte(input))
-
-		_, errs := parseJSONServers(t.Context(), path, ClientClaudeCode, ScopeGlobal, "", true)
-
-		checkFileErrors(t, path, errs, []errWant{{Reason: reasonInvalidJSON, Line: 1}})
-		// At an unexpected end of input the error points at the last byte.
-		if errs[0].Col != len(input) {
-			t.Errorf("position = %d:%d, want 1:%d", errs[0].Line, errs[0].Col, len(input))
-		}
-	})
 
 	t.Run("not JSON at all", func(t *testing.T) {
 		t.Parallel()
@@ -719,12 +715,18 @@ func TestParseJSONServersDuplicateKeys(t *testing.T) {
 func TestParseJSONServersSyntaxErrorPosition(t *testing.T) {
 	t.Parallel()
 
+	const truncated = `{"mcpServers": {"x": {"command": "a"`
+
 	tests := []struct {
 		name     string
 		input    string
 		wantLine int
 		wantCol  int
 	}{
+		// The parser finds the error at the opening quote of "b".
+		{name: "missing comma", input: "{\n  \"a\": 1\n  \"b\": 2\n}", wantLine: 3, wantCol: 3},
+		// At an unexpected end of input the error points at the last byte.
+		{name: "truncated file", input: truncated, wantLine: 1, wantCol: len(truncated)},
 		{name: "bad value", input: `{"a": x}`, wantLine: 1, wantCol: 7},
 		{name: "trailing comma", input: "{\n  \"a\": 1,\n}", wantLine: 3, wantCol: 1},
 		{
@@ -940,22 +942,19 @@ func TestParseJSONServersSizeLimitByScope(t *testing.T) {
 		name        string
 		content     string
 		scope       Scope
-		projectPath string
 		wantServers int
 		wantErrors  []errWant
 	}{
 		{
-			name:        "project scope over the limit is refused",
-			content:     overLimit,
-			scope:       ScopeProject,
-			projectPath: "/work",
-			wantErrors:  []errWant{{Reason: reasonTooLarge}},
+			name:       "project scope over the limit is refused",
+			content:    overLimit,
+			scope:      ScopeProject,
+			wantErrors: []errWant{{Reason: reasonTooLarge}},
 		},
 		{
 			name:        "project scope at the limit is read",
 			content:     overLimit[:maxProjectConfigSize],
 			scope:       ScopeProject,
-			projectPath: "/work",
 			wantServers: 1,
 		},
 		{
@@ -969,9 +968,14 @@ func TestParseJSONServersSizeLimitByScope(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			path := writeFile(t, t.TempDir(), "config.json", []byte(tt.content))
+			dir := t.TempDir()
+			path := writeFile(t, dir, "config.json", []byte(tt.content))
+			projectPath := ""
+			if tt.scope == ScopeProject {
+				projectPath = dir // a project file must be below its projectPath
+			}
 
-			servers, errs := parseJSONServers(t.Context(), path, ClientClaudeCode, tt.scope, tt.projectPath, false)
+			servers, errs := parseJSONServers(t.Context(), path, ClientClaudeCode, tt.scope, projectPath, false)
 
 			if len(servers) != tt.wantServers {
 				t.Errorf("got %d servers, want %d", len(servers), tt.wantServers)
@@ -1199,15 +1203,7 @@ func TestParseJSONServersCaseVariantSections(t *testing.T) {
 func TestParseJSONServersLoneSurrogate(t *testing.T) {
 	t.Parallel()
 
-	tests := []struct {
-		name        string
-		input       string
-		cursor      bool // read with withProjects=false, as for Cursor
-		wantLine    int  // 0: the file is valid and gives wantName
-		wantCol     int
-		wantProject string
-		wantName    string
-	}{
+	runBadStringCases(t, []badStringCase{
 		{
 			name: "server names",
 			input: `{"mcpServers": {
@@ -1329,7 +1325,7 @@ func TestParseJSONServersLoneSurrogate(t *testing.T) {
 		},
 		{
 			name:     "valid pair",
-			input:    `{"mcpServers": {"x😀": {"command": "a"}}}`,
+			input:    `{"mcpServers": {"x\ud83d\ude00": {"command": "a"}}}`,
 			wantName: "x\U0001F600",
 		},
 		{
@@ -1344,16 +1340,35 @@ func TestParseJSONServersLoneSurrogate(t *testing.T) {
 		},
 		{
 			name:     "escaped backslash then a valid pair",
-			input:    `{"mcpServers": {"x\\😀": {"command": "a"}}}`,
+			input:    `{"mcpServers": {"x\\\ud83d\ude00": {"command": "a"}}}`,
 			wantName: "x\\\U0001F600",
 		},
 		{
 			name:     "escape that is not a surrogate",
-			input:    `{"mcpServers": {"café": {"command": "a"}}}`,
+			input:    `{"mcpServers": {"caf\u00e9": {"command": "a"}}}`,
 			wantName: "café",
 		},
-	}
+	})
+}
 
+// badStringCase is one case of TestParseJSONServersLoneSurrogate and
+// TestParseJSONServersInvalidUTF8.
+type badStringCase struct {
+	name        string
+	input       string
+	cursor      bool // read with withProjects=false, as for Cursor
+	wantLine    int  // 0: the file is valid and gives wantName
+	wantCol     int
+	wantProject string
+	wantName    string
+}
+
+// runBadStringCases reads the input of each case as a global file. A case
+// with wantLine 0 must give the one server wantName and no error. Any other
+// case must give no server and one "invalid string" error at the exact
+// position.
+func runBadStringCases(t *testing.T, tests []badStringCase) {
+	t.Helper()
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
@@ -1469,9 +1484,10 @@ func TestParseJSONServersProjectPathInErrors(t *testing.T) {
 
 	t.Run("project file", func(t *testing.T) {
 		t.Parallel()
-		path := writeFile(t, t.TempDir(), "config.json", []byte(`{"mcpServers": {"x": {"type": "bad"}}}`))
+		dir := t.TempDir()
+		path := writeFile(t, dir, "config.json", []byte(`{"mcpServers": {"x": {"type": "bad"}}}`))
 
-		_, errs := parseJSONServers(t.Context(), path, ClientClaudeCode, ScopeProject, "/work", false)
+		_, errs := parseJSONServers(t.Context(), path, ClientClaudeCode, ScopeProject, dir, false)
 
 		want := []string{path + ": server x: " + reasonUnknownTransport}
 		var got []string
@@ -1482,4 +1498,566 @@ func TestParseJSONServersProjectPathInErrors(t *testing.T) {
 			t.Errorf("errors = %q, want %q", got, want)
 		}
 	})
+}
+
+// jsonFixtureCase is one fixture test of a JSON reader (ReadClaudeCode or
+// ReadCursor). The fixture directory testdata/discover/<client>/<name> has a
+// home directory with the global file and a work directory with the project
+// file.
+//
+// The want servers are static. runJSONFixtureCases fills in Client, Source,
+// Scope, ProjectPath and Untrusted:
+//   - a global server (home) gets ScopeGlobal, or ScopeProject when the want
+//     sets ProjectPath (a projects.<path> server of ~/.claude.json), and
+//     Untrusted false;
+//   - a project server (work) gets ScopeProject, the work directory as
+//     ProjectPath, and Untrusted true.
+type jsonFixtureCase struct {
+	name string
+	// hideValues is set for fixtures that hold canaries or are malformed
+	// next to a canary. On a mismatch the test then prints only the server
+	// names, never the values.
+	hideValues bool
+	// canaryFiles are the fixture files, relative to the fixture directory
+	// and with forward slashes, that must hold every canary. The leak checks
+	// only mean something if the input holds the canaries.
+	canaryFiles []string
+
+	home, work         []serverView
+	homeErrs, workErrs []errWant
+}
+
+// jsonReader is the signature of ReadClaudeCode and ReadCursor.
+type jsonReader func(ctx context.Context, path string, scope Scope, projectPath string) Result
+
+// jsonFixtureFiles names the config files of one client inside the home and
+// work directories of a fixture, with forward slashes.
+type jsonFixtureFiles struct {
+	client  Client
+	fixture string // the directory under testdata/discover
+	home    string
+	work    string
+}
+
+// runJSONFixtureCases runs every case with read, on a copy of the fixture.
+// It checks the servers, the errors, Untrusted on every error, and that no
+// result holds a canary.
+func runJSONFixtureCases(t *testing.T, files jsonFixtureFiles, read jsonReader, cases []jsonFixtureCase) {
+	t.Helper()
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			ctx := t.Context()
+			if len(tc.canaryFiles) > 0 {
+				assertFixtureFilesHaveCanaries(t, fixtureDir(t, files.fixture, tc.name), tc.canaryFiles...)
+			}
+			home, work := copyFixture(t, files.fixture, tc.name)
+			homePath := filepath.Join(home, filepath.FromSlash(files.home))
+			workPath := filepath.Join(work, filepath.FromSlash(files.work))
+
+			global := read(ctx, homePath, ScopeGlobal, "")
+			project := read(ctx, workPath, ScopeProject, work)
+
+			checkServers(t, "global", global.Servers, fixtureWants(tc.home, files.client, homePath, ""), tc.hideValues)
+			checkServers(t, "project", project.Servers, fixtureWants(tc.work, files.client, workPath, work), tc.hideValues)
+			checkFileErrors(t, homePath, global.Errors, tc.homeErrs)
+			checkFileErrors(t, workPath, project.Errors, tc.workErrs)
+			checkErrorsUntrusted(t, global.Errors, false)
+			checkErrorsUntrusted(t, project.Errors, true)
+
+			// No result may hold a canary, in any form.
+			for _, r := range []Result{global, project} {
+				assertNoLeakServers(t, r.Servers)
+				assertNoLeakErrors(t, r.Errors)
+			}
+		})
+	}
+}
+
+// fixtureWants returns copies of wants with Client, Source, Scope, ProjectPath
+// and Untrusted filled in (see jsonFixtureCase). work is "" for the global
+// file and the work directory for the project file.
+func fixtureWants(wants []serverView, client Client, source, work string) []serverView {
+	out := make([]serverView, 0, len(wants))
+	for _, w := range wants {
+		w.Client = client
+		w.Source = source
+		switch {
+		case work != "":
+			w.Scope = ScopeProject
+			w.ProjectPath = work
+			w.Untrusted = true
+		case w.ProjectPath != "":
+			w.Scope = ScopeProject
+		default:
+			w.Scope = ScopeGlobal
+		}
+		out = append(out, w)
+	}
+	return out
+}
+
+// checkErrorsUntrusted fails the test if an error in errs has another
+// Untrusted value than want.
+func checkErrorsUntrusted(t testing.TB, errs []*FileError, want bool) {
+	t.Helper()
+	for i, e := range errs {
+		if e.Untrusted != want {
+			t.Errorf("errors[%d] (%s): Untrusted = %v, want %v", i, e.Reason, e.Untrusted, want)
+		}
+	}
+}
+
+// checkServersUntrusted fails the test if a server in servers has another
+// Untrusted value than want.
+func checkServersUntrusted(t testing.TB, servers []Server, want bool) {
+	t.Helper()
+	for _, s := range servers {
+		if s.Untrusted != want {
+			t.Errorf("server %q: Untrusted = %v, want %v", s.Name, s.Untrusted, want)
+		}
+	}
+}
+
+// TestParseJSONServersInvalidUTF8 checks that an invalid UTF-8 byte in a
+// server entry or a project key rejects the whole file. encoding/json gives
+// one U+FFFD for each bad byte, but the clients give one U+FFFD for each
+// maximal bad sequence. So "x\xE2\x82" (one sequence) and "x\xC0\xC0" (two)
+// are two names for the client and one name for encoding/json. An invalid
+// byte in a part of the file that the reader ignores is not an error.
+func TestParseJSONServersInvalidUTF8(t *testing.T) {
+	t.Parallel()
+
+	runBadStringCases(t, []badStringCase{
+		{
+			name:     "server names that encoding/json merges",
+			input:    "{\"mcpServers\": {\"x\xE2\x82\": {\"command\": \"a\"}, \"x\xC0\xC0\": {\"command\": \"b\"}}}",
+			wantLine: 1,
+			wantCol:  19,
+		},
+		{
+			name:     "second server name",
+			input:    "{\"mcpServers\": {\"a\": {\"command\": \"a\"},\n  \"b\xFF\": {\"command\": \"b\"}}}",
+			wantLine: 2,
+			wantCol:  5,
+		},
+		{
+			name:        "project keys",
+			input:       "{\"projects\": {\"/a\xFF\": {}, \"/a\xFE\": {}}}",
+			wantLine:    1,
+			wantCol:     18,
+			wantProject: "/a\uFFFD",
+		},
+		{
+			name:        "server name of a project",
+			input:       "{\"projects\": {\"/p\": {\"mcpServers\": {\"x\xFF\": {\"command\": \"a\"}}}}}",
+			wantLine:    1,
+			wantCol:     39,
+			wantProject: "/p",
+		},
+		{
+			name:     "env keys",
+			input:    "{\"mcpServers\": {\"s\": {\"command\": \"a\", \"env\": {\"K\xFF\": \"1\", \"K\xFE\": \"2\"}}}}",
+			wantLine: 1,
+			wantCol:  49,
+		},
+		{
+			name:     "in a value",
+			input:    "{\"mcpServers\": {\"x\": {\"command\": \"\xFF\"}}}",
+			wantLine: 1,
+			wantCol:  35,
+		},
+		{
+			// UTF-8 has no encoded surrogates: ED A0 80 would be U+D800.
+			name:     "encoded surrogate",
+			input:    "{\"mcpServers\": {\"x\xED\xA0\x80\": {\"command\": \"a\"}}}",
+			wantLine: 1,
+			wantCol:  19,
+		},
+		{
+			// C0 80 is an overlong form of U+0000.
+			name:     "overlong encoding",
+			input:    "{\"mcpServers\": {\"x\xC0\x80\": {\"command\": \"a\"}}}",
+			wantLine: 1,
+			wantCol:  19,
+		},
+		{
+			// The lone surrogate comes first, so its position is reported.
+			name:     "lone surrogate before a bad byte",
+			input:    "{\"mcpServers\": {\"ab\\ud800\": {}, \"\xFF\": {}}}",
+			wantLine: 1,
+			wantCol:  20,
+		},
+		{
+			name:     "bad byte before a lone surrogate",
+			input:    "{\"mcpServers\": {\"ab\xFF\": {}, \"\\ud800\": {}}}",
+			wantLine: 1,
+			wantCol:  20,
+		},
+		// Parts of the file that the reader ignores are not checked.
+		{
+			name:     "in the chat history",
+			input:    "{\"history\": [{\"display\": \"x\xE2\x82\"}], \"mcpServers\": {\"x\": {\"command\": \"a\"}}}",
+			wantName: "x",
+		},
+		{
+			name:     "in an ignored top-level key",
+			input:    "{\"a\xFF\": 1, \"mcpServers\": {\"x\": {\"command\": \"a\"}}}",
+			wantName: "x",
+		},
+		{
+			name:     "in an ignored project field",
+			input:    "{\"projects\": {\"/p\": {\"lastPrompt\": \"\xFF\", \"mcpServers\": {\"x\": {\"command\": \"a\"}}}}}",
+			wantName: "x",
+		},
+		{
+			name:     "in a project key of a file read without projects",
+			input:    "{\"projects\": {\"/a\xFF\": {}}, \"mcpServers\": {\"x\": {\"command\": \"a\"}}}",
+			cursor:   true,
+			wantName: "x",
+		},
+		// Valid UTF-8 is not an error.
+		{
+			// The bytes EF BF BD are the valid encoding of U+FFFD.
+			name:     "U+FFFD as written",
+			input:    "{\"mcpServers\": {\"x\xEF\xBF\xBD\": {\"command\": \"a\"}}}",
+			wantName: "x\uFFFD",
+		},
+		{
+			name:     "multi-byte characters",
+			input:    "{\"mcpServers\": {\"caf\xC3\xA9 \xF0\x9F\x98\x80\": {\"command\": \"a\"}}}",
+			wantName: "café \U0001F600",
+		},
+	})
+}
+
+// TestParseJSONServersUntrusted checks that every server and every error of a
+// project file is untrusted, and that nothing of a global file is, also not
+// the servers under "projects". As in ReadClaudeCode, only the global file is
+// read with withProjects.
+func TestParseJSONServersUntrusted(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name  string
+		input string
+		// wantServers and wantErrors are the numbers that both scopes give,
+		// so the Untrusted checks are not empty by accident.
+		wantServers int
+		wantErrors  int
+	}{
+		{
+			name: "servers and entry errors",
+			input: `{"mcpServers": {
+				"good": {"command": "x"},
+				"remote": {"url": "https://example.com/mcp"},
+				"bad": 5,
+				"": {"command": "x"},
+				"amb": {"command": "x", "Command": "y"},
+				"unknown": {"type": "ws"}}}`,
+			wantServers: 2,
+			wantErrors:  4,
+		},
+		{name: "invalid JSON", input: `{"mcpServers": `, wantErrors: 1},
+		{name: "null file", input: `null`, wantErrors: 1},
+		{name: "top-level array", input: `[]`, wantErrors: 1},
+		{name: "lone surrogate", input: `{"mcpServers": {"x\ud800": {}}}`, wantErrors: 1},
+		{name: "invalid UTF-8", input: "{\"mcpServers\": {\"x\xFF\": {}}}", wantErrors: 1},
+		{name: "ambiguous top-level key", input: `{"mcpServers": {}, "MCPServers": {}}`, wantErrors: 1},
+		{name: "mcpServers is not an object", input: `{"mcpServers": 1}`, wantErrors: 1},
+		{
+			name:       "too many servers",
+			input:      `{"mcpServers": {` + manyEntries(`"s%d":{"command":"x"}`, maxServersPerFile+1) + `}}`,
+			wantErrors: 1,
+		},
+	}
+
+	for _, tt := range tests {
+		for _, scope := range []Scope{ScopeGlobal, ScopeProject} {
+			t.Run(tt.name+"/"+string(scope), func(t *testing.T) {
+				t.Parallel()
+				dir := t.TempDir()
+				path := writeFile(t, dir, "config.json", []byte(tt.input))
+				projectPath := ""
+				if scope == ScopeProject {
+					projectPath = dir
+				}
+
+				servers, errs := parseJSONServers(t.Context(), path, ClientClaudeCode, scope, projectPath, scope == ScopeGlobal)
+
+				if len(servers) != tt.wantServers || len(errs) != tt.wantErrors {
+					t.Fatalf("got %d servers and %d errors, want %d and %d: %v",
+						len(servers), len(errs), tt.wantServers, tt.wantErrors, errs)
+				}
+				untrusted := scope == ScopeProject
+				checkServersUntrusted(t, servers, untrusted)
+				checkErrorsUntrusted(t, errs, untrusted)
+			})
+		}
+	}
+
+	t.Run("projects servers and errors of a global file", func(t *testing.T) {
+		t.Parallel()
+		path := writeFile(t, t.TempDir(), "config.json", []byte(`{"projects": {
+			"/a": {"mcpServers": {"s": {"command": "x"}, "bad": 5}},
+			"/b": 5,
+			"/c": {"mcpServers": {"t": {"command": "x"}}, "MCPSERVERS": {}}}}`))
+
+		servers, errs := parseJSONServers(t.Context(), path, ClientClaudeCode, ScopeGlobal, "", true)
+
+		if len(servers) != 1 || len(errs) != 3 {
+			t.Fatalf("got %d servers and %d errors, want 1 and 3: %v", len(servers), len(errs), errs)
+		}
+		checkServersUntrusted(t, servers, false)
+		checkErrorsUntrusted(t, errs, false)
+	})
+}
+
+// TestParseJSONServersUntrustedReadErrors checks that a read error of a
+// project file is untrusted, with and without a projectPath, and that a read
+// error of a global file is not.
+func TestParseJSONServersUntrustedReadErrors(t *testing.T) {
+	t.Parallel()
+
+	// tooLarge is valid JSON one byte over the project limit.
+	tooLarge := `{}` + strings.Repeat(" ", maxProjectConfigSize-1)
+
+	tests := []struct {
+		name string
+		// setup makes the file in dir and returns its path.
+		setup      func(t *testing.T, dir string) string
+		scope      Scope
+		withRoot   bool // pass dir as projectPath
+		cancel     bool // cancel the context before the read
+		wantReason string
+		wantErr    bool // the error must wrap an OS or context error
+	}{
+		{
+			name:       "directory in a project file",
+			setup:      func(t *testing.T, dir string) string { return makeDir(t, dir, "config.json") },
+			scope:      ScopeProject,
+			withRoot:   true,
+			wantReason: reasonNotRegular,
+		},
+		{
+			name:       "directory in a project file without a projectPath",
+			setup:      func(t *testing.T, dir string) string { return makeDir(t, dir, "config.json") },
+			scope:      ScopeProject,
+			wantReason: reasonNotRegular,
+		},
+		{
+			name:       "project file too large without a projectPath",
+			setup:      func(t *testing.T, dir string) string { return writeFile(t, dir, "config.json", []byte(tooLarge)) },
+			scope:      ScopeProject,
+			wantReason: reasonTooLarge,
+		},
+		{
+			name:       "canceled read of a project file",
+			setup:      func(t *testing.T, dir string) string { return writeFile(t, dir, "config.json", []byte(`{}`)) },
+			scope:      ScopeProject,
+			withRoot:   true,
+			cancel:     true,
+			wantReason: reasonCanceled,
+			wantErr:    true,
+		},
+		{
+			name:       "canceled read of a project file without a projectPath",
+			setup:      func(t *testing.T, dir string) string { return writeFile(t, dir, "config.json", []byte(`{}`)) },
+			scope:      ScopeProject,
+			cancel:     true,
+			wantReason: reasonCanceled,
+			wantErr:    true,
+		},
+		{
+			name:       "directory in a global file",
+			setup:      func(t *testing.T, dir string) string { return makeDir(t, dir, "config.json") },
+			scope:      ScopeGlobal,
+			wantReason: reasonNotRegular,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			dir := t.TempDir()
+			path := tt.setup(t, dir)
+			projectPath := ""
+			if tt.withRoot {
+				projectPath = dir
+			}
+			ctx := t.Context()
+			if tt.cancel {
+				var cancel context.CancelFunc
+				ctx, cancel = context.WithCancel(ctx)
+				cancel()
+			}
+
+			servers, errs := parseJSONServers(ctx, path, ClientCursor, tt.scope, projectPath, false)
+
+			if len(servers) != 0 {
+				t.Errorf("servers = %v, want none", serverNames(servers))
+			}
+			checkFileErrors(t, path, errs, []errWant{{Reason: tt.wantReason, HasErr: tt.wantErr}})
+			checkErrorsUntrusted(t, errs, tt.scope == ScopeProject)
+		})
+	}
+}
+
+// makeDir creates the directory dir/name and returns its path.
+func makeDir(t testing.TB, dir, name string) string {
+	t.Helper()
+	path := filepath.Join(dir, name)
+	if err := os.Mkdir(path, 0o700); err != nil {
+		t.Fatalf("create directory %s: %v", path, err)
+	}
+	return path
+}
+
+// TestReadJSONProjectRoot checks that a project file is read only from below
+// its projectPath. A cloned repository could otherwise make mcpmoat read a
+// file of the user, for example ~/.claude.json, as its own project file.
+func TestReadJSONProjectRoot(t *testing.T) {
+	t.Parallel()
+	skipOnWindows(t)
+
+	const content = `{"mcpServers": {"s": {"command": "x"}}}`
+
+	readers := []struct {
+		name string
+		read jsonReader
+		rel  string // the project file below the work directory
+	}{
+		{name: "claude-code", read: ReadClaudeCode, rel: ".mcp.json"},
+		{name: "cursor", read: ReadCursor, rel: ".cursor/mcp.json"},
+	}
+
+	tests := []struct {
+		name string
+		// setup makes the project file below work, maybe as a symlink to a
+		// file in outside. It returns the path to read.
+		setup func(t *testing.T, work, outside, rel string) string
+		scope Scope
+		// noRoot passes an empty projectPath.
+		noRoot     bool
+		wantReason string // "" means the file is read and gives server "s"
+	}{
+		{
+			name: "symlink out of the work directory",
+			setup: func(t *testing.T, work, outside, rel string) string {
+				return symlinkTo(t, writeFile(t, outside, "config.json", []byte(content)), work, rel)
+			},
+			scope:      ScopeProject,
+			wantReason: reasonOutsideProject,
+		},
+		{
+			name: "relative symlink out of the work directory",
+			setup: func(t *testing.T, work, outside, rel string) string {
+				target := writeFile(t, outside, "config.json", []byte(content))
+				link := filepath.Join(work, filepath.FromSlash(rel))
+				relTarget, err := filepath.Rel(filepath.Dir(link), target)
+				if err != nil {
+					t.Fatalf("relative path: %v", err)
+				}
+				return symlinkTo(t, relTarget, work, rel)
+			},
+			scope:      ScopeProject,
+			wantReason: reasonOutsideProject,
+		},
+		{
+			name: "file not below projectPath",
+			setup: func(t *testing.T, _, outside, _ string) string {
+				return writeFile(t, outside, "config.json", []byte(content))
+			},
+			scope:      ScopeProject,
+			wantReason: reasonOutsideProject,
+		},
+		{
+			// os.Root follows a relative symlink that stays inside the
+			// root. It refuses every absolute symlink.
+			name: "relative symlink inside the work directory",
+			setup: func(t *testing.T, work, _, rel string) string {
+				target := writeFile(t, work, "real/config.json", []byte(content))
+				link := filepath.Join(work, filepath.FromSlash(rel))
+				relTarget, err := filepath.Rel(filepath.Dir(link), target)
+				if err != nil {
+					t.Fatalf("relative path: %v", err)
+				}
+				return symlinkTo(t, relTarget, work, rel)
+			},
+			scope: ScopeProject,
+		},
+		{
+			name: "absolute symlink inside the work directory",
+			setup: func(t *testing.T, work, _, rel string) string {
+				target := writeFile(t, work, "real/config.json", []byte(content))
+				return symlinkTo(t, target, work, rel)
+			},
+			scope:      ScopeProject,
+			wantReason: reasonOutsideProject,
+		},
+		{
+			// Without a projectPath there is no directory to check, but the
+			// file is still untrusted.
+			name: "symlink out without a projectPath",
+			setup: func(t *testing.T, work, outside, rel string) string {
+				return symlinkTo(t, writeFile(t, outside, "config.json", []byte(content)), work, rel)
+			},
+			scope:  ScopeProject,
+			noRoot: true,
+		},
+		{
+			name: "global file follows a symlink anywhere",
+			setup: func(t *testing.T, work, outside, rel string) string {
+				return symlinkTo(t, writeFile(t, outside, "config.json", []byte(content)), work, rel)
+			},
+			scope:  ScopeGlobal,
+			noRoot: true,
+		},
+	}
+
+	for _, r := range readers {
+		for _, tt := range tests {
+			t.Run(r.name+"/"+tt.name, func(t *testing.T) {
+				t.Parallel()
+				work, outside := t.TempDir(), t.TempDir()
+				path := tt.setup(t, work, outside, r.rel)
+				projectPath := work
+				if tt.noRoot {
+					projectPath = ""
+				}
+
+				res := r.read(t.Context(), path, tt.scope, projectPath)
+
+				untrusted := tt.scope == ScopeProject
+				checkErrorsUntrusted(t, res.Errors, untrusted)
+				checkServersUntrusted(t, res.Servers, untrusted)
+				if tt.wantReason != "" {
+					if len(res.Servers) != 0 {
+						t.Errorf("servers = %v, want none", serverNames(res.Servers))
+					}
+					checkFileErrors(t, path, res.Errors, []errWant{{Reason: tt.wantReason}})
+					return
+				}
+				checkFileErrors(t, path, res.Errors, nil)
+				if got := serverNames(res.Servers); !slices.Equal(got, []string{"s"}) {
+					t.Errorf("servers = %v, want [s]", got)
+				}
+			})
+		}
+	}
+}
+
+// symlinkTo creates a symlink at dir/rel (rel with forward slashes) that
+// points to target, and returns the path of the link. It creates the parent
+// directories of the link.
+func symlinkTo(t testing.TB, target, dir, rel string) string {
+	t.Helper()
+	link := filepath.Join(dir, filepath.FromSlash(rel))
+	if err := os.MkdirAll(filepath.Dir(link), 0o700); err != nil {
+		t.Fatalf("create directory for %s: %v", link, err)
+	}
+	if err := os.Symlink(target, link); err != nil {
+		t.Fatalf("symlink %s: %v", link, err)
+	}
+	return link
 }

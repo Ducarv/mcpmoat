@@ -6,6 +6,7 @@ import (
 	"io"
 	"io/fs"
 	"os"
+	"path/filepath"
 	"syscall"
 )
 
@@ -30,64 +31,125 @@ const maxServersPerFile = 10000
 
 // readConfigFile reads the config file at path.
 //
-// It returns found=false and no error when the file does not exist. A dangling
-// symlink counts as missing, and so does a path whose parent is not a
-// directory (ENOTDIR): no config file can exist below a regular file. Every other problem comes back as a *FileError.
+// It returns found=false and no error when the file does not exist. A
+// dangling symlink counts as missing, and so does a path whose parent is not
+// a directory (ENOTDIR): no config file can exist below a regular file. Every
+// other problem comes back as a *FileError.
+//
+// root is the project directory for a project file from the working
+// directory, and "" for any other file. With a root, the file is opened
+// through os.Root: a symlink that leads out of root, an absolute symlink and
+// a path that is not below root are refused with reasonOutsideProject. A
+// symlink that stays inside root is followed. Every FileError of a read with
+// a root has Untrusted set. Without a root, symlinks are followed anywhere.
 //
 // maxSize is a parameter, not a global variable, so each reader passes its
 // own limit and tests can use a small one.
 //
 // The OS errors stored in FileError.Err are *fs.PathError values. They hold
 // the path and the errno only, never file content, so they are safe to print.
-func readConfigFile(ctx context.Context, path string, maxSize int64) (data []byte, found bool, fe *FileError) {
+func readConfigFile(ctx context.Context, path string, maxSize int64, root string) (data []byte, found bool, fe *FileError) {
+	untrusted := root != ""
 	if err := ctx.Err(); err != nil {
-		return nil, false, canceledError(path, err)
+		fe := canceledError(path, err)
+		fe.Untrusted = untrusted
+		return nil, false, fe
 	}
 
-	// os.Stat follows symlinks, so a symlink to a regular file is accepted.
-	info, err := os.Stat(path)
-	if err != nil {
-		if isMissing(err) {
-			return nil, false, nil
+	// Open first, then check the open file. A check of the path before the
+	// open could see another file than the one that is opened. O_NONBLOCK
+	// makes the open of a FIFO return at once, also when no process writes to
+	// it; the type check below then rejects it. For a regular file the flag
+	// changes nothing.
+	var f *os.File
+	var err error
+	if untrusted {
+		f, fe = openInRoot(root, path)
+	} else {
+		f, err = os.OpenFile(path, os.O_RDONLY|syscall.O_NONBLOCK, 0) //nolint:gosec // G304: path is a config file chosen by discovery or --config.
+		if err != nil && !isMissing(err) {
+			fe = readError(path, false, reasonCannotRead, err)
 		}
-		return nil, false, &FileError{Path: path, Reason: reasonCannotRead, Err: err}
 	}
-
-	// Check the type before Open: opening a FIFO could block forever.
-	//
-	// A small race stays. This check runs on the path, before Open. If a local
-	// process swaps the path for a FIFO between Stat and Open, Open can block.
-	// A static cloned repository cannot do this.
-	if !info.Mode().IsRegular() {
-		return nil, false, &FileError{Path: path, Reason: reasonNotRegular}
-	}
-	if info.Size() > maxSize {
-		return nil, false, &FileError{Path: path, Reason: reasonTooLarge}
-	}
-
-	f, err := os.Open(path) //nolint:gosec // G304: path is a config file chosen by discovery or --config.
-	if err != nil {
-		if isMissing(err) {
-			// The file was removed after Stat. Treat it as missing.
-			return nil, false, nil
-		}
-		return nil, false, &FileError{Path: path, Reason: reasonCannotRead, Err: err}
+	if fe != nil || f == nil {
+		// f is nil without an error when the file is missing.
+		return nil, false, fe
 	}
 	defer func() {
 		// The file is read-only, so a close error is not useful.
 		_ = f.Close()
 	}()
 
+	info, err := f.Stat()
+	if err != nil {
+		return nil, false, readError(path, untrusted, reasonCannotRead, err)
+	}
+	if !info.Mode().IsRegular() {
+		return nil, false, readError(path, untrusted, reasonNotRegular, nil)
+	}
+	if info.Size() > maxSize {
+		return nil, false, readError(path, untrusted, reasonTooLarge, nil)
+	}
+
 	// Read one byte more than the limit, so we can tell if the file grew
 	// after Stat.
 	data, err = io.ReadAll(io.LimitReader(f, maxSize+1))
 	if err != nil {
-		return nil, false, &FileError{Path: path, Reason: reasonCannotRead, Err: err}
+		return nil, false, readError(path, untrusted, reasonCannotRead, err)
 	}
 	if int64(len(data)) > maxSize {
-		return nil, false, &FileError{Path: path, Reason: reasonTooLarge}
+		return nil, false, readError(path, untrusted, reasonTooLarge, nil)
 	}
 	return data, true, nil
+}
+
+// openInRoot opens path, which must be below the directory root, through
+// os.Root. It returns a nil file and a nil error when the file is missing
+// (see isMissing); a missing root directory counts as a missing file. Every
+// FileError it returns has Untrusted set.
+func openInRoot(root, path string) (*os.File, *FileError) {
+	rel, err := filepath.Rel(root, path)
+	if err != nil || !filepath.IsLocal(rel) {
+		return nil, readError(path, true, reasonOutsideProject, nil)
+	}
+	r, err := os.OpenRoot(root)
+	if err != nil {
+		if isMissing(err) {
+			return nil, nil
+		}
+		return nil, readError(path, true, reasonCannotRead, err)
+	}
+	defer func() {
+		// Closing the root does not close the files opened through it.
+		_ = r.Close()
+	}()
+
+	f, err := r.OpenFile(rel, os.O_RDONLY|syscall.O_NONBLOCK, 0)
+	switch {
+	case err == nil:
+		return f, nil
+	case isMissing(err):
+		return nil, nil
+	case isOSError(err):
+		return nil, readError(path, true, reasonCannotRead, err)
+	default:
+		// os.Root refuses a path that leaves root with an error that has no
+		// OS error number (it is not exported, so we cannot test for it with
+		// errors.Is). Every OS problem has a number and is handled above.
+		return nil, readError(path, true, reasonOutsideProject, nil)
+	}
+}
+
+// readError returns the FileError of a read of path with the reason r and
+// the OS error err (nil for none). untrusted goes to FileError.Untrusted.
+func readError(path string, untrusted bool, r reason, err error) *FileError {
+	return &FileError{Path: path, Reason: string(r), Err: err, Untrusted: untrusted}
+}
+
+// isOSError reports whether err holds an OS error number.
+func isOSError(err error) bool {
+	var errno syscall.Errno
+	return errors.As(err, &errno)
 }
 
 // isMissing reports whether err means that no file exists at the path: the

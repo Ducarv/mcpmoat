@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
 	"reflect"
 	"testing"
@@ -63,6 +64,7 @@ func TestDiscoverFull(t *testing.T) {
 			Name: "cc-project", Client: ClientClaudeCode, Scope: ScopeProject,
 			ProjectPath: work,
 			Source:      filepath.Join(work, ".mcp.json"),
+			Untrusted:   true,
 			Transport:   TransportHTTP, URL: "https://cc-project.example.com/mcp",
 		},
 		"cursor-global": {
@@ -74,6 +76,7 @@ func TestDiscoverFull(t *testing.T) {
 			Name: "cursor-project", Client: ClientCursor, Scope: ScopeProject,
 			ProjectPath: work,
 			Source:      filepath.Join(work, ".cursor", "mcp.json"),
+			Untrusted:   true,
 			Transport:   TransportHTTP, URL: "https://cursor-project.example.com/mcp",
 		},
 		"codex-global": {
@@ -178,8 +181,9 @@ func TestDiscoverEmptyOptions(t *testing.T) {
 }
 
 // TestDiscoverIgnoresRealHome proves that Discover never reads $HOME or the
-// current directory by itself. It is not parallel: t.Setenv and t.Chdir panic
-// in a parallel test.
+// current directory by itself: an empty Home or WorkDir does not become "."
+// (the current directory). It is not parallel: t.Setenv and t.Chdir panic in
+// a parallel test.
 func TestDiscoverIgnoresRealHome(t *testing.T) {
 	dir := t.TempDir()
 	const jsonConfig = `{"mcpServers": {"trap": {"command": "x"}}}`
@@ -204,6 +208,115 @@ func TestDiscoverIgnoresRealHome(t *testing.T) {
 	}
 }
 
+// TestDiscoverUntrusted checks that the servers from the WorkDir project
+// files are Untrusted, and the servers from the user's own files are not.
+// cc-alpha comes from a projects.<path> entry of ~/.claude.json: it is a
+// project server, but the user's own file holds it.
+func TestDiscoverUntrusted(t *testing.T) {
+	t.Parallel()
+	home, work := copyFixture(t, "all", "full")
+
+	r := Discover(t.Context(), Options{Home: home, WorkDir: work})
+
+	assertDiscoverNoErrors(t, r)
+	want := map[string]bool{
+		"cc-global":      false,
+		"cc-alpha":       false,
+		"cc-project":     true,
+		"cursor-global":  false,
+		"cursor-project": true,
+		"codex-global":   false,
+	}
+	for _, s := range r.Servers {
+		w, ok := want[s.Name]
+		if !ok {
+			t.Errorf("unexpected server %q", s.Name)
+			continue
+		}
+		delete(want, s.Name)
+		if s.Untrusted != w {
+			t.Errorf("server %s (%s): Untrusted = %v, want %v", s.Name, s.Source, s.Untrusted, w)
+		}
+	}
+	for name := range want {
+		t.Errorf("server %s not found", name)
+	}
+}
+
+// TestDiscoverUntrustedErrors checks that an error about a WorkDir project
+// file is Untrusted and an error about a global file is not. It also checks
+// that a project file that is a symlink to a file of the user is refused.
+func TestDiscoverUntrustedErrors(t *testing.T) {
+	t.Parallel()
+	const broken = `{"mcpServers": `
+
+	tests := []struct {
+		name string
+		// setup writes the files and returns the path of the file in error.
+		setup         func(t *testing.T, home, work string) string
+		wantReason    string
+		wantUntrusted bool
+	}{
+		{
+			name: "broken global file",
+			setup: func(t *testing.T, home, _ string) string {
+				return writeFile(t, home, ".claude.json", []byte(broken))
+			},
+			wantReason: reasonInvalidJSON,
+		},
+		{
+			name: "broken .mcp.json",
+			setup: func(t *testing.T, _, work string) string {
+				return writeFile(t, work, ".mcp.json", []byte(broken))
+			},
+			wantReason:    reasonInvalidJSON,
+			wantUntrusted: true,
+		},
+		{
+			name: "broken .cursor/mcp.json",
+			setup: func(t *testing.T, _, work string) string {
+				return writeFile(t, work, ".cursor/mcp.json", []byte(broken))
+			},
+			wantReason:    reasonInvalidJSON,
+			wantUntrusted: true,
+		},
+		{
+			name: ".mcp.json is a symlink to ~/.claude.json",
+			setup: func(t *testing.T, home, work string) string {
+				skipOnWindows(t)
+				target := writeFile(t, home, ".claude.json", []byte(`{}`))
+				link := filepath.Join(work, ".mcp.json")
+				if err := os.Symlink(target, link); err != nil {
+					t.Fatalf("symlink: %v", err)
+				}
+				return link
+			},
+			wantReason:    reasonOutsideProject,
+			wantUntrusted: true,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			home, work := t.TempDir(), t.TempDir()
+			path := tt.setup(t, home, work)
+
+			r := Discover(t.Context(), Options{Home: home, WorkDir: work})
+
+			if len(r.Errors) != 1 {
+				t.Fatalf("got %d errors, want 1: %v", len(r.Errors), r.Errors)
+			}
+			e := r.Errors[0]
+			if e.Path != path || e.Reason != tt.wantReason {
+				t.Errorf("error = {Path: %q, Reason: %q}, want {Path: %q, Reason: %q}", e.Path, e.Reason, path, tt.wantReason)
+			}
+			if e.Untrusted != tt.wantUntrusted {
+				t.Errorf("error Untrusted = %v, want %v", e.Untrusted, tt.wantUntrusted)
+			}
+		})
+	}
+}
+
 // TestDiscoverCleansWorkDir checks that ProjectPath is the clean path, however
 // the caller spells WorkDir.
 func TestDiscoverCleansWorkDir(t *testing.T) {
@@ -225,25 +338,6 @@ func TestDiscoverCleansWorkDir(t *testing.T) {
 	}
 	if !found {
 		t.Errorf("cc-project not found in %v", serverNames(r.Servers))
-	}
-}
-
-// TestDiscoverEmptyStaysEmpty checks that an empty Home or WorkDir does not
-// become "." (the current directory) and so reads no files.
-func TestDiscoverEmptyStaysEmpty(t *testing.T) {
-	// Not parallel: t.Chdir panics in a parallel test.
-	dir := t.TempDir()
-	const jsonConfig = `{"mcpServers": {"trap": {"command": "x"}}}`
-	writeFile(t, dir, ".claude.json", []byte(jsonConfig))
-	writeFile(t, dir, ".mcp.json", []byte(jsonConfig))
-	writeFile(t, dir, ".cursor/mcp.json", []byte(jsonConfig))
-	writeFile(t, dir, codexConfigRel, []byte("[mcp_servers.trap]\ncommand = \"x\"\n"))
-	t.Chdir(dir)
-
-	r := Discover(t.Context(), Options{Home: "", WorkDir: ""})
-
-	if len(r.Servers) != 0 || len(r.Errors) != 0 {
-		t.Errorf("Discover() = servers %v, errors %v, want an empty Result", serverNames(r.Servers), r.Errors)
 	}
 }
 

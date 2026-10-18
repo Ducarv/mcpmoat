@@ -9,8 +9,6 @@ import (
 	"maps"
 	"slices"
 	"strings"
-	"unicode/utf16"
-	"unicode/utf8"
 )
 
 // Exact keys of the Claude Code and Cursor JSON configs. The clients read the
@@ -78,10 +76,23 @@ type jsonParser struct {
 // read; they always get ScopeProject and ProjectPath <dir>. Cursor files pass
 // withProjects=false.
 //
-// A missing file and an empty (or whitespace-only) file give no servers and no
-// error. A problem in one server entry gives a *FileError for that entry; the
-// other entries are still returned. An error for an entry or a project under
-// "projects" has FileError.ProjectPath set to the project key.
+// A missing file and an empty file give no servers and no error. Empty means
+// no bytes, or only the JSON whitespace bytes space, tab, CR and LF. Other
+// space characters (for example U+00A0) are not JSON whitespace, so a file of
+// them is invalid JSON. A file that holds only null is an "unexpected
+// structure" error: the clients need an object. A problem in one server entry
+// gives a *FileError for that entry; the other entries are still returned. An
+// error for an entry or a project under "projects" has FileError.ProjectPath
+// set to the project key.
+//
+// Project files: with scope ScopeProject the file is a project file from a
+// cloned repository, so it is untrusted. Every Server and every FileError of
+// the file then has Untrusted set, also a read error. With a non-empty
+// projectPath, the file is opened below projectPath only (see
+// readConfigFile): a symlink that leads out of projectPath gives a "file is
+// outside the project" error. With an empty projectPath there is no such
+// check. With ScopeGlobal, Untrusted is false everywhere, also for the
+// servers under "projects".
 //
 // Keys are matched exactly, as the clients do. A known key in a different
 // letter case ("Command", "MCPSERVERS") is an "ambiguous key" error: for an
@@ -89,11 +100,12 @@ type jsonParser struct {
 // servers; for the top level, that section gives no servers.
 //
 // A lone UTF-16 surrogate escape (for example "\ud800" without a low
-// surrogate after it) in a server entry or in a project key makes the whole
-// file an "invalid string" error. encoding/json turns every lone surrogate
-// into U+FFFD, so two names that differ for the client would become one name
-// here. A lone surrogate in another part of the file, for example in the chat
-// history of ~/.claude.json, is not an error. See findServerSurrogate.
+// surrogate after it) or an invalid UTF-8 byte in a server entry or in a
+// project key makes the whole file an "invalid string" error, with the
+// position of the first bad spot. encoding/json turns both into U+FFFD, so
+// two names that differ for the client could become one name here. A bad
+// string in another part of the file, for example in the chat history of
+// ~/.claude.json, is not an error. See findBadServerString.
 //
 // Order: servers are sorted by (ProjectPath, Name). Errors come file-level
 // first (Server is empty), then by Server name. Errors of the same name keep
@@ -121,15 +133,45 @@ func parseJSONServers(
 	projectPath string,
 	withProjects bool,
 ) ([]Server, []*FileError) {
+	servers, errs := parseJSONFile(ctx, path, client, scope, projectPath, withProjects)
+	if scope == ScopeProject {
+		markUntrusted(servers, errs)
+	}
+	return servers, errs
+}
+
+// markUntrusted sets Untrusted on every server and every error.
+func markUntrusted(servers []Server, errs []*FileError) {
+	for i := range servers {
+		servers[i].Untrusted = true
+	}
+	for _, e := range errs {
+		e.Untrusted = true
+	}
+}
+
+// parseJSONFile does the work of parseJSONServers, except Untrusted.
+func parseJSONFile(
+	ctx context.Context,
+	path string,
+	client Client,
+	scope Scope,
+	projectPath string,
+	withProjects bool,
+) ([]Server, []*FileError) {
 	maxSize := int64(maxConfigSize)
+	root := ""
 	if scope == ScopeProject {
 		maxSize = maxProjectConfigSize
+		root = projectPath
 	}
-	data, found, fe := readConfigFile(ctx, path, maxSize)
+	data, found, fe := readConfigFile(ctx, path, maxSize, root)
 	if fe != nil {
 		return nil, []*FileError{fe}
 	}
-	if !found || len(bytes.TrimSpace(data)) == 0 {
+	// Trim only the four JSON whitespace bytes. bytes.TrimSpace would also
+	// trim Unicode spaces such as U+00A0, which JSON does not allow.
+	if !found || len(bytes.Trim(data, " \t\r\n")) == 0 {
 		return nil, nil
 	}
 
@@ -139,8 +181,12 @@ func parseJSONServers(
 	if err := json.Unmarshal(data, &top); err != nil {
 		return nil, []*FileError{topLevelError(path, data, err)}
 	}
-	// The file is a valid JSON object now, which findServerSurrogate needs.
-	if off, project := findServerSurrogate(data, withProjects); off >= 0 {
+	// Unmarshal of null into a map gives a nil map and no error.
+	if top == nil {
+		return nil, []*FileError{{Path: path, Reason: reasonBadShape}}
+	}
+	// The file is a valid JSON object now, which findBadServerString needs.
+	if off, project := findBadServerString(data, withProjects); off >= 0 {
 		line, col := lineCol(data, int64(off))
 		return nil, []*FileError{{Path: path, ProjectPath: project, Line: line, Col: col, Reason: reasonBadString}}
 	}
@@ -269,25 +315,25 @@ func (p *jsonParser) decodeServers(raw json.RawMessage, o origin) ([]Server, []*
 			errs = append(errs, &FileError{Path: p.path, ProjectPath: o.project, Reason: reasonEmptyName})
 			continue
 		}
-		entry, reason := decodeEntry(entryRaw)
-		if reason == "" {
+		entry, r := decodeEntry(entryRaw)
+		if r == "" {
 			var srv Server
-			srv, reason = p.newServer(name, entry, o)
-			if reason == "" {
+			srv, r = p.newServer(name, entry, o)
+			if r == "" {
 				servers = append(servers, srv)
 				continue
 			}
 		}
-		errs = append(errs, &FileError{Path: p.path, ProjectPath: o.project, Server: name, Reason: reason})
+		errs = append(errs, &FileError{Path: p.path, ProjectPath: o.project, Server: name, Reason: string(r)})
 	}
 	return servers, errs
 }
 
 // decodeEntry decodes one server entry. It reads only the exact keys in
-// entryKeys and ignores other keys. It returns a fixed reason text if the
-// entry is not an object, if a known key has a value of the wrong type, or if
-// the entry has a known key in a different letter case.
-func decodeEntry(raw json.RawMessage) (jsonEntry, string) {
+// entryKeys and ignores other keys. It returns a reason if the entry is not an
+// object, if a known key has a value of the wrong type, or if the entry has a
+// known key in a different letter case, and "" if the entry is valid.
+func decodeEntry(raw json.RawMessage) (jsonEntry, reason) {
 	var fields map[string]json.RawMessage
 	if err := json.Unmarshal(raw, &fields); err != nil {
 		return jsonEntry{}, reasonBadEntry
@@ -320,206 +366,15 @@ func decodeField(fields map[string]json.RawMessage, key string, dst any) error {
 	return json.Unmarshal(raw, dst)
 }
 
-// hasCaseVariant reports whether obj has a key that is not one of known but
-// differs from one of them only by letter case. strings.EqualFold uses Unicode
-// case folding, so "ARGſ" (with U+017F, a long s) matches "args" too.
-func hasCaseVariant(obj map[string]json.RawMessage, known ...string) bool {
-	for key := range obj {
-		for _, k := range known {
-			if key != k && strings.EqualFold(key, k) {
-				return true
-			}
-		}
-	}
-	return false
-}
-
-// findServerSurrogate returns the byte offset in data of the first lone
-// surrogate escape (see findLoneSurrogate) in a part of the file that the
-// reader uses, or -1 if there is none. For a surrogate under "projects", it
-// also returns the project key, decoded (a lone surrogate in it is U+FFFD).
-//
-// The checked parts are:
-//   - the value of every top-level "mcpServers" member: the server names and
-//     all keys and values of the entries (command, args, env, url, headers);
-//   - if withProjects is true, every key of the top-level "projects" object,
-//     and the value of every "mcpServers" member of every project.
-//
-// A duplicate key is checked every time it occurs, although encoding/json
-// keeps only the last one. The other parts of the file are not checked.
-// ~/.claude.json holds chat history and other text that mcpmoat ignores, and
-// JavaScript's JSON.stringify writes a lone surrogate when a string was cut
-// inside a surrogate pair. A check of the whole file would then reject every
-// server of the file for a reason that does not matter to mcpmoat.
-//
-// data must be a valid JSON object.
-func findServerSurrogate(data []byte, withProjects bool) (int, string) {
-	top, _ := objectMembers(data)
-	for _, m := range top {
-		switch {
-		case m.key == keyMCPServers:
-			if off := findLoneSurrogate(data[m.valStart:m.valEnd]); off >= 0 {
-				return m.valStart + off, ""
-			}
-		case m.key == keyProjects && withProjects:
-			if off, project := findProjectSurrogate(data[m.valStart:m.valEnd]); off >= 0 {
-				return m.valStart + off, project
-			}
-		}
-	}
-	return -1, ""
-}
-
-// findProjectSurrogate does the "projects" part of findServerSurrogate. data
-// is the value of "projects", and the offset it returns is an offset in data.
-// A value that is not an object has nothing to check; decodeProjects reports
-// it. The same holds for a project that is not an object.
-func findProjectSurrogate(data []byte) (int, string) {
-	projects, _ := objectMembers(data)
-	for _, p := range projects {
-		// The key range holds only the key string, and maybe a comma and
-		// whitespace before it, so this checks the project key only.
-		if off := findLoneSurrogate(data[p.keyStart:p.keyEnd]); off >= 0 {
-			return p.keyStart + off, p.key
-		}
-		// Offsets of the project fields are relative to the project value.
-		value := data[p.valStart:p.valEnd]
-		fields, _ := objectMembers(value)
-		for _, f := range fields {
-			if f.key != keyMCPServers {
-				continue
-			}
-			if off := findLoneSurrogate(value[f.valStart:f.valEnd]); off >= 0 {
-				return p.valStart + f.valStart + off, p.key
-			}
-		}
-	}
-	return -1, ""
-}
-
-// jsonMember is one member of a JSON object: its decoded key and two byte
-// ranges in the data of the object. The key range starts where the previous
-// member (or the "{") ends, so it can hold a comma and whitespace before the
-// key string. It ends right after the closing quote of the key. The value
-// range holds the value and nothing else.
-type jsonMember struct {
-	key              string
-	keyStart, keyEnd int
-	valStart, valEnd int
-}
-
-// objectMembers returns the members of the JSON object in data, in file
-// order. A key that occurs twice gives two members. It returns false if data
-// is not a valid JSON object.
-//
-// Unmarshal into a map cannot tell where a value is in the file, and a
-// json.RawMessage is a copy, not a part of data. So objectMembers reads the
-// object one token at a time with a json.Decoder, and takes the positions
-// from Decoder.InputOffset.
-func objectMembers(data []byte) ([]jsonMember, bool) {
-	dec := json.NewDecoder(bytes.NewReader(data))
-	if tok, err := dec.Token(); err != nil || tok != json.Delim('{') {
-		return nil, false
-	}
-	var members []jsonMember
-	for dec.More() {
-		m := jsonMember{keyStart: int(dec.InputOffset())}
-		tok, err := dec.Token()
-		key, ok := tok.(string)
-		if err != nil || !ok {
-			return nil, false
-		}
-		m.key = key
-		m.keyEnd = int(dec.InputOffset())
-		// Decode reads the value. RawMessage keeps its bytes as written, so
-		// its length is the length of the value in data.
-		var raw json.RawMessage
-		if err := dec.Decode(&raw); err != nil {
-			return nil, false
-		}
-		// Between the key and the value there is only a colon and
-		// whitespace. len(data) minus the length of the rest gives the index.
-		m.valStart = len(data) - len(bytes.TrimLeft(data[m.keyEnd:], " \t\r\n:"))
-		m.valEnd = m.valStart + len(raw)
-		members = append(members, m)
-	}
-	return members, true
-}
-
-// findLoneSurrogate returns the byte offset of the first \u escape in data
-// that is a lone UTF-16 surrogate, or -1 if there is none. A high surrogate
-// (U+D800 to U+DBFF) is valid only if a \u escape of a low surrogate (U+DC00
-// to U+DFFF) comes right after it. A low surrogate alone is never valid.
-//
-// data must be valid JSON, or a part of valid JSON that starts and ends
-// outside a string. Then a backslash outside a string cannot occur, every
-// string ends with a quote, and every \u has four hex digits after it. The
-// scan follows the strings, so an escaped backslash ("\\ud800", the text
-// \ud800) is not taken for an escape.
-func findLoneSurrogate(data []byte) int {
-	inString := false
-	for i := 0; i < len(data); i++ {
-		c := data[i]
-		if !inString {
-			inString = c == '"'
-			continue
-		}
-		switch c {
-		case '"':
-			inString = false
-		case '\\':
-			r, ok := unicodeEscape(data, i)
-			if !ok {
-				i++ // Skip the escaped byte, for example the second \ of \\.
-				continue
-			}
-			if !utf16.IsSurrogate(r) {
-				i += 5 // Skip uXXXX.
-				continue
-			}
-			low, ok := unicodeEscape(data, i+6)
-			if !ok || utf16.DecodeRune(r, low) == utf8.RuneError {
-				return i
-			}
-			i += 11 // Skip uXXXX\uXXXX.
-		}
-	}
-	return -1
-}
-
-// unicodeEscape returns the code unit of the \uXXXX escape that starts at
-// data[i], or false if no such escape starts there.
-func unicodeEscape(data []byte, i int) (rune, bool) {
-	if i+6 > len(data) || data[i] != '\\' || data[i+1] != 'u' {
-		return 0, false
-	}
-	var r rune
-	for _, c := range data[i+2 : i+6] {
-		var v byte
-		switch {
-		case '0' <= c && c <= '9':
-			v = c - '0'
-		case 'a' <= c && c <= 'f':
-			v = c - 'a' + 10
-		case 'A' <= c && c <= 'F':
-			v = c - 'A' + 10
-		default:
-			return 0, false
-		}
-		r = r<<4 | rune(v)
-	}
-	return r, true
-}
-
 // newServer builds a Server from a decoded entry. If the entry is not valid it
-// returns a fixed reason text and the Server is not usable.
+// returns a reason and the Server is not usable; else the reason is "".
 //
 // Fields that do not belong to the chosen transport are dropped: a stdio
 // server keeps Command, Args and Env; a remote server keeps URL and Headers.
-func (p *jsonParser) newServer(name string, e jsonEntry, o origin) (Server, string) {
-	transport, reason := resolveTransport(e)
-	if reason != "" {
-		return Server{}, reason
+func (p *jsonParser) newServer(name string, e jsonEntry, o origin) (Server, reason) {
+	transport, r := resolveTransport(e)
+	if r != "" {
+		return Server{}, r
 	}
 	srv := Server{
 		Name:        name,
@@ -542,9 +397,9 @@ func (p *jsonParser) newServer(name string, e jsonEntry, o origin) (Server, stri
 
 // resolveTransport picks the transport of an entry from its "type" field. With
 // no type it infers one: a command means stdio, else a url means http. It
-// returns a fixed reason text if the entry is not valid. The unknown type
-// value is never put in the reason.
-func resolveTransport(e jsonEntry) (Transport, string) {
+// returns a reason if the entry is not valid, and "" if it is. The unknown
+// type value is never put in the reason.
+func resolveTransport(e jsonEntry) (Transport, reason) {
 	hasURL := e.URL.Reveal() != ""
 	switch e.Type {
 	case "stdio":
@@ -571,7 +426,7 @@ func resolveTransport(e jsonEntry) (Transport, string) {
 
 // remoteTransport returns t if the entry has a url, else the reason for a
 // remote entry without a url.
-func remoteTransport(t Transport, hasURL bool) (Transport, string) {
+func remoteTransport(t Transport, hasURL bool) (Transport, reason) {
 	if !hasURL {
 		return "", reasonRemoteNoURL
 	}

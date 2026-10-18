@@ -33,11 +33,12 @@ import (
 const maxFuzzInput = 64 << 10
 
 // knownReasons is the set of fixed reason texts a FileError may have. It is
-// built from allReasons, so a new reason needs no change here.
+// built from allReasons (fileerror_test.go), so a new reason needs no change
+// here.
 var knownReasons = func() map[string]bool {
 	m := make(map[string]bool, len(allReasons))
 	for _, r := range allReasons {
-		m[r] = true
+		m[string(r)] = true
 	}
 	return m
 }()
@@ -113,7 +114,7 @@ func checkFuzzResult(t *testing.T, path string, res Result) {
 func writeFuzzInput(t *testing.T, name string, data []byte) string {
 	t.Helper()
 	if len(data) > maxFuzzInput {
-		t.Skip("input larger than 64 KiB")
+		t.Skipf("input larger than maxFuzzInput (%d bytes)", maxFuzzInput)
 	}
 	return writeFile(t, t.TempDir(), name, data)
 }
@@ -154,6 +155,13 @@ func FuzzReadClaudeCode(f *testing.F) {
 		`{"projects":{"/p":{"lastPrompt":"\ud83d","mcpServers":{"a":{"command":"` + c + `"}}}}}`,
 		`{"history":[{"display":"` + c + `\ud83d"}],"mcpServers":{"a":{"command":"x"}}}`,
 		`{"mcpServers":{"a":{"command":"x\\ud800","args":["😀"]}}}`,
+		// Invalid UTF-8 in checked and in ignored parts, next to the canary.
+		"{\"mcpServers\":{\"x\xE2\x82\":{\"command\":\"x\"},\"x\xC0\xC0\":{\"command\":\"" + c + "\"}}}",
+		"{\"projects\":{\"/p\xFF\":{\"mcpServers\":{\"a\":{\"command\":\"" + c + "\"}}}}}",
+		"{\"history\":[\"\xED\xA0\x80" + c + "\"],\"mcpServers\":{\"a\":{\"command\":\"x\"}}}",
+		// Only null, and only a non-ASCII space.
+		`null`,
+		"\u00a0",
 	} {
 		f.Add([]byte(seed))
 	}
@@ -188,11 +196,11 @@ func FuzzReadCodex(f *testing.F) {
 		// Deep nesting: the reader must return reasonTooDeep, not crash.
 		"[mcp_servers.a]\ncommand = \"x\"\nargs = " + strings.Repeat("[", 100) + strings.Repeat("]", 100) + "\n",
 		"[mcp_servers.a]\ncommand = \"x\"\nenv = " + strings.Repeat("{ k = ", 100) + "1" + strings.Repeat(" }", 100) + "\n",
-		// Very long keys: the reader must return reasonTooDeep, not spend seconds.
+		// Very long keys: the reader must return reasonKeyTooLong, not spend seconds.
 		"[mcp_servers." + keyParts(200) + "]\n",
 		"mcp_servers." + keyParts(200) + " = 1\n",
 		// The key path adds up over nested inline tables: the reader must return
-		// reasonTooDeep, not spend seconds.
+		// reasonKeyTooLong, not spend seconds.
 		"x0 = " + strings.Repeat("{"+keyParts(63)+"=", 63) + "1" + strings.Repeat("}", 63) + "\n",
 		"x0 = " + strings.Repeat("{"+keyParts(8)+"=", 8) + "1" + strings.Repeat("}", 8) + "\n",
 		"[a.b.c.d.e]\nf.g.h.i = { j.k.l.m.n.o.p.q = 1 }\n",

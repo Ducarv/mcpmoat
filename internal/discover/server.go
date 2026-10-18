@@ -85,6 +85,17 @@ type Server struct {
 	// Source is the path of the config file that declared the server.
 	Source string
 
+	// Untrusted is true for a server from a project file that Discover read
+	// from the working directory: <WorkDir>/.mcp.json or
+	// <WorkDir>/.cursor/mcp.json. A cloned repository can ship that file, so
+	// its command is not the user's choice. inspect must not start an
+	// untrusted stdio server without an explicit opt-in from the user.
+	//
+	// Untrusted is false for the user's own files: ~/.claude.json (also for
+	// the servers under its projects.<path> keys, which Claude Code writes
+	// when the user adds a server), ~/.cursor/mcp.json and the Codex file.
+	Untrusted bool
+
 	// Transport is how mcpmoat talks to the server.
 	Transport Transport
 
@@ -101,6 +112,10 @@ type Server struct {
 	// one (Codex cwd), as written. Empty means the config sets none; inspect
 	// must then not run a relative command or argument from its own
 	// directory.
+	//
+	// A relative Dir is relative to the directory where the user runs Codex,
+	// which mcpmoat does not know. inspect must not resolve it against its
+	// own working directory: it must treat a relative Dir like an empty Dir.
 	Dir string
 
 	// Env holds the environment variables for TransportStdio. The values

@@ -4,6 +4,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"io/fs"
 	"strconv"
 	"strings"
@@ -236,9 +239,36 @@ func TestCanceledError(t *testing.T) {
 	}
 }
 
+// allReasons lists every reason constant of fileerror.go. Keep it in sync
+// with the constants: TestAllReasonsInSync fails when a constant is missing
+// here. It is an array, not a slice, so no test can change it. Tests use it
+// to check that a FileError has a known reason.
+var allReasons = [...]reason{
+	reasonCannotRead,
+	reasonNotRegular,
+	reasonTooLarge,
+	reasonOutsideProject,
+	reasonInvalidJSON,
+	reasonInvalidTOML,
+	reasonBadShape,
+	reasonBadServers,
+	reasonBadEntry,
+	reasonUnknownTransport,
+	reasonNoCommandOrURL,
+	reasonStdioNoCommand,
+	reasonRemoteNoURL,
+	reasonCanceled,
+	reasonTooDeep,
+	reasonKeyTooLong,
+	reasonTooManyServers,
+	reasonAmbiguousKey,
+	reasonEmptyName,
+	reasonBadString,
+}
+
 func TestAllReasonsUnique(t *testing.T) {
 	t.Parallel()
-	seen := make(map[string]bool, len(allReasons))
+	seen := make(map[reason]bool, len(allReasons))
 	for _, r := range allReasons {
 		if r == "" {
 			t.Error("allReasons holds an empty reason")
@@ -247,6 +277,74 @@ func TestAllReasonsUnique(t *testing.T) {
 			t.Errorf("allReasons holds %q twice", r)
 		}
 		seen[r] = true
+	}
+}
+
+// TestAllReasonsInSync parses fileerror.go and checks that allReasons holds
+// the value of every constant whose name starts with "reason", and nothing
+// else.
+func TestAllReasonsInSync(t *testing.T) {
+	t.Parallel()
+	file, err := parser.ParseFile(token.NewFileSet(), "fileerror.go", nil, 0)
+	if err != nil {
+		t.Fatalf("parse fileerror.go: %v", err)
+	}
+	declared := make(map[reason]string) // value -> constant name
+	for _, decl := range file.Decls {
+		gen, ok := decl.(*ast.GenDecl)
+		if !ok || gen.Tok != token.CONST {
+			continue
+		}
+		for _, spec := range gen.Specs {
+			vs, ok := spec.(*ast.ValueSpec)
+			if !ok {
+				continue
+			}
+			for i, name := range vs.Names {
+				if !strings.HasPrefix(name.Name, "reason") || i >= len(vs.Values) {
+					continue
+				}
+				lit, ok := vs.Values[i].(*ast.BasicLit)
+				if !ok || lit.Kind != token.STRING {
+					t.Errorf("constant %s is not a string literal", name.Name)
+					continue
+				}
+				v, err := strconv.Unquote(lit.Value)
+				if err != nil {
+					t.Fatalf("unquote %s: %v", name.Name, err)
+				}
+				declared[reason(v)] = name.Name
+			}
+		}
+	}
+	if len(declared) == 0 {
+		t.Fatal("found no reason constants in fileerror.go")
+	}
+	listed := make(map[reason]bool, len(allReasons))
+	for _, r := range allReasons {
+		listed[r] = true
+		if _, ok := declared[r]; !ok {
+			t.Errorf("allReasons holds %q, which is not a reason constant", r)
+		}
+	}
+	for v, name := range declared {
+		if !listed[v] {
+			t.Errorf("constant %s (%q) is missing from allReasons", name, v)
+		}
+	}
+}
+
+func TestReadError(t *testing.T) {
+	t.Parallel()
+	for _, untrusted := range []bool{false, true} {
+		fe := readError("/p", untrusted, reasonCannotRead, fs.ErrPermission)
+		if fe.Path != "/p" || fe.Reason != reasonCannotRead || fe.Untrusted != untrusted {
+			t.Errorf("readError(untrusted=%v) = {Path: %q, Reason: %q, Untrusted: %v}",
+				untrusted, fe.Path, fe.Reason, fe.Untrusted)
+		}
+		if !errors.Is(fe, fs.ErrPermission) {
+			t.Errorf("readError(untrusted=%v): errors.Is(fe, fs.ErrPermission) = false", untrusted)
+		}
 	}
 }
 

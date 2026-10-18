@@ -12,6 +12,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/BurntSushi/toml"
+
 	"github.com/Ducarv/mcpmoat/internal/discover/discovertest"
 )
 
@@ -266,9 +268,27 @@ func TestReadCodexInline(t *testing.T) {
 			wantNames: []string{"ok"},
 		},
 		{
-			name:      "command wins over url",
-			config:    "[mcp_servers.both]\ncommand = \"c\"\nurl = \"https://example.com/mcp\"\n",
-			wantNames: []string{"both"},
+			// Codex rejects an entry with both keys, so mcpmoat must not
+			// guess which transport the user meant.
+			name:      "command and url",
+			config:    "[mcp_servers.both]\ncommand = \"c\"\nurl = \"https://example.com/mcp\"\n\n[mcp_servers.ok]\ncommand = \"c\"\n",
+			wantNames: []string{"ok"},
+			wantErrs:  []errWant{{Server: "both", Reason: reasonBadEntry}},
+		},
+		{
+			name:     "empty command and url",
+			config:   "[mcp_servers.both]\ncommand = \"\"\nurl = \"https://example.com/mcp\"\n",
+			wantErrs: []errWant{{Server: "both", Reason: reasonBadEntry}},
+		},
+		{
+			name:     "command and empty url",
+			config:   "[mcp_servers.both]\ncommand = \"c\"\nurl = \"\"\n",
+			wantErrs: []errWant{{Server: "both", Reason: reasonBadEntry}},
+		},
+		{
+			name:     "command and url in an inline table",
+			config:   "mcp_servers = { both = { command = \"c\", url = \"https://example.com/mcp\" } }\n",
+			wantErrs: []errWant{{Server: "both", Reason: reasonBadEntry}},
 		},
 		{
 			name:     "empty command and no url",
@@ -362,23 +382,21 @@ func TestReadCodexInline(t *testing.T) {
 	}
 }
 
-// TestReadCodexTransport checks the transport and the dropped fields of a
-// server that has both a command and a url, and of the stdio and http paths.
+// TestReadCodexTransport checks the transport and the dropped fields of the
+// stdio and http paths.
 func TestReadCodexTransport(t *testing.T) {
 	t.Parallel()
 
 	config := `
-[mcp_servers.both]
+[mcp_servers.local]
 command = "c"
 args = ["a"]
 env = { K = "v1" }
-url = "https://example.com/mcp"
 http_headers = { H = "v2" }
 
 [mcp_servers.web]
 url = "https://example.com/web"
 http_headers = { H = "v3" }
-command = ""
 args = ["dropped"]
 env = { E = "dropped" }
 `
@@ -388,13 +406,13 @@ env = { E = "dropped" }
 
 	want := []serverView{
 		{
-			// A command makes the server stdio. The url and headers are dropped.
-			Name: "both", Client: ClientCodex, Scope: ScopeGlobal, Source: path,
+			// A stdio server never carries headers.
+			Name: "local", Client: ClientCodex, Scope: ScopeGlobal, Source: path,
 			Transport: TransportStdio, Command: "c", Args: []string{"a"},
 			Env: map[string]string{"K": "v1"},
 		},
 		{
-			// An HTTP server never carries command, args or env.
+			// An HTTP server never carries args or env.
 			Name: "web", Client: ClientCodex, Scope: ScopeGlobal, Source: path,
 			Transport: TransportHTTP, URL: "https://example.com/web",
 			Headers: map[string]string{"H": "v3"},
@@ -480,8 +498,9 @@ func TestReadCodexBadShape(t *testing.T) {
 	}
 }
 
-// TestTOMLShapeOK checks the bracket and key scanner on its own.
-func TestTOMLShapeOK(t *testing.T) {
+// TestCheckTOMLShape checks the bracket and key scanner on its own, and that
+// it names the limit that the input breaks.
+func TestCheckTOMLShape(t *testing.T) {
 	t.Parallel()
 
 	nested := func(open, closing string, n int) string {
@@ -490,66 +509,76 @@ func TestTOMLShapeOK(t *testing.T) {
 	tests := []struct {
 		name  string
 		input string
-		limit int
-		want  bool
+		limit int // maxDepth
+		parts int // maxParts; 0 means maxTOMLKeyParts
+		want  reason
 	}{
-		{name: "empty", input: "", limit: 2, want: true},
-		{name: "inline tables at the limit", input: "a = " + strings.Repeat("{a=", 15) + "1" + strings.Repeat("}", 15) + "\n", limit: 16, want: true},
-		{name: "arrays at the limit", input: nested("[", "]", 16), limit: 16, want: true},
-		{name: "arrays over the limit", input: nested("[", "]", 17), limit: 16, want: false},
-		{name: "inline tables over the limit", input: "a = " + strings.Repeat("{a=", 17) + "1" + strings.Repeat("}", 17) + "\n", limit: 16, want: false},
-		{name: "unclosed brackets count", input: strings.Repeat("[", 17), limit: 16, want: false},
-		{name: "closing brackets alone stay at zero", input: strings.Repeat("]", 100) + "a = [[1]]\n", limit: 2, want: true},
-		{name: "table headers", input: "[a.b]\nx = 1\n[[c]]\ny = [1]\n", limit: 3, want: true},
-		{name: "comment", input: "# [[[[[[[[\na = 1\n", limit: 2, want: true},
-		{name: "comment at the end without newline", input: "a = 1 # [[[[[[[[", limit: 2, want: true},
-		{name: "brackets after a comment count", input: "# x\na = [[[1]]]\n", limit: 2, want: false},
-		{name: "basic string", input: `a = "[[[[[[[["` + "\n", limit: 2, want: true},
-		{name: "basic string with an escaped quote", input: `a = "\"[[[[[[[["` + "\n", limit: 2, want: true},
-		{name: "literal string", input: "a = '[[[[[[[['\n", limit: 2, want: true},
-		{name: "literal string keeps a backslash", input: `a = '\'` + "\nb = [[[1]]]\n", limit: 2, want: false},
-		{name: "multi-line basic string", input: "a = \"\"\"\n[[[[[[[[\n\"\"\"\n", limit: 2, want: true},
-		{name: "multi-line literal string", input: "a = '''\n{{{{{{{{\n'''\n", limit: 2, want: true},
-		{name: "multi-line string with quotes before the end", input: "a = \"\"\"x\"\"\"\"\nb = [[[1]]]\n", limit: 2, want: false},
-		{name: "brackets after a multi-line string count", input: "a = '''x'''\nb = [[[1]]]\n", limit: 2, want: false},
-		{name: "quoted key in a header", input: "[\"a[[[[[b\"]\nx = 1\n", limit: 2, want: true},
-		{name: "string that is not closed ends at the line", input: "a = \"[[[\nb = [[[1]]]\n", limit: 2, want: false},
-		{name: "header with 16 parts", input: "[" + keyParts(16) + "]\n", limit: 64, want: true},
-		{name: "header with 17 parts", input: "[" + keyParts(17) + "]\n", limit: 64, want: false},
-		{name: "array header with 17 parts", input: "[[" + keyParts(17) + "]]\n", limit: 64, want: false},
-		{name: "dotted key with 16 parts", input: keyParts(16) + " = 1\n", limit: 64, want: true},
-		{name: "dotted key with 17 parts", input: keyParts(17) + " = 1\n", limit: 64, want: false},
-		{name: "dotted key in an inline table with 17 parts", input: "t = { " + keyParts(17) + " = 1 }\n", limit: 64, want: false},
-		{name: "the counter restarts on each line", input: strings.Repeat(keyParts(10)+" = 1\n", 5), limit: 64, want: true},
-		{name: "the header is the base of the keys below it", input: "[" + keyParts(8) + "]\n" + keyParts(8) + " = 1\n", limit: 64, want: true},
-		{name: "header and key over the limit", input: "[" + keyParts(8) + "]\n" + keyParts(9) + " = 1\n", limit: 64, want: false},
-		{name: "the next header drops the base", input: "[" + keyParts(15) + "]\nb = 1\n[a]\n" + keyParts(15) + " = 1\n", limit: 64, want: true},
-		{name: "header, key and inline table at 16 parts", input: "[a.b]\nc.d = { e.f = { g.h = { i.j.k.l.m.n.o.p = 1 } } }\n", limit: 64, want: true},
-		{name: "header, key and inline table at 17 parts", input: "[a.b]\nc.d = { e.f = { g.h = { i.j.k.l.m.n.o.p.q = 1 } } }\n", limit: 64, want: false},
-		{name: "sibling inline tables do not add up", input: "t = { " + keyParts(8) + " = 1, " + keyParts(8) + " = 2 }\n", limit: 64, want: true},
-		{name: "inline tables in an array do not add up", input: "t = [" + strings.Repeat("{ "+keyParts(8)+" = 1 }, ", 20) + "]\n", limit: 64, want: true},
-		{name: "the base returns after an inline table closes", input: "t = { " + keyParts(8) + " = {} }\n" + keyParts(16) + " = 1\n", limit: 64, want: true},
-		{name: "nested inline table bypass", input: "x0 = " + strings.Repeat("{"+keyParts(63)+"=", 63) + "1" + strings.Repeat("}", 63) + "\n", limit: 64, want: false},
-		{name: "arrays add depth but no parts", input: "t = [[[" + keyParts(1) + "]]]\n[a]\n" + keyParts(15) + " = [[1.5]]\n", limit: 64, want: true},
-		{name: "real shape: sub-table", input: "[mcp_servers.x]\ncommand = \"c\"\n[mcp_servers.x.env]\nAPI_KEY = \"v\"\n", limit: 16, want: true},
-		{name: "real shape: inline headers", input: "[mcp_servers.x]\nurl = \"http://h\"\nhttp_headers = { Authorization = \"v\" }\n", limit: 16, want: true},
-		{name: "real shape: dotted keys at the root", input: "mcp_servers.x.env.API_KEY = \"v\"\nmcp_servers.x.command = \"c\"\n", limit: 16, want: true},
-		{name: "dots in a quoted key do not count", input: "[\"" + strings.Repeat("a.", 200) + "\"]\nx = 1\n", limit: 64, want: true},
-		{name: "dots in a literal quoted key do not count", input: "'" + strings.Repeat("a.", 200) + "' = 1\n", limit: 64, want: true},
-		{name: "dots in a string value do not count", input: "a = \"" + strings.Repeat("a.", 200) + "\"\n", limit: 64, want: true},
-		{name: "dots in a multi-line string do not count", input: "a = \"\"\"" + strings.Repeat("a.", 200) + "\"\"\"\n", limit: 64, want: true},
-		{name: "dots in a comment do not count", input: "# " + strings.Repeat("a.", 200) + "\nx = 1\n", limit: 64, want: true},
-		{name: "dots in a comment at the end do not count", input: "x = 1 # " + strings.Repeat("a.", 200), limit: 64, want: true},
-		{name: "floats and dates", input: "f = 1.5\nd = 1979-05-27T07:32:00.999\nt = 07:32:00.999\n", limit: 64, want: true},
-		{name: "many floats in an array", input: "a = [" + strings.Repeat("1.5, ", 200) + "]\n", limit: 64, want: true},
-		{name: "many floats in an inline table", input: "t = { " + strings.Repeat("a = 1.5, ", 200) + "z = 1 }\n", limit: 64, want: true},
-		{name: "quoted part and plain parts", input: "[a.\"b.c\"." + keyParts(14) + "]\n", limit: 64, want: true},
+		{name: "empty", input: "", limit: 2, want: ""},
+		{name: "inline tables at the limit", input: "a = " + strings.Repeat("{a=", 15) + "1" + strings.Repeat("}", 15) + "\n", limit: 16, want: ""},
+		{name: "arrays at the limit", input: nested("[", "]", 16), limit: 16, want: ""},
+		{name: "arrays over the limit", input: nested("[", "]", 17), limit: 16, want: reasonTooDeep},
+		// Each nested inline table adds a key part, so the depth limit only
+		// shows when the parts limit is higher.
+		{name: "inline tables over the limit", input: "a = " + strings.Repeat("{a=", 17) + "1" + strings.Repeat("}", 17) + "\n", limit: 16, parts: 64, want: reasonTooDeep},
+		{name: "inline tables over the limit break the parts limit first", input: "a = " + strings.Repeat("{a=", 17) + "1" + strings.Repeat("}", 17) + "\n", limit: 16, want: reasonKeyTooLong},
+		{name: "inline tables in arrays over the limit", input: "a = " + strings.Repeat("[{b=", 9) + "1" + strings.Repeat("}]", 9) + "\n", limit: 16, want: reasonTooDeep},
+		{name: "array header deeper than the limit", input: "[[[a]]]\n", limit: 2, want: reasonTooDeep},
+		{name: "unclosed brackets count", input: strings.Repeat("[", 17), limit: 16, want: reasonTooDeep},
+		{name: "closing brackets alone stay at zero", input: strings.Repeat("]", 100) + "a = [[1]]\n", limit: 2, want: ""},
+		{name: "table headers", input: "[a.b]\nx = 1\n[[c]]\ny = [1]\n", limit: 3, want: ""},
+		{name: "comment", input: "# [[[[[[[[\na = 1\n", limit: 2, want: ""},
+		{name: "comment at the end without newline", input: "a = 1 # [[[[[[[[", limit: 2, want: ""},
+		{name: "brackets after a comment count", input: "# x\na = [[[1]]]\n", limit: 2, want: reasonTooDeep},
+		{name: "basic string", input: `a = "[[[[[[[["` + "\n", limit: 2, want: ""},
+		{name: "basic string with an escaped quote", input: `a = "\"[[[[[[[["` + "\n", limit: 2, want: ""},
+		{name: "literal string", input: "a = '[[[[[[[['\n", limit: 2, want: ""},
+		{name: "literal string keeps a backslash", input: `a = '\'` + "\nb = [[[1]]]\n", limit: 2, want: reasonTooDeep},
+		{name: "multi-line basic string", input: "a = \"\"\"\n[[[[[[[[\n\"\"\"\n", limit: 2, want: ""},
+		{name: "multi-line literal string", input: "a = '''\n{{{{{{{{\n'''\n", limit: 2, want: ""},
+		{name: "multi-line string with quotes before the end", input: "a = \"\"\"x\"\"\"\"\nb = [[[1]]]\n", limit: 2, want: reasonTooDeep},
+		{name: "brackets after a multi-line string count", input: "a = '''x'''\nb = [[[1]]]\n", limit: 2, want: reasonTooDeep},
+		{name: "quoted key in a header", input: "[\"a[[[[[b\"]\nx = 1\n", limit: 2, want: ""},
+		{name: "string that is not closed ends at the line", input: "a = \"[[[\nb = [[[1]]]\n", limit: 2, want: reasonTooDeep},
+		{name: "header with 16 parts", input: "[" + keyParts(16) + "]\n", limit: 64, want: ""},
+		{name: "header with 17 parts", input: "[" + keyParts(17) + "]\n", limit: 64, want: reasonKeyTooLong},
+		{name: "array header with 17 parts", input: "[[" + keyParts(17) + "]]\n", limit: 64, want: reasonKeyTooLong},
+		{name: "dotted key with 16 parts", input: keyParts(16) + " = 1\n", limit: 64, want: ""},
+		{name: "dotted key with 17 parts", input: keyParts(17) + " = 1\n", limit: 64, want: reasonKeyTooLong},
+		{name: "dotted key in an inline table with 17 parts", input: "t = { " + keyParts(17) + " = 1 }\n", limit: 64, want: reasonKeyTooLong},
+		{name: "the counter restarts on each line", input: strings.Repeat(keyParts(10)+" = 1\n", 5), limit: 64, want: ""},
+		{name: "the header is the base of the keys below it", input: "[" + keyParts(8) + "]\n" + keyParts(8) + " = 1\n", limit: 64, want: ""},
+		{name: "header and key over the limit", input: "[" + keyParts(8) + "]\n" + keyParts(9) + " = 1\n", limit: 64, want: reasonKeyTooLong},
+		{name: "the next header drops the base", input: "[" + keyParts(15) + "]\nb = 1\n[a]\n" + keyParts(15) + " = 1\n", limit: 64, want: ""},
+		{name: "header, key and inline table at 16 parts", input: "[a.b]\nc.d = { e.f = { g.h = { i.j.k.l.m.n.o.p = 1 } } }\n", limit: 64, want: ""},
+		{name: "header, key and inline table at 17 parts", input: "[a.b]\nc.d = { e.f = { g.h = { i.j.k.l.m.n.o.p.q = 1 } } }\n", limit: 64, want: reasonKeyTooLong},
+		{name: "sibling inline tables do not add up", input: "t = { " + keyParts(8) + " = 1, " + keyParts(8) + " = 2 }\n", limit: 64, want: ""},
+		{name: "inline tables in an array do not add up", input: "t = [" + strings.Repeat("{ "+keyParts(8)+" = 1 }, ", 20) + "]\n", limit: 64, want: ""},
+		{name: "the base returns after an inline table closes", input: "t = { " + keyParts(8) + " = {} }\n" + keyParts(16) + " = 1\n", limit: 64, want: ""},
+		{name: "nested inline table bypass", input: "x0 = " + strings.Repeat("{"+keyParts(63)+"=", 63) + "1" + strings.Repeat("}", 63) + "\n", limit: 64, want: reasonKeyTooLong},
+		{name: "arrays add depth but no parts", input: "t = [[[" + keyParts(1) + "]]]\n[a]\n" + keyParts(15) + " = [[1.5]]\n", limit: 64, want: ""},
+		{name: "real shape: sub-table", input: "[mcp_servers.x]\ncommand = \"c\"\n[mcp_servers.x.env]\nAPI_KEY = \"v\"\n", limit: 16, want: ""},
+		{name: "real shape: inline headers", input: "[mcp_servers.x]\nurl = \"http://h\"\nhttp_headers = { Authorization = \"v\" }\n", limit: 16, want: ""},
+		{name: "real shape: dotted keys at the root", input: "mcp_servers.x.env.API_KEY = \"v\"\nmcp_servers.x.command = \"c\"\n", limit: 16, want: ""},
+		{name: "dots in a quoted key do not count", input: "[\"" + strings.Repeat("a.", 200) + "\"]\nx = 1\n", limit: 64, want: ""},
+		{name: "dots in a literal quoted key do not count", input: "'" + strings.Repeat("a.", 200) + "' = 1\n", limit: 64, want: ""},
+		{name: "dots in a string value do not count", input: "a = \"" + strings.Repeat("a.", 200) + "\"\n", limit: 64, want: ""},
+		{name: "dots in a multi-line string do not count", input: "a = \"\"\"" + strings.Repeat("a.", 200) + "\"\"\"\n", limit: 64, want: ""},
+		{name: "dots in a comment do not count", input: "# " + strings.Repeat("a.", 200) + "\nx = 1\n", limit: 64, want: ""},
+		{name: "dots in a comment at the end do not count", input: "x = 1 # " + strings.Repeat("a.", 200), limit: 64, want: ""},
+		{name: "floats and dates", input: "f = 1.5\nd = 1979-05-27T07:32:00.999\nt = 07:32:00.999\n", limit: 64, want: ""},
+		{name: "many floats in an array", input: "a = [" + strings.Repeat("1.5, ", 200) + "]\n", limit: 64, want: ""},
+		{name: "many floats in an inline table", input: "t = { " + strings.Repeat("a = 1.5, ", 200) + "z = 1 }\n", limit: 64, want: ""},
+		{name: "quoted part and plain parts", input: "[a.\"b.c\"." + keyParts(14) + "]\n", limit: 64, want: ""},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			if got := tomlShapeOK([]byte(tt.input), tt.limit, maxTOMLKeyParts); got != tt.want {
-				t.Errorf("tomlShapeOK(%q, %d, %d) = %v, want %v", tt.input, tt.limit, maxTOMLKeyParts, got, tt.want)
+			parts := tt.parts
+			if parts == 0 {
+				parts = maxTOMLKeyParts
+			}
+			if got := checkTOMLShape([]byte(tt.input), tt.limit, parts); got != tt.want {
+				t.Errorf("checkTOMLShape(%q, %d, %d) = %q, want %q", tt.input, tt.limit, parts, got, tt.want)
 			}
 		})
 	}
@@ -565,11 +594,12 @@ func TestReadCodexTooDeep(t *testing.T) {
 		name   string
 		config string
 	}{
-		{name: "inline tables", config: "a = " + strings.Repeat("{a=", maxTOMLDepth+1) + "1" + strings.Repeat("}", maxTOMLDepth+1) + "\n"},
+		// An inline table in an inline table needs a key, which adds a key
+		// part. Arrays of inline tables add depth faster than parts.
+		{name: "inline tables in arrays", config: "a = " + strings.Repeat("[{b=", maxTOMLDepth/2+1) + "1" + strings.Repeat("}]", maxTOMLDepth/2+1) + "\n"},
 		{name: "arrays", config: "a = " + strings.Repeat("[", maxTOMLDepth+1) + strings.Repeat("]", maxTOMLDepth+1) + "\n"},
 		{name: "256 KiB of nested arrays", config: strings.Repeat("[", maxTOMLSize)},
-		{name: "inline tables, 63 levels with 63 dots in each key", config: "x0 = " + strings.Repeat("{"+keyParts(63)+"=", 63) + "1" + strings.Repeat("}", 63) + "\n"},
-		{name: "deep input after a valid server", config: "[mcp_servers.ok]\ncommand = \"c\"\n\n[x]\na = " + strings.Repeat("{a=", 5000) + "\n"},
+		{name: "deep input after a valid server", config: "[mcp_servers.ok]\ncommand = \"c\"\n\n[x]\na = " + strings.Repeat("[", 5000) + "\n"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -629,6 +659,9 @@ func TestReadCodexKeyParts(t *testing.T) {
 		{name: "header with 200 parts", config: valid + "[" + keyParts(200) + "]\n"},
 		{name: "17 parts split over header, dotted key and inline table", config: valid + "[a.b.c.d.e]\nf.g.h.i = { j.k.l.m.n.o.p.q = 1 }\n"},
 		{name: "16 parts in the header and one more in the key", config: valid + "[" + keyParts(16) + "]\nk = 1\n"},
+		// Each nested inline table adds the key that opens it.
+		{name: "inline tables, 17 levels", config: valid + "a = " + strings.Repeat("{a=", maxTOMLDepth+1) + "1" + strings.Repeat("}", maxTOMLDepth+1) + "\n"},
+		{name: "inline tables, 63 levels with 63 dots in each key", config: valid + "x0 = " + strings.Repeat("{"+keyParts(63)+"=", 63) + "1" + strings.Repeat("}", 63) + "\n"},
 	}
 	for _, tt := range rejected {
 		t.Run("rejected: "+tt.name, func(t *testing.T) {
@@ -638,7 +671,7 @@ func TestReadCodexKeyParts(t *testing.T) {
 			if len(r.Servers) != 0 {
 				t.Errorf("got %d servers, want none", len(r.Servers))
 			}
-			checkFileErrors(t, path, r.Errors, []errWant{{Reason: reasonTooDeep}})
+			checkFileErrors(t, path, r.Errors, []errWant{{Reason: reasonKeyTooLong}})
 		})
 	}
 
@@ -671,7 +704,7 @@ func TestReadCodexKeyParts(t *testing.T) {
 	// Without the check, this header takes about 1.4 s and 4.8 GiB, and a dotted
 	// key with the same number of parts takes about 23 s. The time limit below
 	// is loose on purpose, so a slow or busy CI machine does not fail the test.
-	// The reasonTooDeep error already proves that the parser never ran.
+	// The reasonKeyTooLong error already proves that the parser never ran.
 	for _, tt := range []struct{ name, config string }{
 		{name: "header with 20000 parts", config: "[mcp_servers." + keyParts(20000) + "]\n"},
 		{name: "dotted key with 20000 parts", config: "mcp_servers." + keyParts(20000) + " = 1\n"},
@@ -684,7 +717,7 @@ func TestReadCodexKeyParts(t *testing.T) {
 			if d := time.Since(start); d > 10*time.Second {
 				t.Errorf("ReadCodex took %v, want less than 10s", d)
 			}
-			checkFileErrors(t, path, r.Errors, []errWant{{Reason: reasonTooDeep}})
+			checkFileErrors(t, path, r.Errors, []errWant{{Reason: reasonKeyTooLong}})
 		})
 	}
 }
@@ -1057,4 +1090,144 @@ func TestReadCodexErrorOrder(t *testing.T) {
 			t.Errorf("server names = %v, want [b]", got)
 		}
 	})
+}
+
+// TestReadCodexBOM checks that a byte order mark at the start of the file
+// does not move the position of a syntax error. The TOML parser removes the
+// mark before it reads, so its offsets do not count the mark.
+func TestReadCodexBOM(t *testing.T) {
+	t.Parallel()
+
+	boms := []struct{ name, mark string }{
+		{name: "UTF-8", mark: "\xef\xbb\xbf"},
+		{name: "UTF-16 LE", mark: "\xff\xfe"},
+		{name: "UTF-16 BE", mark: "\xfe\xff"},
+	}
+	configs := []struct{ name, config string }{
+		{name: "error on line 1", config: "c = \"x\" y\n"},
+		{name: "error on line 3", config: "a = 1\nb = 2\n  c = \"x\" y\n"},
+	}
+	for _, c := range configs {
+		for _, b := range boms {
+			t.Run(c.name+", "+b.name, func(t *testing.T) {
+				t.Parallel()
+				plain := ReadCodex(t.Context(), writeFile(t, t.TempDir(), codexConfigRel, []byte(c.config)))
+				marked := ReadCodex(t.Context(), writeFile(t, t.TempDir(), codexConfigRel, []byte(b.mark+c.config)))
+				if len(plain.Errors) != 1 || len(marked.Errors) != 1 {
+					t.Fatalf("got %d and %d errors, want 1 each", len(plain.Errors), len(marked.Errors))
+				}
+				p, m := plain.Errors[0], marked.Errors[0]
+				if p.Reason != reasonInvalidTOML || m.Reason != reasonInvalidTOML {
+					t.Fatalf("reasons = %q and %q, want %q", p.Reason, m.Reason, reasonInvalidTOML)
+				}
+				if p.Line == 0 || p.Col == 0 {
+					t.Fatalf("without a mark: line %d, col %d, want both set", p.Line, p.Col)
+				}
+				if m.Line != p.Line || m.Col != p.Col {
+					t.Errorf("with a mark: %d:%d, want %d:%d as without it", m.Line, m.Col, p.Line, p.Col)
+				}
+			})
+		}
+	}
+
+	t.Run("valid file with a UTF-8 mark", func(t *testing.T) {
+		t.Parallel()
+		path := writeFile(t, t.TempDir(), codexConfigRel, []byte("\xef\xbb\xbf[mcp_servers.ok]\ncommand = \"c\"\n"))
+		r := ReadCodex(t.Context(), path)
+		checkFileErrors(t, path, r.Errors, nil)
+		if got := serverNames(r.Servers); !reflect.DeepEqual(got, []string{"ok"}) {
+			t.Errorf("server names = %v, want [ok]", got)
+		}
+	})
+}
+
+// TestTOMLBOMLen checks the byte order marks that the TOML parser removes.
+func TestTOMLBOMLen(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		data string
+		want int
+	}{
+		{data: "", want: 0},
+		{data: "a = 1", want: 0},
+		{data: "\xef\xbb\xbfa = 1", want: 3},
+		{data: "\xef\xbb", want: 0},
+		{data: "\xff\xfea", want: 2},
+		{data: "\xfe\xffa", want: 2},
+		{data: "\xff", want: 0},
+	}
+	for _, tt := range tests {
+		if got := tomlBOMLen([]byte(tt.data)); got != tt.want {
+			t.Errorf("tomlBOMLen(%q) = %d, want %d", tt.data, got, tt.want)
+		}
+	}
+}
+
+// TestCodexKeys checks that the key lists agree: codexReads reads exactly
+// codexReadKeys, in order, and no key is both read and ignored.
+func TestCodexKeys(t *testing.T) {
+	t.Parallel()
+
+	var e codexEntry
+	reads := codexReads(&e)
+	keys := make([]string, 0, len(reads))
+	for _, r := range reads {
+		keys = append(keys, r.key)
+		if r.dest == nil {
+			t.Errorf("codexReads: key %q has no destination", r.key)
+		}
+	}
+	if !reflect.DeepEqual(keys, codexReadKeys[:]) {
+		t.Errorf("codexReads keys = %v, want codexReadKeys %v", keys, codexReadKeys)
+	}
+
+	known := codexKnownKeys()
+	if want := len(codexReadKeys) + len(codexIgnoredKeys); len(known) != want {
+		t.Errorf("len(codexKnownKeys()) = %d, want %d", len(known), want)
+	}
+	seen := make(map[string]bool, len(known))
+	for _, k := range known {
+		if seen[k] {
+			t.Errorf("key %q is in codexKnownKeys twice", k)
+		}
+		seen[k] = true
+	}
+}
+
+// TestCodexIsTable checks the md.Type names that codexIsTable and
+// codexHasType depend on. A change in the TOML library would show here first.
+func TestCodexIsTable(t *testing.T) {
+	t.Parallel()
+
+	const config = "n = 1\ns = \"x\"\nl = [1]\ninl = { z = 1 }\n[t]\nx = 1\n[p.q]\ny = 1\n[[arr]]\nw = 1\n"
+	var top map[string]toml.Primitive
+	md, err := toml.Decode(config, &top)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tests := []struct {
+		key      string
+		wantType string
+		table    bool
+	}{
+		{key: "n", wantType: "Integer"},
+		{key: "s", wantType: tomlTypeString},
+		{key: "l", wantType: tomlTypeArray},
+		{key: "inl", wantType: tomlTypeHash, table: true},
+		{key: "t", wantType: tomlTypeHash, table: true},
+		{key: "p", wantType: "", table: true}, // made only through the header [p.q]
+		{key: "arr", wantType: tomlTypeArrayHash},
+	}
+	for _, tt := range tests {
+		if got := md.Type(tt.key); got != tt.wantType {
+			t.Errorf("md.Type(%q) = %q, want %q", tt.key, got, tt.wantType)
+		}
+		if got := codexIsTable(&md, tt.key); got != tt.table {
+			t.Errorf("codexIsTable(%q) = %v, want %v", tt.key, got, tt.table)
+		}
+		if got := codexHasType(&md, tomlTypeHash, tt.key); got != tt.table {
+			t.Errorf("codexHasType(Hash, %q) = %v, want %v", tt.key, got, tt.table)
+		}
+	}
 }
