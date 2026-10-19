@@ -37,6 +37,11 @@ var (
 	errDialPort = errors.New("invalid port in dial address")
 	// errDialNetwork means the dial network is not tcp, tcp4 or tcp6.
 	errDialNetwork = errors.New("unsupported dial network")
+	// errAddrRefused means the DNS answer for the guarded host name held only
+	// refused addresses (see refusedAddr). The text names the classes of
+	// addresses, never an address or the host name. It does not name the
+	// Alibaba Cloud metadata address, which refusedAddr also refuses.
+	errAddrRefused = errors.New("server name resolves only to loopback, unspecified, link-local or multicast addresses")
 )
 
 // lookupFunc resolves a host name to IP addresses. It has the signature of
@@ -71,9 +76,21 @@ type dialFunc func(ctx context.Context, network, address string) (net.Conn, erro
 // certificate check. The pin changes only the IP address, so TLS still
 // verifies the URL host.
 //
+// Guard: the pin alone does not stop a name that points to a local address
+// from the first lookup. So for one host name, guardHost (the host of the
+// configured endpoint), DialContext also drops the addresses that a remote
+// server must not have: loopback, unspecified, link-local, multicast and the
+// Alibaba Cloud metadata address 100.100.100.200 (see refusedAddr). Private
+// (RFC 1918) and unique local (ULA) addresses stay allowed: a server on the
+// company network is a normal case. The rest of 100.64.0.0/10 (shared
+// address space, RFC 6598) also stays allowed, because Tailscale and other
+// carrier-grade NAT networks use it for real servers. The guard does
+// not cover other host names. The proxy host is one of them: the user sets
+// it in the environment, and a local proxy is a normal case.
+//
 // Known limit: with HTTP_PROXY or HTTPS_PROXY, http.Transport dials the proxy,
 // so the pinned address is the address of the proxy. The proxy resolves the
-// server name itself, and the pin does not cover that lookup.
+// server name itself, and neither the pin nor the guard covers that lookup.
 //
 // The zero value is not ready to use; use newPinnedDialer. A pinnedDialer is
 // safe for concurrent use: http.Transport can dial from many goroutines.
@@ -89,6 +106,10 @@ type pinnedDialer struct {
 	// fallbackDelay is the time that the first address family gets before
 	// the other family starts. Tests set a small value.
 	fallbackDelay time.Duration
+	// guardHost is the host name, in ASCII lower case, whose DNS answers
+	// must not hold refused addresses (see refusedAddr). Empty means no host
+	// is guarded. newBaseTransport sets it; newPinnedDialer leaves it empty.
+	guardHost string
 
 	// mu protects pinned. It is never held during a lookup or a dial, so one
 	// slow dial does not block the others.
@@ -133,6 +154,10 @@ func newPinnedDialer(lookup lookupFunc, dial dialFunc) *pinnedDialer {
 //   - Otherwise DialContext resolves the name and connects the way
 //     net.Dialer does (see dialParallel), and pins the address of the
 //     connection that it returns.
+//   - For the guarded host (guardHost), it first drops the refused addresses
+//     of the answer (see refusedAddr) and uses only the others. When none
+//     are left, it returns errAddrRefused and dials nothing. The name
+//     "localhost" is never guarded: it has its own rule below.
 func (d *pinnedDialer) DialContext(ctx context.Context, network, address string) (net.Conn, error) {
 	host, portText, err := net.SplitHostPort(address)
 	if err != nil {
@@ -189,6 +214,17 @@ func (d *pinnedDialer) DialContext(ctx context.Context, network, address string)
 		// it covers every case of the name: "LOCALHOST" shares the pin of
 		// "localhost", and that pin must be a loopback address too.
 		addrs = loopbackAddrs(addrs)
+	} else if d.guardHost != "" && key == d.guardHost && len(addrs) > 0 {
+		// The configured server name. A hostile server controls the DNS
+		// answers for its own name, so it can point the name at a local
+		// service from the first lookup on. Keep only the addresses that a
+		// remote server can have. The pin below then holds one of them. An
+		// empty answer skips this step and stays a "no such host" error.
+		addrs = allowedAddrs(addrs)
+		if len(addrs) == 0 {
+			// Fixed text: no address and no host name.
+			return nil, errAddrRefused
+		}
 	}
 	if len(addrs) == 0 {
 		// The answer was empty or held only invalid addresses, or, for
@@ -231,6 +267,56 @@ func loopbackAddrs(addrs []netip.Addr) []netip.Addr {
 		}
 	}
 	return out
+}
+
+// allowedAddrs returns the addresses of addrs that are not refused (see
+// refusedAddr), in the order of addrs. addrs must be unmapped (see
+// usableAddrs).
+func allowedAddrs(addrs []netip.Addr) []netip.Addr {
+	var out []netip.Addr
+	for _, addr := range addrs {
+		if !refusedAddr(addr) {
+			out = append(out, addr)
+		}
+	}
+	return out
+}
+
+// refusedAddr reports whether addr is an address that the configured server
+// name must not resolve to. addr must be unmapped (see usableAddrs), so that
+// ::ffff:127.0.0.1 counts as 127.0.0.1. The refused classes are:
+//
+//   - loopback (127.0.0.0/8, ::1): a service on this machine;
+//   - unspecified (::) and all of 0.0.0.0/8: many systems send a
+//     connection to 0.0.0.0 to this machine;
+//   - link-local unicast (169.254.0.0/16, fe80::/10): this holds the cloud
+//     metadata address 169.254.169.254;
+//   - multicast (224.0.0.0/4, ff00::/8), with link-local and
+//     interface-local multicast: not an address of one server;
+//   - the Alibaba Cloud metadata address 100.100.100.200: it is not
+//     link-local, so the link-local check does not cover it.
+//
+// Private (RFC 1918) and unique local (fc00::/7) addresses are not refused.
+// The rest of 100.64.0.0/10 (shared address space, RFC 6598) is not refused
+// either: Tailscale and other carrier-grade NAT networks use it for real
+// servers.
+func refusedAddr(addr netip.Addr) bool {
+	if addr.Is4() && addr.As4()[0] == 0 {
+		// 0.0.0.0/8, "this network" (RFC 1122). IsUnspecified covers only
+		// 0.0.0.0 itself.
+		return true
+	}
+	if addr == netip.AddrFrom4([4]byte{100, 100, 100, 200}) {
+		// The Alibaba Cloud metadata address. It is in 100.64.0.0/10, not in
+		// a link-local range.
+		return true
+	}
+	return addr.IsLoopback() ||
+		addr.IsUnspecified() ||
+		addr.IsLinkLocalUnicast() ||
+		addr.IsLinkLocalMulticast() ||
+		addr.IsInterfaceLocalMulticast() ||
+		addr.IsMulticast()
 }
 
 // splitByFamily splits addrs, which must not be empty, the way net.Dialer

@@ -623,3 +623,685 @@ API_KEY = %q
 	}
 	discovertest.AssertNoLeak(t, "Result JSON", string(data))
 }
+
+// stateMcpJSON is a WorkDir/.mcp.json with four servers for the state tests.
+const stateMcpJSON = `{"mcpServers": {
+	"a": {"command": "a"}, "b": {"command": "b"},
+	"c": {"command": "c"}, "d": {"command": "d"}}}`
+
+// writeStateClaudeJSON writes Home/.claude.json with the top-level server
+// global-srv and, when project is not nil, the object project under
+// projects.<key>. It encodes the file with encoding/json, so any key is
+// quoted correctly.
+func writeStateClaudeJSON(t testing.TB, home, key string, project map[string]any) {
+	t.Helper()
+	file := map[string]any{
+		"mcpServers": map[string]any{"global-srv": map[string]any{"command": "g"}},
+	}
+	if project != nil {
+		file["projects"] = map[string]any{key: project}
+	}
+	data, err := json.Marshal(file)
+	if err != nil {
+		t.Fatalf("json.Marshal(.claude.json): %v", err)
+	}
+	writeFile(t, home, ".claude.json", data)
+}
+
+// checkDiscoverStates fails the test unless res has exactly the servers of
+// want (by name), each with its State in want. Every server of WorkDir/.mcp.json
+// must stay Untrusted, whatever its State: an approval only changes the State.
+func checkDiscoverStates(t testing.TB, res Result, want map[string]State) {
+	t.Helper()
+	got := make(map[string]State, len(res.Servers))
+	for _, s := range res.Servers {
+		got[s.Name] = s.State
+		if s.Name != "global-srv" && !s.Untrusted {
+			t.Errorf("server %q: Untrusted = false, want true for a .mcp.json server", s.Name)
+		}
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("server states =\n got  %v\n want %v", got, want)
+	}
+}
+
+// TestDiscoverStateFixture checks the claude-code/state fixture: the user's
+// own settings.json approves approved-srv, the settings.local.json of the
+// project approves repo-srv and rejects rejected-srv, so pending-srv waits for
+// approval. The approval of repo-srv comes only from a file of the
+// repository, so it gives StateProjectApproved. The global server has no list
+// that turns it off.
+func TestDiscoverStateFixture(t *testing.T) {
+	t.Parallel()
+	home, work := copyFixture(t, "claude-code", "state")
+
+	res := Discover(t.Context(), Options{Home: home, WorkDir: work})
+
+	assertDiscoverNoErrors(t, res)
+	assertDiscoverNames(t, res, []string{"global-srv", "approved-srv", "pending-srv", "rejected-srv", "repo-srv"})
+	checkDiscoverStates(t, res, map[string]State{
+		"global-srv":   StateEnabled,
+		"approved-srv": StateEnabled,
+		"repo-srv":     StateProjectApproved,
+		"rejected-srv": StateDisabled,
+		"pending-srv":  StateUnapproved,
+	})
+}
+
+// TestDiscoverStateLegacy checks the state that the projects.<WorkDir> object
+// of ~/.claude.json gives: the approval of the .mcp.json servers, and the
+// disabledMcpServers list for the global servers too.
+//
+// The project key is the WorkDir string of the test, as given. On macOS
+// t.TempDir is below /var, a symlink to /private/var, so the real path has
+// another form. The test uses the same string on both sides. The lookup of
+// the resolved form is tested in TestReadGlobalClaudeCodeStateSymlink.
+func TestDiscoverStateLegacy(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		project map[string]any
+		// otherKey writes the project under another directory, not WorkDir.
+		otherKey bool
+		// workSuffix is added to WorkDir in Options. Discover cleans it.
+		workSuffix string
+		want       map[string]State
+	}{
+		{
+			name: "approval lists",
+			project: map[string]any{
+				keyEnabledMcpjsonServers:  []string{"a"},
+				keyDisabledMcpjsonServers: []string{"b"},
+			},
+			want: map[string]State{
+				"global-srv": StateEnabled,
+				"a":          StateEnabled, "b": StateDisabled,
+				"c": StateUnapproved, "d": StateUnapproved,
+			},
+		},
+		{
+			name: "enable all true",
+			project: map[string]any{
+				keyEnableAllProjectMcpServers: true,
+				keyDisabledMcpjsonServers:     []string{"b"},
+			},
+			want: map[string]State{
+				"global-srv": StateEnabled,
+				"a":          StateEnabled, "b": StateDisabled,
+				"c": StateEnabled, "d": StateEnabled,
+			},
+		},
+		{
+			name: "enable all false",
+			project: map[string]any{
+				keyEnableAllProjectMcpServers: false,
+				keyEnabledMcpjsonServers:      []string{"a"},
+			},
+			want: map[string]State{
+				"global-srv": StateEnabled,
+				"a":          StateEnabled, "b": StateUnapproved,
+				"c": StateUnapproved, "d": StateUnapproved,
+			},
+		},
+		{
+			// disabledMcpServers turns off a server of any scope, also an
+			// approved .mcp.json server.
+			name: "disabledMcpServers for a global and a .mcp.json server",
+			project: map[string]any{
+				keyDisabledMcpServers:         []string{"global-srv", "a"},
+				keyEnabledMcpjsonServers:      []string{"a"},
+				keyEnableAllProjectMcpServers: true,
+			},
+			want: map[string]State{
+				"global-srv": StateDisabled,
+				"a":          StateDisabled, "b": StateEnabled,
+				"c": StateEnabled, "d": StateEnabled,
+			},
+		},
+		{
+			name:       "WorkDir with a trailing separator",
+			project:    map[string]any{keyDisabledMcpServers: []string{"global-srv"}, keyEnabledMcpjsonServers: []string{"a"}},
+			workSuffix: "/./",
+			want: map[string]State{
+				"global-srv": StateDisabled,
+				"a":          StateEnabled, "b": StateUnapproved,
+				"c": StateUnapproved, "d": StateUnapproved,
+			},
+		},
+		{
+			// The lists of another project change nothing for WorkDir.
+			name: "another project",
+			project: map[string]any{
+				keyDisabledMcpServers:         []string{"global-srv"},
+				keyEnableAllProjectMcpServers: true,
+			},
+			otherKey: true,
+			want: map[string]State{
+				"global-srv": StateEnabled,
+				"a":          StateUnapproved, "b": StateUnapproved,
+				"c": StateUnapproved, "d": StateUnapproved,
+			},
+		},
+		{
+			name: "no projects",
+			want: map[string]State{
+				"global-srv": StateEnabled,
+				"a":          StateUnapproved, "b": StateUnapproved,
+				"c": StateUnapproved, "d": StateUnapproved,
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			home, work := t.TempDir(), t.TempDir()
+			key := work
+			if tt.otherKey {
+				key = t.TempDir()
+			}
+			writeStateClaudeJSON(t, home, key, tt.project)
+			writeFile(t, work, ".mcp.json", []byte(stateMcpJSON))
+
+			res := Discover(t.Context(), Options{Home: home, WorkDir: work + tt.workSuffix})
+
+			assertDiscoverNoErrors(t, res)
+			checkDiscoverStates(t, res, tt.want)
+		})
+	}
+}
+
+// TestDiscoverStatePrecedence checks some cases of the order of the
+// settings places: settings.local.json, then the project settings.json, then
+// the user settings.json, then projects.<WorkDir> of ~/.claude.json. The full
+// rule is tested in TestMcpjsonState; this test proves that Discover reads
+// each file and passes the states in that order.
+func TestDiscoverStatePrecedence(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name                 string
+		user, project, local string // settings files; "" means missing
+		legacy               map[string]any
+		want                 map[string]State
+	}{
+		{
+			name:  "local enable all false wins over user true",
+			user:  `{"enableAllProjectMcpServers": true}`,
+			local: `{"enableAllProjectMcpServers": false, "enabledMcpjsonServers": ["a"]}`,
+			want: map[string]State{
+				"global-srv": StateEnabled,
+				"a":          StateProjectApproved, "b": StateUnapproved,
+				"c": StateUnapproved, "d": StateUnapproved,
+			},
+		},
+		{
+			name:    "project enable all true wins over legacy false",
+			project: `{"enableAllProjectMcpServers": true}`,
+			legacy:  map[string]any{keyEnableAllProjectMcpServers: false},
+			want: map[string]State{
+				"global-srv": StateEnabled,
+				"a":          StateProjectApproved, "b": StateProjectApproved,
+				"c": StateProjectApproved, "d": StateProjectApproved,
+			},
+		},
+		{
+			name:   "user enable all false wins over legacy true",
+			user:   `{"enableAllProjectMcpServers": false}`,
+			legacy: map[string]any{keyEnableAllProjectMcpServers: true},
+			want: map[string]State{
+				"global-srv": StateEnabled,
+				"a":          StateUnapproved, "b": StateUnapproved,
+				"c": StateUnapproved, "d": StateUnapproved,
+			},
+		},
+		{
+			// A rejection in any place wins over an approval in any place.
+			name:    "a rejection wins over an approval",
+			user:    `{"enabledMcpjsonServers": ["a", "b"]}`,
+			project: `{"disabledMcpjsonServers": ["a"]}`,
+			local:   `{"enableAllProjectMcpServers": true}`,
+			legacy:  map[string]any{keyDisabledMcpjsonServers: []string{"c"}},
+			// b is approved by the user file, d only by the local file.
+			want: map[string]State{
+				"global-srv": StateEnabled,
+				"a":          StateDisabled, "b": StateEnabled,
+				"c": StateDisabled, "d": StateProjectApproved,
+			},
+		},
+		{
+			// disabledMcpServers of a settings file turns off a .mcp.json
+			// server, also an approved one.
+			name:  "settings disabledMcpServers",
+			local: `{"enabledMcpjsonServers": ["a", "b"], "disabledMcpServers": ["a"]}`,
+			want: map[string]State{
+				"global-srv": StateEnabled,
+				"a":          StateDisabled, "b": StateProjectApproved,
+				"c": StateUnapproved, "d": StateUnapproved,
+			},
+		},
+		{
+			// A cloned repository ships WorkDir/.claude/settings.json that
+			// approves all its servers. That gives only project-approved,
+			// never enabled, and it overrides no trusted setting: the
+			// user's approval and rejection, and the legacy lists, keep
+			// their effect.
+			name:    "repository settings approve all",
+			user:    `{"disabledMcpjsonServers": ["b"]}`,
+			project: `{"enableAllProjectMcpServers": true}`,
+			legacy: map[string]any{
+				keyEnabledMcpjsonServers: []string{"a"},
+				keyDisabledMcpServers:    []string{"d", "global-srv"},
+			},
+			want: map[string]State{
+				"global-srv": StateDisabled,
+				"a":          StateEnabled, "b": StateDisabled,
+				"c": StateProjectApproved, "d": StateDisabled,
+			},
+		},
+		{
+			// The same file alone: every server is only project-approved.
+			name:    "repository settings approve all, nothing else",
+			project: `{"enableAllProjectMcpServers": true, "enabledMcpjsonServers": ["a"]}`,
+			want: map[string]State{
+				"global-srv": StateEnabled,
+				"a":          StateProjectApproved, "b": StateProjectApproved,
+				"c": StateProjectApproved, "d": StateProjectApproved,
+			},
+		},
+		{
+			// An untrusted enable all false hides a trusted true, as in
+			// Claude Code. That can only turn off servers.
+			name:    "repository enable all false hides user true",
+			user:    `{"enableAllProjectMcpServers": true, "enabledMcpjsonServers": ["a"]}`,
+			project: `{"enableAllProjectMcpServers": false}`,
+			want: map[string]State{
+				"global-srv": StateEnabled,
+				"a":          StateEnabled, "b": StateUnapproved,
+				"c": StateUnapproved, "d": StateUnapproved,
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			home, work := t.TempDir(), t.TempDir()
+			writeStateClaudeJSON(t, home, work, tt.legacy)
+			writeFile(t, work, ".mcp.json", []byte(stateMcpJSON))
+			for _, f := range []struct{ dir, rel, content string }{
+				{home, ".claude/settings.json", tt.user},
+				{work, ".claude/settings.json", tt.project},
+				{work, ".claude/settings.local.json", tt.local},
+			} {
+				if f.content != "" {
+					writeFile(t, f.dir, f.rel, []byte(f.content))
+				}
+			}
+
+			res := Discover(t.Context(), Options{Home: home, WorkDir: work})
+
+			assertDiscoverNoErrors(t, res)
+			checkDiscoverStates(t, res, tt.want)
+		})
+	}
+}
+
+// writeBrokenSettings writes a malformed settings file in each of the three
+// settings places and returns their paths.
+func writeBrokenSettings(t testing.TB, home, work string) []string {
+	t.Helper()
+	const broken = `{"enabledMcpjsonServers": [`
+	return []string{
+		writeFile(t, home, ".claude/settings.json", []byte(broken)),
+		writeFile(t, work, ".claude/settings.json", []byte(broken)),
+		writeFile(t, work, ".claude/settings.local.json", []byte(broken)),
+	}
+}
+
+// TestDiscoverStateSettingsNotRead checks that Discover reads the settings
+// files only when WorkDir/.mcp.json has servers: they only matter for those
+// servers. All three settings files are malformed here, so a read would give
+// an error.
+func TestDiscoverStateSettingsNotRead(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		// mcpJSON is WorkDir/.mcp.json; "" means that the file is missing.
+		mcpJSON string
+		// wantMcpErr is the reason of the one .mcp.json error, if any.
+		wantMcpErr string
+	}{
+		{name: "missing .mcp.json"},
+		{name: "empty .mcp.json", mcpJSON: " "},
+		{name: "no servers", mcpJSON: `{"mcpServers": {}}`},
+		{name: "null servers", mcpJSON: `{"mcpServers": null}`},
+		{name: "only a bad entry", mcpJSON: `{"mcpServers": {"x": {"type": "nope"}}}`, wantMcpErr: reasonUnknownTransport},
+		{name: "malformed .mcp.json", mcpJSON: `{"mcpServers": `, wantMcpErr: reasonInvalidJSON},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			home, work := t.TempDir(), t.TempDir()
+			writeStateClaudeJSON(t, home, work, map[string]any{keyEnableAllProjectMcpServers: true})
+			writeBrokenSettings(t, home, work)
+			if tt.mcpJSON != "" {
+				writeFile(t, work, ".mcp.json", []byte(tt.mcpJSON))
+			}
+
+			res := Discover(t.Context(), Options{Home: home, WorkDir: work})
+
+			checkDiscoverStates(t, res, map[string]State{"global-srv": StateEnabled})
+			var wantErrs []string
+			if tt.wantMcpErr != "" {
+				wantErrs = []string{filepath.Join(work, ".mcp.json")}
+			}
+			var gotErrs []string
+			for _, e := range res.Errors {
+				gotErrs = append(gotErrs, e.Path)
+				if e.Reason != tt.wantMcpErr {
+					t.Errorf("error %v: Reason = %q, want %q", e, e.Reason, tt.wantMcpErr)
+				}
+			}
+			if !slices.Equal(gotErrs, wantErrs) {
+				t.Errorf("error paths = %q, want %q", gotErrs, wantErrs)
+			}
+		})
+	}
+}
+
+// stateErrWant is one FileError that a Discover state test expects.
+type stateErrWant struct {
+	rel       string // the path below home or work, with forward slashes
+	inHome    bool
+	reason    string
+	untrusted bool
+}
+
+// checkDiscoverErrors compares the Path, Reason and Untrusted of the errors
+// of res with want, in order.
+func checkDiscoverErrors(t testing.TB, res Result, home, work string, want []stateErrWant) {
+	t.Helper()
+	if len(res.Errors) != len(want) {
+		t.Fatalf("got %d errors, want %d: %v", len(res.Errors), len(want), res.Errors)
+	}
+	for i, w := range want {
+		dir := work
+		if w.inHome {
+			dir = home
+		}
+		e := res.Errors[i]
+		wantPath := filepath.Join(dir, filepath.FromSlash(w.rel))
+		if e.Path != wantPath || e.Reason != w.reason || e.Untrusted != w.untrusted {
+			t.Errorf("errors[%d] = {Path: %q, Reason: %q, Untrusted: %v}, want {%q, %q, %v}",
+				i, e.Path, e.Reason, e.Untrusted, wantPath, w.reason, w.untrusted)
+		}
+	}
+}
+
+// TestDiscoverStateSettingsErrors checks a settings file with an error: it
+// gives one FileError after the errors of .mcp.json, with Untrusted set for
+// the project files only. It fails closed (see setMcpjsonStates): a source
+// that cannot be read could hold a rejection, so no .mcp.json server gets
+// StateEnabled from an approval in any other source; such a server falls back
+// to StateUnapproved. A rejection from a source that was read still gives
+// StateDisabled.
+func TestDiscoverStateSettingsErrors(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		// setup writes the settings files.
+		setup    func(t *testing.T, home, work string)
+		mcpJSON  string
+		want     map[string]State
+		wantErrs []stateErrWant
+	}{
+		{
+			name: "malformed local settings",
+			setup: func(t *testing.T, home, work string) {
+				writeFile(t, work, ".claude/settings.local.json", []byte(`{"enabledMcpjsonServers": ["a"],`))
+				writeFile(t, home, ".claude/settings.json", []byte(`{"enabledMcpjsonServers": ["b"]}`))
+			},
+			want: map[string]State{
+				"global-srv": StateEnabled,
+				"a":          StateUnapproved, "b": StateUnapproved,
+				"c": StateUnapproved, "d": StateUnapproved,
+			},
+			wantErrs: []stateErrWant{{rel: ".claude/settings.local.json", reason: reasonInvalidJSON, untrusted: true}},
+		},
+		{
+			// The bad type drops the whole file. The user file still
+			// counts for its rejection, but not for its approvals.
+			name: "bad type in project settings",
+			setup: func(t *testing.T, home, work string) {
+				writeFile(t, work, ".claude/settings.json", []byte(`{"enabledMcpjsonServers": ["a"], "disabledMcpjsonServers": "b"}`))
+				writeFile(t, home, ".claude/settings.json", []byte(`{"enableAllProjectMcpServers": true, "disabledMcpjsonServers": ["d"]}`))
+			},
+			want: map[string]State{
+				"global-srv": StateEnabled,
+				"a":          StateUnapproved, "b": StateUnapproved,
+				"c": StateUnapproved, "d": StateDisabled,
+			},
+			wantErrs: []stateErrWant{{rel: ".claude/settings.json", reason: reasonBadServerState, untrusted: true}},
+		},
+		{
+			// The user's own file is trusted, so its error is not
+			// Untrusted, although the .mcp.json step reads it.
+			name: "malformed user settings",
+			setup: func(t *testing.T, home, work string) {
+				writeFile(t, home, ".claude/settings.json", []byte(`[`))
+				writeFile(t, work, ".claude/settings.local.json", []byte(`{"enabledMcpjsonServers": ["a"], "disabledMcpServers": ["b"]}`))
+			},
+			want: map[string]State{
+				"global-srv": StateEnabled,
+				"a":          StateUnapproved, "b": StateDisabled,
+				"c": StateUnapproved, "d": StateUnapproved,
+			},
+			wantErrs: []stateErrWant{{rel: ".claude/settings.json", inHome: true, reason: reasonInvalidJSON}},
+		},
+		{
+			// A symlink out of WorkDir is refused: a repository must not
+			// make mcpmoat read the user's approvals from another path.
+			name: "local settings symlink out of WorkDir",
+			setup: func(t *testing.T, home, work string) {
+				skipOnWindows(t)
+				target := writeFile(t, home, "elsewhere.json", []byte(`{"enableAllProjectMcpServers": true}`))
+				symlinkTo(t, target, work, ".claude/settings.local.json")
+			},
+			want: map[string]State{
+				"global-srv": StateEnabled,
+				"a":          StateUnapproved, "b": StateUnapproved,
+				"c": StateUnapproved, "d": StateUnapproved,
+			},
+			wantErrs: []stateErrWant{{rel: ".claude/settings.local.json", reason: reasonOutsideProject, untrusted: true}},
+		},
+		{
+			// The settings errors come after the .mcp.json errors, in the
+			// order home, project, local.
+			name:    "all broken and a bad .mcp.json entry",
+			setup:   func(t *testing.T, home, work string) { writeBrokenSettings(t, home, work) },
+			mcpJSON: `{"mcpServers": {"a": {"command": "a"}, "x": {"type": "nope"}}}`,
+			want: map[string]State{
+				"global-srv": StateEnabled,
+				"a":          StateUnapproved,
+			},
+			wantErrs: []stateErrWant{
+				{rel: ".mcp.json", reason: reasonUnknownTransport, untrusted: true},
+				{rel: ".claude/settings.json", inHome: true, reason: reasonInvalidJSON},
+				{rel: ".claude/settings.json", reason: reasonInvalidJSON, untrusted: true},
+				{rel: ".claude/settings.local.json", reason: reasonInvalidJSON, untrusted: true},
+			},
+		},
+		{
+			// An error for one .mcp.json server is not a settings error, so
+			// the approvals of the other servers stay. The approval comes
+			// from the local file only, so it is project-approved.
+			name: "bad .mcp.json entry only",
+			setup: func(t *testing.T, _, work string) {
+				writeFile(t, work, ".claude/settings.local.json", []byte(`{"enabledMcpjsonServers": ["a"]}`))
+			},
+			mcpJSON: `{"mcpServers": {"a": {"command": "a"}, "x": {"type": "nope"}}}`,
+			want: map[string]State{
+				"global-srv": StateEnabled,
+				"a":          StateProjectApproved,
+			},
+			wantErrs: []stateErrWant{{rel: ".mcp.json", reason: reasonUnknownTransport, untrusted: true}},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			home, work := t.TempDir(), t.TempDir()
+			writeStateClaudeJSON(t, home, work, nil)
+			mcpJSON := tt.mcpJSON
+			if mcpJSON == "" {
+				mcpJSON = stateMcpJSON
+			}
+			writeFile(t, work, ".mcp.json", []byte(mcpJSON))
+			tt.setup(t, home, work)
+
+			res := Discover(t.Context(), Options{Home: home, WorkDir: work})
+
+			checkDiscoverStates(t, res, tt.want)
+			checkDiscoverErrors(t, res, home, work, tt.wantErrs)
+		})
+	}
+}
+
+// TestDiscoverStateLegacyErrors checks the errors of ~/.claude.json that can
+// hide the projects.<WorkDir> state. Such an error fails closed as a settings
+// error does: no .mcp.json server keeps an approval from the settings files.
+// An error for another project, or for one server, does not touch the state
+// of WorkDir.
+func TestDiscoverStateLegacyErrors(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		// claudeJSON makes ~/.claude.json for the project key work.
+		claudeJSON func(work string) string
+		want       map[string]State
+		wantErrs   []stateErrWant
+	}{
+		{
+			name: "bad state in the WorkDir project",
+			claudeJSON: func(work string) string {
+				return fmt.Sprintf(`{"mcpServers": {"global-srv": {"command": "g"}},
+					"projects": {%q: {"disabledMcpServers": "global-srv"}}}`, work)
+			},
+			// The bad list could turn off global-srv, but it cannot be
+			// read, so global-srv fails closed to StateUnapproved; the
+			// error makes the scan fail.
+			want: map[string]State{
+				"global-srv": StateUnapproved,
+				"a":          StateUnapproved, "b": StateUnapproved,
+				"c": StateUnapproved, "d": StateUnapproved,
+			},
+			wantErrs: []stateErrWant{{rel: ".claude.json", inHome: true, reason: reasonBadServerState}},
+		},
+		{
+			name: "malformed file",
+			claudeJSON: func(string) string {
+				return `{"mcpServers": `
+			},
+			want: map[string]State{
+				"a": StateUnapproved, "b": StateUnapproved,
+				"c": StateUnapproved, "d": StateUnapproved,
+			},
+			wantErrs: []stateErrWant{{rel: ".claude.json", inHome: true, reason: reasonInvalidJSON}},
+		},
+		{
+			// A lone surrogate in the servers of another project refuses
+			// the whole file, so the WorkDir state is lost too, and the
+			// approval of the user settings file must not hold.
+			name: "bad string in another project",
+			claudeJSON: func(work string) string {
+				return fmt.Sprintf(`{"mcpServers": {"global-srv": {"command": "g"}},
+					"projects": {%q: {"enabledMcpjsonServers": ["a"]}, %q: {"mcpServers": {"x": {"command": "\ud800"}}}}}`,
+					work, work+"-other")
+			},
+			want: map[string]State{
+				"a": StateUnapproved, "b": StateUnapproved,
+				"c": StateUnapproved, "d": StateUnapproved,
+			},
+			wantErrs: []stateErrWant{{rel: ".claude.json", inHome: true, reason: reasonBadString}},
+		},
+		{
+			name: "bad state in another project",
+			claudeJSON: func(work string) string {
+				return fmt.Sprintf(`{"mcpServers": {"global-srv": {"command": "g"}},
+					"projects": {%q: {"disabledMcpServers": 1}, %q: {"disabledMcpjsonServers": ["b"]}}}`, work+"-other", work)
+			},
+			want: map[string]State{
+				"global-srv": StateEnabled,
+				"a":          StateEnabled, "b": StateDisabled,
+				"c": StateEnabled, "d": StateEnabled,
+			},
+			wantErrs: []stateErrWant{{rel: ".claude.json", inHome: true, reason: reasonBadServerState}},
+		},
+		{
+			name: "bad global server entry",
+			claudeJSON: func(work string) string {
+				return fmt.Sprintf(`{"mcpServers": {"global-srv": {"command": "g"}, "x": {"type": "nope"}},
+					"projects": {%q: {"disabledMcpServers": ["global-srv"]}}}`, work)
+			},
+			want: map[string]State{
+				"global-srv": StateDisabled,
+				"a":          StateEnabled, "b": StateEnabled,
+				"c": StateEnabled, "d": StateEnabled,
+			},
+			wantErrs: []stateErrWant{{rel: ".claude.json", inHome: true, reason: reasonUnknownTransport}},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			home, work := t.TempDir(), t.TempDir()
+			writeFile(t, home, ".claude.json", []byte(tt.claudeJSON(work)))
+			writeFile(t, work, ".mcp.json", []byte(stateMcpJSON))
+			writeFile(t, home, ".claude/settings.json", []byte(`{"enableAllProjectMcpServers": true}`))
+
+			res := Discover(t.Context(), Options{Home: home, WorkDir: work})
+
+			checkDiscoverStates(t, res, tt.want)
+			checkDiscoverErrors(t, res, home, work, tt.wantErrs)
+		})
+	}
+}
+
+// TestDiscoverStateSameHomeAndWork checks that the settings file is read once
+// when WorkDir is the home directory: Home/.claude/settings.json is then also
+// WorkDir/.claude/settings.json. A bad file gives one trusted FileError, not a
+// second one with Untrusted set.
+func TestDiscoverStateSameHomeAndWork(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		settings string
+		want     State
+		wantErrs []stateErrWant
+	}{
+		{name: "approval", settings: `{"enabledMcpjsonServers": ["a"]}`, want: StateEnabled},
+		{
+			name:     "malformed",
+			settings: `{`,
+			want:     StateUnapproved,
+			wantErrs: []stateErrWant{{rel: ".claude/settings.json", inHome: true, reason: reasonInvalidJSON}},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			home := t.TempDir()
+			writeFile(t, home, ".mcp.json", []byte(`{"mcpServers": {"a": {"command": "a"}}}`))
+			writeFile(t, home, ".claude/settings.json", []byte(tt.settings))
+
+			res := Discover(t.Context(), Options{Home: home, WorkDir: home + "/"})
+
+			checkDiscoverStates(t, res, map[string]State{"a": tt.want})
+			checkDiscoverErrors(t, res, home, home, tt.wantErrs)
+		})
+	}
+}

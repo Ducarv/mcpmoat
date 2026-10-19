@@ -22,16 +22,16 @@ const emptyServers = "No MCP servers found.\n"
 //
 // The bound: a file can hold at most 10,000 servers, and auto-discovery reads
 // up to 5 files, so the table has at most 50,000 rows. A padded row is at most
-// 3 x (80+3) + 2 x (256+3) runes, plus 12 for the untrusted marker of SCOPE,
-// plus 5 x 3 bytes of padding: about 800 bytes for ASCII text ("+3" is the cut
-// marker). So the padding stays near 40 MB in the worst case. Multi-byte runes
+// 4 x (80+3) + 2 x (256+3) runes, plus 12 for the untrusted marker of SCOPE,
+// plus 6 x 3 bytes of padding: about 880 bytes for ASCII text ("+3" is the cut
+// marker). So the padding stays near 45 MB in the worst case. Multi-byte runes
 // and escaping make a cell longer (a control character becomes up to 10
 // bytes), so hostile text can reach a few hundred MB. That is still bounded,
 // and a real config is far from it.
 const (
-	// maxShortCellRunes is the cap for the short cells: NAME, CLIENT and
-	// TRANSPORT. 80 runes is more than any real server name, client or
-	// transport needs.
+	// maxShortCellRunes is the cap for the short cells: NAME, CLIENT,
+	// TRANSPORT and STATE. 80 runes is more than any real server name, client,
+	// transport or state needs.
 	maxShortCellRunes = 80
 
 	// maxPathRunes is the cap for SCOPE and SOURCE, which hold file paths. 256
@@ -56,6 +56,8 @@ const untrustedMarker = " (untrusted)"
 //	SCOPE         "global", or "project:" and the project path; a server
 //	              from a project file also shows " (untrusted)"
 //	TRANSPORT     stdio, http or sse
+//	STATE         enabled, disabled, unapproved or project-approved
+//	              (discover.State.String); "unknown" for any other value
 //	SOURCE        the config file that declared the server
 //	COMMAND/URL   the redacted command line for stdio (see
 //	              formatCommand), the redacted URL for http and sse
@@ -68,7 +70,7 @@ const untrustedMarker = " (untrusted)"
 //
 // The padded columns (all but COMMAND/URL) go through cell. It cuts them with
 // [termsafe.Cut], and a cut cell ends with [termsafe.CutMarker]. NAME,
-// CLIENT and TRANSPORT are cut at 80 runes. SCOPE and SOURCE hold paths and
+// CLIENT, TRANSPORT and STATE are cut at 80 runes. SCOPE and SOURCE hold paths and
 // are cut at 256 runes, and an invalid UTF-8 byte counts as one rune. The cut
 // is made on the raw text, before escaping, so an escaped cell can be longer
 // than the cap. These limits stop padding amplification: see
@@ -108,13 +110,16 @@ func WriteServers(w io.Writer, servers []discover.Server) error {
 		_, firstErr = fmt.Fprintf(tw, format, args...)
 	}
 
-	write("NAME\tCLIENT\tSCOPE\tTRANSPORT\tSOURCE\tCOMMAND/URL\n")
+	write("NAME\tCLIENT\tSCOPE\tTRANSPORT\tSTATE\tSOURCE\tCOMMAND/URL\n")
 	for _, s := range servers {
-		write("%s\t%s\t%s\t%s\t%s\t%s\n",
+		write("%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
 			cell(s.Name, maxShortCellRunes),
 			cell(string(s.Client), maxShortCellRunes),
 			scopeCell(s),
 			cell(string(s.Transport), maxShortCellRunes),
+			// The state text is a fixed mcpmoat string, but it goes through
+			// cell like every padded cell.
+			cell(s.State.String(), maxShortCellRunes),
 			cell(s.Source, maxPathRunes),
 			commandCell(s),
 		)
@@ -135,8 +140,8 @@ func WriteServers(w io.Writer, servers []discover.Server) error {
 // spaces, so a name such as "a   b" would otherwise look like two cells.
 // termsafe.Quote keeps such a text as it is, because a space is safe in a
 // message line. Only the shown part counts: a space after the cut does not
-// make the cell quoted. CLIENT and TRANSPORT hold fixed values without a
-// space, so the rule changes only NAME, SCOPE and SOURCE.
+// make the cell quoted. CLIENT, TRANSPORT and STATE hold fixed values
+// without a space, so the rule changes only NAME, SCOPE and SOURCE.
 func cell(s string, limit int) string {
 	short, cut := termsafe.Cut(s, limit)
 	c := termsafe.QuoteIf(short, strings.Contains(short, " "))

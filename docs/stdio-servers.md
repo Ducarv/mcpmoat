@@ -18,9 +18,10 @@ use the network. Use `--no-connect` for servers that you do not trust.
 
 ## No shell
 
-mcpmoat runs the `command` and `args` from the client config exactly as written, byte for byte.
-It does not use a shell. Nothing expands globs, variables, quotes or `~`. The program sees the
-same `argv` that your client gives it, with the command as written in `argv[0]`.
+mcpmoat runs the `command` and `args` from the client config exactly as written, byte for byte,
+after it expands the `${...}` placeholders the same way as your client (see
+[Placeholders](#placeholders)). It does not use a shell. Nothing else expands globs, quotes or `~`.
+The program sees the same `argv` that your client gives it, with the command in `argv[0]`.
 
 ## The base environment
 
@@ -44,6 +45,9 @@ Codex, plus `LC_CTYPE`.
 | `__CF_USER_TEXT_ENCODING` | macOS text encoding. It is in the Codex list. It is not set on Linux. |
 
 Names are case-sensitive. `Path` is not `PATH`.
+
+mcpmoat also adds one variable of its own: `npm_config_yes=false` (see
+[npx and package installs](#npx-and-package-installs)).
 
 ## What is not passed
 
@@ -89,22 +93,85 @@ GITHUB_PERSONAL_ACCESS_TOKEN = "<your value>"
 
 - A variable in the config env wins over the same variable in the base set. For example, a
   `PATH` in the config replaces your `PATH`.
-- mcpmoat does not expand `${VAR}` placeholders yet (issue #88). It passes them as written. So a
-  server that needs the expanded value can fail to authenticate.
+- mcpmoat expands the `${...}` placeholders in the values before it starts the server (see
+  [Placeholders](#placeholders)). It does not expand the names.
 - An empty name, a name with `=` or a NUL byte, or a value with a NUL byte is not valid. Then
   mcpmoat does not start the server. The error message never shows the name or the value, because
   either one can hold a secret.
+
+## Placeholders
+
+A client config can hold `${...}` placeholders, for example `"GITHUB_TOKEN": "${GITHUB_TOKEN}"`.
+Your client replaces them with values from your environment before it starts the server. mcpmoat
+does the same, with the syntax of the client that owns the config:
+
+- Claude Code: `${VAR}` and `${VAR:-default}`. A variable that is set but empty gives an empty
+  value, not the default.
+- Cursor: `${env:NAME}`, `${userHome}`, `${workspaceFolder}`, `${workspaceFolderBasename}`,
+  `${pathSeparator}` and `${/}`.
+- Codex: no placeholders. mcpmoat passes the text as written.
+
+Rules:
+
+- The values come from your environment, the one that you start mcpmoat in. A placeholder can
+  read any variable, not only the base set. So a config can pass a variable such as
+  `GITHUB_TOKEN` to the server, the same as in your client.
+- mcpmoat expands the command, the arguments, the URL, and the values of `env` and `headers`. It
+  does not expand the names.
+- When a variable is not set and the placeholder has no default, mcpmoat does not start the
+  server. The error names the variable, never a value. Cursor probably uses an empty value in
+  this case. mcpmoat stops instead.
+- The error shows the name only when it is a plain variable name: ASCII letters, digits and `_`,
+  not a digit first, at most 64 bytes. Otherwise it says "variable with an invalid name". A
+  secret value can hold `${` by chance, so the text inside `${...}` can be part of the secret.
+- An expanded text can be at most 64 KiB long, and the expanded texts of one server together at
+  most 1 MiB. Over a limit, mcpmoat does not start the server.
+- A Cursor workspace placeholder (`${workspaceFolder}` or `${workspaceFolderBasename}`) in a
+  global Cursor server gives an error, because that server has no project.
+- The server list shows the config as written, not the expanded values. mcpmoat removes the
+  expanded values of 8 bytes or more from its error messages. A shorter value is not removed, so it
+  can show in an error message that the server sends back.
+
+## npx and package installs
+
+When its input is not a terminal, `npx` does not ask before it installs a package. A server gets a
+pipe as input, not your terminal. So `npx some-tool` installs `some-tool` from the public npm
+registry and runs it when it is not installed on your machine. Anyone can publish a package with
+that name.
+
+So mcpmoat always adds `npm_config_yes=false` to the environment of the server. Then `npx` (npm 7
+or later) stops with an error and installs nothing.
+
+Your config still wins:
+
+- With `-y` or `--yes` in the `args`, `npx` installs the package, the same as in your client.
+- With `npm_config_yes` in the `env` of the server (in any letter case), mcpmoat does not add its
+  own value.
+
+Limits:
+
+- `pnpm dlx`, `bunx`, `uvx` and the standalone `npx` from before npm 7 ignore this variable. They
+  can still install a package that is not on your machine.
+- The variable also goes to every `npm` command that the server starts itself. This is a small
+  difference from your client.
 
 ## Work directory
 
 - When the config sets an absolute `cwd` (Codex only), the server runs in that directory, as
   written. Files in that directory can change what runs, the same as in your client.
+- Else, a trusted project server runs in its project directory, the same as in your client. An
+  example is a server in the `projects` section of `~/.claude.json`. The project directory must
+  exist. Files in the project, such as `node_modules/.bin` and `.npmrc`, can change what runs, the
+  same as in your client.
 - Else the server runs in a private, empty directory that mcpmoat makes for it.
 
-When the config sets no absolute `cwd`, mcpmoat does not use your current directory, your home
-directory, `/tmp` or the project directory as the work directory. It makes the private directory
-in your user cache directory (`~/.cache/mcpmoat` on Linux, `~/Library/Caches/mcpmoat` on macOS).
-On Linux, `$XDG_CACHE_HOME` can move the cache directory.
+A server from a project file that a repository can ship (see [Project servers](#project-servers))
+never runs in its project directory, also when you opt in to start it.
+
+When neither of the first two cases applies, mcpmoat does not use your current directory, your
+home directory, `/tmp` or the project directory as the work directory. It makes the private
+directory in your user cache directory (`~/.cache/mcpmoat` on Linux, `~/Library/Caches/mcpmoat` on
+macOS). On Linux, `$XDG_CACHE_HOME` can move the cache directory.
 
 The reason is that npm and uv also look in the parent directories of the work directory for
 `node_modules`, `.npmrc`, `package.json`, `pyproject.toml` and `uv.toml`, and these files can
@@ -116,15 +183,17 @@ Your home directory is one of these parent directories. So npm and uv can still 
 `~/node_modules`, `~/package.json` or `~/pyproject.toml`. This is accepted: you own your home
 directory, and your client sees the same files.
 
-A relative command with a `/`, such as `./server`, needs an absolute `cwd` in the config. Without
-one, mcpmoat does not guess a directory and does not start the server.
+A relative command with a `/`, such as `./server`, needs an absolute `cwd` in the config or a
+project directory. Without one, mcpmoat does not guess a directory and does not start the server.
 
-Limit: your client can run a project server in the project root. mcpmoat does not do that, so a
-server that reads files from its work directory can act differently in mcpmoat.
+Limit: your client can run a global server in the directory where you started the client, and a
+server from a repository project file in the project root. mcpmoat runs these servers in the
+private directory, so a server that reads files from its work directory can act differently in
+mcpmoat.
 
-Note: the server runs in an empty private directory with a small environment. So a malicious server
-could notice that mcpmoat started it, not your client, and act differently. Pins and rules see
-only what the server shows to mcpmoat.
+Note: a server can run in an empty private directory with a small environment. So a malicious
+server could notice that mcpmoat started it, not your client, and act differently. Pins and rules
+see only what the server shows to mcpmoat.
 
 ## Terminal
 
@@ -166,6 +235,24 @@ Risks:
 A server from a project file (`.mcp.json`, `.cursor/mcp.json` or a project `.codex/config.toml`)
 is untrusted, because a cloned repository can ship that file. mcpmoat does not start such a server
 without an explicit opt-in from you. The opt-in flag comes in a later release.
+
+## Disabled and unapproved servers
+
+Your client can turn a server off, and Claude Code asks you to approve each server in `.mcp.json`.
+`mcpmoat scan --no-connect` shows this in the `STATE` column: `enabled`, `disabled`,
+`unapproved` or `project-approved`. A `project-approved` server is approved only by files from the
+repository, not by you. A cloned repository can approve its own servers, so mcpmoat does not count
+that approval.
+
+mcpmoat does not start a `disabled`, `unapproved` or `project-approved` server without an explicit
+opt-in from you. This opt-in is separate from the opt-in for project servers. A server that is both
+untrusted and disabled, unapproved or project-approved needs both opt-ins.
+
+mcpmoat checks the state first, then whether the server is untrusted. When both checks refuse a
+server, the error tells about the state.
+
+No command-line flag exists for these opt-ins yet. They come when `mcpmoat scan` connects to
+servers.
 
 ## Platforms
 

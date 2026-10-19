@@ -27,6 +27,8 @@ func writeTable(t *testing.T, servers ...discover.Server) string {
 
 // threeServers returns one stdio, one http and one project-scope sse server.
 // The sse server comes from a project file, so it is untrusted.
+// The three servers have three of the states: stdio is enabled (the zero value),
+// http is disabled and sse is unapproved.
 // The stdio server has a canary value in Args, the http server has canary
 // values in the URL, and the stdio and http servers have canary values in Env
 // and Headers.
@@ -55,6 +57,7 @@ func threeServers() []discover.Server {
 			Headers: discover.SecretMap{
 				"Authorization": discover.NewSecret("Bearer " + discovertest.CanaryHeader),
 			},
+			State: discover.StateDisabled,
 		},
 		{
 			Name:        "legacy",
@@ -65,6 +68,7 @@ func threeServers() []discover.Server {
 			Untrusted:   true,
 			Transport:   discover.TransportSSE,
 			URL:         discover.NewURL("https://sse.example.com/events"),
+			State:       discover.StateUnapproved,
 		},
 	}
 }
@@ -75,13 +79,58 @@ func TestWriteServersExactTable(t *testing.T) {
 	// Columns are padded to the widest cell plus 3 spaces. The last column has
 	// no padding. Secrets and credentials never show: the args go through the
 	// RedactArgs allowlist.
-	const want = "NAME     CLIENT        SCOPE                           TRANSPORT   SOURCE                     COMMAND/URL\n" +
-		"fs       claude-code   global                          stdio       /home/u/.claude.json       npx -y @scope/server-fs --token ******** /data\n" +
-		"remote   cursor        global                          http        /home/u/.cursor/mcp.json   https://********@example.com/mcp?k=********\n" +
-		"legacy   claude-code   project:/work/app (untrusted)   sse         /work/app/.mcp.json        https://sse.example.com/events\n"
+	const want = "NAME     CLIENT        SCOPE                           TRANSPORT   STATE        SOURCE                     COMMAND/URL\n" +
+		"fs       claude-code   global                          stdio       enabled      /home/u/.claude.json       npx -y @scope/server-fs --token ******** /data\n" +
+		"remote   cursor        global                          http        disabled     /home/u/.cursor/mcp.json   https://********@example.com/mcp?k=********\n" +
+		"legacy   claude-code   project:/work/app (untrusted)   sse         unapproved   /work/app/.mcp.json        https://sse.example.com/events\n"
 
 	if got := writeTable(t, threeServers()...); got != want {
 		t.Errorf("WriteServers() =\n%q\nwant\n%q", got, want)
+	}
+}
+
+// TestWriteServersStateCell checks the STATE cell, the fifth column, for
+// every State value. A value that is not a known State shows as "unknown":
+// the table never prints a number or an empty cell for it.
+func TestWriteServersStateCell(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name  string
+		state discover.State
+		want  string
+	}{
+		{name: "zero value is enabled", state: discover.State(0), want: "enabled"},
+		{name: "enabled", state: discover.StateEnabled, want: "enabled"},
+		{name: "disabled", state: discover.StateDisabled, want: "disabled"},
+		{name: "unapproved", state: discover.StateUnapproved, want: "unapproved"},
+		{name: "project-approved", state: discover.StateProjectApproved, want: "project-approved"},
+		{name: "unknown value", state: discover.State(99), want: "unknown"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			s := oneServer("srv")
+			s.State = tt.state
+
+			out := writeTable(t, s)
+			lines := strings.Split(strings.TrimSuffix(out, "\n"), "\n")
+			if len(lines) != 2 {
+				t.Fatalf("output has %d lines, want 2:\n%q", len(lines), out)
+			}
+			header := cellSplit.Split(lines[0], -1)
+			row := cellSplit.Split(lines[1], -1)
+			if len(header) != 7 || len(row) != 7 {
+				t.Fatalf("header has %d cells and row has %d cells, want 7 each:\n%q", len(header), len(row), out)
+			}
+			// STATE comes right after TRANSPORT.
+			if header[3] != "TRANSPORT" || header[4] != "STATE" {
+				t.Errorf("header cells 3 and 4 = %q, %q, want TRANSPORT, STATE", header[3], header[4])
+			}
+			if row[4] != tt.want {
+				t.Errorf("STATE cell = %q, want %q (row %q)", row[4], tt.want, lines[1])
+			}
+		})
 	}
 }
 
@@ -237,14 +286,14 @@ func TestWriteServersEscapesEveryCell(t *testing.T) {
 					}
 				}
 
-				// The table keeps its shape: a header and one row, each with 6 cells.
+				// The table keeps its shape: a header and one row, each with 7 cells.
 				lines := strings.Split(strings.TrimSuffix(out, "\n"), "\n")
 				if len(lines) != 2 {
 					t.Fatalf("output has %d lines, want 2:\n%q", len(lines), out)
 				}
 				for i, line := range lines {
-					if n := len(cellSplit.Split(line, -1)); n != 6 {
-						t.Errorf("line %d has %d cells, want 6: %q", i, n, line)
+					if n := len(cellSplit.Split(line, -1)); n != 7 {
+						t.Errorf("line %d has %d cells, want 7: %q", i, n, line)
 					}
 				}
 			})
@@ -327,7 +376,7 @@ func TestWriteServersWriteError(t *testing.T) {
 // The caps of the padded columns. They repeat the unexported constants in
 // servers.go, so a change there must change these tests on purpose.
 const (
-	maxShortCellRunes = 80  // NAME, CLIENT, TRANSPORT
+	maxShortCellRunes = 80  // NAME, CLIENT, TRANSPORT, STATE
 	maxPathRunes      = 256 // SCOPE, SOURCE
 )
 
@@ -371,8 +420,8 @@ func TestWriteServersPaddingAmplification(t *testing.T) {
 	out := writeTable(t, servers...)
 	t.Logf("output size: %d bytes for %d servers", len(out), len(servers))
 
-	// A short row is about 83 + 3 + 5 + 3 + 6 + 3 + 5 + 3 + 259 + 3 + 3 + 1 = 377
-	// bytes, so 10,002 rows give about 3.8 MB. Allow up to 8 MiB.
+	// A short row is about 83 + 3 + 5 + 3 + 6 + 3 + 5 + 3 + 7 + 3 + 259 + 3 + 3 + 1
+	// = 387 bytes, so 10,002 rows give about 3.9 MB. Allow up to 8 MiB.
 	if limit := 8 << 20; len(out) >= limit {
 		t.Errorf("output is %d bytes, want less than %d", len(out), limit)
 	}

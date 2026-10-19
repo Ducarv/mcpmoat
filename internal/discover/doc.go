@@ -9,7 +9,10 @@
 // # Server model
 //
 // A [Server] is one server entry from one config file. Its values are kept
-// exactly as written in the config; see [Server] for the details.
+// exactly as written in the config; see [Server] for the details. This
+// includes ${...} placeholders: the readers never expand them (see
+// Placeholders). [Server.State] tells whether the client turns the server
+// on or off (see Server state).
 //
 // # Secrets
 //
@@ -73,7 +76,9 @@
 // (~/.claude.json, ~/.cursor/mcp.json or ~/.codex/config.toml below the home
 // directory that the caller gives): the same file by [os.SameFile].
 // ReadConfig then reads the global path as a global file, with the reader
-// that Discover uses for it. See [ReadConfig] for what "names" means.
+// that Discover uses for it. See [ReadConfig] for what "names" means. One
+// difference: ReadConfig knows no WorkDir, so a top-level server of
+// ~/.claude.json can have another State than in Discover (see Server state).
 //
 // For any other file, ReadConfig detects the format with [DetectClient],
 // which gives the rules and their known limits. A file with no servers is
@@ -262,6 +267,233 @@
 // The user's own files are trusted: ~/.claude.json (also the servers under
 // its projects.<path> keys, which Claude Code writes when the user adds a
 // server), ~/.cursor/mcp.json and the Codex file.
+//
+// # Server state
+//
+// [Server.State] tells whether the client config turns a server on or off.
+// It has four values:
+//
+//   - [StateEnabled]: no config that mcpmoat reads turns the server off.
+//   - [StateDisabled]: a client config turns the server off.
+//   - [StateUnapproved]: the server comes from a Claude Code project
+//     .mcp.json, and the user did not approve it. A top-level server of
+//     ~/.claude.json also gets it when Discover cannot read the
+//     projects.<WorkDir> state (see the rules below).
+//   - [StateProjectApproved]: the server comes from a Claude Code project
+//     .mcp.json, and Claude Code would run it, but only files from the
+//     repository approved it. inspect treats it as StateUnapproved.
+//
+// The zero value is StateEnabled. This fails open: a reader that does not
+// set State, and a client setting that mcpmoat does not read, give
+// StateEnabled.
+//
+// State and Untrusted are separate. State is the on and off switch, or the
+// approval, of the client. Untrusted tells where the config came from (see
+// Untrusted files). A server can be untrusted and enabled, or trusted and
+// disabled. Package internal/inspect must not start or connect to a server
+// whose State is not StateEnabled (StateProjectApproved too) without an
+// explicit opt-in. That opt-in is
+// separate from the opt-in for untrusted servers, so a server that is both
+// disabled and untrusted needs both.
+//
+// Codex: the enabled key of the server table. enabled = false gives
+// StateDisabled. No key, or enabled = true, gives StateEnabled. A value that
+// is not a TOML boolean (for example the string "false") makes the entry
+// bad: a FileError with the reason "invalid server entry", and the server is
+// dropped.
+//
+// Claude Code uses four exact keys:
+//
+//   - enabledMcpjsonServers: the names of the .mcp.json servers that the
+//     user approved.
+//   - disabledMcpjsonServers: the names of the .mcp.json servers that the
+//     user rejected.
+//   - disabledMcpServers: the names of the servers, of any scope, that the
+//     user turned off for one project.
+//   - enableAllProjectMcpServers: true approves all .mcp.json servers.
+//
+// The three lists are arrays of strings, and enableAllProjectMcpServers is a
+// boolean. An absent key or a null value gives no setting. A key with the
+// wrong type gives a FileError with the reason "invalid enabled or approval
+// setting", and a name with a bad string gives "invalid string". The error
+// holds no value. A key in another letter case is ignored, as in Claude
+// Code.
+//
+// The keys can be in three kinds of places:
+//
+//   - the projects.<path> objects of ~/.claude.json (the legacy place,
+//     trusted);
+//   - Home/.claude/settings.json (the user file, trusted, size limit
+//     maxConfigSize);
+//   - WorkDir/.claude/settings.json and WorkDir/.claude/settings.local.json
+//     (project files, untrusted: they are read inside WorkDir as other
+//     project files are, see Symlinks, with the size limit
+//     maxProjectConfigSize, and their errors have Untrusted set).
+//
+// The rules:
+//
+//   - A server of projects.<path>.mcpServers whose name is in
+//     projects.<path>.disabledMcpServers gets StateDisabled. A bad state
+//     key in projects.<path> gives a FileError with ProjectPath <path>, and
+//     the servers of that project are dropped. This fails closed: a server
+//     that the unreadable list can turn off never shows as StateEnabled.
+//     The other projects are still read.
+//   - In [Discover], the projects.<WorkDir>.disabledMcpServers list also
+//     gives StateDisabled to the top-level servers of ~/.claude.json.
+//     Discover looks up two keys for WorkDir: WorkDir as given, and WorkDir
+//     with its symlinks resolved, because Claude Code writes the key with
+//     the real path. The disabled lists of both keys apply. The approval
+//     (enabledMcpjsonServers and enableAllProjectMcpServers) comes from one
+//     key only: WorkDir as given if the file has it, else the resolved
+//     WorkDir. A bad state under either key is a failure (see the next
+//     rule).
+//   - In Discover, this fails closed. When ~/.claude.json exists but its
+//     projects section is not read to the end (a read error, a file refused
+//     as a whole, also for a bad string in another project, a projects
+//     value that is not an object, or a canceled read), or when a
+//     projects.<WorkDir> object or its state has an error, a top-level
+//     server with StateEnabled gets StateUnapproved. mcpmoat cannot confirm
+//     that the lost disabledMcpServers list does not turn it off. A missing
+//     file, and a file with no projects.<WorkDir> key, are not failures.
+//   - In Discover, each .mcp.json server gets its State from the sources
+//     below, in this order of precedence: settings.local.json, the project
+//     settings.json, the user settings.json, then the projects.<WorkDir>
+//     object of ~/.claude.json (legacy).
+//
+// For a .mcp.json server, the rule is:
+//
+//  1. A name in any disabledMcpjsonServers gives StateDisabled.
+//  2. Else the server is approved when its name is in any
+//     enabledMcpjsonServers, or when enableAllProjectMcpServers is true:
+//     for this key the first source in the order above that has it decides,
+//     and a later source cannot change it. The approval gives StateEnabled
+//     when a trusted source (the user settings.json or the legacy
+//     projects.<WorkDir> object) gives it. It gives StateProjectApproved
+//     when only the untrusted project settings files give it.
+//  3. Else the server gets StateUnapproved.
+//  4. Last, a name in any disabledMcpServers gives StateDisabled, also when
+//     step 2 approved the server.
+//
+// Steps 2 and 3 as a table, for a name that no disabled list holds.
+// "Trusted list" and "untrusted list" are the enabledMcpjsonServers lists
+// of the trusted and of the untrusted sources. "enableAll" is the first
+// enableAllProjectMcpServers in the order above, and the kind of its source.
+//
+//	trusted list  untrusted list  enableAll          State
+//	has name      any             any                StateEnabled
+//	no name       any             true, trusted      StateEnabled
+//	no name       any             true, untrusted    StateProjectApproved
+//	no name       has name        absent or false    StateProjectApproved
+//	no name       no name         absent or false    StateUnapproved
+//
+// Discover reads the settings files only when WorkDir/.mcp.json has
+// servers. A missing settings file gives no setting. When Home and WorkDir
+// are the same directory (the cleaned paths are equal as text),
+// WorkDir/.claude/settings.json is the user file: Discover reads it once,
+// as the trusted user file. It still reads
+// WorkDir/.claude/settings.local.json as a project file.
+//
+// The approval fails closed. A source that failed loses its disabled lists,
+// and another source could then approve a server that the lost list turns
+// off. So when any settings file has a FileError, or when the
+// projects.<WorkDir> state of ~/.claude.json could not be read (the same
+// cases as for the top-level servers above), no .mcp.json server keeps an
+// approval: a server with StateEnabled or StateProjectApproved gets
+// StateUnapproved, and StateDisabled stays. A missing file is not a failure.
+// The FileError tells the user why, and the scan fails.
+//
+// A cloned repository can ship a settings file that approves its own
+// .mcp.json servers. So an approval in a project settings file is not a sign
+// of trust: it gives only StateProjectApproved, which needs the same opt-in
+// as StateUnapproved, and it never changes Untrusted. inspect still needs
+// the untrusted opt-in for these servers too.
+//
+// Cursor keeps its on and off switch in its SQLite store. mcpmoat does not
+// read that store, so every Cursor server has StateEnabled, also when the
+// user turned it off in Cursor. This is a known limit.
+//
+// Other known limits:
+//
+//   - [ReadConfig] and a standalone [ReadClaudeCode] know no WorkDir and
+//     read no settings file, so they have no approval data. The .mcp.json
+//     servers keep StateEnabled (not StateUnapproved), and no project state
+//     applies to the top-level servers of ~/.claude.json. Only
+//     projects.<path>.disabledMcpServers of a global ~/.claude.json applies,
+//     to the servers of that same project. A file that turns a server off
+//     itself (Codex enabled = false) still gives StateDisabled.
+//   - The projects key of ~/.claude.json must match the cleaned WorkDir, as
+//     given or with its symlinks resolved. Any other form of the same
+//     directory does not match: for example another letter case on a
+//     case-insensitive file system. Then no state of that project applies:
+//     its disabled lists are lost (the top-level servers keep
+//     StateEnabled), and its approvals are lost (the .mcp.json servers can
+//     get StateUnapproved).
+//   - A disabledMcpServers list in a settings file applies to the .mcp.json
+//     servers only. It is not verified that Claude Code honours it there for
+//     the servers of other scopes, so the top-level servers of
+//     ~/.claude.json do not get StateDisabled from it.
+//   - Managed settings files (set by an administrator) are not read.
+//   - The rule above follows the keys that Claude Code writes. Its exact
+//     merge order in Claude Code is not verified.
+//
+// # Placeholders
+//
+// The readers keep ${...} placeholders as written, and the output shows them
+// as written. The readers never expand them. [Expand] replaces them, with the
+// syntax of the client that declared the server. Package internal/inspect
+// calls it just before it starts or connects to a server, after its state
+// and untrusted checks.
+//
+// The syntax per client:
+//
+//   - Claude Code: ${VAR} and ${VAR:-default}. A set variable gives its
+//     value, also when the value is empty: the default is only for an unset
+//     variable. An unset variable with no default gives
+//     [ErrMissingVariable]. "${}" and a "${" with no "}" after it stay as
+//     written. The text splits at the first ":-", so ${X:-a:-b} reads the
+//     variable X with the default "a:-b". This split is not verified
+//     against Claude Code.
+//   - Cursor: ${env:NAME}, ${userHome} (the HOME variable),
+//     ${workspaceFolder} (ProjectPath), ${workspaceFolderBasename} (the last
+//     element of ProjectPath), ${pathSeparator} and ${/} (the path separator
+//     of this system). An unset variable gives ErrMissingVariable. A
+//     workspace placeholder on a server with no ProjectPath (for example a
+//     server of ~/.cursor/mcp.json) gives [ErrNoWorkspaceFolder]. Cursor
+//     itself probably uses an empty value for an unset variable. Expand
+//     fails closed instead, so inspect never runs a server with a value that
+//     the user did not set. Other ${...} forms stay as written.
+//   - Codex: no expansion. Expand returns a copy of the server.
+//
+// More rules:
+//
+//   - The values come only from the lookup function that the caller gives.
+//     The package never reads the environment itself. inspect gives the
+//     environment that mcpmoat runs in, which is the user's own.
+//   - Expand replaces placeholders in Command, Args, the Env values, URL and
+//     the Headers values. It never expands the env and header names (the
+//     map keys) or another field.
+//   - Expand makes one pass over each text. A value or a default text that
+//     holds "${" is not expanded again.
+//   - The result has new Env and Headers maps, and the expanded values are
+//     in new [Args], [URL] and [Secret] values. They mask the values as
+//     before, and the rules of Secrets apply to them.
+//   - On a failure, Expand returns an *[ExpandError]. It holds the field
+//     (fixed text such as "args") and at most the variable name. It never
+//     holds a value, a default text or the text of the field. The name is
+//     untrusted text from the config, so the error keeps it only when it is
+//     a plain variable name: ASCII letters, digits and "_", not a digit
+//     first, at most 64 bytes. For any other name, the error says "variable
+//     with an invalid name" and holds no name.
+//   - An expanded text can be at most 64 KiB long, and the expanded texts of
+//     one server together at most 1 MiB. Only a text in which Expand
+//     replaces a placeholder counts. Over a limit, Expand fails with
+//     [ErrExpandedTooLong], and inspect does not start or connect to the
+//     server.
+//
+// Expansion of an untrusted server sends values from the user's
+// environment to a command or a host that a repository chose. The client
+// does the same, but this is one more reason for the untrusted opt-in of
+// inspect.
 //
 // # Tests
 //

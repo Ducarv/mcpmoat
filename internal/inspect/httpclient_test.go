@@ -1,6 +1,7 @@
 package inspect
 
 import (
+	"context"
 	"crypto/tls"
 	"encoding/base64"
 	"errors"
@@ -10,6 +11,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/netip"
 	"net/url"
 	"os"
 	"os/exec"
@@ -1930,7 +1932,7 @@ func TestNewHTTPClientBaseTransport(t *testing.T) {
 
 	t.Run("response header limit is 64 KiB", func(t *testing.T) {
 		t.Parallel()
-		if got := newBaseTransport(nil).MaxResponseHeaderBytes; got != 64<<10 {
+		if got := newBaseTransport(nil, "").MaxResponseHeaderBytes; got != 64<<10 {
 			t.Errorf("MaxResponseHeaderBytes = %d, want %d", got, 64<<10)
 		}
 	})
@@ -3714,7 +3716,7 @@ func TestShapeBodyWrap(t *testing.T) {
 func TestNewBaseTransportSettings(t *testing.T) {
 	t.Parallel()
 
-	tr := newBaseTransport(nil)
+	tr := newBaseTransport(nil, "")
 	if tr.Proxy == nil {
 		t.Error("Proxy = nil, want proxyFromEnvironment")
 	}
@@ -3748,7 +3750,7 @@ func TestNewBaseTransportSettings(t *testing.T) {
 
 	// Each transport has its own TLS config, so no caller can change the
 	// config of another one.
-	if other := newBaseTransport(nil); other.TLSClientConfig == tr.TLSClientConfig {
+	if other := newBaseTransport(nil, ""); other.TLSClientConfig == tr.TLSClientConfig {
 		t.Error("two transports share one TLSClientConfig, want one each")
 	}
 
@@ -3772,4 +3774,149 @@ func TestNewBaseTransportSettings(t *testing.T) {
 		t.Fatalf("DialContext(%s) error = %v", ln.Addr(), err)
 	}
 	_ = conn.Close()
+}
+
+// TestRoundTripRecordsAddrRefused checks that headerTransport.RoundTrip
+// records an errAddrRefused from the base transport as the blocked error of
+// the request (issue #106), so the label survives when the SDK flattens the
+// error into text. Other transport errors are not blocked errors. The
+// request without a response also clears an older status of its record.
+func TestRoundTripRecordsAddrRefused(t *testing.T) {
+	t.Parallel()
+
+	const origin = "http://guarded.test"
+
+	tests := []struct {
+		name        string
+		baseErr     error
+		wantBlocked bool
+	}{
+		{name: "bare", baseErr: errAddrRefused, wantBlocked: true},
+		{name: "wrapped", baseErr: fmt.Errorf("dial: %w", errAddrRefused), wantBlocked: true},
+		{name: "in a net.OpError", baseErr: &net.OpError{Op: "dial", Net: "tcp", Err: errAddrRefused}, wantBlocked: true},
+		{name: "other dial error", baseErr: errors.New("dial tcp: connection refused")},
+		{name: "DNS error", baseErr: &net.DNSError{Err: "no such host", Name: "guarded.test", IsNotFound: true}},
+	}
+	for _, tt := range tests {
+		for _, withRec := range []bool{false, true} {
+			name := tt.name + "/fallback record"
+			if withRec {
+				name = tt.name + "/call record"
+			}
+			t.Run(name, func(t *testing.T) {
+				t.Parallel()
+				// /first answers 500, so the record has an old status that
+				// the refused request must clear. Every other request fails
+				// with the base error.
+				base := hcRoundTripFunc(func(req *http.Request) (*http.Response, error) {
+					if req.URL.Path == "/first" {
+						return hcResponse(req, http.StatusInternalServerError, "boom", nil), nil
+					}
+					return nil, tt.baseErr
+				})
+				client, ev, err := hcNew(hcURL(t, origin), nil, base, hcUA, 0)
+				if err != nil {
+					t.Fatal(err)
+				}
+
+				var rec *requestRecorder
+				target := &ev.fallback
+				if withRec {
+					rec = &requestRecorder{}
+					target = rec
+				}
+				if _, err := hcDo(t, client, rec, http.MethodGet, origin+"/first"); err != nil {
+					t.Fatal(err)
+				}
+				if s := target.lastStatus(); s != http.StatusInternalServerError {
+					t.Fatalf("lastStatus() after /first = %d, want 500", s)
+				}
+
+				ctx := t.Context()
+				if rec != nil {
+					ctx = withRecorder(ctx, rec)
+				}
+				req, err := http.NewRequestWithContext(ctx, http.MethodPost, origin+"/mcp", strings.NewReader("{}"))
+				if err != nil {
+					t.Fatal(err)
+				}
+				resp, err := client.Do(req)
+				if resp != nil {
+					_ = resp.Body.Close()
+				}
+				if !errors.Is(err, tt.baseErr) {
+					t.Fatalf("client.Do() error = %v, want the base error", err)
+				}
+
+				got := target.blockedErr()
+				if tt.wantBlocked {
+					if !errors.Is(got, errAddrRefused) {
+						t.Errorf("blockedErr() = %v, want errAddrRefused", got)
+					}
+				} else if got != nil {
+					t.Errorf("blockedErr() = %v, want nil for a plain transport error", got)
+				}
+				if s := target.lastStatus(); s != 0 {
+					t.Errorf("lastStatus() = %d after a request without a response, want 0", s)
+				}
+				if withRec {
+					if fb := ev.fallback.blockedErr(); fb != nil {
+						t.Errorf("fallback blockedErr() = %v, want nil: the request had a record", fb)
+					}
+				}
+
+				// stateFor gives the label for a flattened error too.
+				status, blocked := ev.stateFor(errors.New("flattened"))
+				if !withRec {
+					if tt.wantBlocked != errors.Is(blocked, errAddrRefused) || status != 0 {
+						t.Errorf("stateFor() = %d, %v; want 0 and blocked %v", status, blocked, tt.wantBlocked)
+					}
+				}
+			})
+		}
+	}
+}
+
+// TestAddrRefusedSurvivesFlattening runs the real chain: newBaseTransport
+// with a stub lookup that points the guarded name at 127.0.0.1, behind
+// newHTTPClient. The dial is refused before any connection, the refusal is
+// recorded, and classify still gives KindNetwork with the fixed reason when
+// the error that reaches it is only text, as the SDK can make it.
+func TestAddrRefusedSurvivesFlattening(t *testing.T) {
+	t.Parallel()
+
+	lookup := func(_ context.Context, _, _ string) ([]netip.Addr, error) {
+		return []netip.Addr{netip.MustParseAddr("127.0.0.1")}, nil
+	}
+	base := newBaseTransport(lookup, "guarded.test")
+	// No proxy: the test must not depend on HTTP_PROXY of the machine.
+	base.Proxy = nil
+	t.Cleanup(base.CloseIdleConnections)
+
+	const endpoint = "http://guarded.test:1/mcp"
+	client, ev, err := hcNew(hcURL(t, endpoint), nil, base, hcUA, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	hcMustFail(t, client, endpoint, errAddrRefused)
+
+	if got := ev.fallback.blockedErr(); !errors.Is(got, errAddrRefused) {
+		t.Fatalf("fallback blockedErr() = %v, want errAddrRefused", got)
+	}
+
+	srv := discover.Server{Name: "remote", Transport: discover.TransportHTTP, URL: discover.NewURL(endpoint)}
+	flat := errors.New("calling initialize: Post " + endpoint + ": " + errAddrRefused.Error())
+	ce := classify(flat, srv, ev, nil)
+	if ce.Kind != KindNetwork {
+		t.Errorf("classify().Kind = %q, want %q", ce.Kind, KindNetwork)
+	}
+	if ce.Reason != addrRefusedReason {
+		t.Errorf("classify().Reason = %q, want %q", ce.Reason, addrRefusedReason)
+	}
+	if !errors.Is(ce, errAddrRefused) {
+		t.Errorf("errors.Is(classify(), errAddrRefused) = false, want true")
+	}
+	if strings.Contains(ce.Reason, "127.0.0.1") || strings.Contains(ce.Reason, "guarded.test") {
+		t.Errorf("classify().Reason = %q, must hold no address and no host name", ce.Reason)
+	}
 }

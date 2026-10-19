@@ -12,3 +12,7 @@ cwd = "/tmp"
 [mcp_servers.args-str]
 command = "x"
 args = "not-a-list"
+
+[mcp_servers.enabled-str]
+command = "x"
+enabled = "false"

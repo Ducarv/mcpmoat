@@ -2,7 +2,9 @@ package inspect
 
 import (
 	"errors"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
@@ -13,6 +15,22 @@ import (
 
 // The helpers that only this file uses have the prefix "sc" (stdioCommand).
 // helpers_test.go holds the helpers that several test files share.
+
+// scNoInstall is the entry that stdioCommand adds to the child environment
+// unless the config declares npm_config_yes (issue #104). It is written out
+// here, not built from npmYesName, so a change of the name fails the tests.
+const scNoInstall = "npm_config_yes=false"
+
+// scProjectServer returns a trusted Claude Code project server with the
+// given command, whose ProjectPath is project.
+func scProjectServer(command, project string) discover.Server {
+	s := stdioServer(command)
+	s.Client = discover.ClientClaudeCode
+	s.Scope = discover.ScopeProject
+	s.Source = project + "/.mcp.json"
+	s.ProjectPath = project
+	return s
+}
 
 // scConfigInputs returns the values from the config of s and the
 // FallbackDir of opts. No error from stdioCommand may hold one of them.
@@ -95,7 +113,7 @@ func TestStdioCommand(t *testing.T) {
 					opts:     stdioOptions{Environ: []string{"PATH=/usr/bin", "HOME=/home/user"}, FallbackDir: fallback},
 					wantPath: "/opt/mcp/server",
 					wantDir:  fallback,
-					wantEnv:  []string{"HOME=/home/user", "PATH=/usr/bin"},
+					wantEnv:  []string{"HOME=/home/user", "PATH=/usr/bin", scNoInstall},
 				}
 			},
 		},
@@ -108,7 +126,7 @@ func TestStdioCommand(t *testing.T) {
 					opts:     stdioOptions{Environ: []string{}, FallbackDir: fallback},
 					wantPath: "/opt/mcp/server",
 					wantDir:  fallback,
-					wantEnv:  []string{},
+					wantEnv:  []string{scNoInstall},
 				}
 			},
 		},
@@ -125,7 +143,7 @@ func TestStdioCommand(t *testing.T) {
 					opts:     stdioOptions{FallbackDir: fallback},
 					wantPath: tool,
 					wantDir:  fallback,
-					wantEnv:  []string{"PATH=" + bin},
+					wantEnv:  []string{"PATH=" + bin, scNoInstall},
 				}
 			},
 		},
@@ -140,7 +158,7 @@ func TestStdioCommand(t *testing.T) {
 					opts:     stdioOptions{Environ: []string{"PATH=" + bin}, FallbackDir: fallback},
 					wantPath: tool,
 					wantDir:  fallback,
-					wantEnv:  []string{"PATH=" + bin},
+					wantEnv:  []string{"PATH=" + bin, scNoInstall},
 				}
 			},
 		},
@@ -160,7 +178,7 @@ func TestStdioCommand(t *testing.T) {
 					opts:     stdioOptions{Environ: []string{"PATH=" + parentBin}, FallbackDir: fallback},
 					wantPath: configTool,
 					wantDir:  fallback,
-					wantEnv:  []string{"PATH=" + configBin},
+					wantEnv:  []string{"PATH=" + configBin, scNoInstall},
 				}
 			},
 		},
@@ -175,7 +193,7 @@ func TestStdioCommand(t *testing.T) {
 					opts:     stdioOptions{FallbackDir: t.TempDir()},
 					wantPath: "./tool",
 					wantDir:  dir,
-					wantEnv:  []string{},
+					wantEnv:  []string{scNoInstall},
 				}
 			},
 		},
@@ -190,7 +208,7 @@ func TestStdioCommand(t *testing.T) {
 					opts:     stdioOptions{FallbackDir: t.TempDir()},
 					wantPath: "bin/tool",
 					wantDir:  dir,
-					wantEnv:  []string{},
+					wantEnv:  []string{scNoInstall},
 				}
 			},
 		},
@@ -204,7 +222,7 @@ func TestStdioCommand(t *testing.T) {
 					opts:     stdioOptions{FallbackDir: t.TempDir()},
 					wantPath: "/opt/mcp/server",
 					wantDir:  "/srv/mcp/../app/",
-					wantEnv:  []string{},
+					wantEnv:  []string{scNoInstall},
 				}
 			},
 		},
@@ -219,7 +237,7 @@ func TestStdioCommand(t *testing.T) {
 					opts:     stdioOptions{FallbackDir: fallback},
 					wantPath: "/opt/mcp/server",
 					wantDir:  fallback,
-					wantEnv:  []string{},
+					wantEnv:  []string{scNoInstall},
 				}
 			},
 		},
@@ -236,7 +254,7 @@ func TestStdioCommand(t *testing.T) {
 					opts:     stdioOptions{FallbackDir: fallback},
 					wantPath: "/opt/mcp/server",
 					wantDir:  fallback,
-					wantEnv:  []string{},
+					wantEnv:  []string{scNoInstall},
 				}
 			},
 		},
@@ -253,7 +271,7 @@ func TestStdioCommand(t *testing.T) {
 					opts:     stdioOptions{FallbackDir: fallback, AllowUntrusted: true},
 					wantPath: "/opt/mcp/server",
 					wantDir:  fallback,
-					wantEnv:  []string{},
+					wantEnv:  []string{scNoInstall},
 				}
 			},
 		},
@@ -271,7 +289,7 @@ func TestStdioCommand(t *testing.T) {
 					opts:     stdioOptions{FallbackDir: fallback},
 					wantPath: "/opt/mcp/server",
 					wantDir:  fallback,
-					wantEnv:  []string{},
+					wantEnv:  []string{scNoInstall},
 				}
 			},
 		},
@@ -294,7 +312,7 @@ func TestStdioCommand(t *testing.T) {
 					},
 					wantPath: "/opt/mcp/server",
 					wantDir:  fallback,
-					wantEnv:  []string{"PATH=/usr/bin"},
+					wantEnv:  []string{"PATH=/usr/bin", scNoInstall},
 				}
 			},
 		},
@@ -318,7 +336,230 @@ func TestStdioCommand(t *testing.T) {
 						"HOME=/override",
 						"REF=${HOME}/x",
 						"USER=user",
+						scNoInstall,
 					},
+				}
+			},
+		},
+		{
+			// npm_config_yes is not on the allowlist of the parent
+			// environment, so a parent "true" never reaches the child, and
+			// the forced "false" is added (issue #104).
+			name: "parent npm_config_yes is dropped and the forced entry is added",
+			setup: func(t *testing.T) stdioCase {
+				fallback := t.TempDir()
+				return stdioCase{
+					server: stdioServer("/opt/mcp/server"),
+					opts: stdioOptions{
+						Environ:     []string{"npm_config_yes=true", "NPM_CONFIG_YES=true", "PATH=/usr/bin"},
+						FallbackDir: fallback,
+					},
+					wantPath: "/opt/mcp/server",
+					wantDir:  fallback,
+					wantEnv:  []string{"PATH=/usr/bin", scNoInstall},
+				}
+			},
+		},
+		{
+			name: "declared npm_config_yes wins over the forced entry",
+			setup: func(t *testing.T) stdioCase {
+				fallback := t.TempDir()
+				s := stdioServer("/opt/mcp/server")
+				s.Env = secrets(map[string]string{"npm_config_yes": "true"})
+				return stdioCase{
+					server:   s,
+					opts:     stdioOptions{Environ: []string{"PATH=/usr/bin"}, FallbackDir: fallback},
+					wantPath: "/opt/mcp/server",
+					wantDir:  fallback,
+					wantEnv:  []string{"PATH=/usr/bin", "npm_config_yes=true"},
+				}
+			},
+		},
+		{
+			// npm reads its config variables in any letter case, so a
+			// declared name in another case also counts as set.
+			name: "declared NPM_CONFIG_YES in another case wins over the forced entry",
+			setup: func(t *testing.T) stdioCase {
+				fallback := t.TempDir()
+				s := stdioServer("/opt/mcp/server")
+				s.Env = secrets(map[string]string{"NPM_CONFIG_YES": "true"})
+				return stdioCase{
+					server:   s,
+					opts:     stdioOptions{Environ: []string{"PATH=/usr/bin"}, FallbackDir: fallback},
+					wantPath: "/opt/mcp/server",
+					wantDir:  fallback,
+					wantEnv:  []string{"NPM_CONFIG_YES=true", "PATH=/usr/bin"},
+				}
+			},
+		},
+		{
+			name: "disabled server with AllowDisabled",
+			setup: func(t *testing.T) stdioCase {
+				fallback := t.TempDir()
+				s := stdioServer("/opt/mcp/server")
+				s.State = discover.StateDisabled
+				return stdioCase{
+					server:   s,
+					opts:     stdioOptions{FallbackDir: fallback, AllowDisabled: true},
+					wantPath: "/opt/mcp/server",
+					wantDir:  fallback,
+					wantEnv:  []string{scNoInstall},
+				}
+			},
+		},
+		{
+			name: "unapproved server with AllowDisabled",
+			setup: func(t *testing.T) stdioCase {
+				fallback := t.TempDir()
+				s := stdioServer("/opt/mcp/server")
+				s.State = discover.StateUnapproved
+				return stdioCase{
+					server:   s,
+					opts:     stdioOptions{FallbackDir: fallback, AllowDisabled: true},
+					wantPath: "/opt/mcp/server",
+					wantDir:  fallback,
+					wantEnv:  []string{scNoInstall},
+				}
+			},
+		},
+		{
+			// A .mcp.json server that only the repository approves is also
+			// untrusted, so it needs both opt-ins.
+			name: "untrusted project-approved server with both opt-ins",
+			setup: func(t *testing.T) stdioCase {
+				fallback := t.TempDir()
+				s := stdioServer("/opt/mcp/server")
+				s.Untrusted = true
+				s.State = discover.StateProjectApproved
+				return stdioCase{
+					server:   s,
+					opts:     stdioOptions{FallbackDir: fallback, AllowUntrusted: true, AllowDisabled: true},
+					wantPath: "/opt/mcp/server",
+					wantDir:  fallback,
+					wantEnv:  []string{scNoInstall},
+				}
+			},
+		},
+		{
+			name: "untrusted and unapproved server with both opt-ins",
+			setup: func(t *testing.T) stdioCase {
+				fallback := t.TempDir()
+				s := stdioServer("/opt/mcp/server")
+				s.Untrusted = true
+				s.State = discover.StateUnapproved
+				return stdioCase{
+					server:   s,
+					opts:     stdioOptions{FallbackDir: fallback, AllowUntrusted: true, AllowDisabled: true},
+					wantPath: "/opt/mcp/server",
+					wantDir:  fallback,
+					wantEnv:  []string{scNoInstall},
+				}
+			},
+		},
+		{
+			name: "trusted project server runs in ProjectPath",
+			setup: func(t *testing.T) stdioCase {
+				project := t.TempDir()
+				s := scProjectServer("/opt/mcp/server", project)
+				return stdioCase{
+					server:   s,
+					opts:     stdioOptions{FallbackDir: t.TempDir()},
+					wantPath: "/opt/mcp/server",
+					wantDir:  project,
+					wantEnv:  []string{scNoInstall},
+				}
+			},
+		},
+		{
+			// A project directory counts as a configured directory, so a
+			// relative command stays relative and the kernel resolves it in
+			// the project, as in the client.
+			name: "trusted project server with a relative command resolves in ProjectPath",
+			setup: func(t *testing.T) stdioCase {
+				project := t.TempDir()
+				mustExecutable(t, project, "server")
+				s := scProjectServer("./server", project)
+				return stdioCase{
+					server:   s,
+					opts:     stdioOptions{FallbackDir: t.TempDir()},
+					wantPath: "./server",
+					wantDir:  project,
+					wantEnv:  []string{scNoInstall},
+				}
+			},
+		},
+		{
+			name: "trusted project server without FallbackDir needs none",
+			setup: func(t *testing.T) stdioCase {
+				project := t.TempDir()
+				s := scProjectServer("/opt/mcp/server", project)
+				return stdioCase{
+					server:   s,
+					opts:     stdioOptions{},
+					wantPath: "/opt/mcp/server",
+					wantDir:  project,
+					wantEnv:  []string{scNoInstall},
+				}
+			},
+		},
+		{
+			name: "absolute Dir wins over ProjectPath",
+			setup: func(t *testing.T) stdioCase {
+				dir := t.TempDir()
+				s := scProjectServer("/opt/mcp/server", t.TempDir())
+				s.Dir = dir
+				return stdioCase{
+					server:   s,
+					opts:     stdioOptions{FallbackDir: t.TempDir()},
+					wantPath: "/opt/mcp/server",
+					wantDir:  dir,
+					wantEnv:  []string{scNoInstall},
+				}
+			},
+		},
+		{
+			// An untrusted project file can name any directory, so the
+			// project directory is not used without the trust.
+			name: "untrusted project server with opt-in uses FallbackDir, not ProjectPath",
+			setup: func(t *testing.T) stdioCase {
+				fallback := t.TempDir()
+				s := scProjectServer("/opt/mcp/server", t.TempDir())
+				s.Untrusted = true
+				return stdioCase{
+					server:   s,
+					opts:     stdioOptions{FallbackDir: fallback, AllowUntrusted: true},
+					wantPath: "/opt/mcp/server",
+					wantDir:  fallback,
+					wantEnv:  []string{scNoInstall},
+				}
+			},
+		},
+		{
+			name: "trusted project server whose ProjectPath does not exist uses FallbackDir",
+			setup: func(t *testing.T) stdioCase {
+				fallback := t.TempDir()
+				s := scProjectServer("/opt/mcp/server", t.TempDir()+"/missing")
+				return stdioCase{
+					server:   s,
+					opts:     stdioOptions{FallbackDir: fallback},
+					wantPath: "/opt/mcp/server",
+					wantDir:  fallback,
+					wantEnv:  []string{scNoInstall},
+				}
+			},
+		},
+		{
+			name: "global server with a ProjectPath uses FallbackDir",
+			setup: func(t *testing.T) stdioCase {
+				fallback := t.TempDir()
+				s := scProjectServer("/opt/mcp/server", t.TempDir())
+				s.Scope = discover.ScopeGlobal
+				return stdioCase{
+					server:   s,
+					opts:     stdioOptions{FallbackDir: fallback},
+					wantPath: "/opt/mcp/server",
+					wantDir:  fallback,
+					wantEnv:  []string{scNoInstall},
 				}
 			},
 		},
@@ -331,7 +572,7 @@ func TestStdioCommand(t *testing.T) {
 					opts:     stdioOptions{Environ: nil, FallbackDir: fallback},
 					wantPath: "/opt/mcp/server",
 					wantDir:  fallback,
-					wantEnv:  []string{},
+					wantEnv:  []string{scNoInstall},
 				}
 			},
 		},
@@ -424,6 +665,67 @@ func TestStdioCommandErrors(t *testing.T) {
 				return s, stdioOptions{FallbackDir: t.TempDir()}
 			},
 			wantErr: errUntrusted,
+		},
+		{
+			name: "disabled server without opt-in",
+			setup: func(t *testing.T) (discover.Server, stdioOptions) {
+				s := stdioServer("/opt/"+canaryCmd, discovertest.CanaryArgs)
+				s.State = discover.StateDisabled
+				return s, stdioOptions{FallbackDir: t.TempDir()}
+			},
+			wantErr: errDisabled,
+		},
+		{
+			name: "unapproved server without opt-in",
+			setup: func(t *testing.T) (discover.Server, stdioOptions) {
+				s := stdioServer("/opt/"+canaryCmd, discovertest.CanaryArgs)
+				s.State = discover.StateUnapproved
+				return s, stdioOptions{FallbackDir: t.TempDir()}
+			},
+			wantErr: errUnapproved,
+		},
+		{
+			name: "project-approved server without opt-in",
+			setup: func(t *testing.T) (discover.Server, stdioOptions) {
+				s := stdioServer("/opt/"+canaryCmd, discovertest.CanaryArgs)
+				s.State = discover.StateProjectApproved
+				return s, stdioOptions{FallbackDir: t.TempDir()}
+			},
+			wantErr: errProjectApproved,
+		},
+		{
+			// A State value that inspect does not know fails closed.
+			name: "unknown state without opt-in",
+			setup: func(t *testing.T) (discover.Server, stdioOptions) {
+				s := stdioServer("/opt/"+canaryCmd, discovertest.CanaryArgs)
+				s.State = discover.State(200)
+				return s, stdioOptions{FallbackDir: t.TempDir()}
+			},
+			wantErr: errDisabled,
+		},
+		{
+			// AllowUntrusted does not open the state gate.
+			name: "untrusted disabled server with only AllowUntrusted",
+			setup: func(t *testing.T) (discover.Server, stdioOptions) {
+				s := stdioServer("/opt/"+canaryCmd, discovertest.CanaryArgs)
+				s.Untrusted = true
+				s.State = discover.StateDisabled
+				return s, stdioOptions{FallbackDir: t.TempDir(), AllowUntrusted: true}
+			},
+			wantErr: errDisabled,
+		},
+		{
+			// The project directory of an untrusted server is not a
+			// configured directory, so a relative command is refused.
+			name: "relative command of an untrusted project server",
+			setup: func(t *testing.T) (discover.Server, stdioOptions) {
+				project := t.TempDir()
+				mustExecutable(t, project, canaryCmd)
+				s := scProjectServer("./"+canaryCmd, project)
+				s.Untrusted = true
+				return s, stdioOptions{FallbackDir: t.TempDir(), AllowUntrusted: true}
+			},
+			wantErr: errRelativeCommand,
 		},
 		{
 			name: "empty command",
@@ -615,6 +917,83 @@ func TestStdioCommandCheckOrder(t *testing.T) {
 			wantErr: errUntrusted,
 		},
 		{
+			name: "transport before state gate",
+			setup: func(t *testing.T) (discover.Server, stdioOptions) {
+				s := stdioServer("/opt/mcp/server")
+				s.Transport = discover.TransportHTTP
+				s.State = discover.StateDisabled
+				return s, stdioOptions{FallbackDir: t.TempDir()}
+			},
+			wantErr: errNotStdio,
+		},
+		{
+			// Both gates refuse the server. The state gate comes first, so
+			// its error wins.
+			name: "state gate before untrusted gate",
+			setup: func(t *testing.T) (discover.Server, stdioOptions) {
+				s := stdioServer("/opt/mcp/server")
+				s.Untrusted = true
+				s.State = discover.StateUnapproved
+				return s, stdioOptions{FallbackDir: t.TempDir()}
+			},
+			wantErr: errUnapproved,
+		},
+		{
+			// A .mcp.json server is untrusted, and only the repository
+			// approves it: the state gate still wins.
+			name: "project-approved state gate before untrusted gate",
+			setup: func(t *testing.T) (discover.Server, stdioOptions) {
+				s := stdioServer("/opt/mcp/server")
+				s.Untrusted = true
+				s.State = discover.StateProjectApproved
+				return s, stdioOptions{FallbackDir: t.TempDir()}
+			},
+			wantErr: errProjectApproved,
+		},
+		{
+			// AllowDisabled opens the state gate only. The untrusted gate
+			// still refuses the server.
+			name: "AllowDisabled does not open the untrusted gate",
+			setup: func(t *testing.T) (discover.Server, stdioOptions) {
+				s := stdioServer("/opt/mcp/server")
+				s.Untrusted = true
+				s.State = discover.StateDisabled
+				return s, stdioOptions{FallbackDir: t.TempDir(), AllowDisabled: true}
+			},
+			wantErr: errUntrusted,
+		},
+		{
+			// AllowUntrusted opens the untrusted gate only. The state gate
+			// still refuses the server.
+			name: "AllowUntrusted does not open the state gate",
+			setup: func(t *testing.T) (discover.Server, stdioOptions) {
+				s := stdioServer("/opt/mcp/server")
+				s.Untrusted = true
+				s.State = discover.StateProjectApproved
+				return s, stdioOptions{FallbackDir: t.TempDir(), AllowUntrusted: true}
+			},
+			wantErr: errProjectApproved,
+		},
+		{
+			name: "state gate before empty command",
+			setup: func(t *testing.T) (discover.Server, stdioOptions) {
+				s := stdioServer("")
+				s.State = discover.StateDisabled
+				return s, stdioOptions{FallbackDir: t.TempDir()}
+			},
+			wantErr: errDisabled,
+		},
+		{
+			name: "state gate before env",
+			setup: func(t *testing.T) (discover.Server, stdioOptions) {
+				s := stdioServer("/opt/mcp/server")
+				s.State = discover.StateUnapproved
+				s.Env = badName(t)
+				return s, stdioOptions{}
+			},
+			wantErr: errUnapproved,
+		},
+		{
 			name: "empty command before env",
 			setup: func(t *testing.T) (discover.Server, stdioOptions) {
 				s := stdioServer("")
@@ -699,7 +1078,125 @@ func TestStdioCommandFallbackOnlyWhenNeeded(t *testing.T) {
 			if err != nil {
 				t.Fatalf("stdioCommand() error = %v, want nil", err)
 			}
-			scCheckCmd(t, cmd, s, "./tool", dir, []string{})
+			scCheckCmd(t, cmd, s, "./tool", dir, []string{scNoInstall})
+		})
+	}
+}
+
+// TestStateGate checks every state with and without the opt-in. Only
+// StateEnabled passes without the opt-in. StateProjectApproved is refused
+// as StateUnapproved is, with its own error. A state that inspect does not
+// know (State(4) and up) fails closed with errDisabled.
+func TestStateGate(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name  string
+		state discover.State
+		allow bool
+		want  error
+	}{
+		{name: "enabled", state: discover.StateEnabled, want: nil},
+		{name: "enabled with opt-in", state: discover.StateEnabled, allow: true, want: nil},
+		{name: "disabled", state: discover.StateDisabled, want: errDisabled},
+		{name: "disabled with opt-in", state: discover.StateDisabled, allow: true, want: nil},
+		{name: "unapproved", state: discover.StateUnapproved, want: errUnapproved},
+		{name: "unapproved with opt-in", state: discover.StateUnapproved, allow: true, want: nil},
+		{name: "project-approved", state: discover.StateProjectApproved, want: errProjectApproved},
+		{name: "project-approved with opt-in", state: discover.StateProjectApproved, allow: true, want: nil},
+		// State(4) is the first value after StateProjectApproved.
+		{name: "first unknown state", state: discover.State(4), want: errDisabled},
+		{name: "unknown state 200", state: discover.State(200), want: errDisabled},
+		{name: "largest unknown state", state: discover.State(255), want: errDisabled},
+		{name: "unknown state with opt-in", state: discover.State(255), allow: true, want: nil},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if got := stateGate(tt.state, tt.allow); !errors.Is(got, tt.want) {
+				t.Errorf("stateGate(%v, %v) = %v, want %v", tt.state, tt.allow, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestStdioCommandNpxProjectServer is the acceptance test of issue #104. A
+// trusted project server runs "npx local-only-tool". The child must start in
+// the project directory, where npx finds the locally installed tool, and get
+// npm_config_yes=false, so that npx never installs a package with that name
+// from the registry. A declared npm_config_yes wins.
+//
+// The npx here is a fake shell script in a temporary PATH: no real npm runs
+// and nothing goes to the network. The script writes its work directory, its
+// npm_config_yes value and its first argument to a file in its work
+// directory, so the test sees what the child really got.
+func TestStdioCommandNpxProjectServer(t *testing.T) {
+	t.Parallel()
+	skipOnWindows(t)
+
+	const script = "#!/bin/sh\n" +
+		"printf '%s\\n' \"$(pwd -P)\" \"${npm_config_yes-unset}\" \"$1\" > ./npx-ran\n"
+
+	tests := []struct {
+		name     string
+		declared map[string]string
+		wantYes  string
+		wantEnv  func(bin string) []string
+	}{
+		{
+			name:    "no declared npm_config_yes",
+			wantYes: "false",
+			wantEnv: func(bin string) []string { return []string{"PATH=" + bin, scNoInstall} },
+		},
+		{
+			name:     "declared npm_config_yes wins",
+			declared: map[string]string{"npm_config_yes": "true"},
+			wantYes:  "true",
+			wantEnv:  func(bin string) []string { return []string{"PATH=" + bin, "npm_config_yes=true"} },
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			bin := t.TempDir()
+			npx := bin + "/npx"
+			if err := os.WriteFile(npx, []byte(script), 0o600); err != nil {
+				t.Fatalf("write fake npx: %v", err)
+			}
+			if err := os.Chmod(npx, 0o700); err != nil { //nolint:gosec // G302: the fake npx must be executable
+				t.Fatalf("chmod fake npx: %v", err)
+			}
+			project := t.TempDir()
+
+			s := scProjectServer("npx", project)
+			s.Args = discover.NewArgs([]string{"local-only-tool"})
+			s.Env = secrets(tt.declared)
+			cmd, err := stdioCommand(s, stdioOptions{
+				Environ:     []string{"PATH=" + bin, "npm_config_yes=true"},
+				FallbackDir: t.TempDir(),
+			})
+			if err != nil {
+				t.Fatalf("stdioCommand() error = %v, want nil", err)
+			}
+			scCheckCmd(t, cmd, s, npx, project, tt.wantEnv(bin))
+
+			if err := cmd.Run(); err != nil {
+				t.Fatalf("run fake npx: %v", err)
+			}
+			b, err := os.ReadFile(filepath.Join(project, "npx-ran")) //nolint:gosec // G304: test reads a file under t.TempDir()
+			if err != nil {
+				t.Fatalf("read the output of fake npx: %v (it did not run in the project directory?)", err)
+			}
+			wantDir, err := filepath.EvalSymlinks(project)
+			if err != nil {
+				t.Fatalf("EvalSymlinks(%q) error = %v", project, err)
+			}
+			want := wantDir + "\n" + tt.wantYes + "\nlocal-only-tool\n"
+			if got := string(b); got != want {
+				t.Errorf("fake npx saw %q, want %q", got, want)
+			}
 		})
 	}
 }

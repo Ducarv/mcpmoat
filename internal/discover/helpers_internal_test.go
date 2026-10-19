@@ -291,6 +291,20 @@ func skipOnWindows(t testing.TB) {
 	}
 }
 
+// checkStates fails the test if a server in servers has another State than
+// want[name]. A server that is not in want must have StateEnabled, so a nil
+// want means that every server is enabled. serverView has no State field, so
+// tests check it with this helper.
+func checkStates(t testing.TB, servers []Server, want map[string]State) {
+	t.Helper()
+	for _, s := range servers {
+		w := want[s.Name] // StateEnabled when absent
+		if s.State != w {
+			t.Errorf("server %q: State = %v, want %v", s.Name, s.State, w)
+		}
+	}
+}
+
 // serverNames returns the server names in ss, in order.
 func serverNames(ss []Server) []string {
 	out := make([]string, 0, len(ss))
@@ -330,6 +344,7 @@ var allReasons = [...]reason{
 	reasonUnknownFormat,
 	reasonProjectsNotRead,
 	reasonCwdOutsideProject,
+	reasonBadServerState,
 }
 
 // codexConfigRel is the path of the Codex config file inside a home

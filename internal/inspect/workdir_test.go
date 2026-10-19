@@ -8,6 +8,8 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+
+	"github.com/Ducarv/mcpmoat/internal/discover"
 )
 
 // testRunRoot returns a runRoot for workDir that uses a new directory of the
@@ -258,5 +260,237 @@ func TestRunRootIn(t *testing.T) {
 	errChain := errors.New("shared parent")
 	if _, err := runRootIn(t.TempDir(), func(string) error { return errChain }); !errors.Is(err, errChain) {
 		t.Errorf("runRootIn() error = %v, want the chain check error", err)
+	}
+}
+
+// TestProjectRunDir checks the work directory choice of projectRunDir (issue
+// #104) with a fake isDir: an absolute Dir first, then the ProjectPath of a
+// trusted project server when it is an absolute directory, else "".
+func TestProjectRunDir(t *testing.T) {
+	t.Parallel()
+
+	base := t.TempDir()
+	dir := filepath.Join(base, "dir")
+	proj := filepath.Join(base, "proj")
+
+	always := func(string) bool { return true }
+	never := func(string) bool { return false }
+
+	tests := []struct {
+		name  string
+		srv   discover.Server
+		isDir func(string) bool
+		want  string
+	}{
+		{
+			name:  "absolute Dir of a global server",
+			srv:   discover.Server{Scope: discover.ScopeGlobal, Dir: dir},
+			isDir: never,
+			want:  dir,
+		},
+		{
+			// An absolute Dir is the configured choice, so it wins over the
+			// project directory.
+			name:  "absolute Dir wins over ProjectPath",
+			srv:   discover.Server{Scope: discover.ScopeProject, ProjectPath: proj, Dir: dir},
+			isDir: always,
+			want:  dir,
+		},
+		{
+			// The Dir rule does not depend on trust: stdioCommand checked an
+			// untrusted Dir before.
+			name:  "absolute Dir of an untrusted server",
+			srv:   discover.Server{Scope: discover.ScopeProject, ProjectPath: proj, Dir: dir, Untrusted: true},
+			isDir: always,
+			want:  dir,
+		},
+		{
+			name:  "trusted project server gets ProjectPath",
+			srv:   discover.Server{Scope: discover.ScopeProject, ProjectPath: proj},
+			isDir: always,
+			want:  proj,
+		},
+		{
+			// A relative Dir counts as no Dir.
+			name:  "relative Dir gives ProjectPath",
+			srv:   discover.Server{Scope: discover.ScopeProject, ProjectPath: proj, Dir: "sub"},
+			isDir: always,
+			want:  proj,
+		},
+		{
+			name:  "dot Dir gives ProjectPath",
+			srv:   discover.Server{Scope: discover.ScopeProject, ProjectPath: proj, Dir: "."},
+			isDir: always,
+			want:  proj,
+		},
+		{
+			name:  "relative Dir of a global server gives nothing",
+			srv:   discover.Server{Scope: discover.ScopeGlobal, Dir: "./sub"},
+			isDir: always,
+			want:  "",
+		},
+		{
+			name:  "missing ProjectPath directory",
+			srv:   discover.Server{Scope: discover.ScopeProject, ProjectPath: proj},
+			isDir: never,
+			want:  "",
+		},
+		{
+			// isDir says yes to every path, so only the absolute check can
+			// refuse it. A relative path would resolve against the current
+			// directory of mcpmoat.
+			name:  "relative ProjectPath",
+			srv:   discover.Server{Scope: discover.ScopeProject, ProjectPath: "proj"},
+			isDir: always,
+			want:  "",
+		},
+		{
+			name:  "dot ProjectPath",
+			srv:   discover.Server{Scope: discover.ScopeProject, ProjectPath: "."},
+			isDir: always,
+			want:  "",
+		},
+		{
+			name:  "empty ProjectPath",
+			srv:   discover.Server{Scope: discover.ScopeProject},
+			isDir: always,
+			want:  "",
+		},
+		{
+			// A cloned repository can ship the file of an untrusted server,
+			// so it never gets its project directory.
+			name:  "untrusted project server",
+			srv:   discover.Server{Scope: discover.ScopeProject, ProjectPath: proj, Untrusted: true},
+			isDir: always,
+			want:  "",
+		},
+		{
+			name:  "global server with ProjectPath",
+			srv:   discover.Server{Scope: discover.ScopeGlobal, ProjectPath: proj},
+			isDir: always,
+			want:  "",
+		},
+		{
+			name:  "empty scope with ProjectPath",
+			srv:   discover.Server{ProjectPath: proj},
+			isDir: always,
+			want:  "",
+		},
+		{
+			name:  "unknown scope with ProjectPath",
+			srv:   discover.Server{Scope: discover.Scope("Project"), ProjectPath: proj},
+			isDir: always,
+			want:  "",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if got := projectRunDir(tt.srv, tt.isDir); got != tt.want {
+				t.Errorf("projectRunDir(Scope %q, ProjectPath %q, Dir %q, Untrusted %v) = %q, want %q",
+					tt.srv.Scope, tt.srv.ProjectPath, tt.srv.Dir, tt.srv.Untrusted, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestProjectRunDirIsDirArgument checks that projectRunDir asks isDir about
+// ProjectPath, and only when the other rules allow it.
+func TestProjectRunDirIsDirArgument(t *testing.T) {
+	t.Parallel()
+
+	proj := filepath.Join(t.TempDir(), "proj")
+	var asked []string
+	isDir := func(p string) bool { asked = append(asked, p); return true }
+
+	if got := projectRunDir(discover.Server{Scope: discover.ScopeProject, ProjectPath: proj}, isDir); got != proj {
+		t.Errorf("projectRunDir() = %q, want %q", got, proj)
+	}
+	if len(asked) != 1 || asked[0] != proj {
+		t.Errorf("isDir got %q, want [%q]", asked, proj)
+	}
+
+	asked = nil
+	_ = projectRunDir(discover.Server{Scope: discover.ScopeProject, ProjectPath: proj, Untrusted: true}, isDir)
+	_ = projectRunDir(discover.Server{Scope: discover.ScopeGlobal, ProjectPath: proj}, isDir)
+	_ = projectRunDir(discover.Server{Scope: discover.ScopeProject, ProjectPath: proj, Dir: proj}, isDir)
+	if len(asked) != 0 {
+		t.Errorf("isDir got %q, want no call for untrusted, global and absolute Dir servers", asked)
+	}
+}
+
+// TestProjectRunDirRealFS checks projectRunDir with isExistingDir on a real
+// directory tree: an existing directory, a missing path, a regular file and
+// symbolic links.
+func TestProjectRunDirRealFS(t *testing.T) {
+	t.Parallel()
+
+	base := t.TempDir()
+	proj := filepath.Join(base, "proj")
+	if err := os.Mkdir(proj, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	file := filepath.Join(base, "file.txt")
+	if err := os.WriteFile(file, []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	linkToDir := filepath.Join(base, "link-dir")
+	linkToFile := filepath.Join(base, "link-file")
+	dangling := filepath.Join(base, "dangling")
+	symlinks := true
+	for _, l := range []struct{ target, link string }{
+		{proj, linkToDir},
+		{file, linkToFile},
+		{filepath.Join(base, "missing"), dangling},
+	} {
+		if err := os.Symlink(l.target, l.link); err != nil {
+			// Windows can refuse symbolic links without a privilege.
+			symlinks = false
+			break
+		}
+	}
+
+	tests := []struct {
+		name        string
+		projectPath string
+		want        string
+		needLinks   bool
+	}{
+		{name: "existing directory", projectPath: proj, want: proj},
+		{name: "missing path", projectPath: filepath.Join(base, "missing"), want: ""},
+		{name: "regular file", projectPath: file, want: ""},
+		{name: "path below a file", projectPath: filepath.Join(file, "sub"), want: ""},
+		{name: "symbolic link to a directory", projectPath: linkToDir, want: linkToDir, needLinks: true},
+		{name: "symbolic link to a file", projectPath: linkToFile, want: "", needLinks: true},
+		{name: "dangling symbolic link", projectPath: dangling, want: "", needLinks: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if tt.needLinks && !symlinks {
+				t.Skip("symbolic links are not available")
+			}
+			srv := discover.Server{Scope: discover.ScopeProject, ProjectPath: tt.projectPath}
+			if got := projectRunDir(srv, isExistingDir); got != tt.want {
+				t.Errorf("projectRunDir(ProjectPath %q) = %q, want %q", tt.projectPath, got, tt.want)
+			}
+			if got, want := isExistingDir(tt.projectPath), tt.want != ""; got != want {
+				t.Errorf("isExistingDir(%q) = %v, want %v", tt.projectPath, got, want)
+			}
+		})
+	}
+}
+
+// TestIsExistingDir checks isExistingDir on paths that are not a directory.
+func TestIsExistingDir(t *testing.T) {
+	t.Parallel()
+
+	if !isExistingDir(t.TempDir()) {
+		t.Error("isExistingDir(temp dir) = false, want true")
+	}
+	for _, p := range []string{"", "\x00", filepath.Join(t.TempDir(), "missing")} {
+		if isExistingDir(p) {
+			t.Errorf("isExistingDir(%q) = true, want false", p)
+		}
 	}
 }

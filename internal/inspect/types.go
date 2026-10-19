@@ -10,8 +10,9 @@ import "encoding/json"
 // server controls it. Treat it as untrusted text. Callers must escape it with
 // internal/termsafe before they print it to a terminal, and must never
 // execute it or put it into a command or a format string. The one exception
-// is Warning: its strings come from the client config, not from the server.
-// Callers must still escape them with internal/termsafe.
+// is Warning: its strings come from the client config or from fixed lists in
+// mcpmoat, never from the server. Callers must still escape them with
+// internal/termsafe.
 //
 // The types have no methods and no struct tags on purpose: output types live
 // in internal/report.
@@ -167,9 +168,29 @@ type WarningKind string
 // "cleartext-secrets" is stable and does not change between versions.
 const WarnCleartextSecrets WarningKind = "cleartext-secrets"
 
-// Warning is a problem with the way mcpmoat connects to a server. It is not a
-// finding about the server itself. A Warning holds keys only, never secret
-// values.
+// WarnUndeclaredCapability is the kind of a Warning about lists that the
+// server did not declare in its capabilities but still answered with at least
+// one item. A server that hides a capability from its declaration can show
+// different lists to different clients, so the user should look at it (issue
+// #97). Warning.Capabilities names the lists. The value
+// "undeclared-capability" is stable and does not change between versions.
+const WarnUndeclaredCapability WarningKind = "undeclared-capability"
+
+// WarnDNSPinUnavailable is the kind of a Warning that mcpmoat could not pin
+// the DNS answer for the server host, because the connection goes through a
+// proxy from the environment (HTTP_PROXY, HTTPS_PROXY). The proxy resolves the
+// host, so the address checks of the pinned dialer do not apply to it (issue
+// #106). The warning holds no URL: the proxy setting can hold a user name and
+// a password. The value "dns-pin-unavailable" is stable and does not change
+// between versions.
+const WarnDNSPinUnavailable WarningKind = "dns-pin-unavailable"
+
+// Warning is a problem with the way mcpmoat connects to a server, or a sign
+// that the server behaves in an unusual way. It is not a rule finding. A
+// Warning holds keys and fixed names only, never secret values, never URLs
+// and never server text.
+//
+// Only the fields that belong to Kind are set. The other fields are zero.
 type Warning struct {
 	// Kind tells what the warning is about.
 	Kind WarningKind
@@ -192,6 +213,12 @@ type Warning struct {
 	// masks (discover.SecretQueryParts and discover.SecretPathSegments). The
 	// Warning never holds these parts, their names or their values.
 	URLSecrets bool
+
+	// Capabilities are the lists that a WarnUndeclaredCapability warning is
+	// about, in this order: "tools", "prompts", "resources" and
+	// "resource-templates". It holds only these fixed names, never server
+	// text. Each name is in the list one time.
+	Capabilities []string
 }
 
 // Result is everything that inspect reads from one MCP server.
@@ -201,6 +228,12 @@ type Warning struct {
 // empty list. In both cases the server offers no such item. A report can use
 // the difference: a server that hides a list only from some clients can look
 // like a server without the capability.
+//
+// mcpmoat sends every list request, also for a capability that the server did
+// not declare. When such a list has at least one item, Warnings holds a
+// WarnUndeclaredCapability warning that names the list. An undeclared list
+// that the server answers empty gets no warning: some servers, the SDK server
+// for example, answer every list request.
 type Result struct {
 	// ServerName is the server name from the initialize result.
 	ServerName string
@@ -233,7 +266,10 @@ type Result struct {
 	// not nil.
 	ResourceTemplates []ResourceTemplate
 
-	// Warnings are the problems with the connection to the server, for
-	// example secrets sent over plain http://. It is nil when there are none.
+	// Warnings are the problems with the connection to the server and the
+	// unusual server behaviour that mcpmoat saw, for example secrets sent over
+	// plain http://, a proxy that keeps mcpmoat from pinning the DNS answer,
+	// or items in a list that the server did not declare. It is nil when there
+	// are none.
 	Warnings []Warning
 }

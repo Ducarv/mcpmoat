@@ -1,0 +1,4 @@
+{
+  "enabledMcpjsonServers": ["repo-srv"],
+  "disabledMcpjsonServers": ["rejected-srv"]
+}

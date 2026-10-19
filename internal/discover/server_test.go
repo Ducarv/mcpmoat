@@ -249,6 +249,64 @@ func TestConstantStrings(t *testing.T) {
 	}
 }
 
+// TestStateString pins the String values of State. Output uses them, so a
+// change breaks users' scripts. A value outside the constants gives
+// "unknown", never an empty string or a number.
+func TestStateString(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name  string
+		state discover.State
+		want  string
+	}{
+		{name: "StateEnabled", state: discover.StateEnabled, want: "enabled"},
+		{name: "StateDisabled", state: discover.StateDisabled, want: "disabled"},
+		{name: "StateUnapproved", state: discover.StateUnapproved, want: "unapproved"},
+		{name: "StateProjectApproved", state: discover.StateProjectApproved, want: "project-approved"},
+		// The new constant comes after the older ones, so their values
+		// do not change.
+		{name: "StateProjectApproved is 3", state: discover.State(3), want: "project-approved"},
+		{name: "zero value is enabled", state: discover.State(0), want: "enabled"},
+		{name: "first value after the constants", state: discover.StateProjectApproved + 1, want: "unknown"},
+		{name: "unknown value", state: discover.State(99), want: "unknown"},
+		{name: "largest value", state: discover.State(255), want: "unknown"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if got := tt.state.String(); got != tt.want {
+				t.Errorf("State(%d).String() = %q, want %q", uint8(tt.state), got, tt.want)
+			}
+		})
+	}
+
+	// The zero value of a Server field is StateEnabled, and fmt uses String.
+	t.Run("zero Server is enabled", func(t *testing.T) {
+		t.Parallel()
+		var s discover.Server
+		if s.State != discover.StateEnabled {
+			t.Errorf("Server{}.State = %v, want %v", s.State, discover.StateEnabled)
+		}
+		if got := fmt.Sprint(s.State); got != "enabled" {
+			t.Errorf("fmt.Sprint(Server{}.State) = %q, want %q", got, "enabled")
+		}
+	})
+
+	// The three constants are distinct, so no state hides another.
+	t.Run("constants are distinct", func(t *testing.T) {
+		t.Parallel()
+		all := []discover.State{discover.StateEnabled, discover.StateDisabled, discover.StateUnapproved}
+		seen := make(map[discover.State]bool, len(all))
+		for _, st := range all {
+			if seen[st] {
+				t.Errorf("State %d (%v) is used by two constants", uint8(st), st)
+			}
+			seen[st] = true
+		}
+	})
+}
+
 // TestTransportIsRemote checks that only the HTTP and SSE transports are
 // remote.
 func TestTransportIsRemote(t *testing.T) {

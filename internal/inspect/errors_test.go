@@ -87,6 +87,11 @@ func (e *fakeNetError) Temporary() bool { return false }
 // fails a test.
 const jsonTooComplexReason = "response JSON too large: too deep, too many values or a too long string"
 
+// addrRefusedReason is the fixed reason for errAddrRefused (issue #106). It
+// is written out here, not read from blockedKinds, so a change of the text
+// fails a test. It names no address and no host.
+const addrRefusedReason = "server name resolves only to loopback, unspecified, link-local or multicast addresses; connection refused"
+
 // wantExactReason returns a TestClassify check that Reason is exactly want.
 func wantExactReason(want string) func(t *testing.T, ce *ConnectError) {
 	return func(t *testing.T, ce *ConnectError) {
@@ -448,6 +453,53 @@ func TestClassify(t *testing.T) {
 			wantIs:   []error{errJSONTooComplex, context.DeadlineExceeded},
 			noReason: []string{"timed out"},
 			check:    wantExactReason(jsonTooComplexReason),
+		},
+		// errAddrRefused (issue #106): the dialer refused the DNS answer for
+		// the server name. It is a network error with a fixed reason. The
+		// net.OpError around it must not turn it into the generic
+		// "network error: <text>" reason.
+		{
+			name:     "addr refused bare",
+			err:      errAddrRefused,
+			wantKind: KindNetwork,
+			wantIs:   []error{errAddrRefused},
+			check:    wantExactReason(addrRefusedReason),
+		},
+		{
+			name:     "addr refused in a dial error",
+			err:      urlErr("Post", &net.OpError{Op: "dial", Net: "tcp", Err: errAddrRefused}),
+			wantKind: KindNetwork,
+			wantIs:   []error{errAddrRefused},
+			noReason: []string{"network error:", "dial"},
+			check:    wantExactReason(addrRefusedReason),
+		},
+		{
+			name:     "addr refused wins over http status",
+			err:      fmt.Errorf("dial: %w", errAddrRefused),
+			ev:       &fakeEvents{status: http.StatusBadGateway},
+			wantKind: KindNetwork,
+			wantIs:   []error{errAddrRefused},
+			check:    wantExactReason(addrRefusedReason),
+		},
+		{
+			// The SDK flattens the transport error into text. The record of
+			// headerTransport keeps the label.
+			name:     "ev blocked addr refused wins over flattened text",
+			err:      errors.New("calling initialize: Post x: " + errAddrRefused.Error()),
+			ev:       &fakeEvents{blocked: urlErr("Post", errAddrRefused)},
+			wantKind: KindNetwork,
+			wantIs:   []error{errAddrRefused},
+			notIs:    []error{errOtherOrigin, errBodyTooLarge},
+			check:    wantExactReason(addrRefusedReason),
+		},
+		{
+			name:     "ev blocked addr refused keeps the deadline of err",
+			err:      fmt.Errorf("calling initialize: %w", context.DeadlineExceeded),
+			ev:       &fakeEvents{blocked: errAddrRefused},
+			wantKind: KindNetwork,
+			wantIs:   []error{errAddrRefused, context.DeadlineExceeded},
+			noReason: []string{"timed out"},
+			check:    wantExactReason(addrRefusedReason),
 		},
 		{
 			name:       "sentinel wins over http status",

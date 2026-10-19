@@ -114,3 +114,52 @@ func buildEnv(parent []string, declared discover.SecretMap) ([]string, error) {
 	}
 	return env, nil
 }
+
+// npmYesName is the npm config variable that answers the install prompt of
+// npm exec and npx.
+const npmYesName = "npm_config_yes"
+
+// noAutoInstallEnv returns a copy of env with npm_config_yes=false added.
+// env is a result of buildEnv. The copy is sorted by name, the same as
+// buildEnv sorts, and it is never nil. noAutoInstallEnv does not change env.
+//
+// The reason is issue #104 (dependency confusion). When stdin is not a
+// terminal, npm exec and npx assume --yes. A stdio server child has a pipe
+// as stdin, so "npx some-name" installs and runs a package from the registry
+// when some-name is not installed. An attacker can publish a package with
+// that name. With npm_config_yes=false, npx stops with an error and installs
+// nothing.
+//
+// The configured behaviour wins:
+//   - When env already has an entry whose name equals npm_config_yes in any
+//     letter case, noAutoInstallEnv adds nothing. npm reads its config
+//     variables in any letter case.
+//   - An explicit -y or --yes in the configured args overrides the
+//     variable, so npx then installs, the same as in the client.
+//
+// The result holds the same secret values as env: use it only as
+// exec.Cmd.Env. Never pass it to fmt, a logger, an error or an encoder.
+func noAutoInstallEnv(env []string) []string {
+	out := make([]string, 0, len(env)+1)
+	out = append(out, env...)
+	if !slices.ContainsFunc(env, isNpmYesEntry) {
+		out = append(out, npmYesName+"=false")
+	}
+	slices.SortStableFunc(out, func(a, b string) int {
+		return strings.Compare(envName(a), envName(b))
+	})
+	return out
+}
+
+// isNpmYesEntry reports whether the name of the "name=value" entry equals
+// npm_config_yes in any letter case. It reads only the name.
+func isNpmYesEntry(entry string) bool {
+	return strings.EqualFold(envName(entry), npmYesName)
+}
+
+// envName returns the name part of a "name=value" entry: the text before the
+// first "=", or the whole entry when it has no "=".
+func envName(entry string) string {
+	name, _, _ := strings.Cut(entry, "=")
+	return name
+}

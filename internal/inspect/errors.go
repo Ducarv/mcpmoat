@@ -137,8 +137,8 @@ type transportEvents interface {
 	//
 	// blocked is the first error that the HTTP layer raised on purpose for
 	// that request, or for a request that breaks the whole session. It wraps
-	// errOtherOrigin, errCrossOriginRedirect, errTooManyRedirects or
-	// errBodyTooLarge. It is nil if there was none.
+	// one of the sentinel errors of blockedKinds, for example errOtherOrigin
+	// or errAddrRefused. It is nil if there was none.
 	stateFor(err error) (status int, blocked error)
 	// connected reports whether the server answered the MCP handshake. An
 	// HTTP status after that comes from a server that speaks the configured
@@ -209,6 +209,7 @@ var blockedKinds = []struct {
 	{errTooManyRedirects, KindRedirect, "too many redirects"},
 	{errBodyTooLarge, KindTooLarge, "response too large"},
 	{errJSONTooComplex, KindTooLarge, "response JSON too large: too deep, too many values or a too long string"},
+	{errAddrRefused, KindNetwork, "server name resolves only to loopback, unspecified, link-local or multicast addresses; connection refused"},
 }
 
 // contextErr returns context.DeadlineExceeded or context.Canceled when err

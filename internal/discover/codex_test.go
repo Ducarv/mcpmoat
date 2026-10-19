@@ -41,6 +41,9 @@ func TestReadCodexFixtures(t *testing.T) {
 		// holds the canaries.
 		canaries   bool
 		wantServer []serverView // Client, Scope and Source are filled in
+		// wantStates holds the State of each server that is not
+		// StateEnabled. serverView has no State, so it is checked apart.
+		wantStates map[string]State
 		wantErrs   []errWant
 	}{
 		{
@@ -55,7 +58,9 @@ func TestReadCodexFixtures(t *testing.T) {
 				},
 				{
 					// cwd maps to Dir (see also TestReadCodexCwd).
-					// enabled and startup_timeout_sec are ignored.
+					// enabled = false gives StateDisabled (see
+					// wantStates and TestReadCodexEnabled).
+					// startup_timeout_sec is ignored.
 					Name:      "git",
 					Transport: TransportStdio,
 					Command:   "uvx",
@@ -69,6 +74,7 @@ func TestReadCodexFixtures(t *testing.T) {
 					URL:       "https://codex.example.com/mcp",
 				},
 			},
+			wantStates: map[string]State{"git": StateDisabled},
 		},
 		{name: "empty"},
 		{name: "missing"},
@@ -92,6 +98,8 @@ func TestReadCodexFixtures(t *testing.T) {
 			// Errors are sorted by server name.
 			wantErrs: []errWant{
 				{Server: "args-str", Reason: reasonBadEntry},
+				// enabled = "false" is a string, not a TOML boolean.
+				{Server: "enabled-str", Reason: reasonBadEntry},
 				{Server: "nothing", Reason: reasonNoCommandOrURL},
 				{Server: "num-env", Reason: reasonBadEntry},
 			},
@@ -135,8 +143,172 @@ func TestReadCodexFixtures(t *testing.T) {
 			// ScopeGlobal and leaves ProjectPath and Untrusted empty.
 			want := fixtureWants(tt.wantServer, ClientCodex, path, "")
 			checkServers(t, "servers", res.Servers, want, tt.hideValues)
+			checkStates(t, res.Servers, tt.wantStates)
 			checkFileErrors(t, path, res.Errors, tt.wantErrs)
 
+			assertNoLeakErrors(t, res.Errors)
+			assertNoLeakServers(t, res.Servers)
+		})
+	}
+}
+
+// TestReadCodexEnabled checks the enabled key: a TOML boolean false gives
+// StateDisabled, true or no key gives StateEnabled, and any other TOML type
+// gives reasonBadEntry with no server and no value in the error. The server
+// "ok" must survive next to a bad one.
+func TestReadCodexEnabled(t *testing.T) {
+	t.Parallel()
+
+	// bad is a distinctive value. No error text may hold it.
+	const bad = "7391025"
+	const ok = "\n[mcp_servers.ok]\ncommand = \"c\"\n"
+	badEntry := []errWant{{Server: "x", Reason: reasonBadEntry}}
+
+	tests := []struct {
+		name       string
+		config     string
+		wantStates map[string]State // every listed server; nil: no server x
+		wantErrs   []errWant
+		wantLeaked []string // strings that no error text may hold
+	}{
+		{
+			name:       "enabled false gives disabled",
+			config:     "[mcp_servers.x]\ncommand = \"c\"\nenabled = false\n" + ok,
+			wantStates: map[string]State{"x": StateDisabled, "ok": StateEnabled},
+		},
+		{
+			name:       "enabled true gives enabled",
+			config:     "[mcp_servers.x]\ncommand = \"c\"\nenabled = true\n" + ok,
+			wantStates: map[string]State{"x": StateEnabled, "ok": StateEnabled},
+		},
+		{
+			name:       "no enabled key gives enabled",
+			config:     "[mcp_servers.x]\ncommand = \"c\"\n" + ok,
+			wantStates: map[string]State{"x": StateEnabled, "ok": StateEnabled},
+		},
+		{
+			name:       "enabled false on a remote server",
+			config:     "[mcp_servers.x]\nurl = \"https://example.com/mcp\"\nenabled = false\n" + ok,
+			wantStates: map[string]State{"x": StateDisabled, "ok": StateEnabled},
+		},
+		{
+			name:       "enabled false in an inline table",
+			config:     "mcp_servers = { x = { command = \"c\", enabled = false }, ok = { command = \"c\" } }\n",
+			wantStates: map[string]State{"x": StateDisabled, "ok": StateEnabled},
+		},
+		{
+			name:       "enabled false as a dotted key",
+			config:     "mcp_servers.x.command = \"c\"\nmcp_servers.x.enabled = false\n" + ok,
+			wantStates: map[string]State{"x": StateDisabled, "ok": StateEnabled},
+		},
+		{
+			name:       "enabled is a string",
+			config:     "[mcp_servers.x]\ncommand = \"c\"\nenabled = \"" + bad + "\"\n" + ok,
+			wantStates: map[string]State{"ok": StateEnabled},
+			wantErrs:   badEntry,
+			wantLeaked: []string{bad},
+		},
+		{
+			name:       "enabled is the string false",
+			config:     "[mcp_servers.x]\ncommand = \"c\"\nenabled = \"false\"\n" + ok,
+			wantStates: map[string]State{"ok": StateEnabled},
+			wantErrs:   badEntry,
+		},
+		{
+			name:       "enabled is a string with a canary",
+			config:     "[mcp_servers.x]\ncommand = \"c\"\nenabled = \"" + discovertest.CanaryEnv + "\"\n" + ok,
+			wantStates: map[string]State{"ok": StateEnabled},
+			wantErrs:   badEntry,
+			wantLeaked: []string{discovertest.CanaryEnv},
+		},
+		{
+			name:       "enabled is an integer",
+			config:     "[mcp_servers.x]\ncommand = \"c\"\nenabled = " + bad + "\n" + ok,
+			wantStates: map[string]State{"ok": StateEnabled},
+			wantErrs:   badEntry,
+			wantLeaked: []string{bad},
+		},
+		{
+			name:       "enabled is zero",
+			config:     "[mcp_servers.x]\ncommand = \"c\"\nenabled = 0\n" + ok,
+			wantStates: map[string]State{"ok": StateEnabled},
+			wantErrs:   badEntry,
+		},
+		{
+			name:       "enabled is a float",
+			config:     "[mcp_servers.x]\ncommand = \"c\"\nenabled = 1.5\n" + ok,
+			wantStates: map[string]State{"ok": StateEnabled},
+			wantErrs:   badEntry,
+		},
+		{
+			name:       "enabled is an array",
+			config:     "[mcp_servers.x]\ncommand = \"c\"\nenabled = [false, \"" + bad + "\"]\n" + ok,
+			wantStates: map[string]State{"ok": StateEnabled},
+			wantErrs:   badEntry,
+			wantLeaked: []string{bad},
+		},
+		{
+			name:       "enabled is an inline table",
+			config:     "[mcp_servers.x]\ncommand = \"c\"\nenabled = { v = \"" + bad + "\" }\n" + ok,
+			wantStates: map[string]State{"ok": StateEnabled},
+			wantErrs:   badEntry,
+			wantLeaked: []string{bad},
+		},
+		{
+			name:       "enabled is a sub-table",
+			config:     "[mcp_servers.x]\ncommand = \"c\"\n[mcp_servers.x.enabled]\nv = false\n" + ok,
+			wantStates: map[string]State{"ok": StateEnabled},
+			wantErrs:   badEntry,
+		},
+		{
+			name:       "enabled is an array of tables",
+			config:     "[mcp_servers.x]\ncommand = \"c\"\n[[mcp_servers.x.enabled]]\nv = false\n" + ok,
+			wantStates: map[string]State{"ok": StateEnabled},
+			wantErrs:   badEntry,
+		},
+		{
+			name:       "enabled is a date",
+			config:     "[mcp_servers.x]\ncommand = \"c\"\nenabled = 1979-05-27\n" + ok,
+			wantStates: map[string]State{"ok": StateEnabled},
+			wantErrs:   badEntry,
+			wantLeaked: []string{"1979-05-27"},
+		},
+		{
+			// A case variant of enabled is refused, so a hidden
+			// "Enabled = true" cannot hide an "enabled = false".
+			name:       "enabled and Enabled",
+			config:     "[mcp_servers.x]\ncommand = \"c\"\nenabled = false\nEnabled = true\n" + ok,
+			wantStates: map[string]State{"ok": StateEnabled},
+			wantErrs:   []errWant{{Server: "x", Reason: reasonAmbiguousKey}},
+		},
+		{
+			name:       "ENABLED alone",
+			config:     "[mcp_servers.x]\ncommand = \"c\"\nENABLED = false\n" + ok,
+			wantStates: map[string]State{"ok": StateEnabled},
+			wantErrs:   []errWant{{Server: "x", Reason: reasonAmbiguousKey}},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			path := writeFile(t, t.TempDir(), codexConfigRel, []byte(tt.config))
+			res := ReadCodex(t.Context(), path)
+
+			gotNames := serverNames(res.Servers)
+			slices.Sort(gotNames)
+			wantNames := slices.Sorted(maps.Keys(tt.wantStates))
+			if !slices.Equal(gotNames, wantNames) {
+				t.Errorf("server names = %v, want %v", gotNames, wantNames)
+			}
+			checkStates(t, res.Servers, tt.wantStates)
+			checkFileErrors(t, path, res.Errors, tt.wantErrs)
+			for i, e := range res.Errors {
+				for _, leaked := range tt.wantLeaked {
+					if strings.Contains(e.Error(), leaked) {
+						t.Errorf("errs[%d].Error() = %q holds the bad value %q", i, e.Error(), leaked)
+					}
+				}
+			}
 			assertNoLeakErrors(t, res.Errors)
 			assertNoLeakServers(t, res.Servers)
 		})
@@ -932,6 +1104,12 @@ func TestReadCodexExactKeys(t *testing.T) {
 		},
 		{
 			name:      "an ignored key in another case",
+			config:    "[mcp_servers.x]\ncommand = \"c\"\nStartup_Timeout_Sec = 5\n" + good,
+			wantNames: []string{"good"},
+			wantErrs:  ambiguous,
+		},
+		{
+			name:      "Enabled alone",
 			config:    "[mcp_servers.x]\ncommand = \"c\"\nEnabled = false\n" + good,
 			wantNames: []string{"good"},
 			wantErrs:  ambiguous,

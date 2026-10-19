@@ -3,7 +3,7 @@
 | Field | Value |
 |---|---|
 | Spec version | 0.2 |
-| Date | 2026-10-17 |
+| Date | 2026-10-18 |
 | Status | All decisions closed. Phase 1 in progress. |
 | Scope of this document | Phase 1 (scanner) in detail; phases 2 to 4 as roadmap only |
 
@@ -96,6 +96,11 @@ See section 12 for the full out-of-scope list.
 | Name | `mcpmoat` | Checked: nothing with this name on GitHub. |
 | Connect by default | Yes. `scan` connects to servers; `--no-connect` does static analysis only | Full value by default; opt-out for cautious users and CI. |
 | CLI library | Go standard library `flag` | Simpler to learn. Can migrate to `cobra` if subcommands grow. |
+| Server state (#87) | Each discovered server is `enabled`, `disabled`, `unapproved` or `project-approved`, read from the client config. Inspection does not start or connect to a server that is not enabled without an explicit opt-in, separate from the untrusted opt-in | A turned-off server is not run by the scan. A repository cannot approve its own servers: an approval only from its own settings files gives `project-approved`, which needs the opt-in. Cursor keeps its toggle in SQLite, which mcpmoat does not read, so Cursor servers always show `enabled`. |
+| Placeholder expansion (#88) | Inspection expands `${...}` placeholders like the client: Claude Code and Cursor syntax, none for Codex. A missing variable is a fixed error that names at most the variable | The scan runs what the client runs. Expanded values can be secrets, so they stay masked. Fails closed where Cursor probably uses an empty value. |
+| Client identity and lists (#97) | Send the MCP client name of the client that owns the config. Always send every list request, and warn when an undeclared capability returns items | Makes cloaking harder. Residuals: version, capabilities, timing and User-Agent can still tell mcpmoat apart. A server that never answers an unknown method times out. |
+| Work directory and `npx` (#104) | Trusted project servers run in their project directory, like the client. The child environment always gets `npm_config_yes=false` | Same behaviour as the client, and `npx` does not install a missing package without a prompt. Configured `-y`, `--yes` or `npm_config_yes` still win. Other launchers are not covered. |
+| DNS answers and proxies (#106) | For a configured DNS name, refuse loopback, unspecified, link-local and multicast answers. Behind a proxy, warn with `dns-pin-unavailable` | Stops a DNS name from pointing the scan at the local machine or a metadata service. Private addresses stay allowed for company servers. A proxy resolves names itself, so the guard cannot apply there. |
 
 ---
 
@@ -148,10 +153,58 @@ hidden instructions or leak data.
 The scanner reduces risk but does not guarantee safety. Rule-based detection has false positives and
 false negatives.
 
-A remote server can show the scanner a different tool list than it shows the real clients
-(cloaking). mcpmoat does not name itself in its requests (generic User-Agent and MCP client name),
-but a server can still tell clients apart in other ways, and the pins only cover what the scanner
-sees.
+A server can show the scanner a different tool list than it shows the real clients (cloaking).
+mcpmoat does not name itself in its requests, to make this harder:
+
+- In the MCP `initialize` request, mcpmoat sends the client name of the client that owns the config:
+  `claude-code` for Claude Code, `cursor-vscode` for Cursor and `codex-mcp-client` for Codex. For a
+  config of any other kind, it sends a neutral name. The HTTP User-Agent is generic.
+- mcpmoat always sends the list requests for tools, prompts, resources and resource templates, also
+  when the server does not declare that capability. A server can leave a capability out of the
+  handshake and still answer the real client. When an undeclared list returns items, mcpmoat
+  reports the items and adds an `undeclared-capability` warning.
+
+A server can still tell clients apart in other ways:
+
+- the client version, which is a fixed value and can differ from the installed release;
+- the client capabilities, which are not the same as those of the real client;
+- the timing and the order of the requests;
+- the HTTP User-Agent, which is generic and not the one of the real client.
+
+The pins only cover what the scanner sees.
+
+A benign server that never answers an unknown method makes the inspection of that server time out.
+mcpmoat reports it as timed out (FR-06).
+
+### 5.6 DNS answers and proxies
+
+A remote server is configured with a URL. When the host in that URL is a DNS name, the DNS answer
+decides where mcpmoat connects. A hostile DNS answer can point the scan at the user's own machine
+or at a cloud metadata service. mcpmoat resolves the name once and keeps (pins) the address of the
+first connection for the whole inspection. It also applies these rules:
+
+- For a configured DNS name that is not `localhost`, mcpmoat refuses these resolved addresses:
+  loopback, unspecified (all of `0.0.0.0/8`, and `::`), link-local, multicast and the Alibaba
+  Cloud metadata address `100.100.100.200`.
+- When the answer also holds allowed addresses, mcpmoat uses only those.
+- When no allowed address remains, mcpmoat does not connect. The error is fixed text, labelled
+  `network`, and holds no address.
+- Private addresses (RFC 1918 and IPv6 ULA) stay allowed, because company servers use them.
+- An IP literal in the URL is the user's own choice, so it stays allowed. `localhost` connects to
+  loopback only.
+
+Behind `HTTP_PROXY` or `HTTPS_PROXY`, the proxy resolves the name, not mcpmoat. The pin and the
+address guard do not apply then. mcpmoat adds a `dns-pin-unavailable` warning to tell the user. The
+warning does not hold the proxy URL, because that URL can hold credentials.
+
+Known limits:
+
+- IPv4 addresses embedded in other IPv6 forms (NAT64, 6to4, IPv4-compatible) are not refused.
+- Names that end in `.local` (mDNS) and resolve to link-local addresses are refused, also when the
+  user wants them (false positive).
+- The AWS metadata service IPv6 address is in the ULA range, so it is allowed.
+- `100.64.0.0/10` (shared address space, RFC 6598) stays allowed, because Tailscale uses it for
+  real servers. Only `100.100.100.200` in that range is refused.
 
 ---
 
@@ -180,11 +233,108 @@ section.
 - The format (Claude Code JSON, Cursor JSON, Codex TOML) is detected from the content and file name.
 - An unknown format exits with code 2 and a clear message naming the file.
 
-**FR-03: List servers.** Show discovered servers with origin, type (stdio or http) and command.
+**FR-03: List servers.** Show discovered servers with origin, type (stdio or http), state and
+command.
 
-- For each server the output shows: name, client, source file, transport (`stdio` or `http`), and the
-  command plus arguments (stdio) or URL (http).
+- For each server the output shows: name, client, source file, transport (`stdio` or `http`), state,
+  and the command plus arguments (stdio) or URL (http).
 - Values of environment variables and headers are never printed; only their keys (masked values).
+
+*Enabled and approval state.* Each discovered server has a state: `enabled`, `disabled`,
+`unapproved` or `project-approved`. The state comes from the client config:
+
+- Codex: `enabled = false` in the server's `[mcp_servers.<name>]` table gives `disabled`.
+- Claude Code: the keys `enabledMcpjsonServers`, `disabledMcpjsonServers`, `disabledMcpServers` and
+  `enableAllProjectMcpServers`. mcpmoat reads them from `projects.<path>` in `~/.claude.json`, from
+  the user file `~/.claude/settings.json`, and from the project files `.claude/settings.json` and
+  `.claude/settings.local.json`.
+  - The user file `~/.claude/settings.json` and `projects.<path>` in `~/.claude.json` are trusted.
+    The project files `.claude/settings.json` and `.claude/settings.local.json` are untrusted: a
+    cloned repository can ship them.
+  - A `.mcp.json` server named in `disabledMcpjsonServers` is `disabled`. Else, a server named in
+    `enabledMcpjsonServers`, or any server when `enableAllProjectMcpServers` is true, is approved.
+    An approval from a trusted file gives `enabled`. An approval only from the untrusted project
+    files gives `project-approved`. Else the server is `unapproved`.
+  - For `enableAllProjectMcpServers`, the first value found wins, in this order:
+    `settings.local.json`, the project `settings.json`, the user `settings.json`, `~/.claude.json`.
+    The file that has this first value tells whether the approval is trusted.
+  - A server named in `disabledMcpServers` is `disabled`, also when it is approved. For a global
+    server, only `projects.<path>.disabledMcpServers` of the current project applies.
+  - The current project is the working directory as given, or with its symlinks resolved: Claude
+    Code writes the key with the real path. When `~/.claude.json` has both keys, the disabled lists
+    of both apply. The approval (`enabledMcpjsonServers` and `enableAllProjectMcpServers`) comes
+    from one key only, the working directory as given if it has a key, so a second key never adds
+    an approval. Another form of the same path, such as another letter case on a case-insensitive
+    file system, does not match (known limit).
+
+  For a `.mcp.json` server that no disabled list names:
+
+  | Name in a trusted `enabledMcpjsonServers` | Name in an untrusted `enabledMcpjsonServers` | First `enableAllProjectMcpServers` | State |
+  |---|---|---|---|
+  | yes | any | any | `enabled` |
+  | no | any | `true`, in a trusted file | `enabled` |
+  | no | any | `true`, in an untrusted file | `project-approved` |
+  | no | yes | absent or `false` | `project-approved` |
+  | no | no | absent or `false` | `unapproved` |
+
+  The state fails closed when mcpmoat cannot read a source:
+
+  - A settings file that has an error: no `.mcp.json` server keeps an approval. An `enabled` or
+    `project-approved` server becomes `unapproved`; `disabled` stays.
+  - `~/.claude.json` exists, but mcpmoat cannot read its `projects.<path>` state for the current
+    project: the file is refused as a whole (also for a bad value in another project), the
+    `projects` value is not an object, or the object of the current project, or its state, has an
+    error. Then no `.mcp.json` server keeps an approval, as above, and every global server of
+    `~/.claude.json` that would be `enabled` is `unapproved`: mcpmoat cannot confirm that the
+    project does not turn it off.
+  - A missing file is not an error, and a `~/.claude.json` with no key for the current project is
+    not a failure.
+  - Each failure gives a per-file error, so the scan fails and the result does not look clean.
+- Cursor: not read. Cursor keeps its on and off toggle in its SQLite state, which mcpmoat does not
+  read, so every Cursor server shows `enabled` (known limit).
+- With `--config`, mcpmoat reads one file only and has no approval data. A server from that file is
+  `enabled` unless the file itself turns it off (known limit).
+
+Acceptance criteria:
+
+- A Codex fixture with `enabled = false` gives a `disabled` server.
+- A Claude Code fixture gives `enabled`, `disabled`, `unapproved` and `project-approved` servers
+  from the rule above.
+- A state key with a wrong type gives a per-file error that holds no value.
+- Inspection never starts or connects to a server that is not `enabled` (also `project-approved`),
+  unless the caller opts in explicitly (`AllowDisabled`). This opt-in is separate from the opt-in for untrusted project
+  configs. A server that is both disabled and untrusted needs both.
+
+A project repository can ship its own `.claude/settings.json` that approves its own `.mcp.json`
+servers. Such an approval gives only `project-approved`, never `enabled`, so inspection still needs
+the state opt-in. It never changes trust: inspection of an untrusted project config still needs the
+untrusted opt-in too.
+
+*Variable placeholders.* Discovery keeps `${...}` placeholders as written, and the list shows them
+as written. Inspection expands them as the client does, just before it starts or connects to the
+server:
+
+- Claude Code: `${VAR}` and `${VAR:-default}`. A variable that is set but empty gives an empty
+  value, not the default.
+- Cursor: `${env:NAME}` and the workspace variables `${userHome}`, `${workspaceFolder}`,
+  `${workspaceFolderBasename}`, `${pathSeparator}` and `${/}`. A workspace variable on a server
+  with no project is an error.
+- Codex: no expansion.
+
+Rules:
+
+- Values come from the user's environment, the one that mcpmoat runs in.
+- mcpmoat expands the command, the arguments, the URL, and the values of environment variables and
+  headers. It does not expand names (keys).
+- A missing variable with no default gives a fixed config error. The error names the variable only
+  when it is a plain variable name (ASCII letters, digits and `_`, not a digit first, at most 64
+  bytes). Else it says "variable with an invalid name". mcpmoat does not start or connect to that
+  server. Cursor probably uses an empty value here; mcpmoat fails closed.
+- An expanded text can be at most 64 KiB, and the expanded texts of one server together at most
+  1 MiB. Over a limit, mcpmoat refuses the server with a fixed config error and does not start or
+  connect to it.
+- Expanded values stay masked. They are never printed, logged or stored, and the report shows the
+  server as configured.
 
 ### 6.2 Inspection
 
@@ -357,9 +507,19 @@ the same command the client would use. Minimal, pinned dependencies. `SECURITY.m
 channel.
 
 - A stdio server's environment contains only the variables declared in its client config plus a
-  minimal safe base (for example `PATH`, `HOME`), asserted by a test.
-- The executed command and arguments are exactly those in the client config.
+  minimal safe base (for example `PATH`, `HOME`) and `npm_config_yes=false`, asserted by a test.
+- The executed command and arguments are exactly those in the client config, after the same
+  placeholder expansion as the client (FR-03).
+- A trusted project server (for example a `projects.<path>` entry in `~/.claude.json`) runs in its
+  project directory, as the client runs it. A server from an untrusted project file does not get
+  this default.
 - `go.mod` lists only needed dependencies; CI actions are pinned to commit SHAs.
+
+`npm_config_yes=false` makes `npx` (npm 7 or later) stop with an error when the package is not
+installed, so the scan does not install a package that the user did not install. A configured `-y`
+or `--yes` argument, or a configured `npm_config_yes` variable, still wins, because the user chose
+it. Known limits: `pnpm dlx`, `bunx`, `uvx` and the standalone `npx` from before npm 7 ignore this
+variable.
 
 **NFR-05: Quality.** Tests for every rule, with cases that must and must not fire. Fake MCP servers
 (fixtures) reproducing T1 to T5. CI with `go test`, `go vet`, `golangci-lint`.

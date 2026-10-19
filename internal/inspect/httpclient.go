@@ -85,8 +85,9 @@ type httpClientConfig struct {
 	User *url.Userinfo
 	// Headers are the headers from the config, with raw values.
 	Headers map[string]string
-	// Base does the network I/O. A nil Base gives newBaseTransport(nil). Tests
-	// pass their own.
+	// Base does the network I/O. A nil Base gives newBaseTransport(nil, host),
+	// where host is the host name of Endpoint in lower case, so the dialer
+	// guards that name (see pinnedDialer). Tests pass their own.
 	Base http.RoundTripper
 	// UserAgent is the User-Agent, unless Headers sets one. Empty means the
 	// net/http default ("Go-http-client/1.1" or "Go-http-client/2.0").
@@ -131,7 +132,12 @@ func newHTTPClient(cfg httpClientConfig) (*http.Client, *httpEvents, error) {
 	}
 	base := cfg.Base
 	if base == nil {
-		base = newBaseTransport(nil)
+		// Guard the configured host name: its DNS answer must not point to
+		// a loopback, link-local or other refused address. http.Transport
+		// dials an ASCII host name as the URL has it, so the lower-case
+		// Hostname matches the key of the dialer. Remote refuses a host that
+		// is not ASCII, which http.Transport would dial in punycode form.
+		base = newBaseTransport(nil, strings.ToLower(endpoint.Hostname()))
 	}
 	maxBody := cfg.MaxBody
 	if maxBody <= 0 {
@@ -209,13 +215,23 @@ func newHTTPClient(cfg httpClientConfig) (*http.Client, *httpEvents, error) {
 // HTTPS_PROXY, the transport dials the proxy, so the pinned address is the
 // address of the proxy, and the proxy resolves the server name itself.
 //
+// guardHost is the host name of the configured endpoint. The dialer refuses
+// the loopback, unspecified, link-local and multicast addresses in the DNS
+// answers for that name, and fails with errAddrRefused when no other address
+// is left (see pinnedDialer). It is compared in lower case. An IP literal
+// host is never resolved, so the guard does not apply to it. The proxy host
+// is not guarded: the user sets it in the environment. An empty guardHost
+// guards no host.
+//
 // A nil lookup uses the system resolver. Tests give a stub lookup.
-func newBaseTransport(lookup lookupFunc) *http.Transport {
+func newBaseTransport(lookup lookupFunc, guardHost string) *http.Transport {
+	dialer := newPinnedDialer(lookup, nil)
+	dialer.guardHost = strings.ToLower(guardHost)
 	return &http.Transport{
 		// Honour the user's HTTP_PROXY, HTTPS_PROXY and NO_PROXY variables. The
 		// proxy is user-configured, and Go never uses it for localhost.
 		Proxy:               proxyFromEnvironment,
-		DialContext:         newPinnedDialer(lookup, nil).DialContext,
+		DialContext:         dialer.DialContext,
 		TLSHandshakeTimeout: tlsHandshakeTimeout,
 		// No ResponseHeaderTimeout: an SSE server can wait a long time before
 		// it sends the first byte.
@@ -384,7 +400,8 @@ type headerTransport struct {
 // (see shapeFor), a shapeReader then limits the depth, the number of values and
 // the string length of each JSON message (see shapeBody and jsonshape.go), so
 // that a small body cannot decode to a huge amount of memory. Both store
-// their error in the record of the request.
+// their error in the record of the request. An errAddrRefused from the dialer
+// of the base transport goes to the record too.
 func (t *headerTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 	// Get the record once: every step below writes to the same one.
 	rec := t.events.recorderFor(req)
@@ -435,6 +452,12 @@ func (t *headerTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 		// No response came back. Clear an older status, so that it cannot
 		// outrank this transport error in classify.
 		rec.recordNoResponse()
+		if errors.Is(err, errAddrRefused) {
+			// The dialer refused the DNS answer for the server name on
+			// purpose. Record it, so the label survives when the SDK
+			// flattens the error into text.
+			return nil, rec.recordBlocked(err)
+		}
 		// Return the error as is. classify unwraps the *url.Error that the
 		// http.Client adds.
 		return nil, err

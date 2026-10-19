@@ -35,7 +35,7 @@ func dirsCLI(t *testing.T, home, work string) (*cli, *bytes.Buffer, *bytes.Buffe
 }
 
 // tableHeader is the header row of the server table, split into words.
-var tableHeader = []string{"NAME", "CLIENT", "SCOPE", "TRANSPORT", "SOURCE", "COMMAND/URL"}
+var tableHeader = []string{"NAME", "CLIENT", "SCOPE", "TRANSPORT", "STATE", "SOURCE", "COMMAND/URL"}
 
 // tableRows splits the server table on stdout into data rows. Each row is its
 // list of whitespace-separated words. It fails the test when the first line

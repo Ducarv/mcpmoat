@@ -1,0 +1,10 @@
+{
+  "numStartups": 1,
+  "theme": "dark",
+  "mcpServers": {
+    "global-srv": {
+      "command": "npx",
+      "args": ["-y", "global-server"]
+    }
+  }
+}

@@ -3026,7 +3026,9 @@ func TestListIntoFillsAllLists(t *testing.T) {
 		t.Errorf("ResourceTemplates = %v, want [rt1]", got)
 	}
 
-	// listInto sets the four lists and no other field.
+	// listInto sets the four lists and no other field. With every
+	// capability declared it adds no warning, so Warnings keeps only the
+	// prefilled warning.
 	want := prefilledResult()
 	want.Tools, want.Prompts, want.Resources, want.ResourceTemplates = res.Tools, res.Prompts, res.Resources, res.ResourceTemplates
 	if !reflect.DeepEqual(res, want) {
@@ -3310,4 +3312,306 @@ func TestListIntoRealSDKTemplateErrors(t *testing.T) {
 			}
 		})
 	}
+}
+
+// ---------------------------------------------------------------------------
+// Undeclared capability warnings (#97)
+// ---------------------------------------------------------------------------
+
+// hiddenItem is the name of every item that the warning tests serve. It
+// stands for server text: no warning may hold it.
+const hiddenItem = "HIDDEN-ITEM-CANARY"
+
+// listAnswer is how one fake list answers in the warning tests.
+type listAnswer int
+
+const (
+	// answerNotFound answers with a JSON-RPC "method not found" error.
+	answerNotFound listAnswer = iota
+	// answerEmpty answers with an empty page.
+	answerEmpty
+	// answerItems answers with one page of one item.
+	answerItems
+)
+
+// answerPage returns the fake list for a, with one item named hiddenItem
+// for answerItems.
+func answerPage[T any](a listAnswer, item *T) fakeList[T] {
+	switch a {
+	case answerEmpty:
+		return fakeList[T]{pages: map[string]fakePage[T]{"": {}}}
+	case answerItems:
+		return fakeList[T]{pages: map[string]fakePage[T]{"": {items: []*T{item}}}}
+	}
+	return fakeList[T]{}
+}
+
+// warningFake returns a fakeFullLister whose tools, prompts, resources and
+// templates answer as given.
+func warningFake(tools, prompts, resources, templates listAnswer) *fakeFullLister {
+	return &fakeFullLister{
+		fakeLister: fakeLister{
+			tools:     answerPage(tools, tool(hiddenItem)),
+			prompts:   answerPage(prompts, prompt(hiddenItem)),
+			resources: answerPage(resources, resource(hiddenItem)),
+		},
+		templates: answerPage(templates, sdkTemplate(hiddenItem)),
+	}
+}
+
+// assertNoServerText fails if a warning holds anything but its Kind and the
+// fixed capability names: no item name, no other field.
+func assertNoServerText(t *testing.T, ws []Warning) {
+	t.Helper()
+	fixed := []string{"tools", "prompts", "resources", "resource-templates"}
+	for i, w := range ws {
+		if w.Kind != WarnUndeclaredCapability {
+			continue
+		}
+		for _, c := range w.Capabilities {
+			if !slices.Contains(fixed, c) {
+				t.Errorf("warning %d: capability %q is not one of the fixed names %q", i, c, fixed)
+			}
+		}
+		rest := w
+		rest.Kind, rest.Capabilities = "", nil
+		if !reflect.DeepEqual(rest, Warning{}) {
+			t.Errorf("warning %d: fields other than Kind and Capabilities are set: %+v", i, w)
+		}
+		if text := fmt.Sprintf("%+v", w); strings.Contains(text, hiddenItem) {
+			t.Errorf("warning %d holds server text: %s", i, text)
+		}
+	}
+}
+
+// TestListIntoUndeclaredWarnings checks the warning that listInto adds when a
+// list that the capabilities do not declare has items (issue #97). A
+// declared list, or an undeclared list that is empty or refused, gets no
+// warning. The warnings that result already holds stay in front.
+func TestListIntoUndeclaredWarnings(t *testing.T) {
+	t.Parallel()
+
+	all := []string{"tools", "prompts", "resources", "resource-templates"}
+
+	tests := []struct {
+		name  string
+		caps  *mcp.ServerCapabilities
+		fake  *fakeFullLister
+		start []Warning
+		// want are the capability names of the one new warning; nil means
+		// no new warning.
+		want []string
+	}{
+		{
+			name: "all declared",
+			caps: allCaps(),
+			fake: warningFake(answerItems, answerItems, answerItems, answerItems),
+		},
+		{
+			name: "nil caps with items",
+			caps: nil,
+			fake: warningFake(answerItems, answerItems, answerItems, answerItems),
+			want: all,
+		},
+		{
+			name: "empty caps with items",
+			caps: &mcp.ServerCapabilities{},
+			fake: warningFake(answerItems, answerItems, answerItems, answerItems),
+			want: all,
+		},
+		{
+			// Another capability does not declare the lists.
+			name: "only completions declared",
+			caps: &mcp.ServerCapabilities{Completions: &mcp.CompletionCapabilities{}},
+			fake: warningFake(answerItems, answerItems, answerItems, answerItems),
+			want: all,
+		},
+		{
+			name: "only tools declared",
+			caps: &mcp.ServerCapabilities{Tools: &mcp.ToolCapabilities{}},
+			fake: warningFake(answerItems, answerItems, answerItems, answerItems),
+			want: []string{"prompts", "resources", "resource-templates"},
+		},
+		{
+			// The resources capability covers the templates too.
+			name: "only resources declared",
+			caps: &mcp.ServerCapabilities{Resources: &mcp.ResourceCapabilities{}},
+			fake: warningFake(answerItems, answerItems, answerItems, answerItems),
+			want: []string{"tools", "prompts"},
+		},
+		{
+			name: "only prompts declared",
+			caps: &mcp.ServerCapabilities{Prompts: &mcp.PromptCapabilities{}},
+			fake: warningFake(answerItems, answerItems, answerItems, answerItems),
+			want: []string{"tools", "resources", "resource-templates"},
+		},
+		{
+			// The hiding server of #97: no tools capability, but tools.
+			name: "undeclared tools only",
+			caps: &mcp.ServerCapabilities{Prompts: &mcp.PromptCapabilities{}, Resources: &mcp.ResourceCapabilities{}},
+			fake: warningFake(answerItems, answerEmpty, answerEmpty, answerEmpty),
+			want: []string{"tools"},
+		},
+		{
+			name: "undeclared templates only",
+			caps: nil,
+			fake: warningFake(answerNotFound, answerEmpty, answerEmpty, answerItems),
+			want: []string{"resource-templates"},
+		},
+		{
+			// The SDK server answers every list request, with an empty list
+			// for an undeclared capability. That is no warning.
+			name: "undeclared and empty",
+			caps: nil,
+			fake: warningFake(answerEmpty, answerEmpty, answerEmpty, answerEmpty),
+		},
+		{
+			name: "undeclared and method not found",
+			caps: nil,
+			fake: warningFake(answerNotFound, answerNotFound, answerNotFound, answerNotFound),
+		},
+		{
+			name: "declared and empty",
+			caps: allCaps(),
+			fake: warningFake(answerEmpty, answerEmpty, answerEmpty, answerEmpty),
+		},
+		{
+			name:  "existing warnings kept in front",
+			caps:  nil,
+			fake:  warningFake(answerItems, answerNotFound, answerEmpty, answerNotFound),
+			start: []Warning{{Kind: WarnCleartextSecrets, HeaderKeys: []string{"X-Old"}}, {Kind: WarnDNSPinUnavailable}},
+			want:  []string{"tools"},
+		},
+		{
+			name:  "existing warnings kept without a new one",
+			caps:  allCaps(),
+			fake:  warningFake(answerItems, answerItems, answerItems, answerItems),
+			start: []Warning{{Kind: WarnCleartextSecrets, URLUserInfo: true}},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			res := Result{Warnings: slices.Clone(tt.start)}
+			if err := listInto(t.Context(), tt.fake, tt.caps, &tt.fake.capture, &res); err != nil {
+				t.Fatalf("listInto() error = %v", err)
+			}
+
+			want := slices.Clone(tt.start)
+			if tt.want != nil {
+				want = append(want, Warning{Kind: WarnUndeclaredCapability, Capabilities: tt.want})
+			}
+			if len(want) == 0 {
+				if res.Warnings != nil {
+					t.Errorf("Warnings = %+v, want nil", res.Warnings)
+				}
+			} else if !reflect.DeepEqual(res.Warnings, want) {
+				t.Errorf("Warnings = %+v, want %+v", res.Warnings, want)
+			}
+			assertNoServerText(t, res.Warnings)
+		})
+	}
+}
+
+// TestListIntoUndeclaredWarningOnError checks that listInto adds no warning
+// when it fails: on error it changes nothing in result.
+func TestListIntoUndeclaredWarningOnError(t *testing.T) {
+	t.Parallel()
+
+	f := warningFake(answerItems, answerItems, answerItems, answerItems)
+	f.prompts.err = errors.New("fake: transport broke")
+	res := prefilledResult()
+	if err := listInto(t.Context(), f, nil, &f.capture, &res); err == nil {
+		t.Fatal("listInto() error = nil, want the prompts error")
+	}
+	if want := prefilledResult(); !reflect.DeepEqual(res, want) {
+		t.Errorf("listInto changed result on error:\ngot  %+v\nwant %+v", res, want)
+	}
+}
+
+// TestListIntoRealSDKUndeclaredToolsWarning runs the hiding server of
+// hiddenToolsSession through listInto: the tools reach the result, and the
+// result carries the undeclared-capability warning for tools only. The SDK
+// server answers the undeclared prompts and resources with empty lists,
+// which give no warning.
+func TestListIntoRealSDKUndeclaredToolsWarning(t *testing.T) {
+	t.Parallel()
+
+	cs, raw := hiddenToolsSession(t)
+	caps := cs.InitializeResult().Capabilities
+	if caps != nil && caps.Tools != nil {
+		t.Fatalf("fixture declares tools: %+v", caps.Tools)
+	}
+	var res Result
+	if err := listInto(t.Context(), cs, caps, raw, &res); err != nil {
+		t.Fatalf("listInto() error = %v", err)
+	}
+	if len(res.Tools) == 0 {
+		t.Fatal("Tools is empty, want the hidden tools")
+	}
+	want := []Warning{{Kind: WarnUndeclaredCapability, Capabilities: []string{"tools"}}}
+	if !reflect.DeepEqual(res.Warnings, want) {
+		t.Errorf("Warnings = %+v, want %+v", res.Warnings, want)
+	}
+}
+
+// TestUndeclaredWarnings checks undeclaredWarnings for each list on its own,
+// for nil capabilities and for the order of the names.
+func TestUndeclaredWarnings(t *testing.T) {
+	t.Parallel()
+
+	tools := []Tool{{Name: hiddenItem}}
+	prompts := []Prompt{{Name: hiddenItem}}
+	resources := []Resource{{Name: hiddenItem}}
+	templates := []ResourceTemplate{{Name: hiddenItem}}
+	full := Result{Tools: tools, Prompts: prompts, Resources: resources, ResourceTemplates: templates}
+
+	tests := []struct {
+		name string
+		caps *mcp.ServerCapabilities
+		r    Result
+		want []string // nil means no warning
+	}{
+		{name: "nil caps and no lists", caps: nil, r: Result{}},
+		{name: "nil caps and empty lists", caps: nil, r: Result{Tools: []Tool{}, Prompts: []Prompt{}, Resources: []Resource{}, ResourceTemplates: []ResourceTemplate{}}},
+		{name: "nil caps and tools", caps: nil, r: Result{Tools: tools}, want: []string{"tools"}},
+		{name: "nil caps and prompts", caps: nil, r: Result{Prompts: prompts}, want: []string{"prompts"}},
+		{name: "nil caps and resources", caps: nil, r: Result{Resources: resources}, want: []string{"resources"}},
+		{name: "nil caps and templates", caps: nil, r: Result{ResourceTemplates: templates}, want: []string{"resource-templates"}},
+		{name: "nil caps and all lists in order", caps: nil, r: full, want: []string{"tools", "prompts", "resources", "resource-templates"}},
+		{name: "all declared", caps: allCaps(), r: full},
+		{name: "tools declared", caps: &mcp.ServerCapabilities{Tools: &mcp.ToolCapabilities{}}, r: Result{Tools: tools}},
+		{name: "prompts declared", caps: &mcp.ServerCapabilities{Prompts: &mcp.PromptCapabilities{}}, r: Result{Prompts: prompts}},
+		{name: "resources declared covers resources", caps: &mcp.ServerCapabilities{Resources: &mcp.ResourceCapabilities{}}, r: Result{Resources: resources}},
+		{name: "resources declared covers templates", caps: &mcp.ServerCapabilities{Resources: &mcp.ResourceCapabilities{}}, r: Result{ResourceTemplates: templates}},
+		{name: "tools declared, prompts not", caps: &mcp.ServerCapabilities{Tools: &mcp.ToolCapabilities{}}, r: Result{Tools: tools, Prompts: prompts}, want: []string{"prompts"}},
+		{name: "resources and templates both named", caps: &mcp.ServerCapabilities{Tools: &mcp.ToolCapabilities{}, Prompts: &mcp.PromptCapabilities{}}, r: full, want: []string{"resources", "resource-templates"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got := undeclaredWarnings(tt.caps, tt.r)
+			if tt.want == nil {
+				if got != nil {
+					t.Errorf("undeclaredWarnings() = %+v, want nil", got)
+				}
+				return
+			}
+			want := []Warning{{Kind: WarnUndeclaredCapability, Capabilities: tt.want}}
+			if !reflect.DeepEqual(got, want) {
+				t.Errorf("undeclaredWarnings() = %+v, want %+v", got, want)
+			}
+			assertNoServerText(t, got)
+		})
+	}
+
+	t.Run("new slice on each call", func(t *testing.T) {
+		t.Parallel()
+		a := undeclaredWarnings(nil, full)
+		b := undeclaredWarnings(nil, full)
+		a[0].Capabilities[0] = "changed"
+		if b[0].Capabilities[0] != "tools" {
+			t.Errorf("second call Capabilities = %q, want it unchanged by a change of the first", b[0].Capabilities)
+		}
+	})
 }
