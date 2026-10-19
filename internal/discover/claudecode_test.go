@@ -693,6 +693,85 @@ func TestReadGlobalClaudeCodeStateSymlink(t *testing.T) {
 	}
 }
 
+// TestReadGlobalClaudeCodeStateSymlinkLocalServers checks the local-scope
+// servers (projects.<path>.mcpServers) under one of the two keys of a
+// symlinked workDir. Both keys name the same directory, so the disabled list
+// of the other key turns them off too, and a bad state under the other key
+// fails them closed, as for the top-level servers. The servers of another
+// project keep the state of their own project.
+func TestReadGlobalClaudeCodeStateSymlinkLocalServers(t *testing.T) {
+	t.Parallel()
+	skipOnWindows(t)
+
+	tests := []struct {
+		name    string
+		realKey any
+		badReal bool
+		want    map[string]State
+	}{
+		{
+			name:    "disabled list of the real key",
+			realKey: map[string]any{keyDisabledMcpServers: []string{"loc-a", "other-a"}},
+			want:    map[string]State{"loc-a": StateDisabled},
+		},
+		{
+			name:    "bad state under the real key",
+			realKey: map[string]any{keyDisabledMcpServers: "loc-a"},
+			badReal: true,
+			want: map[string]State{
+				"loc-a": StateUnapproved, "loc-b": StateUnapproved,
+				"top-a": StateUnapproved,
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			base := t.TempDir()
+			realDir := makeDir(t, base, "real")
+			link := symlinkTo(t, realDir, base, "link")
+			realPath, err := filepath.EvalSymlinks(realDir)
+			if err != nil {
+				t.Fatalf("resolve %s: %v", realDir, err)
+			}
+			otherDir := makeDir(t, base, "other")
+
+			data, err := json.Marshal(map[string]any{
+				"mcpServers": map[string]any{"top-a": map[string]any{"command": "a"}},
+				"projects": map[string]any{
+					link: map[string]any{"mcpServers": map[string]any{
+						"loc-a": map[string]any{"command": "a"},
+						"loc-b": map[string]any{"command": "b"},
+					}},
+					realPath: tt.realKey,
+					otherDir: map[string]any{"mcpServers": map[string]any{
+						"other-a": map[string]any{"command": "a"},
+					}},
+				},
+			})
+			if err != nil {
+				t.Fatalf("marshal: %v", err)
+			}
+			path := writeFile(t, t.TempDir(), ".claude.json", data)
+
+			res, _, failed := readGlobalClaudeCodeState(t.Context(), path, link)
+
+			var wantErrs []errWant
+			if tt.badReal {
+				wantErrs = []errWant{{ProjectPath: realPath, Reason: reasonBadServerState}}
+			}
+			checkFileErrors(t, path, res.Errors, wantErrs)
+			if failed != tt.badReal {
+				t.Errorf("failed = %v, want %v", failed, tt.badReal)
+			}
+			if got, want := serverNames(res.Servers), []string{"top-a", "loc-a", "loc-b", "other-a"}; !slices.Equal(slices.Sorted(slices.Values(got)), slices.Sorted(slices.Values(want))) {
+				t.Fatalf("servers = %v, want %v", got, want)
+			}
+			checkStates(t, res.Servers, tt.want)
+		})
+	}
+}
+
 // TestReadGlobalClaudeCodeStateNoState checks the cases that give a zero
 // state: a missing file, a file that is refused as a whole, a projects
 // section that is not an object, a bad state or shape of the

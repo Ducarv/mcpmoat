@@ -345,13 +345,16 @@
 //     (enabledMcpjsonServers and enableAllProjectMcpServers) comes from one
 //     key only: WorkDir as given if the file has it, else the resolved
 //     WorkDir. A bad state under either key is a failure (see the next
-//     rule).
+//     rule). The joined disabled list, and the failure rule, apply also to
+//     the servers of projects.<key>.mcpServers for both keys: the two keys
+//     name the same directory.
 //   - In Discover, this fails closed. When ~/.claude.json exists but its
 //     projects section is not read to the end (a read error, a file refused
 //     as a whole, also for a bad string in another project, a projects
 //     value that is not an object, or a canceled read), or when a
 //     projects.<WorkDir> object or its state has an error, a top-level
-//     server with StateEnabled gets StateUnapproved. mcpmoat cannot confirm
+//     server, or a server of projects.<key>.mcpServers for a key of
+//     WorkDir, with StateEnabled gets StateUnapproved. mcpmoat cannot confirm
 //     that the lost disabledMcpServers list does not turn it off. A missing
 //     file, and a file with no projects.<WorkDir> key, are not failures.
 //   - In Discover, each .mcp.json server gets its State from the sources

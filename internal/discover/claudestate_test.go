@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"maps"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -42,15 +43,10 @@ func sortedNames(s nameSet) []string {
 	if len(s) == 0 {
 		return nil
 	}
-	out := make([]string, 0, len(s))
-	for name := range s {
-		out = append(out, name)
-	}
-	slices.Sort(out)
-	return out
+	return slices.Sorted(maps.Keys(s))
 }
 
-// names returns a nameSet with the given names.
+// nameSetOf returns a nameSet with the given names.
 func nameSetOf(ns ...string) nameSet {
 	s := make(nameSet, len(ns))
 	for _, n := range ns {

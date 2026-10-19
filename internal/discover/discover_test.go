@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"path/filepath"
 	"reflect"
 	"slices"
@@ -660,7 +661,7 @@ func checkDiscoverStates(t testing.TB, res Result, want map[string]State) {
 			t.Errorf("server %q: Untrusted = false, want true for a .mcp.json server", s.Name)
 		}
 	}
-	if !reflect.DeepEqual(got, want) {
+	if !maps.Equal(got, want) {
 		t.Errorf("server states =\n got  %v\n want %v", got, want)
 	}
 }

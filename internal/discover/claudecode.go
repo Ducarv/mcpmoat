@@ -3,6 +3,7 @@ package discover
 import (
 	"context"
 	"path/filepath"
+	"slices"
 )
 
 // ReadClaudeCode reads one Claude Code config file: ~/.claude.json with
@@ -91,9 +92,15 @@ func ReadClaudeCode(ctx context.Context, path string, scope Scope, projectPath s
 //
 // When failed is true, it fails closed: every top-level server with
 // StateEnabled gets StateUnapproved, because mcpmoat cannot confirm that
-// projects.<workDir>.disabledMcpServers does not turn it off. The servers of
-// "projects.<path>.mcpServers" keep their State. Result.Errors holds the
-// error, so the scan fails and the result does not look clean.
+// projects.<workDir>.disabledMcpServers does not turn it off. Result.Errors
+// holds the error, so the scan fails and the result does not look clean.
+//
+// The servers of "projects.<path>.mcpServers" for a path that is one of the
+// two keys of workDir get the same rules as the top-level servers: the
+// joined disabled list, and StateUnapproved when failed is true. Both keys
+// name the same directory, so a list under one key applies to the servers
+// under the other key too. The servers of other projects keep the state of
+// their own project.
 //
 // The state is zero when the "projects" section was not read to the end,
 // when the file is missing or holds only white space, or when the file has
@@ -121,9 +128,9 @@ func readGlobalClaudeCodeState(ctx context.Context, path, workDir string) (res R
 	// at least one error, so the check of errs tells the two apart.
 	failed = (!states.decoded && len(errs) > 0) || bad
 	for i := range res.Servers {
-		// Only the top-level servers have ScopeGlobal. The project servers
-		// already have the state of their own project.
-		if res.Servers[i].Scope != ScopeGlobal {
+		// Only the top-level servers have ScopeGlobal. The servers of other
+		// projects already have the state of their own project.
+		if res.Servers[i].Scope != ScopeGlobal && !slices.Contains(keys, res.Servers[i].ProjectPath) {
 			continue
 		}
 		if st.disabledMcp.has(res.Servers[i].Name) {

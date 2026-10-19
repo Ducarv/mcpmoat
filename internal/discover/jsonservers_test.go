@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"path/filepath"
 	"reflect"
 	"slices"
@@ -2260,7 +2261,7 @@ func checkProjectStates(t testing.TB, servers []Server, want map[projectServer]S
 	for _, s := range servers {
 		got[projectServer{project: s.ProjectPath, name: s.Name}] = s.State
 	}
-	if !reflect.DeepEqual(got, want) {
+	if !maps.Equal(got, want) {
 		t.Errorf("server states =\n got  %v\n want %v", got, want)
 	}
 }
