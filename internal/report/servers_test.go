@@ -100,6 +100,8 @@ func TestWriteServersStateCell(t *testing.T) {
 		state discover.State
 		want  string
 	}{
+		// The zero value is StateEnabled on purpose (see discover.State);
+		// this case pins that, so a change of the zero value shows here.
 		{name: "zero value is enabled", state: discover.State(0), want: "enabled"},
 		{name: "enabled", state: discover.StateEnabled, want: "enabled"},
 		{name: "disabled", state: discover.StateDisabled, want: "disabled"},

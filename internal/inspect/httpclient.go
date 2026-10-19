@@ -220,10 +220,10 @@ func newHTTPClient(cfg httpClientConfig) (*http.Client, *httpEvents, error) {
 // guardHost is the host name of the configured endpoint. The dialer drops
 // the addresses that refusedAddr refuses from the DNS answers for that name,
 // and fails with errAddrRefused when no other address is left (see
-// pinnedDialer). It is compared in lower case. An IP literal
-// host is never resolved, so the guard does not apply to it. The proxy host
-// is not guarded: the user sets it in the environment. An empty guardHost
-// guards no host.
+// pinnedDialer). It is compared in lower case. An IP literal host is never
+// resolved, so the guard does not apply to it. The proxy host is not
+// guarded: the user sets it in the environment. An empty guardHost guards no
+// host.
 //
 // A nil lookup uses the system resolver. Tests give a stub lookup.
 func newBaseTransport(lookup lookupFunc, guardHost string) *http.Transport {

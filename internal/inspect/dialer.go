@@ -80,12 +80,11 @@ type dialFunc func(ctx context.Context, network, address string) (net.Conn, erro
 // Guard: the pin alone does not stop a name that points to a local address
 // from the first lookup. So for one host name, guardHost (the host of the
 // configured endpoint), DialContext also drops the addresses that a remote
-// server must not have (see refusedAddr). Private
-// (RFC 1918) and unique local (ULA) addresses stay allowed: a server on the
-// company network is a normal case. The rest of 100.64.0.0/10 (shared
-// address space, RFC 6598) also stays allowed, because Tailscale and other
-// carrier-grade NAT networks use it for real servers. The guard does
-// not cover other host names. The proxy host is one of them: the user sets
+// server must not have (see refusedAddr). Private (RFC 1918) and unique
+// local (ULA) addresses stay allowed: a server on the company network is a
+// normal case. The rest of 100.64.0.0/10 (shared address space, RFC 6598)
+// also stays allowed, because Tailscale and other carrier-grade NAT networks
+// use it for real servers. The guard does not cover other host names. The proxy host is one of them: the user sets
 // it in the environment, and a local proxy is a normal case.
 //
 // Known limit: with HTTP_PROXY or HTTPS_PROXY, http.Transport dials the proxy,
@@ -299,15 +298,19 @@ func isLocalhostName(host string) bool {
 
 // Addresses and prefixes that refusedAddr checks.
 var (
+	// thisNetworkPrefix is 0.0.0.0/8, "this network" (RFC 1122). Many
+	// systems send a connection to an address in it to this machine.
+	// IsUnspecified covers only 0.0.0.0 itself.
+	thisNetworkPrefix = netip.MustParsePrefix("0.0.0.0/8")
 	// alibabaMetadataAddr is the Alibaba Cloud metadata address. It is in
 	// 100.64.0.0/10, not in a link-local range.
-	alibabaMetadataAddr = netip.AddrFrom4([4]byte{100, 100, 100, 200})
+	alibabaMetadataAddr = netip.MustParseAddr("100.100.100.200")
 	// awsIPv6MetadataAddr is the IPv6 address of the AWS metadata service.
 	// It is in the unique local range fc00::/7, which is not refused.
 	awsIPv6MetadataAddr = netip.MustParseAddr("fd00:ec2::254")
 	// azureWireServerAddr is the Azure WireServer address, a host service
 	// of every Azure VM. It is a public address, not a private one.
-	azureWireServerAddr = netip.AddrFrom4([4]byte{168, 63, 129, 16})
+	azureWireServerAddr = netip.MustParseAddr("168.63.129.16")
 	// ietfProtocolPrefix is 192.0.0.0/24, the IETF protocol assignments
 	// (RFC 6890). It holds 192.0.0.192, the old Oracle Cloud metadata
 	// address, and no address of a normal server.
@@ -378,9 +381,7 @@ func embeddedIPv4(addr netip.Addr) (netip.Addr, bool) {
 // either: Tailscale and other carrier-grade NAT networks use it for real
 // servers.
 func refusedAddr(addr netip.Addr) bool {
-	if addr.Is4() && addr.As4()[0] == 0 {
-		// 0.0.0.0/8, "this network" (RFC 1122). IsUnspecified covers only
-		// 0.0.0.0 itself.
+	if thisNetworkPrefix.Contains(addr) {
 		return true
 	}
 	if addr == alibabaMetadataAddr || addr == awsIPv6MetadataAddr || addr == azureWireServerAddr {

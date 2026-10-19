@@ -30,8 +30,8 @@ import (
 // project directory, so it reads no approval of the servers of a project
 // .mcp.json: with a scope other than ScopeGlobal, every server gets
 // StateUnapproved, which fails closed. It does not apply the state of a
-// project to the top-level servers either. Only [Discover]
-// reads the settings files and the projects.<WorkDir> state for that.
+// project to the top-level servers either. Only [Discover] reads the
+// settings files and the projects.<WorkDir> state for that.
 //
 // See the package doc, Reading configs.
 func ReadClaudeCode(ctx context.Context, path string, scope Scope, projectPath string) Result {

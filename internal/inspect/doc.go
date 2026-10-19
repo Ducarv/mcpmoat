@@ -64,10 +64,11 @@
 //
 // A server from an untrusted project file (s.Untrusted) passes the gates
 // only with AllowUntrusted, and a cloned repository can ship its config. So
-// its placeholders read less: a stdio server reads only the base variables
-// of the child environment (HOME, PATH and the others of isBaseEnv), which
-// its child gets anyway, and a remote server reads no variable at all,
-// because even USER or HOME tell the host who the user is. Any other
+// its placeholders read less (see expandPolicyFor): a stdio server reads
+// only the base variables of the child environment (HOME, PATH and the
+// others of isBaseEnv), which its child gets anyway, and a remote server
+// reads no variable at all and no Cursor workspace folder, because even
+// USER, HOME or the project path tell the host who the user is. Any other
 // variable counts as not set: a placeholder with a default gets the
 // default, and one without a default refuses the server, with a reason that
 // says why. So a config from a cloned repository cannot send a secret

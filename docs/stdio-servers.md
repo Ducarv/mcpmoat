@@ -119,7 +119,8 @@ Rules:
 - Exception: a server from a project file that a repository can ship (see
   [Project servers](#project-servers)) runs only when you opt in, and it reads less. A stdio
   server reads only the base set, which it gets anyway. A remote server reads no variable at all,
-  because even `USER` or `HOME` tell the host who you are. Any other variable counts as not set:
+  and no Cursor `${workspaceFolder}` or `${workspaceFolderBasename}`, because even `USER`, `HOME`
+  or the project path tell the host who you are. Any other variable counts as not set:
   a default applies, and without a default mcpmoat does not start the server or connect. So a
   config from a cloned repository cannot send a secret variable to a server address that it
   chose. This applies also when your client runs the server: mcpmoat cannot see the Cursor

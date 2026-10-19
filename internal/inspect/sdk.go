@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"io/fs"
 	"log/slog"
-	"net/url"
 	"os"
 	"slices"
 	"strings"
@@ -51,9 +50,9 @@ type SDKInspector struct {
 	// returns the directory for the work directories of servers with no
 	// configured work directory (see projectRunDir and workDir). rawLimit is
 	// the raw size limit; 0 means maxRawBytes. When a field is zero, as in
-	// New and in a zero SDKInspector, Inspect uses the default. Tests set them, so that they
-	// never read the real environment or write to the cache directory of
-	// the user, and can go over a small limit.
+	// New and in a zero SDKInspector, Inspect uses the default. Tests set
+	// them, so that they never read the real environment or write to the
+	// cache directory of the user, and can go over a small limit.
 	environ  func() []string
 	runRoot  func() (string, error)
 	rawLimit int64
@@ -144,35 +143,26 @@ func (i *SDKInspector) Inspect(ctx context.Context, s discover.Server) (Result, 
 	}
 	parent := environ()
 
-	// A server from an untrusted project file passed the gates only with an
-	// opt-in, and a cloned repository can ship its config. So its
-	// placeholders read only the variables that its config cannot use to
-	// send a secret to a URL or a header that the repository chose: the base
-	// variables (see isBaseEnv) for a stdio server, whose child gets them
-	// anyway, and none for a remote server, which would send even USER or
-	// HOME to that host. Its State does not matter: every Cursor server is
-	// StateEnabled (mcpmoat cannot read the Cursor toggle), and a Claude
-	// Code approval by name applies to every repository that ships a
-	// server with that name. A trusted server reads the whole environment,
-	// also when it is not enabled: its config is the user's own.
-	lookup := environLookup(parent)
-	allowed, note := func(string) bool { return true }, ""
-	if s.Untrusted {
-		allowed, note = isBaseEnv, reasonBaseOnly
-		if s.Transport.IsRemote() {
-			allowed, note = func(string) bool { return false }, reasonNoEnv
-		}
-		lookup = filterLookup(lookup, allowed)
+	// The placeholders of an untrusted server read less (see
+	// expandPolicyFor and the package doc, Placeholder expansion). A server
+	// without the workspace folder gets an empty ProjectPath for Expand
+	// only, so ${workspaceFolder} fails; the expanded server keeps its
+	// ProjectPath.
+	policy := expandPolicyFor(s)
+	toExpand := s
+	if !policy.workspace {
+		toExpand.ProjectPath = ""
 	}
 	// The recorder keeps every value that Expand looks up (each value one
 	// time), so that the scrub of error text removes them too: an expanded
 	// value can stand in an arg or in the URL host, where no other scrub
 	// list has it.
-	rec := &lookupRecorder{lookup: lookup}
-	expanded, err := discover.Expand(s, rec.Lookup)
+	rec := &lookupRecorder{lookup: filterLookup(environLookup(parent), policy.allowed)}
+	expanded, err := discover.Expand(toExpand, rec.Lookup)
 	if err != nil {
-		return Result{}, expandError(s, err, allowed, note)
+		return Result{}, expandError(s, err, policy)
 	}
+	expanded.ProjectPath = s.ProjectPath
 
 	if s.Transport.IsRemote() {
 		result, err := Remote(ctx, expanded, RemoteOptions{
@@ -389,129 +379,79 @@ func filterLookup(lookup func(string) (string, bool), allowed func(string) bool)
 	}
 }
 
-// The notes that end the reason of a missing variable that the filter of an
-// untrusted server did not let through (see Inspect): the variable can be
-// set in the environment of the user, so "not set" alone would be wrong.
+// expandPolicy is what the placeholders of one server may read (see
+// expandPolicyFor).
+type expandPolicy struct {
+	// allowed reports whether the lookup may find the variable name.
+	allowed func(name string) bool
+	// workspace tells whether the Cursor workspace placeholders get the
+	// ProjectPath of the server.
+	workspace bool
+	// note ends the reason of a placeholder that the policy refused (see
+	// expandError): the variable can be set in the environment of the
+	// user, so "not set" alone would be wrong. It is empty when the policy
+	// refuses nothing.
+	note string
+}
+
+// The notes of expandPolicy for the untrusted servers.
 const (
 	reasonBaseOnly = "; a stdio server from an untrusted project file reads only the base environment variables"
-	reasonNoEnv    = "; a remote server from an untrusted project file reads no environment variables"
+	reasonNoEnv    = "; a remote server from an untrusted project file reads no environment variables and no workspace folder"
 )
+
+// expandPolicyFor returns what the placeholders of s may read. A server
+// from an untrusted project file passed the gates only with an opt-in, and
+// a cloned repository can ship its config, so it reads only what its config
+// cannot use to send a secret, or the name of the user, to a URL or a
+// header that the repository chose:
+//
+//   - a stdio server reads the base variables (see isBaseEnv), which its
+//     child gets anyway, and the workspace folder, which is its work
+//     directory;
+//   - a remote server reads no variable and no workspace folder: even
+//     USER, HOME or the project path tell the host who the user is.
+//
+// The State does not matter: every Cursor server is StateEnabled (mcpmoat
+// cannot read the Cursor toggle), and a Claude Code approval by name applies
+// to every repository that ships a server with that name. A trusted server
+// reads the whole environment and the workspace folder, also when it is not
+// enabled: its config is the user's own.
+func expandPolicyFor(s discover.Server) expandPolicy {
+	switch {
+	case !s.Untrusted:
+		return expandPolicy{allowed: func(string) bool { return true }, workspace: true}
+	case s.Transport.IsRemote():
+		return expandPolicy{allowed: func(string) bool { return false }, note: reasonNoEnv}
+	default:
+		return expandPolicy{allowed: isBaseEnv, workspace: true, note: reasonBaseOnly}
+	}
+}
 
 // expandError turns an error of discover.Expand into a KindConfig
 // *ConnectError. The reason holds the field and at most the variable name of
 // the placeholder, never a value: the text of a *discover.ExpandError holds
 // nothing else, and it shows a name only when the name is a plain variable
 // name (see discover.ExpandError). Any other error gets a fixed reason.
-// allowed is the filter of the lookup (see filterLookup); a missing
-// variable that allowed does not accept gets note at the end. A name that is
-// not a plain variable name is empty in the ExpandError, and no filter
-// accepts it.
-func expandError(s discover.Server, err error, allowed func(string) bool, note string) *ConnectError {
+// A placeholder that policy refused gets policy.note at the end: a missing
+// variable that policy.allowed does not accept, or a missing workspace
+// folder when policy.workspace is false and s has a ProjectPath. A name that
+// is not a plain variable name is empty in the ExpandError; no filter but
+// the one of a trusted server accepts it, and a trusted server has no note.
+func expandError(s discover.Server, err error, policy expandPolicy) *ConnectError {
 	reason := "cannot expand the variables in the server config"
 	if ee, ok := errors.AsType[*discover.ExpandError](err); ok {
 		reason = ee.Error()
-		if errors.Is(err, discover.ErrMissingVariable) && !allowed(ee.Name) {
-			reason += note
+		refusedVar := errors.Is(err, discover.ErrMissingVariable) && !policy.allowed(ee.Name)
+		refusedWorkspace := errors.Is(err, discover.ErrNoWorkspaceFolder) && !policy.workspace && s.ProjectPath != ""
+		if refusedVar || refusedWorkspace {
+			reason += policy.note
 		}
 	} else {
 		// Keep no text of an unknown error.
 		err = nil
 	}
 	return configErrorWithCause(s, reason, err)
-}
-
-// showDiscoveredURL makes ce show the URL as discovered, not the expanded
-// one, for a remote server. Remote built ce from the expanded server, so its
-// URL, its Reason and its cause can hold the redacted expanded URL, and that
-// URL can show the values of variables: a host, a port or a path segment
-// that the redaction keeps, and values shorter than minBareSecretLen that no
-// scrub removes. showDiscoveredURL sets ce.URL to the discovered URL, and
-// replaces the expanded URL in Reason and in the text of the cause with it,
-// also in the form without the query and the fragment, the same forms that
-// scrub replaces. Then it replaces the expanded host (host:port, then the
-// host name alone) with the discovered one, because a DNS or dial error
-// names the host without the URL. A host can be a short word, so this can
-// garble other text of the error: a leak is worse than a garbled word. A
-// cause whose text changes becomes a new error with that text (see
-// withText), which still matches the context error and the sentinel of the
-// old cause, so errors.Is(err, context.DeadlineExceeded) still works. When
-// the two URLs are the same, only ce.URL is set.
-func showDiscoveredURL(ce *ConnectError, expanded, discovered discover.URL) {
-	to := discovered.String()
-	ce.URL = to
-	from := expanded.String()
-	if from == to {
-		return
-	}
-	pairs := [][2]string{{from, to}, {urlBase(from), urlBase(to)}}
-	if expandedURL, err := url.Parse(expanded.Reveal()); err == nil {
-		// A placeholder in the host can make the discovered URL fail to
-		// parse. Then Mask stands for its host.
-		toHost, toName := discover.Mask, discover.Mask
-		if discoveredURL, err := url.Parse(discovered.Reveal()); err == nil {
-			toHost, toName = discoveredURL.Host, discoveredURL.Hostname()
-		}
-		if expandedURL.Host != toHost {
-			pairs = append(pairs,
-				[2]string{expandedURL.Host, toHost},
-				[2]string{expandedURL.Hostname(), toName})
-		}
-	}
-	replace := func(text string) string {
-		for _, p := range pairs {
-			text = replaceForms(text, p[0], p[1])
-		}
-		return text
-	}
-	ce.Reason = truncate(replace(ce.Reason))
-	if ce.err != nil {
-		text := ce.err.Error()
-		if replaced := replace(text); replaced != text {
-			ce.err = withText(ce.err, truncate(replaced))
-		}
-	}
-}
-
-// textError is an error with a fixed text that matches, with errors.Is, the
-// errors in matches. It wraps nothing else, so no text of the old error
-// stays in the chain.
-type textError struct {
-	text    string
-	matches []error
-}
-
-func (e *textError) Error() string { return e.text }
-
-// Unwrap returns the errors that e matches. errors.Is and errors.As walk
-// them.
-func (e *textError) Unwrap() []error { return e.matches }
-
-// withText returns an error with text that still matches what callers check
-// in err with errors.Is: the context error (see contextErr), and the
-// sentinel of blockedKinds or errInvalidProxy that err wraps. These are
-// fixed sentinels with no config text.
-func withText(err error, text string) error {
-	var matches []error
-	for _, b := range blockedKinds {
-		if errors.Is(err, b.err) {
-			matches = append(matches, b.err)
-			break
-		}
-	}
-	if errors.Is(err, errInvalidProxy) {
-		matches = append(matches, errInvalidProxy)
-	}
-	if ctxErr := contextErr(err); ctxErr != nil {
-		matches = append(matches, ctxErr)
-	}
-	return &textError{text: text, matches: matches}
-}
-
-// urlBase returns u without its fragment and its query.
-func urlBase(u string) string {
-	u, _, _ = strings.Cut(u, "#")
-	u, _, _ = strings.Cut(u, "?")
-	return u
 }
 
 // envSecrets returns the configured env values of at least minBareSecretLen

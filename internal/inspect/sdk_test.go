@@ -1006,6 +1006,25 @@ func TestSDKInspectExpand(t *testing.T) {
 			},
 		},
 		{
+			// An untrusted stdio server keeps the workspace folder: it is
+			// its work directory, and its child runs there anyway.
+			name:      "untrusted cursor project stdio reads the workspace folder",
+			client:    discover.ClientCursor,
+			project:   true,
+			untrusted: true,
+			command:   "", // the fixture path, set below
+			envfile:   "${workspaceFolder}/env",
+			env:       map[string]string{"MCPMOAT_TEST_BASE": "${workspaceFolderBasename}"},
+			want: func(dir string) map[string]string {
+				return map[string]string{
+					"HOME":              "/home/mcpmoat-test",
+					"PATH":              "/usr/bin:/bin",
+					"MCPMOAT_TEST_BASE": filepath.Base(dir),
+					"npm_config_yes":    "false",
+				}
+			},
+		},
+		{
 			// Codex does not expand, so the placeholder reaches the child
 			// as written.
 			name:    "codex is not expanded",
@@ -1102,8 +1121,11 @@ func TestSDKInspectExpandErrors(t *testing.T) {
 		// untrusted marks the server Untrusted; it runs with
 		// AllowUntrusted.
 		untrusted bool
-		wantErr   error
-		wantName  string
+		// project makes the server a project server whose ProjectPath is
+		// the test dir.
+		project  bool
+		wantErr  error
+		wantName string
 		// wantSuffix, when set, is the end of the reason.
 		wantSuffix string
 		// wantReason, when set, is the exact reason. It is for the errors
@@ -1236,7 +1258,7 @@ func TestSDKInspectExpandErrors(t *testing.T) {
 			url:        "URL?k=${MCPMOAT_TEST_VALUE}",
 			wantErr:    discover.ErrMissingVariable,
 			wantName:   "MCPMOAT_TEST_VALUE",
-			wantSuffix: "; a remote server from an untrusted project file reads no environment variables",
+			wantSuffix: "; a remote server from an untrusted project file reads no environment variables and no workspace folder",
 		},
 		{
 			// An untrusted Cursor server is always StateEnabled, but a
@@ -1248,7 +1270,30 @@ func TestSDKInspectExpandErrors(t *testing.T) {
 			headers:    map[string]string{"Authorization": "Bearer ${env:MCPMOAT_TEST_VALUE}"},
 			wantErr:    discover.ErrMissingVariable,
 			wantName:   "MCPMOAT_TEST_VALUE",
-			wantSuffix: "; a remote server from an untrusted project file reads no environment variables",
+			wantSuffix: "; a remote server from an untrusted project file reads no environment variables and no workspace folder",
+		},
+		{
+			// The project path shows the user name, so an untrusted remote
+			// server does not get the workspace folder either.
+			name:       "untrusted remote cursor workspaceFolder in the URL",
+			client:     discover.ClientCursor,
+			untrusted:  true,
+			project:    true,
+			url:        "URL/${workspaceFolder}",
+			wantErr:    discover.ErrNoWorkspaceFolder,
+			wantName:   "workspaceFolder",
+			wantSuffix: "; a remote server from an untrusted project file reads no environment variables and no workspace folder",
+		},
+		{
+			name:       "untrusted remote cursor workspaceFolderBasename in a header",
+			client:     discover.ClientCursor,
+			untrusted:  true,
+			project:    true,
+			url:        "URL",
+			headers:    map[string]string{"X-Project": "${workspaceFolderBasename}"},
+			wantErr:    discover.ErrNoWorkspaceFolder,
+			wantName:   "workspaceFolderBasename",
+			wantSuffix: "; a remote server from an untrusted project file reads no environment variables and no workspace folder",
 		},
 		{
 			// Not even a base variable: HOME or USER would tell the host
@@ -1260,7 +1305,7 @@ func TestSDKInspectExpandErrors(t *testing.T) {
 			headers:    map[string]string{"X-User": "${HOME}"},
 			wantErr:    discover.ErrMissingVariable,
 			wantName:   "HOME",
-			wantSuffix: "; a remote server from an untrusted project file reads no environment variables",
+			wantSuffix: "; a remote server from an untrusted project file reads no environment variables and no workspace folder",
 		},
 		{
 			name:       "claude code remote URL too long",
@@ -1305,6 +1350,10 @@ func TestSDKInspectExpandErrors(t *testing.T) {
 				s.Headers = sdkSecretEnv(headers)
 			}
 			s.State, s.Untrusted = tt.state, tt.untrusted
+			if tt.project {
+				s.Scope = discover.ScopeProject
+				s.ProjectPath = dir
+			}
 
 			opts := inspect.SDKOptions{AllowDisabled: tt.state != discover.StateEnabled, AllowUntrusted: tt.untrusted}
 			inspector := inspect.NewForTest(opts, filepath.Join(t.TempDir(), "run"), sdkExpandParent(t, dir), 0)

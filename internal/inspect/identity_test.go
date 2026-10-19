@@ -40,7 +40,7 @@ func TestClientIdentity(t *testing.T) {
 		{
 			name:   "cursor",
 			client: discover.ClientCursor,
-			want:   mcp.Implementation{Name: "cursor-vscode", Version: "1.0.0"},
+			want:   mcp.Implementation{Name: "cursor-vscode", Version: cursorVersion},
 		},
 		{
 			name:   "codex",
