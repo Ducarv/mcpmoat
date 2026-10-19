@@ -783,10 +783,10 @@ func TestReadClaudeSettingsContent(t *testing.T) {
 	}
 }
 
-// TestReadClaudeSettingsFiles checks the file system cases of
+// TestReadClaudeSettingsFileSystem checks the file system cases of
 // readClaudeSettings: missing files, special files, size caps, symlinks and
 // confinement, and a canceled context.
-func TestReadClaudeSettingsFiles(t *testing.T) {
+func TestReadClaudeSettingsFileSystem(t *testing.T) {
 	t.Parallel()
 	skipOnWindows(t)
 

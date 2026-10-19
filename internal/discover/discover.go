@@ -56,7 +56,9 @@ const (
 )
 
 // globalFile is one of the user's own config files, and the read that
-// Discover does for it.
+// ReadConfig does for it. Discover uses the same read for Cursor and Codex;
+// for ~/.claude.json it calls readGlobalClaudeCodeState instead (see the
+// globalClaudeCode var).
 type globalFile struct {
 	rel  string // one of the global file constants, such as globalCodexFile
 	read func(ctx context.Context, path string) Result
@@ -70,7 +72,7 @@ func (g globalFile) path(home string) string {
 // The user's own config files, each with the reader and the scope that
 // Discover uses for it. buildSteps uses them for the global steps of
 // Discover, and globalFor finds them for ReadConfig through globalFiles, so
-// both use one definition. No code writes to them.
+// both use one list of paths, scopes and readers. No code writes to them.
 //
 // One difference: for ~/.claude.json, Discover calls
 // readGlobalClaudeCodeState with its WorkDir, not globalClaudeCode.read.
@@ -178,9 +180,10 @@ type step struct {
 // If ctx ends, Discover stops and returns what it has. It adds one FileError
 // with the reason "canceled" for the first file that it does not read because
 // ctx ended: the file that was being read, or the next file if no read had
-// started. When that file is step 2 or 4, the error has Untrusted set. When
-// ctx ends after the last read, or when there is no file to read, Discover
-// adds no error. A caller that must know can check ctx.Err().
+// started. The error has Untrusted set when that file is untrusted: a
+// project file of step 2 or 4, or a settings file in WorkDir. When ctx ends
+// after the last read, or when there is no file to read, Discover adds no
+// error. A caller that must know can check ctx.Err().
 func Discover(ctx context.Context, opts Options) Result {
 	return runSteps(ctx, buildSteps(opts))
 }
@@ -244,8 +247,8 @@ func buildSteps(opts Options) []step {
 
 	// legacyState is the projects.<WorkDir> state of ~/.claude.json, and
 	// legacyFailed tells that this state could not be read (see
-	// readGlobalClaudeCodeState). The Claude Code step writes them and the .mcp.json
-	// step reads them. Both closures capture the same variables. runSteps
+	// readGlobalClaudeCodeState). The Claude Code step writes them and the
+	// .mcp.json step reads them. Both closures capture the same variables. runSteps
 	// calls the steps one after the other in one goroutine, in the order of
 	// steps, so the write always happens before the read and there is no
 	// data race. If a later change runs the steps in parallel, these
