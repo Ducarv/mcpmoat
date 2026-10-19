@@ -134,10 +134,12 @@ func newHTTPClient(cfg httpClientConfig) (*http.Client, *httpEvents, error) {
 	if base == nil {
 		// Guard the configured host name: its DNS answer must not point to
 		// a loopback, link-local or other refused address. http.Transport
-		// dials an ASCII host name as the URL has it, so the lower-case
-		// Hostname matches the key of the dialer. Remote refuses a host that
-		// is not ASCII, which http.Transport would dial in punycode form.
-		base = newBaseTransport(nil, strings.ToLower(endpoint.Hostname()))
+		// dials an ASCII host name as the URL has it, and newBaseTransport
+		// compares it in lower case, so the Hostname matches the key of the
+		// dialer. Remote refuses a host that is not ASCII, which
+		// http.Transport would dial in punycode form. Remote always passes
+		// its own Base; tests use this default.
+		base = newBaseTransport(nil, endpoint.Hostname())
 	}
 	maxBody := cfg.MaxBody
 	if maxBody <= 0 {

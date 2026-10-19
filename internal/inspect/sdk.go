@@ -27,7 +27,8 @@ type SDKOptions struct {
 	// did not approve it, or only files from the repository approve it. The
 	// caller must have the explicit opt-in of the user before it sets this.
 	// It is separate from AllowUntrusted: an untrusted server that is also
-	// off needs both.
+	// off needs both. The client does not run such a server, so its
+	// placeholders read only the base environment variables (see Inspect).
 	AllowDisabled bool
 }
 
@@ -44,8 +45,8 @@ type SDKInspector struct {
 	// environ returns the environment of mcpmoat in the form of os.Environ:
 	// the parent of the child environment (see buildEnv), and the source of
 	// the variables that Inspect expands (see discover.Expand). runRoot returns
-	// the directory for the work directories of servers without an absolute
-	// Dir (see workDir). rawLimit is the raw size limit; 0 means
+	// the directory for the work directories of servers with no configured
+	// work directory (see projectRunDir and workDir). rawLimit is the raw size limit; 0 means
 	// maxRawBytes. When a field is zero, as in New and in a zero
 	// SDKInspector, Inspect uses the default. Tests set them, so that they
 	// never read the real environment or write to the cache directory of
@@ -140,14 +141,24 @@ func (i *SDKInspector) Inspect(ctx context.Context, s discover.Server) (Result, 
 	}
 	parent := environ()
 
+	// A server that is not enabled passed the gates only with AllowDisabled.
+	// The client does not run it, so it never gets the values of the user's
+	// environment there. Its placeholders read only the base variables (see
+	// isBaseEnv), so a config from a cloned repository cannot send a secret
+	// variable to a URL or a header that it chose.
+	lookup := environLookup(parent)
+	baseOnly := s.State != discover.StateEnabled
+	if baseOnly {
+		lookup = baseEnvLookup(lookup)
+	}
 	// The recorder keeps every value that Expand looks up (each value one
 	// time), so that the scrub of error text removes them too: an expanded
 	// value can stand in an arg or in the URL host, where no other scrub
 	// list has it.
-	rec := &lookupRecorder{lookup: environLookup(parent)}
+	rec := &lookupRecorder{lookup: lookup}
 	expanded, err := discover.Expand(s, rec.Lookup)
 	if err != nil {
-		return Result{}, expandError(s, err)
+		return Result{}, expandError(s, err, baseOnly)
 	}
 
 	if s.Transport.IsRemote() {
@@ -157,9 +168,7 @@ func (i *SDKInspector) Inspect(ctx context.Context, s discover.Server) (Result, 
 			secrets:        rec.values,
 		})
 		if ce, ok := errors.AsType[*ConnectError](err); ok {
-			// The URL of the error must be the one as discovered: the
-			// expanded URL can show values of variables.
-			ce.URL = s.URL.String()
+			showDiscoveredURL(ce, expanded.URL, s.URL)
 		}
 		return result, err
 	}
@@ -266,12 +275,6 @@ func (i *SDKInspector) inspectStdio(ctx context.Context, s discover.Server, pare
 	return result, nil
 }
 
-// newStdioClient is newStdioClientFor with the neutral identity (clientName
-// and clientVersion).
-func newStdioClient(raw *rawLists, limit *rawLimit) *mcp.Client {
-	return newStdioClientFor(&mcp.Implementation{Name: clientName, Version: clientVersion}, raw, limit)
-}
-
 // newStdioClientFor returns a new SDK client for one stdio server, with the
 // client identity id in the initialize request. Inspect passes
 // clientIdentity of the client that declared the server, so a server cannot
@@ -362,22 +365,81 @@ func environLookup(env []string) func(string) (string, bool) {
 	}
 }
 
+// baseEnvLookup returns a lookup that finds only the base variables (see
+// isBaseEnv) through lookup. Every other name is not set.
+func baseEnvLookup(lookup func(string) (string, bool)) func(string) (string, bool) {
+	return func(name string) (string, bool) {
+		if !isBaseEnv(name) {
+			return "", false
+		}
+		return lookup(name)
+	}
+}
+
+// reasonBaseOnly ends the reason of a missing variable when the lookup read
+// only the base variables: the variable can be set in the environment of the
+// user, so "not set" alone would be wrong.
+const reasonBaseOnly = "; a server that is not enabled reads only the base environment variables"
+
 // expandError turns an error of discover.Expand into a KindConfig
 // *ConnectError. The reason holds the field and at most the variable name of
 // the placeholder, never a value: the text of a *discover.ExpandError holds
 // nothing else, and it shows a name only when the name is a plain variable
 // name (see discover.ExpandError). Any other error gets a fixed reason.
-func expandError(s discover.Server, err error) *ConnectError {
+// baseOnly tells that the lookup read only the base variables (see
+// baseEnvLookup); then a missing variable gets reasonBaseOnly at the end.
+func expandError(s discover.Server, err error, baseOnly bool) *ConnectError {
 	reason := "cannot expand the variables in the server config"
 	if ee, ok := errors.AsType[*discover.ExpandError](err); ok {
 		reason = ee.Error()
+		if baseOnly && errors.Is(err, discover.ErrMissingVariable) {
+			reason += reasonBaseOnly
+		}
 	} else {
 		// Keep no text of an unknown error.
 		err = nil
 	}
-	ce := configError(s, reason)
-	ce.err = err
-	return ce
+	return configErrorWithCause(s, reason, err)
+}
+
+// showDiscoveredURL makes ce show the URL as discovered, not the expanded
+// one, for a remote server. Remote built ce from the expanded server, so its
+// URL, its Reason and its cause can hold the redacted expanded URL, and that
+// URL can show the values of variables: a host, a port or a path segment
+// that the redaction keeps, and values shorter than minBareSecretLen that no
+// scrub removes. showDiscoveredURL sets ce.URL to the discovered URL, and
+// replaces the expanded URL in Reason and in the text of the cause with it,
+// also in the form without the query and the fragment, the same forms that
+// scrub replaces. A cause whose text changes becomes a new error with that
+// text, as in safeCause. When the two URLs are the same, only ce.URL is set.
+func showDiscoveredURL(ce *ConnectError, expanded, discovered discover.URL) {
+	to := discovered.String()
+	ce.URL = to
+	from := expanded.String()
+	if from == to {
+		return
+	}
+	fromBase, toBase := urlBase(from), urlBase(to)
+	replace := func(text string) string {
+		text = replaceForms(text, from, to)
+		if fromBase != "" {
+			text = replaceForms(text, fromBase, toBase)
+		}
+		return text
+	}
+	ce.Reason = truncate(replace(ce.Reason))
+	if ce.err != nil {
+		if text := ce.err.Error(); replace(text) != text {
+			ce.err = errors.New(truncate(replace(text)))
+		}
+	}
+}
+
+// urlBase returns u without its fragment and its query.
+func urlBase(u string) string {
+	u, _, _ = strings.Cut(u, "#")
+	u, _, _ = strings.Cut(u, "?")
+	return u
 }
 
 // envSecrets returns the configured env values of at least minBareSecretLen

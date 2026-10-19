@@ -2,7 +2,6 @@ package inspect
 
 import (
 	"errors"
-	"strings"
 
 	"github.com/Ducarv/mcpmoat/internal/discover"
 )
@@ -15,30 +14,34 @@ import (
 // (discover.StateDisabled) and the user did not opt in to inspect it. A
 // State value that this package does not know gets the same error, so an
 // unknown state fails closed.
-var errDisabled = errors.New("inspect: server is turned off in the client config; inspecting it needs explicit opt-in")
+var errDisabled = errors.New("inspect: " + reasonDisabled)
 
 // errUnapproved reports that the server has discover.StateUnapproved and the
 // user did not opt in to inspect it. That state has two causes: the user did
 // not approve the server in the client config, or discover could not read the
 // state that approves it (for example the project state in ~/.claude.json).
 // The text covers both causes.
-var errUnapproved = errors.New("inspect: server is not approved in the client config, or its state could not be read; inspecting it needs explicit opt-in")
+var errUnapproved = errors.New("inspect: " + reasonUnapproved)
 
 // errProjectApproved reports that only files from the repository approve
 // the server (discover.StateProjectApproved), and the user did not opt in to
 // inspect it. A cloned repository can approve its own servers, so that
 // approval does not count as the approval of the user.
-var errProjectApproved = errors.New("inspect: server is approved only by files from the repository; inspecting it needs explicit opt-in")
+var errProjectApproved = errors.New("inspect: " + reasonProjectApproved)
 
 // errUntrusted reports that the server comes from an untrusted project file
 // and the user did not opt in to start such servers. See the discover
 // package doc, Untrusted files.
 var errUntrusted = errors.New("inspect: server from an untrusted project file needs an explicit opt-in to start")
 
-// The reasons of the untrusted gate in a *ConnectError (see gateError). The
-// text names what the opt-in allows: to start a stdio server, or to connect
-// to a remote one.
+// The reasons of the gates in a *ConnectError (see gateError). The state
+// gate reasons are the texts of their errors without the "inspect: " prefix.
+// The untrusted gate reasons name what the opt-in allows: to start a stdio
+// server, or to connect to a remote one.
 const (
+	reasonDisabled        = "server is turned off in the client config; inspecting it needs explicit opt-in"
+	reasonUnapproved      = "server is not approved in the client config, or its state could not be read; inspecting it needs explicit opt-in"
+	reasonProjectApproved = "server is approved only by files from the repository; inspecting it needs explicit opt-in"
 	reasonUntrustedStdio  = "untrusted project server; starting it needs explicit opt-in"
 	reasonUntrustedRemote = "untrusted project server; connecting needs explicit opt-in"
 )
@@ -87,19 +90,24 @@ func stateGate(state discover.State, allow bool) error {
 }
 
 // gateError turns an error of checkGates into a KindConfig *ConnectError,
-// with the error as the cause. The reason is fixed text: for errUntrusted it
-// is reasonUntrustedRemote for a remote server and reasonUntrustedStdio for
-// any other server, and for the state gate it is the text of the error
-// without the "inspect: " prefix.
+// with the error as the cause. The reason is one of the fixed gate reasons:
+// for errUntrusted it is reasonUntrustedRemote for a remote server and
+// reasonUntrustedStdio for any other server. Any other error, also one that
+// checkGates does not return, gets reasonDisabled, so it fails closed with
+// fixed text.
 func gateError(s discover.Server, err error) *ConnectError {
-	reason := strings.TrimPrefix(err.Error(), "inspect: ")
-	if errors.Is(err, errUntrusted) {
+	var reason string
+	switch {
+	case errors.Is(err, errUntrusted) && s.Transport.IsRemote():
+		reason = reasonUntrustedRemote
+	case errors.Is(err, errUntrusted):
 		reason = reasonUntrustedStdio
-		if s.Transport.IsRemote() {
-			reason = reasonUntrustedRemote
-		}
+	case errors.Is(err, errUnapproved):
+		reason = reasonUnapproved
+	case errors.Is(err, errProjectApproved):
+		reason = reasonProjectApproved
+	default:
+		reason = reasonDisabled
 	}
-	ce := configError(s, reason)
-	ce.err = err
-	return ce
+	return configErrorWithCause(s, reason, err)
 }

@@ -52,11 +52,7 @@ type RemoteOptions struct {
 	AllowUntrusted bool
 
 	// AllowDisabled lets Remote connect even when the State of the server is
-	// not discover.StateEnabled: the client config turns it off, the user
-	// did not approve it, or only files from the repository approve it. The
-	// caller must have the explicit opt-in of the user before it sets this.
-	// It is separate from AllowUntrusted: an untrusted server that is also
-	// off needs both.
+	// not discover.StateEnabled. See SDKOptions.AllowDisabled.
 	AllowDisabled bool
 
 	// UserAgent is sent unless the config sets a User-Agent header. Empty
@@ -181,7 +177,7 @@ func Remote(ctx context.Context, srv discover.Server, opts RemoteOptions) (Resul
 		// The same base transport that newHTTPClient makes for a nil Base,
 		// with the proxy function above, so that the requests and the DNS
 		// pin warning below use the same proxy setting.
-		t := newBaseTransport(nil, strings.ToLower(endpointURL.Hostname()))
+		t := newBaseTransport(nil, endpointURL.Hostname())
 		t.Proxy = proxy
 		base = t
 	}

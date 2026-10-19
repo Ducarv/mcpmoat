@@ -50,17 +50,18 @@ func isExistingDir(path string) bool {
 	return err == nil && info.IsDir()
 }
 
-// workDir returns the stdioOptions.FallbackDir for a server whose config
-// Dir is configDir: "" when configDir is absolute (stdioCommand then uses
-// it), else a new, empty directory below the run root that runRoot returns.
+// workDir returns the stdioOptions.FallbackDir for a server whose configured
+// work directory (see projectRunDir) is runDir: "" when runDir is absolute
+// (stdioCommand then uses it), else a new, empty directory below the run
+// root that runRoot returns.
 //
 // The returned cleanup removes that directory. Call it after the process has
 // exited. cleanup is never nil, also on error.
 // cleanup drops the error of the removal: a process that left the process
 // group of the server can still use the directory, and then it stays
 // behind below the run root. It holds nothing of mcpmoat.
-func workDir(configDir string, runRoot func() (string, error)) (dir string, cleanup func(), err error) {
-	if filepath.IsAbs(configDir) {
+func workDir(runDir string, runRoot func() (string, error)) (dir string, cleanup func(), err error) {
+	if filepath.IsAbs(runDir) {
 		return "", noCleanup, nil
 	}
 	root, err := runRoot()
@@ -77,8 +78,9 @@ func workDir(configDir string, runRoot func() (string, error)) (dir string, clea
 }
 
 // defaultRunRoot returns <user cache dir>/mcpmoat/run, the directory in
-// which workDir makes the work directory of a server without an absolute
-// Dir ($XDG_CACHE_HOME or ~/.cache on Linux, ~/Library/Caches on macOS).
+// which workDir makes the work directory of a server with no configured work
+// directory (see projectRunDir) ($XDG_CACHE_HOME or ~/.cache on Linux,
+// ~/Library/Caches on macOS).
 //
 // It follows the rules of stdioOptions.FallbackDir: npm and uv read files
 // in all the parent directories of their work directory, so the run root and

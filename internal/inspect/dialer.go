@@ -40,7 +40,8 @@ var (
 	// errAddrRefused means the DNS answer for the guarded host name held only
 	// refused addresses (see refusedAddr). The text names the classes of
 	// addresses, never an address or the host name. It does not name the
-	// Alibaba Cloud metadata address, which refusedAddr also refuses.
+	// cloud metadata addresses outside these classes, or the IPv6 forms of
+	// refused IPv4 addresses, which refusedAddr also refuses.
 	errAddrRefused = errors.New("server name resolves only to loopback, unspecified, link-local or multicast addresses")
 )
 
@@ -205,14 +206,17 @@ func (d *pinnedDialer) DialContext(ctx context.Context, network, address string)
 		return nil, err
 	}
 	addrs = usableAddrs(addrs)
-	if isLoopbackHost(key) {
+	if isLoopbackHost(key) || isLocalhostName(key) {
 		// The name "localhost" counts as loopback without a lookup, so a
 		// plain http:// URL to it gets no cleartext warning (see
 		// cleartextWarnings), and Go sends it past HTTP_PROXY. Make that
 		// true whatever the resolver answers, for example from a changed
 		// /etc/hosts: dial loopback addresses only. The check uses key, so
 		// it covers every case of the name: "LOCALHOST" shares the pin of
-		// "localhost", and that pin must be a loopback address too.
+		// "localhost", and that pin must be a loopback address too. The
+		// other localhost names (see isLocalhostName) are loopback names
+		// too, so they get the same rule, not the guard below, which would
+		// refuse their loopback answers.
 		addrs = loopbackAddrs(addrs)
 	} else if d.guardHost != "" && key == d.guardHost && len(addrs) > 0 {
 		// The configured server name. A hostile server controls the DNS
@@ -282,6 +286,53 @@ func allowedAddrs(addrs []netip.Addr) []netip.Addr {
 	return out
 }
 
+// isLocalhostName reports whether host, in lower case, is a localhost name
+// other than "localhost" itself: "localhost." or a name under the localhost
+// domain, such as "app.localhost" (RFC 6761 section 6.3). Resolvers answer
+// such names with loopback addresses, so a local development server can use
+// one. isLoopbackHost does not count them, so they keep the cleartext
+// warning, and Go sends them through a proxy.
+func isLocalhostName(host string) bool {
+	host = strings.TrimSuffix(host, ".")
+	return host == "localhost" || strings.HasSuffix(host, ".localhost")
+}
+
+// Addresses and prefixes that refusedAddr checks.
+var (
+	// alibabaMetadataAddr is the Alibaba Cloud metadata address. It is in
+	// 100.64.0.0/10, not in a link-local range.
+	alibabaMetadataAddr = netip.AddrFrom4([4]byte{100, 100, 100, 200})
+	// awsIPv6MetadataAddr is the IPv6 address of the AWS metadata service.
+	// It is in the unique local range fc00::/7, which is not refused.
+	awsIPv6MetadataAddr = netip.MustParseAddr("fd00:ec2::254")
+	// nat64Prefix is the well-known NAT64 prefix (RFC 6052). The last 32
+	// bits are an IPv4 address that a NAT64 gateway connects to.
+	nat64Prefix = netip.MustParsePrefix("64:ff9b::/96")
+	// ipv4CompatPrefix holds the IPv4-compatible IPv6 addresses (RFC 4291,
+	// deprecated). The last 32 bits are an IPv4 address.
+	ipv4CompatPrefix = netip.MustParsePrefix("::/96")
+	// sixToFourPrefix is the 6to4 prefix (RFC 3056). Bits 16 to 47 are an
+	// IPv4 address.
+	sixToFourPrefix = netip.MustParsePrefix("2002::/16")
+)
+
+// embeddedIPv4 returns the IPv4 address in addr, and true, when addr is a
+// NAT64, IPv4-compatible or 6to4 IPv6 address (see the prefixes above). Else
+// it returns false.
+func embeddedIPv4(addr netip.Addr) (netip.Addr, bool) {
+	if !addr.Is6() {
+		return netip.Addr{}, false
+	}
+	b := addr.As16()
+	switch {
+	case nat64Prefix.Contains(addr), ipv4CompatPrefix.Contains(addr):
+		return netip.AddrFrom4([4]byte(b[12:16])), true
+	case sixToFourPrefix.Contains(addr):
+		return netip.AddrFrom4([4]byte(b[2:6])), true
+	}
+	return netip.Addr{}, false
+}
+
 // refusedAddr reports whether addr is an address that the configured server
 // name must not resolve to. addr must be unmapped (see usableAddrs), so that
 // ::ffff:127.0.0.1 counts as 127.0.0.1. The refused classes are:
@@ -293,8 +344,13 @@ func allowedAddrs(addrs []netip.Addr) []netip.Addr {
 //     metadata address 169.254.169.254;
 //   - multicast (224.0.0.0/4, ff00::/8), with link-local and
 //     interface-local multicast: not an address of one server;
-//   - the Alibaba Cloud metadata address 100.100.100.200: it is not
-//     link-local, so the link-local check does not cover it.
+//   - the cloud metadata addresses that the classes above do not cover: the
+//     Alibaba Cloud address 100.100.100.200 and the AWS IPv6 address
+//     fd00:ec2::254;
+//   - a NAT64, IPv4-compatible or 6to4 IPv6 address whose IPv4 address is
+//     refused (see embeddedIPv4): on a NAT64 network, 64:ff9b::a9fe:a9fe
+//     reaches 169.254.169.254. NAT64 with another prefix (for example the
+//     local-use prefix 64:ff9b:1::/48) is not covered.
 //
 // Private (RFC 1918) and unique local (fc00::/7) addresses are not refused.
 // The rest of 100.64.0.0/10 (shared address space, RFC 6598) is not refused
@@ -306,16 +362,16 @@ func refusedAddr(addr netip.Addr) bool {
 		// 0.0.0.0 itself.
 		return true
 	}
-	if addr == netip.AddrFrom4([4]byte{100, 100, 100, 200}) {
-		// The Alibaba Cloud metadata address. It is in 100.64.0.0/10, not in
-		// a link-local range.
+	if addr == alibabaMetadataAddr || addr == awsIPv6MetadataAddr {
 		return true
 	}
+	if v4, ok := embeddedIPv4(addr); ok && refusedAddr(v4) {
+		return true
+	}
+	// IsMulticast covers link-local and interface-local multicast too.
 	return addr.IsLoopback() ||
 		addr.IsUnspecified() ||
 		addr.IsLinkLocalUnicast() ||
-		addr.IsLinkLocalMulticast() ||
-		addr.IsInterfaceLocalMulticast() ||
 		addr.IsMulticast()
 }
 

@@ -97,7 +97,7 @@ See section 12 for the full out-of-scope list.
 | Connect by default | Yes. `scan` connects to servers; `--no-connect` does static analysis only | Full value by default; opt-out for cautious users and CI. |
 | CLI library | Go standard library `flag` | Simpler to learn. Can migrate to `cobra` if subcommands grow. |
 | Server state (#87) | Each discovered server is `enabled`, `disabled`, `unapproved` or `project-approved`, read from the client config. Inspection does not start or connect to a server that is not enabled without an explicit opt-in, separate from the untrusted opt-in | A turned-off server is not run by the scan. A repository cannot approve its own servers: an approval only from its own settings files gives `project-approved`, which needs the opt-in. Cursor keeps its toggle in SQLite, which mcpmoat does not read, so Cursor servers always show `enabled`. |
-| Placeholder expansion (#88) | Inspection expands `${...}` placeholders like the client: Claude Code and Cursor syntax, none for Codex. A missing variable is a fixed error that names at most the variable | The scan runs what the client runs. Expanded values can be secrets, so they stay masked. Fails closed where Cursor probably uses an empty value. |
+| Placeholder expansion (#88) | Inspection expands `${...}` placeholders like the client: Claude Code and Cursor syntax, none for Codex. A missing variable is a fixed error that names at most the variable. A server that is not `enabled` reads only the base variables | The scan runs what the client runs. Expanded values can be secrets, so they stay masked. Fails closed where Cursor probably uses an empty value. The client never sends values to a server that it does not run, so a repository cannot use the opt-in to get secrets. |
 | Client identity and lists (#97) | Send the MCP client name of the client that owns the config. Always send every list request, and warn when an undeclared capability returns items | Makes cloaking harder. Residuals: version, capabilities, timing and User-Agent can still tell mcpmoat apart. A server that never answers an unknown method times out. |
 | Work directory and `npx` (#104) | Trusted project servers run in their project directory, like the client. The child environment always gets `npm_config_yes=false` | Same behaviour as the client, and `npx` does not install a missing package without a prompt. Configured `-y`, `--yes` or `npm_config_yes` still win. Other launchers are not covered. |
 | DNS answers and proxies (#106) | For a configured DNS name, refuse loopback, unspecified, link-local and multicast answers. Behind a proxy, warn with `dns-pin-unavailable` | Stops a DNS name from pointing the scan at the local machine or a metadata service. Private addresses stay allowed for company servers. A proxy resolves names itself, so the guard cannot apply there. |
@@ -257,7 +257,7 @@ command.
     files gives `project-approved`. Else the server is `unapproved`.
   - For `enableAllProjectMcpServers`, the first value found wins, in this order:
     `settings.local.json`, the project `settings.json`, the user `settings.json`, `~/.claude.json`.
-    The file that has this first value tells whether the approval is trusted.
+    When the first value is `true`, the approval is trusted if a trusted file also has `true`.
   - A server named in `disabledMcpServers` is `disabled`, also when it is approved. For a global
     server, only `projects.<path>.disabledMcpServers` of the current project applies.
   - The current project is the working directory as given, or with its symlinks resolved: Claude
@@ -292,8 +292,9 @@ command.
   - Each failure gives a per-file error, so the scan fails and the result does not look clean.
 - Cursor: not read. Cursor keeps its on and off toggle in its SQLite state, which mcpmoat does not
   read, so every Cursor server shows `enabled` (known limit).
-- With `--config`, mcpmoat reads one file only and has no approval data. A server from that file is
-  `enabled` unless the file itself turns it off (known limit).
+- With `--config`, mcpmoat reads one file only and has no approval data. A server from a Claude Code
+  project `.mcp.json` is `unapproved` (fails closed). A server from another file is `enabled` unless
+  the file itself turns it off (known limit).
 
 Acceptance criteria:
 
@@ -302,7 +303,7 @@ Acceptance criteria:
   from the rule above.
 - A state key with a wrong type gives a per-file error that holds no value.
 - Inspection never starts or connects to a server that is not `enabled` (also `project-approved`),
-  unless the caller opts in explicitly (`AllowDisabled`). This opt-in is separate from the opt-in for untrusted project
+  unless the user opts in explicitly. This opt-in is separate from the opt-in for untrusted project
   configs. A server that is both disabled and untrusted needs both.
 
 A project repository can ship its own `.claude/settings.json` that approves its own `.mcp.json`

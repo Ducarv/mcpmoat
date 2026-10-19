@@ -1503,6 +1503,41 @@ func TestPinnedDialerGuard(t *testing.T) {
 			wantLookups: 1,
 		},
 		{
+			// The other localhost names (RFC 6761) get the localhost rule,
+			// not the guard: a local server at app.localhost works.
+			name:    "app.localhost guard keeps loopback",
+			guard:   "app.localhost",
+			answers: []pdAnswer{{addrs: pdAddrs(t, "203.0.113.10", "127.0.0.1")}},
+			steps: []pdStep{
+				{address: "app.localhost:3000", wantDials: []string{"127.0.0.1:3000"}, wantConn: "127.0.0.1:3000"},
+			},
+			wantLookups: 1,
+		},
+		{
+			name:    "localhost. guard keeps loopback",
+			guard:   "localhost.",
+			answers: []pdAnswer{{addrs: pdAddrs(t, "::1")}},
+			steps: []pdStep{
+				{address: "localhost.:8080", wantDials: []string{"[::1]:8080"}, wantConn: "[::1]:8080"},
+			},
+			wantLookups: 1,
+		},
+		{
+			name:        "app.localhost without loopback stays a DNS error",
+			guard:       "app.localhost",
+			answers:     []pdAnswer{{addrs: pdAddrs(t, "203.0.113.10")}},
+			steps:       []pdStep{{address: "app.localhost:3000", wantNotFound: true}},
+			wantLookups: 1,
+		},
+		{
+			// A name that only ends in "localhost" is not a localhost name.
+			name:        "notlocalhost guard refuses loopback",
+			guard:       "notlocalhost",
+			answers:     []pdAnswer{{addrs: pdAddrs(t, "127.0.0.1")}},
+			steps:       []pdStep{{address: "notlocalhost:443", wantErr: errAddrRefused}},
+			wantLookups: 1,
+		},
+		{
 			name:        "localhost without loopback stays a DNS error",
 			guard:       "localhost",
 			answers:     []pdAnswer{{addrs: pdAddrs(t, "203.0.113.10")}},
@@ -1617,8 +1652,26 @@ func TestRefusedAddr(t *testing.T) {
 		{"224.0.0.1", true},
 		{"239.255.255.255", true},
 		{"100.100.100.200", true},
+		{"fd00:ec2::254", true},
+		// IPv6 forms that hold a refused IPv4 address: NAT64,
+		// IPv4-compatible and 6to4.
+		{"64:ff9b::a9fe:a9fe", true},
+		{"64:ff9b::7f00:1", true},
+		{"64:ff9b::6464:64c8", true},
+		{"::7f00:1", true},
+		{"::a9fe:a9fe", true},
+		{"2002:7f00:1::", true},
+		{"2002:a9fe:a9fe::1", true},
 
 		{"1.0.0.0", false},
+		{"fd00:ec2::253", false},
+		// The same forms with an allowed IPv4 address.
+		{"64:ff9b::cb00:710a", false},
+		{"64:ff9b::a00:1", false},
+		{"::cb00:710a", false},
+		{"2002:cb00:710a::1", false},
+		// NAT64 with the local-use prefix is not covered.
+		{"64:ff9b:1::a9fe:a9fe", false},
 		{"10.0.0.1", false},
 		{"172.31.255.255", false},
 		{"192.168.0.1", false},

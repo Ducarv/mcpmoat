@@ -123,6 +123,14 @@ func configError(srv discover.Server, reason string) *ConnectError {
 	}
 }
 
+// configErrorWithCause is configError with cause as the cause of the error
+// (see ConnectError.Unwrap). cause can be nil.
+func configErrorWithCause(srv discover.Server, reason string, cause error) *ConnectError {
+	ce := configError(srv, reason)
+	ce.err = cause
+	return ce
+}
+
 // transportEvents reports what the HTTP layer saw during one inspection. The
 // SDK can flatten error chains (it formats some errors with %v), so classify
 // asks the transport directly instead of relying only on errors.Is.
@@ -209,7 +217,7 @@ var blockedKinds = []struct {
 	{errTooManyRedirects, KindRedirect, "too many redirects"},
 	{errBodyTooLarge, KindTooLarge, "response too large"},
 	{errJSONTooComplex, KindTooLarge, "response JSON too large: too deep, too many values or a too long string"},
-	{errAddrRefused, KindNetwork, "server name resolves only to loopback, unspecified, link-local or multicast addresses; connection refused"},
+	{errAddrRefused, KindNetwork, errAddrRefused.Error() + "; connection refused"},
 }
 
 // contextErr returns context.DeadlineExceeded or context.Canceled when err

@@ -69,10 +69,10 @@ func isBaseEnv(name string) bool {
 // a child. If a name occurs more than once in parent, the first entry wins,
 // the same as os.Getenv on Unix.
 //
-// Declared values are passed exactly as written. buildEnv does not expand
-// ${VAR} references (that is issue #88). A zero discover.Secret (for example
-// from a JSON null in the config) gives the child the name with an empty
-// value.
+// Declared values are passed as buildEnv gets them. buildEnv does not expand
+// placeholders: SDKInspector.Inspect expands the server with discover.Expand
+// before it gets here. A zero discover.Secret (for example from a JSON null
+// in the config) gives the child the name with an empty value.
 //
 // buildEnv returns errInvalidEnvName for a declared name that is empty or
 // contains "=" or a NUL byte, and errInvalidEnvValue for a declared value

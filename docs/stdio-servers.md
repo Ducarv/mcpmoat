@@ -116,6 +116,11 @@ Rules:
 - The values come from your environment, the one that you start mcpmoat in. A placeholder can
   read any variable, not only the base set. So a config can pass a variable such as
   `GITHUB_TOKEN` to the server, the same as in your client.
+- Exception: a server that is not `enabled` (turned off, not approved, or approved only by files
+  from the repository) runs only when you opt in. Your client does not run it, so its
+  placeholders read only the base set. Any other variable counts as not set: a default applies,
+  and without a default mcpmoat does not start the server. So a config from a cloned repository
+  cannot send a secret variable to a server address that it chose.
 - mcpmoat expands the command, the arguments, the URL, and the values of `env` and `headers`. It
   does not expand the names.
 - When a variable is not set and the placeholder has no default, mcpmoat does not start the
@@ -162,7 +167,9 @@ Limits:
 - Else, a trusted project server runs in its project directory, the same as in your client. An
   example is a server in the `projects` section of `~/.claude.json`. The project directory must
   exist. Files in the project, such as `node_modules/.bin` and `.npmrc`, can change what runs, the
-  same as in your client.
+  same as in your client. One scan reads the servers of every project in `~/.claude.json`, so it
+  runs these servers in all of those projects at once. Your client runs them only when you open
+  the project.
 - Else the server runs in a private, empty directory that mcpmoat makes for it.
 
 A server from a project file that a repository can ship (see [Project servers](#project-servers))

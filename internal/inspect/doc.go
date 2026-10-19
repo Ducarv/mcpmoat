@@ -62,9 +62,20 @@
 // secret. An expanded text over 64 KiB, or expanded texts of one server over
 // 1 MiB together, also refuse the server with KindConfig.
 //
+// A server whose State is not discover.StateEnabled passes the gates only
+// with AllowDisabled. The client does not run it, so it never gets the
+// values of the user's environment there. Its placeholders read only the
+// base variables of the child environment (HOME, PATH and the others of
+// isBaseEnv). Any other variable counts as not set: a placeholder with a
+// default gets the default, and one without a default refuses the server,
+// with a reason that says why. So a config from a cloned repository cannot
+// send a secret variable to a URL or a header that it chose.
+//
 // The expanded server stays inside Inspect. [Run] keeps the server as
-// discovered in Outcome.Server, and ConnectError.URL is the redacted URL as
-// discovered, so no expanded value is shown.
+// discovered in Outcome.Server, and the URL of a ConnectError is the
+// redacted URL as discovered: Inspect also replaces the expanded URL with it
+// in the reason and in the cause (see showDiscoveredURL). So no expanded
+// value is shown in a URL.
 //
 // An expanded value can be a secret, and the server gets it and can echo it.
 // So Inspect records each value that it looks up (lookupRecorder), and the

@@ -170,3 +170,9 @@ func noopResource(context.Context, *mcp.ReadResourceRequest) (*mcp.ReadResourceR
 func sseMessageEvent(data string) string {
 	return "event: message\ndata: " + data + "\n\n"
 }
+
+// newStdioClient is newStdioClientFor with the neutral identity (clientName
+// and clientVersion), for tests that do not check the identity.
+func newStdioClient(raw *rawLists, limit *rawLimit) *mcp.Client {
+	return newStdioClientFor(&mcp.Implementation{Name: clientName, Version: clientVersion}, raw, limit)
+}

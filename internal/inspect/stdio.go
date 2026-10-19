@@ -53,9 +53,9 @@ type stdioOptions struct {
 
 	// FallbackDir is the work directory of the child when the server has no
 	// configured work directory (projectRunDir gives ""). It must be
-	// absolute. The caller makes a private, empty
-	// directory and removes it after the server stops (workDir does both
-	// for SDKInspector.Inspect). stdioCommand does not check the directory on disk.
+	// absolute. The caller makes a private, empty directory and removes it
+	// after the server stops (workDir does both for SDKInspector.Inspect).
+	// stdioCommand does not check the directory on disk.
 	//
 	// The whole parent chain matters, not only the leaf. npm walks up the
 	// parent directories from the work directory to find a local prefix (a
@@ -82,11 +82,13 @@ type stdioOptions struct {
 	// ~/node_modules, ~/package.json or ~/pyproject.toml. This is accepted:
 	// HOME is owned by the user, and the client sees the same files.
 	//
-	// The work directory itself is never HOME, the mcpmoat work directory, a
-	// project directory, or a directory under /tmp or os.TempDir(). In a
-	// repository directory, npx and uvx read the node_modules/.bin, .npmrc and
-	// pyproject.toml of the repository, so the repository could change what
-	// runs.
+	// The fallback directory itself is never HOME, the mcpmoat work
+	// directory, a project directory, or a directory under /tmp or
+	// os.TempDir(). In a repository directory, npx and uvx read the
+	// node_modules/.bin, .npmrc and pyproject.toml of the repository, so the
+	// repository could change what runs. A trusted project server runs in
+	// its project directory only because the client does the same (see
+	// projectRunDir); mcpmoat never picks a project directory itself.
 	FallbackDir string
 
 	// AllowUntrusted is the explicit opt-in of the user to start a server
@@ -96,11 +98,9 @@ type stdioOptions struct {
 	AllowUntrusted bool
 
 	// AllowDisabled is the explicit opt-in of the user to start a server
-	// whose State is not discover.StateEnabled: the client config turns it
-	// off, the user did not approve it, or only files from the repository
-	// approve it. It is false by default, so
-	// stdioCommand fails closed. It is separate from AllowUntrusted: an
-	// untrusted server that is also off needs both.
+	// whose State is not discover.StateEnabled (see
+	// SDKOptions.AllowDisabled). It is false by default, so stdioCommand
+	// fails closed.
 	AllowDisabled bool
 }
 
@@ -226,7 +226,7 @@ func stdioCommand(s discover.Server, opts stdioOptions) (*exec.Cmd, error) {
 	// ignores the fallback, or finds no fallback and fails closed with
 	// errNoWorkDir.
 	dir, hasConfigDir := projectRunDir(s, isExistingDir), true
-	if dir != "" && hasNUL(dir) {
+	if hasNUL(dir) {
 		// projectRunDir checks a ProjectPath on disk, and a path with a NUL
 		// byte cannot exist, so this is a guard only.
 		return nil, errInvalidArg

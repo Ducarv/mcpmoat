@@ -34,9 +34,9 @@ const (
 // In the same way, Inspect must not start or connect to a server whose
 // s.State is not discover.StateEnabled (the client config turns it off, the
 // user did not approve it, or only files from the repository approve it)
-// unless the user gave an explicit opt-in
-// (AllowDisabled). State and Untrusted are separate checks: a server must
-// pass both. Run does not check State either.
+// unless the user gave an explicit opt-in (AllowDisabled). State and
+// Untrusted are separate checks: a server must pass both. Run does not check
+// State either.
 //
 // On every return, also on success, Inspect must stop the child processes it
 // started. For a stdio child made with configureProcessGroup, call

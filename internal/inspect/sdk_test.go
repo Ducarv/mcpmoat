@@ -875,6 +875,9 @@ func TestSDKInspectExpand(t *testing.T) {
 		name    string
 		client  discover.Client
 		project bool // a trusted project server whose ProjectPath is the test dir
+		// state is the State of the server. A state other than
+		// StateEnabled runs with AllowDisabled.
+		state   discover.State
 		command string
 		envfile string // the envfile arg; ${MCPMOAT_TEST_DIR} etc. are placeholders
 		env     map[string]string
@@ -937,6 +940,29 @@ func TestSDKInspectExpand(t *testing.T) {
 			},
 		},
 		{
+			// A server that is not enabled reads only the base variables:
+			// HOME is found, MCPMOAT_TEST_VALUE is not, so its default
+			// applies.
+			name:    "claude code not enabled reads only base variables",
+			client:  discover.ClientClaudeCode,
+			state:   discover.StateUnapproved,
+			command: "", // the fixture path, set below
+			envfile: "", // dir/env, set below
+			env: map[string]string{
+				"MCPMOAT_TEST_DEFAULT": "${MCPMOAT_TEST_VALUE:-fallback-value}",
+				"MCPMOAT_TEST_HOME":    "${HOME}",
+			},
+			want: func(string) map[string]string {
+				return map[string]string{
+					"HOME":                 "/home/mcpmoat-test",
+					"PATH":                 "/usr/bin:/bin",
+					"MCPMOAT_TEST_DEFAULT": "fallback-value",
+					"MCPMOAT_TEST_HOME":    "/home/mcpmoat-test",
+					"npm_config_yes":       "false",
+				}
+			},
+		},
+		{
 			// Codex does not expand, so the placeholder reaches the child
 			// as written.
 			name:    "codex is not expanded",
@@ -978,8 +1004,10 @@ func TestSDKInspectExpand(t *testing.T) {
 				s.Scope = discover.ScopeProject
 				s.ProjectPath = dir
 			}
+			s.State = tt.state
 
-			inspector := inspect.NewForTest(inspect.SDKOptions{}, filepath.Join(t.TempDir(), "run"), sdkExpandParent(t, dir), 0)
+			opts := inspect.SDKOptions{AllowDisabled: tt.state != discover.StateEnabled}
+			inspector := inspect.NewForTest(opts, filepath.Join(t.TempDir(), "run"), sdkExpandParent(t, dir), 0)
 			got, err := inspector.Inspect(sdkCtx(t, sdkTimeout), s)
 			if err != nil {
 				t.Fatalf("Inspect() error = %v, want nil", err)
@@ -1024,9 +1052,14 @@ func TestSDKInspectExpandErrors(t *testing.T) {
 		url    string // a remote server when set; "URL" is replaced by the counting server
 		// headers are the headers of a remote server. nil means one
 		// X-Api-Key header with ${MCPMOAT_TEST_VALUE}.
-		headers  map[string]string
+		headers map[string]string
+		// state is the State of the server. A state other than
+		// StateEnabled runs with AllowDisabled.
+		state    discover.State
 		wantErr  error
 		wantName string
+		// wantSuffix, when set, is the end of the reason.
+		wantSuffix string
 		// wantReason, when set, is the exact reason. It is for the errors
 		// that show no variable name.
 		wantReason string
@@ -1103,6 +1136,40 @@ func TestSDKInspectExpandErrors(t *testing.T) {
 			wantReason: "cannot expand env: expanded text is too long",
 		},
 		{
+			// A server that is not enabled reads only the base variables
+			// (issue #88 hardening): a variable that is set in the
+			// environment of the user is not found, and the reason says
+			// why.
+			name:       "not enabled stdio reads only base variables",
+			client:     discover.ClientClaudeCode,
+			state:      discover.StateUnapproved,
+			args:       []string{"-pidfile", "PIDFILE"},
+			env:        map[string]string{"MCPMOAT_TEST_EXPANDED": "${MCPMOAT_TEST_VALUE}"},
+			wantErr:    discover.ErrMissingVariable,
+			wantName:   "MCPMOAT_TEST_VALUE",
+			wantSuffix: "; a server that is not enabled reads only the base environment variables",
+		},
+		{
+			name:       "project-approved cursor stdio reads only base variables",
+			client:     discover.ClientCursor,
+			state:      discover.StateProjectApproved,
+			args:       []string{"-pidfile", "PIDFILE", "--x=${env:MCPMOAT_TEST_VALUE}"},
+			wantErr:    discover.ErrMissingVariable,
+			wantName:   "MCPMOAT_TEST_VALUE",
+			wantSuffix: "; a server that is not enabled reads only the base environment variables",
+		},
+		{
+			// A cloned repository cannot send a secret to its own URL.
+			name:       "disabled remote URL reads only base variables",
+			client:     discover.ClientClaudeCode,
+			state:      discover.StateDisabled,
+			url:        "URL?k=${MCPMOAT_TEST_VALUE}",
+			headers:    map[string]string{"X-Api-Key": "${HOME}"},
+			wantErr:    discover.ErrMissingVariable,
+			wantName:   "MCPMOAT_TEST_VALUE",
+			wantSuffix: "; a server that is not enabled reads only the base environment variables",
+		},
+		{
 			name:       "claude code remote URL too long",
 			client:     discover.ClientClaudeCode,
 			url:        "URL?k=" + tooLong,
@@ -1144,8 +1211,10 @@ func TestSDKInspectExpandErrors(t *testing.T) {
 				}
 				s.Headers = sdkSecretEnv(headers)
 			}
+			s.State = tt.state
 
-			inspector := inspect.NewForTest(inspect.SDKOptions{}, filepath.Join(t.TempDir(), "run"), sdkExpandParent(t, dir), 0)
+			opts := inspect.SDKOptions{AllowDisabled: tt.state != discover.StateEnabled}
+			inspector := inspect.NewForTest(opts, filepath.Join(t.TempDir(), "run"), sdkExpandParent(t, dir), 0)
 			res, err := inspector.Inspect(sdkCtx(t, sdkTimeout), s)
 
 			_, reason := sdkAssertFailed(t, res, err, inspect.KindConfig)
@@ -1165,6 +1234,12 @@ func TestSDKInspectExpandErrors(t *testing.T) {
 				}
 			} else if !strings.Contains(reason, tt.wantName) {
 				t.Errorf("Inspect() reason = %q, want it to name the variable %q", reason, tt.wantName)
+			}
+			if !strings.HasSuffix(reason, tt.wantSuffix) {
+				t.Errorf("Inspect() reason = %q, want the suffix %q", reason, tt.wantSuffix)
+			}
+			if tt.wantSuffix == "" && strings.Contains(reason, "base environment") {
+				t.Errorf("Inspect() reason = %q, want no base environment note for an enabled server", reason)
 			}
 			sdkAssertNotExist(t, pidfile, "a server whose config cannot be expanded must not start")
 			if count != nil {
