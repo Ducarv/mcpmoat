@@ -117,14 +117,16 @@ Rules:
   read any variable, not only the base set. So a config can pass a variable such as
   `GITHUB_TOKEN` to the server, the same as in your client.
 - Exception: a server from a project file that a repository can ship (see
-  [Project servers](#project-servers)), or a server that is not `enabled` (turned off, not
-  approved, or approved only by files from the repository), runs only when you opt in. Its
-  placeholders read only the base set. Any other variable counts as not set: a default applies,
-  and without a default mcpmoat does not start the server. So a config from a cloned repository
-  cannot send a secret variable to a server address that it chose. This applies also when your
-  client runs the server: mcpmoat cannot see the Cursor approval, and a Claude Code approval by
-  name covers every repository with a server of that name. A project server that needs a secret
-  variable, such as `${GITHUB_TOKEN}`, is not started.
+  [Project servers](#project-servers)) runs only when you opt in, and it reads less. A stdio
+  server reads only the base set, which it gets anyway. A remote server reads no variable at all,
+  because even `USER` or `HOME` tell the host who you are. Any other variable counts as not set:
+  a default applies, and without a default mcpmoat does not start the server or connect. So a
+  config from a cloned repository cannot send a secret variable to a server address that it
+  chose. This applies also when your client runs the server: mcpmoat cannot see the Cursor
+  approval, and a Claude Code approval by name covers every repository with a server of that
+  name. A project server that needs a secret variable, such as `${GITHUB_TOKEN}`, is not started.
+  A server from your own config reads your whole environment, also when it is turned off and you
+  opt in to inspect it.
 - mcpmoat expands the command, the arguments, the URL, and the values of `env` and `headers`. It
   does not expand the names.
 - When a variable is not set and the placeholder has no default, mcpmoat does not start the

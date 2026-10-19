@@ -62,19 +62,22 @@
 // secret. An expanded text over 64 KiB, or expanded texts of one server over
 // 1 MiB together, also refuse the server with KindConfig.
 //
-// A server from an untrusted project file (s.Untrusted), or one whose State
-// is not discover.StateEnabled, passes the gates only with an opt-in
-// (AllowUntrusted or AllowDisabled). Its placeholders read only the base
-// variables of the child environment (HOME, PATH and the others of
-// isBaseEnv). Any other variable counts as not set: a placeholder with a
-// default gets the default, and one without a default refuses the server,
-// with a reason that says why. So a config from a cloned repository cannot
-// send a secret variable to a URL or a header that it chose. StateEnabled
-// alone is not enough for an untrusted server: every Cursor server has it,
-// because mcpmoat cannot read the Cursor toggle, and a Claude Code approval
-// by name applies to every repository that ships a server with that name.
-// The cost: an untrusted server that needs a secret variable, such as a
-// team .mcp.json with ${GITHUB_TOKEN}, is refused.
+// A server from an untrusted project file (s.Untrusted) passes the gates
+// only with AllowUntrusted, and a cloned repository can ship its config. So
+// its placeholders read less: a stdio server reads only the base variables
+// of the child environment (HOME, PATH and the others of isBaseEnv), which
+// its child gets anyway, and a remote server reads no variable at all,
+// because even USER or HOME tell the host who the user is. Any other
+// variable counts as not set: a placeholder with a default gets the
+// default, and one without a default refuses the server, with a reason that
+// says why. So a config from a cloned repository cannot send a secret
+// variable to a URL or a header that it chose. The State does not change
+// this: every Cursor server is StateEnabled, because mcpmoat cannot read the
+// Cursor toggle, and a Claude Code approval by name applies to every
+// repository that ships a server with that name. The cost: an untrusted
+// server that needs a secret variable, such as a team .mcp.json with
+// ${GITHUB_TOKEN}, is refused. A trusted server reads the whole
+// environment, also when it is not enabled: its config is the user's own.
 //
 // The expanded server stays inside Inspect. [Run] keeps the server as
 // discovered in Outcome.Server, and the URL of a ConnectError is the
@@ -406,10 +409,14 @@
 //   - link-local unicast (169.254.0.0/16, fe80::/10), which holds the cloud
 //     metadata address 169.254.169.254;
 //   - multicast, with link-local and interface-local multicast;
-//   - the cloud metadata addresses outside these classes: the Alibaba Cloud
-//     address 100.100.100.200 and the AWS IPv6 address fd00:ec2::254;
-//   - a NAT64 (64:ff9b::/96), IPv4-compatible (::/96) or 6to4 (2002::/16)
-//     address whose IPv4 address is refused.
+//   - the cloud host services outside these classes: the Alibaba Cloud
+//     metadata address 100.100.100.200, the AWS IPv6 metadata address
+//     fd00:ec2::254 and the Azure WireServer 168.63.129.16;
+//   - 192.0.0.0/24 (with the old Oracle Cloud metadata address 192.0.0.192)
+//     and the deprecated IPv6 site-local range fec0::/10;
+//   - a NAT64 (64:ff9b::/96), IPv4-compatible (::/96), IPv4-translated
+//     (::ffff:0:0:0/96) or 6to4 (2002::/16) address whose IPv4 address is
+//     refused.
 //
 // An IPv4-mapped IPv6 address counts as its IPv4 address (usableAddrs). When
 // the answer also holds other addresses, the dialer uses only those. When no
@@ -419,10 +426,11 @@
 // company servers use them. The rest of 100.64.0.0/10 (shared address space,
 // RFC 6598) also stays allowed, because Tailscale and other carrier-grade
 // NAT networks use it for real servers. An IP literal in the URL is never
-// resolved, so it is not checked: it is the choice of the user. The localhost names ("localhost", "localhost."
-// and the names under .localhost), in any letter case, are not guarded: they
-// always dial loopback addresses only. Other host names, such as the proxy
-// host, are not guarded.
+// resolved, so it is not checked: it is the choice of the user. The
+// localhost names ("localhost", "localhost." and the names under
+// .localhost), in any letter case, are not guarded: they always dial
+// loopback addresses only. Other host names, such as the proxy host, are not
+// guarded.
 //
 // The guard compares the host name in ASCII lower case, as http.Transport
 // dials it. A host that is not ASCII (an IDN) would be dialled in its
@@ -484,7 +492,9 @@
 //     HTTP(S) proxy; Remote warns instead (see Network).
 //   - The address guard does not refuse an IPv4 address embedded with a
 //     NAT64 prefix other than 64:ff9b::/96 (for example the local-use
-//     prefix 64:ff9b:1::/48), or the IPv4 broadcast address. It refuses an
+//     prefix 64:ff9b:1::/48) or in a Teredo address, or the IPv4 broadcast
+//     address. It does not check an IP literal or a localhost name in the
+//     URL, also for an untrusted server. It refuses an
 //     mDNS name (".local") that resolves to a link-local address, also when
 //     the user wants it. Other ULA addresses than fd00:ec2::254 stay
 //     allowed. Of 100.64.0.0/10, only 100.100.100.200 (Alibaba Cloud

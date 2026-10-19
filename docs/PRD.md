@@ -97,7 +97,7 @@ See section 12 for the full out-of-scope list.
 | Connect by default | Yes. `scan` connects to servers; `--no-connect` does static analysis only | Full value by default; opt-out for cautious users and CI. |
 | CLI library | Go standard library `flag` | Simpler to learn. Can migrate to `cobra` if subcommands grow. |
 | Server state (#87) | Each discovered server is `enabled`, `disabled`, `unapproved` or `project-approved`, read from the client config. Inspection does not start or connect to a server that is not enabled without an explicit opt-in, separate from the untrusted opt-in | A turned-off server is not run by the scan. A repository cannot approve its own servers: an approval only from its own settings files gives `project-approved`, which needs the opt-in. Cursor keeps its toggle in SQLite, which mcpmoat does not read, so Cursor servers always show `enabled`. |
-| Placeholder expansion (#88) | Inspection expands `${...}` placeholders like the client: Claude Code and Cursor syntax, none for Codex. A missing variable is a fixed error that names at most the variable. A server from an untrusted project file, or one that is not `enabled`, reads only the base variables | The scan runs what the client runs. Expanded values can be secrets, so they stay masked. Fails closed where Cursor probably uses an empty value. A repository cannot use an opt-in to get secrets. Cost: an untrusted server that needs a secret variable is refused. |
+| Placeholder expansion (#88) | Inspection expands `${...}` placeholders like the client: Claude Code and Cursor syntax, none for Codex. A missing variable is a fixed error that names at most the variable. A server from an untrusted project file reads only the base variables (stdio) or none (remote) | The scan runs what the client runs. Expanded values can be secrets, so they stay masked. Fails closed where Cursor probably uses an empty value. A repository cannot use the untrusted opt-in to get secrets or the user's name. Cost: an untrusted server that needs a secret variable is refused. |
 | Client identity and lists (#97) | Send the MCP client name of the client that owns the config. Always send every list request, and warn when an undeclared capability returns items | Makes cloaking harder. Residuals: version, capabilities, timing and User-Agent can still tell mcpmoat apart. A server that never answers an unknown method times out. |
 | Work directory and `npx` (#104) | Trusted project servers run in their project directory, like the client. The child environment always gets `npm_config_yes=false` | Same behaviour as the client, and `npx` does not install a missing package without a prompt. Configured `-y`, `--yes` or `npm_config_yes` still win. Other launchers are not covered. |
 | DNS answers and proxies (#106) | For a configured DNS name, refuse loopback, unspecified, link-local and multicast answers. Behind a proxy, warn with `dns-pin-unavailable` | Stops a DNS name from pointing the scan at the local machine or a metadata service. Private addresses stay allowed for company servers. A proxy resolves names itself, so the guard cannot apply there. |
@@ -185,9 +185,10 @@ first connection for the whole inspection. It also applies these rules:
 
 - For a configured DNS name that is not a localhost name (`localhost`, `localhost.` or a name
   under `.localhost`), mcpmoat refuses these resolved addresses: loopback, unspecified (all of
-  `0.0.0.0/8`, and `::`), link-local, multicast, the cloud metadata addresses `100.100.100.200`
-  (Alibaba Cloud) and `fd00:ec2::254` (AWS), and the NAT64 (`64:ff9b::/96`), IPv4-compatible and
-  6to4 forms of a refused IPv4 address.
+  `0.0.0.0/8`, and `::`), link-local, multicast, the cloud host services `100.100.100.200`
+  (Alibaba Cloud), `fd00:ec2::254` (AWS) and `168.63.129.16` (Azure WireServer), `192.0.0.0/24`,
+  `fec0::/10`, and the NAT64 (`64:ff9b::/96`), IPv4-compatible, IPv4-translated and 6to4 forms of
+  a refused IPv4 address.
 - When the answer also holds allowed addresses, mcpmoat uses only those.
 - When no allowed address remains, mcpmoat does not connect. The error is fixed text, labelled
   `network`, and holds no address.
@@ -201,8 +202,9 @@ warning does not hold the proxy URL, because that URL can hold credentials.
 
 Known limits:
 
-- An IPv4 address embedded with another NAT64 prefix (for example `64:ff9b:1::/48`) is not
-  refused.
+- An IPv4 address embedded with another NAT64 prefix (for example `64:ff9b:1::/48`) or in a Teredo
+  address is not refused.
+- An IP literal or a localhost name in the URL is not checked, also for an untrusted server.
 - Names that end in `.local` (mDNS) and resolve to link-local addresses are refused, also when the
   user wants them (false positive).
 - Other ULA addresses than `fd00:ec2::254` stay allowed.

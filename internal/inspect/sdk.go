@@ -22,7 +22,8 @@ type SDKOptions struct {
 	// untrusted project file (discover.Server.Untrusted). The caller must
 	// have the explicit opt-in of the user before it sets this. The
 	// placeholders of such a server read only the base environment
-	// variables (see Inspect).
+	// variables for a stdio server, and none for a remote server (see
+	// Inspect).
 	AllowUntrusted bool
 
 	// AllowDisabled lets Inspect start or connect to a server whose State is
@@ -30,8 +31,7 @@ type SDKOptions struct {
 	// did not approve it, or only files from the repository approve it. The
 	// caller must have the explicit opt-in of the user before it sets this.
 	// It is separate from AllowUntrusted: an untrusted server that is also
-	// off needs both. The placeholders of such a server read only the base
-	// environment variables (see Inspect).
+	// off needs both.
 	AllowDisabled bool
 }
 
@@ -50,8 +50,8 @@ type SDKInspector struct {
 	// the variables that Inspect expands (see discover.Expand). runRoot
 	// returns the directory for the work directories of servers with no
 	// configured work directory (see projectRunDir and workDir). rawLimit is
-	// the raw size limit; 0 means maxRawBytes. When a field is zero, as in New and in a zero
-	// SDKInspector, Inspect uses the default. Tests set them, so that they
+	// the raw size limit; 0 means maxRawBytes. When a field is zero, as in
+	// New and in a zero SDKInspector, Inspect uses the default. Tests set them, so that they
 	// never read the real environment or write to the cache directory of
 	// the user, and can go over a small limit.
 	environ  func() []string
@@ -144,18 +144,25 @@ func (i *SDKInspector) Inspect(ctx context.Context, s discover.Server) (Result, 
 	}
 	parent := environ()
 
-	// A server from an untrusted project file, or one that is not enabled,
-	// passed the gates only with an opt-in. Its placeholders read only the
-	// base variables (see isBaseEnv), so a config from a cloned repository
-	// cannot send a secret variable to a URL or a header that it chose. A
-	// state of StateEnabled is not enough for an untrusted server: every
-	// Cursor server has it (mcpmoat cannot read the Cursor toggle), and a
-	// Claude Code approval by name applies to every repository that ships
-	// a server with that name.
+	// A server from an untrusted project file passed the gates only with an
+	// opt-in, and a cloned repository can ship its config. So its
+	// placeholders read only the variables that its config cannot use to
+	// send a secret to a URL or a header that the repository chose: the base
+	// variables (see isBaseEnv) for a stdio server, whose child gets them
+	// anyway, and none for a remote server, which would send even USER or
+	// HOME to that host. Its State does not matter: every Cursor server is
+	// StateEnabled (mcpmoat cannot read the Cursor toggle), and a Claude
+	// Code approval by name applies to every repository that ships a
+	// server with that name. A trusted server reads the whole environment,
+	// also when it is not enabled: its config is the user's own.
 	lookup := environLookup(parent)
-	baseOnly := s.Untrusted || s.State != discover.StateEnabled
-	if baseOnly {
-		lookup = baseEnvLookup(lookup)
+	allowed, note := func(string) bool { return true }, ""
+	if s.Untrusted {
+		allowed, note = isBaseEnv, reasonBaseOnly
+		if s.Transport.IsRemote() {
+			allowed, note = func(string) bool { return false }, reasonNoEnv
+		}
+		lookup = filterLookup(lookup, allowed)
 	}
 	// The recorder keeps every value that Expand looks up (each value one
 	// time), so that the scrub of error text removes them too: an expanded
@@ -164,7 +171,7 @@ func (i *SDKInspector) Inspect(ctx context.Context, s discover.Server) (Result, 
 	rec := &lookupRecorder{lookup: lookup}
 	expanded, err := discover.Expand(s, rec.Lookup)
 	if err != nil {
-		return Result{}, expandError(s, err, baseOnly)
+		return Result{}, expandError(s, err, allowed, note)
 	}
 
 	if s.Transport.IsRemote() {
@@ -256,7 +263,7 @@ func (i *SDKInspector) inspectStdio(ctx context.Context, s discover.Server, pare
 		return Result{}, stdioFailure(s, err, secrets, sizes.exceeded())
 	}
 
-	client := newStdioClientFor(clientIdentity(s.Client), raw, sizes)
+	client := newStdioClient(clientIdentity(s.Client), raw, sizes)
 	cs, err := client.Connect(ctx, proc.transport(int(limit)), nil)
 	if err != nil {
 		return fail(err)
@@ -281,7 +288,7 @@ func (i *SDKInspector) inspectStdio(ctx context.Context, s discover.Server, pare
 	return result, nil
 }
 
-// newStdioClientFor returns a new SDK client for one stdio server, with the
+// newStdioClient returns a new SDK client for one stdio server, with the
 // client identity id in the initialize request. Inspect passes
 // clientIdentity of the client that declared the server, so a server cannot
 // tell mcpmoat from that client by name. id must not name mcpmoat.
@@ -305,7 +312,7 @@ func (i *SDKInspector) inspectStdio(ctx context.Context, s discover.Server, pare
 // The sending middleware of raw keeps the tools as the server sent them,
 // for listAll, and the one of limit applies the raw size limit. The logger
 // discards everything: SDK logs can hold untrusted server text.
-func newStdioClientFor(id *mcp.Implementation, raw *rawLists, limit *rawLimit) *mcp.Client {
+func newStdioClient(id *mcp.Implementation, raw *rawLists, limit *rawLimit) *mcp.Client {
 	c := mcp.NewClient(
 		id,
 		&mcp.ClientOptions{
@@ -371,37 +378,40 @@ func environLookup(env []string) func(string) (string, bool) {
 	}
 }
 
-// baseEnvLookup returns a lookup that finds only the base variables (see
-// isBaseEnv) through lookup. Every other name is not set.
-func baseEnvLookup(lookup func(string) (string, bool)) func(string) (string, bool) {
+// filterLookup returns a lookup that finds, through lookup, only the names
+// that allowed accepts. Every other name is not set.
+func filterLookup(lookup func(string) (string, bool), allowed func(string) bool) func(string) (string, bool) {
 	return func(name string) (string, bool) {
-		if !isBaseEnv(name) {
+		if !allowed(name) {
 			return "", false
 		}
 		return lookup(name)
 	}
 }
 
-// reasonBaseOnly ends the reason of a missing variable that is not a base
-// variable when the lookup read only the base variables: the variable can be
+// The notes that end the reason of a missing variable that the filter of an
+// untrusted server did not let through (see Inspect): the variable can be
 // set in the environment of the user, so "not set" alone would be wrong.
-const reasonBaseOnly = "; a server from an untrusted project file, or one that is not enabled, reads only the base environment variables"
+const (
+	reasonBaseOnly = "; a stdio server from an untrusted project file reads only the base environment variables"
+	reasonNoEnv    = "; a remote server from an untrusted project file reads no environment variables"
+)
 
 // expandError turns an error of discover.Expand into a KindConfig
 // *ConnectError. The reason holds the field and at most the variable name of
 // the placeholder, never a value: the text of a *discover.ExpandError holds
 // nothing else, and it shows a name only when the name is a plain variable
 // name (see discover.ExpandError). Any other error gets a fixed reason.
-// baseOnly tells that the lookup read only the base variables (see
-// baseEnvLookup); then a missing variable that is not a base variable gets
-// reasonBaseOnly at the end. A name that is not a plain variable name is
-// never a base variable.
-func expandError(s discover.Server, err error, baseOnly bool) *ConnectError {
+// allowed is the filter of the lookup (see filterLookup); a missing
+// variable that allowed does not accept gets note at the end. A name that is
+// not a plain variable name is empty in the ExpandError, and no filter
+// accepts it.
+func expandError(s discover.Server, err error, allowed func(string) bool, note string) *ConnectError {
 	reason := "cannot expand the variables in the server config"
 	if ee, ok := errors.AsType[*discover.ExpandError](err); ok {
 		reason = ee.Error()
-		if baseOnly && errors.Is(err, discover.ErrMissingVariable) && !isBaseEnv(ee.Name) {
-			reason += reasonBaseOnly
+		if errors.Is(err, discover.ErrMissingVariable) && !allowed(ee.Name) {
+			reason += note
 		}
 	} else {
 		// Keep no text of an unknown error.
@@ -422,8 +432,10 @@ func expandError(s discover.Server, err error, baseOnly bool) *ConnectError {
 // host name alone) with the discovered one, because a DNS or dial error
 // names the host without the URL. A host can be a short word, so this can
 // garble other text of the error: a leak is worse than a garbled word. A
-// cause whose text changes becomes a new error with that text, as in
-// safeCause. When the two URLs are the same, only ce.URL is set.
+// cause whose text changes becomes a new error with that text (see
+// withText), which still matches the context error and the sentinel of the
+// old cause, so errors.Is(err, context.DeadlineExceeded) still works. When
+// the two URLs are the same, only ce.URL is set.
 func showDiscoveredURL(ce *ConnectError, expanded, discovered discover.URL) {
 	to := discovered.String()
 	ce.URL = to
@@ -455,9 +467,44 @@ func showDiscoveredURL(ce *ConnectError, expanded, discovered discover.URL) {
 	if ce.err != nil {
 		text := ce.err.Error()
 		if replaced := replace(text); replaced != text {
-			ce.err = errors.New(truncate(replaced))
+			ce.err = withText(ce.err, truncate(replaced))
 		}
 	}
+}
+
+// textError is an error with a fixed text that matches, with errors.Is, the
+// errors in matches. It wraps nothing else, so no text of the old error
+// stays in the chain.
+type textError struct {
+	text    string
+	matches []error
+}
+
+func (e *textError) Error() string { return e.text }
+
+// Unwrap returns the errors that e matches. errors.Is and errors.As walk
+// them.
+func (e *textError) Unwrap() []error { return e.matches }
+
+// withText returns an error with text that still matches what callers check
+// in err with errors.Is: the context error (see contextErr), and the
+// sentinel of blockedKinds or errInvalidProxy that err wraps. These are
+// fixed sentinels with no config text.
+func withText(err error, text string) error {
+	var matches []error
+	for _, b := range blockedKinds {
+		if errors.Is(err, b.err) {
+			matches = append(matches, b.err)
+			break
+		}
+	}
+	if errors.Is(err, errInvalidProxy) {
+		matches = append(matches, errInvalidProxy)
+	}
+	if ctxErr := contextErr(err); ctxErr != nil {
+		matches = append(matches, ctxErr)
+	}
+	return &textError{text: text, matches: matches}
 }
 
 // urlBase returns u without its fragment and its query.

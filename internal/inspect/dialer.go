@@ -80,9 +80,7 @@ type dialFunc func(ctx context.Context, network, address string) (net.Conn, erro
 // Guard: the pin alone does not stop a name that points to a local address
 // from the first lookup. So for one host name, guardHost (the host of the
 // configured endpoint), DialContext also drops the addresses that a remote
-// server must not have: loopback, unspecified, link-local, multicast, the
-// cloud metadata addresses 100.100.100.200 and fd00:ec2::254, and the IPv6
-// forms of refused IPv4 addresses (see refusedAddr). Private
+// server must not have (see refusedAddr). Private
 // (RFC 1918) and unique local (ULA) addresses stay allowed: a server on the
 // company network is a normal case. The rest of 100.64.0.0/10 (shared
 // address space, RFC 6598) also stays allowed, because Tailscale and other
@@ -307,27 +305,44 @@ var (
 	// awsIPv6MetadataAddr is the IPv6 address of the AWS metadata service.
 	// It is in the unique local range fc00::/7, which is not refused.
 	awsIPv6MetadataAddr = netip.MustParseAddr("fd00:ec2::254")
+	// azureWireServerAddr is the Azure WireServer address, a host service
+	// of every Azure VM. It is a public address, not a private one.
+	azureWireServerAddr = netip.AddrFrom4([4]byte{168, 63, 129, 16})
+	// ietfProtocolPrefix is 192.0.0.0/24, the IETF protocol assignments
+	// (RFC 6890). It holds 192.0.0.192, the old Oracle Cloud metadata
+	// address, and no address of a normal server.
+	ietfProtocolPrefix = netip.MustParsePrefix("192.0.0.0/24")
+	// siteLocalPrefix is fec0::/10, the deprecated IPv6 site-local range
+	// (RFC 3879). Some networks still route it internally.
+	siteLocalPrefix = netip.MustParsePrefix("fec0::/10")
 	// nat64Prefix is the well-known NAT64 prefix (RFC 6052). The last 32
 	// bits are an IPv4 address that a NAT64 gateway connects to.
 	nat64Prefix = netip.MustParsePrefix("64:ff9b::/96")
 	// ipv4CompatPrefix holds the IPv4-compatible IPv6 addresses (RFC 4291,
 	// deprecated). The last 32 bits are an IPv4 address.
 	ipv4CompatPrefix = netip.MustParsePrefix("::/96")
+	// ipv4TranslatedPrefix holds the IPv4-translated addresses
+	// ::ffff:0:a.b.c.d (RFC 2765, SIIT). The last 32 bits are an IPv4
+	// address. It differs from the IPv4-mapped form ::ffff:a.b.c.d
+	// (::ffff:0:0/96), which usableAddrs unmaps.
+	ipv4TranslatedPrefix = netip.MustParsePrefix("::ffff:0:0:0/96")
 	// sixToFourPrefix is the 6to4 prefix (RFC 3056). Bits 16 to 47 are an
 	// IPv4 address.
 	sixToFourPrefix = netip.MustParsePrefix("2002::/16")
 )
 
 // embeddedIPv4 returns the IPv4 address in addr, and true, when addr is a
-// NAT64, IPv4-compatible or 6to4 IPv6 address (see the prefixes above). Else
-// it returns false.
+// NAT64, IPv4-compatible, IPv4-translated or 6to4 IPv6 address (see the
+// prefixes above). Else it returns false. Teredo (2001::/32) is not covered:
+// it holds the client address in obfuscated form, and its server address is
+// a public relay.
 func embeddedIPv4(addr netip.Addr) (netip.Addr, bool) {
 	if !addr.Is6() {
 		return netip.Addr{}, false
 	}
 	b := addr.As16()
 	switch {
-	case nat64Prefix.Contains(addr), ipv4CompatPrefix.Contains(addr):
+	case nat64Prefix.Contains(addr), ipv4CompatPrefix.Contains(addr), ipv4TranslatedPrefix.Contains(addr):
 		return netip.AddrFrom4([4]byte(b[12:16])), true
 	case sixToFourPrefix.Contains(addr):
 		return netip.AddrFrom4([4]byte(b[2:6])), true
@@ -346,13 +361,17 @@ func embeddedIPv4(addr netip.Addr) (netip.Addr, bool) {
 //     metadata address 169.254.169.254;
 //   - multicast (224.0.0.0/4, ff00::/8), with link-local and
 //     interface-local multicast: not an address of one server;
-//   - the cloud metadata addresses that the classes above do not cover: the
-//     Alibaba Cloud address 100.100.100.200 and the AWS IPv6 address
-//     fd00:ec2::254;
-//   - a NAT64, IPv4-compatible or 6to4 IPv6 address whose IPv4 address is
-//     refused (see embeddedIPv4): on a NAT64 network, 64:ff9b::a9fe:a9fe
-//     reaches 169.254.169.254. NAT64 with another prefix (for example the
-//     local-use prefix 64:ff9b:1::/48) is not covered.
+//   - the cloud host services that the classes above do not cover: the
+//     Alibaba Cloud metadata address 100.100.100.200, the AWS IPv6 metadata
+//     address fd00:ec2::254 and the Azure WireServer 168.63.129.16;
+//   - 192.0.0.0/24 (IETF protocol assignments, with the old Oracle Cloud
+//     metadata address 192.0.0.192) and fec0::/10 (deprecated IPv6
+//     site-local);
+//   - a NAT64, IPv4-compatible, IPv4-translated or 6to4 IPv6 address whose
+//     IPv4 address is refused (see embeddedIPv4): on a NAT64 network,
+//     64:ff9b::a9fe:a9fe reaches 169.254.169.254. NAT64 with another prefix
+//     (for example the local-use prefix 64:ff9b:1::/48) and Teredo are not
+//     covered.
 //
 // Private (RFC 1918) and unique local (fc00::/7) addresses are not refused.
 // The rest of 100.64.0.0/10 (shared address space, RFC 6598) is not refused
@@ -364,7 +383,10 @@ func refusedAddr(addr netip.Addr) bool {
 		// 0.0.0.0 itself.
 		return true
 	}
-	if addr == alibabaMetadataAddr || addr == awsIPv6MetadataAddr {
+	if addr == alibabaMetadataAddr || addr == awsIPv6MetadataAddr || addr == azureWireServerAddr {
+		return true
+	}
+	if ietfProtocolPrefix.Contains(addr) || siteLocalPrefix.Contains(addr) {
 		return true
 	}
 	if v4, ok := embeddedIPv4(addr); ok && refusedAddr(v4) {

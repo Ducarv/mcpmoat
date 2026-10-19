@@ -132,9 +132,9 @@ func onMethod(method string, h mcp.MethodHandler) mcp.Middleware {
 	}
 }
 
-// connectStdio connects the client of a stdio session (newStdioClient), with
-// the raw size limit limit, to server over in-memory transports. No process
-// and no network are involved. It returns the session and the rawLists and
+// connectStdio connects the client of a stdio session
+// (newNeutralStdioClient), with the raw size limit limit, to server over
+// in-memory transports. No process and no network are involved. It returns the session and the rawLists and
 // rawLimit of the client. t.Cleanup closes both sessions.
 func connectStdio(t *testing.T, server *mcp.Server, limit int64) (*mcp.ClientSession, *rawLists, *rawLimit) {
 	t.Helper()
@@ -148,7 +148,7 @@ func connectStdio(t *testing.T, server *mcp.Server, limit int64) (*mcp.ClientSes
 	t.Cleanup(func() { _ = ss.Close() })
 
 	raw, lim := &rawLists{}, &rawLimit{limit: limit}
-	cs, err := newStdioClient(raw, lim).Connect(ctx, ct, nil)
+	cs, err := newNeutralStdioClient(raw, lim).Connect(ctx, ct, nil)
 	if err != nil {
 		t.Fatalf("client.Connect() error = %v", err)
 	}
@@ -171,8 +171,8 @@ func sseMessageEvent(data string) string {
 	return "event: message\ndata: " + data + "\n\n"
 }
 
-// newStdioClient is newStdioClientFor with the neutral identity (clientName
-// and clientVersion), for tests that do not check the identity.
-func newStdioClient(raw *rawLists, limit *rawLimit) *mcp.Client {
-	return newStdioClientFor(&mcp.Implementation{Name: clientName, Version: clientVersion}, raw, limit)
+// newNeutralStdioClient is newStdioClient with the neutral identity
+// (clientName and clientVersion), for tests that do not check the identity.
+func newNeutralStdioClient(raw *rawLists, limit *rawLimit) *mcp.Client {
+	return newStdioClient(&mcp.Implementation{Name: clientName, Version: clientVersion}, raw, limit)
 }

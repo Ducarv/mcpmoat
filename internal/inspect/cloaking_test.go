@@ -245,7 +245,7 @@ func TestCloakingRemoteNeutralIsFooled(t *testing.T) {
 
 // ckInspectStdio runs the steps of SDKInspector.inspectStdio after the start
 // of the process, over in-memory transports: it connects a stdio client
-// (newStdioClientFor) with the identity id to server, and lists with
+// (newStdioClient) with the identity id to server, and lists with
 // listInto. No process and no network are involved.
 func ckInspectStdio(t *testing.T, server *mcp.Server, id *mcp.Implementation) Result {
 	t.Helper()
@@ -258,7 +258,7 @@ func ckInspectStdio(t *testing.T, server *mcp.Server, id *mcp.Implementation) Re
 	t.Cleanup(func() { _ = ss.Close() })
 
 	raw, limit := &rawLists{}, &rawLimit{limit: maxRawBytes}
-	cs, err := newStdioClientFor(id, raw, limit).Connect(ctx, ct, nil)
+	cs, err := newStdioClient(id, raw, limit).Connect(ctx, ct, nil)
 	if err != nil {
 		t.Fatalf("client.Connect() error = %v", err)
 	}

@@ -217,7 +217,7 @@ var blockedKinds = []struct {
 	{errTooManyRedirects, KindRedirect, "too many redirects"},
 	{errBodyTooLarge, KindTooLarge, "response too large"},
 	{errJSONTooComplex, KindTooLarge, "response JSON too large: too deep, too many values or a too long string"},
-	{errAddrRefused, KindNetwork, errAddrRefused.Error() + "; connection refused"},
+	{errAddrRefused, KindNetwork, errAddrRefused.Error() + "; mcpmoat did not connect"},
 }
 
 // contextErr returns context.DeadlineExceeded or context.Canceled when err

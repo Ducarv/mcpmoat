@@ -1,7 +1,9 @@
 package inspect
 
 import (
+	"context"
 	"errors"
+	"fmt"
 	"slices"
 	"strings"
 	"testing"
@@ -189,6 +191,51 @@ func TestShowDiscoveredURL(t *testing.T) {
 		}
 		if strings.Contains(ce.Error(), "acme7") || strings.Contains(ce.err.Error(), "acme7") {
 			t.Errorf("error %q or cause %q holds the expanded path", ce.Error(), ce.err.Error())
+		}
+	})
+
+	t.Run("a rewritten cause keeps its sentinels", func(t *testing.T) {
+		t.Parallel()
+		// Inspect promises errors.Is(err, context.DeadlineExceeded) for a
+		// timeout, and errors.Is on the sentinels of the HTTP layer. The
+		// rewrite of the text must keep them, and must keep no old text.
+		discovered := discover.NewURL("https://${MCP_HOST}/mcp")
+		expanded := discover.NewURL("https://dev7.example/mcp")
+		tests := []struct {
+			name  string
+			cause error
+			want  []error
+		}{
+			{
+				name:  "deadline",
+				cause: fmt.Errorf("%w: Post %q: i/o timeout", context.DeadlineExceeded, expanded.String()),
+				want:  []error{context.DeadlineExceeded},
+			},
+			{
+				name:  "canceled and a blocked sentinel",
+				cause: fmt.Errorf("%w: %w: dial dev7.example", errAddrRefused, context.Canceled),
+				want:  []error{errAddrRefused, context.Canceled},
+			},
+			{
+				name:  "invalid proxy",
+				cause: fmt.Errorf("%w: for dev7.example", errInvalidProxy),
+				want:  []error{errInvalidProxy},
+			},
+		}
+		for _, tt := range tests {
+			ce := &ConnectError{Kind: KindTimeout, Reason: "timed out", err: tt.cause}
+			showDiscoveredURL(ce, expanded, discovered)
+			for _, w := range tt.want {
+				if !errors.Is(ce, w) {
+					t.Errorf("%s: errors.Is(err, %v) = false after the rewrite", tt.name, w)
+				}
+			}
+			if errors.Is(ce, errOtherOrigin) {
+				t.Errorf("%s: errors.Is(err, errOtherOrigin) = true, want false", tt.name)
+			}
+			if strings.Contains(ce.err.Error(), "dev7") {
+				t.Errorf("%s: cause %q holds the expanded host", tt.name, ce.err.Error())
+			}
 		}
 	})
 

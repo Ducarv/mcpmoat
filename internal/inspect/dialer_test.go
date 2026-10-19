@@ -1662,6 +1662,14 @@ func TestRefusedAddr(t *testing.T) {
 		{"::a9fe:a9fe", true},
 		{"2002:7f00:1::", true},
 		{"2002:a9fe:a9fe::1", true},
+		{"::ffff:0:a9fe:a9fe", true},
+		{"::ffff:0:7f00:1", true},
+		// Other cloud host services and special ranges.
+		{"168.63.129.16", true},
+		{"192.0.0.192", true},
+		{"192.0.0.1", true},
+		{"fec0::1", true},
+		{"feff::1", true},
 
 		{"1.0.0.0", false},
 		{"fd00:ec2::253", false},
@@ -1670,6 +1678,12 @@ func TestRefusedAddr(t *testing.T) {
 		{"64:ff9b::a00:1", false},
 		{"::cb00:710a", false},
 		{"2002:cb00:710a::1", false},
+		{"::ffff:0:cb00:710a", false},
+		{"168.63.129.17", false},
+		{"192.0.1.1", false},
+		{"fc00::1:2", false},
+		// Teredo is not covered.
+		{"2001:0:4136:e378:8000:63bf:3fff:fdd2", false},
 		// NAT64 with the local-use prefix is not covered.
 		{"64:ff9b:1::a9fe:a9fe", false},
 		{"10.0.0.1", false},

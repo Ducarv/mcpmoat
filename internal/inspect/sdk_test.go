@@ -943,14 +943,32 @@ func TestSDKInspectExpand(t *testing.T) {
 			},
 		},
 		{
-			// A server that is not enabled reads only the base variables:
-			// HOME is found, MCPMOAT_TEST_VALUE is not, so its default
-			// applies.
-			name:    "claude code not enabled reads only base variables",
+			// A trusted server that is not enabled still reads the whole
+			// environment: its config is the user's own.
+			name:    "trusted claude code not enabled reads the whole environment",
 			client:  discover.ClientClaudeCode,
-			state:   discover.StateUnapproved,
-			command: "", // the fixture path, set below
+			state:   discover.StateDisabled,
+			command: "${MCPMOAT_TEST_FIXTURE}",
 			envfile: "", // dir/env, set below
+			env:     map[string]string{"MCPMOAT_TEST_EXPANDED": "${MCPMOAT_TEST_VALUE}"},
+			want: func(string) map[string]string {
+				return map[string]string{
+					"HOME":                  "/home/mcpmoat-test",
+					"PATH":                  "/usr/bin:/bin",
+					"MCPMOAT_TEST_EXPANDED": sdkExpandSecret,
+					"npm_config_yes":        "false",
+				}
+			},
+		},
+		{
+			// An untrusted stdio server reads only the base variables: HOME
+			// is found, MCPMOAT_TEST_VALUE is not, so its default applies.
+			name:      "untrusted claude code not enabled reads only base variables",
+			client:    discover.ClientClaudeCode,
+			state:     discover.StateUnapproved,
+			untrusted: true,
+			command:   "", // the fixture path, set below
+			envfile:   "", // dir/env, set below
 			env: map[string]string{
 				"MCPMOAT_TEST_DEFAULT": "${MCPMOAT_TEST_VALUE:-fallback-value}",
 				"MCPMOAT_TEST_HOME":    "${HOME}",
@@ -1164,51 +1182,29 @@ func TestSDKInspectExpandErrors(t *testing.T) {
 			wantReason: "cannot expand env: expanded text is too long",
 		},
 		{
-			// A server that is not enabled reads only the base variables
+			// An untrusted stdio server reads only the base variables
 			// (issue #88 hardening): a variable that is set in the
 			// environment of the user is not found, and the reason says
-			// why.
-			name:       "not enabled stdio reads only base variables",
+			// why. The State does not matter.
+			name:       "untrusted not enabled stdio reads only base variables",
 			client:     discover.ClientClaudeCode,
 			state:      discover.StateUnapproved,
+			untrusted:  true,
 			args:       []string{"-pidfile", "PIDFILE"},
 			env:        map[string]string{"MCPMOAT_TEST_EXPANDED": "${MCPMOAT_TEST_VALUE}"},
 			wantErr:    discover.ErrMissingVariable,
 			wantName:   "MCPMOAT_TEST_VALUE",
-			wantSuffix: "; a server from an untrusted project file, or one that is not enabled, reads only the base environment variables",
+			wantSuffix: "; a stdio server from an untrusted project file reads only the base environment variables",
 		},
 		{
-			name:       "project-approved cursor stdio reads only base variables",
+			name:       "untrusted project-approved cursor stdio reads only base variables",
 			client:     discover.ClientCursor,
 			state:      discover.StateProjectApproved,
+			untrusted:  true,
 			args:       []string{"-pidfile", "PIDFILE", "--x=${env:MCPMOAT_TEST_VALUE}"},
 			wantErr:    discover.ErrMissingVariable,
 			wantName:   "MCPMOAT_TEST_VALUE",
-			wantSuffix: "; a server from an untrusted project file, or one that is not enabled, reads only the base environment variables",
-		},
-		{
-			// A cloned repository cannot send a secret to its own URL.
-			name:       "disabled remote URL reads only base variables",
-			client:     discover.ClientClaudeCode,
-			state:      discover.StateDisabled,
-			url:        "URL?k=${MCPMOAT_TEST_VALUE}",
-			headers:    map[string]string{"X-Api-Key": "${HOME}"},
-			wantErr:    discover.ErrMissingVariable,
-			wantName:   "MCPMOAT_TEST_VALUE",
-			wantSuffix: "; a server from an untrusted project file, or one that is not enabled, reads only the base environment variables",
-		},
-		{
-			// An untrusted Cursor server is always StateEnabled, but a
-			// cloned repository can ship it: it reads only the base
-			// variables.
-			name:       "untrusted enabled cursor remote reads only base variables",
-			client:     discover.ClientCursor,
-			untrusted:  true,
-			url:        "URL",
-			headers:    map[string]string{"Authorization": "Bearer ${env:MCPMOAT_TEST_VALUE}"},
-			wantErr:    discover.ErrMissingVariable,
-			wantName:   "MCPMOAT_TEST_VALUE",
-			wantSuffix: "; a server from an untrusted project file, or one that is not enabled, reads only the base environment variables",
+			wantSuffix: "; a stdio server from an untrusted project file reads only the base environment variables",
 		},
 		{
 			name:       "untrusted enabled claude code stdio reads only base variables",
@@ -1218,18 +1214,53 @@ func TestSDKInspectExpandErrors(t *testing.T) {
 			env:        map[string]string{"MCPMOAT_TEST_EXPANDED": "${MCPMOAT_TEST_VALUE}"},
 			wantErr:    discover.ErrMissingVariable,
 			wantName:   "MCPMOAT_TEST_VALUE",
-			wantSuffix: "; a server from an untrusted project file, or one that is not enabled, reads only the base environment variables",
+			wantSuffix: "; a stdio server from an untrusted project file reads only the base environment variables",
 		},
 		{
 			// A base variable that is truly not set gets no note: the
 			// filter is not the cause.
-			name:      "untrusted base variable not set has no note",
+			name:      "untrusted stdio base variable not set has no note",
 			client:    discover.ClientClaudeCode,
 			untrusted: true,
 			args:      []string{"-pidfile", "PIDFILE"},
 			env:       map[string]string{"MCPMOAT_TEST_EXPANDED": "${TZ}"},
 			wantErr:   discover.ErrMissingVariable,
 			wantName:  "TZ",
+		},
+		{
+			// A cloned repository cannot send a secret to its own URL.
+			name:       "untrusted disabled remote URL reads no variables",
+			client:     discover.ClientClaudeCode,
+			state:      discover.StateDisabled,
+			untrusted:  true,
+			url:        "URL?k=${MCPMOAT_TEST_VALUE}",
+			wantErr:    discover.ErrMissingVariable,
+			wantName:   "MCPMOAT_TEST_VALUE",
+			wantSuffix: "; a remote server from an untrusted project file reads no environment variables",
+		},
+		{
+			// An untrusted Cursor server is always StateEnabled, but a
+			// cloned repository can ship it.
+			name:       "untrusted enabled cursor remote reads no variables",
+			client:     discover.ClientCursor,
+			untrusted:  true,
+			url:        "URL",
+			headers:    map[string]string{"Authorization": "Bearer ${env:MCPMOAT_TEST_VALUE}"},
+			wantErr:    discover.ErrMissingVariable,
+			wantName:   "MCPMOAT_TEST_VALUE",
+			wantSuffix: "; a remote server from an untrusted project file reads no environment variables",
+		},
+		{
+			// Not even a base variable: HOME or USER would tell the host
+			// who the user is.
+			name:       "untrusted remote base variable is not read",
+			client:     discover.ClientClaudeCode,
+			untrusted:  true,
+			url:        "URL",
+			headers:    map[string]string{"X-User": "${HOME}"},
+			wantErr:    discover.ErrMissingVariable,
+			wantName:   "HOME",
+			wantSuffix: "; a remote server from an untrusted project file reads no environment variables",
 		},
 		{
 			name:       "claude code remote URL too long",

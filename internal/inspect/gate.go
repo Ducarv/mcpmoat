@@ -32,7 +32,7 @@ var errProjectApproved = errors.New("inspect: " + reasonProjectApproved)
 // errUntrusted reports that the server comes from an untrusted project file
 // and the user did not opt in to start such servers. See the discover
 // package doc, Untrusted files.
-var errUntrusted = errors.New("inspect: server from an untrusted project file needs an explicit opt-in to start")
+var errUntrusted = errors.New("inspect: server from an untrusted project file needs an explicit opt-in")
 
 // The reasons of the gates in a *ConnectError (see gateError). The state
 // gate reasons are the texts of their errors without the "inspect: " prefix.

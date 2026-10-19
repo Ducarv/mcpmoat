@@ -90,7 +90,7 @@ const jsonTooComplexReason = "response JSON too large: too deep, too many values
 // addrRefusedReason is the fixed reason for errAddrRefused (issue #106). It
 // is written out here, not read from blockedKinds, so a change of the text
 // fails a test. It names no address and no host.
-const addrRefusedReason = "server name resolves only to loopback, unspecified, link-local or multicast addresses; connection refused"
+const addrRefusedReason = "server name resolves only to loopback, unspecified, link-local or multicast addresses; mcpmoat did not connect"
 
 // wantExactReason returns a TestClassify check that Reason is exactly want.
 func wantExactReason(want string) func(t *testing.T, ce *ConnectError) {

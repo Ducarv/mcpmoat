@@ -213,7 +213,7 @@ func TestRawLimitHandshake(t *testing.T) {
 	t.Cleanup(func() { _ = ss.Close() })
 
 	lim := &rawLimit{limit: testRawLimit}
-	cs, err := newStdioClient(&rawLists{}, lim).Connect(t.Context(), ct, nil)
+	cs, err := newNeutralStdioClient(&rawLists{}, lim).Connect(t.Context(), ct, nil)
 	if err == nil {
 		_ = cs.Close()
 		t.Fatal("client.Connect() error = nil, want an error")
