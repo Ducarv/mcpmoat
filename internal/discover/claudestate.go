@@ -340,7 +340,10 @@ func trustedSource(i int) bool {
 //     sourceLegacy) gives StateEnabled. An approval only from untrusted
 //     sources (sourceLocal or sourceProject) gives StateProjectApproved. So
 //     a trusted enabled list wins over an untrusted enableAll, and the
-//     other way round too.
+//     other way round too. When the first enableAll is true, every trusted
+//     source that also has true approves too: the user approved all
+//     servers, and a repository file that says the same comes first only
+//     because of the order.
 //  3. Else the server is StateUnapproved.
 //  4. Last, a name in any disabledMcpServers gives StateDisabled, also when
 //     step 2 approved it.
@@ -373,6 +376,11 @@ func mcpjsonState(name string, sources ...claudeProjectState) State {
 	}
 	if i, all := firstEnableAll(sources); all {
 		approve(i)
+		for j, st := range sources {
+			if trustedSource(j) && st.enableAll != nil && *st.enableAll {
+				approve(j)
+			}
+		}
 	}
 
 	switch {
@@ -420,8 +428,7 @@ func applyMcpjsonStates(servers []Server, sources ...claudeProjectState) {
 // applyDisabledServers sets StateDisabled on every server whose name is in
 // the disabledMcpServers list of st. Other servers keep their State. It
 // changes the servers in place. Use it for the servers of one
-// projects.<path> object, and for the top-level servers of ~/.claude.json
-// with the projects.<WorkDir> state.
+// projects.<path> object.
 func applyDisabledServers(servers []Server, st claudeProjectState) {
 	for i := range servers {
 		if st.disabledMcp.has(servers[i].Name) {

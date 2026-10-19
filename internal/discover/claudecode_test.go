@@ -381,7 +381,7 @@ func TestReadClaudeCodeState(t *testing.T) {
 		t.Parallel()
 		// The fixture has settings files that approve approved-srv and
 		// repo-srv and reject rejected-srv. ReadClaudeCode does not read
-		// them.
+		// them, so every server fails closed to StateUnapproved.
 		_, work := copyFixture(t, "claude-code", "state")
 		path := filepath.Join(work, ".mcp.json")
 
@@ -391,13 +391,19 @@ func TestReadClaudeCodeState(t *testing.T) {
 		if got, want := serverNames(res.Servers), []string{"approved-srv", "pending-srv", "rejected-srv", "repo-srv"}; !slices.Equal(got, want) {
 			t.Fatalf("servers = %v, want %v", got, want)
 		}
-		checkStates(t, res.Servers, nil)
+		checkStates(t, res.Servers, map[string]State{
+			"approved-srv": StateUnapproved,
+			"pending-srv":  StateUnapproved,
+			"rejected-srv": StateUnapproved,
+			"repo-srv":     StateUnapproved,
+		})
 	})
 
 	t.Run(".mcp.json state keys ignored", func(t *testing.T) {
 		t.Parallel()
 		// A project file is untrusted: its own state keys, at the top level
-		// or under projects, must not change a State.
+		// or under projects, must not change a State. With no approval
+		// read, the server is StateUnapproved.
 		work := t.TempDir()
 		path := writeFile(t, work, ".mcp.json", []byte(`{
 			"mcpServers": {"x": {"command": "x"}},
@@ -412,7 +418,7 @@ func TestReadClaudeCodeState(t *testing.T) {
 		if got := serverNames(res.Servers); !slices.Equal(got, []string{"x"}) {
 			t.Fatalf("servers = %v, want [x]", got)
 		}
-		checkStates(t, res.Servers, nil)
+		checkStates(t, res.Servers, map[string]State{"x": StateUnapproved})
 	})
 }
 

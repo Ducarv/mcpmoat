@@ -292,9 +292,8 @@
 // Untrusted files). A server can be untrusted and enabled, or trusted and
 // disabled. Package internal/inspect must not start or connect to a server
 // whose State is not StateEnabled (StateProjectApproved too) without an
-// explicit opt-in. That opt-in is
-// separate from the opt-in for untrusted servers, so a server that is both
-// disabled and untrusted needs both.
+// explicit opt-in. That opt-in is separate from the opt-in for untrusted
+// servers, so a server that is both disabled and untrusted needs both.
 //
 // Codex: the enabled key of the server table. enabled = false gives
 // StateDisabled. No key, or enabled = true, gives StateEnabled. A value that
@@ -369,7 +368,9 @@
 //     and a later source cannot change it. The approval gives StateEnabled
 //     when a trusted source (the user settings.json or the legacy
 //     projects.<WorkDir> object) gives it. It gives StateProjectApproved
-//     when only the untrusted project settings files give it.
+//     when only the untrusted project settings files give it. When the
+//     first enableAllProjectMcpServers is true, a trusted source that also
+//     has true gives the approval too.
 //  3. Else the server gets StateUnapproved.
 //  4. Last, a name in any disabledMcpServers gives StateDisabled, also when
 //     step 2 approved the server.
@@ -378,6 +379,8 @@
 // "Trusted list" and "untrusted list" are the enabledMcpjsonServers lists
 // of the trusted and of the untrusted sources. "enableAll" is the first
 // enableAllProjectMcpServers in the order above, and the kind of its source.
+// "Trusted" also covers a first true from an untrusted source when a
+// trusted source has true as well.
 //
 //	trusted list  untrusted list  enableAll          State
 //	has name      any             any                StateEnabled
@@ -416,8 +419,9 @@
 //
 //   - [ReadConfig] and a standalone [ReadClaudeCode] know no WorkDir and
 //     read no settings file, so they have no approval data. The .mcp.json
-//     servers keep StateEnabled (not StateUnapproved), and no project state
-//     applies to the top-level servers of ~/.claude.json. Only
+//     servers get StateUnapproved (this fails closed: also a server that
+//     the user approved or turned off), and no project state applies to the
+//     top-level servers of ~/.claude.json. Only
 //     projects.<path>.disabledMcpServers of a global ~/.claude.json applies,
 //     to the servers of that same project. A file that turns a server off
 //     itself (Codex enabled = false) still gives StateDisabled.

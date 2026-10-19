@@ -287,7 +287,11 @@ func readJSONServers(ctx context.Context, f jsonFile) ([]Server, []*FileError) {
 // Code, decodeProjects also reads the state keys of each project; see there.
 //
 // For a project file, markUntrusted marks every server and every error at
-// the end.
+// the end. A Claude Code project file (.mcp.json) also gives every server
+// StateUnapproved: Claude Code runs such a server only after an approval,
+// and parseJSONBytes reads no approval. Only [Discover] reads the settings
+// that approve it (see setMcpjsonStates), so every other reader fails
+// closed.
 //
 // See the package doc, Reading configs.
 func parseJSONBytes(ctx context.Context, f jsonFile, data []byte) ([]Server, []*FileError) {
@@ -307,6 +311,11 @@ func parseJSONBytes(ctx context.Context, f jsonFile, data []byte) ([]Server, []*
 
 	if f.scope != ScopeGlobal {
 		markUntrusted(servers, errs)
+		if f.client == ClientClaudeCode {
+			for i := range servers {
+				servers[i].State = StateUnapproved
+			}
+		}
 	}
 	return servers, errs
 }

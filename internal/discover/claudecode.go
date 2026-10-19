@@ -26,9 +26,10 @@ import (
 // State: a server of "projects.<path>.mcpServers" whose name is in the
 // "projects.<path>.disabledMcpServers" list gets StateDisabled. All other
 // servers keep StateEnabled. ReadClaudeCode reads one file and knows no
-// project directory, so it does not apply the approval of the servers of a
-// project .mcp.json (they are not StateUnapproved here), and it does not
-// apply the state of a project to the top-level servers. Only [Discover]
+// project directory, so it reads no approval of the servers of a project
+// .mcp.json: with a scope other than ScopeGlobal, every server gets
+// StateUnapproved, which fails closed. It does not apply the state of a
+// project to the top-level servers either. Only [Discover]
 // reads the settings files and the projects.<WorkDir> state for that.
 //
 // See the package doc, Reading configs.
@@ -125,7 +126,9 @@ func readGlobalClaudeCodeState(ctx context.Context, path, workDir string) (res R
 		if res.Servers[i].Scope != ScopeGlobal {
 			continue
 		}
-		applyDisabledServers(res.Servers[i:i+1], st)
+		if st.disabledMcp.has(res.Servers[i].Name) {
+			res.Servers[i].State = StateDisabled
+		}
 		if failed && res.Servers[i].State == StateEnabled {
 			res.Servers[i].State = StateUnapproved
 		}

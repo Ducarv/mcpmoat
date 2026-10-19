@@ -352,6 +352,29 @@ func TestMcpjsonState(t *testing.T) {
 			want:    StateEnabled,
 		},
 
+		// A first true from a repository file does not hide a trusted true
+		// that comes later in the order.
+		{
+			name:    "project true and user true",
+			sources: []claudeProjectState{zero, allTrue, allTrue, zero},
+			want:    StateEnabled,
+		},
+		{
+			name:    "local true and legacy true",
+			sources: []claudeProjectState{allTrue, zero, zero, allTrue},
+			want:    StateEnabled,
+		},
+		{
+			name:    "local true, user false and legacy true",
+			sources: []claudeProjectState{allTrue, zero, allFalse, allTrue},
+			want:    StateEnabled,
+		},
+		{
+			name:    "local false and user true",
+			sources: []claudeProjectState{allFalse, zero, allTrue, zero},
+			want:    StateUnapproved,
+		},
+
 		// An enabled list approves the name even when enableAll is false.
 		{
 			name:    "enabled in legacy and enableAll false in local",
@@ -412,9 +435,9 @@ func TestMcpjsonState(t *testing.T) {
 			want:    StateProjectApproved,
 		},
 		{
-			name:    "project true wins over legacy true",
+			name:    "project true and legacy true",
 			sources: []claudeProjectState{zero, allTrue, zero, allTrue},
-			want:    StateProjectApproved,
+			want:    StateEnabled,
 		},
 
 		// An untrusted enableAll false hides a trusted true, as in Claude

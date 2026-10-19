@@ -157,10 +157,9 @@ func (e *ExpandError) Unwrap() error {
 //
 // On a failure Expand returns the zero Server and an *[ExpandError]. The
 // error holds the field and at most a plain variable name, never a value.
-// Expand
-// checks the fields in a fixed order (Command, Args, Env in sorted key
-// order, URL, then Headers in sorted key order), so the same server always
-// gives the same error.
+// Expand checks the fields in a fixed order (Command, Args, Env in sorted
+// key order, URL, then Headers in sorted key order), so the same server
+// always gives the same error.
 func Expand(s Server, lookup func(string) (string, bool)) (Server, error) {
 	if lookup == nil {
 		lookup = func(string) (string, bool) { return "", false }
@@ -373,7 +372,7 @@ func isVariableName(name string) bool {
 	if name == "" || len(name) > maxNameLen {
 		return false
 	}
-	for i := 0; i < len(name); i++ {
+	for i := range len(name) {
 		c := name[i]
 		switch {
 		case c == '_', 'a' <= c && c <= 'z', 'A' <= c && c <= 'Z':

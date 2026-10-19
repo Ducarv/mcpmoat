@@ -415,6 +415,46 @@ func TestReadConfigUntrusted(t *testing.T) {
 		}
 	})
 
+	t.Run("the state of an untrusted file fails closed for claude code only", func(t *testing.T) {
+		t.Parallel()
+		// ReadConfig reads no settings file, so it knows no approval of a
+		// Claude Code .mcp.json server: the server is StateUnapproved, also
+		// when the settings next to it approve it. Cursor and Codex servers
+		// need no approval, and a Codex enabled = false still gives
+		// StateDisabled.
+		_, work := copyFixture(t, "claude-code", "state")
+		cursorDir, codexDir := t.TempDir(), t.TempDir()
+		files := []struct {
+			path string
+			want map[string]State
+		}{
+			{
+				path: filepath.Join(work, ".mcp.json"),
+				want: map[string]State{
+					"approved-srv": StateUnapproved,
+					"pending-srv":  StateUnapproved,
+					"rejected-srv": StateUnapproved,
+					"repo-srv":     StateUnapproved,
+				},
+			},
+			{
+				path: writeFile(t, cursorDir, ".cursor/mcp.json", []byte(`{"mcpServers":{"a":{"command":"x"}}}`)),
+				want: nil,
+			},
+			{
+				path: writeFile(t, codexDir, ".codex/config.toml", []byte("[mcp_servers.a]\ncommand = \"x\"\n[mcp_servers.b]\ncommand = \"x\"\nenabled = false\n")),
+				want: map[string]State{"b": StateDisabled},
+			},
+		}
+		for _, f := range files {
+			res := ReadConfig(t.Context(), f.path, "")
+			if len(res.Errors) != 0 || len(res.Servers) == 0 {
+				t.Fatalf("ReadConfig(%s) = %+v, want servers and no errors", f.path, res)
+			}
+			checkStates(t, res.Servers, f.want)
+		}
+	})
+
 	t.Run("untrusted codex errors are marked", func(t *testing.T) {
 		t.Parallel()
 		path := writeFile(t, t.TempDir(), "my.toml", []byte("[mcp_servers.a]\nurl = 5\n[mcp_servers.b]\ncommand = \"x\"\n"))

@@ -126,41 +126,8 @@ func TestE2EScanAllClients(t *testing.T) {
 // stderr holds only the notice.
 func TestE2EScanServerState(t *testing.T) {
 	t.Parallel()
-	tests := []struct {
-		name    string
-		fixture []string
-		want    map[string]string // NAME -> STATE, for every row
-	}{
-		{
-			// ~/.codex/config.toml has enabled = false on "git" only.
-			name:    "codex enabled key",
-			fixture: []string{"codex", "valid"},
-			want: map[string]string{
-				"docs":   "enabled",
-				"remote": "enabled",
-				"git":    "disabled",
-			},
-		},
-		{
-			// The user's own ~/.claude/settings.json approves approved-srv.
-			// work/.claude/settings.local.json approves repo-srv and rejects
-			// rejected-srv; that file comes from the repository, so repo-srv
-			// is only project-approved. Nothing names pending-srv, so it
-			// waits for approval. global-srv comes from ~/.claude.json, which
-			// needs no approval. The binary runs in the work directory, so
-			// it reads the project files there.
-			name:    "claude code project approval",
-			fixture: []string{"claude-code", "state"},
-			want: map[string]string{
-				"global-srv":   "enabled",
-				"approved-srv": "enabled",
-				"repo-srv":     "project-approved",
-				"rejected-srv": "disabled",
-				"pending-srv":  "unapproved",
-			},
-		},
-	}
-	for _, tt := range tests {
+	// serverStateCases is in scan_test.go.
+	for _, tt := range serverStateCases {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			home, work := discovertest.CopyFixture(t, fixtureDir(tt.fixture...))
