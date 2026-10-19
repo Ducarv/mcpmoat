@@ -81,6 +81,13 @@ type RemoteOptions struct {
 // as a Basic Authorization header instead, unless the config sets an
 // Authorization header.
 //
+// If Remote sends config headers, URL user info or secrets in the URL query
+// or path over plain http:// to a host that is not loopback, it still
+// connects, but it adds a warning of kind WarnCleartextSecrets: to
+// Result.Warnings on success, and to ConnectError.Warnings when the
+// inspection fails after the connect started. A warning holds keys only,
+// never values.
+//
 // If ctx has no deadline, Remote adds a 10 second one. Closing the session
 // sends a DELETE request (streamable HTTP) that the SDK bounds to 5 seconds,
 // so in the worst case Remote returns up to about 5 seconds after the
@@ -123,7 +130,7 @@ func Remote(ctx context.Context, srv discover.Server, opts RemoteOptions) (Resul
 	secrets = append(secrets, userinfoSecrets(user)...)
 	secrets = append(secrets, urlSecrets(u.RawQuery, raw)...)
 
-	httpClient, rec, err := newHTTPClient(httpClientConfig{
+	httpClient, ev, err := newHTTPClient(httpClientConfig{
 		Endpoint:  &endpointURL,
 		User:      user,
 		Headers:   headers,
@@ -139,6 +146,14 @@ func Remote(ctx context.Context, srv discover.Server, opts RemoteOptions) (Resul
 		return Result{}, configError(srv, "invalid HTTP client settings")
 	}
 
+	// warnings tell the user about secrets that go over plain http:// to a
+	// host that is not loopback (issue #98). They hold keys only. They are
+	// computed after newHTTPClient accepted the headers, as sentHeaders
+	// expects. Remote returns them on success and with every error after a
+	// request could have gone out (see fail), because by then the secrets
+	// were sent.
+	warnings := cleartextWarnings(srv, u)
+
 	// Always derive a context that this function can cancel, so that the
 	// SDK work that uses ctx stops when Remote returns.
 	// Defers run last-in, first-out (LIFO). cancel is registered first, so it
@@ -149,7 +164,10 @@ func Remote(ctx context.Context, srv discover.Server, opts RemoteOptions) (Resul
 	// One SDK goroutine can outlive Remote: after a call fails because ctx
 	// ended, the SDK sends notifications/cancelled on a detached context,
 	// also bounded to 5 seconds. That is one more request to the same origin,
-	// and its connection can stay idle until idleConnTimeout.
+	// and its connection can stay idle until idleConnTimeout. The detached
+	// context keeps the record of the failed call, but that record is
+	// finished, so the answer cannot change the label of the error (see
+	// requestRecorder.finish).
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	if _, ok := ctx.Deadline(); !ok {
@@ -169,17 +187,11 @@ func Remote(ctx context.Context, srv discover.Server, opts RemoteOptions) (Resul
 	// checks in listAll. It must be added before Connect.
 	rawTools := &rawLists{}
 	mcpClient.AddSendingMiddleware(rawTools.middleware())
-	// Once the server answered initialize (or server/discover), it speaks the
-	// configured transport, even if a later request of Connect fails.
-	mcpClient.AddSendingMiddleware(func(next mcp.MethodHandler) mcp.MethodHandler {
-		return func(ctx context.Context, method string, req mcp.Request) (mcp.Result, error) {
-			res, err := next(ctx, method, req)
-			if err == nil && (method == methodInitialize || method == methodDiscover) {
-				rec.markHandshake()
-			}
-			return res, err
-		}
-	})
+	// Each AddSendingMiddleware call wraps the handler built so far, so the
+	// middleware added last runs first. callRecords is added last on purpose:
+	// it sees every call, and it links the final error of the call to its
+	// HTTP record.
+	mcpClient.AddSendingMiddleware(callRecords(ev))
 
 	// fail turns err into the *ConnectError that Remote returns. The SDK
 	// formats some errors with %v, which drops the context error from the
@@ -189,13 +201,20 @@ func Remote(ctx context.Context, srv discover.Server, opts RemoteOptions) (Resul
 	// deferred cancel has not run yet, so ctx.Err is set only by the deadline
 	// or by the caller.
 	//
-	// The *url.Error is stripped before the join: classify replaces an error
-	// that holds one with its inner error, and that would drop ctxErr.
+	// The *url.Error is stripped before the join (joinContextErr): classify
+	// replaces an error that holds one with its inner error, and that would
+	// drop ctxErr.
+	//
+	// fail also attaches warnings: the requests before the failure already
+	// carried the secrets over plain HTTP. Every return after Connect starts
+	// goes through fail, so no failure path loses the warnings.
 	fail := func(err error) (Result, error) {
 		if ctxErr := ctx.Err(); ctxErr != nil && !errors.Is(err, ctxErr) {
-			err = fmt.Errorf("%w: %w", ctxErr, stripURLError(err))
+			err = joinContextErr(ctxErr, err)
 		}
-		return Result{}, classify(err, srv, rec, secrets)
+		ce := classify(err, srv, ev, secrets)
+		ce.Warnings = warnings
+		return Result{}, ce
 	}
 
 	cs, err := mcpClient.Connect(ctx, newRemoteTransport(srv.Transport, endpoint, httpClient), nil)
@@ -204,8 +223,8 @@ func Remote(ctx context.Context, srv discover.Server, opts RemoteOptions) (Resul
 	}
 	// The session is up: the SDK recovered from any request that the HTTP
 	// layer blocked during the connect, and the server speaks the configured
-	// transport (see requestRecorder.markConnected).
-	rec.markConnected()
+	// transport (see httpEvents.markConnected).
+	ev.markConnected()
 	// Listing is finished when this runs, so the error from Close does not
 	// matter. For streamable HTTP, Close sends a DELETE that the SDK bounds.
 	defer func() { _ = cs.Close() }()
@@ -218,11 +237,55 @@ func Remote(ctx context.Context, srv discover.Server, opts RemoteOptions) (Resul
 	}
 
 	result := resultFromInit(initRes)
-	result.Tools, result.Prompts, result.Resources, err = listAll(ctx, cs, initRes.Capabilities, rawTools)
-	if err != nil {
+	if err := listInto(ctx, cs, initRes.Capabilities, rawTools, &result); err != nil {
 		return fail(err)
 	}
+	result.Warnings = warnings
 	return result, nil
+}
+
+// callRecords returns the sending middleware that gives each MCP call its own
+// HTTP record (issue #100). It puts a new requestRecorder on the context of
+// the call. The SDK sends the HTTP requests of the call with that context, so
+// headerTransport writes the status and any blocked error of those requests
+// to this record and not to a record that all requests share.
+//
+// When the call returns, the middleware stores the record as the last one in
+// ev. If the call failed, it wraps the error in a *recordedError, so that
+// classify finds the record of exactly this call. Once the server answered
+// initialize (or server/discover), it speaks the configured transport, even
+// if a later request of Connect fails, so a success of either marks the
+// handshake.
+func callRecords(ev *httpEvents) mcp.Middleware {
+	return func(next mcp.MethodHandler) mcp.MethodHandler {
+		return func(ctx context.Context, method string, req mcp.Request) (mcp.Result, error) {
+			rec := &requestRecorder{}
+			res, err := next(withRecorder(ctx, rec), method, req)
+			ev.finishCall(rec)
+			if err != nil {
+				return res, &recordedError{err: err, rec: rec}
+			}
+			if method == methodInitialize || method == methodDiscover {
+				ev.markHandshake()
+			}
+			return res, nil
+		}
+	}
+}
+
+// joinContextErr returns err with ctxErr first in its chain, for fail in
+// Remote. It strips the *url.Error of err (see fail). That also drops the
+// *recordedError above it, which links err to the record of its MCP call, so
+// joinContextErr puts the link back. classify then reads the record of the
+// call that failed, not of the call that finished last (see
+// httpEvents.stateFor).
+func joinContextErr(ctxErr, err error) error {
+	joined := fmt.Errorf("%w: %w", ctxErr, stripURLError(err))
+	var re *recordedError
+	if errors.As(err, &re) {
+		return &recordedError{err: joined, rec: re.rec}
+	}
+	return joined
 }
 
 // splitUserinfo returns u without its user info and fragment, and the user

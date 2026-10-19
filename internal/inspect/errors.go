@@ -80,12 +80,24 @@ type ConnectError struct {
 	// URL is the redacted server URL (discover.URL.String). It can be empty.
 	URL string
 
+	// Warnings are the problems with the connection that Remote found even
+	// though the inspection failed. Remote sets them on every failure after
+	// the connect started when the config sends secrets over plain http:// to
+	// a host that is not loopback: the secrets can have gone out before the
+	// failure, so the user must still hear about it. Remote does not check
+	// whether a request reached the server (a failed DNS lookup or dial
+	// sends nothing), so the warning errs on the safe side. A Warning holds
+	// keys only, never secret values. It is nil when there are none. Error
+	// does not print the warnings.
+	Warnings []Warning
+
 	// err is the cause. See Unwrap.
 	err error
 }
 
 // Error returns "<Server>: <Reason> (<URL>)". The part in parentheses is
-// left out when URL is empty.
+// left out when URL is empty. Warnings are not part of the text: a caller
+// that wants them reads the Warnings field.
 func (e *ConnectError) Error() string {
 	if e.URL == "" {
 		return e.Server + ": " + e.Reason
@@ -115,16 +127,19 @@ func configError(srv discover.Server, reason string) *ConnectError {
 // SDK can flatten error chains (it formats some errors with %v), so classify
 // asks the transport directly instead of relying only on errors.Is.
 type transportEvents interface {
-	// lastStatus is the HTTP status of the most recent request: the code of
-	// a non-2xx response that was not a followed redirect. It is 0 after a
-	// 2xx response, after a request that got no response, or if there was
-	// no request yet.
-	lastStatus() int
-	// blockedErr is the first error that the HTTP layer raised on purpose
-	// since the session connected (or since the start, during the connect).
-	// It wraps errOtherOrigin, errCrossOriginRedirect, errTooManyRedirects or
+	// stateFor returns what the HTTP layer saw for the request that caused
+	// err (see httpEvents.stateFor for how it finds that request).
+	//
+	// status is the HTTP status of that request: the code of a non-2xx
+	// response that was not a followed redirect. It is 0 after a 2xx
+	// response, after a request that got no response, or if there was no
+	// request yet.
+	//
+	// blocked is the first error that the HTTP layer raised on purpose for
+	// that request, or for a request that breaks the whole session. It wraps
+	// errOtherOrigin, errCrossOriginRedirect, errTooManyRedirects or
 	// errBodyTooLarge. It is nil if there was none.
-	blockedErr() error
+	stateFor(err error) (status int, blocked error)
 	// connected reports whether the server answered the MCP handshake. An
 	// HTTP status after that comes from a server that speaks the configured
 	// transport.
@@ -134,35 +149,40 @@ type transportEvents interface {
 // classify turns err, from net/http or the MCP SDK, into a ConnectError that
 // is safe to print.
 //
-// ev tells what the HTTP layer saw: the last non-2xx status and the first
-// error that it raised on purpose. ev can be nil. If the HTTP layer blocked a
-// request on purpose, that error decides the kind, even when the SDK
-// flattened err into text. secrets are all the secret strings of the server
-// entry: the header values, the credential parts of auth headers and the
-// secrets of the URL user info, query and path (see Remote). classify
-// removes them from any error text.
+// ev tells what the HTTP layer saw for the request behind err: its non-2xx
+// status and the first error that the layer raised on purpose. ev can be nil.
+// If the HTTP layer blocked a request on purpose, that error decides the
+// kind, even when the SDK flattened err into text. secrets are all the secret
+// strings of the server entry: the header values, the credential parts of
+// auth headers and the secrets of the URL user info, query and path (see
+// Remote). classify removes them from any error text.
 func classify(err error, srv discover.Server, ev transportEvents, secrets []string) *ConnectError {
 	rawURL := srv.URL.Reveal()
 	redacted := srv.URL.String()
 
+	status := 0
+	connected := false
+	var blocked error
+	if ev != nil {
+		// Ask with the original err: stripURLError below can drop the wrapper
+		// that links err to the record of its request.
+		status, blocked = ev.stateFor(err)
+		connected = ev.connected()
+	}
+
 	// *url.Error prints the raw URL in its Error text. Use the error inside it.
 	cause := stripURLError(err)
 
-	status := 0
-	connected := false
-	if ev != nil {
-		status = ev.lastStatus()
-		connected = ev.connected()
-		// An error that the HTTP layer raised on purpose is more reliable
-		// than err, which the SDK may have flattened to text.
-		if blocked := stripURLError(ev.blockedErr()); isBlockedErr(blocked) {
-			// Keep a context error of err in the chain, so that errors.Is(err,
-			// context.DeadlineExceeded) still works, as Remote promises.
-			if ctxErr := contextErr(cause); ctxErr != nil {
-				blocked = fmt.Errorf("%w: %w", blocked, ctxErr)
-			}
-			cause = blocked
+	// An error that the HTTP layer raised on purpose is more reliable than
+	// err, which the SDK may have flattened to text. A nil blocked (no ev, or
+	// nothing blocked) is not a blocked error.
+	if blocked = stripURLError(blocked); isBlockedErr(blocked) {
+		// Keep a context error of err in the chain, so that errors.Is(err,
+		// context.DeadlineExceeded) still works, as Remote promises.
+		if ctxErr := contextErr(cause); ctxErr != nil {
+			blocked = fmt.Errorf("%w: %w", blocked, ctxErr)
 		}
+		cause = blocked
 	}
 
 	ce := &ConnectError{
@@ -188,6 +208,7 @@ var blockedKinds = []struct {
 	{errCrossOriginRedirect, KindRedirect, "redirects to another origin are not followed; use the final URL in the config"},
 	{errTooManyRedirects, KindRedirect, "too many redirects"},
 	{errBodyTooLarge, KindTooLarge, "response too large"},
+	{errJSONTooComplex, KindTooLarge, "response JSON too large: too deep, too many values or a too long string"},
 }
 
 // contextErr returns context.DeadlineExceeded or context.Canceled when err
@@ -323,16 +344,32 @@ func httpReason(srv discover.Server, status int, connected bool) string {
 }
 
 // sentHeaderNames returns the names of the config headers that went to the
-// server, in the order of srv.Headers.Keys. Keys that differ only in case
-// were sent as one header (see buildHeader), so the list names each header
-// once, in the form of the first key. If the URL has user info and the config
-// sets no Authorization header, the request carried a Basic Authorization
-// header built from it (see headerTransport.RoundTrip), so the list names it
-// too. It holds names only, never a value.
+// server, for the reason text of an HTTP 401 or 403. It holds the names from
+// sentHeaders. If the request carried a Basic Authorization header built from
+// the URL user info, it ends with "Authorization (from URL user info)". It
+// holds names only, never a value.
 func sentHeaderNames(srv discover.Server) []string {
+	names, basic := sentHeaders(srv)
+	if basic {
+		names = append(names, "Authorization (from URL user info)")
+	}
+	return names
+}
+
+// sentHeaders returns the keys of the config headers that went to the
+// server, in the order of srv.Headers.Keys, and whether the request carried
+// a Basic Authorization header built from the URL user info.
+//
+// Keys that differ only in case were sent as one header (see buildHeader),
+// so names holds each header once, in the form of the first key. basic is
+// true when the URL has user info and the config sets no Authorization
+// header (see headerTransport.RoundTrip). In that case names leaves out an
+// Authorization key with an empty value, because the Basic header replaced
+// it. The result holds keys only, never a header value or a password.
+func sentHeaders(srv discover.Server) (names []string, basic bool) {
 	// Build the headers as the client did, so that the rules (the last of two
 	// keys wins, an empty Authorization counts as absent) live in one place.
-	// classify runs only after newHTTPClient accepted the headers, so
+	// The callers run only after newHTTPClient accepted the headers, so
 	// buildHeader does not fail here; on a failure, header stays nil.
 	raw, _ := splitHeaders(srv.Headers)
 	header, _ := buildHeader(raw, "")
@@ -340,25 +377,23 @@ func sentHeaderNames(srv discover.Server) []string {
 	if u, err := url.Parse(srv.URL.Reveal()); err == nil {
 		user = u.User
 	}
-	basic := sendsBasicAuth(header, user)
+	basic = sendsBasicAuth(header, user)
 
-	keys := srv.Headers.Keys()
-
-	var names []string
-	seen := make(map[string]bool)
-	for _, name := range keys {
+	// A map with an empty struct{} value is a set: struct{} uses no memory.
+	seen := make(map[string]struct{})
+	for _, name := range srv.Headers.Keys() {
 		canonical := http.CanonicalHeaderKey(name)
-		// With basic, the Basic header replaced the empty config value.
-		if seen[canonical] || basic && canonical == "Authorization" {
+		if _, dup := seen[canonical]; dup {
 			continue
 		}
-		seen[canonical] = true
+		// With basic, the Basic header replaced the empty config value.
+		if basic && canonical == "Authorization" {
+			continue
+		}
+		seen[canonical] = struct{}{}
 		names = append(names, name)
 	}
-	if basic {
-		names = append(names, "Authorization (from URL user info)")
-	}
-	return names
+	return names, basic
 }
 
 // stripURLError returns the error inside the first *url.Error in err's chain,

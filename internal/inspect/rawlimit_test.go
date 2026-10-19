@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -89,6 +90,15 @@ func TestRawLimitStopsEndlessPages(t *testing.T) {
 		}},
 		{"resources icons", "resources/list", func(next string) mcp.Result {
 			return &mcp.ListResourcesResult{Resources: []*mcp.Resource{{Icons: bigIcons(), URI: "file:///r", Name: "r"}}, NextCursor: next}
+		}},
+		// listAll keeps the annotation title, but the limit must count it
+		// all the same: a server can hide a large payload there.
+		{"tools annotations title", "tools/list", func(next string) mcp.Result {
+			return &mcp.ListToolsResult{Tools: []*mcp.Tool{{
+				Name:        "t",
+				InputSchema: objectSchema(),
+				Annotations: &mcp.ToolAnnotations{Title: strings.Repeat("a", bigField)},
+			}}, NextCursor: next}
 		}},
 	}
 	// Each page has more than bigField bytes, so the limit is over after at
@@ -217,6 +227,50 @@ func TestRawLimitHandshake(t *testing.T) {
 	}
 }
 
+// TestStdioFailureJSONShape checks stdioFailure for a JSON shape violation:
+// KindTooLarge with the same fixed reason as for a remote server, the
+// sentinel as the cause, and a context error of the chain kept in the cause.
+// The shape violation also wins over the raw size limit.
+func TestStdioFailureJSONShape(t *testing.T) {
+	t.Parallel()
+	closed := errors.New("connection closed: server text {},{},{}")
+	tests := []struct {
+		name     string
+		err      error
+		tooLarge bool
+		wantCtx  error // context error that must stay in the chain, or nil
+	}{
+		{name: "shape violation", err: fmt.Errorf("%w: %w", errJSONTooComplex, closed)},
+		{name: "shape violation over the raw limit too", err: fmt.Errorf("%w: %w", errJSONTooComplex, closed), tooLarge: true},
+		{name: "shape violation and an ended ctx", err: fmt.Errorf("%w: %w: %w", context.DeadlineExceeded, errJSONTooComplex, closed), wantCtx: context.DeadlineExceeded},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			ce := stdioFailure(stdioServer("/bin/true"), tt.err, nil, tt.tooLarge)
+			if ce.Kind != KindTooLarge {
+				t.Errorf("Kind = %q, want %q", ce.Kind, KindTooLarge)
+			}
+			if ce.Reason != jsonTooComplexReason {
+				t.Errorf("Reason = %q, want %q", ce.Reason, jsonTooComplexReason)
+			}
+			if !errors.Is(ce, errJSONTooComplex) {
+				t.Errorf("errors.Is(ce, errJSONTooComplex) = false: %v", ce)
+			}
+			if errors.Is(ce, closed) {
+				t.Errorf("the cause holds the wrapped detail: %v", errors.Unwrap(ce))
+			}
+			if tt.wantCtx == nil {
+				if cause := errors.Unwrap(ce); cause != errJSONTooComplex { //nolint:errorlint // identity check: the cause must be the sentinel itself
+					t.Errorf("errors.Unwrap(ce) = %v, want errJSONTooComplex", cause)
+				}
+			} else if !errors.Is(ce, tt.wantCtx) {
+				t.Errorf("errors.Is(ce, %v) = false, want the context error kept", tt.wantCtx)
+			}
+		})
+	}
+}
+
 func TestRawLimitMiddleware(t *testing.T) {
 	t.Parallel()
 
@@ -329,5 +383,157 @@ func TestRawLimitMiddlewareMarshalError(t *testing.T) {
 	}
 	if strings.Contains(err.Error(), poisonText) {
 		t.Errorf("middleware error = %q, must not contain server text", err)
+	}
+}
+
+// TestRawLimitStopsEndlessTemplatePages checks that resource template pages
+// count against the raw size limit, so listInto stops long before maxPages.
+func TestRawLimitStopsEndlessTemplatePages(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		page func(next string) mcp.Result
+	}{
+		{"templates _meta", func(next string) mcp.Result {
+			return &mcp.ListResourceTemplatesResult{ResourceTemplates: []*mcp.ResourceTemplate{{
+				Meta: bigMeta(), URITemplate: "file:///{name}", Name: "t",
+			}}, NextCursor: next}
+		}},
+		{"templates description", func(next string) mcp.Result {
+			return &mcp.ListResourceTemplatesResult{ResourceTemplates: []*mcp.ResourceTemplate{{
+				URITemplate: "file:///{name}", Name: "t", Description: strings.Repeat("d", bigField),
+			}}, NextCursor: next}
+		}},
+	}
+	const maxCalls = testRawLimit/bigField + 1
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			var calls atomic.Int64
+			server := rawServer()
+			server.AddReceivingMiddleware(onMethod("resources/templates/list", endlessPages(&calls, tt.page)))
+
+			cs, raw, _ := connectStdio(t, server, testRawLimit)
+			var result Result
+			err := listInto(t.Context(), cs, cs.InitializeResult().Capabilities, raw, &result)
+			if !errors.Is(err, errRawTooLarge) {
+				t.Fatalf("listInto() error = %v, want errRawTooLarge", err)
+			}
+			if n := calls.Load(); n < 2 || n > maxCalls {
+				t.Errorf("resources/templates/list requests = %d, want 2 to %d", n, maxCalls)
+			}
+		})
+	}
+}
+
+// TestRawLimitMeasured checks which results rawLimit measures: every
+// non-nil handshake and list result, and nothing else.
+func TestRawLimitMeasured(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		res  mcp.Result
+		want bool
+	}{
+		{"discover", &mcp.DiscoverResult{}, true},
+		{"initialize", &mcp.InitializeResult{}, true},
+		{"tools", &mcp.ListToolsResult{}, true},
+		{"prompts", &mcp.ListPromptsResult{}, true},
+		{"resources", &mcp.ListResourcesResult{}, true},
+		{"resource templates", &mcp.ListResourceTemplatesResult{}, true},
+		{"nil discover", (*mcp.DiscoverResult)(nil), false},
+		{"nil initialize", (*mcp.InitializeResult)(nil), false},
+		{"nil tools", (*mcp.ListToolsResult)(nil), false},
+		{"nil prompts", (*mcp.ListPromptsResult)(nil), false},
+		{"nil resources", (*mcp.ListResourcesResult)(nil), false},
+		{"nil resource templates", (*mcp.ListResourceTemplatesResult)(nil), false},
+		{"nil interface", nil, false},
+		{"call tool", &mcp.CallToolResult{}, false},
+		{"read resource", &mcp.ReadResourceResult{}, false},
+		{"get prompt", &mcp.GetPromptResult{}, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if got := measured(tt.res); got != tt.want {
+				t.Errorf("measured(%T) = %v, want %v", tt.res, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestRawLimitMiddlewareCountsTemplatesAndAnnotations checks that the
+// middleware counts a resource templates result, and the annotation title of
+// a tool, against the limit. Each pair has the same item with and without
+// the large text: only the large one goes over.
+func TestRawLimitMiddlewareCountsTemplatesAndAnnotations(t *testing.T) {
+	t.Parallel()
+
+	big := strings.Repeat("x", bigField)
+	tests := []struct {
+		name  string
+		small mcp.Result
+		large mcp.Result
+	}{
+		{
+			name: "resource templates",
+			small: &mcp.ListResourceTemplatesResult{ResourceTemplates: []*mcp.ResourceTemplate{{
+				URITemplate: "file:///{name}", Name: "t",
+			}}},
+			large: &mcp.ListResourceTemplatesResult{ResourceTemplates: []*mcp.ResourceTemplate{{
+				URITemplate: "file:///{name}", Name: "t", Description: big,
+			}}},
+		},
+		{
+			name: "tool annotations title",
+			small: &mcp.ListToolsResult{Tools: []*mcp.Tool{{
+				Name: "t", InputSchema: objectSchema(),
+				Annotations: &mcp.ToolAnnotations{Title: "T"},
+			}}},
+			large: &mcp.ListToolsResult{Tools: []*mcp.Tool{{
+				Name: "t", InputSchema: objectSchema(),
+				Annotations: &mcp.ToolAnnotations{Title: big},
+			}}},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			smallSize, err := jsonSize(tt.small)
+			if err != nil {
+				t.Fatalf("jsonSize(small) error = %v", err)
+			}
+			// Room for the small result and half of the large text.
+			limit := smallSize + bigField/2
+
+			small := &rawLimit{limit: limit}
+			if _, err := small.middleware(func(context.Context, string, mcp.Request) (mcp.Result, error) {
+				return tt.small, nil
+			})(t.Context(), "", nil); err != nil {
+				t.Fatalf("small result: middleware error = %v, want nil", err)
+			}
+			if n := small.used.Load(); n != smallSize {
+				t.Errorf("small result: used = %d, want %d", n, smallSize)
+			}
+
+			large := &rawLimit{limit: limit}
+			res, err := large.middleware(func(context.Context, string, mcp.Request) (mcp.Result, error) {
+				return tt.large, nil
+			})(t.Context(), "", nil)
+			if !errors.Is(err, errRawTooLarge) {
+				t.Fatalf("large result: middleware error = %v, want errRawTooLarge", err)
+			}
+			if res != nil {
+				t.Errorf("large result: middleware result = %#v, want nil", res)
+			}
+			if !large.exceeded() {
+				t.Error("large result: exceeded() = false, want true")
+			}
+		})
 	}
 }

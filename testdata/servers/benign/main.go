@@ -7,9 +7,12 @@
 //
 // The server speaks MCP over stdio (stdin and stdout) and offers:
 //
-//   - tools "add" and "echo" (the SDK lists them sorted by name),
+//   - tools "add" and "echo" (the SDK lists them sorted by name), both with
+//     the annotations readOnlyHint true, idempotentHint true and
+//     openWorldHint false,
 //   - prompt "greeting",
-//   - resource "mcpmoat://benign/readme".
+//   - resource "mcpmoat://benign/readme",
+//   - resource template "mcpmoat://benign/notes/{name}" (name "note").
 //
 // The page size is 1, so a client must follow nextCursor to read both tools.
 //
@@ -20,8 +23,9 @@
 //	    crash     exit with code 3 before the MCP handshake
 //	    hang-init never read stdin and never reply
 //	    hang-list complete the handshake, then block every tools/list request
-//	    flood-list complete the handshake and answer tools/list and
-//	              prompts/list with empty lists; on resources/list, send
+//	    flood-list complete the handshake and answer tools/list,
+//	              prompts/list and resources/list with empty lists; on
+//	              resources/templates/list (the last list request), send
 //	              20000 ping requests and an empty list, then never read
 //	              stdin again
 //	-pidfile path
@@ -95,6 +99,13 @@ var (
 
 // readmeURI is the URI of the only resource.
 const readmeURI = "mcpmoat://benign/readme"
+
+// The URI template of the only resource template, and the URI prefix that
+// the template expands to. The note name follows the prefix.
+const (
+	notesURITemplate = "mcpmoat://benign/notes/{name}"
+	notesURIPrefix   = "mcpmoat://benign/notes/"
+)
 
 func main() {
 	os.Exit(run(os.Args[1:], os.Stderr))
@@ -175,11 +186,12 @@ func sleepForever() {
 // runFlood is the flood-list mode. It speaks JSON-RPC by hand, without the
 // SDK, so it can stop reading stdin at a chosen point. It answers
 // initialize with the tools, prompts and resources capabilities, and
-// tools/list and prompts/list with empty lists. On resources/list, the last
-// list that a client reads, it sends floodPings ping requests and then an
-// empty resource list, and then it never reads stdin again. A client that
-// writes a reply to each ping then blocks on a full pipe, until the client
-// closes the pipe or stops this program.
+// tools/list, prompts/list and resources/list with empty lists. On
+// resources/templates/list, the last list that a client reads, it sends
+// floodPings ping requests and then an empty template list, and then it
+// never reads stdin again. A client that writes a reply to each ping then
+// blocks on a full pipe, until the client closes the pipe or stops this
+// program.
 func runFlood(stdin io.Reader, stdout io.Writer, stderr io.Writer) int {
 	in := bufio.NewScanner(stdin)
 	in.Buffer(make([]byte, 0, 64<<10), 1<<20)
@@ -200,10 +212,12 @@ func runFlood(stdin io.Reader, stdout io.Writer, stderr io.Writer) int {
 		case "prompts/list":
 			fmt.Fprintf(out, `{"jsonrpc":"2.0","id":%s,"result":{"prompts":[]}}`+"\n", msg.ID)
 		case "resources/list":
+			fmt.Fprintf(out, `{"jsonrpc":"2.0","id":%s,"result":{"resources":[]}}`+"\n", msg.ID)
+		case "resources/templates/list":
 			for i := range floodPings {
 				fmt.Fprintf(out, `{"jsonrpc":"2.0","id":"ping-%d","method":"ping"}`+"\n", i)
 			}
-			fmt.Fprintf(out, `{"jsonrpc":"2.0","id":%s,"result":{"resources":[]}}`+"\n", msg.ID)
+			fmt.Fprintf(out, `{"jsonrpc":"2.0","id":%s,"result":{"resourceTemplates":[]}}`+"\n", msg.ID)
 			if err := out.Flush(); err != nil {
 				fmt.Fprintf(stderr, "benign: %v\n", err)
 				return exitServe
@@ -262,7 +276,8 @@ func writeStartFiles(pidFile, envFile string) error {
 	return nil
 }
 
-// newServer returns the server with its tools, prompt and resource.
+// newServer returns the server with its tools, prompt, resource and
+// resource template.
 func newServer() *mcp.Server {
 	server := mcp.NewServer(
 		&mcp.Implementation{Name: "benign", Version: "1.0.0"},
@@ -273,12 +288,14 @@ func newServer() *mcp.Server {
 		Name:        "add",
 		Description: "Add two numbers and return the sum.",
 		InputSchema: addInputSchema,
+		Annotations: safeAnnotations(),
 	}, addTool)
 
 	server.AddTool(&mcp.Tool{
 		Name:        "echo",
 		Description: "Return the input text unchanged.",
 		InputSchema: echoInputSchema,
+		Annotations: safeAnnotations(),
 	}, echoTool)
 
 	server.AddPrompt(&mcp.Prompt{
@@ -298,7 +315,31 @@ func newServer() *mcp.Server {
 		MIMEType:    "text/plain",
 	}, readmeResource)
 
+	server.AddResourceTemplate(&mcp.ResourceTemplate{
+		URITemplate: notesURITemplate,
+		Name:        "note",
+		Description: "Read a short note by name.",
+		MIMEType:    "text/plain",
+	}, noteResource)
+
 	return server
+}
+
+// safeAnnotations returns the tool annotations of "add" and "echo": the
+// tool only reads, a repeated call has no extra effect, and the tool does
+// not reach outside systems. Each call returns a new value, so the two
+// tools share no memory.
+//
+// In the SDK type, ReadOnlyHint and IdempotentHint are plain bool, but
+// OpenWorldHint is *bool: the spec default of openWorldHint is true, so the
+// SDK needs nil to mean "not set". new(false) (Go 1.26 and later) returns a
+// pointer to a new bool with the value false.
+func safeAnnotations() *mcp.ToolAnnotations {
+	return &mcp.ToolAnnotations{
+		ReadOnlyHint:   true,
+		IdempotentHint: true,
+		OpenWorldHint:  new(false),
+	}
 }
 
 // addTool returns the sum of the arguments "a" and "b" as text.
@@ -370,6 +411,24 @@ func readmeResource(_ context.Context, _ *mcp.ReadResourceRequest) (*mcp.ReadRes
 			URI:      readmeURI,
 			MIMEType: "text/plain",
 			Text:     "This is the benign mcpmoat test server.",
+		}},
+	}, nil
+}
+
+// noteResource returns the text of one note of the resource template. The
+// note name is the part of the URI after notesURIPrefix. A URI without a
+// name is "resource not found".
+func noteResource(_ context.Context, req *mcp.ReadResourceRequest) (*mcp.ReadResourceResult, error) {
+	uri := req.Params.URI
+	name, ok := strings.CutPrefix(uri, notesURIPrefix)
+	if !ok || name == "" {
+		return nil, mcp.ResourceNotFoundError(uri)
+	}
+	return &mcp.ReadResourceResult{
+		Contents: []*mcp.ResourceContents{{
+			URI:      uri,
+			MIMEType: "text/plain",
+			Text:     "This is the note " + name + ".",
 		}},
 	}, nil
 }

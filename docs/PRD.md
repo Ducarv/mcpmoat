@@ -131,7 +131,7 @@ hidden instructions or leak data.
 | ID | Attack | Detection |
 |---|---|---|
 | T1 | Tool poisoning: hidden instruction in a tool's description or schema | Pattern rules: imperative phrases aimed at the model, mentions of other tools, "don't tell the user", invisible characters, very long text, base64 |
-| T2 | Rug pull: description or schema changes after approval | Per-tool hash stored in a pins file; differences raise an alert |
+| T2 | Rug pull: the description, schema or annotations of a tool change after the pin | Per-tool hash stored in a pins file; differences raise an alert |
 | T3 | Shadowing: a tool that tries to redefine another tool's behaviour ("when using send_email, always...") | Rule: description cites the name of a tool from another server |
 | T4 | Dangerous config: remote server over `http://` without TLS, plaintext secret in config, unpinned package (`npx package@latest`) | Static config analysis |
 | T5 | Basic typosquatting: name very close to a known server | Compare with a short list of popular servers (edit distance) |
@@ -188,11 +188,11 @@ section.
 
 ### 6.2 Inspection
 
-**FR-04: Connect and list.** Connect to each server via MCP and list tools, prompts and resources
-(name, description, schema).
+**FR-04: Connect and list.** Connect to each server via MCP and list tools (with their
+annotations), prompts, resources and resource templates (name, description, schema).
 
-- Against the benign fixture server, inspection returns its exact tools, prompts and resources with
-  names, descriptions and input schemas.
+- Against the benign fixture server, inspection returns its exact tools, prompts, resources and
+  resource templates with names, descriptions, input schemas and tool annotations.
 - Both stdio and HTTP (streamable HTTP and SSE) transports work against fixture servers.
 - Inspection uses `github.com/modelcontextprotocol/go-sdk`.
 
@@ -260,14 +260,20 @@ references:
 
 ### 6.4 Pins (rug-pull detection)
 
-**FR-11: Store pins.** On first run, store the SHA-256 of each tool's name, description and schema
-in `~/.config/mcpmoat/pins.json`.
+**FR-11: Store pins.** On first run, store the SHA-256 of each tool's name, description, schema and
+annotations in `~/.config/mcpmoat/pins.json`. The annotations are the title and the four hints
+`readOnlyHint`, `destructiveHint`, `idempotentHint` and `openWorldHint`. An absent hint is different
+from a set hint.
 
 - The hash input is a canonical serialisation: the same tool with JSON keys in a different order
   gives the same hash.
 - A change of one character in name, description or schema gives a different hash.
+- A change of one annotation hint gives a different hash.
 - The pins file has a format version field and is written atomically (temp file plus rename).
 - `XDG_CONFIG_HOME` is honoured when set.
+
+Known limit: the Go SDK decodes `readOnlyHint` and `idempotentHint` as a plain `bool`. So for these
+two hints, "absent" and "false" are the same. A change to `true` is always visible.
 
 **FR-12: Detect changes.** On later runs, warn about new, removed or changed tools, showing the
 text diff.
