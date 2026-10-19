@@ -125,8 +125,9 @@ func procAssertNoCanary(t *testing.T, out []byte, canaries map[string]string) {
 
 // TestStdioChildEnvIsScrubbed proves two acceptance criteria of issue #27
 // with the real parent environment: the child gets only the allowlisted
-// parent variables and the declared variables, and a secret such as
-// AWS_SECRET_ACCESS_KEY in the parent is absent in the child.
+// parent variables, the declared variables and npm_config_yes=false (issue
+// #104), and a secret such as AWS_SECRET_ACCESS_KEY in the parent is absent
+// in the child. A parent npm_config_yes=true does not reach the child.
 //
 // The test uses t.Setenv, so it cannot run in parallel. The parent
 // environment is real, so failure messages show variable names only, never
@@ -135,6 +136,7 @@ func TestStdioChildEnvIsScrubbed(t *testing.T) {
 	skipOnWindows(t)
 	t.Setenv("AWS_SECRET_ACCESS_KEY", procCanaryAWS)
 	t.Setenv("GITHUB_TOKEN", procCanaryGitHub)
+	t.Setenv("npm_config_yes", "true")
 
 	declared := map[string]string{
 		"API_KEY": "declared-value",
@@ -146,7 +148,8 @@ func TestStdioChildEnvIsScrubbed(t *testing.T) {
 	parent := os.Environ()
 
 	// want is the parent entries whose names are on the allowlist (the
-	// first entry wins), then the declared entries.
+	// first entry wins), then the declared entries, then the forced
+	// npm_config_yes=false (the config declares no npm_config_yes).
 	want := make(map[string]string)
 	for _, entry := range parent {
 		name, value, ok := strings.Cut(entry, "=")
@@ -160,6 +163,7 @@ func TestStdioChildEnvIsScrubbed(t *testing.T) {
 	for name, value := range declared {
 		want[name] = value
 	}
+	want["npm_config_yes"] = "false"
 
 	s := envDumpServer(envDumpExe(t), nil, secrets(declared))
 	opts := stdioOptions{Environ: parent, FallbackDir: t.TempDir()}
@@ -189,8 +193,9 @@ func TestStdioChildEnvIsScrubbed(t *testing.T) {
 
 // TestStdioChildEnvExact proves with a synthetic parent environment that the
 // child environment is exactly the allowlisted parent entries plus the
-// declared entries, and that a declared entry overrides a parent entry.
-// SSH_AUTH_SOCK, LD_PRELOAD and AWS_SECRET_ACCESS_KEY are not on the
+// declared entries plus npm_config_yes=false (issue #104), and that a
+// declared entry overrides a parent entry. SSH_AUTH_SOCK, LD_PRELOAD,
+// AWS_SECRET_ACCESS_KEY and the parent npm_config_yes are not on the
 // allowlist, so they must not reach the child.
 func TestStdioChildEnvExact(t *testing.T) {
 	t.Parallel()
@@ -203,6 +208,7 @@ func TestStdioChildEnvExact(t *testing.T) {
 		"SSH_AUTH_SOCK=/tmp/s",
 		"LANG=C.UTF-8",
 		"LD_PRELOAD=/evil.so",
+		"npm_config_yes=true",
 	}
 	declared := secrets(map[string]string{"TOKEN": "t", "HOME": "/override"})
 
@@ -210,7 +216,7 @@ func TestStdioChildEnvExact(t *testing.T) {
 	opts := stdioOptions{Environ: parent, FallbackDir: t.TempDir()}
 	out, dump := procRun(t, s, opts, true)
 
-	want := []string{"HOME=/override", "LANG=C.UTF-8", "PATH=/usr/bin:/bin", "TOKEN=t"}
+	want := []string{"HOME=/override", "LANG=C.UTF-8", "PATH=/usr/bin:/bin", "TOKEN=t", "npm_config_yes=false"}
 	got := slices.Sorted(slices.Values(dump.Env))
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("child env = %q, want %q", procMaskEnv(got, want), want)
@@ -219,8 +225,9 @@ func TestStdioChildEnvExact(t *testing.T) {
 }
 
 // TestStdioChildEnvEmpty proves that an empty parent environment and no
-// declared env give the child an empty environment. A nil cmd.Env would give
-// the child the whole environment of the test process instead.
+// declared env give the child only npm_config_yes=false (issue #104). A nil
+// cmd.Env would give the child the whole environment of the test process
+// instead.
 func TestStdioChildEnvEmpty(t *testing.T) {
 	t.Parallel()
 	skipOnWindows(t)
@@ -229,14 +236,11 @@ func TestStdioChildEnvEmpty(t *testing.T) {
 	opts := stdioOptions{Environ: nil, FallbackDir: t.TempDir()}
 	_, dump := procRun(t, s, opts, true)
 
-	if dump.Env == nil || len(dump.Env) != 0 {
-		// Only the names: with a nil cmd.Env, the child has the real
-		// environment of the test process.
-		names := make([]string, 0, len(dump.Env))
-		for _, entry := range dump.Env {
-			names = append(names, envKey(entry))
-		}
-		t.Errorf("child env names = %q, want an empty environment", names)
+	want := []string{"npm_config_yes=false"}
+	if !slices.Equal(dump.Env, want) {
+		// Only the names, or entries that the test set: with a nil
+		// cmd.Env, the child has the real environment of the test process.
+		t.Errorf("child env = %q, want %q", procMaskEnv(dump.Env, want), want)
 	}
 }
 

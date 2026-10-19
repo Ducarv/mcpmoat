@@ -285,6 +285,114 @@ func TestScanNoConnectGolden(t *testing.T) {
 	assertScanGolden(t, "scan_no_connect_full", []byte(got))
 }
 
+// stateCells maps the NAME of each table row to its STATE cell. STATE is the
+// fifth column, after TRANSPORT. The SCOPE cell of an untrusted server ends
+// with the extra word "(untrusted)", so the STATE word moves one place right.
+// The fixture names and temporary paths hold no space, so the words before
+// STATE are the cells themselves.
+func stateCells(t *testing.T, stdout string) map[string]string {
+	t.Helper()
+	states := make(map[string]string)
+	for _, row := range tableRows(t, stdout) {
+		i := 4
+		if len(row) > 3 && row[3] == "(untrusted)" {
+			i = 5
+		}
+		if len(row) <= i {
+			t.Fatalf("row %q has no STATE cell", row)
+		}
+		states[row[0]] = row[i]
+	}
+	return states
+}
+
+// serverStateCases are the fixtures of the STATE column tests, with the
+// STATE of every row. TestScanNoConnectState runs them in-process and
+// TestE2EScanServerState with the real binary. The binary runs in the work
+// directory of the fixture, so it reads the project files there, as the
+// in-process cli does. Tests must not change the maps.
+var serverStateCases = []struct {
+	name    string
+	fixture []string
+	want    map[string]string // NAME -> STATE, for every row
+}{
+	{
+		// ~/.codex/config.toml has enabled = false on "git" only.
+		name:    "codex enabled key",
+		fixture: []string{"codex", "valid"},
+		want: map[string]string{
+			"docs":   "enabled",
+			"remote": "enabled",
+			"git":    "disabled",
+		},
+	},
+	{
+		// The user's own ~/.claude/settings.json approves approved-srv.
+		// work/.claude/settings.local.json approves repo-srv and rejects
+		// rejected-srv; that file comes from the repository, so repo-srv
+		// is only project-approved. Nothing names pending-srv, so it
+		// waits for approval. global-srv comes from ~/.claude.json, which
+		// needs no approval.
+		name:    "claude code project approval",
+		fixture: []string{"claude-code", "state"},
+		want: map[string]string{
+			"global-srv":   "enabled",
+			"approved-srv": "enabled",
+			"repo-srv":     "project-approved",
+			"rejected-srv": "disabled",
+			"pending-srv":  "unapproved",
+		},
+	},
+}
+
+// TestScanNoConnectState checks the STATE column of scan --no-connect for
+// the enabled and approval settings of each client config. The state only
+// changes the table: it never changes the exit code.
+func TestScanNoConnectState(t *testing.T) {
+	t.Parallel()
+
+	for _, tt := range serverStateCases {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			c, stdout, stderr, _, _ := scanCLI(t, tt.fixture...)
+
+			code := c.dispatch([]string{"scan", "--no-connect"})
+
+			// A disabled or unapproved server is not a config problem: exit
+			// code 0 and only the notice on stderr.
+			assertScanResult(t, code, stdout.String(), stderr.String(), scanWant{code: exitOK})
+			if got := stateCells(t, stdout.String()); !maps.Equal(got, tt.want) {
+				t.Errorf("STATE per server = %v, want %v\nstdout:\n%s", got, tt.want, stdout)
+			}
+		})
+	}
+}
+
+// TestScanConfigMcpjsonState checks that scan --config of a project
+// .mcp.json shows every server as unapproved: --config reads no settings
+// file, so it knows no approval, and it fails closed. The settings next to
+// the file approve two servers and reject one; plain scan shows that (see
+// TestScanNoConnectState).
+func TestScanConfigMcpjsonState(t *testing.T) {
+	t.Parallel()
+	home, work := discovertest.CopyFixture(t, fixtureDir("claude-code", "state"))
+	c, stdout, stderr := scanConfigCLI(t, home)
+
+	code := c.dispatch([]string{"scan", "--no-connect", "--config", filepath.Join(work, ".mcp.json")})
+
+	assertScanResult(t, code, stdout.String(), stderr.String(), scanWant{code: exitOK})
+	want := map[string]string{
+		"approved-srv": "unapproved",
+		"repo-srv":     "unapproved",
+		"rejected-srv": "unapproved",
+		"pending-srv":  "unapproved",
+	}
+	if got := stateCells(t, stdout.String()); !maps.Equal(got, want) {
+		t.Errorf("STATE per server = %v, want %v\nstdout:\n%s", got, want, stdout)
+	}
+}
+
 func TestScanAutoPartialFailure(t *testing.T) {
 	t.Parallel()
 

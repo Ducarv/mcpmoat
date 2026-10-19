@@ -50,6 +50,7 @@ const (
 	codexKeyURL         = "url"
 	codexKeyHTTPHeaders = "http_headers"
 	codexKeyCwd         = "cwd"
+	codexKeyEnabled     = "enabled"
 
 	// codexKeyAuthEnvVar is bearer_token_env_var. Its name has no "token":
 	// gosec (G101) takes such a name with a string value for a hard-coded
@@ -57,7 +58,6 @@ const (
 	codexKeyAuthEnvVar        = "bearer_token_env_var"
 	codexKeyEnvHTTPHeaders    = "env_http_headers"
 	codexKeyEnvVars           = "env_vars"
-	codexKeyEnabled           = "enabled"
 	codexKeyStartupTimeoutSec = "startup_timeout_sec"
 	codexKeyToolTimeoutSec    = "tool_timeout_sec"
 )
@@ -65,11 +65,11 @@ const (
 // codexIgnoredKeys lists the server keys that Codex knows and parseCodex
 // does not map to a Server field. bearer_token_env_var, env_http_headers and
 // env_vars hold the names of environment variables, and mcpmoat does not read
-// the environment. The scanner does not need enabled, startup_timeout_sec and
+// the environment. The scanner does not need startup_timeout_sec and
 // tool_timeout_sec. No code writes to it.
 var codexIgnoredKeys = [...]string{
 	codexKeyAuthEnvVar, codexKeyEnvHTTPHeaders, codexKeyEnvVars,
-	codexKeyEnabled, codexKeyStartupTimeoutSec, codexKeyToolTimeoutSec,
+	codexKeyStartupTimeoutSec, codexKeyToolTimeoutSec,
 }
 
 // codexStdioKeys and codexRemoteKeys list the server keys that Codex allows
@@ -108,6 +108,7 @@ func codexAllKeys() []string {
 // "ArrayHash" is an array of tables ([[name]]).
 const (
 	tomlTypeString    = "String"
+	tomlTypeBool      = "Bool"
 	tomlTypeArray     = "Array"
 	tomlTypeHash      = "Hash"
 	tomlTypeArrayHash = "ArrayHash"
@@ -119,6 +120,9 @@ const (
 // Env and HTTPHeaders are SecretMap values, and URL is a URL. The TOML
 // decoder calls their UnmarshalText methods, so the values are never held
 // in a plain string map.
+//
+// Enabled is nil when the entry has no enabled key. Codex then runs the
+// server, as with enabled = true.
 type codexEntry struct {
 	Command     string
 	Args        []string
@@ -126,6 +130,7 @@ type codexEntry struct {
 	URL         URL
 	HTTPHeaders SecretMap
 	Cwd         string
+	Enabled     *bool
 }
 
 // codexRead is one key that parseCodex reads: the TOML type that the value
@@ -148,6 +153,8 @@ func codexReads(e *codexEntry) []codexRead {
 		{key: codexKeyURL, typ: tomlTypeString, dest: &e.URL},
 		{key: codexKeyHTTPHeaders, typ: tomlTypeHash, dest: &e.HTTPHeaders},
 		{key: codexKeyCwd, typ: tomlTypeString, dest: &e.Cwd},
+		// dest is a **bool: PrimitiveDecode allocates the bool.
+		{key: codexKeyEnabled, typ: tomlTypeBool, dest: &e.Enabled},
 	}
 }
 
@@ -162,6 +169,11 @@ func codexReads(e *codexEntry) []codexRead {
 // that mixes the keys of the two transports (for example command with
 // http_headers, or url with env) gives a FileError with the reason "invalid
 // server entry", even when a value is empty.
+//
+// A server with enabled = false has StateDisabled; without the key, or with
+// enabled = true, it has StateEnabled. An enabled value that is not a TOML
+// boolean (for example the string "false") gives a FileError with the reason
+// "invalid server entry", and the server is dropped.
 //
 // A file that is not valid TOML gives one FileError with the line and column,
 // which do not count a byte order mark at the start of the file.
@@ -348,13 +360,17 @@ func codexMixesTransports(fields map[string]toml.Primitive) bool {
 // newCodexServer builds a Server from a decoded entry. It returns a reason (and
 // a zero Server) if the entry has neither a command nor a url.
 // decodeCodexEntry has already refused an entry that mixes the two
-// transports, so each case keeps every field it reads.
+// transports, so each case keeps every field it reads. The server has
+// StateDisabled when the entry has enabled = false.
 func newCodexServer(path, name string, e codexEntry) (Server, reason) {
 	s := Server{
 		Name:   name,
 		Client: ClientCodex,
 		Scope:  ScopeGlobal,
 		Source: path,
+	}
+	if e.Enabled != nil && !*e.Enabled {
+		s.State = StateDisabled
 	}
 	switch {
 	case e.Command != "":

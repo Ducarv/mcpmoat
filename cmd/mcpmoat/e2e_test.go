@@ -11,6 +11,7 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"maps"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -116,6 +117,31 @@ func TestE2EScanAllClients(t *testing.T) {
 	want := []string{"cc-global", "cc-alpha", "cc-project", "cursor-global", "cursor-project", "codex-global"}
 	if got := column(tableRows(t, stdout), 0); !slices.Equal(got, want) {
 		t.Errorf("server names = %v, want %v\nstdout:\n%s", got, want, stdout)
+	}
+}
+
+// TestE2EScanServerState runs the real binary and checks the STATE column for
+// the enabled and approval settings of each client config. A disabled or
+// unapproved server is not a config problem, so the exit code stays 0 and
+// stderr holds only the notice.
+func TestE2EScanServerState(t *testing.T) {
+	t.Parallel()
+	// serverStateCases is in scan_test.go.
+	for _, tt := range serverStateCases {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			home, work := discovertest.CopyFixture(t, fixtureDir(tt.fixture...))
+
+			stdout, stderr, code := runBin(t, home, work, "scan", "--no-connect")
+
+			assertScanResult(t, code, stdout, stderr, scanWant{code: exitOK})
+			// stateCells is in scan_test.go. It parses the table and
+			// fails the test when the header is wrong or a row has no
+			// STATE cell, so an empty output does not pass.
+			if got := stateCells(t, stdout); !maps.Equal(got, tt.want) {
+				t.Errorf("STATE per server = %v, want %v\nstdout:\n%s", got, tt.want, stdout)
+			}
+		})
 	}
 }
 

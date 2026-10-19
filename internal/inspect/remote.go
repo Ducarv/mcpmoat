@@ -23,15 +23,16 @@ const (
 	// --timeout comes in issue #28.
 	defaultConnectTimeout = 10 * time.Second
 
-	// clientName and clientVersion are the client identity in the MCP
-	// initialize request. The SDK wants a non-empty name and version.
+	// clientName and clientVersion are the neutral client identity in the
+	// MCP initialize request, for a server of a client that clientIdentity
+	// does not know. The SDK wants a non-empty name and version.
 	//
 	// They do not name mcpmoat on purpose, and neither does the default
 	// User-Agent (the net/http one). A hostile server that recognises the
 	// scanner could show it a clean tool list and show the real clients a
 	// poisoned one, and the pins would never see the difference (threat T1,
 	// FR-11). A server can still fingerprint a client in other ways; see
-	// docs/PRD.md section 5.5.
+	// clientIdentity and docs/PRD.md section 5.5.
 	clientName    = "mcp-client"
 	clientVersion = "1.0.0"
 
@@ -50,6 +51,10 @@ type RemoteOptions struct {
 	// the explicit opt-in of the user before it sets this.
 	AllowUntrusted bool
 
+	// AllowDisabled lets Remote connect even when the State of the server is
+	// not discover.StateEnabled. See SDKOptions.AllowDisabled.
+	AllowDisabled bool
+
 	// UserAgent is sent unless the config sets a User-Agent header. Empty
 	// means the net/http default, which does not name mcpmoat. Never set a
 	// value that names mcpmoat: a server could then show the scanner a clean
@@ -62,31 +67,62 @@ type RemoteOptions struct {
 	MaxResponseBytes int64
 
 	// baseTransport replaces the base HTTP transport. Nil means a fresh
-	// transport with TLS 1.2+ and the proxy settings from the environment.
-	// Only tests in this package set it. It is unexported so that no caller
-	// can give a transport that skips the TLS checks; the origin pin and the
-	// header rules apply to any transport.
+	// transport with TLS 1.2+, the pinned dialer and the proxy function
+	// proxy. Only tests in this package set it. It is unexported so that no
+	// caller can give a transport that skips the TLS checks; the origin pin
+	// and the header rules apply to any transport.
 	baseTransport http.RoundTripper
+
+	// proxy is the proxy function of the base transport that Remote makes,
+	// and the one that the DNS pin warning asks (see dnsPinWarning). Nil
+	// means proxyFromEnvironment. Only tests in this package set it:
+	// http.ProxyFromEnvironment reads the environment one time per process,
+	// so t.Setenv cannot change its answer. With baseTransport set, the
+	// warning still asks proxy, but the requests use the proxy setting of
+	// baseTransport.
+	proxy func(*http.Request) (*url.URL, error)
+
+	// secrets are more strings that classify removes from error text, on
+	// top of the ones that Remote finds in srv (header values, URL user
+	// info, query and path parts). SDKInspector.Inspect passes the values of
+	// the variables that it expanded in srv, because they can stand in any
+	// part of the URL. They are never shown.
+	secrets []string
 }
 
 // Remote connects to a remote MCP server (streamable HTTP or legacy SSE, from
 // srv.Transport) and lists its tools, prompts and resources.
 //
-// A server from an untrusted project file (srv.Untrusted) is refused unless
-// opts.AllowUntrusted is set.
+// Remote checks the gates first, in the order of checkGates. A server whose
+// State is not discover.StateEnabled (the client config turns it off, the
+// user did not approve it, or only files from the repository approve it) is
+// refused unless opts.AllowDisabled is set. Then a server from an untrusted
+// project file (srv.Untrusted) is refused unless opts.AllowUntrusted is set.
+// A refused server gets no request at all.
 //
 // The headers from srv.Headers go to the origin of srv.URL only, exactly as
-// configured: Remote does not expand ${VAR} placeholders (issue #88). The user
-// info of the URL (user:password@) is not given to the MCP SDK. Remote sends it
-// as a Basic Authorization header instead, unless the config sets an
-// Authorization header.
+// srv has them. Remote does not expand ${VAR} placeholders itself:
+// SDKInspector.Inspect expands them with discover.Expand (issue #88) and
+// gives Remote the expanded server. A caller that calls Remote directly
+// passes srv as it wants it sent. The user info of the URL (user:password@)
+// is not given to the MCP SDK. Remote sends it as a Basic Authorization
+// header instead, unless the config sets an Authorization header.
 //
-// If Remote sends config headers, URL user info or secrets in the URL query
-// or path over plain http:// to a host that is not loopback, it still
-// connects, but it adds a warning of kind WarnCleartextSecrets: to
-// Result.Warnings on success, and to ConnectError.Warnings when the
-// inspection fails after the connect started. A warning holds keys only,
-// never values.
+// The initialize request names the client that declared srv (see
+// clientIdentity), not mcpmoat.
+//
+// Remote can add warnings about the connection, with no secret value in
+// them:
+//   - WarnCleartextSecrets, when Remote sends config headers, URL user info
+//     or secrets in the URL query or path over plain http:// to a host that
+//     is not loopback. Remote still connects. The warning holds keys only.
+//   - WarnDNSPinUnavailable, when the host is a DNS name and the request
+//     goes through a proxy, so the proxy resolves the name and the address
+//     checks of the dialer do not apply (see dnsPinWarning).
+//
+// These connection warnings go to Result.Warnings on success, before the
+// warnings that the lists add (see listInto), and to ConnectError.Warnings
+// when the inspection fails after the connect started.
 //
 // If ctx has no deadline, Remote adds a 10 second one. Closing the session
 // sends a DELETE request (streamable HTTP) that the SDK bounds to 5 seconds,
@@ -98,11 +134,12 @@ type RemoteOptions struct {
 // controls, so callers must escape it with internal/termsafe before they print
 // it. errors.Is(err, context.DeadlineExceeded) works for timeouts.
 func Remote(ctx context.Context, srv discover.Server, opts RemoteOptions) (Result, error) {
-	// A cloned repository can ship a project file with a server entry. Do not
+	// The client config turns the server off, or the user did not approve
+	// it, or a cloned repository ships the server in a project file. Do not
 	// connect to it, and so do not send its headers anywhere, without the
 	// explicit opt-in of the user.
-	if srv.Untrusted && !opts.AllowUntrusted {
-		return Result{}, configError(srv, "untrusted project server; connecting needs explicit opt-in")
+	if err := checkGates(srv, opts.AllowUntrusted, opts.AllowDisabled); err != nil {
+		return Result{}, gateError(srv, err)
 	}
 	if !srv.Transport.IsRemote() {
 		return Result{}, configError(srv, "not a remote server")
@@ -129,12 +166,27 @@ func Remote(ctx context.Context, srv discover.Server, opts RemoteOptions) (Resul
 	headers, secrets := splitHeaders(srv.Headers)
 	secrets = append(secrets, userinfoSecrets(user)...)
 	secrets = append(secrets, urlSecrets(u.RawQuery, raw)...)
+	secrets = append(secrets, opts.secrets...)
+
+	proxy := opts.proxy
+	if proxy == nil {
+		proxy = proxyFromEnvironment
+	}
+	base := opts.baseTransport
+	if base == nil {
+		// The same base transport that newHTTPClient makes for a nil Base,
+		// with the proxy function above, so that the requests and the DNS
+		// pin warning below use the same proxy setting.
+		t := newBaseTransport(nil, endpointURL.Hostname())
+		t.Proxy = proxy
+		base = t
+	}
 
 	httpClient, ev, err := newHTTPClient(httpClientConfig{
 		Endpoint:  &endpointURL,
 		User:      user,
 		Headers:   headers,
-		Base:      opts.baseTransport,
+		Base:      base,
 		UserAgent: opts.UserAgent,
 		MaxBody:   opts.MaxResponseBytes,
 	})
@@ -146,13 +198,15 @@ func Remote(ctx context.Context, srv discover.Server, opts RemoteOptions) (Resul
 		return Result{}, configError(srv, "invalid HTTP client settings")
 	}
 
-	// warnings tell the user about secrets that go over plain http:// to a
-	// host that is not loopback (issue #98). They hold keys only. They are
-	// computed after newHTTPClient accepted the headers, as sentHeaders
-	// expects. Remote returns them on success and with every error after a
+	// warnings are the connection warnings. The cleartext ones tell the user
+	// about secrets that go over plain http:// to a host that is not
+	// loopback (issue #98). They hold keys only. They are computed after
+	// newHTTPClient accepted the headers, as sentHeaders expects. The DNS pin
+	// one tells that a proxy resolves the server name (issue #106). It holds
+	// no URL. Remote returns them on success and with every error after a
 	// request could have gone out (see fail), because by then the secrets
 	// were sent.
-	warnings := cleartextWarnings(srv, u)
+	warnings := slices.Concat(cleartextWarnings(srv, u), dnsPinWarning(&endpointURL, proxy))
 
 	// Always derive a context that this function can cancel, so that the
 	// SDK work that uses ctx stops when Remote returns.
@@ -180,7 +234,7 @@ func Remote(ctx context.Context, srv discover.Server, opts RemoteOptions) (Resul
 	// The SDK logger can print server text and URLs. mcpmoat must never log
 	// them, so the logger discards everything.
 	mcpClient := mcp.NewClient(
-		&mcp.Implementation{Name: clientName, Version: clientVersion},
+		clientIdentity(srv.Client),
 		&mcp.ClientOptions{Logger: slog.New(slog.DiscardHandler)},
 	)
 	// The middleware keeps the tool lists as the server sent them, for the
@@ -240,7 +294,9 @@ func Remote(ctx context.Context, srv discover.Server, opts RemoteOptions) (Resul
 	if err := listInto(ctx, cs, initRes.Capabilities, rawTools, &result); err != nil {
 		return fail(err)
 	}
-	result.Warnings = warnings
+	// listInto can have added warnings about the lists. Keep them, after
+	// the connection warnings. slices.Concat gives nil when both are empty.
+	result.Warnings = slices.Concat(warnings, result.Warnings)
 	return result, nil
 }
 

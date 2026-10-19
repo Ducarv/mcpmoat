@@ -87,7 +87,8 @@ func jsonAllKeys() []string {
 const jsonSpace = " \t\r\n"
 
 // jsonFile is one Claude Code or Cursor JSON config to read. ReadClaudeCode,
-// ReadCursor and readUntrustedJSON build it with named fields.
+// readGlobalClaudeCodeState, ReadCursor and readUntrustedJSON build it with
+// named fields.
 type jsonFile struct {
 	path   string
 	client Client
@@ -101,6 +102,54 @@ type jsonFile struct {
 	// projects tells what to do with the top-level "projects" section. The
 	// zero value, projectsSkip, ignores it.
 	projects projectsMode
+	// states receives the enabled and approval state of each project that
+	// decodeProjects reads. nil means "do not collect". Only
+	// readGlobalClaudeCodeState sets it. decodeProjects reads and applies the
+	// state of each project also when states is nil.
+	states *claudeStates
+}
+
+// claudeStates holds the enabled and approval state of each project of a
+// Claude Code ~/.claude.json, as decodeProjects read it.
+type claudeStates struct {
+	// byProject maps a projects.<path> key, exactly as the file has it, to
+	// the state of that project. A project whose state has an error is not
+	// in the map. decodeProjects makes the map when it first adds a project.
+	byProject map[string]claudeProjectState
+	// seen holds every projects.<path> key that decodeProjects visited, also
+	// a key whose project or state has an error. So a key in seen and not in
+	// byProject is a project whose state could not be read.
+	seen nameSet
+	// decoded is true when decodeProjects read the "projects" section to the
+	// end: it visited every project, or the section is absent or null. It
+	// stays false when the file is not decoded (missing, empty, or refused
+	// as a whole), when the section is not an object or is ambiguous, and
+	// when ctx ends during the loop. A file refused for too many entries
+	// sets it back to false.
+	decoded bool
+}
+
+// add stores st as the state of the project key.
+func (c *claudeStates) add(key string, st claudeProjectState) {
+	if c.byProject == nil {
+		c.byProject = make(map[string]claudeProjectState)
+	}
+	c.byProject[key] = st
+}
+
+// see records that decodeProjects visited the project key.
+func (c *claudeStates) see(key string) {
+	if c.seen == nil {
+		c.seen = make(nameSet)
+	}
+	c.seen[key] = struct{}{}
+}
+
+// reset forgets all projects, for a file that is refused as a whole.
+func (c *claudeStates) reset() {
+	c.byProject = nil
+	c.seen = nil
+	c.decoded = false
 }
 
 // projectsMode tells a JSON reader what to do with the top-level "projects"
@@ -186,6 +235,9 @@ type origin struct {
 type jsonParser struct {
 	path   string
 	client Client
+	// states is jsonFile.states. decodeProjects adds to it when it is not
+	// nil.
+	states *claudeStates
 
 	// count is the number of entries seen so far: every server entry and every
 	// project of the file.
@@ -231,10 +283,15 @@ func readJSONServers(ctx context.Context, f jsonFile) ([]Server, []*FileError) {
 // "projects.<dir>.mcpServers" are read too. They get ScopeProject and
 // ProjectPath <dir>, and an error about one of them, or about the project
 // itself, has FileError.ProjectPath <dir>. An empty <dir> is refused
-// (reasonEmptyProject), and the other projects are still read.
+// (reasonEmptyProject), and the other projects are still read. For Claude
+// Code, decodeProjects also reads the state keys of each project; see there.
 //
 // For a project file, markUntrusted marks every server and every error at
-// the end.
+// the end. A Claude Code project file (.mcp.json) also gives every server
+// StateUnapproved: Claude Code runs such a server only after an approval,
+// and parseJSONBytes reads no approval. Only [Discover] reads the settings
+// that approve it (see setMcpjsonStates), so every other reader fails
+// closed.
 //
 // See the package doc, Reading configs.
 func parseJSONBytes(ctx context.Context, f jsonFile, data []byte) ([]Server, []*FileError) {
@@ -254,6 +311,11 @@ func parseJSONBytes(ctx context.Context, f jsonFile, data []byte) ([]Server, []*
 
 	if f.scope != ScopeGlobal {
 		markUntrusted(servers, errs)
+		if f.client == ClientClaudeCode {
+			for i := range servers {
+				servers[i].State = StateUnapproved
+			}
+		}
 	}
 	return servers, errs
 }
@@ -301,7 +363,7 @@ func decodeJSONTop(f jsonFile, data []byte) (map[string]json.RawMessage, *FileEr
 // maxServersPerFile as a whole, as the Codex reader does, and sorts the
 // result.
 func decodeJSONSections(ctx context.Context, f jsonFile, top map[string]json.RawMessage) ([]Server, []*FileError) {
-	p := &jsonParser{path: f.path, client: f.client}
+	p := &jsonParser{path: f.path, client: f.client, states: f.states}
 	var servers []Server
 	var errs []*FileError
 	if hasCaseVariant(top, keyMCPServers) {
@@ -337,6 +399,11 @@ func decodeJSONSections(ctx context.Context, f jsonFile, top map[string]json.Raw
 	}
 
 	if p.full {
+		// The file is refused as a whole, so the states of its projects do
+		// not count either.
+		if p.states != nil {
+			p.states.reset()
+		}
 		return nil, []*FileError{newFileError(f.path, reasonTooManyServers)}
 	}
 
@@ -363,8 +430,26 @@ func topLevelError(path string, data []byte, err error) *FileError {
 //
 // Each project counts as one entry toward maxServersPerFile, so a file with
 // many empty projects is refused too.
+//
+// For a Claude Code file it also reads the enabled and approval state of each
+// project (see decodeClaudeState). A server of the project whose name is in
+// its disabledMcpServers list gets StateDisabled. When p.states is not nil,
+// the state goes there, under the project key, and p.states also records each
+// key that it visits and whether it read the whole section (see
+// claudeStates).
+//
+// A state key with the wrong type gives one FileError with the reason of
+// decodeClaudeState and ProjectPath <path>, and the project's servers are
+// dropped, as for a project that is not an object. This fails closed: a
+// server that the unreadable list could turn off is never shown as
+// StateEnabled, and the error makes the scan fail, so the dropped servers do
+// not look clean. The other projects are still read.
 func (p *jsonParser) decodeProjects(ctx context.Context, raw json.RawMessage) ([]Server, []*FileError) {
-	if p.full || isNull(raw) {
+	if p.full {
+		return nil, nil
+	}
+	if isNull(raw) {
+		p.markDecoded()
 		return nil, nil
 	}
 	var projects map[string]json.RawMessage
@@ -374,11 +459,14 @@ func (p *jsonParser) decodeProjects(ctx context.Context, raw json.RawMessage) ([
 
 	var servers []Server
 	var errs []*FileError
+	// canceled tells that ctx ended before the loop visited every project.
+	var canceled bool
 
 	// slices.Sorted collects the keys of the map iterator and sorts them.
 	for _, key := range slices.Sorted(maps.Keys(projects)) {
 		if err := ctx.Err(); err != nil {
 			errs = append(errs, canceledError(p.path, err))
+			canceled = true
 			break
 		}
 		// Count the project before the decode, so the cap holds even for
@@ -389,6 +477,9 @@ func (p *jsonParser) decodeProjects(ctx context.Context, raw json.RawMessage) ([
 			p.full = true
 			break
 		}
+		if p.states != nil {
+			p.states.see(key)
+		}
 		// An empty key names no directory, and its servers would get the
 		// ProjectPath "" of a global server.
 		if key == "" {
@@ -397,7 +488,7 @@ func (p *jsonParser) decodeProjects(ctx context.Context, raw json.RawMessage) ([
 		}
 		// Decode each project on its own, so a bad project does not drop
 		// the other projects. A project is an object; we read only its
-		// "mcpServers" key.
+		// "mcpServers" key and, for Claude Code, its state keys.
 		var project map[string]json.RawMessage
 		if err := json.Unmarshal(projects[key], &project); err != nil {
 			errs = append(errs, newFileError(p.path, reasonBadShape).inProject(key))
@@ -407,14 +498,39 @@ func (p *jsonParser) decodeProjects(ctx context.Context, raw json.RawMessage) ([
 			errs = append(errs, newFileError(p.path, reasonAmbiguousKey).inProject(key))
 			continue
 		}
+		var st claudeProjectState
+		if p.client == ClientClaudeCode {
+			var r reason
+			if st, r = decodeClaudeState(project); r != "" {
+				errs = append(errs, newFileError(p.path, r).inProject(key))
+				continue
+			}
+		}
 		s, e := p.decodeServers(project[keyMCPServers], origin{scope: ScopeProject, projectPath: key, project: key})
+		applyDisabledServers(s, st)
+		if p.states != nil {
+			p.states.add(key, st)
+		}
 		servers = append(servers, s...)
 		errs = append(errs, e...)
 		if p.full {
 			break
 		}
 	}
+	// A break above leaves the section not read to the end: the file is
+	// full (and refused as a whole), or ctx ended.
+	if !p.full && !canceled {
+		p.markDecoded()
+	}
 	return servers, errs
+}
+
+// markDecoded records that decodeProjects read the "projects" section to the
+// end, when p.states is not nil.
+func (p *jsonParser) markDecoded() {
+	if p.states != nil {
+		p.states.decoded = true
+	}
 }
 
 // decodeServers reads one "mcpServers" object. An absent or null value means

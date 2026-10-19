@@ -17,11 +17,6 @@ import (
 // stdio.
 var errNotStdio = errors.New("inspect: server does not use the stdio transport")
 
-// errUntrusted reports that the server comes from an untrusted project file
-// and the user did not opt in to start such servers. See the discover
-// package doc, Untrusted files.
-var errUntrusted = errors.New("inspect: server from an untrusted project file needs an explicit opt-in to start")
-
 // errEmptyCommand reports that the server config sets no command.
 var errEmptyCommand = errors.New("inspect: server config has an empty command")
 
@@ -32,14 +27,14 @@ var errEmptyCommand = errors.New("inspect: server config has an empty command")
 var errInvalidArg = errors.New("inspect: invalid command, argument or work directory in server config")
 
 // errNoWorkDir reports that the server needs the fallback work directory
-// (the config sets no absolute Dir), but stdioOptions.FallbackDir is empty,
-// not absolute or contains a NUL byte.
+// (projectRunDir gives no configured directory), but
+// stdioOptions.FallbackDir is empty, not absolute or contains a NUL byte.
 var errNoWorkDir = errors.New("inspect: no absolute work directory for the server")
 
 // errRelativeCommand reports a relative command with a "/" (such as
-// "./server" or "bin/server") in a config that sets no absolute Dir. The
-// path is relative to a directory that mcpmoat does not know, so mcpmoat
-// does not guess one.
+// "./server" or "bin/server") for a server with no configured work
+// directory (see projectRunDir). The path is relative to a directory that
+// mcpmoat does not know, so mcpmoat does not guess one.
 var errRelativeCommand = errors.New("inspect: relative command path needs an absolute work directory in the server config")
 
 // errCommandNotRunnable reports that exec.Command refused the command path.
@@ -56,10 +51,11 @@ type stdioOptions struct {
 	// without t.Setenv.
 	Environ []string
 
-	// FallbackDir is the work directory of the child when the config sets no
-	// absolute Dir. It must be absolute. The caller makes a private, empty
-	// directory and removes it after the server stops (workDir does both
-	// for SDKInspector.Inspect). stdioCommand does not check the directory on disk.
+	// FallbackDir is the work directory of the child when the server has no
+	// configured work directory (projectRunDir gives ""). It must be
+	// absolute. The caller makes a private, empty directory and removes it
+	// after the server stops (workDir does both for SDKInspector.Inspect).
+	// stdioCommand does not check the directory on disk.
 	//
 	// The whole parent chain matters, not only the leaf. npm walks up the
 	// parent directories from the work directory to find a local prefix (a
@@ -86,11 +82,13 @@ type stdioOptions struct {
 	// ~/node_modules, ~/package.json or ~/pyproject.toml. This is accepted:
 	// HOME is owned by the user, and the client sees the same files.
 	//
-	// The work directory itself is never HOME, the mcpmoat work directory, a
-	// project directory, or a directory under /tmp or os.TempDir(). In a
-	// repository directory, npx and uvx read the node_modules/.bin, .npmrc and
-	// pyproject.toml of the repository, so the repository could change what
-	// runs.
+	// The fallback directory itself is never HOME, the mcpmoat work
+	// directory, a project directory, or a directory under /tmp or
+	// os.TempDir(). In a repository directory, npx and uvx read the
+	// node_modules/.bin, .npmrc and pyproject.toml of the repository, so the
+	// repository could change what runs. A trusted project server runs in
+	// its project directory only because the client does the same (see
+	// projectRunDir); mcpmoat never picks a project directory itself.
 	FallbackDir string
 
 	// AllowUntrusted is the explicit opt-in of the user to start a server
@@ -98,6 +96,12 @@ type stdioOptions struct {
 	// Untrusted files). It is false by default, so stdioCommand fails
 	// closed.
 	AllowUntrusted bool
+
+	// AllowDisabled is the explicit opt-in of the user to start a server
+	// whose State is not discover.StateEnabled (see
+	// SDKOptions.AllowDisabled). It is false by default, so stdioCommand
+	// fails closed.
+	AllowDisabled bool
 }
 
 // stdioCommand builds the *exec.Cmd that starts the stdio server s
@@ -111,27 +115,37 @@ type stdioOptions struct {
 //     the other entries are s.Args.Values().
 //   - cmd.Env is never nil, so the child never inherits the whole parent
 //     environment. It has the allowlisted parent entries plus the config env
-//     (see buildEnv).
+//     (see buildEnv), plus npm_config_yes=false unless the config env sets
+//     that name (see noAutoInstallEnv). Nothing else.
+//   - A server whose s.State is not discover.StateEnabled needs
+//     opts.AllowDisabled.
 //   - A server with s.Untrusted set needs opts.AllowUntrusted.
 //   - A bare command name (no "/") is looked up in the PATH of the child
 //     environment, not in the PATH of mcpmoat (see lookPath).
-//   - Work directory: an absolute s.Dir as written, else
-//     opts.FallbackDir. A relative s.Dir counts as no Dir, because it is
-//     relative to where the user runs Codex, which mcpmoat does not know.
+//   - Work directory: the configured directory from projectRunDir, else
+//     opts.FallbackDir. The configured directory is an absolute s.Dir as
+//     written, or the ProjectPath of a trusted project server that is an
+//     existing directory (issue #104). A relative s.Dir counts as no Dir,
+//     because it is relative to where the user runs Codex, which mcpmoat
+//     does not know. A project directory counts as a configured directory
+//     for a relative command too, so "./server" resolves in the project, as
+//     in the client.
 //   - Every error is, or wraps, a fixed sentinel with no command, arg, name
 //     or value in it.
 //   - On Unix, cmd.SysProcAttr comes from detachSysProcAttr.
 //
 // The checks run in this order, and the first failed check gives the error:
 //  1. the transport is stdio, else errNotStdio;
-//  2. the untrusted gate, else errUntrusted;
-//  3. the command is not empty, else errEmptyCommand; then no NUL byte in
+//  2. the state gate, else errDisabled, errUnapproved or
+//     errProjectApproved (see checkGates);
+//  3. the untrusted gate, else errUntrusted;
+//  4. the command is not empty, else errEmptyCommand; then no NUL byte in
 //     the command, in an arg or in an absolute s.Dir, else errInvalidArg;
-//  4. the environment (buildEnv), else errInvalidEnvName or
+//  5. the environment (buildEnv), else errInvalidEnvName or
 //     errInvalidEnvValue;
-//  5. the work directory, else errNoWorkDir;
-//  6. the command path, else errRelativeCommand or errCommandNotFound;
-//  7. exec.Command, else errCommandNotRunnable.
+//  6. the work directory, else errInvalidArg or errNoWorkDir;
+//  7. the command path, else errRelativeCommand or errCommandNotFound;
+//  8. exec.Command, else errCommandNotRunnable.
 //
 // Stdin, Stdout and Stderr stay nil: the SDK transport makes its own pipes.
 // The caller must never connect cmd.Stdout or cmd.Stderr to the terminal of
@@ -166,8 +180,8 @@ func stdioCommand(s discover.Server, opts stdioOptions) (*exec.Cmd, error) {
 	if s.Transport != discover.TransportStdio {
 		return nil, errNotStdio
 	}
-	if s.Untrusted && !opts.AllowUntrusted {
-		return nil, errUntrusted
+	if err := checkGates(s, opts.AllowUntrusted, opts.AllowDisabled); err != nil {
+		return nil, err
 	}
 	if s.Command == "" {
 		return nil, errEmptyCommand
@@ -196,15 +210,28 @@ func stdioCommand(s discover.Server, opts stdioOptions) (*exec.Cmd, error) {
 		// the config.
 		return nil, err
 	}
+	// Stop npx from installing a missing package from the registry (issue
+	// #104). This is the only entry that the child gets on top of buildEnv.
+	env = noAutoInstallEnv(env)
 	if env == nil {
-		// buildEnv never returns nil on success. This check keeps the
-		// invariant local: a nil cmd.Env would give the child the whole
+		// buildEnv and noAutoInstallEnv never return nil. This check keeps
+		// the invariant local: a nil cmd.Env would give the child the whole
 		// parent environment.
 		env = []string{}
 	}
 
-	dir, hasConfigDir := s.Dir, true
-	if !filepath.IsAbs(s.Dir) {
+	// SDKInspector.Inspect makes the fallback directory only when
+	// projectRunDir gives "" there. The check on disk can change between the
+	// two calls. Then this call either uses a configured directory and
+	// ignores the fallback, or finds no fallback and fails closed with
+	// errNoWorkDir.
+	dir, hasConfigDir := projectRunDir(s, isExistingDir), true
+	if hasNUL(dir) {
+		// projectRunDir checks a ProjectPath on disk, and a path with a NUL
+		// byte cannot exist, so this is a guard only.
+		return nil, errInvalidArg
+	}
+	if dir == "" {
 		dir, hasConfigDir = opts.FallbackDir, false
 		// FallbackDir comes from the caller, not the config. A NUL byte in
 		// it is a caller bug, but it gets the same fixed error.
@@ -245,8 +272,8 @@ func stdioCommand(s discover.Server, opts stdioOptions) (*exec.Cmd, error) {
 //
 //   - An absolute command is used as written.
 //   - A relative command with a "/" (such as "./server") is used as written,
-//     but only when the config sets an absolute Dir (hasConfigDir). See the
-//     note below.
+//     but only when the server has a configured work directory
+//     (hasConfigDir, see projectRunDir). See the note below.
 //   - A bare name is looked up with lookPath in the PATH of the final child
 //     environment env.
 //

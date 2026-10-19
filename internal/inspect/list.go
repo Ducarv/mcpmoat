@@ -215,8 +215,11 @@ type fullLister interface {
 
 // listInto reads every tool, prompt, resource and resource template that the
 // server offers and stores them in result. It sets result.Tools,
-// result.Prompts, result.Resources and result.ResourceTemplates, and no other
-// field. On error it changes nothing in result.
+// result.Prompts, result.Resources and result.ResourceTemplates. It also
+// appends to result.Warnings the warning from undeclaredWarnings, when a list
+// that caps does not declare has items. It keeps the warnings that result
+// already holds, and it changes no other field. On error it changes nothing
+// in result.
 //
 // Tools, prompts and resources follow listAll (see there). Templates follow
 // the same rules as resources, because the resources capability covers both:
@@ -253,6 +256,7 @@ func listInto(ctx context.Context, cs fullLister, caps *mcp.ServerCapabilities, 
 	result.Prompts = prompts
 	result.Resources = resources
 	result.ResourceTemplates = templates
+	result.Warnings = append(result.Warnings, undeclaredWarnings(caps, *result)...)
 	return nil
 }
 

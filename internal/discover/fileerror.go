@@ -60,6 +60,11 @@ const (
 	// project, or it cannot be checked. The server is dropped. See
 	// ReadConfig.
 	reasonCwdOutsideProject = "working directory is outside the project or cannot be checked"
+
+	// reasonBadServerState is for a Claude Code enabled or approval setting
+	// (for example enabledMcpjsonServers or disabledMcpServers) whose value
+	// has the wrong type.
+	reasonBadServerState = "invalid enabled or approval setting"
 )
 
 // FileError describes a problem with one config file or with one server entry

@@ -123,6 +123,14 @@ func configError(srv discover.Server, reason string) *ConnectError {
 	}
 }
 
+// configErrorWithCause is configError with cause as the cause of the error
+// (see ConnectError.Unwrap). cause can be nil.
+func configErrorWithCause(srv discover.Server, reason string, cause error) *ConnectError {
+	ce := configError(srv, reason)
+	ce.err = cause
+	return ce
+}
+
 // transportEvents reports what the HTTP layer saw during one inspection. The
 // SDK can flatten error chains (it formats some errors with %v), so classify
 // asks the transport directly instead of relying only on errors.Is.
@@ -137,8 +145,8 @@ type transportEvents interface {
 	//
 	// blocked is the first error that the HTTP layer raised on purpose for
 	// that request, or for a request that breaks the whole session. It wraps
-	// errOtherOrigin, errCrossOriginRedirect, errTooManyRedirects or
-	// errBodyTooLarge. It is nil if there was none.
+	// one of the sentinel errors of blockedKinds, for example errOtherOrigin
+	// or errAddrRefused. It is nil if there was none.
 	stateFor(err error) (status int, blocked error)
 	// connected reports whether the server answered the MCP handshake. An
 	// HTTP status after that comes from a server that speaks the configured
@@ -209,6 +217,7 @@ var blockedKinds = []struct {
 	{errTooManyRedirects, KindRedirect, "too many redirects"},
 	{errBodyTooLarge, KindTooLarge, "response too large"},
 	{errJSONTooComplex, KindTooLarge, "response JSON too large: too deep, too many values or a too long string"},
+	{errAddrRefused, KindNetwork, errAddrRefused.Error() + "; mcpmoat did not connect"},
 }
 
 // contextErr returns context.DeadlineExceeded or context.Canceled when err
@@ -507,8 +516,7 @@ func replaceURLParts(text, rawURL, redactedURL string) string {
 	// The redacted URL without its query and fragment, like base. If
 	// RedactURL gave Mask for the whole URL, there is nothing safe to show but
 	// Mask.
-	redactedBase, _, _ := strings.Cut(redactedURL, "#")
-	redactedBase, _, _ = strings.Cut(redactedBase, "?")
+	redactedBase := urlBase(redactedURL)
 
 	// Only "?"+query is replaced, not the bare query: a short query such as
 	// "a" must not garble other words.
@@ -603,4 +611,99 @@ func truncate(text string) string {
 		return text
 	}
 	return string(runes[:maxReasonRunes]) + "…"
+}
+
+// showDiscoveredURL makes ce show the URL as discovered, not the expanded
+// one, for a remote server. Remote built ce from the expanded server, so its
+// URL, its Reason and its cause can hold the redacted expanded URL, and that
+// URL can show the values of variables: a host, a port or a path segment
+// that the redaction keeps, and values shorter than minBareSecretLen that no
+// scrub removes. A port in a dial error that prints the resolved IP:port
+// stays: a port is not a secret. showDiscoveredURL sets ce.URL to the discovered URL, and
+// replaces the expanded URL in Reason and in the text of the cause with it,
+// also in the form without the query and the fragment, the same forms that
+// scrub replaces. Then it replaces the expanded host (host:port, then the
+// host name alone) with the discovered one, because a DNS or dial error
+// names the host without the URL. A host can be a short word, so this can
+// garble other text of the error: a leak is worse than a garbled word. A
+// cause whose text changes becomes a new error with that text (see
+// withText), which still matches the context error and the sentinel of the
+// old cause, so errors.Is(err, context.DeadlineExceeded) still works. When
+// the two URLs are the same, only ce.URL is set.
+func showDiscoveredURL(ce *ConnectError, expanded, discovered discover.URL) {
+	to := discovered.String()
+	ce.URL = to
+	from := expanded.String()
+	if from == to {
+		return
+	}
+	pairs := [][2]string{{from, to}, {urlBase(from), urlBase(to)}}
+	if expandedURL, err := url.Parse(expanded.Reveal()); err == nil {
+		// A placeholder in the host can make the discovered URL fail to
+		// parse. Then Mask stands for its host.
+		toHost, toName := discover.Mask, discover.Mask
+		if discoveredURL, err := url.Parse(discovered.Reveal()); err == nil {
+			toHost, toName = discoveredURL.Host, discoveredURL.Hostname()
+		}
+		if expandedURL.Host != toHost {
+			pairs = append(pairs,
+				[2]string{expandedURL.Host, toHost},
+				[2]string{expandedURL.Hostname(), toName})
+		}
+	}
+	replace := func(text string) string {
+		for _, p := range pairs {
+			text = replaceForms(text, p[0], p[1])
+		}
+		return text
+	}
+	ce.Reason = truncate(replace(ce.Reason))
+	if ce.err != nil {
+		text := ce.err.Error()
+		if replaced := replace(text); replaced != text {
+			ce.err = withText(ce.err, truncate(replaced))
+		}
+	}
+}
+
+// textError is an error with a fixed text that matches, with errors.Is, the
+// errors in matches. It wraps nothing else, so no text of the old error
+// stays in the chain.
+type textError struct {
+	text    string
+	matches []error
+}
+
+func (e *textError) Error() string { return e.text }
+
+// Unwrap returns the errors that e matches. errors.Is and errors.As walk
+// them.
+func (e *textError) Unwrap() []error { return e.matches }
+
+// withText returns an error with text that still matches what callers check
+// in err with errors.Is: the context error (see contextErr), and the
+// sentinel of blockedKinds or errInvalidProxy that err wraps. These are
+// fixed sentinels with no config text.
+func withText(err error, text string) error {
+	var matches []error
+	for _, b := range blockedKinds {
+		if errors.Is(err, b.err) {
+			matches = append(matches, b.err)
+			break
+		}
+	}
+	if errors.Is(err, errInvalidProxy) {
+		matches = append(matches, errInvalidProxy)
+	}
+	if ctxErr := contextErr(err); ctxErr != nil {
+		matches = append(matches, ctxErr)
+	}
+	return &textError{text: text, matches: matches}
+}
+
+// urlBase returns u without its fragment and its query.
+func urlBase(u string) string {
+	u, _, _ = strings.Cut(u, "#")
+	u, _, _ = strings.Cut(u, "?")
+	return u
 }

@@ -118,7 +118,10 @@ func ReadConfig(ctx context.Context, path, home string) Result {
 	return readUntrusted(ctx, path)
 }
 
-// readGlobalClaudeCode reads ~/.claude.json as Discover does.
+// readGlobalClaudeCode reads ~/.claude.json for ReadConfig. Discover reads
+// this file with readGlobalClaudeCodeState instead, which also knows WorkDir.
+// The servers and the errors are the same, but the State of a top-level
+// server can differ (see globalClaudeCode).
 func readGlobalClaudeCode(ctx context.Context, path string) Result {
 	return ReadClaudeCode(ctx, path, ScopeGlobal, "")
 }
@@ -148,8 +151,11 @@ func globalFor(path, home string) (globalFile, bool) {
 	return globalFile{}, false
 }
 
-// readGlobal reads the global file g below home with the reader that Discover
-// uses for it. The readers give an empty result for a missing file, so
+// readGlobal reads the global file g below home with the reader of g, the
+// one that Discover uses for it. For ~/.claude.json, Discover uses
+// readGlobalClaudeCodeState instead: the servers and the errors are the
+// same, but the State of a top-level server can differ (see
+// globalClaudeCode). The readers give an empty result for a missing file, so
 // readGlobal turns an empty result for a file that went away after the check
 // in globalFor into "file not found". See ReadConfig.
 func readGlobal(ctx context.Context, g globalFile, home string) Result {

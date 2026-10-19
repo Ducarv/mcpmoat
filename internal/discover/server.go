@@ -52,12 +52,59 @@ func (t Transport) IsRemote() bool {
 	return t == TransportHTTP || t == TransportSSE
 }
 
+// State tells whether the client config turns a server on or off.
+//
+// The zero value is StateEnabled. The String values are a stable contract:
+// output uses them.
+type State uint8
+
+// Supported states.
+const (
+	// StateEnabled means that no config that mcpmoat reads turns the server
+	// off. It is the zero value.
+	StateEnabled State = iota
+	// StateDisabled means that a client config turns the server off, for
+	// example enabled = false in Codex or a disabled list in Claude Code.
+	StateDisabled
+	// StateUnapproved means that the server comes from a Claude Code project
+	// file (.mcp.json) that the user did not approve. A top-level server of
+	// ~/.claude.json gets it too when mcpmoat cannot read the
+	// projects.<WorkDir> state, so it cannot tell whether that state turns
+	// the server off (see Discover).
+	StateUnapproved
+	// StateProjectApproved means that Claude Code would run the server, but
+	// only files from the repository approved it: the project settings files
+	// WorkDir/.claude/settings.json or WorkDir/.claude/settings.local.json.
+	// A cloned repository can ship these files, so this approval is not the
+	// user's. inspect treats it as StateUnapproved: it needs the explicit
+	// opt-in.
+	StateProjectApproved
+)
+
+// String returns "enabled", "disabled", "unapproved" or "project-approved",
+// and "unknown" for any other value.
+func (s State) String() string {
+	switch s {
+	case StateEnabled:
+		return "enabled"
+	case StateDisabled:
+		return "disabled"
+	case StateUnapproved:
+		return "unapproved"
+	case StateProjectApproved:
+		return "project-approved"
+	default:
+		return "unknown"
+	}
+}
+
 // Server is one MCP server entry read from a client config file. All config
 // readers return this common model.
 //
 // Values are kept exactly as written in the config. Variable references such
-// as ${VAR} are not expanded. Command is not resolved against PATH, because
-// the scanner later runs exactly the configured command (NFR-04).
+// as ${VAR} are not expanded here: Expand returns a copy with them expanded,
+// as the client does. Command is not resolved against PATH, because the
+// scanner later runs exactly the configured command (NFR-04).
 //
 // Env, Headers, URL and Args mask their values in all output, and every
 // string field is untrusted text from the config file. See the package doc,
@@ -89,6 +136,19 @@ type Server struct {
 	// repository can ship. See the package doc, Untrusted files, for what
 	// inspect must not do with it.
 	Untrusted bool
+
+	// State tells whether the client config turns the server on or off.
+	// State and Untrusted are separate: a server can be both untrusted and
+	// enabled. inspect must not start or connect to a server whose State is
+	// not StateEnabled without an explicit opt-in. StateProjectApproved needs
+	// that opt-in too.
+	//
+	// The zero value, StateEnabled, means that no config that mcpmoat reads
+	// turns the server off. This fails open: a reader that does not set State
+	// gives StateEnabled, also when the client has turned the server off in a
+	// place that mcpmoat does not read. See the package doc for the sources
+	// that each reader reads.
+	State State
 
 	// Transport is how mcpmoat talks to the server.
 	Transport Transport

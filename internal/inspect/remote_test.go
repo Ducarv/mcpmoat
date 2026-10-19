@@ -1044,6 +1044,135 @@ func TestRemoteUntrusted(t *testing.T) {
 	})
 }
 
+// TestRemoteStateGate proves that Remote sends nothing to a server whose
+// State is not discover.StateEnabled without AllowDisabled (issue #87), and
+// that it connects with the opt-in. Remote checks the gates in the order of
+// checkGates (the state gate first, then the untrusted gate), and both
+// before the transport.
+func TestRemoteStateGate(t *testing.T) {
+	t.Parallel()
+
+	const (
+		reasonDisabled        = "turned off in the client config"
+		reasonUnapproved      = "not approved in the client config"
+		reasonProjectApproved = "approved only by files from the repository"
+		reasonUntrusted       = "untrusted project server"
+	)
+
+	tests := []struct {
+		name       string
+		state      discover.State
+		untrusted  bool
+		opts       RemoteOptions
+		wantReason string // "" means that Remote connects
+	}{
+		{name: "disabled is refused", state: discover.StateDisabled, wantReason: reasonDisabled},
+		{name: "unapproved is refused", state: discover.StateUnapproved, wantReason: reasonUnapproved},
+		{name: "project-approved is refused", state: discover.StateProjectApproved, wantReason: reasonProjectApproved},
+		{name: "unknown state is refused", state: discover.State(42), wantReason: reasonDisabled},
+		{
+			name:       "AllowUntrusted does not open the state gate",
+			state:      discover.StateDisabled,
+			opts:       RemoteOptions{AllowUntrusted: true},
+			wantReason: reasonDisabled,
+		},
+		{
+			// Both gates refuse the server: the state gate comes first.
+			name:       "state gate comes first",
+			state:      discover.StateUnapproved,
+			untrusted:  true,
+			wantReason: reasonUnapproved,
+		},
+		{
+			name:       "state gate comes first for project-approved",
+			state:      discover.StateProjectApproved,
+			untrusted:  true,
+			wantReason: reasonProjectApproved,
+		},
+		{
+			name:       "AllowDisabled does not open the untrusted gate",
+			state:      discover.StateUnapproved,
+			untrusted:  true,
+			opts:       RemoteOptions{AllowDisabled: true},
+			wantReason: reasonUntrusted,
+		},
+		{
+			name:       "untrusted and disabled with AllowUntrusted only",
+			state:      discover.StateDisabled,
+			untrusted:  true,
+			opts:       RemoteOptions{AllowUntrusted: true},
+			wantReason: reasonDisabled,
+		},
+		{name: "disabled connects with AllowDisabled", state: discover.StateDisabled, opts: RemoteOptions{AllowDisabled: true}},
+		{name: "unapproved connects with AllowDisabled", state: discover.StateUnapproved, opts: RemoteOptions{AllowDisabled: true}},
+		{name: "project-approved connects with AllowDisabled", state: discover.StateProjectApproved, opts: RemoteOptions{AllowDisabled: true}},
+		{
+			name:      "untrusted project-approved connects with both opt-ins",
+			state:     discover.StateProjectApproved,
+			untrusted: true,
+			opts:      RemoteOptions{AllowDisabled: true, AllowUntrusted: true},
+		},
+		{
+			name:      "untrusted unapproved connects with both opt-ins",
+			state:     discover.StateUnapproved,
+			untrusted: true,
+			opts:      RemoteOptions{AllowDisabled: true, AllowUntrusted: true},
+		},
+	}
+	for _, sse := range []bool{false, true} {
+		for _, tt := range tests {
+			t.Run(string(rmKind(sse))+"/"+tt.name, func(t *testing.T) {
+				t.Parallel()
+				ts, rec := startFixture(t, fixtureOpts{SSE: sse})
+				srv := rmServer(rmKind(sse), rmWithSecretQuery(fixtureURL(ts)), rmHeaders())
+				srv.State = tt.state
+				srv.Untrusted = tt.untrusted
+
+				got, err := Remote(t.Context(), srv, tt.opts)
+
+				if tt.wantReason == "" {
+					if err != nil {
+						t.Fatalf("Remote() error = %v", err)
+					}
+					rmCheckResult(t, got)
+					return
+				}
+				ce := rmRequireConnectError(t, err, KindConfig)
+				if !strings.Contains(ce.Reason, tt.wantReason) {
+					t.Errorf("Reason = %q, want it to contain %q", ce.Reason, tt.wantReason)
+				}
+				if n := len(rec.requests()); n != 0 {
+					t.Errorf("fixture got %d request(s), want 0", n)
+				}
+				if len(ce.Warnings) != 0 {
+					t.Errorf("Warnings = %+v, want none: nothing was sent", ce.Warnings)
+				}
+				if !reflect.DeepEqual(got, Result{}) {
+					t.Errorf("Remote() Result = %+v, want the zero Result", got)
+				}
+			})
+		}
+	}
+
+	t.Run("refused before the transport check", func(t *testing.T) {
+		t.Parallel()
+		srv := discover.Server{
+			Name:      rmServerName,
+			Transport: discover.TransportStdio,
+			Command:   "echo",
+			State:     discover.StateDisabled,
+		}
+		_, err := Remote(t.Context(), srv, RemoteOptions{})
+		ce := rmRequireConnectError(t, err, KindConfig)
+		if !strings.Contains(ce.Reason, reasonDisabled) {
+			t.Errorf("Reason = %q, want it to contain %q", ce.Reason, reasonDisabled)
+		}
+		if !errors.Is(err, errDisabled) {
+			t.Errorf("Remote() error = %v, want errors.Is errDisabled", err)
+		}
+	})
+}
+
 // rmUserinfoURL returns the fixture URL with "user:pw@" user info and the
 // secret query.
 func rmUserinfoURL(ts *httptest.Server) string {
@@ -1613,6 +1742,194 @@ func TestRemoteClientIdentity(t *testing.T) {
 				t.Errorf("requests with client info = %v, want %q among them", from, tt.wantFrom)
 			}
 		})
+	}
+}
+
+// TestRemoteClientIdentityPerClient proves that Remote sends the client info
+// of the client that declared the server (issue #97), so that a server
+// cannot tell mcpmoat from that client by name. A client that inspect does
+// not know gets the neutral identity. No request names mcpmoat.
+func TestRemoteClientIdentityPerClient(t *testing.T) {
+	t.Parallel()
+
+	clients := []struct {
+		client    discover.Client
+		wantName  string
+		wantTitle string
+	}{
+		{client: discover.ClientClaudeCode, wantName: "claude-code"},
+		{client: discover.ClientCursor, wantName: "cursor-vscode"},
+		{client: discover.ClientCodex, wantName: "codex-mcp-client", wantTitle: "Codex"},
+		{client: discover.Client("other-client"), wantName: clientName},
+		{client: "", wantName: clientName},
+	}
+	transports := []struct {
+		name      string
+		sse       bool
+		stateless bool
+		wantFrom  string
+	}{
+		{name: "http initialize", wantFrom: "initialize"},
+		{name: "http new protocol", stateless: true, wantFrom: "server/discover"},
+		{name: "sse initialize", sse: true, wantFrom: "initialize"},
+	}
+	for _, c := range clients {
+		for _, tr := range transports {
+			t.Run(string(c.client)+"/"+tr.name, func(t *testing.T) {
+				t.Parallel()
+				want := clientIdentity(c.client)
+				if want.Name != c.wantName || want.Title != c.wantTitle || want.Version == "" {
+					t.Fatalf("clientIdentity(%q) = %+v, want name %q, title %q and a version", c.client, want, c.wantName, c.wantTitle)
+				}
+
+				ts, rec := startFixture(t, fixtureOpts{SSE: tr.sse, Stateless: tr.stateless})
+				srv := rmServer(rmKind(tr.sse), fixtureURL(ts), nil)
+				srv.Client = c.client
+				got, err := Remote(t.Context(), srv, RemoteOptions{})
+				if err != nil {
+					t.Fatalf("Remote() error = %v", err)
+				}
+				rmCheckResult(t, got)
+
+				var from []string
+				for _, req := range rec.requests() {
+					rmCheckNeutral(t, req)
+					if req.Method != http.MethodPost {
+						continue
+					}
+					method, info := rmClientInfo(t, req.Body)
+					if info == nil {
+						continue
+					}
+					from = append(from, method)
+					if !reflect.DeepEqual(*info, *want) {
+						t.Errorf("%s: client info = %+v, want %+v", method, *info, *want)
+					}
+				}
+				if !slices.Contains(from, tr.wantFrom) {
+					t.Errorf("requests with client info = %v, want %q among them", from, tr.wantFrom)
+				}
+			})
+		}
+	}
+}
+
+// rmTenant is the value of the variable in the URL path of
+// TestSDKInspectRemoteExpand. It is plain text, not credential-shaped, so
+// discover.RedactURL does not mask it and only the scrub list of the
+// expanded values (lookupRecorder) can remove it from error text.
+const rmTenant = "acme-team-workspace"
+
+// rmExpandToken is the value of the variable in the Authorization header of
+// TestSDKInspectRemoteExpand.
+const rmExpandToken = "tok-NOTREAL-expand-5c2e" //nolint:gosec // G101: fake test credential
+
+// TestSDKInspectRemoteExpand proves that SDKInspector.Inspect expands the
+// ${VAR} placeholders of a remote Claude Code server with its environ hook
+// (issue #88): the expanded URL and header reach the server. When the
+// server fails and echoes an expanded value, the error holds the value
+// masked, and ConnectError.URL is the URL as discovered, not the expanded
+// one.
+func TestSDKInspectRemoteExpand(t *testing.T) {
+	t.Parallel()
+
+	environ := []string{
+		"MCPMOAT_TEST_TENANT=" + rmTenant,
+		"MCPMOAT_TEST_TOKEN=" + rmExpandToken,
+	}
+	for _, sse := range []bool{false, true} {
+		for _, fail := range []bool{false, true} {
+			name := string(rmKind(sse)) + "/success"
+			if fail {
+				name = string(rmKind(sse)) + "/server echoes the tenant"
+			}
+			t.Run(name, func(t *testing.T) {
+				t.Parallel()
+				var echoed atomic.Int32
+				mcpSrv := newFixtureMCPServer()
+				if fail {
+					mcpSrv.AddReceivingMiddleware(onMethod(methodListTools, func(context.Context, string, mcp.Request) (mcp.Result, error) {
+						echoed.Add(1)
+						return nil, fmt.Errorf("unknown tenant %s", rmTenant)
+					}))
+				}
+				// The wrapper serves the fixture under /<tenant>/mcp. The SSE
+				// message endpoint is relative to the rewritten URL, so later
+				// POSTs go to /mcp directly. The recorder of startFixture
+				// sees the rewritten path, so the wrapper counts the requests
+				// to the expanded path itself.
+				var expandedPath atomic.Int32
+				wrap := func(next http.Handler) http.Handler {
+					return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+						if rest, ok := strings.CutPrefix(r.URL.Path, "/"+rmTenant); ok {
+							expandedPath.Add(1)
+							r2 := r.Clone(r.Context())
+							r2.URL.Path = rest
+							r2.URL.RawPath = ""
+							next.ServeHTTP(w, r2)
+							return
+						}
+						next.ServeHTTP(w, r)
+					})
+				}
+				ts, rec := startFixture(t, fixtureOpts{SSE: sse, Server: mcpSrv, Wrap: wrap})
+
+				srv := rmServer(rmKind(sse), ts.URL+"/${MCPMOAT_TEST_TENANT}/mcp",
+					map[string]string{"Authorization": "Bearer ${MCPMOAT_TEST_TOKEN}"})
+				srv.Client = discover.ClientClaudeCode
+				inspector := New(SDKOptions{})
+				inspector.environ = func() []string { return environ }
+
+				got, err := inspector.Inspect(t.Context(), srv)
+
+				// A request went to the expanded path, and the first request
+				// carried the expanded header, so the expansion reached the
+				// server.
+				reqs := rec.requests()
+				if len(reqs) == 0 {
+					t.Fatalf("fixture got no request (error: %v)", err)
+				}
+				if expandedPath.Load() == 0 {
+					t.Errorf("no request went to the expanded path /%s/mcp", rmTenant)
+				}
+				if auth := reqs[0].Header.Get("Authorization"); auth != "Bearer "+rmExpandToken {
+					t.Errorf("first request Authorization is not the expanded header (value not shown)")
+				}
+
+				if !fail {
+					if err != nil {
+						t.Fatalf("Inspect() error = %v", err)
+					}
+					rmCheckResult(t, got)
+					return
+				}
+
+				if echoed.Load() == 0 {
+					t.Fatalf("the server never echoed the tenant; the test checks nothing (error: %v)", err)
+				}
+				var ce *ConnectError
+				if !errors.As(err, &ce) {
+					t.Fatalf("Inspect() error = %v (%T), want *ConnectError", err, err)
+				}
+				if ce.Kind != KindProtocol {
+					t.Errorf("Kind = %q (reason %q), want %q", ce.Kind, ce.Reason, KindProtocol)
+				}
+				if want := srv.URL.String(); ce.URL != want {
+					t.Errorf("ConnectError.URL = %q, want the URL as discovered %q", ce.URL, want)
+				}
+				assertNoSecrets(t, err, rmTenant, rmExpandToken)
+				// The echo must reach the reason or the cause, masked; else
+				// the test would pass on an error that dropped the server
+				// text.
+				text := ce.Reason
+				if cause := errors.Unwrap(ce); cause != nil {
+					text += " | " + cause.Error()
+				}
+				if want := "unknown tenant " + discover.Mask; !strings.Contains(text, want) {
+					t.Errorf("Reason and cause = %q, want them to contain %q", text, want)
+				}
+			})
+		}
 	}
 }
 

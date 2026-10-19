@@ -56,7 +56,9 @@ const (
 )
 
 // globalFile is one of the user's own config files, and the read that
-// Discover does for it.
+// ReadConfig does for it. Discover uses the same read for Cursor and Codex;
+// for ~/.claude.json it calls readGlobalClaudeCodeState instead (see the
+// globalClaudeCode var).
 type globalFile struct {
 	rel  string // one of the global file constants, such as globalCodexFile
 	read func(ctx context.Context, path string) Result
@@ -70,7 +72,20 @@ func (g globalFile) path(home string) string {
 // The user's own config files, each with the reader and the scope that
 // Discover uses for it. buildSteps uses them for the global steps of
 // Discover, and globalFor finds them for ReadConfig through globalFiles, so
-// both use one definition. No code writes to them.
+// both use one list of paths, scopes and readers. No code writes to them.
+//
+// One difference: for ~/.claude.json, Discover calls
+// readGlobalClaudeCodeState with its WorkDir, not globalClaudeCode.read.
+// ReadConfig knows no WorkDir, so the State of a top-level server can differ
+// in two ways:
+//
+//   - In Discover, the projects.<WorkDir>.disabledMcpServers list can give
+//     it StateDisabled. In ReadConfig it keeps StateEnabled.
+//   - In Discover, it gets StateUnapproved when the projects.<WorkDir> state
+//     cannot be read (see readGlobalClaudeCodeState). In ReadConfig it keeps
+//     StateEnabled.
+//
+// The servers, the errors and all other fields are the same.
 var (
 	globalClaudeCode = globalFile{globalClaudeCodeFile, readGlobalClaudeCode}
 	globalCursor     = globalFile{globalCursorFile, readGlobalCursor}
@@ -106,7 +121,8 @@ type step struct {
 // run:
 //
 //  1. Home/.claude.json
-//  2. WorkDir/.mcp.json
+//  2. WorkDir/.mcp.json, then the Claude Code settings files (see State
+//     below)
 //  3. Home/.cursor/mcp.json
 //  4. WorkDir/.cursor/mcp.json (skipped if it is the same file as step 3)
 //  5. Home/.codex/config.toml
@@ -125,12 +141,49 @@ type step struct {
 // servers and their errors have Untrusted set, and a symlink that leaves
 // WorkDir is refused. See the package doc, Untrusted files.
 //
+// State: each server gets the State that its client config gives it. For
+// Claude Code, Discover joins data from more than one file:
+//
+//   - Step 1 reads the projects.<WorkDir> object of Home/.claude.json. Its
+//     disabledMcpServers list gives StateDisabled to the top-level servers
+//     of that file. The servers of projects.<path>.mcpServers get the state
+//     of their own project. The project key must match WorkDir as given or
+//     WorkDir with its symlinks resolved (see readGlobalClaudeCodeState).
+//   - Step 1 fails closed. When the file exists but its projects section
+//     could not be read to the end (for example the file is refused as a
+//     whole), or when a projects.<WorkDir> object has an error, a
+//     top-level server with StateEnabled gets StateUnapproved: mcpmoat
+//     cannot confirm that the project does not turn it off.
+//   - Step 2, only when WorkDir/.mcp.json has servers, also reads the
+//     settings files WorkDir/.claude/settings.local.json and
+//     WorkDir/.claude/settings.json (untrusted, confined to WorkDir) and
+//     Home/.claude/settings.json (trusted). Each .mcp.json server gets
+//     StateEnabled, StateProjectApproved, StateDisabled or StateUnapproved
+//     from the approval lists of these files and of the projects.<WorkDir>
+//     object (see mcpjsonState). An approval only from the untrusted project
+//     settings files gives StateProjectApproved, not StateEnabled. A
+//     settings file that is missing gives no setting. A settings file with
+//     an error gives no setting and one FileError, after the errors of
+//     .mcp.json. The errors of the project settings files have Untrusted
+//     set. When WorkDir is Home, WorkDir/.claude/settings.json is the user
+//     file: it is read once, as the trusted user file.
+//   - Step 2 fails closed. When a settings file has an error, or step 1
+//     could not read the projects.<WorkDir> state, no .mcp.json server keeps
+//     an approval: a server with StateEnabled or StateProjectApproved gets
+//     StateUnapproved, and StateDisabled stays. The FileError tells the user
+//     why (see setMcpjsonStates).
+//
+// A cloned repository can ship settings files that approve its own .mcp.json
+// servers. Such an approval gives only StateProjectApproved, which inspect
+// treats as StateUnapproved, and the servers stay Untrusted.
+//
 // If ctx ends, Discover stops and returns what it has. It adds one FileError
 // with the reason "canceled" for the first file that it does not read because
 // ctx ended: the file that was being read, or the next file if no read had
-// started. When that file is step 2 or 4, the error has Untrusted set. When
-// ctx ends after the last read, or when there is no file to read, Discover
-// adds no error. A caller that must know can check ctx.Err().
+// started. The error has Untrusted set when that file is untrusted: a
+// project file of step 2 or 4, or a settings file in WorkDir. When ctx ends
+// after the last read, or when there is no file to read, Discover adds no
+// error. A caller that must know can check ctx.Err().
 func Discover(ctx context.Context, opts Options) Result {
 	return runSteps(ctx, buildSteps(opts))
 }
@@ -172,7 +225,8 @@ func hasCanceled(errs []*FileError) bool {
 // steps with one loop. runSteps passes the context to each step. The global
 // steps take their path and their reader from the globalFile values
 // (globalClaudeCode, globalCursor and globalCodex), so ReadConfig reads a
-// global file exactly as Discover does.
+// global file as Discover does. The one difference is the Claude Code step,
+// which also uses WorkDir (see the globalFile values).
 func buildSteps(opts Options) []step {
 	// Clean the paths once. filepath.Clean("") returns ".", so an empty value
 	// must stay empty: it means "skip these files".
@@ -191,11 +245,38 @@ func buildSteps(opts Options) []step {
 		}})
 	}
 
-	addGlobal(globalClaudeCode)
+	// legacyState is the projects.<WorkDir> state of ~/.claude.json, and
+	// legacyFailed tells that this state could not be read (see
+	// readGlobalClaudeCodeState). The Claude Code step writes them and the
+	// .mcp.json step reads them. Both closures capture the same variables. runSteps
+	// calls the steps one after the other in one goroutine, in the order of
+	// steps, so the write always happens before the read and there is no
+	// data race. If a later change runs the steps in parallel, these
+	// variables need a sync, or the .mcp.json step must wait for the Claude
+	// Code step. When Home is empty, or ctx ends before the Claude Code
+	// step, the state stays zero and legacyFailed stays false.
+	var legacyState claudeProjectState
+	var legacyFailed bool
+	if opts.Home != "" {
+		path := globalClaudeCode.path(opts.Home)
+		steps = append(steps, step{path: path, read: func(ctx context.Context) Result {
+			res, st, failed := readGlobalClaudeCodeState(ctx, path, opts.WorkDir)
+			legacyState, legacyFailed = st, failed
+			return res
+		}})
+	}
 	if opts.WorkDir != "" {
 		path := filepath.Join(opts.WorkDir, projectClaudeCodeFile)
 		steps = append(steps, step{path: path, untrusted: true, read: func(ctx context.Context) Result {
-			return ReadClaudeCode(ctx, path, ScopeProject, opts.WorkDir)
+			res := ReadClaudeCode(ctx, path, ScopeProject, opts.WorkDir)
+			// The settings files only matter for .mcp.json servers, so they
+			// are not read when there are none.
+			if len(res.Servers) == 0 {
+				return res
+			}
+			errs := setMcpjsonStates(ctx, res.Servers, opts.Home, opts.WorkDir, legacyState, legacyFailed)
+			res.Errors = append(res.Errors, errs...)
+			return res
 		}})
 	}
 

@@ -45,6 +45,7 @@ func sampleResult() inspect.Result {
 		Warnings: []inspect.Warning{
 			{Kind: inspect.WarnCleartextSecrets, HeaderKeys: []string{"Authorization", "X-Api-Key"}},
 			{Kind: inspect.WarnCleartextSecrets, URLUserInfo: true},
+			{Kind: inspect.WarnUndeclaredCapability, Capabilities: []string{"tools", "prompts"}},
 		},
 	}
 }
@@ -87,12 +88,18 @@ func TestFakeInspect(t *testing.T) {
 			name: "result with empty slices stays empty, not nil",
 			results: map[string]inspect.Result{"a": {
 				ResourceTemplates: []inspect.ResourceTemplate{},
-				Warnings:          []inspect.Warning{{Kind: inspect.WarnCleartextSecrets, HeaderKeys: []string{}}},
+				Warnings: []inspect.Warning{
+					{Kind: inspect.WarnCleartextSecrets, HeaderKeys: []string{}},
+					{Kind: inspect.WarnUndeclaredCapability, Capabilities: []string{}},
+				},
 			}},
 			server: "a",
 			wantResult: inspect.Result{
 				ResourceTemplates: []inspect.ResourceTemplate{},
-				Warnings:          []inspect.Warning{{Kind: inspect.WarnCleartextSecrets, HeaderKeys: []string{}}},
+				Warnings: []inspect.Warning{
+					{Kind: inspect.WarnCleartextSecrets, HeaderKeys: []string{}},
+					{Kind: inspect.WarnUndeclaredCapability, Capabilities: []string{}},
+				},
 			},
 		},
 		{
@@ -296,6 +303,11 @@ func TestFakeInspectClonesSlices(t *testing.T) {
 		{name: "warning header key element", change: func(r *inspect.Result) { r.Warnings[0].HeaderKeys[0] = "changed" }},
 		{name: "warning header key append", change: func(r *inspect.Result) {
 			r.Warnings[0].HeaderKeys = append(r.Warnings[0].HeaderKeys, "Extra")
+		}},
+		{name: "warning capabilities replaced", change: func(r *inspect.Result) { r.Warnings[2].Capabilities = nil }},
+		{name: "warning capability element", change: func(r *inspect.Result) { r.Warnings[2].Capabilities[0] = "changed" }},
+		{name: "warning capability append", change: func(r *inspect.Result) {
+			r.Warnings[2].Capabilities = append(r.Warnings[2].Capabilities, "resources")
 		}},
 		{name: "warning append", change: func(r *inspect.Result) {
 			r.Warnings = append(r.Warnings, inspect.Warning{Kind: "extra"})

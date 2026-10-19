@@ -21,7 +21,9 @@ import (
 )
 
 // These tests cover the warning about secrets sent over plain http:// to a
-// host that is not loopback (issue #98).
+// host that is not loopback (issue #98), the warning about a proxy that keeps
+// mcpmoat from pinning the DNS answer (issue #106), and how Remote joins them
+// with the warning about undeclared lists (issue #97).
 
 // Fake secrets of the warning tests. No warning and no error text may hold
 // them.
@@ -333,11 +335,16 @@ func (s *wnStubLookup) assertKnownOnly(t *testing.T) {
 func wnBaseTransport(t *testing.T) (*http.Transport, *wnStubLookup) {
 	t.Helper()
 	stub := &wnStubLookup{hosts: map[string]bool{"mcp.example.test": true, "localhost": true}}
-	tr := newBaseTransport(stub.lookup)
+	tr := newBaseTransport(stub.lookup, "")
 	tr.Proxy = nil
 	t.Cleanup(tr.CloseIdleConnections)
 	return tr, stub
 }
+
+// wnNoProxy is a proxy function that never uses a proxy. Tests that set
+// baseTransport and use a DNS name also set RemoteOptions.proxy to it, so the
+// HTTP_PROXY of the machine cannot add a dns-pin-unavailable warning.
+func wnNoProxy(*http.Request) (*url.URL, error) { return nil, nil }
 
 // wnStartServer starts a plain HTTP server on 127.0.0.1 with the fixture MCP
 // server at "/mcp". The SDK handlers refuse a request to a loopback listener
@@ -347,7 +354,12 @@ func wnBaseTransport(t *testing.T) (*http.Transport, *wnStubLookup) {
 // outermost handler, so it sees every request, even one that wrap refuses.
 func wnStartServer(t *testing.T, sse bool, wrap func(http.Handler) http.Handler) (*httptest.Server, *recorder) {
 	t.Helper()
-	mcpSrv := newFixtureMCPServer()
+	return wnStartServerFor(t, sse, newFixtureMCPServer(), wrap)
+}
+
+// wnStartServerFor is wnStartServer with the MCP server mcpSrv.
+func wnStartServerFor(t *testing.T, sse bool, mcpSrv *mcp.Server, wrap func(http.Handler) http.Handler) (*httptest.Server, *recorder) {
+	t.Helper()
 	getServer := func(*http.Request) *mcp.Server { return mcpSrv }
 	var h http.Handler
 	if sse {
@@ -451,7 +463,7 @@ func TestRemoteCleartextWarning(t *testing.T) {
 				srv.Transport = discover.TransportSSE
 			}
 
-			got, err := Remote(t.Context(), srv, RemoteOptions{baseTransport: base})
+			got, err := Remote(t.Context(), srv, RemoteOptions{baseTransport: base, proxy: wnNoProxy})
 			if err != nil {
 				t.Fatalf("Remote() error = %v", err)
 			}
@@ -547,7 +559,7 @@ func TestRemoteCleartextWarningOnFailure(t *testing.T) {
 				srv.Transport = discover.TransportSSE
 			}
 
-			got, err := Remote(t.Context(), srv, RemoteOptions{baseTransport: base})
+			got, err := Remote(t.Context(), srv, RemoteOptions{baseTransport: base, proxy: wnNoProxy})
 			if err == nil {
 				t.Fatal("Remote() error = nil, want an HTTP 401 error")
 			}
@@ -615,6 +627,15 @@ func TestRemoteCleartextWarningNotOnConfigError(t *testing.T) {
 			wantMsg: "untrusted",
 		},
 		{
+			name: "disabled server",
+			srv: func() discover.Server {
+				srv := wnServer(rawURL, map[string]string{"X-Api-Key": wnHeaderValue})
+				srv.State = discover.StateDisabled
+				return srv
+			},
+			wantMsg: "turned off",
+		},
+		{
 			name: "reserved header",
 			srv: func() discover.Server {
 				return wnServer(rawURL, map[string]string{"X-Api-Key": wnHeaderValue, "Host": "evil.example"})
@@ -626,7 +647,7 @@ func TestRemoteCleartextWarningNotOnConfigError(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			base := &rmNoRequests{t: t}
-			_, err := Remote(t.Context(), tt.srv(), RemoteOptions{baseTransport: base})
+			_, err := Remote(t.Context(), tt.srv(), RemoteOptions{baseTransport: base, proxy: wnNoProxy})
 			var ce *ConnectError
 			if !errors.As(err, &ce) {
 				t.Fatalf("Remote() error = %T (%v), want *ConnectError", err, err)
@@ -641,6 +662,339 @@ func TestRemoteCleartextWarningNotOnConfigError(t *testing.T) {
 				t.Errorf("base transport calls = %d, want 0", n)
 			}
 			assertNoSecrets(t, err, wnHeaderValue)
+		})
+	}
+}
+
+// wnProxyCanary is the password in the proxy URL of the DNS pin tests. The
+// proxy URL can hold credentials, so no warning may hold it, nor the proxy
+// host.
+const (
+	wnProxyCanary = "proxy-pa55-CANARY"
+	wnProxyHost   = "proxy.wn.invalid"
+	wnProxyURL    = "http://proxy-user:" + wnProxyCanary + "@" + wnProxyHost + ":3128"
+)
+
+// wnProxyTo returns a proxy function that sends every request to the proxy
+// rawURL. It records the request URLs that it gets.
+type wnProxyTo struct {
+	rawURL string
+
+	mu   sync.Mutex
+	seen []string
+}
+
+func (p *wnProxyTo) proxy(req *http.Request) (*url.URL, error) {
+	p.mu.Lock()
+	p.seen = append(p.seen, req.URL.String())
+	p.mu.Unlock()
+	return url.Parse(p.rawURL)
+}
+
+// calls returns the request URLs that the proxy function got.
+func (p *wnProxyTo) calls() []string {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return slices.Clone(p.seen)
+}
+
+// wnAssertNoProxyText fails if the %#v form of v holds the proxy password,
+// the proxy user or the proxy host.
+func wnAssertNoProxyText(t *testing.T, what string, v any) {
+	t.Helper()
+	text := fmt.Sprintf("%#v", v)
+	for _, part := range []string{wnProxyCanary, "proxy-user", wnProxyHost} {
+		if strings.Contains(text, part) {
+			t.Errorf("%s holds the proxy text %q: %s", what, part, text)
+		}
+	}
+}
+
+// TestDNSPinWarning checks dnsPinWarning with injected proxy functions: a
+// DNS name that goes through a proxy gives one warning; an IP literal, no
+// proxy, a proxy error and missing inputs give none. No warning holds any
+// part of the proxy URL or of the server URL.
+func TestDNSPinWarning(t *testing.T) {
+	t.Parallel()
+
+	toProxy := func(*http.Request) (*url.URL, error) { return url.Parse(wnProxyURL) }
+	// proxyErr returns a URL and an error. The error wins: the transport
+	// reports it itself, so no warning.
+	proxyErr := func(*http.Request) (*url.URL, error) {
+		u, _ := url.Parse(wnProxyURL)
+		return u, errors.New("bad proxy " + wnProxyURL)
+	}
+	want := []Warning{{Kind: WarnDNSPinUnavailable}}
+
+	tests := []struct {
+		name     string
+		endpoint string // "" means a nil endpoint
+		proxy    func(*http.Request) (*url.URL, error)
+		want     []Warning
+	}{
+		{name: "DNS name through a proxy", endpoint: "https://mcp.example.test/mcp", proxy: toProxy, want: want},
+		{name: "DNS name with a port through a proxy", endpoint: "http://mcp.example.test:8080/mcp", proxy: toProxy, want: want},
+		{name: "upper case DNS name through a proxy", endpoint: "https://MCP.Example.TEST/mcp", proxy: toProxy, want: want},
+		{name: "single label name through a proxy", endpoint: "http://intranet/mcp", proxy: toProxy, want: want},
+		{name: "DNS name without a proxy", endpoint: "https://mcp.example.test/mcp", proxy: wnNoProxy},
+		{name: "DNS name with a proxy error", endpoint: "https://mcp.example.test/mcp", proxy: proxyErr},
+		{name: "IPv4 literal through a proxy", endpoint: "http://203.0.113.7:8080/mcp", proxy: toProxy},
+		{name: "IPv6 literal through a proxy", endpoint: "http://[2001:db8::7]:8080/mcp", proxy: toProxy},
+		{name: "IPv6 literal with a zone through a proxy", endpoint: "http://[fe80::1%25en0]:8080/mcp", proxy: toProxy},
+		{name: "IPv4-mapped IPv6 literal through a proxy", endpoint: "http://[::ffff:203.0.113.7]/mcp", proxy: toProxy},
+		{name: "loopback literal through a proxy", endpoint: "http://127.0.0.1:8080/mcp", proxy: toProxy},
+		{name: "empty host", endpoint: "http:///mcp", proxy: toProxy},
+		{name: "nil endpoint", proxy: toProxy},
+		{name: "nil proxy function", endpoint: "https://mcp.example.test/mcp"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			var endpoint *url.URL
+			if tt.endpoint != "" {
+				var err error
+				if endpoint, err = url.Parse(tt.endpoint); err != nil {
+					t.Fatalf("url.Parse(%q) error = %v", tt.endpoint, err)
+				}
+			}
+			got := dnsPinWarning(endpoint, tt.proxy)
+			if !reflect.DeepEqual(got, tt.want) {
+				t.Errorf("dnsPinWarning(%q) = %#v, want %#v", tt.endpoint, got, tt.want)
+			}
+			wnAssertNoProxyText(t, "dnsPinWarning()", got)
+			if text := fmt.Sprintf("%#v", got); strings.Contains(text, "example.test") || strings.Contains(text, "203.0.113.7") {
+				t.Errorf("dnsPinWarning() holds the server host: %s", text)
+			}
+		})
+	}
+}
+
+// TestDNSPinWarningRequest checks the request that dnsPinWarning gives the
+// proxy function: it holds the server URL, so that a NO_PROXY rule for the
+// host works. A proxy function that changes the request does not change the
+// endpoint of the caller.
+func TestDNSPinWarningRequest(t *testing.T) {
+	t.Parallel()
+
+	endpoint, err := url.Parse("https://mcp.example.test:8443/mcp")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var gotURL string
+	proxy := func(req *http.Request) (*url.URL, error) {
+		gotURL = req.URL.String()
+		req.URL.Host = "changed.invalid"
+		req.URL.Path = "/changed"
+		return url.Parse(wnProxyURL)
+	}
+
+	got := dnsPinWarning(endpoint, proxy)
+
+	if want := []Warning{{Kind: WarnDNSPinUnavailable}}; !reflect.DeepEqual(got, want) {
+		t.Errorf("dnsPinWarning() = %#v, want %#v", got, want)
+	}
+	if gotURL != "https://mcp.example.test:8443/mcp" {
+		t.Errorf("proxy function got the URL %q, want the endpoint", gotURL)
+	}
+	if endpoint.String() != "https://mcp.example.test:8443/mcp" {
+		t.Errorf("endpoint after dnsPinWarning = %q, want it unchanged", endpoint)
+	}
+}
+
+// TestRemoteDNSPinWarning is the acceptance test of the proxy warning of
+// issue #106 on the Remote path. The base transport dials 127.0.0.1 with no
+// proxy, so no request goes to the injected proxy; the injected proxy
+// function only decides the warning. Remote returns the warning once, after
+// the cleartext warning, in Result.Warnings on success and in
+// ConnectError.Warnings on failure. No warning and no error holds the proxy
+// URL.
+func TestRemoteDNSPinWarning(t *testing.T) {
+	t.Parallel()
+
+	cleartext := Warning{Kind: WarnCleartextSecrets, HeaderKeys: []string{"X-Api-Key"}}
+	dnsPin := Warning{Kind: WarnDNSPinUnavailable}
+	unauthorized := func(http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+		})
+	}
+
+	tests := []struct {
+		name    string
+		sse     bool
+		host    string
+		header  bool
+		noProxy bool
+		fail    bool
+		want    []Warning
+	}{
+		{name: "http DNS name", host: "mcp.example.test", want: []Warning{dnsPin}},
+		{name: "sse DNS name", sse: true, host: "mcp.example.test", want: []Warning{dnsPin}},
+		{name: "http DNS name with a header", host: "mcp.example.test", header: true, want: []Warning{cleartext, dnsPin}},
+		{name: "sse DNS name with a header", sse: true, host: "mcp.example.test", header: true, want: []Warning{cleartext, dnsPin}},
+		{name: "http DNS name without a proxy", host: "mcp.example.test", header: true, noProxy: true, want: []Warning{cleartext}},
+		{name: "http IP literal", host: "127.0.0.1", header: true},
+		{name: "http DNS name, 401", host: "mcp.example.test", fail: true, want: []Warning{dnsPin}},
+		{name: "http DNS name with a header, 401", host: "mcp.example.test", header: true, fail: true, want: []Warning{cleartext, dnsPin}},
+		{name: "sse DNS name with a header, 401", sse: true, host: "mcp.example.test", header: true, fail: true, want: []Warning{cleartext, dnsPin}},
+		{name: "http IP literal, 401", host: "127.0.0.1", header: true, fail: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			var wrap func(http.Handler) http.Handler
+			if tt.fail {
+				wrap = unauthorized
+			}
+			ts, rec := wnStartServer(t, tt.sse, wrap)
+			base, stub := wnBaseTransport(t)
+			proxy := &wnProxyTo{rawURL: wnProxyURL}
+			opts := RemoteOptions{baseTransport: base, proxy: proxy.proxy}
+			if tt.noProxy {
+				opts.proxy = wnNoProxy
+			}
+
+			var headers map[string]string
+			if tt.header {
+				headers = map[string]string{"X-Api-Key": wnHeaderValue}
+			}
+			srv := wnServer("http://"+tt.host+":"+wnPort(t, ts)+"/mcp", headers)
+			srv.Name = rmServerName
+			if tt.sse {
+				srv.Transport = discover.TransportSSE
+			}
+
+			got, err := Remote(t.Context(), srv, opts)
+
+			var gotWarnings []Warning
+			if tt.fail {
+				var ce *ConnectError
+				if !errors.As(err, &ce) {
+					t.Fatalf("Remote() error = %T (%v), want *ConnectError", err, err)
+				}
+				if ce.Kind != KindHTTP || ce.Status != http.StatusUnauthorized {
+					t.Errorf("Kind, Status = %q, %d; want %q, %d (error: %v)", ce.Kind, ce.Status, KindHTTP, http.StatusUnauthorized, err)
+				}
+				if got.Warnings != nil {
+					t.Errorf("Result.Warnings on failure = %#v, want nil (the warnings are on the error)", got.Warnings)
+				}
+				gotWarnings = ce.Warnings
+				wnAssertNoProxyText(t, "ConnectError", *ce)
+				assertNoSecrets(t, err, wnProxyCanary, wnProxyHost, wnHeaderValue)
+			} else {
+				if err != nil {
+					t.Fatalf("Remote() error = %v", err)
+				}
+				if len(got.Tools) == 0 {
+					t.Error("Result.Tools is empty; the inspection did not list the fixture tools")
+				}
+				gotWarnings = got.Warnings
+				wnAssertNoProxyText(t, "Result", got)
+			}
+			if !wnEqual(gotWarnings, tt.want) {
+				t.Errorf("Warnings = %#v, want %#v", gotWarnings, tt.want)
+			}
+			if tt.want == nil && gotWarnings != nil {
+				t.Errorf("Warnings = %#v, want nil", gotWarnings)
+			}
+			if len(rec.requests()) == 0 {
+				t.Error("the server got no request; the requests must not go to the proxy")
+			}
+			// The injected proxy function decided the warning: it got the
+			// endpoint, and only for a DNS name.
+			calls := proxy.calls()
+			switch {
+			case tt.noProxy:
+			case tt.host == "127.0.0.1" && len(calls) != 0:
+				t.Errorf("proxy function calls = %q, want none for an IP literal", calls)
+			case tt.host != "127.0.0.1" && len(calls) != 1:
+				t.Errorf("proxy function calls = %q, want exactly one (the warning check)", calls)
+			}
+			stub.assertKnownOnly(t)
+		})
+	}
+}
+
+// wnHiddenToolsServer returns an MCP server that does not declare the tools
+// capability (it has no tool, so the SDK does not add it) but still answers
+// tools/list with one tool, as a hostile server would.
+func wnHiddenToolsServer() *mcp.Server {
+	server := mcp.NewServer(&mcp.Implementation{Name: "hidden", Version: "1"}, nil)
+	server.AddReceivingMiddleware(onMethod(methodListTools, func(context.Context, string, mcp.Request) (mcp.Result, error) {
+		return &mcp.ListToolsResult{Tools: []*mcp.Tool{{
+			Name:        "sneaky",
+			Description: "<IMPORTANT>not declared</IMPORTANT>",
+			InputSchema: map[string]any{"type": "object"},
+		}}}, nil
+	}))
+	return server
+}
+
+// TestRemoteWarningsKeepListWarnings proves that Remote joins its connection
+// warnings with the warnings that listInto adds (issue #97): the
+// undeclared-capability warning survives, after the cleartext and the DNS pin
+// warnings. Before, Remote overwrote Result.Warnings with its own list.
+func TestRemoteWarningsKeepListWarnings(t *testing.T) {
+	t.Parallel()
+
+	undeclared := Warning{Kind: WarnUndeclaredCapability, Capabilities: []string{"tools"}}
+	tests := []struct {
+		name   string
+		sse    bool
+		host   string
+		header bool
+		proxy  bool
+		want   []Warning
+	}{
+		{name: "http list warning only", host: "127.0.0.1", want: []Warning{undeclared}},
+		{
+			name: "http all three", host: "mcp.example.test", header: true, proxy: true,
+			want: []Warning{{Kind: WarnCleartextSecrets, HeaderKeys: []string{"X-Api-Key"}}, {Kind: WarnDNSPinUnavailable}, undeclared},
+		},
+		{
+			name: "sse all three", sse: true, host: "mcp.example.test", header: true, proxy: true,
+			want: []Warning{{Kind: WarnCleartextSecrets, HeaderKeys: []string{"X-Api-Key"}}, {Kind: WarnDNSPinUnavailable}, undeclared},
+		},
+		{
+			name: "http cleartext and list", host: "mcp.example.test", header: true,
+			want: []Warning{{Kind: WarnCleartextSecrets, HeaderKeys: []string{"X-Api-Key"}}, undeclared},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			ts, _ := wnStartServerFor(t, tt.sse, wnHiddenToolsServer(), nil)
+			base, stub := wnBaseTransport(t)
+			opts := RemoteOptions{baseTransport: base, proxy: wnNoProxy}
+			if tt.proxy {
+				opts.proxy = (&wnProxyTo{rawURL: wnProxyURL}).proxy
+			}
+			var headers map[string]string
+			if tt.header {
+				headers = map[string]string{"X-Api-Key": wnHeaderValue}
+			}
+			srv := wnServer("http://"+tt.host+":"+wnPort(t, ts)+"/mcp", headers)
+			srv.Name = rmServerName
+			if tt.sse {
+				srv.Transport = discover.TransportSSE
+			}
+
+			got, err := Remote(t.Context(), srv, opts)
+			if err != nil {
+				t.Fatalf("Remote() error = %v", err)
+			}
+			if names := toolNames(got.Tools); !reflect.DeepEqual(names, []string{"sneaky"}) {
+				t.Errorf("Result.Tools = %v, want [sneaky]", names)
+			}
+			if !wnEqual(got.Warnings, tt.want) {
+				t.Errorf("Result.Warnings = %#v, want %#v", got.Warnings, tt.want)
+			}
+			if text := fmt.Sprintf("%#v", got.Warnings); strings.Contains(text, "sneaky") || strings.Contains(text, "IMPORTANT") {
+				t.Errorf("Result.Warnings holds server text: %s", text)
+			}
+			wnAssertNoSecrets(t, "Result.Warnings", got.Warnings)
+			wnAssertNoProxyText(t, "Result.Warnings", got.Warnings)
+			stub.assertKnownOnly(t)
 		})
 	}
 }

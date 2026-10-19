@@ -10,6 +10,7 @@ import (
 	"net/netip"
 	"net/url"
 	"slices"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -733,7 +734,7 @@ func TestBaseTransportPinsAcrossConnections(t *testing.T) {
 		return nil, errPDLookup
 	}
 
-	tr := newBaseTransport(lookup)
+	tr := newBaseTransport(lookup, "")
 	// No proxy: the test must not depend on HTTP_PROXY of the machine.
 	tr.Proxy = nil
 	t.Cleanup(tr.CloseIdleConnections)
@@ -1293,5 +1294,504 @@ func TestUsableAddrsUnmapsBeforeSplit(t *testing.T) {
 	}
 	if len(fallbacks) != 0 {
 		t.Errorf("fallbacks = %v, want none", fallbacks)
+	}
+}
+
+// TestPinnedDialerGuard checks the address guard of the configured server
+// name (issue #106): for guardHost, DialContext drops loopback, unspecified,
+// link-local and multicast addresses and fails with errAddrRefused when none
+// are left. It never dials a refused address. Other names, IP literals and
+// "localhost" keep their old rules.
+func TestPinnedDialerGuard(t *testing.T) {
+	t.Parallel()
+
+	const guard = "guarded.test"
+
+	type guardCase struct {
+		name    string
+		guard   string // "" means guard
+		answers []pdAnswer
+		steps   []pdStep
+		// wantLookups is the number of lookup calls.
+		wantLookups int
+	}
+
+	refused := func(addr string) guardCase {
+		return guardCase{
+			name:        "refused " + addr,
+			answers:     []pdAnswer{{addrs: pdAddrs(t, addr)}},
+			steps:       []pdStep{{address: guard + ":443", wantErr: errAddrRefused}},
+			wantLookups: 1,
+		}
+	}
+	allowed := func(addr, dialed string) guardCase {
+		return guardCase{
+			name:        "allowed " + addr,
+			answers:     []pdAnswer{{addrs: pdAddrs(t, addr)}},
+			steps:       []pdStep{{address: guard + ":443", wantDials: []string{dialed}, wantConn: dialed}},
+			wantLookups: 1,
+		}
+	}
+
+	tests := []guardCase{
+		// Loopback, also in the IPv4-mapped IPv6 form.
+		refused("127.0.0.1"),
+		refused("127.255.255.254"),
+		refused("::1"),
+		refused("::ffff:127.0.0.1"),
+		// Unspecified and all of 0.0.0.0/8.
+		refused("0.0.0.0"),
+		refused("0.1.2.3"),
+		refused("0.255.255.255"),
+		refused("::"),
+		refused("::ffff:0.0.0.0"),
+		// Link-local unicast, with the cloud metadata address.
+		refused("169.254.169.254"),
+		refused("169.254.0.1"),
+		refused("::ffff:169.254.169.254"),
+		refused("fe80::1"),
+		refused("fe80::1%lo0"),
+		refused("febf::1"),
+		// Multicast: link-local, interface-local and the rest.
+		refused("224.0.0.1"),
+		refused("239.255.255.250"),
+		refused("ff02::1"),
+		refused("ff01::1"),
+		refused("ff05::1"),
+		refused("ff0e::1"),
+		// The Alibaba Cloud metadata address, also in the IPv4-mapped form.
+		refused("100.100.100.200"),
+		refused("::ffff:100.100.100.200"),
+
+		// Private and unique local addresses are a normal company network.
+		allowed("10.0.0.1", "10.0.0.1:443"),
+		allowed("172.16.0.1", "172.16.0.1:443"),
+		allowed("192.168.1.1", "192.168.1.1:443"),
+		allowed("fd00::1", "[fd00::1]:443"),
+		allowed("::ffff:10.0.0.1", "10.0.0.1:443"),
+		// Public addresses, also next to the edges of the refused ranges.
+		allowed("203.0.113.10", "203.0.113.10:443"),
+		allowed("2001:db8::1", "[2001:db8::1]:443"),
+		allowed("1.0.0.1", "1.0.0.1:443"),
+		allowed("126.255.255.255", "126.255.255.255:443"),
+		allowed("128.0.0.1", "128.0.0.1:443"),
+		allowed("169.253.255.255", "169.253.255.255:443"),
+		allowed("169.255.0.1", "169.255.0.1:443"),
+		allowed("223.255.255.255", "223.255.255.255:443"),
+		// The rest of 100.64.0.0/10 is a Tailscale or carrier-grade NAT
+		// network, with real servers.
+		allowed("100.64.0.1", "100.64.0.1:443"),
+		allowed("100.100.100.100", "100.100.100.100:443"),
+
+		{
+			name: "mixed answer keeps only the public address",
+			answers: []pdAnswer{{addrs: pdAddrs(t,
+				"127.0.0.1", "169.254.169.254", "203.0.113.10", "::1", "fe80::1", "224.0.0.1")}},
+			steps: []pdStep{
+				{address: guard + ":443", wantDials: []string{"203.0.113.10:443"}, wantConn: "203.0.113.10:443"},
+			},
+			wantLookups: 1,
+		},
+		{
+			// The refused address must not become a fallback when the
+			// allowed one fails.
+			name:    "failed public address does not fall back to a refused one",
+			answers: []pdAnswer{{addrs: pdAddrs(t, "203.0.113.10", "127.0.0.1", "10.0.0.1")}},
+			steps: []pdStep{
+				{
+					address:   guard + ":443",
+					fail:      []string{"203.0.113.10:443", "10.0.0.1:443"},
+					wantDials: []string{"203.0.113.10:443", "10.0.0.1:443"},
+					wantErr:   errPDRefused,
+				},
+			},
+			wantLookups: 1,
+		},
+		{
+			// The pin holds the allowed address. A later answer with a
+			// refused address is never asked.
+			name: "pin holds the allowed address",
+			answers: []pdAnswer{
+				{addrs: pdAddrs(t, "127.0.0.1", "203.0.113.10")},
+				{addrs: pdAddrs(t, "127.0.0.1")},
+			},
+			steps: []pdStep{
+				{address: guard + ":443", wantDials: []string{"203.0.113.10:443"}, wantConn: "203.0.113.10:443"},
+				{address: guard + ":8443", wantDials: []string{"203.0.113.10:8443"}, wantConn: "203.0.113.10:8443"},
+			},
+			wantLookups: 1,
+		},
+		{
+			// A refused answer pins nothing: the next dial asks again.
+			name: "refused answer pins nothing",
+			answers: []pdAnswer{
+				{addrs: pdAddrs(t, "127.0.0.1")},
+				{addrs: pdAddrs(t, "203.0.113.10")},
+			},
+			steps: []pdStep{
+				{address: guard + ":443", wantErr: errAddrRefused},
+				{address: guard + ":443", wantDials: []string{"203.0.113.10:443"}, wantConn: "203.0.113.10:443"},
+			},
+			wantLookups: 2,
+		},
+		{
+			// DNS names are not case sensitive: the key of the dialer is
+			// lower case, and so is guardHost.
+			name:        "host name case does not matter",
+			answers:     []pdAnswer{{addrs: pdAddrs(t, "127.0.0.1")}},
+			steps:       []pdStep{{address: "Guarded.TEST:443", wantErr: errAddrRefused}},
+			wantLookups: 1,
+		},
+		{
+			name:        "trailing dot name is guarded when configured so",
+			guard:       guard + ".",
+			answers:     []pdAnswer{{addrs: pdAddrs(t, "127.0.0.1")}},
+			steps:       []pdStep{{address: guard + ".:443", wantErr: errAddrRefused}},
+			wantLookups: 1,
+		},
+		{
+			// The proxy host and any other name are not guarded: a local
+			// proxy is a normal case.
+			name:    "unguarded host keeps loopback",
+			answers: []pdAnswer{{addrs: pdAddrs(t, "127.0.0.1")}},
+			steps: []pdStep{
+				{address: "proxy.test:3128", wantDials: []string{"127.0.0.1:3128"}, wantConn: "127.0.0.1:3128"},
+			},
+			wantLookups: 1,
+		},
+		{
+			name:    "sub-domain of the guarded name is not guarded",
+			answers: []pdAnswer{{addrs: pdAddrs(t, "127.0.0.1")}},
+			steps: []pdStep{
+				{address: "api." + guard + ":443", wantDials: []string{"127.0.0.1:443"}, wantConn: "127.0.0.1:443"},
+			},
+			wantLookups: 1,
+		},
+		{
+			// An IP literal is never resolved, so it is dialled as is.
+			name:  "IP literal guard host is not checked",
+			guard: "127.0.0.1",
+			steps: []pdStep{
+				{address: "127.0.0.1:8080", wantDials: []string{"127.0.0.1:8080"}, wantConn: "127.0.0.1:8080"},
+			},
+		},
+		{
+			name: "IP literal dial with a guarded name",
+			steps: []pdStep{
+				{address: "[::1]:443", wantDials: []string{"[::1]:443"}, wantConn: "[::1]:443"},
+				{address: "169.254.169.254:80", wantDials: []string{"169.254.169.254:80"}, wantConn: "169.254.169.254:80"},
+			},
+		},
+		{
+			// localhost has its own rule: loopback only. The guard does not
+			// refuse it.
+			name:    "localhost guard keeps loopback",
+			guard:   "localhost",
+			answers: []pdAnswer{{addrs: pdAddrs(t, "127.0.0.1")}},
+			steps: []pdStep{
+				{address: "localhost:8080", wantDials: []string{"127.0.0.1:8080"}, wantConn: "127.0.0.1:8080"},
+			},
+			wantLookups: 1,
+		},
+		{
+			name:    "LocalHost guard keeps loopback",
+			guard:   "localhost",
+			answers: []pdAnswer{{addrs: pdAddrs(t, "203.0.113.10", "::1")}},
+			steps: []pdStep{
+				{address: "LocalHost:8080", wantDials: []string{"[::1]:8080"}, wantConn: "[::1]:8080"},
+			},
+			wantLookups: 1,
+		},
+		{
+			// The other localhost names (RFC 6761) get the localhost rule,
+			// not the guard: a local server at app.localhost works.
+			name:    "app.localhost guard keeps loopback",
+			guard:   "app.localhost",
+			answers: []pdAnswer{{addrs: pdAddrs(t, "203.0.113.10", "127.0.0.1")}},
+			steps: []pdStep{
+				{address: "app.localhost:3000", wantDials: []string{"127.0.0.1:3000"}, wantConn: "127.0.0.1:3000"},
+			},
+			wantLookups: 1,
+		},
+		{
+			name:    "localhost. guard keeps loopback",
+			guard:   "localhost.",
+			answers: []pdAnswer{{addrs: pdAddrs(t, "::1")}},
+			steps: []pdStep{
+				{address: "localhost.:8080", wantDials: []string{"[::1]:8080"}, wantConn: "[::1]:8080"},
+			},
+			wantLookups: 1,
+		},
+		{
+			name:        "app.localhost without loopback stays a DNS error",
+			guard:       "app.localhost",
+			answers:     []pdAnswer{{addrs: pdAddrs(t, "203.0.113.10")}},
+			steps:       []pdStep{{address: "app.localhost:3000", wantNotFound: true}},
+			wantLookups: 1,
+		},
+		{
+			// A name that only ends in "localhost" is not a localhost name.
+			name:        "notlocalhost guard refuses loopback",
+			guard:       "notlocalhost",
+			answers:     []pdAnswer{{addrs: pdAddrs(t, "127.0.0.1")}},
+			steps:       []pdStep{{address: "notlocalhost:443", wantErr: errAddrRefused}},
+			wantLookups: 1,
+		},
+		{
+			name:        "localhost without loopback stays a DNS error",
+			guard:       "localhost",
+			answers:     []pdAnswer{{addrs: pdAddrs(t, "203.0.113.10")}},
+			steps:       []pdStep{{address: "localhost:8080", wantNotFound: true}},
+			wantLookups: 1,
+		},
+		{
+			name:        "empty answer stays a DNS error",
+			answers:     []pdAnswer{{}},
+			steps:       []pdStep{{address: guard + ":443", wantNotFound: true}},
+			wantLookups: 1,
+		},
+		{
+			name:        "answer of invalid addresses stays a DNS error",
+			answers:     []pdAnswer{{addrs: []netip.Addr{{}, {}}}},
+			steps:       []pdStep{{address: guard + ":443", wantNotFound: true}},
+			wantLookups: 1,
+		},
+		{
+			name:        "lookup error is kept",
+			answers:     []pdAnswer{{err: errPDLookup}},
+			steps:       []pdStep{{address: guard + ":443", wantErr: errPDLookup}},
+			wantLookups: 1,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			lk := &pdLookup{answers: tt.answers}
+			dl := newPDDialer(t)
+			d := newPinnedDialer(lk.lookup, dl.dial)
+			d.guardHost = guard
+			if tt.guard != "" {
+				d.guardHost = tt.guard
+			}
+
+			for i, st := range tt.steps {
+				dl.setFail(st.fail)
+				conn, err := d.DialContext(t.Context(), "tcp", st.address)
+				dials := dl.takeDials()
+
+				if !slices.Equal(dials, st.wantDials) {
+					t.Errorf("step %d: DialContext(%q) dials = %q, want %q", i, st.address, dials, st.wantDials)
+				}
+				if st.wantConn != "" {
+					if err != nil {
+						t.Fatalf("step %d: DialContext(%q) error = %v, want nil", i, st.address, err)
+					}
+					pc, ok := conn.(*pdConn)
+					if !ok {
+						t.Fatalf("step %d: DialContext() conn = %T, want *pdConn", i, conn)
+					}
+					if pc.addr != st.wantConn {
+						t.Errorf("step %d: conn address = %q, want %q", i, pc.addr, st.wantConn)
+					}
+					continue
+				}
+
+				if err == nil {
+					t.Fatalf("step %d: DialContext(%q) error = nil, want an error", i, st.address)
+				}
+				if conn != nil {
+					t.Errorf("step %d: DialContext() conn = %v, want nil with an error", i, conn)
+				}
+				if st.wantErr != nil && !errors.Is(err, st.wantErr) {
+					t.Errorf("step %d: DialContext() error = %v, want errors.Is %v", i, err, st.wantErr)
+				}
+				if errors.Is(st.wantErr, errAddrRefused) {
+					// Fixed text: no address and no host name.
+					if err.Error() != errAddrRefused.Error() {
+						t.Errorf("step %d: error text = %q, want exactly %q", i, err.Error(), errAddrRefused.Error())
+					}
+				} else if errors.Is(err, errAddrRefused) {
+					t.Errorf("step %d: DialContext() error = %v, want no errAddrRefused", i, err)
+				}
+				if st.wantNotFound {
+					var dnsErr *net.DNSError
+					if !errors.As(err, &dnsErr) || !dnsErr.IsNotFound {
+						t.Errorf("step %d: DialContext() error = %#v, want *net.DNSError with IsNotFound", i, err)
+					}
+				}
+			}
+
+			if n := len(lk.lookups()); n != tt.wantLookups {
+				t.Errorf("lookups = %d, want %d", n, tt.wantLookups)
+			}
+		})
+	}
+}
+
+// TestRefusedAddr checks the address classes of refusedAddr directly. The
+// input is unmapped, as DialContext gives it.
+func TestRefusedAddr(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		addr string
+		want bool
+	}{
+		{"127.0.0.1", true},
+		{"127.1.2.3", true},
+		{"::1", true},
+		{"0.0.0.0", true},
+		{"0.0.0.1", true},
+		{"0.255.255.255", true},
+		{"::", true},
+		{"169.254.169.254", true},
+		{"fe80::1", true},
+		{"ff02::1", true},
+		{"ff01::1", true},
+		{"ff0e::1", true},
+		{"224.0.0.1", true},
+		{"239.255.255.255", true},
+		{"100.100.100.200", true},
+		{"fd00:ec2::254", true},
+		// IPv6 forms that hold a refused IPv4 address: NAT64,
+		// IPv4-compatible and 6to4.
+		{"64:ff9b::a9fe:a9fe", true},
+		{"64:ff9b::7f00:1", true},
+		{"64:ff9b::6464:64c8", true},
+		{"::7f00:1", true},
+		{"::a9fe:a9fe", true},
+		{"2002:7f00:1::", true},
+		{"2002:a9fe:a9fe::1", true},
+		{"::ffff:0:a9fe:a9fe", true},
+		{"::ffff:0:7f00:1", true},
+		// Other cloud host services and special ranges.
+		{"168.63.129.16", true},
+		{"192.0.0.192", true},
+		{"192.0.0.1", true},
+		{"fec0::1", true},
+		{"feff::1", true},
+
+		{"1.0.0.0", false},
+		{"fd00:ec2::253", false},
+		// The same forms with an allowed IPv4 address.
+		{"64:ff9b::cb00:710a", false},
+		{"64:ff9b::a00:1", false},
+		{"::cb00:710a", false},
+		{"2002:cb00:710a::1", false},
+		{"::ffff:0:cb00:710a", false},
+		{"168.63.129.17", false},
+		{"192.0.1.1", false},
+		{"fc00::1:2", false},
+		// Teredo is not covered.
+		{"2001:0:4136:e378:8000:63bf:3fff:fdd2", false},
+		// NAT64 with the local-use prefix is not covered.
+		{"64:ff9b:1::a9fe:a9fe", false},
+		{"10.0.0.1", false},
+		{"172.31.255.255", false},
+		{"192.168.0.1", false},
+		{"fc00::1", false},
+		{"fd00::1", false},
+		{"203.0.113.10", false},
+		{"2001:db8::1", false},
+		{"128.0.0.0", false},
+		{"223.255.255.255", false},
+		{"240.0.0.1", false},
+		{"100.64.0.1", false},
+		{"100.100.100.100", false},
+		{"100.100.100.201", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.addr, func(t *testing.T) {
+			t.Parallel()
+			if got := refusedAddr(netip.MustParseAddr(tt.addr)); got != tt.want {
+				t.Errorf("refusedAddr(%s) = %v, want %v", tt.addr, got, tt.want)
+			}
+		})
+	}
+
+	t.Run("allowedAddrs keeps the order", func(t *testing.T) {
+		t.Parallel()
+		in := pdAddrs(t, "203.0.113.2", "127.0.0.1", "10.0.0.1", "fe80::1", "2001:db8::1")
+		want := pdAddrs(t, "203.0.113.2", "10.0.0.1", "2001:db8::1")
+		if got := allowedAddrs(in); !slices.Equal(got, want) {
+			t.Errorf("allowedAddrs() = %v, want %v", got, want)
+		}
+		if got := allowedAddrs(pdAddrs(t, "127.0.0.1", "::")); len(got) != 0 {
+			t.Errorf("allowedAddrs(refused only) = %v, want none", got)
+		}
+	})
+}
+
+// TestBaseTransportGuard checks that newBaseTransport guards its host name
+// (in any letter case) against a real local server: a request to the guarded
+// name that resolves to 127.0.0.1 fails with errAddrRefused and never reaches
+// the server, and another name (a proxy, for example) that resolves to
+// 127.0.0.1 still works.
+func TestBaseTransportGuard(t *testing.T) {
+	t.Parallel()
+
+	var newConns atomic.Int32
+	srv := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = io.WriteString(w, "ok")
+	}))
+	srv.Config.ConnState = func(_ net.Conn, state http.ConnState) {
+		if state == http.StateNew {
+			newConns.Add(1)
+		}
+	}
+	srv.Start()
+	t.Cleanup(srv.Close)
+
+	u, err := url.Parse(srv.URL)
+	if err != nil {
+		t.Fatalf("url.Parse(%q) error = %v", srv.URL, err)
+	}
+
+	// The lookup gets the host as the URL has it, so it folds the case.
+	lookup := func(_ context.Context, _, host string) ([]netip.Addr, error) {
+		switch strings.ToLower(host) {
+		case "guarded.test", "proxy.test":
+			return []netip.Addr{netip.MustParseAddr("127.0.0.1")}, nil
+		}
+		return nil, &net.DNSError{Err: "no such host", Name: host, IsNotFound: true}
+	}
+
+	// The guard is given in mixed case: newBaseTransport folds it.
+	tr := newBaseTransport(lookup, "Guarded.TEST")
+	// No proxy: the test must not depend on HTTP_PROXY of the machine.
+	tr.Proxy = nil
+	t.Cleanup(tr.CloseIdleConnections)
+	client := &http.Client{Transport: tr}
+
+	get := func(target string) (*http.Response, error) {
+		req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, target, nil)
+		if err != nil {
+			t.Fatalf("NewRequest() error = %v", err)
+		}
+		return client.Do(req)
+	}
+
+	for _, host := range []string{"guarded.test", "GUARDED.test"} {
+		resp, err := get("http://" + host + ":" + u.Port() + "/")
+		if err == nil {
+			_ = resp.Body.Close()
+			t.Fatalf("GET %s: error = nil, want errAddrRefused", host)
+		}
+		if !errors.Is(err, errAddrRefused) {
+			t.Errorf("GET %s: error = %v, want errAddrRefused", host, err)
+		}
+	}
+	if n := newConns.Load(); n != 0 {
+		t.Errorf("server connections after the refused requests = %d, want 0", n)
+	}
+
+	resp, err := get("http://proxy.test:" + u.Port() + "/")
+	if err != nil {
+		t.Fatalf("GET proxy.test: error = %v, want nil", err)
+	}
+	body, err := io.ReadAll(resp.Body)
+	_ = resp.Body.Close()
+	if err != nil || resp.StatusCode != http.StatusOK || string(body) != "ok" {
+		t.Errorf("GET proxy.test: status %d body %q error %v, want 200 \"ok\"", resp.StatusCode, body, err)
 	}
 }

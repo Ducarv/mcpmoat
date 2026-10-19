@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"path/filepath"
 	"reflect"
 	"slices"
@@ -2243,4 +2244,271 @@ func projectsIf(read bool) projectsMode {
 		return projectsRead
 	}
 	return projectsSkip
+}
+
+// projectServer names one server of a file: the ProjectPath and the Name. A
+// ~/.claude.json can have the same name at the top level and in more than
+// one project, so the name alone is not enough.
+type projectServer struct {
+	project, name string
+}
+
+// checkProjectStates fails the test unless servers are exactly the servers
+// of want, each with its State in want.
+func checkProjectStates(t testing.TB, servers []Server, want map[projectServer]State) {
+	t.Helper()
+	got := make(map[projectServer]State, len(servers))
+	for _, s := range servers {
+		got[projectServer{project: s.ProjectPath, name: s.Name}] = s.State
+	}
+	if !maps.Equal(got, want) {
+		t.Errorf("server states =\n got  %v\n want %v", got, want)
+	}
+}
+
+// TestParseJSONServersProjectState checks the state keys of a
+// projects.<path> object of ~/.claude.json: disabledMcpServers turns off the
+// servers of its own project only, the .mcp.json approval keys are collected
+// but do not change the servers of the file, and decodeProjects stores the
+// state of each project under its key as written.
+func TestParseJSONServersProjectState(t *testing.T) {
+	t.Parallel()
+	yes := true
+
+	tests := []struct {
+		name  string
+		input string
+		want  map[projectServer]State
+		// wantStates is the content of claudeStates.byProject.
+		wantStates map[string]claudeProjectState
+	}{
+		{
+			name: "disabledMcpServers of each project",
+			// The top-level x and the x of /b have the same name as a
+			// disabled server of /a, and must stay enabled. /b turns off a
+			// y that it does not have, which changes nothing.
+			input: `{
+				"mcpServers": {"x": {"command": "t"}},
+				"projects": {
+					"/a": {"mcpServers": {"x": {"command": "a"}, "y": {"command": "a"}}, "disabledMcpServers": ["x"]},
+					"/b": {"mcpServers": {"x": {"command": "b"}}, "disabledMcpServers": ["y"]}}}`,
+			want: map[projectServer]State{
+				{"", "x"}:   StateEnabled,
+				{"/a", "x"}: StateDisabled,
+				{"/a", "y"}: StateEnabled,
+				{"/b", "x"}: StateEnabled,
+			},
+			wantStates: map[string]claudeProjectState{
+				"/a": {disabledMcp: nameSet{"x": {}}},
+				"/b": {disabledMcp: nameSet{"y": {}}},
+			},
+		},
+		{
+			name: "project with no state keys",
+			input: `{"projects": {
+				"/a": {"mcpServers": {"x": {"command": "a"}}, "other": [1]}}}`,
+			want:       map[projectServer]State{{"/a", "x"}: StateEnabled},
+			wantStates: map[string]claudeProjectState{"/a": {}},
+		},
+		{
+			name: "null state keys",
+			input: `{"projects": {"/a": {
+				"mcpServers": {"x": {"command": "a"}},
+				"disabledMcpServers": null, "enabledMcpjsonServers": null,
+				"disabledMcpjsonServers": null, "enableAllProjectMcpServers": null}}}`,
+			want:       map[projectServer]State{{"/a", "x"}: StateEnabled},
+			wantStates: map[string]claudeProjectState{"/a": {}},
+		},
+		{
+			name: "project with state and no servers",
+			input: `{"projects": {
+				"/a": {"disabledMcpServers": ["g"], "enableAllProjectMcpServers": true}}}`,
+			want: map[projectServer]State{},
+			wantStates: map[string]claudeProjectState{
+				"/a": {disabledMcp: nameSet{"g": {}}, enableAll: &yes},
+			},
+		},
+		{
+			// These keys approve or reject the servers of a .mcp.json.
+			// The servers of projects.<path>.mcpServers are not .mcp.json
+			// servers, so the keys change nothing here: x is not
+			// disabled, and y is not unapproved.
+			name: "legacy approval keys collected only",
+			input: `{"projects": {"/a": {
+				"mcpServers": {"x": {"command": "a"}, "y": {"command": "a"}},
+				"enabledMcpjsonServers": ["z"],
+				"disabledMcpjsonServers": ["x"],
+				"enableAllProjectMcpServers": true}}}`,
+			want: map[projectServer]State{
+				{"/a", "x"}: StateEnabled,
+				{"/a", "y"}: StateEnabled,
+			},
+			wantStates: map[string]claudeProjectState{"/a": {
+				enabledMcpjson:  nameSet{"z": {}},
+				disabledMcpjson: nameSet{"x": {}},
+				enableAll:       &yes,
+			}},
+		},
+		{
+			// Claude Code reads the exact key only.
+			name: "case variant of the key is ignored",
+			input: `{"projects": {"/a": {
+				"mcpServers": {"x": {"command": "a"}},
+				"DisabledMcpServers": ["x"], "disabledmcpservers": 5}}}`,
+			want:       map[projectServer]State{{"/a", "x"}: StateEnabled},
+			wantStates: map[string]claudeProjectState{"/a": {}},
+		},
+		{
+			// The key is stored as written, not cleaned. Discover cleans
+			// WorkDir and looks up the exact key.
+			name:       "key stored as written",
+			input:      `{"projects": {"/a/": {"disabledMcpServers": []}}}`,
+			want:       map[projectServer]State{},
+			wantStates: map[string]claudeProjectState{"/a/": {disabledMcp: nameSet{}}},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			const path = "/home/u/.claude.json"
+			states := &claudeStates{}
+
+			servers, errs := parseJSONBytes(t.Context(), jsonFile{
+				path: path, client: ClientClaudeCode, scope: ScopeGlobal,
+				projects: projectsRead, states: states,
+			}, []byte(tt.input))
+
+			checkFileErrors(t, path, errs, nil)
+			checkProjectStates(t, servers, tt.want)
+			if !reflect.DeepEqual(states.byProject, tt.wantStates) {
+				t.Errorf("byProject =\n got  %+v\n want %+v", states.byProject, tt.wantStates)
+			}
+		})
+	}
+}
+
+// TestParseJSONServersProjectStateNoCollector checks that decodeProjects
+// applies disabledMcpServers also when jsonFile.states is nil, as for
+// ReadClaudeCode.
+func TestParseJSONServersProjectStateNoCollector(t *testing.T) {
+	t.Parallel()
+	input := `{"projects": {"/a": {"mcpServers": {"x": {"command": "a"}}, "disabledMcpServers": ["x"]}}}`
+
+	servers, errs := parseJSONBytes(t.Context(), jsonFile{
+		path: "c.json", client: ClientClaudeCode, scope: ScopeGlobal, projects: projectsRead,
+	}, []byte(input))
+
+	checkFileErrors(t, "c.json", errs, nil)
+	checkProjectStates(t, servers, map[projectServer]State{{"/a", "x"}: StateDisabled})
+}
+
+// TestParseJSONServersProjectStateCursor checks that the state keys are a
+// Claude Code feature: a Cursor file does not read them, so a value of the
+// wrong type is no error and turns off nothing.
+func TestParseJSONServersProjectStateCursor(t *testing.T) {
+	t.Parallel()
+	input := `{"projects": {"/a": {
+		"mcpServers": {"x": {"command": "a"}, "y": {"command": "a"}},
+		"disabledMcpServers": ["x"], "enabledMcpjsonServers": "bad"}}}`
+	states := &claudeStates{}
+
+	servers, errs := parseJSONBytes(t.Context(), jsonFile{
+		path: "c.json", client: ClientCursor, scope: ScopeGlobal, projects: projectsRead, states: states,
+	}, []byte(input))
+
+	checkFileErrors(t, "c.json", errs, nil)
+	checkProjectStates(t, servers, map[projectServer]State{
+		{"/a", "x"}: StateEnabled,
+		{"/a", "y"}: StateEnabled,
+	})
+}
+
+// TestParseJSONServersProjectStateBadType checks that a state key with the
+// wrong type gives one FileError for its project, with a fixed reason and the
+// ProjectPath, and drops the servers of that project (fail-safe: a server
+// that the unreadable list could turn off is never shown as enabled). The
+// other projects and the top-level servers are still read. The bad values
+// are canaries, so the test also proves that no value reaches the error.
+func TestParseJSONServersProjectStateBadType(t *testing.T) {
+	t.Parallel()
+	canary := discovertest.CanaryEnv
+
+	tests := []struct {
+		name       string
+		state      string // the state keys of project /bad, as JSON members
+		wantReason string
+	}{
+		{name: "disabledMcpServers string", state: fmt.Sprintf(`"disabledMcpServers": %q`, canary), wantReason: reasonBadServerState},
+		{name: "disabledMcpServers number", state: `"disabledMcpServers": 7`, wantReason: reasonBadServerState},
+		{name: "disabledMcpServers object", state: fmt.Sprintf(`"disabledMcpServers": {%q: true}`, canary), wantReason: reasonBadServerState},
+		{name: "disabledMcpServers null item", state: fmt.Sprintf(`"disabledMcpServers": [%q, null]`, canary), wantReason: reasonBadServerState},
+		{name: "disabledMcpServers number item", state: fmt.Sprintf(`"disabledMcpServers": [%q, 1]`, canary), wantReason: reasonBadServerState},
+		{name: "enabledMcpjsonServers string", state: fmt.Sprintf(`"enabledMcpjsonServers": %q`, canary), wantReason: reasonBadServerState},
+		{name: "disabledMcpjsonServers bool", state: `"disabledMcpjsonServers": true`, wantReason: reasonBadServerState},
+		{name: "enableAllProjectMcpServers string", state: fmt.Sprintf(`"enableAllProjectMcpServers": %q`, canary), wantReason: reasonBadServerState},
+		{name: "enableAllProjectMcpServers array", state: `"enableAllProjectMcpServers": [true]`, wantReason: reasonBadServerState},
+		// A good list does not hide a bad one in the same project.
+		{name: "good list and bad list", state: `"disabledMcpServers": ["x"], "disabledMcpjsonServers": 1`, wantReason: reasonBadServerState},
+		{name: "lone surrogate in a name", state: `"disabledMcpServers": ["x\ud800"]`, wantReason: reasonBadString},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			const path = "/home/u/.claude.json"
+			input := fmt.Sprintf(`{
+				"mcpServers": {"top": {"command": "t"}},
+				"projects": {
+					"/bad": {"mcpServers": {"x": {"command": "a"}, "y": {"command": "a"}}, %s},
+					"/good": {"mcpServers": {"x": {"command": "g"}}, "disabledMcpServers": ["x"]}}}`, tt.state)
+			states := &claudeStates{}
+
+			servers, errs := parseJSONBytes(t.Context(), jsonFile{
+				path: path, client: ClientClaudeCode, scope: ScopeGlobal,
+				projects: projectsRead, states: states,
+			}, []byte(input))
+
+			checkFileErrors(t, path, errs, []errWant{{ProjectPath: "/bad", Reason: tt.wantReason}})
+			if want := path + ": project /bad: " + tt.wantReason; errs[0].Error() != want {
+				t.Errorf("Error() = %q, want %q", errs[0].Error(), want)
+			}
+			if errs[0].Untrusted {
+				t.Error("Untrusted = true, want false for a global file")
+			}
+			assertNoLeakErrors(t, errs)
+			checkProjectStates(t, servers, map[projectServer]State{
+				{"", "top"}:    StateEnabled,
+				{"/good", "x"}: StateDisabled,
+			})
+			if _, ok := states.byProject["/bad"]; ok {
+				t.Error("byProject has the project with the bad state")
+			}
+			if _, ok := states.byProject["/good"]; !ok {
+				t.Error("byProject misses the good project")
+			}
+		})
+	}
+}
+
+// TestParseJSONServersProjectStateTooManyServers checks that a file refused
+// for maxServersPerFile collects no state: a state from a refused file must
+// not approve or turn off a server.
+func TestParseJSONServersProjectStateTooManyServers(t *testing.T) {
+	t.Parallel()
+	// "/a" sorts before the "/p..." keys, so its state is collected before
+	// the cap is reached.
+	input := `{"projects": {"/a": {"disabledMcpServers": ["g"], "enableAllProjectMcpServers": true}, ` +
+		manyEntries(`"/p%d": {}`, maxServersPerFile) + `}}`
+	states := &claudeStates{}
+
+	servers, errs := parseJSONBytes(t.Context(), jsonFile{
+		path: "c.json", client: ClientClaudeCode, scope: ScopeGlobal, projects: projectsRead, states: states,
+	}, []byte(input))
+
+	checkFileErrors(t, "c.json", errs, []errWant{{Reason: reasonTooManyServers}})
+	if len(servers) != 0 {
+		t.Errorf("servers = %v, want none", serverNames(servers))
+	}
+	if states.byProject != nil {
+		t.Errorf("byProject has %d projects, want nil", len(states.byProject))
+	}
 }

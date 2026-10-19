@@ -37,6 +37,12 @@ var (
 	errDialPort = errors.New("invalid port in dial address")
 	// errDialNetwork means the dial network is not tcp, tcp4 or tcp6.
 	errDialNetwork = errors.New("unsupported dial network")
+	// errAddrRefused means the DNS answer for the guarded host name held only
+	// refused addresses (see refusedAddr). The text names the classes of
+	// addresses, never an address or the host name. It does not name the
+	// cloud metadata addresses outside these classes, or the IPv6 forms of
+	// refused IPv4 addresses, which refusedAddr also refuses.
+	errAddrRefused = errors.New("server name resolves only to loopback, unspecified, link-local or multicast addresses")
 )
 
 // lookupFunc resolves a host name to IP addresses. It has the signature of
@@ -71,9 +77,19 @@ type dialFunc func(ctx context.Context, network, address string) (net.Conn, erro
 // certificate check. The pin changes only the IP address, so TLS still
 // verifies the URL host.
 //
+// Guard: the pin alone does not stop a name that points to a local address
+// from the first lookup. So for one host name, guardHost (the host of the
+// configured endpoint), DialContext also drops the addresses that a remote
+// server must not have (see refusedAddr). Private (RFC 1918) and unique
+// local (ULA) addresses stay allowed: a server on the company network is a
+// normal case. The rest of 100.64.0.0/10 (shared address space, RFC 6598)
+// also stays allowed, because Tailscale and other carrier-grade NAT networks
+// use it for real servers. The guard does not cover other host names. The proxy host is one of them: the user sets
+// it in the environment, and a local proxy is a normal case.
+//
 // Known limit: with HTTP_PROXY or HTTPS_PROXY, http.Transport dials the proxy,
 // so the pinned address is the address of the proxy. The proxy resolves the
-// server name itself, and the pin does not cover that lookup.
+// server name itself, and neither the pin nor the guard covers that lookup.
 //
 // The zero value is not ready to use; use newPinnedDialer. A pinnedDialer is
 // safe for concurrent use: http.Transport can dial from many goroutines.
@@ -89,6 +105,10 @@ type pinnedDialer struct {
 	// fallbackDelay is the time that the first address family gets before
 	// the other family starts. Tests set a small value.
 	fallbackDelay time.Duration
+	// guardHost is the host name, in ASCII lower case, whose DNS answers
+	// must not hold refused addresses (see refusedAddr). Empty means no host
+	// is guarded. newBaseTransport sets it; newPinnedDialer leaves it empty.
+	guardHost string
 
 	// mu protects pinned. It is never held during a lookup or a dial, so one
 	// slow dial does not block the others.
@@ -133,6 +153,10 @@ func newPinnedDialer(lookup lookupFunc, dial dialFunc) *pinnedDialer {
 //   - Otherwise DialContext resolves the name and connects the way
 //     net.Dialer does (see dialParallel), and pins the address of the
 //     connection that it returns.
+//   - For the guarded host (guardHost), it first drops the refused addresses
+//     of the answer (see refusedAddr) and uses only the others. When none
+//     are left, it returns errAddrRefused and dials nothing. The name
+//     "localhost" is never guarded: it has its own rule below.
 func (d *pinnedDialer) DialContext(ctx context.Context, network, address string) (net.Conn, error) {
 	host, portText, err := net.SplitHostPort(address)
 	if err != nil {
@@ -180,15 +204,29 @@ func (d *pinnedDialer) DialContext(ctx context.Context, network, address string)
 		return nil, err
 	}
 	addrs = usableAddrs(addrs)
-	if isLoopbackHost(key) {
+	if isLoopbackHost(key) || isLocalhostName(key) {
 		// The name "localhost" counts as loopback without a lookup, so a
 		// plain http:// URL to it gets no cleartext warning (see
 		// cleartextWarnings), and Go sends it past HTTP_PROXY. Make that
 		// true whatever the resolver answers, for example from a changed
 		// /etc/hosts: dial loopback addresses only. The check uses key, so
 		// it covers every case of the name: "LOCALHOST" shares the pin of
-		// "localhost", and that pin must be a loopback address too.
+		// "localhost", and that pin must be a loopback address too. The
+		// other localhost names (see isLocalhostName) are loopback names
+		// too, so they get the same rule, not the guard below, which would
+		// refuse their loopback answers.
 		addrs = loopbackAddrs(addrs)
+	} else if d.guardHost != "" && key == d.guardHost && len(addrs) > 0 {
+		// The configured server name. A hostile server controls the DNS
+		// answers for its own name, so it can point the name at a local
+		// service from the first lookup on. Keep only the addresses that a
+		// remote server can have. The pin below then holds one of them. An
+		// empty answer skips this step and stays a "no such host" error.
+		addrs = allowedAddrs(addrs)
+		if len(addrs) == 0 {
+			// Fixed text: no address and no host name.
+			return nil, errAddrRefused
+		}
 	}
 	if len(addrs) == 0 {
 		// The answer was empty or held only invalid addresses, or, for
@@ -231,6 +269,135 @@ func loopbackAddrs(addrs []netip.Addr) []netip.Addr {
 		}
 	}
 	return out
+}
+
+// allowedAddrs returns the addresses of addrs that are not refused (see
+// refusedAddr), in the order of addrs. addrs must be unmapped (see
+// usableAddrs).
+func allowedAddrs(addrs []netip.Addr) []netip.Addr {
+	var out []netip.Addr
+	for _, addr := range addrs {
+		if !refusedAddr(addr) {
+			out = append(out, addr)
+		}
+	}
+	return out
+}
+
+// isLocalhostName reports whether host, in lower case, is "localhost",
+// "localhost." or a name under the localhost domain, such as
+// "app.localhost" (RFC 6761 section 6.3). Resolvers answer such names with
+// loopback addresses, so a local development server can use one.
+// isLoopbackHost counts only "localhost" itself (and loopback IP literals),
+// so the other names keep the cleartext warning, and Go sends them through
+// a proxy.
+func isLocalhostName(host string) bool {
+	host = strings.TrimSuffix(host, ".")
+	return host == "localhost" || strings.HasSuffix(host, ".localhost")
+}
+
+// Addresses and prefixes that refusedAddr checks.
+var (
+	// thisNetworkPrefix is 0.0.0.0/8, "this network" (RFC 1122). Many
+	// systems send a connection to an address in it to this machine.
+	// IsUnspecified covers only 0.0.0.0 itself.
+	thisNetworkPrefix = netip.MustParsePrefix("0.0.0.0/8")
+	// alibabaMetadataAddr is the Alibaba Cloud metadata address. It is in
+	// 100.64.0.0/10, not in a link-local range.
+	alibabaMetadataAddr = netip.MustParseAddr("100.100.100.200")
+	// awsIPv6MetadataAddr is the IPv6 address of the AWS metadata service.
+	// It is in the unique local range fc00::/7, which is not refused.
+	awsIPv6MetadataAddr = netip.MustParseAddr("fd00:ec2::254")
+	// azureWireServerAddr is the Azure WireServer address, a host service
+	// of every Azure VM. It is a public address, not a private one.
+	azureWireServerAddr = netip.MustParseAddr("168.63.129.16")
+	// ietfProtocolPrefix is 192.0.0.0/24, the IETF protocol assignments
+	// (RFC 6890). It holds 192.0.0.192, the old Oracle Cloud metadata
+	// address, and no address of a normal server.
+	ietfProtocolPrefix = netip.MustParsePrefix("192.0.0.0/24")
+	// siteLocalPrefix is fec0::/10, the deprecated IPv6 site-local range
+	// (RFC 3879). Some networks still route it internally.
+	siteLocalPrefix = netip.MustParsePrefix("fec0::/10")
+	// nat64Prefix is the well-known NAT64 prefix (RFC 6052). The last 32
+	// bits are an IPv4 address that a NAT64 gateway connects to.
+	nat64Prefix = netip.MustParsePrefix("64:ff9b::/96")
+	// ipv4CompatPrefix holds the IPv4-compatible IPv6 addresses (RFC 4291,
+	// deprecated). The last 32 bits are an IPv4 address.
+	ipv4CompatPrefix = netip.MustParsePrefix("::/96")
+	// ipv4TranslatedPrefix holds the IPv4-translated addresses
+	// ::ffff:0:a.b.c.d (RFC 2765, SIIT). The last 32 bits are an IPv4
+	// address. It differs from the IPv4-mapped form ::ffff:a.b.c.d
+	// (::ffff:0:0/96), which usableAddrs unmaps.
+	ipv4TranslatedPrefix = netip.MustParsePrefix("::ffff:0:0:0/96")
+	// sixToFourPrefix is the 6to4 prefix (RFC 3056). Bits 16 to 47 are an
+	// IPv4 address.
+	sixToFourPrefix = netip.MustParsePrefix("2002::/16")
+)
+
+// embeddedIPv4 returns the IPv4 address in addr, and true, when addr is a
+// NAT64, IPv4-compatible, IPv4-translated or 6to4 IPv6 address (see the
+// prefixes above). Else it returns false. Teredo (2001::/32) is not covered:
+// it holds the client address in obfuscated form, and its server address is
+// a public relay.
+func embeddedIPv4(addr netip.Addr) (netip.Addr, bool) {
+	if !addr.Is6() {
+		return netip.Addr{}, false
+	}
+	b := addr.As16()
+	switch {
+	case nat64Prefix.Contains(addr), ipv4CompatPrefix.Contains(addr), ipv4TranslatedPrefix.Contains(addr):
+		return netip.AddrFrom4([4]byte(b[12:16])), true
+	case sixToFourPrefix.Contains(addr):
+		return netip.AddrFrom4([4]byte(b[2:6])), true
+	}
+	return netip.Addr{}, false
+}
+
+// refusedAddr reports whether addr is an address that the configured server
+// name must not resolve to. addr must be unmapped (see usableAddrs), so that
+// ::ffff:127.0.0.1 counts as 127.0.0.1. The refused classes are:
+//
+//   - loopback (127.0.0.0/8, ::1): a service on this machine;
+//   - unspecified (::) and all of 0.0.0.0/8: many systems send a
+//     connection to 0.0.0.0 to this machine;
+//   - link-local unicast (169.254.0.0/16, fe80::/10): this holds the cloud
+//     metadata address 169.254.169.254;
+//   - multicast (224.0.0.0/4, ff00::/8), with link-local and
+//     interface-local multicast: not an address of one server;
+//   - the cloud host services that the classes above do not cover: the
+//     Alibaba Cloud metadata address 100.100.100.200, the AWS IPv6 metadata
+//     address fd00:ec2::254 and the Azure WireServer 168.63.129.16;
+//   - 192.0.0.0/24 (IETF protocol assignments, with the old Oracle Cloud
+//     metadata address 192.0.0.192) and fec0::/10 (deprecated IPv6
+//     site-local);
+//   - a NAT64, IPv4-compatible, IPv4-translated or 6to4 IPv6 address whose
+//     IPv4 address is refused (see embeddedIPv4): on a NAT64 network,
+//     64:ff9b::a9fe:a9fe reaches 169.254.169.254. NAT64 with another prefix
+//     (for example the local-use prefix 64:ff9b:1::/48) and Teredo are not
+//     covered.
+//
+// Private (RFC 1918) and unique local (fc00::/7) addresses are not refused.
+// The rest of 100.64.0.0/10 (shared address space, RFC 6598) is not refused
+// either: Tailscale and other carrier-grade NAT networks use it for real
+// servers.
+func refusedAddr(addr netip.Addr) bool {
+	if thisNetworkPrefix.Contains(addr) {
+		return true
+	}
+	if addr == alibabaMetadataAddr || addr == awsIPv6MetadataAddr || addr == azureWireServerAddr {
+		return true
+	}
+	if ietfProtocolPrefix.Contains(addr) || siteLocalPrefix.Contains(addr) {
+		return true
+	}
+	if v4, ok := embeddedIPv4(addr); ok && refusedAddr(v4) {
+		return true
+	}
+	// IsMulticast covers link-local and interface-local multicast too.
+	return addr.IsLoopback() ||
+		addr.IsUnspecified() ||
+		addr.IsLinkLocalUnicast() ||
+		addr.IsMulticast()
 }
 
 // splitByFamily splits addrs, which must not be empty, the way net.Dialer

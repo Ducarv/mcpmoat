@@ -458,3 +458,236 @@ func FuzzBuildEnv(f *testing.F) {
 		}
 	})
 }
+
+// TestNoAutoInstallEnv checks that noAutoInstallEnv adds npm_config_yes=false
+// (issue #104), keeps a declared value of that variable in any letter case,
+// and keeps the result sorted by name.
+func TestNoAutoInstallEnv(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		env  []string
+		want []string
+	}{
+		{
+			name: "nil env",
+			env:  nil,
+			want: []string{"npm_config_yes=false"},
+		},
+		{
+			name: "empty env",
+			env:  []string{},
+			want: []string{"npm_config_yes=false"},
+		},
+		{
+			// Upper case names sort before lower case names, so the new
+			// entry goes to the end.
+			name: "added after upper case names",
+			env:  []string{"HOME=/h", "PATH=/p", "TERM=xterm"},
+			want: []string{"HOME=/h", "PATH=/p", "TERM=xterm", "npm_config_yes=false"},
+		},
+		{
+			name: "added in sort order between names",
+			env:  []string{"API_KEY=k", "PATH=/p", "npm_config_cache=/c", "npm_config_yes_extra=1", "zz=1"},
+			want: []string{"API_KEY=k", "PATH=/p", "npm_config_cache=/c", "npm_config_yes=false", "npm_config_yes_extra=1", "zz=1"},
+		},
+		{
+			name: "declared lower case value wins",
+			env:  []string{"PATH=/p", "npm_config_yes=true"},
+			want: []string{"PATH=/p", "npm_config_yes=true"},
+		},
+		{
+			name: "declared upper case value wins",
+			env:  []string{"NPM_CONFIG_YES=true", "PATH=/p"},
+			want: []string{"NPM_CONFIG_YES=true", "PATH=/p"},
+		},
+		{
+			name: "declared mixed case value wins",
+			env:  []string{"Npm_Config_Yes=1", "PATH=/p"},
+			want: []string{"Npm_Config_Yes=1", "PATH=/p"},
+		},
+		{
+			// A declared empty value is still a declared value: npm reads
+			// it, so mcpmoat must not add a second entry.
+			name: "declared empty value wins",
+			env:  []string{"PATH=/p", "npm_config_yes="},
+			want: []string{"PATH=/p", "npm_config_yes="},
+		},
+		{
+			name: "declared false is kept once",
+			env:  []string{"npm_config_yes=false"},
+			want: []string{"npm_config_yes=false"},
+		},
+		{
+			// Only the name counts. A value that looks like the entry does
+			// not stop the add.
+			name: "value with the name does not count",
+			env:  []string{"X=npm_config_yes=true"},
+			want: []string{"X=npm_config_yes=true", "npm_config_yes=false"},
+		},
+		{
+			name: "similar names do not count",
+			env:  []string{"npm_config_y=1", "npm_config_yes_x=1", "NPM_CONFIG_YESS=1", "npm-config-yes=1", " npm_config_yes=1"},
+			want: []string{" npm_config_yes=1", "NPM_CONFIG_YESS=1", "npm-config-yes=1", "npm_config_y=1", "npm_config_yes=false", "npm_config_yes_x=1"},
+		},
+		{
+			// An unsorted input still gives a sorted result.
+			name: "unsorted input is sorted",
+			env:  []string{"zz=1", "PATH=/p", "HOME=/h"},
+			want: []string{"HOME=/h", "PATH=/p", "npm_config_yes=false", "zz=1"},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			orig := slices.Clone(tt.env)
+			got := noAutoInstallEnv(tt.env)
+			if got == nil {
+				t.Fatal("noAutoInstallEnv() = nil, want a non-nil slice")
+			}
+			if !slices.Equal(got, tt.want) {
+				t.Errorf("noAutoInstallEnv(%q) = %q, want %q", tt.env, got, tt.want)
+			}
+			if !slices.Equal(tt.env, orig) {
+				t.Errorf("input = %q after the call, want %q unchanged", tt.env, orig)
+			}
+		})
+	}
+}
+
+// TestNoAutoInstallEnvDoesNotAliasInput checks that the result has its own
+// backing array: a change to it does not change the input, also when the
+// input has spare capacity that append could reuse.
+func TestNoAutoInstallEnvDoesNotAliasInput(t *testing.T) {
+	t.Parallel()
+
+	backing := make([]string, 2, 8)
+	backing[0], backing[1] = "HOME=/h", "PATH=/p"
+	env := backing[:2]
+
+	got := noAutoInstallEnv(env)
+	for i, spare := range backing[len(env):cap(backing)] {
+		if spare != "" {
+			t.Errorf("spare capacity %d of the input = %q, want it untouched", i, spare)
+		}
+	}
+	for i := range got {
+		got[i] = "X=changed"
+	}
+	if want := []string{"HOME=/h", "PATH=/p"}; !slices.Equal(env, want) {
+		t.Errorf("input = %q after a change to the result, want %q", env, want)
+	}
+}
+
+// TestNoAutoInstallEnvAfterBuildEnv checks the order of the real caller:
+// buildEnv, then noAutoInstallEnv. The parent npm_config_yes is not on the
+// allowlist, so it never reaches the child, and the forced value applies; a
+// declared value wins.
+func TestNoAutoInstallEnvAfterBuildEnv(t *testing.T) {
+	t.Parallel()
+
+	parent := []string{"PATH=/p", "npm_config_yes=true", "NPM_CONFIG_YES=true"}
+
+	t.Run("parent value is dropped", func(t *testing.T) {
+		t.Parallel()
+		env, err := buildEnv(parent, nil)
+		if err != nil {
+			t.Fatalf("buildEnv() error = %v", err)
+		}
+		want := []string{"PATH=/p", "npm_config_yes=false"}
+		if got := noAutoInstallEnv(env); !slices.Equal(got, want) {
+			t.Errorf("noAutoInstallEnv(buildEnv()) = %q, want %q", got, want)
+		}
+	})
+
+	t.Run("declared value wins", func(t *testing.T) {
+		t.Parallel()
+		env, err := buildEnv(parent, discover.SecretMap{"NPM_CONFIG_YES": discover.NewSecret("true")})
+		if err != nil {
+			t.Fatalf("buildEnv() error = %v", err)
+		}
+		want := []string{"NPM_CONFIG_YES=true", "PATH=/p"}
+		if got := noAutoInstallEnv(env); !slices.Equal(got, want) {
+			t.Errorf("noAutoInstallEnv(buildEnv()) = %q, want %q", got, want)
+		}
+	})
+}
+
+// TestEnvName checks the name part of an entry and the npm_config_yes match.
+func TestEnvName(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		entry    string
+		wantName string
+		wantNpm  bool
+	}{
+		{entry: "PATH=/p", wantName: "PATH"},
+		{entry: "A=b=c", wantName: "A"},
+		{entry: "=value", wantName: ""},
+		{entry: "", wantName: ""},
+		{entry: "NOEQUALS", wantName: "NOEQUALS"},
+		{entry: "npm_config_yes=false", wantName: "npm_config_yes", wantNpm: true},
+		{entry: "NPM_CONFIG_YES=", wantName: "NPM_CONFIG_YES", wantNpm: true},
+		{entry: "nPm_CoNfIg_YeS=1", wantName: "nPm_CoNfIg_YeS", wantNpm: true},
+		// No "=": the whole entry is the name.
+		{entry: "npm_config_yes", wantName: "npm_config_yes", wantNpm: true},
+		{entry: "npm_config_yes_x=1", wantName: "npm_config_yes_x"},
+		{entry: "npm_config_ye=1", wantName: "npm_config_ye"},
+		{entry: "X=npm_config_yes", wantName: "X"},
+		{entry: " npm_config_yes=1", wantName: " npm_config_yes"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.entry, func(t *testing.T) {
+			t.Parallel()
+			if got := envName(tt.entry); got != tt.wantName {
+				t.Errorf("envName(%q) = %q, want %q", tt.entry, got, tt.wantName)
+			}
+			if got := isNpmYesEntry(tt.entry); got != tt.wantNpm {
+				t.Errorf("isNpmYesEntry(%q) = %v, want %v", tt.entry, got, tt.wantNpm)
+			}
+		})
+	}
+}
+
+// FuzzNoAutoInstallEnv checks the invariants of noAutoInstallEnv for
+// arbitrary entries: the input is unchanged, the result is sorted by name,
+// holds every input entry, and holds exactly one npm_config_yes entry, the
+// added one only when the input had none.
+func FuzzNoAutoInstallEnv(f *testing.F) {
+	f.Add("PATH=/p", "HOME=/h")
+	f.Add("npm_config_yes=true", "PATH=/p")
+	f.Add("NPM_CONFIG_YES=", "zz=1")
+	f.Add("", "=x")
+	f.Add("npm_config_yes", "npm_config_yes_x=1")
+
+	f.Fuzz(func(t *testing.T, a, b string) {
+		env := []string{a, b}
+		orig := slices.Clone(env)
+		got := noAutoInstallEnv(env)
+
+		if !slices.Equal(env, orig) {
+			t.Fatalf("input changed: %q, want %q", env, orig)
+		}
+		if !slices.IsSortedFunc(got, func(x, y string) int { return strings.Compare(envName(x), envName(y)) }) {
+			t.Fatalf("result %q is not sorted by name", got)
+		}
+		for _, e := range env {
+			if !slices.Contains(got, e) {
+				t.Fatalf("result %q lost the input entry %q", got, e)
+			}
+		}
+		had := slices.ContainsFunc(env, isNpmYesEntry)
+		wantLen := len(env)
+		if !had {
+			wantLen++
+			if !slices.Contains(got, "npm_config_yes=false") {
+				t.Fatalf("result %q has no npm_config_yes=false", got)
+			}
+		}
+		if len(got) != wantLen {
+			t.Fatalf("len(result) = %d, want %d", len(got), wantLen)
+		}
+	})
+}
