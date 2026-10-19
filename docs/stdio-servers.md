@@ -116,11 +116,15 @@ Rules:
 - The values come from your environment, the one that you start mcpmoat in. A placeholder can
   read any variable, not only the base set. So a config can pass a variable such as
   `GITHUB_TOKEN` to the server, the same as in your client.
-- Exception: a server that is not `enabled` (turned off, not approved, or approved only by files
-  from the repository) runs only when you opt in. Your client does not run it, so its
+- Exception: a server from a project file that a repository can ship (see
+  [Project servers](#project-servers)), or a server that is not `enabled` (turned off, not
+  approved, or approved only by files from the repository), runs only when you opt in. Its
   placeholders read only the base set. Any other variable counts as not set: a default applies,
   and without a default mcpmoat does not start the server. So a config from a cloned repository
-  cannot send a secret variable to a server address that it chose.
+  cannot send a secret variable to a server address that it chose. This applies also when your
+  client runs the server: mcpmoat cannot see the Cursor approval, and a Claude Code approval by
+  name covers every repository with a server of that name. A project server that needs a secret
+  variable, such as `${GITHUB_TOKEN}`, is not started.
 - mcpmoat expands the command, the arguments, the URL, and the values of `env` and `headers`. It
   does not expand the names.
 - When a variable is not set and the placeholder has no default, mcpmoat does not start the

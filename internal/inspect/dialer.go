@@ -80,8 +80,9 @@ type dialFunc func(ctx context.Context, network, address string) (net.Conn, erro
 // Guard: the pin alone does not stop a name that points to a local address
 // from the first lookup. So for one host name, guardHost (the host of the
 // configured endpoint), DialContext also drops the addresses that a remote
-// server must not have: loopback, unspecified, link-local, multicast and the
-// Alibaba Cloud metadata address 100.100.100.200 (see refusedAddr). Private
+// server must not have: loopback, unspecified, link-local, multicast, the
+// cloud metadata addresses 100.100.100.200 and fd00:ec2::254, and the IPv6
+// forms of refused IPv4 addresses (see refusedAddr). Private
 // (RFC 1918) and unique local (ULA) addresses stay allowed: a server on the
 // company network is a normal case. The rest of 100.64.0.0/10 (shared
 // address space, RFC 6598) also stays allowed, because Tailscale and other
@@ -286,12 +287,13 @@ func allowedAddrs(addrs []netip.Addr) []netip.Addr {
 	return out
 }
 
-// isLocalhostName reports whether host, in lower case, is a localhost name
-// other than "localhost" itself: "localhost." or a name under the localhost
-// domain, such as "app.localhost" (RFC 6761 section 6.3). Resolvers answer
-// such names with loopback addresses, so a local development server can use
-// one. isLoopbackHost does not count them, so they keep the cleartext
-// warning, and Go sends them through a proxy.
+// isLocalhostName reports whether host, in lower case, is "localhost",
+// "localhost." or a name under the localhost domain, such as
+// "app.localhost" (RFC 6761 section 6.3). Resolvers answer such names with
+// loopback addresses, so a local development server can use one.
+// isLoopbackHost counts only "localhost" itself (and loopback IP literals),
+// so the other names keep the cleartext warning, and Go sends them through
+// a proxy.
 func isLocalhostName(host string) bool {
 	host = strings.TrimSuffix(host, ".")
 	return host == "localhost" || strings.HasSuffix(host, ".localhost")

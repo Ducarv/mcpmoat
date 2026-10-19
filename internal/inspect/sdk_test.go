@@ -877,11 +877,14 @@ func TestSDKInspectExpand(t *testing.T) {
 		project bool // a trusted project server whose ProjectPath is the test dir
 		// state is the State of the server. A state other than
 		// StateEnabled runs with AllowDisabled.
-		state   discover.State
-		command string
-		envfile string // the envfile arg; ${MCPMOAT_TEST_DIR} etc. are placeholders
-		env     map[string]string
-		want    func(dir string) map[string]string
+		state discover.State
+		// untrusted marks the server Untrusted; it runs with
+		// AllowUntrusted.
+		untrusted bool
+		command   string
+		envfile   string // the envfile arg; ${MCPMOAT_TEST_DIR} etc. are placeholders
+		env       map[string]string
+		want      func(dir string) map[string]string
 	}{
 		{
 			name:    "claude code",
@@ -963,6 +966,28 @@ func TestSDKInspectExpand(t *testing.T) {
 			},
 		},
 		{
+			// An untrusted server reads only the base variables, also
+			// when it is enabled: every Cursor project server is.
+			name:      "untrusted enabled cursor reads only base variables",
+			client:    discover.ClientCursor,
+			untrusted: true,
+			command:   "", // the fixture path, set below
+			envfile:   "", // dir/env, set below
+			env: map[string]string{
+				"MCPMOAT_TEST_HOME": "${userHome}",
+				"MCPMOAT_TEST_PATH": "${env:PATH}",
+			},
+			want: func(string) map[string]string {
+				return map[string]string{
+					"HOME":              "/home/mcpmoat-test",
+					"PATH":              "/usr/bin:/bin",
+					"MCPMOAT_TEST_HOME": "/home/mcpmoat-test",
+					"MCPMOAT_TEST_PATH": "/usr/bin:/bin",
+					"npm_config_yes":    "false",
+				}
+			},
+		},
+		{
 			// Codex does not expand, so the placeholder reaches the child
 			// as written.
 			name:    "codex is not expanded",
@@ -1004,9 +1029,9 @@ func TestSDKInspectExpand(t *testing.T) {
 				s.Scope = discover.ScopeProject
 				s.ProjectPath = dir
 			}
-			s.State = tt.state
+			s.State, s.Untrusted = tt.state, tt.untrusted
 
-			opts := inspect.SDKOptions{AllowDisabled: tt.state != discover.StateEnabled}
+			opts := inspect.SDKOptions{AllowDisabled: tt.state != discover.StateEnabled, AllowUntrusted: tt.untrusted}
 			inspector := inspect.NewForTest(opts, filepath.Join(t.TempDir(), "run"), sdkExpandParent(t, dir), 0)
 			got, err := inspector.Inspect(sdkCtx(t, sdkTimeout), s)
 			if err != nil {
@@ -1055,9 +1080,12 @@ func TestSDKInspectExpandErrors(t *testing.T) {
 		headers map[string]string
 		// state is the State of the server. A state other than
 		// StateEnabled runs with AllowDisabled.
-		state    discover.State
-		wantErr  error
-		wantName string
+		state discover.State
+		// untrusted marks the server Untrusted; it runs with
+		// AllowUntrusted.
+		untrusted bool
+		wantErr   error
+		wantName  string
 		// wantSuffix, when set, is the end of the reason.
 		wantSuffix string
 		// wantReason, when set, is the exact reason. It is for the errors
@@ -1147,7 +1175,7 @@ func TestSDKInspectExpandErrors(t *testing.T) {
 			env:        map[string]string{"MCPMOAT_TEST_EXPANDED": "${MCPMOAT_TEST_VALUE}"},
 			wantErr:    discover.ErrMissingVariable,
 			wantName:   "MCPMOAT_TEST_VALUE",
-			wantSuffix: "; a server that is not enabled reads only the base environment variables",
+			wantSuffix: "; a server from an untrusted project file, or one that is not enabled, reads only the base environment variables",
 		},
 		{
 			name:       "project-approved cursor stdio reads only base variables",
@@ -1156,7 +1184,7 @@ func TestSDKInspectExpandErrors(t *testing.T) {
 			args:       []string{"-pidfile", "PIDFILE", "--x=${env:MCPMOAT_TEST_VALUE}"},
 			wantErr:    discover.ErrMissingVariable,
 			wantName:   "MCPMOAT_TEST_VALUE",
-			wantSuffix: "; a server that is not enabled reads only the base environment variables",
+			wantSuffix: "; a server from an untrusted project file, or one that is not enabled, reads only the base environment variables",
 		},
 		{
 			// A cloned repository cannot send a secret to its own URL.
@@ -1167,7 +1195,41 @@ func TestSDKInspectExpandErrors(t *testing.T) {
 			headers:    map[string]string{"X-Api-Key": "${HOME}"},
 			wantErr:    discover.ErrMissingVariable,
 			wantName:   "MCPMOAT_TEST_VALUE",
-			wantSuffix: "; a server that is not enabled reads only the base environment variables",
+			wantSuffix: "; a server from an untrusted project file, or one that is not enabled, reads only the base environment variables",
+		},
+		{
+			// An untrusted Cursor server is always StateEnabled, but a
+			// cloned repository can ship it: it reads only the base
+			// variables.
+			name:       "untrusted enabled cursor remote reads only base variables",
+			client:     discover.ClientCursor,
+			untrusted:  true,
+			url:        "URL",
+			headers:    map[string]string{"Authorization": "Bearer ${env:MCPMOAT_TEST_VALUE}"},
+			wantErr:    discover.ErrMissingVariable,
+			wantName:   "MCPMOAT_TEST_VALUE",
+			wantSuffix: "; a server from an untrusted project file, or one that is not enabled, reads only the base environment variables",
+		},
+		{
+			name:       "untrusted enabled claude code stdio reads only base variables",
+			client:     discover.ClientClaudeCode,
+			untrusted:  true,
+			args:       []string{"-pidfile", "PIDFILE"},
+			env:        map[string]string{"MCPMOAT_TEST_EXPANDED": "${MCPMOAT_TEST_VALUE}"},
+			wantErr:    discover.ErrMissingVariable,
+			wantName:   "MCPMOAT_TEST_VALUE",
+			wantSuffix: "; a server from an untrusted project file, or one that is not enabled, reads only the base environment variables",
+		},
+		{
+			// A base variable that is truly not set gets no note: the
+			// filter is not the cause.
+			name:      "untrusted base variable not set has no note",
+			client:    discover.ClientClaudeCode,
+			untrusted: true,
+			args:      []string{"-pidfile", "PIDFILE"},
+			env:       map[string]string{"MCPMOAT_TEST_EXPANDED": "${TZ}"},
+			wantErr:   discover.ErrMissingVariable,
+			wantName:  "TZ",
 		},
 		{
 			name:       "claude code remote URL too long",
@@ -1211,9 +1273,9 @@ func TestSDKInspectExpandErrors(t *testing.T) {
 				}
 				s.Headers = sdkSecretEnv(headers)
 			}
-			s.State = tt.state
+			s.State, s.Untrusted = tt.state, tt.untrusted
 
-			opts := inspect.SDKOptions{AllowDisabled: tt.state != discover.StateEnabled}
+			opts := inspect.SDKOptions{AllowDisabled: tt.state != discover.StateEnabled, AllowUntrusted: tt.untrusted}
 			inspector := inspect.NewForTest(opts, filepath.Join(t.TempDir(), "run"), sdkExpandParent(t, dir), 0)
 			res, err := inspector.Inspect(sdkCtx(t, sdkTimeout), s)
 

@@ -97,7 +97,7 @@ See section 12 for the full out-of-scope list.
 | Connect by default | Yes. `scan` connects to servers; `--no-connect` does static analysis only | Full value by default; opt-out for cautious users and CI. |
 | CLI library | Go standard library `flag` | Simpler to learn. Can migrate to `cobra` if subcommands grow. |
 | Server state (#87) | Each discovered server is `enabled`, `disabled`, `unapproved` or `project-approved`, read from the client config. Inspection does not start or connect to a server that is not enabled without an explicit opt-in, separate from the untrusted opt-in | A turned-off server is not run by the scan. A repository cannot approve its own servers: an approval only from its own settings files gives `project-approved`, which needs the opt-in. Cursor keeps its toggle in SQLite, which mcpmoat does not read, so Cursor servers always show `enabled`. |
-| Placeholder expansion (#88) | Inspection expands `${...}` placeholders like the client: Claude Code and Cursor syntax, none for Codex. A missing variable is a fixed error that names at most the variable. A server that is not `enabled` reads only the base variables | The scan runs what the client runs. Expanded values can be secrets, so they stay masked. Fails closed where Cursor probably uses an empty value. The client never sends values to a server that it does not run, so a repository cannot use the opt-in to get secrets. |
+| Placeholder expansion (#88) | Inspection expands `${...}` placeholders like the client: Claude Code and Cursor syntax, none for Codex. A missing variable is a fixed error that names at most the variable. A server from an untrusted project file, or one that is not `enabled`, reads only the base variables | The scan runs what the client runs. Expanded values can be secrets, so they stay masked. Fails closed where Cursor probably uses an empty value. A repository cannot use an opt-in to get secrets. Cost: an untrusted server that needs a secret variable is refused. |
 | Client identity and lists (#97) | Send the MCP client name of the client that owns the config. Always send every list request, and warn when an undeclared capability returns items | Makes cloaking harder. Residuals: version, capabilities, timing and User-Agent can still tell mcpmoat apart. A server that never answers an unknown method times out. |
 | Work directory and `npx` (#104) | Trusted project servers run in their project directory, like the client. The child environment always gets `npm_config_yes=false` | Same behaviour as the client, and `npx` does not install a missing package without a prompt. Configured `-y`, `--yes` or `npm_config_yes` still win. Other launchers are not covered. |
 | DNS answers and proxies (#106) | For a configured DNS name, refuse loopback, unspecified, link-local and multicast answers. Behind a proxy, warn with `dns-pin-unavailable` | Stops a DNS name from pointing the scan at the local machine or a metadata service. Private addresses stay allowed for company servers. A proxy resolves names itself, so the guard cannot apply there. |
@@ -183,15 +183,17 @@ decides where mcpmoat connects. A hostile DNS answer can point the scan at the u
 or at a cloud metadata service. mcpmoat resolves the name once and keeps (pins) the address of the
 first connection for the whole inspection. It also applies these rules:
 
-- For a configured DNS name that is not `localhost`, mcpmoat refuses these resolved addresses:
-  loopback, unspecified (all of `0.0.0.0/8`, and `::`), link-local, multicast and the Alibaba
-  Cloud metadata address `100.100.100.200`.
+- For a configured DNS name that is not a localhost name (`localhost`, `localhost.` or a name
+  under `.localhost`), mcpmoat refuses these resolved addresses: loopback, unspecified (all of
+  `0.0.0.0/8`, and `::`), link-local, multicast, the cloud metadata addresses `100.100.100.200`
+  (Alibaba Cloud) and `fd00:ec2::254` (AWS), and the NAT64 (`64:ff9b::/96`), IPv4-compatible and
+  6to4 forms of a refused IPv4 address.
 - When the answer also holds allowed addresses, mcpmoat uses only those.
 - When no allowed address remains, mcpmoat does not connect. The error is fixed text, labelled
   `network`, and holds no address.
 - Private addresses (RFC 1918 and IPv6 ULA) stay allowed, because company servers use them.
-- An IP literal in the URL is the user's own choice, so it stays allowed. `localhost` connects to
-  loopback only.
+- An IP literal in the URL is the user's own choice, so it stays allowed. A localhost name
+  connects to loopback only.
 
 Behind `HTTP_PROXY` or `HTTPS_PROXY`, the proxy resolves the name, not mcpmoat. The pin and the
 address guard do not apply then. mcpmoat adds a `dns-pin-unavailable` warning to tell the user. The
@@ -199,10 +201,11 @@ warning does not hold the proxy URL, because that URL can hold credentials.
 
 Known limits:
 
-- IPv4 addresses embedded in other IPv6 forms (NAT64, 6to4, IPv4-compatible) are not refused.
+- An IPv4 address embedded with another NAT64 prefix (for example `64:ff9b:1::/48`) is not
+  refused.
 - Names that end in `.local` (mDNS) and resolve to link-local addresses are refused, also when the
   user wants them (false positive).
-- The AWS metadata service IPv6 address is in the ULA range, so it is allowed.
+- Other ULA addresses than `fd00:ec2::254` stay allowed.
 - `100.64.0.0/10` (shared address space, RFC 6598) stays allowed, because Tailscale uses it for
   real servers. Only `100.100.100.200` in that range is refused.
 
@@ -259,7 +262,8 @@ command.
     `settings.local.json`, the project `settings.json`, the user `settings.json`, `~/.claude.json`.
     When the first value is `true`, the approval is trusted if a trusted file also has `true`.
   - A server named in `disabledMcpServers` is `disabled`, also when it is approved. For a global
-    server, only `projects.<path>.disabledMcpServers` of the current project applies.
+    server, only `projects.<path>.disabledMcpServers` of the current project applies. When the
+    current project has two keys (see below), the lists of both keys apply to the servers of both.
   - The current project is the working directory as given, or with its symlinks resolved: Claude
     Code writes the key with the real path. When `~/.claude.json` has both keys, the disabled lists
     of both apply. The approval (`enabledMcpjsonServers` and `enableAllProjectMcpServers`) comes

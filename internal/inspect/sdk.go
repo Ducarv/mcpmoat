@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io/fs"
 	"log/slog"
+	"net/url"
 	"os"
 	"slices"
 	"strings"
@@ -19,7 +20,9 @@ import (
 type SDKOptions struct {
 	// AllowUntrusted lets Inspect start or connect to a server from an
 	// untrusted project file (discover.Server.Untrusted). The caller must
-	// have the explicit opt-in of the user before it sets this.
+	// have the explicit opt-in of the user before it sets this. The
+	// placeholders of such a server read only the base environment
+	// variables (see Inspect).
 	AllowUntrusted bool
 
 	// AllowDisabled lets Inspect start or connect to a server whose State is
@@ -27,8 +30,8 @@ type SDKOptions struct {
 	// did not approve it, or only files from the repository approve it. The
 	// caller must have the explicit opt-in of the user before it sets this.
 	// It is separate from AllowUntrusted: an untrusted server that is also
-	// off needs both. The client does not run such a server, so its
-	// placeholders read only the base environment variables (see Inspect).
+	// off needs both. The placeholders of such a server read only the base
+	// environment variables (see Inspect).
 	AllowDisabled bool
 }
 
@@ -44,10 +47,10 @@ type SDKInspector struct {
 
 	// environ returns the environment of mcpmoat in the form of os.Environ:
 	// the parent of the child environment (see buildEnv), and the source of
-	// the variables that Inspect expands (see discover.Expand). runRoot returns
-	// the directory for the work directories of servers with no configured
-	// work directory (see projectRunDir and workDir). rawLimit is the raw size limit; 0 means
-	// maxRawBytes. When a field is zero, as in New and in a zero
+	// the variables that Inspect expands (see discover.Expand). runRoot
+	// returns the directory for the work directories of servers with no
+	// configured work directory (see projectRunDir and workDir). rawLimit is
+	// the raw size limit; 0 means maxRawBytes. When a field is zero, as in New and in a zero
 	// SDKInspector, Inspect uses the default. Tests set them, so that they
 	// never read the real environment or write to the cache directory of
 	// the user, and can go over a small limit.
@@ -141,13 +144,16 @@ func (i *SDKInspector) Inspect(ctx context.Context, s discover.Server) (Result, 
 	}
 	parent := environ()
 
-	// A server that is not enabled passed the gates only with AllowDisabled.
-	// The client does not run it, so it never gets the values of the user's
-	// environment there. Its placeholders read only the base variables (see
-	// isBaseEnv), so a config from a cloned repository cannot send a secret
-	// variable to a URL or a header that it chose.
+	// A server from an untrusted project file, or one that is not enabled,
+	// passed the gates only with an opt-in. Its placeholders read only the
+	// base variables (see isBaseEnv), so a config from a cloned repository
+	// cannot send a secret variable to a URL or a header that it chose. A
+	// state of StateEnabled is not enough for an untrusted server: every
+	// Cursor server has it (mcpmoat cannot read the Cursor toggle), and a
+	// Claude Code approval by name applies to every repository that ships
+	// a server with that name.
 	lookup := environLookup(parent)
-	baseOnly := s.State != discover.StateEnabled
+	baseOnly := s.Untrusted || s.State != discover.StateEnabled
 	if baseOnly {
 		lookup = baseEnvLookup(lookup)
 	}
@@ -376,10 +382,10 @@ func baseEnvLookup(lookup func(string) (string, bool)) func(string) (string, boo
 	}
 }
 
-// reasonBaseOnly ends the reason of a missing variable when the lookup read
-// only the base variables: the variable can be set in the environment of the
-// user, so "not set" alone would be wrong.
-const reasonBaseOnly = "; a server that is not enabled reads only the base environment variables"
+// reasonBaseOnly ends the reason of a missing variable that is not a base
+// variable when the lookup read only the base variables: the variable can be
+// set in the environment of the user, so "not set" alone would be wrong.
+const reasonBaseOnly = "; a server from an untrusted project file, or one that is not enabled, reads only the base environment variables"
 
 // expandError turns an error of discover.Expand into a KindConfig
 // *ConnectError. The reason holds the field and at most the variable name of
@@ -387,12 +393,14 @@ const reasonBaseOnly = "; a server that is not enabled reads only the base envir
 // nothing else, and it shows a name only when the name is a plain variable
 // name (see discover.ExpandError). Any other error gets a fixed reason.
 // baseOnly tells that the lookup read only the base variables (see
-// baseEnvLookup); then a missing variable gets reasonBaseOnly at the end.
+// baseEnvLookup); then a missing variable that is not a base variable gets
+// reasonBaseOnly at the end. A name that is not a plain variable name is
+// never a base variable.
 func expandError(s discover.Server, err error, baseOnly bool) *ConnectError {
 	reason := "cannot expand the variables in the server config"
 	if ee, ok := errors.AsType[*discover.ExpandError](err); ok {
 		reason = ee.Error()
-		if baseOnly && errors.Is(err, discover.ErrMissingVariable) {
+		if baseOnly && errors.Is(err, discover.ErrMissingVariable) && !isBaseEnv(ee.Name) {
 			reason += reasonBaseOnly
 		}
 	} else {
@@ -410,8 +418,12 @@ func expandError(s discover.Server, err error, baseOnly bool) *ConnectError {
 // scrub removes. showDiscoveredURL sets ce.URL to the discovered URL, and
 // replaces the expanded URL in Reason and in the text of the cause with it,
 // also in the form without the query and the fragment, the same forms that
-// scrub replaces. A cause whose text changes becomes a new error with that
-// text, as in safeCause. When the two URLs are the same, only ce.URL is set.
+// scrub replaces. Then it replaces the expanded host (host:port, then the
+// host name alone) with the discovered one, because a DNS or dial error
+// names the host without the URL. A host can be a short word, so this can
+// garble other text of the error: a leak is worse than a garbled word. A
+// cause whose text changes becomes a new error with that text, as in
+// safeCause. When the two URLs are the same, only ce.URL is set.
 func showDiscoveredURL(ce *ConnectError, expanded, discovered discover.URL) {
 	to := discovered.String()
 	ce.URL = to
@@ -419,18 +431,31 @@ func showDiscoveredURL(ce *ConnectError, expanded, discovered discover.URL) {
 	if from == to {
 		return
 	}
-	fromBase, toBase := urlBase(from), urlBase(to)
+	pairs := [][2]string{{from, to}, {urlBase(from), urlBase(to)}}
+	if expandedURL, err := url.Parse(expanded.Reveal()); err == nil {
+		// A placeholder in the host can make the discovered URL fail to
+		// parse. Then Mask stands for its host.
+		toHost, toName := discover.Mask, discover.Mask
+		if discoveredURL, err := url.Parse(discovered.Reveal()); err == nil {
+			toHost, toName = discoveredURL.Host, discoveredURL.Hostname()
+		}
+		if expandedURL.Host != toHost {
+			pairs = append(pairs,
+				[2]string{expandedURL.Host, toHost},
+				[2]string{expandedURL.Hostname(), toName})
+		}
+	}
 	replace := func(text string) string {
-		text = replaceForms(text, from, to)
-		if fromBase != "" {
-			text = replaceForms(text, fromBase, toBase)
+		for _, p := range pairs {
+			text = replaceForms(text, p[0], p[1])
 		}
 		return text
 	}
 	ce.Reason = truncate(replace(ce.Reason))
 	if ce.err != nil {
-		if text := ce.err.Error(); replace(text) != text {
-			ce.err = errors.New(truncate(replace(text)))
+		text := ce.err.Error()
+		if replaced := replace(text); replaced != text {
+			ce.err = errors.New(truncate(replaced))
 		}
 	}
 }

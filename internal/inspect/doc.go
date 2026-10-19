@@ -62,14 +62,19 @@
 // secret. An expanded text over 64 KiB, or expanded texts of one server over
 // 1 MiB together, also refuse the server with KindConfig.
 //
-// A server whose State is not discover.StateEnabled passes the gates only
-// with AllowDisabled. The client does not run it, so it never gets the
-// values of the user's environment there. Its placeholders read only the
-// base variables of the child environment (HOME, PATH and the others of
+// A server from an untrusted project file (s.Untrusted), or one whose State
+// is not discover.StateEnabled, passes the gates only with an opt-in
+// (AllowUntrusted or AllowDisabled). Its placeholders read only the base
+// variables of the child environment (HOME, PATH and the others of
 // isBaseEnv). Any other variable counts as not set: a placeholder with a
 // default gets the default, and one without a default refuses the server,
 // with a reason that says why. So a config from a cloned repository cannot
-// send a secret variable to a URL or a header that it chose.
+// send a secret variable to a URL or a header that it chose. StateEnabled
+// alone is not enough for an untrusted server: every Cursor server has it,
+// because mcpmoat cannot read the Cursor toggle, and a Claude Code approval
+// by name applies to every repository that ships a server with that name.
+// The cost: an untrusted server that needs a secret variable, such as a
+// team .mcp.json with ${GITHUB_TOKEN}, is refused.
 //
 // The expanded server stays inside Inspect. [Run] keeps the server as
 // discovered in Outcome.Server, and the URL of a ConnectError is the
@@ -401,20 +406,23 @@
 //   - link-local unicast (169.254.0.0/16, fe80::/10), which holds the cloud
 //     metadata address 169.254.169.254;
 //   - multicast, with link-local and interface-local multicast;
-//   - the Alibaba Cloud metadata address 100.100.100.200, which is not
-//     link-local.
+//   - the cloud metadata addresses outside these classes: the Alibaba Cloud
+//     address 100.100.100.200 and the AWS IPv6 address fd00:ec2::254;
+//   - a NAT64 (64:ff9b::/96), IPv4-compatible (::/96) or 6to4 (2002::/16)
+//     address whose IPv4 address is refused.
 //
 // An IPv4-mapped IPv6 address counts as its IPv4 address (usableAddrs). When
 // the answer also holds other addresses, the dialer uses only those. When no
-// address is left, it dials nothing and fails with errAddrRefused: KindNetwork,
-// with a fixed text that holds no address and no host name. Private (RFC 1918)
-// and unique local (ULA) addresses stay allowed, because company servers use
-// them. The rest of 100.64.0.0/10 (shared address space, RFC 6598) also
-// stays allowed, because Tailscale and other carrier-grade NAT networks use
-// it for real servers. An IP literal in the URL is never resolved, so it is not checked: it
-// is the choice of the user. The name "localhost", in any letter case, is not
-// guarded: it always dials loopback addresses only. Other host names, such as
-// the proxy host, are not guarded.
+// address is left, it dials nothing and fails with errAddrRefused:
+// KindNetwork, with a fixed text that holds no address and no host name.
+// Private (RFC 1918) and unique local (ULA) addresses stay allowed, because
+// company servers use them. The rest of 100.64.0.0/10 (shared address space,
+// RFC 6598) also stays allowed, because Tailscale and other carrier-grade
+// NAT networks use it for real servers. An IP literal in the URL is never
+// resolved, so it is not checked: it is the choice of the user. The localhost names ("localhost", "localhost."
+// and the names under .localhost), in any letter case, are not guarded: they
+// always dial loopback addresses only. Other host names, such as the proxy
+// host, are not guarded.
 //
 // The guard compares the host name in ASCII lower case, as http.Transport
 // dials it. A host that is not ASCII (an IDN) would be dialled in its
@@ -474,14 +482,15 @@
 //     (see Starting stdio servers).
 //   - The DNS pin and the address guard do not cover a request through an
 //     HTTP(S) proxy; Remote warns instead (see Network).
-//   - The address guard does not refuse an IPv4 address that is embedded in
-//     another IPv6 form (NAT64, 6to4 or IPv4-compatible), or the IPv4
-//     broadcast address. It refuses an mDNS name (".local") that resolves to
-//     a link-local address, also when the user wants it. The IPv6 address of
-//     the AWS metadata service is in the ULA range, so it is allowed. Of
-//     100.64.0.0/10, only 100.100.100.200 (Alibaba Cloud metadata) is
-//     refused. The rest stays allowed because Tailscale uses it, so a
-//     metadata service of another provider in that range is not refused.
+//   - The address guard does not refuse an IPv4 address embedded with a
+//     NAT64 prefix other than 64:ff9b::/96 (for example the local-use
+//     prefix 64:ff9b:1::/48), or the IPv4 broadcast address. It refuses an
+//     mDNS name (".local") that resolves to a link-local address, also when
+//     the user wants it. Other ULA addresses than fd00:ec2::254 stay
+//     allowed. Of 100.64.0.0/10, only 100.100.100.200 (Alibaba Cloud
+//     metadata) is refused. The rest stays allowed because Tailscale uses
+//     it, so a metadata service of another provider in that range is not
+//     refused.
 //   - A stdio server that floods requests during the handshake and does not
 //     read its stdin is bounded only by ctx: the SDK closes the session
 //     inside Client.Connect, before SDKInspector can stop the child.

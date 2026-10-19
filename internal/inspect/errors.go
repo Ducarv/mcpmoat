@@ -516,8 +516,7 @@ func replaceURLParts(text, rawURL, redactedURL string) string {
 	// The redacted URL without its query and fragment, like base. If
 	// RedactURL gave Mask for the whole URL, there is nothing safe to show but
 	// Mask.
-	redactedBase, _, _ := strings.Cut(redactedURL, "#")
-	redactedBase, _, _ = strings.Cut(redactedBase, "?")
+	redactedBase := urlBase(redactedURL)
 
 	// Only "?"+query is replaced, not the bare query: a short query such as
 	// "a" must not garble other words.

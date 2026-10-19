@@ -129,39 +129,68 @@ func TestEnvironLookup(t *testing.T) {
 
 // TestShowDiscoveredURL checks that showDiscoveredURL replaces the expanded
 // URL with the discovered one in the URL, the reason and the cause of a
-// *ConnectError, also in the form without the query, and leaves an error
-// alone when both URLs are the same.
+// *ConnectError, also in the form without the query, then the expanded host
+// (with and without the port), and leaves an error alone when both URLs are
+// the same.
 func TestShowDiscoveredURL(t *testing.T) {
 	t.Parallel()
 
-	discovered := discover.NewURL("https://${MCP_HOST}:${MCP_PORT}/v1?k=${MCP_KEY}")
-	expanded := discover.NewURL("https://dev7.example:8443/v1?k=s3cr3t-value-123")
-	exp, base := expanded.String(), urlBase(expanded.String())
-	cause := errors.New("dial failed for " + base + " and " + exp)
+	t.Run("placeholders in the host", func(t *testing.T) {
+		t.Parallel()
+		// The discovered URL does not parse (its host holds "${"), so its
+		// String is Mask, and Mask stands for its host too.
+		discovered := discover.NewURL("https://${MCP_HOST}:${MCP_PORT}/v1?k=${MCP_KEY}")
+		expanded := discover.NewURL("https://dev7.example:8443/v1?k=s3cr3t-value-123")
+		exp, base := expanded.String(), urlBase(expanded.String())
+		cause := errors.New("dial failed for " + base + " and " + exp + ": dial tcp dev7.example:8443: lookup dev7.example: no such host")
 
-	ce := &ConnectError{
-		Kind:   KindNetwork,
-		Server: "srv",
-		Reason: "cannot reach " + exp,
-		URL:    exp,
-		err:    cause,
-	}
-	showDiscoveredURL(ce, expanded, discovered)
-
-	if want := discovered.String(); ce.URL != want {
-		t.Errorf("URL = %q, want %q", ce.URL, want)
-	}
-	if want := "cannot reach " + discovered.String(); ce.Reason != want {
-		t.Errorf("Reason = %q, want %q", ce.Reason, want)
-	}
-	if want := "dial failed for " + urlBase(discovered.String()) + " and " + discovered.String(); ce.err.Error() != want {
-		t.Errorf("cause = %q, want %q", ce.err.Error(), want)
-	}
-	for _, leak := range []string{"dev7", "8443", "s3cr3t"} {
-		if strings.Contains(ce.Error(), leak) || strings.Contains(ce.err.Error(), leak) {
-			t.Errorf("error %q or cause %q holds %q", ce.Error(), ce.err.Error(), leak)
+		ce := &ConnectError{
+			Kind:   KindNetwork,
+			Server: "srv",
+			Reason: "cannot reach " + exp,
+			URL:    exp,
+			err:    cause,
 		}
-	}
+		showDiscoveredURL(ce, expanded, discovered)
+
+		mask := discover.Mask
+		if ce.URL != mask {
+			t.Errorf("URL = %q, want %q", ce.URL, mask)
+		}
+		if want := "cannot reach " + mask; ce.Reason != want {
+			t.Errorf("Reason = %q, want %q", ce.Reason, want)
+		}
+		if want := "dial failed for " + mask + " and " + mask + ": dial tcp " + mask + ": lookup " + mask + ": no such host"; ce.err.Error() != want {
+			t.Errorf("cause = %q, want %q", ce.err.Error(), want)
+		}
+		for _, leak := range []string{"dev7", "8443", "s3cr3t"} {
+			if strings.Contains(ce.Error(), leak) || strings.Contains(ce.err.Error(), leak) {
+				t.Errorf("error %q or cause %q holds %q", ce.Error(), ce.err.Error(), leak)
+			}
+		}
+	})
+
+	t.Run("placeholder in the path", func(t *testing.T) {
+		t.Parallel()
+		// The host is the same in both URLs, so only the URL forms are
+		// replaced and the host stays.
+		discovered := discover.NewURL("https://api.example.test/${MCP_TENANT}/mcp")
+		expanded := discover.NewURL("https://api.example.test/acme7/mcp")
+		cause := errors.New("bad status from " + expanded.String() + " at api.example.test")
+		ce := &ConnectError{Reason: "failed: " + expanded.String(), err: cause}
+
+		showDiscoveredURL(ce, expanded, discovered)
+
+		if want := "failed: " + discovered.String(); ce.Reason != want {
+			t.Errorf("Reason = %q, want %q", ce.Reason, want)
+		}
+		if want := "bad status from " + discovered.String() + " at api.example.test"; ce.err.Error() != want {
+			t.Errorf("cause = %q, want %q", ce.err.Error(), want)
+		}
+		if strings.Contains(ce.Error(), "acme7") || strings.Contains(ce.err.Error(), "acme7") {
+			t.Errorf("error %q or cause %q holds the expanded path", ce.Error(), ce.err.Error())
+		}
+	})
 
 	t.Run("same URL keeps the cause", func(t *testing.T) {
 		t.Parallel()
