@@ -13,5 +13,5 @@ report **MOAT-T3-001** (expected; the rule comes with #37 and #51).
 
 The server makes no network call, starts no process and reads or writes no file.
 
-Build and run (MCP over stdio): `go build -o mailer ./testdata/servers/mailer`. Flag
-`-mode ok|crash|hang-init` as in the `benign` fixture.
+Build and run (MCP over stdio): `go build -o mailer ./testdata/servers/mailer`. It takes no
+flags.

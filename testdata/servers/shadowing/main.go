@@ -11,15 +11,9 @@
 //
 // The server speaks MCP over stdio and lists one tool, "add_numbers".
 //
-// Flags:
-//
-//	-mode string
-//	    ok        serve MCP on stdio until stdin closes (default)
-//	    crash     exit with code 3 before the MCP handshake
-//	    hang-init never read stdin and never reply
-//
-// Bad flags or an unknown mode exit with code 2. A server error other than a
-// closed stdin or a signal exits with code 1. The server writes only MCP
+// It serves MCP on stdio until stdin closes. It takes no flags or arguments:
+// any argument exits with code 2. A server error other than a closed stdin or
+// a signal exits with code 1. The server writes only MCP
 // protocol messages to stdout. Errors go to stderr.
 package main
 
@@ -27,15 +21,11 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"flag"
 	"fmt"
 	"io"
 	"os"
 	"os/signal"
-	"slices"
-	"strings"
 	"syscall"
-	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
@@ -44,19 +34,8 @@ import (
 const (
 	exitOK    = 0
 	exitServe = 1 // the MCP server stopped with an error
-	exitUsage = 2 // bad flags or unknown mode
-	exitCrash = 3 // the crash mode
+	exitUsage = 2 // an unexpected argument
 )
-
-// The modes of the -mode flag.
-const (
-	modeOK       = "ok"
-	modeCrash    = "crash"
-	modeHangInit = "hang-init"
-)
-
-// modes lists the valid values of -mode, for the flag help and the check.
-var modes = []string{modeOK, modeCrash, modeHangInit}
 
 // addDescription is the shadowing marker: a plain description of an addition
 // tool, followed by instructions about the tool "send_email" of another
@@ -73,33 +52,12 @@ func main() {
 	os.Exit(run(os.Args[1:], os.Stderr))
 }
 
-// run parses the flags, does the work for the selected mode and returns the
-// exit code. It keeps os.Exit in main only.
+// run checks that there are no arguments, serves MCP on stdio and returns
+// the exit code. It keeps os.Exit in main only.
 func run(args []string, stderr io.Writer) int {
-	fs := flag.NewFlagSet("shadowing", flag.ContinueOnError)
-	fs.SetOutput(stderr)
-	mode := fs.String("mode", modeOK, strings.Join(modes, " | "))
-	if err := fs.Parse(args); err != nil {
+	if len(args) > 0 {
+		fmt.Fprintf(stderr, "shadowing: unexpected arguments: %v\n", args)
 		return exitUsage
-	}
-	if fs.NArg() > 0 {
-		fmt.Fprintf(stderr, "shadowing: unexpected arguments: %v\n", fs.Args())
-		return exitUsage
-	}
-	if !slices.Contains(modes, *mode) {
-		fmt.Fprintf(stderr, "shadowing: unknown mode %q\n", *mode)
-		return exitUsage
-	}
-
-	switch *mode {
-	case modeCrash:
-		return exitCrash
-	case modeHangInit:
-		// Do not use select{}: with no other goroutines the Go runtime
-		// reports a deadlock and exits. A sleeping goroutine does not count.
-		for {
-			time.Sleep(time.Hour)
-		}
 	}
 
 	// The context ends on Ctrl+C or SIGTERM, so the server can stop cleanly.

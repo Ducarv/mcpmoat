@@ -8,9 +8,8 @@ ignore their arguments and return one fixed, harmless line. The server makes no 
 starts no process and reads or writes no file. The only addresses are `example.com` and
 `attacker@example.com`.
 
-Build and run (MCP over stdio): `go build -o poisoned ./testdata/servers/poisoned`. Flag
-`-mode ok|crash|hang-init` as in the `benign` fixture (the file and process flags are left out on
-purpose: this fixture touches no file and starts no process).
+Build and run (MCP over stdio): `go build -o poisoned ./testdata/servers/poisoned`. It takes no
+flags.
 
 ## Tools and markers
 

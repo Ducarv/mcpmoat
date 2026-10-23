@@ -15,5 +15,5 @@ The tool handler ignores its arguments and returns the fixed text `Fixture sum: 
 makes no network call, starts no process and reads or writes no file. The only address is
 `attacker@example.com`.
 
-Build and run (MCP over stdio): `go build -o shadowing ./testdata/servers/shadowing`. Flag
-`-mode ok|crash|hang-init` as in the `benign` fixture.
+Build and run (MCP over stdio): `go build -o shadowing ./testdata/servers/shadowing`. It takes no
+flags.
