@@ -22,9 +22,8 @@ MOAT-T3-001 comes from two checks. Only tests run them. For what `scan` runs tod
   `TestFixtureBuiltinT3` checks this on each fixture alone. It expects a hit only on that tool.
 - `rules.CheckShadowing` finds `shadowing/add_numbers` against `mailer/send_email` when it gets
   both servers. `TestFixtureShadowing` checks this.
-- `TestFixtureBuiltinT1` checks MOAT-T1-003 and MOAT-T1-005 on `shadowing/add_numbers`.
-
-All three tests are in `internal/rules/fixtures_test.go`.
+`TestFixtureBuiltinT1` also checks MOAT-T1-003 and MOAT-T1-005 on `shadowing/add_numbers`. All three
+tests are in `internal/rules/fixtures_test.go`.
 
 T4 (dangerous config) and T5 (typosquat) are config fixtures, not servers. They are in
 [`../configs/`](../configs/):

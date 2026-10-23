@@ -131,9 +131,8 @@ Write down:
 Spawn the `research` agent with the issue title and body, referenced files, acceptance
 criteria, and the profile path. It returns a task list with dependencies. Tell it to include a task
 that updates the owner doc for the change. Find the owner in the "Topic to owner" table in
-`docs/README.md`. If no doc needs to change, there is no doc task. The reason goes in the
-`no_doc_reason` field of the research output context. This value is a plan only. Step 10 checks
-the final diff and never uses it as the PR's "No doc change needed because" line.
+`docs/README.md`. If no doc needs to change, there is no doc task, and research says why in its
+notes. The `pr` skill still checks the final diff in Step 10.
 
 ### Step 4: Clarify (interactive only)
 
@@ -176,50 +175,32 @@ Do not swallow exit codes or truncate failing output. If a check fails:
 
 ### Step 9: Self-review
 
-Invoke the `review-pr` skill on the current branch.
+Stage and commit the work with the `commit` skill first, because `review-pr` reads the commits
+(`git diff <base>...HEAD`) and does not see uncommitted files. Then invoke the `review-pr` skill on
+the current branch.
 
 - **Critical / Should-fix**: fix them, then go back to Step 8. A security finding at either
-  severity is always in this group. The exception is a finding that the owner doc is not updated,
-  when it is not security-tagged. Step 10 owns that docs check, so do not act on it here.
+  severity is always in this group. A finding that the owner doc is not updated belongs here too:
+  update the owner doc.
 - **Minor / Nit**: do not fix. List security-tagged nits in the PR body so the reviewer sees
   them.
 
 Severity decides whether you fix it. The security tag decides whether you surface it in the PR
 body. Run at most 2 review cycles.
 
-### Step 10: Commit and open the PR
+### Step 10: Open the PR
 
-The rule for docs is in [CONTRIBUTING.md Pull requests](../../../CONTRIBUTING.md#pull-requests).
+Invoke the `commit` skill for any change made after Step 9, then the `pr` skill. The `pr` skill is
+the one gate for the docs rule in
+[CONTRIBUTING.md Pull requests](../../../CONTRIBUTING.md#pull-requests): it lists the changed docs,
+and it refuses to open the PR when a behaviour change has no owner doc and no real reason. Say
+whether the run is `--auto`, so `pr` does not wait for a person. Pass a "No doc change needed
+because" reason only if the user or the issue gave one. Make sure the PR links the issue (profile
+pattern, default `Closes #<n>`) and has a Summary, Testing and Release Notes section.
 
-1. **Docs check on the diff.** Do this before you call `commit` or `pr`. The work is not
-   committed yet, and a new doc is an untracked file. So take the diff from `git status --short`
-   together with `git diff origin/<base>`. If the diff has a behaviour change (as that rule
-   defines it) and the owner doc from the "Topic to owner" table in `docs/README.md` is not in
-   the diff:
-   - If the user or the issue gave a "No doc change needed because" reason, or the owner doc
-     already states the new behaviour (read it), keep the reason for the `pr` skill.
-   - Otherwise add the owner-doc change as a task and run it once through `coordinate`. Then run
-     the Step 8 checks for the changed files and continue. Ignore a `no_doc_reason` from Step 3
-     here: research wrote it before any code existed, and the diff now shows a behaviour change.
-
-   Do this at most once. It does not start another Step 9 review cycle. If the doc task fails,
-   or the `pr` skill refuses (it returns a failure message in a non-interactive run), do not
-   retry. With `--auto`, stop and report the failure and the missing owner doc. Without
-   `--auto`, ask the user.
-2. **Commit and open the PR.** Invoke the `commit` skill to create a well-formed commit, then
-   the `pr` skill to open the pull request. Give `pr` the reason from the user (if any) and say
-   whether the run is `--auto`, so it does not wait for a person in `--auto` mode. Make sure the
-   PR:
-   - links the issue (profile pattern, default `Closes #<n>`),
-   - has a Summary, Testing and Release Notes section,
-   - lists the changed doc files in `## Docs`, or has a "No doc change needed because" line with a
-     real reason.
-3. **Check the PR body.** Do this only if `pr` returned a PR URL. Read the body with `gh pr view <url> --json body -q .body`.
-   It must list the changed doc files under `## Docs`, or have a "No doc change needed because"
-   line with a real reason. If doc files changed but the body does not list them, fix the body
-   with `gh pr edit` (do not open a new PR) and say so in your report. If no doc file changed and
-   no real reason exists, do not invent one. With `--auto`, stop and report the missing owner doc.
-   Without `--auto`, ask the user.
+If `pr` refuses because the owner doc is missing, add the owner-doc change as a task, run it once
+through `coordinate`, run the Step 8 checks, commit, and call `pr` again. Do this once. If `pr`
+refuses again, stop and report the missing owner doc. Without `--auto`, `pr` asks the user itself.
 
 Report the PR URL.
 

@@ -48,8 +48,9 @@ docs/                   PRD and other documentation
 
 ## Import direction
 
-Imports go one way. A package imports only the packages in its row. The table lists non-test
-imports. Tests also import `inspecttest` and `discovertest`.
+Imports go one way. A package in the table imports only the packages in its row. The table lists
+the product packages and non-test imports. Tests also import `inspecttest` and `discovertest`.
+`inspecttest` imports `discover` and `inspect`. `discovertest` imports no module package.
 
 | Package | Imports (module packages only) |
 |---|---|

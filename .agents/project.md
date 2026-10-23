@@ -27,6 +27,8 @@ This file owns conventions, agent routing, release notes and review criteria. It
 | Update golden files | `go test ./<pkg>/ -update` (review the diff afterwards) |
 | Fuzz a parser | `go test -fuzz=FuzzX -fuzztime=30s ./<pkg>/` |
 
+A row that links to another file means: run the commands at the link target.
+
 ## Code style
 
 - `gofmt` output. Doc comments on every exported identifier.
@@ -35,12 +37,13 @@ This file owns conventions, agent routing, release notes and review criteria. It
 - Small interfaces defined by the consumer; no global mutable state.
 - Table-driven tests; `t.Parallel()` where safe (never with `t.Setenv`); `t.TempDir()`,
   `t.Context()`; fixtures under `testdata/`; no `time.Sleep` for synchronisation. Tests never touch
-  the real `$HOME` or real client configs: use `t.TempDir()` and `t.Setenv()`.
+  the real `$HOME` or real client configs (use `t.Setenv()`).
 - `os.Exit` only in `main`; stdout for data, stderr for logs and warnings.
 - `//nolint` only with the linter name and a reason.
 - Never print, log or store env or header values from client configs, whether or not they look
   secret. Print keys only.
-- No telemetry. No network calls except configured servers and, behind `--llm`, the LLM provider.
+- No telemetry. No network calls except configured servers and, behind `--llm`, the LLM provider
+  (NFR-01).
 - Minimal, pinned dependencies. Ask before adding one.
 - stdio servers run with exactly the configured command and a scrubbed environment (NFR-04).
 - Exit codes: 0 no findings, 1 findings at or above `--fail-on`, 2 execution error (FR-16).
@@ -61,7 +64,7 @@ This file owns conventions, agent routing, release notes and review criteria. It
 | Root-cause diagnosis | `debugger` |
 | Final compile and vet check | `typecheck` |
 | Security-flagged tasks after the dev agent | `review-security` |
-| Docs: `*.md`, `docs/`, `.github/` templates, `.claude/` agent and skill text | `general-purpose` (no dedicated docs agent; follow the owner docs in [docs/README.md](../docs/README.md)). A task that edits `.claude/agents/review-*.md`, a review step of a skill, `.agents/project.md` or `CLAUDE.md` is security-flagged: run `review-security` after it. |
+| Docs: `*.md`, `docs/`, `.github/` templates, `.claude/` agent and skill text | `general-purpose` (no dedicated docs agent; follow the owner docs in [docs/README.md](../docs/README.md)). |
 
 ## Git and pull requests
 
@@ -84,8 +87,11 @@ This file owns conventions, agent routing, release notes and review criteria. It
 ## Review
 
 - Extra sensitive path tokens: `inspect`, `exec`, `env`, `pins`, `hash`, `release`, `goreleaser`,
-  `workflows`, `.agents`.
+  `workflows`, `.agents`, `.claude`, `CLAUDE.md`.
 - Path tokens to ignore: none.
+- Security-flagged files: `.claude/agents/review-*.md`, the review steps of the skills,
+  `.agents/project.md` and `CLAUDE.md`. They define the review rules. `research` marks a task that
+  edits them with a security flag, and the path tokens above force the full review tier.
 - Project review criteria:
   - Code follows the Code style rules on rule tests (NFR-05), the scrubbed stdio environment
     (NFR-04) and the exit-code contract (FR-16).

@@ -49,9 +49,8 @@ If a task is too big, break it down further.
 
 Include a task that updates the owner doc for the change (the owner is listed in the
 "Topic to owner" table in `docs/README.md`), and give it to `general-purpose` (docs, Markdown and
-`.claude/` text have no dedicated agent). If no doc change is needed, add no doc task and put the
-reason in `context.no_doc_reason` in the JSON output. When a doc task is in the list, set
-`no_doc_reason` to `null`.
+`.claude/` text have no dedicated agent). If no doc change is needed, add no doc task and say why
+in the context notes.
 
 ## Output format
 
@@ -86,10 +85,7 @@ reading, and leave it out when another skill calls you. The two must never disag
     {"id": 1, "file": "path/to/file.go", "description": "What to do", "deps": [], "agent": "go-dev", "security": false},
     {"id": 2, "file": "path/to/file_test.go", "description": "What to do", "deps": [1], "agent": "unit-test", "security": true}
   ],
-  "context": {
-    "notes": "Patterns, profile commands and code style, constraints...",
-    "no_doc_reason": null
-  }
+  "context": "Patterns, profile commands and code style, constraints..."
 }
 ```
 
@@ -130,6 +126,7 @@ Flag a task with `✓` if it involves:
 - **Secrets**: env values, headers, tokens in configs; anything that could print or store them.
 - **Network**: any new outbound connection (NFR-01), the `--llm` path.
 - **Exit codes and release supply chain**: FR-16, checksums, attestations.
+- **Review guardrails**: the files that the profile's Review section lists as security-flagged.
 
 Flagged tasks get a `review-security` pass after the dev agent finishes.
 

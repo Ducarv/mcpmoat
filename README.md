@@ -28,8 +28,8 @@ mcpmoat version              # print the version, commit and build date
 
 ## Ignore findings
 
-mcpmoat has built-in rules, and `scan` loads and validates them. `scan` does not apply them to
-server data yet, so it has no findings to ignore. It reads the ignore list and reports problems in it.
+mcpmoat has built-in rules, and `scan` loads and validates them. `scan` does not apply them
+yet, so it has no findings to ignore. It reads the ignore list and reports problems in it.
 
 `--ignore <rule-id>` ignores all findings of one rule. You can use the flag more than one time.
 

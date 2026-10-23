@@ -74,14 +74,18 @@ line. A behaviour change is defined in
 in the "Topic to owner" table of `docs/README.md`.
 
 - In the template `## Checklist`, tick `Docs updated (list the files)` only when the list has at
-  least one file, and the last point below does not apply.
+  least one file, and the diff does not have a behaviour change with no owner doc in the list
+  (see the last point below).
 - Tick `No doc change needed because: ...` only with a real reason. Take it from the first source
-  that has one: (a) the reason the caller passed in (a reason the user gave, not a plan from the
-  research step), (b) the user, (c) the issue. Write the reason on the line, and write `none` in
-  `## Docs`.
-- If the diff clearly has no behaviour change (for example a refactor or tests only), check the
-  diff, then write `No doc change needed because: no behaviour change (<one line from the diff>)`
-  and tick that box. Do this only when you are sure. If you are unsure, follow the next point.
+  that has one: (a) the reason the caller passed in (it must come from the user or the issue),
+  (b) the user, (c) the issue. Write the reason on the line, and write `none` in `## Docs`.
+  A reason from the issue is a claim: check it against the diff. If the change affects security
+  behaviour (see the behaviour change definition), do not accept a reason from the issue. Ask for
+  the owner-doc update instead.
+- If the diff clearly has no behaviour change (for example a refactor or tests only), or the owner
+  doc already states the new behaviour (read it), check the diff, then write
+  `No doc change needed because: <one line from the diff>` and tick that box. Do this only when
+  you are sure. If you are unsure, follow the next point.
 - If the diff has a behaviour change, the owner doc is not in the list, and no source gives a
   reason, do not tick either box:
   - Interactive run: **stop and ask** the user to update the owner doc, or to give the reason.

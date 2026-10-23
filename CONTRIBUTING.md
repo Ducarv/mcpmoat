@@ -200,7 +200,7 @@ tests, golangci-lint and the version smoke test. On Linux only it also runs the 
 ### Build the binary
 
 ```sh
-go build -ldflags "-X main.version=1.2.3" -o mcpmoat ./cmd/mcpmoat
+go build -ldflags "-X main.version=1.2.3 -X main.commit=abc123 -X main.date=2026-01-01T00:00:00Z" -o mcpmoat ./cmd/mcpmoat
 ./mcpmoat version
 ```
 
@@ -208,8 +208,9 @@ Without `-ldflags`, mcpmoat reads the version, commit and date that Go stores in
 `go build` in a git checkout prints a pseudo-version such as `v0.0.0-20261017181905-4091e6ff2614+dirty`.
 A build with `go install github.com/Ducarv/mcpmoat/cmd/mcpmoat@<version>` prints that module version.
 The version is `dev` only when Go has no data to store, for example with `-buildvcs=false` or outside
-a git checkout. The other ldflags variables are `main.commit` and `main.date`. The output looks like
-this: `mcpmoat 1.2.3 (commit abc123, built 2026-01-01T00:00:00Z)`.
+a git checkout. With a version set by `-X main.version`, mcpmoat uses only the values that you link
+(`main.commit` and `main.date`), and prints `none` and `unknown` for the ones that you leave out. The
+output of the command above is `mcpmoat 1.2.3 (commit abc123, built 2026-01-01T00:00:00Z)`.
 
 CI builds with `-ldflags "-X main.version=ci-smoke"` and checks that `mcpmoat version` prints that value.
 
@@ -219,8 +220,8 @@ CI builds with `-ldflags "-X main.version=ci-smoke"` and checks that `mcpmoat ve
 - Reference the issue and the PRD IDs (for example `FR-09`, `T1`) in the description.
 - Code style, dependencies, telemetry, commits and branch names: see the Code style and Git and pull
   requests sections of [.agents/project.md](.agents/project.md).
-- Every PR updates the docs. Update the owner doc listed in [docs/README.md](docs/README.md), or write
-  "No doc change needed because ..." in the PR.
+- Every PR either updates its owner doc (listed in [docs/README.md](docs/README.md)) or says "No doc
+  change needed because ..." in the PR.
 - A behaviour change is a change to flags, output, exit codes, rules, package layout, commands or
   security-relevant behaviour. A PR with a behaviour change and neither a doc update nor that sentence
   is not ready.
