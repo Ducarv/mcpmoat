@@ -80,6 +80,7 @@ func TestNormalizeForMatch(t *testing.T) {
 		{name: "VT and NEL to space", in: "a\vb\u0085c", want: "a b c"},
 		{name: "line and paragraph separators to space", in: "a\u2028b\u2029c", want: "a b c"},
 		{name: "Braille blank to space", in: "a\u2800b", want: "a b"},
+		{name: "control runes to space", in: "a\x00b\x1fc\x7fd\u0090e", want: "a b c d e"},
 		{name: "ASCII white space kept", in: "a\tb\nc\rd\fe", want: "a\tb\nc\rd\fe"},
 		{name: "emoji kept", in: "hi \U0001F642", want: "hi \U0001F642"},
 		{name: "only invisible", in: "\u200b\u200c\u200d", want: ""},
@@ -324,6 +325,7 @@ func TestMatchForms(t *testing.T) {
 		{name: "ZWSP between words", in: "ignore\u200bprevious", want: []string{"ignoreprevious", "ignore previous"}},
 		{name: "Hangul filler between words", in: "ignore\u3164previous", want: []string{"ignoreprevious", "ignore previous"}},
 		{name: "run of invisible runes is one space", in: "a\u200b\u2060\u200bb", want: []string{"ab", "a b"}},
+		{name: "spaces mapped in both forms", in: "a\u200bb\u00a0c", want: []string{"ab c", "a b c"}},
 		{name: "empty", in: "", want: []string{""}},
 	}
 	for _, tt := range tests {

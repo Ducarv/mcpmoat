@@ -10,7 +10,8 @@ import (
 
 // MaxMatchInputBytes is the largest part of a text, in bytes, that the regex
 // and keyword matchers read: 32 KiB, counted after the invisible runes are
-// dropped. Text after it is not regex-matched or keyword-matched. This keeps
+// dropped and the other separator runes are mapped to one space (see
+// spacesToASCII). Text after it is not regex-matched or keyword-matched. This keeps
 // the cost of one match small when a server sends a very long text. Real
 // tool descriptions are a few KB long, so the cap does not cut them.
 //
@@ -78,8 +79,8 @@ func matchForms(s string) []string {
 //
 //  1. Cut s to maxRawScanBytes, at a rune boundary.
 //  2. Drop the invisible runes (see isInvisible).
-//  3. Replace each white-space rune that RE2 \s does not match (see
-//     spacesToASCII) with U+0020.
+//  3. Replace each white-space or control rune that RE2 \s does not match
+//     (see spacesToASCII) with U+0020.
 //  4. Cut the result to MaxMatchInputBytes, at a rune boundary.
 //  5. Apply Unicode normalization form NFC, which joins a letter and its
 //     combining marks into one rune where one exists.
@@ -117,20 +118,27 @@ func normalizeInvisible(s string, repl rune) string {
 	return cutAtRune(replaceInvisible(s, repl), MaxMatchInputBytes)
 }
 
-// spacesToASCII replaces each white-space rune that RE2 \s does not match
-// with U+0020. In RE2, \s is only [\t\n\f\r ], so without this step
-// "ignore" + NBSP (U+00A0) + "previous" would not match `ignore\s+previous`.
-// The set is isKeywordSpace, so the regex and keyword matchers agree on what
-// separates two words: VT, NEL (U+0085), the Z categories (NBSP, the em
-// space, U+2028, U+2029 and others) and U+2800. The runes that \s matches
+// re2SpaceRunes are the runes that RE2 \s matches.
+const re2SpaceRunes = "\t\n\f\r "
+
+// spacesToASCII replaces with U+0020 each rune that separates two words for a
+// reader or a model but that RE2 \s does not match:
+//
+//   - the white space of isKeywordSpace: VT, NEL (U+0085), the Z categories
+//     (NBSP, the em space, U+2028, U+2029 and others) and U+2800, the Braille
+//     blank that looks like a space;
+//   - the other control runes (category Cc, such as U+0000 or U+001F).
+//
+// In RE2, \s is only [\t\n\f\r ], so without this step "ignore" + NBSP +
+// "previous" would not match `ignore\s+previous`. The runes in re2SpaceRunes
 // stay as they are, so a newline is still a newline.
 //
-// NFC maps a white-space rune only to another white-space rune (U+2000 to
-// U+2002, U+2001 to U+2003), so one pass before NFC is enough. Every mapped
-// rune is at least 1 byte long, so the text does not grow.
+// NFC maps such a rune only to another such rune (U+2000 to U+2002, U+2001 to
+// U+2003), so one pass before NFC is enough. Every mapped rune is at least 1
+// byte long, so the text does not grow.
 func spacesToASCII(s string) string {
 	return strings.Map(func(r rune) rune {
-		if isKeywordSpace(r) && !strings.ContainsRune("\t\n\f\r ", r) {
+		if (isKeywordSpace(r) || unicode.Is(unicode.Cc, r)) && !strings.ContainsRune(re2SpaceRunes, r) {
 			return ' '
 		}
 		return r
