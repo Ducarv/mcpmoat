@@ -107,15 +107,16 @@ Guidelines:
 The loader is strict. Each of these is an error:
 
 - an unknown field, at the top level or inside `match`;
-- a repeated key;
+- a repeated key, also inside `params`;
 - more than one YAML document in a file;
 - anchors and aliases (`&name`, `*name`);
-- a key that is not a plain string.
+- a key that is not a plain string, also inside `params`.
 
-The loader reads every file whose name ends in `.yaml` or `.yml`, in lower case, and it does not skip
+The loader reads every file whose name ends in `.yaml` or `.yml`, in any case, and it does not skip
 hidden files. A file such as `._rule.yaml` (macOS makes these on some drives) is an error, not
 ignored, so a rule you wrote is never skipped without a word. A subdirectory is ignored. A symlink, or
-any other entry that is not a regular file, with a rule name is an error.
+any other entry that is not a regular file, with a rule name is an error. A folder with no rule file
+at all is an error too, so a wrong folder name cannot look like a scan with extra rules.
 
 An error names the file, the line and the column, and the field when there is one.
 
