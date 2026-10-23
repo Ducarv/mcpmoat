@@ -258,22 +258,13 @@ type toolTarget struct {
 	target rules.Target
 }
 
-// TestFixtureBuiltinT1 runs the built-in T1 rules on every tool of the fixture
-// servers, once for the description and once for the schema. It does not check
-// prompts or resources. A rule has one
-// target, so the two are checked apart. Each tool and target must match the
-// rule IDs listed for it, and no others; a pair that is not listed must match
-// none. The test also checks the loaded T1 IDs and the tool names of each
-// server, so a missing or new rule or tool fails the test.
-func TestFixtureBuiltinT1(t *testing.T) {
+// TestBuiltinT1IDs checks the loaded T1 rule IDs, so a removed or new T1 rule
+// fails the test and TestFixtureBuiltinT1 cannot pass with a rule missing.
+func TestBuiltinT1IDs(t *testing.T) {
 	t.Parallel()
 
-	rs := t1Rules(t)
-	if len(rs) == 0 {
-		t.Fatal("no built-in T1 rules loaded; the checks would pass with no rule")
-	}
 	var ids []string
-	for _, cr := range rs {
+	for _, cr := range t1Rules(t) {
 		ids = append(ids, cr.id)
 	}
 	slices.Sort(ids)
@@ -283,6 +274,21 @@ func TestFixtureBuiltinT1(t *testing.T) {
 	}
 	if !slices.Equal(ids, wantIDs) {
 		t.Errorf("loaded T1 rule IDs = %q, want %q", ids, wantIDs)
+	}
+}
+
+// TestFixtureBuiltinT1 runs the built-in T1 rules on every tool of the fixture
+// servers, once for the description and once for the schema. It does not check
+// prompts or resources. A rule has one target, so the two are checked apart.
+// Each tool and target must match the rule IDs listed for it, and no others;
+// a pair that is not listed must match none. The test also checks the tool
+// names of each server, so a missing or new tool fails the test.
+func TestFixtureBuiltinT1(t *testing.T) {
+	t.Parallel()
+
+	rs := t1Rules(t)
+	if len(rs) == 0 {
+		t.Fatal("no built-in T1 rules loaded; the checks would pass with no rule")
 	}
 
 	fixtures := []struct {
