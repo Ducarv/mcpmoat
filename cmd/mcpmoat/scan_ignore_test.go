@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bytes"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -31,10 +30,6 @@ const ignoreWarnPrefix = "mcpmoat scan: warning: "
 // tests. stderr must never contain it.
 const ignoreMarker = "ZZMARK"
 
-// okServer is a server map with one valid server, ok-srv, for writeServers.
-// It is only read, so the parallel tests can share it.
-var okServer = map[string]any{"ok-srv": map[string]any{"command": "npx"}}
-
 // writeHomeConfig writes ~/.claude.json with one valid server (ok-srv) into
 // home, so an auto-discovery scan of home exits with 0 and prints a table.
 func writeHomeConfig(t *testing.T, home string) {
@@ -48,60 +43,6 @@ func assertNoIgnoreContent(t *testing.T, stderr string) {
 	t.Helper()
 	if strings.Contains(stderr, ignoreMarker) {
 		t.Errorf("stderr shows content of the ignore file\nstderr:\n%s", stderr)
-	}
-}
-
-// runScanArgs runs "mcpmoat <args>" on c and returns the exit code, stdout and
-// stderr.
-func runScanArgs(c *cli, stdout, stderr *bytes.Buffer, args ...string) (int, string, string) {
-	code := c.dispatch(args)
-	return code, stdout.String(), stderr.String()
-}
-
-// lineWant is the expected text of one stderr line: the exact line, or only
-// its start when prefix is true.
-type lineWant struct {
-	text   string
-	prefix bool
-}
-
-// exactLine wants a line that is exactly s.
-func exactLine(s string) lineWant { return lineWant{text: s} }
-
-// prefixLine wants a line that starts with s.
-func prefixLine(s string) lineWant { return lineWant{text: s, prefix: true} }
-
-// assertStderrLines fails the test unless the non-empty lines of stderr match
-// wants, one for one and in order.
-func assertStderrLines(t *testing.T, stderr string, wants []lineWant) {
-	t.Helper()
-	lines := nonEmptyLines(stderr)
-	if len(lines) != len(wants) {
-		t.Fatalf("stderr has %d lines, want %d:\n%s", len(lines), len(wants), stderr)
-	}
-	for i, w := range wants {
-		ok := lines[i] == w.text
-		if w.prefix {
-			ok = strings.HasPrefix(lines[i], w.text)
-		}
-		if !ok {
-			kind := "="
-			if w.prefix {
-				kind = "starting with"
-			}
-			t.Errorf("stderr line %d = %q, want a line %s %q", i+1, lines[i], kind, w.text)
-		}
-	}
-}
-
-// assertScanPrefix fails the test if a non-empty stderr line does not start
-// with "mcpmoat scan: ".
-func assertScanPrefix(t *testing.T, stderr string) {
-	t.Helper()
-	for _, line := range nonEmptyLines(stderr) {
-		if !strings.HasPrefix(line, "mcpmoat scan: ") {
-			t.Errorf("stderr line %q does not start with %q", line, "mcpmoat scan: ")
-		}
 	}
 }
 
@@ -254,13 +195,7 @@ func TestScanIgnoreFlag(t *testing.T) {
 			// The work dir is empty: no ignore file, no project config.
 			c, stdout, stderr := dirsCLI(t, home, t.TempDir())
 
-			args := []string{"scan"}
-			for _, a := range tt.args {
-				if a == "CONFIG" {
-					a = config
-				}
-				args = append(args, a)
-			}
+			args := append([]string{"scan"}, replaceToken(tt.args, "CONFIG", config)...)
 
 			code, out, errOut := runScanArgs(c, stdout, stderr, args...)
 
@@ -282,11 +217,7 @@ func TestScanIgnoreFlag(t *testing.T) {
 				})
 			}
 			assertContainsAll(t, "stderr", errOut, tt.wantStderr)
-			for _, bad := range tt.noStderr {
-				if strings.Contains(errOut, bad) {
-					t.Errorf("stderr contains %q\nstderr:\n%s", bad, errOut)
-				}
-			}
+			assertContainsNone(t, "stderr", errOut, tt.noStderr)
 			assertNoEscape(t, out, errOut)
 		})
 	}

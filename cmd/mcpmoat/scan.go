@@ -192,13 +192,13 @@ func (c *cli) scanConfig(ctx context.Context, path string, ignoreIDs []string) i
 	// The error text is not printed; a fixed warning is enough.
 	wd, err := c.getwd()
 	if err != nil {
-		wd = ""
+		wd = "" // do not use a value that comes with an error
 		fprintf(c.stderr, "mcpmoat scan: warning: cannot read the working directory; %s is not read\n", rules.IgnoreFileName)
 	}
 	if !filepath.IsAbs(path) && wd != "" {
 		path = filepath.Join(wd, path)
 	}
-	_ = c.loadIgnore(wd, ignoreIDs) // used when findings exist (FR-10 summary and exit-code wiring)
+	_ = c.loadIgnore(wd, ignoreIDs) // TODO(#40): apply to the findings (FR-10 summary and exit code)
 
 	// The home directory only tells ReadConfig whether the file is one of the
 	// user's own global files. Without a home, no file is: the file is read
@@ -234,7 +234,7 @@ func (c *cli) scanAuto(ctx context.Context, ignoreIDs []string) int {
 		fprintf(c.stderr, "mcpmoat scan: cannot read the working directory; use --config\n")
 		return exitError
 	}
-	_ = c.loadIgnore(wd, ignoreIDs) // used when findings exist (FR-10 summary and exit-code wiring)
+	_ = c.loadIgnore(wd, ignoreIDs) // TODO(#40): apply to the findings (FR-10 summary and exit code)
 	return c.listServers(discover.Discover(ctx, discover.Options{Home: home, WorkDir: wd}))
 }
 
@@ -259,7 +259,7 @@ func (c *cli) loadIgnore(wd string, ids []string) rules.IgnoreList {
 			fprintf(c.stderr, "mcpmoat scan: warning: %s; mcpmoat uses no entries from it\n", termsafe.Quote(err.Error()))
 		}
 		for _, w := range warnings {
-			fprintf(c.stderr, "mcpmoat scan: warning: %s\n", w.String())
+			fprintf(c.stderr, "mcpmoat scan: warning: %s\n", w)
 		}
 		switch n := fromFile.Len(); {
 		case n == 1:

@@ -290,3 +290,84 @@ func symlink(t *testing.T, target, link string) {
 
 // usageHint is the line that every usage error prints after the message.
 const usageHint = `Run "mcpmoat help" for usage.`
+
+// okServer is a server map with one valid server, ok-srv, for writeServers.
+// It is only read, so the parallel tests can share it.
+var okServer = map[string]any{"ok-srv": map[string]any{"command": "npx"}}
+
+// runScanArgs runs "mcpmoat <args>" on c and returns the exit code, stdout and
+// stderr.
+func runScanArgs(c *cli, stdout, stderr *bytes.Buffer, args ...string) (int, string, string) {
+	code := c.dispatch(args)
+	return code, stdout.String(), stderr.String()
+}
+
+// lineWant is the expected text of one stderr line: the exact line, or only
+// its start when prefix is true.
+type lineWant struct {
+	text   string
+	prefix bool
+}
+
+// exactLine wants a line that is exactly s.
+func exactLine(s string) lineWant { return lineWant{text: s} }
+
+// prefixLine wants a line that starts with s.
+func prefixLine(s string) lineWant { return lineWant{text: s, prefix: true} }
+
+// assertStderrLines fails the test unless the non-empty lines of stderr match
+// wants, one for one and in order.
+func assertStderrLines(t *testing.T, stderr string, wants []lineWant) {
+	t.Helper()
+	lines := nonEmptyLines(stderr)
+	if len(lines) != len(wants) {
+		t.Fatalf("stderr has %d lines, want %d:\n%s", len(lines), len(wants), stderr)
+	}
+	for i, w := range wants {
+		ok := lines[i] == w.text
+		if w.prefix {
+			ok = strings.HasPrefix(lines[i], w.text)
+		}
+		if !ok {
+			kind := "="
+			if w.prefix {
+				kind = "starting with"
+			}
+			t.Errorf("stderr line %d = %q, want a line %s %q", i+1, lines[i], kind, w.text)
+		}
+	}
+}
+
+// assertScanPrefix fails the test if a non-empty stderr line does not start
+// with "mcpmoat scan: ".
+func assertScanPrefix(t *testing.T, stderr string) {
+	t.Helper()
+	for _, line := range nonEmptyLines(stderr) {
+		if !strings.HasPrefix(line, "mcpmoat scan: ") {
+			t.Errorf("stderr line %q does not start with %q", line, "mcpmoat scan: ")
+		}
+	}
+}
+
+// replaceToken returns a copy of args in which each arg equal to token is
+// value.
+func replaceToken(args []string, token, value string) []string {
+	out := slices.Clone(args)
+	for i, a := range out {
+		if a == token {
+			out[i] = value
+		}
+	}
+	return out
+}
+
+// assertContainsNone fails the test for each string in bad that got contains.
+// what names got in the message.
+func assertContainsNone(t *testing.T, what, got string, bad []string) {
+	t.Helper()
+	for _, b := range bad {
+		if strings.Contains(got, b) {
+			t.Errorf("%s contains %q\n%s:\n%s", what, b, what, got)
+		}
+	}
+}
