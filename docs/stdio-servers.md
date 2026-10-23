@@ -1,7 +1,8 @@
 # How mcpmoat starts stdio servers
 
-> **Status:** this page describes how mcpmoat starts stdio servers. `mcpmoat scan` does not start
-> servers yet. See [ARCHITECTURE.md](ARCHITECTURE.md#data-flow) for what is wired today.
+> **Status:** this page describes how the `internal/inspect` code starts stdio servers.
+> `mcpmoat scan` does not call that code yet. See [ARCHITECTURE.md](ARCHITECTURE.md#data-flow) for
+> what is wired today.
 
 A stdio server is a local program that your MCP client starts. To read its tools, mcpmoat starts
 the same program. This page tells you what the program gets from mcpmoat.

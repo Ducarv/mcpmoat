@@ -111,12 +111,11 @@ round = last ledger round + 1
 loop:
   HEAD = git rev-parse HEAD
   run the review-pr skill: [<N>] --ledger $LEDGER [--lite if round > 1 and --lite-followups]
-  run the docs check (Step 3.6) and add its finding, if any, to the round's findings
   append the round to the ledger: head sha, method/tier, verdict, panelled files, findings
   post the review report as a PR comment (Step 5b)
   if verdict is COMMENT (review incomplete):
       run the round again once; if it is incomplete again, stop and escalate
-  if verdict is APPROVE and every remaining finding (the docs finding too) is Minor/Nit with a disposition:
+  if verdict is APPROVE and every remaining finding is Minor/Nit with a disposition:
       post the resolution summary for the remaining findings (Step 5b), then stop (Step 6)
   triage every finding (Step 3) and write each disposition to the ledger
   apply the fixes (Step 4), run the gates (Step 5), commit
@@ -181,19 +180,14 @@ workflow because "it never uses the token", but `actions/checkout` needs `conten
 private repo, so `{}` would break the build. Declining with that checked reason is correct.
 State the premise you disproved.
 
-### 3.6 Docs check (every round)
+### 3.6 Docs finding
 
-Run `git diff --name-only origin/<base>...HEAD`. If the diff has a behaviour change, as defined in
-[CONTRIBUTING.md Pull requests](../../../CONTRIBUTING.md#pull-requests), find the owner doc in the
-"Topic to owner" table of `docs/README.md`. Add a finding if the owner doc is not in the diff and
-the PR has no "No doc change needed because" line with a real reason. To check the PR, read the body
-with `gh pr view <n> --json body -q .body`. If there is no PR (`N` is empty in Step 1), read the
-ledger instead: a "No doc change needed because" reason that an earlier round recorded there
-counts, and without one the finding stands when the owner doc is not in the diff. The finding is `[Q]`, Should-Fix,
-"PR does not update the owner doc". Treat it like any other finding. There are two fixes. Update
-the owner doc in an additive commit. Or, if the doc needs no change, record the "No doc change
-needed because ..." reason in the ledger and, once a PR exists, add that line to the PR body with
-`gh pr edit`. You can also decline it with a technical reason. Write the disposition to the ledger.
+`review-quality` reports a behaviour change with no owner-doc update as a `[Q]` Should-Fix finding.
+The rule is in [CONTRIBUTING.md Pull requests](../../../CONTRIBUTING.md#pull-requests). Triage it
+like any other finding. There are two fixes. Update the owner doc in an additive commit. Or, if the
+doc needs no change, record a "No doc change needed because ..." reason in the ledger (disposition
+`non-issue`) and, once a PR exists, add that line to the PR body with `gh pr edit`. The next round
+filters the finding while the reason holds. Do not add a second docs check here.
 
 ## Step 4: Apply fixes
 

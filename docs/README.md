@@ -18,7 +18,8 @@ This page is the index. Each topic has one owner doc. Update the owner doc. Do n
 | How stdio servers start | [docs/stdio-servers.md](stdio-servers.md) |
 | Competitor study | [docs/competitors.md](competitors.md) |
 | Claude Code entry point and issue labels | [CLAUDE.md](../CLAUDE.md) |
-| Test fixtures | [testdata/servers/README.md](../testdata/servers/README.md) |
+| Test fixtures (servers) | [testdata/servers/README.md](../testdata/servers/README.md) |
+| Test fixtures (T4 and T5 configs) | [dangerous](../testdata/configs/dangerous/README.md) and [typosquat](../testdata/configs/typosquat/README.md) |
 
 ## Other files
 

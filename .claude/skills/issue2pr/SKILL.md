@@ -132,8 +132,8 @@ Spawn the `research` agent with the issue title and body, referenced files, acce
 criteria, and the profile path. It returns a task list with dependencies. Tell it to include a task
 that updates the owner doc for the change. Find the owner in the "Topic to owner" table in
 `docs/README.md`. If no doc needs to change, there is no doc task. The reason goes in the
-`no_doc_reason` field of the research output context. It is only a plan. Step 10 checks the
-final diff, and does not accept the reason as the "No doc change needed because" line.
+`no_doc_reason` field of the research output context. This value is a plan only. Step 10 checks
+the final diff and never uses it as the PR's "No doc change needed because" line.
 
 ### Step 4: Clarify (interactive only)
 
@@ -179,8 +179,8 @@ Do not swallow exit codes or truncate failing output. If a check fails:
 Invoke the `review-pr` skill on the current branch.
 
 - **Critical / Should-fix**: fix them, then go back to Step 8. A security finding at either
-  severity is always in this group. The exception is a finding that the owner doc is not updated.
-  Step 10 owns the docs check, so do not act on that finding here.
+  severity is always in this group. The exception is a finding that the owner doc is not updated,
+  when it is not security-tagged. Step 10 owns that docs check, so do not act on it here.
 - **Minor / Nit**: do not fix. List security-tagged nits in the PR body so the reviewer sees
   them.
 
@@ -196,7 +196,8 @@ The rule for docs is in [CONTRIBUTING.md Pull requests](../../../CONTRIBUTING.md
    together with `git diff origin/<base>`. If the diff has a behaviour change (as that rule
    defines it) and the owner doc from the "Topic to owner" table in `docs/README.md` is not in
    the diff:
-   - If the user gave a "No doc change needed because" reason, keep it for the `pr` skill.
+   - If the user or the issue gave a "No doc change needed because" reason, or the owner doc
+     already states the new behaviour (read it), keep the reason for the `pr` skill.
    - Otherwise add the owner-doc change as a task and run it once through `coordinate`. Then run
      the Step 8 checks for the changed files and continue. Ignore a `no_doc_reason` from Step 3
      here: research wrote it before any code existed, and the diff now shows a behaviour change.

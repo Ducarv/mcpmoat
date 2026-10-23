@@ -28,7 +28,7 @@ docs/                   PRD and other documentation
 ```
 
 - `cmd/mcpmoat`: parses flags, runs the command, returns the exit code. `os.Exit` is only in `main`.
-- `internal/termsafe`: `Quote`, `QuoteIf`, `QuoteCut`, `Cut` and `IsInvisible`. See
+- `internal/termsafe`: escapes untrusted text for the terminal. See
   [Where untrusted text is escaped](#where-untrusted-text-is-escaped).
 - `internal/discover`: finds the MCP servers that the client configs declare. It does not start them.
 - `internal/inspect`: starts or calls each server and reads what it offers. It is the only product

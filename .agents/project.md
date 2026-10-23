@@ -19,7 +19,7 @@ This file owns conventions, agent routing, release notes and review criteria. It
 
 | Purpose | Command |
 |---|---|
-| Gates (all checks CI runs) | run the block in [CONTRIBUTING.md](../CONTRIBUTING.md#checks) |
+| Gates (the local checks that CI also runs) | run the block in [CONTRIBUTING.md](../CONTRIBUTING.md#checks) |
 | Format fix | `gofmt -w .` (or `golangci-lint fmt`) |
 | Typecheck | `go build ./... && go vet ./...` |
 | Tests (scoped) | `go test -race ./internal/<pkg>/ -run '<TestName>' -v` |
@@ -34,11 +34,12 @@ This file owns conventions, agent routing, release notes and review criteria. It
 - `context.Context` first for anything that does I/O or can block.
 - Small interfaces defined by the consumer; no global mutable state.
 - Table-driven tests; `t.Parallel()` where safe (never with `t.Setenv`); `t.TempDir()`,
-  `t.Context()`; fixtures under `testdata/`; no `time.Sleep` for synchronisation.
-- Tests never touch the real `$HOME` or real client configs. Use `t.TempDir()` and `t.Setenv()`.
+  `t.Context()`; fixtures under `testdata/`; no `time.Sleep` for synchronisation. Tests never touch
+  the real `$HOME` or real client configs: use `t.TempDir()` and `t.Setenv()`.
 - `os.Exit` only in `main`; stdout for data, stderr for logs and warnings.
 - `//nolint` only with the linter name and a reason.
-- Never print, log or store secret values from client configs. Print keys only.
+- Never print, log or store env or header values from client configs, whether or not they look
+  secret. Print keys only.
 - No telemetry. No network calls except configured servers and, behind `--llm`, the LLM provider.
 - Minimal, pinned dependencies. Ask before adding one.
 - stdio servers run with exactly the configured command and a scrubbed environment (NFR-04).
@@ -60,7 +61,7 @@ This file owns conventions, agent routing, release notes and review criteria. It
 | Root-cause diagnosis | `debugger` |
 | Final compile and vet check | `typecheck` |
 | Security-flagged tasks after the dev agent | `review-security` |
-| Docs: `*.md`, `docs/`, `.github/` templates, `.claude/` agent and skill text | `general-purpose` (no dedicated docs agent; follow the owner docs in [docs/README.md](../docs/README.md)). A task that edits `.claude/agents/review-*.md` or a review step of a skill is security-flagged: run `review-security` after it. |
+| Docs: `*.md`, `docs/`, `.github/` templates, `.claude/` agent and skill text | `general-purpose` (no dedicated docs agent; follow the owner docs in [docs/README.md](../docs/README.md)). A task that edits `.claude/agents/review-*.md`, a review step of a skill, `.agents/project.md` or `CLAUDE.md` is security-flagged: run `review-security` after it. |
 
 ## Git and pull requests
 
@@ -83,7 +84,7 @@ This file owns conventions, agent routing, release notes and review criteria. It
 ## Review
 
 - Extra sensitive path tokens: `inspect`, `exec`, `env`, `pins`, `hash`, `release`, `goreleaser`,
-  `workflows`.
+  `workflows`, `.agents`.
 - Path tokens to ignore: none.
 - Project review criteria:
   - Code follows the Code style rules on rule tests (NFR-05), the scrubbed stdio environment

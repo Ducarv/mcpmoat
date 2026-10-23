@@ -18,8 +18,7 @@ NFR-07, threats T1 to T5, milestones M1 to M8. Read the cited section before you
 - [SECURITY.md](SECURITY.md): how to report a vulnerability.
 
 The project profile below is imported from `.agents/project.md`, its one owner. It holds the code
-style and security rules (secrets, no telemetry, NFR-04 scrubbed env), the exit-code contract, the
-PR docs rule and the agent routing. Every session loads it.
+style, the security rules and the agent routing. Every session loads it.
 
 @.agents/project.md
 
