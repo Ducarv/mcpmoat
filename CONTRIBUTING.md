@@ -110,6 +110,8 @@ The loader is strict. Each of these is an error:
 - a repeated key, also inside `params`;
 - more than one YAML document in a file;
 - anchors and aliases (`&name`, `*name`);
+- explicit tags (`!!binary`, `!!str`, `!custom`), because a tag can hide the real value from a person who
+  reads the file. Write a quoted string instead of `!!str`;
 - a key that is not a plain string, also inside `params`.
 
 The loader reads every file whose name ends in `.yaml` or `.yml`, in any case, and it does not skip
@@ -169,8 +171,8 @@ mcpmoat loads every `*.yaml` and `*.yml` file in that folder, in addition to the
 not read subfolders and it refuses symlinks inside the folder. A symlink as the folder path itself is
 followed, like any path you type, so run `--rules` only on a folder you trust or have looked at. A
 folder holds at most 1000 such files. An external rule can use any safe ID (see the `id` field above),
-but it must not use the ID of a built-in rule. An invalid file or a clashing ID gives exit code 2 and
-the message names the file.
+but it must not use the ID of a built-in rule, in any case (`moat-t1-003` clashes with `MOAT-T1-003`).
+An invalid file or a clashing ID gives exit code 2 and the message names the file.
 
 ## Building and testing
 
