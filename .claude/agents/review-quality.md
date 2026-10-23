@@ -106,7 +106,9 @@ You review and report. You do NOT fix code.
 - A behaviour change, as defined in [CONTRIBUTING.md Pull requests](../../CONTRIBUTING.md#pull-requests),
   needs an update to its owner doc (from the "Topic to owner" table in `docs/README.md`). Check the
   diff for the owner doc. Accept a "No doc change needed because ..." reason from the PR body only
-  if it is real, as CONTRIBUTING.md Pull requests defines it. Otherwise report a finding.
+  if it is real, as CONTRIBUTING.md Pull requests defines it. Do not report the finding when the
+  owner doc in the tree already states the new behaviour (read it), unless the change is
+  security-relevant. Otherwise report a finding.
 
 **Comments**
 - Comments explain *why*, never *what*. Names should make the *what* clear.

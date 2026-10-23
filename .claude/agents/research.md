@@ -98,7 +98,8 @@ reading, and leave it out when another skill calls you. The two must never disag
 - **Agent**: from the profile's routing table. Defaults: `go-dev` (`internal/` logic), `cli-dev`
   (`cmd/mcpmoat`, `internal/report`), `datastore` (`pins.json` format and store, ignore file),
   `unit-test` (unit `_test.go`, rule cases, fixtures), `cli-test` (in-process CLI output and
-  golden files), `e2e-test` (`TestE2E*` Go tests that run the real binary).
+  golden files), `e2e-test` (`TestE2E*` Go tests that run the real binary), `general-purpose`
+  (docs, Markdown and `.claude/` text).
 - **Security**: `✓` for security-sensitive tasks (see below).
 
 ## Dependency guidelines

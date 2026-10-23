@@ -187,7 +187,9 @@ The rule is in [CONTRIBUTING.md Pull requests](../../../CONTRIBUTING.md#pull-req
 like any other finding. There are two fixes. Update the owner doc in an additive commit. Or, if the
 doc needs no change, record a "No doc change needed because ..." reason in the ledger (disposition
 `non-issue`) and, once a PR exists, add that line to the PR body with `gh pr edit`. The next round
-filters the finding while the reason holds. Do not add a second docs check here.
+filters the finding while the reason holds. A reason cannot close the finding when the diff changes
+security-relevant behaviour: update the owner doc. When no PR exists yet, pass the recorded reason to
+the `pr` skill when you open the PR. Do not add a second docs check here.
 
 ## Step 4: Apply fixes
 

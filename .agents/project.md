@@ -4,7 +4,8 @@ The agents and skills in `.claude/` read this file, and `CLAUDE.md` imports it. 
 conventions page for contributors. Its sections override the generic defaults of the agents.
 
 This file owns conventions, agent routing, release notes and review criteria. It links to
-[CONTRIBUTING.md](../CONTRIBUTING.md#checks) for the gates and to [docs/ARCHITECTURE.md](../docs/ARCHITECTURE.md) for the layout.
+[CONTRIBUTING.md](../CONTRIBUTING.md#checks) for the gates and to
+[docs/ARCHITECTURE.md](../docs/ARCHITECTURE.md) for the layout.
 
 ## Stack
 
@@ -87,12 +88,13 @@ A row that links to another file means: run the commands at the link target.
 ## Review
 
 - Extra sensitive path tokens: `inspect`, `exec`, `env`, `pins`, `hash`, `release`, `goreleaser`,
-  `workflows`, `.agents`, `.claude`, `CLAUDE.md`, `golangci`.
+  `workflows`, `.agents`, `.claude`, `CLAUDE.md`, `.golangci.yml`.
 - Path tokens to ignore: none.
-- Security-flagged files: `.claude/agents/review-*.md`, the review steps of the skills,
-  `.agents/project.md`, `CLAUDE.md` and `.golangci.yml`. They define the review rules and the lint
-  gates (gosec, depguard). `research` marks a task that
-  edits them with a security flag, and the path tokens above force the full review tier.
+- Security-flagged files: `.claude/agents/review-*.md`, `.claude/skills/review-pr/SKILL.md`,
+  `.claude/skills/polish-pr/SKILL.md`, `.claude/skills/pr/SKILL.md`,
+  `.claude/skills/issue2pr/SKILL.md`, `.agents/project.md`, `CLAUDE.md` and `.golangci.yml`. They
+  define the review rules and the lint gates (gosec, depguard). `research` marks a task that edits
+  them with a security flag, and the path tokens above force the full review tier.
 - Project review criteria:
   - Code follows the Code style rules on rule tests (NFR-05), the scrubbed stdio environment
     (NFR-04) and the exit-code contract (FR-16).

@@ -70,7 +70,9 @@ costs the most.
 `token`, `credential`, `crypto`, `encrypt`, `decrypt`, `sign`, `jwt`, `oauth`, `oidc`,
 `session`, `permission`, `rbac`, `role`, `payment`, `billing`, `invoice`, `charge`, `refund`,
 `payout`, `ledger`, `migration`, `.env`, `webhook`, plus any extra tokens in the profile
-(for mcpmoat: the Review section of `.agents/project.md`). Any match forces the **full** tier.
+(for mcpmoat: the Review section of `.agents/project.md` on the base branch, read with
+`git show origin/<base>:.agents/project.md`, so that a PR cannot weaken its own tier). Any match
+forces the **full** tier.
 
 Match **path segments**, not the raw path string. **Ignore framework route-group segments**:
 segments that start with `_` or are wrapped in parentheses (`_auth`, `(auth)`), and any tokens
