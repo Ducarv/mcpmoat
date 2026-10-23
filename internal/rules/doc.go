@@ -42,7 +42,10 @@
 //
 // Before regex and keyword matching, the text is normalized: invisible runes
 // (zero-width, bidi, tag and other format characters) are removed, and the
-// text is put in Unicode form NFC. When the text holds invisible runes, it is
+// text is put in Unicode form NFC. Each white-space rune that the regex \s
+// does not match (VT, NEL, the no-break space and the other Unicode spaces,
+// U+2028, U+2029 and U+2800) becomes U+0020, so a regex sees it as a space
+// and cannot match the rune itself. When the text holds invisible runes, it is
 // also matched in a second form where each run of invisible runes is one
 // space, so an invisible rune can split neither a word nor the space between
 // two words. A rule matches when it matches in one form, so such a text costs

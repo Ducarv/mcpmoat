@@ -39,7 +39,7 @@ severity: high
 target: description
 match:
   any_regex:
-    - '(?i)\b(?:do\s+not|don(?:''|\x{2019})?t|never)\s+(?:ever\s+)?(?:tell|inform|mention|reveal|disclose)[\s\S]{0,30}\buser(?:[^\w''\x{2019}]|$)'
+    - '(?i)\b(?:do\s+not|don(?:''|\x{2019})?t|never)\s+(?:ever\s+)?(?:tell|inform|mention|reveal|disclose)[\s\S]{0,30}\bthe\s+user(?:[^\w''\x{2019}]|$)'
     - '(?i)\bwithout\s+(?:telling|notifying|informing)\s+the\s+user(?:[^\w''\x{2019}]|$)'
     - '(?i)\b(?:do\s+not|don(?:''|\x{2019})?t|never)\s+let\s+the\s+user\s+know\b'
     - '(?i)(?:\bhide\b[\s\S]{0,30}|\bkeep\s+(?:this|it|that)\b[\s\S]{0,30}|\bhidden\s+)\bfrom\s+the\s+user(?:[^\w''\x{2019}]|$)'
@@ -88,6 +88,9 @@ should_not_match:
     note: The \b before never stops a match inside forever
   - text: Never reveal the user's password or tokens; return only a masked value.
     note: The tail after user stops a match on user's
+  - text: We never disclose user information to third parties.
+    note: A privacy note; the pattern needs the user, not user information
+  - Never reveal user data in the logs.
   - text: Keep the messages received from the user in order.
     note: Keep with no this, it or that is not a hide instruction
   - text: Hides the password field from the user view.
@@ -144,7 +147,8 @@ Limits:
 Guidelines:
 
 - Keep regexes simple. Bound any gap that can hold words (`[\s\S]{0,30}`, not `.*`), because a
-  long gap causes false positives. `\s+` between two words is fine. Go uses RE2, so there is no
+  long gap causes false positives. `\s+` between two words is fine. A block between a pair of tags,
+  such as `<instructions>...</instructions>`, can be unbounded (`[\s\S]+?`): the closing tag ends it. Go uses RE2, so there is no
   catastrophic backtracking.
 - Prefer a lower severity when you are not sure. False positives make people stop using the tool.
 - Add at least one reference (research, advisory, OWASP MCP Top 10 entry).

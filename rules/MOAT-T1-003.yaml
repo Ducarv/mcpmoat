@@ -5,7 +5,7 @@ severity: high
 target: description
 match:
   any_regex:
-    - '(?i)\b(?:do\s+not|don(?:''|\x{2019})?t|never)\s+(?:ever\s+)?(?:tell|inform|mention|reveal|disclose)[\s\S]{0,30}\buser(?:[^\w''\x{2019}]|$)'
+    - '(?i)\b(?:do\s+not|don(?:''|\x{2019})?t|never)\s+(?:ever\s+)?(?:tell|inform|mention|reveal|disclose)[\s\S]{0,30}\bthe\s+user(?:[^\w''\x{2019}]|$)'
     - '(?i)\bwithout\s+(?:telling|notifying|informing)\s+the\s+user(?:[^\w''\x{2019}]|$)'
     - '(?i)\b(?:do\s+not|don(?:''|\x{2019})?t|never)\s+let\s+the\s+user\s+know\b'
     - '(?i)(?:\bhide\b[\s\S]{0,30}|\bkeep\s+(?:this|it|that)\b[\s\S]{0,30}|\bhidden\s+)\bfrom\s+the\s+user(?:[^\w''\x{2019}]|$)'
@@ -54,6 +54,9 @@ should_not_match:
     note: The \b before never stops a match inside forever
   - text: Never reveal the user's password or tokens; return only a masked value.
     note: The tail after user stops a match on user's
+  - text: We never disclose user information to third parties.
+    note: A privacy note; the pattern needs the user, not user information
+  - Never reveal user data in the logs.
   - text: Keep the messages received from the user in order.
     note: Keep with no this, it or that is not a hide instruction
   - text: Hides the password field from the user view.
