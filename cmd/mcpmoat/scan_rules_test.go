@@ -117,7 +117,7 @@ func TestFirstUnsafeRune(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			got, _, found := firstUnsafeRune(tt.in)
-			if found != (tt.want != 0) || got != tt.want && found {
+			if found != (tt.want != 0) || (found && got != tt.want) {
 				t.Errorf("firstUnsafeRune(%q) = %U, %v; want %U", tt.in, got, found, tt.want)
 			}
 		})
@@ -542,9 +542,7 @@ should_not_match:
 			setup: func(t *testing.T) string {
 				dir := t.TempDir()
 				name := "bad\x1b[31m\nname.yaml"
-				if err := os.WriteFile(filepath.Join(dir, name), []byte("colour: red\n"), 0o600); err != nil {
-					t.Skipf("the file system refuses this file name: %v", err)
-				}
+				writeFileOrSkip(t, dir, name, "colour: red\n")
 				return dir
 			},
 		},
@@ -553,9 +551,7 @@ should_not_match:
 			setup: func(t *testing.T) string {
 				dir := t.TempDir()
 				name := "bad\x1b[31m\nname.yaml"
-				if err := os.WriteFile(filepath.Join(dir, name), []byte(goodRule), 0o600); err != nil {
-					t.Skipf("the file system refuses this file name: %v", err)
-				}
+				writeFileOrSkip(t, dir, name, goodRule)
 				// The same ID in a second file: the duplicate error names
 				// the bad file.
 				writeTestFile(t, dir, "other.yaml", goodRule)
@@ -618,9 +614,7 @@ should_not_match:
 			setup: func(t *testing.T) string {
 				dir := t.TempDir()
 				name := "bad\u009b\u202e\u200bname.yaml"
-				if err := os.WriteFile(filepath.Join(dir, name), []byte("colour: red\n"), 0o600); err != nil {
-					t.Skipf("the file system refuses this file name: %v", err)
-				}
+				writeFileOrSkip(t, dir, name, "colour: red\n")
 				return dir
 			},
 		},
@@ -629,9 +623,7 @@ should_not_match:
 			setup: func(t *testing.T) string {
 				dir := t.TempDir()
 				name := "bad\u2028\u2029name.yaml"
-				if err := os.WriteFile(filepath.Join(dir, name), []byte("colour: red\n"), 0o600); err != nil {
-					t.Skipf("the file system refuses this file name: %v", err)
-				}
+				writeFileOrSkip(t, dir, name, "colour: red\n")
 				return dir
 			},
 		},
@@ -776,9 +768,10 @@ func floodDir(t *testing.T) string {
 const maxFloodLines = 101
 
 // floodGuard is the time a flood scan may take. The loader stops early, so the
-// real time is a few milliseconds; the guard only catches a loader that reads
-// all the files.
-const floodGuard = 5 * time.Second
+// real time is a few milliseconds. The guard is long on purpose, so a slow
+// runner with -race does not fail it; it only catches a hang. The line counts
+// show that the loader stopped early.
+const floodGuard = 30 * time.Second
 
 // assertFloodResult checks the result of a scan of floodDir: exit code 2,
 // empty stdout, a capped list of errors that ends with the "too many errors"

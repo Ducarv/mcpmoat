@@ -287,3 +287,13 @@ func symlink(t *testing.T, target, link string) {
 		t.Fatalf("symlink: %v", err)
 	}
 }
+
+// writeFileOrSkip writes content to dir/name. The file system may refuse a file
+// name (a name with a control rune, for example). That is not a failure of
+// mcpmoat, so the test skips.
+func writeFileOrSkip(t *testing.T, dir, name, content string) {
+	t.Helper()
+	if err := os.WriteFile(filepath.Join(dir, name), []byte(content), 0o600); err != nil {
+		t.Skipf("the file system refuses this file name: %v", err)
+	}
+}

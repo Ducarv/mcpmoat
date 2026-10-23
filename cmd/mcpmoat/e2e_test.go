@@ -529,7 +529,7 @@ func TestE2EScanStartsNoProcess(t *testing.T) {
 // would not work.
 func e2eRulesDir(t *testing.T, parts ...string) string {
 	t.Helper()
-	dir, err := filepath.Abs(filepath.Join(append([]string{"..", "..", "testdata", "rules"}, parts...)...))
+	dir, err := filepath.Abs(scanRulesFixture(parts...))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -697,9 +697,7 @@ func TestE2EScanRulesEscapeSafety(t *testing.T) {
 				name := cmp.Or(tt.fileName, "bad.yaml")
 				// The file system may refuse a file name. A write error is
 				// not a failure of mcpmoat, so the test skips.
-				if err := os.WriteFile(filepath.Join(dir, name), []byte(tt.content), 0o600); err != nil {
-					t.Skipf("the file system refuses this file name: %v", err)
-				}
+				writeFileOrSkip(t, dir, name, tt.content)
 			}
 
 			stdout, stderr, code := runBin(t, t.TempDir(), t.TempDir(), "scan", "--no-connect", "--rules", dir)
