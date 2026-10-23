@@ -166,9 +166,11 @@ mcpmoat scan --rules ./my-rules --no-connect
 ```
 
 mcpmoat loads every `*.yaml` and `*.yml` file in that folder, in addition to the built-in rules. It does
-not read subfolders and it refuses symlinks. A folder holds at most 1000 such files. An external rule can
-use any safe ID (see the `id` field above), but it must not use the ID of a built-in rule. An invalid
-file or a clashing ID gives exit code 2 and the message names the file.
+not read subfolders and it refuses symlinks inside the folder. A symlink as the folder path itself is
+followed, like any path you type, so run `--rules` only on a folder you trust or have looked at. A
+folder holds at most 1000 such files. An external rule can use any safe ID (see the `id` field above),
+but it must not use the ID of a built-in rule. An invalid file or a clashing ID gives exit code 2 and
+the message names the file.
 
 ## Building and testing
 

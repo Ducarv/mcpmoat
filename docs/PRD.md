@@ -377,8 +377,8 @@ loadable from a directory (`--rules <dir>`).
 - An invalid rule file fails with exit code 2 and names the file and field.
 - Two rules with the same `id` are rejected.
 
-**FR-08: Rule schema.** Each rule has `id`, `title`, `severity` (low, medium, high, critical),
-`target` (description, schema, config), `match` (regex, word list or native heuristic) and
+**FR-08: Rule schema.** Each built-in rule has `id`, `title`, `severity` (low, medium, high,
+critical), `target` (description, schema, config), `match` (regex, word list or native heuristic) and
 `references`.
 
 - A rule missing a required field is rejected with a message that names the field.
