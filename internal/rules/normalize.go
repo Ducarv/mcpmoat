@@ -78,7 +78,8 @@ func matchForms(s string) []string {
 //
 //  1. Cut s to maxRawScanBytes, at a rune boundary.
 //  2. Drop the invisible runes (see isInvisible).
-//  3. Replace each space separator (see spacesToASCII) with U+0020.
+//  3. Replace each white-space rune that RE2 \s does not match (see
+//     spacesToASCII) with U+0020.
 //  4. Cut the result to MaxMatchInputBytes, at a rune boundary.
 //  5. Apply Unicode normalization form NFC, which joins a letter and its
 //     combining marks into one rune where one exists.
@@ -86,9 +87,10 @@ func matchForms(s string) []string {
 //  7. Cut to MaxMatchInputBytes again, because NFC can make some text up to
 //     three times longer (U+1D160 becomes three runes).
 //
-// Steps 2 and 3 come before step 4, so invisible padding does not use up the
-// MaxMatchInputBytes window. Step 7 keeps the regexes at MaxMatchInputBytes,
-// so the cost bound in match.go holds.
+// Step 2 comes before step 4, so invisible padding does not use up the
+// MaxMatchInputBytes window. Step 3 comes before step 4 too, so a space of up
+// to 3 bytes counts as 1 byte in the window. Step 7 keeps the regexes at
+// MaxMatchInputBytes, so the cost bound in match.go holds.
 //
 // Step 2 comes before NFC, so an invisible rune cannot block composition:
 // "e" + ZWSP + U+0301 becomes U+00E9 (e with acute), the same as "e" + U+0301.
@@ -105,7 +107,8 @@ func normalizeForMatch(s string) string {
 
 // normalizeInvisible runs the steps of normalizeForMatch, but replaces each
 // run of invisible runes with repl (see replaceInvisible). A repl of -1 drops
-// the runes, as in normalizeForMatch.
+// the runes, as in normalizeForMatch. The white space is mapped as in
+// normalizeForMatch, whatever repl is.
 func normalizeInvisible(s string, repl rune) string {
 	s = cutAtRune(s, maxRawScanBytes)
 	s = spacesToASCII(replaceInvisible(s, repl))
@@ -114,15 +117,20 @@ func normalizeInvisible(s string, repl rune) string {
 	return cutAtRune(replaceInvisible(s, repl), MaxMatchInputBytes)
 }
 
-// spacesToASCII replaces each space separator (category Zs, such as NBSP
-// U+00A0 or the em space U+2003) with U+0020. In RE2, \s matches only ASCII
-// white space, so without this step "ignore" + NBSP + "previous" would not
-// match `ignore\s+previous`. NFC does not change these runes, so one pass
-// before NFC is enough. No Zs rune is shorter than U+0020, so the text does
-// not grow.
+// spacesToASCII replaces each white-space rune that RE2 \s does not match
+// with U+0020. In RE2, \s is only [\t\n\f\r ], so without this step
+// "ignore" + NBSP (U+00A0) + "previous" would not match `ignore\s+previous`.
+// The set is isKeywordSpace, so the regex and keyword matchers agree on what
+// separates two words: VT, NEL (U+0085), the Z categories (NBSP, the em
+// space, U+2028, U+2029 and others) and U+2800. The runes that \s matches
+// stay as they are, so a newline is still a newline.
+//
+// NFC maps a white-space rune only to another white-space rune (U+2000 to
+// U+2002, U+2001 to U+2003), so one pass before NFC is enough. Every mapped
+// rune is at least 1 byte long, so the text does not grow.
 func spacesToASCII(s string) string {
 	return strings.Map(func(r rune) rune {
-		if unicode.Is(unicode.Zs, r) {
+		if isKeywordSpace(r) && !strings.ContainsRune("\t\n\f\r ", r) {
 			return ' '
 		}
 		return r
