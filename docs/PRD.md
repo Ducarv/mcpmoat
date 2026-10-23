@@ -382,6 +382,8 @@ loadable from a directory (`--rules <dir>`).
 `references`.
 
 - A rule missing a required field is rejected with a message that names the field.
+- The loader requires only `id`, `title`, `severity`, `target` and `match`. `references`, `risk`,
+  `remediation` and the test cases are required for built-in rules only (NFR-05, NFR-07).
 - `severity` and `target` accept only the listed values.
 - `match` supports at least `any_regex`, `all_regex`, `keywords` and named native heuristics.
 - Regexes are compiled once at load time with Go's RE2 engine (linear time, no backtracking), and

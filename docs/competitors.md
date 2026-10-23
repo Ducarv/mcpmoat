@@ -94,7 +94,6 @@ not check where, or if, it sends data by default.
   runtime dependencies, MIT, created on 2026-08-24, and was active on 2026-10-23
   ([README](https://github.com/alexar76/warden#readme)). The README names the npm package
   `@aimarket/warden`.
-- Earlier searches found no repository by this name. That was wrong: the repository exists.
 - `warden scan` reads the MCP configs of Claude Code, Claude Desktop, Cursor, VS Code and Windsurf,
   connects to the servers, and prints a table, JSON, SARIF or Markdown
   ([README](https://github.com/alexar76/warden#scan-every-server-your-clients-start)).
