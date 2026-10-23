@@ -40,17 +40,14 @@ func scanCLI(t *testing.T, fixture ...string) (c *cli, stdout, stderr *bytes.Buf
 
 // scanConfigCLI returns a cli for --config runs with an absolute path. Its
 // homeDir returns home, which --config uses only to tell whether the file is
-// one of the user's own global files. Its getwd fails the test when it is
-// called: it proves that --config with an absolute path never looks at the
-// working directory. A test with a relative path uses dirsCLI instead.
+// one of the user's own global files. --config resolves its path without the
+// working directory; getwd is used only to find .mcpmoat-ignore. So getwd
+// returns a fresh empty directory: it holds no ignore file and no config, so
+// a scan result never comes from the working directory. A test with a
+// relative path uses dirsCLI instead.
 func scanConfigCLI(t *testing.T, home string) (*cli, *bytes.Buffer, *bytes.Buffer) {
 	t.Helper()
-	c, stdout, stderr := dirsCLI(t, home, "")
-	c.getwd = func() (string, error) {
-		t.Error("getwd was called, but --config must not read the working directory")
-		return "", errors.New("forbidden")
-	}
-	return c, stdout, stderr
+	return dirsCLI(t, home, t.TempDir())
 }
 
 func TestScanFlags(t *testing.T) {
@@ -527,8 +524,8 @@ func TestScanConfigFormats(t *testing.T) {
 			if tt.homeFile {
 				userHome = home
 			}
-			// The forbidden getwd proves that --config does not read the
-			// working directory.
+			// The working directory of scanConfigCLI is empty, so the
+			// result comes from the --config file only.
 			c, stdout, stderr := scanConfigCLI(t, userHome)
 
 			code := c.dispatch([]string{"scan", "--no-connect", "--config", filepath.Join(root, tt.file)})

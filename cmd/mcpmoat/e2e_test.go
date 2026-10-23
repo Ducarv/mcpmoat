@@ -521,3 +521,57 @@ func TestE2EScanStartsNoProcess(t *testing.T) {
 		t.Errorf("marker file exists or cannot be checked (err = %v): mcpmoat started a server", err)
 	}
 }
+
+// TestE2EScanIgnore checks the ignore file and the --ignore flag in the real
+// binary. A malformed line of .mcpmoat-ignore is a warning, not an error: the
+// scan reads the good line, prints the number of entries and lists the
+// servers. An empty --ignore value is a usage error.
+func TestE2EScanIgnore(t *testing.T) {
+	t.Parallel()
+
+	t.Run("file with a malformed line", func(t *testing.T) {
+		t.Parallel()
+		home, work := discovertest.CopyFixture(t, fixtureDir("all", "full"))
+		// Line 2 has an invalid rule ID, so it gets a warning and is skipped.
+		writeTestFile(t, work, ".mcpmoat-ignore", "MOAT-T1-003\n/onlytool\n")
+
+		stdout, stderr, code := runBin(t, home, work, "scan", "--no-connect", "--ignore", "MOAT-T1-001")
+
+		if code != exitOK {
+			t.Errorf("exit code = %d, want %d\nstdout:\n%s\nstderr:\n%s", code, exitOK, stdout, stderr)
+		}
+		// The warning and the entry count come before the notice. The
+		// warning text after the line number is not checked here.
+		lines := nonEmptyLines(stderr)
+		if len(lines) != 3 ||
+			!strings.HasPrefix(lines[0], "mcpmoat scan: warning: .mcpmoat-ignore:2: ") ||
+			lines[1] != "mcpmoat scan: using 1 entry from .mcpmoat-ignore" ||
+			lines[2] != noRulesNotice {
+			t.Errorf("stderr lines = %q, want the warning for line 2, the entry count and the notice", lines)
+		}
+		if strings.Contains(stderr, "onlytool") {
+			t.Errorf("stderr shows content of the ignore file:\n%s", stderr)
+		}
+		want := []string{"cc-global", "cc-alpha", "cc-project", "cursor-global", "cursor-project", "codex-global"}
+		if got := column(tableRows(t, stdout), 0); !slices.Equal(got, want) {
+			t.Errorf("server names = %v, want %v\nstdout:\n%s", got, want, stdout)
+		}
+		assertNoLeakBoth(t, stdout, stderr)
+		assertNoEscape(t, stdout, stderr)
+	})
+
+	t.Run("empty flag value", func(t *testing.T) {
+		t.Parallel()
+		home, work := discovertest.CopyFixture(t, fixtureDir("all", "full"))
+
+		stdout, stderr, code := runBin(t, home, work, "scan", "--no-connect", "--ignore", "")
+
+		if code != exitError {
+			t.Errorf("exit code = %d, want %d\nstdout:\n%s\nstderr:\n%s", code, exitError, stdout, stderr)
+		}
+		assertContainsAll(t, "stderr", stderr, []string{"mcpmoat scan: ", "-ignore", `Run "mcpmoat help" for usage.`})
+		if stdout != "" {
+			t.Errorf("stdout = %q, want empty", stdout)
+		}
+	})
+}

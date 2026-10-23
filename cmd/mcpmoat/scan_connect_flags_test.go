@@ -229,7 +229,7 @@ func TestScanConnectFlags(t *testing.T) {
 			t.Parallel()
 
 			// A config with one server, so that exit code 0 prints a table.
-			// The home is an empty directory. getwd must not be called.
+			// The home is an empty directory.
 			path := writeServers(t, t.TempDir(), "mcp.json", map[string]any{
 				"ok-srv": map[string]any{"command": "npx"},
 			})

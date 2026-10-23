@@ -12,6 +12,7 @@ import (
 	"github.com/Ducarv/mcpmoat/internal/discover"
 	"github.com/Ducarv/mcpmoat/internal/inspect"
 	"github.com/Ducarv/mcpmoat/internal/report"
+	"github.com/Ducarv/mcpmoat/internal/rules"
 	"github.com/Ducarv/mcpmoat/internal/termsafe"
 )
 
@@ -32,6 +33,17 @@ import (
 // --no-connect, which does not use them yet. A value that is not valid (a
 // timeout of 0 or less, a concurrency below 1) is a usage error with exit
 // code 2, like a value that the flag package cannot parse.
+//
+// --ignore <rule-id> ignores all findings of one rule. The user can give it
+// more than once. A value that is not a valid rule ID is a usage error. In
+// both modes scan also reads rules.IgnoreFileName (.mcpmoat-ignore) from the
+// working directory (FR-10). That file is untrusted: a cloned repository can
+// ship one that silences any server, also the user's global servers. So when
+// the file gives one or more entries, scan prints a notice with their number
+// on stderr. A malformed line, a file that scan cannot read and, with
+// --config, an unknown working directory are warnings on stderr, never exit
+// code 2. The ignore list is not used yet: scan produces no findings before
+// M4.
 //
 // Exit codes:
 //   - 0: the table is printed, and no config file had a problem. A missing
@@ -70,6 +82,20 @@ func (c *cli) runScan(_ options, args []string) int {
 		return nil
 	})
 
+	// fs.Func calls the function once for each --ignore, so the user can
+	// give the flag more than once. ValidRuleID also refuses an empty value
+	// and a flag name such as "--no-connect" that the flag package took as
+	// the value: a rule ID starts with a letter. The flag error already holds
+	// the value, so the message does not repeat it.
+	var ignoreIDs []string
+	fs.Func("ignore", "", func(value string) error {
+		if !rules.ValidRuleID(value) {
+			return errors.New("--ignore needs a rule ID")
+		}
+		ignoreIDs = append(ignoreIDs, value)
+		return nil
+	})
+
 	if err := fs.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
 			scanUsage(c.stdout)
@@ -102,9 +128,9 @@ func (c *cli) runScan(_ options, args []string) int {
 	ctx := context.Background()
 
 	if configPath != "" {
-		return c.scanConfig(ctx, configPath)
+		return c.scanConfig(ctx, configPath, ignoreIDs)
 	}
-	return c.scanAuto(ctx)
+	return c.scanAuto(ctx, ignoreIDs)
 }
 
 // connectOptions builds the inspect options from the --timeout and
@@ -159,13 +185,21 @@ func isFlagOf(fs *flag.FlagSet, value string) bool {
 // the safe side: the file is read as untrusted, and an absolute Codex cwd is
 // refused. A server can be refused that the absolute path would accept, but
 // never the other way.
-func (c *cli) scanConfig(ctx context.Context, path string) int {
-	if !filepath.IsAbs(path) {
-		// The error text is not printed and not needed: see above.
-		if wd, err := c.getwd(); err == nil {
-			path = filepath.Join(wd, path)
-		}
+//
+// The working directory is also where .mcpmoat-ignore is. Without it, scan
+// prints a warning and reads no ignore file.
+func (c *cli) scanConfig(ctx context.Context, path string, ignoreIDs []string) int {
+	// The error text is not printed; a fixed warning is enough.
+	wd, err := c.getwd()
+	if err != nil {
+		wd = ""
+		fprintf(c.stderr, "mcpmoat scan: warning: cannot read the working directory; %s is not read\n", rules.IgnoreFileName)
 	}
+	if !filepath.IsAbs(path) && wd != "" {
+		path = filepath.Join(wd, path)
+	}
+	ignore := c.loadIgnore(wd, ignoreIDs)
+	_ = ignore // used when findings exist (FR-10 summary and exit-code wiring)
 
 	// The home directory only tells ReadConfig whether the file is one of the
 	// user's own global files. Without a home, no file is: the file is read
@@ -189,7 +223,7 @@ func (c *cli) scanConfig(ctx context.Context, path string) int {
 
 // scanAuto looks for the config files of the known clients, in the home
 // directory and in the working directory.
-func (c *cli) scanAuto(ctx context.Context) int {
+func (c *cli) scanAuto(ctx context.Context, ignoreIDs []string) int {
 	// The error text is not printed: a fixed message is enough.
 	home, err := c.homeDir()
 	if err != nil {
@@ -201,7 +235,46 @@ func (c *cli) scanAuto(ctx context.Context) int {
 		fprintf(c.stderr, "mcpmoat scan: cannot read the working directory; use --config\n")
 		return exitError
 	}
+	ignore := c.loadIgnore(wd, ignoreIDs)
+	_ = ignore // used when findings exist (FR-10 summary and exit-code wiring)
 	return c.listServers(discover.Discover(ctx, discover.Options{Home: home, WorkDir: wd}))
+}
+
+// loadIgnore builds the ignore list: the entries of .mcpmoat-ignore in the
+// directory wd, then one entry for each --ignore ID in ids. ids holds only
+// valid rule IDs: the --ignore flag checks them. An empty wd means that the
+// working directory is not known, so loadIgnore reads no file.
+//
+// Every problem with the file is a warning on stderr, not an error: the scan
+// goes on. A file that loadIgnore cannot read gives no entries. The warnings
+// and the read error never hold file content. The error holds the path, so
+// termsafe.Quote escapes it. When the file gives one or more entries,
+// loadIgnore prints their number, because the file is untrusted and can hide
+// findings. The --ignore IDs come from the user, so they give no notice.
+func (c *cli) loadIgnore(wd string, ids []string) rules.IgnoreList {
+	var list rules.IgnoreList
+	if wd != "" {
+		fromFile, warnings, err := rules.ReadIgnoreFile(wd)
+		if err != nil {
+			// The error text already starts with "read ignore file <path>",
+			// so the line does not name the file again.
+			fprintf(c.stderr, "mcpmoat scan: warning: %s; mcpmoat uses no entries from it\n", termsafe.Quote(err.Error()))
+		}
+		for _, w := range warnings {
+			fprintf(c.stderr, "mcpmoat scan: warning: %s\n", w.String())
+		}
+		switch n := fromFile.Len(); {
+		case n == 1:
+			fprintf(c.stderr, "mcpmoat scan: using 1 entry from %s\n", rules.IgnoreFileName)
+		case n > 1:
+			fprintf(c.stderr, "mcpmoat scan: using %d entries from %s\n", n, rules.IgnoreFileName)
+		}
+		list = fromFile
+	}
+	for _, id := range ids {
+		list.Add(rules.IgnoreEntry{RuleID: id})
+	}
+	return list
 }
 
 // configErrorHint is the line that listServers prints after the file

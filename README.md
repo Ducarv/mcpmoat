@@ -26,6 +26,42 @@ mcpmoat pin --accept <name>  # accept a changed server after you review it
 mcpmoat version              # print the version, commit and build date
 ```
 
+## Ignore findings
+
+The rules are not in mcpmoat yet (milestone M4). Until then, `scan` reads the ignore list and
+reports problems in it, but there are no findings to ignore. Ignored findings, the ignored count in
+the summary and the effect on the exit code arrive with the rules.
+
+`--ignore <rule-id>` ignores all findings of one rule. You can use the flag more than one time.
+
+A `.mcpmoat-ignore` file in the working directory also ignores findings. Write one entry on each
+line: `RULE-ID [server[/tool]]`. A line that starts with `#` is a comment. After the rule ID, a
+`#` as a separate word starts a comment to the end of the line. A server name cannot start with `#`.
+
+```text
+# All findings of this rule, on all servers
+MOAT-T1-003
+# All findings of this rule on the server "github"
+MOAT-T1-003 github
+# Only the tool "create_issue" of the server "github"
+MOAT-T3-001 github/create_issue
+# A comment after the entry
+MOAT-T1-003 github # reviewed, the server is ours
+# A server name that contains '/': end it with '/'
+MOAT-T1-003 my/server/
+```
+
+Server and tool names must match exactly, and they are case-sensitive. mcpmoat splits each line on
+spaces and tabs, so you cannot write a name that contains a space or a tab. mcpmoat skips a
+malformed line and prints a warning with its line number.
+
+**Security note:** mcpmoat reads `.mcpmoat-ignore` from the directory you run it in, also in a
+repository that you cloned. A repository can use this file to hide findings for any server, also
+for your global servers: an entry without a server, such as `MOAT-T1-003`, applies to every server.
+When the file gives entries, mcpmoat prints `using N entries from .mcpmoat-ignore` (or
+`using 1 entry from .mcpmoat-ignore`) on stderr. If you see this line, read the file before you
+trust a clean result.
+
 ## Build from source
 
 ```sh
