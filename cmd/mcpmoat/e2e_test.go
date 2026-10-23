@@ -192,8 +192,8 @@ func TestE2EScanEmpty(t *testing.T) {
 	stdout, stderr, code := runBin(t, t.TempDir(), t.TempDir(), "scan", "--no-connect")
 
 	assertScanResult(t, code, stdout, stderr, scanWant{code: exitOK})
-	if want := "No MCP servers found.\n"; stdout != want {
-		t.Errorf("stdout = %q, want %q", stdout, want)
+	if stdout != emptyScanOutput {
+		t.Errorf("stdout = %q, want %q", stdout, emptyScanOutput)
 	}
 }
 
@@ -352,9 +352,7 @@ func TestE2EScanConfigSymlinkOut(t *testing.T) {
 		code:   exitError,
 		stderr: []string{".mcp.json: file is outside the project"},
 	})
-	if stdout != "" {
-		t.Errorf("stdout = %q, want empty", stdout)
-	}
+	assertEmptyStdout(t, stdout)
 }
 
 func TestE2EScanConfigErrors(t *testing.T) {
@@ -381,9 +379,7 @@ func TestE2EScanConfigErrors(t *testing.T) {
 			stdout, stderr, code := runBin(t, dir, dir, "scan", "--no-connect", "--config", path)
 
 			assertScanResult(t, code, stdout, stderr, scanWant{code: exitError, stderr: []string{tt.wantErr}})
-			if stdout != "" {
-				t.Errorf("stdout = %q, want empty", stdout)
-			}
+			assertEmptyStdout(t, stdout)
 		})
 	}
 }
@@ -395,9 +391,7 @@ func TestE2EScanWithoutNoConnect(t *testing.T) {
 	stdout, stderr, code := runBin(t, dir, dir, "scan")
 
 	assertScanResult(t, code, stdout, stderr, scanWant{code: exitError, stderr: []string{"not implemented"}})
-	if stdout != "" {
-		t.Errorf("stdout = %q, want empty", stdout)
-	}
+	assertEmptyStdout(t, stdout)
 }
 
 // TestE2EScanTimeoutFlags checks --timeout and --concurrency in the real
@@ -409,7 +403,6 @@ func TestE2EScanTimeoutFlags(t *testing.T) {
 	const (
 		timeoutMsg     = "mcpmoat scan: --timeout must be greater than 0"
 		concurrencyMsg = "mcpmoat scan: --concurrency must be at least 1"
-		usageHint      = `Run "mcpmoat help" for usage.`
 	)
 	tests := []struct {
 		name      string
@@ -440,9 +433,7 @@ func TestE2EScanTimeoutFlags(t *testing.T) {
 				if want := tt.wantError + "\n" + usageHint + "\n"; stderr != want {
 					t.Errorf("stderr = %q, want %q", stderr, want)
 				}
-				if stdout != "" {
-					t.Errorf("stdout = %q, want empty", stdout)
-				}
+				assertEmptyStdout(t, stdout)
 				return
 			}
 			assertScanResult(t, code, stdout, stderr, scanWant{code: exitOK})
@@ -536,9 +527,6 @@ func e2eRulesDir(t *testing.T, parts ...string) string {
 	return dir
 }
 
-// e2eEmptyScanOutput is the stdout of "scan --no-connect" with an empty home.
-const e2eEmptyScanOutput = "No MCP servers found.\n"
-
 // TestE2EScanRulesDefault checks that scan loads the built-in rules with no
 // flags: the output is the same as before the rules existed.
 func TestE2EScanRulesDefault(t *testing.T) {
@@ -546,8 +534,8 @@ func TestE2EScanRulesDefault(t *testing.T) {
 	stdout, stderr, code := runBin(t, t.TempDir(), t.TempDir(), "scan", "--no-connect")
 
 	assertScanResult(t, code, stdout, stderr, scanWant{code: exitOK})
-	if stdout != e2eEmptyScanOutput {
-		t.Errorf("stdout = %q, want %q", stdout, e2eEmptyScanOutput)
+	if stdout != emptyScanOutput {
+		t.Errorf("stdout = %q, want %q", stdout, emptyScanOutput)
 	}
 }
 
@@ -560,8 +548,8 @@ func TestE2EScanRulesExtra(t *testing.T) {
 	stdout, stderr, code := runBin(t, home, work, "scan", "--no-connect", "--rules", e2eRulesDir(t, "extra"))
 
 	assertScanResult(t, code, stdout, stderr, scanWant{code: exitOK})
-	if stdout != e2eEmptyScanOutput {
-		t.Errorf("stdout = %q, want %q", stdout, e2eEmptyScanOutput)
+	if stdout != emptyScanOutput {
+		t.Errorf("stdout = %q, want %q", stdout, emptyScanOutput)
 	}
 	baseOut, baseErr, baseCode := runBin(t, home, work, "scan", "--no-connect")
 	if code != baseCode || stdout != baseOut || stderr != baseErr {
@@ -595,6 +583,21 @@ func TestE2EScanRulesErrors(t *testing.T) {
 			dir:     func(t *testing.T) string { return filepath.Join(t.TempDir(), "missing") },
 			wantErr: []string{"cannot read directory"},
 		},
+		{
+			name:    "empty folder",
+			dir:     func(t *testing.T) string { return t.TempDir() },
+			wantErr: []string{noRuleFilesText},
+		},
+		{
+			name: "folder with no rule file name",
+			dir: func(t *testing.T) string {
+				dir := t.TempDir()
+				writeTestFile(t, dir, "notes.txt", "id: x\n")
+				writeTestFile(t, dir, filepath.Join("sub.yaml", "inner.yaml"), "id: x\n")
+				return dir
+			},
+			wantErr: []string{noRuleFilesText},
+		},
 	}
 	for _, tt := range tests {
 		for _, noConnect := range []bool{true, false} {
@@ -611,13 +614,10 @@ func TestE2EScanRulesErrors(t *testing.T) {
 				stdout, stderr, code := runBin(t, t.TempDir(), t.TempDir(), args...)
 
 				assertScanResult(t, code, stdout, stderr, scanWant{
-					code:     exitError,
-					stderr:   tt.wantErr,
-					noStdout: []string{"No MCP servers found"},
+					code:   exitError,
+					stderr: tt.wantErr,
 				})
-				if stdout != "" {
-					t.Errorf("stdout = %q, want empty", stdout)
-				}
+				assertEmptyStdout(t, stdout)
 				if strings.Contains(stderr, "not implemented") {
 					t.Errorf("stderr reaches the connect step, but the rules are wrong:\n%s", stderr)
 				}
@@ -651,10 +651,8 @@ func TestE2EScanRulesFlagMisuse(t *testing.T) {
 			if code != exitError {
 				t.Errorf("exit code = %d, want %d\nstdout:\n%s\nstderr:\n%s", code, exitError, stdout, stderr)
 			}
-			if stdout != "" {
-				t.Errorf("stdout = %q, want empty", stdout)
-			}
-			if !strings.HasPrefix(stderr, "mcpmoat scan: ") || !strings.HasSuffix(stderr, `Run "mcpmoat help" for usage.`+"\n") {
+			assertEmptyStdout(t, stdout)
+			if !strings.HasPrefix(stderr, "mcpmoat scan: ") || !strings.HasSuffix(stderr, usageHint+"\n") {
 				t.Errorf("stderr = %q, want a scan usage error with the usage hint", stderr)
 			}
 			assertNoLeakBoth(t, stdout, stderr)
@@ -704,9 +702,7 @@ func TestE2EScanRulesEscapeSafety(t *testing.T) {
 			stdout, stderr, code := runBin(t, t.TempDir(), t.TempDir(), "scan", "--no-connect", "--rules", dir)
 
 			assertScanResult(t, code, stdout, stderr, scanWant{code: exitError})
-			if stdout != "" {
-				t.Errorf("stdout = %q, want empty", stdout)
-			}
+			assertEmptyStdout(t, stdout)
 			if stderr == "" {
 				t.Fatal("stderr is empty, want the rule problem")
 			}

@@ -35,8 +35,8 @@ func (c *cli) loadRules(dir string) (*rules.Set, bool) {
 			// a deliberate choice: a duplicate ID, or a clash with a built-in
 			// rule, shows up only after the user fixes the file errors. It
 			// fails closed: scan exits 2 in both cases. printRuleErrors prints
-			// every error it gets. Any cap on the number of errors belongs in
-			// LoadDir.
+			// every error it gets. The caps on the number of errors belong in
+			// the loader (LoadDir and NewSet).
 			c.printRuleErrors(errs)
 			return nil, false
 		}

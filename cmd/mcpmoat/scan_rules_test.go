@@ -186,8 +186,8 @@ func TestScanRulesNoFlag(t *testing.T) {
 	got := scanRulesEmpty(t, "--no-connect")
 
 	assertScanResult(t, got.code, got.stdout, got.stderr, scanWant{code: exitOK})
-	if want := "No MCP servers found.\n"; got.stdout != want {
-		t.Errorf("stdout = %q, want %q", got.stdout, want)
+	if got.stdout != emptyScanOutput {
+		t.Errorf("stdout = %q, want %q", got.stdout, emptyScanOutput)
 	}
 }
 
@@ -228,10 +228,6 @@ func TestScanRulesAccepted(t *testing.T) {
 				return dir
 			},
 		},
-		{
-			name: "empty folder",
-			dir:  func(t *testing.T) string { return t.TempDir() },
-		},
 	}
 
 	home, work := t.TempDir(), t.TempDir()
@@ -251,9 +247,7 @@ func TestScanRulesAccepted(t *testing.T) {
 				t.Errorf("output differs from the scan without --rules\nstdout: %q (want %q)\nstderr: %q (want %q)",
 					got.stdout, base.stdout, got.stderr, base.stderr)
 			}
-			if after := dirSnapshot(t, dir); !slices.Equal(before, after) {
-				t.Errorf("the rules folder changed\nbefore: %q\nafter:  %q", before, after)
-			}
+			assertDirUnchanged(t, dir, before)
 		})
 	}
 }
@@ -279,6 +273,11 @@ func TestScanRulesWithConnect(t *testing.T) {
 	}
 	assertScanErrorLines(t, got.stderr)
 }
+
+// noRuleFilesText is the reason text of a --rules folder with no rule file. It
+// is the same as rules.ReasonNoRuleFiles. The test keeps its own copy, so a
+// change of the text in the loader shows up as a failed test.
+const noRuleFilesText = "no rule files (*.yaml or *.yml) found"
 
 // TestScanRulesErrors checks that a bad rules folder gives exit code 2, an
 // empty stdout and one "mcpmoat scan: " line on stderr for the problem. It
@@ -345,9 +344,7 @@ func TestScanRulesErrors(t *testing.T) {
 					code:   exitError,
 					stderr: tt.wantStderr,
 				})
-				if got.stdout != "" {
-					t.Errorf("stdout = %q, want it empty", got.stdout)
-				}
+				assertEmptyStdout(t, got.stdout)
 				if strings.Contains(got.stderr, "not implemented yet") {
 					t.Errorf("the rules error must come before the connect step\nstderr: %q", got.stderr)
 				}
@@ -355,9 +352,56 @@ func TestScanRulesErrors(t *testing.T) {
 					t.Errorf("stderr has %d lines, want 1\nstderr: %q", len(lines), got.stderr)
 				}
 				assertScanRulesStderr(t, got.stderr)
-				if after := dirSnapshot(t, tt.dir); !slices.Equal(before, after) {
-					t.Errorf("the rules folder changed\nbefore: %q\nafter:  %q", before, after)
+				assertDirUnchanged(t, tt.dir, before)
+			})
+		}
+	}
+}
+
+// TestScanRulesNoRuleFiles checks that a folder with no rule file gives exit
+// code 2 and exactly one line on stderr: the folder and the reason, at the end
+// of the line. A folder where every name is wrong would otherwise look like a
+// scan that uses extra rules and does not. Both modes fail the same way,
+// because the rules are checked before scan looks at --no-connect.
+func TestScanRulesNoRuleFiles(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name  string
+		setup func(t *testing.T, dir string)
+	}{
+		{name: "empty folder", setup: func(*testing.T, string) {}},
+		{name: "other names only", setup: func(t *testing.T, dir string) {
+			writeTestFile(t, dir, "rule.txt", "id: x\n")
+			writeTestFile(t, dir, "rule.yaml.bak", "id: x\n")
+		}},
+		{name: "subfolders only", setup: func(t *testing.T, dir string) {
+			writeTestFile(t, dir, filepath.Join("sub", "inner.yaml"), "id: x\n")
+			writeTestFile(t, dir, filepath.Join("named.yaml", "inner.yaml"), "id: x\n")
+		}},
+	}
+	for _, tt := range tests {
+		for _, noConnect := range []bool{true, false} {
+			name := tt.name + " without --no-connect"
+			args := []string(nil)
+			if noConnect {
+				name = tt.name + " with --no-connect"
+				args = []string{"--no-connect"}
+			}
+			t.Run(name, func(t *testing.T) {
+				t.Parallel()
+				dir := t.TempDir()
+				tt.setup(t, dir)
+				before := dirSnapshot(t, dir)
+
+				got := scanRulesEmpty(t, append(slices.Clone(args), "--rules", dir)...)
+
+				assertScanResult(t, got.code, got.stdout, got.stderr, scanWant{code: exitError})
+				assertEmptyStdout(t, got.stdout)
+				if want := "mcpmoat scan: " + dir + ": " + noRuleFilesText + "\n"; got.stderr != want {
+					t.Errorf("stderr = %q, want %q", got.stderr, want)
 				}
+				assertDirUnchanged(t, dir, before)
 			})
 		}
 	}
@@ -367,7 +411,6 @@ func TestScanRulesErrors(t *testing.T) {
 func TestScanRulesFlagErrors(t *testing.T) {
 	t.Parallel()
 
-	const usageHint = `Run "mcpmoat help" for usage.`
 	extra := scanRulesFixture("extra")
 
 	tests := []struct {
@@ -435,9 +478,7 @@ func TestScanRulesFlagErrors(t *testing.T) {
 				t.Errorf("stderr = %q, want the message and then %q", got.stderr, usageHint)
 			}
 			assertNoEscape(t, got.stdout, got.stderr)
-			if got.stdout != "" {
-				t.Errorf("stdout = %q, want it empty", got.stdout)
-			}
+			assertEmptyStdout(t, got.stdout)
 			for _, bad := range tt.noStderr {
 				if strings.Contains(got.stderr, bad) {
 					t.Errorf("stderr contains %q\nstderr: %q", bad, got.stderr)
@@ -463,7 +504,7 @@ func TestScanRulesUsage(t *testing.T) {
 			if code != exitOK {
 				t.Fatalf("exit code = %d, want %d", code, exitOK)
 			}
-			assertContainsAll(t, "stdout", stdout.String(), []string{"--rules <dir>", "*.yaml", "*.yml"})
+			assertContainsAll(t, "stdout", stdout.String(), []string{"--rules <dir>", "*.yaml", "*.yml", "no rule file"})
 			if stderr.Len() != 0 {
 				t.Errorf("stderr = %q, want it empty", stderr)
 			}
@@ -488,9 +529,7 @@ func TestScanRulesSeveralErrors(t *testing.T) {
 	got := scanRulesEmpty(t, "--no-connect", "--rules", dir)
 
 	assertScanResult(t, got.code, got.stdout, got.stderr, scanWant{code: exitError})
-	if got.stdout != "" {
-		t.Errorf("stdout = %q, want it empty", got.stdout)
-	}
+	assertEmptyStdout(t, got.stdout)
 	lines := nonEmptyLines(got.stderr)
 	wantNames := []string{"a-broken.yaml", "b-unknown.yml", "c-empty.yaml"}
 	if len(lines) != len(wantNames) {
@@ -505,9 +544,7 @@ func TestScanRulesSeveralErrors(t *testing.T) {
 		t.Errorf("stderr names the good rule file\nstderr:\n%s", got.stderr)
 	}
 	assertScanRulesStderr(t, got.stderr)
-	if after := dirSnapshot(t, dir); !slices.Equal(before, after) {
-		t.Errorf("the rules folder changed\nbefore: %q\nafter:  %q", before, after)
-	}
+	assertDirUnchanged(t, dir, before)
 }
 
 // TestScanRulesEscapeSafety checks that text from a rule file or from argv
@@ -721,9 +758,7 @@ should_not_match:
 				// scan prefix (a raw newline from a file name would break
 				// this) and that stderr has no raw ESC byte.
 				assertScanResult(t, got.code, got.stdout, got.stderr, scanWant{code: exitError})
-				if got.stdout != "" {
-					t.Errorf("stdout = %q, want it empty", got.stdout)
-				}
+				assertEmptyStdout(t, got.stdout)
 				if got.stderr == "" {
 					t.Error("stderr is empty, want the problem")
 				}
@@ -793,9 +828,7 @@ func assertFloodResult(t *testing.T, code int, stdout, stderr string) {
 	if code != exitError {
 		t.Errorf("exit code = %d, want %d", code, exitError)
 	}
-	if stdout != "" {
-		t.Errorf("stdout = %q, want it empty", stdout)
-	}
+	assertEmptyStdout(t, stdout)
 	lines := nonEmptyLines(stderr)
 	if len(lines) < 2 || len(lines) > maxFloodLines {
 		t.Fatalf("stderr has %d lines, want 2 to %d", len(lines), maxFloodLines)
@@ -854,9 +887,7 @@ func assertIDFloodResult(t *testing.T, code int, stdout, stderr, reason string, 
 	if code != exitError {
 		t.Errorf("exit code = %d, want %d", code, exitError)
 	}
-	if stdout != "" {
-		t.Errorf("stdout = %q, want it empty", stdout)
-	}
+	assertEmptyStdout(t, stdout)
 	lines := nonEmptyLines(stderr)
 	if len(lines) != maxFloodLines {
 		t.Fatalf("stderr has %d lines, want %d", len(lines), maxFloodLines)
@@ -901,9 +932,7 @@ func TestScanRulesIDClashFlood(t *testing.T) {
 
 			assertFast(t, start)
 			assertIDFloodResult(t, got.code, got.stdout, got.stderr, tt.reason, tt.more)
-			if after := dirSnapshot(t, dir); !slices.Equal(before, after) {
-				t.Error("the rules folder changed during the scan")
-			}
+			assertDirUnchanged(t, dir, before)
 		})
 	}
 }
@@ -945,9 +974,7 @@ func TestScanRulesCreatesNothing(t *testing.T) {
 				t.Errorf("exit code = %d, want %d\nstderr: %q", got.code, tt.wantCode, got.stderr)
 			}
 			for i, d := range dirs {
-				if after := dirSnapshot(t, d); !slices.Equal(before[i], after) {
-					t.Errorf("directory %d changed\nbefore: %q\nafter:  %q", i, before[i], after)
-				}
+				assertDirUnchanged(t, d, before[i])
 			}
 		})
 	}

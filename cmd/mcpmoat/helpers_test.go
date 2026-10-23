@@ -16,6 +16,12 @@ import (
 	"github.com/Ducarv/mcpmoat/internal/discover/discovertest"
 )
 
+// usageHint is the last line of every usage error on stderr.
+const usageHint = `Run "mcpmoat help" for usage.`
+
+// emptyScanOutput is the stdout of "scan --no-connect" when it finds no server.
+const emptyScanOutput = "No MCP servers found.\n"
+
 // fixtureDir returns the path of a fixture under the repository's
 // testdata/discover directory. Tests run in cmd/mcpmoat, so the repository
 // root is two levels up.
@@ -104,6 +110,23 @@ func assertScanErrorLines(t *testing.T, stderr string) {
 		if !strings.HasPrefix(line, prefix) || strings.Contains(line, "warning:") {
 			t.Errorf("stderr line %q must start with %q and not be a warning", line, prefix)
 		}
+	}
+}
+
+// assertEmptyStdout fails the test unless stdout is empty.
+func assertEmptyStdout(t *testing.T, stdout string) {
+	t.Helper()
+	if stdout != "" {
+		t.Errorf("stdout = %q, want empty", stdout)
+	}
+}
+
+// assertDirUnchanged fails the test if the directory dir differs from before,
+// which is an earlier dirSnapshot(t, dir).
+func assertDirUnchanged(t *testing.T, dir string, before []string) {
+	t.Helper()
+	if after := dirSnapshot(t, dir); !slices.Equal(before, after) {
+		t.Errorf("directory %s changed\nbefore: %q\nafter:  %q", dir, before, after)
 	}
 }
 
