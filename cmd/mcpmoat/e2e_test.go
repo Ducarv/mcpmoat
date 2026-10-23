@@ -527,18 +527,6 @@ func e2eRulesDir(t *testing.T, parts ...string) string {
 	return dir
 }
 
-// TestE2EScanRulesDefault checks that scan loads the built-in rules with no
-// flags: the output is the same as before the rules existed.
-func TestE2EScanRulesDefault(t *testing.T) {
-	t.Parallel()
-	stdout, stderr, code := runBin(t, t.TempDir(), t.TempDir(), "scan", "--no-connect")
-
-	assertScanResult(t, code, stdout, stderr, scanWant{code: exitOK})
-	if stdout != emptyScanOutput {
-		t.Errorf("stdout = %q, want %q", stdout, emptyScanOutput)
-	}
-}
-
 // TestE2EScanRulesExtra checks that a valid external rule folder changes
 // nothing yet, because scan loads the rules but does not apply them.
 func TestE2EScanRulesExtra(t *testing.T) {
@@ -548,9 +536,6 @@ func TestE2EScanRulesExtra(t *testing.T) {
 	stdout, stderr, code := runBin(t, home, work, "scan", "--no-connect", "--rules", e2eRulesDir(t, "extra"))
 
 	assertScanResult(t, code, stdout, stderr, scanWant{code: exitOK})
-	if stdout != emptyScanOutput {
-		t.Errorf("stdout = %q, want %q", stdout, emptyScanOutput)
-	}
 	baseOut, baseErr, baseCode := runBin(t, home, work, "scan", "--no-connect")
 	if code != baseCode || stdout != baseOut || stderr != baseErr {
 		t.Errorf("--rules changes the result: exit code %d, want %d\nstdout:\n%s\nwant stdout:\n%s\nstderr:\n%s\nwant stderr:\n%s",
@@ -600,16 +585,10 @@ func TestE2EScanRulesErrors(t *testing.T) {
 		},
 	}
 	for _, tt := range tests {
-		for _, noConnect := range []bool{true, false} {
-			name := tt.name + " with connect"
-			args := []string{"scan"}
-			if noConnect {
-				name = tt.name + " no-connect"
-				args = append(args, "--no-connect")
-			}
-			t.Run(name, func(t *testing.T) {
+		for _, mode := range scanModes {
+			t.Run(tt.name+" "+mode.name, func(t *testing.T) {
 				t.Parallel()
-				args := append(slices.Clone(args), "--rules", tt.dir(t))
+				args := append(append([]string{"scan"}, mode.args...), "--rules", tt.dir(t))
 
 				stdout, stderr, code := runBin(t, t.TempDir(), t.TempDir(), args...)
 

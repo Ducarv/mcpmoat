@@ -30,13 +30,10 @@ func (c *cli) loadRules(dir string) (*rules.Set, bool) {
 		// a bad regex makes scan exit 2.
 		external, errs = rules.LoadDir(dir)
 		if len(errs) > 0 {
-			// LoadDir returns no rules when any file failed, so there is
-			// nothing left to join. NewSet does not run in this case. This is
-			// a deliberate choice: a duplicate ID, or a clash with a built-in
-			// rule, shows up only after the user fixes the file errors. It
-			// fails closed: scan exits 2 in both cases. printRuleErrors prints
-			// every error it gets. The caps on the number of errors belong in
-			// the loader (LoadDir and NewSet).
+			// LoadDir returns no rules when any file failed, so NewSet does
+			// not run. A duplicate ID, or a clash with a built-in rule, shows
+			// up only after the user fixes the file errors. Both cases fail
+			// closed with exit 2.
 			c.printRuleErrors(errs)
 			return nil, false
 		}

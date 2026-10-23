@@ -6,12 +6,16 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
+	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"runtime"
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/Ducarv/mcpmoat/internal/discover/discovertest"
 )
@@ -22,11 +26,29 @@ const usageHint = `Run "mcpmoat help" for usage.`
 // emptyScanOutput is the stdout of "scan --no-connect" when it finds no server.
 const emptyScanOutput = "No MCP servers found.\n"
 
+// testdataPath returns the path of a directory under testdata/<kind> at the
+// repository root. Tests run in cmd/mcpmoat, so the root is two levels up.
+func testdataPath(kind string, parts ...string) string {
+	return filepath.Join(append([]string{"..", "..", "testdata", kind}, parts...)...)
+}
+
 // fixtureDir returns the path of a fixture under the repository's
-// testdata/discover directory. Tests run in cmd/mcpmoat, so the repository
-// root is two levels up.
-func fixtureDir(parts ...string) string {
-	return filepath.Join(append([]string{"..", "..", "testdata", "discover"}, parts...)...)
+// testdata/discover directory.
+func fixtureDir(parts ...string) string { return testdataPath("discover", parts...) }
+
+// scanRulesFixture returns the path of a directory under testdata/rules.
+func scanRulesFixture(parts ...string) string { return testdataPath("rules", parts...) }
+
+// scanModes are the two ways to run scan: with and without --no-connect. args
+// holds the flags to add after "scan". A test that runs in both modes loops
+// over this list, so the subtest names are the same everywhere. Do not change
+// args in place: copy it first (for example with slices.Clone).
+var scanModes = []struct {
+	name string
+	args []string
+}{
+	{name: "with --no-connect", args: []string{"--no-connect"}},
+	{name: "without --no-connect", args: nil},
 }
 
 // dirsCLI builds a test cli whose homeDir returns home and whose getwd returns
@@ -119,6 +141,44 @@ func assertEmptyStdout(t *testing.T, stdout string) {
 	if stdout != "" {
 		t.Errorf("stdout = %q, want empty", stdout)
 	}
+}
+
+// dirSnapshot returns one line for each entry under dir: the relative path,
+// the mode, and for a regular file the size and the content. Two snapshots
+// are equal when nothing was created, removed or changed.
+func dirSnapshot(t *testing.T, dir string) []string {
+	t.Helper()
+	var lines []string
+	if _, err := os.Lstat(dir); errors.Is(err, fs.ErrNotExist) {
+		return nil // a folder that does not exist has nothing to compare
+	}
+	err := filepath.WalkDir(dir, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		rel, err := filepath.Rel(dir, path)
+		if err != nil {
+			return err
+		}
+		info, err := d.Info()
+		if err != nil {
+			return err
+		}
+		line := rel + " " + info.Mode().String()
+		if info.Mode().IsRegular() {
+			data, err := os.ReadFile(path) //nolint:gosec // G304: path comes from walking a test directory
+			if err != nil {
+				return err
+			}
+			line += " " + string(data)
+		}
+		lines = append(lines, line)
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("snapshot of %s: %v", dir, err)
+	}
+	return lines
 }
 
 // assertDirUnchanged fails the test if the directory dir differs from before,
@@ -319,4 +379,125 @@ func writeFileOrSkip(t *testing.T, dir, name, content string) {
 	if err := os.WriteFile(filepath.Join(dir, name), []byte(content), 0o600); err != nil {
 		t.Skipf("the file system refuses this file name: %v", err)
 	}
+}
+
+// floodRuleFile returns the content of rule file number i of the flood
+// folder: a valid header and a hostile body. The odd files have a list of
+// 2000 null items (each is one error, and the loader keeps the first 20); the
+// even files have 30 unknown keys. Every ID is different.
+func floodRuleFile(i int) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "id: MOAT-X-%03d\ntitle: Flood fixture\nseverity: low\ntarget: description\n", i)
+	b.WriteString("match:\n  keywords:\n    - x\nrisk: Fixture.\nremediation: Fixture.\n")
+	if i%2 == 1 {
+		b.WriteString("should_match:\n")
+		b.WriteString(strings.Repeat("  -\n", 2000))
+		return b.String()
+	}
+	for k := range 30 {
+		fmt.Fprintf(&b, "unknown_%02d: 1\n", k)
+	}
+	return b.String()
+}
+
+// floodDir writes 300 hostile rule files in a new folder and returns it.
+func floodDir(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	for i := range 300 {
+		writeTestFile(t, dir, fmt.Sprintf("flood-%03d.yaml", i), floodRuleFile(i))
+	}
+	return dir
+}
+
+// maxFloodLines is the most stderr lines a flood may print: the loader stops
+// after 100 errors and adds one "too many errors" line (maxFolderErrors+1 in
+// internal/rules, which is not exported).
+const maxFloodLines = 101
+
+// floodGuard is the time a flood scan may take. The loader stops early, so the
+// real time is a few milliseconds. The guard is long on purpose, so a slow
+// runner with -race does not fail it; it only catches a hang. The line counts
+// show that the loader stopped early.
+const floodGuard = 30 * time.Second
+
+// assertFast fails the test when more than floodGuard has passed since start.
+func assertFast(t *testing.T, start time.Time) {
+	t.Helper()
+	if d := time.Since(start); d > floodGuard {
+		t.Errorf("the scan took %v, want less than %v", d, floodGuard)
+	}
+}
+
+// floodCap is the number of folder errors the loader prints before its last
+// "too many errors" line.
+const floodCap = maxFloodLines - 1
+
+// assertFloodResult checks the result of a scan of floodDir: exit code 2,
+// empty stdout, a capped list of errors that ends with the "too many errors"
+// line, and no unsafe rune.
+func assertFloodResult(t *testing.T, code int, stdout, stderr string) {
+	t.Helper()
+	if code != exitError {
+		t.Errorf("exit code = %d, want %d", code, exitError)
+	}
+	assertEmptyStdout(t, stdout)
+	lines := nonEmptyLines(stderr)
+	if len(lines) < 2 || len(lines) > maxFloodLines {
+		t.Fatalf("stderr has %d lines, want 2 to %d", len(lines), maxFloodLines)
+	}
+	assertScanErrorLines(t, stderr)
+	assertContainsAll(t, "the last stderr line", lines[len(lines)-1],
+		[]string{"mcpmoat scan: ", "too many errors", "files not fully checked"})
+	assertScanRulesStderr(t, stderr)
+}
+
+// idFloodFiles is the number of valid rule files in an ID flood folder.
+const idFloodFiles = 1000
+
+// idFloodRule returns a valid rule file with the given ID. All the ID flood
+// files have the same content, so the folder passes LoadDir and only NewSet
+// finds the problem.
+func idFloodRule(id string) string {
+	return "id: " + id + "\ntitle: ID flood fixture\nseverity: low\ntarget: description\n" +
+		"match:\n  keywords:\n    - secret\nrisk: Fixture.\nremediation: Fixture.\n" +
+		"should_match:\n  - a secret value\nshould_not_match:\n  - nothing here\n"
+}
+
+// idFloodDir writes idFloodFiles valid rule files with the same ID in a new
+// folder (r0000.yaml and so on) and returns the folder. The content is built
+// once, and every file reuses it.
+func idFloodDir(t *testing.T, id string) string {
+	t.Helper()
+	dir := t.TempDir()
+	content := idFloodRule(id)
+	for i := range idFloodFiles {
+		writeTestFile(t, dir, fmt.Sprintf("r%04d.yaml", i), content)
+	}
+	return dir
+}
+
+// assertIDFloodResult checks the result of a scan of idFloodDir: exit code 2,
+// empty stdout, exactly 101 stderr lines (100 errors and the summary), and no
+// unsafe rune. Each of the first 100 lines holds reason. The last line says
+// "rule set: too many errors" and "<more> more errors not shown".
+func assertIDFloodResult(t *testing.T, code int, stdout, stderr, reason string, more int) {
+	t.Helper()
+	if code != exitError {
+		t.Errorf("exit code = %d, want %d", code, exitError)
+	}
+	assertEmptyStdout(t, stdout)
+	lines := nonEmptyLines(stderr)
+	if len(lines) != maxFloodLines {
+		t.Fatalf("stderr has %d lines, want %d", len(lines), maxFloodLines)
+	}
+	assertScanErrorLines(t, stderr)
+	for i, line := range lines[:maxFloodLines-1] {
+		if !strings.Contains(line, reason) {
+			t.Errorf("stderr line %d = %q, want it to mention %q", i+1, line, reason)
+		}
+	}
+	assertContainsAll(t, "the last stderr line", lines[len(lines)-1],
+		[]string{"mcpmoat scan: ", "rule set: too many errors", fmt.Sprintf("%d more errors not shown", more)})
+	assertScanRulesStderr(t, stderr)
 }
