@@ -42,7 +42,7 @@ match:
     - '(?i)\b(?:do\s+not|don(?:''|\x{2019})?t|never)\s+(?:ever\s+)?(?:tell|inform|mention|reveal|disclose)[\s\S]{0,30}\bthe\s+user(?:[^\w''\x{2019}]|$)'
     - '(?i)\bwithout\s+(?:telling|notifying|informing)\s+the\s+user(?:[^\w''\x{2019}]|$)'
     - '(?i)\b(?:do\s+not|don(?:''|\x{2019})?t|never)\s+let\s+the\s+user\s+know\b'
-    - '(?i)(?:\bhide\b[\s\S]{0,30}|\bkeep\s+(?:this|it|that)\b[\s\S]{0,30}|\bhidden\s+)\bfrom\s+the\s+user(?:[^\w''\x{2019}]|$)'
+    - '(?i)(?:\bhide\b[\s\S]{0,30}|\bkeep\s+(?:this|it|that)\s+(?:(?:[-\w]+\s+){0,3}(?:hidden|secret|away)\s+)?|\bhidden\s+)\bfrom\s+the\s+user(?:[^\w''\x{2019}]|$)'
 risk: The tool description tells the model to hide its actions from the user, so the user cannot see or stop what the tool does.
 remediation: Remove the server or do not use it. Read the full tool description to see what it hides. Report the server to its author.
 references:
@@ -91,6 +91,8 @@ should_not_match:
   - text: We never disclose user information to third parties.
     note: A privacy note; the pattern needs the user, not user information
   - Never reveal user data in the logs.
+  - text: Keep it separate from the user prompt.
+    note: Keep it with a word other than hidden, secret or away before from
   - text: Keep the messages received from the user in order.
     note: Keep with no this, it or that is not a hide instruction
   - text: Hides the password field from the user view.
@@ -102,8 +104,8 @@ should_not_match:
 Notes on the regexes in this file:
 
 - The first line is a YAML comment. MOAT-T1-009 copies the patterns of this rule for the input
-  schema, so a change here needs the same change there. A test checks that the two stay in sync.
-
+  schema, so a change here needs the same change there. A test checks that MOAT-T1-009 matches
+  every `should_match` case of this rule and none of its `should_not_match` cases.
 - In a single-quoted YAML text, `''` is one `'`. So `don(?:''|\x{2019})?t` is the regex
   `don(?:'|\x{2019})?t`: "don't", "don" + U+2019 (the curly apostrophe) + "t", or "dont".
 - `\s+` matches any run of white space, so extra spaces, tabs and newlines do not stop a match.
