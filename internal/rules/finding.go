@@ -25,6 +25,15 @@ const (
 	RuleTyposquat = "MOAT-T5-001"
 )
 
+// Fixed texts of Finding.Message, one for each rule.
+const (
+	shadowingMessage       = "tool description names a tool of another server"
+	insecureURLMessage     = "remote server uses plain http:// without TLS"
+	plaintextSecretMessage = "config holds a plaintext secret; use an environment variable reference" //nolint:gosec // G101: message text, not a credential
+	unpinnedPackageMessage = "package runner fetches an unpinned version"
+	typosquatMessage       = "name is close to a popular MCP server"
+)
+
 // Values of Finding.Field: the config field that a finding is about.
 const (
 	// FieldURL is the server URL.

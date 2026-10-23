@@ -8,9 +8,6 @@ import "net/netip"
 // zone ("::1%lo0"). host is the host without brackets and port, as
 // url.URL.Hostname gives it.
 //
-// Packages internal/inspect and internal/rules call it, so that both decide
-// in the same way which servers are local.
-//
 // The name must be "localhost" in lower case. Go skips HTTP_PROXY for that
 // exact name and for loopback IP addresses only, and its check is case
 // sensitive. "LOCALHOST" goes through the proxy, so it is not loopback here
@@ -20,7 +17,7 @@ import "net/netip"
 // "127.0.0.1.nip.io" are DNS names that can point anywhere, so they are not
 // loopback. For the name "localhost" in any case, the pinned dialer in
 // internal/inspect dials loopback addresses only, whatever the resolver
-// answers (see pinnedDialer.DialContext).
+// answers.
 func IsLoopbackHost(host string) bool {
 	if host == "localhost" {
 		return true

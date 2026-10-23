@@ -4,6 +4,7 @@ import (
 	"math"
 	"net/url"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"strconv"
 	"strings"
@@ -30,6 +31,21 @@ const (
 	// or named-key rules (known limit). The test runs only on token-shaped
 	// values (see isTokenShaped).
 	minEntropy = 4.0
+
+	// minPrefixedTokenLen is the shortest value that a token prefix alone
+	// marks as a secret. The shortest real format, an AWS access key ID, has
+	// 20 bytes. Shorter values such as the locale "sk_SK.UTF-8" share a prefix
+	// by chance.
+	minPrefixedTokenLen = 20
+)
+
+var (
+	// varRef matches a client variable reference such as ${VAR} or
+	// ${env:VAR}.
+	varRef = regexp.MustCompile(`\$\{[^}]*\}`)
+
+	// shellVar matches a value that is only a reference such as $VAR.
+	shellVar = regexp.MustCompile(`^\$[A-Za-z_][A-Za-z0-9_]*$`)
 )
 
 // CheckConfig runs the static config checks of threat T4 on one server. It
@@ -51,12 +67,15 @@ func CheckConfig(s discover.Server) []Finding {
 }
 
 // checkInsecureURL reports MOAT-T4-001: a remote server that uses http://
-// to a host that is not loopback. A URL that does not parse gives no finding.
+// to a host that is not loopback. A variable reference such as ${PORT} is
+// read as "0" first, so "http://${HOST}:${PORT}/mcp" still fires: the scheme
+// is known even when the host is not. A URL that does not parse gives no
+// finding.
 func checkInsecureURL(s discover.Server) []Finding {
 	if !s.Transport.IsRemote() {
 		return nil
 	}
-	u, err := url.Parse(s.URL.Reveal())
+	u, err := url.Parse(varRef.ReplaceAllString(s.URL.Reveal(), "0"))
 	if err != nil {
 		return nil
 	}
@@ -67,7 +86,7 @@ func checkInsecureURL(s discover.Server) []Finding {
 		RuleID:  RuleInsecureURL,
 		Server:  s.Name,
 		Field:   FieldURL,
-		Message: "remote server uses plain http:// without TLS",
+		Message: insecureURLMessage,
 	}}
 }
 
@@ -96,7 +115,7 @@ func secretFinding(server, field, key string) Finding {
 		Server:  server,
 		Field:   field,
 		Key:     key,
-		Message: "config holds a plaintext secret; use an environment variable reference",
+		Message: plaintextSecretMessage,
 	}
 }
 
@@ -116,24 +135,28 @@ func stripAuthScheme(value string) string {
 //
 // The order of the tests matters:
 //  1. An empty value is not a secret.
-//  2. A known token prefix (such as "ghp_") is a secret, even when the value
-//     also holds "${" or looks like a path.
-//  3. A reference (${VAR}, ${env:VAR}, $VAR) is the safe form. Known limit: a
-//     literal default in ${VAR:-literal} is not flagged.
+//  2. A known token prefix (such as "ghp_") on a value of 20 bytes or more is
+//     a secret, even when the value also holds "${" or looks like a path.
+//  3. A reference (${VAR}, ${env:VAR}, or a whole value $VAR) is the safe
+//     form. Known limit: a literal default in ${VAR:-literal} is not flagged.
 //  4. A path or a URL is not a secret. Known limits: a URL with credentials
 //     inside it (scheme://user:pass@host) is not flagged, and neither is an
 //     absolute path, so a random token that starts with "/" is a false
 //     negative, under any key.
-//  5. A credential-like key name with a value of 8 bytes or more is a secret.
+//  5. A credential-like key name with a value of 8 bytes or more is a secret,
+//     unless the value is true, false or a number. Known limits: an all-digit
+//     secret such as a numeric PIN is not flagged, because numbers under such
+//     names are mostly settings ("SESSION_TTL"); and a non-secret word under
+//     a credential-like name ("AUTH_STRATEGY=client_credentials") is flagged.
 //  6. A long, random, token-shaped value is a secret, whatever its key.
 func looksLikePlaintextSecret(key, value string) bool {
 	if value == "" {
 		return false
 	}
-	if discover.HasTokenPrefix(value) {
+	if len(value) >= minPrefixedTokenLen && discover.HasTokenPrefix(value) {
 		return true
 	}
-	if strings.Contains(value, "${") || strings.HasPrefix(value, "$") {
+	if varRef.MatchString(value) || shellVar.MatchString(value) {
 		return false
 	}
 	if looksLikePathOrURL(value) {
@@ -165,7 +188,7 @@ func looksLikePathOrURL(value string) bool {
 // User-Agent string or a header list has spaces or other punctuation, so the
 // entropy test skips it.
 func isTokenShaped(value string) bool {
-	for i := 0; i < len(value); i++ {
+	for i := range len(value) {
 		c := value[i]
 		switch {
 		case c >= 'A' && c <= 'Z', c >= 'a' && c <= 'z', c >= '0' && c <= '9':
@@ -195,7 +218,7 @@ func shannonEntropy(s string) float64 {
 		return 0
 	}
 	var counts [256]int
-	for i := 0; i < len(s); i++ {
+	for i := range len(s) {
 		counts[s[i]]++
 	}
 	total := float64(len(s))
@@ -216,7 +239,8 @@ func checkUnpinnedPackage(s discover.Server) []Finding {
 	if s.Transport != discover.TransportStdio {
 		return nil
 	}
-	spec, ok := ExtractPackage(s.Command, s.Args.Values())
+	args := s.Args.Values()
+	spec, ok := ExtractPackage(s.Command, args)
 	if !ok || !spec.Unpinned() {
 		return nil
 	}
@@ -224,7 +248,7 @@ func checkUnpinnedPackage(s discover.Server) []Finding {
 	// it as written. If the policy masks the arg, the name may be a misparsed
 	// secret, so the finding keeps no name.
 	related := ""
-	if slices.ContainsFunc(discover.RedactArgs(s.Args.Values()), func(a string) bool {
+	if slices.ContainsFunc(discover.RedactArgs(args), func(a string) bool {
 		return strings.Contains(a, spec.Name)
 	}) {
 		related = spec.Name
@@ -234,6 +258,6 @@ func checkUnpinnedPackage(s discover.Server) []Finding {
 		Server:  s.Name,
 		Field:   FieldArgs,
 		Related: related,
-		Message: "package runner fetches an unpinned version",
+		Message: unpinnedPackageMessage,
 	}}
 }

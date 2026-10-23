@@ -355,25 +355,35 @@ func TestUnpinned(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
+		runner  Runner
 		version string
 		want    bool
 	}{
-		{"", true},
-		{"latest", true},
-		{"LATEST", true},
-		{"Latest", true},
-		{"1.0.0", false},
-		{"latest1", false},
-		{"not-latest", false},
-		{">=1.0", false},
-		{"^1.2", false},
-		{digest, false},
+		{RunnerNPX, "", true},
+		{RunnerNPX, "latest", true},
+		{RunnerNPX, "LATEST", true},
+		{RunnerNPX, "Latest", true},
+		{RunnerNPX, "*", true},
+		{RunnerNPX, "x", true},
+		{RunnerBunx, "X", true},
+		{RunnerNPX, "1.0.0", false},
+		{RunnerNPX, "latest1", false},
+		{RunnerNPX, "not-latest", false},
+		{RunnerNPX, ">=1.0", false},
+		{RunnerNPX, "^1.2", false},
+		{RunnerNPX, "1.x", false},
+		{RunnerUVX, "", true},
+		{RunnerUVX, "x", false},
+		{RunnerDocker, "latest", true},
+		{RunnerDocker, "x", false},
+		{RunnerDocker, digest, false},
 	}
 	for _, tt := range tests {
-		t.Run("version "+tt.version, func(t *testing.T) {
+		t.Run(string(tt.runner)+" version "+tt.version, func(t *testing.T) {
 			t.Parallel()
-			if got := (PackageSpec{Version: tt.version}).Unpinned(); got != tt.want {
-				t.Errorf("PackageSpec{Version: %q}.Unpinned() = %v, want %v", tt.version, got, tt.want)
+			spec := PackageSpec{Runner: tt.runner, Version: tt.version}
+			if got := spec.Unpinned(); got != tt.want {
+				t.Errorf("%+v.Unpinned() = %v, want %v", spec, got, tt.want)
 			}
 		})
 	}

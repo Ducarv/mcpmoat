@@ -21,7 +21,7 @@ const (
 // argument) looks like a token. The RedactURL doc comment lists the rules
 // and their limits.
 func looksLikeCredential(s string) bool {
-	if len(s) >= minTokenLen || isUUID(s) || hasTokenPrefix(s) {
+	if len(s) >= minTokenLen || isUUID(s) || HasTokenPrefix(s) {
 		return true
 	}
 	if len(s) < minMixedTokenLen {
@@ -35,10 +35,13 @@ func looksLikeCredential(s string) bool {
 	return hasLetter && hasDigit
 }
 
-// hasTokenPrefix reports whether s starts with the prefix of a well-known
+// HasTokenPrefix reports whether s starts with the prefix of a well-known
 // API token format, such as "ghp_" or "sk-", in any case, and has more text
-// after the prefix.
-func hasTokenPrefix(s string) bool {
+// after the prefix. It does not look at the rest of s, so a match is a strong
+// hint, not proof. It never prints or stores s. RedactURL, RedactArgs and the
+// config checks in internal/rules (threat T4) use it, so the redaction and
+// the rules agree on what looks like a secret.
+func HasTokenPrefix(s string) bool {
 	// tokenPrefixes are in lower case, so the match does not depend on case.
 	// The RedactURL and RedactArgs docs name only some of them as examples,
 	// so they do not need an update when this list changes.

@@ -47,10 +47,16 @@ type PackageSpec struct {
 	Version string
 }
 
-// Unpinned reports whether the spec has no version or the version "latest"
-// (case-insensitive). A docker digest counts as pinned.
+// Unpinned reports whether the spec has no version, the version "latest"
+// (case-insensitive), or for npx and bunx the "any version" range "*" or "x".
+// A docker digest counts as pinned. Known limit: other dist-tags, such as
+// "next" or "beta", also move, but they count as pinned.
 func (p PackageSpec) Unpinned() bool {
-	return p.Version == "" || strings.EqualFold(p.Version, "latest")
+	if p.Version == "" || strings.EqualFold(p.Version, "latest") {
+		return true
+	}
+	npm := p.Runner == RunnerNPX || p.Runner == RunnerBunx
+	return npm && (p.Version == "*" || strings.EqualFold(p.Version, "x"))
 }
 
 // ExtractPackage returns the package that command and args would fetch and
@@ -86,12 +92,12 @@ func extractPackage(command string, args []string) (PackageSpec, bool) {
 	case RunnerNPX, RunnerBunx:
 		return extractNPM(r, args)
 	case RunnerUVX:
-		return extractPython(r, args, true)
+		return extractPython(r, args)
 	case RunnerPipx:
 		if len(args) == 0 || args[0] != "run" {
 			return PackageSpec{}, false
 		}
-		return extractPython(r, args[1:], false)
+		return extractPython(r, args[1:])
 	case RunnerDocker:
 		return extractDocker(args)
 	default:
@@ -233,15 +239,15 @@ func runnerOf(command string) Runner {
 	}
 }
 
-// scanRules tells scan how to read the flags of one runner.
+// scanRules tells scanArgs how to read the flags of one runner.
 type scanRules struct {
 	valued   map[string]bool // flags that consume the next argument
 	override map[string]bool // flags whose value is the spec itself
 	stop     map[string]bool // flags that make the parse doubtful
 }
 
-// set builds a lookup table from a list of flag names.
-func set(names ...string) map[string]bool {
+// flagSet builds a lookup table from a list of flag names.
+func flagSet(names ...string) map[string]bool {
 	m := make(map[string]bool, len(names))
 	for _, n := range names {
 		m[n] = true
@@ -249,11 +255,11 @@ func set(names ...string) map[string]bool {
 	return m
 }
 
-// scan walks args and returns the spec: the value of an override flag, or
+// scanArgs walks args and returns the spec: the value of an override flag, or
 // else the first argument that is not a flag. It also returns the index of
 // the first argument after the spec. It returns false if there is no spec,
 // or if a stop flag comes first.
-func scan(args []string, rules scanRules) (spec string, next int, ok bool) {
+func scanArgs(args []string, rules scanRules) (spec string, next int, ok bool) {
 	for i := 0; i < len(args); i++ {
 		arg := args[i]
 		if arg == "--" {
@@ -290,7 +296,7 @@ func scan(args []string, rules scanRules) (spec string, next int, ok bool) {
 // npmRules are the flags of npx. They follow npm exec and the npm config
 // flags that npx accepts.
 var npmRules = scanRules{
-	valued: set(
+	valued: flagSet(
 		"--loglevel", "-w", "--workspace", "--shell", "--script-shell",
 		"--userconfig", "--globalconfig", "--registry", "--cache", "--prefix", "-C",
 		"--node-options", "--otp", "--tag", "--before", "--ca", "--cafile",
@@ -300,20 +306,20 @@ var npmRules = scanRules{
 		"--logs-dir", "--logs-max", "--audit-level", "--init-module",
 		"--min-release-age",
 	),
-	override: set("-p", "--package"),
-	stop:     set("-c", "--call"),
+	override: flagSet("-p", "--package"),
+	stop:     flagSet("-c", "--call"),
 }
 
 // bunxRules are the flags of bunx. "--bun" and similar boolean flags are not
 // listed.
 var bunxRules = scanRules{
-	valued: set(
+	valued: flagSet(
 		"--cwd", "--registry", "--install", "--tsconfig-override", "--env-file",
 		"-r", "--preload", "--port", "--define", "-d", "--loader", "-l",
 		"--elide-lines", "--user-agent",
 	),
-	override: set("-p", "--package"),
-	stop:     set("-c", "--config"),
+	override: flagSet("-p", "--package"),
+	stop:     flagSet("-c", "--config"),
 }
 
 // extractNPM reads the package from npx or bunx arguments.
@@ -322,7 +328,7 @@ func extractNPM(r Runner, args []string) (PackageSpec, bool) {
 	if r == RunnerBunx {
 		rules = bunxRules
 	}
-	spec, _, ok := scan(args, rules)
+	spec, _, ok := scanArgs(args, rules)
 	if !ok {
 		return PackageSpec{}, false
 	}
@@ -366,7 +372,7 @@ func parseNPMSpec(spec string) (name, version string, ok bool) {
 // uvxRules are the value-taking flags of uvx (uv tool run). Boolean flags such
 // as "--isolated" or "--compile-bytecode" are not listed.
 var uvxRules = scanRules{
-	valued: set(
+	valued: flagSet(
 		"--with", "-w", "--with-editable", "--with-requirements",
 		"--python", "-p", "--python-preference", "--python-platform",
 		"--index", "--default-index", "--index-url", "-i", "--extra-index-url",
@@ -381,28 +387,28 @@ var uvxRules = scanRules{
 		"--no-binary-package", "--no-build-package",
 		"--no-build-isolation-package", "--allow-insecure-host",
 	),
-	override: set("--from"),
+	override: flagSet("--from"),
 }
 
 // pipxRules are the flags of "pipx run". "--editable", "--path" and
 // "--fetch-missing-python" are booleans and are not listed.
 var pipxRules = scanRules{
-	valued:   set("--python", "--pip-args", "--index-url", "-i"),
-	override: set("--spec"),
+	valued:   flagSet("--python", "--pip-args", "--index-url", "-i"),
+	override: flagSet("--spec"),
 }
 
 // extractPython reads the package from uvx arguments, or from the arguments
-// after "pipx run". allowAt says whether "name@version" is valid (uvx only).
-func extractPython(r Runner, args []string, allowAt bool) (PackageSpec, bool) {
+// after "pipx run". Only uvx accepts the "name@version" form.
+func extractPython(r Runner, args []string) (PackageSpec, bool) {
 	rules := uvxRules
 	if r == RunnerPipx {
 		rules = pipxRules
 	}
-	spec, _, ok := scan(args, rules)
+	spec, _, ok := scanArgs(args, rules)
 	if !ok || strings.HasSuffix(spec, ".py") {
 		return PackageSpec{}, false // a script, not a package
 	}
-	name, version, ok := parsePythonSpec(spec, allowAt)
+	name, version, ok := parsePythonSpec(spec, r == RunnerUVX)
 	if !ok {
 		return PackageSpec{}, false
 	}
@@ -455,13 +461,13 @@ func parsePythonSpec(spec string, allowAt bool) (name, version string, ok bool) 
 
 var (
 	dockerGlobalRules = scanRules{
-		valued: set("--config", "-c", "--context", "-H", "--host", "-l", "--log-level",
+		valued: flagSet("--config", "-c", "--context", "-H", "--host", "-l", "--log-level",
 			"--tlscacert", "--tlscert", "--tlskey"),
 	}
 	// dockerRunRules lists the value-taking flags of "docker run". Boolean
 	// flags such as "-i", "-t", "--rm" and "--privileged" are not listed.
 	dockerRunRules = scanRules{
-		valued: set(
+		valued: flagSet(
 			// Environment, mounts and files.
 			"-e", "--env", "--env-file", "-v", "--volume", "--volumes-from",
 			"--volume-driver", "--mount", "--tmpfs", "--storage-opt", "--cidfile",
@@ -499,13 +505,13 @@ var (
 // extractDocker reads the image from "docker run" (or "docker container run")
 // arguments.
 func extractDocker(args []string) (PackageSpec, bool) {
-	sub, next, ok := scan(args, dockerGlobalRules)
+	sub, next, ok := scanArgs(args, dockerGlobalRules)
 	if !ok {
 		return PackageSpec{}, false
 	}
 	rest := args[next:]
 	if sub == "container" {
-		sub, next, ok = scan(rest, scanRules{})
+		sub, next, ok = scanArgs(rest, scanRules{})
 		if !ok {
 			return PackageSpec{}, false
 		}
@@ -514,7 +520,7 @@ func extractDocker(args []string) (PackageSpec, bool) {
 	if sub != "run" {
 		return PackageSpec{}, false
 	}
-	image, _, ok := scan(rest, dockerRunRules)
+	image, _, ok := scanArgs(rest, dockerRunRules)
 	if !ok {
 		return PackageSpec{}, false
 	}

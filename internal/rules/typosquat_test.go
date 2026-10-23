@@ -15,6 +15,16 @@ import (
 
 const popularListPath = "../../rules/data/popular-servers.txt"
 
+// npxServer builds a server that runs pkg with "npx -y".
+func npxServer(name, pkg string) discover.Server {
+	return discover.Server{Name: name, Command: "npx", Args: discover.NewArgs([]string{"-y", pkg})}
+}
+
+// runServer builds a server that runs command with args.
+func runServer(command string, args ...string) discover.Server {
+	return discover.Server{Name: "x-local", Command: command, Args: discover.NewArgs(args)}
+}
+
 func TestDistance(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
@@ -42,11 +52,11 @@ func TestDistance(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			if got := distance(tt.a, tt.b); got != tt.want {
-				t.Errorf("distance(%q, %q) = %d, want %d", tt.a, tt.b, got, tt.want)
+			if got := osaDistance(tt.a, tt.b); got != tt.want {
+				t.Errorf("osaDistance(%q, %q) = %d, want %d", tt.a, tt.b, got, tt.want)
 			}
-			if got := distance(tt.b, tt.a); got != tt.want {
-				t.Errorf("distance(%q, %q) = %d, want %d (symmetry)", tt.b, tt.a, got, tt.want)
+			if got := osaDistance(tt.b, tt.a); got != tt.want {
+				t.Errorf("osaDistance(%q, %q) = %d, want %d (symmetry)", tt.b, tt.a, got, tt.want)
 			}
 		})
 	}
@@ -151,8 +161,8 @@ func TestPopularListFile(t *testing.T) {
 		if n != strings.TrimSpace(n) {
 			t.Errorf("name %q has surrounding space", n)
 		}
-		if utf8.RuneCountInString(n) < minNameLen {
-			t.Errorf("name %q is shorter than %d runes", n, minNameLen)
+		if utf8.RuneCountInString(n) < minTyposquatNameLen {
+			t.Errorf("name %q is shorter than %d runes", n, minTyposquatNameLen)
 		}
 		if strings.ContainsAny(n, " \t") {
 			t.Errorf("name %q contains a space", n)
@@ -181,9 +191,6 @@ func TestTyposquatCheck(t *testing.T) {
 	t.Parallel()
 	ts := NewTyposquat(loadPopular(t))
 
-	npx := func(name, pkg string) discover.Server {
-		return discover.Server{Name: name, Command: "npx", Args: discover.NewArgs([]string{"-y", pkg})}
-	}
 	type want struct{ field, related string }
 
 	tests := []struct {
@@ -194,17 +201,17 @@ func TestTyposquatCheck(t *testing.T) {
 		// Positives.
 		{
 			name:   "npx scoped package, transposed letters",
-			server: npx("files", "@modelcontextprotocol/server-filesytem"),
+			server: npxServer("files", "@modelcontextprotocol/server-filesytem"),
 			want:   []want{{"args", "@modelcontextprotocol/server-filesystem"}},
 		},
 		{
 			name:   "npx scoped package githbu",
-			server: npx("gh", "@modelcontextprotocol/server-githbu"),
+			server: npxServer("gh", "@modelcontextprotocol/server-githbu"),
 			want:   []want{{"args", "@modelcontextprotocol/server-github"}},
 		},
 		{
 			name:   "npx package with version",
-			server: npx("files", "@modelcontextprotocol/server-filesytem@1.2.3"),
+			server: npxServer("files", "@modelcontextprotocol/server-filesytem@1.2.3"),
 			want:   []want{{"args", "@modelcontextprotocol/server-filesystem"}},
 		},
 		{
@@ -228,72 +235,83 @@ func TestTyposquatCheck(t *testing.T) {
 			want:   []want{{"name", "mcp-server-fetch"}},
 		},
 		{
+			// PyPI reads "mcp_server_fetcj" as "mcp-server-fetcj" (PEP 503).
+			name:   "uvx package with PyPI separators, one edit off",
+			server: runServer("uvx", "mcp_server_fetcj"),
+			want:   []want{{"args", "mcp-server-fetch"}},
+		},
+		{
+			name:   "docker image with the Docker Hub prefix, one edit off",
+			server: runServer("docker", "run", "-i", "docker.io/mcp/fetcj"),
+			want:   []want{{"args", "mcp/fetch"}},
+		},
+		{
 			name:   "docker image typo",
 			server: discover.Server{Name: "gh", Command: "docker", Args: discover.NewArgs([]string{"run", "-i", "--rm", "ghcr.io/github/github-mcp-sever"})},
 			want:   []want{{"args", "ghcr.io/github/github-mcp-server"}},
 		},
 		{
 			name:   "server name and package both typo give two findings",
-			server: npx("mcp-server-fecth", "mcp-server-fethc"),
+			server: npxServer("mcp-server-fecth", "mcp-server-fethc"),
 			want:   []want{{"name", "mcp-server-fetch"}, {"args", "mcp-server-fetch"}},
 		},
 		{
 			// Full and bare form of the package are both close to the same
 			// popular entry: still one finding for the package.
 			name:   "package full and bare both close give one finding",
-			server: npx("unrelated-local-thing", "@modelcontextprotocol/server-filesytem"),
+			server: npxServer("unrelated-local-thing", "@modelcontextprotocol/server-filesytem"),
 			want:   []want{{"args", "@modelcontextprotocol/server-filesystem"}},
 		},
 		{
 			name:   "scope squatting: other scope, same bare name",
-			server: npx("files", "@evil/server-filesystem"),
+			server: npxServer("files", "@evil/server-filesystem"),
 			want:   []want{{"args", "@modelcontextprotocol/server-filesystem"}},
 		},
 		{
 			name:   "scope squatting: scope dropped",
-			server: npx("files", "server-filesystem"),
+			server: npxServer("files", "server-filesystem"),
 			want:   []want{{"args", "@modelcontextprotocol/server-filesystem"}},
 		},
 		{
 			name:   "scope squatting with version",
-			server: npx("gh", "@evil/server-github@1.0.0"),
+			server: npxServer("gh", "@evil/server-github@1.0.0"),
 			want:   []want{{"args", "@modelcontextprotocol/server-github"}},
 		},
 		{
 			name:   "scope squatting on a vendor package",
-			server: npx("pw", "@evil/playwright-mcp-server"),
+			server: npxServer("pw", "@evil/playwright-mcp-server"),
 			want:   []want{{"args", "@executeautomation/playwright-mcp-server"}},
 		},
 		{
 			name:   "scope squatting on an unscoped popular name",
-			server: npx("remote", "@evil/mcp-remote"),
+			server: npxServer("remote", "@evil/mcp-remote"),
 			want:   []want{{"args", "mcp-remote"}},
 		},
 		{
 			name:   "scope squatting on an unscoped popular name, with version",
-			server: npx("fc", "@evil/firecrawl-mcp@1.0.0"),
+			server: npxServer("fc", "@evil/firecrawl-mcp@1.0.0"),
 			want:   []want{{"args", "firecrawl-mcp"}},
 		},
 		{
 			name:   "scope squatting on an unscoped popular name, scope with xox prefix",
-			server: npx("remote", "@xoxo/mcp-remote"),
+			server: npxServer("remote", "@xoxo/mcp-remote"),
 			want:   []want{{"args", "mcp-remote"}},
 		},
 		{
 			// The list mixes registries: a scoped npm package with the name
 			// of a PyPI entry also fires.
 			name:   "scope squatting on a PyPI popular name",
-			server: npx("fetcher", "@evil/mcp-server-fetch"),
+			server: npxServer("fetcher", "@evil/mcp-server-fetch"),
 			want:   []want{{"args", "mcp-server-fetch"}},
 		},
 		{
 			name:   "scope squatting with xox scope",
-			server: npx("files", "@xoxo/server-filesystem"),
+			server: npxServer("files", "@xoxo/server-filesystem"),
 			want:   []want{{"args", "@modelcontextprotocol/server-filesystem"}},
 		},
 		{
 			name:   "scope squatting with eyj scope",
-			server: npx("gh", "@eyjay/server-github"),
+			server: npxServer("gh", "@eyjay/server-github"),
 			want:   []want{{"args", "@modelcontextprotocol/server-github"}},
 		},
 
@@ -302,12 +320,12 @@ func TestTyposquatCheck(t *testing.T) {
 			// threshold applies. The bare name is exact, so it is also
 			// scope squatting.
 			name:   "typo inside the scope part",
-			server: npx("files", "@modelcontextprotoco1/server-filesystem"),
+			server: npxServer("files", "@modelcontextprotoco1/server-filesystem"),
 			want:   []want{{"args", "@modelcontextprotocol/server-filesystem"}},
 		},
 		{
 			name:   "other scope with a typo in the bare name",
-			server: npx("files", "@evil/server-filesytem"),
+			server: npxServer("files", "@evil/server-filesytem"),
 			want:   []want{{"args", "@modelcontextprotocol/server-filesystem"}},
 		},
 
@@ -316,15 +334,15 @@ func TestTyposquatCheck(t *testing.T) {
 		// there, so a sibling that is two edits from a popular name (gitlab
 		// against github) is not a typosquat. A one-edit typo in the same scope
 		// still fires (see the positives above): it is a config mistake.
-		{name: "official sibling in the same scope", server: npx("gl", "@modelcontextprotocol/server-gitlab")},
-		{name: "official sibling with version", server: npx("gl", "@modelcontextprotocol/server-gitlab@1.0.0")},
-		{name: "ambiguous bare name shared by two popular packages", server: npx("m", "@acme/mcp-server")},
+		{name: "official sibling in the same scope", server: npxServer("gl", "@modelcontextprotocol/server-gitlab")},
+		{name: "official sibling with version", server: npxServer("gl", "@modelcontextprotocol/server-gitlab@1.0.0")},
+		{name: "ambiguous bare name shared by two popular packages", server: npxServer("m", "@acme/mcp-server")},
 		{name: "scope squatting does not apply to a server name", server: discover.Server{Name: "server-filesystem"}},
-		{name: "exact unscoped popular package", server: npx("remote", "mcp-remote")},
-		{name: "exact unscoped popular package with version", server: npx("remote", "mcp-remote@1.0.0")},
-		{name: "scoped package with an unrelated bare name", server: npx("remote", "@evil/mcp-remote-extra-long-name")},
-		{name: "exact scoped package", server: npx("files", "@modelcontextprotocol/server-filesystem")},
-		{name: "exact package with version", server: npx("files", "@modelcontextprotocol/server-filesystem@1.0.0")},
+		{name: "exact unscoped popular package", server: npxServer("remote", "mcp-remote")},
+		{name: "exact unscoped popular package with version", server: npxServer("remote", "mcp-remote@1.0.0")},
+		{name: "scoped package with an unrelated bare name", server: npxServer("remote", "@evil/mcp-remote-extra-long-name")},
+		{name: "exact scoped package", server: npxServer("files", "@modelcontextprotocol/server-filesystem")},
+		{name: "exact package with version", server: npxServer("files", "@modelcontextprotocol/server-filesystem@1.0.0")},
 		{name: "exact server name", server: discover.Server{Name: "mcp-server-fetch"}},
 		{name: "exact name in other case", server: discover.Server{Name: "MCP-Server-Fetch"}},
 		{name: "exact bare name of a scoped package", server: discover.Server{Name: "server-filesystem"}},
@@ -334,8 +352,19 @@ func TestTyposquatCheck(t *testing.T) {
 		{name: "short name git", server: discover.Server{Name: "git"}},
 		{name: "empty name", server: discover.Server{}},
 		{name: "200 rune name", server: discover.Server{Name: strings.Repeat("a", 200)}},
-		{name: "200 rune package", server: npx("x", strings.Repeat("a", 200))},
-		{name: "unrelated scoped package", server: npx("notes", "@example-corp/notes-mcp")},
+		{name: "200 rune package", server: npxServer("x", strings.Repeat("a", 200))},
+		{name: "unrelated scoped package", server: npxServer("notes", "@example-corp/notes-mcp")},
+		{name: "PyPI name with underscores is the real package", server: runServer("uvx", "mcp_server_fetch")},
+		{name: "PyPI name with dots and case is the real package", server: runServer("pipx", "run", "MCP.Server.Fetch")},
+		{name: "Docker Hub prefix is the real image", server: runServer("docker", "run", "-i", "docker.io/mcp/fetch")},
+		{name: "index.docker.io prefix is the real image", server: runServer("docker", "run", "-i", "index.docker.io/mcp/fetch:1.0")},
+		{name: "Docker Hub library prefix", server: runServer("docker", "run", "-i", "docker.io/library/mcp/fetch")},
+		// "mcp-server" is the bare name of two popular packages, so it proves
+		// nothing in the edit distance either.
+		{name: "server name close to an ambiguous bare name", server: discover.Server{Name: "my-server"}},
+		{name: "server name plural of an ambiguous bare name", server: discover.Server{Name: "mcp-servers"}},
+		{name: "server name with suffix on an ambiguous bare name", server: discover.Server{Name: "mcp-server-1"}},
+		{name: "package close to an ambiguous bare name", server: npxServer("x", "@someone/mcp-servers")},
 		{
 			name:   "docker with unrelated image",
 			server: discover.Server{Name: "db", Command: "docker", Args: discover.NewArgs([]string{"run", "-i", "--rm", "postgres:16"})},
@@ -379,17 +408,14 @@ func TestTyposquatExactNameBeatsNeighbour(t *testing.T) {
 	// popular. Each one is legitimate and must not be reported as a typo of
 	// the other.
 	ts := NewTyposquat([]string{"@scope/server-gitlab", "@scope/server-github", "plain-gitlab-mcp", "plain-github-mcp"})
-	npx := func(pkg string) discover.Server {
-		return discover.Server{Name: "x-local", Command: "npx", Args: discover.NewArgs([]string{"-y", pkg})}
-	}
 	tests := []struct {
 		name   string
 		server discover.Server
 	}{
-		{name: "package gitlab", server: npx("@scope/server-gitlab")},
-		{name: "package github", server: npx("@scope/server-github")},
-		{name: "plain package gitlab", server: npx("plain-gitlab-mcp")},
-		{name: "plain package github", server: npx("plain-github-mcp")},
+		{name: "package gitlab", server: npxServer("x-local", "@scope/server-gitlab")},
+		{name: "package github", server: npxServer("x-local", "@scope/server-github")},
+		{name: "plain package gitlab", server: npxServer("x-local", "plain-gitlab-mcp")},
+		{name: "plain package github", server: npxServer("x-local", "plain-github-mcp")},
 		{name: "server name gitlab", server: discover.Server{Name: "@scope/server-gitlab"}},
 		{name: "server bare name gitlab", server: discover.Server{Name: "server-gitlab"}},
 		{name: "server name plain github", server: discover.Server{Name: "plain-github-mcp"}},
@@ -404,7 +430,7 @@ func TestTyposquatExactNameBeatsNeighbour(t *testing.T) {
 	}
 
 	// A real typo of one of them is still reported.
-	got := ts.Check(npx("@scope/server-githbu"))
+	got := ts.Check(npxServer("x-local", "@scope/server-githbu"))
 	if len(got) != 1 || got[0].Related != "@scope/server-github" {
 		t.Errorf("Check() = %+v, want one finding related to @scope/server-github", got)
 	}
@@ -422,21 +448,18 @@ func TestNewTyposquatAmbiguousBareNames(t *testing.T) {
 		t.Errorf("ambiguous = %v, want %v", ts.ambiguous, want)
 	}
 
-	npx := func(pkg string) discover.Server {
-		return discover.Server{Name: "x-local", Command: "npx", Args: discover.NewArgs([]string{"-y", pkg})}
-	}
-	if got := ts.Check(npx("@evil/shared-server")); len(got) != 0 {
+	if got := ts.Check(npxServer("x-local", "@evil/shared-server")); len(got) != 0 {
 		t.Errorf("ambiguous bare name gave %+v, want none", got)
 	}
-	if got := ts.Check(npx("@evil/unique-server")); len(got) != 1 || got[0].Related != "@ccc/unique-server" {
+	if got := ts.Check(npxServer("x-local", "@evil/unique-server")); len(got) != 1 || got[0].Related != "@ccc/unique-server" {
 		t.Errorf("unique bare name gave %+v, want one finding related to @ccc/unique-server", got)
 	}
-	if got := ts.Check(npx("@evil/repeat-server")); len(got) != 1 || got[0].Related != "@ddd/repeat-server" {
+	if got := ts.Check(npxServer("x-local", "@evil/repeat-server")); len(got) != 1 || got[0].Related != "@ddd/repeat-server" {
 		t.Errorf("repeated entry gave %+v, want one finding related to @ddd/repeat-server", got)
 	}
 	// A bare name under the minimum length is skipped.
 	short := NewTyposquat([]string{"@aaa/mcp"})
-	if got := short.Check(npx("@evil/mcp")); len(got) != 0 {
+	if got := short.Check(npxServer("x-local", "@evil/mcp")); len(got) != 0 {
 		t.Errorf("short bare name gave %+v, want none", got)
 	}
 }

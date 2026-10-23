@@ -5,19 +5,15 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"unicode"
 
 	"github.com/Ducarv/mcpmoat/internal/discover"
 	"github.com/Ducarv/mcpmoat/internal/inspect"
 )
 
-const (
-	// minShadowNameLen is the shortest tool name that CheckShadowing looks
-	// for. Shorter names match too often in normal prose.
-	minShadowNameLen = 5
-
-	// shadowMessage is the fixed text of every T3 finding.
-	shadowMessage = "tool description names a tool of another server"
-)
+// minShadowNameLen is the shortest tool name that CheckShadowing looks for.
+// Shorter names match too often in normal prose.
+const minShadowNameLen = 5
 
 // genericToolNames are tool names so common that a mention in a description is
 // normal prose, not an attack. Every name here is at least minShadowNameLen
@@ -38,8 +34,10 @@ var genericToolNames = map[string]bool{
 
 // ServerTools is one server with the tools that inspect read from it.
 type ServerTools struct {
+	// Server is the server as discover read it from the client config.
 	Server discover.Server
-	Tools  []inspect.Tool
+	// Tools are the tools that the server listed.
+	Tools []inspect.Tool
 }
 
 // toolOwner is one server that has a tool with a given name.
@@ -83,30 +81,34 @@ func (n nameOwners) other(identity int) (toolOwner, bool) {
 // is reported. Otherwise a hostile server could hide a mention by adding a
 // dummy tool with the victim's name.
 //
-// Names are compared without case. A name counts as mentioned only at
-// identifier boundaries: the bytes before and after it are not letters,
-// digits, "_" or "-". So "send_email_later" does not mention "send_email".
-// The whole description is scanned, with no size cap: padding in front of a
-// mention must not hide it from the check, because the model reads the whole
-// description.
+// Names are compared without case, and "-" and "_" count as the same
+// character, so "send-email" mentions "send_email". Unicode format characters
+// (such as a zero-width space) are removed from names and descriptions
+// first: the model reads "send<U+200B>_email" as "send_email". A name counts
+// as mentioned only at identifier boundaries: the bytes before and after it
+// are not letters, digits, "_" or "-". So "send_email_later" does not mention
+// "send_email". The whole description is scanned, with no size cap: padding
+// in front of a mention must not hide it from the check, because the model
+// reads the whole description.
 //
 // A server is known by its launch config, not by its name or its position in
-// all. Two entries are the same owner when Transport, Command, Args, URL, Dir
-// and ProjectPath are equal, so the same global server configured in two
-// clients is one owner and does not shadow itself. A relative command such as
-// "node server.js" in two projects runs two programs, so a different
-// ProjectPath or Dir gives a different owner. Env and Headers are not part of
-// the identity. Two entries with the same Name and a different launch config
-// are two owners, because an attacker can copy a name. The result has one Finding per entry,
-// tool and mentioned name. Finding.Related is "<other server>/<tool>", with
-// the first owner of a different identity in all when several own the name.
+// all (see launchKey). The same server configured in two clients or two
+// projects is one owner and does not shadow itself. Two entries with the same
+// Name and a different launch config are two owners, because an attacker can
+// copy a name. The result has one Finding per entry, tool and mentioned name.
+// Finding.Related is "<other server>/<tool>", with the first owner of a
+// different identity in all when several own the name.
 // The result is sorted by Server, Tool and Related. A Finding never holds
 // description text, and the launch config values are used only as a map key.
 //
 // Known limits: only Tool.Description is scanned. The text of input schemas,
 // prompts and resources is not. A tool name with a byte outside letters,
 // digits, "_" and "-" (a dot or a space, for example) cannot be found as a
-// token, so it is never a candidate name.
+// token, so it is never a candidate name. Look-alike characters, such as the
+// fullwidth U+FF3F for "_", are not folded. A hostile server can name its
+// tools after common words ("files", "github") that are not in
+// genericToolNames: other servers whose descriptions use the word then get
+// findings that name the hostile server in Related.
 //
 // Tool names and descriptions are untrusted input from MCP servers. The check
 // only searches them as text. It never executes them or builds commands from
@@ -124,7 +126,7 @@ func CheckShadowing(all []ServerTools) []Finding {
 	for i, st := range all {
 		for _, tool := range st.Tools {
 			clear(seen)
-			forEachToken(strings.ToLower(tool.Description), func(token string) {
+			forEachToken(foldText(tool.Description), func(token string) {
 				n, ok := owners[token]
 				if !ok {
 					return
@@ -142,7 +144,7 @@ func CheckShadowing(all []ServerTools) []Finding {
 					Server:  st.Server.Name,
 					Tool:    tool.Name,
 					Related: other.server + "/" + other.toolName,
-					Message: shadowMessage,
+					Message: shadowingMessage,
 				})
 			})
 		}
@@ -159,10 +161,7 @@ func CheckShadowing(all []ServerTools) []Finding {
 }
 
 // launchIdentities gives each entry of all an owner identity: the index of the
-// first entry with the same launch config. Entries with equal Transport,
-// Command, Args, URL, Dir and ProjectPath get the same identity. Env, Headers,
-// Name and Client are not part of it. ProjectPath is empty for a global
-// server, so the same global server in several clients still merges.
+// first entry with the same launchKey.
 func launchIdentities(all []ServerTools) []int {
 	ids := make([]int, len(all))
 	byKey := make(map[string]int, len(all))
@@ -178,11 +177,20 @@ func launchIdentities(all []ServerTools) []int {
 	return ids
 }
 
-// launchKey builds the map key of a server's launch config. Every part is
-// written with its length in front, so two different configs never give the
-// same key. Dir and ProjectPath are part of the key: the same relative launch
-// string in two projects is two different programs. The key can hold secrets in Args and URL: it is used only as a
-// map key and must not reach a Finding, an error or a log.
+// launchKey builds the map key of a server's launch config: Transport,
+// Command, Args and URL, and for some stdio servers Dir and ProjectPath. Env,
+// Headers, Name and Client are not part of it. Every part is written with its
+// length in front, so two different configs never give the same key.
+//
+// A remote URL is the same server in every project, and so is a package that
+// a package runner fetches (see ExtractPackage). Any other stdio launch, such
+// as "node server.js", can run a different program in another folder, so for
+// it Dir and ProjectPath are part of the key. Known limit: a package runner
+// can read files in its folder (a local node_modules, an npm or uv config),
+// so the "same" package in two projects can still differ.
+//
+// The key can hold secrets in Args and URL: it is used only as a map key and
+// must not reach a Finding, an error or a log.
 func launchKey(s discover.Server) string {
 	var b strings.Builder
 	part := func(v string) {
@@ -198,19 +206,22 @@ func launchKey(s discover.Server) string {
 		part(a)
 	}
 	part(s.URL.Reveal())
-	part(s.Dir)
-	part(s.ProjectPath)
+	_, fetched := ExtractPackage(s.Command, args)
+	if s.Transport == discover.TransportStdio && !fetched {
+		part(s.Dir)
+		part(s.ProjectPath)
+	}
 	return b.String()
 }
 
-// indexOwners maps each candidate tool name, lowercased, to its first two
-// owners with different identities, in the order of all. identities has one
-// entry per entry of all.
+// indexOwners maps each candidate tool name, in the form of foldText, to its
+// first two owners with different identities, in the order of all.
+// identities has one entry per entry of all.
 func indexOwners(all []ServerTools, identities []int) map[string]nameOwners {
 	owners := make(map[string]nameOwners)
 	for i, st := range all {
 		for _, tool := range st.Tools {
-			name := strings.ToLower(tool.Name)
+			name := foldText(tool.Name)
 			if len(name) < minShadowNameLen || genericToolNames[name] || !allIdentBytes(name) {
 				continue
 			}
@@ -230,10 +241,26 @@ func indexOwners(all []ServerTools, identities []int) map[string]nameOwners {
 	return owners
 }
 
+// foldText returns s in the form that names and descriptions are compared
+// in: lower case, with no Unicode format characters (category Cf, such as
+// zero-width and bidi controls), and with every "-" written as "_".
+func foldText(s string) string {
+	return strings.Map(func(r rune) rune {
+		switch {
+		case r == '-':
+			return '_'
+		case unicode.Is(unicode.Cf, r):
+			return -1
+		default:
+			return unicode.ToLower(r)
+		}
+	}, s)
+}
+
 // forEachToken calls fn for each maximal run of identifier bytes in text.
 func forEachToken(text string, fn func(token string)) {
 	start := -1
-	for i := 0; i < len(text); i++ {
+	for i := range len(text) {
 		if isIdentByte(text[i]) {
 			if start < 0 {
 				start = i
@@ -252,7 +279,7 @@ func forEachToken(text string, fn func(token string)) {
 
 // allIdentBytes reports whether every byte of s is an identifier byte.
 func allIdentBytes(s string) bool {
-	for i := 0; i < len(s); i++ {
+	for i := range len(s) {
 		if !isIdentByte(s[i]) {
 			return false
 		}

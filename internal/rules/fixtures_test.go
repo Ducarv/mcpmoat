@@ -5,11 +5,8 @@ package rules_test
 // network call. The config fixtures are Cursor files under testdata/configs.
 
 import (
-	"bytes"
 	"context"
-	"encoding/json"
 	"fmt"
-	"os"
 	"path/filepath"
 	"reflect"
 	"slices"
@@ -70,34 +67,26 @@ func configServers(t *testing.T, name string) []discover.Server {
 // popularTyposquat builds the typosquat check from the built-in list.
 func popularTyposquat(t *testing.T) *rules.Typosquat {
 	t.Helper()
-	data, err := os.ReadFile(filepath.Join("..", "..", "rules", "data", "popular-servers.txt"))
-	if err != nil {
-		t.Fatalf("read popular list: %v", err)
-	}
-	names, err := rules.ParsePopular(bytes.NewReader(data))
-	if err != nil {
-		t.Fatalf("ParsePopular() error = %v", err)
-	}
-	return rules.NewTyposquat(names)
+	return rules.NewTyposquat(rules.LoadPopular(t))
 }
 
-// got is the comparable form of a Finding for the config tests.
-type got struct{ Server, RuleID, Field, Key, Related string }
+// findingKey is the comparable form of a Finding for the config tests.
+type findingKey struct{ Server, RuleID, Field, Key, Related string }
 
-// compareGot orders got values by their fields.
-func compareGot(a, b got) int {
+// compareFindingKeys orders findingKey values by their fields.
+func compareFindingKeys(a, b findingKey) int {
 	return strings.Compare(fmt.Sprintf("%v", a), fmt.Sprintf("%v", b))
 }
 
 // assertFindings compares findings with want, ignoring order.
-func assertFindings(t *testing.T, what string, findings []rules.Finding, want []got) {
+func assertFindings(t *testing.T, what string, findings []rules.Finding, want []findingKey) {
 	t.Helper()
-	var have []got
+	var have []findingKey
 	for _, f := range findings {
-		have = append(have, got{f.Server, f.RuleID, f.Field, f.Key, f.Related})
+		have = append(have, findingKey{f.Server, f.RuleID, f.Field, f.Key, f.Related})
 	}
-	slices.SortFunc(have, compareGot)
-	slices.SortFunc(want, compareGot)
+	slices.SortFunc(have, compareFindingKeys)
+	slices.SortFunc(want, compareFindingKeys)
 	if !slices.Equal(have, want) {
 		t.Errorf("%s findings =\n%+v\nwant\n%+v", what, have, want)
 	}
@@ -226,27 +215,17 @@ func TestFixtureDangerousConfig(t *testing.T) {
 		}
 	}
 
-	assertFindings(t, "CheckConfig", all, []got{
-		{"remote-plain", rules.RuleInsecureURL, "url", "", ""},
-		{"remote-plain", rules.RulePlaintextSecret, "headers", "X-Api-Key", ""},
-		{"env-secret", rules.RulePlaintextSecret, "env", "GITHUB_TOKEN", ""},
-		{"latest-pkg", rules.RuleUnpinnedPackage, "args", "", "@example-corp/files-mcp"},
-		{"docker-untagged", rules.RuleUnpinnedPackage, "args", "", "example/mcp-server"},
+	assertFindings(t, "CheckConfig", all, []findingKey{
+		{"remote-plain", rules.RuleInsecureURL, rules.FieldURL, "", ""},
+		{"remote-plain", rules.RulePlaintextSecret, rules.FieldHeaders, "X-Api-Key", ""},
+		{"env-secret", rules.RulePlaintextSecret, rules.FieldEnv, "GITHUB_TOKEN", ""},
+		{"latest-pkg", rules.RuleUnpinnedPackage, rules.FieldArgs, "", "@example-corp/files-mcp"},
+		{"docker-untagged", rules.RuleUnpinnedPackage, rules.FieldArgs, "", "example/mcp-server"},
 	})
 
 	// A finding names the place of a problem and never the content.
 	for _, f := range all {
-		for verb, out := range map[string]string{
-			"%+v": fmt.Sprintf("%+v", f),
-			"%#v": fmt.Sprintf("%#v", f),
-		} {
-			discovertest.AssertNoLeak(t, verb+" of "+f.Server+"/"+f.RuleID, out, canaryHeader, canaryToken, canaryHost)
-		}
-		b, err := json.Marshal(f)
-		if err != nil {
-			t.Fatalf("json.Marshal(%s) error = %v", f.RuleID, err)
-		}
-		discovertest.AssertNoLeak(t, "JSON of "+f.Server+"/"+f.RuleID, string(b), canaryHeader, canaryToken, canaryHost)
+		rules.AssertFindingNoLeak(t, f, canaryHeader, canaryToken, canaryHost)
 	}
 }
 
@@ -265,9 +244,9 @@ func TestFixtureTyposquatConfig(t *testing.T) {
 		config = append(config, rules.CheckConfig(s)...)
 	}
 
-	assertFindings(t, "Typosquat.Check", squat, []got{
-		{"filesystem", rules.RuleTyposquat, "args", "", "@modelcontextprotocol/server-filesystem"},
-		{"mcp-server-fecth", rules.RuleTyposquat, "name", "", "mcp-server-fetch"},
+	assertFindings(t, "Typosquat.Check", squat, []findingKey{
+		{"filesystem", rules.RuleTyposquat, rules.FieldArgs, "", "@modelcontextprotocol/server-filesystem"},
+		{"mcp-server-fecth", rules.RuleTyposquat, rules.FieldName, "", "mcp-server-fetch"},
 	})
 	assertFindings(t, "CheckConfig", config, nil)
 }

@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"fmt"
 	"io"
+	"regexp"
 	"strings"
 	"unicode/utf8"
 
@@ -11,18 +12,20 @@ import (
 )
 
 const (
-	// minNameLen is the shortest name that the typosquat check compares. Very
-	// short names are always close to each other, so they give noise.
-	minNameLen = 5
+	// minTyposquatNameLen is the shortest name that the typosquat check
+	// compares. Very short names are always close to each other, so they
+	// give noise.
+	minTyposquatNameLen = 5
 
-	// maxNameLen caps the length of a compared name. Names come from untrusted
-	// configs, and the edit distance costs time and memory in proportion to
-	// the product of the two lengths. The cap keeps that cost bounded.
-	maxNameLen = 128
+	// maxTyposquatNameLen caps the length of a compared name. Names come from
+	// untrusted configs, and the edit distance costs time and memory in
+	// proportion to the product of the two lengths. The cap keeps that cost
+	// bounded.
+	maxTyposquatNameLen = 128
 
-	// shortNameLen is the longest "short" name. Short names allow one edit,
-	// longer names allow two.
-	shortNameLen = 8
+	// shortTyposquatNameLen is the longest "short" name. Short names allow
+	// one edit, longer names allow two.
+	shortTyposquatNameLen = 8
 
 	// sameScopeMaxDistance is the largest edit distance that still counts as
 	// close when a package and a popular package share an npm scope. See
@@ -68,8 +71,9 @@ type Typosquat struct {
 	ambiguous map[string]bool
 }
 
-// NewTyposquat returns a check for the given popular names. It copies and
-// lowercases the names, so the caller may change the slice afterwards.
+// NewTyposquat returns a check for the given popular names. It copies, trims
+// and lowercases the names, so it accepts raw input that did not come from
+// ParsePopular, and the caller may change the slice afterwards.
 func NewTyposquat(popular []string) *Typosquat {
 	t := &Typosquat{
 		popular:   make([]popularName, 0, len(popular)),
@@ -90,8 +94,8 @@ func NewTyposquat(popular []string) *Typosquat {
 	return t
 }
 
-// candidate is a name from a server that the check compares.
-type candidate struct {
+// typoCandidate is a name from a server that the check compares.
+type typoCandidate struct {
 	full      string
 	bare      string
 	field     string // the Finding.Field for this name
@@ -106,10 +110,10 @@ type candidate struct {
 // popular name, or else a copied bare name is scope squatting.
 func (t *Typosquat) Check(s discover.Server) []Finding {
 	name := strings.ToLower(s.Name)
-	candidates := []candidate{{full: name, bare: bareName(name), field: FieldName}}
+	candidates := []typoCandidate{{full: name, bare: bareName(name), field: FieldName}}
 	if spec, ok := ExtractPackage(s.Command, s.Args.Values()); ok {
-		pkg := strings.ToLower(spec.Name)
-		candidates = append(candidates, candidate{full: pkg, bare: bareName(pkg), field: FieldArgs, isPackage: true})
+		pkg := registryName(spec)
+		candidates = append(candidates, typoCandidate{full: pkg, bare: bareName(pkg), field: FieldArgs, isPackage: true})
 	}
 
 	var findings []Finding
@@ -123,7 +127,7 @@ func (t *Typosquat) Check(s discover.Server) []Finding {
 			Server:  s.Name,
 			Field:   c.field,
 			Related: related,
-			Message: "name is close to a popular MCP server",
+			Message: typosquatMessage,
 		})
 	}
 	return findings
@@ -149,7 +153,7 @@ func (t *Typosquat) Check(s discover.Server) []Finding {
 // gives a finding, as a mistake in the user's config (the name probably does
 // not exist, or it is a rare slip in the scope's own packages). A scope that
 // differs, even by one letter, gets the normal threshold.
-func (t *Typosquat) closest(c candidate) (string, bool) {
+func (t *Typosquat) closest(c typoCandidate) (string, bool) {
 	for _, p := range t.popular {
 		// An exact match is the legitimate server. This check also stops an
 		// exact name from being reported as close to a different popular name.
@@ -182,7 +186,9 @@ func (t *Typosquat) closest(c candidate) (string, bool) {
 			}
 		}
 		consider(c.full, p.full)
-		if c.full != c.bare || p.full != p.bare {
+		// A bare name that several popular names share, such as
+		// "mcp-server", proves nothing, as in scopeSquat.
+		if (c.full != c.bare || p.full != p.bare) && !t.ambiguous[p.bare] {
 			consider(c.bare, p.bare)
 		}
 	}
@@ -206,9 +212,9 @@ func (t *Typosquat) closest(c candidate) (string, bool) {
 //
 // Bare names that are too short or too long, or shared by several popular
 // names, never match.
-func (t *Typosquat) scopeSquat(c candidate) (string, bool) {
+func (t *Typosquat) scopeSquat(c typoCandidate) (string, bool) {
 	n := utf8.RuneCountInString(c.bare)
-	if n < minNameLen || n > maxNameLen || t.ambiguous[c.bare] {
+	if n < minTyposquatNameLen || n > maxTyposquatNameLen || t.ambiguous[c.bare] {
 		return "", false
 	}
 	scoped := strings.HasPrefix(c.full, "@")
@@ -228,20 +234,20 @@ func (t *Typosquat) scopeSquat(c candidate) (string, bool) {
 
 // closeDistance returns the edit distance of a and b and true when it is
 // between 1 and the threshold for these names. The threshold is 1 when the
-// shorter name has at most shortNameLen runes, else 2.
+// shorter name has at most shortTyposquatNameLen runes, else 2.
 func closeDistance(a, b string) (int, bool) {
 	la, lb := utf8.RuneCountInString(a), utf8.RuneCountInString(b)
-	if la < minNameLen || lb < minNameLen || la > maxNameLen || lb > maxNameLen {
+	if min(la, lb) < minTyposquatNameLen || max(la, lb) > maxTyposquatNameLen {
 		return 0, false
 	}
 	threshold := 2
-	if min(la, lb) <= shortNameLen {
+	if min(la, lb) <= shortTyposquatNameLen {
 		threshold = 1
 	}
 	if la-lb > threshold || lb-la > threshold {
 		return 0, false // cheap exit: the lengths alone rule it out
 	}
-	d := distance(a, b)
+	d := osaDistance(a, b)
 	return d, d >= 1 && d <= threshold
 }
 
@@ -268,21 +274,45 @@ func scopeOf(name string) string {
 // bareName removes a leading "@scope/" from an npm package name. Any other
 // name, such as a PyPI package or a docker image, is returned as it is.
 func bareName(name string) string {
-	if !strings.HasPrefix(name, "@") {
-		return name
-	}
-	if _, rest, found := strings.Cut(name, "/"); found {
-		return rest
-	}
-	return name
+	return strings.TrimPrefix(name, scopeOf(name))
 }
 
-// distance returns the optimal string alignment distance of a and b: the
+// pypiSeparators matches a run of the characters that PyPI treats as one.
+var pypiSeparators = regexp.MustCompile(`[-_.]+`)
+
+// dockerHubPrefixes are the ways to write the default Docker registry in
+// front of an image name.
+var dockerHubPrefixes = [...]string{"docker.io/", "index.docker.io/", "registry-1.docker.io/"}
+
+// registryName returns the package name of spec in the form that the
+// registry resolves and that the popular list uses: lower case; for PyPI,
+// every run of "-", "_" and "." written as "-" (PEP 503), so
+// "mcp_server_fetch" is "mcp-server-fetch"; for docker, without a Docker Hub
+// registry prefix or "library/", so "docker.io/mcp/fetch" is "mcp/fetch".
+func registryName(spec PackageSpec) string {
+	name := strings.ToLower(spec.Name)
+	switch spec.Runner {
+	case RunnerUVX, RunnerPipx:
+		return pypiSeparators.ReplaceAllString(name, "-")
+	case RunnerDocker:
+		for _, prefix := range dockerHubPrefixes {
+			if rest, found := strings.CutPrefix(name, prefix); found {
+				name = rest
+				break
+			}
+		}
+		return strings.TrimPrefix(name, "library/")
+	default:
+		return name
+	}
+}
+
+// osaDistance returns the optimal string alignment distance of a and b: the
 // fewest insertions, deletions, substitutions and swaps of two neighbouring
 // runes. It is the restricted form of Damerau-Levenshtein, because it never
 // edits the same part of the string twice. Callers cap the input length, so
 // the full matrix is cheap.
-func distance(a, b string) int {
+func osaDistance(a, b string) int {
 	ra, rb := []rune(a), []rune(b)
 	d := make([][]int, len(ra)+1)
 	for i := range d {

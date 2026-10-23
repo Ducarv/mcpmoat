@@ -52,9 +52,9 @@ func withHeader(s discover.Server, key, value string) discover.Server {
 	return s
 }
 
-// project turns findings into wants and checks the fields that every finding
+// wantsOf turns findings into wants and checks the fields that every finding
 // must have.
-func project(t *testing.T, findings []Finding) []wantFinding {
+func wantsOf(t *testing.T, findings []Finding) []wantFinding {
 	t.Helper()
 	var got []wantFinding
 	for _, f := range findings {
@@ -113,6 +113,10 @@ func TestCheckConfig(t *testing.T) {
 		{"127.0.0.1 lookalike fires", remoteServer(discover.TransportHTTP, "http://127.0.0.1.nip.io/"), insecure},
 		{"stdio with empty URL", stdioServer("node", "server.js"), nil},
 		{"stdio ignores URL", stdioWithURL, nil},
+		{"port reference fires", remoteServer(discover.TransportHTTP, "http://mcp.example.com:${PORT}/mcp"), insecure},
+		{"host reference fires", remoteServer(discover.TransportHTTP, "http://${HOST}:8080/mcp"), insecure},
+		{"env host reference fires", remoteServer(discover.TransportSSE, "http://${env:MCP_HOST}/sse"), insecure},
+		{"https with references is fine", remoteServer(discover.TransportHTTP, "https://${HOST}:${PORT}/mcp"), nil},
 		{"unparsable URL gives none", remoteServer(discover.TransportHTTP, "http://[::1"), nil},
 		{"empty remote URL gives none", remoteServer(discover.TransportHTTP, ""), nil},
 		{"disabled server is still checked", disabled, insecure},
@@ -125,6 +129,9 @@ func TestCheckConfig(t *testing.T) {
 		{"${env:VAR} reference", withEnv(stdioServer("node", "s.js"), "GITHUB_TOKEN", "${env:X}"), nil},
 		{"${VAR:-default} reference", withEnv(stdioServer("node", "s.js"), "GITHUB_TOKEN", "${X:-default}"), nil},
 		{"$VAR reference", withEnv(stdioServer("node", "s.js"), "GITHUB_TOKEN", "$X"), nil},
+		{"literal that starts with $", withEnv(stdioServer("node", "s.js"), "DB_PASSWORD", "$uperS3cretPw!"), secretEnv("DB_PASSWORD")},
+		{"locale with a token prefix", withEnv(stdioServer("node", "s.js"), "LANG", "sk_SK.UTF-8"), nil},
+		{"region with a token prefix", withEnv(stdioServer("node", "s.js"), "REGION", "pk_PK"), nil},
 		{"empty value", withEnv(stdioServer("node", "s.js"), "API_KEY", ""), nil},
 		{"secret name, literal of 12", withEnv(stdioServer("node", "s.js"), "API_KEY", "changeme123"), secretEnv("API_KEY")},
 		{"secret name, literal of 8", withEnv(stdioServer("node", "s.js"), "API_KEY", "abcdefgh"), secretEnv("API_KEY")},
@@ -171,6 +178,9 @@ func TestCheckConfig(t *testing.T) {
 		{"npx @latest", stdioServer("npx", "-y", "@scope/server@latest"), unpinned("@scope/server")},
 		{"npx no version", stdioServer("npx", "-y", "@scope/server"), unpinned("@scope/server")},
 		{"npx pinned", stdioServer("npx", "-y", "@scope/server@1.4.2"), nil},
+		{"npx any version *", stdioServer("npx", "-y", "@scope/server@*"), unpinned("")},
+		{"npx any version x", stdioServer("npx", "-y", "pkg-name@x"), unpinned("")},
+		{"docker tag x is a tag", stdioServer("docker", "run", "-i", "image:x"), nil},
 		{"uvx no version", stdioServer("uvx", "some-server"), unpinned("some-server")},
 		{"uvx pinned", stdioServer("uvx", "some-server==0.3.1"), nil},
 		{"docker no tag", stdioServer("docker", "run", "-i", "image"), unpinned("image")},
@@ -202,7 +212,7 @@ func TestCheckConfig(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			got := project(t, CheckConfig(tt.server))
+			got := wantsOf(t, CheckConfig(tt.server))
 			if !reflect.DeepEqual(got, tt.want) {
 				t.Errorf("CheckConfig() = %+v, want %+v", got, tt.want)
 			}
@@ -231,7 +241,7 @@ func TestCheckConfigOrder(t *testing.T) {
 			{RuleID: RulePlaintextSecret, Field: FieldHeaders, Key: "Authorization"},
 			{RuleID: RulePlaintextSecret, Field: FieldHeaders, Key: "X-Zed-Token"},
 		}
-		if got := project(t, CheckConfig(s)); !reflect.DeepEqual(got, want) {
+		if got := wantsOf(t, CheckConfig(s)); !reflect.DeepEqual(got, want) {
 			t.Errorf("CheckConfig() = %+v, want %+v", got, want)
 		}
 	})
@@ -243,7 +253,7 @@ func TestCheckConfigOrder(t *testing.T) {
 			{RuleID: RulePlaintextSecret, Field: FieldEnv, Key: "GITHUB_TOKEN"},
 			{RuleID: RuleUnpinnedPackage, Field: FieldArgs, Related: "@scope/server"},
 		}
-		if got := project(t, CheckConfig(s)); !reflect.DeepEqual(got, want) {
+		if got := wantsOf(t, CheckConfig(s)); !reflect.DeepEqual(got, want) {
 			t.Errorf("CheckConfig() = %+v, want %+v", got, want)
 		}
 	})
@@ -317,23 +327,30 @@ func TestCheckConfigNoLeak(t *testing.T) {
 			t.Parallel()
 			findings := CheckConfig(tt.server)
 			// The checks must really fire, or the leak asserts prove nothing.
-			if got := project(t, findings); !reflect.DeepEqual(got, tt.want) {
+			if got := wantsOf(t, findings); !reflect.DeepEqual(got, tt.want) {
 				t.Fatalf("CheckConfig() = %+v, want %+v", got, tt.want)
 			}
 			for _, f := range findings {
-				js, err := json.Marshal(f)
-				if err != nil {
-					t.Fatalf("json.Marshal(%s) error = %v", f.RuleID, err)
-				}
-				outputs := map[string]string{
-					"%+v":  fmt.Sprintf("%+v", f),
-					"%#v":  fmt.Sprintf("%#v", f),
-					"json": string(js),
-				}
-				for form, out := range outputs {
-					discovertest.AssertNoLeak(t, f.RuleID+" "+form, out, secrets...)
-				}
+				assertFindingNoLeak(t, f, secrets...)
 			}
 		})
+	}
+}
+
+// assertFindingNoLeak fails the test when f, in any common output form,
+// holds one of secrets.
+func assertFindingNoLeak(t *testing.T, f Finding, secrets ...string) {
+	t.Helper()
+	js, err := json.Marshal(f)
+	if err != nil {
+		t.Fatalf("json.Marshal(%s) error = %v", f.RuleID, err)
+	}
+	outputs := map[string]string{
+		"%+v":  fmt.Sprintf("%+v", f),
+		"%#v":  fmt.Sprintf("%#v", f),
+		"json": string(js),
+	}
+	for form, out := range outputs {
+		discovertest.AssertNoLeak(t, f.Server+"/"+f.RuleID+" "+form, out, secrets...)
 	}
 }
