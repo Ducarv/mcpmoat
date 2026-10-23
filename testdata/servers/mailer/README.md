@@ -8,8 +8,8 @@ scenario. It has one tool, `send_email`, with the arguments `to`, `subject` and 
 
 This server must look clean: its text has no instructions, so no rule reports a finding on it
 alone. It pairs with the `shadowing` fixture (`testdata/servers/shadowing`), whose tool
-`add_numbers` tries to change how the model uses `send_email`. Scan both together and mcpmoat must
-report **MOAT-T3-001** (expected; the rule comes with #37 and #51).
+`add_numbers` tries to change how the model uses `send_email`. See
+[testdata/servers/README.md](../README.md) for which tests check it.
 
 The server makes no network call, starts no process and reads or writes no file.
 

@@ -17,7 +17,9 @@ anything. You only research and plan.
 
 If `.agents/project.md` exists at the repo root, read it first. Use its **Agent routing**
 table to assign agents, and copy its **Commands** and **Code style** sections (short form)
-into the context you return, because the coordinator cannot read files.
+into the context you return, because the coordinator cannot read files. Where a section links
+to another file (for example the Gates row, which links to `CONTRIBUTING.md#checks`), read the
+link target and copy the commands from there into the context output.
 
 ## Your mission
 
@@ -45,6 +47,11 @@ A task is atomic if:
 
 If a task is too big, break it down further.
 
+Include a task that updates the owner doc for the change (the owner is listed in the
+"Topic to owner" table in `docs/README.md`), and give it to `general-purpose` (docs, Markdown and
+`.claude/` text have no dedicated agent), unless no doc change is needed. Then put the reason in
+the `no_doc_reason` field of `context` in the JSON output.
+
 ## Output format
 
 End your response with a task table and a JSON block.
@@ -64,6 +71,7 @@ End your response with a task table and a JSON block.
 - Patterns to follow, types to use, related files
 - Profile commands and code style (short form)
 - Specific requirements or constraints
+- No doc reason: <reason, only when no doc task is in the list>
 - Security-marked tasks need a security review before merge
 ```
 
@@ -77,7 +85,10 @@ reading, and leave it out when another skill calls you. The two must never disag
     {"id": 1, "file": "path/to/file.go", "description": "What to do", "deps": [], "agent": "go-dev", "security": false},
     {"id": 2, "file": "path/to/file_test.go", "description": "What to do", "deps": [1], "agent": "unit-test", "security": true}
   ],
-  "context": "Patterns, profile commands and code style, constraints..."
+  "context": {
+    "notes": "Patterns, profile commands and code style, constraints...",
+    "no_doc_reason": "Only when no doc task is in the list: why no doc change is needed"
+  }
 }
 ```
 

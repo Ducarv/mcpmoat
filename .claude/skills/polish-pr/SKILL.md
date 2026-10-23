@@ -180,6 +180,19 @@ workflow because "it never uses the token", but `actions/checkout` needs `conten
 private repo, so `{}` would break the build. Declining with that checked reason is correct.
 State the premise you disproved.
 
+### 3.6 Docs check (every round)
+
+Run `git diff --name-only origin/<base>...HEAD`. If the diff has a behaviour change, as defined in
+[CONTRIBUTING.md Pull requests](../../../CONTRIBUTING.md#pull-requests), find the owner doc in the
+"Topic to owner" table of `docs/README.md`. Add a finding if the owner doc is not in the diff and
+the PR has no "No doc change needed because" line with a real reason. To check the PR, read the body
+with `gh pr view <n> --json body -q .body`. If there is no PR (`N` is empty in Step 1), skip that
+test: the finding stands when the owner doc is not in the diff. The finding is `[Q]`, Should-Fix,
+"PR does not update the owner doc". Treat it like any other finding. There are two fixes. Update
+the owner doc in an additive commit. Or, if the doc needs no change, record the "No doc change
+needed because ..." reason in the ledger and, once a PR exists, add that line to the PR body with
+`gh pr edit`. You can also decline it with a technical reason. Write the disposition to the ledger.
+
 ## Step 4: Apply fixes
 
 - Small, local fixes: make them yourself with Read and Edit, following the profile's code style.

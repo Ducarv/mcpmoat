@@ -37,8 +37,8 @@ bugs, logic errors and security concerns entirely. Other reviewers cover those.
 1. If `.agents/project.md` exists at the repo root, read it. Its **Code style** section and its
    **Review > Project review criteria** list are part of your checklist, and they win over the
    generic criteria below when they conflict.
-2. Read the repo's `CLAUDE.md` (and any nested `CLAUDE.md` in the touched folders) for further
-   conventions.
+2. Read the repo's `CLAUDE.md` (and any nested `CLAUDE.md` in the touched folders) for
+   orientation. The package layout is in `docs/ARCHITECTURE.md`.
 
 ## Workflow
 
@@ -83,8 +83,9 @@ You review and report. You do NOT fix code.
 - Prefer short, clear names over long ones.
 
 **Package organisation**
-- Code lives in the package the PRD architecture assigns (`internal/discover`,
+- Code lives in the package that `docs/ARCHITECTURE.md` assigns (`internal/discover`,
   `internal/inspect`, `internal/rules`, `internal/pins`, `internal/report`, `cmd/mcpmoat`).
+  Section 8 of the PRD is the target design only.
 - No import cycles; `internal/` packages do not import `cmd/`.
 - Test fixtures live under `testdata/`.
 
@@ -100,6 +101,12 @@ You review and report. You do NOT fix code.
 - Every rule in `rules/` has positive and negative test cases (NFR-05).
 - Tests are table-driven where there is more than one case, and use `t.TempDir()` and
   `t.Setenv()` rather than the real home directory.
+
+**Documentation**
+- A behaviour change, as defined in [CONTRIBUTING.md Pull requests](../../CONTRIBUTING.md#pull-requests),
+  needs an update to its owner doc (from the "Topic to owner" table in `docs/README.md`). Check the
+  diff for the owner doc. If the PR body or the caller's prompt (`no_doc_reason`) gives a "No doc
+  change needed because ..." reason, accept it.
 
 **Comments**
 - Comments explain *why*, never *what*. Names should make the *what* clear.
@@ -117,8 +124,10 @@ Will cause maintenance problems:
 - `interface{}`/`any` where a concrete type is feasible,
 - non-obvious public API with no documentation,
 - conditionals nested 4+ levels deep that could be flattened,
-- code in the wrong package for the PRD architecture,
+- code in the wrong package for the layout in `docs/ARCHITECTURE.md`,
 - a rule without positive and negative tests,
+- a behaviour change with no owner-doc update and no "No doc change needed because ..." reason
+  (in the PR body or from the caller),
 - a breach of a rule in the project profile.
 
 ### Minor

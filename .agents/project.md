@@ -2,11 +2,15 @@
 
 The agents and skills in `.claude/` read this file. Its sections override their generic defaults.
 
+This file owns conventions, agent routing, release notes and review criteria. It links to
+[CONTRIBUTING.md](../CONTRIBUTING.md#checks) for the gates and to [docs/ARCHITECTURE.md](../docs/ARCHITECTURE.md) for the layout.
+
 ## Stack
 
 - Language: Go (version pinned in `go.mod`).
 - CLI: standard library `flag`. No cobra.
-- MCP: `github.com/modelcontextprotocol/go-sdk`, isolated behind an interface in `internal/inspect`.
+- MCP: `github.com/modelcontextprotocol/go-sdk`, isolated behind an interface in `internal/inspect` (NFR-06).
+- Package layout and data flow: [docs/ARCHITECTURE.md](../docs/ARCHITECTURE.md).
 - Rules: YAML files in `rules/`, embedded with `go:embed`.
 - No database, no frontend, no Node.js tooling.
 
@@ -14,17 +18,15 @@ The agents and skills in `.claude/` read this file. Its sections override their 
 
 | Purpose | Command |
 |---|---|
-| Format check | `gofmt -l .` (must print nothing) |
+| Gates (all checks CI runs) | run the block in [CONTRIBUTING.md](../CONTRIBUTING.md#checks) |
 | Format fix | `gofmt -w .` (or `golangci-lint fmt`) |
-| Module check | `go mod tidy && git diff --exit-code -- go.mod go.sum` |
 | Typecheck | `go build ./... && go vet ./...` |
-| Lint | `golangci-lint run ./...` (v2 config in `.golangci.yml`) |
-| Vulnerabilities | `govulncheck ./...` |
-| Tests (all) | `go test -race -shuffle=on ./...` |
 | Tests (scoped) | `go test -race ./internal/<pkg>/ -run '<TestName>' -v` |
 | E2E scenario | `go test ./cmd/mcpmoat/ -run 'TestE2E<Name>' -v` |
 | Update golden files | `go test ./<pkg>/ -update` (review the diff afterwards) |
 | Fuzz a parser | `go test -fuzz=FuzzX -fuzztime=30s ./<pkg>/` |
+
+Where a row links to another file, read the link and use its commands.
 
 ## Code style
 
@@ -34,11 +36,17 @@ The agents and skills in `.claude/` read this file. Its sections override their 
 - Small interfaces defined by the consumer; no global mutable state.
 - Table-driven tests; `t.Parallel()` where safe (never with `t.Setenv`); `t.TempDir()`,
   `t.Context()`; fixtures under `testdata/`; no `time.Sleep` for synchronisation.
+- Tests never touch the real `$HOME` or real client configs. Use `t.TempDir()` and `t.Setenv()`.
 - `os.Exit` only in `main`; stdout for data, stderr for logs and warnings.
 - `//nolint` only with the linter name and a reason.
 - Never print, log or store secret values from client configs. Print keys only.
 - No telemetry. No network calls except configured servers and, behind `--llm`, the LLM provider.
 - Minimal, pinned dependencies. Ask before adding one.
+- stdio servers run with exactly the configured command and a scrubbed environment (NFR-04).
+- Exit codes: 0 no findings, 1 findings at or above `--fail-on`, 2 execution error (FR-16).
+- Every rule is one YAML file plus tests with `should_match` and `should_not_match` cases (NFR-05).
+- The repo owner is learning Go. Prefer clear, idiomatic standard-library code over clever code.
+  Explain non-obvious Go idioms in PR descriptions.
 
 ## Agent routing
 
@@ -53,6 +61,7 @@ The agents and skills in `.claude/` read this file. Its sections override their 
 | Root-cause diagnosis | `debugger` |
 | Final compile and vet check | `typecheck` |
 | Security-flagged tasks after the dev agent | `review-security` |
+| Docs: `*.md`, `docs/`, `.github/` templates, `.claude/` agent and skill text | `general-purpose` (no dedicated docs agent; follow the owner docs in [docs/README.md](../docs/README.md)) |
 
 ## Git and pull requests
 
@@ -63,6 +72,7 @@ The agents and skills in `.claude/` read this file. Its sections override their 
 - Issue link: `Closes #<n>`.
 - PR template: `.github/pull_request_template.md`. Add a `## Release Notes` section after it.
 - CI trigger: none (CI runs on every pull request).
+- Every PR updates the docs: see [CONTRIBUTING.md](../CONTRIBUTING.md#pull-requests).
 
 ## Release notes
 
@@ -76,10 +86,12 @@ The agents and skills in `.claude/` read this file. Its sections override their 
   `workflows`.
 - Path tokens to ignore: none.
 - Project review criteria:
-  - Every rule has `should_match` and `should_not_match` cases (NFR-05).
-  - stdio servers run with a scrubbed environment and the exact configured command (NFR-04).
-  - Exit-code contract: 0 / 1 / 2 (FR-16).
-  - Code sits in the package the PRD architecture assigns (`docs/PRD.md`, section 8).
+  - Code follows the Code style rules on rule tests (NFR-05), the scrubbed stdio environment
+    (NFR-04) and the exit-code contract (FR-16).
+  - Code sits in the package that [docs/ARCHITECTURE.md](../docs/ARCHITECTURE.md) assigns. PRD
+    section 8 (`docs/PRD.md`) is the target design.
+  - The PR updates the owner doc (see [docs/README.md](../docs/README.md)) or states why not
+    ([CONTRIBUTING.md](../CONTRIBUTING.md#pull-requests)).
 
 ## Local review loop
 

@@ -28,9 +28,8 @@ mcpmoat version              # print the version, commit and build date
 
 ## Ignore findings
 
-The rules are not in mcpmoat yet (milestone M4). Until then, `scan` reads the ignore list and
-reports problems in it, but there are no findings to ignore. Ignored findings, the ignored count in
-the summary and the effect on the exit code arrive with the rules.
+mcpmoat has built-in rules, and `scan` loads and checks them. `scan` does not apply them to
+server data yet, so it has no findings to ignore. It reads the ignore list and reports problems in it.
 
 `--ignore <rule-id>` ignores all findings of one rule. You can use the flag more than one time.
 
@@ -67,16 +66,11 @@ trust a clean result.
 ## Build from source
 
 ```sh
-go build -ldflags "-X main.version=1.2.3" -o mcpmoat ./cmd/mcpmoat
+go build -o mcpmoat ./cmd/mcpmoat
 ./mcpmoat version
 ```
 
-Without `-ldflags`, mcpmoat reads the version, commit and date that Go stores in the binary. A plain
-`go build` in a git checkout prints a pseudo-version such as `v0.0.0-20261017181905-4091e6ff2614+dirty`.
-A build with `go install github.com/Ducarv/mcpmoat/cmd/mcpmoat@<version>` prints that module version.
-The version is `dev` only when Go has no data to store, for example with `-buildvcs=false` or outside a
-git checkout. The other ldflags variables are `main.commit` and `main.date`. The output looks like this:
-`mcpmoat 1.2.3 (commit abc123, built 2026-01-01T00:00:00Z)`.
+[CONTRIBUTING.md](CONTRIBUTING.md#build-the-binary) explains how to set the version.
 
 ## What this does not do
 
@@ -85,19 +79,18 @@ git checkout. The other ldflags variables are `main.commit` and `main.date`. The
 - It does not analyse server source code, so it does not find malware inside a server.
 - It does not protect against prompt injection that arrives in content the agent reads (for example
   a GitHub issue). That is planned for a later phase.
-- When connecting is implemented, `mcpmoat scan` will by default start each configured stdio
-  server to read its tools, with the same command your client already runs. Connecting to servers
-  is not implemented yet (issue #25). Until then, `scan` needs `--no-connect`. When mcpmoat starts
-  a server, it uses no shell. The server gets only the env from its config plus a small allowlist of
-  safe variables, such as `PATH` and `HOME`. This env scrub is not a sandbox: the server runs as
-  you and can read your files and use the network.
+- `mcpmoat scan` cannot connect to servers yet. Until then, `scan` needs `--no-connect`. Without
+  it, `scan` prints an error and exits with code 2. When connecting is wired in, `mcpmoat scan`
+  will by default start each configured stdio server, with the same command your client already
+  runs. mcpmoat will use no shell. The server will get only the env from its config plus a small
+  allowlist of safe variables, such as `PATH` and `HOME`. This env scrub is not a sandbox: the
+  server runs as you and can read your files and use the network.
 
 ## Documentation
 
-- [Product Requirements Document](docs/PRD.md): vision, threat model, requirements, roadmap.
-- [How mcpmoat starts stdio servers](docs/stdio-servers.md): no shell, small env, work directory.
-- [Contributing](CONTRIBUTING.md): how to add a detection rule.
-- [Security policy](SECURITY.md): how to report a vulnerability in mcpmoat.
+- [docs/README.md](docs/README.md): the index of all docs and which file owns each topic.
+- [CONTRIBUTING.md](CONTRIBUTING.md): how to add a rule, build the binary and open a PR.
+- [SECURITY.md](SECURITY.md): how to report a vulnerability in mcpmoat.
 
 ## Credits
 

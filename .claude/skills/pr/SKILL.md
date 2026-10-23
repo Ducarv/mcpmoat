@@ -54,6 +54,7 @@ git diff origin/<base>...HEAD --stat
 git log origin/<base>..HEAD --pretty=format:"%s%n%b"
 git diff origin/<base>...HEAD
 cat .github/pull_request_template.md .github/PULL_REQUEST_TEMPLATE.md 2>/dev/null || true
+git diff --name-only --diff-filter=AMR origin/<base>...HEAD | grep -v '^testdata/' | grep -E '\.md$|^docs/|^\.github/ISSUE_TEMPLATE/' || true   # changed doc files
 ```
 
 If a PR template exists, keep its structure and fill it in. Otherwise use the format below.
@@ -66,6 +67,28 @@ If a PR template exists, keep its structure and fill it in. Otherwise use the fo
 cases to check. Tick only what you actually ran.
 
 **Release Notes**: what changed, written for a non-technical reader.
+
+**Docs**: put the changed doc files from step 3 in the template `## Docs` section, one path per
+line. A behaviour change is defined in
+[CONTRIBUTING.md Pull requests](../../../CONTRIBUTING.md#pull-requests). The owner doc is the one
+in the "Topic to owner" table of `docs/README.md`.
+
+- In the template `## Checklist`, tick `Docs updated (list the files)` only when the list has at
+  least one file, and the last point below does not apply.
+- Tick `No doc change needed because: ...` only with a real reason. Take it from the first source
+  that has one: (a) the reason the caller passed in (for example from the research step of
+  `issue2pr`), (b) the user, (c) the issue. Write the reason on the line, and write `none` in
+  `## Docs`.
+- If the diff clearly has no behaviour change (for example a refactor or tests only), check the
+  diff, then write `No doc change needed because: no behaviour change (<one line from the diff>)`
+  and tick that box. Do this only when you are sure. If you are unsure, follow the next point.
+- If the diff has a behaviour change, the owner doc is not in the list, and no source gives a
+  reason, do not tick either box:
+  - Interactive run: **stop and ask** the user to update the owner doc, or to give the reason.
+    Do not create the PR until they answer.
+  - Non-interactive or `--auto` run (the caller says so, or no user can answer): do not wait and
+    do not create the PR. Return a short failure message that names the missing owner doc, and let
+    the caller fix it.
 
 If the work closes an issue, add the issue link line from the profile (default `Closes #<n>`).
 
@@ -113,6 +136,14 @@ gh pr create --base <base> --title "<title>" --body "$(cat <<'EOF'
 
 ## Testing
 - [ ] <step>
+
+## Checklist
+<!-- Tick one. -->
+- [ ] Docs updated (list the files)
+- [ ] No doc change needed because: <reason>
+
+## Docs
+- <doc file or "none">
 
 ## Release Notes
 <note>

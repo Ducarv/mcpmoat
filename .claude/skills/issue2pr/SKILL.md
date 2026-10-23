@@ -129,7 +129,11 @@ Write down:
 ### Step 3: Research
 
 Spawn the `research` agent with the issue title and body, referenced files, acceptance
-criteria, and the profile path. It returns a task list with dependencies.
+criteria, and the profile path. It returns a task list with dependencies. Tell it to include a task
+that updates the owner doc for the change. Find the owner in the "Topic to owner" table in
+`docs/README.md`. If no doc needs to change, there is no doc task. The reason goes in the
+`no_doc_reason` field of the research output context. Step 10 reuses it as the
+"No doc change needed because" line in the PR.
 
 ### Step 4: Clarify (interactive only)
 
@@ -160,10 +164,9 @@ sub-agents.
 
 ### Step 8: Verify
 
-Run the profile's commands, scoped to what changed:
-1. format and lint (`gofmt -l .`, `golangci-lint run ./...`),
-2. typecheck (`go build ./... && go vet ./...`, and `go mod tidy` leaves `go.mod`/`go.sum` unchanged),
-3. tests for the touched packages with `-race`, plus the `TestE2E*` tests in `cmd/mcpmoat` if the CLI changed.
+Run the Gates block in [CONTRIBUTING.md Checks](../../../CONTRIBUTING.md#checks), scoped to what
+changed. For example, run the tests only for the touched packages, plus the `TestE2E*` tests in
+`cmd/mcpmoat` if the CLI changed.
 
 Do not swallow exit codes or truncate failing output. If a check fails:
 1. spawn `debugger` with the error output,
@@ -173,7 +176,8 @@ Do not swallow exit codes or truncate failing output. If a check fails:
 
 ### Step 9: Self-review
 
-Invoke the `review-pr` skill on the current branch.
+Invoke the `review-pr` skill on the current branch. If Step 3 gave a `no_doc_reason`, put it in
+the prompt and add: "Treat this as the 'No doc change needed because' reason for the docs check."
 
 - **Critical / Should-fix**: fix them, then go back to Step 8. A security finding at either
   severity is always in this group.
@@ -185,10 +189,35 @@ body. Run at most 2 review cycles.
 
 ### Step 10: Commit and open the PR
 
-Invoke the `commit` skill to create a well-formed commit, then the `pr` skill to open the pull
-request. Make sure the PR:
-- links the issue (profile pattern, default `Closes #<n>`),
-- has a Summary, Testing and Release Notes section.
+The rule for docs is in [CONTRIBUTING.md Pull requests](../../../CONTRIBUTING.md#pull-requests).
+
+1. **Docs check on the diff.** Do this before you call `commit` or `pr`. The work is not
+   committed yet, and a new doc is an untracked file. So take the diff from `git status --short`
+   together with `git diff origin/<base>`. If the diff has a behaviour change (as that rule
+   defines it) and the owner doc from the "Topic to owner" table in `docs/README.md` is not in
+   the diff:
+   - If Step 3 gave a `no_doc_reason`, keep it for the `pr` skill. It is a real reason only if
+     the diff has no behaviour change as defined in
+     [CONTRIBUTING.md Pull requests](../../../CONTRIBUTING.md#pull-requests), or the user gave it.
+   - Otherwise add the owner-doc change as a task and run it once through `coordinate`. Then run
+     the Step 8 checks for the changed files and continue.
+
+   Do this at most once. It does not start another Step 9 review cycle. If the doc task fails,
+   or the `pr` skill refuses (it returns a failure message in a non-interactive run), do not
+   retry. With `--auto`, stop and report the failure and the missing owner doc. Without
+   `--auto`, ask the user.
+2. **Commit and open the PR.** Invoke the `commit` skill to create a well-formed commit, then
+   the `pr` skill to open the pull request. Give `pr` the `no_doc_reason` (if any) and say
+   whether the run is `--auto`, so it does not wait for a person in `--auto` mode. Make sure the
+   PR:
+   - links the issue (profile pattern, default `Closes #<n>`),
+   - has a Summary, Testing and Release Notes section,
+   - lists the changed doc files in `## Docs`, or has a "No doc change needed because" line with a
+     real reason.
+3. **Check the PR body.** Do this only if `pr` returned a PR URL. Read the body with `gh pr view <url> --json body -q .body`.
+   It must list the changed doc files under `## Docs`, or have a "No doc change needed because"
+   line with a real reason. If it has neither, fix the body with `gh pr edit` (do not open a new
+   PR) and say so in your report.
 
 Report the PR URL.
 

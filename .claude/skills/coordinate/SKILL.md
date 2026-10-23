@@ -17,7 +17,9 @@ coordinator's context.
 
 You cannot read files, so ask the `research` agent to read `.agents/project.md`, if it exists,
 and include its **Commands**, **Code style** and **Agent routing** sections in its context
-output. Pass the relevant parts to every agent you spawn.
+output. Ask `research` to also follow the links in those sections (for example the Gates row that
+links to `CONTRIBUTING.md#checks`) and to include the linked commands in its context output.
+Pass the relevant parts to every agent you spawn.
 
 ## Tool notes
 
