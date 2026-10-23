@@ -1,32 +1,25 @@
 package rules
 
 import (
-	"errors"
 	"reflect"
+	"regexp"
 	"strings"
 	"testing"
 )
 
-// fakeMatcher is a Matcher with a fixed answer for each text. A text in errs
-// returns that error; a text in hits matches; any other text does not match.
-type fakeMatcher struct {
-	hits  map[string]bool
-	errs  map[string]error
-	calls []string
-}
-
-func (f *fakeMatcher) Match(text string) (bool, error) {
-	f.calls = append(f.calls, text)
-	if err, ok := f.errs[text]; ok {
-		return false, err
+// textMatcher returns a Matcher that matches each of texts exactly and no
+// other text.
+func textMatcher(t *testing.T, texts ...string) *Matcher {
+	t.Helper()
+	if len(texts) == 0 {
+		return mustCompileMatch(t, Match{AnyRegex: []string{`[^\s\S]`}})
 	}
-	return f.hits[text], nil
+	patterns := make([]string, len(texts))
+	for i, text := range texts {
+		patterns[i] = `\A` + regexp.QuoteMeta(text) + `\z`
+	}
+	return mustCompileMatch(t, Match{AnyRegex: patterns})
 }
-
-// funcMatcher turns a function into a Matcher, for fake compilers.
-type funcMatcher func(string) (bool, error)
-
-func (f funcMatcher) Match(text string) (bool, error) { return f(text) }
 
 // documentedRule returns a rule that meets every CheckDocumented requirement.
 func documentedRule() Rule {
@@ -219,15 +212,9 @@ func TestCheckDocumentedEscapesUntrustedText(t *testing.T) {
 func TestRunCasesAllPass(t *testing.T) {
 	t.Parallel()
 	r := documentedRule()
-	m := &fakeMatcher{hits: map[string]bool{
-		r.ShouldMatch[0].Text: true,
-		r.ShouldMatch[1].Text: true,
-	}}
+	m := textMatcher(t, r.ShouldMatch[0].Text, r.ShouldMatch[1].Text)
 	if got := RunCases(r, m); got != nil {
 		t.Errorf("RunCases() = %v, want nil", got)
-	}
-	if len(m.calls) != 3 {
-		t.Errorf("matcher called %d times, want 3: %q", len(m.calls), m.calls)
 	}
 }
 
@@ -236,26 +223,21 @@ func TestRunCasesNilMatcherAndNoCases(t *testing.T) {
 	if got := RunCases(documentedRule(), nil); got != nil {
 		t.Errorf("RunCases(nil matcher) = %v, want nil", got)
 	}
-	m := &fakeMatcher{}
-	if got := RunCases(Rule{ID: "MOAT-T1-001"}, m); got != nil {
+	if got := RunCases(Rule{ID: "MOAT-T1-001"}, textMatcher(t)); got != nil {
 		t.Errorf("RunCases(no cases) = %v, want nil", got)
-	}
-	if len(m.calls) != 0 {
-		t.Errorf("matcher called for a rule with no cases: %q", m.calls)
 	}
 }
 
 func TestRunCasesShouldMatchMiss(t *testing.T) {
 	t.Parallel()
 	r := documentedRule()
-	m := &fakeMatcher{hits: map[string]bool{r.ShouldMatch[0].Text: true}}
-	got := RunCases(r, m)
+	got := RunCases(r, textMatcher(t, r.ShouldMatch[0].Text))
 	if len(got) != 1 {
 		t.Fatalf("RunCases() = %v, want 1 failure", got)
 	}
 	f := got[0]
 	if f.Kind != KindShouldMatch || f.Index != 1 || f.Text != r.ShouldMatch[1].Text ||
-		f.RuleID != "MOAT-T1-003" || f.Target != TargetDescription || f.Err != nil {
+		f.RuleID != "MOAT-T1-003" || f.Target != TargetDescription {
 		t.Errorf("failure = %+v", f)
 	}
 	s := f.String()
@@ -275,11 +257,7 @@ func TestRunCasesShouldMatchMiss(t *testing.T) {
 func TestRunCasesShouldNotMatchHit(t *testing.T) {
 	t.Parallel()
 	r := documentedRule()
-	m := &fakeMatcher{hits: map[string]bool{
-		r.ShouldMatch[0].Text:    true,
-		r.ShouldMatch[1].Text:    true,
-		r.ShouldNotMatch[0].Text: true,
-	}}
+	m := textMatcher(t, r.ShouldMatch[0].Text, r.ShouldMatch[1].Text, r.ShouldNotMatch[0].Text)
 	got := RunCases(r, m)
 	if len(got) != 1 {
 		t.Fatalf("RunCases() = %v, want 1 failure", got)
@@ -307,8 +285,7 @@ func TestRunCasesOrder(t *testing.T) {
 		},
 	}
 	// m1 is a hit; n0 and n2 are hits. So m0, m2, n0 and n2 fail.
-	m := &fakeMatcher{hits: map[string]bool{"m1": true, "n0": true, "n2": true}}
-	got := RunCases(r, m)
+	got := RunCases(r, textMatcher(t, "m1", "n0", "n2"))
 	type key struct {
 		kind CaseKind
 		idx  int
@@ -325,70 +302,19 @@ func TestRunCasesOrder(t *testing.T) {
 			t.Errorf("failure %d target = %q, want schema", i, f.Target)
 		}
 	}
-	// Cases run should_match first, then should_not_match, each in index order.
-	wantCalls := []string{"m0", "m1", "m2", "n0", "n1", "n2"}
-	if !reflect.DeepEqual(m.calls, wantCalls) {
-		t.Errorf("matcher calls = %q, want %q", m.calls, wantCalls)
-	}
-}
-
-func TestRunCasesMatcherError(t *testing.T) {
-	t.Parallel()
-	sentinel := errors.New("boom")
-	r := Rule{
-		ID:             "MOAT-T3-002",
-		Target:         TargetConfig,
-		ShouldMatch:    []Case{{Text: "bad input"}, {Text: "good"}},
-		ShouldNotMatch: []Case{{Text: "also bad"}, {Text: "clean"}},
-	}
-	m := &fakeMatcher{
-		hits: map[string]bool{"good": true},
-		errs: map[string]error{"bad input": sentinel, "also bad": sentinel},
-	}
-	got := RunCases(r, m)
-	// Both errors are failures; "good" and "clean" pass, so nothing else fails.
-	if len(got) != 2 {
-		t.Fatalf("RunCases() = %v, want 2 failures", got)
-	}
-	if len(m.calls) != 4 {
-		t.Errorf("matcher calls = %q, want all 4 cases to run after an error", m.calls)
-	}
-	for i, f := range got {
-		if f.Err == nil {
-			t.Fatalf("failure %d: Err = nil", i)
-		}
-		if !errors.Is(f, sentinel) {
-			t.Errorf("failure %d: errors.Is(f, sentinel) = false", i)
-		}
-		var asFailure CaseFailure
-		if !errors.As(error(f), &asFailure) || asFailure.Index != f.Index {
-			t.Errorf("failure %d: errors.As to CaseFailure failed", i)
-		}
-		if !strings.Contains(f.String(), "matcher error: ") || !strings.Contains(f.String(), "boom") {
-			t.Errorf("failure %d: String() = %q", i, f.String())
-		}
-		if strings.Contains(f.String(), "expected") {
-			t.Errorf("failure %d: String() = %q, must not give a match verdict", i, f.String())
-		}
-	}
-	if got[0].Kind != KindShouldMatch || got[1].Kind != KindShouldNotMatch {
-		t.Errorf("kinds = %s, %s", got[0].Kind, got[1].Kind)
-	}
 }
 
 func TestRunCasesEscapesUntrustedText(t *testing.T) {
 	t.Parallel()
 	nasty := "\x1b[31mRED\n\x00end"
-	sentinel := errors.New("fail " + nasty)
 	r := Rule{
 		ID:             nasty,
 		Target:         Target(nasty),
 		ShouldMatch:    []Case{{Text: nasty}},
 		ShouldNotMatch: []Case{{Text: nasty + "2"}},
 	}
-	// The should_match text returns an error; the should_not_match text hits.
-	m := &fakeMatcher{hits: map[string]bool{nasty + "2": true}, errs: map[string]error{nasty: sentinel}}
-	got := RunCases(r, m)
+	// The should_match text misses; the should_not_match text hits.
+	got := RunCases(r, mustCompileMatch(t, Match{AnyRegex: []string{`2\z`}}))
 	if len(got) != 2 {
 		t.Fatalf("RunCases() = %v, want 2 failures", got)
 	}
@@ -400,9 +326,9 @@ func TestRunCasesEscapesUntrustedText(t *testing.T) {
 			t.Errorf("String() holds a raw ESC: %q", s)
 		}
 	}
-	// The error text itself is escaped too.
+	// The case text itself is escaped too.
 	if !strings.Contains(got[0].String(), `\x1b[31mRED\n\x00end`) {
-		t.Errorf("String() = %q, want the escaped error text", got[0].String())
+		t.Errorf("String() = %q, want the escaped case text", got[0].String())
 	}
 }
 
@@ -419,22 +345,5 @@ func TestCaseFailureLongTextIsCut(t *testing.T) {
 	}
 	if len(s) >= len(long) {
 		t.Errorf("String() has %d bytes, want fewer than the %d of the input", len(s), len(long))
-	}
-
-	// A long matcher error is cut too.
-	f = CaseFailure{RuleID: "MOAT-T1-001", Kind: KindShouldMatch, Text: "x", Err: errors.New(long)}
-	if strings.Contains(f.String(), strings.Repeat("a", 201)) {
-		t.Errorf("String() holds more than 200 runes of the matcher error")
-	}
-}
-
-func TestCaseFailureUnwrapNil(t *testing.T) {
-	t.Parallel()
-	f := CaseFailure{RuleID: "MOAT-T1-001", Kind: KindShouldNotMatch, Text: "x"}
-	if f.Unwrap() != nil {
-		t.Errorf("Unwrap() = %v, want nil", f.Unwrap())
-	}
-	if !strings.Contains(f.String(), "expected no match, got a match") {
-		t.Errorf("String() = %q", f.String())
 	}
 }

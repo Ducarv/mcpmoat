@@ -7,12 +7,9 @@ import (
 )
 
 // builtinCompiler returns the Compiler that runs the cases of the built-in
-// rules. It is nil while the matchers do not exist.
-//
-// Issue #35 provides rules.Compile. Return it here, and TestBuiltinRulesCases
-// runs instead of skipping.
+// rules.
 func builtinCompiler() Compiler {
-	return nil
+	return func(m Match, _ Target) (*Matcher, error) { return m.Compile() }
 }
 
 // documentedProblems runs CheckDocumented on each rule and returns all the
@@ -134,41 +131,19 @@ func TestDocumentedProblemsCatchesMissingParts(t *testing.T) {
 func TestBuiltinRulesCases(t *testing.T) {
 	t.Parallel()
 	c := builtinCompiler()
-	if c == nil {
-		t.Skip("matchers are not implemented yet: issue #35")
-	}
 	// WithCompiler also checks that the Match section of every rule compiles.
 	rs := mustBuiltin(t, WithCompiler(c))
 	runBuiltinCases(t, rs, c)
 }
 
-// builtinShouldMatchTexts returns a fake matcher that matches the should_match
-// texts of rs and no other text.
-func builtinShouldMatchTexts(rs []Rule) *fakeMatcher {
-	m := &fakeMatcher{hits: map[string]bool{}}
-	for _, r := range rs {
-		for _, c := range r.ShouldMatch {
-			m.hits[c.Text] = true
-		}
-	}
-	return m
+// fixedCompiler returns a Compiler that ignores the rule and compiles m.
+func fixedCompiler(t *testing.T, m Match) Compiler {
+	matcher := mustCompileMatch(t, m)
+	return func(Match, Target) (*Matcher, error) { return matcher, nil }
 }
 
-func TestRunBuiltinCasesWithFakeMatcher(t *testing.T) {
+func TestRunBuiltinCasesWithWrongMatcher(t *testing.T) {
 	t.Parallel()
-	good := func(rs []Rule) Compiler {
-		m := builtinShouldMatchTexts(rs)
-		return func(Match, Target) (Matcher, error) { return m, nil }
-	}
-
-	t.Run("right fake gives no failure", func(t *testing.T) {
-		t.Parallel()
-		// Builtin(WithCompiler) runs the fake once per rule, as #35 will.
-		rs := mustBuiltin(t)
-		rs = mustBuiltin(t, WithCompiler(good(rs)))
-		runBuiltinCases(t, rs, good(rs))
-	})
-
 	rs := mustBuiltin(t)
 	if len(rs) == 0 {
 		t.Fatal("Builtin() returned no rules")
@@ -182,26 +157,17 @@ func TestRunBuiltinCasesWithFakeMatcher(t *testing.T) {
 	}{
 		{
 			name: "matches nothing",
-			c:    func(Match, Target) (Matcher, error) { return &fakeMatcher{}, nil },
+			c:    fixedCompiler(t, Match{AnyRegex: []string{`[^\s\S]`}}),
 			want: []string{rs[0].ID, string(KindShouldMatch), sm.Text},
 		},
 		{
 			name: "matches everything",
-			c: func(Match, Target) (Matcher, error) {
-				return funcMatcher(func(string) (bool, error) { return true, nil }), nil
-			},
+			c:    fixedCompiler(t, Match{AnyRegex: []string{`(?s).`}}),
 			want: []string{rs[0].ID, string(KindShouldNotMatch), snm.Text},
 		},
 		{
-			name: "matcher error",
-			c: func(Match, Target) (Matcher, error) {
-				return funcMatcher(func(string) (bool, error) { return false, errors.New("boom") }), nil
-			},
-			want: []string{rs[0].ID, "boom"},
-		},
-		{
 			name: "compile error",
-			c:    func(Match, Target) (Matcher, error) { return nil, errors.New("bad pattern") },
+			c:    func(Match, Target) (*Matcher, error) { return nil, errors.New("bad pattern") },
 			want: []string{rs[0].ID, "bad pattern"},
 		},
 	}
@@ -210,7 +176,7 @@ func TestRunBuiltinCasesWithFakeMatcher(t *testing.T) {
 			t.Parallel()
 			failures := builtinCaseFailures(rs, tt.c)
 			if len(failures) == 0 {
-				t.Fatal("a wrong fake matcher gave no failure")
+				t.Fatal("a wrong matcher gave no failure")
 			}
 			// One failure line must hold all the wanted parts.
 			for _, f := range failures {

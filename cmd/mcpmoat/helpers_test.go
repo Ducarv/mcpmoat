@@ -129,10 +129,10 @@ func assertContainsAll(t *testing.T, what, got string, wants []string) {
 // notice noRulesNotice has the same prefix and is not a warning either.
 func assertScanErrorLines(t *testing.T, stderr string) {
 	t.Helper()
-	const prefix = "mcpmoat scan: "
+	assertScanPrefix(t, stderr)
 	for _, line := range nonEmptyLines(stderr) {
-		if !strings.HasPrefix(line, prefix) || strings.Contains(line, "warning:") {
-			t.Errorf("stderr line %q must start with %q and not be a warning", line, prefix)
+		if strings.HasPrefix(line, scanWarnPrefix) {
+			t.Errorf("stderr line %q is a warning, want an error", line)
 		}
 	}
 }
@@ -201,6 +201,17 @@ func assertNoRulesNotice(t *testing.T, stderr string) {
 	}
 }
 
+// assertNoticeForCode fails the test unless stderr is exactly noRulesNotice
+// for exit code 0, and holds no notice for another exit code.
+func assertNoticeForCode(t *testing.T, code int, stderr string) {
+	t.Helper()
+	if code == exitOK {
+		assertNoRulesNotice(t, stderr)
+	} else if strings.Contains(stderr, noRulesNotice) {
+		t.Errorf("stderr holds the notice %q, but the scan failed\nstderr:\n%s", noRulesNotice, stderr)
+	}
+}
+
 // scanWant is the expected result of one scan run, for assertScanResult.
 type scanWant struct {
 	code     int
@@ -223,17 +234,9 @@ func assertScanResult(t *testing.T, code int, stdout, stderr string, want scanWa
 		t.Errorf("exit code = %d, want %d\nstdout:\n%s\nstderr:\n%s", code, want.code, stdout, stderr)
 	}
 	assertContainsAll(t, "stdout", stdout, want.stdout)
-	for _, bad := range want.noStdout {
-		if strings.Contains(stdout, bad) {
-			t.Errorf("stdout contains %q\nstdout:\n%s", bad, stdout)
-		}
-	}
+	assertContainsNone(t, "stdout", stdout, want.noStdout)
 	assertContainsAll(t, "stderr", stderr, want.stderr)
-	if want.code == exitOK {
-		assertNoRulesNotice(t, stderr)
-	} else if strings.Contains(stderr, noRulesNotice) {
-		t.Errorf("stderr holds the notice %q, but the scan failed\nstderr:\n%s", noRulesNotice, stderr)
-	}
+	assertNoticeForCode(t, want.code, stderr)
 	assertScanErrorLines(t, stderr)
 	assertNoLeakBoth(t, stdout, stderr)
 	assertNoEscape(t, stdout, stderr)
@@ -372,6 +375,93 @@ func symlink(t *testing.T, target, link string) {
 		t.Fatalf("symlink: %v", err)
 	}
 }
+
+// okServer is a server map with one valid server, ok-srv, for writeServers.
+// It is only read, so the parallel tests can share it.
+var okServer = map[string]any{"ok-srv": map[string]any{"command": "npx"}}
+
+// runScanArgs runs "mcpmoat <args>" on c and returns the exit code, stdout and
+// stderr.
+func runScanArgs(c *cli, stdout, stderr *bytes.Buffer, args ...string) (int, string, string) {
+	code := c.dispatch(args)
+	return code, stdout.String(), stderr.String()
+}
+
+// lineWant is the expected text of one stderr line: the exact line, or only
+// its start when prefix is true.
+type lineWant struct {
+	text   string
+	prefix bool
+}
+
+// exactLine wants a line that is exactly s.
+func exactLine(s string) lineWant { return lineWant{text: s} }
+
+// prefixLine wants a line that starts with s.
+func prefixLine(s string) lineWant { return lineWant{text: s, prefix: true} }
+
+// assertStderrLines fails the test unless the non-empty lines of stderr match
+// wants, one for one and in order.
+func assertStderrLines(t *testing.T, stderr string, wants []lineWant) {
+	t.Helper()
+	lines := nonEmptyLines(stderr)
+	if len(lines) != len(wants) {
+		t.Fatalf("stderr has %d lines, want %d:\n%s", len(lines), len(wants), stderr)
+	}
+	for i, w := range wants {
+		ok := lines[i] == w.text
+		if w.prefix {
+			ok = strings.HasPrefix(lines[i], w.text)
+		}
+		if !ok {
+			kind := "="
+			if w.prefix {
+				kind = "starting with"
+			}
+			t.Errorf("stderr line %d = %q, want a line %s %q", i+1, lines[i], kind, w.text)
+		}
+	}
+}
+
+// assertScanPrefix fails the test if a non-empty stderr line does not start
+// with "mcpmoat scan: ".
+func assertScanPrefix(t *testing.T, stderr string) {
+	t.Helper()
+	for _, line := range nonEmptyLines(stderr) {
+		if !strings.HasPrefix(line, scanPrefix) {
+			t.Errorf("stderr line %q does not start with %q", line, scanPrefix)
+		}
+	}
+}
+
+// replaceToken returns a copy of args in which each arg equal to token is
+// value.
+func replaceToken(args []string, token, value string) []string {
+	out := slices.Clone(args)
+	for i, a := range out {
+		if a == token {
+			out[i] = value
+		}
+	}
+	return out
+}
+
+// assertContainsNone fails the test for each string in bad that got contains.
+// what names got in the message.
+func assertContainsNone(t *testing.T, what, got string, bad []string) {
+	t.Helper()
+	for _, b := range bad {
+		if strings.Contains(got, b) {
+			t.Errorf("%s contains %q\n%s:\n%s", what, b, what, got)
+		}
+	}
+}
+
+// scanPrefix is the start of every stderr line of scan.
+const scanPrefix = "mcpmoat scan: "
+
+// scanWarnPrefix is the start of every scan warning line.
+const scanWarnPrefix = scanPrefix + "warning: "
 
 // writeFileOrSkip writes content to dir/name. The file system may refuse a file
 // name (a name with a control rune, for example). That is not a failure of

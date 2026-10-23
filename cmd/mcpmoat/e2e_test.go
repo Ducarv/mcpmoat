@@ -24,6 +24,7 @@ import (
 	"time"
 
 	"github.com/Ducarv/mcpmoat/internal/discover/discovertest"
+	"github.com/Ducarv/mcpmoat/internal/rules"
 )
 
 // The binary is built once, on the first call to binaryPath. TestMain removes
@@ -513,6 +514,58 @@ func TestE2EScanStartsNoProcess(t *testing.T) {
 	if _, err := os.Stat(marker); !errors.Is(err, os.ErrNotExist) {
 		t.Errorf("marker file exists or cannot be checked (err = %v): mcpmoat started a server", err)
 	}
+}
+
+// TestE2EScanIgnore checks the ignore file and the --ignore flag in the real
+// binary. A malformed line of .mcpmoat-ignore is a warning, not an error: the
+// scan reads the good line, prints the number of entries and lists the
+// servers. An empty --ignore value is a usage error.
+func TestE2EScanIgnore(t *testing.T) {
+	t.Parallel()
+
+	t.Run("file with a malformed line", func(t *testing.T) {
+		t.Parallel()
+		home, work := discovertest.CopyFixture(t, fixtureDir("all", "full"))
+		// Line 2 has an invalid rule ID, so it gets a warning and is skipped.
+		writeTestFile(t, work, rules.IgnoreFileName, "MOAT-T1-003\n/onlytool\n")
+
+		stdout, stderr, code := runBin(t, home, work, "scan", "--no-connect", "--ignore", "MOAT-T1-001")
+
+		if code != exitOK {
+			t.Errorf("exit code = %d, want %d\nstdout:\n%s\nstderr:\n%s", code, exitOK, stdout, stderr)
+		}
+		// The warning and the entry count come before the notice. The
+		// warning text after the line number is not checked here.
+		assertStderrLines(t, stderr, []lineWant{
+			prefixLine(scanWarnPrefix + rules.IgnoreFileName + ":2: "),
+			exactLine("mcpmoat scan: using 1 entry from " + rules.IgnoreFileName),
+			exactLine(noRulesNotice),
+		})
+		if strings.Contains(stderr, "onlytool") {
+			t.Errorf("stderr shows content of the ignore file:\n%s", stderr)
+		}
+		want := []string{"cc-global", "cc-alpha", "cc-project", "cursor-global", "cursor-project", "codex-global"}
+		if got := column(tableRows(t, stdout), 0); !slices.Equal(got, want) {
+			t.Errorf("server names = %v, want %v\nstdout:\n%s", got, want, stdout)
+		}
+		assertNoLeakBoth(t, stdout, stderr)
+		assertNoEscape(t, stdout, stderr)
+	})
+
+	t.Run("empty flag value", func(t *testing.T) {
+		t.Parallel()
+		home, work := discovertest.CopyFixture(t, fixtureDir("all", "full"))
+
+		stdout, stderr, code := runBin(t, home, work, "scan", "--no-connect", "--ignore", "")
+
+		if code != exitError {
+			t.Errorf("exit code = %d, want %d\nstdout:\n%s\nstderr:\n%s", code, exitError, stdout, stderr)
+		}
+		assertContainsAll(t, "stderr", stderr, []string{"mcpmoat scan: ", "-ignore", usageHint})
+		if stdout != "" {
+			t.Errorf("stdout = %q, want empty", stdout)
+		}
+	})
 }
 
 // e2eRulesDir returns the absolute path of a folder below testdata/rules.

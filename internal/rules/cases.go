@@ -15,9 +15,9 @@ const (
 
 // CaseFailure is one test case that did not give the expected result.
 //
-// The fields RuleID, Text and Err hold raw, untrusted text: a case text can be
-// 64 KB, and Err can hold regex or input text. Never print them directly. String
-// and Error escape and cut every piece of rule-derived text; print through them.
+// The fields RuleID and Text hold raw, untrusted text: a case text can be
+// 64 KB. Never print them directly. String and Error escape and cut every piece
+// of rule-derived text; print through them.
 type CaseFailure struct {
 	// RuleID is the ID of the rule that was tested.
 	RuleID string
@@ -29,9 +29,6 @@ type CaseFailure struct {
 	Index int
 	// Text is the case text.
 	Text string
-	// Err is set only when the Matcher returned an error. The case is a
-	// failure then too.
-	Err error
 }
 
 // String returns a one-line description of the failure, for example:
@@ -42,12 +39,9 @@ type CaseFailure struct {
 // holds no raw control or escape byte.
 func (f CaseFailure) String() string {
 	var verdict string
-	switch {
-	case f.Err != nil:
-		verdict = "matcher error: " + displayText(f.Err.Error())
-	case f.Kind == KindShouldMatch:
+	if f.Kind == KindShouldMatch {
 		verdict = "expected a match, got none"
-	default:
+	} else {
 		verdict = "expected no match, got a match"
 	}
 	return fmt.Sprintf("%s %s[%d] (target %s): %s: %s",
@@ -59,22 +53,15 @@ func (f CaseFailure) Error() string {
 	return f.String()
 }
 
-// Unwrap returns the matcher error, so errors.Is and errors.As can see it.
-func (f CaseFailure) Unwrap() error {
-	return f.Err
-}
-
 // RunCases runs every should_match case (the matcher must report a match) and
-// every should_not_match case (it must report no match) of r through m. It
-// returns the failures in a stable order: all should_match failures first,
-// then all should_not_match failures, each list by index.
+// every should_not_match case (it must report no match) of r through m. A
+// match is at least one Hit. It returns the failures in a stable order: all
+// should_match failures first, then all should_not_match failures, each list
+// by index.
 //
-// A matcher error is a failure of that case only. The other cases still run.
 // RunCases returns nil when m is nil: the caller decides to skip the rule,
-// for example when no Compiler is set. A case never makes RunCases panic, but
-// RunCases does not recover a panic of m itself. A Compiler must return a nil
-// interface, not a typed nil pointer, when it has no matcher.
-func RunCases(r Rule, m Matcher) []CaseFailure {
+// for example when no Compiler is set.
+func RunCases(r Rule, m *Matcher) []CaseFailure {
 	if m == nil {
 		return nil
 	}
@@ -85,29 +72,12 @@ func RunCases(r Rule, m Matcher) []CaseFailure {
 }
 
 // runKind runs the cases of one kind and appends the failures to out.
-func runKind(out []CaseFailure, r Rule, m Matcher, kind CaseKind, cases []Case) []CaseFailure {
+func runKind(out []CaseFailure, r Rule, m *Matcher, kind CaseKind, cases []Case) []CaseFailure {
 	want := kind == KindShouldMatch
 	for i, c := range cases {
-		got, err := m.Match(c.Text)
-		if err != nil {
-			out = append(out, newFailure(r, kind, i, c.Text, fmt.Errorf("match case: %w", err)))
-			continue
-		}
-		if got != want {
-			out = append(out, newFailure(r, kind, i, c.Text, nil))
+		if got := len(m.Match(c.Text)) > 0; got != want {
+			out = append(out, CaseFailure{RuleID: r.ID, Target: r.Target, Kind: kind, Index: i, Text: c.Text})
 		}
 	}
 	return out
-}
-
-// newFailure builds a CaseFailure for case number i of a rule.
-func newFailure(r Rule, kind CaseKind, i int, text string, err error) CaseFailure {
-	return CaseFailure{
-		RuleID: r.ID,
-		Target: r.Target,
-		Kind:   kind,
-		Index:  i,
-		Text:   text,
-		Err:    err,
-	}
 }

@@ -10,6 +10,7 @@ import (
 	"text/tabwriter"
 
 	"github.com/Ducarv/mcpmoat/internal/inspect"
+	"github.com/Ducarv/mcpmoat/internal/rules"
 	"github.com/Ducarv/mcpmoat/internal/termsafe"
 )
 
@@ -189,6 +190,8 @@ func scanUsage(w io.Writer) {
 	fprintf(tw, "  --timeout <duration>\tTime limit for each server, a Go duration such as 10s or 1m30s (default %s)\n", inspect.DefaultTimeout)
 	fprintf(tw, "  --concurrency <n>\tMaximum number of servers inspected at the same time (default %d)\n", inspect.DefaultConcurrency)
 	fprintf(tw, "  \tThe two flags above apply when scan connects to servers. --no-connect ignores them, but still checks them\n")
+	fprintf(tw, "  --ignore <rule-id>\tIgnore all findings of this rule; repeatable\n")
+	fprintf(tw, "  \tA %s file in the working directory also ignores findings: one \"RULE-ID [server[/tool]]\" per line; \"# ...\" on its own line or after the entry is a comment\n", rules.IgnoreFileName)
 	_ = tw.Flush() // the write error is ignored on purpose, see fprintf
 
 	fprintf(w, "\nScan output:\n")

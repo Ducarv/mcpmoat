@@ -59,8 +59,14 @@ func (t Target) Valid() bool {
 	}
 }
 
-// Match holds the match keys of a rule. It is data only: matchers and
-// heuristics read these fields elsewhere.
+// Match is the `match:` block of a rule. Parse checks only its shape, and
+// Compile checks the rest: exactly one kind is set (AnyRegex, AllRegex,
+// Keywords or Heuristic), and Params is only for Heuristic, with integer
+// values.
+//
+// Regexes use Go RE2 syntax (package regexp). They are case sensitive: write
+// (?i) in the pattern for a case-insensitive match. Keywords always match
+// without regard to case, and only as whole words.
 type Match struct {
 	// AnyRegex matches when at least one pattern matches.
 	AnyRegex []string `yaml:"any_regex"`

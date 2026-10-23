@@ -157,7 +157,7 @@ func TestBuiltinWithCompiler(t *testing.T) {
 	t.Run("compiler failure names the bare file", func(t *testing.T) {
 		t.Parallel()
 		boom := errors.New("boom")
-		rules, errs := Builtin(WithCompiler(func(Match, Target) (Matcher, error) { return nil, boom }))
+		rules, errs := Builtin(WithCompiler(func(Match, Target) (*Matcher, error) { return nil, boom }))
 		if rules != nil {
 			t.Errorf("rules = %v, want nil", rules)
 		}
@@ -800,7 +800,7 @@ type recordingCompiler struct {
 	err     error
 }
 
-func (c *recordingCompiler) compile(m Match, t Target) (Matcher, error) {
+func (c *recordingCompiler) compile(m Match, t Target) (*Matcher, error) {
 	c.matches = append(c.matches, m)
 	c.targets = append(c.targets, t)
 	return nil, c.err
@@ -879,7 +879,7 @@ func TestLoadDirWithCompiler(t *testing.T) {
 		t.Parallel()
 		dir := t.TempDir()
 		writeFile(t, dir, "a.yaml", validRuleYAML("R-A"))
-		compile := func(Match, Target) (Matcher, error) { return nil, nil }
+		compile := func(Match, Target) (*Matcher, error) { return nil, nil }
 		rules, errs := LoadDir(dir, WithCompiler(compile))
 		if len(errs) > 0 || len(rules) != 1 {
 			t.Errorf("LoadDir() = %v, %v, want one rule", ruleIDs(rules), errs)

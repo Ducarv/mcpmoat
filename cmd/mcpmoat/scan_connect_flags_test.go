@@ -228,19 +228,11 @@ func TestScanConnectFlags(t *testing.T) {
 			t.Parallel()
 
 			// A config with one server, so that exit code 0 prints a table.
-			// The home is an empty directory. getwd must not be called.
-			path := writeServers(t, t.TempDir(), "mcp.json", map[string]any{
-				"ok-srv": map[string]any{"command": "npx"},
-			})
+			// The home is an empty directory.
+			path := writeServers(t, t.TempDir(), "mcp.json", okServer)
 			c, stdout, stderr := scanConfigCLI(t, t.TempDir())
 
-			args := []string{"scan"}
-			for _, a := range tt.args {
-				if a == "CONFIG" {
-					a = path
-				}
-				args = append(args, a)
-			}
+			args := append([]string{"scan"}, replaceToken(tt.args, "CONFIG", path)...)
 
 			code := c.dispatch(args)
 
@@ -249,19 +241,11 @@ func TestScanConnectFlags(t *testing.T) {
 			}
 			assertContainsAll(t, "stdout", stdout.String(), tt.wantStdout)
 			assertContainsAll(t, "stderr", stderr.String(), tt.wantStderr)
-			for _, bad := range tt.noStderr {
-				if strings.Contains(stderr.String(), bad) {
-					t.Errorf("stderr contains %q\nstderr:\n%s", bad, stderr)
-				}
-			}
+			assertContainsNone(t, "stderr", stderr.String(), tt.noStderr)
 			if len(tt.wantStdout) == 0 && stdout.Len() != 0 {
 				t.Errorf("stdout = %q, want empty", stdout)
 			}
-			if tt.wantCode == exitOK {
-				assertNoRulesNotice(t, stderr.String())
-			} else if strings.Contains(stderr.String(), noRulesNotice) {
-				t.Errorf("stderr holds the notice %q, but the scan failed\nstderr:\n%s", noRulesNotice, stderr)
-			}
+			assertNoticeForCode(t, tt.wantCode, stderr.String())
 			assertNoLeakBoth(t, stdout.String(), stderr.String())
 			assertNoEscape(t, stdout.String(), stderr.String())
 		})
@@ -346,7 +330,7 @@ func TestScanConnectFlagsDoNotChangeNoConnectOutput(t *testing.T) {
 	t.Parallel()
 
 	dir := t.TempDir()
-	path := writeServers(t, dir, "mcp.json", map[string]any{"ok-srv": map[string]any{"command": "npx"}})
+	path := writeServers(t, dir, "mcp.json", okServer)
 
 	run := func(extra ...string) (int, string, string) {
 		c, stdout, stderr := scanConfigCLI(t, filepath.Join(dir, "home"))
