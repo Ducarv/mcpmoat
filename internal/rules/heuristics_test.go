@@ -75,11 +75,21 @@ func TestHeuristicInvisibleUnicode(t *testing.T) {
 			text: "\U0001F642\U000E0041",
 			want: []hit{{4, "U+E0041 at offset 4"}},
 		},
-		// ASCII '^' and '`' are Sk, but they are never a symbol base.
+		// ASCII '^' and '`' are Sk, but they are never a pictograph.
 		{name: "ZWJ after caret", text: "^\u200d", want: []hit{{1, "U+200D at offset 1"}}},
 		{name: "VS16 after backtick", text: "`\ufe0f", want: []hit{{1, "U+FE0F at offset 1"}}},
-		{name: "second ZWJ after symbol", text: "\u2764\u200d\u200d", want: []hit{{6, "U+200D at offset 6"}}},
+		// U+02D8 (breve) is a non-ASCII Sk rune, but not an emoji.
+		{name: "VS16 after breve", text: "\u02d8\ufe0f", want: []hit{{2, "U+FE0F at offset 2"}}},
+		{name: "ZWJ chain after symbol", text: "\u2764\u200d\u200d", want: []hit{{3, "U+200D at offset 3"}, {6, "U+200D at offset 6"}}},
 		{name: "ZWJ after second VS", text: "\u2764\ufe0f\ufe0f\u200d", want: []hit{{6, "U+FE0F at offset 6"}, {9, "U+200D at offset 9"}}},
+		// A ZWJ is excused only when a pictograph follows it.
+		{name: "ZWJ before a letter", text: "\u2764\ufe0f\u200dx", want: []hit{{6, "U+200D at offset 6"}}},
+		{name: "ZWJ at the end", text: "\u2764\u200d", want: []hit{{3, "U+200D at offset 3"}}},
+		{name: "ZWJ before an invalid byte", text: "\u2764\u200d\xff", want: []hit{{3, "U+200D at offset 3"}}},
+		// A keycap VS needs U+20E3 after it.
+		{name: "VS16 after a digit", text: "1\ufe0f", want: []hit{{1, "U+FE0F at offset 1"}}},
+		{name: "ZWJ after a keycap", text: "1\ufe0f\u20e3\u200d\U0001F525", want: []hit{{7, "U+200D at offset 7"}}},
+		{name: "VS16 after an invalid byte", text: "\xff\ufe0f", want: []hit{{1, "U+FE0F at offset 1"}}},
 
 		{name: "plain ASCII", text: "Plain ASCII description."},
 		{name: "issue 47 emoji and accents", text: "Emoji \U0001F642 and accented letters \u00e9 are fine."},
@@ -88,6 +98,11 @@ func TestHeuristicInvisibleUnicode(t *testing.T) {
 		{name: "heart on fire", text: "hot \u2764\ufe0f\u200d\U0001F525 take"},
 		{name: "woman technologist skin tone", text: "dev \U0001F469\U0001F3FD\u200d\U0001F4BB at work"},
 		{name: "heart VS15", text: "text \u2764\ufe0e heart"},
+		{name: "keycap steps", text: "1\ufe0f\u20e3 install, 2\ufe0f\u20e3 run, #\ufe0f\u20e3 tag, *\ufe0f\u20e3 all"},
+		// These emoji are not in So: U+203C and U+303D are Po, U+2139 is Ll,
+		// U+2194 and U+2934 are Sm, U+3030 is Pd.
+		{name: "emoji outside So", text: "\u203c\ufe0f \u2049\ufe0f \u2139\ufe0f \u2194\ufe0f \u2934\ufe0f \u2935\ufe0f \u3030\ufe0f \u303d\ufe0f"},
+		{name: "ZWJ after VS15", text: "\u2764\ufe0e\u200d\U0001F525"},
 		{name: "empty", text: ""},
 	}
 	for _, tt := range tests {
@@ -133,7 +148,7 @@ func TestHeuristicInvisibleUnicodeHitCap(t *testing.T) {
 }
 
 // TestHeuristicInvisibleUnicodeVSChain checks that only the first VS after a
-// symbol base is excused, so a long VS chain cannot carry hidden data.
+// pictograph is excused, so a long VS chain cannot carry hidden data.
 func TestHeuristicInvisibleUnicodeVSChain(t *testing.T) {
 	t.Parallel()
 	m := mustCompileHeuristic(t, HeuristicInvisibleUnicode, nil)

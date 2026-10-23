@@ -112,43 +112,72 @@ const (
 	zeroWidthJoiner = '\u200D' // joins emoji: man + ZWJ + laptop
 	textStyle       = '\uFE0E' // VS15: show the symbol before it as text
 	emojiStyle      = '\uFE0F' // VS16: show the symbol before it as emoji
+	keycapMark      = '\u20E3' // visible; "1" + VS16 + U+20E3 is the keycap 1
 )
 
 // invisibleUnicode flags every rune of raw for which isInvisible is true.
 //
-// An emoji can hold a VS15 or VS16 and a ZWJ after a symbol (see
-// isSymbolBase), so some of these runes are not flagged:
+// An emoji can hold a VS15 or VS16 and a ZWJ (see isPictograph), so some of
+// these runes are not flagged:
 //
-//   - one VS15 or VS16 directly after a symbol base;
-//   - one ZWJ directly after a symbol base, or after that one VS15 or VS16.
+//   - one VS15 or VS16 directly after a pictograph;
+//   - one VS15 or VS16 between a keycap base (0-9, '#' or '*') and U+20E3;
+//   - one ZWJ between two pictographs, with at most that one VS15 or VS16
+//     after the first one.
 //
 // So U+2764 VS16 ZWJ U+1F525, the "heart on fire" emoji, gives no hit. A
-// second VS or ZWJ in a row is flagged, so a long chain of them cannot carry
-// hidden data. The tag characters (U+E0000 to U+E007F) can hide a full ASCII
-// text, and they are never excused.
+// second VS in a row, and a ZWJ that no pictograph follows, are flagged, so
+// they cannot carry hidden data. The tag characters (U+E0000 to U+E007F) can
+// hide a full ASCII text, and they are never excused.
 func invisibleUnicode(raw string) []Hit {
 	var l hitList
-	afterBase := false   // the rune before is a symbol base
-	afterBaseVS := false // the rune before is the one VS15 or VS16 after a symbol base
+	prev := rune(-1)    // the rune before r
+	afterEmoji := false // prev is a pictograph, or the one VS after a pictograph
 	for i, r := range raw {
-		isVS := r == textStyle || r == emojiStyle
-		excused := (isVS && afterBase) ||
-			(r == zeroWidthJoiner && (afterBase || afterBaseVS))
+		excused := false
+		switch r {
+		case textStyle, emojiStyle:
+			excused = isPictograph(prev) || isKeycapBase(prev) && runeAt(raw, i+utf8.RuneLen(r)) == keycapMark
+		case zeroWidthJoiner:
+			excused = afterEmoji && isPictograph(runeAt(raw, i+utf8.RuneLen(r)))
+		}
 		if isInvisible(r) && !excused && l.keep(i) {
 			l.hits = append(l.hits, Hit{Offset: i, Detail: fmt.Sprintf("U+%04X at offset %d", r, i)})
 		}
-		afterBaseVS = isVS && afterBase
-		afterBase = isSymbolBase(r)
+		afterEmoji = isPictograph(r) || excused && r != zeroWidthJoiner && isPictograph(prev)
+		prev = r
 	}
 	return l.result("invisible characters")
 }
 
-// isSymbolBase reports whether r can start an emoji: a non-ASCII rune in the
-// category So (other symbols, which holds most emoji, and also U+00A9 and
-// U+00AE) or Sk (modifier symbols, which holds the skin-tone modifiers).
-// ASCII is never a base, so '^' and '`' (both Sk) excuse nothing.
-func isSymbolBase(r rune) bool {
-	return r >= 0x80 && unicode.In(r, unicode.So, unicode.Sk)
+// isPictograph reports whether r is an emoji that a VS or a ZWJ can follow: a
+// non-ASCII rune in the category So (other symbols, which holds most emoji,
+// and also U+00A9 and U+00AE), a skin-tone modifier, or one of the few emoji
+// in another category. ASCII and the other Sk runes (such as '^' and U+02D8)
+// are not, so they excuse nothing.
+func isPictograph(r rune) bool {
+	switch r {
+	case utf8.RuneError: // also what range gives for an invalid byte
+		return false
+	case 0x203C, 0x2049, 0x2139, 0x2194, 0x2934, 0x2935, 0x3030, 0x303D:
+		return true // the emoji that are not So: Po, Ll, Sm and Pd runes
+	}
+	return r >= 0x80 && unicode.Is(unicode.So, r) || 0x1F3FB <= r && r <= 0x1F3FF
+}
+
+// isKeycapBase reports whether r can start a keycap emoji: 0-9, '#' or '*'.
+func isKeycapBase(r rune) bool {
+	return '0' <= r && r <= '9' || r == '#' || r == '*'
+}
+
+// runeAt returns the rune at byte i of s, or -1 at the end of s or at an
+// invalid byte.
+func runeAt(s string, i int) rune {
+	r, size := utf8.DecodeRuneInString(s[i:])
+	if r == utf8.RuneError && size <= 1 {
+		return -1
+	}
+	return r
 }
 
 // maxLength flags raw when it has more than maxRunes runes. The hit is at the
