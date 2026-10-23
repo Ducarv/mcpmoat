@@ -175,14 +175,14 @@ func TestCLIRun(t *testing.T) {
 			name:            "version with an extra argument",
 			args:            []string{"version", "extra"},
 			wantCode:        exitError,
-			wantStderr:      []string{`mcpmoat version: unexpected arguments ["extra"]`, `Run "mcpmoat help" for usage.`},
+			wantStderr:      []string{`mcpmoat version: unexpected arguments ["extra"]`, usageHint},
 			wantStdoutEmpty: true,
 		},
 		{
 			name:            "help with an extra argument",
 			args:            []string{"help", "extra"},
 			wantCode:        exitError,
-			wantStderr:      []string{`mcpmoat help: unexpected arguments ["extra"]`, `Run "mcpmoat help" for usage.`},
+			wantStderr:      []string{`mcpmoat help: unexpected arguments ["extra"]`, usageHint},
 			wantStdoutEmpty: true,
 		},
 		{

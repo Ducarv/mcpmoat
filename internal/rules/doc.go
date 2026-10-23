@@ -7,8 +7,9 @@
 // # The match block
 //
 // Each rule has a `match:` block, the type [Match]. It holds exactly one of
-// any_regex, all_regex, keywords or heuristic. The rule loader (#33) calls
-// [Match.Compile] once, at load time, and keeps the [Matcher] it returns.
+// any_regex, all_regex, keywords or heuristic. [Match.Compile] checks it and
+// returns a [Matcher]. The loader calls it at load time through a [Compiler]
+// given with [WithCompiler].
 // Every error from Compile is a *[FieldError] that names the field, for
 // example "any_regex[2]". An error never holds text from the rule file (a
 // pattern, a keyword or a parameter key) or input text, so it is safe to

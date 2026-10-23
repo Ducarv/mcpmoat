@@ -38,7 +38,7 @@ type paramSpec struct {
 // compileHeuristic returns the function of the heuristic name, with its
 // parameters checked and set. The function reads the raw text. Every error
 // is a *FieldError.
-func compileHeuristic(name string, params map[string]int) (func(raw string) []Hit, error) {
+func compileHeuristic(name string, params map[string]any) (func(raw string) []Hit, error) {
 	switch name {
 	case HeuristicInvisibleUnicode:
 		if _, err := readParams(params); err != nil {
@@ -72,7 +72,7 @@ func compileHeuristic(name string, params map[string]int) (func(raw string) []Hi
 //
 // An unknown key comes from the rule file, so the error does not echo it. It
 // lists the valid keys instead.
-func readParams(params map[string]int, specs ...paramSpec) ([]int, error) {
+func readParams(params map[string]any, specs ...paramSpec) ([]int, error) {
 	for key := range params {
 		known := slices.ContainsFunc(specs, func(s paramSpec) bool { return s.name == key })
 		if !known {
@@ -81,16 +81,27 @@ func readParams(params map[string]int, specs ...paramSpec) ([]int, error) {
 	}
 	values := make([]int, len(specs))
 	for i, s := range specs {
-		v, ok := params[s.name]
-		if !ok {
-			v = s.def
+		v := s.def
+		if raw, ok := params[s.name]; ok {
+			// YAML decodes an integer as int; any other type is a mistake.
+			n, isInt := raw.(int)
+			if !isInt {
+				return nil, rangeError(s)
+			}
+			v = n
 		}
 		if v < s.min || v > s.max {
-			return nil, &FieldError{Field: "params." + s.name, Msg: fmt.Sprintf("must be between %d and %d", s.min, s.max)}
+			return nil, rangeError(s)
 		}
 		values[i] = v
 	}
 	return values, nil
+}
+
+// rangeError returns the error for a value of s that is not an integer in
+// its range.
+func rangeError(s paramSpec) error {
+	return &FieldError{Field: "params." + s.name, Msg: fmt.Sprintf("must be an integer between %d and %d", s.min, s.max)}
 }
 
 // unknownParamError returns the error for a key that is not in specs. The

@@ -21,7 +21,7 @@ const (
 )
 
 // mustCompileHeuristic compiles a heuristic match block or stops the test.
-func mustCompileHeuristic(t *testing.T, name string, params map[string]int) *Matcher {
+func mustCompileHeuristic(t *testing.T, name string, params map[string]any) *Matcher {
 	t.Helper()
 	return mustCompileMatch(t, Match{Heuristic: name, Params: params})
 }
@@ -169,7 +169,7 @@ func TestHeuristicMaxLength(t *testing.T) {
 	normal300 := strings.Repeat("Lists the files in a folder. ", 11)[:300]
 	tests := []struct {
 		name       string
-		params     map[string]int
+		params     map[string]any
 		text       string
 		wantOffset int    // -1: no match
 		wantDetail string // checked when not empty
@@ -182,15 +182,15 @@ func TestHeuristicMaxLength(t *testing.T) {
 		{name: "runes not bytes", text: strings.Repeat("\u00e9", 4096), wantOffset: -1},
 		{name: "issue 48 normal 300 chars", text: normal300, wantOffset: -1},
 		{name: "empty", text: "", wantOffset: -1},
-		{name: "custom at limit", params: map[string]int{"max_runes": 3}, text: "abc", wantOffset: -1},
+		{name: "custom at limit", params: map[string]any{"max_runes": 3}, text: "abc", wantOffset: -1},
 		{
 			// The 4th rune (U+20AC) starts after three 2-byte runes.
-			name: "custom over limit multibyte", params: map[string]int{"max_runes": 3},
+			name: "custom over limit multibyte", params: map[string]any{"max_runes": 3},
 			text: "\u00e9\u00e9\u00e9\u20acx", wantOffset: 6,
 			wantDetail: "text has 5 characters, over the limit of 3",
 		},
 		{
-			name: "invalid UTF-8 bytes count as runes", params: map[string]int{"max_runes": 2},
+			name: "invalid UTF-8 bytes count as runes", params: map[string]any{"max_runes": 2},
 			text: "\xff\xfe\xfd", wantOffset: 2,
 			wantDetail: "text has 3 characters, over the limit of 2",
 		},
@@ -236,7 +236,7 @@ func TestHeuristicBase64Blob(t *testing.T) {
 
 	tests := []struct {
 		name       string
-		params     map[string]int
+		params     map[string]any
 		text       string
 		wantOffset int // -1: no match
 	}{
@@ -257,7 +257,7 @@ func TestHeuristicBase64Blob(t *testing.T) {
 		{name: "mixed alphabets dash after", text: "Run: " + payloadRaw + "+-", wantOffset: 5},
 		{name: "mixed alphabets underscore before", text: "Run: x_" + payloadRaw, wantOffset: 5},
 		{name: "mixed alphabets URL path glued on", text: "See docs/my-page/" + payloadRaw, wantOffset: 4},
-		{name: "small params match short text", params: map[string]int{"min_length": 8, "min_text": 8}, text: "say aGVsbG8gd29ybGQ= now", wantOffset: 4},
+		{name: "small params match short text", params: map[string]any{"min_length": 8, "min_text": 8}, text: "say aGVsbG8gd29ybGQ= now", wantOffset: 4},
 
 		{name: "issue 49 SHA-256", text: "Returns a SHA-256 such as 9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08.", wantOffset: -1},
 		{name: "UUID example", text: "Accepts a UUID such as 123e4567-e89b-12d3-a456-426614174000.", wantOffset: -1},
@@ -269,8 +269,8 @@ func TestHeuristicBase64Blob(t *testing.T) {
 		{name: "Unix path", text: "/usr/local/lib/node_modules/some-package/dist/index.js", wantOffset: -1},
 		{name: "empty", text: "", wantOffset: -1},
 		{name: "text split by NUL byte", text: "Run: " + split, wantOffset: -1},
-		{name: "min_text over payload", params: map[string]int{"min_text": 50}, text: "Run: " + payloadStd, wantOffset: -1},
-		{name: "min_length over payload", params: map[string]int{"min_length": 61}, text: "Run: " + payloadStd, wantOffset: -1},
+		{name: "min_text over payload", params: map[string]any{"min_text": 50}, text: "Run: " + payloadStd, wantOffset: -1},
+		{name: "min_length over payload", params: map[string]any{"min_length": 61}, text: "Run: " + payloadStd, wantOffset: -1},
 		{name: "default params skip short text", text: "say aGVsbG8gd29ybGQ= now", wantOffset: -1},
 	}
 	for _, tt := range tests {
@@ -328,42 +328,44 @@ func TestHeuristicCompileErrors(t *testing.T) {
 		},
 		{
 			name:      "unknown param key escaped",
-			match:     Match{Heuristic: HeuristicMaxLength, Params: map[string]int{"zz\x1b": 1}},
+			match:     Match{Heuristic: HeuristicMaxLength, Params: map[string]any{"zz\x1b": 1}},
 			wantField: "params",
 			wantIn:    []string{"unknown parameter"},
 			wantNotIn: []string{"zz", "\x1b"},
 		},
 		{
 			name:      "invisible_unicode takes no params",
-			match:     Match{Heuristic: HeuristicInvisibleUnicode, Params: map[string]int{"max_runes": 10}},
+			match:     Match{Heuristic: HeuristicInvisibleUnicode, Params: map[string]any{"max_runes": 10}},
 			wantField: "params",
 			wantIn:    []string{"takes no parameters"},
 			wantNotIn: []string{"max_runes"},
 		},
 		{
 			name:      "unknown param lists base64_blob keys",
-			match:     Match{Heuristic: HeuristicBase64Blob, Params: map[string]int{"zz": 10}},
+			match:     Match{Heuristic: HeuristicBase64Blob, Params: map[string]any{"zz": 10}},
 			wantField: "params",
 			wantIn:    []string{"unknown parameter; valid: min_length, min_text"},
 			wantNotIn: []string{"zz"},
 		},
-		{name: "max_runes 0", match: Match{Heuristic: HeuristicMaxLength, Params: map[string]int{"max_runes": 0}}, wantField: "params.max_runes"},
-		{name: "max_runes over max", match: Match{Heuristic: HeuristicMaxLength, Params: map[string]int{"max_runes": 1<<24 + 1}}, wantField: "params.max_runes"},
-		{name: "max_runes negative", match: Match{Heuristic: HeuristicMaxLength, Params: map[string]int{"max_runes": -1}}, wantField: "params.max_runes"},
-		{name: "min_length 7", match: Match{Heuristic: HeuristicBase64Blob, Params: map[string]int{"min_length": 7}}, wantField: "params.min_length"},
-		{name: "min_length 4097", match: Match{Heuristic: HeuristicBase64Blob, Params: map[string]int{"min_length": 4097}}, wantField: "params.min_length"},
-		{name: "min_text 3", match: Match{Heuristic: HeuristicBase64Blob, Params: map[string]int{"min_text": 3}}, wantField: "params.min_text"},
-		{name: "min_text 3073", match: Match{Heuristic: HeuristicBase64Blob, Params: map[string]int{"min_text": 3073}}, wantField: "params.min_text"},
+		{name: "max_runes 0", match: Match{Heuristic: HeuristicMaxLength, Params: map[string]any{"max_runes": 0}}, wantField: "params.max_runes"},
+		{name: "max_runes over max", match: Match{Heuristic: HeuristicMaxLength, Params: map[string]any{"max_runes": 1<<24 + 1}}, wantField: "params.max_runes"},
+		{name: "max_runes negative", match: Match{Heuristic: HeuristicMaxLength, Params: map[string]any{"max_runes": -1}}, wantField: "params.max_runes"},
+		{name: "max_runes string", match: Match{Heuristic: HeuristicMaxLength, Params: map[string]any{"max_runes": "3"}}, wantField: "params.max_runes"},
+		{name: "min_length float", match: Match{Heuristic: HeuristicBase64Blob, Params: map[string]any{"min_length": 8.5}}, wantField: "params.min_length"},
+		{name: "min_length 7", match: Match{Heuristic: HeuristicBase64Blob, Params: map[string]any{"min_length": 7}}, wantField: "params.min_length"},
+		{name: "min_length 4097", match: Match{Heuristic: HeuristicBase64Blob, Params: map[string]any{"min_length": 4097}}, wantField: "params.min_length"},
+		{name: "min_text 3", match: Match{Heuristic: HeuristicBase64Blob, Params: map[string]any{"min_text": 3}}, wantField: "params.min_text"},
+		{name: "min_text 3073", match: Match{Heuristic: HeuristicBase64Blob, Params: map[string]any{"min_text": 3073}}, wantField: "params.min_text"},
 		{
 			name:      "base64 param on max_length",
-			match:     Match{Heuristic: HeuristicMaxLength, Params: map[string]int{"min_text": 10}},
+			match:     Match{Heuristic: HeuristicMaxLength, Params: map[string]any{"min_text": 10}},
 			wantField: "params",
 			wantIn:    []string{"unknown parameter; valid: max_runes"},
 			wantNotIn: []string{"min_text"},
 		},
 		{
 			name:      "params without heuristic",
-			match:     Match{AnyRegex: []string{"x"}, Params: map[string]int{"max_runes": 3}},
+			match:     Match{AnyRegex: []string{"x"}, Params: map[string]any{"max_runes": 3}},
 			wantField: "params",
 		},
 	}
@@ -404,14 +406,14 @@ func TestHeuristicCompileAccepts(t *testing.T) {
 		match Match
 	}{
 		{name: "invisible_unicode nil params", match: Match{Heuristic: HeuristicInvisibleUnicode}},
-		{name: "invisible_unicode empty params", match: Match{Heuristic: HeuristicInvisibleUnicode, Params: map[string]int{}}},
-		{name: "max_length empty params", match: Match{Heuristic: HeuristicMaxLength, Params: map[string]int{}}},
-		{name: "max_runes 1", match: Match{Heuristic: HeuristicMaxLength, Params: map[string]int{"max_runes": 1}}},
-		{name: "max_runes 1<<24", match: Match{Heuristic: HeuristicMaxLength, Params: map[string]int{"max_runes": 1 << 24}}},
-		{name: "min_length 8", match: Match{Heuristic: HeuristicBase64Blob, Params: map[string]int{"min_length": 8}}},
-		{name: "min_length 4096", match: Match{Heuristic: HeuristicBase64Blob, Params: map[string]int{"min_length": 4096}}},
-		{name: "min_text 4", match: Match{Heuristic: HeuristicBase64Blob, Params: map[string]int{"min_text": 4}}},
-		{name: "min_text 3072", match: Match{Heuristic: HeuristicBase64Blob, Params: map[string]int{"min_text": 3072}}},
+		{name: "invisible_unicode empty params", match: Match{Heuristic: HeuristicInvisibleUnicode, Params: map[string]any{}}},
+		{name: "max_length empty params", match: Match{Heuristic: HeuristicMaxLength, Params: map[string]any{}}},
+		{name: "max_runes 1", match: Match{Heuristic: HeuristicMaxLength, Params: map[string]any{"max_runes": 1}}},
+		{name: "max_runes 1<<24", match: Match{Heuristic: HeuristicMaxLength, Params: map[string]any{"max_runes": 1 << 24}}},
+		{name: "min_length 8", match: Match{Heuristic: HeuristicBase64Blob, Params: map[string]any{"min_length": 8}}},
+		{name: "min_length 4096", match: Match{Heuristic: HeuristicBase64Blob, Params: map[string]any{"min_length": 4096}}},
+		{name: "min_text 4", match: Match{Heuristic: HeuristicBase64Blob, Params: map[string]any{"min_text": 4}}},
+		{name: "min_text 3072", match: Match{Heuristic: HeuristicBase64Blob, Params: map[string]any{"min_text": 3072}}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

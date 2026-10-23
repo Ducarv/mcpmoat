@@ -123,7 +123,7 @@ func TestCompileErrors(t *testing.T) {
 		leak      string // must not be in Error(); default matchSecret
 	}{
 		{name: "zero kinds", match: Match{}, wantMsg: "set exactly one"},
-		{name: "params only", match: Match{Params: map[string]int{"max_runes": 1}}, wantMsg: "set exactly one"},
+		{name: "params only", match: Match{Params: map[string]any{"max_runes": 1}}, wantMsg: "set exactly one"},
 		{
 			name:    "any_regex and keywords",
 			match:   Match{AnyRegex: []string{"a" + matchSecret}, Keywords: []string{matchSecret}},
@@ -210,7 +210,7 @@ func TestCompileErrors(t *testing.T) {
 		},
 		{
 			name:      "params without heuristic",
-			match:     Match{AnyRegex: []string{"a"}, Params: map[string]int{"max_runes": 1}},
+			match:     Match{AnyRegex: []string{"a"}, Params: map[string]any{"max_runes": 1}},
 			wantField: "params", wantMsg: "only with heuristic",
 		},
 	}
@@ -540,7 +540,7 @@ func TestMatchInputCap(t *testing.T) {
 func TestMatchHeuristicNotCapped(t *testing.T) {
 	t.Parallel()
 	text := strings.Repeat("a", MaxMatchInputBytes+1)
-	got := mustCompileHeuristic(t, HeuristicMaxLength, map[string]int{"max_runes": MaxMatchInputBytes}).Match(text)
+	got := mustCompileHeuristic(t, HeuristicMaxLength, map[string]any{"max_runes": MaxMatchInputBytes}).Match(text)
 	want := []Hit{{
 		Offset: MaxMatchInputBytes,
 		Detail: fmt.Sprintf("text has %d characters, over the limit of %d", MaxMatchInputBytes+1, MaxMatchInputBytes),

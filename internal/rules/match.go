@@ -45,20 +45,6 @@ const (
 	MaxHits = 16
 )
 
-// Match is the `match:` block of a rule. Exactly one kind is set: AnyRegex,
-// AllRegex, Keywords or Heuristic. Params is only for Heuristic.
-//
-// Regexes use Go RE2 syntax (package regexp). They are case sensitive: write
-// (?i) in the pattern for a case-insensitive match. Keywords always match
-// without regard to case, and only as whole words.
-type Match struct {
-	AnyRegex  []string       `yaml:"any_regex,omitempty"`
-	AllRegex  []string       `yaml:"all_regex,omitempty"`
-	Keywords  []string       `yaml:"keywords,omitempty"`
-	Heuristic string         `yaml:"heuristic,omitempty"`
-	Params    map[string]int `yaml:"params,omitempty"` // only with Heuristic
-}
-
 // FieldError reports an invalid field in the match block, for example
 // "any_regex[2]" or "params.max_runes". The rule loader adds the file name.
 //
