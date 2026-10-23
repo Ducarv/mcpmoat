@@ -30,13 +30,12 @@
 // it and the other heuristics read the full raw text.
 //
 // A list holds at most [MaxPatterns] entries of at most [MaxPatternBytes]
-// bytes each. The compiled program of one regex has a cap of 1000
-// instructions, and the sum of the programs of one list has a cap of 2500
-// instructions. So the worst case for one match block is about 32 KiB x 2500,
-// about 80M instruction-bytes. BenchmarkWorstCaseBlock measures it; the
-// result is in the comment on the caps in match.go. A hostile --rules
-// directory multiplies this cost by the number of rules and texts. A cap at
-// the loader level is future work (#33).
+// bytes each, and the compiled programs of one regex and of one list have
+// instruction caps. The comment on these caps in match.go gives the worst
+// case for one match block and its cost, measured by
+// BenchmarkWorstCaseBlock. A hostile --rules directory multiplies this cost
+// by the number of rules and texts. A cap at the loader level is future work
+// (#33).
 //
 // # Normalization
 //
@@ -45,10 +44,16 @@
 // text is put in Unicode form NFC. The form is not NFKC, so fullwidth letters
 // and homoglyphs (for example Cyrillic U+0430 for Latin "a") are not folded.
 //
-// Keywords are normalized in the same way. For keywords only, the
-// non-spacing marks (category Mn) are then dropped from the keyword and the
-// text, so a mark cannot hide a keyword, and accents are folded: "cafe"
-// matches "caf" + U+00E9. U+2800 (braille blank) counts as white space
+// A regex reads only this normalized text. So a regex cannot match an
+// invisible rune (use the invisible_unicode heuristic for that), and a
+// pattern must be written in NFC: a pattern with a letter and a separate
+// combining mark does not match the composed letter. The should_match cases
+// of a rule (NFR-05) catch such a pattern.
+//
+// Keywords are normalized in the same way. For keywords only, the combining
+// marks (category M) are then dropped from the keyword and the text, so a
+// mark cannot hide a keyword, and accents are folded: "cafe" matches "caf" +
+// U+00E9. U+2800 (braille blank) counts as white space
 // between the words of a keyword. A keyword matches without regard to case,
 // and only as a whole word, with Unicode word edges. A regex gets no
 // automatic (?i): write it in the pattern when you need it.
@@ -61,8 +66,9 @@
 //
 // The base64_blob heuristic checks each run of base64 characters on its own.
 // An invisible rune inside a run is skipped. Any other character, such as a
-// space, a newline or '=', ends a run, and runs are not joined. So a payload that is split into short chunks is not
-// flagged when no chunk reaches min_length on its own.
+// space, a newline or '=', ends a run, and runs are not joined. So a payload
+// that is split into short chunks is not flagged when no chunk reaches
+// min_length on its own.
 //
 // # The ignore file
 //

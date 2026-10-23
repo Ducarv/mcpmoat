@@ -276,10 +276,12 @@ func TestFoldMarks(t *testing.T) {
 		in   string
 		want string
 	}{
-		{name: "precomposed accent", in: "café", want: "cafe"},
-		{name: "overlay mark", in: "ig̶nore", want: "ignore"},
-		{name: "Hangul syllable kept", in: "한", want: "한"},
-		{name: "spacing mark kept", in: "का", want: "का"},
+		{name: "precomposed accent", in: "caf\u00e9", want: "cafe"},
+		{name: "overlay mark", in: "ig\u0336nore", want: "ignore"},
+		{name: "enclosing mark", in: "ig\u20ddnore", want: "ignore"},
+		{name: "spacing mark", in: "ignore\u0903", want: "ignore"},
+		{name: "Devanagari vowel sign", in: "\u0915\u093e", want: "\u0915"},
+		{name: "Hangul syllable kept", in: "\ud55c", want: "\ud55c"},
 		{name: "plain ASCII unchanged", in: "ignore previous", want: "ignore previous"},
 		{name: "empty", in: "", want: ""},
 	}

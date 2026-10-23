@@ -406,6 +406,8 @@ func TestMatchKeywords(t *testing.T) {
 		{name: "braille blank", keyword: "ignore previous", text: "ignore\u2800previous", want: true},
 		{name: "keyword with braille blank", keyword: "ignore\u2800previous", text: "ignore previous", want: true},
 		{name: "mark does not join words", keyword: "ignore previous", text: "ignore\u0301previous"},
+		{name: "enclosing mark inside word", keyword: "ignore previous", text: "ig\u20ddnore previous", want: true},
+		{name: "spacing mark after last letter", keyword: "ignore previous", text: "ignore previous\u0903", want: true},
 		{name: "letter after is non-ASCII", keyword: "caf", text: "caf\u00e9"},
 		{name: "tilde path", keyword: "~/.ssh", text: "read ~/.ssh/id_rsa", want: true},
 		{name: "tilde path no word edge before", keyword: "~/.ssh", text: "x~/.ssh", want: true},

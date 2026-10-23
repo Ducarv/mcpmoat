@@ -22,9 +22,8 @@ import (
 //
 // The worst case for one match block is about 32 KiB x 2500, about 80M
 // instruction-bytes. BenchmarkWorstCaseBlock measured about 0.8 s for it on
-// an Apple M1 Pro (about 10 ns for each instruction-byte). A hostile --rules
-// directory multiplies this cost by the number of rules and the number of
-// texts. A cap at the loader level is future work (#33).
+// an Apple M1 Pro (about 10 ns for each instruction-byte). The package doc
+// says how the rule count multiplies it.
 const (
 	// MaxPatternBytes is the largest regex or keyword, in bytes, before
 	// compilation.
@@ -295,7 +294,7 @@ func compileKeywords(keywords []string) ([]*regexp.Regexp, error) {
 // isKeywordSpace reports whether r separates the words of a keyword. It is
 // the same set as the white-space class in compileKeywords.
 func isKeywordSpace(r rune) bool {
-	return unicode.IsSpace(r) || r == '⠀'
+	return unicode.IsSpace(r) || r == '\u2800'
 }
 
 // isWordRune reports whether r is a letter, a mark, a number or '_'. It is
