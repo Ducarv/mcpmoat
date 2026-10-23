@@ -129,10 +129,8 @@ Write down:
 ### Step 3: Research
 
 Spawn the `research` agent with the issue title and body, referenced files, acceptance
-criteria, and the profile path. It returns a task list with dependencies. Tell it to include a task
-that updates the owner doc for the change. Find the owner in the "Topic to owner" table in
-`docs/README.md`. If no doc needs to change, there is no doc task, and research says why in its
-notes. The `pr` skill still checks the final diff in Step 10.
+criteria, and the profile path. It returns a task list with dependencies. Tell it to include the
+owner-doc task (see `research.md`). The `pr` skill still checks the final diff in Step 10.
 
 ### Step 4: Clarify (interactive only)
 
@@ -181,7 +179,7 @@ the current branch.
 
 - **Critical / Should-fix**: fix them, then go back to Step 8. A security finding at either
   severity is always in this group. A finding that the owner doc is not updated belongs here too:
-  update the owner doc.
+  update the owner doc, unless the user already gave a "No doc change needed because" reason.
 - **Minor / Nit**: do not fix. List security-tagged nits in the PR body so the reviewer sees
   them.
 
@@ -195,7 +193,7 @@ the one gate for the docs rule in
 [CONTRIBUTING.md Pull requests](../../../CONTRIBUTING.md#pull-requests): it lists the changed docs,
 and it refuses to open the PR when a behaviour change has no owner doc and no real reason. Say
 whether the run is `--auto`, so `pr` does not wait for a person. Pass a "No doc change needed
-because" reason only if the user or the issue gave one. Make sure the PR links the issue (profile
+because" reason only if the user gave one. The `pr` skill reads the issue itself. Make sure the PR links the issue (profile
 pattern, default `Closes #<n>`) and has a Summary, Testing and Release Notes section.
 
 If `pr` refuses because the owner doc is missing, add the owner-doc change as a task, run it once

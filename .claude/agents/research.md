@@ -48,9 +48,9 @@ A task is atomic if:
 If a task is too big, break it down further.
 
 Include a task that updates the owner doc for the change (the owner is listed in the
-"Topic to owner" table in `docs/README.md`), and give it to `general-purpose` (docs, Markdown and
-`.claude/` text have no dedicated agent). If no doc change is needed, add no doc task and say why
-in the context notes.
+"Topic to owner" table in `docs/README.md`), and give it to the agent that the profile's Agent
+routing table names for docs. If no doc change is needed, add no doc task and say why in the
+context notes.
 
 ## Output format
 

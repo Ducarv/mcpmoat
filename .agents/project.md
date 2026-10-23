@@ -87,10 +87,11 @@ A row that links to another file means: run the commands at the link target.
 ## Review
 
 - Extra sensitive path tokens: `inspect`, `exec`, `env`, `pins`, `hash`, `release`, `goreleaser`,
-  `workflows`, `.agents`, `.claude`, `CLAUDE.md`.
+  `workflows`, `.agents`, `.claude`, `CLAUDE.md`, `golangci`.
 - Path tokens to ignore: none.
 - Security-flagged files: `.claude/agents/review-*.md`, the review steps of the skills,
-  `.agents/project.md` and `CLAUDE.md`. They define the review rules. `research` marks a task that
+  `.agents/project.md`, `CLAUDE.md` and `.golangci.yml`. They define the review rules and the lint
+  gates (gosec, depguard). `research` marks a task that
   edits them with a security flag, and the path tokens above force the full review tier.
 - Project review criteria:
   - Code follows the Code style rules on rule tests (NFR-05), the scrubbed stdio environment

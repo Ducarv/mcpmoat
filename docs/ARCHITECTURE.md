@@ -145,14 +145,14 @@ can send any text. Raw control characters in such text can rewrite your terminal
 - `Quote(s)` returns `s` unchanged when it is safe, and a quoted, escaped form when it is not.
 - `QuoteIf(s, force)` also quotes a safe `s` when `force` is true.
 - `QuoteCut(s, n)` cuts to `n` runes, quotes the result, and adds `CutMarker` when it cut.
-- `Cut(s, n)` cuts to `n` runes at a rune boundary and adds no marker.
+- `Cut(s, n)` cuts to `n` runes at a rune boundary, adds no marker, and reports whether it cut.
 - `IsInvisible(r)` tells if a rune shows as nothing.
 
 The layers that import it are `cmd/mcpmoat`, `internal/discover`, `internal/report` and
 `internal/rules`. To list the files, run:
 
 ```sh
-grep -rl '"github.com/Ducarv/mcpmoat/internal/termsafe"' --include='*.go' . | grep -v _test.go
+git grep -l '"github.com/Ducarv/mcpmoat/internal/termsafe"' -- '*.go' ':!*_test.go'
 ```
 
 The rule: untrusted text goes through `termsafe` before it reaches a terminal. This covers server

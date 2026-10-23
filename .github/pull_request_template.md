@@ -25,6 +25,6 @@ Closes #
 
 ## Docs
 
-<!-- List the doc files this PR changes, for example docs/ARCHITECTURE.md. Write "none" if you ticked the second box. See CONTRIBUTING.md, Pull requests. -->
+<!-- List the doc files this PR changes, for example docs/ARCHITECTURE.md. Write "none" if no doc file changed. See CONTRIBUTING.md, Pull requests. -->
 
 -

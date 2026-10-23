@@ -225,6 +225,10 @@ CI builds with `-ldflags "-X main.version=ci-smoke"` and checks that `mcpmoat ve
 - A behaviour change is a change to flags, output, exit codes, rules, package layout, commands or
   security-relevant behaviour. A PR with a behaviour change and neither a doc update nor that sentence
   is not ready.
+- A "No doc change needed because ..." reason is real when the diff has no behaviour change, or when
+  the owner doc already states the new behaviour. A reason from an issue or a PR body is a claim:
+  check it against the diff. A change to security-relevant behaviour always needs an owner-doc
+  update, whatever the reason says.
 
 ## Security issues
 

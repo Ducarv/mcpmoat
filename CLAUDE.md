@@ -60,5 +60,4 @@ The Go practices come from [samber/cc-skills-golang](https://github.com/samber/c
 [Go Code Review Comments](https://go.dev/wiki/CodeReviewComments) and the
 [Google Go style guide](https://google.github.io/styleguide/go/).
 
-Agent definitions are in `.claude/agents/` and skill definitions in `.claude/skills/`. They read the
-project profile in [`.agents/project.md`](.agents/project.md).
+Agent definitions are in `.claude/agents/` and skill definitions in `.claude/skills/`.

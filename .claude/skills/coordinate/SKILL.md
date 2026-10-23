@@ -80,6 +80,8 @@ Work in dependency order. For each batch of unblocked tasks:
 - On-disk state (`pins.json` format and store, `.mcpmoat-ignore`): `datastore`
 - Tests: `unit-test` (isolated logic, rule cases, fixtures), `cli-test` (in-process command
   output, golden files, exit codes), `e2e-test` (`TestE2E*` Go tests that run the real binary)
+- Docs, Markdown and `.claude/` text: `general-purpose`. It is built in, so use it without the
+  `workflow:` prefix.
 - Tasks flagged as security-sensitive: run `review-security` **after** the dev agent finishes.
 
 **Every agent prompt includes:**
