@@ -773,6 +773,18 @@ const maxFloodLines = 101
 // show that the loader stopped early.
 const floodGuard = 30 * time.Second
 
+// assertFast fails the test when more than floodGuard has passed since start.
+func assertFast(t *testing.T, start time.Time) {
+	t.Helper()
+	if d := time.Since(start); d > floodGuard {
+		t.Errorf("the scan took %v, want less than %v", d, floodGuard)
+	}
+}
+
+// floodCap is the number of folder errors the loader prints before its last
+// "too many errors" line.
+const floodCap = maxFloodLines - 1
+
 // assertFloodResult checks the result of a scan of floodDir: exit code 2,
 // empty stdout, a capped list of errors that ends with the "too many errors"
 // line, and no unsafe rune.
@@ -790,7 +802,7 @@ func assertFloodResult(t *testing.T, code int, stdout, stderr string) {
 	}
 	assertScanErrorLines(t, stderr)
 	assertContainsAll(t, "the last stderr line", lines[len(lines)-1],
-		[]string{"mcpmoat scan: ", "too many errors", "files not checked"})
+		[]string{"mcpmoat scan: ", "too many errors", "files not fully checked"})
 	assertScanRulesStderr(t, stderr)
 }
 
@@ -804,9 +816,7 @@ func TestScanRulesErrorFlood(t *testing.T) {
 
 	got := scanRulesEmpty(t, "--no-connect", "--rules", dir)
 
-	if d := time.Since(start); d > floodGuard {
-		t.Errorf("the scan took %v, want less than %v", d, floodGuard)
-	}
+	assertFast(t, start)
 	assertFloodResult(t, got.code, got.stdout, got.stderr)
 }
 
@@ -875,9 +885,9 @@ func TestScanRulesIDClashFlood(t *testing.T) {
 		more   int
 	}{
 		// The built-in rule MOAT-T1-003 is embedded, so every file clashes.
-		{"every file clashes with a built-in rule", "MOAT-T1-003", "rule ID clashes with a built-in rule", idFloodFiles - 100},
+		{"every file clashes with a built-in rule", "MOAT-T1-003", "rule ID clashes with a built-in rule", idFloodFiles - floodCap},
 		// The first file with DUP-1 loads, and the other 999 are duplicates.
-		{"every file repeats one new ID", "DUP-1", "duplicate rule ID", idFloodFiles - 1 - 100},
+		{"every file repeats one new ID", "DUP-1", "duplicate rule ID", idFloodFiles - 1 - floodCap},
 	}
 
 	for _, tt := range tests {
@@ -889,9 +899,7 @@ func TestScanRulesIDClashFlood(t *testing.T) {
 
 			got := scanRulesEmpty(t, "--no-connect", "--rules", dir)
 
-			if d := time.Since(start); d > floodGuard {
-				t.Errorf("the scan took %v, want less than %v", d, floodGuard)
-			}
+			assertFast(t, start)
 			assertIDFloodResult(t, got.code, got.stdout, got.stderr, tt.reason, tt.more)
 			if after := dirSnapshot(t, dir); !slices.Equal(before, after) {
 				t.Error("the rules folder changed during the scan")

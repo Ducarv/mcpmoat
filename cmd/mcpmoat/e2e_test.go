@@ -565,7 +565,8 @@ func TestE2EScanRulesExtra(t *testing.T) {
 	}
 	baseOut, baseErr, baseCode := runBin(t, home, work, "scan", "--no-connect")
 	if code != baseCode || stdout != baseOut || stderr != baseErr {
-		t.Errorf("--rules changes the result: exit code %d, want %d\nstdout:\n%s\nstderr:\n%s", code, baseCode, stdout, stderr)
+		t.Errorf("--rules changes the result: exit code %d, want %d\nstdout:\n%s\nwant stdout:\n%s\nstderr:\n%s\nwant stderr:\n%s",
+			code, baseCode, stdout, baseOut, stderr, baseErr)
 	}
 }
 
@@ -726,9 +727,7 @@ func TestE2EScanRulesErrorFlood(t *testing.T) {
 
 	stdout, stderr, code := runBin(t, home, work, "scan", "--no-connect", "--rules", dir)
 
-	if d := time.Since(start); d > floodGuard {
-		t.Errorf("the scan took %v, want less than %v", d, floodGuard)
-	}
+	assertFast(t, start)
 	assertFloodResult(t, code, stdout, stderr)
 }
 
@@ -745,8 +744,6 @@ func TestE2EScanRulesIDClashFlood(t *testing.T) {
 
 	stdout, stderr, code := runBin(t, home, work, "scan", "--no-connect", "--rules", dir)
 
-	if d := time.Since(start); d > floodGuard {
-		t.Errorf("the scan took %v, want less than %v", d, floodGuard)
-	}
-	assertIDFloodResult(t, code, stdout, stderr, "rule ID clashes with a built-in rule", idFloodFiles-100)
+	assertFast(t, start)
+	assertIDFloodResult(t, code, stdout, stderr, "rule ID clashes with a built-in rule", idFloodFiles-floodCap)
 }

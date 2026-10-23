@@ -154,9 +154,9 @@ func pathFlag(fs *flag.FlagSet, name, what string, dest *string) {
 // -help count too, because the flag package treats them as a help request.
 // The flag package takes the next argument as the value of --config and
 // --rules, so "scan --config --no-connect" would use "--no-connect" as a file
-// name. We reject that case. The names come from fs, so a new scan flag is covered
-// without a second edit. A real file name that starts with "-" can be given
-// as ./-name.
+// name. We reject that case. The names come from fs, so a new scan flag is
+// covered without a second edit. A real file name that starts with "-" can be
+// given as ./-name.
 func isFlagOf(fs *flag.FlagSet, value string) bool {
 	name, ok := strings.CutPrefix(value, "-")
 	if !ok {
