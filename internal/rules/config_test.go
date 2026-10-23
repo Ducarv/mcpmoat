@@ -125,6 +125,7 @@ func TestCheckConfig(t *testing.T) {
 		{"leading space fires", remoteServer(discover.TransportHTTP, " http://evil.example/mcp"), insecure},
 		{"trailing newline fires", remoteServer(discover.TransportHTTP, "http://evil.example/mcp\n"), insecure},
 		{"bad escape fires", remoteServer(discover.TransportHTTP, "http://evil.example/%zz"), insecure},
+		{"scheme default with a bad escape fires", remoteServer(discover.TransportHTTP, "${SCHEME:-http}://evil.example/%zz"), insecure},
 		{"unparsable https URL gives none", remoteServer(discover.TransportHTTP, "https://evil.example/%zz"), nil},
 		{"empty remote URL gives none", remoteServer(discover.TransportHTTP, ""), nil},
 		{"disabled server is still checked", disabled, insecure},
@@ -140,6 +141,10 @@ func TestCheckConfig(t *testing.T) {
 		{"literal that starts with $", withEnv(stdioServer("node", "s.js"), "DB_PASSWORD", "$uperS3cretPw!"), secretEnv("DB_PASSWORD")},
 		{"literal next to a reference", withEnv(stdioServer("node", "s.js"), "PASSWORD", "hunter2hunter2${X}"), secretEnv("PASSWORD")},
 		{"short literal next to a reference", withEnv(stdioServer("node", "s.js"), "API_KEY", "sk-${OPENAI_KEY}"), nil},
+		{"token prefix next to a long reference", withEnv(stdioServer("node", "s.js"), "API_KEY", "sk-${OPENAI_API_KEY_VALUE}"), nil},
+		{"path key with a relative path", withEnv(stdioServer("node", "s.js"), "PRIVATE_KEY_PATH", "keys/id_rsa"), nil},
+		{"file key with a relative path", withEnv(stdioServer("node", "s.js"), "token_file", "secrets/gh"), nil},
+		{"token under a path key still fires", withEnv(stdioServer("node", "s.js"), "TOKEN_FILE", testGHToken), secretEnv("TOKEN_FILE")},
 		{"reference inside a path", withEnv(stdioServer("node", "s.js"), "TOKEN_PATH", "${HOME}/.config/token"), nil},
 		{"$HOME path under secret name", withEnv(stdioServer("node", "s.js"), "TOKEN_PATH", "$HOME/.config/token"), nil},
 		{"%APPDATA% path under secret name", withEnv(stdioServer("node", "s.js"), "API_KEY", `%APPDATA%\key.txt`), nil},
@@ -307,7 +312,7 @@ func TestCheckConfigNoLeak(t *testing.T) {
 
 	// The scan takes the value of the unknown flag "--auth-x" as the package.
 	misparsed := stdioServer("npx", "--auth-x", testGHToken, "pkg")
-	// "--auth-key" is not in npmRules, so the scan takes its value as the
+	// "--auth-key" is not in npmFlags, so the scan takes its value as the
 	// package. The value is a valid package name and RedactArgs masks it.
 	maskedName := stdioServer("npx", "--auth-key", "abcdef123456", "pkg")
 	// "--otp" is a known value flag: the scan skips its value and finds "pkg".

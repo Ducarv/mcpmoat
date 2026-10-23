@@ -28,7 +28,7 @@ const (
 	// appear in a Finding.
 	canaryHeader = "mcpmoat-canary-header-8Fk2Zs"
 	canaryToken  = "ghp_mcpmoatcanaryZk3Qp8Vw2LxN7rTb5HcYd4M" //nolint:gosec // G101: synthetic canary of the test fixture, not a credential
-	canaryHost   = "mcp.example.com"
+	canaryHost   = "mcp.example.invalid"
 )
 
 // inspectFixture builds and runs the stdio fixture server name and returns
@@ -228,7 +228,7 @@ func TestFixtureDangerousConfig(t *testing.T) {
 		{"remote-plain", rules.RulePlaintextSecret, rules.FieldHeaders, "X-Api-Key", ""},
 		{"env-secret", rules.RulePlaintextSecret, rules.FieldEnv, "GITHUB_TOKEN", ""},
 		{"latest-pkg", rules.RuleUnpinnedPackage, rules.FieldArgs, "", "@example-corp/files-mcp"},
-		{"docker-untagged", rules.RuleUnpinnedPackage, rules.FieldArgs, "", "example/mcp-server"},
+		{"docker-untagged", rules.RuleUnpinnedPackage, rules.FieldArgs, "", "registry.invalid/example/mcp-server"},
 	})
 
 	// A finding names the place of a problem and never the content.

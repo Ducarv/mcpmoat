@@ -13,9 +13,16 @@ import (
 	"github.com/Ducarv/mcpmoat/internal/termsafe"
 )
 
-// minShadowNameLen is the shortest tool name that CheckShadowing looks for.
-// Shorter names match too often in normal prose.
-const minShadowNameLen = 5
+const (
+	// minShadowNameLen is the shortest tool name, in the form of foldText,
+	// that CheckShadowing looks for. Shorter names match too often in prose.
+	minShadowNameLen = 5
+
+	// maxMentionsPerTool caps the findings of one tool. A description that
+	// names this many tools of other servers is already reported, and the
+	// cap keeps one hostile server from creating millions of findings.
+	maxMentionsPerTool = 10
+)
 
 // compoundName matches a tool name with two or more words: words of letters
 // and digits joined by "_" or "-" ("send_email"), or a lower-case letter
@@ -72,16 +79,15 @@ func (n nameOwners) other(identity int) (toolOwner, bool) {
 // is reported. Otherwise a hostile server could hide a mention by adding a
 // dummy tool with the victim's name.
 //
-// Names are compared in the form of foldText: without case, without "_",
-// "-" and other dashes, and without invisible runes (see
-// termsafe.IsInvisible). So "send-email", "sendEmail" and
-// "send<U+200B>_email" all mention "send_email", as the model reads them. A
-// name counts
-// as mentioned only at identifier boundaries: the bytes before and after it
-// are not letters, digits, "_" or "-". So "send_email_later" does not mention
-// "send_email". The whole description is scanned, with no size cap: padding
-// in front of a mention must not hide it from the check, because the model
-// reads the whole description.
+// Names and descriptions are compared in the form of foldText, as the model
+// reads them: "send-email", "sendEmail", "send\_email" and
+// "send<U+200B>_email" all mention "send_email". A name counts as mentioned
+// only at word boundaries: the bytes before and after it are not letters,
+// digits or "_". So "send_email_later" does not mention "send_email", and the
+// word "setup" does not mention "set_up". The whole description is scanned,
+// with no size cap: padding in front of a mention must not hide it from the
+// check, because the model reads the whole description. One tool gives at
+// most maxMentionsPerTool findings.
 //
 // A server is known by its launch config, not by its name or its position in
 // all (see launchKey). The same server configured in two clients or two
@@ -97,8 +103,9 @@ func (n nameOwners) other(identity int) (toolOwner, bool) {
 // prompts and resources is not. A tool name with a byte outside letters,
 // digits, "_" and "-" (a dot or a space, for example) cannot be found as a
 // token, so it is never a candidate name. A mention of a single-word tool
-// name is never found. Look-alike characters, such as the fullwidth U+FF3F
-// for "_", are not folded.
+// name is never found. A space or a dot between the words ("send email") is
+// not folded, because that is normal prose, and neither are look-alike
+// letters, such as the fullwidth U+FF3F for "_" or a Cyrillic "е".
 //
 // Tool names and descriptions are untrusted input from MCP servers. The check
 // only searches them as text. It never executes them or builds commands from
@@ -117,6 +124,9 @@ func CheckShadowing(all []ServerTools) []Finding {
 		for _, tool := range st.Tools {
 			clear(seen)
 			forEachToken(foldText(tool.Description), func(token string) {
+				if len(seen) >= maxMentionsPerTool {
+					return
+				}
 				n, ok := owners[token]
 				if !ok {
 					return
@@ -227,8 +237,11 @@ func indexOwners(all []ServerTools, identities []int) map[string]nameOwners {
 	owners := make(map[string]nameOwners)
 	for i, st := range all {
 		for _, tool := range st.Tools {
+			if !compoundName.MatchString(tool.Name) {
+				continue
+			}
 			name := foldText(tool.Name)
-			if len(tool.Name) < minShadowNameLen || !compoundName.MatchString(tool.Name) || !allIdentBytes(name) {
+			if len(name) < minShadowNameLen || !allIdentBytes(name) {
 				continue
 			}
 			o := toolOwner{identity: identities[i], server: st.Server.Name, toolName: tool.Name}
@@ -248,18 +261,33 @@ func indexOwners(all []ServerTools, identities []int) map[string]nameOwners {
 }
 
 // foldText returns s in the form that names and descriptions are compared
-// in: lower case, with no invisible runes (see termsafe.IsInvisible) and no
-// word separators ("_", "-", other dashes and the minus sign U+2212). So
-// "send_email", "Send-Email" and "sendEmail" all fold to "sendemail".
+// in, as a model reads them:
+//   - every dash ("-", other Pd dashes and the minus sign U+2212) is "_";
+//   - a "_" goes between a lower-case and an upper-case letter, so camelCase
+//     words split like snake_case ("sendEmail" is "send_email");
+//   - the result is lower case;
+//   - invisible runes (see termsafe.IsInvisible), control characters other
+//     than white space, backslashes and backticks are removed, so Markdown
+//     such as "send\_email" or "`send`_`email`" reads as "send_email".
+//
+// The word separator stays, so "set_up" never folds into the word "setup".
 func foldText(s string) string {
-	return strings.Map(func(r rune) rune {
+	var b strings.Builder
+	b.Grow(len(s))
+	prevLower := false
+	for _, r := range s {
 		switch {
-		case r == '_', r == '\u2212', unicode.Is(unicode.Pd, r), termsafe.IsInvisible(r):
-			return -1
-		default:
-			return unicode.ToLower(r)
+		case r == '\\', r == '`', termsafe.IsInvisible(r), unicode.IsControl(r) && !unicode.IsSpace(r):
+			continue // removed; the letter before still counts for camelCase
+		case r == '-', r == '\u2212', unicode.Is(unicode.Pd, r):
+			r = '_'
+		case prevLower && unicode.IsUpper(r):
+			b.WriteByte('_')
 		}
-	}, s)
+		prevLower = unicode.IsLower(r)
+		b.WriteRune(unicode.ToLower(r))
+	}
+	return b.String()
 }
 
 // forEachToken calls fn for each maximal run of identifier bytes in text.
@@ -292,11 +320,9 @@ func allIdentBytes(s string) bool {
 	return true
 }
 
-// isIdentByte reports whether b can be part of a tool name: a letter, a digit,
-// "_" or "-". Text is lowercase here, but upper case is kept for safety.
+// isIdentByte reports whether b can be part of a folded tool name: a
+// lower-case letter, a digit or "_". foldText has already made every letter
+// lower case and every dash "_".
 func isIdentByte(b byte) bool {
-	return b >= 'a' && b <= 'z' ||
-		b >= 'A' && b <= 'Z' ||
-		b >= '0' && b <= '9' ||
-		b == '_' || b == '-'
+	return b >= 'a' && b <= 'z' || b >= '0' && b <= '9' || b == '_'
 }

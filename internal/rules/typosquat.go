@@ -4,7 +4,7 @@ import (
 	"bufio"
 	"fmt"
 	"io"
-	"regexp"
+	"slices"
 	"strings"
 	"unicode/utf8"
 
@@ -111,19 +111,27 @@ type typoCandidate struct {
 // and one for the package that its runner fetches. A name that equals a
 // popular name is legitimate and gets no finding. A server name is also fine
 // when it equals the bare name of a scoped popular package, because a user
-// may name a local server freely. A package is not: it must equal the full
-// popular name, or else a copied bare name is scope squatting.
+// may name a local server freely, and "_" or "." in it count as "-". A
+// package is not free: it must equal the full popular name, or else a copied
+// bare name is scope squatting. A server that runs a popular package exactly
+// gets no finding at all.
 func (t *Typosquat) Check(s discover.Server) []Finding {
-	name := strings.ToLower(s.Name)
+	// A user may write "_" or "." where the popular name has "-".
+	name := nameForm(strings.ToLower(s.Name))
 	candidates := []typoCandidate{{full: name, bare: bareName(name), field: FieldName}}
 	if spec, ok := ExtractPackage(s.Command, s.Args.Values()); ok {
 		pkg := registryName(spec)
+		if slices.ContainsFunc(t.popular, func(p popularName) bool { return p.full == pkg }) {
+			// The server runs a popular package exactly, so it is that
+			// server, whatever the user calls it.
+			return nil
+		}
 		candidates = append(candidates, typoCandidate{
 			full:      pkg,
 			bare:      bareName(pkg),
 			field:     FieldArgs,
 			isPackage: true,
-			npm:       spec.Runner == RunnerNPX || spec.Runner == RunnerBunx,
+			npm:       spec.Runner.isNPM(),
 		})
 	}
 
@@ -175,7 +183,7 @@ func (t *Typosquat) closest(c typoCandidate) (string, bool) {
 		if c.full == compareForm(c, p) {
 			return "", false
 		}
-		if !c.isPackage && (c.full == p.bare || c.bare == p.bare) {
+		if !c.isPackage && (c.full == nameForm(p.bare) || c.bare == nameForm(p.bare)) {
 			return "", false // a server name is free to copy a bare name
 		}
 	}
@@ -211,13 +219,19 @@ func (t *Typosquat) closest(c typoCandidate) (string, bool) {
 }
 
 // compareForm returns the form of popular name p that closest compares with
-// the full name of c: the full name for a package, the flat name for a
-// server name.
+// the full name of c: the full name for a package, the flat name in
+// nameForm for a server name.
 func compareForm(c typoCandidate, p popularName) string {
 	if c.isPackage {
 		return p.full
 	}
-	return flatName(p.full)
+	return nameForm(flatName(p.full))
+}
+
+// nameForm writes every run of "-", "_" and "." in a server name as "-", so
+// "playwright_mcp" and "playwright-mcp" compare as one name.
+func nameForm(name string) string {
+	return nameSeparators.ReplaceAllString(name, "-")
 }
 
 // flatName writes a scoped npm name "@scope/name" as "scope-name". Any other
@@ -309,32 +323,6 @@ func scopeOf(name string) string {
 // name, such as a PyPI package or a docker image, is returned as it is.
 func bareName(name string) string {
 	return strings.TrimPrefix(name, scopeOf(name))
-}
-
-// pypiSeparators matches a run of the characters that PyPI treats as one.
-var pypiSeparators = regexp.MustCompile(`[-_.]+`)
-
-// registryName returns the package name of spec in the form that the
-// registry resolves and that the popular list uses: lower case; for PyPI,
-// every run of "-", "_" and "." written as "-" (PEP 503), so
-// "mcp_server_fetch" is "mcp-server-fetch"; for docker, without a Docker Hub
-// registry prefix or "library/", so "docker.io/mcp/fetch" is "mcp/fetch".
-func registryName(spec PackageSpec) string {
-	name := strings.ToLower(spec.Name)
-	switch spec.Runner {
-	case RunnerUVX, RunnerPipx:
-		return pypiSeparators.ReplaceAllString(name, "-")
-	case RunnerDocker:
-		for _, prefix := range []string{"docker.io/", "index.docker.io/", "registry-1.docker.io/"} {
-			if rest, found := strings.CutPrefix(name, prefix); found {
-				name = rest
-				break
-			}
-		}
-		return strings.TrimPrefix(name, "library/")
-	default:
-		return name
-	}
 }
 
 // osaDistance returns the optimal string alignment distance of a and b: the

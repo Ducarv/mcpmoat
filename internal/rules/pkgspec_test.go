@@ -152,7 +152,9 @@ func TestExtractPackage(t *testing.T) {
 			want: PackageSpec{RunnerBunx, "pkg", "1"}, ok: true},
 		{name: "bunx -p overrides", command: "bunx", args: []string{"-p", "pkg@1", "cmd"},
 			want: PackageSpec{RunnerBunx, "pkg", "1"}, ok: true},
-		{name: "bunx -c is doubtful", command: "bunx", args: []string{"-c", "echo hi"}},
+		// In Bun, -c/--config is the path of the bunfig file.
+		{name: "bunx --config value skipped", command: "bunx", args: []string{"--config", "bunfig.toml", "pkg@latest"},
+			want: PackageSpec{RunnerBunx, "pkg", "latest"}, ok: true, unpinned: true},
 		{name: "bunx pinned", command: "bunx", args: []string{"pkg@1.2.3"},
 			want: PackageSpec{RunnerBunx, "pkg", "1.2.3"}, ok: true},
 		{name: "bunx unpinned", command: "bunx", args: []string{"pkg"},
@@ -243,7 +245,8 @@ func TestExtractPackage(t *testing.T) {
 		{name: "pipx run alone", command: "pipx", args: []string{"run"}},
 		{name: "pipx no args", command: "pipx"},
 		{name: "pipx name with invalid char", command: "pipx", args: []string{"run", "pk#g"}},
-		{name: "pipx flag before run", command: "pipx", args: []string{"--quiet", "run", "pkg"}},
+		{name: "pipx flag before run", command: "pipx", args: []string{"--quiet", "run", "pkg"},
+			want: PackageSpec{RunnerPipx, "pkg", ""}, ok: true, unpinned: true},
 
 		// docker
 		{name: "docker no tag", command: "docker", args: []string{"run", "-i", "--rm", "image"},
@@ -310,7 +313,10 @@ func TestExtractPackage(t *testing.T) {
 
 		{name: "docker upper case image", command: "docker", args: []string{"run", "Image"}},
 		{name: "docker upper case path", command: "docker", args: []string{"run", "ghcr.io/Org/img:1"}},
-		{name: "docker upper case registry", command: "docker", args: []string{"run", "GHCR.io/org/img"}},
+		// A registry host ignores case; the path after it must be lower case.
+		{name: "docker upper case registry", command: "docker", args: []string{"run", "GHCR.io/org/img"},
+			want: PackageSpec{RunnerDocker, "GHCR.io/org/img", ""}, ok: true, unpinned: true},
+		{name: "docker upper case path", command: "docker", args: []string{"run", "ghcr.io/Org/img"}},
 		{name: "docker empty path component", command: "docker", args: []string{"run", "a//b"}},
 		{name: "docker dot-dot component", command: "docker", args: []string{"run", "a/../b"}},
 		{name: "docker component starts with dash char", command: "docker", args: []string{"run", "a/-b"}},
@@ -418,6 +424,10 @@ func TestPackageAt(t *testing.T) {
 		{"cmd /c npx", "cmd", []string{"/c", "npx", "-y", "pkg-a"}, 3, true},
 		{"cmd.exe /C pipx run", "cmd.exe", []string{"/C", "pipx", "run", "pkg-a"}, 3, true},
 		{"cmd without /c", "cmd", []string{"npx", "pkg-a"}, 0, false},
+		{"cmd /s /c npx", "cmd", []string{"/s", "/c", "npx", "pkg-a"}, 3, true},
+		{"cmd /c with nothing after", "cmd", []string{"/c"}, 0, false},
+		{"pipx global flag before run", "pipx", []string{"--verbose", "run", "pkg-a"}, 2, true},
+		{"docker upper-case registry host", "docker", []string{"run", "Registry.example.com/mcp/x"}, 1, true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

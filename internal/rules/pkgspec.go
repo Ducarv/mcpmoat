@@ -2,6 +2,7 @@ package rules
 
 import (
 	"path/filepath"
+	"regexp"
 	"strings"
 	"unicode"
 )
@@ -59,8 +60,40 @@ func (p PackageSpec) Unpinned() bool {
 	if strings.HasPrefix(p.Version, "!=") && !strings.Contains(p.Version, ",") {
 		return true
 	}
-	npm := p.Runner == RunnerNPX || p.Runner == RunnerBunx
-	return npm && (p.Version == "*" || strings.EqualFold(p.Version, "x"))
+	return p.Runner.isNPM() && (p.Version == "*" || strings.EqualFold(p.Version, "x"))
+}
+
+// isNPM reports whether r fetches from the npm registry.
+func (r Runner) isNPM() bool {
+	return r == RunnerNPX || r == RunnerBunx
+}
+
+// nameSeparators matches a run of "-", "_" and ".". PyPI treats such a run
+// as one "-" (PEP 503), and the typosquat check reads server names the same
+// way.
+var nameSeparators = regexp.MustCompile(`[-_.]+`)
+
+// registryName returns the package name of spec in the form that the
+// registry resolves and that the popular list uses: lower case; for PyPI,
+// every run of "-", "_" and "." written as "-" (PEP 503), so
+// "mcp_server_fetch" is "mcp-server-fetch"; for docker, without a Docker Hub
+// registry prefix or "library/", so "docker.io/mcp/fetch" is "mcp/fetch".
+func registryName(spec PackageSpec) string {
+	name := strings.ToLower(spec.Name)
+	switch spec.Runner {
+	case RunnerUVX, RunnerPipx:
+		return nameSeparators.ReplaceAllString(name, "-")
+	case RunnerDocker:
+		for _, prefix := range []string{"docker.io/", "index.docker.io/", "registry-1.docker.io/"} {
+			if rest, found := strings.CutPrefix(name, prefix); found {
+				name = rest
+				break
+			}
+		}
+		return strings.TrimPrefix(name, "library/")
+	default:
+		return name
+	}
 }
 
 // ExtractPackage returns the package that command and args would fetch and
@@ -103,9 +136,9 @@ func packageAt(command string, args []string) (PackageSpec, int, bool) {
 
 // extractPackage does the parse for packageAt, before the name check.
 func extractPackage(command string, args []string) (PackageSpec, int, bool) {
-	if isCmdWrapper(command, args) {
-		spec, at, ok := extractPackage(args[1], args[2:])
-		return spec, at + 2, ok
+	if i, ok := cmdWrapped(command, args); ok {
+		spec, at, ok := extractPackage(args[i], args[i+1:])
+		return spec, i + 1 + at, ok
 	}
 	switch r := runnerOf(command); r {
 	case RunnerNPX:
@@ -115,11 +148,13 @@ func extractPackage(command string, args []string) (PackageSpec, int, bool) {
 	case RunnerUVX:
 		return extractPython(r, uvxFlags, args)
 	case RunnerPipx:
-		if len(args) == 0 || args[0] != "run" {
+		// Global flags such as "--verbose" may come before "run".
+		sub, at, ok := scanArgs(args, flagTable{})
+		if !ok || sub != "run" {
 			return PackageSpec{}, 0, false
 		}
-		spec, at, ok := extractPython(r, pipxFlags, args[1:])
-		return spec, at + 1, ok
+		spec, specAt, ok := extractPython(r, pipxFlags, args[at+1:])
+		return spec, at + 1 + specAt, ok
 	case RunnerDocker:
 		return extractDocker(args)
 	default:
@@ -127,11 +162,32 @@ func extractPackage(command string, args []string) (PackageSpec, int, bool) {
 	}
 }
 
-// isCmdWrapper reports whether command and args are "cmd /c <command> ...",
-// the usual way to start npx or uvx from a Windows client config.
-func isCmdWrapper(command string, args []string) bool {
-	base := strings.TrimSuffix(strings.ToLower(filepath.Base(command)), ".exe")
-	return base == "cmd" && len(args) >= 2 && strings.EqualFold(args[0], "/c")
+// cmdWrapped reports whether command and args are "cmd [/s /d /q] /c
+// <command> ...", the usual way to start npx or uvx from a Windows client
+// config. It returns the index in args of the wrapped command.
+func cmdWrapped(command string, args []string) (int, bool) {
+	if commandBase(command) != "cmd" {
+		return 0, false
+	}
+	for i, arg := range args {
+		switch {
+		case strings.EqualFold(arg, "/c"):
+			return i + 1, i+1 < len(args)
+		case len(arg) == 2 && arg[0] == '/':
+			continue // another switch, such as /s or /q
+		default:
+			return 0, false
+		}
+	}
+	return 0, false
+}
+
+// commandBase returns the base name of command in lower case, without a
+// Windows ".exe" or ".cmd" suffix.
+func commandBase(command string) string {
+	base := strings.ToLower(filepath.Base(command))
+	base = strings.TrimSuffix(base, ".exe")
+	return strings.TrimSuffix(base, ".cmd")
 }
 
 // validName reports whether name is a valid package name for the registry of
@@ -213,6 +269,8 @@ func validImageName(name string) bool {
 				}
 				part = host
 			}
+			// A registry host is a DNS name, and DNS names ignore case.
+			part = strings.ToLower(part)
 		}
 		if !validImagePart(part) {
 			return false
@@ -254,13 +312,10 @@ func isLowerAlnum(r rune) bool {
 	return (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9')
 }
 
-// runnerOf maps a command to a runner by its base name. It ignores case and
-// a Windows ".exe" or ".cmd" suffix. It returns "" for an unknown command.
+// runnerOf maps a command to a runner by its base name (see commandBase).
+// It returns "" for an unknown command.
 func runnerOf(command string) Runner {
-	base := strings.ToLower(filepath.Base(command))
-	base = strings.TrimSuffix(base, ".exe")
-	base = strings.TrimSuffix(base, ".cmd")
-	switch r := Runner(base); r {
+	switch r := Runner(commandBase(command)); r {
 	case RunnerNPX, RunnerBunx, RunnerUVX, RunnerPipx, RunnerDocker:
 		return r
 	default:
@@ -288,7 +343,7 @@ func flagSet(names ...string) map[string]bool {
 // else the first argument that is not a flag. It also returns the index of
 // the argument that holds the spec. It returns false if there is no spec, if
 // a stop flag comes first, or if a second override flag follows the first
-// one (see secondOverride).
+// one (see secondOverride, which walks the flags in the same way).
 func scanArgs(args []string, flags flagTable) (spec string, at int, ok bool) {
 	for i := 0; i < len(args); i++ {
 		arg := args[i]
@@ -330,6 +385,7 @@ func scanArgs(args []string, flags flagTable) (spec string, at int, ok bool) {
 // secondOverride reports whether the runner flags in args, up to the first
 // argument that is not a flag (the command that the runner runs), hold
 // another override flag. Arguments after that command belong to the server.
+// It walks the flags as scanArgs does; keep the two loops in step.
 func secondOverride(args []string, flags flagTable) bool {
 	for i := 0; i < len(args); i++ {
 		arg := args[i]
@@ -370,10 +426,9 @@ var bunxFlags = flagTable{
 	valued: flagSet(
 		"--cwd", "--registry", "--install", "--tsconfig-override", "--env-file",
 		"-r", "--preload", "--port", "--define", "-d", "--loader", "-l",
-		"--elide-lines", "--user-agent",
+		"--elide-lines", "--user-agent", "-c", "--config",
 	),
 	override: flagSet("-p", "--package"),
-	stop:     flagSet("-c", "--config"),
 }
 
 // extractNPM reads the package from npx or bunx arguments, with the flag
@@ -611,6 +666,11 @@ func parseImage(image string) (name, version string, ok bool) {
 		return name, digest, true
 	}
 	return name, tag, true
+}
+
+// hasPrefixFold reports whether s starts with prefix, in any case.
+func hasPrefixFold(s, prefix string) bool {
+	return len(s) >= len(prefix) && strings.EqualFold(s[:len(prefix)], prefix)
 }
 
 // plainSpec reports whether spec is a usable registry reference: it is not

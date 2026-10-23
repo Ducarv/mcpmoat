@@ -78,7 +78,10 @@ func CheckConfig(s discover.Server) []Finding {
 // checkInsecureURL reports MOAT-T4-001: a remote server that uses http://
 // to a host that is not loopback. A variable reference is read as its
 // default first (see refDefault), so "http://${HOST}:${PORT}/mcp" still
-// fires: the scheme is known even when the host is not.
+// fires: the scheme is known even when the host is not. Known limit: a
+// loopback default, as in "http://${HOST:-localhost}/mcp", counts as
+// loopback. That default is what runs unless the user's own environment sets
+// the variable, and reporting it would flag every local dev server.
 //
 // The check fails closed. Clients parse URLs more loosely than Go: they trim
 // spaces and control characters and accept a bad escape such as "%zz", and
@@ -89,10 +92,11 @@ func checkInsecureURL(s discover.Server) []Finding {
 		return nil
 	}
 	raw := strings.TrimFunc(s.URL.Reveal(), func(r rune) bool { return r <= ' ' || r == 0x7f })
-	u, err := url.Parse(varRef.ReplaceAllStringFunc(raw, refDefault))
+	resolved := varRef.ReplaceAllStringFunc(raw, refDefault)
+	u, err := url.Parse(resolved)
 	switch {
 	case err != nil:
-		if !hasPrefixFold(raw, "http://") {
+		if !hasPrefixFold(resolved, "http://") && !hasPrefixFold(raw, "http://") {
 			return nil
 		}
 	case !strings.EqualFold(u.Scheme, "http") || discover.IsLoopbackHost(u.Hostname()):
@@ -115,11 +119,6 @@ func refDefault(ref string) string {
 		return def
 	}
 	return "0"
-}
-
-// hasPrefixFold reports whether s starts with prefix, in any case.
-func hasPrefixFold(s, prefix string) bool {
-	return len(s) >= len(prefix) && strings.EqualFold(s[:len(prefix)], prefix)
 }
 
 // checkPlaintextSecrets reports MOAT-T4-002 for every env and header entry
@@ -166,24 +165,26 @@ func stripAuthScheme(value string) string {
 // like a secret written in clear text. It never prints, logs or returns value.
 //
 // The order of the tests matters:
-//  1. An empty value is not a secret.
-//  2. A known token prefix (such as "ghp_") on a value of at least
-//     minPrefixedTokenLen bytes is a secret, even when the value also holds
-//     "${" or looks like a path.
-//  3. A reference (${VAR}, ${env:VAR}, or a whole value $VAR or %VAR%) is
-//     the safe form. The ${...} references are removed, and the tests below
-//     look at the literal text that is left, so "hunter2hunter2${X}" is
-//     still a secret. Known limit: a literal default in ${VAR:-literal} is
-//     not flagged.
+//  1. An empty value, or a value that is only a reference ($VAR or %VAR%),
+//     is not a secret.
+//  2. The ${...} references (${VAR}, ${env:VAR}) are the safe form. They are
+//     removed, and the tests below look at the literal text that is left, so
+//     "hunter2hunter2${X}" is still a secret and "sk-${OPENAI_KEY}" is not.
+//     Known limit: a literal default in ${VAR:-literal} is not flagged.
+//  3. A known token prefix (such as "ghp_") on a literal of at least
+//     minPrefixedTokenLen bytes is a secret, even when it looks like a path.
 //  4. A URL with a password in it ("postgres://user:pass@host/db") is a
 //     secret.
-//  5. Any other path or URL is not a secret. A path can start with a
-//     variable ("$HOME/x", "%APPDATA%\x") or end in a file extension such
-//     as ".json" or ".pem". Known limits: an absolute path is never a
-//     secret, so a random token that starts with "/" is a false negative,
-//     under any key; and a long relative path with no extension, such as
-//     "projects/my-project/locations/us-central1", can pass the entropy
-//     test of step 7.
+//  5. A key that names a path (it ends in "PATH", "FILE", "DIR",
+//     "DIRECTORY" or "FOLDER", in any case) holds a path, and any other
+//     path or URL is not a secret either. A path can start with a variable
+//     ("$HOME/x", "%APPDATA%\x") or end in a file extension such as ".json"
+//     or ".pem". Known limits: an absolute path is never a secret, so a
+//     random token that starts with "/" is a false negative, under any key;
+//     and a long relative path or ID with no extension, such as
+//     "projects/my-project/locations/us-central1" or the model ID
+//     "meta-llama/Llama-3.1-70B-Instruct", can pass the entropy test of
+//     step 7.
 //  6. A credential-like key name with a value of at least minNamedSecretLen
 //     bytes is a secret, unless the value is true, false or a number. Known
 //     limits: an all-digit secret such as a numeric PIN is not flagged,
@@ -192,28 +193,37 @@ func stripAuthScheme(value string) string {
 //     ("AUTH_STRATEGY=client_credentials") is flagged.
 //  7. A long, random, token-shaped value is a secret, whatever its key.
 func looksLikePlaintextSecret(key, value string) bool {
-	if value == "" {
-		return false
-	}
-	if len(value) >= minPrefixedTokenLen && discover.HasTokenPrefix(value) {
-		return true
-	}
-	if wholeVar.MatchString(value) {
+	if value == "" || wholeVar.MatchString(value) {
 		return false
 	}
 	if value = varRef.ReplaceAllString(value, ""); value == "" {
 		return false
 	}
+	if len(value) >= minPrefixedTokenLen && discover.HasTokenPrefix(value) {
+		return true
+	}
 	if hasURLPassword(value) {
 		return true
 	}
-	if looksLikePathOrURL(value) {
+	if namesAPath(key) || looksLikePathOrURL(value) {
 		return false
 	}
 	if discover.IsSecretName(key) && len(value) >= minNamedSecretLen && !isBoolOrNumber(value) {
 		return true
 	}
 	return isTokenShaped(value) && len(value) >= minEntropyLen && shannonEntropy(value) >= minEntropy
+}
+
+// namesAPath reports whether key is the name of a path setting, such as
+// "PRIVATE_KEY_PATH", "TOKEN_FILE" or "CREDENTIALS_DIR".
+func namesAPath(key string) bool {
+	lower := strings.ToLower(key)
+	for _, suffix := range []string{"path", "file", "dir", "directory", "folder"} {
+		if strings.HasSuffix(lower, suffix) {
+			return true
+		}
+	}
+	return false
 }
 
 // hasURLPassword reports whether value is a URL with a non-empty password

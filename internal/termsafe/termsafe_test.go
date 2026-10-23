@@ -1,6 +1,7 @@
 package termsafe_test
 
 import (
+	"fmt"
 	"strconv"
 	"strings"
 	"testing"
@@ -393,8 +394,11 @@ func TestIsInvisible(t *testing.T) {
 		{'\u00e9', false}, // precomposed e with acute accent
 	}
 	for _, tt := range tests {
-		if got := termsafe.IsInvisible(tt.r); got != tt.want {
-			t.Errorf("IsInvisible(%U) = %v, want %v", tt.r, got, tt.want)
-		}
+		t.Run(fmt.Sprintf("%U", tt.r), func(t *testing.T) {
+			t.Parallel()
+			if got := termsafe.IsInvisible(tt.r); got != tt.want {
+				t.Errorf("IsInvisible(%U) = %v, want %v", tt.r, got, tt.want)
+			}
+		})
 	}
 }

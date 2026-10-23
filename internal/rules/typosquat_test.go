@@ -228,7 +228,7 @@ func TestTyposquatCheck(t *testing.T) {
 		},
 		{
 			name:   "server name close to the flat form of a scoped popular name",
-			server: npxServer("playwrigth-mcp", "@playwright/mcp@latest"),
+			server: discover.Server{Name: "playwrigth-mcp"},
 			want:   []want{{FieldName, "@playwright/mcp"}},
 		},
 		{
@@ -353,6 +353,13 @@ func TestTyposquatCheck(t *testing.T) {
 		{name: "200 rune package", server: npxServer("x", strings.Repeat("a", 200))},
 		{name: "unrelated scoped package", server: npxServer("notes", "@example-corp/notes-mcp")},
 		// A user who names a server after a scoped package writes it flat.
+		// "_" and "." in a server name count as "-".
+		{name: "underscore flat name", server: discover.Server{Name: "playwright_mcp"}},
+		{name: "underscore bare name", server: discover.Server{Name: "server_github"}},
+		{name: "underscore PyPI name", server: discover.Server{Name: "mcp_server_fetch"}},
+		{name: "underscore unscoped npm name", server: discover.Server{Name: "context7_mcp"}},
+		// A server that runs a popular package exactly is that server.
+		{name: "name typo on an exact popular package", server: npxServer("mcp-server-gitt", "@playwright/mcp@1.0.0")},
 		{name: "flat name of @playwright/mcp", server: npxServer("playwright-mcp", "@playwright/mcp@latest")},
 		{name: "flat name of @stripe/mcp", server: npxServer("stripe-mcp", "@stripe/mcp")},
 		{name: "flat name of @sentry/mcp-server", server: npxServer("sentry-mcp-server", "@sentry/mcp-server")},
