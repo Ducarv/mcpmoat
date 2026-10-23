@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"io/fs"
-	"regexp"
 	"strings"
 	"testing"
 	"unicode/utf8"
@@ -227,15 +226,33 @@ func TestBuiltinRulesASCII(t *testing.T) {
 	}
 }
 
-// t1009SkipText matches the MOAT-T1-004 cases that only its word patterns
-// (keychain, credentials store or file) match. MOAT-T1-009 leaves those
-// patterns out on purpose (see its header comment).
-var t1009SkipText = regexp.MustCompile(`(?i)\bkeychains?\b|\bcredentials?\s+(?:stores?|files?)\b`)
+// schemaWithDescription returns a schema with one property whose description
+// is text. It encodes the schema as inspect.marshalSchema does: encoding/json
+// with no HTML escapes and no final newline.
+func schemaWithDescription(t *testing.T, text string) string {
+	t.Helper()
+	var buf bytes.Buffer
+	enc := json.NewEncoder(&buf)
+	enc.SetEscapeHTML(false)
+	schema := map[string]any{"properties": map[string]any{"x": map[string]any{"type": "string", "description": text}}}
+	if err := enc.Encode(schema); err != nil {
+		t.Fatal(err)
+	}
+	return strings.TrimSuffix(buf.String(), "\n")
+}
+
+// isT1004WordPattern reports whether re is one of the MOAT-T1-004 word
+// patterns (keychain, credentials store or file). MOAT-T1-009 leaves them out
+// on purpose (see its header comment).
+func isT1004WordPattern(re string) bool {
+	return strings.Contains(re, "keychain") || strings.Contains(re, `credentials?\s+`)
+}
 
 // TestSchemaRuleCopiesDescriptionRules checks that MOAT-T1-009 stays in sync
-// with the rules it copies. Each should_match case of MOAT-T1-001, MOAT-T1-003
-// and MOAT-T1-004 is put in a schema description, encoded as inspect encodes
-// a schema (encoding/json without HTML escapes), and MOAT-T1-009 must match it.
+// with the rules it copies. Each case of MOAT-T1-001, MOAT-T1-003 and
+// MOAT-T1-004 is put in a schema description: MOAT-T1-009 must match every
+// should_match case and no should_not_match case. A MOAT-T1-004 should_match
+// case that only its word patterns match is skipped.
 func TestSchemaRuleCopiesDescriptionRules(t *testing.T) {
 	t.Parallel()
 
@@ -243,28 +260,51 @@ func TestSchemaRuleCopiesDescriptionRules(t *testing.T) {
 	for _, r := range mustBuiltin(t, WithCompiler(builtinCompiler())) {
 		byID[r.ID] = r
 	}
-	m, err := byID["MOAT-T1-009"].Match.Compile()
-	if err != nil {
-		t.Fatalf("MOAT-T1-009: compile: %v", err)
-	}
-	for _, id := range []string{"MOAT-T1-001", "MOAT-T1-003", "MOAT-T1-004"} {
-		cases := byID[id].ShouldMatch
-		if len(cases) == 0 {
-			t.Fatalf("%s: no should_match case loaded", id)
+	compile := func(id string, m Match) *Matcher {
+		t.Helper()
+		c, err := m.Compile()
+		if err != nil {
+			t.Fatalf("%s: compile: %v", id, err)
 		}
-		for i, c := range cases {
-			if id == "MOAT-T1-004" && t1009SkipText.MatchString(c.Text) {
+		return c
+	}
+	r009, ok := byID["MOAT-T1-009"]
+	if !ok {
+		t.Fatal("MOAT-T1-009 is not loaded")
+	}
+	schemaRule := compile(r009.ID, r009.Match)
+
+	r004, ok := byID["MOAT-T1-004"]
+	if !ok {
+		t.Fatal("MOAT-T1-004 is not loaded")
+	}
+	var copiedRegex []string
+	for _, re := range r004.Match.AnyRegex {
+		if !isT1004WordPattern(re) {
+			copiedRegex = append(copiedRegex, re)
+		}
+	}
+	if len(copiedRegex) == len(r004.Match.AnyRegex) {
+		t.Fatal("MOAT-T1-004 has no word pattern; update isT1004WordPattern")
+	}
+	copied004 := compile(r004.ID, Match{AnyRegex: copiedRegex})
+
+	for _, id := range []string{"MOAT-T1-001", "MOAT-T1-003", "MOAT-T1-004"} {
+		r, ok := byID[id]
+		if !ok || len(r.ShouldMatch) == 0 || len(r.ShouldNotMatch) == 0 {
+			t.Fatalf("%s: the rule or its cases are not loaded", id)
+		}
+		for i, c := range r.ShouldMatch {
+			if id == r004.ID && len(copied004.Match(c.Text)) == 0 {
 				continue
 			}
-			var buf bytes.Buffer
-			enc := json.NewEncoder(&buf)
-			enc.SetEscapeHTML(false)
-			if err := enc.Encode(c.Text); err != nil {
-				t.Fatal(err)
+			if s := schemaWithDescription(t, c.Text); len(schemaRule.Match(s)) == 0 {
+				t.Errorf("MOAT-T1-009 does not match %s should_match[%d] in a schema: %s", id, i, s)
 			}
-			schema := `{"properties":{"x":{"type":"string","description":` + strings.TrimSpace(buf.String()) + `}}}`
-			if len(m.Match(schema)) == 0 {
-				t.Errorf("MOAT-T1-009 does not match %s should_match[%d] in a schema: %s", id, i, schema)
+		}
+		for i, c := range r.ShouldNotMatch {
+			if s := schemaWithDescription(t, c.Text); len(schemaRule.Match(s)) > 0 {
+				t.Errorf("MOAT-T1-009 matches %s should_not_match[%d] in a schema: %s", id, i, s)
 			}
 		}
 	}
