@@ -99,10 +99,10 @@ func assertContainsAll(t *testing.T, what, got string, wants []string) {
 // notice noRulesNotice has the same prefix and is not a warning either.
 func assertScanErrorLines(t *testing.T, stderr string) {
 	t.Helper()
-	const prefix = "mcpmoat scan: "
+	assertScanPrefix(t, stderr)
 	for _, line := range nonEmptyLines(stderr) {
-		if !strings.HasPrefix(line, prefix) || strings.Contains(line, "warning:") {
-			t.Errorf("stderr line %q must start with %q and not be a warning", line, prefix)
+		if strings.HasPrefix(line, scanWarnPrefix) {
+			t.Errorf("stderr line %q is a warning, want an error", line)
 		}
 	}
 }
@@ -113,6 +113,17 @@ func assertNoRulesNotice(t *testing.T, stderr string) {
 	t.Helper()
 	if want := noRulesNotice + "\n"; stderr != want {
 		t.Errorf("stderr = %q, want only the notice %q", stderr, want)
+	}
+}
+
+// assertNoticeForCode fails the test unless stderr is exactly noRulesNotice
+// for exit code 0, and holds no notice for another exit code.
+func assertNoticeForCode(t *testing.T, code int, stderr string) {
+	t.Helper()
+	if code == exitOK {
+		assertNoRulesNotice(t, stderr)
+	} else if strings.Contains(stderr, noRulesNotice) {
+		t.Errorf("stderr holds the notice %q, but the scan failed\nstderr:\n%s", noRulesNotice, stderr)
 	}
 }
 
@@ -138,17 +149,9 @@ func assertScanResult(t *testing.T, code int, stdout, stderr string, want scanWa
 		t.Errorf("exit code = %d, want %d\nstdout:\n%s\nstderr:\n%s", code, want.code, stdout, stderr)
 	}
 	assertContainsAll(t, "stdout", stdout, want.stdout)
-	for _, bad := range want.noStdout {
-		if strings.Contains(stdout, bad) {
-			t.Errorf("stdout contains %q\nstdout:\n%s", bad, stdout)
-		}
-	}
+	assertContainsNone(t, "stdout", stdout, want.noStdout)
 	assertContainsAll(t, "stderr", stderr, want.stderr)
-	if want.code == exitOK {
-		assertNoRulesNotice(t, stderr)
-	} else if strings.Contains(stderr, noRulesNotice) {
-		t.Errorf("stderr holds the notice %q, but the scan failed\nstderr:\n%s", noRulesNotice, stderr)
-	}
+	assertNoticeForCode(t, want.code, stderr)
 	assertScanErrorLines(t, stderr)
 	assertNoLeakBoth(t, stdout, stderr)
 	assertNoEscape(t, stdout, stderr)
@@ -371,3 +374,6 @@ func assertContainsNone(t *testing.T, what, got string, bad []string) {
 		}
 	}
 }
+
+// scanWarnPrefix is the start of every scan warning line.
+const scanWarnPrefix = "mcpmoat scan: warning: "

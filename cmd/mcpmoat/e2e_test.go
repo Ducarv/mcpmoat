@@ -543,7 +543,7 @@ func TestE2EScanIgnore(t *testing.T) {
 		// The warning and the entry count come before the notice. The
 		// warning text after the line number is not checked here.
 		assertStderrLines(t, stderr, []lineWant{
-			prefixLine(ignoreWarnPrefix + rules.IgnoreFileName + ":2: "),
+			prefixLine(scanWarnPrefix + rules.IgnoreFileName + ":2: "),
 			exactLine("mcpmoat scan: using 1 entry from " + rules.IgnoreFileName),
 			exactLine(noRulesNotice),
 		})

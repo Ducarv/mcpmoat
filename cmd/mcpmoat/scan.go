@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"flag"
+	"fmt"
 	"io"
 	"path/filepath"
 	"strings"
@@ -193,7 +194,7 @@ func (c *cli) scanConfig(ctx context.Context, path string, ignoreIDs []string) i
 	wd, err := c.getwd()
 	if err != nil {
 		wd = "" // do not use a value that comes with an error
-		fprintf(c.stderr, "mcpmoat scan: warning: cannot read the working directory; %s is not read\n", rules.IgnoreFileName)
+		c.warnf("cannot read the working directory; %s is not read", rules.IgnoreFileName)
 	}
 	if !filepath.IsAbs(path) && wd != "" {
 		path = filepath.Join(wd, path)
@@ -238,6 +239,11 @@ func (c *cli) scanAuto(ctx context.Context, ignoreIDs []string) int {
 	return c.listServers(discover.Discover(ctx, discover.Options{Home: home, WorkDir: wd}))
 }
 
+// warnf prints one scan warning line on stderr.
+func (c *cli) warnf(format string, a ...any) {
+	fprintf(c.stderr, "mcpmoat scan: warning: %s\n", fmt.Sprintf(format, a...))
+}
+
 // loadIgnore builds the ignore list: the entries of .mcpmoat-ignore in the
 // directory wd, then one entry for each --ignore ID in ids. ids holds only
 // valid rule IDs: the --ignore flag checks them. An empty wd means that the
@@ -256,10 +262,10 @@ func (c *cli) loadIgnore(wd string, ids []string) rules.IgnoreList {
 		if err != nil {
 			// The error text already starts with "read ignore file <path>",
 			// so the line does not name the file again.
-			fprintf(c.stderr, "mcpmoat scan: warning: %s; mcpmoat uses no entries from it\n", termsafe.Quote(err.Error()))
+			c.warnf("%s; mcpmoat uses no entries from it", termsafe.Quote(err.Error()))
 		}
 		for _, w := range warnings {
-			fprintf(c.stderr, "mcpmoat scan: warning: %s\n", w)
+			c.warnf("%s", w)
 		}
 		switch n := fromFile.Len(); {
 		case n == 1:

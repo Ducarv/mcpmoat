@@ -245,11 +245,7 @@ func TestScanConnectFlags(t *testing.T) {
 			if len(tt.wantStdout) == 0 && stdout.Len() != 0 {
 				t.Errorf("stdout = %q, want empty", stdout)
 			}
-			if tt.wantCode == exitOK {
-				assertNoRulesNotice(t, stderr.String())
-			} else if strings.Contains(stderr.String(), noRulesNotice) {
-				t.Errorf("stderr holds the notice %q, but the scan failed\nstderr:\n%s", noRulesNotice, stderr)
-			}
+			assertNoticeForCode(t, tt.wantCode, stderr.String())
 			assertNoLeakBoth(t, stdout.String(), stderr.String())
 			assertNoEscape(t, stdout.String(), stderr.String())
 		})

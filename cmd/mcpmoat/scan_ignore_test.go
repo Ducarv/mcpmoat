@@ -23,9 +23,6 @@ const ignoreUsageMsg = "for flag -ignore: --ignore needs a rule ID"
 // ignoreCwdWarning is the warning of --config mode when getwd fails.
 const ignoreCwdWarning = "mcpmoat scan: warning: cannot read the working directory; .mcpmoat-ignore is not read"
 
-// ignoreWarnPrefix is the start of every warning about .mcpmoat-ignore.
-const ignoreWarnPrefix = "mcpmoat scan: warning: "
-
 // ignoreMarker is a marker inside the bad lines of the ignore files of these
 // tests. stderr must never contain it.
 const ignoreMarker = "ZZMARK"
@@ -296,8 +293,8 @@ func TestScanIgnoreFile(t *testing.T) {
 					"MOAT-T1-003\n"+ignoreMarker+"/bad\nMOAT-T1-004 ok-srv\nMOAT-T1-005 a b "+ignoreMarker+"\n")
 			},
 			wantLines: []lineWant{
-				prefixLine(ignoreWarnPrefix + ".mcpmoat-ignore:2: "),
-				prefixLine(ignoreWarnPrefix + ".mcpmoat-ignore:4: "),
+				prefixLine(scanWarnPrefix + ".mcpmoat-ignore:2: "),
+				prefixLine(scanWarnPrefix + ".mcpmoat-ignore:4: "),
 				exactLine("mcpmoat scan: using 2 entries from .mcpmoat-ignore"),
 				exactLine(noRulesNotice),
 			},
@@ -309,8 +306,8 @@ func TestScanIgnoreFile(t *testing.T) {
 					"9"+ignoreMarker+"\nMOAT-T1-001 /"+ignoreMarker+"\n")
 			},
 			wantLines: []lineWant{
-				prefixLine(ignoreWarnPrefix + ".mcpmoat-ignore:1: "),
-				prefixLine(ignoreWarnPrefix + ".mcpmoat-ignore:2: "),
+				prefixLine(scanWarnPrefix + ".mcpmoat-ignore:1: "),
+				prefixLine(scanWarnPrefix + ".mcpmoat-ignore:2: "),
 				exactLine(noRulesNotice),
 			},
 		},
@@ -321,7 +318,7 @@ func TestScanIgnoreFile(t *testing.T) {
 					"\x1b[31m"+ignoreMarker+"\x1b[0m\nMOAT-T1-001 srv\x1b]0;"+ignoreMarker+"\x07\n")
 			},
 			wantLines: []lineWant{
-				prefixLine(ignoreWarnPrefix + ".mcpmoat-ignore:1: "),
+				prefixLine(scanWarnPrefix + ".mcpmoat-ignore:1: "),
 				// A server name with an escape byte is not checked by the
 				// parser, so line 2 can be an entry or a warning. Both are
 				// fine; only the escaping matters here.
@@ -335,7 +332,7 @@ func TestScanIgnoreFile(t *testing.T) {
 				writeTestFile(t, work, rules.IgnoreFileName, "MOAT-\xff"+ignoreMarker+"\n")
 			},
 			wantLines: []lineWant{
-				prefixLine(ignoreWarnPrefix + ".mcpmoat-ignore:1: "),
+				prefixLine(scanWarnPrefix + ".mcpmoat-ignore:1: "),
 				exactLine(noRulesNotice),
 			},
 		},
@@ -345,7 +342,7 @@ func TestScanIgnoreFile(t *testing.T) {
 				writeTestFile(t, work, rules.IgnoreFileName, "MOAT-T1-001 "+strings.Repeat("Z", 5000)+ignoreMarker+"\nMOAT-T1-002\n")
 			},
 			wantLines: []lineWant{
-				prefixLine(ignoreWarnPrefix + ".mcpmoat-ignore:1: "),
+				prefixLine(scanWarnPrefix + ".mcpmoat-ignore:1: "),
 				exactLine("mcpmoat scan: using 1 entry from .mcpmoat-ignore"),
 				exactLine(noRulesNotice),
 			},
@@ -358,7 +355,7 @@ func TestScanIgnoreFile(t *testing.T) {
 				}
 			},
 			wantLines: []lineWant{
-				prefixLine(ignoreWarnPrefix),
+				prefixLine(scanWarnPrefix),
 				exactLine(noRulesNotice),
 			},
 			wantStderr: []string{".mcpmoat-ignore", "not a regular file"},
@@ -369,7 +366,7 @@ func TestScanIgnoreFile(t *testing.T) {
 				writeTestFile(t, work, rules.IgnoreFileName, ignoreFileOfSize(rules.MaxIgnoreFileBytes+1))
 			},
 			wantLines: []lineWant{
-				prefixLine(ignoreWarnPrefix),
+				prefixLine(scanWarnPrefix),
 				exactLine(noRulesNotice),
 			},
 			wantStderr: []string{".mcpmoat-ignore", "larger than"},
@@ -392,7 +389,7 @@ func TestScanIgnoreFile(t *testing.T) {
 				symlink(t, target, filepath.Join(work, rules.IgnoreFileName))
 			},
 			wantLines: []lineWant{
-				prefixLine(ignoreWarnPrefix),
+				prefixLine(scanWarnPrefix),
 				exactLine(noRulesNotice),
 			},
 			wantStderr: []string{".mcpmoat-ignore"},
@@ -454,7 +451,7 @@ func TestScanIgnoreFileWarningCap(t *testing.T) {
 	}
 	var warnings []string
 	for _, line := range nonEmptyLines(errOut) {
-		if strings.HasPrefix(line, ignoreWarnPrefix) {
+		if strings.HasPrefix(line, scanWarnPrefix) {
 			warnings = append(warnings, line)
 		}
 	}
@@ -462,13 +459,13 @@ func TestScanIgnoreFileWarningCap(t *testing.T) {
 		t.Fatalf("got %d warning lines, want %d\nstderr:\n%s", len(warnings), want, errOut)
 	}
 	for i, w := range warnings[:rules.MaxIgnoreWarnings] {
-		if want := ignoreWarnPrefix + ".mcpmoat-ignore:" + strconv.Itoa(i+1) + ": "; !strings.HasPrefix(w, want) {
+		if want := scanWarnPrefix + ".mcpmoat-ignore:" + strconv.Itoa(i+1) + ": "; !strings.HasPrefix(w, want) {
 			t.Errorf("warning %d = %q, want it to start with %q", i+1, w, want)
 		}
 	}
 	// The summary has no line number.
-	if last := warnings[rules.MaxIgnoreWarnings]; !strings.HasPrefix(last, ignoreWarnPrefix+".mcpmoat-ignore: ") {
-		t.Errorf("summary warning = %q, want it to start with %q", last, ignoreWarnPrefix+".mcpmoat-ignore: ")
+	if last := warnings[rules.MaxIgnoreWarnings]; !strings.HasPrefix(last, scanWarnPrefix+".mcpmoat-ignore: ") {
+		t.Errorf("summary warning = %q, want it to start with %q", last, scanWarnPrefix+".mcpmoat-ignore: ")
 	}
 	assertContainsAll(t, "stderr", errOut, []string{"mcpmoat scan: using 1 entry from .mcpmoat-ignore", noRulesNotice})
 	assertNoIgnoreContent(t, errOut)
@@ -521,9 +518,7 @@ func TestScanIgnoreFileDoesNotChangeErrorExit(t *testing.T) {
 		".claude.json",
 		configErrorHint,
 	})
-	if strings.Contains(errOut, noRulesNotice) {
-		t.Errorf("stderr holds the notice %q, but the scan failed\nstderr:\n%s", noRulesNotice, errOut)
-	}
+	assertNoticeForCode(t, exitError, errOut)
 	assertScanPrefix(t, errOut)
 	assertNoEscape(t, out, errOut)
 }
@@ -589,7 +584,7 @@ func TestScanIgnoreFileConfigMode(t *testing.T) {
 			t.Errorf("exit code = %d, want %d\nstderr:\n%s", code, exitOK, errOut)
 		}
 		assertStderrLines(t, errOut, []lineWant{
-			prefixLine(ignoreWarnPrefix + ".mcpmoat-ignore:1: "),
+			prefixLine(scanWarnPrefix + ".mcpmoat-ignore:1: "),
 			exactLine(noRulesNotice),
 		})
 		assertNoIgnoreContent(t, errOut)
