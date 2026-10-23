@@ -9,6 +9,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/Ducarv/mcpmoat/internal/discover"
 )
 
 // Timing of the first dial to a host name. The values are the ones of
@@ -204,7 +206,7 @@ func (d *pinnedDialer) DialContext(ctx context.Context, network, address string)
 		return nil, err
 	}
 	addrs = usableAddrs(addrs)
-	if isLoopbackHost(key) || isLocalhostName(key) {
+	if discover.IsLoopbackHost(key) || isLocalhostName(key) {
 		// The name "localhost" counts as loopback without a lookup, so a
 		// plain http:// URL to it gets no cleartext warning (see
 		// cleartextWarnings), and Go sends it past HTTP_PROXY. Make that
@@ -288,9 +290,9 @@ func allowedAddrs(addrs []netip.Addr) []netip.Addr {
 // "localhost." or a name under the localhost domain, such as
 // "app.localhost" (RFC 6761 section 6.3). Resolvers answer such names with
 // loopback addresses, so a local development server can use one.
-// isLoopbackHost counts only "localhost" itself (and loopback IP literals),
-// so the other names keep the cleartext warning, and Go sends them through
-// a proxy.
+// discover.IsLoopbackHost counts only "localhost" itself (and loopback IP
+// literals), so the other names keep the cleartext warning, and Go sends them
+// through a proxy.
 func isLocalhostName(host string) bool {
 	host = strings.TrimSuffix(host, ".")
 	return host == "localhost" || strings.HasSuffix(host, ".localhost")

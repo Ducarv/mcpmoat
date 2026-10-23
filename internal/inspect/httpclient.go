@@ -12,6 +12,8 @@ import (
 	"strings"
 	"sync/atomic"
 	"time"
+
+	"github.com/Ducarv/mcpmoat/internal/discover"
 )
 
 // Limits of the HTTP client. The size caps count wire bytes. The limits on
@@ -515,8 +517,8 @@ func isFollowedRedirect(resp *http.Response) bool {
 // default port of the scheme (80 for http, 443 for https). A nil URL is never
 // the same origin.
 //
-// One exception: the host names must also agree on isLoopbackHost. Go skips
-// HTTP_PROXY for "localhost" but not for "LOCALHOST", so a request to
+// One exception: the host names must also agree on discover.IsLoopbackHost.
+// Go skips HTTP_PROXY for "localhost" but not for "LOCALHOST", so a request to
 // LOCALHOST from a localhost endpoint can carry the secrets to a proxy
 // without the cleartext warning that the endpoint did not get.
 func sameOrigin(u, origin *url.URL) bool {
@@ -530,7 +532,7 @@ func sameOrigin(u, origin *url.URL) bool {
 	if !equalFoldASCII(u.Hostname(), origin.Hostname()) {
 		return false
 	}
-	if isLoopbackHost(u.Hostname()) != isLoopbackHost(origin.Hostname()) {
+	if discover.IsLoopbackHost(u.Hostname()) != discover.IsLoopbackHost(origin.Hostname()) {
 		return false
 	}
 	return portOrDefault(u, scheme) == portOrDefault(origin, scheme)
