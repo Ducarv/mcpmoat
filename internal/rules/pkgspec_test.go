@@ -439,3 +439,27 @@ func TestPackageAt(t *testing.T) {
 		})
 	}
 }
+
+// FuzzExtractPackage checks that the parse of untrusted args never panics,
+// that a returned spec passes the registry name check, and that the spec
+// index points into args.
+func FuzzExtractPackage(f *testing.F) {
+	f.Add("npx", "-y\x00@scope/pkg@1.0.0")
+	f.Add("cmd", "/c\x00npx\x00-p\x00pkg\x00bin")
+	f.Add("docker", "--context\x00x\x00container\x00run\x00-i\x00ghcr.io/org/img:1")
+	f.Add("pipx", "--verbose\x00run\x00--spec\x00pkg==1.0\x00bin")
+	f.Add("uvx", "--from\x00pkg\x00--from\x00other\x00bin")
+	f.Fuzz(func(t *testing.T, command, joined string) {
+		args := strings.Split(joined, "\x00")
+		spec, at, ok := packageAt(command, args)
+		if !ok {
+			return
+		}
+		if !validName(spec.Runner, spec.Name) {
+			t.Errorf("packageAt(%q, %q) = %+v, which fails validName", command, args, spec)
+		}
+		if at < 0 || at >= len(args) {
+			t.Errorf("packageAt(%q, %q) index %d is outside args", command, args, at)
+		}
+	})
+}

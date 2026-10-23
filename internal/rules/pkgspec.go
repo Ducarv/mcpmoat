@@ -68,10 +68,16 @@ func (r Runner) isNPM() bool {
 	return r == RunnerNPX || r == RunnerBunx
 }
 
-// nameSeparators matches a run of "-", "_" and ".". PyPI treats such a run
-// as one "-" (PEP 503), and the typosquat check reads server names the same
-// way.
-var nameSeparators = regexp.MustCompile(`[-_.]+`)
+// nameSeparators matches a run of "-", "_", "." and "/". PyPI treats a run of
+// the first three as one "-" (PEP 503); a PyPI name never holds "/". The
+// typosquat check reads server names the same way, so "mcp-fetch" and the
+// image "mcp/fetch" compare as one name.
+var nameSeparators = regexp.MustCompile(`[-_./]+`)
+
+// nameForm writes every run of "-", "_", "." and "/" as "-".
+func nameForm(name string) string {
+	return nameSeparators.ReplaceAllString(name, "-")
+}
 
 // registryName returns the package name of spec in the form that the
 // registry resolves and that the popular list uses: lower case; for PyPI,
@@ -82,7 +88,7 @@ func registryName(spec PackageSpec) string {
 	name := strings.ToLower(spec.Name)
 	switch spec.Runner {
 	case RunnerUVX, RunnerPipx:
-		return nameSeparators.ReplaceAllString(name, "-")
+		return nameForm(name)
 	case RunnerDocker:
 		for _, prefix := range []string{"docker.io/", "index.docker.io/", "registry-1.docker.io/"} {
 			if rest, found := strings.CutPrefix(name, prefix); found {
@@ -127,17 +133,18 @@ func ExtractPackage(command string, args []string) (PackageSpec, bool) {
 // packageAt is ExtractPackage that also returns the index in args of the
 // argument that holds the spec.
 func packageAt(command string, args []string) (PackageSpec, int, bool) {
-	spec, at, ok := extractPackage(command, args)
+	spec, at, ok := parseRunnerArgs(command, args)
 	if !ok || !validName(spec.Runner, spec.Name) {
 		return PackageSpec{}, 0, false
 	}
 	return spec, at, true
 }
 
-// extractPackage does the parse for packageAt, before the name check.
-func extractPackage(command string, args []string) (PackageSpec, int, bool) {
+// parseRunnerArgs does the parse for packageAt. It does not run validName,
+// so only packageAt may call it.
+func parseRunnerArgs(command string, args []string) (PackageSpec, int, bool) {
 	if i, ok := cmdWrapped(command, args); ok {
-		spec, at, ok := extractPackage(args[i], args[i+1:])
+		spec, at, ok := parseRunnerArgs(args[i], args[i+1:])
 		return spec, i + 1 + at, ok
 	}
 	switch r := runnerOf(command); r {
@@ -257,7 +264,7 @@ func validImageName(name string) bool {
 	if name == "" || len(name) > maxPackageNameLen {
 		return false
 	}
-	if isNumeric(name) {
+	if isDigitsAndDots(name) {
 		return false // an IP address or a number is never an image
 	}
 	parts := strings.Split(name, "/")
@@ -301,9 +308,9 @@ func isPortNumber(s string) bool {
 	return !strings.ContainsFunc(s, func(r rune) bool { return r < '0' || r > '9' })
 }
 
-// isNumeric reports whether s has only ASCII digits and dots, such as
+// isDigitsAndDots reports whether s has only ASCII digits and dots, such as
 // "10.0.0.1" or "42".
-func isNumeric(s string) bool {
+func isDigitsAndDots(s string) bool {
 	return !strings.ContainsFunc(s, func(r rune) bool { return (r < '0' || r > '9') && r != '.' })
 }
 

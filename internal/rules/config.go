@@ -8,6 +8,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"unicode"
 
 	"github.com/Ducarv/mcpmoat/internal/discover"
 )
@@ -46,12 +47,15 @@ var (
 
 	// wholeVar matches a value that is only a reference such as $VAR or the
 	// Windows form %VAR%.
-	wholeVar = regexp.MustCompile(`^(\$[A-Za-z_][A-Za-z0-9_]*|%[A-Za-z_][A-Za-z0-9_]*%)$`)
+	wholeVar = regexp.MustCompile(`^` + shellOrWindowsVar + `$`)
 
 	// varPath matches a path that starts with a variable, such as
 	// "$HOME/.config" or "%APPDATA%\key".
-	varPath = regexp.MustCompile(`^(\$[A-Za-z_][A-Za-z0-9_]*|%[A-Za-z_][A-Za-z0-9_]*%)[/\\]`)
+	varPath = regexp.MustCompile(`^` + shellOrWindowsVar + `[/\\]`)
 )
+
+// shellOrWindowsVar matches a $VAR or %VAR% reference.
+const shellOrWindowsVar = `(\$[A-Za-z_][A-Za-z0-9_]*|%[A-Za-z_][A-Za-z0-9_]*%)`
 
 // CheckConfig runs the static config checks of threat T4 on one server. It
 // needs no connection, so it also runs with --no-connect.
@@ -83,15 +87,16 @@ func CheckConfig(s discover.Server) []Finding {
 // loopback. That default is what runs unless the user's own environment sets
 // the variable, and reporting it would flag every local dev server.
 //
-// The check fails closed. Clients parse URLs more loosely than Go: they trim
-// spaces and control characters and accept a bad escape such as "%zz", and
-// they still connect. So spaces and control characters are trimmed first,
-// and a URL that Go still cannot parse fires when it starts with "http://".
+// The check fails closed. Clients parse URLs more loosely than Go (the WHATWG
+// URL rules): they trim spaces and control characters, remove every tab and
+// newline, and accept a bad escape such as "%zz", and they still connect. So
+// the same trim and removal run first, and a URL that Go still cannot parse
+// fires when it starts with "http://".
 func checkInsecureURL(s discover.Server) []Finding {
 	if !s.Transport.IsRemote() {
 		return nil
 	}
-	raw := strings.TrimFunc(s.URL.Reveal(), func(r rune) bool { return r <= ' ' || r == 0x7f })
+	raw := strings.TrimFunc(tabsAndNewlines.Replace(s.URL.Reveal()), func(r rune) bool { return r <= ' ' || r == 0x7f })
 	resolved := varRef.ReplaceAllStringFunc(raw, refDefault)
 	u, err := url.Parse(resolved)
 	switch {
@@ -109,6 +114,9 @@ func checkInsecureURL(s discover.Server) []Finding {
 		Message: insecureURLMessage,
 	}}
 }
+
+// tabsAndNewlines removes every tab and newline, as WHATWG URL parsers do.
+var tabsAndNewlines = strings.NewReplacer("\t", "", "\n", "", "\r", "")
 
 // refDefault returns the default of a reference "${NAME:-default}", or "0"
 // for a reference with no default. "0" is a valid host and port, and it is
@@ -173,8 +181,8 @@ func stripAuthScheme(value string) string {
 //     Known limit: a literal default in ${VAR:-literal} is not flagged.
 //  3. A known token prefix (such as "ghp_") on a literal of at least
 //     minPrefixedTokenLen bytes is a secret, even when it looks like a path.
-//  4. A URL with a password in it ("postgres://user:pass@host/db") is a
-//     secret.
+//  4. A URL with a password in it ("postgres://user:pass@host/db"), or with
+//     a token as the user name ("https://ghp_...@github.com/x"), is a secret.
 //  5. A key that names a path (it ends in "PATH", "FILE", "DIR",
 //     "DIRECTORY" or "FOLDER", in any case) holds a path, and any other
 //     path or URL is not a secret either. A path can start with a variable
@@ -202,7 +210,7 @@ func looksLikePlaintextSecret(key, value string) bool {
 	if len(value) >= minPrefixedTokenLen && discover.HasTokenPrefix(value) {
 		return true
 	}
-	if hasURLPassword(value) {
+	if hasURLCredential(value) {
 		return true
 	}
 	if namesAPath(key) || looksLikePathOrURL(value) {
@@ -214,27 +222,36 @@ func looksLikePlaintextSecret(key, value string) bool {
 	return isTokenShaped(value) && len(value) >= minEntropyLen && shannonEntropy(value) >= minEntropy
 }
 
-// namesAPath reports whether key is the name of a path setting, such as
-// "PRIVATE_KEY_PATH", "TOKEN_FILE" or "CREDENTIALS_DIR".
+// namesAPath reports whether key is the name of a path setting: its last
+// word is "path", "file", "dir", "directory" or "folder", as in
+// "PRIVATE_KEY_PATH", "token_file" or "keyFile". "AWS_PROFILE" does not count,
+// because "file" is not a word of its own there.
 func namesAPath(key string) bool {
-	lower := strings.ToLower(key)
 	for _, suffix := range []string{"path", "file", "dir", "directory", "folder"} {
-		if strings.HasSuffix(lower, suffix) {
+		start := len(key) - len(suffix) // index of the suffix in key
+		if start < 0 || !strings.EqualFold(key[start:], suffix) {
+			continue
+		}
+		if start == 0 || strings.ContainsRune("_-.", rune(key[start-1])) ||
+			unicode.IsUpper(rune(key[start])) && unicode.IsLower(rune(key[start-1])) {
 			return true
 		}
 	}
 	return false
 }
 
-// hasURLPassword reports whether value is a URL with a non-empty password
-// in its user info, such as "postgres://user:pass@host/db".
-func hasURLPassword(value string) bool {
+// hasURLCredential reports whether value is a URL with a non-empty password
+// in its user info, such as "postgres://user:pass@host/db", or with a token
+// as the user name, such as "https://ghp_...@github.com/x".
+func hasURLCredential(value string) bool {
 	u, err := url.Parse(value)
 	if err != nil || u.User == nil {
 		return false
 	}
-	password, ok := u.User.Password()
-	return ok && password != ""
+	if password, ok := u.User.Password(); ok && password != "" {
+		return true
+	}
+	return discover.HasTokenPrefix(u.User.Username())
 }
 
 // pathExtensions are file extensions of key, certificate and config files.
@@ -286,6 +303,9 @@ func isTokenShaped(value string) bool {
 func isBoolOrNumber(value string) bool {
 	if strings.EqualFold(value, "true") || strings.EqualFold(value, "false") {
 		return true
+	}
+	if strings.Contains(value, "_") {
+		return false // ParseFloat accepts "1_000", which a setting does not use
 	}
 	_, err := strconv.ParseFloat(value, 64)
 	return err == nil

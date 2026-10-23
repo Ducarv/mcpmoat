@@ -115,7 +115,11 @@ func TestFixtureShadowing(t *testing.T) {
 	if len(findings) != len(want) {
 		t.Fatalf("CheckShadowing() = %+v, want exactly one finding %+v", findings, want)
 	}
-	// Message is fixed text; compare the other fields.
+	// Message is fixed text; check that it is set, then compare the other
+	// fields.
+	if findings[0].Message == "" {
+		t.Error("Finding.Message is empty, want a fixed text")
+	}
 	findings[0].Message = ""
 	if !reflect.DeepEqual(findings, want) {
 		t.Errorf("CheckShadowing() = %+v, want %+v", findings, want)

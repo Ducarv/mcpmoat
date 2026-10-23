@@ -2,6 +2,7 @@ package rules
 
 import (
 	"cmp"
+	"path/filepath"
 	"regexp"
 	"slices"
 	"strconv"
@@ -123,20 +124,19 @@ func CheckShadowing(all []ServerTools) []Finding {
 	for i, st := range all {
 		for _, tool := range st.Tools {
 			clear(seen)
-			forEachToken(foldText(tool.Description), func(token string) {
-				if len(seen) >= maxMentionsPerTool {
-					return
-				}
+			forEachToken(foldText(tool.Description), func(token string) bool {
+				// Markdown emphasis such as "_send_email_" wraps the name.
+				token = strings.Trim(token, "_")
 				n, ok := owners[token]
 				if !ok {
-					return
+					return true
 				}
 				other, ok := n.other(identities[i])
 				if !ok {
-					return
+					return true
 				}
 				if _, dup := seen[token]; dup {
-					return
+					return true
 				}
 				seen[token] = struct{}{}
 				findings = append(findings, Finding{
@@ -146,6 +146,7 @@ func CheckShadowing(all []ServerTools) []Finding {
 					Related: other.server + "/" + other.toolName,
 					Message: shadowingMessage,
 				})
+				return len(seen) < maxMentionsPerTool
 			})
 		}
 	}
@@ -189,13 +190,18 @@ func launchIdentities(all []ServerTools) []int {
 //     are not part of it, and neither is the folder: the same package with
 //     another version or another root path is the same server with the same
 //     tools.
-//   - Any other stdio launch, such as "node server.js", is known by Command,
-//     Args, Dir and ProjectPath: it can run a different program in another
-//     folder.
+//     The flags "-y" and "--yes" only skip a prompt, so they are left out.
+//   - Any other stdio launch is known by Command and Args, and also by Dir
+//     and ProjectPath when the launch can depend on its folder (see
+//     dependsOnFolder): "node server.js" in another project runs another
+//     program, but "/usr/local/bin/github-mcp-server stdio" does not.
 //
-// Known limit: a package runner can read files in its folder (a local
+// Known limits: a package runner can read files in its folder (a local
 // node_modules, an npm or uv config) or env variables (npm_config_registry),
-// so the "same" package can still be a different program.
+// so the "same" package can still be a different program. Other spellings
+// still split one server into two owners, such as "npx" against
+// "/usr/local/bin/npx": a different command path can run a different program,
+// so the key keeps it.
 //
 // The key can hold secrets in Args and URL: it is used only as a map key and
 // must not reach a Finding, an error or a log.
@@ -214,8 +220,14 @@ func launchKey(s discover.Server) string {
 	part(s.Command)
 	args := s.Args.Values()
 	if spec, at, fetched := packageAt(s.Command, args); fetched {
-		part(strconv.Itoa(at))
+		var flags []string
 		for _, a := range args[:at] {
+			if a != "-y" && a != "--yes" {
+				flags = append(flags, a)
+			}
+		}
+		part(strconv.Itoa(len(flags)))
+		for _, a := range flags {
 			part(a)
 		}
 		part(registryName(spec))
@@ -225,9 +237,33 @@ func launchKey(s discover.Server) string {
 	for _, a := range args {
 		part(a)
 	}
-	part(s.Dir)
-	part(s.ProjectPath)
+	if dependsOnFolder(s.Command, args) {
+		part(s.Dir)
+		part(s.ProjectPath)
+	}
 	return b.String()
+}
+
+// scriptExtensions are file extensions of scripts that an interpreter runs.
+var scriptExtensions = []string{".js", ".mjs", ".cjs", ".ts", ".py", ".rb", ".sh", ".jar"}
+
+// dependsOnFolder reports whether a stdio launch can run a different program
+// in another folder: the command is not an absolute path (it can be a
+// relative path, or a PATH lookup that a folder tool such as direnv can
+// change), or an argument is a relative path or a script file name.
+func dependsOnFolder(command string, args []string) bool {
+	if !filepath.IsAbs(command) {
+		return true
+	}
+	for _, a := range args {
+		if strings.HasPrefix(a, "-") || filepath.IsAbs(a) {
+			continue
+		}
+		if strings.ContainsAny(a, `/\`) || slices.Contains(scriptExtensions, strings.ToLower(filepath.Ext(a))) {
+			return true
+		}
+	}
+	return false
 }
 
 // indexOwners maps each candidate tool name, in the form of foldText, to its
@@ -240,7 +276,7 @@ func indexOwners(all []ServerTools, identities []int) map[string]nameOwners {
 			if !compoundName.MatchString(tool.Name) {
 				continue
 			}
-			name := foldText(tool.Name)
+			name := strings.Trim(foldText(tool.Name), "_")
 			if len(name) < minShadowNameLen || !allIdentBytes(name) {
 				continue
 			}
@@ -262,7 +298,8 @@ func indexOwners(all []ServerTools, identities []int) map[string]nameOwners {
 
 // foldText returns s in the form that names and descriptions are compared
 // in, as a model reads them:
-//   - every dash ("-", other Pd dashes and the minus sign U+2212) is "_";
+//   - every dash (Pd, which holds "-", and the minus sign U+2212) is "_",
+//     and a run of "_" is one "_", so "send__email" is "send_email";
 //   - a "_" goes between a lower-case and an upper-case letter, so camelCase
 //     words split like snake_case ("sendEmail" is "send_email");
 //   - the result is lower case;
@@ -274,24 +311,28 @@ func indexOwners(all []ServerTools, identities []int) map[string]nameOwners {
 func foldText(s string) string {
 	var b strings.Builder
 	b.Grow(len(s))
-	prevLower := false
+	prevLower, prevSep := false, false
 	for _, r := range s {
 		switch {
 		case r == '\\', r == '`', termsafe.IsInvisible(r), unicode.IsControl(r) && !unicode.IsSpace(r):
 			continue // removed; the letter before still counts for camelCase
-		case r == '-', r == '\u2212', unicode.Is(unicode.Pd, r):
+		case r == '\u2212', unicode.Is(unicode.Pd, r):
 			r = '_'
 		case prevLower && unicode.IsUpper(r):
 			b.WriteByte('_')
 		}
-		prevLower = unicode.IsLower(r)
+		if r == '_' && prevSep {
+			continue
+		}
+		prevLower, prevSep = unicode.IsLower(r), r == '_'
 		b.WriteRune(unicode.ToLower(r))
 	}
 	return b.String()
 }
 
-// forEachToken calls fn for each maximal run of identifier bytes in text.
-func forEachToken(text string, fn func(token string)) {
+// forEachToken calls fn for each maximal run of identifier bytes in text,
+// until fn returns false.
+func forEachToken(text string, fn func(token string) bool) {
 	start := -1
 	for i := range len(text) {
 		if isIdentByte(text[i]) {
@@ -301,7 +342,9 @@ func forEachToken(text string, fn func(token string)) {
 			continue
 		}
 		if start >= 0 {
-			fn(text[start:i])
+			if !fn(text[start:i]) {
+				return
+			}
 			start = -1
 		}
 	}
@@ -324,5 +367,5 @@ func allIdentBytes(s string) bool {
 // lower-case letter, a digit or "_". foldText has already made every letter
 // lower case and every dash "_".
 func isIdentByte(b byte) bool {
-	return b >= 'a' && b <= 'z' || b >= '0' && b <= '9' || b == '_'
+	return isLowerAlnum(rune(b)) || b == '_'
 }

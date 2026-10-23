@@ -15,9 +15,11 @@ import (
 
 const popularListPath = "../../rules/data/popular-servers.txt"
 
-// npxServer builds a server that runs pkg with "npx -y".
+// npxServer builds a stdio server that runs pkg with "npx -y".
 func npxServer(name, pkg string) discover.Server {
-	return discover.Server{Name: name, Command: "npx", Args: discover.NewArgs([]string{"-y", pkg})}
+	s := stdioServer("npx", "-y", pkg)
+	s.Name = name
+	return s
 }
 
 func TestOSADistance(t *testing.T) {
@@ -358,6 +360,8 @@ func TestTyposquatCheck(t *testing.T) {
 		{name: "underscore bare name", server: discover.Server{Name: "server_github"}},
 		{name: "underscore PyPI name", server: discover.Server{Name: "mcp_server_fetch"}},
 		{name: "underscore unscoped npm name", server: discover.Server{Name: "context7_mcp"}},
+		{name: "server name mcp-fetch for the image mcp/fetch", server: discover.Server{Name: "mcp-fetch"}},
+		{name: "server name written as the scoped package", server: discover.Server{Name: "@modelcontextprotocol/server-github"}},
 		// A server that runs a popular package exactly is that server.
 		{name: "name typo on an exact popular package", server: npxServer("mcp-server-gitt", "@playwright/mcp@1.0.0")},
 		{name: "flat name of @playwright/mcp", server: npxServer("playwright-mcp", "@playwright/mcp@latest")},

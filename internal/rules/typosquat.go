@@ -52,10 +52,15 @@ func ParsePopular(r io.Reader) ([]string, error) {
 	return names, nil
 }
 
-// popularName is one entry of the popular list in its two forms.
+// popularName is one entry of the popular list in the forms that the check
+// compares.
 type popularName struct {
 	full string // as listed, such as "@modelcontextprotocol/server-memory"
 	bare string // without the "@scope/" prefix, such as "server-memory"
+
+	// The forms that a server name is compared with (see nameForm).
+	flatForm string // nameForm(flatName(full)), such as "modelcontextprotocol-server-memory"
+	bareForm string // nameForm(bare)
 }
 
 // Typosquat compares server and package names with a list of popular MCP
@@ -87,7 +92,12 @@ func NewTyposquat(popular []string) *Typosquat {
 			continue
 		}
 		bare := bareName(full)
-		t.popular = append(t.popular, popularName{full: full, bare: bare})
+		t.popular = append(t.popular, popularName{
+			full:     full,
+			bare:     bare,
+			flatForm: nameForm(flatName(full)),
+			bareForm: nameForm(bare),
+		})
 		first, seen := owner[bare]
 		if !seen {
 			owner[bare] = full
@@ -104,7 +114,7 @@ type typoCandidate struct {
 	bare      string
 	field     string // the Finding.Field for this name
 	isPackage bool   // a package from the runner args, not a server name
-	npm       bool   // an npx or bunx package: only npm has scopes
+	isNPM     bool   // an npx or bunx package: only npm has scopes
 }
 
 // Check returns the findings for server s: at most one for the server name
@@ -116,8 +126,9 @@ type typoCandidate struct {
 // bare name is scope squatting. A server that runs a popular package exactly
 // gets no finding at all.
 func (t *Typosquat) Check(s discover.Server) []Finding {
-	// A user may write "_" or "." where the popular name has "-".
-	name := nameForm(strings.ToLower(s.Name))
+	// A user may write "_", "." or "/" where the popular name has "-", or
+	// copy a scoped package name: compare the flat form.
+	name := nameForm(flatName(strings.ToLower(s.Name)))
 	candidates := []typoCandidate{{full: name, bare: bareName(name), field: FieldName}}
 	if spec, ok := ExtractPackage(s.Command, s.Args.Values()); ok {
 		pkg := registryName(spec)
@@ -131,7 +142,7 @@ func (t *Typosquat) Check(s discover.Server) []Finding {
 			bare:      bareName(pkg),
 			field:     FieldArgs,
 			isPackage: true,
-			npm:       spec.Runner.isNPM(),
+			isNPM:     spec.Runner.isNPM(),
 		})
 	}
 
@@ -183,12 +194,12 @@ func (t *Typosquat) closest(c typoCandidate) (string, bool) {
 		if c.full == compareForm(c, p) {
 			return "", false
 		}
-		if !c.isPackage && (c.full == nameForm(p.bare) || c.bare == nameForm(p.bare)) {
+		if !c.isPackage && (c.full == p.bareForm || c.bare == p.bareForm) {
 			return "", false // a server name is free to copy a bare name
 		}
 	}
 
-	if c.npm {
+	if c.isNPM {
 		if related, ok := t.scopeSquat(c); ok {
 			return related, true
 		}
@@ -219,19 +230,13 @@ func (t *Typosquat) closest(c typoCandidate) (string, bool) {
 }
 
 // compareForm returns the form of popular name p that closest compares with
-// the full name of c: the full name for a package, the flat name in
-// nameForm for a server name.
+// the full name of c: the full name for a package, the flat form for a
+// server name.
 func compareForm(c typoCandidate, p popularName) string {
 	if c.isPackage {
 		return p.full
 	}
-	return nameForm(flatName(p.full))
-}
-
-// nameForm writes every run of "-", "_" and "." in a server name as "-", so
-// "playwright_mcp" and "playwright-mcp" compare as one name.
-func nameForm(name string) string {
-	return nameSeparators.ReplaceAllString(name, "-")
+	return p.flatForm
 }
 
 // flatName writes a scoped npm name "@scope/name" as "scope-name". Any other
