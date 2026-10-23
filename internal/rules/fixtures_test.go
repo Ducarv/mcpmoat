@@ -169,16 +169,10 @@ func TestFixturePoisoned(t *testing.T) {
 
 	st := inspectFixture(t, "poisoned")
 
-	var names []string
+	// TestFixtureBuiltinT1 checks the tool names.
 	byName := make(map[string]inspect.Tool)
 	for _, tool := range st.Tools {
-		names = append(names, tool.Name)
 		byName[tool.Name] = tool
-	}
-	slices.Sort(names)
-	wantNames := []string{"currency_convert", "daily_quote", "unit_convert", "weather_lookup"}
-	if !reflect.DeepEqual(names, wantNames) {
-		t.Fatalf("tool names = %q, want %q", names, wantNames)
 	}
 
 	if d := byName["daily_quote"].Description; !strings.Contains(d, "<IMPORTANT>") {
@@ -213,17 +207,18 @@ type compiledRule struct {
 	m      *rules.Matcher
 }
 
-// compiledRules returns the built-in rules that run on a description or a
+// t1Rules returns the built-in T1 rules that run on a description or a
 // schema, with their match blocks compiled. Config rules need a server config,
 // so they are skipped.
-func compiledRules(t *testing.T) []compiledRule {
+func t1Rules(t *testing.T) []compiledRule {
 	t.Helper()
 	c := rules.BuiltinCompiler()
-	rs := rules.MustBuiltin(t, rules.WithCompiler(c))
+	// WithCompiler makes a load error name the file, the line and the column.
 	// The loader discards the Matchers (see WithCompiler), so compile again.
+	rs := rules.MustBuiltin(t, rules.WithCompiler(c))
 	var out []compiledRule
 	for _, r := range rs {
-		if r.Target == rules.TargetConfig {
+		if r.Target == rules.TargetConfig || !strings.HasPrefix(r.ID, t1Prefix) {
 			continue
 		}
 		m, err := c(r.Match, r.Target)
@@ -235,12 +230,12 @@ func compiledRules(t *testing.T) []compiledRule {
 	return out
 }
 
-// t1Hits returns the sorted IDs of the T1 rules with the given target that
+// t1Hits returns the sorted IDs of the rules in rs with the given target that
 // match text.
 func t1Hits(rs []compiledRule, target rules.Target, text string) []string {
 	var ids []string
 	for _, cr := range rs {
-		if cr.target == target && strings.HasPrefix(cr.id, t1Prefix) && len(cr.m.Match(text)) > 0 {
+		if cr.target == target && len(cr.m.Match(text)) > 0 {
 			ids = append(ids, cr.id)
 		}
 	}
@@ -264,7 +259,8 @@ type toolTarget struct {
 }
 
 // TestFixtureBuiltinT1 runs the built-in T1 rules on every tool of the fixture
-// servers, once for the description and once for the schema. A rule has one
+// servers, once for the description and once for the schema. It does not check
+// prompts or resources. A rule has one
 // target, so the two are checked apart. Each tool and target must match the
 // rule IDs listed for it, and no others; a pair that is not listed must match
 // none. The test also checks the loaded T1 IDs and the tool names of each
@@ -272,15 +268,13 @@ type toolTarget struct {
 func TestFixtureBuiltinT1(t *testing.T) {
 	t.Parallel()
 
-	rs := compiledRules(t)
+	rs := t1Rules(t)
 	if len(rs) == 0 {
-		t.Fatal("no built-in rules loaded; the checks would pass with no rule")
+		t.Fatal("no built-in T1 rules loaded; the checks would pass with no rule")
 	}
 	var ids []string
 	for _, cr := range rs {
-		if strings.HasPrefix(cr.id, t1Prefix) {
-			ids = append(ids, cr.id)
-		}
+		ids = append(ids, cr.id)
 	}
 	slices.Sort(ids)
 	wantIDs := []string{
@@ -303,6 +297,9 @@ func TestFixtureBuiltinT1(t *testing.T) {
 			{"weather_lookup", rules.TargetSchema}:        {"MOAT-T1-009"},
 			{"currency_convert", rules.TargetDescription}: {"MOAT-T1-006"},
 			{"unit_convert", rules.TargetDescription}:     {"MOAT-T1-008"},
+		}},
+		{"shadowing", []string{"add_numbers"}, map[toolTarget][]string{
+			{"add_numbers", rules.TargetDescription}: {"MOAT-T1-003", "MOAT-T1-005"},
 		}},
 	}
 	for _, fx := range fixtures {

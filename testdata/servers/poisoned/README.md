@@ -33,5 +33,6 @@ MOAT-T1-007 (oversized description) has no marker here yet. The rule files are i
 
 ## Notes
 
-- `TestFixtureBuiltinT1` in `internal/rules/fixtures_test.go` asserts the exact MOAT-T1-* IDs of each poisoned tool, in its description and schema.
+- `TestFixtureBuiltinT1` in `internal/rules/fixtures_test.go` asserts the exact MOAT-T1-* IDs of
+  each poisoned tool, in its description and schema.
 - T2 (rug pull) fixtures come in milestone M5 (Pins). This server never changes its tools.
