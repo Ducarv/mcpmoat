@@ -561,7 +561,7 @@ func TestE2EScanRulesErrors(t *testing.T) {
 		{
 			name:    "built-in ID clash",
 			dir:     func(t *testing.T) string { return e2eRulesDir(t, "collide") },
-			wantErr: []string{"MOAT-T1-003.yaml", "rule ID clashes with a built-in rule"},
+			wantErr: []string{"MOAT-T1-003.yaml", builtinClashText},
 		},
 		{
 			name:    "missing folder",
@@ -685,7 +685,7 @@ func TestE2EScanRulesEscapeSafety(t *testing.T) {
 			if stderr == "" {
 				t.Fatal("stderr is empty, want the rule problem")
 			}
-			assertScanRulesStderr(t, stderr)
+			assertTerminalSafe(t, stderr)
 		})
 	}
 }
@@ -720,5 +720,5 @@ func TestE2EScanRulesIDClashFlood(t *testing.T) {
 	stdout, stderr, code := runBin(t, home, work, "scan", "--no-connect", "--rules", dir)
 
 	assertFast(t, start)
-	assertIDFloodResult(t, code, stdout, stderr, "rule ID clashes with a built-in rule", idFloodFiles-floodCap)
+	assertIDFloodResult(t, code, stdout, stderr, builtinClashText, idFloodFiles-floodCap)
 }

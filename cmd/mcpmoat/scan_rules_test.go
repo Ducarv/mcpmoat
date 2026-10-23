@@ -12,8 +12,6 @@ import (
 	"strings"
 	"testing"
 	"time"
-	"unicode"
-	"unicode/utf8"
 )
 
 // scanRulesResult is the outcome of one scan run.
@@ -36,83 +34,6 @@ func scanIn(t *testing.T, home, work string, args ...string) scanRulesResult {
 	c, stdout, stderr := dirsCLI(t, home, work)
 	code := c.dispatch(append([]string{"scan"}, args...))
 	return scanRulesResult{code: code, stdout: stdout.String(), stderr: stderr.String()}
-}
-
-// firstUnsafeRune returns the first rune of s that can change a terminal or
-// hide text, and its byte offset. The newline that ends a line is allowed. The
-// unsafe runes are:
-//   - the C0 controls (below 0x20, including ESC), DEL (0x7f) and the C1
-//     controls U+0080 to U+009F (U+009B is CSI), all from unicode.IsControl;
-//   - the format characters (category Cf): the bidi controls such as U+202E,
-//     the zero-width characters such as U+200B, the tag characters;
-//   - the line and paragraph separators U+2028 and U+2029;
-//   - a byte that is not valid UTF-8, because a terminal can read a lone
-//     0x9b byte as CSI.
-func firstUnsafeRune(s string) (r rune, offset int, found bool) {
-	for i, r := range s {
-		switch {
-		case r == '\n':
-			continue
-		case r == utf8.RuneError:
-			// range gives U+FFFD for an invalid byte. A real U+FFFD in the
-			// text is 3 bytes long and is safe.
-			if _, size := utf8.DecodeRuneInString(s[i:]); size == 1 {
-				return r, i, true
-			}
-		case unicode.IsControl(r), unicode.Is(unicode.Cf, r), r == '\u2028', r == '\u2029':
-			return r, i, true
-		}
-	}
-	return 0, 0, false
-}
-
-// assertScanRulesStderr fails the test if stderr holds a rune that can change
-// the terminal or hide text (see firstUnsafeRune). The newline that ends a
-// line is the only control character it accepts.
-func assertScanRulesStderr(t *testing.T, stderr string) {
-	t.Helper()
-	if r, i, found := firstUnsafeRune(stderr); found {
-		t.Errorf("stderr has the unsafe rune %U at offset %d\nstderr: %q", r, i, stderr)
-	}
-}
-
-// TestFirstUnsafeRune checks the helper that the escape tests rely on: it must
-// find every kind of unsafe rune and accept plain text, a newline and a
-// printable non-ASCII letter.
-func TestFirstUnsafeRune(t *testing.T) {
-	t.Parallel()
-
-	tests := []struct {
-		name string
-		in   string
-		want rune // 0 means safe
-	}{
-		{"plain text", "mcpmoat scan: ok\n", 0},
-		{"printable non-ASCII", "caf\u00e9 \u65e5\u672c \ufffd", 0},
-		{"ESC", "a\x1bb", 0x1b},
-		{"DEL", "a\x7fb", 0x7f},
-		{"tab", "a\tb", '\t'},
-		{"carriage return", "a\rb", '\r'},
-		{"C1 CSI", "a\u009bb", 0x9b},
-		{"C1 NEL", "a\u0085b", 0x85},
-		{"bidi override", "a\u202eb", 0x202e},
-		{"bidi isolate", "a\u2066b", 0x2066},
-		{"zero-width space", "a\u200bb", 0x200b},
-		{"BOM", "a\ufeffb", 0xfeff},
-		{"tag character", "a\U000e0041b", 0xe0041},
-		{"line separator", "a\u2028b", 0x2028},
-		{"paragraph separator", "a\u2029b", 0x2029},
-		{"invalid UTF-8 byte", "a\x9bb", utf8.RuneError},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
-			got, _, found := firstUnsafeRune(tt.in)
-			if found != (tt.want != 0) || (found && got != tt.want) {
-				t.Errorf("firstUnsafeRune(%q) = %U, %v; want %U", tt.in, got, found, tt.want)
-			}
-		})
-	}
 }
 
 // copyRuleFile copies the fixture file src to dir/name.
@@ -219,6 +140,17 @@ func TestScanRulesWithConnect(t *testing.T) {
 // change of the text in the loader shows up as a failed test.
 const noRuleFilesText = "no rule files (*.yaml or *.yml) found"
 
+// builtinClashText is the reason text of a rule whose ID is the ID of a
+// built-in rule. It is the same as rules.ReasonBuiltinIDClash. The test keeps
+// its own copy, so a change of the text in the loader shows up as a failed
+// test.
+const builtinClashText = "rule ID clashes with a built-in rule"
+
+// duplicateIDText is the reason text of a rule whose ID another rule file
+// already uses. It is the same as rules.ReasonDuplicateID. The test keeps its
+// own copy, for the same reason as noRuleFilesText.
+const duplicateIDText = "duplicate rule ID"
+
 // TestScanRulesErrors checks that a bad rules folder gives exit code 2, an
 // empty stdout and one "mcpmoat scan: " line on stderr for the problem. It
 // runs every case in both modes, because the rules are checked before scan
@@ -244,13 +176,13 @@ func TestScanRulesErrors(t *testing.T) {
 			dir:  scanRulesFixture("collide"),
 			wantStderr: []string{
 				"mcpmoat scan: ", filepath.Join(scanRulesFixture("collide"), "MOAT-T1-003.yaml"),
-				"rule ID clashes with a built-in rule",
+				builtinClashText,
 			},
 		},
 		{
 			name:       "the built-in ID in a copy of the built-in rule",
 			dir:        scanRulesFixture("valid"),
-			wantStderr: []string{"mcpmoat scan: ", "MOAT-T1-003.yaml", "rule ID clashes with a built-in rule"},
+			wantStderr: []string{"mcpmoat scan: ", "MOAT-T1-003.yaml", builtinClashText},
 		},
 		{
 			name:       "folder does not exist",
@@ -283,7 +215,7 @@ func TestScanRulesErrors(t *testing.T) {
 				if lines := nonEmptyLines(got.stderr); len(lines) != 1 {
 					t.Errorf("stderr has %d lines, want 1\nstderr: %q", len(lines), got.stderr)
 				}
-				assertScanRulesStderr(t, got.stderr)
+				assertTerminalSafe(t, got.stderr)
 				assertDirUnchanged(t, tt.dir, before)
 			})
 		}
@@ -409,7 +341,7 @@ func TestScanRulesFlagErrors(t *testing.T) {
 					t.Errorf("stderr contains %q\nstderr: %q", bad, got.stderr)
 				}
 			}
-			assertScanRulesStderr(t, got.stderr)
+			assertTerminalSafe(t, got.stderr)
 		})
 	}
 }
@@ -468,7 +400,7 @@ func TestScanRulesSeveralErrors(t *testing.T) {
 	if strings.Contains(got.stderr, "d-good.yaml") {
 		t.Errorf("stderr names the good rule file\nstderr:\n%s", got.stderr)
 	}
-	assertScanRulesStderr(t, got.stderr)
+	assertTerminalSafe(t, got.stderr)
 	assertDirUnchanged(t, dir, before)
 }
 
@@ -681,7 +613,7 @@ should_not_match:
 				if got.stderr == "" {
 					t.Error("stderr is empty, want the problem")
 				}
-				assertScanRulesStderr(t, got.stderr)
+				assertTerminalSafe(t, got.stderr)
 			})
 		}
 	}
@@ -714,9 +646,9 @@ func TestScanRulesIDClashFlood(t *testing.T) {
 		more   int
 	}{
 		// The built-in rule MOAT-T1-003 is embedded, so every file clashes.
-		{"every file clashes with a built-in rule", "MOAT-T1-003", "rule ID clashes with a built-in rule", idFloodFiles - floodCap},
+		{"every file clashes with a built-in rule", "MOAT-T1-003", builtinClashText, idFloodFiles - floodCap},
 		// The first file with DUP-1 loads, and the other 999 are duplicates.
-		{"every file repeats one new ID", "DUP-1", "duplicate rule ID", idFloodFiles - 1 - floodCap},
+		{"every file repeats one new ID", "DUP-1", duplicateIDText, idFloodFiles - 1 - floodCap},
 	}
 
 	for _, tt := range tests {

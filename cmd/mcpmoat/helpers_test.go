@@ -16,6 +16,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/Ducarv/mcpmoat/internal/discover/discovertest"
 )
@@ -449,7 +451,7 @@ func assertFloodResult(t *testing.T, code int, stdout, stderr string) {
 	assertScanErrorLines(t, stderr)
 	assertContainsAll(t, "the last stderr line", lines[len(lines)-1],
 		[]string{"mcpmoat scan: ", "too many errors", "files not fully checked"})
-	assertScanRulesStderr(t, stderr)
+	assertTerminalSafe(t, stderr)
 }
 
 // idFloodFiles is the number of valid rule files in an ID flood folder.
@@ -499,5 +501,82 @@ func assertIDFloodResult(t *testing.T, code int, stdout, stderr, reason string, 
 	}
 	assertContainsAll(t, "the last stderr line", lines[len(lines)-1],
 		[]string{"mcpmoat scan: ", "rule set: too many errors", fmt.Sprintf("%d more errors not shown", more)})
-	assertScanRulesStderr(t, stderr)
+	assertTerminalSafe(t, stderr)
+}
+
+// firstUnsafeRune returns the first rune of s that can change a terminal or
+// hide text, and its byte offset. The newline that ends a line is allowed. The
+// unsafe runes are:
+//   - the C0 controls (below 0x20, including ESC), DEL (0x7f) and the C1
+//     controls U+0080 to U+009F (U+009B is CSI), all from unicode.IsControl;
+//   - the format characters (category Cf): the bidi controls such as U+202E,
+//     the zero-width characters such as U+200B, the tag characters;
+//   - the line and paragraph separators U+2028 and U+2029;
+//   - a byte that is not valid UTF-8, because a terminal can read a lone
+//     0x9b byte as CSI.
+func firstUnsafeRune(s string) (r rune, offset int, found bool) {
+	for i, r := range s {
+		switch {
+		case r == '\n':
+			continue
+		case r == utf8.RuneError:
+			// range gives U+FFFD for an invalid byte. A real U+FFFD in the
+			// text is 3 bytes long and is safe.
+			if _, size := utf8.DecodeRuneInString(s[i:]); size == 1 {
+				return r, i, true
+			}
+		case unicode.IsControl(r), unicode.Is(unicode.Cf, r), r == '\u2028', r == '\u2029':
+			return r, i, true
+		}
+	}
+	return 0, 0, false
+}
+
+// assertTerminalSafe fails the test if out, the text of one stream (stdout or
+// stderr), holds a rune that can change the terminal or hide text (see
+// firstUnsafeRune). The newline is the only control character it accepts.
+func assertTerminalSafe(t *testing.T, out string) {
+	t.Helper()
+	if r, i, found := firstUnsafeRune(out); found {
+		t.Errorf("output has the unsafe rune %U at offset %d\noutput: %q", r, i, out)
+	}
+}
+
+// TestFirstUnsafeRune checks the helper that the escape tests rely on: it must
+// find every kind of unsafe rune and accept plain text, a newline and a
+// printable non-ASCII letter.
+func TestFirstUnsafeRune(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		in   string
+		want rune // 0 means safe
+	}{
+		{"plain text", "mcpmoat scan: ok\n", 0},
+		{"printable non-ASCII", "caf\u00e9 \u65e5\u672c \ufffd", 0},
+		{"ESC", "a\x1bb", 0x1b},
+		{"DEL", "a\x7fb", 0x7f},
+		{"tab", "a\tb", '\t'},
+		{"carriage return", "a\rb", '\r'},
+		{"C1 CSI", "a\u009bb", 0x9b},
+		{"C1 NEL", "a\u0085b", 0x85},
+		{"bidi override", "a\u202eb", 0x202e},
+		{"bidi isolate", "a\u2066b", 0x2066},
+		{"zero-width space", "a\u200bb", 0x200b},
+		{"BOM", "a\ufeffb", 0xfeff},
+		{"tag character", "a\U000e0041b", 0xe0041},
+		{"line separator", "a\u2028b", 0x2028},
+		{"paragraph separator", "a\u2029b", 0x2029},
+		{"invalid UTF-8 byte", "a\x9bb", utf8.RuneError},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got, _, found := firstUnsafeRune(tt.in)
+			if found != (tt.want != 0) || (found && got != tt.want) {
+				t.Errorf("firstUnsafeRune(%q) = %U, %v; want %U", tt.in, got, found, tt.want)
+			}
+		})
+	}
 }
