@@ -1,0 +1,25 @@
+id: MOAT-T4-001
+title: Remote server uses plain http://
+severity: high
+target: config
+match:
+  heuristic: insecure_url
+risk: The remote server uses plain http:// to a host that is not loopback, so anyone on the network path can read or change the tool list, the prompts and any token sent to it.
+remediation: Use the https:// URL of the server. If the server has no TLS, do not use it over the network; run it locally or behind a TLS proxy.
+references:
+  - https://modelcontextprotocol.io/specification/2025-06-18/basic/security_best_practices
+  - https://owasp.org/www-project-mcp-top-10/
+should_match:
+  - http://mcp.example.com/sse
+  - http://10.0.0.5:8080/mcp
+  - text: HTTP://MCP.EXAMPLE.COM/mcp
+    note: The scheme is in upper case. The check ignores the case of the scheme.
+  - text: "http://${MCP_HOST}:3000/mcp"
+    note: The variable has no default, so it reads as host "0". That host is not loopback, so the http:// URL still fires.
+should_not_match:
+  - https://mcp.example.com/mcp
+  - http://127.0.0.1:3000/mcp
+  - http://localhost:8080
+  - text: "http://[::1]:9000/mcp"
+    note: IPv6 loopback. The host is ::1, which is loopback.
+  - https://${MCP_HOST}/mcp

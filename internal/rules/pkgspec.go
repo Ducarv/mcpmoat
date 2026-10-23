@@ -143,10 +143,14 @@ func packageAt(command string, args []string) (PackageSpec, int, bool) {
 // parseRunnerArgs does the parse for packageAt. It does not run validName,
 // so only packageAt may call it.
 func parseRunnerArgs(command string, args []string) (PackageSpec, int, bool) {
-	if i, ok := cmdWrapped(command, args); ok {
-		spec, at, ok := parseRunnerArgs(args[i], args[i+1:])
-		return spec, i + 1 + at, ok
-	}
+	command, runArgs, skip := unwrapCmd(command, args)
+	spec, at, ok := parseUnwrapped(command, runArgs)
+	return spec, skip + at, ok
+}
+
+// parseUnwrapped is parseRunnerArgs for a command that is not a cmd /c
+// wrapper.
+func parseUnwrapped(command string, args []string) (PackageSpec, int, bool) {
 	switch r := runnerOf(command); r {
 	case RunnerNPX:
 		return extractNPM(r, npmFlags, args)
@@ -170,7 +174,7 @@ func parseRunnerArgs(command string, args []string) (PackageSpec, int, bool) {
 }
 
 // cmdWrapped reports whether command and args are "cmd [/s /d /q] /c
-// <command> ...", the usual way to start npx or uvx from a Windows client
+// <command> ..." (or /k, which also runs the command), the usual way to start npx or uvx from a Windows client
 // config. It returns the index in args of the wrapped command.
 func cmdWrapped(command string, args []string) (int, bool) {
 	if commandBase(command) != "cmd" {
@@ -178,7 +182,7 @@ func cmdWrapped(command string, args []string) (int, bool) {
 	}
 	for i, arg := range args {
 		switch {
-		case strings.EqualFold(arg, "/c"):
+		case strings.EqualFold(arg, "/c") || strings.EqualFold(arg, "/k"):
 			return i + 1, i+1 < len(args)
 		case len(arg) == 2 && arg[0] == '/':
 			continue // another switch, such as /s or /q
@@ -425,6 +429,21 @@ var npmFlags = flagTable{
 	),
 	override: flagSet("-p", "--package"),
 	stop:     flagSet("-c", "--call"),
+}
+
+// unwrapCmd reads through Windows "cmd /c" wrappers (see cmdWrapped). It
+// returns the wrapped command, the arguments that follow it, and the number
+// of arguments it skipped. A single-string wrapper such as
+// "cmd /c \"npx -y pkg\"" is not read through.
+func unwrapCmd(command string, args []string) (wrapped string, wrappedArgs []string, skip int) {
+	for {
+		i, ok := cmdWrapped(command, args)
+		if !ok {
+			return command, args, skip
+		}
+		command, args = args[i], args[i+1:]
+		skip += i + 1
+	}
 }
 
 // bunxFlags are the flags of bunx. "--bun" and similar boolean flags are not

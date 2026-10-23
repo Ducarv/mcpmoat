@@ -23,10 +23,37 @@ const (
 	// 8 to 4096), and min_text, the shortest decoded text in bytes (default
 	// 24, 4 to 3072).
 	HeuristicBase64Blob = "base64_blob"
+
+	// The five heuristics below run the native config checks on one case line
+	// of a built-in config rule (target: config). The line is text, read by the
+	// adapters in textcheck.go. Each one has no parameters.
+
+	// HeuristicInsecureURL flags an http:// URL to a host that is not loopback
+	// (MOAT-T4-001). The text is one URL.
+	HeuristicInsecureURL = "insecure_url"
+	// HeuristicPlaintextSecret flags a KEY=VALUE env entry or a "Name: value"
+	// header entry that holds a secret in plain text (MOAT-T4-002). The value is
+	// never reported.
+	HeuristicPlaintextSecret = "plaintext_secret"
+	// HeuristicUnpinnedPackage flags a package in a command line that is not
+	// pinned to a version (MOAT-T4-003). The text is a command line.
+	HeuristicUnpinnedPackage = "unpinned_package"
+	// HeuristicAutoInstall flags a command line that runs npx with its yes
+	// option on, such as -y or --yes before the package (MOAT-T4-004). The
+	// text is a command line.
+	HeuristicAutoInstall = "auto_install"
+	// HeuristicTyposquat flags a package whose name is close to a popular MCP
+	// server name (MOAT-T5-001). The text is a command line or a bare package
+	// name.
+	HeuristicTyposquat = "typosquat"
 )
 
-// heuristicNames lists the valid heuristic names for an error message.
-const heuristicNames = HeuristicBase64Blob + ", " + HeuristicInvisibleUnicode + ", " + HeuristicMaxLength
+// heuristicNames lists the valid heuristic names for an error message, in
+// alphabetical order.
+const heuristicNames = HeuristicAutoInstall + ", " + HeuristicBase64Blob + ", " +
+	HeuristicInsecureURL + ", " + HeuristicInvisibleUnicode + ", " +
+	HeuristicMaxLength + ", " + HeuristicPlaintextSecret + ", " +
+	HeuristicTyposquat + ", " + HeuristicUnpinnedPackage
 
 // paramSpec describes one integer parameter of a heuristic.
 type paramSpec struct {
@@ -62,6 +89,22 @@ func compileHeuristic(name string, params map[string]any) (func(raw string) []Hi
 		}
 		minLength, minText := v[0], v[1]
 		return func(raw string) []Hit { return base64Blob(raw, minLength, minText) }, nil
+	case HeuristicTyposquat:
+		if _, err := readParams(params); err != nil {
+			return nil, err
+		}
+		fn, err := newTyposquatText()
+		if err != nil {
+			// The popular list is built in, so its text is safe to show.
+			return nil, &FieldError{Field: "heuristic", Msg: "load popular server list: " + err.Error()}
+		}
+		return fn, nil
+	}
+	if fn, ok := configTextChecks[name]; ok {
+		if _, err := readParams(params); err != nil {
+			return nil, err
+		}
+		return fn, nil
 	}
 	// The given name is not echoed: it comes from the rule file.
 	return nil, &FieldError{Field: "heuristic", Msg: "unknown heuristic; valid: " + heuristicNames}

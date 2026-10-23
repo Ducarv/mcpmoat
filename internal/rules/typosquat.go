@@ -9,6 +9,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/Ducarv/mcpmoat/internal/discover"
+	builtinrules "github.com/Ducarv/mcpmoat/rules"
 )
 
 const (
@@ -358,4 +359,10 @@ func osaDistance(a, b string) int {
 		}
 	}
 	return d[len(ra)][len(rb)]
+}
+
+// builtinPopular parses the embedded popular server list. Each call parses the
+// list again, so no global state is kept.
+func builtinPopular() ([]string, error) {
+	return ParsePopular(strings.NewReader(builtinrules.PopularServers))
 }

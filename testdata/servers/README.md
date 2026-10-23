@@ -20,5 +20,5 @@ T4 (dangerous config) and T5 (typosquat) are config fixtures, not servers. They 
 
 | Folder | Threat | Expected rule IDs |
 |---|---|---|
-| `configs/dangerous/` | T4 | MOAT-T4-001, MOAT-T4-002, MOAT-T4-003 |
-| `configs/typosquat/` | T5 | MOAT-T5-001 |
+| `configs/dangerous/` | T4 | MOAT-T4-001, MOAT-T4-002, MOAT-T4-003, MOAT-T4-004 |
+| `configs/typosquat/` | T5 | MOAT-T4-004, MOAT-T5-001 |

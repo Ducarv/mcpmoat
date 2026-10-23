@@ -11,6 +11,7 @@ import (
 	"unicode"
 
 	"github.com/Ducarv/mcpmoat/internal/discover"
+	"github.com/Ducarv/mcpmoat/internal/inspect"
 )
 
 // Thresholds of the plaintext secret check (MOAT-T4-002).
@@ -69,13 +70,14 @@ const shellOrWindowsVar = `(\$[A-Za-z_][A-Za-z0-9_]*|%[A-Za-z_][A-Za-z0-9_]*%)`
 // and the check would report it.
 //
 // The findings come in a fixed order: MOAT-T4-001, then MOAT-T4-002 (env keys,
-// then header keys, each sorted), then MOAT-T4-003. A finding never holds a
-// secret value or a URL (see Finding).
+// then header keys, each sorted), then MOAT-T4-003, then MOAT-T4-004. A finding
+// never holds a secret value or a URL (see Finding).
 func CheckConfig(s discover.Server) []Finding {
 	var findings []Finding
 	findings = append(findings, checkInsecureURL(s)...)
 	findings = append(findings, checkPlaintextSecrets(s)...)
 	findings = append(findings, checkUnpinnedPackage(s)...)
+	findings = append(findings, checkAutoInstall(s)...)
 	return findings
 }
 
@@ -358,4 +360,101 @@ func checkUnpinnedPackage(s discover.Server) []Finding {
 		Related: related,
 		Message: unpinnedPackageMessage,
 	}}
+}
+
+// checkAutoInstall reports MOAT-T4-004: a stdio server that turns on the yes
+// option of npx.
+//
+// The yes option is on when a yes flag comes before the npx command (see
+// walkNPXFlags and isYesFlag), or when an env entry named npm_config_yes, in
+// any ASCII letter case, has a value that npm does not read as false (see
+// npmReadsFalse). The flag is checked first. A server gets one finding at most. A
+// flag finding names FieldArgs. An env finding names FieldEnv and the env key
+// name. A finding never holds a value.
+//
+// Why it matters: an MCP client starts npx with no terminal on stdin, so npx
+// installs a missing package with no prompt anyway. The yes option is a
+// problem because it overrides the npm_config_yes=false that internal/inspect
+// sets in the scrubbed environment, so mcpmoat scan itself installs and runs
+// the package. Removing the option does not make the client safe; pinning an
+// exact version (MOAT-T4-003) or npx --no does.
+//
+// The package spec is not parsed. It does not need to be a valid npm name: a
+// git URL, a tarball URL, a local path or an upper-case name counts too. The
+// check needs only that npx has something to run: a positional argument, a -p
+// or --package value, or a -c or --call value. npx with no argument installs
+// nothing, so it gives no finding.
+//
+// Known limits:
+//   - Only npx is covered. npm exec, npm x, bunx, pnpm dlx and yarn dlx are not.
+//   - sh -c, env and a single-string cmd /c "..." wrapper are not unwrapped.
+//   - npm config files are not read: a project .npmrc, or a file named by
+//     --userconfig, --globalconfig, npm_config_userconfig or
+//     npm_config_globalconfig, can set yes=true and is not seen.
+//   - The check runs before variable expansion, so an env value such as
+//     ${NPM_YES} counts as on, although it can expand to false. That gives a
+//     false finding at worst.
+func checkAutoInstall(s discover.Server) []Finding {
+	if s.Transport != discover.TransportStdio {
+		return nil
+	}
+	command, npxArgs, _ := unwrapCmd(s.Command, s.Args.Values())
+	if runnerOf(command) != RunnerNPX {
+		return nil
+	}
+	yes, runs := walkNPXFlags(npxArgs)
+	if !runs {
+		return nil // npx has nothing to install or run
+	}
+	if yes {
+		return []Finding{{
+			RuleID:  RuleAutoInstall,
+			Server:  s.Name,
+			Field:   FieldArgs,
+			Message: autoInstallMessage,
+		}}
+	}
+	if key, found := yesEnvKey(s.Env); found {
+		return []Finding{{
+			RuleID:  RuleAutoInstall,
+			Server:  s.Name,
+			Field:   FieldEnv,
+			Key:     key,
+			Message: autoInstallMessage,
+		}}
+	}
+	return nil
+}
+
+// yesEnvKey returns the name of an env entry that turns the npm yes option on,
+// and true when there is one. The name matches in any ASCII letter case, as
+// npm reads it (see inspect.IsNpmYesName). Any value that npm does not read as
+// false counts as on. "null" leaves the option unset, which still overrides
+// the scan's npm_config_yes=false. npm skips an empty value, but inspect still
+// counts the entry as set and adds no npm_config_yes=false, so the scan
+// installs. The value is read only to compare it. It is never returned or
+// copied.
+func yesEnvKey(env discover.SecretMap) (string, bool) {
+	for _, key := range env.Keys() {
+		if inspect.IsNpmYesName(key) && !npmReadsFalse(env[key].Reveal()) {
+			return key, true
+		}
+	}
+	return "", false
+}
+
+// npmReadsFalse reports whether npm reads an npm_config_yes env value as
+// false: "false" or "0" after npm trims white space. npm exec validates its
+// config, and that turns "0" into false. (npm config get skips that step, so
+// it prints "0".) npm also reads other numeric zeros, such as "00", as false;
+// they count as on here, which gives a false finding at worst. The trim is
+// ASCII only: Go's strings.TrimSpace also strips U+0085, which npm keeps, so
+// "false\u0085" would look off here but is on in npm.
+func npmReadsFalse(v string) bool {
+	switch strings.Trim(v, " \t\n\v\f\r") {
+	case "false", "0":
+		return true
+	default:
+		return false
+	}
 }

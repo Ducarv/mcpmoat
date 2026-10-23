@@ -1,0 +1,31 @@
+id: MOAT-T5-001
+title: Server package name is close to a popular server (typosquatting)
+severity: medium
+target: config
+match:
+  heuristic: typosquat
+risk: The package name is one or two typos away from a popular MCP server, so it may be a look-alike package that runs attacker code instead of the real server.
+remediation: Check the exact package name and publisher on the registry. Replace it with the official package if it is a typo, and remove the server if you did not mean to install it.
+references:
+  - https://owasp.org/www-project-mcp-top-10/
+  - https://owasp.org/www-community/attacks/Typosquatting
+should_match:
+  - text: '@modelcontextprotocol/server-filesytem'
+    note: Bare package name, run as npx. One letter is missing from server-filesystem, in the same scope.
+  - text: '@modelcontextprotocol/server-githbu'
+    note: Bare package name, run as npx. Two letters are swapped in server-github.
+  - npx -y @modelcontextprotocol/server-filesytem
+  - text: '@modelcontextprotocl/server-github'
+    note: Scope squat. The scope is one letter short of @modelcontextprotocol, and the bare name is server-github.
+  - text: mcp-remot
+    note: Unscoped name, one letter short of mcp-remote.
+should_not_match:
+  - text: '@modelcontextprotocol/server-filesystem'
+    note: Exact popular name, so it is the real server.
+  - my-company-internal-tools
+  - text: npx -y @modelcontextprotocol/server-github@1.0.0
+    note: Exact popular name with a version. The version is not part of the name.
+  - text: node ./server.js
+    note: Local script, not a package. No package is found, so no finding.
+  - text: git
+    note: Too short to compare, under 5 characters.

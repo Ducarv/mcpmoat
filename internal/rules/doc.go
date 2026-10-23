@@ -28,7 +28,7 @@
 // This is an evasion window: instructions placed after the first 32 KiB of
 // visible text (or after the first 128 KiB of raw text) are not seen by regex
 // and keyword rules. The max_length heuristic flags such a long text, because
-// it and the other heuristics read the full raw text.
+// it and the other text heuristics read the full raw text.
 //
 // A list holds at most [MaxPatterns] entries of at most [MaxPatternBytes]
 // bytes each, and the compiled programs of one regex and of one list have
@@ -77,15 +77,26 @@
 //
 // # Heuristics and hits
 //
-// The heuristics read the raw text, not the normalized text. A [Hit] from a
-// heuristic gives a byte offset in the raw text. A hit from a regex or a
-// keyword has the offset -1, because it comes from the normalized text.
+// The text heuristics (invisible_unicode, max_length and base64_blob) read the
+// raw text, not the normalized text. A [Hit] from a text heuristic gives a byte
+// offset in the raw text. A hit from a regex or a keyword has the offset -1,
+// because it comes from the normalized text.
 //
 // The base64_blob heuristic checks each run of base64 characters on its own.
 // An invisible rune inside a run is skipped. Any other character, such as a
 // space, a newline or '=', ends a run, and runs are not joined. So a payload
 // that is split into short chunks is not flagged when no chunk reaches
 // min_length on its own.
+//
+// The config heuristics (insecure_url, plaintext_secret, unpinned_package,
+// auto_install and typosquat) read one line of text each, not the whole text.
+// Only a rule with target: config may use them (Validate checks this). The
+// built-in config rules use them on the lines of their test cases.
+// insecure_url reads a URL. plaintext_secret reads a KEY=VALUE or "Name:
+// value" entry. unpinned_package and auto_install read a command line.
+// typosquat reads a command line or a bare package name. An adapter in this
+// package turns the line into a server and runs the native config check on
+// it. A hit from a config heuristic has the offset -1.
 //
 // # The ignore file
 //

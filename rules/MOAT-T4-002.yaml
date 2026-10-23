@@ -1,0 +1,31 @@
+id: MOAT-T4-002
+title: Plaintext secret in env or headers
+severity: high
+target: config
+match:
+  heuristic: plaintext_secret
+risk: A secret is written in clear text in the client config, so any program or person that can read the file, a backup or a shared dotfiles repo gets it.
+remediation: "Move the secret out of the config file: use a variable reference such as ${GITHUB_TOKEN} and set the value in your environment or a secret manager. Rotate the exposed secret."
+references:
+  - https://owasp.org/www-project-mcp-top-10/
+  - https://cwe.mitre.org/data/definitions/798.html
+should_match:
+  - text: GITHUB_TOKEN=ghp_EXAMPLEexampleEXAMPLEexample00000000
+    note: Synthetic token. The ghp_ prefix plus 36 fake characters.
+  - text: 'Authorization: Bearer FAKE0000EXAMPLE0000fakeLongValueabcd1234WXYZ'
+    note: Header with a Bearer scheme. The scheme is removed before the check, and the value is 44 fake characters.
+  - text: API_KEY=FAKE0000EXAMPLE1234
+    note: Credential-like key name with a fake value of 19 characters.
+  - text: 'X-Api-Key: FAKE0000EXAMPLE0000fakeLongValueabcd1234WXYZ'
+    note: Header form of a credential-like name.
+should_not_match:
+  - text: 'GITHUB_TOKEN=${GITHUB_TOKEN}'
+    note: Variable reference, the safe form. The value is set outside the config.
+  - LOG_LEVEL=debug
+  - text: 'Authorization: Bearer ${API_TOKEN}'
+    note: Bearer scheme with a variable reference, the safe form.
+  - text: CONFIG_PATH=/home/user/.config/app.json
+    note: Path setting. The key ends in PATH, so the value is a path, not a secret.
+  - DEBUG=true
+  - text: 'Accept: application/json'
+    note: Header with no credential-like name and a short value.

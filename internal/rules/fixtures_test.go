@@ -200,9 +200,13 @@ func TestFixturePoisoned(t *testing.T) {
 	}
 }
 
-// t1Prefix is the ID prefix of the T1 (tool poisoning) rules. The test asserts
-// only these IDs, so a later T3, T4 or T5 rule does not break it.
-const t1Prefix = "MOAT-T1-"
+// The ID prefixes of the T1 (tool poisoning) and T3 (shadowing) rules. Each
+// fixture test asserts only the IDs of one threat, so a rule of another threat
+// does not break it.
+const (
+	t1Prefix = "MOAT-T1-"
+	t3Prefix = "MOAT-T3-"
+)
 
 // compiledRule is a built-in rule with its compiled match block.
 type compiledRule struct {
@@ -211,10 +215,10 @@ type compiledRule struct {
 	m      *rules.Matcher
 }
 
-// t1Rules returns the built-in T1 rules that run on a description or a
-// schema, with their match blocks compiled. Config rules need a server config,
-// so they are skipped.
-func t1Rules(t *testing.T) []compiledRule {
+// prefixRules returns the built-in rules whose ID starts with prefix and that
+// run on a description or a schema, with their match blocks compiled. Config
+// rules need a server config, so they are skipped.
+func prefixRules(t *testing.T, prefix string) []compiledRule {
 	t.Helper()
 	c := rules.BuiltinCompiler()
 	// WithCompiler makes a load error name the file, the line and the column.
@@ -222,7 +226,7 @@ func t1Rules(t *testing.T) []compiledRule {
 	rs := rules.MustBuiltin(t, rules.WithCompiler(c))
 	var out []compiledRule
 	for _, r := range rs {
-		if r.Target == rules.TargetConfig || !strings.HasPrefix(r.ID, t1Prefix) {
+		if r.Target == rules.TargetConfig || !strings.HasPrefix(r.ID, prefix) {
 			continue
 		}
 		m, err := c(r.Match, r.Target)
@@ -234,9 +238,9 @@ func t1Rules(t *testing.T) []compiledRule {
 	return out
 }
 
-// t1Hits returns the sorted IDs of the rules in rs with the given target that
-// match text.
-func t1Hits(rs []compiledRule, target rules.Target, text string) []string {
+// ruleHits returns the sorted IDs of the rules in rs with the given target
+// that match text.
+func ruleHits(rs []compiledRule, target rules.Target, text string) []string {
 	var ids []string
 	for _, cr := range rs {
 		if cr.target == target && len(cr.m.Match(text)) > 0 {
@@ -269,7 +273,7 @@ func TestBuiltinT1IDs(t *testing.T) {
 	t.Parallel()
 
 	var ids []string
-	for _, cr := range t1Rules(t) {
+	for _, cr := range prefixRules(t, t1Prefix) {
 		ids = append(ids, cr.id)
 	}
 	slices.Sort(ids)
@@ -291,7 +295,7 @@ func TestBuiltinT1IDs(t *testing.T) {
 func TestFixtureBuiltinT1(t *testing.T) {
 	t.Parallel()
 
-	rs := t1Rules(t)
+	rs := prefixRules(t, t1Prefix)
 	if len(rs) == 0 {
 		t.Fatal("no built-in T1 rules loaded; the checks would pass with no rule")
 	}
@@ -334,7 +338,7 @@ func TestFixtureBuiltinT1(t *testing.T) {
 			for _, target := range []rules.Target{rules.TargetDescription, rules.TargetSchema} {
 				t.Run(fx.name+"/"+tool.Name+"/"+string(target), func(t *testing.T) {
 					t.Parallel()
-					got := t1Hits(rs, target, targetText(tool, target))
+					got := ruleHits(rs, target, targetText(tool, target))
 					want := fx.want[toolTarget{tool.Name, target}]
 					if !slices.Equal(got, want) {
 						t.Errorf("T1 hits = %q, want %q", got, want)
@@ -373,7 +377,9 @@ func TestFixtureDangerousConfig(t *testing.T) {
 		{"remote-plain", rules.RuleInsecureURL, rules.FieldURL, "", ""},
 		{"remote-plain", rules.RulePlaintextSecret, rules.FieldHeaders, "X-Api-Key", ""},
 		{"env-secret", rules.RulePlaintextSecret, rules.FieldEnv, "GITHUB_TOKEN", ""},
+		{"env-secret", rules.RuleAutoInstall, rules.FieldArgs, "", ""},
 		{"latest-pkg", rules.RuleUnpinnedPackage, rules.FieldArgs, "", "@example-corp/files-mcp"},
+		{"latest-pkg", rules.RuleAutoInstall, rules.FieldArgs, "", ""},
 		{"docker-untagged", rules.RuleUnpinnedPackage, rules.FieldArgs, "", "registry.invalid/example/mcp-server"},
 	})
 
@@ -402,5 +408,39 @@ func TestFixtureTyposquatConfig(t *testing.T) {
 		{"filesystem", rules.RuleTyposquat, rules.FieldArgs, "", "@modelcontextprotocol/server-filesystem"},
 		{"mcp-server-fecth", rules.RuleTyposquat, rules.FieldName, "", "mcp-server-fetch"},
 	})
-	assertFindings(t, "CheckConfig", config, nil)
+	assertFindings(t, "CheckConfig", config, []findingKey{
+		{"filesystem", rules.RuleAutoInstall, rules.FieldArgs, "", ""},
+		{"memory", rules.RuleAutoInstall, rules.FieldArgs, "", ""},
+	})
+}
+
+// TestFixtureBuiltinT3 runs the built-in T3 rules on every tool of the fixture
+// servers, once for the description and once for the schema. Only the
+// description of add_numbers in the shadowing fixture may match.
+func TestFixtureBuiltinT3(t *testing.T) {
+	t.Parallel()
+
+	rs := prefixRules(t, t3Prefix)
+	if len(rs) == 0 {
+		t.Fatal("no built-in T3 rules loaded; the checks would pass with no rule")
+	}
+	want := map[string]map[toolTarget][]string{ // sorted; a pair not listed matches none
+		"shadowing": {{"add_numbers", rules.TargetDescription}: {rules.RuleShadowing}},
+	}
+	for _, name := range []string{"benign", "mailer", "poisoned", "shadowing"} {
+		st := inspectFixture(t, name)
+		for key := range want[name] {
+			if !slices.ContainsFunc(st.Tools, func(tool inspect.Tool) bool { return tool.Name == key.tool }) {
+				t.Errorf("%s expects results for tool %q, which the server does not list", name, key.tool)
+			}
+		}
+		for _, tool := range st.Tools {
+			for _, target := range []rules.Target{rules.TargetDescription, rules.TargetSchema} {
+				got := ruleHits(rs, target, targetText(tool, target))
+				if w := want[name][toolTarget{tool.Name, target}]; !slices.Equal(got, w) {
+					t.Errorf("%s/%s/%s: T3 hits = %q, want %q", name, tool.Name, target, got, w)
+				}
+			}
+		}
+	}
 }

