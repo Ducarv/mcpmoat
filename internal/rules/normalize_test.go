@@ -1,6 +1,7 @@
 package rules
 
 import (
+	"slices"
 	"strings"
 	"testing"
 	"unicode/utf8"
@@ -40,6 +41,10 @@ func TestIsInvisible(t *testing.T) {
 		{name: "newline", r: '\n', want: false},
 		{name: "emoji", r: '\U0001F642', want: false},
 		{name: "combining acute", r: '\u0301', want: false},
+		// Cf, but shows as a mark (prepended concatenation marks).
+		{name: "Arabic number sign", r: '\u0600', want: false},
+		{name: "Arabic end of ayah", r: '\u06dd', want: false},
+		{name: "Kaithi number sign", r: '\U000110BD', want: false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -290,6 +295,32 @@ func TestFoldMarks(t *testing.T) {
 			t.Parallel()
 			if got := foldMarks(tt.in); got != tt.want {
 				t.Errorf("foldMarks(%q) = %q, want %q", tt.in, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestMatchForms checks that a text gets the spaced second form only when it
+// holds an invisible rune.
+func TestMatchForms(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		in   string
+		want []string
+	}{
+		{name: "no invisible rune", in: "ignore previous", want: []string{"ignore previous"}},
+		{name: "ZWSP inside a word", in: "ign\u200bore", want: []string{"ignore", "ign ore"}},
+		{name: "ZWSP between words", in: "ignore\u200bprevious", want: []string{"ignoreprevious", "ignore previous"}},
+		{name: "Hangul filler between words", in: "ignore\u3164previous", want: []string{"ignoreprevious", "ignore previous"}},
+		{name: "empty", in: "", want: []string{""}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if got := matchForms(tt.in); !slices.Equal(got, tt.want) {
+				t.Errorf("matchForms(%q) = %q, want %q", tt.in, got, tt.want)
 			}
 		})
 	}

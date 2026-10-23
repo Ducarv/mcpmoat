@@ -41,7 +41,11 @@
 //
 // Before regex and keyword matching, the text is normalized: invisible runes
 // (zero-width, bidi, tag and other format characters) are removed, and the
-// text is put in Unicode form NFC. The form is not NFKC, so fullwidth letters
+// text is put in Unicode form NFC. When the text holds invisible runes, it is
+// also matched in a second form where each invisible rune is a space, so an
+// invisible rune can split neither a word nor the space between two words. A
+// rule matches when it matches in one form, so such a text costs twice as
+// much to match. The form is not NFKC, so fullwidth letters
 // and homoglyphs (for example Cyrillic U+0430 for Latin "a") are not folded.
 //
 // A regex reads only this normalized text. So a regex cannot match an

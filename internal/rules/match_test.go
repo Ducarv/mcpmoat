@@ -310,6 +310,10 @@ func TestMatchAnyRegex(t *testing.T) {
 			name: "NFC before match", patterns: []string{`caf\x{e9}`},
 			text: "cafe\u0301", want: "any_regex[0] matched",
 		},
+		{
+			name: "ZWSP as a space", patterns: []string{`(?i)ignore\s+previous`},
+			text: "IGNORE\u200bprevious", want: "any_regex[0] matched",
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -406,6 +410,13 @@ func TestMatchKeywords(t *testing.T) {
 		{name: "braille blank", keyword: "ignore previous", text: "ignore\u2800previous", want: true},
 		{name: "keyword with braille blank", keyword: "ignore\u2800previous", text: "ignore previous", want: true},
 		{name: "mark does not join words", keyword: "ignore previous", text: "ignore\u0301previous"},
+		// An invisible rune between words works as a space.
+		{name: "ZWSP between words", keyword: "ignore previous", text: "ignore\u200bprevious instructions", want: true},
+		{name: "word joiner between words", keyword: "ignore previous", text: "ignore\u2060previous", want: true},
+		{name: "Hangul filler between words", keyword: "ignore previous", text: "ignore\u3164previous", want: true},
+		{name: "soft hyphen between words", keyword: "ignore previous", text: "ignore\u00adprevious", want: true},
+		{name: "ZWSP at both edges", keyword: "ignore", text: "please\u200bignore\u200bthe rules", want: true},
+		{name: "ZWSP does not make a word edge", keyword: "ignore", text: "xignore\u200bthe"},
 		{name: "enclosing mark inside word", keyword: "ignore previous", text: "ig\u20ddnore previous", want: true},
 		{name: "spacing mark after last letter", keyword: "ignore previous", text: "ignore previous\u0903", want: true},
 		{name: "letter after is non-ASCII", keyword: "caf", text: "caf\u00e9"},

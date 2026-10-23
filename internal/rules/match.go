@@ -22,8 +22,9 @@ import (
 //
 // The worst case for one match block is about 32 KiB x 2500, about 80M
 // instruction-bytes. BenchmarkWorstCaseBlock measured about 0.8 s for it on
-// an Apple M1 Pro (about 10 ns for each instruction-byte). The package doc
-// says how the rule count multiplies it.
+// an Apple M1 Pro (about 10 ns for each instruction-byte). A text with
+// invisible runes is matched in two forms (see matchForms), so it can cost
+// twice that. The package doc says how the rule count multiplies it.
 const (
 	// MaxPatternBytes is the largest regex or keyword, in bytes, before
 	// compilation.
@@ -152,8 +153,9 @@ func (m Match) Compile() (*Matcher, error) {
 // Match returns the hits of the matcher in text, or nil when it does not
 // match.
 //
-// Regexes and keywords read the normalized text (see normalizeForMatch), so
-// an invisible character cannot split a keyword. A heuristic reads the full
+// Regexes and keywords read the normalized forms of the text (see
+// matchForms), so an invisible character cannot split a keyword. A regex or
+// a keyword matches when it matches in one form. A heuristic reads the full
 // raw text.
 func (m *Matcher) Match(text string) []Hit {
 	if m == nil {
@@ -163,17 +165,17 @@ func (m *Matcher) Match(text string) []Hit {
 	case kindHeuristic:
 		return m.heuristic(text)
 	case kindAnyRegex:
-		t := normalizeForMatch(text)
+		forms := matchForms(text)
 		for i, re := range m.regexps {
-			if re.MatchString(t) {
+			if matchesAny(re, forms) {
 				return []Hit{{Offset: -1, Detail: fmt.Sprintf("any_regex[%d] matched", i)}}
 			}
 		}
 		return nil
 	case kindAllRegex:
-		t := normalizeForMatch(text)
+		forms := matchForms(text)
 		for _, re := range m.regexps {
-			if !re.MatchString(t) {
+			if !matchesAny(re, forms) {
 				return nil
 			}
 		}
@@ -185,16 +187,29 @@ func (m *Matcher) Match(text string) []Hit {
 		}
 		return l.result("patterns")
 	case kindKeywords:
-		t := foldMarks(normalizeForMatch(text))
+		forms := matchForms(text)
+		for i, f := range forms {
+			forms[i] = foldMarks(f)
+		}
 		var l hitList
 		for i, re := range m.regexps {
-			if re.MatchString(t) && l.keep(-1) {
+			if matchesAny(re, forms) && l.keep(-1) {
 				l.hits = append(l.hits, Hit{Offset: -1, Detail: fmt.Sprintf("keyword[%d] matched", i)})
 			}
 		}
 		return l.result("keywords")
 	}
 	return nil
+}
+
+// matchesAny reports whether re matches one of forms.
+func matchesAny(re *regexp.Regexp, forms []string) bool {
+	for _, f := range forms {
+		if re.MatchString(f) {
+			return true
+		}
+	}
+	return false
 }
 
 // compileRegexList compiles the entries of the list named field, with the

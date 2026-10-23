@@ -26,13 +26,16 @@ const maxRawScanBytes = 4 * MaxMatchInputBytes
 
 // isInvisible reports whether r is a rune that shows as nothing but can split
 // a keyword: a format character (Cf), a variation selector, or another
-// default-ignorable code point.
+// default-ignorable code point. The few Cf runes that show as a mark (the
+// prepended concatenation marks, such as the Arabic number sign U+0600) are
+// not invisible.
 //
 // This covers the zero-width characters (ZWSP, ZWNJ, ZWJ, word joiner), LRM
 // and RLM, the bidi embeddings, overrides and isolates, the BOM, the soft
 // hyphen, the tag characters (U+E0000 to U+E007F), the variation selectors
 // (VS1 to VS256), the combining grapheme joiner (CGJ, U+034F) and the Hangul
-// fillers.
+// fillers. ZWNJ and ZWJ are also a normal part of Persian and Indic text, so
+// invisible_unicode flags such text too.
 //
 // normalizeForMatch and the invisible_unicode heuristic share this one
 // predicate, so they cannot disagree about which runes are invisible.
@@ -41,7 +44,28 @@ func isInvisible(r rune) bool {
 		unicode.Cf,
 		unicode.Variation_Selector,
 		unicode.Other_Default_Ignorable_Code_Point,
-	)
+	) && !unicode.Is(unicode.Prepended_Concatenation_Mark, r)
+}
+
+// matchForms returns the forms of s that the regex and keyword matchers read.
+// A matcher reports a match when one form matches.
+//
+// The first form is normalizeForMatch(s): the invisible runes are dropped, so
+// "ign" + ZWSP + "ore" is "ignore". When s holds an invisible rune in the
+// part that normalizeForMatch reads, the second form replaces each invisible
+// rune with a space instead, so "ignore" + ZWSP + "previous" is "ignore
+// previous" and a keyword edge next to a ZWSP still holds. A text that uses
+// invisible runes both inside a word and between words defeats both forms;
+// the invisible_unicode heuristic flags it.
+//
+// A text without invisible runes has one form, so it costs no more. A text
+// with them is matched twice, which doubles the cost bound in match.go.
+func matchForms(s string) []string {
+	joined := normalizeForMatch(s)
+	if !strings.ContainsFunc(cutAtRune(s, maxRawScanBytes), isInvisible) {
+		return []string{joined}
+	}
+	return []string{joined, normalizeInvisible(s, ' ')}
 }
 
 // normalizeForMatch returns the form of s that the regex and keyword matchers
@@ -73,11 +97,18 @@ func isInvisible(r rune) bool {
 // Invalid UTF-8 does not cause a panic: strings.Map reads each bad byte as
 // U+FFFD (utf8.RuneError) and writes U+FFFD in its place.
 func normalizeForMatch(s string) string {
+	return normalizeInvisible(s, -1)
+}
+
+// normalizeInvisible runs the steps of normalizeForMatch, but replaces each
+// invisible rune with repl. A repl of -1 drops the rune, as in
+// normalizeForMatch.
+func normalizeInvisible(s string, repl rune) string {
 	s = cutAtRune(s, maxRawScanBytes)
-	s = dropInvisible(s)
+	s = replaceInvisible(s, repl)
 	s = cutAtRune(s, MaxMatchInputBytes)
 	s = norm.NFC.String(s)
-	return cutAtRune(dropInvisible(s), MaxMatchInputBytes)
+	return cutAtRune(replaceInvisible(s, repl), MaxMatchInputBytes)
 }
 
 // foldMarks removes the combining marks (category M: non-spacing, spacing
@@ -100,15 +131,16 @@ func foldMarks(s string) string {
 		}
 		return r
 	}, norm.NFD.String(s))
-	return cutAtRune(dropInvisible(norm.NFC.String(s)), MaxMatchInputBytes)
+	return cutAtRune(replaceInvisible(norm.NFC.String(s), -1), MaxMatchInputBytes)
 }
 
-// dropInvisible returns s without the runes for which isInvisible is true.
-// strings.Map drops a rune when the mapping function returns -1.
-func dropInvisible(s string) string {
+// replaceInvisible returns s with each rune for which isInvisible is true
+// replaced by repl. strings.Map drops a rune when the mapping function
+// returns -1, so a repl of -1 drops the invisible runes.
+func replaceInvisible(s string, repl rune) string {
 	return strings.Map(func(r rune) rune {
 		if isInvisible(r) {
-			return -1
+			return repl
 		}
 		return r
 	}, s)
