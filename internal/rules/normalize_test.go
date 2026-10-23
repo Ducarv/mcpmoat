@@ -266,3 +266,29 @@ func normTestTail(s string) string {
 	}
 	return s[len(s)-k:]
 }
+
+// TestFoldMarks checks the marks that foldMarks drops and the ones it keeps.
+func TestFoldMarks(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{name: "precomposed accent", in: "café", want: "cafe"},
+		{name: "overlay mark", in: "ig̶nore", want: "ignore"},
+		{name: "Hangul syllable kept", in: "한", want: "한"},
+		{name: "spacing mark kept", in: "का", want: "का"},
+		{name: "plain ASCII unchanged", in: "ignore previous", want: "ignore previous"},
+		{name: "empty", in: "", want: ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if got := foldMarks(tt.in); got != tt.want {
+				t.Errorf("foldMarks(%q) = %q, want %q", tt.in, got, tt.want)
+			}
+		})
+	}
+}

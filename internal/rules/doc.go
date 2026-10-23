@@ -45,8 +45,12 @@
 // text is put in Unicode form NFC. The form is not NFKC, so fullwidth letters
 // and homoglyphs (for example Cyrillic U+0430 for Latin "a") are not folded.
 //
-// Keywords are normalized in the same way. A keyword matches without regard
-// to case, and only as a whole word, with Unicode word edges. A regex gets no
+// Keywords are normalized in the same way. For keywords only, the
+// non-spacing marks (category Mn) are then dropped from the keyword and the
+// text, so a mark cannot hide a keyword, and accents are folded: "cafe"
+// matches "caf" + U+00E9. U+2800 (braille blank) counts as white space
+// between the words of a keyword. A keyword matches without regard to case,
+// and only as a whole word, with Unicode word edges. A regex gets no
 // automatic (?i): write it in the pattern when you need it.
 //
 // # Heuristics and hits
@@ -56,8 +60,8 @@
 // keyword has the offset -1, because it comes from the normalized text.
 //
 // The base64_blob heuristic checks each run of base64 characters on its own.
-// Any other character, such as a space, a newline or '=', ends a run, and
-// runs are not joined. So a payload that is split into short chunks is not
+// An invisible rune inside a run is skipped. Any other character, such as a
+// space, a newline or '=', ends a run, and runs are not joined. So a payload that is split into short chunks is not
 // flagged when no chunk reaches min_length on its own.
 //
 // # The ignore file

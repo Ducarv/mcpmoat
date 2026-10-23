@@ -80,6 +80,28 @@ func normalizeForMatch(s string) string {
 	return cutAtRune(dropInvisible(s), MaxMatchInputBytes)
 }
 
+// foldMarks removes the non-spacing marks (category Mn) from s, which comes
+// from normalizeForMatch. The keyword matcher applies it to the keyword and
+// to the text, so a mark cannot hide a keyword: "ig" + U+0336 + "nore" and
+// "previou" + U+015B (s with acute) still match "ignore previous". It also
+// folds accents, so the keyword "caf" + U+00E9 matches "cafe". Regexes do not get it:
+// their patterns are not folded.
+//
+// It splits each letter from its marks (NFD), drops the Mn runes, and joins
+// the rest again (NFC). The NFC step can add a CGJ (see normalizeForMatch),
+// so the invisible runes are dropped again. The result is cut to
+// MaxMatchInputBytes again, so the cost bound in match.go holds whatever the
+// Unicode tables do.
+func foldMarks(s string) string {
+	s = strings.Map(func(r rune) rune {
+		if unicode.Is(unicode.Mn, r) {
+			return -1
+		}
+		return r
+	}, norm.NFD.String(s))
+	return cutAtRune(dropInvisible(norm.NFC.String(s)), MaxMatchInputBytes)
+}
+
 // dropInvisible returns s without the runes for which isInvisible is true.
 // strings.Map drops a rune when the mapping function returns -1.
 func dropInvisible(s string) string {

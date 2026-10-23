@@ -186,7 +186,7 @@ func (m *Matcher) Match(text string) []Hit {
 		}
 		return l.result("patterns")
 	case kindKeywords:
-		t := normalizeForMatch(text)
+		t := foldMarks(normalizeForMatch(text))
 		var l hitList
 		for i, re := range m.regexps {
 			if re.MatchString(t) && l.keep(-1) {
@@ -235,15 +235,18 @@ func checkTotal(field string, total int) error {
 
 // compileKeywords builds and compiles one regex for each keyword.
 //
-// A keyword is normalized like the text it is matched against. It then
-// matches without regard to case, any run of white space in the text matches
-// the white space between its words, and it matches only as a whole word.
+// A keyword is normalized like the text it is matched against, with
+// normalizeForMatch and then foldMarks. It then matches without regard to
+// case, any run of white space in the text matches the white space between
+// its words, and it matches only as a whole word.
 //
 // Go's \b, \w and \s know only ASCII, so the word edges and the white space
 // are written as Unicode classes:
 //
 //   - a word rune is a letter, a mark, a number or '_': [\p{L}\p{M}\p{N}_];
-//   - white space is [\s\v\x{85}\p{Z}], the same set as unicode.IsSpace.
+//   - white space is [\s\v\x{85}\p{Z}\x{2800}]: the same set as
+//     unicode.IsSpace, plus U+2800 (braille blank), a symbol that shows as a
+//     blank.
 //
 // The edge check is added only on a side where the keyword starts or ends
 // with a word rune. So the keyword "C++" still matches in "C++, Go".
@@ -258,14 +261,14 @@ func compileKeywords(keywords []string) ([]*regexp.Regexp, error) {
 		if err := checkEntry(entry, kw); err != nil {
 			return nil, err
 		}
-		words := strings.Fields(normalizeForMatch(kw))
+		words := strings.FieldsFunc(foldMarks(normalizeForMatch(kw)), isKeywordSpace)
 		if len(words) == 0 {
 			return nil, &FieldError{Field: entry, Msg: "has no visible characters"}
 		}
 		for j, w := range words {
 			words[j] = regexp.QuoteMeta(w)
 		}
-		expr := `(?i:` + strings.Join(words, `[\s\v\x{85}\p{Z}]+`) + `)`
+		expr := `(?i:` + strings.Join(words, `[\s\v\x{85}\p{Z}\x{2800}]+`) + `)`
 
 		first, _ := utf8.DecodeRuneInString(words[0])
 		if isWordRune(first) {
@@ -287,6 +290,12 @@ func compileKeywords(keywords []string) ([]*regexp.Regexp, error) {
 		res = append(res, re)
 	}
 	return res, nil
+}
+
+// isKeywordSpace reports whether r separates the words of a keyword. It is
+// the same set as the white-space class in compileKeywords.
+func isKeywordSpace(r rune) bool {
+	return unicode.IsSpace(r) || r == '⠀'
 }
 
 // isWordRune reports whether r is a letter, a mark, a number or '_'. It is
