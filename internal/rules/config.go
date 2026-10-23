@@ -11,6 +11,7 @@ import (
 	"unicode"
 
 	"github.com/Ducarv/mcpmoat/internal/discover"
+	"github.com/Ducarv/mcpmoat/internal/inspect"
 )
 
 // Thresholds of the plaintext secret check (MOAT-T4-002).
@@ -361,15 +362,12 @@ func checkUnpinnedPackage(s discover.Server) []Finding {
 	}}
 }
 
-// npmYesEnv is the environment name that turns on the yes option of npm.
-const npmYesEnv = "npm_config_yes"
-
 // checkAutoInstall reports MOAT-T4-004: a stdio server that turns on the yes
 // option of npx.
 //
 // The yes option is on when a yes flag comes before the npx command (see
 // walkNPXFlags and isYesFlag), or when an env entry named npm_config_yes, in
-// any letter case, has a value that npm does not read as false (see
+// any ASCII letter case, has a value that npm does not read as false (see
 // envFalse). The flag is checked first. A server gets one finding at most. A
 // flag finding names FieldArgs. An env finding names FieldEnv and the env key
 // name. A finding never holds a value.
@@ -393,11 +391,14 @@ const npmYesEnv = "npm_config_yes"
 //   - npm config files are not read: a project .npmrc, or a file named by
 //     --userconfig, --globalconfig, npm_config_userconfig or
 //     npm_config_globalconfig, can set yes=true and is not seen.
+//   - The check runs before variable expansion, so an env value such as
+//     ${NPM_YES} counts as on, although it can expand to false. That gives a
+//     false finding at worst.
 func checkAutoInstall(s discover.Server) []Finding {
 	if s.Transport != discover.TransportStdio {
 		return nil
 	}
-	command, npxArgs, _ := runnerArgs(s.Command, s.Args.Values())
+	command, npxArgs, _ := unwrapCmd(s.Command, s.Args.Values())
 	if runnerOf(command) != RunnerNPX {
 		return nil
 	}
@@ -426,18 +427,16 @@ func checkAutoInstall(s discover.Server) []Finding {
 }
 
 // yesEnvKey returns the name of an env entry that turns the npm yes option on,
-// and true when there is one. The name matches in any letter case, as npm reads
-// it. Any value that npm does not read as false counts as on: an empty value or
-// "null" leaves the option unset, which still overrides the scan's
-// npm_config_yes=false. The value is read only to compare it. It is never
-// returned or copied.
-//
-// npm matches the name with ASCII case folding only. strings.EqualFold also
-// folds some non-ASCII letters, such as U+017F to "s", but such a letter is
-// more than one byte, so the length check rules it out.
+// and true when there is one. The name matches in any ASCII letter case, as
+// npm reads it (see inspect.IsNpmYesName). Any value that npm does not read as
+// false counts as on. "null" leaves the option unset, which still overrides
+// the scan's npm_config_yes=false. npm skips an empty value, but inspect still
+// counts the entry as set and adds no npm_config_yes=false, so the scan
+// installs. The value is read only to compare it. It is never returned or
+// copied.
 func yesEnvKey(env discover.SecretMap) (string, bool) {
 	for _, key := range env.Keys() {
-		if len(key) == len(npmYesEnv) && strings.EqualFold(key, npmYesEnv) && !envFalse(env[key].Reveal()) {
+		if inspect.IsNpmYesName(key) && !envFalse(env[key].Reveal()) {
 			return key, true
 		}
 	}

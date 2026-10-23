@@ -489,13 +489,28 @@ func TestCheckAutoInstall(t *testing.T) {
 		// A lone "-" is the value of a String option, so a later -y counts.
 		{"--tag - then -y", stdioServer("npx", "--tag", "-", "-y", "pkg"), fires},
 		{"-c - then -y", stdioServer("npx", "-p", "@evil/pkg", "-c", "-", "-y"), fires},
+		// npm's shorthand "no" is --no-yes, so null and false after it turn yes on.
+		{"--no=null", stdioServer("npx", "--no=null", "@scope/server@1.2.3"), fires},
+		{"--no false", stdioServer("npx", "--no", "false", "pkg"), fires},
+		{"-no false", stdioServer("npx", "-no", "false", "pkg"), fires},
+		// npx drops a removed option and the next argument, and --reg is an alias
+		// of --registry, so -p does not take the -y in npm.
+		{"--node-arg -p -y", stdioServer("npx", "--node-arg", "-p", "-y", "@scope/server@1.2.3"), fires},
+		{"--reg -p --y", stdioServer("npx", "--reg", "-p", "--y", "@scope/server@1.2.3"), fires},
+		// npx reads a bare "-" as a flag and goes on.
+		{"- then -y", stdioServer("npx", "-", "-y", "@scope/server@1.2.3"), fires},
+		// "--" can be the value of -p, so the walk goes on past it.
+		{"-p -- then -y", stdioServer("npx", "-p", "--", "-y", "bin"), fires},
 
-		// An env entry turns the yes option on unless its value is "false" or
-		// "0" after trimming ASCII white space. The key matches in any letter case.
+		// An env entry turns the yes option on unless its value is "false"
+		// after trimming ASCII white space. The key matches in any ASCII letter
+		// case.
 		{"env npm_config_yes=true", withEnv(stdioServer("npx", "pkg"), "npm_config_yes", "true"), firesEnv("npm_config_yes")},
 		{"env NPM_CONFIG_YES=1", withEnv(stdioServer("npx", "pkg"), "NPM_CONFIG_YES", "1"), firesEnv("NPM_CONFIG_YES")},
-		// npm skips an empty value and reads "null" as unset. Either one still
-		// replaces the scan's npm_config_yes=false, so npx installs with no TTY.
+		// npm reads "null" as unset. That still replaces the scan's
+		// npm_config_yes=false, so npx installs with no TTY.
+		// npm skips an empty value, but inspect counts the entry as set and
+		// adds no npm_config_yes=false, so the scan installs too.
 		{"env npm_config_yes empty", withEnv(stdioServer("npx", "pkg"), "npm_config_yes", ""), firesEnv("npm_config_yes")},
 		{"env npm_config_yes=null", withEnv(stdioServer("npx", "pkg"), "npm_config_yes", "null"), firesEnv("npm_config_yes")},
 		// npm keeps "0" as a string, and npx reads a non-empty string as on.
@@ -506,16 +521,15 @@ func TestCheckAutoInstall(t *testing.T) {
 		{"env npm_config_yes=false and NEL", withEnv(stdioServer("npx", "pkg"), "npm_config_yes", "false\u0085"), firesEnv("npm_config_yes")},
 		{"env npm_config_yes=true, github spec", withEnv(stdioServer("npx", "github:evil/pkg"), "npm_config_yes", "true"), firesEnv("npm_config_yes")},
 
-		// A value after a valued flag is that flag's value, not a yes flag.
-		{"-y is the value of --registry", stdioServer("npx", "--registry", "-y", "pkg"), nil},
-		{"-y is the value of --loglevel", stdioServer("npx", "--loglevel", "-y", "pkg"), nil},
+		// Fail-closed: npm reads -y as the value of --registry, but the walk
+		// checks every flag-like argument before the command.
+		{"-y as the value of --registry", stdioServer("npx", "--registry", "-y", "pkg"), fires},
+		{"-y as the value of --shell", stdioServer("npx", "--shell", "-y", "pkg"), fires},
 		{"-y after the -p spec is a server arg", stdioServer("npx", "-p", "pkg", "bin", "-y"), nil},
 		{"--yes=false", stdioServer("npx", "--yes=false", "pkg"), nil},
 		{"--no-yes", stdioServer("npx", "--no-yes", "pkg"), nil},
 		{"--no-yes true", stdioServer("npx", "--no-yes", "true", "pkg"), nil},
 		{"--ye=false, a prefix of --yes", stdioServer("npx", "--ye=false", "pkg"), nil},
-		// npx rewrites --shell to --script-shell, which takes -y as its value.
-		{"-y is the value of --shell", stdioServer("npx", "--shell", "-y", "pkg"), nil},
 		{"cmd /c wrapper, -y after the command", stdioServer("cmd", "/c", "npx", "-p", "pkg", "bin", "-y"), nil},
 		{"env npm_config_yes=false", withEnv(stdioServer("npx", "pkg"), "npm_config_yes", "false"), nil},
 		{"env NPM_CONFIG_YES padded false", withEnv(stdioServer("npx", "pkg"), "NPM_CONFIG_YES", " false "), nil},

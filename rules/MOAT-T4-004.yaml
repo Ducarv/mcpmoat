@@ -9,6 +9,8 @@ remediation: Pin an exact version (see MOAT-T4-003), or install a version you re
 references:
   - https://docs.npmjs.com/cli/commands/npx
   - https://owasp.org/www-project-mcp-top-10/
+# The cases are command lines. The npm_config_yes env trigger is covered by
+# TestCheckAutoInstall in internal/rules/config_test.go.
 should_match:
   - npx -y @scope/server
   - npx --yes pkg
@@ -42,6 +44,12 @@ should_match:
     note: npm reads "false" as the value of --no-yes, and the "no-" flips it to on
   - text: npx --no-no-yes pkg
     note: Each "no-" flips the option, so two of them leave it on
+  - text: npx --no=null @scope/server@1.2.3
+    note: --no is npm's shorthand for --no-yes, and null resets the option to its default
+  - text: npx --node-arg -p -y @scope/server@1.2.3
+    note: npx drops the removed --node-arg option and the next argument, so -y is a flag
+  - text: npx --registry -y pkg
+    note: Fail-closed. npm reads -y as the registry value, but the check reads every flag-like argument before the command
 should_not_match:
   - node ./server.js
   - npx @scope/server@1.2.3
@@ -51,13 +59,9 @@ should_not_match:
     note: Only npx is covered. uvx is not checked by this rule
   - text: bunx -y pkg
     note: Only npx is covered. bunx is not checked by this rule
-  - text: npx --registry -y pkg
-    note: -y is the value of --registry, not a flag of npx
   - text: npx --yes=false pkg
     note: --yes=false turns the yes option off, so it is not a finding
   - text: npx -p pkg mcp-bin -y
     note: After the command, -y is an argument of the server
   - text: npx --no-yes pkg
     note: --no-yes turns the yes option off
-  - text: npx --shell -y pkg
-    note: npx rewrites --shell to --script-shell, which takes -y as its value
