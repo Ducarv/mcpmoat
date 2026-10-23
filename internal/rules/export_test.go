@@ -5,4 +5,6 @@ package rules
 var (
 	LoadPopular         = loadPopular
 	AssertFindingNoLeak = assertFindingNoLeak
+	BuiltinCompiler     = builtinCompiler
+	MustBuiltin         = mustBuiltin
 )

@@ -1,0 +1,29 @@
+id: MOAT-T1-006
+title: Tool description contains invisible or bidirectional Unicode characters
+severity: medium
+target: description
+match:
+  heuristic: invisible_unicode
+risk: Invisible characters can hide text from the person who reads the description, while the model still reads it.
+remediation: Remove the server or do not use it. Check the description for hidden characters, using the code point and position that mcpmoat reports. Report the server to its author.
+references:
+  - https://invariantlabs.ai/blog/mcp-security-notification-tool-poisoning-attacks
+  - https://unicode.org/reports/tr9/
+  - https://owasp.org/www-project-mcp-top-10/
+should_match:
+  - "Search files\u200B\u200B now"
+  - "text with \u202E reversed part"
+  - text: "Convert an amount between two currencies.\U000E0041\U000E0042"
+    note: Unicode tag characters hide ASCII text and are never excused
+  - "Keep the\uFEFF result short."
+  - text: "Convert an amount\u200B between two currencies.\u202E\U000E0041"
+    note: The description of the currency_convert fixture in testdata/servers/poisoned
+should_not_match:
+  - Plain ASCII description.
+  - "Emoji \U0001F642 and accented letters \u00E9 are fine."
+  - "Built by \U0001F468\u200D\U0001F4BB developers."
+  - "Made with \u2764\uFE0F."
+  - text: "Press 1\uFE0F\u20E3 to continue."
+    note: A keycap emoji, with VS16 and U+20E3
+  - text: Return the input text unchanged.
+    note: The benign fixture in testdata/servers/benign

@@ -162,9 +162,8 @@ func TestFixtureBenign(t *testing.T) {
 	})
 }
 
-// TestFixturePoisoned is a T1 smoke test: it checks that the fixture serves
-// its payloads. It asserts no rule ID, because the T1 rules wait for issue
-// #36 and issues #42 to #50.
+// TestFixturePoisoned checks that the fixture serves its payloads. The rule
+// hits on these tools are asserted in TestFixtureBuiltinT1.
 func TestFixturePoisoned(t *testing.T) {
 	t.Parallel()
 
@@ -200,6 +199,141 @@ func TestFixturePoisoned(t *testing.T) {
 
 	if f := rules.CheckShadowing([]rules.ServerTools{st}); len(f) != 0 {
 		t.Errorf("CheckShadowing(poisoned) = %+v, want none", f)
+	}
+}
+
+// t1Prefix is the ID prefix of the T1 (tool poisoning) rules. The test asserts
+// only these IDs, so a later T3, T4 or T5 rule does not break it.
+const t1Prefix = "MOAT-T1-"
+
+// compiledRule is a built-in rule with its compiled match block.
+type compiledRule struct {
+	id     string
+	target rules.Target
+	m      *rules.Matcher
+}
+
+// compiledRules returns the built-in rules that run on a description or a
+// schema, with their match blocks compiled. Config rules need a server config,
+// so they are skipped.
+func compiledRules(t *testing.T) []compiledRule {
+	t.Helper()
+	c := rules.BuiltinCompiler()
+	rs := rules.MustBuiltin(t, rules.WithCompiler(c))
+	// The loader discards the Matchers (see WithCompiler), so compile again.
+	var out []compiledRule
+	for _, r := range rs {
+		if r.Target == rules.TargetConfig {
+			continue
+		}
+		m, err := c(r.Match, r.Target)
+		if err != nil {
+			t.Fatalf("%s: compile: %v", r.ID, err)
+		}
+		out = append(out, compiledRule{id: r.ID, target: r.Target, m: m})
+	}
+	return out
+}
+
+// t1Hits returns the sorted IDs of the T1 rules with the given target that
+// match text.
+func t1Hits(rs []compiledRule, target rules.Target, text string) []string {
+	var ids []string
+	for _, cr := range rs {
+		if cr.target == target && strings.HasPrefix(cr.id, t1Prefix) && len(cr.m.Match(text)) > 0 {
+			ids = append(ids, cr.id)
+		}
+	}
+	slices.Sort(ids)
+	return ids
+}
+
+// targetText returns the text that a rule with target sees in tool: the
+// description, or the input schema as raw JSON.
+func targetText(tool inspect.Tool, target rules.Target) string {
+	if target == rules.TargetSchema {
+		return string(tool.InputSchema)
+	}
+	return tool.Description
+}
+
+// toolTarget is a tool and one of its targets, the key of an expected result.
+type toolTarget struct {
+	tool   string
+	target rules.Target
+}
+
+// TestFixtureBuiltinT1 runs the built-in T1 rules on every tool of the fixture
+// servers, once for the description and once for the schema. A rule has one
+// target, so the two are checked apart. Each tool and target must match the
+// rule IDs listed for it, and no others; a pair that is not listed must match
+// none. The test also checks the loaded T1 IDs and the tool names of each
+// server, so a missing or new rule or tool fails the test.
+func TestFixtureBuiltinT1(t *testing.T) {
+	t.Parallel()
+
+	rs := compiledRules(t)
+	if len(rs) == 0 {
+		t.Fatal("no built-in rules loaded; the checks would pass with no rule")
+	}
+	var ids []string
+	for _, cr := range rs {
+		if strings.HasPrefix(cr.id, t1Prefix) {
+			ids = append(ids, cr.id)
+		}
+	}
+	slices.Sort(ids)
+	wantIDs := []string{
+		"MOAT-T1-001", "MOAT-T1-002", "MOAT-T1-003", "MOAT-T1-004", "MOAT-T1-005",
+		"MOAT-T1-006", "MOAT-T1-007", "MOAT-T1-008", "MOAT-T1-009",
+	}
+	if !slices.Equal(ids, wantIDs) {
+		t.Errorf("loaded T1 rule IDs = %q, want %q", ids, wantIDs)
+	}
+
+	fixtures := []struct {
+		name  string
+		tools []string                // every tool the server lists, sorted
+		want  map[toolTarget][]string // sorted; a pair not in the map matches none
+	}{
+		{"benign", []string{"add", "echo"}, nil},
+		{"mailer", []string{"send_email"}, nil},
+		{"poisoned", []string{"currency_convert", "daily_quote", "unit_convert", "weather_lookup"}, map[toolTarget][]string{
+			{"daily_quote", rules.TargetDescription}:      {"MOAT-T1-002", "MOAT-T1-003", "MOAT-T1-004", "MOAT-T1-005"},
+			{"weather_lookup", rules.TargetSchema}:        {"MOAT-T1-009"},
+			{"currency_convert", rules.TargetDescription}: {"MOAT-T1-006"},
+			{"unit_convert", rules.TargetDescription}:     {"MOAT-T1-008"},
+		}},
+	}
+	for _, fx := range fixtures {
+		st := inspectFixture(t, fx.name)
+		var names []string
+		for _, tool := range st.Tools {
+			names = append(names, tool.Name)
+		}
+		slices.Sort(names)
+		if !slices.Equal(names, fx.tools) {
+			t.Errorf("%s tool names = %q, want %q", fx.name, names, fx.tools)
+		}
+		// A key that names no served tool would never be checked.
+		for key := range fx.want {
+			if !slices.Contains(names, key.tool) {
+				t.Errorf("%s expects results for tool %q, which the server does not list", fx.name, key.tool)
+			}
+		}
+
+		for _, tool := range st.Tools {
+			for _, target := range []rules.Target{rules.TargetDescription, rules.TargetSchema} {
+				t.Run(fx.name+"/"+tool.Name+"/"+string(target), func(t *testing.T) {
+					t.Parallel()
+					got := t1Hits(rs, target, targetText(tool, target))
+					want := fx.want[toolTarget{tool.Name, target}]
+					if !slices.Equal(got, want) {
+						t.Errorf("%s %s (%s): got %q, want %q", fx.name, tool.Name, target, got, want)
+					}
+				})
+			}
+		}
 	}
 }
 
