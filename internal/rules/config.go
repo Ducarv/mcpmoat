@@ -370,7 +370,7 @@ const npmYesEnv = "npm_config_yes"
 // The yes option is on when a yes flag comes before the npx command (see
 // walkNPXFlags and isYesFlag), or when an env entry named npm_config_yes, in
 // any letter case, has a value that npm does not read as false (see
-// npmFalse). The flag is checked first. A server gets one finding at most. A
+// envFalse). The flag is checked first. A server gets one finding at most. A
 // flag finding names FieldArgs. An env finding names FieldEnv and the env key
 // name. A finding never holds a value.
 //
@@ -431,11 +431,25 @@ func checkAutoInstall(s discover.Server) []Finding {
 // "null" leaves the option unset, which still overrides the scan's
 // npm_config_yes=false. The value is read only to compare it. It is never
 // returned or copied.
+//
+// npm matches the name with ASCII case folding only. strings.EqualFold also
+// folds some non-ASCII letters, such as U+017F to "s", but such a letter is
+// more than one byte, so the length check rules it out.
 func yesEnvKey(env discover.SecretMap) (string, bool) {
 	for _, key := range env.Keys() {
-		if strings.EqualFold(key, npmYesEnv) && !npmFalse(env[key].Reveal()) {
+		if len(key) == len(npmYesEnv) && strings.EqualFold(key, npmYesEnv) && !envFalse(env[key].Reveal()) {
 			return key, true
 		}
 	}
 	return "", false
+}
+
+// envFalse reports whether npm reads an npm_config_yes env value as false:
+// "false" after npm trims white space. npm keeps any other value, such as "0",
+// as a string, and npx reads a non-empty string as on. The trim is ASCII only:
+// Go's strings.TrimSpace also strips U+0085, which npm keeps, so
+// "false\u0085" would look off here but is on in npm. A value with other
+// white space counts as on, which gives a false finding at worst.
+func envFalse(v string) bool {
+	return strings.Trim(v, " \t\n\v\f\r") == "false"
 }

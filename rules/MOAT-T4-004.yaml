@@ -36,6 +36,12 @@ should_match:
     note: npx moves the value of the -y shorthand to its own argument, so the option is on
   - text: npx --yes=null pkg
     note: null resets the option to its default, which overrides the npm_config_yes=false of the scan
+  - text: npx --yes=0 pkg
+    note: npm reads only an exact "=false" as off. Any other value leaves the option on
+  - text: npx --no-yes false pkg
+    note: npm reads "false" as the value of --no-yes, and the "no-" flips it to on
+  - text: npx --no-no-yes pkg
+    note: Each "no-" flips the option, so two of them leave it on
 should_not_match:
   - node ./server.js
   - npx @scope/server@1.2.3
@@ -51,5 +57,7 @@ should_not_match:
     note: --yes=false turns the yes option off, so it is not a finding
   - text: npx -p pkg mcp-bin -y
     note: After the command, -y is an argument of the server
+  - text: npx --no-yes pkg
+    note: --no-yes turns the yes option off
   - text: npx --shell -y pkg
     note: npx rewrites --shell to --script-shell, which takes -y as its value

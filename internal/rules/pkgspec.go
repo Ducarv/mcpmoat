@@ -334,12 +334,13 @@ func runnerOf(command string) Runner {
 	}
 }
 
-// flagTable tells scanArgs how to read the flags of one runner.
+// flagTable tells scanArgs, secondOverride and walkNPXFlags how to read the
+// flags of one runner.
 type flagTable struct {
-	valued   map[string]bool // flags that consume the next argument
-	override map[string]bool // flags whose value is the spec itself
-	stop     map[string]bool // flags that make the parse doubtful
-	str      map[string]bool // valued flags that take no next argument starting with "-" (walkNPXFlags only)
+	valued       map[string]bool // flags that consume the next argument
+	override     map[string]bool // flags whose value is the spec itself
+	stop         map[string]bool // flags that make the parse doubtful
+	stringValued map[string]bool // valued flags that take no next argument that looks like a flag (walkNPXFlags only)
 }
 
 // flagSet builds a lookup table from a list of flag names.
@@ -398,6 +399,9 @@ func scanArgs(args []string, flags flagTable) (spec string, at int, ok bool) {
 // argument that is not a flag (the command that the runner runs), hold
 // another override flag. Arguments after that command belong to the server.
 // It walks the flags as scanArgs does; keep the two loops in step.
+// walkNPXFlags reads npx flags in a different way on purpose: scanArgs gives
+// up when in doubt (no MOAT-T4-003 finding), and walkNPXFlags fails closed
+// (a MOAT-T4-004 finding).
 func secondOverride(args []string, flags flagTable) bool {
 	for i := 0; i < len(args); i++ {
 		arg := args[i]
@@ -432,7 +436,7 @@ var npmFlags = flagTable{
 	stop:     flagSet("-c", "--call"),
 	// npx rewrites --shell to --script-shell, which takes any next argument,
 	// so --shell is not listed here.
-	str: flagSet("--tag", "--min-release-age"),
+	stringValued: flagSet("--tag", "--min-release-age"),
 }
 
 // runnerArgs reads through Windows "cmd /c" wrappers (see cmdWrapped). It
@@ -459,17 +463,17 @@ func runnerArgs(command string, args []string) (string, []string, int) {
 //     argument (the command), a -p or --package value, or a -c or --call value.
 //
 // The walk follows these rules:
-//   - A yes flag takes no value from the next argument. npx puts "--" before
-//     the next word that is not a flag, so "-y false pkg" runs the command
-//     "false" with yes on. npx also moves the value of "-y=<v>" and "--y=<v>"
-//     to its own argument, so <v> is the command.
+//   - A short yes flag takes no value from the next argument. npx puts "--"
+//     before the next word that is not a flag, so "-y false pkg" runs the
+//     command "false" with yes on. npx also moves the value of "-y=<v>" and
+//     "--y=<v>" to its own argument, so <v> is the command.
 //   - A flag of npmFlags.valued takes the next argument, even one that starts
 //     with "-". npm reads "--registry -y" as a registry value. A flag of
-//     npmFlags.str does not take a next argument that starts with "-", so
-//     "--tag -y" leaves -y as a yes flag.
+//     npmFlags.stringValued, and -c or --call, takes the next argument unless
+//     it looks like a flag (see looksLikeFlag): "--tag -y" leaves -y as a yes
+//     flag, and "--tag -" takes "-" as the tag.
 //   - -p and --package take the next argument, even one that starts with "-".
 //     That argument is something to run.
-//   - -c and --call take a next argument that does not start with "-".
 //   - An unknown flag takes the next argument when that argument does not start
 //     with "-". The walk then goes on past that word. The word counts as
 //     something to run, because it may be the package. So npx --quiet pkg -y
@@ -492,9 +496,13 @@ func walkNPXFlags(args []string) (yes, runs bool) {
 		case arg == "-" || !strings.HasPrefix(arg, "-"):
 			return yes, true // the command: npx runs it
 		}
+		next := ""
+		if i+1 < len(args) {
+			next = args[i+1]
+		}
 		name, _, hasValue := strings.Cut(arg, "=")
 		switch {
-		case isYesFlag(arg):
+		case isYesFlag(arg, next):
 			yes = true
 			if hasValue && strings.TrimLeft(name, "-") == "y" {
 				return yes, true // npx runs the value of -y=<v> as the command
@@ -507,17 +515,16 @@ func walkNPXFlags(args []string) (yes, runs bool) {
 			i++ // the next argument is the value, even one that starts with "-"
 		case npmFlags.stop[name]:
 			runs = true
-			if i+1 < len(args) && !strings.HasPrefix(args[i+1], "-") {
+			if i+1 < len(args) && !looksLikeFlag(next) {
 				i++ // the next argument is the value
 			}
 		case npmFlags.valued[name]:
-			// A String flag does not take a following argument that starts with "-".
-			if i+1 < len(args) && (!npmFlags.str[name] || !strings.HasPrefix(args[i+1], "-")) {
+			if i+1 < len(args) && (!npmFlags.stringValued[name] || !looksLikeFlag(next)) {
 				i++ // the next argument is the value
 			}
 		default:
 			// An unknown flag may take the next word as its value.
-			if i+1 < len(args) && !strings.HasPrefix(args[i+1], "-") {
+			if i+1 < len(args) && !strings.HasPrefix(next, "-") {
 				i++
 				runs = true
 			}
@@ -526,39 +533,57 @@ func walkNPXFlags(args []string) (yes, runs bool) {
 	return yes, runs
 }
 
-// isYesFlag reports whether one npx argument turns the yes option on:
-//   - "-y" and "--y" are the shorthand of --yes. npx moves an "=<v>" value
-//     to its own argument, so the option is on whatever <v> is.
-//   - "--yes" and its prefix "--ye", which npm expands, are on unless the
-//     value after "=" is off (see npmFalse). "--yes=null" resets the option
-//     to its default, and that also overrides the npm_config_yes=false of the
-//     scan, so it counts as on.
-//   - A short cluster with a y, such as "-qy", is on.
-func isYesFlag(arg string) bool {
-	name, value, hasValue := strings.Cut(arg, "=")
-	key := strings.TrimLeft(name, "-")
-	switch {
-	case key == "y":
-		return true
-	case strings.HasPrefix(name, "--"):
-		return key != "" && strings.HasPrefix("yes", key) && (!hasValue || !npmFalse(value))
-	default:
-		return strings.HasPrefix(name, "-") && strings.Contains(name, "y")
-	}
+// looksLikeFlag reports whether nopt reads a as a flag and not as the value of
+// a String option before it. nopt checks a against ^-{1,2}[^-], so "-" and
+// "---x" are values.
+func looksLikeFlag(a string) bool {
+	return len(a) >= 2 && a[0] == '-' && (a[1] != '-' || (len(a) >= 3 && a[2] != '-'))
 }
 
-// npmFalse reports whether npm reads the value of the yes option as false:
-// "false" or "0" after npm trims white space. npm reads other numeric zeros
-// such as "00" as false too. They count as on here, which gives a false
-// finding at worst. The trim is ASCII only, because Go's strings.TrimSpace
-// also strips U+0085, which npm keeps, so "false\u0085" would look off here
-// but is on in npm.
-func npmFalse(v string) bool {
-	switch strings.Trim(v, " \t\n\v\f\r") {
-	case "false", "0":
-		return true
-	default:
+// isYesFlag reports whether one npx argument sets the yes option to on, or to
+// null. null is the default, and it also overrides the npm_config_yes=false
+// of the scan, so it counts as on. next is the argument after arg, or "". The
+// rules follow npx-cli.js and nopt (npm 11):
+//   - A short flag with a y, such as "-y" or the cluster "-qy", is on.
+//   - For a long flag, nopt strips every leading "no-", in any letter case,
+//     and each one flips the result. The rest must be a prefix of "yes", such
+//     as "yes" or "ye", or it is not a yes flag. "--y" is the -y shorthand,
+//     so it is on whatever follows.
+//   - "--yes" or "--ye" with no "=" is on. npx puts "--" before the next word,
+//     so that word is not a value. (npm reads "--ye false" as off, so this is
+//     a false finding at worst.)
+//   - Otherwise the value is the text after "=", or the next argument: npx
+//     skips the word after a flag it does not know, such as --no-yes, so nopt
+//     reads that word. "true" and "false" set the option before the flips.
+//     "null" sets null. Any other value, such as "0" or " false", leaves the
+//     option on before the flips.
+func isYesFlag(arg, next string) bool {
+	name, value, hasValue := strings.Cut(arg, "=")
+	if !strings.HasPrefix(name, "--") {
+		return strings.HasPrefix(name, "-") && strings.Contains(name, "y")
+	}
+	key := strings.ToLower(strings.TrimLeft(name, "-"))
+	flips := 0
+	for strings.HasPrefix(key, "no-") {
+		key = key[len("no-"):]
+		flips++
+	}
+	if key == "" || !strings.HasPrefix("yes", key) {
 		return false
+	}
+	if flips == 0 && (key == "y" || !hasValue) {
+		return true
+	}
+	if !hasValue {
+		value = next
+	}
+	switch value {
+	case "null":
+		return true
+	case "false":
+		return flips%2 == 1
+	default: // "true" or any other value
+		return flips%2 == 0
 	}
 }
 

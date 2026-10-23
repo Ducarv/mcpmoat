@@ -476,6 +476,19 @@ func TestCheckAutoInstall(t *testing.T) {
 		{"--yes=null", stdioServer("npx", "--yes=null", "pkg"), fires},
 		// Fail-closed: an off flag does not clear an earlier yes flag.
 		{"-y, then --no-yes", stdioServer("npx", "-y", "--no-yes", "pkg"), fires},
+		// nopt reads only an exact "=false" as off. Any other value is on.
+		{"--yes=0", stdioServer("npx", "--yes=0", "pkg"), fires},
+		{"--yes= false", stdioServer("npx", "--yes= false", "pkg"), fires},
+		{"--yes=false with a trailing space", stdioServer("npx", "--yes=false ", "pkg"), fires},
+		// nopt strips each "no-" and flips the result.
+		{"--no-yes=false", stdioServer("npx", "--no-yes=false", "pkg"), fires},
+		{"--no-yes false", stdioServer("npx", "--no-yes", "false", "pkg"), fires},
+		{"--NO-yes false", stdioServer("npx", "--NO-yes", "false", "pkg"), fires},
+		{"--no-no-yes", stdioServer("npx", "--no-no-yes", "pkg"), fires},
+		{"--no-yes=null", stdioServer("npx", "--no-yes=null", "pkg"), fires},
+		// A lone "-" is the value of a String option, so a later -y counts.
+		{"--tag - then -y", stdioServer("npx", "--tag", "-", "-y", "pkg"), fires},
+		{"-c - then -y", stdioServer("npx", "-p", "@evil/pkg", "-c", "-", "-y"), fires},
 
 		// An env entry turns the yes option on unless its value is "false" or
 		// "0" after trimming ASCII white space. The key matches in any letter case.
@@ -485,6 +498,8 @@ func TestCheckAutoInstall(t *testing.T) {
 		// replaces the scan's npm_config_yes=false, so npx installs with no TTY.
 		{"env npm_config_yes empty", withEnv(stdioServer("npx", "pkg"), "npm_config_yes", ""), firesEnv("npm_config_yes")},
 		{"env npm_config_yes=null", withEnv(stdioServer("npx", "pkg"), "npm_config_yes", "null"), firesEnv("npm_config_yes")},
+		// npm keeps "0" as a string, and npx reads a non-empty string as on.
+		{"env npm_config_yes=0", withEnv(stdioServer("npx", "pkg"), "npm_config_yes", "0"), firesEnv("npm_config_yes")},
 		// npm reads white space only as on.
 		{"env npm_config_yes blank", withEnv(stdioServer("npx", "pkg"), "npm_config_yes", "  "), firesEnv("npm_config_yes")},
 		// npm does not trim U+0085, so it reads this value as on.
@@ -496,14 +511,17 @@ func TestCheckAutoInstall(t *testing.T) {
 		{"-y is the value of --loglevel", stdioServer("npx", "--loglevel", "-y", "pkg"), nil},
 		{"-y after the -p spec is a server arg", stdioServer("npx", "-p", "pkg", "bin", "-y"), nil},
 		{"--yes=false", stdioServer("npx", "--yes=false", "pkg"), nil},
-		{"--yes=0", stdioServer("npx", "--yes=0", "pkg"), nil},
+		{"--no-yes", stdioServer("npx", "--no-yes", "pkg"), nil},
+		{"--no-yes true", stdioServer("npx", "--no-yes", "true", "pkg"), nil},
 		{"--ye=false, a prefix of --yes", stdioServer("npx", "--ye=false", "pkg"), nil},
 		// npx rewrites --shell to --script-shell, which takes -y as its value.
 		{"-y is the value of --shell", stdioServer("npx", "--shell", "-y", "pkg"), nil},
 		{"cmd /c wrapper, -y after the command", stdioServer("cmd", "/c", "npx", "-p", "pkg", "bin", "-y"), nil},
 		{"env npm_config_yes=false", withEnv(stdioServer("npx", "pkg"), "npm_config_yes", "false"), nil},
 		{"env NPM_CONFIG_YES padded false", withEnv(stdioServer("npx", "pkg"), "NPM_CONFIG_YES", " false "), nil},
-		{"env npm_config_yes=0", withEnv(stdioServer("npx", "pkg"), "npm_config_yes", "0"), nil},
+		// npm matches env names with ASCII case folding only, so it ignores
+		// U+017F (long s). This entry is not the yes option.
+		{"env look-alike name", withEnv(stdioServer("npx", "pkg"), "npm_config_ye\u017f", "true"), nil},
 		{"uvx with env npm_config_yes=true", withEnv(stdioServer("uvx", "pkg"), "npm_config_yes", "true"), nil},
 		{"npx with an unrelated env entry", withEnv(stdioServer("npx", "pkg"), "FOO", "true"), nil},
 
