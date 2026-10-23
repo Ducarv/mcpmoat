@@ -1,6 +1,7 @@
 package rules
 
 import (
+	"regexp"
 	"strings"
 	"unicode"
 	"unicode/utf8"
@@ -10,7 +11,8 @@ import (
 
 // MaxMatchInputBytes is the largest part of a text, in bytes, that the regex
 // and keyword matchers read: 32 KiB, counted after the invisible runes are
-// dropped. Text after it is not regex-matched or keyword-matched. This keeps
+// dropped and steps 3 and 4 of normalizeForMatch have mapped each ANSI escape
+// sequence and each other white-space or control rune to U+0020. Text after it is not regex-matched or keyword-matched. This keeps
 // the cost of one match small when a server sends a very long text. Real
 // tool descriptions are a few KB long, so the cap does not cut them.
 //
@@ -74,25 +76,30 @@ func matchForms(s string) []string {
 // read. So "ign" + ZWSP (U+200B) + "ore previous" still matches the keyword
 // "ignore previous".
 //
-// It works in six steps:
+// It works in eight steps:
 //
 //  1. Cut s to maxRawScanBytes, at a rune boundary.
 //  2. Drop the invisible runes (see isInvisible).
-//  3. Cut the result to MaxMatchInputBytes, at a rune boundary.
-//  4. Apply Unicode normalization form NFC, which joins a letter and its
+//  3. Replace each ANSI escape sequence (see ansiToSpace) with U+0020.
+//  4. Replace each white-space or control rune that RE2 \s does not match
+//     (see spacesToASCII) with U+0020.
+//  5. Cut the result to MaxMatchInputBytes, at a rune boundary.
+//  6. Apply Unicode normalization form NFC, which joins a letter and its
 //     combining marks into one rune where one exists.
-//  5. Drop the invisible runes again.
-//  6. Cut to MaxMatchInputBytes again, because NFC can make some text up to
+//  7. Drop the invisible runes again.
+//  8. Cut to MaxMatchInputBytes again, because NFC can make some text up to
 //     three times longer (U+1D160 becomes three runes).
 //
-// Step 2 comes before step 3, so invisible padding does not use up the
-// MaxMatchInputBytes window. Step 6 keeps the regexes at MaxMatchInputBytes,
-// so the cost bound in match.go holds.
+// Step 2 comes before step 5, so invisible padding does not use up the
+// MaxMatchInputBytes window. Steps 3 and 4 come before step 5 too, so an
+// escape sequence or a space of up to 3 bytes counts as 1 byte in the window.
+// Step 8 keeps the regexes at MaxMatchInputBytes, so the cost bound in
+// match.go holds.
 //
 // Step 2 comes before NFC, so an invisible rune cannot block composition:
 // "e" + ZWSP + U+0301 becomes U+00E9 (e with acute), the same as "e" + U+0301.
 //
-// Step 5 exists because the norm package follows the Stream-Safe Text Format:
+// Step 7 exists because the norm package follows the Stream-Safe Text Format:
 // after 30 or more combining marks in a row, it inserts a CGJ (U+034F), which
 // is invisible. The second pass removes it.
 //
@@ -104,13 +111,63 @@ func normalizeForMatch(s string) string {
 
 // normalizeInvisible runs the steps of normalizeForMatch, but replaces each
 // run of invisible runes with repl (see replaceInvisible). A repl of -1 drops
-// the runes, as in normalizeForMatch.
+// the runes, as in normalizeForMatch. The white space is mapped as in
+// normalizeForMatch, whatever repl is.
 func normalizeInvisible(s string, repl rune) string {
 	s = cutAtRune(s, maxRawScanBytes)
-	s = replaceInvisible(s, repl)
+	s = spacesToASCII(ansiToSpace(replaceInvisible(s, repl)))
 	s = cutAtRune(s, MaxMatchInputBytes)
 	s = norm.NFC.String(s)
 	return cutAtRune(replaceInvisible(s, repl), MaxMatchInputBytes)
+}
+
+// ansiSeq matches an ANSI escape sequence that a terminal runs and does not
+// show:
+//
+//   - CSI: ESC [ (or U+009B), parameter and intermediate bytes, and a final
+//     byte, such as ESC [ 8 m (SGR 8, which hides the text after it);
+//   - OSC: ESC ] (or U+009D), at most 256 bytes, and BEL, ESC \ or U+009C.
+//
+// The schema target is JSON text, where ESC is the escape \u001b, so a CSI
+// that starts with that escape matches too. An OSC with no end does not
+// match, so it cannot swallow the rest of the text; its ESC still becomes a
+// space in spacesToASCII.
+var ansiSeq = regexp.MustCompile(`(?:\x1b\[|\x{9b}|\\u001[bB]\[)[0-?]*[ -/]*[@-~]|(?:\x1b\]|\x{9d})[^\x07\x1b\x{9c}]{0,256}(?:\x07|\x1b\\|\x{9c})`)
+
+// ansiToSpace replaces each ANSI escape sequence (see ansiSeq) with U+0020.
+// Without this step, ESC [ 8 m before "Ignore" leaves "[8mIgnore", and the
+// word edge before "Ignore" is lost. A sequence is at least 2 bytes long, so
+// the text does not grow.
+func ansiToSpace(s string) string {
+	return ansiSeq.ReplaceAllLiteralString(s, " ")
+}
+
+// re2SpaceRunes are the runes that RE2 \s matches.
+const re2SpaceRunes = "\t\n\f\r "
+
+// spacesToASCII replaces with U+0020 each rune that separates two words for a
+// reader or a model but that RE2 \s does not match:
+//
+//   - the white space of isKeywordSpace: VT, NEL (U+0085), the Z categories
+//     (NBSP, the em space, U+2028, U+2029 and others) and U+2800, the Braille
+//     blank that looks like a space;
+//   - the other control runes (category Cc, such as U+0000 or U+001F).
+//
+// In RE2, \s is only [\t\n\f\r ], so without this step "ignore" + NBSP +
+// "previous" would not match `ignore\s+previous`. The runes in re2SpaceRunes
+// stay as they are, so a newline is still a newline.
+//
+// NFC never makes such a rune from other runes (it maps U+2000 and U+2001
+// only to other spaces, which this step has already removed), so one pass
+// before NFC is enough. Every mapped rune is at least 1
+// byte long, so the text does not grow.
+func spacesToASCII(s string) string {
+	return strings.Map(func(r rune) rune {
+		if (isKeywordSpace(r) || unicode.Is(unicode.Cc, r)) && !strings.ContainsRune(re2SpaceRunes, r) {
+			return ' '
+		}
+		return r
+	}, s)
 }
 
 // foldMarks folds s, which comes from normalizeForMatch, for the keyword

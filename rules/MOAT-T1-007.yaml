@@ -1,0 +1,297 @@
+id: MOAT-T1-007
+title: Tool description is unusually long
+severity: low
+target: description
+match:
+  heuristic: max_length
+  params:
+    max_runes: 4096
+risk: A very long description can hide instructions that a person does not read to the end.
+remediation: Read the full tool description and check what it asks the model to do. If the length is normal for this tool, ignore this rule for that tool only. Add the line MOAT-T1-007 server/tool to .mcpmoat-ignore, using the exact server and tool names. Do not use --ignore, because it hides the rule on every server.
+references:
+  - https://invariantlabs.ai/blog/mcp-security-notification-tool-poisoning-attacks
+  - https://owasp.org/www-project-mcp-top-10/
+should_match:
+  - text: >-
+      Searches the issue tracker for tickets that match the given query. Use
+      this tool when the user asks to find, list or filter tickets by project,
+      status, label or assignee. The query is a plain text string. It matches
+      the title, the body and the comments of each ticket. Words are matched
+      without regard to case, so Login and login return the same tickets. The
+      tool does not run regular expressions. Characters such as asterisks and
+      brackets are treated as plain text. Results are returned in order of
+      last update, with the most recent ticket first. Each result contains the
+      ticket number, the title, the current status, the assignee and the date
+      of the last update. The body of a ticket is not included in the results.
+      Call get_ticket with the ticket number to read the full body. The limit
+      parameter sets how many tickets to return in one call. The default value
+      is 25. The maximum value of limit is 100. A larger value is reduced to
+      100 and the response says so. Use the cursor parameter to read the next
+      page of results. Pass the cursor value that the previous response
+      returned. When the response has no cursor value, there are no more
+      results. The status parameter accepts one of the values open,
+      in_progress, review, done or closed. A status value that is not in this
+      list causes an error. The error lists the valid values. The label
+      parameter accepts a list of label names. A ticket must have every label
+      in the list to match. Label names are case sensitive. Use list_labels to
+      see the exact names that the project uses. The created_after and
+      created_before parameters take dates in the format YYYY-MM-DD, in UTC.
+      Both date parameters are optional. When both are set, created_before
+      must be later than created_after. The project parameter is required when
+      the account can see more than one project. If the account cannot see the
+      project, the tool returns an empty list and does not reveal whether the
+      project exists. Archived tickets are excluded by default. Set
+      include_archived to true to include them. Private tickets are shown only
+      to the members of the project that own them. The tool returns at most 2
+      MB of text. A search with many long results is cut at that size and the
+      response says so. A search can take several seconds on large projects.
+      Narrow the query with a status or a date range to get faster results.
+      The tool does not change any ticket. It only reads the tracker and never
+      writes comments or changes a status. Rate limits apply to this tool.
+      After a rate limit error, wait for the time given in the retry_after
+      field before you call it again. The response uses the same field names
+      as the get_ticket tool, so the results can be passed to that tool
+      without change. Dates in the response use the ISO 8601 format and are
+      always given in UTC. An empty query with no filters returns the most
+      recent tickets in the project, up to the limit. Words in quotation marks
+      make the search match the exact phrase in the title or the body. For
+      example, the query payment timeout with status open returns the open
+      tickets that mention that phrase. Tickets that were merged into another
+      ticket show the number of the ticket that replaced them. Linked tickets
+      are not expanded. Use get_links on a ticket to see its related tickets.
+      The response includes a summary line with the total number of matches,
+      even when only part of the list is returned. The total count is an
+      estimate for very large projects and may be higher than the number of
+      tickets you can page through. If the search finds no ticket, the
+      response has an empty results list and a total of zero. Errors are
+      returned with a code and a short message. Codes that start with 4 mean
+      the request is wrong, and codes that start with 5 mean the service
+      failed. A timeout on the service returns code 504. Retry the same
+      request once before you report the failure to the user. Do not send more
+      than ten searches per minute from one session, because the service
+      rejects further requests. Each search is logged by the service with the
+      account name and the time, but the query text is not stored after 30
+      days. Keep the query short. Queries longer than 500 characters are
+      rejected with code 400. The tool trims spaces at the start and the end
+      of the query before it searches. A query that contains only spaces is
+      treated as an empty query.
+    note: About 4300 characters, a long description
+  - text: >-
+      Searches the issue tracker for tickets that match the given query. Use
+      this tool when the user asks to find, list or filter tickets by project,
+      status, label or assignee. The query is a plain text string. It matches
+      the title, the body and the comments of each ticket. Words are matched
+      without regard to case, so Login and login return the same tickets. The
+      tool does not run regular expressions. Characters such as asterisks and
+      brackets are treated as plain text. Results are returned in order of
+      last update, with the most recent ticket first. Each result contains the
+      ticket number, the title, the current status, the assignee and the date
+      of the last update. The body of a ticket is not included in the results.
+      Call get_ticket with the ticket number to read the full body. The limit
+      parameter sets how many tickets to return in one call. The default value
+      is 25. The maximum value of limit is 100. A larger value is reduced to
+      100 and the response says so. Use the cursor parameter to read the next
+      page of results. Pass the cursor value that the previous response
+      returned. When the response has no cursor value, there are no more
+      results. The status parameter accepts one of the values open,
+      in_progress, review, done or closed. A status value that is not in this
+      list causes an error. The error lists the valid values. The label
+      parameter accepts a list of label names. A ticket must have every label
+      in the list to match. Label names are case sensitive. Use list_labels to
+      see the exact names that the project uses. The assignee parameter
+      accepts a user name or the value unassigned to find tickets with no
+      owner. The created_after and created_before parameters take dates in the
+      format YYYY-MM-DD, in UTC. Both date parameters are optional. When both
+      are set, created_before must be later than created_after. The project
+      parameter is required when the account can see more than one project. If
+      the account cannot see the project, the tool returns an empty list and
+      does not reveal whether the project exists. Private tickets are shown
+      only to the members of the project that own them. The tool returns at
+      most 2 MB of text. A search with many long results is cut at that size
+      and the response says so. A search can take several seconds on large
+      projects. Narrow the query with a status or a date range to get faster
+      results. The tool does not change any ticket. It only reads the tracker
+      and never writes comments or changes a status. Rate limits apply to this
+      tool. After a rate limit error, wait for the time given in the
+      retry_after field before you call it again. The response uses the same
+      field names as the get_ticket tool, so the results can be passed to that
+      tool without change. Dates in the response use the ISO 8601 format and
+      are always given in UTC. An empty query with no filters returns the most
+      recent tickets in the project, up to the limit. Words in quotation marks
+      make the search match the exact phrase in the title or the body. For
+      example, the query payment timeout with status open returns the open
+      tickets that mention that phrase. Tickets that were merged into another
+      ticket show the number of the ticket that replaced them. Linked tickets
+      are not expanded. Use get_links on a ticket to see its related tickets.
+      The response includes a summary line with the total number of matches,
+      even when only part of the list is returned. The total count is an
+      estimate for very large projects and may be higher than the number of
+      tickets you can page through. If the search finds no ticket, the
+      response has an empty results list and a total of zero. Errors are
+      returned with a code and a short message. Codes that start with 4 mean
+      the request is wrong, and codes that start with 5 mean the service
+      failed. A timeout on the service returns code 504. Retry the same
+      request once before you report the failure to the user. Do not send more
+      than ten searches per minute from one session, because the service
+      rejects further requests. This tool needs the read scope for the
+      tracker. It does not need write access. Each search is logged by the
+      service with the account name and the time, but the query text is not
+      stored after 30 days. Keep the query short. Queries longer than 500
+      characters are rejected with code 400. The tool trims spaces at the
+      start and the end of the query before it searches. A query that contains
+      only spaces is treated as an empty query. Search results can include
+      tickets that the user has muted. These are marked with the muted field
+      set to true. The sort parameter accepts updated, created or priority.
+      The default sort is updated, in descending order. The priority field
+      uses the values low, normal, high and critical, and tickets without a
+      priority show normal. The order parameter accepts asc or desc. It
+      applies to the sort field that you choose. Use the fields parameter to
+      limit the fields in each result. Ticket number and title are always
+      returned. Unknown field names in the fields parameter are ignored
+      without an error. The response is JSON with a results array, a total
+      field, a cursor field and a warnings array. The warnings array lists
+      problems that did not stop the search, such as a label that does not
+      exist in the project. The tool keeps no state between calls. Each call
+      must include the full query and all filters. Filters are combined with a
+      logical and. A ticket must match every filter to appear in the results.
+      Use the any_label parameter instead when a ticket may match one label
+      from a list. The tool follows the visibility rules of the tracker, so a
+      ticket that the account cannot read never appears. Attachments are not
+      searched. Only the text of the title, the body and the comments is
+      searched. Emoji and other non-ASCII characters in the query are matched
+      as they are typed. The search index is updated within a few seconds
+      after a ticket changes, so a very recent change may not appear at once.
+      Saved searches are not part of this tool. Build the same filters again
+      in each call, or store them in your own notes.
+    note: About 6000 characters, a long description
+  - text: >-
+      Searches the issue tracker for tickets that match the given query. Use
+      this tool when the user asks to find, list or filter tickets by project,
+      status, label or assignee. The query is a plain text string. It matches
+      the title, the body and the comments of each ticket. Words are matched
+      without regard to case, so Login and login return the same tickets. The
+      tool does not run regular expressions. Characters such as asterisks and
+      brackets are treated as plain text. Results are returned in order of
+      last update, with the most recent ticket first. Each result contains the
+      ticket number, the title, the current status, the assignee and the date
+      of the last update. The body of a ticket is not included in the results.
+      Call get_ticket with the ticket number to read the full body. The limit
+      parameter sets how many tickets to return in one call. The default value
+      is 25. The maximum value of limit is 100. A larger value is reduced to
+      100 and the response says so. Use the cursor parameter to read the next
+      page of results. Pass the cursor value that the previous response
+      returned. When the response has no cursor value, there are no more
+      results. The status parameter accepts one of the values open,
+      in_progress, review, done or closed. A status value that is not in this
+      list causes an error. The error lists the valid values. The label
+      parameter accepts a list of label names. A ticket must have every label
+      in the list to match. Label names are case sensitive. Use list_labels to
+      see the exact names that the project uses. The assignee parameter
+      accepts a user name or the value unassigned to find tickets with no
+      owner. The created_after and created_before parameters take dates in the
+      format YYYY-MM-DD, in UTC. Both date parameters are optional. When both
+      are set, created_before must be later than created_after. The project
+      parameter is required when the account can see more than one project. If
+      the account cannot see the project, the tool returns an empty list and
+      does not reveal whether the project exists. Archived tickets are
+      excluded by default. Set include_archived to true to include them. The
+      tool returns at most 2 MB of text. A search with many long results is
+      cut at that size and the response says so. A search can take several
+      seconds on large projects. Narrow the query with a status or a date
+      range to get faster results. The tool does not change any ticket. It
+      only reads the tracker and never writes comments or changes a status.
+      Rate limits apply to this tool. After a rate limit error, wait for the
+      time given in the retry_after field before you call it again. The
+      response uses the same field names as the get_ticket tool, so the
+      results can be passed to that tool without change. An empty query with
+      no filters returns the most recent tickets in the project, up to the
+      limit. Words in quotation marks make the search match the exact phrase
+      in the title or the body. For example, the query payment timeout with
+      status open returns the open tickets that mention that phrase. Tickets
+      that were merged into another ticket show the number of the ticket that
+      replaced them. Linked tickets are not expanded. Use get_links on a
+      ticket to see its related tickets. The response includes a summary line
+      with the total number of matches, even when only part of the list is
+      returned. The total count is an estimate for very large projects and may
+      be higher than the number of tickets you can page through. If the search
+      finds no ticket, the response has an empty results list and a total of
+      zero. Errors are returned with a code and a short message. Codes that
+      start with 4 mean the request is wrong, and codes that start with 5 mean
+      the service failed. A timeout on the service returns code 504. Retry the
+      same request once before you report the failure to the user. Do not send
+      more than ten searches per minute from one session, because the service
+      rejects further requests. This tool needs the read scope for the
+      tracker. It does not need write access. Each search is logged by the
+      service with the account name and the time, but the query text is not
+      stored after 30 days.
+    note: One rune over the limit
+should_not_match:
+  - Add two numbers and return the sum.
+  - text: >-
+      Lists the open pull requests in one repository. Returns the number, the
+      title, the author and the date of the last update for each pull request.
+      Use the state parameter to choose open, closed or all. The limit
+      parameter sets the page size, and the default is 30. It only reads and
+      never changes them.
+    note: A normal description of 300 characters
+  - text: >-
+      Searches the issue tracker for tickets that match the given query. Use
+      this tool when the user asks to find, list or filter tickets by project,
+      status, label or assignee. The query is a plain text string. It matches
+      the title, the body and the comments of each ticket. The tool does not
+      run regular expressions. Characters such as asterisks and brackets are
+      treated as plain text. Results are returned in order of last update,
+      with the most recent ticket first. Each result contains the ticket
+      number, the title, the current status, the assignee and the date of the
+      last update. The body of a ticket is not included in the results. Call
+      get_ticket with the ticket number to read the full body. The limit
+      parameter sets how many tickets to return in one call. The default value
+      is 25. The maximum value of limit is 100. A larger value is reduced to
+      100 and the response says so. Use the cursor parameter to read the next
+      page of results. Pass the cursor value that the previous response
+      returned. The status parameter accepts one of the values open,
+      in_progress, review, done or closed. A status value that is not in this
+      list causes an error. The error lists the valid values. The label
+      parameter accepts a list of label names. A ticket must have every label
+      in the list to match. Label names are case sensitive. Use list_labels to
+      see the exact names that the project uses. The assignee parameter
+      accepts a user name or the value unassigned to find tickets with no
+      owner. The created_after and created_before parameters take dates in the
+      format YYYY-MM-DD, in UTC. Both date parameters are optional. When both
+      are set, created_before must be later than created_after. The project
+      parameter is required when the account can see more than one project. If
+      the account cannot see the project, the tool returns an empty list and
+      does not reveal whether the project exists. Archived tickets are
+      excluded by default. Set include_archived to true to include them.
+      Private tickets are shown only to the members of the project that own
+      them. The tool returns at most 2 MB of text. A search with many long
+      results is cut at that size and the response says so. A search can take
+      several seconds on large projects. Narrow the query with a status or a
+      date range to get faster results. The tool does not change any ticket.
+      It only reads the tracker and never writes comments or changes a status.
+      Rate limits apply to this tool. After a rate limit error, wait for the
+      time given in the retry_after field before you call it again. The
+      response uses the same field names as the get_ticket tool, so the
+      results can be passed to that tool without change. Dates in the response
+      use the ISO 8601 format and are always given in UTC. An empty query with
+      no filters returns the most recent tickets in the project, up to the
+      limit. Words in quotation marks make the search match the exact phrase
+      in the title or the body. For example, the query payment timeout with
+      status open returns the open tickets that mention that phrase. Tickets
+      that were merged into another ticket show the number of the ticket that
+      replaced them. Linked tickets are not expanded. Use get_links on a
+      ticket to see its related tickets. The response includes a summary line
+      with the total number of matches, even when only part of the list is
+      returned. The total count is an estimate for very large projects and may
+      be higher than the number of tickets you can page through. If the search
+      finds no ticket, the response has an empty results list and a total of
+      zero. Errors are returned with a code and a short message. Codes that
+      start with 4 mean the request is wrong, and codes that start with 5 mean
+      the service failed. A timeout on the service returns code 504. Retry the
+      same request once before you report the failure to the user. Do not send
+      more than ten searches per minute from one session, because the service
+      rejects further requests. This tool needs the read scope for the
+      tracker. It does not need write access. Each search is logged by the
+      service with the account name and the time, but the query text is not
+      stored after 30 days.
+    note: Exactly at the limit
