@@ -16,8 +16,8 @@ complete it.
 ## Project profile
 
 If `.agents/project.md` exists at the repo root, read it first. Its **Code style** section
-overrides the defaults below. Read `CLAUDE.md` and the PRD section the task cites
-(`docs/PRD.md`).
+overrides the defaults below. Read `CLAUDE.md` for orientation, `docs/ARCHITECTURE.md` for the
+package layout, and the PRD section the task cites (`docs/PRD.md`).
 
 ## Your mission
 

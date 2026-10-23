@@ -17,7 +17,9 @@ coordinator's context.
 
 You cannot read files, so ask the `research` agent to read `.agents/project.md`, if it exists,
 and include its **Commands**, **Code style** and **Agent routing** sections in its context
-output. Pass the relevant parts to every agent you spawn.
+output. Ask `research` to also follow the links in those sections (for example the Gates row that
+links to `CONTRIBUTING.md#checks`) and to include the linked commands in its context output.
+Pass the relevant parts to every agent you spawn.
 
 ## Tool notes
 
@@ -78,6 +80,8 @@ Work in dependency order. For each batch of unblocked tasks:
 - On-disk state (`pins.json` format and store, `.mcpmoat-ignore`): `datastore`
 - Tests: `unit-test` (isolated logic, rule cases, fixtures), `cli-test` (in-process command
   output, golden files, exit codes), `e2e-test` (`TestE2E*` Go tests that run the real binary)
+- Docs, Markdown and `.claude/` text: `general-purpose`. It is built in, so use it without the
+  `workflow:` prefix.
 - Tasks flagged as security-sensitive: run `review-security` **after** the dev agent finishes.
 
 **Every agent prompt includes:**

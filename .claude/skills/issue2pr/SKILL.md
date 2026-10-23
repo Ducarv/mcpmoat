@@ -129,7 +129,8 @@ Write down:
 ### Step 3: Research
 
 Spawn the `research` agent with the issue title and body, referenced files, acceptance
-criteria, and the profile path. It returns a task list with dependencies.
+criteria, and the profile path. It returns a task list with dependencies. Tell it to include the
+owner-doc task (see `research.md`). The `pr` skill still checks the final diff in Step 10.
 
 ### Step 4: Clarify (interactive only)
 
@@ -160,10 +161,9 @@ sub-agents.
 
 ### Step 8: Verify
 
-Run the profile's commands, scoped to what changed:
-1. format and lint (`gofmt -l .`, `golangci-lint run ./...`),
-2. typecheck (`go build ./... && go vet ./...`, and `go mod tidy` leaves `go.mod`/`go.sum` unchanged),
-3. tests for the touched packages with `-race`, plus the `TestE2E*` tests in `cmd/mcpmoat` if the CLI changed.
+Run the Gates block in [CONTRIBUTING.md Checks](../../../CONTRIBUTING.md#checks), scoped to what
+changed. For example, run the tests only for the touched packages, plus the `TestE2E*` tests in
+`cmd/mcpmoat` if the CLI changed.
 
 Do not swallow exit codes or truncate failing output. If a check fails:
 1. spawn `debugger` with the error output,
@@ -173,22 +173,34 @@ Do not swallow exit codes or truncate failing output. If a check fails:
 
 ### Step 9: Self-review
 
-Invoke the `review-pr` skill on the current branch.
+Stage and commit the work with the `commit` skill first, because `review-pr` reads the commits
+(`git diff <base>...HEAD`) and does not see uncommitted files. Then invoke the `review-pr` skill on
+the current branch.
 
 - **Critical / Should-fix**: fix them, then go back to Step 8. A security finding at either
-  severity is always in this group.
+  severity is always in this group. A finding that the owner doc is not updated belongs here too:
+  update the owner doc, unless the user already gave a "No doc change needed because" reason that
+  is real as [CONTRIBUTING.md Pull requests](../../../CONTRIBUTING.md#pull-requests) defines it.
 - **Minor / Nit**: do not fix. List security-tagged nits in the PR body so the reviewer sees
   them.
 
 Severity decides whether you fix it. The security tag decides whether you surface it in the PR
 body. Run at most 2 review cycles.
 
-### Step 10: Commit and open the PR
+### Step 10: Open the PR
 
-Invoke the `commit` skill to create a well-formed commit, then the `pr` skill to open the pull
-request. Make sure the PR:
-- links the issue (profile pattern, default `Closes #<n>`),
-- has a Summary, Testing and Release Notes section.
+Invoke the `commit` skill for any change made after Step 9, then the `pr` skill. The `pr` skill is
+the one gate for the docs rule in
+[CONTRIBUTING.md Pull requests](../../../CONTRIBUTING.md#pull-requests): it lists the changed docs,
+and it refuses to open the PR when a behaviour change has no owner doc and no real reason. Say
+whether the run is `--auto`, so `pr` does not wait for a person. Pass a "No doc change needed
+because" reason only if the user gave one. The `pr` skill reads the issue itself. Make sure the PR
+links the issue (profile pattern, default `Closes #<n>`) and has a Summary, Testing and Release
+Notes section.
+
+If `pr` refuses because the owner doc is missing, add the owner-doc change as a task, run it once
+through `coordinate`, run the Step 8 checks, commit, and call `pr` again. Do this once. If `pr`
+refuses again, stop and report the missing owner doc. Without `--auto`, `pr` asks the user itself.
 
 Report the PR URL.
 

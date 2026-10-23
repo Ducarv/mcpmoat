@@ -180,6 +180,17 @@ workflow because "it never uses the token", but `actions/checkout` needs `conten
 private repo, so `{}` would break the build. Declining with that checked reason is correct.
 State the premise you disproved.
 
+### 3.6 Docs finding
+
+`review-quality` reports a behaviour change with no owner-doc update as a `[Q]` Should-Fix finding.
+The rule is in [CONTRIBUTING.md Pull requests](../../../CONTRIBUTING.md#pull-requests). Triage it
+like any other finding. There are two fixes. Update the owner doc in an additive commit. Or, if the
+doc needs no change, record a "No doc change needed because ..." reason in the ledger (disposition
+`non-issue`) and, once a PR exists, add that line to the PR body with `gh pr edit`. The next round
+filters the finding while the reason holds. A reason cannot close the finding when the diff changes
+security-relevant behaviour: update the owner doc. When no PR exists yet, pass the recorded reason to
+the `pr` skill when you open the PR. Do not add a second docs check here.
+
 ## Step 4: Apply fixes
 
 - Small, local fixes: make them yourself with Read and Edit, following the profile's code style.

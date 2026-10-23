@@ -17,7 +17,9 @@ anything. You only research and plan.
 
 If `.agents/project.md` exists at the repo root, read it first. Use its **Agent routing**
 table to assign agents, and copy its **Commands** and **Code style** sections (short form)
-into the context you return, because the coordinator cannot read files.
+into the context you return, because the coordinator cannot read files. Where a section links
+to another file (for example the Gates row, which links to `CONTRIBUTING.md#checks`), read the
+link target and copy the commands from there into the context output.
 
 ## Your mission
 
@@ -45,6 +47,11 @@ A task is atomic if:
 
 If a task is too big, break it down further.
 
+Include a task that updates the owner doc for the change (the owner is listed in the
+"Topic to owner" table in `docs/README.md`), and give it to the agent that the profile's Agent
+routing table names for docs. If no doc change is needed, add no doc task and say why in the
+context notes.
+
 ## Output format
 
 End your response with a task table and a JSON block.
@@ -64,6 +71,7 @@ End your response with a task table and a JSON block.
 - Patterns to follow, types to use, related files
 - Profile commands and code style (short form)
 - Specific requirements or constraints
+- No doc reason: <reason, only when no doc task is in the list>
 - Security-marked tasks need a security review before merge
 ```
 
@@ -90,7 +98,8 @@ reading, and leave it out when another skill calls you. The two must never disag
 - **Agent**: from the profile's routing table. Defaults: `go-dev` (`internal/` logic), `cli-dev`
   (`cmd/mcpmoat`, `internal/report`), `datastore` (`pins.json` format and store, ignore file),
   `unit-test` (unit `_test.go`, rule cases, fixtures), `cli-test` (in-process CLI output and
-  golden files), `e2e-test` (`TestE2E*` Go tests that run the real binary).
+  golden files), `e2e-test` (`TestE2E*` Go tests that run the real binary), `general-purpose`
+  (docs, Markdown and `.claude/` text).
 - **Security**: `✓` for security-sensitive tasks (see below).
 
 ## Dependency guidelines
@@ -118,6 +127,7 @@ Flag a task with `✓` if it involves:
 - **Secrets**: env values, headers, tokens in configs; anything that could print or store them.
 - **Network**: any new outbound connection (NFR-01), the `--llm` path.
 - **Exit codes and release supply chain**: FR-16, checksums, attestations.
+- **Review guardrails**: the files that the profile's Review section lists as security-flagged.
 
 Flagged tasks get a `review-security` pass after the dev agent finishes.
 
@@ -133,7 +143,8 @@ Request: "Add the Cursor config reader (FR-01)"
 | 3 | internal/discover/cursor_test.go | Table-driven tests: both files, missing file, malformed JSON, env values never in output | 1,2 | unit-test | - |
 | 4 | internal/discover/discover.go | Register the Cursor reader in Discover() | 1 | go-dev | - |
 | 5 | cmd/mcpmoat/e2e_test.go | Add TestE2EScanCursor: scan --no-connect lists the Cursor servers and masks env values | 4 | e2e-test | - |
-| 6 | - | Run typecheck | 1,2,3,4,5 | typecheck | - |
+| 6 | docs/ARCHITECTURE.md | Update the owner doc: name the Cursor reader in the `internal/discover` entry | 4 | general-purpose | - |
+| 7 | - | Run typecheck | 1,2,3,4,5,6 | typecheck | - |
 ```
 
 ## What you do NOT do
