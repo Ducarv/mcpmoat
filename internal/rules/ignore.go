@@ -31,8 +31,9 @@ const (
 	// the "\r" of a CRLF line end is removed.
 	maxIgnoreLineBytes = 4096
 	// maxIgnoreEntries is the largest number of entries that ParseIgnore
-	// keeps.
-	maxIgnoreEntries = 10000
+	// keeps. Ignored compares a finding with each entry, so the cap also
+	// bounds that cost.
+	maxIgnoreEntries = 1000
 	// MaxIgnoreWarnings is the largest number of malformed-line warnings
 	// that ParseIgnore returns. After that, one summary warning gives the
 	// number of the other malformed lines.
@@ -151,12 +152,7 @@ func (l *IgnoreList) Ignored(k FindingKey) bool {
 // the same order as in items) and the number of ignored items. key returns
 // the FindingKey of one item and must not be nil. A nil list ignores nothing.
 // kept is always a new slice, so a change to kept does not change items.
-//
-// [T any] is a type parameter: T stands for the element type of items, and
-// "any" allows every type. So FilterIgnored works on a slice of findings of
-// any type (for example a Finding struct of another package) without a copy
-// into a common type. The compiler picks T from the arguments, so a call is
-// just FilterIgnored(list, findings, keyOf).
+// FilterIgnored works on a slice of any finding type.
 func FilterIgnored[T any](l *IgnoreList, items []T, key func(T) FindingKey) (kept []T, ignored int) {
 	kept = make([]T, 0, len(items))
 	for _, item := range items {
@@ -214,7 +210,7 @@ func (w IgnoreWarning) String() string {
 // ("/tool" or "/"), or has more than two fields.
 //
 // ParseIgnore returns at most MaxIgnoreWarnings line warnings. When there are
-// more, it adds one summary warning with Line 0. When the list has 10000
+// more, it adds one summary warning with Line 0. When the list has 1000
 // entries and the file holds one more entry line, ParseIgnore adds one
 // warning for that line (never dropped into the summary) and stops. So there
 // are at most MaxIgnoreWarnings+2 warnings. warnings is nil when the file has
@@ -347,24 +343,26 @@ func moreMalformedLines(n int) string {
 // escape the error text with termsafe before you print it.
 func ReadIgnoreFile(dir string) (IgnoreList, []IgnoreWarning, error) {
 	data, found, err := readIgnoreData(dir)
-	if err != nil || !found {
-		return IgnoreList{}, nil, err
+	if err != nil {
+		return IgnoreList{}, nil, fmt.Errorf("read ignore file %s: %w", filepath.Join(dir, IgnoreFileName), err)
+	}
+	if !found {
+		return IgnoreList{}, nil, nil
 	}
 	list, warnings := ParseIgnore(data)
 	return list, warnings, nil
 }
 
 // readIgnoreData reads the ignore file in dir. found is false, with a nil
-// error, when the file or dir does not exist.
+// error, when the file or dir does not exist. ReadIgnoreFile adds the path to
+// the error.
 func readIgnoreData(dir string) (data []byte, found bool, err error) {
-	path := filepath.Join(dir, IgnoreFileName)
-
 	root, err := os.OpenRoot(dir)
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
 			return nil, false, nil
 		}
-		return nil, false, fmt.Errorf("read ignore file %s: %w", path, err)
+		return nil, false, err
 	}
 	defer func() {
 		// Closing the root does not close the files opened through it.
@@ -380,7 +378,7 @@ func readIgnoreData(dir string) (data []byte, found bool, err error) {
 		if errors.Is(err, fs.ErrNotExist) {
 			return nil, false, nil
 		}
-		return nil, false, fmt.Errorf("read ignore file %s: %w", path, err)
+		return nil, false, err
 	}
 	defer func() {
 		// The file is read-only, so a close error is not useful.
@@ -389,23 +387,23 @@ func readIgnoreData(dir string) (data []byte, found bool, err error) {
 
 	info, err := f.Stat()
 	if err != nil {
-		return nil, false, fmt.Errorf("read ignore file %s: %w", path, err)
+		return nil, false, err
 	}
 	if !info.Mode().IsRegular() {
-		return nil, false, fmt.Errorf("read ignore file %s: %w", path, errIgnoreNotRegular)
+		return nil, false, errIgnoreNotRegular
 	}
 	if info.Size() > MaxIgnoreFileBytes {
-		return nil, false, fmt.Errorf("read ignore file %s: %w", path, errIgnoreTooLarge)
+		return nil, false, errIgnoreTooLarge
 	}
 
 	// Read one byte more than the limit, so we can tell if the file grew
 	// after Stat.
 	data, err = io.ReadAll(io.LimitReader(f, MaxIgnoreFileBytes+1))
 	if err != nil {
-		return nil, false, fmt.Errorf("read ignore file %s: %w", path, err)
+		return nil, false, err
 	}
 	if len(data) > MaxIgnoreFileBytes {
-		return nil, false, fmt.Errorf("read ignore file %s: %w", path, errIgnoreTooLarge)
+		return nil, false, errIgnoreTooLarge
 	}
 	return data, true, nil
 }

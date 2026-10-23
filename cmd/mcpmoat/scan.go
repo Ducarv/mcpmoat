@@ -198,8 +198,7 @@ func (c *cli) scanConfig(ctx context.Context, path string, ignoreIDs []string) i
 	if !filepath.IsAbs(path) && wd != "" {
 		path = filepath.Join(wd, path)
 	}
-	ignore := c.loadIgnore(wd, ignoreIDs)
-	_ = ignore // used when findings exist (FR-10 summary and exit-code wiring)
+	_ = c.loadIgnore(wd, ignoreIDs) // used when findings exist (FR-10 summary and exit-code wiring)
 
 	// The home directory only tells ReadConfig whether the file is one of the
 	// user's own global files. Without a home, no file is: the file is read
@@ -235,8 +234,7 @@ func (c *cli) scanAuto(ctx context.Context, ignoreIDs []string) int {
 		fprintf(c.stderr, "mcpmoat scan: cannot read the working directory; use --config\n")
 		return exitError
 	}
-	ignore := c.loadIgnore(wd, ignoreIDs)
-	_ = ignore // used when findings exist (FR-10 summary and exit-code wiring)
+	_ = c.loadIgnore(wd, ignoreIDs) // used when findings exist (FR-10 summary and exit-code wiring)
 	return c.listServers(discover.Discover(ctx, discover.Options{Home: home, WorkDir: wd}))
 }
 
