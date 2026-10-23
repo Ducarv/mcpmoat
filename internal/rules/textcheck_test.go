@@ -48,6 +48,8 @@ func TestTextAdapters(t *testing.T) {
 		{name: "env non-secret name", heuristic: HeuristicPlaintextSecret, input: "LOG_LEVEL=debug"},
 		{name: "header with space", heuristic: HeuristicPlaintextSecret, input: "Authorization: Bearer " + leakCanary, wantHit: true},
 		{name: "header no space after colon", heuristic: HeuristicPlaintextSecret, input: "Authorization:Bearer " + leakCanary, wantHit: true},
+		{name: "header name with underscore", heuristic: HeuristicPlaintextSecret, input: "X_Auth: Bearer " + leakCanary, wantHit: true},
+		{name: "URL is not a header", heuristic: HeuristicPlaintextSecret, input: "https://mcp.example.com/" + leakCanary},
 		{name: "empty key", heuristic: HeuristicPlaintextSecret, input: "=value"},
 		{name: "no equals and no colon", heuristic: HeuristicPlaintextSecret, input: "just some text"},
 		{name: "plaintext empty line", heuristic: HeuristicPlaintextSecret, input: ""},
@@ -193,6 +195,16 @@ func TestHeuristicNames(t *testing.T) {
 	for _, name := range names {
 		if _, err := compileHeuristic(name, nil); err != nil {
 			t.Errorf("compileHeuristic(%q, nil) error = %v, want nil", name, err)
+		}
+	}
+	// Every heuristic must be in the list.
+	all := []string{HeuristicInvisibleUnicode, HeuristicMaxLength, HeuristicBase64Blob, HeuristicTyposquat}
+	for name := range configTextChecks {
+		all = append(all, name)
+	}
+	for _, name := range all {
+		if !slices.Contains(names, name) {
+			t.Errorf("heuristicNames = %q, want it to hold %q", heuristicNames, name)
 		}
 	}
 }

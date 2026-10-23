@@ -338,18 +338,16 @@ func TestFixtureBuiltinDescriptionRules(t *testing.T) {
 		wantDescription := map[string][]string{
 			"add_numbers": {"MOAT-T1-003", "MOAT-T3-001"},
 		}
-		seen := false
+		if !slices.ContainsFunc(st.Tools, func(tool inspect.Tool) bool { return tool.Name == "add_numbers" }) {
+			t.Error("shadowing fixture has no add_numbers tool")
+		}
 		for _, tool := range st.Tools {
-			seen = seen || tool.Name == "add_numbers"
 			if got, want := builtinHits(rs, rules.TargetDescription, tool.Description), wantDescription[tool.Name]; !slices.Equal(got, want) {
 				t.Errorf("description of %s: hits = %q, want %q", tool.Name, got, want)
 			}
 			if got := builtinHits(rs, rules.TargetSchema, string(tool.InputSchema)); len(got) != 0 {
 				t.Errorf("schema of %s: hits = %q, want none", tool.Name, got)
 			}
-		}
-		if !seen {
-			t.Error("shadowing fixture has no add_numbers tool")
 		}
 	})
 }

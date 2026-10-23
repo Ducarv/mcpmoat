@@ -39,7 +39,7 @@ func isConfigHeuristic(name string) bool {
 var envEntryRe = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*=`)
 
 // headerEntryRe matches the start of a header entry: a header name, then ":".
-var headerEntryRe = regexp.MustCompile(`^[A-Za-z0-9-]+:`)
+var headerEntryRe = regexp.MustCompile(`^[A-Za-z0-9_-]+:`)
 
 // insecureURLText runs the MOAT-T4-001 check on one URL.
 //
@@ -64,9 +64,11 @@ func insecureURLText(raw string) []Hit {
 //     only letters, digits and "_". The value is the rest of the line after
 //     the first "=", so it may hold more "=" or ":". The entry is read as an
 //     env entry of a stdio server.
-//   - Header entry "Name: value". The name holds only letters, digits and
-//     "-". The value is the rest of the line after the first ":", with white
-//     space trimmed. The entry is read as a header of a remote server.
+//   - Header entry "Name: value". The name holds only letters, digits, "_"
+//     and "-". The value is the rest of the line after the first ":", with
+//     white space trimmed. The entry is read as a header of a remote server.
+//     A line such as "http://host", with "//" right after the ":", is a URL
+//     and not a header entry.
 //
 // Any other line gives no hit. The value is never put into a Hit, an error or
 // a log.
@@ -79,8 +81,7 @@ func plaintextSecretText(raw string) []Hit {
 		s.Env = discover.SecretMap{key: discover.NewSecret(value)}
 		return findingHits(checkPlaintextSecrets(s), HeuristicPlaintextSecret)
 	}
-	if headerEntryRe.MatchString(line) {
-		name, value, _ := strings.Cut(line, ":")
+	if name, value, _ := strings.Cut(line, ":"); headerEntryRe.MatchString(line) && !strings.HasPrefix(value, "//") {
 		s := discover.Server{
 			Name:      caseServerName,
 			Transport: discover.TransportHTTP,

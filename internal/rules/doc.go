@@ -86,11 +86,12 @@
 // The config heuristics (insecure_url, plaintext_secret, unpinned_package,
 // auto_install and typosquat) read one line of text each, not the whole text.
 // Only a rule with target: config may use them (Validate checks this). The
-// built-in config rules use them on the lines of their test cases. insecure_url reads a URL. plaintext_secret reads a KEY=VALUE or
-// "Name: value" entry. unpinned_package and auto_install read a command line.
+// built-in config rules use them on the lines of their test cases.
+// insecure_url reads a URL. plaintext_secret reads a KEY=VALUE or "Name:
+// value" entry. unpinned_package and auto_install read a command line.
 // typosquat reads a command line or a bare package name. An adapter in this
-// package turns the line into a server and runs the native config check on it.
-// A hit from a config heuristic has the offset -1.
+// package turns the line into a server and runs the native config check on
+// it. A hit from a config heuristic has the offset -1.
 //
 // # The ignore file
 //
