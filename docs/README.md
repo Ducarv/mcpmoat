@@ -22,12 +22,7 @@ This page is the index. Each topic has one owner doc. Update the owner doc. Do n
 
 ## Other files
 
-- [docs/README.md](README.md): this index.
 - [bug_report.md](../.github/ISSUE_TEMPLATE/bug_report.md) and [new_rule.md](../.github/ISSUE_TEMPLATE/new_rule.md): issue forms.
 - [.github/pull_request_template.md](../.github/pull_request_template.md): the PR description form.
 - [.claude/agents/](../.claude/agents/) and [.claude/skills/](../.claude/skills/): agent and skill definitions.
   They own no other topic.
-
-## Rule for every PR
-
-See [CONTRIBUTING.md Pull requests](../CONTRIBUTING.md#pull-requests).

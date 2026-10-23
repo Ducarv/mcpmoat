@@ -15,7 +15,8 @@ block is repeated in each folder.
 | `shadowing/` + `mailer/` | T3 cross-server shadowing | MOAT-T1-003 and MOAT-T1-005 (`shadowing/` alone); MOAT-T3-001 (two sources, see the note below) |
 | (none yet) | T2 rug pull | Fixtures come with the M5 Pins milestone |
 
-MOAT-T3-001 comes from two checks. Only tests run them. `mcpmoat scan` applies no rules yet.
+MOAT-T3-001 comes from two checks. Only tests run them. For what `scan` runs today, see
+[Data flow](../../docs/ARCHITECTURE.md#data-flow).
 
 - The YAML rule `rules/MOAT-T3-001.yaml` fires on the description of `shadowing/add_numbers` alone.
   `TestFixtureBuiltinT3` checks this on each fixture alone. It expects a hit only on that tool.

@@ -85,7 +85,7 @@ Work in dependency order. For each batch of unblocked tasks:
 **Every agent prompt includes:**
 - the exact file to create or change,
 - what to do, precisely,
-- context from research (patterns to follow, types to use, related files),
+- context from research (`context.notes`: patterns to follow, types to use, related files),
 - the relevant profile rules (code style, commands),
 - the task ID, for status updates,
 - success criteria.

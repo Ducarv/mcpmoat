@@ -28,7 +28,7 @@ the fields and the test cases. Read it as you follow the steps below.
 Notes on the regexes in `rules/MOAT-T1-003.yaml`:
 
 - The first line of that file is a YAML comment. MOAT-T1-009 copies the patterns of this rule for the
-  input schema, so a change there needs the same change in MOAT-T1-009. A test checks that MOAT-T1-009
+  input schema, so a change to MOAT-T1-003 needs the same change in MOAT-T1-009. A test checks that MOAT-T1-009
   matches every `should_match` case of this rule and none of its `should_not_match` cases.
 - In a single-quoted YAML text, `''` is one `'`. So `don(?:''|\x{2019})?t` is the regex
   `don(?:'|\x{2019})?t`: "don't", "don" + U+2019 (the curly apostrophe) + "t", or "dont".

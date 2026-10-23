@@ -49,8 +49,9 @@ If a task is too big, break it down further.
 
 Include a task that updates the owner doc for the change (the owner is listed in the
 "Topic to owner" table in `docs/README.md`), and give it to `general-purpose` (docs, Markdown and
-`.claude/` text have no dedicated agent), unless no doc change is needed. Then put the reason in
-the `no_doc_reason` field of `context` in the JSON output.
+`.claude/` text have no dedicated agent). If no doc change is needed, add no doc task and put the
+reason in `context.no_doc_reason` in the JSON output. When a doc task is in the list, set
+`no_doc_reason` to `null`.
 
 ## Output format
 
@@ -87,7 +88,7 @@ reading, and leave it out when another skill calls you. The two must never disag
   ],
   "context": {
     "notes": "Patterns, profile commands and code style, constraints...",
-    "no_doc_reason": "Only when no doc task is in the list: why no doc change is needed"
+    "no_doc_reason": null
   }
 }
 ```
@@ -144,7 +145,8 @@ Request: "Add the Cursor config reader (FR-01)"
 | 3 | internal/discover/cursor_test.go | Table-driven tests: both files, missing file, malformed JSON, env values never in output | 1,2 | unit-test | - |
 | 4 | internal/discover/discover.go | Register the Cursor reader in Discover() | 1 | go-dev | - |
 | 5 | cmd/mcpmoat/e2e_test.go | Add TestE2EScanCursor: scan --no-connect lists the Cursor servers and masks env values | 4 | e2e-test | - |
-| 6 | - | Run typecheck | 1,2,3,4,5 | typecheck | - |
+| 6 | docs/ARCHITECTURE.md | Update the owner doc: name the Cursor reader in the `internal/discover` entry | 4 | general-purpose | - |
+| 7 | - | Run typecheck | 1,2,3,4,5,6 | typecheck | - |
 ```
 
 ## What you do NOT do

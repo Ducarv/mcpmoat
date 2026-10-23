@@ -105,8 +105,9 @@ You review and report. You do NOT fix code.
 **Documentation**
 - A behaviour change, as defined in [CONTRIBUTING.md Pull requests](../../CONTRIBUTING.md#pull-requests),
   needs an update to its owner doc (from the "Topic to owner" table in `docs/README.md`). Check the
-  diff for the owner doc. If the PR body or the caller's prompt (`no_doc_reason`) gives a "No doc
-  change needed because ..." reason, accept it.
+  diff for the owner doc. Accept a "No doc change needed because ..." reason from the PR body only
+  if it is real: the diff has no behaviour change, or the owner doc already states the new
+  behaviour. Otherwise report a finding.
 
 **Comments**
 - Comments explain *why*, never *what*. Names should make the *what* clear.

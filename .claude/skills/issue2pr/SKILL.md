@@ -132,8 +132,8 @@ Spawn the `research` agent with the issue title and body, referenced files, acce
 criteria, and the profile path. It returns a task list with dependencies. Tell it to include a task
 that updates the owner doc for the change. Find the owner in the "Topic to owner" table in
 `docs/README.md`. If no doc needs to change, there is no doc task. The reason goes in the
-`no_doc_reason` field of the research output context. Step 10 reuses it as the
-"No doc change needed because" line in the PR.
+`no_doc_reason` field of the research output context. It is only a plan. Step 10 checks the
+final diff, and does not accept the reason as the "No doc change needed because" line.
 
 ### Step 4: Clarify (interactive only)
 
@@ -176,11 +176,11 @@ Do not swallow exit codes or truncate failing output. If a check fails:
 
 ### Step 9: Self-review
 
-Invoke the `review-pr` skill on the current branch. If Step 3 gave a `no_doc_reason`, put it in
-the prompt and add: "Treat this as the 'No doc change needed because' reason for the docs check."
+Invoke the `review-pr` skill on the current branch.
 
 - **Critical / Should-fix**: fix them, then go back to Step 8. A security finding at either
-  severity is always in this group.
+  severity is always in this group. The exception is a finding that the owner doc is not updated.
+  Step 10 owns the docs check, so do not act on that finding here.
 - **Minor / Nit**: do not fix. List security-tagged nits in the PR body so the reviewer sees
   them.
 
@@ -196,18 +196,17 @@ The rule for docs is in [CONTRIBUTING.md Pull requests](../../../CONTRIBUTING.md
    together with `git diff origin/<base>`. If the diff has a behaviour change (as that rule
    defines it) and the owner doc from the "Topic to owner" table in `docs/README.md` is not in
    the diff:
-   - If Step 3 gave a `no_doc_reason`, keep it for the `pr` skill. It is a real reason only if
-     the diff has no behaviour change as defined in
-     [CONTRIBUTING.md Pull requests](../../../CONTRIBUTING.md#pull-requests), or the user gave it.
+   - If the user gave a "No doc change needed because" reason, keep it for the `pr` skill.
    - Otherwise add the owner-doc change as a task and run it once through `coordinate`. Then run
-     the Step 8 checks for the changed files and continue.
+     the Step 8 checks for the changed files and continue. Ignore a `no_doc_reason` from Step 3
+     here: research wrote it before any code existed, and the diff now shows a behaviour change.
 
    Do this at most once. It does not start another Step 9 review cycle. If the doc task fails,
    or the `pr` skill refuses (it returns a failure message in a non-interactive run), do not
    retry. With `--auto`, stop and report the failure and the missing owner doc. Without
    `--auto`, ask the user.
 2. **Commit and open the PR.** Invoke the `commit` skill to create a well-formed commit, then
-   the `pr` skill to open the pull request. Give `pr` the `no_doc_reason` (if any) and say
+   the `pr` skill to open the pull request. Give `pr` the reason from the user (if any) and say
    whether the run is `--auto`, so it does not wait for a person in `--auto` mode. Make sure the
    PR:
    - links the issue (profile pattern, default `Closes #<n>`),
@@ -216,8 +215,10 @@ The rule for docs is in [CONTRIBUTING.md Pull requests](../../../CONTRIBUTING.md
      real reason.
 3. **Check the PR body.** Do this only if `pr` returned a PR URL. Read the body with `gh pr view <url> --json body -q .body`.
    It must list the changed doc files under `## Docs`, or have a "No doc change needed because"
-   line with a real reason. If it has neither, fix the body with `gh pr edit` (do not open a new
-   PR) and say so in your report.
+   line with a real reason. If doc files changed but the body does not list them, fix the body
+   with `gh pr edit` (do not open a new PR) and say so in your report. If no doc file changed and
+   no real reason exists, do not invent one. With `--auto`, stop and report the missing owner doc.
+   Without `--auto`, ask the user.
 
 Report the PR URL.
 

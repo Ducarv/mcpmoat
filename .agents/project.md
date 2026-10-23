@@ -1,6 +1,7 @@
 # Project profile: mcpmoat
 
-The agents and skills in `.claude/` read this file. Its sections override their generic defaults.
+The agents and skills in `.claude/` read this file, and `CLAUDE.md` imports it. It is also the
+conventions page for contributors. Its sections override the generic defaults of the agents.
 
 This file owns conventions, agent routing, release notes and review criteria. It links to
 [CONTRIBUTING.md](../CONTRIBUTING.md#checks) for the gates and to [docs/ARCHITECTURE.md](../docs/ARCHITECTURE.md) for the layout.
@@ -25,8 +26,6 @@ This file owns conventions, agent routing, release notes and review criteria. It
 | E2E scenario | `go test ./cmd/mcpmoat/ -run 'TestE2E<Name>' -v` |
 | Update golden files | `go test ./<pkg>/ -update` (review the diff afterwards) |
 | Fuzz a parser | `go test -fuzz=FuzzX -fuzztime=30s ./<pkg>/` |
-
-Where a row links to another file, read the link and use its commands.
 
 ## Code style
 
@@ -61,7 +60,7 @@ Where a row links to another file, read the link and use its commands.
 | Root-cause diagnosis | `debugger` |
 | Final compile and vet check | `typecheck` |
 | Security-flagged tasks after the dev agent | `review-security` |
-| Docs: `*.md`, `docs/`, `.github/` templates, `.claude/` agent and skill text | `general-purpose` (no dedicated docs agent; follow the owner docs in [docs/README.md](../docs/README.md)) |
+| Docs: `*.md`, `docs/`, `.github/` templates, `.claude/` agent and skill text | `general-purpose` (no dedicated docs agent; follow the owner docs in [docs/README.md](../docs/README.md)). A task that edits `.claude/agents/review-*.md` or a review step of a skill is security-flagged: run `review-security` after it. |
 
 ## Git and pull requests
 
@@ -72,7 +71,8 @@ Where a row links to another file, read the link and use its commands.
 - Issue link: `Closes #<n>`.
 - PR template: `.github/pull_request_template.md`. Add a `## Release Notes` section after it.
 - CI trigger: none (CI runs on every pull request).
-- Every PR updates the docs: see [CONTRIBUTING.md](../CONTRIBUTING.md#pull-requests).
+- Every PR updates its owner doc, or says why no doc change is needed: see
+  [CONTRIBUTING.md](../CONTRIBUTING.md#pull-requests).
 
 ## Release notes
 

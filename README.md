@@ -79,7 +79,7 @@ go build -o mcpmoat ./cmd/mcpmoat
 - It does not analyse server source code, so it does not find malware inside a server.
 - It does not protect against prompt injection that arrives in content the agent reads (for example
   a GitHub issue). That is planned for a later phase.
-- `mcpmoat scan` cannot connect to servers yet. Until then, `scan` needs `--no-connect`. Without
+- `mcpmoat scan` cannot connect to servers yet. Until it can, `scan` needs `--no-connect`. Without
   it, `scan` prints an error and exits with code 2. When connecting is wired in, `mcpmoat scan`
   will by default start each configured stdio server, with the same command your client already
   runs. mcpmoat will use no shell. The server will get only the env from its config plus a small

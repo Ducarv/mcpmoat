@@ -17,10 +17,11 @@ NFR-07, threats T1 to T5, milestones M1 to M8. Read the cited section before you
 - [docs/PRD.md](docs/PRD.md): requirements and threat model.
 - [SECURITY.md](SECURITY.md): how to report a vulnerability.
 
-Conventions are in the [Code style](.agents/project.md#code-style) section of `.agents/project.md`.
-The repo owner is learning Go, so prefer clear, idiomatic standard-library code. Never forget:
-secrets (print keys only), no telemetry, ask before you add a module.
-Every PR updates the docs. The rule is in [CONTRIBUTING.md](CONTRIBUTING.md#pull-requests).
+The project profile below is imported from `.agents/project.md`, its one owner. It holds the code
+style and security rules (secrets, no telemetry, NFR-04 scrubbed env), the exit-code contract, the
+PR docs rule and the agent routing. Every session loads it.
+
+@.agents/project.md
 
 ## Issue labels and how to pick up work
 

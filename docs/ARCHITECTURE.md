@@ -43,8 +43,8 @@ docs/                   PRD and other documentation
   holds example client configs. Other folders hold fixtures for single packages.
 - `internal/discover/discovertest` and `internal/inspect/inspecttest`: helpers for tests in other
   packages. `inspecttest.Fake` is an `Inspector` that returns canned results. A test that uses
-  `Fake` never starts a real server. `inspecttest.Fixture` builds and runs the fixture servers
-  under `testdata/servers/`.
+  `Fake` never starts a real server. `inspecttest.Fixture` builds one fixture server
+  under `testdata/servers/` and returns the path of its binary. The test starts it.
 
 ## Import direction
 
@@ -74,7 +74,8 @@ go list -f '{{.ImportPath}}: {{join .Imports " "}}' ./...
 
 `mcpmoat scan` does these steps today:
 
-1. `cmd/mcpmoat` parses the flags.
+1. `cmd/mcpmoat` parses the flags and checks `--timeout` and `--concurrency`. A bad value is a
+   usage error with exit code 2.
 2. It loads the rules with `rules.Builtin` and, with `--rules`, `rules.LoadDir`. Then
    `rules.NewSet` checks for duplicate rule IDs and for clashes with built-in IDs. This only loads
    and checks the rules. A bad rule file or an ID problem gives exit code 2.
@@ -84,7 +85,7 @@ go list -f '{{.ImportPath}}: {{join .Imports " "}}' ./...
 
 Steps 1 and 2 always run. Steps 3 to 5 run only with `--no-connect`. Without `--no-connect`,
 `scan` prints "not implemented yet" after step 2 and exits with 2. The exit codes in the code are
-only 0 and 2 (`cli.go`). `mcpmoat pin` is a stub. `internal/report` has no JSON output.
+only 0 and 2 (`cmd/mcpmoat/cli.go`). `mcpmoat pin` is a stub. `internal/report` has no JSON output.
 
 The code below is built and tested, but `scan` does not call it yet: `inspect.Run`, `inspect.New`
 (`SDKInspector`), `inspect.Remote`, `rules.CheckConfig` and `rules.CheckShadowing`.
@@ -99,8 +100,6 @@ The target flow is `discover -> inspect -> rules -> pins -> report`:
 - `pins` hashes each tool and reports new, removed and changed tools (rug pulls).
 - `report` prints the findings, as a table and as JSON.
 - The exit code is 1 when a finding is at or above `--fail-on`.
-
-None of this is wired into `scan` today.
 
 ## The `internal/inspect` interface
 
@@ -144,7 +143,7 @@ can send any text. Raw control characters in such text can rewrite your terminal
 
 - `Quote(s)` returns `s` unchanged when it is safe, and a quoted, escaped form when it is not.
 - `QuoteIf(s, force)` also quotes a safe `s` when `force` is true.
-- `QuoteCut(s, n)` cuts to `n` runes and then quotes.
+- `QuoteCut(s, n)` cuts to `n` runes, quotes the result, and adds `CutMarker` when it cut.
 - `Cut(s, n)` cuts to `n` runes at a rune boundary and adds no marker.
 - `IsInvisible(r)` tells if a rune shows as nothing.
 
@@ -159,14 +158,12 @@ The rule: untrusted text goes through `termsafe` before it reaches a terminal. T
 names, paths, argv and errors that carry server output. `Outcome.Err` can carry server output, so
 the report layer must escape it. `discover.FileError.Error` already escapes.
 
-Secrets rule: print keys only, never env or header values. See
-[Code style](../.agents/project.md#code-style).
+For secrets in output, see [Code style](../.agents/project.md#code-style).
 
 ## How to add a rule
 
-A rule is one file, `rules/<ID>.yaml`, plus its test cases. Every rule needs positive
-(`should_match`) and negative (`should_not_match`) cases. The steps are in
-[Contributing a rule](../CONTRIBUTING.md#contributing-a-rule).
+A rule is one file, `rules/<ID>.yaml`, plus its test cases. The steps and the required cases are
+in [Contributing a rule](../CONTRIBUTING.md#contributing-a-rule).
 
 ## See also
 

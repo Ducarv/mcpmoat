@@ -54,7 +54,7 @@ git diff origin/<base>...HEAD --stat
 git log origin/<base>..HEAD --pretty=format:"%s%n%b"
 git diff origin/<base>...HEAD
 cat .github/pull_request_template.md .github/PULL_REQUEST_TEMPLATE.md 2>/dev/null || true
-git diff --name-only --diff-filter=AMR origin/<base>...HEAD | grep -v '^testdata/' | grep -E '\.md$|^docs/|^\.github/ISSUE_TEMPLATE/' || true   # changed doc files
+git diff --name-only --diff-filter=AMRD origin/<base>...HEAD | grep -E '\.md$|^docs/|^\.github/ISSUE_TEMPLATE/' || true   # changed doc files
 ```
 
 If a PR template exists, keep its structure and fill it in. Otherwise use the format below.
@@ -76,8 +76,8 @@ in the "Topic to owner" table of `docs/README.md`.
 - In the template `## Checklist`, tick `Docs updated (list the files)` only when the list has at
   least one file, and the last point below does not apply.
 - Tick `No doc change needed because: ...` only with a real reason. Take it from the first source
-  that has one: (a) the reason the caller passed in (for example from the research step of
-  `issue2pr`), (b) the user, (c) the issue. Write the reason on the line, and write `none` in
+  that has one: (a) the reason the caller passed in (a reason the user gave, not a plan from the
+  research step), (b) the user, (c) the issue. Write the reason on the line, and write `none` in
   `## Docs`.
 - If the diff clearly has no behaviour change (for example a refactor or tests only), check the
   diff, then write `No doc change needed because: no behaviour change (<one line from the diff>)`
