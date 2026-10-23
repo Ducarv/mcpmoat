@@ -1,0 +1,16 @@
+# Test fixture: invalid severity on purpose. Not a real rule.
+id: MOAT-X-900
+title: Fixture rule with an invalid severity value
+severity: urgent
+target: description
+match:
+  any_regex:
+    - '(?i)bad'
+risk: The severity value is not one of the allowed values.
+remediation: Use low, medium, high or critical as the severity.
+references:
+  - https://example.com/fixtures/bad-severity
+should_match:
+  - This is bad text.
+should_not_match:
+  - This is fine text.

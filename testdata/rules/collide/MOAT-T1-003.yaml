@@ -1,0 +1,18 @@
+# Test fixture: reuses a built-in rule ID on purpose. Not a real rule.
+id: MOAT-T1-003
+title: Fixture rule that reuses a built-in rule ID
+severity: medium
+target: description
+match:
+  any_regex:
+    - '(?i)collide-marker-[0-9]{3}'
+risk: Two rules with the same ID make findings and ignore lists ambiguous.
+remediation: Give every rule a unique ID.
+references:
+  - https://example.com/fixtures/collide
+should_match:
+  - This text has COLLIDE-MARKER-123 inside.
+  - collide-marker-007
+should_not_match:
+  - This text has no marker.
+  - collide-marker-ab

@@ -377,11 +377,13 @@ loadable from a directory (`--rules <dir>`).
 - An invalid rule file fails with exit code 2 and names the file and field.
 - Two rules with the same `id` are rejected.
 
-**FR-08: Rule schema.** Each rule has `id`, `title`, `severity` (low, medium, high, critical),
-`target` (description, schema, config), `match` (regex, word list or native heuristic) and
+**FR-08: Rule schema.** Each built-in rule has `id`, `title`, `severity` (low, medium, high,
+critical), `target` (description, schema, config), `match` (regex, word list or native heuristic) and
 `references`.
 
 - A rule missing a required field is rejected with a message that names the field.
+- The loader requires only `id`, `title`, `severity`, `target` and `match`. `references`, `risk`,
+  `remediation` and the test cases are required for built-in rules only (NFR-05, NFR-07).
 - `severity` and `target` accept only the listed values.
 - `match` supports at least `any_regex`, `all_regex`, `keywords` and named native heuristics.
 - Regexes are compiled once at load time with Go's RE2 engine (linear time, no backtracking), and

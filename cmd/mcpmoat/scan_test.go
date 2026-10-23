@@ -79,7 +79,7 @@ func TestScanFlags(t *testing.T) {
 			name:       "unknown flag",
 			args:       []string{"scan", "--bogus"},
 			wantCode:   exitError,
-			wantStderr: []string{"mcpmoat scan: flag provided but not defined: -bogus\n", `Run "mcpmoat help" for usage.`},
+			wantStderr: []string{"mcpmoat scan: flag provided but not defined: -bogus\n", usageHint},
 		},
 		{
 			// %q keeps a blank rune as it is. termsafe.Quote escapes it.
@@ -92,13 +92,13 @@ func TestScanFlags(t *testing.T) {
 			name:       "extra argument",
 			args:       []string{"scan", "--no-connect", "extra"},
 			wantCode:   exitError,
-			wantStderr: []string{`mcpmoat scan: unexpected arguments ["extra"]`, `Run "mcpmoat help" for usage.`},
+			wantStderr: []string{`mcpmoat scan: unexpected arguments ["extra"]`, usageHint},
 		},
 		{
 			name:       "empty config name",
 			args:       []string{"scan", "--no-connect", "--config", ""},
 			wantCode:   exitError,
-			wantStderr: []string{"--config needs a file name", `Run "mcpmoat help" for usage.`},
+			wantStderr: []string{"--config needs a file name", usageHint},
 		},
 		{
 			name:       "empty config name with equals sign",
@@ -421,8 +421,8 @@ func TestScanEmpty(t *testing.T) {
 	if code != exitOK {
 		t.Errorf("exit code = %d, want %d", code, exitOK)
 	}
-	if got, want := stdout.String(), "No MCP servers found.\n"; got != want {
-		t.Errorf("stdout = %q, want %q", got, want)
+	if got := stdout.String(); got != emptyScanOutput {
+		t.Errorf("stdout = %q, want %q", got, emptyScanOutput)
 	}
 	// No rules ran, so the notice shows also when there is no server.
 	assertNoRulesNotice(t, stderr.String())
