@@ -169,7 +169,33 @@ func TestParseIgnore(t *testing.T) {
 			wantEntries: []IgnoreEntry{
 				{RuleID: "R1", Line: 1},
 			},
-			wantWarnings: []IgnoreWarning{{Line: 2, Reason: reasonInvalidRuleID}},
+			wantWarnings: []IgnoreWarning{{Line: 2, Reason: reasonHiddenRune}},
+		},
+		{
+			// A CR in the middle of a line moves the cursor back, so a
+			// terminal shows only the comment, not the rule-wide entry. The
+			// check also applies to comment lines.
+			name: "hidden runes",
+			data: "R1\r# scoped to srv only\n" + // 1
+				"R2\vsrv\n" + // 2
+				"R3\u0085srv\n" + // 3
+				"R4\u2028srv\n" + // 4
+				"R5\u00a0srv\n" + // 5
+				"R6 srv # \u202e evil\n" + // 6
+				"# note \u200b\n" + // 7
+				"R7 s\x1bv\n" + // 8
+				"R8\tsrv\t# tab is fine\n", // 9
+			wantEntries: []IgnoreEntry{{RuleID: "R8", Server: "srv", Line: 9}},
+			wantWarnings: []IgnoreWarning{
+				{Line: 1, Reason: reasonHiddenRune},
+				{Line: 2, Reason: reasonHiddenRune},
+				{Line: 3, Reason: reasonHiddenRune},
+				{Line: 4, Reason: reasonHiddenRune},
+				{Line: 5, Reason: reasonHiddenRune},
+				{Line: 6, Reason: reasonHiddenRune},
+				{Line: 7, Reason: reasonHiddenRune},
+				{Line: 8, Reason: reasonHiddenRune},
+			},
 		},
 	}
 	for _, tt := range tests {

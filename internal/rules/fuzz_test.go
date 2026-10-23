@@ -224,7 +224,7 @@ func FuzzNormalize(f *testing.F) {
 func isKnownIgnoreReason(w IgnoreWarning) bool {
 	if w.Line > 0 {
 		switch w.Reason {
-		case reasonLineTooLong, reasonInvalidUTF8, reasonInvalidRuleID,
+		case reasonLineTooLong, reasonInvalidUTF8, reasonHiddenRune, reasonInvalidRuleID,
 			reasonEmptyServer, reasonHashScope, reasonTooManyFields, reasonTooManyEntries:
 			return true
 		}

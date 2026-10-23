@@ -52,8 +52,10 @@ MOAT-T1-003 my/server/
 ```
 
 Server and tool names must match exactly, and they are case-sensitive. mcpmoat splits each line on
-spaces and tabs, so you cannot write a name that contains a space or a tab. mcpmoat skips a
-malformed line and prints a warning with its line number.
+spaces and tabs, so you cannot write a name that contains a space or a tab. A line, comments
+included, must not hold control characters (other than tab), invisible characters or other white
+space, because they can hide text in a terminal. mcpmoat skips a malformed line and prints a
+warning with its line number.
 
 **Security note:** mcpmoat reads `.mcpmoat-ignore` from the directory you run it in, also in a
 repository that you cloned. A repository can use this file to hide findings for any server, also

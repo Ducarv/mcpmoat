@@ -11,6 +11,7 @@ import (
 	"regexp"
 	"strings"
 	"syscall"
+	"unicode"
 	"unicode/utf8"
 )
 
@@ -48,6 +49,7 @@ const maxRuleIDBytes = 64
 const (
 	reasonLineTooLong    = "line too long"
 	reasonInvalidUTF8    = "invalid UTF-8"
+	reasonHiddenRune     = "control, invisible or non-space white-space character"
 	reasonInvalidRuleID  = "invalid rule ID"
 	reasonEmptyServer    = "empty server name in scope"
 	reasonHashScope      = "a server name cannot start with #; put a space after # for a comment"
@@ -189,7 +191,7 @@ func (w IgnoreWarning) String() string {
 //
 // The format:
 //
-//   - One entry on each line: RULE-ID [server[/tool]]. Spaces and tabs
+//   - One entry on each line: RULE-ID [server[/tool]]. Only spaces and tabs
 //     separate the fields, so a server or tool name cannot hold a space.
 //   - A blank line is skipped, and so is a line whose first non-space
 //     character is '#' (a comment line).
@@ -205,7 +207,8 @@ func (w IgnoreWarning) String() string {
 //     CRLF line end.
 //
 // A line gets a warning and is skipped when it is longer than 4096 bytes, is
-// not valid UTF-8, has an invalid rule ID (see ValidRuleID), has a scope
+// not valid UTF-8, holds a hidden rune (see hasHiddenRune; this also applies
+// to a comment), has an invalid rule ID (see ValidRuleID), has a scope
 // that starts with '#' but is not exactly "#", has an empty server name
 // ("/tool" or "/"), or has more than two fields.
 //
@@ -248,7 +251,13 @@ func ParseIgnore(data []byte) (IgnoreList, []IgnoreWarning) {
 			continue
 		}
 
-		fields := withoutComment(strings.Fields(string(raw)))
+		line := string(raw)
+		if hasHiddenRune(line) {
+			warn(lineNo, reasonHiddenRune)
+			continue
+		}
+
+		fields := withoutComment(strings.FieldsFunc(line, isIgnoreSpace))
 		if len(fields) == 0 {
 			continue // a blank line or a comment line
 		}
@@ -273,6 +282,26 @@ func ParseIgnore(data []byte) (IgnoreList, []IgnoreWarning) {
 		warnings = append(warnings, *limit)
 	}
 	return list, warnings
+}
+
+// hasHiddenRune reports whether s holds a rune that can hide or move text
+// when the file is shown in a terminal or an editor: a control character
+// other than tab (a CR in the middle of a line moves the cursor back over
+// the rule ID), an invisible rune (see isInvisible) such as a bidi control,
+// or white space other than space and tab.
+func hasHiddenRune(s string) bool {
+	return strings.ContainsFunc(s, func(r rune) bool {
+		if isIgnoreSpace(r) {
+			return false
+		}
+		return unicode.IsControl(r) || unicode.IsSpace(r) || isInvisible(r)
+	})
+}
+
+// isIgnoreSpace reports whether r separates the fields of a line: a space or
+// a tab.
+func isIgnoreSpace(r rune) bool {
+	return r == ' ' || r == '\t'
 }
 
 // withoutComment returns fields up to the comment. The comment starts at the
