@@ -201,11 +201,37 @@ func TestSetGet(t *testing.T) {
 	}
 }
 
-func TestNewSetIDsAreCaseSensitive(t *testing.T) {
+// TestNewSetDuplicatesAreCaseSensitive checks that IDs that differ only in
+// case are different IDs, except for an external ID against a built-in ID.
+func TestNewSetDuplicatesAreCaseSensitive(t *testing.T) {
 	t.Parallel()
-	s := mustNewSet(t, []Rule{testRule("MOAT-X-001", "a.yaml")}, []Rule{testRule("moat-x-001", "b.yaml")})
-	if got := s.Len(); got != 2 {
-		t.Errorf("Len() = %d, want 2 (IDs differ by case)", got)
+	tests := []struct {
+		name     string
+		builtin  []Rule
+		external []Rule
+	}{
+		{
+			name:     "two external IDs",
+			external: []Rule{testRule("x-1", "a.yaml"), testRule("X-1", "b.yaml")},
+		},
+		{
+			name:    "two built-in IDs",
+			builtin: []Rule{testRule("x-1", "a.yaml"), testRule("X-1", "b.yaml")},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			s := mustNewSet(t, tt.builtin, tt.external)
+			if got := s.Len(); got != 2 {
+				t.Errorf("Len() = %d, want 2 (IDs differ by case)", got)
+			}
+			for _, id := range []string{"x-1", "X-1"} {
+				if _, ok := s.Get(id); !ok {
+					t.Errorf("Get(%q) ok = false, want true", id)
+				}
+			}
+		})
 	}
 }
 
@@ -245,6 +271,30 @@ func TestNewSetDuplicateID(t *testing.T) {
 			name:       "external id equals builtin id",
 			builtin:    []Rule{testRule("MOAT-X-001", "builtin.yaml")},
 			external:   []Rule{testRule("MOAT-X-001", "external.yaml")},
+			wantReason: ReasonBuiltinIDClash,
+			wantFile:   "external.yaml",
+			wantFirst:  "builtin.yaml",
+		},
+		{
+			name:       "external id equals builtin id in lower case",
+			builtin:    []Rule{testRule("MOAT-T1-003", "builtin.yaml")},
+			external:   []Rule{testRule("moat-t1-003", "external.yaml")},
+			wantReason: ReasonBuiltinIDClash,
+			wantFile:   "external.yaml",
+			wantFirst:  "builtin.yaml",
+		},
+		{
+			name:       "external id equals builtin id in mixed case",
+			builtin:    []Rule{testRule("MOAT-T1-003", "builtin.yaml")},
+			external:   []Rule{testRule("Moat-T1-003", "external.yaml")},
+			wantReason: ReasonBuiltinIDClash,
+			wantFile:   "external.yaml",
+			wantFirst:  "builtin.yaml",
+		},
+		{
+			name:       "builtin id in lower case, external id in upper case",
+			builtin:    []Rule{testRule("moat-t1-003", "builtin.yaml")},
+			external:   []Rule{testRule("MOAT-T1-003", "external.yaml")},
 			wantReason: ReasonBuiltinIDClash,
 			wantFile:   "external.yaml",
 			wantFirst:  "builtin.yaml",
@@ -460,6 +510,12 @@ func TestNewSetErrorMessagesEscapeUntrustedSources(t *testing.T) {
 			name:     "builtin clash, both files evil",
 			builtin:  []Rule{testRule("MOAT-X-001", evil2)},
 			external: []Rule{testRule("MOAT-X-001", evil)},
+			wantN:    1,
+		},
+		{
+			name:     "builtin clash in other case, both files evil",
+			builtin:  []Rule{testRule("MOAT-X-001", evil2)},
+			external: []Rule{testRule("moat-x-001", evil)},
 			wantN:    1,
 		},
 		{

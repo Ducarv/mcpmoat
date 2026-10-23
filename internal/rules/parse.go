@@ -36,6 +36,7 @@ const (
 // readDocument.)
 var (
 	errAnchors     = errors.New("anchors and aliases are not allowed")
+	errTagged      = errors.New("explicit YAML tags are not allowed")
 	errTooDeep     = errors.New("YAML nesting is too deep")
 	errTooManyNode = errors.New("YAML document has too many nodes")
 	errNotMapping  = errors.New("rule must be a mapping")
@@ -85,9 +86,8 @@ func Parse(file string, data []byte) (Rule, []*LoadError) {
 	fields, fieldErrs, dropped := decodeRule(file, root, &rule)
 	// errs holds at most the error about a second document, which comes last in
 	// the file.
-	fieldErrs = append(fieldErrs, errs...)
 	if len(fieldErrs) > 0 {
-		return Rule{}, capErrors(file, fieldErrs, dropped)
+		return Rule{}, capErrors(file, append(fieldErrs, errs...), dropped)
 	}
 
 	rule.Source = file
@@ -95,8 +95,11 @@ func Parse(file string, data []byte) (Rule, []*LoadError) {
 	// order of the fields of Rule. Set the positions and sort by them first,
 	// so the cap keeps the first errors in file order.
 	verrs := rule.Validate()
+	addPositions(verrs, fields)
+	// The error about a second document is reported with the validation errors,
+	// so the user fixes both in one round.
+	verrs = append(verrs, errs...)
 	if len(verrs) > 0 {
-		addPositions(verrs, fields)
 		slices.SortStableFunc(verrs, comparePos)
 		return Rule{}, capErrors(file, verrs, 0)
 	}
@@ -153,14 +156,14 @@ func (l *errList) addAll(errs []*LoadError, dropped int) {
 	}
 }
 
-// isNull reports whether n is a null scalar: ~, null or an empty value.
-func isNull(n *yaml.Node) bool {
-	return n.Kind == yaml.ScalarNode && n.ShortTag() == "!!null"
-}
-
 // total returns the number of errors added, kept or not.
 func (l *errList) total() int {
 	return len(l.errs) + l.dropped
+}
+
+// isNull reports whether n is a null scalar: ~, null or an empty value.
+func isNull(n *yaml.Node) bool {
+	return n.Kind == yaml.ScalarNode && n.ShortTag() == "!!null"
 }
 
 // readDocument decodes the first YAML document of data into a node tree and
@@ -208,8 +211,8 @@ type frame struct {
 	depth int
 }
 
-// checkTree walks the whole tree below root and rejects anchors, aliases, a
-// tree that is too deep and a tree with too many nodes. Aliases are the way to
+// checkTree walks the whole tree below root and rejects anchors, aliases,
+// explicit tags, a tree that is too deep and a tree with too many nodes. Aliases are the way to
 // build an alias bomb (a small file that expands to a huge value), so the
 // parser forbids them. It returns the first bad node and a fixed error. The
 // walk uses its own stack instead of recursion, and the caps bound its work.
@@ -228,6 +231,10 @@ func checkTree(root *yaml.Node) (*yaml.Node, error) {
 			return f.node, errTooDeep
 		case f.node.Kind == yaml.AliasNode || f.node.Anchor != "":
 			return f.node, errAnchors
+		case f.node.Style&yaml.TaggedStyle != 0:
+			// A tag such as !!binary can hide the real value of a field from
+			// a person who reads the file.
+			return f.node, errTagged
 		}
 		for i := len(f.node.Content) - 1; i >= 0; i-- {
 			stack = append(stack, frame{node: f.node.Content[i], depth: f.depth + 1})
@@ -258,7 +265,7 @@ func checkKeys(file, prefix string, m *yaml.Node, allowed []string, out *errList
 		name := key.Value
 		switch {
 		case key.Kind != yaml.ScalarNode || key.ShortTag() != "!!str":
-			out.add(file, ReasonInvalidYAML, key, "", errKeyNotStr)
+			out.add(file, ReasonInvalidYAML, key, strings.TrimSuffix(prefix, "."), errKeyNotStr)
 		case seen[name]:
 			out.add(file, ReasonDuplicateField, key, prefix+name, nil)
 		case allowed != nil && !slices.Contains(allowed, name):

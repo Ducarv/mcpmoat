@@ -150,9 +150,10 @@ func (c *checker) validateMatch(m Match) {
 	c.checkList("match.any_regex", m.AnyRegex, maxPatternItems, maxPatternBytes, nil)
 	c.checkList("match.all_regex", m.AllRegex, maxPatternItems, maxPatternBytes, nil)
 	c.checkList("match.keywords", m.Keywords, maxPatternItems, maxPatternBytes, nil)
-	// A blank heuristic is an error, not a match key: it gets its own error
-	// (so "match" is not also reported missing) and it never counts as a real
-	// heuristic for the params check below.
+	// A heuristic with only white space is an error, not a match key: it gets
+	// its own error (so "match" is not also reported missing) and it never
+	// counts as a real heuristic for the params check below. An empty or null
+	// heuristic counts as absent, like any other empty optional text.
 	if m.Heuristic != "" {
 		c.checkNonBlankBytes("match.heuristic", m.Heuristic, maxHeuristicBytes)
 	}
@@ -239,10 +240,10 @@ func (c *checker) checkList(field string, items []string, maxItems, maxBytes int
 	}
 }
 
-// checkRunes checks that s is valid UTF-8 and has at most limit runes. It
-// returns true when s passes. An empty s passes.
-func (c *checker) checkRunes(field, s string, limit int) bool {
-	return c.checkString(field, s, utf8.RuneCountInString(s), limit)
+// checkRunes checks that s is valid UTF-8 and has at most limit runes. An empty
+// s passes.
+func (c *checker) checkRunes(field, s string, limit int) {
+	c.checkString(field, s, utf8.RuneCountInString(s), limit)
 }
 
 // checkBytes checks that s is valid UTF-8 and has at most limit bytes. It

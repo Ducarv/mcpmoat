@@ -154,11 +154,6 @@ func builtinShouldMatchTexts(rs []Rule) *fakeMatcher {
 	return m
 }
 
-// builtinFuncMatcher turns a function into a Matcher, for the fake compilers below.
-type builtinFuncMatcher func(string) (bool, error)
-
-func (f builtinFuncMatcher) Match(text string) (bool, error) { return f(text) }
-
 func TestRunBuiltinCasesWithFakeMatcher(t *testing.T) {
 	t.Parallel()
 	good := func(rs []Rule) Compiler {
@@ -193,14 +188,14 @@ func TestRunBuiltinCasesWithFakeMatcher(t *testing.T) {
 		{
 			name: "matches everything",
 			c: func(Match, Target) (Matcher, error) {
-				return builtinFuncMatcher(func(string) (bool, error) { return true, nil }), nil
+				return funcMatcher(func(string) (bool, error) { return true, nil }), nil
 			},
 			want: []string{rs[0].ID, string(KindShouldNotMatch), snm.Text},
 		},
 		{
 			name: "matcher error",
 			c: func(Match, Target) (Matcher, error) {
-				return builtinFuncMatcher(func(string) (bool, error) { return false, errors.New("boom") }), nil
+				return funcMatcher(func(string) (bool, error) { return false, errors.New("boom") }), nil
 			},
 			want: []string{rs[0].ID, "boom"},
 		},

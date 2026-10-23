@@ -4,6 +4,7 @@ import (
 	"cmp"
 	"errors"
 	"slices"
+	"strings"
 )
 
 // maxRules is the largest number of rules (built-in and external together)
@@ -35,10 +36,13 @@ type Set struct {
 // order. It returns at most maxSetErrors of them. If there are more, the last
 // error has ReasonTooManyErrors and says how many were not shown. If there is
 // any error, the returned *Set is nil.
-// IDs are compared exactly, so "A" and "a" are different IDs.
+// Two IDs in the same list are duplicates only when they are equal, so "A" and
+// "a" are different IDs.
 //
-// When an external rule has the ID of a built-in rule, the built-in rule stays
-// and the external rule is reported with ReasonBuiltinIDClash.
+// When an external rule has the ID of a built-in rule, in any case, the
+// built-in rule stays and the external rule is reported with
+// ReasonBuiltinIDClash. An ID that differs only in case would look like the
+// built-in ID in a report.
 func NewSet(builtin, external []Rule) (*Set, []*LoadError) {
 	if len(builtin)+len(external) > maxRules {
 		return nil, []*LoadError{newLoadError(setLabel, ReasonTooManyRules)}
@@ -65,10 +69,21 @@ func NewSet(builtin, external []Rule) (*Set, []*LoadError) {
 		builtinByID[r.ID] = r
 	}
 
+	// builtinByFold maps an ID in lower case to the first built-in rule that
+	// uses it. An external ID that differs from a built-in ID only in case
+	// would look like it in a report, so it clashes too.
+	builtinByFold := make(map[string]Rule, len(builtin))
+	for _, r := range builtin {
+		key := strings.ToLower(r.ID)
+		if _, ok := builtinByFold[key]; !ok {
+			builtinByFold[key] = r
+		}
+	}
+
 	// externalByID maps an ID to the first external rule that uses it.
 	externalByID := make(map[string]Rule, len(external))
 	for _, r := range external {
-		if b, ok := builtinByID[r.ID]; ok {
+		if b, ok := builtinByFold[strings.ToLower(r.ID)]; ok {
 			add(r, b, ReasonBuiltinIDClash)
 			continue
 		}

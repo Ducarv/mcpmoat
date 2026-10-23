@@ -23,6 +23,11 @@ func (f *fakeMatcher) Match(text string) (bool, error) {
 	return f.hits[text], nil
 }
 
+// funcMatcher turns a function into a Matcher, for fake compilers.
+type funcMatcher func(string) (bool, error)
+
+func (f funcMatcher) Match(text string) (bool, error) { return f(text) }
+
 // documentedRule returns a rule that meets every CheckDocumented requirement.
 func documentedRule() Rule {
 	return Rule{

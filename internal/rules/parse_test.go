@@ -455,7 +455,76 @@ func TestParseKeyErrors(t *testing.T) {
 		{
 			name: "non-string key in match",
 			data: buildParseRule(map[string]string{"match": "match:\n  any_regex:\n    - 'bad'\n  2: x\n"}, ""),
-			want: []parseWant{{reason: ReasonInvalidYAML, line: 8, col: 3, err: errKeyNotStr}},
+			want: []parseWant{{reason: ReasonInvalidYAML, field: "match", line: 8, col: 3, err: errKeyNotStr}},
+		},
+		{
+			name: "non-string key in match in flow style",
+			data: buildParseRule(map[string]string{"match": "match: {1: a}\n"}, ""),
+			want: []parseWant{{reason: ReasonInvalidYAML, field: "match", line: 5, col: 9, err: errKeyNotStr}},
+		},
+	})
+}
+
+// TestParseExplicitTags checks that a node with an explicit YAML tag is
+// refused, wherever it is. A tag such as !!binary can hide the real value of a
+// field from a person who reads the file.
+func TestParseExplicitTags(t *testing.T) {
+	t.Parallel()
+	tagged := func(line, col int) []parseWant {
+		return []parseWant{{reason: ReasonInvalidYAML, line: line, col: col, err: errTagged}}
+	}
+	runParseCases(t, []parseCase{
+		{
+			name: "binary tag on id",
+			data: buildParseRule(map[string]string{"id": "id: !!binary aGVsbG8=\n"}, ""),
+			want: tagged(1, 5),
+		},
+		{
+			name: "custom tag on title",
+			data: buildParseRule(map[string]string{"title": "title: !custom t\n"}, ""),
+			want: tagged(2, 8),
+		},
+		{
+			name: "str tag on severity",
+			data: buildParseRule(map[string]string{"severity": "severity: !!str high\n"}, ""),
+			want: tagged(3, 11),
+		},
+		{
+			name: "tag on a key",
+			data: buildParseRule(nil, "!!str extra: 1\n"),
+			want: tagged(8, 1),
+		},
+		{
+			name: "tag on a mapping",
+			data: buildParseRule(map[string]string{"match": "match: !!map\n  any_regex: [bad]\n"}, ""),
+			want: tagged(5, 8),
+		},
+		{
+			name: "tag on a sequence",
+			data: buildParseRule(map[string]string{"match": "match:\n  any_regex: !!seq\n    - bad\n"}, ""),
+			want: tagged(6, 14),
+		},
+		{
+			name: "tag deep in a list",
+			data: buildParseRule(nil, "should_match: [!!null x]\n"),
+			want: tagged(8, 16),
+		},
+		{
+			name: "tag in a second list item",
+			data: buildParseRule(nil, "should_not_match:\n  - ok\n  - !custom no\n"),
+			want: tagged(10, 5),
+		},
+		{
+			name: "tag error comes before the multiple documents error",
+			data: buildParseRule(map[string]string{"id": "id: !!str x\n"}, "") + "---\nid: y\n",
+			want: []parseWant{
+				{reason: ReasonInvalidYAML, line: 1, col: 5, err: errTagged},
+				{reason: ReasonMultipleDocuments, line: 8, col: 1},
+			},
+		},
+		{
+			name: "a rule with no tags still loads",
+			data: buildParseRule(nil, "should_match: [a, b]\n"),
 		},
 	})
 }
@@ -957,6 +1026,59 @@ func TestParseMatchForms(t *testing.T) {
 	})
 }
 
+// TestParseSecondDocumentWithOtherErrors checks that the error about a second
+// document comes together with the validation errors of the first one. The
+// errors are in file order. An error for a missing field has no position, so it
+// comes first.
+func TestParseSecondDocumentWithOtherErrors(t *testing.T) {
+	t.Parallel()
+	noSeverity := map[string]string{"severity": ""}
+	runParseCases(t, []parseCase{
+		{
+			// Lines: id 1, title 2, target 3, match 4 to 6, separator 7.
+			name: "missing field and a second document",
+			data: buildParseRule(noSeverity, "---\nid: other\n"),
+			want: []parseWant{
+				{reason: ReasonMissingField, field: "severity"},
+				{reason: ReasonMultipleDocuments, line: 7, col: 1},
+			},
+		},
+		{
+			name: "missing field and a syntax error in the second document",
+			data: buildParseRule(noSeverity, "---\n[unclosed\n"),
+			want: []parseWant{
+				{reason: ReasonMissingField, field: "severity"},
+				{reason: ReasonInvalidYAML, err: errParseSome},
+			},
+		},
+		{
+			name: "bad value and a second document",
+			data: buildParseRule(map[string]string{"severity": "severity: bogus\n"}, "---\nid: other\n"),
+			want: []parseWant{
+				{reason: ReasonInvalidValue, field: "severity", line: 3, col: 11, err: errParseSome},
+				{reason: ReasonMultipleDocuments, line: 8, col: 1},
+			},
+		},
+		{
+			name: "missing field, bad value and a second document",
+			data: buildParseRule(map[string]string{"id": "", "severity": "severity: bogus\n"}, "---\nid: other\n"),
+			want: []parseWant{
+				{reason: ReasonMissingField, field: "id"},
+				{reason: ReasonInvalidValue, field: "severity", line: 2, col: 11, err: errParseSome},
+				{reason: ReasonMultipleDocuments, line: 7, col: 1},
+			},
+		},
+		{
+			name: "unknown field is returned first, with the second document",
+			data: buildParseRule(noSeverity, "colour: red\n---\nid: other\n"),
+			want: []parseWant{
+				{reason: ReasonUnknownField, field: "colour", line: 7, col: 1},
+				{reason: ReasonMultipleDocuments, line: 8, col: 1},
+			},
+		},
+	})
+}
+
 func TestParseMatchParams(t *testing.T) {
 	t.Parallel()
 	// head is the match section up to the params key. "params:" is on line 7.
@@ -968,22 +1090,22 @@ func TestParseMatchParams(t *testing.T) {
 		{
 			name: "null key",
 			data: build("\n    ~: c\n"),
-			want: []parseWant{{reason: ReasonInvalidYAML, line: 8, col: 5, err: errKeyNotStr}},
+			want: []parseWant{{reason: ReasonInvalidYAML, field: "match.params", line: 8, col: 5, err: errKeyNotStr}},
 		},
 		{
 			name: "null key in explicit form",
 			data: build("\n    ? ~\n    : c\n"),
-			want: []parseWant{{reason: ReasonInvalidYAML, line: 8, col: 7, err: errKeyNotStr}},
+			want: []parseWant{{reason: ReasonInvalidYAML, field: "match.params", line: 8, col: 7, err: errKeyNotStr}},
 		},
 		{
 			name: "int key",
 			data: build("\n    1: c\n"),
-			want: []parseWant{{reason: ReasonInvalidYAML, line: 8, col: 5, err: errKeyNotStr}},
+			want: []parseWant{{reason: ReasonInvalidYAML, field: "match.params", line: 8, col: 5, err: errKeyNotStr}},
 		},
 		{
 			name: "bool key",
 			data: build("\n    true: c\n"),
-			want: []parseWant{{reason: ReasonInvalidYAML, line: 8, col: 5, err: errKeyNotStr}},
+			want: []parseWant{{reason: ReasonInvalidYAML, field: "match.params", line: 8, col: 5, err: errKeyNotStr}},
 		},
 		{
 			name: "repeated key",
@@ -994,7 +1116,7 @@ func TestParseMatchParams(t *testing.T) {
 			name: "good key after a bad key is still checked",
 			data: build("\n    1: c\n    a: 1\n    a: 2\n"),
 			want: []parseWant{
-				{reason: ReasonInvalidYAML, line: 8, col: 5, err: errKeyNotStr},
+				{reason: ReasonInvalidYAML, field: "match.params", line: 8, col: 5, err: errKeyNotStr},
 				{reason: ReasonDuplicateField, field: "match.params.a", line: 10, col: 5},
 			},
 		},
