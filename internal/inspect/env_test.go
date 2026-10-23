@@ -498,6 +498,13 @@ func TestNoAutoInstallEnv(t *testing.T) {
 			want: []string{"PATH=/p", "npm_config_yes=true"},
 		},
 		{
+			// npm matches env names with ASCII case folding only, so it
+			// ignores U+017F (long s). The entry must not stop the default.
+			name: "non-ASCII look-alike name does not count",
+			env:  []string{"npm_config_ye\u017f=false"},
+			want: []string{"npm_config_yes=false", "npm_config_ye\u017f=false"},
+		},
+		{
 			name: "declared upper case value wins",
 			env:  []string{"NPM_CONFIG_YES=true", "PATH=/p"},
 			want: []string{"NPM_CONFIG_YES=true", "PATH=/p"},

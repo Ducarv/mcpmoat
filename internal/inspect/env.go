@@ -152,9 +152,14 @@ func noAutoInstallEnv(env []string) []string {
 }
 
 // isNpmYesEntry reports whether the name of the "name=value" entry equals
-// npm_config_yes in any letter case. It reads only the name.
+// npm_config_yes in any ASCII letter case, as npm matches it. It reads only
+// the name. strings.EqualFold also folds some non-ASCII letters, such as
+// U+017F to "s", but such a letter is more than one byte, so the length check
+// rules it out: npm ignores "npm_config_yeſ", so it must not stop the
+// npm_config_yes=false entry.
 func isNpmYesEntry(entry string) bool {
-	return strings.EqualFold(envName(entry), npmYesName)
+	name := envName(entry)
+	return len(name) == len(npmYesName) && strings.EqualFold(name, npmYesName)
 }
 
 // envName returns the name part of a "name=value" entry: the text before the
