@@ -46,7 +46,8 @@
 // regex \s does not match (VT, NEL, the no-break space and the other Unicode
 // spaces, U+2028, U+2029, the Braille blank U+2800, and control characters
 // such as U+001F) becomes U+0020, so a regex sees it as a space and cannot
-// match the rune itself. When the text holds invisible runes, it is
+// match the rune itself. An ANSI escape sequence (CSI or OSC), which a
+// terminal runs and does not show, also becomes one space. When the text holds invisible runes, it is
 // also matched in a second form where each run of invisible runes is one
 // space, so an invisible rune can split neither a word nor the space between
 // two words. A rule matches when it matches in one form, so such a text costs
