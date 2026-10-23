@@ -43,12 +43,6 @@ var (
 	errNullItem    = errors.New("list item must not be empty")
 )
 
-// caseErrors are the fixed errors of Case.UnmarshalYAML. When a field fails
-// with one of them, the parser shows it so the user sees what is wrong.
-func caseErrors() []error {
-	return []error{errCaseShape, errCaseKey, errCaseText, errCaseScalar}
-}
-
 // matchKeys returns the allowed keys of the match mapping. It returns a new
 // slice on each call, so callers cannot change shared state.
 func matchKeys() []string {

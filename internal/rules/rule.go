@@ -101,6 +101,12 @@ var (
 	errCaseScalar = errors.New("case values must be strings")
 )
 
+// caseErrors are the fixed errors of Case.UnmarshalYAML. When a field fails
+// with one of them, the parser shows it so the user sees what is wrong.
+func caseErrors() []error {
+	return []error{errCaseShape, errCaseKey, errCaseText, errCaseScalar}
+}
+
 // UnmarshalYAML decodes a Case from a plain string or from a mapping with
 // only the keys text and note. yaml.v3 calls this method by itself when it
 // decodes a Case.

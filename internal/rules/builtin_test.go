@@ -143,17 +143,13 @@ func TestBuiltinRulesCases(t *testing.T) {
 	runBuiltinCases(t, rs, c)
 }
 
-// textSetMatcher reports a match for the texts in its set and for no other text.
-type textSetMatcher map[string]bool
-
-func (f textSetMatcher) Match(text string) (bool, error) { return f[text], nil }
-
-// builtinShouldMatchTexts collects the should_match texts of rs.
-func builtinShouldMatchTexts(rs []Rule) textSetMatcher {
-	m := textSetMatcher{}
+// builtinShouldMatchTexts returns a fake matcher that matches the should_match
+// texts of rs and no other text.
+func builtinShouldMatchTexts(rs []Rule) *fakeMatcher {
+	m := &fakeMatcher{hits: map[string]bool{}}
 	for _, r := range rs {
 		for _, c := range r.ShouldMatch {
-			m[c.Text] = true
+			m.hits[c.Text] = true
 		}
 	}
 	return m
@@ -192,7 +188,7 @@ func TestRunBuiltinCasesWithFakeMatcher(t *testing.T) {
 	}{
 		{
 			name: "matches nothing",
-			c:    func(Match, Target) (Matcher, error) { return textSetMatcher{}, nil },
+			c:    func(Match, Target) (Matcher, error) { return &fakeMatcher{}, nil },
 			want: []string{rs[0].ID, string(KindShouldMatch), sm.Text},
 		},
 		{
