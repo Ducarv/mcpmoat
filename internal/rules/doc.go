@@ -42,25 +42,32 @@
 // Before regex and keyword matching, the text is normalized: invisible runes
 // (zero-width, bidi, tag and other format characters) are removed, and the
 // text is put in Unicode form NFC. When the text holds invisible runes, it is
-// also matched in a second form where each invisible rune is a space, so an
-// invisible rune can split neither a word nor the space between two words. A
-// rule matches when it matches in one form, so such a text costs twice as
-// much to match. The form is not NFKC, so fullwidth letters
-// and homoglyphs (for example Cyrillic U+0430 for Latin "a") are not folded.
+// also matched in a second form where each run of invisible runes is one
+// space, so an invisible rune can split neither a word nor the space between
+// two words. A rule matches when it matches in one form, so such a text costs
+// twice as much to match.
 //
 // A regex reads only this normalized text. So a regex cannot match an
 // invisible rune (use the invisible_unicode heuristic for that), and a
 // pattern must be written in NFC: a pattern with a letter and a separate
 // combining mark does not match the composed letter. The should_match cases
-// of a rule (NFR-05) catch such a pattern.
+// of a rule (NFR-05) catch such a pattern. The form is not NFKC, so a regex
+// does not see fullwidth or mathematical letters as plain letters.
 //
-// Keywords are normalized in the same way. For keywords only, the combining
-// marks (category M) are then dropped from the keyword and the text, so a
-// mark cannot hide a keyword, and accents are folded: "cafe" matches "caf" +
-// U+00E9. U+2800 (braille blank) counts as white space
-// between the words of a keyword. A keyword matches without regard to case,
-// and only as a whole word, with Unicode word edges. A regex gets no
-// automatic (?i): write it in the pattern when you need it.
+// Keywords are normalized in the same way. For keywords only, the keyword and
+// the text are then put in the compatibility form NFKC and lose their
+// combining marks (category M). So a mark cannot hide a keyword, fullwidth
+// and mathematical letters match the plain letters, and accents are folded:
+// "cafe" matches "caf" + U+00E9. Homoglyphs from other scripts (for example
+// Cyrillic U+0430 for Latin "a") are not folded.
+//
+// Any run of white space, or U+2800 (braille blank), matches the space
+// between the words of a keyword. Punctuation does not: the keyword "ignore
+// previous" does not match "ignore-previous"; write a regex for such
+// variants. A keyword matches without regard to case, and only as a whole
+// word, with Unicode word edges. A keyword is compiled to a regex, so a very
+// long keyword can fail the instruction cap. A regex gets no automatic (?i):
+// write it in the pattern when you need it.
 //
 // # Heuristics and hits
 //

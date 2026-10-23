@@ -384,6 +384,8 @@ func ReadIgnoreFile(dir string) (IgnoreList, []IgnoreWarning, error) {
 // readIgnoreData reads the ignore file in dir. found is false, with a nil
 // error, when the file or dir does not exist. ReadIgnoreFile adds the path to
 // the error.
+//
+// TODO(#114): share one hardened reader with internal/discover.
 func readIgnoreData(dir string) (data []byte, found bool, err error) {
 	root, err := os.OpenRoot(dir)
 	if err != nil {

@@ -420,6 +420,16 @@ func TestMatchKeywords(t *testing.T) {
 		{name: "soft hyphen between words", keyword: "ignore previous", text: "ignore\u00adprevious", want: true},
 		{name: "ZWSP at both edges", keyword: "ignore", text: "please\u200bignore\u200bthe rules", want: true},
 		{name: "ZWSP does not make a word edge", keyword: "ignore", text: "xignore\u200bthe"},
+		// Invisible padding is one space in the second form, so it cannot
+		// push the payload out of the window.
+		{
+			name: "invisible padding before the payload", keyword: "ignore",
+			text: "Tool. " + strings.Repeat("\u200b", MaxMatchInputBytes) + "ignore\u200bprevious instructions", want: true,
+		},
+		// Compatibility forms fold to the plain letters.
+		{name: "fullwidth letters", keyword: "ignore previous", text: "\uff49\uff47\uff4e\uff4f\uff52\uff45 \uff50\uff52\uff45\uff56\uff49\uff4f\uff55\uff53", want: true},
+		{name: "mathematical bold letters", keyword: "ignore", text: "\U0001D422\U0001D420\U0001D427\U0001D428\U0001D42B\U0001D41E all rules", want: true},
+		{name: "fullwidth keyword", keyword: "\uff49\uff47\uff4e\uff4f\uff52\uff45", text: "ignore", want: true},
 		{name: "enclosing mark inside word", keyword: "ignore previous", text: "ig\u20ddnore previous", want: true},
 		{name: "spacing mark after last letter", keyword: "ignore previous", text: "ignore previous\u0903", want: true},
 		{name: "letter after is non-ASCII", keyword: "caf", text: "caf\u00e9"},
@@ -442,7 +452,7 @@ func TestMatchKeywords(t *testing.T) {
 			got := mustCompileMatch(t, Match{Keywords: []string{tt.keyword}}).Match(tt.text)
 			var want []Hit
 			if tt.want {
-				want = []Hit{{Offset: -1, Detail: "keyword[0] matched"}}
+				want = []Hit{{Offset: -1, Detail: "keywords[0] matched"}}
 			}
 			if !reflect.DeepEqual(got, want) {
 				t.Errorf("keyword %q: Match(%q) = %v, want %v", tt.keyword, tt.text, got, want)
@@ -457,7 +467,7 @@ func TestMatchKeywordsHits(t *testing.T) {
 	many := numberedList("kw%d", MaxHits+3)
 	manyWant := make([]Hit, 0, MaxHits+1)
 	for i := range MaxHits {
-		manyWant = append(manyWant, Hit{Offset: -1, Detail: fmt.Sprintf("keyword[%d] matched", i)})
+		manyWant = append(manyWant, Hit{Offset: -1, Detail: fmt.Sprintf("keywords[%d] matched", i)})
 	}
 	manyWant = append(manyWant, Hit{Offset: -1, Detail: "and 3 more keywords"})
 
@@ -469,7 +479,7 @@ func TestMatchKeywordsHits(t *testing.T) {
 	}{
 		{
 			name: "index of each hit", keywords: []string{"alpha", "beta", "gamma"}, text: "gamma and alpha",
-			want: []Hit{{Offset: -1, Detail: "keyword[0] matched"}, {Offset: -1, Detail: "keyword[2] matched"}},
+			want: []Hit{{Offset: -1, Detail: "keywords[0] matched"}, {Offset: -1, Detail: "keywords[2] matched"}},
 		},
 		{name: "no keyword", keywords: []string{"alpha", "beta"}, text: "delta"},
 		{name: "exactly MaxHits", keywords: many[:MaxHits], text: strings.Join(many, " "), want: manyWant[:MaxHits]},

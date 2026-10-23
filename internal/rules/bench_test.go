@@ -205,8 +205,8 @@ func TestMatch10MBCorrect(t *testing.T) {
 
 	const early = "ignore previous" // planted in the first KiB
 	const late = "id_rsa"           // planted after the cap
-	earlyHit := fmt.Sprintf("keyword[%d] matched", slices.Index(benchKeywords, early))
-	lateHit := fmt.Sprintf("keyword[%d] matched", slices.Index(benchKeywords, late))
+	earlyHit := fmt.Sprintf("keywords[%d] matched", slices.Index(benchKeywords, early))
+	lateHit := fmt.Sprintf("keywords[%d] matched", slices.Index(benchKeywords, late))
 	filler := benchText(benchTextSize, 0)
 	zwspAt := len(filler) - 100
 	for !utf8.RuneStart(filler[zwspAt]) {

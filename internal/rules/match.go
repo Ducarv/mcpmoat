@@ -196,7 +196,7 @@ func (m *Matcher) Match(text string) []Hit {
 		var l hitList
 		for i, re := range m.regexps {
 			if matchesAny(re, forms) && l.keep(NoOffset) {
-				l.hits = append(l.hits, Hit{Offset: NoOffset, Detail: fmt.Sprintf("keyword[%d] matched", i)})
+				l.hits = append(l.hits, Hit{Offset: NoOffset, Detail: fmt.Sprintf("keywords[%d] matched", i)})
 			}
 		}
 		return l.result("keywords")
@@ -253,7 +253,7 @@ func compileRegexList(field string, list []string, build func(entry, s string) (
 // too complex fails early, and the error gives the sum at that point.
 func checkTotal(field string, total int) error {
 	if total > maxTotalInsts {
-		return &FieldError{Field: field, Msg: fmt.Sprintf("regexes are too complex in total: %d instructions, over the limit of %d", total, maxTotalInsts)}
+		return &FieldError{Field: field, Msg: fmt.Sprintf("too complex in total: %d regex instructions, over the limit of %d", total, maxTotalInsts)}
 	}
 	return nil
 }
@@ -366,7 +366,7 @@ func compileRegex(field, expr string) (*regexp.Regexp, int, error) {
 		return nil, 0, regexError(field, err)
 	}
 	if insts > maxProgInsts {
-		return nil, 0, &FieldError{Field: field, Msg: fmt.Sprintf("regex is too complex: %d instructions, over the limit of %d", insts, maxProgInsts)}
+		return nil, 0, &FieldError{Field: field, Msg: fmt.Sprintf("too complex: %d regex instructions, over the limit of %d", insts, maxProgInsts)}
 	}
 	// A regex that can match without reading a rune, such as a* or \b, can
 	// match at many places in almost any text, so the rule would fire on

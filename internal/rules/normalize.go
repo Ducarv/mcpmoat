@@ -52,9 +52,11 @@ func isInvisible(r rune) bool {
 //
 // The first form is normalizeForMatch(s): the invisible runes are dropped, so
 // "ign" + ZWSP + "ore" is "ignore". When s holds an invisible rune in the
-// part that normalizeForMatch reads, the second form replaces each invisible
-// rune with a space instead, so "ignore" + ZWSP + "previous" is "ignore
-// previous" and a keyword edge next to a ZWSP still holds. A text that uses
+// part that normalizeForMatch reads, the second form replaces each run of
+// invisible runes with one space instead, so "ignore" + ZWSP + "previous" is
+// "ignore previous" and a keyword edge next to a ZWSP still holds. One space
+// for a whole run means that invisible padding cannot push a payload out of
+// the MaxMatchInputBytes window of this form either. A text that uses
 // invisible runes both inside a word and between words defeats both forms;
 // the invisible_unicode heuristic flags it.
 //
@@ -101,8 +103,8 @@ func normalizeForMatch(s string) string {
 }
 
 // normalizeInvisible runs the steps of normalizeForMatch, but replaces each
-// invisible rune with repl. A repl of -1 drops the rune, as in
-// normalizeForMatch.
+// run of invisible runes with repl (see replaceInvisible). A repl of -1 drops
+// the runes, as in normalizeForMatch.
 func normalizeInvisible(s string, repl rune) string {
 	s = cutAtRune(s, maxRawScanBytes)
 	s = replaceInvisible(s, repl)
@@ -111,39 +113,67 @@ func normalizeInvisible(s string, repl rune) string {
 	return cutAtRune(replaceInvisible(s, repl), MaxMatchInputBytes)
 }
 
-// foldMarks removes the combining marks (category M: non-spacing, spacing
-// and enclosing) from s, which comes from normalizeForMatch. The keyword
-// matcher applies it to the keyword and to the text, so a mark cannot hide a
-// keyword: "ig" + U+0336 + "nore" and "previou" + U+015B (s with acute) still
-// match "ignore previous". It also folds accents, so the keyword "caf" +
-// U+00E9 matches "cafe", and in scripts such as Devanagari it drops the vowel
-// signs. Regexes do not get it: their patterns are not folded.
+// foldMarks folds s, which comes from normalizeForMatch, for the keyword
+// matcher. It applies the compatibility forms of Unicode (NFKD and NFKC) and
+// removes the combining marks (category M: non-spacing, spacing and
+// enclosing). The keyword matcher applies it to the keyword and to the text,
+// so:
 //
-// It splits each letter from its marks (NFD), drops the marks, and joins the
-// rest again (NFC). The NFC step can add a CGJ (see normalizeForMatch),
-// so the invisible runes are dropped again. The result is cut to
-// MaxMatchInputBytes again, so the cost bound in match.go holds whatever the
-// Unicode tables do.
+//   - a mark cannot hide a keyword: "ig" + U+0336 + "nore" and "previou" +
+//     U+015B (s with acute) still match "ignore previous";
+//   - fullwidth letters (U+FF49 for "i") and mathematical letters (U+1D422
+//     for bold "i") match the plain letters;
+//   - accents are folded, so the keyword "caf" + U+00E9 matches "cafe", and in
+//     scripts such as Devanagari the vowel signs are dropped.
+//
+// Regexes do not get it: their patterns are not folded. Homoglyphs from other
+// scripts (Cyrillic U+0430 for Latin "a") are not folded either.
+//
+// It splits each rune into its compatibility parts (NFKD), drops the marks,
+// and joins the rest again (NFKC). The NFKC step can add a CGJ (see
+// normalizeForMatch), so the invisible runes are dropped again. The result is
+// cut to MaxMatchInputBytes again, so the cost bound in match.go holds. A
+// ligature such as U+FDFA becomes many letters, so a text of them fills the
+// window sooner; such a text is long and visible.
 func foldMarks(s string) string {
 	s = strings.Map(func(r rune) rune {
 		if unicode.Is(unicode.M, r) {
 			return -1
 		}
 		return r
-	}, norm.NFD.String(s))
-	return cutAtRune(replaceInvisible(norm.NFC.String(s), -1), MaxMatchInputBytes)
+	}, norm.NFKD.String(s))
+	return cutAtRune(replaceInvisible(norm.NFKC.String(s), -1), MaxMatchInputBytes)
 }
 
-// replaceInvisible returns s with each rune for which isInvisible is true
-// replaced by repl. strings.Map drops a rune when the mapping function
-// returns -1, so a repl of -1 drops the invisible runes.
+// replaceInvisible returns s with each run of runes for which isInvisible is
+// true replaced by one repl. A repl of -1 drops the runes. strings.Map drops
+// a rune when the mapping function returns -1.
+//
+// Invalid UTF-8 becomes U+FFFD, as with strings.Map.
 func replaceInvisible(s string, repl rune) string {
-	return strings.Map(func(r rune) rune {
+	if repl < 0 {
+		return strings.Map(func(r rune) rune {
+			if isInvisible(r) {
+				return -1
+			}
+			return r
+		}, s)
+	}
+	var b strings.Builder
+	b.Grow(len(s))
+	inRun := false
+	for _, r := range s {
 		if isInvisible(r) {
-			return repl
+			if !inRun {
+				b.WriteRune(repl)
+			}
+			inRun = true
+			continue
 		}
-		return r
-	}, s)
+		inRun = false
+		b.WriteRune(r)
+	}
+	return b.String()
 }
 
 // cutAtRune returns at most the first n bytes of s. It never splits a

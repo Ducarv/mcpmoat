@@ -287,6 +287,9 @@ func TestFoldMarks(t *testing.T) {
 		{name: "spacing mark", in: "ignore\u0903", want: "ignore"},
 		{name: "Devanagari vowel sign", in: "\u0915\u093e", want: "\u0915"},
 		{name: "Hangul syllable kept", in: "\ud55c", want: "\ud55c"},
+		{name: "fullwidth letters", in: "\uff49\uff47\uff4e\uff4f\uff52\uff45", want: "ignore"},
+		{name: "mathematical bold letters", in: "\U0001D422\U0001D420\U0001D427\U0001D428\U0001D42B\U0001D41E", want: "ignore"},
+		{name: "ligature fi", in: "\ufb01le", want: "file"},
 		{name: "plain ASCII unchanged", in: "ignore previous", want: "ignore previous"},
 		{name: "empty", in: "", want: ""},
 	}
@@ -314,6 +317,7 @@ func TestMatchForms(t *testing.T) {
 		{name: "ZWSP inside a word", in: "ign\u200bore", want: []string{"ignore", "ign ore"}},
 		{name: "ZWSP between words", in: "ignore\u200bprevious", want: []string{"ignoreprevious", "ignore previous"}},
 		{name: "Hangul filler between words", in: "ignore\u3164previous", want: []string{"ignoreprevious", "ignore previous"}},
+		{name: "run of invisible runes is one space", in: "a\u200b\u2060\u200bb", want: []string{"ab", "a b"}},
 		{name: "empty", in: "", want: []string{""}},
 	}
 	for _, tt := range tests {
