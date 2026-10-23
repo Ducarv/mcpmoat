@@ -77,10 +77,14 @@ func (e *FieldError) Error() string {
 	return "match." + e.Field + ": " + e.Msg
 }
 
+// NoOffset is the Offset of a Hit that has no place in the raw text.
+const NoOffset = -1
+
 // Hit is one reason why a Matcher matched a text.
 type Hit struct {
-	// Offset is a byte offset in the raw text, or -1 for regex and keyword
-	// hits: they run on the normalized text, so no raw offset is known.
+	// Offset is a byte offset in the raw text, or NoOffset for regex and
+	// keyword hits: they run on the normalized text, so no raw offset is
+	// known.
 	Offset int
 	// Detail is short printable ASCII that mcpmoat builds. It never holds
 	// text from the input.
@@ -130,24 +134,22 @@ func (m Match) Compile() (*Matcher, error) {
 		}
 		return &Matcher{kind: kindHeuristic, heuristic: fn}, nil
 	case m.AnyRegex != nil:
-		res, err := compileRegexList(kindAnyRegex, m.AnyRegex, nil)
-		if err != nil {
-			return nil, err
-		}
-		return &Matcher{kind: kindAnyRegex, regexps: res}, nil
+		return compileRegexMatcher(kindAnyRegex, m.AnyRegex, nil)
 	case m.AllRegex != nil:
-		res, err := compileRegexList(kindAllRegex, m.AllRegex, nil)
-		if err != nil {
-			return nil, err
-		}
-		return &Matcher{kind: kindAllRegex, regexps: res}, nil
+		return compileRegexMatcher(kindAllRegex, m.AllRegex, nil)
 	default:
-		res, err := compileRegexList(kindKeywords, m.Keywords, keywordExpr)
-		if err != nil {
-			return nil, err
-		}
-		return &Matcher{kind: kindKeywords, regexps: res}, nil
+		return compileRegexMatcher(kindKeywords, m.Keywords, keywordExpr)
 	}
+}
+
+// compileRegexMatcher compiles a list of the given kind into a Matcher. See
+// compileRegexList for build.
+func compileRegexMatcher(kind string, list []string, build func(entry, s string) (string, error)) (*Matcher, error) {
+	res, err := compileRegexList(kind, list, build)
+	if err != nil {
+		return nil, err
+	}
+	return &Matcher{kind: kind, regexps: res}, nil
 }
 
 // Match returns the hits of the matcher in text, or nil when it does not
@@ -168,7 +170,7 @@ func (m *Matcher) Match(text string) []Hit {
 		forms := matchForms(text)
 		for i, re := range m.regexps {
 			if matchesAny(re, forms) {
-				return []Hit{{Offset: -1, Detail: fmt.Sprintf("any_regex[%d] matched", i)}}
+				return []Hit{{Offset: NoOffset, Detail: fmt.Sprintf("any_regex[%d] matched", i)}}
 			}
 		}
 		return nil
@@ -181,8 +183,8 @@ func (m *Matcher) Match(text string) []Hit {
 		}
 		var l hitList
 		for i := range m.regexps {
-			if l.keep(-1) {
-				l.hits = append(l.hits, Hit{Offset: -1, Detail: fmt.Sprintf("all_regex[%d] matched", i)})
+			if l.keep(NoOffset) {
+				l.hits = append(l.hits, Hit{Offset: NoOffset, Detail: fmt.Sprintf("all_regex[%d] matched", i)})
 			}
 		}
 		return l.result("patterns")
@@ -193,8 +195,8 @@ func (m *Matcher) Match(text string) []Hit {
 		}
 		var l hitList
 		for i, re := range m.regexps {
-			if matchesAny(re, forms) && l.keep(-1) {
-				l.hits = append(l.hits, Hit{Offset: -1, Detail: fmt.Sprintf("keyword[%d] matched", i)})
+			if matchesAny(re, forms) && l.keep(NoOffset) {
+				l.hits = append(l.hits, Hit{Offset: NoOffset, Detail: fmt.Sprintf("keyword[%d] matched", i)})
 			}
 		}
 		return l.result("keywords")
@@ -247,8 +249,8 @@ func compileRegexList(field string, list []string, build func(entry, s string) (
 }
 
 // checkTotal checks the sum of the program sizes of the regexes of the list
-// named field. The callers call it after each regex, so a list that is too
-// complex fails early, and the error gives the sum at that point.
+// named field. compileRegexList calls it after each regex, so a list that is
+// too complex fails early, and the error gives the sum at that point.
 func checkTotal(field string, total int) error {
 	if total > maxTotalInsts {
 		return &FieldError{Field: field, Msg: fmt.Sprintf("regexes are too complex in total: %d instructions, over the limit of %d", total, maxTotalInsts)}
@@ -282,27 +284,35 @@ func keywordExpr(entry, kw string) (string, error) {
 	for j, w := range words {
 		words[j] = regexp.QuoteMeta(w)
 	}
-	expr := `(?i:` + strings.Join(words, `[\s\v\x{85}\p{Z}\x{2800}]+`) + `)`
+	expr := `(?i:` + strings.Join(words, keywordSpaceClass+`+`) + `)`
 
 	first, _ := utf8.DecodeRuneInString(words[0])
 	if isWordRune(first) {
-		expr = `(?:^|[^\p{L}\p{M}\p{N}_])` + expr
+		expr = `(?:^|[^` + wordRuneClass + `])` + expr
 	}
 	last, _ := utf8.DecodeLastRuneInString(words[len(words)-1])
 	if isWordRune(last) {
-		expr += `(?:$|[^\p{L}\p{M}\p{N}_])`
+		expr += `(?:$|[^` + wordRuneClass + `])`
 	}
 	return expr, nil
 }
 
+// keywordSpaceClass is the regex class of the white space between the words
+// of a keyword. isKeywordSpace is the same set.
+const keywordSpaceClass = `[\s\v\x{85}\p{Z}\x{2800}]`
+
+// wordRuneClass is the content of the regex class of a word rune.
+// isWordRune is the same set.
+const wordRuneClass = `\p{L}\p{M}\p{N}_`
+
 // isKeywordSpace reports whether r separates the words of a keyword. It is
-// the same set as the white-space class in keywordExpr.
+// the same set as keywordSpaceClass.
 func isKeywordSpace(r rune) bool {
 	return unicode.IsSpace(r) || r == '\u2800'
 }
 
 // isWordRune reports whether r is a letter, a mark, a number or '_'. It is
-// the same set as the class [\p{L}\p{M}\p{N}_] in keywordExpr.
+// the same set as wordRuneClass.
 func isWordRune(r rune) bool {
 	return r == '_' || unicode.In(r, unicode.L, unicode.M, unicode.N)
 }

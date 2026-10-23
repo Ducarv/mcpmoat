@@ -4,10 +4,13 @@ import (
 	"errors"
 	"fmt"
 	"reflect"
+	"regexp"
 	"slices"
 	"strings"
 	"sync"
 	"testing"
+	"unicode"
+	"unicode/utf8"
 )
 
 // Invisible and non-ASCII runes are written as Go escape sequences on purpose,
@@ -601,5 +604,28 @@ func TestMatchConcurrent(t *testing.T) {
 	wg.Wait()
 	if want[0] == nil || want[1] == nil || want[2] != nil {
 		t.Errorf("baseline hits = %v, want hit, hit, nil", want)
+	}
+}
+
+// TestKeywordClassesMatchPredicates checks keywordSpaceClass against
+// isKeywordSpace and wordRuneClass against isWordRune, for every rune.
+func TestKeywordClassesMatchPredicates(t *testing.T) {
+	t.Parallel()
+	if testing.Short() {
+		t.Skip("checks all runes")
+	}
+	space := regexp.MustCompile(`^` + keywordSpaceClass + `$`)
+	word := regexp.MustCompile(`^[` + wordRuneClass + `]$`)
+	for r := rune(0); r <= unicode.MaxRune; r++ {
+		if !utf8.ValidRune(r) {
+			continue // surrogates
+		}
+		s := string(r)
+		if got := space.MatchString(s); got != isKeywordSpace(r) {
+			t.Errorf("keywordSpaceClass matches %U = %v, isKeywordSpace = %v", r, got, !got)
+		}
+		if got := word.MatchString(s); got != isWordRune(r) {
+			t.Errorf("wordRuneClass matches %U = %v, isWordRune = %v", r, got, !got)
+		}
 	}
 }
