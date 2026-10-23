@@ -1,0 +1,10 @@
+id: MOAT-T1-003
+title: Tool description tells the model to hide actions from the user
+severity: high
+target: description
+match:
+  any_regex:
+    - '(?i)do not (tell|inform|mention).{0,30}user'
+    - '(?i)without (telling|notifying) the user'
+references:
+  - https://invariantlabs.ai/blog/whatsapp-mcp-exploited

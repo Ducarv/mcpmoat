@@ -1,0 +1,19 @@
+# Test fixture: an example external rule. Not a built-in rule.
+id: MOAT-X-001
+title: Tool description mentions a deprecated or experimental feature
+severity: low
+target: description
+match:
+  keywords:
+    - deprecated
+    - experimental
+risk: The tool description marks the tool as unstable, so the tool may change or break without notice.
+remediation: Check if the server has a stable replacement. Pin the tool and review it again after each update.
+references:
+  - https://example.com/mcpmoat/rules/moat-x-001
+should_match:
+  - This tool is deprecated.
+  - An EXPERIMENTAL way to list files.
+should_not_match:
+  - Lists the files in a folder.
+  - Reads a deprecation notice from the log.
