@@ -25,7 +25,8 @@ const (
 	maxTyposquatNameLen = 128
 
 	// shortTyposquatNameLen is the longest "short" name. Short names allow
-	// one edit, longer names allow two.
+	// one edit. Longer names allow two edits only when at least
+	// minTyposquatNameLen runes follow the prefix that the two names share.
 	shortTyposquatNameLen = 8
 
 	// sameScopeMaxDistance is the largest edit distance that still counts as
@@ -288,14 +289,24 @@ func (t *Typosquat) scopeSquat(c typoCandidate) (string, bool) {
 
 // closeDistance returns the edit distance of a and b and true when it is
 // between 1 and the threshold for these names. The threshold is 1 when the
-// shorter name has at most shortTyposquatNameLen runes, else 2.
+// shorter name has at most shortTyposquatNameLen runes, or when it has fewer
+// than minTyposquatNameLen runes after the prefix the two names share. Else it
+// is 2.
+//
+// A known false negative: two edits that both fall in the last few runes after
+// a shared prefix, such as "mcp-server-fexxh" against "mcp-server-fetch", give
+// no finding. A short tail cannot tell a typo from a different product.
 func closeDistance(a, b string) (int, bool) {
 	la, lb := utf8.RuneCountInString(a), utf8.RuneCountInString(b)
-	if min(la, lb) < minTyposquatNameLen || max(la, lb) > maxTyposquatNameLen {
+	short := min(la, lb)
+	if short < minTyposquatNameLen || max(la, lb) > maxTyposquatNameLen {
 		return 0, false
 	}
 	threshold := 2
-	if min(la, lb) <= shortTyposquatNameLen {
+	// A long shared prefix, such as "mcp-server-", makes two edits in a short
+	// tail look like a typo when they are not.
+	tail := short - commonPrefixRunes(a, b)
+	if short <= shortTyposquatNameLen || tail < minTyposquatNameLen {
 		threshold = 1
 	}
 	if la-lb > threshold || lb-la > threshold {
@@ -303,6 +314,16 @@ func closeDistance(a, b string) (int, bool) {
 	}
 	d := osaDistance(a, b)
 	return d, d >= 1 && d <= threshold
+}
+
+// commonPrefixRunes returns the number of leading runes that a and b share.
+func commonPrefixRunes(a, b string) int {
+	ra, rb := []rune(a), []rune(b)
+	n := 0
+	for n < len(ra) && n < len(rb) && ra[n] == rb[n] {
+		n++
+	}
+	return n
 }
 
 // sameScope reports whether a and b are npm packages in the same scope. A name

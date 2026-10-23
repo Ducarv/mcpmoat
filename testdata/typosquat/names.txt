@@ -1,0 +1,144 @@
+# Typosquat corpus for rule MOAT-T5-001 (threat T5, issue #113).
+#
+# Each line is one case for TestTyposquatCorpus. The test builds a server of the
+# given registry kind and runs the rule with the built-in popular list.
+#
+# Line format (single spaces between fields):
+#   <expect> <registry> <name> [<related>]
+#   expect:   ok  = no finding
+#             hit = exactly one finding whose Related is <related>
+#   registry: npm    = run as npx <name>
+#             pypi   = run as uvx <name>
+#             docker = run as docker run -i <name>
+#             name   = only the server name, no package
+#   related:  required for hit, absent for ok
+# Lines that start with # and empty lines are ignored.
+#
+# Source: the ok names are real packages. They were checked with a registry GET
+# on npm, PyPI and Docker Hub on 2026-10-23. The one exception is
+# mcp-server-tidb: it is a synthetic example from issue #113 and it does not
+# exist on npm or PyPI. The hit names are made-up typos of names in
+# rules/data/popular-servers.txt.
+#
+# An ok line for an accepted gap is a known false negative, not a bug. Do not
+# "fix" it by adding it to a hit group.
+
+# --- ok: real npm packages ---
+ok npm mcp-server-gcp
+ok npm mcp-server-git
+ok npm mcp-server-github
+ok npm mcp-server-gitlab
+ok npm mcp-server-docker
+ok npm mcp-server-aws
+ok npm mcp-server-mysql
+ok npm mcp-server-notion
+ok npm mcp-server-redis
+ok npm gcp-mcp
+ok npm gcp-mcp-server
+ok npm git-mcp-server
+ok npm github-mcp
+ok npm gitlab-mcp
+ok npm aws-mcp
+ok npm docker-mcp
+ok npm notion-mcp
+ok npm redis-mcp
+ok npm slack-mcp
+ok npm linear-mcp
+ok npm jira-mcp
+ok npm kubernetes-mcp-server
+ok npm brave-search-mcp
+ok npm @modelcontextprotocol/server-redis
+ok npm @modelcontextprotocol/server-everart
+ok npm @modelcontextprotocol/server-aws-kb-retrieval
+ok npm @modelcontextprotocol/server-gitlab
+ok npm @supabase/mcp-server-postgrest
+ok npm @mapbox/mcp-devkit-server
+ok npm @browserbasehq/mcp
+ok npm @stripe/agent-toolkit
+ok npm mcp-server-azure
+ok npm mcp-server-gmail
+ok npm mcp-server-airtable
+ok npm mcp-server-chroma
+ok npm mcp-server-linear
+ok npm mcp-server-slack
+ok npm mcp-server-terraform
+ok npm mcp-server-jenkins
+
+# --- ok: real PyPI packages (mcp-server-tidb is synthetic) ---
+ok pypi mcp-server-docker
+ok pypi mcp-server-memory
+ok pypi mcp-server-mysql
+ok pypi mcp-server-notion
+ok pypi mcp-server-postgres
+ok pypi mcp-server-redis
+ok pypi mcp-server-sentry
+ok pypi mcp-server-jira
+ok pypi mcp-server-bigquery
+ok pypi mcp-server-duckdb
+ok pypi mcp-server-mssql
+ok pypi mcp-server-obsidian
+ok pypi mcp-server-openai
+ok pypi mcp-server-oracle
+ok pypi mcp-server-qdrant
+ok pypi mcp-server-reddit
+ok pypi mcp-server-snowflake
+ok pypi mcp-server-spotify
+ok pypi mcp-server-ssh
+ok pypi mcp-server-weather
+ok pypi mcp-server-wikipedia
+ok pypi mcp-server-youtube
+ok pypi mcp-server-tidb
+
+# --- ok: real Docker Hub images ---
+ok docker mcp/git
+ok docker mcp/time
+ok docker mcp/github
+ok docker mcp/gitlab
+ok docker mcp/redis
+ok docker mcp/sqlite
+ok docker mcp/memory
+ok docker mcp/filesystem
+ok docker mcp/puppeteer
+ok docker mcp/slack
+ok docker mcp/sentry
+ok docker mcp/duckduckgo
+
+# --- ok: server name only (synthetic example from issue #113) ---
+ok name mcp-server-gcp
+
+# --- hit: one edit (typo or transposition) in the prefix or the tail ---
+hit pypi mcp-server-fecth mcp-server-fetch
+hit pypi mcp-server-fethc mcp-server-fetch
+hit pypi mcp-server-fetcg mcp-server-fetch
+hit pypi mcp-server-gti mcp-server-git
+hit pypi mcp-server-sqlte mcp-server-sqlite
+hit npm mcp-remot mcp-remote
+hit npm mcp-remtoe mcp-remote
+hit npm @modelcontextprotocol/server-filesytem @modelcontextprotocol/server-filesystem
+hit npm @modelcontextprotocol/server-githbu @modelcontextprotocol/server-github
+hit npm @modelcontextprotocol/server-memroy @modelcontextprotocol/server-memory
+hit npm mcp-server-kubernets mcp-server-kubernetes
+hit pypi mcp-server-sqlit3e mcp-server-sqlite
+hit npm mcp-sevrer-kubernetes mcp-server-kubernetes
+hit npm mcp-server-kuberntees mcp-server-kubernetes
+
+# --- hit: two edits spread out (rule A4: min length > 8 and tail >= 5 runes) ---
+hit pypi mcp-sever-fecth mcp-server-fetch
+hit pypi mcp-sevrer-fecth mcp-server-fetch
+hit npm mcp-sever-kubernets mcp-server-kubernetes
+
+# --- hit: scope squats ---
+hit npm @evil/server-filesystem @modelcontextprotocol/server-filesystem
+hit npm @modelcontextprotocl/server-github @modelcontextprotocol/server-github
+hit npm @modelcontextprotocol/server-githubb @modelcontextprotocol/server-github
+
+# --- hit: server name only and docker images ---
+hit name mcp-server-fecth mcp-server-fetch
+hit docker mcp/fecth mcp/fetch
+hit docker mcp/fetchh mcp/fetch
+
+# --- ok: accepted gaps (rule A4)
+# Two edits, both in the last 4 runes after a shared prefix. The rule allows
+# only one edit here, so these names pass. This is a known false negative. ---
+ok pypi mcp-server-fexxh
+ok npm mcp-server-kubernexez
