@@ -184,6 +184,7 @@ func scanUsage(w io.Writer) {
 	fprintf(tw, "  --no-connect\tList the servers in the configs. Starts no process and opens no connection\n")
 	fprintf(tw, "  --config <file>\tRead only this file (Claude Code JSON, Cursor JSON or Codex TOML); skips auto-discovery\n")
 	fprintf(tw, "  \tA file that is not your own global config is read as an untrusted project file\n")
+	fprintf(tw, "  --rules <dir>\tLoad extra *.yaml and *.yml rules from this folder (not recursive). A rule ID that clashes with a built-in rule is an error\n")
 	fprintf(tw, "  --timeout <duration>\tTime limit for each server, a Go duration such as 10s or 1m30s (default %s)\n", inspect.DefaultTimeout)
 	fprintf(tw, "  --concurrency <n>\tMaximum number of servers inspected at the same time (default %d)\n", inspect.DefaultConcurrency)
 	fprintf(tw, "  \tThe two flags above apply when scan connects to servers. --no-connect ignores them, but still checks them\n")

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"flag"
+	"fmt"
 	"io"
 	"path/filepath"
 	"strings"
@@ -55,20 +56,13 @@ func (c *cli) runScan(_ options, args []string) int {
 	timeout := fs.Duration("timeout", inspect.DefaultTimeout, "")
 	concurrency := fs.Int("concurrency", inspect.DefaultConcurrency, "")
 
-	// fs.Func calls the function once for each time the user gives --config.
-	// An error from it becomes a flag error: exit code 2 with a clear message.
-	// An empty value is refused, so configPath != "" means --config was given.
-	var configPath string
-	fs.Func("config", "", func(value string) error {
-		if configPath != "" {
-			return errors.New("--config given more than once")
-		}
-		if value == "" || isFlagOf(fs, value) {
-			return errors.New("--config needs a file name")
-		}
-		configPath = value
-		return nil
-	})
+	// pathFlag calls fs.Func, which runs the function once for each time the
+	// user gives the flag. An error from it becomes a flag error: exit code 2
+	// with a clear message. An empty value is refused, so a result that is not
+	// "" means the flag was given.
+	var configPath, rulesDir string
+	pathFlag(fs, "config", "a file name", &configPath)
+	pathFlag(fs, "rules", "a folder name", &rulesDir)
 
 	if err := fs.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
@@ -90,6 +84,12 @@ func (c *cli) runScan(_ options, args []string) int {
 	// inspect.Run.
 	if _, err := connectOptions(*timeout, *concurrency); err != nil {
 		return c.usageError("scan", "%v", err)
+	}
+
+	// Load and check the rules in both modes, so a bad rule file gives exit
+	// code 2 also with --no-connect. Scan does not apply the rules yet.
+	if _, ok := c.loadRules(rulesDir); !ok {
+		return exitError
 	}
 
 	if !*noConnect {
@@ -128,11 +128,29 @@ func connectOptions(timeout time.Duration, concurrency int) (inspect.Options, er
 	}
 }
 
+// pathFlag adds a flag to fs that takes one path and stores it in *dest. The
+// flag can be given once. An empty value, or a value that looks like another
+// flag (see isFlagOf), is refused. what names the missing value in the error
+// message, for example "a file name".
+func pathFlag(fs *flag.FlagSet, name, what string, dest *string) {
+	fs.Func(name, "", func(value string) error {
+		if *dest != "" {
+			return fmt.Errorf("--%s given more than once", name)
+		}
+		if value == "" || isFlagOf(fs, value) {
+			return fmt.Errorf("--%s needs %s", name, what)
+		}
+		*dest = value
+		return nil
+	})
+}
+
 // isFlagOf reports whether value looks like a flag of fs, in any form that
 // the flag package accepts: "-name", "--name", "-name=x" or "--name=x". -h and
 // -help count too, because the flag package treats them as a help request.
-// The flag package takes the next argument as the value of --config, so
-// "scan --config --no-connect" would use "--no-connect" as a file name. We
+// The flag package takes the next argument as the value of --config
+// and --rules, so "scan --config --no-connect" would use "--no-connect" as a
+// file name. We
 // reject that case. The names come from fs, so a new scan flag is covered
 // without a second edit. A real file name that starts with "-" can be given
 // as ./-name.

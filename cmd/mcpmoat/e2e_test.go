@@ -9,6 +9,7 @@ package main
 
 import (
 	"bytes"
+	"cmp"
 	"errors"
 	"fmt"
 	"maps"
@@ -20,6 +21,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/Ducarv/mcpmoat/internal/discover/discovertest"
 )
@@ -520,4 +522,233 @@ func TestE2EScanStartsNoProcess(t *testing.T) {
 	if _, err := os.Stat(marker); !errors.Is(err, os.ErrNotExist) {
 		t.Errorf("marker file exists or cannot be checked (err = %v): mcpmoat started a server", err)
 	}
+}
+
+// e2eRulesDir returns the absolute path of a folder below testdata/rules.
+// The child process runs in another working directory, so a relative path
+// would not work.
+func e2eRulesDir(t *testing.T, parts ...string) string {
+	t.Helper()
+	dir, err := filepath.Abs(filepath.Join(append([]string{"..", "..", "testdata", "rules"}, parts...)...))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return dir
+}
+
+// e2eEmptyScanOutput is the stdout of "scan --no-connect" with an empty home.
+const e2eEmptyScanOutput = "No MCP servers found.\n"
+
+// TestE2EScanRulesDefault checks that scan loads the built-in rules with no
+// flags: the output is the same as before the rules existed.
+func TestE2EScanRulesDefault(t *testing.T) {
+	t.Parallel()
+	stdout, stderr, code := runBin(t, t.TempDir(), t.TempDir(), "scan", "--no-connect")
+
+	assertScanResult(t, code, stdout, stderr, scanWant{code: exitOK})
+	if stdout != e2eEmptyScanOutput {
+		t.Errorf("stdout = %q, want %q", stdout, e2eEmptyScanOutput)
+	}
+}
+
+// TestE2EScanRulesExtra checks that a valid external rule folder changes
+// nothing yet, because scan loads the rules but does not apply them.
+func TestE2EScanRulesExtra(t *testing.T) {
+	t.Parallel()
+	home, work := t.TempDir(), t.TempDir()
+
+	stdout, stderr, code := runBin(t, home, work, "scan", "--no-connect", "--rules", e2eRulesDir(t, "extra"))
+
+	assertScanResult(t, code, stdout, stderr, scanWant{code: exitOK})
+	if stdout != e2eEmptyScanOutput {
+		t.Errorf("stdout = %q, want %q", stdout, e2eEmptyScanOutput)
+	}
+	baseOut, baseErr, baseCode := runBin(t, home, work, "scan", "--no-connect")
+	if code != baseCode || stdout != baseOut || stderr != baseErr {
+		t.Errorf("--rules changes the result: exit code %d, want %d\nstdout:\n%s\nstderr:\n%s", code, baseCode, stdout, stderr)
+	}
+}
+
+// TestE2EScanRulesErrors checks that a bad rule folder gives exit code 2 with
+// the problem on stderr and nothing on stdout, with and without --no-connect.
+// Scan loads the rules before it connects, so the rule error comes first.
+func TestE2EScanRulesErrors(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name    string
+		dir     func(t *testing.T) string
+		wantErr []string
+	}{
+		{
+			name:    "invalid severity",
+			dir:     func(t *testing.T) string { return e2eRulesDir(t, "invalid") },
+			wantErr: []string{"bad-severity.yaml:4:11", "severity"},
+		},
+		{
+			name:    "built-in ID clash",
+			dir:     func(t *testing.T) string { return e2eRulesDir(t, "collide") },
+			wantErr: []string{"MOAT-T1-003.yaml", "rule ID clashes with a built-in rule"},
+		},
+		{
+			name:    "missing folder",
+			dir:     func(t *testing.T) string { return filepath.Join(t.TempDir(), "missing") },
+			wantErr: []string{"cannot read directory"},
+		},
+	}
+	for _, tt := range tests {
+		for _, noConnect := range []bool{true, false} {
+			name := tt.name + " with connect"
+			args := []string{"scan"}
+			if noConnect {
+				name = tt.name + " no-connect"
+				args = append(args, "--no-connect")
+			}
+			t.Run(name, func(t *testing.T) {
+				t.Parallel()
+				args := append(slices.Clone(args), "--rules", tt.dir(t))
+
+				stdout, stderr, code := runBin(t, t.TempDir(), t.TempDir(), args...)
+
+				assertScanResult(t, code, stdout, stderr, scanWant{
+					code:     exitError,
+					stderr:   tt.wantErr,
+					noStdout: []string{"No MCP servers found"},
+				})
+				if stdout != "" {
+					t.Errorf("stdout = %q, want empty", stdout)
+				}
+				if strings.Contains(stderr, "not implemented") {
+					t.Errorf("stderr reaches the connect step, but the rules are wrong:\n%s", stderr)
+				}
+			})
+		}
+	}
+}
+
+// TestE2EScanRulesFlagMisuse checks that a repeated, empty or flag-like
+// --rules value is a usage error: exit code 2, no stdout.
+func TestE2EScanRulesFlagMisuse(t *testing.T) {
+	t.Parallel()
+	extra := e2eRulesDir(t, "extra")
+	tests := []struct {
+		name string
+		args []string
+	}{
+		{"repeated", []string{"scan", "--no-connect", "--rules", extra, "--rules", extra}},
+		{"empty", []string{"scan", "--no-connect", "--rules", ""}},
+		{"empty with equals", []string{"scan", "--no-connect", "--rules="}},
+		{"flag-like value", []string{"scan", "--rules", "--no-connect"}},
+		{"flag-like value with equals", []string{"scan", "--no-connect", "--rules", "-timeout=1s"}},
+		{"missing value", []string{"scan", "--no-connect", "--rules"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			stdout, stderr, code := runBin(t, t.TempDir(), t.TempDir(), tt.args...)
+
+			// A usage error ends with the usage hint, which has no scan prefix.
+			if code != exitError {
+				t.Errorf("exit code = %d, want %d\nstdout:\n%s\nstderr:\n%s", code, exitError, stdout, stderr)
+			}
+			if stdout != "" {
+				t.Errorf("stdout = %q, want empty", stdout)
+			}
+			if !strings.HasPrefix(stderr, "mcpmoat scan: ") || !strings.HasSuffix(stderr, `Run "mcpmoat help" for usage.`+"\n") {
+				t.Errorf("stderr = %q, want a scan usage error with the usage hint", stderr)
+			}
+			assertNoLeakBoth(t, stdout, stderr)
+		})
+	}
+}
+
+// TestE2EScanRulesEscapeSafety checks that a rule file from an untrusted
+// repository cannot put a control byte, a C1 control (U+009B), a bidi control
+// (U+202E) or a zero-width character (U+200B) on the terminal through the
+// error text: they stay escaped in a key, a value, a file name and a path.
+func TestE2EScanRulesEscapeSafety(t *testing.T) {
+	t.Parallel()
+	const head = "id: MOAT-X-901\ntitle: Escape fixture\n"
+	const tail = "target: description\nmatch:\n  keywords:\n    - x\n"
+	tests := []struct {
+		name     string
+		content  string
+		fileName string // the rule file name; "bad.yaml" when empty
+		noDir    bool   // pass a folder that does not exist
+	}{
+		{name: "yaml escapes in key and value", content: head + "\"bad\\u001b[31mkey\\nforged\": 1\nseverity: \"ur\\ngent\\u001b[2J\"\n" + tail},
+		{name: "raw bytes in key and value", content: head + "bad\x1b[31mkey: 1\nseverity: ur\x1b[2Jgent\n" + tail},
+		{name: "raw escape in file name", content: head + "severity: urgent\n" + tail, fileName: "bad\x1b[31m\nname.yaml"},
+		{name: "hostile runes in file name", content: head + "severity: urgent\n" + tail, fileName: "bad\u009b\u202e\u200bname.yaml"},
+		{name: "hostile runes in key, raw", content: head + "\"k\u009b\u202e\u200bx\": 1\nseverity: low\n" + tail},
+		{name: "hostile runes in key, YAML escapes", content: head + "\"k\\u009b\\u202e\\u200bx\": 1\nseverity: low\n" + tail},
+		{name: "bidi and zero-width in key, valid YAML", content: head + "\"k\u202e\u200bx\": 1\nseverity: low\n" + tail},
+		{name: "bidi and zero-width in severity, valid YAML", content: head + "severity: \"ur\u202e\u200bgent\"\n" + tail},
+		{name: "hostile runes in severity, raw", content: head + "severity: \"ur\u009b\u202e\u200bgent\"\n" + tail},
+		{name: "hostile runes in severity, YAML escapes", content: head + "severity: \"ur\\u009b\\u202e\\u200bgent\"\n" + tail},
+		{name: "hostile runes in the folder path", noDir: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			dir := t.TempDir()
+			if tt.noDir {
+				dir = filepath.Join(dir, "no\u009b\u202e\u200bsuch")
+			} else {
+				name := cmp.Or(tt.fileName, "bad.yaml")
+				// The file system may refuse a file name. A write error is
+				// not a failure of mcpmoat, so the test skips.
+				if err := os.WriteFile(filepath.Join(dir, name), []byte(tt.content), 0o600); err != nil {
+					t.Skipf("the file system refuses this file name: %v", err)
+				}
+			}
+
+			stdout, stderr, code := runBin(t, t.TempDir(), t.TempDir(), "scan", "--no-connect", "--rules", dir)
+
+			assertScanResult(t, code, stdout, stderr, scanWant{code: exitError})
+			if stdout != "" {
+				t.Errorf("stdout = %q, want empty", stdout)
+			}
+			if stderr == "" {
+				t.Fatal("stderr is empty, want the rule problem")
+			}
+			assertScanRulesStderr(t, stderr)
+		})
+	}
+}
+
+// TestE2EScanRulesErrorFlood runs the real binary on 300 hostile rule files
+// and checks that it prints a capped list of errors: exit code 2, empty
+// stdout, at most 101 stderr lines that end with the "too many errors" line.
+func TestE2EScanRulesErrorFlood(t *testing.T) {
+	t.Parallel()
+	dir := floodDir(t)
+	home, work := t.TempDir(), t.TempDir()
+	binaryPath(t) // build first, so the guard below does not count the build
+	start := time.Now()
+
+	stdout, stderr, code := runBin(t, home, work, "scan", "--no-connect", "--rules", dir)
+
+	if d := time.Since(start); d > floodGuard {
+		t.Errorf("the scan took %v, want less than %v", d, floodGuard)
+	}
+	assertFloodResult(t, code, stdout, stderr)
+}
+
+// TestE2EScanRulesIDClashFlood runs the real binary on 1000 valid rule files
+// that all reuse the ID of a built-in rule. LoadDir accepts every file, so
+// only the cap in NewSet limits stderr: exit code 2, empty stdout, 101 lines
+// that end with the "too many errors" line.
+func TestE2EScanRulesIDClashFlood(t *testing.T) {
+	t.Parallel()
+	dir := idFloodDir(t, "MOAT-T1-003")
+	home, work := t.TempDir(), t.TempDir()
+	binaryPath(t) // build first, so the guard below does not count the build
+	start := time.Now()
+
+	stdout, stderr, code := runBin(t, home, work, "scan", "--no-connect", "--rules", dir)
+
+	if d := time.Since(start); d > floodGuard {
+		t.Errorf("the scan took %v, want less than %v", d, floodGuard)
+	}
+	assertIDFloodResult(t, code, stdout, stderr, "rule ID clashes with a built-in rule", idFloodFiles-100)
 }
