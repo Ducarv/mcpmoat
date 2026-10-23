@@ -80,15 +80,22 @@ func (n nameOwners) other(identity int) (toolOwner, bool) {
 // is reported. Otherwise a hostile server could hide a mention by adding a
 // dummy tool with the victim's name.
 //
-// Names and descriptions are compared in the form of foldText, as the model
+// The texts that are scanned are the tool description, the tool title, the
+// title in the annotations, and the description and title strings of the input
+// and output schema, decoded by schemaText (see toolTexts). Each text is
+// scanned on its own, so a name never joins across two texts. In this comment,
+// "text" means any of them.
+//
+// Names and tool text are compared in the form of foldText, as the model
 // reads them: "send-email", "sendEmail", "send\_email" and
 // "send<U+200B>_email" all mention "send_email". A name counts as mentioned
 // only at word boundaries: the bytes before and after it are not letters,
 // digits or "_". So "send_email_later" does not mention "send_email", and the
-// word "setup" does not mention "set_up". The whole description is scanned,
-// with no size cap: padding in front of a mention must not hide it from the
-// check, because the model reads the whole description. One tool gives at
-// most maxMentionsPerTool findings.
+// word "setup" does not mention "set_up". Each text is scanned whole, with no
+// size cap: padding in front of a mention must not hide it from the check,
+// because the model reads the whole text. One tool gives at most
+// maxMentionsPerTool findings, and the cap is shared by all its texts: once it
+// is reached, no more text of that tool is scanned.
 //
 // A server is known by its launch config, not by its name or its position in
 // all (see launchKey). The same server configured in two clients or two
@@ -98,23 +105,31 @@ func (n nameOwners) other(identity int) (toolOwner, bool) {
 // Finding.Related is "<other server>/<tool>", with the first owner of a
 // different identity in all when several own the name.
 // The result is sorted by Server, Tool and Related. A Finding never holds
-// description text, and the launch config values are used only as a map key.
+// tool text, and the launch config values are used only as a map key.
 //
-// Known limits: only Tool.Description is scanned. The text of input schemas,
-// prompts and resources is not. A tool name with a byte outside letters,
+// Known limits: prompts and resources are not scanned. Schema text is scanned
+// only up to the caps of schemaText: on a schema that is too deep or too big,
+// the check scans the texts that schemaText found before the cap and reports
+// nothing about the rest. Only "description" and "title" strings are read. A
+// server can hide a mention in other text that a model can see: default, enum,
+// examples, const, $comment, vendor keys (x-* or markdownDescription),
+// property names, and strings inside an array under "description". The check
+// does not scan these. A tool name with a byte outside letters,
 // digits, "_" and "-" (a dot or a space, for example) cannot be found as a
 // token, so it is never a candidate name. A mention of a single-word tool
 // name is never found. A space or a dot between the words ("send email") is
 // not folded, because that is normal prose, and neither are look-alike
 // letters, such as the fullwidth U+FF3F for "_" or a Cyrillic "е".
 //
-// Tool names and descriptions are untrusted input from MCP servers. The check
+// Tool names and texts are untrusted input from MCP servers. The check
 // only searches them as text. It never executes them or builds commands from
 // them.
 //
-// The cost is linear in the description size: each description is scanned
-// once and every token is looked up in a map. 10 servers with 20 tools each
-// run well under one second (NFR-03).
+// The cost is linear in the size of the tool text: each text is scanned once
+// and every token is looked up in a map. The schema walk is bounded by the
+// depth and value caps of schemaText, so one schema cannot cost more than a
+// fixed amount. 10 servers with 20 tools each run well under one second
+// (NFR-03).
 func CheckShadowing(all []ServerTools) []Finding {
 	identities := launchIdentities(all)
 	owners := indexOwners(all, identities)
@@ -124,30 +139,43 @@ func CheckShadowing(all []ServerTools) []Finding {
 	for i, st := range all {
 		for _, tool := range st.Tools {
 			clear(seen)
-			forEachToken(foldText(tool.Description), func(token string) bool {
-				// Markdown emphasis such as "_send_email_" wraps the name.
-				token = strings.Trim(token, "_")
-				n, ok := owners[token]
-				if !ok {
-					return true
+			// scan looks for mentions in one text. It reports whether the next
+			// text should be scanned: false once the tool has reached the cap.
+			scan := func(text string) bool {
+				if len(seen) >= maxMentionsPerTool {
+					return false
 				}
-				other, ok := n.other(identities[i])
-				if !ok {
-					return true
-				}
-				if _, dup := seen[token]; dup {
-					return true
-				}
-				seen[token] = struct{}{}
-				findings = append(findings, Finding{
-					RuleID:  RuleShadowing,
-					Server:  st.Server.Name,
-					Tool:    tool.Name,
-					Related: other.server + "/" + other.toolName,
-					Message: shadowingMessage,
+				forEachToken(foldText(text), func(token string) bool {
+					// Markdown emphasis such as "_send_email_" wraps the name.
+					token = strings.Trim(token, "_")
+					n, ok := owners[token]
+					if !ok {
+						return true
+					}
+					other, ok := n.other(identities[i])
+					if !ok {
+						return true
+					}
+					if _, dup := seen[token]; dup {
+						return true
+					}
+					seen[token] = struct{}{}
+					findings = append(findings, Finding{
+						RuleID:  RuleShadowing,
+						Server:  st.Server.Name,
+						Tool:    tool.Name,
+						Related: other.server + "/" + other.toolName,
+						Message: shadowingMessage,
+					})
+					return len(seen) < maxMentionsPerTool
 				})
 				return len(seen) < maxMentionsPerTool
-			})
+			}
+			for _, text := range toolTexts(tool) {
+				if !scan(text) {
+					break
+				}
+			}
 		}
 	}
 
@@ -159,6 +187,23 @@ func CheckShadowing(all []ServerTools) []Finding {
 		)
 	})
 	return findings
+}
+
+// toolTexts returns the texts of a tool that a model reads: the description,
+// the title, the title in the annotations, and the description and title
+// strings of the input and output schema. Each text is scanned on its own, so
+// a token never joins across two texts.
+func toolTexts(tool inspect.Tool) []string {
+	texts := []string{tool.Description, tool.Title}
+	if tool.Annotations != nil {
+		texts = append(texts, tool.Annotations.Title)
+	}
+	// schemaText returns partial texts when it hits a cap. The partial texts
+	// are scanned and the cap is not reported, so the second result is unused.
+	input, _ := schemaText(tool.InputSchema)
+	output, _ := schemaText(tool.OutputSchema)
+	texts = append(texts, input...)
+	return append(texts, output...)
 }
 
 // launchIdentities gives each entry of all an owner identity: the index of the

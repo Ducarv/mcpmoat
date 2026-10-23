@@ -4,8 +4,9 @@ package rules
 // built-in YAML rules use the same IDs, so a finding has one ID whatever code
 // produced it.
 const (
-	// RuleShadowing is the ID of the tool shadowing check (threat T3): a
-	// tool description names a tool of another server.
+	// RuleShadowing is the ID of the tool shadowing check (threat T3): the
+	// text of a tool (description, title or schema text) names a tool of
+	// another server.
 	RuleShadowing = "MOAT-T3-001"
 
 	// RuleInsecureURL is the ID of the insecure URL check (threat T4): a
@@ -32,7 +33,7 @@ const (
 
 // Fixed texts of Finding.Message, one for each rule.
 const (
-	shadowingMessage       = "tool description names a tool of another server"
+	shadowingMessage       = "tool text names a tool of another server"
 	insecureURLMessage     = "remote server uses plain http:// without TLS"
 	plaintextSecretMessage = "config holds a plaintext secret; use an environment variable reference" //nolint:gosec // G101: message text, not a credential
 	unpinnedPackageMessage = "package runner fetches an unpinned version"
