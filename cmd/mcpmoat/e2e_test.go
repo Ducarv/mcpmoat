@@ -22,6 +22,7 @@ import (
 	"testing"
 
 	"github.com/Ducarv/mcpmoat/internal/discover/discovertest"
+	"github.com/Ducarv/mcpmoat/internal/rules"
 )
 
 // The binary is built once, on the first call to binaryPath. TestMain removes
@@ -407,7 +408,6 @@ func TestE2EScanTimeoutFlags(t *testing.T) {
 	const (
 		timeoutMsg     = "mcpmoat scan: --timeout must be greater than 0"
 		concurrencyMsg = "mcpmoat scan: --concurrency must be at least 1"
-		usageHint      = `Run "mcpmoat help" for usage.`
 	)
 	tests := []struct {
 		name      string
@@ -533,7 +533,7 @@ func TestE2EScanIgnore(t *testing.T) {
 		t.Parallel()
 		home, work := discovertest.CopyFixture(t, fixtureDir("all", "full"))
 		// Line 2 has an invalid rule ID, so it gets a warning and is skipped.
-		writeTestFile(t, work, ".mcpmoat-ignore", "MOAT-T1-003\n/onlytool\n")
+		writeTestFile(t, work, rules.IgnoreFileName, "MOAT-T1-003\n/onlytool\n")
 
 		stdout, stderr, code := runBin(t, home, work, "scan", "--no-connect", "--ignore", "MOAT-T1-001")
 
@@ -542,13 +542,11 @@ func TestE2EScanIgnore(t *testing.T) {
 		}
 		// The warning and the entry count come before the notice. The
 		// warning text after the line number is not checked here.
-		lines := nonEmptyLines(stderr)
-		if len(lines) != 3 ||
-			!strings.HasPrefix(lines[0], "mcpmoat scan: warning: .mcpmoat-ignore:2: ") ||
-			lines[1] != "mcpmoat scan: using 1 entry from .mcpmoat-ignore" ||
-			lines[2] != noRulesNotice {
-			t.Errorf("stderr lines = %q, want the warning for line 2, the entry count and the notice", lines)
-		}
+		assertStderrLines(t, stderr, []lineWant{
+			prefixLine(ignoreWarnPrefix + rules.IgnoreFileName + ":2: "),
+			exactLine("mcpmoat scan: using 1 entry from " + rules.IgnoreFileName),
+			exactLine(noRulesNotice),
+		})
 		if strings.Contains(stderr, "onlytool") {
 			t.Errorf("stderr shows content of the ignore file:\n%s", stderr)
 		}
@@ -569,7 +567,7 @@ func TestE2EScanIgnore(t *testing.T) {
 		if code != exitError {
 			t.Errorf("exit code = %d, want %d\nstdout:\n%s\nstderr:\n%s", code, exitError, stdout, stderr)
 		}
-		assertContainsAll(t, "stderr", stderr, []string{"mcpmoat scan: ", "-ignore", `Run "mcpmoat help" for usage.`})
+		assertContainsAll(t, "stderr", stderr, []string{"mcpmoat scan: ", "-ignore", usageHint})
 		if stdout != "" {
 			t.Errorf("stdout = %q, want empty", stdout)
 		}

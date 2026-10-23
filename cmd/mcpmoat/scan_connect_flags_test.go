@@ -15,7 +15,6 @@ func TestScanConnectFlags(t *testing.T) {
 	t.Parallel()
 
 	const (
-		hint           = `Run "mcpmoat help" for usage.`
 		timeoutMsg     = "mcpmoat scan: --timeout must be greater than 0\n"
 		concurrencyMsg = "mcpmoat scan: --concurrency must be at least 1\n"
 		notImplemented = "connecting to servers is not implemented yet"
@@ -80,27 +79,27 @@ func TestScanConnectFlags(t *testing.T) {
 			name:       "timeout 0",
 			args:       []string{"--no-connect", "--config", "CONFIG", "--timeout", "0"},
 			wantCode:   exitError,
-			wantStderr: []string{timeoutMsg, hint},
+			wantStderr: []string{timeoutMsg, usageHint},
 			noStderr:   []string{noRulesText},
 		},
 		{
 			name:       "timeout 0s",
 			args:       []string{"--no-connect", "--config", "CONFIG", "--timeout", "0s"},
 			wantCode:   exitError,
-			wantStderr: []string{timeoutMsg, hint},
+			wantStderr: []string{timeoutMsg, usageHint},
 		},
 		{
 			name:       "negative timeout",
 			args:       []string{"--no-connect", "--config", "CONFIG", "--timeout", "-5s"},
 			wantCode:   exitError,
-			wantStderr: []string{timeoutMsg, hint},
+			wantStderr: []string{timeoutMsg, usageHint},
 		},
 		{
 			// The flag package refuses the value before the range check.
 			name:       "timeout that is no duration",
 			args:       []string{"--no-connect", "--config", "CONFIG", "--timeout", "abc"},
 			wantCode:   exitError,
-			wantStderr: []string{"mcpmoat scan: ", "timeout", hint},
+			wantStderr: []string{"mcpmoat scan: ", "timeout", usageHint},
 			noStderr:   []string{"must be greater than 0"},
 		},
 		{
@@ -108,39 +107,39 @@ func TestScanConnectFlags(t *testing.T) {
 			name:       "timeout without a unit",
 			args:       []string{"--no-connect", "--config", "CONFIG", "--timeout", "5"},
 			wantCode:   exitError,
-			wantStderr: []string{"mcpmoat scan: ", "timeout", hint},
+			wantStderr: []string{"mcpmoat scan: ", "timeout", usageHint},
 		},
 		{
 			name:       "concurrency 0",
 			args:       []string{"--no-connect", "--config", "CONFIG", "--concurrency", "0"},
 			wantCode:   exitError,
-			wantStderr: []string{concurrencyMsg, hint},
+			wantStderr: []string{concurrencyMsg, usageHint},
 		},
 		{
 			name:       "negative concurrency",
 			args:       []string{"--no-connect", "--config", "CONFIG", "--concurrency", "-1"},
 			wantCode:   exitError,
-			wantStderr: []string{concurrencyMsg, hint},
+			wantStderr: []string{concurrencyMsg, usageHint},
 		},
 		{
 			name:       "concurrency that is no number",
 			args:       []string{"--no-connect", "--config", "CONFIG", "--concurrency", "x"},
 			wantCode:   exitError,
-			wantStderr: []string{"mcpmoat scan: ", "concurrency", hint},
+			wantStderr: []string{"mcpmoat scan: ", "concurrency", usageHint},
 			noStderr:   []string{"must be at least 1"},
 		},
 		{
 			name:       "concurrency that is a decimal",
 			args:       []string{"--no-connect", "--config", "CONFIG", "--concurrency", "1.5"},
 			wantCode:   exitError,
-			wantStderr: []string{"mcpmoat scan: ", "concurrency", hint},
+			wantStderr: []string{"mcpmoat scan: ", "concurrency", usageHint},
 		},
 		{
 			// The timeout is checked first, so it is the one message.
 			name:       "both values bad",
 			args:       []string{"--no-connect", "--config", "CONFIG", "--timeout", "0", "--concurrency", "0"},
 			wantCode:   exitError,
-			wantStderr: []string{timeoutMsg, hint},
+			wantStderr: []string{timeoutMsg, usageHint},
 			noStderr:   []string{"--concurrency"},
 		},
 		{
@@ -149,7 +148,7 @@ func TestScanConnectFlags(t *testing.T) {
 			name:       "bad value before a missing config file",
 			args:       []string{"--no-connect", "--config", "missing-config-file.json", "--timeout", "0"},
 			wantCode:   exitError,
-			wantStderr: []string{timeoutMsg, hint},
+			wantStderr: []string{timeoutMsg, usageHint},
 			noStderr:   []string{"file not found"},
 		},
 
@@ -170,42 +169,42 @@ func TestScanConnectFlags(t *testing.T) {
 			name:       "timeout 0 without --no-connect",
 			args:       []string{"--timeout", "0"},
 			wantCode:   exitError,
-			wantStderr: []string{timeoutMsg, hint},
+			wantStderr: []string{timeoutMsg, usageHint},
 			noStderr:   []string{notImplemented},
 		},
 		{
 			name:       "negative timeout without --no-connect",
 			args:       []string{"--timeout", "-5s"},
 			wantCode:   exitError,
-			wantStderr: []string{timeoutMsg, hint},
+			wantStderr: []string{timeoutMsg, usageHint},
 			noStderr:   []string{notImplemented},
 		},
 		{
 			name:       "timeout that is no duration without --no-connect",
 			args:       []string{"--timeout", "abc"},
 			wantCode:   exitError,
-			wantStderr: []string{"mcpmoat scan: ", "timeout", hint},
+			wantStderr: []string{"mcpmoat scan: ", "timeout", usageHint},
 			noStderr:   []string{notImplemented},
 		},
 		{
 			name:       "concurrency 0 without --no-connect",
 			args:       []string{"--concurrency", "0"},
 			wantCode:   exitError,
-			wantStderr: []string{concurrencyMsg, hint},
+			wantStderr: []string{concurrencyMsg, usageHint},
 			noStderr:   []string{notImplemented},
 		},
 		{
 			name:       "negative concurrency without --no-connect",
 			args:       []string{"--concurrency", "-1"},
 			wantCode:   exitError,
-			wantStderr: []string{concurrencyMsg, hint},
+			wantStderr: []string{concurrencyMsg, usageHint},
 			noStderr:   []string{notImplemented},
 		},
 		{
 			name:       "concurrency that is no number without --no-connect",
 			args:       []string{"--concurrency", "x"},
 			wantCode:   exitError,
-			wantStderr: []string{"mcpmoat scan: ", "concurrency", hint},
+			wantStderr: []string{"mcpmoat scan: ", "concurrency", usageHint},
 			noStderr:   []string{notImplemented},
 		},
 
@@ -214,13 +213,13 @@ func TestScanConnectFlags(t *testing.T) {
 			name:       "config followed by timeout",
 			args:       []string{"--no-connect", "--config", "--timeout", "2s"},
 			wantCode:   exitError,
-			wantStderr: []string{"--config needs a file name", hint},
+			wantStderr: []string{"--config needs a file name", usageHint},
 		},
 		{
 			name:       "config followed by concurrency",
 			args:       []string{"--no-connect", "--config", "--concurrency=2"},
 			wantCode:   exitError,
-			wantStderr: []string{"--config needs a file name", hint},
+			wantStderr: []string{"--config needs a file name", usageHint},
 		},
 	}
 

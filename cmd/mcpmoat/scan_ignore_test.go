@@ -21,22 +21,34 @@ import (
 // flag package writes it as `invalid value "<v>" for flag -ignore: <msg>`.
 const ignoreUsageMsg = "for flag -ignore: --ignore needs a rule ID"
 
-// usageHint is the line that every usage error prints after the message.
-const usageHint = `Run "mcpmoat help" for usage.`
-
 // ignoreCwdWarning is the warning of --config mode when getwd fails.
 const ignoreCwdWarning = "mcpmoat scan: warning: cannot read the working directory; .mcpmoat-ignore is not read"
 
 // ignoreWarnPrefix is the start of every warning about .mcpmoat-ignore.
 const ignoreWarnPrefix = "mcpmoat scan: warning: "
 
+// ignoreMarker is a marker inside the bad lines of the ignore files of these
+// tests. stderr must never contain it.
+const ignoreMarker = "ZZMARK"
+
+// okServer is a server map with one valid server, ok-srv, for writeServers.
+// It is only read, so the parallel tests can share it.
+var okServer = map[string]any{"ok-srv": map[string]any{"command": "npx"}}
+
 // writeHomeConfig writes ~/.claude.json with one valid server (ok-srv) into
 // home, so an auto-discovery scan of home exits with 0 and prints a table.
 func writeHomeConfig(t *testing.T, home string) {
 	t.Helper()
-	writeServers(t, home, ".claude.json", map[string]any{
-		"ok-srv": map[string]any{"command": "npx"},
-	})
+	writeServers(t, home, ".claude.json", okServer)
+}
+
+// assertNoIgnoreContent fails the test if stderr shows ignoreMarker, which
+// only the ignore file holds.
+func assertNoIgnoreContent(t *testing.T, stderr string) {
+	t.Helper()
+	if strings.Contains(stderr, ignoreMarker) {
+		t.Errorf("stderr shows content of the ignore file\nstderr:\n%s", stderr)
+	}
 }
 
 // runScanArgs runs "mcpmoat <args>" on c and returns the exit code, stdout and
@@ -350,7 +362,7 @@ func TestScanIgnoreFile(t *testing.T) {
 			name: "malformed lines 2 and 4",
 			setup: func(t *testing.T, work string) {
 				writeTestFile(t, work, rules.IgnoreFileName,
-					"MOAT-T1-003\nZZMARK/bad\nMOAT-T1-004 ok-srv\nMOAT-T1-005 a b ZZMARK\n")
+					"MOAT-T1-003\n"+ignoreMarker+"/bad\nMOAT-T1-004 ok-srv\nMOAT-T1-005 a b "+ignoreMarker+"\n")
 			},
 			wantLines: []lineWant{
 				prefixLine(ignoreWarnPrefix + ".mcpmoat-ignore:2: "),
@@ -363,7 +375,7 @@ func TestScanIgnoreFile(t *testing.T) {
 			name: "only malformed lines",
 			setup: func(t *testing.T, work string) {
 				writeTestFile(t, work, rules.IgnoreFileName,
-					"9ZZMARK\nMOAT-T1-001 /ZZMARK\n")
+					"9"+ignoreMarker+"\nMOAT-T1-001 /"+ignoreMarker+"\n")
 			},
 			wantLines: []lineWant{
 				prefixLine(ignoreWarnPrefix + ".mcpmoat-ignore:1: "),
@@ -375,7 +387,7 @@ func TestScanIgnoreFile(t *testing.T) {
 			name: "bad line with an escape sequence",
 			setup: func(t *testing.T, work string) {
 				writeTestFile(t, work, rules.IgnoreFileName,
-					"\x1b[31mZZMARK\x1b[0m\nMOAT-T1-001 srv\x1b]0;ZZMARK\x07\n")
+					"\x1b[31m"+ignoreMarker+"\x1b[0m\nMOAT-T1-001 srv\x1b]0;"+ignoreMarker+"\x07\n")
 			},
 			wantLines: []lineWant{
 				prefixLine(ignoreWarnPrefix + ".mcpmoat-ignore:1: "),
@@ -389,7 +401,7 @@ func TestScanIgnoreFile(t *testing.T) {
 		{
 			name: "bad line with invalid UTF-8",
 			setup: func(t *testing.T, work string) {
-				writeTestFile(t, work, rules.IgnoreFileName, "MOAT-\xffZZMARK\n")
+				writeTestFile(t, work, rules.IgnoreFileName, "MOAT-\xff"+ignoreMarker+"\n")
 			},
 			wantLines: []lineWant{
 				prefixLine(ignoreWarnPrefix + ".mcpmoat-ignore:1: "),
@@ -399,7 +411,7 @@ func TestScanIgnoreFile(t *testing.T) {
 		{
 			name: "line too long",
 			setup: func(t *testing.T, work string) {
-				writeTestFile(t, work, rules.IgnoreFileName, "MOAT-T1-001 "+strings.Repeat("Z", 5000)+"ZZMARK\nMOAT-T1-002\n")
+				writeTestFile(t, work, rules.IgnoreFileName, "MOAT-T1-001 "+strings.Repeat("Z", 5000)+ignoreMarker+"\nMOAT-T1-002\n")
 			},
 			wantLines: []lineWant{
 				prefixLine(ignoreWarnPrefix + ".mcpmoat-ignore:1: "),
@@ -484,9 +496,7 @@ func TestScanIgnoreFile(t *testing.T) {
 			}
 			assertStderrLines(t, errOut, tt.wantLines)
 			assertContainsAll(t, "stderr", errOut, tt.wantStderr)
-			if strings.Contains(errOut, "ZZMARK") {
-				t.Errorf("stderr shows content of the ignore file\nstderr:\n%s", errOut)
-			}
+			assertNoIgnoreContent(t, errOut)
 			assertScanPrefix(t, errOut)
 			assertNoEscape(t, out, errOut)
 		})
@@ -503,7 +513,7 @@ func TestScanIgnoreFileWarningCap(t *testing.T) {
 	writeHomeConfig(t, home)
 	work := t.TempDir()
 	const bad = 25
-	writeTestFile(t, work, rules.IgnoreFileName, strings.Repeat("ZZMARK/bad\n", bad)+"MOAT-T1-003\n")
+	writeTestFile(t, work, rules.IgnoreFileName, strings.Repeat(ignoreMarker+"/bad\n", bad)+"MOAT-T1-003\n")
 	c, stdout, stderr := dirsCLI(t, home, work)
 
 	code, out, errOut := runScanArgs(c, stdout, stderr, "scan", "--no-connect")
@@ -530,9 +540,7 @@ func TestScanIgnoreFileWarningCap(t *testing.T) {
 		t.Errorf("summary warning = %q, want it to start with %q", last, ignoreWarnPrefix+".mcpmoat-ignore: ")
 	}
 	assertContainsAll(t, "stderr", errOut, []string{"mcpmoat scan: using 1 entry from .mcpmoat-ignore", noRulesNotice})
-	if strings.Contains(errOut, "ZZMARK") {
-		t.Errorf("stderr shows content of the ignore file\nstderr:\n%s", errOut)
-	}
+	assertNoIgnoreContent(t, errOut)
 	assertNoEscape(t, out, errOut)
 }
 
@@ -598,7 +606,7 @@ func TestScanIgnoreFileConfigMode(t *testing.T) {
 	t.Run("absolute config path in another directory", func(t *testing.T) {
 		t.Parallel()
 
-		config := writeServers(t, t.TempDir(), "mcp.json", map[string]any{"ok-srv": map[string]any{"command": "npx"}})
+		config := writeServers(t, t.TempDir(), "mcp.json", okServer)
 		work := t.TempDir()
 		writeTestFile(t, work, rules.IgnoreFileName, "MOAT-T1-003\nMOAT-T1-004 ok-srv\n")
 		c, stdout, stderr := dirsCLI(t, t.TempDir(), work)
@@ -620,7 +628,7 @@ func TestScanIgnoreFileConfigMode(t *testing.T) {
 		t.Parallel()
 
 		work := t.TempDir()
-		writeServers(t, work, "mcp.json", map[string]any{"ok-srv": map[string]any{"command": "npx"}})
+		writeServers(t, work, "mcp.json", okServer)
 		writeTestFile(t, work, rules.IgnoreFileName, "MOAT-T1-003\n")
 		c, stdout, stderr := dirsCLI(t, t.TempDir(), work)
 
@@ -639,9 +647,9 @@ func TestScanIgnoreFileConfigMode(t *testing.T) {
 	t.Run("malformed line", func(t *testing.T) {
 		t.Parallel()
 
-		config := writeServers(t, t.TempDir(), "mcp.json", map[string]any{"ok-srv": map[string]any{"command": "npx"}})
+		config := writeServers(t, t.TempDir(), "mcp.json", okServer)
 		work := t.TempDir()
-		writeTestFile(t, work, rules.IgnoreFileName, "ZZMARK/bad\n")
+		writeTestFile(t, work, rules.IgnoreFileName, ignoreMarker+"/bad\n")
 		c, stdout, stderr := dirsCLI(t, t.TempDir(), work)
 
 		code, out, errOut := runScanArgs(c, stdout, stderr, "scan", "--no-connect", "--config", config)
@@ -653,9 +661,7 @@ func TestScanIgnoreFileConfigMode(t *testing.T) {
 			prefixLine(ignoreWarnPrefix + ".mcpmoat-ignore:1: "),
 			exactLine(noRulesNotice),
 		})
-		if strings.Contains(errOut, "ZZMARK") {
-			t.Errorf("stderr shows content of the ignore file\nstderr:\n%s", errOut)
-		}
+		assertNoIgnoreContent(t, errOut)
 		assertNoEscape(t, out, errOut)
 	})
 }
@@ -709,7 +715,7 @@ func TestScanIgnoreConfigModeWithoutWorkDir(t *testing.T) {
 			dir := t.TempDir()
 			config := filepath.Join(dir, "missing.json")
 			if !tt.missing {
-				config = writeServers(t, dir, "mcp.json", map[string]any{"ok-srv": map[string]any{"command": "npx"}})
+				config = writeServers(t, dir, "mcp.json", okServer)
 			}
 			// newTestCLI keeps a getwd that fails. Only the home is set.
 			c, stdout, stderr := newTestCLI(fakeGetenv(nil), testBuild)

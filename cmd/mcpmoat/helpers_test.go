@@ -287,3 +287,6 @@ func symlink(t *testing.T, target, link string) {
 		t.Fatalf("symlink: %v", err)
 	}
 }
+
+// usageHint is the line that every usage error prints after the message.
+const usageHint = `Run "mcpmoat help" for usage.`
