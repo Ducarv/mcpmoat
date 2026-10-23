@@ -200,8 +200,8 @@ These points come from the [PRD](PRD.md) and the facts above.
 - **One person, one machine.** The target user is an individual developer on macOS or Linux. The PRD
   lists SSO, RBAC and a central dashboard as non-goals (section 2.2).
 - **Rules plus pins in one scan.** mcpmoat applies YAML rules and native heuristics to detect T1 to
-  T5. It pins a hash of every tool to detect rug pulls (T2). Each rule is one YAML file with
-  positive and negative tests (NFR-05).
+  T5. It pins a hash of every tool to detect rug pulls (T2). Each built-in rule is one YAML file
+  with positive and negative tests (NFR-05).
 - **Open rule files.** Rules are YAML files in the repository (`rules/`), embedded in the binary.
   Snyk Agent Scan keeps its rules in a remote service
   ([README](https://github.com/snyk/agent-scan#analysis-and-validation)). Warden keeps rules as a
