@@ -11,6 +11,7 @@ import (
 	"strings"
 	"syscall"
 
+	"github.com/Ducarv/mcpmoat/internal/safefile"
 	builtinrules "github.com/Ducarv/mcpmoat/rules"
 )
 
@@ -156,7 +157,7 @@ func (n nonBlockFS) Open(name string) (fs.File, error) {
 	if !fs.ValidPath(name) {
 		return nil, &fs.PathError{Op: "open", Path: name, Err: fs.ErrInvalid}
 	}
-	f, err := n.root.OpenFile(name, os.O_RDONLY|syscall.O_NONBLOCK, 0)
+	f, err := safefile.OpenInRoot(n.root, name)
 	if err != nil {
 		// Return an untyped nil here. A nil *os.File inside an fs.File value is
 		// not equal to nil, and the caller would try to use it.
@@ -308,25 +309,15 @@ func readRuleFile(fsys fs.FS, name, display string) ([]byte, *LoadError) {
 		_ = f.Close()
 	}()
 
-	info, err := f.Stat()
-	if err != nil {
-		return nil, newLoadError(display, ReasonUnreadable).wrap(err)
-	}
-	if !info.Mode().IsRegular() {
+	data, err := safefile.ReadOpened(f, maxFileBytes)
+	switch {
+	case err == nil:
+		return data, nil
+	case errors.Is(err, safefile.ErrNotRegular):
 		return nil, newLoadError(display, ReasonNotRegular)
-	}
-	if info.Size() > maxFileBytes {
+	case errors.Is(err, safefile.ErrTooLarge):
 		return nil, newLoadError(display, ReasonTooLarge)
-	}
-
-	// Read one byte more than the cap, so we can tell if the file grew after
-	// Stat.
-	data, err := io.ReadAll(io.LimitReader(f, maxFileBytes+1))
-	if err != nil {
+	default:
 		return nil, newLoadError(display, ReasonUnreadable).wrap(err)
 	}
-	if len(data) > maxFileBytes {
-		return nil, newLoadError(display, ReasonTooLarge)
-	}
-	return data, nil
 }

@@ -4,15 +4,13 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
-	"io"
-	"io/fs"
-	"os"
 	"path/filepath"
 	"regexp"
 	"strings"
-	"syscall"
 	"unicode"
 	"unicode/utf8"
+
+	"github.com/Ducarv/mcpmoat/internal/safefile"
 )
 
 // IgnoreFileName is the name of the ignore file that mcpmoat reads from the
@@ -358,8 +356,9 @@ func moreMalformedLines(n int) string {
 // dir (normally the working directory). See ParseIgnore for the format and
 // the warnings.
 //
-// When the file or dir does not exist (fs.ErrNotExist), ReadIgnoreFile
-// returns an empty list, nil warnings and a nil error.
+// When the file or dir does not exist, or a parent of the path is not a
+// directory, ReadIgnoreFile returns an empty list, nil warnings and a nil
+// error.
 //
 // The file is opened through os.Root, so a symlink that leaves dir is
 // refused with an error. The open uses O_NONBLOCK, so a FIFO does not block
@@ -381,59 +380,18 @@ func ReadIgnoreFile(dir string) (IgnoreList, []IgnoreWarning, error) {
 	return list, warnings, nil
 }
 
-// readIgnoreData reads the ignore file in dir. found is false, with a nil
-// error, when the file or dir does not exist. ReadIgnoreFile adds the path to
-// the error.
-//
-// TODO(#114): share one hardened reader with internal/discover.
+// readIgnoreData reads the ignore file in dir with safefile. found is false,
+// with a nil error, when the file or dir does not exist. ReadIgnoreFile adds
+// the path to the error.
 func readIgnoreData(dir string) (data []byte, found bool, err error) {
-	root, err := os.OpenRoot(dir)
-	if err != nil {
-		if errors.Is(err, fs.ErrNotExist) {
-			return nil, false, nil
-		}
-		return nil, false, err
-	}
-	defer func() {
-		// Closing the root does not close the files opened through it.
-		_ = root.Close()
-	}()
-
-	// Open first, then check the open file. A check of the path before the
-	// open could see another file than the one that is opened. O_NONBLOCK
-	// makes the open of a FIFO return at once, also when no process writes
-	// to it. For a regular file the flag changes nothing.
-	f, err := root.OpenFile(IgnoreFileName, os.O_RDONLY|syscall.O_NONBLOCK, 0)
-	if err != nil {
-		if errors.Is(err, fs.ErrNotExist) {
-			return nil, false, nil
-		}
-		return nil, false, err
-	}
-	defer func() {
-		// The file is read-only, so a close error is not useful.
-		_ = f.Close()
-	}()
-
-	info, err := f.Stat()
-	if err != nil {
-		return nil, false, err
-	}
-	if !info.Mode().IsRegular() {
+	data, found, err = safefile.ReadBoundedRegularFile(dir, IgnoreFileName, MaxIgnoreFileBytes)
+	switch {
+	case errors.Is(err, safefile.ErrNotRegular):
 		return nil, false, errIgnoreNotRegular
-	}
-	if info.Size() > MaxIgnoreFileBytes {
+	case errors.Is(err, safefile.ErrTooLarge):
 		return nil, false, errIgnoreTooLarge
-	}
-
-	// Read one byte more than the limit, so we can tell if the file grew
-	// after Stat.
-	data, err = io.ReadAll(io.LimitReader(f, MaxIgnoreFileBytes+1))
-	if err != nil {
+	case err != nil:
 		return nil, false, err
 	}
-	if len(data) > MaxIgnoreFileBytes {
-		return nil, false, errIgnoreTooLarge
-	}
-	return data, true, nil
+	return data, found, nil
 }
