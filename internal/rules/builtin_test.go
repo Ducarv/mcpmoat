@@ -2,8 +2,12 @@ package rules
 
 import (
 	"errors"
+	"io/fs"
 	"strings"
 	"testing"
+	"unicode/utf8"
+
+	builtinrules "github.com/Ducarv/mcpmoat/rules"
 )
 
 // builtinCompiler returns the Compiler that runs the cases of the built-in
@@ -190,5 +194,32 @@ func TestRunBuiltinCasesWithWrongMatcher(t *testing.T) {
 			}
 			t.Errorf("no failure contains all of %q; failures: %q", tt.want, failures)
 		})
+	}
+}
+
+// TestBuiltinRulesASCII checks that every built-in rule file is ASCII. A rule
+// writes a special rune as an escape, so an invisible or look-alike rune
+// cannot hide in a pattern or a case, and a case tests the escape it names.
+func TestBuiltinRulesASCII(t *testing.T) {
+	t.Parallel()
+
+	entries, err := fs.ReadDir(builtinrules.FS, ".")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
+		b, err := fs.ReadFile(builtinrules.FS, e.Name())
+		if err != nil {
+			t.Fatal(err)
+		}
+		for i, c := range b {
+			if c >= utf8.RuneSelf {
+				t.Errorf("%s: byte %d is 0x%02X; write a non-ASCII rune as an escape", e.Name(), i, c)
+				break
+			}
+		}
 	}
 }

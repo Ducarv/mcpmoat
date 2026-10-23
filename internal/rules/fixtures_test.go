@@ -258,8 +258,9 @@ type toolTarget struct {
 	target rules.Target
 }
 
-// TestBuiltinT1IDs checks the loaded T1 rule IDs, so a removed or new T1 rule
-// fails the test and TestFixtureBuiltinT1 cannot pass with a rule missing.
+// TestBuiltinT1IDs checks the loaded T1 rule IDs. TestFixtureBuiltinT1 does
+// not check a rule that no fixture triggers, so the two tests together fail
+// when a T1 rule is missing or new.
 func TestBuiltinT1IDs(t *testing.T) {
 	t.Parallel()
 
