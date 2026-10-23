@@ -8,10 +8,6 @@ import (
 	"unicode"
 )
 
-// leakCanary is a fake token for the no-leak tests. It has the GitHub token
-// shape, so the secret checks fire on it. It is not a real credential.
-const leakCanary = "ghp_FAKEcanaryEXAMPLE0000000000000000000" //nolint:gosec // G101: fake test credential
-
 // textAdapterDetail is the fixed Hit.Detail of each text adapter.
 var textAdapterDetail = map[string]string{
 	HeuristicInsecureURL:     "insecure_url matched",
@@ -42,14 +38,14 @@ func TestTextAdapters(t *testing.T) {
 		{name: "insecure_url spaces only", heuristic: HeuristicInsecureURL, input: "   "},
 
 		// plaintext_secret: env form "KEY=VALUE" and header form "Name: value".
-		{name: "env token prefix", heuristic: HeuristicPlaintextSecret, input: "GITHUB_TOKEN=" + leakCanary, wantHit: true},
+		{name: "env token prefix", heuristic: HeuristicPlaintextSecret, input: "GITHUB_TOKEN=" + testGHToken, wantHit: true},
 		{name: "env value with base64 padding", heuristic: HeuristicPlaintextSecret, input: "CLIENT_SECRET=ZmFrZS1jYW5hcnktRVhBTVBMRS1zZWNyZXQteA==", wantHit: true},
 		{name: "env empty value", heuristic: HeuristicPlaintextSecret, input: "GITHUB_TOKEN="},
 		{name: "env non-secret name", heuristic: HeuristicPlaintextSecret, input: "LOG_LEVEL=debug"},
-		{name: "header with space", heuristic: HeuristicPlaintextSecret, input: "Authorization: Bearer " + leakCanary, wantHit: true},
-		{name: "header no space after colon", heuristic: HeuristicPlaintextSecret, input: "Authorization:Bearer " + leakCanary, wantHit: true},
-		{name: "header name with underscore", heuristic: HeuristicPlaintextSecret, input: "X_Auth: Bearer " + leakCanary, wantHit: true},
-		{name: "URL is not a header", heuristic: HeuristicPlaintextSecret, input: "https://mcp.example.com/" + leakCanary},
+		{name: "header with space", heuristic: HeuristicPlaintextSecret, input: "Authorization: Bearer " + testGHToken, wantHit: true},
+		{name: "header no space after colon", heuristic: HeuristicPlaintextSecret, input: "Authorization:Bearer " + testGHToken, wantHit: true},
+		{name: "header name with underscore", heuristic: HeuristicPlaintextSecret, input: "X_Auth: Bearer " + testGHToken, wantHit: true},
+		{name: "URL is not a header", heuristic: HeuristicPlaintextSecret, input: "https://mcp.example.com/" + testGHToken},
 		{name: "empty key", heuristic: HeuristicPlaintextSecret, input: "=value"},
 		{name: "no equals and no colon", heuristic: HeuristicPlaintextSecret, input: "just some text"},
 		{name: "plaintext empty line", heuristic: HeuristicPlaintextSecret, input: ""},
@@ -119,13 +115,13 @@ func TestTextAdaptersNoLeak(t *testing.T) {
 		heuristic string
 		input     string
 	}{
-		{name: "plaintext env", heuristic: HeuristicPlaintextSecret, input: "GITHUB_TOKEN=" + leakCanary},
-		{name: "plaintext header with space", heuristic: HeuristicPlaintextSecret, input: "Authorization: Bearer " + leakCanary},
-		{name: "plaintext header no space", heuristic: HeuristicPlaintextSecret, input: "Authorization:Bearer " + leakCanary},
-		{name: "insecure_url with token in user info", heuristic: HeuristicInsecureURL, input: "http://" + leakCanary + "@mcp.example.com/sse"},
-		{name: "unpinned with canary arg", heuristic: HeuristicUnpinnedPackage, input: "npx -y @scope/server " + leakCanary},
-		{name: "auto_install with canary arg", heuristic: HeuristicAutoInstall, input: "npx -y @scope/server " + leakCanary},
-		{name: "typosquat command line with canary arg", heuristic: HeuristicTyposquat, input: "npx -y @modelcontextprotocol/server-filesytem " + leakCanary},
+		{name: "plaintext env", heuristic: HeuristicPlaintextSecret, input: "GITHUB_TOKEN=" + testGHToken},
+		{name: "plaintext header with space", heuristic: HeuristicPlaintextSecret, input: "Authorization: Bearer " + testGHToken},
+		{name: "plaintext header no space", heuristic: HeuristicPlaintextSecret, input: "Authorization:Bearer " + testGHToken},
+		{name: "insecure_url with token in user info", heuristic: HeuristicInsecureURL, input: "http://" + testGHToken + "@mcp.example.com/sse"},
+		{name: "unpinned with canary arg", heuristic: HeuristicUnpinnedPackage, input: "npx -y @scope/server " + testGHToken},
+		{name: "auto_install with canary arg", heuristic: HeuristicAutoInstall, input: "npx -y @scope/server " + testGHToken},
+		{name: "typosquat command line with canary arg", heuristic: HeuristicTyposquat, input: "npx -y @modelcontextprotocol/server-filesytem " + testGHToken},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -139,7 +135,7 @@ func TestTextAdaptersNoLeak(t *testing.T) {
 				t.Fatalf("got %d hits, want exactly 1 (the leak check needs a hit): %+v", len(hits), hits)
 			}
 			detail := hits[0].Detail
-			if strings.Contains(detail, leakCanary) {
+			if strings.Contains(detail, testGHToken) {
 				t.Errorf("Detail %q contains the canary", detail)
 			}
 			// Every word of the input, split at non-letters and non-digits.

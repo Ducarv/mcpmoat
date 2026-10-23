@@ -113,9 +113,7 @@ func TestParsePopular(t *testing.T) {
 }
 
 // readPopular parses the embedded popular list once for all tests.
-var readPopular = sync.OnceValues(func() ([]string, error) {
-	return builtinPopular()
-})
+var readPopular = sync.OnceValues(builtinPopular)
 
 // loadPopular returns the real popular list, or stops the test when it
 // cannot be read.

@@ -336,7 +336,7 @@ func TestFixtureBuiltinDescriptionRules(t *testing.T) {
 		st := inspectFixture(t, "shadowing")
 		// Wanted description hits per tool. A tool not listed wants none.
 		wantDescription := map[string][]string{
-			"add_numbers": {"MOAT-T1-003", "MOAT-T3-001"},
+			"add_numbers": {"MOAT-T1-003", rules.RuleShadowing},
 		}
 		if !slices.ContainsFunc(st.Tools, func(tool inspect.Tool) bool { return tool.Name == "add_numbers" }) {
 			t.Error("shadowing fixture has no add_numbers tool")

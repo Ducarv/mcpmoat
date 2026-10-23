@@ -192,3 +192,38 @@ func TestRunBuiltinCasesWithWrongMatcher(t *testing.T) {
 		})
 	}
 }
+
+// TestShadowingRegexesInStep checks that the two MOAT-T3-001 patterns share
+// the tool-name group and the keyword tail, so the active and the passive form
+// accept the same tool names and keywords.
+func TestShadowingRegexesInStep(t *testing.T) {
+	t.Parallel()
+	var patterns []string
+	for _, r := range mustBuiltin(t) {
+		if r.ID == RuleShadowing {
+			patterns = r.Match.AnyRegex
+		}
+	}
+	if len(patterns) != 2 {
+		t.Fatalf("%s has %d any_regex patterns, want 2", RuleShadowing, len(patterns))
+	}
+	// The name group runs from its first "(?:`" to the first "`?)" after it.
+	// The keyword tail starts at the window [\s\S]{0,80}.
+	parts := func(re string) (name, tail string) {
+		start := strings.Index(re, "(?:`")
+		end := strings.Index(re[max(start, 0):], "`?)")
+		window := strings.Index(re, `[\s\S]{0,80}`)
+		if start < 0 || end < 0 || window < 0 {
+			t.Fatalf("pattern %q has no name group or keyword window", re)
+		}
+		return re[start : start+end+len("`?)")], re[window:]
+	}
+	name0, tail0 := parts(patterns[0])
+	name1, tail1 := parts(patterns[1])
+	if name0 != name1 {
+		t.Errorf("name groups differ:\n%s\n%s", name0, name1)
+	}
+	if tail0 != tail1 {
+		t.Errorf("keyword tails differ:\n%s\n%s", tail0, tail1)
+	}
+}

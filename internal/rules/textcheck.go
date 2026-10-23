@@ -5,7 +5,6 @@ import (
 	"strings"
 
 	"github.com/Ducarv/mcpmoat/internal/discover"
-	builtinrules "github.com/Ducarv/mcpmoat/rules"
 )
 
 // The adapters in this file let the built-in config rules run their YAML test
@@ -81,7 +80,11 @@ func plaintextSecretText(raw string) []Hit {
 		s.Env = discover.SecretMap{key: discover.NewSecret(value)}
 		return findingHits(checkPlaintextSecrets(s), HeuristicPlaintextSecret)
 	}
-	if name, value, _ := strings.Cut(line, ":"); headerEntryRe.MatchString(line) && !strings.HasPrefix(value, "//") {
+	if headerEntryRe.MatchString(line) {
+		name, value, _ := strings.Cut(line, ":")
+		if strings.HasPrefix(value, "//") {
+			return nil // a URL such as "http://host", not a header
+		}
 		s := discover.Server{
 			Name:      caseServerName,
 			Transport: discover.TransportHTTP,
@@ -135,11 +138,6 @@ func newTyposquatText() (func(raw string) []Hit, error) {
 		}
 		return commandLineHits("", fields, check.Check, HeuristicTyposquat)
 	}, nil
-}
-
-// builtinPopular parses the embedded popular server list.
-func builtinPopular() ([]string, error) {
-	return ParsePopular(strings.NewReader(builtinrules.PopularServers))
 }
 
 // commandLineHits runs check on a stdio server with the given name. The first
