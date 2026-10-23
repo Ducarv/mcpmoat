@@ -23,11 +23,7 @@ const (
 // mustCompileHeuristic compiles a heuristic match block or stops the test.
 func mustCompileHeuristic(t *testing.T, name string, params map[string]int) *Matcher {
 	t.Helper()
-	m, err := Match{Heuristic: name, Params: params}.Compile()
-	if err != nil {
-		t.Fatalf("Compile(%s, %v) error = %v", name, params, err)
-	}
-	return m
+	return mustCompileMatch(t, Match{Heuristic: name, Params: params})
 }
 
 // checkPrintableASCII fails the test when s has a byte outside 0x20 to 0x7e.

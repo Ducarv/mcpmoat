@@ -137,14 +137,15 @@ func invisibleUnicode(raw string) []Hit {
 		excused := false
 		switch r {
 		case textStyle, emojiStyle:
-			excused = isPictograph(prev) || isKeycapBase(prev) && runeAt(raw, i+utf8.RuneLen(r)) == keycapMark
+			excused = isPictograph(prev) || (isKeycapBase(prev) && runeAt(raw, i+utf8.RuneLen(r)) == keycapMark)
 		case zeroWidthJoiner:
 			excused = afterEmoji && isPictograph(runeAt(raw, i+utf8.RuneLen(r)))
 		}
 		if isInvisible(r) && !excused && l.keep(i) {
 			l.hits = append(l.hits, Hit{Offset: i, Detail: fmt.Sprintf("U+%04X at offset %d", r, i)})
 		}
-		afterEmoji = isPictograph(r) || excused && r != zeroWidthJoiner && isPictograph(prev)
+		excusedVS := excused && r != zeroWidthJoiner && isPictograph(prev)
+		afterEmoji = isPictograph(r) || excusedVS
 		prev = r
 	}
 	return l.result("invisible characters")
@@ -162,7 +163,8 @@ func isPictograph(r rune) bool {
 	case 0x203C, 0x2049, 0x2139, 0x2194, 0x2934, 0x2935, 0x3030, 0x303D:
 		return true // the emoji that are not So: Po, Ll, Sm and Pd runes
 	}
-	return r >= 0x80 && unicode.Is(unicode.So, r) || 0x1F3FB <= r && r <= 0x1F3FF
+	isSkinTone := 0x1F3FB <= r && r <= 0x1F3FF
+	return (r >= 0x80 && unicode.Is(unicode.So, r)) || isSkinTone
 }
 
 // isKeycapBase reports whether r can start a keycap emoji: 0-9, '#' or '*'.

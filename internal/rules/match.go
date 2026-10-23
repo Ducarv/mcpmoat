@@ -36,7 +36,7 @@ const (
 	// program size, so this cap bounds the cost of one regex.
 	maxProgInsts = 1000
 	// maxTotalInsts caps the sum of the program sizes of all the regexes in
-	// one list, including the regexes that compileKeywords builds. So 64
+	// one list, including the regexes that keywordExpr builds. So 64
 	// large regexes cannot multiply the cost of a match block.
 	maxTotalInsts = 2500
 	// MaxHits is the largest number of hits that one Match call returns,
@@ -129,19 +129,19 @@ func (m Match) Compile() (*Matcher, error) {
 		}
 		return &Matcher{kind: kindHeuristic, heuristic: fn}, nil
 	case m.AnyRegex != nil:
-		res, err := compileRegexList(kindAnyRegex, m.AnyRegex)
+		res, err := compileRegexList(kindAnyRegex, m.AnyRegex, nil)
 		if err != nil {
 			return nil, err
 		}
 		return &Matcher{kind: kindAnyRegex, regexps: res}, nil
 	case m.AllRegex != nil:
-		res, err := compileRegexList(kindAllRegex, m.AllRegex)
+		res, err := compileRegexList(kindAllRegex, m.AllRegex, nil)
 		if err != nil {
 			return nil, err
 		}
 		return &Matcher{kind: kindAllRegex, regexps: res}, nil
 	default:
-		res, err := compileKeywords(m.Keywords)
+		res, err := compileRegexList(kindKeywords, m.Keywords, keywordExpr)
 		if err != nil {
 			return nil, err
 		}
@@ -197,19 +197,28 @@ func (m *Matcher) Match(text string) []Hit {
 	return nil
 }
 
-// compileRegexList compiles the patterns of the list named field.
-func compileRegexList(field string, patterns []string) ([]*regexp.Regexp, error) {
-	if err := checkList(field, patterns); err != nil {
+// compileRegexList compiles the entries of the list named field, with the
+// size caps on each entry and on the sum of the programs. build turns an
+// entry into its regex; a nil build uses the entry as it is.
+func compileRegexList(field string, list []string, build func(entry, s string) (string, error)) ([]*regexp.Regexp, error) {
+	if err := checkList(field, list); err != nil {
 		return nil, err
 	}
-	res := make([]*regexp.Regexp, 0, len(patterns))
+	res := make([]*regexp.Regexp, 0, len(list))
 	total := 0
-	for i, p := range patterns {
+	for i, s := range list {
 		entry := fmt.Sprintf("%s[%d]", field, i)
-		if err := checkEntry(entry, p); err != nil {
+		if err := checkEntry(entry, s); err != nil {
 			return nil, err
 		}
-		re, insts, err := compileRegex(entry, p)
+		expr := s
+		if build != nil {
+			var err error
+			if expr, err = build(entry, s); err != nil {
+				return nil, err
+			}
+		}
+		re, insts, err := compileRegex(entry, expr)
 		if err != nil {
 			return nil, err
 		}
@@ -232,7 +241,8 @@ func checkTotal(field string, total int) error {
 	return nil
 }
 
-// compileKeywords builds and compiles one regex for each keyword.
+// keywordExpr builds the regex of the keyword kw. entry names the keyword
+// in an error.
 //
 // A keyword is normalized like the text it is matched against, with
 // normalizeForMatch and then foldMarks. It then matches without regard to
@@ -249,56 +259,35 @@ func checkTotal(field string, total int) error {
 //
 // The edge check is added only on a side where the keyword starts or ends
 // with a word rune. So the keyword "C++" still matches in "C++, Go".
-func compileKeywords(keywords []string) ([]*regexp.Regexp, error) {
-	if err := checkList(kindKeywords, keywords); err != nil {
-		return nil, err
+func keywordExpr(entry, kw string) (string, error) {
+	words := strings.FieldsFunc(foldMarks(normalizeForMatch(kw)), isKeywordSpace)
+	if len(words) == 0 {
+		return "", &FieldError{Field: entry, Msg: "has no visible characters"}
 	}
-	res := make([]*regexp.Regexp, 0, len(keywords))
-	total := 0
-	for i, kw := range keywords {
-		entry := fmt.Sprintf("%s[%d]", kindKeywords, i)
-		if err := checkEntry(entry, kw); err != nil {
-			return nil, err
-		}
-		words := strings.FieldsFunc(foldMarks(normalizeForMatch(kw)), isKeywordSpace)
-		if len(words) == 0 {
-			return nil, &FieldError{Field: entry, Msg: "has no visible characters"}
-		}
-		for j, w := range words {
-			words[j] = regexp.QuoteMeta(w)
-		}
-		expr := `(?i:` + strings.Join(words, `[\s\v\x{85}\p{Z}\x{2800}]+`) + `)`
-
-		first, _ := utf8.DecodeRuneInString(words[0])
-		if isWordRune(first) {
-			expr = `(?:^|[^\p{L}\p{M}\p{N}_])` + expr
-		}
-		last, _ := utf8.DecodeLastRuneInString(words[len(words)-1])
-		if isWordRune(last) {
-			expr += `(?:$|[^\p{L}\p{M}\p{N}_])`
-		}
-
-		re, insts, err := compileRegex(entry, expr)
-		if err != nil {
-			return nil, err
-		}
-		total += insts
-		if err := checkTotal(kindKeywords, total); err != nil {
-			return nil, err
-		}
-		res = append(res, re)
+	for j, w := range words {
+		words[j] = regexp.QuoteMeta(w)
 	}
-	return res, nil
+	expr := `(?i:` + strings.Join(words, `[\s\v\x{85}\p{Z}\x{2800}]+`) + `)`
+
+	first, _ := utf8.DecodeRuneInString(words[0])
+	if isWordRune(first) {
+		expr = `(?:^|[^\p{L}\p{M}\p{N}_])` + expr
+	}
+	last, _ := utf8.DecodeLastRuneInString(words[len(words)-1])
+	if isWordRune(last) {
+		expr += `(?:$|[^\p{L}\p{M}\p{N}_])`
+	}
+	return expr, nil
 }
 
 // isKeywordSpace reports whether r separates the words of a keyword. It is
-// the same set as the white-space class in compileKeywords.
+// the same set as the white-space class in keywordExpr.
 func isKeywordSpace(r rune) bool {
 	return unicode.IsSpace(r) || r == '\u2800'
 }
 
 // isWordRune reports whether r is a letter, a mark, a number or '_'. It is
-// the same set as the class [\p{L}\p{M}\p{N}_] in compileKeywords.
+// the same set as the class [\p{L}\p{M}\p{N}_] in keywordExpr.
 func isWordRune(r rune) bool {
 	return r == '_' || unicode.In(r, unicode.L, unicode.M, unicode.N)
 }
