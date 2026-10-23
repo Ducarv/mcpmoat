@@ -57,10 +57,7 @@ var fuzzLongText = strings.Repeat("a ", MaxMatchInputBytes/2) + "ignore previous
 func fuzzMatchers(tb testing.TB) []*Matcher {
 	tb.Helper()
 	blocks := []Match{
-		{AnyRegex: []string{
-			`(?i)do not (tell|inform|mention).{0,30}user`,
-			`(?i)without (telling|notifying) the user`,
-		}},
+		{AnyRegex: t1003Patterns},
 		{AllRegex: []string{`(?i)ignore`, `(?i)previous`, `(?i)instructions`}},
 		{Keywords: []string{"ignore previous", "~/.ssh", "C++", "do not tell"}},
 		// More than MaxHits keywords, so the summary hit is reachable.
@@ -69,15 +66,7 @@ func fuzzMatchers(tb testing.TB) []*Matcher {
 		{Heuristic: HeuristicMaxLength},
 		{Heuristic: HeuristicBase64Blob},
 	}
-	ms := make([]*Matcher, len(blocks))
-	for i, b := range blocks {
-		m, err := b.Compile()
-		if err != nil {
-			tb.Fatalf("Compile(block %d) error = %v", i, err)
-		}
-		ms[i] = m
-	}
-	return ms
+	return mustCompileAll(tb, blocks)
 }
 
 // checkFuzzHits fails the test if hits break a property of Matcher.Match for

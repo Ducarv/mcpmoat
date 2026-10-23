@@ -4,7 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"reflect"
-	"regexp/syntax"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -23,38 +23,35 @@ var t1003Patterns = []string{
 	`(?i)without (telling|notifying) the user`,
 }
 
-// matchTestInsts returns the program size of expr, counted the same way as
-// compileRegex counts it.
-func matchTestInsts(t *testing.T, expr string) int {
-	t.Helper()
-	tree, err := syntax.Parse(expr, syntax.Perl)
+// progInsts returns the program size of expr, counted by the progSize that
+// compileRegex uses.
+func progInsts(tb testing.TB, expr string) int {
+	tb.Helper()
+	_, n, err := progSize(expr)
 	if err != nil {
-		t.Fatalf("syntax.Parse(%q) error = %v", expr, err)
+		tb.Fatalf("progSize(%q) error = %v", expr, err)
 	}
-	prog, err := syntax.Compile(tree.Simplify())
-	if err != nil {
-		t.Fatalf("syntax.Compile(%q) error = %v", expr, err)
-	}
-	return len(prog.Inst)
+	return n
 }
 
 // mustCompileMatch compiles m or stops the test.
-func mustCompileMatch(t *testing.T, m Match) *Matcher {
-	t.Helper()
+func mustCompileMatch(tb testing.TB, m Match) *Matcher {
+	tb.Helper()
 	got, err := m.Compile()
 	if err != nil {
-		t.Fatalf("Compile(%+v) error = %v", m, err)
+		tb.Fatalf("Compile(%+v) error = %v", m, err)
 	}
 	return got
 }
 
-// repeatList returns a list of n copies of s.
-func repeatList(s string, n int) []string {
-	l := make([]string, n)
-	for i := range l {
-		l[i] = s
+// mustCompileAll compiles each block or stops the test.
+func mustCompileAll(tb testing.TB, blocks []Match) []*Matcher {
+	tb.Helper()
+	ms := make([]*Matcher, len(blocks))
+	for i, b := range blocks {
+		ms[i] = mustCompileMatch(tb, b)
 	}
-	return l
+	return ms
 }
 
 // numberedList returns n distinct entries made by format with the index.
@@ -92,12 +89,12 @@ func TestCompileErrors(t *testing.T) {
 	// Preconditions on the size cases, so a change of a cap cannot make a
 	// case test the wrong limit without notice.
 	bigProg := `(?:abcdef){200}`
-	if n := matchTestInsts(t, bigProg); n <= maxProgInsts {
+	if n := progInsts(t, bigProg); n <= maxProgInsts {
 		t.Fatalf("precondition: %s has %d instructions, want over maxProgInsts", bigProg, n)
 	}
 	// Each entry is under maxProgInsts, but the sum is over maxTotalInsts.
 	midProg := `[a-z]{0,490}!` + matchSecret
-	midInsts := matchTestInsts(t, midProg)
+	midInsts := progInsts(t, midProg)
 	nMid := maxTotalInsts/midInsts + 1
 	if midInsts > maxProgInsts || nMid > MaxPatterns {
 		t.Fatalf("precondition: %s has %d instructions; %d entries needed", midProg, midInsts, nMid)
@@ -195,12 +192,12 @@ func TestCompileErrors(t *testing.T) {
 		},
 		{
 			name:      "regex list over maxTotalInsts",
-			match:     Match{AnyRegex: repeatList(midProg, nMid)},
+			match:     Match{AnyRegex: slices.Repeat([]string{midProg}, nMid)},
 			wantField: "any_regex", wantMsg: "too complex in total",
 		},
 		{
 			name:      "keyword list over maxTotalInsts",
-			match:     Match{Keywords: repeatList(longKeyword, MaxPatterns)},
+			match:     Match{Keywords: slices.Repeat([]string{longKeyword}, MaxPatterns)},
 			wantField: "keywords", wantMsg: "too complex in total", leak: longKeyword,
 		},
 		{

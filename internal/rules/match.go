@@ -348,15 +348,10 @@ func checkEntry(field, s string) error {
 // compileRegex also returns the number of instructions, so the caller can
 // check the sum over a list (see maxTotalInsts).
 func compileRegex(field, expr string) (*regexp.Regexp, int, error) {
-	tree, err := syntax.Parse(expr, syntax.Perl)
+	tree, insts, err := progSize(expr)
 	if err != nil {
 		return nil, 0, regexError(field, err)
 	}
-	prog, err := syntax.Compile(tree.Simplify())
-	if err != nil {
-		return nil, 0, regexError(field, err)
-	}
-	insts := len(prog.Inst)
 	if insts > maxProgInsts {
 		return nil, 0, &FieldError{Field: field, Msg: fmt.Sprintf("regex is too complex: %d instructions, over the limit of %d", insts, maxProgInsts)}
 	}
@@ -372,6 +367,20 @@ func compileRegex(field, expr string) (*regexp.Regexp, int, error) {
 		return nil, 0, regexError(field, err)
 	}
 	return re, insts, nil
+}
+
+// progSize parses expr with the flags of regexp.Compile and returns the
+// parse tree and the number of instructions of its compiled program.
+func progSize(expr string) (*syntax.Regexp, int, error) {
+	tree, err := syntax.Parse(expr, syntax.Perl)
+	if err != nil {
+		return nil, 0, err
+	}
+	prog, err := syntax.Compile(tree.Simplify())
+	if err != nil {
+		return nil, 0, err
+	}
+	return tree, len(prog.Inst), nil
 }
 
 // minLen returns the smallest number of runes that a match of re can read.

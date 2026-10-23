@@ -2,7 +2,7 @@ package rules
 
 import (
 	"fmt"
-	"regexp/syntax"
+	"slices"
 	"strings"
 	"testing"
 	"unicode/utf8"
@@ -60,28 +60,18 @@ var benchKeywords = []string{
 func benchMatcherSet(tb testing.TB) []*Matcher {
 	tb.Helper()
 	blocks := []Match{
-		{AnyRegex: []string{
-			`(?i)do not (tell|inform|mention).{0,30}user`, // MOAT-T1-003
-			`(?i)without (telling|notifying) the user`,    // MOAT-T1-003
+		{AnyRegex: append(slices.Clone(t1003Patterns),
 			`(?i)ignore (all |any )?(previous|prior|above) (instructions|rules|prompts)`,
 			`(?i)<\s*(important|system|secret)\s*>`,
 			`(?i)(read|cat|open|send|upload)\s.{0,40}(~/\.ssh|id_rsa|\.aws/credentials|\.env\b)`,
 			`(?i)before (using|calling) (this|any) tool.{0,60}(must|always)`,
-		}},
+		)},
 		{Keywords: benchKeywords},
 		{Heuristic: HeuristicInvisibleUnicode},
 		{Heuristic: HeuristicMaxLength},
 		{Heuristic: HeuristicBase64Blob},
 	}
-	ms := make([]*Matcher, 0, len(blocks))
-	for i, b := range blocks {
-		m, err := b.Compile()
-		if err != nil {
-			tb.Fatalf("block %d: Compile() error = %v", i, err)
-		}
-		ms = append(ms, m)
-	}
-	return ms
+	return mustCompileAll(tb, blocks)
 }
 
 // benchText returns a deterministic text of at least size bytes, made of
@@ -135,21 +125,6 @@ func BenchmarkAnalysis10x20(b *testing.B) {
 			matchAll(ms, d)
 		}
 	}
-}
-
-// progInsts returns the program size of expr, counted like compileRegex
-// does.
-func progInsts(tb testing.TB, expr string) int {
-	tb.Helper()
-	tree, err := syntax.Parse(expr, syntax.Perl)
-	if err != nil {
-		tb.Fatalf("syntax.Parse(%q) error = %v", expr, err)
-	}
-	prog, err := syntax.Compile(tree.Simplify())
-	if err != nil {
-		tb.Fatalf("syntax.Compile(%q) error = %v", expr, err)
-	}
-	return len(prog.Inst)
 }
 
 // worstBlock returns an any_regex list that is about as costly as the caps
@@ -223,11 +198,15 @@ func TestMatch10MBCorrect(t *testing.T) {
 	if testing.Short() {
 		t.Skip("builds a 10 MB text")
 	}
-	ms := benchMatcherSet(t)
-	keywords, invisible, maxLen, b64 := ms[1], ms[2], ms[3], ms[4]
+	keywords := mustCompileMatch(t, Match{Keywords: benchKeywords})
+	invisible := mustCompileMatch(t, Match{Heuristic: HeuristicInvisibleUnicode})
+	maxLen := mustCompileMatch(t, Match{Heuristic: HeuristicMaxLength})
+	b64 := mustCompileMatch(t, Match{Heuristic: HeuristicBase64Blob})
 
-	const early = "ignore previous" // benchKeywords[0], planted in the first KiB
-	const late = "id_rsa"           // benchKeywords[7], planted after the cap
+	const early = "ignore previous" // planted in the first KiB
+	const late = "id_rsa"           // planted after the cap
+	earlyHit := fmt.Sprintf("keyword[%d] matched", slices.Index(benchKeywords, early))
+	lateHit := fmt.Sprintf("keyword[%d] matched", slices.Index(benchKeywords, late))
 	filler := benchText(benchTextSize, 0)
 	zwspAt := len(filler) - 100
 	for !utf8.RuneStart(filler[zwspAt]) {
@@ -246,25 +225,25 @@ func TestMatch10MBCorrect(t *testing.T) {
 	t.Run("keyword in the first KiB is found, keyword after the cap is not", func(t *testing.T) {
 		t.Parallel()
 		got := keywords.Match(text)
-		want := []Hit{{Offset: -1, Detail: "keyword[0] matched"}}
+		want := []Hit{{Offset: -1, Detail: earlyHit}}
 		if len(got) != 1 || got[0] != want[0] {
 			t.Errorf("keywords.Match() = %v, want %v", got, want)
 		}
 		// The late keyword alone is found when it is inside the cap.
-		if got := keywords.Match(late); len(got) != 1 || got[0].Detail != "keyword[7] matched" {
-			t.Errorf("keywords.Match(%q) = %v, want keyword[7]", late, got)
+		if got := keywords.Match(late); len(got) != 1 || got[0].Detail != lateHit {
+			t.Errorf("keywords.Match(%q) = %v, want %q", late, got, lateHit)
 		}
 	})
 
 	t.Run("invisible_unicode finds the ZWSP near the end", func(t *testing.T) {
 		t.Parallel()
+		if text[zwspAt:zwspAt+3] != "\u200b" {
+			t.Fatalf("test setup: no ZWSP at offset %d", zwspAt)
+		}
 		got := invisible.Match(text)
 		want := Hit{Offset: zwspAt, Detail: fmt.Sprintf("U+200B at offset %d", zwspAt)}
 		if len(got) != 1 || got[0] != want {
 			t.Errorf("invisible.Match() = %v, want [%v]", got, want)
-		}
-		if text[zwspAt:zwspAt+3] != "\u200b" {
-			t.Fatalf("test setup: no ZWSP at offset %d", zwspAt)
 		}
 	})
 
