@@ -10,6 +10,7 @@
 # Reference servers (npm, @modelcontextprotocol)
 @modelcontextprotocol/server-filesystem
 @modelcontextprotocol/server-github
+@modelcontextprotocol/server-gitlab
 @modelcontextprotocol/server-memory
 @modelcontextprotocol/server-postgres
 @modelcontextprotocol/server-everything

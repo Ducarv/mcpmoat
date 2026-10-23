@@ -8,8 +8,10 @@
 // This package holds the one rule for every place that prints such text.
 // internal/discover uses it for the paths, project keys and server names in a
 // FileError message, internal/report uses it for every cell of the server
-// table, and cmd/mcpmoat uses it for the arguments in an error message. Keep
-// the rule here only, so these places cannot drift apart.
+// table, and cmd/mcpmoat uses it for the arguments in an error message.
+// internal/rules uses IsInvisible to compare tool names and descriptions as
+// a model reads them. Keep the rule here only, so these places cannot drift
+// apart.
 //
 // The package uses only the standard library and imports no other package of
 // this module, so every package can import it.

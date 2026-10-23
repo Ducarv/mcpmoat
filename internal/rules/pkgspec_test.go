@@ -5,8 +5,8 @@ import (
 	"testing"
 )
 
-// digest is a valid sha256 image digest for the docker cases.
-var digest = "sha256:" + strings.Repeat("ab12", 16)
+// testDigest is a valid sha256 image digest for the docker cases.
+var testDigest = "sha256:" + strings.Repeat("ab12", 16)
 
 func TestExtractPackage(t *testing.T) {
 	t.Parallel()
@@ -252,10 +252,10 @@ func TestExtractPackage(t *testing.T) {
 			want: PackageSpec{RunnerDocker, "image", "latest"}, ok: true, unpinned: true},
 		{name: "docker tag", command: "docker", args: []string{"run", "image:1.2"},
 			want: PackageSpec{RunnerDocker, "image", "1.2"}, ok: true},
-		{name: "docker digest", command: "docker", args: []string{"run", "image@" + digest},
-			want: PackageSpec{RunnerDocker, "image", digest}, ok: true},
-		{name: "docker tag and digest", command: "docker", args: []string{"run", "image:1@" + digest},
-			want: PackageSpec{RunnerDocker, "image", digest}, ok: true},
+		{name: "docker digest", command: "docker", args: []string{"run", "image@" + testDigest},
+			want: PackageSpec{RunnerDocker, "image", testDigest}, ok: true},
+		{name: "docker tag and digest", command: "docker", args: []string{"run", "image:1@" + testDigest},
+			want: PackageSpec{RunnerDocker, "image", testDigest}, ok: true},
 		{name: "docker value flags skipped", command: "docker", args: []string{"run", "-e", "TOKEN", "-v", "/a:/b", "image:1.0"},
 			want: PackageSpec{RunnerDocker, "image", "1.0"}, ok: true},
 		{name: "docker --env=", command: "docker", args: []string{"run", "--env=X=1", "image"},
@@ -376,7 +376,9 @@ func TestUnpinned(t *testing.T) {
 		{RunnerUVX, "x", false},
 		{RunnerDocker, "latest", true},
 		{RunnerDocker, "x", false},
-		{RunnerDocker, digest, false},
+		{RunnerDocker, testDigest, false},
+		{RunnerUVX, "!=1.0", true},
+		{RunnerUVX, "!=1.0,>=0.5", false},
 	}
 	for _, tt := range tests {
 		t.Run(string(tt.runner)+" version "+tt.version, func(t *testing.T) {
@@ -384,6 +386,45 @@ func TestUnpinned(t *testing.T) {
 			spec := PackageSpec{Runner: tt.runner, Version: tt.version}
 			if got := spec.Unpinned(); got != tt.want {
 				t.Errorf("%+v.Unpinned() = %v, want %v", spec, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestPackageAt checks the index of the spec argument, which launchKey and
+// the MOAT-T4-003 Related gate use.
+func TestPackageAt(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		command string
+		args    []string
+		wantAt  int
+		ok      bool
+	}{
+		{"npx positional", "npx", []string{"-y", "pkg-a"}, 1, true},
+		{"npx --package=", "npx", []string{"--package=pkg-a", "bin"}, 0, true},
+		{"npx -p value", "npx", []string{"-y", "-p", "pkg-a", "bin"}, 2, true},
+		{"npx after --", "npx", []string{"--", "pkg-a"}, 1, true},
+		{"npx server -p after the command", "npx", []string{"-p", "pkg-a", "bin", "-p", "3000"}, 1, true},
+		{"npx second -p is doubtful", "npx", []string{"-p", "pkg-a", "-p", "pkg-b", "bin"}, 0, false},
+		{"npx second --package= is doubtful", "npx", []string{"--package=pkg-a", "--package=pkg-b", "bin"}, 0, false},
+		{"pipx run", "pipx", []string{"run", "pkg-a"}, 1, true},
+		{"pipx run --spec", "pipx", []string{"run", "--spec", "pkg-a", "bin"}, 2, true},
+		{"uvx --from", "uvx", []string{"--from", "pkg-a", "bin"}, 1, true},
+		{"docker run", "docker", []string{"run", "-i", "image"}, 2, true},
+		{"docker container run", "docker", []string{"--context", "x", "container", "run", "-i", "image"}, 5, true},
+		{"cmd /c npx", "cmd", []string{"/c", "npx", "-y", "pkg-a"}, 3, true},
+		{"cmd.exe /C pipx run", "cmd.exe", []string{"/C", "pipx", "run", "pkg-a"}, 3, true},
+		{"cmd without /c", "cmd", []string{"npx", "pkg-a"}, 0, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			_, at, ok := packageAt(tt.command, tt.args)
+			if ok != tt.ok || (ok && at != tt.wantAt) {
+				t.Errorf("packageAt(%q, %q) = %d, %v, want %d, %v", tt.command, tt.args, at, ok, tt.wantAt, tt.ok)
 			}
 		})
 	}

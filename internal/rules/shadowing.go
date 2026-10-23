@@ -2,6 +2,7 @@ package rules
 
 import (
 	"cmp"
+	"regexp"
 	"slices"
 	"strconv"
 	"strings"
@@ -15,6 +16,11 @@ import (
 // minShadowNameLen is the shortest tool name that CheckShadowing looks for.
 // Shorter names match too often in normal prose.
 const minShadowNameLen = 5
+
+// compoundName matches a tool name with two or more words: words of letters
+// and digits joined by "_" or "-" ("send_email"), or a lower-case letter
+// followed by an upper-case one ("sendEmail").
+var compoundName = regexp.MustCompile(`^[A-Za-z0-9]+([_-][A-Za-z0-9]+)+$|[a-z][A-Z]`)
 
 // ServerTools is one server with the tools that inspect read from it.
 type ServerTools struct {
@@ -56,9 +62,9 @@ func (n nameOwners) other(identity int) (toolOwner, bool) {
 // a tool called send_email, the check reports it.
 //
 // The check ignores:
-//   - tool names shorter than minShadowNameLen bytes, and single-word names
-//     such as "search" or "click" (see isCompoundName), which appear in
-//     normal prose;
+//   - tool names shorter than minShadowNameLen bytes, and names that are not
+//     compound (see compoundName), such as "search", "click" or "-----",
+//     which appear in normal prose;
 //   - a name that only the describing server owns, so a tool that names a
 //     tool of its own server, or itself, is not reported.
 //
@@ -66,11 +72,11 @@ func (n nameOwners) other(identity int) (toolOwner, bool) {
 // is reported. Otherwise a hostile server could hide a mention by adding a
 // dummy tool with the victim's name.
 //
-// Names are compared without case, and "-" and "_" count as the same
-// character, so "send-email" mentions "send_email". Invisible runes (see
-// termsafe.IsInvisible: zero-width and bidi characters, variation selectors,
-// Hangul fillers) are removed from names and descriptions first: the model
-// reads "send<U+200B>_email" as "send_email". A name counts
+// Names are compared in the form of foldText: without case, without "_",
+// "-" and other dashes, and without invisible runes (see
+// termsafe.IsInvisible). So "send-email", "sendEmail" and
+// "send<U+200B>_email" all mention "send_email", as the model reads them. A
+// name counts
 // as mentioned only at identifier boundaries: the bytes before and after it
 // are not letters, digits, "_" or "-". So "send_email_later" does not mention
 // "send_email". The whole description is scanned, with no size cap: padding
@@ -165,18 +171,21 @@ func launchIdentities(all []ServerTools) []int {
 // Name and Client are never part of it. Every part is written with its length
 // in front, so two different configs never give the same key.
 //
-//   - A stdio server whose package runner fetches a package (see
-//     ExtractPackage) is known by the runner and the package name only. The
-//     same package with another version or other args, in any folder, is
-//     the same server with the same tools.
 //   - A remote server is known by its URL, in every project.
+//   - A stdio server whose package runner fetches a package (see
+//     ExtractPackage) is known by Command as written, the runner flags before
+//     the package spec (such as "--registry" or "uvx --with"), and the
+//     package name. The version and the server's own args after the spec
+//     are not part of it, and neither is the folder: the same package with
+//     another version or another root path is the same server with the same
+//     tools.
 //   - Any other stdio launch, such as "node server.js", is known by Command,
 //     Args, Dir and ProjectPath: it can run a different program in another
 //     folder.
 //
 // Known limit: a package runner can read files in its folder (a local
-// node_modules, an npm or uv config) or take a registry flag, so the "same"
-// package can still be a different program.
+// node_modules, an npm or uv config) or env variables (npm_config_registry),
+// so the "same" package can still be a different program.
 //
 // The key can hold secrets in Args and URL: it is used only as a map key and
 // must not reach a Finding, an error or a log.
@@ -188,23 +197,26 @@ func launchKey(s discover.Server) string {
 		b.WriteString(v)
 	}
 	part(string(s.Transport))
-	args := s.Args.Values()
-	spec, fetched := ExtractPackage(s.Command, args)
-	if s.Transport == discover.TransportStdio && fetched {
-		part(string(spec.Runner))
-		part(registryName(spec))
+	if s.Transport.IsRemote() {
+		part(s.URL.Reveal())
 		return b.String()
 	}
 	part(s.Command)
+	args := s.Args.Values()
+	if spec, at, fetched := packageAt(s.Command, args); fetched {
+		part(strconv.Itoa(at))
+		for _, a := range args[:at] {
+			part(a)
+		}
+		part(registryName(spec))
+		return b.String()
+	}
 	part(strconv.Itoa(len(args)))
 	for _, a := range args {
 		part(a)
 	}
-	part(s.URL.Reveal())
-	if s.Transport == discover.TransportStdio {
-		part(s.Dir)
-		part(s.ProjectPath)
-	}
+	part(s.Dir)
+	part(s.ProjectPath)
 	return b.String()
 }
 
@@ -216,7 +228,7 @@ func indexOwners(all []ServerTools, identities []int) map[string]nameOwners {
 	for i, st := range all {
 		for _, tool := range st.Tools {
 			name := foldText(tool.Name)
-			if len(name) < minShadowNameLen || !isCompoundName(tool.Name) || !allIdentBytes(name) {
+			if len(tool.Name) < minShadowNameLen || !compoundName.MatchString(tool.Name) || !allIdentBytes(name) {
 				continue
 			}
 			o := toolOwner{identity: identities[i], server: st.Server.Name, toolName: tool.Name}
@@ -235,31 +247,14 @@ func indexOwners(all []ServerTools, identities []int) map[string]nameOwners {
 	return owners
 }
 
-// isCompoundName reports whether a tool name has two or more words: it holds
-// "_" or "-", or a lower-case letter followed by an upper-case one, as in
-// "sendEmail". A single word such as "click" or "search" is normal prose in
-// descriptions, so it is not a candidate.
-func isCompoundName(name string) bool {
-	if strings.ContainsAny(name, "_-") {
-		return true
-	}
-	for i := 1; i < len(name); i++ {
-		if name[i-1] >= 'a' && name[i-1] <= 'z' && name[i] >= 'A' && name[i] <= 'Z' {
-			return true
-		}
-	}
-	return false
-}
-
 // foldText returns s in the form that names and descriptions are compared
-// in: lower case, with no invisible runes (see termsafe.IsInvisible), and
-// with every "-" written as "_".
+// in: lower case, with no invisible runes (see termsafe.IsInvisible) and no
+// word separators ("_", "-", other dashes and the minus sign U+2212). So
+// "send_email", "Send-Email" and "sendEmail" all fold to "sendemail".
 func foldText(s string) string {
 	return strings.Map(func(r rune) rune {
 		switch {
-		case r == '-':
-			return '_'
-		case termsafe.IsInvisible(r):
+		case r == '_', r == '\u2212', unicode.Is(unicode.Pd, r), termsafe.IsInvisible(r):
 			return -1
 		default:
 			return unicode.ToLower(r)

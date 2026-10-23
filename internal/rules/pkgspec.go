@@ -48,11 +48,15 @@ type PackageSpec struct {
 }
 
 // Unpinned reports whether the spec has no version, the version "latest"
-// (case-insensitive), or for npx and bunx the "any version" range "*" or "x".
-// A docker digest counts as pinned. Known limit: other dist-tags, such as
-// "next" or "beta", also move, but they count as pinned.
+// (case-insensitive), for npx and bunx the "any version" range "*" or "x",
+// or a lone exclusion such as "!=1.0" (every version but one). A docker
+// digest counts as pinned. Known limit: other dist-tags, such as "next" or
+// "beta", and open ranges such as ">=1" also move, but they count as pinned.
 func (p PackageSpec) Unpinned() bool {
 	if p.Version == "" || strings.EqualFold(p.Version, "latest") {
+		return true
+	}
+	if strings.HasPrefix(p.Version, "!=") && !strings.Contains(p.Version, ",") {
 		return true
 	}
 	npm := p.Runner == RunnerNPX || p.Runner == RunnerBunx
@@ -70,6 +74,10 @@ func (p PackageSpec) Unpinned() bool {
 // a valid name (for example a lower-case "ghp_..." value) is returned. The
 // callers must not print the name unless discover.RedactArgs shows it.
 //
+// A Windows "cmd /c <runner> ..." wrapper is read through. A second
+// "-p"/"--package" (or "--from") makes the parse doubtful, because npx then
+// installs several packages and the one that runs is not known.
+//
 // Known limits: pnpm dlx, npm exec, yarn dlx, uv tool run and podman are not
 // covered. Version ranges such as ^1 or >=1 count as pinned.
 //
@@ -79,32 +87,51 @@ func (p PackageSpec) Unpinned() bool {
 // takes a value can still steer the parse to the wrong word. If that word is a
 // valid package name, it is returned.
 func ExtractPackage(command string, args []string) (PackageSpec, bool) {
-	spec, ok := extractPackage(command, args)
-	if !ok || !validName(spec.Runner, spec.Name) {
-		return PackageSpec{}, false
-	}
-	return spec, true
+	spec, _, ok := packageAt(command, args)
+	return spec, ok
 }
 
-// extractPackage does the parse for ExtractPackage, before the name check.
-func extractPackage(command string, args []string) (PackageSpec, bool) {
+// packageAt is ExtractPackage that also returns the index in args of the
+// argument that holds the spec.
+func packageAt(command string, args []string) (PackageSpec, int, bool) {
+	spec, at, ok := extractPackage(command, args)
+	if !ok || !validName(spec.Runner, spec.Name) {
+		return PackageSpec{}, 0, false
+	}
+	return spec, at, true
+}
+
+// extractPackage does the parse for packageAt, before the name check.
+func extractPackage(command string, args []string) (PackageSpec, int, bool) {
+	if isCmdWrapper(command, args) {
+		spec, at, ok := extractPackage(args[1], args[2:])
+		return spec, at + 2, ok
+	}
 	switch r := runnerOf(command); r {
 	case RunnerNPX:
-		return extractNPM(r, npmRules, args)
+		return extractNPM(r, npmFlags, args)
 	case RunnerBunx:
-		return extractNPM(r, bunxRules, args)
+		return extractNPM(r, bunxFlags, args)
 	case RunnerUVX:
-		return extractPython(r, uvxRules, args)
+		return extractPython(r, uvxFlags, args)
 	case RunnerPipx:
 		if len(args) == 0 || args[0] != "run" {
-			return PackageSpec{}, false
+			return PackageSpec{}, 0, false
 		}
-		return extractPython(r, pipxRules, args[1:])
+		spec, at, ok := extractPython(r, pipxFlags, args[1:])
+		return spec, at + 1, ok
 	case RunnerDocker:
 		return extractDocker(args)
 	default:
-		return PackageSpec{}, false
+		return PackageSpec{}, 0, false
 	}
+}
+
+// isCmdWrapper reports whether command and args are "cmd /c <command> ...",
+// the usual way to start npx or uvx from a Windows client config.
+func isCmdWrapper(command string, args []string) bool {
+	base := strings.TrimSuffix(strings.ToLower(filepath.Base(command)), ".exe")
+	return base == "cmd" && len(args) >= 2 && strings.EqualFold(args[0], "/c")
 }
 
 // validName reports whether name is a valid package name for the registry of
@@ -241,8 +268,8 @@ func runnerOf(command string) Runner {
 	}
 }
 
-// scanRules tells scanArgs how to read the flags of one runner.
-type scanRules struct {
+// flagTable tells scanArgs how to read the flags of one runner.
+type flagTable struct {
 	valued   map[string]bool // flags that consume the next argument
 	override map[string]bool // flags whose value is the spec itself
 	stop     map[string]bool // flags that make the parse doubtful
@@ -259,14 +286,15 @@ func flagSet(names ...string) map[string]bool {
 
 // scanArgs walks args and returns the spec: the value of an override flag, or
 // else the first argument that is not a flag. It also returns the index of
-// the first argument after the spec. It returns false if there is no spec,
-// or if a stop flag comes first.
-func scanArgs(args []string, flags scanRules) (spec string, next int, ok bool) {
+// the argument that holds the spec. It returns false if there is no spec, if
+// a stop flag comes first, or if a second override flag follows the first
+// one (see secondOverride).
+func scanArgs(args []string, flags flagTable) (spec string, at int, ok bool) {
 	for i := 0; i < len(args); i++ {
 		arg := args[i]
 		if arg == "--" {
 			if i+1 < len(args) {
-				return args[i+1], i + 2, true
+				return args[i+1], i + 1, true
 			}
 			return "", 0, false
 		}
@@ -274,20 +302,24 @@ func scanArgs(args []string, flags scanRules) (spec string, next int, ok bool) {
 			return "", 0, false
 		}
 		if !strings.HasPrefix(arg, "-") {
-			return arg, i + 1, true
+			return arg, i, true
 		}
 		flag, value, hasValue := strings.Cut(arg, "=")
 		switch {
 		case flags.stop[flag]:
 			return "", 0, false
 		case flags.override[flag]:
-			if hasValue {
-				return value, i + 1, value != ""
+			at := i
+			if !hasValue {
+				if i+1 >= len(args) {
+					return "", 0, false
+				}
+				at, value = i+1, args[i+1]
 			}
-			if i+1 < len(args) {
-				return args[i+1], i + 2, true
+			if value == "" || secondOverride(args[at+1:], flags) {
+				return "", 0, false
 			}
-			return "", 0, false
+			return value, at, true
 		case flags.valued[flag] && !hasValue:
 			i++ // skip the flag value
 		}
@@ -295,9 +327,29 @@ func scanArgs(args []string, flags scanRules) (spec string, next int, ok bool) {
 	return "", 0, false
 }
 
-// npmRules are the flags of npx. They follow npm exec and the npm config
+// secondOverride reports whether the runner flags in args, up to the first
+// argument that is not a flag (the command that the runner runs), hold
+// another override flag. Arguments after that command belong to the server.
+func secondOverride(args []string, flags flagTable) bool {
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		if arg == "--" || !strings.HasPrefix(arg, "-") {
+			return false
+		}
+		flag, _, hasValue := strings.Cut(arg, "=")
+		switch {
+		case flags.override[flag]:
+			return true
+		case flags.valued[flag] && !hasValue:
+			i++ // skip the flag value
+		}
+	}
+	return false
+}
+
+// npmFlags are the flags of npx. They follow npm exec and the npm config
 // flags that npx accepts.
-var npmRules = scanRules{
+var npmFlags = flagTable{
 	valued: flagSet(
 		"--loglevel", "-w", "--workspace", "--shell", "--script-shell",
 		"--userconfig", "--globalconfig", "--registry", "--cache", "--prefix", "-C",
@@ -312,9 +364,9 @@ var npmRules = scanRules{
 	stop:     flagSet("-c", "--call"),
 }
 
-// bunxRules are the flags of bunx. "--bun" and similar boolean flags are not
+// bunxFlags are the flags of bunx. "--bun" and similar boolean flags are not
 // listed.
-var bunxRules = scanRules{
+var bunxFlags = flagTable{
 	valued: flagSet(
 		"--cwd", "--registry", "--install", "--tsconfig-override", "--env-file",
 		"-r", "--preload", "--port", "--define", "-d", "--loader", "-l",
@@ -325,17 +377,17 @@ var bunxRules = scanRules{
 }
 
 // extractNPM reads the package from npx or bunx arguments, with the flag
-// rules of that runner.
-func extractNPM(r Runner, flags scanRules, args []string) (PackageSpec, bool) {
-	spec, _, ok := scanArgs(args, flags)
+// table of that runner. It also returns the index of the spec argument.
+func extractNPM(r Runner, flags flagTable, args []string) (PackageSpec, int, bool) {
+	spec, at, ok := scanArgs(args, flags)
 	if !ok {
-		return PackageSpec{}, false
+		return PackageSpec{}, 0, false
 	}
 	name, version, ok := parseNPMSpec(spec)
 	if !ok {
-		return PackageSpec{}, false
+		return PackageSpec{}, 0, false
 	}
-	return PackageSpec{Runner: r, Name: name, Version: version}, true
+	return PackageSpec{Runner: r, Name: name, Version: version}, at, true
 }
 
 // parseNPMSpec splits "@scope/name@version", "@scope/name", "name@version"
@@ -368,9 +420,9 @@ func parseNPMSpec(spec string) (name, version string, ok bool) {
 	return name, version, true
 }
 
-// uvxRules are the value-taking flags of uvx (uv tool run). Boolean flags such
+// uvxFlags are the value-taking flags of uvx (uv tool run). Boolean flags such
 // as "--isolated" or "--compile-bytecode" are not listed.
-var uvxRules = scanRules{
+var uvxFlags = flagTable{
 	valued: flagSet(
 		"--with", "-w", "--with-editable", "--with-requirements",
 		"--python", "-p", "--python-preference", "--python-platform",
@@ -389,26 +441,26 @@ var uvxRules = scanRules{
 	override: flagSet("--from"),
 }
 
-// pipxRules are the flags of "pipx run". "--editable", "--path" and
+// pipxFlags are the flags of "pipx run". "--editable", "--path" and
 // "--fetch-missing-python" are booleans and are not listed.
-var pipxRules = scanRules{
+var pipxFlags = flagTable{
 	valued:   flagSet("--python", "--pip-args", "--index-url", "-i"),
 	override: flagSet("--spec"),
 }
 
 // extractPython reads the package from uvx arguments, or from the arguments
-// after "pipx run", with the flag rules of that runner. Only uvx accepts the
-// "name@version" form.
-func extractPython(r Runner, flags scanRules, args []string) (PackageSpec, bool) {
-	spec, _, ok := scanArgs(args, flags)
+// after "pipx run", with the flag table of that runner. Only uvx accepts the
+// "name@version" form. It also returns the index of the spec argument.
+func extractPython(r Runner, flags flagTable, args []string) (PackageSpec, int, bool) {
+	spec, at, ok := scanArgs(args, flags)
 	if !ok || strings.HasSuffix(spec, ".py") {
-		return PackageSpec{}, false // a script, not a package
+		return PackageSpec{}, 0, false // a script, not a package
 	}
 	name, version, ok := parsePythonSpec(spec, r == RunnerUVX)
 	if !ok {
-		return PackageSpec{}, false
+		return PackageSpec{}, 0, false
 	}
-	return PackageSpec{Runner: r, Name: name, Version: version}, true
+	return PackageSpec{Runner: r, Name: name, Version: version}, at, true
 }
 
 // parsePythonSpec splits "name", "name@version" (if allowAt), "name==version"
@@ -456,13 +508,15 @@ func parsePythonSpec(spec string, allowAt bool) (name, version string, ok bool) 
 }
 
 var (
-	dockerGlobalRules = scanRules{
+	// dockerGlobalFlags lists the value-taking global flags that come
+	// before the docker subcommand.
+	dockerGlobalFlags = flagTable{
 		valued: flagSet("--config", "-c", "--context", "-H", "--host", "-l", "--log-level",
 			"--tlscacert", "--tlscert", "--tlskey"),
 	}
-	// dockerRunRules lists the value-taking flags of "docker run". Boolean
+	// dockerRunFlags lists the value-taking flags of "docker run". Boolean
 	// flags such as "-i", "-t", "--rm" and "--privileged" are not listed.
-	dockerRunRules = scanRules{
+	dockerRunFlags = flagTable{
 		valued: flagSet(
 			// Environment, mounts and files.
 			"-e", "--env", "--env-file", "-v", "--volume", "--volumes-from",
@@ -499,32 +553,34 @@ var (
 )
 
 // extractDocker reads the image from "docker run" (or "docker container run")
-// arguments.
-func extractDocker(args []string) (PackageSpec, bool) {
-	sub, next, ok := scanArgs(args, dockerGlobalRules)
+// arguments. It also returns the index of the image argument.
+func extractDocker(args []string) (PackageSpec, int, bool) {
+	sub, at, ok := scanArgs(args, dockerGlobalFlags)
 	if !ok {
-		return PackageSpec{}, false
+		return PackageSpec{}, 0, false
 	}
-	rest := args[next:]
+	base := at + 1 // index in args of rest[0]
+	rest := args[base:]
 	if sub == "container" {
-		sub, next, ok = scanArgs(rest, scanRules{})
+		sub, at, ok = scanArgs(rest, flagTable{})
 		if !ok {
-			return PackageSpec{}, false
+			return PackageSpec{}, 0, false
 		}
-		rest = rest[next:]
+		base += at + 1
+		rest = rest[at+1:]
 	}
 	if sub != "run" {
-		return PackageSpec{}, false
+		return PackageSpec{}, 0, false
 	}
-	image, _, ok := scanArgs(rest, dockerRunRules)
+	image, at, ok := scanArgs(rest, dockerRunFlags)
 	if !ok {
-		return PackageSpec{}, false
+		return PackageSpec{}, 0, false
 	}
 	name, version, ok := parseImage(image)
 	if !ok {
-		return PackageSpec{}, false
+		return PackageSpec{}, 0, false
 	}
-	return PackageSpec{Runner: RunnerDocker, Name: name, Version: version}, true
+	return PackageSpec{Runner: RunnerDocker, Name: name, Version: version}, base + at, true
 }
 
 // parseImage splits an image reference into name and version. A digest wins
@@ -571,9 +627,8 @@ func plainSpec(spec string) bool {
 		strings.Contains(spec, "\\") {
 		return false
 	}
-	lower := strings.ToLower(spec)
 	for _, prefix := range []string{"file:", "git+", "http:", "https:"} {
-		if strings.HasPrefix(lower, prefix) {
+		if hasPrefixFold(spec, prefix) {
 			return false
 		}
 	}

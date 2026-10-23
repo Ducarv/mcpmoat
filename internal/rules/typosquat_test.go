@@ -194,122 +194,122 @@ func TestTyposquatCheck(t *testing.T) {
 		{
 			name:   "npx scoped package, transposed letters",
 			server: npxServer("files", "@modelcontextprotocol/server-filesytem"),
-			want:   []want{{"args", "@modelcontextprotocol/server-filesystem"}},
+			want:   []want{{FieldArgs, "@modelcontextprotocol/server-filesystem"}},
 		},
 		{
 			name:   "npx scoped package githbu",
 			server: npxServer("gh", "@modelcontextprotocol/server-githbu"),
-			want:   []want{{"args", "@modelcontextprotocol/server-github"}},
+			want:   []want{{FieldArgs, "@modelcontextprotocol/server-github"}},
 		},
 		{
 			name:   "npx package with version",
 			server: npxServer("files", "@modelcontextprotocol/server-filesytem@1.2.3"),
-			want:   []want{{"args", "@modelcontextprotocol/server-filesystem"}},
+			want:   []want{{FieldArgs, "@modelcontextprotocol/server-filesystem"}},
 		},
 		{
 			name:   "server name typo",
 			server: discover.Server{Name: "mcp-server-fecth"},
-			want:   []want{{"name", "mcp-server-fetch"}},
+			want:   []want{{FieldName, "mcp-server-fetch"}},
 		},
 		{
 			name:   "server name matches bare name of a scoped package",
 			server: discover.Server{Name: "server-filesytem"},
-			want:   []want{{"name", "@modelcontextprotocol/server-filesystem"}},
+			want:   []want{{FieldName, "@modelcontextprotocol/server-filesystem"}},
 		},
 		{
 			name:   "uvx package with pinned version",
 			server: discover.Server{Name: "fetcher", Command: "uvx", Args: discover.NewArgs([]string{"mcp-server-fethc==1.0"})},
-			want:   []want{{"args", "mcp-server-fetch"}},
+			want:   []want{{FieldArgs, "mcp-server-fetch"}},
 		},
 		{
 			name:   "uppercase name is compared in lowercase",
 			server: discover.Server{Name: "MCP-Server-Fecth"},
-			want:   []want{{"name", "mcp-server-fetch"}},
+			want:   []want{{FieldName, "mcp-server-fetch"}},
 		},
 		{
 			name:   "server name close to the flat form of a scoped popular name",
 			server: npxServer("playwrigth-mcp", "@playwright/mcp@latest"),
-			want:   []want{{"name", "@playwright/mcp"}},
+			want:   []want{{FieldName, "@playwright/mcp"}},
 		},
 		{
 			// PyPI reads "mcp_server_fetcj" as "mcp-server-fetcj" (PEP 503).
 			name:   "uvx package with PyPI separators, one edit off",
 			server: stdioServer("uvx", "mcp_server_fetcj"),
-			want:   []want{{"args", "mcp-server-fetch"}},
+			want:   []want{{FieldArgs, "mcp-server-fetch"}},
 		},
 		{
 			name:   "docker image with the Docker Hub prefix, one edit off",
 			server: stdioServer("docker", "run", "-i", "docker.io/mcp/fetcj"),
-			want:   []want{{"args", "mcp/fetch"}},
+			want:   []want{{FieldArgs, "mcp/fetch"}},
 		},
 		{
 			name:   "docker image typo",
 			server: discover.Server{Name: "gh", Command: "docker", Args: discover.NewArgs([]string{"run", "-i", "--rm", "ghcr.io/github/github-mcp-sever"})},
-			want:   []want{{"args", "ghcr.io/github/github-mcp-server"}},
+			want:   []want{{FieldArgs, "ghcr.io/github/github-mcp-server"}},
 		},
 		{
 			name:   "server name and package both typo give two findings",
 			server: npxServer("mcp-server-fecth", "mcp-server-fethc"),
-			want:   []want{{"name", "mcp-server-fetch"}, {"args", "mcp-server-fetch"}},
+			want:   []want{{FieldName, "mcp-server-fetch"}, {FieldArgs, "mcp-server-fetch"}},
 		},
 		{
 			// Full and bare form of the package are both close to the same
 			// popular entry: still one finding for the package.
 			name:   "package full and bare both close give one finding",
 			server: npxServer("unrelated-local-thing", "@modelcontextprotocol/server-filesytem"),
-			want:   []want{{"args", "@modelcontextprotocol/server-filesystem"}},
+			want:   []want{{FieldArgs, "@modelcontextprotocol/server-filesystem"}},
 		},
 		{
 			name:   "scope squatting: other scope, same bare name",
 			server: npxServer("files", "@evil/server-filesystem"),
-			want:   []want{{"args", "@modelcontextprotocol/server-filesystem"}},
+			want:   []want{{FieldArgs, "@modelcontextprotocol/server-filesystem"}},
 		},
 		{
 			name:   "scope squatting: scope dropped",
 			server: npxServer("files", "server-filesystem"),
-			want:   []want{{"args", "@modelcontextprotocol/server-filesystem"}},
+			want:   []want{{FieldArgs, "@modelcontextprotocol/server-filesystem"}},
 		},
 		{
 			name:   "scope squatting with version",
 			server: npxServer("gh", "@evil/server-github@1.0.0"),
-			want:   []want{{"args", "@modelcontextprotocol/server-github"}},
+			want:   []want{{FieldArgs, "@modelcontextprotocol/server-github"}},
 		},
 		{
 			name:   "scope squatting on a vendor package",
 			server: npxServer("pw", "@evil/playwright-mcp-server"),
-			want:   []want{{"args", "@executeautomation/playwright-mcp-server"}},
+			want:   []want{{FieldArgs, "@executeautomation/playwright-mcp-server"}},
 		},
 		{
 			name:   "scope squatting on an unscoped popular name",
 			server: npxServer("remote", "@evil/mcp-remote"),
-			want:   []want{{"args", "mcp-remote"}},
+			want:   []want{{FieldArgs, "mcp-remote"}},
 		},
 		{
 			name:   "scope squatting on an unscoped popular name, with version",
 			server: npxServer("fc", "@evil/firecrawl-mcp@1.0.0"),
-			want:   []want{{"args", "firecrawl-mcp"}},
+			want:   []want{{FieldArgs, "firecrawl-mcp"}},
 		},
 		{
 			name:   "scope squatting on an unscoped popular name, scope with xox prefix",
 			server: npxServer("remote", "@xoxo/mcp-remote"),
-			want:   []want{{"args", "mcp-remote"}},
+			want:   []want{{FieldArgs, "mcp-remote"}},
 		},
 		{
 			// The list mixes registries: a scoped npm package with the name
 			// of a PyPI entry also fires.
 			name:   "scope squatting on a PyPI popular name",
 			server: npxServer("fetcher", "@evil/mcp-server-fetch"),
-			want:   []want{{"args", "mcp-server-fetch"}},
+			want:   []want{{FieldArgs, "mcp-server-fetch"}},
 		},
 		{
 			name:   "scope squatting with xox scope",
 			server: npxServer("files", "@xoxo/server-filesystem"),
-			want:   []want{{"args", "@modelcontextprotocol/server-filesystem"}},
+			want:   []want{{FieldArgs, "@modelcontextprotocol/server-filesystem"}},
 		},
 		{
 			name:   "scope squatting with eyj scope",
 			server: npxServer("gh", "@eyjay/server-github"),
-			want:   []want{{"args", "@modelcontextprotocol/server-github"}},
+			want:   []want{{FieldArgs, "@modelcontextprotocol/server-github"}},
 		},
 
 		{
@@ -318,12 +318,12 @@ func TestTyposquatCheck(t *testing.T) {
 			// scope squatting.
 			name:   "typo inside the scope part",
 			server: npxServer("files", "@modelcontextprotoco1/server-filesystem"),
-			want:   []want{{"args", "@modelcontextprotocol/server-filesystem"}},
+			want:   []want{{FieldArgs, "@modelcontextprotocol/server-filesystem"}},
 		},
 		{
 			name:   "other scope with a typo in the bare name",
 			server: npxServer("files", "@evil/server-filesytem"),
-			want:   []want{{"args", "@modelcontextprotocol/server-filesystem"}},
+			want:   []want{{FieldArgs, "@modelcontextprotocol/server-filesystem"}},
 		},
 
 		// Negatives.
@@ -332,6 +332,7 @@ func TestTyposquatCheck(t *testing.T) {
 		// against github) is not a typosquat. A one-edit typo in the same scope
 		// still fires (see the positives above): it is a config mistake.
 		{name: "official sibling in the same scope", server: npxServer("gl", "@modelcontextprotocol/server-gitlab")},
+		{name: "server name of an official sibling", server: discover.Server{Name: "server-gitlab"}},
 		{name: "official sibling with version", server: npxServer("gl", "@modelcontextprotocol/server-gitlab@1.0.0")},
 		{name: "ambiguous bare name shared by two popular packages", server: npxServer("m", "@acme/mcp-server")},
 		{name: "scope squatting does not apply to a server name", server: discover.Server{Name: "server-filesystem"}},
@@ -479,11 +480,12 @@ func TestTyposquatNeverEchoesArgValues(t *testing.T) {
 		Command: "npx",
 		Args:    discover.NewArgs([]string{"-y", "@modelcontextprotocol/server-filesytem", "--token=s3cr3t-value"}),
 	}
-	for _, f := range ts.Check(s) {
-		if strings.Contains(f.Message+f.Related+f.Field+f.Key, "s3cr3t") {
-			t.Errorf("finding leaks an argument value: %+v", f)
-		}
+	got := ts.Check(s)
+	// The check must really fire, or the leak assert proves nothing.
+	if len(got) != 1 {
+		t.Fatalf("Check() = %+v, want one finding", got)
 	}
+	assertFindingNoLeak(t, got[0], "s3cr3t-value")
 }
 
 func TestNewTyposquatNormalizesInput(t *testing.T) {

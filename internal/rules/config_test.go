@@ -119,7 +119,13 @@ func TestCheckConfig(t *testing.T) {
 		{"loopback default of a host reference is fine", remoteServer(discover.TransportHTTP, "http://${HOST:-localhost}:3000/mcp"), nil},
 		{"remote default of a host reference fires", remoteServer(discover.TransportHTTP, "http://${HOST:-mcp.example.com}/mcp"), insecure},
 		{"https with references is fine", remoteServer(discover.TransportHTTP, "https://${HOST}:${PORT}/mcp"), nil},
-		{"unparsable URL gives none", remoteServer(discover.TransportHTTP, "http://[::1"), nil},
+		// Clients parse more loosely than Go and still connect, so the check
+		// fails closed on an http:// URL that Go cannot parse.
+		{"unparsable http URL fires", remoteServer(discover.TransportHTTP, "http://[::1"), insecure},
+		{"leading space fires", remoteServer(discover.TransportHTTP, " http://evil.example/mcp"), insecure},
+		{"trailing newline fires", remoteServer(discover.TransportHTTP, "http://evil.example/mcp\n"), insecure},
+		{"bad escape fires", remoteServer(discover.TransportHTTP, "http://evil.example/%zz"), insecure},
+		{"unparsable https URL gives none", remoteServer(discover.TransportHTTP, "https://evil.example/%zz"), nil},
 		{"empty remote URL gives none", remoteServer(discover.TransportHTTP, ""), nil},
 		{"disabled server is still checked", disabled, insecure},
 
@@ -141,6 +147,9 @@ func TestCheckConfig(t *testing.T) {
 		{"URL with a password", withEnv(stdioServer("node", "s.js"), "DATABASE_URL", "postgres://admin:S3cr3tPass@db/prod"), secretEnv("DATABASE_URL")},
 		{"URL with a password under neutral key", withEnv(stdioServer("node", "s.js"), "DSN", "mysql://u:pw@db:3306/x"), secretEnv("DSN")},
 		{"URL with a password reference", withEnv(stdioServer("node", "s.js"), "DATABASE_URL", "postgres://admin:${PW}@db/prod"), nil},
+		{"%VAR% reference", withEnv(stdioServer("node", "s.js"), "API_KEY", "%API_KEY%"), nil},
+		{"file name under secret name", withEnv(stdioServer("node", "s.js"), "GOOGLE_APPLICATION_CREDENTIALS", "service-account.json"), nil},
+		{"relative key path under secret name", withEnv(stdioServer("node", "s.js"), "SSH_KEY_PATH", "keys/id.pem"), nil},
 		{"locale with a token prefix", withEnv(stdioServer("node", "s.js"), "LANG", "sk_SK.UTF-8"), nil},
 		{"region with a token prefix", withEnv(stdioServer("node", "s.js"), "REGION", "pk_PK"), nil},
 		{"empty value", withEnv(stdioServer("node", "s.js"), "API_KEY", ""), nil},
@@ -217,12 +226,17 @@ func TestCheckConfig(t *testing.T) {
 		// package. RedactArgs masks it there, so Related must stay empty even
 		// though the text is visible in another arg.
 		{"masked package name also in another arg", stdioServer("npx", "--npm-token", "secretpw", "x", "--secretpw"), unpinned("")},
+		{"cmd /c wrapper", stdioServer("cmd", "/c", "npx", "-y", "@scope/server@latest"), unpinned("@scope/server")},
+		{"CMD.EXE /C wrapper", stdioServer("CMD.EXE", "/C", "npx", "-y", "@scope/server"), unpinned("@scope/server")},
+		// npx installs every -p package; which one runs is not known.
+		{"second -p is doubtful", stdioServer("npx", "-y", "-p", "@scope/server@1.0.0", "-p", "evil-pkg", "evil-bin"), nil},
+		{"server's own -p after the command", stdioServer("npx", "-y", "-p", "pkg-a", "bin", "-p", "3000"), unpinned("pkg-a")},
 		{"package name shown by RedactArgs", stdioServer("uvx", "some-server@latest"), unpinned("some-server")},
 		{"remote server with args", remoteWithArgs, nil},
 		{"unknown runner", stdioServer("node", "server.js"), nil},
 
 		// Benign.
-		{"benign pinned stdio server", stdioServer("npx", "-y", "@scope/server@1.4.2"), nil},
+		{"benign local server with a neutral env", withEnv(stdioServer("node", "server.js"), "LOG_LEVEL", "info"), nil},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
