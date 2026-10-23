@@ -71,7 +71,7 @@ The fields:
 | `title` | Short name, up to 200 characters. |
 | `severity` | `low`, `medium`, `high` or `critical`. |
 | `target` | What the rule inspects: `description`, `schema` or `config`. |
-| `match` | What the rule looks for. Set at least one of `any_regex`, `all_regex`, `keywords` or `heuristic` (with optional `params`). The meaning of several keys together and the regex engine come with the matcher (issue #35) and the heuristics (issue #36). |
+| `match` | What the rule looks for. Set at least one of `any_regex`, `all_regex`, `keywords` or `heuristic` (with optional `params`). The meaning of several keys together and the compiling of regexes come with the matcher (issue #35) and the heuristics (issue #36). |
 | `risk` | One sentence: what can go wrong. |
 | `remediation` | What the user should do. |
 | `references` | Links (`http` or `https`) to research or advisories. mcpmoat never fetches them. |
@@ -89,10 +89,13 @@ Which fields are required:
 Limits:
 
 - A rule file is at most 64 KiB.
-- `remediation` is at most 1000 characters.
+- `title` is at most 200 characters, `risk` at most 500 and `remediation` at most 1000.
+- `heuristic` is at most 64 bytes.
 - `any_regex`, `all_regex` and `keywords` hold at most 100 items each. One item is at most 4096 bytes.
 - `references` holds at most 20 items. One item is at most 2048 bytes.
 - `should_match` and `should_not_match` hold at most 100 cases each.
+- A rules folder holds at most 1000 `*.yaml` and `*.yml` files and at most 10000 entries of any name.
+  The loader stops after 100 errors in one folder and after 20 errors in one file.
 
 Guidelines:
 
@@ -108,6 +111,11 @@ The loader is strict. Each of these is an error:
 - more than one YAML document in a file;
 - anchors and aliases (`&name`, `*name`);
 - a key that is not a plain string.
+
+The loader reads every file whose name ends in `.yaml` or `.yml`, in lower case, and it does not skip
+hidden files. A file such as `._rule.yaml` (macOS makes these on some drives) is an error, not
+ignored, so a rule you wrote is never skipped without a word. A subdirectory is ignored. A symlink, or
+any other entry that is not a regular file, with a rule name is an error.
 
 An error names the file, the line and the column, and the field when there is one.
 
