@@ -5,7 +5,7 @@ package rules
 // has one ID whatever code produced it.
 const (
 	// RuleShadowing is the ID of the tool shadowing check (threat T3): a
-	// tool of one server has the name of a tool of another server.
+	// tool description names a tool of another server.
 	RuleShadowing = "MOAT-T3-001"
 
 	// RuleInsecureURL is the ID of the insecure URL check (threat T4): a

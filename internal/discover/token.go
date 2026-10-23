@@ -38,9 +38,9 @@ func looksLikeCredential(s string) bool {
 // HasTokenPrefix reports whether s starts with the prefix of a well-known
 // API token format, such as "ghp_" or "sk-", in any case, and has more text
 // after the prefix. It does not look at the rest of s, so a match is a strong
-// hint, not proof. It never prints or stores s. RedactURL, RedactArgs and the
-// config checks in internal/rules (threat T4) use it, so the redaction and
-// the rules agree on what looks like a secret.
+// hint, not proof. It never prints or stores s. It is exported so that the
+// redaction and the config checks (threat T4) agree on what looks like a
+// secret.
 func HasTokenPrefix(s string) bool {
 	// tokenPrefixes are in lower case, so the match does not depend on case.
 	// The RedactURL and RedactArgs docs name only some of them as examples,

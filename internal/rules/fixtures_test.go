@@ -5,8 +5,8 @@ package rules_test
 // network call. The config fixtures are Cursor files under testdata/configs.
 
 import (
+	"cmp"
 	"context"
-	"fmt"
 	"path/filepath"
 	"reflect"
 	"slices"
@@ -53,7 +53,8 @@ func inspectFixture(t *testing.T, name string) rules.ServerTools {
 }
 
 // configServers reads the Cursor config of the fixture testdata/configs/<name>
-// from a copy in a new home, and returns its servers in file order of Name.
+// from a copy in a new home, and returns its servers in the order that
+// ReadCursor gives them.
 func configServers(t *testing.T, name string) []discover.Server {
 	t.Helper()
 	home, _ := discovertest.CopyFixture(t, filepath.Join("..", "..", "testdata", "configs", name))
@@ -75,7 +76,13 @@ type findingKey struct{ Server, RuleID, Field, Key, Related string }
 
 // compareFindingKeys orders findingKey values by their fields.
 func compareFindingKeys(a, b findingKey) int {
-	return strings.Compare(fmt.Sprintf("%v", a), fmt.Sprintf("%v", b))
+	return cmp.Or(
+		cmp.Compare(a.Server, b.Server),
+		cmp.Compare(a.RuleID, b.RuleID),
+		cmp.Compare(a.Field, b.Field),
+		cmp.Compare(a.Key, b.Key),
+		cmp.Compare(a.Related, b.Related),
+	)
 }
 
 // assertFindings compares findings with want, ignoring order.
@@ -85,6 +92,7 @@ func assertFindings(t *testing.T, what string, findings []rules.Finding, want []
 	for _, f := range findings {
 		have = append(have, findingKey{f.Server, f.RuleID, f.Field, f.Key, f.Related})
 	}
+	want = slices.Clone(want)
 	slices.SortFunc(have, compareFindingKeys)
 	slices.SortFunc(want, compareFindingKeys)
 	if !slices.Equal(have, want) {

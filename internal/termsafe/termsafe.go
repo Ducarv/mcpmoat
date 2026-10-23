@@ -143,10 +143,19 @@ func needsQuote(s string) bool {
 }
 
 // needsEscape reports whether r is not visible, or can change how the text
-// around it looks: a rune that is not printable, a format or bidi control
-// character (Cf), or a rune for which isBlank is true.
+// around it looks: a rune that is not printable, or a rune for which
+// IsInvisible is true.
 func needsEscape(r rune) bool {
-	return !unicode.IsPrint(r) || unicode.Is(unicode.Cf, r) || isBlank(r)
+	return !unicode.IsPrint(r) || IsInvisible(r)
+}
+
+// IsInvisible reports whether r shows as nothing or only changes the rune
+// before it: a format character (Cf: the bidi controls, the zero-width
+// characters and the tag characters), or a rune for which isBlank is true.
+// Code that compares text the way a reader (or a model) sees it can drop
+// these runes first.
+func IsInvisible(r rune) bool {
+	return unicode.Is(unicode.Cf, r) || isBlank(r)
 }
 
 // isBlank reports whether r is printable for unicode.IsPrint but shows as

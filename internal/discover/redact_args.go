@@ -494,9 +494,8 @@ func containsToken(s string) bool {
 //
 // name is split into words (see nameWords), so "api-key", "API_KEY" and
 // "apiKey" all give the words "api" and "key", in some case. It never prints
-// or stores name. RedactArgs and the config checks in internal/rules
-// (threat T4) use it, so the redaction and the rules agree on what looks like
-// a credential name.
+// or stores name. It is exported so that the redaction and the config checks
+// (threat T4) agree on what looks like a credential name.
 func IsSecretName(name string) bool {
 	words := nameWords(name)
 	for _, w := range words {

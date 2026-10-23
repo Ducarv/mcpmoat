@@ -20,12 +20,7 @@ func npxServer(name, pkg string) discover.Server {
 	return discover.Server{Name: name, Command: "npx", Args: discover.NewArgs([]string{"-y", pkg})}
 }
 
-// runServer builds a server that runs command with args.
-func runServer(command string, args ...string) discover.Server {
-	return discover.Server{Name: "x-local", Command: command, Args: discover.NewArgs(args)}
-}
-
-func TestDistance(t *testing.T) {
+func TestOSADistance(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
 		name string
@@ -119,27 +114,24 @@ func TestParsePopular(t *testing.T) {
 	})
 }
 
-var (
-	popularOnce  sync.Once
-	popularNames []string
-	popularErr   error
-)
+// readPopular reads the real popular list once for all tests.
+var readPopular = sync.OnceValues(func() ([]string, error) {
+	data, err := os.ReadFile(popularListPath)
+	if err != nil {
+		return nil, err
+	}
+	return ParsePopular(bytes.NewReader(data))
+})
 
-// loadPopular reads the real popular list once for all tests.
+// loadPopular returns the real popular list, or stops the test when it
+// cannot be read.
 func loadPopular(t *testing.T) []string {
 	t.Helper()
-	popularOnce.Do(func() {
-		data, err := os.ReadFile(popularListPath)
-		if err != nil {
-			popularErr = err
-			return
-		}
-		popularNames, popularErr = ParsePopular(bytes.NewReader(data))
-	})
-	if popularErr != nil {
-		t.Fatalf("load popular list: %v", popularErr)
+	names, err := readPopular()
+	if err != nil {
+		t.Fatalf("load popular list: %v", err)
 	}
-	return popularNames
+	return names
 }
 
 func TestPopularListFile(t *testing.T) {
@@ -235,14 +227,19 @@ func TestTyposquatCheck(t *testing.T) {
 			want:   []want{{"name", "mcp-server-fetch"}},
 		},
 		{
+			name:   "server name close to the flat form of a scoped popular name",
+			server: npxServer("playwrigth-mcp", "@playwright/mcp@latest"),
+			want:   []want{{"name", "@playwright/mcp"}},
+		},
+		{
 			// PyPI reads "mcp_server_fetcj" as "mcp-server-fetcj" (PEP 503).
 			name:   "uvx package with PyPI separators, one edit off",
-			server: runServer("uvx", "mcp_server_fetcj"),
+			server: stdioServer("uvx", "mcp_server_fetcj"),
 			want:   []want{{"args", "mcp-server-fetch"}},
 		},
 		{
 			name:   "docker image with the Docker Hub prefix, one edit off",
-			server: runServer("docker", "run", "-i", "docker.io/mcp/fetcj"),
+			server: stdioServer("docker", "run", "-i", "docker.io/mcp/fetcj"),
 			want:   []want{{"args", "mcp/fetch"}},
 		},
 		{
@@ -354,11 +351,19 @@ func TestTyposquatCheck(t *testing.T) {
 		{name: "200 rune name", server: discover.Server{Name: strings.Repeat("a", 200)}},
 		{name: "200 rune package", server: npxServer("x", strings.Repeat("a", 200))},
 		{name: "unrelated scoped package", server: npxServer("notes", "@example-corp/notes-mcp")},
-		{name: "PyPI name with underscores is the real package", server: runServer("uvx", "mcp_server_fetch")},
-		{name: "PyPI name with dots and case is the real package", server: runServer("pipx", "run", "MCP.Server.Fetch")},
-		{name: "Docker Hub prefix is the real image", server: runServer("docker", "run", "-i", "docker.io/mcp/fetch")},
-		{name: "index.docker.io prefix is the real image", server: runServer("docker", "run", "-i", "index.docker.io/mcp/fetch:1.0")},
-		{name: "Docker Hub library prefix", server: runServer("docker", "run", "-i", "docker.io/library/mcp/fetch")},
+		// A user who names a server after a scoped package writes it flat.
+		{name: "flat name of @playwright/mcp", server: npxServer("playwright-mcp", "@playwright/mcp@latest")},
+		{name: "flat name of @stripe/mcp", server: npxServer("stripe-mcp", "@stripe/mcp")},
+		{name: "flat name of @sentry/mcp-server", server: npxServer("sentry-mcp-server", "@sentry/mcp-server")},
+		{name: "flat name of @mapbox/mcp-server", server: npxServer("mapbox-mcp-server", "@mapbox/mcp-server")},
+		// Scopes exist only in npm: a PyPI package with the bare name of a
+		// scoped npm package is not scope squatting.
+		{name: "PyPI package with the bare name of a scoped npm package", server: stdioServer("uvx", "notion-mcp-server")},
+		{name: "PyPI name with underscores is the real package", server: stdioServer("uvx", "mcp_server_fetch")},
+		{name: "PyPI name with dots and case is the real package", server: stdioServer("pipx", "run", "MCP.Server.Fetch")},
+		{name: "Docker Hub prefix is the real image", server: stdioServer("docker", "run", "-i", "docker.io/mcp/fetch")},
+		{name: "index.docker.io prefix is the real image", server: stdioServer("docker", "run", "-i", "index.docker.io/mcp/fetch:1.0")},
+		{name: "Docker Hub library prefix", server: stdioServer("docker", "run", "-i", "docker.io/library/mcp/fetch")},
 		// "mcp-server" is the bare name of two popular packages, so it proves
 		// nothing in the edit distance either.
 		{name: "server name close to an ambiguous bare name", server: discover.Server{Name: "my-server"}},
@@ -483,12 +488,15 @@ func TestTyposquatNeverEchoesArgValues(t *testing.T) {
 
 func TestNewTyposquatNormalizesInput(t *testing.T) {
 	t.Parallel()
-	in := []string{"  Mcp-Server-Fetch "}
+	in := []string{"  Mcp-Server-Fetch ", "", "   "}
 	ts := NewTyposquat(in)
 	in[0] = "changed-after-construction"
 
 	got := ts.Check(discover.Server{Name: "mcp-server-fecth"})
 	if len(got) != 1 || got[0].Related != "mcp-server-fetch" {
 		t.Errorf("Check() = %+v, want one finding related to mcp-server-fetch", got)
+	}
+	if len(ts.popular) != 1 {
+		t.Errorf("popular = %+v, want the blank entries skipped", ts.popular)
 	}
 }

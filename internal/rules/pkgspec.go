@@ -89,15 +89,17 @@ func ExtractPackage(command string, args []string) (PackageSpec, bool) {
 // extractPackage does the parse for ExtractPackage, before the name check.
 func extractPackage(command string, args []string) (PackageSpec, bool) {
 	switch r := runnerOf(command); r {
-	case RunnerNPX, RunnerBunx:
-		return extractNPM(r, args)
+	case RunnerNPX:
+		return extractNPM(r, npmRules, args)
+	case RunnerBunx:
+		return extractNPM(r, bunxRules, args)
 	case RunnerUVX:
-		return extractPython(r, args)
+		return extractPython(r, uvxRules, args)
 	case RunnerPipx:
 		if len(args) == 0 || args[0] != "run" {
 			return PackageSpec{}, false
 		}
-		return extractPython(r, args[1:])
+		return extractPython(r, pipxRules, args[1:])
 	case RunnerDocker:
 		return extractDocker(args)
 	default:
@@ -259,7 +261,7 @@ func flagSet(names ...string) map[string]bool {
 // else the first argument that is not a flag. It also returns the index of
 // the first argument after the spec. It returns false if there is no spec,
 // or if a stop flag comes first.
-func scanArgs(args []string, rules scanRules) (spec string, next int, ok bool) {
+func scanArgs(args []string, flags scanRules) (spec string, next int, ok bool) {
 	for i := 0; i < len(args); i++ {
 		arg := args[i]
 		if arg == "--" {
@@ -276,9 +278,9 @@ func scanArgs(args []string, rules scanRules) (spec string, next int, ok bool) {
 		}
 		flag, value, hasValue := strings.Cut(arg, "=")
 		switch {
-		case rules.stop[flag]:
+		case flags.stop[flag]:
 			return "", 0, false
-		case rules.override[flag]:
+		case flags.override[flag]:
 			if hasValue {
 				return value, i + 1, value != ""
 			}
@@ -286,7 +288,7 @@ func scanArgs(args []string, rules scanRules) (spec string, next int, ok bool) {
 				return args[i+1], i + 2, true
 			}
 			return "", 0, false
-		case rules.valued[flag] && !hasValue:
+		case flags.valued[flag] && !hasValue:
 			i++ // skip the flag value
 		}
 	}
@@ -322,13 +324,10 @@ var bunxRules = scanRules{
 	stop:     flagSet("-c", "--config"),
 }
 
-// extractNPM reads the package from npx or bunx arguments.
-func extractNPM(r Runner, args []string) (PackageSpec, bool) {
-	rules := npmRules
-	if r == RunnerBunx {
-		rules = bunxRules
-	}
-	spec, _, ok := scanArgs(args, rules)
+// extractNPM reads the package from npx or bunx arguments, with the flag
+// rules of that runner.
+func extractNPM(r Runner, flags scanRules, args []string) (PackageSpec, bool) {
+	spec, _, ok := scanArgs(args, flags)
 	if !ok {
 		return PackageSpec{}, false
 	}
@@ -398,13 +397,10 @@ var pipxRules = scanRules{
 }
 
 // extractPython reads the package from uvx arguments, or from the arguments
-// after "pipx run". Only uvx accepts the "name@version" form.
-func extractPython(r Runner, args []string) (PackageSpec, bool) {
-	rules := uvxRules
-	if r == RunnerPipx {
-		rules = pipxRules
-	}
-	spec, _, ok := scanArgs(args, rules)
+// after "pipx run", with the flag rules of that runner. Only uvx accepts the
+// "name@version" form.
+func extractPython(r Runner, flags scanRules, args []string) (PackageSpec, bool) {
+	spec, _, ok := scanArgs(args, flags)
 	if !ok || strings.HasSuffix(spec, ".py") {
 		return PackageSpec{}, false // a script, not a package
 	}

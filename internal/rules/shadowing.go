@@ -9,28 +9,12 @@ import (
 
 	"github.com/Ducarv/mcpmoat/internal/discover"
 	"github.com/Ducarv/mcpmoat/internal/inspect"
+	"github.com/Ducarv/mcpmoat/internal/termsafe"
 )
 
 // minShadowNameLen is the shortest tool name that CheckShadowing looks for.
 // Shorter names match too often in normal prose.
 const minShadowNameLen = 5
-
-// genericToolNames are tool names so common that a mention in a description is
-// normal prose, not an attack. Every name here is at least minShadowNameLen
-// bytes long, because shorter names are skipped anyway.
-var genericToolNames = map[string]bool{
-	"search":  true,
-	"fetch":   true,
-	"query":   true,
-	"write":   true,
-	"create":  true,
-	"update":  true,
-	"delete":  true,
-	"status":  true,
-	"login":   true,
-	"close":   true,
-	"execute": true,
-}
 
 // ServerTools is one server with the tools that inspect read from it.
 type ServerTools struct {
@@ -72,8 +56,9 @@ func (n nameOwners) other(identity int) (toolOwner, bool) {
 // a tool called send_email, the check reports it.
 //
 // The check ignores:
-//   - tool names shorter than 5 bytes and a short list of generic names such
-//     as "search" or "fetch", which appear in normal prose;
+//   - tool names shorter than minShadowNameLen bytes, and single-word names
+//     such as "search" or "click" (see isCompoundName), which appear in
+//     normal prose;
 //   - a name that only the describing server owns, so a tool that names a
 //     tool of its own server, or itself, is not reported.
 //
@@ -82,9 +67,10 @@ func (n nameOwners) other(identity int) (toolOwner, bool) {
 // dummy tool with the victim's name.
 //
 // Names are compared without case, and "-" and "_" count as the same
-// character, so "send-email" mentions "send_email". Unicode format characters
-// (such as a zero-width space) are removed from names and descriptions
-// first: the model reads "send<U+200B>_email" as "send_email". A name counts
+// character, so "send-email" mentions "send_email". Invisible runes (see
+// termsafe.IsInvisible: zero-width and bidi characters, variation selectors,
+// Hangul fillers) are removed from names and descriptions first: the model
+// reads "send<U+200B>_email" as "send_email". A name counts
 // as mentioned only at identifier boundaries: the bytes before and after it
 // are not letters, digits, "_" or "-". So "send_email_later" does not mention
 // "send_email". The whole description is scanned, with no size cap: padding
@@ -104,11 +90,9 @@ func (n nameOwners) other(identity int) (toolOwner, bool) {
 // Known limits: only Tool.Description is scanned. The text of input schemas,
 // prompts and resources is not. A tool name with a byte outside letters,
 // digits, "_" and "-" (a dot or a space, for example) cannot be found as a
-// token, so it is never a candidate name. Look-alike characters, such as the
-// fullwidth U+FF3F for "_", are not folded. A hostile server can name its
-// tools after common words ("files", "github") that are not in
-// genericToolNames: other servers whose descriptions use the word then get
-// findings that name the hostile server in Related.
+// token, so it is never a candidate name. A mention of a single-word tool
+// name is never found. Look-alike characters, such as the fullwidth U+FF3F
+// for "_", are not folded.
 //
 // Tool names and descriptions are untrusted input from MCP servers. The check
 // only searches them as text. It never executes them or builds commands from
@@ -177,17 +161,22 @@ func launchIdentities(all []ServerTools) []int {
 	return ids
 }
 
-// launchKey builds the map key of a server's launch config: Transport,
-// Command, Args and URL, and for some stdio servers Dir and ProjectPath. Env,
-// Headers, Name and Client are not part of it. Every part is written with its
-// length in front, so two different configs never give the same key.
+// launchKey builds the map key of a server's launch config. Env, Headers,
+// Name and Client are never part of it. Every part is written with its length
+// in front, so two different configs never give the same key.
 //
-// A remote URL is the same server in every project, and so is a package that
-// a package runner fetches (see ExtractPackage). Any other stdio launch, such
-// as "node server.js", can run a different program in another folder, so for
-// it Dir and ProjectPath are part of the key. Known limit: a package runner
-// can read files in its folder (a local node_modules, an npm or uv config),
-// so the "same" package in two projects can still differ.
+//   - A stdio server whose package runner fetches a package (see
+//     ExtractPackage) is known by the runner and the package name only. The
+//     same package with another version or other args, in any folder, is
+//     the same server with the same tools.
+//   - A remote server is known by its URL, in every project.
+//   - Any other stdio launch, such as "node server.js", is known by Command,
+//     Args, Dir and ProjectPath: it can run a different program in another
+//     folder.
+//
+// Known limit: a package runner can read files in its folder (a local
+// node_modules, an npm or uv config) or take a registry flag, so the "same"
+// package can still be a different program.
 //
 // The key can hold secrets in Args and URL: it is used only as a map key and
 // must not reach a Finding, an error or a log.
@@ -199,15 +188,20 @@ func launchKey(s discover.Server) string {
 		b.WriteString(v)
 	}
 	part(string(s.Transport))
-	part(s.Command)
 	args := s.Args.Values()
+	spec, fetched := ExtractPackage(s.Command, args)
+	if s.Transport == discover.TransportStdio && fetched {
+		part(string(spec.Runner))
+		part(registryName(spec))
+		return b.String()
+	}
+	part(s.Command)
 	part(strconv.Itoa(len(args)))
 	for _, a := range args {
 		part(a)
 	}
 	part(s.URL.Reveal())
-	_, fetched := ExtractPackage(s.Command, args)
-	if s.Transport == discover.TransportStdio && !fetched {
+	if s.Transport == discover.TransportStdio {
 		part(s.Dir)
 		part(s.ProjectPath)
 	}
@@ -222,7 +216,7 @@ func indexOwners(all []ServerTools, identities []int) map[string]nameOwners {
 	for i, st := range all {
 		for _, tool := range st.Tools {
 			name := foldText(tool.Name)
-			if len(name) < minShadowNameLen || genericToolNames[name] || !allIdentBytes(name) {
+			if len(name) < minShadowNameLen || !isCompoundName(tool.Name) || !allIdentBytes(name) {
 				continue
 			}
 			o := toolOwner{identity: identities[i], server: st.Server.Name, toolName: tool.Name}
@@ -241,15 +235,31 @@ func indexOwners(all []ServerTools, identities []int) map[string]nameOwners {
 	return owners
 }
 
+// isCompoundName reports whether a tool name has two or more words: it holds
+// "_" or "-", or a lower-case letter followed by an upper-case one, as in
+// "sendEmail". A single word such as "click" or "search" is normal prose in
+// descriptions, so it is not a candidate.
+func isCompoundName(name string) bool {
+	if strings.ContainsAny(name, "_-") {
+		return true
+	}
+	for i := 1; i < len(name); i++ {
+		if name[i-1] >= 'a' && name[i-1] <= 'z' && name[i] >= 'A' && name[i] <= 'Z' {
+			return true
+		}
+	}
+	return false
+}
+
 // foldText returns s in the form that names and descriptions are compared
-// in: lower case, with no Unicode format characters (category Cf, such as
-// zero-width and bidi controls), and with every "-" written as "_".
+// in: lower case, with no invisible runes (see termsafe.IsInvisible), and
+// with every "-" written as "_".
 func foldText(s string) string {
 	return strings.Map(func(r rune) rune {
 		switch {
 		case r == '-':
 			return '_'
-		case unicode.Is(unicode.Cf, r):
+		case termsafe.IsInvisible(r):
 			return -1
 		default:
 			return unicode.ToLower(r)

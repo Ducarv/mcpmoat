@@ -5,7 +5,6 @@ import (
 	"net/url"
 	"path/filepath"
 	"regexp"
-	"slices"
 	"strconv"
 	"strings"
 
@@ -46,6 +45,10 @@ var (
 
 	// shellVar matches a value that is only a reference such as $VAR.
 	shellVar = regexp.MustCompile(`^\$[A-Za-z_][A-Za-z0-9_]*$`)
+
+	// varPath matches a path that starts with a variable, such as
+	// "$HOME/.config" or "%APPDATA%\key".
+	varPath = regexp.MustCompile(`^(\$[A-Za-z_][A-Za-z0-9_]*|%[A-Za-z_][A-Za-z0-9_]*%)[/\\]`)
 )
 
 // CheckConfig runs the static config checks of threat T4 on one server. It
@@ -54,6 +57,10 @@ var (
 // It runs on every server, whatever its State: a disabled server stays in the
 // config file, so its plaintext secret or its plain http:// URL is still
 // dangerous, and the user can enable the server later.
+//
+// s must be the server as the config file holds it, before discover.Expand:
+// after the expansion a reference such as ${GITHUB_TOKEN} is a literal value,
+// and the check would report it.
 //
 // The findings come in a fixed order: MOAT-T4-001, then MOAT-T4-002 (env keys,
 // then header keys, each sorted), then MOAT-T4-003. A finding never holds a
@@ -67,15 +74,15 @@ func CheckConfig(s discover.Server) []Finding {
 }
 
 // checkInsecureURL reports MOAT-T4-001: a remote server that uses http://
-// to a host that is not loopback. A variable reference such as ${PORT} is
-// read as "0" first, so "http://${HOST}:${PORT}/mcp" still fires: the scheme
-// is known even when the host is not. A URL that does not parse gives no
-// finding.
+// to a host that is not loopback. A variable reference is read as its
+// default first (see refDefault), so "http://${HOST}:${PORT}/mcp" still
+// fires: the scheme is known even when the host is not. A URL that does not
+// parse gives no finding.
 func checkInsecureURL(s discover.Server) []Finding {
 	if !s.Transport.IsRemote() {
 		return nil
 	}
-	u, err := url.Parse(varRef.ReplaceAllString(s.URL.Reveal(), "0"))
+	u, err := url.Parse(varRef.ReplaceAllStringFunc(s.URL.Reveal(), refDefault))
 	if err != nil {
 		return nil
 	}
@@ -88,6 +95,16 @@ func checkInsecureURL(s discover.Server) []Finding {
 		Field:   FieldURL,
 		Message: insecureURLMessage,
 	}}
+}
+
+// refDefault returns the default of a reference "${NAME:-default}", or "0"
+// for a reference with no default. "0" is a valid host and port, and it is
+// not loopback.
+func refDefault(ref string) string {
+	if _, def, found := strings.Cut(ref[2:len(ref)-1], ":-"); found {
+		return def
+	}
+	return "0"
 }
 
 // checkPlaintextSecrets reports MOAT-T4-002 for every env and header entry
@@ -135,20 +152,27 @@ func stripAuthScheme(value string) string {
 //
 // The order of the tests matters:
 //  1. An empty value is not a secret.
-//  2. A known token prefix (such as "ghp_") on a value of 20 bytes or more is
-//     a secret, even when the value also holds "${" or looks like a path.
+//  2. A known token prefix (such as "ghp_") on a value of at least
+//     minPrefixedTokenLen bytes is a secret, even when the value also holds
+//     "${" or looks like a path.
 //  3. A reference (${VAR}, ${env:VAR}, or a whole value $VAR) is the safe
-//     form. Known limit: a literal default in ${VAR:-literal} is not flagged.
-//  4. A path or a URL is not a secret. Known limits: a URL with credentials
-//     inside it (scheme://user:pass@host) is not flagged, and neither is an
-//     absolute path, so a random token that starts with "/" is a false
+//     form. The ${...} references are removed, and the tests below look at
+//     the literal text that is left, so "hunter2hunter2${X}" is still a
+//     secret. Known limit: a literal default in ${VAR:-literal} is not
+//     flagged.
+//  4. A URL with a password in it ("postgres://user:pass@host/db") is a
+//     secret.
+//  5. Any other path or URL is not a secret. A path can start with a
+//     variable ("$HOME/x", "%APPDATA%\x"). Known limit: an absolute path is
+//     never a secret, so a random token that starts with "/" is a false
 //     negative, under any key.
-//  5. A credential-like key name with a value of 8 bytes or more is a secret,
-//     unless the value is true, false or a number. Known limits: an all-digit
-//     secret such as a numeric PIN is not flagged, because numbers under such
-//     names are mostly settings ("SESSION_TTL"); and a non-secret word under
-//     a credential-like name ("AUTH_STRATEGY=client_credentials") is flagged.
-//  6. A long, random, token-shaped value is a secret, whatever its key.
+//  6. A credential-like key name with a value of at least minNamedSecretLen
+//     bytes is a secret, unless the value is true, false or a number. Known
+//     limits: an all-digit secret such as a numeric PIN is not flagged,
+//     because numbers under such names are mostly settings ("SESSION_TTL");
+//     and a non-secret word under a credential-like name
+//     ("AUTH_STRATEGY=client_credentials") is flagged.
+//  7. A long, random, token-shaped value is a secret, whatever its key.
 func looksLikePlaintextSecret(key, value string) bool {
 	if value == "" {
 		return false
@@ -156,8 +180,14 @@ func looksLikePlaintextSecret(key, value string) bool {
 	if len(value) >= minPrefixedTokenLen && discover.HasTokenPrefix(value) {
 		return true
 	}
-	if varRef.MatchString(value) || shellVar.MatchString(value) {
+	if shellVar.MatchString(value) {
 		return false
+	}
+	if value = varRef.ReplaceAllString(value, ""); value == "" {
+		return false
+	}
+	if hasURLPassword(value) {
+		return true
 	}
 	if looksLikePathOrURL(value) {
 		return false
@@ -168,14 +198,28 @@ func looksLikePlaintextSecret(key, value string) bool {
 	return isTokenShaped(value) && len(value) >= minEntropyLen && shannonEntropy(value) >= minEntropy
 }
 
+// hasURLPassword reports whether value is a URL with a non-empty password
+// in its user info, such as "postgres://user:pass@host/db".
+func hasURLPassword(value string) bool {
+	u, err := url.Parse(value)
+	if err != nil || u.User == nil {
+		return false
+	}
+	password, ok := u.User.Password()
+	return ok && password != ""
+}
+
 // looksLikePathOrURL reports whether value is a file path or a URL: an
-// absolute path, a "~/", "./" or "../" path, a "file:" value, or any value
-// with "://" in it.
+// absolute path, a "~/", "./" or "../" path, a path that starts with a
+// variable, a "file:" value (in any case), or any value with "://" in it.
 func looksLikePathOrURL(value string) bool {
-	if filepath.IsAbs(value) || strings.Contains(value, "://") {
+	if filepath.IsAbs(value) || strings.Contains(value, "://") || varPath.MatchString(value) {
 		return true
 	}
-	for _, prefix := range []string{"~/", "./", "../", "file:"} {
+	if len(value) >= len("file:") && strings.EqualFold(value[:len("file:")], "file:") {
+		return true
+	}
+	for _, prefix := range []string{"~/", "./", "../"} {
 		if strings.HasPrefix(value, prefix) {
 			return true
 		}
@@ -245,12 +289,19 @@ func checkUnpinnedPackage(s discover.Server) []Finding {
 		return nil
 	}
 	// Related names the package only when the redaction policy for args shows
-	// it as written. If the policy masks the arg, the name may be a misparsed
-	// secret, so the finding keeps no name.
+	// it as written, and masks no arg that holds it. If the policy masks such
+	// an arg, the name may be a misparsed secret, so the finding keeps no
+	// name: a name that is also visible in another arg would tell the reader
+	// what the mask hides.
+	shown, masked := false, false
+	for i, redacted := range discover.RedactArgs(args) {
+		if strings.Contains(args[i], spec.Name) {
+			shown = shown || redacted == args[i]
+			masked = masked || redacted != args[i]
+		}
+	}
 	related := ""
-	if slices.ContainsFunc(discover.RedactArgs(args), func(a string) bool {
-		return strings.Contains(a, spec.Name)
-	}) {
+	if shown && !masked {
 		related = spec.Name
 	}
 	return []Finding{{

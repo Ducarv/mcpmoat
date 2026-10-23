@@ -72,8 +72,9 @@ type Typosquat struct {
 }
 
 // NewTyposquat returns a check for the given popular names. It copies, trims
-// and lowercases the names, so it accepts raw input that did not come from
-// ParsePopular, and the caller may change the slice afterwards.
+// and lowercases the names and skips blank ones, so it accepts raw input that
+// did not come from ParsePopular, and the caller may change the slice
+// afterwards.
 func NewTyposquat(popular []string) *Typosquat {
 	t := &Typosquat{
 		popular:   make([]popularName, 0, len(popular)),
@@ -82,6 +83,9 @@ func NewTyposquat(popular []string) *Typosquat {
 	owner := make(map[string]string, len(popular)) // bare name -> first full name
 	for _, name := range popular {
 		full := strings.ToLower(strings.TrimSpace(name))
+		if full == "" {
+			continue
+		}
 		bare := bareName(full)
 		t.popular = append(t.popular, popularName{full: full, bare: bare})
 		first, seen := owner[bare]
@@ -100,6 +104,7 @@ type typoCandidate struct {
 	bare      string
 	field     string // the Finding.Field for this name
 	isPackage bool   // a package from the runner args, not a server name
+	npm       bool   // an npx or bunx package: only npm has scopes
 }
 
 // Check returns the findings for server s: at most one for the server name
@@ -113,7 +118,13 @@ func (t *Typosquat) Check(s discover.Server) []Finding {
 	candidates := []typoCandidate{{full: name, bare: bareName(name), field: FieldName}}
 	if spec, ok := ExtractPackage(s.Command, s.Args.Values()); ok {
 		pkg := registryName(spec)
-		candidates = append(candidates, typoCandidate{full: pkg, bare: bareName(pkg), field: FieldArgs, isPackage: true})
+		candidates = append(candidates, typoCandidate{
+			full:      pkg,
+			bare:      bareName(pkg),
+			field:     FieldArgs,
+			isPackage: true,
+			npm:       spec.Runner == RunnerNPX || spec.Runner == RunnerBunx,
+		})
 	}
 
 	var findings []Finding
@@ -138,8 +149,12 @@ func (t *Typosquat) Check(s discover.Server) []Finding {
 // It returns false when c is exact, too short or too long, or not close to
 // any popular name.
 //
+// A server name is compared with the flat form of a scoped popular name
+// ("@playwright/mcp" as "playwright-mcp", see flatName), because a user who
+// names a server after its package writes it that way.
+//
 // A package (field "args") is exact only when its full name is a popular
-// name. A package whose bare name equals the bare name of a scoped popular
+// name. An npm package whose bare name equals the bare name of a scoped popular
 // package, under another scope or none, is scope squatting: closest returns
 // the popular full name. So is a scoped package whose bare name equals an
 // unscoped popular name, such as "@evil/mcp-remote". The exception is a
@@ -157,7 +172,7 @@ func (t *Typosquat) closest(c typoCandidate) (string, bool) {
 	for _, p := range t.popular {
 		// An exact match is the legitimate server. This check also stops an
 		// exact name from being reported as close to a different popular name.
-		if c.full == p.full {
+		if c.full == compareForm(c, p) {
 			return "", false
 		}
 		if !c.isPackage && (c.full == p.bare || c.bare == p.bare) {
@@ -165,7 +180,7 @@ func (t *Typosquat) closest(c typoCandidate) (string, bool) {
 		}
 	}
 
-	if c.isPackage {
+	if c.npm {
 		if related, ok := t.scopeSquat(c); ok {
 			return related, true
 		}
@@ -185,7 +200,7 @@ func (t *Typosquat) closest(c typoCandidate) (string, bool) {
 				best, related = d, p.full
 			}
 		}
-		consider(c.full, p.full)
+		consider(c.full, compareForm(c, p))
 		// A bare name that several popular names share, such as
 		// "mcp-server", proves nothing, as in scopeSquat.
 		if (c.full != c.bare || p.full != p.bare) && !t.ambiguous[p.bare] {
@@ -195,7 +210,26 @@ func (t *Typosquat) closest(c typoCandidate) (string, bool) {
 	return related, related != ""
 }
 
-// scopeSquat reports whether package c copies the name of a popular package
+// compareForm returns the form of popular name p that closest compares with
+// the full name of c: the full name for a package, the flat name for a
+// server name.
+func compareForm(c typoCandidate, p popularName) string {
+	if c.isPackage {
+		return p.full
+	}
+	return flatName(p.full)
+}
+
+// flatName writes a scoped npm name "@scope/name" as "scope-name". Any other
+// name is returned as it is.
+func flatName(name string) string {
+	if scope := scopeOf(name); scope != "" {
+		return strings.TrimSuffix(scope[1:], "/") + "-" + bareName(name)
+	}
+	return name
+}
+
+// scopeSquat reports whether npm package c copies the name of a popular package
 // under a different scope. It returns the first matching popular full name.
 // Two cases match:
 //
@@ -280,10 +314,6 @@ func bareName(name string) string {
 // pypiSeparators matches a run of the characters that PyPI treats as one.
 var pypiSeparators = regexp.MustCompile(`[-_.]+`)
 
-// dockerHubPrefixes are the ways to write the default Docker registry in
-// front of an image name.
-var dockerHubPrefixes = [...]string{"docker.io/", "index.docker.io/", "registry-1.docker.io/"}
-
 // registryName returns the package name of spec in the form that the
 // registry resolves and that the popular list uses: lower case; for PyPI,
 // every run of "-", "_" and "." written as "-" (PEP 503), so
@@ -295,7 +325,7 @@ func registryName(spec PackageSpec) string {
 	case RunnerUVX, RunnerPipx:
 		return pypiSeparators.ReplaceAllString(name, "-")
 	case RunnerDocker:
-		for _, prefix := range dockerHubPrefixes {
+		for _, prefix := range []string{"docker.io/", "index.docker.io/", "registry-1.docker.io/"} {
 			if rest, found := strings.CutPrefix(name, prefix); found {
 				name = rest
 				break
