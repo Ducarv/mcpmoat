@@ -368,7 +368,7 @@ func checkUnpinnedPackage(s discover.Server) []Finding {
 // The yes option is on when a yes flag comes before the npx command (see
 // walkNPXFlags and isYesFlag), or when an env entry named npm_config_yes, in
 // any ASCII letter case, has a value that npm does not read as false (see
-// envFalse). The flag is checked first. A server gets one finding at most. A
+// npmReadsFalse). The flag is checked first. A server gets one finding at most. A
 // flag finding names FieldArgs. An env finding names FieldEnv and the env key
 // name. A finding never holds a value.
 //
@@ -436,19 +436,25 @@ func checkAutoInstall(s discover.Server) []Finding {
 // copied.
 func yesEnvKey(env discover.SecretMap) (string, bool) {
 	for _, key := range env.Keys() {
-		if inspect.IsNpmYesName(key) && !envFalse(env[key].Reveal()) {
+		if inspect.IsNpmYesName(key) && !npmReadsFalse(env[key].Reveal()) {
 			return key, true
 		}
 	}
 	return "", false
 }
 
-// envFalse reports whether npm reads an npm_config_yes env value as false:
-// "false" after npm trims white space. npm keeps any other value, such as "0",
-// as a string, and npx reads a non-empty string as on. The trim is ASCII only:
-// Go's strings.TrimSpace also strips U+0085, which npm keeps, so
-// "false\u0085" would look off here but is on in npm. A value with other
-// white space counts as on, which gives a false finding at worst.
-func envFalse(v string) bool {
-	return strings.Trim(v, " \t\n\v\f\r") == "false"
+// npmReadsFalse reports whether npm reads an npm_config_yes env value as
+// false: "false" or "0" after npm trims white space. npm exec validates its
+// config, and that turns "0" into false. (npm config get skips that step, so
+// it prints "0".) npm also reads other numeric zeros, such as "00", as false;
+// they count as on here, which gives a false finding at worst. The trim is
+// ASCII only: Go's strings.TrimSpace also strips U+0085, which npm keeps, so
+// "false\u0085" would look off here but is on in npm.
+func npmReadsFalse(v string) bool {
+	switch strings.Trim(v, " \t\n\v\f\r") {
+	case "false", "0":
+		return true
+	default:
+		return false
+	}
 }

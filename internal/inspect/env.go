@@ -161,7 +161,8 @@ func isNpmYesEntry(entry string) bool {
 // case, the way npm matches its config variables. strings.EqualFold also
 // folds some non-ASCII letters, such as U+017F to "s", but such a letter is
 // more than one byte, so the length check rules it out: npm ignores
-// "npm_config_yeſ".
+// "npm_config_yeſ". internal/rules (MOAT-T4-004) uses it too, so both read
+// the same env entry as the yes option.
 func IsNpmYesName(name string) bool {
 	return len(name) == len(npmYesName) && strings.EqualFold(name, npmYesName)
 }

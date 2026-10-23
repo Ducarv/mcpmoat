@@ -2,20 +2,29 @@ package rules
 
 import "strings"
 
+// npmShortFlags are the one-letter shorthands of npm 11 (the @npmcli/config
+// definitions). nopt expands a flag made only of these letters as a group of
+// short flags, with one dash or more: "--qy" is "--loglevel warn --yes".
+const npmShortFlags = "dqsnacfgLlmpCSBDEOP?Hhvwy"
+
 // walkNPXFlags reads the npx flags in args for MOAT-T4-004. args are the
 // arguments after the npx command (see unwrapCmd). It returns two results:
 //   - yes is true when an argument before the command may set the yes option
 //     to on or to null (see isYesFlag).
-//   - runs is true when npx may have something to install or run: an argument
-//     that is not a flag, a -p, --package, -c or --call flag, or a flag with
-//     an "=" value (npx moves the value of a shorthand such as -y=<v> to its
-//     own argument).
+//   - runs is true when npx may have something to install or run. It is false
+//     only when every argument is a yes flag with no "=" or "--": any other
+//     flag may name a package, or expand to a word that becomes the command
+//     (npx expands -q to "--loglevel warn"), and npx moves the value of a
+//     shorthand such as -y=<v> to its own argument.
 //
 // The walk does not copy how npx and nopt decide which flag takes a value.
 // npm has many value flags, aliases, shorthands and removed options, and each
 // one that a copy gets wrong hides a yes flag. The walk fails closed instead:
 //   - Every argument that starts with "-" is checked as a yes flag, even one
-//     that npm may read as the value of the flag before it.
+//     that npm may read as the value of the flag before it. When the flag
+//     before has no "=", npx may skip this flag as that flag's value, and then
+//     the word after it is not its value. So it is checked with and without
+//     that word.
 //   - An argument that does not start with "-", or "--", may be the value of
 //     the argument before it when that argument is a flag with no "=". The
 //     walk then goes on.
@@ -35,14 +44,15 @@ func walkNPXFlags(args []string) (yes, runs bool) {
 	maybeValue := false // the argument before is a flag that may take this one as its value
 	for i, arg := range args {
 		isFlag := strings.HasPrefix(arg, "-") && arg != "--"
-		if !isFlag && !maybeValue {
-			if arg == "--" {
-				return yes, runs || i+1 < len(args)
-			}
+		switch {
+		case arg == "--" && !maybeValue:
+			return yes, runs || i+1 < len(args) // the command follows
+		case !isFlag && !maybeValue:
 			return yes, true // the command: npx runs it
-		}
-		if !isFlag {
-			runs = runs || arg != "--" // a value; it may be the package of -p
+		case !isFlag:
+			// A value of the flag before. It may be the package of -p. A "--"
+			// may also end the flags, and then the next argument is the command.
+			runs = runs || arg != "--" || i+1 < len(args)
 			maybeValue = false
 			continue
 		}
@@ -50,36 +60,27 @@ func walkNPXFlags(args []string) (yes, runs bool) {
 		if i+1 < len(args) {
 			next = args[i+1]
 		}
-		yes = yes || isYesFlag(arg, next)
-		runs = runs || isRunFlag(arg)
+		isYes := isYesFlag(arg, next) || (maybeValue && isYesFlag(arg, ""))
+		yes = yes || isYes
+		runs = runs || !isYes || strings.Contains(arg, "=")
 		maybeValue = !strings.Contains(arg, "=")
 	}
 	return yes, runs
-}
-
-// isRunFlag reports whether a flag names something for npx to run: -p,
-// --package, -c or --call, or any flag with an "=" value.
-func isRunFlag(arg string) bool {
-	name, _, hasValue := strings.Cut(arg, "=")
-	switch strings.TrimLeft(name, "-") {
-	case "p", "package", "c", "call":
-		return true
-	default:
-		return hasValue
-	}
 }
 
 // isYesFlag reports whether one npx argument may set the yes option to on, or
 // to null. null is the default, and it also overrides the npm_config_yes=false
 // of the scan, so it counts as on. next is the argument after arg, or "". The
 // rules follow npx-cli.js and nopt (npm 11) and fail closed:
-//   - A short flag, or a cluster of them, is on when it holds a "y" (-y) or an
+//   - A short flag, or a group of them, is on when it holds a "y" (-y) or an
 //     "n" (npm's shorthand for --no-yes, which a later "false" or "null" turns
 //     on), such as "-y", "-qy" or "-n".
-//   - For a long flag, "--no" and "--n" are the shorthand of "--no-yes". nopt
-//     then strips every leading "no-", in any letter case, and each one flips
-//     the result. The rest must be a prefix of "yes", such as "yes" or "ye", or
-//     the flag is not a yes flag. "--y" is the -y shorthand, so it is on.
+//   - A long flag made only of npm's one-letter shorthands (npmShortFlags) is
+//     such a group too, so "--qy" and "--ny" are on.
+//   - For other long flags, "--no" is the shorthand of "--no-yes". nopt then
+//     strips every leading "no-", in any letter case, and each one flips the
+//     result. The rest must be a prefix of "yes", such as "yes" or "ye", or
+//     the flag is not a yes flag.
 //   - "--yes" or "--ye" with no "=" is on. npx puts "--" before the next word,
 //     so that word is not a value. (npm reads "--ye false" as off, so this is
 //     a false finding at worst.)
@@ -93,8 +94,12 @@ func isYesFlag(arg, next string) bool {
 	if !strings.HasPrefix(name, "--") {
 		return strings.ContainsAny(strings.TrimPrefix(name, "-"), "yn")
 	}
-	key := strings.ToLower(strings.TrimLeft(name, "-"))
-	if key == "no" || key == "n" {
+	key := strings.TrimLeft(name, "-")
+	if isShortGroup(key) {
+		return strings.ContainsAny(key, "yn")
+	}
+	key = strings.ToLower(key)
+	if key == "no" {
 		key = "no-yes"
 	}
 	flips := 0
@@ -105,7 +110,7 @@ func isYesFlag(arg, next string) bool {
 	if key == "" || !strings.HasPrefix("yes", key) {
 		return false
 	}
-	if flips == 0 && (key == "y" || !hasValue) {
+	if flips == 0 && !hasValue {
 		return true
 	}
 	if !hasValue {
@@ -119,4 +124,12 @@ func isYesFlag(arg, next string) bool {
 	default: // "true" or any other value
 		return flips%2 == 0
 	}
+}
+
+// isShortGroup reports whether key, a flag without its dashes, is made only
+// of npm's one-letter shorthands (see npmShortFlags).
+func isShortGroup(key string) bool {
+	return key != "" && !strings.ContainsFunc(key, func(r rune) bool {
+		return !strings.ContainsRune(npmShortFlags, r)
+	})
 }

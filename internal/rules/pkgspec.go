@@ -174,7 +174,7 @@ func parseUnwrapped(command string, args []string) (PackageSpec, int, bool) {
 }
 
 // cmdWrapped reports whether command and args are "cmd [/s /d /q] /c
-// <command> ...", the usual way to start npx or uvx from a Windows client
+// <command> ..." (or /k, which also runs the command), the usual way to start npx or uvx from a Windows client
 // config. It returns the index in args of the wrapped command.
 func cmdWrapped(command string, args []string) (int, bool) {
 	if commandBase(command) != "cmd" {
@@ -182,7 +182,7 @@ func cmdWrapped(command string, args []string) (int, bool) {
 	}
 	for i, arg := range args {
 		switch {
-		case strings.EqualFold(arg, "/c"):
+		case strings.EqualFold(arg, "/c") || strings.EqualFold(arg, "/k"):
 			return i + 1, i+1 < len(args)
 		case len(arg) == 2 && arg[0] == '/':
 			continue // another switch, such as /s or /q
@@ -435,8 +435,7 @@ var npmFlags = flagTable{
 // returns the wrapped command, the arguments that follow it, and the number
 // of arguments it skipped. A single-string wrapper such as
 // "cmd /c \"npx -y pkg\"" is not read through.
-func unwrapCmd(command string, args []string) (string, []string, int) {
-	skip := 0
+func unwrapCmd(command string, args []string) (wrapped string, wrappedArgs []string, skip int) {
 	for {
 		i, ok := cmdWrapped(command, args)
 		if !ok {

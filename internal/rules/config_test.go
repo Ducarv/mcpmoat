@@ -501,9 +501,20 @@ func TestCheckAutoInstall(t *testing.T) {
 		{"- then -y", stdioServer("npx", "-", "-y", "@scope/server@1.2.3"), fires},
 		// "--" can be the value of -p, so the walk goes on past it.
 		{"-p -- then -y", stdioServer("npx", "-p", "--", "-y", "bin"), fires},
+		// nopt expands a flag made only of one-letter shorthands, even with "--".
+		{"--qy", stdioServer("npx", "--qy", "pkg"), fires},
+		{"--yy", stdioServer("npx", "--yy", "pkg"), fires},
+		{"--ny", stdioServer("npx", "--ny", "pkg"), fires},
+		{"--dy", stdioServer("npx", "--dy", "pkg"), fires},
+		// npx skips the yes flag as the value of --call, so "false" is the
+		// command and not the value of --no-no-yes.
+		{"--call --no-no-yes false", stdioServer("npx", "--call", "--no-no-yes", "false"), fires},
+		// npx expands -q to "--loglevel warn", and "warn" becomes the command.
+		{"--loglevel -q -y", stdioServer("npx", "--loglevel", "-q", "-y"), fires},
+		{"cmd /k wrapper", stdioServer("cmd", "/k", "npx", "-y", "pkg"), fires},
 
-		// An env entry turns the yes option on unless its value is "false"
-		// after trimming ASCII white space. The key matches in any ASCII letter
+		// An env entry turns the yes option on unless its value is "false" or
+		// "0" after trimming ASCII white space. The key matches in any ASCII letter
 		// case.
 		{"env npm_config_yes=true", withEnv(stdioServer("npx", "pkg"), "npm_config_yes", "true"), firesEnv("npm_config_yes")},
 		{"env NPM_CONFIG_YES=1", withEnv(stdioServer("npx", "pkg"), "NPM_CONFIG_YES", "1"), firesEnv("NPM_CONFIG_YES")},
@@ -513,8 +524,6 @@ func TestCheckAutoInstall(t *testing.T) {
 		// adds no npm_config_yes=false, so the scan installs too.
 		{"env npm_config_yes empty", withEnv(stdioServer("npx", "pkg"), "npm_config_yes", ""), firesEnv("npm_config_yes")},
 		{"env npm_config_yes=null", withEnv(stdioServer("npx", "pkg"), "npm_config_yes", "null"), firesEnv("npm_config_yes")},
-		// npm keeps "0" as a string, and npx reads a non-empty string as on.
-		{"env npm_config_yes=0", withEnv(stdioServer("npx", "pkg"), "npm_config_yes", "0"), firesEnv("npm_config_yes")},
 		// npm reads white space only as on.
 		{"env npm_config_yes blank", withEnv(stdioServer("npx", "pkg"), "npm_config_yes", "  "), firesEnv("npm_config_yes")},
 		// npm does not trim U+0085, so it reads this value as on.
@@ -528,6 +537,9 @@ func TestCheckAutoInstall(t *testing.T) {
 		{"-y after the -p spec is a server arg", stdioServer("npx", "-p", "pkg", "bin", "-y"), nil},
 		{"--yes=false", stdioServer("npx", "--yes=false", "pkg"), nil},
 		{"--no-yes", stdioServer("npx", "--no-yes", "pkg"), nil},
+		{"--dd is a group with no y or n", stdioServer("npx", "--dd", "pkg"), nil},
+		// npm exec validates its config, which reads "0" as false.
+		{"env npm_config_yes=0", withEnv(stdioServer("npx", "pkg"), "npm_config_yes", "0"), nil},
 		{"--no-yes true", stdioServer("npx", "--no-yes", "true", "pkg"), nil},
 		{"--ye=false, a prefix of --yes", stdioServer("npx", "--ye=false", "pkg"), nil},
 		{"cmd /c wrapper, -y after the command", stdioServer("cmd", "/c", "npx", "-p", "pkg", "bin", "-y"), nil},

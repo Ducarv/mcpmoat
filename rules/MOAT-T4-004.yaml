@@ -39,7 +39,9 @@ should_match:
   - text: npx --yes=null pkg
     note: null resets the option to its default, which overrides the npm_config_yes=false of the scan
   - text: npx --yes=0 pkg
-    note: npm reads only an exact "=false" as off. Any other value leaves the option on
+    note: npm reads only an exact "=false" as off. Any other value leaves the option on, and npx runs the value as the command
+  - text: npx --qy pkg
+    note: nopt expands a flag made only of one-letter shorthands, even after "--", so --qy is --loglevel warn --yes
   - text: npx --no-yes false pkg
     note: npm reads "false" as the value of --no-yes, and the "no-" flips it to on
   - text: npx --no-no-yes pkg
