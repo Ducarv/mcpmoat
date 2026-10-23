@@ -346,8 +346,8 @@ func assertStderrLines(t *testing.T, stderr string, wants []lineWant) {
 func assertScanPrefix(t *testing.T, stderr string) {
 	t.Helper()
 	for _, line := range nonEmptyLines(stderr) {
-		if !strings.HasPrefix(line, "mcpmoat scan: ") {
-			t.Errorf("stderr line %q does not start with %q", line, "mcpmoat scan: ")
+		if !strings.HasPrefix(line, scanPrefix) {
+			t.Errorf("stderr line %q does not start with %q", line, scanPrefix)
 		}
 	}
 }
@@ -375,5 +375,8 @@ func assertContainsNone(t *testing.T, what, got string, bad []string) {
 	}
 }
 
+// scanPrefix is the start of every stderr line of scan.
+const scanPrefix = "mcpmoat scan: "
+
 // scanWarnPrefix is the start of every scan warning line.
-const scanWarnPrefix = "mcpmoat scan: warning: "
+const scanWarnPrefix = scanPrefix + "warning: "

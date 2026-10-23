@@ -529,67 +529,66 @@ func TestScanIgnoreFileDoesNotChangeErrorExit(t *testing.T) {
 func TestScanIgnoreFileConfigMode(t *testing.T) {
 	t.Parallel()
 
-	t.Run("absolute config path in another directory", func(t *testing.T) {
-		t.Parallel()
+	tests := []struct {
+		name string
+		// inWork puts mcp.json in the working directory and passes the
+		// relative path; otherwise the config is an absolute path in
+		// another directory.
+		inWork    bool
+		ignore    string
+		wantLines []lineWant
+	}{
+		{
+			name:   "absolute config path in another directory",
+			ignore: "MOAT-T1-003\nMOAT-T1-004 ok-srv\n",
+			wantLines: []lineWant{
+				exactLine("mcpmoat scan: using 2 entries from .mcpmoat-ignore"),
+				exactLine(noRulesNotice),
+			},
+		},
+		{
+			name:   "relative config path",
+			inWork: true,
+			ignore: "MOAT-T1-003\n",
+			wantLines: []lineWant{
+				exactLine("mcpmoat scan: using 1 entry from .mcpmoat-ignore"),
+				exactLine(noRulesNotice),
+			},
+		},
+		{
+			name:   "malformed line",
+			ignore: ignoreMarker + "/bad\n",
+			wantLines: []lineWant{
+				prefixLine(scanWarnPrefix + ".mcpmoat-ignore:1: "),
+				exactLine(noRulesNotice),
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
 
-		config := writeServers(t, t.TempDir(), "mcp.json", okServer)
-		work := t.TempDir()
-		writeTestFile(t, work, rules.IgnoreFileName, "MOAT-T1-003\nMOAT-T1-004 ok-srv\n")
-		c, stdout, stderr := dirsCLI(t, t.TempDir(), work)
+			work := t.TempDir()
+			config := "mcp.json"
+			if tt.inWork {
+				writeServers(t, work, config, okServer)
+			} else {
+				config = writeServers(t, t.TempDir(), config, okServer)
+			}
+			writeTestFile(t, work, rules.IgnoreFileName, tt.ignore)
+			c, stdout, stderr := dirsCLI(t, t.TempDir(), work)
 
-		code, out, errOut := runScanArgs(c, stdout, stderr, "scan", "--no-connect", "--config", config)
+			code, out, errOut := runScanArgs(c, stdout, stderr, "scan", "--no-connect", "--config", config)
 
-		if code != exitOK {
-			t.Errorf("exit code = %d, want %d\nstderr:\n%s", code, exitOK, errOut)
-		}
-		assertContainsAll(t, "stdout", out, []string{"ok-srv"})
-		assertStderrLines(t, errOut, []lineWant{
-			exactLine("mcpmoat scan: using 2 entries from .mcpmoat-ignore"),
-			exactLine(noRulesNotice),
+			if code != exitOK {
+				t.Errorf("exit code = %d, want %d\nstderr:\n%s", code, exitOK, errOut)
+			}
+			assertContainsAll(t, "stdout", out, []string{"ok-srv"})
+			assertStderrLines(t, errOut, tt.wantLines)
+			assertNoIgnoreContent(t, errOut)
+			assertNoEscape(t, out, errOut)
 		})
-		assertNoEscape(t, out, errOut)
-	})
-
-	t.Run("relative config path", func(t *testing.T) {
-		t.Parallel()
-
-		work := t.TempDir()
-		writeServers(t, work, "mcp.json", okServer)
-		writeTestFile(t, work, rules.IgnoreFileName, "MOAT-T1-003\n")
-		c, stdout, stderr := dirsCLI(t, t.TempDir(), work)
-
-		code, out, errOut := runScanArgs(c, stdout, stderr, "scan", "--no-connect", "--config", "mcp.json")
-
-		if code != exitOK {
-			t.Errorf("exit code = %d, want %d\nstderr:\n%s", code, exitOK, errOut)
-		}
-		assertContainsAll(t, "stdout", out, []string{"ok-srv"})
-		assertStderrLines(t, errOut, []lineWant{
-			exactLine("mcpmoat scan: using 1 entry from .mcpmoat-ignore"),
-			exactLine(noRulesNotice),
-		})
-	})
-
-	t.Run("malformed line", func(t *testing.T) {
-		t.Parallel()
-
-		config := writeServers(t, t.TempDir(), "mcp.json", okServer)
-		work := t.TempDir()
-		writeTestFile(t, work, rules.IgnoreFileName, ignoreMarker+"/bad\n")
-		c, stdout, stderr := dirsCLI(t, t.TempDir(), work)
-
-		code, out, errOut := runScanArgs(c, stdout, stderr, "scan", "--no-connect", "--config", config)
-
-		if code != exitOK {
-			t.Errorf("exit code = %d, want %d\nstderr:\n%s", code, exitOK, errOut)
-		}
-		assertStderrLines(t, errOut, []lineWant{
-			prefixLine(scanWarnPrefix + ".mcpmoat-ignore:1: "),
-			exactLine(noRulesNotice),
-		})
-		assertNoIgnoreContent(t, errOut)
-		assertNoEscape(t, out, errOut)
-	})
+	}
 }
 
 // TestScanIgnoreConfigModeWithoutWorkDir checks --config mode when getwd
