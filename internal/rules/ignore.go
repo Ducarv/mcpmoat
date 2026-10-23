@@ -261,15 +261,14 @@ func ParseIgnore(data []byte) (IgnoreList, []IgnoreWarning) {
 		if len(fields) == 0 {
 			continue // a blank line or a comment line
 		}
-		if list.Len() >= maxIgnoreEntries {
-			limit = &IgnoreWarning{Line: lineNo, Reason: reasonTooManyEntries}
-			break
-		}
-
 		entry, reason := parseIgnoreFields(fields)
 		if reason != "" {
 			warn(lineNo, reason)
 			continue
+		}
+		if list.Len() >= maxIgnoreEntries {
+			limit = &IgnoreWarning{Line: lineNo, Reason: reasonTooManyEntries}
+			break
 		}
 		entry.Line = lineNo
 		list.Add(entry)

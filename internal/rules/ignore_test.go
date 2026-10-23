@@ -297,6 +297,22 @@ func TestParseIgnoreEntryCap(t *testing.T) {
 		}
 	})
 
+	t.Run("a malformed line after the cap keeps its own reason", func(t *testing.T) {
+		t.Parallel()
+		data := entries(maxIgnoreEntries) + "1" + badMarker + "\nR-extra\n"
+		list, warnings := ParseIgnore([]byte(data))
+		if list.Len() != maxIgnoreEntries {
+			t.Errorf("Len() = %d, want %d", list.Len(), maxIgnoreEntries)
+		}
+		want := []IgnoreWarning{
+			{Line: maxIgnoreEntries + 1, Reason: reasonInvalidRuleID},
+			{Line: maxIgnoreEntries + 2, Reason: reasonTooManyEntries},
+		}
+		if !reflect.DeepEqual(warnings, want) {
+			t.Errorf("warnings = %+v, want %+v", warnings, want)
+		}
+	})
+
 	t.Run("cap warning is kept after the summary", func(t *testing.T) {
 		t.Parallel()
 		var b strings.Builder
