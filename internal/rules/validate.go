@@ -200,7 +200,7 @@ func (c *checker) checkReferenceURL(field, ref string) {
 // excludes space, control bytes, DEL and every non-ASCII byte. It works on
 // bytes, not runes, so invalid UTF-8 fails too.
 func isPrintableASCII(s string) bool {
-	for i := 0; i < len(s); i++ {
+	for i := range len(s) {
 		if s[i] < 0x21 || s[i] > 0x7E {
 			return false
 		}

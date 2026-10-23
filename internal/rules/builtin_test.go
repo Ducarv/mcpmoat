@@ -9,8 +9,8 @@ import (
 // builtinCompiler returns the Compiler that runs the cases of the built-in
 // rules. It is nil while the matchers do not exist.
 //
-// Issue #35 provides rules.Compile; return it here and the case execution
-// test below starts to run.
+// Issue #35 provides rules.Compile. Return it here, and TestBuiltinRulesCases
+// runs instead of skipping.
 func builtinCompiler() Compiler {
 	return nil
 }

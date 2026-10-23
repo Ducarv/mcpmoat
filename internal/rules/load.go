@@ -32,9 +32,9 @@ const dirBatch = 256
 // maxFolderErrors is the number of errors after which the loader stops to read
 // more files of a directory. Every file can give up to maxErrorsPerFile+1
 // errors, and a directory can hold maxRuleFiles files, so without the cap a
-// hostile directory could give about 21000 errors and use much time and memory. The loader adds
-// one last ReasonTooManyErrors error, so a result has at most maxFolderErrors+1
-// errors.
+// hostile directory could give (maxErrorsPerFile+1) * maxRuleFiles errors and
+// use much time and memory. The loader adds one last ReasonTooManyErrors error,
+// so a result has at most maxFolderErrors+1 errors.
 const maxFolderErrors = 100
 
 // builtinLabel is the File of the errors that are about the built-in rules as
@@ -87,8 +87,10 @@ func Builtin(opts ...Option) ([]Rule, []*LoadError) {
 }
 
 // LoadDir loads the rule files in the directory dir. It is not recursive. dir
-// is untrusted input: the loader opens it with os.OpenRoot, so a read cannot
-// leave the directory. Rule.Source and the File of an error are
+// is untrusted input: the loader opens it with os.OpenRoot, so a path cannot
+// resolve outside the directory. Hard links are not detected. A symlink as dir
+// itself is followed, like any path the user types; only the entries inside
+// dir are checked for symlinks. Rule.Source and the File of an error are
 // filepath.Join(dir, name). The rules come in the order of the file names,
 // which is the same on every run.
 //
@@ -233,7 +235,6 @@ func isRuleName(name string) bool {
 // directory-level error. display maps a file name to the name that Rule.Source
 // and errors show. It stops to read files when it has maxFolderErrors errors.
 func loadEntries(fsys fs.FS, dirName string, candidates []fs.DirEntry, o loadOptions, display func(name string) string) ([]Rule, []*LoadError) {
-
 	var rules []Rule
 	var errs []*LoadError
 	notChecked := 0 // files not read after the cap, and files whose errors were cut

@@ -113,7 +113,7 @@ func caseErrors() []error {
 func (c *Case) UnmarshalYAML(value *yaml.Node) error {
 	switch value.Kind {
 	case yaml.ScalarNode:
-		if value.Tag == "!!null" {
+		if isNull(value) {
 			// yaml.v3 skips null sequence items and never calls this method for
 			// them; Parse reports them itself (nullItemErrors). This branch
 			// protects direct use of the type.
@@ -139,7 +139,7 @@ func (c *Case) decodeMapping(value *yaml.Node) error {
 	// A mapping node keeps its content as a flat list: key, value, key, value...
 	for i := 0; i+1 < len(value.Content); i += 2 {
 		key, val := value.Content[i], value.Content[i+1]
-		if key.Kind != yaml.ScalarNode || val.Kind != yaml.ScalarNode || val.Tag == "!!null" {
+		if key.Kind != yaml.ScalarNode || val.Kind != yaml.ScalarNode || isNull(val) {
 			return errCaseScalar
 		}
 		var text string

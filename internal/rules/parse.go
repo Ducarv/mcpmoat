@@ -139,6 +139,25 @@ func (l *errList) add(file string, r Reason, node *yaml.Node, field string, err 
 	l.errs = append(l.errs, newLoadError(file, r).at(node.Line, node.Column).inField(field).wrap(err))
 }
 
+// addAll records errs, which are already built and in file order, and counts
+// dropped more errors that the caller left out. Errors after the cap are
+// counted and not kept.
+func (l *errList) addAll(errs []*LoadError, dropped int) {
+	l.dropped += dropped
+	for _, e := range errs {
+		if len(l.errs) >= maxErrorsPerFile {
+			l.dropped++
+			continue
+		}
+		l.errs = append(l.errs, e)
+	}
+}
+
+// isNull reports whether n is a null scalar: ~, null or an empty value.
+func isNull(n *yaml.Node) bool {
+	return n.Kind == yaml.ScalarNode && n.ShortTag() == "!!null"
+}
+
 // total returns the number of errors added, kept or not.
 func (l *errList) total() int {
 	return len(l.errs) + l.dropped
@@ -166,7 +185,7 @@ func readDocument(file string, data []byte) (root *yaml.Node, errs []*LoadError,
 		return nil, []*LoadError{newLoadError(file, ReasonInvalidYAML).wrap(errNotMapping)}, true
 	}
 	// A file with only "---" is one document with an empty value: it is empty.
-	if v := doc.Content[0]; v.Kind == yaml.ScalarNode && v.ShortTag() == "!!null" && v.Value == "" {
+	if v := doc.Content[0]; isNull(v) && v.Value == "" {
 		return nil, []*LoadError{newLoadError(file, ReasonEmptyFile)}, true
 	}
 
@@ -315,7 +334,7 @@ func nullItems(file, name string, val *yaml.Node, why error, out *errList) {
 		return
 	}
 	for i, item := range val.Content {
-		if item.Kind != yaml.ScalarNode || item.ShortTag() != "!!null" {
+		if !isNull(item) {
 			continue
 		}
 		out.add(file, ReasonInvalidValue, item, indexField(name, i), why)
@@ -325,20 +344,24 @@ func nullItems(file, name string, val *yaml.Node, why error, out *errList) {
 // checkMatch checks the shape and the keys of the value of the match field and
 // reports problems to out. It returns false when the value must not be decoded.
 func checkMatch(file string, val *yaml.Node, out *errList) bool {
-	if val.Kind == yaml.ScalarNode && val.ShortTag() == "!!null" {
+	if isNull(val) {
 		return true // an empty match is a missing field; Validate reports it
 	}
 	if val.Kind != yaml.MappingNode {
 		out.add(file, ReasonInvalidValue, val, "match", nil)
 		return false
 	}
-	start := out.total()
-	for _, f := range checkKeys(file, "match.", val, matchKeys(), out) {
+	// Collect the key errors and the params errors apart, then merge them by
+	// position. out keeps the first errors in the order it gets them, so the
+	// merge makes those the first errors in file order.
+	var keyErrs, paramErrs errList
+	for _, f := range checkKeys(file, "match.", val, matchKeys(), &keyErrs) {
 		if f.name == "params" {
-			checkParams(file, f.val, out)
+			checkParams(file, f.val, &paramErrs)
 		}
 	}
-	return out.total() == start
+	out.addAll(mergeByPosition(keyErrs.errs, paramErrs.errs), keyErrs.dropped+paramErrs.dropped)
+	return keyErrs.total()+paramErrs.total() == 0
 }
 
 // checkParams checks the value of match.params: a mapping with plain string
@@ -346,7 +369,7 @@ func checkMatch(file string, val *yaml.Node, out *errList) bool {
 // bool or int key into a string and drop a null key without a word.
 func checkParams(file string, val *yaml.Node, out *errList) {
 	switch {
-	case val.Kind == yaml.ScalarNode && val.ShortTag() == "!!null":
+	case isNull(val):
 		// An empty params is the same as no params.
 	case val.Kind != yaml.MappingNode:
 		out.add(file, ReasonInvalidValue, val, "match.params", nil)

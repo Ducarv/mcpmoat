@@ -1556,6 +1556,123 @@ func TestParseErrorCapKeepsFirstInFile(t *testing.T) {
 	assertSameErrors(t, errs, "rule.yaml", data)
 }
 
+// TestParseMatchErrorsInFileOrder checks that the key errors of match and the
+// errors of match.params come out in file order, also at the error cap. The
+// two kinds are collected apart and merged, so a params error early in the
+// file must not lose its place to a match key error that is later in the file.
+func TestParseMatchErrorsInFileOrder(t *testing.T) {
+	t.Parallel()
+	// badKeys is a params body with n integer keys 0 to n-1, one per line.
+	// Every key gives one errKeyNotStr error at column 5.
+	badKeys := func(n int) string {
+		var b strings.Builder
+		for i := range n {
+			b.WriteString("    " + strconv.Itoa(i) + ": c\n")
+		}
+		return b.String()
+	}
+	parse := func(match string) []*LoadError {
+		_, errs := Parse("rule.yaml", []byte(buildParseRule(map[string]string{"match": match}, "")))
+		return errs
+	}
+
+	t.Run("params errors before a late match key error at the cap", func(t *testing.T) {
+		t.Parallel()
+		// Lines: match 5, heuristic 6, params 7, bad keys 8 to 32, bogus 33.
+		// 25 params errors and 1 bogus error make 26. The first 20 in file
+		// order are params lines 8 to 27, so bogus is dropped. The old order
+		// (key errors first) kept bogus and lost the params error of line 27.
+		const nBad = 25
+		errs := parse("match:\n  heuristic: h\n  params:\n" + badKeys(nBad) + "  bogus: 1\n")
+		assertCapped(t, errs, nBad+1-maxErrorsPerFile)
+		for i, e := range errs[:maxErrorsPerFile] {
+			if e.Reason != ReasonInvalidYAML || e.Line != 8+i || e.Col != 5 || !errors.Is(e, errKeyNotStr) {
+				t.Errorf("error %d = %q (line %d col %d), want a params key error at line %d", i, e.Error(), e.Line, e.Col, 8+i)
+			}
+		}
+	})
+
+	t.Run("early match key error comes first at the cap", func(t *testing.T) {
+		t.Parallel()
+		// Lines: match 5, heuristic 6, bogus 7, params 8, bad keys 9 to 33.
+		// File order: bogus, then params lines 9 to 27 (19 errors).
+		const nBad = 25
+		errs := parse("match:\n  heuristic: h\n  bogus: 1\n  params:\n" + badKeys(nBad))
+		assertCapped(t, errs, nBad+1-maxErrorsPerFile)
+		if e := errs[0]; e.Reason != ReasonUnknownField || e.Field != "match.bogus" || e.Line != 7 {
+			t.Errorf("error 0 = %q (field %q line %d), want unknown field match.bogus at line 7", e.Error(), e.Field, e.Line)
+		}
+		for i, e := range errs[1:maxErrorsPerFile] {
+			if e.Reason != ReasonInvalidYAML || e.Line != 9+i {
+				t.Errorf("error %d = %q (line %d), want a params key error at line %d", i+1, e.Error(), e.Line, 9+i)
+			}
+		}
+	})
+
+	t.Run("match key errors on both sides of params", func(t *testing.T) {
+		t.Parallel()
+		// No cap here. Lines: bogus 7, params 8, bad keys 9 and 10, other 11.
+		// Parse sorts the errors, so this checks the final order, not the cap.
+		errs := parse("match:\n  heuristic: h\n  bogus: 1\n  params:\n" + badKeys(2) + "  other: 1\n")
+		var got []string
+		for _, e := range errs {
+			got = append(got, strconv.Itoa(e.Line)+" "+string(e.Reason))
+		}
+		want := []string{
+			"7 " + string(ReasonUnknownField),
+			"9 " + string(ReasonInvalidYAML),
+			"10 " + string(ReasonInvalidYAML),
+			"11 " + string(ReasonUnknownField),
+		}
+		if !slices.Equal(got, want) {
+			t.Errorf("Parse() errors (line reason) = %q, want %q", got, want)
+		}
+	})
+}
+
+// TestIsNull checks which YAML nodes count as null: the scalars ~, null and
+// the empty value, and no other node.
+func TestIsNull(t *testing.T) {
+	t.Parallel()
+	// doc parses src and returns the value of the one key "k".
+	doc := func(t *testing.T, src string) *yaml.Node {
+		t.Helper()
+		var root yaml.Node
+		if err := yaml.Unmarshal([]byte(src), &root); err != nil {
+			t.Fatalf("yaml.Unmarshal(%q) error = %v", src, err)
+		}
+		return root.Content[0].Content[1]
+	}
+	tests := []struct {
+		name string
+		src  string
+		want bool
+	}{
+		{name: "tilde", src: "k: ~\n", want: true},
+		{name: "null word", src: "k: null\n", want: true},
+		{name: "capital null word", src: "k: Null\n", want: true},
+		{name: "empty value", src: "k:\n", want: true},
+		{name: "quoted null word is a string", src: "k: 'null'\n", want: false},
+		{name: "double quoted tilde is a string", src: "k: \"~\"\n", want: false},
+		{name: "empty string", src: "k: ''\n", want: false},
+		{name: "string", src: "k: text\n", want: false},
+		{name: "number", src: "k: 0\n", want: false},
+		{name: "bool", src: "k: false\n", want: false},
+		{name: "mapping", src: "k: {a: 1}\n", want: false},
+		{name: "empty mapping", src: "k: {}\n", want: false},
+		{name: "sequence", src: "k: [~]\n", want: false},
+		{name: "empty sequence", src: "k: []\n", want: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if got := isNull(doc(t, tt.src)); got != tt.want {
+				t.Errorf("isNull(%q) = %v, want %v", tt.src, got, tt.want)
+			}
+		})
+	}
+}
+
 // TestDecodeFieldHandlesEveryKey guards against a key that checkKeys allows
 // but decodeField has no case for. Such a key would be dropped without a word.
 func TestDecodeFieldHandlesEveryKey(t *testing.T) {
