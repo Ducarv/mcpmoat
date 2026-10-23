@@ -1,8 +1,11 @@
 package rules
 
 import (
+	"bytes"
+	"encoding/json"
 	"errors"
 	"io/fs"
+	"regexp"
 	"strings"
 	"testing"
 	"unicode/utf8"
@@ -203,22 +206,65 @@ func TestRunBuiltinCasesWithWrongMatcher(t *testing.T) {
 func TestBuiltinRulesASCII(t *testing.T) {
 	t.Parallel()
 
+	// The embed pattern in rules/embed.go is *.yaml, so every entry is a file.
 	entries, err := fs.ReadDir(builtinrules.FS, ".")
 	if err != nil {
 		t.Fatal(err)
 	}
 	for _, e := range entries {
-		if e.IsDir() {
-			continue
-		}
 		b, err := fs.ReadFile(builtinrules.FS, e.Name())
 		if err != nil {
 			t.Fatal(err)
 		}
 		for i, c := range b {
 			if c >= utf8.RuneSelf {
-				t.Errorf("%s: byte %d is 0x%02X; write a non-ASCII rune as an escape", e.Name(), i, c)
+				line := bytes.Count(b[:i], []byte("\n")) + 1
+				col := i - bytes.LastIndexByte(b[:i], '\n')
+				t.Errorf("%s:%d:%d: byte 0x%02X; write a non-ASCII rune as an escape", e.Name(), line, col, c)
 				break
+			}
+		}
+	}
+}
+
+// t1009SkipText matches the MOAT-T1-004 cases that only its word patterns
+// (keychain, credentials store or file) match. MOAT-T1-009 leaves those
+// patterns out on purpose (see its header comment).
+var t1009SkipText = regexp.MustCompile(`(?i)\bkeychains?\b|\bcredentials?\s+(?:stores?|files?)\b`)
+
+// TestSchemaRuleCopiesDescriptionRules checks that MOAT-T1-009 stays in sync
+// with the rules it copies. Each should_match case of MOAT-T1-001, MOAT-T1-003
+// and MOAT-T1-004 is put in a schema description, encoded as inspect encodes
+// a schema (encoding/json without HTML escapes), and MOAT-T1-009 must match it.
+func TestSchemaRuleCopiesDescriptionRules(t *testing.T) {
+	t.Parallel()
+
+	byID := make(map[string]Rule)
+	for _, r := range mustBuiltin(t, WithCompiler(builtinCompiler())) {
+		byID[r.ID] = r
+	}
+	m, err := byID["MOAT-T1-009"].Match.Compile()
+	if err != nil {
+		t.Fatalf("MOAT-T1-009: compile: %v", err)
+	}
+	for _, id := range []string{"MOAT-T1-001", "MOAT-T1-003", "MOAT-T1-004"} {
+		cases := byID[id].ShouldMatch
+		if len(cases) == 0 {
+			t.Fatalf("%s: no should_match case loaded", id)
+		}
+		for i, c := range cases {
+			if id == "MOAT-T1-004" && t1009SkipText.MatchString(c.Text) {
+				continue
+			}
+			var buf bytes.Buffer
+			enc := json.NewEncoder(&buf)
+			enc.SetEscapeHTML(false)
+			if err := enc.Encode(c.Text); err != nil {
+				t.Fatal(err)
+			}
+			schema := `{"properties":{"x":{"type":"string","description":` + strings.TrimSpace(buf.String()) + `}}}`
+			if len(m.Match(schema)) == 0 {
+				t.Errorf("MOAT-T1-009 does not match %s should_match[%d] in a schema: %s", id, i, schema)
 			}
 		}
 	}

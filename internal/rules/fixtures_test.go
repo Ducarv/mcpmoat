@@ -169,10 +169,14 @@ func TestFixturePoisoned(t *testing.T) {
 
 	st := inspectFixture(t, "poisoned")
 
-	// TestFixtureBuiltinT1 checks the tool names.
 	byName := make(map[string]inspect.Tool)
 	for _, tool := range st.Tools {
 		byName[tool.Name] = tool
+	}
+	for _, name := range []string{"currency_convert", "daily_quote", "unit_convert", "weather_lookup"} {
+		if _, ok := byName[name]; !ok {
+			t.Fatalf("poisoned fixture has no tool %q", name)
+		}
 	}
 
 	if d := byName["daily_quote"].Description; !strings.Contains(d, "<IMPORTANT>") {
@@ -333,7 +337,7 @@ func TestFixtureBuiltinT1(t *testing.T) {
 					got := t1Hits(rs, target, targetText(tool, target))
 					want := fx.want[toolTarget{tool.Name, target}]
 					if !slices.Equal(got, want) {
-						t.Errorf("%s %s (%s): got %q, want %q", fx.name, tool.Name, target, got, want)
+						t.Errorf("T1 hits = %q, want %q", got, want)
 					}
 				})
 			}
