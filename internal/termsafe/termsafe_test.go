@@ -1,6 +1,7 @@
 package termsafe_test
 
 import (
+	"fmt"
 	"strconv"
 	"strings"
 	"testing"
@@ -371,4 +372,33 @@ func FuzzQuote(f *testing.F) {
 			t.Fatalf("Unquote(Quote(%q)) = %q, want the input", in, back)
 		}
 	})
+}
+
+func TestIsInvisible(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		r    rune
+		want bool
+	}{
+		{'\u200b', true},     // zero-width space (Cf)
+		{'\u202e', true},     // right-to-left override (Cf)
+		{'\U000e0041', true}, // tag character (Cf)
+		{'\ufe0f', true},     // variation selector (Mn)
+		{'\u034f', true},     // combining grapheme joiner (Mn)
+		{'\u3164', true},     // Hangul filler
+		{'\u2800', true},     // blank braille pattern
+		{'a', false},
+		{'_', false},
+		{' ', false},
+		{'\u00e9', false}, // precomposed e with acute accent
+	}
+	for _, tt := range tests {
+		t.Run(fmt.Sprintf("%U", tt.r), func(t *testing.T) {
+			t.Parallel()
+			if got := termsafe.IsInvisible(tt.r); got != tt.want {
+				t.Errorf("IsInvisible(%U) = %v, want %v", tt.r, got, tt.want)
+			}
+		})
+	}
 }

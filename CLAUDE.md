@@ -22,7 +22,7 @@ internal/inspect/     connects to servers, extracts tools, prompts, resources
 internal/rules/       loads YAML, applies regex and heuristics
 internal/pins/        hashes, diff and pins.json
 internal/report/      terminal and JSON output
-internal/termsafe/    escapes untrusted text for the terminal (used by discover and report)
+internal/termsafe/    escapes untrusted text for the terminal (used by discover, report and rules)
 rules/                built-in rules (go:embed)
 testdata/servers/     malicious example MCP servers, for tests and demo
 docs/                 PRD and other documentation

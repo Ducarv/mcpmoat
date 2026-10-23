@@ -8,8 +8,10 @@
 // This package holds the one rule for every place that prints such text.
 // internal/discover uses it for the paths, project keys and server names in a
 // FileError message, internal/report uses it for every cell of the server
-// table, and cmd/mcpmoat uses it for the arguments in an error message. Keep
-// the rule here only, so these places cannot drift apart.
+// table, and cmd/mcpmoat uses it for the arguments in an error message.
+// internal/rules uses IsInvisible to compare tool names and descriptions as
+// a model reads them. Keep the rule here only, so these places cannot drift
+// apart.
 //
 // The package uses only the standard library and imports no other package of
 // this module, so every package can import it.
@@ -143,10 +145,19 @@ func needsQuote(s string) bool {
 }
 
 // needsEscape reports whether r is not visible, or can change how the text
-// around it looks: a rune that is not printable, a format or bidi control
-// character (Cf), or a rune for which isBlank is true.
+// around it looks: a rune that is not printable, or a rune for which
+// IsInvisible is true.
 func needsEscape(r rune) bool {
-	return !unicode.IsPrint(r) || unicode.Is(unicode.Cf, r) || isBlank(r)
+	return !unicode.IsPrint(r) || IsInvisible(r)
+}
+
+// IsInvisible reports whether r shows as nothing or only changes the rune
+// before it: a format character (Cf: the bidi controls, the zero-width
+// characters and the tag characters), or a rune for which isBlank is true.
+// Code that compares text the way a reader (or a model) sees it can drop
+// these runes first.
+func IsInvisible(r rune) bool {
+	return unicode.Is(unicode.Cf, r) || isBlank(r)
 }
 
 // isBlank reports whether r is printable for unicode.IsPrint but shows as

@@ -1,0 +1,53 @@
+# Popular MCP servers, the reference list for the typosquat check (rule
+# MOAT-T5-001, threat T5). A server name or package that is very close to one
+# of these names, but not equal to it, is reported.
+#
+# Format: one name per line, lowercase. Lines that start with # and empty
+# lines are ignored. Each name is a full package name (npm with its scope,
+# PyPI, or a docker image) or a well-known server name. Do not add a version
+# or a tag. Keep every name at least 5 characters long. No duplicates.
+
+# Reference servers (npm, @modelcontextprotocol)
+@modelcontextprotocol/server-filesystem
+@modelcontextprotocol/server-github
+@modelcontextprotocol/server-gitlab
+@modelcontextprotocol/server-memory
+@modelcontextprotocol/server-postgres
+@modelcontextprotocol/server-everything
+@modelcontextprotocol/server-sequential-thinking
+@modelcontextprotocol/server-puppeteer
+@modelcontextprotocol/server-brave-search
+@modelcontextprotocol/server-slack
+@modelcontextprotocol/server-gdrive
+@modelcontextprotocol/server-google-maps
+
+# Reference servers (PyPI)
+mcp-server-git
+mcp-server-fetch
+mcp-server-time
+mcp-server-sqlite
+
+# Vendor and community servers (npm)
+@playwright/mcp
+@upstash/context7-mcp
+@notionhq/notion-mcp-server
+@stripe/mcp
+@sentry/mcp-server
+@supabase/mcp-server-supabase
+@cloudflare/mcp-server-cloudflare
+@neondatabase/mcp-server-neon
+@mongodb-js/mongodb-mcp-server
+@mapbox/mcp-server
+@browsermcp/mcp
+@executeautomation/playwright-mcp-server
+firecrawl-mcp
+figma-developer-mcp
+chrome-devtools-mcp
+tavily-mcp
+exa-mcp-server
+mcp-server-kubernetes
+mcp-remote
+
+# Docker images
+ghcr.io/github/github-mcp-server
+mcp/fetch

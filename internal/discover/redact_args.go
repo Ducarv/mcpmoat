@@ -209,7 +209,7 @@ func redactArg(arg string) (shown string, maskNext bool) {
 func masksValue(name string) bool {
 	// "H" and "u" are compared as written: "-h" is usually help, and "-U"
 	// is often a user name with no password (psql).
-	if name == "H" || name == "u" || isSecretName(name) {
+	if name == "H" || name == "u" || IsSecretName(name) {
 		return true
 	}
 	// valueFlags are long header and user flags, in any case.
@@ -274,7 +274,7 @@ func displayValue(s string) string {
 			return Mask
 		}
 	}
-	if isSecretName(name) {
+	if IsSecretName(name) {
 		return name + "=" + Mask
 	}
 	// displayShape, not displayValue: one level only. A URL value such as
@@ -329,7 +329,7 @@ func displayShape(s string) string {
 // ":" is a secret-like name, as in "token:abc" or "X-Api-Key:abc".
 func hasSecretLabel(s string) bool {
 	label, _, found := strings.Cut(s, ":")
-	return found && isSecretName(label)
+	return found && IsSecretName(label)
 }
 
 // hasSafeColon reports whether s has no ":", or exactly one ":" in a safe
@@ -485,16 +485,18 @@ func containsToken(s string) bool {
 	pieces := strings.FieldsFunc(s, func(r rune) bool {
 		return strings.ContainsRune(".@:+~", r)
 	})
-	return slices.ContainsFunc(pieces, hasTokenPrefix)
+	return slices.ContainsFunc(pieces, HasTokenPrefix)
 }
 
-// isSecretName reports whether name looks like the name of a credential.
+// IsSecretName reports whether name looks like the name of a credential.
 // This function holds the full word list; the RedactArgs doc gives only
 // examples.
 //
 // name is split into words (see nameWords), so "api-key", "API_KEY" and
-// "apiKey" all give the words "api" and "key", in some case.
-func isSecretName(name string) bool {
+// "apiKey" all give the words "api" and "key", in some case. It never prints
+// or stores name. It is exported so that the redaction and the config checks
+// (threat T4) agree on what looks like a credential name.
+func IsSecretName(name string) bool {
 	words := nameWords(name)
 	for _, w := range words {
 		if isShortForm(w) {
