@@ -41,6 +41,9 @@ var (
 	errNotMapping  = errors.New("rule must be a mapping")
 	errKeyNotStr   = errors.New("keys must be plain strings")
 	errNullItem    = errors.New("list item must not be empty")
+	// errNoDecoder is a bug of mcpmoat: a key that checkKeys allows has no case
+	// in decodeField. TestDecodeFieldHandlesEveryKey guards against it.
+	errNoDecoder = errors.New("no decoder for this key")
 )
 
 // matchKeys returns the allowed keys of the match mapping. It returns a new
@@ -62,8 +65,9 @@ func matchKeys() []string {
 // a field value never shows text from the YAML library. A YAML syntax error is
 // different: Parse wraps it with ReasonInvalidYAML, so its library text (it can
 // hold text of the file, for example an anchor name) reaches LoadError.Err.
-// That is safe because LoadError.Error quotes this text and cuts it to 200
-// runes. Parse does not compile regexes and does not run matchers.
+// That is safe because LoadError.Error quotes this text and cuts it to
+// maxDisplayRunes runes. Parse does not compile regexes and does not run
+// matchers.
 func Parse(file string, data []byte) (Rule, []*LoadError) {
 	if len(data) > maxFileBytes {
 		return Rule{}, []*LoadError{newLoadError(file, ReasonTooLarge)}
@@ -92,12 +96,14 @@ func Parse(file string, data []byte) (Rule, []*LoadError) {
 	}
 
 	rule.Source = file
-	// Validate builds all its errors (its own caps bound their number). Only
-	// the first maxErrorsPerFile are kept, with their positions.
-	verrs := capErrors(file, rule.Validate(), 0)
+	// Validate builds all its errors (its own caps bound their number), in the
+	// order of the fields of Rule. Set the positions and sort by them first,
+	// so the cap keeps the first errors in file order.
+	verrs := rule.Validate()
 	if len(verrs) > 0 {
 		addPositions(verrs, fields)
-		return Rule{}, verrs
+		slices.SortStableFunc(verrs, comparePos)
+		return Rule{}, capErrors(file, verrs, 0)
 	}
 	return rule, nil
 }
@@ -150,7 +156,7 @@ func (l *errList) total() int {
 //
 // A syntax error of the YAML library is wrapped as it is. Its text can hold
 // text of the file (for example "unknown anchor 'x' referenced"). That is safe:
-// LoadError.Error quotes it and cuts it to 200 runes.
+// LoadError.Error quotes it and cuts it to maxDisplayRunes runes.
 func readDocument(file string, data []byte) (root *yaml.Node, errs []*LoadError, stop bool) {
 	dec := yaml.NewDecoder(bytes.NewReader(data))
 
@@ -351,7 +357,9 @@ func decodeField(r *Rule, name string, v *yaml.Node) error {
 	case "should_not_match":
 		return v.Decode(&r.ShouldNotMatch)
 	default:
-		return nil // checkKeys only lets the keys above through
+		// checkKeys only lets the keys above through. A key in ruleKeys without
+		// a case here would be dropped without a word, so fail instead.
+		return errNoDecoder
 	}
 }
 

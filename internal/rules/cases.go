@@ -2,7 +2,6 @@ package rules
 
 import (
 	"fmt"
-	"path"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -53,13 +52,12 @@ func CheckDocumented(r Rule) []string {
 		add("id does not match MOAT-T[1-5]-NNN")
 	}
 	if r.Source != "" {
-		// filepath.ToSlash makes a Windows path use "/", so path.Base works.
-		base := path.Base(filepath.ToSlash(r.Source))
+		base := filepath.Base(r.Source)
 		if base != r.ID+".yaml" {
 			add("file name %s does not match the id (want %s)", displayText(base), displayText(r.ID+".yaml"))
 		}
 	}
-	problems = append(problems, checkRisk(id, r.Risk)...)
+	checkRisk(r.Risk, add)
 	if isBlank(r.Remediation) {
 		add("remediation is empty")
 	}
@@ -75,20 +73,21 @@ func CheckDocumented(r Rule) []string {
 	return problems
 }
 
-// checkRisk returns the problems of a Risk text, each starting with id.
-func checkRisk(id, risk string) []string {
-	var problems []string
+// checkRisk reports the problems of a Risk text to add. Validate also caps the
+// length of a risk, but CheckDocumented must work on a Rule that did not come
+// from Parse, so it checks the length too.
+func checkRisk(risk string, add func(format string, args ...any)) {
 	if isBlank(risk) {
-		return []string{id + ": risk is empty"}
+		add("risk is empty")
+		return
 	}
 	// Unicode line and paragraph separators count as line breaks too.
 	if strings.ContainsAny(risk, "\r\n\u0085\u2028\u2029") {
-		problems = append(problems, id+": risk has a line break (use one sentence)")
+		add("risk has a line break (use one sentence)")
 	}
 	if n := utf8.RuneCountInString(risk); n > maxRiskRunes {
-		problems = append(problems, fmt.Sprintf("%s: risk has %d runes (at most %d)", id, n, maxRiskRunes))
+		add("risk has %d runes (at most %d)", n, maxRiskRunes)
 	}
-	return problems
 }
 
 // hasText reports whether at least one item holds more than white space.
@@ -159,7 +158,9 @@ func (f CaseFailure) Unwrap() error {
 //
 // A matcher error is a failure of that case only. The other cases still run.
 // RunCases returns nil when m is nil: the caller decides to skip the rule,
-// for example when no Compiler is set. It never panics because of a case.
+// for example when no Compiler is set. A case never makes RunCases panic, but
+// RunCases does not recover a panic of m itself. A Compiler must return a nil
+// interface, not a typed nil pointer, when it has no matcher.
 func RunCases(r Rule, m Matcher) []CaseFailure {
 	if m == nil {
 		return nil
@@ -176,24 +177,24 @@ func runKind(out []CaseFailure, r Rule, m Matcher, kind CaseKind, cases []Case) 
 	for i, c := range cases {
 		got, err := m.Match(c.Text)
 		if err != nil {
-			out = append(out, newFailure(r, kind, i, c, fmt.Errorf("match case: %w", err)))
+			out = append(out, newFailure(r, kind, i, c.Text, fmt.Errorf("match case: %w", err)))
 			continue
 		}
 		if got != want {
-			out = append(out, newFailure(r, kind, i, c, nil))
+			out = append(out, newFailure(r, kind, i, c.Text, nil))
 		}
 	}
 	return out
 }
 
 // newFailure builds a CaseFailure for case number i of a rule.
-func newFailure(r Rule, kind CaseKind, i int, c Case, err error) CaseFailure {
+func newFailure(r Rule, kind CaseKind, i int, text string, err error) CaseFailure {
 	return CaseFailure{
 		RuleID: r.ID,
 		Target: r.Target,
 		Kind:   kind,
 		Index:  i,
-		Text:   c.Text,
+		Text:   text,
 		Err:    err,
 	}
 }

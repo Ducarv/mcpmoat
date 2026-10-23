@@ -79,3 +79,57 @@ func TestReadRuleFileFIFORace(t *testing.T) {
 		t.Fatal("readRuleFile blocked on a named pipe")
 	}
 }
+
+// TestLoadDirNotDirectoryUnix gives LoadDir a FIFO, a symlink to a FIFO and a
+// regular file as the rules path. A plain open(2) of a FIFO blocks until a
+// writer appears, so LoadDir must check the type before it opens the path.
+func TestLoadDirNotDirectoryUnix(t *testing.T) {
+	t.Parallel()
+	base := t.TempDir()
+	fifo := filepath.Join(base, "pipe")
+	if err := syscall.Mkfifo(fifo, 0o600); err != nil {
+		t.Skipf("cannot create a named pipe: %v", err)
+	}
+	link := filepath.Join(base, "link")
+	if err := os.Symlink(fifo, link); err != nil {
+		t.Skipf("cannot create a symlink: %v", err)
+	}
+	regular := writeFile(t, base, "file.txt", "hello")
+
+	tests := []struct {
+		name string
+		dir  string
+	}{
+		{name: "fifo", dir: fifo},
+		{name: "symlink to fifo", dir: link},
+		{name: "regular file", dir: regular},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			type result struct {
+				rules []Rule
+				errs  []*LoadError
+			}
+			done := make(chan result, 1)
+			go func() {
+				rules, errs := LoadDir(tt.dir)
+				done <- result{rules, errs}
+			}()
+
+			select {
+			case res := <-done:
+				if res.rules != nil {
+					t.Errorf("rules = %v, want nil", ruleIDs(res.rules))
+				}
+				wantOneError(t, res.errs, tt.dir, ReasonDirUnreadable)
+				if !errors.Is(res.errs[0], syscall.ENOTDIR) {
+					t.Errorf("error = %v, want it to wrap ENOTDIR", res.errs[0])
+				}
+			case <-time.After(10 * time.Second):
+				// The goroutine stays blocked in open(2); the test already fails.
+				t.Fatal("LoadDir blocked on a path that is not a directory")
+			}
+		})
+	}
+}

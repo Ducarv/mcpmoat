@@ -107,18 +107,17 @@ func TestDocumentedProblemsCatchesMissingParts(t *testing.T) {
 		for _, tt := range tests {
 			t.Run(r.ID+"/"+tt.name, func(t *testing.T) {
 				t.Parallel()
-				// Each subtest breaks its own copy of the struct. The mutate
-				// functions replace fields and never write into shared slices.
-				r := r
-				if got := CheckDocumented(r); len(got) != 0 {
-					t.Fatalf("unbroken rule %s has problems: %v", r.ID, got)
+				// A copy, so mutate breaks this subtest's rule and not the shared one.
+				rule := r
+				if got := CheckDocumented(rule); len(got) != 0 {
+					t.Fatalf("unbroken rule %s has problems: %v", rule.ID, got)
 				}
-				tt.mutate(&r)
-				problems := documentedProblems([]Rule{r})
+				tt.mutate(&rule)
+				problems := documentedProblems([]Rule{rule})
 				found := false
 				for _, p := range problems {
-					if !strings.HasPrefix(p, r.ID+": ") {
-						t.Errorf("problem %q does not start with the rule ID %q", p, r.ID)
+					if !strings.HasPrefix(p, rule.ID+": ") {
+						t.Errorf("problem %q does not start with the rule ID %q", p, rule.ID)
 					}
 					if strings.Contains(p, tt.want) {
 						found = true

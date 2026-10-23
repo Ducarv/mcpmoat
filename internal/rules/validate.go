@@ -79,11 +79,7 @@ type checker struct {
 
 // add records one problem. detail may be nil when the reason says it all.
 func (c *checker) add(field string, reason Reason, detail error) {
-	e := newLoadError(c.file, reason).inField(field)
-	if detail != nil {
-		e = e.wrap(detail)
-	}
-	c.errs = append(c.errs, e)
+	c.errs = append(c.errs, newLoadError(c.file, reason).inField(field).wrap(detail))
 }
 
 // indexField returns the YAML path of item i in the list at field, for example
@@ -143,7 +139,8 @@ func (c *checker) validateMatch(m Match) {
 	// A blank heuristic is an error, not a match key: it gets its own error
 	// (so "match" is not also reported missing) and it never counts as a real
 	// heuristic for the params check below.
-	if c.checkBytes("match.heuristic", m.Heuristic, maxHeuristicBytes) && m.Heuristic != "" && isBlank(m.Heuristic) {
+	sizeOK := c.checkBytes("match.heuristic", m.Heuristic, maxHeuristicBytes)
+	if sizeOK && m.Heuristic != "" && isBlank(m.Heuristic) {
 		c.add("match.heuristic", ReasonInvalidValue, errBlank)
 	}
 	// Params are options for a heuristic. Without a real heuristic the rule can
@@ -205,7 +202,8 @@ func (c *checker) validateCases(field string, cases []Case) {
 	}
 	for i, tc := range cases {
 		item := indexField(field, i)
-		if c.checkBytes(item+".text", tc.Text, maxCaseTextBytes) && isBlank(tc.Text) {
+		sizeOK := c.checkBytes(item+".text", tc.Text, maxCaseTextBytes)
+		if sizeOK && isBlank(tc.Text) {
 			c.add(item+".text", ReasonInvalidValue, errBlank)
 		}
 		c.checkRunes(item+".note", tc.Note, maxCaseNoteRunes)

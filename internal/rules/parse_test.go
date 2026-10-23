@@ -10,6 +10,9 @@ import (
 	"strings"
 	"testing"
 	"unicode"
+	"unicode/utf8"
+
+	"go.yaml.in/yaml/v3"
 )
 
 // errParseSome is a test marker for parseWant.err: the LoadError must have a non-nil
@@ -62,10 +65,15 @@ func buildParseRule(over map[string]string, suffix string) string {
 // noRawControls fails the test when s holds a rune that must not reach a
 // terminal raw: a control rune (C0, DEL and C1, so U+009B is one), a format
 // rune of category Cf (bidi controls, zero-width characters, tag characters),
-// or a line or paragraph separator (U+2028, U+2029). A LoadError message goes
-// to a terminal, so it must never carry them.
+// or a line or paragraph separator (U+2028, U+2029). It also refuses invalid
+// UTF-8, because a lone 0x9B byte is a CSI on some terminals. A LoadError
+// message goes to a terminal, so it must never carry them.
 func noRawControls(t *testing.T, s string) {
 	t.Helper()
+	if !utf8.ValidString(s) {
+		t.Errorf("message is not valid UTF-8: %q", s)
+		return
+	}
 	for i, r := range s {
 		if unicode.IsControl(r) || unicode.Is(unicode.Cf, r) || r == '\u2028' || r == '\u2029' {
 			t.Errorf("message has raw rune %U at index %d: %q", r, i, s)
@@ -1384,6 +1392,77 @@ func TestParseErrorCap(t *testing.T) {
 			}
 		}
 		assertSameErrors(t, errs, "rule.yaml", data)
+	})
+}
+
+// TestParseErrorOrderIsFileOrder checks that validation errors come in file
+// order, not in the order of the fields of Rule. Validate checks id before
+// title, but here title is on an earlier line.
+func TestParseErrorOrderIsFileOrder(t *testing.T) {
+	t.Parallel()
+	data := []byte("target: description\n" + // 1
+		"title: ' '\n" + //                     2 blank title
+		"severity: high\n" + //                 3
+		"match:\n" + //                         4
+		"  any_regex: [bad]\n" + //             5
+		"id: not an id\n") //                   6 bad id form
+	want := []parseWant{
+		{reason: ReasonMissingField, field: "title", line: 2, col: 8},
+		{reason: ReasonInvalidValue, field: "id", line: 6, col: 5, err: errIDForm},
+	}
+	assertParseErrors(t, "rule.yaml", data, want)
+}
+
+// TestParseErrorCapKeepsFirstInFile checks that the cap keeps the first errors
+// of the file, not the first errors in the order of Validate. The references
+// are at the top of the file but Validate checks them after match.
+func TestParseErrorCapKeepsFirstInFile(t *testing.T) {
+	t.Parallel()
+	const (
+		nRefs  = 3
+		nRegex = maxPatternItems // Validate reports all of them, no more
+	)
+	// Lines: references 1, id 2, title 3, severity 4, target 5, match 6. The
+	// match mapping starts on line 7, and that is the position of its errors.
+	const refsLine, matchLine = 1, 7
+	refs := "references: [" + strings.Repeat("' ', ", nRefs-1) + "' ']\n"
+	match := "match:\n  any_regex:\n" + strings.Repeat("    - ' '\n", nRegex)
+	data := []byte(refs + buildParseRule(map[string]string{"match": match}, ""))
+
+	_, errs := Parse("rule.yaml", data)
+	assertCapped(t, errs, nRefs+nRegex-maxErrorsPerFile)
+	for i, e := range errs[:maxErrorsPerFile] {
+		wantField, wantLine := "references["+strconv.Itoa(i)+"]", refsLine
+		if i >= nRefs {
+			wantField, wantLine = "match.any_regex["+strconv.Itoa(i-nRefs)+"]", matchLine
+		}
+		if e.Field != wantField || e.Line != wantLine {
+			t.Errorf("error %d = field %q line %d, want field %q line %d", i, e.Field, e.Line, wantField, wantLine)
+		}
+	}
+	assertSameErrors(t, errs, "rule.yaml", data)
+}
+
+// TestDecodeFieldHandlesEveryKey guards against a key that checkKeys allows
+// but decodeField has no case for. Such a key would be dropped without a word.
+func TestDecodeFieldHandlesEveryKey(t *testing.T) {
+	t.Parallel()
+	null := func() *yaml.Node { return &yaml.Node{Kind: yaml.ScalarNode, Tag: "!!null"} }
+
+	for _, key := range ruleKeys() {
+		t.Run(key, func(t *testing.T) {
+			t.Parallel()
+			if err := decodeField(&Rule{}, key, null()); errors.Is(err, errNoDecoder) {
+				t.Errorf("decodeField(%q) = %v, want a decoder for every allowed key", key, err)
+			}
+		})
+	}
+
+	t.Run("unknown key", func(t *testing.T) {
+		t.Parallel()
+		if err := decodeField(&Rule{}, "not_a_rule_key", null()); !errors.Is(err, errNoDecoder) {
+			t.Errorf("decodeField(unknown) = %v, want errNoDecoder", err)
+		}
 	})
 }
 

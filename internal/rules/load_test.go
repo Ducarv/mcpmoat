@@ -498,6 +498,143 @@ func TestLoadDirFileCount(t *testing.T) {
 	})
 }
 
+// openTestFS returns a nonBlockFS on a new temporary directory and the path of
+// that directory. It closes the root when the test ends.
+func openTestFS(t *testing.T) (nonBlockFS, string) {
+	t.Helper()
+	dir := t.TempDir()
+	root, err := os.OpenRoot(dir)
+	if err != nil {
+		t.Fatalf("OpenRoot: %v", err)
+	}
+	t.Cleanup(func() { _ = root.Close() })
+	return nonBlockFS{root}, dir
+}
+
+func TestListRuleFiles(t *testing.T) {
+	t.Parallel()
+
+	t.Run("more than one batch is read and sorted", func(t *testing.T) {
+		t.Parallel()
+		fsys, dir := openTestFS(t)
+		// Zero-padded names sort in number order. 300 is more than dirBatch,
+		// so the listing needs at least two ReadDir calls.
+		total := dirBatch + 44
+		var want []string
+		for i := range total {
+			name := fmt.Sprintf("r%04d.yaml", i)
+			writeFile(t, dir, name, "x")
+			want = append(want, name)
+		}
+		entries, lerr := listRuleFiles(fsys, dir, maxDirEntries)
+		if lerr != nil {
+			t.Fatalf("listRuleFiles() error = %v", lerr)
+		}
+		var got []string
+		for _, e := range entries {
+			got = append(got, e.Name())
+		}
+		if !slices.Equal(got, want) {
+			t.Errorf("got %d names (first %q), want %d sorted names", len(got), got[:min(len(got), 3)], len(want))
+		}
+	})
+
+	t.Run("only files with a rule name are candidates", func(t *testing.T) {
+		t.Parallel()
+		fsys, dir := openTestFS(t)
+		for _, name := range []string{"a.txt", "b.YAML", "c.yaml.bak", "z.yml", "m.yaml"} {
+			writeFile(t, dir, name, "x")
+		}
+		for _, name := range []string{"x.yaml", "sub", "y.yml"} {
+			if err := os.Mkdir(filepath.Join(dir, name), 0o700); err != nil {
+				t.Fatal(err)
+			}
+		}
+		entries, lerr := listRuleFiles(fsys, dir, maxDirEntries)
+		if lerr != nil {
+			t.Fatalf("listRuleFiles() error = %v", lerr)
+		}
+		var got []string
+		for _, e := range entries {
+			got = append(got, e.Name())
+		}
+		if want := []string{"m.yaml", "z.yml"}; !slices.Equal(got, want) {
+			t.Errorf("names = %v, want %v", got, want)
+		}
+	})
+
+	t.Run("entry cap counts every name", func(t *testing.T) {
+		t.Parallel()
+		const maxEntries = 5
+		tests := []struct {
+			name    string
+			entries int
+			wantErr bool
+		}{
+			{name: "at the cap", entries: maxEntries, wantErr: false},
+			{name: "one over the cap", entries: maxEntries + 1, wantErr: true},
+		}
+		for _, tt := range tests {
+			t.Run(tt.name, func(t *testing.T) {
+				t.Parallel()
+				fsys, dir := openTestFS(t)
+				for i := range tt.entries {
+					// None of the names is a candidate: only the entry count can trip the cap.
+					writeFile(t, dir, "f"+strconv.Itoa(i)+".txt", "x")
+				}
+				entries, lerr := listRuleFiles(fsys, dir, maxEntries)
+				if !tt.wantErr {
+					if lerr != nil || len(entries) != 0 {
+						t.Fatalf("listRuleFiles() = %d entries, %v, want none and no error", len(entries), lerr)
+					}
+					return
+				}
+				if entries != nil {
+					t.Errorf("entries = %d, want nil", len(entries))
+				}
+				wantOneError(t, []*LoadError{lerr}, dir, ReasonTooManyFiles)
+			})
+		}
+	})
+
+	t.Run("candidate cap", func(t *testing.T) {
+		t.Parallel()
+		fsys, dir := openTestFS(t)
+		for i := range maxRuleFiles + 1 {
+			writeFile(t, dir, "r"+strconv.Itoa(i)+".yaml", "")
+		}
+		entries, lerr := listRuleFiles(fsys, dir, maxDirEntries)
+		if entries != nil {
+			t.Errorf("entries = %d, want nil", len(entries))
+		}
+		wantOneError(t, []*LoadError{lerr}, dir, ReasonTooManyFiles)
+	})
+}
+
+// TestLoadDirManyFilesInOrder loads more files than one directory batch and
+// checks that the rules come back in file name order.
+func TestLoadDirManyFilesInOrder(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	total := dirBatch + 44
+	want := make([]string, 0, total)
+	// Write in reverse so the order on disk is not the name order.
+	for i := total - 1; i >= 0; i-- {
+		id := fmt.Sprintf("R-%04d", i)
+		writeFile(t, dir, fmt.Sprintf("r%04d.yaml", i), validRuleYAML(id))
+	}
+	for i := range total {
+		want = append(want, fmt.Sprintf("R-%04d", i))
+	}
+	rules, errs := LoadDir(dir)
+	if len(errs) > 0 {
+		t.Fatalf("LoadDir() errors = %d (first: %v)", len(errs), errs[0])
+	}
+	if got := ruleIDs(rules); !slices.Equal(got, want) {
+		t.Errorf("got %d IDs, want %d in file name order", len(got), len(want))
+	}
+}
+
 // recordingCompiler records the calls it gets and returns err.
 type recordingCompiler struct {
 	matches []Match
@@ -762,11 +899,11 @@ func tooManyErrorsEntry(t *testing.T, errs []*LoadError, dir string) int {
 		t.Fatalf("last error = {File: %q, Reason: %q}, want {File: %q, Reason: %q}", last.File, last.Reason, dir, ReasonTooManyErrors)
 	}
 	msg := last.Error()
-	if !strings.Contains(msg, "stopped after 100 errors") || !strings.Contains(msg, "files not checked") {
+	if !strings.Contains(msg, "stopped after 100 errors") || !strings.Contains(msg, "files not fully checked") {
 		t.Fatalf("Error() = %q, want the stop text and the count", msg)
 	}
 	_, after, _ := strings.Cut(msg, "errors; ")
-	num, _, _ := strings.Cut(after, " files not checked")
+	num, _, _ := strings.Cut(after, " files not fully checked")
 	n, err := strconv.Atoi(num)
 	if err != nil {
 		t.Fatalf("Error() = %q: cannot read the count: %v", msg, err)
@@ -805,7 +942,7 @@ func TestLoadDirFolderCap(t *testing.T) {
 	}
 	n := tooManyErrorsEntry(t, errs, dir)
 	if n <= 0 || n >= total {
-		t.Errorf("files not checked = %d, want between 1 and %d", n, total-1)
+		t.Errorf("files not fully checked = %d, want between 1 and %d", n, total-1)
 	}
 	shown := errs[:len(errs)-1]
 	if len(shown) != maxFolderErrors {
@@ -814,7 +951,7 @@ func TestLoadDirFolderCap(t *testing.T) {
 	// Every file gives errors, so the files read are the files with errors.
 	// The last file read is cut to fit, so it counts as not checked too.
 	if want := total - distinctFiles(shown) + 1; n != want {
-		t.Errorf("files not checked = %d, want %d (total minus files read, plus the cut file)", n, want)
+		t.Errorf("files not fully checked = %d, want %d (total minus files read, plus the cut file)", n, want)
 	}
 	// Errors come in file-name order, and no file comes back after another.
 	for i := 1; i < len(shown); i++ {
@@ -872,13 +1009,13 @@ func TestLoadDirFolderCapBoundary(t *testing.T) {
 			t.Fatalf("got %d errors, want %d", len(errs), maxFolderErrors+1)
 		}
 		if n := tooManyErrorsEntry(t, errs, dir); n != 1 {
-			t.Errorf("files not checked = %d, want 1", n)
+			t.Errorf("files not fully checked = %d, want 1", n)
 		}
 		// The unread file is the last by name.
 		if last := errs[len(errs)-2].File; last != filepath.Join(dir, "r099.yaml") {
 			t.Errorf("last real error file = %q, want r099.yaml", last)
 		}
-		want := "stopped after 100 errors; 1 files not checked"
+		want := "stopped after 100 errors; 1 files not fully checked"
 		if got := errs[len(errs)-1].Error(); !strings.HasSuffix(got, want) {
 			t.Errorf("Error() = %q, want the suffix %q", got, want)
 		}
@@ -896,7 +1033,7 @@ func TestLoadDirFolderCapBoundary(t *testing.T) {
 			t.Errorf("got %d rules, want nil", len(rules))
 		}
 		if n := tooManyErrorsEntry(t, errs, dir); n != 1 {
-			t.Errorf("files not checked = %d, want 1", n)
+			t.Errorf("files not fully checked = %d, want 1", n)
 		}
 	})
 
@@ -913,7 +1050,7 @@ func TestLoadDirFolderCapBoundary(t *testing.T) {
 			t.Fatalf("got %d errors, want %d", len(errs), maxFolderErrors+1)
 		}
 		if n := tooManyErrorsEntry(t, errs, dir); n != 1 {
-			t.Errorf("files not checked = %d, want 1", n)
+			t.Errorf("files not fully checked = %d, want 1", n)
 		}
 	})
 
@@ -950,7 +1087,7 @@ func TestLoadDirFolderCapBoundary(t *testing.T) {
 			t.Fatalf("got %d errors, want %d", len(errs), maxFolderErrors+1)
 		}
 		if n := tooManyErrorsEntry(t, errs, dir); n != 1 {
-			t.Errorf("files not checked = %d, want 1 (the cut file is not fully shown)", n)
+			t.Errorf("files not fully checked = %d, want 1 (the cut file is not fully shown)", n)
 		}
 	})
 }
@@ -978,9 +1115,9 @@ func TestLoadDirNotCheckedCountsCutAndUnread(t *testing.T) {
 	hostileFiles(t, dir, total)
 	_, errs := LoadDir(dir)
 	if n := tooManyErrorsEntry(t, errs, dir); n != want {
-		t.Errorf("files not checked = %d, want %d (1 cut + %d unread)", n, want, unread)
+		t.Errorf("files not fully checked = %d, want %d (1 cut + %d unread)", n, want, unread)
 	}
-	wantText := fmt.Sprintf("stopped after %d errors; %d files not checked", maxFolderErrors, want)
+	wantText := fmt.Sprintf("stopped after %d errors; %d files not fully checked", maxFolderErrors, want)
 	if got := errs[len(errs)-1].Error(); !strings.HasSuffix(got, wantText) {
 		t.Errorf("Error() = %q, want the suffix %q", got, wantText)
 	}

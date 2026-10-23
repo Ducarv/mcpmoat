@@ -105,7 +105,7 @@ var _ error = (*LoadError)(nil) // compile-time check that *LoadError is an erro
 // File, Field and the text of Err are untrusted. termsafe.Quote quotes the
 // file when it holds characters that are not visible. The file is never cut:
 // the user needs it in full to find the file. termsafe.QuoteCut quotes the
-// field and the text of Err, and cuts them to 200 runes first. The message
+// field and the text of Err, and cuts them to maxDisplayRunes runes first. The message
 // never holds a raw control or escape byte.
 func (e *LoadError) Error() string {
 	if e == nil {
