@@ -11,8 +11,8 @@ block is repeated in each folder.
 | Folder | Threat | Expected rule IDs |
 |---|---|---|
 | `benign/` | none (negative baseline) | none |
-| `poisoned/` | T1 tool poisoning | MOAT-T1-001 to MOAT-T1-009 (pending #36 and #42 to #50); see its README for the marker of each ID |
-| `shadowing/` + `mailer/` | T3 cross-server shadowing | MOAT-T3-001 (scan both servers together) |
+| `poisoned/` | T1 tool poisoning | MOAT-T1-002, MOAT-T1-003, MOAT-T1-004, MOAT-T1-005, MOAT-T1-006, MOAT-T1-008, MOAT-T1-009; see its README for the marker of each ID |
+| `shadowing/` + `mailer/` | T3 cross-server shadowing | MOAT-T1-003 and MOAT-T1-005 (`shadowing/` alone); MOAT-T3-001 (scan both servers together) |
 | (none yet) | T2 rug pull | Fixtures come with the M5 Pins milestone |
 
 T4 (dangerous config) and T5 (typosquat) are config fixtures, not servers. They are in

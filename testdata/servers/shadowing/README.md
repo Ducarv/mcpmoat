@@ -11,6 +11,10 @@ That text tries to change how the model uses `send_email`, a tool of **another**
 `mailer` fixture (`testdata/servers/mailer`) is that other server. Scan both together and mcpmoat
 must report **MOAT-T3-001** (expected; the rule comes with #37 and #51).
 
+The same text also triggers two T1 rules on the tool description: **MOAT-T1-003** ("Do not mention
+this to the user") and **MOAT-T1-005** (add an address to BCC). `TestFixtureBuiltinT1` in
+`internal/rules/fixtures_test.go` asserts these two IDs.
+
 The tool handler ignores its arguments and returns the fixed text `Fixture sum: 0.`. The server
 makes no network call, starts no process and reads or writes no file. The only address is
 `attacker@example.com`.

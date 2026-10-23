@@ -284,7 +284,9 @@ func keywordExpr(entry, kw string) (string, error) {
 }
 
 // keywordSpaceClass is the regex class of the white space between the words
-// of a keyword. isKeywordSpace is the same set.
+// of a keyword. isKeywordSpace is the same set. After normalizeForMatch, only
+// the runes of re2SpaceRunes are left of this set in the text, so the rest of
+// the class is defence in depth.
 const keywordSpaceClass = `[\s\v\x{85}\p{Z}\x{2800}]`
 
 // wordRuneClass is the content of the regex class of a word rune.
