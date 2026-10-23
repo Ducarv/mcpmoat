@@ -30,8 +30,7 @@ gap: the rule needs a priority claim such as "always" or "before any other tool"
 "Before using this tool, ..." is also a common benign setup step. The other markers of this tool
 still trigger MOAT-T1-002 to MOAT-T1-005.
 
-MOAT-T1-007 (oversized description) has no marker here yet. The rule files are in
-`rules/MOAT-T1-*.yaml`.
+MOAT-T1-007 (oversized description) has no marker here yet.
 
 ## Notes
 
