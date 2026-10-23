@@ -1,7 +1,6 @@
 package rules
 
 import (
-	"bytes"
 	"regexp"
 	"strings"
 
@@ -27,6 +26,13 @@ var configTextChecks = map[string]func(raw string) []Hit{
 	HeuristicPlaintextSecret: plaintextSecretText,
 	HeuristicUnpinnedPackage: unpinnedPackageText,
 	HeuristicAutoInstall:     autoInstallText,
+}
+
+// isConfigHeuristic reports whether name is a config heuristic: one that reads
+// a config entry with an adapter in this file.
+func isConfigHeuristic(name string) bool {
+	_, ok := configTextChecks[name]
+	return ok || name == HeuristicTyposquat
 }
 
 // envEntryRe matches the start of an env entry: an env name, then "=".
@@ -68,12 +74,9 @@ func plaintextSecretText(raw string) []Hit {
 	line := strings.TrimSpace(raw)
 	if envEntryRe.MatchString(line) {
 		key, value, _ := strings.Cut(line, "=")
-		s := discover.Server{
-			Name:      caseServerName,
-			Transport: discover.TransportStdio,
-			Command:   "node",
-			Env:       discover.SecretMap{key: discover.NewSecret(value)},
-		}
+		// node is not a package runner, so only the env entry can give a finding.
+		s := caseStdioServer(caseServerName, "node", nil)
+		s.Env = discover.SecretMap{key: discover.NewSecret(value)}
 		return findingHits(checkPlaintextSecrets(s), HeuristicPlaintextSecret)
 	}
 	if headerEntryRe.MatchString(line) {
@@ -119,7 +122,7 @@ func autoInstallText(raw string) []Hit {
 // The server has no name. Only the package is compared, so the name cannot
 // make a result.
 func newTyposquatText() (func(raw string) []Hit, error) {
-	popular, err := ParsePopular(bytes.NewReader(builtinrules.PopularServers))
+	popular, err := builtinPopular()
 	if err != nil {
 		return nil, err
 	}
@@ -131,6 +134,11 @@ func newTyposquatText() (func(raw string) []Hit, error) {
 		}
 		return commandLineHits("", fields, check.Check, HeuristicTyposquat)
 	}, nil
+}
+
+// builtinPopular parses the embedded popular server list.
+func builtinPopular() ([]string, error) {
+	return ParsePopular(strings.NewReader(builtinrules.PopularServers))
 }
 
 // commandLineHits runs check on a stdio server with the given name. The first

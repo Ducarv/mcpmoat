@@ -68,7 +68,7 @@ const (
 // not the content.
 type Finding struct {
 	// RuleID is the ID of the rule that the native check backs, such as
-	// RuleShadowing. Later YAML rules (issues #51 to #56) use the same IDs.
+	// RuleShadowing. The built-in YAML rules use the same IDs.
 	RuleID string
 
 	// Server is the name of the server, from discover.Server.Name.

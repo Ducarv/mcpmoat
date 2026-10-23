@@ -1,7 +1,6 @@
 package rules
 
 import (
-	"bytes"
 	"errors"
 	"reflect"
 	"strings"
@@ -10,7 +9,6 @@ import (
 	"unicode/utf8"
 
 	"github.com/Ducarv/mcpmoat/internal/discover"
-	builtinrules "github.com/Ducarv/mcpmoat/rules"
 )
 
 // npxServer builds a stdio server that runs pkg with "npx -y".
@@ -116,7 +114,7 @@ func TestParsePopular(t *testing.T) {
 
 // readPopular parses the embedded popular list once for all tests.
 var readPopular = sync.OnceValues(func() ([]string, error) {
-	return ParsePopular(bytes.NewReader(builtinrules.PopularServers))
+	return builtinPopular()
 })
 
 // loadPopular returns the real popular list, or stops the test when it

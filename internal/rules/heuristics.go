@@ -89,18 +89,20 @@ func compileHeuristic(name string, params map[string]any) (func(raw string) []Hi
 		}
 		minLength, minText := v[0], v[1]
 		return func(raw string) []Hit { return base64Blob(raw, minLength, minText) }, nil
-	case HeuristicInsecureURL, HeuristicPlaintextSecret, HeuristicUnpinnedPackage,
-		HeuristicAutoInstall, HeuristicTyposquat:
+	case HeuristicTyposquat:
 		if _, err := readParams(params); err != nil {
 			return nil, err
-		}
-		if name != HeuristicTyposquat {
-			return configTextChecks[name], nil
 		}
 		fn, err := newTyposquatText()
 		if err != nil {
 			// The popular list is built in, so its text is safe to show.
 			return nil, &FieldError{Field: "heuristic", Msg: "load popular server list: " + err.Error()}
+		}
+		return fn, nil
+	}
+	if fn, ok := configTextChecks[name]; ok {
+		if _, err := readParams(params); err != nil {
+			return nil, err
 		}
 		return fn, nil
 	}

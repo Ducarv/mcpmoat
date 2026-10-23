@@ -770,3 +770,23 @@ func TestValidateUntrustedTextNeverRaw(t *testing.T) {
 		t.Error("expected an error for the id field")
 	}
 }
+
+// TestValidateHeuristicTarget checks that a config heuristic needs target:
+// config, and that a text heuristic is not affected.
+func TestValidateHeuristicTarget(t *testing.T) {
+	t.Parallel()
+	wrong := []wantErr{{"match.heuristic", ReasonInvalidValue}}
+	withHeuristic := func(target Target, name string) func(r *Rule) {
+		return func(r *Rule) {
+			r.Target = target
+			r.Match = Match{Heuristic: name}
+		}
+	}
+	runValidateCases(t, []validateCase{
+		{name: "insecure_url on description", mutate: withHeuristic(TargetDescription, HeuristicInsecureURL), want: wrong},
+		{name: "typosquat on schema", mutate: withHeuristic(TargetSchema, HeuristicTyposquat), want: wrong},
+		{name: "auto_install on config", mutate: withHeuristic(TargetConfig, HeuristicAutoInstall)},
+		{name: "max_length on description", mutate: withHeuristic(TargetDescription, HeuristicMaxLength)},
+		{name: "invalid target has its own error", mutate: withHeuristic("bogus", HeuristicInsecureURL), want: []wantErr{{"target", ReasonInvalidValue}}},
+	})
+}

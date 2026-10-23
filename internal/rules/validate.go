@@ -42,6 +42,7 @@ var (
 	errNotUTF8           = errors.New("must be valid UTF-8 text")
 	errReferenceURL      = errors.New("must be an http or https URL with ASCII characters only (percent-encode other characters)")
 	errParamsNoHeuristic = errors.New("params needs a heuristic")
+	errHeuristicTarget   = errors.New("this heuristic reads a config entry and needs target: config")
 )
 
 // Validate checks the rule and returns every problem it finds, in the order of
@@ -52,7 +53,8 @@ var (
 //
 // Validate does not compile regexes and does not check the heuristic name or
 // the shape of Match.Params. Other code does that. It does require a heuristic
-// when Match.Params is set, and at least one match key other than Params.
+// when Match.Params is set, and at least one match key other than Params. It
+// also requires target: config for a config heuristic (see isConfigHeuristic).
 func (r Rule) Validate() []*LoadError {
 	c := &checker{file: r.Source}
 
@@ -61,6 +63,7 @@ func (r Rule) Validate() []*LoadError {
 	c.validateSeverity(r.Severity)
 	c.validateTarget(r.Target)
 	c.validateMatch(r.Match)
+	c.validateHeuristicTarget(r.Target, r.Match.Heuristic)
 
 	c.checkRunes("risk", r.Risk, maxRiskRunes)
 	c.checkRunes("remediation", r.Remediation, maxRemediationRunes)
@@ -162,6 +165,16 @@ func (c *checker) validateMatch(m Match) {
 	// or a blank heuristic) is a mistake. The shape of Params is not checked here.
 	if len(m.Params) > 0 && isBlank(m.Heuristic) {
 		c.add("match.params", ReasonInvalidValue, errParamsNoHeuristic)
+	}
+}
+
+// validateHeuristicTarget reports a config heuristic on a rule with a valid
+// target that is not config. A config heuristic reads one config entry, so it
+// gives no useful result on a description or a schema. An invalid target has
+// its own error.
+func (c *checker) validateHeuristicTarget(t Target, heuristic string) {
+	if isConfigHeuristic(heuristic) && t.Valid() && t != TargetConfig {
+		c.add("match.heuristic", ReasonInvalidValue, errHeuristicTarget)
 	}
 }
 

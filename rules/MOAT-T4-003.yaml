@@ -5,7 +5,7 @@ target: config
 match:
   heuristic: unpinned_package
 risk: The server starts from a package with no fixed version, so each start can download and run a new, possibly malicious release without any review.
-remediation: Pin an exact version, for example npx -y @scope/server@1.4.2, uvx some-server==0.3.1 or a docker image digest, and update it on purpose after review.
+remediation: Pin an exact version, for example npx @scope/server@1.4.2, uvx some-server==0.3.1 or a docker image digest, and update it on purpose after review.
 references:
   - https://owasp.org/www-project-mcp-top-10/
   - https://docs.npmjs.com/cli/commands/npx

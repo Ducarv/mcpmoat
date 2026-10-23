@@ -26,4 +26,4 @@ var FS embed.FS
 // parses it with ParsePopular.
 //
 //go:embed data/popular-servers.txt
-var PopularServers []byte
+var PopularServers string
