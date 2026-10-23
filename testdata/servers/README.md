@@ -4,6 +4,10 @@ Every folder here is a **test fixture** for mcpmoat. These are fake servers for 
 They are not products. They make no network call, start no process and read or write no file. The
 malicious text in them is inert data. Do not install them in a real client.
 
+Each fixture is one self-contained `main` package, on purpose: a reader can audit one malicious
+fixture alone, without a shared helper that could hide behaviour. So the small `run()` and exit-code
+block is repeated in each folder.
+
 | Folder | Threat | Expected rule IDs |
 |---|---|---|
 | `benign/` | none (negative baseline) | none |

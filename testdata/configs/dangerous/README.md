@@ -5,7 +5,12 @@
 It is a Cursor config (`home/.cursor/mcp.json`) with unsafe settings. It
 checks the static config rules of threat T4. All secrets in it are synthetic
 canaries. They are not real credentials. The servers do not exist, and the
-fixture makes no network calls.
+tests only read the config, so they make no network calls.
+
+Use this home only with `--no-connect`. The package and image names
+(`@example-corp/*`, `example/mcp-server`) are names that anyone can register,
+so a scan that connects would fetch and run them, and would send the canary
+header to `mcp.example.com`.
 
 | Server | Expected rule IDs |
 |---|---|

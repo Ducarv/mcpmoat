@@ -7,6 +7,9 @@ popular MCP servers. It checks rule `MOAT-T5-001`. The servers are not run,
 and the fixture makes no network calls. All packages are pinned, so no T4 rule
 fires.
 
+Use this home only with `--no-connect`. The packages are real or registrable
+names, so a scan that connects would fetch and run them.
+
 | Server | What it is | Expected rule IDs |
 |---|---|---|
 | `filesystem` | package `@modelcontextprotocol/server-filesytem` is a typo of `server-filesystem` | `MOAT-T5-001` (package) |
