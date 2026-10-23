@@ -54,6 +54,9 @@ const (
 	// ReasonTooManyFiles is for a rules directory with more files than the cap
 	// allows.
 	ReasonTooManyFiles Reason = "too many files"
+	// ReasonNoRuleFiles is for a rules directory that holds no file whose name
+	// ends in .yaml or .yml.
+	ReasonNoRuleFiles Reason = "no rule files (*.yaml or *.yml) found"
 	// ReasonTooManyRules is for a rule set with more rules than the cap allows.
 	ReasonTooManyRules Reason = "too many rules"
 	// ReasonTooManyErrors is for the last error of a file or a directory that
@@ -102,17 +105,19 @@ var _ error = (*LoadError)(nil) // compile-time check that *LoadError is an erro
 
 // Error returns the message in the form
 // "<file>[:<line>[:<col>]]: [field <field>: ]<reason>[: <Err>]".
-// File, Field and the text of Err are untrusted. termsafe.Quote quotes the
-// file when it holds characters that are not visible. The file is never cut:
-// the user needs it in full to find the file. termsafe.QuoteCut quotes the
-// field and the text of Err, and cuts them to maxDisplayRunes runes first. The message
-// never holds a raw control or escape byte.
+// File, Field and the text of Err are untrusted. termsafe.QuoteIf quotes the
+// file when it holds characters that are not visible, or ": ". The file is
+// never cut: the user needs it in full to find the file. termsafe.QuoteCut
+// quotes the field and the text of Err, and cuts them to maxDisplayRunes runes
+// first. The message never holds a raw control or escape byte.
 func (e *LoadError) Error() string {
 	if e == nil {
 		return "<nil>" // a nil *LoadError in an error value must not panic
 	}
 	var b strings.Builder
-	b.WriteString(termsafe.Quote(e.File))
+	// A file name with ": " is quoted, so a name from a cloned repository cannot
+	// imitate the fields of the message.
+	b.WriteString(termsafe.QuoteIf(e.File, strings.Contains(e.File, ": ")))
 	if e.Line > 0 {
 		b.WriteByte(':')
 		b.WriteString(strconv.Itoa(e.Line))

@@ -13,6 +13,14 @@ type wantErr struct {
 	reason Reason
 }
 
+// validateCase is one input for runValidateCases: a change to a valid rule and
+// the errors that Validate must return for the changed rule.
+type validateCase struct {
+	name   string
+	mutate func(r *Rule)
+	want   []wantErr
+}
+
 // validRule returns a fresh, fully valid rule. Each call builds new slices, so a
 // test can change the result without affecting another test.
 func validRule() Rule {
@@ -66,12 +74,7 @@ func checkErrors(t *testing.T, got []*LoadError, file string, want []wantErr) {
 }
 
 // runValidateCases runs each case: mutate a valid rule, validate it, compare.
-func runValidateCases(t *testing.T, tests []struct {
-	name   string
-	mutate func(r *Rule)
-	want   []wantErr
-},
-) {
+func runValidateCases(t *testing.T, tests []validateCase) {
 	t.Helper()
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -91,11 +94,7 @@ func runValidateCases(t *testing.T, tests []struct {
 
 func TestValidateValidRules(t *testing.T) {
 	t.Parallel()
-	runValidateCases(t, []struct {
-		name   string
-		mutate func(r *Rule)
-		want   []wantErr
-	}{
+	runValidateCases(t, []validateCase{
 		{name: "fully valid rule", mutate: nil},
 		{
 			// The PRD example shape: the loader is lenient about the optional fields.
@@ -130,11 +129,7 @@ func TestValidateValidRules(t *testing.T) {
 
 func TestValidateMissingFields(t *testing.T) {
 	t.Parallel()
-	runValidateCases(t, []struct {
-		name   string
-		mutate func(r *Rule)
-		want   []wantErr
-	}{
+	runValidateCases(t, []validateCase{
 		{
 			name:   "missing id",
 			mutate: func(r *Rule) { r.ID = "" },
@@ -185,11 +180,7 @@ func TestValidateMatchParams(t *testing.T) {
 	t.Parallel()
 	params := map[string]any{"min": 3}
 	noHeuristic := []wantErr{{"match.params", ReasonInvalidValue}}
-	runValidateCases(t, []struct {
-		name   string
-		mutate func(r *Rule)
-		want   []wantErr
-	}{
+	runValidateCases(t, []validateCase{
 		{
 			name:   "params only",
 			mutate: func(r *Rule) { r.Match = Match{Params: params} },
@@ -365,11 +356,7 @@ func TestValidateMatchHeuristic(t *testing.T) {
 
 func TestValidateEnums(t *testing.T) {
 	t.Parallel()
-	runValidateCases(t, []struct {
-		name   string
-		mutate func(r *Rule)
-		want   []wantErr
-	}{
+	runValidateCases(t, []validateCase{
 		{
 			name:   "severity urgent",
 			mutate: func(r *Rule) { r.Severity = "urgent" },
@@ -417,11 +404,7 @@ func TestValidateEnums(t *testing.T) {
 func TestValidateIDSyntax(t *testing.T) {
 	t.Parallel()
 	bad := []wantErr{{"id", ReasonInvalidValue}}
-	runValidateCases(t, []struct {
-		name   string
-		mutate func(r *Rule)
-		want   []wantErr
-	}{
+	runValidateCases(t, []validateCase{
 		{name: "space inside", mutate: func(r *Rule) { r.ID = "MOAT 001" }, want: bad},
 		{name: "slash", mutate: func(r *Rule) { r.ID = "MOAT/001" }, want: bad},
 		{name: "leading dash", mutate: func(r *Rule) { r.ID = "-MOAT" }, want: bad},
@@ -469,11 +452,7 @@ func TestValidateCaps(t *testing.T) {
 		return out
 	}
 
-	runValidateCases(t, []struct {
-		name   string
-		mutate func(r *Rule)
-		want   []wantErr
-	}{
+	runValidateCases(t, []validateCase{
 		// Runes are counted, not bytes: each "日" is 3 bytes.
 		{name: "title at limit (multi-byte runes)", mutate: func(r *Rule) { r.Title = strings.Repeat("日", maxTitleRunes) }},
 		{name: "title one over (multi-byte runes)", mutate: func(r *Rule) { r.Title = strings.Repeat("日", maxTitleRunes+1) }, want: tooLong("title")},
@@ -532,11 +511,7 @@ func TestValidateCaps(t *testing.T) {
 func TestValidateBlankItems(t *testing.T) {
 	t.Parallel()
 	blank := func(field string) wantErr { return wantErr{field, ReasonInvalidValue} }
-	runValidateCases(t, []struct {
-		name   string
-		mutate func(r *Rule)
-		want   []wantErr
-	}{
+	runValidateCases(t, []validateCase{
 		{
 			name:   "any_regex empty and white space",
 			mutate: func(r *Rule) { r.Match = Match{AnyRegex: []string{"ok", "", " \t"}} },
@@ -584,11 +559,7 @@ func TestValidateInvalidUTF8(t *testing.T) {
 	t.Parallel()
 	bad := "\xff\xfe"
 	invalid := func(field string) []wantErr { return []wantErr{{field, ReasonInvalidValue}} }
-	runValidateCases(t, []struct {
-		name   string
-		mutate func(r *Rule)
-		want   []wantErr
-	}{
+	runValidateCases(t, []validateCase{
 		{name: "title", mutate: func(r *Rule) { r.Title = bad }, want: invalid("title")},
 		{name: "risk", mutate: func(r *Rule) { r.Risk = bad }, want: invalid("risk")},
 		{name: "remediation", mutate: func(r *Rule) { r.Remediation = bad }, want: invalid("remediation")},
@@ -607,11 +578,7 @@ func TestValidateReferences(t *testing.T) {
 	withRef := func(ref string) func(r *Rule) {
 		return func(r *Rule) { r.References = []string{ref} }
 	}
-	runValidateCases(t, []struct {
-		name   string
-		mutate func(r *Rule)
-		want   []wantErr
-	}{
+	runValidateCases(t, []validateCase{
 		{name: "https URL", mutate: withRef("https://example.com/a")},
 		{name: "http URL", mutate: withRef("http://example.com/a?q=1#frag")},
 		{name: "upper-case scheme", mutate: withRef("HTTP://example.com")},

@@ -480,9 +480,27 @@ func TestParseEmptyAndDocuments(t *testing.T) {
 			want: []parseWant{{reason: ReasonMultipleDocuments, line: 8, col: 1}},
 		},
 		{
-			name: "second document with a syntax error is still multiple documents",
+			name: "second document with a syntax error is a syntax error",
 			data: valid + "---\n[unclosed\n",
-			want: []parseWant{{reason: ReasonMultipleDocuments}},
+			want: []parseWant{{reason: ReasonInvalidYAML, err: errParseSome}},
+		},
+		{
+			// "..." ends the first document. "}}}" then starts a second one that
+			// is not valid YAML. The error comes from the YAML library and has
+			// no position of ours.
+			name: "document end marker then a syntax error",
+			data: valid + "...\n}}}\n",
+			want: []parseWant{{reason: ReasonInvalidYAML, err: errParseSome}},
+		},
+		{
+			name: "document end marker then a second document",
+			data: valid + "...\n---\nid: other\n",
+			want: []parseWant{{reason: ReasonMultipleDocuments, line: 9, col: 1}},
+		},
+		{
+			name: "document end marker alone is fine",
+			data: valid + "...\n",
+			want: nil,
 		},
 		{
 			name: "errors of the first document come before the multiple documents error",
@@ -500,6 +518,22 @@ func TestParseEmptyAndDocuments(t *testing.T) {
 		{
 			name: "separator only",
 			data: "---\n",
+			want: []parseWant{{reason: ReasonEmptyFile}},
+		},
+		{
+			name: "separator without a newline",
+			data: "---",
+			want: []parseWant{{reason: ReasonEmptyFile}},
+		},
+		{
+			name: "separator and a comment",
+			data: "---\n# nothing here\n",
+			want: []parseWant{{reason: ReasonEmptyFile}},
+		},
+		{
+			// An explicit null is a value, not an empty file.
+			name: "separator and a null value",
+			data: "---\n~\n",
 			want: []parseWant{{reason: ReasonInvalidYAML, line: 2, col: 1, err: errNotMapping}},
 		},
 		{
@@ -920,6 +954,85 @@ func TestParseMatchForms(t *testing.T) {
 		if !reflect.DeepEqual(got.Match, want) {
 			t.Errorf("Match = %+v, want %+v", got.Match, want)
 		}
+	})
+}
+
+func TestParseMatchParams(t *testing.T) {
+	t.Parallel()
+	// head is the match section up to the params key. "params:" is on line 7.
+	const head = "match:\n  heuristic: h\n  params:"
+	build := func(params string) string {
+		return buildParseRule(map[string]string{"match": head + params}, "")
+	}
+	runParseCases(t, []parseCase{
+		{
+			name: "null key",
+			data: build("\n    ~: c\n"),
+			want: []parseWant{{reason: ReasonInvalidYAML, line: 8, col: 5, err: errKeyNotStr}},
+		},
+		{
+			name: "null key in explicit form",
+			data: build("\n    ? ~\n    : c\n"),
+			want: []parseWant{{reason: ReasonInvalidYAML, line: 8, col: 7, err: errKeyNotStr}},
+		},
+		{
+			name: "int key",
+			data: build("\n    1: c\n"),
+			want: []parseWant{{reason: ReasonInvalidYAML, line: 8, col: 5, err: errKeyNotStr}},
+		},
+		{
+			name: "bool key",
+			data: build("\n    true: c\n"),
+			want: []parseWant{{reason: ReasonInvalidYAML, line: 8, col: 5, err: errKeyNotStr}},
+		},
+		{
+			name: "repeated key",
+			data: build("\n    a: 1\n    b: 2\n    a: 3\n"),
+			want: []parseWant{{reason: ReasonDuplicateField, field: "match.params.a", line: 10, col: 5}},
+		},
+		{
+			name: "good key after a bad key is still checked",
+			data: build("\n    1: c\n    a: 1\n    a: 2\n"),
+			want: []parseWant{
+				{reason: ReasonInvalidYAML, line: 8, col: 5, err: errKeyNotStr},
+				{reason: ReasonDuplicateField, field: "match.params.a", line: 10, col: 5},
+			},
+		},
+		{
+			name: "list",
+			data: build("\n    - a\n    - b\n"),
+			want: []parseWant{{reason: ReasonInvalidValue, field: "match.params", line: 8, col: 5}},
+		},
+		{
+			name: "list in flow style",
+			data: build(" [a, b]\n"),
+			want: []parseWant{{reason: ReasonInvalidValue, field: "match.params", line: 7, col: 11}},
+		},
+		{
+			name: "plain string",
+			data: build(" text\n"),
+			want: []parseWant{{reason: ReasonInvalidValue, field: "match.params", line: 7, col: 11}},
+		},
+		{
+			name: "number",
+			data: build(" 3\n"),
+			want: []parseWant{{reason: ReasonInvalidValue, field: "match.params", line: 7, col: 11}},
+		},
+		{
+			name: "quoted null word is a string",
+			data: build(" 'null'\n"),
+			want: []parseWant{{reason: ReasonInvalidValue, field: "match.params", line: 7, col: 11}},
+		},
+		{name: "tilde", data: build(" ~\n")},
+		{name: "empty value", data: build("\n")},
+		{name: "null word", data: build(" null\n")},
+		{name: "empty mapping", data: build(" {}\n")},
+		{name: "normal mapping", data: build("\n    max: 3\n    label: x\n")},
+		{
+			// params has free keys. Names that are keys of match are fine here.
+			name: "keys that are match keys",
+			data: build("\n    heuristic: a\n    any_regex: b\n    unknown: c\n"),
+		},
 	})
 }
 

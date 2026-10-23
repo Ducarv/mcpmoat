@@ -8,7 +8,6 @@ import (
 	"path/filepath"
 	"syscall"
 	"testing"
-	"time"
 )
 
 func TestLoadDirFIFO(t *testing.T) {
@@ -19,26 +18,11 @@ func TestLoadDirFIFO(t *testing.T) {
 		t.Skipf("cannot create a named pipe: %v", err)
 	}
 
-	type result struct {
-		rules []Rule
-		errs  []*LoadError
+	rules, errs := loadDirWithin(t, dir)
+	if rules != nil {
+		t.Errorf("rules = %v, want nil", ruleIDs(rules))
 	}
-	done := make(chan result, 1)
-	go func() {
-		rules, errs := LoadDir(dir)
-		done <- result{rules, errs}
-	}()
-
-	select {
-	case res := <-done:
-		if res.rules != nil {
-			t.Errorf("rules = %v, want nil", ruleIDs(res.rules))
-		}
-		wantOneError(t, res.errs, name, ReasonNotRegular)
-	case <-time.After(5 * time.Second):
-		// The goroutine stays blocked in open(2); the test already fails.
-		t.Fatal("LoadDir blocked on a named pipe")
-	}
+	wantOneError(t, errs, name, ReasonNotRegular)
 }
 
 // TestReadRuleFileFIFORace opens a FIFO through nonBlockFS, as if a writer
@@ -57,26 +41,18 @@ func TestReadRuleFileFIFORace(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = root.Close() })
 
-	done := make(chan *LoadError, 1)
-	go func() {
+	lerr := within(t, "readRuleFile", func() *LoadError {
 		data, lerr := readRuleFile(nonBlockFS{root}, "x.yaml", "x.yaml")
 		if data != nil {
 			lerr = newLoadError("x.yaml", ReasonUnreadable).wrap(errors.New("got data from a FIFO"))
 		}
-		done <- lerr
-	}()
-
-	select {
-	case lerr := <-done:
-		if lerr == nil {
-			t.Fatal("readRuleFile() error = nil, want ReasonNotRegular")
-		}
-		if lerr.File != "x.yaml" || lerr.Reason != ReasonNotRegular {
-			t.Errorf("error = {File: %q, Reason: %q}, want {File: %q, Reason: %q}", lerr.File, lerr.Reason, "x.yaml", ReasonNotRegular)
-		}
-	case <-time.After(10 * time.Second):
-		// The goroutine stays blocked in open(2); the test already fails.
-		t.Fatal("readRuleFile blocked on a named pipe")
+		return lerr
+	})
+	if lerr == nil {
+		t.Fatal("readRuleFile() error = nil, want ReasonNotRegular")
+	}
+	if lerr.File != "x.yaml" || lerr.Reason != ReasonNotRegular {
+		t.Errorf("error = {File: %q, Reason: %q}, want {File: %q, Reason: %q}", lerr.File, lerr.Reason, "x.yaml", ReasonNotRegular)
 	}
 }
 
@@ -107,28 +83,13 @@ func TestLoadDirNotDirectoryUnix(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			type result struct {
-				rules []Rule
-				errs  []*LoadError
+			rules, errs := loadDirWithin(t, tt.dir)
+			if rules != nil {
+				t.Errorf("rules = %v, want nil", ruleIDs(rules))
 			}
-			done := make(chan result, 1)
-			go func() {
-				rules, errs := LoadDir(tt.dir)
-				done <- result{rules, errs}
-			}()
-
-			select {
-			case res := <-done:
-				if res.rules != nil {
-					t.Errorf("rules = %v, want nil", ruleIDs(res.rules))
-				}
-				wantOneError(t, res.errs, tt.dir, ReasonDirUnreadable)
-				if !errors.Is(res.errs[0], syscall.ENOTDIR) {
-					t.Errorf("error = %v, want it to wrap ENOTDIR", res.errs[0])
-				}
-			case <-time.After(10 * time.Second):
-				// The goroutine stays blocked in open(2); the test already fails.
-				t.Fatal("LoadDir blocked on a path that is not a directory")
+			wantOneError(t, errs, tt.dir, ReasonDirUnreadable)
+			if !errors.Is(errs[0], syscall.ENOTDIR) {
+				t.Errorf("error = %v, want it to wrap ENOTDIR", errs[0])
 			}
 		})
 	}

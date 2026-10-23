@@ -70,6 +70,33 @@ func TestLoadErrorMessage(t *testing.T) {
 			want: "a.yaml: cannot read file: open: permission denied",
 		},
 		{
+			// A name from a cloned repository must not imitate the fields of the message.
+			name: "file name with a colon and a space is quoted",
+			err: newLoadError("x.yaml: field id: duplicate rule ID: already defined in builtin rules.yaml", ReasonEmptyFile).
+				at(3, 1),
+			want: `"x.yaml: field id: duplicate rule ID: already defined in builtin rules.yaml":3:1: file is empty`,
+		},
+		{
+			name: "file name with a colon and a space is quoted without a position",
+			err:  newLoadError("a: b.yaml", ReasonNotRegular),
+			want: `"a: b.yaml": not a regular file`,
+		},
+		{
+			name: "file name with a quote and a colon and a space escapes the quote",
+			err:  newLoadError(`a": b.yaml`, ReasonNotRegular),
+			want: `"a\": b.yaml": not a regular file`,
+		},
+		{
+			name: "file name with a colon but no space is not quoted",
+			err:  newLoadError(`C:\rules\a.yaml`, ReasonEmptyFile),
+			want: `C:\rules\a.yaml: file is empty`,
+		},
+		{
+			name: "file name with a space but no colon is not quoted",
+			err:  newLoadError("my rules/a b.yaml", ReasonEmptyFile),
+			want: "my rules/a b.yaml: file is empty",
+		},
+		{
 			name: "nil receiver does not panic",
 			err:  nil,
 			want: "<nil>",

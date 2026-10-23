@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -72,6 +74,41 @@ func assertSafeText(t *testing.T, errs []*LoadError) {
 	for _, e := range errs {
 		noRawControls(t, e.Error())
 	}
+}
+
+// hangTimeout is how long a call that could block may take before a test
+// decides that it hangs. A call that works takes milliseconds.
+const hangTimeout = 10 * time.Second
+
+// within runs f in a goroutine and returns its result. It fails the test if f
+// does not return within hangTimeout. A hung goroutine stays behind, but the
+// test already fails.
+func within[T any](t *testing.T, what string, f func() T) T {
+	t.Helper()
+	done := make(chan T, 1)
+	go func() { done <- f() }()
+	select {
+	case v := <-done:
+		return v
+	case <-time.After(hangTimeout):
+		t.Fatalf("%s did not return within %v", what, hangTimeout)
+		var zero T // not reached: t.Fatalf stops the test
+		return zero
+	}
+}
+
+// loadDirWithin calls LoadDir and fails the test if it does not return in time.
+func loadDirWithin(t *testing.T, dir string) ([]Rule, []*LoadError) {
+	t.Helper()
+	type result struct {
+		rules []Rule
+		errs  []*LoadError
+	}
+	r := within(t, "LoadDir", func() result {
+		rules, errs := LoadDir(dir)
+		return result{rules, errs}
+	})
+	return r.rules, r.errs
 }
 
 // Builtin and LoadDir share loadEntries, so the folder cap (maxFolderErrors)
@@ -264,12 +301,14 @@ func TestLoadDirFileFiltering(t *testing.T) {
 	// Rules that must load. Names are written out of order on purpose.
 	writeFile(t, dir, "b.yml", validRuleYAML("R-B"))
 	writeFile(t, dir, "a.yaml", validRuleYAML("R-A"))
-	// Files that must be ignored. Each one would load or fail if it counted.
+	// The extension is not case sensitive, so these load too.
 	writeFile(t, dir, "c.YAML", validRuleYAML("R-C"))
+	writeFile(t, dir, "bb.Yml", validRuleYAML("R-BB"))
+	// Files that must be ignored. Each one would load or fail if it counted.
 	writeFile(t, dir, "d.txt", validRuleYAML("R-D"))
 	writeFile(t, dir, "e.yaml.bak", validRuleYAML("R-E"))
 	writeFile(t, dir, ".hidden", validRuleYAML("R-H"))
-	writeFile(t, dir, "badname.YML", "not: [valid")
+	writeFile(t, dir, "badname.yaml.YML.txt", "not: [valid")
 	if err := os.Mkdir(filepath.Join(dir, "sub"), 0o700); err != nil {
 		t.Fatal(err)
 	}
@@ -283,16 +322,73 @@ func TestLoadDirFileFiltering(t *testing.T) {
 	if len(errs) > 0 {
 		t.Fatalf("LoadDir() errors = %v", errs)
 	}
-	if got := ruleIDs(rules); !slices.Equal(got, []string{"R-A", "R-B"}) {
-		t.Errorf("IDs = %v, want [R-A R-B] sorted by file name", got)
+	if got := ruleIDs(rules); !slices.Equal(got, []string{"R-A", "R-B", "R-BB", "R-C"}) {
+		t.Errorf("IDs = %v, want [R-A R-B R-BB R-C] sorted by file name", got)
 	}
 }
 
-func TestLoadDirEmpty(t *testing.T) {
+func TestLoadDirExtensionCase(t *testing.T) {
 	t.Parallel()
-	rules, errs := LoadDir(t.TempDir())
-	if len(rules) != 0 || len(errs) != 0 {
-		t.Errorf("LoadDir(empty) = %v, %v, want nothing", rules, errs)
+	dir := t.TempDir()
+	// "A.YAML" sorts before "b.Yml" (upper case letters come first), and the
+	// order of the IDs is the reverse of the order of the names, so only a
+	// sort by file name gives R-1 then R-2.
+	writeFile(t, dir, "b.Yml", validRuleYAML("R-2"))
+	writeFile(t, dir, "A.YAML", validRuleYAML("R-1"))
+	rules, errs := LoadDir(dir)
+	if len(errs) > 0 {
+		t.Fatalf("LoadDir() errors = %v", errs)
+	}
+	if got := ruleIDs(rules); !slices.Equal(got, []string{"R-1", "R-2"}) {
+		t.Errorf("IDs = %v, want [R-1 R-2] sorted by file name", got)
+	}
+	if rules[0].Source != filepath.Join(dir, "A.YAML") {
+		t.Errorf("Source = %q, want the full path of A.YAML", rules[0].Source)
+	}
+
+	// A bad file with an upper case extension is an error, not skipped.
+	bad := writeFile(t, dir, "C.YML", badRuleYAML("R-3"))
+	_, errs = LoadDir(dir)
+	wantOneError(t, errs, bad, ReasonInvalidValue)
+}
+
+func TestLoadDirNoRuleFiles(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name  string
+		setup func(t *testing.T, dir string)
+	}{
+		{name: "empty folder", setup: func(*testing.T, string) {}},
+		{name: "only other names and a folder named like a rule", setup: func(t *testing.T, dir string) {
+			writeFile(t, dir, "a.txt", validRuleYAML("R-A"))
+			writeFile(t, dir, "b.yaml.bak", validRuleYAML("R-B"))
+			if err := os.Mkdir(filepath.Join(dir, "x.yaml"), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			writeFile(t, filepath.Join(dir, "x.yaml"), "inner.yaml", validRuleYAML("R-X"))
+		}},
+		{name: "only a subfolder with rules", setup: func(t *testing.T, dir string) {
+			sub := filepath.Join(dir, "sub")
+			if err := os.Mkdir(sub, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			writeFile(t, sub, "inner.yaml", validRuleYAML("R-S"))
+		}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			dir := t.TempDir()
+			tt.setup(t, dir)
+			rules, errs := LoadDir(dir)
+			if rules != nil {
+				t.Errorf("got %d rules, want nil", len(rules))
+			}
+			wantOneError(t, errs, dir, ReasonNoRuleFiles)
+			if errs[0].Err != nil || errs[0].Line != 0 || errs[0].Field != "" {
+				t.Errorf("error = %+v, want only File and Reason", *errs[0])
+			}
+		})
 	}
 }
 
@@ -477,9 +573,10 @@ func TestLoadDirFileCount(t *testing.T) {
 			writeFile(t, dir, "r"+strconv.Itoa(i)+".txt", "x")
 		}
 		rules, errs := LoadDir(dir)
-		if len(rules) != 0 || len(errs) != 0 {
-			t.Errorf("LoadDir() = %d rules, %v, want nothing", len(rules), errs)
+		if rules != nil {
+			t.Errorf("got %d rules, want nil", len(rules))
 		}
+		wantOneError(t, errs, dir, ReasonNoRuleFiles)
 	})
 
 	t.Run("exactly the cap", func(t *testing.T) {
@@ -526,7 +623,7 @@ func TestListRuleFiles(t *testing.T) {
 			writeFile(t, dir, name, "x")
 			want = append(want, name)
 		}
-		entries, lerr := listRuleFiles(fsys, dir, maxDirEntries)
+		entries, lerr := listRuleFiles(fsys, dir, maxDirEntries, maxRuleFiles)
 		if lerr != nil {
 			t.Fatalf("listRuleFiles() error = %v", lerr)
 		}
@@ -542,7 +639,7 @@ func TestListRuleFiles(t *testing.T) {
 	t.Run("only files with a rule name are candidates", func(t *testing.T) {
 		t.Parallel()
 		fsys, dir := openTestFS(t)
-		for _, name := range []string{"a.txt", "b.YAML", "c.yaml.bak", "z.yml", "m.yaml"} {
+		for _, name := range []string{"a.txt", "b.YAML", "c.yaml.bak", "d.yaml.", "z.yml", "m.yaml"} {
 			writeFile(t, dir, name, "x")
 		}
 		for _, name := range []string{"x.yaml", "sub", "y.yml"} {
@@ -550,7 +647,7 @@ func TestListRuleFiles(t *testing.T) {
 				t.Fatal(err)
 			}
 		}
-		entries, lerr := listRuleFiles(fsys, dir, maxDirEntries)
+		entries, lerr := listRuleFiles(fsys, dir, maxDirEntries, maxRuleFiles)
 		if lerr != nil {
 			t.Fatalf("listRuleFiles() error = %v", lerr)
 		}
@@ -558,7 +655,7 @@ func TestListRuleFiles(t *testing.T) {
 		for _, e := range entries {
 			got = append(got, e.Name())
 		}
-		if want := []string{"m.yaml", "z.yml"}; !slices.Equal(got, want) {
+		if want := []string{"b.YAML", "m.yaml", "z.yml"}; !slices.Equal(got, want) {
 			t.Errorf("names = %v, want %v", got, want)
 		}
 	})
@@ -582,7 +679,7 @@ func TestListRuleFiles(t *testing.T) {
 					// None of the names is a candidate: only the entry count can trip the cap.
 					writeFile(t, dir, "f"+strconv.Itoa(i)+".txt", "x")
 				}
-				entries, lerr := listRuleFiles(fsys, dir, maxEntries)
+				entries, lerr := listRuleFiles(fsys, dir, maxEntries, maxRuleFiles)
 				if !tt.wantErr {
 					if lerr != nil || len(entries) != 0 {
 						t.Fatalf("listRuleFiles() = %d entries, %v, want none and no error", len(entries), lerr)
@@ -597,18 +694,79 @@ func TestListRuleFiles(t *testing.T) {
 		}
 	})
 
-	t.Run("candidate cap", func(t *testing.T) {
+	t.Run("candidate cap counts only candidates", func(t *testing.T) {
 		t.Parallel()
-		fsys, dir := openTestFS(t)
-		for i := range maxRuleFiles + 1 {
-			writeFile(t, dir, "r"+strconv.Itoa(i)+".yaml", "")
+		const maxFiles = 3
+		tests := []struct {
+			name       string
+			candidates int
+			wantErr    bool
+		}{
+			{name: "at the cap", candidates: maxFiles, wantErr: false},
+			{name: "one over the cap", candidates: maxFiles + 1, wantErr: true},
 		}
-		entries, lerr := listRuleFiles(fsys, dir, maxDirEntries)
-		if entries != nil {
-			t.Errorf("entries = %d, want nil", len(entries))
+		for _, tt := range tests {
+			t.Run(tt.name, func(t *testing.T) {
+				t.Parallel()
+				fsys, dir := openTestFS(t)
+				for i := range tt.candidates {
+					writeFile(t, dir, "r"+strconv.Itoa(i)+".yaml", "")
+				}
+				// These names are not candidates, so they must not count.
+				for i := range maxFiles + 2 {
+					writeFile(t, dir, "o"+strconv.Itoa(i)+".txt", "")
+				}
+				entries, lerr := listRuleFiles(fsys, dir, maxDirEntries, maxFiles)
+				if !tt.wantErr {
+					if lerr != nil || len(entries) != maxFiles {
+						t.Fatalf("listRuleFiles() = %d entries, %v, want %d and no error", len(entries), lerr, maxFiles)
+					}
+					return
+				}
+				if entries != nil {
+					t.Errorf("entries = %d, want nil", len(entries))
+				}
+				wantOneError(t, []*LoadError{lerr}, dir, ReasonTooManyFiles)
+			})
 		}
-		wantOneError(t, []*LoadError{lerr}, dir, ReasonTooManyFiles)
 	})
+}
+
+// emptyBatchFS is an fs.FS whose root directory breaks the fs.ReadDirFile
+// contract: ReadDir(n) with n > 0 returns no entries and a nil error.
+type emptyBatchFS struct{}
+
+func (emptyBatchFS) Open(name string) (fs.File, error) {
+	if name != "." {
+		return nil, &fs.PathError{Op: "open", Path: name, Err: fs.ErrNotExist}
+	}
+	return emptyBatchDir{}, nil
+}
+
+type emptyBatchDir struct{}
+
+func (emptyBatchDir) Stat() (fs.FileInfo, error)         { return nil, errors.New("not used") }
+func (emptyBatchDir) Read([]byte) (int, error)           { return 0, errors.New("not used") }
+func (emptyBatchDir) Close() error                       { return nil }
+func (emptyBatchDir) ReadDir(int) ([]fs.DirEntry, error) { return nil, nil }
+
+func TestListRuleFilesEmptyBatchWithoutError(t *testing.T) {
+	t.Parallel()
+	type result struct {
+		entries []fs.DirEntry
+		lerr    *LoadError
+	}
+	r := within(t, "listRuleFiles on an empty batch", func() result {
+		entries, lerr := listRuleFiles(emptyBatchFS{}, "fake dir", maxDirEntries, maxRuleFiles)
+		return result{entries, lerr}
+	})
+	if r.entries != nil {
+		t.Errorf("entries = %d, want nil", len(r.entries))
+	}
+	wantOneError(t, []*LoadError{r.lerr}, "fake dir", ReasonDirUnreadable)
+	if !errors.Is(r.lerr, io.ErrNoProgress) {
+		t.Errorf("error = %v, want it to wrap io.ErrNoProgress", r.lerr)
+	}
 }
 
 // TestLoadDirManyFilesInOrder loads more files than one directory batch and

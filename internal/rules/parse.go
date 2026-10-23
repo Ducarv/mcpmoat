@@ -46,12 +46,6 @@ var (
 	errNoDecoder = errors.New("no decoder for this key")
 )
 
-// matchKeys returns the allowed keys of the match mapping. It returns a new
-// slice on each call, so callers cannot change shared state.
-func matchKeys() []string {
-	return []string{"any_regex", "all_regex", "keywords", "heuristic", "params"}
-}
-
 // Parse reads one rule from the YAML text in data. file is the display name
 // used in messages; Parse also stores it in Rule.Source. It returns a valid
 // rule and nil, or a zero Rule and one or more errors in file order. It returns
@@ -79,8 +73,8 @@ func Parse(file string, data []byte) (Rule, []*LoadError) {
 	}
 
 	if bad, err := checkTree(root); err != nil {
-		errs = append([]*LoadError{newLoadError(file, ReasonInvalidYAML).at(bad.Line, bad.Column).wrap(err)}, errs...)
-		return Rule{}, errs
+		e := newLoadError(file, ReasonInvalidYAML).at(bad.Line, bad.Column).wrap(err)
+		return Rule{}, append([]*LoadError{e}, errs...)
 	}
 	if root.Kind != yaml.MappingNode {
 		e := newLoadError(file, ReasonInvalidYAML).at(root.Line, root.Column).wrap(errNotMapping)
@@ -89,7 +83,8 @@ func Parse(file string, data []byte) (Rule, []*LoadError) {
 
 	var rule Rule
 	fields, fieldErrs, dropped := decodeRule(file, root, &rule)
-	// errs holds at most the multiple-documents error, which comes last in the file.
+	// errs holds at most the error about a second document, which comes last in
+	// the file.
 	fieldErrs = append(fieldErrs, errs...)
 	if len(fieldErrs) > 0 {
 		return Rule{}, capErrors(file, fieldErrs, dropped)
@@ -134,14 +129,14 @@ type errList struct {
 	dropped int
 }
 
-// add records one error at the position of the node at, or counts it when the
+// add records one error at the position of node, or counts it when the
 // list is full. field and err may be empty and nil.
-func (l *errList) add(file string, r Reason, at *yaml.Node, field string, err error) {
+func (l *errList) add(file string, r Reason, node *yaml.Node, field string, err error) {
 	if len(l.errs) >= maxErrorsPerFile {
 		l.dropped++
 		return
 	}
-	l.errs = append(l.errs, newLoadError(file, r).at(at.Line, at.Column).inField(field).wrap(err))
+	l.errs = append(l.errs, newLoadError(file, r).at(node.Line, node.Column).inField(field).wrap(err))
 }
 
 // total returns the number of errors added, kept or not.
@@ -151,8 +146,8 @@ func (l *errList) total() int {
 
 // readDocument decodes the first YAML document of data into a node tree and
 // returns its root node. stop is true when the caller cannot go on; errs then
-// holds the reason. When stop is false, errs holds the multiple-documents error
-// or nothing. Decoding into a yaml.Node does not expand aliases.
+// holds the reason. When stop is false, errs holds the error about a second
+// document or nothing. Decoding into a yaml.Node does not expand aliases.
 //
 // A syntax error of the YAML library is wrapped as it is. Its text can hold
 // text of the file (for example "unknown anchor 'x' referenced"). That is safe:
@@ -170,12 +165,20 @@ func readDocument(file string, data []byte) (root *yaml.Node, errs []*LoadError,
 	if doc.Kind != yaml.DocumentNode || len(doc.Content) != 1 {
 		return nil, []*LoadError{newLoadError(file, ReasonInvalidYAML).wrap(errNotMapping)}, true
 	}
+	// A file with only "---" is one document with an empty value: it is empty.
+	if v := doc.Content[0]; v.Kind == yaml.ScalarNode && v.ShortTag() == "!!null" && v.Value == "" {
+		return nil, []*LoadError{newLoadError(file, ReasonEmptyFile)}, true
+	}
 
-	// A second Decode must find the end of the input. Anything else (a second
-	// document, or a syntax error in it) means more than one document.
+	// A second Decode must find the end of the input. A second document is an
+	// error. A syntax error in it is reported as a syntax error, and its text
+	// from the YAML library names the line.
 	var next yaml.Node
-	if err := dec.Decode(&next); !errors.Is(err, io.EOF) {
+	switch err := dec.Decode(&next); {
+	case err == nil:
 		errs = append(errs, newLoadError(file, ReasonMultipleDocuments).at(next.Line, next.Column))
+	case !errors.Is(err, io.EOF):
+		errs = append(errs, newLoadError(file, ReasonInvalidYAML).wrap(err))
 	}
 	return doc.Content[0], errs, false
 }
@@ -224,7 +227,8 @@ type field struct {
 // checkKeys checks the keys of the mapping node m against allowed. It reports
 // keys that are not plain strings, unknown keys and repeated keys to out, in
 // file order. It returns the first occurrence of every allowed key. prefix is
-// put before the key in the Field of an error ("" or "match.").
+// put before the key in the Field of an error ("" or "match."). A nil allowed
+// accepts every plain string key, for the free-form mapping match.params.
 func checkKeys(file, prefix string, m *yaml.Node, allowed []string, out *errList) []field {
 	var fields []field
 	seen := make(map[string]bool)
@@ -238,7 +242,7 @@ func checkKeys(file, prefix string, m *yaml.Node, allowed []string, out *errList
 			out.add(file, ReasonInvalidYAML, key, "", errKeyNotStr)
 		case seen[name]:
 			out.add(file, ReasonDuplicateField, key, prefix+name, nil)
-		case !slices.Contains(allowed, name):
+		case allowed != nil && !slices.Contains(allowed, name):
 			seen[name] = true
 			out.add(file, ReasonUnknownField, key, prefix+name, nil)
 		default:
@@ -329,8 +333,26 @@ func checkMatch(file string, val *yaml.Node, out *errList) bool {
 		return false
 	}
 	start := out.total()
-	checkKeys(file, "match.", val, matchKeys(), out)
+	for _, f := range checkKeys(file, "match.", val, matchKeys(), out) {
+		if f.name == "params" {
+			checkParams(file, f.val, out)
+		}
+	}
 	return out.total() == start
+}
+
+// checkParams checks the value of match.params: a mapping with plain string
+// keys that are not repeated, or an empty value. Decoding alone would turn a
+// bool or int key into a string and drop a null key without a word.
+func checkParams(file string, val *yaml.Node, out *errList) {
+	switch {
+	case val.Kind == yaml.ScalarNode && val.ShortTag() == "!!null":
+		// An empty params is the same as no params.
+	case val.Kind != yaml.MappingNode:
+		out.add(file, ReasonInvalidValue, val, "match.params", nil)
+	default:
+		checkKeys(file, "match.params.", val, nil, out)
+	}
 }
 
 // decodeField decodes the value node v into the field of r that is named name.

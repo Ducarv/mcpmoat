@@ -32,7 +32,7 @@ const dirBatch = 256
 // maxFolderErrors is the number of errors after which the loader stops to read
 // more files of a directory. Every file can give up to maxErrorsPerFile+1
 // errors, and a directory can hold maxRuleFiles files, so without the cap a
-// hostile directory could give about 20000 errors and use much time and memory. The loader adds
+// hostile directory could give about 21000 errors and use much time and memory. The loader adds
 // one last ReasonTooManyErrors error, so a result has at most maxFolderErrors+1
 // errors.
 const maxFolderErrors = 100
@@ -79,10 +79,9 @@ func newLoadOptions(opts []Option) loadOptions {
 // a fatal error.
 func Builtin(opts ...Option) ([]Rule, []*LoadError) {
 	o := newLoadOptions(opts)
-	// fs.ReadDir returns the entries sorted by file name.
-	entries, err := fs.ReadDir(builtinrules.FS, ".")
-	if err != nil {
-		return nil, []*LoadError{newLoadError(builtinLabel, ReasonDirUnreadable).wrap(err)}
+	entries, lerr := listRuleFiles(builtinrules.FS, builtinLabel, maxDirEntries, maxRuleFiles)
+	if lerr != nil {
+		return nil, []*LoadError{lerr}
 	}
 	return loadEntries(builtinrules.FS, builtinLabel, entries, o, func(name string) string { return name })
 }
@@ -93,16 +92,18 @@ func Builtin(opts ...Option) ([]Rule, []*LoadError) {
 // filepath.Join(dir, name). The rules come in the order of the file names,
 // which is the same on every run.
 //
-// Only regular files whose names end in .yaml or .yml are rules. Other files
-// and subdirectories are ignored. A symlink with such a name is refused with
-// ReasonNotRegular, also when it points to a regular file. This check uses the
-// directory listing. A file that someone swaps for a symlink after the listing,
-// while the scan runs, is opened, but the open cannot leave dir. LoadDir collects
-// the errors of all files. A file with an error gives no rule. It returns the rules
-// and nil, or nil and the errors found. LoadDir stops after maxFolderErrors
-// errors; then the last error has ReasonTooManyErrors and says how many files
-// it did not fully check. A directory with more than maxRuleFiles candidate
-// files, or more than maxDirEntries entries, gives ReasonTooManyFiles.
+// Only regular files whose names end in .yaml or .yml, in any case, are rules.
+// Other files and subdirectories are ignored. A symlink with such a name is
+// refused with ReasonNotRegular, also when it points to a regular file. This
+// check uses the directory listing. A file that someone swaps for a symlink
+// after the listing, while the scan runs, is opened, but the open cannot leave
+// dir. A directory with no such file gives ReasonNoRuleFiles. LoadDir collects
+// the errors of all files. A file with an error gives no rule. It returns the
+// rules and nil, or nil and the errors found. LoadDir stops after
+// maxFolderErrors errors; then the last error has ReasonTooManyErrors and says
+// how many files it did not fully check. A directory with more than
+// maxRuleFiles candidate files, or more than maxDirEntries entries, gives
+// ReasonTooManyFiles.
 func LoadDir(dir string, opts ...Option) ([]Rule, []*LoadError) {
 	o := newLoadOptions(opts)
 
@@ -129,9 +130,15 @@ func LoadDir(dir string, opts ...Option) ([]Rule, []*LoadError) {
 	}()
 
 	fsys := nonBlockFS{root}
-	entries, lerr := listRuleFiles(fsys, dir, maxDirEntries)
+	entries, lerr := listRuleFiles(fsys, dir, maxDirEntries, maxRuleFiles)
 	if lerr != nil {
 		return nil, []*LoadError{lerr}
+	}
+	// The user named this folder for its rules. A folder with none, or one
+	// whose files all have another extension, would give a scan that looks as
+	// if it used extra rules and does not.
+	if len(entries) == 0 {
+		return nil, []*LoadError{newLoadError(dir, ReasonNoRuleFiles)}
 	}
 	return loadEntries(fsys, dir, entries, o, func(name string) string { return filepath.Join(dir, name) })
 }
@@ -149,6 +156,8 @@ func (n nonBlockFS) Open(name string) (fs.File, error) {
 	}
 	f, err := n.root.OpenFile(name, os.O_RDONLY|syscall.O_NONBLOCK, 0)
 	if err != nil {
+		// Return an untyped nil here. A nil *os.File inside an fs.File value is
+		// not equal to nil, and the caller would try to use it.
 		return nil, err
 	}
 	return f, nil
@@ -158,9 +167,9 @@ func (n nonBlockFS) Open(name string) (fs.File, error) {
 // file name. A candidate is a name that ends in .yaml or .yml and is not a
 // directory. It reads the directory in batches of dirBatch entries and stops
 // at once when the directory has more than maxEntries entries, or more than
-// maxRuleFiles candidates, so a hostile directory cannot make it read and sort
+// maxFiles candidates, so a hostile directory cannot make it read and sort
 // millions of names. dirName is the File of the error it returns.
-func listRuleFiles(fsys fs.FS, dirName string, maxEntries int) ([]fs.DirEntry, *LoadError) {
+func listRuleFiles(fsys fs.FS, dirName string, maxEntries, maxFiles int) ([]fs.DirEntry, *LoadError) {
 	d, err := fsys.Open(".")
 	if err != nil {
 		return nil, newLoadError(dirName, ReasonDirUnreadable).wrap(err)
@@ -184,7 +193,7 @@ func listRuleFiles(fsys fs.FS, dirName string, maxEntries int) ([]fs.DirEntry, *
 				candidates = append(candidates, e)
 			}
 		}
-		if seen > maxEntries || len(candidates) > maxRuleFiles {
+		if seen > maxEntries || len(candidates) > maxFiles {
 			return nil, newLoadError(dirName, ReasonTooManyFiles)
 		}
 		if errors.Is(err, io.EOF) {
@@ -192,6 +201,11 @@ func listRuleFiles(fsys fs.FS, dirName string, maxEntries int) ([]fs.DirEntry, *
 		}
 		if err != nil {
 			return nil, newLoadError(dirName, ReasonDirUnreadable).wrap(err)
+		}
+		if len(batch) == 0 {
+			// The fs.ReadDirFile contract says an empty batch comes with an
+			// error. Without this check, a file that breaks it would loop forever.
+			return nil, newLoadError(dirName, ReasonDirUnreadable).wrap(io.ErrNoProgress)
 		}
 	}
 	slices.SortFunc(candidates, func(a, b fs.DirEntry) int {
@@ -206,26 +220,19 @@ func isCandidate(e fs.DirEntry) bool {
 	return !e.IsDir() && isRuleName(e.Name())
 }
 
-// isRuleName reports whether name looks like a rule file. The check is
-// case-sensitive.
+// isRuleName reports whether name looks like a rule file: it ends in .yaml or
+// .yml, in any case. The case does not matter, so a file called Rule.YAML is
+// loaded and not skipped without a word.
 func isRuleName(name string) bool {
-	return strings.HasSuffix(name, ".yaml") || strings.HasSuffix(name, ".yml")
+	lower := strings.ToLower(name)
+	return strings.HasSuffix(lower, ".yaml") || strings.HasSuffix(lower, ".yml")
 }
 
-// loadEntries loads the rule files among entries, which are the sorted
-// entries of the root of fsys. dirName is the File of a directory-level error.
-// display maps a file name to the name that Rule.Source and errors show. It
-// stops to read files when it has maxFolderErrors errors.
-func loadEntries(fsys fs.FS, dirName string, entries []fs.DirEntry, o loadOptions, display func(name string) string) ([]Rule, []*LoadError) {
-	var candidates []fs.DirEntry
-	for _, e := range entries {
-		if isCandidate(e) {
-			candidates = append(candidates, e)
-		}
-	}
-	if len(candidates) > maxRuleFiles {
-		return nil, []*LoadError{newLoadError(dirName, ReasonTooManyFiles)}
-	}
+// loadEntries loads the rule files in candidates, which listRuleFiles returned
+// for the root of fsys, sorted by file name. dirName is the File of a
+// directory-level error. display maps a file name to the name that Rule.Source
+// and errors show. It stops to read files when it has maxFolderErrors errors.
+func loadEntries(fsys fs.FS, dirName string, candidates []fs.DirEntry, o loadOptions, display func(name string) string) ([]Rule, []*LoadError) {
 
 	var rules []Rule
 	var errs []*LoadError

@@ -199,6 +199,12 @@ type Rule struct {
 	Source string `yaml:"-"`
 }
 
+// matchKeys returns the allowed keys of the match mapping. It returns a new
+// slice on each call, so callers cannot change shared state.
+func matchKeys() []string {
+	return []string{"any_regex", "all_regex", "keywords", "heuristic", "params"}
+}
+
 // ruleKeys returns the allowed top-level YAML keys of a rule file. It returns
 // a new slice on each call, so callers cannot change shared state.
 func ruleKeys() []string {

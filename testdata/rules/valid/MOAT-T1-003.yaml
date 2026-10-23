@@ -1,3 +1,4 @@
+# Test fixture: the PRD example rule, with no optional fields. Not the built-in rule.
 id: MOAT-T1-003
 title: Tool description tells the model to hide actions from the user
 severity: high

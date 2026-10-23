@@ -30,7 +30,7 @@ const (
 // The requirements are:
 //   - the ID matches ^MOAT-T[1-5]-[0-9]{3}$;
 //   - when Source is set, its base name is the ID plus ".yaml";
-//   - Risk is not empty, has no line break and has at most 500 runes. This is
+//   - Risk is not empty, has no line break and has at most maxRiskRunes (500) runes. This is
 //     a simple stand-in for "one sentence"; the check does not parse text;
 //   - Remediation is not empty;
 //   - there is at least one reference;

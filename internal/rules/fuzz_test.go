@@ -7,6 +7,8 @@ import (
 	"strings"
 	"testing"
 	"unicode/utf8"
+
+	"github.com/Ducarv/mcpmoat/internal/termsafe"
 )
 
 // FuzzParse checks that Parse holds its contract for any bytes: no panic, one
@@ -110,20 +112,25 @@ func checkParseResult(t *testing.T, name string, size int, rule Rule, errs []*Lo
 	if len(errs) > maxErrorsPerFile+1 {
 		t.Fatalf("%d errors, want at most %d (input %d bytes)", len(errs), maxErrorsPerFile+1, size)
 	}
-	// ReasonTooManyErrors is the note at the end of a full list, never anywhere else.
-	for i, e := range errs {
-		if e != nil && e.Reason == ReasonTooManyErrors && (i != len(errs)-1 || len(errs) != maxErrorsPerFile+1) {
-			t.Fatalf("error %d of %d has Reason %q, want it only last in a full list (input %d bytes)", i, len(errs), e.Reason, size)
-		}
-	}
-	// The file name is quoted but never cut, so the bound grows with it.
-	maxLen := 4096 + 6*len(name)
+	// The message holds the file name (quoted, never cut), a field name and a
+	// wrapped error text (each cut to maxDisplayRunes runes and then quoted),
+	// and fixed text. The widest escape of one rune is \UXXXXXXXX, which is 10
+	// bytes, and a rune takes at least one input byte. Each quoted part also has
+	// two quote marks, and a cut part has termsafe.CutMarker. 256 bytes are
+	// room for the reason, the position, "field " and the separators.
+	const widestEscape = 10
+	cutPart := widestEscape*maxDisplayRunes + 2 + len(termsafe.CutMarker)
+	maxLen := (widestEscape*len(name) + 2) + 2*cutPart + 256
 	for i, e := range errs {
 		if e == nil {
 			t.Fatalf("error %d is nil (input %d bytes)", i, size)
 		}
 		if e.File != name || e.Line < 0 || e.Col < 0 || e.Reason == "" {
 			t.Fatalf("error %d has a bad File, Line, Col or Reason (input %d bytes)", i, size)
+		}
+		// ReasonTooManyErrors is the note at the end of a full list, never anywhere else.
+		if e.Reason == ReasonTooManyErrors && (i != len(errs)-1 || len(errs) != maxErrorsPerFile+1) {
+			t.Fatalf("error %d of %d has Reason %q, want it only last in a full list (input %d bytes)", i, len(errs), e.Reason, size)
 		}
 		msg := e.Error()
 		if !utf8.ValidString(msg) {

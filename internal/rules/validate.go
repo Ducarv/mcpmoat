@@ -82,6 +82,20 @@ func (c *checker) add(field string, reason Reason, detail error) {
 	c.errs = append(c.errs, newLoadError(c.file, reason).inField(field).wrap(detail))
 }
 
+// checkNonBlankBytes checks that s is at most limit bytes (like checkBytes) and
+// that it is not blank. It reports a problem at field and returns false, or
+// returns true when s is fine.
+func (c *checker) checkNonBlankBytes(field, s string, limit int) bool {
+	if !c.checkBytes(field, s, limit) {
+		return false
+	}
+	if isBlank(s) {
+		c.add(field, ReasonInvalidValue, errBlank)
+		return false
+	}
+	return true
+}
+
 // indexField returns the YAML path of item i in the list at field, for example
 // "references[0]".
 func indexField(field string, i int) string {
@@ -139,9 +153,8 @@ func (c *checker) validateMatch(m Match) {
 	// A blank heuristic is an error, not a match key: it gets its own error
 	// (so "match" is not also reported missing) and it never counts as a real
 	// heuristic for the params check below.
-	sizeOK := c.checkBytes("match.heuristic", m.Heuristic, maxHeuristicBytes)
-	if sizeOK && m.Heuristic != "" && isBlank(m.Heuristic) {
-		c.add("match.heuristic", ReasonInvalidValue, errBlank)
+	if m.Heuristic != "" {
+		c.checkNonBlankBytes("match.heuristic", m.Heuristic, maxHeuristicBytes)
 	}
 	// Params are options for a heuristic. Without a real heuristic the rule can
 	// never use them, so a rule with only params (or params next to a regex
@@ -202,10 +215,7 @@ func (c *checker) validateCases(field string, cases []Case) {
 	}
 	for i, tc := range cases {
 		item := indexField(field, i)
-		sizeOK := c.checkBytes(item+".text", tc.Text, maxCaseTextBytes)
-		if sizeOK && isBlank(tc.Text) {
-			c.add(item+".text", ReasonInvalidValue, errBlank)
-		}
+		c.checkNonBlankBytes(item+".text", tc.Text, maxCaseTextBytes)
 		c.checkRunes(item+".note", tc.Note, maxCaseNoteRunes)
 	}
 }
@@ -220,11 +230,7 @@ func (c *checker) checkList(field string, items []string, maxItems, maxBytes int
 	}
 	for i, s := range items {
 		item := indexField(field, i)
-		if !c.checkBytes(item, s, maxBytes) {
-			continue
-		}
-		if isBlank(s) {
-			c.add(item, ReasonInvalidValue, errBlank)
+		if !c.checkNonBlankBytes(item, s, maxBytes) {
 			continue
 		}
 		if extra != nil {

@@ -32,7 +32,7 @@ func builtinCaseFailures(rs []Rule, c Compiler) []string {
 	for _, r := range rs {
 		m, err := c(r.Match, r.Target)
 		if err != nil {
-			out = append(out, r.ID+": compile: "+err.Error())
+			out = append(out, displayText(r.ID)+": compile: "+displayText(err.Error()))
 			continue
 		}
 		for _, f := range RunCases(r, m) {
