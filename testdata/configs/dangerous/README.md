@@ -7,10 +7,12 @@ checks the static config rules of threat T4. All secrets in it are synthetic
 canaries. They are not real credentials. The servers do not exist, and the
 tests only read the config, so they make no network calls.
 
-Use this home only with `--no-connect`. The package and image names
-(`@example-corp/*`, `example/mcp-server`) are names that anyone can register,
-so a scan that connects would fetch and run them, and would send the canary
-header to `mcp.example.com`.
+Use this home only with `--no-connect`. As a second guard, every name in it
+points at the reserved `.invalid` top-level domain (RFC 2606), which never
+resolves: the remote URL host is `mcp.example.invalid`, the npx entries pass
+`--registry https://registry.invalid/`, and the docker image is
+`registry.invalid/example/mcp-server`. So a scan that connects by mistake
+fetches nothing and sends the canary header nowhere.
 
 | Server | Expected rule IDs |
 |---|---|

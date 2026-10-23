@@ -1,7 +1,7 @@
 {
   "mcpServers": {
     "remote-plain": {
-      "url": "http://mcp.example.com/sse",
+      "url": "http://mcp.example.invalid/sse",
       "headers": {
         "X-Api-Key": "mcpmoat-canary-header-8Fk2Zs",
         "Authorization": "Bearer ${env:API_TOKEN}"
@@ -12,7 +12,7 @@
     },
     "env-secret": {
       "command": "npx",
-      "args": ["-y", "@example-corp/notes-mcp@1.2.3"],
+      "args": ["-y", "--registry", "https://registry.invalid/", "@example-corp/notes-mcp@1.2.3"],
       "env": {
         "GITHUB_TOKEN": "ghp_mcpmoatcanaryZk3Qp8Vw2LxN7rTb5HcYd4M",
         "LOG_LEVEL": "debug",
@@ -21,11 +21,11 @@
     },
     "latest-pkg": {
       "command": "npx",
-      "args": ["-y", "@example-corp/files-mcp@latest"]
+      "args": ["-y", "--registry", "https://registry.invalid/", "@example-corp/files-mcp@latest"]
     },
     "docker-untagged": {
       "command": "docker",
-      "args": ["run", "-i", "--rm", "-e", "TOKEN", "example/mcp-server"]
+      "args": ["run", "-i", "--rm", "-e", "TOKEN", "registry.invalid/example/mcp-server"]
     }
   }
 }

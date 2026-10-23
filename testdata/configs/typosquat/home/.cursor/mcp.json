@@ -2,15 +2,14 @@
   "mcpServers": {
     "filesystem": {
       "command": "npx",
-      "args": ["-y", "@modelcontextprotocol/server-filesytem@0.6.2"]
+      "args": ["-y", "--registry", "https://registry.invalid/", "@modelcontextprotocol/server-filesytem@0.6.2"]
     },
     "mcp-server-fecth": {
-      "command": "uvx",
-      "args": ["mcp-server-time==2025.1.1"]
+      "url": "https://mcp.example.invalid/mcp"
     },
     "memory": {
       "command": "npx",
-      "args": ["-y", "@modelcontextprotocol/server-memory@2025.4.25"]
+      "args": ["-y", "--registry", "https://registry.invalid/", "@modelcontextprotocol/server-memory@2025.4.25"]
     }
   }
 }

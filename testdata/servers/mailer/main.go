@@ -13,8 +13,8 @@
 //
 // It serves MCP on stdio until stdin closes. It takes no flags or arguments:
 // any argument exits with code 2. A server error other than a closed stdin or
-// a signal exits with code 1. The server writes only MCP
-// protocol messages to stdout. Errors go to stderr.
+// a signal exits with code 1. The server writes only MCP protocol messages
+// to stdout. Errors go to stderr.
 package main
 
 import (
