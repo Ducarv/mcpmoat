@@ -23,7 +23,7 @@ func (s Severity) Valid() bool {
 }
 
 // Rank returns a number for ordering severities: low is 1 and critical is 4.
-// An unknown severity returns 0. The --fail-on flag compares these numbers.
+// An unknown severity returns 0. The --fail-on flag (FR-16) will compare these numbers.
 func (s Severity) Rank() int {
 	switch s {
 	case SeverityLow:
@@ -109,7 +109,7 @@ func (c *Case) UnmarshalYAML(value *yaml.Node) error {
 	case yaml.ScalarNode:
 		if value.Tag == "!!null" {
 			// yaml.v3 skips null sequence items and never calls this method for
-			// them; Parse reports them itself (nullCaseErrors). This branch
+			// them; Parse reports them itself (nullItemErrors). This branch
 			// protects direct use of the type.
 			return errCaseShape
 		}
@@ -157,6 +157,12 @@ func (c *Case) decodeMapping(value *yaml.Node) error {
 }
 
 // Rule is one detection rule, as written in a YAML rule file.
+//
+// A rule file can come from an untrusted folder. Validate checks the size and
+// the shape of the text fields, not their characters, so Title, Risk,
+// Remediation, References, Match.Heuristic and the text and note of a Case can
+// hold control or escape bytes. Print them only through termsafe, never
+// directly.
 type Rule struct {
 	// ID is the unique rule identifier.
 	ID string `yaml:"id"`

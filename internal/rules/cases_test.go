@@ -44,17 +44,6 @@ func documentedRule() Rule {
 	}
 }
 
-// assertNoControl fails when s holds a raw control byte (below 0x20 or 0x7f).
-func assertNoControl(t *testing.T, s string) {
-	t.Helper()
-	for i := 0; i < len(s); i++ {
-		if s[i] < 0x20 || s[i] == 0x7f {
-			t.Errorf("output holds raw control byte 0x%02x at %d: %q", s[i], i, s)
-			return
-		}
-	}
-}
-
 func TestCheckDocumentedValid(t *testing.T) {
 	t.Parallel()
 	for _, source := range []string{"MOAT-T1-003.yaml", "rules/MOAT-T1-003.yaml", ""} {
@@ -207,7 +196,7 @@ func TestCheckDocumentedEscapesUntrustedText(t *testing.T) {
 		t.Fatalf("CheckDocumented() = %q, want several problems", got)
 	}
 	for _, p := range got {
-		assertNoControl(t, p)
+		noRawControls(t, p)
 		if !strings.HasPrefix(p, `"\x1b[31mRED\n\x00end"`) {
 			t.Errorf("problem %q does not start with the escaped rule ID", p)
 		}
@@ -400,8 +389,8 @@ func TestRunCasesEscapesUntrustedText(t *testing.T) {
 	}
 	for _, f := range got {
 		s := f.String()
-		assertNoControl(t, s)
-		assertNoControl(t, f.Error())
+		noRawControls(t, s)
+		noRawControls(t, f.Error())
 		if strings.Contains(s, "\x1b") {
 			t.Errorf("String() holds a raw ESC: %q", s)
 		}

@@ -12,7 +12,6 @@ import (
 	"strings"
 	"testing"
 	"time"
-	"unicode"
 )
 
 // validRuleYAML returns a small valid rule file with the given ID.
@@ -63,23 +62,15 @@ func wantOneError(t *testing.T, errs []*LoadError, file string, reason Reason) {
 	}
 }
 
-// assertSafeText fails if any error message holds a control rune (C0, DEL or
-// C1), a format rune (Unicode class Cf: bidi marks, zero-width characters), or
-// a line or paragraph separator (U+2028, U+2029). A terminal or a viewer could
-// act on any of them.
+// assertSafeText fails if errs is empty or if any error message holds a rune
+// that noRawControls refuses.
 func assertSafeText(t *testing.T, errs []*LoadError) {
 	t.Helper()
 	if len(errs) == 0 {
 		t.Fatal("got no errors, want at least one")
 	}
 	for _, e := range errs {
-		msg := e.Error()
-		for i, r := range msg {
-			if unicode.IsControl(r) || unicode.Is(unicode.Cf, r) || r == '\u2028' || r == '\u2029' {
-				t.Errorf("Error() has unsafe rune U+%04X at %d: %q", r, i, msg)
-				break
-			}
-		}
+		noRawControls(t, e.Error())
 	}
 }
 
@@ -821,8 +812,9 @@ func TestLoadDirFolderCap(t *testing.T) {
 		t.Errorf("got %d errors before the last, want exactly %d (the last file is cut to fit)", len(shown), maxFolderErrors)
 	}
 	// Every file gives errors, so the files read are the files with errors.
-	if want := total - distinctFiles(shown); n != want {
-		t.Errorf("files not checked = %d, want %d (total minus files read)", n, want)
+	// The last file read is cut to fit, so it counts as not checked too.
+	if want := total - distinctFiles(shown) + 1; n != want {
+		t.Errorf("files not checked = %d, want %d (total minus files read, plus the cut file)", n, want)
 	}
 	// Errors come in file-name order, and no file comes back after another.
 	for i := 1; i < len(shown); i++ {
@@ -938,8 +930,9 @@ func TestLoadDirFolderCapBoundary(t *testing.T) {
 		}
 		n := tooManyErrorsEntry(t, errs, dir)
 		read := distinctFiles(errs[:len(errs)-1])
-		if read >= 30 || n != 30-read {
-			t.Errorf("read %d files, not checked = %d, want not checked = %d", read, n, 30-read)
+		// The files not read, plus the fifth file that is cut to fit.
+		if read >= 30 || n != 30-read+1 {
+			t.Errorf("read %d files, not checked = %d, want not checked = %d", read, n, 30-read+1)
 		}
 		// 4 whole files (4*21 errors) and the first 16 errors of the fifth.
 		if read != 5 {
@@ -956,8 +949,39 @@ func TestLoadDirFolderCapBoundary(t *testing.T) {
 		if len(errs) != maxFolderErrors+1 {
 			t.Fatalf("got %d errors, want %d", len(errs), maxFolderErrors+1)
 		}
-		if n := tooManyErrorsEntry(t, errs, dir); n <= 0 {
-			t.Errorf("files not checked = %d, want above 0 (the cut file is not fully shown)", n)
+		if n := tooManyErrorsEntry(t, errs, dir); n != 1 {
+			t.Errorf("files not checked = %d, want 1 (the cut file is not fully shown)", n)
 		}
 	})
+}
+
+// TestLoadDirNotCheckedCountsCutAndUnread covers a folder where one file is cut
+// at the cap and more files are never read. The count must hold both: the cut
+// file and the unread files.
+func TestLoadDirNotCheckedCountsCutAndUnread(t *testing.T) {
+	t.Parallel()
+	const (
+		total   = 10
+		perFile = maxErrorsPerFile + 1 // a hostile file gives 21 errors
+	)
+	// Files that fit whole: 100 / 21 = 4. The fifth file has 16 errors of room
+	// left, so it is cut. The other 5 files are never read.
+	whole := maxFolderErrors / perFile
+	if maxFolderErrors%perFile == 0 {
+		t.Fatal("test bug: the cap is a multiple of the errors per file, so no file is cut")
+	}
+	const cut = 1
+	unread := total - whole - cut
+	want := cut + unread // 1 + 5 = 6; an assignment instead of += would give 5
+
+	dir := t.TempDir()
+	hostileFiles(t, dir, total)
+	_, errs := LoadDir(dir)
+	if n := tooManyErrorsEntry(t, errs, dir); n != want {
+		t.Errorf("files not checked = %d, want %d (1 cut + %d unread)", n, want, unread)
+	}
+	wantText := fmt.Sprintf("stopped after %d errors; %d files not checked", maxFolderErrors, want)
+	if got := errs[len(errs)-1].Error(); !strings.HasSuffix(got, wantText) {
+		t.Errorf("Error() = %q, want the suffix %q", got, wantText)
+	}
 }

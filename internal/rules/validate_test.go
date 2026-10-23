@@ -682,7 +682,7 @@ func TestValidateReferenceASCII(t *testing.T) {
 			if !errors.Is(got[0], errReferenceURL) {
 				t.Errorf("error %v does not wrap errReferenceURL", got[0])
 			}
-			assertNoControlBytes(t, got[0].Error())
+			noRawControls(t, got[0].Error())
 		})
 	}
 }
@@ -778,17 +778,6 @@ func TestValidateBoundedWork(t *testing.T) {
 	})
 }
 
-// assertNoControlBytes fails the test if s holds a byte below 0x20 or 0x7f.
-func assertNoControlBytes(t *testing.T, s string) {
-	t.Helper()
-	for i := 0; i < len(s); i++ {
-		if s[i] < 0x20 || s[i] == 0x7f {
-			t.Errorf("message %q holds control byte 0x%02x at %d", s, s[i], i)
-			return
-		}
-	}
-}
-
 func TestValidateUntrustedTextNeverRaw(t *testing.T) {
 	t.Parallel()
 	const source = "evil\x1b[31m\nfile.yaml"
@@ -807,7 +796,7 @@ func TestValidateUntrustedTextNeverRaw(t *testing.T) {
 		if e.File != source {
 			t.Errorf("File = %q, want the Source unchanged", e.File)
 		}
-		assertNoControlBytes(t, e.Error())
+		noRawControls(t, e.Error())
 	}
 	// The same must hold for the loader-set messages that hold only the source.
 	if !slices.ContainsFunc(got, func(e *LoadError) bool { return e.Field == "id" }) {

@@ -13,17 +13,17 @@ import (
 // field has a limit. Caps on text are in runes where a person reads the text
 // (title, risk, remediation, note) and in bytes everywhere else.
 const (
-	maxTitleRunes       = 200   // longest title, in runes
-	maxRiskRunes        = 500   // longest risk text, in runes
-	maxRemediationRunes = 1000  // longest remediation text, in runes
-	maxPatternBytes     = 4096  // longest single regex or keyword, in bytes
-	maxPatternItems     = 100   // most items in any_regex, all_regex or keywords
-	maxHeuristicBytes   = 64    // longest heuristic name, in bytes
-	maxReferences       = 20    // most items in references
-	maxReferenceBytes   = 2048  // longest single reference, in bytes
-	maxCases            = 100   // most cases in should_match or should_not_match
-	maxCaseTextBytes    = 65536 // longest case text, in bytes
-	maxCaseNoteRunes    = 500   // longest case note, in runes
+	maxTitleRunes       = 200      // longest title, in runes
+	maxRiskRunes        = 500      // longest risk text, in runes
+	maxRemediationRunes = 1000     // longest remediation text, in runes
+	maxPatternBytes     = 4096     // longest single regex or keyword, in bytes
+	maxPatternItems     = 100      // most items in any_regex, all_regex or keywords
+	maxHeuristicBytes   = 64       // longest heuristic name, in bytes
+	maxReferences       = 20       // most items in references
+	maxReferenceBytes   = 2048     // longest single reference, in bytes
+	maxCases            = 100      // most cases in should_match or should_not_match
+	maxCaseTextBytes    = 64 << 10 // longest case text, in bytes
+	maxCaseNoteRunes    = 500      // longest case note, in runes
 )
 
 // idPattern is the allowed form of a rule ID. No whitespace and no '/', because

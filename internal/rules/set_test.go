@@ -65,17 +65,6 @@ func requireOneError(t *testing.T, s *Set, errs []*LoadError, reason Reason, fil
 	return le
 }
 
-// requireNoControlBytes fails the test if s has a byte below 0x20 or 0x7f.
-func requireNoControlBytes(t *testing.T, s string) {
-	t.Helper()
-	for i := 0; i < len(s); i++ {
-		if s[i] < 0x20 || s[i] == 0x7f {
-			t.Errorf("message %q has raw control byte 0x%02x at index %d", s, s[i], i)
-			return
-		}
-	}
-}
-
 func TestNewSetEmptyInputs(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
@@ -493,7 +482,7 @@ func TestNewSetErrorMessagesEscapeUntrustedSources(t *testing.T) {
 				t.Fatalf("got %d errors, want %d", len(errs), tt.wantN)
 			}
 			for _, e := range errs {
-				requireNoControlBytes(t, e.Error())
+				noRawControls(t, e.Error())
 				// The raw name stays in File for programs; only the message is escaped.
 				if strings.Contains(e.Error(), "\x1b") {
 					t.Errorf("Error() = %q holds a raw ESC byte", e.Error())
@@ -596,7 +585,7 @@ func TestNewSetErrorCap(t *testing.T) {
 				t.Error("the first 100 errors differ from the run with exactly 100 errors")
 			}
 			for _, m := range msgs {
-				requireNoControlBytes(t, m)
+				noRawControls(t, m)
 			}
 
 			// A second call gives the same messages.
@@ -656,7 +645,7 @@ func TestNewSetErrorCap(t *testing.T) {
 		requireCapSummary(t, errs[100], more)
 		msgs := errorMessages(errs)
 		for _, m := range msgs {
-			requireNoControlBytes(t, m)
+			noRawControls(t, m)
 		}
 		_, again := NewSet(builtin, external)
 		if !slices.Equal(errorMessages(again), msgs) {

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"reflect"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -70,6 +71,50 @@ func noRawControls(t *testing.T, s string) {
 			t.Errorf("message has raw rune %U at index %d: %q", r, i, s)
 			return
 		}
+	}
+}
+
+// yamlTags returns the sorted yaml keys of the fields of struct type typ. A
+// field tagged "-" has no key. It fails the test for a field without a tag.
+func yamlTags(t *testing.T, typ reflect.Type) []string {
+	t.Helper()
+	var tags []string
+	for f := range typ.Fields() {
+		tag, ok := f.Tag.Lookup("yaml")
+		if !ok {
+			t.Fatalf("%s.%s has no yaml tag", typ.Name(), f.Name)
+		}
+		key, _, _ := strings.Cut(tag, ",")
+		if key == "-" {
+			continue
+		}
+		tags = append(tags, key)
+	}
+	slices.Sort(tags)
+	return tags
+}
+
+// TestAllowedKeysMatchStructTags guards against a field that is added to a
+// struct but not to the list of allowed keys, or the other way round.
+func TestAllowedKeysMatchStructTags(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		typ  reflect.Type
+		keys func() []string
+	}{
+		{name: "ruleKeys and Rule", typ: reflect.TypeFor[Rule](), keys: ruleKeys},
+		{name: "matchKeys and Match", typ: reflect.TypeFor[Match](), keys: matchKeys},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			want := yamlTags(t, tt.typ)
+			got := slices.Sorted(slices.Values(tt.keys()))
+			if !slices.Equal(got, want) {
+				t.Errorf("allowed keys = %q, want the yaml tags %q", got, want)
+			}
+		})
 	}
 }
 

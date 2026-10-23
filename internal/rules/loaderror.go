@@ -2,6 +2,7 @@ package rules
 
 import (
 	"errors"
+	"fmt"
 	"io/fs"
 	"strconv"
 	"strings"
@@ -183,6 +184,13 @@ func errText(err error) string {
 		return pe.Op + ": " + pe.Err.Error()
 	}
 	return err.Error()
+}
+
+// moreErrors returns the text of the last error of a list that was cut at its
+// cap: n errors were counted but not built. It holds only an int, no untrusted
+// text.
+func moreErrors(n int) error {
+	return fmt.Errorf("%d more errors not shown", n)
 }
 
 // displayText returns an untrusted name or error text for a LoadError message:

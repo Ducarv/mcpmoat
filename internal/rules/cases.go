@@ -7,17 +7,7 @@ import (
 	"regexp"
 	"strings"
 	"unicode/utf8"
-
-	"github.com/Ducarv/mcpmoat/internal/termsafe"
 )
-
-// maxShownRunes is the largest number of runes of rule-derived text (a rule
-// ID, a file name, a case text, a matcher error) that one message shows. A
-// rule file is untrusted and can hold very long values.
-const maxShownRunes = 200
-
-// maxDocumentedRiskRunes is the longest Risk text that CheckDocumented accepts.
-const maxDocumentedRiskRunes = 500
 
 // builtinIDPattern is the ID format of a built-in rule: MOAT, a threat from
 // T1 to T5, and three digits. It is compiled once and never changed.
@@ -33,11 +23,6 @@ const (
 	// KindShouldNotMatch is a case from should_not_match: the rule must not fire.
 	KindShouldNotMatch CaseKind = "should_not_match"
 )
-
-// show escapes untrusted text for a message and cuts it to maxShownRunes.
-func show(s string) string {
-	return termsafe.QuoteCut(s, maxShownRunes)
-}
 
 // CheckDocumented checks the strict requirements for a built-in rule
 // (NFR-05, NFR-07) and returns one problem text for each violation. It
@@ -55,7 +40,7 @@ func show(s string) string {
 // Each problem starts with the escaped rule ID, so a failing test names the
 // rule. Every piece of rule text in a problem is escaped with termsafe.
 func CheckDocumented(r Rule) []string {
-	id := show(r.ID)
+	id := displayText(r.ID)
 	if r.ID == "" {
 		id = "(empty id)"
 	}
@@ -71,11 +56,11 @@ func CheckDocumented(r Rule) []string {
 		// filepath.ToSlash makes a Windows path use "/", so path.Base works.
 		base := path.Base(filepath.ToSlash(r.Source))
 		if base != r.ID+".yaml" {
-			add("file name %s does not match the id (want %s)", show(base), show(r.ID+".yaml"))
+			add("file name %s does not match the id (want %s)", displayText(base), displayText(r.ID+".yaml"))
 		}
 	}
 	problems = append(problems, checkRisk(id, r.Risk)...)
-	if strings.TrimSpace(r.Remediation) == "" {
+	if isBlank(r.Remediation) {
 		add("remediation is empty")
 	}
 	if !hasText(r.References) {
@@ -93,15 +78,15 @@ func CheckDocumented(r Rule) []string {
 // checkRisk returns the problems of a Risk text, each starting with id.
 func checkRisk(id, risk string) []string {
 	var problems []string
-	if strings.TrimSpace(risk) == "" {
+	if isBlank(risk) {
 		return []string{id + ": risk is empty"}
 	}
 	// Unicode line and paragraph separators count as line breaks too.
 	if strings.ContainsAny(risk, "\r\n\u0085\u2028\u2029") {
 		problems = append(problems, id+": risk has a line break (use one sentence)")
 	}
-	if n := utf8.RuneCountInString(risk); n > maxDocumentedRiskRunes {
-		problems = append(problems, fmt.Sprintf("%s: risk has %d runes (at most %d)", id, n, maxDocumentedRiskRunes))
+	if n := utf8.RuneCountInString(risk); n > maxRiskRunes {
+		problems = append(problems, fmt.Sprintf("%s: risk has %d runes (at most %d)", id, n, maxRiskRunes))
 	}
 	return problems
 }
@@ -109,7 +94,7 @@ func checkRisk(id, risk string) []string {
 // hasText reports whether at least one item holds more than white space.
 func hasText(items []string) bool {
 	for _, s := range items {
-		if strings.TrimSpace(s) != "" {
+		if !isBlank(s) {
 			return true
 		}
 	}
@@ -147,14 +132,14 @@ func (f CaseFailure) String() string {
 	var verdict string
 	switch {
 	case f.Err != nil:
-		verdict = "matcher error: " + show(f.Err.Error())
+		verdict = "matcher error: " + displayText(f.Err.Error())
 	case f.Kind == KindShouldMatch:
 		verdict = "expected a match, got none"
 	default:
 		verdict = "expected no match, got a match"
 	}
 	return fmt.Sprintf("%s %s[%d] (target %s): %s: %s",
-		show(f.RuleID), show(string(f.Kind)), f.Index, show(string(f.Target)), verdict, show(f.Text))
+		displayText(f.RuleID), displayText(string(f.Kind)), f.Index, displayText(string(f.Target)), verdict, displayText(f.Text))
 }
 
 // Error makes a CaseFailure usable as an error. It returns String.

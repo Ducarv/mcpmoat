@@ -2,10 +2,10 @@ package rules
 
 import (
 	"bytes"
+	"cmp"
 	"errors"
 	"io"
 	"slices"
-	"strconv"
 	"strings"
 
 	"go.yaml.in/yaml/v3"
@@ -122,8 +122,7 @@ func capErrors(file string, errs []*LoadError, dropped int) []*LoadError {
 	if dropped == 0 {
 		return errs
 	}
-	more := errors.New(strconv.Itoa(dropped) + " more errors not shown")
-	return append(errs, newLoadError(file, ReasonTooManyErrors).wrap(more))
+	return append(errs, newLoadError(file, ReasonTooManyErrors).wrap(moreErrors(dropped)))
 }
 
 // errList collects errors of a file in file order, but keeps only the first
@@ -271,16 +270,7 @@ func decodeRule(file string, root *yaml.Node, r *Rule) ([]field, []*LoadError, i
 	}
 	// A null item sits after the start of its list, but a decode error of the
 	// same list is reported at the start. Sorting keeps the list in file order.
-	slices.SortStableFunc(valueErrs.errs, func(x, y *LoadError) int {
-		switch {
-		case before(x, y):
-			return -1
-		case before(y, x):
-			return 1
-		default:
-			return 0
-		}
-	})
+	slices.SortStableFunc(valueErrs.errs, comparePos)
 	return fields, mergeByPosition(keyErrs.errs, valueErrs.errs), keyErrs.dropped + valueErrs.dropped
 }
 
@@ -324,7 +314,7 @@ func nullItems(file, name string, val *yaml.Node, why error, out *errList) {
 		if item.Kind != yaml.ScalarNode || item.ShortTag() != "!!null" {
 			continue
 		}
-		out.add(file, ReasonInvalidValue, item, name+"["+strconv.Itoa(i)+"]", why)
+		out.add(file, ReasonInvalidValue, item, indexField(name, i), why)
 	}
 }
 
@@ -389,7 +379,7 @@ func fixedCaseError(err error) error {
 func mergeByPosition(a, b []*LoadError) []*LoadError {
 	out := make([]*LoadError, 0, len(a)+len(b))
 	for len(a) > 0 && len(b) > 0 {
-		if before(b[0], a[0]) {
+		if comparePos(b[0], a[0]) < 0 {
 			out, b = append(out, b[0]), b[1:]
 		} else {
 			out, a = append(out, a[0]), a[1:]
@@ -403,12 +393,11 @@ func mergeByPosition(a, b []*LoadError) []*LoadError {
 	return out
 }
 
-// before reports whether x comes before y in the file.
-func before(x, y *LoadError) bool {
-	if x.Line != y.Line {
-		return x.Line < y.Line
-	}
-	return x.Col < y.Col
+// comparePos orders two errors by their position in the file: it returns a
+// negative number when x comes before y, zero when the positions are equal and
+// a positive number otherwise.
+func comparePos(x, y *LoadError) int {
+	return cmp.Or(cmp.Compare(x.Line, y.Line), cmp.Compare(x.Col, y.Col))
 }
 
 // addPositions sets Line and Col of validation errors. An error gets the

@@ -4,7 +4,6 @@ import (
 	"cmp"
 	"errors"
 	"slices"
-	"strconv"
 )
 
 // maxRules is the largest number of rules (built-in and external together)
@@ -81,8 +80,7 @@ func NewSet(builtin, external []Rule) (*Set, []*LoadError) {
 	}
 
 	if dropped > 0 {
-		more := errors.New(strconv.Itoa(dropped) + " more errors not shown")
-		errs = append(errs, newLoadError(setLabel, ReasonTooManyErrors).wrap(more))
+		errs = append(errs, newLoadError(setLabel, ReasonTooManyErrors).wrap(moreErrors(dropped)))
 	}
 	if len(errs) > 0 {
 		return nil, errs

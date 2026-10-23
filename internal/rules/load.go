@@ -1,13 +1,13 @@
 package rules
 
 import (
-	"errors"
+	"fmt"
 	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
-	"strconv"
 	"strings"
+	"syscall"
 
 	builtinrules "github.com/Ducarv/mcpmoat/rules"
 )
@@ -25,6 +25,10 @@ const maxRuleFiles = 1000
 // one last ReasonTooManyErrors error, so a result has at most maxFolderErrors+1
 // errors.
 const maxFolderErrors = 100
+
+// builtinLabel is the File of the errors that are about the built-in rules as
+// a whole and not about one file.
+const builtinLabel = "builtin rules"
 
 // loadOptions holds the settings that Option values change.
 type loadOptions struct {
@@ -59,16 +63,17 @@ func newLoadOptions(opts []Option) loadOptions {
 // and the File of an error are the bare file names, for example
 // "MOAT-T1-003.yaml". The rules come in the order of the file names, which is
 // the same on every run. It returns the rules and nil, or nil and the errors
-// found (at most maxFolderErrors, then one ReasonTooManyErrors error). A built-in rule that fails is a bug in mcpmoat, and the caller must
-// treat it as a fatal error.
+// found (at most maxFolderErrors, then one ReasonTooManyErrors error). A
+// built-in rule that fails is a bug in mcpmoat, and the caller must treat it as
+// a fatal error.
 func Builtin(opts ...Option) ([]Rule, []*LoadError) {
 	o := newLoadOptions(opts)
 	// fs.ReadDir returns the entries sorted by file name.
 	entries, err := fs.ReadDir(builtinrules.FS, ".")
 	if err != nil {
-		return nil, []*LoadError{newLoadError("builtin rules", ReasonDirUnreadable).wrap(err)}
+		return nil, []*LoadError{newLoadError(builtinLabel, ReasonDirUnreadable).wrap(err)}
 	}
-	return loadEntries(builtinrules.FS, "builtin rules", entries, o, func(name string) string { return name })
+	return loadEntries(builtinrules.FS, builtinLabel, entries, o, func(name string) string { return name })
 }
 
 // LoadDir loads the rule files in the directory dir. It is not recursive. dir
@@ -96,7 +101,7 @@ func LoadDir(dir string, opts ...Option) ([]Rule, []*LoadError) {
 		_ = root.Close()
 	}()
 
-	fsys := root.FS()
+	fsys := nonBlockFS{root}
 	// fs.ReadDir returns the entries sorted by file name. It fails when dir is
 	// not a directory.
 	entries, err := fs.ReadDir(fsys, ".")
@@ -104,6 +109,24 @@ func LoadDir(dir string, opts ...Option) ([]Rule, []*LoadError) {
 		return nil, []*LoadError{newLoadError(dir, ReasonDirUnreadable).wrap(err)}
 	}
 	return loadEntries(fsys, dir, entries, o, func(name string) string { return filepath.Join(dir, name) })
+}
+
+// nonBlockFS is a read-only fs.FS on an os.Root that opens every file with
+// O_NONBLOCK. Opening a FIFO that a writer swapped in after the directory
+// listing then returns at once and readRuleFile refuses it, where a plain open
+// would block until a writer appears and hang the scan.
+type nonBlockFS struct{ root *os.Root }
+
+// Open opens name, relative to the root, for reading without blocking.
+func (n nonBlockFS) Open(name string) (fs.File, error) {
+	if !fs.ValidPath(name) {
+		return nil, &fs.PathError{Op: "open", Path: name, Err: fs.ErrInvalid}
+	}
+	f, err := n.root.OpenFile(name, os.O_RDONLY|syscall.O_NONBLOCK, 0)
+	if err != nil {
+		return nil, err
+	}
+	return f, nil
 }
 
 // isRuleName reports whether name looks like a rule file. The check is
@@ -134,7 +157,7 @@ func loadEntries(fsys fs.FS, dirName string, entries []fs.DirEntry, o loadOption
 	notChecked := 0 // files left out after the cap
 	for i, e := range candidates {
 		if len(errs) >= maxFolderErrors {
-			notChecked = len(candidates) - i
+			notChecked += len(candidates) - i
 			break
 		}
 		name := display(e.Name())
@@ -160,7 +183,7 @@ func loadEntries(fsys fs.FS, dirName string, entries []fs.DirEntry, o loadOption
 	}
 	if notChecked > 0 {
 		// Only ints in the text: no untrusted text.
-		stop := errors.New("stopped after " + strconv.Itoa(maxFolderErrors) + " errors; " + strconv.Itoa(notChecked) + " files not checked")
+		stop := fmt.Errorf("stopped after %d errors; %d files not checked", maxFolderErrors, notChecked)
 		errs = append(errs, newLoadError(dirName, ReasonTooManyErrors).wrap(stop))
 	}
 	if len(errs) > 0 {

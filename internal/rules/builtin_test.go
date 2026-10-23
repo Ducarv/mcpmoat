@@ -159,6 +159,7 @@ func builtinShouldMatchTexts(rs []Rule) textSetMatcher {
 	return m
 }
 
+// builtinFuncMatcher turns a function into a Matcher, for the fake compilers below.
 type builtinFuncMatcher func(string) (bool, error)
 
 func (f builtinFuncMatcher) Match(text string) (bool, error) { return f(text) }
