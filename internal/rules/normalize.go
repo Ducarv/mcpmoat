@@ -74,25 +74,26 @@ func matchForms(s string) []string {
 // read. So "ign" + ZWSP (U+200B) + "ore previous" still matches the keyword
 // "ignore previous".
 //
-// It works in six steps:
+// It works in seven steps:
 //
 //  1. Cut s to maxRawScanBytes, at a rune boundary.
 //  2. Drop the invisible runes (see isInvisible).
-//  3. Cut the result to MaxMatchInputBytes, at a rune boundary.
-//  4. Apply Unicode normalization form NFC, which joins a letter and its
+//  3. Replace each space separator (see spacesToASCII) with U+0020.
+//  4. Cut the result to MaxMatchInputBytes, at a rune boundary.
+//  5. Apply Unicode normalization form NFC, which joins a letter and its
 //     combining marks into one rune where one exists.
-//  5. Drop the invisible runes again.
-//  6. Cut to MaxMatchInputBytes again, because NFC can make some text up to
+//  6. Drop the invisible runes again.
+//  7. Cut to MaxMatchInputBytes again, because NFC can make some text up to
 //     three times longer (U+1D160 becomes three runes).
 //
-// Step 2 comes before step 3, so invisible padding does not use up the
-// MaxMatchInputBytes window. Step 6 keeps the regexes at MaxMatchInputBytes,
+// Steps 2 and 3 come before step 4, so invisible padding does not use up the
+// MaxMatchInputBytes window. Step 7 keeps the regexes at MaxMatchInputBytes,
 // so the cost bound in match.go holds.
 //
 // Step 2 comes before NFC, so an invisible rune cannot block composition:
 // "e" + ZWSP + U+0301 becomes U+00E9 (e with acute), the same as "e" + U+0301.
 //
-// Step 5 exists because the norm package follows the Stream-Safe Text Format:
+// Step 6 exists because the norm package follows the Stream-Safe Text Format:
 // after 30 or more combining marks in a row, it inserts a CGJ (U+034F), which
 // is invisible. The second pass removes it.
 //
@@ -107,10 +108,25 @@ func normalizeForMatch(s string) string {
 // the runes, as in normalizeForMatch.
 func normalizeInvisible(s string, repl rune) string {
 	s = cutAtRune(s, maxRawScanBytes)
-	s = replaceInvisible(s, repl)
+	s = spacesToASCII(replaceInvisible(s, repl))
 	s = cutAtRune(s, MaxMatchInputBytes)
 	s = norm.NFC.String(s)
 	return cutAtRune(replaceInvisible(s, repl), MaxMatchInputBytes)
+}
+
+// spacesToASCII replaces each space separator (category Zs, such as NBSP
+// U+00A0 or the em space U+2003) with U+0020. In RE2, \s matches only ASCII
+// white space, so without this step "ignore" + NBSP + "previous" would not
+// match `ignore\s+previous`. NFC does not change these runes, so one pass
+// before NFC is enough. No Zs rune is shorter than U+0020, so the text does
+// not grow.
+func spacesToASCII(s string) string {
+	return strings.Map(func(r rune) rune {
+		if unicode.Is(unicode.Zs, r) {
+			return ' '
+		}
+		return r
+	}, s)
 }
 
 // foldMarks folds s, which comes from normalizeForMatch, for the keyword
