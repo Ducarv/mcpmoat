@@ -1,11 +1,11 @@
 id: MOAT-T4-004
-title: Package runner installs without a prompt (--yes / -y)
+title: npx runs with its yes option on (-y, --yes or npm_config_yes)
 severity: low
 target: config
 match:
   heuristic: auto_install
-risk: npx -y, npx --yes or an npm_config_yes env entry installs and runs a package with no confirmation prompt, so a new or swapped package runs on the next start without the user seeing it.
-remediation: Remove -y or --yes and remove npm_config_yes from the server env, or pin an exact version (see MOAT-T4-003) so the prompt-free install can only fetch the release you reviewed.
+risk: npx -y, npx --yes or an npm_config_yes env entry overrides the npm_config_yes=false that mcpmoat scan sets, so the scan itself installs and runs the package, and in a terminal npx also skips its confirmation prompt.
+remediation: Pin an exact version (see MOAT-T4-003), or install a version you reviewed and run its binary, then remove -y, --yes and npm_config_yes. Removing them alone is not enough, because an MCP client starts npx with no terminal and npx then installs a missing package with no prompt. Use npx --no or npm_config_yes=false to make npx refuse to install.
 references:
   - https://docs.npmjs.com/cli/commands/npx
   - https://owasp.org/www-project-mcp-top-10/
@@ -28,6 +28,14 @@ should_match:
     note: A tarball URL installs with no prompt too
   - text: npx --tag -y pkg
     note: --tag does not take a value that starts with "-", so -y is still a flag
+  - text: npx -y false pkg
+    note: npx takes no value after -y. It runs "false" as the command, with the yes option on
+  - text: npx -p @evil/pkg -y false
+    note: Installs @evil/pkg with the yes option on and runs its "false" binary
+  - text: npx -y=false pkg
+    note: npx moves the value of the -y shorthand to its own argument, so the option is on
+  - text: npx --yes=null pkg
+    note: null resets the option to its default, which overrides the npm_config_yes=false of the scan
 should_not_match:
   - node ./server.js
   - npx @scope/server@1.2.3
@@ -40,10 +48,8 @@ should_not_match:
   - text: npx --registry -y pkg
     note: -y is the value of --registry, not a flag of npx
   - text: npx --yes=false pkg
-    note: --yes=false turns the prompt back on, so it is not a finding
+    note: --yes=false turns the yes option off, so it is not a finding
   - text: npx -p pkg mcp-bin -y
     note: After the command, -y is an argument of the server
-  - text: npx -y false pkg
-    note: npm reads "false" as the value of -y, so the prompt stays on
-  - text: npx --yes=null pkg
-    note: null is read as false, so the prompt stays on
+  - text: npx --shell -y pkg
+    note: npx rewrites --shell to --script-shell, which takes -y as its value

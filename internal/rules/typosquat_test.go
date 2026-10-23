@@ -3,7 +3,6 @@ package rules
 import (
 	"bytes"
 	"errors"
-	"os"
 	"reflect"
 	"strings"
 	"sync"
@@ -11,9 +10,8 @@ import (
 	"unicode/utf8"
 
 	"github.com/Ducarv/mcpmoat/internal/discover"
+	builtinrules "github.com/Ducarv/mcpmoat/rules"
 )
-
-const popularListPath = "../../rules/data/popular-servers.txt"
 
 // npxServer builds a stdio server that runs pkg with "npx -y".
 func npxServer(name, pkg string) discover.Server {
@@ -116,13 +114,9 @@ func TestParsePopular(t *testing.T) {
 	})
 }
 
-// readPopular reads the real popular list once for all tests.
+// readPopular parses the embedded popular list once for all tests.
 var readPopular = sync.OnceValues(func() ([]string, error) {
-	data, err := os.ReadFile(popularListPath)
-	if err != nil {
-		return nil, err
-	}
-	return ParsePopular(bytes.NewReader(data))
+	return ParsePopular(bytes.NewReader(builtinrules.PopularServers))
 })
 
 // loadPopular returns the real popular list, or stops the test when it

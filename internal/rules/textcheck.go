@@ -2,7 +2,6 @@ package rules
 
 import (
 	"bytes"
-	"fmt"
 	"regexp"
 	"strings"
 
@@ -14,12 +13,21 @@ import (
 // cases. Each case is one line of text. An adapter turns that line into a
 // discover.Server and calls the native check on it. The native checks in
 // config.go and typosquat.go take a server, not text, so these adapters are
-// the bridge. The scan command (issue #39) does not use them: it calls
-// CheckConfig on the real servers from the client config files.
+// the bridge. The scan command does not use them: it calls CheckConfig on the
+// real servers from the client config files.
 
 // caseServerName is the server name that the adapters use. The checks copy the
 // name into a finding only, so a fixed name does not change a result.
 const caseServerName = "case"
+
+// configTextChecks maps the config heuristics that need no setup to their
+// adapters. typosquat is not here: newTyposquatText builds it.
+var configTextChecks = map[string]func(raw string) []Hit{
+	HeuristicInsecureURL:     insecureURLText,
+	HeuristicPlaintextSecret: plaintextSecretText,
+	HeuristicUnpinnedPackage: unpinnedPackageText,
+	HeuristicAutoInstall:     autoInstallText,
+}
 
 // envEntryRe matches the start of an env entry: an env name, then "=".
 var envEntryRe = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*=`)
@@ -38,7 +46,7 @@ func insecureURLText(raw string) []Hit {
 		Transport: discover.TransportHTTP,
 		URL:       discover.NewURL(strings.TrimSpace(raw)),
 	}
-	return findingHits(checkInsecureURL(s), "insecure_url matched")
+	return findingHits(checkInsecureURL(s), HeuristicInsecureURL)
 }
 
 // plaintextSecretText runs the MOAT-T4-002 check on one entry.
@@ -66,7 +74,7 @@ func plaintextSecretText(raw string) []Hit {
 			Command:   "node",
 			Env:       discover.SecretMap{key: discover.NewSecret(value)},
 		}
-		return findingHits(checkPlaintextSecrets(s), "plaintext_secret matched")
+		return findingHits(checkPlaintextSecrets(s), HeuristicPlaintextSecret)
 	}
 	if headerEntryRe.MatchString(line) {
 		name, value, _ := strings.Cut(line, ":")
@@ -75,7 +83,7 @@ func plaintextSecretText(raw string) []Hit {
 			Transport: discover.TransportHTTP,
 			Headers:   discover.SecretMap{name: discover.NewSecret(strings.TrimSpace(value))},
 		}
-		return findingHits(checkPlaintextSecrets(s), "plaintext_secret matched")
+		return findingHits(checkPlaintextSecrets(s), HeuristicPlaintextSecret)
 	}
 	return nil
 }
@@ -87,12 +95,7 @@ func plaintextSecretText(raw string) []Hit {
 // server is stdio. Example: "npx -y @scope/server@latest". A blank line gives
 // no hit.
 func unpinnedPackageText(raw string) []Hit {
-	fields := strings.Fields(raw)
-	if len(fields) == 0 {
-		return nil
-	}
-	s := caseStdioServer(caseServerName, fields[0], fields[1:])
-	return findingHits(checkUnpinnedPackage(s), "unpinned_package matched")
+	return commandLineHits(caseServerName, strings.Fields(raw), checkUnpinnedPackage, HeuristicUnpinnedPackage)
 }
 
 // autoInstallText runs the MOAT-T4-004 check on one command line.
@@ -100,12 +103,7 @@ func unpinnedPackageText(raw string) []Hit {
 // Grammar: the same as unpinnedPackageText. Example: "npx -y @scope/server".
 // A blank line gives no hit.
 func autoInstallText(raw string) []Hit {
-	fields := strings.Fields(raw)
-	if len(fields) == 0 {
-		return nil
-	}
-	s := caseStdioServer(caseServerName, fields[0], fields[1:])
-	return findingHits(checkAutoInstall(s), "auto_install matched")
+	return commandLineHits(caseServerName, strings.Fields(raw), checkAutoInstall, HeuristicAutoInstall)
 }
 
 // newTyposquatText returns the MOAT-T5-001 check as a text adapter. It parses
@@ -123,22 +121,26 @@ func autoInstallText(raw string) []Hit {
 func newTyposquatText() (func(raw string) []Hit, error) {
 	popular, err := ParsePopular(bytes.NewReader(builtinrules.PopularServers))
 	if err != nil {
-		return nil, fmt.Errorf("load popular servers: %w", err)
+		return nil, err
 	}
 	check := NewTyposquat(popular)
 	return func(raw string) []Hit {
 		fields := strings.Fields(raw)
-		var s discover.Server
-		switch len(fields) {
-		case 0:
-			return nil
-		case 1:
-			s = caseStdioServer("", "npx", fields)
-		default:
-			s = caseStdioServer("", fields[0], fields[1:])
+		if len(fields) == 1 {
+			fields = []string{"npx", fields[0]}
 		}
-		return findingHits(check.Check(s), "typosquat matched")
+		return commandLineHits("", fields, check.Check, HeuristicTyposquat)
 	}, nil
+}
+
+// commandLineHits runs check on a stdio server with the given name. The first
+// field is the command and the other fields are its args. No fields give no
+// hit.
+func commandLineHits(name string, fields []string, check func(discover.Server) []Finding, heuristic string) []Hit {
+	if len(fields) == 0 {
+		return nil
+	}
+	return findingHits(check(caseStdioServer(name, fields[0], fields[1:])), heuristic)
 }
 
 // caseStdioServer returns a stdio server with the given name, command and args.
@@ -153,11 +155,11 @@ func caseStdioServer(name, command string, args []string) discover.Server {
 
 // findingHits turns the findings of one native check into text hits. It
 // returns nil when there are no findings. Otherwise it returns one Hit with no
-// offset. detail is a fixed string that the caller passes. It never holds
-// input text or a Finding field.
-func findingHits(findings []Finding, detail string) []Hit {
+// offset and the detail "<heuristic> matched". heuristic is the fixed name of
+// the heuristic, so the detail never holds input text or a Finding field.
+func findingHits(findings []Finding, heuristic string) []Hit {
 	if len(findings) == 0 {
 		return nil
 	}
-	return []Hit{{Offset: NoOffset, Detail: detail}}
+	return []Hit{{Offset: NoOffset, Detail: heuristic + " matched"}}
 }

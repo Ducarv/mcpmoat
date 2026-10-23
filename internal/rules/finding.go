@@ -1,8 +1,8 @@
 package rules
 
-// Rule IDs of the native checks. Each native check backs one rule. The YAML
-// rules that come later (issues #51 to #56) use the same IDs, so a finding
-// has one ID whatever code produced it.
+// Rule IDs of the native checks. Each native check backs one rule. The
+// built-in YAML rules use the same IDs, so a finding has one ID whatever code
+// produced it.
 const (
 	// RuleShadowing is the ID of the tool shadowing check (threat T3): a
 	// tool description names a tool of another server.
@@ -21,9 +21,8 @@ const (
 	RuleUnpinnedPackage = "MOAT-T4-003"
 
 	// RuleAutoInstall is the ID of the auto install check (threat T4): a stdio
-	// server that runs npx with its yes option on, which installs and runs a
-	// package with no prompt. The option is -y, --yes or similar in the args,
-	// or an npm_config_yes env entry that is not "false" or "0".
+	// server that runs npx with its yes option on (-y, --yes or an
+	// npm_config_yes env entry). See checkAutoInstall.
 	RuleAutoInstall = "MOAT-T4-004"
 
 	// RuleTyposquat is the ID of the typosquat check (threat T5): a server
@@ -37,7 +36,7 @@ const (
 	insecureURLMessage     = "remote server uses plain http:// without TLS"
 	plaintextSecretMessage = "config holds a plaintext secret; use an environment variable reference" //nolint:gosec // G101: message text, not a credential
 	unpinnedPackageMessage = "package runner fetches an unpinned version"
-	autoInstallMessage     = "npx runs with its yes option on (-y, --yes or npm_config_yes), so it installs and runs the package with no prompt"
+	autoInstallMessage     = "npx runs with its yes option on (-y, --yes or npm_config_yes)"
 	typosquatMessage       = "name is close to a popular MCP server"
 )
 

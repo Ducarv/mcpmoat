@@ -38,9 +38,9 @@ const (
 	// HeuristicUnpinnedPackage flags a package in a command line that is not
 	// pinned to a version (MOAT-T4-003). The text is a command line.
 	HeuristicUnpinnedPackage = "unpinned_package"
-	// HeuristicAutoInstall flags a command line that runs npx with -y or --yes
-	// before the package, so the package is installed without a prompt
-	// (MOAT-T4-004). The text is a command line.
+	// HeuristicAutoInstall flags a command line that runs npx with its yes
+	// option on, such as -y or --yes before the package (MOAT-T4-004). The
+	// text is a command line.
 	HeuristicAutoInstall = "auto_install"
 	// HeuristicTyposquat flags a package whose name is close to a popular MCP
 	// server name (MOAT-T5-001). The text is a command line or a bare package
@@ -89,35 +89,18 @@ func compileHeuristic(name string, params map[string]any) (func(raw string) []Hi
 		}
 		minLength, minText := v[0], v[1]
 		return func(raw string) []Hit { return base64Blob(raw, minLength, minText) }, nil
-	case HeuristicInsecureURL:
+	case HeuristicInsecureURL, HeuristicPlaintextSecret, HeuristicUnpinnedPackage,
+		HeuristicAutoInstall, HeuristicTyposquat:
 		if _, err := readParams(params); err != nil {
 			return nil, err
 		}
-		return insecureURLText, nil
-	case HeuristicPlaintextSecret:
-		if _, err := readParams(params); err != nil {
-			return nil, err
-		}
-		return plaintextSecretText, nil
-	case HeuristicUnpinnedPackage:
-		if _, err := readParams(params); err != nil {
-			return nil, err
-		}
-		return unpinnedPackageText, nil
-	case HeuristicAutoInstall:
-		if _, err := readParams(params); err != nil {
-			return nil, err
-		}
-		return autoInstallText, nil
-	case HeuristicTyposquat:
-		if _, err := readParams(params); err != nil {
-			return nil, err
+		if name != HeuristicTyposquat {
+			return configTextChecks[name], nil
 		}
 		fn, err := newTyposquatText()
 		if err != nil {
-			// FieldError has no Unwrap, so the cause is not kept. The popular
-			// list is built in, so a failure here is a build error.
-			return nil, &FieldError{Field: "heuristic", Msg: "load popular server list"}
+			// The popular list is built in, so its text is safe to show.
+			return nil, &FieldError{Field: "heuristic", Msg: "load popular server list: " + err.Error()}
 		}
 		return fn, nil
 	}

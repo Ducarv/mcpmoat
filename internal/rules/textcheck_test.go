@@ -2,6 +2,7 @@ package rules
 
 import (
 	"errors"
+	"slices"
 	"strings"
 	"testing"
 	"unicode"
@@ -166,9 +167,9 @@ func TestCompileHeuristicConfigParams(t *testing.T) {
 	for _, name := range names {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
-			fn, err := compileHeuristic(name, map[string]any{"x": 1})
+			_, err := compileHeuristic(name, map[string]any{"x": 1})
 			if err == nil {
-				t.Fatalf("compileHeuristic(%q, params) = %v, nil; want error", name, fn != nil)
+				t.Fatalf("compileHeuristic(%q, params) error = nil, want error", name)
 			}
 			var fe *FieldError
 			if !errors.As(err, &fe) {
@@ -178,5 +179,20 @@ func TestCompileHeuristicConfigParams(t *testing.T) {
 				t.Errorf("Field = %q, want %q", fe.Field, "params")
 			}
 		})
+	}
+}
+
+// TestHeuristicNames checks that heuristicNames, the list in the unknown
+// heuristic error, is sorted and that each name in it compiles.
+func TestHeuristicNames(t *testing.T) {
+	t.Parallel()
+	names := strings.Split(heuristicNames, ", ")
+	if !slices.IsSorted(names) {
+		t.Errorf("heuristicNames = %q, want sorted", heuristicNames)
+	}
+	for _, name := range names {
+		if _, err := compileHeuristic(name, nil); err != nil {
+			t.Errorf("compileHeuristic(%q, nil) error = %v, want nil", name, err)
+		}
 	}
 }

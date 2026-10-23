@@ -364,17 +364,22 @@ func checkUnpinnedPackage(s discover.Server) []Finding {
 // npmYesEnv is the environment name that turns on the yes option of npm.
 const npmYesEnv = "npm_config_yes"
 
-// checkAutoInstall reports MOAT-T4-004: a stdio server whose npx runner
-// installs or runs a package with no prompt.
+// checkAutoInstall reports MOAT-T4-004: a stdio server that turns on the yes
+// option of npx.
 //
-// Two things turn the prompt off. The first is a yes flag among the npx flags
-// before the command: -y, --yes, --yes=<value> (except =false and =null), a
-// short cluster with y such as -qy, a prefix of --yes such as --y, or a yes
-// flag followed by the word "true" (see walkNPXFlags and isYesFlag). The second
-// is an env entry named npm_config_yes in any letter case, unless its value is
-// "false" or "0" after trimming spaces. The flag is checked first. A server
-// gets one finding at most. A flag finding names FieldArgs. An env finding
-// names FieldEnv and the env key name. A finding never holds a value.
+// The yes option is on when a yes flag comes before the npx command (see
+// walkNPXFlags and isYesFlag), or when an env entry named npm_config_yes, in
+// any letter case, has a value that npm does not read as false (see
+// npmFalse). The flag is checked first. A server gets one finding at most. A
+// flag finding names FieldArgs. An env finding names FieldEnv and the env key
+// name. A finding never holds a value.
+//
+// Why it matters: an MCP client starts npx with no terminal on stdin, so npx
+// installs a missing package with no prompt anyway. The yes option is a
+// problem because it overrides the npm_config_yes=false that internal/inspect
+// sets in the scrubbed environment, so mcpmoat scan itself installs and runs
+// the package. Removing the option does not make the client safe; pinning an
+// exact version (MOAT-T4-003) or npx --no does.
 //
 // The package spec is not parsed. It does not need to be a valid npm name: a
 // git URL, a tarball URL, a local path or an upper-case name counts too. The
@@ -385,21 +390,18 @@ const npmYesEnv = "npm_config_yes"
 // Known limits:
 //   - Only npx is covered. npm exec, npm x, bunx, pnpm dlx and yarn dlx are not.
 //   - sh -c, env and a single-string cmd /c "..." wrapper are not unwrapped.
-//   - A project .npmrc yes setting is not read.
-//
-// Only the flags before the command count. A -y after the command is an
-// argument of the server, so it does not fire. The env check is needed because
-// internal/inspect sets npm_config_yes=false in the scrubbed environment, and an
-// explicit flag or an env entry overrides that setting.
+//   - npm config files are not read: a project .npmrc, or a file named by
+//     --userconfig, --globalconfig, npm_config_userconfig or
+//     npm_config_globalconfig, can set yes=true and is not seen.
 func checkAutoInstall(s discover.Server) []Finding {
 	if s.Transport != discover.TransportStdio {
 		return nil
 	}
-	command, npxArgs := runnerArgs(s.Command, s.Args.Values())
+	command, npxArgs, _ := runnerArgs(s.Command, s.Args.Values())
 	if runnerOf(command) != RunnerNPX {
 		return nil
 	}
-	yes, runs := walkNPXFlags(npxArgs, npmFlags)
+	yes, runs := walkNPXFlags(npxArgs)
 	if !runs {
 		return nil // npx has nothing to install or run
 	}
@@ -425,16 +427,13 @@ func checkAutoInstall(s discover.Server) []Finding {
 
 // yesEnvKey returns the name of an env entry that turns the npm yes option on,
 // and true when there is one. The name matches in any letter case, as npm reads
-// it. The value is read only to compare it. It is never returned or copied.
+// it. Any value that npm does not read as false counts as on: an empty value or
+// "null" leaves the option unset, which still overrides the scan's
+// npm_config_yes=false. The value is read only to compare it. It is never
+// returned or copied.
 func yesEnvKey(env discover.SecretMap) (string, bool) {
 	for _, key := range env.Keys() {
-		if !strings.EqualFold(key, npmYesEnv) {
-			continue
-		}
-		switch strings.TrimSpace(env[key].Reveal()) {
-		case "false", "0":
-			// npm reads these as off
-		default:
+		if strings.EqualFold(key, npmYesEnv) && !npmFalse(env[key].Reveal()) {
 			return key, true
 		}
 	}

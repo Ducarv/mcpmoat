@@ -143,10 +143,14 @@ func packageAt(command string, args []string) (PackageSpec, int, bool) {
 // parseRunnerArgs does the parse for packageAt. It does not run validName,
 // so only packageAt may call it.
 func parseRunnerArgs(command string, args []string) (PackageSpec, int, bool) {
-	if i, ok := cmdWrapped(command, args); ok {
-		spec, at, ok := parseRunnerArgs(args[i], args[i+1:])
-		return spec, i + 1 + at, ok
-	}
+	command, runArgs, skip := runnerArgs(command, args)
+	spec, at, ok := parseUnwrapped(command, runArgs)
+	return spec, skip + at, ok
+}
+
+// parseUnwrapped is parseRunnerArgs for a command that is not a cmd /c
+// wrapper.
+func parseUnwrapped(command string, args []string) (PackageSpec, int, bool) {
 	switch r := runnerOf(command); r {
 	case RunnerNPX:
 		return extractNPM(r, npmFlags, args)
@@ -335,10 +339,7 @@ type flagTable struct {
 	valued   map[string]bool // flags that consume the next argument
 	override map[string]bool // flags whose value is the spec itself
 	stop     map[string]bool // flags that make the parse doubtful
-	// str lists the valued flags that hold a string. npm does not take a next
-	// argument that starts with "-" as the value of these flags. Only
-	// walkNPXFlags reads str. scanArgs still takes it.
-	str map[string]bool
+	str      map[string]bool // valued flags that take no next argument starting with "-" (walkNPXFlags only)
 }
 
 // flagSet builds a lookup table from a list of flag names.
@@ -429,37 +430,43 @@ var npmFlags = flagTable{
 	),
 	override: flagSet("-p", "--package"),
 	stop:     flagSet("-c", "--call"),
-	str:      flagSet("--tag", "--shell", "--min-release-age"),
+	// npx rewrites --shell to --script-shell, which takes any next argument,
+	// so --shell is not listed here.
+	str: flagSet("--tag", "--min-release-age"),
 }
 
-// runnerArgs returns the command that runs npx and the arguments that follow
-// it. It reads through a Windows "cmd /c" wrapper, as parseRunnerArgs does. A
-// single-string wrapper such as "cmd /c \"npx -y pkg\"" is not read through.
-func runnerArgs(command string, args []string) (string, []string) {
+// runnerArgs reads through Windows "cmd /c" wrappers (see cmdWrapped). It
+// returns the wrapped command, the arguments that follow it, and the number
+// of arguments it skipped. A single-string wrapper such as
+// "cmd /c \"npx -y pkg\"" is not read through.
+func runnerArgs(command string, args []string) (string, []string, int) {
+	skip := 0
 	for {
 		i, ok := cmdWrapped(command, args)
 		if !ok {
-			return command, args
+			return command, args, skip
 		}
 		command, args = args[i], args[i+1:]
+		skip += i + 1
 	}
 }
 
-// walkNPXFlags reads the npx flags in args the way npm reads them, up to the
-// command. args are the arguments after the npx command (see runnerArgs). It
-// returns two results:
-//   - yes is true when the yes option is on before the command.
+// walkNPXFlags reads the npx flags in args the way npx 11 reads them
+// (npx-cli.js, then nopt), up to the command. args are the arguments after the
+// npx command (see runnerArgs). It returns two results:
+//   - yes is true when a yes flag (see isYesFlag) comes before the command.
 //   - runs is true when npx has something to install or run: a positional
 //     argument (the command), a -p or --package value, or a -c or --call value.
 //
 // The walk follows these rules:
-//   - A yes flag (see isYesFlag) turns the option on. A word after it that is
-//     exactly "false" turns the option off, and a word that is exactly "true"
-//     turns it on. npm reads both words as the value of the flag.
-//   - A flag of flags.valued takes the next argument, even one that starts with
-//     "-". npm reads "--registry -y" as a registry value. A flag of flags.str
-//     does not take a next argument that starts with "-", so "--tag -y" leaves
-//     -y as a yes flag.
+//   - A yes flag takes no value from the next argument. npx puts "--" before
+//     the next word that is not a flag, so "-y false pkg" runs the command
+//     "false" with yes on. npx also moves the value of "-y=<v>" and "--y=<v>"
+//     to its own argument, so <v> is the command.
+//   - A flag of npmFlags.valued takes the next argument, even one that starts
+//     with "-". npm reads "--registry -y" as a registry value. A flag of
+//     npmFlags.str does not take a next argument that starts with "-", so
+//     "--tag -y" leaves -y as a yes flag.
 //   - -p and --package take the next argument, even one that starts with "-".
 //     That argument is something to run.
 //   - -c and --call take a next argument that does not start with "-".
@@ -472,7 +479,11 @@ func runnerArgs(command string, args []string) (string, []string) {
 //   - The walk stops at "--", at "-" and at the first argument that is neither
 //     a flag nor a value. That argument is the command. The arguments after it
 //     belong to the server.
-func walkNPXFlags(args []string, flags flagTable) (yes, runs bool) {
+//
+// An off flag, such as --no-yes or --yes=false, does not clear an earlier yes
+// flag. npm takes the last one, but this check must not miss a yes flag, so
+// it fails closed: the worst case is a false finding.
+func walkNPXFlags(args []string) (yes, runs bool) {
 	for i := 0; i < len(args); i++ {
 		arg := args[i]
 		switch {
@@ -484,26 +495,24 @@ func walkNPXFlags(args []string, flags flagTable) (yes, runs bool) {
 		name, _, hasValue := strings.Cut(arg, "=")
 		switch {
 		case isYesFlag(arg):
-			off := false
-			if !hasValue && i+1 < len(args) && (args[i+1] == "true" || args[i+1] == "false") {
-				i++ // npm reads the word as the value of the flag
-				off = args[i] == "false"
+			yes = true
+			if hasValue && strings.TrimLeft(name, "-") == "y" {
+				return yes, true // npx runs the value of -y=<v> as the command
 			}
-			yes = yes || !off
 		case hasValue:
 			// The value is in the same argument.
-			runs = runs || flags.override[name] || flags.stop[name]
-		case flags.override[name]:
+			runs = runs || npmFlags.override[name] || npmFlags.stop[name]
+		case npmFlags.override[name]:
 			runs = runs || i+1 < len(args)
 			i++ // the next argument is the value, even one that starts with "-"
-		case flags.stop[name]:
+		case npmFlags.stop[name]:
 			runs = true
 			if i+1 < len(args) && !strings.HasPrefix(args[i+1], "-") {
 				i++ // the next argument is the value
 			}
-		case flags.valued[name]:
+		case npmFlags.valued[name]:
 			// A String flag does not take a following argument that starts with "-".
-			if i+1 < len(args) && (!flags.str[name] || !strings.HasPrefix(args[i+1], "-")) {
+			if i+1 < len(args) && (!npmFlags.str[name] || !strings.HasPrefix(args[i+1], "-")) {
 				i++ // the next argument is the value
 			}
 		default:
@@ -517,25 +526,40 @@ func walkNPXFlags(args []string, flags flagTable) (yes, runs bool) {
 	return yes, runs
 }
 
-// isYesFlag reports whether one npx argument turns on the yes option when it
-// is read alone. npm reads "-y", a short cluster with a y such as "-qy", "--yes"
-// and any prefix of "--yes" with one or more letters, such as "--y", which npm
-// expands. With "=", the values "false" and "null" turn the option off, as in
-// "-y=false", "--yes=false" and "--yes=null". npm reads every other value, such
-// as "--yes=0" or "--yes=no", as on. A word after the flag is read by
-// walkNPXFlags, not here.
+// isYesFlag reports whether one npx argument turns the yes option on:
+//   - "-y" and "--y" are the shorthand of --yes. npx moves an "=<v>" value
+//     to its own argument, so the option is on whatever <v> is.
+//   - "--yes" and its prefix "--ye", which npm expands, are on unless the
+//     value after "=" is off (see npmFalse). "--yes=null" resets the option
+//     to its default, and that also overrides the npm_config_yes=false of the
+//     scan, so it counts as on.
+//   - A short cluster with a y, such as "-qy", is on.
 func isYesFlag(arg string) bool {
 	name, value, hasValue := strings.Cut(arg, "=")
-	if rest, long := strings.CutPrefix(name, "--"); long {
-		if rest == "" || !strings.HasPrefix("yes", rest) {
-			return false
-		}
-		return !hasValue || (value != "false" && value != "null")
+	key := strings.TrimLeft(name, "-")
+	switch {
+	case key == "y":
+		return true
+	case strings.HasPrefix(name, "--"):
+		return key != "" && strings.HasPrefix("yes", key) && (!hasValue || !npmFalse(value))
+	default:
+		return strings.HasPrefix(name, "-") && strings.Contains(name, "y")
 	}
-	if name == "-y" && hasValue && (value == "false" || value == "null") {
+}
+
+// npmFalse reports whether npm reads the value of the yes option as false:
+// "false" or "0" after npm trims white space. npm reads other numeric zeros
+// such as "00" as false too. They count as on here, which gives a false
+// finding at worst. The trim is ASCII only, because Go's strings.TrimSpace
+// also strips U+0085, which npm keeps, so "false\u0085" would look off here
+// but is on in npm.
+func npmFalse(v string) bool {
+	switch strings.Trim(v, " \t\n\v\f\r") {
+	case "false", "0":
+		return true
+	default:
 		return false
 	}
-	return strings.HasPrefix(name, "-") && strings.Contains(name, "y")
 }
 
 // bunxFlags are the flags of bunx. "--bun" and similar boolean flags are not
