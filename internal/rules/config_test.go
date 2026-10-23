@@ -83,6 +83,12 @@ func TestCheckConfig(t *testing.T) {
 		return []wantFinding{{RuleID: RuleUnpinnedPackage, Field: FieldArgs, Related: name}}
 	}
 
+	// autoInstall is the MOAT-T4-004 finding. A -y server also gets it.
+	autoInstall := []wantFinding{{RuleID: RuleAutoInstall, Field: FieldArgs}}
+	unpinnedAutoInstall := func(name string) []wantFinding {
+		return append(unpinned(name), autoInstall...)
+	}
+
 	disabled := remoteServer(discover.TransportHTTP, "http://mcp.example.com/sse")
 	disabled.State = discover.StateDisabled
 
@@ -209,11 +215,11 @@ func TestCheckConfig(t *testing.T) {
 		{"x-api-key literal", withHeader(remoteServer(discover.TransportHTTP, "https://mcp.example.com"), "X-API-Key", "changeme123"), secretHeader("X-API-Key")},
 
 		// MOAT-T4-003
-		{"npx @latest", stdioServer("npx", "-y", "@scope/server@latest"), unpinned("@scope/server")},
-		{"npx no version", stdioServer("npx", "-y", "@scope/server"), unpinned("@scope/server")},
-		{"npx pinned", stdioServer("npx", "-y", "@scope/server@1.4.2"), nil},
-		{"npx any version *", stdioServer("npx", "-y", "@scope/server@*"), unpinned("")},
-		{"npx any version x", stdioServer("npx", "-y", "pkg-name@x"), unpinned("")},
+		{"npx @latest", stdioServer("npx", "-y", "@scope/server@latest"), unpinnedAutoInstall("@scope/server")},
+		{"npx no version", stdioServer("npx", "-y", "@scope/server"), unpinnedAutoInstall("@scope/server")},
+		{"npx pinned", stdioServer("npx", "-y", "@scope/server@1.4.2"), autoInstall},
+		{"npx any version *", stdioServer("npx", "-y", "@scope/server@*"), unpinnedAutoInstall("")},
+		{"npx any version x", stdioServer("npx", "-y", "pkg-name@x"), unpinnedAutoInstall("")},
 		{"docker tag x is a tag", stdioServer("docker", "run", "-i", "image:x"), nil},
 		{"uvx no version", stdioServer("uvx", "some-server"), unpinned("some-server")},
 		{"uvx pinned", stdioServer("uvx", "some-server==0.3.1"), nil},
@@ -228,8 +234,8 @@ func TestCheckConfig(t *testing.T) {
 		// A token-like scope or name is still a package: an attacker can publish
 		// "@xoxo/server-filesystem". The finding fires. RedactArgs masks such an
 		// arg (a part has a token prefix), so Related stays empty.
-		{"scope with xox prefix", stdioServer("npx", "-y", "@xoxo/server-filesystem"), unpinned("")},
-		{"scope with eyj prefix", stdioServer("npx", "-y", "@eyjay/server-github"), unpinned("")},
+		{"scope with xox prefix", stdioServer("npx", "-y", "@xoxo/server-filesystem"), unpinnedAutoInstall("")},
+		{"scope with eyj prefix", stdioServer("npx", "-y", "@eyjay/server-github"), unpinnedAutoInstall("")},
 		{"lower-case token value after unknown flag, masked by RedactArgs",
 			stdioServer("npx", "--token", "ghp_secretsecret0123", "pkg"), unpinned("")},
 		{"unknown flag value that looks like a package, masked by RedactArgs",
@@ -240,11 +246,12 @@ func TestCheckConfig(t *testing.T) {
 		// package. RedactArgs masks it there, so Related must stay empty even
 		// though the text is visible in another arg.
 		{"masked package name also in another arg", stdioServer("npx", "--npm-token", "secretpw", "x", "--secretpw"), unpinned("")},
-		{"cmd /c wrapper", stdioServer("cmd", "/c", "npx", "-y", "@scope/server@latest"), unpinned("@scope/server")},
-		{"CMD.EXE /C wrapper", stdioServer("CMD.EXE", "/C", "npx", "-y", "@scope/server"), unpinned("@scope/server")},
-		// npx installs every -p package; which one runs is not known.
-		{"second -p is doubtful", stdioServer("npx", "-y", "-p", "@scope/server@1.0.0", "-p", "evil-pkg", "evil-bin"), nil},
-		{"server's own -p after the command", stdioServer("npx", "-y", "-p", "pkg-a", "bin", "-p", "3000"), unpinned("pkg-a")},
+		{"cmd /c wrapper", stdioServer("cmd", "/c", "npx", "-y", "@scope/server@latest"), unpinnedAutoInstall("@scope/server")},
+		{"CMD.EXE /C wrapper", stdioServer("CMD.EXE", "/C", "npx", "-y", "@scope/server"), unpinnedAutoInstall("@scope/server")},
+		// npx installs every -p package; which one runs is not known, so
+		// T4-003 stays silent. The -y still fires T4-004.
+		{"second -p is doubtful for T4-003, but -y still fires T4-004", stdioServer("npx", "-y", "-p", "@scope/server@1.0.0", "-p", "evil-pkg", "evil-bin"), autoInstall},
+		{"server's own -p after the command", stdioServer("npx", "-y", "-p", "pkg-a", "bin", "-p", "3000"), unpinnedAutoInstall("pkg-a")},
 		{"package name shown by RedactArgs", stdioServer("uvx", "some-server@latest"), unpinned("some-server")},
 		{"remote server with args", remoteWithArgs, nil},
 		{"unknown runner", stdioServer("node", "server.js"), nil},
@@ -295,6 +302,7 @@ func TestCheckConfigOrder(t *testing.T) {
 		want := []wantFinding{
 			{RuleID: RulePlaintextSecret, Field: FieldEnv, Key: "GITHUB_TOKEN"},
 			{RuleID: RuleUnpinnedPackage, Field: FieldArgs, Related: "@scope/server"},
+			{RuleID: RuleAutoInstall, Field: FieldArgs},
 		}
 		if got := wantsOf(t, CheckConfig(s)); !reflect.DeepEqual(got, want) {
 			t.Errorf("CheckConfig() = %+v, want %+v", got, want)
@@ -333,8 +341,14 @@ func TestCheckConfigNoLeak(t *testing.T) {
 	lowerTokenServer := stdioServer("npx", "--token", lowerToken, "pkg")
 	// The same token after a known value flag is skipped by the scan.
 	lowerTokenKnown := stdioServer("npx", "--otp", lowerToken, "pkg")
+	// -y before the token: MOAT-T4-004 fires, and it must not show the token.
+	autoInstallMasked := stdioServer("npx", "-y", "--token", lowerToken, "pkg")
+	// A fake env value that npm reads as on. MOAT-T4-004 fires with FieldEnv,
+	// and the value must not show in the finding.
+	const yesEnvCanary = "trueFAKEcanary0000"
+	autoInstallEnv := withEnv(stdioServer("npx", "@scope/server@1.2.3"), "npm_config_yes", yesEnvCanary)
 
-	secrets := append(discovertest.Canaries(), testGHToken, testRandom32, host, "abcdef123456", lowerToken)
+	secrets := append(discovertest.Canaries(), testGHToken, testRandom32, host, "abcdef123456", lowerToken, yesEnvCanary)
 
 	tests := []struct {
 		name   string
@@ -350,6 +364,14 @@ func TestCheckConfigNoLeak(t *testing.T) {
 		{"stdio", stdio, []wantFinding{
 			{RuleID: RulePlaintextSecret, Field: FieldEnv, Key: "API_KEY"},
 			{RuleID: RuleUnpinnedPackage, Field: FieldArgs, Related: "@scope/server"},
+			{RuleID: RuleAutoInstall, Field: FieldArgs},
+		}},
+		{"auto install with a secret-like flag value", autoInstallMasked, []wantFinding{
+			{RuleID: RuleUnpinnedPackage, Field: FieldArgs},
+			{RuleID: RuleAutoInstall, Field: FieldArgs},
+		}},
+		{"auto install by env value", autoInstallEnv, []wantFinding{
+			{RuleID: RuleAutoInstall, Field: FieldEnv, Key: "npm_config_yes"},
 		}},
 		{"misparsed token", misparsed, nil},
 		{"secret-like package name", maskedName, []wantFinding{
@@ -375,6 +397,112 @@ func TestCheckConfigNoLeak(t *testing.T) {
 			}
 			for _, f := range findings {
 				assertFindingNoLeak(t, f, secrets...)
+			}
+		})
+	}
+}
+
+// TestCheckAutoInstall covers the flag and runner rules of MOAT-T4-004.
+func TestCheckAutoInstall(t *testing.T) {
+	t.Parallel()
+
+	fires := []wantFinding{{RuleID: RuleAutoInstall, Field: FieldArgs}}
+	firesEnv := func(key string) []wantFinding {
+		return []wantFinding{{RuleID: RuleAutoInstall, Field: FieldEnv, Key: key}}
+	}
+
+	remoteNpx := remoteServer(discover.TransportHTTP, "https://mcp.example.com/mcp")
+	remoteNpx.Command = "npx"
+	remoteNpx.Args = discover.NewArgs([]string{"-y", "pkg"})
+
+	disabledNpx := stdioServer("npx", "-y", "pkg")
+	disabledNpx.State = discover.StateDisabled
+
+	tests := []struct {
+		name   string
+		server discover.Server
+		want   []wantFinding
+	}{
+		{"npx -y", stdioServer("npx", "-y", "@scope/server"), fires},
+		{"npx --yes", stdioServer("npx", "--yes", "pkg"), fires},
+		{"pinned package still fires", stdioServer("npx", "-y", "@scope/server@1.2.3"), fires},
+		{"cmd /c wrapper", stdioServer("cmd", "/c", "npx", "-y", "pkg"), fires},
+		{"disabled server still fires", disabledNpx, fires},
+		{"node script", stdioServer("node", "./server.js"), nil},
+		{"npx pinned without -y", stdioServer("npx", "@scope/server@1.2.3"), nil},
+		{"-y after the spec is a server arg", stdioServer("npx", "pkg", "-y"), nil},
+		{"uvx -y is not npx", stdioServer("uvx", "-y", "pkg"), nil},
+		{"bunx -y is not npx", stdioServer("bunx", "-y", "pkg"), nil},
+		{"npx -y without a package", stdioServer("npx", "-y"), nil},
+		{"remote server with -y args", remoteNpx, nil},
+
+		// The yes flag may come after -p's value, be a prefix of --yes, sit in
+		// a short cluster, or carry any value except "false".
+		{"-y after -p spec", stdioServer("npx", "-p", "@evil/pkg", "-y", "bin"), fires},
+		{"-y after --package= spec", stdioServer("npx", "--package=@evil/pkg", "-y", "bin"), fires},
+		{"--yes=true", stdioServer("npx", "--yes=true", "pkg"), fires},
+		// npm reads only the exact value "false" as off.
+		{"--yes=FALSE", stdioServer("npx", "--yes=FALSE", "pkg"), fires},
+		{"--y prefix of --yes", stdioServer("npx", "--y", "pkg"), fires},
+		{"-qy short cluster", stdioServer("npx", "-qy", "pkg"), fires},
+		{"cmd /c wrapper with -p, then -y", stdioServer("cmd", "/c", "npx", "-p", "pkg", "-y", "bin"), fires},
+		{"-y and env npm_config_yes=true give the flag finding", withEnv(stdioServer("npx", "-y", "pkg"), "npm_config_yes", "true"), fires},
+
+		// npx has something to run, so the spec form does not matter: a git URL,
+		// a tarball URL, a local-looking name or an upper-case name still fires.
+		{"-y with a github: spec", stdioServer("npx", "-y", "github:evil/pkg"), fires},
+		{"-y with a tarball URL spec", stdioServer("npx", "-y", "https://evil.example/pkg.tgz"), fires},
+		{"-y with a git+https spec", stdioServer("npx", "-y", "git+https://evil.example/r.git"), fires},
+		{"-y with an upper-case name", stdioServer("npx", "-y", "Evil-Pkg"), fires},
+		{"-p github spec, then -y", stdioServer("npx", "-p", "github:evil/pkg", "-y", "mcp"), fires},
+		{"-y, -p github spec, -c command", stdioServer("npx", "-y", "-p", "github:evil/pkg", "-c", "mcp"), fires},
+		{"cmd /c wrapper with a github spec", stdioServer("cmd", "/c", "npx", "-y", "github:evil/pkg"), fires},
+		// --tag and --shell take no value that starts with "-", so -y still counts.
+		{"--tag before -y", stdioServer("npx", "--tag", "-y", "pkg"), fires},
+		{"--shell before -y", stdioServer("npx", "--shell", "-y", "pkg"), fires},
+		// A "true" after a yes flag is that flag's value, and it turns the option on.
+		{"-y true", stdioServer("npx", "-y", "true", "pkg"), fires},
+
+		// An env entry turns the yes option on unless its value is "false" or
+		// "0" after trimming spaces. The key matches in any letter case.
+		{"env npm_config_yes=true", withEnv(stdioServer("npx", "pkg"), "npm_config_yes", "true"), firesEnv("npm_config_yes")},
+		{"env NPM_CONFIG_YES=1", withEnv(stdioServer("npx", "pkg"), "NPM_CONFIG_YES", "1"), firesEnv("NPM_CONFIG_YES")},
+		// npm reads an empty value as on: npx then installs without a TTY.
+		{"env npm_config_yes empty", withEnv(stdioServer("npx", "pkg"), "npm_config_yes", ""), firesEnv("npm_config_yes")},
+		{"env npm_config_yes=true, github spec", withEnv(stdioServer("npx", "github:evil/pkg"), "npm_config_yes", "true"), firesEnv("npm_config_yes")},
+
+		// A value after a valued flag is that flag's value, not a yes flag.
+		{"-y is the value of --registry", stdioServer("npx", "--registry", "-y", "pkg"), nil},
+		{"-y is the value of --loglevel", stdioServer("npx", "--loglevel", "-y", "pkg"), nil},
+		{"-y after the -p spec is a server arg", stdioServer("npx", "-p", "pkg", "bin", "-y"), nil},
+		{"--yes=false", stdioServer("npx", "--yes=false", "pkg"), nil},
+		{"-y=false", stdioServer("npx", "-y=false", "pkg"), nil},
+		{"cmd /c wrapper, -y after the command", stdioServer("cmd", "/c", "npx", "-p", "pkg", "bin", "-y"), nil},
+		{"env npm_config_yes=false", withEnv(stdioServer("npx", "pkg"), "npm_config_yes", "false"), nil},
+		{"env NPM_CONFIG_YES padded false", withEnv(stdioServer("npx", "pkg"), "NPM_CONFIG_YES", " false "), nil},
+		{"env npm_config_yes=0", withEnv(stdioServer("npx", "pkg"), "npm_config_yes", "0"), nil},
+		{"uvx with env npm_config_yes=true", withEnv(stdioServer("uvx", "pkg"), "npm_config_yes", "true"), nil},
+		{"npx with an unrelated env entry", withEnv(stdioServer("npx", "pkg"), "FOO", "true"), nil},
+
+		// A "false" after a yes flag is that flag's value, and it turns the option off.
+		{"-y false", stdioServer("npx", "-y", "false", "pkg"), nil},
+		{"--yes false", stdioServer("npx", "--yes", "false", "pkg"), nil},
+		{"--yes=null", stdioServer("npx", "--yes=null", "pkg"), nil},
+		{"-y=null", stdioServer("npx", "-y=null", "pkg"), nil},
+		// No target: npx installs nothing, so the yes flags alone give no finding.
+		{"-y -y -- with no target", stdioServer("npx", "-y", "-y", "--"), nil},
+		// Known limit: a shell wrapper is not unwrapped, so sh -c gives no finding.
+		{"sh -c wrapper", stdioServer("sh", "-c", "npx -y pkg"), nil},
+		// Fail-closed trade-off: an unknown flag may take the next word as its
+		// value, so the walk reads past "pkg" and the -y after it still counts.
+		{"unknown flag, then -y", stdioServer("npx", "--quiet", "pkg", "-y"), fires},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got := wantsOf(t, checkAutoInstall(tt.server))
+			if !reflect.DeepEqual(got, tt.want) {
+				t.Errorf("checkAutoInstall() = %+v, want %+v", got, tt.want)
 			}
 		})
 	}

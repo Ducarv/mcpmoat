@@ -18,8 +18,8 @@ fetches nothing and sends the canary header nowhere.
 |---|---|
 | `remote-plain` | `MOAT-T4-001` (`http://` remote); `MOAT-T4-002` (header `X-Api-Key` holds a plaintext secret) |
 | `remote-local` | none (loopback `http://` is allowed) |
-| `env-secret` | `MOAT-T4-002` (env `GITHUB_TOKEN` holds a plaintext token) |
-| `latest-pkg` | `MOAT-T4-003` (`@latest` package) |
+| `env-secret` | `MOAT-T4-002` (env `GITHUB_TOKEN` holds a plaintext token); `MOAT-T4-004` (npx `-y` before the package spec) |
+| `latest-pkg` | `MOAT-T4-003` (`@latest` package); `MOAT-T4-004` (npx `-y` before the package spec) |
 | `docker-untagged` | `MOAT-T4-003` (docker image without a tag) |
 
 No other rule must fire. In particular:

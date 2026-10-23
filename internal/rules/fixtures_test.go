@@ -231,7 +231,9 @@ func TestFixtureDangerousConfig(t *testing.T) {
 		{"remote-plain", rules.RuleInsecureURL, rules.FieldURL, "", ""},
 		{"remote-plain", rules.RulePlaintextSecret, rules.FieldHeaders, "X-Api-Key", ""},
 		{"env-secret", rules.RulePlaintextSecret, rules.FieldEnv, "GITHUB_TOKEN", ""},
+		{"env-secret", rules.RuleAutoInstall, rules.FieldArgs, "", ""},
 		{"latest-pkg", rules.RuleUnpinnedPackage, rules.FieldArgs, "", "@example-corp/files-mcp"},
+		{"latest-pkg", rules.RuleAutoInstall, rules.FieldArgs, "", ""},
 		{"docker-untagged", rules.RuleUnpinnedPackage, rules.FieldArgs, "", "registry.invalid/example/mcp-server"},
 	})
 
@@ -260,5 +262,94 @@ func TestFixtureTyposquatConfig(t *testing.T) {
 		{"filesystem", rules.RuleTyposquat, rules.FieldArgs, "", "@modelcontextprotocol/server-filesystem"},
 		{"mcp-server-fecth", rules.RuleTyposquat, rules.FieldName, "", "mcp-server-fetch"},
 	})
-	assertFindings(t, "CheckConfig", config, nil)
+	assertFindings(t, "CheckConfig", config, []findingKey{
+		{"filesystem", rules.RuleAutoInstall, rules.FieldArgs, "", ""},
+		{"memory", rules.RuleAutoInstall, rules.FieldArgs, "", ""},
+	})
+}
+
+// compiledRule is a built-in rule with its match block compiled. It keeps the
+// target, so a text is only checked against the rules of its own target.
+type compiledRule struct {
+	id     string
+	target rules.Target
+	m      *rules.Matcher
+}
+
+// compileBuiltin loads the built-in rules and compiles their match blocks with
+// Match.Compile, the Compiler of the built-in case tests.
+func compileBuiltin(t *testing.T) []compiledRule {
+	t.Helper()
+	rs, errs := rules.Builtin()
+	if len(errs) != 0 {
+		t.Fatalf("Builtin() errors = %v, want none", errs)
+	}
+	out := make([]compiledRule, 0, len(rs))
+	for _, r := range rs {
+		m, err := r.Match.Compile()
+		if err != nil {
+			t.Fatalf("%s: Match.Compile() error = %v, want nil", r.ID, err)
+		}
+		out = append(out, compiledRule{id: r.ID, target: r.Target, m: m})
+	}
+	return out
+}
+
+// builtinHits returns the sorted IDs of the rules with the target that match
+// text.
+func builtinHits(rs []compiledRule, target rules.Target, text string) []string {
+	var ids []string
+	for _, r := range rs {
+		if r.target == target && len(r.m.Match(text)) > 0 {
+			ids = append(ids, r.id)
+		}
+	}
+	slices.Sort(ids)
+	return ids
+}
+
+// TestFixtureBuiltinDescriptionRules runs the built-in description and schema
+// rules over the benign fixture (no hit) and the shadowing fixture (T3 hit).
+func TestFixtureBuiltinDescriptionRules(t *testing.T) {
+	t.Parallel()
+
+	rs := compileBuiltin(t)
+	if len(rs) == 0 {
+		t.Fatal("Builtin() returned no rules, want at least 1")
+	}
+
+	t.Run("benign", func(t *testing.T) {
+		t.Parallel()
+		// The canned result holds the tools of testdata/servers/benign.
+		for _, tool := range inspecttest.BenignResult().Tools {
+			if got := builtinHits(rs, rules.TargetDescription, tool.Description); len(got) != 0 {
+				t.Errorf("description of %s: hits = %q, want none", tool.Name, got)
+			}
+			if got := builtinHits(rs, rules.TargetSchema, string(tool.InputSchema)); len(got) != 0 {
+				t.Errorf("schema of %s: hits = %q, want none", tool.Name, got)
+			}
+		}
+	})
+
+	t.Run("shadowing", func(t *testing.T) {
+		t.Parallel()
+		st := inspectFixture(t, "shadowing")
+		// Wanted description hits per tool. A tool not listed wants none.
+		wantDescription := map[string][]string{
+			"add_numbers": {"MOAT-T1-003", "MOAT-T3-001"},
+		}
+		seen := false
+		for _, tool := range st.Tools {
+			seen = seen || tool.Name == "add_numbers"
+			if got, want := builtinHits(rs, rules.TargetDescription, tool.Description), wantDescription[tool.Name]; !slices.Equal(got, want) {
+				t.Errorf("description of %s: hits = %q, want %q", tool.Name, got, want)
+			}
+			if got := builtinHits(rs, rules.TargetSchema, string(tool.InputSchema)); len(got) != 0 {
+				t.Errorf("schema of %s: hits = %q, want none", tool.Name, got)
+			}
+		}
+		if !seen {
+			t.Error("shadowing fixture has no add_numbers tool")
+		}
+	})
 }

@@ -69,13 +69,14 @@ const shellOrWindowsVar = `(\$[A-Za-z_][A-Za-z0-9_]*|%[A-Za-z_][A-Za-z0-9_]*%)`
 // and the check would report it.
 //
 // The findings come in a fixed order: MOAT-T4-001, then MOAT-T4-002 (env keys,
-// then header keys, each sorted), then MOAT-T4-003. A finding never holds a
-// secret value or a URL (see Finding).
+// then header keys, each sorted), then MOAT-T4-003, then MOAT-T4-004. A finding
+// never holds a secret value or a URL (see Finding).
 func CheckConfig(s discover.Server) []Finding {
 	var findings []Finding
 	findings = append(findings, checkInsecureURL(s)...)
 	findings = append(findings, checkPlaintextSecrets(s)...)
 	findings = append(findings, checkUnpinnedPackage(s)...)
+	findings = append(findings, checkAutoInstall(s)...)
 	return findings
 }
 
@@ -358,4 +359,84 @@ func checkUnpinnedPackage(s discover.Server) []Finding {
 		Related: related,
 		Message: unpinnedPackageMessage,
 	}}
+}
+
+// npmYesEnv is the environment name that turns on the yes option of npm.
+const npmYesEnv = "npm_config_yes"
+
+// checkAutoInstall reports MOAT-T4-004: a stdio server whose npx runner
+// installs or runs a package with no prompt.
+//
+// Two things turn the prompt off. The first is a yes flag among the npx flags
+// before the command: -y, --yes, --yes=<value> (except =false and =null), a
+// short cluster with y such as -qy, a prefix of --yes such as --y, or a yes
+// flag followed by the word "true" (see walkNPXFlags and isYesFlag). The second
+// is an env entry named npm_config_yes in any letter case, unless its value is
+// "false" or "0" after trimming spaces. The flag is checked first. A server
+// gets one finding at most. A flag finding names FieldArgs. An env finding
+// names FieldEnv and the env key name. A finding never holds a value.
+//
+// The package spec is not parsed. It does not need to be a valid npm name: a
+// git URL, a tarball URL, a local path or an upper-case name counts too. The
+// check needs only that npx has something to run: a positional argument, a -p
+// or --package value, or a -c or --call value. npx with no argument installs
+// nothing, so it gives no finding.
+//
+// Known limits:
+//   - Only npx is covered. npm exec, npm x, bunx, pnpm dlx and yarn dlx are not.
+//   - sh -c, env and a single-string cmd /c "..." wrapper are not unwrapped.
+//   - A project .npmrc yes setting is not read.
+//
+// Only the flags before the command count. A -y after the command is an
+// argument of the server, so it does not fire. The env check is needed because
+// internal/inspect sets npm_config_yes=false in the scrubbed environment, and an
+// explicit flag or an env entry overrides that setting.
+func checkAutoInstall(s discover.Server) []Finding {
+	if s.Transport != discover.TransportStdio {
+		return nil
+	}
+	command, npxArgs := runnerArgs(s.Command, s.Args.Values())
+	if runnerOf(command) != RunnerNPX {
+		return nil
+	}
+	yes, runs := walkNPXFlags(npxArgs, npmFlags)
+	if !runs {
+		return nil // npx has nothing to install or run
+	}
+	if yes {
+		return []Finding{{
+			RuleID:  RuleAutoInstall,
+			Server:  s.Name,
+			Field:   FieldArgs,
+			Message: autoInstallMessage,
+		}}
+	}
+	if key, found := yesEnvKey(s.Env); found {
+		return []Finding{{
+			RuleID:  RuleAutoInstall,
+			Server:  s.Name,
+			Field:   FieldEnv,
+			Key:     key,
+			Message: autoInstallMessage,
+		}}
+	}
+	return nil
+}
+
+// yesEnvKey returns the name of an env entry that turns the npm yes option on,
+// and true when there is one. The name matches in any letter case, as npm reads
+// it. The value is read only to compare it. It is never returned or copied.
+func yesEnvKey(env discover.SecretMap) (string, bool) {
+	for _, key := range env.Keys() {
+		if !strings.EqualFold(key, npmYesEnv) {
+			continue
+		}
+		switch strings.TrimSpace(env[key].Reveal()) {
+		case "false", "0":
+			// npm reads these as off
+		default:
+			return key, true
+		}
+	}
+	return "", false
 }

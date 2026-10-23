@@ -20,6 +20,12 @@ const (
 	// (threat T4): a server that runs a package with no fixed version.
 	RuleUnpinnedPackage = "MOAT-T4-003"
 
+	// RuleAutoInstall is the ID of the auto install check (threat T4): a stdio
+	// server that runs npx with its yes option on, which installs and runs a
+	// package with no prompt. The option is -y, --yes or similar in the args,
+	// or an npm_config_yes env entry that is not "false" or "0".
+	RuleAutoInstall = "MOAT-T4-004"
+
 	// RuleTyposquat is the ID of the typosquat check (threat T5): a server
 	// or package name that is close to a popular name.
 	RuleTyposquat = "MOAT-T5-001"
@@ -31,6 +37,7 @@ const (
 	insecureURLMessage     = "remote server uses plain http:// without TLS"
 	plaintextSecretMessage = "config holds a plaintext secret; use an environment variable reference" //nolint:gosec // G101: message text, not a credential
 	unpinnedPackageMessage = "package runner fetches an unpinned version"
+	autoInstallMessage     = "npx runs with its yes option on (-y, --yes or npm_config_yes), so it installs and runs the package with no prompt"
 	typosquatMessage       = "name is close to a popular MCP server"
 )
 

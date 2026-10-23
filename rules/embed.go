@@ -1,4 +1,5 @@
 // Package rules holds the built-in detection rules as embedded YAML files.
+// It also embeds the popular server list in data/popular-servers.txt.
 //
 // This package contains data only. The package internal/rules parses,
 // validates and applies the rules. It cannot embed this folder itself,
@@ -19,3 +20,10 @@ import "embed"
 //
 //go:embed *.yaml
 var FS embed.FS
+
+// PopularServers is the curated list of popular MCP server package names that
+// the typosquatting check (MOAT-T5-001) compares against. internal/rules
+// parses it with ParsePopular.
+//
+//go:embed data/popular-servers.txt
+var PopularServers []byte

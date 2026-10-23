@@ -1,0 +1,27 @@
+id: MOAT-T4-003
+title: Package runner uses an unpinned version
+severity: medium
+target: config
+match:
+  heuristic: unpinned_package
+risk: The server starts from a package with no fixed version, so each start can download and run a new, possibly malicious release without any review.
+remediation: Pin an exact version, for example npx -y @scope/server@1.4.2, uvx some-server==0.3.1 or a docker image digest, and update it on purpose after review.
+references:
+  - https://owasp.org/www-project-mcp-top-10/
+  - https://docs.npmjs.com/cli/commands/npx
+should_match:
+  - npx -y @scope/server@latest
+  - uvx some-server
+  - npx @scope/server
+  - text: docker run -i --rm mcp/github
+    note: Docker image with no tag, so Docker uses latest
+  - text: docker run -i --rm mcp/github:latest
+    note: Docker image with the tag latest
+should_not_match:
+  - npx -y @scope/server@1.4.2
+  - uvx some-server==0.3.1
+  - node ./server.js
+  - text: docker run -i --rm mcp/github@sha256:a1b2c3d4e5f60718a1b2c3d4e5f60718a1b2c3d4e5f60718a1b2c3d4e5f60718
+    note: Image pinned by digest, which does not move
+  - text: python -m my_server
+    note: Python module run, not a package runner, so no package is fetched

