@@ -1,15 +1,12 @@
-# The schema twin of MOAT-T1-010. Change both files. This rule reads the
-# raw JSON of the input schema, so property names and enum values are checked
-# too. json_escapes: 1 decodes the JSON escapes; the package doc of
-# internal/rules says how.
+# The schema twin of MOAT-T1-010. Change both files. The schema is decoded
+# first, so the JSON escapes are already decoded and the match block is the
+# same as in MOAT-T1-010. Property names and enum values are checked too.
 id: MOAT-T1-011
 title: Tool schema has a word that mixes letters of look-alike scripts
 severity: medium
 target: schema
 match:
   heuristic: mixed_script
-  params:
-    json_escapes: 1
 risk: Look-alike letters from another script in the input schema can hide an instruction from the pattern rules, while the model still reads the word.
 remediation: Remove the server or do not use it. Read every field of the input schema, and check the word at the offset that mcpmoat reports for letters from another script. Report the server to its author. If the word is real math or science notation (such as Delta-t), ignore this rule for that tool only. Add the line MOAT-T1-011 server/tool to .mcpmoat-ignore, using the exact server and tool names. Do not use --ignore, because it hides the rule on every server.
 references:

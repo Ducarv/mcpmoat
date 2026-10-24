@@ -240,7 +240,7 @@ func TestExfilCorpus(t *testing.T) {
 		len(cases), count["ok"], count["hit"], count["fp"], count["miss"],
 		100*float64(count["fp"])/float64(count["ok"]+count["fp"]))
 
-	m, err := exfilRule(t).Match.Compile()
+	m, err := exfilRule(t).Match.CompileFor(TargetDescription)
 	if err != nil {
 		t.Fatalf("compile %s: %v", exfilID, err)
 	}

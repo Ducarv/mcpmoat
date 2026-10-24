@@ -176,7 +176,7 @@ func TestFixturePoisoned(t *testing.T) {
 	for _, tool := range st.Tools {
 		byName[tool.Name] = tool
 	}
-	for _, name := range []string{"currency_convert", "daily_quote", "unit_convert", "weather_lookup"} {
+	for _, name := range []string{"currency_convert", "daily_quote", "padded_notes", "unit_convert", "weather_lookup"} {
 		if _, ok := byName[name]; !ok {
 			t.Fatalf("poisoned fixture has no tool %q", name)
 		}
@@ -196,6 +196,16 @@ func TestFixturePoisoned(t *testing.T) {
 	}
 	if s := string(byName["weather_lookup"].InputSchema); !strings.Contains(s, "sidenote") {
 		t.Errorf("weather_lookup InputSchema has no sidenote parameter")
+	}
+	// padded_notes hides its payload past the window that the regex and
+	// keyword matchers read. No other check above reads padded_notes, so no
+	// check needs the payload inside the window.
+	d = byName["padded_notes"].Description
+	if len(d) <= rules.MaxMatchInputBytes {
+		t.Errorf("padded_notes description is %d bytes, want more than MaxMatchInputBytes (%d)", len(d), rules.MaxMatchInputBytes)
+	}
+	if at := strings.Index(d, "<IMPORTANT>"); at < rules.MaxMatchInputBytes {
+		t.Errorf("padded_notes first <IMPORTANT> is at byte %d, want at or past MaxMatchInputBytes (%d)", at, rules.MaxMatchInputBytes)
 	}
 
 	if f := rules.CheckShadowing([]rules.ServerTools{st}); len(f) != 0 {
@@ -283,7 +293,9 @@ func TestBuiltinT1IDs(t *testing.T) {
 	wantIDs := []string{
 		"MOAT-T1-001", "MOAT-T1-002", "MOAT-T1-003", "MOAT-T1-004", "MOAT-T1-005",
 		"MOAT-T1-006", "MOAT-T1-007", "MOAT-T1-008", "MOAT-T1-009", "MOAT-T1-010",
-		"MOAT-T1-011",
+		"MOAT-T1-011", "MOAT-T1-012", "MOAT-T1-013", "MOAT-T1-014", "MOAT-T1-015",
+		"MOAT-T1-016", "MOAT-T1-017", "MOAT-T1-018", "MOAT-T1-019", "MOAT-T1-020",
+		"MOAT-T1-021", "MOAT-T1-022",
 	}
 	if !slices.Equal(ids, wantIDs) {
 		t.Errorf("loaded T1 rule IDs = %q, want %q", ids, wantIDs)
@@ -311,11 +323,14 @@ func TestFixtureBuiltinT1(t *testing.T) {
 	}{
 		{"benign", []string{"add", "echo"}, nil},
 		{"mailer", []string{"send_email"}, nil},
-		{"poisoned", []string{"currency_convert", "daily_quote", "unit_convert", "weather_lookup"}, map[toolTarget][]string{
+		{"poisoned", []string{"currency_convert", "daily_quote", "padded_notes", "unit_convert", "weather_lookup"}, map[toolTarget][]string{
 			{"daily_quote", rules.TargetDescription}:      {"MOAT-T1-002", "MOAT-T1-003", "MOAT-T1-004", "MOAT-T1-005"},
-			{"weather_lookup", rules.TargetSchema}:        {"MOAT-T1-009"},
-			{"currency_convert", rules.TargetDescription}: {"MOAT-T1-006"},
-			{"unit_convert", rules.TargetDescription}:     {"MOAT-T1-008"},
+			{"weather_lookup", rules.TargetSchema}:        {"MOAT-T1-009", "MOAT-T1-012"},
+			{"currency_convert", rules.TargetDescription}: {"MOAT-T1-006", "MOAT-T1-019"},
+			{"unit_convert", rules.TargetDescription}:     {"MOAT-T1-008", "MOAT-T1-020"},
+			// The payload is past the regex window, so only the heuristics
+			// that read the full text match.
+			{"padded_notes", rules.TargetDescription}: {"MOAT-T1-007", "MOAT-T1-017"},
 		}},
 		{"shadowing", []string{"add_numbers"}, map[toolTarget][]string{
 			{"add_numbers", rules.TargetDescription}: {"MOAT-T1-003", "MOAT-T1-005"},

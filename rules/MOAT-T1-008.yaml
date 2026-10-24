@@ -1,3 +1,4 @@
+# MOAT-T1-016 copies this match block for the input schema. Change both files.
 id: MOAT-T1-008
 title: Tool description contains a base64 payload
 severity: medium

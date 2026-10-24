@@ -108,9 +108,9 @@ func TestNewSetSortsByID(t *testing.T) {
 	external := []Rule{
 		testRule("MOAT-T3-001", "e3.yaml"),
 		testRule("MOAT-T1-001", "e1.yaml"),
-		testRule("MOAT-T1-010", "e10.yaml"),
+		testRule("MOAT-T1-012", "e10.yaml"),
 	}
-	want := []string{"MOAT-T1-001", "MOAT-T1-002", "MOAT-T1-010", "MOAT-T2-001", "MOAT-T3-001"}
+	want := []string{"MOAT-T1-001", "MOAT-T1-002", "MOAT-T1-012", "MOAT-T2-001", "MOAT-T3-001"}
 
 	s := mustNewSet(t, builtin, external)
 	if got := ruleIDs(s.Rules()); !slices.Equal(got, want) {

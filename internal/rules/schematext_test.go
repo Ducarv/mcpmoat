@@ -1,6 +1,7 @@
 package rules
 
 import (
+	"bytes"
 	"encoding/json"
 	"slices"
 	"strings"
@@ -70,7 +71,7 @@ func TestSchemaText(t *testing.T) {
 		{name: "escaped value", raw: `{"description":"a\u200bb"}`, want: []string{"a\u200bb"}, wantComplete: true},
 		{name: "escaped quote and newline", raw: `{"title":"say \"hi\"\nnow"}`, want: []string{"say \"hi\"\nnow"}, wantComplete: true},
 		{name: "escaped key", raw: `{"\u0064escription":"x","\u0074itle":"y"}`, want: []string{"x", "y"}, wantComplete: true},
-		{name: "surrogate pair", raw: `{"description":"😀"}`, want: []string{"\U0001F600"}, wantComplete: true},
+		{name: "surrogate pair", raw: `{"description":"\ud83d\ude00"}`, want: []string{"\U0001F600"}, wantComplete: true},
 
 		// Duplicate keys.
 		{name: "duplicate keys", raw: `{"description":"a","description":"b"}`, want: []string{"a", "b"}, wantComplete: true},
@@ -170,6 +171,174 @@ func TestSchemaTextNilRawMessage(t *testing.T) {
 	if got != nil || !complete {
 		t.Errorf("schemaText(nil) = (%q, %v), want (nil, true)", got, complete)
 	}
+}
+
+func TestSchemaStrings(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name         string
+		raw          string
+		want         []string
+		wantComplete bool
+	}{
+		// Keys and string values, in document order.
+		{name: "keys and values", raw: `{"type":"object","description":"d"}`, want: []string{"type", "object", "description", "d"}, wantComplete: true},
+		{
+			name:         "document order, nested",
+			raw:          `{"a":{"b":"c"},"d":["e",{"f":"g"}],"h":"i"}`,
+			want:         []string{"a", "b", "c", "d", "e", "f", "g", "h", "i"},
+			wantComplete: true,
+		},
+		{name: "nested arrays", raw: `[["a",["b"]],[[["c"]]]]`, want: []string{"a", "b", "c"}, wantComplete: true},
+		{name: "bare string", raw: `"hi"`, want: []string{"hi"}, wantComplete: true},
+		{name: "empty string value", raw: `{"k":""}`, want: []string{"k", ""}, wantComplete: true},
+		{name: "empty object", raw: `{}`, want: nil, wantComplete: true},
+		{name: "surrounding whitespace", raw: " \n{\"a\":\"b\"}\t ", want: []string{"a", "b"}, wantComplete: true},
+
+		// Numbers, booleans and null are skipped.
+		{name: "scalars skipped", raw: `{"n":1,"t":true,"f":false,"z":null,"h":123456789012345678901234567890}`, want: []string{"n", "t", "f", "z", "h"}, wantComplete: true},
+		{name: "bare number", raw: `42`, want: nil, wantComplete: true},
+		{name: "array of scalars", raw: `[1,true,null]`, want: nil, wantComplete: true},
+
+		// Escapes are decoded, so a rule sees the real rune.
+		{name: "decoded U+0001", raw: `{"d":"Ig\u0001nore"}`, want: []string{"d", "Ig\x01nore"}, wantComplete: true},
+		{name: "decoded ESC", raw: `{"d":"\u001b[8mhidden"}`, want: []string{"d", "\x1b[8mhidden"}, wantComplete: true},
+		{name: "decoded key", raw: `{"\u0064escription":"x"}`, want: []string{"description", "x"}, wantComplete: true},
+		{name: "decoded surrogate pair", raw: `{"d":"\ud83d\ude00"}`, want: []string{"d", "\U0001F600"}, wantComplete: true},
+
+		// Each distinct string once, at its first place. A key and a value
+		// with the same text are one string.
+		{name: "duplicate values", raw: `{"a":"x","b":"x","c":"y"}`, want: []string{"a", "x", "b", "c", "y"}, wantComplete: true},
+		{name: "duplicate keys", raw: `{"a":"1","a":"2"}`, want: []string{"a", "1", "2"}, wantComplete: true},
+		{name: "key equal to an earlier value", raw: `{"x":"y","y":"x"}`, want: []string{"x", "y"}, wantComplete: true},
+		{name: "escaped and plain text are equal", raw: `["\u0061b","ab"]`, want: []string{"ab"}, wantComplete: true},
+
+		// Malformed input: the strings read so far, and complete is false.
+		{name: "truncated after key", raw: `{"a":"b","c":`, want: []string{"a", "b", "c"}, wantComplete: false},
+		{name: "truncated in string", raw: `{"a":"b","c":"de`, want: []string{"a", "b", "c"}, wantComplete: false},
+		{name: "bad token", raw: `{"a":"b","c":tru}`, want: []string{"a", "b", "c"}, wantComplete: false},
+		// The key comes before the error, so it is read.
+		{name: "missing colon", raw: `{"a" "b"}`, want: []string{"a"}, wantComplete: false},
+		{name: "not json", raw: `hello`, want: nil, wantComplete: false},
+
+		// Data after the first value.
+		{name: "trailing garbage", raw: `{"a":"b"} x`, want: []string{"a", "b"}, wantComplete: false},
+		{name: "trailing second value", raw: `{"a":"b"}{"c":"d"}`, want: []string{"a", "b"}, wantComplete: false},
+		{name: "extra closing brace", raw: `{"a":"b"}}`, want: []string{"a", "b"}, wantComplete: false},
+
+		// Empty input is not valid JSON here, unlike in schemaText.
+		{name: "empty", raw: "", want: nil, wantComplete: false},
+		{name: "whitespace only", raw: " \n\t ", want: nil, wantComplete: false},
+
+		// Depth cap. The object is depth 1, so nestedArrays(n) has depth n.
+		{name: "depth at the cap", raw: nestedArrays(maxSchemaDepth), want: []string{"description", "top", "x"}, wantComplete: true},
+		{name: "depth over the cap", raw: nestedArrays(maxSchemaDepth + 1), want: []string{"description", "top", "x"}, wantComplete: false},
+
+		// Value cap. valueCapDoc(k) has k+5 values; the string "x" is the last.
+		{name: "exactly maxSchemaValues values", raw: valueCapDoc(maxSchemaValues - 5), want: []string{"a", "description", "x"}, wantComplete: true},
+		{name: "maxSchemaValues plus one values", raw: valueCapDoc(maxSchemaValues - 4), want: []string{"a", "description"}, wantComplete: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got, complete := schemaStrings([]byte(tt.raw))
+			if !slices.Equal(got, tt.want) || complete != tt.wantComplete {
+				t.Errorf("schemaStrings(%.80q) = (%q, %v), want (%q, %v)", tt.raw, got, complete, tt.want, tt.wantComplete)
+			}
+		})
+	}
+}
+
+func TestSchemaStringsNil(t *testing.T) {
+	t.Parallel()
+	got, complete := schemaStrings(nil)
+	if got != nil || complete {
+		t.Errorf("schemaStrings(nil) = (%q, %v), want (nil, false)", got, complete)
+	}
+}
+
+// collectStrings adds every object key and every string value in v, a value
+// from json.Decoder.Decode, to set. FuzzSchemaStrings uses it as a second,
+// simple way to find the strings of a document.
+func collectStrings(v any, set map[string]bool) {
+	switch v := v.(type) {
+	case string:
+		set[v] = true
+	case []any:
+		for _, e := range v {
+			collectStrings(e, set)
+		}
+	case map[string]any:
+		for k, e := range v {
+			set[k] = true
+			collectStrings(e, set)
+		}
+	}
+}
+
+func FuzzSchemaStrings(f *testing.F) {
+	for _, seed := range []string{
+		``,
+		` `,
+		`{}`,
+		`"x"`,
+		`42`,
+		`{"type":"object","description":"d"}`,
+		`{"a":"x","b":"x","a":"y"}`,
+		`{"d":"\u001b[8mhidden\u0001"}`,
+		`[["a",["b"]],{"c":{"d":"e"}}]`,
+		`{"a":"b"} x`,
+		`{"a":"b","c":`,
+		nestedArrays(maxSchemaDepth),
+		nestedArrays(maxSchemaDepth + 1),
+	} {
+		f.Add([]byte(seed))
+	}
+	f.Fuzz(func(t *testing.T, data []byte) {
+		strs, complete := schemaStrings(data)
+
+		// Every returned string is unique.
+		seen := make(map[string]bool)
+		for _, s := range strs {
+			if seen[s] {
+				t.Errorf("schemaStrings(%q) returned %q twice", data, s)
+			}
+			seen[s] = true
+		}
+
+		valid := json.Valid(data)
+		if complete && !valid {
+			t.Errorf("schemaStrings(%q) complete = true for invalid JSON", data)
+		}
+
+		// Depth d needs at least 2*d bytes ("[" and "]" for each level), and
+		// each value needs at least 1 byte. So a short input cannot go over
+		// a cap. The fuzzer mostly makes short inputs.
+		underCaps := len(data) < 2*(maxSchemaDepth+1) && len(data) <= maxSchemaValues
+		if !valid || !underCaps {
+			return
+		}
+		if !complete {
+			t.Errorf("schemaStrings(%q) complete = false for valid JSON under the caps", data)
+		}
+
+		// Each string that the standard decoder finds must be in strs.
+		dec := json.NewDecoder(bytes.NewReader(data))
+		dec.UseNumber()
+		var v any
+		if err := dec.Decode(&v); err != nil {
+			t.Fatalf("Decode(%q) error = %v for valid JSON", data, err)
+		}
+		want := make(map[string]bool)
+		collectStrings(v, want)
+		for s := range want {
+			if !seen[s] {
+				t.Errorf("schemaStrings(%q) = %q, want it to hold %q", data, strs, s)
+			}
+		}
+	})
 }
 
 func FuzzSchemaText(f *testing.F) {
