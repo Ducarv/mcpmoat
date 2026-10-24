@@ -5,13 +5,15 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"unicode"
 )
 
 // Non-ASCII runes are written as Go escape sequences on purpose, so the
 // source file stays pure ASCII (see normalize_test.go).
 
-// TestHeuristicMixedScript runs the cases with jsonEscapes true, as rule
-// MOAT-T1-011 does. TestHeuristicMixedScriptText covers the text mode.
+// TestHeuristicMixedScript runs its table with jsonEscapes true, as rule
+// MOAT-T1-011 does. The hit cap and long text subtests use the text mode,
+// and TestHeuristicMixedScriptText covers that mode.
 func TestHeuristicMixedScript(t *testing.T) {
 	t.Parallel()
 
@@ -83,8 +85,11 @@ func TestHeuristicMixedScript(t *testing.T) {
 		{name: "Armenian stops the mu excuse", text: "5\u03bcs\u0585", want: []hit{{1, "Latin, Greek and Armenian"}}},
 		{name: "JSON escape with uppercase hex", text: "\\u041Egnore", want: []hit{{0, latCyr}}},
 		// The high surrogate is not followed by a low one, so it is a lone
-		// surrogate (bytes 0 to 5) that ends the word. "A" starts a word at 6.
-		{name: "high surrogate then a non-low escape", text: "\\uD835\\u0041\u0430", want: []hit{{6, latCyr}}},
+		// surrogate (bytes 0 to 5), U+FFFD, which joins the word.
+		{name: "high surrogate then a non-low escape", text: "\\uD835\\u0041\u0430", want: []hit{{0, latCyr}}},
+		{name: "lone surrogate escape inside Ignore", text: "\u0406\\ud835gnore", want: []hit{{0, latCyr}}},
+		{name: "invalid byte between Latin and Cyrillic", text: "a\xff\u0430", want: []hit{{0, latCyr}}},
+		{name: "invalid byte inside Ignore", text: "\u0406\xffgnore", want: []hit{{0, latCyr}}},
 		{name: "private-use rune inside Ignore", text: "\u0406\ue000gnore", want: []hit{{0, latCyr}}},
 		{name: "plane 15 private-use rune inside Ignore", text: "\u0406\U000F0000gnore", want: []hit{{0, latCyr}}},
 		{name: "unassigned code point inside Ignore", text: "\u0406\u0378gnore", want: []hit{{0, latCyr}}},
@@ -125,7 +130,6 @@ func TestHeuristicMixedScript(t *testing.T) {
 		// Raw `\\` is one escape, so "u0406gnore" is plain Latin text.
 		{name: "escaped backslash before u0406", text: "\\\\u0406gnore"},
 		{name: "JSON escape of a less-than sign ends the word", text: "\u0406\\u003cgnore"},
-		{name: "lone surrogate escape splits the word", text: "\u0406\\ud835gnore"},
 		{name: "pure Armenian word next to Latin", text: "hello \u0570\u0561\u0575 world"},
 		{name: "pure Cherokee word next to Latin", text: "hello \u13e3\u13b3\u13a9 world"},
 		{name: "pure Coptic word next to Latin", text: "hello \u2c99\u2c89\u2ca7 world"},
@@ -150,9 +154,6 @@ func TestHeuristicMixedScript(t *testing.T) {
 		// Documented limit: a word fully in Cyrillic look-alikes.
 		{name: "Cyrillic copy look-alike", text: "\u0441\u043e\u0440\u0443"},
 		{name: "empty", text: ""},
-		// Documented limit: U+FFFD from an invalid byte splits the word.
-		{name: "invalid byte between Latin and Cyrillic", text: "a\xff\u0430"},
-		{name: "invalid byte inside Ignore", text: "\u0406\xffgnore"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -227,6 +228,21 @@ func TestHeuristicMixedScript(t *testing.T) {
 			}
 		}
 	})
+}
+
+// TestLookalikeScripts checks that each entry of lookalikeScripts has a
+// table and a name, and that latinScript and greekScript point at Latin and
+// Greek. A wrong key in the array literal would leave a nil table.
+func TestLookalikeScripts(t *testing.T) {
+	t.Parallel()
+	for i, s := range lookalikeScripts {
+		if s.table == nil || s.name == "" {
+			t.Errorf("lookalikeScripts[%d] = %+v, want a table and a name", i, s)
+		}
+	}
+	if lookalikeScripts[latinScript].table != unicode.Latin || lookalikeScripts[greekScript].table != unicode.Greek {
+		t.Errorf("latinScript or greekScript does not point at its table")
+	}
 }
 
 // TestHeuristicMixedScriptText checks the text mode (jsonEscapes false), as

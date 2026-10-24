@@ -18,11 +18,11 @@ import (
 //
 // It reads the full raw text in one pass, with no size cut. A word is a
 // longest run of letters, of the runes that isWordFiller accepts (marks,
-// invisible runes, private-use runes and unassigned code points) and of the
-// runes that fold to letters only (see wordState.foldsToLetters), such as
-// U+216E (Roman numeral D) and U+24D6 (circled g). Any other rune ends a
-// word. An invalid UTF-8 byte decodes to U+FFFD, a symbol, so it also ends a
-// word.
+// invisible runes, private-use runes, unassigned code points and U+FFFD) and
+// of the runes that fold to letters only (see wordState.foldIsLetters), such
+// as U+216E (Roman numeral D) and U+24D6 (circled g). Any other rune ends a
+// word. An invalid UTF-8 byte and a lone surrogate escape decode to U+FFFD,
+// so they join a word.
 //
 // When jsonEscapes is true, JSON escapes are decoded (see jsonEscape), so the
 // heuristic reads the raw JSON of a schema as it reads the decoded text. The
@@ -47,8 +47,8 @@ func mixedScript(raw string, jsonEscapes bool) []Hit {
 	// end flags the current word when it mixes scripts. Then it clears w for
 	// the next word.
 	end := func() {
-		if scripts := w.flaggedScripts(); scripts != "" && l.keep(w.start) {
-			l.hits = append(l.hits, Hit{Offset: w.start, Detail: fmt.Sprintf("word at offset %d mixes %s letters", w.start, scripts)})
+		if m := w.flagged(); m != 0 && l.keep(w.start) {
+			l.hits = append(l.hits, Hit{Offset: w.start, Detail: fmt.Sprintf("word at offset %d mixes %s letters", w.start, scriptNames(m))})
 		}
 		w = wordState{fold: w.fold[:0]} // keep the fold buffer for the next word
 	}
@@ -64,7 +64,7 @@ func mixedScript(raw string, jsonEscapes bool) []Hit {
 		}
 		escaped := size > 0
 		if !escaped {
-			// An invalid byte gives utf8.RuneError (U+FFFD), which ends a word.
+			// An invalid byte gives utf8.RuneError (U+FFFD).
 			r, size = utf8.DecodeRuneInString(raw[i:])
 		}
 		switch {
@@ -73,9 +73,10 @@ func mixedScript(raw string, jsonEscapes bool) []Hit {
 			w.addLetter(r)
 		case isWordFiller(r):
 			w.begin(i, prev1, prev2)
-		case r > unicode.MaxASCII && w.foldsToLetters(r):
+		case r > unicode.MaxASCII && w.setFold(r) && w.foldIsLetters():
+			// The regexes read this rune as the letters of its fold.
 			w.begin(i, prev1, prev2)
-			w.addFolded(r)
+			w.countFold()
 		default:
 			end()
 		}
@@ -98,10 +99,12 @@ const noRune rune = -1
 
 // isWordFiller reports whether r, a rune that is not a letter, joins a word:
 // a mark (see unicode.IsMark), an invisible rune (see isInvisible), a
-// private-use rune or an unassigned code point. Many fonts draw a private-use
-// or unassigned rune as nothing, so it must not split a word either.
+// private-use rune, an unassigned code point or U+FFFD. Many fonts draw a
+// private-use or unassigned rune as nothing, and a client may drop U+FFFD,
+// so they must not split a word either. To join runes into one word can only
+// add hits.
 func isWordFiller(r rune) bool {
-	if unicode.IsMark(r) || isInvisible(r) {
+	if unicode.IsMark(r) || isInvisible(r) || r == utf8.RuneError {
 		return true
 	}
 	return r > unicode.MaxASCII && unicode.In(r, unicode.Co, unicode.Cn)
@@ -140,7 +143,8 @@ var lookalikeScripts = [...]struct {
 }
 
 // The indexes of Latin and Greek in lookalikeScripts. The array literal of
-// lookalikeScripts uses them as keys, so the compiler checks them.
+// lookalikeScripts uses them as keys, and TestLookalikeScripts checks that
+// they point at the right tables.
 const (
 	latinScript = 0
 	greekScript = 2
@@ -178,7 +182,7 @@ type wordState struct {
 	latin  [3]rune
 	nLatin int
 
-	// fold is a scratch buffer for addFolded. mixedScript keeps it from one
+	// fold is a scratch buffer for setFold. mixedScript keeps it from one
 	// word to the next, so a scan allocates it at most once.
 	fold []byte
 }
@@ -205,17 +209,26 @@ func (w *wordState) addLetter(r rune) {
 	w.countLetter(r, i)
 }
 
-// addFolded adds the rune r by its fold (see appendFold). Each letter of the
-// fold counts as one letter of its own script, with no second fold. When the
-// fold does not change r, or holds no letter, r counts as one letter of its
-// own script (see scriptOf).
+// addFolded adds the letter r by its fold (see setFold and countFold). When
+// the fold does not change r, or holds no letter, r counts as one letter of
+// its own script (see scriptOf).
 func (w *wordState) addFolded(r rune) {
+	if !w.setFold(r) || !w.countFold() {
+		w.countLetter(r, scriptOf(r))
+	}
+}
+
+// setFold sets the scratch buffer w.fold to the fold of r (see appendFold).
+// It reports whether the fold differs from r.
+func (w *wordState) setFold(r rune) bool {
 	rs := string(r)
 	w.fold = appendFold(w.fold[:0], r, rs)
-	if string(w.fold) == rs {
-		w.countLetter(r, scriptOf(r))
-		return
-	}
+	return string(w.fold) != rs
+}
+
+// countFold counts each letter of w.fold (see setFold) as one letter of its
+// own script, with no second fold. It reports whether w.fold holds a letter.
+func (w *wordState) countFold() bool {
 	counted := false
 	for _, f := range string(w.fold) {
 		if unicode.IsLetter(f) {
@@ -223,20 +236,16 @@ func (w *wordState) addFolded(r rune) {
 			counted = true
 		}
 	}
-	if !counted {
-		w.countLetter(r, scriptOf(r))
-	}
+	return counted
 }
 
-// foldsToLetters reports whether the fold of r (see appendFold) differs from
-// r and holds only letters. The regexes read such a rune as letters, so it
-// joins a word, though it is not a letter itself: a Roman numeral such as
-// U+216E (category Nl), or a circled or squared letter such as U+24D6
-// (category So).
-func (w *wordState) foldsToLetters(r rune) bool {
-	rs := string(r)
-	w.fold = appendFold(w.fold[:0], r, rs)
-	if len(w.fold) == 0 || string(w.fold) == rs {
+// foldIsLetters reports whether w.fold (see setFold) is not empty and holds
+// only letters. A rune that is not a letter but has such a fold joins a word,
+// as the regexes read it as letters: a Roman numeral such as U+216E
+// (category Nl), or a circled or squared letter such as U+24D6 (category
+// So).
+func (w *wordState) foldIsLetters() bool {
+	if len(w.fold) == 0 {
 		return false
 	}
 	for _, f := range string(w.fold) {
@@ -271,33 +280,39 @@ func (w *wordState) countLetter(r rune, i int) {
 	w.letters++
 }
 
-// flaggedScripts returns the scripts that make the word suspect, such as
-// "Latin and Cyrillic" or "Latin, Cyrillic and Coptic", or "" when the word
-// is not flagged. The names come in the order of lookalikeScripts. Greek is
-// left out when greekExcused excuses it.
-func (w *wordState) flaggedScripts() string {
-	if bits.OnesCount16(w.scripts) < 2 {
-		return ""
+// flagged returns the scripts that make the word suspect, as a mask like
+// w.scripts, or 0 when the word is not flagged. Greek is left out when
+// greekExcused excuses it. It does not allocate, so mixedScript calls it
+// before the hit cap check.
+func (w *wordState) flagged() uint16 {
+	m := w.scripts
+	if bits.OnesCount16(m) < 2 {
+		return 0
 	}
+	if m&(1<<greekScript) != 0 && w.greekExcused() {
+		m &^= 1 << greekScript
+	}
+	if bits.OnesCount16(m) < 2 {
+		return 0
+	}
+	return m
+}
+
+// scriptNames returns the names of the scripts in the mask m, which has two
+// or more bits, in the order of lookalikeScripts: "Latin and Cyrillic" or
+// "Latin, Cyrillic and Coptic".
+func scriptNames(m uint16) string {
 	var names [len(lookalikeScripts)]string
 	n := 0
 	for i, s := range lookalikeScripts {
-		if w.scripts&(1<<i) == 0 || i == greekScript && w.greekExcused() {
-			continue
+		if m&(1<<i) != 0 {
+			names[n] = s.name
+			n++
 		}
-		names[n] = s.name
-		n++
 	}
-	if n < 2 {
-		return ""
-	}
-	return joinNames(names[:n])
-}
-
-// joinNames joins two or more script names: "A and B", "A, B and C".
-func joinNames(names []string) string {
-	last := len(names) - 1
-	return strings.Join(names[:last], ", ") + " and " + names[last]
+	list := names[:n]
+	last := len(list) - 1
+	return strings.Join(list[:last], ", ") + " and " + list[last]
 }
 
 // greekExcused reports whether the Greek letter of the word is a unit

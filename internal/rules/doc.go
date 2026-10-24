@@ -143,17 +143,18 @@
 // text.
 //
 // A word is a run of letters, marks, invisible runes, private-use runes,
-// unassigned code points and runes whose fold is only letters. So a ZWSP, a
-// combining mark, a private-use rune (such as U+E000, which many fonts draw
-// as nothing), a Roman numeral (such as U+216E, "D") or a circled letter
-// (such as U+24D6, "g") cannot split a word. Any other rune, such as a digit,
-// '_', '-', a space or punctuation, ends a word.
+// unassigned code points, U+FFFD (from an invalid UTF-8 byte or a lone
+// surrogate) and runes whose fold is only letters. So a ZWSP, a combining
+// mark, a private-use rune (such as U+E000, which many fonts draw as
+// nothing), a Roman numeral (such as U+216E, "D") or a circled letter (such
+// as U+24D6, "g") cannot split a word. Any other rune, such as a digit, '_',
+// '-', a space or punctuation, ends a word.
 //
 // Each letter counts for its own script. So Armenian small oh (U+0585) and
 // Lisu letter ga (U+A4D6) count for their scripts. A letter of the Common or
 // Inherited script, a Latin letter that is not ASCII and a rune that is not a
 // letter but folds to letters count by their fold, the same fold that the
-// regexes read. So the mathematical Greek letters (U+1D6A8 to U+1D7CB) and
+// regexes read. So the mathematical Greek letters (in U+1D6A8 to U+1D7CB) and
 // the double-struck Greek letters (U+213C to U+213F) count as Greek, the
 // mathematical Latin letters (such as U+1D400), the fullwidth Latin letters
 // and the Roman numerals count as Latin, and U+00B5 (micro sign) counts as
@@ -200,9 +201,12 @@
 //     syllable U+12D0, which looks like an "O", and the Runic letter U+16C1,
 //     which looks like an "I";
 //   - a word that a visible rune splits in two, when the rune is not a
-//     letter and does not fold to letters, such as U+FFFD from an invalid
-//     UTF-8 byte, U+2800 (braille blank) or U+212E (estimated sign, a
-//     symbol that looks like an "e").
+//     letter and does not fold to letters, such as U+2800 (braille blank),
+//     U+0966 (Devanagari digit zero) or U+212E (estimated sign, a symbol
+//     that looks like an "e");
+//   - a mark of a script outside the list, such as U+0C02 (Telugu
+//     anusvara), which looks like an "o": a mark joins a word but counts for
+//     no script.
 //
 // The config heuristics (insecure_url, plaintext_secret, unpinned_package,
 // auto_install and typosquat) read one line of text each, not the whole text.
