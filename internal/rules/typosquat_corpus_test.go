@@ -74,7 +74,10 @@ func parseCorpus(path string) ([]corpusCase, error) {
 		}
 		cases = append(cases, c)
 	}
-	return cases, sc.Err()
+	if err := sc.Err(); err != nil {
+		return nil, fmt.Errorf("scan corpus: %w", err)
+	}
+	return cases, nil
 }
 
 // TestTyposquatCorpus runs the typosquat rule over testdata/typosquat/names.txt
