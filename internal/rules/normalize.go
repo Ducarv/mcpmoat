@@ -533,9 +533,16 @@ func spacesToASCII(s string) string {
 //
 // The regex matchers apply it only to the text, not to the pattern, and they
 // keep the forms before the fold too (see preparedText.regexForms).
-// Homoglyphs from other scripts (Cyrillic U+0430 for Latin "a") are not
-// folded. The mixed_script heuristic flags a word that mixes letters of two
-// or more look-alike scripts, such as Latin and Cyrillic, instead.
+//
+// foldMarks and appendFold fold only what NFKD and the mark rules above
+// fold. They do not fold homoglyphs from other scripts (Cyrillic U+0430 for
+// Latin "a"). The regex forms add the confusable skeleton of confusables.go
+// (foldSkeleton) to this fold, so the regexes read U+0430 as "a". The
+// keyword matcher does not get the skeleton: its text and its keywords are
+// folded with foldMarks only. mixedScript counts the scripts of each word
+// with appendFold, so the skeleton does not change it: the mixed_script
+// heuristic still flags a word that mixes letters of two or more look-alike
+// scripts, such as Latin and Cyrillic.
 //
 // It folds s one rune at a time (see appendFold), and it uses the fold of a
 // rune only when the fold is not longer, in bytes, than the rune. Otherwise

@@ -21,27 +21,40 @@ import (
 // regexes of one any_regex, all_regex or keywords list.
 //
 // The worst case for one match block on one form of the text is about 32 KiB
-// x 2500, about 82M instruction-bytes. That is about 0.74 s on an Apple M1
-// Pro (about 9.0 ns for each instruction-byte: the BenchmarkWorstCaseBlock
-// time below divided by 14 forms). A text can have more forms (see
+// x 2500, about 82M instruction-bytes. That is about 0.75 s on an Apple M1
+// Pro (about 9.2 ns for each instruction-byte: the BenchmarkWorstCaseBlock
+// time below divided by 21 forms). A text can have more forms (see
 // matchForms and preparedText):
 //
-//   - keywords read up to maxKeywordForms (7) forms: the folds of the base
-//     forms of matchForms;
-//   - any_regex and all_regex read up to maxRegexForms (14) forms: the base
-//     forms and their folds, when the text is not only ASCII.
+//   - keywords read up to maxKeywordForms (7) forms: the plain folds of the
+//     base forms of matchForms;
+//   - any_regex and all_regex read up to maxRegexForms (21) forms: the seven
+//     base forms, their seven plain folds and their seven skeleton folds,
+//     when the text is not only ASCII.
+//
+// The skeleton fold (#140) is a new form only when a base form or its plain
+// fold holds a rune of skeletonTable. The plain fold stays a regex form next
+// to it, so no match of the plain fold is lost (see preparedText). A text
+// with no rune of skeletonTable has at most 14 regex forms. Only a text with
+// such a rune, which the server picks, reaches 21.
 //
 // Each form is at most MaxMatchInputBytes long, so the worst case for one
-// match block is fourteen times the cost above: 14 x 32 KiB x 2500, about
-// 1.1G instruction-bytes. BenchmarkWorstCaseBlock measured about 10.3 s for
-// one Match call over the fourteen forms on an Apple M1 Pro (median of five
-// runs, Go 1.27). The package doc says how the rule count multiplies it.
+// match block is 21 times the cost above: 21 x 32 KiB x 2500, about 1.7G
+// instruction-bytes. BenchmarkWorstCaseBlock measured about 15.9 s for one
+// Match call over the 21 forms on an Apple M1 Pro (median of five runs with
+// -benchtime=1x, 15.60 s to 16.03 s, go1.27.3). In the same run, the 14
+// forms of BenchmarkWorstCaseBlockNoSkeleton took about 10.7 s, the same as
+// before #140. So the seven skeleton folds add about 49%, in line with 21/14
+// forms. The package doc says how the rule count multiplies this cost.
 //
 // The server alone picks the forms, so its text alone can raise the cost of
-// one text about 12 times with the built-in rules: the 13 description rules
-// on 32 KiB took about 50 ms for plain text and about 612 ms with a prefix
-// that gives all fourteen forms (Apple M1 Pro). The scan engine (#143) needs
-// a time or bytes budget.
+// one text about 19 times with the built-in rules. Before #140, the 13
+// description rules on 32 KiB took about 50 ms for plain text and about
+// 612 ms with a prefix that gave all fourteen forms (Apple M1 Pro). For the
+// current code, scaled by the new worst-case time (15.86 s / 10.3 s, about
+// 1.54), the all-forms time is about 0.94 s. This is an estimate, not a new
+// measurement. The plain text has one form, so it stays at about 50 ms. The
+// scan engine (#143) needs a time or bytes budget.
 //
 // Building the forms has a cost too. The slowest known input is a run of
 // U+009D, because each one can start an OSC (see oscExprC0): 128 KiB of it
@@ -61,8 +74,10 @@ import (
 // the seams of neighbour strings (at most maxSeamBytes, 128 KiB), and, when
 // the JSON cannot be read in full, the raw text once, in the window of one
 // description. So one schema costs about nine times the bound of one
-// description: the seam pass doubles the cost of the string pass. The
-// match_window heuristic fires on a schema whose strings these caps cut, but
+// description: the seam pass doubles the cost of the string pass.
+// BenchmarkSchemaWorstCase measured at most about 63.0 s for one Match call
+// (4 strings of 32 KiB, 21 forms each), about 4 times the description worst
+// case. The match_window heuristic fires on a schema whose strings these caps cut, but
 // not when the seam budget is used up. The package doc gives the details.
 const (
 	// MaxPatternBytes is the largest regex or keyword, in bytes, before

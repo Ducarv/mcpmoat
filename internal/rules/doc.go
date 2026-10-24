@@ -57,7 +57,7 @@
 //
 // A list holds at most [MaxPatterns] entries of at most [MaxPatternBytes]
 // bytes each, and the compiled programs of one regex and of one list have
-// instruction caps. A text has up to 14 forms for a regex (see
+// instruction caps. A text has up to 21 forms for a regex (see
 // Normalization below). For the worst case of one match block and its cost,
 // see the cost comment on these caps in match.go. A hostile --rules
 // directory multiplies this cost by the number of rules and texts. A cap at
@@ -90,16 +90,40 @@
 // parts (NFKD), its combining marks (category M) are dropped, and the rest is
 // joined again (NFKC). The pattern is not folded. So a regex such as `ignore`
 // also matches fullwidth and mathematical letters ("ignore" in U+FF49 ... or
-// in U+1D422 ...) and a word with a mark in it ("ig" + U+0336 + "nore"). A
-// fold that is longer than the rune is not used, so the folded form is never
+// in U+1D422 ...) and a word with a mark in it ("ig" + U+0336 + "nore").
+//
+// A regex also reads a second fold of each base form, the skeleton fold
+// (foldSkeleton in confusables.go). It is the fold above (the plain fold,
+// foldMarks) that also maps look-alike letters of other scripts to one
+// ASCII letter: the confusable skeleton. Its table, skeletonTable, holds
+// 562 runes from Unicode TR39 confusables.txt (version 18.0.0), each a
+// single rune that TR39 maps to one ASCII letter, alone or followed only by
+// combining marks (category Mn). The marks are dropped, so U+0268 (i with
+// stroke, TR39 "i" + U+0335) maps to "i". The target keeps the case of
+// TR39, but a TR39 target "l" becomes "I" for an uppercase rune. A spacing
+// mark of the table, such as Telugu U+0C02 ("o"), maps before the fold
+// drops the marks. So `ignore` also matches U+0456 + "gnore" (Cyrillic i),
+// and `~/\.ssh` matches "~/." + U+0455 U+0455 U+04BB (Cyrillic). The keyword
+// fold does not get the skeleton. For the limits, see the end of the
+// Heuristics and hits section.
+//
+// A fold that is longer than the rune is not used, so the folded form is never
 // longer than the text: a ligature that folds to many letters, such as
 // U+FDFA, stays as it is and cannot push a payload out of the 32 KiB. A form
 // that is only ASCII is its own fold, so it adds no folded form. A rule
 // matches when it matches in one form, and each regex of an all_regex list
-// can match in a different form. So a regex reads up to 14 forms of a text
-// (maxRegexForms: the base forms and their folds), and a keyword up to 7
-// (maxKeywordForms: the folds of the base forms): such a text costs up to
-// 14 times as much to match. The forms are built only when a regex or
+// can match in a different form. So a regex reads up to 21 forms of a text
+// (maxRegexForms: the 7 base forms, their plain folds and their skeleton
+// folds), and a keyword up to 7 (maxKeywordForms: the plain folds of the
+// base forms): such a text costs up to 21 times as much to match. The plain
+// fold stays a regex form next to the skeleton fold, so no match of the
+// plain fold is lost. A skeleton fold is a new form only when it differs
+// from the plain fold, that is when the base form or its plain fold holds a
+// rune of skeletonTable. So a text with no such rune has at most 14 regex
+// forms, as before the skeleton. The worst case for one match block is 21 x
+// 32 KiB x 2500, about 1.7G instruction-bytes: about 16 s for one Match call
+// on an Apple M1 Pro (an order of magnitude, not a precise figure; see the
+// cost comment in match.go). The forms are built only when a regex or
 // keyword matcher reads the text, and only once for each match. A heuristic
 // gets only the raw text. The match_window heuristic builds the forms
 // itself, to check their length.
@@ -112,12 +136,13 @@
 // Keywords are normalized in the same way, but for keywords both the keyword
 // and the text are folded, and only the folded forms are matched. So a mark
 // cannot hide a keyword, fullwidth and mathematical letters match the plain
-// letters, and accents are folded: "cafe" matches "caf" + U+00E9. Homoglyphs
-// from other scripts (for example Cyrillic U+0430 for Latin "a") are not
-// folded, for regexes or keywords. Instead, the mixed_script heuristic (rules
-// MOAT-T1-010 and MOAT-T1-011) flags a word that mixes letters of two or
-// more look-alike scripts, such as Latin and Cyrillic, except a Greek unit
-// letter after a number. See the Heuristics and hits section for details.
+// letters, and accents are folded: "cafe" matches "caf" + U+00E9. Keywords
+// do not get the confusable skeleton, so a homoglyph from another script
+// (for example Cyrillic U+0430 for Latin "a") is not folded for a keyword.
+// The mixed_script heuristic (rules MOAT-T1-010 and MOAT-T1-011) flags a
+// word that mixes letters of two or more look-alike scripts, such as Latin
+// and Cyrillic, except a Greek unit letter after a number. See the
+// Heuristics and hits section for details.
 //
 // Any run of white space, or U+2800 (braille blank), matches the space
 // between the words of a keyword. Punctuation does not: the keyword "ignore
@@ -246,6 +271,7 @@
 // mathematical Latin letters (such as U+1D400), the fullwidth Latin letters
 // and the Roman numerals count as Latin, and U+00B5 (micro sign) counts as
 // Greek mu. A letter of any other script, such as Han, counts for no script.
+// The heuristic does not use the confusable skeleton of the regex fold.
 //
 // A mark counts for its own script, with no fold, as in TR39 section 5.1. So
 // a mark of a script in the table counts for that script, in the tier of
@@ -295,14 +321,16 @@
 //
 //   - a word written fully in look-alikes of one script, such as Cyrillic
 //     "copy" (U+0441 U+043E U+0440 U+0443) or the Cyrillic "ssh" in "~/." +
-//     U+0455 U+0455 U+04BB;
+//     U+0455 U+0455 U+04BB. The regexes read such a word in ASCII letters
+//     (see Normalization), so the sensitive-path rules catch that "~/.ssh";
 //   - a word of one letter, because it cannot mix two scripts;
-//   - Latin-script look-alikes that do not fold, such as U+0131 (dotless i),
-//     U+01C0 (dental click) and U+0261 (script g): they are Latin, so the
-//     word does not mix scripts;
+//   - Latin-script look-alikes, such as U+0131 (dotless i), U+01C0 (dental
+//     click) and U+0261 (script g): they are Latin, so the word does not mix
+//     scripts. The regexes read U+0131 as "i" and U+0261 as "g";
 //   - a word that a visible rune splits in two, when the rune is not a
 //     letter and does not fold to letters, such as U+2800 (braille blank) or
-//     U+212E (estimated sign, a symbol that looks like an "e");
+//     U+212E (estimated sign, a symbol that looks like an "e"). The regexes
+//     read U+212E as "e";
 //   - a digit or punctuation look-alike, such as U+0966 (Devanagari digit
 //     zero) for an "o": the rune ends the word, as the "0" in the leetspeak
 //     "ign0re" does. A script whose only Latin look-alikes are digits or
@@ -326,8 +354,43 @@
 //     tables: Go reads it as unassigned, so it joins the word but counts for
 //     no script.
 //
-// U+01C0, U+0261 and U+212E are not caught today. Issue #140 tracks a
-// confusable fold for such runes.
+// The regexes fold U+0261 and U+212E (see Normalization). U+01C0 is not
+// caught: see the first limit below.
+//
+// The confusable skeleton of the regex fold has these limits:
+//
+//   - a caseless look-alike of "I", such as U+01C0 (dental click) or Runic
+//     U+16C1, maps to "l". So U+01C0 + "gnore" reads "lgnore", and no rule
+//     catches it (mixed_script flags U+16C1 in a Latin word, but U+01C0 is
+//     Latin). An uppercase look-alike of "l", such as U+04C0 (palochka),
+//     maps to "I", so U+04C0 U+04C0 does not read as "ll";
+//   - Cyrillic has no look-alike of a small "n" or "g", so "ignore" cannot
+//     be written fully in Cyrillic. A look-alike "ignore" needs a second
+//     script, such as Armenian U+0578 ("n") and U+0581 ("g");
+//   - digit look-alikes, such as U+0966 (Devanagari digit zero) for an "o",
+//     and ASCII leetspeak, such as "ign0re", are not folded;
+//   - U+017F (long s): TR39 reads it as "f", but the plain fold reads it as
+//     "s", so it is not in the table. So U+017F + "orget all previous
+//     instructions" reads "sorget" and is not caught;
+//   - a look-alike whose TR39 target is a letter followed by a rune that is
+//     not a combining mark of category Mn, or two or more letters (such as
+//     "rn" for "m"), is not folded;
+//   - in a word of another script, a letter that is not in the table stays
+//     as it is, and the ASCII-only \w of the regex engine reads it as a word
+//     edge. So the table letters of the word become ASCII fragments between
+//     such edges: the skeleton fold of the Greek word U+03B7 U+03B3 U+03BF
+//     U+03CD U+03BC U+03B5 U+03BD U+03BF U+03C2 is "nyou" + U+03BC U+03B5 +
+//     "vo" + U+03C2, so a pattern such as `\bvo\b` matches in it;
+//   - real Russian, Greek and Armenian text gets ASCII letters in the
+//     skeleton fold. A few should_not_match cases of the built-in rules
+//     check short Russian and Greek texts. No case checks Armenian text, and
+//     other real text is not tested, so a built-in rule or a new pattern can
+//     hit it;
+//   - Han letters, such as U+4E05 and U+4E2B, and symbols other than
+//     U+212E, such as U+00D7 for "x", are not in the table;
+//   - a look-alike from a script or code point that the Go tables (Unicode
+//     17.0.0) or TR39 confusables.txt (version 18.0.0) do not list is not
+//     folded.
 //
 // The mixed_script heuristic flags these words, which are known false
 // positives:
