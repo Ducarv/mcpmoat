@@ -74,7 +74,11 @@ func (n nameOwners) other(identity int) (toolOwner, bool) {
 //     compound (see compoundName), such as "search", "click" or "-----",
 //     which appear in normal prose;
 //   - a name that only the describing server owns, so a tool that names a
-//     tool of its own server, or itself, is not reported.
+//     tool of its own server, or itself, is not reported;
+//   - a text that is only the tool's own name. pydantic sets the schema title
+//     of the tool git_status to "GitStatus", and a tool title is often the
+//     name. Such a text has no instruction, so it cannot shadow anything,
+//     even when another server also has a tool with that name.
 //
 // A name that the describing server owns and that another server also owns
 // is reported. Otherwise a hostile server could hide a mention by adding a
@@ -95,7 +99,7 @@ func (n nameOwners) other(identity int) (toolOwner, bool) {
 // size cap: padding in front of a mention must not hide it from the check,
 // because the model reads the whole text. One tool gives at most
 // maxMentionsPerTool findings, and the cap is shared by all its texts: once it
-// is reached, no more text of that tool is scanned.
+// is reached, the rest of that tool's text is not searched.
 //
 // A server is known by its launch config, not by its name or its position in
 // all (see launchKey). The same server configured in two clients or two
@@ -114,12 +118,12 @@ func (n nameOwners) other(identity int) (toolOwner, bool) {
 // server can hide a mention in other text that a model can see: default, enum,
 // examples, const, $comment, vendor keys (x-* or markdownDescription),
 // property names, and strings inside an array under "description". The check
-// does not scan these. A tool name with a byte outside letters,
-// digits, "_" and "-" (a dot or a space, for example) cannot be found as a
-// token, so it is never a candidate name. A mention of a single-word tool
-// name is never found. A space or a dot between the words ("send email") is
-// not folded, because that is normal prose, and neither are look-alike
-// letters, such as the fullwidth U+FF3F for "_" or a Cyrillic "е".
+// does not scan these. A tool name with a byte outside letters, digits, "_"
+// and "-" (a dot or a space, for example) cannot be found as a token, so it is
+// never a candidate name. A mention of a single-word tool name is never
+// found. A space or a dot between the words ("send email") is not folded,
+// because that is normal prose, and neither are look-alike letters, such as
+// the fullwidth U+FF3F for "_" or a Cyrillic "е".
 //
 // Tool names and texts are untrusted input from MCP servers. The check
 // only searches them as text. It never executes them or builds commands from
@@ -129,8 +133,9 @@ func (n nameOwners) other(identity int) (toolOwner, bool) {
 // and every token is looked up in a map. The schema walk is bounded in depth
 // and in the number of values by the caps of schemaText. A string has no byte
 // cap, so the cost stays linear in the schema size, and the caller bounds the
-// input size (inspect does). 10 servers with 20 tools each run well under one
-// second (NFR-03).
+// input size. So pass tools that inspect read: inspect bounds the size and
+// shape of each schema, and schemaText then reads it in full. 10 servers with
+// 20 tools each run well under one second (NFR-03).
 func CheckShadowing(all []ServerTools) []Finding {
 	identities := launchIdentities(all)
 	owners := indexOwners(all, identities)
@@ -140,12 +145,17 @@ func CheckShadowing(all []ServerTools) []Finding {
 	for i, st := range all {
 		for _, tool := range st.Tools {
 			clear(seen)
+			self := foldText(tool.Name)
 			// The cap is shared by all texts of the tool.
 			for _, text := range toolTexts(tool) {
 				if len(seen) >= maxMentionsPerTool {
 					break
 				}
-				forEachToken(foldText(text), func(token string) bool {
+				folded := foldText(text)
+				if strings.TrimSpace(folded) == self {
+					continue // only the tool's own name, such as the schema title "GitStatus"
+				}
+				forEachToken(folded, func(token string) bool {
 					// Markdown emphasis such as "_send_email_" wraps the name.
 					token = strings.Trim(token, "_")
 					n, ok := owners[token]
