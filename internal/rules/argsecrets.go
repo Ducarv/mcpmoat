@@ -61,6 +61,29 @@ const (
 	minLongRandomLen = 20
 	minLongEntropy   = 3.5
 
+	// minWordLen is the shortest part of a name that counts as a word, and
+	// minNumberLen the shortest that counts as a number (see isWordLike). Random
+	// base62 parts pass as a word at 22% (3 bytes), 9% (4), 4% (5), 0.3% (8). So
+	// the rule also needs 2 separators and half of the parts. Measured recall
+	// of random 32-byte base64url under --api-key: 98.3% (98.8% before).
+	minWordLen   = 3
+	minNumberLen = 2
+
+	// maxOpaquePartLen is the length from which a part makes the whole value not
+	// word-like, unless it is all digits or letters of one case with an entropy
+	// under minOpaqueEntropy ("aaaaaaaaaaaaaaaaaaaaaaaa"). A long run like that is
+	// a secret body, not a readable name. A hostile config can still split a
+	// random value into pieces shorter than this: a documented limit.
+	//
+	// minOpaqueEntropy was set by measurement. Random lowercase letters have an
+	// entropy of 3.25 (1% quantile) and 3.68 (median) at 20 bytes, 3.39 and 3.84
+	// at 24, 3.66 and 4.05 at 32. Real words of 20 bytes or more are in
+	// 2.9 to 3.6: "internationalization" 2.95. At 3.2 about 99% of random 20-byte
+	// parts are found (100% from 24 bytes), and the longest common words stay
+	// words. A higher limit, 3.5, would miss 15% of random 20-byte parts.
+	maxOpaquePartLen = 20
+	minOpaqueEntropy = 3.2
+
 	// refMark stands in for a variable reference without a default while a URL
 	// is split. It is plain letters and a digit, so it is valid in a scheme, a
 	// host, a port-less authority and a path. literalPart removes it again.
@@ -199,8 +222,10 @@ func assignmentHasSecret(text string) bool {
 // value.
 //
 // The order of the tests:
-//  1. A reference ($VAR, %VAR%) is removed, as in looksLikePlaintextSecret. A
-//     value with nothing literal left is not a secret.
+//  1. A reference ($VAR, %VAR%, ${VAR}) is removed (see literalPart). Unlike
+//     looksLikePlaintextSecret, the default of ${NAME:-default} is kept and
+//     scanned, because a client uses it when NAME is not set. A value with
+//     nothing literal left is not a secret.
 //  2. A well-known token (see bareToken) is a secret, under any name.
 //  3. A name of a path setting ("--key-file"), or a value that is a path or
 //     a URL, is not a secret. A URL value goes through urlHasSecret instead.
@@ -329,6 +354,86 @@ func looksLongRandom(value string) bool {
 	return hasLetter && hasDigit && separators < 2 && shannonEntropy(value) >= minLongEntropy
 }
 
+// isWordLike reports whether value is a name made of words and numbers, such
+// as "production-session-2024-01" or "Document_Final_Version_2024_Q3_Report",
+// and not a random token. A file extension is cut first. Then value must have
+// 2 or more of "-", "_" and ".", and at least half of its counted parts (the
+// text between the separators) must be words or numbers (see isWordPart). A
+// random token has short parts of mixed letters and digits, so it fails. A
+// value with 1 separator ("ghp_<36 random>", "sk-<30 random>") never passes.
+// A part of maxOpaquePartLen or more bytes makes value not word-like at once,
+// so a prefix or a padding of words does not hide a random body
+// ("sk_live_<24 random>", "aaa-bbb-<24 random>"). Two kinds of long part are
+// spared: digits only (a number) and letters of one case with an entropy under
+// minOpaqueEntropy (a word). So one-case random letters are still caught.
+func isWordLike(value string) bool {
+	// A file extension is not a word of the name: ".tar.gz" after a hash must
+	// not add a word and a separator (see trimFileExt).
+	value = trimFileExt(value)
+	separators, counted, words := 0, 0, 0
+	for i := range len(value) {
+		if isNameSeparator(rune(value[i])) {
+			separators++
+		}
+	}
+	// FieldsFunc cuts value at every separator and drops the empty parts.
+	for _, part := range strings.FieldsFunc(value, isNameSeparator) {
+		switch {
+		case isNumberPart(part):
+			counted++
+			words++
+		case len(part) >= maxOpaquePartLen && (!isWordPart(part) || shannonEntropy(part) >= minOpaqueEntropy):
+			return false // a long opaque run is a secret body, not a name
+		case isWordPart(part):
+			counted++
+			words++
+		case len(part) >= minWordLen:
+			counted++ // long and not a word: it counts against
+		}
+		// A short part ("my", "v2", "q3", "1") decides nothing: not counted.
+	}
+	return separators >= 2 && counted >= 2 && words*2 >= counted
+}
+
+// isNameSeparator reports whether r separates the words of a name.
+func isNameSeparator(r rune) bool {
+	return r == '-' || r == '_' || r == '.'
+}
+
+// isNumberPart reports whether part is a number: minNumberLen or more digits.
+func isNumberPart(part string) bool {
+	return len(part) >= minNumberLen && strings.Trim(part, "0123456789") == ""
+}
+
+// isWordPart reports whether part is a word (minWordLen or more ASCII letters
+// in one case, with an optional capital first) or a number (minNumberLen or
+// more digits).
+func isWordPart(part string) bool {
+	if isNumberPart(part) {
+		return true
+	}
+	if len(part) < minWordLen {
+		return false
+	}
+	// Skip a capital first letter ("Document"), then all letters must be of the
+	// same case as the second one.
+	rest := part
+	if part[0] >= 'A' && part[0] <= 'Z' {
+		rest = part[1:]
+	}
+	lower := rest[0] >= 'a' && rest[0] <= 'z'
+	for i := range len(rest) {
+		c := rest[i]
+		if lower && (c < 'a' || c > 'z') {
+			return false
+		}
+		if !lower && (c < 'A' || c > 'Z') {
+			return false
+		}
+	}
+	return true
+}
+
 // looksRandom reports whether value has the shape of a random token: only
 // token bytes (see isTokenShaped) and one of two things:
 //   - at least minRandomLen bytes, a digit and an entropy of at least
@@ -339,7 +444,7 @@ func looksLongRandom(value string) bool {
 // setting, not a token. Known limit: a random value of under minRandomLen bytes
 // is not found.
 func looksRandom(value string) bool {
-	if len(value) < minRandomLen || !isTokenShaped(value) {
+	if len(value) < minRandomLen || !isTokenShaped(value) || isWordLike(value) {
 		return false
 	}
 	entropy := shannonEntropy(value)
@@ -489,14 +594,16 @@ func unhexByte(c byte) byte {
 //     secret holds "+" and a client may send it as it is;
 //   - each of these with its "%" bytes removed, when one is left. A "%" that
 //     stays after decoding is a stray or a bad escape ("?token=<random>%"),
-//     and it would make the token shape test fail and hide the secret.
+//     and it would make the token shape test fail and hide the secret. A form
+//     that is a whole reference ("%NAME%") is not stripped: without its "%"
+//     marks it would look like a plain value.
 func valueForms(rawValue string) []string {
 	forms := []string{
 		lenientUnescape(rawValue, true),
 		lenientUnescape(rawValue, false),
 	}
 	for _, form := range forms[:2] {
-		if strings.Contains(form, "%") {
+		if strings.Contains(form, "%") && !wholeVar.MatchString(form) {
 			forms = append(forms, strings.ReplaceAll(form, "%", ""))
 		}
 	}
@@ -550,6 +657,7 @@ func randomSegment(segment string) bool {
 	return len(segment) >= minEntropyLen &&
 		!uuidText.MatchString(segment) &&
 		isTokenShaped(segment) &&
+		!isWordLike(segment) &&
 		shannonEntropy(segment) >= minEntropy
 }
 
