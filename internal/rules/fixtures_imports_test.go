@@ -1,12 +1,19 @@
 package rules_test
 
 // Import checks for the server fixtures of issue #57. The fixtures under
-// testdata/servers must make no network call. The test reads the import list
-// of each main.go without compiling it, so a new import fails the test at once.
+// testdata/servers must make no network call. The test reads the direct
+// imports of each Go file there without compiling it, so a new import fails
+// the test at once.
+//
+// The check sees direct imports only. It does not see what a fixture reaches
+// through an allowed package: the MCP SDK imports net/http, and syscall has
+// Socket and Exec. Review a fixture change for such calls.
 
 import (
 	"go/parser"
 	"go/token"
+	"io/fs"
+	"maps"
 	"path/filepath"
 	"slices"
 	"strconv"
@@ -22,8 +29,7 @@ import (
 //   - "os/exec" starts a program. Only "benign" may import it: its test-only
 //     -spawn flag starts a copy of itself for the inspect tests. It starts no
 //     other program.
-//   - "syscall" is allowed. All four fixtures import it only for
-//     syscall.SIGTERM.
+//   - "syscall" is allowed, for signal handling.
 func forbiddenImport(dir, path string) bool {
 	switch {
 	case path == "net", strings.HasPrefix(path, "net/"):
@@ -59,20 +65,34 @@ func importPaths(filename string, src any) ([]string, error) {
 // fixtures make no network call).
 func TestFixtureImports(t *testing.T) {
 	t.Parallel()
-	files, err := filepath.Glob("../../testdata/servers/*/*.go")
+	const root = "../../testdata/servers"
+	// Each Go file at any depth, keyed by its fixture folder (the first path
+	// element under root), so a subpackage of a fixture is checked too.
+	fixtureOf := map[string]string{}
+	err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
+		if err != nil || d.IsDir() || filepath.Ext(path) != ".go" {
+			return err
+		}
+		rel, err := filepath.Rel(root, path)
+		if err != nil {
+			return err
+		}
+		fixture, _, _ := strings.Cut(filepath.ToSlash(rel), "/")
+		fixtureOf[path] = fixture
+		return nil
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
 	// benign, mailer, poisoned and shadowing.
 	folders := map[string]bool{}
-	for _, file := range files {
-		folders[filepath.Base(filepath.Dir(file))] = true
+	for _, fixture := range fixtureOf {
+		folders[fixture] = true
 	}
 	if len(folders) < 4 {
-		t.Fatalf("found %d fixture folders %v, want at least 4", len(folders), files)
+		t.Fatalf("found %d fixture folders %v, want at least 4", len(folders), slices.Sorted(maps.Keys(folders)))
 	}
-	for _, file := range files {
-		dir := filepath.Base(filepath.Dir(file))
+	for file, dir := range fixtureOf {
 		t.Run(dir+"/"+filepath.Base(file), func(t *testing.T) {
 			t.Parallel()
 			paths, err := importPaths(file, nil)

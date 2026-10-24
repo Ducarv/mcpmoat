@@ -663,14 +663,14 @@ func TestNewBuiltinTyposquat(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			got := builtin.Check(tt.server)
-			if tt.wantRelated == "" {
-				if len(got) != 0 {
-					t.Fatalf("Check() = %+v, want no finding", got)
-				}
-			} else {
-				if len(got) != 1 {
-					t.Fatalf("Check() gave %d findings, want 1: %+v", len(got), got)
-				}
+			want := 0
+			if tt.wantRelated != "" {
+				want = 1
+			}
+			if len(got) != want {
+				t.Fatalf("Check() gave %d findings, want %d: %+v", len(got), want, got)
+			}
+			if want == 1 {
 				if got[0].RuleID != RuleTyposquat {
 					t.Errorf("RuleID = %q, want %q", got[0].RuleID, RuleTyposquat)
 				}
