@@ -361,17 +361,29 @@ func TestUsageContent(t *testing.T) {
 			"     in auto-discovery, but a missing --config file is)\n",
 		"Scan output:\n",
 		"  A heuristic masks secret-like arguments. Review the output before you share it.\n",
-		"  --no-connect: " + noRulesText + ".\n",
+		"  --no-connect: scan runs only the built-in config rules (T4 and T5). The tool rules need a connection.\n",
+		"  Rules from --rules are loaded and checked, but not applied yet.\n",
+		"  Exit code 1 means a finding of severity high or above that is not ignored.\n",
 	} {
 		if !strings.Contains(got, want) {
 			t.Errorf("usage text does not contain %q\n--- got ---\n%s", want, got)
 		}
 	}
-	// The help says once that no rules are applied: in the scan notes, with
-	// the same text as the notice on stderr.
-	for _, once := range []string{noRulesText, "no rules"} {
+	// The scan help says once which rules scan runs, and says that the
+	// --no-connect line lists and checks the configs. The old text said that
+	// scan applies no rules: it must be gone.
+	for _, once := range []string{
+		"built-in config rules (T4 and T5)",
+		"List the servers in the configs and check the configs.",
+		"not applied yet",
+	} {
 		if n := strings.Count(got, once); n != 1 {
 			t.Errorf("usage text holds %q %d times, want 1\n--- got ---\n%s", once, n, got)
+		}
+	}
+	for _, gone := range []string{"no rules", "applies no rules", "No rules were applied"} {
+		if strings.Contains(got, gone) {
+			t.Errorf("usage text holds the old text %q\n--- got ---\n%s", gone, got)
 		}
 	}
 }

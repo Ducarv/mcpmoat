@@ -14,11 +14,13 @@ import (
 	"github.com/Ducarv/mcpmoat/internal/termsafe"
 )
 
-// Exit codes (PRD FR-16). Exit code 1 means "findings at or above --fail-on".
-// It has no constant yet because no command reports findings before M2.
+// Exit codes (PRD FR-16): 0 no findings, 1 findings at or above --fail-on,
+// 2 execution or usage error. Until --fail-on exists (issue #65), the limit
+// is high, the PRD default.
 const (
-	exitOK    = 0 // success, no findings
-	exitError = 2 // execution or usage error
+	exitOK       = 0 // success, no findings
+	exitFindings = 1 // a finding that is not ignored has severity high or above
+	exitError    = 2 // execution or usage error
 )
 
 // options holds the resolved global flags. The cli passes it explicitly to
@@ -182,7 +184,7 @@ func scanUsage(w io.Writer) {
 	fprintf(w, "Scan flags (after \"scan\"):\n")
 	// Padding 2 keeps the descriptions in one column, like the text in usage.
 	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
-	fprintf(tw, "  --no-connect\tList the servers in the configs. Starts no process and opens no connection\n")
+	fprintf(tw, "  --no-connect\tList the servers in the configs and check the configs. Starts no process and opens no connection\n")
 	fprintf(tw, "  --config <file>\tRead only this file (Claude Code JSON, Cursor JSON or Codex TOML); skips auto-discovery\n")
 	fprintf(tw, "  \tA file that is not your own global config is read as an untrusted project file\n")
 	fprintf(tw, "  --rules <dir>\tLoad extra *.yaml and *.yml rules from this folder (not recursive)\n")
@@ -196,8 +198,9 @@ func scanUsage(w io.Writer) {
 
 	fprintf(w, "\nScan output:\n")
 	fprintf(w, "  A heuristic masks secret-like arguments. Review the output before you share it.\n")
-	// The same text as the notice that a scan with exit code 0 prints.
-	fprintf(w, "  --no-connect: %s.\n", noRulesText)
+	fprintf(w, "  --no-connect: scan runs only the built-in config rules (T4 and T5). The tool rules need a connection.\n")
+	fprintf(w, "  Rules from --rules are loaded and checked, but not applied yet.\n")
+	fprintf(w, "  Exit code 1 means a finding of severity high or above that is not ignored.\n")
 }
 
 // fprintf writes formatted text to w and ignores the write error on purpose.

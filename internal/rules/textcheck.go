@@ -141,11 +141,10 @@ func autoInstallText(raw string) []Hit {
 // The server has no name. Only the package is compared, so the name cannot
 // make a result.
 func newTyposquatText() (func(raw string) []Hit, error) {
-	popular, err := builtinPopular()
+	check, err := NewBuiltinTyposquat()
 	if err != nil {
 		return nil, err
 	}
-	check := NewTyposquat(popular)
 	return func(raw string) []Hit {
 		fields := strings.Fields(raw)
 		if len(fields) == 1 {

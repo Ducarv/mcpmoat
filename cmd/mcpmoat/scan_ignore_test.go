@@ -3,18 +3,20 @@ package main
 import (
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
 
+	"github.com/Ducarv/mcpmoat/internal/discover/discovertest"
 	"github.com/Ducarv/mcpmoat/internal/rules"
 )
 
 // Tests for the --ignore flag and the .mcpmoat-ignore file of "mcpmoat scan"
-// (FR-10). The ignore list is not used yet (scan has no findings before M4),
-// so these tests check only what the user sees: the usage errors of the flag,
-// the notice and the warnings for the file, and that the exit code and the
-// table on stdout never change because of ignore content.
+// (FR-10). They check what the user sees: the usage errors of the flag, the
+// notice and the warnings for the file, and the effect of the ignore list on
+// the findings block and on the exit code (TestScanIgnoreDropsFindings). An
+// ignore entry for a rule that the config does not trigger changes nothing.
 
 // ignoreUsageMsg is the end of the flag error for a bad --ignore value. The
 // flag package writes it as `invalid value "<v>" for flag -ignore: <msg>`.
@@ -56,10 +58,10 @@ func ignoreFileOfSize(size int) string {
 }
 
 // TestScanIgnoreFlag checks the --ignore flag. A valid rule ID, given once or
-// more, changes nothing that the user sees: exit code 0, the table, and only
-// the no-rules notice on stderr (the IDs come from the user, so they give no
-// notice). A value that is not a rule ID is a usage error with exit code 2
-// and an empty stdout.
+// more, for a rule that the config does not trigger, changes nothing that the
+// user sees: exit code 0, the table, and nothing on stderr (the IDs come from
+// the user, so they give no notice). A value that is not a rule ID is a usage
+// error with exit code 2 and an empty stdout.
 func TestScanIgnoreFlag(t *testing.T) {
 	t.Parallel()
 
@@ -201,7 +203,7 @@ func TestScanIgnoreFlag(t *testing.T) {
 			}
 			if tt.wantCode == exitOK {
 				assertContainsAll(t, "stdout", out, []string{"ok-srv"})
-				assertNoRulesNotice(t, errOut)
+				assertCleanStderr(t, errOut)
 			} else {
 				if out != "" {
 					t.Errorf("stdout = %q, want empty", out)
@@ -215,6 +217,244 @@ func TestScanIgnoreFlag(t *testing.T) {
 			}
 			assertContainsAll(t, "stderr", errOut, tt.wantStderr)
 			assertContainsNone(t, "stderr", errOut, tt.noStderr)
+			assertNoEscape(t, out, errOut)
+		})
+	}
+}
+
+// TestScanIgnoreDropsFindings checks that --ignore and .mcpmoat-ignore remove
+// findings from stdout and, when no finding of severity high or above is left,
+// turn exit code 1 into exit code 0. Both servers hold a plaintext secret in
+// an env entry, so each has one MOAT-T4-002 finding (high). Every case runs in
+// auto-discovery and with --config.
+func TestScanIgnoreDropsFindings(t *testing.T) {
+	t.Parallel()
+
+	const rule = "MOAT-T4-002"
+	servers := map[string]any{
+		"leaky-a": map[string]any{"command": "run", "env": map[string]string{"API_KEY": discovertest.CanaryEnv}},
+		"leaky-b": map[string]any{"command": "run", "env": map[string]string{"API_KEY": discovertest.CanaryEnv}},
+	}
+
+	tests := []struct {
+		name string
+		// file is the content of .mcpmoat-ignore ("" writes no file).
+		file string
+		// flags are more arguments after --no-connect.
+		flags []string
+		// wantServers are the SERVER cells of the MOAT-T4-002 rows that stay.
+		wantServers []string
+		wantCode    int
+		// wantNotice is the "using N entries" notice line on stderr ("" for
+		// none). It comes first.
+		wantNotice string
+		// wantIgnored is the line that counts the dropped findings ("" for
+		// none: a scan that drops nothing prints no such line). It follows
+		// the notice.
+		wantIgnored string
+	}{
+		{
+			name:        "no ignore entry",
+			wantServers: []string{"leaky-a", "leaky-b"},
+			wantCode:    exitFindings,
+		},
+		{
+			name:        "flag by rule",
+			flags:       []string{"--ignore", rule},
+			wantCode:    exitOK,
+			wantIgnored: "mcpmoat scan: 2 findings ignored: MOAT-T4-002 (2)",
+		},
+		{
+			name:        "flag for another rule",
+			flags:       []string{"--ignore", "MOAT-T4-003"},
+			wantServers: []string{"leaky-a", "leaky-b"},
+			wantCode:    exitFindings,
+		},
+		{
+			// The comparison is case-sensitive, so this is another rule.
+			name:        "flag with the wrong case",
+			flags:       []string{"--ignore", "moat-t4-002"},
+			wantServers: []string{"leaky-a", "leaky-b"},
+			wantCode:    exitFindings,
+		},
+		{
+			name:        "file by rule",
+			file:        rule + "\n",
+			wantCode:    exitOK,
+			wantIgnored: "mcpmoat scan: 2 findings ignored: MOAT-T4-002 (2)",
+			wantNotice:  "mcpmoat scan: using 1 entry from .mcpmoat-ignore",
+		},
+		{
+			// Only leaky-a is silenced, so leaky-b keeps the exit code at 1.
+			name:        "file by rule and server",
+			file:        rule + " leaky-a\n",
+			wantServers: []string{"leaky-b"},
+			wantCode:    exitFindings,
+			wantIgnored: "mcpmoat scan: 1 finding ignored: MOAT-T4-002 (1)",
+			wantNotice:  "mcpmoat scan: using 1 entry from .mcpmoat-ignore",
+		},
+		{
+			name:        "file by rule and server for both servers",
+			file:        rule + " leaky-a\n" + rule + " leaky-b\n",
+			wantCode:    exitOK,
+			wantIgnored: "mcpmoat scan: 2 findings ignored: MOAT-T4-002 (2)",
+			wantNotice:  "mcpmoat scan: using 2 entries from .mcpmoat-ignore",
+		},
+		{
+			// A server entry for another rule drops nothing.
+			name:        "file by another rule and server",
+			file:        "MOAT-T4-003 leaky-a\n",
+			wantServers: []string{"leaky-a", "leaky-b"},
+			wantCode:    exitFindings,
+			wantNotice:  "mcpmoat scan: using 1 entry from .mcpmoat-ignore",
+		},
+		{
+			// A rule entry for a server that does not exist drops nothing.
+			name:        "file by rule and unknown server",
+			file:        rule + " other-srv\n",
+			wantServers: []string{"leaky-a", "leaky-b"},
+			wantCode:    exitFindings,
+			wantNotice:  "mcpmoat scan: using 1 entry from .mcpmoat-ignore",
+		},
+		{
+			// A tool entry does not match a server-level finding.
+			name:        "file by rule and tool",
+			file:        rule + " leaky-a/read_file\n",
+			wantServers: []string{"leaky-a", "leaky-b"},
+			wantCode:    exitFindings,
+			wantNotice:  "mcpmoat scan: using 1 entry from .mcpmoat-ignore",
+		},
+		{
+			name:        "file by server plus flag by rule",
+			file:        rule + " leaky-a\n",
+			flags:       []string{"--ignore", rule},
+			wantCode:    exitOK,
+			wantIgnored: "mcpmoat scan: 2 findings ignored: MOAT-T4-002 (2)",
+			wantNotice:  "mcpmoat scan: using 1 entry from .mcpmoat-ignore",
+		},
+		{
+			// A comment line is no entry, so there is no notice either.
+			name:        "commented line",
+			file:        "# " + rule + "\n",
+			wantServers: []string{"leaky-a", "leaky-b"},
+			wantCode:    exitFindings,
+		},
+	}
+
+	for _, tt := range tests {
+		for _, mode := range configModes {
+			t.Run(tt.name+"/"+mode, func(t *testing.T) {
+				t.Parallel()
+
+				home, work := t.TempDir(), t.TempDir()
+				args := scanServersArgs(t, mode, home, servers)
+				if tt.file != "" {
+					writeTestFile(t, work, rules.IgnoreFileName, tt.file)
+				}
+				args = append(args, tt.flags...)
+				c, stdout, stderr := dirsCLI(t, home, work)
+
+				code, out, errOut := runScanArgs(c, stdout, stderr, args...)
+
+				if code != tt.wantCode {
+					t.Errorf("exit code = %d, want %d\nstdout:\n%s\nstderr:\n%s", code, tt.wantCode, out, errOut)
+				}
+				// The server table never changes: both servers stay in it.
+				if got := column(tableRows(t, out), 0); !slices.Equal(got, []string{"leaky-a", "leaky-b"}) {
+					t.Errorf("table servers = %v, want both\nstdout:\n%s", got, out)
+				}
+				rows := findingRows(t, out)
+				var gotServers []string
+				for _, row := range rows {
+					if row[0] == rule {
+						gotServers = append(gotServers, row[2])
+					}
+				}
+				if !slices.Equal(gotServers, tt.wantServers) {
+					t.Errorf("%s findings for servers %v, want %v\nstdout:\n%s", rule, gotServers, tt.wantServers, out)
+				}
+				// A scan that drops every finding prints no findings block.
+				if tt.wantServers == nil && len(rows) != 0 {
+					t.Errorf("stdout still holds a findings block\n%s", out)
+				}
+				var wantLines []lineWant
+				if tt.wantNotice != "" {
+					wantLines = append(wantLines, exactLine(tt.wantNotice))
+				}
+				if tt.wantIgnored != "" {
+					wantLines = append(wantLines, exactLine(tt.wantIgnored))
+				}
+				if len(wantLines) == 0 {
+					assertCleanStderr(t, errOut)
+				} else {
+					assertStderrLines(t, errOut, wantLines)
+				}
+				if tt.wantIgnored == "" && strings.Contains(errOut, "ignored:") {
+					t.Errorf("stderr has an ignored line, but nothing is dropped\nstderr:\n%s", errOut)
+				}
+				// The secret value never shows, in the findings block too.
+				assertNoLeakBoth(t, out, errOut)
+				assertNoEscape(t, out, errOut)
+			})
+		}
+	}
+}
+
+// TestScanIgnoreHiddenHighFinding is the security case of FR-10: a project
+// .mcpmoat-ignore file in the scanned folder (which can be untrusted) hides a
+// high finding. The exit code stays 0, so the file does change the verdict.
+// Then scan must not be silent about it: the ignored line is on stderr. The
+// line names only the rule ID and a count, never a server name or a key.
+func TestScanIgnoreHiddenHighFinding(t *testing.T) {
+	t.Parallel()
+
+	const (
+		rule       = "MOAT-T4-002"
+		serverName = "hidden-high-srv"
+		envKey     = "HIDDEN_HIGH_KEY_NAME"
+		wantLine   = "mcpmoat scan: 1 finding ignored: MOAT-T4-002 (1)"
+	)
+	servers := map[string]any{
+		serverName: map[string]any{"command": "run", "env": map[string]string{envKey: discovertest.CanaryEnv}},
+	}
+
+	for _, mode := range configModes {
+		t.Run(mode, func(t *testing.T) {
+			t.Parallel()
+
+			home, work := t.TempDir(), t.TempDir()
+			args := scanServersArgs(t, mode, home, servers)
+
+			// Control run: without the file the high finding fails the scan.
+			c, stdout, stderr := dirsCLI(t, home, work)
+			code, out, errOut := runScanArgs(c, stdout, stderr, args...)
+			if code != exitFindings {
+				t.Fatalf("control: exit code = %d, want %d\nstdout:\n%s\nstderr:\n%s", code, exitFindings, out, errOut)
+			}
+			if !slices.Contains(findingIDs(findingRows(t, out)), rule) {
+				t.Fatalf("control: stdout has no %s finding\n%s", rule, out)
+			}
+			assertCleanStderr(t, errOut)
+
+			// With the project ignore file the finding is hidden.
+			writeTestFile(t, work, rules.IgnoreFileName, rule+" "+serverName+"\n")
+			c, stdout, stderr = dirsCLI(t, home, work)
+			code, out, errOut = runScanArgs(c, stdout, stderr, args...)
+
+			if code != exitOK {
+				t.Errorf("exit code = %d, want %d\nstdout:\n%s\nstderr:\n%s", code, exitOK, out, errOut)
+			}
+			if len(findingRows(t, out)) != 0 {
+				t.Errorf("stdout still holds a findings block\n%s", out)
+			}
+			assertStderrLines(t, errOut, []lineWant{
+				exactLine("mcpmoat scan: using 1 entry from .mcpmoat-ignore"),
+				exactLine(wantLine),
+			})
+			// The ignored line holds no server name and no key. (The notice
+			// line cannot, so check the whole stderr.)
+			assertContainsNone(t, "stderr", errOut, []string{serverName, envKey})
+			assertNoLeakBoth(t, out, errOut)
 			assertNoEscape(t, out, errOut)
 		})
 	}
@@ -240,7 +480,7 @@ func TestScanIgnoreFile(t *testing.T) {
 		{
 			name:      "no file",
 			setup:     func(*testing.T, string) {},
-			wantLines: []lineWant{exactLine(noRulesNotice)},
+			wantLines: nil,
 		},
 		{
 			name: "two entries",
@@ -249,7 +489,6 @@ func TestScanIgnoreFile(t *testing.T) {
 			},
 			wantLines: []lineWant{
 				exactLine("mcpmoat scan: using 2 entries from .mcpmoat-ignore"),
-				exactLine(noRulesNotice),
 			},
 		},
 		{
@@ -259,7 +498,6 @@ func TestScanIgnoreFile(t *testing.T) {
 			},
 			wantLines: []lineWant{
 				exactLine("mcpmoat scan: using 1 entry from .mcpmoat-ignore"),
-				exactLine(noRulesNotice),
 			},
 		},
 		{
@@ -269,7 +507,6 @@ func TestScanIgnoreFile(t *testing.T) {
 			},
 			wantLines: []lineWant{
 				exactLine("mcpmoat scan: using 3 entries from .mcpmoat-ignore"),
-				exactLine(noRulesNotice),
 			},
 		},
 		{
@@ -277,14 +514,14 @@ func TestScanIgnoreFile(t *testing.T) {
 			setup: func(t *testing.T, work string) {
 				writeTestFile(t, work, rules.IgnoreFileName, "# nothing here\n\n   # indented comment\n\t\n")
 			},
-			wantLines: []lineWant{exactLine(noRulesNotice)},
+			wantLines: nil,
 		},
 		{
 			name: "empty file",
 			setup: func(t *testing.T, work string) {
 				writeTestFile(t, work, rules.IgnoreFileName, "")
 			},
-			wantLines: []lineWant{exactLine(noRulesNotice)},
+			wantLines: nil,
 		},
 		{
 			name: "malformed lines 2 and 4",
@@ -296,7 +533,6 @@ func TestScanIgnoreFile(t *testing.T) {
 				prefixLine(scanWarnPrefix + ".mcpmoat-ignore:2: "),
 				prefixLine(scanWarnPrefix + ".mcpmoat-ignore:4: "),
 				exactLine("mcpmoat scan: using 2 entries from .mcpmoat-ignore"),
-				exactLine(noRulesNotice),
 			},
 		},
 		{
@@ -308,7 +544,6 @@ func TestScanIgnoreFile(t *testing.T) {
 			wantLines: []lineWant{
 				prefixLine(scanWarnPrefix + ".mcpmoat-ignore:1: "),
 				prefixLine(scanWarnPrefix + ".mcpmoat-ignore:2: "),
-				exactLine(noRulesNotice),
 			},
 		},
 		{
@@ -323,7 +558,6 @@ func TestScanIgnoreFile(t *testing.T) {
 				// parser, so line 2 can be an entry or a warning. Both are
 				// fine; only the escaping matters here.
 				prefixLine("mcpmoat scan: "),
-				exactLine(noRulesNotice),
 			},
 		},
 		{
@@ -333,7 +567,6 @@ func TestScanIgnoreFile(t *testing.T) {
 			},
 			wantLines: []lineWant{
 				prefixLine(scanWarnPrefix + ".mcpmoat-ignore:1: "),
-				exactLine(noRulesNotice),
 			},
 		},
 		{
@@ -344,7 +577,6 @@ func TestScanIgnoreFile(t *testing.T) {
 			wantLines: []lineWant{
 				prefixLine(scanWarnPrefix + ".mcpmoat-ignore:1: "),
 				exactLine("mcpmoat scan: using 1 entry from .mcpmoat-ignore"),
-				exactLine(noRulesNotice),
 			},
 		},
 		{
@@ -356,7 +588,6 @@ func TestScanIgnoreFile(t *testing.T) {
 			},
 			wantLines: []lineWant{
 				prefixLine(scanWarnPrefix),
-				exactLine(noRulesNotice),
 			},
 			wantStderr: []string{".mcpmoat-ignore", "not a regular file"},
 		},
@@ -367,7 +598,6 @@ func TestScanIgnoreFile(t *testing.T) {
 			},
 			wantLines: []lineWant{
 				prefixLine(scanWarnPrefix),
-				exactLine(noRulesNotice),
 			},
 			wantStderr: []string{".mcpmoat-ignore", "larger than"},
 		},
@@ -378,7 +608,6 @@ func TestScanIgnoreFile(t *testing.T) {
 			},
 			wantLines: []lineWant{
 				exactLine("mcpmoat scan: using 1 entry from .mcpmoat-ignore"),
-				exactLine(noRulesNotice),
 			},
 		},
 		{
@@ -390,7 +619,6 @@ func TestScanIgnoreFile(t *testing.T) {
 			},
 			wantLines: []lineWant{
 				prefixLine(scanWarnPrefix),
-				exactLine(noRulesNotice),
 			},
 			wantStderr: []string{".mcpmoat-ignore"},
 		},
@@ -467,7 +695,7 @@ func TestScanIgnoreFileWarningCap(t *testing.T) {
 	if last := warnings[rules.MaxIgnoreWarnings]; !strings.HasPrefix(last, scanWarnPrefix+".mcpmoat-ignore: ") {
 		t.Errorf("summary warning = %q, want it to start with %q", last, scanWarnPrefix+".mcpmoat-ignore: ")
 	}
-	assertContainsAll(t, "stderr", errOut, []string{"mcpmoat scan: using 1 entry from .mcpmoat-ignore", noRulesNotice})
+	assertContainsAll(t, "stderr", errOut, []string{"mcpmoat scan: using 1 entry from .mcpmoat-ignore"})
 	assertNoIgnoreContent(t, errOut)
 	assertNoEscape(t, out, errOut)
 }
@@ -491,7 +719,6 @@ func TestScanIgnoreFileNoticeCountsOnlyFileEntries(t *testing.T) {
 	}
 	assertStderrLines(t, errOut, []lineWant{
 		exactLine("mcpmoat scan: using 1 entry from .mcpmoat-ignore"),
-		exactLine(noRulesNotice),
 	})
 	assertNoEscape(t, out, errOut)
 }
@@ -518,7 +745,6 @@ func TestScanIgnoreFileDoesNotChangeErrorExit(t *testing.T) {
 		".claude.json",
 		configErrorHint,
 	})
-	assertNoticeForCode(t, exitError, errOut)
 	assertScanPrefix(t, errOut)
 	assertNoEscape(t, out, errOut)
 }
@@ -543,7 +769,6 @@ func TestScanIgnoreFileConfigMode(t *testing.T) {
 			ignore: "MOAT-T1-003\nMOAT-T1-004 ok-srv\n",
 			wantLines: []lineWant{
 				exactLine("mcpmoat scan: using 2 entries from .mcpmoat-ignore"),
-				exactLine(noRulesNotice),
 			},
 		},
 		{
@@ -552,7 +777,6 @@ func TestScanIgnoreFileConfigMode(t *testing.T) {
 			ignore: "MOAT-T1-003\n",
 			wantLines: []lineWant{
 				exactLine("mcpmoat scan: using 1 entry from .mcpmoat-ignore"),
-				exactLine(noRulesNotice),
 			},
 		},
 		{
@@ -560,7 +784,6 @@ func TestScanIgnoreFileConfigMode(t *testing.T) {
 			ignore: ignoreMarker + "/bad\n",
 			wantLines: []lineWant{
 				prefixLine(scanWarnPrefix + ".mcpmoat-ignore:1: "),
-				exactLine(noRulesNotice),
 			},
 		},
 	}
@@ -610,7 +833,6 @@ func TestScanIgnoreConfigModeWithoutWorkDir(t *testing.T) {
 			wantCode: exitOK,
 			wantLines: []lineWant{
 				exactLine(ignoreCwdWarning),
-				exactLine(noRulesNotice),
 			},
 		},
 		{
@@ -619,7 +841,6 @@ func TestScanIgnoreConfigModeWithoutWorkDir(t *testing.T) {
 			wantCode: exitOK,
 			wantLines: []lineWant{
 				exactLine(ignoreCwdWarning),
-				exactLine(noRulesNotice),
 			},
 		},
 		{
