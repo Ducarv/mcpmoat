@@ -69,7 +69,7 @@ When the ignore list drops findings, `scan` also prints one line on stderr after
 table. It gives the count for each rule ID, for example
 `mcpmoat scan: 2 findings ignored: MOAT-T4-002 (2)`. It shows only rule IDs and counts. A
 `.mcpmoat-ignore` in a repository that you did not write can hide findings, so check this line and
-the file. Ignored findings do not change the exit code.
+the file. Ignored findings do not count for the exit code, so the file can turn exit code 1 into 0.
 
 ## Build from source
 
@@ -94,6 +94,8 @@ go build -o mcpmoat ./cmd/mcpmoat
   command your client already runs. mcpmoat will use no shell. The server will get only the env
   from its config plus a small allowlist of safe variables, such as `PATH` and `HOME`. This env
   scrub is not a sandbox: the server runs as you and can read your files and use the network.
+- `scan --rules <dir>` loads and checks extra rule files, but `scan` does not apply them yet. It
+  prints `mcpmoat scan: rules from --rules are loaded and checked, but not applied yet` on stderr.
 
 ## Documentation
 

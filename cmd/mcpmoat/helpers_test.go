@@ -108,7 +108,7 @@ var findingsHeader = []string{"RULE", "SEVERITY", "SERVER", "FIELD", "KEY/RELATE
 // space.
 func findingRows(t *testing.T, stdout string) [][]string {
 	t.Helper()
-	_, after, found := strings.Cut(stdout, "\n\n")
+	_, after, found := splitScanOutput(stdout)
 	if !found {
 		return nil
 	}
@@ -121,6 +121,45 @@ func findingRows(t *testing.T, stdout string) [][]string {
 		rows = append(rows, strings.Fields(line))
 	}
 	return rows
+}
+
+// splitScanOutput splits the stdout of a scan at the first blank line: the
+// server table comes before it, the findings table after it. found is false
+// when stdout has no blank line (no findings).
+func splitScanOutput(stdout string) (table, findings string, found bool) {
+	return strings.Cut(stdout, "\n\n")
+}
+
+// dangerousCanaries are the synthetic canaries of testdata/configs/dangerous:
+// a header value, a token, an arg and a URL query value. They are not
+// credentials, and they must not appear anywhere in stdout or stderr.
+var dangerousCanaries = []string{
+	"mcpmoat-canary-header-8Fk2Zs",
+	"ghp_mcpmoatcanaryZk3Qp8Vw2LxN7rTb5HcYd4M",
+	"Zq8Lm3Vx0Rt5Ws2Hy7Nb4Kd1",
+	"Jt6Pc9Gh2Fw8Ye4Ua1Xs7Mq3",
+}
+
+// configModes are the two ways a test gives scan its config: "auto"
+// (auto-discovery in the home folder) and "config" (--config on one file).
+var configModes = []string{"auto", "config"}
+
+// scanServersArgs writes servers for mode and returns the scan arguments. In
+// mode "auto" it writes .claude.json in home. In mode "config" it writes
+// mcp.json in a new temporary folder and passes it with --config. Any other
+// mode fails the test.
+func scanServersArgs(t *testing.T, mode, home string, servers map[string]any) []string {
+	t.Helper()
+	args := []string{"scan", "--no-connect"}
+	switch mode {
+	case "auto":
+		writeServers(t, home, ".claude.json", servers)
+	case "config":
+		args = append(args, "--config", writeServers(t, t.TempDir(), "mcp.json", servers))
+	default:
+		t.Fatalf("unknown scan mode %q", mode)
+	}
+	return args
 }
 
 // findingIDs returns the rule ID (the first word) of each findings row.
@@ -162,8 +201,8 @@ func assertContainsAll(t *testing.T, what, got string, wants []string) {
 
 // assertScanErrorLines fails the test if a non-empty line of stderr does not
 // start with "mcpmoat scan: ", or if it is a warning. A config problem fails
-// the scan, so scan must report it as an error and never as a warning. The
-// An ignore-file notice ("using 1 entry from ...") has the same prefix and is
+// the scan, so scan must report it as an error and never as a warning. An
+// ignore-file notice ("using 1 entry from ...") has the same prefix and is
 // not a warning either.
 func assertScanErrorLines(t *testing.T, stderr string) {
 	t.Helper()

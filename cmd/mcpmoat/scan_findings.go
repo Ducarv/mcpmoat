@@ -6,10 +6,17 @@ import (
 	"github.com/Ducarv/mcpmoat/internal/rules"
 )
 
-// configFindings runs the static config checks on every server and returns
-// one report row for each finding that the ignore list does not drop. The
-// order of the rows follows the order of servers. For one server, the T4
-// checks (rules.CheckConfig) come first, then the T5 check (typo.Check).
+// configChecks holds what the config rules need: the rule set (for the
+// severity of a finding) and the typosquat check (T5).
+type configChecks struct {
+	set  *rules.Set
+	typo *rules.Typosquat
+}
+
+// findings runs the static config checks on every server and returns one
+// report row for each finding that the ignore list does not drop. The order
+// of the rows follows the order of servers. For one server, the T4 checks
+// (rules.CheckConfig) come first, then the T5 check (typo.Check).
 //
 // The servers are checked as discover gives them, with no expansion of
 // variables in the command, args or URL. The checks look at the text in the
@@ -27,12 +34,12 @@ import (
 // folder and hide a finding. The map holds only rule IDs and counts.
 //
 // A nil ignore list ignores nothing.
-func configFindings(set *rules.Set, typo *rules.Typosquat, ignore *rules.IgnoreList, servers []discover.Server) ([]report.FindingRow, map[string]int) {
+func (cc configChecks) findings(ignore *rules.IgnoreList, servers []discover.Server) ([]report.FindingRow, map[string]int) {
 	var rows []report.FindingRow
 	var ignored map[string]int
 	for _, s := range servers {
 		found := rules.CheckConfig(s)
-		found = append(found, typo.Check(s)...)
+		found = append(found, cc.typo.Check(s)...)
 		for _, f := range found {
 			key := rules.FindingKey{RuleID: f.RuleID, Server: f.Server, Tool: f.Tool}
 			if ignore.Ignored(key) {
@@ -44,7 +51,7 @@ func configFindings(set *rules.Set, typo *rules.Typosquat, ignore *rules.IgnoreL
 			}
 			rows = append(rows, report.FindingRow{
 				RuleID:   f.RuleID,
-				Severity: findingSeverity(set, f.RuleID),
+				Severity: findingSeverity(cc.set, f.RuleID),
 				Server:   f.Server,
 				Field:    f.Field,
 				Key:      f.Key,

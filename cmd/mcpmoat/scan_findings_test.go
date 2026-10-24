@@ -17,29 +17,25 @@ import (
 // see fixtures_test.go). Each test runs the scan on a copy of the fixture, in
 // auto-discovery and with --config, and compares the whole findings table.
 
-// Synthetic canaries of testdata/configs/dangerous. They must not appear
-// anywhere in stdout or stderr.
-const (
-	findingsCanaryHeader = "mcpmoat-canary-header-8Fk2Zs"
-	findingsCanaryToken  = "ghp_mcpmoatcanaryZk3Qp8Vw2LxN7rTb5HcYd4M" //nolint:gosec // G101: synthetic canary of the test fixture, not a credential
-	findingsCanaryArg    = "Zq8Lm3Vx0Rt5Ws2Hy7Nb4Kd1"                 //nolint:gosec // G101: synthetic canary of the test fixture, not a credential
-	findingsCanaryURL    = "Jt6Pc9Gh2Fw8Ye4Ua1Xs7Mq3"
-
-	// findingsFixtureHost is the host of the remote servers of the fixtures.
-	// The server table may show it, the findings block must not.
-	findingsFixtureHost = "mcp.example.invalid"
-)
+// findingsFixtureHost is the host of the remote servers of the fixtures. The
+// server table may show it, the findings block must not.
+const findingsFixtureHost = "mcp.example.invalid"
 
 // findingsScan runs "scan --no-connect" on a copy of the fixture
 // testdata/configs/<fixture>, in auto-discovery (mode "auto") or with
-// --config on the copy of .cursor/mcp.json (mode "config"). It returns the
-// exit code, stdout and stderr. It never touches the real $HOME.
+// --config on the copy of .cursor/mcp.json (mode "config"). Any other mode
+// fails the test. It returns the exit code, stdout and stderr. It never
+// touches the real $HOME.
 func findingsScan(t *testing.T, fixture, mode string) (code int, stdout, stderr string) {
 	t.Helper()
 	home, work := discovertest.CopyFixture(t, testdataPath("configs", fixture))
 	args := []string{"scan", "--no-connect"}
-	if mode == "config" {
+	switch mode {
+	case "auto":
+	case "config":
 		args = append(args, "--config", filepath.Join(home, ".cursor", "mcp.json"))
+	default:
+		t.Fatalf("unknown scan mode %q", mode)
 	}
 	c, out, errOut := dirsCLI(t, home, work)
 	return runScanArgs(c, out, errOut, args...)
@@ -65,7 +61,7 @@ func assertFindingRows(t *testing.T, stdout string, want [][]string) {
 // is the findings table. It fails the test when stdout has no blank line.
 func findingsBlock(t *testing.T, stdout string) string {
 	t.Helper()
-	_, block, found := strings.Cut(stdout, "\n\n")
+	_, block, found := splitScanOutput(stdout)
 	if !found {
 		t.Fatalf("stdout has no findings block\nstdout:\n%s", stdout)
 	}
@@ -98,9 +94,9 @@ func TestScanFindingsDangerousFixture(t *testing.T) {
 		{"MOAT-T4-002", "high", "remote-plain", "headers", "X-Api-Key"},
 		{"MOAT-T4-002", "high", "remote-url-secret", "url", "-"},
 	}
-	canaries := []string{findingsCanaryHeader, findingsCanaryToken, findingsCanaryArg, findingsCanaryURL}
+	canaries := dangerousCanaries
 
-	for _, mode := range []string{"auto", "config"} {
+	for _, mode := range configModes {
 		t.Run(mode, func(t *testing.T) {
 			t.Parallel()
 
@@ -145,14 +141,13 @@ func TestScanFindingsTyposquatFixture(t *testing.T) {
 		{"MOAT-T4-004", "low", "memory", "args", "-"},
 	}
 
-	for _, mode := range []string{"auto", "config"} {
+	for _, mode := range configModes {
 		t.Run(mode, func(t *testing.T) {
 			t.Parallel()
 
 			code, stdout, stderr := findingsScan(t, "typosquat", mode)
 
 			assertScanResult(t, code, stdout, stderr, scanWant{code: exitOK})
-			assertCleanStderr(t, stderr)
 			if got := column(tableRows(t, stdout), 0); !slices.Equal(got, wantServers) {
 				t.Errorf("table servers = %v, want %v\nstdout:\n%s", got, wantServers, stdout)
 			}
@@ -304,8 +299,8 @@ func TestHasFailingFinding(t *testing.T) {
 	}
 }
 
-// TestConfigFindings checks configFindings with servers built in the test: the
-// rows, the severity of every row, the ignore list and the secrets.
+// TestConfigFindings checks configChecks.findings with servers built in the
+// test: the rows, the severity of every row, the ignore list and the secrets.
 func TestConfigFindings(t *testing.T) {
 	t.Parallel()
 	set := builtinSet(t)
@@ -351,7 +346,7 @@ func TestConfigFindings(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			rows, ignored := configFindings(set, typo, tt.ignore, servers)
+			rows, ignored := configChecks{set: set, typo: typo}.findings(tt.ignore, servers)
 
 			if got := hasRule(rows, rules.RulePlaintextSecret); got != tt.wantSecret {
 				t.Errorf("rows hold %s = %v, want %v\nrows: %+v", rules.RulePlaintextSecret, got, tt.wantSecret, rows)

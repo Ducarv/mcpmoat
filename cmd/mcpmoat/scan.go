@@ -6,8 +6,9 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"maps"
 	"path/filepath"
-	"sort"
+	"slices"
 	"strings"
 	"time"
 
@@ -136,6 +137,11 @@ func (c *cli) runScan(_ options, args []string) int {
 		fprintf(c.stderr, "mcpmoat scan: connecting to servers is not implemented yet; use --no-connect\n")
 		return exitError
 	}
+	// A rule from --rules can target the config, but scan applies only the
+	// built-in config checks. Say so, or such a rule would pass in silence.
+	if rulesDir != "" {
+		fprintf(c.stderr, "%s\n", rulesNotAppliedNotice)
+	}
 
 	// The typosquat check is built once and used for every server. An error
 	// means a bug in mcpmoat (the list is part of the binary), so the message
@@ -157,12 +163,9 @@ func (c *cli) runScan(_ options, args []string) int {
 	return c.scanAuto(ctx, ignoreIDs, checks)
 }
 
-// configChecks holds what the config rules need: the rule set (for the
-// severity of a finding) and the typosquat check (T5).
-type configChecks struct {
-	set  *rules.Set
-	typo *rules.Typosquat
-}
+// rulesNotAppliedNotice is the line that runScan prints on stderr when
+// --rules is given. It is fixed text: it holds no path and no rule text.
+const rulesNotAppliedNotice = "mcpmoat scan: rules from --rules are loaded and checked, but not applied yet"
 
 // connectOptions builds the inspect options from the --timeout and
 // --concurrency flags. inspect.Options.Validate holds the rules. Its messages
@@ -265,7 +268,7 @@ func (c *cli) scanConfig(ctx context.Context, path string, ignoreIDs []string, c
 		c.printFileErrors(res.Errors)
 		return exitError
 	}
-	return c.listServers(res, checks, &ignore)
+	return c.reportScan(res, checks, &ignore)
 }
 
 // scanAuto looks for the config files of the known clients, in the home
@@ -283,7 +286,7 @@ func (c *cli) scanAuto(ctx context.Context, ignoreIDs []string, checks configChe
 		return exitError
 	}
 	ignore := c.loadIgnore(wd, ignoreIDs)
-	return c.listServers(discover.Discover(ctx, discover.Options{Home: home, WorkDir: wd}), checks, &ignore)
+	return c.reportScan(discover.Discover(ctx, discover.Options{Home: home, WorkDir: wd}), checks, &ignore)
 }
 
 // scanWarnf prints one scan warning line on stderr.
@@ -328,34 +331,33 @@ func (c *cli) loadIgnore(wd string, ids []string) rules.IgnoreList {
 	return list
 }
 
-// configErrorHint is the line that listServers prints after the file
+// configErrorHint is the line that reportScan prints after the file
 // problems, when it printed the table. It is fixed text: it holds no path and
 // no config text.
 const configErrorHint = "mcpmoat scan: a config file has a problem; " +
 	"the table can miss servers that the client loads"
 
-// listServers prints the server table and the findings on stdout and the file
-// problems on stderr, and returns the exit code. The findings come from the
-// config rules (see configFindings), and the ignore list drops some of them.
-// When the ignore list dropped at least one finding, listServers prints one
-// line on stderr after the findings, with the rule IDs and their counts (see
-// printIgnored). This line does not change the exit code.
+// reportScan runs the config rules on the servers of res (see
+// configChecks.findings), prints the server table and the findings on stdout
+// and the file problems on stderr, and returns the exit code. When the ignore
+// list dropped at least one finding, reportScan prints one line on stderr
+// after the findings, with the rule IDs and their counts (see printIgnored).
+// This line does not change the exit code.
 // The runScan doc holds the exit-code contract: 2 for a write error or a
 // config file problem, else 1 for a finding of severity high or above, else 0.
-func (c *cli) listServers(res discover.Result, checks configChecks, ignore *rules.IgnoreList) int {
-	// Do not use fprintf for the table: a write error (a closed pipe, for
+func (c *cli) reportScan(res discover.Result, checks configChecks, ignore *rules.IgnoreList) int {
+	rows, ignored := checks.findings(ignore, res.Servers)
+
+	// Do not use fprintf for the tables: a write error (a closed pipe, for
 	// example) must give exit code 2.
-	if err := report.WriteServers(c.stdout, res.Servers); err != nil {
+	err := report.WriteServers(c.stdout, res.Servers)
+	if err == nil {
+		err = report.WriteFindings(c.stdout, rows)
+	}
+	if err != nil {
 		fprintf(c.stderr, "mcpmoat scan: cannot write output\n")
 		// stderr can still work. The file problems are the reason for a
 		// failed scan, so the user must still see them.
-		c.printFileErrors(res.Errors)
-		return exitError
-	}
-
-	rows, ignored := configFindings(checks.set, checks.typo, ignore, res.Servers)
-	if err := report.WriteFindings(c.stdout, rows); err != nil {
-		fprintf(c.stderr, "mcpmoat scan: cannot write output\n")
 		c.printFileErrors(res.Errors)
 		return exitError
 	}
@@ -384,16 +386,12 @@ func (c *cli) printIgnored(ignored map[string]int) {
 	if len(ignored) == 0 {
 		return
 	}
-	ids := make([]string, 0, len(ignored))
-	total := 0
-	for id, n := range ignored {
-		ids = append(ids, id)
-		total += n
-	}
-	sort.Strings(ids)
+	ids := slices.Sorted(maps.Keys(ignored))
 	parts := make([]string, len(ids))
+	total := 0
 	for i, id := range ids {
 		parts[i] = fmt.Sprintf("%s (%d)", id, ignored[id])
+		total += ignored[id]
 	}
 	noun := "findings"
 	if total == 1 {

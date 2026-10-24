@@ -92,11 +92,12 @@ go list -f '{{.ImportPath}}: {{join .Imports " "}}' ./...
 5. It runs the built-in config rules on every server it found, also a disabled one, as `discover`
    gives it. `rules.CheckConfig` gives the T4 findings (MOAT-T4-001 to 004). The typosquat check
    from `rules.NewBuiltinTyposquat` gives the T5 finding (MOAT-T5-001). The ignore list drops
-   some findings. `listServers` prints the ignored count for each rule ID on stderr (only rule
-   IDs and counts, no server names). The rule set gives the severity of each one that is left.
+   some findings. The rule set gives the severity of each one that is left.
 6. `report.WriteServers` prints the servers. Then, only when findings are left,
    `report.WriteFindings` prints a blank line and a table of them. The table holds the rule ID, the
-   severity, the server, the field and the key or related name. It never holds a value.
+   severity, the server, the field and the key or related name. It never holds a value. Last,
+   `reportScan` prints the ignored count for each rule ID on stderr (only rule IDs and counts, no
+   server names).
 
 Steps 1 and 2 always run. Steps 3 to 6 run only with `--no-connect`. Without `--no-connect`,
 `scan` prints "not implemented yet" after step 2 and exits with 2. The exit codes
@@ -108,7 +109,7 @@ no JSON output.
 The code below is built and tested, but `scan` does not call it yet: `inspect.Run`, `inspect.New`
 (`SDKInspector`), `inspect.Remote` and `rules.CheckShadowing`. The tool rules (descriptions and
 schemas) do not run yet. `scan` loads the rules from `--rules` and checks them, but does not apply
-them.
+them. It prints a notice on stderr that says so.
 
 ### Planned (PRD section 8)
 

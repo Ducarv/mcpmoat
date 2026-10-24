@@ -15,12 +15,11 @@ import (
 )
 
 // Exit codes (PRD FR-16): 0 no findings, 1 findings at or above --fail-on,
-// 2 execution or usage error.
+// 2 execution or usage error. Until --fail-on exists (issue #65), the limit
+// is high, the PRD default.
 const (
-	exitOK = 0 // success, no findings
-	// exitFindings means a finding that is not ignored has severity high or
-	// above. High is the PRD default of --fail-on. The flag comes with issue #65.
-	exitFindings = 1
+	exitOK       = 0 // success, no findings
+	exitFindings = 1 // a finding that is not ignored has severity high or above
 	exitError    = 2 // execution or usage error
 )
 

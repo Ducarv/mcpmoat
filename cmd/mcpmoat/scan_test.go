@@ -871,7 +871,7 @@ func TestScanNoLeak(t *testing.T) {
 func scanAssertNoSecret(t *testing.T, stdout, stderr string) {
 	t.Helper()
 	assertNoLeakBoth(t, stdout, stderr)
-	serverTable, _, _ := strings.Cut(stdout, "\n\n")
+	serverTable, _, _ := splitScanOutput(stdout)
 	for name, out := range map[string]string{"server table": serverTable, "stderr": stderr} {
 		if strings.Contains(out, "API_KEY") {
 			t.Errorf("%s shows the env key API_KEY, but it must show no env at all\n%s", name, out)

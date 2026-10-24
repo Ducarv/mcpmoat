@@ -342,18 +342,12 @@ func TestScanIgnoreDropsFindings(t *testing.T) {
 	}
 
 	for _, tt := range tests {
-		for _, mode := range []string{"auto", "config"} {
+		for _, mode := range configModes {
 			t.Run(tt.name+"/"+mode, func(t *testing.T) {
 				t.Parallel()
 
 				home, work := t.TempDir(), t.TempDir()
-				args := []string{"scan", "--no-connect"}
-				if mode == "auto" {
-					writeServers(t, home, ".claude.json", servers)
-				} else {
-					path := writeServers(t, t.TempDir(), "mcp.json", servers)
-					args = append(args, "--config", path)
-				}
+				args := scanServersArgs(t, mode, home, servers)
 				if tt.file != "" {
 					writeTestFile(t, work, rules.IgnoreFileName, tt.file)
 				}
@@ -369,8 +363,9 @@ func TestScanIgnoreDropsFindings(t *testing.T) {
 				if got := column(tableRows(t, out), 0); !slices.Equal(got, []string{"leaky-a", "leaky-b"}) {
 					t.Errorf("table servers = %v, want both\nstdout:\n%s", got, out)
 				}
+				rows := findingRows(t, out)
 				var gotServers []string
-				for _, row := range findingRows(t, out) {
+				for _, row := range rows {
 					if row[0] == rule {
 						gotServers = append(gotServers, row[2])
 					}
@@ -379,7 +374,7 @@ func TestScanIgnoreDropsFindings(t *testing.T) {
 					t.Errorf("%s findings for servers %v, want %v\nstdout:\n%s", rule, gotServers, tt.wantServers, out)
 				}
 				// A scan that drops every finding prints no findings block.
-				if tt.wantServers == nil && len(findingRows(t, out)) != 0 {
+				if tt.wantServers == nil && len(rows) != 0 {
 					t.Errorf("stdout still holds a findings block\n%s", out)
 				}
 				var wantLines []lineWant
@@ -423,17 +418,12 @@ func TestScanIgnoreHiddenHighFinding(t *testing.T) {
 		serverName: map[string]any{"command": "run", "env": map[string]string{envKey: discovertest.CanaryEnv}},
 	}
 
-	for _, mode := range []string{"auto", "config"} {
+	for _, mode := range configModes {
 		t.Run(mode, func(t *testing.T) {
 			t.Parallel()
 
 			home, work := t.TempDir(), t.TempDir()
-			args := []string{"scan", "--no-connect"}
-			if mode == "auto" {
-				writeServers(t, home, ".claude.json", servers)
-			} else {
-				args = append(args, "--config", writeServers(t, t.TempDir(), "mcp.json", servers))
-			}
+			args := scanServersArgs(t, mode, home, servers)
 
 			// Control run: without the file the high finding fails the scan.
 			c, stdout, stderr := dirsCLI(t, home, work)

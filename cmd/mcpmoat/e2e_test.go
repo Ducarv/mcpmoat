@@ -493,32 +493,19 @@ func TestE2EScanSecretsDoNotLeak(t *testing.T) {
 					}
 					// The server table and stderr show no env at all. The
 					// findings block may name the key API_KEY, never a value.
-					serverTable, _, _ := strings.Cut(stdout, "\n\n")
-					for name, out := range map[string]string{"server table": serverTable, "stderr": stderr} {
-						if strings.Contains(out, "API_KEY") {
-							t.Errorf("%s shows the env key API_KEY, but it must show no env at all\n%s", name, out)
-						}
-					}
+					scanAssertNoSecret(t, stdout, stderr)
 				})
 			}
 		})
 	}
 }
 
-// Synthetic canaries of testdata/configs/dangerous. They are not credentials.
-const (
-	e2eCanaryHeader = "mcpmoat-canary-header-8Fk2Zs"
-	e2eCanaryToken  = "ghp_mcpmoatcanaryZk3Qp8Vw2LxN7rTb5HcYd4M" //nolint:gosec // G101: synthetic canary of the test fixture, not a credential
-	e2eCanaryArg    = "Zq8Lm3Vx0Rt5Ws2Hy7Nb4Kd1"
-	e2eCanaryQuery  = "Jt6Pc9Gh2Fw8Ye4Ua1Xs7Mq3"
-)
-
 // TestE2EScanConfigFindings scans the dangerous config fixture (T4). The
 // findings block names keys, never values, and the ignore list can remove the
 // high findings and so change the exit code.
 func TestE2EScanConfigFindings(t *testing.T) {
 	t.Parallel()
-	canaries := []string{e2eCanaryHeader, e2eCanaryToken, e2eCanaryArg, e2eCanaryQuery}
+	canaries := dangerousCanaries
 
 	tests := []struct {
 		name     string
@@ -675,18 +662,20 @@ func e2eRulesDir(t *testing.T, parts ...string) string {
 }
 
 // TestE2EScanRulesExtra checks that a valid external rule folder changes
-// nothing yet, because scan loads the rules but does not apply them.
+// nothing yet, because scan loads the rules but does not apply them. The only
+// change is the notice on stderr that says so.
 func TestE2EScanRulesExtra(t *testing.T) {
 	t.Parallel()
 	home, work := t.TempDir(), t.TempDir()
 
 	stdout, stderr, code := runBin(t, home, work, "scan", "--no-connect", "--rules", e2eRulesDir(t, "extra"))
 
-	assertScanResult(t, code, stdout, stderr, scanWant{code: exitOK})
+	assertScanResult(t, code, stdout, stderr, scanWant{code: exitOK, stderr: []string{rulesNotAppliedNotice}})
 	baseOut, baseErr, baseCode := runBin(t, home, work, "scan", "--no-connect")
-	if code != baseCode || stdout != baseOut || stderr != baseErr {
+	wantErr := baseErr + rulesNotAppliedNotice + "\n"
+	if code != baseCode || stdout != baseOut || stderr != wantErr {
 		t.Errorf("--rules changes the result: exit code %d, want %d\nstdout:\n%s\nwant stdout:\n%s\nstderr:\n%s\nwant stderr:\n%s",
-			code, baseCode, stdout, baseOut, stderr, baseErr)
+			code, baseCode, stdout, baseOut, stderr, wantErr)
 	}
 }
 
