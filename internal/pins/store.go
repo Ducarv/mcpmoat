@@ -1,0 +1,296 @@
+package pins
+
+import (
+	"bytes"
+	"cmp"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"maps"
+	"os"
+	"path/filepath"
+	"slices"
+	"sync"
+	"unicode/utf8"
+
+	"github.com/Ducarv/mcpmoat/internal/safefile"
+)
+
+// CurrentVersion is the format version of pins.json that this mcpmoat reads
+// and writes.
+const CurrentVersion = 1
+
+// maxFileSize is the largest pins.json that Load reads, in bytes.
+const maxFileSize = 8 << 20
+
+// ErrUnsupportedVersion means that pins.json has a format version that this
+// mcpmoat does not know, because the file is newer. Load never reads such a
+// file, so an old binary cannot overwrite it. Test for it with errors.Is.
+var ErrUnsupportedVersion = errors.New("unsupported pins.json version")
+
+// Identity names one MCP server in the pins store.
+//
+// The fields hold the client, the config file and the server name only. They
+// never hold a secret: no args, URL, env, headers or command. ProjectPath is
+// empty for a global server.
+//
+// All fields are strings, so Identity is comparable and a valid map key.
+type Identity struct {
+	// Client is the client that owns the config, for example "claude-code".
+	Client string
+	// Source is the path of the config file that declares the server.
+	Source string
+	// ProjectPath is the project that the server belongs to. It is empty for a
+	// global server.
+	ProjectPath string
+	// Name is the name of the server in the config. It must not be empty.
+	Name string
+}
+
+// ServerPins maps a tool name to the hash of that tool. A hash is an opaque
+// non-empty string here: the hashing code owns its format.
+type ServerPins map[string]string
+
+// Store holds the pins of all servers and the path of the pins file.
+//
+// A Store is safe for use by several goroutines. Two processes that save to
+// the same path do not corrupt the file (the write is atomic), but the last
+// writer wins.
+type Store struct {
+	path string
+
+	mu sync.Mutex
+	// servers uses Identity as the key. A struct is a valid map key when all
+	// its fields are comparable, and strings are.
+	servers map[Identity]ServerPins
+}
+
+// fileFormat is the shape of pins.json, version 1.
+type fileFormat struct {
+	Version int          `json:"version"`
+	Servers []fileServer `json:"servers"`
+}
+
+// fileServer is one server entry in pins.json.
+type fileServer struct {
+	Client      string            `json:"client"`
+	Source      string            `json:"source"`
+	ProjectPath string            `json:"project_path"`
+	Name        string            `json:"name"`
+	Tools       map[string]string `json:"tools"`
+}
+
+// DefaultPath returns the path of pins.json.
+//
+// It is $XDG_CONFIG_HOME/mcpmoat/pins.json when XDG_CONFIG_HOME is set to an
+// absolute path, and ~/.config/mcpmoat/pins.json otherwise. The XDG
+// specification says that a relative value is invalid and must be ignored. We
+// do not use os.UserConfigDir, because on macOS it returns
+// ~/Library/Application Support and the PRD (FR-11) fixes ~/.config.
+func DefaultPath() (string, error) {
+	base := os.Getenv("XDG_CONFIG_HOME")
+	if base == "" || !filepath.IsAbs(base) {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return "", fmt.Errorf("find the home directory for pins.json: %w", err)
+		}
+		// A relative home would put pins.json under the working directory, which
+		// can be a cloned repository.
+		if !filepath.IsAbs(home) {
+			return "", errors.New("the home directory for pins.json is not an absolute path")
+		}
+		base = filepath.Join(home, ".config")
+	}
+	return filepath.Join(base, "mcpmoat", "pins.json"), nil
+}
+
+// Load reads the pins file at path.
+//
+// A missing file (or a missing directory) is the first run: Load returns an
+// empty Store that saves to path. Any other problem is an error, and Load
+// never replaces a bad file with an empty store, because that would pin a
+// poisoned server as trusted. The errors name the path and the position of the
+// problem, and never hold file content. A file with a newer format version
+// gives an error that wraps ErrUnsupportedVersion.
+func Load(path string) (*Store, error) {
+	s := &Store{path: path, servers: make(map[Identity]ServerPins)}
+
+	data, found, err := safefile.ReadBoundedRegularFile(filepath.Dir(path), filepath.Base(path), maxFileSize)
+	if err != nil {
+		return nil, fmt.Errorf("read %s: %w", path, err)
+	}
+	if !found {
+		return s, nil
+	}
+
+	// Read the version first with a loose decode. A future version may change
+	// the rest of the shape, and the user must then see the version error and
+	// not a shape error. json.Unmarshal also rejects trailing data, so the
+	// strict decode does not need its own check.
+	var probe struct {
+		Version *int `json:"version"`
+	}
+	if err := json.Unmarshal(data, &probe); err != nil {
+		return nil, fmt.Errorf("parse %s: %s", path, describeJSONError(err))
+	}
+	switch {
+	case probe.Version == nil:
+		return nil, fmt.Errorf("parse %s: version field is missing", path)
+	case *probe.Version < 1:
+		return nil, fmt.Errorf("parse %s: invalid version %d", path, *probe.Version)
+	case *probe.Version > CurrentVersion:
+		return nil, fmt.Errorf("%s has version %d, newer than this mcpmoat supports (%d); upgrade mcpmoat: %w",
+			path, *probe.Version, CurrentVersion, ErrUnsupportedVersion)
+	}
+
+	// Strict decode: an unknown field is an error, so a typo or a field from a
+	// different format is not dropped silently.
+	var f fileFormat
+	dec := json.NewDecoder(bytes.NewReader(data))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&f); err != nil {
+		return nil, fmt.Errorf("parse %s: %s", path, describeJSONError(err))
+	}
+
+	for i, srv := range f.Servers {
+		id := Identity{Client: srv.Client, Source: srv.Source, ProjectPath: srv.ProjectPath, Name: srv.Name}
+		if err := validateServer(id, srv.Tools); err != nil {
+			return nil, fmt.Errorf("parse %s: servers[%d]: %w", path, i, err)
+		}
+		if _, dup := s.servers[id]; dup {
+			return nil, fmt.Errorf("parse %s: servers[%d]: duplicate server identity", path, i)
+		}
+		s.servers[id] = maps.Clone(srv.Tools)
+		if s.servers[id] == nil {
+			s.servers[id] = ServerPins{}
+		}
+	}
+	return s, nil
+}
+
+// Get returns a copy of the pins of the server id. The bool is false when the
+// server has no pins. Changing the returned map does not change the Store.
+func (s *Store) Get(id Identity) (ServerPins, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	p, ok := s.servers[id]
+	if !ok {
+		return nil, false
+	}
+	return maps.Clone(p), true
+}
+
+// Set stores a copy of p as the pins of the server id. It replaces the pins of
+// that server only. It does not write the file: call Save.
+func (s *Store) Set(id Identity, p ServerPins) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	c := maps.Clone(p)
+	if c == nil {
+		c = ServerPins{}
+	}
+	s.servers[id] = c
+}
+
+// Save writes the store to its path, atomically, with file mode 0o600. A new
+// directory gets mode 0o700. The servers are sorted, so the same store always
+// gives the same bytes.
+//
+// Save refuses a store that Load would refuse: an empty server name, an empty
+// tool name, an empty hash, text that is not valid UTF-8, or data larger than
+// the size limit of Load.
+func (s *Store) Save() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	ids := slices.SortedFunc(maps.Keys(s.servers), compareIdentity)
+	f := fileFormat{Version: CurrentVersion, Servers: make([]fileServer, 0, len(ids))}
+	for _, id := range ids {
+		tools := s.servers[id]
+		if err := validateServer(id, tools); err != nil {
+			return fmt.Errorf("save %s: %w", s.path, err)
+		}
+		f.Servers = append(f.Servers, fileServer{
+			Client:      id.Client,
+			Source:      id.Source,
+			ProjectPath: id.ProjectPath,
+			Name:        id.Name,
+			Tools:       tools, // encoding/json sorts map keys.
+		})
+	}
+
+	data, err := json.MarshalIndent(f, "", "  ")
+	if err != nil {
+		return fmt.Errorf("encode pins: %w", err)
+	}
+	data = append(data, '\n')
+	// Check the size before the write, so the old file stays valid.
+	if len(data) > maxFileSize {
+		return fmt.Errorf("save %s: pins data is %d bytes, larger than the %d byte limit",
+			s.path, len(data), maxFileSize)
+	}
+
+	if err := writeFileAtomic(s.path, data); err != nil {
+		return fmt.Errorf("save %s: %w", s.path, err)
+	}
+	return nil
+}
+
+// compareIdentity orders identities by Client, Source, ProjectPath and Name.
+func compareIdentity(a, b Identity) int {
+	return cmp.Or(
+		cmp.Compare(a.Client, b.Client),
+		cmp.Compare(a.Source, b.Source),
+		cmp.Compare(a.ProjectPath, b.ProjectPath),
+		cmp.Compare(a.Name, b.Name),
+	)
+}
+
+// validateServer checks the rules that Load and Save share. The errors do not
+// hold tool names, because a server that we do not trust chose them.
+func validateServer(id Identity, tools map[string]string) error {
+	if id.Name == "" {
+		return errors.New("server name is empty")
+	}
+	// encoding/json replaces bad UTF-8 with U+FFFD, so such text would not
+	// round-trip and the server would look new on each run. Only Save can
+	// hit this check: Load gets text that encoding/json has already decoded.
+	if !utf8.ValidString(id.Client) || !utf8.ValidString(id.Source) ||
+		!utf8.ValidString(id.ProjectPath) || !utf8.ValidString(id.Name) {
+		return errors.New("server identity is not valid UTF-8")
+	}
+	for name, hash := range tools {
+		if name == "" {
+			return errors.New("tool name is empty")
+		}
+		if hash == "" {
+			return errors.New("a tool hash is empty")
+		}
+		if !utf8.ValidString(name) {
+			return errors.New("a tool name is not valid UTF-8")
+		}
+		if !utf8.ValidString(hash) {
+			return errors.New("a tool hash is not valid UTF-8")
+		}
+	}
+	return nil
+}
+
+// describeJSONError turns a decode error into text with a position and no file
+// content. The text of an encoding/json error can hold input, for example an
+// unknown field name, so we write our own text.
+func describeJSONError(err error) string {
+	if se, ok := errors.AsType[*json.SyntaxError](err); ok {
+		return fmt.Sprintf("invalid JSON at byte %d", se.Offset)
+	}
+	if te, ok := errors.AsType[*json.UnmarshalTypeError](err); ok {
+		return fmt.Sprintf("wrong JSON type near byte %d, expected %s", te.Offset, te.Type)
+	}
+	if errors.Is(err, io.ErrUnexpectedEOF) || errors.Is(err, io.EOF) {
+		return "unexpected end of the JSON data"
+	}
+	return "invalid or unknown field"
+}

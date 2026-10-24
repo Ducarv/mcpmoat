@@ -20,7 +20,7 @@ internal/
   inspect/              connects to servers, reads tools, prompts and resources
     inspecttest/        test helpers for inspect, including Fake
   rules/                loads YAML rules, applies regex and heuristics
-  pins/                 hashes and pins.json (doc.go only for now)
+  pins/                 pins.json store (hashing and diff planned)
   report/               terminal output
 rules/                  built-in rules (go:embed)
 testdata/               fixtures for tests and the demo
@@ -40,7 +40,9 @@ docs/                   PRD and other documentation
   package that imports the MCP SDK (see [The `internal/inspect` interface](#the-internalinspect-interface)).
 - `internal/rules`: loads and checks the YAML rules, runs the config heuristics and the shadowing
   check, and reads `.mcpmoat-ignore`.
-- `internal/pins`: planned home of the per-tool hashes and `pins.json`. It holds `doc.go` only.
+- `internal/pins`: the versioned `pins.json` store: `Load`, `Get`, `Set`, `Save` and `DefaultPath`. See
+  [The `pins.json` store](#the-pinsjson-store). The hashing of a tool and the change detection are
+  planned and not in the package yet.
 - `internal/report`: writes the terminal tables: the servers (`WriteServers`) and the config findings
   (`WriteFindings`).
 - `rules/`: the built-in rule files (`rules/*.yaml`) and `data/popular-servers.txt`. The Go file
@@ -66,7 +68,7 @@ the product packages and non-test imports. Tests also import `inspecttest` and `
 | `internal/inspect` | `discover` |
 | `internal/rules` | `discover`, `inspect`, `safefile`, `termsafe`, `rules` (the embedded data) |
 | `internal/report` | `discover`, `termsafe` |
-| `internal/pins` | none |
+| `internal/pins` | `safefile` |
 | `cmd/mcpmoat` | `discover`, `inspect`, `report`, `rules`, `termsafe` |
 
 `internal/inspect` does not import `termsafe`. The report layer escapes what `inspect` returns.
@@ -111,6 +113,8 @@ The code below is built and tested, but `scan` does not call it yet: `inspect.Ru
 schemas) do not run yet. `scan` loads the rules from `--rules` and checks them, but does not apply
 them. It prints a notice on stderr that says so.
 
+The `internal/pins` store is built and tested too, but `scan` and `mcpmoat pin` do not call it yet.
+
 ### Planned (PRD section 8)
 
 The target flow is `discover -> inspect -> rules -> pins -> report`:
@@ -154,6 +158,69 @@ Before `Inspect` starts anything, it checks the state gate and the untrusted gat
 fails starts nothing. A stdio server runs with no shell, with the exact configured command and with
 a scrubbed environment (NFR-04). The details are in `internal/inspect/doc.go`. The page for users
 is [How mcpmoat starts stdio servers](stdio-servers.md).
+
+## The `pins.json` store
+
+`internal/pins` keeps the tool hashes of each server in one file, `pins.json`, so that a later run
+can see a changed tool (a rug pull). The store is built and tested. Nothing calls it yet. The
+hashing of a tool, the change detection and `pin --accept` are planned.
+
+- Path: `DefaultPath` returns `$XDG_CONFIG_HOME/mcpmoat/pins.json` when `XDG_CONFIG_HOME` is set to
+  an absolute path, and `~/.config/mcpmoat/pins.json` otherwise. It does not use `os.UserConfigDir`,
+  so macOS also uses `~/.config`. It returns an error when the home directory is not an absolute
+  path.
+- Format, version 1:
+
+  ```json
+  {
+    "version": 1,
+    "servers": [
+      {
+        "client": "claude-code",
+        "source": "/home/me/.claude.json",
+        "project_path": "",
+        "name": "files",
+        "tools": { "read_file": "<hash>" }
+      }
+    ]
+  }
+  ```
+
+- Identity: a server is `client`, `source`, `project_path` and `name`. `project_path` is empty for a
+  global server. Claude Code project servers in `~/.claude.json` share the same `source` and can share
+  a `name`, so `project_path` tells them apart. Two entries with the same identity are an error.
+  The identity fields, the tool names and the hashes must be valid UTF-8. `Save` refuses any other
+  value, because `encoding/json` would change the bytes and the identity would not match on the
+  next run. `Load` never sees invalid UTF-8: `encoding/json` reads it as U+FFFD.
+- Hashes: a tool hash is an opaque non-empty string for the store. The hashing code owns its format.
+- No secrets: the file holds the identity, the tool names and the hashes. It never holds args, a URL,
+  env, headers or a command.
+- Read: `Load` reads the file through `safefile` with a cap of 8 MiB. A missing file (or directory)
+  is the first run and gives an empty store. A corrupt file, an unknown field, a bad shape or a newer
+  `version` is an error (a newer version wraps `ErrUnsupportedVersion`). `Load` never resets a bad
+  file to an empty store, because an empty store would hide a rug pull. The errors name the path and
+  the byte position and hold no file content.
+- Write: `Save` writes a temp file in the same directory, syncs it, sets mode `0600` and renames it
+  over `pins.json`. A new directory gets mode `0700`. The mode of an existing directory does not
+  change. The servers are sorted, so the same store gives the same bytes. `Save` refuses to write
+  when the encoded data is larger than the 8 MiB read cap, so it never writes a file that `Load`
+  refuses. The old file stays.
+
+Known limits:
+
+- There is no file lock. With two parallel runs, the last writer wins. A parallel `pin --accept` and
+  a scan can undo each other. Issue #150 tracks this and the missing-file limit below.
+- An existing config directory keeps its mode. mcpmoat creates a new directory with `0700`, but it
+  does not check or tighten one that exists. If other users can write to the directory, they can
+  replace `pins.json`.
+- A crash (for example SIGKILL or a power loss) can leave a `.pins-*.tmp` file in the directory. It
+  holds only names and hashes and has mode `0600`. mcpmoat does not remove old temp files, because
+  one can belong to a parallel run that is still writing.
+- A missing `pins.json` looks like a first run, so a deleted file resets the pins without an alert.
+- `Load` follows a `pins.json` symlink that stays inside the directory. It refuses one that points
+  outside (`safefile.ErrOutsideRoot`). `Save` replaces a symlink with a regular file.
+- On Windows the mode bits are mostly ignored and the directory sync is skipped.
+- A duplicate tool name inside one `tools` object is not detected. `encoding/json` keeps the last one.
 
 ## Where untrusted text is escaped
 
