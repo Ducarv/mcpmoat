@@ -632,3 +632,55 @@ func TestNewTyposquatNormalizesInput(t *testing.T) {
 		t.Errorf("popular = %+v, want the blank entries skipped", ts.popular)
 	}
 }
+
+func TestNewBuiltinTyposquat(t *testing.T) {
+	t.Parallel()
+	builtin, err := NewBuiltinTyposquat()
+	if err != nil {
+		t.Fatalf("NewBuiltinTyposquat() error = %v, want nil", err)
+	}
+	if builtin == nil {
+		t.Fatal("NewBuiltinTyposquat() = nil, want a check")
+	}
+	reference := NewTyposquat(loadPopular(t))
+
+	tests := []struct {
+		name        string
+		server      discover.Server
+		wantRelated string // empty means no finding
+	}{
+		{
+			name:        "typo of the filesystem server",
+			server:      npxServer("files", "@modelcontextprotocol/server-filesytem"),
+			wantRelated: "@modelcontextprotocol/server-filesystem",
+		},
+		{
+			name:   "exact filesystem server",
+			server: npxServer("files", "@modelcontextprotocol/server-filesystem"),
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got := builtin.Check(tt.server)
+			if tt.wantRelated == "" {
+				if len(got) != 0 {
+					t.Fatalf("Check() = %+v, want no finding", got)
+				}
+			} else {
+				if len(got) != 1 {
+					t.Fatalf("Check() gave %d findings, want 1: %+v", len(got), got)
+				}
+				if got[0].RuleID != RuleTyposquat {
+					t.Errorf("RuleID = %q, want %q", got[0].RuleID, RuleTyposquat)
+				}
+				if got[0].Related != tt.wantRelated {
+					t.Errorf("Related = %q, want %q", got[0].Related, tt.wantRelated)
+				}
+			}
+			if want := reference.Check(tt.server); !reflect.DeepEqual(got, want) {
+				t.Errorf("builtin findings = %+v, want same as NewTyposquat(popular): %+v", got, want)
+			}
+		})
+	}
+}
