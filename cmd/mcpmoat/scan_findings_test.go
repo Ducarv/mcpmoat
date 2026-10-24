@@ -6,7 +6,10 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/Ducarv/mcpmoat/internal/discover"
 	"github.com/Ducarv/mcpmoat/internal/discover/discovertest"
+	"github.com/Ducarv/mcpmoat/internal/report"
+	"github.com/Ducarv/mcpmoat/internal/rules"
 )
 
 // Tests for the findings block of "scan --no-connect" on the fixtures under
@@ -209,6 +212,180 @@ func TestPrintIgnored(t *testing.T) {
 			}
 			if stdout.Len() != 0 {
 				t.Errorf("stdout = %q, want empty: the line goes to stderr", stdout.String())
+			}
+		})
+	}
+}
+
+// builtinSet loads the built-in rules into a set. It fails the test on a
+// load error.
+func builtinSet(t *testing.T) *rules.Set {
+	t.Helper()
+	builtin, errs := rules.Builtin()
+	if len(errs) > 0 {
+		t.Fatalf("rules.Builtin() returned %d errors, first: %v", len(errs), errs[0])
+	}
+	set, errs := rules.NewSet(builtin, nil)
+	if len(errs) > 0 {
+		t.Fatalf("rules.NewSet() returned %d errors, first: %v", len(errs), errs[0])
+	}
+	return set
+}
+
+// TestFindingSeverity checks the severity of a row: the YAML severity for a
+// known rule, and "critical" (fail closed) for a rule that the set does not
+// have, also when the set is nil.
+func TestFindingSeverity(t *testing.T) {
+	t.Parallel()
+	set := builtinSet(t)
+
+	tests := []struct {
+		name string
+		set  *rules.Set
+		id   string
+		want string
+	}{
+		{"insecure url is high", set, rules.RuleInsecureURL, "high"},
+		{"plaintext secret is high", set, rules.RulePlaintextSecret, "high"},
+		{"unpinned package is medium", set, rules.RuleUnpinnedPackage, "medium"},
+		{"auto install is low", set, rules.RuleAutoInstall, "low"},
+		{"unknown rule fails closed", set, "MOAT-X-999", "critical"},
+		{"empty rule ID fails closed", set, "", "critical"},
+		{"nil set fails closed", nil, rules.RuleInsecureURL, "critical"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if got := findingSeverity(tt.set, tt.id); got != tt.want {
+				t.Errorf("findingSeverity(%q) = %q, want %q", tt.id, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestHasFailingFinding checks the exit-code rule: high and critical fail,
+// low and medium do not, and an unknown severity fails closed.
+func TestHasFailingFinding(t *testing.T) {
+	t.Parallel()
+	rowsOf := func(severities ...string) []report.FindingRow {
+		var rows []report.FindingRow
+		for _, sev := range severities {
+			rows = append(rows, report.FindingRow{RuleID: "MOAT-T4-001", Severity: sev})
+		}
+		return rows
+	}
+
+	tests := []struct {
+		name string
+		rows []report.FindingRow
+		want bool
+	}{
+		{"nil rows", nil, false},
+		{"empty rows", rowsOf(), false},
+		{"low only", rowsOf("low"), false},
+		{"medium only", rowsOf("medium"), false},
+		{"low and medium", rowsOf("low", "medium"), false},
+		{"high", rowsOf("high"), true},
+		{"critical", rowsOf("critical"), true},
+		{"unknown severity word", rowsOf("bogus"), true},
+		{"empty severity", rowsOf(""), true},
+		{"wrong case is unknown", rowsOf("HIGH"), true},
+		{"low and high", rowsOf("low", "high"), true},
+		{"high and low", rowsOf("high", "low"), true},
+		{"low and unknown", rowsOf("low", "bogus"), true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if got := hasFailingFinding(tt.rows); got != tt.want {
+				t.Errorf("hasFailingFinding(%v) = %v, want %v", tt.rows, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestConfigFindings checks configFindings with servers built in the test: the
+// rows, the severity of every row, the ignore list and the secrets.
+func TestConfigFindings(t *testing.T) {
+	t.Parallel()
+	set := builtinSet(t)
+	typo, err := rules.NewBuiltinTyposquat()
+	if err != nil {
+		t.Fatalf("rules.NewBuiltinTyposquat() error = %v", err)
+	}
+
+	const canary = "mcpmoat-canary-env-Qw9Rt4Yu7Io2"
+	servers := []discover.Server{
+		{
+			Name:      "leaky",
+			Transport: discover.TransportStdio,
+			Command:   "node",
+			Args:      discover.NewArgs([]string{"server.js"}),
+			Env:       discover.SecretMap{"GITHUB_TOKEN": discover.NewSecret(canary)},
+		},
+		{
+			Name:      "auto",
+			Transport: discover.TransportStdio,
+			Command:   "npx",
+			Args:      discover.NewArgs([]string{"-y", "pkg"}),
+		},
+	}
+
+	var ignoreSecret rules.IgnoreList
+	ignoreSecret.Add(rules.IgnoreEntry{RuleID: rules.RulePlaintextSecret})
+
+	hasRule := func(rows []report.FindingRow, id string) bool {
+		return slices.ContainsFunc(rows, func(r report.FindingRow) bool { return r.RuleID == id })
+	}
+
+	tests := []struct {
+		name        string
+		ignore      *rules.IgnoreList
+		wantSecret  bool
+		wantIgnored map[string]int
+	}{
+		{"nil ignore list keeps all findings", nil, true, nil},
+		{"empty ignore list keeps all findings", &rules.IgnoreList{}, true, nil},
+		{"ignore list drops the secret finding", &ignoreSecret, false, map[string]int{rules.RulePlaintextSecret: 1}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			rows, ignored := configFindings(set, typo, tt.ignore, servers)
+
+			if got := hasRule(rows, rules.RulePlaintextSecret); got != tt.wantSecret {
+				t.Errorf("rows hold %s = %v, want %v\nrows: %+v", rules.RulePlaintextSecret, got, tt.wantSecret, rows)
+			}
+			// The other server must keep its findings in every case.
+			for _, id := range []string{rules.RuleUnpinnedPackage, rules.RuleAutoInstall} {
+				if !hasRule(rows, id) {
+					t.Errorf("rows have no %s finding\nrows: %+v", id, rows)
+				}
+			}
+			if len(ignored) != len(tt.wantIgnored) {
+				t.Errorf("ignored = %v, want %v", ignored, tt.wantIgnored)
+			}
+			for id, n := range tt.wantIgnored {
+				if ignored[id] != n {
+					t.Errorf("ignored[%q] = %d, want %d", id, ignored[id], n)
+				}
+			}
+
+			for i, r := range rows {
+				if r.Severity == "" {
+					t.Errorf("row %d (%s) has an empty Severity", i, r.RuleID)
+				}
+				if r.RuleID == rules.RulePlaintextSecret && r.Severity != "high" {
+					t.Errorf("row %d (%s) Severity = %q, want high", i, r.RuleID, r.Severity)
+				}
+				for name, field := range map[string]string{
+					"RuleID": r.RuleID, "Severity": r.Severity, "Server": r.Server,
+					"Field": r.Field, "Key": r.Key, "Related": r.Related,
+				} {
+					if strings.Contains(field, canary) {
+						t.Errorf("row %d field %s holds the secret value", i, name)
+					}
+				}
 			}
 		})
 	}
