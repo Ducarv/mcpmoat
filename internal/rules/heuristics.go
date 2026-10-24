@@ -1,6 +1,7 @@
 package rules
 
 import (
+	"bytes"
 	"encoding/base64"
 	"fmt"
 	"slices"
@@ -20,9 +21,24 @@ const (
 	HeuristicMaxLength = "max_length"
 	// HeuristicBase64Blob flags a long base64 run that decodes to text.
 	// Parameters: min_length, the shortest run in characters (default 32,
-	// 8 to 4096), and min_text, the shortest decoded text in bytes (default
-	// 24, 4 to 3072).
+	// 8 to 4096), min_text, the shortest decoded text in bytes (default 24,
+	// 4 to 3072), and min_words, the fewest words in a row that the decoded
+	// text must hold (default 0, which turns the check off, 0 to 64). See
+	// hasWordRun for what a word is.
 	HeuristicBase64Blob = "base64_blob"
+	// HeuristicMatchWindow flags a text that the regex and keyword matchers
+	// do not read in full: the text is longer than the raw scan limit, or a
+	// match form is cut at MaxMatchInputBytes (see matchWindowCut). So a
+	// payload that padding pushes out of the match window still gives a hit.
+	// It has no parameters.
+	HeuristicMatchWindow = "match_window"
+	// HeuristicTagBidiOverride flags the Unicode tag characters (U+E0000 to
+	// U+E007F), which can hide a full ASCII text, and the bidi overrides LRO
+	// (U+202D) and RLO (U+202E), which reverse the text a reader sees. It
+	// excuses only the three emoji flags that use tag characters: England,
+	// Scotland and Wales. It does not flag the other invisible runes, such as
+	// ZWJ, ZWNJ, RLM or the bidi isolates. It has no parameters.
+	HeuristicTagBidiOverride = "tag_or_bidi_override"
 
 	// The five heuristics below run the native config checks on one case line
 	// of a built-in config rule (target: config). The line is text, read by the
@@ -59,7 +75,8 @@ const (
 // alphabetical order.
 const heuristicNames = HeuristicAutoInstall + ", " + HeuristicBase64Blob + ", " +
 	HeuristicInsecureURL + ", " + HeuristicInvisibleUnicode + ", " +
-	HeuristicMaxLength + ", " + HeuristicPlaintextSecret + ", " +
+	HeuristicMatchWindow + ", " + HeuristicMaxLength + ", " +
+	HeuristicPlaintextSecret + ", " + HeuristicTagBidiOverride + ", " +
 	HeuristicTyposquat + ", " + HeuristicUnpinnedPackage
 
 // paramSpec describes one integer parameter of a heuristic.
@@ -79,6 +96,16 @@ func compileHeuristic(name string, params map[string]any) (func(raw string) []Hi
 			return nil, err
 		}
 		return invisibleUnicode, nil
+	case HeuristicMatchWindow:
+		if _, err := readParams(params); err != nil {
+			return nil, err
+		}
+		return matchWindow, nil
+	case HeuristicTagBidiOverride:
+		if _, err := readParams(params); err != nil {
+			return nil, err
+		}
+		return tagBidiOverride, nil
 	case HeuristicMaxLength:
 		v, err := readParams(params, paramSpec{name: "max_runes", def: 4096, min: 1, max: 1 << 24})
 		if err != nil {
@@ -90,12 +117,13 @@ func compileHeuristic(name string, params map[string]any) (func(raw string) []Hi
 		v, err := readParams(params,
 			paramSpec{name: "min_length", def: 32, min: 8, max: 4096},
 			paramSpec{name: "min_text", def: 24, min: 4, max: 3072},
+			paramSpec{name: "min_words", def: 0, min: 0, max: 64},
 		)
 		if err != nil {
 			return nil, err
 		}
-		minLength, minText := v[0], v[1]
-		return func(raw string) []Hit { return base64Blob(raw, minLength, minText) }, nil
+		minLength, minText, minWords := v[0], v[1], v[2]
+		return func(raw string) []Hit { return base64Blob(raw, minLength, minText, minWords) }, nil
 	case HeuristicTyposquat:
 		if _, err := readParams(params); err != nil {
 			return nil, err
@@ -266,16 +294,104 @@ func maxLength(raw string, maxRunes int) []Hit {
 	return []Hit{{Offset: offset, Detail: fmt.Sprintf("text has %d characters, over the limit of %d", n, maxRunes)}}
 }
 
+// matchWindow flags raw when the regex and keyword matchers do not read all
+// of it (see matchWindowCut). The hit is about the whole text, so it has the
+// offset NoOffset.
+func matchWindow(raw string) []Hit {
+	if !matchWindowCut(raw) {
+		return nil
+	}
+	return []Hit{{Offset: NoOffset, Detail: "text is longer than the match window"}}
+}
+
+// Runes that tag_or_bidi_override flags, and the base of the tag flags.
+const (
+	tagFirst            = '\U000E0000' // the first tag character
+	tagLast             = '\U000E007F' // the last tag character, CANCEL TAG
+	leftToRightOverride = '\u202D'     // LRO
+	rightToLeftOverride = '\u202E'     // RLO
+	blackFlag           = '\U0001F3F4' // the base of the tag flags
+)
+
+// The tag characters after blackFlag in the three emoji flags that use them.
+// Each one is a tag letter (its ASCII letter plus U+E0000) and then the
+// CANCEL TAG. The letters are a region code, such as "gbeng" for England.
+const (
+	flagTagsEngland  = "\U000E0067\U000E0062\U000E0065\U000E006E\U000E0067\U000E007F" // gbeng
+	flagTagsScotland = "\U000E0067\U000E0062\U000E0073\U000E0063\U000E0074\U000E007F" // gbsct
+	flagTagsWales    = "\U000E0067\U000E0062\U000E0077\U000E006C\U000E0073\U000E007F" // gbwls
+)
+
+// tagBidiOverride flags each run of tag characters and bidi overrides (see
+// isTagOrOverride) in raw. One hit stands for a whole run, at the offset of
+// its first rune. The Detail gives the length of the run but not its runes:
+// the code points of tag characters are the hidden text.
+//
+// The tag characters of the England, Scotland and Wales flags (see
+// flagTagsLen) are excused only directly after U+1F3F4. Any other tag
+// character is flagged, also in a sequence that looks like a flag but has
+// other letters, and also a tag character right after an excused flag.
+func tagBidiOverride(raw string) []Hit {
+	var l hitList
+	runStart, runLen := 0, 0 // byte offset and rune count of the current run
+	endRun := func() {
+		if runLen > 0 && l.keep(runStart) {
+			l.hits = append(l.hits, Hit{Offset: runStart, Detail: fmt.Sprintf("tag or bidi override run of %d runes at offset %d", runLen, runStart)})
+		}
+		runLen = 0
+	}
+	// The loop uses a byte index instead of range, so it can skip the tag
+	// characters of an excused flag.
+	for i := 0; i < len(raw); {
+		r, size := utf8.DecodeRuneInString(raw[i:])
+		switch {
+		case isTagOrOverride(r):
+			if runLen == 0 {
+				runStart = i
+			}
+			runLen++
+		case r == blackFlag:
+			endRun()
+			size += flagTagsLen(raw[i+size:])
+		default:
+			endRun()
+		}
+		i += size
+	}
+	endRun()
+	return l.result("tag or bidi override runs")
+}
+
+// isTagOrOverride reports whether r is a tag character (U+E0000 to U+E007F)
+// or a bidi override (U+202D or U+202E).
+func isTagOrOverride(r rune) bool {
+	return tagFirst <= r && r <= tagLast || r == leftToRightOverride || r == rightToLeftOverride
+}
+
+// flagTagsLen returns the length in bytes of the tag characters of the
+// England, Scotland or Wales flag at the start of s, or 0 when s does not
+// start with one of them.
+func flagTagsLen(s string) int {
+	for _, tags := range []string{flagTagsEngland, flagTagsScotland, flagTagsWales} {
+		if strings.HasPrefix(s, tags) {
+			return len(tags)
+		}
+	}
+	return 0
+}
+
 // base64Blob flags each run of base64 characters in raw that is at least
 // minLength characters long and decodes to at least minText printable bytes
-// in a row.
+// in a row. When minWords is more than 0, the decoded text must also hold at
+// least minWords words in a row (see hasWordRun). So a JWT, which decodes to
+// JSON, does not count, but an encoded sentence does.
 //
 // A run is a longest sequence of [A-Za-z0-9+/_-]. A run can mix the standard
 // and the URL-safe alphabets, so a "-" or "_" glued to a payload cannot hide
 // it. An invisible rune inside a run is skipped, so a ZWSP or a control rune
 // such as ESC cannot split a payload. A '=' ends a run: base64 padding comes
 // only at the end, and the decoder does not need it.
-func base64Blob(raw string, minLength, minText int) []Hit {
+func base64Blob(raw string, minLength, minText, minWords int) []Hit {
 	var l hitList
 	var run []byte // characters of the current run, without invisible runes
 	var dst []byte // decode buffer, reused for every run
@@ -285,7 +401,7 @@ func base64Blob(raw string, minLength, minText int) []Hit {
 	check := func() {
 		if len(run) >= minLength {
 			var ok bool
-			ok, dst = decodesToText(run, minText, dst)
+			ok, dst = decodesToText(run, minText, minWords, dst)
 			if ok && l.keep(start) {
 				l.hits = append(l.hits, Hit{Offset: start, Detail: fmt.Sprintf("base64 run of %d characters at offset %d decodes to text", len(run), start)})
 			}
@@ -317,8 +433,9 @@ func isBase64Char(r rune) bool {
 }
 
 // decodesToText reports whether run decodes to at least minText printable
-// bytes in a row. dst is a buffer that decodesToText can reuse; it returns
-// the buffer for the next call.
+// bytes in a row and, when minWords is more than 0, to at least minWords
+// words in a row (see hasWordRun). dst is a buffer that decodesToText can
+// reuse; it returns the buffer for the next call.
 //
 // decodesToText changes run: it maps the URL-safe '-' and '_' to the
 // standard '+' and '/', so one decoder reads both alphabets, also when they
@@ -326,7 +443,7 @@ func isBase64Char(r rune) bool {
 //
 // The run can start in the middle of a base64 text, for example when a word
 // is glued to it, so each of the 4 possible alignments is tried.
-func decodesToText(run []byte, minText int, dst []byte) (bool, []byte) {
+func decodesToText(run []byte, minText, minWords int, dst []byte) (bool, []byte) {
 	// A hex hash or a UUID is made of hex digits (and '-'). A base64 text
 	// almost always holds other letters too.
 	onlyHex := true
@@ -361,7 +478,8 @@ func decodesToText(run []byte, minText int, dst []byte) (bool, []byte) {
 		if err != nil {
 			continue
 		}
-		if hasTextRun(dst[:n], minText) {
+		text := dst[:n]
+		if hasTextRun(text, minText) && (minWords == 0 || hasWordRun(text, minWords)) {
 			return true, dst
 		}
 	}
@@ -392,4 +510,45 @@ func hasTextRun(b []byte, n int) bool {
 		count = 0
 	}
 	return false
+}
+
+// hasWordRun reports whether b holds at least n words in a row. The words
+// are the fields of b between white space (see bytes.FieldsSeq). Any field
+// that is not a word (see isWord) ends the run.
+//
+// JSON, such as the decoded parts of a JWT ({"alg":"HS256",...}), has its
+// quotes, colons and digits inside the fields, so its fields are not words.
+// A sentence such as "ignore all previous instructions" is a run of words.
+func hasWordRun(b []byte, n int) bool {
+	count := 0
+	for field := range bytes.FieldsSeq(b) {
+		if !isWord(field) {
+			count = 0
+			continue
+		}
+		count++
+		if count >= n {
+			return true
+		}
+	}
+	return false
+}
+
+// isWord reports whether field is a word: after the punctuation at its two
+// ends is removed (such as the comma in "file," or the quotes in "\"read\""),
+// it is not empty and every rune of it is a letter. An invalid byte is not a
+// letter.
+func isWord(field []byte) bool {
+	field = bytes.TrimFunc(field, unicode.IsPunct)
+	if len(field) == 0 {
+		return false
+	}
+	for len(field) > 0 {
+		r, size := utf8.DecodeRune(field)
+		if !unicode.IsLetter(r) {
+			return false
+		}
+		field = field[size:]
+	}
+	return true
 }

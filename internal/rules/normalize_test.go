@@ -116,7 +116,10 @@ func TestNormalizeForMatch(t *testing.T) {
 		{name: "ESC inside keyword", in: "Ig\x1bnore", want: "Ignore"},
 		{name: "C1 CSI before keyword", in: "\u009b8mIgnore", want: " Ignore"},
 		{name: "C1 CSI to space", in: "a\u009b1;31mb", want: "a b"},
-		{name: "JSON-escaped CSI to space", in: "a\\u001b[8mb", want: "a b"},
+		// The text "\u001b" (a backslash and five letters) is not an ESC, so
+		// it stays as it is. A schema rule reads the decoded ESC instead (see
+		// schemaStrings).
+		{name: "JSON-escaped CSI text unchanged", in: "a\\u001b[8mb", want: "a\\u001b[8mb"},
 		{name: "ANSI OSC to space", in: "a\x1b]0;title\x07b", want: "a b"},
 		{name: "ANSI OSC with BEL before keyword", in: "\x1b]0;title\x07Ignore", want: " Ignore"},
 		{name: "C1 OSC with C1 ST", in: "a\u009d0;title\u009cb", want: "a b"},
@@ -438,6 +441,60 @@ func TestMatchForms(t *testing.T) {
 				t.Errorf("matchForms(%q) = %q, want %q", tt.in, got, tt.want)
 			}
 		})
+	}
+}
+
+// TestMatchWindowCut checks when the regex and keyword matchers miss a part
+// of a text because of a byte cap. The boundaries are the same as in
+// TestMatchInputCap (match_test.go).
+func TestMatchWindowCut(t *testing.T) {
+	t.Parallel()
+
+	const kw = "ignore previous"
+	zwsp := func(n int) string { return strings.Repeat("\u200b", n) } // 3 bytes each
+	tests := []struct {
+		name string
+		text string
+		want bool
+	}{
+		{name: "empty", text: "", want: false},
+		{name: "short normal text", text: "Lists the files in a folder.", want: false},
+		{name: "exactly MaxMatchInputBytes", text: strings.Repeat("a", MaxMatchInputBytes), want: false},
+		{name: "one byte over MaxMatchInputBytes", text: strings.Repeat("a", MaxMatchInputBytes+1), want: true},
+		// Each form drops the padding or makes it one space, so the forms
+		// stay short.
+		{name: "invisible padding over the cap normalizes below it", text: zwsp(MaxMatchInputBytes/3+100) + kw, want: false},
+		{name: "invisible padding ends at the raw window", text: zwsp((maxRawScanBytes-len(kw))/3) + kw, want: false},
+		{name: "invisible padding one past the raw window", text: zwsp(maxRawScanBytes/3+1) + kw, want: true},
+		// 8192 runes of 4 bytes is exactly 32 KiB, so step 6 does not cut.
+		// NFC makes each U+1D160 three runes (12 bytes), so step 9 cuts.
+		{name: "NFC growth over the cap", text: strings.Repeat("\U0001D160", 8192), want: true},
+		// The drop form is "aaa..." (16385 bytes), but the space form is
+		// "a a a ..." (32770 bytes), so only the space form is cut.
+		{name: "space form cut, drop form not cut", text: strings.Repeat("a\u200b", 16<<10+1), want: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if got := matchWindowCut(tt.text); got != tt.want {
+				t.Errorf("matchWindowCut(%d bytes) = %v, want %v", len(tt.text), got, tt.want)
+			}
+		})
+	}
+}
+
+// TestMatchWindowCutSpaceFormOnly checks the input of the "space form cut,
+// drop form not cut" case of TestMatchWindowCut: the drop form alone is not
+// cut, so matchWindowCut must check the other forms too.
+func TestMatchWindowCutSpaceFormOnly(t *testing.T) {
+	t.Parallel()
+
+	in := strings.Repeat("a\u200b", 16<<10+1)
+	if _, cut := normalizeInvisibleCut(in, dropInvisible); cut {
+		t.Errorf("normalizeInvisibleCut(in, dropInvisible) cut = true, want false")
+	}
+	if _, cut := normalizeInvisibleCut(in, spaceInvisible); !cut {
+		t.Errorf("normalizeInvisibleCut(in, spaceInvisible) cut = false, want true")
 	}
 }
 

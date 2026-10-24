@@ -1,6 +1,7 @@
 package rules
 
 import (
+	"encoding/json"
 	"fmt"
 	"path/filepath"
 	"regexp"
@@ -24,7 +25,10 @@ var builtinIDPattern = regexp.MustCompile(`^MOAT-T[1-5]-[0-9]{3}$`)
 //     text;
 //   - Remediation is not empty;
 //   - there is at least one reference;
-//   - there is at least one should_match case and one should_not_match case.
+//   - there is at least one should_match case and one should_not_match case;
+//   - for a rule with target schema, every case text is valid JSON. A schema
+//     rule reads the strings of a JSON schema, so a case that is not JSON
+//     does not test what a scan sees.
 //
 // Each problem starts with the escaped rule ID, so a failing test names the
 // rule. Every piece of rule text in a problem is escaped with termsafe.
@@ -60,7 +64,21 @@ func CheckDocumented(r Rule) []string {
 	if len(r.ShouldNotMatch) == 0 {
 		add("no %s case", KindShouldNotMatch)
 	}
+	if r.Target == TargetSchema {
+		checkJSONCases(KindShouldMatch, r.ShouldMatch, add)
+		checkJSONCases(KindShouldNotMatch, r.ShouldNotMatch, add)
+	}
 	return problems
+}
+
+// checkJSONCases reports to add each case whose text is not valid JSON. The
+// problem names the kind and the index of the case only, never its text.
+func checkJSONCases(kind CaseKind, cases []Case, add func(format string, args ...any)) {
+	for i, c := range cases {
+		if !json.Valid([]byte(c.Text)) {
+			add("%s[%d] is not valid JSON", kind, i)
+		}
+	}
 }
 
 // checkRisk reports the problems of a Risk text to add. Validate also caps the

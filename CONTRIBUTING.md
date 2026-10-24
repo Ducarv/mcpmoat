@@ -27,10 +27,8 @@ the fields and the test cases. Read it as you follow the steps below.
 
 Notes on the regexes in `rules/MOAT-T1-003.yaml`:
 
-- The first line of that file is a YAML comment. MOAT-T1-009 copies the patterns of this rule for the
-  input schema, so a change to MOAT-T1-003 needs the same change in MOAT-T1-009. A test checks that
-  MOAT-T1-009 matches every `should_match` case of this rule and none of its `should_not_match`
-  cases.
+- The first line of that file is a YAML comment. It says that MOAT-T1-009 copies these patterns for
+  the input schema (see [Schema copies](#schema-copies) below).
 - In a single-quoted YAML text, `''` is one `'`. So `don(?:''|\x{2019})?t` is the regex
   `don(?:'|\x{2019})?t`: "don't", "don" + U+2019 (the curly apostrophe) + "t", or "dont".
 - Go regexes (RE2) have no lookahead. So the tail `user(?:[^\w''\x{2019}]|$)` means "the word
@@ -57,15 +55,68 @@ How mcpmoat prepares the text before a match. This applies to every regex and ke
      of control characters is one space. So a ZWSP inside a word and a control character between
      words still match.
 
-  A control character inside a word and a ZWSP between words defeat all three forms. In a
-  description, the `invisible_unicode` heuristic flags every invisible character, also every
-  control character except white space. So it still flags such a text.
+  A control character inside a word and a ZWSP between words defeat all three forms. The
+  `invisible_unicode` heuristic (MOAT-T1-006 for a description, MOAT-T1-013 for a schema) flags
+  every invisible character, also every control character except white space. So it still flags
+  such a text.
 - A regex also sees a folded form of the text: fullwidth letters, mathematical letters and
   combining marks become plain letters. Only the text is folded, not the pattern. So write the
   pattern in ASCII and do not add fullwidth alternatives: `(?i)ignore` also matches "ignore" in
   fullwidth letters (U+FF49 and on). A character is folded only when its fold is not longer than
   the character. So U+FDFA, U+00BD and U+2177 are not folded. Homoglyphs from other scripts, such
   as Cyrillic U+0456 for Latin "i", are not folded.
+- A regex or a keyword reads only a window of the text: the invisible characters are removed from
+  the first 128 KiB of the raw text, and then each form is cut at 32 KiB. Padding can push an
+  instruction past this window. The `match_window` heuristic closes this gap. It fires when the
+  regex and keyword rules cannot read the whole text: the raw text is longer than 128 KiB, or a form
+  is cut at 32 KiB. MOAT-T1-015 (description) and MOAT-T1-016 (schema) use it at high severity.
+
+How mcpmoat prepares the text of a `target: schema` rule:
+
+- mcpmoat decodes the input schema as JSON first. Then it matches each object key and each string
+  value alone, at any depth, as it matches a description. All the steps above apply to each string.
+  So write the patterns for the decoded text, with no JSON escapes: `\u200b` in the JSON is a real
+  ZWSP, and `\u001b` is a real ESC.
+- The strings are never joined. So all the regexes of an `all_regex` list must match in one string.
+  A string that comes more than once is matched once. Numbers, booleans and `null` are not matched.
+- A hit of a schema rule has no offset. Its detail starts with `schema string N`, where N is the
+  place of the string in the schema, from 1.
+- A regex or keyword rule has a budget for one schema. It reads the strings in document order, at
+  most 4096 strings and at most 128 KiB in all. A string counts for at most 32 KiB, its match window.
+  A heuristic rule reads every string, with no budget.
+- When the JSON cannot be read in full (it is malformed, has data after the first value, or goes
+  over a decode cap), the rule also matches the raw JSON text once. These hits have a detail that
+  starts with `schema raw text`.
+- For a schema, `match_window` fires when the budget cuts the strings, when one string is longer
+  than its window, or when the JSON cannot be read in full.
+- The shadowing rule MOAT-T3-001 does not read a schema this way. It reads only the `description`
+  and `title` strings of the schema.
+
+#### Schema copies
+
+Most T1 description rules have a copy with `target: schema` that checks the tool input schema.
+When you change one file of a pair, change the other too. The first line of each file names the
+other file.
+
+| Description rule | Schema copy | What the copy takes |
+|---|---|---|
+| MOAT-T1-001 and MOAT-T1-003 | MOAT-T1-009 | The patterns of both rules, in that order |
+| MOAT-T1-002 | MOAT-T1-011 | The match block |
+| MOAT-T1-004 | MOAT-T1-010 | Only the file patterns, not the word patterns (keychain, credentials store or file) |
+| MOAT-T1-005 | MOAT-T1-012 | The match block |
+| MOAT-T1-006 | MOAT-T1-013 | The match block |
+| MOAT-T1-008 | MOAT-T1-014 | The match block |
+| MOAT-T1-015 | MOAT-T1-016 | The match block |
+| MOAT-T1-017 | MOAT-T1-019 | The match block |
+| MOAT-T1-018 | MOAT-T1-020 | The match block |
+
+Each copy has the severity of its source. So a file path in a schema (MOAT-T1-010) is `medium`,
+and a benign SSH tool with a key-path field does not exit 1 under the default `--fail-on high`.
+MOAT-T1-007 (`max_length`) has no copy. Two tests in `internal/rules/builtin_test.go` check the
+pairs. `TestSchemaRuleCopiesDescriptionRules` checks that each copy has the match block and the
+severity of its source, and that it matches the `should_match` cases of the source, put in a schema,
+and none of its `should_not_match` cases. `TestEveryT1DescriptionRuleHasSchemaCopy` checks that
+every T1 description rule except MOAT-T1-007 has a copy.
 
 The fields:
 
@@ -74,8 +125,8 @@ The fields:
 | `id` | Unique ID. Built-in rules: `MOAT-T<1-5>-NNN`. External rules: letters, digits, `.`, `_` and `-`, up to 64 characters, starting with a letter or digit. No spaces and no `/`. |
 | `title` | Short name, up to 200 characters. |
 | `severity` | `low`, `medium`, `high` or `critical`. |
-| `target` | What the rule inspects: `description`, `schema` or `config`. |
-| `match` | What the rule looks for. Set exactly one of `any_regex`, `all_regex`, `keywords` or `heuristic`. `params` is allowed only with `heuristic`. Regexes are case sensitive, so write `(?i)` for a case-insensitive match. `keywords` ignore case and match whole words. The text heuristics are `invisible_unicode` (no params), `max_length` (param `max_runes`, default 4096) and `base64_blob` (params `min_length`, default 32, and `min_text`, default 24). The config heuristics `insecure_url`, `plaintext_secret`, `unpinned_package`, `auto_install` and `typosquat` take no params and need `target: config`. Each one reads one case line: a URL, a `KEY=VALUE` or `Name: value` entry, or a command line. `plaintext_secret` reads all four forms, so it also checks the args of a stdio server and a URL, not only env and header entries. `unpinned_package` also covers git and GitHub-shorthand package specs, unless the spec pins a full 40-hex commit (`#<40-hex>` for npm, `@<40-hex>` for Python). An https URL of a repository on github.com, gitlab.com or bitbucket.org counts as a git spec for npm. Other tarball and URL specs, and a script URL given to `pipx run`, are always unpinned, also with a 40-hex fragment. |
+| `target` | What the rule inspects: `description`, `schema` or `config`. Every test case of a `target: schema` rule must be valid JSON, such as a tool input schema. The tests report a case that is not. |
+| `match` | What the rule looks for. Set exactly one of `any_regex`, `all_regex`, `keywords` or `heuristic`. `params` is allowed only with `heuristic`. Regexes are case sensitive, so write `(?i)` for a case-insensitive match. `keywords` ignore case and match whole words. The text heuristics are `invisible_unicode` (no params), `tag_or_bidi_override` (no params: Unicode tag characters U+E0000 to U+E007F and the bidi overrides U+202D and U+202E, but not the England, Scotland and Wales flag emoji), `match_window` (no params: the regex and keyword rules cannot read the whole text), `max_length` (param `max_runes`, default 4096) and `base64_blob` (params `min_length`, default 32, `min_text`, default 24, and `min_words`, default 0 for off, up to 64: the decoded text must hold that many words in a row). The config heuristics `insecure_url`, `plaintext_secret`, `unpinned_package`, `auto_install` and `typosquat` take no params and need `target: config`. Each one reads one case line: a URL, a `KEY=VALUE` or `Name: value` entry, or a command line. `plaintext_secret` reads all four forms, so it also checks the args of a stdio server and a URL, not only env and header entries. `unpinned_package` also covers git and GitHub-shorthand package specs, unless the spec pins a full 40-hex commit (`#<40-hex>` for npm, `@<40-hex>` for Python). An https URL of a repository on github.com, gitlab.com or bitbucket.org counts as a git spec for npm. Other tarball and URL specs, and a script URL given to `pipx run`, are always unpinned, also with a 40-hex fragment. |
 | `risk` | One sentence: what can go wrong. |
 | `remediation` | What the user should do. |
 | `references` | Links (`http` or `https`) to research or advisories. mcpmoat never fetches them. |

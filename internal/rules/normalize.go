@@ -107,16 +107,48 @@ func isInvisibleControl(r rune) bool {
 // with them is matched up to three times, which triples the cost bound in
 // match.go. The regex matchers read more forms (see regexForms).
 func matchForms(s string) []string {
-	forms := []string{normalizeForMatch(s)}
+	forms, _ := matchFormsCut(s)
+	return forms
+}
+
+// matchWindowCut reports whether the regex and keyword matchers can miss a
+// part of s because of a byte cap. That is so when s is longer than
+// maxRawScanBytes, or when step 6 or step 9 of normalizeForMatch cuts one of
+// the forms of matchForms at MaxMatchInputBytes.
+//
+// It checks every form, not only the first. The second form can be longer
+// than the first (each run of invisible runes becomes a space instead of
+// nothing), so invisible padding can push a payload out of the window of the
+// second form only.
+func matchWindowCut(s string) bool {
+	if len(s) > maxRawScanBytes {
+		return true
+	}
+	_, cut := matchFormsCut(s)
+	return cut
+}
+
+// matchFormsCut returns the forms of matchForms, and true when step 6 or
+// step 9 of normalizeForMatch cut one of them (see normalizeInvisibleCut).
+// The flag covers each form that it builds, also a form that is equal to an
+// earlier form and so is not added to the list.
+func matchFormsCut(s string) ([]string, bool) {
+	first, cut := normalizeInvisibleCut(s, dropInvisible)
+	forms := []string{first}
 	raw := cutAtRune(s, maxRawScanBytes)
 	if !strings.ContainsFunc(raw, isInvisible) {
-		return forms
+		return forms, cut
 	}
-	forms = appendNew(forms, normalizeInvisible(s, spaceInvisible))
+	modes := []invisibleMode{spaceInvisible}
 	if strings.ContainsFunc(raw, isInvisibleControl) {
-		forms = appendNew(forms, normalizeInvisible(s, spaceControls))
+		modes = append(modes, spaceControls)
 	}
-	return forms
+	for _, mode := range modes {
+		f, fCut := normalizeInvisibleCut(s, mode)
+		forms = appendNew(forms, f)
+		cut = cut || fCut
+	}
+	return forms, cut
 }
 
 // appendNew appends f to forms when forms does not hold it yet.
@@ -253,15 +285,30 @@ func (m invisibleMode) controlRepl() rune {
 
 // normalizeInvisible runs the steps of normalizeForMatch, with the invisible
 // runes handled as mode says. In each mode, the white space is mapped as in
-// normalizeForMatch.
+// normalizeForMatch. It is normalizeInvisibleCut without the cut flag.
 func normalizeInvisible(s string, mode invisibleMode) string {
+	out, _ := normalizeInvisibleCut(s, mode)
+	return out
+}
+
+// normalizeInvisibleCut is normalizeInvisible, and it also reports whether
+// step 6 or step 9 of normalizeForMatch cut the text at MaxMatchInputBytes.
+// When the flag is true, the form misses the end of the text, so a matcher
+// cannot see a payload there. The cut of step 1 (maxRawScanBytes) is not in
+// the flag: matchWindowCut checks the raw length itself.
+func normalizeInvisibleCut(s string, mode invisibleMode) (string, bool) {
 	s = cutAtRune(s, maxRawScanBytes)
 	s = ansiToSpace(replaceFormatRuns(s, mode.formatRepl()))
 	s = replaceInvisible(s, mode.controlRepl()) // only invisible control runes are left
 	s = spacesToASCII(s)
+	cut := len(s) > MaxMatchInputBytes // step 6 cuts the text
 	s = cutAtRune(s, MaxMatchInputBytes)
 	s = norm.NFC.String(s)
-	return cutAtRune(replaceInvisible(s, mode.formatRepl()), MaxMatchInputBytes)
+	s = replaceInvisible(s, mode.formatRepl())
+	if len(s) > MaxMatchInputBytes { // step 9 cuts the text
+		cut = true
+	}
+	return cutAtRune(s, MaxMatchInputBytes), cut
 }
 
 // ansiSeq matches an ANSI escape sequence that a terminal runs and does not
@@ -271,14 +318,10 @@ func normalizeInvisible(s string, mode invisibleMode) string {
 //     byte, such as ESC [ 8 m (SGR 8, which hides the text after it);
 //   - OSC: ESC ] (or U+009D), at most 256 bytes, and BEL, ESC \ or U+009C.
 //
-// The schema target is JSON text, where ESC is the escape \u001b, so a CSI
-// that starts with that escape matches too. Its final byte is not a
-// backslash: in JSON text a backslash starts the next escape, so in
-// \u001b[\u0001Ignore the CSI does not take the backslash and leave
-// "u0001Ignore" with no word edge. An OSC with no end does not
-// match, so it cannot swallow the rest of the text; its ESC is an invisible
-// control rune, so step 4 of normalizeForMatch handles it.
-var ansiSeq = regexp.MustCompile(`(?:\x1b\[|\x{9b})[0-?]*[ -/]*[@-~]|\\u001[bB]\[[0-?]*[ -/]*[@-\[\]-~]|(?:\x1b\]|\x{9d})[^\x07\x1b\x{9c}]{0,256}(?:\x07|\x1b\\|\x{9c})`)
+// An OSC with no end does not match, so it cannot swallow the rest of the
+// text; its ESC is an invisible control rune, so step 4 of normalizeForMatch
+// handles it.
+var ansiSeq = regexp.MustCompile(`(?:\x1b\[|\x{9b})[0-?]*[ -/]*[@-~]|(?:\x1b\]|\x{9d})[^\x07\x1b\x{9c}]{0,256}(?:\x07|\x1b\\|\x{9c})`)
 
 // ansiToSpace replaces each ANSI escape sequence (see ansiSeq) with U+0020.
 // Without this step, ESC [ 8 m before "Ignore" leaves "[8mIgnore", and the

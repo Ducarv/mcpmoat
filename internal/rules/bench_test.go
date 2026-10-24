@@ -198,6 +198,73 @@ func BenchmarkWorstCaseBlock(b *testing.B) {
 	}
 }
 
+// worstSchema returns a JSON array of n distinct strings that fills the caps
+// of schemaFit exactly: each string is maxSchemaMatchBytes/n bytes long, and
+// n is at most maxSchemaMatchStrings. Each string starts with sixFormsText,
+// so it has all six regex forms, and the rest is letters, so no regex of
+// worstBlock matches.
+func worstSchema(tb testing.TB, n int) string {
+	tb.Helper()
+	size := maxSchemaMatchBytes / n
+	strs := make([]string, n)
+	for i := range strs {
+		// Three letters make each string distinct: 26*26*26 > maxSchemaMatchStrings.
+		id := string([]byte{byte('a' + i/676%26), byte('a' + i/26%26), byte('a' + i%26)})
+		strs[i] = sixFormsText + id + strings.Repeat("a", size-len(sixFormsText)-len(id))
+	}
+	raw := mustJSON(tb, strs)
+
+	got, complete := schemaStrings([]byte(raw))
+	if fit, cut := schemaFit(got); !complete || cut || fit != n || len(got) != n {
+		tb.Fatalf("worstSchema(%d): %d strings, %d fit, cut %v, complete %v", n, len(got), fit, cut, complete)
+	}
+	if forms := len(regexForms(got[0])); forms != 6 || len(got[0]) != size {
+		tb.Fatalf("worstSchema(%d): string of %d bytes with %d forms, want %d bytes and 6 forms", n, len(got[0]), forms, size)
+	}
+	return raw
+}
+
+// BenchmarkSchemaWorstCase measures the worst-case block of
+// BenchmarkWorstCaseBlock, compiled for the schema target, on a schema that
+// fills the caps of schemaFit. Each string has the six regex forms. Two
+// shapes fill the byte cap:
+//
+//   - 4096 strings of 32 bytes: they also fill maxSchemaMatchStrings, so this
+//     shape has the most match calls;
+//   - 4 strings of 32 KiB (MaxMatchInputBytes): this shape is four times the
+//     description worst case.
+//
+// The JSON is complete, so the raw text is not matched. A broken schema adds
+// one raw text match, at most one BenchmarkWorstCaseBlock.
+//
+// Measured on 2026-10-24 on an Apple M1 Pro (go1.27.3 darwin/arm64), caps
+// 128 KiB and 4096 strings, with -benchtime=3x, in the same run as
+// BenchmarkWorstCaseBlock (about 4.4 s):
+//
+//   - 4096 strings: about 0.62 s for one Match call, about 0.14 times the
+//     description worst case. Each string is short, so few regex threads
+//     are alive at each byte;
+//   - 4 strings: about 17.8 s for one Match call, about 4.0 times the
+//     description worst case. This is the worst shape.
+func BenchmarkSchemaWorstCase(b *testing.B) {
+	m, err := Match{AnyRegex: worstBlock(b)}.CompileFor(TargetSchema)
+	if err != nil {
+		b.Fatalf("CompileFor() error = %v", err)
+	}
+	for _, n := range []int{maxSchemaMatchStrings, 4} {
+		raw := worstSchema(b, n)
+		b.Run(fmt.Sprintf("%d strings", n), func(b *testing.B) {
+			b.SetBytes(int64(len(raw)))
+			b.ReportAllocs()
+			for b.Loop() {
+				if m.Match(raw) != nil {
+					b.Fatal("Match() != nil, want no match")
+				}
+			}
+		})
+	}
+}
+
 // TestMatch10MBCorrect checks that the matchers give the right result on a
 // 10 MB text: the regex and keyword matchers read only the first
 // MaxMatchInputBytes, and the heuristics read the full text.

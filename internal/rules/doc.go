@@ -7,10 +7,12 @@
 // # The match block
 //
 // Each rule has a `match:` block, the type [Match]. It holds exactly one of
-// any_regex, all_regex, keywords or heuristic. [Match.Compile] checks it and
-// returns a [Matcher]. The loader calls it at load time through a [Compiler]
-// given with [WithCompiler].
-// Every error from Compile is a *[FieldError] that names the field, for
+// any_regex, all_regex, keywords or heuristic. [Match.CompileFor] checks it
+// and returns a [Matcher] for the target of the rule. The target decides how
+// the Matcher reads its text (see Schema text below). [Match.Compile] is
+// CompileFor with the description target. The loader compiles at load time
+// through a [Compiler] given with [WithCompiler].
+// Every error from CompileFor is a *[FieldError] that names the field, for
 // example "any_regex[2]". An error never holds text from the rule file (a
 // pattern, a keyword or a parameter key) or input text, so it is safe to
 // print.
@@ -27,8 +29,19 @@
 // raw text before this cut, so invisible padding does not use up the 32 KiB.
 // This is an evasion window: instructions placed after the first 32 KiB of
 // visible text (or after the first 128 KiB of raw text) are not seen by regex
-// and keyword rules. The max_length heuristic flags such a long text, because
-// it and the other text heuristics read the full raw text.
+// and keyword rules. The match_window heuristic closes it: a high rule with
+// it fires on every text that the regex and keyword rules do not read in
+// full, also when only one form of the text is cut. The max_length heuristic
+// also flags a long text. Both read the full raw text, as the other text
+// heuristics do.
+//
+// A schema has its own budget (see Schema text). The regex and keyword rules
+// read at most 128 KiB of its strings and at most 4096 strings, each string
+// in the 32 KiB window. When the JSON cannot be read in full, they also read
+// the raw text once, in the 32 KiB window. So one schema costs about four
+// times as much as one description, plus one description. The match_window
+// heuristic also fires on a schema that these caps cut, on a schema with a
+// string longer than the window, and on JSON that cannot be read in full.
 //
 // A list holds at most [MaxPatterns] entries of at most [MaxPatternBytes]
 // bytes each, and the compiled programs of one regex and of one list have
@@ -112,20 +125,36 @@
 //
 // # Heuristics and hits
 //
-// The text heuristics (invisible_unicode, max_length and base64_blob) read the
-// raw text, not the normalized text. A [Hit] from a text heuristic gives a byte
-// offset in the raw text. A hit from a regex or a keyword has the offset -1,
-// because it comes from the normalized text.
+// The text heuristics (invisible_unicode, tag_or_bidi_override, max_length,
+// base64_blob and match_window) read the raw text, not the normalized text. A
+// [Hit] from a text heuristic gives a byte offset in the raw text, except a
+// match_window hit, which is about the whole text and has the offset -1
+// ([NoOffset]). A hit from a regex or a keyword has the offset -1, because it
+// comes from the normalized text. Every hit of a schema rule has the offset
+// -1, and its Detail starts with "schema string N", where N is the 1-based
+// place of the string in the schema (see Schema text).
 //
 // The invisible_unicode heuristic flags the same invisible runes that the
 // normalization removes, so it flags every control character except the
 // white space, such as U+0000, ESC and DEL.
 //
+// The tag_or_bidi_override heuristic flags a narrower set: the Unicode tag
+// characters (U+E0000 to U+E007F), which can hide a full ASCII text, and the
+// bidi overrides LRO and RLO, which reverse the text a reader sees. It
+// excuses the tag characters of the England, Scotland and Wales flag emoji.
+// One hit stands for one run, and its Detail gives the length of the run but
+// never its runes.
+//
+// The match_window heuristic flags a text that the regex and keyword rules do
+// not read in full (see Cost bounds). It has no parameters.
+//
 // The base64_blob heuristic checks each run of base64 characters on its own.
 // An invisible rune inside a run, also a control character such as U+0000 or
 // ESC, is skipped. Any other character, such as a space, a newline or '=', ends a
 // run, and runs are not joined. So a payload that is split into short chunks
-// is not flagged when no chunk reaches min_length on its own.
+// is not flagged when no chunk reaches min_length on its own. With min_words
+// set above 0, the decoded text must also hold that many words in a row. So a
+// JWT, which decodes to JSON, is not flagged, but an encoded sentence is.
 //
 // The config heuristics (insecure_url, plaintext_secret, unpinned_package,
 // auto_install and typosquat) read one line of text each, not the whole text.
@@ -145,16 +174,28 @@
 //
 // # Schema text
 //
-// The text of a tool schema (InputSchema or OutputSchema) is the value of
-// every "description" and "title" string, at any depth, in document order.
-// The keys match in any case. The rules do not model JSON Schema keywords.
-// JSON escapes are decoded first, before any normalization or fold, so an
-// invisible rune written as \u200b cannot hide as literal text. The read is
-// bounded by the depth and value caps of the inspect package, so a schema
-// that inspect accepts is read in full.
+// A rule with target: schema (the T1 schema rules) reads the tool input
+// schema as JSON. It reads every object key and every string value, at any
+// depth, in document order, one at a time. A string that comes more than once
+// is read once. Each string is matched alone, as a description is matched:
+// the strings are never joined, so the regexes of an all_regex list must all
+// match in one string. Numbers, booleans and null are not read.
 //
-// The shadowing check (MOAT-T3-001) scans this text, together with the tool
-// description, the tool title and the annotations title.
+// JSON escapes are decoded first, before any normalization or fold, so an
+// invisible rune written as \u200b cannot hide as literal text, and an ESC
+// written as \u001b is an ESC. The read is bounded by the depth and value
+// caps of the inspect package, so a schema that inspect accepts is read in
+// full. When the JSON cannot be read in full (it is malformed, has data after
+// the first value, or goes over a cap), the rule also reads the raw text once,
+// so a broken schema is still scanned. Its hits have a Detail that starts with
+// "schema raw text".
+//
+// The shadowing check (MOAT-T3-001) still reads a narrower text: the value of
+// every "description" and "title" string of the schema (InputSchema or
+// OutputSchema), at any depth, in document order, with the keys matched in
+// any case. It scans this text, together with the tool description, the tool
+// title and the annotations title. The rules do not model JSON Schema
+// keywords.
 //
 // # The ignore file
 //

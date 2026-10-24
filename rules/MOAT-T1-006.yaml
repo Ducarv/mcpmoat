@@ -1,3 +1,4 @@
+# MOAT-T1-013 copies this match block for the input schema. Change both files.
 id: MOAT-T1-006
 title: Tool description contains invisible or bidirectional Unicode characters
 severity: medium
