@@ -32,12 +32,30 @@ type schemaFrame struct {
 	key       string // object only: the key of the value that comes next
 }
 
+// take reads the next token inside the frame. In an object, tokens are a key,
+// then its value, then a key again. take reports isKey for a key. For a value,
+// it returns the key of that value; in an array, the key is "".
+func (f *schemaFrame) take(tok json.Token) (key string, isKey bool) {
+	if !f.isObject {
+		return "", false
+	}
+	if f.expectKey {
+		f.key, _ = tok.(string) // the decoder checks that a key is a string
+		f.expectKey = false
+		return "", true
+	}
+	f.expectKey = true
+	return f.key, false
+}
+
 // schemaText returns the decoded text of every "description" and "title"
 // string in a JSON schema, in document order. A string is collected when it is
 // the value of a key named "description" or "title", in any case, at any
 // depth.
-// The decoder resolves JSON escapes, so the key "description" and the
-// text "\u200b" are returned as the characters that they stand for.
+//
+// The decoder resolves JSON escapes first. So the key written as
+// "\u0064escription" matches "description", and the text "\u200b" is returned
+// as the rune U+200B.
 //
 // The function does not model schema keywords on purpose. A property that is
 // named "description" and has an object as value is not collected, but the
@@ -64,48 +82,43 @@ func schemaText(raw json.RawMessage) (texts []string, complete bool) {
 
 	var stack []schemaFrame
 	values := 0
+tokens:
 	for {
 		tok, err := dec.Token()
 		if err != nil {
 			return texts, false // malformed JSON, or EOF before a full value
 		}
 
-		// A closing delimiter is not a value. Every other token is one: it is
-		// counted, as inspect counts it. Then find the key of this value, and
-		// mark the parent as ready for the next key.
-		closing := tok == json.Delim('}') || tok == json.Delim(']')
-		key := ""
-		if !closing {
-			values++
-			if values > maxSchemaValues {
-				return texts, false
+		// A closing '}' or ']' is not a value, as in inspect. The decoder
+		// checks that it matches an open frame.
+		if tok == json.Delim('}') || tok == json.Delim(']') {
+			stack = stack[:len(stack)-1]
+			if len(stack) == 0 {
+				break tokens // the first top-level value is complete
 			}
-			if n := len(stack); n > 0 && stack[n-1].isObject {
-				top := &stack[n-1]
-				if top.expectKey {
-					// A string here is a key (the decoder checks that it is one).
-					if s, ok := tok.(string); ok {
-						top.key = s
-						top.expectKey = false
-					}
-					continue
-				}
-				key = top.key
-				top.expectKey = true
+			continue
+		}
+
+		// Every other token is a value, and it is counted as inspect counts it.
+		values++
+		if values > maxSchemaValues {
+			return texts, false
+		}
+
+		key := ""
+		if n := len(stack); n > 0 {
+			var isKey bool
+			if key, isKey = stack[n-1].take(tok); isKey {
+				continue
 			}
 		}
 
 		switch v := tok.(type) {
-		case json.Delim:
-			switch v {
-			case '{', '[':
-				if len(stack) >= maxSchemaDepth {
-					return texts, false
-				}
-				stack = append(stack, schemaFrame{isObject: v == '{', expectKey: v == '{'})
-			default: // '}' or ']'
-				stack = stack[:len(stack)-1]
+		case json.Delim: // '{' or '['
+			if len(stack) >= maxSchemaDepth {
+				return texts, false
 			}
+			stack = append(stack, schemaFrame{isObject: v == '{', expectKey: v == '{'})
 		case string:
 			// A model reads "Description" as well as "description".
 			if strings.EqualFold(key, "description") || strings.EqualFold(key, "title") {
@@ -114,7 +127,7 @@ func schemaText(raw json.RawMessage) (texts []string, complete bool) {
 		}
 
 		if len(stack) == 0 {
-			break // the first top-level value is complete
+			break tokens // a top-level scalar is the whole value
 		}
 	}
 

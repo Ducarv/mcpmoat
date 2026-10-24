@@ -30,6 +30,10 @@ const (
 // followed by an upper-case one ("sendEmail").
 var compoundName = regexp.MustCompile(`^[A-Za-z0-9]+([_-][A-Za-z0-9]+)+$|[a-z][A-Z]`)
 
+// plainName matches a text that is only one name: ASCII letters, digits, "_"
+// and "-", with no space and nothing that foldText removes.
+var plainName = regexp.MustCompile(`^[A-Za-z0-9_-]+$`)
+
 // ServerTools is one server with the tools that inspect read from it.
 type ServerTools struct {
 	// Server is the server as discover read it from the client config.
@@ -75,12 +79,14 @@ func (n nameOwners) other(identity int) (toolOwner, bool) {
 //     which appear in normal prose;
 //   - a name that only the describing server owns, so a tool that names a
 //     tool of its own server, or itself, is not reported;
-//   - a text that is one token and the tool's own name. pydantic sets the
-//     schema title of the tool git_status to "GitStatus", and a tool title
-//     is often the name. Such a text has no instruction, so it cannot shadow
-//     anything, even when another server also has a tool with that name. A
-//     text with any other word is scanned, even when it equals the tool
-//     name, because the server chooses the name.
+//   - a title or schema text that is only the tool's own name: one word of
+//     ASCII letters, digits, "_" and "-" that folds to the name. pydantic
+//     sets the schema title of the tool git_status to "GitStatus", and a
+//     tool title is often the name. Such a text has no instruction, so it
+//     cannot shadow anything, even when another server also has a tool with
+//     that name. Any other text is scanned, even when it equals the tool
+//     name, because the server chooses the name. The description is always
+//     scanned.
 //
 // A name that the describing server owns and that another server also owns
 // is reported. Otherwise a hostile server could hide a mention by adding a
@@ -117,8 +123,8 @@ func (n nameOwners) other(identity int) (toolOwner, bool) {
 // only up to the caps of schemaText: on a schema that is too deep or too big,
 // the check scans the texts that schemaText found before the cap and reports
 // nothing about the rest. Only "description" and "title" strings (the keys in
-// any case) are read. A
-// server can hide a mention in other text that a model can see: default, enum,
+// any case) are read. A server can hide a mention in other text that a model
+// can see: default, enum,
 // examples, const, $comment, vendor keys (x-* or markdownDescription),
 // property names, and strings inside an array under "description". The check
 // does not scan these. A tool name with a byte outside letters, digits, "_"
@@ -170,19 +176,19 @@ func CheckShadowing(all []ServerTools) []Finding {
 // order, and at most maxMentionsPerTool. identity is the owner identity of the
 // server of tool.
 func mentionedOwners(tool inspect.Tool, identity int, owners map[string]nameOwners) []toolOwner {
-	self := strings.Trim(foldText(tool.Name), "_")
+	self := foldName(tool.Name)
 	seen := make(map[string]struct{}) // names already found
 	var found []toolOwner
-	for _, text := range toolTexts(tool) {
+	for i, text := range toolTexts(tool) {
 		if len(found) >= maxMentionsPerTool {
 			break
 		}
-		folded := foldText(text)
-		// Only one token, and it is the tool's own name ("GitStatus").
-		if t := strings.Trim(strings.TrimSpace(folded), "_"); t == self && allIdentBytes(t) {
+		// A title or schema text that is only the own name ("GitStatus").
+		// The description (i == 0) is always scanned.
+		if i > 0 && plainName.MatchString(text) && foldName(text) == self {
 			continue
 		}
-		forEachToken(folded, func(token string) bool {
+		forEachToken(foldText(text), func(token string) bool {
 			// Markdown emphasis such as "_send_email_" wraps the name.
 			token = strings.Trim(token, "_")
 			n, ok := owners[token]
@@ -205,7 +211,8 @@ func mentionedOwners(tool inspect.Tool, identity int, owners map[string]nameOwne
 }
 
 // toolTexts returns each text of a tool that CheckShadowing scans (see its
-// doc comment) as a separate string, in a fixed order.
+// doc comment) as a separate string, in a fixed order. The description comes
+// first.
 func toolTexts(tool inspect.Tool) []string {
 	texts := []string{tool.Description, tool.Title}
 	if tool.Annotations != nil {
@@ -333,7 +340,7 @@ func indexOwners(all []ServerTools, identities []int) map[string]nameOwners {
 			if !compoundName.MatchString(tool.Name) {
 				continue
 			}
-			name := strings.Trim(foldText(tool.Name), "_")
+			name := foldName(tool.Name)
 			if len(name) < minShadowNameLen || !allIdentBytes(name) {
 				continue
 			}
@@ -385,6 +392,12 @@ func foldText(s string) string {
 		b.WriteRune(unicode.ToLower(r))
 	}
 	return b.String()
+}
+
+// foldName returns a tool name in the form that CheckShadowing compares:
+// folded by foldText, without "_" at the ends.
+func foldName(name string) string {
+	return strings.Trim(foldText(name), "_")
 }
 
 // forEachToken calls fn for each maximal run of identifier bytes in text,
