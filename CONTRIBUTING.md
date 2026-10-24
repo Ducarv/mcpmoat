@@ -87,14 +87,15 @@ How mcpmoat prepares the text before a match. This applies to every regex and ke
   - text that only a sequence gives back (OSC text or a CSI letter) with two kinds of invisible
     characters, one inside a word and the other between words (ESC [ "Ig" + ZWSP + "nore" +
     U+0001 + "all");
-  - a control character between ESC and a format character (ESC + U+0001 + ZWSP + "[8mIgnore");
   - a CSI that takes a character that no form gives back: the "m" of a word (ESC [ 1 "make" reads
     as "ake", and "you " + ESC [ "must" reads as "you ust"), a digit, `;` or `:`, or a final byte
     that is not a letter (ESC [ "~/.ssh" reads as " /.ssh");
   - a CSI with a letter final byte inside an OSC text, right before a word: forms 5 and 7 keep
     its letter, and the other forms drop the OSC text (ESC ] "0;" + U+009B + "2KIgnore" BEL reads
     as " 0; KIgnore ");
-  - a payload that only forms 5 and 7 show, after more than 32 KiB of sequence text. The
+  - an OSC, or a CSI with a final byte other than "m", inside a word: a terminal shows one word,
+    but every form splits it ("Ig" + ESC [ K + "nore" reads as "Ig Knore" or "Ig nore");
+  - a payload that only forms 5 and 7 show, after more than 32 KiB of OSC text. The
     `match_window` heuristic does not flag such a text (see below). The `max_length` heuristic
     (MOAT-T1-007, low) flags it when it has more than 4096 characters. Forms 5 and 7 are not
     longer than the raw text in characters, so this is true unless only the Unicode normalization
@@ -123,10 +124,10 @@ How mcpmoat prepares the text before a match. This applies to every regex and ke
   the first 128 KiB of the raw text, and then each form is cut at 32 KiB. Padding can push an
   instruction past this window. The `match_window` heuristic closes this gap. It fires when the
   regex and keyword rules cannot read the whole text: the raw text is longer than 128 KiB, or one of
-  forms 1 to 4 and 6 is cut at 32 KiB. A cut of form 5 or 7 does not count, because the sequence
-  text that these forms keep (such as the URL of an OSC 8 link) makes a benign text longer than
-  32 KiB in these forms only. MOAT-T1-017 (description) and MOAT-T1-018 (schema) use it at high
-  severity.
+  the forms is cut at 32 KiB. For forms 5 and 7, the text that a CSI gives back counts, but the
+  OSC text does not, because OSC text (such as the URL of an OSC 8 link) makes a benign text
+  longer than 32 KiB in these forms only. So padding with ESC [ A still gives a hit. MOAT-T1-017
+  (description) and MOAT-T1-018 (schema) use it at high severity.
 
 How mcpmoat prepares the text of a `target: schema` rule:
 

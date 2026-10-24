@@ -31,11 +31,11 @@
 // visible text (or after the first 128 KiB of raw text) are not seen by regex
 // and keyword rules. The match_window heuristic closes it: a high rule with
 // it fires on a text longer than 128 KiB, and when the window cuts one of
-// the forms 1 to 4 and 6 (see matchForms), also when only one of them is
-// cut. A cut of the forms 5 and 7 does not count: the sequence text that
-// they keep, such as an OSC 8 link URL, makes a benign text long in these
-// forms only. The max_length heuristic also flags a long text. Both read
-// the full raw text, as the other text heuristics do.
+// the forms (see matchForms), also when only one of them is cut. The OSC
+// text of a form does not count: the OSC text, such as an OSC 8 link URL,
+// makes a benign text long in the forms that keep sequence text only (see
+// matchWindowCut). The max_length heuristic also flags a long text. Both
+// read the full raw text, as the other text heuristics do.
 //
 // A schema has its own budget (see Schema text). The regex and keyword rules
 // read one schema in three passes:
@@ -57,7 +57,7 @@
 //
 // A list holds at most [MaxPatterns] entries of at most [MaxPatternBytes]
 // bytes each, and the compiled programs of one regex and of one list have
-// instruction caps. A text has up to maxRegexForms forms for a regex (see
+// instruction caps. A text has up to 14 forms for a regex (see
 // Normalization below). For the worst case of one match block and its cost,
 // see the cost comment on these caps in match.go. A hostile --rules
 // directory multiplies this cost by the number of rules and texts. A cap at
@@ -96,12 +96,13 @@
 // U+FDFA, stays as it is and cannot push a payload out of the 32 KiB. A form
 // that is only ASCII is its own fold, so it adds no folded form. A rule
 // matches when it matches in one form, and each regex of an all_regex list
-// can match in a different form. So a regex reads up to maxRegexForms forms
-// of a text (the base forms and their folds), and a keyword up to
-// maxKeywordForms (the folds of the base forms): such a text costs up to
-// maxRegexForms times as much to match. The forms are built only when a
-// regex or keyword matcher reads the text, and only once for each match: a
-// heuristic reads only the raw text.
+// can match in a different form. So a regex reads up to 14 forms of a text
+// (maxRegexForms: the base forms and their folds), and a keyword up to 7
+// (maxKeywordForms: the folds of the base forms): such a text costs up to
+// 14 times as much to match. The forms are built only when a regex or
+// keyword matcher reads the text, and only once for each match. A heuristic
+// gets only the raw text. The match_window heuristic builds the forms
+// itself, to check their length.
 //
 // A regex cannot match an invisible rune (use the invisible_unicode heuristic
 // for that), and a pattern must be written in NFC: a pattern with a letter

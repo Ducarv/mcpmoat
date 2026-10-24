@@ -46,8 +46,8 @@ import (
 // A text longer than the window is cut, so padding can push a payload out of
 // the reach of the regex and keyword rules. The match_window heuristic closes
 // this evasion: a high rule with it fires when the window cuts one of the
-// forms 1 to 4 and 6 of matchForms, but not the forms 5 and 7, which keep
-// OSC text such as link URLs (see matchWindowCut).
+// forms of matchForms. The OSC text of a form, such as a link URL, does not
+// count (see matchWindowCut).
 //
 // A schema target is many short texts (see matchSchema). An any_regex,
 // all_regex or keywords rule reads one schema in three passes: its strings
@@ -241,9 +241,10 @@ func (m *Matcher) Match(text string) []Hit {
 
 // matchPrepared returns the hits of the matcher in p, as Match does. The
 // forms of p are built at most once, so the matchers of many rules can share
-// one p for the same text (see preparedText). A heuristic reads only p.raw,
-// so it does not build the forms. matchPrepared never writes into the forms
-// of p.
+// one p for the same text (see preparedText). A heuristic gets only p.raw,
+// so it does not build the forms of p. The match_window heuristic builds
+// its own forms of p.raw (see matchWindowCut). matchPrepared never writes
+// into the forms of p.
 //
 // For the schema target, p.raw is a JSON schema, and matchPrepared reads it
 // with matchSchema. The forms of p are then not built and not shared:

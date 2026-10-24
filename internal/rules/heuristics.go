@@ -39,11 +39,10 @@ const (
 	HeuristicMixedScript = "mixed_script"
 	// HeuristicMatchWindow flags a text that the regex and keyword matchers
 	// do not read in full: the text is longer than the raw scan limit, or
-	// one of the forms 1 to 4 and 6 of matchForms is cut at
-	// MaxMatchInputBytes. A cut of the forms 5 and 7, which keep OSC text
-	// such as link URLs, does not count (see matchWindowCut). So a payload
-	// that padding pushes out of the match window still gives a hit. It has
-	// no parameters.
+	// a form of matchForms is cut at MaxMatchInputBytes. The OSC text of a
+	// form, such as a link URL, does not count (see matchWindowCut). So a
+	// payload that padding pushes out of the match window still gives a hit.
+	// It has no parameters.
 	HeuristicMatchWindow = "match_window"
 	// HeuristicTagBidiOverride flags the Unicode tag characters (U+E0000 to
 	// U+E007F), which can hide a full ASCII text, and the bidi overrides LRO

@@ -16,15 +16,16 @@ const maxKeywordForms = maxBaseForms
 // preparedText is one target text and the match forms built from it. The
 // forms are built once for each target text, so the rules that read the same
 // text do not normalize it again. The build is lazy: it runs on the first
-// call of regexForms or keywordForms. A heuristic reads only raw, so a text
-// that only heuristics read is never normalized.
+// call of regexForms or keywordForms. A heuristic gets only raw, so it does
+// not build the forms of p. The match_window heuristic builds its own forms
+// of raw (see matchWindowCut).
 //
-// The forms are shared only when the caller shares the preparedText: the
-// scan engine (#143) must build one preparedText for each target text and call
-// matchPrepared for every rule with it. Today only Match, which builds one
-// preparedText for each call, and the tests use it. A schema rule does not
-// share p: matchPrepared reads a schema with matchSchema, and each schema
-// string gets its own preparedText (see matchPrepared).
+// The forms are shared only when the caller shares the preparedText: a
+// caller that builds one preparedText for each target text and calls
+// matchPrepared for every rule with it builds the forms once. Match builds
+// one preparedText for each call. A schema rule does not share p:
+// matchPrepared reads a schema with matchSchema, and each schema string gets
+// its own preparedText (see matchPrepared).
 //
 // A preparedText is safe for concurrent reads: once guards the build, so the
 // first call of regexForms or keywordForms builds the forms, and the other
