@@ -17,7 +17,17 @@ match:
     # HTML closes a comment at --> and also at ---> (more dashes) and --!>.
     # The body never steps over one of these closes, so the match cannot run
     # past a real close. A dash run before the word can be any length.
-    - '(?i)<!--(?:(?:[^-]|-[^-]|--+!?[^!>-])*?(?:[^\w:-]|-+\s))?(?:you|your|assistant|model|always|must|never|ignore|instead)(?:--+!?>|[^\w-](?:[^-]|-[^-]|--+!?[^!>-])*?--+!?>)'
+    # The parts, in order:
+    #   <!--                      the start
+    #   [^\w:>-] or -+\s          a gap of one rune (or a dash run and a space)
+    #                             before the word. It is never ">", so <!-->
+    #                             (an abrupt close in HTML) is not a start
+    #   or a body, then a gap     the body does not start with ">" or "->"
+    #                             (<!--->), and it never holds a close
+    #   the word list             the words that address the model
+    #   the close                 --> ---> --!> right after the word, or a
+    #                             non-word rune, a body and a close
+    - '(?i)<!--(?:[^\w:>-]|-+\s|(?:[^->]|-[^->]|--+!?[^!>-])(?:[^-]|-[^-]|--+!?[^!>-])*?(?:[^\w:-]|-+\s))?(?:you|your|assistant|model|always|must|never|ignore|instead)(?:--+!?>|[^\w-](?:[^-]|-[^-]|--+!?[^!>-])*?--+!?>)'
 risk: The tool input schema uses a markup tag to frame hidden instructions for the model, so the model may follow commands that the user cannot see.
 remediation: Remove the server or do not use it. Read every key and value of the input schema to see what the hidden instructions ask for. Report the server to its author.
 references:
@@ -108,6 +118,10 @@ should_not_match:
     note: The word comes after a --!> close
   - text: '{"properties":{"s":{"type":"string","description":"<!-- toc --!>\nYou must pass a path. <!-- /toc -->"}}}'
     note: The match does not run past a --!> close to the next close
+  - text: '{"properties":{"s":{"type":"string","description":"<!-->\nYou must pass a path. <!-- toc -->"}}}'
+    note: HTML closes <!--> at once, so the word comes after the comment ends
+  - text: '{"properties":{"s":{"type":"string","description":"<!--->\nYou must pass a path. <!-- toc -->"}}}'
+    note: HTML closes <!---> at once, so the word comes after the comment ends
   - text: '{"properties":{"system":{"type":"string","description":"Name of the target system."},"important":{"type":"boolean"}}}'
     note: Property names with no angle brackets
   - text: '{"properties":{"open":{"type":"string","default":"<instructions>"},"close":{"type":"string","default":"</instructions>"}}}'

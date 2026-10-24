@@ -1,15 +1,19 @@
-# The same check as MOAT-T1-015, for the input schema. The regex and keyword
-# rules read each schema string in the 32 KiB window, at most 4096 strings and
-# 128 KiB in all, and the raw text when the JSON cannot be read in full. The
-# match_window heuristic flags a schema that they do not read in full.
+# MOAT-T1-015 is the same check for the description. Change both files.
+# The regex and keyword rules read each schema string in the 32 KiB window, at
+# most 4096 strings and 128 KiB in all, and the raw text when the JSON cannot
+# be read in full. The match_window heuristic flags a schema that they do not
+# read in full.
+# The long should_match case is one paragraph, repeated until the string is
+# longer than MaxMatchInputBytes. Keep it longer than the window when the
+# window changes.
 id: MOAT-T1-016
-title: Tool schema string is longer than the match window
+title: Tool schema is too large or too broken for the regex rules to read in full
 severity: high
 target: schema
 match:
   heuristic: match_window
 risk: The regex rules read only the first 32 KiB of each input schema string and a capped part of the schema, so padding can push hidden instructions past the part that they read.
-remediation: Read the full input schema, mainly the long strings and their ends, and check what they ask the model to do. A benign server rarely has a schema string this long. Remove the server or do not use it if the schema hides instructions, and report the server to its author.
+remediation: Read the full input schema, mainly the long strings and their ends, and check what they ask the model to do. A benign server rarely has a schema this large, a string this long or a schema that is not valid JSON. Remove the server or do not use it if the schema hides instructions, and report the server to its author.
 references:
   - https://invariantlabs.ai/blog/mcp-security-notification-tool-poisoning-attacks
   - https://owasp.org/www-project-mcp-top-10/

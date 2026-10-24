@@ -154,7 +154,7 @@
 //     match_window hit for one string that is longer than the window starts
 //     with "schema string N".
 //
-// A schema rule returns at most 16 such hits, plus one summary hit
+// A schema rule returns at most [MaxHits] such hits, plus one summary hit
 // "and N more schema hits".
 //
 // The invisible_unicode heuristic flags the same invisible runes that the
@@ -183,11 +183,14 @@
 // word is a token of letters, with an optional apostrophe inside. An empty
 // token or a token of digits is skipped. Any other token ends the run. A
 // field between white space that holds a '/' or a '\' is a path, and it
-// counts as one word at most. A decoded JSON object or array never counts as
-// text when min_words is set, also when its strings hold words. So a JWT, an
+// counts as one word at most. In a decoded JSON object or array, one string
+// (a key or a value) must hold twice min_words words in a row. So a JWT, an
 // encoded JSON cursor and a path alone are not flagged, but an encoded
 // sentence is, also when it is written with hyphens or holds a path or a
-// number. YAML, shell or log text with spaces can still count as words.
+// number, or sits in a JSON wrapper. YAML, shell or log text with spaces can
+// still count as words. A sentence that a '/' joins into one field, or that
+// one token which is not a word (such as "e.g") cuts, stays below the run. The
+// medium rules without min_words still flag such a text.
 //
 // The config heuristics (insecure_url, plaintext_secret, unpinned_package,
 // auto_install and typosquat) read one line of text each, not the whole text.

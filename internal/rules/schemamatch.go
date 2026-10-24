@@ -68,20 +68,34 @@ const (
 // jsonSpace holds the four white-space characters of JSON.
 const jsonSpace = " \t\r\n"
 
-// schemaMode tells matchSchema how to read the strings of a schema.
+// schemaMode tells matchSchema how to read the strings of a schema. The zero
+// value is schemaBudget, the mode of the regex and keyword kinds.
 type schemaMode int
 
 const (
-	// schemaAll reads every string. Use it for the text heuristics: their
-	// cost is linear in the input, so they need no cap.
-	schemaAll schemaMode = iota
 	// schemaBudget reads the strings in document order until a cap stops it
 	// (see schemaFit). Use it for any_regex, all_regex and keywords.
-	schemaBudget
+	schemaBudget schemaMode = iota
+	// schemaAll reads every string. Use it for the text heuristics: their
+	// cost is linear in the input, so they need no cap.
+	schemaAll
 	// schemaWindow is for the match_window heuristic. It reports the schemas
 	// that the schemaBudget mode cannot read in full (see matchSchema).
 	schemaWindow
 )
+
+// String returns the name of the mode, for test names and messages.
+func (m schemaMode) String() string {
+	switch m {
+	case schemaBudget:
+		return "budget"
+	case schemaAll:
+		return "all"
+	case schemaWindow:
+		return "window"
+	}
+	return fmt.Sprintf("schemaMode(%d)", int(m))
+}
 
 // matchSchema runs match on a tool schema, raw, and returns the hits.
 //
@@ -150,7 +164,7 @@ func matchSchema(raw string, mode schemaMode, match func(string) []Hit) []Hit {
 		return nil
 	}
 	strs, complete := schemaStrings([]byte(raw))
-	n, cut := schemaFit(strs)
+	n, cut := schemaFit(strs) // used by the schemaBudget and schemaWindow modes
 
 	if mode == schemaWindow {
 		return schemaWindowHit(strs, complete, cut, match)
@@ -172,6 +186,9 @@ func matchSchema(raw string, mode schemaMode, match func(string) []Hit) []Hit {
 		keepSchemaHits(&l, label, hits)
 	}
 	if !complete {
+		// The raw text is JSON text: an escape such as \u001b is not decoded
+		// here. MOAT-T1-016 flags every schema that cannot be read in full,
+		// so this pass is the second line, not the only one.
 		keepSchemaHits(&l, "schema raw text", match(raw))
 	}
 	return l.result("schema hits")

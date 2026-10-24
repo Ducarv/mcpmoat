@@ -114,15 +114,17 @@ const (
 // Matcher is a compiled match block for one target. Make one with
 // Match.CompileFor. A Matcher is immutable and safe for concurrent use.
 type Matcher struct {
-	kind          string
-	target        Target                 // how Match reads the text
-	heuristicName string                 // heuristic only: the name, such as "match_window"
-	regexps       []*regexp.Regexp       // any_regex, all_regex and keywords
-	heuristic     func(raw string) []Hit // heuristic
+	kind      string
+	target    Target                 // how Match reads the text
+	mode      schemaMode             // how Match reads a schema
+	regexps   []*regexp.Regexp       // any_regex, all_regex and keywords
+	heuristic func(raw string) []Hit // heuristic
 }
 
 // Compile checks the match block and compiles it for the description target.
-// It is CompileFor(TargetDescription).
+// It is CompileFor(TargetDescription). Do not use it for a rule with
+// target: schema: the matcher then reads the raw JSON as one text. Use
+// CompileFor(TargetSchema).
 func (m Match) Compile() (*Matcher, error) {
 	return m.CompileFor(TargetDescription)
 }
@@ -168,7 +170,11 @@ func (m Match) compile() (*Matcher, error) {
 		if err != nil {
 			return nil, err
 		}
-		return &Matcher{kind: kindHeuristic, heuristicName: m.Heuristic, heuristic: fn}, nil
+		mode := schemaAll
+		if m.Heuristic == HeuristicMatchWindow {
+			mode = schemaWindow
+		}
+		return &Matcher{kind: kindHeuristic, mode: mode, heuristic: fn}, nil
 	case m.AnyRegex != nil:
 		return compileRegexMatcher(kindAnyRegex, m.AnyRegex, nil)
 	case m.AllRegex != nil:
@@ -228,21 +234,9 @@ func (m *Matcher) Match(text string) []Hit {
 		return nil
 	}
 	if m.target == TargetSchema {
-		return matchSchema(text, m.schemaMode(), m.matchText)
+		return matchSchema(text, m.mode, m.matchText)
 	}
 	return m.matchText(text)
-}
-
-// schemaMode returns the mode in which matchSchema reads a schema for m.
-func (m *Matcher) schemaMode() schemaMode {
-	switch {
-	case m.kind == kindHeuristic && m.heuristicName == HeuristicMatchWindow:
-		return schemaWindow
-	case m.kind == kindHeuristic:
-		return schemaAll
-	default:
-		return schemaBudget
-	}
 }
 
 // matchText returns the hits of m in one text, as Match describes for a text

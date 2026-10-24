@@ -336,7 +336,7 @@ func TestMatchSchemaMalformed(t *testing.T) {
 	}
 	for _, tt := range tests {
 		for _, mode := range []schemaMode{schemaBudget, schemaAll} {
-			t.Run(fmt.Sprintf("%s/mode %d", tt.name, mode), func(t *testing.T) {
+			t.Run(fmt.Sprintf("%s/mode %v", tt.name, mode), func(t *testing.T) {
 				t.Parallel()
 				r := &recorder{hit: holds("evil")}
 				got := matchSchema(tt.raw, mode, r.match)
@@ -987,7 +987,7 @@ func FuzzMatchSchema(f *testing.F) {
 		}
 		for _, mode := range []schemaMode{schemaAll, schemaBudget, schemaWindow} {
 			r := &recorder{hit: always, perCall: 2}
-			check(t, fmt.Sprintf("fake mode %d", mode), matchSchema(raw, mode, r.match))
+			check(t, fmt.Sprintf("fake mode %v", mode), matchSchema(raw, mode, r.match))
 		}
 		for i, m := range matchers {
 			check(t, "matcher "+strconv.Itoa(i), m.Match(raw))

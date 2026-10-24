@@ -5,8 +5,7 @@
 # The schema is decoded first. Each object key and each string value is
 # matched alone, as a description is matched, so the patterns need no JSON
 # escapes. When no string matches, each seam of two neighbour strings is
-# matched too: the end of one string, 32 newlines, the start of the next. A
-# gap such as [\s\S]{0,30} cannot cross a seam.
+# matched too: the end of one string, 32 newlines, the start of the next.
 id: MOAT-T1-010
 title: Tool schema mentions sensitive local files
 severity: medium

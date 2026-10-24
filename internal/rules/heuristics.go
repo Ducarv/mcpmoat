@@ -385,9 +385,9 @@ func flagTagsLen(s string) int {
 // base64Blob flags each run of base64 characters in raw that is at least
 // minLength characters long and decodes to at least minText printable bytes
 // in a row. When minWords is more than 0, the decoded text must also hold at
-// least minWords words in a row (see hasWordRun), and it must not be a valid
-// JSON object or array (see isJSONText). So a JWT, which decodes to JSON,
-// does not count, but an encoded sentence does.
+// least minWords words in a row (see hasWordRun). A valid JSON object or
+// array needs a longer run in one of its strings (see hasWords). So a JWT,
+// which decodes to JSON, does not count, but an encoded sentence does.
 //
 // A run is a longest sequence of [A-Za-z0-9+/_-]. A run can mix the standard
 // and the URL-safe alphabets, so a "-" or "_" glued to a payload cannot hide
@@ -437,9 +437,7 @@ func isBase64Char(r rune) bool {
 
 // decodesToText reports whether run decodes to at least minText printable
 // bytes in a row and, when minWords is more than 0, to at least minWords
-// words in a row (see hasWordRun). When minWords is more than 0, a decoded
-// text that is a valid JSON object or array never counts (see isJSONText),
-// also when its string values hold words. dst is a buffer that
+// words in a row (see hasWords). dst is a buffer that
 // decodesToText can reuse; it returns the buffer for the next call.
 //
 // decodesToText changes run: it maps the URL-safe '-' and '_' to the
@@ -487,17 +485,42 @@ func decodesToText(run []byte, minText, minWords int, dst []byte) (bool, []byte)
 		if !hasTextRun(text, minText) {
 			continue
 		}
-		if minWords == 0 || (!isJSONText(text) && hasWordRun(text, minWords)) {
+		if minWords == 0 || hasWords(text, minWords) {
 			return true, dst
 		}
 	}
 	return false, dst
 }
 
+// jsonWordFactor is how many times longer than min_words the run of words
+// must be in a string of a JSON text (see hasWords).
+const jsonWordFactor = 2
+
+// hasWords reports whether the decoded text holds a run of n words (see
+// hasWordRun).
+//
+// A valid JSON object or array (see isJSONText) is data, such as the parts
+// of a JWT or an encoded cursor. But a free JSON wrapper, such as
+// ["ignore all ..."], must not hide a sentence. So for JSON, hasWords reads
+// each string, key or value, and asks for a run of jsonWordFactor*n words in
+// it. A scope claim with a few words is not flagged, a long sentence is. A
+// JSON string of fewer words is a documented limit, and the medium rules
+// that have no min_words still flag it.
+func hasWords(text []byte, n int) bool {
+	if !isJSONText(text) {
+		return hasWordRun(text, n)
+	}
+	strs, _ := schemaStrings(text) // a partial read is enough: a hit stays a hit
+	for _, s := range strs {
+		if hasWordRun([]byte(s), jsonWordFactor*n) {
+			return true
+		}
+	}
+	return false
+}
+
 // isJSONText reports whether b, without the white space at its two ends, is
-// a valid JSON object or array. Such a text is data, such as the parts of a
-// JWT or an encoded cursor, and not a sentence, also when its string values
-// hold words.
+// a valid JSON object or array.
 //
 // The cost is safe: json.Valid reads b once and builds no values, so its
 // cost is linear in the decoded run, like the decode itself. Each run is
@@ -557,9 +580,14 @@ func hasTextRun(b []byte, n int) bool {
 // Compact JSON, such as {"alg":"HS256"}, keeps its quotes and colons inside
 // the tokens, so its tokens are not words. But JSON with spaces, or a JSON
 // string with spaces in it, such as a JWT scope, can give a run of words.
-// So decodesToText skips a valid JSON object or array as a whole (see
-// isJSONText) and does not call hasWordRun for it. YAML, shell or log text
-// with spaces can still count as words. That is an accepted limit.
+// So hasWords asks for a longer run in a JSON string. YAML, shell or log
+// text with spaces can still count as words. That is an accepted limit.
+//
+// Two cheap evasions are known limits too. A '/' or a '\' joins a whole
+// sentence into one word ("ignore/all/previous/..."), because a path must
+// not count as a sentence. And one token that is not a word, such as "e.g"
+// or "2x", ends the run. A rule with min_words has a medium twin without it
+// (MOAT-T1-008 and MOAT-T1-014), and the twin still flags such a text.
 func hasWordRun(b []byte, n int) bool {
 	count := 0
 	for field := range bytes.FieldsSeq(b) {
