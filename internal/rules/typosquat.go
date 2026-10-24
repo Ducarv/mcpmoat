@@ -15,7 +15,7 @@ import (
 const (
 	// minTyposquatNameLen is the shortest name that the typosquat check
 	// compares. Very short names are always close to each other, so they
-	// give noise. It is also the shortest word in which two edits count as
+	// give noise. It is also the shortest tail in which two edits count as
 	// close (see shortTyposquatNameLen).
 	minTyposquatNameLen = 5
 
@@ -26,8 +26,10 @@ const (
 	maxTyposquatNameLen = 128
 
 	// shortTyposquatNameLen is the longest "short" name. Short names allow
-	// one edit. Longer names allow two edits only when the word in which the
-	// two names first differ has at least minTyposquatNameLen runes.
+	// one edit. Longer names allow two edits only when the tail has at least
+	// minTyposquatNameLen runes. The tail is the part of the shorter name
+	// after the last separator that the two names share (see
+	// distinctiveTailRunes).
 	shortTyposquatNameLen = 8
 
 	// sameScopeMaxDistance is the largest edit distance that still counts as
@@ -290,16 +292,18 @@ func (t *Typosquat) scopeSquat(c typoCandidate) (string, bool) {
 
 // closeDistance returns the edit distance of a and b and true when it is
 // between 1 and the threshold for these names. The threshold is 1 when the
-// shorter name has at most shortTyposquatNameLen runes or when the word in
-// which the names first differ is shorter than minTyposquatNameLen runes (see
-// distinctiveTailRunes). Else it is 2.
+// shorter name has at most shortTyposquatNameLen runes or when the tail (see
+// distinctiveTailRunes) is shorter than minTyposquatNameLen runes. Else it
+// is 2.
 //
-// A known false negative: a 2-edit change of a word shorter than
+// A known false negative: a 2-edit change of a tail shorter than
 // minTyposquatNameLen runes, such as "mcp-server-gxx" against
-// "mcp-server-git", gives no finding. A short word cannot tell a typo from a
-// different product ("gcp" against "git"). Real names whose distinctive word
-// has 5 runes or more and differ by 2 edits, such as "github" and "gitlab",
-// count as close. That matters only if both are on the popular list.
+// "mcp-server-git", gives no finding. A short tail cannot tell a typo from a
+// different product ("gcp" against "git"). The tail runs to the end of the
+// name, so a shared suffix makes it longer: "ana-mcp-server" against
+// "exa-mcp-server" still counts as close. Real names whose tail has 5 runes
+// or more and differ by 2 edits, such as "github" and "gitlab", also count as
+// close. That matters only if both are on the popular list.
 func closeDistance(a, b string) (int, bool) {
 	la, lb := utf8.RuneCountInString(a), utf8.RuneCountInString(b)
 	short := min(la, lb)

@@ -125,7 +125,7 @@ hit pypi mcp-server-sqlit3e mcp-server-sqlite
 hit npm mcp-sevrer-kubernetes mcp-server-kubernetes
 hit npm mcp-server-kuberntees mcp-server-kubernetes
 
-# --- hit: two edits (the shorter name has more than 8 runes and the word where the names differ has 5 runes or more) ---
+# --- hit: two edits (the shorter name has more than 8 runes and its part after the last shared separator has 5 runes or more) ---
 hit pypi mcp-sever-fecth mcp-server-fetch
 hit pypi mcp-sevrer-fecth mcp-server-fetch
 hit npm mcp-sever-kubernets mcp-server-kubernetes
@@ -149,8 +149,8 @@ hit docker mcp/fecth mcp/fetch
 hit docker mcp/fetchh mcp/fetch
 
 # --- ok: accepted gaps (synthetic names, not real packages) ---
-# Two edits in a word shorter than 5 runes after a shared prefix give no
-# finding. The rule allows only one edit here, because a short word cannot tell
+# Two edits in a tail shorter than 5 runes after the last shared separator give
+# no finding. The rule allows only one edit here, because a short tail cannot tell
 # a typo from a different product (gcp against git). This is a known false
 # negative. A fix for it should flip these lines to hit.
 ok pypi mcp-server-gxx

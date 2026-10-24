@@ -22,7 +22,7 @@ should_match:
   - text: mcp-sever-fecth
     note: Bare package name, run as uvx. A prefix typo (sever) and a tail typo (fecth) are two edits from mcp-server-fetch.
   - text: mcp-server-fetchxx
-    note: Bare package name, run as uvx. Two runes are appended to mcp-server-fetch. The word "fetch" has 5 runes, so two edits count.
+    note: Bare package name, run as uvx. Two runes are appended to mcp-server-fetch. The part after the last shared separator ("fetch") has 5 runes, so two edits count.
 should_not_match:
   - text: '@modelcontextprotocol/server-filesystem'
     note: Exact popular name, so it is the real server.
@@ -34,4 +34,4 @@ should_not_match:
   - text: git
     note: Too short to compare, under 5 characters.
   - text: mcp-server-gcp
-    note: Bare package name, run as npx. A different product, not a typo of mcp-server-git. Two edits in a 3-rune word are not allowed.
+    note: Bare package name, run as npx. A different product, not a typo of mcp-server-git. Two edits in a 3-rune tail ("gcp") are not allowed.
