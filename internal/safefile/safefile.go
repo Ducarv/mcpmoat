@@ -12,9 +12,10 @@
 //   - A size cap, checked on Stat and checked again on the bytes read, so a
 //     file that grew after Stat is still caught.
 //
-// The helpers return OS errors and the sentinel errors below. They hold the
-// path and the errno only, never file content. The caller adds the path to the
-// error and its own text.
+// The helpers return OS errors and the sentinel errors below, and no error
+// holds file content. The OS errors are *fs.PathError values that hold the path
+// and the errno only. The sentinels hold no path, so the caller adds the path
+// and its own text.
 package safefile
 
 import (
@@ -53,7 +54,8 @@ var ErrOutsideRoot = errors.New("path leaves the directory")
 // use errors.As with *fs.PathError and errors.Is with fs.ErrPermission.
 // ReadOpened gives the other errors: ErrNotRegular and ErrTooLarge.
 //
-// maxSize is the largest file size in bytes that is read.
+// maxSize is the largest file size in bytes that is read. It must not be
+// negative: with a negative maxSize every file gives ErrTooLarge.
 func ReadBoundedRegularFile(dir, name string, maxSize int64) (data []byte, found bool, err error) {
 	root, err := OpenRoot(dir)
 	if err != nil {
@@ -99,8 +101,9 @@ func ReadBoundedRegularFile(dir, name string, maxSize int64) (data []byte, found
 // opens f and closes it. f must not be nil.
 //
 // It returns ErrNotRegular when f is not a regular file, and ErrTooLarge when f
-// is larger than maxSize bytes. The errors of Stat and of the read come back as
-// they are.
+// is larger than maxSize bytes. maxSize must not be negative (see
+// ReadBoundedRegularFile). The errors of Stat and of the read come back as they
+// are.
 func ReadOpened(f fs.File, maxSize int64) ([]byte, error) {
 	info, err := f.Stat()
 	if err != nil {
@@ -115,11 +118,11 @@ func ReadOpened(f fs.File, maxSize int64) ([]byte, error) {
 
 	// Read one byte more than the limit, so we can tell if the file grew after
 	// Stat. maxSize+1 would overflow for math.MaxInt64, and no file is larger.
-	limit := maxSize
-	if limit < math.MaxInt64 {
-		limit++
+	readMax := maxSize
+	if readMax < math.MaxInt64 {
+		readMax++
 	}
-	data, err := io.ReadAll(io.LimitReader(f, limit))
+	data, err := io.ReadAll(io.LimitReader(f, readMax))
 	if err != nil {
 		return nil, err
 	}

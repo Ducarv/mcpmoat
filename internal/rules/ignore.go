@@ -64,6 +64,9 @@ const utf8BOM = "\xEF\xBB\xBF"
 var ruleIDPattern = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9]*(?:[-_.][A-Za-z0-9]+)*$`)
 
 // Errors that ReadIgnoreFile wraps. They hold no file content.
+// errIgnoreNotRegular is safefile.ErrNotRegular, which readIgnoreData passes
+// on as it is; the name only gives the tests one name per ignore error.
+// errIgnoreTooLarge replaces safefile.ErrTooLarge, so the warning gives the cap.
 var (
 	errIgnoreNotRegular = safefile.ErrNotRegular
 	errIgnoreTooLarge   = fmt.Errorf("larger than %d bytes", MaxIgnoreFileBytes)
