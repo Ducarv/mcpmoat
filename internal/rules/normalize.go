@@ -158,8 +158,7 @@ func isInvisibleFormat(r rune) bool {
 // is maxBaseForms times the cost bound in match.go. The regex matchers also
 // read the folds (see preparedText.regexForms).
 func matchForms(s string) []string {
-	forms := make([]string, 1, maxBaseForms)
-	forms[0] = buildForm(s, dropInvisible)
+	forms := make([]string, 0, maxBaseForms)
 	for _, mode := range formModes(s) {
 		forms = appendNew(forms, buildForm(s, mode))
 	}
@@ -170,15 +169,16 @@ func matchForms(s string) []string {
 // one form for each formMode, 7 in all.
 const maxBaseForms = int(keepSeqTextSpaced) + 1
 
-// formModes returns the modes of the forms after the first that matchForms
-// builds for s. The order of the list sets the form numbers of matchForms, so
-// it follows the order of the formMode constants.
+// formModes returns the modes of the forms that matchForms builds for s:
+// dropInvisible always, and then each other mode that s needs. The order of
+// the list sets the form numbers of matchForms, so it follows the order of
+// the formMode constants.
 func formModes(s string) []formMode {
 	raw := cutAtRune(s, maxRawScanBytes)
 	hasControl := strings.ContainsFunc(raw, isInvisibleControl)
 	hasFormat := strings.ContainsFunc(raw, isInvisibleFormat)
 	seqStart := hasSeqStart(raw)
-	var modes []formMode
+	modes := []formMode{dropInvisible}
 	if hasControl || hasFormat {
 		modes = append(modes, spaceInvisible)
 	}
@@ -223,7 +223,7 @@ func matchWindowCut(s string) bool {
 	if len(s) > maxRawScanBytes {
 		return true
 	}
-	for _, mode := range append([]formMode{dropInvisible}, formModes(s)...) {
+	for _, mode := range formModes(s) {
 		ansi := mode.ansiStep
 		if mode.keepsSeqText() {
 			ansi = ansiKeepCSIText
@@ -248,11 +248,15 @@ func hasSeqStart(s string) bool {
 
 // hasSeqC0 reports whether s holds ESC or U+009B, which start a CSI, and a C0
 // control rune of csiC0. matchForms adds the sixth form only then. Without
-// both, ansiSeqC0 finds the same sequences as ansiSeq, so the sixth form is
-// the first form. It is a cheap check: the two runes need not be in the same
-// sequence, and appendNew drops the sixth form when it equals another form.
-// U+009D starts only an OSC, and ansiSeq and ansiSeqC0 read an OSC the same
-// way, so it does not count here.
+// both, ansiSeqC0 finds the same CSIs as ansiSeq. It is a cheap check: the
+// two runes need not be in the same sequence, and appendNew drops the sixth
+// form when it equals another form.
+//
+// ansiSeq and ansiSeqC0 differ in one more way: in ansiSeqC0, a U+009D ends
+// the text of an OSC (see oscExprC0). So without a C0 rune, the sixth form
+// can still differ from the first, when an OSC text holds U+009D. It is not
+// built then, but the fifth and the seventh form read the same sequences
+// with ansiSeqC0 and keep more of the text, so no match is lost.
 func hasSeqC0(s string) bool {
 	return strings.ContainsFunc(s, startsCSI) && csiC0Rune.MatchString(s)
 }

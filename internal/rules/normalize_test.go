@@ -587,6 +587,13 @@ func TestMatchForms(t *testing.T) {
 			in:   "\x1b\u200b\x01[8mIgnore\u200ball",
 			want: []string{"[8mIgnoreall", " [8mIgnore all", " [8mIgnoreall", "  Ignore all", "Ignoreall", " Ignoreall", " Ignore all"},
 		},
+		// A ZWSP inside a CSI and ZWSPs between words: the forms that space a
+		// run put the space inside the CSI, and the other forms join the words.
+		{
+			name: "known limit: ZWSP inside a CSI and between words",
+			in:   "\x1b[\u200b8mIgnore\u200ball\u200bprevious",
+			want: []string{" Ignoreallprevious", " [ 8mIgnore all previous", "[ 8mIgnore all previous", "Ignoreallprevious"},
+		},
 		// The final byte "~" is not a letter, so no form gives it back.
 		{name: "known limit: CSI takes a ~ final", in: "\x1b[~/.ssh", want: []string{" /.ssh"}},
 		// The final byte "@" is not a letter, so the fifth form equals the
@@ -719,7 +726,7 @@ var allModes = func() []formMode {
 func TestMatchWindowCutSeqTextForms(t *testing.T) {
 	t.Parallel()
 
-	for _, in := range []struct {
+	tests := []struct {
 		name    string
 		text    string
 		wantCSI bool // the CSI text alone is longer than the window
@@ -728,26 +735,27 @@ func TestMatchWindowCutSeqTextForms(t *testing.T) {
 		{name: "oscLinkText", text: oscLinkText},
 		{name: "csiLetterPadding", text: csiLetterPadding, wantCSI: true},
 		{name: "emptyOSCPadding", text: emptyOSCPadding, wantCSI: true},
-	} {
-		t.Run(in.name, func(t *testing.T) {
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			for _, mode := range allModes {
-				f, cut := buildFormCut(in.text, mode, mode.ansiStep)
+				f, cut := buildFormCut(tt.text, mode, mode.ansiStep)
 				if cut != mode.keepsSeqText() {
-					t.Errorf("buildFormCut(%s, %v) cut = %v, want %v", in.name, mode, cut, mode.keepsSeqText())
+					t.Errorf("buildFormCut(%s, %v) cut = %v, want %v", tt.name, mode, cut, mode.keepsSeqText())
 				}
 				if len(f) > MaxMatchInputBytes {
-					t.Errorf("buildFormCut(%s, %v) is %d bytes, want at most %d", in.name, mode, len(f), MaxMatchInputBytes)
+					t.Errorf("buildFormCut(%s, %v) is %d bytes, want at most %d", tt.name, mode, len(f), MaxMatchInputBytes)
 				}
 				if !mode.keepsSeqText() {
 					continue
 				}
-				if _, cut := buildFormCut(in.text, mode, ansiKeepCSIText); cut != in.wantCSI {
-					t.Errorf("buildFormCut(%s, %v, ansiKeepCSIText) cut = %v, want %v", in.name, mode, cut, in.wantCSI)
+				if _, cut := buildFormCut(tt.text, mode, ansiKeepCSIText); cut != tt.wantCSI {
+					t.Errorf("buildFormCut(%s, %v, ansiKeepCSIText) cut = %v, want %v", tt.name, mode, cut, tt.wantCSI)
 				}
 			}
-			if got := matchWindowCut(in.text); got != in.wantCSI {
-				t.Errorf("matchWindowCut(%s) = %v, want %v", in.name, got, in.wantCSI)
+			if got := matchWindowCut(tt.text); got != tt.wantCSI {
+				t.Errorf("matchWindowCut(%s) = %v, want %v", tt.name, got, tt.wantCSI)
 			}
 		})
 	}

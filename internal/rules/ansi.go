@@ -12,8 +12,8 @@ const oscExpr = `(?:\x1b\]|\x{9d})[^\x07\x1b\x{9c}]{0,256}(?:\x07|\x1b\\|\x{9c})
 // oscExprC0 is oscExpr for ansiSeqC0: the text of an OSC also holds no
 // U+009D, so U+009D starts a new OSC, as ESC does. In oscExpr, each U+009D
 // of a run of U+009D starts a match that stays open for up to 256 runes, so
-// RE2 keeps up to 256 threads for each rune: a run of 128 KiB of U+009D takes
-// about 240 ms for one form on an Apple M1 Pro. oscExprC0 keeps one thread.
+// the regex engine keeps up to 256 threads for each rune (see the cost
+// comment in match.go for the time). oscExprC0 keeps one thread.
 // ansiSeq keeps oscExpr, so the forms that read with ansiSeq do not change.
 const oscExprC0 = `(?:\x1b\]|\x{9d})[^\x07\x1b\x{9c}\x{9d}]{0,256}(?:\x07|\x1b\\|\x{9c})`
 

@@ -84,6 +84,8 @@ How mcpmoat prepares the text before a match. This applies to every regex and ke
 
   Some texts defeat all seven forms:
   - one kind of invisible character both inside a word and between words;
+  - a format character (such as ZWSP) inside a CSI, after the "[", with the same character between
+    words (ESC [ + ZWSP + "8mIgnore" + ZWSP + "all");
   - text that only a sequence gives back (OSC text or a CSI letter) with two kinds of invisible
     characters, one inside a word and the other between words (ESC [ "Ig" + ZWSP + "nore" +
     U+0001 + "all");

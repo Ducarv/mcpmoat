@@ -1,7 +1,6 @@
 package rules
 
 import (
-	"reflect"
 	"slices"
 	"strings"
 	"sync"
@@ -221,7 +220,7 @@ func TestPrepareTextShared(t *testing.T) {
 				for _, mm := range ms {
 					got := mm.m.matchPrepared(p)
 					want := mm.m.Match(tt.text)
-					if !reflect.DeepEqual(got, want) {
+					if !slices.Equal(got, want) {
 						t.Errorf("%s: matchPrepared() = %+v, Match() = %+v, want equal", mm.name, got, want)
 					}
 					if tt.wantHit && len(got) == 0 {
@@ -253,9 +252,7 @@ func TestPrepareTextConcurrent(t *testing.T) {
 	start := make(chan struct{})
 	var wg sync.WaitGroup
 	for i := range n {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			<-start
 			// Half the goroutines read the keyword forms first, so both
 			// methods can run the build.
@@ -265,7 +262,7 @@ func TestPrepareTextConcurrent(t *testing.T) {
 				kw := p.keywordForms()
 				results[i] = result{regex: p.regexForms(), keywords: kw}
 			}
-		}()
+		})
 	}
 	close(start)
 	wg.Wait()

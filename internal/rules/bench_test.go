@@ -236,12 +236,16 @@ func BenchmarkWorstCaseBlock(b *testing.B) {
 }
 
 // BenchmarkOSCStartRun times one matchForms and one matchWindowCut call on
-// maxRawScanBytes of U+009D (and U+0001 and ESC, so that every form is
-// built). Each U+009D can start an OSC, so this is the slowest known input for
-// the OSC part of ansiSeq and ansiSeqC0 (see oscExprC0).
+// about maxRawScanBytes of U+009D, then U+0001, ESC and ZWSP, so that all
+// seven forms are built. Each U+009D can start an OSC, so this is the slowest
+// known input for the OSC part of ansiSeq (see oscExprC0).
 func BenchmarkOSCStartRun(b *testing.B) {
-	text := strings.Repeat("\u009d", maxRawScanBytes/2-1) + "\x01\x1b"
+	text := strings.Repeat("\u009d", maxRawScanBytes/2-3) + "\x01\x1b\u200b"
+	if got := len(formModes(text)); got != maxBaseForms {
+		b.Fatalf("len(formModes(text)) = %d, want %d", got, maxBaseForms)
+	}
 	b.SetBytes(int64(len(text)))
+	b.ReportAllocs()
 	for b.Loop() {
 		matchForms(text)
 		matchWindowCut(text)

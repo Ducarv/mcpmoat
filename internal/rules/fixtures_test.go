@@ -253,7 +253,8 @@ func prefixRules(t *testing.T, prefix string) []compiledRule {
 
 // ruleHits returns the sorted IDs of the rules in rs with the given target
 // that match text. It prepares text once and shares it between the rules, so
-// one set of match forms is built for each target text.
+// one set of match forms is built for each target text (not for a schema
+// target, whose strings get their own forms, see matchPrepared).
 func ruleHits(rs []compiledRule, target rules.Target, text string) []string {
 	p := rules.PrepareText(text)
 	var ids []string
