@@ -286,7 +286,7 @@ func TestHeuristicNames(t *testing.T) {
 	// Every heuristic must be in the list.
 	all := []string{
 		HeuristicInvisibleUnicode, HeuristicMaxLength, HeuristicBase64Blob,
-		HeuristicMatchWindow, HeuristicTagBidiOverride, HeuristicTyposquat,
+		HeuristicMatchWindow, HeuristicTagBidiOverride, HeuristicMixedScript, HeuristicTyposquat,
 	}
 	for name := range configTextChecks {
 		all = append(all, name)

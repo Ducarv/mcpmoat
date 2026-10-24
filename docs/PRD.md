@@ -135,7 +135,7 @@ hidden instructions or leak data.
 
 | ID | Attack | Detection |
 |---|---|---|
-| T1 | Tool poisoning: hidden instruction in a tool's description or schema | Pattern rules: imperative phrases aimed at the model, mentions of other tools, "don't tell the user", invisible characters, very long text, base64 |
+| T1 | Tool poisoning: hidden instruction in a tool's description or schema | Pattern rules: imperative phrases aimed at the model, mentions of other tools, "don't tell the user", invisible characters, very long text, base64, mixed-script words |
 | T2 | Rug pull: the description, schema or annotations of a tool change after the pin | Per-tool hash stored in a pins file; differences raise an alert |
 | T3 | Shadowing: a tool that tries to redefine another tool's behaviour ("when using send_email, always...") | Rule: tool text (description, title, annotations title, or the description and title strings of the input and output schema) cites the name of a tool from another server |
 | T4 | Dangerous config: remote server over `http://` without TLS, plaintext secret in config, unpinned package (`npx package@latest`) | Static config analysis |

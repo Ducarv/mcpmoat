@@ -298,6 +298,16 @@ func schemaWithDescription(t *testing.T, text string) string {
 	return strings.TrimSuffix(buf.String(), "\n")
 }
 
+// builtinByID returns the built-in rules by ID.
+func builtinByID(t *testing.T) map[string]Rule {
+	t.Helper()
+	byID := make(map[string]Rule)
+	for _, r := range mustBuiltin(t, WithCompiler(builtinCompiler())) {
+		byID[r.ID] = r
+	}
+	return byID
+}
+
 // isT1004WordPattern reports whether re is one of the MOAT-T1-004 word
 // patterns (keychain, credentials store or file). MOAT-T1-012 leaves them out
 // on purpose (see its header comment).
@@ -317,6 +327,7 @@ type schemaCopy struct {
 // schemaCopies lists every schema copy of a description rule.
 var schemaCopies = []schemaCopy{
 	{"MOAT-T1-009", []string{"MOAT-T1-001", "MOAT-T1-003"}},
+	{"MOAT-T1-011", []string{"MOAT-T1-010"}},
 	{"MOAT-T1-012", []string{"MOAT-T1-004"}}, // without the word patterns
 	{"MOAT-T1-013", []string{"MOAT-T1-002"}},
 	{"MOAT-T1-014", []string{"MOAT-T1-005"}},
@@ -360,10 +371,7 @@ func copiedMatch(r Rule) Match {
 func TestSchemaRuleCopiesDescriptionRules(t *testing.T) {
 	t.Parallel()
 
-	byID := make(map[string]Rule)
-	for _, r := range mustBuiltin(t, WithCompiler(builtinCompiler())) {
-		byID[r.ID] = r
-	}
+	byID := builtinByID(t)
 	// loaded returns the rule id with the target want, or stops the test.
 	loaded := func(t *testing.T, id string, want Target) Rule {
 		t.Helper()

@@ -123,7 +123,10 @@
 // cannot hide a keyword, fullwidth and mathematical letters match the plain
 // letters, and accents are folded: "cafe" matches "caf" + U+00E9. Homoglyphs
 // from other scripts (for example Cyrillic U+0430 for Latin "a") are not
-// folded, for regexes or keywords.
+// folded, for regexes or keywords. Instead, the mixed_script heuristic (rules
+// MOAT-T1-010 and MOAT-T1-011) flags a word that mixes letters of two or
+// more look-alike scripts, such as Latin and Cyrillic, except a Greek unit
+// letter after a number. See the Heuristics and hits section for details.
 //
 // Any run of white space, or U+2800 (braille blank), matches the space
 // between the words of a keyword. Punctuation does not: the keyword "ignore
@@ -136,7 +139,7 @@
 // # Heuristics and hits
 //
 // The text heuristics (invisible_unicode, tag_or_bidi_override, max_length,
-// base64_blob and match_window) read the raw text, not the normalized text. A
+// base64_blob, mixed_script and match_window) read the raw text, not the normalized text. A
 // [Hit] from a text heuristic gives a byte offset in the raw text, except a
 // match_window hit, which is about the whole text and has the offset -1
 // ([NoOffset]). A hit from a regex or a keyword has the offset -1, because it
@@ -191,6 +194,86 @@
 // still count as words. A sentence that a '/' joins into one field, or that
 // one token which is not a word (such as "e.g") cuts, stays below the run. The
 // medium rules without min_words still flag such a text.
+//
+// The mixed_script heuristic flags a word that mixes letters of two or more
+// look-alike scripts, such as "Ignore" with a Cyrillic "I" (U+0406). The
+// look-alike scripts are Latin, Cyrillic, Greek, Armenian, Cherokee, Lisu,
+// Coptic, Canadian Aboriginal and Tifinagh. So a word with no Latin letter
+// is flagged too when it mixes two of them, such as Cyrillic and Armenian
+// letters that read as "ignore". Only Greek has an exemption, for a unit (see
+// below). The heuristic reads the full raw text. A hit gives the raw byte
+// offset of the first rune of the word and names the scripts in the order of
+// the list above, but it never holds the word: the terminal-safe output does
+// not change look-alike letters, so the word would show as normal Latin
+// text.
+//
+// A word is a run of letters, marks, invisible runes, private-use runes,
+// unassigned code points, U+FFFD (from an invalid UTF-8 byte or a lone
+// surrogate) and runes whose fold is only letters. So a ZWSP, a combining
+// mark, a private-use rune (such as U+E000, which many fonts draw as
+// nothing), a Roman numeral (such as U+216E, "D") or a circled letter (such
+// as U+24D6, "g") cannot split a word. Any other rune, such as a digit, '_',
+// '-', a space or punctuation, ends a word.
+//
+// Each letter counts for its own script. So Armenian small oh (U+0585) and
+// Lisu letter ga (U+A4D6) count for their scripts. A letter of the Common or
+// Inherited script, a Latin letter that is not ASCII and a rune that is not a
+// letter but folds to letters count by their fold, the same fold that the
+// regexes read. So the mathematical Greek letters (in U+1D6A8 to U+1D7CB) and
+// the double-struck Greek letters (U+213C to U+213F) count as Greek, the
+// mathematical Latin letters (such as U+1D400), the fullwidth Latin letters
+// and the Roman numerals count as Latin, and U+00B5 (micro sign) counts as
+// Greek mu. A letter of any other script, such as Han, counts for no script.
+//
+// The parameter json_escapes (default 0) says whether the text is raw JSON.
+// A schema rule reads decoded strings (see Schema text), so MOAT-T1-011 keeps
+// the default 0 too. With json_escapes: 1 the heuristic decodes JSON escapes: \b, \f, \n, \r, \t, \\, \", \/ and \u plus
+// exactly 4 hex digits. A surrogate pair is one rune, and a lone surrogate
+// is U+FFFD. The decoded rune acts like a raw rune: a letter, a mark or an
+// invisible rune joins the word, and any other rune ends it. So the escape
+// of U+0406 is a Cyrillic letter in the word. A description is decoded text,
+// so rule MOAT-T1-010 keeps the default 0: a backslash is a normal rune that
+// ends a word, as the model reads it. A schema string is decoded before the
+// heuristic reads it, so a second decode would turn a literal "\b" into a
+// backspace.
+//
+// A word with Greek letters is not flagged for them when it is a unit after
+// a number. The word must have exactly one Greek letter at its start or end,
+// up to 3 Latin letters and no other letter, and the two parts must form a
+// unit:
+//
+//   - mu (U+03BC or U+00B5) and then an SI unit: s, m, g, l, L, A, V, W, F,
+//     H, C, J, K, M, N, S, T, Hz, Pa, mol or sec;
+//   - k, M, G or m and then Omega (U+03A9 or the ohm sign U+2126);
+//   - Omega and then m or cm (ohm metre).
+//
+// The word must come directly after an ASCII digit, or after one space that
+// comes directly after an ASCII digit. With json_escapes: 1, an escaped
+// digit, such as \u0035, does not count. So "5" + U+03BC + "s", "5 " +
+// U+03BC + "mol" and "10k" + U+03A9 are not flagged. But U+03BC + "s" with
+// no number before it, "2 " + U+03BC + "ser" and "5" + U+03BC + "pdate" are
+// flagged. Math notation is also flagged: U+0394 (capital Delta) + "t" gives
+// a known false positive. To accept such a word, ignore the rule
+// (MOAT-T1-010 or MOAT-T1-011) for that one tool in .mcpmoat-ignore.
+//
+// The mixed_script heuristic does not flag:
+//
+//   - a word written fully in look-alikes of one script, such as Cyrillic
+//     "copy" (U+0441 U+043E U+0440 U+0443) or the Cyrillic "ssh" in "~/." +
+//     U+0455 U+0455 U+04BB;
+//   - a word of one letter, because it cannot mix two scripts;
+//   - Latin-script look-alikes that do not fold, such as U+0131 (dotless i),
+//     U+01C0 (dental click) and U+0261 (script g);
+//   - look-alikes from scripts outside the list, such as the Ethiopic
+//     syllable U+12D0, which looks like an "O", and the Runic letter U+16C1,
+//     which looks like an "I";
+//   - a word that a visible rune splits in two, when the rune is not a
+//     letter and does not fold to letters, such as U+2800 (braille blank),
+//     U+0966 (Devanagari digit zero) or U+212E (estimated sign, a symbol
+//     that looks like an "e");
+//   - a mark of a script outside the list, such as U+0C02 (Telugu
+//     anusvara), which looks like an "o": a mark joins a word but counts for
+//     no script.
 //
 // The config heuristics (insecure_url, plaintext_secret, unpinned_package,
 // auto_install and typosquat) read one line of text each, not the whole text.

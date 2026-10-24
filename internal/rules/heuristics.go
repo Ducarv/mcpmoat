@@ -30,6 +30,13 @@ const (
 	// JSON object or array, one string must hold twice min_words words in a
 	// row.
 	HeuristicBase64Blob = "base64_blob"
+	// HeuristicMixedScript flags a word that mixes letters of two or more
+	// look-alike scripts, such as Latin, Cyrillic, Greek or Armenian (see the
+	// package doc), as in "Ignore" with a Cyrillic "I". It reads the raw text.
+	// Parameter: json_escapes (default 0, 0 to 1). 1 decodes the JSON escapes
+	// of raw JSON text; a description and a schema string are decoded text,
+	// so they keep 0.
+	HeuristicMixedScript = "mixed_script"
 	// HeuristicMatchWindow flags a text that the regex and keyword matchers
 	// do not read in full: the text is longer than the raw scan limit, or a
 	// match form is cut at MaxMatchInputBytes (see matchWindowCut). So a
@@ -79,7 +86,7 @@ const (
 // alphabetical order.
 const heuristicNames = HeuristicAutoInstall + ", " + HeuristicBase64Blob + ", " +
 	HeuristicInsecureURL + ", " + HeuristicInvisibleUnicode + ", " +
-	HeuristicMatchWindow + ", " + HeuristicMaxLength + ", " +
+	HeuristicMatchWindow + ", " + HeuristicMaxLength + ", " + HeuristicMixedScript + ", " +
 	HeuristicPlaintextSecret + ", " + HeuristicTagBidiOverride + ", " +
 	HeuristicTyposquat + ", " + HeuristicUnpinnedPackage
 
@@ -128,6 +135,13 @@ func compileHeuristic(name string, params map[string]any) (func(raw string) []Hi
 		}
 		minLength, minText, minWords := v[0], v[1], v[2]
 		return func(raw string) []Hit { return base64Blob(raw, minLength, minText, minWords) }, nil
+	case HeuristicMixedScript:
+		v, err := readParams(params, paramSpec{name: "json_escapes", def: 0, min: 0, max: 1})
+		if err != nil {
+			return nil, err
+		}
+		jsonEscapes := v[0] == 1
+		return func(raw string) []Hit { return mixedScript(raw, jsonEscapes) }, nil
 	case HeuristicTyposquat:
 		if _, err := readParams(params); err != nil {
 			return nil, err

@@ -642,7 +642,7 @@ func TestHeuristicCompileErrors(t *testing.T) {
 			name:      "unknown heuristic",
 			match:     Match{Heuristic: "evil_heuristic"},
 			wantField: "heuristic",
-			wantIn:    []string{HeuristicInvisibleUnicode, HeuristicMaxLength, HeuristicBase64Blob, HeuristicMatchWindow, HeuristicTagBidiOverride},
+			wantIn:    []string{HeuristicInvisibleUnicode, HeuristicMaxLength, HeuristicBase64Blob, HeuristicMatchWindow, HeuristicTagBidiOverride, HeuristicMixedScript},
 			wantNotIn: []string{"evil_heuristic"},
 		},
 		{
@@ -678,6 +678,19 @@ func TestHeuristicCompileErrors(t *testing.T) {
 			wantField: "params",
 			wantIn:    []string{"takes no parameters"},
 			wantNotIn: []string{"max_runes"},
+		},
+		{
+			name:      "unknown param lists mixed_script keys",
+			match:     Match{Heuristic: HeuristicMixedScript, Params: map[string]any{"zz": 1}},
+			wantField: "params",
+			wantIn:    []string{"unknown parameter", "json_escapes"},
+			wantNotIn: []string{"zz"},
+		},
+		{
+			name:      "json_escapes out of range",
+			match:     Match{Heuristic: HeuristicMixedScript, Params: map[string]any{"json_escapes": 2}},
+			wantField: "params.json_escapes",
+			wantIn:    []string{"between 0 and 1"},
 		},
 		{
 			name:      "unknown param lists base64_blob keys",
@@ -749,6 +762,9 @@ func TestHeuristicCompileAccepts(t *testing.T) {
 	}{
 		{name: "invisible_unicode nil params", match: Match{Heuristic: HeuristicInvisibleUnicode}},
 		{name: "invisible_unicode empty params", match: Match{Heuristic: HeuristicInvisibleUnicode, Params: map[string]any{}}},
+		{name: "mixed_script nil params", match: Match{Heuristic: HeuristicMixedScript}},
+		{name: "mixed_script empty params", match: Match{Heuristic: HeuristicMixedScript, Params: map[string]any{}}},
+		{name: "json_escapes 1", match: Match{Heuristic: HeuristicMixedScript, Params: map[string]any{"json_escapes": 1}}},
 		{name: "max_length empty params", match: Match{Heuristic: HeuristicMaxLength, Params: map[string]any{}}},
 		{name: "max_runes 1", match: Match{Heuristic: HeuristicMaxLength, Params: map[string]any{"max_runes": 1}}},
 		{name: "max_runes 1<<24", match: Match{Heuristic: HeuristicMaxLength, Params: map[string]any{"max_runes": 1 << 24}}},

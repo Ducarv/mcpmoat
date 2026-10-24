@@ -292,9 +292,10 @@ func TestBuiltinT1IDs(t *testing.T) {
 	slices.Sort(ids)
 	wantIDs := []string{
 		"MOAT-T1-001", "MOAT-T1-002", "MOAT-T1-003", "MOAT-T1-004", "MOAT-T1-005",
-		"MOAT-T1-006", "MOAT-T1-007", "MOAT-T1-008", "MOAT-T1-009", "MOAT-T1-012",
-		"MOAT-T1-013", "MOAT-T1-014", "MOAT-T1-015", "MOAT-T1-016", "MOAT-T1-017",
-		"MOAT-T1-018", "MOAT-T1-019", "MOAT-T1-020", "MOAT-T1-021", "MOAT-T1-022",
+		"MOAT-T1-006", "MOAT-T1-007", "MOAT-T1-008", "MOAT-T1-009", "MOAT-T1-010",
+		"MOAT-T1-011", "MOAT-T1-012", "MOAT-T1-013", "MOAT-T1-014", "MOAT-T1-015",
+		"MOAT-T1-016", "MOAT-T1-017", "MOAT-T1-018", "MOAT-T1-019", "MOAT-T1-020",
+		"MOAT-T1-021", "MOAT-T1-022",
 	}
 	if !slices.Equal(ids, wantIDs) {
 		t.Errorf("loaded T1 rule IDs = %q, want %q", ids, wantIDs)

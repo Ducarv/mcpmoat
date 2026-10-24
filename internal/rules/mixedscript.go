@@ -1,0 +1,429 @@
+package rules
+
+import (
+	"fmt"
+	"math/bits"
+	"strings"
+	"unicode"
+	"unicode/utf16"
+	"unicode/utf8"
+)
+
+// mixedScript flags each word of raw that mixes letters of two or more
+// look-alike scripts (see lookalikeScripts), such as "Ignore" with a Cyrillic
+// "I" (U+0406). normalizeForMatch does not fold look-alike letters from other
+// scripts, so such a word gets past the regex rules. The package doc
+// (doc.go) holds the full rules for users: the unit exemption and the limits.
+// This comment holds the implementation contract.
+//
+// It reads the full raw text in one pass, with no size cut. A word is a
+// longest run of letters, of the runes that isWordFiller accepts (marks,
+// invisible runes, private-use runes, unassigned code points and U+FFFD) and
+// of the runes that fold to letters only (see wordState.foldIsLetters), such
+// as U+216E (Roman numeral D) and U+24D6 (circled g). Any other rune ends a
+// word. An invalid UTF-8 byte and a lone surrogate escape decode to U+FFFD,
+// so they join a word.
+//
+// When jsonEscapes is true, JSON escapes are decoded (see jsonEscape), so the
+// heuristic reads the raw JSON of a schema as it reads the decoded text. The
+// decoded rune counts as a raw rune at the offset of the backslash, and all
+// bytes of the escape are skipped. Any other backslash is a normal rune that
+// ends a word. When jsonEscapes is false, as for a description, which is
+// decoded text, every backslash is a normal rune.
+//
+// Each letter counts for its own script. A letter of the Common or
+// Inherited script counts by its fold (see wordState.addFolded). A letter of
+// any other script counts for no script but stays part of the word. A word is
+// flagged when its letters count for two or more scripts, after the unit
+// exemption (see wordState.greekExcused).
+//
+// The hit is at the byte offset of the first rune of the word. The Detail
+// names the scripts in the order of lookalikeScripts. It never holds the
+// word: the terminal-safe output does not change look-alike letters, so the
+// word would show as normal Latin text.
+func mixedScript(raw string, jsonEscapes bool) []Hit {
+	var l hitList
+	var w wordState
+	// end flags the current word when it mixes scripts. Then it clears w for
+	// the next word.
+	end := func() {
+		if m := w.flagged(); m != 0 && l.keep(w.start) {
+			l.hits = append(l.hits, Hit{Offset: w.start, Detail: fmt.Sprintf("word at offset %d mixes %s letters", w.start, scriptNames(m))})
+		}
+		w = wordState{fold: w.fold[:0]} // keep the fold buffer for the next word
+	}
+	// prev1 is the rune just before offset i, and prev2 is the rune before
+	// prev1. They tell whether a word comes after a number (see
+	// followsDigit).
+	prev1, prev2 := noRune, noRune
+	for i := 0; i < len(raw); {
+		var r rune
+		size := 0
+		if jsonEscapes && raw[i] == '\\' {
+			r, size = jsonEscape(raw[i:])
+		}
+		escaped := size > 0
+		if !escaped {
+			// An invalid byte gives utf8.RuneError (U+FFFD).
+			r, size = utf8.DecodeRuneInString(raw[i:])
+		}
+		switch {
+		case unicode.IsLetter(r):
+			w.begin(i, prev1, prev2)
+			w.addLetter(r)
+		case isWordFiller(r):
+			w.begin(i, prev1, prev2)
+		case r > unicode.MaxASCII && w.setFold(r) && w.foldIsLetters():
+			// The regexes read this rune as the letters of its fold.
+			w.begin(i, prev1, prev2)
+			w.countFold()
+		default:
+			end()
+		}
+		prev := r
+		if escaped && isASCIIDigit(r) {
+			// An escaped digit never comes before a unit: the schema JSON
+			// from the inspect package never escapes a digit.
+			prev = noRune
+		}
+		prev2, prev1 = prev1, prev
+		i += size
+	}
+	end()
+	return l.result("mixed-script words")
+}
+
+// noRune stands for "no rune" before the start of the text (see
+// followsDigit).
+const noRune rune = -1
+
+// isWordFiller reports whether r, a rune that is not a letter, joins a word:
+// a mark (see unicode.IsMark), an invisible rune (see isInvisible), a
+// private-use rune, an unassigned code point or U+FFFD. Many fonts draw a
+// private-use or unassigned rune as nothing, and a client may drop U+FFFD,
+// so they must not split a word either. To join runes into one word can only
+// add hits.
+func isWordFiller(r rune) bool {
+	if unicode.IsMark(r) || isInvisible(r) || r == utf8.RuneError {
+		return true
+	}
+	return r > unicode.MaxASCII && unicode.In(r, unicode.Co, unicode.Cn)
+}
+
+// followsDigit reports whether a word whose two previous runes are prev1
+// (the nearer one) and prev2 comes directly after an ASCII digit, or after
+// one space rune that comes directly after an ASCII digit. A space rune is a
+// rune of unicode.IsSpace. It covers the no-break space (U+00A0), the thin
+// space (U+2009) and the narrow no-break space (U+202F), which texts put
+// between a number and its unit.
+func followsDigit(prev1, prev2 rune) bool {
+	return isASCIIDigit(prev1) || (unicode.IsSpace(prev1) && isASCIIDigit(prev2))
+}
+
+// isASCIIDigit reports whether r is 0-9.
+func isASCIIDigit(r rune) bool {
+	return '0' <= r && r <= '9'
+}
+
+// lookalikeScripts lists the scripts that mixedScript counts, in the order
+// that a Detail names them. Each has letters that look like Latin letters.
+var lookalikeScripts = [...]struct {
+	name  string
+	table *unicode.RangeTable
+}{
+	latinScript: {"Latin", unicode.Latin},
+	{"Cyrillic", unicode.Cyrillic},
+	greekScript: {"Greek", unicode.Greek},
+	{"Armenian", unicode.Armenian},
+	{"Cherokee", unicode.Cherokee},
+	{"Lisu", unicode.Lisu},
+	{"Coptic", unicode.Coptic},
+	{"Canadian Aboriginal", unicode.Canadian_Aboriginal},
+	{"Tifinagh", unicode.Tifinagh},
+}
+
+// The indexes of Latin and Greek in lookalikeScripts. The array literal of
+// lookalikeScripts uses them as keys, and TestLookalikeScripts checks that
+// they point at the right tables.
+const (
+	latinScript = 0
+	greekScript = 2
+)
+
+// scriptOf returns the index in lookalikeScripts of the script of r, or -1
+// when r is of no script in the list.
+func scriptOf(r rune) int {
+	for i, s := range lookalikeScripts {
+		if unicode.Is(s.table, r) {
+			return i
+		}
+	}
+	return -1
+}
+
+// wordState holds what mixedScript knows about the current word. It uses
+// counts and fixed fields, not a slice per word, so a word costs no memory.
+type wordState struct {
+	started    bool // the word has at least one rune
+	start      int  // byte offset of the first rune of the word
+	afterDigit bool // the word comes after a digit (see followsDigit)
+
+	letters int    // letters of any script
+	scripts uint16 // bit i is set when a letter counts for lookalikeScripts[i]
+
+	greek            int  // Greek letters
+	greekLetter      rune // the last Greek letter; the only one when greek == 1
+	firstLetterGreek bool // the first letter of the word is Greek
+	lastLetterGreek  bool // the last letter so far is Greek
+
+	// latin holds the first Latin letters of the word, for greekExcused.
+	// nLatin counts all Latin letters. When it is more than len(latin), the
+	// word is too long to be a unit.
+	latin  [3]rune
+	nLatin int
+
+	// fold is a scratch buffer for setFold. mixedScript keeps it from one
+	// word to the next, so a scan allocates it at most once.
+	fold []byte
+}
+
+// begin starts a word at byte offset i, unless a word is started. prev1 and
+// prev2 are the two runes before i (see followsDigit).
+func (w *wordState) begin(i int, prev1, prev2 rune) {
+	if !w.started {
+		w.started, w.start, w.afterDigit = true, i, followsDigit(prev1, prev2)
+	}
+}
+
+// addLetter adds the letter r to the word. A letter of the Common or
+// Inherited script, or a Latin letter that is not ASCII, counts by its fold
+// (see addFolded). So the mathematical Greek letters count as Greek, and the
+// fullwidth "s" and the Kelvin sign count as "s" and "K". Any other letter
+// counts for its own script (see countLetter).
+func (w *wordState) addLetter(r rune) {
+	i := scriptOf(r)
+	if (i < 0 && unicode.In(r, unicode.Common, unicode.Inherited)) || (i == latinScript && r > unicode.MaxASCII) {
+		w.addFolded(r)
+		return
+	}
+	w.countLetter(r, i)
+}
+
+// addFolded adds the letter r by its fold (see setFold and countFold). When
+// the fold does not change r, or holds no letter, r counts as one letter of
+// its own script (see scriptOf).
+func (w *wordState) addFolded(r rune) {
+	if !w.setFold(r) || !w.countFold() {
+		w.countLetter(r, scriptOf(r))
+	}
+}
+
+// setFold sets the scratch buffer w.fold to the fold of r (see appendFold).
+// It reports whether the fold differs from r.
+func (w *wordState) setFold(r rune) bool {
+	rs := string(r)
+	w.fold = appendFold(w.fold[:0], r, rs)
+	return string(w.fold) != rs
+}
+
+// countFold counts each letter of w.fold (see setFold) as one letter of its
+// own script, with no second fold. It reports whether w.fold holds a letter.
+func (w *wordState) countFold() bool {
+	counted := false
+	for _, f := range string(w.fold) {
+		if unicode.IsLetter(f) {
+			w.countLetter(f, scriptOf(f))
+			counted = true
+		}
+	}
+	return counted
+}
+
+// foldIsLetters reports whether w.fold (see setFold) is not empty and holds
+// only letters. A rune that is not a letter but has such a fold joins a word,
+// as the regexes read it as letters: a Roman numeral such as U+216E
+// (category Nl), or a circled or squared letter such as U+24D6 (category
+// So).
+func (w *wordState) foldIsLetters() bool {
+	if len(w.fold) == 0 {
+		return false
+	}
+	for _, f := range string(w.fold) {
+		if !unicode.IsLetter(f) {
+			return false
+		}
+	}
+	return true
+}
+
+// countLetter counts the letter r for the script lookalikeScripts[i], or
+// for no script when i is -1.
+func (w *wordState) countLetter(r rune, i int) {
+	if i >= 0 {
+		w.scripts |= 1 << i
+	}
+	if i == latinScript {
+		if w.nLatin < len(w.latin) {
+			w.latin[w.nLatin] = r
+		}
+		w.nLatin++
+	}
+	isGreek := i == greekScript
+	if isGreek {
+		w.greek++
+		w.greekLetter = r
+	}
+	if w.letters == 0 {
+		w.firstLetterGreek = isGreek
+	}
+	w.lastLetterGreek = isGreek
+	w.letters++
+}
+
+// flagged returns the scripts that make the word suspect, as a mask like
+// w.scripts, or 0 when the word is not flagged. Greek is left out when
+// greekExcused excuses it. It does not allocate, so mixedScript calls it
+// before the hit cap check.
+func (w *wordState) flagged() uint16 {
+	m := w.scripts
+	if bits.OnesCount16(m) < 2 {
+		return 0
+	}
+	if m&(1<<greekScript) != 0 && w.greekExcused() {
+		m &^= 1 << greekScript
+	}
+	if bits.OnesCount16(m) < 2 {
+		return 0
+	}
+	return m
+}
+
+// scriptNames returns the names of the scripts in the mask m, which has two
+// or more bits, in the order of lookalikeScripts: "Latin and Cyrillic" or
+// "Latin, Cyrillic and Coptic".
+func scriptNames(m uint16) string {
+	var names [len(lookalikeScripts)]string
+	n := 0
+	for i, s := range lookalikeScripts {
+		if m&(1<<i) != 0 {
+			names[n] = s.name
+			n++
+		}
+	}
+	list := names[:n]
+	last := len(list) - 1
+	return strings.Join(list[:last], ", ") + " and " + list[last]
+}
+
+// greekExcused reports whether the Greek letter of the word is a unit
+// letter in a unit after a number (see followsDigit). The word must be one
+// Greek letter at its start or end and up to 3 Latin letters, with no
+// other letter, and the two parts must form a unit (see isUnit). So "5" + mu
+// + "s" and "10k" + Omega are excused, but "2" + mu + "ser" is not.
+func (w *wordState) greekExcused() bool {
+	if w.greek != 1 || !w.afterDigit || w.nLatin > len(w.latin) || w.letters != 1+w.nLatin {
+		return false
+	}
+	if !w.firstLetterGreek && !w.lastLetterGreek {
+		return false
+	}
+	return isUnit(w.greekLetter, w.firstLetterGreek, string(w.latin[:w.nLatin]))
+}
+
+// isUnit reports whether the Greek letter g and the Latin letters latin
+// form a unit. When first is true, g comes before latin, else after
+// it. The units are micro (small mu, U+03BC, also the fold of the micro sign
+// U+00B5) before an SI unit in microUnits, such as mu + "s", and ohm
+// (capital Omega U+03A9 or the ohm sign U+2126) after the prefix "k", "M",
+// "G" or "m", or before "m" or "cm" (ohm metre).
+func isUnit(g rune, first bool, latin string) bool {
+	switch g {
+	case '\u03BC': // small mu
+		return first && microUnits[latin]
+	case '\u03A9', '\u2126': // capital Omega, ohm sign
+		if first {
+			return latin == "m" || latin == "cm"
+		}
+		return latin == "k" || latin == "M" || latin == "G" || latin == "m"
+	}
+	return false
+}
+
+// microUnits holds the units that come after micro (mu) in a unit, such as
+// "s" for microseconds and "mol" for micromoles.
+var microUnits = map[string]bool{
+	"s": true, "m": true, "g": true, "l": true, "L": true, "A": true,
+	"V": true, "W": true, "F": true, "H": true, "C": true, "J": true,
+	"K": true, "M": true, "N": true, "S": true, "T": true,
+	"Hz": true, "Pa": true, "mol": true, "sec": true,
+}
+
+// jsonEscape decodes the JSON escape at the start of s. It returns the rune
+// and the length of the escape in bytes, or a length of 0 when s does not
+// start with an escape. A JSON escape here is:
+//
+//   - a backslash and one of b, f, n, r, t, '\\', '"' and '/' (2 bytes),
+//     which gives U+0008, U+000C, a newline, a carriage return, a tab, or
+//     the ASCII rune itself;
+//   - a backslash, a 'u' and exactly 4 hex digits (6 bytes), which gives
+//     that code point;
+//   - a high surrogate escape directly followed by a low surrogate escape
+//     (12 bytes), which gives the rune of the pair (see utf16.DecodeRune).
+//     Any other surrogate escape is a lone surrogate. It gives
+//     utf8.RuneError (6 bytes).
+//
+// The escaped backslash is an escape too, so the caller skips both of its
+// bytes: the second backslash cannot start a new escape with the byte after
+// it.
+func jsonEscape(s string) (rune, int) {
+	if len(s) < 2 || s[0] != '\\' {
+		return 0, 0
+	}
+	switch s[1] {
+	case 'b':
+		return '\b', 2
+	case 'f':
+		return '\f', 2
+	case 'n':
+		return '\n', 2
+	case 'r':
+		return '\r', 2
+	case 't':
+		return '\t', 2
+	case '\\', '"', '/':
+		return rune(s[1]), 2
+	case 'u':
+		hi, ok := hex4(s[2:])
+		if !ok {
+			return 0, 0
+		}
+		if !utf16.IsSurrogate(hi) {
+			return hi, 6
+		}
+		if len(s) >= 12 && s[6] == '\\' && s[7] == 'u' {
+			if lo, ok := hex4(s[8:]); ok {
+				if pair := utf16.DecodeRune(hi, lo); pair != utf8.RuneError {
+					return pair, 12
+				}
+			}
+		}
+		return utf8.RuneError, 6 // a lone surrogate
+	}
+	return 0, 0
+}
+
+// hex4 reads the first 4 bytes of s as hex digits. It returns false when s
+// is shorter than 4 bytes or one of the 4 bytes is not a hex digit.
+func hex4(s string) (rune, bool) {
+	if len(s) < 4 {
+		return 0, false
+	}
+	var v rune
+	for i := range 4 {
+		if !isHexDigit(s[i]) {
+			return 0, false
+		}
+		v = v<<4 | rune(unhexByte(s[i]))
+	}
+	return v, true
+}
