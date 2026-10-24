@@ -23,6 +23,10 @@ const (
 	// 8 to 4096), and min_text, the shortest decoded text in bytes (default
 	// 24, 4 to 3072).
 	HeuristicBase64Blob = "base64_blob"
+	// HeuristicMixedScript flags a word that mixes Latin letters with
+	// Cyrillic or Greek letters, such as "Ignore" with a Cyrillic "I". It
+	// reads the raw text and has no parameters.
+	HeuristicMixedScript = "mixed_script"
 
 	// The five heuristics below run the native config checks on one case line
 	// of a built-in config rule (target: config). The line is text, read by the
@@ -59,8 +63,9 @@ const (
 // alphabetical order.
 const heuristicNames = HeuristicAutoInstall + ", " + HeuristicBase64Blob + ", " +
 	HeuristicInsecureURL + ", " + HeuristicInvisibleUnicode + ", " +
-	HeuristicMaxLength + ", " + HeuristicPlaintextSecret + ", " +
-	HeuristicTyposquat + ", " + HeuristicUnpinnedPackage
+	HeuristicMaxLength + ", " + HeuristicMixedScript + ", " +
+	HeuristicPlaintextSecret + ", " + HeuristicTyposquat + ", " +
+	HeuristicUnpinnedPackage
 
 // paramSpec describes one integer parameter of a heuristic.
 type paramSpec struct {
@@ -79,6 +84,11 @@ func compileHeuristic(name string, params map[string]any) (func(raw string) []Hi
 			return nil, err
 		}
 		return invisibleUnicode, nil
+	case HeuristicMixedScript:
+		if _, err := readParams(params); err != nil {
+			return nil, err
+		}
+		return mixedScript, nil
 	case HeuristicMaxLength:
 		v, err := readParams(params, paramSpec{name: "max_runes", def: 4096, min: 1, max: 1 << 24})
 		if err != nil {

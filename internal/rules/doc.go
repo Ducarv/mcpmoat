@@ -100,7 +100,9 @@
 // cannot hide a keyword, fullwidth and mathematical letters match the plain
 // letters, and accents are folded: "cafe" matches "caf" + U+00E9. Homoglyphs
 // from other scripts (for example Cyrillic U+0430 for Latin "a") are not
-// folded, for regexes or keywords.
+// folded, for regexes or keywords. Instead, the mixed_script heuristic (rules
+// MOAT-T1-010 and MOAT-T1-011) flags a word that mixes Latin letters with
+// Cyrillic or Greek letters. See the Heuristics and hits section for details.
 //
 // Any run of white space, or U+2800 (braille blank), matches the space
 // between the words of a keyword. Punctuation does not: the keyword "ignore
@@ -112,9 +114,9 @@
 //
 // # Heuristics and hits
 //
-// The text heuristics (invisible_unicode, max_length and base64_blob) read the
-// raw text, not the normalized text. A [Hit] from a text heuristic gives a byte
-// offset in the raw text. A hit from a regex or a keyword has the offset -1,
+// The text heuristics (invisible_unicode, max_length, base64_blob and
+// mixed_script) read the raw text, not the normalized text. A [Hit] from a
+// text heuristic gives a byte offset in the raw text. A hit from a regex or a keyword has the offset -1,
 // because it comes from the normalized text.
 //
 // The invisible_unicode heuristic flags the same invisible runes that the
@@ -126,6 +128,36 @@
 // ESC, is skipped. Any other character, such as a space, a newline or '=', ends a
 // run, and runs are not joined. So a payload that is split into short chunks
 // is not flagged when no chunk reaches min_length on its own.
+//
+// The mixed_script heuristic flags a word that mixes Latin letters with
+// Cyrillic or Greek letters, such as "Ignore" with a Cyrillic "I" (U+0406).
+// It reads the full raw text. A hit gives the raw byte offset of the first
+// rune of the word and names the scripts, but it never holds the word: the
+// terminal-safe output does not change look-alike letters, so the word would
+// show as normal Latin text. A word is a run of letters, marks and invisible
+// runes, so a ZWSP or a combining mark cannot split a word. Any other rune,
+// such as a digit, '_', '-', a space or punctuation, ends a word. A JSON
+// escape also ends a word: \b, \f, \n, \r, \t, \\, \", \/ and \u plus
+// exactly 4 hex digits. So rule MOAT-T1-011 can use the same heuristic on
+// the raw JSON of a schema.
+//
+// Greek letters get one exemption, for units and math. A word with exactly
+// one Greek letter is not flagged when that letter is the first or the last
+// letter of the word and it is on a short list of symbol letters that do not
+// look like Latin letters: mu, capital omega, the ohm sign U+2126, capital
+// and small delta, lambda, pi, theta, small and capital sigma, phi, small
+// omega, beta and gamma. So "10k" + U+03A9 (ohm) and U+0394 + "t" are not
+// flagged. Alpha (U+03B1) is not on the list, because it looks like a Latin
+// "a".
+//
+// The mixed_script heuristic does not flag:
+//
+//   - a word written fully in look-alikes of one script, such as Cyrillic
+//     "copy" (U+0441 U+043E U+0440 U+0443);
+//   - a word of one letter, because it cannot mix two scripts;
+//   - Latin-script look-alikes, such as U+0131 (dotless i);
+//   - look-alikes from other scripts, such as Armenian;
+//   - one allowlisted Greek letter at the start or the end of a word.
 //
 // The config heuristics (insecure_url, plaintext_secret, unpinned_package,
 // auto_install and typosquat) read one line of text each, not the whole text.

@@ -18,8 +18,8 @@ import (
 // small when a server sends a very long text. Real tool descriptions are a
 // few KB long, so the cap does not cut them.
 //
-// The heuristics (max_length, invisible_unicode, base64_blob) see the full raw
-// text, so a very long text is still flagged.
+// The text heuristics (max_length, invisible_unicode, base64_blob and
+// mixed_script) see the full raw text, so a very long text is still flagged.
 const MaxMatchInputBytes = 32 << 10
 
 // maxRawScanBytes is the largest part of the raw text that normalizeForMatch
@@ -340,7 +340,9 @@ func spacesToASCII(s string) string {
 //
 // The regex matchers apply it only to the text, not to the pattern, and they
 // keep the forms before the fold too (see regexForms). Homoglyphs from other
-// scripts (Cyrillic U+0430 for Latin "a") are not folded.
+// scripts (Cyrillic U+0430 for Latin "a") are not folded. The mixed_script
+// heuristic flags a word that mixes Latin letters with Cyrillic or Greek
+// letters instead.
 //
 // It folds s one rune at a time (see appendFold), and it uses the fold of a
 // rune only when the fold is not longer, in bytes, than the rune. Otherwise

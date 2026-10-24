@@ -65,7 +65,11 @@ How mcpmoat prepares the text before a match. This applies to every regex and ke
   pattern in ASCII and do not add fullwidth alternatives: `(?i)ignore` also matches "ignore" in
   fullwidth letters (U+FF49 and on). A character is folded only when its fold is not longer than
   the character. So U+FDFA, U+00BD and U+2177 are not folded. Homoglyphs from other scripts, such
-  as Cyrillic U+0456 for Latin "i", are not folded.
+  as Cyrillic U+0456 for Latin "i", are not folded. Instead, the `mixed_script` heuristic
+  (MOAT-T1-010 for a description, MOAT-T1-011 for a schema) flags a word that mixes Latin letters
+  with Cyrillic or Greek letters. It does not flag a word fully in look-alikes of one script, a
+  word of one letter, Latin-script look-alikes such as U+0131, look-alikes from other scripts such
+  as Armenian, or one Greek symbol letter such as U+03A9 (Omega) at the start or end of a word.
 
 The fields:
 
@@ -75,7 +79,7 @@ The fields:
 | `title` | Short name, up to 200 characters. |
 | `severity` | `low`, `medium`, `high` or `critical`. |
 | `target` | What the rule inspects: `description`, `schema` or `config`. |
-| `match` | What the rule looks for. Set exactly one of `any_regex`, `all_regex`, `keywords` or `heuristic`. `params` is allowed only with `heuristic`. Regexes are case sensitive, so write `(?i)` for a case-insensitive match. `keywords` ignore case and match whole words. The text heuristics are `invisible_unicode` (no params), `max_length` (param `max_runes`, default 4096) and `base64_blob` (params `min_length`, default 32, and `min_text`, default 24). The config heuristics `insecure_url`, `plaintext_secret`, `unpinned_package`, `auto_install` and `typosquat` take no params and need `target: config`. Each one reads one case line: a URL, a `KEY=VALUE` or `Name: value` entry, or a command line. `plaintext_secret` reads all four forms, so it also checks the args of a stdio server and a URL, not only env and header entries. `unpinned_package` also covers git and GitHub-shorthand package specs, unless the spec pins a full 40-hex commit (`#<40-hex>` for npm, `@<40-hex>` for Python). An https URL of a repository on github.com, gitlab.com or bitbucket.org counts as a git spec for npm. Other tarball and URL specs, and a script URL given to `pipx run`, are always unpinned, also with a 40-hex fragment. |
+| `match` | What the rule looks for. Set exactly one of `any_regex`, `all_regex`, `keywords` or `heuristic`. `params` is allowed only with `heuristic`. Regexes are case sensitive, so write `(?i)` for a case-insensitive match. `keywords` ignore case and match whole words. The text heuristics are `invisible_unicode` (no params), `max_length` (param `max_runes`, default 4096), `base64_blob` (params `min_length`, default 32, and `min_text`, default 24) and `mixed_script` (no params). The config heuristics `insecure_url`, `plaintext_secret`, `unpinned_package`, `auto_install` and `typosquat` take no params and need `target: config`. Each one reads one case line: a URL, a `KEY=VALUE` or `Name: value` entry, or a command line. `plaintext_secret` reads all four forms, so it also checks the args of a stdio server and a URL, not only env and header entries. `unpinned_package` also covers git and GitHub-shorthand package specs, unless the spec pins a full 40-hex commit (`#<40-hex>` for npm, `@<40-hex>` for Python). An https URL of a repository on github.com, gitlab.com or bitbucket.org counts as a git spec for npm. Other tarball and URL specs, and a script URL given to `pipx run`, are always unpinned, also with a 40-hex fragment. |
 | `risk` | One sentence: what can go wrong. |
 | `remediation` | What the user should do. |
 | `references` | Links (`http` or `https`) to research or advisories. mcpmoat never fetches them. |

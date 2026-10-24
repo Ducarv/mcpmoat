@@ -56,7 +56,7 @@ var benchKeywords = []string{
 
 // benchMatcherSet compiles a realistic set of matchers: one any_regex with
 // the PRD MOAT-T1-003 patterns and other T1 patterns, one keywords list and
-// the three heuristics with their defaults.
+// the four heuristics with their defaults.
 func benchMatcherSet(tb testing.TB) []*Matcher {
 	tb.Helper()
 	blocks := []Match{
@@ -70,6 +70,7 @@ func benchMatcherSet(tb testing.TB) []*Matcher {
 		{Heuristic: HeuristicInvisibleUnicode},
 		{Heuristic: HeuristicMaxLength},
 		{Heuristic: HeuristicBase64Blob},
+		{Heuristic: HeuristicMixedScript},
 	}
 	return mustCompileAll(tb, blocks)
 }
@@ -210,6 +211,7 @@ func TestMatch10MBCorrect(t *testing.T) {
 	invisible := mustCompileMatch(t, Match{Heuristic: HeuristicInvisibleUnicode})
 	maxLen := mustCompileMatch(t, Match{Heuristic: HeuristicMaxLength})
 	b64 := mustCompileMatch(t, Match{Heuristic: HeuristicBase64Blob})
+	mixed := mustCompileMatch(t, Match{Heuristic: HeuristicMixedScript})
 
 	const early = "ignore previous" // planted in the first KiB
 	const late = "id_rsa"           // planted after the cap
@@ -270,6 +272,13 @@ func TestMatch10MBCorrect(t *testing.T) {
 		t.Parallel()
 		if got := b64.Match(text); got != nil {
 			t.Errorf("b64.Match() = %v, want nil", got)
+		}
+	})
+
+	t.Run("mixed_script does not flag the filler", func(t *testing.T) {
+		t.Parallel()
+		if got := mixed.Match(text); got != nil {
+			t.Errorf("mixed.Match() = %v, want nil", got)
 		}
 	})
 }
