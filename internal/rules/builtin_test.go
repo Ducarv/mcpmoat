@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io/fs"
+	"reflect"
 	"strings"
 	"testing"
 	"unicode/utf8"
@@ -276,6 +277,16 @@ func schemaWithDescription(t *testing.T, text string) string {
 	return strings.TrimSuffix(buf.String(), "\n")
 }
 
+// builtinByID returns the built-in rules by ID.
+func builtinByID(t *testing.T) map[string]Rule {
+	t.Helper()
+	byID := make(map[string]Rule)
+	for _, r := range mustBuiltin(t, WithCompiler(builtinCompiler())) {
+		byID[r.ID] = r
+	}
+	return byID
+}
+
 // isT1004WordPattern reports whether re is one of the MOAT-T1-004 word
 // patterns (keychain, credentials store or file). MOAT-T1-009 leaves them out
 // on purpose (see its header comment).
@@ -302,10 +313,7 @@ var jsonEscapeSkips = map[string]bool{
 func TestSchemaRuleCopiesDescriptionRules(t *testing.T) {
 	t.Parallel()
 
-	byID := make(map[string]Rule)
-	for _, r := range mustBuiltin(t, WithCompiler(builtinCompiler())) {
-		byID[r.ID] = r
-	}
+	byID := builtinByID(t)
 	compile := func(id string, m Match) *Matcher {
 		t.Helper()
 		c, err := m.Compile()
@@ -371,6 +379,43 @@ func TestSchemaRuleCopiesDescriptionRules(t *testing.T) {
 	for text := range jsonEscapeSkips {
 		if !usedSkips[text] {
 			t.Errorf("jsonEscapeSkips holds %+q, which is no should_match case of the copied rules; remove it", text)
+		}
+	}
+}
+
+// TestMixedScriptTwinRules checks that MOAT-T1-011, the schema twin of
+// MOAT-T1-010, stays in sync with it: the same severity, the same heuristic
+// (with json_escapes 1 only for the schema), and each case of MOAT-T1-010
+// put in a schema description gives the same result.
+func TestMixedScriptTwinRules(t *testing.T) {
+	t.Parallel()
+
+	byID := builtinByID(t)
+	desc, okDesc := byID["MOAT-T1-010"]
+	schema, okSchema := byID["MOAT-T1-011"]
+	if !okDesc || !okSchema || len(desc.ShouldMatch) == 0 || len(desc.ShouldNotMatch) == 0 {
+		t.Fatal("MOAT-T1-010, MOAT-T1-011 or the cases of MOAT-T1-010 are not loaded")
+	}
+	if desc.Severity != schema.Severity {
+		t.Errorf("severity: MOAT-T1-010 has %q, MOAT-T1-011 has %q", desc.Severity, schema.Severity)
+	}
+	wantDesc := Match{Heuristic: HeuristicMixedScript}
+	wantSchema := Match{Heuristic: HeuristicMixedScript, Params: map[string]any{"json_escapes": 1}}
+	if !reflect.DeepEqual(desc.Match, wantDesc) || !reflect.DeepEqual(schema.Match, wantSchema) {
+		t.Errorf("match: MOAT-T1-010 has %+v (want %+v), MOAT-T1-011 has %+v (want %+v)", desc.Match, wantDesc, schema.Match, wantSchema)
+	}
+	m, err := schema.Match.Compile()
+	if err != nil {
+		t.Fatalf("MOAT-T1-011: compile: %v", err)
+	}
+	for i, c := range desc.ShouldMatch {
+		if s := schemaWithDescription(t, c.Text); len(m.Match(s)) == 0 {
+			t.Errorf("MOAT-T1-011 does not match MOAT-T1-010 should_match[%d] in a schema: %s", i, s)
+		}
+	}
+	for i, c := range desc.ShouldNotMatch {
+		if s := schemaWithDescription(t, c.Text); len(m.Match(s)) > 0 {
+			t.Errorf("MOAT-T1-011 matches MOAT-T1-010 should_not_match[%d] in a schema: %s", i, s)
 		}
 	}
 }

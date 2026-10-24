@@ -23,6 +23,12 @@ const (
 	// 8 to 4096), and min_text, the shortest decoded text in bytes (default
 	// 24, 4 to 3072).
 	HeuristicBase64Blob = "base64_blob"
+	// HeuristicMixedScript flags a word that mixes letters of two or more
+	// look-alike scripts, such as Latin, Cyrillic, Greek or Armenian (see the
+	// package doc), as in "Ignore" with a Cyrillic "I". It reads the raw text.
+	// Parameter: json_escapes (default 0, 0 to 1). 1 decodes the JSON escapes
+	// of a schema; a description is decoded text, so it keeps 0.
+	HeuristicMixedScript = "mixed_script"
 
 	// The five heuristics below run the native config checks on one case line
 	// of a built-in config rule (target: config). The line is text, read by the
@@ -59,8 +65,9 @@ const (
 // alphabetical order.
 const heuristicNames = HeuristicAutoInstall + ", " + HeuristicBase64Blob + ", " +
 	HeuristicInsecureURL + ", " + HeuristicInvisibleUnicode + ", " +
-	HeuristicMaxLength + ", " + HeuristicPlaintextSecret + ", " +
-	HeuristicTyposquat + ", " + HeuristicUnpinnedPackage
+	HeuristicMaxLength + ", " + HeuristicMixedScript + ", " +
+	HeuristicPlaintextSecret + ", " + HeuristicTyposquat + ", " +
+	HeuristicUnpinnedPackage
 
 // paramSpec describes one integer parameter of a heuristic.
 type paramSpec struct {
@@ -96,6 +103,13 @@ func compileHeuristic(name string, params map[string]any) (func(raw string) []Hi
 		}
 		minLength, minText := v[0], v[1]
 		return func(raw string) []Hit { return base64Blob(raw, minLength, minText) }, nil
+	case HeuristicMixedScript:
+		v, err := readParams(params, paramSpec{name: "json_escapes", def: 0, min: 0, max: 1})
+		if err != nil {
+			return nil, err
+		}
+		jsonEscapes := v[0] == 1
+		return func(raw string) []Hit { return mixedScript(raw, jsonEscapes) }, nil
 	case HeuristicTyposquat:
 		if _, err := readParams(params); err != nil {
 			return nil, err
