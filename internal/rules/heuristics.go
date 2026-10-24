@@ -502,26 +502,31 @@ const jsonWordFactor = 2
 // A valid JSON object or array (see isJSONText) is data, such as the parts
 // of a JWT or an encoded cursor. But a free JSON wrapper, such as
 // ["ignore all ..."], must not hide a sentence. So for JSON, hasWords reads
-// each string, key or value, and asks for a run of jsonWordFactor*n words in
-// it. A scope claim with a few words is not flagged, a long sentence is. A
-// JSON string of fewer words is a documented limit, and the medium rules
-// that have no min_words still flag it.
+// each string, key or value, with its escapes resolved, and asks for a run of
+// jsonWordFactor*n words in it. A scope claim with a few words is not
+// flagged, a long sentence is. A JSON string of fewer words, or a sentence
+// split over two strings, is a documented limit, and the medium rules that
+// have no min_words still flag it.
+//
+// hasWords reads the tokens with json.Decoder and not with schemaStrings,
+// because schemaStrings stops at a depth of 64 and at 100000 values, and a
+// wrapper of 65 brackets must not hide a sentence. isJSONText has checked the
+// text, so the decoder cannot fail, and it reads the text once.
 func hasWords(text []byte, n int) bool {
 	if !isJSONText(text) {
 		return hasWordRun(text, n)
 	}
-	strs, complete := schemaStrings(text)
-	if !complete {
-		// Too deep or too big to read in full. A wrapper of 65 brackets must
-		// not hide a sentence, so read the text as plain text.
-		return hasWordRun(text, n)
-	}
-	for _, s := range strs {
-		if hasWordRun([]byte(s), jsonWordFactor*n) {
+	dec := json.NewDecoder(bytes.NewReader(text))
+	dec.UseNumber()
+	for {
+		tok, err := dec.Token()
+		if err != nil { // io.EOF at the end of the text
+			return false
+		}
+		if s, ok := tok.(string); ok && hasWordRun([]byte(s), jsonWordFactor*n) {
 			return true
 		}
 	}
-	return false
 }
 
 // isJSONText reports whether b, without the white space at its two ends, is
