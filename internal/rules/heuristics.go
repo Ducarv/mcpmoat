@@ -42,7 +42,8 @@ const (
 	// a registry package and also a git, tarball, URL or GitHub-shorthand spec
 	// (npx, bunx, uvx --from, pipx --spec) and a "pipx run" script URL. A git or
 	// GitHub spec is unpinned unless it pins a full 40-hex commit. A tarball,
-	// URL or script spec is always unpinned.
+	// URL or script spec is always unpinned, except the https URL of a
+	// repository on a known git host, which counts as a git spec.
 	HeuristicUnpinnedPackage = "unpinned_package"
 	// HeuristicAutoInstall flags a command line that runs npx with its yes
 	// option on, such as -y or --yes before the package (MOAT-T4-004). The

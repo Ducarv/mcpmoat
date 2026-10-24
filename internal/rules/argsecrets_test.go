@@ -251,6 +251,26 @@ func TestCheckArgSecretsArgs(t *testing.T) {
 		{"camelCase name with a year", []string{"--token-file-name", "GithubTokenStorage2024"}, false},
 		{"camelCase name with digits inside", []string{"--session", "ProductionSession2024Main"}, false},
 
+		// PascalCase names with short words and acronyms are names too.
+		{"PascalCase with Db and a version", []string{"--secret-name", "ProdDbCredentialsV2"}, false},
+		{"PascalCase with Ai", []string{"--secret-name", "OpenAiApiKeyProd2024"}, false},
+		{"PascalCase with Ui", []string{"--secret-name", "McpServerUiToken2024"}, false},
+		{"PascalCase with an acronym inside", []string{"--secret-name", "MySQLRootPassword2024"}, false},
+		{"PascalCase that starts with an acronym", []string{"--secret-name", "APIKeyForProduction2024"}, false},
+		{"PascalCase with OAuth", []string{"--secret-name", "OAuthClientSecretProd1"}, false},
+		{"PascalCase with S3 and no digit at the end", []string{"--secret-name", "AwsS3BucketSecretKey"}, false},
+		{"a fake token of two-letter words is still a token", []string{"--secret-name", "Zq8Lm3Vx0Rt5Ws2Hy7Nb4Kd1"}, true},
+
+		// An OAuth client ID is public. A name with ID letters inside a word is
+		// not an ID name.
+		{"oauth client id", []string{"--oauth-client-id", "Zq8Lm3Vx0Rt5Ws2Hy7Nb4Kd1"}, false},
+		{"client id in an env name", []string{"-e", "GOOGLE_OAUTH_CLIENT_ID=Zq8Lm3Vx0Rt5Ws2Hy7Nb4Kd1"}, false},
+		{"an ANDROID name is not an ID name", []string{"--android-token", asHex32}, true},
+
+		// A Basic credential counts only in an authorization header.
+		{"Basic word in a plain header", []string{"-H", "X-Mode: Basic auth-mode"}, false},
+		{"Basic credential in a proxy authorization header", []string{"-H", "Proxy-Authorization: Basic dXNlcjpwYXNz"}, true},
+
 		// A long camelCase word after a prefix is still a name.
 		{"secret id with a camelCase path", []string{"--secret-id", "prod/ProductionDatabaseCredentials2024"}, false},
 		{"secret name with camelCase and a version", []string{"--secret-name", "prod-ProductionDatabaseCredentials-v2"}, false},
@@ -420,9 +440,6 @@ func TestCheckArgSecretsURL(t *testing.T) {
 		{"token in the fragment after another pair", "https://" + asHost + "/sse#state=1&token=" + asGH, true},
 		{"password query with a plain word and a stray percent", "https://h/mcp?password=hunter2%x", true},
 		{"password query with a plain word", "https://h/mcp?password=hunter2hunter2", true},
-		{"base64 JSON config in a query", "https://server.example/mcp?config=eyJkZWJ1ZyI6ZmFsc2V9", false},
-		{"password query with a %VAR% that starts with escape digits", "https://h/sse?password=%DB_PASSWORD%", false},
-		{"password query with a %VAR% that starts with hex letters", "https://h/sse?password=%DEV_PASSWORD%", false},
 		{"user info that holds the old reference marker text", "https://u:refx0@h/sse", true},
 		{"bad port", "https://h:abc/mcp?token=" + asGH, true},
 		{"reference as scheme", "${SCHEME}://h/mcp?token=" + asGH, true},
@@ -466,6 +483,9 @@ func TestCheckArgSecretsURL(t *testing.T) {
 		{"api_key query with an encoded %VAR%", "https://h/mcp?api_key=%25AZURE_OPENAI_KEY_2024_PROD%25", false},
 
 		// Negative.
+		{"base64 JSON config in a query", "https://server.example/mcp?config=eyJkZWJ1ZyI6ZmFsc2V9", false},
+		{"password query with a %VAR% that starts with escape digits", "https://h/sse?password=%DB_PASSWORD%", false},
+		{"password query with a %VAR% that starts with hex letters", "https://h/sse?password=%DEV_PASSWORD%", false},
 		{"page query", "https://" + asHost + "/mcp?page=2", false},
 		{"readable path", "https://" + asHost + "/mcp/v1/sse", false},
 		{"UUID path with many distinct digits", "https://" + asHost + "/mcp/0a1b2c3d-4e5f-6789-abcd-ef0123456789", false},
@@ -507,12 +527,12 @@ func TestCheckArgSecretsURL(t *testing.T) {
 	}
 }
 
-// TestCheckArgSecretsWordURLs runs URLs with a readable long name in the path
-// on both remote transports and as a URL arg of a stdio server (bare, after
-// "--url=" and after "--url "). None holds a secret. The positive rows show
-// that the same shapes with a random base64url value are found in all five
-// places.
-func TestCheckArgSecretsWordURLs(t *testing.T) {
+// TestCheckArgSecretsURLPlaces runs each URL in five places: on both remote
+// transports and as a URL arg of a stdio server (bare, after "--url=" and after
+// "--url "). The rows with a readable long name in the path hold no secret. The
+// positive rows show that the same shapes with a random value are found in all
+// five places.
+func TestCheckArgSecretsURLPlaces(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
@@ -649,6 +669,44 @@ func TestCheckArgSecretsOpaqueParts(t *testing.T) {
 					got := checkArgSecrets(remoteServer(tr, tt.url))
 					assertArgSecret(t, got, tt.want, FieldURL, fmt.Sprintf("checkArgSecrets(%s, %q)", tr, tt.url))
 				}
+			}
+		})
+	}
+}
+
+func TestIsCamelName(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		in   string
+		want bool
+	}{
+		{"GithubTokenStorage2024", true},
+		{"keyRings", true},
+		{"ProductionSession2024Main", true},
+		{"MyCompanyProductionApiKey2024", true},
+		{"ProdDbCredentialsV2", true},
+		{"OpenAiApiKeyProd2024", true},
+		{"MySQLRootPassword2024", true},
+		{"APIKeyForProduction2024", true},
+		{"OAuthClientSecretProd1", true},
+		{"AwsS3BucketSecretKey", true},
+		{"SecretForMCPServer2024", true},
+		// Not names: one word, fake tokens, a lower-case letter after a digit,
+		// two-letter words that are not known words, a lone capital before a word.
+		{"productiondatabase", false},
+		{"Zq8Lm3Vx0Rt5Ws2Hy7Nb4Kd1", false},
+		{"aB3dE5fG7hJ9kL2mN4pQ6rS8", false},
+		{"ZqLmVxRtWsHyNbKd", false},
+		{"QZkjAbcDef", false},
+		{"", false},
+		{"with-dash", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.in, func(t *testing.T) {
+			t.Parallel()
+			if got := isCamelName(tt.in); got != tt.want {
+				t.Errorf("isCamelName(%q) = %v, want %v", tt.in, got, tt.want)
 			}
 		})
 	}

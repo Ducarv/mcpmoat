@@ -126,8 +126,9 @@ var tabsAndNewlines = strings.NewReplacer("\t", "", "\n", "", "\r", "")
 
 // cleanClientURL reads a URL the way clients do before they parse it: it
 // removes every tab and newline and trims the control characters and spaces at
-// both ends. The URL checks (T4-001 and T4-002) share it, so they read one URL
-// in one way.
+// both ends. The URL checks (T4-001 and T4-002) share this clean-up step. After
+// it, they read references differently: T4-001 uses refDefault (only ":-"),
+// T4-002 uses expandRefs (more forms, nested).
 func cleanClientURL(raw string) string {
 	return strings.TrimFunc(tabsAndNewlines.Replace(raw), func(r rune) bool { return r <= ' ' || r == 0x7f })
 }
@@ -163,7 +164,8 @@ func checkPlaintextSecrets(s discover.Server) []Finding {
 	return append(findings, checkArgSecrets(s)...)
 }
 
-// secretFinding builds the MOAT-T4-002 finding for one key.
+// secretFinding builds the MOAT-T4-002 finding. key is the env or header key,
+// or "" for a finding with Field args or url.
 func secretFinding(server, field, key string) Finding {
 	return Finding{
 		RuleID:  RulePlaintextSecret,

@@ -37,6 +37,12 @@ should_match:
     note: npm reads this URL as a git spec, and a branch name moves
   - text: pipx run https://example.com/script.py
     note: A script that pipx downloads and runs. The URL can serve different code at any time
+  - text: npx Foo@https://example.com/x.tgz
+    note: An alias name with upper case. npm accepts it, and the tarball URL behind it can change
+  - text: npx deploy@gitlab.com:team/repo
+    note: An scp-style git spec with a user other than git, and no commit
+  - text: npx https:/github.com/user/repo
+    note: A WHATWG parser, which npm uses, reads a missing slash after https as https://, so this is a git repo with no commit
   - text: npx git@https://example.com/x.tgz#0123456789abcdef0123456789abcdef01234567
     note: npm reads git@ as an alias name for a tarball URL, and a tarball URL is never pinned, also with a 40-hex fragment
   - text: pipx run https://example.com/run?file=x.py
@@ -55,6 +61,8 @@ should_not_match:
     note: Python git package pinned to a full 40-hex commit
   - text: npx https://github.com/user/repo#0123456789abcdef0123456789abcdef01234567
     note: The https URL of a GitHub repository, pinned to a full 40-hex commit
+  - text: npx https://github.com/user/repo/tree/0123456789abcdef0123456789abcdef01234567
+    note: A GitHub tree URL with the commit in the path. npm reads it as a git spec with that commit
   - text: npx git@github.com:user/repo.git#0123456789abcdef0123456789abcdef01234567
     note: A scp-style git spec, pinned to a full 40-hex commit
   - text: npx ./local-dir

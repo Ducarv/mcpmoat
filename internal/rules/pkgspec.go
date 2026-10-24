@@ -604,7 +604,7 @@ var pipxFlags = flagTable{
 func extractPython(r Runner, flags flagTable, args []string) (PackageSpec, int, bool) {
 	spec, at, ok := scanArgs(args, flags)
 	if !ok || strings.HasSuffix(spec, ".py") {
-		return PackageSpec{}, 0, false // a script, not a package
+		return PackageSpec{}, 0, false // a script, not a package (see rawSpecAt for URLs)
 	}
 	name, version, ok := parsePythonSpec(spec, r == RunnerUVX)
 	if !ok {

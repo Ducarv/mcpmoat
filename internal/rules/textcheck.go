@@ -46,11 +46,8 @@ var headerEntryRe = regexp.MustCompile(`^[A-Za-z0-9_-]+:`)
 // space at both ends is trimmed. The URL is read as the URL of a remote
 // server. A line that is blank gives a URL that is not http, so no hit.
 func insecureURLText(raw string) []Hit {
-	s := discover.Server{
-		Name:      caseServerName,
-		Transport: discover.TransportHTTP,
-		URL:       discover.NewURL(strings.TrimSpace(raw)),
-	}
+	s := caseRemoteServer(caseServerName)
+	s.URL = discover.NewURL(strings.TrimSpace(raw))
 	return findingHits(checkInsecureURL(s), HeuristicInsecureURL)
 }
 
@@ -96,21 +93,15 @@ func plaintextSecretText(raw string) []Hit {
 		// "http://host" also matches headerEntryRe, so the "//" test keeps a URL
 		// out of the header form. The URL form below then reads it.
 		if !strings.HasPrefix(value, "//") {
-			s := discover.Server{
-				Name:      caseServerName,
-				Transport: discover.TransportHTTP,
-				Headers:   discover.SecretMap{name: discover.NewSecret(strings.TrimSpace(value))},
-			}
+			s := caseRemoteServer(caseServerName)
+			s.Headers = discover.SecretMap{name: discover.NewSecret(strings.TrimSpace(value))}
 			return findingHits(checkPlaintextSecrets(s), HeuristicPlaintextSecret)
 		}
 	}
 	fields := strings.Fields(line)
 	if len(fields) == 1 && urlLineRe.MatchString(line) {
-		s := discover.Server{
-			Name:      caseServerName,
-			Transport: discover.TransportHTTP,
-			URL:       discover.NewURL(line),
-		}
+		s := caseRemoteServer(caseServerName)
+		s.URL = discover.NewURL(line)
 		return findingHits(checkPlaintextSecrets(s), HeuristicPlaintextSecret)
 	}
 	if len(fields) >= 2 {
@@ -172,6 +163,11 @@ func commandLineHits(name string, fields []string, check func(discover.Server) [
 		return nil
 	}
 	return findingHits(check(caseStdioServer(name, fields[0], fields[1:])), heuristic)
+}
+
+// caseRemoteServer returns an HTTP remote server with the given name.
+func caseRemoteServer(name string) discover.Server {
+	return discover.Server{Name: name, Transport: discover.TransportHTTP}
 }
 
 // caseStdioServer returns a stdio server with the given name, command and args.

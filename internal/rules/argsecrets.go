@@ -73,8 +73,9 @@ const (
 	minNumberLen = 2
 
 	// maxOpaquePartLen is the length from which a part makes the whole value not
-	// word-like, unless it is all digits or letters of one case with an entropy
-	// under minOpaqueEntropy ("aaaaaaaaaaaaaaaaaaaaaaaa"). A long run like that is
+	// word-like, unless it is all digits, a camelCase name, or letters of one case
+	// with an entropy under minOpaqueEntropy ("aaaaaaaaaaaaaaaaaaaaaaaa"). A long
+	// run like that is
 	// a secret body, not a readable name. A hostile config can still split a
 	// random value into pieces shorter than this: a documented limit.
 	//
@@ -252,8 +253,10 @@ func headerEntryHasSecret(entry string) bool {
 	}
 	last := words[len(words)-1]
 	// A Basic credential is "user:password" in base64, so any literal value of
-	// minNamedSecretLen bytes or more is a secret, as for a password.
-	if len(words) >= 2 && strings.EqualFold(words[len(words)-2], "Basic") {
+	// minNamedSecretLen bytes or more is a secret, as for a password. Only the
+	// authorization headers take this scheme.
+	if len(words) >= 2 && strings.EqualFold(words[len(words)-2], "Basic") &&
+		(strings.EqualFold(name, "Authorization") || strings.EqualFold(name, "Proxy-Authorization")) {
 		return len(literalPart(last)) >= minNamedSecretLen
 	}
 	return namedValueHasSecret(name, last)
@@ -371,9 +374,12 @@ func tokenForName(name, value string) bool {
 	if endsInPasswordWord(name) {
 		return true
 	}
+	if namesAClientID(name) {
+		return false // an OAuth client ID is public
+	}
 	// A name that ends in "id" ("--key-id", "keyId") holds an identifier, and a
 	// UUID or a hex digest there is a public ID, not a secret.
-	if endsInIDWord(name) && (uuidText.MatchString(value) || isHexString(value, 1)) {
+	if endsInIDWord(name) && (uuidText.MatchString(value) || isHex(value)) {
 		return false
 	}
 	if uuidText.MatchString(value) {
@@ -386,7 +392,8 @@ func tokenForName(name, value string) bool {
 }
 
 // endsInIDWord reports whether the last word of name is "id" or "ids", in any
-// case, or name ends in camelCase "Id" or "ID" ("keyId", "clientID").
+// case, or name ends in camelCase "Id" or "ID" after a lower-case letter
+// ("keyId", "clientID"). So "ANDROID" does not count.
 func endsInIDWord(name string) bool {
 	words := strings.FieldsFunc(name, isNameSeparator)
 	if len(words) == 0 {
@@ -396,7 +403,16 @@ func endsInIDWord(name string) bool {
 	if strings.EqualFold(last, "id") || strings.EqualFold(last, "ids") {
 		return true
 	}
-	return len(last) > 2 && (strings.HasSuffix(last, "Id") || strings.HasSuffix(last, "ID"))
+	if n := len(last); n > 2 && (strings.HasSuffix(last, "Id") || strings.HasSuffix(last, "ID")) {
+		return last[n-3] >= 'a' && last[n-3] <= 'z'
+	}
+	return false
+}
+
+// namesAClientID reports whether name ends in an ID word and holds the word
+// "client": an OAuth client ID is public, whatever its look.
+func namesAClientID(name string) bool {
+	return endsInIDWord(name) && strings.Contains(strings.ToLower(name), "client")
 }
 
 // passwordWords are the last words of a name that takes a password.
@@ -429,13 +445,17 @@ func endsInPasswordWord(name string) bool {
 	return false
 }
 
+// secretNameWords are the words that make nameHoldsSecretWord true. "pass" also
+// covers "password" and "passwd".
+var secretNameWords = []string{"key", "token", "secret", "pass"}
+
 // nameHoldsSecretWord reports whether name, in any case, contains "key",
 // "token", "secret" or "pass". The text "pass" also covers "password" and
 // "passwd". The match is on the text and not on whole words, so "apikey" and
 // "X-Api-Key" count.
 func nameHoldsSecretWord(name string) bool {
 	lower := strings.ToLower(name)
-	for _, word := range [...]string{"key", "token", "secret", "pass"} {
+	for _, word := range secretNameWords {
 		if strings.Contains(lower, word) {
 			return true
 		}
@@ -443,18 +463,19 @@ func nameHoldsSecretWord(name string) bool {
 	return false
 }
 
-// isHexString reports whether s has at least minLen bytes and only hex digits
-// (0-9, a-f, A-F).
-func isHexString(s string, minLen int) bool {
-	if len(s) < minLen {
-		return false
-	}
+// isHex reports whether s has only hex digits (0-9, a-f, A-F).
+func isHex(s string) bool {
 	for i := range len(s) {
 		if !isHexDigit(s[i]) {
 			return false
 		}
 	}
 	return true
+}
+
+// isHexString reports whether s has at least minLen bytes and only hex digits.
+func isHexString(s string, minLen int) bool {
+	return len(s) >= minLen && isHex(s)
 }
 
 // looksLongRandom reports whether value is a token-shaped text of at least
@@ -483,31 +504,31 @@ func looksLongRandom(value string) bool {
 // value with 1 separator ("ghp_<36 random>", "sk-<30 random>") never passes.
 // A part of maxOpaquePartLen or more bytes makes value not word-like at once,
 // so a prefix or a padding of words does not hide a random body
-// ("sk_live_<24 random>", "aaa-bbb-<24 random>"). Two kinds of long part are
-// spared: digits only (a number) and letters of one case with an entropy under
-// minOpaqueEntropy (a word). So one-case random letters are still caught.
+// ("sk_live_<24 random>", "aaa-bbb-<24 random>"). Three kinds of long part are
+// spared: digits only (a number), letters of one case with an entropy under
+// minOpaqueEntropy (a word), and a camelCase name (see isCamelName). So
+// one-case random letters are still caught.
 //
 // A "/" also separates words here ("projects/my-proj/secrets/token/versions/1"
 // is a resource path, not a token), and a value made of Capitalized words
-// ("GithubTokenStorage2024") is a name (see camelWords). A value with a "/"
+// ("GithubTokenStorage2024") is a name (see isCamelName). A value with a "/"
 // and only one break is word-like when all its counted parts are words.
 func isWordLike(value string) bool {
 	// A file extension is not a word of the name: ".tar.gz" after a hash must
 	// not add a word and a separator (see trimFileExt).
 	value = trimFileExt(value)
-	if camelWords.MatchString(value) {
+	if isCamelName(value) {
 		return true
 	}
 	counted, words := 0, 0
 	for _, part := range strings.FieldsFunc(value, isWordBreak) {
-		word := isWordPart(part)
 		switch {
 		case isNumberPart(part):
 			counted++
 			words++
-		case len(part) >= maxOpaquePartLen && !camelWords.MatchString(part) && (!word || shannonEntropy(part) >= minOpaqueEntropy):
+		case isOpaquePart(part):
 			return false // a long opaque run is a secret body, not a name
-		case word:
+		case isWordPart(part):
 			counted++
 			words++
 		case len(part) >= minWordLen:
@@ -521,6 +542,23 @@ func isWordLike(value string) bool {
 	breaks := countRunes(value, isWordBreak)
 	onlyWords := strings.Contains(value, "/") && words == counted
 	return (breaks >= 2 || onlyWords) && counted >= 2 && words*2 >= counted
+}
+
+// shortCamelWords are the two-letter words that a camelCase name can hold.
+var shortCamelWords = []string{
+	"My", "Db", "Ai", "Ui", "Ux", "Io", "Id", "Os", "Ip", "Js", "Ml", "Qa", "Ci", "Cd", "Vm",
+	"Of", "To", "In", "On", "Is", "As", "At", "By", "Or", "No", "Go",
+}
+
+// isOpaquePart reports whether part is a long run that looks like the body of a
+// secret and not a name: it has maxOpaquePartLen bytes or more, it is not a
+// camelCase name, and it is not a word, or it is a word with an entropy of at
+// least minOpaqueEntropy (one-case random letters).
+func isOpaquePart(part string) bool {
+	if len(part) < maxOpaquePartLen || isCamelName(part) {
+		return false
+	}
+	return !isWordPart(part) || shannonEntropy(part) >= minOpaqueEntropy
 }
 
 // isWordBreak reports whether r ends a word of a name: a name separator or "/".
@@ -551,21 +589,85 @@ func isNumberPart(part string) bool {
 	return len(part) >= minNumberLen && strings.Trim(part, "0123456789") == ""
 }
 
-// camelWords matches a name made of two or more words in camelCase, with
-// optional digits between and after the words: "GithubTokenStorage2024",
-// "keyRings", "ProductionSession2024Main", "MyCompanyApiKey". Each word has a
-// capital (the first word may be all lower case) and at least two lower-case
-// letters after it. Only the first word may be short ("My"). A fake token such
-// as "Zq8Lm3Vx0Rt5" has one lower-case letter per word, so it does not match,
-// and a random token does not have this shape, except by a very small chance.
-var camelWords = regexp.MustCompile(`^[A-Za-z][a-z]+(?:[0-9]*[A-Z][a-z]{2,})+[0-9]*$`)
+// isCamelName reports whether s is a name in camelCase or PascalCase, such as
+// "GithubTokenStorage2024", "keyRings", "ProdDbCredentialsV2",
+// "MySQLRootPassword2024" or "OAuthClientSecretProd1". It is made of words that
+// start with a capital (the first one may be lower case), acronym runs of
+// capitals ("SQL", "API") and digits. A Capitalized word has three letters or
+// more, except the two-letter words in shortCamelWords ("Db", "Ai", "My"). It
+// needs at least two such words, and few short items (a short word, an acronym
+// run or a lone capital): at most half the long words plus one. So a fake token
+// such as "Zq8Lm3Vx0Rt5" (words of two letters) and a random token are not
+// names: random letters give a Capitalized word of three letters or more only
+// one time in four, and a lower-case letter after a digit ends the check.
+func isCamelName(s string) bool {
+	isUpper := func(c byte) bool { return c >= 'A' && c <= 'Z' }
+	isLower := func(c byte) bool { return c >= 'a' && c <= 'z' }
+	isDigit := func(c byte) bool { return c >= '0' && c <= '9' }
+
+	longWords, shortItems := 0, 0 // words of three or more letters, and the rest
+	for i := 0; i < len(s); {
+		j := i + 1
+		switch c := s[i]; {
+		case isDigit(c):
+			for j < len(s) && isDigit(s[j]) {
+				j++
+			}
+		case isUpper(c) && j < len(s) && isLower(s[j]):
+			// A Capitalized word: "Credentials".
+			for j < len(s) && isLower(s[j]) {
+				j++
+			}
+			switch {
+			case j-i >= minWordLen:
+				longWords++
+			case slices.Contains(shortCamelWords, s[i:j]):
+				shortItems++
+			default:
+				return false // "Zq", "Lm": two letters that are not a known word
+			}
+		case isUpper(c) && strings.HasPrefix(s[i:], "OAuth"):
+			j = i + len("OAuth") // "OAuth" is a word, but not a Capitalized one
+			longWords++
+		case isUpper(c):
+			// An acronym run: "SQL" in "MySQLRoot", or a lone capital before a
+			// digit or the end: "V2". The last capital of a run starts the next
+			// word when a lower-case letter follows the run.
+			for j < len(s) && isUpper(s[j]) {
+				j++
+			}
+			run := j - i
+			if j < len(s) && isLower(s[j]) && run > 1 {
+				j--
+			}
+			if run > 1 && j-i == 1 {
+				return false // a lone capital before a Capitalized word: "QZkj"
+			}
+			shortItems++
+		case isLower(c) && i == 0:
+			// A lower-case first word: "key" in "keyRings".
+			for j < len(s) && isLower(s[j]) {
+				j++
+			}
+			if j-i >= minWordLen {
+				longWords++
+			} else {
+				shortItems++
+			}
+		default:
+			return false // a separator, a symbol, or a lower-case letter after a digit
+		}
+		i = j
+	}
+	return longWords >= 2 && shortItems <= longWords/2+1
+}
 
 // isWordPart reports whether part is a word (minWordLen or more ASCII letters
 // in one case, with an optional capital first), a camelCase name (see
-// camelWords) or a number (minNumberLen or more digits). A number is also
+// isCamelName) or a number (minNumberLen or more digits). A number is also
 // checked first by isWordLike, which counts it on its own.
 func isWordPart(part string) bool {
-	if isNumberPart(part) || camelWords.MatchString(part) {
+	if isNumberPart(part) || isCamelName(part) {
 		return true
 	}
 	if len(part) < minWordLen {
@@ -591,7 +693,8 @@ func isWordPart(part string) bool {
 }
 
 // looksRandom reports whether value has the shape of a random token: only
-// token bytes (see isTokenShaped) and one of two things:
+// token bytes (see isTokenShaped), not word-like (see isWordLike), and one of
+// two things:
 //   - at least minRandomLen bytes, a digit and an entropy of at least
 //     minDigitEntropy;
 //   - at least minEntropyLen bytes and an entropy of at least minEntropy.
@@ -838,7 +941,7 @@ func randomSegment(segment string) bool {
 // md5HexLen and sha256HexLen are the lengths of a hex MD5 and SHA-256 digest.
 // A SHA-1 digest has fullSHALen digits.
 const (
-	md5HexLen    = 32
+	md5HexLen    = minHexLen
 	sha256HexLen = 64
 )
 
@@ -856,7 +959,7 @@ var hashHexLens = []int{md5HexLen, fullSHALen, sha256HexLen}
 // token there ("https://<40 hex>@host") is a real secret shape.
 func randomPathSegment(segment string) bool {
 	segment = trimFileExt(segment)
-	if slices.Contains(hashHexLens, len(segment)) && isHexString(segment, len(segment)) {
+	if slices.Contains(hashHexLens, len(segment)) && isHex(segment) {
 		return false
 	}
 	return randomSegment(segment)

@@ -186,7 +186,7 @@ func TestTextAdaptersNoLeak(t *testing.T) {
 
 // hitForms renders hits in every common output form: the Detail of the first
 // hit, then %v, %+v, %#v and JSON.
-func hitForms(t *testing.T, hits []Hit) []string {
+func hitForms(t testing.TB, hits []Hit) []string {
 	t.Helper()
 	js, err := json.Marshal(hits)
 	if err != nil {
