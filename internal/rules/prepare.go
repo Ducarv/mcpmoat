@@ -66,7 +66,7 @@ func prepareText(raw string) *preparedText {
 // the maxBaseForms base forms, their plain folds and their skeleton folds.
 // When no rune of skeletonTable is in a base form or in its plain fold, its
 // skeleton fold equals its plain fold, so it adds no form: such a text has
-// the same forms as before the skeleton. Each form is at most
+// only its base forms and their plain folds. Each form is at most
 // MaxMatchInputBytes long. A plain ASCII text has one form, so it costs no
 // more.
 //

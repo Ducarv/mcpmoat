@@ -464,20 +464,21 @@ func FuzzRegexForms(f *testing.F) {
 		p := prepareText(s)
 		regex := p.regexForms()
 		for i, base := range matchForms(s) {
+			kw, rx := foldMarks(base), foldSkeleton(base)
 			// build adds both folds of every base form, also an invalid one.
-			if kw := foldMarks(base); !slices.Contains(regex, kw) {
+			if !slices.Contains(regex, kw) {
 				t.Errorf("base form %d: regexForms lacks its plain fold %q", i, kw)
 			}
-			if rx := foldSkeleton(base); !slices.Contains(regex, rx) {
+			if !slices.Contains(regex, rx) {
 				t.Errorf("base form %d: regexForms lacks its skeleton fold %q", i, rx)
 			}
 			if !utf8.ValidString(base) {
 				continue // foldMarks keeps an invalid byte; the bound is for valid text
 			}
-			if kw := foldMarks(base); len(kw) > len(base) {
+			if len(kw) > len(base) {
 				t.Errorf("base form %d: len(foldMarks) = %d, want at most %d", i, len(kw), len(base))
 			}
-			if rx := foldSkeleton(base); len(rx) > len(base) {
+			if len(rx) > len(base) {
 				t.Errorf("base form %d: len(foldSkeleton) = %d, want at most %d", i, len(rx), len(base))
 			}
 		}

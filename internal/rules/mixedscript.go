@@ -21,8 +21,8 @@ import (
 // contract.
 //
 // It reads the full raw text in one pass, with no size cut. A word is a
-// longest run of letters, of the runes that isWordFiller accepts (marks,
-// invisible runes, private-use runes, unassigned code points and U+FFFD) and
+// longest run of letters, of marks, of the runes that isWordFiller accepts
+// (invisible runes, private-use runes, unassigned code points and U+FFFD) and
 // of the runes that fold to letters only (see wordState.foldIsLetters), such
 // as U+216E (Roman numeral D) and U+24D6 (circled g). Any other rune ends a
 // word. An invalid UTF-8 byte and a lone surrogate escape decode to U+FFFD,
@@ -138,14 +138,15 @@ func mixedScript(raw string, jsonEscapes bool) []Hit {
 // followsDigit).
 const noRune rune = -1
 
-// isWordFiller reports whether r, a rune that is not a letter, joins a word:
-// a mark (see unicode.IsMark), an invisible rune (see isInvisible), a
-// private-use rune, an unassigned code point or U+FFFD. Many fonts draw a
+// isWordFiller reports whether r, a rune that is neither a letter nor a mark
+// (mixedScript handles those first), joins a word: an invisible rune (see
+// isInvisible), a private-use rune, an unassigned code point or U+FFFD. Many
+// fonts draw a
 // private-use or unassigned rune as nothing, and a client may drop U+FFFD,
 // so they must not split a word either. To join runes into one word can only
 // add hits. No ASCII rune is private-use or unassigned.
 func isWordFiller(r rune) bool {
-	if unicode.IsMark(r) || isInvisible(r) || r == utf8.RuneError {
+	if isInvisible(r) || r == utf8.RuneError {
 		return true
 	}
 	return unicode.In(r, unicode.Co, unicode.Cn)
@@ -165,17 +166,6 @@ func followsDigit(prev1, prev2 rune) bool {
 func isASCIIDigit(r rune) bool {
 	return '0' <= r && r <= '9'
 }
-
-// The sources of lookalikeScripts. confusablesVersion is the version of
-// Unicode TR39 confusables.txt (https://www.unicode.org/reports/tr39/) and
-// scriptTablesVersion is the Unicode version of the Go unicode tables
-// (unicode.Version) when the list was made. When Go updates its tables, or
-// TR39 has a new version, check the list again: a new script or a new
-// confusable can add a script.
-const (
-	confusablesVersion  = "18.0.0"
-	scriptTablesVersion = "17.0.0"
-)
 
 // scriptTier says where in a word a rune of a look-alike script counts (see
 // wordState.countLetter and wordState.addMark).
@@ -241,7 +231,11 @@ const arabicHighHamza = '\u0674'
 // NFKD base is U+0647, and the letters that TR39 maps to a Latin letter and a
 // spacing mark (Mc), such as Myanmar U+1010 ("o" + U+102C): the visible sign
 // shows that the letter is not a Latin one. When confusablesVersion or
-// scriptTablesVersion changes, make the list again.
+// scriptTablesVersion changes, make the list again (issue #152 tracks a
+// generator).
+//
+// The comments of U+0629, U+06C3, U+FE93 and U+FE94 call the letter TAA
+// MARBUTA, its common name: the misspell linter rejects the Unicode name.
 var edgeLookalikes = [...]rune{
 	0x05D5,  // HEBREW LETTER VAV: l
 	0x05D8,  // HEBREW LETTER TET: v
@@ -251,7 +245,7 @@ var edgeLookalikes = [...]rune{
 	0x0623,  // ARABIC LETTER ALEF WITH HAMZA ABOVE: NFKD U+0627
 	0x0625,  // ARABIC LETTER ALEF WITH HAMZA BELOW: NFKD U+0627
 	0x0627,  // ARABIC LETTER ALEF: l
-	0x0629,  // ARABIC LETTER TAA MARBUTA (common name: misspell rejects the Unicode name): o
+	0x0629,  // ARABIC LETTER TAA MARBUTA: o
 	0x0647,  // ARABIC LETTER HEH: o
 	0x0672,  // ARABIC LETTER ALEF WITH WAVY HAMZA ABOVE: l
 	0x0673,  // ARABIC LETTER ALEF WITH WAVY HAMZA BELOW: l
@@ -260,7 +254,7 @@ var edgeLookalikes = [...]rune{
 	0x06C0,  // ARABIC LETTER HEH WITH YEH ABOVE: NFKD U+06D5
 	0x06C1,  // ARABIC LETTER HEH GOAL: o
 	0x06C2,  // ARABIC LETTER HEH GOAL WITH HAMZA ABOVE: NFKD U+06C1
-	0x06C3,  // ARABIC LETTER TAA MARBUTA GOAL (common name: misspell rejects the Unicode name): o
+	0x06C3,  // ARABIC LETTER TAA MARBUTA GOAL: o
 	0x06D5,  // ARABIC LETTER AE: o
 	0x06FF,  // ARABIC LETTER HEH WITH INVERTED V: o
 	0x0B20,  // ORIYA LETTER TTHA: O
@@ -300,8 +294,8 @@ var edgeLookalikes = [...]rune{
 	0xFE88,  // ARABIC LETTER ALEF WITH HAMZA BELOW FINAL FORM: NFKD U+0627
 	0xFE8D,  // ARABIC LETTER ALEF ISOLATED FORM: l
 	0xFE8E,  // ARABIC LETTER ALEF FINAL FORM: l
-	0xFE93,  // ARABIC LETTER TAA MARBUTA ISOLATED FORM (common name: misspell rejects the Unicode name): NFKD U+0629
-	0xFE94,  // ARABIC LETTER TAA MARBUTA FINAL FORM (common name: misspell rejects the Unicode name): NFKD U+0629
+	0xFE93,  // ARABIC LETTER TAA MARBUTA ISOLATED FORM: NFKD U+0629
+	0xFE94,  // ARABIC LETTER TAA MARBUTA FINAL FORM: NFKD U+0629
 	0xFEE9,  // ARABIC LETTER HEH ISOLATED FORM: o
 	0xFEEA,  // ARABIC LETTER HEH FINAL FORM: o
 	0xFEEB,  // ARABIC LETTER HEH INITIAL FORM: o
@@ -327,13 +321,14 @@ type lookalikeScript struct {
 }
 
 // lookalikeScripts lists the scripts that mixedScript counts, in the order
-// that a Detail names them. The first nine are the original list. The others
-// are each script of the Go unicode tables with a letter or mark that maps
-// to a Latin letter in TR39 confusables.txt (see confusablesVersion), and
-// Gothic, which has Latin look-alikes that TR39 does not list.
+// that a Detail names them. The first nine are Latin, Cyrillic, Greek,
+// Armenian, Cherokee, Lisu, Coptic, Canadian Aboriginal and Tifinagh. The
+// others are each script of the Go unicode tables with a letter or mark that
+// maps to a Latin letter in TR39 confusables.txt (see confusablesVersion),
+// and Gothic, which has Latin look-alikes that TR39 does not list.
 //
 // The edge tier also holds Thai, Lao and Khmer, whose only Latin
-// confusables in TR39 are digits, as issue #139 decided.
+// confusables in TR39 are digits (issue #139).
 //
 // Out of scope: a Latin-script look-alike (such as U+0261) is Latin, so it
 // cannot mix scripts. Not listed: scripts whose only Latin confusables are
@@ -508,8 +503,9 @@ type wordState struct {
 	letters int        // letters of any script
 	scripts scriptMask // the scripts that a letter or mark counts for
 	// lastScript is the index in lookalikeScripts of the script of the last
-	// letter that has a script in the list. It is valid only when
-	// letters > 0 (see addMark and countLetter).
+	// letter that has a script in the list. It is 0 (latinScript) until such
+	// a letter comes. Latin is never an edge-tier script, so addMark does not
+	// take that zero for the script of a mark (see addMark and countLetter).
 	lastScript int
 
 	// The edge run is the edge-tier letters and marks (see edgeTier) since
@@ -517,8 +513,9 @@ type wordState struct {
 	// letter came yet. edgeRun holds their scripts. edgeLetters counts the
 	// visible letters of the run, up to 2, and edgeLetter is the only one
 	// when edgeLetters is 1. An invisible letter (see isInvisible), such as
-	// the Hangul filler U+3164, is not counted, so it cannot make a run of
-	// one letter look like a run of two. The next Latin letter ends the run
+	// the Hangul filler U+3164, U+0674 and a modifier letter (Lm) are not
+	// counted, so they cannot make a run of one letter look like a run of
+	// two (see countLetter). The next Latin letter ends the run
 	// (see countLetter), and so does the end of the word (see flagged). A
 	// run between two Latin letters counts. A run at the start or the end of
 	// a word counts only when runCounts says so.
@@ -663,13 +660,15 @@ func (w *wordState) countLetter(r rune, i int) {
 		w.nLatin++
 	case lookalikeScripts[i].tier == edgeTier:
 		w.edgeRun |= 1 << i
-		// U+0674 (see arabicHighHamza) and an invisible letter (see
-		// isInvisible) are not counted. For a letter, isInvisible reads only
-		// the Other_Default_Ignorable_Code_Point table (a letter is never Cc,
-		// Cf or a variation selector), so the check reads that table alone.
-		// It stops at the second letter of the run, so a long run costs no
-		// more than a short one.
-		if w.edgeLetters < 2 && r != arabicHighHamza && !unicode.Is(unicode.Other_Default_Ignorable_Code_Point, r) {
+		// U+0674 (see arabicHighHamza), a modifier letter (category Lm, such
+		// as the small Arabic waw U+06E5, a small sign above the letter
+		// before it) and an invisible letter (see isInvisible) are not
+		// counted. For a letter, isInvisible reads only the
+		// Other_Default_Ignorable_Code_Point table (a letter is never Cc, Cf
+		// or a variation selector), so the check reads that table alone. It
+		// stops at the second letter of the run, so a long run costs no more
+		// than a short one.
+		if w.edgeLetters < 2 && r != arabicHighHamza && !unicode.Is(unicode.Lm, r) && !unicode.Is(unicode.Other_Default_Ignorable_Code_Point, r) {
 			w.edgeLetters++
 			w.edgeLetter = r // read only when edgeLetters is 1
 		}

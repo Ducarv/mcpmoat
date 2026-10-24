@@ -1,8 +1,6 @@
 package rules
 
 import (
-	"cmp"
-	"slices"
 	"strings"
 	"unicode/utf8"
 )
@@ -24,6 +22,18 @@ import (
 // in the regex fold. The keyword fold, mixedScript and appendFold do not
 // change.
 
+// The sources of lookalikeScripts and of both look-alike tables.
+// confusablesVersion is the version of Unicode TR39 confusables.txt
+// (https://www.unicode.org/reports/tr39/) and scriptTablesVersion is the
+// Unicode version of the Go unicode tables (unicode.Version) when the lists
+// were made. When Go updates its tables, or TR39 has a new version, check
+// the lists again: a new script or a new confusable can add a script or a
+// table entry.
+const (
+	confusablesVersion  = "18.0.0"
+	scriptTablesVersion = "17.0.0"
+)
+
 // confusable maps one rune to the ASCII letter that it looks like.
 type confusable struct {
 	from rune // a letter or a spacing mark that is not ASCII
@@ -32,12 +42,12 @@ type confusable struct {
 
 // skeletonTable is the table of skeletonOf, sorted by from with no
 // duplicates. It is a hand-checked subset of TR39 confusables.txt, version
-// confusablesVersion (see mixedscript.go, the same file version that
-// lookalikeScripts comes from). When confusablesVersion or
-// scriptTablesVersion changes, make the table again. Every entry comes from
-// one line of confusables.txt whose source is one rune and whose target is
-// one ASCII letter, alone or followed only by combining marks of category
-// Mn. The entry maps the rune to that letter and drops the marks, because
+// confusablesVersion (the same version that lookalikeScripts comes from).
+// When confusablesVersion or scriptTablesVersion changes, make the table
+// again (issue #152 tracks a generator). Every entry comes from one line of
+// confusables.txt whose source is one rune and whose target is one ASCII
+// letter, alone or followed only by combining marks of category Mn. The
+// entry maps the rune to that letter and drops the marks, because
 // foldMarks drops every mark of the text too: TR39 maps U+0268 (i with
 // stroke) to "i" + U+0335 and U+00F8 (o with stroke) to "o" + U+0338, so
 // the table maps them to "i" and "o", and U+0268 + "gnore" reads as
@@ -660,18 +670,27 @@ var skeletonTable = [...]confusable{
 // is in skeletonTable. It returns false for every other rune, also for every
 // ASCII rune. The range check comes first, so most runes of a text (ASCII,
 // and the accented Latin letters below U+00D0, the first entry) cost no
-// binary search.
+// binary search. The search is written by hand, as in scriptOf: with
+// slices.BinarySearchFunc, skeleton took 160 ms instead of 57 ms on 10 MB of
+// Cyrillic text (Apple M1 Pro, go1.27.3), because the comparison function is
+// not inlined.
 func skeletonOf(r rune) (byte, bool) {
 	if r < skeletonTable[0].from || r > skeletonTable[len(skeletonTable)-1].from {
 		return 0, false
 	}
-	i, ok := slices.BinarySearchFunc(skeletonTable[:], r, func(c confusable, r rune) int {
-		return cmp.Compare(c.from, r)
-	})
-	if !ok {
-		return 0, false
+	lo, hi := 0, len(skeletonTable)
+	for lo < hi {
+		mid := int(uint(lo+hi) >> 1) // the shift halves the sum with no overflow
+		if skeletonTable[mid].from < r {
+			lo = mid + 1
+		} else {
+			hi = mid
+		}
 	}
-	return skeletonTable[i].to, true
+	if lo < len(skeletonTable) && skeletonTable[lo].from == r {
+		return skeletonTable[lo].to, true
+	}
+	return 0, false
 }
 
 // skeleton returns s with each rune of skeletonTable replaced by its ASCII

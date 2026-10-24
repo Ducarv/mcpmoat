@@ -52,7 +52,7 @@ func TestSkeletonTable(t *testing.T) {
 		if unicode.Is(unicode.Han, r) {
 			t.Errorf("source %U is Han", r)
 		}
-		// The same filter as the generator: no entry may be a rune that
+		// The filter that the table follows: no entry may be a rune that
 		// foldMarks already maps to ASCII. The entries whose TR39 target is
 		// a letter and Mn marks (such as U+0268 and U+00F8) must pass it
 		// too: their fold keeps the rune. An Mc mark folds to "" (foldMarks

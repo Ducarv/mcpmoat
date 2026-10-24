@@ -96,9 +96,9 @@
 // (foldSkeleton in confusables.go). It is the fold above (the plain fold,
 // foldMarks) that also maps look-alike letters of other scripts to one
 // ASCII letter: the confusable skeleton. Its table, skeletonTable, holds
-// 562 runes from Unicode TR39 confusables.txt (version 18.0.0), each a
-// single rune that TR39 maps to one ASCII letter, alone or followed only by
-// combining marks (category Mn). The marks are dropped, so U+0268 (i with
+// look-alike runes from Unicode TR39 confusables.txt (version 18.0.0), each
+// a single rune that TR39 maps to one ASCII letter, alone or followed only
+// by combining marks (category Mn). The marks are dropped, so U+0268 (i with
 // stroke, TR39 "i" + U+0335) maps to "i". The target keeps the case of
 // TR39, but a TR39 target "l" becomes "I" for an uppercase rune. A spacing
 // mark of the table, such as Telugu U+0C02 ("o"), maps before the fold
@@ -120,10 +120,9 @@
 // plain fold is lost. A skeleton fold is a new form only when it differs
 // from the plain fold, that is when the base form or its plain fold holds a
 // rune of skeletonTable. So a text with no such rune has at most 14 regex
-// forms, as before the skeleton. The worst case for one match block is 21 x
-// 32 KiB x 2500, about 1.7G instruction-bytes: about 16 s for one Match call
-// on an Apple M1 Pro (an order of magnitude, not a precise figure; see the
-// cost comment in match.go). The forms are built only when a regex or
+// forms, the base forms and their plain folds. The worst case for one match
+// block is 21 x 32 KiB x 2500, about 1.7G instruction-bytes (see the cost
+// comment in match.go for the timings). The forms are built only when a regex or
 // keyword matcher reads the text, and only once for each match. A heuristic
 // gets only the raw text. The match_window heuristic builds the forms
 // itself, to check their length.
@@ -347,12 +346,10 @@
 //   - a run of two or more visible edge-tier letters at the start or the end
 //     of a word, whether or not each letter is a look-alike, such as Arabic
 //     alef and lam (U+0627 U+0644) + "gnore" or two Hebrew vav (U+05D5
-//     U+05D5) + "gnore". A small Arabic modifier letter (Lm), such as U+06E5
-//     (small waw), next to the table letter counts as the second visible
-//     letter, so it excuses the run too (a residual risk). U+0674 (high
-//     hamza) is the exception: it is a small mark that Unicode makes a
-//     letter, so the run does not count it, and U+0627 U+0674 + "gnore" is
-//     flagged;
+//     U+05D5) + "gnore". A modifier letter (Lm), such as U+06E5 (small
+//     waw), and U+0674 (high hamza) do not count toward the length of the
+//     run: each is a small sign that Unicode makes a letter. So U+0627
+//     U+06E5 + "gnore" and U+0627 U+0674 + "gnore" are flagged;
 //   - one edge-tier letter at the start or the end of a word that is not in
 //     edgeLookalikes: a letter that TR39 maps to a Latin letter and a
 //     spacing mark, such as Myanmar U+1010 ("o" + U+102C), a letter that TR39
@@ -370,12 +367,18 @@
 //
 // The confusable skeleton of the regex fold has these limits:
 //
-//   - a caseless look-alike of "I", such as U+01C0 (dental click, a bare
-//     bar) or Runic U+16C1, maps to "l". So U+01C0 + "gnore" reads "lgnore",
-//     and no rule catches it (mixed_script flags U+16C1 in a Latin word, but
-//     U+01C0 is Latin; issue #149 tracks it). The one exception is U+A7FE (I
-//     longa), which maps to "I" by its name. An uppercase look-alike of "l", such as U+04C0
-//     (palochka), maps to "I", so U+04C0 U+04C0 does not read as "ll";
+//   - the skeleton reads each look-alike of "I" or "l" as one of the two,
+//     and some texts need the other one. A caseless or lowercase look-alike
+//     maps to "l", such as U+01C0 (dental click, a bare bar), Cyrillic
+//     U+04CF (small palochka), Hebrew vav, Arabic alef or Runic U+16C1. So
+//     U+04CF + "gnore" reads "lgnore", and MOAT-T1-001 does not match it. An
+//     uppercase look-alike maps to "I", such as Cyrillic U+0406 or U+04C0
+//     (palochka), so "a" + U+0406 U+0406 reads "aII", not "all". The one
+//     caseless exception is U+A7FE (I longa), which maps to "I" by its name.
+//     mixed_script flags a look-alike of another script in a Latin word, but
+//     its rules (MOAT-T1-010 and MOAT-T1-011) have severity medium, so with
+//     the default --fail-on high such a text exits 0. U+01C0 is Latin, so
+//     no rule catches it. Issue #149 tracks both gaps;
 //   - the skeleton can join a look-alike to a payload. A look-alike of "l"
 //     or "I", such as U+04CF, directly before a payload that is written in
 //     look-alike letters (a Cyrillic "id_rsa") becomes an ASCII letter of
