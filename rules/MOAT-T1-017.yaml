@@ -1,7 +1,9 @@
 # MOAT-T1-018 is the same check for the input schema. Change both files.
 # The regex and keyword rules read only the first 32 KiB of a description
-# (MaxMatchInputBytes). The match_window heuristic flags any text that they
-# do not read in full.
+# (MaxMatchInputBytes). The match_window heuristic flags a text when this
+# window cuts one of the forms 1 to 4 and 6 (see matchForms). A cut of the
+# forms 5 and 7 does not count: their OSC text, such as link URLs, makes a
+# benign text long in these forms only.
 # The long should_match case is one paragraph, repeated until the text is
 # longer than MaxMatchInputBytes. The rule format cannot build a text, so keep
 # the case longer than the window when the window changes.

@@ -2,7 +2,9 @@
 # The regex and keyword rules read each schema string in the 32 KiB window, at
 # most 4096 strings and 128 KiB in all, and the raw text when the JSON cannot
 # be read in full. The match_window heuristic flags a schema that they do not
-# read in full.
+# read in full. A cut of the forms 5 and 7 of a string (see matchForms) does
+# not count: their OSC text, such as link URLs, makes a benign string long in
+# these forms only.
 # The long should_match case is one paragraph, repeated until the string is
 # longer than MaxMatchInputBytes. Keep it longer than the window when the
 # window changes.

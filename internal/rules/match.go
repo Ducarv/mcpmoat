@@ -22,25 +22,32 @@ import (
 //
 // The worst case for one match block on one form of the text is about 32 KiB
 // x 2500, about 82M instruction-bytes. That is about 0.74 s on an Apple M1
-// Pro (about 9.1 ns for each instruction-byte: the BenchmarkWorstCaseBlock
+// Pro (about 9.0 ns for each instruction-byte: the BenchmarkWorstCaseBlock
 // time below divided by 14 forms). A text can have more forms (see
 // matchForms and preparedText):
 //
-//   - keywords read up to seven forms: the folds of the seven base forms of
-//     matchForms;
-//   - any_regex and all_regex read up to fourteen forms: the seven base
+//   - keywords read up to maxKeywordForms (7) forms: the folds of the base
+//     forms of matchForms;
+//   - any_regex and all_regex read up to maxRegexForms (14) forms: the base
 //     forms and their folds, when the text is not only ASCII.
 //
 // Each form is at most MaxMatchInputBytes long, so the worst case for one
 // match block is fourteen times the cost above: 14 x 32 KiB x 2500, about
-// 1.1G instruction-bytes. BenchmarkWorstCaseBlock measured about 10.4 s for
+// 1.1G instruction-bytes. BenchmarkWorstCaseBlock measured about 10.3 s for
 // one Match call over the fourteen forms on an Apple M1 Pro (median of five
 // runs, Go 1.27). The package doc says how the rule count multiplies it.
 //
+// The server alone picks the forms, so its text alone can raise the cost of
+// one text about 12 times with the built-in rules: the 13 description rules
+// on 32 KiB took about 50 ms for plain text and about 612 ms with a prefix
+// that gives all fourteen forms (security review, Apple M1 Pro). The scan
+// engine (#35) needs a time or bytes budget (a follow-up issue).
+//
 // A text longer than the window is cut, so padding can push a payload out of
 // the reach of the regex and keyword rules. The match_window heuristic closes
-// this evasion: a high rule with it fires on every text that the matchers do
-// not read in full (see matchWindowCut).
+// this evasion: a high rule with it fires when the window cuts one of the
+// forms 1 to 4 and 6 of matchForms, but not the forms 5 and 7, which keep
+// OSC text such as link URLs (see matchWindowCut).
 //
 // A schema target is many short texts (see matchSchema). An any_regex,
 // all_regex or keywords rule reads one schema in three passes: its strings
@@ -48,9 +55,9 @@ import (
 // the seams of neighbour strings (at most maxSeamBytes, 128 KiB), and, when
 // the JSON cannot be read in full, the raw text once, in the window of one
 // description. So one schema costs about nine times the bound of one
-// description: the seam pass doubles the cost of the string pass. The match_window
-// heuristic fires on a schema whose strings these caps cut, but not when the
-// seam budget is used up. The package doc gives the details.
+// description: the seam pass doubles the cost of the string pass. The
+// match_window heuristic fires on a schema whose strings these caps cut, but
+// not when the seam budget is used up. The package doc gives the details.
 const (
 	// MaxPatternBytes is the largest regex or keyword, in bytes, before
 	// compilation.
@@ -234,11 +241,9 @@ func (m *Matcher) Match(text string) []Hit {
 
 // matchPrepared returns the hits of the matcher in p, as Match does. The
 // forms of p are built at most once, so the matchers of many rules can share
-// one p for the same text. The scan engine (#35) must build one preparedText
-// for each target text and call matchPrepared for every rule with it; today
-// only Match (one preparedText for each call) and the tests call it. A
-// heuristic reads only p.raw, so it does not build the forms. matchPrepared
-// never writes into the forms of p.
+// one p for the same text (see preparedText). A heuristic reads only p.raw,
+// so it does not build the forms. matchPrepared never writes into the forms
+// of p.
 //
 // For the schema target, p.raw is a JSON schema, and matchPrepared reads it
 // with matchSchema. The forms of p are then not built and not shared:

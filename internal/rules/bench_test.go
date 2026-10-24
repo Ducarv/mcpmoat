@@ -217,8 +217,8 @@ func BenchmarkWorstCaseBlock(b *testing.B) {
 	}
 	text := allFormsText + strings.Repeat("a", MaxMatchInputBytes-len(allFormsText))
 	forms := regexForms(text)
-	if len(forms) != 14 {
-		b.Fatalf("len(regexForms(text)) = %d, want 14 (fourteen forms)", len(forms))
+	if len(forms) != maxRegexForms {
+		b.Fatalf("len(regexForms(text)) = %d, want %d", len(forms), maxRegexForms)
 	}
 	// Each form must fill the cap, or the benchmark does not hit the bound.
 	for i, f := range forms {
@@ -256,8 +256,9 @@ func worstSchema(tb testing.TB, n int) string {
 	if fit, cut := schemaFit(got); !complete || cut || fit != n || len(got) != n {
 		tb.Fatalf("worstSchema(%d): %d strings, %d fit, cut %v, complete %v", n, len(got), fit, cut, complete)
 	}
-	if forms := len(regexForms(got[0])); forms != 14 || len(got[0]) != size {
-		tb.Fatalf("worstSchema(%d): string of %d bytes with %d forms, want %d bytes and 14 forms", n, len(got[0]), forms, size)
+	if forms := len(regexForms(got[0])); forms != maxRegexForms || len(got[0]) != size {
+		tb.Fatalf("worstSchema(%d): string of %d bytes with %d forms, want %d bytes and %d forms",
+			n, len(got[0]), forms, size, maxRegexForms)
 	}
 
 	// No string matches, so the seam pass runs until maxSeamBytes stops it.
@@ -275,9 +276,9 @@ func worstSchema(tb testing.TB, n int) string {
 		return nil
 	})
 	wantSeams := min(n-1, maxSeamBytes/(2*min(size, seamSideBytes)+len(seamSep)))
-	if strCalls != n || seamCalls != wantSeams || len(regexForms(firstSeam)) != 14 {
-		tb.Fatalf("worstSchema(%d): %d string calls, %d seam calls, first seam %d forms; want %d, %d, 14",
-			n, strCalls, seamCalls, len(regexForms(firstSeam)), n, wantSeams)
+	if strCalls != n || seamCalls != wantSeams || len(regexForms(firstSeam)) != maxRegexForms {
+		tb.Fatalf("worstSchema(%d): %d string calls, %d seam calls, first seam %d forms; want %d, %d, %d",
+			n, strCalls, seamCalls, len(regexForms(firstSeam)), n, wantSeams, maxRegexForms)
 	}
 	return raw
 }
@@ -303,14 +304,14 @@ func worstSchema(tb testing.TB, n int) string {
 //
 // Measured on 2026-10-24 on an Apple M1 Pro (go1.27.3 darwin/arm64), caps
 // 128 KiB and 4096 strings, fourteen regex forms for each string, with
-// -benchtime=3x, in the same run as BenchmarkWorstCaseBlock (about 10.4 s):
+// -benchtime=3x, in the same run as BenchmarkWorstCaseBlock (about 10.3 s):
 //
 //   - 4096 strings: about 1.3 s for one Match call, about 0.13 times the
 //     description worst case. Each string and seam is short, so few regex
 //     threads are alive at each byte;
-//   - 256 strings: about 35.0 s for one Match call, about 3.4 times the
+//   - 256 strings: about 35.1 s for one Match call, about 3.4 times the
 //     description worst case;
-//   - 4 strings: about 41.6 s for one Match call, about 4.0 times the
+//   - 4 strings: about 43.1 s for one Match call, about 4.2 times the
 //     description worst case. This is the worst shape.
 func BenchmarkSchemaWorstCase(b *testing.B) {
 	m, err := Match{AnyRegex: worstBlock(b)}.CompileFor(TargetSchema)

@@ -411,9 +411,9 @@ func FuzzNormalize(f *testing.F) {
 
 // FuzzRegexForms checks the bounds that the cost comment in match.go relies
 // on: foldMarks never makes a valid text longer, regexForms gives at most
-// fourteen forms (seven base forms and their folds) and keywordForms at most
-// seven, with no duplicates, each at most MaxMatchInputBytes long and valid
-// UTF-8 when the input is.
+// maxRegexForms forms (the base forms and their folds) and keywordForms at
+// most maxKeywordForms, with no duplicates, each at most MaxMatchInputBytes
+// long and valid UTF-8 when the input is.
 func FuzzRegexForms(f *testing.F) {
 	for _, s := range fuzzTexts {
 		f.Add(s)
@@ -438,8 +438,8 @@ func FuzzRegexForms(f *testing.F) {
 			t.Errorf("len(foldMarks(s)) = %d, want at most len(s) = %d", len(folded), len(s))
 		}
 		p := prepareText(s)
-		checkFuzzForms(t, "regexForms", p.regexForms(), 14, valid)
-		checkFuzzForms(t, "keywordForms", p.keywordForms(), 7, valid)
+		checkFuzzForms(t, "regexForms", p.regexForms(), maxRegexForms, valid)
+		checkFuzzForms(t, "keywordForms", p.keywordForms(), maxKeywordForms, valid)
 	})
 }
 

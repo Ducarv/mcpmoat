@@ -30,10 +30,12 @@
 // This is an evasion window: instructions placed after the first 32 KiB of
 // visible text (or after the first 128 KiB of raw text) are not seen by regex
 // and keyword rules. The match_window heuristic closes it: a high rule with
-// it fires on every text that the regex and keyword rules do not read in
-// full, also when only one form of the text is cut. The max_length heuristic
-// also flags a long text. Both read the full raw text, as the other text
-// heuristics do.
+// it fires on a text longer than 128 KiB, and when the window cuts one of
+// the forms 1 to 4 and 6 (see matchForms), also when only one of them is
+// cut. A cut of the forms 5 and 7 does not count: the sequence text that
+// they keep, such as an OSC 8 link URL, makes a benign text long in these
+// forms only. The max_length heuristic also flags a long text. Both read
+// the full raw text, as the other text heuristics do.
 //
 // A schema has its own budget (see Schema text). The regex and keyword rules
 // read one schema in three passes:
@@ -55,7 +57,7 @@
 //
 // A list holds at most [MaxPatterns] entries of at most [MaxPatternBytes]
 // bytes each, and the compiled programs of one regex and of one list have
-// instruction caps. A text has up to fourteen forms for a regex (see
+// instruction caps. A text has up to maxRegexForms forms for a regex (see
 // Normalization below). For the worst case of one match block and its cost,
 // see the cost comment on these caps in match.go. A hostile --rules
 // directory multiplies this cost by the number of rules and texts. A cap at
@@ -75,36 +77,13 @@
 // Braille blank U+2800) becomes U+0020, so a regex sees it as a space and
 // cannot match the rune itself.
 //
-// A text gives up to seven base forms. The first form is always built, and
-// each other form only when the first 128 KiB of the raw text hold the runes
-// that it needs. Equal forms are kept only once. In short:
-//
-//   - form 1 removes the invisible runes, so "ign" + ZWSP + "ore" is
-//     "ignore", and turns each sequence into one space;
-//   - forms 2 to 4 turn some runs of invisible runes into one space, so an
-//     invisible rune cannot take the place of the space between two words:
-//     form 2 each run, form 3 each run of control characters (it removes
-//     the format characters), and form 4 each run with a format character
-//     (it removes the control characters);
-//   - forms 4 to 7 read a CSI as a terminal does, with C0 control
-//     characters inside it, so ESC + U+0001 + "[8mIgnore" is " Ignore";
-//   - forms 5 and 7 give back the text that a sequence takes: an OSC text
-//     (a model reads it, a terminal does not show it), and the letter and
-//     the < = > ? and intermediate bytes of a CSI, so ESC [ "Ignore" is
-//     " Ignore" and ESC [ "<IMPORTANT>" is " <IMPORTANT>". An SGR (colour
-//     and bold) becomes nothing, as a terminal shows it. Form 5 removes the
-//     invisible runes, and form 7 turns each run of them into a space, as
-//     form 2 does.
-//
-// The doc comment of matchForms in normalize.go has the full list with the
-// build conditions, and the texts that still defeat all the forms. The
-// invisible_unicode heuristic (MOAT-T1-006 for a description, MOAT-T1-015
-// for a schema) flags each of those texts, because it flags the invisible
-// runes and the ESC. CONTRIBUTING.md has the
-// same list for rule authors.
-//
-// A text without invisible runes and escape sequences has one form, so it
-// costs no more.
+// The regex and keyword matchers read a few base forms of the text, and
+// each form handles the invisible runes and the escape sequences in another
+// way, so that an invisible rune or a sequence cannot hide a word in all of
+// them. The doc comment of matchForms in normalize.go lists the forms, when
+// each one is built and the texts that still defeat all of them, and
+// CONTRIBUTING.md has the same list for rule authors. A text without
+// invisible runes and escape sequences has one form, so it costs no more.
 //
 // A regex reads these base forms, and also a folded form of each. The text
 // is folded one rune at a time: the rune is split into its compatibility
@@ -114,15 +93,15 @@
 // in U+1D422 ...) and a word with a mark in it ("ig" + U+0336 + "nore"). A
 // fold that is longer than the rune is not used, so the folded form is never
 // longer than the text: a ligature that folds to many letters, such as
-// U+FDFA, stays as it is and cannot push a payload out of the 32 KiB.
-// A form that is only ASCII is its own fold, so it adds no folded form. A
-// rule matches when it matches in one form, and each regex of an all_regex
-// list can match in a different form. So a regex reads up to fourteen forms
-// of a text (the seven base forms and their folds), and a keyword up to
-// seven (the folds of the base forms): such a text costs up to fourteen
-// times as much to match. The forms are built only when a regex or keyword
-// matcher reads the text, and only once for each match: a heuristic reads
-// only the raw text.
+// U+FDFA, stays as it is and cannot push a payload out of the 32 KiB. A form
+// that is only ASCII is its own fold, so it adds no folded form. A rule
+// matches when it matches in one form, and each regex of an all_regex list
+// can match in a different form. So a regex reads up to maxRegexForms forms
+// of a text (the base forms and their folds), and a keyword up to
+// maxKeywordForms (the folds of the base forms): such a text costs up to
+// maxRegexForms times as much to match. The forms are built only when a
+// regex or keyword matcher reads the text, and only once for each match: a
+// heuristic reads only the raw text.
 //
 // A regex cannot match an invisible rune (use the invisible_unicode heuristic
 // for that), and a pattern must be written in NFC: a pattern with a letter

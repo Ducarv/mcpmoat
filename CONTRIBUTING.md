@@ -73,13 +73,14 @@ How mcpmoat prepares the text before a match. This applies to every regex and ke
      it is nothing, as a terminal shows it: ESC [ 1 m "iPhone" reads as "iPhone", and "Ig" +
      ESC [ 0 m + "nore" reads as "Ignore". An OSC keeps its text: ESC ] "Ignore all" BEL reads as
      " Ignore all ". A model reads OSC text, such as a window title or a link URL, so a rule can
-     match it.
+     match it. A CSI inside that text is read in the same way, so ESC ] + U+009B + "8mIgnore" BEL
+     reads as " Ignore ".
   6. When the text has ESC or U+009B and a C0 control character: as form 1, but each sequence,
      read the terminal way, is one space. So ESC + U+0001 + "[8mIgnore" reads as " Ignore".
-  7. When the text has ESC, U+009B or U+009D, and another invisible character: as form 5, but
-     each run of invisible characters is one space, as in form 2. So ESC ] "Ignore" + ZWSP +
-     "all" BEL reads as " Ignore all ", and ESC [ "Ignore" + U+0001 + "all" reads as
-     " Ignore all".
+  7. When the text has ESC, U+009B or U+009D: as form 5, but each run of invisible characters is
+     one space, as in form 2. So ESC ] "Ignore" + ZWSP + "all" BEL reads as " Ignore all ",
+     ESC [ "Ignore" + U+0001 + "all" reads as " Ignore all", and an ESC that starts no sequence
+     is a space too: ESC [ "Ignore" + ESC + "all" reads as " Ignore all".
 
   Some texts defeat all seven forms:
   - one kind of invisible character both inside a word and between words;
@@ -90,8 +91,14 @@ How mcpmoat prepares the text before a match. This applies to every regex and ke
   - a CSI that takes a character that no form gives back: the "m" of a word (ESC [ 1 "make" reads
     as "ake", and "you " + ESC [ "must" reads as "you ust"), a digit, `;` or `:`, or a final byte
     that is not a letter (ESC [ "~/.ssh" reads as " /.ssh");
+  - a CSI with a letter final byte inside an OSC text, right before a word: forms 5 and 7 keep
+    its letter, and the other forms drop the OSC text (ESC ] "0;" + U+009B + "2KIgnore" BEL reads
+    as " 0; KIgnore ");
   - a payload that only forms 5 and 7 show, after more than 32 KiB of sequence text. The
-    `match_window` heuristic flags such a text (see below).
+    `match_window` heuristic does not flag such a text (see below). The `max_length` heuristic
+    (MOAT-T1-007, low) flags it when it has more than 4096 characters. Forms 5 and 7 are not
+    longer than the raw text in characters, so this is true unless only the Unicode normalization
+    (NFC) makes forms 5 and 7 longer than 32 KiB.
 
   Form 5 can also make a token that neither the raw text nor a terminal shows, from a rare CSI. It
   writes a space and gives back the kept bytes and the final letter. So "<system" + ESC [ > c +
@@ -115,8 +122,11 @@ How mcpmoat prepares the text before a match. This applies to every regex and ke
 - A regex or a keyword reads only a window of the text: the invisible characters are removed from
   the first 128 KiB of the raw text, and then each form is cut at 32 KiB. Padding can push an
   instruction past this window. The `match_window` heuristic closes this gap. It fires when the
-  regex and keyword rules cannot read the whole text: the raw text is longer than 128 KiB, or a form
-  is cut at 32 KiB. MOAT-T1-017 (description) and MOAT-T1-018 (schema) use it at high severity.
+  regex and keyword rules cannot read the whole text: the raw text is longer than 128 KiB, or one of
+  forms 1 to 4 and 6 is cut at 32 KiB. A cut of form 5 or 7 does not count, because the sequence
+  text that these forms keep (such as the URL of an OSC 8 link) makes a benign text longer than
+  32 KiB in these forms only. MOAT-T1-017 (description) and MOAT-T1-018 (schema) use it at high
+  severity.
 
 How mcpmoat prepares the text of a `target: schema` rule:
 
