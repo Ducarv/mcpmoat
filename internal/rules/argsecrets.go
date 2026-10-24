@@ -395,7 +395,7 @@ func tokenForName(name, value string) bool {
 // case, or name ends in camelCase "Id" or "ID" after a lower-case letter
 // ("keyId", "clientID"). So "ANDROID" does not count.
 func endsInIDWord(name string) bool {
-	words := strings.FieldsFunc(name, isNameSeparator)
+	words := strings.FieldsFunc(name, isArgNameSeparator)
 	if len(words) == 0 {
 		return false
 	}
@@ -432,7 +432,7 @@ var switchWords = []string{"no", "skip", "ask", "prompt", "disable", "show", "hi
 // list, because "--pwd" is usually the working directory.
 func endsInPasswordWord(name string) bool {
 	lower := strings.ToLower(name)
-	if first := strings.FieldsFunc(lower, isNameSeparator); len(first) > 0 && slices.Contains(switchWords, first[0]) {
+	if first := strings.FieldsFunc(lower, isArgNameSeparator); len(first) > 0 && slices.Contains(switchWords, first[0]) {
 		return false
 	}
 	for _, word := range passwordWords {
@@ -491,7 +491,7 @@ func looksLongRandom(value string) bool {
 	hasDigit := strings.ContainsFunc(value, unicode.IsDigit)
 	// Two or more of "-", "_" and "." mean a name made of words
 	// ("my-prod-secret-store-v2"), not a random token.
-	return hasLetter && hasDigit && countRunes(value, isNameSeparator) < 2 &&
+	return hasLetter && hasDigit && countRunes(value, isArgNameSeparator) < 2 &&
 		shannonEntropy(value) >= minLongEntropy && !isWordLike(value)
 }
 
@@ -563,13 +563,13 @@ func isOpaquePart(part string) bool {
 
 // isWordBreak reports whether r ends a word of a name: a name separator or "/".
 // Only isWordLike uses it. The tests for a random token (looksLongRandom) keep
-// to isNameSeparator, because a base64 secret can hold "/".
+// to isArgNameSeparator, because a base64 secret can hold "/".
 func isWordBreak(r rune) bool {
-	return isNameSeparator(r) || r == '/'
+	return isArgNameSeparator(r) || r == '/'
 }
 
-// isNameSeparator reports whether r separates the words of a name.
-func isNameSeparator(r rune) bool {
+// isArgNameSeparator reports whether r separates the words of a name.
+func isArgNameSeparator(r rune) bool {
 	return r == '-' || r == '_' || r == '.'
 }
 

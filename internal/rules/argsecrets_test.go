@@ -1335,8 +1335,8 @@ func TestIsNameSeparator(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(string(tt.in), func(t *testing.T) {
 			t.Parallel()
-			if got := isNameSeparator(tt.in); got != tt.want {
-				t.Errorf("isNameSeparator(%q) = %v, want %v", tt.in, got, tt.want)
+			if got := isArgNameSeparator(tt.in); got != tt.want {
+				t.Errorf("isArgNameSeparator(%q) = %v, want %v", tt.in, got, tt.want)
 			}
 		})
 	}
