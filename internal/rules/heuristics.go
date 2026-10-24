@@ -170,13 +170,12 @@ const (
 )
 
 // invisibleUnicode flags every rune of raw for which isInvisible is true, and
-// also each rune of ansiControls (ESC, BEL, CAN, SUB, U+009B, U+009C and
-// U+009D). The normalizer keeps those runes, so that it can still find an
-// ANSI escape sequence, but they show as nothing and a terminal runs them. A
-// raw ESC before a letter can make the letter the final byte of a CSI, so
-// "\x1b[Ignore" hides the "I" from the regexes; this heuristic flags the ESC.
-// The only control runes that are not flagged are the white space: tab, LF,
-// VT, FF, CR and NEL.
+// also each rune of ansiControls. The normalizer keeps those runes, so that
+// it can still find an ANSI escape sequence, but they show as nothing and a
+// terminal runs them. A raw ESC before a letter can make the letter the final
+// byte of a CSI, so "\x1b[Ignore" hides the "I" from the regexes; this
+// heuristic flags the ESC. The only control runes that are not flagged are
+// the white space.
 //
 // An emoji can hold a VS15 or VS16 and a ZWJ (see isPictograph), so some of
 // these runes are not flagged:
@@ -202,7 +201,7 @@ func invisibleUnicode(raw string) []Hit {
 		case zeroWidthJoiner:
 			excused = afterEmoji && isPictograph(runeAt(raw, i+utf8.RuneLen(r)))
 		}
-		flagged := isInvisible(r) || strings.ContainsRune(ansiControls, r)
+		flagged := isInvisible(r) || isANSIControl(r)
 		if flagged && !excused && l.keep(i) {
 			l.hits = append(l.hits, Hit{Offset: i, Detail: fmt.Sprintf("U+%04X at offset %d", r, i)})
 		}

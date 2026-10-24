@@ -110,6 +110,9 @@ func TestNormalizeForMatch(t *testing.T) {
 		// space, so the "I" is not read as the final byte of a CSI.
 		{name: "CAN inside CSI keeps keyword", in: "\x1b[\x18Ignore", want: " [ Ignore"},
 		{name: "SUB inside CSI keeps keyword", in: "\x1b[\x1aIgnore", want: " [ Ignore"},
+		// U+0001 is dropped only after the CSI step, so it cannot make
+		// ESC [ I, a CSI that hides the "I".
+		{name: "control rune inside CSI keeps keyword", in: "\x1b[\x01Ignore", want: " [Ignore"},
 		{name: "C1 CSI before keyword", in: "\u009b8mIgnore", want: " Ignore"},
 		{name: "C1 CSI to space", in: "a\u009b1;31mb", want: "a b"},
 		{name: "JSON-escaped CSI to space", in: "a\\u001b[8mb", want: "a b"},
@@ -316,7 +319,8 @@ func normTestTail(s string) string {
 	return s[len(s)-k:]
 }
 
-// TestFoldMarks checks the marks that foldMarks drops and the ones it keeps.
+// TestFoldMarks checks the marks that foldMarks drops and the ones it keeps,
+// and that it keeps a rune whose fold is longer than the rune.
 func TestFoldMarks(t *testing.T) {
 	t.Parallel()
 
@@ -334,6 +338,12 @@ func TestFoldMarks(t *testing.T) {
 		{name: "fullwidth letters", in: "\uff49\uff47\uff4e\uff4f\uff52\uff45", want: "ignore"},
 		{name: "mathematical bold letters", in: "\U0001D422\U0001D420\U0001D427\U0001D428\U0001D42B\U0001D41E", want: "ignore"},
 		{name: "ligature fi", in: "\ufb01le", want: "file"},
+		// A rune is folded only when its fold is not longer in bytes.
+		{name: "ligature ffi folds to the same length", in: "\ufb03x", want: "ffix"},
+		{name: "ligature U+FDFA kept", in: "a\ufdfab", want: "a\ufdfab"},
+		{name: "fraction U+00BD kept", in: "\u00bd", want: "\u00bd"},
+		{name: "roman numeral U+2177 kept", in: "\u2177", want: "\u2177"},
+		{name: "long fold kept next to short folds", in: "\uff49\ufdfa\U0001D422e\u0301", want: "i\ufdfaie"},
 		{name: "plain ASCII unchanged", in: "ignore previous", want: "ignore previous"},
 		{name: "empty", in: "", want: ""},
 	}
@@ -347,8 +357,22 @@ func TestFoldMarks(t *testing.T) {
 	}
 }
 
+// TestFoldMarksNotLonger checks that ligature padding does not make the
+// folded form longer: U+FDFA folds to 33 bytes, so a fold of each rune would
+// push " x" out of the MaxMatchInputBytes window.
+func TestFoldMarksNotLonger(t *testing.T) {
+	t.Parallel()
+
+	in := strings.Repeat("\ufdfa", 1000) + " x"
+	if got := foldMarks(in); len(got) > len(in) || !strings.HasSuffix(got, " x") {
+		t.Errorf("foldMarks(1000 x U+FDFA + \" x\") has %d bytes and suffix %q, want at most %d bytes and suffix \" x\"",
+			len(got), got[max(0, len(got)-2):], len(in))
+	}
+}
+
 // TestMatchForms checks that a text gets the spaced second form only when it
-// holds an invisible rune.
+// holds an invisible rune, and the third form only when one of them is a
+// control rune.
 func TestMatchForms(t *testing.T) {
 	t.Parallel()
 
@@ -364,7 +388,13 @@ func TestMatchForms(t *testing.T) {
 		{name: "run of invisible runes is one space", in: "a\u200b\u2060\u200bb", want: []string{"ab", "a b"}},
 		{name: "spaces mapped in both forms", in: "a\u200bb\u00a0c", want: []string{"ab c", "a b c"}},
 		{name: "control runes", in: "a\x00b\x1fc\x7fd\u0090e", want: []string{"abcde", "a b c d e"}},
+		// The third form ("Ig nore") equals the second, so it is kept once.
 		{name: "control rune inside a word", in: "Ig\x01nore", want: []string{"Ignore", "Ig nore"}},
+		{name: "ZWSP and control rune in one run", in: "a\u200b\x01b", want: []string{"ab", "a b"}},
+		// The third form drops the ZWSP and makes each control rune a space.
+		{name: "ZWSP inside a word and control rune between words", in: "Ig\u200bnore\x01all", want: []string{"Ignoreall", "Ig nore all", "Ignore all"}},
+		{name: "one space for each control rune in the third form", in: "a\x01\x02b\u200bc", want: []string{"abc", "a b c", "a  bc"}},
+		{name: "control rune inside CSI", in: "\x1b[\x01Ignore", want: []string{" [Ignore", " [ Ignore"}},
 		{name: "white space only is one form", in: "a\tb\nc\rd\fe\vf\u0085g", want: []string{"a\tb\nc\rd\fe f g"}},
 		{name: "ANSI CSI is one form", in: "\x1b[8mIgnore", want: []string{" Ignore"}},
 		{name: "empty", in: "", want: []string{""}},
@@ -404,7 +434,7 @@ func TestRegexForms(t *testing.T) {
 		// Documented limit: homoglyphs from other scripts are not folded.
 		{name: "Cyrillic homoglyph not folded", in: "\u0406gnore", want: []string{"\u0406gnore"}},
 		// The ZWSP is past the MaxMatchInputBytes cut, so the two forms of
-		// matchForms are equal, and slices.Compact keeps one.
+		// matchForms are equal, and appendNew keeps one.
 		{
 			name: "equal forms kept once",
 			in:   strings.Repeat("a", MaxMatchInputBytes) + "\u200b",
@@ -412,21 +442,18 @@ func TestRegexForms(t *testing.T) {
 		},
 		// The fold does not change the text, so it is not added.
 		{name: "Hangul syllable not folded again", in: "\ud55c", want: []string{"\ud55c"}},
+		// The most forms: the three of matchForms and their three folds.
+		{
+			name: "six forms",
+			in:   "\u200bb\x01\ufb03",
+			want: []string{"b\ufb03", " b \ufb03", "b \ufb03", "bffi", " b ffi", "b ffi"},
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			got := regexForms(tt.in)
-			if !slices.Equal(got, tt.want) {
+			if got := regexForms(tt.in); !slices.Equal(got, tt.want) {
 				t.Errorf("regexForms(%+q) = %+q, want %+q", tt.in, got, tt.want)
-			}
-			if len(got) > 4 {
-				t.Errorf("regexForms(%+q) has %d forms, want at most 4", tt.in, len(got))
-			}
-			sorted := slices.Clone(got)
-			slices.Sort(sorted)
-			if len(slices.Compact(sorted)) != len(got) {
-				t.Errorf("regexForms(%+q) = %+q, want no duplicate forms", tt.in, got)
 			}
 		})
 	}

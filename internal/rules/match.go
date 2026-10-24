@@ -25,14 +25,16 @@ import (
 // an Apple M1 Pro (about 10 ns for each instruction-byte). That is the cost
 // for one form of the text, and a text can have more forms:
 //
-//   - keywords read up to two forms (see matchForms): two when the text has
-//     invisible runes;
-//   - any_regex and all_regex read up to four forms (see regexForms): the
-//     two of matchForms and their folds, when the text is not only ASCII.
+//   - keywords read up to three forms (see matchForms): two when the text has
+//     invisible runes, and three when one of them is a control rune such as
+//     U+0001;
+//   - any_regex and all_regex read up to six forms (see regexForms): the
+//     three of matchForms and their folds, when the text is not only ASCII.
 //
-// Each form is at most MaxMatchInputBytes long, so the worst case is four
-// times the cost above, about 320M instruction-bytes. That is twice the
-// bound for two forms. The package doc says how the rule count multiplies it.
+// Each form is at most MaxMatchInputBytes long, so the worst case is six
+// times the cost above, about 480M instruction-bytes. That is three times the
+// bound for the two forms of earlier versions. The package doc says how the
+// rule count multiplies it.
 const (
 	// MaxPatternBytes is the largest regex or keyword, in bytes, before
 	// compilation.

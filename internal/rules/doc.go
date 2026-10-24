@@ -52,28 +52,36 @@
 // Braille blank U+2800, and an ESC that does not start an escape sequence)
 // becomes U+0020, so a regex sees it as a space and cannot match the rune
 // itself. An ANSI escape sequence (CSI or OSC), which a terminal runs and
-// does not show, also becomes one space. When the text holds invisible runes,
-// it is also matched in a second form where each run of invisible runes is
-// one space. So an invisible rune cannot split a word (the first form) or the
-// space between two words (the second form).
+// does not show, also becomes one space. The control characters are removed
+// only after this step, so they cannot make an escape sequence: ESC [ U+0001
+// "Ignore" keeps its "I".
 //
-// Each form covers one kind of use at a time. A text that mixes them can
-// defeat a regex: in "Ig" + ZWSP + "nore" + U+0001 + "all" + U+0001 +
-// "previous", the first form joins the words and the second form splits the
-// first word. Also, a raw ESC before a letter can make the letter the final
-// byte of a CSI, so ANSI text before a word can hide its first letter from a
-// regex. The invisible_unicode heuristic still flags such a text: it flags
-// the invisible runes and the ESC.
+// When the text holds invisible runes, it is also matched in a second form
+// where each run of invisible runes is one space. When one of them is a
+// control character, it is also matched in a third form, where the other
+// invisible runes are removed and each control character is one space. So an
+// invisible rune cannot split a word (the first form) or the space between
+// two words (the second form), and "Ig" + ZWSP + "nore" + U+0001 + "all" +
+// U+0001 + "previous" still matches (the third form).
+//
+// A text that uses one kind of invisible rune both inside a word and between
+// words can still defeat a regex. Also, a raw ESC before a letter can make
+// the letter the final byte of a CSI, so ANSI text before a word can hide its
+// first letter from a regex. In a description, the invisible_unicode
+// heuristic flags such a text: it flags the invisible runes and the ESC.
 //
 // A regex reads this normalized text, and also a folded form of it: the text
 // is put in the compatibility form NFKC and loses its combining marks
 // (category M). The pattern is not folded. So a regex such as `ignore` also
 // matches fullwidth and mathematical letters ("ignore" in U+FF49 ... or in
-// U+1D422 ...) and a word with a mark in it ("ig" + U+0336 + "nore"). A text
-// that is only ASCII has no folded form. A rule matches when it matches in
-// one form, and each regex of an all_regex list can match in a different
-// form. So a regex reads up to four forms of a text, and a keyword up to
-// two: such a text costs up to four times as much to match.
+// U+1D422 ...) and a word with a mark in it ("ig" + U+0336 + "nore"). A rune
+// is folded only when its fold is not longer than the rune, so the folded
+// form is never longer than the text: a ligature that folds to many letters,
+// such as U+FDFA, stays as it is and cannot push a payload out of the 32 KiB.
+// A text that is only ASCII has no folded form. A rule matches when it
+// matches in one form, and each regex of an all_regex list can match in a
+// different form. So a regex reads up to six forms of a text, and a keyword
+// up to three: such a text costs up to six times as much to match.
 //
 // A regex cannot match an invisible rune (use the invisible_unicode heuristic
 // for that), and a pattern must be written in NFC: a pattern with a letter
@@ -105,9 +113,8 @@
 // The invisible_unicode heuristic flags the same invisible runes that the
 // normalization removes, so it also flags a control character such as U+0000
 // or DEL. It also flags the runes that the normalization keeps to read an
-// ANSI escape sequence: ESC, BEL, CAN, SUB, U+009B, U+009C and U+009D. So it
-// flags every control character except the white space: tab, LF, VT, FF, CR
-// and NEL.
+// ANSI escape sequence. So it flags every control character except the white
+// space.
 //
 // The base64_blob heuristic checks each run of base64 characters on its own.
 // An invisible rune inside a run, also a control character such as U+0000, is
