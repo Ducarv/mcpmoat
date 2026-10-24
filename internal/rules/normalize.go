@@ -2,6 +2,7 @@ package rules
 
 import (
 	"regexp"
+	"slices"
 	"strings"
 	"unicode"
 	"unicode/utf8"
@@ -12,9 +13,10 @@ import (
 // MaxMatchInputBytes is the largest part of a text, in bytes, that the regex
 // and keyword matchers read: 32 KiB, counted after the invisible runes are
 // dropped and steps 3 and 4 of normalizeForMatch have mapped each ANSI escape
-// sequence and each other white-space or control rune to U+0020. Text after it is not regex-matched or keyword-matched. This keeps
-// the cost of one match small when a server sends a very long text. Real
-// tool descriptions are a few KB long, so the cap does not cut them.
+// sequence and each other white-space or control rune to U+0020. Text after
+// it is not regex-matched or keyword-matched. This keeps the cost of one
+// match small when a server sends a very long text. Real tool descriptions
+// are a few KB long, so the cap does not cut them.
 //
 // The heuristics (max_length, invisible_unicode, base64_blob) see the full raw
 // text, so a very long text is still flagged.
@@ -27,10 +29,11 @@ const MaxMatchInputBytes = 32 << 10
 const maxRawScanBytes = 4 * MaxMatchInputBytes
 
 // isInvisible reports whether r is a rune that shows as nothing but can split
-// a keyword: a format character (Cf), a variation selector, or another
-// default-ignorable code point. The few Cf runes that show as a mark (the
-// prepended concatenation marks, such as the Arabic number sign U+0600) are
-// not invisible.
+// a keyword: a format character (Cf), a variation selector, another
+// default-ignorable code point, or a control rune (Cc) that is not white
+// space and not part of an ANSI escape sequence. The few Cf runes that show
+// as a mark (the prepended concatenation marks, such as the Arabic number
+// sign U+0600) are not invisible.
 //
 // This covers the zero-width characters (ZWSP, ZWNJ, ZWJ, word joiner), LRM
 // and RLM, the bidi embeddings, overrides and isolates, the BOM, the soft
@@ -39,9 +42,25 @@ const maxRawScanBytes = 4 * MaxMatchInputBytes
 // fillers. ZWNJ and ZWJ are also a normal part of Persian and Indic text, so
 // invisible_unicode flags such text too.
 //
-// normalizeForMatch and the invisible_unicode heuristic share this one
-// predicate, so they cannot disagree about which runes are invisible.
+// It also covers the control runes (U+0000 to U+001F and U+007F to U+009F),
+// such as NUL, U+0001 and DEL. So "Ig" + U+0001 + "nore" is "Ignore" for the
+// matchers, as it is for a model. These control runes are not invisible:
+//
+//   - the white space of unicode.IsSpace: tab, LF, VT, FF, CR and NEL
+//     (U+0085). They separate words, and spacesToASCII maps VT and NEL;
+//   - the runes of ansiControls, which change how an ANSI escape sequence is
+//     read. normalizeInvisible drops the invisible runes before ansiToSpace
+//     runs, so if they were invisible, ESC [ 8 m before "Ignore" would leave
+//     "[8mIgnore".
+//
+// normalizeForMatch, the invisible_unicode heuristic and the base64_blob
+// heuristic share this one predicate, so they cannot disagree about which
+// runes are invisible. The invisible_unicode heuristic also flags the runes
+// of ansiControls (see invisibleUnicode).
 func isInvisible(r rune) bool {
+	if unicode.IsControl(r) { // category Cc
+		return !unicode.IsSpace(r) && !strings.ContainsRune(ansiControls, r)
+	}
 	return unicode.In(r,
 		unicode.Cf,
 		unicode.Variation_Selector,
@@ -63,13 +82,54 @@ func isInvisible(r rune) bool {
 // the invisible_unicode heuristic flags it.
 //
 // A text without invisible runes has one form, so it costs no more. A text
-// with them is matched twice, which doubles the cost bound in match.go.
+// with them is matched twice, which doubles the cost bound in match.go. The
+// regex matchers read more forms (see regexForms).
 func matchForms(s string) []string {
 	joined := normalizeForMatch(s)
 	if !strings.ContainsFunc(cutAtRune(s, maxRawScanBytes), isInvisible) {
 		return []string{joined}
 	}
 	return []string{joined, normalizeInvisible(s, ' ')}
+}
+
+// regexForms returns the forms of s that the regex matchers (any_regex and
+// all_regex) read: the forms of matchForms, and then foldMarks of each of
+// them when the fold changes it. A regex matches when it matches in one form.
+// So the regex `ignore` also matches the fullwidth "ignore" (U+FF49 ...),
+// the mathematical bold "ignore" (U+1D422 ...) and "ig" + U+0336 + "nore".
+//
+// Only the text is folded, not the pattern. So a pattern with an accent or a
+// mark matches only in the forms of matchForms, as before.
+//
+// A form that is only ASCII does not change in foldMarks, so it is not
+// folded, and a plain ASCII text costs no more. Equal forms are kept only
+// once: slices.Compact drops the second form of matchForms when it equals the
+// first, and a folded form that is equal to a form in the list is not added.
+// So a text has at most four forms: the two of matchForms and their two
+// folds. This doubles the cost bound in match.go again.
+func regexForms(s string) []string {
+	forms := slices.Compact(matchForms(s))
+	n := len(forms) // fold only the forms of matchForms, not the folds
+	for i := range n {
+		if isASCII(forms[i]) {
+			continue
+		}
+		folded := foldMarks(forms[i])
+		if !slices.Contains(forms, folded) {
+			forms = append(forms, folded)
+		}
+	}
+	return forms
+}
+
+// isASCII reports whether every byte of s is ASCII (less than 0x80).
+func isASCII(s string) bool {
+	for i := 0; i < len(s); i++ {
+		if s[i] >= utf8.RuneSelf {
+			return false
+		}
+	}
+	return true
 }
 
 // normalizeForMatch returns the form of s that the regex and keyword matchers
@@ -134,6 +194,19 @@ func normalizeInvisible(s string, repl rune) string {
 // space in spacesToASCII.
 var ansiSeq = regexp.MustCompile(`(?:\x1b\[|\x{9b}|\\u001[bB]\[)[0-?]*[ -/]*[@-~]|(?:\x1b\]|\x{9d})[^\x07\x1b\x{9c}]{0,256}(?:\x07|\x1b\\|\x{9c})`)
 
+// ansiControls are the control runes that change how an ANSI escape sequence
+// is read. isInvisible keeps them, so ansiToSpace still sees them:
+//
+//   - ESC (U+001B) and the C1 controls CSI (U+009B), ST (U+009C) and OSC
+//     (U+009D) start or end a sequence in ansiSeq;
+//   - BEL (U+0007) ends an OSC in ansiSeq;
+//   - CAN (U+0018) and SUB (U+001A) cancel a sequence in a terminal, and the
+//     terminal shows the text after them. If they were dropped, ESC [ CAN
+//     before "Ignore" would leave ESC [ I, a CSI that hides the "I".
+//
+// spacesToASCII maps the ones that are left after ansiToSpace to U+0020.
+const ansiControls = "\x1b\x07\x18\x1a\u009b\u009c\u009d"
+
 // ansiToSpace replaces each ANSI escape sequence (see ansiSeq) with U+0020.
 // Without this step, ESC [ 8 m before "Ignore" leaves "[8mIgnore", and the
 // word edge before "Ignore" is lost. A sequence is at least 2 bytes long, so
@@ -151,7 +224,11 @@ const re2SpaceRunes = "\t\n\f\r "
 //   - the white space of isKeywordSpace: VT, NEL (U+0085), the Z categories
 //     (NBSP, the em space, U+2028, U+2029 and others) and U+2800, the Braille
 //     blank that looks like a space;
-//   - the other control runes (category Cc, such as U+0000 or U+001F).
+//   - the control runes of ansiControls that are left after ansiToSpace, such
+//     as the ESC of an OSC with no end. The other control runes (category
+//     Cc, such as U+0000 or U+001F) are invisible (see isInvisible), so
+//     normalizeInvisible has already dropped them or replaced them before
+//     this step. The check for Cc here also covers them, as defence in depth.
 //
 // In RE2, \s is only [\t\n\f\r ], so without this step "ignore" + NBSP +
 // "previous" would not match `ignore\s+previous`. The runes in re2SpaceRunes
@@ -170,11 +247,11 @@ func spacesToASCII(s string) string {
 	}, s)
 }
 
-// foldMarks folds s, which comes from normalizeForMatch, for the keyword
-// matcher. It applies the compatibility forms of Unicode (NFKD and NFKC) and
-// removes the combining marks (category M: non-spacing, spacing and
-// enclosing). The keyword matcher applies it to the keyword and to the text,
-// so:
+// foldMarks folds s, which comes from normalizeForMatch, for the keyword and
+// regex matchers. It applies the compatibility forms of Unicode (NFKD and
+// NFKC) and removes the combining marks (category M: non-spacing, spacing
+// and enclosing). The keyword matcher applies it to the keyword and to the
+// text, so:
 //
 //   - a mark cannot hide a keyword: "ig" + U+0336 + "nore" and "previou" +
 //     U+015B (s with acute) still match "ignore previous";
@@ -183,8 +260,9 @@ func spacesToASCII(s string) string {
 //   - accents are folded, so the keyword "caf" + U+00E9 matches "cafe", and in
 //     scripts such as Devanagari the vowel signs are dropped.
 //
-// Regexes do not get it: their patterns are not folded. Homoglyphs from other
-// scripts (Cyrillic U+0430 for Latin "a") are not folded either.
+// The regex matchers apply it only to the text, not to the pattern, and they
+// keep the forms before the fold too (see regexForms). Homoglyphs from other
+// scripts (Cyrillic U+0430 for Latin "a") are not folded.
 //
 // It splits each rune into its compatibility parts (NFKD), drops the marks,
 // and joins the rest again (NFKC). The NFKC step can add a CGJ (see

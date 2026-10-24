@@ -169,7 +169,14 @@ const (
 	keycapMark      = '\u20E3' // visible; "1" + VS16 + U+20E3 is the keycap 1
 )
 
-// invisibleUnicode flags every rune of raw for which isInvisible is true.
+// invisibleUnicode flags every rune of raw for which isInvisible is true, and
+// also each rune of ansiControls (ESC, BEL, CAN, SUB, U+009B, U+009C and
+// U+009D). The normalizer keeps those runes, so that it can still find an
+// ANSI escape sequence, but they show as nothing and a terminal runs them. A
+// raw ESC before a letter can make the letter the final byte of a CSI, so
+// "\x1b[Ignore" hides the "I" from the regexes; this heuristic flags the ESC.
+// The only control runes that are not flagged are the white space: tab, LF,
+// VT, FF, CR and NEL.
 //
 // An emoji can hold a VS15 or VS16 and a ZWJ (see isPictograph), so some of
 // these runes are not flagged:
@@ -195,7 +202,8 @@ func invisibleUnicode(raw string) []Hit {
 		case zeroWidthJoiner:
 			excused = afterEmoji && isPictograph(runeAt(raw, i+utf8.RuneLen(r)))
 		}
-		if isInvisible(r) && !excused && l.keep(i) {
+		flagged := isInvisible(r) || strings.ContainsRune(ansiControls, r)
+		if flagged && !excused && l.keep(i) {
 			l.hits = append(l.hits, Hit{Offset: i, Detail: fmt.Sprintf("U+%04X at offset %d", r, i)})
 		}
 		excusedVS := excused && r != zeroWidthJoiner && isPictograph(prev)

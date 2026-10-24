@@ -167,11 +167,15 @@ func worstBlock(tb testing.TB) []string {
 }
 
 // BenchmarkWorstCaseBlock measures the most costly match block that passes
-// the caps, on MaxMatchInputBytes of 'a'.
+// the caps, on MaxMatchInputBytes of text that has all four regex forms (see
+// regexForms): a ZWSP, so matchForms gives two forms, and the ligature U+FB03,
+// so each form is not ASCII and its fold ("ffi") is a new form. The rest is
+// 'a', so each form is about MaxMatchInputBytes runes long.
 //
 // The block is \pL{0,498}!X twice and \pL{0,248}!X: 1000 + 1000 + 500 =
 // maxTotalInsts instructions. Measured on an Apple M1 Pro (Go 1.27, caps 32
-// KiB and 2500): about 0.8 s for one Match call, about 25 us per input byte.
+// KiB and 2500): about 3.0 s for one Match call over the four forms, about
+// 93 us per input byte. One form (a text of only 'a') costs about 0.8 s.
 // A hostile --rules directory can repeat such a block in every rule, and
 // every tool text is matched against every rule, so this cost is multiplied
 // by the number of rules and the number of texts.
@@ -180,7 +184,11 @@ func BenchmarkWorstCaseBlock(b *testing.B) {
 	if err != nil {
 		b.Fatalf("Compile() error = %v", err)
 	}
-	text := strings.Repeat("a", MaxMatchInputBytes)
+	const head = "\u200b\ufb03"
+	text := head + strings.Repeat("a", MaxMatchInputBytes-len(head))
+	if n := len(regexForms(text)); n != 4 {
+		b.Fatalf("len(regexForms(text)) = %d, want 4", n)
+	}
 	b.SetBytes(int64(len(text)))
 	b.ReportAllocs()
 	for b.Loop() {

@@ -34,9 +34,17 @@ Notes on the regexes in `rules/MOAT-T1-003.yaml`:
 - In a single-quoted YAML text, `''` is one `'`. So `don(?:''|\x{2019})?t` is the regex
   `don(?:'|\x{2019})?t`: "don't", "don" + U+2019 (the curly apostrophe) + "t", or "dont".
 - `\s+` matches any run of white space, so extra spaces, tabs and newlines do not stop a match.
-  Before the match, mcpmoat turns the Unicode white space and control characters that `\s`
-  does not match (no-break spaces, line separators, a vertical tab, U+001F and others) into plain
-  spaces.
+  Before the match, mcpmoat turns the Unicode white space that `\s` does not match (no-break
+  spaces, line separators, a vertical tab and others) into plain spaces.
+- mcpmoat removes invisible characters before the match. These include control characters such as
+  U+0001, U+001F and DEL, but not white space (tab, LF, VT, FF, CR, NEL) and not ESC, BEL, CAN,
+  SUB, U+009B, U+009C or U+009D. So "Ig" + U+0001 + "nore" reads as "Ignore". The
+  `invisible_unicode` heuristic flags these characters.
+- A regex also sees a folded form of the text: fullwidth letters, mathematical letters and
+  combining marks become plain letters. Only the text is folded, not the pattern. So write the
+  pattern in ASCII and do not add fullwidth alternatives: `(?i)ignore` also matches "ignore" in
+  fullwidth letters (U+FF49 and on). Homoglyphs from other scripts, such as Cyrillic U+0456 for
+  Latin "i", are not folded.
 - Go regexes (RE2) have no lookahead. So the tail `user(?:[^\w''\x{2019}]|$)` means "the word
   user, not followed by a letter, a digit, `_` or an apostrophe". It does not match "users",
   "username" or "user's".

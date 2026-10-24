@@ -41,6 +41,25 @@ func TestIsInvisible(t *testing.T) {
 		{name: "newline", r: '\n', want: false},
 		{name: "emoji", r: '\U0001F642', want: false},
 		{name: "combining acute", r: '\u0301', want: false},
+		// Control runes (Cc) are invisible, except white space and the runes
+		// that change how an ANSI escape sequence is read.
+		{name: "NUL", r: '\x00', want: true},
+		{name: "SOH U+0001", r: '\x01', want: true},
+		{name: "US U+001F", r: '\x1f', want: true},
+		{name: "DEL", r: '\x7f', want: true},
+		{name: "C1 DCS U+0090", r: '\u0090', want: true},
+		{name: "tab", r: '\t', want: false},
+		{name: "VT", r: '\v', want: false},
+		{name: "FF", r: '\f', want: false},
+		{name: "CR", r: '\r', want: false},
+		{name: "NEL", r: '\u0085', want: false},
+		{name: "ESC", r: '\x1b', want: false},
+		{name: "BEL", r: '\x07', want: false},
+		{name: "CAN", r: '\x18', want: false},
+		{name: "SUB", r: '\x1a', want: false},
+		{name: "C1 CSI", r: '\u009b', want: false},
+		{name: "C1 ST", r: '\u009c', want: false},
+		{name: "C1 OSC", r: '\u009d', want: false},
 		// Cf, but shows as a mark (prepended concatenation marks).
 		{name: "Arabic number sign", r: '\u0600', want: false},
 		{name: "Arabic end of ayah", r: '\u06dd', want: false},
@@ -80,13 +99,26 @@ func TestNormalizeForMatch(t *testing.T) {
 		{name: "VT and NEL to space", in: "a\vb\u0085c", want: "a b c"},
 		{name: "line and paragraph separators to space", in: "a\u2028b\u2029c", want: "a b c"},
 		{name: "Braille blank to space", in: "a\u2800b", want: "a b"},
-		{name: "control runes to space", in: "a\x00b\x1fc\x7fd\u0090e", want: "a b c d e"},
+		// Control runes are invisible, so they are dropped here. The second
+		// form of matchForms has a space for them (see TestMatchForms).
+		{name: "control runes dropped", in: "a\x00b\x1fc\x7fd\u0090e", want: "abcde"},
+		{name: "control rune inside keyword", in: "Ig\x01nore", want: "Ignore"},
+		{name: "control rune next to white space", in: "a\x01\tb\x7f\nc", want: "a\tb\nc"},
 		{name: "ANSI CSI to space", in: "a\x1b[8mIgnore\x1b[0m b", want: "a Ignore  b"},
+		{name: "ANSI CSI before keyword", in: "\x1b[8mIgnore", want: " Ignore"},
+		// CAN and SUB cancel a sequence: they are kept, and each becomes a
+		// space, so the "I" is not read as the final byte of a CSI.
+		{name: "CAN inside CSI keeps keyword", in: "\x1b[\x18Ignore", want: " [ Ignore"},
+		{name: "SUB inside CSI keeps keyword", in: "\x1b[\x1aIgnore", want: " [ Ignore"},
+		{name: "C1 CSI before keyword", in: "\u009b8mIgnore", want: " Ignore"},
 		{name: "C1 CSI to space", in: "a\u009b1;31mb", want: "a b"},
 		{name: "JSON-escaped CSI to space", in: "a\\u001b[8mb", want: "a b"},
 		{name: "ANSI OSC to space", in: "a\x1b]0;title\x07b", want: "a b"},
+		{name: "ANSI OSC with BEL before keyword", in: "\x1b]0;title\x07Ignore", want: " Ignore"},
+		{name: "C1 OSC with C1 ST", in: "a\u009d0;title\u009cb", want: "a b"},
 		{name: "OSC with no end keeps the text", in: "a\x1b]0;title b", want: "a ]0;title b"},
 		{name: "ASCII white space kept", in: "a\tb\nc\rd\fe", want: "a\tb\nc\rd\fe"},
+		{name: "VT FF and NEL not dropped", in: "a\vb\fc\u0085d", want: "a b\fc d"},
 		{name: "emoji kept", in: "hi \U0001F642", want: "hi \U0001F642"},
 		{name: "only invisible", in: "\u200b\u200c\u200d", want: ""},
 		{name: "empty", in: "", want: ""},
@@ -331,6 +363,10 @@ func TestMatchForms(t *testing.T) {
 		{name: "Hangul filler between words", in: "ignore\u3164previous", want: []string{"ignoreprevious", "ignore previous"}},
 		{name: "run of invisible runes is one space", in: "a\u200b\u2060\u200bb", want: []string{"ab", "a b"}},
 		{name: "spaces mapped in both forms", in: "a\u200bb\u00a0c", want: []string{"ab c", "a b c"}},
+		{name: "control runes", in: "a\x00b\x1fc\x7fd\u0090e", want: []string{"abcde", "a b c d e"}},
+		{name: "control rune inside a word", in: "Ig\x01nore", want: []string{"Ignore", "Ig nore"}},
+		{name: "white space only is one form", in: "a\tb\nc\rd\fe\vf\u0085g", want: []string{"a\tb\nc\rd\fe f g"}},
+		{name: "ANSI CSI is one form", in: "\x1b[8mIgnore", want: []string{" Ignore"}},
 		{name: "empty", in: "", want: []string{""}},
 	}
 	for _, tt := range tests {
@@ -338,6 +374,59 @@ func TestMatchForms(t *testing.T) {
 			t.Parallel()
 			if got := matchForms(tt.in); !slices.Equal(got, tt.want) {
 				t.Errorf("matchForms(%q) = %q, want %q", tt.in, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestRegexForms checks the forms that the regex matchers read: the forms of
+// matchForms, and their folds when a form is not only ASCII.
+func TestRegexForms(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		in   string
+		want []string
+	}{
+		{name: "plain ASCII is one form", in: "Ignore previous", want: []string{"Ignore previous"}},
+		{name: "empty", in: "", want: []string{""}},
+		// The forms of matchForms are ASCII, so they are not folded.
+		{name: "ASCII with control rune", in: "Ig\x01nore", want: []string{"Ignore", "Ig nore"}},
+		{name: "fullwidth letter", in: "\uff29gnore", want: []string{"\uff29gnore", "Ignore"}},
+		{name: "mathematical bold letter", in: "\U0001D408gnore", want: []string{"\U0001D408gnore", "Ignore"}},
+		{name: "overlay mark", in: "Ig\u0336nore", want: []string{"Ig\u0336nore", "Ignore"}},
+		{
+			name: "invisible rune and fullwidth letter",
+			in:   "\uff29g\u200bnore",
+			want: []string{"\uff29gnore", "\uff29g nore", "Ignore", "Ig nore"},
+		},
+		// Documented limit: homoglyphs from other scripts are not folded.
+		{name: "Cyrillic homoglyph not folded", in: "\u0406gnore", want: []string{"\u0406gnore"}},
+		// The ZWSP is past the MaxMatchInputBytes cut, so the two forms of
+		// matchForms are equal, and slices.Compact keeps one.
+		{
+			name: "equal forms kept once",
+			in:   strings.Repeat("a", MaxMatchInputBytes) + "\u200b",
+			want: []string{strings.Repeat("a", MaxMatchInputBytes)},
+		},
+		// The fold does not change the text, so it is not added.
+		{name: "Hangul syllable not folded again", in: "\ud55c", want: []string{"\ud55c"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got := regexForms(tt.in)
+			if !slices.Equal(got, tt.want) {
+				t.Errorf("regexForms(%+q) = %+q, want %+q", tt.in, got, tt.want)
+			}
+			if len(got) > 4 {
+				t.Errorf("regexForms(%+q) has %d forms, want at most 4", tt.in, len(got))
+			}
+			sorted := slices.Clone(got)
+			slices.Sort(sorted)
+			if len(slices.Compact(sorted)) != len(got) {
+				t.Errorf("regexForms(%+q) = %+q, want no duplicate forms", tt.in, got)
 			}
 		})
 	}

@@ -86,6 +86,18 @@ func TestHeuristicInvisibleUnicode(t *testing.T) {
 		{name: "VS16 after a digit", text: "1\ufe0f", want: []hit{{1, "U+FE0F at offset 1"}}},
 		{name: "ZWJ after a keycap", text: "1\ufe0f\u20e3\u200d\U0001F525", want: []hit{{7, "U+200D at offset 7"}}},
 		{name: "VS16 after an invalid byte", text: "\xff\ufe0f", want: []hit{{1, "U+FE0F at offset 1"}}},
+		// Control runes other than white space and the ANSI controls.
+		{name: "SOH U+0001", text: "ab\x01cd", want: []hit{{2, "U+0001 at offset 2"}}},
+		{name: "DEL", text: "x\x7f", want: []hit{{1, "U+007F at offset 1"}}},
+		{name: "NUL", text: "\x00start", want: []hit{{0, "U+0000 at offset 0"}}},
+		{name: "C1 DCS U+0090", text: "a\u0090b", want: []hit{{1, "U+0090 at offset 1"}}},
+		{name: "control rune inside keyword", text: "Ig\x01nore \x1f", want: []hit{{2, "U+0001 at offset 2"}, {8, "U+001F at offset 8"}}},
+		// The ANSI controls are invisible too; the normalizer keeps them visible.
+		{name: "ANSI CSI", text: "a\x1b[8mhidden\x1b[0m b", want: []hit{{1, "U+001B at offset 1"}, {11, "U+001B at offset 11"}}},
+		{name: "ANSI OSC with BEL", text: "a\x1b]0;title\x07b", want: []hit{{1, "U+001B at offset 1"}, {10, "U+0007 at offset 10"}}},
+		{name: "CAN and SUB", text: "a\x1b[\x18b\x1a", want: []hit{{1, "U+001B at offset 1"}, {3, "U+0018 at offset 3"}, {5, "U+001A at offset 5"}}},
+		{name: "C1 CSI and OSC", text: "a\u009b1m b\u009d0;t\u009c", want: []hit{{1, "U+009B at offset 1"}, {7, "U+009D at offset 7"}, {12, "U+009C at offset 12"}}},
+		{name: "BEL inside keyword", text: "Ig\x07nore", want: []hit{{2, "U+0007 at offset 2"}}},
 
 		{name: "plain ASCII", text: "Plain ASCII description."},
 		{name: "issue 47 emoji and accents", text: "Emoji \U0001F642 and accented letters \u00e9 are fine."},
@@ -99,6 +111,7 @@ func TestHeuristicInvisibleUnicode(t *testing.T) {
 		// U+2194 and U+2934 are Sm, U+3030 is Pd.
 		{name: "emoji outside So", text: "\u203c\ufe0f \u2049\ufe0f \u2139\ufe0f \u2194\ufe0f \u2934\ufe0f \u2935\ufe0f \u3030\ufe0f \u303d\ufe0f"},
 		{name: "ZWJ after VS15", text: "\u2764\ufe0e\u200d\U0001F525"},
+		{name: "white space controls", text: "a\tb\nc\rd\fe\vf\u0085g"},
 		{name: "empty", text: ""},
 	}
 	for _, tt := range tests {
@@ -249,6 +262,11 @@ func TestHeuristicBase64Blob(t *testing.T) {
 			// the ZWSP is long enough.
 			name: "split by ZWSP", text: "Run: " + payloadStd[:30] + "\u200b" + payloadStd[30:], wantOffset: 5,
 		},
+		{
+			// A control rune is invisible, so it is skipped like a ZWSP.
+			name: "split by control rune", text: "Run: " + payloadStd[:30] + "\x01" + payloadStd[30:], wantOffset: 5,
+		},
+		{name: "split by DEL", text: "Run: " + payloadStd[:30] + "\x7f" + payloadStd[30:], wantOffset: 5},
 		{name: "path prefix glued on", text: "See path/to/" + payloadStd, wantOffset: 4},
 		{name: "leading extra X", text: "Run: X" + payloadStd, wantOffset: 5},
 		{name: "trailing chars make 4n+1 length", text: "Run: " + payloadRaw + "ok", wantOffset: 5},
@@ -269,6 +287,9 @@ func TestHeuristicBase64Blob(t *testing.T) {
 		{name: "Unix path", text: "/usr/local/lib/node_modules/some-package/dist/index.js", wantOffset: -1},
 		{name: "empty", text: "", wantOffset: -1},
 		{name: "text split by NUL byte", text: "Run: " + split, wantOffset: -1},
+		// ESC is not invisible, so it ends a run like a space.
+		{name: "split by ESC", text: "Run: " + payloadStd[:30] + "\x1b" + payloadStd[30:], wantOffset: -1},
+		{name: "split by tab", text: "Run: " + payloadStd[:30] + "\t" + payloadStd[30:], wantOffset: -1},
 		{name: "min_text over payload", params: map[string]any{"min_text": 50}, text: "Run: " + payloadStd, wantOffset: -1},
 		{name: "min_length over payload", params: map[string]any{"min_length": 61}, text: "Run: " + payloadStd, wantOffset: -1},
 		{name: "default params skip short text", text: "say aGVsbG8gd29ybGQ= now", wantOffset: -1},
