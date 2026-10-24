@@ -18,7 +18,7 @@ import (
 
 // Limits of the HTTP client. The size caps count wire bytes. The limits on
 // the shape of the decoded JSON (depth, values, string length) are in
-// jsonshape.go: maxJSONDepth, maxJSONValues and maxJSONStringBytes.
+// jsonshape.go: MaxJSONDepth, MaxJSONValues and maxJSONStringBytes.
 const (
 	// defaultMaxResponseBytes is the size cap for one HTTP response body, in
 	// bytes (8 MiB). newHTTPClient uses it when MaxBody is not positive.

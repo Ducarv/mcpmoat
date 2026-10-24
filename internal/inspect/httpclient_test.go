@@ -3404,13 +3404,13 @@ type hcServed struct {
 func TestShapeBodyEndToEnd(t *testing.T) {
 	t.Parallel()
 
-	// overLimit has one value more than maxJSONValues, atLimit has exactly
-	// maxJSONValues. Both are about 300 KB, far below the 8 MiB body cap, so
+	// overLimit has one value more than MaxJSONValues, atLimit has exactly
+	// MaxJSONValues. Both are about 300 KB, far below the 8 MiB body cap, so
 	// only the shape check can refuse them.
-	overLimit := hcRPCList(maxJSONValues - hcEnvelopeValues + 1)
-	atLimit := hcRPCList(maxJSONValues - hcEnvelopeValues)
-	deepOver := hcRPCDeepID(maxJSONValues - hcDeepIDEnvelopeValues + 1)
-	deepAt := hcRPCDeepID(maxJSONValues - hcDeepIDEnvelopeValues)
+	overLimit := hcRPCList(MaxJSONValues - hcEnvelopeValues + 1)
+	atLimit := hcRPCList(MaxJSONValues - hcEnvelopeValues)
+	deepOver := hcRPCDeepID(MaxJSONValues - hcDeepIDEnvelopeValues + 1)
+	deepAt := hcRPCDeepID(MaxJSONValues - hcDeepIDEnvelopeValues)
 
 	served := map[string]hcServed{
 		"/json-over":         {status: 200, ct: "application/json", body: overLimit},
@@ -3613,7 +3613,7 @@ func TestShapeBodyWrap(t *testing.T) {
 	t.Parallel()
 
 	const origin = "http://example.com"
-	overLimit := hcRPCList(maxJSONValues - hcEnvelopeValues + 1)
+	overLimit := hcRPCList(MaxJSONValues - hcEnvelopeValues + 1)
 
 	tests := []struct {
 		name    string

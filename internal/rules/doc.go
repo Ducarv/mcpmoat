@@ -98,6 +98,19 @@
 // package turns the line into a server and runs the native config check on
 // it. A hit from a config heuristic has the offset -1.
 //
+// # Schema text
+//
+// The text of a tool schema (InputSchema or OutputSchema) is the value of
+// every "description" and "title" string, at any depth, in document order.
+// The keys match in any case. The rules do not model JSON Schema keywords.
+// JSON escapes are decoded first, before any normalization or fold, so an
+// invisible rune written as \u200b cannot hide as literal text. The read is
+// bounded by the depth and value caps of the inspect package, so a schema
+// that inspect accepts is read in full.
+//
+// The shadowing check (MOAT-T3-001) scans this text, together with the tool
+// description, the tool title and the annotations title.
+//
 // # The ignore file
 //
 // The file .mcpmoat-ignore ([IgnoreFileName]) in the working directory lists

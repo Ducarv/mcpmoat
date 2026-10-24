@@ -8,21 +8,21 @@ import (
 	"sync/atomic"
 )
 
-// maxJSONDepth is the deepest nesting of objects and arrays that one JSON
+// MaxJSONDepth is the deepest nesting of objects and arrays that one JSON
 // message from a server can have. The JSON-RPC envelope uses about 5 levels
 // and real tool schemas use fewer than 25, so 64 leaves a wide margin. The
 // SDK itself refuses only more than 1000 levels, and that check bounds the
 // stack, not the memory.
-const maxJSONDepth = 64
+const MaxJSONDepth = 64
 
-// maxJSONValues is the most JSON values (objects, arrays, strings, object
+// MaxJSONValues is the most JSON values (objects, arrays, strings, object
 // keys, numbers, true, false and null) that one JSON message from a server
 // can have. A large real server with about 100 tools sends about 10,000 to
 // 20,000 values in one tools/list page. The smallest value, an empty object,
 // needs about 60 bytes in memory after decoding, so 100,000 values are about
 // 6 to 10 MiB of decoded data: well below 64 MiB for one message, even in the
 // worst case.
-const maxJSONValues = 100_000
+const MaxJSONValues = 100_000
 
 // maxJSONStringBytes is the longest string (or number or literal) that one
 // JSON message from a server can have, in raw bytes as sent. A string decodes
@@ -55,11 +55,11 @@ type jsonLimits struct {
 }
 
 // defaultJSONLimits returns the limits that the inspector uses:
-// maxJSONDepth, maxJSONValues and maxJSONStringBytes.
+// MaxJSONDepth, MaxJSONValues and maxJSONStringBytes.
 func defaultJSONLimits() jsonLimits {
 	return jsonLimits{
-		depth:       maxJSONDepth,
-		values:      maxJSONValues,
+		depth:       MaxJSONDepth,
+		values:      MaxJSONValues,
 		stringBytes: maxJSONStringBytes,
 	}
 }

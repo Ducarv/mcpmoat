@@ -355,7 +355,7 @@ func (s *rsStatusServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 func TestRemoteShapeErrorStatus(t *testing.T) {
 	t.Parallel()
 
-	deepOver := hcRPCDeepID(maxJSONValues - hcDeepIDEnvelopeValues + 1)
+	deepOver := hcRPCDeepID(MaxJSONValues - hcDeepIDEnvelopeValues + 1)
 	tests := []struct {
 		name       string
 		status     int
