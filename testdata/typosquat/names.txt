@@ -23,8 +23,9 @@
 #
 # An ok line for an accepted gap is a known false negative, not a bug. Do not
 # "fix" it by adding it to a hit group. If the rule gets a fix for the gap,
-# the fix must flip those lines to hit. The rule is closeDistance in
-# internal/rules/typosquat.go.
+# the fix must flip those lines to hit. In the same way, the hit line in the
+# accepted-false-positive group is a known false positive: a fix must flip it
+# to ok. The rule is closeDistance in internal/rules/typosquat.go.
 
 # --- ok: real npm packages ---
 ok npm mcp-server-gcp

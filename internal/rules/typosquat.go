@@ -320,8 +320,8 @@ func (t *Typosquat) scopeSquat(c typoCandidate) (string, bool) {
 //     longer: "ana-mcp-server" against "exa-mcp-server" still counts as
 //     close.
 //   - Real names that differ by 2 edits in a tail of 5 runes or more, such as
-//     "github" and "gitlab", also count as close. That matters only if both
-//     are on the popular list.
+//     "mcp-server-github" and "mcp-server-gitlab", also count as close. That
+//     matters only if both are on the popular list.
 func closeDistance(a, b string) (int, bool) {
 	la, lb := utf8.RuneCountInString(a), utf8.RuneCountInString(b)
 	short := min(la, lb)
