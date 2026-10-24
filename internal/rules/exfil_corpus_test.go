@@ -18,6 +18,9 @@ type exfilCase struct {
 	text  string // the description text, escapes already decoded
 }
 
+// exfilID is the rule that the exfil corpus measures.
+const exfilID = "MOAT-T1-005"
+
 // matches reports whether the rule is expected to match the text of the case.
 // hit and fp match today. ok and miss do not.
 func (c exfilCase) matches() bool { return c.label == "hit" || c.label == "fp" }
@@ -86,17 +89,15 @@ func parseExfilCorpus(r io.Reader) ([]exfilCase, error) {
 	return cases, nil
 }
 
-// clipExfil cuts s to 120 bytes so a failure message stays short.
+// clipExfil cuts s to at most 120 bytes so a failure message stays short.
+// It drops a rune that the cut splits.
 func clipExfil(s string) string {
 	const maxLen = 120
 	if len(s) > maxLen {
-		return s[:maxLen]
+		return strings.ToValidUTF8(s[:maxLen], "")
 	}
 	return s
 }
-
-// exfilID is the rule that the exfil corpus measures.
-const exfilID = "MOAT-T1-005"
 
 // exfilRule returns the built-in rule exfilID or stops the test.
 func exfilRule(t *testing.T) *Rule {
@@ -121,11 +122,16 @@ func TestExfilPrefixesAgree(t *testing.T) {
 	if len(res) < 2 {
 		t.Fatalf("%s has %d any_regex entries, want at least 2", exfilID, len(res))
 	}
-	// "<?" is the optional angle bracket that starts the address part.
-	url, _, okURL := strings.Cut(res[0], "<?")
-	email, _, okEmail := strings.Cut(res[1], "<?")
+	// "<?" is the optional angle bracket that starts the address part. It must
+	// not occur earlier in the regex. [0] is the URL and phone form, [1] the
+	// email form.
+	url, urlAddr, okURL := strings.Cut(res[0], "<?")
+	email, emailAddr, okEmail := strings.Cut(res[1], "<?")
 	if !okURL || !okEmail {
 		t.Fatalf("%s any_regex[0] or [1] has no \"<?\" before the address", exfilID)
+	}
+	if !strings.HasPrefix(urlAddr, "(?:https?://") || !strings.HasPrefix(emailAddr, `[\w.+%-]`) {
+		t.Fatalf("%s any_regex[0] must be the URL form and [1] the email form, each with its first \"<?\" before the address", exfilID)
 	}
 	if url != email {
 		t.Errorf("%s any_regex[0] and [1] differ before the address:\n[0] %s\n[1] %s", exfilID, url, email)
