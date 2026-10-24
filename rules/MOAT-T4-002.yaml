@@ -1,11 +1,11 @@
 id: MOAT-T4-002
-title: Plaintext secret in env or headers
+title: Plaintext secret in config
 severity: high
 target: config
 match:
   heuristic: plaintext_secret
-risk: A secret is written in clear text in the client config, so any program or person that can read the file, a backup or a shared dotfiles repo gets it.
-remediation: "Move the secret out of the config file: use a variable reference such as ${GITHUB_TOKEN} and set the value in your environment or a secret manager. Rotate the exposed secret."
+risk: A secret is written in clear text in the client config, in the command arguments or in a URL. Anyone who can read the file, a backup or a shared dotfiles repo gets it. Command arguments also show in process listings, and URLs also show in logs.
+remediation: "Move the secret out of the config: use an environment variable reference such as ${GITHUB_TOKEN} or a secret manager, and set the value outside the file. For a URL, send the secret in a header or an env reference instead of a query token or a path segment. Rotate the exposed secret."
 references:
   - https://owasp.org/www-project-mcp-top-10/
   - https://cwe.mitre.org/data/definitions/798.html
@@ -18,6 +18,24 @@ should_match:
     note: Credential-like key name with a fake value of 19 characters.
   - text: 'X-Api-Key: FAKE0000EXAMPLE0000fakeLongValueabcd1234WXYZ'
     note: Header form of a credential-like name.
+  - text: docker run -i --rm -e GITHUB_PERSONAL_ACCESS_TOKEN=ghp_EXAMPLEexampleEXAMPLEexample00000000 image
+    note: Env flag in the command args. The name is credential-like and the value has a token prefix. The ghp_ prefix plus 36 fake characters.
+  - text: npx some-server --api-key Zq8Lm3Vx0Rt5Ws2Hy7Nb4Kd1
+    note: Secret flag with its value in the next arg. The value is 24 random fake characters with no token prefix.
+  - text: npx some-server --token=Zq8Lm3Vx0Rt5Ws2Hy7Nb4Kd1
+    note: Secret flag with the value after "=".
+  - text: npx mcp-remote https://example.com/sse --header X-Api-Key:Zq8Lm3Vx0Rt5Ws2Hy7Nb4Kd1
+    note: Header flag. The value is a "Name:value" header, checked like a header entry. A text case is split at white space, so it has no space after the colon.
+  - text: npx some-server --password hunter2hunter2
+    note: A name that ends in "password" takes any value of 8 bytes or more, not only a random one.
+  - text: npx some-server sk-EXAMPLE0Zq8Lm3Vx0Rt5Ws2Hy7Nb4
+    note: Bare arg with a token prefix. It needs no flag name. Synthetic value, the sk- prefix plus 28 fake characters. The body must look random, so a repeated pattern such as the ghp_EXAMPLEexample cases above does not match here.
+  - text: https://example.com/sse?api_key=Zq8Lm3Vx0Rt5Ws2Hy7Nb4Kd1
+    note: URL with a token in a credential-like query key.
+  - text: https://example.com/mcp/Zq8Lm3Vx0Rt5Ws2Hy7Nb4Kd1/sse
+    note: URL with a long random fake token as a path segment.
+  - text: https://user:pw@example.com/sse
+    note: URL with a password in the user info.
 should_not_match:
   - text: 'GITHUB_TOKEN=${GITHUB_TOKEN}'
     note: Variable reference, the safe form. The value is set outside the config.
@@ -29,3 +47,33 @@ should_not_match:
   - DEBUG=true
   - text: 'Accept: application/json'
     note: Header with no credential-like name and a short value.
+  - text: docker run -e GITHUB_TOKEN image
+    note: Env flag with a name only. Docker reads the value from the caller's environment, so no value is in the config.
+  - text: 'docker run -e GITHUB_TOKEN=${GITHUB_TOKEN} image'
+    note: Env flag with a variable reference, the safe form.
+  - text: 'npx some-server --token ${GITHUB_TOKEN}'
+    note: Secret flag with a variable reference, the safe form.
+  - text: npx some-server --api-key $API_KEY
+    note: Secret flag with a shell variable, the safe form.
+  - text: npx mcp-remote https://example.com/sse --header X-Api-Key:${API_KEY}
+    note: Header flag with a variable reference, the safe form.
+  - text: docker login --password-stdin registry.example.com
+    note: The name does not end in a password word. The flag takes no value, and the next arg is a registry host.
+  - text: npx some-server --secret projects/123456789/secrets/githubtoken/versions/1
+    note: A Secret Manager resource path under a credential-like name. It is made of words, not a random token.
+  - text: npx some-server --config eyJkZWJ1ZyI6ZmFsc2V9
+    note: A base64 JSON config. It starts with eyJ like a JWT, but it has no dots.
+  - text: npx some-server --secret-name ProdDbCredentialsV2
+    note: A PascalCase secret name, made of words and short words. It is a name, not a random token.
+  - text: psql --no-password mydatabase1
+    note: A name that starts with "no" is a switch, so the next arg is a database name, not a password.
+  - text: npx some-server --max-tokens 4096
+    note: The flag name has "token" in it but it is a count. The value is a number.
+  - text: npx some-server --tokenizer cl100k_base
+    note: The flag name has "token" in it but it names a tokenizer. The value is a short setting, not a random token.
+  - text: https://example.com/mcp?page=2
+    note: URL with a plain query setting.
+  - text: https://example.com/mcp/v1/sse
+    note: URL with readable path segments.
+  - text: https://example.com/mcp/123e4567-e89b-12d3-a456-426614174000/sse
+    note: URL with a UUID path segment. A UUID is an ID, not a secret.

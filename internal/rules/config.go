@@ -70,8 +70,12 @@ const shellOrWindowsVar = `(\$[A-Za-z_][A-Za-z0-9_]*|%[A-Za-z_][A-Za-z0-9_]*%)`
 // and the check would report it.
 //
 // The findings come in a fixed order: MOAT-T4-001, then MOAT-T4-002 (env keys,
-// then header keys, each sorted), then MOAT-T4-003, then MOAT-T4-004. A finding
-// never holds a secret value or a URL (see Finding).
+// then header keys, each sorted, then the args finding, then the URL finding),
+// then MOAT-T4-003, then MOAT-T4-004. MOAT-T4-002 also looks at the command
+// args of a stdio server and at the URL of a remote server (see
+// checkArgSecrets). MOAT-T4-003 covers a registry package and a git, tarball
+// or URL spec (see nonRegistrySpecUnpinned). A finding never holds a secret
+// value, an arg or a URL (see Finding).
 func CheckConfig(s discover.Server) []Finding {
 	var findings []Finding
 	findings = append(findings, checkInsecureURL(s)...)
@@ -98,7 +102,7 @@ func checkInsecureURL(s discover.Server) []Finding {
 	if !s.Transport.IsRemote() {
 		return nil
 	}
-	raw := strings.TrimFunc(tabsAndNewlines.Replace(s.URL.Reveal()), func(r rune) bool { return r <= ' ' || r == 0x7f })
+	raw := cleanClientURL(s.URL.Reveal())
 	resolved := varRef.ReplaceAllStringFunc(raw, refDefault)
 	u, err := url.Parse(resolved)
 	switch {
@@ -120,6 +124,15 @@ func checkInsecureURL(s discover.Server) []Finding {
 // tabsAndNewlines removes every tab and newline, as WHATWG URL parsers do.
 var tabsAndNewlines = strings.NewReplacer("\t", "", "\n", "", "\r", "")
 
+// cleanClientURL reads a URL the way clients do before they parse it: it
+// removes every tab and newline and trims the control characters and spaces at
+// both ends. The URL checks (T4-001 and T4-002) share this clean-up step. After
+// it, they read references differently: T4-001 uses refDefault (only ":-"),
+// T4-002 uses expandRefs (more forms, nested).
+func cleanClientURL(raw string) string {
+	return strings.TrimFunc(tabsAndNewlines.Replace(raw), func(r rune) bool { return r <= ' ' || r == 0x7f })
+}
+
 // refDefault returns the default of a reference "${NAME:-default}", or "0"
 // for a reference with no default. "0" is a valid host and port, and it is
 // not loopback.
@@ -132,7 +145,9 @@ func refDefault(ref string) string {
 }
 
 // checkPlaintextSecrets reports MOAT-T4-002 for every env and header entry
-// that holds a secret in clear text. It never copies a value into a finding.
+// that holds a secret in clear text, then for a secret in the args or in the
+// URL (see checkArgSecrets). The order is env, headers, args, URL. It never
+// copies a value, an arg or a URL into a finding.
 func checkPlaintextSecrets(s discover.Server) []Finding {
 	var findings []Finding
 	for _, key := range s.Env.Keys() {
@@ -146,10 +161,11 @@ func checkPlaintextSecrets(s discover.Server) []Finding {
 			findings = append(findings, secretFinding(s.Name, FieldHeaders, key))
 		}
 	}
-	return findings
+	return append(findings, checkArgSecrets(s)...)
 }
 
-// secretFinding builds the MOAT-T4-002 finding for one key.
+// secretFinding builds the MOAT-T4-002 finding. key is the env or header key,
+// or "" for a finding with Field args or url.
 func secretFinding(server, field, key string) Finding {
 	return Finding{
 		RuleID:  RulePlaintextSecret,
@@ -202,6 +218,10 @@ func stripAuthScheme(value string) string {
 //     and a non-secret word under a credential-like name
 //     ("AUTH_STRATEGY=client_credentials") is flagged.
 //  7. A long, random, token-shaped value is a secret, whatever its key.
+//
+// Known limit: a URL value is checked for user info only (step 4). A token in
+// its query or path is not found here, but it is found in the args and in the
+// URL of a remote server (see urlHasSecret).
 func looksLikePlaintextSecret(key, value string) bool {
 	if value == "" || wholeVar.MatchString(value) {
 		return false
@@ -336,14 +356,26 @@ func shannonEntropy(s string) float64 {
 }
 
 // checkUnpinnedPackage reports MOAT-T4-003: a stdio server whose package
-// runner fetches a package with no fixed version.
+// runner fetches a package with no fixed version. It gives one finding at most.
+//
+// A registry spec ("pkg", "pkg@latest") is read by packageAt, and its finding
+// names the package in Related when the args redaction policy allows it. A git,
+// tarball, URL or GitHub shorthand spec is not a registry spec, so packageAt
+// refuses it. nonRegistrySpecUnpinned reads those, and their finding keeps
+// Related empty: the spec can hold a credential, such as a token in a URL.
 func checkUnpinnedPackage(s discover.Server) []Finding {
 	if s.Transport != discover.TransportStdio {
 		return nil
 	}
 	args := s.Args.Values()
 	spec, at, ok := packageAt(s.Command, args)
-	if !ok || !spec.Unpinned() {
+	if !ok {
+		if nonRegistrySpecUnpinned(s.Command, args) {
+			return []Finding{unpinnedFinding(s.Name, "")}
+		}
+		return nil
+	}
+	if !spec.Unpinned() {
 		return nil
 	}
 	// Related names the package only when the redaction policy for args shows
@@ -353,13 +385,19 @@ func checkUnpinnedPackage(s discover.Server) []Finding {
 	if discover.RedactArgs(args)[at] == args[at] {
 		related = spec.Name
 	}
-	return []Finding{{
+	return []Finding{unpinnedFinding(s.Name, related)}
+}
+
+// unpinnedFinding builds the MOAT-T4-003 finding. related is empty for a git,
+// tarball or URL spec.
+func unpinnedFinding(server, related string) Finding {
+	return Finding{
 		RuleID:  RuleUnpinnedPackage,
-		Server:  s.Name,
+		Server:  server,
 		Field:   FieldArgs,
 		Related: related,
 		Message: unpinnedPackageMessage,
-	}}
+	}
 }
 
 // checkAutoInstall reports MOAT-T4-004: a stdio server that turns on the yes

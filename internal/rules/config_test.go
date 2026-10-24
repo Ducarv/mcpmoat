@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 
@@ -17,6 +18,8 @@ const (
 	testGHToken = "ghp_" + "mcpmoatCanaryAB12cdEF34ghIJ56klMN78"
 	// 32 distinct characters: Shannon entropy of 5 bits per byte.
 	testRandom32 = "aB3dE5fG7hJ9kL2mN4pQ6rS8tU0vW1xZ"
+	// A full 40 digit commit hash.
+	testSHA = "0123456789abcdef0123456789abcdef01234567"
 )
 
 // wantFinding is the part of a Finding that the tests compare. Message is a fixed
@@ -82,6 +85,12 @@ func TestCheckConfig(t *testing.T) {
 	unpinned := func(name string) []wantFinding {
 		return []wantFinding{{RuleID: RuleUnpinnedPackage, Field: FieldArgs, Related: name}}
 	}
+	// MOAT-T4-002 in the args or in the URL: Key is always empty.
+	secretArgs := []wantFinding{{RuleID: RulePlaintextSecret, Field: FieldArgs}}
+	secretURL := []wantFinding{{RuleID: RulePlaintextSecret, Field: FieldURL}}
+	// A git, tarball or URL spec: MOAT-T4-003 with an empty Related, because the
+	// spec can hold a credential.
+	unpinnedSpec := unpinned("")
 
 	// autoInstall is the MOAT-T4-004 finding. A -y server also gets it.
 	autoInstall := []wantFinding{{RuleID: RuleAutoInstall, Field: FieldArgs}}
@@ -92,9 +101,29 @@ func TestCheckConfig(t *testing.T) {
 	disabled := remoteServer(discover.TransportHTTP, "http://mcp.example.com/sse")
 	disabled.State = discover.StateDisabled
 
-	remoteWithArgs := remoteServer(discover.TransportHTTP, "https://mcp.example.com/mcp")
-	remoteWithArgs.Command = "npx"
-	remoteWithArgs.Args = discover.NewArgs([]string{"-y", "@scope/server@latest"})
+	// remoteWithCommand builds a remote server that also has a command and args.
+	remoteWithCommand := func(command string, args ...string) discover.Server {
+		s := remoteServer(discover.TransportHTTP, "https://mcp.example.com/mcp")
+		s.Command = command
+		s.Args = discover.NewArgs(args)
+		return s
+	}
+	// A remote server with git-spec args and secret args: both checks are for
+	// stdio servers only, so it gives no finding.
+	remoteWithSpecArgs := remoteWithCommand("npx", "github:user/repo", "--api-key", testRandom32)
+
+	// Remote servers with args of one kind each: the args checks are for stdio
+	// servers only, so these give no finding either.
+	remoteWithSecretArgs := remoteWithCommand("npx", "--api-key", testRandom32)
+	remoteWithGitHubArgs := remoteWithCommand("npx", "github:user/repo")
+	remoteWithUVXArgs := remoteWithCommand("uvx", "--from", "git+https://github.com/u/r", "tool")
+
+	// A stdio server with a secret URL field: the URL field is read only for
+	// remote servers, so it gives no finding.
+	stdioWithSecretURL := stdioServer("node", "server.js")
+	stdioWithSecretURL.URL = discover.NewURL("https://mcp.example.com/sse?token=" + testRandom32)
+
+	remoteWithArgs := remoteWithCommand("npx", "-y", "@scope/server@latest")
 
 	stdioWithURL := stdioServer("node", "server.js")
 	stdioWithURL.URL = discover.NewURL("http://mcp.example.com/sse")
@@ -230,14 +259,19 @@ func TestCheckConfig(t *testing.T) {
 		{"docker tag", stdioServer("docker", "run", "-i", "image:1.2.3"), nil},
 		// A flag the tables do not know takes a value: the scan picks it as the
 		// package. The charset check or the redaction policy must stop it.
-		{"unknown flag value is a token", stdioServer("npx", "--token", "ghp_SECRETSECRET", "pkg"), nil},
+		// "--token" is a secret flag and "ghp_SECRETSECRET" has a token prefix and
+		// 16 bytes, so MOAT-T4-002 fires on the args. T4-003 stays silent: the
+		// charset check refuses the value as a package.
+		{"unknown flag value is a token", stdioServer("npx", "--token", "ghp_SECRETSECRET", "pkg"), secretArgs},
 		// A token-like scope or name is still a package: an attacker can publish
 		// "@xoxo/server-filesystem". The finding fires. RedactArgs masks such an
 		// arg (a part has a token prefix), so Related stays empty.
 		{"scope with xox prefix", stdioServer("npx", "-y", "@xoxo/server-filesystem"), unpinnedAutoInstall("")},
 		{"scope with eyj prefix", stdioServer("npx", "-y", "@eyjay/server-github"), unpinnedAutoInstall("")},
+		// The token is also a literal secret under "--token", so T4-002 comes
+		// first. The row still tests that T4-003 keeps Related empty.
 		{"lower-case token value after unknown flag, masked by RedactArgs",
-			stdioServer("npx", "--token", "ghp_secretsecret0123", "pkg"), unpinned("")},
+			stdioServer("npx", "--token", "ghp_secretsecret0123", "pkg"), slices.Concat(secretArgs, unpinned(""))},
 		{"unknown flag value that looks like a package, masked by RedactArgs",
 			stdioServer("npx", "--auth-key", "abcdef123456", "pkg"), unpinned("")},
 		{"known value flag: the scan skips its value", stdioServer("npx", "--otp", "abcdef123456", "pkg"), unpinned("pkg")},
@@ -255,6 +289,81 @@ func TestCheckConfig(t *testing.T) {
 		{"package name shown by RedactArgs", stdioServer("uvx", "some-server@latest"), unpinned("some-server")},
 		{"remote server with args", remoteWithArgs, nil},
 		{"unknown runner", stdioServer("node", "server.js"), nil},
+
+		// MOAT-T4-002 args (stdio servers only; Key is empty)
+		{"docker -e NAME=token", stdioServer("docker", "run", "-i", "-e", "GITHUB_TOKEN="+testGHToken, "image:1.2.3"), secretArgs},
+		{"docker -eNAME=token", stdioServer("docker", "run", "-i", "-eGITHUB_TOKEN="+testGHToken, "image:1.2.3"), secretArgs},
+		{"docker --env=NAME=token", stdioServer("docker", "run", "-i", "--env=GITHUB_TOKEN="+testGHToken, "image:1.2.3"), secretArgs},
+		{"docker -e NAME=${VAR}", stdioServer("docker", "run", "-i", "-e", "GITHUB_TOKEN=${GITHUB_TOKEN}", "image:1.2.3"), nil},
+		{"docker -e NAME only", stdioServer("docker", "run", "-i", "-e", "GITHUB_TOKEN", "image:1.2.3"), nil},
+		{"docker -e neutral NAME with a short value", stdioServer("docker", "run", "-i", "-e", "LOG_LEVEL=debug", "image:1.2.3"), nil},
+		{"--api-key random value", stdioServer("node", "server.js", "--api-key", testRandom32), secretArgs},
+		{"--api-key=random value", stdioServer("node", "server.js", "--api-key="+testRandom32), secretArgs},
+		{"--api-key ${VAR}", stdioServer("node", "server.js", "--api-key", "${API_KEY}"), nil},
+		{"--api-key=${env:VAR}", stdioServer("node", "server.js", "--api-key=${env:API_KEY}"), nil},
+		{"--api-key $VAR", stdioServer("node", "server.js", "--api-key", "$API_KEY"), nil},
+		{"--api-key reference with a literal default", stdioServer("node", "server.js", "--api-key=${API_KEY:-"+testRandom32+"}"), secretArgs},
+		// Precision: a plain 12 byte word is not token-like.
+		{"--api-key plain word", stdioServer("node", "server.js", "--api-key", "changeme123"), nil},
+		{"--otp 12 bytes is not token-like", stdioServer("node", "server.js", "--otp", "abcdef123456"), nil},
+		{"--token with a token prefix of 8 bytes", stdioServer("node", "server.js", "--token", "ghp_abcd"), secretArgs},
+		{"--key-file path", stdioServer("node", "server.js", "--key-file", "/home/u/"+testRandom32+".pem"), nil},
+		{"--api-key followed by a flag", stdioServer("node", "server.js", "--api-key", "--verbose"), nil},
+		{"bare token arg", stdioServer("node", "server.js", testGHToken), secretArgs},
+		{"two secret args give one finding", stdioServer("node", "server.js", "--api-key", testRandom32, "--token="+testGHToken), secretArgs},
+		{"URL arg with a query token", stdioServer("node", "server.js", "https://mcp.example.com/sse?token="+testRandom32), secretArgs},
+		{"URL arg with a password", stdioServer("node", "server.js", "--url=https://user:hunter2@mcp.example.com/sse"), secretArgs},
+		{"URL arg without a secret", stdioServer("node", "server.js", "https://mcp.example.com/sse?page=2"), nil},
+		{"remote server with secret args gives none", remoteWithSecretArgs, nil},
+		{"args secret comes after the env secret", withEnv(stdioServer("node", "server.js", "--api-key", testRandom32), "GITHUB_TOKEN", testGHToken),
+			slices.Concat(secretEnv("GITHUB_TOKEN"), secretArgs)},
+
+		// MOAT-T4-002 url (remote servers only; Key is empty)
+		{"URL query token", remoteServer(discover.TransportHTTP, "https://mcp.example.com/sse?token="+testRandom32), secretURL},
+		{"URL query api_key token prefix", remoteServer(discover.TransportSSE, "https://mcp.example.com/sse?api_key="+testGHToken), secretURL},
+		{"URL password", remoteServer(discover.TransportHTTP, "https://user:hunter2@mcp.example.com/mcp"), secretURL},
+		{"URL token as user name", remoteServer(discover.TransportHTTP, "https://"+testGHToken+"@mcp.example.com/mcp"), secretURL},
+		{"URL random path segment", remoteServer(discover.TransportHTTP, "https://mcp.example.com/"+testRandom32+"/mcp"), secretURL},
+		{"URL query token reference", remoteServer(discover.TransportHTTP, "https://mcp.example.com/sse?token=${TOKEN}"), nil},
+		{"URL query token $VAR reference", remoteServer(discover.TransportHTTP, "https://mcp.example.com/sse?token=$TOKEN"), nil},
+		{"URL password reference", remoteServer(discover.TransportHTTP, "https://user:${PW}@mcp.example.com/mcp"), nil},
+		{"URL query without a secret", remoteServer(discover.TransportHTTP, "https://mcp.example.com/sse?page=2&mode=fast"), nil},
+		{"URL UUID path segment", remoteServer(discover.TransportHTTP, "https://mcp.example.com/12345678-1234-1234-1234-123456789abc/mcp"), nil},
+		{"URL plain user name", remoteServer(discover.TransportHTTP, "https://git@mcp.example.com/mcp"), nil},
+		{"http URL with a query token gives both", remoteServer(discover.TransportHTTP, "http://mcp.example.com/sse?token="+testRandom32), slices.Concat(insecure, secretURL)},
+		{"URL secret and header secret: headers first", withHeader(remoteServer(discover.TransportHTTP, "https://mcp.example.com/sse?token="+testRandom32), "X-Token", testGHToken),
+			slices.Concat(secretHeader("X-Token"), secretURL)},
+		{"stdio server ignores a secret URL field", stdioWithSecretURL, nil},
+
+		// MOAT-T4-003 git, tarball and URL specs (stdio only; Related is empty)
+		{"npx github: spec", stdioServer("npx", "github:user/repo"), unpinnedSpec},
+		{"npx -y github: spec also gives T4-004", stdioServer("npx", "-y", "github:user/repo"), slices.Concat(unpinnedSpec, autoInstall)},
+		{"npx github: spec pinned to a full commit", stdioServer("npx", "github:user/repo#"+testSHA), nil},
+		{"npx github: spec pinned to an upper-case commit", stdioServer("npx", "github:user/repo#"+strings.ToUpper(testSHA)), nil},
+		{"npx github: spec with a branch", stdioServer("npx", "github:user/repo#main"), unpinnedSpec},
+		{"npx github: spec with a short commit", stdioServer("npx", "github:user/repo#"+testSHA[:7]), unpinnedSpec},
+		{"npx github: spec with a 39 digit commit", stdioServer("npx", "github:user/repo#"+testSHA[:39]), unpinnedSpec},
+		{"npx github: spec with a 41 digit commit", stdioServer("npx", "github:user/repo#"+testSHA+"a"), unpinnedSpec},
+		{"npx github: spec with a non-hex 40 char commit", stdioServer("npx", "github:user/repo#"+strings.Repeat("g", 40)), unpinnedSpec},
+		{"npx user/repo shorthand", stdioServer("npx", "user/repo"), unpinnedSpec},
+		{"npx user/repo shorthand pinned", stdioServer("npx", "user/repo#"+testSHA), nil},
+		{"npx git+https spec", stdioServer("npx", "git+https://github.com/u/r.git"), unpinnedSpec},
+		{"npx git+https spec pinned", stdioServer("npx", "git+https://github.com/u/r.git#"+testSHA), nil},
+		{"npx tarball URL", stdioServer("npx", "https://example.com/p.tgz"), unpinnedSpec},
+		{"npx tarball URL with a hash fragment is never pinned", stdioServer("npx", "https://example.com/p.tgz#"+testSHA), unpinnedSpec},
+		{"bunx github: spec", stdioServer("bunx", "github:user/repo"), unpinnedSpec},
+		{"bunx github: spec pinned", stdioServer("bunx", "github:user/repo#"+testSHA), nil},
+		{"uvx --from git+https", stdioServer("uvx", "--from", "git+https://github.com/u/r", "tool"), unpinnedSpec},
+		{"uvx --from git+https pinned", stdioServer("uvx", "--from", "git+https://github.com/u/r@"+testSHA, "tool"), nil},
+		{"uvx --from git+https with a tag", stdioServer("uvx", "--from", "git+https://github.com/u/r@v1.0.0", "tool"), unpinnedSpec},
+		{"uvx --from git+https with a short commit", stdioServer("uvx", "--from", "git+https://github.com/u/r@"+testSHA[:7], "tool"), unpinnedSpec},
+		{"uvx --from=git+https", stdioServer("uvx", "--from=git+https://github.com/u/r", "tool"), unpinnedSpec},
+		{"uvx --from wheel URL", stdioServer("uvx", "--from", "https://example.com/p-1.0-py3-none-any.whl", "tool"), unpinnedSpec},
+		{"pipx run --spec git+https", stdioServer("pipx", "run", "--spec", "git+https://github.com/u/r", "tool"), unpinnedSpec},
+		{"pipx run --spec git+https pinned", stdioServer("pipx", "run", "--spec", "git+https://github.com/u/r@"+testSHA, "tool"), nil},
+		{"remote server with a github: spec gives none", remoteWithGitHubArgs, nil},
+		{"remote server with git+https uvx args gives none", remoteWithUVXArgs, nil},
+		{"remote server with git spec and secret args gives none", remoteWithSpecArgs, nil},
 
 		// Benign.
 		{"benign local server with a neutral env", withEnv(stdioServer("node", "server.js"), "LOG_LEVEL", "info"), nil},
@@ -290,6 +399,60 @@ func TestCheckConfigOrder(t *testing.T) {
 			{RuleID: RulePlaintextSecret, Field: FieldEnv, Key: "B_TOKEN"},
 			{RuleID: RulePlaintextSecret, Field: FieldHeaders, Key: "Authorization"},
 			{RuleID: RulePlaintextSecret, Field: FieldHeaders, Key: "X-Zed-Token"},
+		}
+		if got := wantsOf(t, CheckConfig(s)); !reflect.DeepEqual(got, want) {
+			t.Errorf("CheckConfig() = %+v, want %+v", got, want)
+		}
+	})
+
+	// A remote server cannot have args or T4-003/T4-004 findings, and a stdio
+	// server cannot have T4-001 or a URL finding, so the full order needs two
+	// servers. Together they cover every rule in the CheckConfig doc order.
+	t.Run("remote: T4-001, then T4-002 env, headers, url", func(t *testing.T) {
+		t.Parallel()
+		s := remoteServer(discover.TransportHTTP, "http://user:hunter2@mcp.example.com/sse?token="+testRandom32)
+		s.Env = discover.SecretMap{
+			"B_TOKEN": discover.NewSecret(testGHToken),
+			"A_TOKEN": discover.NewSecret(testGHToken),
+		}
+		s.Headers = discover.SecretMap{
+			"X-Zed-Token":   discover.NewSecret(testGHToken),
+			"Authorization": discover.NewSecret("Bearer " + testRandom32),
+		}
+		// Args are ignored on a remote server, even with a git spec and a secret.
+		s.Command = "npx"
+		s.Args = discover.NewArgs([]string{"-y", "github:user/repo", "--api-key", testRandom32})
+		want := []wantFinding{
+			{RuleID: RuleInsecureURL, Field: FieldURL},
+			{RuleID: RulePlaintextSecret, Field: FieldEnv, Key: "A_TOKEN"},
+			{RuleID: RulePlaintextSecret, Field: FieldEnv, Key: "B_TOKEN"},
+			{RuleID: RulePlaintextSecret, Field: FieldHeaders, Key: "Authorization"},
+			{RuleID: RulePlaintextSecret, Field: FieldHeaders, Key: "X-Zed-Token"},
+			{RuleID: RulePlaintextSecret, Field: FieldURL},
+		}
+		if got := wantsOf(t, CheckConfig(s)); !reflect.DeepEqual(got, want) {
+			t.Errorf("CheckConfig() = %+v, want %+v", got, want)
+		}
+	})
+
+	t.Run("stdio: T4-002 env, headers, args, then T4-003, then T4-004", func(t *testing.T) {
+		t.Parallel()
+		// The spec is a git spec, so T4-003 keeps Related empty. The server
+		// arg after it holds the args secret.
+		s := stdioServer("npx", "-y", "github:user/repo", "--api-key", testRandom32)
+		s.URL = discover.NewURL("http://mcp.example.com/sse?token=" + testRandom32) // ignored: not remote
+		s.Env = discover.SecretMap{
+			"B_TOKEN": discover.NewSecret(testGHToken),
+			"A_TOKEN": discover.NewSecret(testGHToken),
+		}
+		s.Headers = discover.SecretMap{"Authorization": discover.NewSecret("Bearer " + testRandom32)}
+		want := []wantFinding{
+			{RuleID: RulePlaintextSecret, Field: FieldEnv, Key: "A_TOKEN"},
+			{RuleID: RulePlaintextSecret, Field: FieldEnv, Key: "B_TOKEN"},
+			{RuleID: RulePlaintextSecret, Field: FieldHeaders, Key: "Authorization"},
+			{RuleID: RulePlaintextSecret, Field: FieldArgs},
+			{RuleID: RuleUnpinnedPackage, Field: FieldArgs},
+			{RuleID: RuleAutoInstall, Field: FieldArgs},
 		}
 		if got := wantsOf(t, CheckConfig(s)); !reflect.DeepEqual(got, want) {
 			t.Errorf("CheckConfig() = %+v, want %+v", got, want)
@@ -348,7 +511,22 @@ func TestCheckConfigNoLeak(t *testing.T) {
 	const yesEnvCanary = "trueFAKEcanary0000"
 	autoInstallEnv := withEnv(stdioServer("npx", "@scope/server@1.2.3"), "npm_config_yes", yesEnvCanary)
 
-	secrets := append(discovertest.Canaries(), testGHToken, testRandom32, host, "abcdef123456", lowerToken, yesEnvCanary)
+	// Fake secrets that pass the token test, so the args and URL checks fire.
+	// The Canary* values are readable words and some stay below the entropy rule.
+	const (
+		argsToken  = "xK9mQ2vL7pR4tW8zB3nY6cH1jD5fG0sA" //nolint:gosec // G101: synthetic test token
+		queryToken = "Zq8Lw3Rt6Yx1Vn5Mc9Hb2Kd7Pf4Sg0J"  //nolint:gosec // G101: synthetic test token
+		specHost   = "host.example"
+	)
+	argsSecret := stdioServer("node", "server.js", "--api-key", argsToken)
+	querySecret := remoteServer(discover.TransportHTTP, "https://"+host+"/sse?token="+queryToken)
+	// The userinfo password of a tarball URL is a literal secret. T4-003 must
+	// not name the spec, because the spec holds the password and the host.
+	npxTarball := stdioServer("npx", "https://user:"+discovertest.CanaryArgs+"@"+specHost+"/x.tgz")
+	uvxGit := stdioServer("uvx", "--from", "git+https://user:"+discovertest.CanaryArgs+"@"+specHost+"/u/r", "tool")
+
+	secrets := append(discovertest.Canaries(), testGHToken, testRandom32, host, "abcdef123456", lowerToken, yesEnvCanary,
+		argsToken, queryToken, specHost)
 
 	tests := []struct {
 		name   string
@@ -360,31 +538,55 @@ func TestCheckConfigNoLeak(t *testing.T) {
 			{RuleID: RulePlaintextSecret, Field: FieldEnv, Key: "GITHUB_TOKEN"},
 			{RuleID: RulePlaintextSecret, Field: FieldHeaders, Key: "Authorization"},
 			{RuleID: RulePlaintextSecret, Field: FieldHeaders, Key: "X-Token"},
+			// The URL holds a password and a query token.
+			{RuleID: RulePlaintextSecret, Field: FieldURL},
 		}},
 		{"stdio", stdio, []wantFinding{
 			{RuleID: RulePlaintextSecret, Field: FieldEnv, Key: "API_KEY"},
 			{RuleID: RuleUnpinnedPackage, Field: FieldArgs, Related: "@scope/server"},
 			{RuleID: RuleAutoInstall, Field: FieldArgs},
 		}},
+		// "--token" with a "ghp_" value is a literal secret, so T4-002 fires too.
 		{"auto install with a secret-like flag value", autoInstallMasked, []wantFinding{
+			{RuleID: RulePlaintextSecret, Field: FieldArgs},
 			{RuleID: RuleUnpinnedPackage, Field: FieldArgs},
 			{RuleID: RuleAutoInstall, Field: FieldArgs},
 		}},
 		{"auto install by env value", autoInstallEnv, []wantFinding{
 			{RuleID: RuleAutoInstall, Field: FieldEnv, Key: "npm_config_yes"},
 		}},
-		{"misparsed token", misparsed, nil},
+		{"misparsed token", misparsed, []wantFinding{
+			{RuleID: RulePlaintextSecret, Field: FieldArgs},
+		}},
 		{"secret-like package name", maskedName, []wantFinding{
 			{RuleID: RuleUnpinnedPackage, Field: FieldArgs},
 		}},
 		{"lower-case token taken as the package", lowerTokenServer, []wantFinding{
+			{RuleID: RulePlaintextSecret, Field: FieldArgs},
 			{RuleID: RuleUnpinnedPackage, Field: FieldArgs},
 		}},
+		// "--otp" is a known value flag, so T4-003 names "pkg". The value is a
+		// "ghp_" token of 20 bytes under a secret flag name, so T4-002 fires.
 		{"lower-case token after a known value flag", lowerTokenKnown, []wantFinding{
+			{RuleID: RulePlaintextSecret, Field: FieldArgs},
 			{RuleID: RuleUnpinnedPackage, Field: FieldArgs, Related: "pkg"},
 		}},
 		{"known value flag with a secret value", knownFlag, []wantFinding{
 			{RuleID: RuleUnpinnedPackage, Field: FieldArgs, Related: "pkg"},
+		}},
+		{"secret in the args", argsSecret, []wantFinding{
+			{RuleID: RulePlaintextSecret, Field: FieldArgs},
+		}},
+		{"secret in the URL query", querySecret, []wantFinding{
+			{RuleID: RulePlaintextSecret, Field: FieldURL},
+		}},
+		{"npx tarball URL with a password", npxTarball, []wantFinding{
+			{RuleID: RulePlaintextSecret, Field: FieldArgs},
+			{RuleID: RuleUnpinnedPackage, Field: FieldArgs},
+		}},
+		{"uvx --from git URL with a password", uvxGit, []wantFinding{
+			{RuleID: RulePlaintextSecret, Field: FieldArgs},
+			{RuleID: RuleUnpinnedPackage, Field: FieldArgs},
 		}},
 	}
 	for _, tt := range tests {
@@ -570,20 +772,26 @@ func TestCheckAutoInstall(t *testing.T) {
 	}
 }
 
-// assertFindingNoLeak fails the test when f, in any common output form,
-// holds one of secrets.
-func assertFindingNoLeak(t *testing.T, f Finding, secrets ...string) {
+// findingOutputs renders f in every common output form, keyed by the form.
+func findingOutputs(t testing.TB, f Finding) map[string]string {
 	t.Helper()
 	js, err := json.Marshal(f)
 	if err != nil {
 		t.Fatalf("json.Marshal(%s) error = %v", f.RuleID, err)
 	}
-	outputs := map[string]string{
+	return map[string]string{
+		"%v":   fmt.Sprintf("%v", f),
 		"%+v":  fmt.Sprintf("%+v", f),
 		"%#v":  fmt.Sprintf("%#v", f),
 		"json": string(js),
 	}
-	for form, out := range outputs {
+}
+
+// assertFindingNoLeak fails the test when f, in any common output form,
+// holds one of secrets.
+func assertFindingNoLeak(t *testing.T, f Finding, secrets ...string) {
+	t.Helper()
+	for form, out := range findingOutputs(t, f) {
 		discovertest.AssertNoLeak(t, f.Server+"/"+f.RuleID+" "+form, out, secrets...)
 	}
 }

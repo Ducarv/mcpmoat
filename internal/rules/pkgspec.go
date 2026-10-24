@@ -140,6 +140,73 @@ func packageAt(command string, args []string) (PackageSpec, int, bool) {
 	return spec, at, true
 }
 
+// rawSpecAt returns the runner, the raw spec argument that the runner would
+// fetch, and the index of that argument in args. It finds the spec as
+// ExtractPackage does (same unwrapCmd, scanArgs and flag tables), but it does
+// not parse the spec or check it as a package name. So it also returns the
+// specs that ExtractPackage refuses on purpose: git and GitHub specs, URLs and
+// "file:" paths. The caller classifies them.
+//
+// What spec holds, by runner:
+//   - npx, bunx: the value of -p/--package, else the first argument that is
+//     not a flag.
+//   - uvx: the value of --from, else the first argument that is not a flag.
+//   - pipx: the same, for "pipx run" and --spec.
+//   - docker and unknown commands: ok is false. A docker image is not a
+//     non-registry spec.
+//
+// ok is false when the parse is doubtful (second override flag, missing value,
+// stop flag, unknown runner) and for a uvx or pipx ".py" script path. A spec
+// that starts with "git+" or holds "://" (see isNonRegistryURLSpec) is a
+// non-registry URL spec, not a script, so the ".py" test does not apply to it
+// (a repository can be named "discord.py"). It is also false when spec is
+// empty, longer than maxSpecLen, or holds white space or a control character.
+// rawSpecAt does not validate more than that.
+//
+// The spec is untrusted config text and can hold credentials, for example
+// "git+https://user:token@host/repo". The caller must never copy it into a
+// Finding, an error or a log line.
+func rawSpecAt(command string, args []string) (runner Runner, spec string, at int, ok bool) {
+	command, runArgs, skip := unwrapCmd(command, args)
+	runner = runnerOf(command)
+	flags, scanFrom, ok := runnerFlags(runner, runArgs)
+	if !ok {
+		return "", "", 0, false
+	}
+
+	spec, specAt, found := scanArgs(runArgs[scanFrom:], flags)
+	if !found || !cleanSpec(spec) {
+		return "", "", 0, false
+	}
+	if (runner == RunnerUVX || runner == RunnerPipx) && strings.HasSuffix(spec, ".py") && !isNonRegistryURLSpec(spec) {
+		return "", "", 0, false // a script, not a package
+	}
+	return runner, spec, skip + scanFrom + specAt, true
+}
+
+// runnerFlags returns the flag table of runner r and the index in args where
+// the scan with that table starts: after the "run" subcommand for pipx (global
+// flags such as "--verbose" may come before it), else 0. ok is false for
+// docker, an unknown runner, and pipx without "run".
+func runnerFlags(r Runner, args []string) (flags flagTable, from int, ok bool) {
+	switch r {
+	case RunnerNPX:
+		return npmFlags, 0, true
+	case RunnerBunx:
+		return bunxFlags, 0, true
+	case RunnerUVX:
+		return uvxFlags, 0, true
+	case RunnerPipx:
+		sub, at, found := scanArgs(args, flagTable{})
+		if !found || sub != "run" {
+			return flagTable{}, 0, false
+		}
+		return pipxFlags, at + 1, true
+	default:
+		return flagTable{}, 0, false
+	}
+}
+
 // parseRunnerArgs does the parse for packageAt. It does not run validName,
 // so only packageAt may call it.
 func parseRunnerArgs(command string, args []string) (PackageSpec, int, bool) {
@@ -151,26 +218,20 @@ func parseRunnerArgs(command string, args []string) (PackageSpec, int, bool) {
 // parseUnwrapped is parseRunnerArgs for a command that is not a cmd /c
 // wrapper.
 func parseUnwrapped(command string, args []string) (PackageSpec, int, bool) {
-	switch r := runnerOf(command); r {
-	case RunnerNPX:
-		return extractNPM(r, npmFlags, args)
-	case RunnerBunx:
-		return extractNPM(r, bunxFlags, args)
-	case RunnerUVX:
-		return extractPython(r, uvxFlags, args)
-	case RunnerPipx:
-		// Global flags such as "--verbose" may come before "run".
-		sub, at, ok := scanArgs(args, flagTable{})
-		if !ok || sub != "run" {
-			return PackageSpec{}, 0, false
-		}
-		spec, specAt, ok := extractPython(r, pipxFlags, args[at+1:])
-		return spec, at + 1 + specAt, ok
-	case RunnerDocker:
+	r := runnerOf(command)
+	if r == RunnerDocker {
 		return extractDocker(args)
-	default:
+	}
+	flags, from, ok := runnerFlags(r, args)
+	if !ok {
 		return PackageSpec{}, 0, false
 	}
+	extract := extractPython
+	if r.isNPM() {
+		extract = extractNPM
+	}
+	spec, at, ok := extract(r, flags, args[from:])
+	return spec, from + at, ok
 }
 
 // cmdWrapped reports whether command and args are "cmd [/s /d /q] /c
@@ -251,13 +312,10 @@ func validPyPIName(name string) bool {
 	if name == "" || len(name) > maxPackageNameLen {
 		return false
 	}
-	isAlnum := func(r rune) bool { return isLowerAlnum(r) || (r >= 'A' && r <= 'Z') }
-	if first, last := rune(name[0]), rune(name[len(name)-1]); !isAlnum(first) || !isAlnum(last) {
+	if first, last := rune(name[0]), rune(name[len(name)-1]); !isASCIIAlnum(first) || !isASCIIAlnum(last) {
 		return false
 	}
-	return !strings.ContainsFunc(name, func(r rune) bool {
-		return !isAlnum(r) && !strings.ContainsRune("._-", r)
-	})
+	return !strings.ContainsFunc(name, func(r rune) bool { return !isNameRune(r) })
 }
 
 // validImageName reports whether name is a docker image path: components
@@ -321,6 +379,17 @@ func isDigitsAndDots(s string) bool {
 // isLowerAlnum reports whether r is an ASCII lower-case letter or digit.
 func isLowerAlnum(r rune) bool {
 	return (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9')
+}
+
+// isASCIIAlnum reports whether r is an ASCII letter or digit.
+func isASCIIAlnum(r rune) bool {
+	return isLowerAlnum(r) || (r >= 'A' && r <= 'Z')
+}
+
+// isNameRune reports whether r can be in a package or repository name: an ASCII
+// letter or digit, or one of "._-".
+func isNameRune(r rune) bool {
+	return isASCIIAlnum(r) || strings.ContainsRune("._-", r)
 }
 
 // runnerOf maps a command to a runner by its base name (see commandBase).
@@ -535,7 +604,7 @@ var pipxFlags = flagTable{
 func extractPython(r Runner, flags flagTable, args []string) (PackageSpec, int, bool) {
 	spec, at, ok := scanArgs(args, flags)
 	if !ok || strings.HasSuffix(spec, ".py") {
-		return PackageSpec{}, 0, false // a script, not a package
+		return PackageSpec{}, 0, false // a script, not a package (see rawSpecAt for URLs)
 	}
 	name, version, ok := parsePythonSpec(spec, r == RunnerUVX)
 	if !ok {
@@ -699,14 +768,20 @@ func hasPrefixFold(s, prefix string) bool {
 	return len(s) >= len(prefix) && strings.EqualFold(s[:len(prefix)], prefix)
 }
 
+// cleanSpec reports whether spec is not empty, not longer than maxSpecLen,
+// and has no white space or control character.
+func cleanSpec(spec string) bool {
+	if spec == "" || len(spec) > maxSpecLen {
+		return false
+	}
+	return !strings.ContainsFunc(spec, func(r rune) bool { return unicode.IsSpace(r) || unicode.IsControl(r) })
+}
+
 // plainSpec reports whether spec is a usable registry reference: it is not
 // empty or too long, has no space or control character, and is not a local
 // path, a file or a URL.
 func plainSpec(spec string) bool {
-	if spec == "" || len(spec) > maxSpecLen {
-		return false
-	}
-	if strings.ContainsFunc(spec, func(r rune) bool { return unicode.IsSpace(r) || unicode.IsControl(r) }) {
+	if !cleanSpec(spec) {
 		return false
 	}
 	if strings.HasPrefix(spec, ".") || strings.HasPrefix(spec, "/") || strings.HasPrefix(spec, "~") ||

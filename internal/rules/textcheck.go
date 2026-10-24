@@ -46,18 +46,19 @@ var headerEntryRe = regexp.MustCompile(`^[A-Za-z0-9_-]+:`)
 // space at both ends is trimmed. The URL is read as the URL of a remote
 // server. A line that is blank gives a URL that is not http, so no hit.
 func insecureURLText(raw string) []Hit {
-	s := discover.Server{
-		Name:      caseServerName,
-		Transport: discover.TransportHTTP,
-		URL:       discover.NewURL(strings.TrimSpace(raw)),
-	}
+	s := caseRemoteServer(caseServerName)
+	s.URL = discover.NewURL(strings.TrimSpace(raw))
 	return findingHits(checkInsecureURL(s), HeuristicInsecureURL)
 }
 
+// urlLineRe matches the start of a URL: a scheme, then "://".
+var urlLineRe = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9+.-]*://`)
+
 // plaintextSecretText runs the MOAT-T4-002 check on one entry.
 //
-// Grammar: the line is one of these two forms. White space at both ends is
-// trimmed first.
+// Grammar: the line is one of these four forms. White space at both ends is
+// trimmed first. The forms are tested in this order, and the first one that
+// fits is used.
 //
 //   - Env entry "KEY=VALUE". The key starts with a letter or "_" and holds
 //     only letters, digits and "_". The value is the rest of the line after
@@ -68,6 +69,13 @@ func insecureURLText(raw string) []Hit {
 //     white space trimmed. The entry is read as a header of a remote server.
 //     A line such as "http://host", with "//" right after the ":", is a URL
 //     and not a header entry.
+//   - URL line "scheme://rest". It is one field (no white space inside). The
+//     line is read as the URL of a remote server, so the check looks at the
+//     user info, the query and the path.
+//   - Command line of two or more fields, split at white space
+//     (strings.Fields), such as "npx some-server --api-key VALUE". The first
+//     field is the command and the other fields are its args. The line is read
+//     as a stdio server, so the check looks at the args.
 //
 // Any other line gives no hit. The value is never put into a Hit, an error or
 // a log.
@@ -82,15 +90,22 @@ func plaintextSecretText(raw string) []Hit {
 	}
 	if headerEntryRe.MatchString(line) {
 		name, value, _ := strings.Cut(line, ":")
-		if strings.HasPrefix(value, "//") {
-			return nil // a URL such as "http://host", not a header
+		// "http://host" also matches headerEntryRe, so the "//" test keeps a URL
+		// out of the header form. The URL form below then reads it.
+		if !strings.HasPrefix(value, "//") {
+			s := caseRemoteServer(caseServerName)
+			s.Headers = discover.SecretMap{name: discover.NewSecret(strings.TrimSpace(value))}
+			return findingHits(checkPlaintextSecrets(s), HeuristicPlaintextSecret)
 		}
-		s := discover.Server{
-			Name:      caseServerName,
-			Transport: discover.TransportHTTP,
-			Headers:   discover.SecretMap{name: discover.NewSecret(strings.TrimSpace(value))},
-		}
+	}
+	fields := strings.Fields(line)
+	if len(fields) == 1 && urlLineRe.MatchString(line) {
+		s := caseRemoteServer(caseServerName)
+		s.URL = discover.NewURL(line)
 		return findingHits(checkPlaintextSecrets(s), HeuristicPlaintextSecret)
+	}
+	if len(fields) >= 2 {
+		return commandLineHits(caseServerName, fields, checkPlaintextSecrets, HeuristicPlaintextSecret)
 	}
 	return nil
 }
@@ -148,6 +163,11 @@ func commandLineHits(name string, fields []string, check func(discover.Server) [
 		return nil
 	}
 	return findingHits(check(caseStdioServer(name, fields[0], fields[1:])), heuristic)
+}
+
+// caseRemoteServer returns an HTTP remote server with the given name.
+func caseRemoteServer(name string) discover.Server {
+	return discover.Server{Name: name, Transport: discover.TransportHTTP}
 }
 
 // caseStdioServer returns a stdio server with the given name, command and args.

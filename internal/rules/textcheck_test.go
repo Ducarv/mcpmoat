@@ -1,12 +1,18 @@
 package rules
 
 import (
+	"encoding/json"
 	"errors"
+	"fmt"
 	"slices"
 	"strings"
 	"testing"
 	"unicode"
 )
+
+// testRand24 is a synthetic random-looking secret of 24 distinct characters
+// with digits. It is built from parts so no scanner sees one literal.
+const testRand24 = "k7Qp2xZr9L" + "mN4vBw8TdY3cHs"
 
 // textAdapterDetail is the fixed Hit.Detail of each text adapter.
 var textAdapterDetail = map[string]string{
@@ -18,7 +24,7 @@ var textAdapterDetail = map[string]string{
 }
 
 // TestTextAdapters runs each text adapter, compiled by compileHeuristic, on
-// the text grammar: spaces, tabs, blank lines and the two forms of
+// the text grammar: spaces, tabs, blank lines and the four forms of
 // plaintext_secret. A hit must be one Hit with NoOffset and the fixed Detail.
 func TestTextAdapters(t *testing.T) {
 	t.Parallel()
@@ -45,7 +51,32 @@ func TestTextAdapters(t *testing.T) {
 		{name: "header with space", heuristic: HeuristicPlaintextSecret, input: "Authorization: Bearer " + testGHToken, wantHit: true},
 		{name: "header no space after colon", heuristic: HeuristicPlaintextSecret, input: "Authorization:Bearer " + testGHToken, wantHit: true},
 		{name: "header name with underscore", heuristic: HeuristicPlaintextSecret, input: "X_Auth: Bearer " + testGHToken, wantHit: true},
-		{name: "URL is not a header", heuristic: HeuristicPlaintextSecret, input: "https://mcp.example.com/" + testGHToken},
+		// URL form: a single field with "scheme://". It is never read as a header.
+		{name: "URL is not a header", heuristic: HeuristicPlaintextSecret, input: "https://mcp.example.com/mcp"},
+		{name: "URL with a token in the path is a url secret", heuristic: HeuristicPlaintextSecret, input: "https://mcp.example.com/" + testGHToken, wantHit: true},
+		{name: "URL with a secret query key", heuristic: HeuristicPlaintextSecret, input: "https://mcp.example.com/sse?api_key=" + testRand24, wantHit: true},
+		{name: "URL with a password in user info", heuristic: HeuristicPlaintextSecret, input: "https://user:pw@example.com/sse", wantHit: true}, //nolint:gosec // G101: synthetic URL password in a test case
+		{name: "URL with spaces around", heuristic: HeuristicPlaintextSecret, input: "  https://mcp.example.com/sse?api_key=" + testRand24 + "  ", wantHit: true},
+		{name: "URL with a reference as query value", heuristic: HeuristicPlaintextSecret, input: "https://mcp.example.com/sse?api_key=${API_KEY}"},
+		{name: "URL with a harmless query", heuristic: HeuristicPlaintextSecret, input: "https://mcp.example.com/sse?page=2"},
+
+		// Command line form: two or more fields, a stdio server.
+		{name: "command line docker env flag", heuristic: HeuristicPlaintextSecret, input: "docker run -e GITHUB_TOKEN=" + testGHToken + " image", wantHit: true},
+		{name: "command line flag and value", heuristic: HeuristicPlaintextSecret, input: "npx some-server --api-key " + testRand24, wantHit: true},
+		{name: "command line flag with equals", heuristic: HeuristicPlaintextSecret, input: "npx some-server --token=" + testGHToken, wantHit: true},
+		{name: "command line tabs as separators", heuristic: HeuristicPlaintextSecret, input: "npx\tsome-server\t--api-key\t" + testRand24, wantHit: true},
+		{name: "command line docker env by name only", heuristic: HeuristicPlaintextSecret, input: "docker run -e GITHUB_TOKEN image"},
+		{name: "command line flag with a reference", heuristic: HeuristicPlaintextSecret, input: "npx some-server --token ${GITHUB_TOKEN}"},
+		{name: "command line flag that only looks like a secret", heuristic: HeuristicPlaintextSecret, input: "npx some-server --max-tokens 4096"},
+		{name: "command line without a secret", heuristic: HeuristicPlaintextSecret, input: "npx -y @scope/server@1.2.3"},
+
+		// Order of the forms: an env entry wins over the URL and command forms.
+		{name: "env entry with a short value under a secret name stays an env entry", heuristic: HeuristicPlaintextSecret, input: "API_KEY=sk-EXAMPLE", wantHit: true},
+		{name: "env entry with a URL value is not read as a URL", heuristic: HeuristicPlaintextSecret, input: "SERVER_URL=https://mcp.example.com/mcp"},
+
+		// Lines of one field that are not a URL.
+		{name: "single field that is not a URL", heuristic: HeuristicPlaintextSecret, input: "justoneword"},
+		{name: "single field with a token and no scheme", heuristic: HeuristicPlaintextSecret, input: testGHToken},
 		{name: "empty key", heuristic: HeuristicPlaintextSecret, input: "=value"},
 		{name: "no equals and no colon", heuristic: HeuristicPlaintextSecret, input: "just some text"},
 		{name: "plaintext empty line", heuristic: HeuristicPlaintextSecret, input: ""},
@@ -135,8 +166,10 @@ func TestTextAdaptersNoLeak(t *testing.T) {
 				t.Fatalf("got %d hits, want exactly 1 (the leak check needs a hit): %+v", len(hits), hits)
 			}
 			detail := hits[0].Detail
-			if strings.Contains(detail, testGHToken) {
-				t.Errorf("Detail %q contains the canary", detail)
+			for _, form := range hitForms(t, hits) {
+				if strings.Contains(form, testGHToken) {
+					t.Errorf("Hit form %q contains the canary", form)
+				}
 			}
 			// Every word of the input, split at non-letters and non-digits.
 			words := strings.FieldsFunc(tt.input, func(r rune) bool {
@@ -145,6 +178,63 @@ func TestTextAdaptersNoLeak(t *testing.T) {
 			for _, w := range words {
 				if len(w) >= 4 && strings.Contains(detail, w) {
 					t.Errorf("Detail %q contains input word %q", detail, w)
+				}
+			}
+		})
+	}
+}
+
+// hitForms renders hits in every common output form: the Detail of the first
+// hit, then %v, %+v, %#v and JSON.
+func hitForms(t testing.TB, hits []Hit) []string {
+	t.Helper()
+	js, err := json.Marshal(hits)
+	if err != nil {
+		t.Fatalf("json.Marshal() error = %v", err)
+	}
+	return []string{
+		hits[0].Detail,
+		fmt.Sprintf("%v", hits[0]),
+		fmt.Sprintf("%+v", hits[0]),
+		fmt.Sprintf("%#v", hits[0]),
+		string(js),
+	}
+}
+
+// TestTextAdaptersNoLeakArgsAndURL checks the URL and command line forms of
+// plaintext_secret. The Hit must hold no secret, no arg and no URL, in any
+// field and in any print form (see hitForms). Each input must hit, so the
+// check does not pass for the wrong reason.
+func TestTextAdaptersNoLeakArgsAndURL(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name  string
+		input string
+		leaks []string // text that must not appear in the Hit
+	}{
+		{"url query", "https://mcp.example.com/sse?api_key=" + testRand24, []string{testRand24, "mcp.example.com", "api_key", "https://"}},
+		{"url path", "https://mcp.example.com/" + testGHToken, []string{testGHToken, "mcp.example.com", "https://"}},
+		{"url password", "https://user:pw@example.com/sse", []string{"user:pw", "example.com", "https://"}},
+		{"command flag value", "npx some-server --api-key " + testRand24, []string{testRand24, "--api-key", "some-server", "npx"}},
+		{"command flag equals", "npx some-server --token=" + testGHToken, []string{testGHToken, "--token", "some-server"}},
+		{"command docker env", "docker run -e GITHUB_TOKEN=" + testGHToken + " image", []string{testGHToken, "GITHUB_TOKEN", "docker", "image"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			fn, err := compileHeuristic(HeuristicPlaintextSecret, nil)
+			if err != nil {
+				t.Fatalf("compileHeuristic() error = %v", err)
+			}
+			hits := fn(tt.input)
+			if len(hits) != 1 {
+				t.Fatalf("got %d hits, want exactly 1 (the leak check needs a hit): %+v", len(hits), hits)
+			}
+			for _, form := range hitForms(t, hits) {
+				for _, leak := range tt.leaks {
+					if strings.Contains(form, leak) {
+						t.Errorf("Hit form %q contains %q", form, leak)
+					}
 				}
 			}
 		})

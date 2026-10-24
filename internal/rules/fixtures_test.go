@@ -29,6 +29,9 @@ const (
 	canaryHeader = "mcpmoat-canary-header-8Fk2Zs"
 	canaryToken  = "ghp_mcpmoatcanaryZk3Qp8Vw2LxN7rTb5HcYd4M" //nolint:gosec // G101: synthetic canary of the test fixture, not a credential
 	canaryHost   = "mcp.example.invalid"
+
+	canaryArgSecret = "Zq8Lm3Vx0Rt5Ws2Hy7Nb4Kd1" //nolint:gosec // G101: synthetic canary of the test fixture, not a credential
+	canaryURLSecret = "Jt6Pc9Gh2Fw8Ye4Ua1Xs7Mq3" //nolint:gosec // G101: synthetic canary of the test fixture, not a credential
 )
 
 // inspectFixture builds and runs the stdio fixture server name and returns
@@ -353,15 +356,26 @@ func TestFixtureDangerousConfig(t *testing.T) {
 	t.Parallel()
 
 	servers := configServers(t, "dangerous")
-	if len(servers) != 5 {
-		t.Fatalf("ReadCursor() returned %d servers, want 5", len(servers))
+	if len(servers) != 9 {
+		t.Fatalf("ReadCursor() returned %d servers, want 9", len(servers))
 	}
 	ts := popularTyposquat(t)
 
 	// Guard against a vacuous leak check: the canaries must be in the config.
 	for _, s := range servers {
-		if s.Name == "env-secret" && s.Env["GITHUB_TOKEN"].Reveal() != canaryToken {
-			t.Fatal("fixture env-secret no longer holds the canary token; update the test")
+		switch s.Name {
+		case "env-secret":
+			if s.Env["GITHUB_TOKEN"].Reveal() != canaryToken {
+				t.Fatal("fixture env-secret no longer holds the canary token; update the test")
+			}
+		case "docker-arg-secret":
+			if !slices.Contains(s.Args.Values(), "SOME_API_TOKEN="+canaryArgSecret) {
+				t.Fatal("fixture docker-arg-secret no longer holds the canary arg secret; update the test")
+			}
+		case "remote-url-secret":
+			if !strings.Contains(s.URL.Reveal(), canaryURLSecret) {
+				t.Fatal("fixture remote-url-secret no longer holds the canary URL secret; update the test")
+			}
 		}
 	}
 
@@ -381,11 +395,16 @@ func TestFixtureDangerousConfig(t *testing.T) {
 		{"latest-pkg", rules.RuleUnpinnedPackage, rules.FieldArgs, "", "@example-corp/files-mcp"},
 		{"latest-pkg", rules.RuleAutoInstall, rules.FieldArgs, "", ""},
 		{"docker-untagged", rules.RuleUnpinnedPackage, rules.FieldArgs, "", "registry.invalid/example/mcp-server"},
+		{"docker-arg-secret", rules.RulePlaintextSecret, rules.FieldArgs, "", ""},
+		{"remote-url-secret", rules.RulePlaintextSecret, rules.FieldURL, "", ""},
+		{"npx-git-unpinned", rules.RuleUnpinnedPackage, rules.FieldArgs, "", ""},
+		{"npx-git-unpinned", rules.RuleAutoInstall, rules.FieldArgs, "", ""},
+		{"npx-git-pinned", rules.RuleAutoInstall, rules.FieldArgs, "", ""},
 	})
 
 	// A finding names the place of a problem and never the content.
 	for _, f := range all {
-		rules.AssertFindingNoLeak(t, f, canaryHeader, canaryToken, canaryHost)
+		rules.AssertFindingNoLeak(t, f, canaryHeader, canaryToken, canaryHost, canaryArgSecret, canaryURLSecret)
 	}
 }
 

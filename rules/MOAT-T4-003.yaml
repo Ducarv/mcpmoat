@@ -1,11 +1,11 @@
 id: MOAT-T4-003
-title: Package runner uses an unpinned version
+title: Package runner uses an unpinned package
 severity: medium
 target: config
 match:
   heuristic: unpinned_package
-risk: The server starts from a package with no fixed version, so each start can download and run a new, possibly malicious release without any review.
-remediation: Pin an exact version, for example npx @scope/server@1.4.2, uvx some-server==0.3.1 or a docker image digest, and update it on purpose after review.
+risk: The server starts from a package that is not fixed. A registry package with no exact version, a git branch head, a tarball or a URL can change at any time. Each start can download and run new, possibly malicious code without any review.
+remediation: Pin an exact version, for example npx @scope/server@1.4.2, uvx some-server==0.3.1 or a docker image digest. For a git package, pin a full 40-hex commit, as in npx github:user/repo#<40-hex> or uvx --from git+https://github.com/user/repo@<40-hex> tool. Or use a registry package with an exact version. Update the pin on purpose after review.
 references:
   - https://owasp.org/www-project-mcp-top-10/
   - https://docs.npmjs.com/cli/commands/npx
@@ -17,6 +17,36 @@ should_match:
     note: Docker image with no tag, so Docker uses latest
   - text: docker run -i --rm mcp/github:latest
     note: Docker image with the tag latest
+  - text: npx github:user/repo
+    note: GitHub package with no commit, so it follows the default branch
+  - text: npx user/repo
+    note: GitHub shorthand with no commit
+  - text: npx github:user/repo#main
+    note: A branch name moves, so it is not a pin
+  - text: npx github:user/repo#abc1234
+    note: A short hash is not a full 40-hex commit
+  - text: npx https://example.com/pkg.tgz
+    note: A URL can serve different content at any time
+  - text: npx git+https://github.com/user/repo
+    note: Git URL with no commit
+  - text: uvx --from git+https://github.com/user/repo tool
+    note: Python git package with no commit
+  - text: pipx run --spec git+https://github.com/user/repo tool
+    note: Python git package with no commit
+  - text: npx https://github.com/user/repo#main
+    note: npm reads this URL as a git spec, and a branch name moves
+  - text: pipx run https://example.com/script.py
+    note: A script that pipx downloads and runs. The URL can serve different code at any time
+  - text: npx Foo@https://example.com/x.tgz
+    note: An alias name with upper case. npm accepts it, and the tarball URL behind it can change
+  - text: npx deploy@gitlab.com:team/repo
+    note: An scp-style git spec with a user other than git, and no commit
+  - text: npx https:/github.com/user/repo
+    note: A WHATWG parser, which npm uses, reads a missing slash after https as https://, so this is a git repo with no commit
+  - text: npx git@https://example.com/x.tgz#0123456789abcdef0123456789abcdef01234567
+    note: npm reads git@ as an alias name for a tarball URL, and a tarball URL is never pinned, also with a 40-hex fragment
+  - text: pipx run https://example.com/run?file=x.py
+    note: pipx tests the whole argument for the .py suffix, so it also runs a URL that has .py only in the query
 should_not_match:
   - npx -y @scope/server@1.4.2
   - uvx some-server==0.3.1
@@ -25,3 +55,15 @@ should_not_match:
     note: Image pinned by digest, which does not move
   - text: python -m my_server
     note: Python module run, not a package runner, so no package is fetched
+  - text: npx github:user/repo#0123456789abcdef0123456789abcdef01234567
+    note: GitHub package pinned to a full 40-hex commit
+  - text: uvx --from git+https://github.com/user/repo@0123456789abcdef0123456789abcdef01234567 tool
+    note: Python git package pinned to a full 40-hex commit
+  - text: npx https://github.com/user/repo#0123456789abcdef0123456789abcdef01234567
+    note: The https URL of a GitHub repository, pinned to a full 40-hex commit
+  - text: npx https://github.com/user/repo/tree/0123456789abcdef0123456789abcdef01234567
+    note: A GitHub tree URL with the commit in the path. npm reads it as a git spec with that commit
+  - text: npx git@github.com:user/repo.git#0123456789abcdef0123456789abcdef01234567
+    note: A scp-style git spec, pinned to a full 40-hex commit
+  - text: npx ./local-dir
+    note: Local path, so no remote package is fetched
