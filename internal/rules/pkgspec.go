@@ -140,6 +140,78 @@ func packageAt(command string, args []string) (PackageSpec, int, bool) {
 	return spec, at, true
 }
 
+// rawSpecAt returns the runner, the raw spec argument that the runner would
+// fetch, and the index of that argument in args. It finds the spec as
+// ExtractPackage does (same unwrapCmd, scanArgs and flag tables), but it does
+// not parse the spec or check it as a package name. So it also returns the
+// specs that ExtractPackage refuses on purpose: git and GitHub specs, URLs and
+// "file:" paths. The caller classifies them.
+//
+// What spec holds, by runner:
+//   - npx, bunx: the value of -p/--package, else the first argument that is
+//     not a flag.
+//   - uvx: the value of --from, else the first argument that is not a flag.
+//   - pipx: the same, for "pipx run" and --spec.
+//   - docker and unknown commands: ok is false. A docker image is no remote
+//     spec.
+//
+// ok is false when the parse is doubtful (second override flag, missing value,
+// stop flag, unknown runner) and for a uvx or pipx ".py" script path. A spec
+// that starts with "git+", "http://" or "https://" (any case) is a remote URL
+// spec, not a script, so the ".py" test does not apply to it (a repository can
+// be named "discord.py"). It is also false when spec is empty, longer than
+// maxSpecLen, or holds white space or a control character. rawSpecAt does not validate more than that.
+//
+// The spec is untrusted config text and can hold credentials, for example
+// "git+https://user:token@host/repo". The caller must never copy it into a
+// Finding, an error or a log line.
+func rawSpecAt(command string, args []string) (runner Runner, spec string, at int, ok bool) {
+	command, runArgs, skip := unwrapCmd(command, args)
+	runner = runnerOf(command)
+
+	// flags is the table that scanArgs uses for the arguments in scanFrom.
+	var flags flagTable
+	scanFrom := 0 // index in runArgs where the runner flags start
+	switch runner {
+	case RunnerNPX:
+		flags = npmFlags
+	case RunnerBunx:
+		flags = bunxFlags
+	case RunnerUVX:
+		flags = uvxFlags
+	case RunnerPipx:
+		// Global flags such as "--verbose" may come before "run".
+		sub, subAt, found := scanArgs(runArgs, flagTable{})
+		if !found || sub != "run" {
+			return "", "", 0, false
+		}
+		flags, scanFrom = pipxFlags, subAt+1
+	default:
+		return "", "", 0, false
+	}
+
+	spec, specAt, found := scanArgs(runArgs[scanFrom:], flags)
+	if !found || !cleanSpec(spec) {
+		return "", "", 0, false
+	}
+	if (runner == RunnerUVX || runner == RunnerPipx) && strings.HasSuffix(spec, ".py") && !isRemoteURLSpec(spec) {
+		return "", "", 0, false // a script, not a package
+	}
+	return runner, spec, skip + scanFrom + specAt, true
+}
+
+// isRemoteURLSpec reports whether spec starts with "git+", "http://" or
+// "https://", compared without regard to case.
+func isRemoteURLSpec(spec string) bool {
+	lower := strings.ToLower(spec)
+	for _, prefix := range []string{"git+", "http://", "https://"} {
+		if strings.HasPrefix(lower, prefix) {
+			return true
+		}
+	}
+	return false
+}
+
 // parseRunnerArgs does the parse for packageAt. It does not run validName,
 // so only packageAt may call it.
 func parseRunnerArgs(command string, args []string) (PackageSpec, int, bool) {
@@ -699,14 +771,20 @@ func hasPrefixFold(s, prefix string) bool {
 	return len(s) >= len(prefix) && strings.EqualFold(s[:len(prefix)], prefix)
 }
 
+// cleanSpec reports whether spec is not empty, not longer than maxSpecLen,
+// and has no white space or control character.
+func cleanSpec(spec string) bool {
+	if spec == "" || len(spec) > maxSpecLen {
+		return false
+	}
+	return !strings.ContainsFunc(spec, func(r rune) bool { return unicode.IsSpace(r) || unicode.IsControl(r) })
+}
+
 // plainSpec reports whether spec is a usable registry reference: it is not
 // empty or too long, has no space or control character, and is not a local
 // path, a file or a URL.
 func plainSpec(spec string) bool {
-	if spec == "" || len(spec) > maxSpecLen {
-		return false
-	}
-	if strings.ContainsFunc(spec, func(r rune) bool { return unicode.IsSpace(r) || unicode.IsControl(r) }) {
+	if !cleanSpec(spec) {
 		return false
 	}
 	if strings.HasPrefix(spec, ".") || strings.HasPrefix(spec, "/") || strings.HasPrefix(spec, "~") ||

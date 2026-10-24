@@ -1,11 +1,11 @@
 id: MOAT-T4-003
-title: Package runner uses an unpinned version
+title: Package runner uses an unpinned package
 severity: medium
 target: config
 match:
   heuristic: unpinned_package
-risk: The server starts from a package with no fixed version, so each start can download and run a new, possibly malicious release without any review.
-remediation: Pin an exact version, for example npx @scope/server@1.4.2, uvx some-server==0.3.1 or a docker image digest, and update it on purpose after review.
+risk: The server starts from a package that is not fixed. A registry package with no exact version, a git branch head, a tarball or a URL can change at any time. Each start can download and run new, possibly malicious code without any review.
+remediation: Pin an exact version, for example npx @scope/server@1.4.2, uvx some-server==0.3.1 or a docker image digest. For a git package, pin a full 40-hex commit, as in npx github:user/repo#<40-hex> or uvx --from git+https://github.com/user/repo@<40-hex> tool. Or use a registry package with an exact version. Update the pin on purpose after review.
 references:
   - https://owasp.org/www-project-mcp-top-10/
   - https://docs.npmjs.com/cli/commands/npx
@@ -17,6 +17,22 @@ should_match:
     note: Docker image with no tag, so Docker uses latest
   - text: docker run -i --rm mcp/github:latest
     note: Docker image with the tag latest
+  - text: npx github:user/repo
+    note: GitHub package with no commit, so it follows the default branch
+  - text: npx user/repo
+    note: GitHub shorthand with no commit
+  - text: npx github:user/repo#main
+    note: A branch name moves, so it is not a pin
+  - text: npx github:user/repo#abc1234
+    note: A short hash is not a full 40-hex commit
+  - text: npx https://example.com/pkg.tgz
+    note: A URL can serve different content at any time
+  - text: npx git+https://github.com/user/repo
+    note: Git URL with no commit
+  - text: uvx --from git+https://github.com/user/repo tool
+    note: Python git package with no commit
+  - text: pipx run --spec git+https://github.com/user/repo tool
+    note: Python git package with no commit
 should_not_match:
   - npx -y @scope/server@1.4.2
   - uvx some-server==0.3.1
@@ -25,3 +41,9 @@ should_not_match:
     note: Image pinned by digest, which does not move
   - text: python -m my_server
     note: Python module run, not a package runner, so no package is fetched
+  - text: npx github:user/repo#0123456789abcdef0123456789abcdef01234567
+    note: GitHub package pinned to a full 40-hex commit
+  - text: uvx --from git+https://github.com/user/repo@0123456789abcdef0123456789abcdef01234567 tool
+    note: Python git package pinned to a full 40-hex commit
+  - text: npx ./local-dir
+    note: Local path, so no remote package is fetched

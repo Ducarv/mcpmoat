@@ -70,8 +70,12 @@ const shellOrWindowsVar = `(\$[A-Za-z_][A-Za-z0-9_]*|%[A-Za-z_][A-Za-z0-9_]*%)`
 // and the check would report it.
 //
 // The findings come in a fixed order: MOAT-T4-001, then MOAT-T4-002 (env keys,
-// then header keys, each sorted), then MOAT-T4-003, then MOAT-T4-004. A finding
-// never holds a secret value or a URL (see Finding).
+// then header keys, each sorted, then the args finding, then the URL finding),
+// then MOAT-T4-003, then MOAT-T4-004. MOAT-T4-002 also looks at the command
+// args of a stdio server and at the URL of a remote server (see
+// checkArgSecrets). MOAT-T4-003 covers a registry package and a git, tarball
+// or URL spec (see remoteSpecUnpinned). A finding never holds a secret value,
+// an arg or a URL (see Finding).
 func CheckConfig(s discover.Server) []Finding {
 	var findings []Finding
 	findings = append(findings, checkInsecureURL(s)...)
@@ -132,7 +136,9 @@ func refDefault(ref string) string {
 }
 
 // checkPlaintextSecrets reports MOAT-T4-002 for every env and header entry
-// that holds a secret in clear text. It never copies a value into a finding.
+// that holds a secret in clear text, then for a secret in the args or in the
+// URL (see checkArgSecrets). The order is env, headers, args, URL. It never
+// copies a value, an arg or a URL into a finding.
 func checkPlaintextSecrets(s discover.Server) []Finding {
 	var findings []Finding
 	for _, key := range s.Env.Keys() {
@@ -146,7 +152,8 @@ func checkPlaintextSecrets(s discover.Server) []Finding {
 			findings = append(findings, secretFinding(s.Name, FieldHeaders, key))
 		}
 	}
-	return findings
+	// append(a, b...) adds every element of the slice b. A nil b adds nothing.
+	return append(findings, checkArgSecrets(s)...)
 }
 
 // secretFinding builds the MOAT-T4-002 finding for one key.
@@ -336,14 +343,26 @@ func shannonEntropy(s string) float64 {
 }
 
 // checkUnpinnedPackage reports MOAT-T4-003: a stdio server whose package
-// runner fetches a package with no fixed version.
+// runner fetches a package with no fixed version. It gives one finding at most.
+//
+// A registry spec ("pkg", "pkg@latest") is read by packageAt, and its finding
+// names the package in Related when the args redaction policy allows it. A git,
+// tarball, URL or GitHub shorthand spec is not a registry spec, so packageAt
+// refuses it. remoteSpecUnpinned reads those, and their finding keeps Related
+// empty: the spec can hold a credential, such as a token in a URL.
 func checkUnpinnedPackage(s discover.Server) []Finding {
 	if s.Transport != discover.TransportStdio {
 		return nil
 	}
 	args := s.Args.Values()
 	spec, at, ok := packageAt(s.Command, args)
-	if !ok || !spec.Unpinned() {
+	if !ok {
+		if remoteSpecUnpinned(s.Command, args) {
+			return []Finding{unpinnedFinding(s.Name, "")}
+		}
+		return nil
+	}
+	if !spec.Unpinned() {
 		return nil
 	}
 	// Related names the package only when the redaction policy for args shows
@@ -353,13 +372,19 @@ func checkUnpinnedPackage(s discover.Server) []Finding {
 	if discover.RedactArgs(args)[at] == args[at] {
 		related = spec.Name
 	}
-	return []Finding{{
+	return []Finding{unpinnedFinding(s.Name, related)}
+}
+
+// unpinnedFinding builds the MOAT-T4-003 finding. related is empty for a git,
+// tarball or URL spec.
+func unpinnedFinding(server, related string) Finding {
+	return Finding{
 		RuleID:  RuleUnpinnedPackage,
-		Server:  s.Name,
+		Server:  server,
 		Field:   FieldArgs,
 		Related: related,
 		Message: unpinnedPackageMessage,
-	}}
+	}
 }
 
 // checkAutoInstall reports MOAT-T4-004: a stdio server that turns on the yes

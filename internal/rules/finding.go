@@ -13,11 +13,17 @@ const (
 	RuleInsecureURL = "MOAT-T4-001"
 
 	// RulePlaintextSecret is the ID of the plaintext secret check
-	// (threat T4): a secret written in clear text in the client config.
+	// (threat T4): a secret written in clear text in the client config. It
+	// covers env values and header values (Field env or headers), a literal
+	// secret in the command args of a stdio server (Field args), and a literal
+	// secret in the URL of a remote server (Field url). A URL inside the args
+	// of a stdio server is reported with Field args, not url.
 	RulePlaintextSecret = "MOAT-T4-002" //nolint:gosec // G101: rule ID, not a credential
 
 	// RuleUnpinnedPackage is the ID of the unpinned package check
-	// (threat T4): a server that runs a package with no fixed version.
+	// (threat T4): a server that runs a package with no fixed version. It also
+	// covers git, tarball, URL and GitHub shorthand specs, unless the spec is
+	// pinned to a full 40-hex commit.
 	RuleUnpinnedPackage = "MOAT-T4-003"
 
 	// RuleAutoInstall is the ID of the auto install check (threat T4): a stdio
@@ -40,9 +46,13 @@ const (
 	typosquatMessage       = "name is close to a popular MCP server"
 )
 
-// Values of Finding.Field: the config field that a finding is about.
+// Values of Finding.Field: the config field that a finding is about. For env
+// and headers, the Field names the map and Finding.Key names the entry. A
+// finding with Field args or url has an empty Key. A server gets at most one
+// args finding and one url finding.
 const (
-	// FieldURL is the server URL.
+	// FieldURL is the URL of a remote server. A URL inside the args of a stdio
+	// server is reported with FieldArgs, not FieldURL.
 	FieldURL = "url"
 
 	// FieldEnv is the env map of a stdio server.
@@ -84,14 +94,19 @@ type Finding struct {
 	Field string
 
 	// Key is the env or header KEY that the finding is about. It is never the
-	// value. It is empty when no key applies.
+	// value. It is empty when no key applies. It is always empty for Field args
+	// and url: the arg or the URL is never copied, because it can hold the
+	// secret.
 	Key string
 
 	// Related names the second party of the finding. For T3 it is the shadowed
 	// tool, as "<server>/<tool>". For T5 it is the popular name that the
 	// server or package name resembles. For MOAT-T4-003 it is the package
-	// name, only when the redaction policy (discover.RedactArgs) shows it
-	// unmasked; otherwise it is empty. It is empty for the other findings.
+	// name of a registry spec, only when the redaction policy
+	// (discover.RedactArgs) shows the arg unmasked; otherwise it is empty. It
+	// is also empty for git, tarball and URL specs, because such a spec can
+	// hold credentials (such as https://user:token@host/x.tgz). It is empty
+	// for the other findings.
 	Related string
 
 	// Message is a fixed English text. It is built only from constants in

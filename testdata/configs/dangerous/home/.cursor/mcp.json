@@ -26,6 +26,21 @@
     "docker-untagged": {
       "command": "docker",
       "args": ["run", "-i", "--rm", "-e", "TOKEN", "registry.invalid/example/mcp-server"]
+    },
+    "docker-arg-secret": {
+      "command": "docker",
+      "args": ["run", "-i", "--rm", "-e", "SOME_API_TOKEN=Zq8Lm3Vx0Rt5Ws2Hy7Nb4Kd1", "registry.invalid/example/server@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"]
+    },
+    "remote-url-secret": {
+      "url": "https://mcp.example.invalid/sse?api_key=Jt6Pc9Gh2Fw8Ye4Ua1Xs7Mq3"
+    },
+    "npx-git-unpinned": {
+      "command": "npx",
+      "args": ["-y", "git+https://git.invalid/example/example-server.git"]
+    },
+    "npx-git-pinned": {
+      "command": "npx",
+      "args": ["-y", "git+https://git.invalid/example/example-server.git#0123456789abcdef0123456789abcdef01234567"]
     }
   }
 }

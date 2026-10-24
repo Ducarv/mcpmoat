@@ -31,12 +31,17 @@ const (
 	// HeuristicInsecureURL flags an http:// URL to a host that is not loopback
 	// (MOAT-T4-001). The text is one URL.
 	HeuristicInsecureURL = "insecure_url"
-	// HeuristicPlaintextSecret flags a KEY=VALUE env entry or a "Name: value"
-	// header entry that holds a secret in plain text (MOAT-T4-002). The value is
-	// never reported.
+	// HeuristicPlaintextSecret flags a literal secret in plain text
+	// (MOAT-T4-002). A case line can be an env entry "KEY=VALUE", a header entry
+	// "Name: value", a URL, or a command line (the args of a stdio server). The
+	// check looks at env values, header values, command args and URLs. The value
+	// is never reported.
 	HeuristicPlaintextSecret = "plaintext_secret"
 	// HeuristicUnpinnedPackage flags a package in a command line that is not
-	// pinned to a version (MOAT-T4-003). The text is a command line.
+	// pinned to a version (MOAT-T4-003). The text is a command line. It covers
+	// a registry package and also a git, tarball, URL or GitHub-shorthand spec
+	// (npx, bunx, uvx --from, pipx --spec). Such a spec is unpinned unless it
+	// pins a full 40-hex commit.
 	HeuristicUnpinnedPackage = "unpinned_package"
 	// HeuristicAutoInstall flags a command line that runs npx with its yes
 	// option on, such as -y or --yes before the package (MOAT-T4-004). The

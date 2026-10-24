@@ -92,11 +92,15 @@
 // auto_install and typosquat) read one line of text each, not the whole text.
 // Only a rule with target: config may use them (Validate checks this). The
 // built-in config rules use them on the lines of their test cases.
-// insecure_url reads a URL. plaintext_secret reads a KEY=VALUE or "Name:
-// value" entry. unpinned_package and auto_install read a command line.
-// typosquat reads a command line or a bare package name. An adapter in this
-// package turns the line into a server and runs the native config check on
-// it. A hit from a config heuristic has the offset -1.
+// insecure_url reads a URL. plaintext_secret reads an env entry
+// ("KEY=VALUE"), a header entry ("Name: value"), a URL or a command line (the
+// args of a stdio server). It reports a literal secret in env values, header
+// values, command args and URLs. It never reports the value. unpinned_package
+// and auto_install read a command line. unpinned_package also covers git,
+// tarball, URL and GitHub shorthand package specs, unless the spec is pinned
+// to a full 40-hex commit. typosquat reads a command line or a bare package
+// name. An adapter in this package turns the line into a server and runs the
+// native config check on it. A hit from a config heuristic has the offset -1.
 //
 // # The ignore file
 //
