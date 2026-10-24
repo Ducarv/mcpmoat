@@ -1,7 +1,6 @@
 package rules
 
 import (
-	"encoding/hex"
 	"fmt"
 	"math/bits"
 	"strings"
@@ -364,9 +363,12 @@ func hex4(s string) (rune, bool) {
 	if len(s) < 4 {
 		return 0, false
 	}
-	var b [2]byte
-	if _, err := hex.Decode(b[:], []byte(s[:4])); err != nil {
-		return 0, false
+	var v rune
+	for i := range 4 {
+		if !isHexDigit(s[i]) {
+			return 0, false
+		}
+		v = v<<4 | rune(unhexByte(s[i]))
 	}
-	return rune(b[0])<<8 | rune(b[1]), true
+	return v, true
 }
