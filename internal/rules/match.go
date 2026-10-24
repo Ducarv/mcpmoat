@@ -22,9 +22,18 @@ import (
 //
 // The worst case for one match block is about 32 KiB x 2500, about 80M
 // instruction-bytes. BenchmarkWorstCaseBlock measured about 0.8 s for it on
-// an Apple M1 Pro (about 10 ns for each instruction-byte). A text with
-// invisible runes is matched in two forms (see matchForms), so it can cost
-// twice that. The package doc says how the rule count multiplies it.
+// an Apple M1 Pro (about 10 ns for each instruction-byte). That is the cost
+// for one form of the text, and a text can have more forms:
+//
+//   - keywords read up to three forms (see matchForms): two when the text has
+//     invisible runes, and three when one of them is a control rune such as
+//     U+0001;
+//   - any_regex and all_regex read up to six forms (see regexForms): the
+//     three of matchForms and their folds, when the text is not only ASCII.
+//
+// Each form is at most MaxMatchInputBytes long, so the worst case is six
+// times the cost above, about 480M instruction-bytes. The package doc says
+// how the rule count multiplies it.
 const (
 	// MaxPatternBytes is the largest regex or keyword, in bytes, before
 	// compilation.
@@ -141,10 +150,16 @@ func compileRegexMatcher(kind string, list []string, build func(entry, s string)
 // Match returns the hits of the matcher in text, or nil when it does not
 // match.
 //
-// Regexes and keywords read the normalized forms of the text (see
-// matchForms), so an invisible character cannot split a keyword. A regex or
-// a keyword matches when it matches in one form. A heuristic reads the full
-// raw text.
+// Regexes and keywords read the normalized forms of the text, so an
+// invisible character cannot split a keyword. Regexes read the forms of
+// regexForms, which also hold the folded forms, so a fullwidth letter or a
+// combining mark cannot hide a word from a regex. Keywords read the forms of
+// matchForms, folded with foldMarks. A regex or a keyword matches when it
+// matches in one form. In all_regex, each regex must match, but each one can
+// match in a different form. A heuristic reads the full raw text.
+//
+// A regex or keyword hit has the offset NoOffset, whatever form it matched
+// in, because a form has no byte offsets in the raw text.
 func (m *Matcher) Match(text string) []Hit {
 	if m == nil {
 		return nil
@@ -153,7 +168,7 @@ func (m *Matcher) Match(text string) []Hit {
 	case kindHeuristic:
 		return m.heuristic(text)
 	case kindAnyRegex:
-		forms := matchForms(text)
+		forms := regexForms(text)
 		for i, re := range m.regexps {
 			if matchesAny(re, forms) {
 				return []Hit{{Offset: NoOffset, Detail: fmt.Sprintf("any_regex[%d] matched", i)}}
@@ -161,7 +176,7 @@ func (m *Matcher) Match(text string) []Hit {
 		}
 		return nil
 	case kindAllRegex:
-		forms := matchForms(text)
+		forms := regexForms(text)
 		for _, re := range m.regexps {
 			if !matchesAny(re, forms) {
 				return nil

@@ -169,7 +169,12 @@ const (
 	keycapMark      = '\u20E3' // visible; "1" + VS16 + U+20E3 is the keycap 1
 )
 
-// invisibleUnicode flags every rune of raw for which isInvisible is true.
+// invisibleUnicode flags every rune of raw for which isInvisible is true. So
+// it flags every control rune except the white space, also the runes that
+// start, end or cancel an ANSI escape sequence (see ansiToSpace): they show
+// as nothing, and a terminal runs them. A raw ESC before a letter can make
+// the letter the final byte of a CSI, so "\x1b[Ignore" hides the "I" from the
+// regexes; this heuristic flags the ESC.
 //
 // An emoji can hold a VS15 or VS16 and a ZWJ (see isPictograph), so some of
 // these runes are not flagged:
@@ -260,9 +265,9 @@ func maxLength(raw string, maxRunes int) []Hit {
 //
 // A run is a longest sequence of [A-Za-z0-9+/_-]. A run can mix the standard
 // and the URL-safe alphabets, so a "-" or "_" glued to a payload cannot hide
-// it. An invisible rune inside a run is skipped, so a ZWSP cannot split a
-// payload. A '=' ends a run: base64 padding comes only at the end, and the
-// decoder does not need it.
+// it. An invisible rune inside a run is skipped, so a ZWSP or a control rune
+// such as ESC cannot split a payload. A '=' ends a run: base64 padding comes
+// only at the end, and the decoder does not need it.
 func base64Blob(raw string, minLength, minText int) []Hit {
 	var l hitList
 	var run []byte // characters of the current run, without invisible runes

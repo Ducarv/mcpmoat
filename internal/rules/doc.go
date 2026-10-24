@@ -41,31 +41,66 @@
 // # Normalization
 //
 // Before regex and keyword matching, the text is normalized: invisible runes
-// (zero-width, bidi, tag and other format characters) are removed, and the
-// text is put in Unicode form NFC. Each white-space or control rune that the
-// regex \s does not match (VT, NEL, the no-break space and the other Unicode
-// spaces, U+2028, U+2029, the Braille blank U+2800, and control characters
-// such as U+001F) becomes U+0020, so a regex sees it as a space and cannot
-// match the rune itself. An ANSI escape sequence (CSI or OSC), which a
-// terminal runs and does not show, also becomes one space. When the text holds invisible runes, it is
-// also matched in a second form where each run of invisible runes is one
-// space, so an invisible rune can split neither a word nor the space between
-// two words. A rule matches when it matches in one form, so such a text costs
-// twice as much to match.
+// are removed, and the text is put in Unicode form NFC. The invisible runes
+// are the zero-width, bidi, tag and other format characters, and every
+// control character (such as U+0000, U+0001, ESC, BEL and DEL) other than
+// the white space (tab, LF, VT, FF, CR and NEL). So "Ig" + U+0001 + "nore"
+// and "Ig" + BEL + "nore" are "Ignore". An ANSI escape sequence (CSI or OSC),
+// which a terminal runs and does not show, becomes one space. The control
+// characters are removed only after this step, so the step still sees the
+// ESC, BEL, CAN, SUB and C1 controls that start, end or cancel a sequence,
+// and a removed control character cannot join the parts of a sequence: ESC [
+// U+0001 "Ignore" keeps its "I". Each white-space rune that the regex \s
+// does not match (VT, NEL, the no-break space and the other Unicode spaces,
+// U+2028, U+2029 and the Braille blank U+2800) becomes U+0020, so a regex
+// sees it as a space and cannot match the rune itself.
 //
-// A regex reads only this normalized text. So a regex cannot match an
-// invisible rune (use the invisible_unicode heuristic for that), and a
-// pattern must be written in NFC: a pattern with a letter and a separate
-// combining mark does not match the composed letter. The should_match cases
-// of a rule (NFR-05) catch such a pattern. The form is not NFKC, so a regex
-// does not see fullwidth or mathematical letters as plain letters.
+// When the text holds invisible runes, it is also matched in a second form
+// where each run of invisible runes is one space (or two, when the run has a
+// control character and ends with a format character). When one of them is a
+// control character, it is also matched in a third form, where the other
+// invisible runes are removed and each run of control characters is one
+// space. So an invisible rune cannot split a word (the first form) or the
+// space between two words (the second form), and "Ig" + ZWSP + "nore" +
+// U+0001 + "all" + U+0001 + "previous" still matches (the third form).
 //
-// Keywords are normalized in the same way. For keywords only, the keyword and
-// the text are then put in the compatibility form NFKC and lose their
-// combining marks (category M). So a mark cannot hide a keyword, fullwidth
-// and mathematical letters match the plain letters, and accents are folded:
-// "cafe" matches "caf" + U+00E9. Homoglyphs from other scripts (for example
-// Cyrillic U+0430 for Latin "a") are not folded.
+// A text that uses one kind of invisible rune both inside a word and between
+// words can still defeat a regex, and so can a text with a control character
+// inside a word and a format character (such as ZWSP) between words. Also, a
+// raw ESC before a letter can make the letter the final byte of a CSI, so
+// ANSI text before a word can hide its first letter from a regex, and a
+// terminal still runs a CSI with a control character inside it (ESC [ U+0001
+// 8 m), which the normalization does not find. A format character after
+// ESC or U+009B can also defeat a regex (ESC + ZWSP + "[8mIgnore" + ZWSP +
+// "all"): one form keeps "[8m" before the word, and the other forms join the
+// words. In a description, the invisible_unicode heuristic flags such a
+// text: it flags the invisible runes and the ESC.
+//
+// A regex reads this normalized text, and also a folded form of it. The text
+// is folded one rune at a time: the rune is split into its compatibility
+// parts (NFKD), its combining marks (category M) are dropped, and the rest is
+// joined again (NFKC). The pattern is not folded. So a regex such as `ignore`
+// also matches fullwidth and mathematical letters ("ignore" in U+FF49 ... or
+// in U+1D422 ...) and a word with a mark in it ("ig" + U+0336 + "nore"). A
+// fold that is longer than the rune is not used, so the folded form is never
+// longer than the text: a ligature that folds to many letters, such as
+// U+FDFA, stays as it is and cannot push a payload out of the 32 KiB.
+// A text that is only ASCII has no folded form. A rule matches when it
+// matches in one form, and each regex of an all_regex list can match in a
+// different form. So a regex reads up to six forms of a text, and a keyword
+// up to three: such a text costs up to six times as much to match.
+//
+// A regex cannot match an invisible rune (use the invisible_unicode heuristic
+// for that), and a pattern must be written in NFC: a pattern with a letter
+// and a separate combining mark does not match the composed letter. The
+// should_match cases of a rule (NFR-05) catch such a pattern.
+//
+// Keywords are normalized in the same way, but for keywords both the keyword
+// and the text are folded, and only the folded forms are matched. So a mark
+// cannot hide a keyword, fullwidth and mathematical letters match the plain
+// letters, and accents are folded: "cafe" matches "caf" + U+00E9. Homoglyphs
+// from other scripts (for example Cyrillic U+0430 for Latin "a") are not
+// folded, for regexes or keywords.
 //
 // Any run of white space, or U+2800 (braille blank), matches the space
 // between the words of a keyword. Punctuation does not: the keyword "ignore
@@ -82,11 +117,15 @@
 // offset in the raw text. A hit from a regex or a keyword has the offset -1,
 // because it comes from the normalized text.
 //
+// The invisible_unicode heuristic flags the same invisible runes that the
+// normalization removes, so it flags every control character except the
+// white space, such as U+0000, ESC and DEL.
+//
 // The base64_blob heuristic checks each run of base64 characters on its own.
-// An invisible rune inside a run is skipped. Any other character, such as a
-// space, a newline or '=', ends a run, and runs are not joined. So a payload
-// that is split into short chunks is not flagged when no chunk reaches
-// min_length on its own.
+// An invisible rune inside a run, also a control character such as U+0000 or
+// ESC, is skipped. Any other character, such as a space, a newline or '=', ends a
+// run, and runs are not joined. So a payload that is split into short chunks
+// is not flagged when no chunk reaches min_length on its own.
 //
 // The config heuristics (insecure_url, plaintext_secret, unpinned_package,
 // auto_install and typosquat) read one line of text each, not the whole text.
