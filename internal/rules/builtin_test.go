@@ -408,6 +408,9 @@ func TestSchemaRuleCopiesDescriptionRules(t *testing.T) {
 				want.AllRegex = append(want.AllRegex, part.AllRegex...)
 				want.Keywords = append(want.Keywords, part.Keywords...)
 				if part.Heuristic != "" {
+					if want.Heuristic != "" {
+						t.Fatalf("%s joins two heuristic sources; a match block has one heuristic", dst.ID)
+					}
 					want.Heuristic, want.Params = part.Heuristic, part.Params
 				}
 
