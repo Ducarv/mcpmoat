@@ -3,8 +3,9 @@
 # secrets on purpose. Keep real secrets out of these paths: they are not scanned.
 version: 2
 secret:
+  # ggshield globs: a trailing "/" matches a directory at any depth. A trailing
+  # "**" matches only one path segment, so do not use "testdata/**".
   ignored_paths:
     - "**/*_test.go"
-    - "**/testdata/**"
-    - "testdata/**"
-    - "rules/*.yaml"
+    - "testdata/"
+    - "/rules/*.yaml"
