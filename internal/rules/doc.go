@@ -71,9 +71,10 @@
 // ANSI text before a word can hide its first letter from a regex, and a
 // terminal still runs a CSI with a control character inside it (ESC [ U+0001
 // 8 m), which the normalization does not find. A format character after
-// ESC or U+009B can also keep a CSI before a word in every form (ESC + ZWSP
-// + "[8mIgnore" + ZWSP + "all"). In a description, the invisible_unicode
-// heuristic flags such a text: it flags the invisible runes and the ESC.
+// ESC or U+009B can also defeat a regex (ESC + ZWSP + "[8mIgnore" + ZWSP +
+// "all"): one form keeps "[8m" before the word, and the other forms join the
+// words. In a description, the invisible_unicode heuristic flags such a
+// text: it flags the invisible runes and the ESC.
 //
 // A regex reads this normalized text, and also a folded form of it. The text
 // is folded one rune at a time: the rune is split into its compatibility
