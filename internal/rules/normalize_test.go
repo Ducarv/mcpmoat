@@ -126,7 +126,10 @@ func TestNormalizeForMatch(t *testing.T) {
 		{name: "ESC inside keyword", in: "Ig\x1bnore", want: "Ignore"},
 		{name: "C1 CSI before keyword", in: "\u009b8mIgnore", want: " Ignore"},
 		{name: "C1 CSI to space", in: "a\u009b1;31mb", want: "a b"},
-		{name: "JSON-escaped CSI to space", in: "a\\u001b[8mb", want: "a b"},
+		// The text "\u001b" (a backslash and five letters) is not an ESC, so
+		// it stays as it is. A schema rule reads the decoded ESC instead (see
+		// schemaStrings).
+		{name: "JSON-escaped CSI text unchanged", in: "a\\u001b[8mb", want: "a\\u001b[8mb"},
 		{name: "ANSI OSC to space", in: "a\x1b]0;title\x07b", want: "a b"},
 		{name: "ANSI OSC with BEL before keyword", in: "\x1b]0;title\x07Ignore", want: " Ignore"},
 		{name: "C1 OSC with C1 ST", in: "a\u009d0;title\u009cb", want: "a b"},
@@ -436,7 +439,9 @@ func TestMatchForms(t *testing.T) {
 		// < I. The fifth form gives "<I" back (see csiText), the sixth form
 		// loses it, and the strict forms 1 to 3 keep "[" LF "<IMPORTANT>".
 		{name: "LF inside CSI: the fifth form gives the < back", in: "\x1b[\n<IMPORTANT>x", want: []string{"[\n<IMPORTANT>x", " [\n<IMPORTANT>x", " <IMPORTANT>x", " MPORTANT>x"}},
-		{name: "JSON-escaped CSI takes the first letter", in: "a\\u001b[Ignore all", want: []string{"a gnore all", "a Ignore all"}},
+		// The text "\u001b" is not an ESC (see TestNormalizeForMatch), so it
+		// starts no sequence and the text has one form.
+		{name: "JSON-escaped CSI text is one plain form", in: "a\\u001b[Ignore all", want: []string{"a\\u001b[Ignore all"}},
 		// The fourth form puts the space before the ESC (or U+009B), so the
 		// sequence is still a CSI and the ZWSP between words is a space. The
 		// fifth form drops the SGR. The seventh form puts the space before the
@@ -556,6 +561,87 @@ func TestMatchForms(t *testing.T) {
 	}
 }
 
+// TestMatchWindowCut checks when the regex and keyword matchers miss a part
+// of a text because of a byte cap. The boundaries are the same as in
+// TestMatchInputCap (match_test.go).
+func TestMatchWindowCut(t *testing.T) {
+	t.Parallel()
+
+	const kw = "ignore previous"
+	zwsp := func(n int) string { return strings.Repeat("\u200b", n) } // 3 bytes each
+	tests := []struct {
+		name string
+		text string
+		want bool
+	}{
+		{name: "empty", text: "", want: false},
+		{name: "short normal text", text: "Lists the files in a folder.", want: false},
+		{name: "exactly MaxMatchInputBytes", text: strings.Repeat("a", MaxMatchInputBytes), want: false},
+		{name: "one byte over MaxMatchInputBytes", text: strings.Repeat("a", MaxMatchInputBytes+1), want: true},
+		// Each form drops the padding or makes it one space, so the forms
+		// stay short.
+		{name: "invisible padding over the cap normalizes below it", text: zwsp(MaxMatchInputBytes/3+100) + kw, want: false},
+		{name: "invisible padding ends at the raw window", text: zwsp((maxRawScanBytes-len(kw))/3) + kw, want: false},
+		{name: "invisible padding one past the raw window", text: zwsp(maxRawScanBytes/3+1) + kw, want: true},
+		// 8192 runes of 4 bytes is exactly 32 KiB, so step 6 does not cut.
+		// NFC makes each U+1D160 three runes (12 bytes), so step 9 cuts.
+		{name: "NFC growth over the cap", text: strings.Repeat("\U0001D160", 8192), want: true},
+		// The drop form is "aaa..." (16385 bytes), but the space form is
+		// "a a a ..." (32770 bytes), so only the space form is cut.
+		{name: "space form cut, drop form not cut", text: strings.Repeat("a\u200b", 16<<10+1), want: true},
+		// The drop form makes each OSC one space (170 bytes), but the fifth
+		// form keeps its text (170 x 202 bytes), so only the forms that keep
+		// OSC text are cut.
+		{name: "OSC text form cut, drop form not cut", text: oscPadding, want: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if got := matchWindowCut(tt.text); got != tt.want {
+				t.Errorf("matchWindowCut(%d bytes) = %v, want %v", len(tt.text), got, tt.want)
+			}
+		})
+	}
+}
+
+// TestMatchWindowCutSpaceFormOnly checks the input of the "space form cut,
+// drop form not cut" case of TestMatchWindowCut: the drop form alone is not
+// cut, so matchWindowCut must check the other forms too.
+func TestMatchWindowCutSpaceFormOnly(t *testing.T) {
+	t.Parallel()
+
+	in := strings.Repeat("a\u200b", 16<<10+1)
+	if _, cut := normalizeInvisibleCut(in, dropInvisible); cut {
+		t.Errorf("normalizeInvisibleCut(in, dropInvisible) cut = true, want false")
+	}
+	if _, cut := normalizeInvisibleCut(in, spaceInvisible); !cut {
+		t.Errorf("normalizeInvisibleCut(in, spaceInvisible) cut = false, want true")
+	}
+}
+
+// oscPadding is 170 OSCs of 200 letters each. The forms 1 to 4 and 6 make
+// each OSC one space, but the fifth and the seventh form keep its text, so
+// they are longer than MaxMatchInputBytes.
+var oscPadding = strings.Repeat("\x1b]"+strings.Repeat("a", 200)+"\x07", 170)
+
+// TestMatchWindowCutOSCTextFormOnly checks the input of the "OSC text form
+// cut, drop form not cut" case of TestMatchWindowCut: only the forms that
+// keep the text of an OSC are cut, so matchWindowCut must check them too.
+func TestMatchWindowCutOSCTextFormOnly(t *testing.T) {
+	t.Parallel()
+
+	for _, mode := range []invisibleMode{dropInvisible, spaceInvisible, spaceControls, spaceFormats, dropSeqC0} {
+		if _, cut := normalizeInvisibleCut(oscPadding, mode); cut {
+			t.Errorf("normalizeInvisibleCut(oscPadding, %d) cut = true, want false", mode)
+		}
+	}
+	for _, mode := range []invisibleMode{keepSeqText, keepSeqTextSpaced} {
+		if _, cut := normalizeInvisibleCut(oscPadding, mode); !cut {
+			t.Errorf("normalizeInvisibleCut(oscPadding, %d) cut = false, want true", mode)
+		}
+	}
+}
+
 // TestNormalizeInvisibleModes checks that each mode of normalizeInvisible
 // builds its form of matchForms for one input.
 func TestNormalizeInvisibleModes(t *testing.T) {
@@ -668,7 +754,7 @@ func TestNormalizeInvisibleKeepSeqText(t *testing.T) {
 	}{
 		{name: "CSI letter and OSC text kept", in: "\x1b[Ignore\x1b]0;all\x07b", want: " Ignore 0;all b"},
 		{name: "C1 OSC with C1 ST", in: "\u009dall\u009cb", want: " all b"},
-		{name: "JSON-escaped CSI letter kept", in: "a\\u001B[Ignore", want: "a Ignore"},
+		{name: "JSON-escaped CSI text unchanged", in: "a\\u001B[Ignore", want: "a\\u001B[Ignore"},
 		{name: "CSI with no letter is one space", in: "\x1b[1@x", want: " x"},
 		{name: "invisible runes dropped", in: "Ig\u200bnore\x01all", want: "Ignoreall"},
 	}
@@ -704,7 +790,7 @@ func TestNormalizeInvisibleKeepSeqTextSpaced(t *testing.T) {
 		// second form (see replaceRuns).
 		{name: "control rune and ZWSP in one run", in: "\x1b[Ig\x01\u200bnore", want: " Ig  nore", wantFifth: " Ignore"},
 		{name: "C1 CSI letter and ZWSP", in: "\u009bIgnore\u200ball", want: " Ignore all", wantFifth: " Ignoreall"},
-		{name: "JSON-escaped CSI letter and ZWSP", in: "\\u001b[Ignore\u200ball", want: " Ignore all", wantFifth: " Ignoreall"},
+		{name: "JSON-escaped CSI text and ZWSP", in: "\\u001b[Ignore\u200ball", want: "\\u001b[Ignore all", wantFifth: "\\u001b[Ignoreall"},
 		{name: "no invisible run", in: "\x1b[Ignore all", want: " Ignore all", wantFifth: " Ignore all"},
 		// A ZWSP before an ESC must not join "ning" and "jQuery" (#133).
 		{
@@ -781,7 +867,6 @@ func TestSeqText(t *testing.T) {
 		{name: "CSI with a non-m letter final keeps it", seq: "\x1b[2K", want: " K"},
 		{name: "C1 CSI with letter", seq: "\u009bI", want: " I"},
 		{name: "CSI with control rune and letter", seq: "\x1b[\x01z", want: " z"},
-		{name: "JSON-escaped CSI with letter", seq: "\\u001b[I", want: " I"},
 		{name: "CSI with no letter", seq: "\x1b[1@", want: " "},
 		{name: "CSI with a ~ final", seq: "\x1b[~", want: " "},
 		// csiText: the bytes 0x20 to 0x2F and 0x3C to 0x3F are kept, and the
@@ -795,8 +880,6 @@ func TestSeqText(t *testing.T) {
 		{name: "CSI drops a C0 rune", seq: "\x1b[\x01<I", want: " <I"},
 		{name: "CSI drops C0 runes between ESC and [", seq: "\x1b\x01\n[<I", want: " <I"},
 		{name: "C1 CSI keeps a < parameter byte", seq: "\u009b<I", want: " <I"},
-		{name: "JSON-escaped CSI keeps a < parameter byte", seq: "\\u001b[<I", want: " <I"},
-		{name: "JSON-escaped CSI with upper case B", seq: "\\u001B[/.e", want: " /.e"},
 		// The OSC text stays as it is, also its digits and "<".
 		{name: "OSC with BEL", seq: "\x1b]0;t\x07", want: " 0;t "},
 		{name: "OSC keeps < and digits", seq: "\x1b]<1>\x07", want: " <1> "},
@@ -828,8 +911,10 @@ func TestHasSeqStart(t *testing.T) {
 		{name: "ESC", in: "a\x1bb", want: true},
 		{name: "C1 CSI", in: "a\u009bb", want: true},
 		{name: "C1 OSC", in: "a\u009db", want: true},
-		{name: "JSON escape lower case", in: "a\\u001b[", want: true},
-		{name: "JSON escape upper case", in: "a\\u001B[", want: true},
+		// The text "\u001b" is not an ESC: a schema rule reads the decoded
+		// ESC instead (see schemaStrings).
+		{name: "JSON escape text lower case", in: "a\\u001b[", want: false},
+		{name: "JSON escape text upper case", in: "a\\u001B[", want: false},
 		{name: "C1 ST alone", in: "a\u009cb", want: false},
 		{name: "other control rune", in: "a\x01b", want: false},
 		{name: "other JSON escape", in: "a\\u0001b", want: false},

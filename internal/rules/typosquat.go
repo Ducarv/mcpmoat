@@ -440,3 +440,14 @@ func osaDistance(a, b string) int {
 func builtinPopular() ([]string, error) {
 	return ParsePopular(strings.NewReader(builtinrules.PopularServers))
 }
+
+// NewBuiltinTyposquat builds the T5 check from the embedded popular server
+// list. It parses the list each time it is called, so the CLI calls it once
+// per scan. It returns an error if the embedded list does not parse.
+func NewBuiltinTyposquat() (*Typosquat, error) {
+	popular, err := builtinPopular()
+	if err != nil {
+		return nil, err
+	}
+	return NewTyposquat(popular), nil
+}

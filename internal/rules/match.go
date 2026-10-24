@@ -36,6 +36,21 @@ import (
 // 1.1G instruction-bytes. BenchmarkWorstCaseBlock measured about 10.4 s for
 // one Match call over the fourteen forms on an Apple M1 Pro (median of five
 // runs, Go 1.27). The package doc says how the rule count multiplies it.
+//
+// A text longer than the window is cut, so padding can push a payload out of
+// the reach of the regex and keyword rules. The match_window heuristic closes
+// this evasion: a high rule with it fires on every text that the matchers do
+// not read in full (see matchWindowCut).
+//
+// A schema target is many short texts (see matchSchema). An any_regex,
+// all_regex or keywords rule reads one schema in three passes: its strings
+// (at most maxSchemaMatchBytes, 128 KiB, and maxSchemaMatchStrings strings),
+// the seams of neighbour strings (at most maxSeamBytes, 128 KiB), and, when
+// the JSON cannot be read in full, the raw text once, in the window of one
+// description. So one schema costs about nine times the bound of one
+// description: the seam pass doubles the cost of the string pass. The match_window
+// heuristic fires on a schema whose strings these caps cut, but not when the
+// seam budget is used up. The package doc gives the details.
 const (
 	// MaxPatternBytes is the largest regex or keyword, in bytes, before
 	// compilation.
@@ -81,7 +96,8 @@ const NoOffset = -1
 type Hit struct {
 	// Offset is a byte offset in the raw text, or NoOffset for regex and
 	// keyword hits: they run on the normalized text, so no raw offset is
-	// known.
+	// known. Every hit of a schema target has NoOffset too, also a hit of a
+	// heuristic or of the raw JSON text (see matchSchema).
 	Offset int
 	// Detail is short printable ASCII that mcpmoat builds. It never holds
 	// text from the input.
@@ -97,17 +113,36 @@ const (
 	kindHeuristic = "heuristic"
 )
 
-// Matcher is a compiled match block. Make one with Match.Compile. A Matcher
-// is immutable and safe for concurrent use.
+// Matcher is a compiled match block for one target. Make one with
+// Match.CompileFor. A Matcher is immutable and safe for concurrent use.
 type Matcher struct {
 	kind      string
+	target    Target                 // how Match reads the text
+	mode      schemaMode             // how Match reads a schema
 	regexps   []*regexp.Regexp       // any_regex, all_regex and keywords
 	heuristic func(raw string) []Hit // heuristic
 }
 
-// Compile checks the match block and compiles it. Every error is a
-// *FieldError that names the field.
-func (m Match) Compile() (*Matcher, error) {
+// CompileFor checks the match block and compiles it for the target t. Every
+// error is a *FieldError that names the field.
+//
+// The target decides how Matcher.Match reads its text. For TargetSchema, the
+// text is a JSON schema, and Match reads each of its strings, and for some
+// kinds also the seams of neighbour strings (see Matcher.Match). For any
+// other target, Match reads the text as one text.
+// CompileFor does not check t: Validate checks the target of a rule.
+func (m Match) CompileFor(t Target) (*Matcher, error) {
+	mt, err := m.compile()
+	if err != nil {
+		return nil, err
+	}
+	mt.target = t
+	return mt, nil
+}
+
+// compile checks the match block and compiles it, with no target. Every
+// error is a *FieldError that names the field.
+func (m Match) compile() (*Matcher, error) {
 	// A list that is present but empty (YAML "[]") counts as given, so the
 	// error says "must not be empty" and not "set exactly one".
 	given := 0
@@ -129,7 +164,11 @@ func (m Match) Compile() (*Matcher, error) {
 		if err != nil {
 			return nil, err
 		}
-		return &Matcher{kind: kindHeuristic, heuristic: fn}, nil
+		mode := schemaAll
+		if m.Heuristic == HeuristicMatchWindow {
+			mode = schemaWindow
+		}
+		return &Matcher{kind: kindHeuristic, mode: mode, heuristic: fn}, nil
 	case m.AnyRegex != nil:
 		return compileRegexMatcher(kindAnyRegex, m.AnyRegex, nil)
 	case m.AllRegex != nil:
@@ -146,7 +185,7 @@ func compileRegexMatcher(kind string, list []string, build func(entry, s string)
 	if err != nil {
 		return nil, err
 	}
-	return &Matcher{kind: kind, regexps: res}, nil
+	return &Matcher{kind: kind, mode: schemaBudget, regexps: res}, nil
 }
 
 // Match returns the hits of the matcher in text, or nil when it does not
@@ -164,6 +203,28 @@ func compileRegexMatcher(kind string, list []string, build func(entry, s string)
 //
 // A regex or keyword hit has the offset NoOffset, whatever form it matched
 // in, because a form has no byte offsets in the raw text.
+//
+// For the schema target, text is a JSON schema, and Match runs the steps
+// above on each decoded object key and string value (see matchSchema).
+// Every hit then has the offset NoOffset, and its detail starts with a label
+// such as "schema string N" (the package doc lists the labels). The schema
+// mode depends on the kind:
+//
+//   - a heuristic reads every string, with no cap and no seams (schemaAll).
+//     So invisible_unicode, base64_blob and tag_or_bidi_override flag a
+//     decoded string, also when the JSON text writes its runes as \u escapes;
+//   - the match_window heuristic fires once when the regex and keyword rules
+//     cannot read all the strings of the schema: the JSON is broken, the
+//     schema caps cut the strings, or one string is longer than the match
+//     window (schemaWindow). It does not fire when the seam budget is used
+//     up;
+//   - any_regex, all_regex and keywords read the strings until the schema
+//     caps stop them. When no string matched, they also read each seam of
+//     two neighbour strings, until the seam budget stops them (schemaBudget).
+//     Only this mode has the seam pass.
+//
+// When the JSON cannot be read in full, every mode except schemaWindow also
+// reads the raw text once.
 func (m *Matcher) Match(text string) []Hit {
 	if m == nil {
 		return nil
@@ -179,8 +240,30 @@ func (m *Matcher) Match(text string) []Hit {
 // heuristic reads only p.raw, so it does not build the forms. matchPrepared
 // never writes into the forms of p.
 //
+// For the schema target, p.raw is a JSON schema, and matchPrepared reads it
+// with matchSchema. The forms of p are then not built and not shared:
+// matchSchema calls matchText on each string, seam and raw text, and
+// matchText builds a new preparedText for each of them.
+//
 // m and p must not be nil. Match does the nil check for m.
 func (m *Matcher) matchPrepared(p *preparedText) []Hit {
+	if m.target == TargetSchema {
+		return matchSchema(p.raw, m.mode, m.matchText)
+	}
+	return m.matchOne(p)
+}
+
+// matchText returns the hits of m in one text, as Match describes for a text
+// that is not a schema. For a schema, matchSchema calls it on each string,
+// and in some cases on seams and on the raw text (see matchSchema). It builds
+// a new preparedText for text.
+func (m *Matcher) matchText(text string) []Hit {
+	return m.matchOne(prepareText(text))
+}
+
+// matchOne returns the hits of m in p.raw, read as one text (not as a
+// schema), with the forms of p.
+func (m *Matcher) matchOne(p *preparedText) []Hit {
 	switch m.kind {
 	case kindHeuristic:
 		return m.heuristic(p.raw)

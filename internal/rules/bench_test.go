@@ -56,7 +56,7 @@ var benchKeywords = []string{
 
 // benchMatcherSet compiles a realistic set of matchers: one any_regex with
 // the PRD MOAT-T1-003 patterns and other T1 patterns, one keywords list and
-// the three heuristics with their defaults.
+// the text heuristics with their defaults.
 func benchMatcherSet(tb testing.TB) []*Matcher {
 	tb.Helper()
 	blocks := []Match{
@@ -70,6 +70,7 @@ func benchMatcherSet(tb testing.TB) []*Matcher {
 		{Heuristic: HeuristicInvisibleUnicode},
 		{Heuristic: HeuristicMaxLength},
 		{Heuristic: HeuristicBase64Blob},
+		{Heuristic: HeuristicMixedScript},
 	}
 	return mustCompileAll(tb, blocks)
 }
@@ -189,7 +190,7 @@ func worstBlock(tb testing.TB) []string {
 	if _, _, ok := largest(maxTotalInsts - total); ok {
 		tb.Fatalf("worstBlock: %d instructions left unused", maxTotalInsts-total)
 	}
-	if _, err := (Match{AnyRegex: list}).Compile(); err != nil {
+	if _, err := (Match{AnyRegex: list}).CompileFor(TargetDescription); err != nil {
 		tb.Fatalf("worstBlock: Compile() error = %v", err)
 	}
 	return list
@@ -210,7 +211,7 @@ func worstBlock(tb testing.TB) []string {
 // every tool text is matched against every rule, so this cost is multiplied
 // by the number of rules and the number of texts.
 func BenchmarkWorstCaseBlock(b *testing.B) {
-	m, err := Match{AnyRegex: worstBlock(b)}.Compile()
+	m, err := Match{AnyRegex: worstBlock(b)}.CompileFor(TargetDescription)
 	if err != nil {
 		b.Fatalf("Compile() error = %v", err)
 	}
@@ -234,6 +235,102 @@ func BenchmarkWorstCaseBlock(b *testing.B) {
 	}
 }
 
+// worstSchema returns a JSON array of n distinct strings that fills the caps
+// of schemaFit exactly: each string is maxSchemaMatchBytes/n bytes long, and
+// n is at most maxSchemaMatchStrings. Each string starts with allFormsText,
+// so it has all fourteen regex forms, and the rest is letters, so no regex of
+// worstBlock matches. It also checks that the seam pass runs on as many seams
+// as maxSeamBytes allows.
+func worstSchema(tb testing.TB, n int) string {
+	tb.Helper()
+	size := maxSchemaMatchBytes / n
+	strs := make([]string, n)
+	for i := range strs {
+		// Three letters make each string distinct: 26*26*26 > maxSchemaMatchStrings.
+		id := string([]byte{byte('a' + i/676%26), byte('a' + i/26%26), byte('a' + i%26)})
+		strs[i] = allFormsText + id + strings.Repeat("a", size-len(allFormsText)-len(id))
+	}
+	raw := mustJSON(tb, strs)
+
+	got, complete := schemaStrings([]byte(raw))
+	if fit, cut := schemaFit(got); !complete || cut || fit != n || len(got) != n {
+		tb.Fatalf("worstSchema(%d): %d strings, %d fit, cut %v, complete %v", n, len(got), fit, cut, complete)
+	}
+	if forms := len(regexForms(got[0])); forms != 14 || len(got[0]) != size {
+		tb.Fatalf("worstSchema(%d): string of %d bytes with %d forms, want %d bytes and 14 forms", n, len(got[0]), forms, size)
+	}
+
+	// No string matches, so the seam pass runs until maxSeamBytes stops it.
+	var strCalls, seamCalls int
+	var firstSeam string
+	matchSchema(raw, schemaBudget, func(s string) []Hit {
+		if !strings.Contains(s, seamSep) {
+			strCalls++
+			return nil
+		}
+		if seamCalls == 0 {
+			firstSeam = s
+		}
+		seamCalls++
+		return nil
+	})
+	wantSeams := min(n-1, maxSeamBytes/(2*min(size, seamSideBytes)+len(seamSep)))
+	if strCalls != n || seamCalls != wantSeams || len(regexForms(firstSeam)) != 14 {
+		tb.Fatalf("worstSchema(%d): %d string calls, %d seam calls, first seam %d forms; want %d, %d, 14",
+			n, strCalls, seamCalls, len(regexForms(firstSeam)), n, wantSeams)
+	}
+	return raw
+}
+
+// BenchmarkSchemaWorstCase measures the worst-case block of
+// BenchmarkWorstCaseBlock, compiled for the schema target, on a schema that
+// fills the caps of schemaFit. Each string has the fourteen regex forms. No string
+// matches, so the seam pass also runs until maxSeamBytes stops it. Three
+// shapes fill the byte cap:
+//
+//   - 4096 strings of 32 bytes: they also fill maxSchemaMatchStrings, so this
+//     shape has the most match calls (4096 strings and 1365 seams);
+//   - 256 strings of 512 bytes: each seam is 544 bytes, the longest, so this
+//     shape has the most seam bytes (240 seams);
+//   - 4 strings of 32 KiB (MaxMatchInputBytes): this shape is four times the
+//     description worst case, plus only 3 seams.
+//
+// The JSON is complete, so the raw text is not matched. A broken schema adds
+// one raw text match, at most one BenchmarkWorstCaseBlock.
+//
+// The seam pass reads up to maxSeamBytes more, so the cost bound of one
+// schema is about twice the bound of the strings alone.
+//
+// Measured on 2026-10-24 on an Apple M1 Pro (go1.27.3 darwin/arm64), caps
+// 128 KiB and 4096 strings, fourteen regex forms for each string, with
+// -benchtime=3x, in the same run as BenchmarkWorstCaseBlock (about 10.4 s):
+//
+//   - 4096 strings: about 1.3 s for one Match call, about 0.13 times the
+//     description worst case. Each string and seam is short, so few regex
+//     threads are alive at each byte;
+//   - 256 strings: about 35.0 s for one Match call, about 3.4 times the
+//     description worst case;
+//   - 4 strings: about 41.6 s for one Match call, about 4.0 times the
+//     description worst case. This is the worst shape.
+func BenchmarkSchemaWorstCase(b *testing.B) {
+	m, err := Match{AnyRegex: worstBlock(b)}.CompileFor(TargetSchema)
+	if err != nil {
+		b.Fatalf("CompileFor() error = %v", err)
+	}
+	for _, n := range []int{maxSchemaMatchStrings, 256, 4} {
+		raw := worstSchema(b, n)
+		b.Run(fmt.Sprintf("%d strings", n), func(b *testing.B) {
+			b.SetBytes(int64(len(raw)))
+			b.ReportAllocs()
+			for b.Loop() {
+				if m.Match(raw) != nil {
+					b.Fatal("Match() != nil, want no match")
+				}
+			}
+		})
+	}
+}
+
 // TestMatch10MBCorrect checks that the matchers give the right result on a
 // 10 MB text: the regex and keyword matchers read only the first
 // MaxMatchInputBytes, and the heuristics read the full text.
@@ -246,6 +343,7 @@ func TestMatch10MBCorrect(t *testing.T) {
 	invisible := mustCompileMatch(t, Match{Heuristic: HeuristicInvisibleUnicode})
 	maxLen := mustCompileMatch(t, Match{Heuristic: HeuristicMaxLength})
 	b64 := mustCompileMatch(t, Match{Heuristic: HeuristicBase64Blob})
+	mixed := mustCompileMatch(t, Match{Heuristic: HeuristicMixedScript})
 
 	const early = "ignore previous" // planted in the first KiB
 	const late = "id_rsa"           // planted after the cap
@@ -306,6 +404,13 @@ func TestMatch10MBCorrect(t *testing.T) {
 		t.Parallel()
 		if got := b64.Match(text); got != nil {
 			t.Errorf("b64.Match() = %v, want nil", got)
+		}
+	})
+
+	t.Run("mixed_script does not flag the filler", func(t *testing.T) {
+		t.Parallel()
+		if got := mixed.Match(text); got != nil {
+			t.Errorf("mixed.Match() = %v, want nil", got)
 		}
 	})
 }

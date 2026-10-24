@@ -478,14 +478,96 @@ func TestE2EScanSecretsDoNotLeak(t *testing.T) {
 				t.Run(mode.name, func(t *testing.T) {
 					stdout, stderr, code := runBin(t, home, work, mode.args...)
 
+					// The secrets fixtures hold plaintext secrets, so the config
+					// rules find MOAT-T4-002 (high) and the exit code is 1.
 					// assertScanResult also checks that no canary leaks.
-					assertScanResult(t, code, stdout, stderr, scanWant{code: exitOK})
-					// Check that the scan listed servers. Without this, an
-					// empty output would pass the leak check.
+					assertScanResult(t, code, stdout, stderr, scanWant{code: exitFindings})
+					assertCleanStderr(t, stderr)
+					// Check that the scan listed servers and findings. Without
+					// this, an empty output would pass the leak check.
 					if len(tableRows(t, stdout)) == 0 {
 						t.Errorf("stdout has no server rows:\n%s", stdout)
 					}
+					if !slices.Contains(findingIDs(findingRows(t, stdout)), "MOAT-T4-002") {
+						t.Errorf("no MOAT-T4-002 finding, so the findings block is not checked\nstdout:\n%s", stdout)
+					}
+					// The server table and stderr show no env at all. The
+					// findings block may name the key API_KEY, never a value.
+					scanAssertNoSecret(t, stdout, stderr)
 				})
+			}
+		})
+	}
+}
+
+// TestE2EScanConfigFindings scans the dangerous config fixture (T4). The
+// findings block names keys, never values, and the ignore list can remove the
+// high findings and so change the exit code.
+func TestE2EScanConfigFindings(t *testing.T) {
+	t.Parallel()
+	canaries := dangerousCanaries
+
+	tests := []struct {
+		name     string
+		args     []string
+		wantCode int
+		wantRows [][]string // whole rows (RULE, SEVERITY, SERVER, FIELD, KEY/RELATED) that must show
+		wantNone []string   // rule IDs that must not show
+		// wantStderr is the one line on stderr ("" for an empty stderr): the
+		// line that counts the ignored findings.
+		wantStderr string
+	}{
+		{
+			name:     "findings",
+			args:     []string{"scan", "--no-connect"},
+			wantCode: exitFindings,
+			wantRows: [][]string{
+				{"MOAT-T4-001", "high", "remote-plain", "url", "-"},
+				{"MOAT-T4-002", "high", "env-secret", "env", "GITHUB_TOKEN"},
+			},
+		},
+		{
+			name:     "high findings ignored",
+			args:     []string{"scan", "--no-connect", "--ignore", "MOAT-T4-001", "--ignore", "MOAT-T4-002"},
+			wantCode: exitOK,
+			wantNone: []string{"MOAT-T4-001", "MOAT-T4-002"},
+			// Hidden findings are never silent: the count is on stderr, with
+			// rule IDs only.
+			wantStderr: "mcpmoat scan: 5 findings ignored: MOAT-T4-001 (1), MOAT-T4-002 (4)",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			home, work := discovertest.CopyFixture(t, filepath.Join("..", "..", "testdata", "configs", "dangerous"))
+
+			stdout, stderr, code := runBin(t, home, work, tt.args...)
+
+			want := scanWant{code: tt.wantCode}
+			if tt.wantStderr != "" {
+				want.stderr = []string{tt.wantStderr}
+			}
+			assertScanResult(t, code, stdout, stderr, want)
+			if tt.wantStderr == "" {
+				assertCleanStderr(t, stderr)
+			} else {
+				assertStderrLines(t, stderr, []lineWant{exactLine(tt.wantStderr)})
+			}
+			assertContainsNone(t, "stdout", stdout, canaries)
+			assertContainsNone(t, "stderr", stderr, canaries)
+			if len(tableRows(t, stdout)) == 0 {
+				t.Fatalf("stdout has no server rows:\n%s", stdout)
+			}
+			rows := findingRows(t, stdout)
+			for _, want := range tt.wantRows {
+				if !slices.ContainsFunc(rows, func(row []string) bool { return slices.Equal(row, want) }) {
+					t.Errorf("no finding row %v\nstdout:\n%s", want, stdout)
+				}
+			}
+			for _, id := range tt.wantNone {
+				if slices.Contains(findingIDs(rows), id) {
+					t.Errorf("finding %s shows, but it is ignored\nstdout:\n%s", id, stdout)
+				}
 			}
 		})
 	}
@@ -539,7 +621,6 @@ func TestE2EScanIgnore(t *testing.T) {
 		assertStderrLines(t, stderr, []lineWant{
 			prefixLine(scanWarnPrefix + rules.IgnoreFileName + ":2: "),
 			exactLine("mcpmoat scan: using 1 entry from " + rules.IgnoreFileName),
-			exactLine(noRulesNotice),
 		})
 		if strings.Contains(stderr, "onlytool") {
 			t.Errorf("stderr shows content of the ignore file:\n%s", stderr)
@@ -581,18 +662,20 @@ func e2eRulesDir(t *testing.T, parts ...string) string {
 }
 
 // TestE2EScanRulesExtra checks that a valid external rule folder changes
-// nothing yet, because scan loads the rules but does not apply them.
+// nothing yet, because scan loads the rules but does not apply them. The only
+// change is the notice on stderr that says so.
 func TestE2EScanRulesExtra(t *testing.T) {
 	t.Parallel()
 	home, work := t.TempDir(), t.TempDir()
 
 	stdout, stderr, code := runBin(t, home, work, "scan", "--no-connect", "--rules", e2eRulesDir(t, "extra"))
 
-	assertScanResult(t, code, stdout, stderr, scanWant{code: exitOK})
+	assertScanResult(t, code, stdout, stderr, scanWant{code: exitOK, stderr: []string{rulesNotAppliedNotice}})
 	baseOut, baseErr, baseCode := runBin(t, home, work, "scan", "--no-connect")
-	if code != baseCode || stdout != baseOut || stderr != baseErr {
+	wantErr := baseErr + rulesNotAppliedNotice + "\n"
+	if code != baseCode || stdout != baseOut || stderr != wantErr {
 		t.Errorf("--rules changes the result: exit code %d, want %d\nstdout:\n%s\nwant stdout:\n%s\nstderr:\n%s\nwant stderr:\n%s",
-			code, baseCode, stdout, baseOut, stderr, baseErr)
+			code, baseCode, stdout, baseOut, stderr, wantErr)
 	}
 }
 

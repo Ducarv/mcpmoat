@@ -18,8 +18,8 @@ import (
 // small when a server sends a very long text. Real tool descriptions are a
 // few KB long, so the cap does not cut them.
 //
-// The heuristics (max_length, invisible_unicode, base64_blob) see the full raw
-// text, so a very long text is still flagged.
+// The text heuristics (max_length, invisible_unicode, base64_blob and
+// mixed_script) see the full raw text, so a very long text is still flagged.
 const MaxMatchInputBytes = 32 << 10
 
 // maxRawScanBytes is the largest part of the raw text that normalizeForMatch
@@ -107,13 +107,12 @@ func isInvisibleFormat(r rune) bool {
 //     and the ZWSP splits two words. In ESC + ZWSP + "[8mIgnore" + ZWSP +
 //     "all", the space goes before the ESC, so ESC [ 8 m is still a CSI and
 //     the form is "  Ignore all".
-//  5. When s holds ESC, U+009B (CSI) or U+009D (OSC), or the JSON text
-//     \u001b or \u001B (see hasSeqStart): as the first form, but the
-//     sequences are read with ansiSeqC0 and a sequence gives back the text
-//     that it takes (see keepSeqText and seqText). A CSI whose final byte is
-//     an ASCII letter other than 'm' becomes a space, its parameter bytes
-//     < = > ? and its intermediate bytes (such as "." and "/"), and its final
-//     letter. So ESC [ "Ignore" is " Ignore", ESC [ "<IMPORTANT>" is
+//  5. When s holds ESC, U+009B (CSI) or U+009D (OSC) (see hasSeqStart): as
+//     the first form, but the sequences are read with ansiSeqC0 and a
+//     sequence gives back the text that it takes (see keepSeqText and
+//     seqText). A CSI whose final byte is an ASCII letter other than 'm'
+//     becomes a space, its parameter bytes < = > ? and its intermediate
+//     bytes (such as "." and "/"), and its final letter. So ESC [ "Ignore" is " Ignore", ESC [ "<IMPORTANT>" is
 //     " <IMPORTANT>" and ESC [ ".env" is " .env". Its numeric parameter bytes
 //     (digits, ";" and ":") are dropped, so ESC [ 2 K is " K". A CSI with the
 //     final 'm' is SGR (colour and bold): it becomes nothing, as a terminal
@@ -163,16 +162,17 @@ func isInvisibleFormat(r rune) bool {
 //     (the CSI ESC [ ~ and the text "/.ssh");
 //   - a payload that only the fifth or the seventh form shows, after more
 //     than MaxMatchInputBytes of text that these forms keep from escape
-//     sequences (OSC text and CSI bytes). The max_length heuristic flags
-//     such a long text.
+//     sequences (OSC text and CSI bytes). The match_window heuristic flags
+//     such a text, because the window cuts the fifth or the seventh form
+//     (see matchWindowCut).
 //
 // The fifth form can also make a token that neither the raw text nor a
 // terminal shows, from a rare CSI: it writes a space and gives back the
 // kept bytes and the final letter. So "<system" + ESC [ > c + "-info>" (a
 // DA2) is "<system >c-info>", ESC [ SP q + ESC [ 1 m + "iPhone" (a
-// DECSCUSR before an SGR) gives the word "qiPhone", and the JSON text
-// \u001b + "[.env" is " .env". Such a hit can be a false positive. The
-// invisible_unicode heuristic flags the ESC at medium in either case.
+// DECSCUSR before an SGR) gives the word "qiPhone". Such a hit can be a
+// false positive. The invisible_unicode heuristic flags the ESC at medium in
+// either case.
 //
 // An OSC with more than 256 runes of text is not an OSC for ansiSeq or
 // ansiSeqC0. So its ESC and its end are dropped, and its text stays in every
@@ -183,39 +183,72 @@ func isInvisibleFormat(r rune) bool {
 // seven times the cost bound in match.go. The regex matchers also read the
 // folds (see preparedText.regexForms).
 func matchForms(s string) []string {
-	forms := []string{normalizeForMatch(s)}
-	raw := cutAtRune(s, maxRawScanBytes)
-	hasControl := strings.ContainsFunc(raw, isInvisibleControl)
-	hasFormat := strings.ContainsFunc(raw, isInvisibleFormat)
-	if hasControl || hasFormat {
-		forms = appendNew(forms, normalizeInvisible(s, spaceInvisible))
-	}
-	if hasControl {
-		forms = appendNew(forms, normalizeInvisible(s, spaceControls))
-	}
-	if hasControl && hasFormat {
-		forms = appendNew(forms, normalizeInvisible(s, spaceFormats))
-	}
-	seqStart := hasSeqStart(raw)
-	if seqStart {
-		forms = appendNew(forms, normalizeInvisible(s, keepSeqText))
-	}
-	if hasSeqC0(raw) {
-		forms = appendNew(forms, normalizeInvisible(s, dropSeqC0))
-	}
-	if seqStart && hasPlainInvisible(raw) {
-		forms = appendNew(forms, normalizeInvisible(s, keepSeqTextSpaced))
-	}
+	forms, _ := matchFormsCut(s)
 	return forms
 }
 
-// hasSeqStart reports whether s holds a rune or a text that can start an
-// ANSI escape sequence in ansiSeqC0: ESC, U+009B (CSI) or U+009D (OSC) (see
-// startsSeq), or the JSON escape \u001b or \u001B. matchForms adds the fifth
-// form only then, and the seventh form only then and with hasPlainInvisible.
+// matchWindowCut reports whether the regex and keyword matchers can miss a
+// part of s because of a byte cap. That is so when s is longer than
+// maxRawScanBytes, or when step 6 or step 9 of normalizeForMatch cuts one of
+// the forms of matchForms at MaxMatchInputBytes.
+//
+// It checks every form, not only the first. The other forms can be longer
+// than the first: in the second form each run of invisible runes becomes a
+// space instead of nothing, and the fifth and the seventh form keep the text
+// of escape sequences. So invisible padding or OSC text can push a payload
+// out of the window of one of these forms only.
+func matchWindowCut(s string) bool {
+	if len(s) > maxRawScanBytes {
+		return true
+	}
+	_, cut := matchFormsCut(s)
+	return cut
+}
+
+// matchFormsCut returns the forms of matchForms, and true when step 6 or
+// step 9 of normalizeForMatch cut one of them (see normalizeInvisibleCut).
+// The flag covers each form that it builds, also a form that is equal to an
+// earlier form and so is not added to the list.
+func matchFormsCut(s string) ([]string, bool) {
+	first, cut := normalizeInvisibleCut(s, dropInvisible)
+	forms := []string{first}
+	raw := cutAtRune(s, maxRawScanBytes)
+	hasControl := strings.ContainsFunc(raw, isInvisibleControl)
+	hasFormat := strings.ContainsFunc(raw, isInvisibleFormat)
+	seqStart := hasSeqStart(raw)
+	var modes []invisibleMode
+	if hasControl || hasFormat {
+		modes = append(modes, spaceInvisible)
+	}
+	if hasControl {
+		modes = append(modes, spaceControls)
+	}
+	if hasControl && hasFormat {
+		modes = append(modes, spaceFormats)
+	}
+	if seqStart {
+		modes = append(modes, keepSeqText)
+	}
+	if hasSeqC0(raw) {
+		modes = append(modes, dropSeqC0)
+	}
+	if seqStart && hasPlainInvisible(raw) {
+		modes = append(modes, keepSeqTextSpaced)
+	}
+	for _, mode := range modes {
+		f, fCut := normalizeInvisibleCut(s, mode)
+		forms = appendNew(forms, f)
+		cut = cut || fCut
+	}
+	return forms, cut
+}
+
+// hasSeqStart reports whether s holds a rune that can start an ANSI escape
+// sequence in ansiSeqC0: ESC, U+009B (CSI) or U+009D (OSC) (see startsSeq).
+// matchForms adds the fifth form only then, and the seventh form only then
+// and with hasPlainInvisible.
 func hasSeqStart(s string) bool {
-	return strings.ContainsFunc(s, startsSeq) ||
-		strings.Contains(s, `\u001b`) || strings.Contains(s, `\u001B`)
+	return strings.ContainsFunc(s, startsSeq)
 }
 
 // hasPlainInvisible reports whether s holds an invisible rune (see
@@ -412,22 +445,33 @@ func (m invisibleMode) ansiStep(s string) string {
 
 // normalizeInvisible runs the steps of normalizeForMatch, with the invisible
 // runes and the escape sequences handled as mode says. In each mode, the
-// white space is mapped as in normalizeForMatch.
+// white space is mapped as in normalizeForMatch. It is normalizeInvisibleCut
+// without the cut flag.
 func normalizeInvisible(s string, mode invisibleMode) string {
+	out, _ := normalizeInvisibleCut(s, mode)
+	return out
+}
+
+// normalizeInvisibleCut is normalizeInvisible, and it also reports whether
+// step 6 or step 9 of normalizeForMatch cut the text at MaxMatchInputBytes.
+// When the flag is true, the form misses the end of the text, so a matcher
+// cannot see a payload there. The cut of step 1 (maxRawScanBytes) is not in
+// the flag: matchWindowCut checks the raw length itself.
+func normalizeInvisibleCut(s string, mode invisibleMode) (string, bool) {
 	s = cutAtRune(s, maxRawScanBytes)
 	s = replaceFormatRuns(s, mode)
 	s = mode.ansiStep(s)
 	s = replaceInvisible(s, mode.controlRepl()) // only invisible control runes are left
 	s = spacesToASCII(s)
+	cut := len(s) > MaxMatchInputBytes // step 6 cuts the text
 	s = cutAtRune(s, MaxMatchInputBytes)
 	s = norm.NFC.String(s)
-	return cutAtRune(replaceInvisible(s, mode.formatRepl()), MaxMatchInputBytes)
+	s = replaceInvisible(s, mode.formatRepl())
+	if len(s) > MaxMatchInputBytes { // step 9 cuts the text
+		cut = true
+	}
+	return cutAtRune(s, MaxMatchInputBytes), cut
 }
-
-// jsonCSIExpr matches a CSI in JSON text, where ESC is the escape \u001b or
-// \u001B. Its final byte is not a backslash (see ansiSeq). ansiSeq and
-// ansiSeqC0 share it.
-const jsonCSIExpr = `\\u001[bB]\[[0-?]*[ -/]*[@-\[\]-~]`
 
 // oscExpr matches an OSC: ESC ] (or U+009D), at most 256 runes of text, and
 // BEL, ESC \ or U+009C. ansiSeq and ansiSeqC0 share it.
@@ -441,18 +485,13 @@ const oscExpr = `(?:\x1b\]|\x{9d})[^\x07\x1b\x{9c}]{0,256}(?:\x07|\x1b\\|\x{9c})
 //   - OSC: ESC ] (or U+009D), at most 256 runes of text, and BEL, ESC \ or
 //     U+009C (see oscExpr).
 //
-// The schema target is JSON text, where ESC is the escape \u001b, so a CSI
-// that starts with that escape matches too (see jsonCSIExpr). Its final byte
-// is not a backslash: in JSON text a backslash starts the next escape, so in
-// \u001b[\u0001Ignore the CSI does not take the backslash and leave
-// "u0001Ignore" with no word edge. An OSC with no end, or with more than 256
-// runes of text, does not match, so it cannot swallow the rest of the text;
-// its ESC is an invisible control rune, so step 4 of normalizeForMatch drops
-// it, and its text stays.
+// An OSC with no end, or with more than 256 runes of text, does not match,
+// so it cannot swallow the rest of the text; its ESC is an invisible control
+// rune, so step 4 of normalizeForMatch drops it, and its text stays.
 //
 // A CSI here holds no C0 control rune. The forms 1 to 3 of matchForms read
 // the sequences with ansiSeq. The forms 4 to 7 read them with ansiSeqC0.
-var ansiSeq = regexp.MustCompile(`(?:\x1b\[|\x{9b})[0-?]*[ -/]*[@-~]|` + jsonCSIExpr + `|` + oscExpr)
+var ansiSeq = regexp.MustCompile(`(?:\x1b\[|\x{9b})[0-?]*[ -/]*[@-~]|` + oscExpr)
 
 // csiC0 is the content of a regex class: the C0 control runes that a
 // terminal (VT500 and xterm) runs inside a CSI and then goes on with the
@@ -464,11 +503,10 @@ const csiC0 = `\x00-\x17\x19\x1c-\x1f\x7f`
 // csiC0Rune matches one rune of csiC0 (see hasSeqC0).
 var csiC0Rune = regexp.MustCompile(`[` + csiC0 + `]`)
 
-// ansiSeqC0 is ansiSeq, but a raw CSI can hold C0 control runes (see csiC0),
-// as in a terminal: between ESC and "[", and among the parameter and
+// ansiSeqC0 is ansiSeq, but a CSI can hold C0 control runes (see csiC0), as
+// in a terminal: between ESC and "[", and among the parameter and
 // intermediate bytes. So ESC + U+0001 + "[8m" and U+009B + U+0001 + "8m" are
-// a CSI too. The JSON branch and the OSC are the same as in ansiSeq
-// (jsonCSIExpr and oscExpr).
+// a CSI too. The OSC is the same as in ansiSeq (oscExpr).
 //
 // The final byte of a CSI can be a letter of the text: in ESC [ "Ignore",
 // the CSI is ESC [ I, as for a terminal. And a C0 rune lets a CSI take
@@ -478,7 +516,7 @@ var csiC0Rune = regexp.MustCompile(`[` + csiC0 + `]`)
 // letter final byte (see ansiKeepText).
 var ansiSeqC0 = regexp.MustCompile(
 	`(?:\x1b[` + csiC0 + `]*\[|\x{9b})[0-?` + csiC0 + `]*[ -/` + csiC0 + `]*[@-~]` +
-		`|` + jsonCSIExpr + `|` + oscExpr)
+		`|` + oscExpr)
 
 // ansiToSpace replaces each ANSI escape sequence (see ansiSeq) with U+0020.
 // Without this step, ESC [ 8 m before "Ignore" leaves "[8mIgnore", and the
@@ -519,8 +557,8 @@ func ansiC0ToSpace(s string) string {
 //
 //   - a CSI with a letter other than 'm' as its final byte becomes 1 byte
 //     (U+0020), its kept parameter and intermediate bytes, and its final
-//     byte. It is at least 2 bytes (ESC [, U+009B, or the 7 bytes of
-//     \u001b[), the same kept bytes and more, and its final byte;
+//     byte. It is at least 2 bytes (ESC [ or U+009B), the same kept bytes
+//     and more, and its final byte;
 //   - an SGR (a CSI with the final byte 'm') becomes nothing;
 //   - an OSC becomes its text and 2 bytes, and it is its text and at least 3
 //     bytes long (ESC ] and BEL; U+009D is 2 bytes, and its end is 1 or 2
@@ -558,17 +596,17 @@ func seqText(seq string) string {
 // csiText returns the bytes of head that a CSI takes from the text: head is
 // a CSI of ansiSeqC0 without its final byte. They are its parameter bytes
 // < = > ? (0x3C to 0x3F) and its intermediate bytes (0x20 to 0x2F, such as
-// "." and "/"), in order. The introducer (ESC, its C0 runes and "[", U+009B,
-// or the JSON text \u001b[), the numeric parameter bytes (digits, ";" and
-// ":") and the C0 runes are dropped: a numeric parameter is mostly a real
-// SGR or cursor parameter, not text.
+// "." and "/"), in order. The introducer (ESC, its C0 runes and "[", or
+// U+009B), the numeric parameter bytes (digits, ";" and ":") and the C0 runes
+// are dropped: a numeric parameter is mostly a real SGR or cursor parameter,
+// not text.
 func csiText(head string) string {
 	if body, ok := strings.CutPrefix(head, "\u009b"); ok {
 		head = body
 	} else {
-		// ESC, C0 runes and "[", or \u001b[: the first "[" ends the
-		// introducer, because no rune before it and no parameter or
-		// intermediate byte is "[".
+		// ESC, C0 runes and "[": the first "[" ends the introducer,
+		// because no rune before it and no parameter or intermediate
+		// byte is "[".
 		_, head, _ = strings.Cut(head, "[")
 	}
 	kept := make([]byte, 0, len(head))
@@ -648,7 +686,9 @@ func spacesToASCII(s string) string {
 //
 // The regex matchers apply it only to the text, not to the pattern, and they
 // keep the forms before the fold too (see regexForms). Homoglyphs from other
-// scripts (Cyrillic U+0430 for Latin "a") are not folded.
+// scripts (Cyrillic U+0430 for Latin "a") are not folded. The mixed_script
+// heuristic flags a word that mixes letters of two or more look-alike
+// scripts, such as Latin and Cyrillic, instead.
 //
 // It folds s one rune at a time (see appendFold), and it uses the fold of a
 // rune only when the fold is not longer, in bytes, than the rune. Otherwise

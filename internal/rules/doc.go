@@ -7,10 +7,12 @@
 // # The match block
 //
 // Each rule has a `match:` block, the type [Match]. It holds exactly one of
-// any_regex, all_regex, keywords or heuristic. [Match.Compile] checks it and
-// returns a [Matcher]. The loader calls it at load time through a [Compiler]
-// given with [WithCompiler].
-// Every error from Compile is a *[FieldError] that names the field, for
+// any_regex, all_regex, keywords or heuristic. [Match.CompileFor] checks it
+// and returns a [Matcher] for the target of the rule. The target decides how
+// the Matcher reads its text (see Schema text below). [Match.Compile] is
+// CompileFor with the description target. The loader compiles at load time
+// through a [Compiler] given with [WithCompiler].
+// Every error from CompileFor is a *[FieldError] that names the field, for
 // example "any_regex[2]". An error never holds text from the rule file (a
 // pattern, a keyword or a parameter key) or input text, so it is safe to
 // print.
@@ -27,8 +29,29 @@
 // raw text before this cut, so invisible padding does not use up the 32 KiB.
 // This is an evasion window: instructions placed after the first 32 KiB of
 // visible text (or after the first 128 KiB of raw text) are not seen by regex
-// and keyword rules. The max_length heuristic flags such a long text, because
-// it and the other text heuristics read the full raw text.
+// and keyword rules. The match_window heuristic closes it: a high rule with
+// it fires on every text that the regex and keyword rules do not read in
+// full, also when only one form of the text is cut. The max_length heuristic
+// also flags a long text. Both read the full raw text, as the other text
+// heuristics do.
+//
+// A schema has its own budget (see Schema text). The regex and keyword rules
+// read one schema in three passes:
+//
+//   - the strings, in document order: at most 4096 strings and at most
+//     128 KiB, where a string counts for min(its length, 32 KiB) and is read
+//     in the 32 KiB window;
+//   - the seams of neighbour strings, only when no string matched: at most
+//     128 KiB of seam text in all, at most 544 bytes for each seam;
+//   - the raw text once, in the 32 KiB window, only when the JSON cannot be
+//     read in full.
+//
+// So one schema costs about nine times as much as one description: four for
+// the strings, four for the seams and one for the raw text. The seam pass
+// doubles the cost of the string pass. The match_window heuristic also fires
+// on a schema whose strings the caps cut, on a schema with a string longer
+// than the window, and on JSON that cannot be read in full. It does not fire
+// when the seam budget is used up (see Schema text).
 //
 // A list holds at most [MaxPatterns] entries of at most [MaxPatternBytes]
 // bytes each, and the compiled programs of one regex and of one list have
@@ -74,9 +97,10 @@
 //     form 2 does.
 //
 // The doc comment of matchForms in normalize.go has the full list with the
-// build conditions, and the texts that still defeat all the forms. In a
-// description, the invisible_unicode heuristic flags each of those texts,
-// because it flags the invisible runes and the ESC. CONTRIBUTING.md has the
+// build conditions, and the texts that still defeat all the forms. The
+// invisible_unicode heuristic (MOAT-T1-006 for a description, MOAT-T1-015
+// for a schema) flags each of those texts, because it flags the invisible
+// runes and the ESC. CONTRIBUTING.md has the
 // same list for rule authors.
 //
 // A text without invisible runes and escape sequences has one form, so it
@@ -110,7 +134,10 @@
 // cannot hide a keyword, fullwidth and mathematical letters match the plain
 // letters, and accents are folded: "cafe" matches "caf" + U+00E9. Homoglyphs
 // from other scripts (for example Cyrillic U+0430 for Latin "a") are not
-// folded, for regexes or keywords.
+// folded, for regexes or keywords. Instead, the mixed_script heuristic (rules
+// MOAT-T1-010 and MOAT-T1-011) flags a word that mixes letters of two or
+// more look-alike scripts, such as Latin and Cyrillic, except a Greek unit
+// letter after a number. See the Heuristics and hits section for details.
 //
 // Any run of white space, or U+2800 (braille blank), matches the space
 // between the words of a keyword. Punctuation does not: the keyword "ignore
@@ -122,20 +149,142 @@
 //
 // # Heuristics and hits
 //
-// The text heuristics (invisible_unicode, max_length and base64_blob) read the
-// raw text, not the normalized text. A [Hit] from a text heuristic gives a byte
-// offset in the raw text. A hit from a regex or a keyword has the offset -1,
-// because it comes from the normalized text.
+// The text heuristics (invisible_unicode, tag_or_bidi_override, max_length,
+// base64_blob, mixed_script and match_window) read the raw text, not the normalized text. A
+// [Hit] from a text heuristic gives a byte offset in the raw text, except a
+// match_window hit, which is about the whole text and has the offset -1
+// ([NoOffset]). A hit from a regex or a keyword has the offset -1, because it
+// comes from the normalized text. Every hit of a schema rule has the offset
+// -1, also a hit of a text heuristic. Its Detail starts with one of these
+// texts (see Schema text), where N is the 1-based place of a string in the
+// list of distinct schema strings:
+//
+//   - "schema string N": a hit in one string;
+//   - "schema strings N and N+1": a hit in the seam of two neighbour strings;
+//   - "schema raw text": a hit in the raw text of a schema that cannot be
+//     read in full;
+//   - "schema JSON cannot be read in full" or "schema is longer than the
+//     match window": the two match_window hits for the whole schema. A
+//     match_window hit for one string that is longer than the window starts
+//     with "schema string N".
+//
+// A schema rule returns at most [MaxHits] such hits, plus one summary hit
+// "and N more schema hits".
 //
 // The invisible_unicode heuristic flags the same invisible runes that the
 // normalization removes, so it flags every control character except the
 // white space, such as U+0000, ESC and DEL.
 //
+// The tag_or_bidi_override heuristic flags a narrower set: the Unicode tag
+// characters (U+E0000 to U+E007F), which can hide a full ASCII text, and the
+// bidi overrides LRO and RLO, which reverse the text a reader sees. It
+// excuses the tag characters of the England, Scotland and Wales flag emoji.
+// One hit stands for one run, and its Detail gives the length of the run but
+// never its runes.
+//
+// The match_window heuristic flags a text that the regex and keyword rules do
+// not read in full (see Cost bounds). It has no parameters.
+//
 // The base64_blob heuristic checks each run of base64 characters on its own.
 // An invisible rune inside a run, also a control character such as U+0000 or
 // ESC, is skipped. Any other character, such as a space, a newline or '=', ends a
 // run, and runs are not joined. So a payload that is split into short chunks
-// is not flagged when no chunk reaches min_length on its own.
+// is not flagged when no chunk reaches min_length on its own. With min_words
+// set above 0 (the range is 0 to 64, and 0 is the default), the decoded text
+// must also hold that many words in a row. The
+// text is split into tokens at white space and at '-', '_', '/' and '\', and
+// the punctuation and symbols at the two ends of each token are removed. A
+// word is a token of letters, with an optional apostrophe inside. An empty
+// token or a token of digits is skipped. Any other token ends the run. A
+// field between white space that holds a '/' or a '\' is a path, and it
+// counts as one word at most. In a decoded JSON object or array, one string
+// (a key or a value) must hold twice min_words words in a row. So a JWT, an
+// encoded JSON cursor and a path alone are not flagged, but an encoded
+// sentence is, also when it is written with hyphens or holds a path or a
+// number, or sits in a JSON wrapper. YAML, shell or log text with spaces can
+// still count as words. A sentence that a '/' joins into one field, or that
+// one token which is not a word (such as "e.g") cuts, stays below the run. The
+// medium rules without min_words still flag such a text.
+//
+// The mixed_script heuristic flags a word that mixes letters of two or more
+// look-alike scripts, such as "Ignore" with a Cyrillic "I" (U+0406). The
+// look-alike scripts are Latin, Cyrillic, Greek, Armenian, Cherokee, Lisu,
+// Coptic, Canadian Aboriginal and Tifinagh. So a word with no Latin letter
+// is flagged too when it mixes two of them, such as Cyrillic and Armenian
+// letters that read as "ignore". Only Greek has an exemption, for a unit (see
+// below). The heuristic reads the full raw text. A hit gives the raw byte
+// offset of the first rune of the word and names the scripts in the order of
+// the list above, but it never holds the word: the terminal-safe output does
+// not change look-alike letters, so the word would show as normal Latin
+// text.
+//
+// A word is a run of letters, marks, invisible runes, private-use runes,
+// unassigned code points, U+FFFD (from an invalid UTF-8 byte or a lone
+// surrogate) and runes whose fold is only letters. So a ZWSP, a combining
+// mark, a private-use rune (such as U+E000, which many fonts draw as
+// nothing), a Roman numeral (such as U+216E, "D") or a circled letter (such
+// as U+24D6, "g") cannot split a word. Any other rune, such as a digit, '_',
+// '-', a space or punctuation, ends a word.
+//
+// Each letter counts for its own script. So Armenian small oh (U+0585) and
+// Lisu letter ga (U+A4D6) count for their scripts. A letter of the Common or
+// Inherited script, a Latin letter that is not ASCII and a rune that is not a
+// letter but folds to letters count by their fold, the same fold that the
+// regexes read. So the mathematical Greek letters (in U+1D6A8 to U+1D7CB) and
+// the double-struck Greek letters (U+213C to U+213F) count as Greek, the
+// mathematical Latin letters (such as U+1D400), the fullwidth Latin letters
+// and the Roman numerals count as Latin, and U+00B5 (micro sign) counts as
+// Greek mu. A letter of any other script, such as Han, counts for no script.
+//
+// The parameter json_escapes (default 0) says whether the text is raw JSON.
+// A schema rule reads decoded strings (see Schema text), so MOAT-T1-011 keeps
+// the default 0 too. With json_escapes: 1 the heuristic decodes JSON escapes: \b, \f, \n, \r, \t, \\, \", \/ and \u plus
+// exactly 4 hex digits. A surrogate pair is one rune, and a lone surrogate
+// is U+FFFD. The decoded rune acts like a raw rune: a letter, a mark or an
+// invisible rune joins the word, and any other rune ends it. So the escape
+// of U+0406 is a Cyrillic letter in the word. A description is decoded text,
+// so rule MOAT-T1-010 keeps the default 0: a backslash is a normal rune that
+// ends a word, as the model reads it. A schema string is decoded before the
+// heuristic reads it, so a second decode would turn a literal "\b" into a
+// backspace.
+//
+// A word with Greek letters is not flagged for them when it is a unit after
+// a number. The word must have exactly one Greek letter at its start or end,
+// up to 3 Latin letters and no other letter, and the two parts must form a
+// unit:
+//
+//   - mu (U+03BC or U+00B5) and then an SI unit: s, m, g, l, L, A, V, W, F,
+//     H, C, J, K, M, N, S, T, Hz, Pa, mol or sec;
+//   - k, M, G or m and then Omega (U+03A9 or the ohm sign U+2126);
+//   - Omega and then m or cm (ohm metre).
+//
+// The word must come directly after an ASCII digit, or after one space that
+// comes directly after an ASCII digit. With json_escapes: 1, an escaped
+// digit, such as \u0035, does not count. So "5" + U+03BC + "s", "5 " +
+// U+03BC + "mol" and "10k" + U+03A9 are not flagged. But U+03BC + "s" with
+// no number before it, "2 " + U+03BC + "ser" and "5" + U+03BC + "pdate" are
+// flagged. Math notation is also flagged: U+0394 (capital Delta) + "t" gives
+// a known false positive. To accept such a word, ignore the rule
+// (MOAT-T1-010 or MOAT-T1-011) for that one tool in .mcpmoat-ignore.
+//
+// The mixed_script heuristic does not flag:
+//
+//   - a word written fully in look-alikes of one script, such as Cyrillic
+//     "copy" (U+0441 U+043E U+0440 U+0443) or the Cyrillic "ssh" in "~/." +
+//     U+0455 U+0455 U+04BB;
+//   - a word of one letter, because it cannot mix two scripts;
+//   - Latin-script look-alikes that do not fold, such as U+0131 (dotless i),
+//     U+01C0 (dental click) and U+0261 (script g);
+//   - look-alikes from scripts outside the list, such as the Ethiopic
+//     syllable U+12D0, which looks like an "O", and the Runic letter U+16C1,
+//     which looks like an "I";
+//   - a word that a visible rune splits in two, when the rune is not a
+//     letter and does not fold to letters, such as U+2800 (braille blank),
+//     U+0966 (Devanagari digit zero) or U+212E (estimated sign, a symbol
+//     that looks like an "e");
+//   - a mark of a script outside the list, such as U+0C02 (Telugu
+//     anusvara), which looks like an "o": a mark joins a word but counts for
+//     no script.
 //
 // The config heuristics (insecure_url, plaintext_secret, unpinned_package,
 // auto_install and typosquat) read one line of text each, not the whole text.
@@ -155,16 +304,67 @@
 //
 // # Schema text
 //
-// The text of a tool schema (InputSchema or OutputSchema) is the value of
-// every "description" and "title" string, at any depth, in document order.
-// The keys match in any case. The rules do not model JSON Schema keywords.
-// JSON escapes are decoded first, before any normalization or fold, so an
-// invisible rune written as \u200b cannot hide as literal text. The read is
-// bounded by the depth and value caps of the inspect package, so a schema
-// that inspect accepts is read in full.
+// A rule with target: schema (the T1 schema rules) reads the tool input
+// schema as JSON. It reads every object key and every string value, at any
+// depth, in document order. A string that comes more than once is read once,
+// at its first place, so the list of strings holds each distinct string once.
+// Each string is matched alone, as a description is matched. Numbers,
+// booleans and null are not read.
 //
-// The shadowing check (MOAT-T3-001) scans this text, together with the tool
-// description, the tool title and the annotations title.
+// An any_regex, all_regex or keywords rule reads the strings until the caps
+// stop it (see Cost bounds). When no string matched, it also reads the seams:
+// a seam is one text made of the last 256 bytes of a string, 32 newlines and
+// the first 256 bytes of the next string in the list. So an instruction that
+// is split over two neighbour strings is still found. A seam hit has a Detail
+// that starts with "schema strings N and N+1". The seams use only the strings
+// that fit the caps. The heuristics and match_window have no seam pass.
+//
+// In a seam, all_regex matches when all its regexes match in one string or
+// all in one seam. A keyword of several words can cross a seam, because any
+// run of white space matches the space between its words, but one word cannot
+// be built from the parts of two strings. A regex gap such as [\s\S]{0,N},
+// with N up to 31, cannot cross the 32 newlines, but \s+ and \s* can. When
+// a side is cut at 256 bytes, the cut point acts like the start or the end of
+// the text, so ^, $ and \b can match there although the full string has no
+// edge at that place; a seam can therefore give a rare hit that the string
+// alone does not give.
+//
+// The seams do not catch:
+//
+//   - a split with one benign string between the two halves;
+//   - a split over strings that are not neighbours in the list, also when a
+//     string is a copy of an earlier string: the list keeps only the first
+//     copy, so an early copy of the second half removes it from its place;
+//   - a split over three or more strings;
+//   - a split with more than 256 bytes on one side of the seam;
+//   - a split between the name and the description of the first property:
+//     the key "description" is usually listed there for the first time, so
+//     it sits between the two halves (in the next properties, the list drops
+//     the repeated key, so the halves are neighbours);
+//   - an indirection, such as "the URL in the endpoint field" or a $ref that
+//     points to the other half.
+//
+// The seam texts of one schema total at most 128 KiB, and a seam is at most
+// 544 bytes long. When this budget is used up, the seam pass stops silently:
+// the match_window heuristic does not fire. One benign string between the two
+// halves already defeats any join in document order, so a hit there would be
+// a false positive on large benign schemas, with no gain in security.
+//
+// JSON escapes are decoded first, before any normalization or fold, so an
+// invisible rune written as \u200b cannot hide as literal text, and an ESC
+// written as \u001b is an ESC. The read is bounded by the depth and value
+// caps of the inspect package, so a schema that inspect accepts is read in
+// full. When the JSON cannot be read in full (it is malformed, has data after
+// the first value, or goes over a cap), the rule also reads the raw text once,
+// so a broken schema is still scanned. Its hits have a Detail that starts with
+// "schema raw text".
+//
+// The shadowing check (MOAT-T3-001) still reads a narrower text: the value of
+// every "description" and "title" string of the schema (InputSchema or
+// OutputSchema), at any depth, in document order, with the keys matched in
+// any case. It scans this text, together with the tool description, the tool
+// title and the annotations title. The rules do not model JSON Schema
+// keywords.
 //
 // # The ignore file
 //
