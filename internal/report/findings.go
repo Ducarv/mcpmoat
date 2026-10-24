@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"io"
 	"text/tabwriter"
+
+	"github.com/Ducarv/mcpmoat/internal/termsafe"
 )
 
 // emptyCell is what WriteFindings prints for a cell with no text.
@@ -41,7 +43,7 @@ type FindingRow struct {
 //	FIELD         the config field
 //	KEY/RELATED   Key when it is set, else Related, else "-"
 //
-// Any other empty cell shows "-".
+// Any other empty cell shows "-". A name that is exactly "-" shows as "\"-\"".
 //
 // WriteFindings prints only rule IDs, severities, server names, field names
 // and key names. It never prints a value, a URL, an arg or a finding message.
@@ -102,10 +104,14 @@ func WriteFindings(w io.Writer, rows []FindingRow) error {
 }
 
 // findingCell returns one cell of the findings table: emptyCell for an empty
-// s, else s through cell with the short cell cap.
+// s, else s through cell with the short cell cap. A name that is exactly
+// emptyCell is quoted, so it does not read as an empty cell.
 func findingCell(s string) string {
-	if s == "" {
+	switch s {
+	case "":
 		return emptyCell
+	case emptyCell:
+		return termsafe.QuoteIf(s, true)
 	}
 	return cell(s, maxShortCellRunes)
 }

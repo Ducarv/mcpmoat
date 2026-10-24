@@ -74,6 +74,16 @@ func TestWriteFindingsExact(t *testing.T) {
 				"-      -          -        -       -\n",
 		},
 		{
+			// A name "-" must not look like an empty cell.
+			name: "name that is a dash is quoted",
+			rows: []report.FindingRow{
+				{RuleID: "R", Severity: "low", Server: "-", Field: "f", Key: "-"},
+			},
+			want: "\n" +
+				"RULE   SEVERITY   SERVER   FIELD   KEY/RELATED\n" +
+				"R      low        \"-\"      f       \"-\"\n",
+		},
+		{
 			name: "dash for empty key and related",
 			rows: []report.FindingRow{
 				{RuleID: "R", Severity: "low", Server: "s", Field: "f"},
@@ -96,11 +106,7 @@ func TestWriteFindingsExact(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			var sb strings.Builder
-			if err := report.WriteFindings(&sb, tt.rows); err != nil {
-				t.Fatalf("WriteFindings() error = %v, want nil", err)
-			}
-			if got := sb.String(); got != tt.want {
+			if got := writeFindings(t, tt.rows...); got != tt.want {
 				t.Errorf("WriteFindings() =\n%q\nwant\n%q", got, tt.want)
 			}
 		})
@@ -149,7 +155,7 @@ func TestWriteFindingsEscapesHostileText(t *testing.T) {
 				if got := strings.Count(out, "\n"); got != 3 {
 					t.Errorf("output has %d newlines, want 3:\n%q", got, out)
 				}
-				for i := 0; i < len(out); i++ {
+				for i := range len(out) {
 					if out[i] < 0x20 && out[i] != '\n' {
 						t.Errorf("output holds raw control byte 0x%02x at %d:\n%q", out[i], i, out)
 						break
