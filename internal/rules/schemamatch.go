@@ -46,11 +46,16 @@ const (
 	maxSeamBytes = maxSchemaMatchBytes
 
 	// seamSep goes between the two sides of a seam. It is 32 newlines, in
-	// four groups of 8. The built-in rules use bounded gaps such as
-	// [\s\S]{0,30}, with at most 30 characters, so they cannot cross 32
-	// newlines. \s+ and \s* still cross a seam, and \b works at a newline.
-	// ^ and $ match only at the start and the end of the whole seam text,
-	// unless the regex has the (?m) flag. The separator is not an invisible
+	// four groups of 8. A bounded gap of at most 31 characters, such as the
+	// [\s\S]{0,30} of MOAT-T1-009 and MOAT-T1-012, cannot cross 32
+	// newlines. Longer or unbounded gaps, such as the [^<>]{0,100} and
+	// [\s\S]+? of MOAT-T1-011, and \s+ and \s* can cross a seam. \b works at
+	// a newline. ^ and $ match only at the start and the end of the whole
+	// seam text, unless the regex has the (?m) flag. When a side is cut at
+	// seamSideBytes, the cut point acts like the start or the end of the
+	// text, so ^, $ and \b can match there although the full string has no
+	// edge at that place. So a seam can give a rare hit that the string
+	// alone does not give. The separator is not an invisible
 	// rune, because normalization drops those runes and would glue the two
 	// words together. It is not a space, because an escape sequence (CSI) at
 	// the end of one string could eat the first rune of the next string.

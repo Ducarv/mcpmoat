@@ -38,4 +38,8 @@ should_not_match:
     note: Decodes to "usr/local/bin/foo/bar/baz". A path counts as one word
   - text: '{"properties":{"codes":{"type":"string","default":"MTAwIDIwMCAzMDAgNDAwIDUwMCA2MDAgNzAwIDgwMA=="}}}'
     note: Decodes to "100 200 300 400 500 600 700 800". Numbers are not words
+  - text: '{"properties":{"cursor":{"type":"string","description":"Cursor: eyJzb3J0IjogIm5hbWUiLCAib3JkZXIiOiAiYXNjIiwgImN1cnNvciI6ICJhYmMifQ=="}}}'
+    note: 'Decodes to {"sort": "name", "order": "asc", "cursor": "abc"}. Base64 of JSON with spaces is not a sentence'
+  - text: '{"properties":{"claims":{"type":"string","description":"Claims: eyJzdWIiOiJhdXRoMHwxMjMiLCJzY29wZSI6Im9wZW5pZCBwcm9maWxlIGVtYWlsIHBob25lIGFkZHJlc3Mgb2ZmbGluZV9hY2Nlc3MiLCJpYXQiOjF9"}}}'
+    note: Decodes to a JWT payload with a "scope" claim that has spaces. Base64 of JSON with spaces is not a sentence
   - '{"type":"object","properties":{"a":{"type":"number","description":"First number."},"b":{"type":"number","description":"Second number."}},"required":["a","b"]}'

@@ -183,9 +183,11 @@
 // word is a token of letters, with an optional apostrophe inside. An empty
 // token or a token of digits is skipped. Any other token ends the run. A
 // field between white space that holds a '/' or a '\' is a path, and it
-// counts as one word at most. So a JWT, which decodes to JSON, and a path
-// alone are not flagged, but an encoded sentence is, also when it is written
-// with hyphens or holds a path or a number.
+// counts as one word at most. A decoded JSON object or array never counts as
+// text when min_words is set, also when its strings hold words. So a JWT, an
+// encoded JSON cursor and a path alone are not flagged, but an encoded
+// sentence is, also when it is written with hyphens or holds a path or a
+// number. YAML, shell or log text with spaces can still count as words.
 //
 // The config heuristics (insecure_url, plaintext_secret, unpinned_package,
 // auto_install and typosquat) read one line of text each, not the whole text.
@@ -224,7 +226,11 @@
 // all in one seam. A keyword of several words can cross a seam, because any
 // run of white space matches the space between its words, but one word cannot
 // be built from the parts of two strings. A regex gap such as [\s\S]{0,N},
-// with N up to 31, cannot cross the 32 newlines, but \s+ and \s* can.
+// with N up to 31, cannot cross the 32 newlines, but \s+ and \s* can. When
+// a side is cut at 256 bytes, the cut point acts like the start or the end of
+// the text, so ^, $ and \b can match there although the full string has no
+// edge at that place; a seam can therefore give a rare hit that the string
+// alone does not give.
 //
 // The seams do not catch:
 //

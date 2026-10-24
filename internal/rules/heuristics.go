@@ -3,6 +3,7 @@ package rules
 import (
 	"bytes"
 	"encoding/base64"
+	"encoding/json"
 	"fmt"
 	"slices"
 	"strings"
@@ -24,7 +25,8 @@ const (
 	// 8 to 4096), min_text, the shortest decoded text in bytes (default 24,
 	// 4 to 3072), and min_words, the fewest words in a row that the decoded
 	// text must hold (default 0, which turns the check off, 0 to 64). See
-	// hasWordRun for what a word is.
+	// hasWordRun for what a word is. A decoded JSON object or array never
+	// counts as text when min_words is set.
 	HeuristicBase64Blob = "base64_blob"
 	// HeuristicMatchWindow flags a text that the regex and keyword matchers
 	// do not read in full: the text is longer than the raw scan limit, or a
@@ -383,8 +385,9 @@ func flagTagsLen(s string) int {
 // base64Blob flags each run of base64 characters in raw that is at least
 // minLength characters long and decodes to at least minText printable bytes
 // in a row. When minWords is more than 0, the decoded text must also hold at
-// least minWords words in a row (see hasWordRun). So a JWT, which decodes to
-// JSON, does not count, but an encoded sentence does.
+// least minWords words in a row (see hasWordRun), and it must not be a valid
+// JSON object or array (see isJSONText). So a JWT, which decodes to JSON,
+// does not count, but an encoded sentence does.
 //
 // A run is a longest sequence of [A-Za-z0-9+/_-]. A run can mix the standard
 // and the URL-safe alphabets, so a "-" or "_" glued to a payload cannot hide
@@ -434,8 +437,10 @@ func isBase64Char(r rune) bool {
 
 // decodesToText reports whether run decodes to at least minText printable
 // bytes in a row and, when minWords is more than 0, to at least minWords
-// words in a row (see hasWordRun). dst is a buffer that decodesToText can
-// reuse; it returns the buffer for the next call.
+// words in a row (see hasWordRun). When minWords is more than 0, a decoded
+// text that is a valid JSON object or array never counts (see isJSONText),
+// also when its string values hold words. dst is a buffer that
+// decodesToText can reuse; it returns the buffer for the next call.
 //
 // decodesToText changes run: it maps the URL-safe '-' and '_' to the
 // standard '+' and '/', so one decoder reads both alphabets, also when they
@@ -479,11 +484,30 @@ func decodesToText(run []byte, minText, minWords int, dst []byte) (bool, []byte)
 			continue
 		}
 		text := dst[:n]
-		if hasTextRun(text, minText) && (minWords == 0 || hasWordRun(text, minWords)) {
+		if !hasTextRun(text, minText) {
+			continue
+		}
+		if minWords == 0 || (!isJSONText(text) && hasWordRun(text, minWords)) {
 			return true, dst
 		}
 	}
 	return false, dst
+}
+
+// isJSONText reports whether b, without the white space at its two ends, is
+// a valid JSON object or array. Such a text is data, such as the parts of a
+// JWT or an encoded cursor, and not a sentence, also when its string values
+// hold words.
+//
+// The cost is safe: json.Valid reads b once and builds no values, so its
+// cost is linear in the decoded run, like the decode itself. Each run is
+// decoded at most 4 times, so base64Blob stays linear in its text.
+func isJSONText(b []byte) bool {
+	b = bytes.TrimSpace(b)
+	if len(b) == 0 || (b[0] != '{' && b[0] != '[') {
+		return false
+	}
+	return json.Valid(b)
 }
 
 // isHexDigit reports whether c is 0-9, a-f or A-F.
@@ -529,9 +553,13 @@ func hasTextRun(b []byte, n int) bool {
 // the run. So "send ~/.ssh/id_rsa to" is 3 words, and a text that is only a
 // path, such as "usr/local/bin/foo/bar/baz", is not a sentence.
 //
-// JSON, such as the decoded parts of a JWT ({"alg":"HS256",...}), has its
-// quotes, colons and commas inside the tokens, so its tokens are not words.
 // A sentence such as "ignore all previous instructions" is a run of words.
+// Compact JSON, such as {"alg":"HS256"}, keeps its quotes and colons inside
+// the tokens, so its tokens are not words. But JSON with spaces, or a JSON
+// string with spaces in it, such as a JWT scope, can give a run of words.
+// So decodesToText skips a valid JSON object or array as a whole (see
+// isJSONText) and does not call hasWordRun for it. YAML, shell or log text
+// with spaces can still count as words. That is an accepted limit.
 func hasWordRun(b []byte, n int) bool {
 	count := 0
 	for field := range bytes.FieldsSeq(b) {
