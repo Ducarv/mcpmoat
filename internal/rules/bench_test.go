@@ -168,9 +168,10 @@ func worstBlock(tb testing.TB) []string {
 
 // BenchmarkWorstCaseBlock measures the most costly match block that passes
 // the caps, on MaxMatchInputBytes of text that has all six regex forms (see
-// regexForms): a ZWSP and U+0001, so matchForms gives three forms, and the
-// ligature U+FB03, so each form is not ASCII and its fold ("ffi") is a new
-// form. The rest is 'a', so each form is about MaxMatchInputBytes runes long.
+// regexForms). It starts with sixFormsText: a ZWSP and U+0001, so
+// matchForms gives three forms, and the ligature U+FB03, so each form is not
+// ASCII and its fold ("ffi") is a new form. The rest is 'a', so each form is
+// about MaxMatchInputBytes runes long.
 //
 // The block is \pL{0,498}!X twice and \pL{0,248}!X: 1000 + 1000 + 500 =
 // maxTotalInsts instructions. Measured on an Apple M1 Pro (Go 1.27, caps 32
@@ -184,8 +185,7 @@ func BenchmarkWorstCaseBlock(b *testing.B) {
 	if err != nil {
 		b.Fatalf("Compile() error = %v", err)
 	}
-	const head = "\u200bb\x01\ufb03"
-	text := head + strings.Repeat("a", MaxMatchInputBytes-len(head))
+	text := sixFormsText + strings.Repeat("a", MaxMatchInputBytes-len(sixFormsText))
 	if n := len(regexForms(text)); n != 6 {
 		b.Fatalf("len(regexForms(text)) = %d, want 6", n)
 	}

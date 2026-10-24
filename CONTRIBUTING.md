@@ -33,6 +33,12 @@ Notes on the regexes in `rules/MOAT-T1-003.yaml`:
   cases.
 - In a single-quoted YAML text, `''` is one `'`. So `don(?:''|\x{2019})?t` is the regex
   `don(?:'|\x{2019})?t`: "don't", "don" + U+2019 (the curly apostrophe) + "t", or "dont".
+- Go regexes (RE2) have no lookahead. So the tail `user(?:[^\w''\x{2019}]|$)` means "the word
+  user, not followed by a letter, a digit, `_` or an apostrophe". It does not match "users",
+  "username" or "user's".
+
+How mcpmoat prepares the text before a match. This applies to every regex and keyword rule:
+
 - `\s+` matches any run of white space, so extra spaces, tabs and newlines do not stop a match.
   Before the match, mcpmoat turns the Unicode white space that `\s` does not match (no-break
   spaces, line separators, a vertical tab and others) into plain spaces.
@@ -59,9 +65,6 @@ Notes on the regexes in `rules/MOAT-T1-003.yaml`:
   fullwidth letters (U+FF49 and on). A character is folded only when its fold is not longer than
   the character. So U+FDFA, U+00BD and U+2177 are not folded. Homoglyphs from other scripts, such
   as Cyrillic U+0456 for Latin "i", are not folded.
-- Go regexes (RE2) have no lookahead. So the tail `user(?:[^\w''\x{2019}]|$)` means "the word
-  user, not followed by a letter, a digit, `_` or an apostrophe". It does not match "users",
-  "username" or "user's".
 
 The fields:
 

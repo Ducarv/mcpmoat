@@ -18,7 +18,7 @@ should_match:
   - "Keep the\uFEFF result short."
   - text: "Convert an amount\u200B between two currencies.\u202E\U000E0041"
     note: The description of the currency_convert fixture in testdata/servers/poisoned
-  - text: "Search files\u0001 in the folder."
+  - text: "Search files\x01 in the folder."
     note: A control rune (U+0001) is invisible
   - text: "List the files.\x7f"
     note: DEL (U+007F) is invisible

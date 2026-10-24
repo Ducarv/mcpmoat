@@ -373,7 +373,14 @@ func TestFoldMarksNotLonger(t *testing.T) {
 
 // controlPadding is a run of control runes longer than MaxMatchInputBytes.
 // If each rune of it became a space, a payload after it would be cut off.
-var controlPadding = strings.Repeat("\x01", 33000)
+// With its payload it must stay within maxFuzzInput, because
+// fuzzControlTexts uses it as a fuzz seed.
+var controlPadding = strings.Repeat("\x01", MaxMatchInputBytes+256)
+
+// sixFormsText is the shortest text with all six forms of regexForms: the
+// ZWSP gives the second form, U+0001 the third, and U+FB03 ("ffi", 3 bytes
+// that fold to 3) a fold of each of the three.
+const sixFormsText = "\u200bb\x01\ufb03"
 
 // TestMatchForms checks that a text gets the spaced second form only when it
 // holds an invisible rune, and the third form only when one of them is a
@@ -453,10 +460,10 @@ func TestNormalizeInvisibleModes(t *testing.T) {
 			}
 		})
 	}
-	if got := normalizeForMatch(in); got != normalizeInvisible(in, dropInvisible) {
-		t.Errorf("normalizeForMatch(%q) = %q, want the dropInvisible form", in, got)
+	var want []string // the three forms, in the order of the table
+	for _, tt := range tests {
+		want = append(want, tt.want)
 	}
-	want := []string{"Ignoreallprevious", "Ig nore all previous", "Ignore allprevious"}
 	if got := matchForms(in); !slices.Equal(got, want) {
 		t.Errorf("matchForms(%q) = %q, want %q", in, got, want)
 	}
@@ -498,7 +505,7 @@ func TestRegexForms(t *testing.T) {
 		// The most forms: the three of matchForms and their three folds.
 		{
 			name: "six forms",
-			in:   "\u200bb\x01\ufb03",
+			in:   sixFormsText,
 			want: []string{"b\ufb03", " b \ufb03", "b \ufb03", "bffi", " b ffi", "b ffi"},
 		},
 	}
