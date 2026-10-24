@@ -15,7 +15,8 @@ import (
 const (
 	// minTyposquatNameLen is the shortest name that the typosquat check
 	// compares. Very short names are always close to each other, so they
-	// give noise.
+	// give noise. It is also the shortest word in which two edits count as
+	// close (see shortTyposquatNameLen).
 	minTyposquatNameLen = 5
 
 	// maxTyposquatNameLen caps the length of a compared name. Names come from
@@ -25,8 +26,8 @@ const (
 	maxTyposquatNameLen = 128
 
 	// shortTyposquatNameLen is the longest "short" name. Short names allow
-	// one edit. Longer names allow two edits only when at least
-	// minTyposquatNameLen runes follow the prefix that the two names share.
+	// one edit. Longer names allow two edits only when the word in which the
+	// two names first differ has at least minTyposquatNameLen runes.
 	shortTyposquatNameLen = 8
 
 	// sameScopeMaxDistance is the largest edit distance that still counts as
@@ -289,13 +290,16 @@ func (t *Typosquat) scopeSquat(c typoCandidate) (string, bool) {
 
 // closeDistance returns the edit distance of a and b and true when it is
 // between 1 and the threshold for these names. The threshold is 1 when the
-// shorter name has at most shortTyposquatNameLen runes, or when it has fewer
-// than minTyposquatNameLen runes after the prefix the two names share. Else it
-// is 2.
+// shorter name has at most shortTyposquatNameLen runes or when the word in
+// which the names first differ is shorter than minTyposquatNameLen runes (see
+// distinctiveTailRunes). Else it is 2.
 //
-// A known false negative: two edits that both fall in the last few runes after
-// a shared prefix, such as "mcp-server-fexxh" against "mcp-server-fetch", give
-// no finding. A short tail cannot tell a typo from a different product.
+// A known false negative: a 2-edit change of a word shorter than
+// minTyposquatNameLen runes, such as "mcp-server-gxx" against
+// "mcp-server-git", gives no finding. A short word cannot tell a typo from a
+// different product ("gcp" against "git"). Real names whose distinctive word
+// has 5 runes or more and differ by 2 edits, such as "github" and "gitlab",
+// count as close. That matters only if both are on the popular list.
 func closeDistance(a, b string) (int, bool) {
 	la, lb := utf8.RuneCountInString(a), utf8.RuneCountInString(b)
 	short := min(la, lb)
@@ -303,10 +307,7 @@ func closeDistance(a, b string) (int, bool) {
 		return 0, false
 	}
 	threshold := 2
-	// A long shared prefix, such as "mcp-server-", makes two edits in a short
-	// tail look like a typo when they are not.
-	tail := short - commonPrefixRunes(a, b)
-	if short <= shortTyposquatNameLen || tail < minTyposquatNameLen {
+	if short <= shortTyposquatNameLen || distinctiveTailRunes(a, b, short) < minTyposquatNameLen {
 		threshold = 1
 	}
 	if la-lb > threshold || lb-la > threshold {
@@ -316,14 +317,41 @@ func closeDistance(a, b string) (int, bool) {
 	return d, d >= 1 && d <= threshold
 }
 
-// commonPrefixRunes returns the number of leading runes that a and b share.
-func commonPrefixRunes(a, b string) int {
-	ra, rb := []rune(a), []rune(b)
-	n := 0
-	for n < len(ra) && n < len(rb) && ra[n] == rb[n] {
+// distinctiveTailRunes returns the length in runes of the part of the shorter
+// name that starts after the last separator ("-", "/", "_", "." or "@") inside
+// the prefix that a and b share. short is the rune count of the shorter name.
+// For "mcp-server-gcp" and "mcp-server-git" the shared prefix is
+// "mcp-server-g", the last separator in it is the second "-", and the result
+// is 3: the word "gcp". It allocates nothing.
+//
+// A long shared prefix, such as "mcp-server-", would make two edits in a short
+// word look like a typo when they are not. Measuring from the last separator
+// keeps appended runes ("mcp-server-fetchxx") and two edits in a long word
+// visible.
+func distinctiveTailRunes(a, b string, short int) int {
+	start, n := 0, 0 // start: runes up to and including the last separator
+	for a != "" && b != "" {
+		ra, sa := utf8.DecodeRuneInString(a)
+		rb, sb := utf8.DecodeRuneInString(b)
+		if ra != rb {
+			break
+		}
 		n++
+		if isNameSeparator(ra) {
+			start = n
+		}
+		a, b = a[sa:], b[sb:]
 	}
-	return n
+	return short - start
+}
+
+// isNameSeparator reports whether r separates the words of a package name.
+func isNameSeparator(r rune) bool {
+	switch r {
+	case '-', '/', '_', '.', '@':
+		return true
+	}
+	return false
 }
 
 // sameScope reports whether a and b are npm packages in the same scope. A name

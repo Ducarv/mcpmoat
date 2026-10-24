@@ -14,14 +14,17 @@
 #   related:  required for hit, absent for ok
 # Lines that start with # and empty lines are ignored.
 #
-# Source: the ok names are real packages. They were checked with a registry GET
-# on npm, PyPI and Docker Hub on 2026-10-23. The one exception is
-# mcp-server-tidb: it is a synthetic example from issue #113 and it does not
-# exist on npm or PyPI. The hit names are made-up typos of names in
-# rules/data/popular-servers.txt.
+# Source: the ok names in the "real" groups are real packages. They were
+# checked with a registry GET on npm, PyPI and Docker Hub on 2026-10-23. The
+# one exception is mcp-server-tidb: it is a synthetic example from issue #113
+# and it does not exist on npm or PyPI. The hit names and the names in the
+# accepted-gap group are synthetic: they are made-up typos of names in
+# rules/data/popular-servers.txt and are not real packages.
 #
 # An ok line for an accepted gap is a known false negative, not a bug. Do not
-# "fix" it by adding it to a hit group.
+# "fix" it by adding it to a hit group. If the rule gets a fix for the gap,
+# the fix must flip those lines to hit. The rule is closeDistance in
+# internal/rules/typosquat.go.
 
 # --- ok: real npm packages ---
 ok npm mcp-server-gcp
@@ -122,10 +125,18 @@ hit pypi mcp-server-sqlit3e mcp-server-sqlite
 hit npm mcp-sevrer-kubernetes mcp-server-kubernetes
 hit npm mcp-server-kuberntees mcp-server-kubernetes
 
-# --- hit: two edits spread out (rule A4: min length > 8 and tail >= 5 runes) ---
+# --- hit: two edits (the shorter name has more than 8 runes and the word where the names differ has 5 runes or more) ---
 hit pypi mcp-sever-fecth mcp-server-fetch
 hit pypi mcp-sevrer-fecth mcp-server-fetch
 hit npm mcp-sever-kubernets mcp-server-kubernetes
+hit pypi mcp-server-fexxh mcp-server-fetch
+hit npm mcp-server-kubernexez mcp-server-kubernetes
+
+# --- hit: two runes appended to a popular name ---
+hit pypi mcp-server-fetchxx mcp-server-fetch
+hit npm mcp-remotejs mcp-remote
+hit npm @evil/server-filesysxxm @modelcontextprotocol/server-filesystem
+hit docker mcp/fetchxx mcp/fetch
 
 # --- hit: scope squats ---
 hit npm @evil/server-filesystem @modelcontextprotocol/server-filesystem
@@ -137,8 +148,10 @@ hit name mcp-server-fecth mcp-server-fetch
 hit docker mcp/fecth mcp/fetch
 hit docker mcp/fetchh mcp/fetch
 
-# --- ok: accepted gaps (rule A4)
-# Two edits, both in the last 4 runes after a shared prefix. The rule allows
-# only one edit here, so these names pass. This is a known false negative. ---
-ok pypi mcp-server-fexxh
-ok npm mcp-server-kubernexez
+# --- ok: accepted gaps (synthetic names, not real packages) ---
+# Two edits in a word shorter than 5 runes after a shared prefix give no
+# finding. The rule allows only one edit here, because a short word cannot tell
+# a typo from a different product (gcp against git). This is a known false
+# negative. A fix for it should flip these lines to hit.
+ok pypi mcp-server-gxx
+ok pypi mcp-server-tixx
