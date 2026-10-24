@@ -15,8 +15,7 @@ import (
 const (
 	// minTyposquatNameLen is the shortest name that the typosquat check
 	// compares. Very short names are always close to each other, so they
-	// give noise. It is also the shortest tail in which two edits count as
-	// close (see shortTyposquatNameLen).
+	// give noise.
 	minTyposquatNameLen = 5
 
 	// maxTyposquatNameLen caps the length of a compared name. Names come from
@@ -26,11 +25,14 @@ const (
 	maxTyposquatNameLen = 128
 
 	// shortTyposquatNameLen is the longest "short" name. Short names allow
-	// one edit. Longer names allow two edits only when the tail has at least
-	// minTyposquatNameLen runes. The tail is the part of the shorter name
-	// after the last separator that the two names share (see
-	// distinctiveTailRunes).
+	// one edit. Longer names allow two edits only in the cases that
+	// closeDistance lists.
 	shortTyposquatNameLen = 8
+
+	// minTwoEditTailLen is the shortest tail in which two edits count as
+	// close. The tail is the part of the shorter name after the last
+	// separator that the two names share (see distinctiveTailRunes).
+	minTwoEditTailLen = 5
 
 	// sameScopeMaxDistance is the largest edit distance that still counts as
 	// close when a package and a popular package share an npm scope. See
@@ -291,27 +293,36 @@ func (t *Typosquat) scopeSquat(c typoCandidate) (string, bool) {
 }
 
 // closeDistance returns the edit distance of a and b and true when it is
-// between 1 and the threshold for these names. The threshold is 1 when the
-// shorter name has at most shortTyposquatNameLen runes or when the tail (see
-// distinctiveTailRunes) is shorter than minTyposquatNameLen runes. Else it
-// is 2.
+// between 1 and the threshold for these names. The threshold is 2 when the
+// shorter name has more than shortTyposquatNameLen runes and one of these is
+// true:
+//   - the longer name starts with the whole shorter name, so the edits only
+//     add or drop runes at the end ("mcp-server-gitxx" against
+//     "mcp-server-git"), or
+//   - the tail (see distinctiveTailRunes) has at least minTwoEditTailLen
+//     runes.
 //
-// A known false negative: a 2-edit change of a tail shorter than
-// minTyposquatNameLen runes, such as "mcp-server-gxx" against
-// "mcp-server-git", gives no finding. A short tail cannot tell a typo from a
-// different product ("gcp" against "git"). The tail runs to the end of the
-// name, so a shared suffix makes it longer: "ana-mcp-server" against
-// "exa-mcp-server" still counts as close. Real names whose tail has 5 runes
-// or more and differ by 2 edits, such as "github" and "gitlab", also count as
-// close. That matters only if both are on the popular list.
+// Else the threshold is 1.
+//
+// Known limits:
+//   - Two edits inside a tail shorter than minTwoEditTailLen runes, such as
+//     "mcp-server-gxx" against "mcp-server-git", give no finding. A short
+//     tail cannot tell a typo from a different product ("gcp" against "git").
+//   - The tail runs to the end of the name, so a shared suffix makes it
+//     longer: "ana-mcp-server" against "exa-mcp-server" still counts as
+//     close.
+//   - Real names that differ by 2 edits in a tail of 5 runes or more, such as
+//     "github" and "gitlab", also count as close. That matters only if both
+//     are on the popular list.
 func closeDistance(a, b string) (int, bool) {
 	la, lb := utf8.RuneCountInString(a), utf8.RuneCountInString(b)
 	short := min(la, lb)
 	if short < minTyposquatNameLen || max(la, lb) > maxTyposquatNameLen {
 		return 0, false
 	}
+	appended := strings.HasPrefix(a, b) || strings.HasPrefix(b, a)
 	threshold := 2
-	if short <= shortTyposquatNameLen || distinctiveTailRunes(a, b, short) < minTyposquatNameLen {
+	if short <= shortTyposquatNameLen || (!appended && distinctiveTailRunes(a, b, short) < minTwoEditTailLen) {
 		threshold = 1
 	}
 	if la-lb > threshold || lb-la > threshold {
@@ -330,8 +341,9 @@ func closeDistance(a, b string) (int, bool) {
 //
 // A long shared prefix, such as "mcp-server-", would make two edits in a short
 // word look like a typo when they are not. Measuring from the last separator
-// keeps appended runes ("mcp-server-fetchxx") and two edits in a long word
-// visible.
+// keeps two edits in a long word ("mcp-server-fexxh") visible. closeDistance
+// handles runes added at the end of the whole shorter name ("mcp-server-gitxx")
+// on its own.
 func distinctiveTailRunes(a, b string, short int) int {
 	start, n := 0, 0 // start: runes up to and including the last separator
 	for a != "" && b != "" {

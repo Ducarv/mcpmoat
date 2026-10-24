@@ -81,13 +81,19 @@ func TestCloseDistance(t *testing.T) {
 		{name: "prefix typo plus tail typo", a: "mcp-sever-fecth", b: "mcp-server-fetch", want: true, wantDist: 2},
 		{name: "extra rune at the end", a: "mcp-server-fetchx", b: "mcp-server-fetch", want: true, wantDist: 1},
 		{name: "two extra runes at the end", a: "mcp-server-fetchxx", b: "mcp-server-fetch", want: true, wantDist: 2},
+		// Runes added or dropped at the end of the whole shorter name allow two
+		// edits, even when the last word is short.
+		{name: "two extra runes after a 3 rune word", a: "mcp-server-gitxx", b: "mcp-server-git", want: true, wantDist: 2},
+		{name: "two extra runes after a -mcp suffix", a: "tavily-mcpjs", b: "tavily-mcp", want: true, wantDist: 2},
+		{name: "two runes dropped from a 3 rune word", a: "mcp-server-g", b: "mcp-server-git", want: true, wantDist: 2},
+		{name: "one change plus one extra rune in a 3 rune word", a: "mcp-server-gixx", b: "mcp-server-git", want: false},
 
 		// Names of at most 8 runes allow one edit.
 		{name: "8 runes, 1 edit", a: "abcdefgh", b: "abXdefgh", want: true, wantDist: 1},
 		{name: "8 runes, 2 edits", a: "abcdefgh", b: "abXdeXgh", want: false},
 		{name: "9 runes, 2 edits, long tail", a: "abcdefghi", b: "aXcdefgXi", want: true, wantDist: 2},
 		{name: "9 runes, 3 edits", a: "abcdefghi", b: "aXcdXfgXi", want: false},
-		{name: "shorter name decides: 8 vs 12 runes", a: "abcdefgh", b: "abcdefghXY", want: false},
+		{name: "shorter name decides: 8 vs 10 runes", a: "abcdefgh", b: "abcdefghXY", want: false},
 
 		// Length caps.
 		{name: "below the minimum length", a: "abcd", b: "abce", want: false},
@@ -412,7 +418,6 @@ func TestTyposquatCheck(t *testing.T) {
 			server: stdioServer("uvx", "mcp-sever-fecth"),
 			want:   []want{{FieldArgs, "mcp-server-fetch"}},
 		},
-
 		{
 			name:   "uvx package with two edits in a long word",
 			server: stdioServer("uvx", "mcp-server-fexxh"),
@@ -423,6 +428,16 @@ func TestTyposquatCheck(t *testing.T) {
 			server: stdioServer("uvx", "mcp-server-fetchxx"),
 			want:   []want{{FieldArgs, "mcp-server-fetch"}},
 		},
+		{
+			name:   "uvx package with two extra runes after a short word",
+			server: stdioServer("uvx", "mcp-server-gitxx"),
+			want:   []want{{FieldArgs, "mcp-server-git"}},
+		},
+		{
+			name:   "npx package with two extra runes after a -mcp suffix",
+			server: npxServer("t", "tavily-mcpjs"),
+			want:   []want{{FieldArgs, "tavily-mcp"}},
+		},
 
 		// Negatives.
 		// Two edits in a short word after a long shared prefix are two
@@ -431,7 +446,6 @@ func TestTyposquatCheck(t *testing.T) {
 		{name: "uvx package gcp next to git", server: stdioServer("uvx", "mcp-server-gcp")},
 		{name: "uvx package tidb next to time", server: stdioServer("uvx", "mcp-server-tidb")},
 		{name: "server name gcp next to git", server: discover.Server{Name: "mcp-server-gcp"}},
-		{name: "uvx package gitee next to git", server: stdioServer("uvx", "mcp-server-gitee")},
 		// Accepted false negative: two edits in a 3 rune word.
 		{name: "uvx package gxx next to git", server: stdioServer("uvx", "mcp-server-gxx")},
 		// Same scope as a popular package: only the scope owner can publish

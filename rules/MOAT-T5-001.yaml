@@ -23,6 +23,8 @@ should_match:
     note: Bare package name, run as uvx. A prefix typo (sever) and a tail typo (fecth) are two edits from mcp-server-fetch.
   - text: mcp-server-fetchxx
     note: Bare package name, run as uvx. Two runes are appended to mcp-server-fetch. The part after the last shared separator ("fetch") has 5 runes, so two edits count.
+  - text: mcp-server-gitxx
+    note: Bare package name, run as uvx. Two runes are appended to the whole name mcp-server-git, so two edits count although the last word ("git") has only 3 runes.
 should_not_match:
   - text: '@modelcontextprotocol/server-filesystem'
     note: Exact popular name, so it is the real server.
