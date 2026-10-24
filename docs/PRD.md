@@ -419,10 +419,10 @@ references:
 
 ### 6.4 Pins (rug-pull detection)
 
-**FR-11: Store pins.** On first run, store the SHA-256 of each tool's name, description, schema and
-annotations in `~/.config/mcpmoat/pins.json`. The annotations are the title and the four hints
-`readOnlyHint`, `destructiveHint`, `idempotentHint` and `openWorldHint`. An absent hint is different
-from a set hint.
+**FR-11: Store pins.** On first run, store the SHA-256 of each tool's name, title, description,
+input schema, output schema and annotations in `~/.config/mcpmoat/pins.json`. The annotations are
+the title and the four hints `readOnlyHint`, `destructiveHint`, `idempotentHint` and
+`openWorldHint`. An absent hint is different from a set hint.
 
 - The hash input is a canonical serialisation: the same tool with JSON keys in a different order
   gives the same hash.
@@ -432,7 +432,9 @@ from a set hint.
 - `XDG_CONFIG_HOME` is honoured when set.
 
 Known limit: the Go SDK decodes `readOnlyHint` and `idempotentHint` as a plain `bool`. So for these
-two hints, "absent" and "false" are the same. A change to `true` is always visible.
+two hints, "absent" and "false" are the same. A change to `true` is always visible. The SDK also
+decodes schema numbers as `float64`, so a change only in an integer above 2^53 does not change the
+hash.
 
 **FR-12: Detect changes.** On later runs, warn about new, removed or changed tools, showing the
 text diff.

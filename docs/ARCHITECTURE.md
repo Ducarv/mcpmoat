@@ -20,7 +20,7 @@ internal/
   inspect/              connects to servers, reads tools, prompts and resources
     inspecttest/        test helpers for inspect, including Fake
   rules/                loads YAML rules, applies regex and heuristics
-  pins/                 hashes and pins.json (doc.go only for now)
+  pins/                 tool hash (pins.json store still to come)
   report/               terminal output
 rules/                  built-in rules (go:embed)
 testdata/               fixtures for tests and the demo
@@ -40,7 +40,8 @@ docs/                   PRD and other documentation
   package that imports the MCP SDK (see [The `internal/inspect` interface](#the-internalinspect-interface)).
 - `internal/rules`: loads and checks the YAML rules, runs the config heuristics and the shadowing
   check, and reads `.mcpmoat-ignore`.
-- `internal/pins`: planned home of the per-tool hashes and `pins.json`. It holds `doc.go` only.
+- `internal/pins`: computes the canonical hash of each tool (`Canonical`, `Hash`). See
+  [Tool hash](#tool-hash). The `pins.json` store is still to come.
 - `internal/report`: writes the terminal tables: the servers (`WriteServers`) and the config findings
   (`WriteFindings`).
 - `rules/`: the built-in rule files (`rules/*.yaml`) and `data/popular-servers.txt`. The Go file
@@ -66,7 +67,7 @@ the product packages and non-test imports. Tests also import `inspecttest` and `
 | `internal/inspect` | `discover` |
 | `internal/rules` | `discover`, `inspect`, `safefile`, `termsafe`, `rules` (the embedded data) |
 | `internal/report` | `discover`, `termsafe` |
-| `internal/pins` | none |
+| `internal/pins` | `inspect` |
 | `cmd/mcpmoat` | `discover`, `inspect`, `report`, `rules`, `termsafe` |
 
 `internal/inspect` does not import `termsafe`. The report layer escapes what `inspect` returns.
@@ -121,6 +122,30 @@ The target flow is `discover -> inspect -> rules -> pins -> report`:
 - `pins` hashes each tool and reports new, removed and changed tools (rug pulls).
 - `report` prints the findings, as a table and as JSON.
 - The exit code is 1 when a finding is at or above `--fail-on`.
+
+## Tool hash
+
+`pins.Hash` gives the pin hash of one `inspect.Tool` (FR-11, threat T2). The full contract is in
+`internal/pins/canonical.go` and `internal/pins/hash.go`.
+
+- Input: all six `inspect.Tool` fields: name, title, description, input schema, output schema and
+  annotations (title and the four hints). `inspect` drops `_meta` and `icons`, so they are not
+  hashed.
+- Canonical form: one JSON object with a fixed shape. Every key is always present: an absent hint
+  or schema is `null`, and nil annotations give the same bytes as empty annotations. RFC 8785 (JCS)
+  makes it canonical, through `Value.Canonicalize` in the standard library `encoding/json/jsontext`.
+- No Unicode normalisation: invisible, bidi and tag characters, and NFC against NFD, all change the
+  hash.
+- Invalid UTF-8, invalid schema JSON and duplicate keys give an error that wraps `ErrInvalidTool`.
+- Output: `sha256-v1:` (`HashVersion`) and the lowercase hex SHA-256 of the canonical form. A change
+  to the fields, the shape or the canonicalisation needs a new version. A stored hash with another
+  prefix means "pin again", not a rug pull.
+- Known limits: the MCP SDK decodes schema numbers as `float64`, so a change only in an integer
+  above 2^53 does not change the hash. JCS makes `1`, `1.0` and `1e0` equal. At decode time, the SDK
+  keeps the last value of a duplicate key and turns invalid UTF-8 and lone surrogates into U+FFFD.
+  For `readOnlyHint` and `idempotentHint`, `false` and absent are the same.
+- Golden hashes: `testdata/pins/hash/golden.txt`, for the fixtures in
+  `testdata/pins/hash/tools.json`.
 
 ## The `internal/inspect` interface
 
