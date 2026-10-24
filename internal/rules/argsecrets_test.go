@@ -2,7 +2,9 @@ package rules
 
 import (
 	"fmt"
+	"maps"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 
@@ -161,6 +163,8 @@ func TestCheckArgSecretsArgs(t *testing.T) {
 		{"secret after clean args", []string{"-y", "pkg@1.0.0", "--port", "8080", "--password", asRand24}, true},
 		{"oversize arg does not hide a later secret", []string{strings.Repeat("a", maxScanLen+1), "--token=" + asGH}, true},
 
+		// Length, entropy and prefix boundaries of a value under a credential name.
+
 		{"15 distinct bytes is not found", []string{"--api-key", testRandom32[:15]}, false},
 		{"16 distinct bytes with digits is found", []string{"--api-key", testRandom32[:16]}, true},
 		{"20 distinct bytes with digits is found", []string{"--api-key", testRandom32[:20]}, true},
@@ -180,6 +184,10 @@ func TestCheckArgSecretsArgs(t *testing.T) {
 		{"api-key flag with 32 hex", []string{"--api-key", asHex32}, true},
 		{"api-key equals with 40 hex", []string{"--api-key=" + asHex40}, true},
 		{"api-key flag with 64 upper-case hex", []string{"--api-key", asHex64}, true},
+		{"api-key with random base62 of 20", []string{"--api-key", asB20}, true},
+		{"api-key with random base62 of 21", []string{"--api-key", asB21}, true},
+		{"api-key with random base62 of 22", []string{"--api-key", asB22}, true},
+		{"api-key with random base62 of 23", []string{"--api-key", asB23}, true},
 		{"token query with 32 hex in a URL arg", []string{"--url=https://h/mcp?token=" + asHex32}, true},
 		{"api-key flag with a UUID", []string{"--api-key", asUUID}, true},
 		{"client-secret equals with a UUID", []string{"--client-secret=" + asUUID}, true},
@@ -203,10 +211,6 @@ func TestCheckArgSecretsArgs(t *testing.T) {
 		{"header flag with a literal default", []string{"--header", "Authorization: Bearer ${API_TOKEN:-" + asRand24 + "}"}, true},
 		{"short -H flag, value attached", []string{"-HAuthorization: Bearer " + asRand24}, true},
 		{"short -H flag, value attached, no space", []string{"-HX-Api-Key:" + asRand24}, true},
-		{"api-key with random base62 of 20", []string{"--api-key", asB20}, true},
-		{"api-key with random base62 of 21", []string{"--api-key", asB21}, true},
-		{"api-key with random base62 of 22", []string{"--api-key", asB22}, true},
-		{"api-key with random base62 of 23", []string{"--api-key", asB23}, true},
 
 		// Negative: a UUID needs key, token, secret or pass in the name; a hash or
 		// a name made of words is not a secret.
@@ -246,6 +250,30 @@ func TestCheckArgSecretsArgs(t *testing.T) {
 		{"GCP key ring path", []string{"--key-ring", "projects/myproj/locations/us/keyRings/ring1"}, false},
 		{"camelCase name with a year", []string{"--token-file-name", "GithubTokenStorage2024"}, false},
 		{"camelCase name with digits inside", []string{"--session", "ProductionSession2024Main"}, false},
+
+		// A long camelCase word after a prefix is still a name.
+		{"secret id with a camelCase path", []string{"--secret-id", "prod/ProductionDatabaseCredentials2024"}, false},
+		{"secret name with camelCase and a version", []string{"--secret-name", "prod-ProductionDatabaseCredentials-v2"}, false},
+		{"GCP secret path with a long camelCase part", []string{"--secret", "projects/my-proj/secrets/ProductionDatabaseCredentials/versions/2"}, false},
+		{"camelCase name that starts with a short word", []string{"--key-vault-secret", "MyCompanyProductionApiKey2024"}, false},
+
+		// A base64 JSON config is not a JWT.
+		{"base64 JSON config", []string{"--config", "eyJkZWJ1ZyI6ZmFsc2V9"}, false},
+		{"base64 JSON config with a longer body", []string{"serve", "eyJkZWJ1ZyI6ZmFsc2UsIm1vZGUiOiJwcm9kIn0"}, false},
+		{"bare JWT", []string{"serve", "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.Zq8Lm3Vx0Rt5Ws2Hy7Nb4Kd1"}, true},
+
+		// A name that ends in "id" holds an identifier.
+		{"key-id with a UUID", []string{"--key-id", asUUID}, false},
+		{"client-id with hex", []string{"--oauth-client-id", asHex32}, false},
+		{"private-key-id with hex", []string{"--private-key-id", asHex40}, false},
+		{"camelCase keyId with a UUID", []string{"--keyId=" + asUUID}, false},
+		{"api-key still takes a UUID", []string{"--api-key", asUUID}, true},
+
+		// "enable-password" takes a device password. A short Basic credential is
+		// a secret in a header flag.
+		{"enable-password takes a password", []string{"--enable-password", "S3cretPassw0rd"}, true},
+		{"short Basic credential in a header flag", []string{"-H", "Authorization: Basic dXNlcjpwYXNz"}, true},
+		{"Basic reference in a header flag", []string{"-H", "Authorization: Basic ${CREDS}"}, false},
 
 		// A token prefix on a readable name is not a secret.
 		{"tokenizer name with a prefix", []string{"--tokenizer", "sk-learn-tokenizer"}, false},
@@ -392,6 +420,7 @@ func TestCheckArgSecretsURL(t *testing.T) {
 		{"token in the fragment after another pair", "https://" + asHost + "/sse#state=1&token=" + asGH, true},
 		{"password query with a plain word and a stray percent", "https://h/mcp?password=hunter2%x", true},
 		{"password query with a plain word", "https://h/mcp?password=hunter2hunter2", true},
+		{"base64 JSON config in a query", "https://server.example/mcp?config=eyJkZWJ1ZyI6ZmFsc2V9", false},
 		{"password query with a %VAR% that starts with escape digits", "https://h/sse?password=%DB_PASSWORD%", false},
 		{"password query with a %VAR% that starts with hex letters", "https://h/sse?password=%DEV_PASSWORD%", false},
 		{"user info that holds the old reference marker text", "https://u:refx0@h/sse", true},
@@ -1283,9 +1312,7 @@ func FuzzCheckArgSecrets(f *testing.F) {
 	// fixed holds both findings in every form that out below can hold.
 	var fixedForms []string
 	for _, field := range []string{FieldArgs, FieldURL} {
-		for _, out := range findingOutputs(f, secretFinding("srv", field, "")) {
-			fixedForms = append(fixedForms, out)
-		}
+		fixedForms = slices.AppendSeq(fixedForms, maps.Values(findingOutputs(f, secretFinding("srv", field, ""))))
 	}
 	fixed := strings.Join(fixedForms, " ")
 
@@ -1308,11 +1335,7 @@ func FuzzCheckArgSecrets(f *testing.F) {
 				if want := secretFinding("srv", c.field, ""); !reflect.DeepEqual(got, want) {
 					t.Fatalf("finding = %+v, want %+v", got, want)
 				}
-				outs := make([]string, 0, 4)
-				for _, out := range findingOutputs(t, got) {
-					outs = append(outs, out)
-				}
-				out := strings.Join(outs, " ")
+				out := strings.Join(slices.Collect(maps.Values(findingOutputs(t, got))), " ")
 				for _, in := range []string{arg1, arg2, rawURL} {
 					if len(in) >= 4 && !strings.Contains(fixed, in) && strings.Contains(out, in) {
 						t.Fatalf("finding holds the input %q", in)

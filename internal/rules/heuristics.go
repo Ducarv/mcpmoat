@@ -40,8 +40,9 @@ const (
 	// HeuristicUnpinnedPackage flags a package in a command line that is not
 	// pinned to a version (MOAT-T4-003). The text is a command line. It covers
 	// a registry package and also a git, tarball, URL or GitHub-shorthand spec
-	// (npx, bunx, uvx --from, pipx --spec). Such a spec is unpinned unless it
-	// pins a full 40-hex commit.
+	// (npx, bunx, uvx --from, pipx --spec) and a "pipx run" script URL. A git or
+	// GitHub spec is unpinned unless it pins a full 40-hex commit. A tarball,
+	// URL or script spec is always unpinned.
 	HeuristicUnpinnedPackage = "unpinned_package"
 	// HeuristicAutoInstall flags a command line that runs npx with its yes
 	// option on, such as -y or --yes before the package (MOAT-T4-004). The

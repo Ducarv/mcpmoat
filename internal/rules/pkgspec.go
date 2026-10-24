@@ -157,11 +157,11 @@ func packageAt(command string, args []string) (PackageSpec, int, bool) {
 //
 // ok is false when the parse is doubtful (second override flag, missing value,
 // stop flag, unknown runner) and for a uvx or pipx ".py" script path. A spec
-// that starts with "git+", "http://" or "https://" (any case) is a non-registry
-// URL spec, not a script, so the ".py" test does not apply to it (a repository
-// can be named "discord.py"). It is also false when spec is empty, longer than
-// maxSpecLen, or holds white space or a control character. rawSpecAt does not
-// validate more than that.
+// that starts with "git+" or holds "://" (see isNonRegistryURLSpec) is a
+// non-registry URL spec, not a script, so the ".py" test does not apply to it
+// (a repository can be named "discord.py"). It is also false when spec is
+// empty, longer than maxSpecLen, or holds white space or a control character.
+// rawSpecAt does not validate more than that.
 //
 // The spec is untrusted config text and can hold credentials, for example
 // "git+https://user:token@host/repo". The caller must never copy it into a
@@ -315,9 +315,7 @@ func validPyPIName(name string) bool {
 	if first, last := rune(name[0]), rune(name[len(name)-1]); !isASCIIAlnum(first) || !isASCIIAlnum(last) {
 		return false
 	}
-	return !strings.ContainsFunc(name, func(r rune) bool {
-		return !isASCIIAlnum(r) && !strings.ContainsRune("._-", r)
-	})
+	return !strings.ContainsFunc(name, func(r rune) bool { return !isNameRune(r) })
 }
 
 // validImageName reports whether name is a docker image path: components
@@ -386,6 +384,12 @@ func isLowerAlnum(r rune) bool {
 // isASCIIAlnum reports whether r is an ASCII letter or digit.
 func isASCIIAlnum(r rune) bool {
 	return isLowerAlnum(r) || (r >= 'A' && r <= 'Z')
+}
+
+// isNameRune reports whether r can be in a package or repository name: an ASCII
+// letter or digit, or one of "._-".
+func isNameRune(r rune) bool {
+	return isASCIIAlnum(r) || strings.ContainsRune("._-", r)
 }
 
 // runnerOf maps a command to a runner by its base name (see commandBase).

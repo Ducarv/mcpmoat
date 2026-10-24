@@ -96,9 +96,10 @@
 // ("KEY=VALUE"), a header entry ("Name: value"), a URL or a command line (the
 // args of a stdio server). It reports a literal secret in env values, header
 // values, command args and URLs. It never reports the value. unpinned_package
-// and auto_install read a command line. unpinned_package also covers git,
-// tarball, URL and GitHub shorthand package specs, unless the spec is pinned
-// to a full 40-hex commit, and a script URL given to "pipx run". typosquat
+// and auto_install read a command line. unpinned_package also covers git and
+// GitHub shorthand package specs, unless the spec is pinned to a full 40-hex
+// commit, and tarball, URL and "pipx run" script specs, which are always
+// unpinned. typosquat
 // reads a command line or a bare package name. An adapter in this package
 // turns the line into a server and runs the native config check on it. A hit
 // from a config heuristic has the offset -1.

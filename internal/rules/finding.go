@@ -22,8 +22,10 @@ const (
 
 	// RuleUnpinnedPackage is the ID of the unpinned package check
 	// (threat T4): a server that runs a package with no fixed version. It also
-	// covers git, tarball, URL and GitHub shorthand specs, unless the spec is
-	// pinned to a full 40-hex commit.
+	// covers git and GitHub shorthand specs, unless the spec is pinned to a
+	// full 40-hex commit, and tarball, URL and "pipx run" script specs, which
+	// are always unpinned (an https URL of a repository on github.com,
+	// gitlab.com or bitbucket.org counts as a git spec).
 	RuleUnpinnedPackage = "MOAT-T4-003"
 
 	// RuleAutoInstall is the ID of the auto install check (threat T4): a stdio

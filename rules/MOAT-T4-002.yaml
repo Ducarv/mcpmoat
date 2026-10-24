@@ -61,6 +61,8 @@ should_not_match:
     note: The name does not end in a password word. The flag takes no value, and the next arg is a registry host.
   - text: npx some-server --secret projects/123456789/secrets/githubtoken/versions/1
     note: A Secret Manager resource path under a credential-like name. It is made of words, not a random token.
+  - text: npx some-server --config eyJkZWJ1ZyI6ZmFsc2V9
+    note: A base64 JSON config. It starts with eyJ like a JWT, but it has no dots.
   - text: psql --no-password mydatabase1
     note: A name that starts with "no" is a switch, so the next arg is a database name, not a password.
   - text: npx some-server --max-tokens 4096

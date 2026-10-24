@@ -188,6 +188,9 @@ func nonRegistryUnpinnedCases() []nonRegistryCase {
 		{"npx github branch with options", "npx", []string{"github:u/r#main::path:packages/x"}},
 		{"npx hosted git url, longer path", "npx", []string{"https://github.com/u/r/tree/main#" + testSHA}},
 		{"npx hosted git url, no repo", "npx", []string{"https://github.com/u#" + testSHA}},
+		{"npx git@ name before a tarball url", "npx", []string{"-y", "git@https://evil.example/x.tgz#" + testSHA}},
+		{"npx git@ name before a hosted git url", "npx", []string{"git@https://github.com/u/r#main"}},
+		{"npx backslash hides the host of a tarball url", "npx", []string{`https://evil.example\@github.com/u/r#` + testSHA}},
 		{"uvx --from commit only in the query", "uvx", []string{"--from", "git+https://h/u/r?x=@" + testSHA, "tool"}},
 
 		// npx: alias and flag forms
@@ -242,7 +245,7 @@ func nonRegistryUnpinnedCases() []nonRegistryCase {
 		{"pipx run --spec whl", "pipx", []string{"run", "--spec", "https://h/x.whl", "tool"}},
 		{"pipx run --spec mixed case", "pipx", []string{"run", "--spec", "GIT+https://h/u/r", "tool"}},
 		{"pipx run positional script url", "pipx", []string{"run", "https://h/script.py"}},
-		{"pipx run positional script url upper case", "pipx", []string{"run", "HTTPS://h/SCRIPT.PY"}},
+		{"pipx run positional script url, upper case scheme", "pipx", []string{"run", "HTTPS://h/script.py"}},
 		{"pipx run script url, .py only in the query", "pipx", []string{"run", "https://evil.example/run?f=x.py"}},
 		{"pipx run script url, .py only in the fragment", "pipx", []string{"run", "https://evil.example/s#.py"}},
 		{"pipx run script url, ftp scheme", "pipx", []string{"run", "ftp://evil.example/x.py"}},
@@ -325,6 +328,8 @@ func nonRegistryFalseCases() []nonRegistryCase {
 		{"pipx run positional git+https", "pipx", []string{"run", "git+https://h/u/r"}},
 		{"pipx run positional whl", "pipx", []string{"run", "https://h/x.whl"}},
 		{"pipx run script url with a query after .py (pipx refuses it)", "pipx", []string{"run", "https://h/script.py?a=1#frag"}},
+		{"pipx run script url, upper case suffix (pipx refuses it)", "pipx", []string{"run", "https://h/SCRIPT.PY"}},
+		{"npx scp-like git@ pinned", "npx", []string{"git@github.com:u/r.git#" + testSHA}},
 		{"pipx install --spec", "pipx", []string{"install", "--spec", "git+https://h/u/r"}},
 		{"uvx --from https no archive", "uvx", []string{"--from", "https://h/simple"}},
 		{"uvx --from https html", "uvx", []string{"--from", "https://h/x.html"}},

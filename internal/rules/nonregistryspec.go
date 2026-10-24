@@ -121,10 +121,12 @@ var hostedGitHosts = []string{"github.com", "gitlab.com", "bitbucket.org"}
 //
 // The URL is cut by hand and not with url.Parse, which refuses a reference such
 // as "https://${TOKEN}@github.com/u/r" (braces in the user info), the safe form
-// of a private repository.
+// of a private repository. A "\" is refused: a WHATWG parser reads it as "/" in
+// an https URL, so "https://evil.example\@github.com/u/r" has the host
+// evil.example, not github.com.
 func isHostedGitURL(rawURL string) bool {
 	_, rest, found := strings.Cut(rawURL, "://")
-	if !found {
+	if !found || strings.Contains(rawURL, `\`) {
 		return false
 	}
 	rest, _, _ = strings.Cut(rest, "?")
@@ -146,14 +148,21 @@ var npmGitPrefixes = []string{
 }
 
 // isNPMGitSpec reports whether spec (without its "#" fragment) is an npm git
-// spec: a known prefix with something after it, or the "git@host:path" form.
+// spec: a known prefix with something after it, or the scp form
+// "git@host:path". In the scp form the text after ":" is a path. A text that
+// starts with "//" is a URL: npm reads "git@https://host/x.tgz" as the alias
+// "git" for a tarball, and a tarball is never pinned.
 func isNPMGitSpec(spec string) bool {
 	for _, prefix := range npmGitPrefixes {
 		if hasPrefixFold(spec, prefix) && len(spec) > len(prefix) {
 			return true
 		}
 	}
-	return hasPrefixFold(spec, "git@") && strings.Contains(spec, ":")
+	if !hasPrefixFold(spec, "git@") {
+		return false
+	}
+	_, path, found := strings.Cut(spec, ":")
+	return found && !strings.HasPrefix(path, "//")
 }
 
 // npmArchiveSuffixes are the suffixes of a local npm package file, in lower
@@ -185,9 +194,7 @@ func isGitHubName(s string) bool {
 	if s == "" || !isASCIIAlnum(rune(s[0])) {
 		return false
 	}
-	return !strings.ContainsFunc(s, func(r rune) bool {
-		return !isASCIIAlnum(r) && !strings.ContainsRune("._-", r)
-	})
+	return !strings.ContainsFunc(s, func(r rune) bool { return !isNameRune(r) })
 }
 
 // isNonRegistryURLSpec reports whether spec starts with "git+" or holds a URL
@@ -198,12 +205,12 @@ func isNonRegistryURLSpec(spec string) bool {
 }
 
 // isScriptURL reports whether spec is a URL that ends in ".py": a script that
-// "pipx run" downloads and runs. pipx tests the whole argument, for any URL
-// scheme, so a query or a fragment after ".py" makes pipx refuse the URL, and
-// ".py" only in the query ("https://h/run?f=x.py") makes it run. A script URL
-// cannot be pinned.
+// "pipx run" downloads and runs. pipx tests the whole argument (case
+// sensitive, any URL scheme), so a query or a fragment after ".py" makes pipx
+// refuse the URL, and ".py" only in the query ("https://h/run?f=x.py") makes it
+// run. A script URL cannot be pinned.
 func isScriptURL(spec string) bool {
-	return strings.Contains(spec, "://") && strings.HasSuffix(strings.ToLower(spec), ".py")
+	return strings.Contains(spec, "://") && strings.HasSuffix(spec, ".py")
 }
 
 // pythonNonRegistryUnpinned classifies a uvx --from or pipx --spec spec (see
