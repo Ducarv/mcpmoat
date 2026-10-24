@@ -299,7 +299,7 @@ func schemaWithDescription(t *testing.T, text string) string {
 }
 
 // isT1004WordPattern reports whether re is one of the MOAT-T1-004 word
-// patterns (keychain, credentials store or file). MOAT-T1-010 leaves them out
+// patterns (keychain, credentials store or file). MOAT-T1-012 leaves them out
 // on purpose (see its header comment).
 func isT1004WordPattern(re string) bool {
 	return strings.Contains(re, "keychain") || strings.Contains(re, `credentials?\s+`)
@@ -317,14 +317,14 @@ type schemaCopy struct {
 // schemaCopies lists every schema copy of a description rule.
 var schemaCopies = []schemaCopy{
 	{"MOAT-T1-009", []string{"MOAT-T1-001", "MOAT-T1-003"}},
-	{"MOAT-T1-010", []string{"MOAT-T1-004"}}, // without the word patterns
-	{"MOAT-T1-011", []string{"MOAT-T1-002"}},
-	{"MOAT-T1-012", []string{"MOAT-T1-005"}},
-	{"MOAT-T1-013", []string{"MOAT-T1-006"}},
-	{"MOAT-T1-014", []string{"MOAT-T1-008"}},
-	{"MOAT-T1-016", []string{"MOAT-T1-015"}},
-	{"MOAT-T1-019", []string{"MOAT-T1-017"}},
-	{"MOAT-T1-020", []string{"MOAT-T1-018"}},
+	{"MOAT-T1-012", []string{"MOAT-T1-004"}}, // without the word patterns
+	{"MOAT-T1-013", []string{"MOAT-T1-002"}},
+	{"MOAT-T1-014", []string{"MOAT-T1-005"}},
+	{"MOAT-T1-015", []string{"MOAT-T1-006"}},
+	{"MOAT-T1-016", []string{"MOAT-T1-008"}},
+	{"MOAT-T1-018", []string{"MOAT-T1-017"}},
+	{"MOAT-T1-021", []string{"MOAT-T1-019"}},
+	{"MOAT-T1-022", []string{"MOAT-T1-020"}},
 }
 
 // noSchemaCopy holds the T1 description rules that have no schema copy.
@@ -332,7 +332,7 @@ var schemaCopies = []schemaCopy{
 var noSchemaCopy = map[string]bool{"MOAT-T1-007": true}
 
 // copiedMatch returns the part of the match block of r that its schema copy
-// holds. That is the full block, except for MOAT-T1-004: MOAT-T1-010 leaves
+// holds. That is the full block, except for MOAT-T1-004: MOAT-T1-012 leaves
 // out its word patterns.
 func copiedMatch(r Rule) Match {
 	if r.ID != "MOAT-T1-004" {
@@ -356,7 +356,7 @@ func copiedMatch(r Rule) Match {
 //     a source matches the schema rule, and no should_not_match case does.
 //
 // A MOAT-T1-004 should_match case that only its word patterns match is
-// skipped, because MOAT-T1-010 leaves those patterns out.
+// skipped, because MOAT-T1-012 leaves those patterns out.
 func TestSchemaRuleCopiesDescriptionRules(t *testing.T) {
 	t.Parallel()
 
@@ -418,7 +418,7 @@ func TestSchemaRuleCopiesDescriptionRules(t *testing.T) {
 				copied := compile(t, id, part, TargetDescription)
 				for i, c := range src.ShouldMatch {
 					if id == "MOAT-T1-004" && len(copied.Match(c.Text)) == 0 {
-						continue // only a word pattern matches, and MOAT-T1-010 leaves those out
+						continue // only a word pattern matches, and MOAT-T1-012 leaves those out
 					}
 					if len(schemaRule.Match(schemaWithDescription(t, c.Text))) == 0 {
 						t.Errorf("%s does not match %s should_match[%d] in a schema: %s", dst.ID, id, i, short(c.Text))

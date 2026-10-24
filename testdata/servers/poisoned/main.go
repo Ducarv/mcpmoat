@@ -15,7 +15,7 @@
 //   - daily_quote: a hidden <IMPORTANT> instruction block,
 //   - padded_notes: more than 32 KiB of benign text, then a hidden
 //     <IMPORTANT> instruction block past the regex match window (rule hits:
-//     MOAT-T1-007 for the length, MOAT-T1-015 for the match window),
+//     MOAT-T1-007 for the length, MOAT-T1-017 for the match window),
 //   - unit_convert: a base64 blob that decodes to an instruction,
 //   - weather_lookup: an instruction in an input-schema property.
 //

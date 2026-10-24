@@ -5,7 +5,7 @@
 # escapes. When no string matches, each seam of two neighbour strings is
 # matched too: the end of one string, 32 newlines, the start of the next. So
 # an instruction split over two neighbour strings is still found. A gap such
-# as [\s\S]{0,30} cannot cross a seam. File paths are in MOAT-T1-010, at
+# as [\s\S]{0,30} cannot cross a seam. File paths are in MOAT-T1-012, at
 # medium.
 id: MOAT-T1-009
 title: Tool schema tells the model to override its instructions or hide actions from the user
@@ -92,9 +92,9 @@ should_not_match:
   - text: '{"type":"object","properties":{"title":{"type":"string","default":"Untitled"},"enum":{"type":"string","enum":["draft","final"]},"examples":{"type":"array","examples":[["a","b"]]}}}'
     note: JSON Schema keywords as property names
   - text: '{"type":"object","properties":{"key_path":{"type":"string","description":"Path to the private key, such as ~/.ssh/id_ed25519."}}}'
-    note: A file path alone is for MOAT-T1-010, at medium
+    note: A file path alone is for MOAT-T1-012, at medium
   - text: '{"properties":{"path":{"type":"string","default":".env"}}}'
-    note: A file name alone is for MOAT-T1-010
+    note: A file name alone is for MOAT-T1-012
   - text: '{"properties":{"creds":{"type":"string","description":"Path to the credentials file."}}}'
     note: No override and no hide instruction
   - '{"properties":{"source":{"type":"string","description":"Read the value from process.env."}}}'

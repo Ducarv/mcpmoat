@@ -292,9 +292,9 @@ func TestBuiltinT1IDs(t *testing.T) {
 	slices.Sort(ids)
 	wantIDs := []string{
 		"MOAT-T1-001", "MOAT-T1-002", "MOAT-T1-003", "MOAT-T1-004", "MOAT-T1-005",
-		"MOAT-T1-006", "MOAT-T1-007", "MOAT-T1-008", "MOAT-T1-009", "MOAT-T1-010",
-		"MOAT-T1-011", "MOAT-T1-012", "MOAT-T1-013", "MOAT-T1-014", "MOAT-T1-015",
-		"MOAT-T1-016", "MOAT-T1-017", "MOAT-T1-018", "MOAT-T1-019", "MOAT-T1-020",
+		"MOAT-T1-006", "MOAT-T1-007", "MOAT-T1-008", "MOAT-T1-009", "MOAT-T1-012",
+		"MOAT-T1-013", "MOAT-T1-014", "MOAT-T1-015", "MOAT-T1-016", "MOAT-T1-017",
+		"MOAT-T1-018", "MOAT-T1-019", "MOAT-T1-020", "MOAT-T1-021", "MOAT-T1-022",
 	}
 	if !slices.Equal(ids, wantIDs) {
 		t.Errorf("loaded T1 rule IDs = %q, want %q", ids, wantIDs)
@@ -324,12 +324,12 @@ func TestFixtureBuiltinT1(t *testing.T) {
 		{"mailer", []string{"send_email"}, nil},
 		{"poisoned", []string{"currency_convert", "daily_quote", "padded_notes", "unit_convert", "weather_lookup"}, map[toolTarget][]string{
 			{"daily_quote", rules.TargetDescription}:      {"MOAT-T1-002", "MOAT-T1-003", "MOAT-T1-004", "MOAT-T1-005"},
-			{"weather_lookup", rules.TargetSchema}:        {"MOAT-T1-009", "MOAT-T1-010"},
-			{"currency_convert", rules.TargetDescription}: {"MOAT-T1-006", "MOAT-T1-017"},
-			{"unit_convert", rules.TargetDescription}:     {"MOAT-T1-008", "MOAT-T1-018"},
+			{"weather_lookup", rules.TargetSchema}:        {"MOAT-T1-009", "MOAT-T1-012"},
+			{"currency_convert", rules.TargetDescription}: {"MOAT-T1-006", "MOAT-T1-019"},
+			{"unit_convert", rules.TargetDescription}:     {"MOAT-T1-008", "MOAT-T1-020"},
 			// The payload is past the regex window, so only the heuristics
 			// that read the full text match.
-			{"padded_notes", rules.TargetDescription}: {"MOAT-T1-007", "MOAT-T1-015"},
+			{"padded_notes", rules.TargetDescription}: {"MOAT-T1-007", "MOAT-T1-017"},
 		}},
 		{"shadowing", []string{"add_numbers"}, map[toolTarget][]string{
 			{"add_numbers", rules.TargetDescription}: {"MOAT-T1-003", "MOAT-T1-005"},

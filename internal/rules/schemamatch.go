@@ -47,9 +47,9 @@ const (
 
 	// seamSep goes between the two sides of a seam. It is 32 newlines, in
 	// four groups of 8. A bounded gap of at most 31 characters, such as the
-	// [\s\S]{0,30} of MOAT-T1-009 and MOAT-T1-012, cannot cross 32
+	// [\s\S]{0,30} of MOAT-T1-009 and MOAT-T1-014, cannot cross 32
 	// newlines. Longer or unbounded gaps, such as the [^<>]{0,100} and
-	// [\s\S]+? of MOAT-T1-011, and \s+ and \s* can cross a seam. \b works at
+	// [\s\S]+? of MOAT-T1-013, and \s+ and \s* can cross a seam. \b works at
 	// a newline. ^ and $ match only at the start and the end of the whole
 	// seam text, unless the regex has the (?m) flag. When a side is cut at
 	// seamSideBytes, the cut point acts like the start or the end of the
@@ -193,7 +193,7 @@ func matchSchema(raw string, mode schemaMode, match func(string) []Hit) []Hit {
 	}
 	if !complete {
 		// The raw text is JSON text: an escape such as \u001b is not decoded
-		// here. MOAT-T1-016 flags every schema that cannot be read in full,
+		// here. MOAT-T1-018 flags every schema that cannot be read in full,
 		// so this pass is the second line, not the only one.
 		keepSchemaHits(&l, "schema raw text", match(raw))
 	}

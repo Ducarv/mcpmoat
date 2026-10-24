@@ -607,7 +607,7 @@ func hasTextRun(b []byte, n int) bool {
 // not count as a sentence. A ',' or a '.' with no space after it
 // ("ignore,all,previous,...") makes a token that is not a word. And one
 // token that is not a word, such as "e.g" or "2x", ends the run. A rule with min_words has a medium twin without it
-// (MOAT-T1-008 and MOAT-T1-014), and the twin still flags such a text.
+// (MOAT-T1-008 and MOAT-T1-016), and the twin still flags such a text.
 func hasWordRun(b []byte, n int) bool {
 	count := 0
 	for field := range bytes.FieldsSeq(b) {

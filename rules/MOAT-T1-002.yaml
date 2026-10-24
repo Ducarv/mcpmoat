@@ -1,4 +1,4 @@
-# MOAT-T1-011 copies this match block for the input schema. Change both files.
+# MOAT-T1-013 copies this match block for the input schema. Change both files.
 id: MOAT-T1-002
 title: Tool description uses markup tags to frame hidden instructions
 severity: high

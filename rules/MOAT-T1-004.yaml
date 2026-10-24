@@ -1,4 +1,4 @@
-# MOAT-T1-010 copies these file patterns (not the word patterns) for the input schema. Change both files.
+# MOAT-T1-012 copies these file patterns (not the word patterns) for the input schema. Change both files.
 id: MOAT-T1-004
 title: Tool description mentions sensitive local files
 severity: medium

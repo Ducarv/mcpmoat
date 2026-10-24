@@ -674,7 +674,7 @@ func seamHit(text string) bool { return strings.Contains(text, seamSep) }
 func TestSeamSepLength(t *testing.T) {
 	t.Parallel()
 	// A bounded gap of at most 31 characters, such as the [\s\S]{0,30} of
-	// MOAT-T1-009 and MOAT-T1-012, cannot cross 32 newlines. Longer or
+	// MOAT-T1-009 and MOAT-T1-014, cannot cross 32 newlines. Longer or
 	// unbounded gaps ([^<>]{0,100}, [\s\S]+?) and \s+ can cross a seam.
 	if len(seamSep) != 32 {
 		t.Errorf("len(seamSep) = %d, want 32", len(seamSep))

@@ -1,4 +1,4 @@
-# MOAT-T1-012 copies these patterns for the input schema. Change both files.
+# MOAT-T1-014 copies these patterns for the input schema. Change both files.
 id: MOAT-T1-005
 title: Tool description asks to send data to an external address
 severity: high

@@ -56,7 +56,7 @@ How mcpmoat prepares the text before a match. This applies to every regex and ke
      words still match.
 
   A control character inside a word and a ZWSP between words defeat all three forms. The
-  `invisible_unicode` heuristic (MOAT-T1-006 for a description, MOAT-T1-013 for a schema) flags
+  `invisible_unicode` heuristic (MOAT-T1-006 for a description, MOAT-T1-015 for a schema) flags
   every invisible character, also every control character except white space. So it still flags
   such a text.
 - A regex also sees a folded form of the text: fullwidth letters, mathematical letters and
@@ -69,7 +69,7 @@ How mcpmoat prepares the text before a match. This applies to every regex and ke
   the first 128 KiB of the raw text, and then each form is cut at 32 KiB. Padding can push an
   instruction past this window. The `match_window` heuristic closes this gap. It fires when the
   regex and keyword rules cannot read the whole text: the raw text is longer than 128 KiB, or a form
-  is cut at 32 KiB. MOAT-T1-015 (description) and MOAT-T1-016 (schema) use it at high severity.
+  is cut at 32 KiB. MOAT-T1-017 (description) and MOAT-T1-018 (schema) use it at high severity.
 
 How mcpmoat prepares the text of a `target: schema` rule:
 
@@ -127,16 +127,16 @@ other file.
 | Description rule | Schema copy | What the copy takes |
 |---|---|---|
 | MOAT-T1-001 and MOAT-T1-003 | MOAT-T1-009 | The patterns of both rules, in that order |
-| MOAT-T1-002 | MOAT-T1-011 | The match block |
-| MOAT-T1-004 | MOAT-T1-010 | Only the file patterns, not the word patterns (keychain, credentials store or file) |
-| MOAT-T1-005 | MOAT-T1-012 | The match block |
-| MOAT-T1-006 | MOAT-T1-013 | The match block |
-| MOAT-T1-008 | MOAT-T1-014 | The match block |
-| MOAT-T1-015 | MOAT-T1-016 | The match block |
-| MOAT-T1-017 | MOAT-T1-019 | The match block |
-| MOAT-T1-018 | MOAT-T1-020 | The match block |
+| MOAT-T1-002 | MOAT-T1-013 | The match block |
+| MOAT-T1-004 | MOAT-T1-012 | Only the file patterns, not the word patterns (keychain, credentials store or file) |
+| MOAT-T1-005 | MOAT-T1-014 | The match block |
+| MOAT-T1-006 | MOAT-T1-015 | The match block |
+| MOAT-T1-008 | MOAT-T1-016 | The match block |
+| MOAT-T1-017 | MOAT-T1-018 | The match block |
+| MOAT-T1-019 | MOAT-T1-021 | The match block |
+| MOAT-T1-020 | MOAT-T1-022 | The match block |
 
-Each copy has the severity of its source. So a file path in a schema (MOAT-T1-010) is `medium`,
+Each copy has the severity of its source. So a file path in a schema (MOAT-T1-012) is `medium`,
 and a benign SSH tool with a key-path field does not exit 1 under the default `--fail-on high`.
 MOAT-T1-007 (`max_length`) has no copy. Two tests in `internal/rules/builtin_test.go` check the
 pairs. `TestSchemaRuleCopiesDescriptionRules` checks that each copy has the match block and the
