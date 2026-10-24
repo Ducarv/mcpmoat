@@ -16,6 +16,7 @@ func TestHeuristicMixedScript(t *testing.T) {
 		cyr   = "Latin and Cyrillic"
 		greek = "Latin and Greek"
 		all3  = "Latin, Cyrillic and Greek"
+		cyrGr = "Cyrillic and Greek"
 	)
 	type hit struct {
 		offset  int
@@ -81,6 +82,19 @@ func TestHeuristicMixedScript(t *testing.T) {
 		// The high surrogate is not followed by a low one, so it is a lone
 		// surrogate (bytes 0 to 5) that ends the word. "A" starts a word at 6.
 		{name: "high surrogate then a non-low escape", text: "\\uD835\\u0041\u0430", want: []hit{{6, cyr}}},
+		{name: "private-use rune inside Ignore", text: "\u0406\ue000gnore", want: []hit{{0, cyr}}},
+		{name: "plane 15 private-use rune inside Ignore", text: "\u0406\U000F0000gnore", want: []hit{{0, cyr}}},
+		{name: "unassigned code point inside Ignore", text: "\u0406\u0378gnore", want: []hit{{0, cyr}}},
+		// "\u0430\u03b1 " is 5 bytes.
+		{name: "Cyrillic and Greek without Latin", text: "\u0430\u03b1 \u043e\u03bf", want: []hit{{0, cyrGr}, {5, cyrGr}}},
+		{name: "Armenian and Cyrillic without Latin", text: "\u0585\u0430", want: []hit{{0, "Cyrillic and Armenian"}}},
+		{name: "Cyrillic and Armenian ignore", text: "\u0456\u0581\u043f\u043e\u0433\u0435", want: []hit{{0, "Cyrillic and Armenian"}}},
+		{name: "two other look-alike scripts", text: "x\u0585\u13a5", want: []hit{{0, "Latin, Armenian and Cherokee"}}},
+		{name: "mu at the start of a long word after a digit", text: "5\u03bcpdate", want: []hit{{1, greek}}},
+		{name: "mu in the middle after a digit", text: "5a\u03bcb", want: []hit{{1, greek}}},
+		// Raw `\u0035` is 6 bytes. The escaped digit does not excuse the mu.
+		{name: "escaped digit before mu", text: "\\u0035\u03bcs", want: []hit{{6, greek}}},
+		{name: "double-struck small pi", text: "\u213cx", want: []hit{{0, greek}}},
 
 		// Negative cases.
 		{name: "pure Cyrillic and Greek words next to Latin", text: "Use \u043f\u043e\u0438\u0441\u043a now \u03bb\u03cc\u03b3\u03bf\u03c2 ok"},
@@ -100,13 +114,21 @@ func TestHeuristicMixedScript(t *testing.T) {
 		{name: "escaped backslash before u0406", text: "\\\\u0406gnore"},
 		{name: "JSON escape of a less-than sign ends the word", text: "\u0406\\u003cgnore"},
 		{name: "lone surrogate escape splits the word", text: "\u0406\\ud835gnore"},
-		{name: "Cyrillic and Greek without Latin", text: "\u0430\u03b1 \u043e\u03bf"},
 		{name: "pure Armenian word next to Latin", text: "hello \u0570\u0561\u0575 world"},
 		{name: "pure Cherokee word next to Latin", text: "hello \u13e3\u13b3\u13a9 world"},
 		{name: "pure Coptic word next to Latin", text: "hello \u2c99\u2c89\u2ca7 world"},
-		{name: "Armenian and Cyrillic without Latin", text: "\u0585\u0430"},
 		// Raw `\t` decodes to a tab, which ends the word.
 		{name: "JSON t escape ends the word", text: "\u0406\\tgnore"},
+		{name: "JSON f escape ends the word", text: "\u0406\\fgnore"},
+		{name: "JSON r escape ends the word", text: "\u0406\\rgnore"},
+		{name: "JSON slash escape ends the word", text: "\u0406\\/gnore"},
+		{name: "JSON quote escape ends the word", text: "\u0406\\\"gnore"},
+		{name: "unit word of 4 letters", text: "5\u03bcmol"},
+		{name: "Omega at the start after a digit", text: "5\u03a9x"},
+		// Documented limit: a unit-shaped word of at most 4 letters.
+		{name: "short unit-shaped word", text: "5\u03bcse"},
+		// Documented limit: U+2800 is not a letter, so it splits the word.
+		{name: "braille blank inside Ignore", text: "\u0406\u2800gnore"},
 		{name: "short u escape at the end", text: "\u0406\\u12"},
 		{name: "backslash at the end", text: "x\\"},
 		// Documented limit: a word fully in Cyrillic look-alikes.

@@ -101,10 +101,9 @@
 // letters, and accents are folded: "cafe" matches "caf" + U+00E9. Homoglyphs
 // from other scripts (for example Cyrillic U+0430 for Latin "a") are not
 // folded, for regexes or keywords. Instead, the mixed_script heuristic (rules
-// MOAT-T1-010 and MOAT-T1-011) flags a word that mixes Latin letters with
-// letters of Cyrillic, Greek or another look-alike script such as Lisu,
-// except a Greek unit letter after a number. See the Heuristics and hits
-// section for details.
+// MOAT-T1-010 and MOAT-T1-011) flags a word that mixes letters of two or
+// more look-alike scripts, such as Latin and Cyrillic, except a Greek unit
+// letter after a number. See the Heuristics and hits section for details.
 //
 // Any run of white space, or U+2800 (braille blank), matches the space
 // between the words of a keyword. Punctuation does not: the keyword "ignore
@@ -131,43 +130,52 @@
 // ends a run, and runs are not joined. So a payload that is split into short
 // chunks is not flagged when no chunk reaches min_length on its own.
 //
-// The mixed_script heuristic flags a word that mixes Latin letters with
-// letters of a look-alike script, such as "Ignore" with a Cyrillic "I"
-// (U+0406). The look-alike scripts are Cyrillic, Greek, Armenian, Cherokee,
-// Lisu, Coptic, Canadian Aboriginal and Tifinagh. Only Greek has an
-// exemption, for a unit (see below). The heuristic reads the full raw text.
-// A hit gives the raw byte offset of the first rune of the word and names
-// the scripts, but it never holds the word: the terminal-safe output does
+// The mixed_script heuristic flags a word that mixes letters of two or more
+// look-alike scripts, such as "Ignore" with a Cyrillic "I" (U+0406). The
+// look-alike scripts are Latin, Cyrillic, Greek, Armenian, Cherokee, Lisu,
+// Coptic, Canadian Aboriginal and Tifinagh. So a word with no Latin letter
+// is flagged too when it mixes two of them, such as Cyrillic and Armenian
+// letters that read as "ignore". Only Greek has an exemption, for a unit (see
+// below). The heuristic reads the full raw text. A hit gives the raw byte
+// offset of the first rune of the word and names the scripts in the order of
+// the list above, but it never holds the word: the terminal-safe output does
 // not change look-alike letters, so the word would show as normal Latin
-// text. A word is a run of letters, marks and invisible runes, so a ZWSP or
-// a combining mark cannot split a word. Any other rune, such as a digit,
-// '_', '-', a space or punctuation, ends a word.
+// text.
+//
+// A word is a run of letters, marks, invisible runes, private-use runes and
+// unassigned code points. So a ZWSP, a combining mark or a private-use rune
+// (such as U+E000, which many fonts draw as nothing) cannot split a word. Any
+// other rune, such as a digit, '_', '-', a space or punctuation, ends a word.
 //
 // Each letter counts for its own script. So Armenian small oh (U+0585) and
 // Lisu letter ga (U+A4D6) count for their scripts. A letter of the Common or
 // Inherited script counts by its fold, the same fold that the regexes read.
-// So the mathematical Greek letters (U+1D6A8 to U+1D7CB) count as Greek, the
+// So the mathematical Greek letters (U+1D6A8 to U+1D7CB) and the
+// double-struck Greek letters (U+213C to U+213F) count as Greek, the
 // mathematical Latin letters (such as U+1D400) count as Latin, and U+00B5
-// (micro sign) counts as Greek mu.
+// (micro sign) counts as Greek mu. A letter of any other script, such as
+// Han, counts for no script.
 //
 // The heuristic decodes JSON escapes: \b, \f, \n, \r, \t, \\, \", \/ and \u
-// plus exactly 4 hex digits. A surrogate pair is one rune. The decoded rune
-// acts like a raw rune: a letter, a mark or an invisible rune joins the word,
-// and any other rune ends it. So the escape of U+0406 is a Cyrillic letter in
-// the word, and rule MOAT-T1-011 can use the same heuristic on the raw JSON
-// of a schema. The decoding also runs on description text, so a backslash
-// and a "t" in a description read as a tab.
+// plus exactly 4 hex digits. A surrogate pair is one rune, and a lone
+// surrogate is U+FFFD. The decoded rune acts like a raw rune: a letter, a
+// mark or an invisible rune joins the word, and any other rune ends it. So
+// the escape of U+0406 is a Cyrillic letter in the word, and rule
+// MOAT-T1-011 can use the same heuristic on the raw JSON of a schema. The
+// decoding also runs on description text, so a backslash and a "t" in a
+// description read as a tab.
 //
-// A word with Latin and Greek letters is not flagged when it is a unit after
-// a number. The word must have exactly one Greek letter, and that letter must
-// be mu (U+03BC or U+00B5) or Omega (U+03A9 or the ohm sign U+2126). It must
-// be the first or the last letter of the word. The word must come directly
-// after an ASCII digit, or after one space that comes directly after an ASCII
-// digit. So "5" + U+03BC + "s" and "10k" + U+03A9 are not flagged, but
-// U+03BC + "s" with no number before it is flagged. Math notation is also
-// flagged: U+0394 (capital Delta) + "t" gives a known false positive. To
-// accept such a word, ignore the rule (MOAT-T1-010 or MOAT-T1-011) for that
-// one tool in .mcpmoat-ignore.
+// A word with Greek letters is not flagged for them when it is a unit after
+// a number. The word must have exactly one Greek letter and at most 4
+// letters. The Greek letter must be mu (U+03BC or U+00B5) or Omega (U+03A9 or
+// the ohm sign U+2126), and it must be the first or the last letter of the
+// word. The word must come directly after an ASCII digit, or after one space
+// that comes directly after an ASCII digit. An escaped digit, such as \u0035,
+// does not count. So "5" + U+03BC + "s", "5" + U+03BC + "mol" and "10k" +
+// U+03A9 are not flagged. But U+03BC + "s" with no number before it and "5" +
+// U+03BC + "pdate" are flagged. Math notation is also flagged: U+0394 (capital
+// Delta) + "t" gives a known false positive. To accept such a word, ignore
+// the rule (MOAT-T1-010 or MOAT-T1-011) for that one tool in .mcpmoat-ignore.
 //
 // The mixed_script heuristic does not flag:
 //
@@ -177,8 +185,8 @@
 //   - Latin-script look-alikes that do not fold, such as U+0131 (dotless i);
 //   - look-alikes from scripts outside the list, such as the Ethiopic
 //     syllable U+12D0, which looks like an "O";
-//   - one mu or Omega at the start or the end of a word that comes after a
-//     digit, such as "5" + U+03BC + "ser";
+//   - a unit-shaped word of at most 4 letters with one mu or Omega at its
+//     start or end after a digit, such as "5" + U+03BC + "se";
 //   - a word that a visible rune other than a letter splits in two, such as
 //     U+FFFD from an invalid UTF-8 byte or U+2800 (braille blank).
 //
@@ -209,7 +217,10 @@
 // that inspect accepts is read in full.
 //
 // The shadowing check (MOAT-T3-001) scans this text, together with the tool
-// description, the tool title and the annotations title.
+// description, the tool title and the annotations title. A rule with target:
+// schema does not read this text. It reads the raw JSON of the input schema,
+// so property names and enum values are checked too (see MOAT-T1-009 and
+// MOAT-T1-011).
 //
 // # The ignore file
 //

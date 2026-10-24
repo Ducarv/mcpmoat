@@ -23,9 +23,10 @@ const (
 	// 8 to 4096), and min_text, the shortest decoded text in bytes (default
 	// 24, 4 to 3072).
 	HeuristicBase64Blob = "base64_blob"
-	// HeuristicMixedScript flags a word that mixes Latin letters with
-	// Cyrillic or Greek letters, such as "Ignore" with a Cyrillic "I". It
-	// reads the raw text and has no parameters.
+	// HeuristicMixedScript flags a word that mixes letters of two or more
+	// look-alike scripts, such as Latin, Cyrillic, Greek or Armenian (see the
+	// package doc), as in "Ignore" with a Cyrillic "I". It reads the raw text
+	// and has no parameters.
 	HeuristicMixedScript = "mixed_script"
 
 	// The five heuristics below run the native config checks on one case line
@@ -84,11 +85,6 @@ func compileHeuristic(name string, params map[string]any) (func(raw string) []Hi
 			return nil, err
 		}
 		return invisibleUnicode, nil
-	case HeuristicMixedScript:
-		if _, err := readParams(params); err != nil {
-			return nil, err
-		}
-		return mixedScript, nil
 	case HeuristicMaxLength:
 		v, err := readParams(params, paramSpec{name: "max_runes", def: 4096, min: 1, max: 1 << 24})
 		if err != nil {
@@ -106,6 +102,11 @@ func compileHeuristic(name string, params map[string]any) (func(raw string) []Hi
 		}
 		minLength, minText := v[0], v[1]
 		return func(raw string) []Hit { return base64Blob(raw, minLength, minText) }, nil
+	case HeuristicMixedScript:
+		if _, err := readParams(params); err != nil {
+			return nil, err
+		}
+		return mixedScript, nil
 	case HeuristicTyposquat:
 		if _, err := readParams(params); err != nil {
 			return nil, err

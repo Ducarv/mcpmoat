@@ -189,6 +189,8 @@ var fuzzTexts = []string{
 	"ig\u0301n\u043ere",                                              // combining mark inside a mixed word
 	"\\u003c\u0406gnore",                                             // JSON escape before a mixed word
 	"\\\\n\u0430",                                                    // backslash pair before an escape letter
+	"\u0406\ue000gnore \u0456\u0581\u043f\u043e\u0433\u0435",         // private-use rune; no Latin letter
+	"\\u0035\u03bcs 5\u03bcpdate",                                    // escaped digit; long unit-shaped word
 	strings.Repeat("\u0430b ", 100),                                  // more than MaxHits mixed words
 }
 

@@ -341,8 +341,8 @@ func spacesToASCII(s string) string {
 // The regex matchers apply it only to the text, not to the pattern, and they
 // keep the forms before the fold too (see regexForms). Homoglyphs from other
 // scripts (Cyrillic U+0430 for Latin "a") are not folded. The mixed_script
-// heuristic flags a word that mixes Latin letters with Cyrillic or Greek
-// letters instead.
+// heuristic flags a word that mixes letters of two or more look-alike
+// scripts, such as Latin and Cyrillic, instead.
 //
 // It folds s one rune at a time (see appendFold), and it uses the fold of a
 // rune only when the fold is not longer, in bytes, than the rune. Otherwise

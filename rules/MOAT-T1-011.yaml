@@ -1,11 +1,11 @@
-# The schema twin of MOAT-T1-010. Change them together. This rule reads the
+# The schema twin of MOAT-T1-010. Change both files. This rule reads the
 # raw JSON of the input schema, so property names and enum values are checked
 # too. JSON escapes are decoded. So an escaped letter (such as \u0406, a
 # Cyrillic I) counts in the word, and an escaped control rune (such as
 # \u0001) does not split a word. An escape that decodes to a space or a
 # punctuation rune (such as \n or \") ends a word.
 id: MOAT-T1-011
-title: Tool schema has a word that mixes Latin letters with letters of a look-alike script
+title: Tool schema has a word that mixes letters of look-alike scripts
 severity: medium
 target: schema
 match:
