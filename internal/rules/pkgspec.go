@@ -168,25 +168,8 @@ func packageAt(command string, args []string) (PackageSpec, int, bool) {
 func rawSpecAt(command string, args []string) (runner Runner, spec string, at int, ok bool) {
 	command, runArgs, skip := unwrapCmd(command, args)
 	runner = runnerOf(command)
-
-	// flags is the table that scanArgs uses for the arguments in scanFrom.
-	var flags flagTable
-	scanFrom := 0 // index in runArgs where the runner flags start
-	switch runner {
-	case RunnerNPX:
-		flags = npmFlags
-	case RunnerBunx:
-		flags = bunxFlags
-	case RunnerUVX:
-		flags = uvxFlags
-	case RunnerPipx:
-		// Global flags such as "--verbose" may come before "run".
-		sub, subAt, found := scanArgs(runArgs, flagTable{})
-		if !found || sub != "run" {
-			return "", "", 0, false
-		}
-		flags, scanFrom = pipxFlags, subAt+1
-	default:
+	flags, scanFrom, ok := runnerFlags(runner, runArgs)
+	if !ok {
 		return "", "", 0, false
 	}
 
@@ -194,22 +177,39 @@ func rawSpecAt(command string, args []string) (runner Runner, spec string, at in
 	if !found || !cleanSpec(spec) {
 		return "", "", 0, false
 	}
-	if (runner == RunnerUVX || runner == RunnerPipx) && strings.HasSuffix(spec, ".py") && !isRemoteURLSpec(spec) {
+	if (runner == RunnerUVX || runner == RunnerPipx) && strings.HasSuffix(spec, ".py") && !isNonRegistryURLSpec(spec) {
 		return "", "", 0, false // a script, not a package
 	}
 	return runner, spec, skip + scanFrom + specAt, true
 }
 
-// isRemoteURLSpec reports whether spec starts with "git+", "http://" or
-// "https://", compared without regard to case.
-func isRemoteURLSpec(spec string) bool {
-	lower := strings.ToLower(spec)
-	for _, prefix := range []string{"git+", "http://", "https://"} {
-		if strings.HasPrefix(lower, prefix) {
-			return true
+// runnerFlags returns the flag table of runner r and the index in args where
+// the scan with that table starts: after the "run" subcommand for pipx (global
+// flags such as "--verbose" may come before it), else 0. ok is false for
+// docker, an unknown runner, and pipx without "run".
+func runnerFlags(r Runner, args []string) (flags flagTable, from int, ok bool) {
+	switch r {
+	case RunnerNPX:
+		return npmFlags, 0, true
+	case RunnerBunx:
+		return bunxFlags, 0, true
+	case RunnerUVX:
+		return uvxFlags, 0, true
+	case RunnerPipx:
+		sub, at, found := scanArgs(args, flagTable{})
+		if !found || sub != "run" {
+			return flagTable{}, 0, false
 		}
+		return pipxFlags, at + 1, true
+	default:
+		return flagTable{}, 0, false
 	}
-	return false
+}
+
+// isNonRegistryURLSpec reports whether spec starts with "git+", "http://" or
+// "https://", compared without regard to case.
+func isNonRegistryURLSpec(spec string) bool {
+	return hasPrefixFold(spec, "git+") || hasPrefixFold(spec, "http://") || hasPrefixFold(spec, "https://")
 }
 
 // parseRunnerArgs does the parse for packageAt. It does not run validName,
@@ -223,26 +223,20 @@ func parseRunnerArgs(command string, args []string) (PackageSpec, int, bool) {
 // parseUnwrapped is parseRunnerArgs for a command that is not a cmd /c
 // wrapper.
 func parseUnwrapped(command string, args []string) (PackageSpec, int, bool) {
-	switch r := runnerOf(command); r {
-	case RunnerNPX:
-		return extractNPM(r, npmFlags, args)
-	case RunnerBunx:
-		return extractNPM(r, bunxFlags, args)
-	case RunnerUVX:
-		return extractPython(r, uvxFlags, args)
-	case RunnerPipx:
-		// Global flags such as "--verbose" may come before "run".
-		sub, at, ok := scanArgs(args, flagTable{})
-		if !ok || sub != "run" {
-			return PackageSpec{}, 0, false
-		}
-		spec, specAt, ok := extractPython(r, pipxFlags, args[at+1:])
-		return spec, at + 1 + specAt, ok
-	case RunnerDocker:
+	r := runnerOf(command)
+	if r == RunnerDocker {
 		return extractDocker(args)
-	default:
+	}
+	flags, from, ok := runnerFlags(r, args)
+	if !ok {
 		return PackageSpec{}, 0, false
 	}
+	extract := extractPython
+	if r.isNPM() {
+		extract = extractNPM
+	}
+	spec, at, ok := extract(r, flags, args[from:])
+	return spec, from + at, ok
 }
 
 // cmdWrapped reports whether command and args are "cmd [/s /d /q] /c
@@ -323,12 +317,11 @@ func validPyPIName(name string) bool {
 	if name == "" || len(name) > maxPackageNameLen {
 		return false
 	}
-	isAlnum := func(r rune) bool { return isLowerAlnum(r) || (r >= 'A' && r <= 'Z') }
-	if first, last := rune(name[0]), rune(name[len(name)-1]); !isAlnum(first) || !isAlnum(last) {
+	if first, last := rune(name[0]), rune(name[len(name)-1]); !isASCIIAlnum(first) || !isASCIIAlnum(last) {
 		return false
 	}
 	return !strings.ContainsFunc(name, func(r rune) bool {
-		return !isAlnum(r) && !strings.ContainsRune("._-", r)
+		return !isASCIIAlnum(r) && !strings.ContainsRune("._-", r)
 	})
 }
 
@@ -393,6 +386,11 @@ func isDigitsAndDots(s string) bool {
 // isLowerAlnum reports whether r is an ASCII lower-case letter or digit.
 func isLowerAlnum(r rune) bool {
 	return (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9')
+}
+
+// isASCIIAlnum reports whether r is an ASCII letter or digit.
+func isASCIIAlnum(r rune) bool {
+	return isLowerAlnum(r) || (r >= 'A' && r <= 'Z')
 }
 
 // runnerOf maps a command to a runner by its base name (see commandBase).

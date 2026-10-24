@@ -24,6 +24,10 @@ should_match:
     note: Secret flag with its value in the next arg. The value is 24 random fake characters with no token prefix.
   - text: npx some-server --token=Zq8Lm3Vx0Rt5Ws2Hy7Nb4Kd1
     note: Secret flag with the value after "=".
+  - text: npx mcp-remote https://example.com/sse --header X-Api-Key:Zq8Lm3Vx0Rt5Ws2Hy7Nb4Kd1
+    note: Header flag. The value is a "Name:value" header, checked like a header entry. A text case is split at white space, so it has no space after the colon.
+  - text: npx some-server --password hunter2hunter2
+    note: A name that ends in "password" takes any value of 8 bytes or more, not only a random one.
   - text: npx some-server sk-EXAMPLE0Zq8Lm3Vx0Rt5Ws2Hy7Nb4
     note: Bare arg with a token prefix. It needs no flag name. Synthetic value, the sk- prefix plus 28 fake characters. The body must look random, so a repeated pattern such as the ghp_EXAMPLEexample cases above does not match here.
   - text: https://example.com/sse?api_key=Zq8Lm3Vx0Rt5Ws2Hy7Nb4Kd1
@@ -51,6 +55,10 @@ should_not_match:
     note: Secret flag with a variable reference, the safe form.
   - text: npx some-server --api-key $API_KEY
     note: Secret flag with a shell variable, the safe form.
+  - text: npx mcp-remote https://example.com/sse --header X-Api-Key:${API_KEY}
+    note: Header flag with a variable reference, the safe form.
+  - text: docker login --password-stdin registry.example.com
+    note: The name does not end in a password word. The flag takes no value, and the next arg is a registry host.
   - text: npx some-server --max-tokens 4096
     note: The flag name has "token" in it but it is a count. The value is a number.
   - text: npx some-server --tokenizer cl100k_base

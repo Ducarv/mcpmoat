@@ -107,6 +107,18 @@ func TestCheckConfig(t *testing.T) {
 	remoteWithSpecArgs.Command = "npx"
 	remoteWithSpecArgs.Args = discover.NewArgs([]string{"github:user/repo", "--api-key", testRandom32})
 
+	// Remote servers with args of one kind each: the args checks are for stdio
+	// servers only, so these give no finding either.
+	remoteWithSecretArgs := remoteServer(discover.TransportHTTP, "https://mcp.example.com/mcp")
+	remoteWithSecretArgs.Command = "npx"
+	remoteWithSecretArgs.Args = discover.NewArgs([]string{"--api-key", testRandom32})
+	remoteWithGitHubArgs := remoteServer(discover.TransportHTTP, "https://mcp.example.com/mcp")
+	remoteWithGitHubArgs.Command = "npx"
+	remoteWithGitHubArgs.Args = discover.NewArgs([]string{"github:user/repo"})
+	remoteWithUVXArgs := remoteServer(discover.TransportHTTP, "https://mcp.example.com/mcp")
+	remoteWithUVXArgs.Command = "uvx"
+	remoteWithUVXArgs.Args = discover.NewArgs([]string{"--from", "git+https://github.com/u/r", "tool"})
+
 	// A stdio server with a secret URL field: the URL field is read only for
 	// remote servers, so it gives no finding.
 	stdioWithSecretURL := stdioServer("node", "server.js")
@@ -305,11 +317,7 @@ func TestCheckConfig(t *testing.T) {
 		{"URL arg with a query token", stdioServer("node", "server.js", "https://mcp.example.com/sse?token="+testRandom32), secretArgs},
 		{"URL arg with a password", stdioServer("node", "server.js", "--url=https://user:hunter2@mcp.example.com/sse"), secretArgs},
 		{"URL arg without a secret", stdioServer("node", "server.js", "https://mcp.example.com/sse?page=2"), nil},
-		{"remote server with secret args gives none", func() discover.Server {
-			s := remoteWithSpecArgs
-			s.Args = discover.NewArgs([]string{"--api-key", testRandom32})
-			return s
-		}(), nil},
+		{"remote server with secret args gives none", remoteWithSecretArgs, nil},
 		{"args secret comes after the env secret", withEnv(stdioServer("node", "server.js", "--api-key", testRandom32), "GITHUB_TOKEN", testGHToken),
 			slices.Concat(secretEnv("GITHUB_TOKEN"), secretArgs)},
 
@@ -356,17 +364,8 @@ func TestCheckConfig(t *testing.T) {
 		{"uvx --from wheel URL", stdioServer("uvx", "--from", "https://example.com/p-1.0-py3-none-any.whl", "tool"), unpinnedSpec},
 		{"pipx run --spec git+https", stdioServer("pipx", "run", "--spec", "git+https://github.com/u/r", "tool"), unpinnedSpec},
 		{"pipx run --spec git+https pinned", stdioServer("pipx", "run", "--spec", "git+https://github.com/u/r@"+testSHA, "tool"), nil},
-		{"remote server with a github: spec gives none", func() discover.Server {
-			s := remoteWithSpecArgs
-			s.Args = discover.NewArgs([]string{"github:user/repo"})
-			return s
-		}(), nil},
-		{"remote server with git+https uvx args gives none", func() discover.Server {
-			s := remoteServer(discover.TransportHTTP, "https://mcp.example.com/mcp")
-			s.Command = "uvx"
-			s.Args = discover.NewArgs([]string{"--from", "git+https://github.com/u/r", "tool"})
-			return s
-		}(), nil},
+		{"remote server with a github: spec gives none", remoteWithGitHubArgs, nil},
+		{"remote server with git+https uvx args gives none", remoteWithUVXArgs, nil},
 		{"remote server with git spec and secret args gives none", remoteWithSpecArgs, nil},
 
 		// Benign.
@@ -785,6 +784,7 @@ func assertFindingNoLeak(t *testing.T, f Finding, secrets ...string) {
 		t.Fatalf("json.Marshal(%s) error = %v", f.RuleID, err)
 	}
 	outputs := map[string]string{
+		"%v":   fmt.Sprintf("%v", f),
 		"%+v":  fmt.Sprintf("%+v", f),
 		"%#v":  fmt.Sprintf("%#v", f),
 		"json": string(js),

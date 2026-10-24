@@ -1,11 +1,15 @@
 package rules
 
-import "strings"
+import (
+	"net/url"
+	"slices"
+	"strings"
+)
 
 // fullSHALen is the length of a full Git commit hash in hex (SHA-1).
 const fullSHALen = 40
 
-// remoteSpecUnpinned reports whether the package runner fetches its package
+// nonRegistrySpecUnpinned reports whether the package runner fetches its package
 // from a git repository, a GitHub shorthand or a URL, and the spec is not
 // pinned to a full commit. These specs are the ones that ExtractPackage
 // refuses, so the registry check (PackageSpec.Unpinned) never sees them.
@@ -14,35 +18,42 @@ const fullSHALen = 40
 //   - npx, bunx: "github:u/r" and the gitlab:, bitbucket: and gist: forms,
 //     "u/r", "git+https://", "git+http://", "git+ssh://", "git://", "ssh://",
 //     "git@host:u/r" and "http(s)://" URLs, with or without a "name@" prefix.
-//     A git form is pinned only by a "#" fragment of exactly 40 hex digits.
-//     A URL is never pinned.
+//     A git form is pinned only by a "#" fragment of exactly 40 hex digits
+//     (npm options after "::" are ignored). So is an https URL of a repository
+//     on github.com, gitlab.com or bitbucket.org, which npm reads as a git
+//     spec. Any other URL is never pinned.
 //   - uvx --from and pipx run --spec: "git+https://", "git+http://",
 //     "git+ssh://" and "git+git://" unless the repository path ends in
-//     "@<40 hex digits>", and "http(s)://" URLs of a .whl, .tar.gz, .tgz, .zip
-//     or .tar file.
+//     "@<40 hex digits>", and "http(s)://" URLs of a .whl, .tar.gz, .tgz, .zip,
+//     .tar, .tar.bz2 or .tar.xz file. The name may carry extras, as in
+//     "tool[extra]@git+https://...".
+//   - pipx run <URL>.py: a script that pipx downloads and runs. It cannot be
+//     pinned.
 //
 // It returns false for everything else: a registry spec, a local path, a doubtful
-// parse (see rawSpecAt), docker, a uvx or pipx spec that is not given with
-// --from or --spec, and any form it does not know. When unsure, it says false.
+// parse (see rawSpecAt), docker, a uvx spec that is not given with --from, a pipx
+// spec that is neither given with --spec nor a script URL, and any form it does
+// not know (for example hg+, svn+ and bzr+ specs, and "name @ url" with spaces).
+// When unsure, it says false.
 //
 // The spec is untrusted config text and can hold credentials. This function
 // only reads it and returns a bool; it never builds an error, a log line or a
 // message from it.
-func remoteSpecUnpinned(command string, args []string) bool {
-	if _, _, ok := packageAt(command, args); ok {
-		return false // a registry spec: the registry check handles it
-	}
+func nonRegistrySpecUnpinned(command string, args []string) bool {
 	runner, spec, at, ok := rawSpecAt(command, args)
 	if !ok {
 		return false
 	}
 	switch runner {
 	case RunnerNPX, RunnerBunx:
-		return npmRemoteUnpinned(spec)
+		return npmNonRegistryUnpinned(spec)
 	case RunnerUVX:
-		return givenByFlag(args, at, "--from") && pythonRemoteUnpinned(spec)
+		return givenByFlag(args, at, "--from") && pythonNonRegistryUnpinned(spec)
 	case RunnerPipx:
-		return givenByFlag(args, at, "--spec") && pythonRemoteUnpinned(spec)
+		if givenByFlag(args, at, "--spec") {
+			return pythonNonRegistryUnpinned(spec)
+		}
+		return isScriptURL(spec)
 	default:
 		return false
 	}
@@ -63,11 +74,11 @@ func givenByFlag(args []string, at int, flag string) bool {
 	return at > 0 && args[at-1] == flag
 }
 
-// npmRemoteUnpinned classifies an npx or bunx spec (see remoteSpecUnpinned).
-// A spec can also be an alias, "name@<remote spec>", so it tries the part
+// npmNonRegistryUnpinned classifies an npx or bunx spec (see nonRegistrySpecUnpinned).
+// A spec can also be an alias, "name@<non-registry spec>", so it tries the part
 // after the first "@" that follows the name.
-func npmRemoteUnpinned(spec string) bool {
-	if unpinned, remote := classifyNPM(spec); remote {
+func npmNonRegistryUnpinned(spec string) bool {
+	if unpinned, nonRegistry := classifyNPM(spec); nonRegistry {
 		return unpinned
 	}
 	// Index(spec[1:], "@")+1 skips the "@" of a scope ("@scope/name"). When
@@ -80,20 +91,38 @@ func npmRemoteUnpinned(spec string) bool {
 	return false
 }
 
-// classifyNPM reports whether spec is a remote npm spec, and if so whether it
+// classifyNPM reports whether spec is a non-registry npm spec, and if so whether it
 // is unpinned. The two results are separate so the caller can tell "pinned"
-// from "not a remote spec".
-func classifyNPM(spec string) (unpinned, remote bool) {
+// from "not a non-registry spec".
+func classifyNPM(spec string) (unpinned, nonRegistry bool) {
 	// A git spec ends in "#<commit-ish>". Only a full commit hash pins it.
 	base, fragment, _ := strings.Cut(spec, "#")
+	// npm allows options after the commit-ish: "#<commit>::path:packages/x".
+	commit, _, _ := strings.Cut(fragment, "::")
 	switch {
 	case hasHTTPScheme(base):
-		return true, true // a URL cannot be pinned
+		// npm reads the https URL of a repository on a known git host as a git
+		// spec. Any other URL is a tarball, and a tarball cannot be pinned.
+		return !isHostedGitURL(base) || !isFullSHA(commit), true
 	case isNPMGitSpec(base), isGitHubShorthand(base):
-		return !isFullSHA(fragment), true
+		return !isFullSHA(commit), true
 	default:
 		return false, false
 	}
+}
+
+// hostedGitHosts are the hosts whose repository URLs npm reads as git specs.
+var hostedGitHosts = []string{"github.com", "gitlab.com", "bitbucket.org"}
+
+// isHostedGitURL reports whether rawURL, without its "#" fragment, is the
+// https URL of a repository on one of hostedGitHosts: "https://host/user/repo"
+// or "https://host/user/repo.git". A longer path is not a repository root.
+func isHostedGitURL(rawURL string) bool {
+	u, err := url.Parse(rawURL)
+	if err != nil || !slices.Contains(hostedGitHosts, strings.ToLower(u.Hostname())) {
+		return false
+	}
+	return len(strings.Split(strings.Trim(u.Path, "/"), "/")) == 2
 }
 
 // npmGitPrefixes are the prefixes of npm git specs, in lower case. A local
@@ -144,23 +173,40 @@ func isGitHubName(s string) bool {
 	})
 }
 
-// isASCIIAlnum reports whether r is an ASCII letter or digit.
-func isASCIIAlnum(r rune) bool {
-	return isLowerAlnum(r) || (r >= 'A' && r <= 'Z')
+// isScriptURL reports whether spec is an http(s) URL of a .py file, a script
+// that "pipx run" downloads and runs.
+func isScriptURL(spec string) bool {
+	if !hasHTTPScheme(spec) {
+		return false
+	}
+	path, _, _ := strings.Cut(spec, "#")
+	path, _, _ = strings.Cut(path, "?")
+	return strings.HasSuffix(strings.ToLower(path), ".py")
 }
 
-// pythonRemoteUnpinned classifies a uvx --from or pipx --spec spec (see
-// remoteSpecUnpinned). Like npm, it also reads "name@<remote spec>".
-func pythonRemoteUnpinned(spec string) bool {
-	if unpinned, remote := classifyPython(spec); remote {
+// pythonNonRegistryUnpinned classifies a uvx --from or pipx --spec spec (see
+// nonRegistrySpecUnpinned). Like npm, it also reads "name@<non-registry spec>".
+func pythonNonRegistryUnpinned(spec string) bool {
+	if unpinned, nonRegistry := classifyPython(spec); nonRegistry {
 		return unpinned
 	}
-	// The name must come first, so the first "@" after index 0 splits it.
-	if i := strings.Index(spec, "@"); i > 0 && validPyPIName(spec[:i]) {
+	// The name must come first, so the first "@" after index 0 splits it. The
+	// name may carry extras: "tool[extra]".
+	if i := strings.Index(spec, "@"); i > 0 && validPyPIName(stripExtras(spec[:i])) {
 		unpinned, _ := classifyPython(spec[i+1:])
 		return unpinned
 	}
 	return false
+}
+
+// stripExtras cuts a trailing "[extra,...]" from a Python package name.
+func stripExtras(name string) string {
+	if before, ok := strings.CutSuffix(name, "]"); ok {
+		if i := strings.IndexByte(before, '['); i > 0 {
+			return before[:i]
+		}
+	}
+	return name
 }
 
 // pythonGitSchemes are the schemes that a pip or uv git spec can use, in lower
@@ -169,11 +215,11 @@ var pythonGitSchemes = []string{"git+https://", "git+http://", "git+ssh://", "gi
 
 // pythonArchiveSuffixes are the file types that make a URL a Python package
 // download, in lower case.
-var pythonArchiveSuffixes = []string{".whl", ".tar.gz", ".tgz", ".zip", ".tar"}
+var pythonArchiveSuffixes = []string{".whl", ".tar.gz", ".tgz", ".zip", ".tar", ".tar.bz2", ".tar.xz"}
 
-// classifyPython reports whether spec is a remote Python spec, and if so
+// classifyPython reports whether spec is a non-registry Python spec, and if so
 // whether it is unpinned.
-func classifyPython(spec string) (unpinned, remote bool) {
+func classifyPython(spec string) (unpinned, nonRegistry bool) {
 	// The fragment holds "egg=" or "subdirectory=" options, not a version.
 	base, _, _ := strings.Cut(spec, "#")
 	for _, scheme := range pythonGitSchemes {
@@ -219,13 +265,5 @@ func hasHTTPScheme(s string) bool {
 // isFullSHA reports whether s is exactly fullSHALen hex digits (upper or lower
 // case). A short hash or a 64 digit hash is not a full SHA-1 commit.
 func isFullSHA(s string) bool {
-	if len(s) != fullSHALen {
-		return false
-	}
-	for i := 0; i < len(s); i++ {
-		if !isHexDigit(s[i]) { // isHexDigit is in heuristics.go
-			return false
-		}
-	}
-	return true
+	return len(s) == fullSHALen && isHexString(s, fullSHALen)
 }

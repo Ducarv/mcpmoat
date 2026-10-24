@@ -33,6 +33,10 @@ should_match:
     note: Python git package with no commit
   - text: pipx run --spec git+https://github.com/user/repo tool
     note: Python git package with no commit
+  - text: npx https://github.com/user/repo#main
+    note: npm reads this URL as a git spec, and a branch name moves
+  - text: pipx run https://example.com/script.py
+    note: A script that pipx downloads and runs. The URL can serve different code at any time
 should_not_match:
   - npx -y @scope/server@1.4.2
   - uvx some-server==0.3.1
@@ -45,5 +49,7 @@ should_not_match:
     note: GitHub package pinned to a full 40-hex commit
   - text: uvx --from git+https://github.com/user/repo@0123456789abcdef0123456789abcdef01234567 tool
     note: Python git package pinned to a full 40-hex commit
+  - text: npx https://github.com/user/repo#0123456789abcdef0123456789abcdef01234567
+    note: The https URL of a GitHub repository, pinned to a full 40-hex commit
   - text: npx ./local-dir
     note: Local path, so no remote package is fetched

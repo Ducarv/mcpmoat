@@ -74,7 +74,7 @@ const shellOrWindowsVar = `(\$[A-Za-z_][A-Za-z0-9_]*|%[A-Za-z_][A-Za-z0-9_]*%)`
 // then MOAT-T4-003, then MOAT-T4-004. MOAT-T4-002 also looks at the command
 // args of a stdio server and at the URL of a remote server (see
 // checkArgSecrets). MOAT-T4-003 covers a registry package and a git, tarball
-// or URL spec (see remoteSpecUnpinned). A finding never holds a secret value,
+// or URL spec (see nonRegistrySpecUnpinned). A finding never holds a secret value,
 // an arg or a URL (see Finding).
 func CheckConfig(s discover.Server) []Finding {
 	var findings []Finding
@@ -152,7 +152,6 @@ func checkPlaintextSecrets(s discover.Server) []Finding {
 			findings = append(findings, secretFinding(s.Name, FieldHeaders, key))
 		}
 	}
-	// append(a, b...) adds every element of the slice b. A nil b adds nothing.
 	return append(findings, checkArgSecrets(s)...)
 }
 
@@ -348,7 +347,7 @@ func shannonEntropy(s string) float64 {
 // A registry spec ("pkg", "pkg@latest") is read by packageAt, and its finding
 // names the package in Related when the args redaction policy allows it. A git,
 // tarball, URL or GitHub shorthand spec is not a registry spec, so packageAt
-// refuses it. remoteSpecUnpinned reads those, and their finding keeps Related
+// refuses it. nonRegistrySpecUnpinned reads those, and their finding keeps Related
 // empty: the spec can hold a credential, such as a token in a URL.
 func checkUnpinnedPackage(s discover.Server) []Finding {
 	if s.Transport != discover.TransportStdio {
@@ -357,7 +356,7 @@ func checkUnpinnedPackage(s discover.Server) []Finding {
 	args := s.Args.Values()
 	spec, at, ok := packageAt(s.Command, args)
 	if !ok {
-		if remoteSpecUnpinned(s.Command, args) {
+		if nonRegistrySpecUnpinned(s.Command, args) {
 			return []Finding{unpinnedFinding(s.Name, "")}
 		}
 		return nil

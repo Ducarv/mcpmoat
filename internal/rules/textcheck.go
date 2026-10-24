@@ -91,15 +91,18 @@ func plaintextSecretText(raw string) []Hit {
 		s.Env = discover.SecretMap{key: discover.NewSecret(value)}
 		return findingHits(checkPlaintextSecrets(s), HeuristicPlaintextSecret)
 	}
-	// "http://host" also matches headerEntryRe, so the "//" test keeps a URL
-	// out of the header form. The URL form below then reads it.
-	if name, value, _ := strings.Cut(line, ":"); headerEntryRe.MatchString(line) && !strings.HasPrefix(value, "//") {
-		s := discover.Server{
-			Name:      caseServerName,
-			Transport: discover.TransportHTTP,
-			Headers:   discover.SecretMap{name: discover.NewSecret(strings.TrimSpace(value))},
+	if headerEntryRe.MatchString(line) {
+		name, value, _ := strings.Cut(line, ":")
+		// "http://host" also matches headerEntryRe, so the "//" test keeps a URL
+		// out of the header form. The URL form below then reads it.
+		if !strings.HasPrefix(value, "//") {
+			s := discover.Server{
+				Name:      caseServerName,
+				Transport: discover.TransportHTTP,
+				Headers:   discover.SecretMap{name: discover.NewSecret(strings.TrimSpace(value))},
+			}
+			return findingHits(checkPlaintextSecrets(s), HeuristicPlaintextSecret)
 		}
-		return findingHits(checkPlaintextSecrets(s), HeuristicPlaintextSecret)
 	}
 	fields := strings.Fields(line)
 	if len(fields) == 1 && urlLineRe.MatchString(line) {

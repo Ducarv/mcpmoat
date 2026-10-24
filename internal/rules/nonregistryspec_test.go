@@ -1,8 +1,6 @@
 package rules
 
 import (
-	"encoding/json"
-	"fmt"
 	"strings"
 	"testing"
 
@@ -12,13 +10,13 @@ import (
 // Synthetic commit hashes. None of them is a real commit.
 const (
 	// sha40 is a full SHA-1 commit hash in lower case hex.
-	sha40 = "0123456789abcdef0123456789abcdef01234567"
+	sha40 = testSHA
 	// sha40Upper is sha40 in upper case hex.
 	sha40Upper = "0123456789ABCDEF0123456789ABCDEF01234567"
 )
 
-// remoteSpecCase is one command line for the remote spec tests.
-type remoteSpecCase struct {
+// nonRegistryCase is one command line for the non-registry spec tests.
+type nonRegistryCase struct {
 	name    string
 	command string
 	args    []string
@@ -149,10 +147,10 @@ func TestRawSpecAt(t *testing.T) {
 	}
 }
 
-// remoteUnpinnedCases are the command lines for which remoteSpecUnpinned must be
+// nonRegistryUnpinnedCases are the command lines for which nonRegistrySpecUnpinned must be
 // true. The strict T5 test reuses them.
-func remoteUnpinnedCases() []remoteSpecCase {
-	return []remoteSpecCase{
+func nonRegistryUnpinnedCases() []nonRegistryCase {
+	return []nonRegistryCase{
 		// npx and bunx: GitHub and other host shorthands
 		{"npx github no ref", "npx", []string{"-y", "github:u/r"}},
 		{"npx github branch", "npx", []string{"-y", "github:u/r#main"}},
@@ -188,6 +186,12 @@ func remoteUnpinnedCases() []remoteSpecCase {
 		{"npx http tgz", "npx", []string{"http://example.com/x.tgz"}},
 		{"npx https no suffix", "npx", []string{"https://example.com/x"}},
 		{"npx url ignores sha fragment", "npx", []string{"https://example.com/x.tgz#" + sha40}},
+		{"npx hosted git url no ref", "npx", []string{"https://github.com/u/r"}},
+		{"npx hosted git url branch", "npx", []string{"https://github.com/u/r#main"}},
+		{"npx hosted git url short sha", "npx", []string{"https://gitlab.com/u/r.git#abc1234"}},
+		{"npx hosted git archive ignores sha fragment", "npx", []string{"https://github.com/u/r/archive/main.tar.gz#" + sha40}},
+		{"npx unknown git host ignores sha fragment", "npx", []string{"https://git.example.com/u/r#" + sha40}},
+		{"npx github branch with options", "npx", []string{"github:u/r#main::path:packages/x"}},
 
 		// npx: alias and flag forms
 		{"npx alias github", "npx", []string{"foo@github:u/r"}},
@@ -220,6 +224,9 @@ func remoteUnpinnedCases() []remoteSpecCase {
 		{"uvx --from zip upper case", "uvx", []string{"--from", "HTTP://h/X.ZIP", "tool"}},
 		{"uvx --from tgz", "uvx", []string{"--from", "https://h/x.tgz", "tool"}},
 		{"uvx --from tar", "uvx", []string{"--from", "https://h/x.tar", "tool"}},
+		{"uvx --from tar.bz2", "uvx", []string{"--from", "https://h/x.tar.bz2", "tool"}},
+		{"uvx --from tar.xz", "uvx", []string{"--from", "https://h/x.tar.xz", "tool"}},
+		{"uvx --from alias with extras", "uvx", []string{"--from", "pkg[extra,more]@git+https://h/u/r", "tool"}},
 		{"uvx --from alias git+https", "uvx", []string{"--from", "pkg@git+https://h/u/r", "tool"}},
 		{"uvx --from mixed case scheme", "uvx", []string{"--from", "Git+HTTPS://h/u/r", "tool"}},
 		{"uvx --from egg fragment", "uvx", []string{"--from", "git+https://h/u/r#egg=x", "tool"}},
@@ -237,17 +244,26 @@ func remoteUnpinnedCases() []remoteSpecCase {
 		{"pipx run --spec branch", "pipx", []string{"run", "--spec", "git+https://h/u/r@main", "tool"}},
 		{"pipx run --spec whl", "pipx", []string{"run", "--spec", "https://h/x.whl", "tool"}},
 		{"pipx run --spec mixed case", "pipx", []string{"run", "--spec", "GIT+https://h/u/r", "tool"}},
+		{"pipx run positional script url", "pipx", []string{"run", "https://h/script.py"}},
+		{"pipx run positional script url upper case", "pipx", []string{"run", "HTTPS://h/SCRIPT.PY"}},
+		{"pipx run positional script url with query", "pipx", []string{"run", "https://h/script.py?a=1#frag"}},
 	}
 }
 
-// remoteSpecFalseCases are the command lines for which remoteSpecUnpinned must
+// nonRegistryFalseCases are the command lines for which nonRegistrySpecUnpinned must
 // be false.
-func remoteSpecFalseCases() []remoteSpecCase {
+func nonRegistryFalseCases() []nonRegistryCase {
 	tooLong := "github:u/" + strings.Repeat("a", maxSpecLen)
-	return []remoteSpecCase{
+	return []nonRegistryCase{
 		// pinned to a full commit
 		{"npx github 40 hex", "npx", []string{"-y", "github:u/r#" + sha40}},
 		{"npx github 40 hex upper", "npx", []string{"-y", "github:u/r#" + sha40Upper}},
+		{"npx github 40 hex with options", "npx", []string{"-y", "github:u/r#" + sha40 + "::path:packages/x"}},
+		{"npx hosted git url 40 hex", "npx", []string{"https://github.com/u/r#" + sha40}},
+		{"npx hosted git url .git 40 hex", "npx", []string{"https://gitlab.com/u/r.git#" + sha40}},
+		{"npx bitbucket url 40 hex", "npx", []string{"-y", "https://bitbucket.org/u/r#" + sha40}},
+		{"npx hosted git url alias 40 hex", "npx", []string{"foo@https://github.com/u/r#" + sha40}},
+		{"uvx --from alias with extras 40 hex", "uvx", []string{"--from", "pkg[extra]@git+https://h/u/r@" + sha40, "tool"}},
 		{"npx gitlab 40 hex", "npx", []string{"gitlab:u/r#" + sha40}},
 		{"bunx shorthand 40 hex", "bunx", []string{"u/r#" + sha40}},
 		{"npx shorthand 40 hex", "npx", []string{"u/r#" + sha40}},
@@ -305,7 +321,6 @@ func remoteSpecFalseCases() []remoteSpecCase {
 		{"uvx tool then --from", "uvx", []string{"tool", "--from", "git+https://h/u/r"}},
 		{"pipx run positional git+https", "pipx", []string{"run", "git+https://h/u/r"}},
 		{"pipx run positional whl", "pipx", []string{"run", "https://h/x.whl"}},
-		{"pipx run positional script url", "pipx", []string{"run", "https://h/script.py"}},
 		{"pipx install --spec", "pipx", []string{"install", "--spec", "git+https://h/u/r"}},
 		{"uvx --from https no archive", "uvx", []string{"--from", "https://h/simple"}},
 		{"uvx --from https html", "uvx", []string{"--from", "https://h/x.html"}},
@@ -342,34 +357,34 @@ func remoteSpecFalseCases() []remoteSpecCase {
 	}
 }
 
-func TestRemoteSpecUnpinned(t *testing.T) {
+func TestNonRegistrySpecUnpinned(t *testing.T) {
 	t.Parallel()
 
-	for _, tc := range remoteUnpinnedCases() {
+	for _, tc := range nonRegistryUnpinnedCases() {
 		t.Run("unpinned/"+tc.name, func(t *testing.T) {
 			t.Parallel()
-			if !remoteSpecUnpinned(tc.command, tc.args) {
-				t.Errorf("remoteSpecUnpinned(%q, %q) = false, want true", tc.command, tc.args)
+			if !nonRegistrySpecUnpinned(tc.command, tc.args) {
+				t.Errorf("nonRegistrySpecUnpinned(%q, %q) = false, want true", tc.command, tc.args)
 			}
 		})
 	}
-	for _, tc := range remoteSpecFalseCases() {
+	for _, tc := range nonRegistryFalseCases() {
 		t.Run("not-flagged/"+tc.name, func(t *testing.T) {
 			t.Parallel()
-			if remoteSpecUnpinned(tc.command, tc.args) {
-				t.Errorf("remoteSpecUnpinned(%q, %q) = true, want false", tc.command, tc.args)
+			if nonRegistrySpecUnpinned(tc.command, tc.args) {
+				t.Errorf("nonRegistrySpecUnpinned(%q, %q) = true, want false", tc.command, tc.args)
 			}
 		})
 	}
 }
 
-// TestRemoteSpecStrictT5 checks that ExtractPackage refuses every remote spec.
+// TestNonRegistrySpecStrictT5 checks that ExtractPackage refuses every non-registry spec.
 // If it returned a name for one, T5 would compare a guessed name with the popular
 // list.
-func TestRemoteSpecStrictT5(t *testing.T) {
+func TestNonRegistrySpecStrictT5(t *testing.T) {
 	t.Parallel()
 
-	extra := []remoteSpecCase{
+	extra := []nonRegistryCase{
 		{"pinned github", "npx", []string{"github:u/r#" + sha40}},
 		{"pinned shorthand", "bunx", []string{"u/r#" + sha40}},
 		{"pinned alias", "npx", []string{"@s/foo@github:u/r#" + sha40}},
@@ -378,7 +393,7 @@ func TestRemoteSpecStrictT5(t *testing.T) {
 		{"pipx pinned", "pipx", []string{"run", "--spec=git+https://h/u/r@" + sha40, "tool"}},
 		{"npx file", "npx", []string{"file:../x"}},
 	}
-	for _, tc := range append(remoteUnpinnedCases(), extra...) {
+	for _, tc := range append(nonRegistryUnpinnedCases(), extra...) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			if spec, ok := ExtractPackage(tc.command, tc.args); ok {
@@ -388,9 +403,9 @@ func TestRemoteSpecStrictT5(t *testing.T) {
 	}
 }
 
-// TestRemoteSpecLeak builds a server whose npx arg is a tarball URL with
+// TestNonRegistrySpecLeak builds a server whose npx arg is a tarball URL with
 // credentials and checks that the T4-003 finding holds none of them.
-func TestRemoteSpecLeak(t *testing.T) {
+func TestNonRegistrySpecLeak(t *testing.T) {
 	t.Parallel()
 
 	const (
@@ -398,8 +413,8 @@ func TestRemoteSpecLeak(t *testing.T) {
 		host   = "host.example"
 	)
 	arg := "https://user:" + secret + "@" + host + "/x.tgz"
-	if !remoteSpecUnpinned("npx", []string{arg}) {
-		t.Fatal("remoteSpecUnpinned() = false, want true for a URL with credentials")
+	if !nonRegistrySpecUnpinned("npx", []string{arg}) {
+		t.Fatal("nonRegistrySpecUnpinned() = false, want true for a URL with credentials")
 	}
 
 	s := discover.Server{
@@ -424,25 +439,12 @@ func TestRemoteSpecLeak(t *testing.T) {
 	}
 
 	for _, f := range findings {
-		forms := []string{fmt.Sprintf("%v", f), fmt.Sprintf("%+v", f), fmt.Sprintf("%#v", f)}
-		raw, err := json.Marshal(f)
-		if err != nil {
-			t.Fatalf("json.Marshal(%+v) error = %v", f, err)
-		}
-		forms = append(forms, string(raw))
-		forms = append(forms, f.RuleID, f.Server, f.Tool, f.Field, f.Key, f.Related, f.Message)
-		for _, form := range forms {
-			for _, banned := range []string{secret, host, "user:"} {
-				if strings.Contains(form, banned) {
-					t.Errorf("finding %q leaks %q: %s", f.RuleID, banned, form)
-				}
-			}
-		}
+		assertFindingNoLeak(t, f, secret, host, "user:")
 	}
 }
 
-func FuzzRemoteSpec(f *testing.F) {
-	for _, tc := range append(remoteUnpinnedCases(), remoteSpecFalseCases()...) {
+func FuzzNonRegistrySpec(f *testing.F) {
+	for _, tc := range append(nonRegistryUnpinnedCases(), nonRegistryFalseCases()...) {
 		for _, a := range tc.args {
 			f.Add(tc.command, a)
 		}
@@ -475,11 +477,11 @@ func FuzzRemoteSpec(f *testing.F) {
 			{"cmd", []string{"/c", "npx", "-y", spec}},
 		}
 		for _, l := range lines {
-			got := remoteSpecUnpinned(l.command, l.args)
-			// A remote spec is never a registry package: T5 must not see a name.
+			got := nonRegistrySpecUnpinned(l.command, l.args)
+			// A non-registry spec is never a registry package: T5 must not see a name.
 			if got {
 				if pkg, ok := ExtractPackage(l.command, l.args); ok {
-					t.Fatalf("remoteSpecUnpinned true and ExtractPackage ok for (%q, %q): %+v", l.command, l.args, pkg)
+					t.Fatalf("nonRegistrySpecUnpinned true and ExtractPackage ok for (%q, %q): %+v", l.command, l.args, pkg)
 				}
 			}
 		}

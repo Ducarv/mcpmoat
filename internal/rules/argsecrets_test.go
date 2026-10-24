@@ -18,8 +18,7 @@ const (
 	// entropy is above minEntropy at every length used here.
 	asBody = "Zq7Xw2Lm9Vb4Nc8Kd3Rt6Yh1Jg5Fs0PaE7uI2oB"
 
-	// asRand32 has 32 distinct characters: 5 bits of entropy per byte.
-	asRand32 = "aB3dE5fG7hJ9kL2mN4pQ6rS8tU0vW1xZ"
+	// testRandom32 has 32 distinct characters: 5 bits of entropy per byte.
 
 	asHost = "mcp.example.com"
 
@@ -144,15 +143,15 @@ func TestCheckArgSecretsArgs(t *testing.T) {
 		{"secret after clean args", []string{"-y", "pkg@1.0.0", "--port", "8080", "--password", asRand24}, true},
 		{"oversize arg does not hide a later secret", []string{strings.Repeat("a", maxScanLen+1), "--token=" + asGH}, true},
 
-		{"15 distinct bytes is not found", []string{"--api-key", asRand32[:15]}, false},
-		{"16 distinct bytes with digits is found", []string{"--api-key", asRand32[:16]}, true},
-		{"20 distinct bytes with digits is found", []string{"--api-key", asRand32[:20]}, true},
+		{"15 distinct bytes is not found", []string{"--api-key", testRandom32[:15]}, false},
+		{"16 distinct bytes with digits is found", []string{"--api-key", testRandom32[:16]}, true},
+		{"20 distinct bytes with digits is found", []string{"--api-key", testRandom32[:20]}, true},
 		{"low entropy value with a digit", []string{"--api-key", "aaaaaaaabbbbbbbb1"}, false},
 		{"readable value with a digit", []string{"--api-key", "my-service-name-1"}, false},
 		{"next arg is a flag with a long random name", []string{"--token", "--" + asRand24}, false},
 		{"prefix alone under a credential name", []string{"--api-key", "sk-abc12345"}, true},
-		{"prefix of 20 bytes is a bare token", []string{"gh" + "p_" + asRand32[:16]}, true},
-		{"prefix of 19 bytes is not a bare token", []string{"gh" + "p_" + asRand32[:15]}, false},
+		{"prefix of 20 bytes is a bare token", []string{"gh" + "p_" + testRandom32[:16]}, true},
+		{"prefix of 19 bytes is not a bare token", []string{"gh" + "p_" + testRandom32[:15]}, false},
 		{"locale with a token prefix", []string{"sk_SK.UTF-8"}, false},
 		{"credential URL with two at signs", []string{"--url=https://a@b:pw@example.com/sse"}, true},
 		{"percent-encoded key", []string{"--url=https://h/mcp?to%6Ben=" + asRand24}, true},
@@ -167,6 +166,23 @@ func TestCheckArgSecretsArgs(t *testing.T) {
 		{"api-key flag with a UUID", []string{"--api-key", asUUID}, true},
 		{"client-secret equals with a UUID", []string{"--client-secret=" + asUUID}, true},
 		{"password flag with a UUID", []string{"--password", asUUID}, true},
+
+		// A name that ends in a password word takes any value of 8 bytes or more.
+		{"password flag with a plain word", []string{"--password", "hunter2hunter2"}, true},
+		{"password flag with equals and symbols", []string{"--password=S3cure!Pass#2024"}, true},
+		{"db-password flag with a phrase", []string{"--db-password", "correct-horse-battery-staple"}, true},
+		{"passphrase flag", []string{"--passphrase=correcthorse"}, true},
+		{"password env name with a plain word", []string{"-e", "DB_PASSWORD=hunter2hunter2", "img"}, true},
+
+		// A header flag holds "Name: value". The value is checked like a header
+		// entry of the headers map.
+		{"header flag with a bearer token", []string{"mcp-remote", "https://h/sse", "--header", "Authorization: Bearer " + asRand24}, true},
+		{"header flag with a prefixed token", []string{"--header", "Authorization: Bearer " + asGH}, true},
+		{"header flag, no space after the colon", []string{"--header", "Authorization:Bearer " + asRand24}, true},
+		{"header flag with equals", []string{"--header=X-Api-Key: " + asRand24}, true},
+		{"headers flag", []string{"--HEADERS", "X-Api-Key: " + asRand24}, true},
+		{"short -H flag", []string{"-H", "X-Api-Key: " + asRand24}, true},
+		{"header flag with a literal default", []string{"--header", "Authorization: Bearer ${API_TOKEN:-" + asRand24 + "}"}, true},
 		{"api-key with random base62 of 20", []string{"--api-key", asB20}, true},
 		{"api-key with random base62 of 21", []string{"--api-key", asB21}, true},
 		{"api-key with random base62 of 22", []string{"--api-key", asB22}, true},
@@ -180,6 +196,21 @@ func TestCheckArgSecretsArgs(t *testing.T) {
 		{"bare UUID arg", []string{asUUID}, false},
 		{"key-name made of words (separator rule)", []string{"--key-name", "my-prod-secret-store-v2"}, false},
 		{"limit: random 16 bytes under the entropy limit is not found", []string{"--api-key", asB16}, false},
+
+		// A password word must be the last word of the name, and the value must
+		// be 8 bytes or more and not a reference, a boolean or a number.
+		{"password-stdin takes a registry", []string{"--password-stdin", "registry.example.com"}, false},
+		{"password-prompt takes a mode", []string{"--password-prompt", "interactive"}, false},
+		{"short password is not found", []string{"--password", "short"}, false},
+		{"password reference", []string{"--password", "${DB_PASSWORD}"}, false},
+		{"password flag with a number", []string{"--password", "12345678"}, false},
+		{"password-file takes a path", []string{"--password-file", "secrets.txt"}, false},
+
+		// Negative: header flags.
+		{"header flag with a reference", []string{"--header", "Authorization: Bearer ${API_TOKEN}"}, false},
+		{"header flag with a plain header", []string{"--header", "Accept: application/json"}, false},
+		{"header flag without a colon", []string{"--header", "justtext" + asRand24}, false},
+		{"-h is help, not a header flag", []string{"-h", "Authorization: Bearer " + asRand24}, false},
 
 		// Positive: random base64url with "-" or "_" inside is not word-like.
 		{"api-key with base64url 24, one separator", []string{"--api-key", asU24a}, true},
@@ -288,19 +319,24 @@ func TestCheckArgSecretsURL(t *testing.T) {
 		{"percent-encoded key name", "https://" + asHost + "/mcp?api%5Fkey=" + asGH, true},
 		{"user and password", "https://user:pw@" + asHost + "/mcp", true},
 		{"token as user", "https://" + asGH + "@" + asHost + "/mcp", true},
-		{"random 32-byte path segment", "https://" + asHost + "/mcp/" + asRand32, true},
+		{"random 32-byte path segment", "https://" + asHost + "/mcp/" + testRandom32, true},
 		{"token path segment", "https://" + asHost + "/mcp/" + asGH, true},
 		{"reference in host (S1)", "https://${HOST}/mcp?api_key=" + asGH, true},
 		{"bad escape in path (S1)", "https://h/%zz/" + asGH, true},
 		{"bad escape in the secret value", "https://h/mcp?token=" + asGH + "%zz", true},
 		{"bad escape in password", "https://user:p%ss@h/x", true},
+		{"token in the fragment", "https://" + asHost + "/sse#access_token=" + asRand24, true},
+		{"token in the fragment after another pair", "https://" + asHost + "/sse#state=1&token=" + asGH, true},
+		{"password query with a plain word and a stray percent", "https://h/mcp?password=hunter2%x", true},
+		{"password query with a plain word", "https://h/mcp?password=hunter2hunter2", true},
+		{"user info that holds the old reference marker text", "https://u:refx0@h/sse", true},
 		{"bad port", "https://h:abc/mcp?token=" + asGH, true},
 		{"reference as scheme", "${SCHEME}://h/mcp?token=" + asGH, true},
 		{"literal default in query (S2)", "https://h/mcp?api_key=${K:-" + asGH + "}", true},
 		{"nested default", "https://h/mcp?api_key=${K:-${J:-" + asGH + "}}", true},
 		{"tab inside the token", "https://h/mcp?token=" + asGH[:10] + "\t" + asGH[10:], true},
 		{"leading space", "  https://h/mcp?token=" + asGH, true},
-		{"random user name", "https://" + asRand32 + "@" + asHost + "/mcp", true},
+		{"random user name", "https://" + testRandom32 + "@" + asHost + "/mcp", true},
 		{"two at signs in the authority", "https://a@b:pw@h/mcp", true},
 		{"percent-encoded key name hides the word", "https://h/mcp?to%6Ben=" + asRand24, true},
 		{"tab inside a random value", "https://h/mcp?api_key=" + asRand24[:10] + "\t" + asRand24[10:], true},
@@ -360,8 +396,9 @@ func TestCheckArgSecretsURL(t *testing.T) {
 		{"md5 .zip archive", "https://h/dl/" + asMD5Hex + ".zip", false},
 		{"uniform md5 path segment", "https://h/dl/" + asUniMD5, false},
 		{"uniform sha256 path segment", "https://h/dl/" + asUniSHA, false},
-		{"limit: short password with a stray percent is not found", "https://h/mcp?password=hunter2%x", false},
-		{"limit: short password is not found", "https://h/mcp?password=hunter2", false},
+		{"limit: password under 8 bytes is not found", "https://h/mcp?password=hunter2", false},
+		{"plain fragment", "https://h/docs#section-2", false},
+		{"fragment with a reference", "https://h/sse#access_token=${TOKEN}", false},
 		{"page query with a stray percent", "https://h/mcp?page=2%", false},
 	}
 	for _, tt := range tests {
@@ -627,7 +664,7 @@ func TestCheckArgSecretsStructure(t *testing.T) {
 func TestCheckArgSecretsNoLeak(t *testing.T) {
 	t.Parallel()
 
-	secretURL := "https://user:" + asRand24 + "@" + asHost + "/mcp/" + asRand32 + "?token=" + asGH
+	secretURL := "https://user:" + asRand24 + "@" + asHost + "/mcp/" + testRandom32 + "?token=" + asGH
 	servers := map[string]discover.Server{
 		"named token":     argServer("run", "-e", "GITHUB_PERSONAL_ACCESS_TOKEN="+asGH),
 		"api-key flag":    argServer("--api-key", asRand24),
@@ -640,7 +677,7 @@ func TestCheckArgSecretsNoLeak(t *testing.T) {
 		"URL arg":         argServer("--url=https://user:" + asRand24 + "@" + asHost + "/sse"),
 		"NAME=URL":        argServer("SERVER_URL=https://" + asHost + "/x?token=" + asRand24),
 		"remote":          remoteServer(discover.TransportHTTP, secretURL),
-		"remote sse":      remoteServer(discover.TransportSSE, "https://"+asHost+"/mcp/"+asRand32),
+		"remote sse":      remoteServer(discover.TransportSSE, "https://"+asHost+"/mcp/"+testRandom32),
 		"hex key":         argServer("--api-key", asHex32),
 		"upper hex key":   argServer("--api-key=" + asHex64),
 		"UUID password":   argServer("--password", asUUID),
@@ -651,7 +688,7 @@ func TestCheckArgSecretsNoLeak(t *testing.T) {
 		"remote UUID key": remoteServer(discover.TransportHTTP, "https://"+asHost+"/mcp?api_key="+asUUID),
 		"random path zip": remoteServer(discover.TransportHTTP, "https://"+asHost+"/mcp/"+asPath+".zip"),
 	}
-	pieces := append([]string{asBody, asBody[:36], asGH, asSK, asRand24, asRand32, asHost, secretURL,
+	pieces := append([]string{asBody, asBody[:36], asGH, asSK, asRand24, testRandom32, asHost, secretURL,
 		asUUID, asHex32, asHex64, asB22, asB28, asPlus, asPath}, asNames...)
 
 	for name, s := range servers {
@@ -668,23 +705,7 @@ func TestCheckArgSecretsNoLeak(t *testing.T) {
 				}
 			}
 			for _, f := range findings {
-				js, err := json.Marshal(f)
-				if err != nil {
-					t.Fatalf("json.Marshal() error = %v", err)
-				}
-				outputs := map[string]string{
-					"%v":   fmt.Sprintf("%v", f),
-					"%+v":  fmt.Sprintf("%+v", f),
-					"%#v":  fmt.Sprintf("%#v", f),
-					"json": string(js),
-				}
-				for form, out := range outputs {
-					for _, secret := range secrets {
-						if secret != "" && strings.Contains(out, secret) {
-							t.Errorf("finding in %s form holds %q: %s", form, secret, out)
-						}
-					}
-				}
+				assertFindingNoLeak(t, f, secrets...)
 			}
 		})
 	}
@@ -905,18 +926,18 @@ func TestLooksLongRandom(t *testing.T) {
 		in   string
 		want bool
 	}{
-		{"20 bytes with letter, digit and entropy", asRand32[:20], true},
-		{"19 bytes", asRand32[:19], false},
+		{"20 bytes with letter, digit and entropy", testRandom32[:20], true},
+		{"19 bytes", testRandom32[:19], false},
 		{"21 bytes", asB21, true},
 		{"22 bytes", asB22, true},
 		{"23 bytes", asB23, true},
-		{"one separator", asRand32[:10] + "-" + asRand32[11:21], true},
-		{"two separators", asRand32[:10] + "-" + asRand32[11:15] + "_" + asRand32[16:21], false},
-		{"two dots", asRand32[:10] + "." + asRand32[11:15] + "." + asRand32[16:21], false},
+		{"one separator", testRandom32[:10] + "-" + testRandom32[11:21], true},
+		{"two separators", testRandom32[:10] + "-" + testRandom32[11:15] + "_" + testRandom32[16:21], false},
+		{"two dots", testRandom32[:10] + "." + testRandom32[11:15] + "." + testRandom32[16:21], false},
 		{"name made of words", "my-prod-secret-store-v2", false},
 		{"no digit", "aBcDeFgHiJkLmNoPqRsT", false},
 		{"low entropy", "a1a1a1a1a1a1a1a1a1a1", false},
-		{"not token-shaped", asRand32[:19] + "!", false},
+		{"not token-shaped", testRandom32[:19] + "!", false},
 		{"empty", "", false},
 	}
 	for _, tt := range tests {
@@ -964,7 +985,7 @@ func TestIsWordLike(t *testing.T) {
 		{"19 byte opaque tail is a limit", "my-project-" + asT24[:19], true},
 
 		// Not word-like: a random token, or too few separators.
-		{"random base62", asRand32, false},
+		{"random base62", testRandom32, false},
 		{"base64url 24, one separator", asU24a, false},
 		{"base64url 24, two separators", asU24b, false},
 		{"base64url 32, one separator", asU32a, false},
@@ -1162,7 +1183,7 @@ func TestIsNameSeparator(t *testing.T) {
 func FuzzCheckArgSecrets(f *testing.F) {
 	f.Add("--token="+asGH, "", "https://"+asHost+"/mcp?token="+asGH)
 	f.Add("--api-key", asRand24, "https://user:pw@h/mcp")
-	f.Add("-e", "DB_PASSWORD="+asRand24, "https://h/mcp/"+asRand32)
+	f.Add("-e", "DB_PASSWORD="+asRand24, "https://h/mcp/"+testRandom32)
 	f.Add("-eAPI_KEY="+asSK, "--token", "${SCHEME}://${HOST}:${PORT}/%zz?a=${K:-${J:-x}}")
 	f.Add("--token=${X:-"+asGH+"}", "--env=A=B=C", "https://h:abc/mcp?token=")
 	f.Add("--url=https://u:p%ss@h/", "SERVER_URL=https://h/x?token="+asRand24, "://")

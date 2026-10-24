@@ -9,17 +9,17 @@ tests only read the config, so they make no network calls.
 
 Use this home only with `--no-connect`. As a second guard, every name in it
 points at the reserved `.invalid` top-level domain (RFC 2606), which never
-resolves: the remote URL host is `mcp.example.invalid`, the npx entries pass
-`--registry https://registry.invalid/`, and the docker image is
-`registry.invalid/example/mcp-server`. The pinned docker image is
-`registry.invalid/example/server@sha256:...` and the `remote-url-secret` host
-is `mcp.example.invalid`. So a scan that connects by mistake fetches nothing
-and sends the canary header nowhere.
+resolves. The hosts in this fixture are:
 
-The two npx git specs use `git+https://git.invalid/example/example-server.git`.
-The host `git.invalid` never resolves. So every host in this fixture is
-`.invalid` or `example.invalid`, with no exception. No network call happens,
-because the fixture is read with `--no-connect` and nothing fetches the package.
+- `mcp.example.invalid`: the remote URL hosts (`remote-plain` and `remote-url-secret`).
+- `registry.invalid`: the `--registry` of the registry npx entries, and the docker images
+  (`registry.invalid/example/mcp-server` and `registry.invalid/example/server@sha256:...`).
+- `git.invalid`: the two npx git specs, `git+https://git.invalid/example/example-server.git`.
+- `127.0.0.1`: the `remote-local` URL. It is a loopback address and never leaves the machine.
+
+So a scan that connects by mistake fetches nothing and sends the canary header nowhere. No
+network call happens, because the fixture is read with `--no-connect` and nothing fetches
+the package.
 
 | Server | Expected rule IDs |
 |---|---|
