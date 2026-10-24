@@ -3,22 +3,25 @@ package rules
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"io"
+
+	"github.com/Ducarv/mcpmoat/internal/inspect"
 )
 
 const (
 	// maxSchemaDepth is the deepest nesting of objects and arrays that
-	// schemaText reads. It mirrors maxJSONDepth in internal/inspect/jsonshape.go.
-	// The rules package cannot use that unexported constant. json.Decoder.Token
-	// has no depth limit, so schemaText counts the depth itself.
-	maxSchemaDepth = 64
+	// schemaText reads: the inspect cap, so a schema that inspect accepts is
+	// read in full. json.Decoder.Token has no depth limit, so schemaText counts
+	// the depth itself.
+	maxSchemaDepth = inspect.MaxJSONDepth
 
-	// maxSchemaValues is the most JSON values that schemaText reads. It mirrors
-	// maxJSONValues in internal/inspect/jsonshape.go and counts the same things:
-	// objects, arrays, object keys, strings, numbers, true, false and null.
-	// Closing '}' and ']' are not counted. So a schema that inspect accepts
-	// never goes over this cap. The cap keeps the work bounded for any input.
-	maxSchemaValues = 100_000
+	// maxSchemaValues is the most JSON values that schemaText reads: the
+	// inspect cap. schemaText counts the same things as inspect: objects,
+	// arrays, object keys, strings, numbers, true, false and null. Closing '}'
+	// and ']' are not counted. So a schema that inspect accepts never goes
+	// over this cap. The cap keeps the work bounded for any input.
+	maxSchemaValues = inspect.MaxJSONValues
 )
 
 // schemaFrame is one open object or array while schemaText reads a schema.
@@ -47,9 +50,8 @@ type schemaFrame struct {
 //
 // complete is false when the text may be partial: the JSON is malformed, has
 // data after the first value, or went over a bound. texts then holds what the
-// function read before it stopped. Empty input gives (nil, true).
-//
-// T1 rules can reuse this function to read the text of a schema.
+// function read before it stopped. Empty input gives (nil, true), and
+// whitespace-only input is malformed: (nil, false).
 func schemaText(raw json.RawMessage) (texts []string, complete bool) {
 	if len(raw) == 0 {
 		return nil, true
@@ -67,20 +69,14 @@ func schemaText(raw json.RawMessage) (texts []string, complete bool) {
 		}
 
 		// A closing delimiter is not a value. Every other token is one: it is
-		// counted, as inspect counts it.
-		d, isDelim := tok.(json.Delim)
-		isValue := !isDelim || d == '{' || d == '['
-		if isValue {
+		// counted, as inspect counts it. Then find the key of this value, and
+		// mark the parent as ready for the next key.
+		key := ""
+		if d, isDelim := tok.(json.Delim); !isDelim || d == '{' || d == '[' {
 			values++
 			if values > maxSchemaValues {
 				return texts, false
 			}
-		}
-
-		// Find the key of this value, and mark the parent as ready for the
-		// next key.
-		key := ""
-		if isValue {
 			if n := len(stack); n > 0 && stack[n-1].isObject {
 				top := &stack[n-1]
 				if top.expectKey {
@@ -119,7 +115,7 @@ func schemaText(raw json.RawMessage) (texts []string, complete bool) {
 	}
 
 	// Only the end of the input may follow the first value.
-	if _, err := dec.Token(); err != io.EOF {
+	if _, err := dec.Token(); !errors.Is(err, io.EOF) {
 		return texts, false
 	}
 	return texts, true

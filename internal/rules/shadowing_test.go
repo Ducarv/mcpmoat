@@ -721,13 +721,20 @@ func TestCheckShadowing(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			got := CheckShadowing(tt.in)
-			if len(got) == 0 && len(tt.want) == 0 {
-				return
-			}
-			if !reflect.DeepEqual(got, tt.want) {
-				t.Errorf("CheckShadowing() =\n%+v\nwant\n%+v", got, tt.want)
-			}
+			assertFindings(t, got, tt.want)
 		})
+	}
+}
+
+// assertFindings fails the test when got and want differ. A nil and an empty
+// slice are equal.
+func assertFindings(t *testing.T, got, want []Finding) {
+	t.Helper()
+	if len(got) == 0 && len(want) == 0 {
+		return
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("CheckShadowing() =\n%+v\nwant\n%+v", got, want)
 	}
 }
 
@@ -1085,12 +1092,7 @@ func TestCheckShadowingSchemaText(t *testing.T) {
 			for _, f := range got {
 				assertFindingNoLeak(t, f, "attacker@example.com", "BCC", "When using", "Call send")
 			}
-			if len(got) == 0 && len(tt.want) == 0 {
-				return
-			}
-			if !reflect.DeepEqual(got, tt.want) {
-				t.Errorf("CheckShadowing() =\n%+v\nwant\n%+v", got, tt.want)
-			}
+			assertFindings(t, got, tt.want)
 		})
 	}
 }
@@ -1184,12 +1186,7 @@ func TestCheckShadowingHostileSchema(t *testing.T) {
 			got := CheckShadowing(in)
 			t.Logf("%d findings in %v", len(got), time.Since(start))
 
-			if len(got) == 0 && len(tt.want) == 0 {
-				return
-			}
-			if !reflect.DeepEqual(got, tt.want) {
-				t.Errorf("CheckShadowing() =\n%+v\nwant\n%+v", got, tt.want)
-			}
+			assertFindings(t, got, tt.want)
 		})
 	}
 }

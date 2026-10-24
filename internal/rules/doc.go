@@ -107,15 +107,16 @@
 // normalization or fold, so an invisible rune written as \u200b cannot hide
 // as literal text.
 //
-// The walk stops at a nesting depth of 64 and at 100000 values. The inspect
-// package counts values in the same way, so a schema that inspect accepts is
-// read in full. When the walk stops, or when the JSON is malformed, it returns
-// the text it has read, and the caller still scans that partial text. The walk has no byte cap for one
-// string, so the caller must bound the input size.
+// The walk stops at the depth and value caps of the inspect package
+// (inspect.MaxJSONDepth and inspect.MaxJSONValues), and it counts values in
+// the same way, so a schema that inspect accepts is read in full. When the
+// walk stops, or when the JSON is malformed, it returns the text it has read,
+// and the caller still scans that partial text. The walk has no byte cap for
+// one string, so the caller must bound the input size.
 //
-// The shadowing check (MOAT-T3-001) uses this walk now, together with the
-// tool description, the tool title and the annotations title. T1 rules can
-// reuse it.
+// The shadowing check (MOAT-T3-001) uses this walk, together with the tool
+// description, the tool title and the annotations title. T1 rules can reuse
+// it.
 //
 // # The ignore file
 //

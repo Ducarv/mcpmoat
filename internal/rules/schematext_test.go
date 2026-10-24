@@ -77,7 +77,7 @@ func TestSchemaText(t *testing.T) {
 		{name: "duplicate keys, mixed", raw: `{"title":"a","description":"b","title":"c"}`, want: []string{"a", "b", "c"}, wantComplete: true},
 
 		// Empty and broken input.
-		{name: "nil", raw: "", want: nil, wantComplete: true},
+		{name: "empty", raw: "", want: nil, wantComplete: true},
 		{name: "whitespace only", raw: " \n\t ", want: nil, wantComplete: false},
 		{name: "not json", raw: `hello`, want: nil, wantComplete: false},
 		{name: "truncated after value", raw: `{"description":"a","title":"b"`, want: []string{"a", "b"}, wantComplete: false},
@@ -163,12 +163,11 @@ func TestSchemaText(t *testing.T) {
 
 func TestSchemaTextNilRawMessage(t *testing.T) {
 	t.Parallel()
-	// A nil RawMessage and an empty one both mean "no schema".
-	for _, raw := range []json.RawMessage{nil, {}} {
-		got, complete := schemaText(raw)
-		if got != nil || !complete {
-			t.Errorf("schemaText(%#v) = (%q, %v), want (nil, true)", raw, got, complete)
-		}
+	// A nil RawMessage means "no schema", like an empty one (the "empty" case
+	// of TestSchemaText).
+	got, complete := schemaText(nil)
+	if got != nil || !complete {
+		t.Errorf("schemaText(nil) = (%q, %v), want (nil, true)", got, complete)
 	}
 }
 
@@ -188,7 +187,8 @@ func FuzzSchemaText(f *testing.F) {
 	}
 	f.Fuzz(func(t *testing.T, data []byte) {
 		texts, complete := schemaText(json.RawMessage(data))
-		if complete && len(texts) > 0 && !json.Valid(data) {
+		// Empty input is complete but not valid JSON.
+		if complete && len(data) > 0 && !json.Valid(data) {
 			t.Errorf("schemaText(%q) = (%q, true) for invalid JSON", data, texts)
 		}
 	})
