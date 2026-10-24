@@ -510,7 +510,12 @@ func hasWords(text []byte, n int) bool {
 	if !isJSONText(text) {
 		return hasWordRun(text, n)
 	}
-	strs, _ := schemaStrings(text) // a partial read is enough: a hit stays a hit
+	strs, complete := schemaStrings(text)
+	if !complete {
+		// Too deep or too big to read in full. A wrapper of 65 brackets must
+		// not hide a sentence, so read the text as plain text.
+		return hasWordRun(text, n)
+	}
 	for _, s := range strs {
 		if hasWordRun([]byte(s), jsonWordFactor*n) {
 			return true
