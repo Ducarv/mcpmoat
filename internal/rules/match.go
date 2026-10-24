@@ -40,8 +40,14 @@ import (
 // The server alone picks the forms, so its text alone can raise the cost of
 // one text about 12 times with the built-in rules: the 13 description rules
 // on 32 KiB took about 50 ms for plain text and about 612 ms with a prefix
-// that gives all fourteen forms (security review, Apple M1 Pro). The scan
-// engine (#143) needs a time or bytes budget.
+// that gives all fourteen forms (Apple M1 Pro). The scan engine (#143) needs
+// a time or bytes budget.
+//
+// Building the forms has a cost too. The slowest known input is a run of
+// U+009D, because each one can start an OSC (see oscExprC0): 128 KiB of it
+// takes about 240 ms for each form that reads with ansiSeq, and about 1.5 s
+// for one matchForms and one matchWindowCut call (BenchmarkOSCStartRun).
+// Match builds the forms again for each rule. #146 tracks this cost.
 //
 // A text longer than the window is cut, so padding can push a payload out of
 // the reach of the regex and keyword rules. The match_window heuristic closes

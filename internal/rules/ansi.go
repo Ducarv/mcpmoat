@@ -5,9 +5,17 @@ import (
 	"strings"
 )
 
-// oscExpr matches an OSC: ESC ] (or U+009D), at most 256 runes of text, and
-// BEL, ESC \ or U+009C. ansiSeq and ansiSeqC0 share it.
+// oscExpr matches an OSC for ansiSeq: ESC ] (or U+009D), at most 256 runes
+// of text, and BEL, ESC \ or U+009C.
 const oscExpr = `(?:\x1b\]|\x{9d})[^\x07\x1b\x{9c}]{0,256}(?:\x07|\x1b\\|\x{9c})`
+
+// oscExprC0 is oscExpr for ansiSeqC0: the text of an OSC also holds no
+// U+009D, so U+009D starts a new OSC, as ESC does. In oscExpr, each U+009D
+// of a run of U+009D starts a match that stays open for up to 256 runes, so
+// RE2 keeps up to 256 threads for each rune: a run of 128 KiB of U+009D takes
+// about 240 ms for one form on an Apple M1 Pro. oscExprC0 keeps one thread.
+// ansiSeq keeps oscExpr, so the forms that read with ansiSeq do not change.
+const oscExprC0 = `(?:\x1b\]|\x{9d})[^\x07\x1b\x{9c}\x{9d}]{0,256}(?:\x07|\x1b\\|\x{9c})`
 
 // ansiSeq matches an ANSI escape sequence that a terminal runs and does not
 // show:
@@ -38,7 +46,7 @@ var csiC0Rune = regexp.MustCompile(`[` + csiC0 + `]`)
 // ansiSeqC0 is ansiSeq, but a CSI can hold C0 control runes (see csiC0), as
 // in a terminal: between ESC and "[", and among the parameter and
 // intermediate bytes. So ESC + U+0001 + "[8m" and U+009B + U+0001 + "8m" are
-// a CSI too. The OSC is the same as in ansiSeq (oscExpr).
+// a CSI too. Its OSC text holds no U+009D (see oscExprC0).
 //
 // The final byte of a CSI can be a letter of the text: in ESC [ "Ignore",
 // the CSI is ESC [ I, as for a terminal. And a C0 rune lets a CSI take
@@ -48,7 +56,7 @@ var csiC0Rune = regexp.MustCompile(`[` + csiC0 + `]`)
 // letter final byte (see ansiKeepText).
 var ansiSeqC0 = regexp.MustCompile(
 	`(?:\x1b[` + csiC0 + `]*\[|\x{9b})[0-?` + csiC0 + `]*[ -/` + csiC0 + `]*[@-~]` +
-		`|` + oscExpr)
+		`|` + oscExprC0)
 
 // ansiToSpace replaces each ANSI escape sequence (see ansiSeq) with U+0020.
 // Without this step, ESC [ 8 m before "Ignore" leaves "[8mIgnore", and the
@@ -92,25 +100,25 @@ func ansiC0ToSpace(s string) string {
 //     byte. It is at least 2 bytes (ESC [ or U+009B), the same kept bytes
 //     and more, and its final byte;
 //   - an SGR (a CSI with the final byte 'm') becomes nothing;
-//   - an OSC becomes at most its text and 2 bytes, and it is its text and at
-//     least 3 bytes long (ESC ] and BEL; U+009D is 2 bytes, and its end is 1
-//     or 2 bytes). Its text is read with these same rules, so the text does
-//     not grow either;
+//   - an OSC becomes U+0020, at most its text, and U+0020, and it is its
+//     text and at least 3 bytes long (ESC ] and BEL; U+009D is 2 bytes, and
+//     its end is 1 or 2 bytes). Its text is read with these same rules, so
+//     the text does not grow either;
 //   - each other sequence becomes 1 byte, and it is at least 2 bytes long.
 func ansiKeepText(s string) string {
 	return ansiSeqC0.ReplaceAllStringFunc(s, seqText)
 }
 
-// ansiKeepCSIText is ansiKeepText, but an OSC becomes one U+0020, as in
-// ansiC0ToSpace. matchWindowCut reads the fifth and the seventh form with
-// it, so the text that a CSI gives back counts for the window, and the text
-// of an OSC does not.
+// ansiKeepCSIText is ansiKeepText, but an OSC becomes two U+0020, without
+// its text. matchWindowCut reads the fifth and the seventh form with it, so
+// every byte of these forms counts for the window except the text of an
+// OSC: the two U+0020 of an OSC with no text count too.
 func ansiKeepCSIText(s string) string {
 	return ansiSeqC0.ReplaceAllStringFunc(s, func(seq string) string {
 		if _, ok := oscText(seq); ok {
-			return " "
+			return "  "
 		}
-		return seqText(seq)
+		return csiSeqText(seq)
 	})
 }
 
@@ -129,10 +137,16 @@ func ansiKeepCSIText(s string) string {
 //   - for each other sequence: one U+0020.
 func seqText(seq string) string {
 	if text, ok := oscText(seq); ok {
-		// One level only: the text holds no ESC, BEL or U+009C, so it holds
-		// no OSC (no end) and the inner matches are CSIs, which do not recurse.
+		// One level only: the text holds no ESC, U+009D, BEL or U+009C, so it
+		// holds no OSC and the inner matches are CSIs, which do not recurse.
 		return " " + ansiKeepText(text) + " "
 	}
+	return csiSeqText(seq)
+}
+
+// csiSeqText returns what seqText puts in place of seq, a CSI or another
+// sequence of ansiSeqC0 that is not an OSC.
+func csiSeqText(seq string) string {
 	final := seq[len(seq)-1]
 	switch {
 	case final == 'm':
@@ -161,20 +175,21 @@ func csiText(head string) string {
 	}
 	kept := make([]byte, 0, len(head))
 	for i := range len(head) {
-		if c := head[i]; ' ' <= c && c <= '/' || '<' <= c && c <= '?' {
+		if c := head[i]; (' ' <= c && c <= '/') || ('<' <= c && c <= '?') {
 			kept = append(kept, c)
 		}
 	}
 	return string(kept)
 }
 
-// oscEnds are the runes that end an OSC in oscExpr: BEL, ESC \ and U+009C.
+// oscEnds are the runes that end an OSC in oscExpr and oscExprC0: BEL, ESC \
+// and U+009C.
 var oscEnds = [...]string{"\x07", "\x1b\\", "\u009c"}
 
 // oscText returns the text of seq, a match of ansiSeqC0, when seq is an OSC:
 // the part between ESC ] (or U+009D) and its end (BEL, ESC \ or U+009C). It
 // returns false when seq is a CSI. The text of an OSC holds no BEL, ESC or
-// U+009C (see ansiSeqC0), so the end is not ambiguous.
+// U+009C (see oscExprC0), so the end is not ambiguous.
 func oscText(seq string) (string, bool) {
 	var text string
 	switch {

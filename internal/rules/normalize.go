@@ -143,49 +143,11 @@ func isInvisibleFormat(r rune) bool {
 // invisible padding cannot push a payload out of the MaxMatchInputBytes
 // window of these forms either.
 //
-// These texts still defeat all the forms. The invisible_unicode heuristic
-// flags each of them in a description:
-//
-//   - one kind of invisible rune both inside a word and between words, such
-//     as a ZWSP in both places, or U+0001 in both places;
-//   - text that only a sequence gives back (an OSC text or a CSI letter)
-//     together with two kinds of invisible runes, one inside a word and the
-//     other between words: in ESC [ "Ig" + ZWSP + "nore" + U+0001 + "all",
-//     the fifth form joins "Ignoreall", the seventh form splits "Ig nore",
-//     and the other forms lose the "I";
-//   - a CSI that takes a character of the text that no form gives back: the
-//     "m" of a word, as in ESC [ 1 "make" (the CSI ESC [ 1 m and the text
-//     "ake") or "you " + ESC [ "must" (an SGR and the text "ust"), a digit,
-//     ";" or ":", or a final byte that is not a letter, as in ESC [ "~/.ssh"
-//     (the CSI ESC [ ~ and the text "/.ssh");
-//   - a CSI with a letter final byte inside an OSC text, right before a
-//     word: the fifth and the seventh form give back its letter, and the
-//     other forms drop the OSC text. So ESC ] "0;" + U+009B + "2KIgnore" BEL
-//     is " 0; KIgnore ". Outside an OSC, the first form reads such a CSI as
-//     one space;
-//   - an OSC, or a CSI with a final byte other than 'm', inside a word: a
-//     terminal shows one word, but every form splits it. The fifth and the
-//     seventh form put the text of the sequence between the halves, and the
-//     other forms a space. So "Ig" + ESC [ K + "nore" is "Ig Knore", and an
-//     OSC 8 link on "Ig" gives " 8;;x Ig 8;; nore";
-//   - a payload that only the fifth or the seventh form shows, after more
-//     than MaxMatchInputBytes of OSC text. The window cuts these forms, but
-//     the match_window heuristic does not count the OSC text of these forms
-//     (see matchWindowCut), so that a long benign text with OSC 8 links is
-//     not a high finding. The invisible_unicode heuristic flags its ESC or
-//     U+009D at medium. The max_length heuristic (MOAT-T1-007, low) flags it
-//     when step 6 cuts these forms: before NFC, each raw rune gives at most
-//     one rune in them, so the raw text has more than 8192 runes. When only
-//     step 9 cuts them, because NFC makes them longer, the raw text can have
-//     fewer than 4096 runes, and only invisible_unicode flags it.
-//
-// The fifth form can also make a token that neither the raw text nor a
-// terminal shows, from a rare CSI: it writes a space and gives back the
-// kept bytes and the final letter. So "<system" + ESC [ > c + "-info>" (a
-// DA2) is "<system >c-info>", ESC [ SP q + ESC [ 1 m + "iPhone" (a
-// DECSCUSR before an SGR) gives the word "qiPhone". Such a hit can be a
-// false positive. The invisible_unicode heuristic flags the ESC at medium in
-// either case.
+// Some texts still defeat all the forms, and the fifth form can make a
+// token from a rare CSI that a terminal does not show (a false positive).
+// CONTRIBUTING.md ("How mcpmoat prepares the text") is the one list of both,
+// with examples. The "known limit" cases of TestMatchForms pin them, and the
+// invisible_unicode heuristic flags each such text in a description.
 //
 // An OSC with more than 256 runes of text is not an OSC for ansiSeq or
 // ansiSeqC0. So its ESC and its end are dropped, and its text stays in every
@@ -205,8 +167,8 @@ func matchForms(s string) []string {
 }
 
 // maxBaseForms is the largest number of base forms that matchForms returns:
-// the first form and one form for each other formMode.
-const maxBaseForms = 7
+// one form for each formMode, 7 in all.
+const maxBaseForms = int(keepSeqTextSpaced) + 1
 
 // formModes returns the modes of the forms after the first that matchForms
 // builds for s. The order of the list sets the form numbers of matchForms, so
@@ -249,13 +211,14 @@ func formModes(s string) []formMode {
 // invisible padding can push a payload out of the window of one form only.
 //
 // For a mode that keeps the text of escape sequences (see keepsSeqText), it
-// checks the form with each OSC as one U+0020 (see ansiKeepCSIText). So the
-// letters that a CSI gives back count, and padding with ESC [ A cannot push
-// a payload out of the window of these forms. The text of an OSC does not
-// count: a benign text near MaxMatchInputBytes with OSC 8 links (each link
-// URL is OSC text) is longer than the window in these forms only. A payload
-// that only these forms show, after more than MaxMatchInputBytes of OSC
-// text, is a known limit of matchForms.
+// checks the form without the text of each OSC (see ansiKeepCSIText). So the
+// letters that a CSI gives back and the spaces around an OSC count, and
+// padding with ESC [ A or with empty OSCs cannot push a payload out of the
+// window of these forms. The text of an OSC does not count: a benign text
+// near MaxMatchInputBytes with OSC 8 links (each link URL is OSC text) is
+// longer than the window in these forms only. A payload that only these forms
+// show, after more than MaxMatchInputBytes of OSC text, is a known limit of
+// matchForms.
 func matchWindowCut(s string) bool {
 	if len(s) > maxRawScanBytes {
 		return true
@@ -410,8 +373,9 @@ const (
 	// before the ANSI step, and a control run becomes one U+0020 after it,
 	// also inside the text of an OSC. The U+0020 of a run goes as in
 	// spaceFormats (see placeOnce): before the control runes of the run
-	// when one of them is ESC, U+009B or U+009D, and after them otherwise. So ZWSP + ESC + "[1m" is U+0020 + ESC + "[1m", and the SGR
-	// does not join the words around it. It builds the seventh form.
+	// when one of them is ESC, U+009B or U+009D, and after them otherwise.
+	// So ZWSP + ESC + "[1m" is U+0020 + ESC + "[1m", and the SGR does not
+	// join the words around it. It builds the seventh form.
 	keepSeqTextSpaced
 )
 
@@ -605,10 +569,10 @@ func foldMarks(s string) string {
 // appendFold appends the fold of the rune r, whose UTF-8 bytes are rs, to dst
 // and returns the extended slice, as append does. The fold splits the rune
 // into its compatibility parts (NFKD), drops the combining marks and the
-// invisible runes, and joins the rest again (NFKC). So U+00E9 (e with acute) becomes
-// "e", U+FF49 becomes "i", U+0336 becomes nothing, and the Hangul syllable
-// U+D55C stays U+D55C. When the fold is longer than rs, appendFold appends rs
-// instead (see foldMarks).
+// invisible runes, and joins the rest again (NFKC). So U+00E9 (e with
+// acute) becomes "e", U+FF49 becomes "i", U+0336 becomes nothing, and the
+// Hangul syllable U+D55C stays U+D55C. When the fold is longer than rs,
+// appendFold appends rs instead (see foldMarks).
 //
 // Most runes have no compatibility decomposition. Such a rune is its own NFKD
 // and NFKC, so it is appended as it is, or not at all for a mark or an

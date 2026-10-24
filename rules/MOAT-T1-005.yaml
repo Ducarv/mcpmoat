@@ -100,3 +100,5 @@ should_not_match:
     note: The wording with no address after it
   - text: Bcc is optional; pass a list of addresses.
     note: Bcc with no concrete address
+  - text: "Contact \x1b[1msupport@example.com\x1b[0m for help."
+    note: A benign address in SGR bold, with no send verb before it

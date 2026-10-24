@@ -235,6 +235,19 @@ func BenchmarkWorstCaseBlock(b *testing.B) {
 	}
 }
 
+// BenchmarkOSCStartRun times one matchForms and one matchWindowCut call on
+// maxRawScanBytes of U+009D (and U+0001 and ESC, so that every form is
+// built). Each U+009D can start an OSC, so this is the slowest known input for
+// the OSC part of ansiSeq and ansiSeqC0 (see oscExprC0).
+func BenchmarkOSCStartRun(b *testing.B) {
+	text := strings.Repeat("\u009d", maxRawScanBytes/2-1) + "\x01\x1b"
+	b.SetBytes(int64(len(text)))
+	for b.Loop() {
+		matchForms(text)
+		matchWindowCut(text)
+	}
+}
+
 // worstSchema returns a JSON array of n distinct strings that fills the caps
 // of schemaFit exactly: each string is maxSchemaMatchBytes/n bytes long, and
 // n is at most maxSchemaMatchStrings. Each string starts with allFormsText,

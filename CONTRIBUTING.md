@@ -124,9 +124,9 @@ How mcpmoat prepares the text before a match. This applies to every regex and ke
   the first 128 KiB of the raw text, and then each form is cut at 32 KiB. Padding can push an
   instruction past this window. The `match_window` heuristic closes this gap. It fires when the
   regex and keyword rules cannot read the whole text: the raw text is longer than 128 KiB, or one of
-  the forms is cut at 32 KiB. For forms 5 and 7, the text that a CSI gives back counts, but the
-  OSC text does not, because OSC text (such as the URL of an OSC 8 link) makes a benign text
-  longer than 32 KiB in these forms only. So padding with ESC [ A still gives a hit. MOAT-T1-017
+  the forms is cut at 32 KiB. For forms 5 and 7, every character counts except the OSC text,
+  because OSC text (such as the URL of an OSC 8 link) makes a benign text longer than 32 KiB in
+  these forms only. So padding with ESC [ A or with empty OSCs still gives a hit. MOAT-T1-017
   (description) and MOAT-T1-018 (schema) use it at high severity.
 
 How mcpmoat prepares the text of a `target: schema` rule:

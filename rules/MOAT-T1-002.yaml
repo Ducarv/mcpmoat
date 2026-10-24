@@ -119,3 +119,7 @@ should_not_match:
     note: HTML closes <!--> at once, so the word comes after the comment ends
   - text: "<!--->\nYou must pass a path. <!-- toc -->"
     note: HTML closes <!---> at once, so the word comes after the comment ends
+  - text: "\x1b[1mNote:\x1b[0m pass the <name> value as a string."
+    note: Benign SGR bold before a tag that is not a hidden-instruction tag
+  - text: "Returns the \x1b]8;;https://example.com/docs\x1b\\<system-info>\x1b]8;;\x1b\\ object."
+    note: A benign OSC 8 link around a tag name that is not a match
