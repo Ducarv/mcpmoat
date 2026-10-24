@@ -90,7 +90,8 @@ How mcpmoat prepares the text of a `target: schema` rule:
     several words can cross a seam, but one word is never built from two strings.
   - Neighbours are neighbours in the list of distinct strings, so a repeated key such as `type` or
     `description` is left out after its first place. The seams do not catch a split with one benign
-    string between the halves, over strings that are not neighbours, over three or more strings,
+    string between the halves, over strings that are not neighbours (an early copy of the second half
+    removes it from its place in the list), over three or more strings,
     with more than 256 bytes on one side, or between the name and the description of the first
     property (the key `description` sits between them). They do not follow an indirection such as
     `$ref`.

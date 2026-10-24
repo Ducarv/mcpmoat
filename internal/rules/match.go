@@ -46,7 +46,7 @@ import (
 // the seams of neighbour strings (at most maxSeamBytes, 128 KiB), and, when
 // the JSON cannot be read in full, the raw text once, in the window of one
 // description. So one schema costs about nine times the bound of one
-// description: about twice the bound before the seam pass. The match_window
+// description: the seam pass doubles the cost of the string pass. The match_window
 // heuristic fires on a schema whose strings these caps cut, but not when the
 // seam budget is used up. The package doc gives the details.
 const (
@@ -121,14 +121,6 @@ type Matcher struct {
 	heuristic func(raw string) []Hit // heuristic
 }
 
-// Compile checks the match block and compiles it for the description target.
-// It is CompileFor(TargetDescription). Do not use it for a rule with
-// target: schema: the matcher then reads the raw JSON as one text. Use
-// CompileFor(TargetSchema).
-func (m Match) Compile() (*Matcher, error) {
-	return m.CompileFor(TargetDescription)
-}
-
 // CompileFor checks the match block and compiles it for the target t. Every
 // error is a *FieldError that names the field.
 //
@@ -191,7 +183,7 @@ func compileRegexMatcher(kind string, list []string, build func(entry, s string)
 	if err != nil {
 		return nil, err
 	}
-	return &Matcher{kind: kind, regexps: res}, nil
+	return &Matcher{kind: kind, mode: schemaBudget, regexps: res}, nil
 }
 
 // Match returns the hits of the matcher in text, or nil when it does not

@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"io"
 	"slices"
 	"strings"
 	"unicode"
@@ -25,8 +26,9 @@ const (
 	// 8 to 4096), min_text, the shortest decoded text in bytes (default 24,
 	// 4 to 3072), and min_words, the fewest words in a row that the decoded
 	// text must hold (default 0, which turns the check off, 0 to 64). See
-	// hasWordRun for what a word is. A decoded JSON object or array never
-	// counts as text when min_words is set.
+	// the package doc, Heuristics and hits, for what a word is. In a decoded
+	// JSON object or array, one string must hold twice min_words words in a
+	// row.
 	HeuristicBase64Blob = "base64_blob"
 	// HeuristicMatchWindow flags a text that the regex and keyword matchers
 	// do not read in full: the text is longer than the raw scan limit, or a
@@ -511,7 +513,9 @@ const jsonWordFactor = 2
 // hasWords reads the tokens with json.Decoder and not with schemaStrings,
 // because schemaStrings stops at a depth of 64 and at 100000 values, and a
 // wrapper of 65 brackets must not hide a sentence. isJSONText has checked the
-// text, so the decoder cannot fail, and it reads the text once.
+// text with json.Valid, so the only error that the decoder returns is io.EOF at
+// the end. If it returns any other error, hasWords reads the text as plain text
+// and does not trust the JSON.
 func hasWords(text []byte, n int) bool {
 	if !isJSONText(text) {
 		return hasWordRun(text, n)
@@ -520,8 +524,11 @@ func hasWords(text []byte, n int) bool {
 	dec.UseNumber()
 	for {
 		tok, err := dec.Token()
-		if err != nil { // io.EOF at the end of the text
+		if err == io.EOF {
 			return false
+		}
+		if err != nil {
+			return hasWordRun(text, n)
 		}
 		if s, ok := tok.(string); ok && hasWordRun([]byte(s), jsonWordFactor*n) {
 			return true
@@ -529,14 +536,16 @@ func hasWords(text []byte, n int) bool {
 	}
 }
 
-// isJSONText reports whether b, without the white space at its two ends, is
-// a valid JSON object or array.
+// isJSONText reports whether b, without the JSON white space at its two ends,
+// is a valid JSON object or array. Only the four white-space bytes of JSON
+// count (see jsonSpace): a text that starts with a vertical tab or a no-break
+// space is not JSON, and hasWords reads it as plain text.
 //
 // The cost is safe: json.Valid reads b once and builds no values, so its
 // cost is linear in the decoded run, like the decode itself. Each run is
 // decoded at most 4 times, so base64Blob stays linear in its text.
 func isJSONText(b []byte) bool {
-	b = bytes.TrimSpace(b)
+	b = bytes.Trim(b, jsonSpace)
 	if len(b) == 0 || (b[0] != '{' && b[0] != '[') {
 		return false
 	}
@@ -593,10 +602,11 @@ func hasTextRun(b []byte, n int) bool {
 // So hasWords asks for a longer run in a JSON string. YAML, shell or log
 // text with spaces can still count as words. That is an accepted limit.
 //
-// Two cheap evasions are known limits too. A '/' or a '\' joins a whole
+// Some cheap evasions are known limits too. A '/' or a '\' joins a whole
 // sentence into one word ("ignore/all/previous/..."), because a path must
-// not count as a sentence. And one token that is not a word, such as "e.g"
-// or "2x", ends the run. A rule with min_words has a medium twin without it
+// not count as a sentence. A ',' or a '.' with no space after it
+// ("ignore,all,previous,...") makes a token that is not a word. And one
+// token that is not a word, such as "e.g" or "2x", ends the run. A rule with min_words has a medium twin without it
 // (MOAT-T1-008 and MOAT-T1-014), and the twin still flags such a text.
 func hasWordRun(b []byte, n int) bool {
 	count := 0

@@ -280,7 +280,7 @@ func FuzzCompile(f *testing.F) {
 		default:
 			m.Keywords = []string{pattern}
 		}
-		matcher, err := m.Compile()
+		matcher, err := m.CompileFor(TargetDescription)
 		if err != nil {
 			if matcher != nil {
 				t.Errorf("Compile() = non-nil Matcher with error %v", err)

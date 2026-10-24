@@ -160,7 +160,7 @@ func worstBlock(tb testing.TB) []string {
 	if _, _, ok := largest(maxTotalInsts - total); ok {
 		tb.Fatalf("worstBlock: %d instructions left unused", maxTotalInsts-total)
 	}
-	if _, err := (Match{AnyRegex: list}).Compile(); err != nil {
+	if _, err := (Match{AnyRegex: list}).CompileFor(TargetDescription); err != nil {
 		tb.Fatalf("worstBlock: Compile() error = %v", err)
 	}
 	return list
@@ -181,7 +181,7 @@ func worstBlock(tb testing.TB) []string {
 // every tool text is matched against every rule, so this cost is multiplied
 // by the number of rules and the number of texts.
 func BenchmarkWorstCaseBlock(b *testing.B) {
-	m, err := Match{AnyRegex: worstBlock(b)}.Compile()
+	m, err := Match{AnyRegex: worstBlock(b)}.CompileFor(TargetDescription)
 	if err != nil {
 		b.Fatalf("Compile() error = %v", err)
 	}
@@ -262,7 +262,7 @@ func worstSchema(tb testing.TB, n int) string {
 // one raw text match, at most one BenchmarkWorstCaseBlock.
 //
 // The seam pass reads up to maxSeamBytes more, so the cost bound of one
-// schema is now about twice the old bound of the strings alone.
+// schema is about twice the bound of the strings alone.
 //
 // Measured on 2026-10-24 on an Apple M1 Pro (go1.27.3 darwin/arm64), caps
 // 128 KiB and 4096 strings, with -benchtime=3x, in the same run as

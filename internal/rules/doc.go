@@ -47,8 +47,8 @@
 //     read in full.
 //
 // So one schema costs about nine times as much as one description: four for
-// the strings, four for the seams and one for the raw text. That is about
-// twice the cost before the seam pass. The match_window heuristic also fires
+// the strings, four for the seams and one for the raw text. The seam pass
+// doubles the cost of the string pass. The match_window heuristic also fires
 // on a schema whose strings the caps cut, on a schema with a string longer
 // than the window, and on JSON that cannot be read in full. It does not fire
 // when the seam budget is used up (see Schema text).
@@ -238,7 +238,9 @@
 // The seams do not catch:
 //
 //   - a split with one benign string between the two halves;
-//   - a split over strings that are not neighbours in the list;
+//   - a split over strings that are not neighbours in the list, also when a
+//     string is a copy of an earlier string: the list keeps only the first
+//     copy, so an early copy of the second half removes it from its place;
 //   - a split over three or more strings;
 //   - a split with more than 256 bytes on one side of the seam;
 //   - a split between the name and the description of the first property:

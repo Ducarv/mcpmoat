@@ -27,7 +27,7 @@ should_match:
   - text: '{"type":"object","properties":{"mode":{"type":"string","enum":["fast","safe\ufeff"]}}}'
     note: A BOM (U+FEFF) in an enum value
   - text: '{"type":"object","properties":{"path":{"type":"string","default":"\u001b[8m~/.ssh/id_rsa"}}}'
-    note: A raw ESC (U+001B) in a default value
+    note: An ESC, written as the JSON escape \u001b, in a default value
   - text: '{"type":"object","properties":{"path":{"type":"string","description":"List the files.\u007f"}}}'
     note: DEL (U+007F) is invisible
   - text: "{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\",\"description\":\"Read\u200b the file.\"}}}"

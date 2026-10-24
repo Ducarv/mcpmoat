@@ -113,7 +113,9 @@ func (m schemaMode) String() string {
 // be built from the parts of two strings. The seams do not catch:
 //
 //   - a split with one benign string between the two halves;
-//   - a split over strings that are not neighbours in the list;
+//   - a split over strings that are not neighbours in the list, also when a
+//     string is a copy of an earlier string: the list keeps only the first
+//     copy, so an early copy of the second half removes it from its place;
 //   - a split over three or more strings;
 //   - a split with more than seamSideBytes on one side of the seam;
 //   - a split between the name and the description of the first property.
@@ -164,7 +166,11 @@ func matchSchema(raw string, mode schemaMode, match func(string) []Hit) []Hit {
 		return nil
 	}
 	strs, complete := schemaStrings([]byte(raw))
-	n, cut := schemaFit(strs) // used by the schemaBudget and schemaWindow modes
+	var n int
+	var cut bool
+	if mode != schemaAll { // the all mode has no caps
+		n, cut = schemaFit(strs)
+	}
 
 	if mode == schemaWindow {
 		return schemaWindowHit(strs, complete, cut, match)

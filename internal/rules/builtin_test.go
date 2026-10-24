@@ -307,7 +307,8 @@ func isT1004WordPattern(re string) bool {
 
 // schemaCopy names a rule with target schema and the description rules whose
 // match block it copies. An attacker can hide a prompt in the input schema as
-// well as in the description, so each description rule has a schema copy.
+// well as in the description, so most description rules have a schema copy (see
+// noSchemaCopy).
 type schemaCopy struct {
 	schema  string   // the ID of the schema rule
 	sources []string // the IDs of the description rules it copies, in order

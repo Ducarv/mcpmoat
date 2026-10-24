@@ -40,7 +40,7 @@ func progInsts(tb testing.TB, expr string) int {
 // mustCompileMatch compiles m or stops the test.
 func mustCompileMatch(tb testing.TB, m Match) *Matcher {
 	tb.Helper()
-	got, err := m.Compile()
+	got, err := m.CompileFor(TargetDescription)
 	if err != nil {
 		tb.Fatalf("Compile(%+v) error = %v", m, err)
 	}
@@ -217,7 +217,7 @@ func TestCompileErrors(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			m, err := tt.match.Compile()
+			m, err := tt.match.CompileFor(TargetDescription)
 			if err == nil {
 				t.Fatal("Compile() error = nil, want error")
 			}
@@ -691,9 +691,8 @@ func TestMatchHitDetailHasNoInput(t *testing.T) {
 	}
 }
 
-// CompileFor(TargetDescription) is Compile, and a config matcher also reads
-// its text as one text. So they give the same hits as Compile for any text,
-// also for a text that is JSON.
+// A config matcher reads its text as one text, like a description matcher.
+// So they give the same hits for any text, also for a text that is JSON.
 func TestMatchCompileForDescription(t *testing.T) {
 	t.Parallel()
 	blocks := map[string]Match{
@@ -726,7 +725,7 @@ func TestMatchCompileForDescription(t *testing.T) {
 					got := m.Match(s)
 					hits += len(got)
 					if w := want.Match(s); !reflect.DeepEqual(got, w) {
-						t.Errorf("Match(%.60q) = %v, Compile().Match() = %v", s, got, w)
+						t.Errorf("Match(%.60q) = %v, description Match() = %v", s, got, w)
 					}
 				}
 				if hits == 0 {
