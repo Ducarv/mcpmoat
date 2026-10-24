@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"strings"
 
 	"github.com/Ducarv/mcpmoat/internal/inspect"
 )
@@ -33,7 +34,8 @@ type schemaFrame struct {
 
 // schemaText returns the decoded text of every "description" and "title"
 // string in a JSON schema, in document order. A string is collected when it is
-// the value of a key named exactly "description" or "title", at any depth.
+// the value of a key named "description" or "title", in any case, at any
+// depth.
 // The decoder resolves JSON escapes, so the key "description" and the
 // text "\u200b" are returned as the characters that they stand for.
 //
@@ -71,8 +73,9 @@ func schemaText(raw json.RawMessage) (texts []string, complete bool) {
 		// A closing delimiter is not a value. Every other token is one: it is
 		// counted, as inspect counts it. Then find the key of this value, and
 		// mark the parent as ready for the next key.
+		closing := tok == json.Delim('}') || tok == json.Delim(']')
 		key := ""
-		if d, isDelim := tok.(json.Delim); !isDelim || d == '{' || d == '[' {
+		if !closing {
 			values++
 			if values > maxSchemaValues {
 				return texts, false
@@ -104,7 +107,8 @@ func schemaText(raw json.RawMessage) (texts []string, complete bool) {
 				stack = stack[:len(stack)-1]
 			}
 		case string:
-			if key == "description" || key == "title" {
+			// A model reads "Description" as well as "description".
+			if strings.EqualFold(key, "description") || strings.EqualFold(key, "title") {
 				texts = append(texts, v)
 			}
 		}

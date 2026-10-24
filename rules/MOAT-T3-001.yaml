@@ -1,6 +1,9 @@
 id: MOAT-T3-001
-title: Tool description changes the behaviour of another tool (shadowing)
+title: Tool text changes the behaviour of another tool (shadowing)
 severity: high
+# This regex reads only the description. The native check with the same ID
+# (CheckShadowing in internal/rules) reads all tool text: the description, the
+# titles and the schema text.
 target: description
 match:
   # The two patterns share the tool-name group and the keyword tail. Change
@@ -13,7 +16,7 @@ match:
     - '\b(?i:when(?:ever)?\s+(?:you\s+)?|before\s+|after\s+)(?i:use|using|call|calling|invoke|invoking|run|running|execute|executing)\s+(?:(?i:the)\s+)?(?:`[A-Za-z][A-Za-z0-9]+-[A-Za-z0-9][A-Za-z0-9_.-]+`|`?(?:(?:[A-Za-z0-9]+\.)*[a-z][A-Za-z0-9]+_[A-Za-z0-9][A-Za-z0-9_.-]+|(?:[A-Za-z0-9]+\.)*[A-Za-z][A-Za-z0-9]+\.[A-Za-z0-9]*[a-z0-9][A-Z][A-Za-z0-9]*|[a-z][a-z0-9]+[A-Z][a-z0-9]+[A-Za-z0-9]*)`?)[\s\S]{0,80}?\b(?i:always|also|instead|first|must|should|never|ensure|make\s+sure)\b'
     - '\b(?i:when(?:ever)?|before|after)\s+(?:(?i:the)\s+)?(?:`[A-Za-z][A-Za-z0-9]+-[A-Za-z0-9][A-Za-z0-9_.-]+`|`?(?:(?:[A-Za-z0-9]+\.)*[a-z][A-Za-z0-9]+_[A-Za-z0-9][A-Za-z0-9_.-]+|(?:[A-Za-z0-9]+\.)*[A-Za-z][A-Za-z0-9]+\.[A-Za-z0-9]*[a-z0-9][A-Z][A-Za-z0-9]*|[a-z][a-z0-9]+[A-Z][a-z0-9]+[A-Za-z0-9]*)`?)(?:\s+(?i:tool))?\s+(?i:is\s+(?:called|invoked|used)|runs)[\s\S]{0,80}?\b(?i:always|also|instead|first|must|should|never|ensure|make\s+sure)\b'
 risk: The tool text tries to change how the model uses a different tool, for example to copy data to an attacker when another tool runs.
-remediation: Remove the server or do not use it. Check which other tool the tool text (description, title or schema) names. Report the server to its author.
+remediation: Remove the server or do not use it. Check which other tool the tool text names. Report the server to its author.
 references:
   - https://invariantlabs.ai/blog/mcp-security-notification-tool-poisoning-attacks
   - https://owasp.org/www-project-mcp-top-10/

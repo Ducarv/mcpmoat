@@ -100,20 +100,16 @@
 //
 // # Schema text
 //
-// The schemaText helper reads the text of a tool schema (InputSchema or
-// OutputSchema). It returns the value of every "description" and "title"
-// string, at any depth, in document order. It does not model JSON Schema
-// keywords. The JSON decoder resolves the escapes first, before any
-// normalization or fold, so an invisible rune written as \u200b cannot hide
-// as literal text.
+// The text of a tool schema (InputSchema or OutputSchema) is the value of
+// every "description" and "title" string, at any depth, in document order.
+// The keys match in any case. The rules do not model JSON Schema keywords.
+// JSON escapes are decoded first, before any normalization or fold, so an
+// invisible rune written as \u200b cannot hide as literal text. The read is
+// bounded by the depth and value caps of the inspect package, so a schema
+// that inspect accepts is read in full.
 //
-// The walk is bounded by the depth and value caps of the inspect package, so
-// a schema that inspect accepts is read in full. The schemaText doc comment
-// gives the caps, the partial result and the size contract.
-//
-// The shadowing check (MOAT-T3-001) uses this walk, together with the tool
-// description, the tool title and the annotations title. T1 rules can reuse
-// it.
+// The shadowing check (MOAT-T3-001) scans this text, together with the tool
+// description, the tool title and the annotations title.
 //
 // # The ignore file
 //
