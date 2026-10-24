@@ -478,14 +478,109 @@ func TestE2EScanSecretsDoNotLeak(t *testing.T) {
 				t.Run(mode.name, func(t *testing.T) {
 					stdout, stderr, code := runBin(t, home, work, mode.args...)
 
+					// The secrets fixtures hold plaintext secrets, so the config
+					// rules find MOAT-T4-002 (high) and the exit code is 1.
 					// assertScanResult also checks that no canary leaks.
-					assertScanResult(t, code, stdout, stderr, scanWant{code: exitOK})
-					// Check that the scan listed servers. Without this, an
-					// empty output would pass the leak check.
+					assertScanResult(t, code, stdout, stderr, scanWant{code: exitFindings})
+					assertCleanStderr(t, stderr)
+					// Check that the scan listed servers and findings. Without
+					// this, an empty output would pass the leak check.
 					if len(tableRows(t, stdout)) == 0 {
 						t.Errorf("stdout has no server rows:\n%s", stdout)
 					}
+					if !slices.Contains(findingIDs(findingRows(t, stdout)), "MOAT-T4-002") {
+						t.Errorf("no MOAT-T4-002 finding, so the findings block is not checked\nstdout:\n%s", stdout)
+					}
+					// The server table and stderr show no env at all. The
+					// findings block may name the key API_KEY, never a value.
+					serverTable, _, _ := strings.Cut(stdout, "\n\n")
+					for name, out := range map[string]string{"server table": serverTable, "stderr": stderr} {
+						if strings.Contains(out, "API_KEY") {
+							t.Errorf("%s shows the env key API_KEY, but it must show no env at all\n%s", name, out)
+						}
+					}
 				})
+			}
+		})
+	}
+}
+
+// Synthetic canaries of testdata/configs/dangerous. They are not credentials.
+const (
+	e2eCanaryHeader = "mcpmoat-canary-header-8Fk2Zs"
+	e2eCanaryToken  = "ghp_mcpmoatcanaryZk3Qp8Vw2LxN7rTb5HcYd4M" //nolint:gosec // G101: synthetic canary of the test fixture, not a credential
+	e2eCanaryArg    = "Zq8Lm3Vx0Rt5Ws2Hy7Nb4Kd1"
+	e2eCanaryQuery  = "Jt6Pc9Gh2Fw8Ye4Ua1Xs7Mq3"
+)
+
+// TestE2EScanConfigFindings scans the dangerous config fixture (T4). The
+// findings block names keys, never values, and the ignore list can remove the
+// high findings and so change the exit code.
+func TestE2EScanConfigFindings(t *testing.T) {
+	t.Parallel()
+	canaries := []string{e2eCanaryHeader, e2eCanaryToken, e2eCanaryArg, e2eCanaryQuery}
+
+	tests := []struct {
+		name     string
+		args     []string
+		wantCode int
+		wantRows [][]string // whole rows (RULE, SEVERITY, SERVER, FIELD, KEY/RELATED) that must show
+		wantNone []string   // rule IDs that must not show
+		// wantStderr is the one line on stderr ("" for an empty stderr): the
+		// line that counts the ignored findings.
+		wantStderr string
+	}{
+		{
+			name:     "findings",
+			args:     []string{"scan", "--no-connect"},
+			wantCode: exitFindings,
+			wantRows: [][]string{
+				{"MOAT-T4-001", "high", "remote-plain", "url", "-"},
+				{"MOAT-T4-002", "high", "env-secret", "env", "GITHUB_TOKEN"},
+			},
+		},
+		{
+			name:     "high findings ignored",
+			args:     []string{"scan", "--no-connect", "--ignore", "MOAT-T4-001", "--ignore", "MOAT-T4-002"},
+			wantCode: exitOK,
+			wantNone: []string{"MOAT-T4-001", "MOAT-T4-002"},
+			// Hidden findings are never silent: the count is on stderr, with
+			// rule IDs only.
+			wantStderr: "mcpmoat scan: 5 findings ignored: MOAT-T4-001 (1), MOAT-T4-002 (4)",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			home, work := discovertest.CopyFixture(t, filepath.Join("..", "..", "testdata", "configs", "dangerous"))
+
+			stdout, stderr, code := runBin(t, home, work, tt.args...)
+
+			want := scanWant{code: tt.wantCode}
+			if tt.wantStderr != "" {
+				want.stderr = []string{tt.wantStderr}
+			}
+			assertScanResult(t, code, stdout, stderr, want)
+			if tt.wantStderr == "" {
+				assertCleanStderr(t, stderr)
+			} else {
+				assertStderrLines(t, stderr, []lineWant{exactLine(tt.wantStderr)})
+			}
+			assertContainsNone(t, "stdout", stdout, canaries)
+			assertContainsNone(t, "stderr", stderr, canaries)
+			if len(tableRows(t, stdout)) == 0 {
+				t.Fatalf("stdout has no server rows:\n%s", stdout)
+			}
+			rows := findingRows(t, stdout)
+			for _, want := range tt.wantRows {
+				if !slices.ContainsFunc(rows, func(row []string) bool { return slices.Equal(row, want) }) {
+					t.Errorf("no finding row %v\nstdout:\n%s", want, stdout)
+				}
+			}
+			for _, id := range tt.wantNone {
+				if slices.Contains(findingIDs(rows), id) {
+					t.Errorf("finding %s shows, but it is ignored\nstdout:\n%s", id, stdout)
+				}
 			}
 		})
 	}
@@ -539,7 +634,6 @@ func TestE2EScanIgnore(t *testing.T) {
 		assertStderrLines(t, stderr, []lineWant{
 			prefixLine(scanWarnPrefix + rules.IgnoreFileName + ":2: "),
 			exactLine("mcpmoat scan: using 1 entry from " + rules.IgnoreFileName),
-			exactLine(noRulesNotice),
 		})
 		if strings.Contains(stderr, "onlytool") {
 			t.Errorf("stderr shows content of the ignore file:\n%s", stderr)

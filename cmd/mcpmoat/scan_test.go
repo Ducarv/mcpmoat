@@ -274,10 +274,12 @@ func TestScanNoConnectGolden(t *testing.T) {
 
 	code := c.dispatch([]string{"scan", "--no-connect"})
 
+	// The findings in this fixture are medium (unpinned) and low (npx -y)
+	// only, so the exit code stays 0. The golden file holds the findings block.
 	if code != exitOK {
 		t.Fatalf("exit code = %d, want %d; stderr:\n%s", code, exitOK, stderr)
 	}
-	assertNoRulesNotice(t, stderr.String())
+	assertCleanStderr(t, stderr.String())
 	got := scanNormalize(t, stdout.String(), map[string]string{home: "$HOME", work: "$WORK"})
 	assertScanGolden(t, "scan_no_connect_full", []byte(got))
 }
@@ -421,8 +423,8 @@ func TestScanEmpty(t *testing.T) {
 	if got := stdout.String(); got != emptyScanOutput {
 		t.Errorf("stdout = %q, want %q", got, emptyScanOutput)
 	}
-	// No rules ran, so the notice shows also when there is no server.
-	assertNoRulesNotice(t, stderr.String())
+	// No server, no finding and no ignore file: nothing on stderr.
+	assertCleanStderr(t, stderr.String())
 }
 
 func TestScanConfigFormats(t *testing.T) {
@@ -760,8 +762,13 @@ func TestScanOpensNoConnection(t *testing.T) {
 
 	code := c.dispatch([]string{"scan", "--no-connect"})
 
-	assertScanResult(t, code, stdout.String(), stderr.String(), scanWant{code: exitOK})
+	// The URL holds a password and a key query: four MOAT-T4-002 findings
+	// (high), so the exit code is 1. stdout must still show the redacted URL.
+	assertScanResult(t, code, stdout.String(), stderr.String(), scanWant{code: exitFindings})
 	rows := tableRows(t, stdout.String())
+	if got := findingIDs(findingRows(t, stdout.String())); !slices.Equal(got, slices.Repeat([]string{"MOAT-T4-002"}, 4)) {
+		t.Errorf("finding rules = %v, want four MOAT-T4-002\nstdout:\n%s", got, stdout)
+	}
 	if len(rows) != 4 {
 		t.Errorf("table has %d rows, want 4\nstdout:\n%s", len(rows), stdout)
 	}
@@ -813,11 +820,16 @@ func TestScanNoLeak(t *testing.T) {
 
 			code := c.dispatch([]string{"scan", "--no-connect"})
 
-			if code != exitOK {
-				t.Fatalf("exit code = %d, want %d; stderr:\n%s", code, exitOK, stderr)
+			// The secrets fixtures hold plaintext secrets, so the config
+			// rules find MOAT-T4-002 (high) and the exit code is 1.
+			if code != exitFindings {
+				t.Fatalf("exit code = %d, want %d; stderr:\n%s", code, exitFindings, stderr)
 			}
 			if len(tableRows(t, stdout.String())) == 0 {
 				t.Errorf("table has no rows, so the test checks nothing\nstdout:\n%s", stdout)
+			}
+			if !slices.Contains(findingIDs(findingRows(t, stdout.String())), "MOAT-T4-002") {
+				t.Errorf("no MOAT-T4-002 finding, so the findings block is not checked\nstdout:\n%s", stdout)
 			}
 			scanAssertNoSecret(t, stdout.String(), stderr.String())
 		})
@@ -834,11 +846,16 @@ func TestScanNoLeak(t *testing.T) {
 
 				code := c.dispatch([]string{"scan", "--no-connect", "--config", path})
 
-				if code != exitOK {
-					t.Fatalf("exit code = %d, want %d; stderr:\n%s", code, exitOK, stderr)
+				// The secrets fixtures hold plaintext secrets, so the config
+				// rules find MOAT-T4-002 (high) and the exit code is 1.
+				if code != exitFindings {
+					t.Fatalf("exit code = %d, want %d; stderr:\n%s", code, exitFindings, stderr)
 				}
 				if len(tableRows(t, stdout.String())) == 0 {
 					t.Errorf("table has no rows, so the test checks nothing\nstdout:\n%s", stdout)
+				}
+				if !slices.Contains(findingIDs(findingRows(t, stdout.String())), "MOAT-T4-002") {
+					t.Errorf("no MOAT-T4-002 finding, so the findings block is not checked\nstdout:\n%s", stdout)
 				}
 				scanAssertNoSecret(t, stdout.String(), stderr.String())
 			})
@@ -846,12 +863,16 @@ func TestScanNoLeak(t *testing.T) {
 	}
 }
 
-// scanAssertNoSecret fails if stdout or stderr holds a canary value or an env
-// key from the secrets fixtures.
+// scanAssertNoSecret fails if stdout or stderr holds a canary value (the whole
+// output is checked, so the findings block too). It also fails if the server
+// table or stderr shows the env key API_KEY: the table shows no env at all.
+// The findings block that follows the table may name the key (KEY column),
+// because the project rule is to print keys only, never values.
 func scanAssertNoSecret(t *testing.T, stdout, stderr string) {
 	t.Helper()
 	assertNoLeakBoth(t, stdout, stderr)
-	for name, out := range map[string]string{"stdout": stdout, "stderr": stderr} {
+	serverTable, _, _ := strings.Cut(stdout, "\n\n")
+	for name, out := range map[string]string{"server table": serverTable, "stderr": stderr} {
 		if strings.Contains(out, "API_KEY") {
 			t.Errorf("%s shows the env key API_KEY, but it must show no env at all\n%s", name, out)
 		}
@@ -912,7 +933,7 @@ func TestScanNoColor(t *testing.T) {
 	}
 
 	plain, plainErr, plainCode := runWith([]string{"scan", "--no-connect"}, nil)
-	if plainCode != exitOK || plainErr != noRulesNotice+"\n" {
+	if plainCode != exitOK || plainErr != "" {
 		t.Fatalf("plain run: exit code = %d, stderr = %q", plainCode, plainErr)
 	}
 
@@ -999,6 +1020,78 @@ func TestScanWriteError(t *testing.T) {
 	}
 }
 
+// scanFailOnFindingsWriter writes to buf, but fails on the header of the
+// findings table. So the server table is written and the findings table is
+// not. The table writer sends a lone newline for each line, so the writer
+// cannot tell the blank line before the findings from the end of a row.
+type scanFailOnFindingsWriter struct{ buf *bytes.Buffer }
+
+func (w scanFailOnFindingsWriter) Write(p []byte) (int, error) {
+	if bytes.Contains(p, []byte("RULE")) {
+		return 0, errors.New("broken pipe")
+	}
+	return w.buf.Write(p)
+}
+
+// TestScanFindingsExitCodes checks that exit code 2 wins over exit code 1:
+// a write error in the findings block, and a config problem next to a
+// finding. In both cases the scan has a high finding (a plaintext env secret),
+// which alone would give exit code 1.
+func TestScanFindingsExitCodes(t *testing.T) {
+	t.Parallel()
+
+	leaky := map[string]any{"leaky": map[string]any{
+		"command": "run",
+		"env":     map[string]string{"API_KEY": discovertest.CanaryEnv},
+	}}
+
+	t.Run("write error in the findings block", func(t *testing.T) {
+		t.Parallel()
+
+		home, work := t.TempDir(), t.TempDir()
+		writeServers(t, home, ".claude.json", leaky)
+		c, _, stderr := dirsCLI(t, home, work)
+		var table bytes.Buffer
+		c.stdout = scanFailOnFindingsWriter{buf: &table}
+
+		code := c.dispatch([]string{"scan", "--no-connect"})
+
+		assertScanResult(t, code, table.String(), stderr.String(), scanWant{
+			code:   exitError,
+			stderr: []string{"mcpmoat scan: cannot write output"},
+		})
+		if got := column(tableRows(t, table.String()), 0); !slices.Equal(got, []string{"leaky"}) {
+			t.Errorf("table servers = %v, want [leaky]\ntable:\n%s", got, table.String())
+		}
+		if got := nonEmptyLines(stderr.String()); len(got) != 1 {
+			t.Errorf("stderr has %d lines, want 1\nstderr:\n%s", len(got), stderr)
+		}
+	})
+
+	t.Run("config problem and a finding", func(t *testing.T) {
+		t.Parallel()
+
+		home, work := t.TempDir(), t.TempDir()
+		writeServers(t, home, ".claude.json", leaky)
+		writeTestFile(t, work, ".mcp.json", "{not json")
+		c, stdout, stderr := dirsCLI(t, home, work)
+
+		code := c.dispatch([]string{"scan", "--no-connect"})
+
+		assertScanResult(t, code, stdout.String(), stderr.String(), scanWant{
+			code:   exitError,
+			stderr: []string{".mcp.json", configErrorHint},
+		})
+		// The findings block is still printed, on stdout only.
+		if got := findingIDs(findingRows(t, stdout.String())); !slices.Equal(got, []string{"MOAT-T4-002"}) {
+			t.Errorf("finding rules = %v, want [MOAT-T4-002]\nstdout:\n%s", got, stdout)
+		}
+		if strings.Contains(stderr.String(), "MOAT-T4-002") {
+			t.Errorf("stderr holds a finding:\n%s", stderr)
+		}
+	})
+}
+
 // TestScanArgsMasked checks that the COMMAND/URL cell never shows an argument
 // as written. The configs put the args canary in secret-like shapes, in a
 // global and in a project file.
@@ -1029,7 +1122,13 @@ func TestScanArgsMasked(t *testing.T) {
 
 	code := c.dispatch([]string{"scan", "--no-connect"})
 
-	assertScanResult(t, code, stdout.String(), stderr.String(), scanWant{code: exitOK})
+	// The args hold plaintext secrets: MOAT-T4-002 (high) gives exit code 1.
+	// assertScanResult checks the whole stdout, the findings block too, for
+	// the canary.
+	assertScanResult(t, code, stdout.String(), stderr.String(), scanWant{code: exitFindings})
+	if got := findingIDs(findingRows(t, stdout.String())); !slices.Contains(got, "MOAT-T4-002") {
+		t.Errorf("finding rules = %v, want MOAT-T4-002\nstdout:\n%s", got, stdout)
+	}
 	// The safe parts stay, so the leak check is not a pass on empty output.
 	if got := strings.Count(stdout.String(), "npx -y @scope/server --token "+discover.Mask+" "); got != 2 {
 		t.Errorf("stdout shows the redacted command line %d times, want 2\nstdout:\n%s", got, stdout)

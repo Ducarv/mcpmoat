@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -18,13 +19,14 @@ import (
 )
 
 // runScan implements "mcpmoat scan". For now it only supports --no-connect: it
-// reads the client configs and lists the servers it finds. It starts no
-// process and opens no network connection. M3 adds the connection step, and M4
-// applies the rules.
+// reads the client configs, lists the servers it finds and runs the built-in
+// config rules on every server (T4 with rules.CheckConfig, T5 with the
+// typosquat check). It starts no process and opens no network connection. M3
+// adds the connection step. The tool rules run after M3.
 //
 // --rules loads the *.yaml and *.yml rule files of one folder in addition to
-// the built-in rules, and checks them. Scan does not apply the rules yet, in
-// either mode.
+// the built-in rules, and checks them. Scan does not apply these rules yet. The
+// loaded set only gives the severity of the built-in config rules.
 //
 // --config reads one file. The file can come from anywhere, for example from
 // a cloned repository, so discover.ReadConfig reads it as an untrusted project
@@ -47,15 +49,20 @@ import (
 // the file gives one or more entries, scan prints a notice with their number
 // on stderr. A malformed line, a file that scan cannot read and, with
 // --config, an unknown working directory are warnings on stderr, never exit
-// code 2. The ignore list is not used yet: scan produces no findings before
-// M4.
+// code 2. The ignore list drops the findings of the config rules.
+//
+// Scan prints the server table, then the findings that the ignore list does
+// not drop, on stdout.
 //
 // Exit codes:
-//   - 0: the table is printed, and no config file had a problem. A missing
-//     file is not a problem in auto-discovery. No rules run yet, so scan
-//     then prints noRulesNotice on stderr: exit code 0 does not mean that
-//     the servers are safe.
-//   - 2: a flag or usage error, no home or working directory in
+//   - 0: the table is printed, no config file had a problem, and no finding
+//     has severity high or above. A missing file is not a problem in
+//     auto-discovery. Only the config rules run, so exit code 0 does not mean
+//     that the tools of the servers are safe.
+//   - 1: at least one finding that is not ignored has severity high or above
+//     (--fail-on is not implemented yet, so the limit is always high).
+//   - 2: a flag or usage error, an internal error (the built-in typosquat
+//     list is invalid), no home or working directory in
 //     auto-discovery, a write error on stdout, any problem with a rule file
 //     or with the rule set (an invalid file, a duplicate ID, an ID that clashes
 //     with a built-in rule), or any problem with a config file (a
@@ -64,7 +71,8 @@ import (
 //     a server entry that it refuses, can hide servers that the client still
 //     loads. So the scan must not look clean: scan prints the table and all
 //     problems first, and then exits with 2. With --config, a file that gave
-//     no servers at all gives only the problems, and no table.
+//     no servers at all gives only the problems, and no table. Exit code 2
+//     wins over exit code 1.
 func (c *cli) runScan(_ options, args []string) int {
 	fs := flag.NewFlagSet("mcpmoat scan", flag.ContinueOnError)
 	// We print our own messages and scanUsage prints the help, so the flag
@@ -117,8 +125,10 @@ func (c *cli) runScan(_ options, args []string) int {
 	}
 
 	// Load and check the rules in both modes, so a bad rule file gives exit
-	// code 2 also with --no-connect. Scan does not apply the rules yet.
-	if _, ok := c.loadRules(rulesDir); !ok {
+	// code 2 also with --no-connect. The set gives the severity of the
+	// built-in config rules.
+	set, ok := c.loadRules(rulesDir)
+	if !ok {
 		return exitError
 	}
 
@@ -127,14 +137,31 @@ func (c *cli) runScan(_ options, args []string) int {
 		return exitError
 	}
 
+	// The typosquat check is built once and used for every server. An error
+	// means a bug in mcpmoat (the list is part of the binary), so the message
+	// is fixed text.
+	typo, err := rules.NewBuiltinTyposquat()
+	if err != nil {
+		fprintf(c.stderr, "mcpmoat scan: internal error: built-in typosquat list is invalid\n")
+		return exitError
+	}
+	checks := configChecks{set: set, typo: typo}
+
 	// context.Background() never ends. M3 adds signal handling in main, and
 	// main will pass a context that ends on Ctrl-C.
 	ctx := context.Background()
 
 	if configPath != "" {
-		return c.scanConfig(ctx, configPath, ignoreIDs)
+		return c.scanConfig(ctx, configPath, ignoreIDs, checks)
 	}
-	return c.scanAuto(ctx, ignoreIDs)
+	return c.scanAuto(ctx, ignoreIDs, checks)
+}
+
+// configChecks holds what the config rules need: the rule set (for the
+// severity of a finding) and the typosquat check (T5).
+type configChecks struct {
+	set  *rules.Set
+	typo *rules.Typosquat
 }
 
 // connectOptions builds the inspect options from the --timeout and
@@ -209,7 +236,7 @@ func isFlagOf(fs *flag.FlagSet, value string) bool {
 //
 // The working directory is also where .mcpmoat-ignore is. Without it, scan
 // prints a warning and reads no ignore file.
-func (c *cli) scanConfig(ctx context.Context, path string, ignoreIDs []string) int {
+func (c *cli) scanConfig(ctx context.Context, path string, ignoreIDs []string, checks configChecks) int {
 	// The error text is not printed; a fixed warning is enough.
 	wd, err := c.getwd()
 	if err != nil {
@@ -219,7 +246,7 @@ func (c *cli) scanConfig(ctx context.Context, path string, ignoreIDs []string) i
 	if !filepath.IsAbs(path) && wd != "" {
 		path = filepath.Join(wd, path)
 	}
-	_ = c.loadIgnore(wd, ignoreIDs) // TODO(#40): apply to the findings (FR-10 summary and exit code)
+	ignore := c.loadIgnore(wd, ignoreIDs)
 
 	// The home directory only tells ReadConfig whether the file is one of the
 	// user's own global files. Without a home, no file is: the file is read
@@ -238,12 +265,12 @@ func (c *cli) scanConfig(ctx context.Context, path string, ignoreIDs []string) i
 		c.printFileErrors(res.Errors)
 		return exitError
 	}
-	return c.listServers(res)
+	return c.listServers(res, checks, &ignore)
 }
 
 // scanAuto looks for the config files of the known clients, in the home
 // directory and in the working directory.
-func (c *cli) scanAuto(ctx context.Context, ignoreIDs []string) int {
+func (c *cli) scanAuto(ctx context.Context, ignoreIDs []string, checks configChecks) int {
 	// The error text is not printed: a fixed message is enough.
 	home, err := c.homeDir()
 	if err != nil {
@@ -255,8 +282,8 @@ func (c *cli) scanAuto(ctx context.Context, ignoreIDs []string) int {
 		fprintf(c.stderr, "mcpmoat scan: cannot read the working directory; use --config\n")
 		return exitError
 	}
-	_ = c.loadIgnore(wd, ignoreIDs) // TODO(#40): apply to the findings (FR-10 summary and exit code)
-	return c.listServers(discover.Discover(ctx, discover.Options{Home: home, WorkDir: wd}))
+	ignore := c.loadIgnore(wd, ignoreIDs)
+	return c.listServers(discover.Discover(ctx, discover.Options{Home: home, WorkDir: wd}), checks, &ignore)
 }
 
 // scanWarnf prints one scan warning line on stderr.
@@ -307,20 +334,15 @@ func (c *cli) loadIgnore(wd string, ids []string) rules.IgnoreList {
 const configErrorHint = "mcpmoat scan: a config file has a problem; " +
 	"the table can miss servers that the client loads"
 
-// noRulesText says that --no-connect applies no rules yet (they come in M4),
-// so exit code 0 must not read as "the servers are safe". noRulesNotice and
-// the "Scan output" note of scanUsage both use it, so the two say the same.
-const noRulesText = "no rules are applied yet, so exit code 0 does not mean that the servers are safe"
-
-// noRulesNotice is the line that listServers prints on stderr when the scan
-// exits with 0. It is a notice, not a warning or an error, and it is fixed
-// text.
-const noRulesNotice = "mcpmoat scan: " + noRulesText
-
-// listServers prints the server table on stdout and the file problems on
-// stderr, and returns the exit code. The runScan doc holds the exit-code
-// contract.
-func (c *cli) listServers(res discover.Result) int {
+// listServers prints the server table and the findings on stdout and the file
+// problems on stderr, and returns the exit code. The findings come from the
+// config rules (see configFindings), and the ignore list drops some of them.
+// When the ignore list dropped at least one finding, listServers prints one
+// line on stderr after the findings, with the rule IDs and their counts (see
+// printIgnored). This line does not change the exit code.
+// The runScan doc holds the exit-code contract: 2 for a write error or a
+// config file problem, else 1 for a finding of severity high or above, else 0.
+func (c *cli) listServers(res discover.Result, checks configChecks, ignore *rules.IgnoreList) int {
 	// Do not use fprintf for the table: a write error (a closed pipe, for
 	// example) must give exit code 2.
 	if err := report.WriteServers(c.stdout, res.Servers); err != nil {
@@ -331,14 +353,53 @@ func (c *cli) listServers(res discover.Result) int {
 		return exitError
 	}
 
-	if len(res.Errors) == 0 {
-		fprintf(c.stderr, "%s\n", noRulesNotice)
-		return exitOK
+	rows, ignored := configFindings(checks.set, checks.typo, ignore, res.Servers)
+	if err := report.WriteFindings(c.stdout, rows); err != nil {
+		fprintf(c.stderr, "mcpmoat scan: cannot write output\n")
+		c.printFileErrors(res.Errors)
+		return exitError
 	}
-	// Print the problems in the order of the result, then the hint.
-	c.printFileErrors(res.Errors)
-	fprintf(c.stderr, "%s\n", configErrorHint)
-	return exitError
+	c.printIgnored(ignored)
+
+	if len(res.Errors) > 0 {
+		// Print the problems in the order of the result, then the hint.
+		c.printFileErrors(res.Errors)
+		fprintf(c.stderr, "%s\n", configErrorHint)
+		return exitError
+	}
+	if hasFailingFinding(rows) {
+		return exitFindings
+	}
+	return exitOK
+}
+
+// printIgnored writes one line on stderr that counts the findings which the
+// ignore list dropped, for example
+// "mcpmoat scan: 3 findings ignored: MOAT-T4-002 (2), MOAT-T4-003 (1)". The
+// rule IDs are sorted. It writes nothing when the map is empty. The line holds
+// only rule IDs from the built-in rules and counts: no server name, key or
+// config text. FR-10 asks for this count, and an untrusted ignore file must not
+// hide findings in silence.
+func (c *cli) printIgnored(ignored map[string]int) {
+	if len(ignored) == 0 {
+		return
+	}
+	ids := make([]string, 0, len(ignored))
+	total := 0
+	for id, n := range ignored {
+		ids = append(ids, id)
+		total += n
+	}
+	sort.Strings(ids)
+	parts := make([]string, len(ids))
+	for i, id := range ids {
+		parts[i] = fmt.Sprintf("%s (%d)", id, ignored[id])
+	}
+	noun := "findings"
+	if total == 1 {
+		noun = "finding"
+	}
+	fprintf(c.stderr, "mcpmoat scan: %d %s ignored: %s\n", total, noun, strings.Join(parts, ", "))
 }
 
 // printFileErrors writes one line per file problem on stderr, with the

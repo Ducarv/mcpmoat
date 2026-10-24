@@ -8,8 +8,9 @@ import (
 // rules in dir. It returns the joined set and true, or nil and false after it
 // printed every problem on stderr.
 //
-// The rules are loaded and checked here, but scan does not apply them yet.
-// Every line has the prefix "mcpmoat scan: " and holds only
+// Scan uses the loaded set for the severity of the built-in config rules.
+// The rules from --rules are loaded and checked here, but scan does not apply
+// them yet. Every line has the prefix "mcpmoat scan: " and holds only
 // rules.LoadError.Error(), which already escapes the file name and the
 // reason. The rule files can come from an untrusted repository, so this
 // function never prints rule text itself, and it prints nothing on stdout.
