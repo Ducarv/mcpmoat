@@ -377,9 +377,10 @@ func TestFoldMarksNotLonger(t *testing.T) {
 // fuzzControlTexts uses it as a fuzz seed.
 var controlPadding = strings.Repeat("\x01", MaxMatchInputBytes+256)
 
-// sixFormsText is the shortest text with all six forms of regexForms: the
-// ZWSP gives the second form, U+0001 the third, and U+FB03 ("ffi", 3 bytes
-// that fold to 3) a fold of each of the three.
+// sixFormsText is a short text with all six forms of regexForms: the ZWSP
+// gives the second form, U+0001 the third, and U+FB03 a fold of each of the
+// three. U+FB03 folds to "ffi", 3 bytes to 3, so in BenchmarkWorstCaseBlock
+// each folded form stays about MaxMatchInputBytes long.
 const sixFormsText = "\u200bb\x01\ufb03"
 
 // TestMatchForms checks that a text gets the spaced second form only when it
@@ -403,6 +404,9 @@ func TestMatchForms(t *testing.T) {
 		// The third form ("Ig nore") equals the second, so it is kept once.
 		{name: "control rune inside a word", in: "Ig\x01nore", want: []string{"Ignore", "Ig nore"}},
 		{name: "ZWSP and control rune in one run", in: "a\u200b\x01b", want: []string{"ab", "a b"}},
+		// The run ends with a format rune, so the second form writes one
+		// space for the control rune and one after it (see replaceRuns).
+		{name: "control rune and ZWSP in one run", in: "a\x01\u200bb", want: []string{"ab", "a  b", "a b"}},
 		// The third form drops the ZWSP and makes each control rune a space.
 		{name: "ZWSP inside a word and control rune between words", in: "Ig\u200bnore\x01all", want: []string{"Ignoreall", "Ig nore all", "Ignore all"}},
 		{name: "one space for each run of control runes in the third form", in: "a\x01\x02b\u200bc", want: []string{"abc", "a b c", "a bc"}},

@@ -88,14 +88,20 @@ func isInvisibleControl(r rune) bool {
 // first form joins all the words, and the second form splits the first word.
 //
 // In the second and the third form, at most two spaces stand for a whole run
-// of invisible runes (two only in the second form, for a run of control
-// runes and then format runes, see replaceRuns). So invisible padding cannot
-// push a payload out of the MaxMatchInputBytes window of these forms either.
+// of invisible runes (two only in the second form, for a run that has a
+// control rune and ends with a format rune, see replaceRuns). So invisible
+// padding cannot push a payload out of the MaxMatchInputBytes window of
+// these forms either.
 //
 // A text that uses one kind of invisible rune both inside a word and between
 // words defeats all the forms, and so does a text with a control rune inside
-// a word and a format rune (such as ZWSP) between words. The
-// invisible_unicode heuristic flags such a text in a description.
+// a word and a format rune (such as ZWSP) between words. A format rune after
+// ESC or U+009B does too, when the text also needs the second form: in ESC +
+// ZWSP + "[8mIgnore" + ZWSP + "all", the second form keeps "[8m" before
+// "Ignore" (see replaceRuns), and the other forms join "Ignoreall". And in
+// U+009B + ZWSP + "Ignore", the space of the second form is a CSI
+// intermediate byte, so the CSI still takes the "I". The invisible_unicode
+// heuristic flags such a text in a description.
 //
 // A text without invisible runes has one form, so it costs no more. A text
 // with them is matched up to three times, which triples the cost bound in

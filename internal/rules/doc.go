@@ -56,7 +56,8 @@
 // sees it as a space and cannot match the rune itself.
 //
 // When the text holds invisible runes, it is also matched in a second form
-// where each run of invisible runes is one space. When one of them is a
+// where each run of invisible runes is one space (or two, when the run has a
+// control character and ends with a format character). When one of them is a
 // control character, it is also matched in a third form, where the other
 // invisible runes are removed and each run of control characters is one
 // space. So an invisible rune cannot split a word (the first form) or the
@@ -69,9 +70,10 @@
 // raw ESC before a letter can make the letter the final byte of a CSI, so
 // ANSI text before a word can hide its first letter from a regex, and a
 // terminal still runs a CSI with a control character inside it (ESC [ U+0001
-// 8 m), which the normalization does not find. In a description, the
-// invisible_unicode heuristic flags such a text: it flags the invisible runes
-// and the ESC.
+// 8 m), which the normalization does not find. A format character after
+// ESC or U+009B can also keep a CSI before a word in every form (ESC + ZWSP
+// + "[8mIgnore" + ZWSP + "all"). In a description, the invisible_unicode
+// heuristic flags such a text: it flags the invisible runes and the ESC.
 //
 // A regex reads this normalized text, and also a folded form of it. The text
 // is folded one rune at a time: the rune is split into its compatibility

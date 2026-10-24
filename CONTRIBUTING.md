@@ -50,7 +50,8 @@ How mcpmoat prepares the text before a match. This applies to every regex and ke
 - A regex or a keyword is matched against up to three forms of the text. It matches when it
   matches one form:
   1. The invisible characters are removed. So "Ig" + U+0001 + "nore" reads as "Ignore".
-  2. Each run of invisible characters is one space. So "Ignore" + U+001F + "previous", or a ZWSP
+  2. Each run of invisible characters is one space, or two when the run has a control character
+     and ends with a format character. So "Ignore" + U+001F + "previous", or a ZWSP
      between the words, reads as two words.
   3. Only when the text has a control character: the format characters are removed, and each run
      of control characters is one space. So a ZWSP inside a word and a control character between
