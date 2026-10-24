@@ -25,8 +25,14 @@ const (
 	maxTyposquatNameLen = 128
 
 	// shortTyposquatNameLen is the longest "short" name. Short names allow
-	// one edit, longer names allow two.
+	// one edit. Longer names allow two edits only in the cases that
+	// closeDistance lists.
 	shortTyposquatNameLen = 8
+
+	// minTwoEditTailLen is the shortest tail in which two edits count as
+	// close. The tail is the part of the shorter name after the last
+	// separator that the two names share (see distinctiveTailRunes).
+	minTwoEditTailLen = 5
 
 	// sameScopeMaxDistance is the largest edit distance that still counts as
 	// close when a package and a popular package share an npm scope. See
@@ -287,22 +293,90 @@ func (t *Typosquat) scopeSquat(c typoCandidate) (string, bool) {
 }
 
 // closeDistance returns the edit distance of a and b and true when it is
-// between 1 and the threshold for these names. The threshold is 1 when the
-// shorter name has at most shortTyposquatNameLen runes, else 2.
+// between 1 and the threshold for these names. The threshold is 2 when the
+// shorter name has more than shortTyposquatNameLen runes and one of these is
+// true:
+//   - the longer name starts with the whole shorter name, so the edits only
+//     add or drop runes at the end ("mcp-server-gitxx" against
+//     "mcp-server-git"), or
+//   - the tail (see distinctiveTailRunes) has at least minTwoEditTailLen
+//     runes.
+//
+// Else the threshold is 1.
+//
+// Known limits:
+//   - Two edits inside a tail shorter than minTwoEditTailLen runes give no
+//     finding. A short tail cannot tell a typo from a different product
+//     ("gcp" against "git"). This covers every popular name whose last word
+//     is short, such as "mcp-server-gxx" against "mcp-server-git" and
+//     "tavily-mxx" against "tavily-mcp". One edit there still gives a
+//     finding.
+//   - Two runes added at the end count even after a short last word, so a
+//     real product that extends a popular name by two runes, such as
+//     "mcp-server-gitee" against "mcp-server-git", gives a finding. Appending
+//     runes is a common way to squat a name, and no such package was found
+//     on npm or PyPI when the threshold was set.
+//   - The tail runs to the end of the name, so a shared suffix makes it
+//     longer: "ana-mcp-server" against "exa-mcp-server" still counts as
+//     close.
+//   - Real names that differ by 2 edits in a tail of 5 runes or more, such as
+//     "mcp-server-github" and "mcp-server-gitlab", also count as close. That
+//     matters only if both are on the popular list.
 func closeDistance(a, b string) (int, bool) {
 	la, lb := utf8.RuneCountInString(a), utf8.RuneCountInString(b)
-	if min(la, lb) < minTyposquatNameLen || max(la, lb) > maxTyposquatNameLen {
+	short := min(la, lb)
+	if short < minTyposquatNameLen || max(la, lb) > maxTyposquatNameLen {
 		return 0, false
 	}
-	threshold := 2
-	if min(la, lb) <= shortTyposquatNameLen {
-		threshold = 1
+	appended := strings.HasPrefix(a, b) || strings.HasPrefix(b, a)
+	threshold := 1
+	if short > shortTyposquatNameLen && (appended || distinctiveTailRunes(a, b, short) >= minTwoEditTailLen) {
+		threshold = 2
 	}
 	if la-lb > threshold || lb-la > threshold {
 		return 0, false // cheap exit: the lengths alone rule it out
 	}
 	d := osaDistance(a, b)
 	return d, d >= 1 && d <= threshold
+}
+
+// distinctiveTailRunes returns the length in runes of the part of the shorter
+// name that starts after the last separator ("-", "/", "_", "." or "@") inside
+// the prefix that a and b share. short is the rune count of the shorter name;
+// the caller passes it because it has already counted both names.
+// For "mcp-server-gcp" and "mcp-server-git" the shared prefix is
+// "mcp-server-g", the last separator in it is the second "-", and the result
+// is 3: the word "gcp". It allocates nothing.
+//
+// A long shared prefix, such as "mcp-server-", would make two edits in a short
+// word look like a typo when they are not. Measuring from the last separator
+// keeps two edits in a long word ("mcp-server-fexxh") visible. closeDistance
+// handles runes added at the end of the whole shorter name ("mcp-server-gitxx")
+// on its own.
+func distinctiveTailRunes(a, b string, short int) int {
+	start, n := 0, 0 // start: runes up to and including the last separator
+	for a != "" && b != "" {
+		ra, sa := utf8.DecodeRuneInString(a)
+		rb, sb := utf8.DecodeRuneInString(b)
+		if ra != rb {
+			break
+		}
+		n++
+		if isNameSeparator(ra) {
+			start = n
+		}
+		a, b = a[sa:], b[sb:]
+	}
+	return short - start
+}
+
+// isNameSeparator reports whether r separates the words of a package name.
+func isNameSeparator(r rune) bool {
+	switch r {
+	case '-', '/', '_', '.', '@':
+		return true
+	}
+	return false
 }
 
 // sameScope reports whether a and b are npm packages in the same scope. A name

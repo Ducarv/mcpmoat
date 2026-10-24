@@ -55,6 +55,102 @@ func TestOSADistance(t *testing.T) {
 	}
 }
 
+func TestCloseDistance(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name     string
+		a, b     string
+		want     bool
+		wantDist int // checked only when want is true
+	}{
+		// The distinctive word is the part of the name after the last
+		// separator in the shared prefix. A word of fewer than 5 runes allows
+		// one edit only.
+		{name: "2 edits in a 4 rune word", a: "mcp-server-abcd", b: "mcp-server-aXcX", want: false},
+		{name: "2 edits in a 5 rune word", a: "mcp-server-abcde", b: "mcp-server-XbcXe", want: true, wantDist: 2},
+		{name: "2 edits in a long word", a: "mcp-server-fexxh", b: "mcp-server-fetch", want: true, wantDist: 2},
+		{name: "2 runes removed from a long word", a: "mcp-server-kubernet", b: "mcp-server-kubernetes", want: true, wantDist: 2},
+		{name: "2 edits in a long word after a scope", a: "@modelcontextprotocol/server-filesysxxm", b: "@modelcontextprotocol/server-filesystem", want: true, wantDist: 2},
+		// Accepted false negative: a short word cannot tell a typo from a
+		// different product.
+		{name: "2 edits in a 3 rune word", a: "mcp-server-gxx", b: "mcp-server-git", want: false},
+		{name: "1 edit in a short tail", a: "mcp-server-fetcX", b: "mcp-server-fetch", want: true, wantDist: 1},
+		{name: "transposition in a short tail", a: "mcp-server-gti", b: "mcp-server-git", want: true, wantDist: 1},
+		{name: "issue case gcp vs git", a: "mcp-server-gcp", b: "mcp-server-git", want: false},
+		{name: "issue case tidb vs time", a: "mcp-server-tidb", b: "mcp-server-time", want: false},
+		{name: "prefix typo plus tail typo", a: "mcp-sever-fecth", b: "mcp-server-fetch", want: true, wantDist: 2},
+		{name: "extra rune at the end", a: "mcp-server-fetchx", b: "mcp-server-fetch", want: true, wantDist: 1},
+		{name: "two extra runes at the end", a: "mcp-server-fetchxx", b: "mcp-server-fetch", want: true, wantDist: 2},
+		// Runes added or dropped at the end of the whole shorter name allow two
+		// edits, even when the last word is short.
+		{name: "two extra runes after a 3 rune word", a: "mcp-server-gitxx", b: "mcp-server-git", want: true, wantDist: 2},
+		{name: "two extra runes after a -mcp suffix", a: "tavily-mcpjs", b: "tavily-mcp", want: true, wantDist: 2},
+		{name: "two runes dropped from a 3 rune word", a: "mcp-server-g", b: "mcp-server-git", want: true, wantDist: 2},
+		{name: "one change plus one extra rune in a 3 rune word", a: "mcp-server-gixx", b: "mcp-server-git", want: false},
+
+		// Names of at most 8 runes allow one edit.
+		{name: "8 runes, 1 edit", a: "abcdefgh", b: "abXdefgh", want: true, wantDist: 1},
+		{name: "8 runes, 2 edits", a: "abcdefgh", b: "abXdeXgh", want: false},
+		{name: "9 runes, 2 edits, long tail", a: "abcdefghi", b: "aXcdefgXi", want: true, wantDist: 2},
+		{name: "9 runes, 3 edits", a: "abcdefghi", b: "aXcdXfgXi", want: false},
+		{name: "shorter name decides: 8 vs 10 runes", a: "abcdefgh", b: "abcdefghXY", want: false},
+
+		// Length caps.
+		{name: "below the minimum length", a: "abcd", b: "abce", want: false},
+		{name: "minimum length, 1 edit", a: "abcde", b: "abcdX", want: true, wantDist: 1},
+		{name: "at the maximum length", a: strings.Repeat("a", 128), b: strings.Repeat("a", 127) + "b", want: true, wantDist: 1},
+		{name: "above the maximum length", a: strings.Repeat("a", 129), b: strings.Repeat("a", 128) + "b", want: false},
+
+		{name: "identical names", a: "mcp-server-fetch", b: "mcp-server-fetch", want: false},
+		{name: "unicode runes count as one edit", a: "café-mcp", b: "cafe-mcp", want: true, wantDist: 1},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			for _, pair := range [][2]string{{tt.a, tt.b}, {tt.b, tt.a}} {
+				d, ok := closeDistance(pair[0], pair[1])
+				if ok != tt.want {
+					t.Errorf("closeDistance(%q, %q) ok = %v, want %v", pair[0], pair[1], ok, tt.want)
+				}
+				if ok && d != tt.wantDist {
+					t.Errorf("closeDistance(%q, %q) distance = %d, want %d", pair[0], pair[1], d, tt.wantDist)
+				}
+			}
+		})
+	}
+}
+
+func TestDistinctiveTailRunes(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		a, b string
+		want int
+	}{
+		{name: "short word after a long prefix", a: "mcp-server-gcp", b: "mcp-server-git", want: 3},
+		{name: "typo in the prefix", a: "mcp-sever-fecth", b: "mcp-server-fetch", want: 11},
+		{name: "extra runes at the end", a: "mcp-server-fetchxx", b: "mcp-server-fetch", want: 5},
+		{name: "no shared prefix", a: "abcdef", b: "xbcdef", want: 6},
+		{name: "separator at index 0", a: "@abcd", b: "@abXd", want: 4},
+		{name: "scoped names", a: "@scope/server-abc", b: "@scope/server-abd", want: 3},
+		{name: "multi-byte rune before a separator", a: "café-abc", b: "café-abd", want: 3},
+		{name: "no separator in the shared prefix", a: "abcdef", b: "abcdXf", want: 6},
+		{name: "both empty", a: "", b: "", want: 0},
+		{name: "one empty", a: "abc", b: "", want: 0},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			short := min(utf8.RuneCountInString(tt.a), utf8.RuneCountInString(tt.b))
+			for _, pair := range [][2]string{{tt.a, tt.b}, {tt.b, tt.a}} {
+				if got := distinctiveTailRunes(pair[0], pair[1], short); got != tt.want {
+					t.Errorf("distinctiveTailRunes(%q, %q, %d) = %d, want %d", pair[0], pair[1], short, got, tt.want)
+				}
+			}
+		})
+	}
+}
+
 // errReader fails on the first read.
 type errReader struct{ err error }
 
@@ -317,8 +413,41 @@ func TestTyposquatCheck(t *testing.T) {
 			server: npxServer("files", "@evil/server-filesytem"),
 			want:   []want{{FieldArgs, "@modelcontextprotocol/server-filesystem"}},
 		},
+		{
+			name:   "uvx package with a typo in the prefix and in the tail",
+			server: stdioServer("uvx", "mcp-sever-fecth"),
+			want:   []want{{FieldArgs, "mcp-server-fetch"}},
+		},
+		{
+			name:   "uvx package with two edits in a long word",
+			server: stdioServer("uvx", "mcp-server-fexxh"),
+			want:   []want{{FieldArgs, "mcp-server-fetch"}},
+		},
+		{
+			name:   "uvx package with two extra runes at the end",
+			server: stdioServer("uvx", "mcp-server-fetchxx"),
+			want:   []want{{FieldArgs, "mcp-server-fetch"}},
+		},
+		{
+			name:   "uvx package with two extra runes after a short word",
+			server: stdioServer("uvx", "mcp-server-gitxx"),
+			want:   []want{{FieldArgs, "mcp-server-git"}},
+		},
+		{
+			name:   "npx package with two extra runes after a -mcp suffix",
+			server: npxServer("t", "tavily-mcpjs"),
+			want:   []want{{FieldArgs, "tavily-mcp"}},
+		},
 
 		// Negatives.
+		// Two edits in a short word after a long shared prefix are two
+		// different products, not a typo.
+		{name: "npx package gcp next to git", server: npxServer("x", "mcp-server-gcp")},
+		{name: "uvx package gcp next to git", server: stdioServer("uvx", "mcp-server-gcp")},
+		{name: "uvx package tidb next to time", server: stdioServer("uvx", "mcp-server-tidb")},
+		{name: "server name gcp next to git", server: discover.Server{Name: "mcp-server-gcp"}},
+		// Accepted false negative: two edits in a 3 rune word.
+		{name: "uvx package gxx next to git", server: stdioServer("uvx", "mcp-server-gxx")},
 		// Same scope as a popular package: only the scope owner can publish
 		// there, so a sibling that is two edits from a popular name (gitlab
 		// against github) is not a typosquat. A one-edit typo in the same scope

@@ -139,7 +139,7 @@ hidden instructions or leak data.
 | T2 | Rug pull: the description, schema or annotations of a tool change after the pin | Per-tool hash stored in a pins file; differences raise an alert |
 | T3 | Shadowing: a tool that tries to redefine another tool's behaviour ("when using send_email, always...") | Rule: description cites the name of a tool from another server |
 | T4 | Dangerous config: remote server over `http://` without TLS, plaintext secret in config, unpinned package (`npx package@latest`) | Static config analysis |
-| T5 | Basic typosquatting: name very close to a known server | Compare with a short list of popular servers (edit distance) |
+| T5 | Basic typosquatting: name very close to a known server | Compare with a short list of popular servers (edit distance: one edit. Two edits when the shorter name has more than 8 characters and either the edits only add or drop characters at the end of the popular name, or the part after the last separator the two names share has 5 or more characters. With no shared separator, that part is the whole shorter name) |
 
 ### 5.4 Out of scope for phase 1
 
