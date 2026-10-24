@@ -7,13 +7,9 @@ import (
 	"github.com/Ducarv/mcpmoat/internal/discover"
 )
 
-// Synthetic commit hashes. None of them is a real commit.
-const (
-	// sha40 is a full SHA-1 commit hash in lower case hex.
-	sha40 = testSHA
-	// sha40Upper is sha40 in upper case hex.
-	sha40Upper = "0123456789ABCDEF0123456789ABCDEF01234567"
-)
+// sha40Upper is testSHA (a synthetic commit hash, not a real commit) in upper
+// case hex.
+const sha40Upper = "0123456789ABCDEF0123456789ABCDEF01234567"
 
 // nonRegistryCase is one command line for the non-registry spec tests.
 type nonRegistryCase struct {
@@ -79,7 +75,7 @@ func TestRawSpecAt(t *testing.T) {
 		{name: "cmd /s /c uvx --from", command: "cmd", args: []string{"/s", "/c", "uvx", "--from", "git+https://h/u/r", "tool"},
 			wantRunner: RunnerUVX, wantSpec: "git+https://h/u/r", wantAt: 4, wantOK: true},
 
-		// S3: a remote URL spec that ends in ".py" is a repository, not a script
+		// S3: a non-registry URL spec that ends in ".py" is a repository, not a script
 		{name: "uvx --from repo named discord.py", command: "uvx",
 			args:       []string{"--from", "git+https://github.com/Rapptz/discord.py", "tool"},
 			wantRunner: RunnerUVX, wantSpec: "git+https://github.com/Rapptz/discord.py", wantAt: 1, wantOK: true},
@@ -156,10 +152,10 @@ func nonRegistryUnpinnedCases() []nonRegistryCase {
 		{"npx github branch", "npx", []string{"-y", "github:u/r#main"}},
 		{"npx github short sha", "npx", []string{"-y", "github:u/r#abc1234"}},
 		{"npx github semver", "npx", []string{"-y", "github:u/r#semver:^1.0.0"}},
-		{"npx github 41 hex", "npx", []string{"-y", "github:u/r#" + sha40 + "a"}},
-		{"npx github 39 hex", "npx", []string{"-y", "github:u/r#" + sha40[:39]}},
+		{"npx github 41 hex", "npx", []string{"-y", "github:u/r#" + testSHA + "a"}},
+		{"npx github 39 hex", "npx", []string{"-y", "github:u/r#" + testSHA[:39]}},
 		{"npx github 64 hex", "npx", []string{"-y", "github:u/r#" + strings.Repeat("ab12", 16)}},
-		{"npx github 40 chars not hex", "npx", []string{"-y", "github:u/r#" + sha40[:39] + "g"}},
+		{"npx github 40 chars not hex", "npx", []string{"-y", "github:u/r#" + testSHA[:39] + "g"}},
 		{"npx github empty fragment", "npx", []string{"-y", "github:u/r#"}},
 		{"npx gitlab", "npx", []string{"gitlab:u/r"}},
 		{"npx bitbucket", "npx", []string{"bitbucket:u/r"}},
@@ -178,20 +174,23 @@ func nonRegistryUnpinnedCases() []nonRegistryCase {
 		{"npx git://", "npx", []string{"git://github.com/u/r.git"}},
 		{"npx ssh://", "npx", []string{"ssh://git@h/u/r.git"}},
 		{"npx scp-like git@", "npx", []string{"git@github.com:u/r.git"}},
-		{"npx git+https sha in userinfo", "npx", []string{"git+https://" + sha40 + "@h/u/r"}},
+		{"npx git+https sha in userinfo", "npx", []string{"git+https://" + testSHA + "@h/u/r"}},
 		{"npx git+https short sha fragment", "npx", []string{"git+https://h/u/r#abc1234"}},
 
 		// npx: URLs
 		{"npx https tgz", "npx", []string{"https://example.com/x-1.0.0.tgz"}},
 		{"npx http tgz", "npx", []string{"http://example.com/x.tgz"}},
 		{"npx https no suffix", "npx", []string{"https://example.com/x"}},
-		{"npx url ignores sha fragment", "npx", []string{"https://example.com/x.tgz#" + sha40}},
+		{"npx url ignores sha fragment", "npx", []string{"https://example.com/x.tgz#" + testSHA}},
 		{"npx hosted git url no ref", "npx", []string{"https://github.com/u/r"}},
 		{"npx hosted git url branch", "npx", []string{"https://github.com/u/r#main"}},
 		{"npx hosted git url short sha", "npx", []string{"https://gitlab.com/u/r.git#abc1234"}},
-		{"npx hosted git archive ignores sha fragment", "npx", []string{"https://github.com/u/r/archive/main.tar.gz#" + sha40}},
-		{"npx unknown git host ignores sha fragment", "npx", []string{"https://git.example.com/u/r#" + sha40}},
+		{"npx hosted git archive ignores sha fragment", "npx", []string{"https://github.com/u/r/archive/main.tar.gz#" + testSHA}},
+		{"npx unknown git host ignores sha fragment", "npx", []string{"https://git.example.com/u/r#" + testSHA}},
 		{"npx github branch with options", "npx", []string{"github:u/r#main::path:packages/x"}},
+		{"npx hosted git url, longer path", "npx", []string{"https://github.com/u/r/tree/main#" + testSHA}},
+		{"npx hosted git url, no repo", "npx", []string{"https://github.com/u#" + testSHA}},
+		{"uvx --from commit only in the query", "uvx", []string{"--from", "git+https://h/u/r?x=@" + testSHA, "tool"}},
 
 		// npx: alias and flag forms
 		{"npx alias github", "npx", []string{"foo@github:u/r"}},
@@ -212,12 +211,12 @@ func nonRegistryUnpinnedCases() []nonRegistryCase {
 		{"uvx --from git+git", "uvx", []string{"--from", "git+git://h/u/r", "tool"}},
 		{"uvx --from branch", "uvx", []string{"--from", "git+https://h/u/r@main", "tool"}},
 		{"uvx --from short sha", "uvx", []string{"--from", "git+https://h/u/r@abc1234", "tool"}},
-		{"uvx --from 39 hex", "uvx", []string{"--from", "git+https://h/u/r@" + sha40[:39], "tool"}},
-		{"uvx --from 41 hex", "uvx", []string{"--from", "git+https://h/u/r@" + sha40 + "a", "tool"}},
+		{"uvx --from 39 hex", "uvx", []string{"--from", "git+https://h/u/r@" + testSHA[:39], "tool"}},
+		{"uvx --from 41 hex", "uvx", []string{"--from", "git+https://h/u/r@" + testSHA + "a", "tool"}},
 		{"uvx --from 64 hex", "uvx", []string{"--from", "git+https://h/u/r@" + strings.Repeat("ab12", 16), "tool"}},
-		{"uvx --from sha in userinfo", "uvx", []string{"--from", "git+https://" + sha40 + "@h/u/r", "tool"}},
-		{"uvx --from sha in host part", "uvx", []string{"--from", "git+https://h@" + sha40 + "/u/r", "tool"}},
-		{"uvx --from sha in fragment only", "uvx", []string{"--from", "git+https://h/u/r#" + sha40, "tool"}},
+		{"uvx --from sha in userinfo", "uvx", []string{"--from", "git+https://" + testSHA + "@h/u/r", "tool"}},
+		{"uvx --from sha in host part", "uvx", []string{"--from", "git+https://h@" + testSHA + "/u/r", "tool"}},
+		{"uvx --from sha in fragment only", "uvx", []string{"--from", "git+https://h/u/r#" + testSHA, "tool"}},
 		{"uvx --from git+ssh", "uvx", []string{"--from", "git+ssh://git@h/u/r", "tool"}},
 		{"uvx --from whl", "uvx", []string{"--from", "https://h/x.whl", "tool"}},
 		{"uvx --from tar.gz with query", "uvx", []string{"--from", "https://h/x-1.tar.gz?a=1", "tool"}},
@@ -256,31 +255,35 @@ func nonRegistryFalseCases() []nonRegistryCase {
 	tooLong := "github:u/" + strings.Repeat("a", maxSpecLen)
 	return []nonRegistryCase{
 		// pinned to a full commit
-		{"npx github 40 hex", "npx", []string{"-y", "github:u/r#" + sha40}},
+		{"npx github 40 hex", "npx", []string{"-y", "github:u/r#" + testSHA}},
 		{"npx github 40 hex upper", "npx", []string{"-y", "github:u/r#" + sha40Upper}},
-		{"npx github 40 hex with options", "npx", []string{"-y", "github:u/r#" + sha40 + "::path:packages/x"}},
-		{"npx hosted git url 40 hex", "npx", []string{"https://github.com/u/r#" + sha40}},
-		{"npx hosted git url .git 40 hex", "npx", []string{"https://gitlab.com/u/r.git#" + sha40}},
-		{"npx bitbucket url 40 hex", "npx", []string{"-y", "https://bitbucket.org/u/r#" + sha40}},
-		{"npx hosted git url alias 40 hex", "npx", []string{"foo@https://github.com/u/r#" + sha40}},
-		{"uvx --from alias with extras 40 hex", "uvx", []string{"--from", "pkg[extra]@git+https://h/u/r@" + sha40, "tool"}},
-		{"npx gitlab 40 hex", "npx", []string{"gitlab:u/r#" + sha40}},
-		{"bunx shorthand 40 hex", "bunx", []string{"u/r#" + sha40}},
-		{"npx shorthand 40 hex", "npx", []string{"u/r#" + sha40}},
-		{"npx git+https 40 hex", "npx", []string{"git+https://h/u/r#" + sha40}},
-		{"npx git+ssh 40 hex", "npx", []string{"git+ssh://git@h/u/r.git#" + sha40}},
-		{"npx scp-like 40 hex", "npx", []string{"git@h:u/r.git#" + sha40}},
-		{"npx scoped alias 40 hex", "npx", []string{"@s/foo@github:u/r#" + sha40}},
-		{"npx alias 40 hex", "npx", []string{"foo@github:u/r#" + sha40}},
-		{"npx -p github 40 hex", "npx", []string{"-p", "github:u/r#" + sha40, "cmd"}},
-		{"uvx --from git+https @40 hex", "uvx", []string{"--from", "git+https://h/u/r@" + sha40, "tool"}},
-		{"uvx --from git+https @40 hex egg", "uvx", []string{"--from", "git+https://h/u/r@" + sha40 + "#egg=x", "tool"}},
+		{"npx github 40 hex with options", "npx", []string{"-y", "github:u/r#" + testSHA + "::path:packages/x"}},
+		{"npx hosted git url 40 hex", "npx", []string{"https://github.com/u/r#" + testSHA}},
+		{"npx hosted git url .git 40 hex", "npx", []string{"https://gitlab.com/u/r.git#" + testSHA}},
+		{"npx bitbucket url 40 hex", "npx", []string{"-y", "https://bitbucket.org/u/r#" + testSHA}},
+		{"npx hosted git url alias 40 hex", "npx", []string{"foo@https://github.com/u/r#" + testSHA}},
+		{"npx hosted git url, token reference as user", "npx", []string{"https://${GH_TOKEN}@github.com/u/r#" + testSHA}},
+		{"npx hosted git url, user and password references", "npx", []string{"https://x-access-token:${GH_TOKEN}@github.com/u/r#" + testSHA}},
+		{"npx hosted git url, www and port", "npx", []string{"https://www.github.com:443/u/r.git#" + testSHA}},
+		{"uvx --from commit in the path, query after it", "uvx", []string{"--from", "git+https://h/u/r@" + testSHA + "?x=1", "tool"}},
+		{"uvx --from alias with extras 40 hex", "uvx", []string{"--from", "pkg[extra]@git+https://h/u/r@" + testSHA, "tool"}},
+		{"npx gitlab 40 hex", "npx", []string{"gitlab:u/r#" + testSHA}},
+		{"bunx shorthand 40 hex", "bunx", []string{"u/r#" + testSHA}},
+		{"npx shorthand 40 hex", "npx", []string{"u/r#" + testSHA}},
+		{"npx git+https 40 hex", "npx", []string{"git+https://h/u/r#" + testSHA}},
+		{"npx git+ssh 40 hex", "npx", []string{"git+ssh://git@h/u/r.git#" + testSHA}},
+		{"npx scp-like 40 hex", "npx", []string{"git@h:u/r.git#" + testSHA}},
+		{"npx scoped alias 40 hex", "npx", []string{"@s/foo@github:u/r#" + testSHA}},
+		{"npx alias 40 hex", "npx", []string{"foo@github:u/r#" + testSHA}},
+		{"npx -p github 40 hex", "npx", []string{"-p", "github:u/r#" + testSHA, "cmd"}},
+		{"uvx --from git+https @40 hex", "uvx", []string{"--from", "git+https://h/u/r@" + testSHA, "tool"}},
+		{"uvx --from git+https @40 hex egg", "uvx", []string{"--from", "git+https://h/u/r@" + testSHA + "#egg=x", "tool"}},
 		{"uvx --from git+https @40 hex upper", "uvx", []string{"--from", "git+https://h/u/r@" + sha40Upper, "tool"}},
-		{"uvx --from= git+https @40 hex", "uvx", []string{"--from=git+https://h/u/r@" + sha40, "tool"}},
-		{"uvx --from git+ssh @40 hex", "uvx", []string{"--from", "git+ssh://git@h/u/r@" + sha40, "tool"}},
-		{"uvx --from alias @40 hex", "uvx", []string{"--from", "pkg@git+https://h/u/r@" + sha40, "tool"}},
-		{"pipx run --spec= @40 hex", "pipx", []string{"run", "--spec=git+https://h/u/r@" + sha40, "tool"}},
-		{"pipx run --spec @40 hex", "pipx", []string{"run", "--spec", "git+https://h/u/r@" + sha40, "tool"}},
+		{"uvx --from= git+https @40 hex", "uvx", []string{"--from=git+https://h/u/r@" + testSHA, "tool"}},
+		{"uvx --from git+ssh @40 hex", "uvx", []string{"--from", "git+ssh://git@h/u/r@" + testSHA, "tool"}},
+		{"uvx --from alias @40 hex", "uvx", []string{"--from", "pkg@git+https://h/u/r@" + testSHA, "tool"}},
+		{"pipx run --spec= @40 hex", "pipx", []string{"run", "--spec=git+https://h/u/r@" + testSHA, "tool"}},
+		{"pipx run --spec @40 hex", "pipx", []string{"run", "--spec", "git+https://h/u/r@" + testSHA, "tool"}},
 
 		// registry specs: the registry check handles them
 		{"npx scoped", "npx", []string{"@scope/pkg"}},
@@ -385,12 +388,12 @@ func TestNonRegistrySpecStrictT5(t *testing.T) {
 	t.Parallel()
 
 	extra := []nonRegistryCase{
-		{"pinned github", "npx", []string{"github:u/r#" + sha40}},
-		{"pinned shorthand", "bunx", []string{"u/r#" + sha40}},
-		{"pinned alias", "npx", []string{"@s/foo@github:u/r#" + sha40}},
-		{"pinned git+https", "npx", []string{"git+https://h/u/r#" + sha40}},
-		{"uvx pinned", "uvx", []string{"--from", "git+https://h/u/r@" + sha40, "tool"}},
-		{"pipx pinned", "pipx", []string{"run", "--spec=git+https://h/u/r@" + sha40, "tool"}},
+		{"pinned github", "npx", []string{"github:u/r#" + testSHA}},
+		{"pinned shorthand", "bunx", []string{"u/r#" + testSHA}},
+		{"pinned alias", "npx", []string{"@s/foo@github:u/r#" + testSHA}},
+		{"pinned git+https", "npx", []string{"git+https://h/u/r#" + testSHA}},
+		{"uvx pinned", "uvx", []string{"--from", "git+https://h/u/r@" + testSHA, "tool"}},
+		{"pipx pinned", "pipx", []string{"run", "--spec=git+https://h/u/r@" + testSHA, "tool"}},
 		{"npx file", "npx", []string{"file:../x"}},
 	}
 	for _, tc := range append(nonRegistryUnpinnedCases(), extra...) {

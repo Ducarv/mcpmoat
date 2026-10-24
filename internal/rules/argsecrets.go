@@ -12,8 +12,10 @@ import (
 
 // maxScanLen caps the length of one arg or one URL that the secret check
 // reads. Both are untrusted text from a client config. A longer text is
-// skipped (no finding), so a hostile config cannot cost parse time.
-const maxScanLen = 2048
+// skipped (no finding), so a hostile config cannot cost parse time. It is
+// above the size of the largest real tokens: a JWT with many claims can pass
+// 2 KiB. Every test on a value is linear in its length.
+const maxScanLen = 64 * 1024
 
 const (
 	// minRandomLen is the shortest value that looksRandom accepts on the digit
@@ -128,11 +130,12 @@ func checkArgSecrets(s discover.Server) []Finding {
 	var findings []Finding
 	// Any transport that is not remote is read as stdio, also an unknown one: a
 	// secret in the args is worth a finding even if the transport is not set.
-	if !s.Transport.IsRemote() && argsHaveSecret(s.Args.Values()) {
+	if s.Transport.IsRemote() {
+		if urlHasSecret(s.URL.Reveal()) {
+			findings = append(findings, secretFinding(s.Name, FieldURL, ""))
+		}
+	} else if argsHaveSecret(s.Args.Values()) {
 		findings = append(findings, secretFinding(s.Name, FieldArgs, ""))
-	}
-	if s.Transport.IsRemote() && urlHasSecret(s.URL.Reveal()) {
-		findings = append(findings, secretFinding(s.Name, FieldURL, ""))
 	}
 	return findings
 }
@@ -195,6 +198,11 @@ func flagHasSecret(arg, next string) bool {
 		}
 	}
 
+	// "-HName: value": curl lets the header flag and its value touch.
+	if !strings.HasPrefix(arg, "--") && len(trimmed) > 1 && trimmed[0] == 'H' && headerEntryHasSecret(trimmed[1:]) {
+		return true
+	}
+
 	header := isHeaderFlag(arg, name)
 	if hasValue {
 		if (name == "e" || name == "env") && assignmentHasSecret(value) {
@@ -223,17 +231,20 @@ func isHeaderFlag(arg, name string) bool {
 }
 
 // headerEntryHasSecret checks the value of a header flag, a "Name: value"
-// text such as "Authorization: Bearer <token>", the way checkPlaintextSecrets
-// checks an entry of the headers map. As in the other args, the default of
-// ${NAME:-default} is scanned.
+// text such as "Authorization: Bearer <token>". The credential is the last
+// word of the value, so a scheme word ("Bearer", "Basic", "Negotiate") is
+// skipped. The credential then gets the rule of the other args (see
+// namedValueHasSecret), not the looser rule of the headers map: a header flag
+// is free text, and a reference such as "session=${SESSION}" leaves letters
+// that must not count.
 func headerEntryHasSecret(entry string) bool {
 	name, value, found := strings.Cut(entry, ":")
 	name = strings.TrimSpace(name)
-	if !found || name == "" {
+	words := strings.Fields(value)
+	if !found || name == "" || len(words) == 0 {
 		return false
 	}
-	value = literalPart(stripAuthScheme(strings.TrimSpace(value)))
-	return looksLikePlaintextSecret(name, value)
+	return namedValueHasSecret(name, words[len(words)-1])
 }
 
 // assignmentHasSecret checks a NAME=value text. It is false when the text has
@@ -257,7 +268,9 @@ func assignmentHasSecret(text string) bool {
 //     nothing literal left is not a secret.
 //  2. A well-known token (see bareToken) is a secret, under any name.
 //  3. A name of a path setting ("--key-file"), or a value that is a path or
-//     a URL, is not a secret. A URL value goes through urlHasSecret instead.
+//     a URL, is not a secret. A URL value in an arg goes through urlHasSecret
+//     (see urlValueHasSecret). Known limit: a URL inside a query value is not
+//     read again.
 //  4. A credential-like name needs a token-like value (see tokenForName). For
 //     a query value, the caller tests several forms of the value (see
 //     valueForms).
@@ -302,7 +315,9 @@ func expandRefs(value, stand string) string {
 			return stand
 		})
 	}
-	return value
+	// Deeper nesting than maxRefPasses is not read: a reference that is left is
+	// not literal text. A default at that depth is not scanned (known limit).
+	return varRef.ReplaceAllString(value, stand)
 }
 
 // tokenForName reports whether value is token-like enough to count as a secret
@@ -314,7 +329,9 @@ func expandRefs(value, stand string) string {
 // and is a secret on one of these routes:
 //  1. A name that ends in a password word (see endsInPasswordWord): any such
 //     value, as in the env check. People choose passwords, so they do not look
-//     random. The last word decides, so "--password-stdin" does not count.
+//     random. The last word decides, so "--password-stdin" does not count, and
+//     a name that starts with a negation or a prompt word ("--no-password")
+//     is a switch, not a password.
 //  2. A UUID: only when name holds "key", "token", "secret" or "pass" (this
 //     covers "password" and "passwd"). A session or auth ID is often a UUID, so
 //     a name that is credential-like for another reason ("--session-id") does
@@ -344,11 +361,21 @@ func tokenForName(name, value string) bool {
 		looksLongRandom(value)
 }
 
+// switchWords are the first words of a name that make a password name a
+// switch: "--no-password", "--ask-password" and "--prompt-password" take no
+// password, and the arg after them is something else.
+var switchWords = []string{"no", "skip", "ask", "prompt", "disable", "enable", "show", "hide", "without"}
+
 // endsInPasswordWord reports whether name, in any case, ends in "password",
-// "passwd", "passphrase" or "pwd": "--password", "--db-password", "DB_PASSWORD".
+// "passwd" or "passphrase": "--password", "--db-password", "DB_PASSWORD". It
+// is false when the first word of name is in switchWords. "pwd" is not in the
+// list, because "--pwd" is usually the working directory.
 func endsInPasswordWord(name string) bool {
 	lower := strings.ToLower(name)
-	for _, word := range [...]string{"password", "passwd", "passphrase", "pwd"} {
+	if first := strings.FieldsFunc(lower, isNameSeparator); len(first) > 0 && slices.Contains(switchWords, first[0]) {
+		return false
+	}
+	for _, word := range [...]string{"password", "passwd", "passphrase"} {
 		if strings.HasSuffix(lower, word) {
 			return true
 		}
@@ -557,7 +584,7 @@ func urlHasSecret(raw string) bool {
 	if len(raw) > maxScanLen {
 		return false
 	}
-	cleaned := strings.TrimFunc(tabsAndNewlines.Replace(raw), func(r rune) bool { return r <= ' ' || r == 0x7f })
+	cleaned := cleanClientURL(raw)
 	// A default is kept (it is scanned). A reference with no default becomes
 	// refMark, so "?token=${TOKEN}" has no literal value and "${HOST}" is still
 	// a host. NUL bytes are dropped first, so the mark cannot come from the input.

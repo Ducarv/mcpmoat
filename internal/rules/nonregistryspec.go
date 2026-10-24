@@ -1,7 +1,6 @@
 package rules
 
 import (
-	"net/url"
 	"slices"
 	"strings"
 )
@@ -115,14 +114,27 @@ func classifyNPM(spec string) (unpinned, nonRegistry bool) {
 var hostedGitHosts = []string{"github.com", "gitlab.com", "bitbucket.org"}
 
 // isHostedGitURL reports whether rawURL, without its "#" fragment, is the
-// https URL of a repository on one of hostedGitHosts: "https://host/user/repo"
-// or "https://host/user/repo.git". A longer path is not a repository root.
+// URL of a repository on one of hostedGitHosts: "https://host/user/repo" or
+// "https://host/user/repo.git", with an optional "www." and user info. A longer
+// path is not a repository root (it can be an archive), so it does not count.
+//
+// The URL is cut by hand and not with url.Parse, which refuses a reference such
+// as "https://${TOKEN}@github.com/u/r" (braces in the user info), the safe form
+// of a private repository.
 func isHostedGitURL(rawURL string) bool {
-	u, err := url.Parse(rawURL)
-	if err != nil || !slices.Contains(hostedGitHosts, strings.ToLower(u.Hostname())) {
+	_, rest, found := strings.Cut(rawURL, "://")
+	if !found {
 		return false
 	}
-	return len(strings.Split(strings.Trim(u.Path, "/"), "/")) == 2
+	rest, _, _ = strings.Cut(rest, "?")
+	authority, path, _ := strings.Cut(rest, "/")
+	if at := strings.LastIndexByte(authority, '@'); at >= 0 {
+		authority = authority[at+1:] // drop the user info
+	}
+	host, _, _ := strings.Cut(authority, ":") // drop the port
+	host = strings.TrimPrefix(strings.ToLower(host), "www.")
+	parts := strings.Split(strings.Trim(path, "/"), "/")
+	return slices.Contains(hostedGitHosts, host) && len(parts) == 2 && parts[0] != "" && parts[1] != ""
 }
 
 // npmGitPrefixes are the prefixes of npm git specs, in lower case. A local
@@ -143,6 +155,10 @@ func isNPMGitSpec(spec string) bool {
 	return hasPrefixFold(spec, "git@") && strings.Contains(spec, ":")
 }
 
+// npmArchiveSuffixes are the suffixes of a local npm package file, in lower
+// case. A repo name that ends in one of them is a file, not a GitHub repo.
+var npmArchiveSuffixes = []string{".tgz", ".tar.gz", ".tar"}
+
 // isGitHubShorthand reports whether spec (without its "#" fragment) is the
 // npm shorthand "user/repo". Both parts must look like GitHub names, so a
 // path ("./x", "../x", "/x", "~/x"), a scope ("@scope/pkg") and a "host:path"
@@ -153,7 +169,7 @@ func isGitHubShorthand(spec string) bool {
 	if !found || !isGitHubName(user) || !isGitHubName(repo) {
 		return false
 	}
-	for _, suffix := range []string{".tgz", ".tar.gz", ".tar"} {
+	for _, suffix := range npmArchiveSuffixes {
 		if strings.HasSuffix(strings.ToLower(repo), suffix) {
 			return false
 		}
@@ -171,6 +187,12 @@ func isGitHubName(s string) bool {
 	return !strings.ContainsFunc(s, func(r rune) bool {
 		return !isASCIIAlnum(r) && !strings.ContainsRune("._-", r)
 	})
+}
+
+// isNonRegistryURLSpec reports whether spec starts with "git+", "http://" or
+// "https://", compared without regard to case.
+func isNonRegistryURLSpec(spec string) bool {
+	return hasPrefixFold(spec, "git+") || hasPrefixFold(spec, "http://") || hasPrefixFold(spec, "https://")
 }
 
 // isScriptURL reports whether spec is an http(s) URL of a .py file, a script
@@ -247,6 +269,9 @@ func isPinnedGitURL(rest string) bool {
 	if !found {
 		return false
 	}
+	// pip and uv read the revision from the path only. An "@<sha>" in the query
+	// is not a pin.
+	path, _, _ = strings.Cut(path, "?")
 	at := strings.LastIndex(path, "@")
 	return at >= 0 && isFullSHA(path[at+1:])
 }

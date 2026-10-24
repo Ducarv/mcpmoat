@@ -166,8 +166,10 @@ func TestTextAdaptersNoLeak(t *testing.T) {
 				t.Fatalf("got %d hits, want exactly 1 (the leak check needs a hit): %+v", len(hits), hits)
 			}
 			detail := hits[0].Detail
-			if strings.Contains(detail, testGHToken) {
-				t.Errorf("Detail %q contains the canary", detail)
+			for _, form := range hitForms(t, hits) {
+				if strings.Contains(form, testGHToken) {
+					t.Errorf("Hit form %q contains the canary", form)
+				}
 			}
 			// Every word of the input, split at non-letters and non-digits.
 			words := strings.FieldsFunc(tt.input, func(r rune) bool {
@@ -179,6 +181,23 @@ func TestTextAdaptersNoLeak(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// hitForms renders hits in every common output form: the Detail of the first
+// hit, then %v, %+v, %#v and JSON.
+func hitForms(t *testing.T, hits []Hit) []string {
+	t.Helper()
+	js, err := json.Marshal(hits)
+	if err != nil {
+		t.Fatalf("json.Marshal() error = %v", err)
+	}
+	return []string{
+		hits[0].Detail,
+		fmt.Sprintf("%v", hits[0]),
+		fmt.Sprintf("%+v", hits[0]),
+		fmt.Sprintf("%#v", hits[0]),
+		string(js),
 	}
 }
 
@@ -211,18 +230,7 @@ func TestTextAdaptersNoLeakArgsAndURL(t *testing.T) {
 			if len(hits) != 1 {
 				t.Fatalf("got %d hits, want exactly 1 (the leak check needs a hit): %+v", len(hits), hits)
 			}
-			js, err := json.Marshal(hits)
-			if err != nil {
-				t.Fatalf("json.Marshal() error = %v", err)
-			}
-			forms := []string{
-				hits[0].Detail,
-				fmt.Sprintf("%v", hits[0]),
-				fmt.Sprintf("%+v", hits[0]),
-				fmt.Sprintf("%#v", hits[0]),
-				string(js),
-			}
-			for _, form := range forms {
+			for _, form := range hitForms(t, hits) {
 				for _, leak := range tt.leaks {
 					if strings.Contains(form, leak) {
 						t.Errorf("Hit form %q contains %q", form, leak)

@@ -102,7 +102,7 @@ func checkInsecureURL(s discover.Server) []Finding {
 	if !s.Transport.IsRemote() {
 		return nil
 	}
-	raw := strings.TrimFunc(tabsAndNewlines.Replace(s.URL.Reveal()), func(r rune) bool { return r <= ' ' || r == 0x7f })
+	raw := cleanClientURL(s.URL.Reveal())
 	resolved := varRef.ReplaceAllStringFunc(raw, refDefault)
 	u, err := url.Parse(resolved)
 	switch {
@@ -123,6 +123,14 @@ func checkInsecureURL(s discover.Server) []Finding {
 
 // tabsAndNewlines removes every tab and newline, as WHATWG URL parsers do.
 var tabsAndNewlines = strings.NewReplacer("\t", "", "\n", "", "\r", "")
+
+// cleanClientURL reads a URL the way clients do before they parse it: it
+// removes every tab and newline and trims the control characters and spaces at
+// both ends. The URL checks (T4-001 and T4-002) share it, so they read one URL
+// in one way.
+func cleanClientURL(raw string) string {
+	return strings.TrimFunc(tabsAndNewlines.Replace(raw), func(r rune) bool { return r <= ' ' || r == 0x7f })
+}
 
 // refDefault returns the default of a reference "${NAME:-default}", or "0"
 // for a reference with no default. "0" is a valid host and port, and it is
@@ -208,6 +216,10 @@ func stripAuthScheme(value string) string {
 //     and a non-secret word under a credential-like name
 //     ("AUTH_STRATEGY=client_credentials") is flagged.
 //  7. A long, random, token-shaped value is a secret, whatever its key.
+//
+// Known limit: a URL value is checked for user info only (step 4). A token in
+// its query or path is not found here, but it is found in the args and in the
+// URL of a remote server (see urlHasSecret).
 func looksLikePlaintextSecret(key, value string) bool {
 	if value == "" || wholeVar.MatchString(value) {
 		return false

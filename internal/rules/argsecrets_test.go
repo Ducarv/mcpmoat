@@ -1,7 +1,6 @@
 package rules
 
 import (
-	"encoding/json"
 	"fmt"
 	"reflect"
 	"strings"
@@ -18,13 +17,12 @@ const (
 	// entropy is above minEntropy at every length used here.
 	asBody = "Zq7Xw2Lm9Vb4Nc8Kd3Rt6Yh1Jg5Fs0PaE7uI2oB"
 
-	// testRandom32 has 32 distinct characters: 5 bits of entropy per byte.
-
 	asHost = "mcp.example.com"
 
 	// Fixed pseudo-random fakes for the credential-name routes. Each was picked
 	// from a seeded generator and checked: the hex and base62 values miss
-	// looksRandom, so only the new routes of tokenForName find them.
+	// looksRandom, so only the hex, UUID and long-random routes of tokenForName
+	// find them.
 	asUUID  = "550e8400-e29b-41d4-a716-446655440000"
 	asHex32 = "9fdd8712c201540b1cf6d97f119f1359"
 	asHex40 = "30ae9f8b4759af2599402d145b1f15b782e7bcd5"
@@ -103,6 +101,9 @@ var (
 	asPrefixed = []string{asStripe, asStripeRK, asSlack, asGHPat}
 )
 
+// oversizeBody is a token body longer than maxScanLen, so the check skips it.
+var oversizeBody = strings.Repeat(asBody, maxScanLen/len(asBody)+1)
+
 // argServer builds a stdio server with the given args.
 func argServer(args ...string) discover.Server {
 	return stdioServer("docker", args...)
@@ -158,7 +159,7 @@ func TestCheckArgSecretsArgs(t *testing.T) {
 		{"flag value is a URL with a trailing space", []string{"--url=https://h/mcp?api_key=" + asRand24 + " "}, true},
 
 		// Positive: hex and UUID values and long random values under a
-		// credential name (tokenForName routes 1, 4 and 5).
+		// credential name (the UUID, hex and long-random routes of tokenForName).
 		{"api-key flag with 32 hex", []string{"--api-key", asHex32}, true},
 		{"api-key equals with 40 hex", []string{"--api-key=" + asHex40}, true},
 		{"api-key flag with 64 upper-case hex", []string{"--api-key", asHex64}, true},
@@ -183,6 +184,8 @@ func TestCheckArgSecretsArgs(t *testing.T) {
 		{"headers flag", []string{"--HEADERS", "X-Api-Key: " + asRand24}, true},
 		{"short -H flag", []string{"-H", "X-Api-Key: " + asRand24}, true},
 		{"header flag with a literal default", []string{"--header", "Authorization: Bearer ${API_TOKEN:-" + asRand24 + "}"}, true},
+		{"short -H flag, value attached", []string{"-HAuthorization: Bearer " + asRand24}, true},
+		{"short -H flag, value attached, no space", []string{"-HX-Api-Key:" + asRand24}, true},
 		{"api-key with random base62 of 20", []string{"--api-key", asB20}, true},
 		{"api-key with random base62 of 21", []string{"--api-key", asB21}, true},
 		{"api-key with random base62 of 22", []string{"--api-key", asB22}, true},
@@ -196,6 +199,29 @@ func TestCheckArgSecretsArgs(t *testing.T) {
 		{"bare UUID arg", []string{asUUID}, false},
 		{"key-name made of words (separator rule)", []string{"--key-name", "my-prod-secret-store-v2"}, false},
 		{"limit: random 16 bytes under the entropy limit is not found", []string{"--api-key", asB16}, false},
+
+		// A switch name ("--no-password") takes no password, and "--pwd" is
+		// usually a directory.
+		{"no-password takes a database", []string{"--no-password", "mydatabase1"}, false},
+		{"prompt-password takes a name", []string{"--prompt-password", "production_database"}, false},
+		{"ask-password takes a name", []string{"--ask-password", "my-server-name"}, false},
+		{"pwd takes a directory", []string{"--pwd", "my-workspace"}, false},
+		{"switch name with equals", []string{"--no-password=mydatabase1"}, false},
+
+		// Header flags: a reference leaves no literal credential.
+		{"header flag with a cookie reference", []string{"--header", "Cookie: session=${SESSION}"}, false},
+		{"header flag with a scheme word and a reference", []string{"--header", "Authorization: Negotiate ${X}"}, false},
+		{"header flag with a plain mode", []string{"--header", "X-Auth-Mode: interactive"}, false},
+		{"headers flag with a JSON reference", []string{"--headers", `{"Authorization":"Bearer ${TOKEN}"}`}, false},
+
+		// Nesting deeper than maxRefPasses is not read.
+		{"limit: a default at depth 4 is not read", []string{"--api-key=${A:-${B:-${C:-${D:-" + asGH + "}}}}"}, false},
+		{"leftover reference is no password", []string{"--password", "${A:-${B:-${C:-${DB_PASSWORD_VAL}}}}"}, false},
+		{"a default at depth 2 is read", []string{"--api-key=${A:-${B:-" + asGH + "}}"}, true},
+
+		// A token under the cap is read, however long. One over it is skipped.
+		{"long token flag", []string{"--token=" + strings.Repeat(asBody, 60)}, true},
+		{"long token in a header flag", []string{"-H", "Authorization: Bearer " + strings.Repeat(asBody, 60)}, true},
 
 		// A password word must be the last word of the name, and the value must
 		// be 8 bytes or more and not a reference, a boolean or a number.
@@ -285,9 +311,9 @@ func TestCheckArgSecretsArgs(t *testing.T) {
 
 		// Oversize input is skipped.
 		{"oversize arg", []string{strings.Repeat("a", maxScanLen+1)}, false},
-		{"oversize token arg", []string{"gh" + "p_" + strings.Repeat(asBody, 60)}, false},
-		{"oversize flag value", []string{"--token", "gh" + "p_" + strings.Repeat(asBody, 60)}, false},
-		{"oversize flag with equals", []string{"--token=" + strings.Repeat(asBody, 60)}, false},
+		{"oversize token arg", []string{"gh" + "p_" + oversizeBody}, false},
+		{"oversize flag value", []string{"--token", "gh" + "p_" + oversizeBody}, false},
+		{"oversize flag with equals", []string{"--token=" + oversizeBody}, false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -387,7 +413,7 @@ func TestCheckArgSecretsURL(t *testing.T) {
 		{"fragment only", "https://h/mcp#" + asGH, false},
 		{"user without password", "https://user@h/mcp", false},
 		{"empty URL", "", false},
-		{"oversize URL", "https://h/mcp?token=" + strings.Repeat(asBody, 60), false},
+		{"oversize URL", "https://h/mcp?token=" + oversizeBody, false},
 		{"session query with a UUID", "https://h/mcp?session=" + asUUID, false},
 		{"hex32 path segment", "https://h/mcp/" + asHex32, false},
 		{"UUID path segment under a longer path", "https://h/mcp/v1/" + asUUID + "/sse", false},
@@ -398,6 +424,7 @@ func TestCheckArgSecretsURL(t *testing.T) {
 		{"uniform sha256 path segment", "https://h/dl/" + asUniSHA, false},
 		{"limit: password under 8 bytes is not found", "https://h/mcp?password=hunter2", false},
 		{"plain fragment", "https://h/docs#section-2", false},
+		{"long token under the cap", "https://h/mcp?token=" + strings.Repeat(asBody, 60), true},
 		{"fragment with a reference", "https://h/sse#access_token=${TOKEN}", false},
 		{"page query with a stray percent", "https://h/mcp?page=2%", false},
 	}
@@ -1203,7 +1230,14 @@ func FuzzCheckArgSecrets(f *testing.F) {
 	f.Add(strings.Repeat("a", maxScanLen+1), "--token", strings.Repeat("b", maxScanLen+1))
 
 	// The finding text is fixed, so an input that is a piece of it is no leak.
-	fixed := fmt.Sprintf("%v %+v %#v", secretFinding("srv", FieldArgs, ""), secretFinding("srv", FieldURL, ""), secretFinding("srv", FieldURL, ""))
+	// fixed holds both findings in every form that out below can hold.
+	var fixedForms []string
+	for _, field := range []string{FieldArgs, FieldURL} {
+		for _, out := range findingOutputs(f, secretFinding("srv", field, "")) {
+			fixedForms = append(fixedForms, out)
+		}
+	}
+	fixed := strings.Join(fixedForms, " ")
 
 	f.Fuzz(func(t *testing.T, arg1, arg2, rawURL string) {
 		stdio := argServer(arg1, arg2)
@@ -1224,11 +1258,11 @@ func FuzzCheckArgSecrets(f *testing.F) {
 				if want := secretFinding("srv", c.field, ""); !reflect.DeepEqual(got, want) {
 					t.Fatalf("finding = %+v, want %+v", got, want)
 				}
-				js, err := json.Marshal(got)
-				if err != nil {
-					t.Fatalf("json.Marshal() error = %v", err)
+				outs := make([]string, 0, 4)
+				for _, out := range findingOutputs(t, got) {
+					outs = append(outs, out)
 				}
-				out := fmt.Sprintf("%v %+v %#v %s", got, got, got, js)
+				out := strings.Join(outs, " ")
 				for _, in := range []string{arg1, arg2, rawURL} {
 					if len(in) >= 4 && !strings.Contains(fixed, in) && strings.Contains(out, in) {
 						t.Fatalf("finding holds the input %q", in)

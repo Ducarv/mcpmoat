@@ -103,30 +103,27 @@ func TestCheckConfig(t *testing.T) {
 
 	// A remote server with git-spec args and secret args: both checks are for
 	// stdio servers only, so it gives no finding.
-	remoteWithSpecArgs := remoteServer(discover.TransportHTTP, "https://mcp.example.com/mcp")
-	remoteWithSpecArgs.Command = "npx"
-	remoteWithSpecArgs.Args = discover.NewArgs([]string{"github:user/repo", "--api-key", testRandom32})
+	// remoteWithCommand builds a remote server that also has a command and args.
+	remoteWithCommand := func(command string, args ...string) discover.Server {
+		s := remoteServer(discover.TransportHTTP, "https://mcp.example.com/mcp")
+		s.Command = command
+		s.Args = discover.NewArgs(args)
+		return s
+	}
+	remoteWithSpecArgs := remoteWithCommand("npx", "github:user/repo", "--api-key", testRandom32)
 
 	// Remote servers with args of one kind each: the args checks are for stdio
 	// servers only, so these give no finding either.
-	remoteWithSecretArgs := remoteServer(discover.TransportHTTP, "https://mcp.example.com/mcp")
-	remoteWithSecretArgs.Command = "npx"
-	remoteWithSecretArgs.Args = discover.NewArgs([]string{"--api-key", testRandom32})
-	remoteWithGitHubArgs := remoteServer(discover.TransportHTTP, "https://mcp.example.com/mcp")
-	remoteWithGitHubArgs.Command = "npx"
-	remoteWithGitHubArgs.Args = discover.NewArgs([]string{"github:user/repo"})
-	remoteWithUVXArgs := remoteServer(discover.TransportHTTP, "https://mcp.example.com/mcp")
-	remoteWithUVXArgs.Command = "uvx"
-	remoteWithUVXArgs.Args = discover.NewArgs([]string{"--from", "git+https://github.com/u/r", "tool"})
+	remoteWithSecretArgs := remoteWithCommand("npx", "--api-key", testRandom32)
+	remoteWithGitHubArgs := remoteWithCommand("npx", "github:user/repo")
+	remoteWithUVXArgs := remoteWithCommand("uvx", "--from", "git+https://github.com/u/r", "tool")
 
 	// A stdio server with a secret URL field: the URL field is read only for
 	// remote servers, so it gives no finding.
 	stdioWithSecretURL := stdioServer("node", "server.js")
 	stdioWithSecretURL.URL = discover.NewURL("https://mcp.example.com/sse?token=" + testRandom32)
 
-	remoteWithArgs := remoteServer(discover.TransportHTTP, "https://mcp.example.com/mcp")
-	remoteWithArgs.Command = "npx"
-	remoteWithArgs.Args = discover.NewArgs([]string{"-y", "@scope/server@latest"})
+	remoteWithArgs := remoteWithCommand("npx", "-y", "@scope/server@latest")
 
 	stdioWithURL := stdioServer("node", "server.js")
 	stdioWithURL.URL = discover.NewURL("http://mcp.example.com/sse")
@@ -775,21 +772,26 @@ func TestCheckAutoInstall(t *testing.T) {
 	}
 }
 
-// assertFindingNoLeak fails the test when f, in any common output form,
-// holds one of secrets.
-func assertFindingNoLeak(t *testing.T, f Finding, secrets ...string) {
+// findingOutputs renders f in every common output form, keyed by the form.
+func findingOutputs(t testing.TB, f Finding) map[string]string {
 	t.Helper()
 	js, err := json.Marshal(f)
 	if err != nil {
 		t.Fatalf("json.Marshal(%s) error = %v", f.RuleID, err)
 	}
-	outputs := map[string]string{
+	return map[string]string{
 		"%v":   fmt.Sprintf("%v", f),
 		"%+v":  fmt.Sprintf("%+v", f),
 		"%#v":  fmt.Sprintf("%#v", f),
 		"json": string(js),
 	}
-	for form, out := range outputs {
+}
+
+// assertFindingNoLeak fails the test when f, in any common output form,
+// holds one of secrets.
+func assertFindingNoLeak(t *testing.T, f Finding, secrets ...string) {
+	t.Helper()
+	for form, out := range findingOutputs(t, f) {
 		discovertest.AssertNoLeak(t, f.Server+"/"+f.RuleID+" "+form, out, secrets...)
 	}
 }

@@ -59,6 +59,8 @@ should_not_match:
     note: Header flag with a variable reference, the safe form.
   - text: docker login --password-stdin registry.example.com
     note: The name does not end in a password word. The flag takes no value, and the next arg is a registry host.
+  - text: psql --no-password mydatabase1
+    note: A name that starts with "no" is a switch, so the next arg is a database name, not a password.
   - text: npx some-server --max-tokens 4096
     note: The flag name has "token" in it but it is a count. The value is a number.
   - text: npx some-server --tokenizer cl100k_base

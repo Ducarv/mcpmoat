@@ -152,15 +152,16 @@ func packageAt(command string, args []string) (PackageSpec, int, bool) {
 //     not a flag.
 //   - uvx: the value of --from, else the first argument that is not a flag.
 //   - pipx: the same, for "pipx run" and --spec.
-//   - docker and unknown commands: ok is false. A docker image is no remote
-//     spec.
+//   - docker and unknown commands: ok is false. A docker image is not a
+//     non-registry spec.
 //
 // ok is false when the parse is doubtful (second override flag, missing value,
 // stop flag, unknown runner) and for a uvx or pipx ".py" script path. A spec
-// that starts with "git+", "http://" or "https://" (any case) is a remote URL
-// spec, not a script, so the ".py" test does not apply to it (a repository can
-// be named "discord.py"). It is also false when spec is empty, longer than
-// maxSpecLen, or holds white space or a control character. rawSpecAt does not validate more than that.
+// that starts with "git+", "http://" or "https://" (any case) is a non-registry
+// URL spec, not a script, so the ".py" test does not apply to it (a repository
+// can be named "discord.py"). It is also false when spec is empty, longer than
+// maxSpecLen, or holds white space or a control character. rawSpecAt does not
+// validate more than that.
 //
 // The spec is untrusted config text and can hold credentials, for example
 // "git+https://user:token@host/repo". The caller must never copy it into a
@@ -204,12 +205,6 @@ func runnerFlags(r Runner, args []string) (flags flagTable, from int, ok bool) {
 	default:
 		return flagTable{}, 0, false
 	}
-}
-
-// isNonRegistryURLSpec reports whether spec starts with "git+", "http://" or
-// "https://", compared without regard to case.
-func isNonRegistryURLSpec(spec string) bool {
-	return hasPrefixFold(spec, "git+") || hasPrefixFold(spec, "http://") || hasPrefixFold(spec, "https://")
 }
 
 // parseRunnerArgs does the parse for packageAt. It does not run validName,
