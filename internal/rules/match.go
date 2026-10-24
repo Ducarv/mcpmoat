@@ -41,13 +41,14 @@ import (
 // not read in full (see matchWindowCut).
 //
 // A schema target is many short texts (see matchSchema). An any_regex,
-// all_regex or keywords rule reads at most maxSchemaMatchBytes (128 KiB) of
-// string bytes and at most maxSchemaMatchStrings strings of one schema, each
-// string cut at MaxMatchInputBytes. When the JSON cannot be read in full, the
-// rule also reads the raw text once, in the window of one description. So one
-// schema costs about four times the bound of one description, plus one
-// description. The match_window heuristic fires on a schema that these caps
-// cut.
+// all_regex or keywords rule reads one schema in three passes: its strings
+// (at most maxSchemaMatchBytes, 128 KiB, and maxSchemaMatchStrings strings),
+// the seams of neighbour strings (at most maxSeamBytes, 128 KiB), and, when
+// the JSON cannot be read in full, the raw text once, in the window of one
+// description. So one schema costs about nine times the bound of one
+// description: about twice the bound before the seam pass. The match_window
+// heuristic fires on a schema whose strings these caps cut, but not when the
+// seam budget is used up. The package doc gives the details.
 const (
 	// MaxPatternBytes is the largest regex or keyword, in bytes, before
 	// compilation.
@@ -93,8 +94,8 @@ const NoOffset = -1
 type Hit struct {
 	// Offset is a byte offset in the raw text, or NoOffset for regex and
 	// keyword hits: they run on the normalized text, so no raw offset is
-	// known. Every hit of a schema target has NoOffset too, because it comes
-	// from a decoded string and not from the raw JSON text.
+	// known. Every hit of a schema target has NoOffset too, also a hit of a
+	// heuristic or of the raw JSON text (see matchSchema).
 	Offset int
 	// Detail is short printable ASCII that mcpmoat builds. It never holds
 	// text from the input.
@@ -130,8 +131,9 @@ func (m Match) Compile() (*Matcher, error) {
 // error is a *FieldError that names the field.
 //
 // The target decides how Matcher.Match reads its text. For TargetSchema, the
-// text is a JSON schema, and Match reads its strings one at a time (see
-// Matcher.Match). For any other target, Match reads the text as one text.
+// text is a JSON schema, and Match reads each of its strings, and for some
+// kinds also the seams of neighbour strings (see Matcher.Match). For any
+// other target, Match reads the text as one text.
 // CompileFor does not check t: Validate checks the target of a rule.
 func (m Match) CompileFor(t Target) (*Matcher, error) {
 	mt, err := m.compile()
@@ -201,18 +203,26 @@ func compileRegexMatcher(kind string, list []string, build func(entry, s string)
 // in, because a form has no byte offsets in the raw text.
 //
 // For the schema target, text is a JSON schema, and Match runs the steps
-// above on each decoded object key and string value alone (see matchSchema).
-// Every hit then has the offset NoOffset and the detail "schema string N:
-// ...". The schema mode depends on the kind:
+// above on each decoded object key and string value (see matchSchema).
+// Every hit then has the offset NoOffset, and its detail starts with a label
+// such as "schema string N" (the package doc lists the labels). The schema
+// mode depends on the kind:
 //
-//   - a heuristic reads every string, with no cap (schemaAll). So
-//     invisible_unicode, base64_blob and tag_or_bidi_override flag a decoded
-//     string, also when the JSON text writes its runes as \u escapes;
+//   - a heuristic reads every string, with no cap and no seams (schemaAll).
+//     So invisible_unicode, base64_blob and tag_or_bidi_override flag a
+//     decoded string, also when the JSON text writes its runes as \u escapes;
 //   - the match_window heuristic fires once when the regex and keyword rules
-//     cannot read the whole schema: the JSON is broken, the schema caps cut
-//     it, or one string is longer than the match window (schemaWindow);
+//     cannot read all the strings of the schema: the JSON is broken, the
+//     schema caps cut the strings, or one string is longer than the match
+//     window (schemaWindow). It does not fire when the seam budget is used
+//     up;
 //   - any_regex, all_regex and keywords read the strings until the schema
-//     caps stop them (schemaBudget).
+//     caps stop them. When no string matched, they also read each seam of
+//     two neighbour strings, until the seam budget stops them (schemaBudget).
+//     Only this mode has the seam pass.
+//
+// When the JSON cannot be read in full, every mode except schemaWindow also
+// reads the raw text once.
 func (m *Matcher) Match(text string) []Hit {
 	if m == nil {
 		return nil
@@ -236,7 +246,8 @@ func (m *Matcher) schemaMode() schemaMode {
 }
 
 // matchText returns the hits of m in one text, as Match describes for a text
-// that is not a schema. For a schema, matchSchema calls it on each string.
+// that is not a schema. For a schema, matchSchema calls it on each string,
+// and in some cases on seams and on the raw text (see matchSchema).
 func (m *Matcher) matchText(text string) []Hit {
 	switch m.kind {
 	case kindHeuristic:

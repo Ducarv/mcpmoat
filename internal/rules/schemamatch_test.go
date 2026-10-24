@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"reflect"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -91,6 +92,35 @@ func textLens(texts []string) []int {
 	return lens
 }
 
+// splitSeams splits the texts that a recorder got into two lists: the seam
+// texts of matchSeams, and all the other texts (the schema strings and the
+// raw text). A seam text holds seamSep. No test schema has a string that
+// holds seamSep, so only a seam text does.
+func splitSeams(texts []string) (others, seams []string) {
+	for _, s := range texts {
+		if strings.Contains(s, seamSep) {
+			seams = append(seams, s)
+		} else {
+			others = append(others, s)
+		}
+	}
+	return others, seams
+}
+
+// seamsThatFit returns how many seams of strs fit in maxSeamBytes. It is for
+// ASCII strs only. A seam takes at most seamSideBytes of each of its two
+// strings, plus seamSep.
+func seamsThatFit(strs []string) int {
+	total := 0
+	for i := 1; i < len(strs); i++ {
+		total += min(len(strs[i-1]), seamSideBytes) + len(seamSep) + min(len(strs[i]), seamSideBytes)
+		if total > maxSeamBytes {
+			return i - 1
+		}
+	}
+	return len(strs) - 1
+}
+
 func TestMatchSchemaStringCap(t *testing.T) {
 	t.Parallel()
 	// The caps of schemaFit are the ones that the window detail names.
@@ -100,20 +130,29 @@ func TestMatchSchemaStringCap(t *testing.T) {
 	atCap := mustJSON(t, distinctStrings(maxSchemaMatchStrings))
 	overCap := mustJSON(t, distinctStrings(maxSchemaMatchStrings+1))
 
+	// The seams of the 4096 short strings ("s0", "s1", ...) are 36 to 42
+	// bytes long. maxSeamBytes stops the seam pass before the last of the
+	// 4095 seams.
+	seamsAtCap := seamsThatFit(distinctStrings(maxSchemaMatchStrings))
+	if seamsAtCap >= maxSchemaMatchStrings-1 {
+		t.Fatalf("precondition: all %d seams fit in maxSeamBytes, want a cut", seamsAtCap)
+	}
+
 	tests := []struct {
-		name      string
-		raw       string
-		mode      schemaMode
-		wantCalls int
-		wantHits  []Hit
+		name        string
+		raw         string
+		mode        schemaMode
+		wantStrings int // the calls on one schema string
+		wantSeams   int // the calls on one seam text
+		wantHits    []Hit
 	}{
-		{name: "budget reads 4096 strings", raw: atCap, mode: schemaBudget, wantCalls: 4096},
-		{name: "budget stops after 4096 of 4097 strings", raw: overCap, mode: schemaBudget, wantCalls: 4096},
-		{name: "all reads 4097 strings", raw: overCap, mode: schemaAll, wantCalls: 4097},
-		{name: "window reads 4096 strings and has no hit", raw: atCap, mode: schemaWindow, wantCalls: 4096},
+		{name: "budget reads 4096 strings", raw: atCap, mode: schemaBudget, wantStrings: 4096, wantSeams: seamsAtCap},
+		{name: "budget stops after 4096 of 4097 strings", raw: overCap, mode: schemaBudget, wantStrings: 4096, wantSeams: seamsAtCap},
+		{name: "all reads 4097 strings", raw: overCap, mode: schemaAll, wantStrings: 4097},
+		{name: "window reads 4096 strings and has no hit", raw: atCap, mode: schemaWindow, wantStrings: 4096},
 		{
 			name: "window flags 4097 strings", raw: overCap, mode: schemaWindow,
-			wantCalls: 0, wantHits: []Hit{{Offset: NoOffset, Detail: windowCutDetail}},
+			wantStrings: 0, wantHits: []Hit{{Offset: NoOffset, Detail: windowCutDetail}},
 		},
 	}
 	for _, tt := range tests {
@@ -124,13 +163,28 @@ func TestMatchSchemaStringCap(t *testing.T) {
 			if !reflect.DeepEqual(got, tt.wantHits) {
 				t.Errorf("matchSchema() = %v, want %v", got, tt.wantHits)
 			}
-			if len(r.texts) != tt.wantCalls {
-				t.Fatalf("match called %d times, want %d", len(r.texts), tt.wantCalls)
+			strs, seams := splitSeams(r.texts)
+			if len(strs) != tt.wantStrings {
+				t.Fatalf("match called on %d strings, want %d", len(strs), tt.wantStrings)
 			}
 			// The strings are read in document order, from the first one.
-			if tt.wantCalls > 0 {
-				if last := r.texts[tt.wantCalls-1]; last != fmt.Sprintf("s%d", tt.wantCalls-1) {
-					t.Errorf("last text = %q, want %q", last, fmt.Sprintf("s%d", tt.wantCalls-1))
+			if tt.wantStrings > 0 {
+				if last := strs[tt.wantStrings-1]; last != fmt.Sprintf("s%d", tt.wantStrings-1) {
+					t.Errorf("last text = %q, want %q", last, fmt.Sprintf("s%d", tt.wantStrings-1))
+				}
+			}
+			if len(seams) != tt.wantSeams {
+				t.Fatalf("match called on %d seams, want %d", len(seams), tt.wantSeams)
+			}
+			// The seams are read in document order too: seam N joins the
+			// strings "s(N-1)" and "sN".
+			if tt.wantSeams > 0 {
+				if want := "s0" + seamSep + "s1"; seams[0] != want {
+					t.Errorf("first seam = %q, want %q", seams[0], want)
+				}
+				last := seams[tt.wantSeams-1]
+				if want := fmt.Sprintf("s%d", tt.wantSeams-1) + seamSep + fmt.Sprintf("s%d", tt.wantSeams); last != want {
+					t.Errorf("last seam = %q, want %q", last, want)
 				}
 			}
 		})
@@ -157,23 +211,46 @@ func TestMatchSchemaByteCap(t *testing.T) {
 		return mustJSON(t, strs)
 	}
 
+	// A seam of two long strings is 256 + 32 + 256 = 544 bytes. A seam with
+	// the 1-byte string is 256 + 32 + 1 = 289 bytes.
+	const seam = 2*seamSideBytes + len(seamSep)
+	const shortSeam = seamSideBytes + len(seamSep) + 1
+
 	tests := []struct {
-		name     string
-		raw      string
-		mode     schemaMode
-		wantLens []int // lengths of the texts that match gets, in order
-		wantHits []Hit
+		name         string
+		raw          string
+		mode         schemaMode
+		wantLens     []int // lengths of the string texts that match gets, in order
+		wantSeamLens []int // lengths of the seam texts that match gets, in order
+		wantHits     []Hit
 	}{
-		{name: "four 40 KiB strings fit", raw: schema(big, big, big, big), mode: schemaBudget, wantLens: []int{big, big, big, big}},
-		{name: "fifth 40 KiB string is cut", raw: schema(big, big, big, big, big), mode: schemaBudget, wantLens: []int{big, big, big, big}},
-		{name: "four window strings fit", raw: schema(window, window, window, window), mode: schemaBudget, wantLens: []int{window, window, window, window}},
-		{name: "one byte over the cap is cut", raw: schema(window, window, window, window, 1), mode: schemaBudget, wantLens: []int{window, window, window, window}},
-		{name: "one byte under the cap fits", raw: schema(window, window, window, window-1, 1), mode: schemaBudget, wantLens: []int{window, window, window, window - 1, 1}},
+		{
+			name: "four 40 KiB strings fit", raw: schema(big, big, big, big), mode: schemaBudget,
+			wantLens: []int{big, big, big, big}, wantSeamLens: []int{seam, seam, seam},
+		},
+		{
+			name: "fifth 40 KiB string is cut", raw: schema(big, big, big, big, big), mode: schemaBudget,
+			wantLens: []int{big, big, big, big}, wantSeamLens: []int{seam, seam, seam},
+		},
+		{
+			name: "four window strings fit", raw: schema(window, window, window, window), mode: schemaBudget,
+			wantLens: []int{window, window, window, window}, wantSeamLens: []int{seam, seam, seam},
+		},
+		{
+			// The seams read only the strings that fit, so no seam has the
+			// cut fifth string.
+			name: "one byte over the cap is cut", raw: schema(window, window, window, window, 1), mode: schemaBudget,
+			wantLens: []int{window, window, window, window}, wantSeamLens: []int{seam, seam, seam},
+		},
+		{
+			name: "one byte under the cap fits", raw: schema(window, window, window, window-1, 1), mode: schemaBudget,
+			wantLens: []int{window, window, window, window - 1, 1}, wantSeamLens: []int{seam, seam, seam, shortSeam},
+		},
 		{name: "all reads the cut string", raw: schema(big, big, big, big, big), mode: schemaAll, wantLens: []int{big, big, big, big, big}},
 		{name: "window reads four 40 KiB strings", raw: schema(big, big, big, big), mode: schemaWindow, wantLens: []int{big, big, big, big}},
 		{
 			name: "window flags the fifth 40 KiB string", raw: schema(big, big, big, big, big), mode: schemaWindow,
-			wantLens: []int{}, wantHits: []Hit{{Offset: NoOffset, Detail: windowCutDetail}},
+			wantHits: []Hit{{Offset: NoOffset, Detail: windowCutDetail}},
 		},
 	}
 	for _, tt := range tests {
@@ -184,8 +261,13 @@ func TestMatchSchemaByteCap(t *testing.T) {
 			if !reflect.DeepEqual(got, tt.wantHits) {
 				t.Errorf("matchSchema() = %v, want %v", got, tt.wantHits)
 			}
-			if lens := textLens(r.texts); !reflect.DeepEqual(lens, tt.wantLens) {
-				t.Errorf("lengths of the matched texts = %v, want %v", lens, tt.wantLens)
+			// slices.Equal treats a nil slice and an empty slice as equal.
+			strs, seams := splitSeams(r.texts)
+			if lens := textLens(strs); !slices.Equal(lens, tt.wantLens) {
+				t.Errorf("lengths of the matched strings = %v, want %v", lens, tt.wantLens)
+			}
+			if lens := textLens(seams); !slices.Equal(lens, tt.wantSeamLens) {
+				t.Errorf("lengths of the matched seams = %v, want %v", lens, tt.wantSeamLens)
 			}
 		})
 	}
@@ -197,7 +279,11 @@ func TestMatchSchemaMalformed(t *testing.T) {
 		name      string
 		raw       string
 		wantTexts []string // the texts that match gets, in order
-		want      []Hit
+		// budgetTexts are the texts in the schemaBudget mode, when they differ
+		// from wantTexts. With two strings and no string hit, that mode also
+		// reads the seam of the two strings, before the raw text.
+		budgetTexts []string
+		want        []Hit
 	}{
 		{
 			name:      "complete JSON does not read the raw text",
@@ -223,16 +309,18 @@ func TestMatchSchemaMalformed(t *testing.T) {
 			want:      []Hit{{Offset: NoOffset, Detail: "schema raw text: fake"}},
 		},
 		{
-			name:      "trailing text",
-			raw:       `{"a":"x"} evil`,
-			wantTexts: []string{"a", "x", `{"a":"x"} evil`},
-			want:      []Hit{{Offset: NoOffset, Detail: "schema raw text: fake"}},
+			name:        "trailing text",
+			raw:         `{"a":"x"} evil`,
+			wantTexts:   []string{"a", "x", `{"a":"x"} evil`},
+			budgetTexts: []string{"a", "x", "a" + seamSep + "x", `{"a":"x"} evil`},
+			want:        []Hit{{Offset: NoOffset, Detail: "schema raw text: fake"}},
 		},
 		{
-			name:      "trailing second value",
-			raw:       `{"a":"x"}{"b":"evil"}`,
-			wantTexts: []string{"a", "x", `{"a":"x"}{"b":"evil"}`},
-			want:      []Hit{{Offset: NoOffset, Detail: "schema raw text: fake"}},
+			name:        "trailing second value",
+			raw:         `{"a":"x"}{"b":"evil"}`,
+			wantTexts:   []string{"a", "x", `{"a":"x"}{"b":"evil"}`},
+			budgetTexts: []string{"a", "x", "a" + seamSep + "x", `{"a":"x"}{"b":"evil"}`},
+			want:        []Hit{{Offset: NoOffset, Detail: "schema raw text: fake"}},
 		},
 		{
 			name:      "not JSON",
@@ -255,8 +343,12 @@ func TestMatchSchemaMalformed(t *testing.T) {
 				if !reflect.DeepEqual(got, tt.want) {
 					t.Errorf("matchSchema(%q) = %v, want %v", tt.raw, got, tt.want)
 				}
-				if !reflect.DeepEqual(r.texts, tt.wantTexts) {
-					t.Errorf("matched texts = %q, want %q", r.texts, tt.wantTexts)
+				wantTexts := tt.wantTexts
+				if mode == schemaBudget && tt.budgetTexts != nil {
+					wantTexts = tt.budgetTexts
+				}
+				if !reflect.DeepEqual(r.texts, wantTexts) {
+					t.Errorf("matched texts = %q, want %q", r.texts, wantTexts)
 				}
 			})
 		}
@@ -279,19 +371,65 @@ func TestMatchSchemaRealMatchers(t *testing.T) {
 			want:  []string{"schema string 1: any_regex[0] matched", "schema string 2: any_regex[1] matched"},
 		},
 		{
-			name:  "all_regex needs every regex in one string",
-			match: Match{AllRegex: []string{"alpha", "beta"}},
-			raw:   `{"alpha":"beta"}`,
-		},
-		{
 			name:  "all_regex matches in one string",
 			match: Match{AllRegex: []string{"alpha", "beta"}},
 			raw:   `{"x":"alpha beta"}`,
 			want:  []string{"schema string 2: all_regex[0] matched", "schema string 2: all_regex[1] matched"},
 		},
+		// When no string matches alone, the seam of two neighbour strings is
+		// matched: the end of one string, seamSep, the start of the next.
 		{
-			name:  "a regex does not span two strings",
+			name:  "all_regex matches across two neighbour strings",
+			match: Match{AllRegex: []string{"alpha", "beta"}},
+			raw:   `{"alpha":"beta"}`,
+			want:  []string{"schema strings 1 and 2: all_regex[0] matched", "schema strings 1 and 2: all_regex[1] matched"},
+		},
+		{
+			name:  "a regex spans two neighbour strings",
 			match: Match{AnyRegex: []string{`alpha\W+beta`}},
+			raw:   `["alpha","beta"]`,
+			want:  []string{"schema strings 1 and 2: any_regex[0] matched"},
+		},
+		{
+			name:  "a regex does not span a string between",
+			match: Match{AnyRegex: []string{`alpha\W+beta`}},
+			raw:   `["alpha","x","beta"]`,
+		},
+		{
+			// The list is alpha, x, beta: the key "x" sits between.
+			name:  "all_regex does not match across a key between",
+			match: Match{AllRegex: []string{"alpha", "beta"}},
+			raw:   `{"alpha":1,"x":"beta"}`,
+		},
+		{
+			// A number is not in the list, so alpha and beta are neighbours.
+			name:  "all_regex matches across a number",
+			match: Match{AllRegex: []string{"alpha", "beta"}},
+			raw:   `{"alpha":1,"beta":2}`,
+			want:  []string{"schema strings 1 and 2: all_regex[0] matched", "schema strings 1 and 2: all_regex[1] matched"},
+		},
+		{
+			// seamSep is 32 newlines, so a gap of at most 31 runes cannot
+			// cross a seam.
+			name:  "a 31-rune gap does not cross a seam",
+			match: Match{AnyRegex: []string{`alpha[\s\S]{0,31}beta`}},
+			raw:   `["alpha","beta"]`,
+		},
+		{
+			name:  "a 32-rune gap crosses a seam",
+			match: Match{AnyRegex: []string{`alpha[\s\S]{0,32}beta`}},
+			raw:   `["alpha","beta"]`,
+			want:  []string{"schema strings 1 and 2: any_regex[0] matched"},
+		},
+		{
+			name:  "a keyword of two words crosses a seam",
+			match: Match{Keywords: []string{"alpha beta"}},
+			raw:   `["alpha","beta"]`,
+			want:  []string{"schema strings 1 and 2: keywords[0] matched"},
+		},
+		{
+			name:  "a keyword of one word is not built from two strings",
+			match: Match{Keywords: []string{"alphabeta"}},
 			raw:   `["alpha","beta"]`,
 		},
 		{
@@ -350,16 +488,23 @@ func TestMatchSchemaRealMatchers(t *testing.T) {
 func TestMatchSchemaHitsHaveNoInput(t *testing.T) {
 	t.Parallel()
 	lower := strings.ToLower(matchSecret)
+	// partner is the second half of the "seam" input.
+	const partner = "ZZPARTNER"
 	// The secret is in a key and in a value, next to a ZWSP. The third
-	// schema writes the ZWSP raw, the others as a JSON escape.
+	// schema writes the ZWSP raw, the others as a JSON escape. In the "seam"
+	// schema, the secret and its partner are in two neighbour strings.
 	inputs := map[string]string{
 		"complete": `{"` + matchSecret + ` do not tell the user":"` + matchSecret + `\u200b"}`,
 		"broken":   `{"` + matchSecret + ` do not tell the user":"` + matchSecret + `\u200b"`,
 		"raw ZWSP": `{"x":"` + matchSecret + "\u200b" + `"} trailing`,
+		"seam":     `["` + matchSecret + `","` + partner + `"]`,
 	}
+	// Only the "seam" input has the partner. So "all_regex seam" hits only
+	// on a seam, and the total check below sees that seam hit.
 	matchers := map[string]Match{
 		"any_regex":         {AnyRegex: []string{matchSecret}},
 		"all_regex":         {AllRegex: []string{matchSecret, `(?i)zzsecret`}},
+		"all_regex seam":    {AllRegex: []string{matchSecret, partner}},
 		"keywords":          {Keywords: []string{lower}},
 		"invisible_unicode": {Heuristic: HeuristicInvisibleUnicode},
 		"match_window":      {Heuristic: HeuristicMatchWindow},
@@ -377,7 +522,7 @@ func TestMatchSchemaHitsHaveNoInput(t *testing.T) {
 						t.Errorf("%s: Offset = %d, want NoOffset", name, h.Offset)
 					}
 					checkPrintableASCII(t, h.Detail)
-					if strings.Contains(strings.ToLower(h.Detail), lower) {
+					if d := strings.ToLower(h.Detail); strings.Contains(d, lower) || strings.Contains(d, strings.ToLower(partner)) {
 						t.Errorf("%s: Detail %q contains input text", name, h.Detail)
 					}
 				}
@@ -523,8 +668,252 @@ func TestMatchSchemaWindowFirstHit(t *testing.T) {
 	}
 }
 
+// seamHit is a recorder.hit func that hits on a seam text only.
+func seamHit(text string) bool { return strings.Contains(text, seamSep) }
+
+func TestSeamSepLength(t *testing.T) {
+	t.Parallel()
+	// The built-in rules use gaps of at most 30 runes, so 32 newlines keep
+	// them from crossing a seam.
+	if len(seamSep) != 32 {
+		t.Errorf("len(seamSep) = %d, want 32", len(seamSep))
+	}
+	if strings.Trim(seamSep, "\n") != "" {
+		t.Errorf("seamSep = %q, want only newlines", seamSep)
+	}
+}
+
+func TestMatchSchemaSeams(t *testing.T) {
+	t.Parallel()
+	// The tail of the first string is 256 "b" and the head of the second
+	// string is 256 "c". So the seam is 256 + 32 + 256 = 544 bytes.
+	longA := strings.Repeat("a", 100) + strings.Repeat("b", seamSideBytes)
+	longB := strings.Repeat("c", seamSideBytes) + strings.Repeat("d", 100)
+	longSeam := strings.Repeat("b", seamSideBytes) + seamSep + strings.Repeat("c", seamSideBytes)
+	if len(longSeam) != 544 {
+		t.Fatalf("precondition: len(longSeam) = %d, want 544", len(longSeam))
+	}
+	// window strings fill the string budget, so a fifth string is cut.
+	window := strings.Repeat("w", MaxMatchInputBytes)
+
+	tests := []struct {
+		name      string
+		raw       string
+		mode      schemaMode
+		hit       func(string) bool
+		wantSeams []string // the seam texts that match gets, in order
+		want      []Hit
+	}{
+		{
+			name:      "short strings are joined whole",
+			raw:       `["a","b","c"]`,
+			mode:      schemaBudget,
+			wantSeams: []string{"a" + seamSep + "b", "b" + seamSep + "c"},
+		},
+		{
+			name:      "long strings give their tail and their head",
+			raw:       mustJSON(t, []string{longA, longB}),
+			mode:      schemaBudget,
+			wantSeams: []string{longSeam},
+		},
+		{
+			name:      "a seam hit gets the numbers of its two strings",
+			raw:       `["a","b"]`,
+			mode:      schemaBudget,
+			hit:       seamHit,
+			wantSeams: []string{"a" + seamSep + "b"},
+			want:      []Hit{{Offset: NoOffset, Detail: "schema strings 1 and 2: fake"}},
+		},
+		{
+			// Seams c|d and d|e also hit, but the pass stops at b|c.
+			name:      "stops at the first seam hit",
+			raw:       `["a","b","c","d","e"]`,
+			mode:      schemaBudget,
+			hit:       func(s string) bool { return seamHit(s) && !strings.HasPrefix(s, "a") },
+			wantSeams: []string{"a" + seamSep + "b", "b" + seamSep + "c"},
+			want:      []Hit{{Offset: NoOffset, Detail: "schema strings 2 and 3: fake"}},
+		},
+		{
+			// The list is "a", "b": the second "a" is a duplicate.
+			name:      "numbers follow the list without duplicates",
+			raw:       `["a","a","b"]`,
+			mode:      schemaBudget,
+			hit:       seamHit,
+			wantSeams: []string{"a" + seamSep + "b"},
+			want:      []Hit{{Offset: NoOffset, Detail: "schema strings 1 and 2: fake"}},
+		},
+		{
+			name: "no seam when a string matched",
+			raw:  `["a","evil","c"]`,
+			mode: schemaBudget,
+			hit:  holds("evil"),
+			want: []Hit{{Offset: NoOffset, Detail: "schema string 2: fake"}},
+		},
+		{
+			name: "no seam in the all mode",
+			raw:  `["a","b"]`,
+			mode: schemaAll,
+			hit:  seamHit,
+		},
+		{
+			name: "no seam in the window mode",
+			raw:  `["a","b"]`,
+			mode: schemaWindow,
+			hit:  seamHit,
+		},
+		{
+			// The decode is not complete, so the raw text is matched after
+			// the seams. The raw text holds "[", the strings do not.
+			name:      "a seam hit and a raw text hit are both kept",
+			raw:       `["a","b"`,
+			mode:      schemaBudget,
+			hit:       func(s string) bool { return seamHit(s) || strings.Contains(s, "[") },
+			wantSeams: []string{"a" + seamSep + "b"},
+			want: []Hit{
+				{Offset: NoOffset, Detail: "schema strings 1 and 2: fake"},
+				{Offset: NoOffset, Detail: "schema raw text: fake"},
+			},
+		},
+		{
+			// The fifth string "e" does not fit the string budget. So no
+			// seam reads it, and no seam is cut by it.
+			name: "seams read only the strings that fit",
+			raw:  mustJSON(t, []string{window, window + "x", window + "y", window + "z", "e"}),
+			mode: schemaBudget,
+			hit:  func(s string) bool { return seamHit(s) && strings.HasSuffix(s, "e") },
+			wantSeams: []string{
+				strings.Repeat("w", seamSideBytes) + seamSep + strings.Repeat("w", seamSideBytes),
+				strings.Repeat("w", seamSideBytes-1) + "x" + seamSep + strings.Repeat("w", seamSideBytes),
+				strings.Repeat("w", seamSideBytes-1) + "y" + seamSep + strings.Repeat("w", seamSideBytes),
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			r := &recorder{hit: tt.hit}
+			got := matchSchema(tt.raw, tt.mode, r.match)
+			if !reflect.DeepEqual(got, tt.want) {
+				t.Errorf("matchSchema() = %v, want %v", got, tt.want)
+			}
+			if _, seams := splitSeams(r.texts); !reflect.DeepEqual(seams, tt.wantSeams) {
+				t.Errorf("seam texts = %.80q, want %.80q", seams, tt.wantSeams)
+			}
+		})
+	}
+}
+
+// The seam texts of one schema share the budget maxSeamBytes. When the next
+// seam does not fit, the seam pass stops and reports nothing.
+func TestMatchSchemaSeamBudget(t *testing.T) {
+	t.Parallel()
+	// 256 strings of 512 bytes fill the string budget exactly. Each string
+	// is longer than seamSideBytes, so each seam is 256 + 32 + 256 = 544
+	// bytes. 240 seams fit in 128 KiB, of the 255 seams of the schema.
+	const strLen = 512
+	const seamLen = 2*seamSideBytes + len(seamSep)
+	const wantSeams = maxSeamBytes / seamLen
+	strs := make([]string, maxSchemaMatchBytes/strLen)
+	for i := range strs {
+		strs[i] = fmt.Sprintf("%03d", i) + strings.Repeat("x", strLen-3)
+	}
+	if wantSeams >= len(strs)-1 {
+		t.Fatalf("precondition: all %d seams fit, want a cut", len(strs)-1)
+	}
+
+	// The fake hits on a seam with the last string, but the budget stops the
+	// pass before that seam.
+	last := strs[len(strs)-1]
+	r := &recorder{hit: func(s string) bool { return seamHit(s) && strings.HasSuffix(s, last[:seamSideBytes]) }}
+	if got := matchSchema(mustJSON(t, strs), schemaBudget, r.match); got != nil {
+		t.Errorf("matchSchema() = %v, want nil", got)
+	}
+	others, seams := splitSeams(r.texts)
+	if len(others) != len(strs) {
+		t.Errorf("match called on %d strings, want %d", len(others), len(strs))
+	}
+	if len(seams) != wantSeams {
+		t.Errorf("match called on %d seams, want maxSeamBytes / %d = %d", len(seams), seamLen, wantSeams)
+	}
+	for i, s := range seams {
+		if len(s) != seamLen {
+			t.Errorf("seam %d has %d bytes, want %d", i, len(s), seamLen)
+		}
+	}
+}
+
+// The hits of a seam and of the raw text share the cap of MaxHits hits and
+// one summary hit.
+func TestMatchSchemaSeamHitCap(t *testing.T) {
+	t.Parallel()
+	// The seam gives 10 hits and the raw text 10 hits. 16 are kept: 10 seam
+	// hits and 6 raw text hits. The other 4 go in the summary.
+	if MaxHits != 16 {
+		t.Fatalf("precondition: MaxHits = %d, want 16", MaxHits)
+	}
+	r := &recorder{
+		hit:     func(s string) bool { return seamHit(s) || strings.Contains(s, "[") },
+		perCall: 10,
+	}
+	got := matchSchema(`["a","b"`, schemaBudget, r.match)
+	var want []Hit
+	for range 10 {
+		want = append(want, Hit{Offset: NoOffset, Detail: "schema strings 1 and 2: fake"})
+	}
+	for range 6 {
+		want = append(want, Hit{Offset: NoOffset, Detail: "schema raw text: fake"})
+	}
+	want = append(want, Hit{Offset: NoOffset, Detail: "and 4 more schema hits"})
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("matchSchema() = %v, want %v", got, want)
+	}
+}
+
+func TestLastAtRune(t *testing.T) {
+	t.Parallel()
+	// "ab" + e acute (2 bytes) + euro sign (3 bytes): 7 bytes in total.
+	const mixed = "ab\u00e9\u20ac"
+	invalid := "x" + strings.Repeat("\x80", 10)
+
+	tests := []struct {
+		name string
+		s    string
+		n    int
+		want string
+	}{
+		{name: "n equals len", s: "abc", n: 3, want: "abc"},
+		{name: "n over len", s: "abc", n: 10, want: "abc"},
+		{name: "n zero", s: "abc", n: 0, want: ""},
+		{name: "n negative", s: "abc", n: -1, want: ""},
+		{name: "empty string", s: "", n: 0, want: ""},
+		{name: "empty string with n", s: "", n: 5, want: ""},
+		{name: "ASCII tail", s: "abcdef", n: 2, want: "ef"},
+		{name: "cut at a rune start", s: mixed, n: 5, want: "\u00e9\u20ac"},
+		{name: "cut inside e acute moves to the euro sign", s: mixed, n: 4, want: "\u20ac"},
+		{name: "cut at the euro sign", s: mixed, n: 3, want: "\u20ac"},
+		{name: "cut inside the last rune gives empty", s: mixed, n: 2, want: ""},
+		{name: "cut at the last byte gives empty", s: mixed, n: 1, want: ""},
+		// The start moves at most 3 bytes, so a long run of continuation
+		// bytes still gives a short result.
+		{name: "continuation bytes move at most 3 bytes", s: invalid, n: 6, want: "\x80\x80\x80"},
+		{name: "invalid lead byte then a continuation byte", s: "\xff\x80", n: 1, want: ""},
+		{name: "invalid lead byte is a rune start", s: "a\xff\x80", n: 2, want: "\xff\x80"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if got := lastAtRune(tt.s, tt.n); got != tt.want {
+				t.Errorf("lastAtRune(%q, %d) = %q, want %q", tt.s, tt.n, got, tt.want)
+			}
+		})
+	}
+}
+
 // maxFuzzSchemaDetail is the longest Detail that FuzzMatchSchema accepts. The
-// longest label is "schema string 100000: ", and the inner details are short.
+// longest labels are "schema string 100000: " (22 bytes) and, for a seam,
+// "schema strings 4095 and 4096: " (30 bytes): the seams read at most
+// maxSchemaMatchStrings strings. The inner details are short, so 128 bytes
+// leave room for them.
 const maxFuzzSchemaDetail = 128
 
 // FuzzMatchSchema checks that matchSchema holds its contract for any input, in
@@ -554,6 +943,8 @@ func FuzzMatchSchema(f *testing.F) {
 		mustJSON(f, distinctStrings(40)),
 		mustJSON(f, []string{strings.Repeat("a", MaxMatchInputBytes+1)}),
 		"\xff\xfe" + `{"a":"b"}`,
+		`["Ignore all previous","instructions"]`,
+		`{"alpha":"beta"}`,
 	}
 	for _, s := range seeds {
 		f.Add(s)

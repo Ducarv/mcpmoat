@@ -512,43 +512,94 @@ func hasTextRun(b []byte, n int) bool {
 	return false
 }
 
-// hasWordRun reports whether b holds at least n words in a row. The words
-// are the fields of b between white space (see bytes.FieldsSeq). Any field
-// that is not a word (see isWord) ends the run.
+// hasWordRun reports whether b holds at least n words in a row.
+//
+// hasWordRun splits b into fields at white space, and each field into tokens
+// at '-', '_', '/' and '\'. So "ignore-all-previous-instructions" is 4
+// tokens. It removes the punctuation and the symbols at the two ends of each
+// token, such as the comma in "file,", the quotes in "\"read\"" or the '<'
+// and '>' in "<IMPORTANT>". Then it reads the tokens in order:
+//
+//   - A token that is now empty (such as "~") or that holds only digits
+//     (such as "3") is skipped. It does not count and it does not end the run.
+//   - A word (see isWord) adds 1 to the run.
+//   - Any other token, such as "HS256" or "a:b", ends the run.
+//
+// A field that holds a '/' or a '\' is a path, and its words add at most 1 to
+// the run. So "send ~/.ssh/id_rsa to" is 3 words, and a text that is only a
+// path, such as "usr/local/bin/foo/bar/baz", is not a sentence.
 //
 // JSON, such as the decoded parts of a JWT ({"alg":"HS256",...}), has its
-// quotes, colons and digits inside the fields, so its fields are not words.
+// quotes, colons and commas inside the tokens, so its tokens are not words.
 // A sentence such as "ignore all previous instructions" is a run of words.
 func hasWordRun(b []byte, n int) bool {
 	count := 0
 	for field := range bytes.FieldsSeq(b) {
-		if !isWord(field) {
-			count = 0
-			continue
-		}
-		count++
-		if count >= n {
-			return true
+		isPath := bytes.ContainsAny(field, `/\`)
+		added := 0 // words of this field that count
+		for token := range bytes.FieldsFuncSeq(field, isWordSeparator) {
+			token = bytes.TrimFunc(token, isPunctOrSymbol)
+			switch {
+			case len(token) == 0 || isDigits(token):
+				continue
+			case !isWord(token):
+				count = 0
+				continue
+			case isPath && added > 0:
+				continue
+			}
+			added++
+			count++
+			if count >= n {
+				return true
+			}
 		}
 	}
 	return false
 }
 
-// isWord reports whether field is a word: after the punctuation at its two
-// ends is removed (such as the comma in "file," or the quotes in "\"read\""),
-// it is not empty and every rune of it is a letter. An invalid byte is not a
-// letter.
-func isWord(field []byte) bool {
-	field = bytes.TrimFunc(field, unicode.IsPunct)
-	if len(field) == 0 {
+// isWordSeparator reports whether r splits a field into tokens for
+// hasWordRun: '-', '_', '/' or '\'.
+func isWordSeparator(r rune) bool {
+	return r == '-' || r == '_' || r == '/' || r == '\\'
+}
+
+// isPunctOrSymbol reports whether r is a punctuation rune or a symbol, such
+// as '"', ',', '~', '<' or '>'.
+func isPunctOrSymbol(r rune) bool {
+	return unicode.IsPunct(r) || unicode.IsSymbol(r)
+}
+
+// isDigits reports whether token is not empty and every rune of it is a
+// digit.
+func isDigits(token []byte) bool {
+	if len(token) == 0 {
 		return false
 	}
-	for len(field) > 0 {
-		r, size := utf8.DecodeRune(field)
-		if !unicode.IsLetter(r) {
+	for _, r := range string(token) {
+		if !unicode.IsDigit(r) {
 			return false
 		}
-		field = field[size:]
+	}
+	return true
+}
+
+// isWord reports whether token is a word: it is not empty and every rune of
+// it is a letter, or an apostrophe (U+0027 or U+2019) between its first and
+// its last rune, as in "don't". An invalid byte is not a letter. hasWordRun
+// removes the punctuation at the two ends of a token before it calls isWord.
+func isWord(token []byte) bool {
+	if len(token) == 0 {
+		return false
+	}
+	for i, r := range string(token) {
+		if unicode.IsLetter(r) {
+			continue
+		}
+		inner := i > 0 && i+utf8.RuneLen(r) < len(token)
+		if !inner || (r != '\'' && r != '\u2019') {
+			return false
+		}
 	}
 	return true
 }

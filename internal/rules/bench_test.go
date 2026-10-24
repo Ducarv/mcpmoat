@@ -202,7 +202,8 @@ func BenchmarkWorstCaseBlock(b *testing.B) {
 // of schemaFit exactly: each string is maxSchemaMatchBytes/n bytes long, and
 // n is at most maxSchemaMatchStrings. Each string starts with sixFormsText,
 // so it has all six regex forms, and the rest is letters, so no regex of
-// worstBlock matches.
+// worstBlock matches. It also checks that the seam pass runs on as many seams
+// as maxSeamBytes allows.
 func worstSchema(tb testing.TB, n int) string {
 	tb.Helper()
 	size := maxSchemaMatchBytes / n
@@ -221,37 +222,65 @@ func worstSchema(tb testing.TB, n int) string {
 	if forms := len(regexForms(got[0])); forms != 6 || len(got[0]) != size {
 		tb.Fatalf("worstSchema(%d): string of %d bytes with %d forms, want %d bytes and 6 forms", n, len(got[0]), forms, size)
 	}
+
+	// No string matches, so the seam pass runs until maxSeamBytes stops it.
+	var strCalls, seamCalls int
+	var firstSeam string
+	matchSchema(raw, schemaBudget, func(s string) []Hit {
+		if !strings.Contains(s, seamSep) {
+			strCalls++
+			return nil
+		}
+		if seamCalls == 0 {
+			firstSeam = s
+		}
+		seamCalls++
+		return nil
+	})
+	wantSeams := min(n-1, maxSeamBytes/(2*min(size, seamSideBytes)+len(seamSep)))
+	if strCalls != n || seamCalls != wantSeams || len(regexForms(firstSeam)) != 6 {
+		tb.Fatalf("worstSchema(%d): %d string calls, %d seam calls, first seam %d forms; want %d, %d, 6",
+			n, strCalls, seamCalls, len(regexForms(firstSeam)), n, wantSeams)
+	}
 	return raw
 }
 
 // BenchmarkSchemaWorstCase measures the worst-case block of
 // BenchmarkWorstCaseBlock, compiled for the schema target, on a schema that
-// fills the caps of schemaFit. Each string has the six regex forms. Two
+// fills the caps of schemaFit. Each string has the six regex forms. No string
+// matches, so the seam pass also runs until maxSeamBytes stops it. Three
 // shapes fill the byte cap:
 //
 //   - 4096 strings of 32 bytes: they also fill maxSchemaMatchStrings, so this
-//     shape has the most match calls;
+//     shape has the most match calls (4096 strings and 1365 seams);
+//   - 256 strings of 512 bytes: each seam is 544 bytes, the longest, so this
+//     shape has the most seam bytes (240 seams);
 //   - 4 strings of 32 KiB (MaxMatchInputBytes): this shape is four times the
-//     description worst case.
+//     description worst case, plus only 3 seams.
 //
 // The JSON is complete, so the raw text is not matched. A broken schema adds
 // one raw text match, at most one BenchmarkWorstCaseBlock.
 //
+// The seam pass reads up to maxSeamBytes more, so the cost bound of one
+// schema is now about twice the old bound of the strings alone.
+//
 // Measured on 2026-10-24 on an Apple M1 Pro (go1.27.3 darwin/arm64), caps
 // 128 KiB and 4096 strings, with -benchtime=3x, in the same run as
-// BenchmarkWorstCaseBlock (about 4.4 s):
+// BenchmarkWorstCaseBlock (about 4.6 s):
 //
-//   - 4096 strings: about 0.62 s for one Match call, about 0.14 times the
-//     description worst case. Each string is short, so few regex threads
-//     are alive at each byte;
-//   - 4 strings: about 17.8 s for one Match call, about 4.0 times the
+//   - 4096 strings: about 1.1 s for one Match call, about 0.24 times the
+//     description worst case. Each string and seam is short, so few regex
+//     threads are alive at each byte;
+//   - 256 strings: about 15.9 s for one Match call, about 3.5 times the
+//     description worst case;
+//   - 4 strings: about 18.5 s for one Match call, about 4.0 times the
 //     description worst case. This is the worst shape.
 func BenchmarkSchemaWorstCase(b *testing.B) {
 	m, err := Match{AnyRegex: worstBlock(b)}.CompileFor(TargetSchema)
 	if err != nil {
 		b.Fatalf("CompileFor() error = %v", err)
 	}
-	for _, n := range []int{maxSchemaMatchStrings, 4} {
+	for _, n := range []int{maxSchemaMatchStrings, 256, 4} {
 		raw := worstSchema(b, n)
 		b.Run(fmt.Sprintf("%d strings", n), func(b *testing.B) {
 			b.SetBytes(int64(len(raw)))

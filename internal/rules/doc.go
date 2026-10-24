@@ -36,12 +36,22 @@
 // heuristics do.
 //
 // A schema has its own budget (see Schema text). The regex and keyword rules
-// read at most 128 KiB of its strings and at most 4096 strings, each string
-// in the 32 KiB window. When the JSON cannot be read in full, they also read
-// the raw text once, in the 32 KiB window. So one schema costs about four
-// times as much as one description, plus one description. The match_window
-// heuristic also fires on a schema that these caps cut, on a schema with a
-// string longer than the window, and on JSON that cannot be read in full.
+// read one schema in three passes:
+//
+//   - the strings, in document order: at most 4096 strings and at most
+//     128 KiB, where a string counts for min(its length, 32 KiB) and is read
+//     in the 32 KiB window;
+//   - the seams of neighbour strings, only when no string matched: at most
+//     128 KiB of seam text in all, at most 544 bytes for each seam;
+//   - the raw text once, in the 32 KiB window, only when the JSON cannot be
+//     read in full.
+//
+// So one schema costs about nine times as much as one description: four for
+// the strings, four for the seams and one for the raw text. That is about
+// twice the cost before the seam pass. The match_window heuristic also fires
+// on a schema whose strings the caps cut, on a schema with a string longer
+// than the window, and on JSON that cannot be read in full. It does not fire
+// when the seam budget is used up (see Schema text).
 //
 // A list holds at most [MaxPatterns] entries of at most [MaxPatternBytes]
 // bytes each, and the compiled programs of one regex and of one list have
@@ -131,8 +141,21 @@
 // match_window hit, which is about the whole text and has the offset -1
 // ([NoOffset]). A hit from a regex or a keyword has the offset -1, because it
 // comes from the normalized text. Every hit of a schema rule has the offset
-// -1, and its Detail starts with "schema string N", where N is the 1-based
-// place of the string in the schema (see Schema text).
+// -1, also a hit of a text heuristic. Its Detail starts with one of these
+// texts (see Schema text), where N is the 1-based place of a string in the
+// list of distinct schema strings:
+//
+//   - "schema string N": a hit in one string;
+//   - "schema strings N and N+1": a hit in the seam of two neighbour strings;
+//   - "schema raw text": a hit in the raw text of a schema that cannot be
+//     read in full;
+//   - "schema JSON cannot be read in full" or "schema is longer than the
+//     match window": the two match_window hits for the whole schema. A
+//     match_window hit for one string that is longer than the window starts
+//     with "schema string N".
+//
+// A schema rule returns at most 16 such hits, plus one summary hit
+// "and N more schema hits".
 //
 // The invisible_unicode heuristic flags the same invisible runes that the
 // normalization removes, so it flags every control character except the
@@ -153,8 +176,16 @@
 // ESC, is skipped. Any other character, such as a space, a newline or '=', ends a
 // run, and runs are not joined. So a payload that is split into short chunks
 // is not flagged when no chunk reaches min_length on its own. With min_words
-// set above 0, the decoded text must also hold that many words in a row. So a
-// JWT, which decodes to JSON, is not flagged, but an encoded sentence is.
+// set above 0 (the range is 0 to 64, and 0 is the default), the decoded text
+// must also hold that many words in a row. The
+// text is split into tokens at white space and at '-', '_', '/' and '\', and
+// the punctuation and symbols at the two ends of each token are removed. A
+// word is a token of letters, with an optional apostrophe inside. An empty
+// token or a token of digits is skipped. Any other token ends the run. A
+// field between white space that holds a '/' or a '\' is a path, and it
+// counts as one word at most. So a JWT, which decodes to JSON, and a path
+// alone are not flagged, but an encoded sentence is, also when it is written
+// with hyphens or holds a path or a number.
 //
 // The config heuristics (insecure_url, plaintext_secret, unpinned_package,
 // auto_install and typosquat) read one line of text each, not the whole text.
@@ -176,10 +207,43 @@
 //
 // A rule with target: schema (the T1 schema rules) reads the tool input
 // schema as JSON. It reads every object key and every string value, at any
-// depth, in document order, one at a time. A string that comes more than once
-// is read once. Each string is matched alone, as a description is matched:
-// the strings are never joined, so the regexes of an all_regex list must all
-// match in one string. Numbers, booleans and null are not read.
+// depth, in document order. A string that comes more than once is read once,
+// at its first place, so the list of strings holds each distinct string once.
+// Each string is matched alone, as a description is matched. Numbers,
+// booleans and null are not read.
+//
+// An any_regex, all_regex or keywords rule reads the strings until the caps
+// stop it (see Cost bounds). When no string matched, it also reads the seams:
+// a seam is one text made of the last 256 bytes of a string, 32 newlines and
+// the first 256 bytes of the next string in the list. So an instruction that
+// is split over two neighbour strings is still found. A seam hit has a Detail
+// that starts with "schema strings N and N+1". The seams use only the strings
+// that fit the caps. The heuristics and match_window have no seam pass.
+//
+// In a seam, all_regex matches when all its regexes match in one string or
+// all in one seam. A keyword of several words can cross a seam, because any
+// run of white space matches the space between its words, but one word cannot
+// be built from the parts of two strings. A regex gap such as [\s\S]{0,N},
+// with N up to 31, cannot cross the 32 newlines, but \s+ and \s* can.
+//
+// The seams do not catch:
+//
+//   - a split with one benign string between the two halves;
+//   - a split over strings that are not neighbours in the list;
+//   - a split over three or more strings;
+//   - a split with more than 256 bytes on one side of the seam;
+//   - a split between the name and the description of the first property:
+//     the key "description" is usually listed there for the first time, so
+//     it sits between the two halves (in the next properties, the list drops
+//     the repeated key, so the halves are neighbours);
+//   - an indirection, such as "the URL in the endpoint field" or a $ref that
+//     points to the other half.
+//
+// The seam texts of one schema total at most 128 KiB, and a seam is at most
+// 544 bytes long. When this budget is used up, the seam pass stops silently:
+// the match_window heuristic does not fire. One benign string between the two
+// halves already defeats any join in document order, so a hit there would be
+// a false positive on large benign schemas, with no gain in security.
 //
 // JSON escapes are decoded first, before any normalization or fold, so an
 // invisible rune written as \u200b cannot hide as literal text, and an ESC

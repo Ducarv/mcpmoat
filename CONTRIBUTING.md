@@ -77,13 +77,35 @@ How mcpmoat prepares the text of a `target: schema` rule:
   value alone, at any depth, as it matches a description. All the steps above apply to each string.
   So write the patterns for the decoded text, with no JSON escapes: `\u200b` in the JSON is a real
   ZWSP, and `\u001b` is a real ESC.
-- The strings are never joined. So all the regexes of an `all_regex` list must match in one string.
-  A string that comes more than once is matched once. Numbers, booleans and `null` are not matched.
-- A hit of a schema rule has no offset. Its detail starts with `schema string N`, where N is the
-  place of the string in the schema, from 1.
+- A string that comes more than once is matched once, at its first place. Numbers, booleans and
+  `null` are not matched.
+- Seams: when no string matches alone, a regex or keyword rule also reads each seam of two neighbour
+  strings. A seam is the last 256 bytes of one string, 32 newlines, and the first 256 bytes of the
+  next string. So an instruction split over two neighbour strings is still found. Only the first
+  seam that matches is reported. A heuristic rule reads no seams.
+  - A bounded gap of at most 31 characters, such as `[\s\S]{0,30}`, cannot cross the 32 newlines.
+    `\s+`, `\s*` and the space between the words of a keyword can.
+  - For `all_regex`, all the regexes must match in one string, or all in one seam. A keyword of
+    several words can cross a seam, but one word is never built from two strings.
+  - Neighbours are neighbours in the list of distinct strings, so a repeated key such as `type` or
+    `description` is left out after its first place. The seams do not catch a split with one benign
+    string between the halves, over strings that are not neighbours, over three or more strings,
+    with more than 256 bytes on one side, or between the name and the description of the first
+    property (the key `description` sits between them). They do not follow an indirection such as
+    `$ref`.
+  - To test a seam, put the two halves in neighbour strings of a schema, and check that no half
+    matches alone: two items of an `enum` or `examples` array, such as
+    `{"enum": ["Ignore all", "previous instructions"]}`, or the name and the description of a
+    property that is not the first.
+- A hit of a schema rule has no offset. Its detail starts with `schema string N` for one string,
+  or `schema strings N and N+1` for a seam. N is the place of the string among the distinct keys
+  and strings in document order, from 1: a repeated string counts only at its first place. It is
+  not the position in the JSON text.
 - A regex or keyword rule has a budget for one schema. It reads the strings in document order, at
   most 4096 strings and at most 128 KiB in all. A string counts for at most 32 KiB, its match window.
-  A heuristic rule reads every string, with no budget.
+  The seams use only these strings and have their own budget of 128 KiB (a seam is at most 544
+  bytes). When the seam budget is used up, the seam pass stops with no report, and `match_window`
+  does not fire. A heuristic rule reads every string, with no budget.
 - When the JSON cannot be read in full (it is malformed, has data after the first value, or goes
   over a decode cap), the rule also matches the raw JSON text once. These hits have a detail that
   starts with `schema raw text`.
@@ -94,7 +116,9 @@ How mcpmoat prepares the text of a `target: schema` rule:
 
 #### Schema copies
 
-Most T1 description rules have a copy with `target: schema` that checks the tool input schema.
+Most T1 description rules have a copy with `target: schema` that checks the tool input schema. The
+copy matches each schema string alone and, for a regex or keyword rule, each seam of two neighbour
+strings (see above).
 When you change one file of a pair, change the other too. The first line of each file names the
 other file.
 
@@ -126,7 +150,7 @@ The fields:
 | `title` | Short name, up to 200 characters. |
 | `severity` | `low`, `medium`, `high` or `critical`. |
 | `target` | What the rule inspects: `description`, `schema` or `config`. Every test case of a `target: schema` rule must be valid JSON, such as a tool input schema. The tests report a case that is not. |
-| `match` | What the rule looks for. Set exactly one of `any_regex`, `all_regex`, `keywords` or `heuristic`. `params` is allowed only with `heuristic`. Regexes are case sensitive, so write `(?i)` for a case-insensitive match. `keywords` ignore case and match whole words. The text heuristics are `invisible_unicode` (no params), `tag_or_bidi_override` (no params: Unicode tag characters U+E0000 to U+E007F and the bidi overrides U+202D and U+202E, but not the England, Scotland and Wales flag emoji), `match_window` (no params: the regex and keyword rules cannot read the whole text), `max_length` (param `max_runes`, default 4096) and `base64_blob` (params `min_length`, default 32, `min_text`, default 24, and `min_words`, default 0 for off, up to 64: the decoded text must hold that many words in a row). The config heuristics `insecure_url`, `plaintext_secret`, `unpinned_package`, `auto_install` and `typosquat` take no params and need `target: config`. Each one reads one case line: a URL, a `KEY=VALUE` or `Name: value` entry, or a command line. `plaintext_secret` reads all four forms, so it also checks the args of a stdio server and a URL, not only env and header entries. `unpinned_package` also covers git and GitHub-shorthand package specs, unless the spec pins a full 40-hex commit (`#<40-hex>` for npm, `@<40-hex>` for Python). An https URL of a repository on github.com, gitlab.com or bitbucket.org counts as a git spec for npm. Other tarball and URL specs, and a script URL given to `pipx run`, are always unpinned, also with a 40-hex fragment. |
+| `match` | What the rule looks for. Set exactly one of `any_regex`, `all_regex`, `keywords` or `heuristic`. `params` is allowed only with `heuristic`. Regexes are case sensitive, so write `(?i)` for a case-insensitive match. `keywords` ignore case and match whole words. The text heuristics are `invisible_unicode` (no params), `tag_or_bidi_override` (no params: Unicode tag characters U+E0000 to U+E007F and the bidi overrides U+202D and U+202E, but not the England, Scotland and Wales flag emoji), `match_window` (no params: the regex and keyword rules cannot read the whole text), `max_length` (param `max_runes`, default 4096) and `base64_blob` (params `min_length`, default 32, `min_text`, default 24, and `min_words`, default 0 for off, up to 64: the decoded text must hold that many words in a row. A word is a token of letters between white space, `-`, `_`, `/` or `\`, after the punctuation and symbols at its ends are removed. A number is skipped, any other token ends the run, and a path such as `~/.ssh/id_rsa` counts as one word). The config heuristics `insecure_url`, `plaintext_secret`, `unpinned_package`, `auto_install` and `typosquat` take no params and need `target: config`. Each one reads one case line: a URL, a `KEY=VALUE` or `Name: value` entry, or a command line. `plaintext_secret` reads all four forms, so it also checks the args of a stdio server and a URL, not only env and header entries. `unpinned_package` also covers git and GitHub-shorthand package specs, unless the spec pins a full 40-hex commit (`#<40-hex>` for npm, `@<40-hex>` for Python). An https URL of a repository on github.com, gitlab.com or bitbucket.org counts as a git spec for npm. Other tarball and URL specs, and a script URL given to `pipx run`, are always unpinned, also with a 40-hex fragment. |
 | `risk` | One sentence: what can go wrong. |
 | `remediation` | What the user should do. |
 | `references` | Links (`http` or `https`) to research or advisories. mcpmoat never fetches them. |

@@ -71,7 +71,7 @@ func TestSchemaText(t *testing.T) {
 		{name: "escaped value", raw: `{"description":"a\u200bb"}`, want: []string{"a\u200bb"}, wantComplete: true},
 		{name: "escaped quote and newline", raw: `{"title":"say \"hi\"\nnow"}`, want: []string{"say \"hi\"\nnow"}, wantComplete: true},
 		{name: "escaped key", raw: `{"\u0064escription":"x","\u0074itle":"y"}`, want: []string{"x", "y"}, wantComplete: true},
-		{name: "surrogate pair", raw: `{"description":"😀"}`, want: []string{"\U0001F600"}, wantComplete: true},
+		{name: "surrogate pair", raw: `{"description":"\ud83d\ude00"}`, want: []string{"\U0001F600"}, wantComplete: true},
 
 		// Duplicate keys.
 		{name: "duplicate keys", raw: `{"description":"a","description":"b"}`, want: []string{"a", "b"}, wantComplete: true},
@@ -204,15 +204,15 @@ func TestSchemaStrings(t *testing.T) {
 		// Escapes are decoded, so a rule sees the real rune.
 		{name: "decoded U+0001", raw: `{"d":"Ig\u0001nore"}`, want: []string{"d", "Ig\x01nore"}, wantComplete: true},
 		{name: "decoded ESC", raw: `{"d":"\u001b[8mhidden"}`, want: []string{"d", "\x1b[8mhidden"}, wantComplete: true},
-		{name: "decoded key", raw: `{"description":"x"}`, want: []string{"description", "x"}, wantComplete: true},
-		{name: "decoded surrogate pair", raw: `{"d":"😀"}`, want: []string{"d", "\U0001F600"}, wantComplete: true},
+		{name: "decoded key", raw: `{"\u0064escription":"x"}`, want: []string{"description", "x"}, wantComplete: true},
+		{name: "decoded surrogate pair", raw: `{"d":"\ud83d\ude00"}`, want: []string{"d", "\U0001F600"}, wantComplete: true},
 
 		// Each distinct string once, at its first place. A key and a value
 		// with the same text are one string.
 		{name: "duplicate values", raw: `{"a":"x","b":"x","c":"y"}`, want: []string{"a", "x", "b", "c", "y"}, wantComplete: true},
 		{name: "duplicate keys", raw: `{"a":"1","a":"2"}`, want: []string{"a", "1", "2"}, wantComplete: true},
 		{name: "key equal to an earlier value", raw: `{"x":"y","y":"x"}`, want: []string{"x", "y"}, wantComplete: true},
-		{name: "escaped and plain text are equal", raw: `["ab","ab"]`, want: []string{"ab"}, wantComplete: true},
+		{name: "escaped and plain text are equal", raw: `["\u0061b","ab"]`, want: []string{"ab"}, wantComplete: true},
 
 		// Malformed input: the strings read so far, and complete is false.
 		{name: "truncated after key", raw: `{"a":"b","c":`, want: []string{"a", "b", "c"}, wantComplete: false},
