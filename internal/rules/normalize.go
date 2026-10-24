@@ -79,15 +79,15 @@ func isInvisibleFormat(r rune) bool {
 // keyword matchers read before the fold (see preparedText). A matcher reports
 // a match when one form matches. Each form is at most MaxMatchInputBytes
 // long, and equal forms are kept only once (see appendNew), so there are at
-// most six forms. The conditions below look only at the part of s that
+// most seven forms. The conditions below look only at the part of s that
 // normalizeForMatch reads (the first maxRawScanBytes).
 //
 // The forms 1 to 3 read the escape sequences with ansiSeq, which takes no C0
-// control rune inside a CSI. The forms 4 to 6 read them with ansiSeqC0,
+// control rune inside a CSI. The forms 4 to 7 read them with ansiSeqC0,
 // which does, as a terminal does. ansiSeqC0 can take more of the text into a
 // sequence: ESC [ LF "<IMPORTANT>" is the CSI ESC [ LF < I for ansiSeqC0,
 // and the text "MPORTANT>". ansiSeq does not read it as a CSI, so the forms 1
-// to 3 keep "[" LF "<IMPORTANT>". So the forms 4 to 6 only add matches: a
+// to 3 keep "[" LF "<IMPORTANT>". So the forms 4 to 7 only add matches: a
 // text that the forms 1 to 3 match is not lost.
 //
 //  1. Always: normalizeForMatch(s). The invisible runes are dropped, so "ign"
@@ -108,53 +108,80 @@ func isInvisibleFormat(r rune) bool {
 //     "all", the space goes before the ESC, so ESC [ 8 m is still a CSI and
 //     the form is "  Ignore all".
 //  5. When s holds ESC, U+009B (CSI) or U+009D (OSC), or the JSON text
-//     \u001b or \u001B: as the sixth form, but a CSI whose final byte is a
-//     letter other than 'm' keeps that letter, and an OSC keeps its text
-//     (see keepSeqText). So ESC [ "Ignore" is " Ignore", not " gnore", and
-//     ESC ] "Ignore all" BEL is " Ignore all ". A CSI with the final 'm' is
-//     SGR (colour and bold) and is one space, so ESC [ 1 m "iPhone" is
-//     " iPhone", not " miPhone".
+//     \u001b or \u001B (see hasSeqStart): as the first form, but the
+//     sequences are read with ansiSeqC0 and a sequence gives back the text
+//     that it takes (see keepSeqText and seqText). A CSI whose final byte is
+//     an ASCII letter other than 'm' becomes a space, its parameter bytes
+//     < = > ? and its intermediate bytes (such as "." and "/"), and its final
+//     letter. So ESC [ "Ignore" is " Ignore", ESC [ "<IMPORTANT>" is
+//     " <IMPORTANT>" and ESC [ ".env" is " .env". Its numeric parameter bytes
+//     (digits, ";" and ":") are dropped, so ESC [ 2 K is " K". A CSI with the
+//     final 'm' is SGR (colour and bold): it becomes nothing, as a terminal
+//     shows it. So ESC [ 1 m "iPhone" is "iPhone", not "miPhone", and "Ig" +
+//     ESC [ 0 m + "nore" is "Ignore". An OSC becomes its text between two
+//     spaces: ESC ] "Ignore all" BEL is " Ignore all ".
 //  6. When s holds ESC or U+009B and a C0 control rune of csiC0 (see
 //     hasSeqC0): as the first form, but a CSI can hold C0 control runes (see
 //     dropSeqC0). So ESC + U+0001 + "[8mIgnore" is " Ignore": the first form
 //     keeps "[8mIgnore", which has no word edge before "Ignore".
+//  7. When s holds a sequence start (see hasSeqStart) and an invisible rune
+//     that is not ESC, U+009B or U+009D (see hasPlainInvisible): the ANSI
+//     step of the fifth form with the runs of the second form (see
+//     keepSeqTextSpaced). So each run of invisible runes is a space, also
+//     inside the text that a sequence gives back: ESC ] "Ignore" + ZWSP +
+//     "all" BEL is " Ignore all ", and ESC [ "Ignore" + U+0001 + "all" is
+//     " Ignore all". As in the fourth form, the space of a run goes before
+//     an ESC at its end (see placeOnce), so "run" + ZWSP + ESC [ 1 m +
+//     "ning" is "run ning", not "running".
 //
-// In the forms 2 to 4, at most two spaces stand for a whole run of invisible
-// runes (two only in the second form, for a run that has a control rune and
-// ends with a format rune, see replaceRuns). So invisible padding cannot
-// push a payload out of the MaxMatchInputBytes window of these forms either.
+// In the forms 2 to 4 and 7, at most two spaces stand for a whole run of
+// invisible runes (two only in the second form, for a run that has a
+// control rune and ends with a format rune, and in the seventh form, for a
+// run that has a control rune and a format rune, see replaceRuns). So
+// invisible padding cannot push a payload out of the MaxMatchInputBytes
+// window of these forms either.
 //
 // These texts still defeat all the forms. The invisible_unicode heuristic
 // flags each of them in a description:
 //
 //   - one kind of invisible rune both inside a word and between words, such
 //     as a ZWSP in both places, or U+0001 in both places;
-//   - a CSI that takes a letter together with a format rune between words:
-//     in ESC [ "Ignore" + ZWSP + "all", the fifth form drops the ZWSP, so it
-//     joins "Ignoreall", and the other forms lose the "I";
+//   - text that only a sequence gives back (an OSC text or a CSI letter)
+//     together with two kinds of invisible runes, one inside a word and the
+//     other between words: in ESC [ "Ig" + ZWSP + "nore" + U+0001 + "all",
+//     the fifth form joins "Ignoreall", the seventh form splits "Ig nore",
+//     and the other forms lose the "I";
 //   - a control rune between ESC (or U+009B, U+009D) and a format rune: the
 //     fourth form puts its space before the controls of a run only when the
 //     last of them is ESC, U+009B or U+009D. So in ESC + U+0001 + ZWSP +
 //     "[8mIgnore" + ZWSP + "all", the fourth form keeps "[8m" before
-//     "Ignore", and the other forms join "Ignoreall";
-//   - a payload that only the fifth form shows, after more than
-//     MaxMatchInputBytes of text that the fifth form keeps from escape
-//     sequences (OSC text and CSI letters). The max_length heuristic flags
+//     "Ignore", and the other forms join "Ignoreall" or keep "[8m";
+//   - a CSI that takes a character of the text that no form gives back: the
+//     "m" of a word, as in ESC [ 1 "make" (the CSI ESC [ 1 m and the text
+//     "ake") or "you " + ESC [ "must" (an SGR and the text "ust"), a digit,
+//     ";" or ":", or a final byte that is not a letter, as in ESC [ "~/.ssh"
+//     (the CSI ESC [ ~ and the text "/.ssh");
+//   - a payload that only the fifth or the seventh form shows, after more
+//     than MaxMatchInputBytes of text that these forms keep from escape
+//     sequences (OSC text and CSI bytes). The max_length heuristic flags
 //     such a long text.
 //
-// A CSI with the final byte 'm' that takes the "m" of a word also defeats
-// all the forms: ESC [ 1 "make" is the CSI ESC [ 1 m and the text "ake", and
-// no form gives the "m" back. The invisible_unicode heuristic flags the ESC
-// in a description.
+// The fifth form can also make a token that neither the raw text nor a
+// terminal shows, from a rare CSI: it writes a space and gives back the
+// kept bytes and the final letter. So "<system" + ESC [ > c + "-info>" (a
+// DA2) is "<system >c-info>", ESC [ SP q + ESC [ 1 m + "iPhone" (a
+// DECSCUSR before an SGR) gives the word "qiPhone", and the JSON text
+// \u001b + "[.env" is " .env". Such a hit can be a false positive. The
+// invisible_unicode heuristic flags the ESC at medium in either case.
 //
 // An OSC with more than 256 runes of text is not an OSC for ansiSeq or
 // ansiSeqC0. So its ESC and its end are dropped, and its text stays in every
 // form, after its "]": the matchers read that text.
 //
 // A text without invisible runes and escape sequences has one form, so it
-// costs no more. A text with them is matched up to six times, which is six
-// times the cost bound in match.go. The regex matchers also read the folds
-// (see preparedText.regexForms).
+// costs no more. A text with them is matched up to seven times, which is
+// seven times the cost bound in match.go. The regex matchers also read the
+// folds (see preparedText.regexForms).
 func matchForms(s string) []string {
 	forms := []string{normalizeForMatch(s)}
 	raw := cutAtRune(s, maxRawScanBytes)
@@ -169,21 +196,37 @@ func matchForms(s string) []string {
 	if hasControl && hasFormat {
 		forms = appendNew(forms, normalizeInvisible(s, spaceFormats))
 	}
-	if hasSeqStart(raw) {
+	seqStart := hasSeqStart(raw)
+	if seqStart {
 		forms = appendNew(forms, normalizeInvisible(s, keepSeqText))
 	}
 	if hasSeqC0(raw) {
 		forms = appendNew(forms, normalizeInvisible(s, dropSeqC0))
 	}
+	if seqStart && hasPlainInvisible(raw) {
+		forms = appendNew(forms, normalizeInvisible(s, keepSeqTextSpaced))
+	}
 	return forms
 }
 
 // hasSeqStart reports whether s holds a rune or a text that can start an
-// ANSI escape sequence in ansiSeqC0: ESC, U+009B (CSI), U+009D (OSC), or the
-// JSON escape \u001b or \u001B. matchForms adds the fifth form only then.
+// ANSI escape sequence in ansiSeqC0: ESC, U+009B (CSI) or U+009D (OSC) (see
+// startsSeq), or the JSON escape \u001b or \u001B. matchForms adds the fifth
+// form only then, and the seventh form only then and with hasPlainInvisible.
 func hasSeqStart(s string) bool {
-	return strings.ContainsAny(s, "\x1b\u009b\u009d") ||
+	return strings.ContainsFunc(s, startsSeq) ||
 		strings.Contains(s, `\u001b`) || strings.Contains(s, `\u001B`)
+}
+
+// hasPlainInvisible reports whether s holds an invisible rune (see
+// isInvisible) that is not ESC, U+009B or U+009D (see startsSeq). Without
+// one, the seventh form of matchForms is the fifth form. It is a cheap check:
+// the rune can also be a part of a sequence, such as the BEL that ends an
+// OSC, and appendNew drops the seventh form when it equals another form.
+func hasPlainInvisible(s string) bool {
+	return strings.ContainsFunc(s, func(r rune) bool {
+		return isInvisible(r) && !startsSeq(r)
+	})
 }
 
 // hasSeqC0 reports whether s holds ESC or U+009B, which start a CSI, and a C0
@@ -203,15 +246,6 @@ func appendNew(forms []string, f string) []string {
 		return forms
 	}
 	return append(forms, f)
-}
-
-// regexForms returns the forms of s that the regex matchers read: at most
-// twelve forms, the six base forms of matchForms and their folds. It builds a
-// new preparedText for s each time, so the tests, the fuzz tests and the
-// benchmarks can call it. The matchers use preparedText.regexForms, which
-// builds the forms only once for each text.
-func regexForms(s string) []string {
-	return prepareText(s).regexForms()
 }
 
 // isASCII reports whether every byte of s is ASCII (less than 0x80).
@@ -260,7 +294,7 @@ func isASCII(s string) bool {
 // [ I, which ansiSeq reads as a CSI that hides the "I". A terminal reads a
 // C0 rune inside a CSI in another way: it runs the rune and goes on with the
 // sequence, so ESC [ U+0001 8 m still hides the text after it. ansiSeq does
-// not match such a sequence, so this form keeps "[8m". The forms 4 to 6 of
+// not match such a sequence, so this form keeps "[8m". The forms 4 to 7 of
 // matchForms read it with ansiSeqC0 (see dropSeqC0). The invisible_unicode
 // heuristic flags its ESC in a description.
 //
@@ -304,23 +338,35 @@ const (
 	// ansiSeqC0. It builds the fourth form.
 	spaceFormats
 	// keepSeqText drops every invisible rune, as dropSeqC0 does, but it
-	// keeps the text that an escape sequence takes: a CSI whose final byte
-	// is a letter other than 'm' becomes U+0020 and that letter, and an OSC
-	// becomes its text between two U+0020 (see ansiKeepText). Its ANSI step reads the
-	// sequences with ansiSeqC0. It builds the fifth form.
+	// keeps the text that an escape sequence takes (see seqText): a CSI
+	// whose final byte is a letter gives back that letter and its parameter
+	// bytes < = > ? and its intermediate bytes, an SGR (final 'm') becomes
+	// nothing, and an OSC becomes its text between two U+0020. Its ANSI
+	// step reads the sequences with ansiSeqC0 (see ansiKeepText). It builds
+	// the fifth form.
 	keepSeqText
 	// dropSeqC0 drops every invisible rune, as dropInvisible does, but its
 	// ANSI step reads the sequences with ansiSeqC0, so a CSI can hold C0
 	// control runes, and it replaces each sequence with one U+0020 (see
 	// ansiC0ToSpace). It builds the sixth form.
 	dropSeqC0
+	// keepSeqTextSpaced handles the runs of invisible runes as
+	// spaceInvisible does, and the escape sequences as keepSeqText does
+	// (see ansiKeepText). So a run that holds a format rune gets one U+0020
+	// before the ANSI step, and a control run becomes one U+0020 after it,
+	// also inside the text of an OSC. The U+0020 of a run goes as in
+	// spaceFormats (see placeOnce): before the control runes of the run
+	// when the last of them is ESC, U+009B or U+009D, and after them
+	// otherwise. So ZWSP + ESC + "[1m" is U+0020 + ESC + "[1m", and the SGR
+	// does not join the words around it. It builds the seventh form.
+	keepSeqTextSpaced
 )
 
 // formatRepl returns what a run of invisible runes that holds a format rune
 // becomes in mode m: U+0020, or -1 when its format runes are dropped.
 func (m invisibleMode) formatRepl() rune {
 	switch m {
-	case spaceInvisible, spaceFormats:
+	case spaceInvisible, spaceFormats, keepSeqTextSpaced:
 		return ' '
 	}
 	return -1
@@ -330,28 +376,33 @@ func (m invisibleMode) formatRepl() rune {
 // m after the ANSI step: U+0020, or -1 when the run is dropped.
 func (m invisibleMode) controlRepl() rune {
 	switch m {
-	case spaceInvisible, spaceControls:
+	case spaceInvisible, spaceControls, keepSeqTextSpaced:
 		return ' '
 	}
 	return -1
 }
 
 // runPlace returns where replaceFormatRuns puts the repl of a run in mode m:
-// placeOnce for spaceFormats, and placeAtTail for the other modes.
+// placeOnce for spaceFormats and keepSeqTextSpaced, and placeAtTail for the
+// other modes. In keepSeqTextSpaced, placeAtTail would write no space for a
+// run such as ZWSP + ESC, which ends with a kept rune. Then the SGR that the
+// ESC starts becomes nothing, and two words join: "run" + ZWSP + ESC +
+// "ning" would be "running". placeOnce writes the space before the ESC.
 func (m invisibleMode) runPlace() runPlace {
-	if m == spaceFormats {
+	if m == spaceFormats || m == keepSeqTextSpaced {
 		return placeOnce
 	}
 	return placeAtTail
 }
 
 // ansiStep runs step 3 of normalizeForMatch on s for mode m: ansiKeepText
-// for keepSeqText, ansiC0ToSpace for spaceFormats and dropSeqC0, and
-// ansiToSpace for the other modes. So the forms 1 to 3 of matchForms read the
-// sequences with ansiSeq, and the forms 4 to 6 with ansiSeqC0.
+// for keepSeqText and keepSeqTextSpaced, ansiC0ToSpace for spaceFormats and
+// dropSeqC0, and ansiToSpace for the other modes. So the forms 1 to 3 of
+// matchForms read the sequences with ansiSeq, and the forms 4 to 7 with
+// ansiSeqC0.
 func (m invisibleMode) ansiStep(s string) string {
 	switch m {
-	case keepSeqText:
+	case keepSeqText, keepSeqTextSpaced:
 		return ansiKeepText(s)
 	case spaceFormats, dropSeqC0:
 		return ansiC0ToSpace(s)
@@ -373,17 +424,26 @@ func normalizeInvisible(s string, mode invisibleMode) string {
 	return cutAtRune(replaceInvisible(s, mode.formatRepl()), MaxMatchInputBytes)
 }
 
+// jsonCSIExpr matches a CSI in JSON text, where ESC is the escape \u001b or
+// \u001B. Its final byte is not a backslash (see ansiSeq). ansiSeq and
+// ansiSeqC0 share it.
+const jsonCSIExpr = `\\u001[bB]\[[0-?]*[ -/]*[@-\[\]-~]`
+
+// oscExpr matches an OSC: ESC ] (or U+009D), at most 256 runes of text, and
+// BEL, ESC \ or U+009C. ansiSeq and ansiSeqC0 share it.
+const oscExpr = `(?:\x1b\]|\x{9d})[^\x07\x1b\x{9c}]{0,256}(?:\x07|\x1b\\|\x{9c})`
+
 // ansiSeq matches an ANSI escape sequence that a terminal runs and does not
 // show:
 //
 //   - CSI: ESC [ (or U+009B), parameter and intermediate bytes, and a final
 //     byte, such as ESC [ 8 m (SGR 8, which hides the text after it);
 //   - OSC: ESC ] (or U+009D), at most 256 runes of text, and BEL, ESC \ or
-//     U+009C.
+//     U+009C (see oscExpr).
 //
 // The schema target is JSON text, where ESC is the escape \u001b, so a CSI
-// that starts with that escape matches too. Its final byte is not a
-// backslash: in JSON text a backslash starts the next escape, so in
+// that starts with that escape matches too (see jsonCSIExpr). Its final byte
+// is not a backslash: in JSON text a backslash starts the next escape, so in
 // \u001b[\u0001Ignore the CSI does not take the backslash and leave
 // "u0001Ignore" with no word edge. An OSC with no end, or with more than 256
 // runes of text, does not match, so it cannot swallow the rest of the text;
@@ -391,8 +451,8 @@ func normalizeInvisible(s string, mode invisibleMode) string {
 // it, and its text stays.
 //
 // A CSI here holds no C0 control rune. The forms 1 to 3 of matchForms read
-// the sequences with ansiSeq. The forms 4 to 6 read them with ansiSeqC0.
-var ansiSeq = regexp.MustCompile(`(?:\x1b\[|\x{9b})[0-?]*[ -/]*[@-~]|\\u001[bB]\[[0-?]*[ -/]*[@-\[\]-~]|(?:\x1b\]|\x{9d})[^\x07\x1b\x{9c}]{0,256}(?:\x07|\x1b\\|\x{9c})`)
+// the sequences with ansiSeq. The forms 4 to 7 read them with ansiSeqC0.
+var ansiSeq = regexp.MustCompile(`(?:\x1b\[|\x{9b})[0-?]*[ -/]*[@-~]|` + jsonCSIExpr + `|` + oscExpr)
 
 // csiC0 is the content of a regex class: the C0 control runes that a
 // terminal (VT500 and xterm) runs inside a CSI and then goes on with the
@@ -407,17 +467,18 @@ var csiC0Rune = regexp.MustCompile(`[` + csiC0 + `]`)
 // ansiSeqC0 is ansiSeq, but a raw CSI can hold C0 control runes (see csiC0),
 // as in a terminal: between ESC and "[", and among the parameter and
 // intermediate bytes. So ESC + U+0001 + "[8m" and U+009B + U+0001 + "8m" are
-// a CSI too. The JSON branch and the OSC are the same as in ansiSeq.
+// a CSI too. The JSON branch and the OSC are the same as in ansiSeq
+// (jsonCSIExpr and oscExpr).
 //
 // The final byte of a CSI can be a letter of the text: in ESC [ "Ignore",
 // the CSI is ESC [ I, as for a terminal. And a C0 rune lets a CSI take
 // parameter bytes of the text: ESC [ LF "<IMPORTANT>" is the CSI ESC [ LF < I.
-// So only the forms 4 to 6 of matchForms read the sequences with ansiSeqC0,
-// and the fifth form keeps a letter final byte (see ansiKeepText).
+// So only the forms 4 to 7 of matchForms read the sequences with ansiSeqC0,
+// and the fifth and the seventh form give back the text of a CSI with a
+// letter final byte (see ansiKeepText).
 var ansiSeqC0 = regexp.MustCompile(
 	`(?:\x1b[` + csiC0 + `]*\[|\x{9b})[0-?` + csiC0 + `]*[ -/` + csiC0 + `]*[@-~]` +
-		`|\\u001[bB]\[[0-?]*[ -/]*[@-\[\]-~]` +
-		`|(?:\x1b\]|\x{9d})[^\x07\x1b\x{9c}]{0,256}(?:\x07|\x1b\\|\x{9c})`)
+		`|` + jsonCSIExpr + `|` + oscExpr)
 
 // ansiToSpace replaces each ANSI escape sequence (see ansiSeq) with U+0020.
 // Without this step, ESC [ 8 m before "Ignore" leaves "[8mIgnore", and the
@@ -448,18 +509,19 @@ func ansiC0ToSpace(s string) string {
 	return ansiSeqC0.ReplaceAllLiteralString(s, " ")
 }
 
-// ansiKeepText is the ANSI step of the fifth form of matchForms (see
-// keepSeqText). It replaces each ANSI escape sequence (see ansiSeqC0) with the
-// text that seqText gives for it. So a CSI that takes a letter of the text
-// as its final byte gives the letter back, and the text of an OSC, which a
-// terminal does not show but a model reads, is matched. A CSI with the final
-// byte 'm' is SGR (colour and bold), so it becomes one U+0020 and does not
-// give its 'm' back: ESC [ 1 m "iPhone" is " iPhone", not " miPhone".
+// ansiKeepText is the ANSI step of the fifth and the seventh form of
+// matchForms (see keepSeqText and keepSeqTextSpaced). It replaces each ANSI
+// escape sequence (see ansiSeqC0) with the text that seqText gives for it.
+// So a CSI that takes characters of the text gives them back, and the text
+// of an OSC, which a terminal does not show but a model reads, is matched.
 //
 // No replacement is longer than its sequence, so the text does not grow:
 //
-//   - a CSI with a letter other than 'm' as its final byte becomes 2 bytes,
-//     and it is at least 3 bytes long (ESC [ I, or U+009B, 2 bytes, and I);
+//   - a CSI with a letter other than 'm' as its final byte becomes 1 byte
+//     (U+0020), its kept parameter and intermediate bytes, and its final
+//     byte. It is at least 2 bytes (ESC [, U+009B, or the 7 bytes of
+//     \u001b[), the same kept bytes and more, and its final byte;
+//   - an SGR (a CSI with the final byte 'm') becomes nothing;
 //   - an OSC becomes its text and 2 bytes, and it is its text and at least 3
 //     bytes long (ESC ] and BEL; U+009D is 2 bytes, and its end is 1 or 2
 //     bytes);
@@ -468,18 +530,54 @@ func ansiKeepText(s string) string {
 	return ansiSeqC0.ReplaceAllStringFunc(s, seqText)
 }
 
-// seqText returns what ansiKeepText puts in place of seq, a match of ansiSeqC0:
-// U+0020 and the text of an OSC and U+0020; U+0020 and the final byte of a
-// CSI whose final byte is an ASCII letter other than 'm'; else one U+0020.
+// seqText returns what ansiKeepText puts in place of seq, a match of
+// ansiSeqC0:
+//
+//   - for an OSC: U+0020, its text and U+0020;
+//   - for a CSI whose final byte is 'm' (SGR: colour and bold): nothing, as a
+//     terminal shows it. So "Ig" + ESC [ 0 m + "nore" is "Ignore", and
+//     ESC [ 1 m "iPhone" is "iPhone", not "miPhone";
+//   - for a CSI whose final byte is another ASCII letter: U+0020, the bytes
+//     of csiText, and the final byte. So ESC [ "<IMPORTANT>" (the CSI
+//     ESC [ < I) is " <IMPORTANT>", and ESC [ 2 K is " K";
+//   - for each other sequence: one U+0020.
 func seqText(seq string) string {
 	if text, ok := oscText(seq); ok {
 		return " " + text + " "
 	}
-	// An 'm' final is SGR (colour, bold): keeping it makes bold "iPhone" "miPhone".
-	if last := seq[len(seq)-1]; isASCIILetter(last) && last != 'm' {
-		return " " + seq[len(seq)-1:]
+	final := seq[len(seq)-1]
+	switch {
+	case final == 'm':
+		return ""
+	case isASCIILetter(final):
+		return " " + csiText(seq[:len(seq)-1]) + string(final)
 	}
 	return " "
+}
+
+// csiText returns the bytes of head that a CSI takes from the text: head is
+// a CSI of ansiSeqC0 without its final byte. They are its parameter bytes
+// < = > ? (0x3C to 0x3F) and its intermediate bytes (0x20 to 0x2F, such as
+// "." and "/"), in order. The introducer (ESC, its C0 runes and "[", U+009B,
+// or the JSON text \u001b[), the numeric parameter bytes (digits, ";" and
+// ":") and the C0 runes are dropped: a numeric parameter is mostly a real
+// SGR or cursor parameter, not text.
+func csiText(head string) string {
+	if body, ok := strings.CutPrefix(head, "\u009b"); ok {
+		head = body
+	} else {
+		// ESC, C0 runes and "[", or \u001b[: the first "[" ends the
+		// introducer, because no rune before it and no parameter or
+		// intermediate byte is "[".
+		_, head, _ = strings.Cut(head, "[")
+	}
+	kept := make([]byte, 0, len(head))
+	for i := range len(head) {
+		if c := head[i]; ' ' <= c && c <= '/' || '<' <= c && c <= '?' {
+			kept = append(kept, c)
+		}
+	}
+	return string(kept)
 }
 
 // oscText returns the text of seq, a match of ansiSeqC0, when seq is an OSC:

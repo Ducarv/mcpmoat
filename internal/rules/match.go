@@ -21,20 +21,21 @@ import (
 // regexes of one any_regex, all_regex or keywords list.
 //
 // The worst case for one match block on one form of the text is about 32 KiB
-// x 2500, about 80M instruction-bytes. That is about 0.75 s on an Apple M1
-// Pro (about 9 ns for each instruction-byte), one twelfth of the measured
-// time below. A text can have more forms (see matchForms and preparedText):
+// x 2500, about 82M instruction-bytes. That is about 0.74 s on an Apple M1
+// Pro (about 9.1 ns for each instruction-byte: the BenchmarkWorstCaseBlock
+// time below divided by 14 forms). A text can have more forms (see
+// matchForms and preparedText):
 //
-//   - keywords read up to six forms: the folds of the six base forms of
+//   - keywords read up to seven forms: the folds of the seven base forms of
 //     matchForms;
-//   - any_regex and all_regex read up to twelve forms: the six base forms
-//     and their folds, when the text is not only ASCII.
+//   - any_regex and all_regex read up to fourteen forms: the seven base
+//     forms and their folds, when the text is not only ASCII.
 //
 // Each form is at most MaxMatchInputBytes long, so the worst case for one
-// match block is twelve times the cost above: 12 x 32 KiB x 2500, about 960M
-// instruction-bytes. BenchmarkWorstCaseBlock measured about 9.0 s for one
-// Match call over the twelve forms on an Apple M1 Pro (median of five runs,
-// Go 1.27). The package doc says how the rule count multiplies it.
+// match block is fourteen times the cost above: 14 x 32 KiB x 2500, about
+// 1.1G instruction-bytes. BenchmarkWorstCaseBlock measured about 10.4 s for
+// one Match call over the fourteen forms on an Apple M1 Pro (median of five
+// runs, Go 1.27). The package doc says how the rule count multiplies it.
 const (
 	// MaxPatternBytes is the largest regex or keyword, in bytes, before
 	// compilation.
@@ -172,8 +173,13 @@ func (m *Matcher) Match(text string) []Hit {
 
 // matchPrepared returns the hits of the matcher in p, as Match does. The
 // forms of p are built at most once, so the matchers of many rules can share
-// one p for the same text. A heuristic reads only p.raw, so it does not build
-// the forms. matchPrepared never writes into the forms of p.
+// one p for the same text. The scan engine (#35) must build one preparedText
+// for each target text and call matchPrepared for every rule with it; today
+// only Match (one preparedText for each call) and the tests call it. A
+// heuristic reads only p.raw, so it does not build the forms. matchPrepared
+// never writes into the forms of p.
+//
+// m and p must not be nil. Match does the nil check for m.
 func (m *Matcher) matchPrepared(p *preparedText) []Hit {
 	switch m.kind {
 	case kindHeuristic:

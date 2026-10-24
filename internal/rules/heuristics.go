@@ -181,8 +181,9 @@ const (
 // start, end or cancel an ANSI escape sequence (see ansiToSpace): they show
 // as nothing, and a terminal runs them. A raw ESC before a letter can make
 // the letter the final byte of a CSI, so a terminal does not show the "I" of
-// "\x1b[Ignore". The fifth form of matchForms keeps that letter, and the text
-// of an OSC, so the regexes and keywords still read them (see keepSeqText).
+// "\x1b[Ignore". The fifth and the seventh form of matchForms give back that
+// letter, and the text of an OSC, so the regexes and keywords still read them
+// (see keepSeqText and seqText).
 // This heuristic still flags the ESC. It also flags each text that defeats
 // all the forms (see matchForms), because each such text holds an invisible
 // rune.

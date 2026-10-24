@@ -87,7 +87,7 @@ func benchText(size, first int) string {
 
 // matchAll runs every matcher on text and returns the number of hits. It
 // builds the forms of text once and shares them between the matchers, as the
-// engine does for one target text.
+// engine must do for one target text (#35).
 func matchAll(ms []*Matcher, text string) int {
 	p := prepareText(text)
 	n := 0
@@ -197,14 +197,14 @@ func worstBlock(tb testing.TB) []string {
 
 // BenchmarkWorstCaseBlock measures the most costly match block that passes
 // the caps (32 KiB of text, 2500 instructions), on MaxMatchInputBytes of text
-// that has all twelve regex forms (see preparedText.regexForms). It starts
-// with twelveFormsText: the ZWSP, U+0001, ESC [ I and ESC U+0001 [8m give the
-// six base forms of matchForms, and the ligature U+FB03 makes each base form
+// that has all fourteen regex forms (see preparedText.regexForms). It starts
+// with allFormsText: the ZWSP, U+0001, ESC [ I and ESC U+0001 [8m give the
+// seven base forms of matchForms, and the ligature U+FB03 makes each base form
 // not ASCII, so its fold ("ffi") is a new form. The rest is 'a', after the
-// short prefix, so each of the twelve forms is about MaxMatchInputBytes long.
+// short prefix, so each of the fourteen forms is about MaxMatchInputBytes long.
 //
 // The block is \pL{0,498}!X twice and \pL{0,248}!X: 1000 + 1000 + 500 =
-// maxTotalInsts instructions. One op is one Match call over the twelve forms.
+// maxTotalInsts instructions. One op is one Match call over the fourteen forms.
 // For the time on an Apple M1 Pro, see the cost comment in match.go.
 // A hostile --rules directory can repeat such a block in every rule, and
 // every tool text is matched against every rule, so this cost is multiplied
@@ -214,15 +214,15 @@ func BenchmarkWorstCaseBlock(b *testing.B) {
 	if err != nil {
 		b.Fatalf("Compile() error = %v", err)
 	}
-	text := twelveFormsText + strings.Repeat("a", MaxMatchInputBytes-len(twelveFormsText))
+	text := allFormsText + strings.Repeat("a", MaxMatchInputBytes-len(allFormsText))
 	forms := regexForms(text)
-	if len(forms) != 12 {
-		b.Fatalf("len(regexForms(text)) = %d, want 12 (twelve forms)", len(forms))
+	if len(forms) != 14 {
+		b.Fatalf("len(regexForms(text)) = %d, want 14 (fourteen forms)", len(forms))
 	}
 	// Each form must fill the cap, or the benchmark does not hit the bound.
 	for i, f := range forms {
-		if len(f) < MaxMatchInputBytes-len(twelveFormsText) {
-			b.Fatalf("len(regexForms(text)[%d]) = %d, want at least %d", i, len(f), MaxMatchInputBytes-len(twelveFormsText))
+		if len(f) < MaxMatchInputBytes-len(allFormsText) {
+			b.Fatalf("len(regexForms(text)[%d]) = %d, want at least %d", i, len(f), MaxMatchInputBytes-len(allFormsText))
 		}
 	}
 	b.SetBytes(int64(len(text)))

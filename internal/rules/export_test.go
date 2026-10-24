@@ -15,3 +15,12 @@ var (
 	// the first argument.
 	MatchPrepared = (*Matcher).matchPrepared
 )
+
+// regexForms returns the forms of s that the regex matchers read: at most
+// fourteen forms, the seven base forms of matchForms and their folds. It
+// builds a new preparedText for s each time, so the tests, the fuzz tests and
+// the benchmarks can call it. The matchers use preparedText.regexForms, which
+// builds the forms only once for each text.
+func regexForms(s string) []string {
+	return prepareText(s).regexForms()
+}

@@ -8,6 +8,11 @@ import "slices"
 // call of regexForms or keywordForms. A heuristic reads only raw, so a text
 // that only heuristics read is never normalized.
 //
+// The forms are shared only when the caller shares the preparedText: the
+// scan engine (#35) must build one preparedText for each target text and call
+// matchPrepared for every rule with it. Today only Match, which builds one
+// preparedText for each call, and the tests use it.
+//
 // A preparedText is not safe for concurrent use: the first call builds the
 // forms and writes them into the struct. Use one preparedText in one
 // goroutine. A Matcher stays safe for concurrent use, because Match makes a
@@ -35,8 +40,9 @@ func prepareText(raw string) *preparedText {
 // Only the text is folded, not the pattern. So a pattern with an accent or a
 // mark matches only in the base forms.
 //
-// Equal forms are kept only once. matchForms gives at most six base forms,
-// so there are at most twelve forms: the six base forms and their six folds.
+// Equal forms are kept only once. matchForms gives at most seven base forms,
+// so there are at most fourteen forms: the seven base forms and their seven
+// folds.
 // Each form is at most MaxMatchInputBytes long. A plain ASCII text has one
 // form, so it costs no more.
 //
@@ -49,7 +55,7 @@ func (p *preparedText) regexForms() []string {
 
 // keywordForms returns the forms that the keyword matcher reads: the fold
 // (foldMarks) of each base form of matchForms. Equal folds are kept only
-// once, so there are at most six forms, each at most MaxMatchInputBytes
+// once, so there are at most seven forms, each at most MaxMatchInputBytes
 // long.
 //
 // The caller must not modify the returned slice or its elements: the next

@@ -32,106 +32,55 @@
 //
 // A list holds at most [MaxPatterns] entries of at most [MaxPatternBytes]
 // bytes each, and the compiled programs of one regex and of one list have
-// instruction caps. The comment on these caps in match.go gives the worst
-// case for one match block and its cost. A text has up to twelve forms (see
-// Normalization below). BenchmarkWorstCaseBlock measures that cost on a text
-// with all twelve forms: about 9.0 s on an Apple M1 Pro (see match.go). A
-// hostile --rules directory multiplies this cost by the number of rules and
-// texts. A cap at the loader level is future work (#33).
+// instruction caps. A text has up to fourteen forms for a regex (see
+// Normalization below). For the worst case of one match block and its cost,
+// see the cost comment on these caps in match.go. A hostile --rules
+// directory multiplies this cost by the number of rules and texts. A cap at
+// the loader level is future work (#33).
 //
 // # Normalization
 //
 // Before regex and keyword matching, the text is normalized: invisible runes
-// are removed, and the text is put in Unicode form NFC. The invisible runes
+// are handled, and the text is put in Unicode form NFC. The invisible runes
 // are the zero-width, bidi, tag and other format characters, and every
 // control character (such as U+0000, U+0001, ESC, BEL and DEL) other than
-// the white space (tab, LF, VT, FF, CR and NEL). So "Ig" + U+0001 + "nore"
-// and "Ig" + BEL + "nore" are "Ignore". An ANSI escape sequence (CSI or OSC),
-// which a terminal runs and does not show, becomes one space. The control
-// characters are removed only after this step, so the step still sees the
-// ESC, BEL, CAN, SUB and C1 controls that start, end or cancel a sequence.
-// CAN and SUB cancel a sequence, so ESC [ CAN "Ignore" is not a CSI. Each
-// white-space rune that the regex \s does not match (VT, NEL, the no-break
-// space and the other Unicode spaces, U+2028, U+2029 and the Braille blank
-// U+2800) becomes U+0020, so a regex sees it as a space and cannot match the
-// rune itself.
+// the white space (tab, LF, VT, FF, CR and NEL). An ANSI escape sequence (CSI
+// or OSC), which a terminal runs and does not show, is handled before the
+// control characters, so the sequence is still found. CAN and SUB cancel a
+// sequence. Each white-space rune that the regex \s does not match (VT, NEL,
+// the no-break space and the other Unicode spaces, U+2028, U+2029 and the
+// Braille blank U+2800) becomes U+0020, so a regex sees it as a space and
+// cannot match the rune itself.
 //
-// As in a terminal, a CSI can also hold C0 control characters (U+0000 to
-// U+001F and DEL, but not CAN, SUB and ESC) between ESC and "[" and among
-// its parameter and intermediate bytes: for a terminal, ESC [ U+0001 8 m is
-// one CSI. The forms 1 to 3 below do not read such a CSI as a sequence, and
-// the forms 4 to 6 do. A C0 character lets a CSI take text: ESC [ LF
-// "<IMPORTANT>" is the CSI ESC [ LF < I and the text "MPORTANT>". So the
-// forms 1 to 3 keep "<IMPORTANT>", and the forms 4 to 6 only add matches.
+// A text gives up to seven base forms. The first form is always built, and
+// each other form only when the first 128 KiB of the raw text hold the runes
+// that it needs. Equal forms are kept only once. In short:
 //
-// A text gives up to six base forms. The first form is always built. Each
-// other form is built only when the first 128 KiB of the raw text hold the
-// runes that it needs. Equal forms are kept only once.
+//   - form 1 removes the invisible runes, so "ign" + ZWSP + "ore" is
+//     "ignore", and turns each sequence into one space;
+//   - forms 2 to 4 turn some runs of invisible runes into one space, so an
+//     invisible rune cannot take the place of the space between two words:
+//     form 2 each run, form 3 each run of control characters (it removes
+//     the format characters), and form 4 each run with a format character
+//     (it removes the control characters);
+//   - forms 4 to 7 read a CSI as a terminal does, with C0 control
+//     characters inside it, so ESC + U+0001 + "[8mIgnore" is " Ignore";
+//   - forms 5 and 7 give back the text that a sequence takes: an OSC text
+//     (a model reads it, a terminal does not show it), and the letter and
+//     the < = > ? and intermediate bytes of a CSI, so ESC [ "Ignore" is
+//     " Ignore" and ESC [ "<IMPORTANT>" is " <IMPORTANT>". An SGR (colour
+//     and bold) becomes nothing, as a terminal shows it. Form 5 removes the
+//     invisible runes, and form 7 turns each run of them into a space, as
+//     form 2 does.
 //
-//  1. Always: the invisible runes are removed, so an invisible rune cannot
-//     split a word: "ign" + ZWSP + "ore" is "ignore".
-//  2. When the text holds an invisible rune: each run of invisible runes is
-//     one space, so an invisible rune cannot take the place of the space
-//     between two words: "ignore" + ZWSP + "previous" is "ignore previous".
-//  3. When the text holds an invisible control character: the format
-//     characters (such as ZWSP) are removed, and each run of control
-//     characters is one space. So "Ig" + ZWSP + "nore" + U+0001 + "all" is
-//     "Ignore all".
-//  4. When the text holds an invisible control character and a format
-//     character: the control characters are removed, and each run that holds
-//     a format character is one space. A run of only control characters
-//     gives no space. So "Ig" + U+0001 + "nore" + ZWSP + "all" is "Ignore
-//     all". When the last control character of a run is ESC, U+009B or
-//     U+009D, the space goes before the run, so the sequence that it starts
-//     is still found: ESC + ZWSP + "[8mIgnore" + ZWSP + "all" is "  Ignore
-//     all".
-//  5. When the text holds ESC, U+009B (CSI) or U+009D (OSC), or the JSON
-//     text \u001b or \u001B: as the sixth form, but a sequence keeps the text
-//     that it takes. A raw ESC before a letter can make the letter the final
-//     byte of a CSI, as for a terminal: ESC [ "Ignore" is the CSI ESC [ I and
-//     the text "gnore". In this form, a CSI whose final byte is an ASCII
-//     letter other than "m" becomes a space and that letter, so
-//     ESC [ "Ignore" is " Ignore". A CSI with the final byte "m" is SGR
-//     (colour and bold), so it becomes one space: ESC [ 1 m "iPhone" is
-//     " iPhone", not " miPhone", which looks like a camelCase tool name. An
-//     OSC, which a terminal does not show but a model reads, becomes its
-//     text between two spaces: ESC ] "Ignore all" BEL is " Ignore all ".
-//     So this form shows the OSC text, such as a window title or the URL of
-//     a link, and a rule can match it: ESC ] "0;~/.ssh" BEL "Lists files."
-//     is a MOAT-T1-004 hit.
-//  6. When the text holds ESC or U+009B and a C0 control character that can
-//     stand inside a CSI (also TAB, LF and CR): as the first form, but a CSI
-//     can hold C0 control characters, and each sequence becomes one space.
-//     So ESC + U+0001 + "[8mIgnore" is " Ignore". The first form keeps
-//     "[8mIgnore", with no word edge before "Ignore".
+// The doc comment of matchForms in normalize.go has the full list with the
+// build conditions, and the texts that still defeat all the forms. In a
+// description, the invisible_unicode heuristic flags each of those texts,
+// because it flags the invisible runes and the ESC. CONTRIBUTING.md has the
+// same list for rule authors.
 //
 // A text without invisible runes and escape sequences has one form, so it
 // costs no more.
-//
-// These texts still defeat all the forms. In a description, the
-// invisible_unicode heuristic flags each of them, because it flags the
-// invisible runes and the ESC:
-//
-//   - one kind of invisible rune both inside a word and between words, such
-//     as a ZWSP in both places, or U+0001 in both places;
-//   - a CSI that takes a letter together with a format character between
-//     words: in ESC [ "Ignore" + ZWSP + "all", the fifth form removes the
-//     ZWSP, so it joins "Ignoreall", and the other forms lose the "I";
-//   - a control character between ESC (or U+009B, U+009D) and a format
-//     character: the fourth form looks only at the last control character of
-//     a run. So in ESC + U+0001 + ZWSP + "[8mIgnore" + ZWSP + "all", the
-//     fourth form keeps "[8m" before "Ignore", and the other forms join
-//     "Ignoreall";
-//   - a payload that only the fifth form shows, after more than 32 KiB of
-//     text that the fifth form keeps from escape sequences (OSC text and CSI
-//     letters). The max_length heuristic flags such a long text;
-//   - a CSI with the final byte "m" that takes the "m" of a word:
-//     ESC [ 1 "make" is the CSI ESC [ 1 m and the text "ake", and no form
-//     gives the "m" back.
-//
-// An OSC with more than 256 runes of text is not a sequence for any form. So
-// its ESC and its end are removed, and its text stays in every form, where
-// the regexes and keywords read it.
 //
 // A regex reads these base forms, and also a folded form of each. The text
 // is folded one rune at a time: the rune is split into its compatibility
@@ -144,11 +93,12 @@
 // U+FDFA, stays as it is and cannot push a payload out of the 32 KiB.
 // A form that is only ASCII is its own fold, so it adds no folded form. A
 // rule matches when it matches in one form, and each regex of an all_regex
-// list can match in a different form. So a regex reads up to twelve forms of
-// a text (the six base forms and their folds), and a keyword up to six (the
-// folds of the base forms): such a text costs up to twelve times as much to
-// match. The forms are built only when a regex or keyword matcher reads the
-// text, and only once for each match: a heuristic reads only the raw text.
+// list can match in a different form. So a regex reads up to fourteen forms
+// of a text (the seven base forms and their folds), and a keyword up to
+// seven (the folds of the base forms): such a text costs up to fourteen
+// times as much to match. The forms are built only when a regex or keyword
+// matcher reads the text, and only once for each match: a heuristic reads
+// only the raw text.
 //
 // A regex cannot match an invisible rune (use the invisible_unicode heuristic
 // for that), and a pattern must be written in NFC: a pattern with a letter
