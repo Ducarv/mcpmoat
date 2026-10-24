@@ -86,8 +86,22 @@ func benchText(size, first int) string {
 	return b.String()
 }
 
-// matchAll runs every matcher on text and returns the number of hits.
+// matchAll runs every matcher on text and returns the number of hits. It
+// builds the forms of text once and shares them between the matchers, as the
+// engine must do for one target text (#143).
 func matchAll(ms []*Matcher, text string) int {
+	p := prepareText(text)
+	n := 0
+	for _, m := range ms {
+		n += len(m.matchPrepared(p))
+	}
+	return n
+}
+
+// matchAllPerMatcher is matchAll without the shared forms: each Match call
+// builds the forms of text again. BenchmarkAnalysis10x20PerMatcher uses it to
+// show what the shared forms save.
+func matchAllPerMatcher(ms []*Matcher, text string) int {
 	n := 0
 	for _, m := range ms {
 		n += len(m.Match(text))
@@ -110,8 +124,23 @@ func BenchmarkMatch10MB(b *testing.B) {
 
 // BenchmarkAnalysis10x20 is the NFR-03 benchmark: the analysis of 10 servers
 // with 20 tools each (200 descriptions of about 1 KiB) runs in under 1 s. One
-// op is the whole analysis.
+// op is the whole analysis. The matchers share the forms of each description
+// (see matchAll).
 func BenchmarkAnalysis10x20(b *testing.B) {
+	benchAnalysis(b, matchAll)
+}
+
+// BenchmarkAnalysis10x20PerMatcher is BenchmarkAnalysis10x20 with a Match
+// call for each matcher, so each matcher builds the forms again. Compare the
+// two to see the cost of the forms.
+func BenchmarkAnalysis10x20PerMatcher(b *testing.B) {
+	benchAnalysis(b, matchAllPerMatcher)
+}
+
+// benchAnalysis runs match on 200 descriptions of about 1 KiB with the
+// matchers of benchMatcherSet. One op is the 200 calls.
+func benchAnalysis(b *testing.B, match func([]*Matcher, string) int) {
+	b.Helper()
 	ms := benchMatcherSet(b)
 	descs := make([]string, 200)
 	total := 0
@@ -123,7 +152,7 @@ func BenchmarkAnalysis10x20(b *testing.B) {
 	b.ReportAllocs()
 	for b.Loop() {
 		for _, d := range descs {
-			matchAll(ms, d)
+			match(ms, d)
 		}
 	}
 }
@@ -168,16 +197,16 @@ func worstBlock(tb testing.TB) []string {
 }
 
 // BenchmarkWorstCaseBlock measures the most costly match block that passes
-// the caps, on MaxMatchInputBytes of text that has all six regex forms (see
-// regexForms). It starts with sixFormsText: a ZWSP and U+0001, so
-// matchForms gives three forms, and the ligature U+FB03, so each form is not
-// ASCII and its fold ("ffi") is a new form. The rest is 'a', so each form is
-// about MaxMatchInputBytes runes long.
+// the caps (32 KiB of text, 2500 instructions), on MaxMatchInputBytes of text
+// that has all fourteen regex forms (see preparedText.regexForms). It starts
+// with allFormsText: the ZWSP, U+0001, ESC [ I and ESC U+0001 [8m give the
+// seven base forms of matchForms, and the ligature U+FB03 makes each base form
+// not ASCII, so its fold ("ffi") is a new form. The rest is 'a', after the
+// short prefix, so each of the fourteen forms is about MaxMatchInputBytes long.
 //
 // The block is \pL{0,498}!X twice and \pL{0,248}!X: 1000 + 1000 + 500 =
-// maxTotalInsts instructions. Measured on an Apple M1 Pro (Go 1.27, caps 32
-// KiB and 2500): about 4.7 s for one Match call over the six forms, about
-// 144 us per input byte. One form (a text of only 'a') costs about 0.8 s.
+// maxTotalInsts instructions. One op is one Match call over the fourteen forms.
+// For the time on an Apple M1 Pro, see the cost comment in match.go.
 // A hostile --rules directory can repeat such a block in every rule, and
 // every tool text is matched against every rule, so this cost is multiplied
 // by the number of rules and the number of texts.
@@ -186,9 +215,16 @@ func BenchmarkWorstCaseBlock(b *testing.B) {
 	if err != nil {
 		b.Fatalf("Compile() error = %v", err)
 	}
-	text := sixFormsText + strings.Repeat("a", MaxMatchInputBytes-len(sixFormsText))
-	if n := len(regexForms(text)); n != 6 {
-		b.Fatalf("len(regexForms(text)) = %d, want 6", n)
+	text := allFormsText + strings.Repeat("a", MaxMatchInputBytes-len(allFormsText))
+	forms := regexForms(text)
+	if len(forms) != maxRegexForms {
+		b.Fatalf("len(regexForms(text)) = %d, want %d", len(forms), maxRegexForms)
+	}
+	// Each form must fill the cap, or the benchmark does not hit the bound.
+	for i, f := range forms {
+		if len(f) < MaxMatchInputBytes-len(allFormsText) {
+			b.Fatalf("len(regexForms(text)[%d]) = %d, want at least %d", i, len(f), MaxMatchInputBytes-len(allFormsText))
+		}
 	}
 	b.SetBytes(int64(len(text)))
 	b.ReportAllocs()
@@ -199,10 +235,27 @@ func BenchmarkWorstCaseBlock(b *testing.B) {
 	}
 }
 
+// BenchmarkOSCStartRun times one matchForms and one matchWindowCut call on
+// about maxRawScanBytes of U+009D, then U+0001, ESC and ZWSP, so that all
+// seven forms are built. Each U+009D can start an OSC, so this is the slowest
+// known input for the OSC part of ansiSeq (see oscExprC0).
+func BenchmarkOSCStartRun(b *testing.B) {
+	text := strings.Repeat("\u009d", maxRawScanBytes/2-3) + "\x01\x1b\u200b"
+	if got := len(formModes(text)); got != maxBaseForms {
+		b.Fatalf("len(formModes(text)) = %d, want %d", got, maxBaseForms)
+	}
+	b.SetBytes(int64(len(text)))
+	b.ReportAllocs()
+	for b.Loop() {
+		matchForms(text)
+		matchWindowCut(text)
+	}
+}
+
 // worstSchema returns a JSON array of n distinct strings that fills the caps
 // of schemaFit exactly: each string is maxSchemaMatchBytes/n bytes long, and
-// n is at most maxSchemaMatchStrings. Each string starts with sixFormsText,
-// so it has all six regex forms, and the rest is letters, so no regex of
+// n is at most maxSchemaMatchStrings. Each string starts with allFormsText,
+// so it has all fourteen regex forms, and the rest is letters, so no regex of
 // worstBlock matches. It also checks that the seam pass runs on as many seams
 // as maxSeamBytes allows.
 func worstSchema(tb testing.TB, n int) string {
@@ -212,7 +265,7 @@ func worstSchema(tb testing.TB, n int) string {
 	for i := range strs {
 		// Three letters make each string distinct: 26*26*26 > maxSchemaMatchStrings.
 		id := string([]byte{byte('a' + i/676%26), byte('a' + i/26%26), byte('a' + i%26)})
-		strs[i] = sixFormsText + id + strings.Repeat("a", size-len(sixFormsText)-len(id))
+		strs[i] = allFormsText + id + strings.Repeat("a", size-len(allFormsText)-len(id))
 	}
 	raw := mustJSON(tb, strs)
 
@@ -220,8 +273,9 @@ func worstSchema(tb testing.TB, n int) string {
 	if fit, cut := schemaFit(got); !complete || cut || fit != n || len(got) != n {
 		tb.Fatalf("worstSchema(%d): %d strings, %d fit, cut %v, complete %v", n, len(got), fit, cut, complete)
 	}
-	if forms := len(regexForms(got[0])); forms != 6 || len(got[0]) != size {
-		tb.Fatalf("worstSchema(%d): string of %d bytes with %d forms, want %d bytes and 6 forms", n, len(got[0]), forms, size)
+	if forms := len(regexForms(got[0])); forms != maxRegexForms || len(got[0]) != size {
+		tb.Fatalf("worstSchema(%d): string of %d bytes with %d forms, want %d bytes and %d forms",
+			n, len(got[0]), forms, size, maxRegexForms)
 	}
 
 	// No string matches, so the seam pass runs until maxSeamBytes stops it.
@@ -239,16 +293,16 @@ func worstSchema(tb testing.TB, n int) string {
 		return nil
 	})
 	wantSeams := min(n-1, maxSeamBytes/(2*min(size, seamSideBytes)+len(seamSep)))
-	if strCalls != n || seamCalls != wantSeams || len(regexForms(firstSeam)) != 6 {
-		tb.Fatalf("worstSchema(%d): %d string calls, %d seam calls, first seam %d forms; want %d, %d, 6",
-			n, strCalls, seamCalls, len(regexForms(firstSeam)), n, wantSeams)
+	if strCalls != n || seamCalls != wantSeams || len(regexForms(firstSeam)) != maxRegexForms {
+		tb.Fatalf("worstSchema(%d): %d string calls, %d seam calls, first seam %d forms; want %d, %d, %d",
+			n, strCalls, seamCalls, len(regexForms(firstSeam)), n, wantSeams, maxRegexForms)
 	}
 	return raw
 }
 
 // BenchmarkSchemaWorstCase measures the worst-case block of
 // BenchmarkWorstCaseBlock, compiled for the schema target, on a schema that
-// fills the caps of schemaFit. Each string has the six regex forms. No string
+// fills the caps of schemaFit. Each string has the fourteen regex forms. No string
 // matches, so the seam pass also runs until maxSeamBytes stops it. Three
 // shapes fill the byte cap:
 //
@@ -266,15 +320,15 @@ func worstSchema(tb testing.TB, n int) string {
 // schema is about twice the bound of the strings alone.
 //
 // Measured on 2026-10-24 on an Apple M1 Pro (go1.27.3 darwin/arm64), caps
-// 128 KiB and 4096 strings, with -benchtime=3x, in the same run as
-// BenchmarkWorstCaseBlock (about 4.6 s):
+// 128 KiB and 4096 strings, fourteen regex forms for each string, with
+// -benchtime=3x, in the same run as BenchmarkWorstCaseBlock (about 10.3 s):
 //
-//   - 4096 strings: about 1.1 s for one Match call, about 0.24 times the
+//   - 4096 strings: about 1.3 s for one Match call, about 0.13 times the
 //     description worst case. Each string and seam is short, so few regex
 //     threads are alive at each byte;
-//   - 256 strings: about 15.9 s for one Match call, about 3.5 times the
+//   - 256 strings: about 35.1 s for one Match call, about 3.4 times the
 //     description worst case;
-//   - 4 strings: about 18.5 s for one Match call, about 4.0 times the
+//   - 4 strings: about 43.1 s for one Match call, about 4.2 times the
 //     description worst case. This is the worst shape.
 func BenchmarkSchemaWorstCase(b *testing.B) {
 	m, err := Match{AnyRegex: worstBlock(b)}.CompileFor(TargetSchema)

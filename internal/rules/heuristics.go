@@ -38,8 +38,9 @@ const (
 	// so they keep 0.
 	HeuristicMixedScript = "mixed_script"
 	// HeuristicMatchWindow flags a text that the regex and keyword matchers
-	// do not read in full: the text is longer than the raw scan limit, or a
-	// match form is cut at MaxMatchInputBytes (see matchWindowCut). So a
+	// do not read in full: the text is longer than the raw scan limit, or
+	// a form of matchForms is cut at MaxMatchInputBytes. The OSC text of a
+	// form, such as a link URL, does not count (see matchWindowCut). So a
 	// payload that padding pushes out of the match window still gives a hit.
 	// It has no parameters.
 	HeuristicMatchWindow = "match_window"
@@ -226,8 +227,12 @@ const (
 // it flags every control rune except the white space, also the runes that
 // start, end or cancel an ANSI escape sequence (see ansiToSpace): they show
 // as nothing, and a terminal runs them. A raw ESC before a letter can make
-// the letter the final byte of a CSI, so "\x1b[Ignore" hides the "I" from the
-// regexes; this heuristic flags the ESC.
+// the letter the final byte of a CSI, so a terminal does not show the "I" of
+// "\x1b[Ignore". The fifth and the seventh form of matchForms give back that
+// letter, and the text of an OSC, so the regexes and keywords still read them
+// (see keepSeqText and seqText). This heuristic still flags the ESC. It also
+// flags each text that defeats all the forms (see matchForms), because each
+// such text holds an invisible rune.
 //
 // An emoji can hold a VS15 or VS16 and a ZWJ (see isPictograph), so some of
 // these runes are not flagged:
