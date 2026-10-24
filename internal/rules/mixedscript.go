@@ -7,9 +7,10 @@ import (
 	"unicode/utf8"
 )
 
-// mixedScript flags each word of raw that mixes Latin letters with Cyrillic
-// or Greek letters. normalizeForMatch does not fold look-alike letters from
-// other scripts, so "Ignore" with a Cyrillic "I" (U+0406) gets past the regex
+// mixedScript flags each word of raw that mixes Latin letters with letters
+// of a script that has look-alikes of Latin letters, such as Cyrillic or
+// Greek. normalizeForMatch does not fold look-alike letters from other
+// scripts, so "Ignore" with a Cyrillic "I" (U+0406) gets past the regex
 // rules. This heuristic flags such a word.
 //
 // It reads the full raw text in one pass, with no size cut. A word is a
@@ -31,19 +32,27 @@ import (
 // backslash end the word. Any other backslash is a normal rune that ends a
 // word.
 //
-// Each letter counts for its own script: unicode.Latin, unicode.Cyrillic or
-// unicode.Greek. A letter of the Common or Inherited script counts by its
-// fold, the same fold the regex rules use (see appendFold). Each letter of
+// Each letter counts for its own script: unicode.Latin, unicode.Cyrillic,
+// unicode.Greek, or one of the other look-alike scripts (see
+// lookalikeScript): unicode.Armenian, unicode.Cherokee, unicode.Lisu,
+// unicode.Coptic, unicode.Canadian_Aboriginal and unicode.Tifinagh. So
+// Armenian small oh (U+0585), Coptic small o (U+2C9F), Lisu letter ga
+// (U+A4D6) and Cherokee letter v (U+13A5) count for their scripts. A
+// letter of the Common or Inherited script counts by its fold, the same
+// fold the regex rules use (see appendFold). Each letter of
 // the fold counts for its own script. So the mathematical Greek letters
 // (U+1D6A8 to U+1D7CB) and the double-struck Greek letters (U+213C to
 // U+213F) count as Greek, the mathematical Latin letters (such as U+1D400)
 // count as Latin, and U+00B5 (micro sign) counts as Greek small mu. A letter
-// of the Common or Inherited script with no usable fold, and a letter of any
-// other script, count for no script but stay part of the word.
+// of the Common or Inherited script with no usable fold, and a letter of a
+// script not in the list above, count for no script but stay part of the
+// word.
 //
 // A word is flagged when it has:
 //
 //   - Latin and Cyrillic letters, always;
+//   - Latin letters and letters of one of the other look-alike scripts,
+//     always;
 //   - Latin and Greek letters, except for a unit (see
 //     wordState.greekExcused): exactly one Greek letter, that letter is small
 //     mu (U+03BC), capital Omega (U+03A9) or the ohm sign (U+2126), it is the
@@ -53,10 +62,12 @@ import (
 //     not flagged. But mu + "s" with no digit before it, "D" + small sigma
 //     and U+0394 (capital Delta) + "t" are flagged.
 //
-// Cyrillic and Greek letters without a Latin letter are not flagged. The
-// Detail names Greek only when the Greek letters count toward the flag. So
-// a word with Latin, Cyrillic and one excused Greek letter gives "Latin and
-// Cyrillic".
+// A word with no Latin letter is never flagged. The Detail names the
+// scripts that count toward the flag in this order: Latin, Cyrillic, Greek,
+// then the first other look-alike script of the word, such as "Latin and
+// Lisu" or "Latin, Cyrillic and Armenian". It names Greek only when the
+// Greek letters count toward the flag. So a word with Latin, Cyrillic and
+// one excused Greek letter gives "Latin and Cyrillic".
 //
 // The hit is at the byte offset of the first rune of the word. The Detail
 // never holds the word: the terminal-safe output does not change look-alike
@@ -69,11 +80,13 @@ import (
 //   - a word of one letter, as it cannot mix two scripts;
 //   - Latin-script look-alikes that do not fold, such as U+0131 (dotless i),
 //     U+0261 (script g) and the small capitals from U+1D00;
-//   - look-alikes from other scripts, such as Armenian and Cherokee;
+//   - look-alikes from scripts that are not in the list above, such as the
+//     Ethiopic syllable U+12D0, which looks like an "O";
 //   - one mu or Omega at the start or the end of a word that comes after a
 //     digit, such as "5" + mu + "ser";
 //   - a visible rune that is not a letter between the two parts of a word,
-//     such as U+FFFD from an invalid UTF-8 byte, as it splits the word.
+//     as it splits the word. Examples are U+FFFD from an invalid UTF-8 byte
+//     and U+2800 (braille pattern blank), which is not a letter.
 //
 // The escape decoding also runs on description text. So a literal
 // backslash sequence in a description, such as a backslash and a "t", is
@@ -120,21 +133,17 @@ func mixedScript(raw string) []Hit {
 
 // followsDigit reports whether a word whose two previous runes are prev1
 // (the nearer one) and prev2 comes directly after an ASCII digit, or after
-// one space rune that comes directly after an ASCII digit.
+// one space rune that comes directly after an ASCII digit. A space rune is a
+// rune of unicode.IsSpace. It covers the no-break space (U+00A0), the thin
+// space (U+2009) and the narrow no-break space (U+202F), which texts put
+// between a number and its unit.
 func followsDigit(prev1, prev2 rune) bool {
-	return isASCIIDigit(prev1) || isUnitSpace(prev1) && isASCIIDigit(prev2)
+	return isASCIIDigit(prev1) || unicode.IsSpace(prev1) && isASCIIDigit(prev2)
 }
 
 // isASCIIDigit reports whether r is 0-9.
 func isASCIIDigit(r rune) bool {
 	return '0' <= r && r <= '9'
-}
-
-// isUnitSpace reports whether r is a space rune that can stand between a
-// number and its unit: a rune of unicode.IsSpace, the no-break space
-// (U+00A0), the thin space (U+2009) or the narrow no-break space (U+202F).
-func isUnitSpace(r rune) bool {
-	return unicode.IsSpace(r) || r == '\u00A0' || r == '\u2009' || r == '\u202F'
 }
 
 // wordState holds what mixedScript knows about the current word. It uses
@@ -148,6 +157,12 @@ type wordState struct {
 	latin    int // Latin letters
 	cyrillic int // Cyrillic letters
 	greek    int // Greek letters
+
+	// other counts the letters of the other look-alike scripts (see
+	// lookalikeScript), and otherName is the name of the first such script
+	// in the word.
+	other     int
+	otherName string
 
 	greekLetter      rune // the last Greek letter; the only one when greek == 1
 	firstLetterGreek bool // the first letter of the word is Greek
@@ -171,8 +186,9 @@ func (w *wordState) add(i int, r rune) {
 }
 
 // addLetter counts the letter r for its own script, if that script is
-// Latin, Cyrillic or Greek. When fold is true and r is of the Common or
-// Inherited script, r counts by its fold instead (see addFolded).
+// Latin, Cyrillic, Greek or one of the other look-alike scripts (see
+// lookalikeScript). When fold is true and r is of the Common or Inherited
+// script, r counts by its fold instead (see addFolded).
 func (w *wordState) addLetter(r rune, fold bool) {
 	isGreek := false
 	switch {
@@ -184,6 +200,11 @@ func (w *wordState) addLetter(r rune, fold bool) {
 		w.greek++
 		w.greekLetter = r
 		isGreek = true
+	case lookalikeScript(r) != "":
+		if w.other == 0 {
+			w.otherName = lookalikeScript(r)
+		}
+		w.other++
 	case fold && unicode.In(r, unicode.Common, unicode.Inherited):
 		w.addFolded(r)
 		return
@@ -220,22 +241,67 @@ func (w *wordState) addFolded(r rune) {
 	}
 }
 
+// lookalikeScript returns the name of the script of the letter r when that
+// script is one of the other scripts with letters that look like Latin
+// letters: Armenian, Cherokee, Lisu, Coptic, Canadian Aboriginal or
+// Tifinagh. It returns "" for any other rune.
+func lookalikeScript(r rune) string {
+	switch {
+	case unicode.Is(unicode.Armenian, r):
+		return "Armenian"
+	case unicode.Is(unicode.Cherokee, r):
+		return "Cherokee"
+	case unicode.Is(unicode.Lisu, r):
+		return "Lisu"
+	case unicode.Is(unicode.Coptic, r):
+		return "Coptic"
+	case unicode.Is(unicode.Canadian_Aboriginal, r):
+		return "Canadian Aboriginal"
+	case unicode.Is(unicode.Tifinagh, r):
+		return "Tifinagh"
+	}
+	return ""
+}
+
 // mixedScripts returns the scripts that make the word suspect, such as
-// "Latin and Cyrillic", or "" when the word is not flagged.
+// "Latin and Cyrillic" or "Latin, Cyrillic and Coptic", or "" when the word
+// is not flagged. The names come in this order: Latin, Cyrillic, Greek, then
+// the first other look-alike script of the word.
 func (w *wordState) mixedScripts() string {
 	if w.latin == 0 {
 		return ""
 	}
-	greekCounts := w.greek > 0 && !w.greekExcused()
-	switch {
-	case w.cyrillic > 0 && greekCounts:
-		return "Latin, Cyrillic and Greek"
-	case w.cyrillic > 0:
-		return "Latin and Cyrillic"
-	case greekCounts:
-		return "Latin and Greek"
+	names := [4]string{"Latin"}
+	n := 1
+	if w.cyrillic > 0 {
+		names[n] = "Cyrillic"
+		n++
 	}
-	return ""
+	if w.greek > 0 && !w.greekExcused() {
+		names[n] = "Greek"
+		n++
+	}
+	if w.other > 0 {
+		names[n] = w.otherName
+		n++
+	}
+	if n < 2 {
+		return ""
+	}
+	return joinNames(names[:n])
+}
+
+// joinNames joins two or more script names: "A and B", "A, B and C".
+func joinNames(names []string) string {
+	s := names[0]
+	for i := 1; i < len(names); i++ {
+		sep := ", "
+		if i == len(names)-1 {
+			sep = " and "
+		}
+		s += sep + names[i]
+	}
+	return s
 }
 
 // greekExcused reports whether the Greek letters of the word are one unit

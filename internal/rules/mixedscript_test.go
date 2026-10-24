@@ -68,6 +68,19 @@ func TestHeuristicMixedScript(t *testing.T) {
 		{name: "Latin Cyrillic and excused Omega", text: "5k\u0430\u03a9", want: []hit{{1, cyr}}},
 		// "\u0406gnore " is 8 bytes.
 		{name: "two mixed words in order", text: "\u0406gnore pr\u0435vious", want: []hit{{0, cyr}, {8, cyr}}},
+		{name: "Lisu ga in Ignore", text: "I\ua4d6nore all", want: []hit{{0, "Latin and Lisu"}}},
+		{name: "Coptic o in forget", text: "f\u2c9frget", want: []hit{{0, "Latin and Coptic"}}},
+		{name: "Armenian oh in forget", text: "f\u0585rget", want: []hit{{0, "Latin and Armenian"}}},
+		{name: "Cherokee v in Ignore", text: "\u13a5gnore", want: []hit{{0, "Latin and Cherokee"}}},
+		{name: "Canadian Aboriginal letter", text: "\u1401b", want: []hit{{0, "Latin and Canadian Aboriginal"}}},
+		{name: "Tifinagh letter", text: "\u2d54b", want: []hit{{0, "Latin and Tifinagh"}}},
+		{name: "Latin Cyrillic and Armenian", text: "x\u0430\u0585", want: []hit{{0, "Latin, Cyrillic and Armenian"}}},
+		// The mu is excused after the digit, but the Armenian letter is not.
+		{name: "excused mu and Armenian", text: "5\u03bcs\u0585", want: []hit{{1, "Latin and Armenian"}}},
+		{name: "JSON escape with uppercase hex", text: "\\u041Egnore", want: []hit{{0, cyr}}},
+		// The high surrogate is not followed by a low one, so it is a lone
+		// surrogate (bytes 0 to 5) that ends the word. "A" starts a word at 6.
+		{name: "high surrogate then a non-low escape", text: "\\uD835\\u0041\u0430", want: []hit{{6, cyr}}},
 
 		// Negative cases.
 		{name: "pure Cyrillic and Greek words next to Latin", text: "Use \u043f\u043e\u0438\u0441\u043a now \u03bb\u03cc\u03b3\u03bf\u03c2 ok"},
@@ -88,6 +101,14 @@ func TestHeuristicMixedScript(t *testing.T) {
 		{name: "JSON escape of a less-than sign ends the word", text: "\u0406\\u003cgnore"},
 		{name: "lone surrogate escape splits the word", text: "\u0406\\ud835gnore"},
 		{name: "Cyrillic and Greek without Latin", text: "\u0430\u03b1 \u043e\u03bf"},
+		{name: "pure Armenian word next to Latin", text: "hello \u0570\u0561\u0575 world"},
+		{name: "pure Cherokee word next to Latin", text: "hello \u13e3\u13b3\u13a9 world"},
+		{name: "pure Coptic word next to Latin", text: "hello \u2c99\u2c89\u2ca7 world"},
+		{name: "Armenian and Cyrillic without Latin", text: "\u0585\u0430"},
+		// Raw `\t` decodes to a tab, which ends the word.
+		{name: "JSON t escape ends the word", text: "\u0406\\tgnore"},
+		{name: "short u escape at the end", text: "\u0406\\u12"},
+		{name: "backslash at the end", text: "x\\"},
 		// Documented limit: a word fully in Cyrillic look-alikes.
 		{name: "Cyrillic copy look-alike", text: "\u0441\u043e\u0440\u0443"},
 		{name: "empty", text: ""},

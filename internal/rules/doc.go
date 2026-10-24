@@ -102,8 +102,9 @@
 // from other scripts (for example Cyrillic U+0430 for Latin "a") are not
 // folded, for regexes or keywords. Instead, the mixed_script heuristic (rules
 // MOAT-T1-010 and MOAT-T1-011) flags a word that mixes Latin letters with
-// Cyrillic or Greek letters, except a Greek unit letter after a number. See
-// the Heuristics and hits section for details.
+// letters of Cyrillic, Greek or another look-alike script such as Lisu,
+// except a Greek unit letter after a number. See the Heuristics and hits
+// section for details.
 //
 // Any run of white space, or U+2800 (braille blank), matches the space
 // between the words of a keyword. Punctuation does not: the keyword "ignore
@@ -131,17 +132,21 @@
 // chunks is not flagged when no chunk reaches min_length on its own.
 //
 // The mixed_script heuristic flags a word that mixes Latin letters with
-// Cyrillic or Greek letters, such as "Ignore" with a Cyrillic "I" (U+0406).
-// It reads the full raw text. A hit gives the raw byte offset of the first
-// rune of the word and names the scripts, but it never holds the word: the
-// terminal-safe output does not change look-alike letters, so the word would
-// show as normal Latin text. A word is a run of letters, marks and invisible
-// runes, so a ZWSP or a combining mark cannot split a word. Any other rune,
-// such as a digit, '_', '-', a space or punctuation, ends a word.
+// letters of a look-alike script, such as "Ignore" with a Cyrillic "I"
+// (U+0406). The look-alike scripts are Cyrillic, Greek, Armenian, Cherokee,
+// Lisu, Coptic, Canadian Aboriginal and Tifinagh. Only Greek has an
+// exemption, for a unit (see below). The heuristic reads the full raw text.
+// A hit gives the raw byte offset of the first rune of the word and names
+// the scripts, but it never holds the word: the terminal-safe output does
+// not change look-alike letters, so the word would show as normal Latin
+// text. A word is a run of letters, marks and invisible runes, so a ZWSP or
+// a combining mark cannot split a word. Any other rune, such as a digit,
+// '_', '-', a space or punctuation, ends a word.
 //
-// Each letter counts for its own script. A letter of the Common or Inherited
-// script counts by its fold, the same fold that the regexes read. So the
-// mathematical Greek letters (U+1D6A8 to U+1D7CB) count as Greek, the
+// Each letter counts for its own script. So Armenian small oh (U+0585) and
+// Lisu letter ga (U+A4D6) count for their scripts. A letter of the Common or
+// Inherited script counts by its fold, the same fold that the regexes read.
+// So the mathematical Greek letters (U+1D6A8 to U+1D7CB) count as Greek, the
 // mathematical Latin letters (such as U+1D400) count as Latin, and U+00B5
 // (micro sign) counts as Greek mu.
 //
@@ -170,11 +175,12 @@
 //     "copy" (U+0441 U+043E U+0440 U+0443);
 //   - a word of one letter, because it cannot mix two scripts;
 //   - Latin-script look-alikes that do not fold, such as U+0131 (dotless i);
-//   - look-alikes from other scripts, such as Armenian and Cherokee;
+//   - look-alikes from scripts outside the list, such as the Ethiopic
+//     syllable U+12D0, which looks like an "O";
 //   - one mu or Omega at the start or the end of a word that comes after a
 //     digit, such as "5" + U+03BC + "ser";
 //   - a word that a visible rune other than a letter splits in two, such as
-//     U+FFFD from an invalid UTF-8 byte.
+//     U+FFFD from an invalid UTF-8 byte or U+2800 (braille blank).
 //
 // The config heuristics (insecure_url, plaintext_secret, unpinned_package,
 // auto_install and typosquat) read one line of text each, not the whole text.

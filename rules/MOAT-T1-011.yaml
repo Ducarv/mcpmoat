@@ -5,7 +5,7 @@
 # \u0001) does not split a word. An escape that decodes to a space or a
 # punctuation rune (such as \n or \") ends a word.
 id: MOAT-T1-011
-title: Tool schema has a word that mixes Latin letters with Cyrillic or Greek letters
+title: Tool schema has a word that mixes Latin letters with letters of a look-alike script
 severity: medium
 target: schema
 match:
