@@ -2,6 +2,7 @@ package rules
 
 import (
 	"bufio"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -32,7 +33,7 @@ func unescapeExfil(s string) (string, error) {
 		}
 		i++
 		if i == len(s) {
-			return "", fmt.Errorf("trailing backslash")
+			return "", errors.New("trailing backslash")
 		}
 		switch s[i] {
 		case 'n':
@@ -57,6 +58,7 @@ func unescapeExfil(s string) (string, error) {
 func parseExfilCorpus(r io.Reader) ([]exfilCase, error) {
 	var cases []exfilCase
 	sc := bufio.NewScanner(r)
+	// The default 64 KB line limit is close: the longest real description is about 18 KB.
 	sc.Buffer(make([]byte, 0, 64*1024), 1024*1024)
 	for n := 1; sc.Scan(); n++ {
 		line := strings.TrimRight(sc.Text(), "\r \t")
@@ -68,7 +70,7 @@ func parseExfilCorpus(r io.Reader) ([]exfilCase, error) {
 			return nil, fmt.Errorf("line %d: want a label, one space and a text", n)
 		}
 		switch label {
-		case "ok", "hit", "fp", "miss":
+		case "ok", "hit", "fp", "miss": // a known label
 		default:
 			return nil, fmt.Errorf("line %d: unknown label %q", n, label)
 		}
@@ -91,6 +93,43 @@ func clipExfil(s string) string {
 		return s[:maxLen]
 	}
 	return s
+}
+
+// exfilID is the rule that the exfil corpus measures.
+const exfilID = "MOAT-T1-005"
+
+// exfilRule returns the built-in rule exfilID or stops the test.
+func exfilRule(t *testing.T) *Rule {
+	t.Helper()
+	rs := mustBuiltin(t, WithCompiler(builtinCompiler()))
+	for i := range rs {
+		if rs[i].ID == exfilID {
+			return &rs[i]
+		}
+	}
+	t.Fatalf("built-in rule %s not found", exfilID)
+	return nil
+}
+
+// TestExfilPrefixesAgree checks that the URL and email regexes of the rule
+// differ only in the address part. They are one form split in two to stay
+// under the instruction limit, so an edit to the verbs, nouns or wording of
+// only one of them would make the URL and email forms disagree.
+func TestExfilPrefixesAgree(t *testing.T) {
+	t.Parallel()
+	res := exfilRule(t).Match.AnyRegex
+	if len(res) < 2 {
+		t.Fatalf("%s has %d any_regex entries, want at least 2", exfilID, len(res))
+	}
+	// "<?" is the optional angle bracket that starts the address part.
+	url, _, okURL := strings.Cut(res[0], "<?")
+	email, _, okEmail := strings.Cut(res[1], "<?")
+	if !okURL || !okEmail {
+		t.Fatalf("%s any_regex[0] or [1] has no \"<?\" before the address", exfilID)
+	}
+	if url != email {
+		t.Errorf("%s any_regex[0] and [1] differ before the address:\n[0] %s\n[1] %s", exfilID, url, email)
+	}
 }
 
 // TestParseExfilCorpus checks the corpus parser: good lines, each escape,
@@ -195,21 +234,9 @@ func TestExfilCorpus(t *testing.T) {
 		len(cases), count["ok"], count["hit"], count["fp"], count["miss"],
 		100*float64(count["fp"])/float64(count["ok"]+count["fp"]))
 
-	const id = "MOAT-T1-005"
-	var rule *Rule
-	rs := mustBuiltin(t, WithCompiler(builtinCompiler()))
-	for i := range rs {
-		if rs[i].ID == id {
-			rule = &rs[i]
-			break
-		}
-	}
-	if rule == nil {
-		t.Fatalf("built-in rule %s not found", id)
-	}
-	m, err := rule.Match.Compile()
+	m, err := exfilRule(t).Match.Compile()
 	if err != nil {
-		t.Fatalf("compile %s: %v", id, err)
+		t.Fatalf("compile %s: %v", exfilID, err)
 	}
 
 	for _, c := range cases {
@@ -231,7 +258,7 @@ func TestExfilCorpus(t *testing.T) {
 				hint = " (the rule now matches this accepted gap: relabel the line hit)"
 			}
 			t.Errorf("line %d (%s): rule %s matched = %v, want it to %s%s: %q",
-				c.line, c.label, id, got, want, hint, clipExfil(c.text))
+				c.line, c.label, exfilID, got, want, hint, clipExfil(c.text))
 		})
 	}
 }
