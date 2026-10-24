@@ -305,9 +305,17 @@ func (t *Typosquat) scopeSquat(c typoCandidate) (string, bool) {
 // Else the threshold is 1.
 //
 // Known limits:
-//   - Two edits inside a tail shorter than minTwoEditTailLen runes, such as
-//     "mcp-server-gxx" against "mcp-server-git", give no finding. A short
-//     tail cannot tell a typo from a different product ("gcp" against "git").
+//   - Two edits inside a tail shorter than minTwoEditTailLen runes give no
+//     finding. A short tail cannot tell a typo from a different product
+//     ("gcp" against "git"). This covers every popular name whose last word
+//     is short, such as "mcp-server-gxx" against "mcp-server-git" and
+//     "tavily-mxx" against "tavily-mcp". One edit there still gives a
+//     finding.
+//   - Two runes added at the end count even after a short last word, so a
+//     real product that extends a popular name by two runes, such as
+//     "mcp-server-gitee" against "mcp-server-git", gives a finding. Appending
+//     runes is a common way to squat a name, and no such package was found
+//     on npm or PyPI when the threshold was set.
 //   - The tail runs to the end of the name, so a shared suffix makes it
 //     longer: "ana-mcp-server" against "exa-mcp-server" still counts as
 //     close.
@@ -321,9 +329,9 @@ func closeDistance(a, b string) (int, bool) {
 		return 0, false
 	}
 	appended := strings.HasPrefix(a, b) || strings.HasPrefix(b, a)
-	threshold := 2
-	if short <= shortTyposquatNameLen || (!appended && distinctiveTailRunes(a, b, short) < minTwoEditTailLen) {
-		threshold = 1
+	threshold := 1
+	if short > shortTyposquatNameLen && (appended || distinctiveTailRunes(a, b, short) >= minTwoEditTailLen) {
+		threshold = 2
 	}
 	if la-lb > threshold || lb-la > threshold {
 		return 0, false // cheap exit: the lengths alone rule it out
@@ -334,7 +342,8 @@ func closeDistance(a, b string) (int, bool) {
 
 // distinctiveTailRunes returns the length in runes of the part of the shorter
 // name that starts after the last separator ("-", "/", "_", "." or "@") inside
-// the prefix that a and b share. short is the rune count of the shorter name.
+// the prefix that a and b share. short is the rune count of the shorter name;
+// the caller passes it because it has already counted both names.
 // For "mcp-server-gcp" and "mcp-server-git" the shared prefix is
 // "mcp-server-g", the last separator in it is the second "-", and the result
 // is 3: the word "gcp". It allocates nothing.

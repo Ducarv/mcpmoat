@@ -160,9 +160,19 @@ hit docker mcp/fetchh mcp/fetch
 # Two edits that change a tail shorter than 5 runes after the last shared
 # separator give no finding. The rule allows only one edit here, because a
 # short tail cannot tell a typo from a different product (gcp against git).
+# Popular names that end in a short word such as -mcp are in this gap too.
 # This is a known false negative. A fix for it should flip these lines to hit.
 # Runes only added at the end of the whole popular name are not in this gap
 # (see the hit group for a short last word).
 ok pypi mcp-server-gxx
 ok pypi mcp-server-tixx
 ok pypi mcp-server-gixx
+ok npm tavily-mxx
+ok npm firecrawl-mpx
+
+# --- hit: accepted false positive (synthetic name, not a real package) ---
+# Two runes added at the end of a popular name count even after a short last
+# word, so a real product that extends a popular name this way gets a finding.
+# mcp-server-gitee was not on npm or PyPI on 2026-10-23. A fix for this should
+# flip the line to ok.
+hit pypi mcp-server-gitee mcp-server-git
