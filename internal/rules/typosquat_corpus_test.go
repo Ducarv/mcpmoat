@@ -36,13 +36,14 @@ func corpusServer(registry, name string) discover.Server {
 // parseCorpus reads the corpus file. A malformed line is an error that names
 // its line number.
 func parseCorpus(path string) ([]corpusCase, error) {
-	data, err := os.ReadFile(path) //nolint:gosec // G304: path is a constant fixture path from the test
+	f, err := os.Open(path) //nolint:gosec // G304: path is a constant fixture path from the test
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("read corpus: %w", err)
 	}
+	defer func() { _ = f.Close() }() // read-only file: a close error loses no data
 
 	var cases []corpusCase
-	sc := bufio.NewScanner(strings.NewReader(string(data)))
+	sc := bufio.NewScanner(f)
 	for n := 1; sc.Scan(); n++ {
 		text := strings.TrimSpace(sc.Text())
 		if text == "" || strings.HasPrefix(text, "#") {
