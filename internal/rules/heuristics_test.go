@@ -86,13 +86,14 @@ func TestHeuristicInvisibleUnicode(t *testing.T) {
 		{name: "VS16 after a digit", text: "1\ufe0f", want: []hit{{1, "U+FE0F at offset 1"}}},
 		{name: "ZWJ after a keycap", text: "1\ufe0f\u20e3\u200d\U0001F525", want: []hit{{7, "U+200D at offset 7"}}},
 		{name: "VS16 after an invalid byte", text: "\xff\ufe0f", want: []hit{{1, "U+FE0F at offset 1"}}},
-		// Control runes other than white space and the ANSI controls.
+		// Control runes other than white space.
 		{name: "SOH U+0001", text: "ab\x01cd", want: []hit{{2, "U+0001 at offset 2"}}},
 		{name: "DEL", text: "x\x7f", want: []hit{{1, "U+007F at offset 1"}}},
 		{name: "NUL", text: "\x00start", want: []hit{{0, "U+0000 at offset 0"}}},
 		{name: "C1 DCS U+0090", text: "a\u0090b", want: []hit{{1, "U+0090 at offset 1"}}},
 		{name: "control rune inside keyword", text: "Ig\x01nore \x1f", want: []hit{{2, "U+0001 at offset 2"}, {8, "U+001F at offset 8"}}},
-		// The ANSI controls are invisible too; the normalizer keeps them visible.
+		// The runes that start, end or cancel an ANSI escape sequence are
+		// invisible control runes too.
 		{name: "ANSI CSI", text: "a\x1b[8mhidden\x1b[0m b", want: []hit{{1, "U+001B at offset 1"}, {11, "U+001B at offset 11"}}},
 		{name: "ANSI OSC with BEL", text: "a\x1b]0;title\x07b", want: []hit{{1, "U+001B at offset 1"}, {10, "U+0007 at offset 10"}}},
 		{name: "CAN and SUB", text: "a\x1b[\x18b\x1a", want: []hit{{1, "U+001B at offset 1"}, {3, "U+0018 at offset 3"}, {5, "U+001A at offset 5"}}},
@@ -287,8 +288,9 @@ func TestHeuristicBase64Blob(t *testing.T) {
 		{name: "Unix path", text: "/usr/local/lib/node_modules/some-package/dist/index.js", wantOffset: -1},
 		{name: "empty", text: "", wantOffset: -1},
 		{name: "text split by NUL byte", text: "Run: " + split, wantOffset: -1},
-		// ESC is not invisible, so it ends a run like a space.
-		{name: "split by ESC", text: "Run: " + payloadStd[:30] + "\x1b" + payloadStd[30:], wantOffset: -1},
+		// ESC and BEL are invisible, so they are skipped like a ZWSP.
+		{name: "ESC inside a run is skipped", text: "Run: " + payloadStd[:30] + "\x1b" + payloadStd[30:], wantOffset: 5},
+		{name: "BEL inside a run is skipped", text: "Run: " + payloadStd[:30] + "\x07" + payloadStd[30:], wantOffset: 5},
 		{name: "split by tab", text: "Run: " + payloadStd[:30] + "\t" + payloadStd[30:], wantOffset: -1},
 		{name: "min_text over payload", params: map[string]any{"min_text": 50}, text: "Run: " + payloadStd, wantOffset: -1},
 		{name: "min_length over payload", params: map[string]any{"min_length": 61}, text: "Run: " + payloadStd, wantOffset: -1},

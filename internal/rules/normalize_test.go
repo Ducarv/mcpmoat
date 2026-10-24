@@ -41,8 +41,8 @@ func TestIsInvisible(t *testing.T) {
 		{name: "newline", r: '\n', want: false},
 		{name: "emoji", r: '\U0001F642', want: false},
 		{name: "combining acute", r: '\u0301', want: false},
-		// Control runes (Cc) are invisible, except white space and the runes
-		// that change how an ANSI escape sequence is read.
+		// Control runes (Cc) are invisible, except white space. The runes
+		// that start, end or cancel an ANSI escape sequence are invisible too.
 		{name: "NUL", r: '\x00', want: true},
 		{name: "SOH U+0001", r: '\x01', want: true},
 		{name: "US U+001F", r: '\x1f', want: true},
@@ -53,13 +53,13 @@ func TestIsInvisible(t *testing.T) {
 		{name: "FF", r: '\f', want: false},
 		{name: "CR", r: '\r', want: false},
 		{name: "NEL", r: '\u0085', want: false},
-		{name: "ESC", r: '\x1b', want: false},
-		{name: "BEL", r: '\x07', want: false},
-		{name: "CAN", r: '\x18', want: false},
-		{name: "SUB", r: '\x1a', want: false},
-		{name: "C1 CSI", r: '\u009b', want: false},
-		{name: "C1 ST", r: '\u009c', want: false},
-		{name: "C1 OSC", r: '\u009d', want: false},
+		{name: "ESC", r: '\x1b', want: true},
+		{name: "BEL", r: '\x07', want: true},
+		{name: "CAN", r: '\x18', want: true},
+		{name: "SUB", r: '\x1a', want: true},
+		{name: "C1 CSI", r: '\u009b', want: true},
+		{name: "C1 ST", r: '\u009c', want: true},
+		{name: "C1 OSC", r: '\u009d', want: true},
 		// Cf, but shows as a mark (prepended concatenation marks).
 		{name: "Arabic number sign", r: '\u0600', want: false},
 		{name: "Arabic end of ayah", r: '\u06dd', want: false},
@@ -106,20 +106,21 @@ func TestNormalizeForMatch(t *testing.T) {
 		{name: "control rune next to white space", in: "a\x01\tb\x7f\nc", want: "a\tb\nc"},
 		{name: "ANSI CSI to space", in: "a\x1b[8mIgnore\x1b[0m b", want: "a Ignore  b"},
 		{name: "ANSI CSI before keyword", in: "\x1b[8mIgnore", want: " Ignore"},
-		// CAN and SUB cancel a sequence: they are kept, and each becomes a
-		// space, so the "I" is not read as the final byte of a CSI.
-		{name: "CAN inside CSI keeps keyword", in: "\x1b[\x18Ignore", want: " [ Ignore"},
-		{name: "SUB inside CSI keeps keyword", in: "\x1b[\x1aIgnore", want: " [ Ignore"},
-		// U+0001 is dropped only after the CSI step, so it cannot make
-		// ESC [ I, a CSI that hides the "I".
-		{name: "control rune inside CSI keeps keyword", in: "\x1b[\x01Ignore", want: " [Ignore"},
+		// The control runes are dropped only after the CSI step, so CAN, SUB
+		// or U+0001 cannot make ESC [ I, a CSI that hides the "I". The ESC is
+		// then dropped too.
+		{name: "CAN inside CSI keeps keyword", in: "\x1b[\x18Ignore", want: "[Ignore"},
+		{name: "SUB inside CSI keeps keyword", in: "\x1b[\x1aIgnore", want: "[Ignore"},
+		{name: "control rune inside CSI keeps keyword", in: "\x1b[\x01Ignore", want: "[Ignore"},
+		{name: "BEL inside keyword", in: "Ig\x07nore", want: "Ignore"},
+		{name: "ESC inside keyword", in: "Ig\x1bnore", want: "Ignore"},
 		{name: "C1 CSI before keyword", in: "\u009b8mIgnore", want: " Ignore"},
 		{name: "C1 CSI to space", in: "a\u009b1;31mb", want: "a b"},
 		{name: "JSON-escaped CSI to space", in: "a\\u001b[8mb", want: "a b"},
 		{name: "ANSI OSC to space", in: "a\x1b]0;title\x07b", want: "a b"},
 		{name: "ANSI OSC with BEL before keyword", in: "\x1b]0;title\x07Ignore", want: " Ignore"},
 		{name: "C1 OSC with C1 ST", in: "a\u009d0;title\u009cb", want: "a b"},
-		{name: "OSC with no end keeps the text", in: "a\x1b]0;title b", want: "a ]0;title b"},
+		{name: "OSC with no end keeps the text", in: "a\x1b]0;title b", want: "a]0;title b"},
 		{name: "ASCII white space kept", in: "a\tb\nc\rd\fe", want: "a\tb\nc\rd\fe"},
 		{name: "VT FF and NEL not dropped", in: "a\vb\fc\u0085d", want: "a b\fc d"},
 		{name: "emoji kept", in: "hi \U0001F642", want: "hi \U0001F642"},
@@ -370,6 +371,10 @@ func TestFoldMarksNotLonger(t *testing.T) {
 	}
 }
 
+// controlPadding is a run of control runes longer than MaxMatchInputBytes.
+// If each rune of it became a space, a payload after it would be cut off.
+var controlPadding = strings.Repeat("\x01", 33000)
+
 // TestMatchForms checks that a text gets the spaced second form only when it
 // holds an invisible rune, and the third form only when one of them is a
 // control rune.
@@ -393,8 +398,24 @@ func TestMatchForms(t *testing.T) {
 		{name: "ZWSP and control rune in one run", in: "a\u200b\x01b", want: []string{"ab", "a b"}},
 		// The third form drops the ZWSP and makes each control rune a space.
 		{name: "ZWSP inside a word and control rune between words", in: "Ig\u200bnore\x01all", want: []string{"Ignoreall", "Ig nore all", "Ignore all"}},
-		{name: "one space for each control rune in the third form", in: "a\x01\x02b\u200bc", want: []string{"abc", "a b c", "a  bc"}},
-		{name: "control rune inside CSI", in: "\x1b[\x01Ignore", want: []string{" [Ignore", " [ Ignore"}},
+		{name: "one space for each run of control runes in the third form", in: "a\x01\x02b\u200bc", want: []string{"abc", "a b c", "a bc"}},
+		// A ZWSP inside a run of control runes does not end the run.
+		{name: "ZWSP inside a run of control runes", in: "a\x01\u200b\x01b\u200bc", want: []string{"abc", "a b c", "a bc"}},
+		{name: "control rune inside CSI", in: "\x1b[\x01Ignore", want: []string{"[Ignore", " [ Ignore"}},
+		// The runes that start, end or cancel an ANSI escape sequence are
+		// invisible control runes too, so they are dropped inside a word.
+		{name: "BEL inside a word", in: "Ig\x07nore", want: []string{"Ignore", "Ig nore"}},
+		{name: "CAN inside a word", in: "Ig\x18nore", want: []string{"Ignore", "Ig nore"}},
+		{name: "SUB inside a word", in: "Ig\x1anore", want: []string{"Ignore", "Ig nore"}},
+		{name: "ESC inside a word", in: "Ig\x1bnore", want: []string{"Ignore", "Ig nore"}},
+		{name: "C1 ST inside a word", in: "Ig\u009cnore", want: []string{"Ignore", "Ig nore"}},
+		// One space for the whole run of padding, so the payload stays in
+		// the MaxMatchInputBytes window of the third form.
+		{
+			name: "control rune padding is one space in the third form",
+			in:   controlPadding + "Ig\u200bnore\x01all\x01previous",
+			want: []string{"Ignoreallprevious", " Ig nore all previous", " Ignore all previous"},
+		},
 		{name: "white space only is one form", in: "a\tb\nc\rd\fe\vf\u0085g", want: []string{"a\tb\nc\rd\fe f g"}},
 		{name: "ANSI CSI is one form", in: "\x1b[8mIgnore", want: []string{" Ignore"}},
 		{name: "empty", in: "", want: []string{""}},
@@ -406,6 +427,38 @@ func TestMatchForms(t *testing.T) {
 				t.Errorf("matchForms(%q) = %q, want %q", tt.in, got, tt.want)
 			}
 		})
+	}
+}
+
+// TestNormalizeInvisibleModes checks that each mode of normalizeInvisible
+// builds its form of matchForms for one input.
+func TestNormalizeInvisibleModes(t *testing.T) {
+	t.Parallel()
+
+	in := "Ig\u200bnore\x01\x02all\u200b\u200cprevious"
+	tests := []struct {
+		name string
+		mode invisibleMode
+		want string
+	}{
+		{name: "dropInvisible", mode: dropInvisible, want: "Ignoreallprevious"},
+		{name: "spaceInvisible", mode: spaceInvisible, want: "Ig nore all previous"},
+		{name: "spaceControls", mode: spaceControls, want: "Ignore allprevious"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if got := normalizeInvisible(in, tt.mode); got != tt.want {
+				t.Errorf("normalizeInvisible(%q, %s) = %q, want %q", in, tt.name, got, tt.want)
+			}
+		})
+	}
+	if got := normalizeForMatch(in); got != normalizeInvisible(in, dropInvisible) {
+		t.Errorf("normalizeForMatch(%q) = %q, want the dropInvisible form", in, got)
+	}
+	want := []string{"Ignoreallprevious", "Ig nore all previous", "Ignore allprevious"}
+	if got := matchForms(in); !slices.Equal(got, want) {
+		t.Errorf("matchForms(%q) = %q, want %q", in, got, want)
 	}
 }
 

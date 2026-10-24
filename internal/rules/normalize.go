@@ -31,9 +31,8 @@ const maxRawScanBytes = 4 * MaxMatchInputBytes
 // isInvisible reports whether r is a rune that shows as nothing but can split
 // a keyword: a format character (Cf), a variation selector, another
 // default-ignorable code point, or a control rune (Cc) that is not white
-// space and not one of ansiControls. The few Cf runes that show as a mark
-// (the prepended concatenation marks, such as the Arabic number sign U+0600)
-// are not invisible.
+// space. The few Cf runes that show as a mark (the prepended concatenation
+// marks, such as the Arabic number sign U+0600) are not invisible.
 //
 // This covers the zero-width characters (ZWSP, ZWNJ, ZWJ, word joiner), LRM
 // and RLM, the bidi embeddings, overrides and isolates, the BOM, the soft
@@ -43,21 +42,18 @@ const maxRawScanBytes = 4 * MaxMatchInputBytes
 // invisible_unicode flags such text too.
 //
 // It also covers the control runes (U+0000 to U+001F and U+007F to U+009F),
-// such as NUL, U+0001 and DEL. So "Ig" + U+0001 + "nore" is "Ignore" for the
-// matchers, as it is for a model. These control runes are not invisible:
-//
-//   - the white space of unicode.IsSpace. It separates words, and
-//     spacesToASCII maps the white space that RE2 \s does not match;
-//   - the runes of ansiControls, which change how an ANSI escape sequence is
-//     read, so ansiToSpace must still see them.
+// such as NUL, U+0001, ESC, BEL and DEL. So "Ig" + U+0001 + "nore" and "Ig" +
+// BEL + "nore" are "Ignore" for the matchers, as they are for a model. The
+// white space of unicode.IsSpace (tab, LF, VT, FF, CR and NEL) is not
+// invisible: it separates words, and spacesToASCII maps the white space that
+// RE2 \s does not match.
 //
 // normalizeForMatch, the invisible_unicode heuristic and the base64_blob
 // heuristic share this one predicate, so they cannot disagree about which
-// runes are invisible. The invisible_unicode heuristic also flags the runes
-// of ansiControls (see invisibleUnicode).
+// runes are invisible.
 func isInvisible(r rune) bool {
 	if unicode.IsControl(r) { // category Cc
-		return !unicode.IsSpace(r) && !isANSIControl(r)
+		return !unicode.IsSpace(r)
 	}
 	return unicode.In(r,
 		unicode.Cf,
@@ -67,7 +63,7 @@ func isInvisible(r rune) bool {
 }
 
 // isInvisibleControl reports whether r is an invisible rune (see isInvisible)
-// that is also a control rune (category Cc), such as U+0000 or U+0001.
+// that is also a control rune (category Cc), such as U+0001 or ESC.
 func isInvisibleControl(r rune) bool {
 	return unicode.IsControl(r) && isInvisible(r)
 }
@@ -77,25 +73,28 @@ func isInvisibleControl(r rune) bool {
 // MaxMatchInputBytes long, and equal forms are kept only once.
 //
 // The first form is normalizeForMatch(s): the invisible runes are dropped, so
-// "ign" + ZWSP + "ore" is "ignore".
+// "ign" + ZWSP + "ore" is "ignore" (see dropInvisible).
 //
 // When s holds an invisible rune in the part that normalizeForMatch reads,
 // the second form replaces each run of invisible runes with one space
 // instead, so "ignore" + ZWSP + "previous" is "ignore previous" and a keyword
-// edge next to a ZWSP still holds. One space for a whole run means that
-// invisible padding cannot push a payload out of the MaxMatchInputBytes
-// window of this form either.
+// edge next to a ZWSP still holds (see spaceInvisible).
 //
 // When that part also holds an invisible control rune (see
 // isInvisibleControl), the third form drops the other invisible runes and
-// replaces each invisible control rune with one space. So "Ig" + ZWSP +
-// "nore" + U+0001 + "previous" is "Ignore previous": the ZWSP joins a word
-// and the control rune splits two words. The first form joins all the words,
-// and the second form splits the first word.
+// replaces each run of invisible control runes with one space (see
+// spaceControls). So "Ig" + ZWSP + "nore" + U+0001 + "previous" is "Ignore
+// previous": the ZWSP joins a word and the control rune splits two words. The
+// first form joins all the words, and the second form splits the first word.
+//
+// In the second and the third form, one space stands for a whole run of
+// invisible runes, so invisible padding cannot push a payload out of the
+// MaxMatchInputBytes window of these forms either.
 //
 // A text that uses one kind of invisible rune both inside a word and between
-// words defeats all the forms; the invisible_unicode heuristic flags it in a
-// description.
+// words defeats all the forms, and so does a text with a control rune inside
+// a word and a format rune (such as ZWSP) between words. The
+// invisible_unicode heuristic flags such a text in a description.
 //
 // A text without invisible runes has one form, so it costs no more. A text
 // with them is matched up to three times, which triples the cost bound in
@@ -106,9 +105,9 @@ func matchForms(s string) []string {
 	if !strings.ContainsFunc(raw, isInvisible) {
 		return forms
 	}
-	forms = appendNew(forms, normalizeInvisible(s, ' ', false))
+	forms = appendNew(forms, normalizeInvisible(s, spaceInvisible))
 	if strings.ContainsFunc(raw, isInvisibleControl) {
-		forms = appendNew(forms, normalizeInvisible(s, -1, true))
+		forms = appendNew(forms, normalizeInvisible(s, spaceControls))
 	}
 	return forms
 }
@@ -128,7 +127,7 @@ func appendNew(forms []string, f string) []string {
 // the mathematical bold "ignore" (U+1D422 ...) and "ig" + U+0336 + "nore".
 //
 // Only the text is folded, not the pattern. So a pattern with an accent or a
-// mark matches only in the forms of matchForms, as before.
+// mark matches only in the forms of matchForms.
 //
 // A form that is only ASCII does not change in foldMarks, so it is not
 // folded, and a plain ASCII text costs no more. Equal forms are kept only
@@ -159,7 +158,7 @@ func isASCII(s string) bool {
 
 // normalizeForMatch returns the form of s that the regex and keyword matchers
 // read. So "ign" + ZWSP (U+200B) + "ore previous" still matches the keyword
-// "ignore previous".
+// "ignore previous". It is normalizeInvisible(s, dropInvisible).
 //
 // It works in nine steps:
 //
@@ -167,10 +166,10 @@ func isASCII(s string) bool {
 //  2. Drop the invisible runes that are not control runes, such as ZWSP
 //     (see replaceFormatRuns).
 //  3. Replace each ANSI escape sequence (see ansiToSpace) with U+0020.
-//  4. Drop the invisible control runes, such as U+0001 (see
-//     isInvisibleControl).
-//  5. Replace each white-space or control rune that RE2 \s does not match
-//     (see spacesToASCII) with U+0020.
+//  4. Drop the invisible control runes that are left, such as U+0001 and an
+//     ESC that does not start an escape sequence (see isInvisibleControl).
+//  5. Replace each white-space rune that RE2 \s does not match (see
+//     spacesToASCII) with U+0020.
 //  6. Cut the result to MaxMatchInputBytes, at a rune boundary.
 //  7. Apply Unicode normalization form NFC, which joins a letter and its
 //     combining marks into one rune where one exists.
@@ -185,9 +184,15 @@ func isASCII(s string) bool {
 // match.go holds.
 //
 // Step 2 comes before step 3, so a ZWSP inside ESC [ 8 m does not stop the
-// sequence from being found. Step 4 comes after step 3, so a control rune
-// cannot make an escape sequence: if U+0001 were dropped before step 3,
-// ESC [ U+0001 "Ignore" would become ESC [ I, a CSI that hides the "I".
+// sequence from being found. Step 4 comes after step 3, so step 3 still sees
+// the control runes that start, end or cancel a sequence (see ansiToSpace),
+// and a dropped control rune cannot join the parts of an ansiSeq match: if
+// U+0001 were dropped before step 3, ESC [ U+0001 "Ignore" would become ESC
+// [ I, which ansiSeq reads as a CSI that hides the "I". A terminal reads a
+// C0 rune inside a CSI in another way: it runs the rune and goes on with the
+// sequence, so ESC [ U+0001 8 m still hides the text after it. ansiSeq does
+// not match such a sequence; the invisible_unicode heuristic flags its ESC in
+// a description.
 //
 // Step 2 comes before NFC, so an invisible rune cannot block composition:
 // "e" + ZWSP + U+0301 becomes U+00E9 (e with acute), the same as "e" + U+0301.
@@ -199,27 +204,56 @@ func isASCII(s string) bool {
 // Invalid UTF-8 does not cause a panic: each bad byte becomes U+FFFD
 // (utf8.RuneError), as with strings.Map.
 func normalizeForMatch(s string) string {
-	return normalizeInvisible(s, -1, false)
+	return normalizeInvisible(s, dropInvisible)
 }
 
-// normalizeInvisible runs the steps of normalizeForMatch, but replaces each
-// run of invisible runes with repl. A repl of -1 drops the runes, as in
-// normalizeForMatch. The white space is mapped as in normalizeForMatch,
-// whatever repl is.
-//
-// When controlsToSpace is true, step 4 is skipped, so step 5 replaces each
-// invisible control rune with U+0020, one space for each rune. matchForms
-// uses this, with a repl of -1, for its third form.
-func normalizeInvisible(s string, repl rune, controlsToSpace bool) string {
-	s = cutAtRune(s, maxRawScanBytes)
-	s = ansiToSpace(replaceFormatRuns(s, repl))
-	if !controlsToSpace {
-		s = replaceInvisible(s, repl) // only invisible control runes are left
+// invisibleMode tells normalizeInvisible what to do with the invisible runes
+// (see isInvisible). Each mode builds one form of matchForms.
+type invisibleMode int
+
+const (
+	// dropInvisible drops every invisible rune. It builds the first form,
+	// the form of normalizeForMatch.
+	dropInvisible invisibleMode = iota
+	// spaceInvisible replaces each run of invisible runes, of any kind, with
+	// one U+0020. It builds the second form.
+	spaceInvisible
+	// spaceControls drops the invisible runes that are not control runes,
+	// and replaces each run of invisible control runes with one U+0020. The
+	// dropped runes do not end a run, so U+0001 + ZWSP + U+0001 is one
+	// space. It builds the third form.
+	spaceControls
+)
+
+// formatRepl returns what a run of invisible runes that are not control runes
+// becomes in mode m: U+0020, or -1 when the run is dropped.
+func (m invisibleMode) formatRepl() rune {
+	if m == spaceInvisible {
+		return ' '
 	}
+	return -1
+}
+
+// controlRepl returns what a run of invisible control runes becomes in mode
+// m: U+0020, or -1 when the run is dropped.
+func (m invisibleMode) controlRepl() rune {
+	if m == dropInvisible {
+		return -1
+	}
+	return ' '
+}
+
+// normalizeInvisible runs the steps of normalizeForMatch, with the invisible
+// runes handled as mode says. In each mode, the white space is mapped as in
+// normalizeForMatch.
+func normalizeInvisible(s string, mode invisibleMode) string {
+	s = cutAtRune(s, maxRawScanBytes)
+	s = ansiToSpace(replaceFormatRuns(s, mode.formatRepl()))
+	s = replaceInvisible(s, mode.controlRepl()) // only invisible control runes are left
 	s = spacesToASCII(s)
 	s = cutAtRune(s, MaxMatchInputBytes)
 	s = norm.NFC.String(s)
-	return cutAtRune(replaceInvisible(s, repl), MaxMatchInputBytes)
+	return cutAtRune(replaceInvisible(s, mode.formatRepl()), MaxMatchInputBytes)
 }
 
 // ansiSeq matches an ANSI escape sequence that a terminal runs and does not
@@ -231,33 +265,25 @@ func normalizeInvisible(s string, repl rune, controlsToSpace bool) string {
 //
 // The schema target is JSON text, where ESC is the escape \u001b, so a CSI
 // that starts with that escape matches too. An OSC with no end does not
-// match, so it cannot swallow the rest of the text; its ESC still becomes a
-// space in spacesToASCII.
+// match, so it cannot swallow the rest of the text; its ESC is an invisible
+// control rune, so step 4 of normalizeForMatch handles it.
 var ansiSeq = regexp.MustCompile(`(?:\x1b\[|\x{9b}|\\u001[bB]\[)[0-?]*[ -/]*[@-~]|(?:\x1b\]|\x{9d})[^\x07\x1b\x{9c}]{0,256}(?:\x07|\x1b\\|\x{9c})`)
-
-// ansiControls are the control runes that change how an ANSI escape sequence
-// is read: ESC, BEL, CAN, SUB, U+009B, U+009C and U+009D. isInvisible keeps
-// them, so ansiToSpace still sees them:
-//
-//   - ESC (U+001B) and the C1 controls CSI (U+009B), ST (U+009C) and OSC
-//     (U+009D) start or end a sequence in ansiSeq;
-//   - BEL (U+0007) ends an OSC in ansiSeq;
-//   - CAN (U+0018) and SUB (U+001A) cancel a sequence in a terminal, and the
-//     terminal shows the text after them. They stay in the text, so ESC [
-//     CAN "Ignore" is not read as ESC [ I, a CSI that hides the "I".
-//
-// spacesToASCII maps the ones that are left after ansiToSpace to U+0020.
-const ansiControls = "\x1b\x07\x18\x1a\u009b\u009c\u009d"
-
-// isANSIControl reports whether r is one of ansiControls.
-func isANSIControl(r rune) bool {
-	return strings.ContainsRune(ansiControls, r)
-}
 
 // ansiToSpace replaces each ANSI escape sequence (see ansiSeq) with U+0020.
 // Without this step, ESC [ 8 m before "Ignore" leaves "[8mIgnore", and the
 // word edge before "Ignore" is lost. A sequence is at least 2 bytes long, so
 // the text does not grow.
+//
+// These control runes change how a sequence is read, and they are invisible
+// control runes (see isInvisible). So normalizeInvisible drops or replaces
+// them only after this step:
+//
+//   - ESC (U+001B) and the C1 controls CSI (U+009B), ST (U+009C) and OSC
+//     (U+009D) start or end a sequence in ansiSeq;
+//   - BEL (U+0007) ends an OSC in ansiSeq;
+//   - CAN (U+0018) and SUB (U+001A) cancel a sequence in a terminal, and the
+//     terminal shows the text after them. They are still in the text here,
+//     so ESC [ CAN "Ignore" is not read as ESC [ I, a CSI that hides the "I".
 func ansiToSpace(s string) string {
 	return ansiSeq.ReplaceAllLiteralString(s, " ")
 }
@@ -266,15 +292,10 @@ func ansiToSpace(s string) string {
 const re2SpaceRunes = "\t\n\f\r "
 
 // spacesToASCII replaces with U+0020 each rune that separates two words for a
-// reader or a model but that RE2 \s does not match:
-//
-//   - the white space of isKeywordSpace that is not in re2SpaceRunes, such as
-//     VT, NEL (U+0085), the Z categories (NBSP, the em space, U+2028, U+2029
-//     and others) and U+2800, the Braille blank that looks like a space;
-//   - the control runes (category Cc) that are left: the runes of
-//     ansiControls that ansiToSpace did not replace, such as the ESC of an
-//     OSC with no end, and, in the third form of matchForms, the invisible
-//     control runes (see normalizeInvisible).
+// reader or a model but that RE2 \s does not match: the white space of
+// isKeywordSpace that is not in re2SpaceRunes, such as VT, NEL (U+0085), the
+// Z categories (NBSP, the em space, U+2028, U+2029 and others) and U+2800,
+// the Braille blank that looks like a space.
 //
 // In RE2, \s is only [\t\n\f\r ], so without this step "ignore" + NBSP +
 // "previous" would not match `ignore\s+previous`. The runes in re2SpaceRunes
@@ -282,11 +303,11 @@ const re2SpaceRunes = "\t\n\f\r "
 //
 // NFC never makes such a rune from other runes (it maps U+2000 and U+2001
 // only to other spaces, which this step has already removed), so one pass
-// before NFC is enough. Every mapped rune is at least 1
-// byte long, so the text does not grow.
+// before NFC is enough. Every mapped rune is at least 1 byte long, so the
+// text does not grow.
 func spacesToASCII(s string) string {
 	return strings.Map(func(r rune) rune {
-		if (isKeywordSpace(r) || unicode.Is(unicode.Cc, r)) && !strings.ContainsRune(re2SpaceRunes, r) {
+		if isKeywordSpace(r) && !strings.ContainsRune(re2SpaceRunes, r) {
 			return ' '
 		}
 		return r
@@ -344,7 +365,7 @@ func foldMarks(s string) string {
 }
 
 // appendFold appends the fold of the one rune in rs to dst and returns the
-// longer slice, as append does. The fold splits the rune into its
+// extended slice, as append does. The fold splits the rune into its
 // compatibility parts (NFKD), drops the combining marks and the invisible
 // runes, and joins the rest again (NFKC). So U+00E9 (e with acute) becomes
 // "e", U+FF49 becomes "i", U+0336 becomes nothing, and the Hangul syllable
@@ -378,27 +399,43 @@ func appendFold(dst []byte, rs string) []byte {
 	return dst
 }
 
-// replaceFormatRuns is step 2 of normalizeForMatch. It drops the invisible
-// runes that are not control runes, and it keeps the invisible control runes
-// for step 4, which runs after ansiToSpace (see normalizeForMatch for why).
-//
-// A repl of -1 only drops the runes. Otherwise, a run of invisible runes that
-// holds no control rune becomes one repl, as in replaceInvisible. A run that
-// holds a control rune keeps only its control runes, and step 4 replaces
-// them with one repl. So each run of invisible runes becomes one repl in the
-// end, whatever runes it holds.
+// replaceFormatRuns is step 2 of normalizeForMatch. It replaces each run of
+// invisible runes in s with one repl (a repl of -1 drops the run), but it
+// keeps the invisible control runes of the run for step 4, which runs after
+// ansiToSpace (see normalizeForMatch for why). So a run of invisible runes
+// becomes one repl when it holds no control rune, and its control runes, in
+// order and with nothing between them, when it holds one. Step 4 then
+// replaces those control runes with one rune or drops them.
+func replaceFormatRuns(s string, repl rune) string {
+	return replaceRuns(s, isInvisibleControl, repl)
+}
+
+// replaceInvisible returns s with each run of runes for which isInvisible is
+// true replaced by one repl. A repl of -1 drops the runes.
+func replaceInvisible(s string, repl rune) string {
+	return replaceRuns(s, keepNone, repl)
+}
+
+// keepNone returns false for every rune. replaceInvisible uses it to keep no
+// rune of a run.
+func keepNone(rune) bool { return false }
+
+// replaceRuns rewrites each run of runes in s for which isInvisible is true.
+// It writes the runes of the run for which keep is true, in order. When the
+// run has no such rune, it writes one repl instead, or nothing when repl is
+// -1. The other runes of s stay as they are.
 //
 // Invalid UTF-8 becomes U+FFFD, as with strings.Map.
-func replaceFormatRuns(s string, repl rune) string {
+func replaceRuns(s string, keep func(rune) bool, repl rune) string {
 	var b strings.Builder
 	b.Grow(len(s))
-	inRun := false      // the rune before r is invisible
-	hasControl := false // the current run holds an invisible control rune
+	inRun := false // the rune before r is invisible
+	kept := false  // the current run has a rune for which keep is true
 	endRun := func() {
-		if inRun && !hasControl && repl >= 0 {
+		if inRun && !kept && repl >= 0 {
 			b.WriteRune(repl)
 		}
-		inRun, hasControl = false, false
+		inRun, kept = false, false
 	}
 	for _, r := range s {
 		if !isInvisible(r) {
@@ -407,43 +444,12 @@ func replaceFormatRuns(s string, repl rune) string {
 			continue
 		}
 		inRun = true
-		if unicode.IsControl(r) {
-			hasControl = true
+		if keep(r) {
+			kept = true
 			b.WriteRune(r)
 		}
 	}
 	endRun()
-	return b.String()
-}
-
-// replaceInvisible returns s with each run of runes for which isInvisible is
-// true replaced by one repl. A repl of -1 drops the runes. strings.Map drops
-// a rune when the mapping function returns -1.
-//
-// Invalid UTF-8 becomes U+FFFD, as with strings.Map.
-func replaceInvisible(s string, repl rune) string {
-	if repl < 0 {
-		return strings.Map(func(r rune) rune {
-			if isInvisible(r) {
-				return -1
-			}
-			return r
-		}, s)
-	}
-	var b strings.Builder
-	b.Grow(len(s))
-	inRun := false
-	for _, r := range s {
-		if isInvisible(r) {
-			if !inRun {
-				b.WriteRune(repl)
-			}
-			inRun = true
-			continue
-		}
-		inRun = false
-		b.WriteRune(r)
-	}
 	return b.String()
 }
 

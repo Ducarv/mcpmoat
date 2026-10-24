@@ -36,15 +36,29 @@ Notes on the regexes in `rules/MOAT-T1-003.yaml`:
 - `\s+` matches any run of white space, so extra spaces, tabs and newlines do not stop a match.
   Before the match, mcpmoat turns the Unicode white space that `\s` does not match (no-break
   spaces, line separators, a vertical tab and others) into plain spaces.
-- mcpmoat removes invisible characters before the match. These include control characters such as
-  U+0001, U+001F and DEL, but not white space (tab, LF, VT, FF, CR, NEL) and not ESC, BEL, CAN,
-  SUB, U+009B, U+009C or U+009D. So "Ig" + U+0001 + "nore" reads as "Ignore". The
-  `invisible_unicode` heuristic flags these characters.
+- mcpmoat handles invisible characters before the match. These are the format characters (ZWSP and
+  the other zero-width, bidi and tag characters) and every control character except white space
+  (tab, LF, VT, FF, CR, NEL). So ESC, BEL, CAN, SUB, U+009B, U+009C and U+009D are invisible too.
+  First mcpmoat turns each ANSI escape sequence into one space. Only then does it handle the
+  control characters that are left. So ESC [ U+0001 "Ignore" keeps its "I".
+- A regex or a keyword is matched against up to three forms of the text. It matches when it
+  matches one form:
+  1. The invisible characters are removed. So "Ig" + U+0001 + "nore" reads as "Ignore".
+  2. Each run of invisible characters is one space. So "Ignore" + U+001F + "previous", or a ZWSP
+     between the words, reads as two words.
+  3. Only when the text has a control character: the format characters are removed, and each run
+     of control characters is one space. So a ZWSP inside a word and a control character between
+     words still match.
+
+  A control character inside a word and a ZWSP between words defeat all three forms. In a
+  description, the `invisible_unicode` heuristic flags every invisible character, also every
+  control character except white space. So it still flags such a text.
 - A regex also sees a folded form of the text: fullwidth letters, mathematical letters and
   combining marks become plain letters. Only the text is folded, not the pattern. So write the
   pattern in ASCII and do not add fullwidth alternatives: `(?i)ignore` also matches "ignore" in
-  fullwidth letters (U+FF49 and on). Homoglyphs from other scripts, such as Cyrillic U+0456 for
-  Latin "i", are not folded.
+  fullwidth letters (U+FF49 and on). A character is folded only when its fold is not longer than
+  the character. So U+FDFA, U+00BD and U+2177 are not folded. Homoglyphs from other scripts, such
+  as Cyrillic U+0456 for Latin "i", are not folded.
 - Go regexes (RE2) have no lookahead. So the tail `user(?:[^\w''\x{2019}]|$)` means "the word
   user, not followed by a letter, a digit, `_` or an apostrophe". It does not match "users",
   "username" or "user's".

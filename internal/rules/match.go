@@ -32,9 +32,8 @@ import (
 //     three of matchForms and their folds, when the text is not only ASCII.
 //
 // Each form is at most MaxMatchInputBytes long, so the worst case is six
-// times the cost above, about 480M instruction-bytes. That is three times the
-// bound for the two forms of earlier versions. The package doc says how the
-// rule count multiplies it.
+// times the cost above, about 480M instruction-bytes. The package doc says
+// how the rule count multiplies it.
 const (
 	// MaxPatternBytes is the largest regex or keyword, in bytes, before
 	// compilation.
