@@ -73,7 +73,8 @@ func givenByFlag(args []string, at int, flag string) bool {
 	return at > 0 && args[at-1] == flag
 }
 
-// npmNonRegistryUnpinned classifies an npx or bunx spec (see nonRegistrySpecUnpinned).
+// npmNonRegistryUnpinned classifies an npx or bunx spec (see
+// nonRegistrySpecUnpinned).
 // A spec can also be an alias, "name@<non-registry spec>", so it tries the part
 // after the first "@" that follows the name.
 func npmNonRegistryUnpinned(spec string) bool {
@@ -90,9 +91,9 @@ func npmNonRegistryUnpinned(spec string) bool {
 	return false
 }
 
-// classifyNPM reports whether spec is a non-registry npm spec, and if so whether it
-// is unpinned. The two results are separate so the caller can tell "pinned"
-// from "not a non-registry spec".
+// classifyNPM reports whether spec is a non-registry npm spec, and if so
+// whether it is unpinned. The two results are separate so the caller can tell
+// "pinned" from "not a non-registry spec".
 func classifyNPM(spec string) (unpinned, nonRegistry bool) {
 	// A git spec ends in "#<commit-ish>". Only a full commit hash pins it.
 	base, fragment, _ := strings.Cut(spec, "#")
@@ -189,21 +190,20 @@ func isGitHubName(s string) bool {
 	})
 }
 
-// isNonRegistryURLSpec reports whether spec starts with "git+", "http://" or
-// "https://", compared without regard to case.
+// isNonRegistryURLSpec reports whether spec starts with "git+" or holds a URL
+// scheme ("://"), compared without regard to case. Such a spec is not a local
+// script, even when it ends in ".py".
 func isNonRegistryURLSpec(spec string) bool {
-	return hasPrefixFold(spec, "git+") || hasPrefixFold(spec, "http://") || hasPrefixFold(spec, "https://")
+	return hasPrefixFold(spec, "git+") || strings.Contains(spec, "://")
 }
 
-// isScriptURL reports whether spec is an http(s) URL of a .py file, a script
-// that "pipx run" downloads and runs.
+// isScriptURL reports whether spec is a URL that ends in ".py": a script that
+// "pipx run" downloads and runs. pipx tests the whole argument, for any URL
+// scheme, so a query or a fragment after ".py" makes pipx refuse the URL, and
+// ".py" only in the query ("https://h/run?f=x.py") makes it run. A script URL
+// cannot be pinned.
 func isScriptURL(spec string) bool {
-	if !hasHTTPScheme(spec) {
-		return false
-	}
-	path, _, _ := strings.Cut(spec, "#")
-	path, _, _ = strings.Cut(path, "?")
-	return strings.HasSuffix(strings.ToLower(path), ".py")
+	return strings.Contains(spec, "://") && strings.HasSuffix(strings.ToLower(spec), ".py")
 }
 
 // pythonNonRegistryUnpinned classifies a uvx --from or pipx --spec spec (see

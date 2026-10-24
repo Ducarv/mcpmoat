@@ -203,7 +203,7 @@ func hitForms(t *testing.T, hits []Hit) []string {
 
 // TestTextAdaptersNoLeakArgsAndURL checks the URL and command line forms of
 // plaintext_secret. The Hit must hold no secret, no arg and no URL, in any
-// field and in any print form (%v, %+v, JSON). Each input must hit, so the
+// field and in any print form (see hitForms). Each input must hit, so the
 // check does not pass for the wrong reason.
 func TestTextAdaptersNoLeakArgsAndURL(t *testing.T) {
 	t.Parallel()

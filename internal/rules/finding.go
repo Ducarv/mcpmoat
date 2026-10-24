@@ -41,15 +41,15 @@ const (
 	shadowingMessage       = "tool description names a tool of another server"
 	insecureURLMessage     = "remote server uses plain http:// without TLS"
 	plaintextSecretMessage = "config holds a plaintext secret; use an environment variable reference" //nolint:gosec // G101: message text, not a credential
-	unpinnedPackageMessage = "package runner fetches an unpinned version"
+	unpinnedPackageMessage = "package runner fetches an unpinned package"
 	autoInstallMessage     = "npx runs with its yes option on (-y, --yes or npm_config_yes)"
 	typosquatMessage       = "name is close to a popular MCP server"
 )
 
 // Values of Finding.Field: the config field that a finding is about. For env
 // and headers, the Field names the map and Finding.Key names the entry. A
-// finding with Field args or url has an empty Key. A server gets at most one
-// args finding and one url finding.
+// finding with Field args or url has an empty Key. A stdio server gets an args
+// finding, and a remote server gets a url finding.
 const (
 	// FieldURL is the URL of a remote server. A URL inside the args of a stdio
 	// server is reported with FieldArgs, not FieldURL.

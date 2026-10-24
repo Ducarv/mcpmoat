@@ -105,6 +105,9 @@ var (
 	// path is an ID, not a secret.
 	uuidText = regexp.MustCompile(`^[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}$`)
 
+	// innermostRef matches a reference that holds no other reference.
+	innermostRef = regexp.MustCompile(`\$\{[^{}]*\}`)
+
 	// refWithDefault matches one whole reference that has a default, such as
 	// ${NAME:-default} or ${NAME-default} (also := and =, and an "env:" prefix).
 	// Group 1 is the default. A reference like ${NAME}, ${NAME:?msg} or
@@ -113,11 +116,10 @@ var (
 )
 
 // checkArgSecrets reports MOAT-T4-002 for a literal secret in the command
-// args of a stdio server or in the URL of a remote server. It adds at most
-// one finding with Field FieldArgs and at most one with Field FieldURL, and
-// the findings hold no Key and no value, arg or URL. FieldURL is only for the
-// URL of a remote server. A URL inside the args of a stdio server gives
-// FieldArgs.
+// args of a stdio server or in the URL of a remote server. It gives at most
+// one finding: with Field FieldArgs for a stdio server, or with Field FieldURL
+// for a remote server. The finding holds no Key and no value, arg or URL. A URL
+// inside the args of a stdio server gives FieldArgs.
 //
 // The check favours precision: a finding can fail a CI run. A credential-like
 // flag or NAME needs a value that looks like a token (see tokenForName). A
@@ -275,7 +277,7 @@ func assignmentHasSecret(text string) bool {
 //     a query value, the caller tests several forms of the value (see
 //     valueForms).
 func namedValueHasSecret(name, value string) bool {
-	value = literalPart(value)
+	value = stripAuthScheme(literalPart(value))
 	if value == "" {
 		return false
 	}
@@ -301,23 +303,25 @@ func literalPart(value string) string {
 // expandRefs replaces every ${...} reference in value. A reference with a
 // default ("${NAME:-default}") becomes that default, because a client expands
 // it to the default when NAME is not set, so a secret written there is a
-// literal secret. A reference with no default becomes stand. A default can hold
-// another reference, so the replacement runs again, at most maxRefPasses times.
-func expandRefs(value, stand string) string {
+// literal secret. A reference with no default becomes placeholder. A default
+// can hold another reference, so each pass replaces the innermost references
+// (the ones with no "${" or "}" inside), from the inside out, at most
+// maxRefPasses times. So "${A:-${B}text}" gives "text".
+func expandRefs(value, placeholder string) string {
 	for range maxRefPasses {
 		if !strings.Contains(value, "${") {
 			break
 		}
-		value = varRef.ReplaceAllStringFunc(value, func(ref string) string {
+		value = innermostRef.ReplaceAllStringFunc(value, func(ref string) string {
 			if m := refWithDefault.FindStringSubmatch(ref); m != nil {
 				return m[1]
 			}
-			return stand
+			return placeholder
 		})
 	}
 	// Deeper nesting than maxRefPasses is not read: a reference that is left is
 	// not literal text. A default at that depth is not scanned (known limit).
-	return varRef.ReplaceAllString(value, stand)
+	return varRef.ReplaceAllString(value, placeholder)
 }
 
 // tokenForName reports whether value is token-like enough to count as a secret
@@ -336,10 +340,12 @@ func expandRefs(value, stand string) string {
 //     covers "password" and "passwd"). A session or auth ID is often a UUID, so
 //     a name that is credential-like for another reason ("--session-id") does
 //     not count. A UUID gets no other route.
-//  3. A token prefix (see discover.HasTokenPrefix).
+//  3. A token prefix (see discover.HasTokenPrefix), unless the value is made
+//     of words ("sk-learn-tokenizer").
 //  4. A random look (see looksRandom).
 //  5. Pure hex of at least minHexLen digits ("--api-key" with an MD5 or SHA
-//     hex digest).
+//     hex digest). Known limit: a public hash under a name with "key" in it
+//     ("--cache-key") is reported too.
 //  6. A long random look (see looksLongRandom).
 //
 // Routes 5 and 6 live here and not in bareToken: a bare arg or a URL path
@@ -355,7 +361,7 @@ func tokenForName(name, value string) bool {
 	if uuidText.MatchString(value) {
 		return nameHoldsSecretWord(name)
 	}
-	return discover.HasTokenPrefix(value) ||
+	return (discover.HasTokenPrefix(value) && !isWordLike(value)) ||
 		looksRandom(value) ||
 		isHexString(value, minHexLen) ||
 		looksLongRandom(value)
@@ -363,7 +369,12 @@ func tokenForName(name, value string) bool {
 
 // switchWords are the first words of a name that make a password name a
 // switch: "--no-password", "--ask-password" and "--prompt-password" take no
-// password, and the arg after them is something else.
+// password, and the arg after them is something else. Known limit: a switch
+// with a plain name, such as "psql --password", cannot be told from a flag that
+// takes a password.
+var passwordWords = [...]string{"password", "passwd", "passphrase"}
+
+// switchWords are the first words (see above) of a switch name.
 var switchWords = []string{"no", "skip", "ask", "prompt", "disable", "enable", "show", "hide", "without"}
 
 // endsInPasswordWord reports whether name, in any case, ends in "password",
@@ -375,8 +386,15 @@ func endsInPasswordWord(name string) bool {
 	if first := strings.FieldsFunc(lower, isNameSeparator); len(first) > 0 && slices.Contains(switchWords, first[0]) {
 		return false
 	}
-	for _, word := range [...]string{"password", "passwd", "passphrase"} {
+	for _, word := range passwordWords {
 		if strings.HasSuffix(lower, word) {
+			// "nopassword" and "noPassword" have no separator: the switch word is
+			// glued to the password word.
+			for _, sw := range switchWords {
+				if lower == sw+word {
+					return false
+				}
+			}
 			return true
 		}
 	}
@@ -413,7 +431,8 @@ func isHexString(s string, minLen int) bool {
 
 // looksLongRandom reports whether value is a token-shaped text of at least
 // minLongRandomLen bytes that holds a letter and a digit and has an entropy of
-// at least minLongEntropy. It catches a random value that looksRandom misses
+// at least minLongEntropy and is not word-like (a resource path, a camelCase
+// name). It catches a random value that looksRandom misses
 // because the entropy of a sample of 20 to 23 bytes is below minDigitEntropy.
 func looksLongRandom(value string) bool {
 	if len(value) < minLongRandomLen || !isTokenShaped(value) {
@@ -423,7 +442,8 @@ func looksLongRandom(value string) bool {
 	hasDigit := strings.ContainsFunc(value, unicode.IsDigit)
 	// Two or more of "-", "_" and "." mean a name made of words
 	// ("my-prod-secret-store-v2"), not a random token.
-	return hasLetter && hasDigit && countNameSeparators(value) < 2 && shannonEntropy(value) >= minLongEntropy
+	return hasLetter && hasDigit && countNameSeparators(value) < 2 &&
+		shannonEntropy(value) >= minLongEntropy && !isWordLike(value)
 }
 
 // isWordLike reports whether value is a name made of words and numbers, such
@@ -438,12 +458,19 @@ func looksLongRandom(value string) bool {
 // ("sk_live_<24 random>", "aaa-bbb-<24 random>"). Two kinds of long part are
 // spared: digits only (a number) and letters of one case with an entropy under
 // minOpaqueEntropy (a word). So one-case random letters are still caught.
+//
+// A "/" also separates words here ("projects/my-proj/secrets/token/versions/1"
+// is a resource path, not a token), and a value made of Capitalized words
+// ("GithubTokenStorage2024") is a name (see camelWords).
 func isWordLike(value string) bool {
 	// A file extension is not a word of the name: ".tar.gz" after a hash must
 	// not add a word and a separator (see trimFileExt).
 	value = trimFileExt(value)
+	if camelWords.MatchString(value) {
+		return true
+	}
 	counted, words := 0, 0
-	for _, part := range strings.FieldsFunc(value, isNameSeparator) {
+	for _, part := range strings.FieldsFunc(value, isWordBreak) {
 		word := isWordPart(part)
 		switch {
 		case isNumberPart(part):
@@ -459,7 +486,19 @@ func isWordLike(value string) bool {
 		}
 		// A short part ("my", "v2", "q3", "1") decides nothing: not counted.
 	}
-	return countNameSeparators(value) >= 2 && counted >= 2 && words*2 >= counted
+	return countWordBreaks(value) >= 2 && counted >= 2 && words*2 >= counted
+}
+
+// isWordBreak reports whether r ends a word of a name: a name separator or "/".
+// Only isWordLike uses it. The tests for a random token (looksLongRandom) keep
+// to isNameSeparator, because a base64 secret can hold "/".
+func isWordBreak(r rune) bool {
+	return isNameSeparator(r) || r == '/'
+}
+
+// countWordBreaks returns how many runes of s satisfy isWordBreak.
+func countWordBreaks(s string) int {
+	return strings.Count(s, "/") + countNameSeparators(s)
 }
 
 // isNameSeparator reports whether r separates the words of a name.
@@ -483,11 +522,19 @@ func isNumberPart(part string) bool {
 	return len(part) >= minNumberLen && strings.Trim(part, "0123456789") == ""
 }
 
+// camelWords matches a name made of two or more words in camelCase, with
+// optional digits after the words: "GithubTokenStorage2024", "keyRings",
+// "ProductionSession2024Main". Each word has a capital (the first word may be
+// all lower case) and at least two more lower-case letters. A random token does
+// not have this shape, except by a very small chance.
+var camelWords = regexp.MustCompile(`^[A-Za-z][a-z]{2,}(?:[0-9]*[A-Z][a-z]{2,})+[0-9]*$`)
+
 // isWordPart reports whether part is a word (minWordLen or more ASCII letters
-// in one case, with an optional capital first) or a number (minNumberLen or
-// more digits).
+// in one case, with an optional capital first), a camelCase name (see
+// camelWords) or a number (minNumberLen or more digits). A number is also
+// checked first by isWordLike, which counts it on its own.
 func isWordPart(part string) bool {
-	if isNumberPart(part) {
+	if isNumberPart(part) || camelWords.MatchString(part) {
 		return true
 	}
 	if len(part) < minWordLen {
@@ -575,7 +622,7 @@ func urlValueHasSecret(arg string) bool {
 // as "?page=2" are not secrets. Known limit: a long random resource ID in a
 // path, such as a Google Sheets ID, looks like a token and is reported. The
 // check reads the URL the way clients do: it removes tabs and newlines and
-// trims control characters first (see checkInsecureURL).
+// trims control characters first (see cleanClientURL).
 //
 // The URL is cut by splitURL, not by url.Parse. url.Parse fails on input that
 // clients accept (a "%" in a password, a bad escape, a bad port, an empty host
@@ -673,18 +720,27 @@ func unhexByte(c byte) byte {
 // Any one of them that qualifies is a hit:
 //   - the value decoded the query way ("+" is a space);
 //   - the value decoded the path way ("+" stays a plus), because a base64-like
-//     secret holds "+" and a client may send it as it is;
+//     secret holds "+" and a client may send it as it is (left out when it is
+//     the same text);
 //   - each of these with its "%" bytes removed, when one is left. A "%" that
 //     stays after decoding is a stray or a bad escape ("?token=<random>%"),
 //     and it would make the token shape test fail and hide the secret. A form
 //     that is a whole reference ("%NAME%") is not stripped: without its "%"
 //     marks it would look like a plain value.
 func valueForms(rawValue string) []string {
-	forms := []string{
-		lenientUnescape(rawValue, true),
-		lenientUnescape(rawValue, false),
+	// A raw "%NAME%" is a reference. Decoded first, "%DB_PASSWORD%" would read
+	// "%DB" as an escape and no longer be a reference.
+	if wholeVar.MatchString(rawValue) {
+		return nil
 	}
-	for _, form := range forms[:2] {
+	queryForm := lenientUnescape(rawValue, true)
+	pathForm := lenientUnescape(rawValue, false)
+	forms := []string{queryForm}
+	if pathForm != queryForm {
+		forms = append(forms, pathForm)
+	}
+	decoded := slices.Clone(forms)
+	for _, form := range decoded {
 		if strings.Contains(form, "%") && !wholeVar.MatchString(form) {
 			forms = append(forms, strings.ReplaceAll(form, "%", ""))
 		}

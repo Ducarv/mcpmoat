@@ -119,6 +119,23 @@ func assertOnlyField(t *testing.T, findings []Finding, field string) {
 	}
 }
 
+// assertArgSecret fails the test unless findings is empty (when found is
+// false) or exactly one finding on field (when found is true). what names the
+// input in the failure message.
+func assertArgSecret(t *testing.T, findings []Finding, found bool, field, what string) {
+	t.Helper()
+	if found {
+		assertOnlyField(t, findings, field)
+		return
+	}
+	if len(findings) != 0 {
+		t.Errorf("%s = %+v, want no finding", what, findings)
+	}
+}
+
+// remoteTransports are the two transports with a URL.
+var remoteTransports = []discover.Transport{discover.TransportHTTP, discover.TransportSSE}
+
 func TestCheckArgSecretsArgs(t *testing.T) {
 	t.Parallel()
 
@@ -223,6 +240,32 @@ func TestCheckArgSecretsArgs(t *testing.T) {
 		{"long token flag", []string{"--token=" + strings.Repeat(asBody, 60)}, true},
 		{"long token in a header flag", []string{"-H", "Authorization: Bearer " + strings.Repeat(asBody, 60)}, true},
 
+		// Readable resource paths and camelCase names are not tokens.
+		{"GCP secret path", []string{"--secret", "projects/123456789/secrets/githubtoken/versions/1"}, false},
+		{"GCP KMS key path", []string{"--kms-key-name", "projects/my-proj/locations/global/keyRings/mcp/cryptoKeys/main"}, false},
+		{"GCP key ring path", []string{"--key-ring", "projects/myproj/locations/us/keyRings/ring1"}, false},
+		{"camelCase name with a year", []string{"--token-file-name", "GithubTokenStorage2024"}, false},
+		{"camelCase name with digits inside", []string{"--session", "ProductionSession2024Main"}, false},
+
+		// A token prefix on a readable name is not a secret.
+		{"tokenizer name with a prefix", []string{"--tokenizer", "sk-learn-tokenizer"}, false},
+		{"provider name with a prefix", []string{"--auth-provider", "xoxo-auth-provider"}, false},
+		{"key alias with a prefix", []string{"--key-alias", "akia-main-key"}, false},
+
+		// A glued switch word is a switch too.
+		{"nopassword switch", []string{"--nopassword", "mydatabase1"}, false},
+		{"noPassword switch", []string{"--noPassword", "mydatabase1"}, false},
+		{"node password is a name", []string{"--node-password", "hunter2hunter2"}, true},
+
+		// A scheme word is skipped under any name.
+		{"token flag with a bearer value", []string{"--token", "Bearer " + asRand24}, true},
+		{"authorization equals with a bearer value", []string{"--authorization=Bearer " + asRand24}, true},
+		{"NAME=Bearer value", []string{"API_KEY=Bearer " + asRand24}, true},
+		{"token flag with a bearer reference", []string{"--token", "Bearer ${TOKEN}"}, false},
+
+		// A reference before literal text in a nested default is expanded first.
+		{"nested default, reference then literal", []string{"--token", "${TOKEN:-${PREFIX}" + asGH + "}"}, true},
+
 		// A password word must be the last word of the name, and the value must
 		// be 8 bytes or more and not a reference, a boolean or a number.
 		{"password-stdin takes a registry", []string{"--password-stdin", "registry.example.com"}, false},
@@ -290,7 +333,7 @@ func TestCheckArgSecretsArgs(t *testing.T) {
 		{"empty arg", []string{""}, false},
 		{"only a dash", []string{"-"}, false},
 
-		// Negative: the false-positive corpus (S4).
+		// Negative: the false-positive corpus.
 		{"tokenizer name", []string{"--tokenizer", "cl100k_base"}, false},
 		{"key name", []string{"--key-name", "my_key_1"}, false},
 		{"auth provider", []string{"--auth-provider", "google-oauth2"}, false},
@@ -319,13 +362,7 @@ func TestCheckArgSecretsArgs(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			got := checkArgSecrets(argServer(tt.args...))
-			if !tt.want {
-				if len(got) != 0 {
-					t.Errorf("checkArgSecrets(%q) = %+v, want no finding", tt.args, got)
-				}
-				return
-			}
-			assertOnlyField(t, got, FieldArgs)
+			assertArgSecret(t, got, tt.want, FieldArgs, fmt.Sprintf("checkArgSecrets(%q)", tt.args))
 		})
 	}
 }
@@ -347,18 +384,20 @@ func TestCheckArgSecretsURL(t *testing.T) {
 		{"token as user", "https://" + asGH + "@" + asHost + "/mcp", true},
 		{"random 32-byte path segment", "https://" + asHost + "/mcp/" + testRandom32, true},
 		{"token path segment", "https://" + asHost + "/mcp/" + asGH, true},
-		{"reference in host (S1)", "https://${HOST}/mcp?api_key=" + asGH, true},
-		{"bad escape in path (S1)", "https://h/%zz/" + asGH, true},
+		{"reference in host", "https://${HOST}/mcp?api_key=" + asGH, true},
+		{"bad escape in path", "https://h/%zz/" + asGH, true},
 		{"bad escape in the secret value", "https://h/mcp?token=" + asGH + "%zz", true},
 		{"bad escape in password", "https://user:p%ss@h/x", true},
 		{"token in the fragment", "https://" + asHost + "/sse#access_token=" + asRand24, true},
 		{"token in the fragment after another pair", "https://" + asHost + "/sse#state=1&token=" + asGH, true},
 		{"password query with a plain word and a stray percent", "https://h/mcp?password=hunter2%x", true},
 		{"password query with a plain word", "https://h/mcp?password=hunter2hunter2", true},
+		{"password query with a %VAR% that starts with escape digits", "https://h/sse?password=%DB_PASSWORD%", false},
+		{"password query with a %VAR% that starts with hex letters", "https://h/sse?password=%DEV_PASSWORD%", false},
 		{"user info that holds the old reference marker text", "https://u:refx0@h/sse", true},
 		{"bad port", "https://h:abc/mcp?token=" + asGH, true},
 		{"reference as scheme", "${SCHEME}://h/mcp?token=" + asGH, true},
-		{"literal default in query (S2)", "https://h/mcp?api_key=${K:-" + asGH + "}", true},
+		{"literal default in query", "https://h/mcp?api_key=${K:-" + asGH + "}", true},
 		{"nested default", "https://h/mcp?api_key=${K:-${J:-" + asGH + "}}", true},
 		{"tab inside the token", "https://h/mcp?token=" + asGH[:10] + "\t" + asGH[10:], true},
 		{"leading space", "  https://h/mcp?token=" + asGH, true},
@@ -379,6 +418,7 @@ func TestCheckArgSecretsURL(t *testing.T) {
 		{"literal plus in a base64-like query value", "https://h.invalid/mcp?api_key=" + asPlus, true},
 		{"%2B form of the same query value", "https://h.invalid/mcp?api_key=" + strings.Replace(asPlus, "+", "%2B", 1), true},
 		{"stray percent after the value", "https://h/mcp?token=" + asB28 + "%", true},
+		{"long token under the cap", "https://h/mcp?token=" + strings.Repeat(asBody, 60), true},
 		{"stray percent before the value", "https://h/mcp?token=%" + asB28, true},
 		{"bad escape after the value", "https://h/mcp?token=" + asB28 + "%zz", true},
 		{"base64url 24 with one separator in a query", "https://h/mcp?api_key=" + asU24a, true},
@@ -424,22 +464,15 @@ func TestCheckArgSecretsURL(t *testing.T) {
 		{"uniform sha256 path segment", "https://h/dl/" + asUniSHA, false},
 		{"limit: password under 8 bytes is not found", "https://h/mcp?password=hunter2", false},
 		{"plain fragment", "https://h/docs#section-2", false},
-		{"long token under the cap", "https://h/mcp?token=" + strings.Repeat(asBody, 60), true},
 		{"fragment with a reference", "https://h/sse#access_token=${TOKEN}", false},
 		{"page query with a stray percent", "https://h/mcp?page=2%", false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			for _, tr := range []discover.Transport{discover.TransportHTTP, discover.TransportSSE} {
+			for _, tr := range remoteTransports {
 				got := checkArgSecrets(remoteServer(tr, tt.url))
-				if !tt.want {
-					if len(got) != 0 {
-						t.Errorf("checkArgSecrets(%s, %q) = %+v, want no finding", tr, tt.url, got)
-					}
-					continue
-				}
-				assertOnlyField(t, got, FieldURL)
+				assertArgSecret(t, got, tt.want, FieldURL, fmt.Sprintf("checkArgSecrets(%s, %q)", tr, tt.url))
 			}
 		})
 	}
@@ -488,13 +521,7 @@ func TestCheckArgSecretsWordURLs(t *testing.T) {
 			}
 			for where, c := range servers {
 				got := checkArgSecrets(c.server)
-				if !tt.want {
-					if len(got) != 0 {
-						t.Errorf("%s: checkArgSecrets(%q) = %+v, want no finding", where, tt.url, got)
-					}
-					continue
-				}
-				assertOnlyField(t, got, c.field)
+				assertArgSecret(t, got, tt.want, c.field, fmt.Sprintf("%s: checkArgSecrets(%q)", where, tt.url))
 			}
 		})
 	}
@@ -585,25 +612,46 @@ func TestCheckArgSecretsOpaqueParts(t *testing.T) {
 			t.Parallel()
 			if tt.args != nil {
 				got := checkArgSecrets(argServer(tt.args...))
-				if !tt.want {
-					if len(got) != 0 {
-						t.Errorf("checkArgSecrets(%q) = %+v, want no finding", tt.args, got)
-					}
-				} else {
-					assertOnlyField(t, got, FieldArgs)
-				}
+				assertArgSecret(t, got, tt.want, FieldArgs, fmt.Sprintf("checkArgSecrets(%q)", tt.args))
 			}
 			if tt.url != "" {
-				for _, tr := range []discover.Transport{discover.TransportHTTP, discover.TransportSSE} {
+				for _, tr := range remoteTransports {
 					got := checkArgSecrets(remoteServer(tr, tt.url))
-					if !tt.want {
-						if len(got) != 0 {
-							t.Errorf("checkArgSecrets(%s, %q) = %+v, want no finding", tr, tt.url, got)
-						}
-					} else {
-						assertOnlyField(t, got, FieldURL)
-					}
+					assertArgSecret(t, got, tt.want, FieldURL, fmt.Sprintf("checkArgSecrets(%s, %q)", tr, tt.url))
 				}
+			}
+		})
+	}
+}
+
+// TestHeaderFlagsMatchRedactArgs keeps isHeaderFlag in step with the header
+// flags whose value discover.RedactArgs always masks.
+func TestHeaderFlagsMatchRedactArgs(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		flag string
+		want bool
+	}{
+		{"-H", true},
+		{"--header", true},
+		{"--headers", true},
+		{"--HEADER", true},
+		{"-h", false},
+		{"--host", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.flag, func(t *testing.T) {
+			t.Parallel()
+			args := []string{tt.flag, "X-Api-Key: " + testRandom32}
+			masked := discover.RedactArgs(args)[1] != args[1]
+			if got := isHeaderFlag(tt.flag, strings.TrimLeft(tt.flag, "-")); got != tt.want {
+				t.Errorf("isHeaderFlag(%q) = %v, want %v", tt.flag, got, tt.want)
+			}
+			// RedactArgs fails closed and masks the value of unknown flags too, so
+			// only the header flags are compared.
+			if tt.want && !masked {
+				t.Errorf("RedactArgs does not mask the value of %q", tt.flag)
 			}
 		})
 	}
@@ -861,12 +909,13 @@ func TestValueForms(t *testing.T) {
 		in   string
 		want []string
 	}{
-		{"plain", "abc", []string{"abc", "abc"}},
+		{"plain, one form", "abc", []string{"abc"}},
 		{"plus", "a+b", []string{"a b", "a+b"}},
 		{"stray percent adds a stripped form of each", "a+b%", []string{"a b%", "a+b%", "a b", "a+b"}},
-		{"%NAME% adds no stripped form", "%AZURE_OPENAI_KEY_2024_PROD%", []string{"%AZURE_OPENAI_KEY_2024_PROD%", "%AZURE_OPENAI_KEY_2024_PROD%"}},
-		{"encoded %NAME% adds no stripped form", "%25KEY_NAME%25", []string{"%KEY_NAME%", "%KEY_NAME%"}},
-		{"bad escape inside a value is still stripped", "ab%zzcd", []string{"ab%zzcd", "ab%zzcd", "abzzcd", "abzzcd"}},
+		{"raw %NAME% is a reference, no form", "%AZURE_OPENAI_KEY_2024_PROD%", nil},
+		{"raw %NAME% that starts with an escape is a reference too", "%DB_PASSWORD%", nil},
+		{"encoded %NAME% adds no stripped form", "%25KEY_NAME%25", []string{"%KEY_NAME%"}},
+		{"bad escape inside a value is still stripped", "ab%zzcd", []string{"ab%zzcd", "abzzcd"}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

@@ -101,8 +101,6 @@ func TestCheckConfig(t *testing.T) {
 	disabled := remoteServer(discover.TransportHTTP, "http://mcp.example.com/sse")
 	disabled.State = discover.StateDisabled
 
-	// A remote server with git-spec args and secret args: both checks are for
-	// stdio servers only, so it gives no finding.
 	// remoteWithCommand builds a remote server that also has a command and args.
 	remoteWithCommand := func(command string, args ...string) discover.Server {
 		s := remoteServer(discover.TransportHTTP, "https://mcp.example.com/mcp")
@@ -110,6 +108,8 @@ func TestCheckConfig(t *testing.T) {
 		s.Args = discover.NewArgs(args)
 		return s
 	}
+	// A remote server with git-spec args and secret args: both checks are for
+	// stdio servers only, so it gives no finding.
 	remoteWithSpecArgs := remoteWithCommand("npx", "github:user/repo", "--api-key", testRandom32)
 
 	// Remote servers with args of one kind each: the args checks are for stdio
@@ -303,7 +303,7 @@ func TestCheckConfig(t *testing.T) {
 		{"--api-key=${env:VAR}", stdioServer("node", "server.js", "--api-key=${env:API_KEY}"), nil},
 		{"--api-key $VAR", stdioServer("node", "server.js", "--api-key", "$API_KEY"), nil},
 		{"--api-key reference with a literal default", stdioServer("node", "server.js", "--api-key=${API_KEY:-"+testRandom32+"}"), secretArgs},
-		// S4 precision: a plain 12 byte word is not token-like.
+		// Precision: a plain 12 byte word is not token-like.
 		{"--api-key plain word", stdioServer("node", "server.js", "--api-key", "changeme123"), nil},
 		{"--otp 12 bytes is not token-like", stdioServer("node", "server.js", "--otp", "abcdef123456"), nil},
 		{"--token with a token prefix of 8 bytes", stdioServer("node", "server.js", "--token", "ghp_abcd"), secretArgs},

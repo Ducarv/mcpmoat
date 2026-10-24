@@ -37,6 +37,8 @@ should_match:
     note: npm reads this URL as a git spec, and a branch name moves
   - text: pipx run https://example.com/script.py
     note: A script that pipx downloads and runs. The URL can serve different code at any time
+  - text: pipx run https://example.com/run?file=x.py
+    note: pipx tests the whole argument for the .py suffix, so it also runs a URL that has .py only in the query
 should_not_match:
   - npx -y @scope/server@1.4.2
   - uvx some-server==0.3.1

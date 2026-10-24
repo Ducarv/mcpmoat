@@ -3,13 +3,11 @@ package rules
 import (
 	"strings"
 	"testing"
-
-	"github.com/Ducarv/mcpmoat/internal/discover"
 )
 
 // sha40Upper is testSHA (a synthetic commit hash, not a real commit) in upper
 // case hex.
-const sha40Upper = "0123456789ABCDEF0123456789ABCDEF01234567"
+var sha40Upper = strings.ToUpper(testSHA)
 
 // nonRegistryCase is one command line for the non-registry spec tests.
 type nonRegistryCase struct {
@@ -75,7 +73,7 @@ func TestRawSpecAt(t *testing.T) {
 		{name: "cmd /s /c uvx --from", command: "cmd", args: []string{"/s", "/c", "uvx", "--from", "git+https://h/u/r", "tool"},
 			wantRunner: RunnerUVX, wantSpec: "git+https://h/u/r", wantAt: 4, wantOK: true},
 
-		// S3: a non-registry URL spec that ends in ".py" is a repository, not a script
+		// A non-registry URL spec that ends in ".py" is a repository, not a script
 		{name: "uvx --from repo named discord.py", command: "uvx",
 			args:       []string{"--from", "git+https://github.com/Rapptz/discord.py", "tool"},
 			wantRunner: RunnerUVX, wantSpec: "git+https://github.com/Rapptz/discord.py", wantAt: 1, wantOK: true},
@@ -231,7 +229,7 @@ func nonRegistryUnpinnedCases() []nonRegistryCase {
 		{"uvx --from egg fragment", "uvx", []string{"--from", "git+https://h/u/r#egg=x", "tool"}},
 		{"cmd /c uvx --from", "cmd", []string{"/c", "uvx", "--from", "git+https://h/u/r", "tool"}},
 
-		// S3: repository names that end in ".py"
+		// Repository names that end in ".py"
 		{"uvx --from repo discord.py", "uvx", []string{"--from", "git+https://github.com/Rapptz/discord.py", "tool"}},
 		{"uvx --from subdirectory a.py", "uvx", []string{"--from", "git+https://github.com/u/r.git#subdirectory=a.py"}},
 		{"pipx --spec repo r.py", "pipx", []string{"run", "--spec", "git+https://github.com/u/r.py", "tool"}},
@@ -245,7 +243,9 @@ func nonRegistryUnpinnedCases() []nonRegistryCase {
 		{"pipx run --spec mixed case", "pipx", []string{"run", "--spec", "GIT+https://h/u/r", "tool"}},
 		{"pipx run positional script url", "pipx", []string{"run", "https://h/script.py"}},
 		{"pipx run positional script url upper case", "pipx", []string{"run", "HTTPS://h/SCRIPT.PY"}},
-		{"pipx run positional script url with query", "pipx", []string{"run", "https://h/script.py?a=1#frag"}},
+		{"pipx run script url, .py only in the query", "pipx", []string{"run", "https://evil.example/run?f=x.py"}},
+		{"pipx run script url, .py only in the fragment", "pipx", []string{"run", "https://evil.example/s#.py"}},
+		{"pipx run script url, ftp scheme", "pipx", []string{"run", "ftp://evil.example/x.py"}},
 	}
 }
 
@@ -324,6 +324,7 @@ func nonRegistryFalseCases() []nonRegistryCase {
 		{"uvx tool then --from", "uvx", []string{"tool", "--from", "git+https://h/u/r"}},
 		{"pipx run positional git+https", "pipx", []string{"run", "git+https://h/u/r"}},
 		{"pipx run positional whl", "pipx", []string{"run", "https://h/x.whl"}},
+		{"pipx run script url with a query after .py (pipx refuses it)", "pipx", []string{"run", "https://h/script.py?a=1#frag"}},
 		{"pipx install --spec", "pipx", []string{"install", "--spec", "git+https://h/u/r"}},
 		{"uvx --from https no archive", "uvx", []string{"--from", "https://h/simple"}},
 		{"uvx --from https html", "uvx", []string{"--from", "https://h/x.html"}},
@@ -420,13 +421,7 @@ func TestNonRegistrySpecLeak(t *testing.T) {
 		t.Fatal("nonRegistrySpecUnpinned() = false, want true for a URL with credentials")
 	}
 
-	s := discover.Server{
-		Name:      "srv",
-		Transport: discover.TransportStdio,
-		Command:   "npx",
-		Args:      discover.NewArgs([]string{"-y", arg}),
-	}
-	findings := CheckConfig(s)
+	findings := CheckConfig(stdioServer("npx", "-y", arg))
 
 	var unpinned []Finding
 	for _, f := range findings {
@@ -446,6 +441,8 @@ func TestNonRegistrySpecLeak(t *testing.T) {
 	}
 }
 
+// FuzzNonRegistrySpec checks that nonRegistrySpecUnpinned never panics and
+// never reports a spec that ExtractPackage reads as a registry package.
 func FuzzNonRegistrySpec(f *testing.F) {
 	for _, tc := range append(nonRegistryUnpinnedCases(), nonRegistryFalseCases()...) {
 		for _, a := range tc.args {

@@ -99,8 +99,9 @@
 // and auto_install read a command line. unpinned_package also covers git,
 // tarball, URL and GitHub shorthand package specs, unless the spec is pinned
 // to a full 40-hex commit, and a script URL given to "pipx run". typosquat
-// reads a command line or a bare package name. An adapter in this package turns the line into a server and runs the
-// native config check on it. A hit from a config heuristic has the offset -1.
+// reads a command line or a bare package name. An adapter in this package
+// turns the line into a server and runs the native config check on it. A hit
+// from a config heuristic has the offset -1.
 //
 // # The ignore file
 //
