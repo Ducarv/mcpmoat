@@ -479,9 +479,10 @@ func TestCheckArgSecretsURL(t *testing.T) {
 }
 
 // TestCheckArgSecretsWordURLs runs URLs with a readable long name in the path
-// on a remote server and as a URL arg of a stdio server (bare, and after
-// "--url="). None holds a secret. The positive rows show that the same shapes
-// with a random base64url value are found in all three places.
+// on both remote transports and as a URL arg of a stdio server (bare, after
+// "--url=" and after "--url "). None holds a secret. The positive rows show
+// that the same shapes with a random base64url value are found in all five
+// places.
 func TestCheckArgSecretsWordURLs(t *testing.T) {
 	t.Parallel()
 
