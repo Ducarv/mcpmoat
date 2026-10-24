@@ -226,6 +226,17 @@ should_not_match:
 Negative cases matter as much as positive ones. Add realistic, benign descriptions from real servers
 that look close to the pattern but are safe.
 
+Rule `MOAT-T1-005` (exfiltration) also has a corpus of real tool and schema descriptions from public
+MCP servers in `testdata/exfil/descriptions.txt`. Each line is `<label> <text>`. The label `ok` is benign
+text that must not match, and `hit` is malicious text that must match. The label `fp` is benign text
+that matches today, and `miss` is malicious text that does not match today. These two pin accepted
+limits, so a rule change that fixes one fails the test until you relabel the line on purpose. A change
+to `MOAT-T1-005` must keep `TestExfilCorpus` green and must not add a new match on a real `ok` line. To
+add a benign case, add one real description and name its source repo, commit and license in the group
+comment. A malicious case is synthetic: put it in a group whose comment says "synthetic". The file
+header explains the line format. Run it with
+`go test -race ./internal/rules/ -run TestExfilCorpus -v`.
+
 ### 4. Run the tests
 
 ```sh

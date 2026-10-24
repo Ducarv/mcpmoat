@@ -103,10 +103,12 @@ func TestScanRulesAccepted(t *testing.T) {
 
 			got := scanIn(t, home, work, "--no-connect", "--rules", dir)
 
-			assertScanResult(t, got.code, got.stdout, got.stderr, scanWant{code: exitOK})
-			if got.stdout != base.stdout || got.stderr != base.stderr {
+			// The only change is the notice that the rules are not applied.
+			assertScanResult(t, got.code, got.stdout, got.stderr, scanWant{code: exitOK, stderr: []string{rulesNotAppliedNotice}})
+			wantStderr := base.stderr + rulesNotAppliedNotice + "\n"
+			if got.stdout != base.stdout || got.stderr != wantStderr {
 				t.Errorf("output differs from the scan without --rules\nstdout: %q (want %q)\nstderr: %q (want %q)",
-					got.stdout, base.stdout, got.stderr, base.stderr)
+					got.stdout, base.stdout, got.stderr, wantStderr)
 			}
 			assertDirUnchanged(t, dir, before)
 		})

@@ -80,7 +80,7 @@ func TestScanConnectFlags(t *testing.T) {
 			args:       []string{"--no-connect", "--config", "CONFIG", "--timeout", "0"},
 			wantCode:   exitError,
 			wantStderr: []string{timeoutMsg, usageHint},
-			noStderr:   []string{noRulesText},
+			noStderr:   []string{"no rules", "config rules"},
 		},
 		{
 			name:       "timeout 0s",
@@ -245,7 +245,9 @@ func TestScanConnectFlags(t *testing.T) {
 			if len(tt.wantStdout) == 0 && stdout.Len() != 0 {
 				t.Errorf("stdout = %q, want empty", stdout)
 			}
-			assertNoticeForCode(t, tt.wantCode, stderr.String())
+			if tt.wantCode == exitOK {
+				assertCleanStderr(t, stderr.String())
+			}
 			assertNoLeakBoth(t, stdout.String(), stderr.String())
 			assertNoEscape(t, stdout.String(), stderr.String())
 		})

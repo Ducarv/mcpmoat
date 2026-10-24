@@ -5,3 +5,10 @@ cc-project       claude-code   project:$WORK (untrusted)   http        unapprove
 cursor-global    cursor        global                      stdio       enabled      $HOME/.cursor/mcp.json     uvx cursor-global
 cursor-project   cursor        project:$WORK (untrusted)   http        enabled      $WORK/.cursor/mcp.json     https://cursor-project.example.com/mcp
 codex-global     codex         global                      stdio       enabled      $HOME/.codex/config.toml   npx -y codex-global
+
+RULE          SEVERITY   SERVER          FIELD   KEY/RELATED
+MOAT-T4-003   medium     cc-global       args    cc-global
+MOAT-T4-004   low        cc-global       args    -
+MOAT-T4-003   medium     cursor-global   args    cursor-global
+MOAT-T4-003   medium     codex-global    args    codex-global
+MOAT-T4-004   low        codex-global    args    -

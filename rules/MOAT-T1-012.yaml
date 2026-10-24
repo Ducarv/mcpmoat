@@ -12,7 +12,8 @@ severity: high
 target: schema
 match:
   any_regex:
-    - '(?i)\b(?:send|post|upload|forward|exfiltrate|transmit|copy|email|mail|submit|leak)\b[\s\S]{0,30}\b(?:results?|data|contents?|output|messages?|conversations?|history|secrets?|tokens?|keys?|credentials?|passwords?|everything)\b[\s\S]{0,30}\bto(?:\s*:\s*|\s+)(?:the\s+(?:server|endpoint|address|url)\s+(?:at\s+)?)?<?(?:https?://\S{1,100}|[\w.+%-]{1,64}@[\w-]{1,63}\.[\w.-]{1,64}|\+[0-9][0-9 ()-]{6,20}[0-9])'
+    - '(?i)\b(?:send|post|upload|forward|exfiltrate|transmit|copy|email|mail|submit|leak)\b[\s\S]{0,30}\b(?:results?|data|contents?|output|messages?|conversations?|history|secrets?|tokens?|keys?|credentials?|passwords?|everything|answers?|responses?|arguments?|args)\b[\s\S]{0,30}\bto(?:\s*:\s*|\s+)(?:(?:the|my|our|your|this)\s+(?:server|endpoint|address|url|webhook)(?:\s*:\s*|\s+(?:at\s+)?))?<?(?:https?://\S{1,100}|\+[0-9][0-9 ()-]{6,20}[0-9])'
+    - '(?i)\b(?:send|post|upload|forward|exfiltrate|transmit|copy|email|mail|submit|leak)\b[\s\S]{0,30}\b(?:results?|data|contents?|output|messages?|conversations?|history|secrets?|tokens?|keys?|credentials?|passwords?|everything|answers?|responses?|arguments?|args)\b[\s\S]{0,30}\bto(?:\s*:\s*|\s+)(?:(?:the|my|our|your|this)\s+(?:server|endpoint|address|url|webhook)(?:\s*:\s*|\s+(?:at\s+)?))?<?[\w.+%-]{1,64}@[\w-]{1,63}\.[\w.-]{1,64}'
     - '(?i)\b(?:add\s+[\w.+%-]{1,64}@[\w-]{1,63}\.[\w.-]{1,64}\s+to\s+(?:the\s+)?bcc|always\s+bcc\s+[\w.+%-]{1,64}@[\w-]{1,63}\.[\w.-]{1,64})\b'
 risk: The tool input schema tells the model to send data to an external URL, email address or phone number, so private data can leave the user's machine without the user knowing.
 remediation: Remove the server or do not use it. Read every key and value of the input schema to see where the data goes. Report the server to its author.

@@ -69,7 +69,9 @@ var tableHeader = []string{"NAME", "CLIENT", "SCOPE", "TRANSPORT", "STATE", "SOU
 
 // tableRows splits the server table on stdout into data rows. Each row is its
 // list of whitespace-separated words. It fails the test when the first line
-// is not the table header, and it drops that line.
+// is not the table header, and it drops that line. The table ends at the first
+// blank line: the findings table, when there is one, follows after it (see
+// findingRows).
 //
 // CLIENT never holds a space, and report quotes a NAME, SCOPE or SOURCE cell
 // that holds one. The test names and paths hold no space, so the first two
@@ -84,10 +86,84 @@ func tableRows(t *testing.T, stdout string) [][]string {
 	}
 	var rows [][]string
 	for _, line := range lines[1:] {
+		if line == "" {
+			break
+		}
 		rows = append(rows, strings.Fields(line))
 	}
 	return rows
 }
+
+// findingsHeader is the header row of the findings table, split into words.
+var findingsHeader = []string{"RULE", "SEVERITY", "SERVER", "FIELD", "KEY/RELATED"}
+
+// findingRows returns the rows of the findings table on stdout. The table
+// starts after the first blank line. Each row is its list of
+// whitespace-separated words. It returns nil when stdout has no blank line,
+// which is the case when scan finds nothing. It fails the test when the line
+// after the blank line is not the findings header, and it drops that line.
+//
+// A cell can be quoted when it holds a space, so use only the first four
+// words of a row (RULE, SEVERITY, SERVER, FIELD) when the names hold no
+// space.
+func findingRows(t *testing.T, stdout string) [][]string {
+	t.Helper()
+	_, after, found := splitScanOutput(stdout)
+	if !found {
+		return nil
+	}
+	lines := strings.Split(strings.TrimSuffix(after, "\n"), "\n")
+	if !slices.Equal(strings.Fields(lines[0]), findingsHeader) {
+		t.Fatalf("the text after the blank line does not start with the findings header %q:\n%s", findingsHeader, stdout)
+	}
+	var rows [][]string
+	for _, line := range lines[1:] {
+		rows = append(rows, strings.Fields(line))
+	}
+	return rows
+}
+
+// splitScanOutput splits the stdout of a scan at the first blank line: the
+// server table comes before it, the findings table after it. found is false
+// when stdout has no blank line (no findings).
+func splitScanOutput(stdout string) (table, findings string, found bool) {
+	return strings.Cut(stdout, "\n\n")
+}
+
+// dangerousCanaries are the synthetic canaries of testdata/configs/dangerous:
+// a header value, a token, an arg and a URL query value. They are not
+// credentials, and they must not appear anywhere in stdout or stderr.
+var dangerousCanaries = []string{
+	"mcpmoat-canary-header-8Fk2Zs",
+	"ghp_mcpmoatcanaryZk3Qp8Vw2LxN7rTb5HcYd4M",
+	"Zq8Lm3Vx0Rt5Ws2Hy7Nb4Kd1",
+	"Jt6Pc9Gh2Fw8Ye4Ua1Xs7Mq3",
+}
+
+// configModes are the two ways a test gives scan its config: "auto"
+// (auto-discovery in the home folder) and "config" (--config on one file).
+var configModes = []string{"auto", "config"}
+
+// scanServersArgs writes servers for mode and returns the scan arguments. In
+// mode "auto" it writes .claude.json in home. In mode "config" it writes
+// mcp.json in a new temporary folder and passes it with --config. Any other
+// mode fails the test.
+func scanServersArgs(t *testing.T, mode, home string, servers map[string]any) []string {
+	t.Helper()
+	args := []string{"scan", "--no-connect"}
+	switch mode {
+	case "auto":
+		writeServers(t, home, ".claude.json", servers)
+	case "config":
+		args = append(args, "--config", writeServers(t, t.TempDir(), "mcp.json", servers))
+	default:
+		t.Fatalf("unknown scan mode %q", mode)
+	}
+	return args
+}
+
+// findingIDs returns the rule ID (the first word) of each findings row.
+func findingIDs(rows [][]string) []string { return column(rows, 0) }
 
 // column returns word i (0 is NAME) of each row. It skips a row that is too
 // short.
@@ -125,8 +201,9 @@ func assertContainsAll(t *testing.T, what, got string, wants []string) {
 
 // assertScanErrorLines fails the test if a non-empty line of stderr does not
 // start with "mcpmoat scan: ", or if it is a warning. A config problem fails
-// the scan, so scan must report it as an error and never as a warning. The
-// notice noRulesNotice has the same prefix and is not a warning either.
+// the scan, so scan must report it as an error and never as a warning. An
+// ignore-file notice ("using 1 entry from ...") has the same prefix and is
+// not a warning either.
 func assertScanErrorLines(t *testing.T, stderr string) {
 	t.Helper()
 	assertScanPrefix(t, stderr)
@@ -192,23 +269,13 @@ func assertDirUnchanged(t *testing.T, dir string, before []string) {
 	}
 }
 
-// assertNoRulesNotice fails the test unless stderr is exactly the notice
-// line that a scan with exit code 0 prints.
-func assertNoRulesNotice(t *testing.T, stderr string) {
+// assertCleanStderr fails the test unless stderr is empty. A scan with exit
+// code 0 prints nothing on stderr when no ignore entry, warning or problem
+// applies.
+func assertCleanStderr(t *testing.T, stderr string) {
 	t.Helper()
-	if want := noRulesNotice + "\n"; stderr != want {
-		t.Errorf("stderr = %q, want only the notice %q", stderr, want)
-	}
-}
-
-// assertNoticeForCode fails the test unless stderr is exactly noRulesNotice
-// for exit code 0, and holds no notice for another exit code.
-func assertNoticeForCode(t *testing.T, code int, stderr string) {
-	t.Helper()
-	if code == exitOK {
-		assertNoRulesNotice(t, stderr)
-	} else if strings.Contains(stderr, noRulesNotice) {
-		t.Errorf("stderr holds the notice %q, but the scan failed\nstderr:\n%s", noRulesNotice, stderr)
+	if stderr != "" {
+		t.Errorf("stderr = %q, want empty", stderr)
 	}
 }
 
@@ -217,15 +284,14 @@ type scanWant struct {
 	code     int
 	stdout   []string // substrings of stdout
 	noStdout []string // strings that stdout must not contain
-	// stderr are substrings of stderr. With code exitOK, stderr must be
-	// exactly the notice line, so leave stderr empty.
+	// stderr are substrings of stderr. With code exitOK and no substring,
+	// stderr must be empty: a clean scan prints nothing on stderr.
 	stderr []string
 }
 
 // assertScanResult checks the exit code, stdout and stderr of a scan run
 // against want. It also checks the rules that hold for every scan:
-//   - exit code 0 prints only noRulesNotice on stderr, and exit code 2 never
-//     prints it;
+//   - exit code 0 with no wanted stderr substring prints nothing on stderr;
 //   - every stderr line starts with "mcpmoat scan: " and is not a warning;
 //   - no canary value leaks and no raw escape byte shows.
 func assertScanResult(t *testing.T, code int, stdout, stderr string, want scanWant) {
@@ -236,7 +302,9 @@ func assertScanResult(t *testing.T, code int, stdout, stderr string, want scanWa
 	assertContainsAll(t, "stdout", stdout, want.stdout)
 	assertContainsNone(t, "stdout", stdout, want.noStdout)
 	assertContainsAll(t, "stderr", stderr, want.stderr)
-	assertNoticeForCode(t, want.code, stderr)
+	if want.code == exitOK && len(want.stderr) == 0 {
+		assertCleanStderr(t, stderr)
+	}
 	assertScanErrorLines(t, stderr)
 	assertNoLeakBoth(t, stdout, stderr)
 	assertNoEscape(t, stdout, stderr)
