@@ -1,8 +1,11 @@
 # Test fixtures: MCP servers
 
 Every folder here is a **test fixture** for mcpmoat. These are fake servers for tests and the demo.
-They are not products. They make no network call, start no process and read or write no file. The
-malicious text in them is inert data. Do not install them in a real client.
+They are not products. No fixture makes a network call. The malicious fixtures (`poisoned/`,
+`shadowing/` and `mailer/`) start no process and write no file. Their malicious text is inert data.
+`benign/` has test-only flags that can write a file or start a copy of itself. See its
+[README](benign/README.md). `TestFixtureImports` in `internal/rules/fixtures_imports_test.go`
+checks the imports of every fixture. Do not install any fixture in a real client.
 
 Each fixture is one self-contained `main` package, on purpose: a reader can audit one malicious
 fixture alone, without a shared helper that could hide behaviour. So the small `run()` and exit-code
@@ -10,7 +13,7 @@ block is repeated in each folder.
 
 | Folder | Threat | Expected rule IDs |
 |---|---|---|
-| `benign/` | none (negative baseline) | none |
+| `benign/` | none (negative baseline) | none; see its [README](benign/README.md) for the test-only flags |
 | `poisoned/` | T1 tool poisoning | MOAT-T1-002, MOAT-T1-003, MOAT-T1-004, MOAT-T1-005, MOAT-T1-006, MOAT-T1-008, MOAT-T1-009; see its README for the marker of each ID |
 | `shadowing/` + `mailer/` | T3 cross-server shadowing | MOAT-T1-003 and MOAT-T1-005 (`shadowing/` alone); MOAT-T3-001 (two sources, see the note below) |
 | (none yet) | T2 rug pull | Fixtures come with the M5 Pins milestone |

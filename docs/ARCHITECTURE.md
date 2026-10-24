@@ -1,7 +1,8 @@
 # Architecture
 
 > **Status:** this page describes the code as it is today and marks what is still planned. Today
-> `mcpmoat scan` reads configs, loads rules and lists servers. It does not connect to servers yet.
+> `mcpmoat scan --no-connect` reads configs, loads rules, lists servers and applies the config rules
+> (T4 and T5) and the ignore list. It does not connect to servers yet.
 
 This page is the one place for the package layout, the import direction, the data flow, the
 `internal/inspect` interface and the rules for untrusted text. The [PRD](PRD.md) holds the product
@@ -40,7 +41,8 @@ docs/                   PRD and other documentation
 - `internal/rules`: loads and checks the YAML rules, runs the config heuristics and the shadowing
   check, and reads `.mcpmoat-ignore`.
 - `internal/pins`: planned home of the per-tool hashes and `pins.json`. It holds `doc.go` only.
-- `internal/report`: writes the terminal table of servers.
+- `internal/report`: writes the terminal tables: the servers (`WriteServers`) and the config findings
+  (`WriteFindings`).
 - `rules/`: the built-in rule files (`rules/*.yaml`) and `data/popular-servers.txt`. The Go file
   `rules/embed.go` embeds both with `go:embed`. It holds data only. `internal/rules` parses it.
 - `testdata/`: fixtures. `testdata/servers` holds malicious example servers. `testdata/configs`
@@ -85,16 +87,28 @@ go list -f '{{.ImportPath}}: {{join .Imports " "}}' ./...
 2. It loads the rules with `rules.Builtin` and, with `--rules`, `rules.LoadDir`. Then
    `rules.NewSet` checks for duplicate rule IDs and for clashes with built-in IDs. This only loads
    and checks the rules. A bad rule file or an ID problem gives exit code 2.
-3. It reads `.mcpmoat-ignore` with `rules.ReadIgnoreFile`. The list is read but not applied yet.
+3. It reads `.mcpmoat-ignore` with `rules.ReadIgnoreFile` and adds the `--ignore` rule IDs.
 4. It finds the servers with `discover.Discover`, or reads one file with `discover.ReadConfig`.
-5. `report.WriteServers` prints the servers.
+5. It runs the built-in config rules on every server it found, also a disabled one, as `discover`
+   gives it. `rules.CheckConfig` gives the T4 findings (MOAT-T4-001 to 004). The typosquat check
+   from `rules.NewBuiltinTyposquat` gives the T5 finding (MOAT-T5-001). The ignore list drops
+   some findings. `listServers` prints the ignored count for each rule ID on stderr (only rule
+   IDs and counts, no server names). The rule set gives the severity of each one that is left.
+6. `report.WriteServers` prints the servers. Then, only when findings are left,
+   `report.WriteFindings` prints a blank line and a table of them. The table holds the rule ID, the
+   severity, the server, the field and the key or related name. It never holds a value.
 
-Steps 1 and 2 always run. Steps 3 to 5 run only with `--no-connect`. Without `--no-connect`,
-`scan` prints "not implemented yet" after step 2 and exits with 2. The exit codes in the code are
-only 0 and 2 (`cmd/mcpmoat/cli.go`). `mcpmoat pin` is a stub. `internal/report` has no JSON output.
+Steps 1 and 2 always run. Steps 3 to 6 run only with `--no-connect`. Without `--no-connect`,
+`scan` prints "not implemented yet" after step 2 and exits with 2. The exit codes
+(`cmd/mcpmoat/cli.go`) are: 0 when no finding has severity high or above; 1 when a finding that is
+not ignored has severity high or above (the PRD default of `--fail-on`, which is not a flag yet);
+2 for an execution error. Exit code 2 wins over 1. `mcpmoat pin` is a stub. `internal/report` has
+no JSON output.
 
 The code below is built and tested, but `scan` does not call it yet: `inspect.Run`, `inspect.New`
-(`SDKInspector`), `inspect.Remote`, `rules.CheckConfig` and `rules.CheckShadowing`.
+(`SDKInspector`), `inspect.Remote` and `rules.CheckShadowing`. The tool rules (descriptions and
+schemas) do not run yet. `scan` loads the rules from `--rules` and checks them, but does not apply
+them.
 
 ### Planned (PRD section 8)
 

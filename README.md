@@ -28,8 +28,10 @@ mcpmoat version              # print the version, commit and build date
 
 ## Ignore findings
 
-mcpmoat has built-in rules, and `scan` loads and validates them. `scan` does not apply them
-yet, so it has no findings to ignore. It reads the ignore list and reports problems in it.
+`mcpmoat scan --no-connect` applies the built-in config rules (dangerous config, T4, and
+typosquatting, T5) to every server it finds. The ignore list below drops findings of these rules.
+The tool rules need a connection to the server. That is not implemented yet, so they do not run.
+`scan` exits with code 1 when a finding that is not ignored has severity high or above.
 
 `--ignore <rule-id>` ignores all findings of one rule. You can use the flag more than one time.
 
@@ -63,6 +65,12 @@ When the file gives entries, mcpmoat prints `using N entries from .mcpmoat-ignor
 `using 1 entry from .mcpmoat-ignore`) on stderr. If you see this line, read the file before you
 trust a clean result.
 
+When the ignore list drops findings, `scan` also prints one line on stderr after the findings
+table. It gives the count for each rule ID, for example
+`mcpmoat scan: 2 findings ignored: MOAT-T4-002 (2)`. It shows only rule IDs and counts. A
+`.mcpmoat-ignore` in a repository that you did not write can hide findings, so check this line and
+the file. Ignored findings do not change the exit code.
+
 ## Build from source
 
 ```sh
@@ -80,11 +88,12 @@ go build -o mcpmoat ./cmd/mcpmoat
 - It does not protect against prompt injection that arrives in content the agent reads (for example
   a GitHub issue). That is planned for a later phase.
 - `mcpmoat scan` cannot connect to servers yet. Until it can, `scan` needs `--no-connect`. Without
-  it, `scan` prints an error and exits with code 2. When connecting is wired in, `mcpmoat scan`
-  will by default start each configured stdio server, with the same command your client already
-  runs. mcpmoat will use no shell. The server will get only the env from its config plus a small
-  allowlist of safe variables, such as `PATH` and `HOME`. This env scrub is not a sandbox: the
-  server runs as you and can read your files and use the network.
+  it, `scan` prints an error and exits with code 2. It cannot check the tools of a server, so the
+  tool rules do not run, and exit code 0 does not mean that the tools are safe. When connecting is
+  wired in, `mcpmoat scan` will by default start each configured stdio server, with the same
+  command your client already runs. mcpmoat will use no shell. The server will get only the env
+  from its config plus a small allowlist of safe variables, such as `PATH` and `HOME`. This env
+  scrub is not a sandbox: the server runs as you and can read your files and use the network.
 
 ## Documentation
 
