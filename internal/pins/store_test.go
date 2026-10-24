@@ -8,7 +8,6 @@ import (
 	"maps"
 	"os"
 	"path/filepath"
-	"reflect"
 	"runtime"
 	"slices"
 	"strings"
@@ -92,7 +91,7 @@ func storeTestWantPins(t *testing.T, s *pins.Store, id pins.Identity, want pins.
 		t.Errorf("Get(%+v) ok = false, want true", id)
 		return
 	}
-	if !reflect.DeepEqual(got, want) {
+	if !maps.Equal(got, want) {
 		t.Errorf("Get(%+v) = %v, want %v", id, got, want)
 	}
 }
@@ -503,6 +502,16 @@ func TestSetNilClearsPins(t *testing.T) {
 	storeTestWantPins(t, storeTestMustLoad(t, path), idA, storeTestPins())
 }
 
+func TestZeroValueStore(t *testing.T) {
+	t.Parallel()
+	var s pins.Store
+	s.Set(idA, storeTestPins("t", "h"))
+	storeTestWantPins(t, &s, idA, storeTestPins("t", "h"))
+	if err := s.Save(); err == nil {
+		t.Error("Save() of a zero-value Store error = nil, want an error (empty path)")
+	}
+}
+
 func TestGetReturnsCopy(t *testing.T) {
 	t.Parallel()
 	s := storeTestMustLoad(t, storeTestPath(t))
@@ -890,7 +899,7 @@ func FuzzLoad(f *testing.F) {
 			id := pins.Identity{Client: srv.Client, Source: srv.Source, ProjectPath: srv.ProjectPath, Name: srv.Name}
 			want, _ := s.Get(id)
 			got, ok := again.Get(id)
-			if !ok || !reflect.DeepEqual(got, want) {
+			if !ok || !maps.Equal(got, want) {
 				t.Fatalf("Get(%+v) after the round trip = %v, %v; want %v", id, got, ok, want)
 			}
 		}

@@ -61,29 +61,27 @@ func (w atomicWriter) writeFile(path string, data []byte) (err error) {
 	// longer exists, so we do not remove anything.
 	defer func() {
 		if err != nil {
+			// A second Close on a closed file only returns an error, which we ignore.
+			_ = f.Close()
 			_ = os.Remove(tmp)
 		}
 	}()
 
 	if w.beforeWrite != nil {
 		if err = w.beforeWrite(tmp); err != nil {
-			_ = f.Close()
 			return fmt.Errorf("write temp file: %w", err)
 		}
 	}
 	if _, err = f.Write(data); err != nil {
-		_ = f.Close()
 		return fmt.Errorf("write temp file: %w", err)
 	}
 	// os.CreateTemp already uses mode 0o600. The explicit Chmod keeps the mode
 	// independent of that detail. It works on the open descriptor, so a path that
 	// someone swapped cannot redirect it.
 	if err = f.Chmod(fileMode); err != nil {
-		_ = f.Close()
 		return fmt.Errorf("chmod temp file: %w", err)
 	}
 	if err = f.Sync(); err != nil {
-		_ = f.Close()
 		return fmt.Errorf("sync temp file: %w", err)
 	}
 	if err = f.Close(); err != nil {

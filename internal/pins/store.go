@@ -61,8 +61,7 @@ type Store struct {
 	path string
 
 	mu sync.Mutex
-	// servers uses Identity as the key. A struct is a valid map key when all
-	// its fields are comparable, and strings are.
+	// servers is keyed by server identity.
 	servers map[Identity]ServerPins
 }
 
@@ -112,7 +111,9 @@ func DefaultPath() (string, error) {
 // never replaces a bad file with an empty store, because that would pin a
 // poisoned server as trusted. The errors name the path and the position of the
 // problem, and never hold file content. A file with a newer format version
-// gives an error that wraps ErrUnsupportedVersion.
+// gives an error that wraps ErrUnsupportedVersion. A pins.json symlink that
+// points outside its directory is refused (safefile.ErrOutsideRoot); Save
+// replaces a symlink with a regular file.
 func Load(path string) (*Store, error) {
 	s := &Store{path: path, servers: make(map[Identity]ServerPins)}
 
@@ -126,8 +127,9 @@ func Load(path string) (*Store, error) {
 
 	// Read the version first with a loose decode. A future version may change
 	// the rest of the shape, and the user must then see the version error and
-	// not a shape error. json.Unmarshal also rejects trailing data, so the
-	// strict decode does not need its own check.
+	// not a shape error. This holds while the top level stays an object with an
+	// integer "version", so a format change must keep that. json.Unmarshal also
+	// rejects trailing data, so the strict decode does not need its own check.
 	var probe struct {
 		Version *int `json:"version"`
 	}
@@ -161,10 +163,7 @@ func Load(path string) (*Store, error) {
 		if _, dup := s.servers[id]; dup {
 			return nil, fmt.Errorf("parse %s: servers[%d]: duplicate server identity", path, i)
 		}
-		s.servers[id] = maps.Clone(srv.Tools)
-		if s.servers[id] == nil {
-			s.servers[id] = ServerPins{}
-		}
+		s.servers[id] = cloneOrEmpty(srv.Tools)
 	}
 	return s, nil
 }
@@ -188,11 +187,20 @@ func (s *Store) Set(id Identity, p ServerPins) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	// A zero-value Store has a nil map, and writing to a nil map panics.
+	if s.servers == nil {
+		s.servers = make(map[Identity]ServerPins)
+	}
+	s.servers[id] = cloneOrEmpty(p)
+}
+
+// cloneOrEmpty returns a copy of p. A nil p gives an empty map, not nil.
+func cloneOrEmpty(p map[string]string) ServerPins {
 	c := maps.Clone(p)
 	if c == nil {
 		c = ServerPins{}
 	}
-	s.servers[id] = c
+	return c
 }
 
 // Save writes the store to its path, atomically, with file mode 0o600. A new
@@ -292,5 +300,5 @@ func describeJSONError(err error) string {
 	if errors.Is(err, io.ErrUnexpectedEOF) || errors.Is(err, io.EOF) {
 		return "unexpected end of the JSON data"
 	}
-	return "invalid or unknown field"
+	return "unknown field or invalid value"
 }
