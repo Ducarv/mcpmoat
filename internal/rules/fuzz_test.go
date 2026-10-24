@@ -551,8 +551,9 @@ func checkFuzzSkeleton(t *testing.T, s string) {
 }
 
 // FuzzSkeleton checks skeleton and foldSkeleton directly (see
-// checkFuzzSkeleton), also on inputs longer than MaxMatchInputBytes: they do
-// not cut the text, and no other code limits them.
+// checkFuzzSkeleton), also on inputs longer than MaxMatchInputBytes. skeleton
+// does not cut the text, and no other code limits it. foldSkeleton cuts the
+// text at MaxMatchInputBytes through foldMarks.
 func FuzzSkeleton(f *testing.F) {
 	for _, s := range fuzzLookalikeTexts {
 		f.Add(s)

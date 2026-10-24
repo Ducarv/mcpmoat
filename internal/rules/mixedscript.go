@@ -13,10 +13,12 @@ import (
 
 // mixedScript flags each word of raw that mixes letters of two or more
 // look-alike scripts (see lookalikeScripts), such as "Ignore" with a Cyrillic
-// "I" (U+0406). normalizeForMatch does not fold look-alike letters from other
-// scripts, so such a word gets past the regex rules. The package doc
-// (doc.go) holds the full rules for users: the unit exemption and the limits.
-// This comment holds the implementation contract.
+// "I" (U+0406). The regex forms read most such letters as ASCII (see
+// skeleton), but a word that mixes scripts is suspect also when no regex
+// matches it: a letter can be missing from the table, and a keyword form has
+// no skeleton fold. The package doc (doc.go) holds the full rules for users:
+// the unit exemption and the limits. This comment holds the implementation
+// contract.
 //
 // It reads the full raw text in one pass, with no size cut. A word is a
 // longest run of letters, of the runes that isWordFiller accepts (marks,
@@ -65,6 +67,9 @@ func mixedScript(raw string, jsonEscapes bool) []Hit {
 	// prev1. They tell whether a word comes after a number (see
 	// followsDigit).
 	prev1, prev2 := noRune, noRune
+	// The decode and the ASCII fast path below stay in this loop on purpose.
+	// A helper function for the decode was not inlined and made 10 MB of
+	// ASCII text 10% slower (68 ms to 75 ms, Apple M1 Pro, go1.27.3).
 	for i := 0; i < len(raw); {
 		var r rune
 		size := 0
@@ -109,7 +114,7 @@ func mixedScript(raw string, jsonEscapes bool) []Hit {
 			w.addMark(scriptOf(r))
 		case isWordFiller(r):
 			w.begin(i, prev1, prev2)
-		case r > unicode.MaxASCII && w.setFold(r) && w.foldIsLetters():
+		case w.setFold(r) && w.foldIsLetters():
 			// The regexes read this rune as the letters of its fold.
 			w.begin(i, prev1, prev2)
 			w.countFold()
@@ -138,12 +143,12 @@ const noRune rune = -1
 // private-use rune, an unassigned code point or U+FFFD. Many fonts draw a
 // private-use or unassigned rune as nothing, and a client may drop U+FFFD,
 // so they must not split a word either. To join runes into one word can only
-// add hits.
+// add hits. No ASCII rune is private-use or unassigned.
 func isWordFiller(r rune) bool {
 	if unicode.IsMark(r) || isInvisible(r) || r == utf8.RuneError {
 		return true
 	}
-	return r > unicode.MaxASCII && unicode.In(r, unicode.Co, unicode.Cn)
+	return unicode.In(r, unicode.Co, unicode.Cn)
 }
 
 // followsDigit reports whether a word whose two previous runes are prev1
@@ -200,31 +205,42 @@ const (
 	edgeTier
 )
 
+// arabicHighHamza is U+0674 ARABIC LETTER HIGH HAMZA, a small hamza that
+// Unicode makes a letter (category Lo). TR39 maps U+0672 and U+0675 to "l" and
+// then U+0674, and it is the part of U+0675 that NFKD splits off. The edge run
+// does not count it as a visible letter, as it does not count a mark.
+const arabicHighHamza = '\u0674'
+
 // edgeLookalikes holds the edge-tier letters (see edgeTier) that read as one
 // Latin letter, sorted by code point for isEdgeLookalike. It holds two
 // groups:
 //
-//   - The 38 letters that TR39 confusables.txt 18.0.0 (see
-//     confusablesVersion) maps to exactly one Latin letter. The comment of
-//     each entry gives that letter.
-//   - The 20 composed and compatibility forms of those letters. A form is an
+//   - The letters that TR39 confusables.txt 18.0.0 (see confusablesVersion)
+//     maps to one Latin letter, or to one Latin letter and then only
+//     non-spacing marks (Mn) or U+0674 (Arabic letter high hamza, see
+//     arabicHighHamza). The comment of each entry gives that letter. So
+//     U+0673 (alef with wavy hamza below, TR39 "l" + U+0655) and U+0675 (high
+//     hamza alef, TR39 "l" + U+0674) are in the table, as U+0625 is.
+//   - The composed and compatibility forms of those letters. A form is an
 //     edge-tier letter whose NFKD decomposition, with its marks (Mn, Mc and
-//     Me) removed, is exactly one rune of the first group. The comment of
-//     each entry gives that rune. TR39 applies NFD before it maps a rune, so
-//     confusables.txt does not list most of these forms, but they read as
-//     their base letter: U+0623 (alef with hamza above) + "gnore" reads as
-//     "lgnore", as U+0627 U+0654 does.
+//     Me) and U+0674 removed, is exactly one letter of the first group. The
+//     comment of each entry gives that letter. TR39 applies NFD before it
+//     maps a letter, so confusables.txt does not list most of these forms,
+//     but they read as their base letter: U+0623 (alef with hamza above) +
+//     "gnore" reads as "lgnore", as U+0627 U+0654 does.
 //
 // The second group comes from the Unicode 17.0.0 tables of Go (see
 // scriptTablesVersion, unicode.Version) and of
 // golang.org/x/text/unicode/norm. A test walks all edge-tier letters and
-// checks that the table holds each such form. The table holds letters only:
-// a mark is handled by wordState.addMark, and a digit or a punctuation rune
-// is not part of a word. It leaves out the letters that TR39 maps to two or
-// more Latin letters, such as U+0629 (o and a diaeresis), U+11EE (oo) and
-// U+1EE64 (ARABIC MATHEMATICAL STRETCHED HEH: ol), whose NFKD base is
-// U+0647. When confusablesVersion or scriptTablesVersion changes, make the
-// list again.
+// checks that the table holds each such form, and that it holds every edge-tier
+// letter of skeletonTable. The table holds letters only: a mark is handled by
+// wordState.addMark, and a digit or a punctuation rune is not part of a word.
+// It leaves out the letters that TR39 maps to two or more Latin letters, such
+// as U+11EE (oo) and U+1EE64 (ARABIC MATHEMATICAL STRETCHED HEH: ol), whose
+// NFKD base is U+0647, and the letters that TR39 maps to a Latin letter and a
+// spacing mark (Mc), such as Myanmar U+1010 ("o" + U+102C): the visible sign
+// shows that the letter is not a Latin one. When confusablesVersion or
+// scriptTablesVersion changes, make the list again.
 var edgeLookalikes = [...]rune{
 	0x05D5,  // HEBREW LETTER VAV: l
 	0x05D8,  // HEBREW LETTER TET: v
@@ -234,12 +250,18 @@ var edgeLookalikes = [...]rune{
 	0x0623,  // ARABIC LETTER ALEF WITH HAMZA ABOVE: NFKD U+0627
 	0x0625,  // ARABIC LETTER ALEF WITH HAMZA BELOW: NFKD U+0627
 	0x0627,  // ARABIC LETTER ALEF: l
+	0x0629,  // ARABIC LETTER TAA MARBUTA (common name: misspell rejects the Unicode name): o
 	0x0647,  // ARABIC LETTER HEH: o
+	0x0672,  // ARABIC LETTER ALEF WITH WAVY HAMZA ABOVE: l
+	0x0673,  // ARABIC LETTER ALEF WITH WAVY HAMZA BELOW: l
+	0x0675,  // ARABIC LETTER HIGH HAMZA ALEF: l
 	0x06BE,  // ARABIC LETTER HEH DOACHASHMEE: o
 	0x06C0,  // ARABIC LETTER HEH WITH YEH ABOVE: NFKD U+06D5
 	0x06C1,  // ARABIC LETTER HEH GOAL: o
 	0x06C2,  // ARABIC LETTER HEH GOAL WITH HAMZA ABOVE: NFKD U+06C1
+	0x06C3,  // ARABIC LETTER TAA MARBUTA GOAL (common name: misspell rejects the Unicode name): o
 	0x06D5,  // ARABIC LETTER AE: o
+	0x06FF,  // ARABIC LETTER HEH WITH INVERTED V: o
 	0x0B20,  // ORIYA LETTER TTHA: O
 	0x0D1F,  // MALAYALAM LETTER TTA: s
 	0x0D20,  // MALAYALAM LETTER TTHA: o
@@ -249,6 +271,8 @@ var edgeLookalikes = [...]rune{
 	0x110B,  // HANGUL CHOSEONG IEUNG: o
 	0x11BC,  // HANGUL JONGSEONG IEUNG: o
 	0x1A45,  // TAI THAM LETTER WA: o
+	0x3112,  // BOPOMOFO LETTER X: T
+	0x311A,  // BOPOMOFO LETTER A: Y
 	0x3147,  // HANGUL LETTER IEUNG: o
 	0xFB35,  // HEBREW LETTER VAV WITH DAGESH: NFKD U+05D5
 	0xFB38,  // HEBREW LETTER TET WITH DAGESH: NFKD U+05D8
@@ -275,6 +299,8 @@ var edgeLookalikes = [...]rune{
 	0xFE88,  // ARABIC LETTER ALEF WITH HAMZA BELOW FINAL FORM: NFKD U+0627
 	0xFE8D,  // ARABIC LETTER ALEF ISOLATED FORM: l
 	0xFE8E,  // ARABIC LETTER ALEF FINAL FORM: l
+	0xFE93,  // ARABIC LETTER TAA MARBUTA ISOLATED FORM (common name: misspell rejects the Unicode name): NFKD U+0629
+	0xFE94,  // ARABIC LETTER TAA MARBUTA FINAL FORM (common name: misspell rejects the Unicode name): NFKD U+0629
 	0xFEE9,  // ARABIC LETTER HEH ISOLATED FORM: o
 	0xFEEA,  // ARABIC LETTER HEH FINAL FORM: o
 	0xFEEB,  // ARABIC LETTER HEH INITIAL FORM: o
@@ -314,9 +340,9 @@ type lookalikeScript struct {
 // counts letters and marks only, and Han. Chinese and Japanese text puts Han
 // letters next to Latin names with no space, and even between two names, so
 // no tier fits Han. TR39 also allows Latin with Han (the Highly Restrictive
-// level). Code points that are new in TR39 but
-// not yet in the Go tables are unassigned for Go, so they join a word (see
-// isWordFiller) but count for no script.
+// level). Code points that are new in TR39 but not yet in the Go tables are
+// unassigned for Go, so they join a word (see isWordFiller) but count for no
+// script.
 var lookalikeScripts = [...]lookalikeScript{
 	latinScript: {"Latin", unicode.Latin, strictTier},
 	{"Cyrillic", unicode.Cyrillic, strictTier},
@@ -334,7 +360,6 @@ var lookalikeScripts = [...]lookalikeScript{
 	{"Bassa Vah", unicode.Bassa_Vah, strictTier},
 	{"Batak", unicode.Batak, strictTier},
 	{"Beria Erfe", unicode.Beria_Erfe, strictTier},
-	{"Bopomofo", unicode.Bopomofo, strictTier},
 	{"Carian", unicode.Carian, strictTier},
 	{"Chakma", unicode.Chakma, strictTier},
 	{"Deseret", unicode.Deseret, strictTier},
@@ -361,10 +386,12 @@ var lookalikeScripts = [...]lookalikeScript{
 	{"Vai", unicode.Vai, strictTier},
 	{"Warang Citi", unicode.Warang_Citi, strictTier},
 
-	// The edge tier, in alphabetical order. Hangul (a Korean particle after
-	// a name), Oriya (Indic suffixes) and Tai Tham (no spaces, as Thai)
-	// attach to Latin names too.
+	// The edge tier, in alphabetical order. Bopomofo (Taiwanese text writes
+	// phonetic letters and particles next to a name, with no spaces, as Han
+	// text does), Hangul (a Korean particle after a name), Oriya (Indic
+	// suffixes) and Tai Tham (no spaces, as Thai) attach to Latin names too.
 	{"Arabic", unicode.Arabic, edgeTier},
+	{"Bopomofo", unicode.Bopomofo, edgeTier},
 	{"Hangul", unicode.Hangul, edgeTier},
 	{"Hebrew", unicode.Hebrew, edgeTier},
 	{"Kannada", unicode.Kannada, edgeTier},
@@ -450,7 +477,10 @@ func scriptOf(r rune) int {
 	}
 	// A binary search for the first range that ends at c or after c: the
 	// ranges before lo end before c, and the ranges from hi on end at c or
-	// after c.
+	// after c. It is written by hand on purpose: slices.BinarySearchFunc with
+	// a comparison function was 29% to 43% slower on 10 MB of Cyrillic and
+	// mixed text (135 ms to 193 ms, Apple M1 Pro, go1.27.3), because the
+	// function call is not inlined.
 	c := uint32(r)
 	lo, hi := 0, len(scriptRanges)
 	for lo < hi {
@@ -477,8 +507,8 @@ type wordState struct {
 	letters int        // letters of any script
 	scripts scriptMask // the scripts that a letter or mark counts for
 	// lastScript is the index in lookalikeScripts of the script of the last
-	// letter, or -1 when that letter is of no script in the list. It is
-	// valid only when letters > 0 (see addMark).
+	// letter that has a script in the list. It is valid only when
+	// letters > 0 (see addMark and countLetter).
 	lastScript int
 
 	// The edge run is the edge-tier letters and marks (see edgeTier) since
@@ -519,14 +549,14 @@ func (w *wordState) begin(i int, prev1, prev2 rune) {
 	}
 }
 
-// addLetter adds the letter r to the word. A letter of the Common or
-// Inherited script, or a Latin letter that is not ASCII, counts by its fold
-// (see addFolded). So the mathematical Greek letters count as Greek, and the
+// addLetter adds the letter r, which is not ASCII, to the word. A letter of
+// the Common or Inherited script, or a Latin letter, counts by its fold (see
+// addFolded). So the mathematical Greek letters count as Greek, and the
 // fullwidth "s" and the Kelvin sign count as "s" and "K". Any other letter
 // counts for its own script (see countLetter).
 func (w *wordState) addLetter(r rune) {
 	i := scriptOf(r)
-	if (i < 0 && unicode.In(r, unicode.Common, unicode.Inherited)) || (i == latinScript && r > unicode.MaxASCII) {
+	if (i < 0 && unicode.In(r, unicode.Common, unicode.Inherited)) || i == latinScript {
 		w.addFolded(r)
 		return
 	}
@@ -623,19 +653,24 @@ func (w *wordState) countLetter(r rune, i int) {
 		w.nLatin++
 	case lookalikeScripts[i].tier == edgeTier:
 		w.edgeRun |= 1 << i
-		// An invisible letter (see isInvisible) is not counted. For a
-		// letter, isInvisible reads only the Other_Default_Ignorable_Code_Point
-		// table (a letter is never Cc, Cf or a variation selector), so the
-		// check reads that table alone. It stops at the second letter of
-		// the run, so a long run costs no more than a short one.
-		if w.edgeLetters < 2 && !unicode.Is(unicode.Other_Default_Ignorable_Code_Point, r) {
+		// U+0674 (see arabicHighHamza) and an invisible letter (see
+		// isInvisible) are not counted. For a letter, isInvisible reads only
+		// the Other_Default_Ignorable_Code_Point table (a letter is never Cc,
+		// Cf or a variation selector), so the check reads that table alone.
+		// It stops at the second letter of the run, so a long run costs no
+		// more than a short one.
+		if w.edgeLetters < 2 && r != arabicHighHamza && !unicode.Is(unicode.Other_Default_Ignorable_Code_Point, r) {
 			w.edgeLetters++
 			w.edgeLetter = r // read only when edgeLetters is 1
 		}
 	default:
 		w.scripts |= 1 << i
 	}
-	w.lastScript = i
+	if i >= 0 {
+		// A letter of no listed script, such as the Arabic tatweel (U+0640),
+		// is transparent: a mark after it still belongs to the letter before.
+		w.lastScript = i
+	}
 	isGreek := i == greekScript
 	if isGreek {
 		w.greek++

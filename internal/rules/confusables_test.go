@@ -18,6 +18,11 @@ import (
 // again and update this number.
 const skeletonTableSize = 562
 
+// latinILonga is U+A7FE LATIN EPIGRAPHIC LETTER I LONGA. It has no case, but
+// its name says that it is an "I", so the table maps it to "I" and not to
+// "l" (see the I/l rule in the comment of skeletonTable).
+const latinILonga = '\uA7FE'
+
 // TestSkeletonTable checks the rules that the comment of skeletonTable gives
 // for each entry, and the order that the binary search of skeletonOf needs.
 func TestSkeletonTable(t *testing.T) {
@@ -38,7 +43,7 @@ func TestSkeletonTable(t *testing.T) {
 		if r < utf8.RuneSelf {
 			t.Errorf("source %U is ASCII", r)
 		}
-		if c.to < 'A' || c.to > 'z' || 'Z' < c.to && c.to < 'a' {
+		if !isASCIILetter(c.to) {
 			t.Errorf("target of %U = %q, want an ASCII letter", r, c.to)
 		}
 		if !unicode.IsLetter(r) && !unicode.Is(unicode.Mc, r) && r != 0x212E {
@@ -66,8 +71,9 @@ func TestSkeletonTable(t *testing.T) {
 				t.Errorf("source %U is redundant: its fold %U maps to %q too", r, fr, to)
 			}
 		}
-		// The I/l rule: an uppercase look-alike of TR39 "l" maps to "I".
-		if c.to == 'I' && !unicode.IsUpper(r) {
+		// The I/l rule: an uppercase look-alike of TR39 "l" maps to "I". The
+		// one caseless exception is an "I" by its name.
+		if c.to == 'I' && !unicode.IsUpper(r) && r != latinILonga {
 			t.Errorf("source %U maps to 'I' but is not uppercase", r)
 		}
 		if c.to == 'l' && unicode.IsUpper(r) {
@@ -85,31 +91,32 @@ func TestSkeletonOf(t *testing.T) {
 		want   byte
 		wantOK bool
 	}{
-		{r: 0x0455, want: 's', wantOK: true}, // CYRILLIC SMALL LETTER DZE
-		{r: 0x04BB, want: 'h', wantOK: true}, // CYRILLIC SMALL LETTER SHHA
-		{r: 0x0430, want: 'a', wantOK: true}, // CYRILLIC SMALL LETTER A
-		{r: 0x0435, want: 'e', wantOK: true}, // CYRILLIC SMALL LETTER IE
-		{r: 0x043E, want: 'o', wantOK: true}, // CYRILLIC SMALL LETTER O
-		{r: 0x0440, want: 'p', wantOK: true}, // CYRILLIC SMALL LETTER ER
-		{r: 0x0441, want: 'c', wantOK: true}, // CYRILLIC SMALL LETTER ES
-		{r: 0x0443, want: 'y', wantOK: true}, // CYRILLIC SMALL LETTER U
-		{r: 0x0445, want: 'x', wantOK: true}, // CYRILLIC SMALL LETTER HA
-		{r: 0x0456, want: 'i', wantOK: true}, // CYRILLIC SMALL LETTER BYELORUSSIAN-UKRAINIAN I
-		{r: 0x0458, want: 'j', wantOK: true}, // CYRILLIC SMALL LETTER JE
-		{r: 0x0501, want: 'd', wantOK: true}, // CYRILLIC SMALL LETTER KOMI DE
-		{r: 0x051B, want: 'q', wantOK: true}, // CYRILLIC SMALL LETTER QA
-		{r: 0x051D, want: 'w', wantOK: true}, // CYRILLIC SMALL LETTER WE
-		{r: 0x0581, want: 'g', wantOK: true}, // ARMENIAN SMALL LETTER CO
-		{r: 0x0585, want: 'o', wantOK: true}, // ARMENIAN SMALL LETTER OH
-		{r: 0x0261, want: 'g', wantOK: true}, // LATIN SMALL LETTER SCRIPT G
-		{r: 0x212E, want: 'e', wantOK: true}, // ESTIMATED SYMBOL
-		{r: 0x0131, want: 'i', wantOK: true}, // LATIN SMALL LETTER DOTLESS I
-		{r: 0x01C0, want: 'l', wantOK: true}, // LATIN LETTER DENTAL CLICK
-		{r: 0x0C02, want: 'o', wantOK: true}, // TELUGU SIGN ANUSVARA (spacing mark)
-		{r: 0x0C82, want: 'o', wantOK: true}, // KANNADA SIGN ANUSVARA (spacing mark)
-		{r: 0x0D02, want: 'o', wantOK: true}, // MALAYALAM SIGN ANUSVARA (spacing mark)
-		{r: 0x0D82, want: 'o', wantOK: true}, // SINHALA SIGN ANUSVARAYA (spacing mark)
-		{r: 0x0406, want: 'I', wantOK: true}, // CYRILLIC CAPITAL LETTER BYELORUSSIAN-UKRAINIAN I (TR39: l)
+		{r: 0x0455, want: 's', wantOK: true},      // CYRILLIC SMALL LETTER DZE
+		{r: 0x04BB, want: 'h', wantOK: true},      // CYRILLIC SMALL LETTER SHHA
+		{r: 0x0430, want: 'a', wantOK: true},      // CYRILLIC SMALL LETTER A
+		{r: 0x0435, want: 'e', wantOK: true},      // CYRILLIC SMALL LETTER IE
+		{r: 0x043E, want: 'o', wantOK: true},      // CYRILLIC SMALL LETTER O
+		{r: 0x0440, want: 'p', wantOK: true},      // CYRILLIC SMALL LETTER ER
+		{r: 0x0441, want: 'c', wantOK: true},      // CYRILLIC SMALL LETTER ES
+		{r: 0x0443, want: 'y', wantOK: true},      // CYRILLIC SMALL LETTER U
+		{r: 0x0445, want: 'x', wantOK: true},      // CYRILLIC SMALL LETTER HA
+		{r: 0x0456, want: 'i', wantOK: true},      // CYRILLIC SMALL LETTER BYELORUSSIAN-UKRAINIAN I
+		{r: 0x0458, want: 'j', wantOK: true},      // CYRILLIC SMALL LETTER JE
+		{r: 0x0501, want: 'd', wantOK: true},      // CYRILLIC SMALL LETTER KOMI DE
+		{r: 0x051B, want: 'q', wantOK: true},      // CYRILLIC SMALL LETTER QA
+		{r: 0x051D, want: 'w', wantOK: true},      // CYRILLIC SMALL LETTER WE
+		{r: 0x0581, want: 'g', wantOK: true},      // ARMENIAN SMALL LETTER CO
+		{r: 0x0585, want: 'o', wantOK: true},      // ARMENIAN SMALL LETTER OH
+		{r: 0x0261, want: 'g', wantOK: true},      // LATIN SMALL LETTER SCRIPT G
+		{r: 0x212E, want: 'e', wantOK: true},      // ESTIMATED SYMBOL
+		{r: 0x0131, want: 'i', wantOK: true},      // LATIN SMALL LETTER DOTLESS I
+		{r: 0x01C0, want: 'l', wantOK: true},      // LATIN LETTER DENTAL CLICK
+		{r: latinILonga, want: 'I', wantOK: true}, // LATIN EPIGRAPHIC LETTER I LONGA (TR39: l)
+		{r: 0x0C02, want: 'o', wantOK: true},      // TELUGU SIGN ANUSVARA (spacing mark)
+		{r: 0x0C82, want: 'o', wantOK: true},      // KANNADA SIGN ANUSVARA (spacing mark)
+		{r: 0x0D02, want: 'o', wantOK: true},      // MALAYALAM SIGN ANUSVARA (spacing mark)
+		{r: 0x0D82, want: 'o', wantOK: true},      // SINHALA SIGN ANUSVARAYA (spacing mark)
+		{r: 0x0406, want: 'I', wantOK: true},      // CYRILLIC CAPITAL LETTER BYELORUSSIAN-UKRAINIAN I (TR39: l)
 		// TR39 target: one ASCII letter and Mn marks. The table drops the marks.
 		{r: 0x0268, want: 'i', wantOK: true}, // LATIN SMALL LETTER I WITH STROKE (TR39: i + U+0335)
 		{r: 0x0142, want: 'l', wantOK: true}, // LATIN SMALL LETTER L WITH STROKE
@@ -143,6 +150,8 @@ func TestSkeletonOf(t *testing.T) {
 	}
 }
 
+// TestSkeleton checks skeleton on single cases: it maps each rune of
+// skeletonTable and keeps every other rune and every invalid byte.
 func TestSkeleton(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
@@ -178,6 +187,8 @@ func TestSkeleton(t *testing.T) {
 	}
 }
 
+// TestFoldSkeleton checks foldSkeleton on single cases: the skeleton, the
+// fold of marks and the second skeleton pass work together.
 func TestFoldSkeleton(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
@@ -198,8 +209,7 @@ func TestFoldSkeleton(t *testing.T) {
 		{name: "alpha with tonos", in: "\u03acll", want: "all"},
 		// U+1D6C2 (mathematical bold alpha) folds to U+03B1.
 		{name: "mathematical bold alpha", in: "\U0001d6c2ll", want: "all"},
-		// U+FF49 is folded by foldMarks, not by the skeleton.
-		// Fullwidth i (U+FF49).
+		// Fullwidth i (U+FF49): foldMarks folds it, not the skeleton.
 		{name: "fullwidth i", in: "\uff49gnore", want: "ignore"},
 		// Cyrillic dze (U+0455) after an invalid byte.
 		{name: "invalid byte kept", in: "\xff\u0455", want: "\xffs"},
@@ -246,10 +256,8 @@ func TestSkeletonNoAlloc(t *testing.T) {
 	}
 }
 
-// TestSkeletonProperties checks skeleton and foldSkeleton on pseudo-random
-// strings: neither makes a string longer, skeleton is idempotent, and the
-// skeleton has no rune of skeletonTable left. The seed is fixed, so the test
-// is deterministic.
+// TestSkeletonProperties checks the properties of checkFuzzSkeleton on
+// pseudo-random strings. The seed is fixed, so the test is deterministic.
 func TestSkeletonProperties(t *testing.T) {
 	t.Parallel()
 	// Other non-ASCII runes: accents, fullwidth, marks, Hangul, Han, a
@@ -273,20 +281,9 @@ func TestSkeletonProperties(t *testing.T) {
 			}
 		}
 		s := b.String()
-		sk := skeleton(s)
-		if len(sk) > len(s) {
-			t.Fatalf("case %d: len(skeleton(%+q)) = %d, longer than %d", n, s, len(sk), len(s))
-		}
-		if again := skeleton(sk); again != sk {
-			t.Fatalf("case %d: skeleton is not idempotent: skeleton(%+q) = %+q, skeleton of that = %+q", n, s, sk, again)
-		}
-		for _, r := range sk {
-			if _, ok := skeletonOf(r); ok {
-				t.Fatalf("case %d: skeleton(%+q) = %+q still holds %U", n, s, sk, r)
-			}
-		}
-		if fs := foldSkeleton(s); len(fs) > len(s) {
-			t.Fatalf("case %d: len(foldSkeleton(%+q)) = %d, longer than %d", n, s, len(fs), len(s))
+		checkFuzzSkeleton(t, s)
+		if t.Failed() {
+			t.Fatalf("case %d: s = %+q", n, s)
 		}
 	}
 }

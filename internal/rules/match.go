@@ -48,13 +48,13 @@ import (
 // forms. The package doc says how the rule count multiplies this cost.
 //
 // The server alone picks the forms, so its text alone can raise the cost of
-// one text about 19 times with the built-in rules. Before #140, the 13
+// one text about 18 times with the built-in rules. Before #140, the 13
 // description rules on 32 KiB took about 50 ms for plain text and about
 // 612 ms with a prefix that gave all fourteen forms (Apple M1 Pro). For the
-// current code, scaled by the new worst-case time (15.86 s / 10.3 s, about
-// 1.54), the all-forms time is about 0.94 s. This is an estimate, not a new
-// measurement. The plain text has one form, so it stays at about 50 ms. The
-// scan engine (#143) needs a time or bytes budget.
+// current code, scaled by the ratio of the two benchmarks above (15.9 s /
+// 10.7 s, about 1.49), the all-forms time is about 0.91 s. This is an
+// estimate, not a new measurement. The plain text has one form, so it stays
+// at about 50 ms. The scan engine (#143) needs a time or bytes budget.
 //
 // Building the forms has a cost too. The slowest known input is a run of
 // U+009D, because each one can start an OSC (see oscExprC0): 128 KiB of it
@@ -77,8 +77,9 @@ import (
 // description: the seam pass doubles the cost of the string pass.
 // BenchmarkSchemaWorstCase measured at most about 63.0 s for one Match call
 // (4 strings of 32 KiB, 21 forms each), about 4 times the description worst
-// case. The match_window heuristic fires on a schema whose strings these caps cut, but
-// not when the seam budget is used up. The package doc gives the details.
+// case. The match_window heuristic fires on a schema whose strings these
+// caps cut, but not when the seam budget is used up. The package doc gives
+// the details.
 const (
 	// MaxPatternBytes is the largest regex or keyword, in bytes, before
 	// compilation.

@@ -35,7 +35,7 @@ const maxKeywordForms = maxBaseForms
 type preparedText struct {
 	raw      string    // the target text, as the server sent it
 	once     sync.Once // guards build
-	regex    []string  // base forms, then the foldMarks and the foldSkeleton of each non-ASCII base form (dedup)
+	regex    []string  // base forms, then their plain and skeleton folds (dedup)
 	keywords []string  // the foldMarks of each base form, no skeleton (dedup)
 }
 
@@ -134,9 +134,8 @@ func (p *preparedText) build() {
 }
 
 // skeletonFold returns foldSkeleton(f), with kw = foldMarks(f) computed by
-// the caller. foldSkeleton(f) is skeleton(foldMarks(skeleton(f))). When no
-// rune of f maps, skeleton(f) is f, so the result is skeleton(kw), and
-// foldMarks does not run again. Only a base form with a rune of
+// the caller. When no rune of f maps, skeleton(f) is f, so the result is
+// skeleton(kw), and foldMarks does not run again. Only a base form with a rune of
 // skeletonTable runs foldMarks a second time, on skeleton(f).
 func skeletonFold(f, kw string) string {
 	s1 := skeleton(f)

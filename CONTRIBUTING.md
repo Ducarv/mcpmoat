@@ -117,13 +117,14 @@ How mcpmoat prepares the text before a match. This applies to every regex and ke
   fullwidth letters (U+FF49 and on). A character is folded only when its fold is not longer than
   the character. So U+FDFA, U+00BD and U+2177 are not folded. A regex also sees a second fold that
   also maps look-alike letters of other scripts to one ASCII letter, such as Cyrillic U+0456 for
-  Latin "i". Keywords do not get this fold. The `mixed_script` heuristic (MOAT-T1-010 for a
-  description, MOAT-T1-011 for a schema) flags a word that mixes letters of look-alike scripts.
-  The look-alike fold, the rules and the unit exemption of `mixed_script`, and the limits of both
-  are in the package doc of `internal/rules` ([doc.go](internal/rules/doc.go)). A regex reads up
-  to 21 forms: the seven forms, their folds and their look-alike folds. A look-alike fold is a new
-  form only when the text has a look-alike letter, so other text has at most 14 forms. A keyword
-  reads up to seven, because mcpmoat matches a keyword only against the folds.
+  Latin "i". Keywords do not get this fold, so use `any_regex` for a term that a word of look-alike
+  letters can hide. The `mixed_script` heuristic (MOAT-T1-010 for a description, MOAT-T1-011 for a
+  schema) flags a word that mixes letters of look-alike scripts. The look-alike fold, the rules and
+  the unit exemption of `mixed_script`, and the limits of both are in the package doc of
+  `internal/rules` ([doc.go](internal/rules/doc.go)). A regex reads up to 21 forms: the seven forms,
+  their folds and their look-alike folds. A look-alike fold is a new form only when the text has a
+  look-alike letter, so other text has at most 14 forms. A keyword reads up to seven, because
+  mcpmoat matches a keyword only against the folds.
 - A regex or a keyword reads only a window of the text: the invisible characters are removed from
   the first 128 KiB of the raw text, and then each form is cut at 32 KiB. Padding can push an
   instruction past this window. The `match_window` heuristic closes this gap. It fires when the

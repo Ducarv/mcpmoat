@@ -232,8 +232,10 @@
 //     run of edge-tier letters at the start or the end of a word is excused
 //     when it has 2 or more visible letters, or when its one letter is not
 //     in the table edgeLookalikes. That table holds the edge-tier letters
-//     that TR39 confusables.txt maps to one Latin letter, for example Arabic
-//     alef (U+0627) and Hebrew vav (U+05D5) as "l", and Hangul ieung
+//     that TR39 confusables.txt maps to one Latin letter, or to one Latin
+//     letter and then only non-spacing marks or U+0674 (high hamza), for
+//     example Arabic alef (U+0627), Arabic alef with wavy hamza below
+//     (U+0673) and Hebrew vav (U+05D5) as "l", and Hangul ieung
 //     (U+3147) as "o". It also holds their composed and compatibility forms,
 //     which have the same base letter after NFKD with the marks removed,
 //     such as Arabic alef with hamza above (U+0623) and Hebrew vav with
@@ -242,11 +244,13 @@
 //     letter of their own script belong to the same run.
 //     An invisible letter, such as the Hangul filler U+3164, does not count
 //     toward the length of the run, and a run with no visible letter is
-//     excused. So Thai "use" (U+0E43 U+0E0A U+0E49) + "Google", Hebrew bet (U+05D1) +
-//     "Google", Arabic "al" (U+0627 U+0644) + "Google" and "Google" + a
-//     Korean particle (U+C744) are not flagged. Thai, Lao, Khmer, Myanmar,
-//     Hebrew, Arabic, Hangul and the Indic scripts with spacing marks, such
-//     as Telugu and Kannada, are examples.
+//     excused. So Thai "use" (U+0E43 U+0E0A U+0E49) + "Google", Hebrew bet
+//     (U+05D1) + "Google", Arabic "al" (U+0627 U+0644) + "Google" and
+//     "Google" + a Korean particle (U+C744) are not flagged. Thai, Lao,
+//     Khmer, Myanmar, Hebrew, Arabic, Bopomofo, Hangul and the Indic scripts
+//     with spacing marks, such as Telugu and Kannada, are examples. Bopomofo
+//     is here because informal Taiwanese text puts a Bopomofo particle next
+//     to a Latin name.
 //
 // Only Greek has an exemption, for a unit (see below). The heuristic reads
 // the full raw text. A hit gives the raw byte offset of the first rune of the
@@ -341,11 +345,14 @@
 //     alef and lam (U+0627 U+0644) + "gnore" or two Hebrew vav (U+05D5
 //     U+05D5) + "gnore". A small Arabic modifier letter (Lm), such as U+06E5
 //     (small waw), next to the table letter counts as the second visible
-//     letter, so it excuses the run too (a residual risk);
+//     letter, so it excuses the run too (a residual risk). U+0674 (high
+//     hamza) is the exception: it is a small mark that Unicode makes a
+//     letter, so the run does not count it, and U+0627 U+0674 + "gnore" is
+//     flagged;
 //   - one edge-tier letter at the start or the end of a word that is not in
-//     edgeLookalikes: a letter that TR39 maps to a Latin letter plus an
-//     Arabic rune, such as U+0672, U+0673 and U+0675, a letter that TR39
-//     maps to two Latin runes, such as U+11EE ("oo") and U+1EE64 ("ol"), and
+//     edgeLookalikes: a letter that TR39 maps to a Latin letter and a
+//     spacing mark, such as Myanmar U+1010 ("o" + U+102C), a letter that TR39
+//     maps to two Latin letters, such as U+11EE ("oo") and U+1EE64 ("ol"), and
 //     a letter with no Latin mapping, such as alef wasla (U+0671);
 //   - Han letters next to Latin letters, such as "API" + U+63A5 U+53E3: Han
 //     is not in the table, because Chinese and Japanese text puts Han
@@ -359,11 +366,18 @@
 //
 // The confusable skeleton of the regex fold has these limits:
 //
-//   - a caseless look-alike of "I", such as U+01C0 (dental click) or Runic
-//     U+16C1, maps to "l". So U+01C0 + "gnore" reads "lgnore", and no rule
-//     catches it (mixed_script flags U+16C1 in a Latin word, but U+01C0 is
-//     Latin). An uppercase look-alike of "l", such as U+04C0 (palochka),
-//     maps to "I", so U+04C0 U+04C0 does not read as "ll";
+//   - a caseless look-alike of "I", such as U+01C0 (dental click, a bare
+//     bar) or Runic U+16C1, maps to "l". So U+01C0 + "gnore" reads "lgnore",
+//     and no rule catches it (mixed_script flags U+16C1 in a Latin word, but
+//     U+01C0 is Latin). The one exception is U+A7FE (I longa), which maps to
+//     "I" by its name. An uppercase look-alike of "l", such as U+04C0
+//     (palochka), maps to "I", so U+04C0 U+04C0 does not read as "ll";
+//   - the skeleton can join a look-alike to a payload. A look-alike of "l"
+//     or "I", such as U+04CF, directly before a payload that is written in
+//     look-alike letters (a Cyrillic "id_rsa") becomes an ASCII letter of
+//     the same word ("lid_rsa"), so a pattern with `\b` does not match. The
+//     plain fold does not help, because the payload is not ASCII in it. Such
+//     a payload had no detection before the skeleton fold;
 //   - Cyrillic has no look-alike of a small "n" or "g", so "ignore" cannot
 //     be written fully in Cyrillic. A look-alike "ignore" needs a second
 //     script, such as Armenian U+0578 ("n") and U+0581 ("g");
@@ -398,7 +412,11 @@
 //   - an edge-tier run between two Latin names in one word, such as
 //     "Google" + Thai "and" (U+0E41 U+0E25 U+0E30) + "Apple";
 //   - a Latin word with one edgeLookalikes letter at its start or end, such
-//     as the Hebrew prefix vav (U+05D5, "and") + "Google".
+//     as the Hebrew prefix vav (U+05D5, "and") + "Google";
+//   - Burmese text in the Zawgyi encoding next to a Latin name: Zawgyi
+//     stores the vowel sign U+1031 before its consonant, so the sign has no
+//     Myanmar letter before it in the word and counts at once ("Google" +
+//     U+1031 U+1000). The same text in Unicode order is not flagged.
 //
 // Rules MOAT-T1-010 and MOAT-T1-011 have severity medium, so with the
 // default --fail-on high they do not change the exit code. To accept such a

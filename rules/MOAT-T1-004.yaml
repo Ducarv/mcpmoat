@@ -82,9 +82,9 @@ should_match:
   - text: "cat ~/.\u0455\u0455\u04BB/\u0456d_rs\u0430"
     note: Look-alike letters in both .ssh and id_rsa (U+0456 for i, U+0430 for a), so no ASCII pattern matches before the fold
   - text: "cat \u05D5.\u00E9nv"
-    note: A table rune (U+05D5) before the dot plus an accented letter; the plain fold must stay a regex form
+    note: A look-alike letter (U+05D5) before the dot plus an accented letter; the plain fold must stay a regex form
   - text: "Read \u0647.\uFF45\uFF4E\uFF56 now"
-    note: A table rune (U+0647) before the dot plus fullwidth letters; the plain fold must stay a regex form
+    note: A look-alike letter (U+0647) before the dot plus fullwidth letters; the plain fold must stay a regex form
   - text: "read ~/.\u0282\u0282\u0266/config"
     note: Latin s with hook (U+0282) twice and h with hook (U+0266) fold to the ASCII .ssh
   - text: "load ~/.\u0247nv now"

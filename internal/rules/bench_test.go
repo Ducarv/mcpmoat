@@ -218,14 +218,11 @@ const worstPrefix = "\u0430" + allFormsText
 // instruction-bytes (see the cost comment in match.go).
 //
 // Measured on 2026-10-24 on an Apple M1 Pro (go1.27.3 darwin/arm64), with
-// -benchtime=1x -count=5: median about 15.9 s for one op (15.60 s to
-// 16.03 s). In the same run, BenchmarkWorstCaseBlockNoSkeleton (14 forms)
-// took a median of about 10.7 s (10.58 s to 10.77 s), so the seven skeleton
-// folds add about 49%, in line with 21/14 forms. In an earlier run, before
-// the skeleton (#140), this benchmark had 14 forms and took about 10.7 s.
-// A hostile --rules directory can repeat such a block in every rule, and
-// every tool text is matched against every rule, so this cost is multiplied
-// by the number of rules and the number of texts.
+// -benchtime=1x -count=5. The results, and the comparison with
+// BenchmarkWorstCaseBlockNoSkeleton (14 forms), are in the cost comment in
+// match.go. A hostile --rules directory can repeat such a block in every
+// rule, and every tool text is matched against every rule, so this cost is
+// multiplied by the number of rules and the number of texts.
 func BenchmarkWorstCaseBlock(b *testing.B) {
 	n := MaxMatchInputBytes - len(worstPrefix)
 	text := worstPrefix + strings.Repeat("a", n)
@@ -357,7 +354,7 @@ func worstSchema(tb testing.TB, n int) string {
 // Measured on 2026-10-24 on an Apple M1 Pro (go1.27.3 darwin/arm64), caps
 // 128 KiB and 4096 strings, 21 regex forms for each string, with
 // -benchtime=1x -count=3 (medians), compared with the median of
-// BenchmarkWorstCaseBlock (about 15.9 s):
+// BenchmarkWorstCaseBlock (see the cost comment in match.go):
 //
 //   - 4096 strings: about 1.73 s for one Match call, about 0.11 times the
 //     description worst case. Each string and seam is short, so few regex

@@ -65,10 +65,14 @@ type confusable struct {
 // target "l" to "I" when the rune is an uppercase letter (unicode.IsUpper),
 // such as Cyrillic U+0406 and Greek U+0399, and to "l" otherwise, such as
 // Cyrillic U+04CF (small palochka) and Hebrew vav U+05D5. Such an entry has
-// "(TR39: l)" in its comment when it maps to "I". The other reading is a
-// known limit: an uppercase look-alike used as "l" (U+04C0 U+04C0 for "ll"),
-// and a caseless one used as "I" (Runic U+16C1 + "gnore" is "lgnore"). The
-// mixed_script heuristic still flags such a rune in a Latin word.
+// "(TR39: l)" in its comment when it maps to "I". One caseless rune maps to
+// "I" too: U+A7FE (Latin epigraphic letter I longa), which is an "I" by its
+// name (see latinILonga in the test). The other reading is a known limit:
+// an uppercase look-alike used as "l" (U+04C0 U+04C0 for "ll"), and a
+// caseless one used as "I" (Runic U+16C1 or U+01C0, a bare bar, + "gnore" is
+// "lgnore"). The mixed_script heuristic flags a rune of another script in a
+// Latin word, so it catches U+16C1, but it cannot catch U+01C0, which is
+// Latin.
 //
 // The I/l rule uses the letter of the target, also when marks follow it:
 // U+0197 (capital I with stroke, TR39 "l" + U+0335) maps to "I", and U+019A
@@ -518,7 +522,7 @@ var skeletonTable = [...]confusable{
 	{0xA7B4, 'B'},  // LATIN CAPITAL LETTER BETA
 	{0xA7C5, 'S'},  // LATIN CAPITAL LETTER S WITH HOOK
 	{0xA7FA, 'w'},  // LATIN LETTER SMALL CAPITAL TURNED M
-	{0xA7FE, 'l'},  // LATIN EPIGRAPHIC LETTER I LONGA
+	{0xA7FE, 'I'},  // LATIN EPIGRAPHIC LETTER I LONGA (TR39: l)
 	{0xAB32, 'e'},  // LATIN SMALL LETTER BLACKLETTER E
 	{0xAB35, 'f'},  // LATIN SMALL LETTER LENIS F
 	{0xAB3D, 'o'},  // LATIN SMALL LETTER BLACKLETTER O
@@ -661,11 +665,6 @@ func skeletonOf(r rune) (byte, bool) {
 	if r < skeletonTable[0].from || r > skeletonTable[len(skeletonTable)-1].from {
 		return 0, false
 	}
-	return searchSkeleton(r)
-}
-
-// searchSkeleton finds r in skeletonTable by binary search, for skeletonOf.
-func searchSkeleton(r rune) (byte, bool) {
 	i, ok := slices.BinarySearchFunc(skeletonTable[:], r, func(c confusable, r rune) int {
 		return cmp.Compare(c.from, r)
 	})
@@ -725,6 +724,11 @@ func skeleton(s string) string {
 // foldSkeleton returns the regex fold of s, a base form of matchForms: the
 // fold of foldMarks with the skeleton applied before it and after it. So
 // "~/." + U+0455 U+0455 U+04BB becomes "~/.ssh".
+//
+// foldSkeleton is the definition of this fold. The matchers call skeletonFold
+// (see prepare.go), which gives the same result and runs foldMarks once less.
+// The tests and the fuzz tests check that the two agree, so only they call
+// foldSkeleton.
 //
 // The skeleton runs twice, because each pass maps runes that the other
 // cannot see:
