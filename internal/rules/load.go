@@ -9,7 +9,6 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
-	"syscall"
 
 	"github.com/Ducarv/mcpmoat/internal/safefile"
 	builtinrules "github.com/Ducarv/mcpmoat/rules"
@@ -110,20 +109,9 @@ func Builtin(opts ...Option) ([]Rule, []*LoadError) {
 func LoadDir(dir string, opts ...Option) ([]Rule, []*LoadError) {
 	o := newLoadOptions(opts)
 
-	// os.OpenRoot opens dir with a plain open(2), which blocks on a FIFO until
-	// a writer appears. A FIFO, or a symlink to one, as the --rules path would
-	// hang the scan. os.Stat does not block and follows symlinks. A swap to a
-	// FIFO between this check and the open is a local race that we accept.
-	info, err := os.Stat(dir)
-	if err != nil {
-		return nil, []*LoadError{newLoadError(dir, ReasonDirUnreadable).wrap(err)}
-	}
-	if !info.IsDir() {
-		err = &fs.PathError{Op: "open", Path: dir, Err: syscall.ENOTDIR}
-		return nil, []*LoadError{newLoadError(dir, ReasonDirUnreadable).wrap(err)}
-	}
-
-	root, err := os.OpenRoot(dir)
+	// safefile.OpenRoot does not block when the --rules path is a FIFO, or a
+	// symlink to one, and refuses it with ENOTDIR.
+	root, err := safefile.OpenRoot(dir)
 	if err != nil {
 		return nil, []*LoadError{newLoadError(dir, ReasonDirUnreadable).wrap(err)}
 	}
@@ -311,13 +299,12 @@ func readRuleFile(fsys fs.FS, name, display string) ([]byte, *LoadError) {
 
 	data, err := safefile.ReadOpened(f, maxFileBytes)
 	switch {
-	case err == nil:
-		return data, nil
 	case errors.Is(err, safefile.ErrNotRegular):
 		return nil, newLoadError(display, ReasonNotRegular)
 	case errors.Is(err, safefile.ErrTooLarge):
 		return nil, newLoadError(display, ReasonTooLarge)
-	default:
+	case err != nil:
 		return nil, newLoadError(display, ReasonUnreadable).wrap(err)
 	}
+	return data, nil
 }

@@ -5,7 +5,6 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
-	"syscall"
 
 	"github.com/Ducarv/mcpmoat/internal/safefile"
 )
@@ -59,8 +58,8 @@ func readConfigFile(ctx context.Context, path string, maxSize int64, root string
 
 // readInRoot reads path, which must be below the directory root, through
 // safefile.ReadBoundedRegularFile. A path that is not below root is refused
-// before any file is opened. A missing root directory counts as a missing
-// file.
+// before any file is opened. A root that is missing or is not a directory
+// counts as a missing file.
 func readInRoot(path string, maxSize int64, root string) (data []byte, found bool, fe *FileError) {
 	rel, err := filepath.Rel(root, path)
 	if err != nil || !filepath.IsLocal(rel) {
@@ -76,14 +75,11 @@ func readInRoot(path string, maxSize int64, root string) (data []byte, found boo
 // readTrusted reads path and follows symlinks, with no confinement. It is only
 // for a trusted global config file (see readConfigFile).
 func readTrusted(path string, maxSize int64) (data []byte, found bool, fe *FileError) {
-	// Open first, then check the open file (safefile.ReadOpened does it). A check
-	// of the path before the open could see another file than the one that is
-	// opened. O_NONBLOCK makes the open of a FIFO return at once, also when no
-	// process writes to it; the type check then rejects it. For a regular file
-	// the flag changes nothing.
-	f, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NONBLOCK, 0) //nolint:gosec // G304: root == "" only for a trusted global config file under Home.
+	// Open first, then check the open file, so the checks and the read use the
+	// same file. See safefile.OpenFlags for why the open cannot block.
+	f, err := os.OpenFile(path, safefile.OpenFlags, 0) //nolint:gosec // G304: root == "" only for a trusted global config file under Home.
 	if err != nil {
-		if isMissing(err) {
+		if safefile.IsMissing(err) {
 			return nil, false, nil
 		}
 		return nil, false, readError(path, reasonCannotRead, err)
@@ -114,10 +110,4 @@ func readFailure(path string, err error) *FileError {
 	default:
 		return readError(path, reasonCannotRead, err)
 	}
-}
-
-// isMissing reports whether err means that no file exists at the path: the
-// path does not exist, or a parent in the path is not a directory (ENOTDIR).
-func isMissing(err error) bool {
-	return safefile.IsMissing(err)
 }

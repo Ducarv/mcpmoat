@@ -8,6 +8,8 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+
+	"github.com/Ducarv/mcpmoat/internal/safefile"
 )
 
 // ReadConfig reads one config file that the user named (for example with
@@ -171,7 +173,7 @@ func readGlobal(ctx context.Context, g globalFile, home string) Result {
 // symlink counts as missing, as in readConfigFile.
 func isMissingFile(path string) bool {
 	_, err := os.Stat(path)
-	return isMissing(err)
+	return safefile.IsMissing(err)
 }
 
 // readUntrusted reads the file at path, which is not one of the user's own

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"math"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -22,6 +23,7 @@ const canary = "CANARY-SECRET-VALUE-9f3a"
 // limit is the size cap that most tests use.
 const limit = 8
 
+// skipOnWindows skips a test that needs Unix file semantics.
 func skipOnWindows(t *testing.T) {
 	t.Helper()
 	if runtime.GOOS == "windows" {
@@ -291,28 +293,92 @@ func TestReadBoundedRegularFile(t *testing.T) {
 	}
 }
 
-// TestReadBoundedRegularFileDirIsFile checks the case where dir itself is a
-// regular file. os.OpenRoot does not report ENOTDIR for a non-directory root
-// and callers always pass a directory, so the error comes back as it is.
-func TestReadBoundedRegularFileDirIsFile(t *testing.T) {
+// TestReadBoundedRegularFileDirNotDirectory checks a dir that is not a
+// directory. No file can exist below it, so it counts as missing. A FIFO as dir
+// must not block: a plain os.OpenRoot waits for a writer for ever.
+func TestReadBoundedRegularFileDirNotDirectory(t *testing.T) {
 	t.Parallel()
-	skipOnWindows(t)
 
-	path := writeFile(t, t.TempDir(), "file", []byte(canary))
+	tests := []struct {
+		name  string
+		setup func(t *testing.T) string // returns dir
+	}{
+		{
+			name: "regular file",
+			setup: func(t *testing.T) string {
+				skipOnWindows(t)
+				return writeFile(t, t.TempDir(), "file", []byte(canary))
+			},
+		},
+		{
+			name: "fifo",
+			setup: func(t *testing.T) string {
+				dir := filepath.Join(t.TempDir(), ".cursor")
+				makeFIFO(t, dir)
+				return dir
+			},
+		},
+		{
+			name: "symlink to a fifo",
+			setup: func(t *testing.T) string {
+				parent := t.TempDir()
+				makeFIFO(t, filepath.Join(parent, "pipe"))
+				symlinkTo(t, "pipe", parent, ".cursor")
+				return filepath.Join(parent, ".cursor")
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			dir := tt.setup(t)
 
-	data, found, err := ReadBoundedRegularFile(path, "a.json", limit)
+			type result struct {
+				data    []byte
+				found   bool
+				err     error
+				rootErr error
+			}
+			done := make(chan result, 1)
+			go func() {
+				var r result
+				r.data, r.found, r.err = ReadBoundedRegularFile(dir, "mcp.json", limit)
+				root, err := OpenRoot(dir)
+				if err == nil {
+					_ = root.Close()
+				}
+				r.rootErr = err
+				done <- r
+			}()
 
-	if err == nil {
-		t.Fatal("error = nil, want an error")
+			select {
+			case got := <-done:
+				if got.err != nil || got.found || got.data != nil {
+					t.Errorf("ReadBoundedRegularFile() = (%q, %v, %v), want (nil, false, nil)", got.data, got.found, got.err)
+				}
+				if !errors.Is(got.rootErr, syscall.ENOTDIR) {
+					t.Errorf("OpenRoot() error = %v, want errors.Is ENOTDIR", got.rootErr)
+				}
+			case <-time.After(5 * time.Second):
+				t.Fatal("blocked on a dir that is not a directory")
+			}
+		})
 	}
-	if found || data != nil {
-		t.Errorf("got (%q, %v), want (nil, false)", data, found)
+}
+
+// TestReadBoundedRegularFileOutsideRootKeepsCause checks that ErrOutsideRoot
+// keeps the os.Root error, so the caller can still see the cause.
+func TestReadBoundedRegularFileOutsideRootKeepsCause(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	_, _, err := ReadBoundedRegularFile(dir, filepath.Join("..", "x"), limit)
+
+	if !errors.Is(err, ErrOutsideRoot) {
+		t.Fatalf("error = %v, want errors.Is ErrOutsideRoot", err)
 	}
-	if IsMissing(err) {
-		t.Error("IsMissing(err) = true, want false")
-	}
-	if strings.Contains(err.Error(), canary) {
-		t.Errorf("error text holds file content: %v", err)
+	if _, ok := errors.AsType[*fs.PathError](err); !ok {
+		t.Errorf("errors.AsType[*fs.PathError] = false, error is %v", err)
 	}
 }
 
@@ -545,6 +611,24 @@ func TestReadOpenedRealFile(t *testing.T) {
 	}
 }
 
+// TestReadOpenedMaxCap checks that the largest cap still reads the file. The
+// read limit is maxSize+1, which would overflow to a negative limit and read
+// nothing.
+func TestReadOpenedMaxCap(t *testing.T) {
+	t.Parallel()
+
+	f := fakeFile{info: fakeInfo{size: 2}, content: strings.NewReader("ok")}
+
+	data, err := ReadOpened(f, math.MaxInt64)
+
+	if err != nil {
+		t.Fatalf("ReadOpened() error = %v, want nil", err)
+	}
+	if string(data) != "ok" {
+		t.Errorf("data = %q, want %q", data, "ok")
+	}
+}
+
 func TestOpenInRoot(t *testing.T) {
 	t.Parallel()
 
@@ -629,7 +713,9 @@ func TestIsMissing(t *testing.T) {
 }
 
 // TestErrorsHoldNoContent checks that the errors for a bad file never hold the
-// content of the file.
+// content of the file. It is the regression guard for that rule: one case per
+// error kind, each with the canary as content. Some cases overlap with
+// TestReadBoundedRegularFile on purpose, so the rule has one test to look at.
 func TestErrorsHoldNoContent(t *testing.T) {
 	t.Parallel()
 
@@ -661,7 +747,7 @@ func TestErrorsHoldNoContent(t *testing.T) {
 			name: "not regular",
 			setup: func(t *testing.T) (string, string) {
 				dir := t.TempDir()
-				// The directory name is the canary file's neighbour, not its content.
+				// d holds a canary file; refusing d must not read or quote it.
 				writeFile(t, dir, "d/secret", []byte(canary))
 				return dir, "d"
 			},

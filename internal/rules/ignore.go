@@ -356,14 +356,13 @@ func moreMalformedLines(n int) string {
 // dir (normally the working directory). See ParseIgnore for the format and
 // the warnings.
 //
-// When the file or dir does not exist, or a parent of the path is not a
+// When the file or dir does not exist, or dir or a parent in the path is not a
 // directory, ReadIgnoreFile returns an empty list, nil warnings and a nil
 // error.
 //
-// The file is opened through os.Root, so a symlink that leaves dir is
-// refused with an error. The open uses O_NONBLOCK, so a FIFO does not block
-// the scan; the check of the open file then refuses everything that is not a
-// regular file. A file larger than MaxIgnoreFileBytes is refused too.
+// The read uses package safefile: a symlink that leaves dir, a file that is
+// not a regular file and a file larger than MaxIgnoreFileBytes are refused
+// with an error, and a FIFO does not block the scan.
 //
 // The errors wrap the OS error with %w. They hold the path, but never file
 // content. The path comes from the caller and can hold any character, so

@@ -32,8 +32,8 @@ docs/                   PRD and other documentation
 - `internal/termsafe`: escapes untrusted text for the terminal. See
   [Where untrusted text is escaped](#where-untrusted-text-is-escaped).
 - `internal/safefile`: the one shared hardened file read. It confines the open to a directory with
-  `os.Root`, refuses non-regular files, does not block on a FIFO and caps the size. `discover` and
-  `rules` use it.
+  `os.Root`, refuses non-regular files, does not block on a FIFO (as the file or as the directory) and
+  caps the size. `discover` and `rules` use it.
 - `internal/discover`: finds the MCP servers that the client configs declare. It does not start them.
 - `internal/inspect`: starts or calls each server and reads what it offers. It is the only product
   package that imports the MCP SDK (see [The `internal/inspect` interface](#the-internalinspect-interface)).
