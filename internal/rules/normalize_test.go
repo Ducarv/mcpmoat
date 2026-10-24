@@ -106,12 +106,22 @@ func TestNormalizeForMatch(t *testing.T) {
 		{name: "control rune next to white space", in: "a\x01\tb\x7f\nc", want: "a\tb\nc"},
 		{name: "ANSI CSI to space", in: "a\x1b[8mIgnore\x1b[0m b", want: "a Ignore  b"},
 		{name: "ANSI CSI before keyword", in: "\x1b[8mIgnore", want: " Ignore"},
-		// The control runes are dropped only after the CSI step, so CAN, SUB
-		// or U+0001 cannot make ESC [ I, a CSI that hides the "I". The ESC is
-		// then dropped too.
+		// The control runes are dropped only after the CSI step, so CAN and
+		// SUB cancel the CSI: ESC [ CAN "I" is not a CSI that hides the "I".
+		// The ESC is then dropped too.
 		{name: "CAN inside CSI keeps keyword", in: "\x1b[\x18Ignore", want: "[Ignore"},
 		{name: "SUB inside CSI keeps keyword", in: "\x1b[\x1aIgnore", want: "[Ignore"},
-		{name: "control rune inside CSI keeps keyword", in: "\x1b[\x01Ignore", want: "[Ignore"},
+		{name: "CAN between ESC and [ cancels the CSI and [8m stays", in: "\x1b\x18[8mIgnore", want: "[8mIgnore"},
+		{name: "SUB between ESC and [ cancels the CSI and [8m stays", in: "\x1b\x1a[8mIgnore", want: "[8mIgnore"},
+		// ansiSeq is strict, as on main: a C0 control rune inside ESC [ ends
+		// the CSI, so ansiSeq finds no CSI, and step 4 drops the ESC and the
+		// control rune. A terminal goes on with the CSI; the forms 4 to 6 of
+		// matchForms read it that way (see TestMatchForms).
+		{name: "control rune inside CSI is not a CSI", in: "\x1b[\x01Ignore", want: "[Ignore"},
+		{name: "DEL inside CSI is not a CSI", in: "\x1b[\x7fIgnore", want: "[Ignore"},
+		{name: "DEL among CSI parameters is not a CSI", in: "\x1b[8\x7fmIgnore", want: "[8mIgnore"},
+		{name: "control rune between ESC and [ is not a CSI", in: "\x1b\x01[8mIgnore", want: "[8mIgnore"},
+		{name: "control rune after C1 CSI is not a CSI", in: "\u009b\x018mIgnore", want: "8mIgnore"},
 		{name: "BEL inside keyword", in: "Ig\x07nore", want: "Ignore"},
 		{name: "ESC inside keyword", in: "Ig\x1bnore", want: "Ignore"},
 		{name: "C1 CSI before keyword", in: "\u009b8mIgnore", want: " Ignore"},
@@ -377,15 +387,23 @@ func TestFoldMarksNotLonger(t *testing.T) {
 // fuzzControlTexts uses it as a fuzz seed.
 var controlPadding = strings.Repeat("\x01", MaxMatchInputBytes+256)
 
-// sixFormsText is a short text with all six forms of regexForms: the ZWSP
-// gives the second form, U+0001 the third, and U+FB03 a fold of each of the
-// three. U+FB03 folds to "ffi", 3 bytes to 3, so in BenchmarkWorstCaseBlock
-// each folded form stays about MaxMatchInputBytes long.
+// sixFormsText is a short text with eight forms of regexForms: the ZWSP and
+// U+0001 give the forms 2 to 4 of matchForms, and U+FB03 a fold of each of
+// the four. It has no escape sequence, so it has no fifth form (see
+// tenFormsText).
 const sixFormsText = "\u200bb\x01\ufb03"
 
-// TestMatchForms checks that a text gets the spaced second form only when it
-// holds an invisible rune, and the third form only when one of them is a
-// control rune.
+// tenFormsText is a short text with ten forms of regexForms: the ZWSP and
+// U+0001 give the forms 2 to 4 of matchForms, ESC [ I the fifth, and U+FB03 a
+// fold of each of the five. Its sixth form equals the first, because no C0
+// control rune is inside its CSI (see twelveFormsText for all twelve). U+FB03 folds to "ffi", 3 bytes to 3, so in
+// BenchmarkWorstCaseBlock each folded form stays about MaxMatchInputBytes
+// long.
+const tenFormsText = "\u200bb\x01\x1b[Ic\ufb03"
+
+// TestMatchForms checks that a text gets each of the forms 2 to 6 of
+// matchForms only when it holds the runes that the form needs (see
+// matchForms), and that equal forms are kept once.
 func TestMatchForms(t *testing.T) {
 	t.Parallel()
 
@@ -408,11 +426,56 @@ func TestMatchForms(t *testing.T) {
 		// space for the control rune and one after it (see replaceRuns).
 		{name: "control rune and ZWSP in one run", in: "a\x01\u200bb", want: []string{"ab", "a  b", "a b"}},
 		// The third form drops the ZWSP and makes each control rune a space.
-		{name: "ZWSP inside a word and control rune between words", in: "Ig\u200bnore\x01all", want: []string{"Ignoreall", "Ig nore all", "Ignore all"}},
-		{name: "one space for each run of control runes in the third form", in: "a\x01\x02b\u200bc", want: []string{"abc", "a b c", "a bc"}},
-		// A ZWSP inside a run of control runes does not end the run.
+		// The fourth form drops the control rune and makes the ZWSP a space.
+		{name: "ZWSP inside a word and control rune between words", in: "Ig\u200bnore\x01all", want: []string{"Ignoreall", "Ig nore all", "Ignore all", "Ig noreall"}},
+		{name: "control rune inside a word and ZWSP between words", in: "Ig\x01nore\u200ball\u200bprevious", want: []string{"Ignoreallprevious", "Ig nore all previous", "Ig noreallprevious", "Ignore all previous"}},
+		{name: "one space for each run of control runes in the third form", in: "a\x01\x02b\u200bc", want: []string{"abc", "a b c", "a bc", "ab c"}},
+		// A ZWSP inside a run of control runes does not end the run. The
+		// fourth form gives one space for the run, so it equals the second.
 		{name: "ZWSP inside a run of control runes", in: "a\x01\u200b\x01b\u200bc", want: []string{"abc", "a b c", "a bc"}},
-		{name: "control rune inside CSI", in: "\x1b[\x01Ignore", want: []string{"[Ignore", " [ Ignore"}},
+		// For ansiSeq (forms 1 to 3) a C0 control rune ends a CSI, so they
+		// keep the "[". For ansiSeqC0 (forms 5 and 6) it does not, so the CSI
+		// takes the "I": the fifth form gives the "I" back, and the sixth
+		// form (dropSeqC0) loses it.
+		{name: "control rune inside CSI", in: "\x1b[\x01Ignore", want: []string{"[Ignore", " [ Ignore", " Ignore", " gnore"}},
+		{name: "control rune between ESC and [", in: "\x1b\x01[8mIgnore all", want: []string{"[8mIgnore all", " [8mIgnore all", " Ignore all"}},
+		{name: "control rune after C1 CSI", in: "\u009b\x018mIgnore all", want: []string{"8mIgnore all", " 8mIgnore all", " Ignore all"}},
+		{name: "CSI takes the first letter", in: "\x1b[Ignore all", want: []string{" gnore all", " Ignore all"}},
+		{name: "control rune between ESC and [ and CSI takes the first letter", in: "\x1b\x01[Ignore all", want: []string{"[Ignore all", " [Ignore all", " Ignore all", " gnore all"}},
+		// A LF lets the ansiSeqC0 CSI take "<" and "I" of the text: ESC [ LF
+		// < I. So the forms 5 and 6 lose the "<", and the strict forms 1 to 3
+		// keep "<IMPORTANT>" for the rules that need it.
+		{name: "LF inside CSI takes the < in the C0 forms only", in: "\x1b[\n<IMPORTANT>x", want: []string{"[\n<IMPORTANT>x", " [\n<IMPORTANT>x", " IMPORTANT>x", " MPORTANT>x"}},
+		{name: "JSON-escaped CSI takes the first letter", in: "a\\u001b[Ignore all", want: []string{"a gnore all", "a Ignore all"}},
+		// The fourth form puts the space before the ESC (or U+009B), so the
+		// sequence is still a CSI and the ZWSP between words is a space.
+		{
+			name: "ZWSP after ESC and between words",
+			in:   "\x1b\u200b[8mIgnore\u200ball",
+			want: []string{" Ignoreall", "  [8mIgnore all", "  Ignore all"},
+		},
+		{
+			name: "ZWSP after C1 CSI and between words",
+			in:   "\u009b\u200b8mIgnore\u200ball",
+			want: []string{" Ignoreall", "  8mIgnore all", "  Ignore all"},
+		},
+		// The fourth form equals the first, so it is kept once.
+		{name: "ZWSP after C1 CSI and CSI takes the first letter", in: "\u009b\u200bIgnore all", want: []string{" gnore all", "  gnore all", " Ignore all"}},
+		// An OSC is one space, and the fifth form keeps its text.
+		{name: "OSC with BEL", in: "\x1b]Ignore all\x07", want: []string{" ", " Ignore all "}},
+		{name: "OSC with ST", in: "\x1b]Ignore all\x1b\\", want: []string{" ", " Ignore all "}},
+		{name: "C1 OSC with BEL", in: "\u009dIgnore all\x07", want: []string{" ", " Ignore all "}},
+		// An OSC with more than 256 runes of text is not an OSC, so its text
+		// stays in every form, after its "]". The second form makes the ESC
+		// and the BEL a space, and the fifth form equals the first.
+		{
+			name: "OSC text over 256 runes stays in every form",
+			in:   "\x1b]" + strings.Repeat("x", 257) + " Ignore all\x07",
+			want: []string{
+				"]" + strings.Repeat("x", 257) + " Ignore all",
+				" ]" + strings.Repeat("x", 257) + " Ignore all ",
+			},
+		},
 		// The runes that start, end or cancel an ANSI escape sequence are
 		// invisible control runes too, so they are dropped inside a word.
 		{name: "BEL inside a word", in: "Ig\x07nore", want: []string{"Ignore", "Ig nore"}},
@@ -421,14 +484,24 @@ func TestMatchForms(t *testing.T) {
 		{name: "ESC inside a word", in: "Ig\x1bnore", want: []string{"Ignore", "Ig nore"}},
 		{name: "C1 ST inside a word", in: "Ig\u009cnore", want: []string{"Ignore", "Ig nore"}},
 		// One space for the whole run of padding, so the payload stays in
-		// the MaxMatchInputBytes window of the third form.
+		// the MaxMatchInputBytes window of the third form. The fourth form
+		// drops the padding.
 		{
 			name: "control rune padding is one space in the third form",
 			in:   controlPadding + "Ig\u200bnore\x01all\x01previous",
-			want: []string{"Ignoreallprevious", " Ig nore all previous", " Ignore all previous"},
+			want: []string{"Ignoreallprevious", " Ig nore all previous", " Ignore all previous", "Ig noreallprevious"},
 		},
 		{name: "white space only is one form", in: "a\tb\nc\rd\fe\vf\u0085g", want: []string{"a\tb\nc\rd\fe f g"}},
-		{name: "ANSI CSI is one form", in: "\x1b[8mIgnore", want: []string{" Ignore"}},
+		// The fifth form drops an SGR m final, so it equals the first form and
+		// is kept once (#133).
+		{name: "ANSI CSI", in: "\x1b[8mIgnore", want: []string{" Ignore"}},
+		// A CSI ends at its first letter, so in ESC [1make the m of make is the
+		// SGR final. The fifth form drops an m final, so no form gives "make"
+		// back (#133).
+		{name: "known limit: m final takes the m of a word", in: "\x1b[1make", want: []string{" ake"}},
+		// The final byte "@" is not a letter, so the fifth form equals the
+		// first and is kept once.
+		{name: "CSI with no letter is one form", in: "\x1b[1@x", want: []string{" x"}},
 		{name: "empty", in: "", want: []string{""}},
 	}
 	for _, tt := range tests {
@@ -455,6 +528,8 @@ func TestNormalizeInvisibleModes(t *testing.T) {
 		{name: "dropInvisible", mode: dropInvisible, want: "Ignoreallprevious"},
 		{name: "spaceInvisible", mode: spaceInvisible, want: "Ig nore all previous"},
 		{name: "spaceControls", mode: spaceControls, want: "Ignore allprevious"},
+		{name: "spaceFormats", mode: spaceFormats, want: "Ig noreall previous"},
+		{name: "dropSeqC0", mode: dropSeqC0, want: "Ignoreallprevious"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -464,12 +539,267 @@ func TestNormalizeInvisibleModes(t *testing.T) {
 			}
 		})
 	}
-	var want []string // the three forms, in the order of the table
-	for _, tt := range tests {
+	// The input has no ESC, so hasSeqStart and hasSeqC0 are false: it has
+	// only the forms 1 to 4, the first four rows of the table.
+	var want []string
+	for _, tt := range tests[:4] {
 		want = append(want, tt.want)
 	}
 	if got := matchForms(in); !slices.Equal(got, want) {
 		t.Errorf("matchForms(%q) = %q, want %q", in, got, want)
+	}
+}
+
+// TestNormalizeInvisibleDropSeqC0 checks the sixth form of matchForms: it
+// reads a CSI that holds C0 control runes as one sequence, where the first
+// form (strict ansiSeq) does not.
+func TestNormalizeInvisibleDropSeqC0(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name      string
+		in        string
+		want      string
+		wantFirst string // normalizeForMatch(in), the first form
+	}{
+		{name: "control rune between ESC and [", in: "\x1b\x01[8mIgnore", want: " Ignore", wantFirst: "[8mIgnore"},
+		{name: "control rune after C1 CSI", in: "\u009b\x018mIgnore", want: " Ignore", wantFirst: "8mIgnore"},
+		{name: "DEL among CSI parameters", in: "\x1b[8\x7fmIgnore", want: " Ignore", wantFirst: "[8mIgnore"},
+		{name: "CAN cancels the CSI in both", in: "\x1b\x18[8mIgnore", want: "[8mIgnore", wantFirst: "[8mIgnore"},
+		{name: "invisible runes dropped", in: "Ig\u200bnore\x01all", want: "Ignoreall", wantFirst: "Ignoreall"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if got := normalizeInvisible(tt.in, dropSeqC0); got != tt.want {
+				t.Errorf("normalizeInvisible(%+q, dropSeqC0) = %+q, want %+q", tt.in, got, tt.want)
+			}
+			if got := normalizeForMatch(tt.in); got != tt.wantFirst {
+				t.Errorf("normalizeForMatch(%+q) = %+q, want %+q", tt.in, got, tt.wantFirst)
+			}
+		})
+	}
+}
+
+// TestStrictFormsMatchMain checks the forms 1 to 3 of matchForms for texts
+// with a C0 control rune inside a CSI. These forms must stay byte for byte
+// the forms of main (strict ansiSeq), so that the form set is a superset of
+// main's and no match that main finds is lost. The want values come from
+// main.
+func TestStrictFormsMatchMain(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		in   string
+		want [3]string // dropInvisible, spaceInvisible, spaceControls
+	}{
+		{name: "control rune inside CSI", in: "\x1b[\x01Ignore", want: [3]string{"[Ignore", " [ Ignore", " [ Ignore"}},
+		{name: "control rune between ESC and [", in: "\x1b\x01[8mIgnore all", want: [3]string{"[8mIgnore all", " [8mIgnore all", " [8mIgnore all"}},
+		{name: "control rune after C1 CSI", in: "\u009b\x018mIgnore all", want: [3]string{"8mIgnore all", " 8mIgnore all", " 8mIgnore all"}},
+		{name: "DEL among CSI parameters", in: "\x1b[8\x7fmIgnore", want: [3]string{"[8mIgnore", " [8 mIgnore", " [8 mIgnore"}},
+		{name: "LF inside CSI", in: "\x1b[\n<IMPORTANT>x", want: [3]string{"[\n<IMPORTANT>x", " [\n<IMPORTANT>x", " [\n<IMPORTANT>x"}},
+		{name: "ZWSP and control rune after ESC", in: "\x1b\u200b\x01[8m\u200bIgnore", want: [3]string{"[8mIgnore", " [8m Ignore", " [8mIgnore"}},
+	}
+	modes := [3]invisibleMode{dropInvisible, spaceInvisible, spaceControls}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			for i, mode := range modes {
+				if got := normalizeInvisible(tt.in, mode); got != tt.want[i] {
+					t.Errorf("normalizeInvisible(%+q, %d) = %+q, want %+q (main)", tt.in, mode, got, tt.want[i])
+				}
+			}
+		})
+	}
+}
+
+// TestNormalizeInvisibleKeepSeqText checks the fifth form of matchForms: it
+// keeps the letter that a CSI takes and the text of an OSC.
+func TestNormalizeInvisibleKeepSeqText(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{name: "CSI letter and OSC text kept", in: "\x1b[Ignore\x1b]0;all\x07b", want: " Ignore 0;all b"},
+		{name: "C1 OSC with C1 ST", in: "\u009dall\u009cb", want: " all b"},
+		{name: "JSON-escaped CSI letter kept", in: "a\\u001B[Ignore", want: "a Ignore"},
+		{name: "CSI with no letter is one space", in: "\x1b[1@x", want: " x"},
+		{name: "invisible runes dropped", in: "Ig\u200bnore\x01all", want: "Ignoreall"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if got := normalizeInvisible(tt.in, keepSeqText); got != tt.want {
+				t.Errorf("normalizeInvisible(%q, keepSeqText) = %q, want %q", tt.in, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestReplaceFormatRuns checks where step 2 puts the space of a run of
+// invisible runes. In spaceFormats (placeOnce), the space goes before the
+// control runes of the run when the last of them starts a sequence, and
+// after them otherwise. In spaceInvisible (placeAtTail), it goes after them,
+// and only when the run ends with a format rune.
+func TestReplaceFormatRuns(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		mode invisibleMode
+		in   string
+		want string
+	}{
+		{name: "ESC and ZWSP", mode: spaceFormats, in: "a\x1b\u200b[b", want: "a \x1b[b"},
+		{name: "ZWSP and ESC", mode: spaceFormats, in: "a\u200b\x1b[b", want: "a \x1b[b"},
+		{name: "C1 CSI and ZWSP", mode: spaceFormats, in: "a\u009b\u200bb", want: "a \u009bb"},
+		{name: "C1 OSC and ZWSP", mode: spaceFormats, in: "a\u009d\u200bb", want: "a \u009db"},
+		{name: "U+0001 and ZWSP", mode: spaceFormats, in: "a\x01\u200bb", want: "a\x01 b"},
+		{name: "ZWSP and U+0001", mode: spaceFormats, in: "a\u200b\x01b", want: "a\x01 b"},
+		// The last control rune is U+0001, not ESC, so the space goes after.
+		{name: "ESC U+0001 and ZWSP", mode: spaceFormats, in: "a\x1b\x01\u200bb", want: "a\x1b\x01 b"},
+		{name: "run of only control runes gets no space", mode: spaceFormats, in: "a\x01\x02b", want: "a\x01\x02b"},
+		{name: "run of only format runes", mode: spaceFormats, in: "a\u200b\u200cb", want: "a b"},
+		{name: "ESC and ZWSP at the tail", mode: spaceInvisible, in: "a\x1b\u200b[b", want: "a\x1b [b"},
+		{name: "ZWSP and ESC with no tail", mode: spaceInvisible, in: "a\u200b\x1b[b", want: "a\x1b[b"},
+		{name: "format runes dropped", mode: spaceControls, in: "a\x1b\u200b[b", want: "a\x1b[b"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if got := replaceFormatRuns(tt.in, tt.mode); got != tt.want {
+				t.Errorf("replaceFormatRuns(%+q, %d) = %+q, want %+q", tt.in, tt.mode, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestSeqText checks what the fifth form puts in place of each kind of
+// escape sequence. Each input is one whole match of ansiSeqC0, the regex
+// whose matches ansiKeepText passes to seqText.
+func TestSeqText(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		seq  string
+		want string
+	}{
+		{name: "CSI with letter", seq: "\x1b[I", want: " I"},
+		{name: "SGR m final is a space", seq: "\x1b[8m", want: " "},
+		{name: "CSI with a non-m letter final keeps it", seq: "\x1b[2K", want: " K"},
+		{name: "C1 CSI with letter", seq: "\u009bI", want: " I"},
+		{name: "CSI with control rune and letter", seq: "\x1b[\x01z", want: " z"},
+		{name: "JSON-escaped CSI with letter", seq: "\\u001b[I", want: " I"},
+		{name: "CSI with no letter", seq: "\x1b[1@", want: " "},
+		{name: "OSC with BEL", seq: "\x1b]0;t\x07", want: " 0;t "},
+		{name: "OSC with ST", seq: "\x1b]t\x1b\\", want: " t "},
+		{name: "C1 OSC with C1 ST", seq: "\u009dt\u009c", want: " t "},
+		{name: "empty OSC", seq: "\u009d\x07", want: "  "},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if m := ansiSeqC0.FindString(tt.seq); m != tt.seq {
+				t.Fatalf("ansiSeqC0.FindString(%+q) = %+q, want the whole input", tt.seq, m)
+			}
+			if got := seqText(tt.seq); got != tt.want {
+				t.Errorf("seqText(%+q) = %+q, want %+q", tt.seq, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestHasSeqStart(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		in   string
+		want bool
+	}{
+		{name: "ESC", in: "a\x1bb", want: true},
+		{name: "C1 CSI", in: "a\u009bb", want: true},
+		{name: "C1 OSC", in: "a\u009db", want: true},
+		{name: "JSON escape lower case", in: "a\\u001b[", want: true},
+		{name: "JSON escape upper case", in: "a\\u001B[", want: true},
+		{name: "C1 ST alone", in: "a\u009cb", want: false},
+		{name: "other control rune", in: "a\x01b", want: false},
+		{name: "other JSON escape", in: "a\\u0001b", want: false},
+		{name: "empty", in: "", want: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if got := hasSeqStart(tt.in); got != tt.want {
+				t.Errorf("hasSeqStart(%+q) = %v, want %v", tt.in, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestHasSeqC0(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		in   string
+		want bool
+	}{
+		{name: "ESC and U+0001", in: "a\x1b\x01[8mb", want: true},
+		{name: "C1 CSI and LF", in: "a\u009b\n8mb", want: true},
+		{name: "ESC and DEL", in: "a\x1b[\x7fb", want: true},
+		{name: "runes far apart", in: "\x01" + strings.Repeat("a", 100) + "\x1b", want: true},
+		// U+009D starts only an OSC, which ansiSeq and ansiSeqC0 read the
+		// same way.
+		{name: "C1 OSC and U+0001", in: "a\u009d\x01b", want: false},
+		// CAN and SUB cancel a CSI and ESC starts a new one, so they are not
+		// in csiC0.
+		{name: "ESC and CAN only", in: "a\x1b\x18[8mb", want: false},
+		{name: "ESC and SUB only", in: "a\x1b\x1a[8mb", want: false},
+		{name: "U+0001 alone", in: "a\x01b", want: false},
+		{name: "ESC alone", in: "a\x1b[8mb", want: false},
+		{name: "plain ASCII", in: "Ignore all", want: false},
+		{name: "empty", in: "", want: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if got := hasSeqC0(tt.in); got != tt.want {
+				t.Errorf("hasSeqC0(%+q) = %v, want %v", tt.in, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestIsInvisibleFormat(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		r    rune
+		want bool
+	}{
+		{name: "ZWSP", r: '\u200b', want: true},
+		{name: "RLO", r: '\u202e', want: true},
+		{name: "VS16", r: '\ufe0f', want: true},
+		{name: "U+0001 is a control rune", r: '\x01', want: false},
+		{name: "ESC is a control rune", r: '\x1b', want: false},
+		{name: "C1 CSI is a control rune", r: '\u009b', want: false},
+		{name: "Arabic number sign is not invisible", r: '\u0600', want: false},
+		{name: "letter", r: 'a', want: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if got := isInvisibleFormat(tt.r); got != tt.want {
+				t.Errorf("isInvisibleFormat(%U) = %v, want %v", tt.r, got, tt.want)
+			}
+		})
 	}
 }
 
@@ -506,11 +836,24 @@ func TestRegexForms(t *testing.T) {
 		},
 		// The fold does not change the text, so it is not added.
 		{name: "Hangul syllable not folded again", in: "\ud55c", want: []string{"\ud55c"}},
-		// The most forms: the three of matchForms and their three folds.
+		// Five forms of matchForms and their five folds. The sixth form
+		// equals the first, so it is kept once.
 		{
-			name: "six forms",
-			in:   sixFormsText,
-			want: []string{"b\ufb03", " b \ufb03", "b \ufb03", "bffi", " b ffi", "b ffi"},
+			name: "ten forms",
+			in:   tenFormsText,
+			want: []string{
+				"b c\ufb03", " b  c\ufb03", "b  c\ufb03", " b c\ufb03", "b Ic\ufb03",
+				"b cffi", " b  cffi", "b  cffi", " b cffi", "b Icffi",
+			},
+		},
+		// The most forms: the six of matchForms and their six folds.
+		{
+			name: "twelve forms",
+			in:   twelveFormsText,
+			want: []string{
+				"b c\ufb03[8m", " b  c\ufb03 [8m", "b  c\ufb03 [8m", " b c\ufb03 ", "b Ic\ufb03 ", "b c\ufb03 ",
+				"b cffi[8m", " b  cffi [8m", "b  cffi [8m", " b cffi ", "b Icffi ", "b cffi ",
+			},
 		},
 	}
 	for _, tt := range tests {

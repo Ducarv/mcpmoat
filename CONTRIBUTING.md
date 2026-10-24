@@ -45,27 +45,50 @@ How mcpmoat prepares the text before a match. This applies to every regex and ke
 - mcpmoat handles invisible characters before the match. These are the format characters (ZWSP and
   the other zero-width, bidi and tag characters) and every control character except white space
   (tab, LF, VT, FF, CR, NEL). So ESC, BEL, CAN, SUB, U+009B, U+009C and U+009D are invisible too.
-  First mcpmoat turns each ANSI escape sequence into one space. Only then does it handle the
-  control characters that are left. So ESC [ U+0001 "Ignore" keeps its "I".
-- A regex or a keyword is matched against up to three forms of the text. It matches when it
-  matches one form:
-  1. The invisible characters are removed. So "Ig" + U+0001 + "nore" reads as "Ignore".
-  2. Each run of invisible characters is one space, or two when the run has a control character
-     and ends with a format character. So "Ignore" + U+001F + "previous", or a ZWSP
-     between the words, reads as two words.
-  3. Only when the text has a control character: the format characters are removed, and each run
-     of control characters is one space. So a ZWSP inside a word and a control character between
+  First mcpmoat turns each ANSI escape sequence (CSI or OSC) into one space. CAN and SUB cancel a
+  sequence. Only then does mcpmoat handle the control characters that are left.
+- mcpmoat reads a sequence in two ways. Forms 1 to 3 below use the strict way: a C0 control
+  character inside ESC [ ends the CSI there, so the text after it stays whole. Forms 4 to 6 use
+  the terminal way: a CSI can hold C0 control characters, so ESC [ U+0001 8 m is one CSI. The
+  terminal way can take text into a sequence: ESC [ LF "<IMPORTANT>" is the CSI ESC [ LF < I and
+  the text "MPORTANT>". So a pattern sees "[" and "<IMPORTANT>" in forms 1 to 3, but not in forms
+  4 to 6. Forms 4 to 6 only add matches.
+- A regex or a keyword is matched against up to six forms of the text. It matches when it matches
+  one form. mcpmoat builds form 1 always, and each other form only when the text has the characters
+  that the form needs:
+  1. Always: the invisible characters are removed. So "Ig" + U+0001 + "nore" reads as "Ignore".
+  2. When the text has an invisible character: each run of invisible characters is one space, or
+     two when the run has a control character and ends with a format character. So "Ignore" +
+     ZWSP + "previous" reads as two words.
+  3. When the text has a control character: the format characters are removed, and each run of
+     control characters is one space. So a ZWSP inside a word and a control character between
      words still match.
+  4. When the text has a control character and a format character: the control characters are
+     removed, and each run with a format character is one space. So a control character inside a
+     word and a ZWSP between words still match.
+  5. When the text has ESC, U+009B or U+009D (or the JSON text `\u001b`): as form 6, but a CSI keeps
+     its final byte when it is an ASCII letter other than "m", and an OSC keeps its text. So
+     ESC [ "Ignore" (the CSI ESC [ I) reads as " Ignore", and ESC ] "Ignore all" BEL reads as
+     " Ignore all ". A CSI with the final byte "m" is SGR (colour and bold), so it is one space:
+     ESC [ 1 m "iPhone" reads as " iPhone", not " miPhone". A model reads OSC text, such as a
+     window title or a link URL, so a rule can match it.
+  6. When the text has ESC or U+009B and a C0 control character: as form 1, but each sequence,
+     read the terminal way, is one space. So ESC + U+0001 + "[8mIgnore" reads as " Ignore".
 
-  A control character inside a word and a ZWSP between words defeat all three forms. In a
-  description, the `invisible_unicode` heuristic flags every invisible character, also every
-  control character except white space. So it still flags such a text.
+  Some texts defeat all six forms: one kind of invisible character both inside a word and between
+  words, a CSI that takes a letter together with a ZWSP between words, a control character between
+  ESC and a format character, a payload that only form 5 shows after more than 32 KiB of
+  sequence text, and a CSI with the final byte "m" that takes the "m" of a word (ESC [ 1 "make"
+  reads as " ake"). In a description, the `invisible_unicode` heuristic flags every invisible
+  character, also every control character except white space. So it still flags such a text.
 - A regex also sees a folded form of the text: fullwidth letters, mathematical letters and
   combining marks become plain letters. Only the text is folded, not the pattern. So write the
   pattern in ASCII and do not add fullwidth alternatives: `(?i)ignore` also matches "ignore" in
   fullwidth letters (U+FF49 and on). A character is folded only when its fold is not longer than
   the character. So U+FDFA, U+00BD and U+2177 are not folded. Homoglyphs from other scripts, such
-  as Cyrillic U+0456 for Latin "i", are not folded.
+  as Cyrillic U+0456 for Latin "i", are not folded. So a regex reads up to twelve forms (the six
+  forms and their folds). A keyword reads up to six, because mcpmoat matches a keyword only
+  against the folds.
 
 The fields:
 

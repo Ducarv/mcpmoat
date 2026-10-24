@@ -68,55 +68,133 @@ func isInvisibleControl(r rune) bool {
 	return unicode.IsControl(r) && isInvisible(r)
 }
 
-// matchForms returns the forms of s that the regex and keyword matchers read.
-// A matcher reports a match when one form matches. Each form is at most
-// MaxMatchInputBytes long, and equal forms are kept only once.
+// isInvisibleFormat reports whether r is an invisible rune (see isInvisible)
+// that is not a control rune, such as ZWSP, a bidi control or a variation
+// selector. The comments of this package call such a rune a format rune.
+func isInvisibleFormat(r rune) bool {
+	return !unicode.IsControl(r) && isInvisible(r)
+}
+
+// matchForms returns the base forms of s: the forms that the regex and
+// keyword matchers read before the fold (see preparedText). A matcher reports
+// a match when one form matches. Each form is at most MaxMatchInputBytes
+// long, and equal forms are kept only once (see appendNew), so there are at
+// most six forms. The conditions below look only at the part of s that
+// normalizeForMatch reads (the first maxRawScanBytes).
 //
-// The first form is normalizeForMatch(s): the invisible runes are dropped, so
-// "ign" + ZWSP + "ore" is "ignore" (see dropInvisible).
+// The forms 1 to 3 read the escape sequences with ansiSeq, which takes no C0
+// control rune inside a CSI. The forms 4 to 6 read them with ansiSeqC0,
+// which does, as a terminal does. ansiSeqC0 can take more of the text into a
+// sequence: ESC [ LF "<IMPORTANT>" is the CSI ESC [ LF < I for ansiSeqC0,
+// and the text "MPORTANT>". ansiSeq does not read it as a CSI, so the forms 1
+// to 3 keep "[" LF "<IMPORTANT>". So the forms 4 to 6 only add matches: a
+// text that the forms 1 to 3 match is not lost.
 //
-// When s holds an invisible rune in the part that normalizeForMatch reads,
-// the second form replaces each run of invisible runes with one space
-// instead, so "ignore" + ZWSP + "previous" is "ignore previous" and a keyword
-// edge next to a ZWSP still holds (see spaceInvisible).
+//  1. Always: normalizeForMatch(s). The invisible runes are dropped, so "ign"
+//     + ZWSP + "ore" is "ignore" (see dropInvisible).
+//  2. When s holds an invisible rune: each run of invisible runes is one
+//     space instead, so "ignore" + ZWSP + "previous" is "ignore previous"
+//     and a keyword edge next to a ZWSP still holds (see spaceInvisible).
+//  3. When s holds an invisible control rune (see isInvisibleControl): the
+//     format runes are dropped and each run of control runes is one space
+//     (see spaceControls). So "Ig" + ZWSP + "nore" + U+0001 + "previous" is
+//     "Ignore previous": the ZWSP joins a word and the control rune splits
+//     two words.
+//  4. When s holds an invisible control rune and a format rune (see
+//     isInvisibleFormat): the control runes are dropped and each run that
+//     holds a format rune is one space (see spaceFormats). So "Ig" + U+0001
+//     + "nore" + ZWSP + "all" is "Ignore all": the control rune joins a word
+//     and the ZWSP splits two words. In ESC + ZWSP + "[8mIgnore" + ZWSP +
+//     "all", the space goes before the ESC, so ESC [ 8 m is still a CSI and
+//     the form is "  Ignore all".
+//  5. When s holds ESC, U+009B (CSI) or U+009D (OSC), or the JSON text
+//     \u001b or \u001B: as the sixth form, but a CSI whose final byte is a
+//     letter other than 'm' keeps that letter, and an OSC keeps its text
+//     (see keepSeqText). So ESC [ "Ignore" is " Ignore", not " gnore", and
+//     ESC ] "Ignore all" BEL is " Ignore all ". A CSI with the final 'm' is
+//     SGR (colour and bold) and is one space, so ESC [ 1 m "iPhone" is
+//     " iPhone", not " miPhone".
+//  6. When s holds ESC or U+009B and a C0 control rune of csiC0 (see
+//     hasSeqC0): as the first form, but a CSI can hold C0 control runes (see
+//     dropSeqC0). So ESC + U+0001 + "[8mIgnore" is " Ignore": the first form
+//     keeps "[8mIgnore", which has no word edge before "Ignore".
 //
-// When that part also holds an invisible control rune (see
-// isInvisibleControl), the third form drops the other invisible runes and
-// replaces each run of invisible control runes with one space (see
-// spaceControls). So "Ig" + ZWSP + "nore" + U+0001 + "previous" is "Ignore
-// previous": the ZWSP joins a word and the control rune splits two words. The
-// first form joins all the words, and the second form splits the first word.
+// In the forms 2 to 4, at most two spaces stand for a whole run of invisible
+// runes (two only in the second form, for a run that has a control rune and
+// ends with a format rune, see replaceRuns). So invisible padding cannot
+// push a payload out of the MaxMatchInputBytes window of these forms either.
 //
-// In the second and the third form, at most two spaces stand for a whole run
-// of invisible runes (two only in the second form, for a run that has a
-// control rune and ends with a format rune, see replaceRuns). So invisible
-// padding cannot push a payload out of the MaxMatchInputBytes window of
-// these forms either.
+// These texts still defeat all the forms. The invisible_unicode heuristic
+// flags each of them in a description:
 //
-// A text that uses one kind of invisible rune both inside a word and between
-// words defeats all the forms, and so does a text with a control rune inside
-// a word and a format rune (such as ZWSP) between words. A format rune after
-// ESC or U+009B does too, when the text also needs the second form: in ESC +
-// ZWSP + "[8mIgnore" + ZWSP + "all", the second form keeps "[8m" before
-// "Ignore" (see replaceRuns), and the other forms join "Ignoreall". And in
-// U+009B + ZWSP + "Ignore", the space of the second form is a CSI
-// intermediate byte, so the CSI still takes the "I". The invisible_unicode
-// heuristic flags such a text in a description.
+//   - one kind of invisible rune both inside a word and between words, such
+//     as a ZWSP in both places, or U+0001 in both places;
+//   - a CSI that takes a letter together with a format rune between words:
+//     in ESC [ "Ignore" + ZWSP + "all", the fifth form drops the ZWSP, so it
+//     joins "Ignoreall", and the other forms lose the "I";
+//   - a control rune between ESC (or U+009B, U+009D) and a format rune: the
+//     fourth form puts its space before the controls of a run only when the
+//     last of them is ESC, U+009B or U+009D. So in ESC + U+0001 + ZWSP +
+//     "[8mIgnore" + ZWSP + "all", the fourth form keeps "[8m" before
+//     "Ignore", and the other forms join "Ignoreall";
+//   - a payload that only the fifth form shows, after more than
+//     MaxMatchInputBytes of text that the fifth form keeps from escape
+//     sequences (OSC text and CSI letters). The max_length heuristic flags
+//     such a long text.
 //
-// A text without invisible runes has one form, so it costs no more. A text
-// with them is matched up to three times, which triples the cost bound in
-// match.go. The regex matchers read more forms (see regexForms).
+// A CSI with the final byte 'm' that takes the "m" of a word also defeats
+// all the forms: ESC [ 1 "make" is the CSI ESC [ 1 m and the text "ake", and
+// no form gives the "m" back. The invisible_unicode heuristic flags the ESC
+// in a description.
+//
+// An OSC with more than 256 runes of text is not an OSC for ansiSeq or
+// ansiSeqC0. So its ESC and its end are dropped, and its text stays in every
+// form, after its "]": the matchers read that text.
+//
+// A text without invisible runes and escape sequences has one form, so it
+// costs no more. A text with them is matched up to six times, which is six
+// times the cost bound in match.go. The regex matchers also read the folds
+// (see preparedText.regexForms).
 func matchForms(s string) []string {
 	forms := []string{normalizeForMatch(s)}
 	raw := cutAtRune(s, maxRawScanBytes)
-	if !strings.ContainsFunc(raw, isInvisible) {
-		return forms
+	hasControl := strings.ContainsFunc(raw, isInvisibleControl)
+	hasFormat := strings.ContainsFunc(raw, isInvisibleFormat)
+	if hasControl || hasFormat {
+		forms = appendNew(forms, normalizeInvisible(s, spaceInvisible))
 	}
-	forms = appendNew(forms, normalizeInvisible(s, spaceInvisible))
-	if strings.ContainsFunc(raw, isInvisibleControl) {
+	if hasControl {
 		forms = appendNew(forms, normalizeInvisible(s, spaceControls))
 	}
+	if hasControl && hasFormat {
+		forms = appendNew(forms, normalizeInvisible(s, spaceFormats))
+	}
+	if hasSeqStart(raw) {
+		forms = appendNew(forms, normalizeInvisible(s, keepSeqText))
+	}
+	if hasSeqC0(raw) {
+		forms = appendNew(forms, normalizeInvisible(s, dropSeqC0))
+	}
 	return forms
+}
+
+// hasSeqStart reports whether s holds a rune or a text that can start an
+// ANSI escape sequence in ansiSeqC0: ESC, U+009B (CSI), U+009D (OSC), or the
+// JSON escape \u001b or \u001B. matchForms adds the fifth form only then.
+func hasSeqStart(s string) bool {
+	return strings.ContainsAny(s, "\x1b\u009b\u009d") ||
+		strings.Contains(s, `\u001b`) || strings.Contains(s, `\u001B`)
+}
+
+// hasSeqC0 reports whether s holds ESC or U+009B, which start a CSI, and a C0
+// control rune of csiC0. matchForms adds the sixth form only then. Without
+// both, ansiSeqC0 finds the same sequences as ansiSeq, so the sixth form is
+// the first form. It is a cheap check: the two runes need not be in the same
+// sequence, and appendNew drops the sixth form when it equals another form.
+// U+009D starts only an OSC, and ansiSeq and ansiSeqC0 read an OSC the same
+// way, so it does not count here.
+func hasSeqC0(s string) bool {
+	return strings.ContainsAny(s, "\x1b\u009b") && csiC0Rune.MatchString(s)
 }
 
 // appendNew appends f to forms when forms does not hold it yet.
@@ -127,30 +205,13 @@ func appendNew(forms []string, f string) []string {
 	return append(forms, f)
 }
 
-// regexForms returns the forms of s that the regex matchers (any_regex and
-// all_regex) read: the forms of matchForms, and then foldMarks of each of
-// them when the fold changes it. A regex matches when it matches in one form.
-// So the regex `ignore` also matches the fullwidth "ignore" (U+FF49 ...),
-// the mathematical bold "ignore" (U+1D422 ...) and "ig" + U+0336 + "nore".
-//
-// Only the text is folded, not the pattern. So a pattern with an accent or a
-// mark matches only in the forms of matchForms.
-//
-// A form that is only ASCII does not change in foldMarks, so it is not
-// folded, and a plain ASCII text costs no more. Equal forms are kept only
-// once: a folded form that is equal to a form in the list is not added. So a
-// text has at most six forms: the three of matchForms and their three folds.
-// This doubles the cost bound of matchForms in match.go.
+// regexForms returns the forms of s that the regex matchers read: at most
+// twelve forms, the six base forms of matchForms and their folds. It builds a
+// new preparedText for s each time, so the tests, the fuzz tests and the
+// benchmarks can call it. The matchers use preparedText.regexForms, which
+// builds the forms only once for each text.
 func regexForms(s string) []string {
-	forms := matchForms(s)
-	n := len(forms) // fold only the forms of matchForms, not the folds
-	for i := range n {
-		if isASCII(forms[i]) {
-			continue
-		}
-		forms = appendNew(forms, foldMarks(forms[i]))
-	}
-	return forms
+	return prepareText(s).regexForms()
 }
 
 // isASCII reports whether every byte of s is ASCII (less than 0x80).
@@ -165,7 +226,8 @@ func isASCII(s string) bool {
 
 // normalizeForMatch returns the form of s that the regex and keyword matchers
 // read. So "ign" + ZWSP (U+200B) + "ore previous" still matches the keyword
-// "ignore previous". It is normalizeInvisible(s, dropInvisible).
+// "ignore previous". It is normalizeInvisible(s, dropInvisible), the first
+// form of matchForms.
 //
 // It works in nine steps:
 //
@@ -198,8 +260,9 @@ func isASCII(s string) bool {
 // [ I, which ansiSeq reads as a CSI that hides the "I". A terminal reads a
 // C0 rune inside a CSI in another way: it runs the rune and goes on with the
 // sequence, so ESC [ U+0001 8 m still hides the text after it. ansiSeq does
-// not match such a sequence; the invisible_unicode heuristic flags its ESC in
-// a description.
+// not match such a sequence, so this form keeps "[8m". The forms 4 to 6 of
+// matchForms read it with ansiSeqC0 (see dropSeqC0). The invisible_unicode
+// heuristic flags its ESC in a description.
 //
 // Step 2 comes before NFC, so an invisible rune cannot block composition:
 // "e" + ZWSP + U+0301 becomes U+00E9 (e with acute), the same as "e" + U+0301.
@@ -215,7 +278,8 @@ func normalizeForMatch(s string) string {
 }
 
 // invisibleMode tells normalizeInvisible what to do with the invisible runes
-// (see isInvisible). Each mode builds one form of matchForms.
+// (see isInvisible) and with the ANSI escape sequences. Each mode builds one
+// form of matchForms.
 type invisibleMode int
 
 const (
@@ -226,37 +290,82 @@ const (
 	// one U+0020, or with two when the run has a control rune and ends with
 	// a format rune (see replaceRuns). It builds the second form.
 	spaceInvisible
-	// spaceControls drops the invisible runes that are not control runes,
-	// and replaces each run of invisible control runes with one U+0020. The
+	// spaceControls drops the format runes (see isInvisibleFormat), and
+	// replaces each run of invisible control runes with one U+0020. The
 	// dropped runes do not end a run, so U+0001 + ZWSP + U+0001 is one
 	// space. It builds the third form.
 	spaceControls
+	// spaceFormats replaces each run of invisible runes that holds a format
+	// rune with one U+0020, and drops the control runes. A run of only
+	// control runes becomes nothing. The control runes of a run stay in the
+	// text until the ANSI step, and the space goes before them when the last
+	// of them is ESC, U+009B or U+009D, so that the sequence it starts is
+	// still found (see placeOnce). Its ANSI step reads the sequences with
+	// ansiSeqC0. It builds the fourth form.
+	spaceFormats
+	// keepSeqText drops every invisible rune, as dropSeqC0 does, but it
+	// keeps the text that an escape sequence takes: a CSI whose final byte
+	// is a letter other than 'm' becomes U+0020 and that letter, and an OSC
+	// becomes its text between two U+0020 (see ansiKeepText). Its ANSI step reads the
+	// sequences with ansiSeqC0. It builds the fifth form.
+	keepSeqText
+	// dropSeqC0 drops every invisible rune, as dropInvisible does, but its
+	// ANSI step reads the sequences with ansiSeqC0, so a CSI can hold C0
+	// control runes, and it replaces each sequence with one U+0020 (see
+	// ansiC0ToSpace). It builds the sixth form.
+	dropSeqC0
 )
 
-// formatRepl returns what a run of invisible runes that are not control runes
-// becomes in mode m: U+0020, or -1 when the run is dropped.
+// formatRepl returns what a run of invisible runes that holds a format rune
+// becomes in mode m: U+0020, or -1 when its format runes are dropped.
 func (m invisibleMode) formatRepl() rune {
-	if m == spaceInvisible {
+	switch m {
+	case spaceInvisible, spaceFormats:
 		return ' '
 	}
 	return -1
 }
 
 // controlRepl returns what a run of invisible control runes becomes in mode
-// m: U+0020, or -1 when the run is dropped.
+// m after the ANSI step: U+0020, or -1 when the run is dropped.
 func (m invisibleMode) controlRepl() rune {
-	if m == dropInvisible {
-		return -1
+	switch m {
+	case spaceInvisible, spaceControls:
+		return ' '
 	}
-	return ' '
+	return -1
+}
+
+// runPlace returns where replaceFormatRuns puts the repl of a run in mode m:
+// placeOnce for spaceFormats, and placeAtTail for the other modes.
+func (m invisibleMode) runPlace() runPlace {
+	if m == spaceFormats {
+		return placeOnce
+	}
+	return placeAtTail
+}
+
+// ansiStep runs step 3 of normalizeForMatch on s for mode m: ansiKeepText
+// for keepSeqText, ansiC0ToSpace for spaceFormats and dropSeqC0, and
+// ansiToSpace for the other modes. So the forms 1 to 3 of matchForms read the
+// sequences with ansiSeq, and the forms 4 to 6 with ansiSeqC0.
+func (m invisibleMode) ansiStep(s string) string {
+	switch m {
+	case keepSeqText:
+		return ansiKeepText(s)
+	case spaceFormats, dropSeqC0:
+		return ansiC0ToSpace(s)
+	}
+	return ansiToSpace(s)
 }
 
 // normalizeInvisible runs the steps of normalizeForMatch, with the invisible
-// runes handled as mode says. In each mode, the white space is mapped as in
-// normalizeForMatch.
+// runes and the escape sequences handled as mode says. In each mode, the
+// white space is mapped as in normalizeForMatch.
 func normalizeInvisible(s string, mode invisibleMode) string {
 	s = cutAtRune(s, maxRawScanBytes)
-	s = ansiToSpace(replaceFormatRuns(s, mode.formatRepl()))
+	s = replaceFormatRuns(s, mode)
+	s = mode.ansiStep(s)
 	s = replaceInvisible(s, mode.controlRepl()) // only invisible control runes are left
 	s = spacesToASCII(s)
 	s = cutAtRune(s, MaxMatchInputBytes)
@@ -269,16 +378,46 @@ func normalizeInvisible(s string, mode invisibleMode) string {
 //
 //   - CSI: ESC [ (or U+009B), parameter and intermediate bytes, and a final
 //     byte, such as ESC [ 8 m (SGR 8, which hides the text after it);
-//   - OSC: ESC ] (or U+009D), at most 256 bytes, and BEL, ESC \ or U+009C.
+//   - OSC: ESC ] (or U+009D), at most 256 runes of text, and BEL, ESC \ or
+//     U+009C.
 //
 // The schema target is JSON text, where ESC is the escape \u001b, so a CSI
 // that starts with that escape matches too. Its final byte is not a
 // backslash: in JSON text a backslash starts the next escape, so in
 // \u001b[\u0001Ignore the CSI does not take the backslash and leave
-// "u0001Ignore" with no word edge. An OSC with no end does not
-// match, so it cannot swallow the rest of the text; its ESC is an invisible
-// control rune, so step 4 of normalizeForMatch handles it.
+// "u0001Ignore" with no word edge. An OSC with no end, or with more than 256
+// runes of text, does not match, so it cannot swallow the rest of the text;
+// its ESC is an invisible control rune, so step 4 of normalizeForMatch drops
+// it, and its text stays.
+//
+// A CSI here holds no C0 control rune. The forms 1 to 3 of matchForms read
+// the sequences with ansiSeq. The forms 4 to 6 read them with ansiSeqC0.
 var ansiSeq = regexp.MustCompile(`(?:\x1b\[|\x{9b})[0-?]*[ -/]*[@-~]|\\u001[bB]\[[0-?]*[ -/]*[@-\[\]-~]|(?:\x1b\]|\x{9d})[^\x07\x1b\x{9c}]{0,256}(?:\x07|\x1b\\|\x{9c})`)
+
+// csiC0 is the content of a regex class: the C0 control runes that a
+// terminal (VT500 and xterm) runs inside a CSI and then goes on with the
+// sequence. It is U+0000 to U+001F and DEL (U+007F), but not CAN (U+0018) and
+// SUB (U+001A), which cancel the sequence, and not ESC (U+001B), which starts
+// a new one. It holds TAB, LF and CR too.
+const csiC0 = `\x00-\x17\x19\x1c-\x1f\x7f`
+
+// csiC0Rune matches one rune of csiC0 (see hasSeqC0).
+var csiC0Rune = regexp.MustCompile(`[` + csiC0 + `]`)
+
+// ansiSeqC0 is ansiSeq, but a raw CSI can hold C0 control runes (see csiC0),
+// as in a terminal: between ESC and "[", and among the parameter and
+// intermediate bytes. So ESC + U+0001 + "[8m" and U+009B + U+0001 + "8m" are
+// a CSI too. The JSON branch and the OSC are the same as in ansiSeq.
+//
+// The final byte of a CSI can be a letter of the text: in ESC [ "Ignore",
+// the CSI is ESC [ I, as for a terminal. And a C0 rune lets a CSI take
+// parameter bytes of the text: ESC [ LF "<IMPORTANT>" is the CSI ESC [ LF < I.
+// So only the forms 4 to 6 of matchForms read the sequences with ansiSeqC0,
+// and the fifth form keeps a letter final byte (see ansiKeepText).
+var ansiSeqC0 = regexp.MustCompile(
+	`(?:\x1b[` + csiC0 + `]*\[|\x{9b})[0-?` + csiC0 + `]*[ -/` + csiC0 + `]*[@-~]` +
+		`|\\u001[bB]\[[0-?]*[ -/]*[@-\[\]-~]` +
+		`|(?:\x1b\]|\x{9d})[^\x07\x1b\x{9c}]{0,256}(?:\x07|\x1b\\|\x{9c})`)
 
 // ansiToSpace replaces each ANSI escape sequence (see ansiSeq) with U+0020.
 // Without this step, ESC [ 8 m before "Ignore" leaves "[8mIgnore", and the
@@ -292,11 +431,82 @@ var ansiSeq = regexp.MustCompile(`(?:\x1b\[|\x{9b})[0-?]*[ -/]*[@-~]|\\u001[bB]\
 //   - ESC (U+001B) and the C1 controls CSI (U+009B), ST (U+009C) and OSC
 //     (U+009D) start or end a sequence in ansiSeq;
 //   - BEL (U+0007) ends an OSC in ansiSeq;
+//   - the other C0 control runes (see csiC0) can stand inside a CSI of
+//     ansiSeqC0 (see ansiC0ToSpace);
 //   - CAN (U+0018) and SUB (U+001A) cancel a sequence in a terminal, and the
 //     terminal shows the text after them. They are still in the text here,
 //     so ESC [ CAN "Ignore" is not read as ESC [ I, a CSI that hides the "I".
 func ansiToSpace(s string) string {
 	return ansiSeq.ReplaceAllLiteralString(s, " ")
+}
+
+// ansiC0ToSpace is ansiToSpace with ansiSeqC0: it replaces each ANSI escape
+// sequence, also a CSI that holds C0 control runes, with U+0020. It is the
+// ANSI step of the fourth and the sixth form of matchForms. A sequence is at
+// least 2 bytes long, so the text does not grow.
+func ansiC0ToSpace(s string) string {
+	return ansiSeqC0.ReplaceAllLiteralString(s, " ")
+}
+
+// ansiKeepText is the ANSI step of the fifth form of matchForms (see
+// keepSeqText). It replaces each ANSI escape sequence (see ansiSeqC0) with the
+// text that seqText gives for it. So a CSI that takes a letter of the text
+// as its final byte gives the letter back, and the text of an OSC, which a
+// terminal does not show but a model reads, is matched. A CSI with the final
+// byte 'm' is SGR (colour and bold), so it becomes one U+0020 and does not
+// give its 'm' back: ESC [ 1 m "iPhone" is " iPhone", not " miPhone".
+//
+// No replacement is longer than its sequence, so the text does not grow:
+//
+//   - a CSI with a letter other than 'm' as its final byte becomes 2 bytes,
+//     and it is at least 3 bytes long (ESC [ I, or U+009B, 2 bytes, and I);
+//   - an OSC becomes its text and 2 bytes, and it is its text and at least 3
+//     bytes long (ESC ] and BEL; U+009D is 2 bytes, and its end is 1 or 2
+//     bytes);
+//   - each other sequence becomes 1 byte, and it is at least 2 bytes long.
+func ansiKeepText(s string) string {
+	return ansiSeqC0.ReplaceAllStringFunc(s, seqText)
+}
+
+// seqText returns what ansiKeepText puts in place of seq, a match of ansiSeqC0:
+// U+0020 and the text of an OSC and U+0020; U+0020 and the final byte of a
+// CSI whose final byte is an ASCII letter other than 'm'; else one U+0020.
+func seqText(seq string) string {
+	if text, ok := oscText(seq); ok {
+		return " " + text + " "
+	}
+	// An 'm' final is SGR (colour, bold): keeping it makes bold "iPhone" "miPhone".
+	if last := seq[len(seq)-1]; isASCIILetter(last) && last != 'm' {
+		return " " + seq[len(seq)-1:]
+	}
+	return " "
+}
+
+// oscText returns the text of seq, a match of ansiSeqC0, when seq is an OSC:
+// the part between ESC ] (or U+009D) and its end (BEL, ESC \ or U+009C). It
+// returns false when seq is a CSI. The text of an OSC holds no BEL, ESC or
+// U+009C (see ansiSeqC0), so the end is not ambiguous.
+func oscText(seq string) (string, bool) {
+	var text string
+	switch {
+	case strings.HasPrefix(seq, "\x1b]"):
+		text = seq[len("\x1b]"):]
+	case strings.HasPrefix(seq, "\u009d"):
+		text = seq[len("\u009d"):]
+	default:
+		return "", false
+	}
+	for _, end := range []string{"\x07", "\x1b\\", "\u009c"} {
+		if t, ok := strings.CutSuffix(text, end); ok {
+			return t, true
+		}
+	}
+	return text, true // not reached: ansiSeqC0 ends each OSC with one of them
+}
+
+// isASCIILetter reports whether c is an ASCII letter, A to Z or a to z.
+func isASCIILetter(c byte) bool {
+	return 'A' <= c && c <= 'Z' || 'a' <= c && c <= 'z'
 }
 
 // re2SpaceRunes are the runes that RE2 \s matches.
@@ -410,62 +620,121 @@ func appendFold(dst []byte, r rune, rs string) []byte {
 	return dst
 }
 
-// replaceFormatRuns is step 2 of normalizeForMatch. It replaces each run of
-// invisible runes in s with one repl (a repl of -1 drops the run), but it
-// keeps the invisible control runes of the run for step 4, which runs after
-// ansiToSpace (see normalizeForMatch for why). So a run of invisible runes
-// becomes one repl when it holds no control rune, and its control runes, in
-// order and with nothing between them, when it holds one. When such a run
-// ends with runes that are not control runes, one repl follows its control
-// runes (see replaceRuns). Step 4 then replaces those control runes with one
-// rune or drops them.
-func replaceFormatRuns(s string, repl rune) string {
-	return replaceRuns(s, isInvisibleControl, repl)
+// replaceFormatRuns is step 2 of normalizeForMatch. It rewrites each run of
+// invisible runes in s for mode (see replaceRuns): it keeps the invisible
+// control runes of the run for step 4, which runs after the ANSI step (see
+// normalizeForMatch for why), and it writes mode.formatRepl() for the format
+// runes of the run, or drops them when that is -1. mode.runPlace() says where
+// the repl goes. Step 4 then replaces the kept control runes with one rune or
+// drops them.
+func replaceFormatRuns(s string, mode invisibleMode) string {
+	return replaceRuns(s, isInvisibleControl, mode.formatRepl(), mode.runPlace())
 }
 
 // replaceInvisible returns s with each run of runes for which isInvisible is
 // true replaced by one repl. A repl of -1 drops the runes.
 func replaceInvisible(s string, repl rune) string {
-	return replaceRuns(s, keepNone, repl)
+	return replaceRuns(s, keepNone, repl, placeAtTail)
 }
 
 // keepNone returns false for every rune. replaceInvisible uses it to keep no
 // rune of a run.
 func keepNone(rune) bool { return false }
 
+// runPlace tells replaceRuns when and where it writes the repl of a run of
+// invisible runes, relative to the runes of the run that it keeps.
+type runPlace int
+
+const (
+	// placeAtTail writes one repl after the kept runes, and only when the
+	// run ends with runes that are not kept. So a kept ESC does not join the
+	// rune after the run: in the second form of matchForms, ESC + ZWSP +
+	// "[" is ESC + U+0020 + "[", not a CSI.
+	placeAtTail runPlace = iota
+	// placeOnce writes one repl when the run has a rune that is not kept,
+	// wherever that rune is. The repl goes before the kept runes when the
+	// last kept rune is ESC, U+009B or U+009D (see startsSeq), and after
+	// them otherwise. So in the fourth form of matchForms, ESC + ZWSP + "[8m"
+	// is U+0020 + ESC + "[8m", a CSI, and U+0001 + ZWSP + "all" is U+0001 +
+	// U+0020 + "all".
+	placeOnce
+)
+
 // replaceRuns rewrites each run of runes in s for which isInvisible is true.
-// It writes the runes of the run for which keep is true, in order. When the
-// run ends with runes for which keep is false, it writes one repl after the
-// kept runes, or nothing when repl is -1. So a run with no kept rune becomes
-// one repl, and a kept ESC does not join the rune after the run: in the
-// second form of matchForms, ESC + ZWSP + "[" is ESC + U+0020 + "[", not a
-// CSI. The other runes of s stay as they are.
+// It writes the runes of the run for which keep is true, in order and with
+// nothing between them, and at most one repl, as place says (see runPlace).
+// A repl of -1 writes nothing. So a run with no kept rune becomes one repl
+// in both places. The other runes of s stay as they are.
 //
-// Invalid UTF-8 becomes U+FFFD, as with strings.Map.
-func replaceRuns(s string, keep func(rune) bool, repl rune) string {
+// A run holds at least one rune that is not kept when it gets a repl, and a
+// repl is 1 byte, so the text does not grow.
+//
+// Invalid UTF-8 becomes U+FFFD, as with strings.Map. U+FFFD is not
+// invisible, so it ends a run.
+func replaceRuns(s string, keep func(rune) bool, repl rune, place runPlace) string {
 	var b strings.Builder
 	b.Grow(len(s))
-	tail := false // the runes since the last kept rune or visible rune are invisible and not kept
-	endTail := func() {
-		if tail && repl >= 0 {
-			b.WriteRune(repl)
-		}
-		tail = false
-	}
-	for _, r := range s {
-		switch {
-		case !isInvisible(r):
-			endTail()
+	for i := 0; i < len(s); {
+		r, size := utf8.DecodeRuneInString(s[i:])
+		if !isInvisible(r) {
 			b.WriteRune(r)
-		case keep(r):
-			tail = false // the runes before r in the run are dropped
-			b.WriteRune(r)
-		default:
-			tail = true
+			i += size
+			continue
 		}
+		end := i + size // the run is s[i:end]
+		for end < len(s) {
+			r, size := utf8.DecodeRuneInString(s[end:])
+			if !isInvisible(r) {
+				break
+			}
+			end += size
+		}
+		writeRun(&b, s[i:end], keep, repl, place)
+		i = end
 	}
-	endTail()
 	return b.String()
+}
+
+// writeRun writes run, a run of invisible runes, to b for replaceRuns: the
+// runes of run for which keep is true, and repl as place says. The runes of
+// a run are invisible, so they are valid UTF-8.
+func writeRun(b *strings.Builder, run string, keep func(rune) bool, repl rune, place runPlace) {
+	lastKept := rune(-1) // the last kept rune of the run, or -1
+	dropped := false     // the run has a rune that is not kept
+	tail := false        // the run ends with runes that are not kept
+	for _, r := range run {
+		if keep(r) {
+			lastKept, tail = r, false
+		} else {
+			dropped, tail = true, true
+		}
+	}
+	var space, before bool
+	switch place {
+	case placeAtTail:
+		space = tail
+	case placeOnce:
+		space = dropped
+		before = startsSeq(lastKept)
+	}
+	space = space && repl >= 0
+	if space && before {
+		b.WriteRune(repl)
+	}
+	for _, r := range run {
+		if keep(r) {
+			b.WriteRune(r)
+		}
+	}
+	if space && !before {
+		b.WriteRune(repl)
+	}
+}
+
+// startsSeq reports whether r is ESC, U+009B (CSI) or U+009D (OSC), a rune
+// that starts an ANSI escape sequence in ansiSeq and ansiSeqC0.
+func startsSeq(r rune) bool {
+	return r == '\x1b' || r == '\u009b' || r == '\u009d'
 }
 
 // cutAtRune returns at most the first n bytes of s. It never splits a

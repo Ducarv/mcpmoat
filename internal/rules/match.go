@@ -20,20 +20,21 @@ import (
 // maxProgInsts caps one regex, and maxTotalInsts caps the sum over all the
 // regexes of one any_regex, all_regex or keywords list.
 //
-// The worst case for one match block is about 32 KiB x 2500, about 80M
-// instruction-bytes. BenchmarkWorstCaseBlock measured about 0.8 s for it on
-// an Apple M1 Pro (about 10 ns for each instruction-byte). That is the cost
-// for one form of the text, and a text can have more forms:
+// The worst case for one match block on one form of the text is about 32 KiB
+// x 2500, about 80M instruction-bytes. That is about 0.75 s on an Apple M1
+// Pro (about 9 ns for each instruction-byte), one twelfth of the measured
+// time below. A text can have more forms (see matchForms and preparedText):
 //
-//   - keywords read up to three forms (see matchForms): two when the text has
-//     invisible runes, and three when one of them is a control rune such as
-//     U+0001;
-//   - any_regex and all_regex read up to six forms (see regexForms): the
-//     three of matchForms and their folds, when the text is not only ASCII.
+//   - keywords read up to six forms: the folds of the six base forms of
+//     matchForms;
+//   - any_regex and all_regex read up to twelve forms: the six base forms
+//     and their folds, when the text is not only ASCII.
 //
-// Each form is at most MaxMatchInputBytes long, so the worst case is six
-// times the cost above, about 480M instruction-bytes. The package doc says
-// how the rule count multiplies it.
+// Each form is at most MaxMatchInputBytes long, so the worst case for one
+// match block is twelve times the cost above: 12 x 32 KiB x 2500, about 960M
+// instruction-bytes. BenchmarkWorstCaseBlock measured about 9.0 s for one
+// Match call over the twelve forms on an Apple M1 Pro (median of five runs,
+// Go 1.27). The package doc says how the rule count multiplies it.
 const (
 	// MaxPatternBytes is the largest regex or keyword, in bytes, before
 	// compilation.
@@ -148,15 +149,17 @@ func compileRegexMatcher(kind string, list []string, build func(entry, s string)
 }
 
 // Match returns the hits of the matcher in text, or nil when it does not
-// match.
+// match. It is safe for concurrent use: it builds the forms of text for this
+// call only (see matchPrepared).
 //
 // Regexes and keywords read the normalized forms of the text, so an
 // invisible character cannot split a keyword. Regexes read the forms of
-// regexForms, which also hold the folded forms, so a fullwidth letter or a
-// combining mark cannot hide a word from a regex. Keywords read the forms of
-// matchForms, folded with foldMarks. A regex or a keyword matches when it
-// matches in one form. In all_regex, each regex must match, but each one can
-// match in a different form. A heuristic reads the full raw text.
+// preparedText.regexForms, which also hold the folded forms, so a fullwidth
+// letter or a combining mark cannot hide a word from a regex. Keywords read
+// the forms of preparedText.keywordForms, the base forms of matchForms folded
+// with foldMarks. A regex or a keyword matches when it matches in one form.
+// In all_regex, each regex must match, but each one can match in a different
+// form. A heuristic reads the full raw text.
 //
 // A regex or keyword hit has the offset NoOffset, whatever form it matched
 // in, because a form has no byte offsets in the raw text.
@@ -164,11 +167,19 @@ func (m *Matcher) Match(text string) []Hit {
 	if m == nil {
 		return nil
 	}
+	return m.matchPrepared(prepareText(text))
+}
+
+// matchPrepared returns the hits of the matcher in p, as Match does. The
+// forms of p are built at most once, so the matchers of many rules can share
+// one p for the same text. A heuristic reads only p.raw, so it does not build
+// the forms. matchPrepared never writes into the forms of p.
+func (m *Matcher) matchPrepared(p *preparedText) []Hit {
 	switch m.kind {
 	case kindHeuristic:
-		return m.heuristic(text)
+		return m.heuristic(p.raw)
 	case kindAnyRegex:
-		forms := regexForms(text)
+		forms := p.regexForms()
 		for i, re := range m.regexps {
 			if matchesAny(re, forms) {
 				return []Hit{{Offset: NoOffset, Detail: fmt.Sprintf("any_regex[%d] matched", i)}}
@@ -176,7 +187,7 @@ func (m *Matcher) Match(text string) []Hit {
 		}
 		return nil
 	case kindAllRegex:
-		forms := regexForms(text)
+		forms := p.regexForms()
 		for _, re := range m.regexps {
 			if !matchesAny(re, forms) {
 				return nil
@@ -190,10 +201,7 @@ func (m *Matcher) Match(text string) []Hit {
 		}
 		return l.result("patterns")
 	case kindKeywords:
-		forms := matchForms(text)
-		for i, f := range forms {
-			forms[i] = foldMarks(f)
-		}
+		forms := p.keywordForms()
 		var l hitList
 		for i, re := range m.regexps {
 			if matchesAny(re, forms) && l.keep(NoOffset) {

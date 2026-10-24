@@ -242,11 +242,13 @@ func prefixRules(t *testing.T, prefix string) []compiledRule {
 }
 
 // ruleHits returns the sorted IDs of the rules in rs with the given target
-// that match text.
+// that match text. It prepares text once and shares it between the rules, so
+// one set of match forms is built for each target text.
 func ruleHits(rs []compiledRule, target rules.Target, text string) []string {
+	p := rules.PrepareText(text)
 	var ids []string
 	for _, cr := range rs {
-		if cr.target == target && len(cr.m.Match(text)) > 0 {
+		if cr.target == target && len(rules.MatchPrepared(cr.m, p)) > 0 {
 			ids = append(ids, cr.id)
 		}
 	}

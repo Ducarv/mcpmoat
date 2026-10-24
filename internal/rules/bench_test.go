@@ -85,8 +85,22 @@ func benchText(size, first int) string {
 	return b.String()
 }
 
-// matchAll runs every matcher on text and returns the number of hits.
+// matchAll runs every matcher on text and returns the number of hits. It
+// builds the forms of text once and shares them between the matchers, as the
+// engine does for one target text.
 func matchAll(ms []*Matcher, text string) int {
+	p := prepareText(text)
+	n := 0
+	for _, m := range ms {
+		n += len(m.matchPrepared(p))
+	}
+	return n
+}
+
+// matchAllPerMatcher is matchAll without the shared forms: each Match call
+// builds the forms of text again. BenchmarkAnalysis10x20PerMatcher uses it to
+// show what the shared forms save.
+func matchAllPerMatcher(ms []*Matcher, text string) int {
 	n := 0
 	for _, m := range ms {
 		n += len(m.Match(text))
@@ -109,8 +123,23 @@ func BenchmarkMatch10MB(b *testing.B) {
 
 // BenchmarkAnalysis10x20 is the NFR-03 benchmark: the analysis of 10 servers
 // with 20 tools each (200 descriptions of about 1 KiB) runs in under 1 s. One
-// op is the whole analysis.
+// op is the whole analysis. The matchers share the forms of each description
+// (see matchAll).
 func BenchmarkAnalysis10x20(b *testing.B) {
+	benchAnalysis(b, matchAll)
+}
+
+// BenchmarkAnalysis10x20PerMatcher is BenchmarkAnalysis10x20 with a Match
+// call for each matcher, so each matcher builds the forms again. Compare the
+// two to see the cost of the forms.
+func BenchmarkAnalysis10x20PerMatcher(b *testing.B) {
+	benchAnalysis(b, matchAllPerMatcher)
+}
+
+// benchAnalysis runs match on 200 descriptions of about 1 KiB with the
+// matchers of benchMatcherSet. One op is the 200 calls.
+func benchAnalysis(b *testing.B, match func([]*Matcher, string) int) {
+	b.Helper()
 	ms := benchMatcherSet(b)
 	descs := make([]string, 200)
 	total := 0
@@ -122,7 +151,7 @@ func BenchmarkAnalysis10x20(b *testing.B) {
 	b.ReportAllocs()
 	for b.Loop() {
 		for _, d := range descs {
-			matchAll(ms, d)
+			match(ms, d)
 		}
 	}
 }
@@ -167,16 +196,16 @@ func worstBlock(tb testing.TB) []string {
 }
 
 // BenchmarkWorstCaseBlock measures the most costly match block that passes
-// the caps, on MaxMatchInputBytes of text that has all six regex forms (see
-// regexForms). It starts with sixFormsText: a ZWSP and U+0001, so
-// matchForms gives three forms, and the ligature U+FB03, so each form is not
-// ASCII and its fold ("ffi") is a new form. The rest is 'a', so each form is
-// about MaxMatchInputBytes runes long.
+// the caps (32 KiB of text, 2500 instructions), on MaxMatchInputBytes of text
+// that has all twelve regex forms (see preparedText.regexForms). It starts
+// with twelveFormsText: the ZWSP, U+0001, ESC [ I and ESC U+0001 [8m give the
+// six base forms of matchForms, and the ligature U+FB03 makes each base form
+// not ASCII, so its fold ("ffi") is a new form. The rest is 'a', after the
+// short prefix, so each of the twelve forms is about MaxMatchInputBytes long.
 //
 // The block is \pL{0,498}!X twice and \pL{0,248}!X: 1000 + 1000 + 500 =
-// maxTotalInsts instructions. Measured on an Apple M1 Pro (Go 1.27, caps 32
-// KiB and 2500): about 4.7 s for one Match call over the six forms, about
-// 144 us per input byte. One form (a text of only 'a') costs about 0.8 s.
+// maxTotalInsts instructions. One op is one Match call over the twelve forms.
+// For the time on an Apple M1 Pro, see the cost comment in match.go.
 // A hostile --rules directory can repeat such a block in every rule, and
 // every tool text is matched against every rule, so this cost is multiplied
 // by the number of rules and the number of texts.
@@ -185,9 +214,16 @@ func BenchmarkWorstCaseBlock(b *testing.B) {
 	if err != nil {
 		b.Fatalf("Compile() error = %v", err)
 	}
-	text := sixFormsText + strings.Repeat("a", MaxMatchInputBytes-len(sixFormsText))
-	if n := len(regexForms(text)); n != 6 {
-		b.Fatalf("len(regexForms(text)) = %d, want 6", n)
+	text := twelveFormsText + strings.Repeat("a", MaxMatchInputBytes-len(twelveFormsText))
+	forms := regexForms(text)
+	if len(forms) != 12 {
+		b.Fatalf("len(regexForms(text)) = %d, want 12 (twelve forms)", len(forms))
+	}
+	// Each form must fill the cap, or the benchmark does not hit the bound.
+	for i, f := range forms {
+		if len(f) < MaxMatchInputBytes-len(twelveFormsText) {
+			b.Fatalf("len(regexForms(text)[%d]) = %d, want at least %d", i, len(f), MaxMatchInputBytes-len(twelveFormsText))
+		}
 	}
 	b.SetBytes(int64(len(text)))
 	b.ReportAllocs()

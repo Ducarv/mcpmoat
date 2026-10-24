@@ -98,3 +98,9 @@ should_not_match:
     note: The word tool after the article is not a tool name
   - text: Before running README.md tools, always back up.
     note: File name. README.md has no underscore, hyphen or inner capital after the dot, so it is not a tool name.
+  - text: "When using \x1b[1miPhone\x1b[0m, always keep the screen on."
+    note: "Benign bold text: an SGR 'm' final must not join the next word (#133)"
+  - text: "When using \x1b[1meBay\x1b[0m listings, always show the price in USD."
+    note: "Benign bold text: an SGR 'm' final must not join the next word (#133)"
+  - text: "When running \x1b[1mjQuery\x1b[0m code, also load the CSS."
+    note: "Benign bold text: an SGR 'm' final must not join the next word (#133)"
