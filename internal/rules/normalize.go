@@ -87,9 +87,10 @@ func isInvisibleControl(r rune) bool {
 // previous": the ZWSP joins a word and the control rune splits two words. The
 // first form joins all the words, and the second form splits the first word.
 //
-// In the second and the third form, one space stands for a whole run of
-// invisible runes, so invisible padding cannot push a payload out of the
-// MaxMatchInputBytes window of these forms either.
+// In the second and the third form, at most two spaces stand for a whole run
+// of invisible runes (two only in the second form, for a run of control
+// runes and then format runes, see replaceRuns). So invisible padding cannot
+// push a payload out of the MaxMatchInputBytes window of these forms either.
 //
 // A text that uses one kind of invisible rune both inside a word and between
 // words defeats all the forms, and so does a text with a control rune inside
@@ -216,7 +217,8 @@ const (
 	// the form of normalizeForMatch.
 	dropInvisible invisibleMode = iota
 	// spaceInvisible replaces each run of invisible runes, of any kind, with
-	// one U+0020. It builds the second form.
+	// one U+0020, or with two when the run has a control rune and ends with
+	// a format rune (see replaceRuns). It builds the second form.
 	spaceInvisible
 	// spaceControls drops the invisible runes that are not control runes,
 	// and replaces each run of invisible control runes with one U+0020. The
@@ -264,10 +266,13 @@ func normalizeInvisible(s string, mode invisibleMode) string {
 //   - OSC: ESC ] (or U+009D), at most 256 bytes, and BEL, ESC \ or U+009C.
 //
 // The schema target is JSON text, where ESC is the escape \u001b, so a CSI
-// that starts with that escape matches too. An OSC with no end does not
+// that starts with that escape matches too. Its final byte is not a
+// backslash: in JSON text a backslash starts the next escape, so in
+// \u001b[\u0001Ignore the CSI does not take the backslash and leave
+// "u0001Ignore" with no word edge. An OSC with no end does not
 // match, so it cannot swallow the rest of the text; its ESC is an invisible
 // control rune, so step 4 of normalizeForMatch handles it.
-var ansiSeq = regexp.MustCompile(`(?:\x1b\[|\x{9b}|\\u001[bB]\[)[0-?]*[ -/]*[@-~]|(?:\x1b\]|\x{9d})[^\x07\x1b\x{9c}]{0,256}(?:\x07|\x1b\\|\x{9c})`)
+var ansiSeq = regexp.MustCompile(`(?:\x1b\[|\x{9b})[0-?]*[ -/]*[@-~]|\\u001[bB]\[[0-?]*[ -/]*[@-\[\]-~]|(?:\x1b\]|\x{9d})[^\x07\x1b\x{9c}]{0,256}(?:\x07|\x1b\\|\x{9c})`)
 
 // ansiToSpace replaces each ANSI escape sequence (see ansiSeq) with U+0020.
 // Without this step, ESC [ 8 m before "Ignore" leaves "[8mIgnore", and the
@@ -353,19 +358,19 @@ func spacesToASCII(s string) string {
 func foldMarks(s string) string {
 	out := make([]byte, 0, len(s))
 	for i := 0; i < len(s); {
-		_, size := utf8.DecodeRuneInString(s[i:])
+		r, size := utf8.DecodeRuneInString(s[i:])
 		if size == 1 { // ASCII folds to itself; keep an invalid byte too
 			out = append(out, s[i])
 		} else {
-			out = appendFold(out, s[i:i+size])
+			out = appendFold(out, r, s[i:i+size])
 		}
 		i += size
 	}
 	return cutAtRune(string(out), MaxMatchInputBytes)
 }
 
-// appendFold appends the fold of the one rune in rs to dst and returns the
-// extended slice, as append does. The fold splits the rune into its
+// appendFold appends the fold of the rune r, whose UTF-8 bytes are rs, to dst
+// and returns the extended slice, as append does. The fold splits the rune into its
 // compatibility parts (NFKD), drops the combining marks and the invisible
 // runes, and joins the rest again (NFKC). So U+00E9 (e with acute) becomes
 // "e", U+FF49 becomes "i", U+0336 becomes nothing, and the Hangul syllable
@@ -375,10 +380,10 @@ func foldMarks(s string) string {
 // Most runes have no compatibility decomposition. Such a rune is its own NFKD
 // and NFKC, so it is appended as it is, or not at all for a mark or an
 // invisible rune.
-func appendFold(dst []byte, rs string) []byte {
+func appendFold(dst []byte, r rune, rs string) []byte {
 	parts := norm.NFKD.PropertiesString(rs).Decomposition()
 	if parts == nil {
-		if r, _ := utf8.DecodeRuneInString(rs); unicode.Is(unicode.M, r) || isInvisible(r) {
+		if unicode.Is(unicode.M, r) || isInvisible(r) {
 			return dst
 		}
 		return append(dst, rs...)
@@ -404,8 +409,10 @@ func appendFold(dst []byte, rs string) []byte {
 // keeps the invisible control runes of the run for step 4, which runs after
 // ansiToSpace (see normalizeForMatch for why). So a run of invisible runes
 // becomes one repl when it holds no control rune, and its control runes, in
-// order and with nothing between them, when it holds one. Step 4 then
-// replaces those control runes with one rune or drops them.
+// order and with nothing between them, when it holds one. When such a run
+// ends with runes that are not control runes, one repl follows its control
+// runes (see replaceRuns). Step 4 then replaces those control runes with one
+// rune or drops them.
 func replaceFormatRuns(s string, repl rune) string {
 	return replaceRuns(s, isInvisibleControl, repl)
 }
@@ -422,34 +429,36 @@ func keepNone(rune) bool { return false }
 
 // replaceRuns rewrites each run of runes in s for which isInvisible is true.
 // It writes the runes of the run for which keep is true, in order. When the
-// run has no such rune, it writes one repl instead, or nothing when repl is
-// -1. The other runes of s stay as they are.
+// run ends with runes for which keep is false, it writes one repl after the
+// kept runes, or nothing when repl is -1. So a run with no kept rune becomes
+// one repl, and a kept ESC does not join the rune after the run: in the
+// second form of matchForms, ESC + ZWSP + "[" is ESC + U+0020 + "[", not a
+// CSI. The other runes of s stay as they are.
 //
 // Invalid UTF-8 becomes U+FFFD, as with strings.Map.
 func replaceRuns(s string, keep func(rune) bool, repl rune) string {
 	var b strings.Builder
 	b.Grow(len(s))
-	inRun := false // the rune before r is invisible
-	kept := false  // the current run has a rune for which keep is true
-	endRun := func() {
-		if inRun && !kept && repl >= 0 {
+	tail := false // the runes since the last kept rune or visible rune are invisible and not kept
+	endTail := func() {
+		if tail && repl >= 0 {
 			b.WriteRune(repl)
 		}
-		inRun, kept = false, false
+		tail = false
 	}
 	for _, r := range s {
-		if !isInvisible(r) {
-			endRun()
+		switch {
+		case !isInvisible(r):
+			endTail()
 			b.WriteRune(r)
-			continue
-		}
-		inRun = true
-		if keep(r) {
-			kept = true
+		case keep(r):
+			tail = false // the runes before r in the run are dropped
 			b.WriteRune(r)
+		default:
+			tail = true
 		}
 	}
-	endRun()
+	endTail()
 	return b.String()
 }
 
