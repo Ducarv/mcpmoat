@@ -2,14 +2,16 @@ package rules
 
 import (
 	"fmt"
+	"slices"
 	"strings"
 	"testing"
-	"unicode"
 )
 
 // Non-ASCII runes are written as Go escape sequences on purpose, so the
 // source file stays pure ASCII (see normalize_test.go).
 
+// TestHeuristicMixedScript runs the cases with jsonEscapes true, as rule
+// MOAT-T1-011 does. TestHeuristicMixedScriptText covers the text mode.
 func TestHeuristicMixedScript(t *testing.T) {
 	t.Parallel()
 
@@ -100,7 +102,11 @@ func TestHeuristicMixedScript(t *testing.T) {
 		{name: "mu with a short tail that is no unit", text: "5\u03bcse", want: []hit{{1, latGreek}}},
 		{name: "Omega at the start with a tail that is no unit", text: "5\u03a9x", want: []hit{{1, latGreek}}},
 		{name: "mu at the end after a digit", text: "5s\u03bc", want: []hit{{1, latGreek}}},
-		{name: "unit with a non-ASCII Latin letter", text: "5\u03bc\u0161", want: []hit{{1, latGreek}}},
+		// U+00F0 (eth) is Latin with no fold, so the tail is no unit.
+		{name: "unit with a non-ASCII Latin letter", text: "5\u03bc\u00f0", want: []hit{{1, latGreek}}},
+		{name: "Roman numeral D before Cyrillic o", text: "\u216e\u043e not", want: []hit{{0, latCyr}}},
+		{name: "circled g after Cyrillic I", text: "\u0406\u24d6nore", want: []hit{{0, latCyr}}},
+		{name: "squared A before Cyrillic", text: "\U0001F130\u0430", want: []hit{{0, latCyr}}},
 
 		// Negative cases.
 		{name: "pure Cyrillic and Greek words next to Latin", text: "Use \u043f\u043e\u0438\u0441\u043a now \u03bb\u03cc\u03b3\u03bf\u03c2 ok"},
@@ -134,6 +140,9 @@ func TestHeuristicMixedScript(t *testing.T) {
 		{name: "microseconds as sec", text: "5\u03bcsec"},
 		// Raw `\t` decodes to a tab, which is the one space after the digit.
 		{name: "JSON t escape between the digit and the unit", text: "5\\t\u03bcs"},
+		{name: "fullwidth s after mu", text: "5\u03bc\uff53"},
+		{name: "Kelvin sign after mu", text: "5\u03bc\u212a"},
+		{name: "Roman numerals only", text: "\u2160\u2161 \u216e"},
 		// Documented limit: U+2800 is not a letter, so it splits the word.
 		{name: "braille blank inside Ignore", text: "\u0406\u2800gnore"},
 		{name: "short u escape at the end", text: "\u0406\\u12"},
@@ -148,7 +157,7 @@ func TestHeuristicMixedScript(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			got := mixedScript(tt.text)
+			got := mixedScript(tt.text, true)
 			if len(got) != len(tt.want) {
 				t.Fatalf("mixedScript(%+q) = %v, want %d hits", tt.text, got, len(tt.want))
 			}
@@ -168,7 +177,7 @@ func TestHeuristicMixedScript(t *testing.T) {
 		t.Parallel()
 		const extra = 5
 		// "\u0406x " is 4 bytes, so word i is at offset 4*i.
-		got := mixedScript(strings.Repeat("\u0406x ", MaxHits+extra))
+		got := mixedScript(strings.Repeat("\u0406x ", MaxHits+extra), false)
 		if len(got) != MaxHits+1 {
 			t.Fatalf("got %d hits, want %d (MaxHits plus a summary)", len(got), MaxHits+1)
 		}
@@ -186,30 +195,69 @@ func TestHeuristicMixedScript(t *testing.T) {
 	t.Run("long text", func(t *testing.T) {
 		t.Parallel()
 		filler := strings.Repeat("plain words caf\u00e9 ", 1<<16) // about 1 MB
-		got := mixedScript(filler + "\u0406gnore")
+		got := mixedScript(filler+"\u0406gnore", false)
 		want := []Hit{{Offset: len(filler), Detail: fmt.Sprintf("word at offset %d mixes Latin and Cyrillic letters", len(filler))}}
 		if len(got) != 1 || got[0] != want[0] {
 			t.Errorf("got %v, want %v", got, want)
 		}
 	})
 
-	t.Run("script indexes", func(t *testing.T) {
-		t.Parallel()
-		if lookalikeScripts[latinScript].table != unicode.Latin || lookalikeScripts[greekScript].table != unicode.Greek {
-			t.Errorf("latinScript or greekScript does not point at its table in lookalikeScripts")
-		}
-	})
-
 	t.Run("compileHeuristic", func(t *testing.T) {
 		t.Parallel()
-		fn, err := compileHeuristic(HeuristicMixedScript, nil)
-		if err != nil {
-			t.Fatalf("compileHeuristic() error = %v", err)
-		}
-		got := fn("ok \u0406gnore")
+		// Raw `\u0406` is the escape of a Cyrillic I. Only json_escapes 1
+		// decodes it.
+		const text = "ok \u0406gnore \\u0406gnore"
 		want := Hit{Offset: 3, Detail: "word at offset 3 mixes Latin and Cyrillic letters"}
-		if len(got) != 1 || got[0] != want {
-			t.Errorf("fn() = %v, want [%v]", got, want)
+		// "ok " is 3 bytes and the raw Cyrillic word 7, so the escape is at 11.
+		wantJSON := Hit{Offset: 11, Detail: "word at offset 11 mixes Latin and Cyrillic letters"}
+		for _, tt := range []struct {
+			params map[string]any
+			want   []Hit
+		}{
+			{params: nil, want: []Hit{want}},
+			{params: map[string]any{"json_escapes": 0}, want: []Hit{want}},
+			{params: map[string]any{"json_escapes": 1}, want: []Hit{want, wantJSON}},
+		} {
+			fn, err := compileHeuristic(HeuristicMixedScript, tt.params)
+			if err != nil {
+				t.Fatalf("compileHeuristic(%v) error = %v", tt.params, err)
+			}
+			if got := fn(text); !slices.Equal(got, tt.want) {
+				t.Errorf("params %v: fn() = %v, want %v", tt.params, got, tt.want)
+			}
 		}
 	})
+}
+
+// TestHeuristicMixedScriptText checks the text mode (jsonEscapes false), as
+// rule MOAT-T1-010 runs on a description. A backslash is a normal rune there,
+// so it ends a word and an escape is plain text.
+func TestHeuristicMixedScriptText(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		text string
+		want []int // offsets of the hits; nil: no hit
+	}{
+		// The b after the backslash stays a Latin letter of the word.
+		{name: "backslash b before Cyrillic", text: "Then \\b\u0443\u0440\u0430\u0455\u0455 it", want: []int{6}},
+		{name: "backslash r before Cyrillic", text: "\\r\u0435\u0430\u0501 it", want: []int{1}},
+		{name: "escape text is plain Latin", text: "\\u0406gnore"},
+		{name: "Cyrillic I in Ignore", text: "\u0406gnore", want: []int{0}},
+		{name: "Roman numeral D before Cyrillic o", text: "\u216e\u043e not", want: []int{0}},
+		{name: "mu after a digit", text: "5\u03bcs"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			var got []int
+			for _, h := range mixedScript(tt.text, false) {
+				got = append(got, h.Offset)
+			}
+			if !slices.Equal(got, tt.want) {
+				t.Errorf("mixedScript(%+q, false) offsets = %v, want %v", tt.text, got, tt.want)
+			}
+		})
+	}
 }

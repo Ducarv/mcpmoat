@@ -56,7 +56,7 @@ var benchKeywords = []string{
 
 // benchMatcherSet compiles a realistic set of matchers: one any_regex with
 // the PRD MOAT-T1-003 patterns and other T1 patterns, one keywords list and
-// the four heuristics with their defaults.
+// the text heuristics with their defaults.
 func benchMatcherSet(tb testing.TB) []*Matcher {
 	tb.Helper()
 	blocks := []Match{

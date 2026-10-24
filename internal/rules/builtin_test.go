@@ -384,8 +384,9 @@ func TestSchemaRuleCopiesDescriptionRules(t *testing.T) {
 }
 
 // TestMixedScriptTwinRules checks that MOAT-T1-011, the schema twin of
-// MOAT-T1-010, stays in sync with it: the same severity and match, and each
-// case of MOAT-T1-010 put in a schema description gives the same result.
+// MOAT-T1-010, stays in sync with it: the same severity, the same heuristic
+// (with json_escapes 1 only for the schema), and each case of MOAT-T1-010
+// put in a schema description gives the same result.
 func TestMixedScriptTwinRules(t *testing.T) {
 	t.Parallel()
 
@@ -398,8 +399,10 @@ func TestMixedScriptTwinRules(t *testing.T) {
 	if desc.Severity != schema.Severity {
 		t.Errorf("severity: MOAT-T1-010 has %q, MOAT-T1-011 has %q", desc.Severity, schema.Severity)
 	}
-	if !reflect.DeepEqual(desc.Match, schema.Match) {
-		t.Errorf("match: MOAT-T1-010 has %+v, MOAT-T1-011 has %+v", desc.Match, schema.Match)
+	wantDesc := Match{Heuristic: HeuristicMixedScript}
+	wantSchema := Match{Heuristic: HeuristicMixedScript, Params: map[string]any{"json_escapes": 1}}
+	if !reflect.DeepEqual(desc.Match, wantDesc) || !reflect.DeepEqual(schema.Match, wantSchema) {
+		t.Errorf("match: MOAT-T1-010 has %+v (want %+v), MOAT-T1-011 has %+v (want %+v)", desc.Match, wantDesc, schema.Match, wantSchema)
 	}
 	m, err := schema.Match.Compile()
 	if err != nil {
@@ -407,12 +410,12 @@ func TestMixedScriptTwinRules(t *testing.T) {
 	}
 	for i, c := range desc.ShouldMatch {
 		if s := schemaWithDescription(t, c.Text); len(m.Match(s)) == 0 {
-			t.Errorf("MOAT-T1-011 does not match MOAT-T1-010 should_match[%d] in a schema: %+q", i, s)
+			t.Errorf("MOAT-T1-011 does not match MOAT-T1-010 should_match[%d] in a schema: %s", i, s)
 		}
 	}
 	for i, c := range desc.ShouldNotMatch {
 		if s := schemaWithDescription(t, c.Text); len(m.Match(s)) > 0 {
-			t.Errorf("MOAT-T1-011 matches MOAT-T1-010 should_not_match[%d] in a schema: %+q", i, s)
+			t.Errorf("MOAT-T1-011 matches MOAT-T1-010 should_not_match[%d] in a schema: %s", i, s)
 		}
 	}
 }

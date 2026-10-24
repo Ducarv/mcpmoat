@@ -17,15 +17,19 @@ import (
 // This comment holds the implementation contract.
 //
 // It reads the full raw text in one pass, with no size cut. A word is a
-// longest run of letters and of the runes that isWordFiller accepts: marks,
-// invisible runes, private-use runes and unassigned code points. Any other
-// rune ends a word. An invalid UTF-8 byte decodes to U+FFFD, a symbol, so it
-// also ends a word.
+// longest run of letters, of the runes that isWordFiller accepts (marks,
+// invisible runes, private-use runes and unassigned code points) and of the
+// runes that fold to letters only (see wordState.foldsToLetters), such as
+// U+216E (Roman numeral D) and U+24D6 (circled g). Any other rune ends a
+// word. An invalid UTF-8 byte decodes to U+FFFD, a symbol, so it also ends a
+// word.
 //
-// JSON escapes are decoded (see jsonEscape), so the heuristic reads the raw
-// JSON of a schema as it reads the decoded text. The decoded rune counts as
-// a raw rune at the offset of the backslash, and all bytes of the escape are
-// skipped. Any other backslash is a normal rune that ends a word.
+// When jsonEscapes is true, JSON escapes are decoded (see jsonEscape), so the
+// heuristic reads the raw JSON of a schema as it reads the decoded text. The
+// decoded rune counts as a raw rune at the offset of the backslash, and all
+// bytes of the escape are skipped. Any other backslash is a normal rune that
+// ends a word. When jsonEscapes is false, as for a description, which is
+// decoded text, every backslash is a normal rune.
 //
 // Each letter counts for its own script. A letter of the Common or
 // Inherited script counts by its fold (see wordState.addFolded). A letter of
@@ -37,7 +41,7 @@ import (
 // names the scripts in the order of lookalikeScripts. It never holds the
 // word: the terminal-safe output does not change look-alike letters, so the
 // word would show as normal Latin text.
-func mixedScript(raw string) []Hit {
+func mixedScript(raw string, jsonEscapes bool) []Hit {
 	var l hitList
 	var w wordState
 	// end flags the current word when it mixes scripts. Then it clears w for
@@ -50,12 +54,12 @@ func mixedScript(raw string) []Hit {
 	}
 	// prev1 is the rune just before offset i, and prev2 is the rune before
 	// prev1. They tell whether a word comes after a number (see
-	// followsDigit). -1 means no rune.
-	prev1, prev2 := rune(-1), rune(-1)
+	// followsDigit).
+	prev1, prev2 := noRune, noRune
 	for i := 0; i < len(raw); {
 		var r rune
 		size := 0
-		if raw[i] == '\\' {
+		if jsonEscapes && raw[i] == '\\' {
 			r, size = jsonEscape(raw[i:])
 		}
 		escaped := size > 0
@@ -63,28 +67,34 @@ func mixedScript(raw string) []Hit {
 			// An invalid byte gives utf8.RuneError (U+FFFD), which ends a word.
 			r, size = utf8.DecodeRuneInString(raw[i:])
 		}
-		if isLetter := unicode.IsLetter(r); isLetter || isWordFiller(r) {
-			if !w.started {
-				w.started, w.start, w.afterDigit = true, i, followsDigit(prev1, prev2)
-			}
-			if isLetter {
-				w.addLetter(r)
-			}
-		} else {
+		switch {
+		case unicode.IsLetter(r):
+			w.begin(i, prev1, prev2)
+			w.addLetter(r)
+		case isWordFiller(r):
+			w.begin(i, prev1, prev2)
+		case r > unicode.MaxASCII && w.foldsToLetters(r):
+			w.begin(i, prev1, prev2)
+			w.addFolded(r)
+		default:
 			end()
 		}
+		prev := r
 		if escaped && isASCIIDigit(r) {
-			// An escaped digit never comes before a unit. In a description
-			// the model reads the escape text, such as \u0035, and the
-			// schema JSON from the inspect package never escapes a digit.
-			r = -1
+			// An escaped digit never comes before a unit: the schema JSON
+			// from the inspect package never escapes a digit.
+			prev = noRune
 		}
-		prev2, prev1 = prev1, r
+		prev2, prev1 = prev1, prev
 		i += size
 	}
 	end()
 	return l.result("mixed-script words")
 }
+
+// noRune stands for "no rune" before the start of the text (see
+// followsDigit).
+const noRune rune = -1
 
 // isWordFiller reports whether r, a rune that is not a letter, joins a word:
 // a mark (see unicode.IsMark), an invisible rune (see isInvisible), a
@@ -104,7 +114,7 @@ func isWordFiller(r rune) bool {
 // space (U+2009) and the narrow no-break space (U+202F), which texts put
 // between a number and its unit.
 func followsDigit(prev1, prev2 rune) bool {
-	return isASCIIDigit(prev1) || unicode.IsSpace(prev1) && isASCIIDigit(prev2)
+	return isASCIIDigit(prev1) || (unicode.IsSpace(prev1) && isASCIIDigit(prev2))
 }
 
 // isASCIIDigit reports whether r is 0-9.
@@ -118,9 +128,9 @@ var lookalikeScripts = [...]struct {
 	name  string
 	table *unicode.RangeTable
 }{
-	{"Latin", unicode.Latin},
+	latinScript: {"Latin", unicode.Latin},
 	{"Cyrillic", unicode.Cyrillic},
-	{"Greek", unicode.Greek},
+	greekScript: {"Greek", unicode.Greek},
 	{"Armenian", unicode.Armenian},
 	{"Cherokee", unicode.Cherokee},
 	{"Lisu", unicode.Lisu},
@@ -129,7 +139,8 @@ var lookalikeScripts = [...]struct {
 	{"Tifinagh", unicode.Tifinagh},
 }
 
-// The indexes of Latin and Greek in lookalikeScripts.
+// The indexes of Latin and Greek in lookalikeScripts. The array literal of
+// lookalikeScripts uses them as keys, so the compiler checks them.
 const (
 	latinScript = 0
 	greekScript = 2
@@ -172,27 +183,37 @@ type wordState struct {
 	fold []byte
 }
 
+// begin starts a word at byte offset i, unless a word is started. prev1 and
+// prev2 are the two runes before i (see followsDigit).
+func (w *wordState) begin(i int, prev1, prev2 rune) {
+	if !w.started {
+		w.started, w.start, w.afterDigit = true, i, followsDigit(prev1, prev2)
+	}
+}
+
 // addLetter adds the letter r to the word. A letter of the Common or
-// Inherited script counts by its fold (see addFolded). Any other letter
+// Inherited script, or a Latin letter that is not ASCII, counts by its fold
+// (see addFolded). So the mathematical Greek letters count as Greek, and the
+// fullwidth "s" and the Kelvin sign count as "s" and "K". Any other letter
 // counts for its own script (see countLetter).
 func (w *wordState) addLetter(r rune) {
 	i := scriptOf(r)
-	if i < 0 && unicode.In(r, unicode.Common, unicode.Inherited) {
+	if (i < 0 && unicode.In(r, unicode.Common, unicode.Inherited)) || (i == latinScript && r > unicode.MaxASCII) {
 		w.addFolded(r)
 		return
 	}
 	w.countLetter(r, i)
 }
 
-// addFolded adds the letter r of the Common or Inherited script by its fold
-// (see appendFold). Each letter of the fold counts as one letter of its own
-// script, with no second fold. When the fold does not change r, or holds no
-// letter, r counts as one letter of no script.
+// addFolded adds the rune r by its fold (see appendFold). Each letter of the
+// fold counts as one letter of its own script, with no second fold. When the
+// fold does not change r, or holds no letter, r counts as one letter of its
+// own script (see scriptOf).
 func (w *wordState) addFolded(r rune) {
 	rs := string(r)
 	w.fold = appendFold(w.fold[:0], r, rs)
 	if string(w.fold) == rs {
-		w.countLetter(r, -1)
+		w.countLetter(r, scriptOf(r))
 		return
 	}
 	counted := false
@@ -203,8 +224,27 @@ func (w *wordState) addFolded(r rune) {
 		}
 	}
 	if !counted {
-		w.countLetter(r, -1)
+		w.countLetter(r, scriptOf(r))
 	}
+}
+
+// foldsToLetters reports whether the fold of r (see appendFold) differs from
+// r and holds only letters. The regexes read such a rune as letters, so it
+// joins a word, though it is not a letter itself: a Roman numeral such as
+// U+216E (category Nl), or a circled or squared letter such as U+24D6
+// (category So).
+func (w *wordState) foldsToLetters(r rune) bool {
+	rs := string(r)
+	w.fold = appendFold(w.fold[:0], r, rs)
+	if len(w.fold) == 0 || string(w.fold) == rs {
+		return false
+	}
+	for _, f := range string(w.fold) {
+		if !unicode.IsLetter(f) {
+			return false
+		}
+	}
+	return true
 }
 
 // countLetter counts the letter r for the script lookalikeScripts[i], or
@@ -283,9 +323,9 @@ func (w *wordState) greekExcused() bool {
 // "G" or "m", or before "m" or "cm" (ohm metre).
 func isUnit(g rune, first bool, latin string) bool {
 	switch g {
-	case '\u03BC':
+	case '\u03BC': // small mu
 		return first && microUnits[latin]
-	case '\u03A9', '\u2126':
+	case '\u03A9', '\u2126': // capital Omega, ohm sign
 		if first {
 			return latin == "m" || latin == "cm"
 		}

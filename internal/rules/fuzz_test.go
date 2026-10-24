@@ -221,6 +221,7 @@ func fuzzMatchers(tb testing.TB) []*Matcher {
 		{Heuristic: HeuristicMaxLength},
 		{Heuristic: HeuristicBase64Blob},
 		{Heuristic: HeuristicMixedScript},
+		{Heuristic: HeuristicMixedScript, Params: map[string]any{"json_escapes": 1}},
 	}
 	return mustCompileAll(tb, blocks)
 }
