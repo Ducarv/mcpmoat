@@ -262,13 +262,14 @@ func readUntrustedCodex(ctx context.Context, path string, data []byte) Result {
 type projectDir struct {
 	path string   // the ProjectPath of the file
 	root *os.Root // nil when err is set
-	err  error    // the error of os.OpenRoot
+	err  error    // the error of safefile.OpenRoot
 }
 
-// openProjectDir opens the project directory at path. An error is kept for
-// holdsDir, which decides what it means for a cwd.
+// openProjectDir opens the project directory at path with safefile.OpenRoot,
+// so a FIFO at path does not block. An error is kept for holdsDir, which
+// decides what it means for a cwd.
 func openProjectDir(path string) projectDir {
-	root, err := os.OpenRoot(path)
+	root, err := safefile.OpenRoot(path)
 	return projectDir{path: path, root: root, err: err}
 }
 

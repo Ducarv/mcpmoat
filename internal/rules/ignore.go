@@ -65,7 +65,7 @@ var ruleIDPattern = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9]*(?:[-_.][A-Za-z0-9]
 
 // Errors that ReadIgnoreFile wraps. They hold no file content.
 var (
-	errIgnoreNotRegular = errors.New("not a regular file")
+	errIgnoreNotRegular = safefile.ErrNotRegular
 	errIgnoreTooLarge   = fmt.Errorf("larger than %d bytes", MaxIgnoreFileBytes)
 )
 
@@ -380,13 +380,11 @@ func ReadIgnoreFile(dir string) (IgnoreList, []IgnoreWarning, error) {
 }
 
 // readIgnoreData reads the ignore file in dir with safefile. found is false,
-// with a nil error, when the file or dir does not exist. ReadIgnoreFile adds
-// the path to the error.
+// with a nil error, when the file or dir does not exist, or dir or a parent in
+// the path is not a directory. ReadIgnoreFile adds the path to the error.
 func readIgnoreData(dir string) (data []byte, found bool, err error) {
 	data, found, err = safefile.ReadBoundedRegularFile(dir, IgnoreFileName, MaxIgnoreFileBytes)
 	switch {
-	case errors.Is(err, safefile.ErrNotRegular):
-		return nil, false, errIgnoreNotRegular
 	case errors.Is(err, safefile.ErrTooLarge):
 		return nil, false, errIgnoreTooLarge
 	case err != nil:

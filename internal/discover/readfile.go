@@ -67,7 +67,7 @@ func readInRoot(path string, maxSize int64, root string) (data []byte, found boo
 	}
 	data, found, err = safefile.ReadBoundedRegularFile(root, rel, maxSize)
 	if err != nil {
-		return nil, false, readFailure(path, err)
+		return nil, false, toFileError(path, err)
 	}
 	return data, found, nil
 }
@@ -91,15 +91,15 @@ func readTrusted(path string, maxSize int64) (data []byte, found bool, fe *FileE
 
 	data, err = safefile.ReadOpened(f, maxSize)
 	if err != nil {
-		return nil, false, readFailure(path, err)
+		return nil, false, toFileError(path, err)
 	}
 	return data, true, nil
 }
 
-// readFailure turns an error of the safefile package into a FileError for
+// toFileError turns an error of the safefile package into a FileError for
 // path. An OS error is kept as it is in FileError.Err, so errors.As with
 // *fs.PathError and errors.Is with fs.ErrPermission still work.
-func readFailure(path string, err error) *FileError {
+func toFileError(path string, err error) *FileError {
 	switch {
 	case errors.Is(err, safefile.ErrOutsideRoot):
 		return readError(path, reasonOutsideProject, nil)

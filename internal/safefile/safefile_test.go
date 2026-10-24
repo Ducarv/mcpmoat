@@ -57,6 +57,8 @@ func symlinkTo(t *testing.T, target, dir, name string) {
 func makeFIFO(t *testing.T, path string) {
 	t.Helper()
 	skipOnWindows(t)
+	// The mkfifo program is used because syscall.Mkfifo does not exist on every
+	// OS, and a call to it would stop the package from compiling there.
 	mkfifo, err := exec.LookPath("mkfifo")
 	if err != nil {
 		t.Skip("mkfifo not available")
@@ -382,6 +384,38 @@ func TestReadBoundedRegularFileOutsideRootKeepsCause(t *testing.T) {
 	}
 }
 
+// TestReadBoundedRegularFileDirPermissionDenied checks a dir that exists but
+// cannot be opened. The OS error comes back as it is, not as a missing file.
+func TestReadBoundedRegularFileDirPermissionDenied(t *testing.T) {
+	t.Parallel()
+	skipOnWindows(t)
+	if os.Geteuid() == 0 {
+		t.Skip("root can open directories with mode 0")
+	}
+
+	dir := filepath.Join(t.TempDir(), "locked")
+	writeFile(t, dir, "a.json", []byte(canary))
+	if err := os.Chmod(dir, 0o000); err != nil {
+		t.Fatalf("chmod: %v", err)
+	}
+	t.Cleanup(func() {
+		// Restore the mode so the t.TempDir cleanup can remove the directory.
+		_ = os.Chmod(dir, 0o700) //nolint:gosec // G302: a directory needs the execute bit; it is under t.TempDir()
+	})
+
+	data, found, err := ReadBoundedRegularFile(dir, "a.json", 1024)
+
+	if !errors.Is(err, fs.ErrPermission) {
+		t.Fatalf("error = %v, want errors.Is fs.ErrPermission", err)
+	}
+	if IsMissing(err) {
+		t.Error("IsMissing(err) = true, want false")
+	}
+	if found || data != nil {
+		t.Errorf("found = %v, data = %q, want false and nil", found, data)
+	}
+}
+
 func TestReadBoundedRegularFilePermissionDenied(t *testing.T) {
 	t.Parallel()
 	skipOnWindows(t)
@@ -647,9 +681,6 @@ func TestOpenInRoot(t *testing.T) {
 			t.Fatalf("OpenInRoot() error = %v, want nil", err)
 		}
 		defer func() { _ = f.Close() }()
-		if f == nil {
-			t.Fatal("file = nil, want a file")
-		}
 	})
 
 	t.Run("missing file", func(t *testing.T) {

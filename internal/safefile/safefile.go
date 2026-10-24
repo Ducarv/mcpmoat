@@ -5,8 +5,9 @@
 // The read has four protections:
 //   - os.Root confinement: a symlink cannot make the open leave the directory.
 //   - No blocking on a FIFO: OpenRoot refuses a directory path that is not a
-//     directory before it opens it, and the file open uses O_NONBLOCK. For a
-//     regular file the flag changes nothing.
+//     directory before it opens it (see OpenRoot for the race that we accept),
+//     and the file open uses O_NONBLOCK. For a regular file the flag changes
+//     nothing.
 //   - Regular file only: a FIFO, a device or a directory is refused.
 //   - A size cap, checked on Stat and checked again on the bytes read, so a
 //     file that grew after Stat is still caught.
@@ -133,8 +134,14 @@ func ReadOpened(f fs.File, maxSize int64) ([]byte, error) {
 // os.OpenRoot opens dir with a plain open(2), which blocks on a FIFO until a
 // writer appears, so OpenRoot first checks dir with os.Stat, which does not
 // block and follows symlinks as os.OpenRoot does. A dir that is not a
-// directory gives a *fs.PathError with ENOTDIR, which IsMissing accepts. A swap
-// to a FIFO between the check and the open is a local race that we accept.
+// directory gives a *fs.PathError with ENOTDIR, which IsMissing accepts.
+//
+// os.OpenRoot takes a path, not an open directory, so the check and the open
+// can see different files. A local process that swaps dir between them wins a
+// race that we accept: a FIFO blocks the open, and a regular file gives the
+// "not a directory" error of os.OpenRoot, which has no ENOTDIR. A cloned
+// repository cannot do this alone, because its files do not change while the
+// scan runs.
 func OpenRoot(dir string) (*os.Root, error) {
 	info, err := os.Stat(dir)
 	if err != nil {
