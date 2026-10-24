@@ -1,0 +1,10 @@
+# GitGuardian secret scan settings.
+# mcpmoat finds secrets in MCP configs, so its tests and rule cases hold fake
+# secrets on purpose. Keep real secrets out of these paths: they are not scanned.
+version: 2
+secret:
+  ignored_paths:
+    - "**/*_test.go"
+    - "**/testdata/**"
+    - "testdata/**"
+    - "rules/*.yaml"
