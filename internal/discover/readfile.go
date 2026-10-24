@@ -3,11 +3,10 @@ package discover
 import (
 	"context"
 	"errors"
-	"io"
-	"io/fs"
 	"os"
 	"path/filepath"
-	"syscall"
+
+	"github.com/Ducarv/mcpmoat/internal/safefile"
 )
 
 // maxConfigSize is the largest config file that discovery reads: 32 MiB.
@@ -51,108 +50,64 @@ func readConfigFile(ctx context.Context, path string, maxSize int64, root string
 		return nil, false, canceledError(path, err)
 	}
 
-	// Open first, then check the open file. A check of the path before the
-	// open could see another file than the one that is opened. O_NONBLOCK
-	// makes the open of a FIFO return at once, also when no process writes to
-	// it; the type check below then rejects it. For a regular file the flag
-	// changes nothing.
-	var f *os.File
 	if root != "" {
-		f, fe = openInRoot(root, path)
-	} else {
-		f, fe = openPlain(path)
+		return readInRoot(path, maxSize, root)
 	}
-	if fe != nil || f == nil {
-		// f is nil without an error when the file is missing.
-		return nil, false, fe
+	return readTrusted(path, maxSize)
+}
+
+// readInRoot reads path, which must be below the directory root, through
+// safefile.ReadBoundedRegularFile. A path that is not below root is refused
+// before any file is opened. A root that is missing or is not a directory
+// counts as a missing file.
+func readInRoot(path string, maxSize int64, root string) (data []byte, found bool, fe *FileError) {
+	rel, err := filepath.Rel(root, path)
+	if err != nil || !filepath.IsLocal(rel) {
+		return nil, false, readError(path, reasonOutsideProject, nil)
+	}
+	data, found, err = safefile.ReadBoundedRegularFile(root, rel, maxSize)
+	if err != nil {
+		return nil, false, toFileError(path, err)
+	}
+	return data, found, nil
+}
+
+// readTrusted reads path and follows symlinks, with no confinement. It is only
+// for a trusted global config file (see readConfigFile).
+func readTrusted(path string, maxSize int64) (data []byte, found bool, fe *FileError) {
+	// Open first, then check the open file, so the checks and the read use the
+	// same file. See safefile.OpenFlags for why the open cannot block.
+	f, err := os.OpenFile(path, safefile.OpenFlags, 0) //nolint:gosec // G304: root == "" only for a trusted global config file under Home.
+	if err != nil {
+		if safefile.IsMissing(err) {
+			return nil, false, nil
+		}
+		return nil, false, readError(path, reasonCannotRead, err)
 	}
 	defer func() {
 		// The file is read-only, so a close error is not useful.
 		_ = f.Close()
 	}()
 
-	info, err := f.Stat()
+	data, err = safefile.ReadOpened(f, maxSize)
 	if err != nil {
-		return nil, false, readError(path, reasonCannotRead, err)
-	}
-	if !info.Mode().IsRegular() {
-		return nil, false, readError(path, reasonNotRegular, nil)
-	}
-	if info.Size() > maxSize {
-		return nil, false, readError(path, reasonTooLarge, nil)
-	}
-
-	// Read one byte more than the limit, so we can tell if the file grew
-	// after Stat.
-	data, err = io.ReadAll(io.LimitReader(f, maxSize+1))
-	if err != nil {
-		return nil, false, readError(path, reasonCannotRead, err)
-	}
-	if int64(len(data)) > maxSize {
-		return nil, false, readError(path, reasonTooLarge, nil)
+		return nil, false, toFileError(path, err)
 	}
 	return data, true, nil
 }
 
-// openPlain opens path for reading, and follows symlinks. It returns a nil
-// file and a nil error when the file is missing (see isMissing), as
-// openInRoot does.
-func openPlain(path string) (*os.File, *FileError) {
-	f, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NONBLOCK, 0) //nolint:gosec // G304: root == "" only for a trusted global config file under Home.
+// toFileError turns an error of the safefile package into a FileError for
+// path. An OS error is kept as it is in FileError.Err, so errors.As with
+// *fs.PathError and errors.Is with fs.ErrPermission still work.
+func toFileError(path string, err error) *FileError {
 	switch {
-	case err == nil:
-		return f, nil
-	case isMissing(err):
-		return nil, nil
+	case errors.Is(err, safefile.ErrOutsideRoot):
+		return readError(path, reasonOutsideProject, nil)
+	case errors.Is(err, safefile.ErrNotRegular):
+		return readError(path, reasonNotRegular, nil)
+	case errors.Is(err, safefile.ErrTooLarge):
+		return readError(path, reasonTooLarge, nil)
 	default:
-		return nil, readError(path, reasonCannotRead, err)
+		return readError(path, reasonCannotRead, err)
 	}
-}
-
-// openInRoot opens path, which must be below the directory root, through
-// os.Root. It returns a nil file and a nil error when the file is missing
-// (see isMissing); a missing root directory counts as a missing file.
-func openInRoot(root, path string) (*os.File, *FileError) {
-	rel, err := filepath.Rel(root, path)
-	if err != nil || !filepath.IsLocal(rel) {
-		return nil, readError(path, reasonOutsideProject, nil)
-	}
-	r, err := os.OpenRoot(root)
-	if err != nil {
-		if isMissing(err) {
-			return nil, nil
-		}
-		return nil, readError(path, reasonCannotRead, err)
-	}
-	defer func() {
-		// Closing the root does not close the files opened through it.
-		_ = r.Close()
-	}()
-
-	f, err := r.OpenFile(rel, os.O_RDONLY|syscall.O_NONBLOCK, 0)
-	switch {
-	case err == nil:
-		return f, nil
-	case isMissing(err):
-		return nil, nil
-	case isOSError(err):
-		return nil, readError(path, reasonCannotRead, err)
-	default:
-		// os.Root refuses a path that leaves root with an error that has no
-		// OS error number (it is not exported, so we cannot test for it with
-		// errors.Is). Every OS problem has a number and is handled above.
-		return nil, readError(path, reasonOutsideProject, nil)
-	}
-}
-
-// isOSError reports whether err holds an OS error number.
-func isOSError(err error) bool {
-	_, ok := errors.AsType[syscall.Errno](err)
-	return ok
-}
-
-// isMissing reports whether err means that no file exists at the path: the
-// path does not exist, or a parent in the path is not a directory (ENOTDIR).
-func isMissing(err error) bool {
-	return errors.Is(err, fs.ErrNotExist) || errors.Is(err, syscall.ENOTDIR)
 }

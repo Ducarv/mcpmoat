@@ -566,13 +566,12 @@ func TestReadConfigReadErrors(t *testing.T) {
 		}
 	})
 
-	t.Run("a file used as a directory is an error", func(t *testing.T) {
+	t.Run("a file used as a directory is not found", func(t *testing.T) {
 		t.Parallel()
 		// A file used as a directory. ReadConfig confines the read to the
-		// directory of the path, here a regular file. os.OpenRoot refuses it
-		// with a "not a directory" error that has no OS error number on Unix,
-		// so the reason is "cannot read file". Another OS can report the path
-		// as missing ("file not found"). Both are one untrusted error.
+		// directory of the path, here a regular file. safefile.OpenRoot
+		// refuses it with ENOTDIR: no config can exist below a regular file,
+		// so the reason is "file not found", as one untrusted error.
 		file := filepath.Join(t.TempDir(), "file.json")
 		if err := os.WriteFile(file, []byte("{}"), 0o600); err != nil {
 			t.Fatal(err)
@@ -583,8 +582,8 @@ func TestReadConfigReadErrors(t *testing.T) {
 			t.Fatalf("ReadConfig() = %+v, want exactly one error", res)
 		}
 		fe := res.Errors[0]
-		if fe.Reason != reasonNotFound && fe.Reason != reasonCannotRead {
-			t.Errorf("reason = %q, want %q or %q", fe.Reason, reasonNotFound, reasonCannotRead)
+		if fe.Reason != reasonNotFound {
+			t.Errorf("reason = %q, want %q", fe.Reason, reasonNotFound)
 		}
 		if fe.Path != path || !fe.Untrusted {
 			t.Errorf("error = %+v, want path %q and Untrusted", fe, path)

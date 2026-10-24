@@ -13,6 +13,7 @@ requirements. Section 8 of the PRD is the target architecture.
 cmd/mcpmoat/            CLI entry (standard library flag); run() returns the exit code
 internal/
   termsafe/             escapes untrusted text for the terminal
+  safefile/             hardened bounded read of untrusted files
   discover/             config readers: Claude Code, Cursor, Codex
     discovertest/       test helpers for discover
   inspect/              connects to servers, reads tools, prompts and resources
@@ -30,6 +31,9 @@ docs/                   PRD and other documentation
 - `cmd/mcpmoat`: parses flags, runs the command, returns the exit code. `os.Exit` is only in `main`.
 - `internal/termsafe`: escapes untrusted text for the terminal. See
   [Where untrusted text is escaped](#where-untrusted-text-is-escaped).
+- `internal/safefile`: the one shared hardened file read. It confines the open to a directory with
+  `os.Root`, refuses non-regular files, does not block on a FIFO (as the file or as the directory) and
+  caps the size. `discover` and `rules` use it.
 - `internal/discover`: finds the MCP servers that the client configs declare. It does not start them.
 - `internal/inspect`: starts or calls each server and reads what it offers. It is the only product
   package that imports the MCP SDK (see [The `internal/inspect` interface](#the-internalinspect-interface)).
@@ -55,9 +59,10 @@ the product packages and non-test imports. Tests also import `inspecttest` and `
 | Package | Imports (module packages only) |
 |---|---|
 | `internal/termsafe` | none |
-| `internal/discover` | `termsafe` |
+| `internal/safefile` | none |
+| `internal/discover` | `safefile`, `termsafe` |
 | `internal/inspect` | `discover` |
-| `internal/rules` | `discover`, `inspect`, `termsafe`, `rules` (the embedded data) |
+| `internal/rules` | `discover`, `inspect`, `safefile`, `termsafe`, `rules` (the embedded data) |
 | `internal/report` | `discover`, `termsafe` |
 | `internal/pins` | none |
 | `cmd/mcpmoat` | `discover`, `inspect`, `report`, `rules`, `termsafe` |
