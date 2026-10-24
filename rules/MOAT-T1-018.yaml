@@ -2,7 +2,9 @@
 # The regex and keyword rules read each schema string in the 32 KiB window, at
 # most 4096 strings and 128 KiB in all, and the raw text when the JSON cannot
 # be read in full. The match_window heuristic flags a schema that they do not
-# read in full.
+# read in full (see matchWindowCut in internal/rules/normalize.go for which
+# text of a string counts). The escape-sequence padding cases are too long
+# for this file: TestMatchWindowCut covers them.
 # The long should_match case is one paragraph, repeated until the string is
 # longer than MaxMatchInputBytes. Keep it longer than the window when the
 # window changes.
