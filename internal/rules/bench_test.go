@@ -88,7 +88,7 @@ func benchText(size, first int) string {
 
 // matchAll runs every matcher on text and returns the number of hits. It
 // builds the forms of text once and shares them between the matchers, as the
-// engine must do for one target text (#35).
+// engine must do for one target text (#143).
 func matchAll(ms []*Matcher, text string) int {
 	p := prepareText(text)
 	n := 0

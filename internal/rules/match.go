@@ -41,7 +41,7 @@ import (
 // one text about 12 times with the built-in rules: the 13 description rules
 // on 32 KiB took about 50 ms for plain text and about 612 ms with a prefix
 // that gives all fourteen forms (security review, Apple M1 Pro). The scan
-// engine (#35) needs a time or bytes budget (a follow-up issue).
+// engine (#143) needs a time or bytes budget.
 //
 // A text longer than the window is cut, so padding can push a payload out of
 // the reach of the regex and keyword rules. The match_window heuristic closes

@@ -20,7 +20,7 @@ const maxKeywordForms = maxBaseForms
 // that only heuristics read is never normalized.
 //
 // The forms are shared only when the caller shares the preparedText: the
-// scan engine (#35) must build one preparedText for each target text and call
+// scan engine (#143) must build one preparedText for each target text and call
 // matchPrepared for every rule with it. Today only Match, which builds one
 // preparedText for each call, and the tests use it. A schema rule does not
 // share p: matchPrepared reads a schema with matchSchema, and each schema
