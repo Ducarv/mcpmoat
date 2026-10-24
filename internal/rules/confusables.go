@@ -72,7 +72,7 @@ type confusable struct {
 // caseless one used as "I" (Runic U+16C1 or U+01C0, a bare bar, + "gnore" is
 // "lgnore"). The mixed_script heuristic flags a rune of another script in a
 // Latin word, so it catches U+16C1, but it cannot catch U+01C0, which is
-// Latin.
+// Latin (issue #149).
 //
 // The I/l rule uses the letter of the target, also when marks follow it:
 // U+0197 (capital I with stroke, TR39 "l" + U+0335) maps to "I", and U+019A

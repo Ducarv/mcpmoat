@@ -285,10 +285,14 @@
 //
 // An edge-tier mark after a base letter of its own script joins the run of
 // that letter, so it stays benign at the edge. Any other edge-tier mark
-// counts at once, as a strict-tier mark does: the word has no letter yet,
-// or the last letter is of another script. Real text does not put such a
-// mark there. So "hell" + U+0C02 (Telugu anusvara, which looks like an "o")
-// and U+0C02 + "pen" are flagged.
+// counts at once, as a strict-tier mark does, when it reads as a Latin
+// letter (it is in skeletonTable): the word has no letter yet, or the last
+// letter is of another script, and real text does not put such a mark
+// there. So "hell" + U+0C02 (Telugu anusvara, which looks like an "o") and
+// U+0C02 + "pen" are flagged. An edge-tier mark that does not read as a
+// letter joins the run too. So Burmese text in the Zawgyi encoding, which
+// stores the vowel sign U+1031 before its consonant, is not flagged at the
+// edge of a word, next to a Latin name.
 //
 // The parameter json_escapes (default 0) says whether the text is raw JSON.
 // A schema rule reads decoded strings (see Schema text), so MOAT-T1-011 keeps
@@ -369,8 +373,8 @@
 //   - a caseless look-alike of "I", such as U+01C0 (dental click, a bare
 //     bar) or Runic U+16C1, maps to "l". So U+01C0 + "gnore" reads "lgnore",
 //     and no rule catches it (mixed_script flags U+16C1 in a Latin word, but
-//     U+01C0 is Latin). The one exception is U+A7FE (I longa), which maps to
-//     "I" by its name. An uppercase look-alike of "l", such as U+04C0
+//     U+01C0 is Latin; issue #149 tracks it). The one exception is U+A7FE (I
+//     longa), which maps to "I" by its name. An uppercase look-alike of "l", such as U+04C0
 //     (palochka), maps to "I", so U+04C0 U+04C0 does not read as "ll";
 //   - the skeleton can join a look-alike to a payload. A look-alike of "l"
 //     or "I", such as U+04CF, directly before a payload that is written in
@@ -412,11 +416,7 @@
 //   - an edge-tier run between two Latin names in one word, such as
 //     "Google" + Thai "and" (U+0E41 U+0E25 U+0E30) + "Apple";
 //   - a Latin word with one edgeLookalikes letter at its start or end, such
-//     as the Hebrew prefix vav (U+05D5, "and") + "Google";
-//   - Burmese text in the Zawgyi encoding next to a Latin name: Zawgyi
-//     stores the vowel sign U+1031 before its consonant, so the sign has no
-//     Myanmar letter before it in the word and counts at once ("Google" +
-//     U+1031 U+1000). The same text in Unicode order is not flagged.
+//     as the Hebrew prefix vav (U+05D5, "and") + "Google".
 //
 // Rules MOAT-T1-010 and MOAT-T1-011 have severity medium, so with the
 // default --fail-on high they do not change the exit code. To accept such a

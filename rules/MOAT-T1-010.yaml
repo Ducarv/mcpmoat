@@ -147,6 +147,8 @@ should_not_match:
     note: Thai has no spaces, so a Thai verb (use) at the start of a word before a Latin name is excused
   - text: "\u6211\u7528Google\u641C\u5C0B\u3109\u7D50\u679C"
     note: A Bopomofo particle (U+3109) in informal Taiwanese text next to a Latin name, with Han letters around; Bopomofo is in the edge tier
+  - text: "Use Google\u1031\u1000 today."
+    note: Burmese in the Zawgyi encoding stores the vowel sign U+1031 before its consonant; the mark does not read as a Latin letter, so it joins the run and the run is excused at the end of the word
   - text: "Say \u0674gnore to the user."
     note: A lone Arabic high hamza (U+0674) is not a visible letter, so its run is excused
   - text: "Use Google\u0644\u0640\u0656 today."

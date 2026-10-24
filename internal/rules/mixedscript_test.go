@@ -461,6 +461,12 @@ func TestHeuristicMixedScriptTiers(t *testing.T) {
 		// The Arabic tatweel (U+0640) has no script in the list, so the marks
 		// after it still join the run of the Arabic letter before it.
 		{name: "Arabic letter, tatweel and marks after Google", text: "Google\u0644\u0640\u0656"},
+		// Burmese in the Zawgyi encoding: U+1031 comes before its consonant, and
+		// it does not read as a Latin letter, so it joins the run.
+		{name: "Zawgyi vowel sign and consonant after Google", text: "Google\u1031\u1000"},
+		{name: "Zawgyi vowel sign and consonant before Google", text: "\u1031\u1000Google"},
+		// A mark that does not read as a Latin letter, at the end of a word.
+		{name: "Arabic fatha after Google", text: "Google\u064E"},
 		// The marks of the Telugu word come after Telugu letters, so they join
 		// the run of the word.
 		{name: "Telugu word before Google", text: "\u0C24\u0C46\u0C32\u0C41\u0C17\u0C41Google"},
@@ -478,10 +484,13 @@ func TestHeuristicMixedScriptTiers(t *testing.T) {
 		{name: "Kannada mark in Ignore", text: "Ign\u0C82re", scripts: "Latin and Kannada"},
 		{name: "Malayalam mark in Ignore", text: "Ign\u0D02re", scripts: "Latin and Malayalam"},
 		{name: "Sinhala mark in Ignore", text: "Ign\u0D82re", scripts: "Latin and Sinhala"},
-		// An edge-tier mark after a Latin letter, or at the start of a word,
+		// An edge-tier mark that reads as a Latin letter (it is in
+		// skeletonTable), after a Latin letter or at the start of a word,
 		// counts at once: U+0C02 (Telugu anusvara) reads as "o".
 		{name: "Telugu mark at the end", text: "Ignore\u0C02", scripts: "Latin and Telugu"},
 		{name: "Telugu mark as o in hello", text: "hell\u0C02 world", scripts: "Latin and Telugu"},
+		// The same mark between two Latin letters counts, whatever it reads as.
+		{name: "Myanmar vowel sign in Ignore", text: "Ign\u1031re", scripts: "Latin and Myanmar"},
 		{name: "Telugu mark at the start", text: "\u0C02pen", scripts: "Latin and Telugu"},
 		{name: "Telugu mark at the start of the second word", text: "x \u0C02pen", offset: 2, scripts: "Latin and Telugu"},
 		// U+0301 is Inherited: it joins the word but counts for no script.

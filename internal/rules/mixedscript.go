@@ -111,7 +111,7 @@ func mixedScript(raw string, jsonEscapes bool) []Hit {
 			// counts for no script (scriptOf returns -1), but it still joins
 			// the word.
 			w.begin(i, prev1, prev2)
-			w.addMark(scriptOf(r))
+			w.addMark(r, scriptOf(r))
 		case isWordFiller(r):
 			w.begin(i, prev1, prev2)
 		case w.setFold(r) && w.foldIsLetters():
@@ -199,9 +199,10 @@ const (
 	//     after the letter are part of the run. A run of two or more
 	//     letters is excused, so Arabic U+0627 U+0644 + "Google" is not
 	//     flagged, but Hebrew vav + "Google" ("and Google") is.
-	//   - A mark that does not come after a letter of its own script counts
-	//     at once (see wordState.addMark): "hell" + U+0C02 (Telugu
-	//     anusvara) reads as "hello".
+	//   - A mark that reads as a Latin letter (it is in skeletonTable) and
+	//     does not come after a letter of its own script counts at once (see
+	//     wordState.addMark): "hell" + U+0C02 (Telugu anusvara) reads as
+	//     "hello".
 	edgeTier
 )
 
@@ -610,21 +611,30 @@ func (w *wordState) foldIsLetters() bool {
 	return true
 }
 
-// addMark counts a mark for the script lookalikeScripts[i], or for no
+// addMark counts the mark r for the script lookalikeScripts[i], or for no
 // script when i is -1. A strict-tier mark counts at once. An edge-tier mark
 // that comes after a letter of its own script joins the edge run of that
 // letter (see edgeRun), as the marks of real Thai, Hebrew or Indic text do.
-// Any other edge-tier mark counts at once, as a strict-tier mark does: the
-// word has no letter yet, or its last letter is of another script. Real
-// text does not put such a mark there, and on a Latin letter it can read as
-// a Latin letter: U+0C02 (Telugu anusvara) looks like "o".
-func (w *wordState) addMark(i int) {
+// Any other edge-tier mark counts at once when it reads as a Latin letter
+// (it is in skeletonTable): real text does not put such a mark at the start
+// of a word or after a Latin letter, and U+0C02 (Telugu anusvara) looks like
+// "o". A mark that does not read as a letter joins the edge run too, with no
+// letter of its own: Burmese text in the Zawgyi encoding puts U+1031 before
+// its consonant. The run counts between two Latin letters, and it is
+// excused at a word edge.
+func (w *wordState) addMark(r rune, i int) {
 	switch {
 	case i < 0: // no script
-	case lookalikeScripts[i].tier == edgeTier && w.letters > 0 && w.lastScript == i:
+	case lookalikeScripts[i].tier != edgeTier:
+		w.scripts |= 1 << i
+	case w.letters > 0 && w.lastScript == i:
 		w.edgeRun |= 1 << i
 	default:
-		w.scripts |= 1 << i
+		if _, ok := skeletonOf(r); ok {
+			w.scripts |= 1 << i
+		} else {
+			w.edgeRun |= 1 << i
+		}
 	}
 }
 
