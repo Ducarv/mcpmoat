@@ -102,7 +102,8 @@
 // from other scripts (for example Cyrillic U+0430 for Latin "a") are not
 // folded, for regexes or keywords. Instead, the mixed_script heuristic (rules
 // MOAT-T1-010 and MOAT-T1-011) flags a word that mixes Latin letters with
-// Cyrillic or Greek letters. See the Heuristics and hits section for details.
+// Cyrillic or Greek letters, except a Greek unit letter after a number. See
+// the Heuristics and hits section for details.
 //
 // Any run of white space, or U+2800 (braille blank), matches the space
 // between the words of a keyword. Punctuation does not: the keyword "ignore
@@ -116,8 +117,8 @@
 //
 // The text heuristics (invisible_unicode, max_length, base64_blob and
 // mixed_script) read the raw text, not the normalized text. A [Hit] from a
-// text heuristic gives a byte offset in the raw text. A hit from a regex or a keyword has the offset -1,
-// because it comes from the normalized text.
+// text heuristic gives a byte offset in the raw text. A hit from a regex or a
+// keyword has the offset -1, because it comes from the normalized text.
 //
 // The invisible_unicode heuristic flags the same invisible runes that the
 // normalization removes, so it flags every control character except the
@@ -125,9 +126,9 @@
 //
 // The base64_blob heuristic checks each run of base64 characters on its own.
 // An invisible rune inside a run, also a control character such as U+0000 or
-// ESC, is skipped. Any other character, such as a space, a newline or '=', ends a
-// run, and runs are not joined. So a payload that is split into short chunks
-// is not flagged when no chunk reaches min_length on its own.
+// ESC, is skipped. Any other character, such as a space, a newline or '=',
+// ends a run, and runs are not joined. So a payload that is split into short
+// chunks is not flagged when no chunk reaches min_length on its own.
 //
 // The mixed_script heuristic flags a word that mixes Latin letters with
 // Cyrillic or Greek letters, such as "Ignore" with a Cyrillic "I" (U+0406).
@@ -136,28 +137,44 @@
 // terminal-safe output does not change look-alike letters, so the word would
 // show as normal Latin text. A word is a run of letters, marks and invisible
 // runes, so a ZWSP or a combining mark cannot split a word. Any other rune,
-// such as a digit, '_', '-', a space or punctuation, ends a word. A JSON
-// escape also ends a word: \b, \f, \n, \r, \t, \\, \", \/ and \u plus
-// exactly 4 hex digits. So rule MOAT-T1-011 can use the same heuristic on
-// the raw JSON of a schema.
+// such as a digit, '_', '-', a space or punctuation, ends a word.
 //
-// Greek letters get one exemption, for units and math. A word with exactly
-// one Greek letter is not flagged when that letter is the first or the last
-// letter of the word and it is on a short list of symbol letters that do not
-// look like Latin letters: mu, capital omega, the ohm sign U+2126, capital
-// and small delta, lambda, pi, theta, small and capital sigma, phi, small
-// omega, beta and gamma. So "10k" + U+03A9 (ohm) and U+0394 + "t" are not
-// flagged. Alpha (U+03B1) is not on the list, because it looks like a Latin
-// "a".
+// Each letter counts for its own script. A letter of the Common or Inherited
+// script counts by its fold, the same fold that the regexes read. So the
+// mathematical Greek letters (U+1D6A8 to U+1D7CB) count as Greek, the
+// mathematical Latin letters (such as U+1D400) count as Latin, and U+00B5
+// (micro sign) counts as Greek mu.
+//
+// The heuristic decodes JSON escapes: \b, \f, \n, \r, \t, \\, \", \/ and \u
+// plus exactly 4 hex digits. A surrogate pair is one rune. The decoded rune
+// acts like a raw rune: a letter, a mark or an invisible rune joins the word,
+// and any other rune ends it. So the escape of U+0406 is a Cyrillic letter in
+// the word, and rule MOAT-T1-011 can use the same heuristic on the raw JSON
+// of a schema. The decoding also runs on description text, so a backslash
+// and a "t" in a description read as a tab.
+//
+// A word with Latin and Greek letters is not flagged when it is a unit after
+// a number. The word must have exactly one Greek letter, and that letter must
+// be mu (U+03BC or U+00B5) or Omega (U+03A9 or the ohm sign U+2126). It must
+// be the first or the last letter of the word. The word must come directly
+// after an ASCII digit, or after one space that comes directly after an ASCII
+// digit. So "5" + U+03BC + "s" and "10k" + U+03A9 are not flagged, but
+// U+03BC + "s" with no number before it is flagged. Math notation is also
+// flagged: U+0394 (capital Delta) + "t" gives a known false positive. To
+// accept such a word, ignore the rule (MOAT-T1-010 or MOAT-T1-011) for that
+// one tool in .mcpmoat-ignore.
 //
 // The mixed_script heuristic does not flag:
 //
 //   - a word written fully in look-alikes of one script, such as Cyrillic
 //     "copy" (U+0441 U+043E U+0440 U+0443);
 //   - a word of one letter, because it cannot mix two scripts;
-//   - Latin-script look-alikes, such as U+0131 (dotless i);
-//   - look-alikes from other scripts, such as Armenian;
-//   - one allowlisted Greek letter at the start or the end of a word.
+//   - Latin-script look-alikes that do not fold, such as U+0131 (dotless i);
+//   - look-alikes from other scripts, such as Armenian and Cherokee;
+//   - one mu or Omega at the start or the end of a word that comes after a
+//     digit, such as "5" + U+03BC + "ser";
+//   - a word that a visible rune other than a letter splits in two, such as
+//     U+FFFD from an invalid UTF-8 byte.
 //
 // The config heuristics (insecure_url, plaintext_secret, unpinned_package,
 // auto_install and typosquat) read one line of text each, not the whole text.
