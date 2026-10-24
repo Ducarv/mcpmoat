@@ -166,29 +166,38 @@
 // description read as a tab.
 //
 // A word with Greek letters is not flagged for them when it is a unit after
-// a number. The word must have exactly one Greek letter and at most 4
-// letters. The Greek letter must be mu (U+03BC or U+00B5) or Omega (U+03A9 or
-// the ohm sign U+2126), and it must be the first or the last letter of the
-// word. The word must come directly after an ASCII digit, or after one space
-// that comes directly after an ASCII digit. An escaped digit, such as \u0035,
-// does not count. So "5" + U+03BC + "s", "5" + U+03BC + "mol" and "10k" +
-// U+03A9 are not flagged. But U+03BC + "s" with no number before it and "5" +
-// U+03BC + "pdate" are flagged. Math notation is also flagged: U+0394 (capital
-// Delta) + "t" gives a known false positive. To accept such a word, ignore
-// the rule (MOAT-T1-010 or MOAT-T1-011) for that one tool in .mcpmoat-ignore.
+// a number. The word must have exactly one Greek letter at its start or end,
+// up to 3 Latin letters and no other letter, and the two parts must form a
+// unit:
+//
+//   - mu (U+03BC or U+00B5) and then an SI unit: s, m, g, l, L, A, V, W, F,
+//     H, C, J, K, M, N, S, T, Hz, Pa, mol or sec;
+//   - k, M, G or m and then Omega (U+03A9 or the ohm sign U+2126);
+//   - Omega and then m or cm (ohm metre).
+//
+// The word must come directly after an ASCII digit, or after one space that
+// comes directly after an ASCII digit. An escaped digit, such as \u0035,
+// does not count. So "5" + U+03BC + "s", "5 " + U+03BC + "mol" and "10k" +
+// U+03A9 are not flagged. But U+03BC + "s" with no number before it, "2 " +
+// U+03BC + "ser" and "5" + U+03BC + "pdate" are flagged. Math notation is
+// also flagged: U+0394 (capital Delta) + "t" gives a known false positive.
+// To accept such a word, ignore the rule (MOAT-T1-010 or MOAT-T1-011) for
+// that one tool in .mcpmoat-ignore.
 //
 // The mixed_script heuristic does not flag:
 //
 //   - a word written fully in look-alikes of one script, such as Cyrillic
-//     "copy" (U+0441 U+043E U+0440 U+0443);
+//     "copy" (U+0441 U+043E U+0440 U+0443) or the Cyrillic "ssh" in "~/." +
+//     U+0455 U+0455 U+04BB;
 //   - a word of one letter, because it cannot mix two scripts;
-//   - Latin-script look-alikes that do not fold, such as U+0131 (dotless i);
+//   - Latin-script look-alikes that do not fold, such as U+0131 (dotless i),
+//     U+01C0 (dental click) and U+0261 (script g);
 //   - look-alikes from scripts outside the list, such as the Ethiopic
-//     syllable U+12D0, which looks like an "O";
-//   - a unit-shaped word of at most 4 letters with one mu or Omega at its
-//     start or end after a digit, such as "5" + U+03BC + "se";
+//     syllable U+12D0, which looks like an "O", and the Runic letter U+16C1,
+//     which looks like an "I";
 //   - a word that a visible rune other than a letter splits in two, such as
-//     U+FFFD from an invalid UTF-8 byte or U+2800 (braille blank).
+//     U+FFFD from an invalid UTF-8 byte, U+2800 (braille blank) or U+212E
+//     (estimated sign, a symbol that looks like an "e").
 //
 // The config heuristics (insecure_url, plaintext_secret, unpinned_package,
 // auto_install and typosquat) read one line of text each, not the whole text.

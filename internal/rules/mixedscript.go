@@ -4,6 +4,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"math/bits"
+	"strings"
 	"unicode"
 	"unicode/utf16"
 	"unicode/utf8"
@@ -73,10 +74,10 @@ func mixedScript(raw string) []Hit {
 		} else {
 			end()
 		}
-		if escaped {
+		if escaped && isASCIIDigit(r) {
 			// An escaped digit never comes before a unit. In a description
-			// the model reads the escape text, such as 5, and the schema
-			// JSON from the inspect package never escapes a digit.
+			// the model reads the escape text, such as \u0035, and the
+			// schema JSON from the inspect package never escapes a digit.
 			r = -1
 		}
 		prev2, prev1 = prev1, r
@@ -129,6 +130,12 @@ var lookalikeScripts = [...]struct {
 	{"Tifinagh", unicode.Tifinagh},
 }
 
+// The indexes of Latin and Greek in lookalikeScripts.
+const (
+	latinScript = 0
+	greekScript = 2
+)
+
 // scriptOf returns the index in lookalikeScripts of the script of r, or -1
 // when r is of no script in the list.
 func scriptOf(r rune) int {
@@ -139,10 +146,6 @@ func scriptOf(r rune) int {
 	}
 	return -1
 }
-
-// maxUnitLetters is the most letters a unit word can have, such as mu +
-// "mol" (see wordState.greekExcused).
-const maxUnitLetters = 4
 
 // wordState holds what mixedScript knows about the current word. It uses
 // counts and fixed fields, not a slice per word, so a word costs no memory.
@@ -158,6 +161,12 @@ type wordState struct {
 	greekLetter      rune // the last Greek letter; the only one when greek == 1
 	firstLetterGreek bool // the first letter of the word is Greek
 	lastLetterGreek  bool // the last letter so far is Greek
+
+	// latin holds the first Latin letters of the word, for greekExcused.
+	// nLatin counts all Latin letters. When it is more than len(latin), the
+	// word is too long to be a unit.
+	latin  [3]rune
+	nLatin int
 
 	// fold is a scratch buffer for addFolded. mixedScript keeps it from one
 	// word to the next, so a scan allocates it at most once.
@@ -202,11 +211,16 @@ func (w *wordState) addFolded(r rune) {
 // countLetter counts the letter r for the script lookalikeScripts[i], or
 // for no script when i is -1.
 func (w *wordState) countLetter(r rune, i int) {
-	isGreek := false
 	if i >= 0 {
 		w.scripts |= 1 << i
-		isGreek = lookalikeScripts[i].table == unicode.Greek
 	}
+	if i == latinScript {
+		if w.nLatin < len(w.latin) {
+			w.latin[w.nLatin] = r
+		}
+		w.nLatin++
+	}
+	isGreek := i == greekScript
 	if isGreek {
 		w.greek++
 		w.greekLetter = r
@@ -229,7 +243,7 @@ func (w *wordState) flaggedScripts() string {
 	var names [len(lookalikeScripts)]string
 	n := 0
 	for i, s := range lookalikeScripts {
-		if w.scripts&(1<<i) == 0 || s.table == unicode.Greek && w.greekExcused() {
+		if w.scripts&(1<<i) == 0 || i == greekScript && w.greekExcused() {
 			continue
 		}
 		names[n] = s.name
@@ -243,31 +257,51 @@ func (w *wordState) flaggedScripts() string {
 
 // joinNames joins two or more script names: "A and B", "A, B and C".
 func joinNames(names []string) string {
-	s := names[0]
-	for i := 1; i < len(names); i++ {
-		sep := ", "
-		if i == len(names)-1 {
-			sep = " and "
-		}
-		s += sep + names[i]
-	}
-	return s
+	last := len(names) - 1
+	return strings.Join(names[:last], ", ") + " and " + names[last]
 }
 
-// greekExcused reports whether the Greek letters of the word are one unit
-// letter (see isUnitGreek) at the start or the end of a word of at most
-// maxUnitLetters letters that comes after a digit (see followsDigit), such
-// as the ohm (U+03A9) in "10k" + U+03A9.
+// greekExcused reports whether the Greek letter of the word is a unit
+// letter in a unit after a number (see followsDigit). The word must be one
+// Greek letter at its start or end and up to 3 Latin letters, with no
+// other letter, and the two parts must form a unit (see isUnit). So "5" + mu
+// + "s" and "10k" + Omega are excused, but "2" + mu + "ser" is not.
 func (w *wordState) greekExcused() bool {
-	atEdge := w.firstLetterGreek || w.lastLetterGreek
-	return w.greek == 1 && atEdge && w.letters <= maxUnitLetters && w.afterDigit && isUnitGreek(w.greekLetter)
+	if w.greek != 1 || !w.afterDigit || w.nLatin > len(w.latin) || w.letters != 1+w.nLatin {
+		return false
+	}
+	if !w.firstLetterGreek && !w.lastLetterGreek {
+		return false
+	}
+	return isUnit(w.greekLetter, w.firstLetterGreek, string(w.latin[:w.nLatin]))
 }
 
-// isUnitGreek reports whether r is a Greek letter that texts use as a unit
-// after a number: small mu (U+03BC, micro, also the fold of the micro sign
-// U+00B5), capital Omega (U+03A9, ohm) or the ohm sign (U+2126).
-func isUnitGreek(r rune) bool {
-	return r == 'μ' || r == 'Ω' || r == 'Ω'
+// isUnit reports whether the Greek letter g and the Latin letters latin
+// form a unit. When first is true, g comes before latin, else after
+// it. The units are micro (small mu, U+03BC, also the fold of the micro sign
+// U+00B5) before an SI unit in microUnits, such as mu + "s", and ohm
+// (capital Omega U+03A9 or the ohm sign U+2126) after the prefix "k", "M",
+// "G" or "m", or before "m" or "cm" (ohm metre).
+func isUnit(g rune, first bool, latin string) bool {
+	switch g {
+	case '\u03BC':
+		return first && microUnits[latin]
+	case '\u03A9', '\u2126':
+		if first {
+			return latin == "m" || latin == "cm"
+		}
+		return latin == "k" || latin == "M" || latin == "G" || latin == "m"
+	}
+	return false
+}
+
+// microUnits holds the units that come after micro (mu) in a unit, such as
+// "s" for microseconds and "mol" for micromoles.
+var microUnits = map[string]bool{
+	"s": true, "m": true, "g": true, "l": true, "L": true, "A": true,
+	"V": true, "W": true, "F": true, "H": true, "C": true, "J": true,
+	"K": true, "M": true, "N": true, "S": true, "T": true,
+	"Hz": true, "Pa": true, "mol": true, "sec": true,
 }
 
 // jsonEscape decodes the JSON escape at the start of s. It returns the rune

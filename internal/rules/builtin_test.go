@@ -277,6 +277,16 @@ func schemaWithDescription(t *testing.T, text string) string {
 	return strings.TrimSuffix(buf.String(), "\n")
 }
 
+// builtinByID returns the built-in rules by ID.
+func builtinByID(t *testing.T) map[string]Rule {
+	t.Helper()
+	byID := make(map[string]Rule)
+	for _, r := range mustBuiltin(t, WithCompiler(builtinCompiler())) {
+		byID[r.ID] = r
+	}
+	return byID
+}
+
 // isT1004WordPattern reports whether re is one of the MOAT-T1-004 word
 // patterns (keychain, credentials store or file). MOAT-T1-009 leaves them out
 // on purpose (see its header comment).
@@ -303,10 +313,7 @@ var jsonEscapeSkips = map[string]bool{
 func TestSchemaRuleCopiesDescriptionRules(t *testing.T) {
 	t.Parallel()
 
-	byID := make(map[string]Rule)
-	for _, r := range mustBuiltin(t, WithCompiler(builtinCompiler())) {
-		byID[r.ID] = r
-	}
+	byID := builtinByID(t)
 	compile := func(id string, m Match) *Matcher {
 		t.Helper()
 		c, err := m.Compile()
@@ -382,14 +389,11 @@ func TestSchemaRuleCopiesDescriptionRules(t *testing.T) {
 func TestMixedScriptTwinRules(t *testing.T) {
 	t.Parallel()
 
-	byID := make(map[string]Rule)
-	for _, r := range mustBuiltin(t, WithCompiler(builtinCompiler())) {
-		byID[r.ID] = r
-	}
+	byID := builtinByID(t)
 	desc, okDesc := byID["MOAT-T1-010"]
 	schema, okSchema := byID["MOAT-T1-011"]
-	if !okDesc || !okSchema {
-		t.Fatal("MOAT-T1-010 or MOAT-T1-011 is not loaded")
+	if !okDesc || !okSchema || len(desc.ShouldMatch) == 0 || len(desc.ShouldNotMatch) == 0 {
+		t.Fatal("MOAT-T1-010, MOAT-T1-011 or the cases of MOAT-T1-010 are not loaded")
 	}
 	if desc.Severity != schema.Severity {
 		t.Errorf("severity: MOAT-T1-010 has %q, MOAT-T1-011 has %q", desc.Severity, schema.Severity)

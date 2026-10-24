@@ -38,6 +38,7 @@ should_not_match:
     note: Greek mu (U+03BC) for micro, directly after a digit
   - text: "{\"description\":\"A 10k\u03a9 resistor\"}"
     note: Greek capital omega (U+03A9) for ohm
-  - '{"type":"object","properties":{"text":{"type":"string","description":"Text to return."}},"required":["text"]}'
+  - text: '{"type":"object","properties":{"text":{"type":"string","description":"Text to return."}},"required":["text"]}'
+    note: The benign fixture schema in testdata/servers/benign
   - text: "{\"properties\":{\"q\":{\"description\":\"\u043f\u043e\u0438\u0441\u043a query\"}}}"
     note: A whole Cyrillic word beside a Latin word

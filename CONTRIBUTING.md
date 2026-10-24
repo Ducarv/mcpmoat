@@ -67,11 +67,8 @@ How mcpmoat prepares the text before a match. This applies to every regex and ke
   the character. So U+FDFA, U+00BD and U+2177 are not folded. Homoglyphs from other scripts, such
   as Cyrillic U+0456 for Latin "i", are not folded. Instead, the `mixed_script` heuristic
   (MOAT-T1-010 for a description, MOAT-T1-011 for a schema) flags a word that mixes letters of
-  two or more look-alike scripts: Latin, Cyrillic, Greek, Armenian, Cherokee, Lisu, Coptic,
-  Canadian Aboriginal or Tifinagh. It decodes JSON escapes. Only a Greek unit after a number is
-  excused, such as "5" + U+03BC + "s" or "10k" + U+03A9. Math notation such as U+0394 + "t" is
-  flagged. The full rules and the limits are in the package doc of `internal/rules`
-  ([doc.go](internal/rules/doc.go)).
+  look-alike scripts. Its rules, the unit exemption and its limits are in the package doc of
+  `internal/rules` ([doc.go](internal/rules/doc.go)).
 
 The fields:
 
