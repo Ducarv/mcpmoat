@@ -1,0 +1,69 @@
+# GoReleaser v2 config. Check it with: goreleaser check
+version: 2
+
+project_name: mcpmoat
+
+# No before.hooks on purpose: a hook would run with the tap token in its env.
+
+builds:
+  - id: mcpmoat
+    main: ./cmd/mcpmoat
+    binary: mcpmoat
+    env:
+      # CGO off gives a static binary with no libc dependency.
+      - CGO_ENABLED=0
+    flags:
+      - -trimpath
+    mod_timestamp: "{{ .CommitTimestamp }}"
+    ldflags:
+      - -s -w -X main.version=v{{ .Version }} -X main.commit={{ .ShortCommit }} -X main.date={{ .CommitDate }}
+    goos:
+      - darwin
+      - linux
+    goarch:
+      - amd64
+      - arm64
+
+archives:
+  - ids:
+      - mcpmoat
+    formats:
+      - tar.gz
+    files:
+      - LICENSE
+      - README.md
+
+checksum:
+  name_template: checksums.txt
+
+snapshot:
+  version_template: "{{ incpatch .Version }}-next"
+
+release:
+  # The release workflow publishes the draft after the attestations verify.
+  draft: true
+  prerelease: auto
+
+homebrew_casks:
+  - name: mcpmoat
+    binaries:
+      - mcpmoat
+    repository:
+      owner: Ducarv
+      name: homebrew-tap
+      token: "{{ .Env.HOMEBREW_TAP_GITHUB_TOKEN }}"
+    directory: Casks
+    homepage: https://github.com/Ducarv/mcpmoat
+    description: Offline scanner for malicious or tampered MCP servers
+    commit_author:
+      name: goreleaserbot
+      email: bot@goreleaser.com
+    # auto keeps prerelease tags (for example v0.1.0-rc1) out of the tap.
+    skip_upload: auto
+    hooks:
+      post:
+        # The binary is not notarized, so macOS would quarantine it. Clear the flag on install.
+        install_steps: |
+          on_macos do
+            run "/usr/bin/xattr", args: ["-dr", "com.apple.quarantine", "{{ .StagedPath }}/mcpmoat"]
+          end
