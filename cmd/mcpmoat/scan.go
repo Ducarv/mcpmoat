@@ -281,20 +281,23 @@ func (c *cli) reportScan(ctx context.Context, res discover.Result, configPath st
 	// With no server there is nothing to inspect and nothing to pin, so scan
 	// does not read pins.json.
 	if setup.connect != nil && len(res.Servers) > 0 {
-		var interrupted bool
-		pr, pinFailed, interrupted = c.inspectAndPin(ctx, res.Servers, *setup.connect, ignore)
-		if interrupted {
+		var err error
+		pr, err = c.inspectAndPin(ctx, res.Servers, *setup.connect, ignore)
+		if errors.Is(err, errInterrupted) {
 			// Nothing is saved and no report is printed: the user stopped
 			// the scan, so the result would be partial.
 			c.cmdErrorf("scan", "%s", interruptedText)
 			return exitError
 		}
+		// Any other error is already on stderr. The report of the config
+		// rules still prints, and scan exits with 2.
+		pinFailed = err != nil
 		rows = append(rows, pr.rows...)
 		ignored = mergeIgnored(ignored, pr.ignored)
 	}
 
-	if err := c.writeScanReport(res.Servers, rows, pr, configPath); err != nil {
-		fprintf(c.stderr, "mcpmoat scan: cannot write output\n")
+	if err := c.writeScanReport(res.Servers, rows, pr, configPath, len(res.Errors) > 0); err != nil {
+		c.cmdErrorf("scan", "cannot write output")
 		// stderr can still work. The file problems are the reason for a
 		// failed scan, so the user must still see them. New pins are not
 		// saved: the user did not see the report.
@@ -326,8 +329,9 @@ func (c *cli) reportScan(ctx context.Context, res discover.Result, configPath st
 // diffs of the changed and new tools, then the "To accept" lines. It returns the
 // first write error. Do not use fprintf for it: a write error (a closed pipe,
 // for example) must give exit code 2. configPath is the --config value, or
-// empty: the "To accept" lines repeat it.
-func (c *cli) writeScanReport(servers []discover.Server, rows []report.FindingRow, pr pinReport, configPath string) error {
+// empty, and configProblem is true when a config file has a problem: the "To
+// accept" lines depend on both (see writeAcceptHints).
+func (c *cli) writeScanReport(servers []discover.Server, rows []report.FindingRow, pr pinReport, configPath string, configProblem bool) error {
 	if err := report.WriteServers(c.stdout, servers); err != nil {
 		return err
 	}
@@ -337,7 +341,7 @@ func (c *cli) writeScanReport(servers []discover.Server, rows []report.FindingRo
 	if err := report.WriteDiffs(c.stdout, pr.diffs); err != nil {
 		return err
 	}
-	return writeAcceptHints(c.stdout, pr.hints, configPath)
+	return writeAcceptHints(c.stdout, pr.hints, configPath, configProblem)
 }
 
 // savePinned saves the first-run pins of the pin step and, only when the save
@@ -391,32 +395,42 @@ func (c *cli) savePinned(pr pinReport) bool {
 //
 // The store is read first, before inspect.Run starts any server, so a corrupt
 // or newer pins.json gives exit code 2 before a stdio server runs. savePinned
-// reads it again before it saves. The second result is true when scan must exit
-// with 2: the store could not be read, or inspect.Run refused its input (no
+// reads it again before it saves. It returns an error when scan must exit with
+// 2: the store could not be read, or inspect.Run refused its input (no
 // inspector, or bad options; the flags are already checked, so this is a bug).
-// The error is already written on stderr.
+// The message is already written on stderr.
 //
-// The third result is true when ctx ended during the inspection (the process
-// got a signal). The caller prints interruptedText and exits with 2. Nothing
-// is saved: inspectAndPin never saves.
-func (c *cli) inspectAndPin(ctx context.Context, servers []discover.Server, opts inspect.Options, ignore *scanIgnores) (pr pinReport, failed, interrupted bool) {
+// The error is errInterrupted when ctx ended during the inspection (the process
+// got a signal). It writes nothing then: the caller prints interruptedText.
+// Nothing is saved: inspectAndPin never saves.
+func (c *cli) inspectAndPin(ctx context.Context, servers []discover.Server, opts inspect.Options, ignore *scanIgnores) (pinReport, error) {
 	store, ok := c.readPins("scan")
 	if !ok {
-		return pinReport{}, true, false
+		return pinReport{}, errPinsUnreadable
 	}
 
 	outcomes, err := inspect.Run(ctx, servers, opts, c.inspector)
 	if ctx.Err() != nil {
-		return pinReport{}, false, true
+		return pinReport{}, errInterrupted
 	}
 	if err != nil {
 		// The text of an inspect.Run error holds only our own words.
 		c.cmdErr("scan", "cannot inspect the servers", err)
-		return pinReport{}, true, false
+		return pinReport{}, err
 	}
 	c.warnNotInspected(outcomes)
-	return c.pinOutcomes(store, outcomes, ignore), false, false
+	return c.pinOutcomes(store, outcomes, ignore), nil
 }
+
+// The errors of inspectAndPin that have no other error to return. Their text
+// is never printed.
+var (
+	// errInterrupted means that the process got a signal during the
+	// inspection.
+	errInterrupted = errors.New("interrupted")
+	// errPinsUnreadable means that readPins failed and wrote the message.
+	errPinsUnreadable = errors.New("cannot read the pins file")
+)
 
 // printIgnored writes one line on stderr that counts the findings which the
 // ignore list dropped, for example

@@ -71,9 +71,11 @@ mcpmoat version              # print the version, commit and build date
 - `scan` prints no `To accept` line for a server that is pinned for the first time, for a server
   that it could not inspect, for a finding that you ignored, or for tools that cannot be pinned. The
   line holds a command only when the server name (and the `--config` path) uses only the characters
-  `A-Z a-z 0-9 . _ @ / : + = -` and does not start with `-` or `@`. Every shell, also `cmd.exe` and
-  PowerShell, reads such a word as plain text. Else the line says what to run and gives the digest,
-  but no command. If a diff of that server was cut, the line ends with
+  `A-Z a-z 0-9 . _ @ / : + = -` and starts with a letter, `_` or `/`. Every shell, also `cmd.exe`
+  and PowerShell, reads such a word as plain text. Else the line says what to run and gives the
+  digest, but no command. The line has no command either when a diff of that server was cut, when
+  another server has the same name, or when a config file has a problem, because you must review
+  the tool first or `pin` needs `--config`. If a diff of that server was cut, the line ends with
   `(the diff was cut: review the full tool first)`. If `--ignore` dropped a pin finding of that
   server, the line ends with `(--ignore hid some changes: run scan without it to review them
   first)`, because the digest covers those changes too.

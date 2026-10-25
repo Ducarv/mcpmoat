@@ -1,7 +1,6 @@
 package main
 
 import (
-	"fmt"
 	"strings"
 )
 
@@ -47,7 +46,7 @@ func (c *cli) rejectArgs(name string, args []string) bool {
 // must escape untrusted text in a before the call (see quoteArg and
 // termsafe.Quote).
 func (c *cli) usageError(name, format string, a ...any) int {
-	fprintf(c.stderr, "mcpmoat %s: %s\n", name, fmt.Sprintf(format, a...))
+	c.cmdErrorf(name, format, a...)
 	fprintf(c.stderr, "Run \"mcpmoat help\" for usage.\n")
 	return exitError
 }

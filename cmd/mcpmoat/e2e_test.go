@@ -937,12 +937,21 @@ func TestE2EPinAccept(t *testing.T) {
 		t.Errorf("pins.json holds the env of the server config:\n%s", data)
 	}
 	pinned := string(data)
+	// assertPinsUnchanged checks that pins.json still holds the first pins.
+	assertPinsUnchanged := func(t *testing.T, after string) {
+		t.Helper()
+		got, err := os.ReadFile(pinsJSON) //nolint:gosec // G304: the path is below the t.TempDir() home
+		if err != nil {
+			t.Fatal(err)
+		}
+		if string(got) != pinned {
+			t.Errorf("pins.json changed after %s:\n%s", after, got)
+		}
+	}
 
 	// Step 2: a scan of a pinned server finds nothing and writes nothing.
 	scanClean(t, nil)
-	if got, _ := os.ReadFile(pinsJSON); string(got) != pinned { //nolint:gosec // G304: the path is below the t.TempDir() home
-		t.Errorf("pins.json changed after a scan of a pinned server:\n%s", got)
-	}
+	assertPinsUnchanged(t, "a scan of a pinned server")
 
 	// Step 3: accepting an unchanged server counts no change. Without --expect,
 	// stderr holds the one note that pin trusts what the server returns.
@@ -961,9 +970,7 @@ func TestE2EPinAccept(t *testing.T) {
 		!strings.Contains(stderr, "expected "+wrongDigest+"); nothing was saved. Run scan again and review the diff.") {
 		t.Errorf("pin --expect wrong digest: exit code %d, stdout %q, stderr %q, want exit code %d, no stdout and the digest mismatch error", code, stdout, stderr, exitError)
 	}
-	if got, _ := os.ReadFile(pinsJSON); string(got) != pinned { //nolint:gosec // G304: the path is below the t.TempDir() home
-		t.Errorf("pins.json changed after a pin with the wrong digest:\n%s", got)
-	}
+	assertPinsUnchanged(t, "a pin with the wrong digest")
 	assertNoLeakBoth(t, stdout, stderr)
 
 	// Step 3c: the mismatch error names the digest of the tools that the server
@@ -990,9 +997,7 @@ func TestE2EPinAccept(t *testing.T) {
 	if code != exitError || stdout != "" || !strings.Contains(stderr, "mcpmoat pin: unknown server") {
 		t.Errorf("pin --accept unknown: exit code %d, stdout %q, stderr %q, want exit code %d, no stdout and the unknown server error", code, stdout, stderr, exitError)
 	}
-	if got, _ := os.ReadFile(pinsJSON); string(got) != pinned { //nolint:gosec // G304: the path is below the t.TempDir() home
-		t.Errorf("pins.json changed after a refused pin:\n%s", got)
-	}
+	assertPinsUnchanged(t, "a refused pin")
 
 	// Step 5: a missing --accept is a usage error.
 	stdout, stderr, code = runBin(t, home, work, "pin")

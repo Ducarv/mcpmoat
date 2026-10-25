@@ -404,16 +404,19 @@ func TestPinInspectFailure(t *testing.T) {
 }
 
 // TestPinSnapshotFailure checks that tools which cannot be pinned (a name used
-// twice, or an empty name) are exit code 2, and that the store is not changed.
+// twice, an empty name, or a server over the size limit) are exit code 2 with a
+// fixed reason, and that the store is not changed.
 func TestPinSnapshotFailure(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
-		name  string
-		tools []inspect.Tool
+		name   string
+		tools  []inspect.Tool
+		reason string
 	}{
-		{"duplicate tool name", []inspect.Tool{mkTool("a", "One."), mkTool("a", "Two.")}},
-		{"empty tool name", []inspect.Tool{mkTool("", "No name.")}},
+		{"duplicate tool name", []inspect.Tool{mkTool("a", "One."), mkTool("a", "Two.")}, "duplicate tool name"},
+		{"empty tool name", []inspect.Tool{mkTool("", "No name.")}, "invalid tool data"},
+		{"server over 2 MiB", []inspect.Tool{mkTool("a", strings.Repeat("x", 2<<20))}, "the tools cannot be pinned"},
 	}
 	for _, tt := range tests {
 		for _, pinned := range []bool{false, true} {
@@ -433,7 +436,7 @@ func TestPinSnapshotFailure(t *testing.T) {
 
 				got := e.pin(fakeServers(map[string][]inspect.Tool{"srv": tt.tools}), "--accept", "srv")
 
-				assertPinRun(t, got, scanWant{code: exitError, stderr: []string{"mcpmoat pin: cannot pin the tools of server srv: "}})
+				assertPinRun(t, got, scanWant{code: exitError, stderr: []string{"mcpmoat pin: cannot pin the tools of server srv: " + tt.reason + "\n"}})
 				assertEmptyStdout(t, got.stdout)
 				assertDirUnchanged(t, e.xdg, before)
 			})

@@ -82,13 +82,13 @@ func IsPinRuleID(id string) bool {
 func (k ChangeKind) RuleID() string {
 	switch k {
 	case KindChanged:
-		return "MOAT-T2-001"
+		return RuleIDPrefix + "001"
 	case KindNew:
-		return "MOAT-T2-002"
+		return RuleIDPrefix + "002"
 	case KindRemoved:
-		return "MOAT-T2-003"
+		return RuleIDPrefix + "003"
 	case KindUnverified:
-		return "MOAT-T2-004"
+		return RuleIDPrefix + "004"
 	}
 	return ""
 }

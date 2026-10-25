@@ -13,11 +13,6 @@ import (
 // noDiffNote is the fixed line under the header of a tool with no diff text.
 const noDiffNote = "  (no diff text available)"
 
-// errWriter fails every write with err.
-type errWriter struct{ err error }
-
-func (w errWriter) Write([]byte) (int, error) { return 0, w.err }
-
 // failAfterWriter accepts the first ok writes and then fails with err. It
 // counts the writes it has seen.
 type failAfterWriter struct {
@@ -223,36 +218,36 @@ func TestWriteDiffsExact(t *testing.T) {
 		},
 		{
 			name:  "new tool gets the New tool header",
-			diffs: []report.ToolDiff{{Server: "fs", Tool: "write", New: true, Diff: "+++ current\n+a\n"}},
+			diffs: []report.ToolDiff{{Server: "fs", Tool: "write", Kind: report.DiffNew, Diff: "+++ current\n+a\n"}},
 			want:  "\nNew tool write on server fs:\n+++ current\n+a\n",
 		},
 		{
 			name:  "new tool with empty Diff writes the note",
-			diffs: []report.ToolDiff{{Server: "fs", Tool: "write", New: true}},
+			diffs: []report.ToolDiff{{Server: "fs", Tool: "write", Kind: report.DiffNew}},
 			want:  "\nNew tool write on server fs:\n  (no diff text available)\n",
 		},
 		{
 			name:  "hostile names are escaped in the New header",
-			diffs: []report.ToolDiff{{Server: "evil\x1b[2J", Tool: "t\x1b]0;x\a", New: true, Diff: "+a\n"}},
+			diffs: []report.ToolDiff{{Server: "evil\x1b[2J", Tool: "t\x1b]0;x\a", Kind: report.DiffNew, Diff: "+a\n"}},
 			want:  "\nNew tool \"t\\x1b]0;x\\a\" on server \"evil\\x1b[2J\":\n+a\n",
 		},
 		{
 			name: "new and changed diffs keep their own headers",
 			diffs: []report.ToolDiff{
 				{Server: "a", Tool: "t1", Diff: "+x\n"},
-				{Server: "a", Tool: "t2", New: true, Diff: "+y\n"},
+				{Server: "a", Tool: "t2", Kind: report.DiffNew, Diff: "+y\n"},
 			},
 			want: "\nChanged tool t1 on server a:\n+x\n" +
 				"\nNew tool t2 on server a:\n+y\n",
 		},
 		{
 			name:  "not verified tool gets its own header",
-			diffs: []report.ToolDiff{{Server: "fs", Tool: "read", Unverified: true, Diff: "+++ current\n+a\n"}},
+			diffs: []report.ToolDiff{{Server: "fs", Tool: "read", Kind: report.DiffUnverified, Diff: "+++ current\n+a\n"}},
 			want:  "\nNot verified tool read on server fs (current text):\n+++ current\n+a\n",
 		},
 		{
 			name:  "not verified tool with hostile names",
-			diffs: []report.ToolDiff{{Server: "evil\x1b[2J", Tool: "t\x1b]0;x\a", Unverified: true, Diff: "+a\n"}},
+			diffs: []report.ToolDiff{{Server: "evil\x1b[2J", Tool: "t\x1b]0;x\a", Kind: report.DiffUnverified, Diff: "+a\n"}},
 			want:  "\nNot verified tool \"t\\x1b]0;x\\a\" on server \"evil\\x1b[2J\" (current text):\n+a\n",
 		},
 		{
@@ -415,7 +410,7 @@ func TestWriteDiffsWriteError(t *testing.T) {
 
 	t.Run("first write fails", func(t *testing.T) {
 		t.Parallel()
-		err := report.WriteDiffs(errWriter{err: errBoom}, diffs)
+		err := report.WriteDiffs(&failingWriter{err: errBoom}, diffs)
 		if !errors.Is(err, errBoom) {
 			t.Fatalf("WriteDiffs() error = %v, want %v", err, errBoom)
 		}
@@ -435,7 +430,7 @@ func TestWriteDiffsWriteError(t *testing.T) {
 
 	t.Run("empty diffs never write", func(t *testing.T) {
 		t.Parallel()
-		if err := report.WriteDiffs(errWriter{err: errBoom}, nil); err != nil {
+		if err := report.WriteDiffs(&failingWriter{err: errBoom}, nil); err != nil {
 			t.Errorf("WriteDiffs(nil) error = %v, want nil", err)
 		}
 	})

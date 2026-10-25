@@ -514,9 +514,9 @@ func TestPinAcceptFreshStoreKeepsOtherEntries(t *testing.T) {
 	}
 }
 
-// TestScanAcceptHintCutNote checks that the "To accept" line of a server ends
-// with the cut note when a kept diff of that server was cut, and ends with the
-// digest otherwise.
+// TestScanAcceptHintCutNote checks that the "To accept" line of a server has no
+// command and ends with the cut note when a kept diff of that server was cut,
+// and holds the command otherwise.
 func TestScanAcceptHintCutNote(t *testing.T) {
 	t.Parallel()
 
@@ -580,7 +580,9 @@ func TestScanAcceptHintCutNote(t *testing.T) {
 			}
 			line := acceptHintPrefix + "srv: mcpmoat pin --accept srv --config " + e.config + " --expect " + digestOf(t, tt.current...)
 			if tt.wantCut {
-				line += hintCutText
+				// The user did not see the whole tool, so the line has no command.
+				line = acceptHintPrefix + "srv: run pin --accept with this server name, --config with the file of this scan, and --expect " +
+					digestOf(t, tt.current...) + hintCutText
 			}
 			if len(tt.flags) > 0 {
 				// --ignore dropped a row, so the line says so too.
@@ -589,8 +591,12 @@ func TestScanAcceptHintCutNote(t *testing.T) {
 			if !strings.HasSuffix(got.stdout, "\n"+line+"\n") {
 				t.Errorf("stdout does not end with the hint %q\nstdout tail:\n%s", line, tail(got.stdout, 400))
 			}
-			if n := strings.Count(got.stdout, hintCutText); n != btoi(tt.wantCut) {
-				t.Errorf("stdout has the cut note %d times, want %d", n, btoi(tt.wantCut))
+			wantNotes := 0
+			if tt.wantCut {
+				wantNotes = 1
+			}
+			if n := strings.Count(got.stdout, hintCutText); n != wantNotes {
+				t.Errorf("stdout has the cut note %d times, want %d", n, wantNotes)
 			}
 			// The hint is data: it belongs on stdout, and the cut note never on stderr.
 			assertContainsNone(t, "stderr", got.stderr, []string{hintCutText, acceptHintPrefix})
@@ -598,8 +604,8 @@ func TestScanAcceptHintCutNote(t *testing.T) {
 	}
 }
 
-// TestScanAcceptHintCutNotePerServer checks that the cut note is on the line of
-// the server with the cut diff only.
+// TestScanAcceptHintCutNotePerServer checks that the cut note, and the line
+// without a command, are for the server with the cut diff only.
 func TestScanAcceptHintCutNotePerServer(t *testing.T) {
 	t.Parallel()
 
@@ -624,7 +630,7 @@ func TestScanAcceptHintCutNotePerServer(t *testing.T) {
 	}
 	_, hints := cutAcceptHints(got.stdout)
 	want := []string{
-		acceptHintPrefix + "cut: mcpmoat pin --accept cut --config " + e.config + " --expect " + digestOf(t, cutTools...) + hintCutText,
+		acceptHintPrefix + "cut: run pin --accept with this server name, --config with the file of this scan, and --expect " + digestOf(t, cutTools...) + hintCutText,
 		acceptHintPrefix + "small: mcpmoat pin --accept small --config " + e.config + " --expect " + digestOf(t, smallTools...),
 	}
 	if !slices.Equal(hints, want) {
@@ -638,14 +644,6 @@ func tail(s string, n int) string {
 		return s
 	}
 	return s[len(s)-n:]
-}
-
-// btoi returns 1 for true and 0 for false.
-func btoi(b bool) int {
-	if b {
-		return 1
-	}
-	return 0
 }
 
 // pinShared runs "pin --config <file> args..." with one buffer for stdout and

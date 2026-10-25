@@ -45,8 +45,10 @@ var hunkHeader = regexp.MustCompile(`^@@ -(\d+)(,\d+)? \+(\d+)(,\d+)? @@$`)
 // that both texts share at the start and at the end, and keeps diffContextLines
 // of them on each side. Only this middle window is cut to maxRenderedBytes and
 // maxRenderedLines, and ends with a marker line when it was cut. So a change
-// after a very long text is still in the diff, and the first change is always
-// in the window. The line numbers in the hunk headers are those of the full
+// after a very long text is still in the diff. The first change is always in
+// the window: a rendered line holds at most maxIndent bytes of lead and
+// maxLineRunes runes of text, so the context lines before it are far below the
+// caps. The line numbers in the hunk headers are those of the full
 // rendered texts. The truncated result is true when a text was cut. This
 // function returns an error when a canonical form does not parse.
 //

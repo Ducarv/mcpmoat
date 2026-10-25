@@ -3,6 +3,7 @@ package pins
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"unicode/utf8"
@@ -15,10 +16,10 @@ const (
 	// wrapping a payload at the end of one long line would not show in the diff.
 	maxLineRunes = 200
 
-	// maxChunkIndent is the most indentation that a wrapped chunk after the
-	// first one keeps, in spaces. It stops a deeply nested JSON line from
-	// repeating a huge indentation on each of its chunks.
-	maxChunkIndent = 200
+	// maxIndent is the most indentation that a rendered line keeps, in bytes.
+	// A deeply nested JSON line would else start with so many spaces that the
+	// report cuts the line before its text, and its change would not show.
+	maxIndent = 200
 )
 
 // renderedTool is the shape of the canonical form that render reads. The
@@ -68,7 +69,9 @@ type renderedTool struct {
 func render(canonical string) (string, error) {
 	var t renderedTool
 	if err := json.Unmarshal([]byte(canonical), &t); err != nil {
-		return "", fmt.Errorf("render tool: parse canonical form: %w", err)
+		// The error of encoding/json can quote input, so it is not wrapped,
+		// like the error of json.Indent below. The caller adds the context.
+		return "", errors.New("parse canonical form")
 	}
 
 	var b strings.Builder
@@ -105,16 +108,16 @@ func writePrefixed(b *strings.Builder, prefix, value string) {
 // UTF-8 character never splits. An empty text gives one line with only lead.
 // The work is linear in len(text).
 //
-// The chunks after the first keep lead, but at most maxChunkIndent bytes of it.
-// A lead is a short prefix or spaces, so a cut inside it is safe.
+// Every line keeps at most maxIndent bytes of lead. A lead is a short prefix or
+// spaces, so a cut inside it is safe.
 func writeWrapped(b *strings.Builder, lead, text string) {
+	lead = lead[:min(len(lead), maxIndent)]
 	b.WriteString(lead)
-	nextLead := lead[:min(len(lead), maxChunkIndent)]
 	runes := 0
 	for i := 0; i < len(text); {
 		if runes == maxLineRunes {
 			b.WriteByte('\n')
-			b.WriteString(nextLead)
+			b.WriteString(lead)
 			runes = 0
 		}
 		// For invalid UTF-8 the size is 1, so the loop always moves forward.
@@ -136,7 +139,7 @@ func writeIndented(b *strings.Builder, label string, raw json.RawMessage) error 
 	var buf bytes.Buffer
 	if err := json.Indent(&buf, raw, "  ", "  "); err != nil {
 		// The error can quote server text, so it is not wrapped.
-		return fmt.Errorf("render tool: indent %s", strings.TrimSuffix(label, ":"))
+		return fmt.Errorf("indent %s", strings.TrimSuffix(label, ":"))
 	}
 	b.WriteString(label)
 	b.WriteByte('\n')

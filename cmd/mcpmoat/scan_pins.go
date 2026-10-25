@@ -14,12 +14,14 @@ import (
 	"github.com/Ducarv/mcpmoat/internal/termsafe"
 )
 
-// maxWarnNameRunes and maxWarnErrRunes cap the untrusted text that a stderr
-// line shows: a server name from a config file and the error text of an
-// inspection, which can carry server output. A cut ends with
-// termsafe.CutMarker, so a cut is never silent.
+// maxWarnNameRunes, maxWarnPathRunes and maxWarnErrRunes cap the untrusted text
+// that a line on the terminal shows: a server name from a config file, a path
+// (a config file or a project), and the error text of an inspection, which can
+// carry server output. A cut ends with termsafe.CutMarker, so a cut is never
+// silent.
 const (
 	maxWarnNameRunes = 100
+	maxWarnPathRunes = 500
 	maxWarnErrRunes  = 500
 )
 
@@ -80,6 +82,9 @@ type acceptHint struct {
 	// server. The digest still covers that change, but the report shows no diff
 	// for it.
 	ignored bool
+	// shared is true when another server that scan inspected has the same
+	// name. pin refuses such a name without a --config that narrows it.
+	shared bool
 }
 
 // The notes at the end of a "To accept" line. They are fixed text.
@@ -99,20 +104,25 @@ const (
 // the tools only when they have the same digest, so a server cannot show good
 // tools to scan and bad tools to pin (a time-of-check to time-of-use attack).
 // configPath is the --config of the scan, or empty. pin must read the same
-// file, so the command holds "--config <configPath>" too.
+// file, so the command holds "--config <configPath>" too. configProblem is true
+// when a config file of the scan has a problem: pin then refuses to run.
 //
-// The server name and configPath come from untrusted sources. Before the colon
-// the name is escaped and cut for the terminal. The command holds them only
-// when they are bare shell words (see isBareShellWord), which every shell
-// (POSIX, PowerShell, cmd.exe) reads as plain text. Quotes would not be safe:
-// each shell escapes them in its own way. Else the line has no command and says
-// what to run. The digest is made by mcpmoat from hex, so it needs no escape.
-// The line ends with hintCutNote when a diff of the server was cut, and with
-// hintIgnoredNote when --ignore dropped a change. writeAcceptHints returns the
-// first write error: the caller must check it, like for the report.
-func writeAcceptHints(w io.Writer, hints []acceptHint, configPath string) error {
+// The line holds a command only when pin can run it as printed and the user saw
+// every change (see acceptCommand). Else it says what to run and gives the
+// digest, so the user must type the command: when a diff was cut, when another
+// server has the same name, when a config file has a problem, or when the name
+// or configPath is not a bare shell word. Before the colon the name is escaped
+// and cut for the terminal. The digest is made by mcpmoat from hex, so it needs
+// no escape. The line ends with hintCutNote when a diff of the server was cut,
+// and with hintIgnoredNote when --ignore dropped a change. writeAcceptHints
+// returns the first write error: the caller must check it, like for the report.
+func writeAcceptHints(w io.Writer, hints []acceptHint, configPath string, configProblem bool) error {
 	for _, h := range hints {
-		line := "To accept " + cutName(h.name) + ": " + acceptCommand(h.name, configPath, h.digest)
+		text, ok := acceptCommand(h.name, configPath, h.digest)
+		if !ok || h.truncated || h.shared || configProblem {
+			text = acceptSteps(configPath, h.shared || configProblem, h.digest)
+		}
+		line := "To accept " + cutName(h.name) + ": " + text
 		if h.truncated {
 			line += hintCutNote
 		}
@@ -126,30 +136,51 @@ func writeAcceptHints(w io.Writer, hints []acceptHint, configPath string) error 
 	return nil
 }
 
-// acceptCommand returns the part of a "To accept" line after the colon: the
-// command, or, when the name or configPath is not a bare shell word, the text
-// that says what to run.
-func acceptCommand(name, configPath, digest string) string {
-	config := ""
+// acceptCommand returns the command that accepts the tools with the digest, and
+// true. It returns false when name or configPath (when not empty) is not a bare
+// shell word (see isBareShellWord): quotes are not safe, because each shell
+// (POSIX, PowerShell, cmd.exe) escapes them in its own way.
+func acceptCommand(name, configPath, digest string) (string, bool) {
+	if !isBareShellWord(name, maxWarnNameRunes) {
+		return "", false
+	}
+	cmd := "mcpmoat pin --accept " + name
 	if configPath != "" {
-		config = " --config " + configPath
-	}
-	if !isBareShellWord(name, maxWarnNameRunes) || (configPath != "" && !isBareShellWord(configPath, maxWarnErrRunes)) {
-		if configPath != "" {
-			config = ", --config with the file of this scan,"
+		if !isBareShellWord(configPath, maxWarnPathRunes) {
+			return "", false
 		}
-		return "run pin --accept with this server name" + config + " and --expect " + digest
+		cmd += " --config " + configPath
 	}
-	return "mcpmoat pin --accept " + name + config + " --expect " + digest
+	return cmd + " --expect " + digest, true
 }
 
-// isBareShellWord reports whether s is not empty, has at most maxLen bytes, and
-// holds only the ASCII characters [A-Za-z0-9._@/:+=-], which no shell treats as
-// special. It must not start with a dash, because pin would read a word such as
-// -config or -expect as a flag, or with "@", which PowerShell reads as a
-// variable (splatting).
-func isBareShellWord(s string, maxLen int) bool {
-	if s == "" || len(s) > maxLen || s[0] == '-' || s[0] == '@' {
+// acceptSteps returns the text of a "To accept" line that has no command: what
+// to run, and the digest. needConfig is true when pin needs a --config that
+// names the config file of the server.
+func acceptSteps(configPath string, needConfig bool, digest string) string {
+	config := ""
+	switch {
+	case configPath != "":
+		config = ", --config with the file of this scan,"
+	case needConfig:
+		config = ", --config with its config file,"
+	}
+	return "run pin --accept with this server name" + config + " and --expect " + digest
+}
+
+// isBareShellWord reports whether s is not empty, has at most maxBytes bytes,
+// and holds only the ASCII characters [A-Za-z0-9._@/:+=-], so a byte is a rune.
+// POSIX shells, PowerShell and cmd.exe read such a word as plain text when its
+// first character is a letter, "_" or "/". Other first characters can be
+// special: pin reads "-config" as a flag, zsh expands "=ls", PowerShell reads
+// "@x" as a variable and "1kb" as a number.
+func isBareShellWord(s string, maxBytes int) bool {
+	if s == "" || len(s) > maxBytes {
+		return false
+	}
+	switch c := s[0]; {
+	case c >= 'a' && c <= 'z', c >= 'A' && c <= 'Z', c == '_', c == '/':
+	default:
 		return false
 	}
 	for i := range len(s) {
@@ -232,8 +263,15 @@ func (c *cli) pinOutcomes(store *pins.Store, outcomes []inspect.Outcome, ign *sc
 		failed:  make(map[pins.Identity]bool),
 		warned:  make(map[string]bool),
 	}
+	names := make(map[string]int, len(outcomes))
 	for _, o := range outcomes {
 		p.outcome(o)
+		names[o.Server.Name]++
+	}
+	// pin finds its server by name among all the servers, also the ones that
+	// were not inspected, so a name that two of them use needs --config.
+	for i := range p.res.hints {
+		p.res.hints[i].shared = names[p.res.hints[i].name] > 1
 	}
 	return p.res
 }
@@ -363,8 +401,8 @@ func (p *pinner) firstPin(s discover.Server, id pins.Identity, tools []inspect.T
 // Each change is one finding row. The rule ID comes from the change kind and
 // the severity from Change.Severity (a pinned name that cannot be verified is
 // high), not from the rule set, which does not hold the pin rules. A changed
-// or new tool, and a pinned tool that cannot be verified, also gets a diff (see
-// hasDiff). The store is never changed. When at least one row is kept (not
+// or new tool, and a pinned tool whose pin cannot be checked, also gets a diff
+// (see appendDiff). The store is never changed. When at least one row is kept (not
 // ignored), compare also records the digest for the "--expect" hint (see
 // hint). The hint says so when a kept diff was cut, or when the ignore list
 // dropped a row: the digest covers that change, but the report shows no diff
@@ -418,30 +456,26 @@ func pinnable(id pins.Identity, tools []inspect.Tool) (pins.ServerPins, error) {
 }
 
 // diffOf returns the diff of one change for the report. The change must have a
-// diff (see hasDiff). server is the name that the report shows.
+// diff (see appendDiff). server is the name that the report shows.
 func diffOf(server string, ch pins.Change) report.ToolDiff {
-	return report.ToolDiff{
-		Server:     server,
-		Tool:       ch.Tool,
-		Diff:       ch.Diff,
-		New:        ch.Kind == pins.KindNew,
-		Unverified: ch.Kind == pins.KindUnverified,
+	d := report.ToolDiff{Server: server, Tool: ch.Tool, Diff: ch.Diff}
+	switch ch.Kind {
+	case pins.KindNew:
+		d.Kind = report.DiffNew
+	case pins.KindUnverified:
+		d.Kind = report.DiffUnverified
 	}
+	return d
 }
 
-// hasDiff reports whether the change has a diff: a changed tool, a new tool, or
-// a pinned tool whose pin cannot be checked (see pins.Change.Diff). The user
-// must see the content of a tool before they accept it.
-func hasDiff(ch pins.Change) bool {
-	return ch.Diff != ""
-}
-
-// appendDiff adds the diff of ch to diffs and returns the result. A change
-// without a diff adds nothing. When the diff was cut at the size limit, it
+// appendDiff adds the diff of ch to diffs and returns the result. A changed
+// tool, a new tool and a pinned tool whose pin cannot be checked have a diff
+// (see pins.Change.Diff): the user must see the content of a tool before they
+// accept it. A change without a diff adds nothing. When the diff was cut at the size limit, it
 // prints one warning on stderr for the command cmd ("scan" or "pin"), because
 // the user would review only a part of the tool.
 func (c *cli) appendDiff(cmd string, diffs []report.ToolDiff, server string, ch pins.Change) []report.ToolDiff {
-	if !hasDiff(ch) {
+	if ch.Diff == "" {
 		return diffs
 	}
 	if ch.Truncated {
@@ -505,7 +539,7 @@ func (c *cli) printPinned(servers []pinnedServer) {
 		if p.tools == 1 {
 			noun = "tool"
 		}
-		fprintf(c.stderr, "mcpmoat scan: pinned %d %s for %s\n", p.tools, noun, cutName(p.name))
+		c.cmdErrorf("scan", "pinned %d %s for %s", p.tools, noun, cutName(p.name))
 	}
 }
 

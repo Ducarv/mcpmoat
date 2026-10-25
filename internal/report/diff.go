@@ -41,13 +41,27 @@ type ToolDiff struct {
 	// server, so WriteDiffs escapes it. When Diff is empty or holds only
 	// whitespace, WriteDiffs writes a fixed note in its place.
 	Diff string
-	// New is true for a tool that is new on a pinned server: the server offers
-	// it, but the pins do not hold it. Its Diff has only added lines.
-	New bool
-	// Unverified is true for a pinned tool whose pin can not be checked (see
-	// pins.Change.Diff). Its Diff has only added lines: the whole current tool.
-	Unverified bool
+	// Kind says what the diff shows, and so its header. The zero value is
+	// DiffChanged.
+	Kind DiffKind
 }
+
+// DiffKind is the kind of tool that a ToolDiff shows.
+type DiffKind int
+
+// The kinds of ToolDiff.
+const (
+	// DiffChanged is a changed tool: the diff of the pinned and the current
+	// text.
+	DiffChanged DiffKind = iota
+	// DiffNew is a tool that is new on a pinned server: the server offers it,
+	// but the pins do not hold it. Its Diff has only added lines.
+	DiffNew
+	// DiffUnverified is a pinned tool whose pin can not be checked (see
+	// pins.Change.Diff). Its Diff has only added lines: the whole current
+	// tool.
+	DiffUnverified
+)
 
 // WriteDiffs writes one unified diff for each element of diffs to w, in the
 // given order. When diffs is empty it writes nothing and returns nil.
@@ -56,11 +70,12 @@ type ToolDiff struct {
 //
 //	Changed tool <tool> on server <server>:
 //
-// When New is true, the header says that the tool is new:
+// When Kind is DiffNew, the header says that the tool is new:
 //
 //	New tool <tool> on server <server>:
 //
-// When Unverified is true, the header says that the diff is the current text:
+// When Kind is DiffUnverified, the header says that the diff is the current
+// text:
 //
 //	Not verified tool <tool> on server <server> (current text):
 //
@@ -105,10 +120,10 @@ func WriteDiffs(w io.Writer, diffs []ToolDiff) error {
 		var b strings.Builder
 
 		// The blank line separates the diff from the output before it.
-		switch {
-		case d.New:
+		switch d.Kind {
+		case DiffNew:
 			b.WriteString("\nNew tool ")
-		case d.Unverified:
+		case DiffUnverified:
 			b.WriteString("\nNot verified tool ")
 		default:
 			b.WriteString("\nChanged tool ")
@@ -116,18 +131,18 @@ func WriteDiffs(w io.Writer, diffs []ToolDiff) error {
 		b.WriteString(findingCell(d.Tool))
 		b.WriteString(" on server ")
 		b.WriteString(findingCell(d.Server))
-		if d.Unverified {
+		if d.Kind == DiffUnverified {
 			b.WriteString(" (current text)")
 		}
 		b.WriteString(":\n")
 
-		// A final newline ends the last line. It does not start a new one.
-		text := strings.TrimSuffix(d.Diff, "\n")
 		if strings.TrimSpace(d.Diff) == "" {
 			// No content: write the fixed note, so the header does not stand alone.
 			b.WriteString(noDiffNote)
 			b.WriteByte('\n')
 		} else {
+			// A final newline ends the last line. It does not start a new one.
+			text := strings.TrimSuffix(d.Diff, "\n")
 			for line := range strings.SplitSeq(text, "\n") {
 				b.WriteString(diffLine(line))
 				b.WriteByte('\n')

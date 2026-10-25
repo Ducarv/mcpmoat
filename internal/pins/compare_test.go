@@ -2,6 +2,7 @@ package pins
 
 import (
 	"cmp"
+	"encoding/json"
 	"maps"
 	"reflect"
 	"slices"
@@ -781,7 +782,9 @@ func FuzzCompare(f *testing.F) {
 			if want := wantSeverity(stored, c); c.Severity != want {
 				t.Errorf("%s change of %q has Severity %q, want %q", c.Kind, c.Tool, c.Severity, want)
 			}
-			hasDiff := c.Kind == KindChanged || c.Kind == KindNew
+			// A pin that can not be checked shows the whole current tool.
+			hasDiff := c.Kind == KindChanged || c.Kind == KindNew ||
+				c.Reason == ReasonHashVersion || c.Reason == ReasonPinMismatch
 			if !hasDiff && (c.Diff != "" || c.Truncated) {
 				t.Errorf("kind %q has a Diff or Truncated", c.Kind)
 			}
@@ -913,5 +916,35 @@ func TestCompareTruncated(t *testing.T) {
 				t.Errorf("Diff has the marker = %v, want %v", has, tt.want)
 			}
 		})
+	}
+}
+
+// TestCompareDeepSchemaChangeVisible checks that a change deep in a schema
+// shows in the diff on a short line. inspect caps the depth at 64, but
+// Compare must not rely on it: a line with thousands of spaces of indentation
+// would be cut by the report before its text.
+func TestCompareDeepSchemaChangeVisible(t *testing.T) {
+	t.Parallel()
+	nested := func(leaf string) json.RawMessage {
+		const depth = 1500
+		return json.RawMessage(`{"type":"object","x":` + strings.Repeat(`{"x":`, depth) + `"` + leaf + `"` + strings.Repeat("}", depth) + "}")
+	}
+	pinned := inspect.Tool{Name: "deep", InputSchema: nested("good")}
+	cur := inspect.Tool{Name: "deep", InputSchema: nested("evil")}
+
+	got := Compare(mustSnapshot(t, []inspect.Tool{pinned}), []inspect.Tool{cur})
+
+	if len(got) != 1 || got[0].Kind != KindChanged || got[0].Truncated {
+		t.Fatalf("Compare() = %+v, want one changed tool with a full diff", got)
+	}
+	found := false
+	for line := range strings.SplitSeq(got[0].Diff, "\n") {
+		if len(line) > 1+maxIndent+4*maxLineRunes {
+			t.Errorf("diff line has %d bytes, want at most %d", len(line), 1+maxIndent+4*maxLineRunes)
+		}
+		found = found || (strings.HasPrefix(line, "+") && strings.Contains(line, `"x": "evil"`))
+	}
+	if !found {
+		t.Errorf("Diff has no added line with the changed leaf:\n%s", got[0].Diff)
 	}
 }

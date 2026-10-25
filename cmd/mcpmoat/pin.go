@@ -4,8 +4,8 @@ import (
 	"context"
 	"errors"
 	"flag"
+	"fmt"
 	"io"
-	"strconv"
 
 	"github.com/Ducarv/mcpmoat/internal/discover"
 	"github.com/Ducarv/mcpmoat/internal/inspect"
@@ -162,11 +162,13 @@ func (c *cli) inspectOne(ctx context.Context, server discover.Server, opts inspe
 // before it saves.
 func (c *cli) acceptTools(server discover.Server, tools []inspect.Tool, expect string) int {
 	name := cutName(server.Name)
+	id := serverIdentity(server)
 
-	// The error text is not printed: it can name a tool of the server.
-	snap, err := pins.Snapshot(tools)
+	// The same check as the "To accept" hint of scan (see pinnable). The error
+	// text is not printed: it can name a tool of the server.
+	snap, err := pinnable(id, tools)
 	if err != nil {
-		c.pinErrorf("cannot pin the tools of server %s: a tool name is empty or used twice, or a tool cannot be hashed", name)
+		c.pinErrorf("cannot pin the tools of server %s: %s", name, snapshotReason(err))
 		return exitError
 	}
 
@@ -175,7 +177,6 @@ func (c *cli) acceptTools(server discover.Server, tools []inspect.Tool, expect s
 	if !ok {
 		return exitError
 	}
-	id := serverIdentity(server)
 	counts, diffs := c.pinChanges(store, id, server.Name, tools)
 
 	// Show the diffs before pin saves. Do not use fprintf: a write error (a
@@ -298,10 +299,10 @@ func (c *cli) printAmbiguous(accept string, matches []discover.Server) {
 	c.pinErrorf("%d servers are named %s; narrow it with --config <file>:", len(matches), cutName(accept))
 	for _, s := range matches {
 		line := "  client " + cutName(string(s.Client)) +
-			", source " + termsafe.QuoteCut(s.Source, maxWarnErrRunes) +
+			", source " + termsafe.QuoteCut(s.Source, maxWarnPathRunes) +
 			", scope " + cutName(string(s.Scope))
 		if s.ProjectPath != "" {
-			line += ", project " + termsafe.QuoteCut(s.ProjectPath, maxWarnErrRunes)
+			line += ", project " + termsafe.QuoteCut(s.ProjectPath, maxWarnPathRunes)
 		}
 		fprintf(c.stderr, "%s\n", line)
 	}
@@ -316,9 +317,9 @@ type pinCounts struct {
 // example "2 new, 1 changed, 0 removed". The not verified count shows only
 // when it is above 0.
 func (p pinCounts) String() string {
-	s := strconv.Itoa(p.added) + " new, " + strconv.Itoa(p.changed) + " changed, " + strconv.Itoa(p.removed) + " removed"
+	s := fmt.Sprintf("%d new, %d changed, %d removed", p.added, p.changed, p.removed)
 	if p.unverified > 0 {
-		s += ", " + strconv.Itoa(p.unverified) + " not verified"
+		s += fmt.Sprintf(", %d not verified", p.unverified)
 	}
 	return s
 }

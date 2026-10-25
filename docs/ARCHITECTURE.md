@@ -14,7 +14,7 @@ requirements. Section 8 of the PRD is the target architecture.
 ## Package layout
 
 ```
-cmd/mcpmoat/            CLI entry (standard library flag); run() returns the exit code
+cmd/mcpmoat/            CLI entry (standard library flag); runWithContext() returns the exit code
 internal/
   termsafe/             escapes untrusted text for the terminal
   safefile/             hardened bounded read of untrusted files
@@ -177,10 +177,13 @@ the connect and pin steps between step 5 and step 6:
   ` (the diff was cut: review the full tool first)`. When `--ignore` dropped a pin finding of that
   server, it ends with ` (--ignore hid some changes: run scan without it to review them first)`.
   The command holds the server name and the config path only when each one is a bare shell word
-  (`isBareShellWord`: the ASCII characters `[A-Za-z0-9._@/:+=-]`, not starting with `-` or `@`, and
-  not too long). POSIX shells, `cmd.exe` and PowerShell all read such a word as plain text. No
-  quoting is safe in all of them, so any other name or path gives a line with no command
-  (`acceptCommand`).
+  (`isBareShellWord`: the ASCII characters `[A-Za-z0-9._@/:+=-]`, starting with a letter, `_` or
+  `/`, and not too long). POSIX shells, `cmd.exe` and PowerShell all read such a word as plain text.
+  No quoting is safe in all of them, so any other name or path gives a line with no command
+  (`acceptCommand`). The line has no command either when a diff of that server was cut (the user
+  did not see the whole tool), when another inspected server has the same name (`acceptHint.shared`),
+  or when a config file has a problem: `pin` refuses both of the last two without a `--config` that
+  narrows it (`acceptSteps`).
 - `scan` saves the new pins after it prints the report, so a save error never hides the report
   (`savePinned` in `cmd/mcpmoat/scan.go`). `savePinned` reads `pins.json` again, sets only the
   first-run servers that the file does not hold yet (another run may have pinned them meanwhile),

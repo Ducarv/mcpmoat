@@ -323,7 +323,7 @@ func TestScanAcceptHintPresent(t *testing.T) {
 
 			got := e.scan(fakeServers(map[string][]inspect.Tool{"srv": tt.current}), tt.flags...)
 
-			assertScanRun(t, got, scanWant{code: tt.wantCode, stdout: []string{tt.wantRule}, stderr: stderrOf(tt.flags)})
+			assertScanRun(t, got, scanWant{code: tt.wantCode, stdout: []string{tt.wantRule}, stderr: ignoredSummaryFor(tt.flags)})
 			wantLine := acceptHintPrefix + "srv: mcpmoat pin --accept srv --config " + e.config + " --expect " + digestOf(t, tt.current...) + tt.wantNote + "\n"
 			if !strings.HasSuffix(got.stdout, "\n"+wantLine) {
 				t.Errorf("stdout does not end with the hint %q\n%s", wantLine, got.stdout)
@@ -350,9 +350,9 @@ func TestScanAcceptHintPresent(t *testing.T) {
 	}
 }
 
-// stderrOf returns the stderr text that a scan with these flags must hold: the
+// ignoredSummaryFor returns the stderr text that a scan with these flags must hold: the
 // summary of the findings that --ignore dropped.
-func stderrOf(flags []string) []string {
+func ignoredSummaryFor(flags []string) []string {
 	if len(flags) == 0 {
 		return nil
 	}
@@ -600,9 +600,9 @@ func TestPinAcceptsNameWithoutCommand(t *testing.T) {
 	assertCleanStderr(t, got.stderr)
 }
 
-// TestAcceptCommand checks the text after the colon of a "To accept" line: the
-// command with --config when scan had one, and the text without a command when
-// the name or the config path is not a bare shell word.
+// TestAcceptCommand checks the command of a "To accept" line: with --config when
+// scan had one, and none when the name or the config path is not a bare shell
+// word.
 func TestAcceptCommand(t *testing.T) {
 	t.Parallel()
 
@@ -612,20 +612,96 @@ func TestAcceptCommand(t *testing.T) {
 	}{
 		{"no config", "srv", "", "mcpmoat pin --accept srv --expect pd1:00"},
 		{"bare config", "srv", "/home/u/.cursor/mcp.json", "mcpmoat pin --accept srv --config /home/u/.cursor/mcp.json --expect pd1:00"},
-		{"config with a space", "srv", "/Users/u/Application Support/c.json", "run pin --accept with this server name, --config with the file of this scan, and --expect pd1:00"},
-		{"config with a quote", "srv", "/tmp/a'b.json", "run pin --accept with this server name, --config with the file of this scan, and --expect pd1:00"},
-		{"config that starts with a dash", "srv", "-x.json", "run pin --accept with this server name, --config with the file of this scan, and --expect pd1:00"},
-		{"config over 500 bytes", "srv", strings.Repeat("a", 501), "run pin --accept with this server name, --config with the file of this scan, and --expect pd1:00"},
-		{"name that is not bare, with config", "a b", "/c.json", "run pin --accept with this server name, --config with the file of this scan, and --expect pd1:00"},
-		{"name that is not bare, no config", "a b", "", "run pin --accept with this server name and --expect pd1:00"},
+		{"relative config", "srv", "cfg/mcp.json", "mcpmoat pin --accept srv --config cfg/mcp.json --expect pd1:00"},
+		{"config with a space", "srv", "/Users/u/Application Support/c.json", ""},
+		{"config with a quote", "srv", "/tmp/a'b.json", ""},
+		{"config that starts with a dash", "srv", "-x.json", ""},
+		{"config that starts with a dot", "srv", "./mcp.json", ""},
+		{"config over 500 bytes", "srv", "/" + strings.Repeat("a", 500), ""},
+		{"name that is not bare, with config", "a b", "/c.json", ""},
+		{"name that is not bare, no config", "a b", "", ""},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			if got := acceptCommand(tt.server, tt.config, d); got != tt.want {
-				t.Errorf("acceptCommand(%q, %q) = %q, want %q", tt.server, tt.config, got, tt.want)
+			got, ok := acceptCommand(tt.server, tt.config, d)
+			if got != tt.want || ok != (tt.want != "") {
+				t.Errorf("acceptCommand(%q, %q) = (%q, %v), want (%q, %v)", tt.server, tt.config, got, ok, tt.want, tt.want != "")
 			}
 		})
+	}
+}
+
+// TestWriteAcceptHints checks when a "To accept" line has a command, and the
+// text and the notes that it has when it has none.
+func TestWriteAcceptHints(t *testing.T) {
+	t.Parallel()
+
+	const d = "pd1:00"
+	const steps = "To accept srv: run pin --accept with this server name and --expect pd1:00"
+	const stepsConfig = "To accept srv: run pin --accept with this server name, --config with its config file, and --expect pd1:00"
+	tests := []struct {
+		name          string
+		hint          acceptHint
+		config        string
+		configProblem bool
+		want          string
+	}{
+		{"command", acceptHint{name: "srv", digest: d}, "", false, "To accept srv: mcpmoat pin --accept srv --expect pd1:00"},
+		{"command with an ignore note", acceptHint{name: "srv", digest: d, ignored: true}, "", false,
+			"To accept srv: mcpmoat pin --accept srv --expect pd1:00" + hintIgnoredNote},
+		// The user did not see the whole tool, so they must type the command.
+		{"cut diff: no command", acceptHint{name: "srv", digest: d, truncated: true}, "", false, steps + hintCutNote},
+		{"cut diff and ignored rows", acceptHint{name: "srv", digest: d, truncated: true, ignored: true}, "", false,
+			steps + hintCutNote + hintIgnoredNote},
+		// pin refuses a name that two servers use, and any config problem.
+		{"shared name: no command", acceptHint{name: "srv", digest: d, shared: true}, "", false, stepsConfig},
+		{"config problem: no command", acceptHint{name: "srv", digest: d}, "", true, stepsConfig},
+		{"config problem with --config", acceptHint{name: "srv", digest: d}, "/c.json", true,
+			"To accept srv: run pin --accept with this server name, --config with the file of this scan, and --expect pd1:00"},
+		{"name that is not bare", acceptHint{name: "a b", digest: d}, "", false,
+			"To accept a b: run pin --accept with this server name and --expect pd1:00"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			var b strings.Builder
+			if err := writeAcceptHints(&b, []acceptHint{tt.hint}, tt.config, tt.configProblem); err != nil {
+				t.Fatalf("writeAcceptHints() error = %v, want nil", err)
+			}
+			if got := b.String(); got != tt.want+"\n" {
+				t.Errorf("writeAcceptHints() = %q, want %q", got, tt.want+"\n")
+			}
+		})
+	}
+}
+
+// TestScanAcceptHintSharedName checks that two servers with one name in
+// different config files get hints with no command, because pin refuses the
+// name without --config.
+func TestScanAcceptHintSharedName(t *testing.T) {
+	t.Parallel()
+
+	srvA := discover.Server{Name: "srv", Client: discover.ClientClaudeCode, Source: "/a/mcp.json"}
+	srvB := discover.Server{Name: "srv", Client: discover.ClientCursor, Source: "/b/mcp.json"}
+	e := newPinEnv(t, oneServer("srv"))
+	for _, s := range []discover.Server{srvA, srvB} {
+		writePinsAside(t, e.pinsPath(), serverIdentity(s), mkTool("a", "Add."))
+	}
+	c, _, _ := e.cli(nil)
+	store, ok := c.readPins("scan")
+	if !ok {
+		t.Fatal("readPins() = false, want true")
+	}
+	changed := []inspect.Tool{mkTool("a", "Add. Changed.")}
+
+	pr := c.pinOutcomes(store, []inspect.Outcome{
+		{Server: srvA, Status: inspect.StatusOK, Result: inspect.Result{Tools: changed}},
+		{Server: srvB, Status: inspect.StatusOK, Result: inspect.Result{Tools: changed}},
+	}, &scanIgnores{})
+
+	if len(pr.hints) != 2 || !pr.hints[0].shared || !pr.hints[1].shared {
+		t.Errorf("hints = %+v, want two shared hints", pr.hints)
 	}
 }
 
@@ -640,8 +716,11 @@ func TestIsBareShellWord(t *testing.T) {
 	}{
 		{"plain", "srv", true},
 		{"every bare character", "aZ09._@/:+=-", true},
+		{"starts with _", "_srv", true},
+		{"absolute path", "/home/u/mcp.json", true},
 		{"dash inside", "a-b", true},
 		{"@ inside", "a@b", true},
+		{"= inside", "a=b", true},
 		{"exactly the cap", strings.Repeat("a", 20), true},
 		{"over the cap", strings.Repeat("a", 21), false},
 		// pin would read a word that starts with a dash as a flag.
@@ -650,6 +729,13 @@ func TestIsBareShellWord(t *testing.T) {
 		{"two dashes", "--", false},
 		// PowerShell reads @name as splatting.
 		{"starts with @", "@x", false},
+		// zsh expands =name to the path of a command.
+		{"starts with =", "=ls", false},
+		// PowerShell can read 1kb or .5 as a number.
+		{"starts with a digit", "1kb", false},
+		{"starts with a dot", ".5", false},
+		{"starts with +", "+5", false},
+		{"starts with :", ":a", false},
 		{"empty", "", false},
 		{"space", "a b", false},
 		{"quote", "it's", false},
@@ -693,7 +779,7 @@ func TestBareShellWordReadByShell(t *testing.T) {
 		t.Skip("no sh in PATH")
 	}
 	dir := t.TempDir()
-	for _, word := range []string{"srv", "a-n", "a=b", "a:b", "a+b", "a@b", "a/b.c", "aZ09._@/:+=-"} {
+	for _, word := range []string{"srv", "a-n", "a=b", "a:b", "a+b", "a@b", "a/b.c", "/abs/path", "_x", "aZ09._@/:+=-"} {
 		if !isBareShellWord(word, maxWarnNameRunes) {
 			t.Fatalf("isBareShellWord(%q) = false, want true", word)
 		}

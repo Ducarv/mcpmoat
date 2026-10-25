@@ -522,9 +522,11 @@ text diff.
 - After the diffs, `scan` prints one line for each pinned server that has a pin finding that is not
   ignored: `To accept <server>: mcpmoat pin --accept <server> --expect pd1:<64 hex>`. After
   `scan --config <file>`, the command holds `--config <file>` too. The command holds the server name
-  and the path only when each one is a bare shell word (ASCII `[A-Za-z0-9._@/:+=-]`, not starting
-  with `-` or `@`), which every shell, also `cmd.exe` and PowerShell, reads as plain text. Else the
-  line says what to run and gives the digest, with no command. When a diff of that server was cut
+  and the path only when each one is a bare shell word (ASCII `[A-Za-z0-9._@/:+=-]`, starting with a
+  letter, `_` or `/`), which every shell, also `cmd.exe` and PowerShell, reads as plain text. Else
+  the line says what to run and gives the digest, with no command. The line has no command either
+  when a diff of that server was cut, when another server has the same name, or when a config file
+  has a problem. When a diff of that server was cut
   at the size limit, the line ends with ` (the diff was cut: review the full tool first)`. When
   `--ignore` dropped a pin finding of that server, the line ends with
   ` (--ignore hid some changes: run scan without it to review them first)`: the digest covers those

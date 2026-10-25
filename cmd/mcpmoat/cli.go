@@ -36,13 +36,14 @@ type cli struct {
 	stdout, stderr io.Writer
 	getenv         func(string) string
 	build          buildInfo
-	// homeDir returns the user's home directory. run sets it to os.UserHomeDir.
-	// Tests inject a fixture path.
+	// homeDir returns the user's home directory. runWithContext sets it to
+	// os.UserHomeDir. Tests inject a fixture path.
 	homeDir func() (string, error)
-	// getwd returns the current working directory. run sets it to os.Getwd.
+	// getwd returns the current working directory. runWithContext sets it to
+	// os.Getwd.
 	getwd func() (string, error)
 	// inspector connects to the servers when scan runs without --no-connect.
-	// run sets it to the SDK inspector. Tests inject a fake from
+	// runWithContext sets it to the SDK inspector. Tests inject a fake from
 	// internal/inspect/inspecttest, so they start no process and open no
 	// connection.
 	inspector inspect.Inspector

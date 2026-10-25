@@ -689,7 +689,7 @@ func TestRenderWrapCutsOnRuneBoundaries(t *testing.T) {
 func TestWriteWrapped(t *testing.T) {
 	t.Parallel()
 	long := strings.Repeat("a", maxLineRunes+1)
-	deep := strings.Repeat(" ", maxChunkIndent+50)
+	deep := strings.Repeat(" ", maxIndent+50)
 	tests := []struct {
 		name       string
 		lead, text string
@@ -700,7 +700,7 @@ func TestWriteWrapped(t *testing.T) {
 		{"exactly the limit", "p: ", long[:maxLineRunes], "p: " + long[:maxLineRunes] + "\n"},
 		{"one over", "p: ", long, "p: " + long[:maxLineRunes] + "\np: a\n"},
 		{"invalid UTF-8 bytes count one each", "p: ", strings.Repeat("\xff", maxLineRunes+1), "p: " + strings.Repeat("\xff", maxLineRunes) + "\np: \xff\n"},
-		{"huge indentation is capped after the first chunk", deep, long, deep + long[:maxLineRunes] + "\n" + deep[:maxChunkIndent] + "a\n"},
+		{"huge indentation is capped on every chunk", deep, long, deep[:maxIndent] + long[:maxLineRunes] + "\n" + deep[:maxIndent] + "a\n"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
