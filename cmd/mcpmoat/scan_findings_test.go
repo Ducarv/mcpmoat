@@ -305,6 +305,7 @@ func TestHasFailingFinding(t *testing.T) {
 	always := perLevel[bool]{true, true, true, true}
 	upToMedium := perLevel[bool]{true, true, false, false}
 	upToHigh := perLevel[bool]{true, true, true, false}
+	onlyLow := perLevel[bool]{true, false, false, false}
 
 	tests := []struct {
 		name string
@@ -313,7 +314,7 @@ func TestHasFailingFinding(t *testing.T) {
 	}{
 		{"nil rows", nil, never},
 		{"empty rows", severityRows(), never},
-		{"low", severityRows("low"), perLevel[bool]{true, false, false, false}},
+		{"low", severityRows("low"), onlyLow},
 		{"medium", severityRows("medium"), upToMedium},
 		{"high", severityRows("high"), upToHigh},
 		{"critical", severityRows("critical"), always},
@@ -367,6 +368,7 @@ func TestScanExitCode(t *testing.T) {
 
 	// The want values are in the order low, medium, high, critical.
 	alwaysError := perLevel[int]{exitError, exitError, exitError, exitError}
+	alwaysOK := perLevel[int]{exitOK, exitOK, exitOK, exitOK}
 
 	tests := []struct {
 		name string
@@ -378,7 +380,7 @@ func TestScanExitCode(t *testing.T) {
 	}{
 		{
 			name: "no failure, no findings",
-			want: perLevel[int]{exitOK, exitOK, exitOK, exitOK},
+			want: alwaysOK,
 		},
 		{
 			name: "no failure, a low finding",

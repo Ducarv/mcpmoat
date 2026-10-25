@@ -357,12 +357,12 @@ func TestUsageContent(t *testing.T) {
 		"  --config <file> ",
 		"A file that is not your own global config is read as an untrusted project file\n",
 		"Exit codes:\n",
-		"  0  no finding at or above --fail-on\n",
-		"  1  a finding at or above --fail-on (default high)\n",
+		"  0  no finding that is not ignored at or above --fail-on\n",
+		"  1  a finding that is not ignored at or above --fail-on (default high)\n",
 		// Exit code 2 wins over 1 (FR-16). README.md#exit-codes owns the
 		// exact contract, so the usage text points to it.
 		"  2  execution or usage error, also when there are findings\n",
-		"     (README \"Exit codes\" lists the causes and when the report still prints)\n",
+		"     (https://github.com/Ducarv/mcpmoat#exit-codes lists the causes and when the report still prints)\n",
 		// The --fail-on flag line and its continuation lines. Only the text is
 		// checked, not the padding that tabwriter prints.
 		"  --fail-on <severity>  Exit 1 for a finding of this severity or above: low, medium, high or critical (default high)\n",
@@ -372,7 +372,7 @@ func TestUsageContent(t *testing.T) {
 		"  A new tool is medium, so alone it does not give exit code 1 with the default --fail-on high; next to a removed tool (a likely rename) it is high.\n",
 		"  If that server is already pinned and failed or timed out, it is also a finding (MOAT-T2-004, high).\n",
 		"  scan reads pins.json before it starts a server, and reads it again just before it saves the first-run pins.\n",
-		"  Ctrl-C (or SIGTERM or SIGHUP) during the inspection, or before scan saves new pins, stops scan with exit 2 and saves no pins.\n",
+		"  Ctrl-C (or SIGTERM or SIGHUP) during the inspection, or after it while scan has new pins to save, stops scan with exit 2 and saves no pins.\n",
 		"  pin changes only the entry of this server: it reads pins.json again just before it saves, and keeps the other entries.\n",
 		"Ctrl-C stops the server and saves nothing (exit 2)",
 		"Pin flags (after \"pin\"):\n",

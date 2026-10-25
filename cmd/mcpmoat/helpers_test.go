@@ -180,13 +180,15 @@ func scanServersArgs(t *testing.T, mode, home string, servers map[string]any) []
 // findingIDs returns the rule ID (the first word) of each findings row.
 func findingIDs(rows [][]string) []string { return column(rows, 0) }
 
-// sortedFindingIDs returns the rule IDs of the findings table of stdout,
-// sorted. It returns nil when stdout has no findings table.
-func sortedFindingIDs(t *testing.T, stdout string) []string {
+// assertFindingIDs checks that the rule IDs of the findings table of stdout,
+// sorted, equal want. want must be sorted. Use nil for no findings table.
+func assertFindingIDs(t *testing.T, stdout string, want []string) {
 	t.Helper()
 	ids := findingIDs(findingRows(t, stdout))
 	slices.Sort(ids)
-	return ids
+	if !slices.Equal(ids, want) {
+		t.Errorf("finding IDs = %v, want %v\nstdout:\n%s", ids, want, stdout)
+	}
 }
 
 // failOnLevels are the four --fail-on values, from low to critical.

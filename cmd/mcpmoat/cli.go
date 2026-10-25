@@ -19,7 +19,7 @@ import (
 // --fail-on, 1 such a finding, 2 execution or usage error. README.md#exit-codes
 // is the exact contract.
 const (
-	exitOK       = 0 // success: no finding that is not ignored at or above --fail-on
+	exitOK       = 0 // success; for scan: no finding that counts for --fail-on
 	exitFindings = 1 // a finding that is not ignored has severity at or above --fail-on (default high)
 	exitError    = 2 // execution or usage error
 )
@@ -200,10 +200,10 @@ func (c *cli) usage(w io.Writer) {
 	pinUsage(w)
 
 	fprintf(w, "\nExit codes:\n")
-	fprintf(w, "  0  no finding at or above --fail-on\n")
-	fprintf(w, "  1  a finding at or above --fail-on (default high)\n")
+	fprintf(w, "  0  no finding that is not ignored at or above --fail-on\n")
+	fprintf(w, "  1  a finding that is not ignored at or above --fail-on (default high)\n")
 	fprintf(w, "  2  execution or usage error, also when there are findings\n")
-	fprintf(w, "     (README \"Exit codes\" lists the causes and when the report still prints)\n")
+	fprintf(w, "     (https://github.com/Ducarv/mcpmoat#exit-codes lists the causes and when the report still prints)\n")
 }
 
 // scanUsage writes the flags and the output notes of the scan command to w.
@@ -243,7 +243,7 @@ func scanUsage(w io.Writer) {
 	fprintf(w, "  If that server is already pinned and failed or timed out, it is also a finding (MOAT-T2-004, high).\n")
 	fprintf(w, "  The warnings of an inspection (cleartext-secrets, undeclared-capability, dns-pin-unavailable) go to stderr.\n")
 	fprintf(w, "  scan reads pins.json before it starts a server, and reads it again just before it saves the first-run pins.\n")
-	fprintf(w, "  Ctrl-C (or SIGTERM or SIGHUP) during the inspection, or before scan saves new pins, stops scan with exit 2 and saves no pins.\n")
+	fprintf(w, "  Ctrl-C (or SIGTERM or SIGHUP) during the inspection, or after it while scan has new pins to save, stops scan with exit 2 and saves no pins.\n")
 	fprintf(w, "  --no-connect: scan runs only the built-in config rules (T4 and T5). It reads and writes no pins.\n")
 	fprintf(w, "  The tool rules (YAML) are not applied to tools yet. Rules from --rules are loaded and checked, but not applied yet.\n")
 	fprintf(w, "  Exit code 1 means a finding that is not ignored, with severity at or above --fail-on (default high).\n")

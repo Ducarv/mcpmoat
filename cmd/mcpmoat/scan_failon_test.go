@@ -127,9 +127,7 @@ func TestScanFailOnThresholds(t *testing.T) {
 						want.stderr = append(want.stderr, failOnCriticalNotice+"\n")
 					}
 					assertScanRun(t, got, want)
-					if ids := sortedFindingIDs(t, got.stdout); !slices.Equal(ids, tt.wantIDs) {
-						t.Errorf("finding IDs = %v, want %v\nstdout:\n%s", ids, tt.wantIDs, got.stdout)
-					}
+					assertFindingIDs(t, got.stdout, tt.wantIDs)
 				})
 			}
 		}
@@ -137,7 +135,7 @@ func TestScanFailOnThresholds(t *testing.T) {
 
 	// The default is high, the PRD default, and --fail-on=<value> is the same
 	// as --fail-on <value>.
-	for _, tc := range []struct {
+	for _, tt := range []struct {
 		name       string
 		args       []string
 		want       int
@@ -147,13 +145,13 @@ func TestScanFailOnThresholds(t *testing.T) {
 		{"equals form critical", []string{"--fail-on=critical"}, exitOK, []string{failOnCriticalNotice + "\n"}},
 		{"equals form high", []string{"--fail-on=high"}, exitFindings, nil},
 	} {
-		t.Run(tc.name, func(t *testing.T) {
+		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			e := newPinEnv(t, map[string]any{"high-srv": failOnHighServer})
 
-			got := e.scan(nil, append([]string{"--no-connect"}, tc.args...)...)
+			got := e.scan(nil, append([]string{"--no-connect"}, tt.args...)...)
 
-			assertScanRun(t, got, scanWant{code: tc.want, stdout: []string{"MOAT-T4-001"}, stderr: tc.wantStderr})
+			assertScanRun(t, got, scanWant{code: tt.want, stdout: []string{"MOAT-T4-001"}, stderr: tt.wantStderr})
 		})
 	}
 }
@@ -224,9 +222,7 @@ func TestScanFailOnIgnored(t *testing.T) {
 				got := e.scan(failOnFake(servers), args...)
 
 				assertScanRun(t, got, scanWant{code: tt.wantCode, stderr: tt.wantStderr})
-				if ids := sortedFindingIDs(t, got.stdout); !slices.Equal(ids, tt.wantIDs) {
-					t.Errorf("finding IDs = %v, want %v\nstdout:\n%s", ids, tt.wantIDs, got.stdout)
-				}
+				assertFindingIDs(t, got.stdout, tt.wantIDs)
 			})
 		}
 	}
@@ -358,7 +354,7 @@ func TestScanFailOnExecErrors(t *testing.T) {
 			setup: func(t *testing.T, e *pinEnv) []string {
 				writeTestFile(t, e.home, ".claude.json", `{"mcpServers": {`)
 				writeServers(t, filepath.Join(e.home, ".cursor"), "mcp.json",
-					map[string]any{"high-srv": map[string]any{"url": "http://mcp.example.invalid/mcp"}})
+					map[string]any{"high-srv": failOnHighServer})
 				return nil
 			},
 			wantStdout: []string{"MOAT-T4-001", "high-srv"},

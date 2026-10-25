@@ -1198,9 +1198,7 @@ func TestE2EScanFailOn(t *testing.T) {
 				if !slices.Equal(names, []string{"files", "notes", "remote"}) {
 					t.Errorf("server names = %v, want files, notes and remote\nstdout:\n%s", names, stdout)
 				}
-				if got := sortedFindingIDs(t, stdout); !slices.Equal(got, tt.wantIDs) {
-					t.Errorf("finding rule IDs = %v, want %v\nstdout:\n%s", got, tt.wantIDs, stdout)
-				}
+				assertFindingIDs(t, stdout, tt.wantIDs)
 			})
 		}
 	}
