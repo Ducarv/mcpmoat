@@ -41,8 +41,9 @@ type hashFixtureFile struct {
 		Name        string `json:"name"`
 		Title       string `json:"title"`
 		Description string `json:"description"`
-		// A jsontext.Value keeps the raw schema bytes exactly as in the file
-		// (spaces and number forms included). An absent schema stays nil.
+		// A jsontext.Value keeps the raw JSON bytes (schemas, _meta and icons)
+		// exactly as in the file, spaces and number forms included. An absent
+		// value stays nil.
 		InputSchema  jsontext.Value          `json:"inputSchema"`
 		OutputSchema jsontext.Value          `json:"outputSchema"`
 		Meta         jsontext.Value          `json:"_meta"`

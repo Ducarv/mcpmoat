@@ -1438,7 +1438,7 @@ func checkRaw(t *testing.T, field string, raw json.RawMessage, want map[string]a
 	}
 }
 
-func TestMarshalSchema(t *testing.T) {
+func TestMarshalJSON(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {

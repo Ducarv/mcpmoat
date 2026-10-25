@@ -31,7 +31,7 @@ func hashMutations(t testing.TB, tool inspect.Tool) []hashMutation {
 	t.Helper()
 	muts := hashTextMutations(tool)
 	muts = append(muts, hashHintMutations(tool)...)
-	return append(muts, hashSchemaFieldMutations(t, tool)...)
+	return append(muts, hashJSONFieldMutations(t, tool)...)
 }
 
 // hashMutated returns a copy of tool (see cloneTool), changed by change.
@@ -100,10 +100,10 @@ func hashHintMutations(tool inspect.Tool) []hashMutation {
 	return muts
 }
 
-// hashSchemaFieldMutations removes each schema, _meta and icons, or, when the
+// hashJSONFieldMutations removes each schema, _meta and icons, or, when the
 // field is absent, sets it to each value in whenAbsent, and adds the changes of
 // hashSchemaMutations.
-func hashSchemaFieldMutations(t testing.TB, tool inspect.Tool) []hashMutation {
+func hashJSONFieldMutations(t testing.TB, tool inspect.Tool) []hashMutation {
 	t.Helper()
 	fields := []struct {
 		name       string
