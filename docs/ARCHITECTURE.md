@@ -125,25 +125,30 @@ The target flow is `discover -> inspect -> rules -> pins -> report`:
 
 ## Tool hash
 
-`pins.Hash` gives the pin hash of one `inspect.Tool` (FR-11, threat T2). The full contract is in
-`internal/pins/canonical.go` and `internal/pins/hash.go`.
+`pins.Hash` gives the pin hash of one `inspect.Tool` (FR-11, threat T2). The full contract is the
+`Canonical` doc comment (`go doc ./internal/pins Canonical`).
 
 - Input: all six `inspect.Tool` fields: name, title, description, input schema, output schema and
   annotations (title and the four hints). `inspect` drops `_meta` and `icons`, so they are not
-  hashed.
+  hashed. This is an accepted limit. Issue #153 closes it before v1.0.0.
 - Canonical form: one JSON object with a fixed shape. Every key is always present: an absent hint
-  or schema is `null`, and nil annotations give the same bytes as empty annotations. RFC 8785 (JCS)
-  makes it canonical, through `Value.Canonicalize` in the standard library `encoding/json/jsontext`.
+  or schema is `null`, and nil annotations give the same bytes as empty annotations. A schema that
+  is the JSON literal `null` counts as no schema, so it is also `null`. Both differ from `{}`.
+  RFC 8785 (JCS) makes it canonical, through `Value.Canonicalize` in the standard library
+  `encoding/json/jsontext`.
 - No Unicode normalisation: invisible, bidi and tag characters, and NFC against NFD, all change the
   hash.
-- Invalid UTF-8, invalid schema JSON and duplicate keys give an error that wraps `ErrInvalidTool`.
+- Invalid UTF-8, invalid schema JSON, duplicate keys and out-of-range numbers (for example `1e400`)
+  give an error that wraps `ErrInvalidTool`.
 - Output: `sha256-v1:` (`HashVersion`) and the lowercase hex SHA-256 of the canonical form. A change
   to the fields, the shape or the canonicalisation needs a new version. A stored hash with another
   prefix means "pin again", not a rug pull.
-- Known limits: the MCP SDK decodes schema numbers as `float64`, so a change only in an integer
-  above 2^53 does not change the hash. JCS makes `1`, `1.0` and `1e0` equal. At decode time, the SDK
-  keeps the last value of a duplicate key and turns invalid UTF-8 and lone surrogates into U+FFFD.
-  For `readOnlyHint` and `idempotentHint`, `false` and absent are the same.
+- Known limits: the MCP SDK decode and JCS both pass schema numbers through `float64` (IEEE 754
+  double). So `1`, `1.0` and `1e0` are equal, and a change only in an integer above 2^53 does not
+  change the hash. This is also true for raw schema bytes from other sources. At decode time, the
+  SDK keeps the last value of a duplicate key and turns invalid UTF-8 and lone surrogates into
+  U+FFFD. The SDK decodes `readOnlyHint` and `idempotentHint` as a plain `bool`, and the canonical
+  form maps `false` to `null`. So for these two hints, `false` and absent give the same hash.
 - Golden hashes: `testdata/pins/hash/golden.txt`, for the fixtures in
   `testdata/pins/hash/tools.json`.
 

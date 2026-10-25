@@ -5,20 +5,18 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json/jsontext"
-	"errors"
 	"math"
 	"math/rand/v2"
 	"regexp"
 	"strconv"
-	"strings"
 	"testing"
 	"unicode/utf8"
 
 	"github.com/Ducarv/mcpmoat/internal/inspect"
 )
 
-// hashFormat is the exact form of a hash of version sha256-v1.
-var hashFormat = regexp.MustCompile(`^sha256-v1:[0-9a-f]{64}$`)
+// hashFormat is the exact form of a hash of version HashVersion.
+var hashFormat = regexp.MustCompile("^" + regexp.QuoteMeta(HashVersion) + ":[0-9a-f]{64}$")
 
 func TestHashFormat(t *testing.T) {
 	t.Parallel()
@@ -29,7 +27,7 @@ func TestHashFormat(t *testing.T) {
 			if err != nil {
 				t.Fatalf("Hash() error = %v", err)
 			}
-			if !hashFormat.MatchString(h) || !strings.HasPrefix(h, HashVersion+":") {
+			if !hashFormat.MatchString(h) {
 				t.Errorf("Hash() = %q, want %s:<64 lowercase hex digits>", h, HashVersion)
 			}
 			canon, err := Canonical(f.Tool)
@@ -103,8 +101,7 @@ func TestHashMutations(t *testing.T) {
 			if err != nil {
 				t.Fatalf("Hash() error = %v", err)
 			}
-			muts := hashMutations(t, f.Tool)
-			for _, m := range muts {
+			for _, m := range hashMutations(t, f.Tool) {
 				got, err := Hash(m.tool)
 				if err != nil {
 					t.Errorf("%s: Hash() error = %v", m.name, err)
@@ -115,37 +112,41 @@ func TestHashMutations(t *testing.T) {
 				}
 			}
 			// The mutations must not change the fixture through shared memory.
-			if again, _ := Hash(f.Tool); again != orig {
+			again, err := Hash(f.Tool)
+			if err != nil {
+				t.Fatalf("Hash() of the original tool: error = %v", err)
+			}
+			if again != orig {
 				t.Errorf("Hash() of the original tool changed to %q, want %q", again, orig)
 			}
-			t.Logf("%d mutations", len(muts))
 		})
 	}
 }
 
-func TestHashInvalidTool(t *testing.T) {
+// TestHashFalseHintIsNil checks that false and nil give the same hash for
+// readOnlyHint and idempotentHint (see Canonical).
+func TestHashFalseHintIsNil(t *testing.T) {
 	t.Parallel()
-	tests := []struct {
-		name string
-		tool inspect.Tool
-	}{
-		{name: "invalid UTF-8 in name", tool: inspect.Tool{Name: "a\xffb"}},
-		{name: "invalid UTF-8 in description", tool: inspect.Tool{Name: "x", Description: "\xc3"}},
-		{name: "invalid UTF-8 in annotations title", tool: inspect.Tool{Name: "x", Annotations: &inspect.ToolAnnotations{Title: "\xff"}}},
-		{name: "invalid JSON in inputSchema", tool: inspect.Tool{Name: "x", InputSchema: []byte(`{`)}},
-		{name: "duplicate key in outputSchema", tool: inspect.Tool{Name: "x", OutputSchema: []byte(`{"a":1,"a":2}`)}},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
-			h, err := Hash(tt.tool)
-			if !errors.Is(err, ErrInvalidTool) {
-				t.Errorf("Hash() error = %v, want an error that wraps ErrInvalidTool", err)
+	for _, f := range loadHashFixtures(t) {
+		for _, h := range hashHints {
+			if !h.falseIsNull {
+				continue
 			}
-			if h != "" {
-				t.Errorf("Hash() = %q, want \"\" on error", h)
-			}
-		})
+			t.Run(f.Name+"/"+h.field, func(t *testing.T) {
+				t.Parallel()
+				set := func(v *bool) string {
+					m := hashMutated(f.Tool, "", func(c *inspect.Tool) { *h.ptr(hashAnnotations(c)) = v })
+					got, err := Hash(m.tool)
+					if err != nil {
+						t.Fatalf("Hash() error = %v", err)
+					}
+					return got
+				}
+				if isNil, isFalse := set(nil), set(new(false)); isNil != isFalse {
+					t.Errorf("Hash() with %s nil = %q, with false = %q, want equal", h.field, isNil, isFalse)
+				}
+			})
+		}
 	}
 }
 
@@ -159,26 +160,53 @@ type hashMutation struct {
 // change: zero width space, byte order mark and the tag character "A".
 var hashInvisible = []string{"\u200b", "\ufeff", "\U000E0041"}
 
-// hashMutations returns changed copies of tool. None of them changes tool.
-func hashMutations(t *testing.T, tool inspect.Tool) []hashMutation {
-	t.Helper()
-	var muts []hashMutation
-	add := func(name string, change func(*inspect.Tool)) {
-		c := tool
-		if tool.Annotations != nil {
-			ann := *tool.Annotations
-			c.Annotations = &ann
-		}
-		change(&c)
-		muts = append(muts, hashMutation{name: name, tool: c})
-	}
-	annotations := func(c *inspect.Tool) *inspect.ToolAnnotations {
-		if c.Annotations == nil {
-			c.Annotations = &inspect.ToolAnnotations{}
-		}
-		return c.Annotations
-	}
+// hashHints are the four hints of inspect.ToolAnnotations. falseIsNull marks
+// the hints that the canonical form writes as null when they are false.
+var hashHints = []struct {
+	field       string
+	ptr         func(*inspect.ToolAnnotations) **bool
+	falseIsNull bool
+}{
+	{"readOnlyHint", func(a *inspect.ToolAnnotations) **bool { return &a.ReadOnlyHint }, true},
+	{"destructiveHint", func(a *inspect.ToolAnnotations) **bool { return &a.DestructiveHint }, false},
+	{"idempotentHint", func(a *inspect.ToolAnnotations) **bool { return &a.IdempotentHint }, true},
+	{"openWorldHint", func(a *inspect.ToolAnnotations) **bool { return &a.OpenWorldHint }, false},
+}
 
+// hashMutations returns changed copies of tool. Each one must have another
+// hash than tool. None of them changes tool.
+func hashMutations(t testing.TB, tool inspect.Tool) []hashMutation {
+	t.Helper()
+	muts := hashTextMutations(tool)
+	muts = append(muts, hashHintMutations(tool)...)
+	return append(muts, hashSchemaFieldMutations(t, tool)...)
+}
+
+// hashMutated returns a copy of tool, changed by change. The copy has its own
+// annotations, so change cannot alter the annotations of tool. change must
+// replace a schema, never write into its bytes.
+func hashMutated(tool inspect.Tool, name string, change func(*inspect.Tool)) hashMutation {
+	c := tool
+	if tool.Annotations != nil {
+		ann := *tool.Annotations
+		c.Annotations = &ann
+	}
+	change(&c)
+	return hashMutation{name: name, tool: c}
+}
+
+// hashAnnotations returns the annotations of c, and first adds empty ones
+// when c has none.
+func hashAnnotations(c *inspect.Tool) *inspect.ToolAnnotations {
+	if c.Annotations == nil {
+		c.Annotations = &inspect.ToolAnnotations{}
+	}
+	return c.Annotations
+}
+
+// hashTextMutations changes one character of each text field, and adds each
+// invisible character at its start and at its end.
+func hashTextMutations(tool inspect.Tool) []hashMutation {
 	texts := []struct {
 		field string
 		ptr   func(*inspect.Tool) *string
@@ -186,50 +214,59 @@ func hashMutations(t *testing.T, tool inspect.Tool) []hashMutation {
 		{"name", func(c *inspect.Tool) *string { return &c.Name }},
 		{"title", func(c *inspect.Tool) *string { return &c.Title }},
 		{"description", func(c *inspect.Tool) *string { return &c.Description }},
-		{"annotations title", func(c *inspect.Tool) *string { return &annotations(c).Title }},
+		{"annotations title", func(c *inspect.Tool) *string { return &hashAnnotations(c).Title }},
 	}
+	var muts []hashMutation
 	for _, tf := range texts {
-		add(tf.field+": one character changed", func(c *inspect.Tool) {
+		muts = append(muts, hashMutated(tool, tf.field+": one character changed", func(c *inspect.Tool) {
 			p := tf.ptr(c)
 			*p = hashChangeOneChar(*p)
-		})
+		}))
 		for _, inv := range hashInvisible {
-			add(tf.field+": "+strconv.QuoteToASCII(inv)+" at the start", func(c *inspect.Tool) {
-				p := tf.ptr(c)
-				*p = inv + *p
-			})
-			add(tf.field+": "+strconv.QuoteToASCII(inv)+" at the end", func(c *inspect.Tool) {
-				p := tf.ptr(c)
-				*p += inv
-			})
+			muts = append(muts,
+				hashMutated(tool, tf.field+": "+strconv.QuoteToASCII(inv)+" at the start", func(c *inspect.Tool) {
+					p := tf.ptr(c)
+					*p = inv + *p
+				}),
+				hashMutated(tool, tf.field+": "+strconv.QuoteToASCII(inv)+" at the end", func(c *inspect.Tool) {
+					p := tf.ptr(c)
+					*p += inv
+				}),
+			)
 		}
 	}
+	return muts
+}
 
-	hints := []struct {
-		field string
-		ptr   func(*inspect.ToolAnnotations) **bool
-	}{
-		{"readOnlyHint", func(a *inspect.ToolAnnotations) **bool { return &a.ReadOnlyHint }},
-		{"destructiveHint", func(a *inspect.ToolAnnotations) **bool { return &a.DestructiveHint }},
-		{"idempotentHint", func(a *inspect.ToolAnnotations) **bool { return &a.IdempotentHint }},
-		{"openWorldHint", func(a *inspect.ToolAnnotations) **bool { return &a.OpenWorldHint }},
-	}
-	yes, no := true, false
-	for _, hf := range hints {
+// hashHintMutations sets each hint to each value of nil, true and false that
+// gives another canonical form. For readOnlyHint and idempotentHint, nil and
+// false are the same (TestHashFalseHintIsNil checks this), so only a change
+// to or from true is a mutation.
+func hashHintMutations(tool inspect.Tool) []hashMutation {
+	var muts []hashMutation
+	for _, hf := range hashHints {
 		var cur *bool
 		if tool.Annotations != nil {
 			cur = *hf.ptr(tool.Annotations)
 		}
-		for _, v := range []*bool{nil, &yes, &no} {
-			if hashSameHint(cur, v) {
+		// new(true) (Go 1.26+) returns a pointer to a new bool set to true.
+		for _, v := range []*bool{nil, new(true), new(false)} {
+			if hashHintJSON(cur, hf.falseIsNull) == hashHintJSON(v, hf.falseIsNull) {
 				continue
 			}
-			add(hf.field+": "+hashHintString(cur)+" to "+hashHintString(v), func(c *inspect.Tool) {
-				*hf.ptr(annotations(c)) = v
-			})
+			name := hf.field + ": " + hashHintString(cur) + " to " + hashHintString(v)
+			muts = append(muts, hashMutated(tool, name, func(c *inspect.Tool) {
+				*hf.ptr(hashAnnotations(c)) = v
+			}))
 		}
 	}
+	return muts
+}
 
+// hashSchemaFieldMutations removes each schema, or adds {} when it is absent,
+// and adds the changes of hashSchemaMutations.
+func hashSchemaFieldMutations(t testing.TB, tool inspect.Tool) []hashMutation {
+	t.Helper()
 	schemas := []struct {
 		field string
 		ptr   func(*inspect.Tool) *[]byte
@@ -237,16 +274,17 @@ func hashMutations(t *testing.T, tool inspect.Tool) []hashMutation {
 		{"inputSchema", func(c *inspect.Tool) *[]byte { return (*[]byte)(&c.InputSchema) }},
 		{"outputSchema", func(c *inspect.Tool) *[]byte { return (*[]byte)(&c.OutputSchema) }},
 	}
+	var muts []hashMutation
 	for _, sf := range schemas {
 		raw := *sf.ptr(&tool)
 		if raw == nil {
 			// No schema and the empty schema {} must have different hashes.
-			add(sf.field+": absent to {}", func(c *inspect.Tool) { *sf.ptr(c) = []byte(`{}`) })
+			muts = append(muts, hashMutated(tool, sf.field+": absent to {}", func(c *inspect.Tool) { *sf.ptr(c) = []byte(`{}`) }))
 			continue
 		}
-		add(sf.field+": removed", func(c *inspect.Tool) { *sf.ptr(c) = nil })
+		muts = append(muts, hashMutated(tool, sf.field+": removed", func(c *inspect.Tool) { *sf.ptr(c) = nil }))
 		for _, sm := range hashSchemaMutations(t, raw) {
-			add(sf.field+": "+sm.name, func(c *inspect.Tool) { *sf.ptr(c) = sm.schema })
+			muts = append(muts, hashMutated(tool, sf.field+": "+sm.name, func(c *inspect.Tool) { *sf.ptr(c) = sm.schema }))
 		}
 	}
 	return muts
@@ -264,27 +302,36 @@ type hashSchemaMutation struct {
 // adjacent, different array elements swapped. Numbers at or above 2^53 are
 // left alone, because the canonical form cannot tell them apart (see the
 // known limits in canonical.go).
-func hashSchemaMutations(t *testing.T, raw []byte) []hashSchemaMutation {
+func hashSchemaMutations(t testing.TB, raw []byte) []hashSchemaMutation {
 	t.Helper()
 	var p hashSchemaParts
 	dec := jsontext.NewDecoder(bytes.NewReader(raw))
 	if _, err := hashWalk(dec, &p); err != nil {
 		t.Fatalf("walk schema %q: %v", raw, err)
 	}
+	muts := hashStringMutations(t, raw, p.strings)
+	muts = append(muts, hashNumberMutations(t, raw, p.numbers)...)
+	muts = append(muts, hashBoolMutations(raw, p.bools)...)
+	return append(muts, hashArraySwaps(t, raw, p.arrays)...)
+}
 
+// hashStringMutations changes one character of each string or key in spans,
+// and adds each invisible character at its start.
+func hashStringMutations(t testing.TB, raw []byte, spans []hashSpan) []hashSchemaMutation {
+	t.Helper()
+	quote := func(v string) []byte {
+		q, err := jsontext.AppendQuote(nil, v)
+		if err != nil {
+			t.Fatalf("quote %q: %v", v, err)
+		}
+		return q
+	}
 	var muts []hashSchemaMutation
-	for _, s := range p.strings {
+	for _, s := range spans {
 		tok := raw[s.start:s.end]
 		str, err := jsontext.AppendUnquote(nil, tok)
 		if err != nil {
 			t.Fatalf("unquote %s: %v", tok, err)
-		}
-		quote := func(v string) []byte {
-			q, err := jsontext.AppendQuote(nil, v)
-			if err != nil {
-				t.Fatalf("quote %q: %v", v, err)
-			}
-			return q
 		}
 		muts = append(muts, hashSchemaMutation{
 			name:   "string " + string(tok) + ": one character changed",
@@ -297,7 +344,14 @@ func hashSchemaMutations(t *testing.T, raw []byte) []hashSchemaMutation {
 			})
 		}
 	}
-	for _, s := range p.numbers {
+	return muts
+}
+
+// hashNumberMutations adds one to each number in spans that is below 2^53.
+func hashNumberMutations(t testing.TB, raw []byte, spans []hashSpan) []hashSchemaMutation {
+	t.Helper()
+	var muts []hashSchemaMutation
+	for _, s := range spans {
 		tok := raw[s.start:s.end]
 		f, err := strconv.ParseFloat(string(tok), 64)
 		if err != nil {
@@ -311,7 +365,13 @@ func hashSchemaMutations(t *testing.T, raw []byte) []hashSchemaMutation {
 			schema: hashSplice(raw, s, strconv.AppendFloat(nil, f+1, 'g', -1, 64)),
 		})
 	}
-	for _, s := range p.bools {
+	return muts
+}
+
+// hashBoolMutations flips each bool in spans.
+func hashBoolMutations(raw []byte, spans []hashSpan) []hashSchemaMutation {
+	var muts []hashSchemaMutation
+	for _, s := range spans {
 		repl := []byte("true")
 		if string(raw[s.start:s.end]) == "true" {
 			repl = []byte("false")
@@ -321,7 +381,15 @@ func hashSchemaMutations(t *testing.T, raw []byte) []hashSchemaMutation {
 			schema: hashSplice(raw, s, repl),
 		})
 	}
-	for _, elems := range p.arrays {
+	return muts
+}
+
+// hashArraySwaps swaps each pair of adjacent array elements that have
+// different canonical forms. arrays holds the element spans of each array.
+func hashArraySwaps(t testing.TB, raw []byte, arrays [][]hashSpan) []hashSchemaMutation {
+	t.Helper()
+	var muts []hashSchemaMutation
+	for _, elems := range arrays {
 		for i := 0; i+1 < len(elems); i++ {
 			a, b := elems[i], elems[i+1]
 			if canonicalForm(t, raw[a.start:a.end]) == canonicalForm(t, raw[b.start:b.end]) {
@@ -428,12 +496,14 @@ func hashChangeOneChar(s string) string {
 	return repl + s[size:]
 }
 
-// hashSameHint reports whether a and b are the same hint value.
-func hashSameHint(a, b *bool) bool {
-	if a == nil || b == nil {
-		return a == b
+// hashHintJSON returns the JSON value of the hint b in the canonical form:
+// "null", "true" or "false". falseIsNull is the falseIsNull of the hint in
+// hashHints.
+func hashHintJSON(b *bool, falseIsNull bool) string {
+	if b == nil || (!*b && falseIsNull) {
+		return "null"
 	}
-	return *a == *b
+	return strconv.FormatBool(*b)
 }
 
 // hashHintString returns "nil", "true" or "false".

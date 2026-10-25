@@ -161,7 +161,7 @@ func TestShuffleJSON(t *testing.T) {
 }
 
 // canonicalForm returns the RFC 8785 (JCS) form of v.
-func canonicalForm(t *testing.T, v []byte) string {
+func canonicalForm(t testing.TB, v []byte) string {
 	t.Helper()
 	c := jsontext.Value(bytes.Clone(v))
 	if err := c.Canonicalize(); err != nil {
@@ -172,7 +172,7 @@ func canonicalForm(t *testing.T, v []byte) string {
 
 // compactForm returns v without whitespace and with raw tokens and member
 // order unchanged.
-func compactForm(t *testing.T, v []byte, opts ...jsontext.Options) string {
+func compactForm(t testing.TB, v []byte, opts ...jsontext.Options) string {
 	t.Helper()
 	c := jsontext.Value(bytes.Clone(v))
 	if err := c.Compact(opts...); err != nil {
@@ -182,7 +182,7 @@ func compactForm(t *testing.T, v []byte, opts ...jsontext.Options) string {
 }
 
 // sortedRawForm is compactForm with object members sorted by name.
-func sortedRawForm(t *testing.T, v []byte) string {
+func sortedRawForm(t testing.TB, v []byte) string {
 	t.Helper()
 	return compactForm(t, v, jsontext.ReorderRawObjects(true))
 }

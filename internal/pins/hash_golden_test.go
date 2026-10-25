@@ -12,8 +12,8 @@ import (
 	"github.com/Ducarv/mcpmoat/internal/inspect"
 )
 
-// update rewrites the golden files of package pins. It is the only update
-// flag in the package: other test files in the package reuse it. Run
+// update rewrites the golden files of package pins. Other golden tests in
+// this package must reuse this flag; do not define a second one. Run
 // "go test ./internal/pins/ -run TestHashGolden -update", then read
 // "git diff" before you commit.
 var update = flag.Bool("update", false, "rewrite golden files")
@@ -39,21 +39,13 @@ type hashFixtureFile struct {
 		Description string `json:"description"`
 		// A jsontext.Value keeps the raw schema bytes exactly as in the file
 		// (spaces and number forms included). An absent schema stays nil.
-		InputSchema  jsontext.Value       `json:"inputSchema"`
-		OutputSchema jsontext.Value       `json:"outputSchema"`
-		Annotations  *hashAnnotationsFile `json:"annotations"`
+		InputSchema  jsontext.Value `json:"inputSchema"`
+		OutputSchema jsontext.Value `json:"outputSchema"`
+		// canonicalAnnotations has json tags and the fields of
+		// inspect.ToolAnnotations, so a type conversion turns one into the
+		// other.
+		Annotations *canonicalAnnotations `json:"annotations"`
 	} `json:"tool"`
-}
-
-// hashAnnotationsFile has the same fields in the same order as
-// inspect.ToolAnnotations, so a plain conversion turns one into the other
-// (Go ignores struct tags in conversions).
-type hashAnnotationsFile struct {
-	Title           string `json:"title"`
-	ReadOnlyHint    *bool  `json:"readOnlyHint"`
-	DestructiveHint *bool  `json:"destructiveHint"`
-	IdempotentHint  *bool  `json:"idempotentHint"`
-	OpenWorldHint   *bool  `json:"openWorldHint"`
 }
 
 // loadHashFixtures reads the tools in testdata/pins/hash/tools.json, in file

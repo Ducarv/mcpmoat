@@ -431,10 +431,12 @@ the title and the four hints `readOnlyHint`, `destructiveHint`, `idempotentHint`
 - The pins file has a format version field and is written atomically (temp file plus rename).
 - `XDG_CONFIG_HOME` is honoured when set.
 
-Known limit: the Go SDK decodes `readOnlyHint` and `idempotentHint` as a plain `bool`. So for these
-two hints, "absent" and "false" are the same. A change to `true` is always visible. The SDK also
-decodes schema numbers as `float64`, so a change only in an integer above 2^53 does not change the
-hash.
+Known limits: the Go SDK decodes `readOnlyHint` and `idempotentHint` as a plain `bool`. So for
+these two hints, "absent" and "false" are the same. A change to `true` is always visible. The SDK
+decode and the canonical serialisation both pass schema numbers through `float64`, so a change only
+in an integer above 2^53 does not change the hash. The hash does not cover a tool's `_meta` and
+`icons`, because `inspect` drops them. So a change only in `_meta` or `icons` does not change the
+hash. This is an accepted limit. Issue #153 will keep them in `inspect` and hash them before v1.0.0.
 
 **FR-12: Detect changes.** On later runs, warn about new, removed or changed tools, showing the
 text diff.

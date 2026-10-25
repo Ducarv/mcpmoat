@@ -2,7 +2,6 @@ package pins
 
 import (
 	"bytes"
-	"encoding/json/jsontext"
 	"errors"
 	"math/rand/v2"
 	"testing"
@@ -22,6 +21,7 @@ func FuzzCanonical(f *testing.F) {
 		`null`,
 		``,
 		`{"n":[1.0,1e2,-0,9007199254740993]}`,
+		`{"n":1e400}`,
 		`{"d":"zero\u200bwidth"}`,     // JSON escape
 		"{\"d\":\"zero\u200bwidth\"}", // raw U+200B bytes
 		`{not json`,
@@ -59,14 +59,8 @@ func FuzzCanonical(f *testing.F) {
 		if !utf8.ValidString(name) {
 			t.Fatalf("Canonical() error = nil for name %q with invalid UTF-8", name)
 		}
-		if !jsontext.Value(got).IsValid() {
-			t.Fatalf("Canonical() = %q, not valid JSON", got)
-		}
-		again := jsontext.Value(bytes.Clone(got))
-		if err := again.Canonicalize(); err != nil {
-			t.Fatalf("Canonicalize(Canonical()) error = %v", err)
-		}
-		if !bytes.Equal(again, got) {
+		// canonicalForm fails the test when got is not valid JSON.
+		if again := canonicalForm(t, got); again != string(got) {
 			t.Fatalf("Canonical() = %q is not idempotent: Canonicalize gives %q", got, again)
 		}
 

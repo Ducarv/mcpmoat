@@ -11,7 +11,7 @@ import (
 // It is the prefix of every hash.
 //
 // Any change to the field set, the shape or the canonicalisation of the
-// canonical form (see canonical.go) needs a new version, because the same
+// canonical form (see Canonical) needs a new version, because the same
 // tool then gets a different hash. A stored hash with another prefix means
 // that the algorithm changed, not that the tool changed. The tool must then
 // be pinned again. It is not a rug pull.
