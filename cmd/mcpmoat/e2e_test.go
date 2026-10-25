@@ -565,7 +565,7 @@ func TestE2EScanConfigFindings(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			home, work := discovertest.CopyFixture(t, filepath.Join("..", "..", "testdata", "configs", "dangerous"))
+			home, work := discovertest.CopyFixture(t, testdataPath("configs", "dangerous"))
 
 			stdout, stderr, code := runBin(t, home, work, tt.args...)
 
@@ -1091,16 +1091,16 @@ func TestE2EPinAcceptProject(t *testing.T) {
 }
 
 // TestE2EScanFailOn checks the exit codes of --fail-on and --ignore in the
-// real binary, on the CI example repo of testdata/ci (see its README). It also
-// checks that docs/ci.md shows the same command, so the doc and the test do
-// not drift apart.
+// real binary, on the CI example repo of testdata/ci. It also checks that
+// docs/ci.md shows the same command, so the doc and the test do not drift
+// apart.
 func TestE2EScanFailOn(t *testing.T) {
 	t.Parallel()
 	const command = "mcpmoat scan --no-connect --config .mcp.json"
 
 	t.Run("docs/ci.md shows the command", func(t *testing.T) {
 		t.Parallel()
-		doc, err := os.ReadFile(filepath.Join("..", "..", "docs", "ci.md"))
+		doc, err := os.ReadFile(repoPath("docs", "ci.md"))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -1109,15 +1109,43 @@ func TestE2EScanFailOn(t *testing.T) {
 		}
 	})
 
-	config, err := os.ReadFile(filepath.Join("..", "..", "testdata", "ci", "repo", ".mcp.json"))
+	config, err := os.ReadFile(testdataPath("ci", "repo", ".mcp.json"))
 	if err != nil {
 		t.Fatal(err)
 	}
+	// runCI runs command with extra args in a new project that holds the CI
+	// example config, and checks that scan writes no pins file.
+	runCI := func(t *testing.T, extra ...string) (stdout, stderr string, code int) {
+		t.Helper()
+		home, work := t.TempDir(), t.TempDir()
+		writeTestFile(t, work, ".mcp.json", string(config))
+		args := append(strings.Fields(command)[1:], extra...)
+		stdout, stderr, code = runBin(t, home, work, args...)
+		assertNoPinsFile(t, home)
+		return stdout, stderr, code
+	}
+
+	t.Run("bogus", func(t *testing.T) {
+		t.Parallel()
+
+		stdout, stderr, code := runCI(t, "--fail-on", "bogus")
+
+		// A usage error ends with the usage hint, which has no
+		// "mcpmoat scan: " prefix, so assertScanResult does not fit.
+		if code != exitError {
+			t.Errorf("exit code = %d, want %d\nstdout:\n%s\nstderr:\n%s", code, exitError, stdout, stderr)
+		}
+		assertContainsAll(t, "stderr", stderr, []string{"mcpmoat scan: ", "-fail-on", usageHint})
+		assertEmptyStdout(t, stdout)
+	})
+
 	all := []string{"MOAT-T4-001", "MOAT-T4-003", "MOAT-T4-004"}
 	notIgnored := []string{"MOAT-T4-003", "MOAT-T4-004"}
 	// The ignored finding is never silent: stderr counts it, by rule ID.
 	ignoredLine := "MOAT-T4-001 (1)"
 
+	// This table holds the expected exit code of the CI example for each
+	// --fail-on value, with and without --ignore MOAT-T4-001.
 	tests := []struct {
 		name       string
 		args       []string
@@ -1135,33 +1163,18 @@ func TestE2EScanFailOn(t *testing.T) {
 		{name: "ignore medium", args: []string{"--ignore", "MOAT-T4-001", "--fail-on", "medium"}, wantCode: exitFindings, wantIDs: notIgnored, wantStderr: []string{ignoredLine}},
 		{name: "ignore high", args: []string{"--ignore", "MOAT-T4-001", "--fail-on", "high"}, wantCode: exitOK, wantIDs: notIgnored, wantStderr: []string{ignoredLine}},
 		{name: "ignore critical", args: []string{"--ignore", "MOAT-T4-001", "--fail-on", "critical"}, wantCode: exitOK, wantIDs: notIgnored, wantStderr: []string{ignoredLine}},
-		{name: "bogus", args: []string{"--fail-on", "bogus"}, wantCode: exitError, wantStderr: []string{"-fail-on", usageHint}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			home, work := t.TempDir(), t.TempDir()
-			writeTestFile(t, work, ".mcp.json", string(config))
-			args := append(strings.Fields(command)[1:], tt.args...)
 
-			stdout, stderr, code := runBin(t, home, work, args...)
+			stdout, stderr, code := runCI(t, tt.args...)
 
-			assertNoPinsFile(t, home)
-			if tt.wantCode == exitError {
-				// A usage error ends with the usage hint, which has no
-				// "mcpmoat scan: " prefix, so assertScanResult does not fit.
-				if code != exitError {
-					t.Errorf("exit code = %d, want %d\nstdout:\n%s\nstderr:\n%s", code, exitError, stdout, stderr)
-				}
-				assertContainsAll(t, "stderr", stderr, append([]string{"mcpmoat scan: "}, tt.wantStderr...))
-				assertEmptyStdout(t, stdout)
-				return
-			}
 			assertScanResult(t, code, stdout, stderr, scanWant{code: tt.wantCode, stderr: tt.wantStderr})
 			if got := slices.Sorted(slices.Values(column(tableRows(t, stdout), 0))); !slices.Equal(got, []string{"files", "notes", "remote"}) {
 				t.Errorf("server names = %v, want files, notes and remote\nstdout:\n%s", got, stdout)
 			}
-			if got := slices.Sorted(slices.Values(findingIDs(findingRows(t, stdout)))); !slices.Equal(got, tt.wantIDs) {
+			if got := sortedFindingIDs(t, stdout); !slices.Equal(got, tt.wantIDs) {
 				t.Errorf("finding rule IDs = %v, want %v\nstdout:\n%s", got, tt.wantIDs, stdout)
 			}
 		})

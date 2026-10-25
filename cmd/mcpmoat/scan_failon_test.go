@@ -54,15 +54,6 @@ func failOnFake(servers map[string]any) *inspecttest.Fake {
 	return fakeServers(tools)
 }
 
-// sortedFindingIDs returns the rule IDs of the findings table of stdout,
-// sorted.
-func sortedFindingIDs(t *testing.T, stdout string) []string {
-	t.Helper()
-	ids := findingIDs(findingRows(t, stdout))
-	slices.Sort(ids)
-	return ids
-}
-
 // TestScanFailOnThresholds checks the exit code for every --fail-on value on
 // configs with findings of known severities. A finding at or above the value
 // gives 1, else 0. No built-in config rule is critical, so --fail-on critical
@@ -71,48 +62,50 @@ func sortedFindingIDs(t *testing.T, stdout string) []string {
 func TestScanFailOnThresholds(t *testing.T) {
 	t.Parallel()
 
+	// byLevel is the exit code for each --fail-on value.
+	type byLevel = map[rules.Severity]int
+	low, medium, high, critical := rules.SeverityLow, rules.SeverityMedium, rules.SeverityHigh, rules.SeverityCritical
+
 	tests := []struct {
 		name    string
 		servers map[string]any
 		wantIDs []string // sorted; nil for no findings table
-		// want is the exit code for low, medium, high and critical, in this
-		// order (see failOnLevels).
-		want [4]int
+		want    byLevel
 	}{
 		{
 			name:    "clean config",
 			servers: map[string]any{"clean-srv": failOnCleanServer},
-			want:    [4]int{exitOK, exitOK, exitOK, exitOK},
+			want:    byLevel{low: exitOK, medium: exitOK, high: exitOK, critical: exitOK},
 		},
 		{
 			name:    "low finding",
 			servers: map[string]any{"low-srv": failOnLowServer, "clean-srv": failOnCleanServer},
 			wantIDs: []string{"MOAT-T4-004"},
-			want:    [4]int{exitFindings, exitOK, exitOK, exitOK},
+			want:    byLevel{low: exitFindings, medium: exitOK, high: exitOK, critical: exitOK},
 		},
 		{
 			name:    "medium finding",
 			servers: map[string]any{"medium-srv": failOnMediumServer},
 			wantIDs: []string{"MOAT-T4-003"},
-			want:    [4]int{exitFindings, exitFindings, exitOK, exitOK},
+			want:    byLevel{low: exitFindings, medium: exitFindings, high: exitOK, critical: exitOK},
 		},
 		{
 			name:    "high finding",
 			servers: map[string]any{"high-srv": failOnHighServer},
 			wantIDs: []string{"MOAT-T4-001"},
-			want:    [4]int{exitFindings, exitFindings, exitFindings, exitOK},
+			want:    byLevel{low: exitFindings, medium: exitFindings, high: exitFindings, critical: exitOK},
 		},
 		{
 			name:    "low, medium and high findings",
 			servers: failOnMixedServers(),
 			wantIDs: failOnMixedIDs,
-			want:    [4]int{exitFindings, exitFindings, exitFindings, exitOK},
+			want:    byLevel{low: exitFindings, medium: exitFindings, high: exitFindings, critical: exitOK},
 		},
 	}
 
 	for _, tt := range tests {
 		for _, mode := range scanModes {
-			for i, failOn := range failOnLevels {
+			for _, failOn := range failOnLevels {
 				t.Run(tt.name+"/"+mode.name+"/fail-on "+string(failOn), func(t *testing.T) {
 					t.Parallel()
 					e := newPinEnv(t, tt.servers)
@@ -120,7 +113,7 @@ func TestScanFailOnThresholds(t *testing.T) {
 
 					got := e.scan(failOnFake(tt.servers), args...)
 
-					want := scanWant{code: tt.want[i]}
+					want := scanWant{code: levelWant(t, tt.want, failOn)}
 					if mode.args == nil {
 						// The first run pins the servers: the notice shows
 						// that scan connected.
@@ -137,24 +130,24 @@ func TestScanFailOnThresholds(t *testing.T) {
 
 	// The default is high, the PRD default, and --fail-on=<value> is the same
 	// as --fail-on <value>.
-	t.Run("default and equals form", func(t *testing.T) {
-		t.Parallel()
-		for _, tc := range []struct {
-			args []string
-			want int
-		}{
-			{nil, exitFindings},
-			{[]string{"--fail-on=critical"}, exitOK},
-			{[]string{"--fail-on=high"}, exitFindings},
-		} {
+	for _, tc := range []struct {
+		name string
+		args []string
+		want int
+	}{
+		{"default is high", nil, exitFindings},
+		{"equals form critical", []string{"--fail-on=critical"}, exitOK},
+		{"equals form high", []string{"--fail-on=high"}, exitFindings},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
 			e := newPinEnv(t, map[string]any{"high-srv": failOnHighServer})
+
 			got := e.scan(nil, append([]string{"--no-connect"}, tc.args...)...)
-			if got.code != tc.want {
-				t.Errorf("scan --no-connect %q: exit code = %d, want %d\nstdout:\n%s\nstderr:\n%s",
-					tc.args, got.code, tc.want, got.stdout, got.stderr)
-			}
-		}
-	})
+
+			assertScanRun(t, got, scanWant{code: tc.want, stdout: []string{"MOAT-T4-001"}})
+		})
+	}
 }
 
 // TestScanFailOnIgnored checks that an ignored finding never counts for
@@ -316,7 +309,8 @@ func TestScanFailOnUsageErrors(t *testing.T) {
 // TestScanFailOnExecErrors checks that an execution error gives exit code 2 at
 // every --fail-on value, also when there are findings at or above it (FR-16:
 // 2 wins over 1). When scan could read some configs, the report still prints
-// the findings.
+// the findings. A case that stops before scan has findings runs at one
+// --fail-on value only: with no finding, the value cannot change the result.
 func TestScanFailOnExecErrors(t *testing.T) {
 	t.Parallel()
 
@@ -327,7 +321,9 @@ func TestScanFailOnExecErrors(t *testing.T) {
 		setup      func(t *testing.T, e *pinEnv) []string
 		modes      []string // the scanModes names to run; nil runs both
 		wantStdout []string
-		wantEmpty  bool // stdout must be empty
+		// early is true when scan stops before it has findings: stdout must
+		// be empty, and the case runs with --fail-on low only.
+		early      bool
 		wantStderr []string
 	}{
 		{
@@ -335,7 +331,7 @@ func TestScanFailOnExecErrors(t *testing.T) {
 			setup: func(_ *testing.T, e *pinEnv) []string {
 				return []string{"--config", e.config, "--rules", scanRulesFixture("invalid")}
 			},
-			wantEmpty:  true,
+			early:      true,
 			wantStderr: []string{"mcpmoat scan: ", "bad-severity.yaml", "field severity"},
 		},
 		{
@@ -343,7 +339,7 @@ func TestScanFailOnExecErrors(t *testing.T) {
 			setup: func(t *testing.T, _ *pinEnv) []string {
 				return []string{"--config", filepath.Join(t.TempDir(), "nope.json")}
 			},
-			wantEmpty:  true,
+			early:      true,
 			wantStderr: []string{"mcpmoat scan: ", "nope.json", "file not found"},
 		},
 		{
@@ -379,7 +375,11 @@ func TestScanFailOnExecErrors(t *testing.T) {
 			if tt.modes != nil && !slices.Contains(tt.modes, mode.name) {
 				continue
 			}
-			for _, failOn := range failOnLevels {
+			levels := failOnLevels
+			if tt.early {
+				levels = []rules.Severity{rules.SeverityLow}
+			}
+			for _, failOn := range levels {
 				t.Run(tt.name+"/"+mode.name+"/fail-on "+string(failOn), func(t *testing.T) {
 					t.Parallel()
 					servers := failOnMixedServers()
@@ -392,7 +392,7 @@ func TestScanFailOnExecErrors(t *testing.T) {
 					got := e.raw(fake, args...)
 
 					assertScanRun(t, got, scanWant{code: exitError, stdout: tt.wantStdout, stderr: tt.wantStderr})
-					if tt.wantEmpty {
+					if tt.early {
 						assertEmptyStdout(t, got.stdout)
 					}
 				})
@@ -404,12 +404,18 @@ func TestScanFailOnExecErrors(t *testing.T) {
 // TestScanFailOnServerFailure checks how a server that fails to answer counts
 // for --fail-on. A server with no pins is a warning only, so it never changes
 // the exit code, not even with --fail-on low. A pinned server that fails is a
-// MOAT-T2-004 high finding: it gives 1 up to --fail-on high and 0 at critical,
-// unless --ignore drops it. A .mcpmoat-ignore file cannot drop it.
+// MOAT-T2-004 high finding: it gives 1 up to --fail-on high and 0 at critical.
+//
+// This test covers only the --fail-on dimension. TestScanPinnedNotInspectedExit
+// (pin_flow_test.go) covers the default threshold, --ignore MOAT-T2-004 and the
+// "1 finding ignored" line. TestScanPinsIgnoreFileWarningPerRule
+// (scan_pins_test.go) covers that .mcpmoat-ignore cannot ignore a pin rule.
 func TestScanFailOnServerFailure(t *testing.T) {
 	t.Parallel()
 
 	const failWarning = "mcpmoat scan: warning: server srv: failed: inspect: boom\n"
+	// failing is the inspecttest fake that the scan_pins tests also use for
+	// a server that fails. Its error is fixed, so the warning is exact.
 	failing := func() *inspecttest.Fake {
 		return &inspecttest.Fake{Errors: map[string]error{"srv": errors.New("boom")}}
 	}
@@ -420,74 +426,33 @@ func TestScanFailOnServerFailure(t *testing.T) {
 
 		got := e.scan(failing(), "--fail-on", "low")
 
+		// The warning must be in scanWant: assertScanRun wants an empty
+		// stderr for exit code 0 otherwise.
 		assertScanRun(t, got, scanWant{code: exitOK, stdout: []string{"srv"}, stderr: []string{failWarning}})
-		if got.stderr != failWarning {
-			t.Errorf("stderr = %q, want only the warning %q", got.stderr, failWarning)
-		}
-		assertNoPinRows(t, got.stdout)
 		if rows := findingRows(t, got.stdout); len(rows) != 0 {
 			t.Errorf("findings table has %d rows, want none\nstdout:\n%s", len(rows), got.stdout)
 		}
 	})
 
-	pinned := []struct {
-		failOn rules.Severity
-		want   int
-	}{
-		{rules.SeverityLow, exitFindings},
-		{rules.SeverityMedium, exitFindings},
-		{rules.SeverityHigh, exitFindings},
-		{rules.SeverityCritical, exitOK},
-	}
-	for _, tc := range pinned {
-		t.Run("pinned server with --fail-on "+string(tc.failOn), func(t *testing.T) {
+	low, medium, high, critical := rules.SeverityLow, rules.SeverityMedium, rules.SeverityHigh, rules.SeverityCritical
+	pinnedWant := map[rules.Severity]int{low: exitFindings, medium: exitFindings, high: exitFindings, critical: exitOK}
+	for _, failOn := range failOnLevels {
+		t.Run("pinned server with --fail-on "+string(failOn), func(t *testing.T) {
 			t.Parallel()
 			e := newPinEnv(t, oneServer("srv"))
 			firstScan(t, e, mkTool("a", "Add."))
 
-			got := e.scan(failing(), "--fail-on", string(tc.failOn))
+			got := e.scan(failing(), "--fail-on", string(failOn))
 
 			// The finding shows at every value: --fail-on changes only the
 			// exit code.
 			assertScanRun(t, got, scanWant{
-				code:   tc.want,
+				code:   levelWant(t, pinnedWant, failOn),
 				stdout: []string{"MOAT-T2-004", "high", "srv"},
 				stderr: []string{failWarning},
 			})
 		})
 	}
-
-	t.Run("pinned server ignored with --ignore and --fail-on low", func(t *testing.T) {
-		t.Parallel()
-		e := newPinEnv(t, oneServer("srv"))
-		firstScan(t, e, mkTool("a", "Add."))
-
-		got := e.scan(failing(), "--ignore", "MOAT-T2-004", "--fail-on", "low")
-
-		assertScanRun(t, got, scanWant{
-			code:     exitOK,
-			noStdout: []string{"MOAT-T2-004"},
-			stderr:   []string{failWarning, "mcpmoat scan: 1 finding ignored: MOAT-T2-004 (1)"},
-		})
-	})
-
-	t.Run("pinned server in .mcpmoat-ignore still fails with --fail-on low", func(t *testing.T) {
-		t.Parallel()
-		e := newPinEnv(t, oneServer("srv"))
-		firstScan(t, e, mkTool("a", "Add."))
-		writeTestFile(t, e.work, rules.IgnoreFileName, "MOAT-T2-004\n")
-
-		got := e.scan(failing(), "--fail-on", "low")
-
-		assertScanRun(t, got, scanWant{
-			code:   exitFindings,
-			stdout: []string{"MOAT-T2-004"},
-			stderr: []string{failWarning, ".mcpmoat-ignore cannot ignore MOAT-T2-004"},
-		})
-		if strings.Contains(got.stderr, "finding ignored") {
-			t.Errorf("stderr counts an ignored finding, want none\nstderr:\n%s", got.stderr)
-		}
-	})
 }
 
 // TestScanFailOnPin checks that --fail-on is a scan flag only: pin refuses it

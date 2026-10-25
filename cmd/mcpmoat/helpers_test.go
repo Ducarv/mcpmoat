@@ -22,6 +22,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/Ducarv/mcpmoat/internal/discover/discovertest"
+	"github.com/Ducarv/mcpmoat/internal/rules"
 )
 
 // run is runWithContext with a context that never ends: no signal stops it.
@@ -36,10 +37,16 @@ const usageHint = `Run "mcpmoat help" for usage.`
 // emptyScanOutput is the stdout of "scan --no-connect" when it finds no server.
 const emptyScanOutput = "No MCP servers found.\n"
 
+// repoPath returns the path of a file or directory relative to the repository
+// root. Tests run in cmd/mcpmoat, so the root is two levels up.
+func repoPath(parts ...string) string {
+	return filepath.Join(append([]string{"..", ".."}, parts...)...)
+}
+
 // testdataPath returns the path of a directory under testdata/<kind> at the
-// repository root. Tests run in cmd/mcpmoat, so the root is two levels up.
+// repository root.
 func testdataPath(kind string, parts ...string) string {
-	return filepath.Join(append([]string{"..", "..", "testdata", kind}, parts...)...)
+	return repoPath(append([]string{"testdata", kind}, parts...)...)
 }
 
 // fixtureDir returns the path of a fixture under the repository's
@@ -172,6 +179,35 @@ func scanServersArgs(t *testing.T, mode, home string, servers map[string]any) []
 
 // findingIDs returns the rule ID (the first word) of each findings row.
 func findingIDs(rows [][]string) []string { return column(rows, 0) }
+
+// sortedFindingIDs returns the rule IDs of the findings table of stdout,
+// sorted. It returns nil when stdout has no findings table.
+func sortedFindingIDs(t *testing.T, stdout string) []string {
+	t.Helper()
+	ids := findingIDs(findingRows(t, stdout))
+	slices.Sort(ids)
+	return ids
+}
+
+// failOnLevels are the four --fail-on values, from low to critical.
+var failOnLevels = []rules.Severity{
+	rules.SeverityLow, rules.SeverityMedium, rules.SeverityHigh, rules.SeverityCritical,
+}
+
+// levelWant returns want[level]. A test table keys its expectations by
+// --fail-on value. levelWant fails the test when want does not hold exactly
+// the four values of failOnLevels, so no table can skip a level.
+func levelWant[T any](t *testing.T, want map[rules.Severity]T, level rules.Severity) T {
+	t.Helper()
+	if len(want) != len(failOnLevels) {
+		t.Fatalf("the test table has %d --fail-on values, want the %d of failOnLevels: %v", len(want), len(failOnLevels), want)
+	}
+	got, ok := want[level]
+	if !ok {
+		t.Fatalf("the test table has no expectation for --fail-on %s: %v", level, want)
+	}
+	return got
+}
 
 // column returns word i (0 is NAME) of each row. It skips a row that is too
 // short.

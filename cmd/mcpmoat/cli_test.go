@@ -359,17 +359,19 @@ func TestUsageContent(t *testing.T) {
 		"Exit codes:\n",
 		"  0  no findings\n",
 		"  1  findings at or above --fail-on\n",
-		// Exit code 2 wins over 1 (FR-16): the precedence line says so.
-		"  2  execution error, also when there are findings (the report still prints)\n",
-		"     (scan also exits 2 when a config file has a problem or when pins.json cannot be read\n" +
-			"     or saved, or when it is stopped by a signal; a missing file is not a problem in auto-discovery,\n" +
-			"     but a missing --config file is. A server that fails or times out is a warning and does not\n" +
-			"     change the exit code, unless its pins are already stored: then it is a high finding, and scan exits 1\n" +
-			"     at the default --fail-on high)\n",
+		// Exit code 2 wins over 1 (FR-16): the precedence line says so, and
+		// the next lines say when the report still prints.
+		"  2  execution error; it wins over findings\n",
+		"     (scan also exits 2 when a config file has a problem, when pins.json cannot be read or saved,\n" +
+			"     or when a signal stops it. The report still prints for a config file or pins.json problem,\n" +
+			"     but not for a --config file that gives no server or for a signal during the inspection.\n" +
+			"     A missing file is not a problem in auto-discovery, but a missing --config file is.\n" +
+			"     A server that fails or times out is a warning and does not change the exit code, unless its pins\n" +
+			"     are already stored: then it is a high finding, and scan exits 1 at the default --fail-on high)\n",
 		// The --fail-on flag line (tabwriter pads the name column) and its
 		// two continuation lines, with the padding that tabwriter prints.
 		"  --fail-on <severity>  Exit 1 for a finding of this severity or above: low, medium, high or critical (default high)\n",
-		"A finding severity that mcpmoat does not know always counts\n",
+		"\n                        A finding severity that mcpmoat does not know always counts\n",
 		"\n                        No built-in rule is critical yet, so critical fails only on an unknown severity or rule ID\n",
 		"The file cannot ignore the pin rules (MOAT-T2-*)",
 		"  A new tool is medium, so alone it does not give exit code 1 with the default --fail-on high; next to a removed tool (a likely rename) it is high.\n",
@@ -405,12 +407,15 @@ func TestUsageContent(t *testing.T) {
 			t.Errorf("usage text holds %q %d times, want 1\n--- got ---\n%s", once, n, got)
 		}
 	}
-	// The text from before --fail-on fixed the limit at high.
+	// The old text: from before --fail-on (it fixed the limit at high), and
+	// the old exit code 2 lines (they said that the report always prints).
 	for _, gone := range []string{
 		"no rules", "applies no rules", "No rules were applied",
 		"a finding of severity high or above",
 		"(MOAT-T2-004, high, exit code 1)",
 		"  2  execution error\n",
+		"(the report still prints)",
+		"when it is stopped by a signal",
 	} {
 		if strings.Contains(got, gone) {
 			t.Errorf("usage text holds the old text %q\n--- got ---\n%s", gone, got)

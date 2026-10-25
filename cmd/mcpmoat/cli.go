@@ -201,12 +201,13 @@ func (c *cli) usage(w io.Writer) {
 	fprintf(w, "\nExit codes:\n")
 	fprintf(w, "  0  no findings\n")
 	fprintf(w, "  1  findings at or above --fail-on\n")
-	fprintf(w, "  2  execution error, also when there are findings (the report still prints)\n")
-	fprintf(w, "     (scan also exits 2 when a config file has a problem or when pins.json cannot be read\n")
-	fprintf(w, "     or saved, or when it is stopped by a signal; a missing file is not a problem in auto-discovery,\n")
-	fprintf(w, "     but a missing --config file is. A server that fails or times out is a warning and does not\n")
-	fprintf(w, "     change the exit code, unless its pins are already stored: then it is a high finding, and scan exits 1\n")
-	fprintf(w, "     at the default --fail-on high)\n")
+	fprintf(w, "  2  execution error; it wins over findings\n")
+	fprintf(w, "     (scan also exits 2 when a config file has a problem, when pins.json cannot be read or saved,\n")
+	fprintf(w, "     or when a signal stops it. The report still prints for a config file or pins.json problem,\n")
+	fprintf(w, "     but not for a --config file that gives no server or for a signal during the inspection.\n")
+	fprintf(w, "     A missing file is not a problem in auto-discovery, but a missing --config file is.\n")
+	fprintf(w, "     A server that fails or times out is a warning and does not change the exit code, unless its pins\n")
+	fprintf(w, "     are already stored: then it is a high finding, and scan exits 1 at the default --fail-on high)\n")
 }
 
 // scanUsage writes the flags and the output notes of the scan command to w.
