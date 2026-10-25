@@ -614,8 +614,8 @@ of the route to a configured server, so mcpmoat honours it (and `NO_PROXY`).
   asserts no other connection is attempted. The test clears the proxy variables.
 
 **NFR-02: Distribution.** Single binary for macOS and Linux (amd64, arm64), static on Linux,
-published with GoReleaser, Homebrew cask in an own tap, checksums and GitHub attestation. The macOS
-binary is not static, because Go binaries on macOS always link libSystem dynamically.
+published with GoReleaser, Homebrew cask in an own tap, checksums and GitHub attestation. Go binaries
+on macOS always link the system libraries dynamically.
 
 - Release artefacts exist for darwin/amd64, darwin/arm64, linux/amd64, linux/arm64.
 - Binaries are built with `CGO_ENABLED=0`.

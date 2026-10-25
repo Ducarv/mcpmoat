@@ -441,20 +441,21 @@ GoReleaser config is `.goreleaser.yaml`.
 
 ### One-time setup
 
-Do all of these steps before you push the first release tag. If the `release` environment does not
-exist, GitHub creates it on the first run, with no reviewer and no tag limit. The release job then
-stops before GoReleaser runs, because the environment has no tap secret.
+Do all of these steps before you push the first release tag. Step 3 says why.
 
 1. Create the public repo `Ducarv/homebrew-tap`. GoReleaser writes the cask to its `Casks/` folder.
    Protect its default branch so that only the maintainer, who owns the token below, can push.
 2. Create a fine-grained personal access token. Give it access to only `Ducarv/homebrew-tap`, with
-   the Contents permission set to read and write. Give it an expiry date.
+   the Contents permission set to read and write. Give it an expiry of 90 days or less. Before it
+   expires, make a new token and replace the secret in step 3.
 3. In `Ducarv/mcpmoat`, create the GitHub environment `release`. Limit its deployment branches and
    tags to tags that match `v[0-9]*`. Add the maintainer as a required reviewer, so each release
    waits for approval. Add the token to it as the environment secret `HOMEBREW_TAP_GITHUB_TOKEN`. Do
    not make it a repository or organization secret: only jobs in the `release` environment can read
-   an environment secret. The release job stops when the secret is missing, but a repository or
-   organization secret with the same name hides a missing environment from that check.
+   an environment secret. If the environment does not exist, GitHub creates it on the first run,
+   with no reviewer and no tag limit. The release job then stops before GoReleaser runs, because the
+   secret is missing. A repository or organization secret with the same name hides a missing
+   environment from that check.
 4. Add a tag ruleset for `v[0-9]*` that restricts creations, updates and deletes. Let only the
    maintainer bypass it. Then only the maintainer can push, move or delete a release tag. After a
    release is published, Immutable releases (step 5) lock its tag for everyone.
@@ -465,7 +466,8 @@ stops before GoReleaser runs, because the environment has no tap secret.
 
 ### Cut a release
 
-Tag a commit on `main` and push the tag:
+Tag a commit on the first-parent history of `main` (a merge commit or a direct push) and push the
+tag:
 
 ```sh
 git tag v0.1.0
@@ -474,13 +476,13 @@ git push origin v0.1.0
 
 The tag starts the release workflow. The `test` job runs vet, the race tests and govulncheck. Then
 the `release` job waits for the maintainer to approve it in the `release` environment. It fails if
-the tagged commit is not on `main`, or if the environment has no tap secret. It builds the archives
-with GoReleaser, creates a draft GitHub release and pushes the cask to the tap. Only the GoReleaser
-step gets the tap token. Then it attests the build provenance of `dist/*.tar.gz` and
-`dist/checksums.txt`. It checks that the draft release holds exactly those files, downloads them,
-checks that they match `dist/` and verifies each attestation with `gh attestation verify`. It checks
-that the tag still points at the commit that it built. Then it publishes the release, and checks the
-published files against `dist/` once more.
+the tagged commit is not on the first-parent history of `main`, or if the environment has no tap
+secret. It builds the archives with GoReleaser, creates a draft GitHub release and pushes the cask
+to the tap. Only the GoReleaser step gets the tap token. Then it attests the build provenance of
+`dist/*.tar.gz` and `dist/checksums.txt`. It checks that the draft release holds exactly those
+files. It downloads them and checks that they match `dist/`. It verifies each attestation with
+`gh attestation verify`. It checks that the tag still points at the commit that it built. Then it
+publishes the release. Last, it checks the tag and the published files once more.
 
 Try a prerelease tag first, for example `v0.1.0-rc.1`. GoReleaser marks it as a prerelease and does
 not update the tap.
@@ -515,8 +517,8 @@ release stays a draft, so it is not public. But the cask is already in the tap, 
   again. Delete the draft, revert the tap commit, fix the cause on `main` and cut a new patch or rc
   tag.
 
-After any re-run of part of the workflow, check that the sha256 values in the tap's
-`Casks/mcpmoat.rb` match the draft's `checksums.txt`.
+After any re-run of part of the workflow, check the tap's `Casks/mcpmoat.rb` with the cask steps in
+[README.md](README.md#verify-a-download). Its sha256 values must match the draft's `checksums.txt`.
 
 ## Security issues
 

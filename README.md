@@ -20,8 +20,9 @@ These methods will work from the first release:
   [releases page](https://github.com/Ducarv/mcpmoat/releases). The archives are
   `mcpmoat_<version>_<os>_<arch>.tar.gz` for `darwin` or `linux` and `amd64` or `arm64`.
   `<version>` is the release number without the `v`, for example `0.1.0`. Each archive holds the
-  `mcpmoat` binary, `LICENSE` and `README.md`. The Linux binary is static. The macOS binary links only the macOS system
-  library (libSystem), like every Go binary on macOS. Extract the binary and put it on your `PATH`.
+  `mcpmoat` binary, `LICENSE` and `README.md`. The Linux binary is static. The macOS binary links
+  only macOS system libraries, like every Go binary on macOS. Extract the binary and put it on your
+  `PATH`.
 
 Run `mcpmoat version` to check the install. A release binary prints
 `mcpmoat v<version> (commit <c>, built <d>)`. The `go install` build above prints `commit none, built
@@ -53,9 +54,17 @@ was reviewed. Use `--cert-identity` as above, not `--signer-workflow`: some `gh`
 whose name starts with `release.yml`.
 
 Homebrew does not check the attestation. `brew install` checks only the sha256 values in the cask
-from the tap. To check the cask, run the command above on `checksums.txt`, with the same flags.
-Then compare its lines with the sha256 values in `Casks/mcpmoat.rb` of the
-[tap](https://github.com/Ducarv/homebrew-tap).
+from the tap. A cask is Ruby code that Homebrew runs on install, so matching sha256 values alone do
+not prove that the cask is safe. To check the cask, first verify `checksums.txt` with the command
+above, with the same flags. Then open `Casks/mcpmoat.rb` in the
+[tap](https://github.com/Ducarv/homebrew-tap) and check these points:
+
+- Every `url` starts with `https://github.com/Ducarv/mcpmoat/releases/download/v<version>/`.
+- Every `sha256` value is a line of the verified `checksums.txt`.
+- The only block that runs a command is `postflight_steps`, with one `xattr` line that removes the
+  quarantine flag from `mcpmoat`.
+- There is no other code. The cask holds only `version`, the `on_macos` and `on_linux` blocks with
+  `url` and `sha256`, `name`, `desc`, `homepage`, `livecheck`, `binary` and `postflight_steps`.
 
 The macOS binaries are not notarized yet. The Homebrew cask removes the quarantine flag on install,
 so Gatekeeper does not check the binary. Verify the archive if that matters to you.
