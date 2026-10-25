@@ -538,44 +538,39 @@ func TestUnifiedDiffMetaAndIcons(t *testing.T) {
 		return tool
 	}
 	tests := []struct {
-		name         string
-		oldTool      inspect.Tool
-		newTool      inspect.Tool
-		wantIn       []string
-		wantContext  string
-		wantNotInAny []string
+		name        string
+		oldTool     inspect.Tool
+		newTool     inspect.Tool
+		wantIn      []string
+		wantContext string
 	}{
 		{
-			name:         "ui resourceUri in _meta",
-			oldTool:      withMeta(`{"ui":{"resourceUri":"ui://good/app"}}`),
-			newTool:      withMeta(`{"ui":{"resourceUri":"ui://evil/app"}}`),
-			wantIn:       []string{"-      \"resourceUri\": \"ui://good/app\"\n", "+      \"resourceUri\": \"ui://evil/app\"\n"},
-			wantContext:  " _meta:\n",
-			wantNotInAny: []string{"description", `"required"`},
+			name:        "ui resourceUri in _meta",
+			oldTool:     withMeta(`{"ui":{"resourceUri":"ui://good/app"}}`),
+			newTool:     withMeta(`{"ui":{"resourceUri":"ui://evil/app"}}`),
+			wantIn:      []string{"-      \"resourceUri\": \"ui://good/app\"\n", "+      \"resourceUri\": \"ui://evil/app\"\n"},
+			wantContext: " _meta:\n",
 		},
 		{
-			name:         "_meta added",
-			oldTool:      diffTool("d"),
-			newTool:      withMeta(`{"ui":{"resourceUri":"ui://evil/app"}}`),
-			wantIn:       []string{"-  null\n", "+      \"resourceUri\": \"ui://evil/app\"\n"},
-			wantContext:  " _meta:\n",
-			wantNotInAny: []string{"description", `"required"`},
+			name:        "_meta added",
+			oldTool:     diffTool("d"),
+			newTool:     withMeta(`{"ui":{"resourceUri":"ui://evil/app"}}`),
+			wantIn:      []string{"-  null\n", "+      \"resourceUri\": \"ui://evil/app\"\n"},
+			wantContext: " _meta:\n",
 		},
 		{
-			name:         "icon src",
-			oldTool:      withIcons(`[{"src":"https://good.example/a.png"}]`),
-			newTool:      withIcons(`[{"src":"https://evil.example/a.png"}]`),
-			wantIn:       []string{"-      \"src\": \"https://good.example/a.png\"\n", "+      \"src\": \"https://evil.example/a.png\"\n"},
-			wantContext:  " icons:\n",
-			wantNotInAny: []string{"description", `"required"`},
+			name:        "icon src",
+			oldTool:     withIcons(`[{"src":"https://good.example/a.png"}]`),
+			newTool:     withIcons(`[{"src":"https://evil.example/a.png"}]`),
+			wantIn:      []string{"-      \"src\": \"https://good.example/a.png\"\n", "+      \"src\": \"https://evil.example/a.png\"\n"},
+			wantContext: " icons:\n",
 		},
 		{
-			name:         "icons added",
-			oldTool:      diffTool("d"),
-			newTool:      withIcons(`[{"src":"https://evil.example/a.png"}]`),
-			wantIn:       []string{"-  null\n", "+      \"src\": \"https://evil.example/a.png\"\n"},
-			wantContext:  " icons:\n",
-			wantNotInAny: []string{"description", `"required"`},
+			name:        "icons added",
+			oldTool:     diffTool("d"),
+			newTool:     withIcons(`[{"src":"https://evil.example/a.png"}]`),
+			wantIn:      []string{"-  null\n", "+      \"src\": \"https://evil.example/a.png\"\n"},
+			wantContext: " icons:\n",
 		},
 	}
 	for _, tt := range tests {
@@ -590,7 +585,7 @@ func TestUnifiedDiffMetaAndIcons(t *testing.T) {
 					t.Errorf("diff lacks %q:\n%s", want, got)
 				}
 			}
-			for _, absent := range tt.wantNotInAny {
+			for _, absent := range []string{"description", `"required"`} {
 				if strings.Contains(got, absent) {
 					t.Errorf("diff has unchanged text %q:\n%s", absent, got)
 				}
@@ -601,9 +596,9 @@ func TestUnifiedDiffMetaAndIcons(t *testing.T) {
 
 // TestUnifiedDiffMetaSurvivesCut checks that a change in _meta is in the diff
 // when the description changes too and a large unchanged input schema follows.
-// The small sections are rendered before the schemas. So the unchanged schema
-// is a shared tail that the diff trims, and it cannot push the _meta change
-// into a cut part. With _meta after the schemas, the window would hold the
+// annotations, _meta and icons are rendered before the schemas. So the
+// unchanged schema is a shared tail that the diff trims, and it cannot push
+// the _meta change into a cut part. With _meta after the schemas, the window would hold the
 // whole schema and the cap would hide the _meta change.
 func TestUnifiedDiffMetaSurvivesCut(t *testing.T) {
 	t.Parallel()

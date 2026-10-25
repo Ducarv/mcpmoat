@@ -107,42 +107,34 @@ func TestHashRugPull(t *testing.T) {
 func TestHashMetaIcons(t *testing.T) {
 	t.Parallel()
 	base := inspect.Tool{Name: "ping"}
-	hash := func(t *testing.T, tool inspect.Tool) string {
-		t.Helper()
-		h, err := Hash(tool)
-		if err != nil {
-			t.Fatalf("Hash() error = %v", err)
-		}
-		return h
-	}
 	withMeta := func(m string) inspect.Tool { c := base; c.Meta = []byte(m); return c }
 	withIcons := func(i string) inspect.Tool { c := base; c.Icons = []byte(i); return c }
 
 	t.Run("_meta only changes the hash", func(t *testing.T) {
 		t.Parallel()
-		if hash(t, base) == hash(t, withMeta(`{"ui":{"resourceUri":"ui://a"}}`)) {
+		if mustHash(t, base) == mustHash(t, withMeta(`{"ui":{"resourceUri":"ui://a"}}`)) {
 			t.Error("adding _meta does not change the hash")
 		}
-		if hash(t, withMeta(`{"ui":{"resourceUri":"ui://a"}}`)) == hash(t, withMeta(`{"ui":{"resourceUri":"ui://b"}}`)) {
+		if mustHash(t, withMeta(`{"ui":{"resourceUri":"ui://a"}}`)) == mustHash(t, withMeta(`{"ui":{"resourceUri":"ui://b"}}`)) {
 			t.Error("changing a _meta value does not change the hash")
 		}
 	})
 	t.Run("icons only changes the hash", func(t *testing.T) {
 		t.Parallel()
-		if hash(t, base) == hash(t, withIcons(`[{"src":"a"}]`)) {
+		if mustHash(t, base) == mustHash(t, withIcons(`[{"src":"a"}]`)) {
 			t.Error("adding icons does not change the hash")
 		}
-		if hash(t, withIcons(`[{"src":"a"}]`)) == hash(t, withIcons(`[{"src":"b"}]`)) {
+		if mustHash(t, withIcons(`[{"src":"a"}]`)) == mustHash(t, withIcons(`[{"src":"b"}]`)) {
 			t.Error("changing an icon src does not change the hash")
 		}
-		if hash(t, withIcons(`[{"src":"a"},{"src":"b"}]`)) == hash(t, withIcons(`[{"src":"b"},{"src":"a"}]`)) {
+		if mustHash(t, withIcons(`[{"src":"a"},{"src":"b"}]`)) == mustHash(t, withIcons(`[{"src":"b"},{"src":"a"}]`)) {
 			t.Error("reordering icons does not change the hash")
 		}
 	})
 	t.Run("_meta key order does not change the hash", func(t *testing.T) {
 		t.Parallel()
-		a := hash(t, withMeta(`{"a":1,"ui":{"resourceUri":"ui://a","visibility":["model"]}}`))
-		b := hash(t, withMeta(`{ "ui": { "visibility": ["model"], "resourceUri": "ui://a" }, "a": 1 }`))
+		a := mustHash(t, withMeta(`{"a":1,"ui":{"resourceUri":"ui://a","visibility":["model"]}}`))
+		b := mustHash(t, withMeta(`{ "ui": { "visibility": ["model"], "resourceUri": "ui://a" }, "a": 1 }`))
 		if a != b {
 			t.Errorf("Hash() = %q and %q, want equal for a different key order in _meta", a, b)
 		}

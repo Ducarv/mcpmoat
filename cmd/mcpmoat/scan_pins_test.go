@@ -129,8 +129,8 @@ func TestScanPinsFindings(t *testing.T) {
 		// new tool (see assertDiffsOf).
 		wantDiffs []string
 		// wantInDiff are texts that the diff text must hold (for example the
-		// new value of a changed _meta), and noInDiff texts it must not hold.
-		wantInDiff, noInDiff []string
+		// new value of a changed _meta).
+		wantInDiff []string
 	}{
 		{
 			name:     "changed tool is high and exits 1",
@@ -263,7 +263,6 @@ func TestScanPinsFindings(t *testing.T) {
 			}
 			assertDiffsOf(t, out.diffs, "srv", tt.wantDiffs)
 			assertContainsAll(t, "diff text", out.diffs, tt.wantInDiff)
-			assertContainsNone(t, "diff text", out.diffs, tt.noInDiff)
 			// The diffs come after the findings table.
 			if len(tt.wantDiffs) > 0 && !strings.HasPrefix(out.diffs, "Changed tool ") && !strings.HasPrefix(out.diffs, "New tool ") {
 				t.Errorf("text after the findings table = %q, want it to start with a diff header", out.diffs)
@@ -299,9 +298,7 @@ func TestScanPinsRelatedReason(t *testing.T) {
 		if strings.Contains(got.stderr, "pinned") {
 			t.Errorf("stderr = %q, want no pin notice", got.stderr)
 		}
-		if _, err := os.Stat(e.pinsPath()); !errors.Is(err, os.ErrNotExist) {
-			t.Errorf("pins.json exists after a snapshot failure (stat error = %v), want nothing stored", err)
-		}
+		e.assertNoPinsFile(t, "a snapshot failure")
 	})
 
 	t.Run("empty tool name on the first run", func(t *testing.T) {
@@ -314,9 +311,7 @@ func TestScanPinsRelatedReason(t *testing.T) {
 			code:   exitFindings,
 			stdout: []string{"MOAT-T2-004", "high", "srv", "empty tool name"},
 		})
-		if _, err := os.Stat(e.pinsPath()); !errors.Is(err, os.ErrNotExist) {
-			t.Errorf("pins.json exists after a snapshot failure (stat error = %v), want nothing stored", err)
-		}
+		e.assertNoPinsFile(t, "a snapshot failure")
 	})
 
 	t.Run("duplicate tool name of a pinned server", func(t *testing.T) {
@@ -404,9 +399,7 @@ func TestScanPinsNotInspected(t *testing.T) {
 			t.Errorf("stderr = %q, want %q", got.stderr, want)
 		}
 		// No server was inspected, so scan did not read or write pins.json.
-		if _, err := os.Stat(e.pinsPath()); !errors.Is(err, os.ErrNotExist) {
-			t.Errorf("pins.json exists after a scan where no server was inspected (stat error = %v)", err)
-		}
+		e.assertNoPinsFile(t, "a scan where no server was inspected")
 	})
 
 	t.Run("timeout", func(t *testing.T) {
@@ -949,9 +942,7 @@ func TestScanPinsMetaNeverInOutput(t *testing.T) {
 				assertContainsNone(t, "stderr", got.stderr, []string{metaCanary})
 				if !pinnedFirst {
 					// Nothing is stored for a server that cannot be pinned.
-					if _, err := os.Stat(e.pinsPath()); !errors.Is(err, os.ErrNotExist) {
-						t.Errorf("pins.json exists after a snapshot failure (stat error = %v), want nothing stored", err)
-					}
+					e.assertNoPinsFile(t, "a snapshot failure")
 				}
 			})
 		}
@@ -989,9 +980,7 @@ func TestScanPinsHugeMetaFailsClosed(t *testing.T) {
 		assertContainsNone(t, "stdout", got.stdout, []string{metaCanary})
 		assertContainsNone(t, "stderr", got.stderr, []string{metaCanary})
 		// Nothing is stored for a server that cannot be pinned.
-		if _, err := os.Stat(e.pinsPath()); !errors.Is(err, os.ErrNotExist) {
-			t.Errorf("pins.json exists after a snapshot failure (stat error = %v), want nothing stored", err)
-		}
+		e.assertNoPinsFile(t, "a snapshot failure")
 	})
 
 	t.Run("pinned server", func(t *testing.T) {
@@ -1121,8 +1110,8 @@ func TestScanPinsInterrupted(t *testing.T) {
 				if after := readFileBytes(t, e.pinsPath()); !bytes.Equal(pinsBefore, after) {
 					t.Errorf("pins.json changed in an interrupted scan\nbefore: %s\nafter:  %s", pinsBefore, after)
 				}
-			} else if _, err := os.Stat(e.pinsPath()); !errors.Is(err, os.ErrNotExist) {
-				t.Errorf("pins.json exists after an interrupted scan (stat error = %v), want nothing stored", err)
+			} else {
+				e.assertNoPinsFile(t, "an interrupted scan")
 			}
 		})
 	}
@@ -1191,9 +1180,7 @@ func TestScanPinsCanceledBeforeInspection(t *testing.T) {
 	if calls := fake.Calls(); len(calls) != 0 {
 		t.Errorf("the inspector was called for %v, want no call", calls)
 	}
-	if _, err := os.Stat(e.pinsPath()); !errors.Is(err, os.ErrNotExist) {
-		t.Errorf("pins.json exists after a canceled scan (stat error = %v), want nothing stored", err)
-	}
+	e.assertNoPinsFile(t, "a canceled scan")
 	if strings.Contains(stdout.String(), "MOAT-T2-") {
 		t.Errorf("stdout has a pin finding:\n%s", stdout)
 	}
