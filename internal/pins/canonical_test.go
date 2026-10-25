@@ -25,7 +25,7 @@ func TestCanonicalToolFields(t *testing.T) {
 	t.Parallel()
 	if n := reflect.TypeFor[inspect.Tool]().NumField(); n != 8 {
 		t.Errorf("inspect.Tool has %d fields, want 8. A new inspect.Tool field needs a decision: "+
-			"add it to the hash with a new HashVersion, or document why the hash leaves it out "+
+			"add it to the hash (with a new HashVersion after the first release), or document why the hash leaves it out "+
 			"(see the Canonical doc). Then update this test.", n)
 	}
 }
@@ -207,11 +207,6 @@ func TestCanonicalDiffer(t *testing.T) {
 			name: "swapped icon order",
 			a:    inspect.Tool{Name: "x", Icons: []byte(`[{"src":"a"},{"src":"b"}]`)},
 			b:    inspect.Tool{Name: "x", Icons: []byte(`[{"src":"b"},{"src":"a"}]`)},
-		},
-		{
-			name: "same JSON in _meta and in icons",
-			a:    inspect.Tool{Name: "x", Meta: []byte(`{"src":"a"}`)},
-			b:    inspect.Tool{Name: "x", Icons: []byte(`{"src":"a"}`)},
 		},
 		{
 			name: "_meta and input schema are not swapped",
@@ -427,7 +422,12 @@ func TestCanonicalErrors(t *testing.T) {
 		{name: "duplicate nested key in _meta", tool: meta(`{"a":{"SECRET":1,"SECRET":3}}`), reason: "duplicate object key in _meta"},
 		{name: "1e400 in _meta", tool: meta(`{"SECRET":1e400}`), reason: "number out of range in _meta"},
 		{name: "-1e400 in _meta", tool: meta(`{"a":[-1e400],"SECRET":1}`), reason: "number out of range in _meta"},
+		{name: "_meta array", tool: meta(`["SECRET"]`), reason: "_meta is not an object"},
+		{name: "_meta string", tool: meta(`"SECRET"`), reason: "_meta is not an object"},
+		{name: "_meta number", tool: meta(`5`), reason: "_meta is not an object"},
 		{name: "truncated icons", tool: icons(`[{"SECRET":"a`), reason: "invalid JSON in icons"},
+		{name: "icons object", tool: icons(`{"src":"SECRET"}`), reason: "icons is not an array"},
+		{name: "icons bool", tool: icons(`true`), reason: "icons is not an array"},
 		{name: "trailing data in icons", tool: icons(`[] "SECRET"`), reason: "invalid JSON in icons"},
 		{name: "not JSON in icons", tool: icons(`SECRET`), reason: "invalid JSON in icons"},
 		{name: "invalid UTF-8 in icons", tool: icons("[{\"src\":\"SECRET\xff\"}]"), reason: "invalid JSON in icons"},

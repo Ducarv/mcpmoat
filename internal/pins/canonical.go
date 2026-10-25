@@ -53,8 +53,8 @@ type canonicalAnnotations struct {
 // (PRD FR-11, threat T2). Canonical does not change t.
 //
 // Rug-pull detection depends on the canonical form: it must change when, and
-// only when, the tool changes. The notes below are its contract. Any change
-// to them needs a new HashVersion.
+// only when, the tool changes. The notes below are its contract. After the
+// first release, any change to them needs a new HashVersion (see HashVersion).
 //
 // Field set. The canonical form holds all eight fields of inspect.Tool: name,
 // title, description, inputSchema, outputSchema, _meta, icons and
@@ -120,7 +120,8 @@ type canonicalAnnotations struct {
 // Canonical returns an error that wraps ErrInvalidTool when a string field
 // holds invalid UTF-8, or when a schema, _meta or icons is not valid JSON
 // (this includes invalid UTF-8 and lone surrogates), has a duplicate object
-// key or has a number out of range. The error message names the field but
+// key or has a number out of range, and when _meta is not an object or null
+// or icons is not an array or null. The error message names the field but
 // never holds server text or _meta values.
 func Canonical(t inspect.Tool) ([]byte, error) {
 	// Nil annotations and empty annotations must give the same bytes, so use
@@ -152,15 +153,19 @@ func Canonical(t inspect.Tool) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	// _meta and icons use the same function and checks as the schemas. The
-	// error names only the field, never a value.
 	meta, err := canonicalJSON("_meta", t.Meta)
 	if err != nil {
 		return nil, err
 	}
+	if k := meta.Kind(); k != '{' && k != 'n' {
+		return nil, invalidTool("_meta is not an object")
+	}
 	icons, err := canonicalJSON("icons", t.Icons)
 	if err != nil {
 		return nil, err
+	}
+	if k := icons.Kind(); k != '[' && k != 'n' {
+		return nil, invalidTool("icons is not an array")
 	}
 
 	// The type conversion copies every field, and stops compiling when
@@ -205,7 +210,7 @@ func falseToNil(p *bool) *bool {
 	return p
 }
 
-// canonicalJSON returns the JCS form of one schema, `_meta` or icons value, or
+// canonicalJSON returns the JCS form of one schema, _meta or icons value, or
 // null when raw is nil or zero-length. field is the fixed key name for the
 // error message.
 func canonicalJSON(field string, raw []byte) (jsontext.Value, error) {
@@ -254,7 +259,7 @@ func checkNumbers(field string, raw []byte) error {
 	}
 }
 
-// fieldError maps a jsontext error for a schema, `_meta` or icons value to a
+// fieldError maps a jsontext error for a schema, _meta or icons value to a
 // fixed reason. The jsontext error message can quote the value (key names,
 // string parts), so it is not wrapped.
 func fieldError(field string, err error) error {
