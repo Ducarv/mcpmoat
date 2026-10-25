@@ -45,22 +45,23 @@ mcpmoat version              # print the version, commit and build date
   not set. The file has mode `0600`. It stores each tool's hash and text. It never stores env,
   header, args or URL values from your configs.
 - **Later runs:** `scan` compares the tools with the pins. It reports `MOAT-T2-001` (changed tool,
-  high), `MOAT-T2-002` (new tool, medium), `MOAT-T2-003` (removed tool, low) and `MOAT-T2-004`
-  (tool not verified). A new tool is medium, so alone it does not give exit code 1 at the default
-  `--fail-on high`: read the report, not only the exit code. A new tool, or a not verified tool with a new name, is high when
-  the same server also lost a tool in that scan, because a server can rename a tool to avoid the
-  changed-tool check. A server whose tools cannot be pinned (a duplicate or empty tool
-  name, invalid tool data, or more than 2 MiB) is a high `MOAT-T2-004`, because mcpmoat can never
-  check its tools for changes. `MOAT-T2-004` is high when the tool name is pinned, because a duplicate,
-  invalid or unverifiable copy of a pinned tool can hide a rug pull. Else it is medium. For each
-  changed tool, `scan` prints a unified diff of the pinned and the current text after the findings
-  table. For each new tool, it prints the full text of the tool as added lines, under the header
-  `New tool <tool> on server <server>:`, so you can review it before you accept it. A pinned tool
-  whose pin cannot be checked (another hash version, or a pinned text that does not match its hash)
-  gets its full current text too, under `Not verified tool <tool> on server <server> (current
-  text):`. An ignored finding gets no diff. If a diff is longer than 64 KiB or 2000 lines, `scan` cuts it and prints a
-  warning on stderr with the tool and the server name. Review the full tool before you accept it.
-  You can ignore these IDs with `--ignore` only (see [Ignore findings](#ignore-findings)).
+  high), `MOAT-T2-002` (new tool, medium), `MOAT-T2-003` (removed tool, low) and `MOAT-T2-004` (tool
+  not verified). A new tool is medium, so alone it does not give exit code 1 at the default
+  `--fail-on high`: read the report, not only the exit code. A new tool, or a not verified tool with
+  a new name, is high when the same server also lost a tool in that scan, because a server can
+  rename a tool to avoid the changed-tool check. A server whose tools cannot be pinned (a duplicate
+  or empty tool name, invalid tool data, or more than 2 MiB) is a high `MOAT-T2-004`, because
+  mcpmoat can never check its tools for changes. `MOAT-T2-004` is high when the tool name is pinned,
+  because a duplicate, invalid or unverifiable copy of a pinned tool can hide a rug pull. Else it is
+  medium. For each changed tool, `scan` prints a unified diff of the pinned and the current text
+  after the findings table. For each new tool, it prints the full text of the tool as added lines,
+  under the header `New tool <tool> on server <server>:`, so you can review it before you accept it.
+  A pinned tool whose pin cannot be checked (another hash version, or a pinned text that does not
+  match its hash) gets its full current text too, under `Not verified tool <tool> on server <server>
+  (current text):`. An ignored finding gets no diff. If a diff is longer than 64 KiB or 2000 lines,
+  `scan` cuts it and prints a warning on stderr with the tool and the server name. Review the full
+  tool before you accept it. You can ignore these IDs with `--ignore` only (see [Ignore
+  findings](#ignore-findings)).
 - **Accept:** `scan` never changes the pins of a pinned server. Read the diff. If you trust the
   change, run `mcpmoat pin --accept <server> --expect <digest>`. The name must match one server
   exactly. If two clients use it, narrow it with `--config <file>`. If one file uses it in several
@@ -100,9 +101,10 @@ mcpmoat version              # print the version, commit and build date
 - A server that fails, times out or is refused (an untrusted or turned-off server) is a warning on
   stderr. If the server is not pinned, it does not change the exit code. If the server is already
   pinned and fails or times out, it is also a `MOAT-T2-004` finding (high, so exit code 1 at the
-  default `--fail-on high`) with the reason `pinned server could not be inspected`, because a hostile server must not avoid the
-  rug-pull check by failing on purpose. A pinned server that is refused stays a warning: your
-  client config turns it off or does not approve it, and the server cannot choose that.
+  default `--fail-on high`) with the reason `pinned server could not be inspected`, because a
+  hostile server must not avoid the rug-pull check by failing on purpose. A pinned server that is
+  refused stays a warning: your client config turns it off or does not approve it, and the server
+  cannot choose that.
 - `scan` and `pin --accept` print the warnings of the inspection on stderr: secrets that go over
   plain http (`cleartext-secrets`), lists that the server answered but did not declare
   (`undeclared-capability`), and a proxy that skips the DNS pin (`dns-pin-unavailable`). The lines
@@ -179,7 +181,7 @@ the file. Ignored findings do not count for the exit code, so the file can turn 
 
 | Code | Meaning |
 |---|---|
-| 0 | No finding that is not ignored has severity at or above `--fail-on`. |
+| 0 | No execution error, and no finding that is not ignored has severity at or above `--fail-on`. |
 | 1 | At least one finding that is not ignored has severity at or above `--fail-on`. |
 | 2 | Execution error. |
 
@@ -189,14 +191,19 @@ the file. Ignored findings do not count for the exit code, so the file can turn 
   code 1.
 - A finding with a severity that mcpmoat does not know always counts.
 - Ignored findings (`.mcpmoat-ignore` or `--ignore`) never give exit code 1.
-- Exit code 2 comes from invalid flags, invalid rules, an unreadable `--config` file, a problem in
-  a config file, a `pins.json` that cannot be read or saved, or an interrupt (Ctrl-C, `SIGTERM`,
-  `SIGHUP`). Exit code 2 wins over 1. The report still prints first.
+- Exit code 2 comes, for example, from invalid flags, invalid rules, an unreadable `--config` file,
+  a problem in a config file, a `pins.json` that cannot be read or saved, a report that cannot be
+  written (a closed stdout), an unknown home or working directory in auto-discovery, or an
+  internal error. An interrupt (Ctrl-C, `SIGTERM`, `SIGHUP`) gives exit code 2 only during the
+  inspection of the servers or before the save of new pins.
+- Exit code 2 wins over 1. A problem in a config file, a `pins.json` that cannot be read or saved,
+  and an interrupt before the save of new pins still print the report first. A `--config` file
+  with a problem and no server prints only the problem. The other errors print no report.
 - An unpinned server that fails or times out is a warning on stderr only. It does not change the
   exit code. A pinned server that fails or times out is a high `MOAT-T2-004` finding, so it gives
   exit code 1 at the default `--fail-on high`.
-- No built-in rule is critical today. So `--fail-on critical` never gives exit code 1, also on a
-  rug pull (`MOAT-T2-001` is high).
+- No built-in rule is critical yet, so `--fail-on critical` fails only on an unknown severity or
+  rule ID, not even on a rug pull (`MOAT-T2-001` is high).
 
 To use the exit code in CI or in a git hook, see [docs/ci.md](docs/ci.md).
 

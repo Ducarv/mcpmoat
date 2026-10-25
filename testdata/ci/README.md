@@ -21,23 +21,8 @@ resolves. So a scan that connects by mistake fetches nothing.
 No other rule must fire. In particular, the package names do not match
 `MOAT-T5-001` (typosquat).
 
-Expected exit codes from `mcpmoat scan --no-connect --config .mcp.json`, run
-in the `repo` folder:
-
-| Extra flags | Exit code |
-|---|---|
-| none | 1 |
-| `--fail-on low` | 1 |
-| `--fail-on medium` | 1 |
-| `--fail-on high` | 1 |
-| `--fail-on critical` | 0 |
-| `--ignore MOAT-T4-001` | 0 |
-| `--ignore MOAT-T4-001 --fail-on low` | 1 |
-| `--ignore MOAT-T4-001 --fail-on medium` | 1 |
-| `--ignore MOAT-T4-001 --fail-on high` | 0 |
-| `--ignore MOAT-T4-001 --fail-on critical` | 0 |
-| `--fail-on bogus` | 2 |
-
-The default limit is `high`. With `--ignore MOAT-T4-001`, the highest
-finding left is `MOAT-T4-003` (medium). A bad `--fail-on` value is a usage
-error.
+In the `repo` folder, `mcpmoat scan --no-connect --config .mcp.json` exits
+with 1, because `MOAT-T4-001` is high and the default is `--fail-on high`.
+With `--fail-on critical`, it exits with 0. `TestE2EScanFailOn` in
+`cmd/mcpmoat/e2e_test.go` holds the expected exit code for each `--fail-on`
+and `--ignore` value.

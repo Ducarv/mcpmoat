@@ -28,11 +28,6 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - name: Check out the code
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-
       - name: Set up Go
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
@@ -41,9 +36,18 @@ jobs:
           cache: false
 
       - name: Install mcpmoat
-        # There is no tagged release yet. For a reproducible build, replace
-        # @latest with a commit SHA of github.com/Ducarv/mcpmoat.
-        run: go install github.com/Ducarv/mcpmoat/cmd/mcpmoat@latest
+        # There is no tagged release yet. This pins one commit of main, and
+        # the Go checksum database checks it. For newer rules and --fail-on,
+        # use a newer pseudo-version of main:
+        # go list -m github.com/Ducarv/mcpmoat@<commit> prints one.
+        run: go install github.com/Ducarv/mcpmoat/cmd/mcpmoat@v0.0.0-20261025220440-f51b6705da29
+
+      # The install runs before the checkout, so it never runs in the tree of
+      # the pull request.
+      - name: Check out the code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       - name: Scan .mcp.json
         # A pull request that deletes .mcp.json has nothing to scan.
@@ -56,12 +60,25 @@ The `paths` filter runs the job only when a pull request changes `.mcp.json` or 
 If you make the job a required check, remove the filter: GitHub keeps a required check that did
 not run in the pending state.
 
+mcpmoat also reads a Cursor project config, `.cursor/mcp.json`. If your repository has one, add
+`'.cursor/mcp.json'` to `paths` and add a second scan step:
+
+```yaml
+      - name: Scan .cursor/mcp.json
+        if: hashFiles('.cursor/mcp.json') != ''
+        run: mcpmoat scan --no-connect --config .cursor/mcp.json
+```
+
+`--config` reads a file in a folder named `.cursor` as a Cursor config, and the repository root
+is its project.
+
 ## A plain git hook
 
 Run this in the root of your repository. It saves the hook and makes it executable:
 
 ```sh
-cat > .git/hooks/pre-commit <<'EOF'
+hook=$(git rev-parse --git-path hooks)/pre-commit
+cat > "$hook" <<'EOF'
 #!/bin/sh
 # Scan the MCP config with mcpmoat before each commit.
 if [ ! -f .mcp.json ]; then
@@ -69,8 +86,12 @@ if [ ! -f .mcp.json ]; then
 fi
 exec mcpmoat scan --no-connect --config .mcp.json
 EOF
-chmod +x .git/hooks/pre-commit
+chmod +x "$hook"
 ```
+
+`git rev-parse --git-path hooks` finds the hooks folder also in a linked worktree or a submodule.
+When `core.hooksPath` is set, it gives that folder: the folder must exist, and the block replaces
+any pre-commit hook in it.
 
 The hook needs `mcpmoat` on `PATH`. It exits with code 0 when there is no `.mcp.json`. Else it
 exits with the exit code of mcpmoat, so a code that is not 0 stops the commit. To change the
@@ -80,8 +101,7 @@ threshold, add `--fail-on` to the last line of the hook:
 exec mcpmoat scan --no-connect --config .mcp.json --fail-on critical
 ```
 
-No built-in rule is critical today, so with `--fail-on critical` this git hook shows the findings
-but never stops a commit for them.
+[Exit codes](../README.md#exit-codes) in the README tells which findings each value fails on.
 
 `git commit --no-verify` skips the hook. So the hook helps you, but it does not replace the CI job.
 
@@ -95,7 +115,9 @@ repos:
     hooks:
       - id: mcpmoat
         name: mcpmoat scan
-        entry: mcpmoat scan --no-connect --config .mcp.json
+        # A commit that changes only .mcpmoat-ignore can run the hook when
+        # there is no .mcp.json. Then there is nothing to scan.
+        entry: sh -c '[ ! -f .mcp.json ] || exec mcpmoat scan --no-connect --config .mcp.json'
         language: system
         pass_filenames: false
         files: ^(\.mcp\.json|\.mcpmoat-ignore)$
@@ -106,9 +128,9 @@ test the hook now, run `pre-commit run --all-files`.
 
 `language: system` runs the `mcpmoat` command from your `PATH`, so install mcpmoat first. The hook
 runs only when the commit changes `.mcp.json` or `.mcpmoat-ignore`. To change the threshold, add
-`--fail-on` to `entry`. pre-commit shows the output of a hook only when the hook fails. To see the
-findings each time, add `verbose: true` to the hook. A remote hook (`repo: https://github.com/Ducarv/mcpmoat`)
-comes after the first tagged release.
+`--fail-on` after `.mcp.json`, inside the quotes of `entry`. pre-commit shows the output of a hook
+only when the hook fails. To see the findings each time, add `verbose: true` to the hook. A remote
+hook (`repo: https://github.com/Ducarv/mcpmoat`) comes after the first tagged release.
 
 ## Exit codes and --fail-on
 
@@ -123,15 +145,25 @@ known.
   file comes from the pull request. With `--no-connect`, no server process starts from that
   content.
 - A pull request can add or change `.mcpmoat-ignore` to hide config findings and turn exit code 1
-  into 0. Review changes to that file like code. When the file gives entries, `scan` prints
-  `mcpmoat scan: using N entries from .mcpmoat-ignore` (or `using 1 entry`) on stderr. Look for
-  this line in the job log.
+  into 0. It can also edit the workflow file: with `pull_request`, the run uses the workflow of the
+  pull request, so it can add `--fail-on critical` or `|| true`. Review changes to these files
+  like code, and let GitHub enforce it. Add a `CODEOWNERS` entry for them, turn on "Require review
+  from Code Owners" in the branch protection rule, and make the job a required check:
+
+  ```text
+  # .github/CODEOWNERS
+  /.mcp.json                     @example-org/security
+  /.cursor/mcp.json              @example-org/security
+  /.mcpmoat-ignore               @example-org/security
+  /.github/workflows/mcpmoat.yml @example-org/security
+  ```
+
+- When `.mcpmoat-ignore` gives entries, `scan` prints `mcpmoat scan: using N entries from
+  .mcpmoat-ignore` (or `using 1 entry`) on stderr. Look for this line in the job log.
 - The plain git hook scans the file in the working tree, not the staged version. If you stage only
   a part of your changes, the hook can check other text than the commit holds. The pre-commit
   framework hides the changes that are not staged while the hooks run, so it checks the staged
   version.
-- `--fail-on critical` never fails today, because no built-in rule is critical. Not even a rug pull
-  fails with it (`MOAT-T2-001` is high).
 
 ## Try it
 
@@ -146,6 +178,6 @@ mcpmoat scan --no-connect --config .mcp.json
 echo "exit code: $?"
 ```
 
-[testdata/ci/README.md](../testdata/ci/README.md) lists the findings and the exit code for each
-`--fail-on` and `--ignore` value. To try the plain git hook, run `git init` in the same folder, then
-run the commands from [A plain git hook](#a-plain-git-hook) and `.git/hooks/pre-commit`.
+The exit code is 1. [testdata/ci/README.md](../testdata/ci/README.md) lists the findings of each
+server. To try the plain git hook, run `git init` in the same folder, run the block from
+[A plain git hook](#a-plain-git-hook), then run `"$hook"`.
