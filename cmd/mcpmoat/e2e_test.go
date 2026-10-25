@@ -1141,10 +1141,7 @@ func TestE2ERugPull(t *testing.T) {
 	// assertPinsFile checks that pins.json does not hold the args of the config.
 	assertPinsFile := func(t *testing.T) {
 		t.Helper()
-		data, err := os.ReadFile(pinsPath(home))
-		if err != nil {
-			t.Fatal(err)
-		}
+		data := readFileBytes(t, pinsPath(home))
 		if strings.Contains(string(data), "-variant") {
 			t.Errorf("pins.json holds the args of the server config:\n%s", data)
 		}

@@ -84,7 +84,7 @@ func TestFixtureImports(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// benign, mailer, poisoned and shadowing.
+	// benign, mailer, poisoned, rugpull and shadowing.
 	folders := map[string]bool{}
 	for _, fixture := range fixtureOf {
 		folders[fixture] = true

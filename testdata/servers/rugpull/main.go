@@ -88,6 +88,7 @@ func run(args []string, stderr io.Writer) int {
 	fs.SetOutput(stderr)
 	variant := fs.String("variant", variantClean, variantClean+" | "+variantInjected)
 	if err := fs.Parse(args); err != nil {
+		// fs.Parse already printed the error and the usage to stderr (SetOutput above).
 		return exitUsage
 	}
 	// Parse stops at the first argument that is not a flag. Any such argument
