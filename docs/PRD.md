@@ -428,6 +428,8 @@ the title and the four hints `readOnlyHint`, `destructiveHint`, `idempotentHint`
   gives the same hash.
 - A change of one character in name, description or schema gives a different hash.
 - A change of one annotation hint gives a different hash.
+- Each hash starts with its version (`sha256-v1:`). When a stored hash has another version, mcpmoat
+  shows the tool as not verified and pins it again. It never accepts the tool silently.
 - The pins file has a format version field and is written atomically (temp file plus rename).
 - `XDG_CONFIG_HOME` is honoured when set.
 

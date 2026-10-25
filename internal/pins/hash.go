@@ -12,9 +12,10 @@ import (
 //
 // Any change to the field set, the shape or the canonicalisation of the
 // canonical form (see Canonical) needs a new version, because the same
-// tool then gets a different hash. A stored hash with another prefix means
-// that the algorithm changed, not that the tool changed. The tool must then
-// be pinned again. It is not a rug pull.
+// tool then gets a different hash. Hash computes only the current version,
+// so a stored hash with another prefix cannot be compared. The store must
+// then show the tool as not verified and pin it again. It must never accept
+// the tool silently: a rug pull at the same time would become the new pin.
 const HashVersion = "sha256-v1"
 
 // Hash returns the pin hash of t: HashVersion, a colon, and the lowercase
@@ -30,6 +31,5 @@ func Hash(t inspect.Tool) (string, error) {
 		return "", err
 	}
 	sum := sha256.Sum256(b)
-	// sum is an array, so sum[:] gives the slice that EncodeToString needs.
 	return HashVersion + ":" + hex.EncodeToString(sum[:]), nil
 }

@@ -127,17 +127,17 @@ The target flow is `discover -> inspect -> rules -> pins -> report`:
 
 `pins.Hash` gives the pin hash of one `inspect.Tool` (FR-11, threat T2).
 
-- Input: all six `inspect.Tool` fields. `_meta` and `icons` are not hashed. This is an accepted
-  limit until issue #153.
-- Output: `sha256-v1:<hex>`. The prefix is `HashVersion`. A change to the fields, the shape or the
-  canonicalisation needs a new version. A stored hash with another prefix means "pin again", not a
-  rug pull.
-- The canonical form uses RFC 8785 (JCS), through the standard library `encoding/json/jsontext`.
+- Input: the six `inspect.Tool` fields, in a canonical form that uses RFC 8785 (JCS), through the
+  standard library `encoding/json/jsontext`.
+- Output: `sha256-v1:<hex>`. The prefix is `HashVersion`.
 - Golden hashes: `testdata/pins/hash/golden.txt`, for the fixtures in
   `testdata/pins/hash/tools.json`.
 
-The `Canonical` doc comment owns the full rules: the shape, null handling, errors, no
-normalisation and the number limits. Read it with `go doc ./internal/pins Canonical`.
+The doc comments own the rules. `Canonical` owns the shape, null handling, errors, no normalisation
+and the known limits. `HashVersion` owns when the version changes and what the store does with a
+stored hash of another version. Read them with `go doc ./internal/pins Canonical` and
+`go doc ./internal/pins HashVersion`. The accepted limits are requirements in
+[PRD FR-11](PRD.md#64-pins-rug-pull-detection).
 
 ## The `internal/inspect` interface
 
