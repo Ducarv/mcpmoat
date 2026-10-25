@@ -117,16 +117,21 @@ func TestPinOutcomesUnverifiedSeverity(t *testing.T) {
 		pinBefore bool
 		outcomes  []inspect.Outcome
 		want      []row
+		// status is the inspection status that the --json report shows for
+		// the identity.
+		status report.InspectionStatus
 	}{
 		{
 			name: "listed twice on a pinned identity is high", pinBefore: true,
 			outcomes: []inspect.Outcome{okWith(tools), okWith(tools)},
 			want:     []row{{"MOAT-T2-004", "high", reasonListedTwice}},
+			status:   report.InspectionOK,
 		},
 		{
 			name:     "listed twice on an identity that is not pinned is medium",
 			outcomes: []inspect.Outcome{okWith(tools), okWith(tools)},
 			want:     []row{{"MOAT-T2-004", "medium", reasonListedTwice}},
+			status:   report.InspectionOK,
 		},
 		{
 			name: "listed three times on a pinned identity gives a row for each extra", pinBefore: true,
@@ -135,30 +140,36 @@ func TestPinOutcomesUnverifiedSeverity(t *testing.T) {
 				{"MOAT-T2-004", "high", reasonListedTwice},
 				{"MOAT-T2-004", "high", reasonListedTwice},
 			},
+			status: report.InspectionOK,
 		},
 		{
 			name: "not inspected on a pinned identity is high", pinBefore: true,
 			outcomes: []inspect.Outcome{failed},
 			want:     []row{{"MOAT-T2-004", "high", reasonNotInspected}},
+			status:   report.InspectionFailed,
 		},
 		{
 			name: "two failing outcomes with one pinned identity give one row", pinBefore: true,
 			outcomes: []inspect.Outcome{failed, timedOut},
 			want:     []row{{"MOAT-T2-004", "high", reasonNotInspected}},
+			status:   report.InspectionFailed,
 		},
 		{
 			name: "three failing outcomes with one pinned identity give one row", pinBefore: true,
 			outcomes: []inspect.Outcome{failed, timedOut, failed},
 			want:     []row{{"MOAT-T2-004", "high", reasonNotInspected}},
+			status:   report.InspectionFailed,
 		},
 		{
 			name:     "two failing outcomes with an identity that is not pinned give no row",
 			outcomes: []inspect.Outcome{failed, timedOut},
+			status:   report.InspectionFailed,
 		},
 		{
 			name: "inspected after a failed outcome is still compared: no change", pinBefore: true,
 			outcomes: []inspect.Outcome{failed, okWith(tools)},
 			want:     []row{{"MOAT-T2-004", "high", reasonNotInspected}},
+			status:   report.InspectionOK,
 		},
 		{
 			name: "inspected after a failed outcome is still compared: change", pinBefore: true,
@@ -167,6 +178,7 @@ func TestPinOutcomesUnverifiedSeverity(t *testing.T) {
 				{"MOAT-T2-004", "high", reasonNotInspected},
 				{"MOAT-T2-001", "high", ""},
 			},
+			status: report.InspectionOK,
 		},
 		{
 			name: "failed, failed, then inspected: one failed row and the comparison", pinBefore: true,
@@ -175,6 +187,7 @@ func TestPinOutcomesUnverifiedSeverity(t *testing.T) {
 				{"MOAT-T2-004", "high", reasonNotInspected},
 				{"MOAT-T2-001", "high", ""},
 			},
+			status: report.InspectionOK,
 		},
 	}
 	for _, tt := range tests {
@@ -191,6 +204,9 @@ func TestPinOutcomesUnverifiedSeverity(t *testing.T) {
 			}
 			if !slices.Equal(got, tt.want) {
 				t.Errorf("rows = %+v, want %+v", got, tt.want)
+			}
+			if got := pr.inspectionOf(srv); got != tt.status {
+				t.Errorf("inspectionOf() = %q, want %q", got, tt.status)
 			}
 		})
 	}

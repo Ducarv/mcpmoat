@@ -10,6 +10,7 @@ This page is the index. Each topic has one owner doc. Update the owner doc. Do n
 | Requirements, milestones and FR/NFR IDs | [docs/PRD.md](PRD.md) |
 | Threat model | [docs/PRD.md](PRD.md#53-threats) |
 | Package layout and data flow (docs/PRD.md section 8 is the target design) | [docs/ARCHITECTURE.md](ARCHITECTURE.md) |
+| JSON output schema and versioning (it links the schema file) | [docs/ARCHITECTURE.md](ARCHITECTURE.md#json-output) |
 | Commands (gates) | [CONTRIBUTING.md](../CONTRIBUTING.md#checks) |
 | Rule authoring | [CONTRIBUTING.md](../CONTRIBUTING.md#contributing-a-rule) |
 | PR docs rule | [CONTRIBUTING.md](../CONTRIBUTING.md#pull-requests) |

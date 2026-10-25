@@ -1,0 +1,153 @@
+{
+  "schema_version": 1,
+  "tool": {
+    "name": "mcpmoat",
+    "version": "1.2.3"
+  },
+  "mode": "no-connect",
+  "complete": true,
+  "servers": [
+    {
+      "name": "cc-global",
+      "client": "claude-code",
+      "scope": "global",
+      "project_path": "",
+      "untrusted": false,
+      "state": "enabled",
+      "transport": "stdio",
+      "source": "$HOME/.claude.json",
+      "argv": [
+        "npx",
+        "-y",
+        "cc-global"
+      ],
+      "inspection": {
+        "status": "not_run"
+      }
+    },
+    {
+      "name": "cc-alpha",
+      "client": "claude-code",
+      "scope": "project",
+      "project_path": "/work/alpha",
+      "untrusted": false,
+      "state": "enabled",
+      "transport": "stdio",
+      "source": "$HOME/.claude.json",
+      "argv": [
+        "node",
+        "alpha.js"
+      ],
+      "inspection": {
+        "status": "not_run"
+      }
+    },
+    {
+      "name": "cc-project",
+      "client": "claude-code",
+      "scope": "project",
+      "project_path": "$WORK",
+      "untrusted": true,
+      "state": "unapproved",
+      "transport": "http",
+      "source": "$WORK/.mcp.json",
+      "url": "https://cc-project.example.com/mcp",
+      "inspection": {
+        "status": "not_run"
+      }
+    },
+    {
+      "name": "cursor-global",
+      "client": "cursor",
+      "scope": "global",
+      "project_path": "",
+      "untrusted": false,
+      "state": "enabled",
+      "transport": "stdio",
+      "source": "$HOME/.cursor/mcp.json",
+      "argv": [
+        "uvx",
+        "cursor-global"
+      ],
+      "inspection": {
+        "status": "not_run"
+      }
+    },
+    {
+      "name": "cursor-project",
+      "client": "cursor",
+      "scope": "project",
+      "project_path": "$WORK",
+      "untrusted": true,
+      "state": "enabled",
+      "transport": "http",
+      "source": "$WORK/.cursor/mcp.json",
+      "url": "https://cursor-project.example.com/mcp",
+      "inspection": {
+        "status": "not_run"
+      }
+    },
+    {
+      "name": "codex-global",
+      "client": "codex",
+      "scope": "global",
+      "project_path": "",
+      "untrusted": false,
+      "state": "enabled",
+      "transport": "stdio",
+      "source": "$HOME/.codex/config.toml",
+      "argv": [
+        "npx",
+        "-y",
+        "codex-global"
+      ],
+      "inspection": {
+        "status": "not_run"
+      }
+    }
+  ],
+  "findings": [
+    {
+      "rule_id": "MOAT-T4-003",
+      "severity": "medium",
+      "server": "cc-global",
+      "field": "args",
+      "key": "",
+      "related": "cc-global"
+    },
+    {
+      "rule_id": "MOAT-T4-004",
+      "severity": "low",
+      "server": "cc-global",
+      "field": "args",
+      "key": "",
+      "related": ""
+    },
+    {
+      "rule_id": "MOAT-T4-003",
+      "severity": "medium",
+      "server": "cursor-global",
+      "field": "args",
+      "key": "",
+      "related": "cursor-global"
+    },
+    {
+      "rule_id": "MOAT-T4-003",
+      "severity": "medium",
+      "server": "codex-global",
+      "field": "args",
+      "key": "",
+      "related": "codex-global"
+    },
+    {
+      "rule_id": "MOAT-T4-004",
+      "severity": "low",
+      "server": "codex-global",
+      "field": "args",
+      "key": "",
+      "related": ""
+    }
+  ],
+  "diffs": [],
+  "errors": []
+}

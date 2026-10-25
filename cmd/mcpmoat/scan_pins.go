@@ -11,12 +11,16 @@ import (
 	"github.com/Ducarv/mcpmoat/internal/termsafe"
 )
 
-// This file holds the pin step of scan: the pinner, which checks the tools of
-// each inspected server against pins.json, and the ignore lists of the pin
-// rules.
+// This file holds the connect step of scan after inspect.Run: the inspection
+// status of each server for the --json report, the pinner, which checks the
+// tools of each inspected server against pins.json, and the ignore lists of
+// the pin rules.
 
-// pinReport is the result of the pin step: what scan adds to its report, and
-// what it must still save.
+// pinReport is the result of the connect step of scan: the inspection status
+// of each server, and from the pin step what scan adds to its report and what
+// it must still save. The status lives here because inspectAndPin returns only
+// this value, and because two servers with one identity get their status by
+// the same rule that checkOutcome uses (see recordInspection).
 type pinReport struct {
 	// rows are the pin findings that the ignore list does not drop, in the
 	// order of the servers, then of the tools.
@@ -37,6 +41,13 @@ type pinReport struct {
 	// --expect <digest>" (see writeAcceptHints). A server whose tools cannot be
 	// pinned has no hint: pin --accept would refuse those tools (see addHint).
 	hints []acceptHint
+	// inspection holds the inspection status of each server that scan
+	// inspected, as one of the report.InspectionStatus constants. It is keyed by
+	// serverIdentity, because inspect.Run sorts the servers, so the outcomes
+	// are not in the order of the server table. A server that is not in the
+	// map was not inspected: the --json report shows it as not run (see
+	// inspectionOf). It is nil when scan inspected nothing.
+	inspection map[pins.Identity]report.InspectionStatus
 }
 
 // pinnedServer is one server that scan pinned for the first time. It holds what
@@ -95,9 +106,11 @@ func (c *cli) pinOutcomes(store *pins.Store, outcomes []inspect.Outcome, ign *sc
 		handled: make(map[pins.Identity]bool),
 		failed:  make(map[pins.Identity]bool),
 		warned:  make(map[string]bool),
+		res:     pinReport{inspection: make(map[pins.Identity]report.InspectionStatus, len(outcomes))},
 	}
 	servers := make([]discover.Server, len(outcomes))
 	for i, o := range outcomes {
+		p.recordInspection(o)
 		p.checkOutcome(o)
 		servers[i] = o.Server
 	}
@@ -127,6 +140,49 @@ type pinner struct {
 	// warned holds the rule IDs for which the user already got the warning
 	// that .mcpmoat-ignore cannot ignore them.
 	warned map[string]bool
+}
+
+// recordInspection stores the inspection status of o (see pinReport.inspection).
+// Two servers with one identity should not happen. If they do, they share one
+// status: ok when one of them was inspected, because checkOutcome then checks
+// the tools of the first one that was inspected. Otherwise the first outcome
+// keeps its status.
+func (p *pinner) recordInspection(o inspect.Outcome) {
+	id := serverIdentity(o.Server)
+	status := inspectionStatus(o)
+	old, seen := p.res.inspection[id]
+	firstOK := old != report.InspectionOK && status == report.InspectionOK
+	if !seen || firstOK {
+		p.res.inspection[id] = status
+	}
+}
+
+// inspectionStatus maps the outcome of an inspection to a
+// report.InspectionStatus constant. It reads the status and the kind of the
+// error, never the error text. A refusal comes first: a gate that refuses a
+// server also sets inspect.StatusFailed.
+func inspectionStatus(o inspect.Outcome) report.InspectionStatus {
+	if inspect.Refused(o.Err) {
+		return report.InspectionRefused
+	}
+	switch o.Status {
+	case inspect.StatusOK:
+		return report.InspectionOK
+	case inspect.StatusTimeout:
+		return report.InspectionTimeout
+	default:
+		return report.InspectionFailed
+	}
+}
+
+// inspectionOf returns the inspection status of the server s for the --json
+// report. A server that scan did not inspect (--no-connect, or no outcome)
+// has the status report.InspectionNotRun.
+func (r pinReport) inspectionOf(s discover.Server) report.InspectionStatus {
+	if status, ok := r.inspection[serverIdentity(s)]; ok {
+		return status
+	}
+	return report.InspectionNotRun
 }
 
 // checkOutcome checks one outcome. A server that was not inspected is a
