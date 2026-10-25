@@ -13,8 +13,12 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  # An intended subset of ci.yml. main already passed ci.yml; this job
-  # checks the tagged commit again before the release.
+  # A subset of ci.yml, run again on the tagged commit. main already passed
+  # all of ci.yml. This job keeps the checks that guard the release: vet,
+  # the race tests and govulncheck, which can find a new advisory after the
+  # merge. It leaves out gofmt, go mod tidy, golangci-lint, the version smoke
+  # test and the macOS runner: they cannot give a new result on the same
+  # commit, and the release cross-compiles on Linux.
   test:
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -55,8 +59,8 @@ jobs:
       id-token: write # get the OIDC token that signs the attestation
       attestations: write # store the attestation
     env:
-      # Dependabot does not bump this version string. Keep it equal to
-      # ci.yml (release-check) and CONTRIBUTING.md.
+      # Dependabot does not bump this version string. The release-check job
+      # in ci.yml checks that ci.yml and CONTRIBUTING.md pin the same version.
       GORELEASER_VERSION: v2.19.0
     steps:
       - name: Check out the code
@@ -74,8 +78,26 @@ jobs:
       - name: Check that the tagged commit is on main
         shell: bash
         run: |
+          if ! git rev-parse --verify --quiet origin/main >/dev/null; then
+            echo "origin/main is missing. Check the checkout step."
+            exit 1
+          fi
           if ! git merge-base --is-ancestor "$GITHUB_SHA" origin/main; then
             echo "$GITHUB_SHA is not on main. Tag a commit on main."
+            exit 1
+          fi
+
+      # GitHub creates a missing environment on the first run, with no
+      # reviewer and no tag limit. Its secret is missing too, so stop here,
+      # before GoReleaser writes anything. The expression gives only true or
+      # false, so the token itself never reaches this step.
+      - name: Check that the release environment is set up
+        env:
+          HAS_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_GITHUB_TOKEN != '' }}
+        run: |
+          if [ "$HAS_TAP_TOKEN" != true ]; then
+            echo "The release environment has no HOMEBREW_TAP_GITHUB_TOKEN secret."
+            echo "Do the one-time setup in CONTRIBUTING.md (Releasing) first."
             exit 1
           fi
 
@@ -113,27 +135,39 @@ jobs:
             dist/checksums.txt
 
       # GoReleaser makes a draft release. Publish it only after the
-      # attestations of the uploaded files verify.
-      - name: Verify the uploaded files
+      # attestations of the uploaded files verify. With Immutable releases,
+      # the assets lock at publish, so check them once more after it: a file
+      # that changed between the verify and the publish shows up there.
+      - name: Verify and publish the release
         env:
           GH_TOKEN: ${{ github.token }}
         shell: bash
         run: |
           set -euo pipefail
-          # The draft must hold exactly the files in dist/, no more and no less.
-          want=$(cd dist && find . -maxdepth 1 -type f \( -name '*.tar.gz' -o -name checksums.txt \) | sed 's|^\./||' | sort)
-          got=$(gh release view "$GITHUB_REF_NAME" -R "$GITHUB_REPOSITORY" --json assets -q '.assets[].name' | sort)
-          if [ "$got" != "$want" ]; then
-            echo "The draft assets do not match dist/:"
-            diff <(echo "$want") <(echo "$got") || true
-            exit 1
-          fi
-          gh release download "$GITHUB_REF_NAME" -R "$GITHUB_REPOSITORY" \
-            --pattern '*.tar.gz' --pattern checksums.txt -D published
-          for f in dist/*.tar.gz dist/checksums.txt; do
-            cmp "$f" "published/$(basename "$f")"
-          done
-          for f in published/*; do
+          # check_assets downloads the release assets to $1 and checks that
+          # they are exactly the files in dist/, no more and no less. Each
+          # command has its own "|| return 1", because set -e is off inside
+          # a function that runs as an if condition.
+          check_assets() {
+            local want got f
+            want=$(cd dist && find . -maxdepth 1 -type f \
+              \( -name '*.tar.gz' -o -name checksums.txt \) | sed 's|^\./||' | sort) || return 1
+            got=$(gh release view "$GITHUB_REF_NAME" -R "$GITHUB_REPOSITORY" \
+              --json assets -q '.assets[].name' | sort) || return 1
+            if [ "$got" != "$want" ]; then
+              echo "The release assets do not match dist/:"
+              diff <(echo "$want") <(echo "$got") || true
+              return 1
+            fi
+            gh release download "$GITHUB_REF_NAME" -R "$GITHUB_REPOSITORY" \
+              --pattern '*.tar.gz' --pattern checksums.txt -D "$1" || return 1
+            for f in dist/*.tar.gz dist/checksums.txt; do
+              cmp "$f" "$1/$(basename "$f")" || return 1
+            done
+          }
+
+          check_assets draft
+          for f in draft/*; do
             gh attestation verify "$f" -R "$GITHUB_REPOSITORY" \
               --signer-workflow "$GITHUB_REPOSITORY/.github/workflows/release.yml" \
               --source-ref "$GITHUB_REF" \
@@ -141,7 +175,9 @@ jobs:
               --deny-self-hosted-runners
           done
 
-      - name: Publish the release
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: gh release edit "$GITHUB_REF_NAME" -R "$GITHUB_REPOSITORY" --draft=false
+          gh release edit "$GITHUB_REF_NAME" -R "$GITHUB_REPOSITORY" --draft=false
+
+          if ! check_assets published; then
+            echo "::error::The release is public, but its assets changed after the verify step. Check it and delete it."
+            exit 1
+          fi
