@@ -1341,17 +1341,17 @@ func TestListAllMetaIcons(t *testing.T) {
 		{
 			name:       "unmarshalable meta func",
 			meta:       mcp.Meta{"bad": func() {}, "other": canary},
-			wantErrSub: "list tools: meta:",
+			wantErrSub: "list tools: _meta:",
 		},
 		{
 			name:       "unmarshalable meta channel",
 			meta:       mcp.Meta{canary: make(chan int)},
-			wantErrSub: "list tools: meta:",
+			wantErrSub: "list tools: _meta:",
 		},
 		{
 			name:       "unmarshalable meta infinity",
 			meta:       mcp.Meta{"bad": math.Inf(1), "other": canary},
-			wantErrSub: "list tools: meta:",
+			wantErrSub: "list tools: _meta:",
 		},
 		// No icons marshal-error case: []mcp.Icon holds only typed string
 		// fields, so encoding cannot fail. The "icons:" wrap in list.go is a guard.

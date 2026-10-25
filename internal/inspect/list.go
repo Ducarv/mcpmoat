@@ -348,7 +348,7 @@ func listTools(ctx context.Context, cs sessionLister, raw *rawLists) ([]Tool, er
 			}
 			meta, err := marshalNonEmpty(len(t.Meta), t.Meta)
 			if err != nil {
-				return Tool{}, fmt.Errorf("meta: %w", err)
+				return Tool{}, fmt.Errorf("_meta: %w", err)
 			}
 			icons, err := marshalNonEmpty(len(t.Icons), t.Icons)
 			if err != nil {
