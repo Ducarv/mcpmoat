@@ -313,8 +313,9 @@ const configErrorHint = "mcpmoat scan: a config file has a problem; " +
 // the report. The "pinned N tools" notices come after a successful save.
 //
 // A config file problem, a pins.json read or save error, an inspect.Run error
-// or a signal before the save of new pins gives exit code 2, also when there
-// are findings at or above setup.failOn (see scanExitCode). The report is already
+// or a signal before the save of new pins (when there are new pins) gives exit
+// code 2, also when there are findings at or above setup.failOn (see
+// scanExitCode). The report is already
 // printed when reportScan calls scanExitCode, so the user still sees the
 // findings. Only a signal during the inspection and a failed write of the
 // report return exit code 2 without a full report.

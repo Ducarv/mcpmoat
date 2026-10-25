@@ -119,9 +119,9 @@ mcpmoat version               # print the version, commit and build date
   that another run wrote meanwhile. A parallel run can still lose an update until the lock (#150)
   exists.
 - Press Ctrl-C (or send `SIGTERM` or `SIGHUP`) to stop a run. mcpmoat stops the stdio servers that
-  it started. A signal during the inspection, or after it but before new pins are saved (only when
-  there are new pins), makes `scan` and `pin --accept` print `interrupted; no pins were saved`,
-  save nothing and exit with code 2. [Exit codes](#exit-codes) tells what `scan` does at other times.
+  it started. A signal during the inspection, or after it but before new pins are saved (for
+  `scan`, only when there are new pins), makes `scan` and `pin --accept` print `interrupted; no
+  pins were saved`, save nothing and exit with code 2. [Exit codes](#exit-codes) tells what `scan` does at other times.
 - [Exit codes](#exit-codes) tells which of these findings give exit code 1 at each `--fail-on`
   value.
 
