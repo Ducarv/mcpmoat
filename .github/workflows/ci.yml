@@ -110,7 +110,8 @@ jobs:
       - name: Check the GoReleaser version pins
         run: |
           rel=$(sed -n 's/^ *GORELEASER_VERSION: //p' .github/workflows/release.yml)
-          doc=$(grep -i goreleaser CONTRIBUTING.md | grep -o 'v2\.[0-9]*\.[0-9]*' | sort -u || true)
+          # CONTRIBUTING.md names the version only in goreleaser/v<major>@<version>.
+          doc=$(grep -oE 'goreleaser(/v[0-9]+)?@v[0-9][0-9.]*' CONTRIBUTING.md | sed 's/.*@//' | sort -u || true)
           if [ "$rel" != "$GORELEASER_VERSION" ] || [ "$doc" != "$GORELEASER_VERSION" ]; then
             echo "The GoReleaser pins differ. ci.yml: $GORELEASER_VERSION. release.yml: $rel. CONTRIBUTING.md: $doc."
             exit 1
