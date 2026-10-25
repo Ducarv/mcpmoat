@@ -1,0 +1,27 @@
+NAME     CLIENT        SCOPE                       TRANSPORT   STATE        SOURCE               COMMAND/URL
+github   claude-code   global                      stdio       enabled      $HOME/.claude.json   /usr/local/bin/github-mcp
+github   claude-code   project:$WORK (untrusted)   stdio       unapproved   $WORK/.mcp.json      npx -y github-mcp
+
+SUMMARY
+  github (claude-code, global): not inspected, 1 finding
+  github (claude-code, project:$WORK (untrusted)): not inspected, 2 findings
+
+FINDINGS
+HIGH (1)
+  MOAT-T4-002  Plaintext secret in config
+    Server: github (claude-code, global)
+    Where: env GITHUB_TOKEN
+    Risk: A secret is written in clear text in the client config, in the command arguments or in a URL. Anyone who can read the file, a backup or a shared dotfiles repo gets it. Command arguments also show in process listings, and URLs also show in logs.
+    Fix: Move the secret out of the config: use an environment variable reference such as ${GITHUB_TOKEN} or a secret manager, and set the value outside the file. For a URL, send the secret in a header or an env reference instead of a query token or a path segment. Rotate the exposed secret.
+MEDIUM (1)
+  MOAT-T4-003  Package runner uses an unpinned package
+    Server: github (claude-code, project:$WORK (untrusted))
+    Where: args github-mcp
+    Risk: The server starts from a package that is not fixed. A registry package with no exact version, a git branch head, a tarball or a URL can change at any time. Each start can download and run new, possibly malicious code without any review.
+    Fix: Pin an exact version, for example npx @scope/server@1.4.2, uvx some-server==0.3.1 or a docker image digest. For a git package, pin a full 40-hex commit, as in npx github:user/repo#<40-hex> or uvx --from git+https://github.com/user/repo@<40-hex> tool. Or use a registry package with an exact version. Update the pin on purpose after review.
+LOW (1)
+  MOAT-T4-004  npx runs with its yes option on (-y, --yes or npm_config_yes)
+    Server: github (claude-code, project:$WORK (untrusted))
+    Where: args
+    Risk: npx -y, npx --yes or an npm_config_yes env entry overrides the npm_config_yes=false that mcpmoat scan sets, so the scan itself installs and runs the package, and in a terminal npx also skips its confirmation prompt.
+    Fix: Pin an exact version (see MOAT-T4-003), or install a version you reviewed and run its binary, then remove -y, --yes and npm_config_yes. Removing them alone is not enough, because an MCP client starts npx with no terminal and npx then installs a missing package with no prompt. Use npx --no or npm_config_yes=false to make npx refuse to install.

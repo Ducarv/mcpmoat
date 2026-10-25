@@ -115,7 +115,7 @@ func WriteServers(w io.Writer, servers []discover.Server) error {
 		write("%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
 			cell(s.Name, maxShortCellRunes),
 			cell(string(s.Client), maxShortCellRunes),
-			scopeCell(s),
+			scopeCell(s.Scope, s.ProjectPath, s.Untrusted),
 			cell(string(s.Transport), maxShortCellRunes),
 			// The state text is a fixed mcpmoat string, but it goes through
 			// cell like every padded cell.
@@ -151,15 +151,16 @@ func cell(s string, limit int) string {
 	return c
 }
 
-// scopeCell returns the SCOPE cell for s. For an untrusted server,
-// untrustedMarker comes after the cut and quoted text.
-func scopeCell(s discover.Server) string {
-	text := string(s.Scope)
-	if s.Scope == discover.ScopeProject {
-		text = "project:" + s.ProjectPath
+// scopeCell returns the SCOPE cell: "global", or "project:" and the project
+// path. For an untrusted server, untrustedMarker comes after the cut and
+// quoted text.
+func scopeCell(scope discover.Scope, projectPath string, untrusted bool) string {
+	text := string(scope)
+	if scope == discover.ScopeProject {
+		text = "project:" + projectPath
 	}
 	c := cell(text, maxPathRunes)
-	if s.Untrusted {
+	if untrusted {
 		c += untrustedMarker
 	}
 	return c

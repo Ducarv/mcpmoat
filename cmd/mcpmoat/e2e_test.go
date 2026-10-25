@@ -95,11 +95,17 @@ func binaryPath(t *testing.T) string {
 // never read or write the real home directory or the real pins.json.
 func runBin(t *testing.T, home, dir string, args ...string) (stdout, stderr string, code int) {
 	t.Helper()
+	return runBinEnv(t, home, dir, nil, args...)
+}
+
+// runBinEnv is runBin with extra "KEY=value" entries in the child environment.
+func runBinEnv(t *testing.T, home, dir string, extraEnv []string, args ...string) (stdout, stderr string, code int) {
+	t.Helper()
 	bin := binaryPath(t)
 
 	cmd := exec.Command(bin, args...) //nolint:gosec // G204: the test runs the binary it just built
 	cmd.Dir = dir
-	cmd.Env = []string{"HOME=" + home, "XDG_CONFIG_HOME=" + filepath.Join(home, ".config"), "PATH=/usr/bin:/bin"}
+	cmd.Env = append([]string{"HOME=" + home, "XDG_CONFIG_HOME=" + filepath.Join(home, ".config"), "PATH=/usr/bin:/bin"}, extraEnv...)
 	var outBuf, errBuf bytes.Buffer
 	cmd.Stdout = &outBuf
 	cmd.Stderr = &errBuf
@@ -594,6 +600,79 @@ func TestE2EScanConfigFindings(t *testing.T) {
 				if slices.Contains(findingIDs(rows), id) {
 					t.Errorf("finding %s shows, but it is ignored\nstdout:\n%s", id, stdout)
 				}
+			}
+		})
+	}
+}
+
+// TestE2EScanReport scans the dangerous config fixture, which has findings in
+// the high, medium and low severities. The child's stdout is a pipe, so it is
+// not a terminal and the report has no colour, with or without NO_COLOR and
+// --no-color.
+func TestE2EScanReport(t *testing.T) {
+	t.Parallel()
+	severityRank := map[string]int{"critical": 0, "high": 1, "medium": 2, "low": 3}
+
+	tests := []struct {
+		name string
+		env  []string
+		args []string
+	}{
+		{name: "piped", args: []string{"scan", "--no-connect"}},
+		{name: "NO_COLOR", env: []string{"NO_COLOR=1"}, args: []string{"scan", "--no-connect"}},
+		{name: "no-color after scan", args: []string{"scan", "--no-color", "--no-connect"}},
+		{name: "no-color before scan", args: []string{"--no-color", "scan", "--no-connect"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			home, work := discovertest.CopyFixture(t, filepath.Join("..", "..", "testdata", "configs", "dangerous"))
+
+			stdout, stderr, code := runBinEnv(t, home, work, tt.env, tt.args...)
+
+			assertScanResult(t, code, stdout, stderr, scanWant{code: exitFindings})
+			assertCleanStderr(t, stderr)
+			if strings.Contains(stdout, "\x1b") {
+				t.Errorf("stdout has an escape byte, want plain text\nstdout:\n%q", stdout)
+			}
+
+			// SUMMARY: every server, none inspected, counts add up.
+			servers := column(tableRows(t, stdout), 0)
+			summary := summaryRows(t, stdout)
+			var names []string
+			for _, row := range summary {
+				names = append(names, row.Name)
+				if row.Status != "not inspected" {
+					t.Errorf("server %s: status = %q, want %q", row.Name, row.Status, "not inspected")
+				}
+			}
+			if !slices.Equal(names, servers) {
+				t.Errorf("summary servers = %v, want table servers %v", names, servers)
+			}
+			total := 0
+			for _, row := range summary {
+				total += row.Findings
+			}
+
+			// FINDINGS: severity order, and the text of the built-in rules.
+			findings := parseFindings(t, stdout)
+			if total != len(findings) || total == 0 {
+				t.Errorf("summary counts add up to %d, FINDINGS block has %d findings (want equal and above 0)", total, len(findings))
+			}
+			seen := map[string]bool{}
+			for i, f := range findings {
+				seen[f.Severity] = true
+				if i > 0 && severityRank[f.Severity] < severityRank[findings[i-1].Severity] {
+					t.Errorf("finding %d (%s) has severity %s after %s", i, f.RuleID, f.Severity, findings[i-1].Severity)
+				}
+				for field, text := range map[string]string{"Server": f.Server, "Risk": f.Risk, "Fix": f.Fix} {
+					if text == "" || text == "-" {
+						t.Errorf("finding %d (%s): %s = %q, want the rule text", i, f.RuleID, field, text)
+					}
+				}
+			}
+			if len(seen) < 2 {
+				t.Errorf("findings have severities %v, want at least two\nstdout:\n%s", slices.Sorted(maps.Keys(seen)), stdout)
 			}
 		})
 	}

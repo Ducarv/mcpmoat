@@ -10,6 +10,8 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/Ducarv/mcpmoat/internal/inspect"
 )
@@ -1130,6 +1132,71 @@ func TestReasonOf(t *testing.T) {
 	} {
 		if got := ReasonOf(tt.err); got != tt.want {
 			t.Errorf("ReasonOf(%v) = %q, want %q", tt.err, got, tt.want)
+		}
+	}
+}
+
+// TestChangeKindRiskRemediation checks the fixed texts of every kind: they are
+// not empty, are valid UTF-8, hold no control character (so no ESC) and, for a
+// known kind, differ from the generic text of an unknown kind. The last check
+// catches a known kind that falls through to the generic text.
+func TestChangeKindRiskRemediation(t *testing.T) {
+	t.Parallel()
+	unknown := ChangeKind("no-such-kind")
+	tests := []struct {
+		name  string
+		kind  ChangeKind
+		known bool
+	}{
+		{name: "changed", kind: KindChanged, known: true},
+		{name: "new", kind: KindNew, known: true},
+		{name: "removed", kind: KindRemoved, known: true},
+		{name: "unverified", kind: KindUnverified, known: true},
+		{name: "unknown", kind: unknown},
+		{name: "empty kind", kind: ChangeKind("")},
+	}
+	texts := []struct {
+		name string
+		get  func(ChangeKind) string
+	}{
+		{name: "Risk", get: ChangeKind.Risk},
+		{name: "Remediation", get: ChangeKind.Remediation},
+	}
+	for _, tt := range tests {
+		for _, text := range texts {
+			t.Run(tt.name+"/"+text.name, func(t *testing.T) {
+				t.Parallel()
+				got := text.get(tt.kind)
+				if got == "" {
+					t.Fatalf("%s() of %q is empty", text.name, tt.kind)
+				}
+				if !utf8.ValidString(got) {
+					t.Errorf("%s() of %q is not valid UTF-8: %q", text.name, tt.kind, got)
+				}
+				for _, r := range got {
+					if unicode.IsControl(r) {
+						t.Errorf("%s() of %q holds control character %U: %q", text.name, tt.kind, r, got)
+					}
+				}
+				generic := text.get(unknown)
+				if tt.known && got == generic {
+					t.Errorf("%s() of %q = the generic text of an unknown kind: %q", text.name, tt.kind, got)
+				}
+				if !tt.known && got != generic {
+					t.Errorf("%s() of %q = %q, want the generic text %q", text.name, tt.kind, got, generic)
+				}
+			})
+		}
+	}
+	// The four known kinds must also differ from each other.
+	for _, text := range texts {
+		seen := map[string]ChangeKind{}
+		for _, k := range []ChangeKind{KindChanged, KindNew, KindRemoved, KindUnverified} {
+			s := text.get(k)
+			if prev, dup := seen[s]; dup {
+				t.Errorf("%s() of %q and %q are the same text: %q", text.name, prev, k, s)
+			}
+			seen[s] = k
 		}
 	}
 }

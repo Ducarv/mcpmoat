@@ -1,7 +1,10 @@
 package main
 
 import (
+	"errors"
 	"path/filepath"
+	"reflect"
+	"slices"
 
 	"github.com/Ducarv/mcpmoat/internal/discover"
 	"github.com/Ducarv/mcpmoat/internal/inspect"
@@ -37,6 +40,18 @@ type pinReport struct {
 	// --expect <digest>" (see writeAcceptHints). A server whose tools cannot be
 	// pinned has no hint: pin --accept would refuse those tools (see addHint).
 	hints []acceptHint
+	// statuses holds the inspection result of each outcome, in the order of
+	// the outcomes (not of the config). serverStatuses puts them in the order
+	// of the servers for the summary. It is nil when scan inspected nothing.
+	statuses []outcomeStatus
+}
+
+// outcomeStatus is the summary entry of one outcome, with the server that it
+// belongs to. The report.ServerStatus holds only the pin findings of the
+// server: serverStatuses adds the findings of the config rules.
+type outcomeStatus struct {
+	server discover.Server
+	status report.ServerStatus
 }
 
 // pinnedServer is one server that scan pinned for the first time. It holds what
@@ -98,8 +113,16 @@ func (c *cli) pinOutcomes(store *pins.Store, outcomes []inspect.Outcome, ign *sc
 	}
 	servers := make([]discover.Server, len(outcomes))
 	for i, o := range outcomes {
+		before := len(p.res.rows)
 		p.checkOutcome(o)
 		servers[i] = o.Server
+		// The rows that checkOutcome kept are the pin findings of this
+		// outcome. Counting here (not by name) keeps two servers with one
+		// name apart.
+		p.res.statuses = append(p.res.statuses, outcomeStatus{
+			server: o.Server,
+			status: outcomeSummary(o, len(p.res.rows)-before),
+		})
 	}
 	// pin selects its server among all the servers, also the ones that were
 	// not inspected.
@@ -144,16 +167,16 @@ func (p *pinner) checkOutcome(o inspect.Outcome) {
 	s := o.Server
 	id := serverIdentity(s)
 	if o.Status != inspect.StatusOK {
-		p.notInspected(s.Name, id, o.Err)
+		p.notInspected(s, id, o.Err)
 		return
 	}
 	if p.handled[id] {
-		p.addUnverified(s.Name, reasonListedTwice, p.unverifiedSeverity(id))
+		p.addUnverified(s, reasonListedTwice, p.unverifiedSeverity(id))
 		return
 	}
 	p.handled[id] = true
 	if !filepath.IsAbs(s.Source) {
-		p.addUnverified(s.Name, reasonRelativeSource, pins.UnverifiedSeverity(true))
+		p.addUnverified(s, reasonRelativeSource, pins.UnverifiedSeverity(true))
 		return
 	}
 
@@ -168,7 +191,7 @@ func (p *pinner) checkOutcome(o inspect.Outcome) {
 // add keeps a row, or counts it when the ignore list drops it. It returns false
 // for a dropped row, so the caller keeps no diff for it.
 func (p *pinner) add(row report.FindingRow) bool {
-	key := rules.FindingKey{RuleID: row.RuleID, Server: row.Server, Tool: row.Key}
+	key := rules.FindingKey{RuleID: row.RuleID, Server: row.Name, Tool: row.Key}
 	dropped, blocked := p.ign.ignored(key)
 	if blocked && !p.warned[row.RuleID] {
 		p.warned[row.RuleID] = true
@@ -186,8 +209,8 @@ func (p *pinner) add(row report.FindingRow) bool {
 // addUnverified adds the MOAT-T2-004 row of a server that scan cannot verify,
 // with the given severity. reason must be a fixed text: it is shown in the
 // report.
-func (p *pinner) addUnverified(name, reason, severity string) {
-	row := pinRow(pins.KindUnverified, name, "", severity)
+func (p *pinner) addUnverified(s discover.Server, reason, severity string) {
+	row := pinRow(pins.KindUnverified, s, "", severity)
 	row.Related = reason
 	p.add(row)
 }
@@ -201,7 +224,7 @@ func (p *pinner) unverifiedSeverity(id pins.Identity) string {
 }
 
 // notInspected handles a server that failed, timed out or was refused. The
-// warning on stderr is already written (see warnNotInspected). A server that
+// summary on stdout shows its status (see outcomeSummary). A server that
 // was pinned before this run and failed or timed out also gets a MOAT-T2-004
 // finding with severity high and the fixed reason reasonNotInspected, so scan
 // exits with 1: its pinned tools could not be checked, and a hostile server
@@ -214,12 +237,12 @@ func (p *pinner) unverifiedSeverity(id pins.Identity) string {
 // server that is not in the store is only a warning (FR-06). A server that this
 // run already inspected gets no row: the first outcome checked its tools. A
 // second failing outcome with one identity gives no second row (see failed).
-func (p *pinner) notInspected(name string, id pins.Identity, err error) {
+func (p *pinner) notInspected(s discover.Server, id pins.Identity, err error) {
 	if inspect.Refused(err) {
 		return
 	}
 	if _, pinned := p.store.Get(id); pinned && !p.handled[id] && !p.failed[id] {
-		p.addUnverified(name, reasonNotInspected, pins.UnverifiedSeverity(true))
+		p.addUnverified(s, reasonNotInspected, pins.UnverifiedSeverity(true))
 		p.failed[id] = true
 	}
 }
@@ -236,7 +259,7 @@ func (p *pinner) firstPin(s discover.Server, id pins.Identity, tools []inspect.T
 	if err != nil {
 		// The row gets the fixed reason, never the error text (see
 		// pinnableReason).
-		p.addUnverified(s.Name, pinnableReason(err), pins.UnverifiedSeverity(true))
+		p.addUnverified(s, pinnableReason(err), pins.UnverifiedSeverity(true))
 		return
 	}
 	p.res.pinned = append(p.res.pinned, pinnedServer{id: id, snap: snap, name: s.Name, tools: len(tools)})
@@ -256,7 +279,7 @@ func (p *pinner) compare(s discover.Server, id pins.Identity, tools []inspect.To
 	h := acceptHint{name: s.Name, id: id}
 	kept := false // true when at least one row of this server is not ignored
 	for _, ch := range pins.Compare(stored, tools) {
-		row := pinRow(ch.Kind, s.Name, ch.Tool, ch.Severity)
+		row := pinRow(ch.Kind, s, ch.Tool, ch.Severity)
 		if ch.Kind == pins.KindUnverified {
 			// ch.Reason is a fixed text from internal/pins.
 			row.Related = ch.Reason
@@ -302,17 +325,109 @@ const (
 	reasonRelativeSource = "the config path is not absolute"
 )
 
-// pinRow returns the report row of one pin change. The caller gives the
-// severity: findingSeverity would answer "critical" for these rule IDs,
-// because the rule set has no rule for them.
-func pinRow(kind pins.ChangeKind, server, tool, severity string) report.FindingRow {
+// pinRow returns the report row of one pin change on the server s. The caller
+// gives the severity: findingSeverity would answer "critical" for these rule
+// IDs, because the rule set has no rule for them. The risk and the remediation
+// are the fixed texts of the change kind (see pins.ChangeKind). The pin rules
+// have no title, so the report prints "-" for it.
+func pinRow(kind pins.ChangeKind, s discover.Server, tool, severity string) report.FindingRow {
 	return report.FindingRow{
-		RuleID:   kind.RuleID(),
-		Severity: severity,
-		Server:   server,
-		Field:    rules.FieldTool,
-		Key:      tool,
+		ServerRef:   report.NewServerRef(s),
+		RuleID:      kind.RuleID(),
+		Severity:    severity,
+		Risk:        kind.Risk(),
+		Remediation: kind.Remediation(),
+		Field:       rules.FieldTool,
+		Key:         tool,
 	}
+}
+
+// outcomeSummary returns the summary entry of one outcome. findings is the
+// number of pin findings that the outcome got.
+//
+//   - A server that inspect started and read gives "ok" and its tool count.
+//   - A timeout gives "timeout", and any other failure gives "failed". The
+//     reason is the raw error text: the report escapes and cuts it.
+//   - A server that a gate refused (the client config turns it off, or it is
+//     untrusted) was not started, so it gives "not inspected".
+//
+// The warnings of the inspection come from Result.Warnings, or, for a server
+// that failed, from ConnectError.Warnings. They hold keys and fixed names,
+// never values.
+func outcomeSummary(o inspect.Outcome, findings int) report.ServerStatus {
+	st := report.ServerStatus{
+		ServerRef: report.NewServerRef(o.Server),
+		Findings:  findings,
+	}
+	if o.Status == inspect.StatusOK {
+		st.Status = report.StatusOK
+		st.Tools = len(o.Result.Tools)
+		st.Warnings = o.Result.Warnings
+		return st
+	}
+	switch {
+	case inspect.Refused(o.Err):
+		st.Status = report.StatusNotInspected
+	case o.Status == inspect.StatusTimeout:
+		st.Status = report.StatusTimeout
+	default:
+		st.Status = report.StatusFailed
+	}
+	st.Reason = outcomeReason(o)
+	var ce *inspect.ConnectError
+	if errors.As(o.Err, &ce) {
+		st.Warnings = ce.Warnings
+	}
+	return st
+}
+
+// serverStatuses returns the summary of all servers, in the order of servers
+// (the config order), so it lines up with the server table. configFindings
+// holds the number of config findings of each server, by index in servers.
+//
+// An outcome belongs to a server when both hold the same data. The outcomes
+// come sorted, so the index does not match. The name does not tell two servers
+// apart either (two clients can both have a server "github"), so serverStatuses
+// compares the whole discover.Server with reflect.DeepEqual and uses each
+// outcome once. Two servers that are equal in every field cannot be told apart,
+// but they also have the same result. A server with no outcome (scan inspected
+// nothing, for example with --no-connect) is "not inspected" and has only its
+// config findings.
+//
+// To avoid comparing every server with every outcome, serverStatuses first
+// sorts the outcomes into buckets by serverIdentity (client, config file,
+// project and name). Servers with different identities are never equal, so a
+// server needs reflect.DeepEqual only against the outcomes in its own bucket.
+// The identity is a struct of strings, so it can be a map key.
+func (pr pinReport) serverStatuses(servers []discover.Server, configFindings []int) []report.ServerStatus {
+	if len(servers) == 0 {
+		return nil
+	}
+	// buckets maps an identity to the indexes of its outcomes in pr.statuses.
+	// An index leaves its bucket when an outcome is used.
+	buckets := make(map[pins.Identity][]int, len(pr.statuses))
+	for j, entry := range pr.statuses {
+		id := serverIdentity(entry.server)
+		buckets[id] = append(buckets[id], j)
+	}
+	out := make([]report.ServerStatus, len(servers))
+	for i, s := range servers {
+		st := report.ServerStatus{
+			ServerRef: report.NewServerRef(s),
+			Status:    report.StatusNotInspected,
+		}
+		id := serverIdentity(s)
+		for k, j := range buckets[id] {
+			if reflect.DeepEqual(pr.statuses[j].server, s) {
+				st = pr.statuses[j].status
+				buckets[id] = slices.Delete(buckets[id], k, k+1)
+				break
+			}
+		}
+		st.Findings += configFindings[i]
+		out[i] = st
+	}
+	return out
 }
 
 // printPinned writes the line "pinned N tools for <server>" on stderr for
@@ -322,21 +437,5 @@ func pinRow(kind pins.ChangeKind, server, tool, severity string) report.FindingR
 func (c *cli) printPinned(servers []pinnedServer) {
 	for _, p := range servers {
 		c.cmdPrintf("scan", "pinned %d %s for %s", p.tools, plural(p.tools, "tool", "tools"), cutName(p.name))
-	}
-}
-
-// warnNotInspected writes one line on stderr for each outcome that is not
-// inspect.StatusOK, for example
-// "mcpmoat scan: warning: server foo: timeout: inspect: no answer within 10s".
-// It writes the warning only, never exit code 2 (FR-06, FR-16). For a server
-// that is pinned, pinOutcomes also adds a high MOAT-T2-004 finding (see
-// notInspected). It also writes the inspection warnings of every outcome (see
-// warnInspection).
-func (c *cli) warnNotInspected(outcomes []inspect.Outcome) {
-	for _, o := range outcomes {
-		if o.Status != inspect.StatusOK {
-			c.scanWarnf("%s", notInspectedText(o))
-		}
-		c.warnInspection("scan", o)
 	}
 }

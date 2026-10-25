@@ -661,7 +661,7 @@ func TestPinAcceptKeepsOtherServers(t *testing.T) {
 	next := e.scan(current)
 	assertScanRun(t, next, scanWant{code: exitFindings, stdout: []string{"MOAT-T2-001"}})
 	out := splitPinOutput(t, next.stdout)
-	want := []pinFindingRow{{"MOAT-T2-001", "high", "other", "tool", "o"}}
+	want := []pinFinding{{"MOAT-T2-001", "high", "other", "o"}}
 	if !slices.Equal(out.rows, want) {
 		t.Errorf("rows after pin = %+v, want %+v", out.rows, want)
 	}
@@ -682,8 +682,11 @@ func TestPinAcceptAfterScanReview(t *testing.T) {
 	review := e.scan(changed)
 	assertScanRun(t, review, scanWant{
 		code:   exitFindings,
-		stdout: []string{"MOAT-T2-001", "high", "Changed tool a on server srv:", "--- pinned", "+++ current", "reads your keys"},
+		stdout: []string{"MOAT-T2-001", "Changed tool a on server srv:", "--- pinned", "+++ current", "reads your keys"},
 	})
+	if f := parseFindings(t, review.stdout); len(f) != 1 || f[0].RuleID != "MOAT-T2-001" || f[0].Severity != "high" {
+		t.Errorf("findings = %+v, want one high MOAT-T2-001 finding", f)
+	}
 	digest := hintDigest(t, review.stdout, "srv")
 
 	accepted := e.pin(changed, "--accept", "srv", "--expect", digest)

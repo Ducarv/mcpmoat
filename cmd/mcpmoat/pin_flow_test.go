@@ -197,8 +197,9 @@ func TestPinOutcomesUnverifiedSeverity(t *testing.T) {
 }
 
 // TestScanPinnedNotInspectedExit checks that scan exits 1 for a pinned server
-// that was not inspected, shows the high row and the reason in the report, and
-// that --ignore of the rule is the only way to exit 0.
+// that was not inspected, shows the high row in the report and the failure in
+// the SUMMARY block (not on stderr), and that --ignore of the rule is the only
+// way to exit 0.
 func TestScanPinnedNotInspectedExit(t *testing.T) {
 	t.Parallel()
 
@@ -213,9 +214,13 @@ func TestScanPinnedNotInspectedExit(t *testing.T) {
 
 		assertScanRun(t, got, scanWant{
 			code:   exitFindings,
-			stdout: []string{"MOAT-T2-004", "high", "pinned server could not be inspected"},
-			stderr: []string{"warning: server srv: timeout: "},
+			stdout: []string{"MOAT-T2-004", "pinned server could not be inspected"},
 		})
+		assertSummaryStatus(t, got, "srv", "timeout", "inspect: no answer within 20ms: context deadline exceeded")
+		findings := parseFindings(t, got.stdout)
+		if len(findings) != 1 || findings[0].RuleID != "MOAT-T2-004" || findings[0].Severity != "high" || findings[0].Name != "srv" {
+			t.Errorf("findings = %+v, want one high MOAT-T2-004 finding for srv", findings)
+		}
 		// A server that was not inspected has no tools to show, so no hint.
 		assertContainsNone(t, "stdout", got.stdout, []string{acceptHintPrefix})
 	})
@@ -229,9 +234,10 @@ func TestScanPinnedNotInspectedExit(t *testing.T) {
 
 		assertScanRun(t, got, scanWant{
 			code:     exitOK,
-			stderr:   []string{"warning: server srv: timeout: ", "1 finding ignored: MOAT-T2-004 (1)"},
+			stderr:   []string{"1 finding ignored: MOAT-T2-004 (1)"},
 			noStdout: []string{"MOAT-T2-004"},
 		})
+		assertSummaryStatus(t, got, "srv", "timeout", "inspect: no answer within 20ms: context deadline exceeded")
 	})
 
 	t.Run("an unpinned server that fails exits 0", func(t *testing.T) {
@@ -240,7 +246,8 @@ func TestScanPinnedNotInspectedExit(t *testing.T) {
 
 		got := e.scan(blockingInspector{}, "--timeout", "20ms")
 
-		assertScanRun(t, got, scanWant{code: exitOK, stderr: []string{"warning: server srv: timeout: "}})
+		assertScanRun(t, got, scanWant{code: exitOK})
+		assertSummaryStatus(t, got, "srv", "timeout", "inspect: no answer within 20ms: context deadline exceeded")
 		assertNoPinRows(t, got.stdout)
 	})
 }
@@ -736,8 +743,8 @@ func TestPinNoExpectNoteOrder(t *testing.T) {
 	})
 }
 
-// TestFindingsTableHoldsNotInspectedReason checks that the findings table of a
-// pinned server that was not inspected shows the severity and the reason.
+// TestFindingsTableHoldsNotInspectedReason checks that the FINDINGS block of a
+// pinned server that was not inspected shows the severity group and the reason.
 func TestFindingsTableHoldsNotInspectedReason(t *testing.T) {
 	t.Parallel()
 
@@ -748,13 +755,20 @@ func TestFindingsTableHoldsNotInspectedReason(t *testing.T) {
 	pr := c.pinOutcomes(store, []inspect.Outcome{{Server: srv, Status: inspect.StatusFailed, Err: errors.New("boom")}}, &scanIgnores{})
 
 	var out bytes.Buffer
-	if err := report.WriteFindings(&out, pr.rows); err != nil {
+	if err := report.WriteFindings(&out, pr.rows, report.Style{}); err != nil {
 		t.Fatal(err)
 	}
-	for _, want := range []string{"MOAT-T2-004", "high", "srv", "pinned server could not be inspected"} {
-		if !strings.Contains(out.String(), want) {
-			t.Errorf("findings table has no %q\n%s", want, out.String())
-		}
+	// WriteFindings starts with a blank line, as it follows a table in a scan.
+	got := parseFindings(t, "\n"+out.String())
+	if len(got) != 1 {
+		t.Fatalf("findings = %+v, want one\n%s", got, out.String())
+	}
+	f := got[0]
+	if f.RuleID != "MOAT-T2-004" || f.Severity != "high" || f.Name != "srv" {
+		t.Errorf("finding = %s %s on %q, want a high MOAT-T2-004 finding on srv", f.RuleID, f.Severity, f.Name)
+	}
+	if !strings.Contains(f.Tool, reasonNotInspected) {
+		t.Errorf("Tool line = %q, want the reason %q", f.Tool, reasonNotInspected)
 	}
 }
 
@@ -1037,13 +1051,28 @@ func TestWarningText(t *testing.T) {
 	}
 }
 
-// TestScanAndPinPrintInspectionWarnings checks that scan and pin print the
-// warnings of an inspection on stderr, also for a server that failed.
+// TestScanAndPinPrintInspectionWarnings checks where the warnings of an
+// inspection go, also for a server that failed. scan shows them in the SUMMARY
+// block on stdout and nothing on stderr. pin prints them on stderr.
 func TestScanAndPinPrintInspectionWarnings(t *testing.T) {
 	t.Parallel()
 
 	undeclared := inspect.Warning{Kind: inspect.WarnUndeclaredCapability, Capabilities: []string{"tools"}}
-	const line = "warning: server srv: undeclared-capability: "
+	const text = "undeclared-capability: "
+
+	// assertScanWarning checks that the one SUMMARY row of srv holds the warning
+	// and that stderr holds no warning.
+	assertScanWarning := func(t *testing.T, got pinRunResult, status string) {
+		t.Helper()
+		rows := summaryRows(t, got.stdout)
+		if len(rows) != 1 || rows[0].Name != "srv" || rows[0].Status != status {
+			t.Fatalf("summary rows = %+v, want one row for srv with the status %q\nstdout:\n%s", rows, status, got.stdout)
+		}
+		if len(rows[0].Warnings) != 1 || !strings.HasPrefix(rows[0].Warnings[0], text) {
+			t.Errorf("warnings of srv = %q, want one that starts with %q", rows[0].Warnings, text)
+		}
+		assertContainsNone(t, "stderr", got.stderr, []string{"warning"})
+	}
 
 	t.Run("scan, inspected", func(t *testing.T) {
 		t.Parallel()
@@ -1052,7 +1081,7 @@ func TestScanAndPinPrintInspectionWarnings(t *testing.T) {
 
 		got := e.scan(fake)
 
-		assertContainsAll(t, "stderr", got.stderr, []string{"mcpmoat scan: " + line})
+		assertScanWarning(t, got, "ok")
 	})
 
 	t.Run("scan, failed", func(t *testing.T) {
@@ -1062,7 +1091,7 @@ func TestScanAndPinPrintInspectionWarnings(t *testing.T) {
 
 		got := e.scan(fake)
 
-		assertContainsAll(t, "stderr", got.stderr, []string{"mcpmoat scan: " + line})
+		assertScanWarning(t, got, "failed")
 	})
 
 	t.Run("pin", func(t *testing.T) {
@@ -1072,6 +1101,6 @@ func TestScanAndPinPrintInspectionWarnings(t *testing.T) {
 
 		got := e.pin(fake, "--accept", "srv")
 
-		assertContainsAll(t, "stderr", got.stderr, []string{"mcpmoat pin: " + line})
+		assertContainsAll(t, "stderr", got.stderr, []string{"mcpmoat pin: warning: server srv: " + text})
 	})
 }

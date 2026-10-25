@@ -54,7 +54,7 @@ func TestScanNewToolDiff(t *testing.T) {
 			noStdout: []string{"Changed tool"},
 		})
 		out := splitPinOutput(t, got.stdout)
-		if want := []pinFindingRow{{"MOAT-T2-002", "medium", "srv", "tool", "b"}}; !slices.Equal(out.rows, want) {
+		if want := []pinFinding{{"MOAT-T2-002", "medium", "srv", "b"}}; !slices.Equal(out.rows, want) {
 			t.Errorf("pin rows = %+v, want %+v", out.rows, want)
 		}
 		assertDiffsOf(t, out.diffs, "srv", []string{"+b"})

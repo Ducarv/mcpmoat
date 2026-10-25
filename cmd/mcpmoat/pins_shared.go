@@ -127,18 +127,25 @@ func pinnableReason(err error) string {
 }
 
 // notInspectedText returns "server <name>: <status>: <reason>" for an outcome
-// that is not inspect.StatusOK. scan shows it as a warning and pin as an error.
+// that is not inspect.StatusOK. pin shows it as an error. scan shows the status
+// in its summary on stdout (see outcomeSummary) and does not use this text.
 // The server name and the error text come from untrusted sources (the error can
 // carry server output), so both are escaped and cut.
 func notInspectedText(o inspect.Outcome) string {
-	reason := "no error text"
-	if o.Err != nil {
-		reason = o.Err.Error()
-	}
 	return fmt.Sprintf("server %s: %s: %s",
 		cutName(o.Server.Name),
 		termsafe.Quote(string(o.Status)),
-		termsafe.QuoteCut(reason, maxWarnErrRunes))
+		termsafe.QuoteCut(outcomeReason(o), maxWarnErrRunes))
+}
+
+// outcomeReason returns the raw text that says why o was not inspected: the
+// error text, or "no error text" when there is none. The text is untrusted
+// (see inspect.Outcome.Err). The caller must escape it before it prints it.
+func outcomeReason(o inspect.Outcome) string {
+	if o.Err != nil {
+		return o.Err.Error()
+	}
+	return "no error text"
 }
 
 // warnInspection writes the warnings of the inspection of o on stderr for the

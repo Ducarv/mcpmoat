@@ -6,9 +6,39 @@ cursor-global    cursor        global                      stdio       enabled  
 cursor-project   cursor        project:$WORK (untrusted)   http        enabled      $WORK/.cursor/mcp.json     https://cursor-project.example.com/mcp
 codex-global     codex         global                      stdio       enabled      $HOME/.codex/config.toml   npx -y codex-global
 
-RULE          SEVERITY   SERVER          FIELD   KEY/RELATED
-MOAT-T4-003   medium     cc-global       args    cc-global
-MOAT-T4-004   low        cc-global       args    -
-MOAT-T4-003   medium     cursor-global   args    cursor-global
-MOAT-T4-003   medium     codex-global    args    codex-global
-MOAT-T4-004   low        codex-global    args    -
+SUMMARY
+  cc-global (claude-code, global): not inspected, 2 findings
+  cc-alpha (claude-code, project:/work/alpha): not inspected, 0 findings
+  cc-project (claude-code, project:$WORK (untrusted)): not inspected, 0 findings
+  cursor-global (cursor, global): not inspected, 1 finding
+  cursor-project (cursor, project:$WORK (untrusted)): not inspected, 0 findings
+  codex-global (codex, global): not inspected, 2 findings
+
+FINDINGS
+MEDIUM (3)
+  MOAT-T4-003  Package runner uses an unpinned package
+    Server: cc-global (claude-code, global)
+    Where: args cc-global
+    Risk: The server starts from a package that is not fixed. A registry package with no exact version, a git branch head, a tarball or a URL can change at any time. Each start can download and run new, possibly malicious code without any review.
+    Fix: Pin an exact version, for example npx @scope/server@1.4.2, uvx some-server==0.3.1 or a docker image digest. For a git package, pin a full 40-hex commit, as in npx github:user/repo#<40-hex> or uvx --from git+https://github.com/user/repo@<40-hex> tool. Or use a registry package with an exact version. Update the pin on purpose after review.
+  MOAT-T4-003  Package runner uses an unpinned package
+    Server: cursor-global (cursor, global)
+    Where: args cursor-global
+    Risk: The server starts from a package that is not fixed. A registry package with no exact version, a git branch head, a tarball or a URL can change at any time. Each start can download and run new, possibly malicious code without any review.
+    Fix: Pin an exact version, for example npx @scope/server@1.4.2, uvx some-server==0.3.1 or a docker image digest. For a git package, pin a full 40-hex commit, as in npx github:user/repo#<40-hex> or uvx --from git+https://github.com/user/repo@<40-hex> tool. Or use a registry package with an exact version. Update the pin on purpose after review.
+  MOAT-T4-003  Package runner uses an unpinned package
+    Server: codex-global (codex, global)
+    Where: args codex-global
+    Risk: The server starts from a package that is not fixed. A registry package with no exact version, a git branch head, a tarball or a URL can change at any time. Each start can download and run new, possibly malicious code without any review.
+    Fix: Pin an exact version, for example npx @scope/server@1.4.2, uvx some-server==0.3.1 or a docker image digest. For a git package, pin a full 40-hex commit, as in npx github:user/repo#<40-hex> or uvx --from git+https://github.com/user/repo@<40-hex> tool. Or use a registry package with an exact version. Update the pin on purpose after review.
+LOW (2)
+  MOAT-T4-004  npx runs with its yes option on (-y, --yes or npm_config_yes)
+    Server: cc-global (claude-code, global)
+    Where: args
+    Risk: npx -y, npx --yes or an npm_config_yes env entry overrides the npm_config_yes=false that mcpmoat scan sets, so the scan itself installs and runs the package, and in a terminal npx also skips its confirmation prompt.
+    Fix: Pin an exact version (see MOAT-T4-003), or install a version you reviewed and run its binary, then remove -y, --yes and npm_config_yes. Removing them alone is not enough, because an MCP client starts npx with no terminal and npx then installs a missing package with no prompt. Use npx --no or npm_config_yes=false to make npx refuse to install.
+  MOAT-T4-004  npx runs with its yes option on (-y, --yes or npm_config_yes)
+    Server: codex-global (codex, global)
+    Where: args
+    Risk: npx -y, npx --yes or an npm_config_yes env entry overrides the npm_config_yes=false that mcpmoat scan sets, so the scan itself installs and runs the package, and in a terminal npx also skips its confirmation prompt.
+    Fix: Pin an exact version (see MOAT-T4-003), or install a version you reviewed and run its binary, then remove -y, --yes and npm_config_yes. Removing them alone is not enough, because an MCP client starts npx with no terminal and npx then installs a missing package with no prompt. Use npx --no or npm_config_yes=false to make npx refuse to install.
