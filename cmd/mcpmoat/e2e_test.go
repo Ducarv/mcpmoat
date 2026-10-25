@@ -893,6 +893,7 @@ const pinEnvCanary = "e2e-plain-env-value-7c1f"
 func benignHome(t *testing.T, name string) (home, work string) {
 	t.Helper()
 	home, work = t.TempDir(), t.TempDir()
+	requirePrivateChain(t, home)
 	writeServers(t, home, ".claude.json", map[string]any{
 		name: map[string]any{
 			"command": inspecttest.Fixture(t, "benign"),
@@ -900,6 +901,35 @@ func benignHome(t *testing.T, name string) (home, work string) {
 		},
 	})
 	return home, work
+}
+
+// requirePrivateChain skips the test when another user can write to dir or
+// to one of its parents, such as /tmp on Linux. The binary refuses to make
+// its run directory below such a home (see checkChain in internal/inspect).
+// CI sets TMPDIR to a private directory, so on CI the test fails instead of a
+// silent skip.
+func requirePrivateChain(t *testing.T, dir string) {
+	t.Helper()
+	dir, err := filepath.EvalSymlinks(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for p := dir; ; p = filepath.Dir(p) {
+		info, err := os.Lstat(p)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if info.Mode().Perm()&0o022 != 0 {
+			msg := fmt.Sprintf("%s is writable by its group or by others, so mcpmoat makes no run directory below it; set TMPDIR to a private directory", p)
+			if os.Getenv("CI") != "" {
+				t.Fatal(msg)
+			}
+			t.Skip(msg)
+		}
+		if filepath.Dir(p) == p {
+			return
+		}
+	}
 }
 
 // TestE2EPinAccept runs the pin journey on the real binary: the first scan pins
