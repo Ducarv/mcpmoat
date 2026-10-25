@@ -556,8 +556,8 @@ text diff.
   it to review them first)` or ` (a change has no diff text: review the tool first)` for each
   change that the user did not see: the digest covers those changes too. There is no line for a server pinned for the first time, a server that
   could not be inspected, an ignored finding, or tools that cannot be pinned.
-- `scan` and `pin --accept` print the inspection warnings on stderr, one line each, with keys and
-  fixed names only: `cleartext-secrets`, `undeclared-capability` (the cloaking signal) and
+- `scan` shows the inspection warnings in the summary of the server on stdout, and `pin --accept`
+  prints them on stderr, one line each, with keys and fixed names only: `cleartext-secrets`, `undeclared-capability` (the cloaking signal) and
   `dns-pin-unavailable`.
 - The digest (`pins.Digest`, version `pd1`) is the full SHA-256 over the sorted tool names and their
   hashes. The server picks both tool sets, so a collision costs about 2^(n/2) work for n bits (the

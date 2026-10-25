@@ -287,8 +287,9 @@ type scanFinding struct {
 	// Server is the label "name (client, scope)", and Name is the server name.
 	Server, Name string
 	// Where is the text of the "Where:" line, for example "env API_KEY". Tool
-	// is the text of the "Tool:" line. A finding has one of them, or neither.
-	Where, Tool string
+	// is the text of the "Tool:" line, and Reason the text of the "Reason:" line
+	// (a finding about a whole server). A finding has one of them, or none.
+	Where, Tool, Reason string
 	// Risk and Fix are the texts of the "Risk:" and "Fix:" lines.
 	Risk, Fix string
 }
@@ -352,6 +353,8 @@ func parseFindings(t *testing.T, stdout string) []scanFinding {
 				cur.Where = value
 			case "Tool":
 				cur.Tool = value
+			case "Reason":
+				cur.Reason = value
 			case "Risk":
 				cur.Risk = value
 			case "Fix":
@@ -377,8 +380,8 @@ func parseFindings(t *testing.T, stdout string) []scanFinding {
 // findingRows returns the findings of a plain stdout as rows of words, in the
 // printed order. A row is RULE, SEVERITY, SERVER (the name only), FIELD, and
 // then the words of the key or related text. FIELD and the key come from the
-// "Where:" line, or from the "Tool:" line (FIELD is then "tool"). A part that
-// is missing shows as "-". It is a view of parseFindings for the tests that
+// "Where:" line, or from the "Tool:" or "Reason:" line (FIELD is then "tool").
+// A part that is missing shows as "-". It is a view of parseFindings for the tests that
 // compare rows. It returns nil when stdout has no FINDINGS block.
 //
 // A cell can be quoted when it holds a space, so use only the first four
@@ -392,6 +395,9 @@ func findingRows(t *testing.T, stdout string) [][]string {
 		case f.Tool != "":
 			row = append(row, "tool")
 			row = append(row, strings.Fields(f.Tool)...)
+		case f.Reason != "":
+			row = append(row, "tool")
+			row = append(row, strings.Fields(f.Reason)...)
 		case f.Where != "":
 			words := strings.Fields(f.Where)
 			row = append(row, words...)

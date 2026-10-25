@@ -128,6 +128,16 @@ func TestWriteFindingsExact(t *testing.T) {
 				"    Fix: Move it to a secret store.\n",
 		},
 		{
+			name: "tool row with an empty key gives a reason line",
+			rows: []report.FindingRow{with(func(r *report.FindingRow) { r.Field, r.Key, r.Related = "tool", "", "the server is listed twice" })},
+			want: "\nFINDINGS\nHIGH (1)\n" +
+				"  MOAT-T4-001  Secret in env\n" +
+				"    Server: github (claude-code, global)\n" +
+				"    Reason: \"the server is listed twice\"\n" +
+				"    Risk: A secret sits in the config.\n" +
+				"    Fix: Move it to a secret store.\n",
+		},
+		{
 			name: "key and related",
 			rows: []report.FindingRow{with(func(r *report.FindingRow) { r.Field, r.Key, r.Related = "args", "KEY", "REL" })},
 			want: "\nFINDINGS\nHIGH (1)\n" +

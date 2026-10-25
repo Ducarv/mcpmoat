@@ -661,7 +661,7 @@ func TestPinAcceptKeepsOtherServers(t *testing.T) {
 	next := e.scan(current)
 	assertScanRun(t, next, scanWant{code: exitFindings, stdout: []string{"MOAT-T2-001"}})
 	out := splitPinOutput(t, next.stdout)
-	want := []pinFinding{{"MOAT-T2-001", "high", "other", "o"}}
+	want := []pinFinding{{"MOAT-T2-001", "high", "other", "o", ""}}
 	if !slices.Equal(out.rows, want) {
 		t.Errorf("rows after pin = %+v, want %+v", out.rows, want)
 	}

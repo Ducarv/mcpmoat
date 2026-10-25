@@ -218,11 +218,13 @@ func (blockingInspector) Inspect(ctx context.Context, _ discover.Server) (inspec
 }
 
 // pinFinding is one finding of a pin rule in the FINDINGS block: the rule, the
-// severity of its group, the server name, and the text of its "Tool:" line. A
-// pin rule has a tool name, then its reason in parentheses and quotes when it
-// has one. A rule about a whole server has the reason alone.
+// severity of its group, the server name, and the text of its "Tool:" line or
+// its "Reason:" line. A pin rule about a tool has a "Tool:" line with the tool
+// name, then its reason in parentheses and quotes when it has one. A rule about
+// a whole server has a "Reason:" line with the reason alone, and no "Tool:"
+// line. A finding has one of the two lines, so one of tool and reason is empty.
 type pinFinding struct {
-	rule, severity, server, tool string
+	rule, severity, server, tool, reason string
 }
 
 // pinOutput is the stdout of a scan, split for the pin tests.
@@ -293,7 +295,7 @@ func splitPinOutput(t *testing.T, stdout string) pinOutput {
 		if f.Title != "" || f.Where != "" {
 			t.Errorf("pin finding %s has the title %q and the Where line %q, want neither", f.RuleID, f.Title, f.Where)
 		}
-		out.rows = append(out.rows, pinFinding{f.RuleID, f.Severity, f.Name, f.Tool})
+		out.rows = append(out.rows, pinFinding{f.RuleID, f.Severity, f.Name, f.Tool, f.Reason})
 	}
 	return out
 }

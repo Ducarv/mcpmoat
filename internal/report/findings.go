@@ -21,12 +21,6 @@ const (
 	maxRuleTextRunes = 500
 )
 
-// severityOrder lists the severity words in the order of the groups of
-// WriteFindings: the worst first. A row with any other severity word goes to
-// the first group, "critical" (fail closed, like findingSeverity in
-// cmd/mcpmoat).
-var severityOrder = []string{severityCritical, severityHigh, severityMedium, severityLow}
-
 // The severity words of a finding.
 const (
 	severityCritical = "critical"
@@ -35,11 +29,17 @@ const (
 	severityLow      = "low"
 )
 
+// severityOrder lists the severity words in the order of the groups of
+// WriteFindings: the worst first. A row with any other severity word goes to
+// the first group, "critical" (fail closed, like findingSeverity in
+// cmd/mcpmoat). It is an array, not a slice, so no code can change it.
+var severityOrder = [...]string{severityCritical, severityHigh, severityMedium, severityLow}
+
 // groupSeverity returns s when it is a known severity word, and "critical"
 // otherwise. An unknown severity fails closed: it is grouped and coloured as
 // the worst one.
 func groupSeverity(s string) string {
-	if slices.Contains(severityOrder, s) {
+	if slices.Contains(severityOrder[:], s) {
 		return s
 	}
 	return severityCritical
@@ -144,8 +144,10 @@ const fieldTool = "tool"
 // two servers with the same name in two scopes read differently (see
 // ServerRef). Where is "<field> <key> (<related>)"; a missing part is left
 // out, and the whole line is left out when Field, Key and Related are all
-// empty. A row with the field "tool" has a line "Tool: <name>" in place of
-// Where. An empty Risk or Remediation shows as "-".
+// empty. A row with the field "tool" has a line "Tool: <name> (<related>)" in
+// place of Where. When its Key is empty (a finding about the whole server, with
+// a fixed reason in Related) the line is "Reason: <related>" instead, because
+// no tool is named. An empty Risk or Remediation shows as "-".
 //
 // Names go through findingCell, so each is escaped, cut and quoted alone. Title,
 // Risk and Remediation go through [termsafe.QuoteCut]: a rule file can hold
@@ -200,15 +202,16 @@ func writeFinding(b *strings.Builder, r FindingRow) {
 		b.WriteString("  ")
 		b.WriteString(termsafe.QuoteCut(r.Title, maxTitleRunes))
 	}
-	b.WriteString("\n    Server: ")
-	b.WriteString(r.label())
 	b.WriteString("\n")
+	writeLine(b, "Server", r.label())
 
 	switch {
+	case r.Field == fieldTool && r.Key == "":
+		// No tool name: the row is about the whole server, and Related is the
+		// reason. A "Tool:" line would show the reason as a tool name.
+		writeLine(b, "Reason", keyRelatedCell(r.Key, r.Related))
 	case r.Field == fieldTool:
-		b.WriteString("    Tool: ")
-		b.WriteString(keyRelatedCell(r.Key, r.Related))
-		b.WriteString("\n")
+		writeLine(b, "Tool", keyRelatedCell(r.Key, r.Related))
 	case r.Field != "" || r.Key != "" || r.Related != "":
 		where := make([]string, 0, 2)
 		if r.Field != "" {
@@ -217,15 +220,20 @@ func writeFinding(b *strings.Builder, r FindingRow) {
 		if r.Key != "" || r.Related != "" {
 			where = append(where, keyRelatedCell(r.Key, r.Related))
 		}
-		b.WriteString("    Where: ")
-		b.WriteString(strings.Join(where, " "))
-		b.WriteString("\n")
+		writeLine(b, "Where", strings.Join(where, " "))
 	}
 
-	b.WriteString("    Risk: ")
-	b.WriteString(ruleText(r.Risk))
-	b.WriteString("\n    Fix: ")
-	b.WriteString(ruleText(r.Remediation))
+	writeLine(b, "Risk", ruleText(r.Risk))
+	writeLine(b, "Fix", ruleText(r.Remediation))
+}
+
+// writeLine writes one detail line of a finding: four spaces, the label, a
+// colon and a space, the text and a newline. The caller escapes the text.
+func writeLine(b *strings.Builder, label, text string) {
+	b.WriteString("    ")
+	b.WriteString(label)
+	b.WriteString(": ")
+	b.WriteString(text)
 	b.WriteString("\n")
 }
 
@@ -251,9 +259,9 @@ func findingCell(s string) string {
 	return cell(s, maxShortCellRunes)
 }
 
-// keyRelatedCell returns the KEY/RELATED cell. With both key and related set
-// it is "<key> (<related>)", and each part goes through findingCell. With one
-// part set, it is that part. With none, it is emptyCell.
+// keyRelatedCell returns the text of the Tool, Reason or Where line. With both
+// key and related set it is "<key> (<related>)", and each part goes through
+// findingCell. With one part set, it is that part. With none, it is emptyCell.
 func keyRelatedCell(key, related string) string {
 	if key != "" && related != "" {
 		return findingCell(key) + " (" + findingCell(related) + ")"

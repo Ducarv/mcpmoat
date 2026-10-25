@@ -24,7 +24,9 @@ const (
 )
 
 // maxReasonRunes caps the failure reason of a server, in runes of raw text.
-// The reason can hold server or system error text.
+// The reason can hold server or system error text. It is the same number as
+// maxWarnErrRunes in cmd/mcpmoat (the cap of the stderr of pin), so both
+// streams cut a reason at the same length.
 const maxReasonRunes = 500
 
 // maxSummaryNameRunes caps a header key in a warning line, in runes of raw
@@ -71,9 +73,8 @@ type ServerStatus struct {
 //	github (cursor, project:/x (untrusted)): failed (<reason>), 0 findings
 //	other (codex, global): not inspected, 1 finding
 //
-// Each warning has its own line under the server. The warning text is
-// WarningText, the text that "mcpmoat pin" prints on stderr. It shows header keys, never header
-// values.
+// Each warning has its own line under the server. The text of a warning is
+// WarningText (see there for what it shows).
 //
 // Every text from a config file or a server goes through internal/termsafe,
 // and names and paths are cut (see ServerRef). The Style only colours the

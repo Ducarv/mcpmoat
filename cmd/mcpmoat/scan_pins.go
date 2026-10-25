@@ -152,9 +152,10 @@ type pinner struct {
 	warned map[string]bool
 }
 
-// checkOutcome checks one outcome. A server that was not inspected is a
-// warning, and also a high MOAT-T2-004 finding when it is pinned and failed or
-// timed out (see notInspected). For a server that was inspected:
+// checkOutcome checks one outcome. A server that was not inspected shows its
+// status in the summary (see outcomeSummary), and also gets a high MOAT-T2-004
+// finding when it is pinned and failed or timed out (see notInspected). For a
+// server that was inspected:
 //   - one that is not in the store is pinned (see firstPin);
 //   - one that is in the store is compared with its pins (see compare);
 //   - a second server with the same identity is a MOAT-T2-004 finding, so that

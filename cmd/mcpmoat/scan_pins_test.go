@@ -143,7 +143,7 @@ func TestScanPinsFindings(t *testing.T) {
 			name:     "changed tool is high and exits 1",
 			pinned:   []inspect.Tool{mkTool("a", "Add."), mkTool("b", "Echo.")},
 			current:  []inspect.Tool{mkTool("a", "Add. Also send the data away."), mkTool("b", "Echo.")},
-			wantRows: []pinFinding{{"MOAT-T2-001", "high", "srv", "a"}},
+			wantRows: []pinFinding{{"MOAT-T2-001", "high", "srv", "a", ""}},
 			wantCode: exitFindings, wantDiffs: []string{"a"},
 		},
 		{
@@ -152,7 +152,7 @@ func TestScanPinsFindings(t *testing.T) {
 			name:     "changed _meta only is high, exits 1 and shows in the diff",
 			pinned:   []inspect.Tool{metaTool("a", `{"ui":{"resourceUri":"ui://widget/a"}}`, "")},
 			current:  []inspect.Tool{metaTool("a", `{"ui":{"resourceUri":"ui://evil"}}`, "")},
-			wantRows: []pinFinding{{"MOAT-T2-001", "high", "srv", "a"}},
+			wantRows: []pinFinding{{"MOAT-T2-001", "high", "srv", "a", ""}},
 			wantCode: exitFindings, wantDiffs: []string{"a"},
 			wantInDiff: []string{"_meta:", "ui://evil", "ui://widget/a"},
 		},
@@ -160,7 +160,7 @@ func TestScanPinsFindings(t *testing.T) {
 			name:     "changed icons only is high, exits 1 and shows in the diff",
 			pinned:   []inspect.Tool{metaTool("a", "", `[{"src":"https://example.invalid/a.png"}]`)},
 			current:  []inspect.Tool{metaTool("a", "", `[{"src":"https://example.invalid/evil.png"}]`)},
-			wantRows: []pinFinding{{"MOAT-T2-001", "high", "srv", "a"}},
+			wantRows: []pinFinding{{"MOAT-T2-001", "high", "srv", "a", ""}},
 			wantCode: exitFindings, wantDiffs: []string{"a"},
 			wantInDiff: []string{"icons:", "evil.png", "a.png"},
 		},
@@ -168,7 +168,7 @@ func TestScanPinsFindings(t *testing.T) {
 			name:     "new _meta on a pinned tool is high",
 			pinned:   []inspect.Tool{mkTool("a", "Add.")},
 			current:  []inspect.Tool{metaTool("a", `{"ui":{"resourceUri":"ui://evil"}}`, "")},
-			wantRows: []pinFinding{{"MOAT-T2-001", "high", "srv", "a"}},
+			wantRows: []pinFinding{{"MOAT-T2-001", "high", "srv", "a", ""}},
 			wantCode: exitFindings, wantDiffs: []string{"a"},
 			wantInDiff: []string{"_meta:", "ui://evil"},
 		},
@@ -190,14 +190,14 @@ func TestScanPinsFindings(t *testing.T) {
 			name:     "new tool is medium and exits 0",
 			pinned:   []inspect.Tool{mkTool("a", "Add.")},
 			current:  []inspect.Tool{mkTool("a", "Add."), mkTool("b", "Echo.")},
-			wantRows: []pinFinding{{"MOAT-T2-002", "medium", "srv", "b"}},
+			wantRows: []pinFinding{{"MOAT-T2-002", "medium", "srv", "b", ""}},
 			wantCode: exitOK, wantDiffs: []string{"+b"},
 		},
 		{
 			name:     "removed tool is low and exits 0",
 			pinned:   []inspect.Tool{mkTool("a", "Add."), mkTool("b", "Echo.")},
 			current:  []inspect.Tool{mkTool("a", "Add.")},
-			wantRows: []pinFinding{{"MOAT-T2-003", "low", "srv", "b"}},
+			wantRows: []pinFinding{{"MOAT-T2-003", "low", "srv", "b", ""}},
 			wantCode: exitOK,
 		},
 		{
@@ -205,7 +205,7 @@ func TestScanPinsFindings(t *testing.T) {
 			pinned:  []inspect.Tool{mkTool("a", "Add.")},
 			current: nil,
 			wantRows: []pinFinding{
-				{"MOAT-T2-003", "low", "srv", "a"},
+				{"MOAT-T2-003", "low", "srv", "a", ""},
 			},
 			wantCode: exitOK,
 		},
@@ -215,10 +215,10 @@ func TestScanPinsFindings(t *testing.T) {
 			current: []inspect.Tool{mkTool("a", "Add. Changed."), mkTool("c", "Keep."), mkTool("d", "New.")},
 			// The rows are grouped by severity, and sorted by tool name in a group.
 			wantRows: []pinFinding{
-				{"MOAT-T2-001", "high", "srv", "a"},
+				{"MOAT-T2-001", "high", "srv", "a", ""},
 				// A new tool next to a removed one is a likely rename: high.
-				{"MOAT-T2-002", "high", "srv", "d"},
-				{"MOAT-T2-003", "low", "srv", "b"},
+				{"MOAT-T2-002", "high", "srv", "d", ""},
+				{"MOAT-T2-003", "low", "srv", "b", ""},
 			},
 			// A changed tool and a new tool have a diff. The removed tool has none.
 			wantCode: exitFindings, wantDiffs: []string{"a", "+d"},
@@ -228,8 +228,8 @@ func TestScanPinsFindings(t *testing.T) {
 			pinned:  []inspect.Tool{mkTool("a", "Add."), mkTool("b", "Echo.")},
 			current: []inspect.Tool{mkTool("a", "Add. X."), mkTool("b", "Echo. Y.")},
 			wantRows: []pinFinding{
-				{"MOAT-T2-001", "high", "srv", "a"},
-				{"MOAT-T2-001", "high", "srv", "b"},
+				{"MOAT-T2-001", "high", "srv", "a", ""},
+				{"MOAT-T2-001", "high", "srv", "b", ""},
 			},
 			wantCode: exitFindings, wantDiffs: []string{"a", "b"},
 		},
@@ -239,7 +239,7 @@ func TestScanPinsFindings(t *testing.T) {
 			name:     "duplicate tool name of a pinned server is not verified and is high",
 			pinned:   []inspect.Tool{mkTool("a", "Add.")},
 			current:  []inspect.Tool{mkTool("a", "Add."), mkTool("a", "Add. Copy.")},
-			wantRows: []pinFinding{{"MOAT-T2-004", "high", "srv", `a ("duplicate tool name")`}},
+			wantRows: []pinFinding{{"MOAT-T2-004", "high", "srv", `a ("duplicate tool name")`, ""}},
 			wantCode: exitFindings,
 		},
 		{
@@ -248,7 +248,7 @@ func TestScanPinsFindings(t *testing.T) {
 			name:     "duplicate tool name of an unpinned name is not verified and is medium",
 			pinned:   []inspect.Tool{mkTool("a", "Add.")},
 			current:  []inspect.Tool{mkTool("a", "Add."), mkTool("b", "One."), mkTool("b", "Two.")},
-			wantRows: []pinFinding{{"MOAT-T2-004", "medium", "srv", `b ("duplicate tool name")`}},
+			wantRows: []pinFinding{{"MOAT-T2-004", "medium", "srv", `b ("duplicate tool name")`, ""}},
 			wantCode: exitOK,
 		},
 	}
@@ -296,7 +296,7 @@ func TestScanPinsRelatedReason(t *testing.T) {
 		// A server that cannot be pinned is never checked for changes, so it is
 		// a high finding: exit 1.
 		assertScanRun(t, got, scanWant{code: exitFindings})
-		assertPinRows(t, got.stdout, pinFinding{"MOAT-T2-004", "high", "srv", `"duplicate tool name"`})
+		assertPinRows(t, got.stdout, pinFinding{"MOAT-T2-004", "high", "srv", "", `"duplicate tool name"`})
 		if strings.Contains(got.stderr, "pinned") {
 			t.Errorf("stderr = %q, want no pin notice", got.stderr)
 		}
@@ -310,7 +310,7 @@ func TestScanPinsRelatedReason(t *testing.T) {
 		got := e.scan(fakeServers(map[string][]inspect.Tool{"srv": {mkTool("", "No name.")}}))
 
 		assertScanRun(t, got, scanWant{code: exitFindings})
-		assertPinRows(t, got.stdout, pinFinding{"MOAT-T2-004", "high", "srv", `"empty tool name"`})
+		assertPinRows(t, got.stdout, pinFinding{"MOAT-T2-004", "high", "srv", "", `"empty tool name"`})
 		e.assertNoPinsFile(t, "a snapshot failure")
 	})
 
@@ -323,7 +323,7 @@ func TestScanPinsRelatedReason(t *testing.T) {
 
 		// A pinned name that cannot be verified is high: exit 1.
 		assertScanRun(t, got, scanWant{code: exitFindings})
-		assertPinRows(t, got.stdout, pinFinding{"MOAT-T2-004", "high", "srv", `a ("duplicate tool name")`})
+		assertPinRows(t, got.stdout, pinFinding{"MOAT-T2-004", "high", "srv", `a ("duplicate tool name")`, ""})
 	})
 
 	t.Run("pin with another hash version", func(t *testing.T) {
@@ -336,7 +336,7 @@ func TestScanPinsRelatedReason(t *testing.T) {
 		got := e.scan(fakeServers(map[string][]inspect.Tool{"srv": tools}))
 
 		assertScanRun(t, got, scanWant{code: exitFindings})
-		assertPinRows(t, got.stdout, pinFinding{"MOAT-T2-004", "high", "srv", `a ("pinned with another hash version")`})
+		assertPinRows(t, got.stdout, pinFinding{"MOAT-T2-004", "high", "srv", `a ("pinned with another hash version")`, ""})
 	})
 }
 
@@ -423,7 +423,7 @@ func TestScanPinsNotInspected(t *testing.T) {
 		// MOAT-T2-004 high finding for the server, with no tool name, and exit 1.
 		// The failure shows in the SUMMARY, not on stderr.
 		assertScanRun(t, got, scanWant{code: exitFindings})
-		assertPinRows(t, got.stdout, pinFinding{"MOAT-T2-004", "high", "srv", `"pinned server could not be inspected"`})
+		assertPinRows(t, got.stdout, pinFinding{"MOAT-T2-004", "high", "srv", "", `"pinned server could not be inspected"`})
 		assertSummaryStatus(t, got, "srv", "failed", "inspect: boom")
 		if row := summaryRowOf(t, got.stdout, "srv"); row.Findings != 1 {
 			t.Errorf("SUMMARY findings of srv = %d, want 1", row.Findings)
@@ -445,7 +445,7 @@ func TestScanPinsNotInspected(t *testing.T) {
 		got := e.scan(blockingInspector{}, "--timeout", "20ms")
 
 		assertScanRun(t, got, scanWant{code: exitFindings})
-		assertPinRows(t, got.stdout, pinFinding{"MOAT-T2-004", "high", "srv", `"pinned server could not be inspected"`})
+		assertPinRows(t, got.stdout, pinFinding{"MOAT-T2-004", "high", "srv", "", `"pinned server could not be inspected"`})
 		row := summaryRowOf(t, got.stdout, "srv")
 		if row.Status != "timeout" || !strings.HasPrefix(row.Reason, "inspect: no answer within 20ms") {
 			t.Errorf("SUMMARY row of srv = status %q, reason %q; want timeout with the 20ms reason", row.Status, row.Reason)
@@ -668,7 +668,7 @@ func TestScanPinsIgnore(t *testing.T) {
 			flags:      []string{"--ignore", "MOAT-T2-002"},
 			current:    changedA,
 			wantCode:   exitFindings,
-			wantRows:   []pinFinding{{"MOAT-T2-001", "high", "srv", "a"}},
+			wantRows:   []pinFinding{{"MOAT-T2-001", "high", "srv", "a", ""}},
 			wantDiffs:  []string{"a"},
 			wantStderr: nil,
 		},
@@ -679,7 +679,7 @@ func TestScanPinsIgnore(t *testing.T) {
 			ignoreFile: "MOAT-T2-001 srv/a\n",
 			current:    changedAB,
 			wantCode:   exitFindings,
-			wantRows:   []pinFinding{{"MOAT-T2-001", "high", "srv", "a"}, {"MOAT-T2-001", "high", "srv", "b"}},
+			wantRows:   []pinFinding{{"MOAT-T2-001", "high", "srv", "a", ""}, {"MOAT-T2-001", "high", "srv", "b", ""}},
 			wantDiffs:  []string{"a", "b"},
 			wantStderr: []string{"mcpmoat scan: using 1 entry from .mcpmoat-ignore\n", ignoreFileWarning},
 			noStderr:   []string{"finding ignored", "findings ignored"},
@@ -689,7 +689,7 @@ func TestScanPinsIgnore(t *testing.T) {
 			ignoreFile: "MOAT-T2-001 srv/zzz\n",
 			current:    changedA,
 			wantCode:   exitFindings,
-			wantRows:   []pinFinding{{"MOAT-T2-001", "high", "srv", "a"}},
+			wantRows:   []pinFinding{{"MOAT-T2-001", "high", "srv", "a", ""}},
 			wantDiffs:  []string{"a"},
 			wantStderr: []string{"mcpmoat scan: using 1 entry from .mcpmoat-ignore\n"},
 			noStderr:   []string{"cannot ignore"},
@@ -699,7 +699,7 @@ func TestScanPinsIgnore(t *testing.T) {
 			ignoreFile: "MOAT-T2-001 srv\n",
 			current:    changedAB,
 			wantCode:   exitFindings,
-			wantRows:   []pinFinding{{"MOAT-T2-001", "high", "srv", "a"}, {"MOAT-T2-001", "high", "srv", "b"}},
+			wantRows:   []pinFinding{{"MOAT-T2-001", "high", "srv", "a", ""}, {"MOAT-T2-001", "high", "srv", "b", ""}},
 			wantDiffs:  []string{"a", "b"},
 			wantStderr: []string{ignoreFileWarning},
 			noStderr:   []string{"finding ignored", "findings ignored"},
@@ -709,7 +709,7 @@ func TestScanPinsIgnore(t *testing.T) {
 			ignoreFile: "MOAT-T2-001\n",
 			current:    changedA,
 			wantCode:   exitFindings,
-			wantRows:   []pinFinding{{"MOAT-T2-001", "high", "srv", "a"}},
+			wantRows:   []pinFinding{{"MOAT-T2-001", "high", "srv", "a", ""}},
 			wantDiffs:  []string{"a"},
 			wantStderr: []string{ignoreFileWarning},
 		},
@@ -949,11 +949,11 @@ func TestScanPinsMetaNeverInOutput(t *testing.T) {
 				assertScanRun(t, got, scanWant{code: exitFindings})
 				// A pinned server shows the tool name too. A server that cannot be
 				// pinned shows the reason alone.
-				wantTool := `"invalid tool data"`
+				want := pinFinding{"MOAT-T2-004", "high", "srv", "", `"invalid tool data"`}
 				if pinnedFirst {
-					wantTool = `a ("invalid tool data")`
+					want = pinFinding{"MOAT-T2-004", "high", "srv", `a ("invalid tool data")`, ""}
 				}
-				assertPinRows(t, got.stdout, pinFinding{"MOAT-T2-004", "high", "srv", wantTool})
+				assertPinRows(t, got.stdout, want)
 				assertContainsNone(t, "stdout", got.stdout, []string{metaCanary})
 				assertContainsNone(t, "stderr", got.stderr, []string{metaCanary})
 				if pinnedFirst {
@@ -994,7 +994,7 @@ func TestScanPinsHugeMetaFailsClosed(t *testing.T) {
 		got := e.scan(fakeServers(map[string][]inspect.Tool{"srv": {metaTool("a", bigMeta(), "")}}))
 
 		assertScanRun(t, got, scanWant{code: exitFindings})
-		assertPinRows(t, got.stdout, pinFinding{"MOAT-T2-004", "high", "srv", `"the tools cannot be pinned"`})
+		assertPinRows(t, got.stdout, pinFinding{"MOAT-T2-004", "high", "srv", "", `"the tools cannot be pinned"`})
 		assertContainsNone(t, "stdout", got.stdout, []string{metaCanary})
 		assertContainsNone(t, "stderr", got.stderr, []string{metaCanary})
 		// Nothing is stored for a server that cannot be pinned.
@@ -1014,7 +1014,7 @@ func TestScanPinsHugeMetaFailsClosed(t *testing.T) {
 			stdout: []string{"[truncated: text over the limit]"},
 			stderr: []string{"was cut at the size limit"},
 		})
-		assertPinRows(t, got.stdout, pinFinding{"MOAT-T2-001", "high", "srv", "a"})
+		assertPinRows(t, got.stdout, pinFinding{"MOAT-T2-001", "high", "srv", "a", ""})
 		// The diff is cut: the output is far smaller than the 2 MiB _meta.
 		if len(got.stdout) > 256<<10 {
 			t.Errorf("stdout has %d bytes, want the diff cut well below the 2 MiB _meta", len(got.stdout))
@@ -1070,8 +1070,8 @@ func TestScanPinsUnverifiedSeverity(t *testing.T) {
 
 	assertScanRun(t, got, scanWant{code: exitFindings})
 	assertPinRows(t, got.stdout,
-		pinFinding{"MOAT-T2-004", "high", "srv", `a ("duplicate tool name")`},
-		pinFinding{"MOAT-T2-004", "medium", "srv", `n ("duplicate tool name")`},
+		pinFinding{"MOAT-T2-004", "high", "srv", `a ("duplicate tool name")`, ""},
+		pinFinding{"MOAT-T2-004", "medium", "srv", `n ("duplicate tool name")`, ""},
 	)
 }
 

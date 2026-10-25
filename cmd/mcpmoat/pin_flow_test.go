@@ -846,8 +846,8 @@ func TestFindingsTableHoldsNotInspectedReason(t *testing.T) {
 	if f.RuleID != "MOAT-T2-004" || f.Severity != "high" || f.Name != "srv" {
 		t.Errorf("finding = %s %s on %q, want a high MOAT-T2-004 finding on srv", f.RuleID, f.Severity, f.Name)
 	}
-	if !strings.Contains(f.Tool, reasonNotInspected) {
-		t.Errorf("Tool line = %q, want the reason %q", f.Tool, reasonNotInspected)
+	if f.Tool != "" || !strings.Contains(f.Reason, reasonNotInspected) {
+		t.Errorf("Tool line = %q and Reason line = %q, want no Tool line and the reason %q", f.Tool, f.Reason, reasonNotInspected)
 	}
 }
 
