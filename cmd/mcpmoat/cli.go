@@ -16,11 +16,10 @@ import (
 )
 
 // Exit codes (PRD FR-16): 0 no findings, 1 findings at or above --fail-on,
-// 2 execution or usage error. Until --fail-on exists (issue #65), the limit
-// is high, the PRD default.
+// 2 execution or usage error.
 const (
 	exitOK       = 0 // success, no findings
-	exitFindings = 1 // a finding that is not ignored has severity high or above
+	exitFindings = 1 // a finding that is not ignored has severity at or above --fail-on (default high)
 	exitError    = 2 // execution or usage error
 )
 
@@ -202,11 +201,12 @@ func (c *cli) usage(w io.Writer) {
 	fprintf(w, "\nExit codes:\n")
 	fprintf(w, "  0  no findings\n")
 	fprintf(w, "  1  findings at or above --fail-on\n")
-	fprintf(w, "  2  execution error\n")
+	fprintf(w, "  2  execution error, also when there are findings (the report still prints)\n")
 	fprintf(w, "     (scan also exits 2 when a config file has a problem or when pins.json cannot be read\n")
 	fprintf(w, "     or saved, or when it is stopped by a signal; a missing file is not a problem in auto-discovery,\n")
 	fprintf(w, "     but a missing --config file is. A server that fails or times out is a warning and does not\n")
-	fprintf(w, "     change the exit code, unless its pins are already stored: then it is a high finding and scan exits 1)\n")
+	fprintf(w, "     change the exit code, unless its pins are already stored: then it is a high finding, and scan exits 1\n")
+	fprintf(w, "     at the default --fail-on high)\n")
 }
 
 // scanUsage writes the flags and the output notes of the scan command to w.
@@ -224,6 +224,9 @@ func scanUsage(w io.Writer) {
 	fprintf(tw, "  --timeout <duration>\tTime limit for each server, a Go duration such as 10s or 1m30s (default %s)\n", inspect.DefaultTimeout)
 	fprintf(tw, "  --concurrency <n>\tMaximum number of servers inspected at the same time (default %d)\n", inspect.DefaultConcurrency)
 	fprintf(tw, "  \tThe two flags above apply when scan connects to servers. --no-connect ignores them, but still checks them\n")
+	fprintf(tw, "  --fail-on <severity>\tExit 1 for a finding of this severity or above: low, medium, high or critical (default high)\n")
+	fprintf(tw, "  \tA finding severity that mcpmoat does not know always counts\n")
+	fprintf(tw, "  \tNo built-in rule is critical yet, so critical fails only on an unknown severity or rule ID\n")
 	fprintf(tw, "  --ignore <rule-id>\tIgnore all findings of this rule; repeatable\n")
 	fprintf(tw, "  \tA %s file in the working directory also ignores findings: one \"RULE-ID [server[/tool]]\" per line; \"# ...\" on its own line or after the entry is a comment\n", rules.IgnoreFileName)
 	fprintf(tw, "  \tThe file cannot ignore the pin rules (MOAT-T2-*): it can come from a cloned repository. Use --ignore for them\n")
@@ -235,18 +238,18 @@ func scanUsage(w io.Writer) {
 	fprintf(w, "  pins.json ($XDG_CONFIG_HOME/mcpmoat/, else ~/.config/mcpmoat/). The first run pins the tools of a server.\n")
 	fprintf(w, "  Later runs report a changed tool (MOAT-T2-001), a new tool (MOAT-T2-002), a removed tool (MOAT-T2-003) and a tool\n")
 	fprintf(w, "  that cannot be verified (MOAT-T2-004), with a diff for each changed, new or not verified tool. \"pin --accept <server>\" accepts the changes.\n")
-	fprintf(w, "  A new tool is medium, so alone it does not give exit code 1; next to a removed tool (a likely rename) it is high.\n")
+	fprintf(w, "  A new tool is medium, so alone it does not give exit code 1 with the default --fail-on high; next to a removed tool (a likely rename) it is high.\n")
 	fprintf(w, "  A server whose tools cannot be pinned is high (MOAT-T2-004).\n")
 	fprintf(w, "  For each pinned server with a finding, scan prints \"To accept <server>: mcpmoat pin --accept <server> --expect <digest>\".\n")
 	fprintf(w, "  The digest covers the tools that scan saw, so pin saves only those tools. Review the diff, then run that line.\n")
 	fprintf(w, "  A server that fails, times out, or that scan refuses to start (an untrusted or turned-off server) is a warning on stderr.\n")
-	fprintf(w, "  If that server is already pinned and failed or timed out, it is also a finding (MOAT-T2-004, high, exit code 1).\n")
+	fprintf(w, "  If that server is already pinned and failed or timed out, it is also a finding (MOAT-T2-004, high).\n")
 	fprintf(w, "  The warnings of an inspection (cleartext-secrets, undeclared-capability, dns-pin-unavailable) go to stderr.\n")
 	fprintf(w, "  scan reads pins.json before it starts a server, and reads it again just before it saves the first-run pins.\n")
 	fprintf(w, "  Ctrl-C (or SIGTERM or SIGHUP) stops the servers, saves no pins and exits 2.\n")
 	fprintf(w, "  --no-connect: scan runs only the built-in config rules (T4 and T5). It reads and writes no pins.\n")
 	fprintf(w, "  The tool rules (YAML) are not applied to tools yet. Rules from --rules are loaded and checked, but not applied yet.\n")
-	fprintf(w, "  Exit code 1 means a finding of severity high or above that is not ignored.\n")
+	fprintf(w, "  Exit code 1 means a finding that is not ignored, with severity at or above --fail-on (default high).\n")
 }
 
 // fprintf writes formatted text to w and ignores the write error on purpose.

@@ -21,6 +21,8 @@ import (
 // runScan implements "mcpmoat scan": it reads the client configs, runs the
 // built-in config rules (T4 and T5) on every server and, unless --no-connect
 // is given, inspects the servers and checks their tools against pins.json.
+// --fail-on sets the lowest severity that gives exit code 1. Like --timeout,
+// it is checked in both modes.
 //
 // docs/ARCHITECTURE.md describes the data flow. The usage text (scanUsage and
 // usage in cli.go) is the one place that lists the flags and the exit codes
@@ -51,6 +53,24 @@ func (c *cli) runScan(_ options, args []string) int {
 			return errors.New("--ignore needs a rule ID")
 		}
 		ignoreIDs = append(ignoreIDs, value)
+		return nil
+	})
+
+	// --fail-on takes one exact severity word. Valid refuses an empty value,
+	// another case ("HIGH") and a flag name that the flag package took as the
+	// value. The flag error already holds the value, so the message does not
+	// repeat it. failOnSet tells a second use apart from the default.
+	failOn := rules.SeverityHigh
+	var failOnSet bool
+	fs.Func("fail-on", "", func(value string) error {
+		if failOnSet {
+			return errors.New("--fail-on given more than once")
+		}
+		if !rules.Severity(value).Valid() {
+			return errors.New("--fail-on needs low, medium, high or critical")
+		}
+		failOn = rules.Severity(value)
+		failOnSet = true
 		return nil
 	})
 
@@ -102,7 +122,7 @@ func (c *cli) runScan(_ options, args []string) int {
 		fprintf(c.stderr, "mcpmoat scan: internal error: built-in typosquat list is invalid\n")
 		return exitError
 	}
-	setup := scanSetup{checks: configChecks{set: set, typo: typo}, connect: connect}
+	setup := scanSetup{checks: configChecks{set: set, typo: typo}, connect: connect, failOn: failOn}
 
 	// The context ends when the process gets SIGINT, SIGTERM or SIGHUP (see
 	// main). scan starts stdio servers in their own session, so the terminal
@@ -117,6 +137,9 @@ type scanSetup struct {
 	// connect is nil with --no-connect. Otherwise it holds the options for
 	// inspect.Run, and scan inspects the servers and checks their pins.
 	connect *inspect.Options
+	// failOn is the --fail-on value: a finding at or above it gives exit
+	// code 1 (see scanExitCode).
+	failOn rules.Severity
 }
 
 // rulesNotAppliedNotice is the line that runScan prints on stderr when
@@ -267,9 +290,12 @@ const configErrorHint = "mcpmoat scan: a config file has a problem; " +
 // rule IDs and their counts (see printIgnored).
 //
 // The pin findings are merged with the config findings before the table is
-// written, so one table holds them all and hasFailingFinding sees them all.
+// written, so one table holds them all and scanExitCode sees them all.
 // New pins are saved after the report is printed, so a save error never hides
 // the report. The "pinned N tools" notices come after a successful save.
+//
+// A file problem or a pin error gives exit code 2 also when there are
+// findings at or above setup.failOn (see scanExitCode).
 func (c *cli) reportScan(ctx context.Context, res discover.Result, configPath string, setup scanSetup, ignore *scanIgnores) int {
 	rows, ignored := setup.checks.findings(&ignore.all, res.Servers)
 
@@ -310,15 +336,8 @@ func (c *cli) reportScan(ctx context.Context, res discover.Result, configPath st
 		// Print the problems in the order of the result, then the hint.
 		c.printFileErrors("scan", res.Errors)
 		fprintf(c.stderr, "%s\n", configErrorHint)
-		return exitError
 	}
-	if pinFailed {
-		return exitError
-	}
-	if hasFailingFinding(rows) {
-		return exitFindings
-	}
-	return exitOK
+	return scanExitCode(len(res.Errors) > 0 || pinFailed, rows, setup.failOn)
 }
 
 // writeScanReport writes the report on c.stdout: the server table, the findings, the

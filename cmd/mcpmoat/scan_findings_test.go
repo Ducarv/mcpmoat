@@ -3,6 +3,7 @@ package main
 import (
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -258,44 +259,116 @@ func TestFindingSeverity(t *testing.T) {
 	}
 }
 
-// TestHasFailingFinding checks the exit-code rule: high and critical fail,
-// low and medium do not, and an unknown severity fails closed.
+// severityRows returns one report row for each severity word, in order.
+func severityRows(severities ...string) []report.FindingRow {
+	var rows []report.FindingRow
+	for _, sev := range severities {
+		rows = append(rows, report.FindingRow{RuleID: "MOAT-T4-001", Severity: sev})
+	}
+	return rows
+}
+
+// failOnLevels are the four --fail-on values, from low to critical.
+var failOnLevels = []rules.Severity{
+	rules.SeverityLow, rules.SeverityMedium, rules.SeverityHigh, rules.SeverityCritical,
+}
+
+// TestHasFailingFinding checks the exit-code rule of FR-16 for every --fail-on
+// value: a row fails when its severity is at or above the threshold. An
+// unknown row severity fails at every threshold (fail closed), and so does
+// every row when the threshold itself is unknown (rank 0).
 func TestHasFailingFinding(t *testing.T) {
 	t.Parallel()
-	rowsOf := func(severities ...string) []report.FindingRow {
-		var rows []report.FindingRow
-		for _, sev := range severities {
-			rows = append(rows, report.FindingRow{RuleID: "MOAT-T4-001", Severity: sev})
-		}
-		return rows
-	}
 
 	tests := []struct {
 		name string
 		rows []report.FindingRow
-		want bool
+		// want is the result for low, medium, high and critical, in this
+		// order (see failOnLevels).
+		want [4]bool
 	}{
-		{"nil rows", nil, false},
-		{"empty rows", rowsOf(), false},
-		{"low only", rowsOf("low"), false},
-		{"medium only", rowsOf("medium"), false},
-		{"low and medium", rowsOf("low", "medium"), false},
-		{"high", rowsOf("high"), true},
-		{"critical", rowsOf("critical"), true},
-		{"unknown severity word", rowsOf("bogus"), true},
-		{"empty severity", rowsOf(""), true},
-		{"wrong case is unknown", rowsOf("HIGH"), true},
-		{"low and high", rowsOf("low", "high"), true},
-		{"high and low", rowsOf("high", "low"), true},
-		{"low and unknown", rowsOf("low", "bogus"), true},
+		{"nil rows", nil, [4]bool{false, false, false, false}},
+		{"empty rows", severityRows(), [4]bool{false, false, false, false}},
+		{"low", severityRows("low"), [4]bool{true, false, false, false}},
+		{"medium", severityRows("medium"), [4]bool{true, true, false, false}},
+		{"high", severityRows("high"), [4]bool{true, true, true, false}},
+		{"critical", severityRows("critical"), [4]bool{true, true, true, true}},
+		{"unknown severity word", severityRows("bogus"), [4]bool{true, true, true, true}},
+		{"empty severity", severityRows(""), [4]bool{true, true, true, true}},
+		{"wrong case is unknown", severityRows("HIGH"), [4]bool{true, true, true, true}},
+		{"low and medium", severityRows("low", "medium"), [4]bool{true, true, false, false}},
+		{"low and high", severityRows("low", "high"), [4]bool{true, true, true, false}},
+		{"high and low", severityRows("high", "low"), [4]bool{true, true, true, false}},
+		{"medium and critical", severityRows("medium", "critical"), [4]bool{true, true, true, true}},
+		{"low and unknown", severityRows("low", "bogus"), [4]bool{true, true, true, true}},
+		{"every severity", severityRows("low", "medium", "high", "critical"), [4]bool{true, true, true, true}},
 	}
 	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
+		for i, failOn := range failOnLevels {
+			t.Run(tt.name+"/fail-on "+string(failOn), func(t *testing.T) {
+				t.Parallel()
+				if got := hasFailingFinding(tt.rows, failOn); got != tt.want[i] {
+					t.Errorf("hasFailingFinding(%v, %q) = %v, want %v", tt.rows, failOn, got, tt.want[i])
+				}
+			})
+		}
+	}
+
+	// runScan accepts only a known --fail-on value. If an unknown one gets
+	// through anyway, its rank is 0, so every finding fails (fail closed).
+	// No finding still passes.
+	for _, failOn := range []rules.Severity{"", "bogus", "HIGH"} {
+		t.Run("unknown threshold "+strconv.Quote(string(failOn)), func(t *testing.T) {
 			t.Parallel()
-			if got := hasFailingFinding(tt.rows); got != tt.want {
-				t.Errorf("hasFailingFinding(%v) = %v, want %v", tt.rows, got, tt.want)
+			for _, sev := range []string{"low", "medium", "high", "critical", "bogus"} {
+				if !hasFailingFinding(severityRows(sev), failOn) {
+					t.Errorf("hasFailingFinding(%s row, %q) = false, want true", sev, failOn)
+				}
+			}
+			if hasFailingFinding(nil, failOn) {
+				t.Errorf("hasFailingFinding(nil, %q) = true, want false", failOn)
 			}
 		})
+	}
+}
+
+// TestScanExitCode checks the exit code of a scan for every --fail-on value
+// (FR-16): 2 when the scan failed, else 1 for a finding at or above the
+// threshold, else 0. Exit code 2 wins over 1: a failed scan with failing
+// findings still gives 2.
+func TestScanExitCode(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name       string
+		execFailed bool
+		rows       []report.FindingRow
+		// want is the code for low, medium, high and critical, in this order
+		// (see failOnLevels).
+		want [4]int
+	}{
+		{"no findings", false, nil, [4]int{exitOK, exitOK, exitOK, exitOK}},
+		{"low finding", false, severityRows("low"), [4]int{exitFindings, exitOK, exitOK, exitOK}},
+		{"medium finding", false, severityRows("medium"), [4]int{exitFindings, exitFindings, exitOK, exitOK}},
+		{"high finding", false, severityRows("high"), [4]int{exitFindings, exitFindings, exitFindings, exitOK}},
+		{"critical finding", false, severityRows("critical"), [4]int{exitFindings, exitFindings, exitFindings, exitFindings}},
+		{"unknown severity", false, severityRows("bogus"), [4]int{exitFindings, exitFindings, exitFindings, exitFindings}},
+		{"mixed findings", false, severityRows("low", "medium", "high"), [4]int{exitFindings, exitFindings, exitFindings, exitOK}},
+		{"failed with no findings", true, nil, [4]int{exitError, exitError, exitError, exitError}},
+		{"failed with a low finding", true, severityRows("low"), [4]int{exitError, exitError, exitError, exitError}},
+		{"failed with a high finding", true, severityRows("high"), [4]int{exitError, exitError, exitError, exitError}},
+		{"failed with a critical finding", true, severityRows("critical"), [4]int{exitError, exitError, exitError, exitError}},
+		{"failed with an unknown severity", true, severityRows("bogus"), [4]int{exitError, exitError, exitError, exitError}},
+	}
+	for _, tt := range tests {
+		for i, failOn := range failOnLevels {
+			t.Run(tt.name+"/fail-on "+string(failOn), func(t *testing.T) {
+				t.Parallel()
+				if got := scanExitCode(tt.execFailed, tt.rows, failOn); got != tt.want[i] {
+					t.Errorf("scanExitCode(%v, %v, %q) = %d, want %d", tt.execFailed, tt.rows, failOn, got, tt.want[i])
+				}
+			})
+		}
 	}
 }
 

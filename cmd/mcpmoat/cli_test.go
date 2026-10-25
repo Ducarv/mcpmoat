@@ -359,13 +359,21 @@ func TestUsageContent(t *testing.T) {
 		"Exit codes:\n",
 		"  0  no findings\n",
 		"  1  findings at or above --fail-on\n",
-		"  2  execution error\n",
+		// Exit code 2 wins over 1 (FR-16): the precedence line says so.
+		"  2  execution error, also when there are findings (the report still prints)\n",
 		"     (scan also exits 2 when a config file has a problem or when pins.json cannot be read\n" +
 			"     or saved, or when it is stopped by a signal; a missing file is not a problem in auto-discovery,\n" +
 			"     but a missing --config file is. A server that fails or times out is a warning and does not\n" +
-			"     change the exit code, unless its pins are already stored: then it is a high finding and scan exits 1)\n",
+			"     change the exit code, unless its pins are already stored: then it is a high finding, and scan exits 1\n" +
+			"     at the default --fail-on high)\n",
+		// The --fail-on flag line (tabwriter pads the name column) and its
+		// two continuation lines, with the padding that tabwriter prints.
+		"  --fail-on <severity>  Exit 1 for a finding of this severity or above: low, medium, high or critical (default high)\n",
+		"A finding severity that mcpmoat does not know always counts\n",
+		"\n                        No built-in rule is critical yet, so critical fails only on an unknown severity or rule ID\n",
 		"The file cannot ignore the pin rules (MOAT-T2-*)",
-		"  If that server is already pinned and failed or timed out, it is also a finding (MOAT-T2-004, high, exit code 1).\n",
+		"  A new tool is medium, so alone it does not give exit code 1 with the default --fail-on high; next to a removed tool (a likely rename) it is high.\n",
+		"  If that server is already pinned and failed or timed out, it is also a finding (MOAT-T2-004, high).\n",
 		"  scan reads pins.json before it starts a server, and reads it again just before it saves the first-run pins.\n",
 		"  Ctrl-C (or SIGTERM or SIGHUP) stops the servers, saves no pins and exits 2.\n",
 		"  pin changes only the entry of this server: it reads pins.json again just before it saves, and keeps the other entries.\n",
@@ -379,7 +387,7 @@ func TestUsageContent(t *testing.T) {
 		"  A heuristic masks secret-like arguments. Review the output before you share it.\n",
 		"  --no-connect: scan runs only the built-in config rules (T4 and T5). It reads and writes no pins.\n",
 		"  The tool rules (YAML) are not applied to tools yet. Rules from --rules are loaded and checked, but not applied yet.\n",
-		"  Exit code 1 means a finding of severity high or above that is not ignored.\n",
+		"  Exit code 1 means a finding that is not ignored, with severity at or above --fail-on (default high).\n",
 	} {
 		if !strings.Contains(got, want) {
 			t.Errorf("usage text does not contain %q\n--- got ---\n%s", want, got)
@@ -397,7 +405,13 @@ func TestUsageContent(t *testing.T) {
 			t.Errorf("usage text holds %q %d times, want 1\n--- got ---\n%s", once, n, got)
 		}
 	}
-	for _, gone := range []string{"no rules", "applies no rules", "No rules were applied"} {
+	// The text from before --fail-on fixed the limit at high.
+	for _, gone := range []string{
+		"no rules", "applies no rules", "No rules were applied",
+		"a finding of severity high or above",
+		"(MOAT-T2-004, high, exit code 1)",
+		"  2  execution error\n",
+	} {
 		if strings.Contains(got, gone) {
 			t.Errorf("usage text holds the old text %q\n--- got ---\n%s", gone, got)
 		}
