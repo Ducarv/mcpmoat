@@ -8,6 +8,11 @@ project_name: mcpmoat
 git:
   # Sort v0.1.0-rc.1 before v0.1.0 when both tags point at the same commit.
   prerelease_suffix: "-"
+  # A stable release skips rc tags when it looks for the previous tag, so its
+  # changelog starts at the last stable release. This runs before GoReleaser
+  # parses the tag, so read the tag from the env that release.yml sets.
+  ignore_tags:
+    - '{{ if not (contains (index .Env "GORELEASER_CURRENT_TAG") "-") }}*-*{{ end }}'
 
 builds:
   - id: mcpmoat
@@ -20,7 +25,10 @@ builds:
       - -trimpath
     mod_timestamp: "{{ .CommitTimestamp }}"
     ldflags:
-      - -s -w -X main.version=v{{ .Version }} -X main.commit={{ .ShortCommit }} -X main.date={{ .CommitDate }}
+      - -s -w
+      - -X main.version=v{{ .Version }}
+      - -X main.commit={{ .ShortCommit }}
+      - -X main.date={{ .CommitDate }}
     goos:
       - darwin
       - linux
@@ -35,15 +43,24 @@ archives:
     name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
     formats:
       - tar.gz
-    # Use the commit date, not the checkout time, so the archive digests do
-    # not change from run to run. mod_timestamp does the same for the binary.
+    # Fix the tar header of each file: the commit date, not the checkout
+    # time, and a fixed owner and mode, not the build user and umask. Then a
+    # rebuild of the same commit with the same Go version gives the same
+    # archive digests. Every new file needs the same info.
+    builds_info:
+      owner: root
+      group: root
+      mode: 0o755
+      mtime: "{{ .CommitDate }}"
     files:
       - src: LICENSE
-        info:
+        info: &file_info
+          owner: root
+          group: root
+          mode: 0o644
           mtime: "{{ .CommitDate }}"
       - src: README.md
-        info:
-          mtime: "{{ .CommitDate }}"
+        info: *file_info
 
 checksum:
   name_template: checksums.txt
