@@ -561,6 +561,12 @@ func TestEdgeLookalikes(t *testing.T) {
 			if !unicode.IsLetter(r) || unicode.Is(unicode.Other_Default_Ignorable_Code_Point, r) {
 				t.Errorf("U+%04X is not a visible letter", r)
 			}
+			// wordState.countLetter does not count these letters in an edge
+			// run. If one were in the table, its run could be excused when it
+			// should count (see runCounts).
+			if unicode.Is(unicode.Lm, r) || r == arabicHighHamza {
+				t.Errorf("U+%04X is a modifier letter or U+0674: the edge run does not count it, so it must not be in the table", r)
+			}
 			i := scriptOf(r)
 			if i < 0 || lookalikeScripts[i].tier != edgeTier {
 				t.Fatalf("scriptOf(U+%04X) = %d, want an edge-tier script", r, i)

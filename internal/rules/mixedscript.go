@@ -141,10 +141,9 @@ const noRune rune = -1
 // isWordFiller reports whether r, a rune that is neither a letter nor a mark
 // (mixedScript handles those first), joins a word: an invisible rune (see
 // isInvisible), a private-use rune, an unassigned code point or U+FFFD. Many
-// fonts draw a
-// private-use or unassigned rune as nothing, and a client may drop U+FFFD,
-// so they must not split a word either. To join runes into one word can only
-// add hits. No ASCII rune is private-use or unassigned.
+// fonts draw a private-use or unassigned rune as nothing, and a client may
+// drop U+FFFD, so they must not split a word either. To join runes into one
+// word can only add hits. No ASCII rune is private-use or unassigned.
 func isWordFiller(r rune) bool {
 	if isInvisible(r) || r == utf8.RuneError {
 		return true
