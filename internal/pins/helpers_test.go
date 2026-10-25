@@ -1,6 +1,7 @@
 package pins
 
-// This file holds the test helpers that more than one test file uses.
+// This file holds the test helpers that more than one test file uses, except
+// shuffleJSON, which stays in jsonshuffle_test.go next to its own test.
 
 import (
 	"bytes"
@@ -37,6 +38,15 @@ func cloneTool(tool inspect.Tool) inspect.Tool {
 		c.Annotations = &ann
 	}
 	return c
+}
+
+// ensureAnnotations returns the annotations of c, and first adds empty ones
+// when c has none.
+func ensureAnnotations(c *inspect.Tool) *inspect.ToolAnnotations {
+	if c.Annotations == nil {
+		c.Annotations = &inspect.ToolAnnotations{}
+	}
+	return c.Annotations
 }
 
 // mustCanonical returns Canonical(tool) and fails the test on an error.

@@ -24,7 +24,8 @@ const HashVersion = "sha256-v1"
 //	sha256-v1:<64 lowercase hex digits>
 //
 // Hash returns the error of Canonical when t has no canonical form. The error
-// wraps ErrInvalidTool.
+// wraps ErrInvalidTool. A caller must then show the tool as not verified. It
+// must never skip the tool: a server could then avoid the pin.
 func Hash(t inspect.Tool) (string, error) {
 	b, err := Canonical(t)
 	if err != nil {

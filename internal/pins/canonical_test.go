@@ -306,6 +306,7 @@ func TestCanonicalErrors(t *testing.T) {
 		{name: "out of range number in a trailing value", tool: input(`{} {"SECRET":1e400}`), reason: "invalid JSON in inputSchema"},
 		{name: "duplicate key in a trailing value", tool: input(`{} {"SECRET":1,"SECRET":2}`), reason: "invalid JSON in inputSchema"},
 		{name: "not JSON", tool: input(`SECRET`), reason: "invalid JSON in inputSchema"},
+		{name: "only whitespace in input schema", tool: input(" \t\n"), reason: "invalid JSON in inputSchema"},
 		{name: "duplicate top-level key", tool: input(`{"SECRET":1,"SECRET":2}`), reason: "duplicate object key in inputSchema"},
 		{name: "duplicate nested key", tool: input(`{"a":{"SECRET":1,"b":2,"SECRET":3}}`), reason: "duplicate object key in inputSchema"},
 		{name: "duplicate key in output schema", tool: output(`{"SECRET":1,"SECRET":1}`), reason: "duplicate object key in outputSchema"},

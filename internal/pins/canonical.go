@@ -14,8 +14,7 @@ import (
 )
 
 // ErrInvalidTool is the error that Canonical and Hash wrap when a tool has no
-// canonical form: a string field holds invalid UTF-8, or a schema is not
-// valid JSON, has a duplicate object key or has a number out of range.
+// canonical form. Canonical lists the cases.
 var ErrInvalidTool = errors.New("invalid tool data")
 
 // canonicalTool is the fixed shape of the canonical form. The field order
@@ -73,8 +72,9 @@ type canonicalAnnotations struct {
 // number format.
 //
 // Absent values. A nil hint is null. Nil annotations give the same bytes as
-// empty annotations. A nil schema, an empty schema and the JSON literal null
-// are all null, so "no schema" is different from the empty schema {}.
+// empty annotations. A nil or zero-length schema and the JSON literal null
+// are all null, so "no schema" is different from the empty object schema {}.
+// A schema of only whitespace is not "no schema": it is invalid JSON.
 // readOnlyHint and idempotentHint map false to null, so false and absent are
 // the same for these two hints: the SDK cannot tell them apart (see
 // inspect.ToolAnnotations). A change to true always changes the hash.
@@ -184,7 +184,7 @@ func falseToNil(p *bool) *bool {
 }
 
 // canonicalSchema returns the JCS form of one schema, or null when raw is nil
-// or empty. field is the fixed key name for the error message.
+// or zero-length. field is the fixed key name for the error message.
 func canonicalSchema(field string, raw []byte) (jsontext.Value, error) {
 	if len(raw) == 0 {
 		return jsontext.Value("null"), nil

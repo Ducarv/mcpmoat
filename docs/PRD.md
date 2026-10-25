@@ -426,7 +426,8 @@ the title and the four hints `readOnlyHint`, `destructiveHint`, `idempotentHint`
 
 - The hash input is a canonical serialisation: the same tool with JSON keys in a different order
   gives the same hash.
-- A change of one character in name, description or schema gives a different hash.
+- A change of one character in the name, title, description or a schema gives a different hash,
+  except a number change within the float64 limit below.
 - A change of one annotation hint gives a different hash.
 - Each hash starts with its version (`sha256-v1:`). When a stored hash has another version, mcpmoat
   shows the tool as not verified and pins it again. It never accepts the tool silently.

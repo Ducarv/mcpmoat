@@ -18,6 +18,8 @@ import (
 // "git diff" before you commit.
 var update = flag.Bool("update", false, "rewrite golden files")
 
+// The fixtures are in the root testdata/, like the fixtures of the other
+// packages (see docs/ARCHITECTURE.md).
 const (
 	hashFixturesPath = "../../testdata/pins/hash/tools.json"
 	hashGoldenPath   = "../../testdata/pins/hash/golden.txt"

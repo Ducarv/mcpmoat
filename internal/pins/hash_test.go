@@ -146,7 +146,9 @@ func TestHashMutations(t *testing.T) {
 }
 
 // TestHashFalseHintIsNil checks that false and nil give the same hash for
-// readOnlyHint and idempotentHint (see Canonical).
+// readOnlyHint and idempotentHint (see Canonical). TestCanonicalHints checks
+// this on a minimal tool; this test goes through Hash, on every fixture, with
+// the other annotations set.
 func TestHashFalseHintIsNil(t *testing.T) {
 	t.Parallel()
 	for _, f := range loadHashFixtures(t) {
@@ -158,7 +160,7 @@ func TestHashFalseHintIsNil(t *testing.T) {
 				t.Parallel()
 				set := func(v *bool) string {
 					c := cloneTool(f.Tool)
-					*h.ptr(hashAnnotations(&c)) = v
+					*h.ptr(ensureAnnotations(&c)) = v
 					got, err := Hash(c)
 					if err != nil {
 						t.Fatalf("Hash() error = %v", err)

@@ -42,15 +42,6 @@ func hashMutated(tool inspect.Tool, name string, change func(*inspect.Tool)) has
 	return hashMutation{name: name, tool: c}
 }
 
-// hashAnnotations returns the annotations of c, and first adds empty ones
-// when c has none.
-func hashAnnotations(c *inspect.Tool) *inspect.ToolAnnotations {
-	if c.Annotations == nil {
-		c.Annotations = &inspect.ToolAnnotations{}
-	}
-	return c.Annotations
-}
-
 // hashTextMutations changes one character of each text field, and adds each
 // invisible character at its start and at its end.
 func hashTextMutations(tool inspect.Tool) []hashMutation {
@@ -61,7 +52,7 @@ func hashTextMutations(tool inspect.Tool) []hashMutation {
 		{"name", func(c *inspect.Tool) *string { return &c.Name }},
 		{"title", func(c *inspect.Tool) *string { return &c.Title }},
 		{"description", func(c *inspect.Tool) *string { return &c.Description }},
-		{"annotations title", func(c *inspect.Tool) *string { return &hashAnnotations(c).Title }},
+		{"annotations title", func(c *inspect.Tool) *string { return &ensureAnnotations(c).Title }},
 	}
 	var muts []hashMutation
 	for _, tf := range texts {
@@ -102,7 +93,7 @@ func hashHintMutations(tool inspect.Tool) []hashMutation {
 			}
 			name := hf.field + ": " + hashHintString(cur) + " to " + hashHintString(v)
 			muts = append(muts, hashMutated(tool, name, func(c *inspect.Tool) {
-				*hf.ptr(hashAnnotations(c)) = v
+				*hf.ptr(ensureAnnotations(c)) = v
 			}))
 		}
 	}
@@ -153,7 +144,7 @@ func hashSchemaMutations(t testing.TB, raw []byte) []hashSchemaMutation {
 	t.Helper()
 	var p hashSchemaParts
 	dec := jsontext.NewDecoder(bytes.NewReader(raw))
-	if _, err := hashWalk(dec, &p); err != nil {
+	if _, err := walkSchemaParts(dec, &p); err != nil {
 		t.Fatalf("walk schema %q: %v", raw, err)
 	}
 	muts := hashStringMutations(t, raw, p.strings)
@@ -263,9 +254,9 @@ type hashSchemaParts struct {
 	arrays  [][]hashSpan // the elements of each array
 }
 
-// hashWalk reads the next JSON value from dec, adds its parts to p and
+// walkSchemaParts reads the next JSON value from dec, adds its parts to p and
 // returns its span.
-func hashWalk(dec *jsontext.Decoder, p *hashSchemaParts) (hashSpan, error) {
+func walkSchemaParts(dec *jsontext.Decoder, p *hashSchemaParts) (hashSpan, error) {
 	kind := dec.PeekKind()
 	if kind != '{' && kind != '[' {
 		val, err := dec.ReadValue()
@@ -302,7 +293,7 @@ func hashWalk(dec *jsontext.Decoder, p *hashSchemaParts) (hashSpan, error) {
 			}
 			p.strings = append(p.strings, hashSpan{dec.InputOffset() - int64(len(name)), dec.InputOffset()})
 		}
-		s, err := hashWalk(dec, p)
+		s, err := walkSchemaParts(dec, p)
 		if err != nil {
 			return hashSpan{}, err
 		}
