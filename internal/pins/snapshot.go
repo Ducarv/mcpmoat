@@ -9,8 +9,9 @@ import (
 
 // ErrDuplicateTool is the error that Snapshot wraps when two tools in the
 // list have the same name. The pins are keyed by tool name, so one of the two
-// tools would replace the other.
-var ErrDuplicateTool = errors.New("duplicate tool name")
+// tools would replace the other. Its text is the reason that a finding shows
+// (ReasonDuplicateName).
+var ErrDuplicateTool = errors.New(ReasonDuplicateName)
 
 // Snapshot returns the pins of a server: for each tool, the Hash and the
 // Canonical form, stored under the tool name.

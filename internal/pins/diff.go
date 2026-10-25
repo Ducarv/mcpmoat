@@ -12,7 +12,7 @@ import (
 
 const (
 	// maxRenderedBytes limits the size of each rendered text before the diff,
-	// so a hostile server can not make the diff use a lot of time or memory.
+	// so a hostile server cannot make the diff use a lot of time or memory.
 	maxRenderedBytes = 64 * 1024
 
 	// maxRenderedLines limits the lines of each rendered text before the diff,
@@ -170,7 +170,7 @@ func commonSuffixLen(a, b string) int {
 
 // shiftHunks adds offset to the line numbers of every hunk header in diff, so
 // that they count lines of the full texts and not of the window that was
-// diffed. A header that it can not parse stays as it is.
+// diffed. A header that it cannot parse stays as it is.
 func shiftHunks(diff string, offset int) string {
 	if offset == 0 || diff == "" {
 		return diff

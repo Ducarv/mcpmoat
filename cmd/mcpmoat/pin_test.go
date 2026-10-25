@@ -1,7 +1,7 @@
 package main
 
 // In-process tests of "mcpmoat pin --accept <server>" (FR-13). They use the
-// helpers of scan_pins_test.go: a fake inspector, and a home, a working
+// helpers of pins_helpers_test.go: a fake inspector, and a home, a working
 // directory and an XDG_CONFIG_HOME in t.TempDir(). None of them calls t.Setenv,
 // so all of them can run in parallel.
 
@@ -557,7 +557,7 @@ func TestPinAccept(t *testing.T) {
 			current:    []inspect.Tool{mkTool("a", "Add."), mkTool("b", "Echo.")},
 			breakHash:  true,
 			wantStdout: "accepted srv: 0 new, 0 changed, 0 removed, 2 not verified\n",
-			// The pins can not be checked, so pin shows the whole current text.
+			// The pins cannot be checked, so pin shows the whole current text.
 			wantDiffs: []string{"?a", "?b"},
 		},
 	}

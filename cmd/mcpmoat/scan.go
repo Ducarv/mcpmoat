@@ -286,7 +286,7 @@ func (c *cli) reportScan(ctx context.Context, res discover.Result, configPath st
 		if errors.Is(err, errInterrupted) {
 			// Nothing is saved and no report is printed: the user stopped
 			// the scan, so the result would be partial.
-			c.cmdErrorf("scan", "%s", interruptedText)
+			c.cmdPrintf("scan", "%s", interruptedText)
 			return exitError
 		}
 		// Any other error is already on stderr. The report of the config
@@ -297,7 +297,7 @@ func (c *cli) reportScan(ctx context.Context, res discover.Result, configPath st
 	}
 
 	if err := c.writeScanReport(res.Servers, rows, pr, configPath, len(res.Errors) > 0); err != nil {
-		c.cmdErrorf("scan", "cannot write output")
+		c.cmdPrintf("scan", "cannot write output")
 		// stderr can still work. The file problems are the reason for a
 		// failed scan, so the user must still see them. New pins are not
 		// saved: the user did not see the report.
@@ -306,7 +306,7 @@ func (c *cli) reportScan(ctx context.Context, res discover.Result, configPath st
 	}
 	c.printIgnored(ignored)
 
-	if !c.savePinned(pr) {
+	if !c.savePinned(ctx, pr) {
 		pinFailed = true
 	}
 
@@ -325,7 +325,7 @@ func (c *cli) reportScan(ctx context.Context, res discover.Result, configPath st
 	return exitOK
 }
 
-// writeScanReport writes the report on w: the server table, the findings, the
+// writeScanReport writes the report on c.stdout: the server table, the findings, the
 // diffs of the changed and new tools, then the "To accept" lines. It returns the
 // first write error. Do not use fprintf for it: a write error (a closed pipe,
 // for example) must give exit code 2. configPath is the --config value, or
@@ -345,7 +345,8 @@ func (c *cli) writeScanReport(servers []discover.Server, rows []report.FindingRo
 }
 
 // savePinned saves the first-run pins of the pin step and, only when the save
-// worked, prints the "pinned N tools" notices. It returns false when the store
+// worked, prints the "pinned N tools" notices. It returns false when ctx ended
+// (the user stopped the scan while the report printed), or when the store
 // cannot be read again or saved. The report is already out, so an error here
 // cannot hide it. It writes nothing when no server was pinned, so a scan of
 // pinned servers never writes pins.json (only "pin --accept" re-pins).
@@ -357,9 +358,15 @@ func (c *cli) writeScanReport(servers []discover.Server, rows []report.FindingRo
 // prints no notice for it. This makes the window for a lost update short. It does
 // not close it: two runs can still read and save at the same moment. A lock on
 // the file is issue #150.
-func (c *cli) savePinned(pr pinReport) bool {
+func (c *cli) savePinned(ctx context.Context, pr pinReport) bool {
 	if len(pr.pinned) == 0 {
 		return true
+	}
+	// A signal while the report printed means the user stopped the scan: save
+	// nothing.
+	if ctx.Err() != nil {
+		c.cmdPrintf("scan", "%s", interruptedText)
+		return false
 	}
 	store, ok := c.readPins("scan")
 	if !ok {
@@ -450,9 +457,5 @@ func (c *cli) printIgnored(ignored map[string]int) {
 		parts[i] = fmt.Sprintf("%s (%d)", id, ignored[id])
 		total += ignored[id]
 	}
-	noun := "findings"
-	if total == 1 {
-		noun = "finding"
-	}
-	fprintf(c.stderr, "mcpmoat scan: %d %s ignored: %s\n", total, noun, strings.Join(parts, ", "))
+	c.cmdPrintf("scan", "%d %s ignored: %s", total, plural(total, "finding", "findings"), strings.Join(parts, ", "))
 }

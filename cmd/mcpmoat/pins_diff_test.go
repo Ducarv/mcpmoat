@@ -2,7 +2,7 @@ package main
 
 // In-process tests of the diff of a new tool and of the truncation warning, in
 // "mcpmoat scan" and in "mcpmoat pin --accept" (FR-12, FR-13). They use the
-// helpers of scan_pins_test.go and a fake inspector, so no server starts.
+// helpers of pins_helpers_test.go and a fake inspector, so no server starts.
 
 import (
 	"slices"

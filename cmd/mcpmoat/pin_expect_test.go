@@ -4,7 +4,7 @@ package main
 // gap of "pin --accept": scan prints "To accept <server>: mcpmoat pin --accept
 // <server> --expect <digest>", and "pin --accept --expect <digest>" saves the
 // tools only if they have this digest. They use the helpers of
-// scan_pins_test.go and pin_test.go. None of them calls t.Setenv, so all of
+// pins_helpers_test.go and pin_test.go. None of them calls t.Setenv, so all of
 // them run in parallel.
 
 import (
@@ -324,7 +324,12 @@ func TestScanAcceptHintPresent(t *testing.T) {
 			got := e.scan(fakeServers(map[string][]inspect.Tool{"srv": tt.current}), tt.flags...)
 
 			assertScanRun(t, got, scanWant{code: tt.wantCode, stdout: []string{tt.wantRule}, stderr: ignoredSummaryFor(tt.flags)})
-			wantLine := acceptHintPrefix + "srv: mcpmoat pin --accept srv --config " + e.config + " --expect " + digestOf(t, tt.current...) + tt.wantNote + "\n"
+			wantLine := acceptHintPrefix + "srv: mcpmoat pin --accept srv --config " + e.config + " --expect " + digestOf(t, tt.current...) + "\n"
+			if tt.wantNote != "" {
+				// The user did not see every change, so the line has no command.
+				wantLine = acceptHintPrefix + "srv: run pin --accept with this server name, --config with the file of this scan, and --expect " +
+					digestOf(t, tt.current...) + tt.wantNote + "\n"
+			}
 			if !strings.HasSuffix(got.stdout, "\n"+wantLine) {
 				t.Errorf("stdout does not end with the hint %q\n%s", wantLine, got.stdout)
 			}
@@ -339,7 +344,7 @@ func TestScanAcceptHintPresent(t *testing.T) {
 				t.Errorf("scan changed pins.json of a pinned server")
 			}
 			if tt.breakHash {
-				// The pins can not be checked, so the report shows the whole
+				// The pins cannot be checked, so the report shows the whole
 				// current text of each tool that the digest covers.
 				assertContainsAll(t, "stdout", got.stdout, []string{
 					"Not verified tool a on server srv (current text):\n",
@@ -385,7 +390,7 @@ func TestScanAcceptHintAbsent(t *testing.T) {
 			name: "first run that cannot be pinned", insp: func() inspect.Inspector {
 				return fakeServers(map[string][]inspect.Tool{"srv": {mkTool("a", "One."), mkTool("a", "Two.")}})
 			},
-			wantCode: exitOK, wantRow: "MOAT-T2-004",
+			wantCode: exitFindings, wantRow: "MOAT-T2-004",
 		},
 		{
 			name: "pinned server that did not change", pinFirst: true,
@@ -648,17 +653,20 @@ func TestWriteAcceptHints(t *testing.T) {
 		want          string
 	}{
 		{"command", acceptHint{name: "srv", digest: d}, "", false, "To accept srv: mcpmoat pin --accept srv --expect pd1:00"},
-		{"command with an ignore note", acceptHint{name: "srv", digest: d, ignored: true}, "", false,
-			"To accept srv: mcpmoat pin --accept srv --expect pd1:00" + hintIgnoredNote},
+		// The user did not see the change that --ignore hid.
+		{"ignored rows: no command", acceptHint{name: "srv", digest: d, ignored: true}, "", false, steps + hintIgnoredNote},
+		// The diff of a change is a fixed note, so the user saw no text of it.
+		{"diff that is a note: no command", acceptHint{name: "srv", digest: d, noText: true}, "", false, steps + hintNoTextNote},
 		// The user did not see the whole tool, so they must type the command.
 		{"cut diff: no command", acceptHint{name: "srv", digest: d, truncated: true}, "", false, steps + hintCutNote},
 		{"cut diff and ignored rows", acceptHint{name: "srv", digest: d, truncated: true, ignored: true}, "", false,
 			steps + hintCutNote + hintIgnoredNote},
 		// pin refuses a name that two servers use, and any config problem.
 		{"shared name: no command", acceptHint{name: "srv", digest: d, shared: true}, "", false, stepsConfig},
-		{"config problem: no command", acceptHint{name: "srv", digest: d}, "", true, stepsConfig},
+		{"config problem: no command", acceptHint{name: "srv", digest: d}, "", true,
+			"To accept srv: fix the config file first, then run pin --accept with this server name, --config with its config file, and --expect pd1:00"},
 		{"config problem with --config", acceptHint{name: "srv", digest: d}, "/c.json", true,
-			"To accept srv: run pin --accept with this server name, --config with the file of this scan, and --expect pd1:00"},
+			"To accept srv: fix the config file first, then run pin --accept with this server name, --config with the file of this scan, and --expect pd1:00"},
 		{"name that is not bare", acceptHint{name: "a b", digest: d}, "", false,
 			"To accept a b: run pin --accept with this server name and --expect pd1:00"},
 	}

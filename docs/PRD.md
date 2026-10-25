@@ -487,10 +487,15 @@ text diff.
   one identity) is also a `MOAT-T2-004` finding, with the reason `the server is listed twice`: `high`
   when the identity is pinned, else `medium`. A server that is not pinned and cannot be inspected
   stays a warning only (FR-06).
+- A server whose first-run snapshot fails (a duplicate or empty tool name, invalid tool data, more
+  than 2 MiB, or a config path that is not absolute) is a `high` `MOAT-T2-004`. Such a server is
+  never pinned, so its tools are never checked for changes: a hostile server could send one bad tool
+  on purpose to stay outside the rug-pull check.
 - The default threshold of `--fail-on` is `high`. So the default does not fail on `MOAT-T2-002`
-  (new tool), `MOAT-T2-003` (removed tool) or a `medium` `MOAT-T2-004` (an unpinned tool name, a
-  first-run snapshot that fails, or an unpinned server that is listed twice). It does fail on
-  `MOAT-T2-001` and on a `high` `MOAT-T2-004`.
+  (new tool), `MOAT-T2-003` (removed tool) or a `medium` `MOAT-T2-004` (an unpinned tool name on a
+  pinned server, or an unpinned server that is listed twice). It does fail on `MOAT-T2-001` and on a
+  `high` `MOAT-T2-004`. The scan usage text and the README say that a new tool alone does not give
+  exit code 1.
 - `scan` and `pin --accept` read `pins.json` before they start any server. A bad `pins.json` exits
   with code 2 before a server starts. They read it again just before they save, to keep what
   another run wrote meanwhile. `scan` sets only the first-run servers that the file does not hold

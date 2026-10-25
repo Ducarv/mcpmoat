@@ -75,12 +75,12 @@ func (c *cli) readConfigFile(ctx context.Context, path string) (discover.Result,
 func (c *cli) discoverConfigs(ctx context.Context, cmd string) (discover.Result, string, bool) {
 	home, err := c.homeDir()
 	if err != nil {
-		c.cmdErrorf(cmd, "cannot find the home directory: set HOME or use --config")
+		c.cmdPrintf(cmd, "cannot find the home directory: set HOME or use --config")
 		return discover.Result{}, "", false
 	}
 	wd, err := c.getwd()
 	if err != nil {
-		c.cmdErrorf(cmd, "cannot read the working directory; use --config")
+		c.cmdPrintf(cmd, "cannot read the working directory; use --config")
 		return discover.Result{}, "", false
 	}
 	return discover.Discover(ctx, discover.Options{Home: home, WorkDir: wd}), wd, true
@@ -99,13 +99,21 @@ func loadFailed(res discover.Result) bool {
 func (c *cli) printFileErrors(cmd string, errs []*discover.FileError) {
 	// FileError.Error already escapes the path and the server name.
 	for _, e := range errs {
-		c.cmdErrorf(cmd, "%s", e.Error())
+		c.cmdPrintf(cmd, "%s", e.Error())
 	}
 }
 
-// cmdErrorf writes one line on stderr, with the prefix "mcpmoat <cmd>: ". The
-// caller must escape untrusted text in a.
-func (c *cli) cmdErrorf(cmd, format string, a ...any) {
+// plural returns one when n is 1, and many otherwise.
+func plural(n int, one, many string) string {
+	if n == 1 {
+		return one
+	}
+	return many
+}
+
+// cmdPrintf writes one line on stderr, with the prefix "mcpmoat <cmd>: ": an
+// error or a notice. The caller must escape untrusted text in a.
+func (c *cli) cmdPrintf(cmd, format string, a ...any) {
 	fprintf(c.stderr, "mcpmoat %s: %s\n", cmd, fmt.Sprintf(format, a...))
 }
 
@@ -113,7 +121,7 @@ func (c *cli) cmdErrorf(cmd, format string, a ...any) {
 // "what: <err>". what is fixed text from the caller. The text of err can hold
 // a path from the environment or output of a server, so it is escaped.
 func (c *cli) cmdErr(cmd, what string, err error) {
-	c.cmdErrorf(cmd, "%s: %s", what, termsafe.Quote(err.Error()))
+	c.cmdPrintf(cmd, "%s: %s", what, termsafe.Quote(err.Error()))
 }
 
 // interruptedText is the text after the prefix of the error line that scan and

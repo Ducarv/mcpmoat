@@ -579,13 +579,16 @@ func TestScanAcceptHintCutNote(t *testing.T) {
 				t.Fatalf("exit code = %d, want 0 or 1\nstderr:\n%s", got.code, got.stderr)
 			}
 			line := acceptHintPrefix + "srv: mcpmoat pin --accept srv --config " + e.config + " --expect " + digestOf(t, tt.current...)
-			if tt.wantCut {
-				// The user did not see the whole tool, so the line has no command.
+			if tt.wantCut || len(tt.flags) > 0 {
+				// The user did not see every change (a cut diff, or a row that
+				// --ignore dropped), so the line has no command.
 				line = acceptHintPrefix + "srv: run pin --accept with this server name, --config with the file of this scan, and --expect " +
-					digestOf(t, tt.current...) + hintCutText
+					digestOf(t, tt.current...)
+			}
+			if tt.wantCut {
+				line += hintCutText
 			}
 			if len(tt.flags) > 0 {
-				// --ignore dropped a row, so the line says so too.
 				line += hintIgnoredNote
 			}
 			if !strings.HasSuffix(got.stdout, "\n"+line+"\n") {
@@ -883,4 +886,95 @@ func TestPinOutcomesNotInspectedAfterDuplicate(t *testing.T) {
 			}
 		})
 	}
+}
+
+// cancelOnWrite is a writer that cancels a context on its first write, like a
+// Ctrl-C while the output prints.
+type cancelOnWrite struct {
+	buf    *bytes.Buffer
+	cancel context.CancelFunc
+}
+
+func (w cancelOnWrite) Write(p []byte) (int, error) {
+	w.cancel()
+	return w.buf.Write(p)
+}
+
+// TestSignalWhileOutputPrintsSavesNothing checks that a signal that comes after
+// the inspection, while scan or pin writes its output, stops the save: exit 2,
+// the interrupted message, and no change to pins.json.
+func TestSignalWhileOutputPrintsSavesNothing(t *testing.T) {
+	t.Parallel()
+
+	for _, cmd := range []string{"scan", "pin"} {
+		t.Run(cmd, func(t *testing.T) {
+			t.Parallel()
+			e := newPinEnv(t, oneServer("srv"))
+			ctx, cancel := context.WithCancel(t.Context())
+			defer cancel()
+			c, _, stderr := e.cli(fakeServers(map[string][]inspect.Tool{"srv": {mkTool("a", "Add.")}}))
+			c.ctx = ctx
+			var out bytes.Buffer
+			c.stdout = cancelOnWrite{buf: &out, cancel: cancel}
+			args := []string{"scan", "--config", e.config}
+			if cmd == "pin" {
+				args = []string{"pin", "--config", e.config, "--accept", "srv"}
+			}
+
+			code := c.dispatch(args)
+
+			if code != exitError {
+				t.Errorf("exit code = %d, want %d\nstdout:\n%s\nstderr:\n%s", code, exitError, out.String(), stderr.String())
+			}
+			assertContainsAll(t, "stderr", stderr.String(), []string{"mcpmoat " + cmd + ": " + interruptedText + "\n"})
+			assertContainsNone(t, "output", out.String()+stderr.String(), []string{"accepted", "pinned 1 tool"})
+			if _, err := os.Stat(e.pinsPath()); !errors.Is(err, os.ErrNotExist) {
+				t.Errorf("pins.json exists after an interrupted %s (stat error = %v)", cmd, err)
+			}
+		})
+	}
+}
+
+// TestRelativeConfigPathIsNotPinned checks that a server whose config path is
+// not absolute is neither pinned nor compared by scan (a high MOAT-T2-004 row),
+// and that pin refuses it: its identity would not match the store.
+func TestRelativeConfigPathIsNotPinned(t *testing.T) {
+	t.Parallel()
+
+	srv := discover.Server{Name: "srv", Client: discover.ClientClaudeCode, Source: "cfg/mcp.json"}
+	tools := []inspect.Tool{mkTool("a", "Add.")}
+
+	t.Run("scan", func(t *testing.T) {
+		t.Parallel()
+		e := newPinEnv(t, oneServer("srv"))
+		c, _, _ := e.cli(nil)
+		store, ok := c.readPins("scan")
+		if !ok {
+			t.Fatal("readPins() = false, want true")
+		}
+
+		pr := c.pinOutcomes(store, []inspect.Outcome{{Server: srv, Status: inspect.StatusOK, Result: inspect.Result{Tools: tools}}}, &scanIgnores{})
+
+		if len(pr.rows) != 1 || pr.rows[0].RuleID != "MOAT-T2-004" || pr.rows[0].Severity != "high" || pr.rows[0].Related != reasonRelativeSource {
+			t.Errorf("rows = %+v, want one high MOAT-T2-004 row with the reason %q", pr.rows, reasonRelativeSource)
+		}
+		if len(pr.pinned) != 0 || len(pr.hints) != 0 {
+			t.Errorf("pinned = %+v, hints = %+v, want none", pr.pinned, pr.hints)
+		}
+	})
+
+	t.Run("pin", func(t *testing.T) {
+		t.Parallel()
+		e := newPinEnv(t, oneServer("srv"))
+		c, stdout, stderr := e.cli(nil)
+
+		code := c.acceptTools(t.Context(), srv, tools, "")
+
+		if code != exitError || stdout.Len() != 0 || !strings.Contains(stderr.String(), "the path of its config file is not absolute") {
+			t.Errorf("exit code %d, stdout %q, stderr %q, want exit code %d and the path error", code, stdout, stderr, exitError)
+		}
+		if _, err := os.Stat(e.pinsPath()); !errors.Is(err, os.ErrNotExist) {
+			t.Errorf("pins.json exists after a refused pin (stat error = %v)", err)
+		}
+	})
 }

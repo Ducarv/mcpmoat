@@ -34,7 +34,9 @@ docs/                   PRD and other documentation
 
 - `cmd/mcpmoat`: parses flags, runs the command, returns the exit code. `os.Exit` is only in `main`.
   `configs.go` holds the config loader that `scan` and `pin` share (`loadConfigs`), so both commands
-  apply the same trust rules to a config file.
+  apply the same trust rules to a config file. `pins_shared.go` holds the helpers of the pin step that both
+  commands use (`serverIdentity`, `readPins`, `pinnable`, `appendDiff`). `scan_pins.go` holds the
+  pin step of `scan` (`pinner`), and `accept_hint.go` the "To accept" line.
 - `internal/termsafe`: escapes untrusted text for the terminal. See
   [Where untrusted text is escaped](#where-untrusted-text-is-escaped).
 - `internal/safefile`: the one shared hardened file read. It confines the open to a directory with
@@ -134,7 +136,10 @@ the connect and pin steps between step 5 and step 6:
   prints no report and exits with code 2. A second signal ends mcpmoat at once.
 - 5b. For each server, `cmd/mcpmoat` checks the tools against the store that it read in 5a.
   - A server that is not in the store is pinned on its first run. If the tools cannot be pinned (see
-    `pins.Snapshot`), the server gets a MOAT-T2-004 finding, so that it never passes in silence.
+    `pinnable`), the server gets a high MOAT-T2-004 finding: it is never pinned, so its tools are
+    never checked for changes, and it must fail the default threshold. A server whose config path is
+    not absolute (the working directory is not known) gets the same finding with the reason
+    `the config path is not absolute`, because its identity would not match the store.
     `scan` prints `mcpmoat scan: pinned N tools for <server>` on stderr only after the save worked.
   - A pinned server that was not inspected (it failed, timed out or was refused) gets a MOAT-T2-004
     finding (high, exit 1) with the reason `pinned server could not be inspected`
@@ -158,7 +163,7 @@ the connect and pin steps between step 5 and step 6:
     `.mcpmoat-ignore` file does not (see step 3). `scan` never re-pins a server that is in the
     store.
 - 5c. For a pinned server with at least one pin finding that is not ignored, `pinOutcomes` also keeps
-  the `pins.Digest` of the tools that `scan` saw (`acceptHint` in `cmd/mcpmoat/scan_pins.go`). A
+  the `pins.Digest` of the tools that `scan` saw (`acceptHint` in `cmd/mcpmoat/accept_hint.go`). A
   server whose tools cannot be pinned (`pinnable`: `pins.Snapshot` and `pins.ValidateServer`, the
   rules of `Store.Set`) has no hint, because `pin --accept` would refuse them. A first-run server, a
   server that was not inspected and an ignored finding give no hint. A hint keeps `truncated` when a

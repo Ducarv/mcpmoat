@@ -20,7 +20,7 @@ const (
 	KindNew ChangeKind = "new"
 	// KindRemoved is a pinned tool that the server no longer has.
 	KindRemoved ChangeKind = "removed"
-	// KindUnverified is a tool that Compare can not check against the pin.
+	// KindUnverified is a tool that Compare cannot check against the pin.
 	// The name is empty or duplicate, the tool has no canonical form, the pin
 	// uses another hash version, or the pin text does not match its hash.
 	// Change.Reason says which.
@@ -40,11 +40,11 @@ const (
 // never empty: a tool must never hide behind a render error or an invisible
 // change.
 const (
-	// diffUnavailable is the Diff of a changed tool when the diff can not be
+	// diffUnavailable is the Diff of a changed tool when the diff cannot be
 	// made.
 	diffUnavailable = "pinned text could not be rendered"
 	// diffNewUnavailable is the Diff of a new tool, or of a pinned tool that
-	// can not be verified, when the diff of its current text can not be made.
+	// cannot be verified, when the diff of its current text cannot be made.
 	diffNewUnavailable = "current text could not be rendered"
 	// diffNotVisible is the Diff when the hashes differ but the rendered texts
 	// are equal. The canonical form has a key that render does not show, or two
@@ -67,13 +67,13 @@ const (
 	ReasonPinMismatch = "pinned text does not match its hash"
 )
 
-// RuleIDPrefix is the start of every rule ID that ChangeKind.RuleID returns.
-const RuleIDPrefix = "MOAT-T2-"
+// ruleIDPrefix is the start of every rule ID that ChangeKind.RuleID returns.
+const ruleIDPrefix = "MOAT-T2-"
 
 // IsPinRuleID reports whether id is the rule ID of a pin change, that is, an
-// ID that starts with RuleIDPrefix. The match is exact and case-sensitive.
+// ID that starts with ruleIDPrefix. The match is exact and case-sensitive.
 func IsPinRuleID(id string) bool {
-	return strings.HasPrefix(id, RuleIDPrefix)
+	return strings.HasPrefix(id, ruleIDPrefix)
 }
 
 // RuleID returns the rule ID of the findings for this kind: MOAT-T2-001
@@ -82,13 +82,13 @@ func IsPinRuleID(id string) bool {
 func (k ChangeKind) RuleID() string {
 	switch k {
 	case KindChanged:
-		return RuleIDPrefix + "001"
+		return ruleIDPrefix + "001"
 	case KindNew:
-		return RuleIDPrefix + "002"
+		return ruleIDPrefix + "002"
 	case KindRemoved:
-		return RuleIDPrefix + "003"
+		return ruleIDPrefix + "003"
 	case KindUnverified:
-		return RuleIDPrefix + "004"
+		return ruleIDPrefix + "004"
 	}
 	return ""
 }
@@ -129,7 +129,7 @@ type Change struct {
 	// and "+++ current".
 	//
 	// A KindUnverified change with ReasonHashVersion or ReasonPinMismatch has a
-	// Diff too, made like the one of KindNew: the pin can not be trusted, so the
+	// Diff too, made like the one of KindNew: the pin cannot be trusted, so the
 	// diff shows the whole current tool. The user must see that text before they
 	// accept it. The other KindUnverified changes have no single current tool to
 	// show, so their Diff is empty.
@@ -146,7 +146,7 @@ type Change struct {
 	// or "low". Compare always sets it. It equals Kind.Severity(), except for a
 	// KindUnverified change whose Tool is a pinned name: that one is "high".
 	//
-	// A pinned tool that Compare can not verify (a duplicate name, invalid tool
+	// A pinned tool that Compare cannot verify (a duplicate name, invalid tool
 	// data, another hash version or a corrupt pin) can hide a rug pull. A hostile
 	// server can return a pinned name twice, or with data that has no canonical
 	// form, to avoid the KindChanged check. The change must then fail the default
@@ -166,7 +166,7 @@ type Change struct {
 //   - A name that two or more current tools share gives one KindUnverified
 //     change for that name. Compare does not pick one of the tools.
 //   - A pinned tool with a hash of another HashVersion is KindUnverified. The
-//     hashes of two versions can not be compared, and Compare must not accept
+//     hashes of two versions cannot be compared, and Compare must not accept
 //     the tool silently.
 //   - A pinned tool with another hash is KindChanged, also when the diff can
 //     not be made (Diff then holds a short note, never the empty string).
@@ -234,7 +234,7 @@ func compareTool(stored ServerPins, t inspect.Tool) (Change, bool) {
 		diff, truncated := currentToolDiff(canonical)
 		return Change{Kind: KindNew, Tool: t.Name, Diff: diff, Truncated: truncated, Severity: KindNew.Severity()}, true
 	}
-	// The pin can not be checked in the next two cases, so the change shows the
+	// The pin cannot be checked in the next two cases, so the change shows the
 	// whole current tool, like a new tool.
 	unverifiedWithText := func(reason string) (Change, bool) {
 		c := unverifiedChange(stored, t.Name, reason)
@@ -264,7 +264,7 @@ func compareTool(stored ServerPins, t inspect.Tool) (Change, bool) {
 }
 
 // currentToolDiff returns the diff of the whole current tool from empty text,
-// and whether it was cut. When the diff can not be made, it returns the fixed
+// and whether it was cut. When the diff cannot be made, it returns the fixed
 // note diffNewUnavailable.
 func currentToolDiff(canonical []byte) (diff string, truncated bool) {
 	diff, truncated, err := newToolDiff(string(canonical))
@@ -274,13 +274,30 @@ func currentToolDiff(canonical []byte) (diff string, truncated bool) {
 	return diff, truncated
 }
 
-// unverifiedChange returns a KindUnverified change. Its severity is "high" when
-// the name is pinned, because a pinned tool that can not be verified can hide a
-// rug pull, and "medium" otherwise.
+// unverifiedChange returns a KindUnverified change, with the severity of
+// UnverifiedSeverity.
 func unverifiedChange(stored ServerPins, name, reason string) Change {
-	severity := KindUnverified.Severity()
-	if _, pinned := stored[name]; pinned {
-		severity = severityHigh
+	_, pinned := stored[name]
+	return Change{Kind: KindUnverified, Tool: name, Reason: reason, Severity: UnverifiedSeverity(pinned)}
+}
+
+// UnverifiedSeverity returns the severity of a KindUnverified finding: "high"
+// when the tool or the server is pinned, because a pinned item that cannot be
+// verified can hide a rug pull, and "medium" otherwise.
+func UnverifiedSeverity(pinned bool) string {
+	if pinned {
+		return severityHigh
 	}
-	return Change{Kind: KindUnverified, Tool: name, Reason: reason, Severity: severity}
+	return KindUnverified.Severity()
+}
+
+// DiffIsNote reports whether Diff is one of the fixed notes that replace the
+// diff text, so the user sees no text of the tool in it. A real diff always
+// starts with the "--- pinned" label, so it never equals a note.
+func (c Change) DiffIsNote() bool {
+	switch c.Diff {
+	case diffUnavailable, diffNewUnavailable, diffNotVisible:
+		return true
+	}
+	return false
 }

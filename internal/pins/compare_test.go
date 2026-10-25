@@ -453,7 +453,7 @@ func TestCompareChangedDiffNeverEmpty(t *testing.T) {
 }
 
 // mustCurrentDiff returns the diff of the whole tool from empty text, as Compare
-// makes it for a new tool and for a pin that can not be checked.
+// makes it for a new tool and for a pin that cannot be checked.
 func mustCurrentDiff(t testing.TB, tool inspect.Tool) string {
 	t.Helper()
 	diff, truncated, err := newToolDiff(mustCanonical(t, tool))
@@ -611,7 +611,7 @@ func TestCompareUnverifiedSeverity(t *testing.T) {
 
 // TestCompareChangeAfterLongDescription checks that a change in the input
 // schema shows in the Diff when the pinned description is very long, so a
-// server can not hide a change behind a long text that it pinned.
+// server cannot hide a change behind a long text that it pinned.
 func TestCompareChangeAfterLongDescription(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
@@ -782,7 +782,7 @@ func FuzzCompare(f *testing.F) {
 			if want := wantSeverity(stored, c); c.Severity != want {
 				t.Errorf("%s change of %q has Severity %q, want %q", c.Kind, c.Tool, c.Severity, want)
 			}
-			// A pin that can not be checked shows the whole current tool.
+			// A pin that cannot be checked shows the whole current tool.
 			hasDiff := c.Kind == KindChanged || c.Kind == KindNew ||
 				c.Reason == ReasonHashVersion || c.Reason == ReasonPinMismatch
 			if !hasDiff && (c.Diff != "" || c.Truncated) {
@@ -827,8 +827,8 @@ func TestIsPinRuleID(t *testing.T) {
 			t.Errorf("IsPinRuleID(%q) = true, want false", id)
 		}
 	}
-	if !IsPinRuleID(RuleIDPrefix) {
-		t.Errorf("IsPinRuleID(%q) = false, want true", RuleIDPrefix)
+	if !IsPinRuleID(ruleIDPrefix) {
+		t.Errorf("IsPinRuleID(%q) = false, want true", ruleIDPrefix)
 	}
 }
 
@@ -946,5 +946,33 @@ func TestCompareDeepSchemaChangeVisible(t *testing.T) {
 	}
 	if !found {
 		t.Errorf("Diff has no added line with the changed leaf:\n%s", got[0].Diff)
+	}
+}
+
+func TestChangeDiffIsNote(t *testing.T) {
+	t.Parallel()
+	for _, tt := range []struct {
+		diff string
+		want bool
+	}{
+		{diffUnavailable, true},
+		{diffNewUnavailable, true},
+		{diffNotVisible, true},
+		{"", false},
+		{"--- pinned\n+++ current\n@@ -1 +1 @@\n-a\n+b\n", false},
+	} {
+		if got := (Change{Diff: tt.diff}).DiffIsNote(); got != tt.want {
+			t.Errorf("Change{Diff: %q}.DiffIsNote() = %v, want %v", tt.diff, got, tt.want)
+		}
+	}
+}
+
+func TestUnverifiedSeverity(t *testing.T) {
+	t.Parallel()
+	if got := UnverifiedSeverity(true); got != "high" {
+		t.Errorf("UnverifiedSeverity(true) = %q, want high", got)
+	}
+	if got := UnverifiedSeverity(false); got != "medium" {
+		t.Errorf("UnverifiedSeverity(false) = %q, want medium", got)
 	}
 }

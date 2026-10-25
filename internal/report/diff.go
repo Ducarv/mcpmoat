@@ -57,7 +57,7 @@ const (
 	// DiffNew is a tool that is new on a pinned server: the server offers it,
 	// but the pins do not hold it. Its Diff has only added lines.
 	DiffNew
-	// DiffUnverified is a pinned tool whose pin can not be checked (see
+	// DiffUnverified is a pinned tool whose pin cannot be checked (see
 	// pins.Change.Diff). Its Diff has only added lines: the whole current
 	// tool.
 	DiffUnverified

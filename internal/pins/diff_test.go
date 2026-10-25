@@ -615,19 +615,16 @@ func TestRenderWrapsLongLines(t *testing.T) {
 	}
 	var counts = map[string]int{}
 	for line := range strings.SplitSeq(strings.TrimSuffix(got, "\n"), "\n") {
-		switch {
-		case strings.HasPrefix(line, "name: "):
-			counts["name"]++
-		case strings.HasPrefix(line, "title: "):
-			counts["title"]++
-		case strings.HasPrefix(line, "description: "):
-			counts["description"]++
-		case strings.HasPrefix(line, "    "):
-			counts["schema"]++
+		text := line
+		for _, field := range []string{"name", "title", "description"} {
+			if rest, ok := cutFieldLead(line, field); ok {
+				counts[field]++
+				text = rest
+			}
 		}
-		text := strings.TrimLeft(line, " ")
-		for _, p := range []string{"name: ", "title: ", "description: "} {
-			text = strings.TrimPrefix(text, p)
+		if strings.HasPrefix(line, "    ") {
+			counts["schema"]++
+			text = strings.TrimPrefix(strings.TrimLeft(line, " "), "+ ")
 		}
 		if n := utf8.RuneCountInString(text); n > maxLineRunes {
 			t.Errorf("line has %d runes of text, want at most %d: %q", n, maxLineRunes, line)
@@ -646,13 +643,22 @@ func TestRenderWrapsLongLines(t *testing.T) {
 	// Joining the chunks of the name gives the whole name back.
 	var name strings.Builder
 	for line := range strings.SplitSeq(got, "\n") {
-		if text, ok := strings.CutPrefix(line, "name: "); ok {
+		if text, ok := cutFieldLead(line, "name"); ok {
 			name.WriteString(text)
 		}
 	}
 	if name.String() != long {
 		t.Errorf("the chunks of the name do not give the name back: %q", name.String())
 	}
+}
+
+// cutFieldLead returns the text of a rendered line of field, after its lead:
+// "field: " on the first chunk, or "field+ " on a continuation chunk.
+func cutFieldLead(line, field string) (string, bool) {
+	if text, ok := strings.CutPrefix(line, field+": "); ok {
+		return text, true
+	}
+	return strings.CutPrefix(line, field+"+ ")
 }
 
 func TestRenderWrapCutsOnRuneBoundaries(t *testing.T) {
@@ -671,7 +677,7 @@ func TestRenderWrapCutsOnRuneBoundaries(t *testing.T) {
 				}
 				var joined strings.Builder
 				for line := range strings.SplitSeq(got, "\n") {
-					if text, ok := strings.CutPrefix(line, "description: "); ok {
+					if text, ok := cutFieldLead(line, "description"); ok {
 						if c := utf8.RuneCountInString(text); c > maxLineRunes {
 							t.Errorf("chunk has %d runes, want at most %d", c, maxLineRunes)
 						}
@@ -691,26 +697,46 @@ func TestWriteWrapped(t *testing.T) {
 	long := strings.Repeat("a", maxLineRunes+1)
 	deep := strings.Repeat(" ", maxIndent+50)
 	tests := []struct {
-		name       string
-		lead, text string
-		want       string
+		name             string
+		lead, cont, text string
+		want             string
 	}{
-		{"empty text", "p: ", "", "p: \n"},
-		{"short", "p: ", "abc", "p: abc\n"},
-		{"exactly the limit", "p: ", long[:maxLineRunes], "p: " + long[:maxLineRunes] + "\n"},
-		{"one over", "p: ", long, "p: " + long[:maxLineRunes] + "\np: a\n"},
-		{"invalid UTF-8 bytes count one each", "p: ", strings.Repeat("\xff", maxLineRunes+1), "p: " + strings.Repeat("\xff", maxLineRunes) + "\np: \xff\n"},
-		{"huge indentation is capped on every chunk", deep, long, deep[:maxIndent] + long[:maxLineRunes] + "\n" + deep[:maxIndent] + "a\n"},
+		{"empty text", "p: ", "p+ ", "", "p: \n"},
+		{"short", "p: ", "p+ ", "abc", "p: abc\n"},
+		{"exactly the limit", "p: ", "p+ ", long[:maxLineRunes], "p: " + long[:maxLineRunes] + "\n"},
+		{"one over: the next chunk has the continuation lead", "p: ", "p+ ", long, "p: " + long[:maxLineRunes] + "\np+ a\n"},
+		{"invalid UTF-8 bytes count one each", "p: ", "p+ ", strings.Repeat("\xff", maxLineRunes+1), "p: " + strings.Repeat("\xff", maxLineRunes) + "\np+ \xff\n"},
+		{"huge indentation is capped on every chunk", deep, deep + "+ ", long, deep[:maxIndent] + long[:maxLineRunes] + "\n" + deep[:maxIndent] + "+ a\n"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			var b strings.Builder
-			writeWrapped(&b, tt.lead, tt.text)
+			writeWrapped(&b, tt.lead, tt.cont, tt.text)
 			if b.String() != tt.want {
 				t.Errorf("writeWrapped() = %q, want %q", b.String(), tt.want)
 			}
 		})
+	}
+}
+
+// TestRenderWrapDiffersFromLineBreak checks that a wrapped line and a real line
+// break in the text never render the same.
+func TestRenderWrapDiffersFromLineBreak(t *testing.T) {
+	t.Parallel()
+	a := strings.Repeat("A", maxLineRunes)
+	wrapped := mustCanonical(t, inspect.Tool{Name: "t", Description: a + "B"})
+	broken := mustCanonical(t, inspect.Tool{Name: "t", Description: a + "\nB"})
+	rw, err := render(wrapped)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rb, err := render(broken)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rw == rb {
+		t.Errorf("a wrapped line and a line break render the same:\n%s", rw)
 	}
 }
 
@@ -790,12 +816,13 @@ func tail(s string, n int) string {
 func checkWrapped(t *testing.T, rendered string) {
 	t.Helper()
 	for line := range strings.SplitSeq(rendered, "\n") {
-		var text string
-		switch {
-		case strings.HasPrefix(line, "name: "), strings.HasPrefix(line, "title: "), strings.HasPrefix(line, "description: "):
-			_, text, _ = strings.Cut(line, ": ")
-		default:
-			text = strings.TrimLeft(line, " ")
+		// A JSON line never starts with "+", so "+ " after the indentation is
+		// the continuation lead.
+		text := strings.TrimPrefix(strings.TrimLeft(line, " "), "+ ")
+		for _, field := range []string{"name", "title", "description"} {
+			if rest, ok := cutFieldLead(line, field); ok {
+				text = rest
+			}
 		}
 		if n := utf8.RuneCountInString(text); n > maxLineRunes {
 			t.Fatalf("rendered line has %d runes of text, want at most %d: %.80q", n, maxLineRunes, line)

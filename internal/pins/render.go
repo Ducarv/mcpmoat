@@ -50,13 +50,17 @@ type renderedTool struct {
 //	  <line of the indented JSON>
 //
 // A name, a title or a description with line breaks gives one line for each of
-// its lines, and each line has the prefix. So text from a server can not make
+// its lines, and each line has the prefix. So text from a server cannot make
 // a line that looks like another field.
 //
 // A line with more than maxLineRunes runes after its prefix or indentation is
 // wrapped: it becomes several lines of at most maxLineRunes runes, cut on rune
-// boundaries. Each chunk keeps the prefix, or the indentation, of the line. So
-// a line diff shows the chunk that changed, also in a very long line.
+// boundaries. So a line diff shows the chunk that changed, also in a very long
+// line. The first chunk keeps the prefix, or the indentation, of the line. The
+// next chunks have a continuation lead: the field name and "+ " (for example
+// "description+ "), or the indentation and "+ ". A real line never starts like
+// that (a field line has ": ", and a JSON line never starts with "+"), so a
+// wrapped line and a line break in the text never render the same.
 //
 // The JSON parts have two spaces of indent for each level, and the key order
 // of the canonical form. A schema that the server did not send is null.
@@ -98,26 +102,31 @@ func render(canonical string) (string, error) {
 // writePrefixed writes value to b, one line for each line of value, and puts
 // prefix at the start of every line. A long line is wrapped (see writeWrapped).
 func writePrefixed(b *strings.Builder, prefix, value string) {
+	cont := strings.TrimSuffix(prefix, ": ") + "+ "
 	for line := range strings.SplitSeq(value, "\n") {
-		writeWrapped(b, prefix, line)
+		writeWrapped(b, prefix, cont, line)
 	}
 }
 
-// writeWrapped writes text to b as one or more lines. Each line is lead, then
-// at most maxLineRunes runes of text. It cuts only between runes, so a valid
-// UTF-8 character never splits. An empty text gives one line with only lead.
-// The work is linear in len(text).
+// writeWrapped writes text to b as one or more lines. The first line is lead,
+// and the next lines are cont, each followed by at most maxLineRunes runes of
+// text. It cuts only between runes, so a valid UTF-8 character never splits. An
+// empty text gives one line with only lead. The work is linear in len(text).
 //
-// Every line keeps at most maxIndent bytes of lead. A lead is a short prefix or
-// spaces, so a cut inside it is safe.
-func writeWrapped(b *strings.Builder, lead, text string) {
+// Every line keeps at most maxIndent bytes of lead, and cont keeps its last two
+// bytes (the "+ " marker) after the cut. A lead is a short prefix or spaces, so
+// a cut inside it is safe.
+func writeWrapped(b *strings.Builder, lead, cont, text string) {
 	lead = lead[:min(len(lead), maxIndent)]
+	if len(cont) > maxIndent+2 {
+		cont = cont[:maxIndent] + cont[len(cont)-2:]
+	}
 	b.WriteString(lead)
 	runes := 0
 	for i := 0; i < len(text); {
 		if runes == maxLineRunes {
 			b.WriteByte('\n')
-			b.WriteString(lead)
+			b.WriteString(cont)
 			runes = 0
 		}
 		// For invalid UTF-8 the size is 1, so the loop always moves forward.
@@ -147,7 +156,8 @@ func writeIndented(b *strings.Builder, label string, raw json.RawMessage) error 
 	// line is wrapped on its text, after its indentation.
 	for line := range strings.SplitSeq("  "+buf.String(), "\n") {
 		text := strings.TrimLeft(line, " ")
-		writeWrapped(b, line[:len(line)-len(text)], text)
+		indent := line[:len(line)-len(text)]
+		writeWrapped(b, indent, indent+"+ ", text)
 	}
 	return nil
 }

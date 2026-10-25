@@ -6,6 +6,8 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"path/filepath"
+	"text/tabwriter"
 
 	"github.com/Ducarv/mcpmoat/internal/discover"
 	"github.com/Ducarv/mcpmoat/internal/inspect"
@@ -54,7 +56,7 @@ func (c *cli) runPin(_ options, args []string) int {
 	if !ok {
 		return exitError
 	}
-	return c.acceptTools(server, tools, a.expect)
+	return c.acceptTools(ctx, server, tools, a.expect)
 }
 
 // pinArgs holds the checked flags of "pin".
@@ -121,7 +123,7 @@ func (c *cli) parsePinArgs(args []string) (a pinArgs, code int, ok bool) {
 func (c *cli) inspectOne(ctx context.Context, server discover.Server, opts inspect.Options) ([]inspect.Tool, bool) {
 	outcomes, err := inspect.Run(ctx, []discover.Server{server}, opts, c.inspector)
 	if ctx.Err() != nil {
-		c.pinErrorf("%s", interruptedText)
+		c.cmdPrintf("pin", "%s", interruptedText)
 		return nil, false
 	}
 	if err != nil {
@@ -131,11 +133,11 @@ func (c *cli) inspectOne(ctx context.Context, server discover.Server, opts inspe
 	}
 	// Run gives one outcome for one server. Any other number is a bug.
 	if len(outcomes) != 1 {
-		c.pinErrorf("server %s: not inspected", cutName(server.Name))
+		c.cmdPrintf("pin", "server %s: not inspected", cutName(server.Name))
 		return nil, false
 	}
 	if outcomes[0].Status != inspect.StatusOK {
-		c.pinErrorf("%s", notInspectedText(outcomes[0]))
+		c.cmdPrintf("pin", "%s", notInspectedText(outcomes[0]))
 		return nil, false
 	}
 	return outcomes[0].Result.Tools, true
@@ -160,15 +162,21 @@ func (c *cli) inspectOne(ctx context.Context, server discover.Server, opts inspe
 // the digests differ, pin saves nothing. Without expect, pin trusts the tools
 // that the server returns now, and prints the note pinNoExpectNote on stderr
 // before it saves.
-func (c *cli) acceptTools(server discover.Server, tools []inspect.Tool, expect string) int {
+func (c *cli) acceptTools(ctx context.Context, server discover.Server, tools []inspect.Tool, expect string) int {
 	name := cutName(server.Name)
 	id := serverIdentity(server)
+	// A relative path gives another identity than the one in the store, so
+	// the accept would add an entry and leave the old pins in place.
+	if !filepath.IsAbs(server.Source) {
+		c.cmdPrintf("pin", "cannot pin server %s: the path of its config file is not absolute (the working directory is not known)", name)
+		return exitError
+	}
 
 	// The same check as the "To accept" hint of scan (see pinnable). The error
 	// text is not printed: it can name a tool of the server.
 	snap, err := pinnable(id, tools)
 	if err != nil {
-		c.pinErrorf("cannot pin the tools of server %s: %s", name, snapshotReason(err))
+		c.cmdPrintf("pin", "cannot pin the tools of server %s: %s", name, snapshotReason(err))
 		return exitError
 	}
 
@@ -183,7 +191,7 @@ func (c *cli) acceptTools(server discover.Server, tools []inspect.Tool, expect s
 	// closed pipe) must stop pin before the save, because the user did not see
 	// the diff.
 	if err := report.WriteDiffs(c.stdout, diffs); err != nil {
-		c.pinErrorf("cannot write output; no pins were saved")
+		c.cmdPrintf("pin", "cannot write output; no pins were saved")
 		return exitError
 	}
 
@@ -194,10 +202,16 @@ func (c *cli) acceptTools(server discover.Server, tools []inspect.Tool, expect s
 	} else if got := pins.Digest(snap); got != expect {
 		// The two digests are hex made by mcpmoat (expect passed ValidDigest),
 		// so they need no escape.
-		c.pinErrorf("the tools of %s differ from what scan showed (digest %s, expected %s); nothing was saved. Run scan again and review the diff.", name, got, expect)
+		c.cmdPrintf("pin", "the tools of %s differ from what scan showed (digest %s, expected %s); nothing was saved. Run scan again and review the diff.", name, got, expect)
 		return exitError
 	}
 
+	// A signal while the diffs printed means the user stopped pin: save
+	// nothing.
+	if ctx.Err() != nil {
+		c.cmdPrintf("pin", "%s", interruptedText)
+		return exitError
+	}
 	if err := store.Set(id, snap); err != nil {
 		c.cmdErr("pin", "cannot set the pins of server "+name, err)
 		return exitError
@@ -220,24 +234,21 @@ const pinNoExpectNote = "mcpmoat pin: note: without --expect, pin trusts the too
 // "mcpmoat pin -h" prints it alone.
 func pinUsage(w io.Writer) {
 	fprintf(w, "Pin flags (after \"pin\"):\n")
-	fprintf(w, "  --accept <server>    Accept the tools that the server offers now as its new pins (required)\n")
-	fprintf(w, "                       pin connects to this one server (a stdio server is started). Review the diff of \"scan\" first\n")
-	fprintf(w, "                       pin prints the diff of each changed, new or not verified tool, then \"accepted ...\". Ctrl-C stops the server and saves nothing (exit 2)\n")
-	fprintf(w, "                       The name must match exactly one server. If two clients or projects use it, narrow it with --config\n")
-	fprintf(w, "  --expect <digest>    Save the tools only if their digest is this one (pd1:<64 hex>); scan prints it as\n")
-	fprintf(w, "                       \"To accept <server>: mcpmoat pin --accept <server> --expect <digest>\". If the tools differ, pin prints\n")
-	fprintf(w, "                       the diff, saves nothing and exits 2. Without it, pin trusts the tools the server returns now (a note on stderr)\n")
-	fprintf(w, "  --config <file>      Read only this file, like \"scan --config\"; skips auto-discovery\n")
-	fprintf(w, "  --timeout <duration> Time limit for the server, a Go duration such as 10s or 1m30s (default %s)\n", inspect.DefaultTimeout)
+	// Padding 2 keeps the descriptions in one column, like scanUsage.
+	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
+	fprintf(tw, "  --accept <server>\tAccept the tools that the server offers now as its new pins (required)\n")
+	fprintf(tw, "  \tpin connects to this one server (a stdio server is started). Review the diff of \"scan\" first\n")
+	fprintf(tw, "  \tpin prints the diff of each changed, new or not verified tool, then \"accepted ...\". Ctrl-C stops the server and saves nothing (exit 2)\n")
+	fprintf(tw, "  \tThe name must match exactly one server. If two clients or projects use it, narrow it with --config\n")
+	fprintf(tw, "  --expect <digest>\tSave the tools only if their digest is this one (pd1:<64 hex>); scan prints it as\n")
+	fprintf(tw, "  \t\"To accept <server>: mcpmoat pin --accept <server> --expect <digest>\". If the tools differ, pin prints\n")
+	fprintf(tw, "  \tthe diff, saves nothing and exits 2. Without it, pin trusts the tools the server returns now (a note on stderr)\n")
+	fprintf(tw, "  --config <file>\tRead only this file, like \"scan --config\"; skips auto-discovery\n")
+	fprintf(tw, "  --timeout <duration>\tTime limit for the server, a Go duration such as 10s or 1m30s (default %s)\n", inspect.DefaultTimeout)
+	_ = tw.Flush() // the write error is ignored on purpose, see fprintf
 	fprintf(w, "  A problem with a config file is an error (exit 2): it can hide a second server with the same name. Fix the file or use --config\n")
 	fprintf(w, "  pin changes only the entry of this server: it reads pins.json again just before it saves, and keeps the other entries.\n")
 	fprintf(w, "  A server that fails, times out, or that pin refuses to start is an error (exit 2) and pin changes nothing.\n")
-}
-
-// pinErrorf writes one error line on stderr, with the prefix "mcpmoat pin: ".
-// The caller must escape untrusted text in a.
-func (c *cli) pinErrorf(format string, a ...any) {
-	c.cmdErrorf("pin", format, a...)
 }
 
 // findPinServer finds the one server that has the name accept, exactly. It
@@ -258,13 +269,12 @@ func (c *cli) findPinServer(ctx context.Context, accept, configPath string) (dis
 	if !ok {
 		return discover.Server{}, false
 	}
-	if configPath != "" && loadFailed(res) {
-		c.printFileErrors("pin", res.Errors)
-		return discover.Server{}, false
-	}
 	if len(res.Errors) > 0 {
 		c.printFileErrors("pin", res.Errors)
-		c.pinErrorf("fix the config file or choose one with --config <file>")
+		// A --config file that did not load needs no hint: the error says it.
+		if configPath == "" || !loadFailed(res) {
+			c.cmdPrintf("pin", "fix the config file or choose one with --config <file>")
+		}
 		return discover.Server{}, false
 	}
 
@@ -273,7 +283,7 @@ func (c *cli) findPinServer(ctx context.Context, accept, configPath string) (dis
 		return matches[0], true
 	}
 	if len(matches) == 0 {
-		c.pinErrorf("unknown server %s", cutName(accept))
+		c.cmdPrintf("pin", "unknown server %s", cutName(accept))
 		return discover.Server{}, false
 	}
 	c.printAmbiguous(accept, matches)
@@ -296,7 +306,7 @@ func serversNamed(servers []discover.Server, name string) []discover.Server {
 // and lists where each one comes from, so the user can narrow it with --config.
 // The fields come from config files, so they are escaped and cut.
 func (c *cli) printAmbiguous(accept string, matches []discover.Server) {
-	c.pinErrorf("%d servers are named %s; narrow it with --config <file>:", len(matches), cutName(accept))
+	c.cmdPrintf("pin", "%d servers are named %s; narrow it with --config <file>:", len(matches), cutName(accept))
 	for _, s := range matches {
 		line := "  client " + cutName(string(s.Client)) +
 			", source " + termsafe.QuoteCut(s.Source, maxWarnPathRunes) +
