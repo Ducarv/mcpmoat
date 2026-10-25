@@ -1,0 +1,16 @@
+{
+  "mcpServers": {
+    "notes": {
+      "command": "npx",
+      "args": ["@example~corp/notes~mcp@1.2.3"]
+    },
+    "files": {
+      "command": "npx",
+      "args": ["-y", "@example~corp/files~mcp@latest"]
+    },
+    "remote": {
+      "type": "http",
+      "url": "http://mcp.example.invalid/mcp"
+    }
+  }
+}

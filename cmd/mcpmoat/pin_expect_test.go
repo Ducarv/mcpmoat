@@ -20,7 +20,6 @@ import (
 
 	"github.com/Ducarv/mcpmoat/internal/discover"
 	"github.com/Ducarv/mcpmoat/internal/inspect"
-	"github.com/Ducarv/mcpmoat/internal/inspect/inspecttest"
 	"github.com/Ducarv/mcpmoat/internal/pins"
 )
 
@@ -381,7 +380,7 @@ func TestScanAcceptHintAbsent(t *testing.T) {
 		{
 			name: "pinned server that was not inspected", pinFirst: true,
 			insp: func() inspect.Inspector {
-				return &inspecttest.Fake{Errors: map[string]error{"srv": errors.New("boom")}}
+				return failingFake("srv")
 			},
 			wantCode: exitFindings, wantRow: "MOAT-T2-004",
 		},

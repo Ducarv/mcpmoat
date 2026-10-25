@@ -69,18 +69,35 @@ func findingSeverity(set *rules.Set, id string) string {
 	return string(rule.Severity)
 }
 
-// hasFailingFinding reports whether any row has severity high or above, which
-// makes scan exit with code 1 (FR-16). A severity that mcpmoat does not know
-// counts as failing (fail closed).
-func hasFailingFinding(rows []report.FindingRow) bool {
-	high := rules.SeverityHigh.Rank()
+// hasFailingFinding reports whether any row has severity failOn or above,
+// which makes scan exit with code 1 (FR-16). A row severity that mcpmoat does
+// not know counts as failing at every threshold (fail closed). An invalid or
+// zero failOn has rank 0, so every finding fails (fail closed). runScan always
+// sets a valid failOn, so this case does not occur in a normal run.
+func hasFailingFinding(rows []report.FindingRow, failOn rules.Severity) bool {
+	limit := failOn.Rank()
 	for _, r := range rows {
 		rank := rules.Severity(r.Severity).Rank()
-		if rank == 0 || rank >= high {
+		if rank == 0 || rank >= limit {
 			return true
 		}
 	}
 	return false
+}
+
+// scanExitCode maps the result of a scan to its exit code (FR-16). execFailed
+// is true when the scan is incomplete (see reportScan). Exit code 2 wins over
+// 1: the result is incomplete, so "only findings" would claim more than scan
+// knows.
+func scanExitCode(execFailed bool, rows []report.FindingRow, failOn rules.Severity) int {
+	switch {
+	case execFailed:
+		return exitError
+	case hasFailingFinding(rows, failOn):
+		return exitFindings
+	default:
+		return exitOK
+	}
 }
 
 // addIgnored adds n to the count of the rule ID in dst and returns dst. It makes

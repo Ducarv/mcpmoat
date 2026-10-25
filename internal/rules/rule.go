@@ -23,7 +23,7 @@ func (s Severity) Valid() bool {
 }
 
 // Rank returns a number for ordering severities: low is 1 and critical is 4.
-// An unknown severity returns 0. The --fail-on flag (FR-16) will compare these numbers.
+// An unknown severity returns 0. The --fail-on flag of scan (FR-16) compares these numbers.
 func (s Severity) Rank() int {
 	switch s {
 	case SeverityLow:
