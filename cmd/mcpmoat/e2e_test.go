@@ -26,6 +26,7 @@ import (
 	"github.com/Ducarv/mcpmoat/internal/discover/discovertest"
 	"github.com/Ducarv/mcpmoat/internal/inspect/inspecttest"
 	"github.com/Ducarv/mcpmoat/internal/pins"
+	"github.com/Ducarv/mcpmoat/internal/report"
 	"github.com/Ducarv/mcpmoat/internal/rules"
 )
 
@@ -594,6 +595,67 @@ func TestE2EScanConfigFindings(t *testing.T) {
 				if slices.Contains(findingIDs(rows), id) {
 					t.Errorf("finding %s shows, but it is ignored\nstdout:\n%s", id, stdout)
 				}
+			}
+		})
+	}
+}
+
+// TestE2EScanJSON runs scan --json with the real binary. Stdout is one JSON
+// document, and --json changes neither stderr nor the exit code.
+func TestE2EScanJSON(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name         string
+		setup        func(t *testing.T) (home, work string)
+		wantCode     int
+		wantFindings bool
+	}{
+		{
+			name: "dangerous",
+			setup: func(t *testing.T) (string, string) {
+				return discovertest.CopyFixture(t, testdataPath("configs", "dangerous"))
+			},
+			wantCode:     exitFindings,
+			wantFindings: true,
+		},
+		{
+			name:     "benign",
+			setup:    func(t *testing.T) (string, string) { return benignHome(t, "benign-srv") },
+			wantCode: exitOK,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			home, work := tt.setup(t)
+
+			plainOut, plainErr, plainCode := runBin(t, home, work, "scan", "--no-connect")
+			stdout, stderr, code := runBin(t, home, work, "scan", "--no-connect", "--json")
+
+			if code != tt.wantCode || plainCode != tt.wantCode {
+				t.Errorf("exit codes: --json %d, plain %d, want %d\nstderr:\n%s", code, plainCode, tt.wantCode, stderr)
+			}
+			if stderr != plainErr {
+				t.Errorf("stderr with --json = %q, without = %q", stderr, plainErr)
+			}
+			assertContainsNone(t, "stdout", stdout, dangerousCanaries)
+			assertContainsNone(t, "stderr", stderr, dangerousCanaries)
+			assertContainsNone(t, "stdout", stdout, []string{pinEnvCanary})
+			if plainOut == stdout {
+				t.Errorf("--json stdout equals the table output:\n%s", stdout)
+			}
+
+			// decodeScanJSON checks: one document, schema_version, and the
+			// schema, which also rejects a null list.
+			doc := decodeScanJSON(t, stdout)
+			if doc.Mode != report.ModeNoConnect {
+				t.Errorf("mode = %q, want %q", doc.Mode, report.ModeNoConnect)
+			}
+			if len(doc.Servers) == 0 {
+				t.Error("servers is empty, want the servers of the fixture")
+			}
+			if (len(doc.Findings) > 0) != tt.wantFindings {
+				t.Errorf("got %d findings, want findings: %v", len(doc.Findings), tt.wantFindings)
 			}
 		})
 	}

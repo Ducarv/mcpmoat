@@ -126,7 +126,7 @@ func Cut(s string, n int) (string, bool) {
 }
 
 // needsQuote reports whether s starts with a double quote, holds invalid
-// UTF-8, or holds a rune for which needsEscape is true.
+// UTF-8, or holds a rune for which NeedsEscape is true.
 func needsQuote(s string) bool {
 	if strings.HasPrefix(s, `"`) {
 		return true
@@ -137,17 +137,17 @@ func needsQuote(s string) bool {
 		return true
 	}
 	for _, r := range s {
-		if needsEscape(r) {
+		if NeedsEscape(r) {
 			return true
 		}
 	}
 	return false
 }
 
-// needsEscape reports whether r is not visible, or can change how the text
+// NeedsEscape reports whether r is not visible, or can change how the text
 // around it looks: a rune that is not printable, or a rune for which
 // IsInvisible is true.
-func needsEscape(r rune) bool {
+func NeedsEscape(r rune) bool {
 	return !unicode.IsPrint(r) || IsInvisible(r)
 }
 

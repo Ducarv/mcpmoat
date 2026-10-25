@@ -33,6 +33,7 @@ func (c *cli) runScan(_ options, args []string) int {
 	// package prints nothing and the flags have no usage text.
 	fs.SetOutput(io.Discard)
 	noConnect := fs.Bool("no-connect", false, "")
+	jsonOut := fs.Bool("json", false, "")
 	timeout := fs.Duration("timeout", inspect.DefaultTimeout, "")
 	concurrency := fs.Int("concurrency", inspect.DefaultConcurrency, "")
 
@@ -118,7 +119,7 @@ func (c *cli) runScan(_ options, args []string) int {
 		fprintf(c.stderr, "mcpmoat scan: internal error: built-in typosquat list is invalid\n")
 		return exitError
 	}
-	setup := scanSetup{checks: configChecks{set: set, typo: typo}, connect: connect, failOn: failOn}
+	setup := scanSetup{checks: configChecks{set: set, typo: typo}, connect: connect, failOn: failOn, jsonOut: *jsonOut}
 
 	// The context ends when the process gets SIGINT, SIGTERM or SIGHUP (see
 	// main). scan starts stdio servers in their own session, so the terminal
@@ -136,6 +137,9 @@ type scanSetup struct {
 	// failOn is the --fail-on value: a finding at or above it gives exit
 	// code 1 (see scanExitCode).
 	failOn rules.Severity
+	// jsonOut is true with --json: scan writes one JSON document on stdout
+	// and none of the terminal tables.
+	jsonOut bool
 }
 
 // rulesNotAppliedNotice is the line that runScan prints on stderr when
@@ -292,23 +296,24 @@ func (c *cli) loadIgnore(wd string, ids []string) *scanIgnores {
 }
 
 // configErrorHint is the line that reportScan prints after the file
-// problems, when it printed the table. It is fixed text: it holds no path and
-// no config text.
+// problems, when it printed the report (the table or the --json document). It
+// is fixed text: it holds no path and no config text.
 const configErrorHint = "mcpmoat scan: a config file has a problem; " +
-	"the table can miss servers that the client loads"
+	"the report can miss servers that the client loads"
 
 // reportScan runs the config rules on the servers of res, with the ignore list
 // ignore. When setup.connect is not nil, it also inspects the servers and
 // checks their pins (see inspectAndPin). configPath is the --config value, or
-// empty. It prints the report on stdout (see writeScanReport), and the
-// file problems and warnings on stderr, and returns the exit code (see
-// scanExitCode; README.md#exit-codes is the contract, and the usage text in
-// cli.go summarises it). When the ignore list dropped at least one finding, it
-// prints one line on stderr after the report, with the rule IDs and their
-// counts (see printIgnored).
+// empty. It prints the report on stdout (see writeScanReport, or the JSON
+// document with --json), and the file problems and warnings on stderr, and
+// returns the exit code (see scanExitCode; README.md#exit-codes is the
+// contract, and the usage text in cli.go summarises it). When the ignore list
+// dropped at least one finding, it prints one line on stderr after the report,
+// with the rule IDs and their counts (see printIgnored).
 //
-// The pin findings are merged with the config findings before the table is
-// written, so one table holds them all and scanExitCode sees them all.
+// The pin findings are merged with the config findings before the report (the
+// table or the JSON document) is written, so the report holds them all and
+// scanExitCode sees them all.
 // New pins are saved after the report is printed, so a save error never hides
 // the report. The "pinned N tools" notices come after a successful save.
 //
@@ -342,7 +347,18 @@ func (c *cli) reportScan(ctx context.Context, res discover.Result, configPath st
 	}
 
 	configProblem := len(res.Errors) > 0
-	if err := c.writeScanReport(res.Servers, rows, pr, configPath, configProblem); err != nil {
+	var writeErr error
+	if setup.jsonOut {
+		mode := report.ModeNoConnect
+		if setup.connect != nil {
+			mode = report.ModeConnect
+		}
+		complete := !pinFailed && !configProblem
+		writeErr = c.writeScanJSON(mode, complete, res, rows, pr)
+	} else {
+		writeErr = c.writeScanReport(res.Servers, rows, pr, configPath, configProblem)
+	}
+	if writeErr != nil {
 		c.cmdPrintf("scan", "cannot write output")
 		// stderr can still work. The file problems are the reason for a
 		// failed scan, so the user must still see them. New pins are not

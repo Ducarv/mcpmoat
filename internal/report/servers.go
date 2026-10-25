@@ -191,14 +191,20 @@ func commandCell(s discover.Server) string {
 // Parts are joined with one space. Nothing is cut: the COMMAND/URL cell is
 // the last column, which is never cut.
 func formatCommand(command string, args discover.Args) string {
-	// Values gives the args as written. They go straight into RedactArgs and
-	// nowhere else, so only the redacted form reaches the cell. Args.String
-	// is not enough here: it joins the parts with a space, so an empty part
-	// would not show.
-	parts := discover.RedactArgs(append([]string{command}, args.Values()...))
-
+	parts := redactedArgv(command, args)
 	for i, p := range parts {
 		parts[i] = termsafe.QuoteIf(p, p == "" || strings.Contains(p, " "))
 	}
 	return strings.Join(parts, " ")
+}
+
+// redactedArgv returns the command line of a stdio server as a list of parts,
+// with the command first. The command and the args go through
+// [discover.RedactArgs] together, so every part with an unknown shape is
+// [discover.Mask]. Only this redacted form may reach a report.
+func redactedArgv(command string, args discover.Args) []string {
+	// Values gives the args as written. They go straight into RedactArgs and
+	// nowhere else. Args.String is not enough here: it joins the parts with a
+	// space, so an empty part would not show.
+	return discover.RedactArgs(append([]string{command}, args.Values()...))
 }
