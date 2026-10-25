@@ -31,9 +31,6 @@ jobs:
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: go.mod
-          # There is no go.sum yet, so key the cache on go.mod. Change this
-          # to go.sum when the first dependency is added.
-          cache-dependency-path: go.mod
 
       - name: Check formatting
         if: runner.os == 'Linux'
@@ -89,3 +86,90 @@ jobs:
         uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9.3.0
         with:
           version: v2.15.0
+
+  # Checks .goreleaser.yaml and builds a snapshot, so a broken release config
+  # fails here and not at tag time. It uses no secrets: a snapshot does not
+  # publish, so the tap token is not needed.
+  release-check:
+    name: release-check
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - name: Check out the code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # GoReleaser reads the git tags to compute the version.
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+
+      # goreleaser-action verifies the GoReleaser signature only when cosign
+      # is on PATH. Without it, it checks only the checksum.
+      - name: Install cosign
+        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+
+      - name: Check the GoReleaser config
+        uses: goreleaser/goreleaser-action@a4f02ab5355a589de60d917a659ce617ed19b3de # v7.3.0
+        with:
+          distribution: goreleaser
+          # Dependabot does not bump this version string. Keep it equal to
+          # the version in release.yml.
+          version: v2.19.0
+          args: check
+
+      - name: Build a snapshot
+        uses: goreleaser/goreleaser-action@a4f02ab5355a589de60d917a659ce617ed19b3de # v7.3.0
+        with:
+          distribution: goreleaser
+          # Keep equal to the version in release.yml (see above).
+          version: v2.19.0
+          args: release --snapshot --clean
+
+      - name: Check the snapshot artifacts
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          count=$(find dist -maxdepth 1 -name '*.tar.gz' | wc -l)
+          if [ "$count" -ne 4 ]; then
+            echo "expected 4 archives in dist/, found $count:"
+            ls -l dist
+            exit 1
+          fi
+
+          if ! (cd dist && sha256sum -c checksums.txt); then
+            echo "dist/checksums.txt does not match the archives"
+            exit 1
+          fi
+
+          bin=$(jq -r '.[] | select(.type == "Binary" and .goos == "linux" and .goarch == "amd64") | .path' dist/artifacts.json)
+          if [ -z "$bin" ] || [ ! -f "$bin" ]; then
+            echo "no linux amd64 binary found in dist/artifacts.json (got '$bin')"
+            exit 1
+          fi
+
+          info=$(file "$bin")
+          echo "$info"
+          case "$info" in
+            *"statically linked"*) ;;
+            *)
+              echo "$bin is not statically linked"
+              exit 1
+              ;;
+          esac
+
+          out=$("$bin" version)
+          echo "$out"
+          case "$out" in
+            "mcpmoat v"*) ;;
+            *)
+              echo "version output does not start with 'mcpmoat v'"
+              exit 1
+              ;;
+          esac
