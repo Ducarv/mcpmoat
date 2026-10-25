@@ -180,19 +180,24 @@ func TestSDKInspectKillsProcessGroup(t *testing.T) {
 // Inspect must stop the child, which closes its stdin, before it closes the
 // MCP session, because the close of the session waits for those writes.
 // With the wrong order, Inspect returns only when ctx ends.
+//
+// The test checks ctx, not a wall-clock bound: a loaded CI runner with -race
+// can take 20s or more for the pings, while the wrong order always waits for
+// the end of ctx.
 func TestSDKInspectFloodWithoutReads(t *testing.T) {
 	t.Parallel()
 
-	// Build the fixture before the timer and the ctx start, so a cold
-	// build cache does not count against the bound.
+	// Build the fixture before ctx starts, so a cold build cache does not
+	// count against it.
 	server := sdkBenign(t, "-mode", "flood-list")
 	inspector := sdkNew(t, inspect.SDKOptions{})
-	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
+	ctx, cancel := context.WithTimeout(t.Context(), 60*time.Second)
 	defer cancel()
 
 	start := time.Now()
 	res, err := inspector.Inspect(ctx, server)
 	elapsed := time.Since(start)
+	ctxErr := ctx.Err()
 
 	if err != nil {
 		t.Fatalf("Inspect() error = %v, want nil", err)
@@ -200,11 +205,8 @@ func TestSDKInspectFloodWithoutReads(t *testing.T) {
 	if res.Tools == nil || len(res.Tools) != 0 {
 		t.Errorf("Inspect() Tools = %#v, want an empty, non-nil slice", res.Tools)
 	}
-	// The child ignores the close of its stdin, so the stop takes one
-	// stopGrace until the group kill. The bound leaves room for a slow machine,
-	// but stays far below the 30s of ctx.
-	if limit := 3*stopGrace + 5*time.Second; elapsed > limit {
-		t.Errorf("Inspect took %v, want at most %v", elapsed, limit)
+	if ctxErr != nil {
+		t.Errorf("Inspect returned after %v, when ctx had ended (%v); want a return before the end of ctx", elapsed, ctxErr)
 	}
 	t.Logf("Inspect returned after %v", elapsed)
 }
