@@ -302,8 +302,8 @@ of a new tool (`newToolDiff`, a diff from empty text, so every content line is a
 on a rendered form of the tool: one item for each line (name, title, description, annotations,
 `_meta`, icons, inputSchema, outputSchema, the last five as indented JSON). The annotations,
 `_meta` and icons come before the schemas, so a large unchanged schema cannot push a change in them
-out of a cut diff. A large `_meta` change can still push a schema change out (#162). A line of more than about 200 runes is
-wrapped, so a change in a long line still shows. The diff trims the lines that both texts share at
+out of a cut diff. A large `_meta` change can still push a schema change out (#162). A line of
+more than about 200 runes is wrapped, so a change in a long line still shows. The diff trims the lines that both texts share at
 the start and at the end, keeps 3 lines of context, and only then cuts the rest to 64 KiB and 2000
 lines. When the cut applies, the diff ends with a marker line and `Change.Truncated` is true, so
 `scan` and `pin` can warn the user. The labels are `pinned` and `current`. A changed or new tool
@@ -416,7 +416,8 @@ a changed tool (a rug pull). `scan` writes the pins of a server on its first run
   never holds args, a URL, env, headers or a command from your configs.
 - Echo residual risk: a server can echo an env value that you configured into a tool description.
   That text then lands in the canonical text in `pins.json`. mcpmoat cannot tell such a value from
-  other text. The file has mode `0600`, so treat it as private.
+  other text. The same is true for a URL from the server, such as a signed icon `src` with a token
+  in it. The file and the pin diff can hold it. The file has mode `0600`, so treat it as private.
 - Read, change and write: `Load` reads the file through `safefile` and fails closed. A bad file is
   an error and never an empty store, because an empty store would hide a rug pull. `Set` checks one
   server and refuses it on its own, with a size cap of 2 MiB for each server (compact JSON), so the

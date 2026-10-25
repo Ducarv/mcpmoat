@@ -34,10 +34,10 @@ type renderedTool struct {
 	Title        string          `json:"title"`
 	Description  string          `json:"description"`
 	Annotations  json.RawMessage `json:"annotations"`
-	InputSchema  json.RawMessage `json:"inputSchema"`
-	OutputSchema json.RawMessage `json:"outputSchema"`
 	Meta         json.RawMessage `json:"_meta"`
 	Icons        json.RawMessage `json:"icons"`
+	InputSchema  json.RawMessage `json:"inputSchema"`
+	OutputSchema json.RawMessage `json:"outputSchema"`
 }
 
 // render turns the canonical form of a tool (the output of Canonical, one line

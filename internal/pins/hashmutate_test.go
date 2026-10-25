@@ -101,14 +101,14 @@ func hashHintMutations(tool inspect.Tool) []hashMutation {
 }
 
 // hashSchemaFieldMutations removes each schema, _meta and icons, or, when the
-// field is absent, sets it to each of its absent values, and adds the changes
-// of hashSchemaMutations.
+// field is absent, sets it to each value in whenAbsent, and adds the changes of
+// hashSchemaMutations.
 func hashSchemaFieldMutations(t testing.TB, tool inspect.Tool) []hashMutation {
 	t.Helper()
 	fields := []struct {
-		name   string
-		ptr    func(*inspect.Tool) *[]byte
-		absent []string // the values that replace an absent field
+		name       string
+		ptr        func(*inspect.Tool) *[]byte
+		whenAbsent []string // the values that replace an absent field
 	}{
 		// json.RawMessage is defined as []byte, so Go allows the pointer conversion.
 		{"inputSchema", func(c *inspect.Tool) *[]byte { return (*[]byte)(&c.InputSchema) }, []string{`{}`}},
@@ -121,7 +121,7 @@ func hashSchemaFieldMutations(t testing.TB, tool inspect.Tool) []hashMutation {
 		raw := *f.ptr(&tool)
 		if raw == nil {
 			// An absent field and an empty value such as {} must have different hashes.
-			for _, v := range f.absent {
+			for _, v := range f.whenAbsent {
 				muts = append(muts, hashMutated(tool, f.name+": absent to "+v, func(c *inspect.Tool) { *f.ptr(c) = []byte(v) }))
 			}
 			continue

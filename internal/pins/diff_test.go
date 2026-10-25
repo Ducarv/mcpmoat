@@ -598,8 +598,8 @@ func TestUnifiedDiffMetaAndIcons(t *testing.T) {
 // when the description changes too and a large unchanged input schema follows.
 // annotations, _meta and icons are rendered before the schemas. So the
 // unchanged schema is a shared tail that the diff trims, and it cannot push
-// the _meta change into a cut part. With _meta after the schemas, the window would hold the
-// whole schema and the cap would hide the _meta change.
+// the _meta change into a cut part. With _meta after the schemas, the window
+// would hold the whole schema and the cap would hide the _meta change.
 func TestUnifiedDiffMetaSurvivesCut(t *testing.T) {
 	t.Parallel()
 	var props strings.Builder
