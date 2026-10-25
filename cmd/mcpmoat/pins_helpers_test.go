@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -52,6 +53,15 @@ func newPinEnv(t *testing.T, servers map[string]any) *pinEnv {
 // pinsPath is the path of pins.json: XDG_CONFIG_HOME/mcpmoat/pins.json.
 func (e *pinEnv) pinsPath() string {
 	return filepath.Join(e.xdg, "mcpmoat", "pins.json")
+}
+
+// assertNoPinsFile fails the test if pins.json exists. after names the run,
+// for example "a snapshot failure".
+func (e *pinEnv) assertNoPinsFile(t *testing.T, after string) {
+	t.Helper()
+	if _, err := os.Stat(e.pinsPath()); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("pins.json exists after %s (stat error = %v), want nothing stored", after, err)
+	}
 }
 
 // readOnlyPinsDir makes the folder of pins.json read-only, so that a save
@@ -169,6 +179,19 @@ func mkTool(name, description string) inspect.Tool {
 		Description: description,
 		InputSchema: json.RawMessage(`{"type":"object"}`),
 	}
+}
+
+// metaTool returns a tool like mkTool(name, "Add.") with the raw JSON _meta and
+// icons given. An empty string means the field is not set.
+func metaTool(name, meta, icons string) inspect.Tool {
+	t := mkTool(name, "Add.")
+	if meta != "" {
+		t.Meta = json.RawMessage(meta)
+	}
+	if icons != "" {
+		t.Icons = json.RawMessage(icons)
+	}
+	return t
 }
 
 // fakeServers returns a fake inspector that gives each server name its tools.

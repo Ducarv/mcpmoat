@@ -287,7 +287,8 @@ The target flow is `discover -> inspect -> rules -> pins -> report`. The `discov
 
 `pins.Hash` gives the pin hash of one `inspect.Tool` (FR-11, threat T2).
 
-- Input: the six `inspect.Tool` fields, in a canonical form that uses RFC 8785 (JCS), through the
+- Input: the eight `inspect.Tool` fields (name, title, description, annotations, inputSchema,
+  outputSchema, `_meta` and icons), in a canonical form that uses RFC 8785 (JCS), through the
   standard library `encoding/json/jsontext`.
 - Output: `sha256-v1:<hex>`. The prefix is `HashVersion`.
 - The store keeps the canonical text next to the hash. A later run shows a diff of that text.
@@ -299,20 +300,24 @@ The target flow is `discover -> inspect -> rules -> pins -> report`. The `discov
 The diff of a changed tool (`unifiedDiff` in `internal/pins/diff.go`, with `go-udiff`) and the diff
 of a new tool (`newToolDiff`, a diff from empty text, so every content line is an added line) work
 on a rendered form of the tool: one item for each line (name, title, description, annotations,
-inputSchema, outputSchema, the last three as indented JSON). A line of more than about 200 runes is
-wrapped, so a change in a long line still shows. The diff trims the lines that both texts share at
-the start and at the end, keeps 3 lines of context, and only then cuts the rest to 64 KiB and 2000
-lines. When the cut applies, the diff ends with a marker line and `Change.Truncated` is true, so
-`scan` and `pin` can warn the user. The labels are `pinned` and `current`. A changed or new tool
-always has diff text, or a fixed note when the diff cannot be made or the change is not visible in
-the rendered text. Server text is raw in the diff. The report layer escapes it (see [Where untrusted
-text is escaped](#where-untrusted-text-is-escaped)).
+`_meta`, icons, inputSchema, outputSchema, the last five as indented JSON). The annotations,
+`_meta` and icons come before the schemas, so a large unchanged schema cannot push a change in them
+out of a cut diff. A large `_meta` change, or a large `_meta` or icons value in a new tool, can
+still push the schemas out (#162). A line of more than about 200 runes is wrapped, so a change in a
+long line still shows. The diff trims the lines that both texts share at the start and at the end,
+keeps 3 lines of context, and only then cuts the rest to 64 KiB and 2000 lines. When the cut
+applies, the diff ends with a marker line and `Change.Truncated` is true, so `scan` and `pin` can
+warn the user. The labels are `pinned` and `current`. A changed or new tool always has diff text, or
+a fixed note when the diff cannot be made or the change is not visible in the rendered text. Server
+text is raw in the diff. The report layer escapes it (see [Where untrusted text is
+escaped](#where-untrusted-text-is-escaped)).
 
 The doc comments own the rules. `Canonical` owns the shape, null handling, errors, no normalisation
 and the known limits. `HashVersion` owns when the version changes and what the store does with a
 stored hash of another version. Read them with `go doc ./internal/pins Canonical` and
-`go doc ./internal/pins HashVersion`. The accepted limits are requirements in
-[PRD FR-11](PRD.md#64-pins-rug-pull-detection).
+`go doc ./internal/pins HashVersion`. The known limits, also those of `_meta` and `icons`, are
+requirements in [PRD FR-11](PRD.md#64-pins-rug-pull-detection). Logs and errors never print a
+`_meta` value.
 
 ## Tool set digest
 
@@ -408,7 +413,8 @@ a changed tool (a rug pull). `scan` writes the pins of a server on its first run
   never holds args, a URL, env, headers or a command from your configs.
 - Echo residual risk: a server can echo an env value that you configured into a tool description.
   That text then lands in the canonical text in `pins.json`. mcpmoat cannot tell such a value from
-  other text. The file has mode `0600`, so treat it as private.
+  other text. The same is true for a URL from the server, such as a signed icon `src` with a token
+  in it. The file and the pin diff can hold it. The file has mode `0600`, so treat it as private.
 - Read, change and write: `Load` reads the file through `safefile` and fails closed. A bad file is
   an error and never an empty store, because an empty store would hide a rug pull. `Set` checks one
   server and refuses it on its own, with a size cap of 2 MiB for each server (compact JSON), so the

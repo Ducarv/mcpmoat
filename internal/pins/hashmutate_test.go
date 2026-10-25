@@ -31,7 +31,7 @@ func hashMutations(t testing.TB, tool inspect.Tool) []hashMutation {
 	t.Helper()
 	muts := hashTextMutations(tool)
 	muts = append(muts, hashHintMutations(tool)...)
-	return append(muts, hashSchemaFieldMutations(t, tool)...)
+	return append(muts, hashJSONFieldMutations(t, tool)...)
 }
 
 // hashMutated returns a copy of tool (see cloneTool), changed by change.
@@ -100,29 +100,35 @@ func hashHintMutations(tool inspect.Tool) []hashMutation {
 	return muts
 }
 
-// hashSchemaFieldMutations removes each schema, or adds {} when it is absent,
-// and adds the changes of hashSchemaMutations.
-func hashSchemaFieldMutations(t testing.TB, tool inspect.Tool) []hashMutation {
+// hashJSONFieldMutations removes each schema, _meta and icons, or, when the
+// field is absent, sets it to each value in whenAbsent, and adds the changes of
+// hashSchemaMutations.
+func hashJSONFieldMutations(t testing.TB, tool inspect.Tool) []hashMutation {
 	t.Helper()
-	schemas := []struct {
-		field string
-		ptr   func(*inspect.Tool) *[]byte
+	fields := []struct {
+		name       string
+		ptr        func(*inspect.Tool) *[]byte
+		whenAbsent []string // the values that replace an absent field
 	}{
 		// json.RawMessage is defined as []byte, so Go allows the pointer conversion.
-		{"inputSchema", func(c *inspect.Tool) *[]byte { return (*[]byte)(&c.InputSchema) }},
-		{"outputSchema", func(c *inspect.Tool) *[]byte { return (*[]byte)(&c.OutputSchema) }},
+		{"inputSchema", func(c *inspect.Tool) *[]byte { return (*[]byte)(&c.InputSchema) }, []string{`{}`}},
+		{"outputSchema", func(c *inspect.Tool) *[]byte { return (*[]byte)(&c.OutputSchema) }, []string{`{}`}},
+		{"_meta", func(c *inspect.Tool) *[]byte { return (*[]byte)(&c.Meta) }, []string{`{}`}},
+		{"icons", func(c *inspect.Tool) *[]byte { return (*[]byte)(&c.Icons) }, []string{`[]`, `[{"src":"x"}]`}},
 	}
 	var muts []hashMutation
-	for _, sf := range schemas {
-		raw := *sf.ptr(&tool)
+	for _, f := range fields {
+		raw := *f.ptr(&tool)
 		if raw == nil {
-			// No schema and the empty schema {} must have different hashes.
-			muts = append(muts, hashMutated(tool, sf.field+": absent to {}", func(c *inspect.Tool) { *sf.ptr(c) = []byte(`{}`) }))
+			// An absent field and an empty value such as {} must have different hashes.
+			for _, v := range f.whenAbsent {
+				muts = append(muts, hashMutated(tool, f.name+": absent to "+v, func(c *inspect.Tool) { *f.ptr(c) = []byte(v) }))
+			}
 			continue
 		}
-		muts = append(muts, hashMutated(tool, sf.field+": removed", func(c *inspect.Tool) { *sf.ptr(c) = nil }))
+		muts = append(muts, hashMutated(tool, f.name+": removed", func(c *inspect.Tool) { *f.ptr(c) = nil }))
 		for _, sm := range hashSchemaMutations(t, raw) {
-			muts = append(muts, hashMutated(tool, sf.field+": "+sm.name, func(c *inspect.Tool) { *sf.ptr(c) = sm.schema }))
+			muts = append(muts, hashMutated(tool, f.name+": "+sm.name, func(c *inspect.Tool) { *f.ptr(c) = sm.schema }))
 		}
 	}
 	return muts

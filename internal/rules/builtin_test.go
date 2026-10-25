@@ -284,7 +284,7 @@ func TestBuiltinRulesASCII(t *testing.T) {
 }
 
 // schemaWithDescription returns a schema with one property whose description
-// is text. It encodes the schema as inspect.marshalSchema does: encoding/json
+// is text. It encodes the schema as inspect.marshalJSON does: encoding/json
 // with no HTML escapes and no final newline.
 func schemaWithDescription(t *testing.T, text string) string {
 	t.Helper()

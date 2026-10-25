@@ -18,6 +18,10 @@ const diffSchema = `{"type":"object","properties":{"path":{"type":"string"}},"re
 const emptyAnnotations = "annotations:\n  {\n    \"destructiveHint\": null,\n    \"idempotentHint\": null,\n" +
 	"    \"openWorldHint\": null,\n    \"readOnlyHint\": null,\n    \"title\": \"\"\n  }\n"
 
+// emptyMetaIcons is the rendered _meta and icons of a tool that has none. They
+// come after annotations and before the schemas.
+const emptyMetaIcons = "_meta:\n  null\nicons:\n  null\n"
+
 // diffTool returns a tool with a name, a title, the given description and a
 // small input schema.
 func diffTool(description string) inspect.Tool {
@@ -66,7 +70,7 @@ func TestRender(t *testing.T) {
 			want: "name: read_file\n" +
 				"title: Read file\n" +
 				"description: Read a file.\n" +
-				emptyAnnotations +
+				emptyAnnotations + emptyMetaIcons +
 				"inputSchema:\n" +
 				"  {\n" +
 				"    \"properties\": {\n" +
@@ -81,31 +85,72 @@ func TestRender(t *testing.T) {
 		{
 			name: "absent fields",
 			tool: inspect.Tool{Name: "t"},
-			want: "name: t\ntitle: \ndescription: \n" + emptyAnnotations + "inputSchema:\n  null\noutputSchema:\n  null\n",
+			want: "name: t\ntitle: \ndescription: \n" + emptyAnnotations + emptyMetaIcons + "inputSchema:\n  null\noutputSchema:\n  null\n",
 		},
 		{
 			name: "empty object schema stays on one line",
 			tool: inspect.Tool{Name: "t", InputSchema: []byte(`{}`)},
-			want: "name: t\ntitle: \ndescription: \n" + emptyAnnotations + "inputSchema:\n  {}\noutputSchema:\n  null\n",
+			want: "name: t\ntitle: \ndescription: \n" + emptyAnnotations + emptyMetaIcons + "inputSchema:\n  {}\noutputSchema:\n  null\n",
 		},
 		{
 			name: "every line of a multi-line description has the prefix",
 			tool: inspect.Tool{Name: "t", Description: "one\ntwo\n\nfour"},
 			want: "name: t\ntitle: \n" +
 				"description: one\ndescription: two\ndescription: \ndescription: four\n" +
-				emptyAnnotations + "inputSchema:\n  null\noutputSchema:\n  null\n",
+				emptyAnnotations + emptyMetaIcons + "inputSchema:\n  null\noutputSchema:\n  null\n",
 		},
 		{
 			name: "name and title with line breaks get the prefix on every line",
 			tool: inspect.Tool{Name: "a\nb", Title: "c\nd"},
 			want: "name: a\nname: b\ntitle: c\ntitle: d\ndescription: \n" +
-				emptyAnnotations + "inputSchema:\n  null\noutputSchema:\n  null\n",
+				emptyAnnotations + emptyMetaIcons + "inputSchema:\n  null\noutputSchema:\n  null\n",
 		},
 		{
 			name: "text is not escaped or normalised",
 			tool: inspect.Tool{Name: "t", Description: "a\u200bb <&> \x1b[31m"},
 			want: "name: t\ntitle: \ndescription: a\u200bb <&> \x1b[31m\n" +
-				emptyAnnotations + "inputSchema:\n  null\noutputSchema:\n  null\n",
+				emptyAnnotations + emptyMetaIcons + "inputSchema:\n  null\noutputSchema:\n  null\n",
+		},
+		{
+			name: "_meta set, keys sorted at every level",
+			tool: inspect.Tool{
+				Name: "t",
+				Meta: []byte(`{"ui":{"resourceUri":"ui://x/y","a":1},"anthropic/z":true}`),
+			},
+			want: "name: t\ntitle: \ndescription: \n" + emptyAnnotations +
+				"_meta:\n" +
+				"  {\n" +
+				"    \"anthropic/z\": true,\n" +
+				"    \"ui\": {\n" +
+				"      \"a\": 1,\n" +
+				"      \"resourceUri\": \"ui://x/y\"\n" +
+				"    }\n" +
+				"  }\n" +
+				"icons:\n  null\n" +
+				"inputSchema:\n  null\noutputSchema:\n  null\n",
+		},
+		{
+			name: "icons set, array of two icons",
+			tool: inspect.Tool{
+				Name:  "t",
+				Icons: []byte(`[{"src":"https://e.example/a.png","mimeType":"image/png"},{"src":"https://e.example/b.svg","sizes":["any"]}]`),
+			},
+			want: "name: t\ntitle: \ndescription: \n" + emptyAnnotations +
+				"_meta:\n  null\n" +
+				"icons:\n" +
+				"  [\n" +
+				"    {\n" +
+				"      \"mimeType\": \"image/png\",\n" +
+				"      \"src\": \"https://e.example/a.png\"\n" +
+				"    },\n" +
+				"    {\n" +
+				"      \"sizes\": [\n" +
+				"        \"any\"\n" +
+				"      ],\n" +
+				"      \"src\": \"https://e.example/b.svg\"\n" +
+				"    }\n" +
+				"  ]\n" +
+				"inputSchema:\n  null\noutputSchema:\n  null\n",
 		},
 	}
 	for _, tt := range tests {
@@ -474,6 +519,128 @@ func TestUnifiedDiffHunkLineNumbers(t *testing.T) {
 	}
 	if !strings.Contains(got, "-description: row-2500\n") {
 		t.Errorf("diff does not show the change:\n%s", got)
+	}
+}
+
+// TestUnifiedDiffMetaAndIcons checks that a change that only touches _meta or
+// icons shows the old and the new value line in the diff, and nothing else. The
+// schema label may show as context, but not a line of the schema body.
+func TestUnifiedDiffMetaAndIcons(t *testing.T) {
+	t.Parallel()
+	withMeta := func(meta string) inspect.Tool {
+		tool := diffTool("d")
+		tool.Meta = []byte(meta)
+		return tool
+	}
+	withIcons := func(icons string) inspect.Tool {
+		tool := diffTool("d")
+		tool.Icons = []byte(icons)
+		return tool
+	}
+	tests := []struct {
+		name        string
+		oldTool     inspect.Tool
+		newTool     inspect.Tool
+		wantIn      []string
+		wantContext string
+	}{
+		{
+			name:        "ui resourceUri in _meta",
+			oldTool:     withMeta(`{"ui":{"resourceUri":"ui://good/app"}}`),
+			newTool:     withMeta(`{"ui":{"resourceUri":"ui://evil/app"}}`),
+			wantIn:      []string{"-      \"resourceUri\": \"ui://good/app\"\n", "+      \"resourceUri\": \"ui://evil/app\"\n"},
+			wantContext: " _meta:\n",
+		},
+		{
+			name:        "_meta added",
+			oldTool:     diffTool("d"),
+			newTool:     withMeta(`{"ui":{"resourceUri":"ui://evil/app"}}`),
+			wantIn:      []string{"-  null\n", "+      \"resourceUri\": \"ui://evil/app\"\n"},
+			wantContext: " _meta:\n",
+		},
+		{
+			name:        "icon src",
+			oldTool:     withIcons(`[{"src":"https://good.example/a.png"}]`),
+			newTool:     withIcons(`[{"src":"https://evil.example/a.png"}]`),
+			wantIn:      []string{"-      \"src\": \"https://good.example/a.png\"\n", "+      \"src\": \"https://evil.example/a.png\"\n"},
+			wantContext: " icons:\n",
+		},
+		{
+			name:        "icons added",
+			oldTool:     diffTool("d"),
+			newTool:     withIcons(`[{"src":"https://evil.example/a.png"}]`),
+			wantIn:      []string{"-  null\n", "+      \"src\": \"https://evil.example/a.png\"\n"},
+			wantContext: " icons:\n",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got := mustDiff(t, tt.oldTool, tt.newTool)
+			if got == "" {
+				t.Fatal("unifiedDiff() = empty, want a changed line")
+			}
+			for _, want := range append([]string{tt.wantContext}, tt.wantIn...) {
+				if !strings.Contains(got, want) {
+					t.Errorf("diff lacks %q:\n%s", want, got)
+				}
+			}
+			for _, absent := range []string{"description", `"required"`} {
+				if strings.Contains(got, absent) {
+					t.Errorf("diff has unchanged text %q:\n%s", absent, got)
+				}
+			}
+		})
+	}
+}
+
+// TestUnifiedDiffMetaSurvivesCut checks that a change in _meta is in the diff
+// when the description changes too and a large unchanged input schema follows.
+// annotations, _meta and icons are rendered before the schemas. So the
+// unchanged schema is a shared tail that the diff trims, and it cannot push
+// the _meta change into a cut part. With _meta after the schemas, the window
+// would hold the whole schema and the cap would hide the _meta change.
+func TestUnifiedDiffMetaSurvivesCut(t *testing.T) {
+	t.Parallel()
+	var props strings.Builder
+	for i := range 3000 {
+		if i > 0 {
+			props.WriteByte(',')
+		}
+		fmt.Fprintf(&props, `"p%04d":{"type":"string"}`, i)
+	}
+	schema := `{"type":"object","properties":{` + props.String() + `}}`
+
+	build := func(description, meta string) inspect.Tool {
+		return inspect.Tool{
+			Name:        "read_file",
+			Description: description,
+			Meta:        []byte(meta),
+			InputSchema: []byte(schema),
+		}
+	}
+	oldTool := build("old text", `{"ui":{"resourceUri":"ui://good/app"}}`)
+	newTool := build("new text", `{"ui":{"resourceUri":"ui://evil/app"}}`)
+
+	got, truncated, err := unifiedDiff(mustCanonical(t, oldTool), mustCanonical(t, newTool))
+	if err != nil {
+		t.Fatalf("unifiedDiff() error = %v, want nil", err)
+	}
+	if truncated {
+		t.Error("unifiedDiff() truncated = true, want false: the unchanged schema is trimmed")
+	}
+	if len(got) > maxRenderedBytes/10 {
+		t.Errorf("diff has %d bytes, want a small diff without the unchanged schema", len(got))
+	}
+	for _, want := range []string{
+		"-description: old text\n",
+		"+description: new text\n",
+		"-      \"resourceUri\": \"ui://good/app\"\n",
+		"+      \"resourceUri\": \"ui://evil/app\"\n",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("cut diff lacks %q", want)
+		}
 	}
 }
 

@@ -41,10 +41,13 @@ type hashFixtureFile struct {
 		Name        string `json:"name"`
 		Title       string `json:"title"`
 		Description string `json:"description"`
-		// A jsontext.Value keeps the raw schema bytes exactly as in the file
-		// (spaces and number forms included). An absent schema stays nil.
+		// A jsontext.Value keeps the raw JSON bytes (schemas, _meta and icons)
+		// exactly as in the file, spaces and number forms included. An absent
+		// value stays nil.
 		InputSchema  jsontext.Value          `json:"inputSchema"`
 		OutputSchema jsontext.Value          `json:"outputSchema"`
+		Meta         jsontext.Value          `json:"_meta"`
+		Icons        jsontext.Value          `json:"icons"`
 		Annotations  *hashFixtureAnnotations `json:"annotations"`
 	} `json:"tool"`
 }
@@ -85,6 +88,8 @@ func loadHashFixtures(t testing.TB) []hashFixture {
 			Description:  e.Tool.Description,
 			InputSchema:  []byte(e.Tool.InputSchema),
 			OutputSchema: []byte(e.Tool.OutputSchema),
+			Meta:         []byte(e.Tool.Meta),
+			Icons:        []byte(e.Tool.Icons),
 		}
 		if e.Tool.Annotations != nil {
 			ann := inspect.ToolAnnotations(*e.Tool.Annotations)
@@ -103,9 +108,10 @@ func loadHashFixtures(t testing.TB) []hashFixture {
 // "fixture<TAB>hash<TAB>quoted canonical form", with the canonical form quoted
 // by strconv.QuoteToASCII so that invisible characters stay visible.
 //
-// A change in golden.txt means that the hash algorithm changed: every stored
-// pin then gets a different hash. That needs a new HashVersion (see hash.go).
-// Review the diff of golden.txt with care before you accept it with -update.
+// A change in golden.txt means that the hash form changed: every stored pin
+// then gets a different hash. After the first release, bump HashVersion when
+// the form changes (see hash.go). Review the diff of golden.txt with care
+// before you accept it with -update.
 func TestHashGolden(t *testing.T) {
 	t.Parallel()
 	var got bytes.Buffer
@@ -136,7 +142,7 @@ func TestHashGolden(t *testing.T) {
 		}
 	}
 	if !bytes.Equal(got.Bytes(), want) {
-		t.Errorf("hashes differ from %s. A change needs a new HashVersion; run the test with -update and review the diff\n--- got ---\n%s\n--- want ---\n%s",
+		t.Errorf("hashes differ from %s. After the first release, bump HashVersion when the form changes; run the test with -update and review the diff\n--- got ---\n%s\n--- want ---\n%s",
 			hashGoldenPath, got.Bytes(), want)
 	}
 }
