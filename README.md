@@ -37,7 +37,7 @@ SUMMARY
   github (claude-code, global): ok, 12 tools, 0 findings
   files (cursor, project:/work/app (untrusted)): ok, 4 tools, 2 findings
     warning: cleartext-secrets: secrets go over plain http to a host that is not loopback: header X-Api-Key
-  search (codex, global): timeout (...), 0 findings
+  search (codex, global): timeout, 0 findings (...)
 
 FINDINGS
 HIGH (1)
@@ -56,8 +56,8 @@ MEDIUM (1)
 
 - **Summary:** the status of a server is `ok`, `timeout`, `failed` or `not inspected`. A server
   that `--no-connect` skipped, or that `scan` refused to start (an untrusted or turned-off server),
-  is `not inspected`. A server that failed or timed out shows its reason in brackets (shortened
-  as `(...)` above). A server with status `ok` also shows its tool count. The connection warnings
+  is `not inspected`. A server that failed or timed out shows its reason in brackets at the end of
+  its line (shortened as `(...)` above). A server with status `ok` also shows its tool count. The connection warnings
   of a server show under its line. They hold header keys only, never values.
 - **Findings:** each finding has the rule ID and title, the server with its client and scope (so two
   servers with the same name in two configs differ), where it matched (the field and key, or the

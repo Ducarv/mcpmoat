@@ -224,27 +224,34 @@ func TestPinOutcomesRemediation(t *testing.T) {
 		want [][2]string
 		// hint is true when scan prints a "To accept" line for the server.
 		hint bool
+		// scanMade is true when scan makes the one row itself. It is about
+		// the whole server, so it has the server-level risk text.
+		scanMade bool
 	}{
 		{
 			name:     "listed twice",
 			outcomes: []inspect.Outcome{okWith(srv, tools), okWith(srv, tools)},
 			want:     [][2]string{{"MOAT-T2-004", "Remove the duplicate entry of this server from the config file, then run mcpmoat scan again."}},
+			scanMade: true,
 		},
 		{
 			name:     "relative config path",
 			outcomes: []inspect.Outcome{okWith(relative, tools)},
 			want:     [][2]string{{"MOAT-T2-004", "Run mcpmoat scan again with an absolute --config path, or from a working directory that mcpmoat can read."}},
+			scanMade: true,
 		},
 		{
 			name:      "pinned server not inspected",
 			pinBefore: true,
 			outcomes:  []inspect.Outcome{failed},
 			want:      [][2]string{{"MOAT-T2-004", "Find out why the server could not be inspected (see its status in the summary), fix it, then run mcpmoat scan again."}},
+			scanMade:  true,
 		},
 		{
 			name:     "tools cannot be pinned",
 			outcomes: []inspect.Outcome{okWith(srv, dup)},
 			want:     [][2]string{{"MOAT-T2-004", notPinnable}},
+			scanMade: true,
 		},
 		{
 			name:      "row from pins.Compare for tools that cannot be pinned",
@@ -289,6 +296,9 @@ func TestPinOutcomesRemediation(t *testing.T) {
 			}
 			if !slices.Equal(got, tt.want) {
 				t.Errorf("rows (rule ID, Fix) =\n%q\nwant\n%q", got, tt.want)
+			}
+			if tt.scanMade && (len(pr.rows) != 1 || pr.rows[0].Risk != riskServerUnverified) {
+				t.Errorf("rows = %+v, want one row with the risk %q", pr.rows, riskServerUnverified)
 			}
 			if gotHint := len(pr.hints) > 0; gotHint != tt.hint {
 				t.Errorf("hint = %v, want %v (hints %+v)", gotHint, tt.hint, pr.hints)

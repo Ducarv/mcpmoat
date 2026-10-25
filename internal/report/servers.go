@@ -85,7 +85,7 @@ const untrustedMarker = " (untrusted)"
 // discover.RedactArgs allowlist (see formatCommand), and the URL through
 // URL.String, which removes credentials.
 //
-// The table has no colour. The full coloured report comes in milestone M6.
+// The table has no colour: only WriteSummary and WriteFindings use a Style.
 //
 // WriteServers returns the first write error, or the error of the final flush.
 // Callers must check it: a failed write (for example a closed pipe) has to

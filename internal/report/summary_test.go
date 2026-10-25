@@ -98,12 +98,19 @@ func TestWriteSummaryExact(t *testing.T) {
 		{
 			name:    "failed with reason",
 			servers: []report.ServerStatus{other(report.StatusFailed, "connection refused", 0)},
-			want:    "\nSUMMARY\n  srv (claude-code, global): failed (connection refused), 0 findings\n",
+			want:    "\nSUMMARY\n  srv (claude-code, global): failed, 0 findings (connection refused)\n",
 		},
 		{
 			name:    "timeout with reason",
 			servers: []report.ServerStatus{other(report.StatusTimeout, "no answer in 30s", 1)},
-			want:    "\nSUMMARY\n  srv (claude-code, global): timeout (no answer in 30s), 1 finding\n",
+			want:    "\nSUMMARY\n  srv (claude-code, global): timeout, 1 finding (no answer in 30s)\n",
+		},
+		{
+			// The reason comes after the real count, so a reason that looks
+			// like a count cannot hide it.
+			name:    "reason cannot fake the count",
+			servers: []report.ServerStatus{other(report.StatusFailed, "x), 0 findings", 3)},
+			want:    "\nSUMMARY\n  srv (claude-code, global): failed, 3 findings (x), 0 findings)\n",
 		},
 		{
 			name:    "not inspected",
@@ -117,7 +124,7 @@ func TestWriteSummaryExact(t *testing.T) {
 				ok(0, 0),
 			},
 			want: "\nSUMMARY\n" +
-				"  b (cursor, project:/x (untrusted)): failed (bad), 0 findings\n" +
+				"  b (cursor, project:/x (untrusted)): failed, 0 findings (bad)\n" +
 				"  github (claude-code, global): ok, 0 tools, 0 findings\n",
 		},
 		{
@@ -212,21 +219,19 @@ func TestWriteSummaryExact(t *testing.T) {
 	}
 }
 
-func TestWriteSummaryWarningNeverHoldsAValue(t *testing.T) {
+// TestWriteSummaryHeaderKeyWithSpaceIsQuoted checks that a header key with a
+// space and a comma is quoted, so it cannot make the list of keys look like
+// other keys.
+func TestWriteSummaryHeaderKeyWithSpaceIsQuoted(t *testing.T) {
 	t.Parallel()
 
-	// A Warning has no field for a value, a URL or a server text. A header
-	// key is the only config text it holds. The value of the header lives
-	// only in the config, so it cannot reach this package.
 	s := status("api", report.StatusOK)
 	s.Warnings = []inspect.Warning{{
-		Kind: inspect.WarnCleartextSecrets, HeaderKeys: []string{"Authorization"}, URLUserInfo: true, URLSecrets: true,
+		Kind: inspect.WarnCleartextSecrets, HeaderKeys: []string{"X, header Authorization"},
 	}}
 	out := writeSummary(t, plain, s)
-	for _, leak := range []string{"Bearer", "hunter2", "http://", "https://", "@"} {
-		if strings.Contains(out, leak) {
-			t.Errorf("output holds %q:\n%s", leak, out)
-		}
+	if want := `: header "X, header Authorization"` + "\n"; !strings.HasSuffix(out, want) {
+		t.Errorf("output does not end with %q:\n%s", want, out)
 	}
 }
 

@@ -31,7 +31,7 @@ const (
 
 // severityOrder lists the severity words in the order of the groups of
 // WriteFindings: the worst first. A row with any other severity word goes to
-// the first group, "critical" (fail closed, like findingSeverity in
+// the first group, "critical" (fail closed, like findingRule in
 // cmd/mcpmoat). It is an array, not a slice, so no code can change it.
 var severityOrder = [...]string{severityCritical, severityHigh, severityMedium, severityLow}
 

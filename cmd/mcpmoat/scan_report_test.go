@@ -9,8 +9,8 @@ package main
 // These tests cover the server side: a tool description or name, an
 // inspection warning and a failure reason. They use a fake inspector and a
 // pinEnv (pins_helpers_test.go), so no server starts and nothing touches the
-// real $HOME or the real pins.json. No test calls t.Setenv, so all can run in
-// parallel.
+// real $HOME or the real pins.json. All of them run in parallel, except
+// TestRunWithContextBufferHasNoColor, which sets the environment.
 
 import (
 	"bytes"
@@ -276,39 +276,33 @@ func TestScanReportHostileFailure(t *testing.T) {
 func TestIsTerminalPipedOutput(t *testing.T) {
 	t.Parallel()
 
+	// newFile creates a regular file that the test closes at its end.
+	newFile := func(t *testing.T) *os.File {
+		f, err := os.Create(filepath.Join(t.TempDir(), "out.txt"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = f.Close() })
+		return f
+	}
+	// newPipe returns both ends of a pipe that the test closes at its end.
+	newPipe := func(t *testing.T) (r, w *os.File) {
+		r, w, err := os.Pipe()
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = r.Close(); _ = w.Close() })
+		return r, w
+	}
 	tests := []struct {
 		name string
 		open func(t *testing.T) *os.File
 	}{
-		{"regular file", func(t *testing.T) *os.File {
-			f, err := os.Create(filepath.Join(t.TempDir(), "out.txt"))
-			if err != nil {
-				t.Fatal(err)
-			}
-			t.Cleanup(func() { _ = f.Close() })
-			return f
-		}},
-		{"pipe writer", func(t *testing.T) *os.File {
-			r, w, err := os.Pipe()
-			if err != nil {
-				t.Fatal(err)
-			}
-			t.Cleanup(func() { _ = r.Close(); _ = w.Close() })
-			return w
-		}},
-		{"pipe reader", func(t *testing.T) *os.File {
-			r, w, err := os.Pipe()
-			if err != nil {
-				t.Fatal(err)
-			}
-			t.Cleanup(func() { _ = r.Close(); _ = w.Close() })
-			return r
-		}},
+		{"regular file", newFile},
+		{"pipe writer", func(t *testing.T) *os.File { _, w := newPipe(t); return w }},
+		{"pipe reader", func(t *testing.T) *os.File { r, _ := newPipe(t); return r }},
 		{"closed file", func(t *testing.T) *os.File {
-			f, err := os.Create(filepath.Join(t.TempDir(), "out.txt"))
-			if err != nil {
-				t.Fatal(err)
-			}
+			f := newFile(t)
 			if err := f.Close(); err != nil {
 				t.Fatal(err)
 			}
@@ -329,12 +323,14 @@ func TestIsTerminalPipedOutput(t *testing.T) {
 // TestRunWithContextBufferHasNoColor checks that runWithContext decides about
 // colour from the stdout writer that it gets, not from os.Stdout. A bytes.Buffer
 // is not a terminal, so the report has no ESC byte, even with no flag and with
-// NO_COLOR empty. The test points HOME, XDG_CONFIG_HOME and the working
-// directory at temporary folders, so it never reads the real home. It changes
-// the environment, so it does not run in parallel.
+// NO_COLOR empty. The test points HOME, USERPROFILE (the home on Windows),
+// XDG_CONFIG_HOME and the working directory at temporary folders, so it never
+// reads the real home. It changes the environment, so it does not run in
+// parallel.
 func TestRunWithContextBufferHasNoColor(t *testing.T) {
 	home, work := t.TempDir(), t.TempDir()
 	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
 	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
 	t.Setenv("NO_COLOR", "")
 	t.Chdir(work)

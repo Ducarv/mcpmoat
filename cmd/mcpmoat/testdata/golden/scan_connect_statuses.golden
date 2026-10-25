@@ -4,8 +4,8 @@ slow     claude-code   global   stdio       enabled   $HOME/.claude.json   /usr/
 web      claude-code   global   http        enabled   $HOME/.claude.json   http://tools.example.com/mcp
 
 SUMMARY
-  broken (claude-code, global): failed (inspect: connection refused), 0 findings
-  slow (claude-code, global): timeout (inspect: no answer within 50ms: context deadline exceeded), 0 findings
+  broken (claude-code, global): failed, 0 findings (inspect: connection refused)
+  slow (claude-code, global): timeout, 0 findings (inspect: no answer within 50ms: context deadline exceeded)
   web (claude-code, global): ok, 2 tools, 2 findings
     warning: cleartext-secrets: secrets go over plain http to a host that is not loopback: header Authorization
 

@@ -68,11 +68,13 @@ type ServerStatus struct {
 //
 //	github (claude-code, global): ok, 3 tools, 2 findings
 //	  warning: cleartext-secrets: secrets go over plain http ...
-//	github (cursor, project:/x (untrusted)): failed (<reason>), 0 findings
+//	github (cursor, project:/x (untrusted)): failed, 0 findings (<reason>)
 //	other (codex, global): not inspected, 1 finding
 //
-// Each warning has its own line under the server. The text of a warning is
-// WarningText (see there for what it shows).
+// The reason of a server that is not ok comes last, after the counts: it can
+// hold server text, so it must not be able to fake a count or push the real
+// one off the line. Each warning has its own line under the server. The text
+// of a warning is WarningText (see there for what it shows).
 //
 // Every text from a config file or a server goes through internal/termsafe,
 // and names and paths are cut (see ServerRef). The Style only colours the
@@ -98,15 +100,16 @@ func WriteSummary(w io.Writer, servers []ServerStatus, st Style) error {
 
 		status := termsafe.QuoteCut(s.Status, maxShortCellRunes)
 		b.WriteString(st.status(s.Status, status))
+		if s.Status == StatusOK {
+			fmt.Fprintf(&b, ", %d %s", s.Tools, plural(s.Tools, "tool", "tools"))
+		}
+		fmt.Fprintf(&b, ", %d %s", s.Findings, plural(s.Findings, "finding", "findings"))
 		if s.Status != StatusOK && s.Reason != "" {
 			b.WriteString(" (")
 			b.WriteString(termsafe.QuoteCut(s.Reason, maxReasonRunes))
 			b.WriteString(")")
 		}
-		if s.Status == StatusOK {
-			fmt.Fprintf(&b, ", %d %s", s.Tools, plural(s.Tools, "tool", "tools"))
-		}
-		fmt.Fprintf(&b, ", %d %s\n", s.Findings, plural(s.Findings, "finding", "findings"))
+		b.WriteString("\n")
 
 		for _, warning := range s.Warnings {
 			b.WriteString("    warning: ")
@@ -147,7 +150,7 @@ func WarningText(w inspect.Warning) string {
 		// At most: the keys, "and N more", the user info and the URL secrets.
 		parts := make([]string, 0, len(keys)+3)
 		for _, k := range keys {
-			parts = append(parts, "header "+termsafe.QuoteCut(k, maxSummaryNameRunes))
+			parts = append(parts, "header "+cell(k, maxSummaryNameRunes))
 		}
 		if more := len(w.HeaderKeys) - len(keys); more > 0 {
 			parts = append(parts, fmt.Sprintf("and %d more header %s", more, plural(more, "key", "keys")))

@@ -192,7 +192,8 @@ type summaryRow struct {
 	Name string
 	// Status is "ok", "timeout", "failed" or "not inspected".
 	Status string
-	// Reason is the text in parentheses after the status. Empty when none.
+	// Reason is the text in parentheses at the end of the line. Empty when
+	// none.
 	Reason string
 	// Tools is the tool count. HasTools is false when the line shows none
 	// (only a server with status ok shows its tools).
@@ -205,16 +206,17 @@ type summaryRow struct {
 }
 
 var (
-	summaryFindingsPattern = regexp.MustCompile(`, (\d+) findings?$`)
-	summaryToolsPattern    = regexp.MustCompile(`, (\d+) tools?$`)
+	summaryFindingsPattern = regexp.MustCompile(`^, (\d+) findings?`)
+	summaryToolsPattern    = regexp.MustCompile(`^, (\d+) tools?`)
 	summaryStatuses        = []string{"not inspected", "timeout", "failed", "ok"}
 )
 
 // summaryRows parses the SUMMARY block of a plain stdout into one row for each
 // server, in the printed order. It returns nil when stdout has no SUMMARY block.
-// A server line is "  <label>: <status>[ (<reason>)][, N tools], M findings".
+// A server line is "  <label>: <status>[, N tools], M findings[ (<reason>)]".
 // It splits the label at the first ": ", so it needs a server name without
-// that text. It fails the test on a line it cannot read.
+// that text. It reads the rest from the left, because only the reason at the
+// end can hold server text. It fails the test on a line it cannot read.
 func summaryRows(t *testing.T, stdout string) []summaryRow {
 	t.Helper()
 	block := splitScanSections(stdout).Summary
@@ -237,32 +239,34 @@ func summaryRows(t *testing.T, stdout string) []summaryRow {
 			t.Fatalf("summary line %q has no \": \":\n%s", line, stdout)
 		}
 		row := summaryRow{Server: label, Name: serverLabelName(label)}
-		m := summaryFindingsPattern.FindStringSubmatch(rest)
-		if m == nil {
-			t.Fatalf("summary line %q does not end with a finding count:\n%s", line, stdout)
-		}
-		row.Findings, _ = strconv.Atoi(m[1])
-		rest = strings.TrimSuffix(rest, m[0])
-		if m := summaryToolsPattern.FindStringSubmatch(rest); m != nil {
-			row.Tools, _ = strconv.Atoi(m[1])
-			row.HasTools = true
-			rest = strings.TrimSuffix(rest, m[0])
-		}
 		for _, st := range summaryStatuses {
-			after, ok := strings.CutPrefix(rest, st)
-			if !ok {
-				continue
+			// A status is followed by ", ": a longer word that only starts
+			// with the status does not match.
+			if after, ok := strings.CutPrefix(rest, st); ok && strings.HasPrefix(after, ", ") {
+				row.Status, rest = st, after
+				break
 			}
-			row.Status = st
-			if reason, ok := strings.CutPrefix(after, " ("); ok {
-				row.Reason = strings.TrimSuffix(reason, ")")
-			} else if after != "" {
-				continue // a longer word that only starts with the status
-			}
-			break
 		}
 		if row.Status == "" {
 			t.Fatalf("summary line %q has an unknown status:\n%s", line, stdout)
+		}
+		if m := summaryToolsPattern.FindStringSubmatch(rest); m != nil {
+			row.Tools, _ = strconv.Atoi(m[1])
+			row.HasTools = true
+			rest = rest[len(m[0]):]
+		}
+		m := summaryFindingsPattern.FindStringSubmatch(rest)
+		if m == nil {
+			t.Fatalf("summary line %q has no finding count after the status:\n%s", line, stdout)
+		}
+		row.Findings, _ = strconv.Atoi(m[1])
+		rest = rest[len(m[0]):]
+		if rest != "" {
+			reason, ok := strings.CutPrefix(rest, " (")
+			if !ok || !strings.HasSuffix(reason, ")") {
+				t.Fatalf("summary line %q has text after the counts that is not a reason:\n%s", line, stdout)
+			}
+			row.Reason = strings.TrimSuffix(reason, ")")
 		}
 		rows = append(rows, row)
 	}
@@ -380,9 +384,10 @@ func parseFindings(t *testing.T, stdout string) []scanFinding {
 // findingRows returns the findings of a plain stdout as rows of words, in the
 // printed order. A row is RULE, SEVERITY, SERVER (the name only), FIELD, and
 // then the words of the key or related text. FIELD and the key come from the
-// "Where:" line, or from the "Tool:" or "Reason:" line (FIELD is then "tool").
-// A part that is missing shows as "-". It is a view of parseFindings for the tests that
-// compare rows. It returns nil when stdout has no FINDINGS block.
+// "Where:" line, or from the "Tool:" line (FIELD is then "tool") or the
+// "Reason:" line (FIELD is then "reason"). A part that is missing shows as
+// "-". It is a view of parseFindings for the tests that compare rows. It
+// returns nil when stdout has no FINDINGS block.
 //
 // A cell can be quoted when it holds a space, so use only the first four
 // words of a row (RULE, SEVERITY, SERVER, FIELD) when the names hold no space.
@@ -396,7 +401,7 @@ func findingRows(t *testing.T, stdout string) [][]string {
 			row = append(row, "tool")
 			row = append(row, strings.Fields(f.Tool)...)
 		case f.Reason != "":
-			row = append(row, "tool")
+			row = append(row, "reason")
 			row = append(row, strings.Fields(f.Reason)...)
 		case f.Where != "":
 			words := strings.Fields(f.Where)

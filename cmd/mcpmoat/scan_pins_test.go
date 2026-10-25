@@ -492,7 +492,7 @@ func TestScanPinsNotInspected(t *testing.T) {
 
 		// The reason is escaped in the SUMMARY (quoted, with no raw control or
 		// bidi character), and stderr stays empty.
-		assertScanRun(t, got, scanWant{code: exitOK, stdout: []string{`failed ("inspect: boom `, `\x1b[31m`, `\u202e`}})
+		assertScanRun(t, got, scanWant{code: exitOK, stdout: []string{`failed, 0 findings ("inspect: boom `, `\x1b[31m`, `\u202e`}})
 		row := summaryRowOf(t, got.stdout, "srv")
 		if row.Status != "failed" || !strings.Contains(row.Reason, `\x1b[31m`) || !strings.Contains(row.Reason, `\u202e`) {
 			t.Errorf("SUMMARY row of srv = status %q, reason %q; want failed with the escaped reason", row.Status, row.Reason)
@@ -1162,7 +1162,8 @@ func TestScanPinsInterrupted(t *testing.T) {
 
 // TestScanPinsCorruptStoreStartsNoServer checks that a pins.json that cannot be
 // read stops scan before the inspector is called, for a corrupt file, a newer
-// version and a pins path that is a folder (M2).
+// version and a pins path that is a folder (M2). The summary says why the
+// server was not inspected.
 func TestScanPinsCorruptStoreStartsNoServer(t *testing.T) {
 	t.Parallel()
 
@@ -1191,6 +1192,10 @@ func TestScanPinsCorruptStoreStartsNoServer(t *testing.T) {
 			got := e.scan(fake)
 
 			assertScanRun(t, got, scanWant{code: exitError, stderr: []string{"mcpmoat scan: cannot read the pins file: "}})
+			row := summaryRowOf(t, got.stdout, "srv")
+			if row.Status != "not inspected" || row.Reason != reasonPinStepFailed {
+				t.Errorf("SUMMARY row of srv = status %q, reason %q; want not inspected with %q", row.Status, row.Reason, reasonPinStepFailed)
+			}
 			if calls := fake.Calls(); len(calls) != 0 {
 				t.Errorf("the inspector was called for %v, want no call", calls)
 			}

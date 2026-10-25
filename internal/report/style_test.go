@@ -29,7 +29,7 @@ var stripSGR = strings.NewReplacer(
 	sgrGreen, "", sgrYellow, "", sgrCyan, "",
 )
 
-var colour = report.Style{Color: true}
+var colored = report.Style{Color: true}
 
 // hostile lists texts that must never reach the output as raw bytes.
 var hostile = []struct {
@@ -126,7 +126,7 @@ func TestHostileTextNeverReachesTheOutputRaw(t *testing.T) {
 				t.Parallel()
 				baseline := strings.Count(p.out(t, plain, "x"), "\n")
 
-				for _, st := range []report.Style{plain, colour} {
+				for _, st := range []report.Style{plain, colored} {
 					out := p.out(t, st, h.value)
 
 					if want := p.want(h.value); !strings.Contains(out, want) {
@@ -165,7 +165,7 @@ func TestHostileTextNeverReachesTheOutputRaw(t *testing.T) {
 	}
 }
 
-func TestColourOffIsColourOnWithoutSGR(t *testing.T) {
+func TestColorOffIsColorOnWithoutSGR(t *testing.T) {
 	t.Parallel()
 
 	rows := []report.FindingRow{
@@ -182,7 +182,7 @@ func TestColourOffIsColourOnWithoutSGR(t *testing.T) {
 
 	t.Run("findings", func(t *testing.T) {
 		t.Parallel()
-		off, on := writeFindings(t, plain, rows...), writeFindings(t, colour, rows...)
+		off, on := writeFindings(t, plain, rows...), writeFindings(t, colored, rows...)
 		if strings.ContainsRune(off, 0x1b) {
 			t.Errorf("Color=false output holds an ESC byte:\n%q", off)
 		}
@@ -195,7 +195,7 @@ func TestColourOffIsColourOnWithoutSGR(t *testing.T) {
 	})
 	t.Run("summary", func(t *testing.T) {
 		t.Parallel()
-		off, on := writeSummary(t, plain, servers...), writeSummary(t, colour, servers...)
+		off, on := writeSummary(t, plain, servers...), writeSummary(t, colored, servers...)
 		if strings.ContainsRune(off, 0x1b) {
 			t.Errorf("Color=false output holds an ESC byte:\n%q", off)
 		}
@@ -208,16 +208,16 @@ func TestColourOffIsColourOnWithoutSGR(t *testing.T) {
 	})
 	t.Run("empty input stays empty with colour", func(t *testing.T) {
 		t.Parallel()
-		if got := writeFindings(t, colour); got != "" {
+		if got := writeFindings(t, colored); got != "" {
 			t.Errorf("WriteFindings(nil) = %q, want empty", got)
 		}
-		if got := writeSummary(t, colour); got != "" {
+		if got := writeSummary(t, colored); got != "" {
 			t.Errorf("WriteSummary(nil) = %q, want empty", got)
 		}
 	})
 }
 
-func TestFindingsColours(t *testing.T) {
+func TestFindingsColors(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
@@ -234,7 +234,7 @@ func TestFindingsColours(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.severity, func(t *testing.T) {
 			t.Parallel()
-			out := writeFindings(t, colour, sevRow("R", tt.severity))
+			out := writeFindings(t, colored, sevRow("R", tt.severity))
 			if want := "\n" + sgrBold + "FINDINGS" + sgrReset + "\n" + tt.want + "\n"; !strings.HasPrefix(out, want) {
 				t.Errorf("output starts with\n%q\nwant prefix\n%q", out, want)
 			}
@@ -242,7 +242,7 @@ func TestFindingsColours(t *testing.T) {
 	}
 }
 
-func TestSummaryColours(t *testing.T) {
+func TestSummaryColors(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
@@ -258,14 +258,14 @@ func TestSummaryColours(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.status, func(t *testing.T) {
 			t.Parallel()
-			out := writeSummary(t, colour, status("s", tt.status))
+			out := writeSummary(t, colored, status("s", tt.status))
 			if !strings.HasPrefix(out, "\n"+sgrBold+"SUMMARY"+sgrReset+"\n") {
 				t.Errorf("output does not start with the bold heading:\n%q", out)
 			}
 			if want := "(claude-code, global): " + tt.want; !strings.Contains(out, want) {
 				t.Errorf("output does not hold %q:\n%q", want, out)
 			}
-			if tt.status == "not inspected" || tt.status == "other" {
+			if tt.status == report.StatusNotInspected || tt.status == "other" {
 				// Plain statuses: the only SGR codes are the heading ones.
 				if got := strings.Count(out, "\x1b"); got != 2 {
 					t.Errorf("output has %d ESC bytes, want 2 (the heading):\n%q", got, out)

@@ -640,18 +640,16 @@ func TestE2EScanReport(t *testing.T) {
 			servers := column(tableRows(t, stdout), 0)
 			summary := summaryRows(t, stdout)
 			var names []string
+			total := 0
 			for _, row := range summary {
 				names = append(names, row.Name)
+				total += row.Findings
 				if row.Status != "not inspected" {
 					t.Errorf("server %s: status = %q, want %q", row.Name, row.Status, "not inspected")
 				}
 			}
 			if !slices.Equal(names, servers) {
 				t.Errorf("summary servers = %v, want table servers %v", names, servers)
-			}
-			total := 0
-			for _, row := range summary {
-				total += row.Findings
 			}
 
 			// FINDINGS: severity order, and the text of the built-in rules.

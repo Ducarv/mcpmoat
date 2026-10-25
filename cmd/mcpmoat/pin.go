@@ -405,3 +405,31 @@ func (c *cli) pinChanges(store *pins.Store, id pins.Identity, server string, too
 	}
 	return n, diffs
 }
+
+// notInspectedText returns "server <name>: <status>: <reason>" for an outcome
+// that is not inspect.StatusOK. pin shows it as an error. scan shows the status
+// in its summary on stdout (see outcomeSummary) and does not use this text.
+// The server name and the error text come from untrusted sources (the error can
+// carry server output), so both are escaped and cut.
+func notInspectedText(o inspect.Outcome) string {
+	return fmt.Sprintf("server %s: %s: %s",
+		cutName(o.Server.Name),
+		termsafe.Quote(string(o.Status)),
+		termsafe.QuoteCut(outcomeReason(o), maxWarnErrRunes))
+}
+
+// warnInspection writes the warnings of the inspection of o on stderr, for
+// pin: one line for each warning of outcomeWarnings. scan shows them in its
+// summary on stdout instead (see outcomeSummary).
+func (c *cli) warnInspection(o inspect.Outcome) {
+	for _, w := range outcomeWarnings(o) {
+		c.warnf("pin", "%s", warningText(o.Server.Name, w))
+	}
+}
+
+// warningText returns "server <name>: <kind>: <what it means>" for one
+// inspection warning. The server name is escaped and cut here. The rest comes
+// from report.WarningText, the one owner of the warning wording.
+func warningText(name string, w inspect.Warning) string {
+	return "server " + cutName(name) + ": " + report.WarningText(w)
+}

@@ -6,3 +6,6 @@ var FormatCommand = formatCommand
 
 // FieldTool exports fieldTool to the external test package report_test.
 const FieldTool = fieldTool
+
+// SeverityOrder exports severityOrder to the external test package report_test.
+var SeverityOrder = severityOrder

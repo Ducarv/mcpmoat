@@ -2,7 +2,6 @@ package main
 
 import (
 	"errors"
-	"fmt"
 
 	"github.com/Ducarv/mcpmoat/internal/discover"
 	"github.com/Ducarv/mcpmoat/internal/inspect"
@@ -12,8 +11,9 @@ import (
 )
 
 // This file holds the helpers of the pin step that scan and pin both use: the
-// server identity, the read of pins.json, the pinnable check, the diffs and the
-// fixed texts for stderr.
+// server identity, the read of pins.json, the pinnable check, the diffs, the
+// reason and the warnings of an outcome, and the caps of untrusted text on the
+// terminal. The stderr texts that only pin prints are in pin.go.
 
 // maxWarnNameRunes, maxWarnPathRunes and maxWarnErrRunes cap the untrusted text
 // that a line on the terminal shows: a server name from a config file, a path
@@ -125,18 +125,6 @@ func pinnableReason(err error) string {
 	return reasonNotPinnable
 }
 
-// notInspectedText returns "server <name>: <status>: <reason>" for an outcome
-// that is not inspect.StatusOK. pin shows it as an error. scan shows the status
-// in its summary on stdout (see outcomeSummary) and does not use this text.
-// The server name and the error text come from untrusted sources (the error can
-// carry server output), so both are escaped and cut.
-func notInspectedText(o inspect.Outcome) string {
-	return fmt.Sprintf("server %s: %s: %s",
-		cutName(o.Server.Name),
-		termsafe.Quote(string(o.Status)),
-		termsafe.QuoteCut(outcomeReason(o), maxWarnErrRunes))
-}
-
 // outcomeReason returns the raw text that says why o was not inspected: the
 // error text, or "no error text" when there is none. The text is untrusted
 // (see inspect.Outcome.Err). The caller must escape it before it prints it.
@@ -145,15 +133,6 @@ func outcomeReason(o inspect.Outcome) string {
 		return o.Err.Error()
 	}
 	return "no error text"
-}
-
-// warnInspection writes the warnings of the inspection of o on stderr, for
-// pin: one line for each warning of outcomeWarnings. scan shows them in its
-// summary on stdout instead (see outcomeSummary).
-func (c *cli) warnInspection(o inspect.Outcome) {
-	for _, w := range outcomeWarnings(o) {
-		c.warnf("pin", "%s", warningText(o.Server.Name, w))
-	}
 }
 
 // outcomeWarnings returns the warnings of the inspection of o: Result.Warnings
@@ -169,11 +148,4 @@ func outcomeWarnings(o inspect.Outcome) []inspect.Warning {
 		return ce.Warnings
 	}
 	return nil
-}
-
-// warningText returns "server <name>: <kind>: <what it means>" for one
-// inspection warning. The server name is escaped and cut here. The rest comes
-// from report.WarningText, the one owner of the warning wording.
-func warningText(name string, w inspect.Warning) string {
-	return "server " + cutName(name) + ": " + report.WarningText(w)
 }

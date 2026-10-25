@@ -106,7 +106,7 @@ func runWithContext(ctx context.Context, args []string, stdout, stderr io.Writer
 
 // isTerminal reports whether f is a terminal. It uses only the standard
 // library: a terminal is a character device. /dev/null is a character device
-// too, so output sent there may get color. That is harmless.
+// too, so output sent there may get colour. That is harmless.
 func isTerminal(f *os.File) bool {
 	fi, err := f.Stat()
 	return err == nil && fi.Mode()&os.ModeCharDevice != 0
@@ -188,7 +188,7 @@ func (c *cli) parseGlobals(args []string) (options, []string, error) {
 // the --no-color flag is set or if NO_COLOR has any non-empty value, even "0"
 // (see https://no-color.org/ and PRD FR-14).
 //
-// scan uses this result together with cli.stdoutIsTTY: color is on only when
+// scan uses this result together with cli.stdoutIsTTY: colour is on only when
 // stdout is a terminal and neither --no-color nor NO_COLOR is set.
 func colorDisabled(noColorFlag bool, getenv func(string) string) bool {
 	return noColorFlag || getenv("NO_COLOR") != ""
@@ -278,8 +278,8 @@ func scanUsage(w io.Writer) {
 // "_, _ =" in this one place means the rest of the code stays short, and the
 // errcheck linter has nothing to flag.
 //
-// Use it only for help and diagnostic text. Do not use it for the findings
-// report (M6): if that write fails, the exit code must say so (exit 2), or a
+// Use it only for help and diagnostic text. Do not use it for the report on
+// stdout: if that write fails, the exit code must say so (exit 2), or a
 // broken pipe could look like "no findings".
 func fprintf(w io.Writer, format string, a ...any) {
 	_, _ = fmt.Fprintf(w, format, a...)

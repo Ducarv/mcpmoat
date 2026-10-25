@@ -475,8 +475,9 @@ Known limits:
 2. `SUMMARY` (`report.WriteSummary`): one line for each server, in config order. The line has the
    name with the client and the scope, the status, the tool count (status `ok` only) and the
    finding count. The status is `ok`, `timeout`, `failed` or `not inspected`. A server that
-   `--no-connect` skipped, or that `scan` refused to start, is `not inspected`. A failed server
-   shows its reason. The inspection warnings (`cleartext-secrets`, `undeclared-capability`,
+   `--no-connect` skipped, or that `scan` refused to start, is `not inspected`. A server that is
+   not `ok` shows its reason last, after the counts: the reason can hold server text, so it must
+   not be able to fake a count or push the real one off the line. The inspection warnings (`cleartext-secrets`, `undeclared-capability`,
    `dns-pin-unavailable`) are indented under the server. They hold header keys, never values.
 3. `FINDINGS` (`report.WriteFindings`): groups by severity, the worst first, only the groups that
    have findings. Each finding has the rule ID and title, the server as `name (client, scope)`

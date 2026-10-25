@@ -440,3 +440,18 @@ func TestFieldToolMatchesRules(t *testing.T) {
 		t.Errorf("report fieldTool = %q, want rules.FieldTool = %q", report.FieldTool, rules.FieldTool)
 	}
 }
+
+// TestSeverityWordsMatchRules checks that the severity words of report, worst
+// first, are the words of rules. A word that drifts apart would move every
+// finding of that severity into the critical group.
+func TestSeverityWordsMatchRules(t *testing.T) {
+	t.Parallel()
+
+	want := [...]string{
+		string(rules.SeverityCritical), string(rules.SeverityHigh),
+		string(rules.SeverityMedium), string(rules.SeverityLow),
+	}
+	if report.SeverityOrder != want {
+		t.Errorf("report severityOrder = %q, want the rules words %q", report.SeverityOrder, want)
+	}
+}

@@ -103,7 +103,7 @@ func (c *cli) runScan(opts options, args []string) int {
 		fprintf(c.stderr, "mcpmoat scan: internal error: built-in typosquat list is invalid\n")
 		return exitError
 	}
-	// Color is on only when stdout is a terminal, --no-color is not set and
+	// Colour is on only when stdout is a terminal, --no-color is not set and
 	// NO_COLOR is empty (FR-14). opts.noColor holds the combined result of the
 	// global flag (before "scan") and the environment variable. The scan flag
 	// --no-color (after "scan") is read here, so both positions work.
@@ -123,7 +123,7 @@ type scanSetup struct {
 	// connect is nil with --no-connect. Otherwise it holds the options for
 	// inspect.Run, and scan inspects the servers and checks their pins.
 	connect *inspect.Options
-	// style tells the report writers whether to use color.
+	// style tells the report writers whether to use colour.
 	style report.Style
 }
 
@@ -303,6 +303,13 @@ func (c *cli) reportScan(ctx context.Context, res discover.Result, configPath st
 	}
 
 	statuses := pr.serverStatuses(res.Servers, configCounts)
+	if pinFailed {
+		// The pin step stopped before any server was inspected. Say so, or
+		// each line would look like a refused server. The error is on stderr.
+		for i := range statuses {
+			statuses[i].Reason = reasonPinStepFailed
+		}
+	}
 	if err := c.writeScanReport(res.Servers, statuses, rows, pr, setup.style, configPath, len(res.Errors) > 0); err != nil {
 		c.cmdPrintf("scan", "cannot write output")
 		// stderr can still work. The file problems are the reason for a
@@ -455,6 +462,10 @@ var (
 	// errPinsUnreadable means that readPins failed and wrote the message.
 	errPinsUnreadable = errors.New("cannot read the pins file")
 )
+
+// reasonPinStepFailed is the summary reason of every server when inspectAndPin
+// failed before it inspected any server (pinFailed in reportScan).
+const reasonPinStepFailed = "scan stopped before it inspected the servers, see the error on stderr"
 
 // printIgnored writes one line on stderr that counts the findings which the
 // ignore list dropped, for example

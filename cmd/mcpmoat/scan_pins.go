@@ -210,10 +210,13 @@ func (p *pinner) add(row report.FindingRow) bool {
 // with the given severity. reason and fix must be fixed texts: they are shown
 // in the report. fix replaces the remediation of pins.KindUnverified, because
 // scan prints no "To accept" line for these rows, so "pin --accept" cannot
-// solve them (see the fix constants).
+// solve them (see the fix constants). The risk is riskServerUnverified: the
+// row is about the whole server, which may have no pin at all, not about the
+// pin of one tool.
 func (p *pinner) addUnverified(s discover.Server, reason, fix, severity string) {
 	row := pinRow(pins.KindUnverified, s, "", severity)
 	row.Related = reason
+	row.Risk = riskServerUnverified
 	row.Remediation = fix
 	p.add(row)
 }
@@ -334,6 +337,10 @@ const (
 	reasonRelativeSource = "the config path is not absolute"
 )
 
+// riskServerUnverified is the risk of the MOAT-T2-004 rows that scan makes
+// itself (see addUnverified). It holds no server text.
+const riskServerUnverified = "mcpmoat cannot check the tools of this server against pins, so a changed or hostile tool could pass without a review."
+
 // Fixed remediations for the MOAT-T2-004 rows that scan makes itself, one for
 // each reason above (a reason from pinnableReason uses fixNotPinnable). They
 // are not the text of pins.KindUnverified: scan prints no "To accept" line for
@@ -399,8 +406,8 @@ func outcomeSummary(o inspect.Outcome, findings int) report.ServerStatus {
 
 // serverStatuses returns the summary of all servers, in the order of servers
 // (the config order), so it lines up with the server table. configFindings
-// holds the number of config findings of each server, by index in servers: it
-// must have one entry for each server (configChecks.findings makes it so).
+// holds the number of config findings of each server, by index in servers
+// (configChecks.findings gives one entry for each server).
 //
 // servers must be the slice that scan gave to inspect.Run. An outcome belongs
 // to the server at its Index (see inspect.Outcome.Index). The outcomes come
@@ -421,15 +428,18 @@ func (pr pinReport) serverStatuses(servers []discover.Server, configFindings []i
 			Status:    report.StatusNotInspected,
 		}
 	}
+	// An index outside servers, or a configFindings shorter than servers,
+	// cannot happen when the caller passes the slices of one scan. Skip the
+	// bad entry rather than panic.
 	for _, entry := range pr.statuses {
-		// An index outside servers cannot happen when the caller passes the
-		// slice that went to inspect.Run. Skip it rather than panic.
 		if entry.index >= 0 && entry.index < len(out) {
 			out[entry.index] = entry.status
 		}
 	}
-	for i := range out {
-		out[i].Findings += configFindings[i]
+	for i, n := range configFindings {
+		if i < len(out) {
+			out[i].Findings += n
+		}
 	}
 	return out
 }
