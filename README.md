@@ -41,15 +41,19 @@ mcpmoat version              # print the version, commit and build date
   (tool not verified). `MOAT-T2-004` is high when the tool name is pinned, because a duplicate,
   invalid or unverifiable copy of a pinned tool can hide a rug pull. Else it is medium. For each
   changed tool, `scan` prints a unified diff of the pinned and the current text after the findings
-  table. You can ignore these IDs with `--ignore` only (see
-  [Ignore findings](#ignore-findings)).
+  table. For each new tool, it prints the full text of the tool as added lines, under the header
+  `New tool <tool> on server <server>:`, so you can review it before you accept it. An ignored
+  finding gets no diff. If a diff is longer than 64 KiB or 2000 lines, `scan` cuts it and prints a
+  warning on stderr with the tool and the server name. Review the full tool before you accept it.
+  You can ignore these IDs with `--ignore` only (see [Ignore findings](#ignore-findings)).
 - **Accept:** `scan` never changes the pins of a pinned server. Read the diff. If you trust the
   change, run `mcpmoat pin --accept <server> --expect <digest>`. The name must match one server
   exactly. If two clients or projects use it, narrow it with `--config <file>`. If a config file has
   any problem, `pin --accept` prints it and exits with code 2, because a broken file can hide a
   second server with the same name. `pin --accept` connects to that one server and stores new pins
-  for it only. It prints the diff of each changed tool, then
-  `accepted <server>: N new, N changed, N removed`.
+  for it only. It prints the diff of each changed tool and of each new tool, then
+  `accepted <server>: N new, N changed, N removed`. If the server is not pinned yet, every tool is
+  new, so `pin --accept` shows every tool. It prints the same warning when it cuts a diff.
 - **Recommended flow:** run `mcpmoat scan` and review the diff. After the diffs, `scan` prints one
   line for each pinned server that has a pin finding:
   `To accept <server>: mcpmoat pin --accept <server> --expect pd1:<32 hex>`. Copy that line and run
@@ -63,8 +67,8 @@ mcpmoat version              # print the version, commit and build date
   returns now. It prints a note on stderr to say so. Use `--expect` unless you have a reason not to.
 - `scan` prints no `To accept` line for a server that is pinned for the first time, for a server
   that it could not inspect, for a finding that you ignored, or for tools that cannot be pinned. If
-  the server name has a character that is not safe to paste in a shell, the line has the digest but
-  no command. The name in the command is quoted for a POSIX shell. On Windows (`cmd.exe` or
+  the server name has a character that is not safe to paste in a shell, or starts with `-`, the line
+  has the digest but no command. The name in the command is quoted for a POSIX shell. On Windows (`cmd.exe` or
   PowerShell) you may need to change the quotes.
 - A server that fails, times out or is refused (an untrusted or turned-off server) is a warning on
   stderr and does not change the exit code. If the server is already pinned, it is also a

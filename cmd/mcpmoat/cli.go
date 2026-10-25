@@ -68,12 +68,6 @@ type command struct {
 	run     func(opts options, args []string) int
 }
 
-// run is runWithContext with a context that never ends: no signal stops it.
-// Tests use it. main uses runWithContext.
-func run(args []string, stdout, stderr io.Writer) int {
-	return runWithContext(context.Background(), args, stdout, stderr)
-}
-
 // runWithContext builds a cli from the real process environment and runs it.
 // It returns the exit code. main passes that code to os.Exit. When ctx ends,
 // scan and pin stop the servers that they started and exit with 2 (see

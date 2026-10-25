@@ -5,7 +5,6 @@ import (
 	"errors"
 	"flag"
 	"io"
-	"path/filepath"
 	"strconv"
 
 	"github.com/Ducarv/mcpmoat/internal/discover"
@@ -20,46 +19,57 @@ import (
 // runs it after "mcpmoat scan" reported a change and the user reviewed the
 // diff.
 //
-// The steps:
-//  1. Find the servers whose name is exactly the --accept value. --config
-//     chooses the source like it does for scan (see pinServers). No match, or
-//     more than one match, is an error: pin never accepts more than one server.
-//  2. Read pins.json. This comes before the next step, so a corrupt or newer
-//     file stops pin before it starts a stdio server.
-//  3. Inspect only that server, with the --timeout value. The server runs in
-//     its own session, so the terminal does not signal it. When the process
-//     gets SIGINT, SIGTERM or SIGHUP (see main), the context ends and
-//     inspect.Run stops the server. pin then prints
-//     "mcpmoat pin: interrupted; no pins were saved" and exits with 2.
-//  4. Make the snapshot of its tools, count what changes, print the diff of
-//     each changed tool, set the pins of this server only, and save the file.
+// The steps, each in its own function:
+//  1. parsePinArgs: read and check the flags.
+//  2. findPinServer: find the one server that has the --accept name.
+//  3. loadPinStore: read pins.json. This comes before the next step, so a
+//     corrupt or newer file stops pin before it starts a stdio server.
+//  4. inspectOne: inspect only that server.
+//  5. acceptTools: show the diffs, check --expect, set the pins of this server
+//     only and save the file.
 //
-// Nothing is written unless every step before the save worked.
-//
-// --expect <digest> closes a time-of-check to time-of-use gap. A hostile server
-// can show good tools to "scan", which the user reviews, and bad tools to "pin
-// --accept", which then saves them. "scan" prints the digest of the tools that
-// it saw (see writeAcceptHints). With --expect, pin compares that digest with
-// pins.Digest of the tools that it just inspected. The flag value is checked
-// with pins.ValidDigest before pin reads any file or starts any server, and a
-// bad value is a usage error. If the digests differ, pin prints the diffs (so
-// the user sees what changed) and an error on stderr, saves nothing and exits
-// with 2. Without --expect, pin trusts the tools that the server returns now.
-// It prints the one-line note pinNoExpectNote on stderr after a successful
-// save, to say so.
-//
-// pin prints on stdout the unified diff of each changed tool (the same text as
-// scan, see report.WriteDiffs), so the user sees what the accept changes. The
-// diffs come before the save. Then pin prints one line, for example
-// "accepted foo: 2 new, 1 changed, 0 removed" (", N not verified" is added
-// only when N is above 0). Warnings and errors go to stderr.
-//
-// Exit codes: 0 the pins are saved, 2 a usage error, a config problem that
-// hides the server, an unknown or ambiguous server, a server that was not
-// inspected (failed, timeout, or refused: an untrusted or turned-off server),
-// a signal during the inspection, tools that cannot be pinned, a write error
-// on stdout, or a pins.json that cannot be read or saved.
+// Nothing is written unless every step before the save worked. The server runs
+// in its own session, so the terminal does not signal it. When the process gets
+// SIGINT, SIGTERM or SIGHUP (see main), the context ends and inspect.Run stops
+// the server. The usage text (pinUsage and usage in cli.go) lists the flags and
+// the exit codes (FR-16).
 func (c *cli) runPin(_ options, args []string) int {
+	a, code, ok := c.parsePinArgs(args)
+	if !ok {
+		return code
+	}
+
+	// The context ends on a signal, like in runScan.
+	ctx := c.context()
+
+	server, ok := c.findPinServer(ctx, a.accept, a.configPath)
+	if !ok {
+		return exitError
+	}
+	store, ok := c.loadPinStore()
+	if !ok {
+		return exitError
+	}
+	tools, ok := c.inspectOne(ctx, server, a.connOpts)
+	if !ok {
+		return exitError
+	}
+	return c.acceptTools(store, server, tools, a.expect)
+}
+
+// pinArgs holds the checked flags of "pin".
+type pinArgs struct {
+	accept     string // the server name; never empty
+	configPath string // --config, or empty for auto-discovery
+	// expect is the --expect digest, or empty. It is a valid digest: it passed
+	// pins.ValidDigest.
+	expect   string
+	connOpts inspect.Options
+}
+
+// parsePinArgs parses and checks the flags of "pin". When ok is false, it has
+// printed the message (or the help text) and code is the exit code.
+func (c *cli) parsePinArgs(args []string) (a pinArgs, code int, ok bool) {
 	fs := flag.NewFlagSet("mcpmoat pin", flag.ContinueOnError)
 	// We print our own messages and pinUsage prints the help, so the flag
 	// package prints nothing.
@@ -68,125 +78,132 @@ func (c *cli) runPin(_ options, args []string) int {
 
 	// pathFlag refuses an empty value and a value that looks like a flag, so
 	// a result that is not "" means the flag was given.
-	var accept, configPath, expect string
-	pathFlag(fs, "accept", "a server name", &accept)
-	pathFlag(fs, "config", "a file name", &configPath)
-	pathFlag(fs, "expect", "a digest", &expect)
+	pathFlag(fs, "accept", "a server name", &a.accept)
+	pathFlag(fs, "config", "a file name", &a.configPath)
+	pathFlag(fs, "expect", "a digest", &a.expect)
 
 	if err := fs.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
 			pinUsage(c.stdout)
-			return exitOK
+			return pinArgs{}, exitOK, false
 		}
 		// The flag error holds untrusted argv, so it is escaped. See
 		// dispatch in cli.go.
-		return c.usageError("pin", "%s", termsafe.Quote(err.Error()))
+		return pinArgs{}, c.usageError("pin", "%s", termsafe.Quote(err.Error())), false
 	}
 	if c.rejectArgs("pin", fs.Args()) {
-		return exitError
+		return pinArgs{}, exitError, false
 	}
-	if accept == "" {
-		return c.usageError("pin", "--accept <server> is required")
+	if a.accept == "" {
+		return pinArgs{}, c.usageError("pin", "--accept <server> is required"), false
 	}
 	// Check the digest before discovery, so a typo stops pin before it reads a
 	// file or starts a server. The value is not printed: it is untrusted argv.
-	if expect != "" && !pins.ValidDigest(expect) {
-		return c.usageError("pin", "--expect needs a digest such as %s:<32 hex>", pins.DigestVersion)
+	if a.expect != "" && !pins.ValidDigest(a.expect) {
+		return pinArgs{}, c.usageError("pin", "--expect needs a digest such as %s:<32 hex>", pins.DigestVersion), false
 	}
 
 	// The concurrency is 1 for the one server. connectOptions gives the same
 	// --timeout message as scan.
 	connOpts, err := connectOptions(*timeout, 1)
 	if err != nil {
-		return c.usageError("pin", "%v", err)
+		return pinArgs{}, c.usageError("pin", "%v", err), false
 	}
+	a.connOpts = connOpts
+	return a, exitOK, true
+}
 
-	// The context ends on a signal, like in runScan.
-	ctx := c.context()
-
-	server, ok := c.findPinServer(ctx, accept, configPath)
-	if !ok {
-		return exitError
-	}
-	name := termsafe.QuoteCut(server.Name, maxWarnNameRunes)
-
-	// Read pins.json before inspect.Run starts the server. A corrupt or newer
-	// file must stop pin before any server runs.
+// loadPinStore reads pins.json. It returns false, after a message on stderr,
+// when the path is not known or the file cannot be read (a corrupt file, an
+// unsupported version). pin never replaces a bad store with an empty one.
+func (c *cli) loadPinStore() (*pins.Store, bool) {
 	path, err := pins.DefaultPath(c.getenv, c.homeDir)
 	if err != nil {
-		c.pinFailf("cannot find the pins file: %s", termsafe.Quote(err.Error()))
-		return exitError
+		c.pinErrorf("cannot find the pins file: %s", termsafe.Quote(err.Error()))
+		return nil, false
 	}
 	store, err := pins.Load(path)
 	if err != nil {
-		c.pinFailf("cannot read the pins file: %s", termsafe.Quote(err.Error()))
-		return exitError
+		c.pinErrorf("cannot read the pins file: %s", termsafe.Quote(err.Error()))
+		return nil, false
 	}
+	return store, true
+}
 
-	outcomes, err := inspect.Run(ctx, []discover.Server{server}, connOpts, c.inspector)
+// inspectOne inspects the one server and returns its tools. It returns false,
+// after a message on stderr, when the process got a signal (the result may be
+// partial, so pin saves nothing) or when the server was not inspected (failed,
+// timeout, or refused: an untrusted or turned-off server). scan prints the
+// second case as a warning, but here it is an error: nothing is accepted.
+func (c *cli) inspectOne(ctx context.Context, server discover.Server, opts inspect.Options) ([]inspect.Tool, bool) {
+	outcomes, err := inspect.Run(ctx, []discover.Server{server}, opts, c.inspector)
 	if ctx.Err() != nil {
-		// The process got a signal. The result may be partial, so pin saves
-		// nothing. The text is fixed.
-		c.pinFailf("interrupted; no pins were saved")
-		return exitError
+		// The text is fixed.
+		c.pinErrorf("interrupted; no pins were saved")
+		return nil, false
 	}
 	if err != nil {
 		// The text of an inspect.Run error holds only our own words.
-		c.pinFailf("cannot inspect the server: %s", termsafe.Quote(err.Error()))
-		return exitError
+		c.pinErrorf("cannot inspect the server: %s", termsafe.Quote(err.Error()))
+		return nil, false
+	}
+	// Run gives one outcome for one server.
+	if len(outcomes) == 0 {
+		c.pinErrorf("server %s: not inspected", cutName(server.Name))
+		return nil, false
 	}
 	if len(outcomes) != 1 || outcomes[0].Status != inspect.StatusOK {
-		// Run gives one outcome for one server. This line is the same warning
-		// that scan prints, but it is an error here: nothing is accepted.
-		if len(outcomes) == 0 {
-			c.pinFailf("server %s: not inspected", name)
-		} else {
-			o := outcomes[0]
-			reason := "no error text"
-			if o.Err != nil {
-				reason = o.Err.Error()
-			}
-			c.pinFailf("server %s: %s: %s", name,
-				termsafe.Quote(string(o.Status)),
-				termsafe.QuoteCut(reason, maxWarnErrRunes))
-		}
-		return exitError
+		c.pinErrorf("%s", notInspectedText(outcomes[0]))
+		return nil, false
 	}
-	tools := outcomes[0].Result.Tools
+	return outcomes[0].Result.Tools, true
+}
+
+// acceptTools sets the pins of the server to its tools and saves the store. It
+// prints the diff of each changed or new tool first, so the user sees what the
+// accept changes. It returns the exit code.
+//
+// With a non-empty expect, it compares that digest with pins.Digest of the
+// tools that it just inspected. This closes a time-of-check to time-of-use gap:
+// a hostile server can show good tools to "scan", which the user reviews, and
+// bad tools to "pin --accept", which then saves them (see writeAcceptHints). If
+// the digests differ, pin saves nothing. Without expect, pin trusts the tools
+// that the server returns now, and prints the note pinNoExpectNote on stderr
+// after a successful save.
+func (c *cli) acceptTools(store *pins.Store, server discover.Server, tools []inspect.Tool, expect string) int {
+	name := cutName(server.Name)
 
 	// The error text is not printed: it can name a tool of the server.
 	snap, err := pins.Snapshot(tools)
 	if err != nil {
-		c.pinFailf("cannot pin the tools of server %s: a tool name is empty or used twice, or a tool cannot be hashed", name)
+		c.pinErrorf("cannot pin the tools of server %s: a tool name is empty or used twice, or a tool cannot be hashed", name)
 		return exitError
 	}
 
 	id := serverIdentity(server)
-	counts, diffs := pinChanges(store, id, server.Name, tools)
-	got := pins.Digest(snap)
+	counts, diffs := c.pinChanges(store, id, server.Name, tools)
 
-	// Show the diffs before pin saves, so the user sees what the accept
-	// changes. Do not use fprintf: a write error (a closed pipe) must stop pin
-	// before the save, because the user did not see the diff.
+	// Show the diffs before pin saves. Do not use fprintf: a write error (a
+	// closed pipe) must stop pin before the save, because the user did not see
+	// the diff.
 	if err := report.WriteDiffs(c.stdout, diffs); err != nil {
-		c.pinFailf("cannot write output; no pins were saved")
+		c.pinErrorf("cannot write output; no pins were saved")
 		return exitError
 	}
 
-	if expect != "" && got != expect {
-		// The diffs are out, so the user sees what the server shows now. The
-		// two digests are hex made by mcpmoat (expect passed ValidDigest), so
-		// they need no escape.
-		c.pinFailf("the tools of %s differ from what scan showed (digest %s, expected %s); nothing was saved. Run scan again and review the diff.", name, got, expect)
+	// The two digests are hex made by mcpmoat (expect passed ValidDigest), so
+	// they need no escape.
+	if got := pins.Digest(snap); expect != "" && got != expect {
+		c.pinErrorf("the tools of %s differ from what scan showed (digest %s, expected %s); nothing was saved. Run scan again and review the diff.", name, got, expect)
 		return exitError
 	}
 
 	if err := store.Set(id, snap); err != nil {
-		c.pinFailf("cannot set the pins of server %s: %s", name, termsafe.Quote(err.Error()))
+		c.pinErrorf("cannot set the pins of server %s: %s", name, termsafe.Quote(err.Error()))
 		return exitError
 	}
 	if err := store.Save(); err != nil {
-		c.pinFailf("cannot save the pins file: %s", termsafe.Quote(err.Error()))
+		c.pinErrorf("cannot save the pins file: %s", termsafe.Quote(err.Error()))
 		return exitError
 	}
 
@@ -219,17 +236,17 @@ func pinUsage(w io.Writer) {
 	fprintf(w, "  Other servers keep their pins. A server that fails, times out, or that pin refuses to start is an error (exit 2) and pin changes nothing.\n")
 }
 
-// pinFailf writes one error line on stderr, with the prefix "mcpmoat pin: ".
+// pinErrorf writes one error line on stderr, with the prefix "mcpmoat pin: ".
 // The caller must escape untrusted text in a.
-func (c *cli) pinFailf(format string, a ...any) {
-	fprintf(c.stderr, "mcpmoat pin: "+format+"\n", a...)
+func (c *cli) pinErrorf(format string, a ...any) {
+	c.cmdErrorf("pin", format, a...)
 }
 
 // findPinServer finds the one server that has the name accept, exactly. It
-// reads the config files like scan does: only configPath when it is not
-// empty, else auto-discovery. It returns false, after a message on stderr,
-// when the server is unknown, when more than one server has the name, or when
-// the configs cannot be read at all.
+// reads the config files like scan does (see loadConfigs): only configPath when
+// it is not empty, else auto-discovery. It returns false, after a message on
+// stderr, when the server is unknown, when more than one server has the name,
+// or when the configs cannot be read at all.
 //
 // pin fails closed on a config problem. If discovery reports any problem with
 // a config file, findPinServer prints each problem on stderr and returns false,
@@ -237,90 +254,60 @@ func (c *cli) pinFailf(format string, a ...any) {
 // server with the same name, and "pin --accept" could trust the wrong one. The
 // user fixes the file or narrows the search with --config.
 func (c *cli) findPinServer(ctx context.Context, accept, configPath string) (discover.Server, bool) {
-	res, ok := c.readPinConfigs(ctx, configPath)
+	// pin does not read .mcpmoat-ignore, so it does not need the working
+	// directory.
+	res, _, ok := c.loadConfigs(ctx, "pin", configPath)
 	if !ok {
 		return discover.Server{}, false
 	}
+	if configPath != "" && loadFailed(res) {
+		c.printFileErrors("pin", res.Errors)
+		return discover.Server{}, false
+	}
 	if len(res.Errors) > 0 {
-		// FileError.Error already escapes the path and the server name.
-		for _, e := range res.Errors {
-			c.pinFailf("%s", e.Error())
-		}
-		c.pinFailf("fix the config file or choose one with --config <file>")
+		c.printFileErrors("pin", res.Errors)
+		c.pinErrorf("fix the config file or choose one with --config <file>")
 		return discover.Server{}, false
 	}
 
+	matches := serversNamed(res.Servers, accept)
+	if len(matches) == 1 {
+		return matches[0], true
+	}
+	if len(matches) == 0 {
+		c.pinErrorf("unknown server %s", cutName(accept))
+		return discover.Server{}, false
+	}
+	c.printAmbiguous(accept, matches)
+	return discover.Server{}, false
+}
+
+// serversNamed returns the servers that have exactly the name name, in the
+// order of servers.
+func serversNamed(servers []discover.Server, name string) []discover.Server {
 	var matches []discover.Server
-	for _, s := range res.Servers {
-		if s.Name == accept {
+	for _, s := range servers {
+		if s.Name == name {
 			matches = append(matches, s)
 		}
 	}
+	return matches
+}
 
-	switch len(matches) {
-	case 1:
-		return matches[0], true
-	case 0:
-		c.pinFailf("unknown server %s", termsafe.QuoteCut(accept, maxWarnNameRunes))
-		return discover.Server{}, false
-	}
-
-	c.pinFailf("%d servers are named %s; narrow it with --config <file>:", len(matches), termsafe.QuoteCut(accept, maxWarnNameRunes))
+// printAmbiguous tells the user that more than one server has the name accept,
+// and lists where each one comes from, so the user can narrow it with --config.
+// The fields come from config files, so they are escaped and cut.
+func (c *cli) printAmbiguous(accept string, matches []discover.Server) {
+	c.pinErrorf("%d servers are named %s; narrow it with --config <file>:", len(matches), cutName(accept))
 	for _, s := range matches {
-		line := "  client " + termsafe.QuoteCut(string(s.Client), maxWarnNameRunes) +
+		line := "  client " + cutName(string(s.Client)) +
 			", source " + termsafe.QuoteCut(s.Source, maxWarnErrRunes) +
-			", scope " + termsafe.QuoteCut(string(s.Scope), maxWarnNameRunes)
+			", scope " + cutName(string(s.Scope))
 		if s.ProjectPath != "" {
 			line += ", project " + termsafe.QuoteCut(s.ProjectPath, maxWarnErrRunes)
 		}
 		fprintf(c.stderr, "%s\n", line)
 	}
-	return discover.Server{}, false
-}
-
-// readPinConfigs reads the client configs for pin, with the same rules as
-// scan. With --config it reads the one file (scanConfig explains the path and
-// the trust rules). Without it, it discovers the files in the home and the
-// working directory (scanAuto). It returns false, after a message on stderr,
-// when a needed directory is not known, or when the file of --config gave no
-// server and has a problem.
-func (c *cli) readPinConfigs(ctx context.Context, configPath string) (discover.Result, bool) {
-	if configPath != "" {
-		// A relative path is made absolute first, so that the project path
-		// and the trust check do not depend on how the user spells the path.
-		// Without a working directory the path stays relative: that is the
-		// safe side, the file is read as untrusted.
-		if wd, err := c.getwd(); err == nil && !filepath.IsAbs(configPath) {
-			configPath = filepath.Join(wd, configPath)
-		}
-		// The home directory only tells ReadConfig whether the file is the
-		// user's own global file. Without a home, the file is untrusted.
-		home, err := c.homeDir()
-		if err != nil {
-			home = ""
-		}
-		res := discover.ReadConfig(ctx, configPath, home)
-		if len(res.Servers) == 0 && len(res.Errors) > 0 {
-			for _, e := range res.Errors {
-				c.pinFailf("%s", e.Error())
-			}
-			return discover.Result{}, false
-		}
-		return res, true
-	}
-
-	// The error texts are not printed: fixed messages are enough.
-	home, err := c.homeDir()
-	if err != nil {
-		c.pinFailf("cannot find the home directory: set HOME or use --config")
-		return discover.Result{}, false
-	}
-	wd, err := c.getwd()
-	if err != nil {
-		c.pinFailf("cannot read the working directory; use --config")
-		return discover.Result{}, false
-	}
-	return discover.Discover(ctx, discover.Options{Home: home, WorkDir: wd}), true
 }
 
 // pinCounts holds how many tools "pin --accept" adds, changes and removes.
@@ -340,29 +327,29 @@ func (p pinCounts) String() string {
 }
 
 // pinChanges counts what accepting tools changes in the pins of the server id,
-// and returns the diff of each changed tool. server is the name that the diffs
-// show. A server that is not pinned yet has only new tools and no diff. It
-// reads the store and does not change it.
-func pinChanges(store *pins.Store, id pins.Identity, server string, tools []inspect.Tool) (pinCounts, []report.ToolDiff) {
+// and returns the diff of each changed or new tool. server is the name that the
+// diffs show. A server that is not pinned yet has no pins, so all its tools are
+// new, and each one gets a diff of added lines. It reads the store and does not
+// change it. It prints a warning on stderr for each diff that was cut at the
+// size limit (see appendDiff).
+func (c *cli) pinChanges(store *pins.Store, id pins.Identity, server string, tools []inspect.Tool) (pinCounts, []report.ToolDiff) {
 	var n pinCounts
 	var diffs []report.ToolDiff
-	stored, found := store.Get(id)
-	if !found {
-		n.added = len(tools)
-		return n, nil
-	}
+	// An unpinned server gives nil pins, and pins.Compare then reports every
+	// valid tool as new.
+	stored, _ := store.Get(id)
 	for _, ch := range pins.Compare(stored, tools) {
 		switch ch.Kind {
 		case pins.KindNew:
 			n.added++
 		case pins.KindChanged:
 			n.changed++
-			diffs = append(diffs, report.ToolDiff{Server: server, Tool: ch.Tool, Diff: ch.Diff})
 		case pins.KindRemoved:
 			n.removed++
 		case pins.KindUnverified:
 			n.unverified++
 		}
+		diffs = c.appendDiff("pin", diffs, server, ch)
 	}
 	return n, diffs
 }

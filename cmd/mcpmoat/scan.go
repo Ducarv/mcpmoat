@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"io"
 	"maps"
-	"path/filepath"
 	"slices"
 	"strings"
 	"time"
@@ -19,104 +18,13 @@ import (
 	"github.com/Ducarv/mcpmoat/internal/termsafe"
 )
 
-// runScan implements "mcpmoat scan". It reads the client configs, lists the
-// servers it finds and runs the built-in config rules on every server (T4 with
-// rules.CheckConfig, T5 with the typosquat check).
+// runScan implements "mcpmoat scan": it reads the client configs, runs the
+// built-in config rules (T4 and T5) on every server and, unless --no-connect
+// is given, inspects the servers and checks their tools against pins.json.
 //
-// With --no-connect that is all: scan starts no process, opens no network
-// connection, and reads and writes no pins.json.
-//
-// Without --no-connect, scan then inspects the servers with c.inspector
-// (inspect.Run with the --timeout and --concurrency values) and checks the
-// tools of each server against pins.json (FR-11, FR-12): the first run pins
-// the tools, and a later run reports a changed, new, removed or unverified
-// tool as a finding, with a diff for a changed tool (see pinOutcomes). The
-// YAML rules are not applied to the tools yet. A server that fails, times out
-// or that the inspector refuses (an untrusted or turned-off server) is a
-// warning on stderr, never exit code 2 (FR-06, FR-16). It is a finding only
-// when the server is already pinned: then it gets a MOAT-T2-004 row (medium,
-// "pinned server could not be inspected"), because a hostile server must not
-// avoid the rug-pull check by failing on purpose.
-//
-// scan reads pins.json before it starts any server, so a corrupt or newer file
-// gives exit code 2 before a stdio server runs. The "pinned N tools" notices
-// come only after the new pins are saved.
-//
-// Signals: scan starts each stdio server in its own session, so the terminal
-// does not signal it. main passes a context that ends on SIGINT, SIGTERM or
-// SIGHUP, and inspect.Run stops the servers when it ends. Then scan saves
-// nothing, prints "mcpmoat scan: interrupted; no pins were saved" and exits
-// with 2.
-//
-// --rules loads the *.yaml and *.yml rule files of one folder in addition to
-// the built-in rules, and checks them. Scan does not apply these rules yet. The
-// loaded set only gives the severity of the built-in config rules.
-//
-// --config reads one file. The file can come from anywhere, for example from
-// a cloned repository, so discover.ReadConfig reads it as an untrusted project
-// file (confined to its directory, no "projects" section), unless it is the
-// user's own global config file (~/.claude.json, ~/.cursor/mcp.json or
-// ~/.codex/config.toml). The home directory is only used for that check.
-//
-// --timeout (default inspect.DefaultTimeout) is the time limit for one server.
-// --concurrency (default inspect.DefaultConcurrency) is the number of servers
-// inspected at the same time. Both are checked in both modes, also with
-// --no-connect, which does not use them. A value that is not valid (a
-// timeout of 0 or less, a concurrency below 1) is a usage error with exit
-// code 2, like a value that the flag package cannot parse.
-//
-// --ignore <rule-id> ignores all findings of one rule. The user can give it
-// more than once. A value that is not a valid rule ID is a usage error. In
-// both modes scan also reads rules.IgnoreFileName (.mcpmoat-ignore) from the
-// working directory (FR-10). That file is untrusted: a cloned repository can
-// ship one that silences any server, also the user's global servers. So when
-// the file gives one or more entries, scan prints a notice with their number
-// on stderr. A malformed line, a file that scan cannot read and, with
-// --config, an unknown working directory are warnings on stderr, never exit
-// code 2. The ignore list drops the findings of the config rules.
-//
-// The ignore list drops pin findings too, by rule ID, server and tool name,
-// but only the --ignore entries do. An entry of .mcpmoat-ignore for a pin rule
-// (MOAT-T2-*) is not applied, or a cloned repository could silence the
-// rug-pull alarm. scan prints one warning for each rule ID that the file would
-// have ignored: ".mcpmoat-ignore cannot ignore MOAT-T2-001; use --ignore on
-// the command line".
-//
-// Scan prints the server table, then the findings that the ignore list does
-// not drop (the config findings, then the pin findings), then the diffs of the
-// changed tools, then one line for each pinned server that has a pin finding
-// that is not ignored, on stdout:
-// "To accept <server>: mcpmoat pin --accept <server> --expect <digest>". The
-// digest covers the tools that scan saw, so "pin --accept --expect" saves only
-// those tools and not tools that a hostile server shows later (see
-// writeAcceptHints). A first-run server, a server that was not inspected and a
-// server whose tools cannot be pinned get no such line.
-//
-// Exit codes:
-//   - 0: the table is printed, no config file had a problem, pins.json had no
-//     problem, and no finding has severity high or above. A missing file is
-//     not a problem in auto-discovery. A server that was not inspected does
-//     not change the code. The tool rules do not run yet, so exit code 0 does
-//     not mean that the tools of the servers are safe.
-//   - 1: at least one finding that is not ignored has severity high or above
-//     (--fail-on is not implemented yet, so the limit is always high). A
-//     changed tool (MOAT-T2-001) is high.
-//   - 2: a flag or usage error, an internal error (the built-in typosquat
-//     list is invalid), no home or working directory in
-//     auto-discovery, a write error on stdout, any problem with a rule file
-//     or with the rule set (an invalid file, a duplicate ID, an ID that clashes
-//     with a built-in rule), or any problem with a config file (a
-//     discover.FileError), in auto-discovery too and also for the user's own
-//     global files. A file that mcpmoat cannot read or refuses, or
-//     a server entry that it refuses, can hide servers that the client still
-//     loads. So the scan must not look clean: scan prints the table and all
-//     problems first, and then exits with 2. The same holds for pins.json: if
-//     scan cannot read it (a corrupt file, a newer format), it starts no server
-//     and checks no pins; if it cannot save new pins, they are lost. A signal
-//     during the inspection is also exit code 2, with no report. With a
-//     problem, scan prints the report first. With --config, a file that gave
-//     no servers at all gives only the problems, and no table. Exit code 2
-//     wins over exit code 1.
+// docs/ARCHITECTURE.md describes the data flow. The usage text (scanUsage and
+// usage in cli.go) is the one place that lists the flags and the exit codes
+// (FR-16).
 func (c *cli) runScan(_ options, args []string) int {
 	fs := flag.NewFlagSet("mcpmoat scan", flag.ContinueOnError)
 	// We print our own messages and scanUsage prints the help, so the flag
@@ -176,9 +84,7 @@ func (c *cli) runScan(_ options, args []string) int {
 		return exitError
 	}
 
-	// connect is nil with --no-connect. Otherwise it holds the options for
-	// inspect.Run, and scan inspects the servers and checks their pins.
-	var connect *inspect.Options
+	var connect *inspect.Options // nil with --no-connect
 	if !*noConnect {
 		connect = &connOpts
 	}
@@ -196,17 +102,24 @@ func (c *cli) runScan(_ options, args []string) int {
 		fprintf(c.stderr, "mcpmoat scan: internal error: built-in typosquat list is invalid\n")
 		return exitError
 	}
-	checks := configChecks{set: set, typo: typo}
+	setup := scanSetup{checks: configChecks{set: set, typo: typo}, connect: connect}
 
 	// The context ends when the process gets SIGINT, SIGTERM or SIGHUP (see
 	// main). scan starts stdio servers in their own session, so the terminal
 	// does not reach them: only this context stops them.
-	ctx := c.context()
+	return c.scanConfigs(c.context(), configPath, ignoreIDs, setup)
+}
 
-	if configPath != "" {
-		return c.scanConfig(ctx, configPath, ignoreIDs, checks, connect)
-	}
-	return c.scanAuto(ctx, ignoreIDs, checks, connect)
+// scanSetup holds what scan has built before it reads the config files.
+type scanSetup struct {
+	// checks are the config rules (T4 and T5).
+	checks configChecks
+	// ignore is the ignore list. scanConfigs sets it, because the working
+	// directory (where .mcpmoat-ignore is) is known only after the load.
+	ignore *scanIgnores
+	// connect is nil with --no-connect. Otherwise it holds the options for
+	// inspect.Run, and scan inspects the servers and checks their pins.
+	connect *inspect.Options
 }
 
 // rulesNotAppliedNotice is the line that runScan prints on stderr when
@@ -269,79 +182,35 @@ func isFlagOf(fs *flag.FlagSet, value string) bool {
 	return fs.Lookup(name) != nil || name == "h" || name == "help"
 }
 
-// scanConfig reads the one file that --config names.
+// scanConfigs loads the config files (see loadConfigs), builds the ignore
+// list and runs the scan (see reportScan). configPath is the --config value, or
+// empty for auto-discovery.
 //
-// A relative path is made absolute first, from the working directory.
-// ReadConfig takes the project path of a project file from the file path, so
-// a relative path would give a relative project path. Then the result would
-// depend on how the user spells the path: the SCOPE cell would change, the
-// check that keeps an absolute Codex cwd inside the project would refuse
-// every such cwd, and the user's own global file would not be found.
-//
-// If the working directory is not known, the path stays relative. That is
-// the safe side: the file is read as untrusted, and an absolute Codex cwd is
-// refused. A server can be refused that the absolute path would accept, but
-// never the other way.
-//
-// The working directory is also where .mcpmoat-ignore is. Without it, scan
-// prints a warning and reads no ignore file.
-//
-// connect is nil with --no-connect. Otherwise it holds the inspect options
-// (see reportScan).
-func (c *cli) scanConfig(ctx context.Context, path string, ignoreIDs []string, checks configChecks, connect *inspect.Options) int {
-	// The error text is not printed; a fixed warning is enough.
-	wd, err := c.getwd()
-	if err != nil {
-		wd = "" // do not use a value that comes with an error
+// The working directory is where .mcpmoat-ignore is. With --config, an unknown
+// working directory is a warning, and scan reads no ignore file.
+func (c *cli) scanConfigs(ctx context.Context, configPath string, ignoreIDs []string, setup scanSetup) int {
+	res, wd, ok := c.loadConfigs(ctx, "scan", configPath)
+	if !ok {
+		return exitError
+	}
+	if wd == "" {
 		c.scanWarnf("cannot read the working directory; %s is not read", rules.IgnoreFileName)
 	}
-	if !filepath.IsAbs(path) && wd != "" {
-		path = filepath.Join(wd, path)
-	}
-	ignore := c.loadIgnore(wd, ignoreIDs)
-
-	// The home directory only tells ReadConfig whether the file is one of the
-	// user's own global files. Without a home, no file is: the file is read
-	// as untrusted, the safe side. So a home error is not fatal here, and its
-	// text is not printed.
-	home, err := c.homeDir()
-	if err != nil {
-		home = ""
-	}
-	res := discover.ReadConfig(ctx, path, home)
+	setup.ignore = c.loadIgnore(wd, ignoreIDs)
 
 	// A file that failed to load and gave no servers is a plain error. The
 	// "No MCP servers found." line would be wrong and misleading here, so we
 	// skip the table and print only the errors.
-	if len(res.Servers) == 0 && len(res.Errors) > 0 {
-		c.printFileErrors(res.Errors)
+	if configPath != "" && loadFailed(res) {
+		c.printFileErrors("scan", res.Errors)
 		return exitError
 	}
-	return c.reportScan(ctx, res, checks, ignore, connect)
-}
-
-// scanAuto looks for the config files of the known clients, in the home
-// directory and in the working directory. connect is nil with --no-connect
-// (see reportScan).
-func (c *cli) scanAuto(ctx context.Context, ignoreIDs []string, checks configChecks, connect *inspect.Options) int {
-	// The error text is not printed: a fixed message is enough.
-	home, err := c.homeDir()
-	if err != nil {
-		fprintf(c.stderr, "mcpmoat scan: cannot find the home directory: set HOME or use --config\n")
-		return exitError
-	}
-	wd, err := c.getwd()
-	if err != nil {
-		fprintf(c.stderr, "mcpmoat scan: cannot read the working directory; use --config\n")
-		return exitError
-	}
-	ignore := c.loadIgnore(wd, ignoreIDs)
-	return c.reportScan(ctx, discover.Discover(ctx, discover.Options{Home: home, WorkDir: wd}), checks, ignore, connect)
+	return c.reportScan(ctx, res, setup)
 }
 
 // scanWarnf prints one scan warning line on stderr.
 func (c *cli) scanWarnf(format string, a ...any) {
-	fprintf(c.stderr, "mcpmoat scan: warning: %s\n", fmt.Sprintf(format, a...))
+	c.warnf("scan", format, a...)
 }
 
 // loadIgnore builds the ignore lists (see scanIgnores). The list for the
@@ -394,34 +263,28 @@ func (c *cli) loadIgnore(wd string, ids []string) *scanIgnores {
 const configErrorHint = "mcpmoat scan: a config file has a problem; " +
 	"the table can miss servers that the client loads"
 
-// reportScan runs the config rules on the servers of res (see
-// configChecks.findings). When connect is not nil, it also inspects the servers
-// and checks their pins (see inspectAndPin). It prints the server table, the
-// findings and the diffs of changed tools on stdout, and the file problems and
-// warnings on stderr, and returns the exit code. When the ignore list dropped
-// at least one finding, reportScan prints one line on stderr after the
-// findings, with the rule IDs and their counts (see printIgnored). This line
-// does not change the exit code.
+// reportScan runs the config rules on the servers of res. When setup.connect is
+// not nil, it also inspects the servers and checks their pins (see
+// inspectAndPin). It prints the report on stdout (see writeScanReport), and the
+// file problems and warnings on stderr, and returns the exit code (the contract
+// is in the usage text, see usage in cli.go). When the ignore list dropped at
+// least one finding, it prints one line on stderr after the report, with the
+// rule IDs and their counts (see printIgnored).
 //
 // The pin findings are merged with the config findings before the table is
 // written, so one table holds them all and hasFailingFinding sees them all.
-// The "To accept" lines come after the diffs and are not part of the table.
 // New pins are saved after the report is printed, so a save error never hides
 // the report. The "pinned N tools" notices come after a successful save.
-//
-// The runScan doc holds the exit-code contract: 2 for a write error, a config
-// file problem or a pins.json problem, else 1 for a finding of severity high
-// or above, else 0.
-func (c *cli) reportScan(ctx context.Context, res discover.Result, checks configChecks, ignore *scanIgnores, connect *inspect.Options) int {
-	rows, ignored := checks.findings(&ignore.all, res.Servers)
+func (c *cli) reportScan(ctx context.Context, res discover.Result, setup scanSetup) int {
+	rows, ignored := setup.checks.findings(&setup.ignore.all, res.Servers)
 
 	var pr pinReport
 	var pinFailed bool
 	// With no server there is nothing to inspect and nothing to pin, so scan
 	// does not read pins.json.
-	if connect != nil && len(res.Servers) > 0 {
+	if setup.connect != nil && len(res.Servers) > 0 {
 		var interrupted bool
-		pr, pinFailed, interrupted = c.inspectAndPin(ctx, res.Servers, *connect, ignore)
+		pr, pinFailed, interrupted = c.inspectAndPin(ctx, res.Servers, *setup.connect, setup.ignore)
 		if interrupted {
 			// Nothing is saved and no report is printed: the user stopped
 			// the scan, so the result would be partial.
@@ -432,40 +295,23 @@ func (c *cli) reportScan(ctx context.Context, res discover.Result, checks config
 		ignored = mergeIgnored(ignored, pr.ignored)
 	}
 
-	// Do not use fprintf for the tables: a write error (a closed pipe, for
-	// example) must give exit code 2.
-	err := report.WriteServers(c.stdout, res.Servers)
-	if err == nil {
-		err = report.WriteFindings(c.stdout, rows)
-	}
-	if err == nil {
-		err = report.WriteDiffs(c.stdout, pr.diffs)
-	}
-	if err == nil {
-		err = writeAcceptHints(c.stdout, pr.hints)
-	}
-	if err != nil {
+	if err := c.writeScanReport(res.Servers, rows, pr); err != nil {
 		fprintf(c.stderr, "mcpmoat scan: cannot write output\n")
 		// stderr can still work. The file problems are the reason for a
 		// failed scan, so the user must still see them. New pins are not
 		// saved: the user did not see the report.
-		c.printFileErrors(res.Errors)
+		c.printFileErrors("scan", res.Errors)
 		return exitError
 	}
 	c.printIgnored(ignored)
 
-	// The report is out, so a save error cannot hide it.
-	// Say "pinned" only when the save worked.
-	if err := pr.save(); err != nil {
-		c.pinErrorf("cannot save the pins file", err)
+	if !c.savePinned(pr) {
 		pinFailed = true
-	} else {
-		c.printPinned(pr.pinned)
 	}
 
 	if len(res.Errors) > 0 {
 		// Print the problems in the order of the result, then the hint.
-		c.printFileErrors(res.Errors)
+		c.printFileErrors("scan", res.Errors)
 		fprintf(c.stderr, "%s\n", configErrorHint)
 		return exitError
 	}
@@ -476,6 +322,35 @@ func (c *cli) reportScan(ctx context.Context, res discover.Result, checks config
 		return exitFindings
 	}
 	return exitOK
+}
+
+// writeScanReport writes the report on w: the server table, the findings, the
+// diffs of the changed and new tools, then the "To accept" lines. It returns the
+// first write error. Do not use fprintf for it: a write error (a closed pipe,
+// for example) must give exit code 2.
+func (c *cli) writeScanReport(servers []discover.Server, rows []report.FindingRow, pr pinReport) error {
+	if err := report.WriteServers(c.stdout, servers); err != nil {
+		return err
+	}
+	if err := report.WriteFindings(c.stdout, rows); err != nil {
+		return err
+	}
+	if err := report.WriteDiffs(c.stdout, pr.diffs); err != nil {
+		return err
+	}
+	return writeAcceptHints(c.stdout, pr.hints)
+}
+
+// savePinned saves the new pins of the pin step and, only when the save
+// worked, prints the "pinned N tools" notices. It returns false when the save
+// failed. The report is already out, so a save error cannot hide it.
+func (c *cli) savePinned(pr pinReport) bool {
+	if err := pr.save(); err != nil {
+		c.scanStoreErrorf("cannot save the pins file", err)
+		return false
+	}
+	c.printPinned(pr.pinned)
+	return true
 }
 
 // interruptedNotice is the line that scan prints on stderr when the process
@@ -498,7 +373,7 @@ const interruptedNotice = "mcpmoat scan: interrupted; no pins were saved"
 func (c *cli) inspectAndPin(ctx context.Context, servers []discover.Server, opts inspect.Options, ignore *scanIgnores) (pr pinReport, failed, interrupted bool) {
 	store, err := c.loadPins()
 	if err != nil {
-		c.pinErrorf("cannot read the pins file", err)
+		c.scanStoreErrorf("cannot read the pins file", err)
 		return pinReport{}, true, false
 	}
 
@@ -508,7 +383,7 @@ func (c *cli) inspectAndPin(ctx context.Context, servers []discover.Server, opts
 	}
 	if err != nil {
 		// The text of an inspect.Run error holds only our own words.
-		c.pinErrorf("cannot inspect the servers", err)
+		c.scanStoreErrorf("cannot inspect the servers", err)
 		return pinReport{}, true, false
 	}
 	c.warnNotInspected(outcomes)
@@ -538,15 +413,4 @@ func (c *cli) printIgnored(ignored map[string]int) {
 		noun = "finding"
 	}
 	fprintf(c.stderr, "mcpmoat scan: %d %s ignored: %s\n", total, noun, strings.Join(parts, ", "))
-}
-
-// printFileErrors writes one line per file problem on stderr, with the
-// prefix "mcpmoat scan: ". A line holds only the fields of the FileError
-// (path, position, project path, server name, fixed reason and OS error),
-// never config text.
-func (c *cli) printFileErrors(errs []*discover.FileError) {
-	// FileError.Error already escapes the path and the server name.
-	for _, e := range errs {
-		fprintf(c.stderr, "mcpmoat scan: %s\n", e.Error())
-	}
 }

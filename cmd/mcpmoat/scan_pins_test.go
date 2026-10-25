@@ -412,7 +412,8 @@ func TestScanPinsFindings(t *testing.T) {
 		current  []inspect.Tool
 		wantRows []pinFindingRow
 		wantCode int
-		// wantDiffs are the tools that must have a diff, in order.
+		// wantDiffs are the tools that must have a diff, in order. "+name" is a
+		// new tool (see assertDiffsOf).
 		wantDiffs []string
 	}{
 		{
@@ -427,7 +428,7 @@ func TestScanPinsFindings(t *testing.T) {
 			pinned:   []inspect.Tool{mkTool("a", "Add.")},
 			current:  []inspect.Tool{mkTool("a", "Add."), mkTool("b", "Echo.")},
 			wantRows: []pinFindingRow{{"MOAT-T2-002", "medium", "srv", "tool", "b"}},
-			wantCode: exitOK,
+			wantCode: exitOK, wantDiffs: []string{"+b"},
 		},
 		{
 			name:     "removed tool is low and exits 0",
@@ -455,7 +456,8 @@ func TestScanPinsFindings(t *testing.T) {
 				{"MOAT-T2-003", "low", "srv", "tool", "b"},
 				{"MOAT-T2-002", "medium", "srv", "tool", "d"},
 			},
-			wantCode: exitFindings, wantDiffs: []string{"a"},
+			// A changed tool and a new tool have a diff. The removed tool has none.
+			wantCode: exitFindings, wantDiffs: []string{"a", "+d"},
 		},
 		{
 			name:    "two changed tools have two diffs",
@@ -504,7 +506,7 @@ func TestScanPinsFindings(t *testing.T) {
 			}
 			assertDiffsOf(t, out.diffs, "srv", tt.wantDiffs)
 			// The diffs come after the findings table.
-			if len(tt.wantDiffs) > 0 && !strings.HasPrefix(out.diffs, "Changed tool ") {
+			if len(tt.wantDiffs) > 0 && !strings.HasPrefix(out.diffs, "Changed tool ") && !strings.HasPrefix(out.diffs, "New tool ") {
 				t.Errorf("text after the findings table = %q, want it to start with a diff header", out.diffs)
 			}
 			// scan never writes pins.json for a pinned server.
@@ -515,30 +517,69 @@ func TestScanPinsFindings(t *testing.T) {
 	}
 }
 
-// assertDiffsOf checks the diff text of a scan: one diff block for each tool of
-// tools, in order, each with the pinned and current file headers, and no other
-// block.
+// assertDiffsOf checks the diff text of a scan or a pin: one diff block for each
+// entry of tools, in order, each with the pinned and current file headers, and
+// no other block. An entry "name" is a changed tool ("Changed tool name on
+// server <server>:"). An entry "+name" is a new tool ("New tool name on server
+// <server>:"), and the body of its block must have added lines only.
 func assertDiffsOf(t *testing.T, diffs, server string, tools []string) {
 	t.Helper()
-	if n := strings.Count(diffs, "Changed tool "); n != len(tools) {
+	headers := make([]string, len(tools))
+	for i, tool := range tools {
+		if name, isNew := strings.CutPrefix(tool, "+"); isNew {
+			headers[i] = "New tool " + name + " on server " + server + ":\n"
+		} else {
+			headers[i] = "Changed tool " + tool + " on server " + server + ":\n"
+		}
+	}
+	if n := strings.Count(diffs, "Changed tool ") + strings.Count(diffs, "New tool "); n != len(tools) {
 		t.Errorf("diff text has %d diffs, want %d (%v)\n%s", n, len(tools), tools, diffs)
 	}
 	if len(tools) == 0 {
 		return
 	}
+	// starts holds the offset of each header, in order.
+	starts := make([]int, len(headers))
 	pos := 0
-	for _, tool := range tools {
-		header := "Changed tool " + tool + " on server " + server + ":\n"
-		i := strings.Index(diffs[pos:], header)
-		if i < 0 {
+	for i, header := range headers {
+		j := strings.Index(diffs[pos:], header)
+		if j < 0 {
 			t.Errorf("diff text has no %q after offset %d\n%s", header, pos, diffs)
 			return
 		}
-		pos += i + len(header)
+		starts[i] = pos + j
+		pos += j + len(header)
 	}
 	assertContainsAll(t, "diff text", diffs, []string{"--- pinned", "+++ current"})
 	if n := strings.Count(diffs, "--- pinned"); n != len(tools) {
 		t.Errorf("diff text has %d \"--- pinned\" lines, want %d\n%s", n, len(tools), diffs)
+	}
+	for i, tool := range tools {
+		if !strings.HasPrefix(tool, "+") {
+			continue
+		}
+		end := len(diffs)
+		if i+1 < len(starts) {
+			end = starts[i+1]
+		}
+		assertOnlyAddedLines(t, diffs[starts[i]+len(headers[i]):end])
+	}
+}
+
+// assertOnlyAddedLines checks the body of the diff of a new tool, the text after
+// its header line: the two file headers, one hunk header "@@ -0,0 +1,N @@", and
+// then only lines that start with "+". Blank lines between blocks are skipped.
+func assertOnlyAddedLines(t *testing.T, body string) {
+	t.Helper()
+	lines := strings.Split(strings.TrimRight(body, "\n"), "\n")
+	if len(lines) < 4 || lines[0] != "--- pinned" || lines[1] != "+++ current" || !strings.HasPrefix(lines[2], "@@ -0,0 +1,") {
+		t.Errorf("the diff of a new tool does not start with the file headers and an \"@@ -0,0 +1,N @@\" hunk:\n%s", body)
+		return
+	}
+	for _, l := range lines[3:] {
+		if !strings.HasPrefix(l, "+") {
+			t.Errorf("the diff of a new tool has the line %q, want only added lines (+)\n%s", l, body)
+		}
 	}
 }
 

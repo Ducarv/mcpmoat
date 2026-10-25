@@ -43,8 +43,8 @@ type pinReport struct {
 	// rows are the pin findings that the ignore list does not drop, in the
 	// order of the servers, then of the tools.
 	rows []report.FindingRow
-	// diffs are the diffs of the changed tools in rows. A change that the
-	// ignore list drops has no diff.
+	// diffs are the diffs of the changed and new tools in rows. A change that
+	// the ignore list drops has no diff.
 	diffs []report.ToolDiff
 	// ignored counts the pin findings that the ignore list dropped, by rule
 	// ID. It is nil when the list dropped nothing.
@@ -108,7 +108,8 @@ func writeAcceptHints(w io.Writer, hints []acceptHint) error {
 // and true. It returns false when no safe form exists: the name is over
 // maxWarnNameRunes, or it has a rune that termsafe would escape (a control
 // character, a bidi or invisible rune, invalid UTF-8), so the user could not
-// see what they paste.
+// see what they paste. A name that starts with a dash has no safe form either:
+// even in quotes, pin would read it as a flag.
 //
 // A name of plain ASCII characters stays bare. Any other safe name goes in
 // single quotes, where the shell reads every character as text. Each single
@@ -118,7 +119,8 @@ func writeAcceptHints(w io.Writer, hints []acceptHint) error {
 // escapes a single quote by doubling it, so on Windows the user may need to
 // adapt the line.
 func shellArg(name string) (string, bool) {
-	if utf8.RuneCountInString(name) > maxWarnNameRunes || termsafe.Quote(name) != name {
+	if strings.HasPrefix(name, "-") ||
+		utf8.RuneCountInString(name) > maxWarnNameRunes || termsafe.Quote(name) != name {
 		return "", false
 	}
 	if isBareShellWord(name) {
@@ -172,15 +174,12 @@ type scanIgnores struct {
 	flags rules.IgnoreList
 }
 
-// pinRulePrefix starts the ID of every pin rule (MOAT-T2-001 to MOAT-T2-004).
-const pinRulePrefix = "MOAT-T2-"
-
 // ignored reports whether the user asked to ignore the finding k. For a pin
 // rule only the --ignore list counts. The second result is true when the
 // .mcpmoat-ignore file has an entry that matches k but is not applied, so
 // that the caller can warn about it.
 func (s *scanIgnores) ignored(k rules.FindingKey) (ignored, fileBlocked bool) {
-	if !strings.HasPrefix(k.RuleID, pinRulePrefix) {
+	if !pins.IsPinRuleID(k.RuleID) {
 		return s.all.Ignored(k), false
 	}
 	if s.flags.Ignored(k) {
@@ -204,140 +203,199 @@ func (c *cli) loadPins() (*pins.Store, error) {
 
 // pinOutcomes checks the tools of the servers that were inspected against
 // the pins store (FR-11 and FR-12). It gets the store from loadPins, which
-// scan calls before the servers are inspected.
-//
-// For each outcome with inspect.StatusOK:
-//   - A server that is not in the store is pinned (first run). pinOutcomes
-//     records it in the result. scan prints "pinned N tools for <server>" on
-//     stderr only after the store is saved (see printPinned). When
-//     pins.Snapshot or Store.Set refuses the tools, nothing is stored and the
-//     server gets a MOAT-T2-004 finding (not verified): a server that cannot
-//     be pinned must never pass in silence. A second server with the same
-//     identity gets the same finding, so that its tools are not skipped.
-//   - A server that is in the store is compared with pins.Compare. Each
-//     change is one finding row. The rule ID comes from the change kind and
-//     the severity from Change.Severity (a pinned name that cannot be
-//     verified is high), not from the rule set, which does not hold the pin
-//     rules. A changed tool also gets a diff. The store is never changed for
-//     a pinned server. When at least one row of the server is kept (not
-//     ignored), pinOutcomes also records the pins.Digest of the tools that scan
-//     saw, so scan can print the "--expect" hint (see writeAcceptHints). No
-//     hint is recorded when pins.Snapshot refuses the tools.
-//
-// For an outcome that is not OK (failed, timeout or refused):
-//   - A server that is in the store gets a MOAT-T2-004 finding with severity
-//     medium and the fixed reason reasonNotInspected. Its pinned tools could
-//     not be checked, so a hostile server must not be able to avoid the
-//     rug-pull check by failing on purpose. The warning on stderr stays.
-//   - A server that is not in the store gets no finding: it is only a warning
-//     (FR-06).
+// scan calls before the servers are inspected. It does not save the store: call
+// save on the result after the report is printed.
 //
 // The ignore list drops pin findings by rule ID, server name and tool name,
 // but only with --ignore (see scanIgnores). A dropped finding is counted in
 // the result, and its diff is not kept. A .mcpmoat-ignore entry that would
 // drop a pin finding is not applied, and gives one warning for each rule ID.
-//
-// pinOutcomes does not save the store: call save on the result after the
-// report is printed.
 func (c *cli) pinOutcomes(store *pins.Store, outcomes []inspect.Outcome, ign *scanIgnores) pinReport {
-	res := pinReport{store: store}
+	p := &pinner{
+		c:       c,
+		ign:     ign,
+		store:   store,
+		res:     pinReport{store: store},
+		handled: make(map[pins.Identity]bool),
+		warned:  make(map[string]bool),
+	}
+	for _, o := range outcomes {
+		p.outcome(o)
+	}
+	return p.res
+}
+
+// pinner holds the state of one pinOutcomes call.
+type pinner struct {
+	c     *cli
+	ign   *scanIgnores
+	store *pins.Store
+	res   pinReport
 	// handled holds the servers that this run already checked or pinned. Two
 	// servers with one identity should not happen, but if they do, the second
 	// must not be compared with the pins of the first.
-	handled := make(map[pins.Identity]bool)
+	handled map[pins.Identity]bool
 	// warned holds the rule IDs for which the user already got the warning
 	// that .mcpmoat-ignore cannot ignore them.
-	warned := make(map[string]bool)
+	warned map[string]bool
+}
 
-	// add keeps a row, or counts it when the ignore list drops it. It returns
-	// false for a dropped row, so the caller keeps no diff for it.
-	add := func(row report.FindingRow) bool {
-		key := rules.FindingKey{RuleID: row.RuleID, Server: row.Server, Tool: row.Key}
-		dropped, blocked := ign.ignored(key)
-		if blocked && !warned[row.RuleID] {
-			warned[row.RuleID] = true
-			c.scanWarnf("%s cannot ignore %s; use --ignore on the command line",
-				rules.IgnoreFileName, termsafe.Quote(row.RuleID))
-		}
-		if dropped {
-			if res.ignored == nil {
-				res.ignored = make(map[string]int)
-			}
-			res.ignored[row.RuleID]++
-			return false
-		}
-		res.rows = append(res.rows, row)
-		return true
+// outcome checks one outcome. A server that was not inspected is a warning
+// only (see notInspected). For a server that was inspected:
+//   - one that is not in the store is pinned (see firstPin);
+//   - one that is in the store is compared with its pins (see compare);
+//   - a second server with the same identity is a MOAT-T2-004 finding, so that
+//     its tools are not skipped.
+func (p *pinner) outcome(o inspect.Outcome) {
+	s := o.Server
+	id := serverIdentity(s)
+	if o.Status != inspect.StatusOK {
+		p.notInspected(s, id)
+		return
 	}
-	// unverified adds the MOAT-T2-004 row of a server that scan cannot verify.
-	// reason must be a fixed text: it is shown in the report.
-	unverified := func(name, reason string) {
-		row := pinRow(pins.KindUnverified, name, "", pins.KindUnverified.Severity())
-		row.Related = reason
-		add(row)
+	if p.handled[id] {
+		p.unverified(s.Name, reasonListedTwice)
+		return
 	}
+	p.handled[id] = true
 
-	for _, o := range outcomes {
-		s := o.Server
-		id := serverIdentity(s)
+	tools := o.Result.Tools
+	if stored, found := p.store.Get(id); found {
+		p.compare(s, tools, stored)
+		return
+	}
+	p.firstPin(s, id, tools)
+}
 
-		if o.Status != inspect.StatusOK {
-			// The warning on stderr is already written (warnNotInspected).
-			// A pinned server that cannot be inspected is also a finding.
-			if _, pinned := store.Get(id); pinned {
-				unverified(s.Name, reasonNotInspected)
-			}
+// add keeps a row, or counts it when the ignore list drops it. It returns false
+// for a dropped row, so the caller keeps no diff for it.
+func (p *pinner) add(row report.FindingRow) bool {
+	key := rules.FindingKey{RuleID: row.RuleID, Server: row.Server, Tool: row.Key}
+	dropped, blocked := p.ign.ignored(key)
+	if blocked && !p.warned[row.RuleID] {
+		p.warned[row.RuleID] = true
+		p.c.scanWarnf("%s cannot ignore %s; use --ignore on the command line",
+			rules.IgnoreFileName, termsafe.Quote(row.RuleID))
+	}
+	if dropped {
+		if p.res.ignored == nil {
+			p.res.ignored = make(map[string]int)
+		}
+		p.res.ignored[row.RuleID]++
+		return false
+	}
+	p.res.rows = append(p.res.rows, row)
+	return true
+}
+
+// unverified adds the MOAT-T2-004 row of a server that scan cannot verify.
+// reason must be a fixed text: it is shown in the report.
+func (p *pinner) unverified(name, reason string) {
+	row := pinRow(pins.KindUnverified, name, "", pins.KindUnverified.Severity())
+	row.Related = reason
+	p.add(row)
+}
+
+// notInspected handles a server that failed, timed out or was refused. The
+// warning on stderr is already written (see warnNotInspected). A server that
+// was pinned before this run also gets a MOAT-T2-004 finding with the fixed
+// reason reasonNotInspected: its pinned tools could not be checked, so a
+// hostile server must not be able to avoid the rug-pull check by failing on
+// purpose. A server that is not in the store is only a warning (FR-06). A
+// server that this run already handled gets no row: it was not pinned before.
+func (p *pinner) notInspected(s discover.Server, id pins.Identity) {
+	if _, pinned := p.store.Get(id); pinned && !p.handled[id] {
+		p.unverified(s.Name, reasonNotInspected)
+	}
+}
+
+// firstPin pins the tools of a server that is not in the store yet. The result
+// records it, and scan prints "pinned N tools for <server>" on stderr only after
+// the store is saved (see printPinned). When pins.Snapshot or Store.Set refuses
+// the tools, nothing is stored and the server gets a MOAT-T2-004 finding (not
+// verified): a server that cannot be pinned must never pass in silence.
+func (p *pinner) firstPin(s discover.Server, id pins.Identity, tools []inspect.Tool) {
+	snap, err := pins.Snapshot(tools)
+	if err == nil {
+		err = p.store.Set(id, snap)
+	}
+	if err != nil {
+		// The error text is not printed: it can name a tool. The row gets a
+		// fixed reason instead.
+		p.unverified(s.Name, snapshotReason(err))
+		return
+	}
+	p.res.dirty = true
+	p.res.pinned = append(p.res.pinned, pinnedServer{name: s.Name, tools: len(tools)})
+}
+
+// compare compares the tools of a pinned server with its pins (pins.Compare).
+// Each change is one finding row. The rule ID comes from the change kind and
+// the severity from Change.Severity (a pinned name that cannot be verified is
+// high), not from the rule set, which does not hold the pin rules. A changed
+// or new tool also gets a diff. The store is never changed. When at least one
+// row is kept (not ignored), compare also records the digest for the
+// "--expect" hint (see hint).
+func (p *pinner) compare(s discover.Server, tools []inspect.Tool, stored pins.ServerPins) {
+	kept := false // true when at least one row of this server is not ignored
+	for _, ch := range pins.Compare(stored, tools) {
+		row := pinRow(ch.Kind, s.Name, ch.Tool, ch.Severity)
+		if ch.Kind == pins.KindUnverified {
+			// ch.Reason is a fixed text from internal/pins.
+			row.Related = ch.Reason
+		}
+		if !p.add(row) {
 			continue
 		}
-		tools := o.Result.Tools
-
-		if handled[id] {
-			unverified(s.Name, reasonListedTwice)
-			continue
-		}
-		handled[id] = true
-
-		stored, found := store.Get(id)
-		if !found {
-			snap, err := pins.Snapshot(tools)
-			if err == nil {
-				err = store.Set(id, snap)
-			}
-			if err != nil {
-				// The error text is not printed: it can name a tool. The
-				// row gets a fixed reason instead.
-				unverified(s.Name, snapshotReason(err))
-				continue
-			}
-			res.dirty = true
-			res.pinned = append(res.pinned, pinnedServer{name: s.Name, tools: len(tools)})
-			continue
-		}
-
-		kept := false // true when at least one row of this server is not ignored
-		for _, ch := range pins.Compare(stored, tools) {
-			row := pinRow(ch.Kind, s.Name, ch.Tool, ch.Severity)
-			if ch.Kind == pins.KindUnverified {
-				// ch.Reason is a fixed text from internal/pins.
-				row.Related = ch.Reason
-			}
-			if !add(row) {
-				continue
-			}
-			kept = true
-			if ch.Kind == pins.KindChanged {
-				res.diffs = append(res.diffs, report.ToolDiff{Server: s.Name, Tool: ch.Tool, Diff: ch.Diff})
-			}
-		}
-		if kept {
-			// The error text is not printed. Tools that cannot be pinned
-			// cannot be accepted either, so there is no hint for them.
-			if snap, err := pins.Snapshot(tools); err == nil {
-				res.hints = append(res.hints, acceptHint{name: s.Name, digest: pins.Digest(snap)})
-			}
-		}
+		kept = true
+		p.res.diffs = p.c.appendDiff("scan", p.res.diffs, s.Name, ch)
 	}
-	return res
+	if kept {
+		p.hint(s.Name, tools)
+	}
+}
+
+// hint records the pins.Digest of the tools that scan saw, so scan can print
+// the "--expect" line (see writeAcceptHints). The error text is not printed.
+// Tools that cannot be pinned cannot be accepted either, so there is no hint
+// for them.
+func (p *pinner) hint(server string, tools []inspect.Tool) {
+	if snap, err := pins.Snapshot(tools); err == nil {
+		p.res.hints = append(p.res.hints, acceptHint{name: server, digest: pins.Digest(snap)})
+	}
+}
+
+// diffOf returns the diff of one change for the report. The change must have a
+// diff (see hasDiff). server is the name that the report shows.
+func diffOf(server string, ch pins.Change) report.ToolDiff {
+	return report.ToolDiff{Server: server, Tool: ch.Tool, Diff: ch.Diff, New: ch.Kind == pins.KindNew}
+}
+
+// hasDiff reports whether the change is one that has a diff: a changed tool or
+// a new tool. The user must see the content of a new tool before they accept it.
+func hasDiff(ch pins.Change) bool {
+	return ch.Kind == pins.KindChanged || ch.Kind == pins.KindNew
+}
+
+// appendDiff adds the diff of ch to diffs and returns the result. A change
+// without a diff adds nothing. When the diff was cut at the size limit, it
+// prints one warning on stderr for the command cmd ("scan" or "pin"), because
+// the user would review only a part of the tool.
+func (c *cli) appendDiff(cmd string, diffs []report.ToolDiff, server string, ch pins.Change) []report.ToolDiff {
+	if !hasDiff(ch) {
+		return diffs
+	}
+	if ch.Truncated {
+		c.warnf(cmd, "the diff of tool %s on server %s was cut at the size limit; review the full tool before you accept it",
+			cutName(ch.Tool), cutName(server))
+	}
+	return append(diffs, diffOf(server, ch))
+}
+
+// cutName returns an untrusted name (a server or a tool) escaped and cut for a
+// line on stderr.
+func cutName(name string) string {
+	return termsafe.QuoteCut(name, maxWarnNameRunes)
 }
 
 // Fixed reasons for a MOAT-T2-004 row that scan makes itself. They hold no
@@ -395,23 +453,29 @@ func (c *cli) printPinned(servers []pinnedServer) {
 // warnNotInspected writes one line on stderr for each outcome that is not
 // inspect.StatusOK, for example
 // "mcpmoat scan: warning: server foo: timeout: inspect: no answer within 10s".
-// The server name and the error text come from untrusted sources (the error
-// can carry server output), so both are escaped and cut. A server that was
-// not inspected is a warning, not a finding and not exit code 2 (FR-06, FR-16).
+// A server that was not inspected is a warning, not a finding and not exit
+// code 2 (FR-06, FR-16).
 func (c *cli) warnNotInspected(outcomes []inspect.Outcome) {
 	for _, o := range outcomes {
-		if o.Status == inspect.StatusOK {
-			continue
+		if o.Status != inspect.StatusOK {
+			c.scanWarnf("%s", notInspectedText(o))
 		}
-		reason := "no error text"
-		if o.Err != nil {
-			reason = o.Err.Error()
-		}
-		c.scanWarnf("server %s: %s: %s",
-			termsafe.QuoteCut(o.Server.Name, maxWarnNameRunes),
-			termsafe.Quote(string(o.Status)),
-			termsafe.QuoteCut(reason, maxWarnErrRunes))
 	}
+}
+
+// notInspectedText returns "server <name>: <status>: <reason>" for an outcome
+// that is not inspect.StatusOK. scan shows it as a warning and pin as an error.
+// The server name and the error text come from untrusted sources (the error can
+// carry server output), so both are escaped and cut.
+func notInspectedText(o inspect.Outcome) string {
+	reason := "no error text"
+	if o.Err != nil {
+		reason = o.Err.Error()
+	}
+	return fmt.Sprintf("server %s: %s: %s",
+		cutName(o.Server.Name),
+		termsafe.Quote(string(o.Status)),
+		termsafe.QuoteCut(reason, maxWarnErrRunes))
 }
 
 // mergeIgnored adds the counts of extra to dst and returns dst. It makes a new
@@ -426,8 +490,8 @@ func mergeIgnored(dst, extra map[string]int) map[string]int {
 	return dst
 }
 
-// pinErrorf writes one pin store error on stderr. The error text can hold the
-// path of pins.json, which comes from the environment, so it is escaped.
-func (c *cli) pinErrorf(what string, err error) {
-	fprintf(c.stderr, "mcpmoat scan: %s: %s\n", what, termsafe.Quote(err.Error()))
+// scanStoreErrorf writes one pin store error on stderr. The error text can hold
+// the path of pins.json, which comes from the environment, so it is escaped.
+func (c *cli) scanStoreErrorf(what string, err error) {
+	c.cmdErrorf("scan", "%s: %s", what, termsafe.Quote(err.Error()))
 }

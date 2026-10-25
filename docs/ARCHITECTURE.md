@@ -3,8 +3,8 @@
 > **Status:** this page describes the code as it is today and marks what is still planned. Today
 > `mcpmoat scan --no-connect` reads configs, loads rules, lists servers and applies the config rules
 > (T4 and T5) and the ignore list. `mcpmoat scan` without `--no-connect` also connects to the
-> servers, pins their tools on the first run, and reports new, removed and changed tools with a diff
-> on later runs (T2). `mcpmoat pin --accept <server> --expect <digest>` accepts the changes. The YAML rules are not
+> servers, pins their tools on the first run, and reports new, removed and changed tools on later
+> runs (T2). It prints a diff for each new and each changed tool. `mcpmoat pin --accept <server> --expect <digest>` accepts the changes. The YAML rules are not
 > applied to tools yet (#143).
 
 This page is the one place for the package layout, the import direction, the data flow, the
@@ -33,6 +33,8 @@ docs/                   PRD and other documentation
 ```
 
 - `cmd/mcpmoat`: parses flags, runs the command, returns the exit code. `os.Exit` is only in `main`.
+  `configs.go` holds the config loader that `scan` and `pin` share (`loadConfigs`), so both commands
+  apply the same trust rules to a config file.
 - `internal/termsafe`: escapes untrusted text for the terminal. See
   [Where untrusted text is escaped](#where-untrusted-text-is-escaped).
 - `internal/safefile`: the one shared hardened file read. It confines the open to a directory with
@@ -47,11 +49,11 @@ docs/                   PRD and other documentation
   a server (`Snapshot`), keeps the versioned `pins.json` store (`Load`, `Get`, `Set`, `Save` and
   `DefaultPath`), compares the pins with the current tools (`Compare`), and makes the digest of a tool
   set (`Digest`, `ValidDigest`). `Compare` finds changed,
-  new, removed and not verified tools and makes the unified diff of a changed tool. See
+  new, removed and not verified tools and makes the unified diff of a changed or new tool. See
   [Tool hash](#tool-hash), [Tool set digest](#tool-set-digest) and
   [The `pins.json` store](#the-pinsjson-store).
 - `internal/report`: writes the terminal output: the servers (`WriteServers`), the findings
-  (`WriteFindings`) and the diffs of changed tools (`WriteDiffs`).
+  (`WriteFindings`) and the diffs of changed and new tools (`WriteDiffs`).
 - `rules/`: the built-in rule files (`rules/*.yaml`) and `data/popular-servers.txt`. The Go file
   `rules/embed.go` embeds both with `go:embed`. It holds data only. `internal/rules` parses it.
 - `testdata/`: fixtures. `testdata/servers` holds malicious example servers. `testdata/configs`
@@ -99,9 +101,12 @@ go list -f '{{.ImportPath}}: {{join .Imports " "}}' ./...
 3. It reads `.mcpmoat-ignore` with `rules.ReadIgnoreFile` and adds the `--ignore` rule IDs. It
    keeps two lists (`scanIgnores` in `cmd/mcpmoat/scan_pins.go`): one for the config rules, with the
    file and the flags, and one for the pin rules, with the flags only. The file can come from a
-   cloned repository, so it cannot ignore a pin rule (`MOAT-T2-*`). `scan` prints a warning for each
+   cloned repository, so it cannot ignore a pin rule. The guard is `pins.IsPinRuleID`: a rule ID is
+   a pin rule when it starts with `pins.RuleIDPrefix` (`MOAT-T2-`). `scan` prints a warning for each
    such rule ID, and tells the user to use `--ignore`.
-4. It finds the servers with `discover.Discover`, or reads one file with `discover.ReadConfig`.
+4. It finds the servers with `loadConfigs` in `cmd/mcpmoat/configs.go`. That function runs
+   `discover.Discover`, or reads one file with `discover.ReadConfig` when `--config` is set. `pin`
+   uses the same function, so both commands read the configs with the same trust rules.
 5. It runs the built-in config rules on every server it found, also a disabled one, as `discover`
    gives it. `rules.CheckConfig` gives the T4 findings (MOAT-T4-001 to 004). The typosquat check
    from `rules.NewBuiltinTyposquat` gives the T5 finding (MOAT-T5-001). The ignore list drops
@@ -133,7 +138,7 @@ the connect and pin steps between step 5 and step 6:
   - A pinned server that was not inspected (it failed, timed out or was refused) gets a MOAT-T2-004
     finding (medium) with the reason `pinned server could not be inspected`. A hostile server must
     not avoid the check by failing on purpose. A server that is not pinned stays a warning only.
-  - A server that is in the store goes through `pins.Compare`. The findings are MOAT-T2-001
+  - A server that is in the store goes through `pins.Compare` (`pinner.compare`). The findings are MOAT-T2-001
     (changed tool, high), MOAT-T2-002 (new tool, medium), MOAT-T2-003 (removed tool, low) and
     MOAT-T2-004 (not verified). The severity of MOAT-T2-004 is high when the tool name is pinned,
     because a duplicate, invalid or unverifiable copy of a pinned tool can hide a rug pull, and
@@ -151,14 +156,19 @@ the connect and pin steps between step 5 and step 6:
   the `pins.Digest` of the tools that `scan` saw (`acceptHint` in `cmd/mcpmoat/scan_pins.go`). A
   server whose tools `pins.Snapshot` refuses has no hint. A first-run server, a server that was not
   inspected and an ignored finding give no hint.
-- The pin findings join the config findings in one table. A changed tool also gets a diff.
-  `report.WriteDiffs` prints the diffs after the findings table. Then `writeAcceptHints` prints one
+- The pin findings join the config findings in one table. A changed tool and a new tool also get a
+  diff, so the user can review the content of a new tool before they accept it. A new tool has the
+  header `New tool <tool> on server <server>:` and only added lines. A finding that the user ignored
+  gets no diff. `report.WriteDiffs` prints the diffs after the findings table. When a diff was cut at
+  the size limit (`Change.Truncated`), `scan` prints a warning on stderr that names the tool and the
+  server: `the diff of tool <tool> on server <server> was cut at the size limit; review the full tool
+  before you accept it`. Then `writeAcceptHints` prints one
   line for each hint on stdout:
   `To accept <server>: mcpmoat pin --accept <server> --expect pd1:<32 hex>`. The server name in the
   command goes through `shellArg`: a name of plain ASCII characters stays bare, and any other safe
   name goes in single quotes (POSIX shell quoting; on Windows `cmd.exe` or PowerShell the user may
-  need to change it). A name that is too long, or that `termsafe` would escape, gets no command,
-  only the digest.
+  need to change it). A name that is too long, that `termsafe` would escape, or that starts with a
+  dash (`pin` would read it as a flag, even in quotes) gets no command, only the digest.
 - `scan` saves the new pins after it prints the report, so a save error never hides the report.
   The `pinned N tools` lines come after the save.
 
@@ -184,7 +194,9 @@ Exit code 2 wins over 1. `internal/report` has no JSON output.
 3. It inspects that one server with `--timeout`, with the same inspector as `scan`. A server that
    fails, times out or is refused exits with 2, and nothing is written.
 4. It makes the pins of the tools (`pins.Snapshot`) and counts the differences with `pins.Compare`.
-   It prints the diff of each changed tool on stdout (`report.WriteDiffs`).
+   It prints the diff of each changed tool and of each new tool on stdout (`report.WriteDiffs`).
+   A server that is not pinned yet has no pins, so `pin` shows every tool as a new tool, with only
+   added lines. A diff that was cut at the size limit gives the same stderr warning as in `scan`.
 5. With `--expect`, it computes `pins.Digest` of the snapshot and compares it with the flag value
    before `Store.Set` and `Save`. If they differ, it prints
    `mcpmoat pin: the tools of <server> differ from what scan showed (digest ..., expected ...);
@@ -240,14 +252,16 @@ The target flow is `discover -> inspect -> rules -> pins -> report`. The `discov
 - Golden hashes: `testdata/pins/hash/golden.txt`, for the fixtures in
   `testdata/pins/hash/tools.json`.
 
-The diff of a changed tool (`unifiedDiff` in `internal/pins/diff.go`, with `go-udiff`) works on a
+The diff of a changed tool (`unifiedDiff` in `internal/pins/diff.go`, with `go-udiff`) and the diff
+of a new tool (`newToolDiff`, a diff from empty text, so every content line is an added line) work on a
 rendered form of the tool: one item for each line (name, title, description, annotations,
 inputSchema, outputSchema, the last three as indented JSON). A line of more than about 200 runes is
 wrapped, so a change in a long line still shows. The diff trims the lines that both texts share at
 the start and at the end, keeps 3 lines of context, and only then cuts the rest to 64 KiB and 2000
-lines. The labels are `pinned` and `current`. A changed tool always has diff text, or a fixed note
-when the diff cannot be made or the change is not visible in the rendered text. Server text is raw
-in the diff. The report layer escapes it (see
+lines. When the cut applies, the diff ends with a marker line and `Change.Truncated` is true, so
+`scan` and `pin` can warn the user. The labels are `pinned` and `current`. A changed or new tool
+always has diff text, or a fixed note when the diff cannot be made or the change is not visible in
+the rendered text. Server text is raw in the diff. The report layer escapes it (see
 [Where untrusted text is escaped](#where-untrusted-text-is-escaped)).
 
 The doc comments own the rules. `Canonical` owns the shape, null handling, errors, no normalisation
@@ -414,7 +428,7 @@ The rule: untrusted text goes through `termsafe` before it reaches a terminal. T
 names, paths, argv and errors that carry server output. `Outcome.Err` can carry server output, so
 the report layer must escape it. `discover.FileError.Error` already escapes.
 
-The diff of a changed tool is the first place where a tool description reaches the terminal.
+The diff of a changed or new tool is the first place where a tool description reaches the terminal.
 `internal/pins` keeps the raw text in `Change.Diff`. `report.WriteDiffs` splits each diff line into
 the unified prefix (`@@`, `---`, `+++`, `+`, `-` or a space) and the rest. It writes the prefix as it
 is and sends the rest through `termsafe.QuoteCut`, with a cap of 2000 runes for each line. A control

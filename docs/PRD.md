@@ -465,6 +465,12 @@ text diff.
 - Using the rug-pull fixture, the second run reports the changed tool with a unified text diff of the
   description and/or schema.
 - New and removed tools are reported as separate change kinds.
+- A new tool also gets a diff, from empty text, with only added lines and the header `New tool
+  <tool> on server <server>:`. So the user can review the content of a new tool before they accept
+  it. A finding that the user ignored gets no diff.
+- When a diff is cut at the size limit (64 KiB or 2000 lines after the shared lines are trimmed),
+  `scan` and `pin` print a warning on stderr that names the tool and the server: `the diff of tool
+  <tool> on server <server> was cut at the size limit; review the full tool before you accept it`.
 - A changed tool is a finding with severity `high` (T2). The rule IDs and severities are:
   `MOAT-T2-001` changed tool (`high`), `MOAT-T2-002` new tool (`medium`), `MOAT-T2-003` removed tool
   (`low`) and `MOAT-T2-004` tool not verified (`high` when the tool name is pinned, else `medium`).
@@ -492,8 +498,9 @@ text diff.
 - Any config file problem exits with code 2, because a broken file can hide a second server with
   the same name. `pin` prints each problem and `fix the config file or choose one with --config
   <file>`, and it does not inspect or write anything.
-- `pin --accept` prints the diff of each changed tool before the `accepted ...` line, so you see
-  what the accept changes.
+- `pin --accept` prints the diff of each changed tool and of each new tool before the `accepted ...`
+  line, so you see what the accept changes. For a server that is not pinned yet, it shows every tool
+  as a new tool.
 - `pin --accept <server> --expect <digest>` saves the pins only if the tools that the server
   returns now give the same digest. A hostile server picks the tools that it shows, so it could
   show harmless tools to `scan` and harmful tools to `pin --accept`. The digest closes this gap.
@@ -504,7 +511,7 @@ text diff.
 - After the diffs, `scan` prints one line for each pinned server that has a pin finding that is not
   ignored: `To accept <server>: mcpmoat pin --accept <server> --expect pd1:<32 hex>`. The server
   name in the command is quoted for a POSIX shell when needed. A name with a character that is not
-  safe to paste gets no command, only the digest. On Windows (`cmd.exe` or PowerShell) the user may
+  safe to paste, or that starts with `-`, gets no command, only the digest. On Windows (`cmd.exe` or PowerShell) the user may
   need to change the quotes. There is no line for a server pinned for the first time, a server that
   could not be inspected, an ignored finding, or tools that cannot be pinned.
 - The digest (`pins.Digest`, version `pd1`) is the first 128 bits of SHA-256 over the sorted tool

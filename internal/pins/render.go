@@ -55,9 +55,10 @@ type renderedTool struct {
 // A line with more than maxLineRunes runes after its prefix or indentation is
 // wrapped: it becomes several lines of at most maxLineRunes runes, cut on rune
 // boundaries. Each chunk keeps the prefix, or the indentation, of the line. So
-// a line diff shows the chunk that changed, also in a very long line. The JSON parts have two spaces of
-// indent for each level, and the key order of the canonical form. A schema
-// that the server did not send is null.
+// a line diff shows the chunk that changed, also in a very long line.
+//
+// The JSON parts have two spaces of indent for each level, and the key order
+// of the canonical form. A schema that the server did not send is null.
 //
 // render keeps every byte of the strings as the server sent them. It does not
 // escape or normalise anything, so an added invisible character is a changed

@@ -222,6 +222,30 @@ func TestWriteDiffsExact(t *testing.T) {
 				"---\" a\\x1b\"\n+++\" b\\x1b\"\n-\"- c\\x1b\"\n",
 		},
 		{
+			name:  "new tool gets the New tool header",
+			diffs: []report.ToolDiff{{Server: "fs", Tool: "write", New: true, Diff: "+++ current\n+a\n"}},
+			want:  "\nNew tool write on server fs:\n+++ current\n+a\n",
+		},
+		{
+			name:  "new tool with empty Diff writes the note",
+			diffs: []report.ToolDiff{{Server: "fs", Tool: "write", New: true}},
+			want:  "\nNew tool write on server fs:\n  (no diff text available)\n",
+		},
+		{
+			name:  "hostile names are escaped in the New header",
+			diffs: []report.ToolDiff{{Server: "evil\x1b[2J", Tool: "t\x1b]0;x\a", New: true, Diff: "+a\n"}},
+			want:  "\nNew tool \"t\\x1b]0;x\\a\" on server \"evil\\x1b[2J\":\n+a\n",
+		},
+		{
+			name: "new and changed diffs keep their own headers",
+			diffs: []report.ToolDiff{
+				{Server: "a", Tool: "t1", Diff: "+x\n"},
+				{Server: "a", Tool: "t2", New: true, Diff: "+y\n"},
+			},
+			want: "\nChanged tool t1 on server a:\n+x\n" +
+				"\nNew tool t2 on server a:\n+y\n",
+		},
+		{
 			name: "two diffs in order, each with a blank line before",
 			diffs: []report.ToolDiff{
 				{Server: "a", Tool: "t1", Diff: "+x\n"},

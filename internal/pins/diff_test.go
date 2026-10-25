@@ -41,7 +41,7 @@ func numberedLines(n int) string {
 // mustDiff returns unifiedDiff of the two tools and fails the test on an error.
 func mustDiff(t testing.TB, oldTool, newTool inspect.Tool) string {
 	t.Helper()
-	got, err := unifiedDiff(mustCanonical(t, oldTool), mustCanonical(t, newTool))
+	got, _, err := unifiedDiff(mustCanonical(t, oldTool), mustCanonical(t, newTool))
 	if err != nil {
 		t.Fatalf("unifiedDiff() error = %v, want nil", err)
 	}
@@ -312,12 +312,12 @@ func TestUnifiedDiffErrors(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			got, err := unifiedDiff(tt.old, tt.new)
+			got, truncated, err := unifiedDiff(tt.old, tt.new)
 			if err == nil {
 				t.Fatalf("unifiedDiff() = %q, error = nil, want an error", got)
 			}
-			if got != "" {
-				t.Errorf("unifiedDiff() = %q with an error, want empty", got)
+			if got != "" || truncated {
+				t.Errorf("unifiedDiff() = %q, %v with an error, want empty and false", got, truncated)
 			}
 			if !strings.Contains(err.Error(), tt.wantMsg) {
 				t.Errorf("unifiedDiff() error = %q, want it to name the %s tool", err, tt.wantMsg)
@@ -735,13 +735,16 @@ func TestCapText(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			got := capText(tt.in)
+			got, cut := capText(tt.in)
 			want := tt.want
 			if tt.same {
 				want = tt.in
 			}
 			if got != want {
 				t.Errorf("capText() = %.60q (len %d), want %.60q (len %d)", got, len(got), want, len(want))
+			}
+			if cut == tt.same {
+				t.Errorf("capText() cut = %v, want %v", cut, !tt.same)
 			}
 		})
 	}
@@ -755,7 +758,7 @@ func TestCapTextCutsOnRuneStart(t *testing.T) {
 			t.Run(fmt.Sprintf("%d-byte rune, prefix %d", len(r), prefix), func(t *testing.T) {
 				t.Parallel()
 				in := strings.Repeat("a", prefix) + strings.Repeat(r, maxRenderedBytes/len(r)+4)
-				got := capText(in)
+				got, _ := capText(in)
 				if !utf8.ValidString(got) {
 					t.Fatalf("capText() is not valid UTF-8: tail %q", tail(got, 20))
 				}
@@ -836,7 +839,7 @@ func FuzzRender(f *testing.F) {
 			t.Fatalf("render(%q) = %q with error %v, want empty text", a, r, err)
 		}
 
-		d, err := unifiedDiff(a, b)
+		d, _, err := unifiedDiff(a, b)
 		if err != nil {
 			if d != "" {
 				t.Fatalf("unifiedDiff() = %q with error %v, want empty text", d, err)
@@ -860,4 +863,18 @@ func FuzzRender(f *testing.F) {
 			t.Fatalf("diff is %d bytes, want it bounded", len(d))
 		}
 	})
+}
+
+func TestNewToolDiffErrors(t *testing.T) {
+	t.Parallel()
+	got, truncated, err := newToolDiff("{not json")
+	if err == nil {
+		t.Fatalf("newToolDiff() = %q, error = nil, want an error", got)
+	}
+	if got != "" || truncated {
+		t.Errorf("newToolDiff() = %q, %v with an error, want empty and false", got, truncated)
+	}
+	if !strings.Contains(err.Error(), "current") {
+		t.Errorf("newToolDiff() error = %q, want it to name the current tool", err)
+	}
 }

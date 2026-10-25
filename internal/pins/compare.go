@@ -35,12 +35,17 @@ const (
 	severityLow    = "low"
 )
 
-// The Diff of a changed tool when there is no diff text. Both are fixed notes,
-// never server text. The change is still reported, and its Diff is never
-// empty: a tool must never hide behind a render error or an invisible change.
+// The Diff of a changed or new tool when there is no diff text. All are fixed
+// notes, never server text. The change is still reported, and its Diff is
+// never empty: a tool must never hide behind a render error or an invisible
+// change.
 const (
-	// diffUnavailable is the Diff when the diff can not be made.
+	// diffUnavailable is the Diff of a changed tool when the diff can not be
+	// made.
 	diffUnavailable = "pinned text could not be rendered"
+	// diffNewUnavailable is the Diff of a new tool when the diff can not be
+	// made.
+	diffNewUnavailable = "current text could not be rendered"
 	// diffNotVisible is the Diff when the hashes differ but the rendered texts
 	// are equal. The canonical form has a key that render does not show, or two
 	// keys that differ only in case.
@@ -61,6 +66,15 @@ const (
 	// pinned hash, so the pin is corrupt or was edited.
 	ReasonPinMismatch = "pinned text does not match its hash"
 )
+
+// RuleIDPrefix is the start of every rule ID that ChangeKind.RuleID returns.
+const RuleIDPrefix = "MOAT-T2-"
+
+// IsPinRuleID reports whether id is the rule ID of a pin change, that is, an
+// ID that starts with RuleIDPrefix. The match is exact and case-sensitive.
+func IsPinRuleID(id string) bool {
+	return strings.HasPrefix(id, RuleIDPrefix)
+}
 
 // RuleID returns the rule ID of the findings for this kind: MOAT-T2-001
 // (changed), MOAT-T2-002 (new), MOAT-T2-003 (removed) or MOAT-T2-004
@@ -109,9 +123,15 @@ type Change struct {
 	// Tool is the tool name. For KindUnverified it can be empty.
 	Tool string
 	// Diff is the unified diff between the pinned and the current tool. It is
-	// set only for KindChanged, and it is never empty there: when no diff text
-	// exists, it is a fixed note.
+	// set only for KindChanged and KindNew, and it is never empty there: when no
+	// diff text exists, it is a fixed note. For KindNew the diff is from empty
+	// text, so every content line is an added line. The labels are "--- pinned"
+	// and "+++ current".
 	Diff string
+	// Truncated is true when the diff window was cut by the size caps (64 KiB
+	// or 2000 lines) and Diff ends with a truncated marker line. It is only
+	// true for KindChanged and KindNew.
+	Truncated bool
 	// Reason says why a tool is KindUnverified. It is always one of the Reason
 	// constants, never text from a server, so it is safe to print. It is empty
 	// for the other kinds.
@@ -203,7 +223,13 @@ func compareTool(stored ServerPins, t inspect.Tool) (Change, bool) {
 
 	pin, ok := stored[t.Name]
 	if !ok {
-		return Change{Kind: KindNew, Tool: t.Name, Severity: KindNew.Severity()}, true
+		// The user must see a new tool before they accept it, so it has a diff
+		// too: all its lines are added lines.
+		diff, truncated, err := newToolDiff(string(canonical))
+		if err != nil {
+			diff, truncated = diffNewUnavailable, false
+		}
+		return Change{Kind: KindNew, Tool: t.Name, Diff: diff, Truncated: truncated, Severity: KindNew.Severity()}, true
 	}
 	if !strings.HasPrefix(pin.Hash, HashVersion+":") {
 		return unverified(ReasonHashVersion)
@@ -217,14 +243,14 @@ func compareTool(stored ServerPins, t inspect.Tool) (Change, bool) {
 		return unverified(ReasonPinMismatch)
 	}
 
-	diff, err := unifiedDiff(pin.Canonical, string(canonical))
+	diff, truncated, err := unifiedDiff(pin.Canonical, string(canonical))
 	switch {
 	case err != nil:
-		diff = diffUnavailable
+		diff, truncated = diffUnavailable, false
 	case diff == "":
 		diff = diffNotVisible
 	}
-	return Change{Kind: KindChanged, Tool: t.Name, Diff: diff, Severity: KindChanged.Severity()}, true
+	return Change{Kind: KindChanged, Tool: t.Name, Diff: diff, Truncated: truncated, Severity: KindChanged.Severity()}, true
 }
 
 // unverifiedChange returns a KindUnverified change. Its severity is "high" when

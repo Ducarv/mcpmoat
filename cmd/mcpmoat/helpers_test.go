@@ -5,9 +5,11 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -21,6 +23,12 @@ import (
 
 	"github.com/Ducarv/mcpmoat/internal/discover/discovertest"
 )
+
+// run is runWithContext with a context that never ends: no signal stops it.
+// Only tests use it. main uses runWithContext.
+func run(args []string, stdout, stderr io.Writer) int {
+	return runWithContext(context.Background(), args, stdout, stderr)
+}
 
 // usageHint is the last line of every usage error on stderr.
 const usageHint = `Run "mcpmoat help" for usage.`

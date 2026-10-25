@@ -516,7 +516,7 @@ func TestScanAcceptHintServerNames(t *testing.T) {
 		{"plain", "my-srv.v1", "my-srv.v1", "my-srv.v1"},
 		{"all bare characters", "A_b.c@d/e:f+g=h-9", "A_b.c@d/e:f+g=h-9", "A_b.c@d/e:f+g=h-9"},
 		{"space and quote", "it's a b", "it's a b", `'it'\''s a b'`},
-		{"starts with a dash", "-dash", "-dash", "'-dash'"},
+		{"starts with a dash: no command", "-dash", "-dash", ""},
 		{"shell metacharacters", "a;b $(x) `y` *", "a;b $(x) `y` *", "'a;b $(x) `y` *'"},
 		{"non-ASCII letters", "café", "café", "'café'"},
 		{"escape sequence: no command", "evil\x1b[31m", `"evil\x1b[31m"`, ""},
@@ -592,9 +592,11 @@ func TestShellArg(t *testing.T) {
 		{"plain", "srv", "srv", true},
 		{"every bare character", "aZ09._@/:+=-", "aZ09._@/:+=-", true},
 		{"dash inside", "a-b", "a-b", true},
-		{"starts with a dash", "-x", "'-x'", true},
-		{"only a dash", "-", "'-'", true},
-		{"two dashes", "--", "'--'", true},
+		// pin would read a name that starts with a dash as a flag, even in
+		// quotes, so there is no safe form.
+		{"starts with a dash: no safe form", "-x", "", false},
+		{"only a dash: no safe form", "-", "", false},
+		{"two dashes: no safe form", "--", "", false},
 		{"empty", "", "''", true},
 		{"space", "a b", "'a b'", true},
 		{"one quote", "it's", `'it'\''s'`, true},
@@ -641,8 +643,15 @@ func TestShellArgReadByShell(t *testing.T) {
 	}
 	dir := t.TempDir()
 	names := []string{
-		"srv", "-n", "-", "--", "a b", "it's a b", "'", "''", `a\b`, "$HOME", "$(touch pwned)",
+		"srv", "a-n", "a b", "it's a b", "'", "''", `a\b`, "$HOME", "$(touch pwned)",
 		"`touch pwned`", "a;touch pwned", "a|b", "a&b", "*", "~", "#a", "!x", "{a,b}", "a=b", "naïve",
+	}
+	// sh would read "-n" as an option of printf, and pin would read a name that
+	// starts with a dash as a flag: there is no safe form, so nothing is quoted.
+	for _, name := range []string{"-n", "-", "--", "-e x"} {
+		if arg, ok := shellArg(name); ok || arg != "" {
+			t.Errorf("shellArg(%q) = (%q, %v), want (\"\", false)", name, arg, ok)
+		}
 	}
 	for _, name := range names {
 		arg, ok := shellArg(name)

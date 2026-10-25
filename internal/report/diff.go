@@ -41,6 +41,9 @@ type ToolDiff struct {
 	// server, so WriteDiffs escapes it. When Diff is empty or holds only
 	// whitespace, WriteDiffs writes a fixed note in its place.
 	Diff string
+	// New is true for a tool that is new on a pinned server: the server offers
+	// it, but the pins do not hold it. Its Diff has only added lines.
+	New bool
 }
 
 // WriteDiffs writes one unified diff for each element of diffs to w, in the
@@ -50,12 +53,17 @@ type ToolDiff struct {
 //
 //	Changed tool <tool> on server <server>:
 //
+// When New is true, the header says that the tool is new:
+//
+//	New tool <tool> on server <server>:
+//
 // The diff lines follow, one output line for each line of Diff.
 //
 // When Diff is empty, or holds only whitespace and newlines, the reviewer would
 // see a changed tool with no content. So WriteDiffs writes one fixed note line
 // under the header instead of diff lines. The line is two spaces and the text
-// "(no diff text available)". The note is a constant of this package. It is never server text.
+// "(no diff text available)". The note is a constant of this package. It is
+// never server text.
 //
 // The tool and server names go through findingCell, like the cells of
 // WriteFindings: an empty name shows as "-", and a name is escaped and cut at
@@ -90,7 +98,11 @@ func WriteDiffs(w io.Writer, diffs []ToolDiff) error {
 		var b strings.Builder
 
 		// The blank line separates the diff from the output before it.
-		b.WriteString("\nChanged tool ")
+		if d.New {
+			b.WriteString("\nNew tool ")
+		} else {
+			b.WriteString("\nChanged tool ")
+		}
 		b.WriteString(findingCell(d.Tool))
 		b.WriteString(" on server ")
 		b.WriteString(findingCell(d.Server))

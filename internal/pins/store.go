@@ -295,9 +295,9 @@ func (s *Store) Get(id Identity) (ServerPins, bool) {
 // Set refuses a server that Load would refuse: an empty server name, an empty
 // tool name, an empty hash, an empty canonical text, text that is not valid
 // UTF-8, or an entry larger than maxServerSize (2 MiB) as compact JSON. Every
-// error from Set is such a refusal. Then the store does not change, and the caller can still save the
-// other servers. The errors hold no tool names, because the server chose
-// them, and no server context: the caller adds it.
+// error from Set is such a refusal. Then the store does not change, and the
+// caller can still save the other servers. The errors hold no tool names,
+// because the server chose them, and no server context: the caller adds it.
 //
 // The server chose the data that Set refuses, so a hostile server can make
 // itself impossible to pin. The caller must report a refused server (for

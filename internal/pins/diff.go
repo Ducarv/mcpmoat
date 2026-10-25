@@ -47,34 +47,54 @@ var hunkHeader = regexp.MustCompile(`^@@ -(\d+)(,\d+)? \+(\d+)(,\d+)? @@$`)
 // maxRenderedLines, and ends with a marker line when it was cut. So a change
 // after a very long text is still in the diff, and the first change is always
 // in the window. The line numbers in the hunk headers are those of the full
-// rendered texts. unifiedDiff returns an error when a canonical form does not
-// parse.
+// rendered texts. The truncated result is true when a text was cut. This
+// function returns an error when a canonical form does not parse.
 //
 // The diff keeps the bytes of the server text. The caller must escape it
 // before it writes it to a terminal.
-func unifiedDiff(oldCanonical, newCanonical string) (string, error) {
+func unifiedDiff(oldCanonical, newCanonical string) (diff string, truncated bool, err error) {
 	before, err := render(oldCanonical)
 	if err != nil {
-		return "", fmt.Errorf("render pinned tool: %w", err)
+		return "", false, fmt.Errorf("render pinned tool: %w", err)
 	}
 	after, err := render(newCanonical)
 	if err != nil {
-		return "", fmt.Errorf("render current tool: %w", err)
+		return "", false, fmt.Errorf("render current tool: %w", err)
 	}
+	return diffRendered(before, after)
+}
+
+// newToolDiff returns the unified diff from no text to the current tool: every
+// content line is an added line. It is the diff of a tool that the pin does
+// not have yet. The labels, the caps and the truncated result are those of
+// unifiedDiff. The diff is never empty, because a rendered tool always has
+// lines. newToolDiff returns an error when newCanonical does not parse.
+func newToolDiff(newCanonical string) (diff string, truncated bool, err error) {
+	after, err := render(newCanonical)
+	if err != nil {
+		return "", false, fmt.Errorf("render current tool: %w", err)
+	}
+	return diffRendered("", after)
+}
+
+// diffRendered returns the unified diff of two rendered texts, with the window
+// and the caps that the unifiedDiff comment describes. It is the empty string
+// only when the texts are equal.
+func diffRendered(before, after string) (diff string, truncated bool, err error) {
 	if before == after {
-		return "", nil
+		return "", false, nil
 	}
 
 	before, after, skipped := trimCommon(before, after, diffContextLines)
-	before = capText(before)
-	after = capText(after)
+	before, cutBefore := capText(before)
+	after, cutAfter := capText(after)
 
 	edits := udiff.Lines(before, after)
-	diff, err := udiff.ToUnified(diffOldLabel, diffNewLabel, before, edits, diffContextLines)
+	diff, err = udiff.ToUnified(diffOldLabel, diffNewLabel, before, edits, diffContextLines)
 	if err != nil {
-		return "", fmt.Errorf("make unified diff: %w", err)
+		return "", false, fmt.Errorf("make unified diff: %w", err)
 	}
-	return shiftHunks(diff, skipped), nil
+	return shiftHunks(diff, skipped), cutBefore || cutAfter, nil
 }
 
 // trimCommon removes the whole lines that a and b share at the start and at the
@@ -88,7 +108,8 @@ func unifiedDiff(oldCanonical, newCanonical string) (string, error) {
 func trimCommon(a, b string, context int) (trimmedA, trimmedB string, skipped int) {
 	// Start: the first whole line that differs, then back up by context lines.
 	p := commonPrefixLen(a, b)
-	start := strings.LastIndexByte(a[:p], '\n') + 1
+	firstDiffLineStart := strings.LastIndexByte(a[:p], '\n') + 1
+	start := firstDiffLineStart
 	for range context {
 		if start == 0 {
 			break
@@ -99,7 +120,8 @@ func trimCommon(a, b string, context int) (trimmedA, trimmedB string, skipped in
 
 	// End: the shared tail, but not into the lines at the start. Then move
 	// forward to a line start, and move on by context lines.
-	q := min(commonSuffixLen(a, b), min(len(a), len(b))-(strings.LastIndexByte(a[:p], '\n')+1))
+	shorterLen := min(len(a), len(b))
+	q := min(commonSuffixLen(a, b), shorterLen-firstDiffLineStart)
 	endA, endB := len(a)-q, len(b)-q
 	atLineStart := (endA == 0 || a[endA-1] == '\n') && (endB == 0 || b[endB-1] == '\n')
 	if !atLineStart {
@@ -168,9 +190,10 @@ func shiftHunks(diff string, offset int) string {
 }
 
 // capText cuts s to maxRenderedBytes and maxRenderedLines. When it cuts, it
-// ends the text with truncatedMarker on its own line. The cut is always at the
-// start of a UTF-8 character. A text inside the limits is returned as it is.
-func capText(s string) string {
+// ends the text with truncatedMarker on its own line, and the second result is
+// true. The cut is always at the start of a UTF-8 character. A text inside the
+// limits is returned as it is, with false.
+func capText(s string) (string, bool) {
 	cut := len(s)
 	if cut > maxRenderedBytes {
 		cut = maxRenderedBytes
@@ -184,13 +207,13 @@ func capText(s string) string {
 	cut = min(cut, lineLimitIndex(s[:cut]))
 
 	if cut == len(s) {
-		return s
+		return s, false
 	}
 	kept := s[:cut]
 	if kept != "" && !strings.HasSuffix(kept, "\n") {
 		kept += "\n"
 	}
-	return kept + truncatedMarker + "\n"
+	return kept + truncatedMarker + "\n", true
 }
 
 // lineLimitIndex returns the index in s after its maxRenderedLines-th line. It

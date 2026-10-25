@@ -461,6 +461,10 @@ func TestCompareUnverifiedReasons(t *testing.T) {
 	mismatch := maps.Clone(good)
 	mismatch["list"] = Pin{Hash: good["list"].Hash, Canonical: good["read_file"].Canonical}
 	changedList := withTool(t, base, "list", func(x *inspect.Tool) { x.Description = "z" })
+	newDiff, _, err := newToolDiff(mustCanonical(t, inspect.Tool{Name: "write_file", Description: "Write."}))
+	if err != nil {
+		t.Fatalf("newToolDiff() error = %v, want nil", err)
+	}
 
 	tests := []struct {
 		name    string
@@ -504,7 +508,7 @@ func TestCompareUnverifiedReasons(t *testing.T) {
 			current: append(without(compareTools(), "list"), inspect.Tool{Name: "write_file", Description: "Write."}),
 			want: []Change{
 				{Kind: KindRemoved, Tool: "list", Severity: "low"},
-				{Kind: KindNew, Tool: "write_file", Severity: "medium"},
+				{Kind: KindNew, Tool: "write_file", Diff: newDiff, Severity: "medium"},
 			},
 		},
 	}
@@ -751,11 +755,15 @@ func FuzzCompare(f *testing.F) {
 			if want := wantSeverity(stored, c); c.Severity != want {
 				t.Errorf("%s change of %q has Severity %q, want %q", c.Kind, c.Tool, c.Severity, want)
 			}
-			if c.Diff != "" && c.Kind != KindChanged {
-				t.Errorf("kind %q has a Diff", c.Kind)
+			hasDiff := c.Kind == KindChanged || c.Kind == KindNew
+			if !hasDiff && (c.Diff != "" || c.Truncated) {
+				t.Errorf("kind %q has a Diff or Truncated", c.Kind)
 			}
-			if c.Kind == KindChanged && c.Diff == "" {
-				t.Errorf("changed tool %q has an empty Diff", c.Tool)
+			if hasDiff && c.Diff == "" {
+				t.Errorf("%s tool %q has an empty Diff", c.Kind, c.Tool)
+			}
+			if c.Truncated && !strings.Contains(c.Diff, truncatedMarker) {
+				t.Errorf("%s tool %q is Truncated but its Diff has no marker", c.Kind, c.Tool)
 			}
 			if (c.Kind == KindUnverified) != (c.Reason != "") {
 				t.Errorf("kind %q has Reason %q", c.Kind, c.Reason)
@@ -776,4 +784,108 @@ func FuzzCompare(f *testing.F) {
 			}
 		}
 	})
+}
+
+func TestIsPinRuleID(t *testing.T) {
+	t.Parallel()
+	for _, k := range []ChangeKind{KindChanged, KindNew, KindRemoved, KindUnverified} {
+		if !IsPinRuleID(k.RuleID()) {
+			t.Errorf("IsPinRuleID(%q) = false, want true for kind %q", k.RuleID(), k)
+		}
+	}
+	for _, id := range []string{"MOAT-T1-001", "", "moat-t2-001", " MOAT-T2-001", "MOAT-T2", "XMOAT-T2-001"} {
+		if IsPinRuleID(id) {
+			t.Errorf("IsPinRuleID(%q) = true, want false", id)
+		}
+	}
+	if !IsPinRuleID(RuleIDPrefix) {
+		t.Errorf("IsPinRuleID(%q) = false, want true", RuleIDPrefix)
+	}
+}
+
+func TestCompareNewToolDiff(t *testing.T) {
+	t.Parallel()
+	tool := inspect.Tool{Name: "write_file", Description: "Write a file.\nSecond line.", InputSchema: []byte(`{"type":"object"}`)}
+	got := Compare(ServerPins{}, []inspect.Tool{tool})
+	if len(got) != 1 || got[0].Kind != KindNew || got[0].Severity != "medium" {
+		t.Fatalf("Compare() = %+v, want one medium new", got)
+	}
+	c := got[0]
+	if c.Truncated {
+		t.Error("Truncated = true, want false for a small tool")
+	}
+	for _, want := range []string{
+		"--- pinned\n",
+		"+++ current\n",
+		"+name: write_file\n",
+		"+description: Write a file.\n",
+		"+description: Second line.\n",
+	} {
+		if !strings.Contains(c.Diff, want) {
+			t.Errorf("Diff lacks %q:\n%s", want, c.Diff)
+		}
+	}
+	// Every line after the header is an added line or a hunk header.
+	lines := strings.Split(strings.TrimSuffix(c.Diff, "\n"), "\n")
+	for _, line := range lines[2:] {
+		if !strings.HasPrefix(line, "+") && !strings.HasPrefix(line, "@@ ") {
+			t.Errorf("Diff has a line that is not an added line: %q\n%s", line, c.Diff)
+		}
+	}
+}
+
+func TestCompareNewToolDiffCapped(t *testing.T) {
+	t.Parallel()
+	tool := inspect.Tool{Name: "big", Description: numberedLines(5000)}
+	got := Compare(ServerPins{}, []inspect.Tool{tool})
+	if len(got) != 1 || got[0].Kind != KindNew {
+		t.Fatalf("Compare() = %+v, want one new", got)
+	}
+	c := got[0]
+	if !c.Truncated {
+		t.Error("Truncated = false, want true for a long new tool")
+	}
+	if !strings.Contains(c.Diff, "+"+truncatedMarker+"\n") {
+		t.Errorf("Diff has no added marker line:\n%s", tail(c.Diff, 200))
+	}
+	if strings.Contains(c.Diff, "row-4999") {
+		t.Error("Diff has a line after the limit")
+	}
+	if n := strings.Count(c.Diff, "\n"); n > maxRenderedLines+50 {
+		t.Errorf("Diff has %d lines, want at most about %d", n, maxRenderedLines+50)
+	}
+}
+
+func TestCompareTruncated(t *testing.T) {
+	t.Parallel()
+	old := inspect.Tool{Name: "t", Description: "old"}
+	small := inspect.Tool{Name: "t", Description: "new"}
+	long := inspect.Tool{Name: "t", Description: numberedLines(5000)}
+	pins := mustSnapshot(t, []inspect.Tool{old})
+
+	tests := []struct {
+		name string
+		got  []Change
+		want bool
+	}{
+		{"small change", Compare(pins, []inspect.Tool{small}), false},
+		{"long change", Compare(pins, []inspect.Tool{long}), true},
+		{"small new tool", Compare(ServerPins{}, []inspect.Tool{small}), false},
+		{"long new tool", Compare(ServerPins{}, []inspect.Tool{long}), true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if len(tt.got) != 1 {
+				t.Fatalf("Compare() = %+v, want one change", tt.got)
+			}
+			c := tt.got[0]
+			if c.Truncated != tt.want {
+				t.Errorf("Truncated = %v, want %v", c.Truncated, tt.want)
+			}
+			if has := strings.Contains(c.Diff, truncatedMarker); has != tt.want {
+				t.Errorf("Diff has the marker = %v, want %v", has, tt.want)
+			}
+		})
+	}
 }

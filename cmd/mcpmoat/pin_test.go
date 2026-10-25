@@ -507,8 +507,10 @@ func TestPinStoreErrors(t *testing.T) {
 		got := e.pin(fake(), "--accept", "srv")
 
 		assertPinRun(t, got, scanWant{code: exitError, stderr: []string{"mcpmoat pin: cannot save the pins file: "}})
-		// Nothing says "accepted" when the save failed.
-		assertEmptyStdout(t, got.stdout)
+		// The diffs of the new tools come before the save, but nothing says
+		// "accepted" when the save failed.
+		assertContainsNone(t, "stdout", got.stdout, []string{"accepted"})
+		assertDiffsOf(t, got.stdout, "srv", []string{"+a"})
 	})
 }
 
@@ -527,14 +529,16 @@ func TestPinAccept(t *testing.T) {
 		breakHash bool
 		// wantStdout is the "accepted" line, the last line of stdout.
 		wantStdout string
-		// wantDiffs are the changed tools whose diff pin prints before the
-		// "accepted" line, in order. No tool means no text before the line.
+		// wantDiffs are the tools whose diff pin prints before the "accepted"
+		// line, in order. "+name" is a new tool (see assertDiffsOf). No tool
+		// means no text before the line.
 		wantDiffs []string
 	}{
 		{
 			name:       "unpinned server: every tool is new",
 			current:    []inspect.Tool{mkTool("a", "Add."), mkTool("b", "Echo.")},
 			wantStdout: "accepted srv: 2 new, 0 changed, 0 removed\n",
+			wantDiffs:  []string{"+a", "+b"},
 		},
 		{
 			name:       "unpinned server with no tool",
@@ -546,7 +550,7 @@ func TestPinAccept(t *testing.T) {
 			pinned:     []inspect.Tool{mkTool("a", "Add."), mkTool("b", "Echo."), mkTool("c", "Keep.")},
 			current:    []inspect.Tool{mkTool("a", "Add. Changed."), mkTool("c", "Keep."), mkTool("d", "New."), mkTool("e", "New too.")},
 			wantStdout: "accepted srv: 2 new, 1 changed, 1 removed\n",
-			wantDiffs:  []string{"a"},
+			wantDiffs:  []string{"a", "+d", "+e"},
 		},
 		{
 			name:       "nothing changed",
@@ -799,9 +803,9 @@ func TestPinAcceptShowsDiffBeforeAccepted(t *testing.T) {
 	}
 }
 
-// TestPinAcceptNoDiffWithoutChange checks that pin prints no diff block for a
-// new tool, a removed tool or an unchanged tool: only a changed tool has one.
-func TestPinAcceptNoDiffWithoutChange(t *testing.T) {
+// TestPinAcceptDiffsOnlyForChangedAndNew checks that pin prints a diff block
+// for a new tool, and none for a removed tool or an unchanged tool.
+func TestPinAcceptDiffsOnlyForChangedAndNew(t *testing.T) {
 	t.Parallel()
 
 	e := newPinEnv(t, oneServer("srv"))
@@ -811,11 +815,18 @@ func TestPinAcceptNoDiffWithoutChange(t *testing.T) {
 
 	got := e.pin(fakeServers(map[string][]inspect.Tool{"srv": {mkTool("a", "Add."), mkTool("c", "New.")}}), "--accept", "srv")
 
-	assertPinRun(t, got, scanWant{code: exitOK, noStdout: []string{"Changed tool", "--- pinned"}, stderr: []string{noExpectNote}})
+	assertPinRun(t, got, scanWant{
+		code:     exitOK,
+		stdout:   []string{"New tool c on server srv:\n", "+description: New."},
+		noStdout: []string{"Changed tool", "tool a ", "tool b "},
+		stderr:   []string{noExpectNote},
+	})
 	assertNoExpectNote(t, got.stderr)
-	if want := "accepted srv: 1 new, 0 changed, 1 removed\n"; got.stdout != want {
-		t.Errorf("stdout = %q, want %q", got.stdout, want)
+	diffs, accepted := splitAcceptedLine(got.stdout)
+	if want := "accepted srv: 1 new, 0 changed, 1 removed\n"; accepted != want {
+		t.Errorf("accepted line = %q, want %q", accepted, want)
 	}
+	assertDiffsOf(t, diffs, "srv", []string{"+c"})
 }
 
 // TestPinInterrupted checks that a signal during the inspection (S1) gives exit
