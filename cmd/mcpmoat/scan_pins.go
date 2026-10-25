@@ -11,9 +11,10 @@ import (
 	"github.com/Ducarv/mcpmoat/internal/termsafe"
 )
 
-// This file holds the pin step of scan: the pinner, which checks the tools of
-// each inspected server against pins.json, and the ignore lists of the pin
-// rules.
+// This file holds the connect step of scan after inspect.Run: the inspection
+// status of each server for the --json report, the pinner, which checks the
+// tools of each inspected server against pins.json, and the ignore lists of
+// the pin rules.
 
 // pinReport is the result of the connect step of scan: the inspection status
 // of each server, and from the pin step what scan adds to its report and what
@@ -149,15 +150,17 @@ type pinner struct {
 func (p *pinner) recordInspection(o inspect.Outcome) {
 	id := serverIdentity(o.Server)
 	status := inspectionStatus(o)
-	if old, seen := p.res.inspection[id]; !seen || (old != report.InspectionOK && status == report.InspectionOK) {
+	old, seen := p.res.inspection[id]
+	firstOK := old != report.InspectionOK && status == report.InspectionOK
+	if !seen || firstOK {
 		p.res.inspection[id] = status
 	}
 }
 
 // inspectionStatus maps the outcome of an inspection to a
-// report.InspectionStatus constant. It reads the status and the kind of the error, never the error
-// text. A refusal comes first: a gate that refuses a server also sets
-// inspect.StatusFailed.
+// report.InspectionStatus constant. It reads the status and the kind of the
+// error, never the error text. A refusal comes first: a gate that refuses a
+// server also sets inspect.StatusFailed.
 func inspectionStatus(o inspect.Outcome) report.InspectionStatus {
 	if inspect.Refused(o.Err) {
 		return report.InspectionRefused

@@ -109,15 +109,17 @@ type JSONFinding struct {
 
 // JSONDiff is the diff of one tool in the JSON report.
 type JSONDiff struct {
-	Server    string `json:"server"`
-	Tool      string `json:"tool"`
-	Kind      string `json:"kind"`
-	Diff      string `json:"diff"`
-	Truncated bool   `json:"diff_truncated"`
-	// DiffIsNote is true when Diff is a fixed note of mcpmoat, not a unified
-	// diff: the diff could not be made, or the change does not show in the
-	// rendered text.
-	DiffIsNote bool `json:"diff_is_note"`
+	Server string `json:"server"`
+	Tool   string `json:"tool"`
+	Kind   string `json:"kind"`
+	Diff   string `json:"diff"`
+	// Truncated is true when the stored diff was cut, so Diff is not the
+	// whole diff.
+	Truncated bool `json:"diff_truncated"`
+	// IsNote is true when Diff is a fixed note of mcpmoat, not a unified diff:
+	// the diff could not be made, or the change does not show in the rendered
+	// text.
+	IsNote bool `json:"diff_is_note"`
 }
 
 // JSONFileError is one config problem in the JSON report. Reason is fixed
@@ -133,8 +135,9 @@ type JSONFileError struct {
 }
 
 // NewJSONServer converts s to its JSON form. status is one of the
-// InspectionStatus constants. The command line and the URL are redacted like in WriteServers.
-// The text is not quoted: JSON escaping does that job (see WriteJSON).
+// InspectionStatus constants. The command line and the URL are redacted like
+// in WriteServers. The text is not quoted: JSON escaping does that job (see
+// WriteJSON).
 func NewJSONServer(s discover.Server, status InspectionStatus) JSONServer {
 	js := JSONServer{
 		Name:        s.Name,
@@ -166,12 +169,12 @@ func NewJSONFinding(r FindingRow) JSONFinding {
 // NewJSONDiff converts a tool diff to its JSON form.
 func NewJSONDiff(d ToolDiff) JSONDiff {
 	return JSONDiff{
-		Server:     d.Server,
-		Tool:       d.Tool,
-		Kind:       d.Kind.String(),
-		Diff:       d.Diff,
-		Truncated:  d.Truncated,
-		DiffIsNote: d.IsNote,
+		Server:    d.Server,
+		Tool:      d.Tool,
+		Kind:      d.Kind.String(),
+		Diff:      d.Diff,
+		Truncated: d.Truncated,
+		IsNote:    d.IsNote,
 	}
 }
 
@@ -198,8 +201,9 @@ func NewJSONFileError(e *discover.FileError) JSONFileError {
 // Names, paths and diffs come from untrusted servers. Valid UTF-8 text stays
 // lossless (encoding/json writes invalid bytes as U+FFFD), but every non-ASCII
 // character that is not printable or not visible is written as a \uXXXX
-// escape, in addition to the escapes of encoding/json for control characters. So a terminal that shows the output does not run
-// control sequences or bidi tricks.
+// escape, in addition to the escapes of encoding/json for control characters.
+// So a terminal that shows the output does not run control sequences or bidi
+// tricks.
 //
 // WriteJSON writes once, after it has built the whole output, and wraps the
 // error of the encoder or of the write. Callers must check it: a failed write
@@ -243,9 +247,10 @@ func escapeUnsafeRunes(b []byte) []byte {
 	out := make([]byte, 0, len(b))
 	for len(b) > 0 {
 		r, size := utf8.DecodeRune(b)
-		// The bound keeps the newlines and spaces of the indented output.
-		if r >= 0x7f && termsafe.NeedsEscape(r) {
-			if r >= 0x10000 {
+		// encoding/json escapes the ASCII controls but not DEL. The bound
+		// keeps the newlines and spaces of the indented output.
+		if (r == 0x7f || r >= utf8.RuneSelf) && termsafe.NeedsEscape(r) {
+			if utf16.RuneLen(r) == 2 {
 				// Above U+FFFF JSON needs a surrogate pair.
 				r1, r2 := utf16.EncodeRune(r)
 				out = fmt.Appendf(out, `\u%04x\u%04x`, r1, r2)

@@ -59,7 +59,7 @@ func decodeScanJSON(t *testing.T, stdout string) report.ScanReport {
 		t.Fatalf("decode stdout as a generic value: %v", err)
 	}
 	if err := reporttest.Schema(t).Validate(generic); err != nil {
-		t.Errorf("stdout does not follow %s: %v\nstdout:\n%s", reporttest.SchemaName(), err, stdout)
+		t.Errorf("stdout does not follow %s: %v\nstdout:\n%s", reporttest.SchemaPath(), err, stdout)
 	}
 	return doc
 }
@@ -225,7 +225,7 @@ func TestScanJSONPinsGolden(t *testing.T) {
 		if d.Truncated {
 			t.Errorf("diff of %s/%s is truncated, want the whole small diff", d.Server, d.Tool)
 		}
-		if d.DiffIsNote {
+		if d.IsNote {
 			t.Errorf("diff of %s/%s is a note, want a unified diff", d.Server, d.Tool)
 		}
 	}
@@ -246,6 +246,13 @@ func TestScanJSONPinsGolden(t *testing.T) {
 	})
 	assertNoTempPath(t, got, e.home, e.work, e.xdg, filepath.Dir(e.config))
 	assertScanGolden(t, "scan_json_pins_changed", []byte(got))
+
+}
+
+// TestScanJSONDiffKinds checks the diffs of a pinned tool whose pin cannot be
+// checked, and of a pin whose text cannot be rendered.
+func TestScanJSONDiffKinds(t *testing.T) {
+	t.Parallel()
 
 	t.Run("unverified tool", func(t *testing.T) {
 		t.Parallel()
@@ -274,7 +281,7 @@ func TestScanJSONPinsGolden(t *testing.T) {
 		got := e.scan(fakeServers(map[string][]inspect.Tool{"srv": {mkTool("add", "Add.")}}), "--json")
 
 		doc := decodeScanJSON(t, got.stdout)
-		if len(doc.Diffs) != 1 || !doc.Diffs[0].DiffIsNote || strings.Contains(doc.Diffs[0].Diff, "+++") {
+		if len(doc.Diffs) != 1 || !doc.Diffs[0].IsNote || strings.Contains(doc.Diffs[0].Diff, "+++") {
 			t.Errorf("diffs = %+v, want one diff of tool add that is a note", doc.Diffs)
 		}
 	})
@@ -466,8 +473,8 @@ func TestScanJSONMatchesTerminal(t *testing.T) {
 				t.Errorf("errors = %v, want non-empty: %v", doc.Errors, tt.wantErrors)
 			}
 			// A config problem makes the report incomplete.
-			if doc.Complete == tt.wantErrors {
-				t.Errorf("complete = %v, want %v", doc.Complete, !tt.wantErrors)
+			if wantComplete := !tt.wantErrors; doc.Complete != wantComplete {
+				t.Errorf("complete = %v, want %v", doc.Complete, wantComplete)
 			}
 
 			// The document holds the same servers and findings as the tables,

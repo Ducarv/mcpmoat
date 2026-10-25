@@ -271,8 +271,9 @@ const configErrorHint = "mcpmoat scan: a config file has a problem; " +
 // line on stderr after the report, with the rule IDs and their counts (see
 // printIgnored).
 //
-// The pin findings are merged with the config findings before the table is
-// written, so one table holds them all and hasFailingFinding sees them all.
+// The pin findings are merged with the config findings before the report (the
+// table or the JSON document) is written, so the report holds them all and
+// hasFailingFinding sees them all.
 // New pins are saved after the report is printed, so a save error never hides
 // the report. The "pinned N tools" notices come after a successful save.
 func (c *cli) reportScan(ctx context.Context, res discover.Result, configPath string, setup scanSetup, ignore *scanIgnores) int {

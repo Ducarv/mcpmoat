@@ -76,7 +76,7 @@ func checkSchemaObject(t *testing.T, root map[string]any, typ reflect.Type, s an
 		gotRequired = append(gotRequired, name)
 	}
 
-	file := reporttest.SchemaName()
+	file := reporttest.SchemaPath()
 	const bumpHint = "Adding, renaming, removing or changing a field needs a schema_version bump and a new schema file."
 	if d := setDiff(wantNames, gotNames); d != "" {
 		t.Errorf("field set of %s differs from %s: %s. %s", typ.Name(), file, d, bumpHint)

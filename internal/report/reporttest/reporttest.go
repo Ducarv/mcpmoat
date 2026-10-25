@@ -21,9 +21,9 @@ import (
 	"github.com/Ducarv/mcpmoat/internal/termsafe"
 )
 
-// SchemaName returns the repo-relative path of the schema file for
+// SchemaPath returns the repo-relative path of the schema file for
 // report.SchemaVersion, for example "docs/schema/scan-output.v1.json".
-func SchemaName() string {
+func SchemaPath() string {
 	return fmt.Sprintf("docs/schema/scan-output.v%d.json", report.SchemaVersion)
 }
 
@@ -36,9 +36,9 @@ func SchemaBytes(t testing.TB) []byte {
 	if err != nil {
 		t.Fatal(err)
 	}
-	b, err := os.ReadFile(filepath.Join(root, filepath.FromSlash(SchemaName()))) //nolint:gosec // G304: a fixed schema file in the repo
+	b, err := os.ReadFile(filepath.Join(root, filepath.FromSlash(SchemaPath()))) //nolint:gosec // G304: a fixed schema file in the repo
 	if errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("schema_version is %d but %s does not exist; add the new schema file", report.SchemaVersion, SchemaName())
+		t.Fatalf("schema_version is %d but %s does not exist; add the new schema file", report.SchemaVersion, SchemaPath())
 	}
 	if err != nil {
 		t.Fatalf("read schema: %v", err)

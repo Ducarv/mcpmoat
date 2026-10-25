@@ -157,8 +157,8 @@ func TestWriteJSONEscaping(t *testing.T) {
 			out := writeJSON(t, r)
 			reporttest.AssertSafeBytes(t, out)
 			got := decodeJSON(t, out)
-			if got.Diffs[0].Tool != s || got.Diffs[0].Server != s || got.Diffs[0].Diff != "+"+s+"\n" {
-				t.Errorf("round trip changed the text: got %q, want %q", got.Diffs[0].Tool, s)
+			if d := got.Diffs[0]; d.Tool != s || d.Server != s || d.Diff != "+"+s+"\n" {
+				t.Errorf("round trip changed the text: server %q, tool %q, diff %q; want %q, %q, %q", d.Server, d.Tool, d.Diff, s, s, "+"+s+"\n")
 			}
 		})
 	}
@@ -288,7 +288,7 @@ func TestDiffKindString(t *testing.T) {
 func TestNewJSONDiffCopiesFields(t *testing.T) {
 	t.Parallel()
 	got := report.NewJSONDiff(report.ToolDiff{Server: "s", Tool: "t", Kind: report.DiffNew, Diff: "a note", Truncated: true, IsNote: true})
-	want := report.JSONDiff{Server: "s", Tool: "t", Kind: "new", Diff: "a note", Truncated: true, DiffIsNote: true}
+	want := report.JSONDiff{Server: "s", Tool: "t", Kind: "new", Diff: "a note", Truncated: true, IsNote: true}
 	if got != want {
 		t.Errorf("NewJSONDiff() = %+v, want %+v", got, want)
 	}
@@ -297,14 +297,15 @@ func TestNewJSONDiffCopiesFields(t *testing.T) {
 func TestNewJSONFileErrorNeverCopiesErr(t *testing.T) {
 	t.Parallel()
 	e := &discover.FileError{
-		Path: "/p/mcp.json", Server: "s", Line: 3, Col: 7, Reason: "invalid JSON", Untrusted: true,
+		Path: "/p/mcp.json", ProjectPath: "/p", Server: "s", Line: 3, Col: 7, Reason: "invalid JSON", Untrusted: true,
 		Err: errors.New("secret " + discovertest.CanaryEnv),
 	}
 	out := writeJSON(t, report.ScanReport{Errors: []report.JSONFileError{report.NewJSONFileError(e)}})
 	discovertest.AssertNoLeak(t, "WriteJSON output", string(out))
 	got := decodeJSON(t, out).Errors[0]
-	if got.Path != e.Path || got.Server != "s" || got.Line != 3 || got.Col != 7 || got.Reason != "invalid JSON" || !got.Untrusted {
-		t.Errorf("file error = %+v", got)
+	want := report.JSONFileError{Path: "/p/mcp.json", ProjectPath: "/p", Server: "s", Line: 3, Col: 7, Reason: "invalid JSON", Untrusted: true}
+	if got != want {
+		t.Errorf("file error = %+v, want %+v", got, want)
 	}
 }
 

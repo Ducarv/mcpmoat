@@ -10,10 +10,8 @@ package main
 import (
 	"bytes"
 	"cmp"
-	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"maps"
 	"os"
 	"os/exec"
@@ -615,7 +613,7 @@ func TestE2EScanJSON(t *testing.T) {
 		{
 			name: "dangerous",
 			setup: func(t *testing.T) (string, string) {
-				return discovertest.CopyFixture(t, filepath.Join("..", "..", "testdata", "configs", "dangerous"))
+				return discovertest.CopyFixture(t, testdataPath("configs", "dangerous"))
 			},
 			wantCode:     exitFindings,
 			wantFindings: true,
@@ -647,26 +645,17 @@ func TestE2EScanJSON(t *testing.T) {
 				t.Errorf("--json stdout equals the table output:\n%s", stdout)
 			}
 
-			dec := json.NewDecoder(strings.NewReader(stdout))
-			var doc map[string]any
-			if err := dec.Decode(&doc); err != nil {
-				t.Fatalf("stdout is not JSON: %v\n%s", err, stdout)
+			// decodeScanJSON checks: one document, schema_version, and the
+			// schema, which also rejects a null list.
+			doc := decodeScanJSON(t, stdout)
+			if doc.Mode != report.ModeNoConnect {
+				t.Errorf("mode = %q, want %q", doc.Mode, report.ModeNoConnect)
 			}
-			if err := dec.Decode(new(any)); !errors.Is(err, io.EOF) {
-				t.Errorf("stdout has more than one JSON document (err = %v):\n%s", err, stdout)
+			if len(doc.Servers) == 0 {
+				t.Error("servers is empty, want the servers of the fixture")
 			}
-			if doc["schema_version"] != float64(report.SchemaVersion) || doc["mode"] != "no-connect" {
-				t.Errorf("schema_version = %v, mode = %v, want %d and no-connect", doc["schema_version"], doc["mode"], report.SchemaVersion)
-			}
-			if servers, _ := doc["servers"].([]any); len(servers) == 0 {
-				t.Errorf("servers = %v, want a non-empty array", doc["servers"])
-			}
-			findings, ok := doc["findings"].([]any)
-			if !ok {
-				t.Fatalf("findings = %#v, want an array (an empty one is [], not null)", doc["findings"])
-			}
-			if (len(findings) > 0) != tt.wantFindings {
-				t.Errorf("got %d findings, want findings: %v", len(findings), tt.wantFindings)
+			if (len(doc.Findings) > 0) != tt.wantFindings {
+				t.Errorf("got %d findings, want findings: %v", len(doc.Findings), tt.wantFindings)
 			}
 		})
 	}

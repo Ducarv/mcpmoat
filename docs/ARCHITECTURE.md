@@ -492,7 +492,9 @@ Shape (`schema_version` 1):
   `false`, the exit code is 2 and the reason is on stderr. Two servers with the same identity
   (client, source, project path and name) share one status: `ok` when one of them was inspected,
   because `checkOutcome` then checks the tools of the first one that was inspected. The duplicate
-  also gives a `MOAT-T2-004` finding.
+  gives a `MOAT-T2-004` finding when both copies were inspected, or when the identity is pinned
+  and a copy failed. An identity that is not pinned, with one copy `ok` and one that failed, gives
+  only the warning on stderr.
 - A finding has `rule_id`, `severity`, `server`, `field`, `key` and `related`. `related` is a
   second name (a key or a server) or a fixed reason text, never a value.
 - A diff has `server`, `tool`, `kind` (`changed`, `new` or `unverified`), `diff`,
@@ -527,15 +529,16 @@ terminal. JSON escaping does the same job here.
 
 Version policy: a rename, a removal, an added field (every object in the schema sets
 `additionalProperties: false`, so the old schema rejects it), or a change of the type or the
-meaning of a field bumps `SchemaVersion` and adds `docs/schema/scan-output.v<N>.json`. `internal/report/reporttest` loads the schema file of the current version for
-the tests in `internal/report` and `cmd/mcpmoat`. A test in `internal/report` compares the struct
-tags of the Go types with the schema file of the current version, and fails when they differ. A
-second test validates sample output against the schema. The limit: the tests cannot stop someone
-from editing the v1 schema file in place. The reviewer must catch that. An old schema file is kept
-as it was released.
+meaning of a field bumps `SchemaVersion` and adds `docs/schema/scan-output.v<N>.json`.
+`internal/report/reporttest` loads the schema file of the current version for the tests in
+`internal/report` and `cmd/mcpmoat`. A test in `internal/report` compares the struct tags of the
+Go types with the schema file of the current version, and fails when they differ. A second test
+validates sample output against the schema. The limit: the tests cannot stop someone from editing
+the v1 schema file in place. The reviewer must catch that. An old schema file is kept as it was
+released.
 
-Not in version 1: accept hints (#169), ignored counts (#175), a summary, `pin --json` and `--fail-on`
-(#65).
+Not in version 1: accept hints (#169), ignored counts (#175), a summary, `pin --json` and
+`--fail-on` (#65).
 
 ## Where untrusted text is escaped
 
