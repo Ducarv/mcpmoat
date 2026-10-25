@@ -16,6 +16,9 @@ import (
 // so a stored hash with another prefix cannot be compared. The store must
 // then show the tool as not verified and pin it again. It must never accept
 // the tool silently: a rug pull at the same time would become the new pin.
+//
+// The canonical form changed in place before the first release (issue #153
+// added _meta and icons), so the version stays sha256-v1.
 const HashVersion = "sha256-v1"
 
 // Hash returns the pin hash of t: HashVersion, a colon, and the lowercase

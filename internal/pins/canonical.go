@@ -28,6 +28,8 @@ type canonicalTool struct {
 	// checks that it is valid JSON.
 	InputSchema  jsontext.Value       `json:"inputSchema"`
 	OutputSchema jsontext.Value       `json:"outputSchema"`
+	Meta         jsontext.Value       `json:"_meta"`
+	Icons        jsontext.Value       `json:"icons"`
 	Annotations  canonicalAnnotations `json:"annotations"`
 }
 
@@ -54,16 +56,17 @@ type canonicalAnnotations struct {
 // only when, the tool changes. The notes below are its contract. Any change
 // to them needs a new HashVersion.
 //
-// Field set. The canonical form holds all six fields of inspect.Tool: name,
-// title, description, inputSchema, outputSchema and annotations. The
-// annotations hold their title and the four hints.
+// Field set. The canonical form holds all eight fields of inspect.Tool: name,
+// title, description, inputSchema, outputSchema, _meta, icons and
+// annotations. The annotations hold their title and the four hints.
 //
 // Shape. The canonical form is one JSON object with a fixed shape. Every key
 // is always present, also when the server did not send the field:
 //
-//	{"annotations":{"destructiveHint":null|bool,"idempotentHint":null|bool,
-//	 "openWorldHint":null|bool,"readOnlyHint":null|bool,"title":""},
-//	 "description":"","inputSchema":<schema>|null,"name":"",
+//	{"_meta":<obj>|null,"annotations":{"destructiveHint":null|bool,
+//	 "idempotentHint":null|bool,"openWorldHint":null|bool,
+//	 "readOnlyHint":null|bool,"title":""},"description":"",
+//	 "icons":<array>|null,"inputSchema":<schema>|null,"name":"",
 //	 "outputSchema":<schema>|null,"title":""}
 //
 // The line breaks are for this comment only: the real form has no
@@ -74,7 +77,12 @@ type canonicalAnnotations struct {
 // Absent values. A nil hint is null. Nil annotations give the same bytes as
 // empty annotations. A nil or zero-length schema and the JSON literal null
 // are all null, so "no schema" is different from the empty object schema {}.
-// A schema of only whitespace is not "no schema": it is invalid JSON.
+// A schema of only whitespace is not "no schema": it is invalid JSON. _meta
+// and icons follow the same rules as the schemas: nil, zero-length and the
+// literal null are null. A {} or [] given directly is different from null,
+// but inspect turns an empty _meta or icons into nil, so a tool from inspect
+// never has that difference. JCS sorts the keys of _meta. The order of the
+// icons array is kept, so a reordered array changes the hash.
 // readOnlyHint and idempotentHint map false to null, so false and absent are
 // the same for these two hints: the SDK cannot tell them apart (see
 // inspect.ToolAnnotations). A change to true always changes the hash.
@@ -103,15 +111,17 @@ type canonicalAnnotations struct {
 //     server message. A schema from the SDK therefore has no duplicate keys
 //     and no invalid UTF-8. Canonical still rejects them for tools from other
 //     sources.
-//   - The MCP fields _meta and icons are not part of the hash, because
-//     inspect drops them. This is an accepted limit (PRD FR-11). Issue #153
-//     adds them before v1.0.0.
+//   - The numbers in _meta pass through float64 too: inspect re-encodes the
+//     _meta of the SDK, so the limits of the first bullet apply to it.
+//   - The SDK drops the unknown keys inside an icon, so a change in such a key
+//     does not change the hash. The known icon fields (src, mimeType, sizes
+//     and theme) are part of the hash.
 //
 // Canonical returns an error that wraps ErrInvalidTool when a string field
-// holds invalid UTF-8, or when a schema is not valid JSON (this includes
-// invalid UTF-8 and lone surrogates in the schema), has a duplicate object
+// holds invalid UTF-8, or when a schema, _meta or icons is not valid JSON
+// (this includes invalid UTF-8 and lone surrogates), has a duplicate object
 // key or has a number out of range. The error message names the field but
-// never holds server text.
+// never holds server text or _meta values.
 func Canonical(t inspect.Tool) ([]byte, error) {
 	// Nil annotations and empty annotations must give the same bytes, so use
 	// the zero value when there are none.
@@ -142,6 +152,16 @@ func Canonical(t inspect.Tool) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
+	// _meta and icons use the same checks as the schemas. The error names only
+	// the field, never a value.
+	meta, err := canonicalSchema("_meta", t.Meta)
+	if err != nil {
+		return nil, err
+	}
+	icons, err := canonicalSchema("icons", t.Icons)
+	if err != nil {
+		return nil, err
+	}
 
 	// The type conversion copies every field, and stops compiling when
 	// inspect.ToolAnnotations changes (see canonicalAnnotations).
@@ -155,6 +175,8 @@ func Canonical(t inspect.Tool) ([]byte, error) {
 		Description:  t.Description,
 		InputSchema:  in,
 		OutputSchema: out,
+		Meta:         meta,
+		Icons:        icons,
 		Annotations:  a,
 	})
 	if err != nil {

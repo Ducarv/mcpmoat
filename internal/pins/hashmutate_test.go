@@ -100,24 +100,32 @@ func hashHintMutations(tool inspect.Tool) []hashMutation {
 	return muts
 }
 
-// hashSchemaFieldMutations removes each schema, or adds {} when it is absent,
-// and adds the changes of hashSchemaMutations.
+// hashSchemaFieldMutations removes each schema, _meta and icons, or adds an
+// empty value ({} or [] for icons) when it is absent, and adds the changes of
+// hashSchemaMutations.
 func hashSchemaFieldMutations(t testing.TB, tool inspect.Tool) []hashMutation {
 	t.Helper()
 	schemas := []struct {
-		field string
-		ptr   func(*inspect.Tool) *[]byte
+		field  string
+		ptr    func(*inspect.Tool) *[]byte
+		absent string // the value that replaces an absent field
 	}{
 		// json.RawMessage is defined as []byte, so Go allows the pointer conversion.
-		{"inputSchema", func(c *inspect.Tool) *[]byte { return (*[]byte)(&c.InputSchema) }},
-		{"outputSchema", func(c *inspect.Tool) *[]byte { return (*[]byte)(&c.OutputSchema) }},
+		{"inputSchema", func(c *inspect.Tool) *[]byte { return (*[]byte)(&c.InputSchema) }, `{}`},
+		{"outputSchema", func(c *inspect.Tool) *[]byte { return (*[]byte)(&c.OutputSchema) }, `{}`},
+		{"_meta", func(c *inspect.Tool) *[]byte { return (*[]byte)(&c.Meta) }, `{}`},
+		// icons is a JSON array, so the absent case must not become {}.
+		{"icons", func(c *inspect.Tool) *[]byte { return (*[]byte)(&c.Icons) }, `[{"src":"x"}]`},
 	}
 	var muts []hashMutation
 	for _, sf := range schemas {
 		raw := *sf.ptr(&tool)
 		if raw == nil {
 			// No schema and the empty schema {} must have different hashes.
-			muts = append(muts, hashMutated(tool, sf.field+": absent to {}", func(c *inspect.Tool) { *sf.ptr(c) = []byte(`{}`) }))
+			muts = append(muts, hashMutated(tool, sf.field+": absent to "+sf.absent, func(c *inspect.Tool) { *sf.ptr(c) = []byte(sf.absent) }))
+			if sf.field == "icons" {
+				muts = append(muts, hashMutated(tool, sf.field+": absent to []", func(c *inspect.Tool) { *sf.ptr(c) = []byte(`[]`) }))
+			}
 			continue
 		}
 		muts = append(muts, hashMutated(tool, sf.field+": removed", func(c *inspect.Tool) { *sf.ptr(c) = nil }))

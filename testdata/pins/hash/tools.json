@@ -6,6 +6,44 @@
     }
   },
   {
+    "fixture": "meta-only",
+    "tool": {
+      "name": "ping",
+      "_meta": {
+        "ui": {
+          "resourceUri": "ui://widget/a"
+        }
+      }
+    }
+  },
+  {
+    "fixture": "icons-only",
+    "tool": {
+      "name": "ping",
+      "icons": [
+        {
+          "src": "https://example.com/i.png",
+          "mimeType": "image/png",
+          "sizes": ["48x48"]
+        }
+      ]
+    }
+  },
+  {
+    "fixture": "meta-unsorted",
+    "tool": {
+      "name": "ping",
+      "_meta": {
+        "zeta": [3, 1, 2],
+        "ui": {
+          "visibility": ["model", "app"],
+          "resourceUri": "ui://widget/a"
+        },
+        "alpha": true
+      }
+    }
+  },
+  {
     "fixture": "typical",
     "tool": {
       "name": "read_file",
@@ -64,6 +102,25 @@
         },
         "required": ["deleted"]
       },
+      "_meta": {
+        "ui": {
+          "resourceUri": "ui://widget/a"
+        },
+        "vendor/version": 2
+      },
+      "icons": [
+        {
+          "src": "https://example.com/i.png",
+          "mimeType": "image/png",
+          "sizes": ["48x48"]
+        },
+        {
+          "src": "https://example.com/i.svg",
+          "mimeType": "image/svg+xml",
+          "sizes": ["any"],
+          "theme": "dark"
+        }
+      ],
       "annotations": {
         "title": "Delete a remote branch",
         "readOnlyHint": false,
@@ -89,6 +146,12 @@
             "type": "string",
             "description": "Tag\ufeff\u00ad\u2028\ud83d\ude00"
           }
+        }
+      },
+      "_meta": {
+        "note": "hidden\u200b\ufeff \u202eflip\u202c \udb40\udc41 cafe\u0301 \ud83d\ude00",
+        "ui": {
+          "resourceUri": "ui://caf\u00e9/\u200b"
         }
       },
       "annotations": {

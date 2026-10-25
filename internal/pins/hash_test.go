@@ -30,8 +30,8 @@ func TestHashFormat(t *testing.T) {
 func TestHashKnownAnswer(t *testing.T) {
 	t.Parallel()
 	// Computed outside Go with:
-	//   printf '%s' '{"annotations":{"destructiveHint":null,"idempotentHint":null,"openWorldHint":null,"readOnlyHint":null,"title":""},"description":"","inputSchema":null,"name":"x","outputSchema":null,"title":""}' | shasum -a 256
-	const want = "sha256-v1:fc7144327c0193d2cddd15ff7bdd991773e2166f3b837e24ee1999631ff22423"
+	//   printf '%s' '{"_meta":null,"annotations":{"destructiveHint":null,"idempotentHint":null,"openWorldHint":null,"readOnlyHint":null,"title":""},"description":"","icons":null,"inputSchema":null,"name":"x","outputSchema":null,"title":""}' | shasum -a 256
+	const want = "sha256-v1:bfde9b2344b469ab8c510f3b0da09475d65f2ac4b2f8533b0173d748be4e256d"
 	got, err := Hash(inspect.Tool{Name: "x"})
 	if err != nil {
 		t.Fatalf("Hash() error = %v", err)
@@ -42,7 +42,7 @@ func TestHashKnownAnswer(t *testing.T) {
 }
 
 // TestHashKeyOrder checks that the hash does not depend on the key order or
-// the whitespace of the schemas.
+// the whitespace of the schemas and of _meta and icons.
 func TestHashKeyOrder(t *testing.T) {
 	t.Parallel()
 	for i, f := range loadHashFixtures(t) {
@@ -61,13 +61,19 @@ func TestHashKeyOrder(t *testing.T) {
 				if shuffled.OutputSchema != nil {
 					shuffled.OutputSchema = shuffleJSON(t, f.Tool.OutputSchema, r)
 				}
+				if shuffled.Meta != nil {
+					shuffled.Meta = shuffleJSON(t, f.Tool.Meta, r)
+				}
+				if shuffled.Icons != nil {
+					shuffled.Icons = shuffleJSON(t, f.Tool.Icons, r)
+				}
 				got, err := Hash(shuffled)
 				if err != nil {
 					t.Fatalf("shuffle %d: Hash() error = %v", n, err)
 				}
 				if got != want {
-					t.Fatalf("shuffle %d: Hash() = %q, want %q\ninputSchema: %q\noutputSchema: %q",
-						n, got, want, shuffled.InputSchema, shuffled.OutputSchema)
+					t.Fatalf("shuffle %d: Hash() = %q, want %q\ninputSchema: %q\noutputSchema: %q\n_meta: %q\nicons: %q",
+						n, got, want, shuffled.InputSchema, shuffled.OutputSchema, shuffled.Meta, shuffled.Icons)
 				}
 			}
 		})
@@ -93,6 +99,54 @@ func TestHashRugPull(t *testing.T) {
 	if before == after {
 		t.Errorf("Hash() of rugpull-before and rugpull-after = %q, want different hashes", before)
 	}
+}
+
+// TestHashMetaIcons checks the acceptance rules for _meta and icons: a change
+// only in _meta or only in icons changes the hash, and the key order inside
+// _meta does not.
+func TestHashMetaIcons(t *testing.T) {
+	t.Parallel()
+	base := inspect.Tool{Name: "ping"}
+	hash := func(t *testing.T, tool inspect.Tool) string {
+		t.Helper()
+		h, err := Hash(tool)
+		if err != nil {
+			t.Fatalf("Hash() error = %v", err)
+		}
+		return h
+	}
+	withMeta := func(m string) inspect.Tool { c := base; c.Meta = []byte(m); return c }
+	withIcons := func(i string) inspect.Tool { c := base; c.Icons = []byte(i); return c }
+
+	t.Run("_meta only changes the hash", func(t *testing.T) {
+		t.Parallel()
+		if hash(t, base) == hash(t, withMeta(`{"ui":{"resourceUri":"ui://a"}}`)) {
+			t.Error("adding _meta does not change the hash")
+		}
+		if hash(t, withMeta(`{"ui":{"resourceUri":"ui://a"}}`)) == hash(t, withMeta(`{"ui":{"resourceUri":"ui://b"}}`)) {
+			t.Error("changing a _meta value does not change the hash")
+		}
+	})
+	t.Run("icons only changes the hash", func(t *testing.T) {
+		t.Parallel()
+		if hash(t, base) == hash(t, withIcons(`[{"src":"a"}]`)) {
+			t.Error("adding icons does not change the hash")
+		}
+		if hash(t, withIcons(`[{"src":"a"}]`)) == hash(t, withIcons(`[{"src":"b"}]`)) {
+			t.Error("changing an icon src does not change the hash")
+		}
+		if hash(t, withIcons(`[{"src":"a"},{"src":"b"}]`)) == hash(t, withIcons(`[{"src":"b"},{"src":"a"}]`)) {
+			t.Error("reordering icons does not change the hash")
+		}
+	})
+	t.Run("_meta key order does not change the hash", func(t *testing.T) {
+		t.Parallel()
+		a := hash(t, withMeta(`{"a":1,"ui":{"resourceUri":"ui://a","visibility":["model"]}}`))
+		b := hash(t, withMeta(`{ "ui": { "visibility": ["model"], "resourceUri": "ui://a" }, "a": 1 }`))
+		if a != b {
+			t.Errorf("Hash() = %q and %q, want equal for a different key order in _meta", a, b)
+		}
+	})
 }
 
 // TestHashSchemaMutationsKeyCollision checks that a changed key that matches

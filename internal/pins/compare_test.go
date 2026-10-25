@@ -331,6 +331,95 @@ func TestCompareInvisibleCharInDiff(t *testing.T) {
 	}
 }
 
+// TestCompareMetaAndIcons checks that a change that only touches _meta or icons
+// is a high "changed" tool with a real diff of the changed line, and that the
+// key order of _meta or of an icon is no change.
+func TestCompareMetaAndIcons(t *testing.T) {
+	t.Parallel()
+	meta := func(s string) func(*inspect.Tool) { return func(x *inspect.Tool) { x.Meta = []byte(s) } }
+	icons := func(s string) func(*inspect.Tool) { return func(x *inspect.Tool) { x.Icons = []byte(s) } }
+	pinnedMeta := meta(`{"ui":{"resourceUri":"ui://good/app","visibility":["model"]}}`)
+	pinnedIcons := icons(`[{"src":"https://good.example/a.png","mimeType":"image/png"}]`)
+
+	tests := []struct {
+		name     string
+		pinned   func(*inspect.Tool)
+		current  func(*inspect.Tool)
+		wantDiff []string // empty: no change
+	}{
+		{
+			name:     "_meta value changed",
+			pinned:   pinnedMeta,
+			current:  meta(`{"ui":{"resourceUri":"ui://evil/app","visibility":["model"]}}`),
+			wantDiff: []string{"-      \"resourceUri\": \"ui://good/app\",\n", "+      \"resourceUri\": \"ui://evil/app\",\n"},
+		},
+		{
+			name:     "_meta added",
+			pinned:   func(*inspect.Tool) {},
+			current:  pinnedMeta,
+			wantDiff: []string{"-  null\n", "+      \"resourceUri\": \"ui://good/app\",\n"},
+		},
+		{
+			name:     "_meta removed",
+			pinned:   pinnedMeta,
+			current:  func(*inspect.Tool) {},
+			wantDiff: []string{"-      \"resourceUri\": \"ui://good/app\",\n", "+  null\n"},
+		},
+		{
+			name:    "_meta same keys in another order",
+			pinned:  pinnedMeta,
+			current: meta(`{ "ui" : {"visibility":["model"], "resourceUri":"ui://good/app"} }`),
+		},
+		{
+			name:     "icon src changed",
+			pinned:   pinnedIcons,
+			current:  icons(`[{"src":"https://evil.example/a.png","mimeType":"image/png"}]`),
+			wantDiff: []string{"-      \"src\": \"https://good.example/a.png\"\n", "+      \"src\": \"https://evil.example/a.png\"\n"},
+		},
+		{
+			name:     "icon added",
+			pinned:   pinnedIcons,
+			current:  icons(`[{"src":"https://good.example/a.png","mimeType":"image/png"},{"src":"https://evil.example/b.png"}]`),
+			wantDiff: []string{"+      \"src\": \"https://evil.example/b.png\"\n"},
+		},
+		{
+			name:    "icon keys in another order",
+			pinned:  pinnedIcons,
+			current: icons(`[{"mimeType":"image/png","src":"https://good.example/a.png"}]`),
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			base := compareTools()
+			stored := mustSnapshot(t, withTool(t, base, "read_file", tt.pinned))
+			current := withTool(t, base, "read_file", tt.current)
+			got := Compare(stored, current)
+			if len(tt.wantDiff) == 0 {
+				if len(got) != 0 {
+					t.Fatalf("Compare() = %+v, want no change", got)
+				}
+				return
+			}
+			if len(got) != 1 {
+				t.Fatalf("Compare() = %+v, want one change", got)
+			}
+			c := got[0]
+			if c.Kind != KindChanged || c.Tool != "read_file" || c.Severity != "high" {
+				t.Fatalf("Compare()[0] = %+v, want a high changed read_file", c)
+			}
+			if c.DiffIsNote() {
+				t.Errorf("Diff = the fixed note %q, want a real diff", c.Diff)
+			}
+			for _, want := range tt.wantDiff {
+				if !strings.Contains(c.Diff, want) {
+					t.Errorf("Diff lacks %q:\n%s", want, c.Diff)
+				}
+			}
+		})
+	}
+}
+
 func TestCompareHashVersionMismatch(t *testing.T) {
 	t.Parallel()
 	tool := compareTools()[0]

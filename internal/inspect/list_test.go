@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"reflect"
 	"slices"
 	"strings"
@@ -729,6 +730,8 @@ func TestListAllConvertsFields(t *testing.T) {
 			Name: "n", Title: "T", Description: "D",
 			InputSchema:  map[string]any{"type": "object"},
 			OutputSchema: map[string]any{"type": "string"},
+			Meta:         mcp.Meta{"ui": map[string]any{"resourceUri": "ui://widget"}},
+			Icons:        []mcp.Icon{{Source: "https://example.com/i.png", MIMEType: "image/png"}},
 		}}}}},
 		prompts: fakeList[mcp.Prompt]{pages: map[string]fakePage[mcp.Prompt]{"": {items: []*mcp.Prompt{{
 			Name: "pn", Title: "PT", Description: "PD",
@@ -755,6 +758,8 @@ func TestListAllConvertsFields(t *testing.T) {
 		Name: "n", Title: "T", Description: "D",
 		InputSchema:  json.RawMessage(`{"type":"object"}`),
 		OutputSchema: json.RawMessage(`{"type":"string"}`),
+		Meta:         json.RawMessage(`{"ui":{"resourceUri":"ui://widget"}}`),
+		Icons:        json.RawMessage(`[{"src":"https://example.com/i.png","mimeType":"image/png"}]`),
 	}
 	if !reflect.DeepEqual(tools[0], wantTool) {
 		t.Errorf("tool = %+v, want %+v", tools[0], wantTool)
@@ -1279,6 +1284,120 @@ func TestListAllSchemaConversion(t *testing.T) {
 			checkRaw(t, "InputSchema", tools[0].InputSchema, tt.wantIn)
 			checkRaw(t, "OutputSchema", tools[0].OutputSchema, tt.wantOut)
 		})
+	}
+}
+
+func TestListAllMetaIcons(t *testing.T) {
+	t.Parallel()
+
+	const canary = "SECRET-CANARY-153"
+
+	tests := []struct {
+		name       string
+		meta       mcp.Meta
+		icons      []mcp.Icon
+		wantMeta   string // "": expect nil RawMessage
+		wantIcons  string // "": expect nil RawMessage
+		wantErrSub string
+	}{
+		{name: "both nil"},
+		{name: "meta set", meta: mcp.Meta{"ui": map[string]any{"resourceUri": "ui://widget"}}, wantMeta: `{"ui":{"resourceUri":"ui://widget"}}`},
+		{name: "meta empty map", meta: mcp.Meta{}},
+		{name: "icons set", icons: []mcp.Icon{{Source: "https://example.com/i.png", MIMEType: "image/png"}}, wantIcons: `[{"src":"https://example.com/i.png","mimeType":"image/png"}]`},
+		{name: "icons empty slice", icons: []mcp.Icon{}},
+		{
+			name:      "icon with sizes and theme",
+			icons:     []mcp.Icon{{Source: "data:image/svg+xml;base64,AAAA", Sizes: []string{"48x48", "any"}, Theme: mcp.IconThemeDark}},
+			wantIcons: `[{"src":"data:image/svg+xml;base64,AAAA","sizes":["48x48","any"],"theme":"dark"}]`,
+		},
+		{
+			name:      "two icons keep order",
+			icons:     []mcp.Icon{{Source: "b"}, {Source: "a"}},
+			wantIcons: `[{"src":"b"},{"src":"a"}]`,
+		},
+		{
+			name:     "nested numbers keep their value",
+			meta:     mcp.Meta{"n": map[string]any{"f": 1.5, "i": 10, "list": []any{2.25, 3}}},
+			wantMeta: `{"n":{"f":1.5,"i":10,"list":[2.25,3]}}`,
+		},
+		{
+			name:     "no HTML escape in meta",
+			meta:     mcp.Meta{"k": "<a href=\"x\">&</a>"},
+			wantMeta: `{"k":"<a href=\"x\">&</a>"}`,
+		},
+		{
+			name:      "no HTML escape in icons",
+			icons:     []mcp.Icon{{Source: "https://example.com/i?a=1&b=<2>"}},
+			wantIcons: `[{"src":"https://example.com/i?a=1&b=<2>"}]`,
+		},
+		{
+			name:     "map keys are sorted",
+			meta:     mcp.Meta{"zeta": 1, "alpha": map[string]any{"y": 1, "x": 2}, "mid": true},
+			wantMeta: `{"alpha":{"x":2,"y":1},"mid":true,"zeta":1}`,
+		},
+		{
+			name:       "unmarshalable meta func",
+			meta:       mcp.Meta{"bad": func() {}, "other": canary},
+			wantErrSub: "list tools: meta:",
+		},
+		{
+			name:       "unmarshalable meta channel",
+			meta:       mcp.Meta{canary: make(chan int)},
+			wantErrSub: "list tools: meta:",
+		},
+		{
+			name:       "unmarshalable meta infinity",
+			meta:       mcp.Meta{"bad": math.Inf(1), "other": canary},
+			wantErrSub: "list tools: meta:",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			f := &fakeLister{tools: fakeList[mcp.Tool]{pages: map[string]fakePage[mcp.Tool]{
+				"": {items: []*mcp.Tool{{Name: "t", Meta: tt.meta, Icons: tt.icons}}},
+			}}}
+			tools, _, _, err := listAll(t.Context(), f, &mcp.ServerCapabilities{Tools: &mcp.ToolCapabilities{}}, &f.capture)
+			if tt.wantErrSub != "" {
+				if err == nil {
+					t.Fatal("listAll() error = nil, want error")
+				}
+				if !strings.HasPrefix(err.Error(), tt.wantErrSub) {
+					t.Errorf("err = %q, want prefix %q", err, tt.wantErrSub)
+				}
+				// Neither the key nor the value of another _meta entry may leak.
+				if strings.Contains(err.Error(), canary) {
+					t.Errorf("err = %q holds the canary %q", err, canary)
+				}
+				if tools != nil {
+					t.Errorf("tools = %v, want nil on error", tools)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("listAll() error = %v", err)
+			}
+			if len(tools) != 1 {
+				t.Fatalf("len(tools) = %d, want 1", len(tools))
+			}
+			checkRawString(t, "Meta", tools[0].Meta, tt.wantMeta)
+			checkRawString(t, "Icons", tools[0].Icons, tt.wantIcons)
+		})
+	}
+}
+
+// checkRawString checks that raw is nil when want is empty, and otherwise is
+// exactly want, byte for byte.
+func checkRawString(t *testing.T, field string, raw json.RawMessage, want string) {
+	t.Helper()
+	if want == "" {
+		if raw != nil {
+			t.Errorf("%s = %s, want nil", field, raw)
+		}
+		return
+	}
+	if string(raw) != want {
+		t.Errorf("%s = %s, want %s", field, raw, want)
 	}
 }
 

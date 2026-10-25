@@ -346,6 +346,20 @@ func listTools(ctx context.Context, cs sessionLister, raw *rawLists) ([]Tool, er
 			if err != nil {
 				return Tool{}, fmt.Errorf("output schema: %w", err)
 			}
+			// A nil map or slice inside an any is not a nil any, so
+			// marshalSchema would encode it as null. Skip the empty
+			// values: absent or empty gives a nil RawMessage.
+			var meta, icons json.RawMessage
+			if len(t.Meta) > 0 {
+				if meta, err = marshalSchema(t.Meta); err != nil {
+					return Tool{}, fmt.Errorf("meta: %w", err)
+				}
+			}
+			if len(t.Icons) > 0 {
+				if icons, err = marshalSchema(t.Icons); err != nil {
+					return Tool{}, fmt.Errorf("icons: %w", err)
+				}
+			}
 			return Tool{
 				Name:         t.Name,
 				Title:        t.Title,
@@ -353,6 +367,8 @@ func listTools(ctx context.Context, cs sessionLister, raw *rawLists) ([]Tool, er
 				InputSchema:  in,
 				OutputSchema: out,
 				Annotations:  toolAnnotations(t.Annotations),
+				Meta:         meta,
+				Icons:        icons,
 			}, nil
 		})
 }

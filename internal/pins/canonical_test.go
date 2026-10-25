@@ -12,7 +12,7 @@ import (
 
 func TestCanonicalExactBytes(t *testing.T) {
 	t.Parallel()
-	const want = `{"annotations":{"destructiveHint":null,"idempotentHint":null,"openWorldHint":null,"readOnlyHint":null,"title":""},"description":"","inputSchema":null,"name":"x","outputSchema":null,"title":""}`
+	const want = `{"_meta":null,"annotations":{"destructiveHint":null,"idempotentHint":null,"openWorldHint":null,"readOnlyHint":null,"title":""},"description":"","icons":null,"inputSchema":null,"name":"x","outputSchema":null,"title":""}`
 	if got := mustCanonical(t, inspect.Tool{Name: "x"}); got != want {
 		t.Errorf("Canonical(Tool{Name: \"x\"}) =\n%s\nwant\n%s", got, want)
 	}
@@ -23,8 +23,8 @@ func TestCanonicalExactBytes(t *testing.T) {
 // canonicalTool field by field and would silently drop the new one.
 func TestCanonicalToolFields(t *testing.T) {
 	t.Parallel()
-	if n := reflect.TypeFor[inspect.Tool]().NumField(); n != 6 {
-		t.Errorf("inspect.Tool has %d fields, want 6. A new inspect.Tool field needs a decision: "+
+	if n := reflect.TypeFor[inspect.Tool]().NumField(); n != 8 {
+		t.Errorf("inspect.Tool has %d fields, want 8. A new inspect.Tool field needs a decision: "+
 			"add it to the hash with a new HashVersion, or document why the hash leaves it out "+
 			"(see the Canonical doc). Then update this test.", n)
 	}
@@ -72,6 +72,41 @@ func TestCanonicalEqual(t *testing.T) {
 			name: "schema whitespace does not matter",
 			a:    inspect.Tool{Name: "x", OutputSchema: []byte("{ \"type\" :\n\t\"object\" , \"required\": [ \"a\" ] }")},
 			b:    inspect.Tool{Name: "x", OutputSchema: []byte(`{"required":["a"],"type":"object"}`)},
+		},
+		{
+			name: "_meta key order does not matter",
+			a:    inspect.Tool{Name: "x", Meta: []byte(`{"ui":{"visibility":["model"],"resourceUri":"ui://a"},"a":1}`)},
+			b:    inspect.Tool{Name: "x", Meta: []byte(`{"a":1,"ui":{"resourceUri":"ui://a","visibility":["model"]}}`)},
+		},
+		{
+			name: "_meta whitespace does not matter",
+			a:    inspect.Tool{Name: "x", Meta: []byte("{ \"a\" :\n\t[ 1 , 2 ] }")},
+			b:    inspect.Tool{Name: "x", Meta: []byte(`{"a":[1,2]}`)},
+		},
+		{
+			name: "empty bytes equal nil _meta",
+			a:    inspect.Tool{Name: "x"},
+			b:    inspect.Tool{Name: "x", Meta: []byte{}},
+		},
+		{
+			name: "literal null equals nil _meta",
+			a:    inspect.Tool{Name: "x"},
+			b:    inspect.Tool{Name: "x", Meta: []byte(` null `)},
+		},
+		{
+			name: "icon key order does not matter",
+			a:    inspect.Tool{Name: "x", Icons: []byte(`[{"src":"a","mimeType":"image/png","sizes":["1x1"]}]`)},
+			b:    inspect.Tool{Name: "x", Icons: []byte(`[ { "sizes": ["1x1"], "mimeType": "image/png", "src": "a" } ]`)},
+		},
+		{
+			name: "empty bytes equal nil icons",
+			a:    inspect.Tool{Name: "x"},
+			b:    inspect.Tool{Name: "x", Icons: []byte{}},
+		},
+		{
+			name: "literal null equals nil icons",
+			a:    inspect.Tool{Name: "x"},
+			b:    inspect.Tool{Name: "x", Icons: []byte(`null`)},
 		},
 		{
 			// Known limit (FR-11, canonical.go): JCS writes one number format.
@@ -137,6 +172,51 @@ func TestCanonicalDiffer(t *testing.T) {
 			name: "NFC differs from NFD in a schema",
 			a:    inspect.Tool{Name: "x", InputSchema: []byte("{\"d\":\"caf\u00e9\"}")},
 			b:    inspect.Tool{Name: "x", InputSchema: []byte("{\"d\":\"cafe\u0301\"}")},
+		},
+		{
+			name: "nil _meta differs from empty object",
+			a:    inspect.Tool{Name: "x"},
+			b:    inspect.Tool{Name: "x", Meta: []byte(`{}`)},
+		},
+		{
+			name: "nil icons differ from empty array",
+			a:    inspect.Tool{Name: "x"},
+			b:    inspect.Tool{Name: "x", Icons: []byte(`[]`)},
+		},
+		{
+			name: "changed _meta value",
+			a:    inspect.Tool{Name: "x", Meta: []byte(`{"ui":{"resourceUri":"ui://a"}}`)},
+			b:    inspect.Tool{Name: "x", Meta: []byte(`{"ui":{"resourceUri":"ui://b"}}`)},
+		},
+		{
+			name: "changed _meta key",
+			a:    inspect.Tool{Name: "x", Meta: []byte(`{"a":1}`)},
+			b:    inspect.Tool{Name: "x", Meta: []byte(`{"b":1}`)},
+		},
+		{
+			name: "invisible character in _meta",
+			a:    inspect.Tool{Name: "x", Meta: []byte(`{"a":"ab"}`)},
+			b:    inspect.Tool{Name: "x", Meta: []byte("{\"a\":\"a\u200bb\"}")},
+		},
+		{
+			name: "changed icon src",
+			a:    inspect.Tool{Name: "x", Icons: []byte(`[{"src":"https://example.com/a.png"}]`)},
+			b:    inspect.Tool{Name: "x", Icons: []byte(`[{"src":"https://example.com/b.png"}]`)},
+		},
+		{
+			name: "swapped icon order",
+			a:    inspect.Tool{Name: "x", Icons: []byte(`[{"src":"a"},{"src":"b"}]`)},
+			b:    inspect.Tool{Name: "x", Icons: []byte(`[{"src":"b"},{"src":"a"}]`)},
+		},
+		{
+			name: "same JSON in _meta and in icons",
+			a:    inspect.Tool{Name: "x", Meta: []byte(`{"src":"a"}`)},
+			b:    inspect.Tool{Name: "x", Icons: []byte(`{"src":"a"}`)},
+		},
+		{
+			name: "_meta and input schema are not swapped",
+			a:    inspect.Tool{Name: "x", Meta: []byte(`{"a":1}`)},
+			b:    inspect.Tool{Name: "x", InputSchema: []byte(`{"a":1}`)},
 		},
 		{
 			name: "no trimming",
@@ -249,6 +329,8 @@ func TestCanonicalIdempotent(t *testing.T) {
 			Description:  "Reads a file.\n\t\"quoted\" \\ \u0001 \u200b",
 			InputSchema:  []byte(`{ "type": "object", "properties": { "path": { "type": "string", "maxLength": 1.5e2 } } }`),
 			OutputSchema: []byte(`[1, "aA", null, true]`),
+			Meta:         []byte(`{ "z": 1.0, "ui": { "resourceUri": "ui://a\u200b" } }`),
+			Icons:        []byte(`[ { "src": "a", "sizes": [ "1x1" ] }, { "src": "b" } ]`),
 			Annotations: &inspect.ToolAnnotations{
 				Title: "Reader", ReadOnlyHint: new(true), DestructiveHint: new(false),
 			},
@@ -273,9 +355,12 @@ func TestCanonicalDoesNotChangeInput(t *testing.T) {
 	t.Parallel()
 	in := []byte("{ \"z\": 1.0,\n  \"a\": [ 2 , 3 ] }")
 	out := []byte(`{"type" : "object" , "additionalProperties" : false}`)
+	meta := []byte(`{ "z": 1.0, "a": { "y": 1, "b": 2 } }`)
+	icons := []byte(`[ { "src" : "a", "mimeType" : "image/png" } ]`)
 	inCopy, outCopy := bytes.Clone(in), bytes.Clone(out)
+	metaCopy, iconsCopy := bytes.Clone(meta), bytes.Clone(icons)
 
-	tool := inspect.Tool{Name: "x", InputSchema: in, OutputSchema: out}
+	tool := inspect.Tool{Name: "x", InputSchema: in, OutputSchema: out, Meta: meta, Icons: icons}
 	if _, err := Canonical(tool); err != nil {
 		t.Fatalf("Canonical() error = %v", err)
 	}
@@ -284,6 +369,12 @@ func TestCanonicalDoesNotChangeInput(t *testing.T) {
 	}
 	if !bytes.Equal(out, outCopy) {
 		t.Errorf("OutputSchema changed: got %q, want %q", out, outCopy)
+	}
+	if !bytes.Equal(meta, metaCopy) {
+		t.Errorf("Meta changed: got %q, want %q", meta, metaCopy)
+	}
+	if !bytes.Equal(icons, iconsCopy) {
+		t.Errorf("Icons changed: got %q, want %q", icons, iconsCopy)
 	}
 }
 
@@ -294,6 +385,8 @@ func TestCanonicalErrors(t *testing.T) {
 	const marker = "SECRET"
 	input := func(s string) inspect.Tool { return inspect.Tool{Name: "x", InputSchema: []byte(s)} }
 	output := func(s string) inspect.Tool { return inspect.Tool{Name: "x", OutputSchema: []byte(s)} }
+	meta := func(s string) inspect.Tool { return inspect.Tool{Name: "x", Meta: []byte(s)} }
+	icons := func(s string) inspect.Tool { return inspect.Tool{Name: "x", Icons: []byte(s)} }
 	tests := []struct {
 		name   string
 		tool   inspect.Tool
@@ -326,6 +419,20 @@ func TestCanonicalErrors(t *testing.T) {
 		{name: "-1e400 in input schema", tool: input(`{"a":[-1e400],"SECRET":1}`), reason: "number out of range in inputSchema"},
 		{name: "1e400 in output schema", tool: output(`{"SECRET":[1e400]}`), reason: "number out of range in outputSchema"},
 		{name: "-1e400 in output schema", tool: output(`{"SECRET":-1e400}`), reason: "number out of range in outputSchema"},
+		{name: "truncated _meta", tool: meta(`{"SECRET":"a`), reason: "invalid JSON in _meta"},
+		{name: "trailing data in _meta", tool: meta(`{"a":1} "SECRET"`), reason: "invalid JSON in _meta"},
+		{name: "only whitespace in _meta", tool: meta(" \t\n"), reason: "invalid JSON in _meta"},
+		{name: "lone surrogate in _meta", tool: meta(`{"a":"SECRET\ud800"}`), reason: "invalid JSON in _meta"},
+		{name: "duplicate key in _meta", tool: meta(`{"SECRET":1,"SECRET":2}`), reason: "duplicate object key in _meta"},
+		{name: "duplicate nested key in _meta", tool: meta(`{"a":{"SECRET":1,"SECRET":3}}`), reason: "duplicate object key in _meta"},
+		{name: "1e400 in _meta", tool: meta(`{"SECRET":1e400}`), reason: "number out of range in _meta"},
+		{name: "-1e400 in _meta", tool: meta(`{"a":[-1e400],"SECRET":1}`), reason: "number out of range in _meta"},
+		{name: "truncated icons", tool: icons(`[{"SECRET":"a`), reason: "invalid JSON in icons"},
+		{name: "trailing data in icons", tool: icons(`[] "SECRET"`), reason: "invalid JSON in icons"},
+		{name: "not JSON in icons", tool: icons(`SECRET`), reason: "invalid JSON in icons"},
+		{name: "invalid UTF-8 in icons", tool: icons("[{\"src\":\"SECRET\xff\"}]"), reason: "invalid JSON in icons"},
+		{name: "duplicate key in an icon", tool: icons(`[{"src":"SECRET","src":"b"}]`), reason: "duplicate object key in icons"},
+		{name: "1e400 in icons", tool: icons(`[{"SECRET":1e400}]`), reason: "number out of range in icons"},
 		{
 			name:   "just above the largest float64",
 			tool:   input(`{"SECRET":1.797693134862316e308}`),

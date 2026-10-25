@@ -27,8 +27,8 @@ const (
 )
 
 // renderedTool is the shape of the canonical form that render reads. The
-// schemas and the annotations stay raw JSON, because render only re-indents
-// them. The field names are the keys that Canonical writes.
+// schemas, _meta, icons and the annotations stay raw JSON, because render only
+// re-indents them. The field names are the keys that Canonical writes.
 type renderedTool struct {
 	Name         string          `json:"name"`
 	Title        string          `json:"title"`
@@ -36,6 +36,8 @@ type renderedTool struct {
 	Annotations  json.RawMessage `json:"annotations"`
 	InputSchema  json.RawMessage `json:"inputSchema"`
 	OutputSchema json.RawMessage `json:"outputSchema"`
+	Meta         json.RawMessage `json:"_meta"`
+	Icons        json.RawMessage `json:"icons"`
 }
 
 // render turns the canonical form of a tool (the output of Canonical, one line
@@ -48,10 +50,17 @@ type renderedTool struct {
 //	description: <line of the description>
 //	annotations:
 //	  <line of the indented JSON>
+//	_meta:
+//	  <line of the indented JSON>
+//	icons:
+//	  <line of the indented JSON>
 //	inputSchema:
 //	  <line of the indented JSON>
 //	outputSchema:
 //	  <line of the indented JSON>
+//
+// The small fields come before the schemas, so a diff that is cut after a large
+// schema keeps a change in _meta or icons.
 //
 // A name, a title or a description with line breaks gives one line for each of
 // its lines, and each line has the prefix. So text from a server cannot make
@@ -67,7 +76,8 @@ type renderedTool struct {
 // wrapped line and a line break in the text never render the same.
 //
 // The JSON parts have two spaces of indent for each level, and the key order
-// of the canonical form. A schema that the server did not send is null.
+// of the canonical form. A schema, _meta or icons value that the server did not
+// send is null.
 //
 // render keeps every byte of the strings as the server sent them. It does not
 // escape or normalise anything, so an added invisible character is a changed
@@ -87,11 +97,15 @@ func render(canonical string) (string, error) {
 	writePrefixed(&b, "title: ", t.Title)
 	writePrefixed(&b, "description: ", t.Description)
 
+	// The small sections come before the schemas, so a diff that is cut after a
+	// large unchanged schema does not hide a change in _meta or icons.
 	sections := []struct {
 		label string
 		raw   json.RawMessage
 	}{
 		{"annotations:", t.Annotations},
+		{"_meta:", t.Meta},
+		{"icons:", t.Icons},
 		{"inputSchema:", t.InputSchema},
 		{"outputSchema:", t.OutputSchema},
 	}

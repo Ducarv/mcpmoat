@@ -236,6 +236,15 @@
 // the pin hash and of the rule input (PRD FR-11), so a server that flips a
 // hint changes the pin.
 //
+// Each tool also keeps its _meta object and its icons array as raw JSON
+// (Tool.Meta and Tool.Icons). The SDK decodes them and mcpmoat encodes them
+// again, so key order can differ and numbers pass through float64. The SDK
+// decodes icons into typed structs, so it drops a key inside an icon that it
+// does not know. Both fields are part of the pin hash. They are nil when the
+// server sends none or an empty value. Prompts and resources still drop their
+// _meta and icons. The wire limits (jsonshape.go: depth, value count and
+// string size) and the 8 MiB raw limit cover these fields like all others.
+//
 // mcpmoat always sends all four list requests, also for a capability that the
 // server did not declare in the handshake (listAll). A hostile server can
 // leave a capability out of the handshake and still answer the list request
@@ -475,7 +484,9 @@
 //   - No CLI flag sets AllowUntrusted or AllowDisabled yet. scan and pin
 //     print the warnings (Result.Warnings and ConnectError.Warnings) on
 //     stderr, one line each.
-//   - The tool schemas are decoded and encoded again (see Tool.InputSchema).
+//   - The tool schemas, _meta and icons are decoded and encoded again (see
+//     Tool.InputSchema). Numbers pass through float64, and the SDK drops an
+//     unknown key inside an icon.
 //   - A server can still tell mcpmoat apart from a real client by the
 //     version, the capabilities, the timing and the User-Agent (see Client
 //     identity).
