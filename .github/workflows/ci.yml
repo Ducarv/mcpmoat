@@ -96,8 +96,8 @@ jobs:
     permissions:
       contents: read
     env:
-      # Dependabot does not bump this version string. Keep it equal to
-      # release.yml and CONTRIBUTING.md.
+      # Dependabot does not bump this version string. The first step below
+      # checks that release.yml and CONTRIBUTING.md pin the same version.
       GORELEASER_VERSION: v2.19.0
     steps:
       - name: Check out the code
@@ -106,6 +106,15 @@ jobs:
           # GoReleaser reads the git tags to compute the version.
           fetch-depth: 0
           persist-credentials: false
+
+      - name: Check the GoReleaser version pins
+        run: |
+          rel=$(sed -n 's/^ *GORELEASER_VERSION: //p' .github/workflows/release.yml)
+          doc=$(grep -i goreleaser CONTRIBUTING.md | grep -o 'v2\.[0-9]*\.[0-9]*' | sort -u || true)
+          if [ "$rel" != "$GORELEASER_VERSION" ] || [ "$doc" != "$GORELEASER_VERSION" ]; then
+            echo "The GoReleaser pins differ. ci.yml: $GORELEASER_VERSION. release.yml: $rel. CONTRIBUTING.md: $doc."
+            exit 1
+          fi
 
       - name: Set up Go
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
@@ -132,56 +141,4 @@ jobs:
           args: release --snapshot --clean
 
       - name: Check the snapshot artifacts
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          # The goos x goarch list in .goreleaser.yaml: one archive each, no others.
-          targets=(darwin_amd64 darwin_arm64 linux_amd64 linux_arm64)
-          for t in "${targets[@]}"; do
-            n=$(find dist -maxdepth 1 -name "mcpmoat_*_$t.tar.gz" | wc -l)
-            if [ "$n" -ne 1 ]; then
-              echo "expected 1 archive for $t in dist/, found $n:"
-              ls -l dist
-              exit 1
-            fi
-          done
-          want=${#targets[@]}
-          count=$(find dist -maxdepth 1 -name '*.tar.gz' | wc -l)
-          if [ "$count" -ne "$want" ]; then
-            echo "expected only the archives for ${targets[*]} in dist/, found $count:"
-            ls -l dist
-            exit 1
-          fi
-
-          if ! (cd dist && sha256sum -c checksums.txt); then
-            echo "dist/checksums.txt does not match the archives"
-            exit 1
-          fi
-
-          bin=$(jq -r '.[] | select(.type == "Binary" and .goos == "linux" and .goarch == "amd64") | .path' dist/artifacts.json)
-          if [ -z "$bin" ] || [ ! -f "$bin" ]; then
-            echo "no linux amd64 binary found in dist/artifacts.json (got '$bin')"
-            exit 1
-          fi
-
-          info=$(file "$bin")
-          echo "$info"
-          case "$info" in
-            *"statically linked"*) ;;
-            *)
-              echo "$bin is not statically linked"
-              exit 1
-              ;;
-          esac
-
-          want_v="mcpmoat v$(jq -r .version dist/metadata.json) "
-          out=$("$bin" version)
-          echo "$out"
-          case "$out" in
-            "$want_v"*) ;;
-            *)
-              echo "version output does not start with '$want_v'"
-              exit 1
-              ;;
-          esac
+        run: .github/scripts/check-snapshot.sh
