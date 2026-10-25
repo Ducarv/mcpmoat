@@ -191,14 +191,17 @@ here.
 - mcpmoat fails closed. A finding with a severity that mcpmoat does not know always counts, at
   every `--fail-on` value. A finding whose rule ID is not in the rule set counts as critical.
 - No built-in rule is critical yet, so `--fail-on critical` passes every built-in finding, also a
-  rug pull (`MOAT-T2-001` is high). It fails only in the two fail-closed cases above.
+  rug pull (`MOAT-T2-001` is high). It fails only in the two fail-closed cases above. `scan` says
+  so on stderr: `mcpmoat scan: note: no built-in rule is critical yet, so with --fail-on critical
+  no built-in finding gives exit code 1`.
 - An unpinned server that fails or times out is a warning on stderr only. It does not change the
   exit code. A pinned server that fails or times out is a high `MOAT-T2-004` finding.
 
-Exit code 2 comes, for example, from a usage error (invalid flags), invalid rules, an unreadable `--config` file,
-a problem in a config file, a `pins.json` that cannot be read or saved, a report that cannot be
-written (a closed stdout), an unknown home or working directory in auto-discovery, or an internal
-error. Some of these errors still print the report on stdout first, so you can read the findings:
+Exit code 2 comes, for example, from a usage error (invalid flags), invalid rules, an unreadable
+`--config` file, a problem in a config file, a `pins.json` that cannot be read or saved, a report
+that cannot be written (a closed stdout), an unknown home or working directory in auto-discovery,
+or an internal error. Some of these errors still print the report on stdout first, so you can read
+the findings:
 
 | Execution error | Report |
 |---|---|
@@ -215,6 +218,8 @@ A signal is Ctrl-C, `SIGTERM` or `SIGHUP`. It gives exit code 2 at these times:
 - While `scan` reads the configs. The read stops, and the file it did not read is a config file
   problem with the reason `canceled`. If `scan` found a server and you did not use `--no-connect`,
   it then stops at the inspection, as in the next item: it prints the line below and no report.
+  A `pins.json` that cannot be read is the exception: `scan` reads it before the inspection, so
+  it prints the report and the `pins.json` error, without the line below.
 - During the inspection. `scan` stops the stdio servers that it started, prints
   `mcpmoat scan: interrupted; no pins were saved`, saves nothing and prints no report.
 - After the report, before the save of new pins. `scan` prints the same line and saves nothing.

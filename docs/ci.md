@@ -141,9 +141,10 @@ test the hook now, run `pre-commit run --all-files`.
 
 `language: system` runs the `mcpmoat` command from your `PATH`, so install mcpmoat first. The hook
 runs only when the commit changes `.mcp.json` or `.mcpmoat-ignore`. To change the threshold, add
-`--fail-on` after `.mcp.json`, inside the quotes of `entry`, for example `--fail-on medium`. pre-commit shows the output of a hook
-only when the hook fails. To see the findings each time, add `verbose: true` to the hook. A remote
-hook (`repo: https://github.com/Ducarv/mcpmoat`) comes after the first tagged release.
+`--fail-on` after `.mcp.json`, inside the quotes of `entry`, for example `--fail-on medium`.
+pre-commit shows the output of a hook only when the hook fails. To see the findings each time, add
+`verbose: true` to the hook. A remote hook (`repo: https://github.com/Ducarv/mcpmoat`) comes after
+the first tagged release.
 
 ## Exit codes and --fail-on
 
@@ -168,12 +169,12 @@ known.
   /.mcp.json           @example-org/security
   /.cursor/mcp.json    @example-org/security
   /.mcpmoat-ignore     @example-org/security
-  /.github/CODEOWNERS  @example-org/security
-  /.github/workflows/  @example-org/security
+  /.github/            @example-org/security
   ```
 
-  The entry covers the whole `.github/workflows/` folder, because a pull request can also add a
-  new workflow with a job of the same name that always passes. When you add the required check `mcpmoat-scan`, choose GitHub Actions as its
+  The entry covers the whole `.github/` folder: `CODEOWNERS`, the workflows and local actions such
+  as `.github/actions/`. A pull request can also add a new workflow with a job of the same name
+  that always passes. When you add the required check `mcpmoat-scan`, choose GitHub Actions as its
   source, so that another app cannot report a check with the same name.
 
 - When `.mcpmoat-ignore` gives entries, `scan` prints `mcpmoat scan: using N entries from
