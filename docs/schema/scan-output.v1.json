@@ -2,13 +2,14 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://github.com/Ducarv/mcpmoat/docs/schema/scan-output.v1.json",
   "title": "mcpmoat scan output",
-  "description": "The JSON document that `mcpmoat scan --json` writes to stdout. The document never holds env or header values. A finding names the key it is about, never the value. Text fields that come from servers or config files are untrusted: non-printable and invisible non-ASCII characters are written as \\uXXXX escapes.",
+  "description": "The JSON document that `mcpmoat scan --json` writes to stdout. The document never holds env or header values. A finding names the key it is about, never the value. Text fields that come from servers or config files are untrusted: non-printable and invisible non-ASCII characters are written as \\uXXXX escapes. Every enum lists all the values that mcpmoat writes.",
   "type": "object",
   "additionalProperties": false,
   "required": [
     "schema_version",
     "tool",
     "mode",
+    "complete",
     "servers",
     "findings",
     "diffs",
@@ -25,6 +26,10 @@
     "mode": {
       "description": "How the scan ran. \"no-connect\" only reads configs. \"connect\" also connects to the servers.",
       "enum": ["no-connect", "connect"]
+    },
+    "complete": {
+      "description": "False when the report can miss results: a config file has a problem (see \"errors\"), or the inspection or the pin step failed as a whole (for example, pins.json cannot be read). The exit code is then 2, and the reason is on stderr.",
+      "type": "boolean"
     },
     "servers": {
       "description": "Every server that the scan found. Empty list when there is none.",
@@ -109,13 +114,12 @@
           "type": "boolean"
         },
         "state": {
-          "description": "Whether the client config turns the server on. \"project-approved\" means that only files from the repository approved the server. \"unknown\" is the fallback for a state that this version does not know.",
+          "description": "Whether the client config turns the server on. \"project-approved\" means that only files from the repository approved the server.",
           "enum": [
             "enabled",
             "disabled",
             "unapproved",
-            "project-approved",
-            "unknown"
+            "project-approved"
           ]
         },
         "transport": {
@@ -190,7 +194,7 @@
       "description": "The diff of one tool against its pin.",
       "type": "object",
       "additionalProperties": false,
-      "required": ["server", "tool", "kind", "diff", "diff_truncated"],
+      "required": ["server", "tool", "kind", "diff", "diff_truncated", "diff_is_note"],
       "properties": {
         "server": {
           "description": "Name of the server. Untrusted text.",
@@ -205,11 +209,15 @@
           "enum": ["changed", "new", "unverified"]
         },
         "diff": {
-          "description": "Unified diff as raw server text. It is untrusted. JSON escaping covers control characters, and non-printable or invisible non-ASCII characters are written as \\uXXXX escapes. Do not write it to a terminal without care.",
+          "description": "Unified diff as raw server text, or a fixed note of mcpmoat when \"diff_is_note\" is true. It is untrusted. JSON escaping covers control characters, and non-printable or invisible non-ASCII characters are written as \\uXXXX escapes. Do not write it to a terminal without care.",
           "type": "string"
         },
         "diff_truncated": {
           "description": "True when the stored diff was cut, so \"diff\" is not the whole diff.",
+          "type": "boolean"
+        },
+        "diff_is_note": {
+          "description": "True when \"diff\" is a fixed note, not a unified diff: the diff could not be made, or the change does not show in the rendered text.",
           "type": "boolean"
         }
       }

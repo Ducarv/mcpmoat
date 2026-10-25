@@ -1,8 +1,9 @@
 package main
 
 import (
-	"cmp"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"io"
@@ -12,51 +13,28 @@ import (
 	"slices"
 	"strings"
 	"testing"
-	"unicode/utf8"
-
-	"github.com/google/jsonschema-go/jsonschema"
 
 	"github.com/Ducarv/mcpmoat/internal/discover"
 	"github.com/Ducarv/mcpmoat/internal/discover/discovertest"
 	"github.com/Ducarv/mcpmoat/internal/inspect"
 	"github.com/Ducarv/mcpmoat/internal/inspect/inspecttest"
+	"github.com/Ducarv/mcpmoat/internal/pins"
 	"github.com/Ducarv/mcpmoat/internal/report"
+	"github.com/Ducarv/mcpmoat/internal/report/reporttest"
 )
 
 // This file tests "mcpmoat scan --json" (FR-15) in process: the exact shape of
 // the document (golden files), that it matches the terminal run, that it holds
-// no secret and no raw control character, and that it follows
-// docs/schema/scan-output.v1.json.
-
-// scanSchemaPath is the JSON Schema of the scan output, seen from cmd/mcpmoat.
-var scanSchemaPath = filepath.Join("..", "..", "docs", "schema", "scan-output.v1.json")
-
-// loadScanSchema loads docs/schema/scan-output.v1.json and resolves it, so a
-// test can validate a document against it. It fails the test on an error.
-func loadScanSchema(t *testing.T) *jsonschema.Resolved {
-	t.Helper()
-	data, err := os.ReadFile(scanSchemaPath) //nolint:gosec // G304: scanSchemaPath is a fixed repo file
-	if err != nil {
-		t.Fatalf("read the scan output schema: %v", err)
-	}
-	var schema jsonschema.Schema
-	if err := json.Unmarshal(data, &schema); err != nil {
-		t.Fatalf("decode the scan output schema: %v", err)
-	}
-	resolved, err := schema.Resolve(nil)
-	if err != nil {
-		t.Fatalf("resolve the scan output schema: %v", err)
-	}
-	return resolved
-}
+// no secret and no raw control character, and that it follows the schema file
+// of report.SchemaVersion.
 
 // decodeScanJSON checks that stdout is exactly one JSON document of the scan
 // output and returns it. It checks, in this order:
 //   - the text decodes into report.ScanReport with no unknown field;
 //   - nothing follows the document (a second Decode gives io.EOF);
 //   - the document ends with one newline;
-//   - schema_version is 1;
-//   - the document validates against docs/schema/scan-output.v1.json.
+//   - schema_version is report.SchemaVersion;
+//   - the document validates against the schema file of that version.
 //
 // The schema check uses the generic form of the document, so a list that is
 // null instead of [] fails it.
@@ -76,16 +54,16 @@ func decodeScanJSON(t *testing.T, stdout string) report.ScanReport {
 	if !strings.HasSuffix(stdout, "}\n") || strings.HasSuffix(stdout, "\n\n") {
 		t.Errorf("stdout does not end with one closing brace and one newline: %q", lastBytes(stdout, 20))
 	}
-	if doc.SchemaVersion != 1 {
-		t.Errorf("schema_version = %d, want 1", doc.SchemaVersion)
+	if doc.SchemaVersion != report.SchemaVersion {
+		t.Errorf("schema_version = %d, want %d", doc.SchemaVersion, report.SchemaVersion)
 	}
 
 	var generic any
 	if err := json.Unmarshal([]byte(stdout), &generic); err != nil {
 		t.Fatalf("decode stdout as a generic value: %v", err)
 	}
-	if err := loadScanSchema(t).Validate(generic); err != nil {
-		t.Errorf("stdout does not follow docs/schema/scan-output.v1.json: %v\nstdout:\n%s", err, stdout)
+	if err := reporttest.Schema(t).Validate(generic); err != nil {
+		t.Errorf("stdout does not follow %s: %v\nstdout:\n%s", reporttest.SchemaName(), err, stdout)
 	}
 	return doc
 }
@@ -106,11 +84,7 @@ func lastBytes(s string, n int) string {
 // columns, so unlike scanNormalize this does not align anything.
 func jsonNormalize(t *testing.T, out string, replacements map[string]string) string {
 	t.Helper()
-	paths := slices.SortedFunc(maps.Keys(replacements), func(a, b string) int { return cmp.Compare(len(b), len(a)) })
-	for _, p := range paths {
-		out = strings.ReplaceAll(out, jsonEscaped(t, p), replacements[p])
-	}
-	return out
+	return replacePaths(out, replacements, func(p string) string { return jsonEscaped(t, p) })
 }
 
 // jsonEscaped returns s as it shows inside a JSON string, without the quotes.
@@ -130,24 +104,6 @@ func assertNoTempPath(t *testing.T, out string, paths ...string) {
 		if strings.Contains(out, p) || strings.Contains(out, jsonEscaped(t, p)) {
 			t.Errorf("normalized output still holds the real path %q:\n%s", p, out)
 		}
-	}
-}
-
-// assertNoRawControl fails the test if the JSON text holds a raw ESC byte or a
-// raw C1 control rune (U+0080 to U+009F in UTF-8). WriteJSON writes them as
-// \uXXXX escapes.
-func assertNoRawControl(t *testing.T, stdout string) {
-	t.Helper()
-	if strings.Contains(stdout, "\x1b") {
-		t.Errorf("stdout has a raw ESC byte: %q", stdout)
-	}
-	for i, r := range stdout {
-		if r >= 0x80 && r <= 0x9f {
-			t.Errorf("stdout has a raw C1 control rune U+%04X at offset %d", r, i)
-		}
-	}
-	if !utf8.ValidString(stdout) {
-		t.Errorf("stdout is not valid UTF-8")
 	}
 }
 
@@ -262,7 +218,7 @@ func TestScanJSONPinsGolden(t *testing.T) {
 		t.Fatalf("second scan: exit code = %d, want %d\nstdout:\n%s\nstderr:\n%s", second.code, exitFindings, second.stdout, second.stderr)
 	}
 	assertNoLeakBoth(t, second.stdout, second.stderr)
-	assertNoRawControl(t, second.stdout)
+	reporttest.AssertSafeBytes(t, []byte(second.stdout))
 	doc := decodeScanJSON(t, second.stdout)
 	if got := inspectionByName(doc); !maps.Equal(got, wantFirst) {
 		t.Errorf("second scan: inspection statuses = %v, want %v", got, wantFirst)
@@ -278,8 +234,11 @@ func TestScanJSONPinsGolden(t *testing.T) {
 		if d.Truncated {
 			t.Errorf("diff of %s/%s is truncated, want the whole small diff", d.Server, d.Tool)
 		}
+		if d.DiffIsNote {
+			t.Errorf("diff of %s/%s is a note, want a unified diff", d.Server, d.Tool)
+		}
 	}
-	wantDiffs := []diffKey{{"alpha", "add", "changed"}, {"alpha", "mul", "new"}}
+	wantDiffs := []diffKey{{"alpha", "add", report.DiffChanged.String()}, {"alpha", "mul", report.DiffNew.String()}}
 	if !slices.Equal(gotDiffs, wantDiffs) {
 		t.Errorf("diffs = %v, want %v", gotDiffs, wantDiffs)
 	}
@@ -287,11 +246,7 @@ func TestScanJSONPinsGolden(t *testing.T) {
 	if strings.Contains(second.stdout, acceptHintPrefix) {
 		t.Errorf("stdout has a \"To accept\" line, want only the JSON document:\n%s", second.stdout)
 	}
-	var rules []string
-	for _, f := range doc.Findings {
-		rules = append(rules, f.RuleID)
-	}
-	if len(rules) == 0 || !slices.ContainsFunc(rules, func(id string) bool { return strings.HasPrefix(id, "MOAT-T2-") }) {
+	if rules := findingRuleIDs(doc); !slices.ContainsFunc(rules, func(id string) bool { return strings.HasPrefix(id, "MOAT-T2-") }) {
 		t.Errorf("finding rule IDs = %v, want at least one MOAT-T2 pin finding", rules)
 	}
 
@@ -311,11 +266,54 @@ func TestScanJSONPinsGolden(t *testing.T) {
 		got := e.scan(fakeServers(map[string][]inspect.Tool{"srv": {mkTool("add", "Add.")}}), "--json")
 
 		doc := decodeScanJSON(t, got.stdout)
-		if len(doc.Diffs) != 1 || doc.Diffs[0].Kind != "unverified" || doc.Diffs[0].Tool != "add" {
+		if len(doc.Diffs) != 1 || doc.Diffs[0].Kind != report.DiffUnverified.String() || doc.Diffs[0].Tool != "add" {
 			t.Errorf("diffs = %+v, want one unverified diff of tool add", doc.Diffs)
 		}
 		assertNoLeakBoth(t, got.stdout, got.stderr)
 	})
+
+	t.Run("diff note", func(t *testing.T) {
+		t.Parallel()
+
+		e := newPinEnv(t, oneServer("srv"))
+		firstScan(t, e, mkTool("add", "Add."))
+		// render refuses this canonical text, so the diff is a fixed note.
+		setPinCanonical(t, e, "add", `{"name": 5}`)
+
+		got := e.scan(fakeServers(map[string][]inspect.Tool{"srv": {mkTool("add", "Add.")}}), "--json")
+
+		doc := decodeScanJSON(t, got.stdout)
+		if len(doc.Diffs) != 1 || !doc.Diffs[0].DiffIsNote || strings.Contains(doc.Diffs[0].Diff, "+++") {
+			t.Errorf("diffs = %+v, want one diff of tool add that is a note", doc.Diffs)
+		}
+	})
+}
+
+// TestScanJSONIncomplete checks that a pin step that fails as a whole gives a
+// document with complete set to false, so a consumer that reads only stdout
+// sees that the report can miss results.
+func TestScanJSONIncomplete(t *testing.T) {
+	t.Parallel()
+
+	e := newPinEnv(t, oneServer("srv"))
+	writeTestFile(t, filepath.Join(e.xdg, "mcpmoat"), "pins.json", "{this is not json")
+
+	got := e.scan(fakeServers(map[string][]inspect.Tool{"srv": {mkTool("a", "Add.")}}), "--json")
+
+	if got.code != exitError {
+		t.Errorf("exit code = %d, want %d\nstderr:\n%s", got.code, exitError, got.stderr)
+	}
+	doc := decodeScanJSON(t, got.stdout)
+	if doc.Complete {
+		t.Error("complete = true, want false when pins.json cannot be read")
+	}
+	if doc.Mode != report.ModeConnect {
+		t.Errorf("mode = %q, want %q", doc.Mode, report.ModeConnect)
+	}
+	want := map[string]report.InspectionStatus{"srv": report.InspectionNotRun}
+	if got := inspectionByName(doc); !maps.Equal(got, want) {
+		t.Errorf("inspection statuses = %v, want %v", got, want)
+	}
 }
 
 // TestScanJSONInspectionStatus checks the inspection statuses that a connect
@@ -382,6 +380,10 @@ func TestScanJSONInspectionStatus(t *testing.T) {
 func TestScanJSONMatchesTerminal(t *testing.T) {
 	t.Parallel()
 
+	// anyServers is the wantServers value of a case that does not check the
+	// number of servers.
+	const anyServers = -1
+
 	// fixtureDirs copies a fixture and returns its home and work paths.
 	fixtureDirs := func(fixture string) func(t *testing.T) (string, string) {
 		return func(t *testing.T) (string, string) {
@@ -395,7 +397,8 @@ func TestScanJSONMatchesTerminal(t *testing.T) {
 		// dirs gives the home and the working directory of the run.
 		dirs     func(t *testing.T) (home, work string)
 		wantCode int
-		// wantServers is the number of servers in the document.
+		// wantServers is the number of servers in the document, or
+		// anyServers to skip the check.
 		wantServers int
 		// wantFindings and wantErrors tell whether the lists must be empty
 		// (false) or not (true).
@@ -405,7 +408,7 @@ func TestScanJSONMatchesTerminal(t *testing.T) {
 			name:         "findings below the fail level",
 			dirs:         fixtureDirs(fixtureDir("all", "full")),
 			wantCode:     exitOK,
-			wantServers:  -1,
+			wantServers:  anyServers,
 			wantFindings: true,
 		},
 		{
@@ -419,7 +422,7 @@ func TestScanJSONMatchesTerminal(t *testing.T) {
 			name:         "config error with servers",
 			dirs:         fixtureDirs(fixtureDir("all", "partial-failure")),
 			wantCode:     exitError,
-			wantServers:  -1,
+			wantServers:  anyServers,
 			wantFindings: true,
 			wantErrors:   true,
 		},
@@ -456,13 +459,13 @@ func TestScanJSONMatchesTerminal(t *testing.T) {
 				t.Errorf("--json stderr differs from the terminal run\n--json:\n%s\nterminal:\n%s", jsonErr, termErr)
 			}
 			assertNoLeakBoth(t, jsonOut, jsonErr)
-			assertNoRawControl(t, jsonOut)
+			reporttest.AssertSafeBytes(t, []byte(jsonOut))
 
-			// decodeScanJSON checks: one document, no more tokens, schema_version 1,
+			// decodeScanJSON checks: one document, no more tokens, schema_version,
 			// and the schema.
 			doc := decodeScanJSON(t, jsonOut)
 
-			if tt.wantServers >= 0 && len(doc.Servers) != tt.wantServers {
+			if tt.wantServers != anyServers && len(doc.Servers) != tt.wantServers {
 				t.Errorf("servers has %d entries, want %d", len(doc.Servers), tt.wantServers)
 			}
 			if got := len(doc.Findings) > 0; got != tt.wantFindings {
@@ -471,6 +474,10 @@ func TestScanJSONMatchesTerminal(t *testing.T) {
 			if got := len(doc.Errors) > 0; got != tt.wantErrors {
 				t.Errorf("errors = %v, want non-empty: %v", doc.Errors, tt.wantErrors)
 			}
+			// A config problem makes the report incomplete.
+			if doc.Complete == tt.wantErrors {
+				t.Errorf("complete = %v, want %v", doc.Complete, !tt.wantErrors)
+			}
 
 			// The document holds the same servers and findings as the tables,
 			// in the same order. The names of the fixtures hold no space.
@@ -478,7 +485,7 @@ func TestScanJSONMatchesTerminal(t *testing.T) {
 				if got, want := serverNames(doc), column(tableRows(t, termOut), 0); !slices.Equal(got, want) {
 					t.Errorf("server names = %v, want %v (the order of the server table)", got, want)
 				}
-				if got, want := findingColumn(doc), column(findingRows(t, termOut), 0); !slices.Equal(got, want) {
+				if got, want := findingRuleIDs(doc), column(findingRows(t, termOut), 0); !slices.Equal(got, want) {
 					t.Errorf("finding rule IDs = %v, want %v (the order of the findings table)", got, want)
 				}
 			}
@@ -508,8 +515,8 @@ func serverNames(doc report.ScanReport) []string {
 	return names
 }
 
-// findingColumn returns the rule IDs of the findings of doc, in order.
-func findingColumn(doc report.ScanReport) []string {
+// findingRuleIDs returns the rule IDs of the findings of doc, in order.
+func findingRuleIDs(doc report.ScanReport) []string {
 	ids := make([]string, len(doc.Findings))
 	for i, f := range doc.Findings {
 		ids[i] = f.RuleID
@@ -519,6 +526,9 @@ func findingColumn(doc report.ScanReport) []string {
 
 // TestScanJSONConfigFileProblem checks that a config file problem with servers
 // still gives one JSON document, with the problem in errors and exit code 2.
+// TestScanJSONMatchesTerminal runs the same fixture, but checks only that the
+// lists are not empty. This test checks the fields of the error entry and the
+// exact stderr lines.
 func TestScanJSONConfigFileProblem(t *testing.T) {
 	t.Parallel()
 
@@ -625,7 +635,7 @@ func TestScanJSONNoSecret(t *testing.T) {
 			assertNoLeakBoth(t, out, errOut)
 			assertContainsNone(t, "stdout", out, dangerousCanaries)
 			assertNoEscape(t, out, errOut)
-			assertNoRawControl(t, out)
+			reporttest.AssertSafeBytes(t, []byte(out))
 			doc := decodeScanJSON(t, out)
 
 			// The servers hold no env and no header at all: their JSON has
@@ -678,13 +688,37 @@ func TestScanJSONEscapesUntrustedText(t *testing.T) {
 		t.Fatalf("exit code = %d, want %d\nstderr:\n%s", code, exitOK, errOut)
 	}
 	assertNoEscape(t, out, errOut)
-	assertNoRawControl(t, out)
-	if strings.Contains(out, "\u202e") {
-		t.Errorf("stdout has a raw U+202E: %q", out)
-	}
+	reporttest.AssertSafeBytes(t, []byte(out))
 	doc := decodeScanJSON(t, out)
 	if len(doc.Servers) != 1 || doc.Servers[0].Name != wantName {
 		t.Errorf("servers = %+v, want one server named %q", doc.Servers, wantName)
 	}
 	assertContainsAll(t, "stdout", out, []string{`\u001b`, `\u0085`, `\u202e`})
+}
+
+// setPinCanonical sets the canonical text of the pinned tool in pins.json of
+// e, with the matching hash, so the store still loads it.
+func setPinCanonical(t *testing.T, e *pinEnv, tool, canonical string) {
+	t.Helper()
+	var doc map[string]any
+	if err := json.Unmarshal(readFileBytes(t, e.pinsPath()), &doc); err != nil {
+		t.Fatal(err)
+	}
+	servers, _ := doc["servers"].([]any)
+	if len(servers) != 1 {
+		t.Fatalf("pins.json has %d servers, want 1", len(servers))
+	}
+	tools, _ := servers[0].(map[string]any)["tools"].(map[string]any)
+	if _, ok := tools[tool]; !ok {
+		t.Fatalf("pins.json has no tool %q", tool)
+	}
+	sum := sha256.Sum256([]byte(canonical))
+	tools[tool] = map[string]any{"hash": pins.HashVersion + ":" + hex.EncodeToString(sum[:]), "canonical": canonical}
+	data, err := json.Marshal(doc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(e.pinsPath(), data, 0o600); err != nil {
+		t.Fatal(err)
+	}
 }

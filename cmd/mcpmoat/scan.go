@@ -103,7 +103,7 @@ func (c *cli) runScan(_ options, args []string) int {
 		fprintf(c.stderr, "mcpmoat scan: internal error: built-in typosquat list is invalid\n")
 		return exitError
 	}
-	setup := scanSetup{checks: configChecks{set: set, typo: typo}, connect: connect, json: *jsonOut}
+	setup := scanSetup{checks: configChecks{set: set, typo: typo}, connect: connect, jsonOut: *jsonOut}
 
 	// The context ends when the process gets SIGINT, SIGTERM or SIGHUP (see
 	// main). scan starts stdio servers in their own session, so the terminal
@@ -118,9 +118,9 @@ type scanSetup struct {
 	// connect is nil with --no-connect. Otherwise it holds the options for
 	// inspect.Run, and scan inspects the servers and checks their pins.
 	connect *inspect.Options
-	// json is true with --json: scan writes one JSON document on stdout and
-	// none of the terminal tables.
-	json bool
+	// jsonOut is true with --json: scan writes one JSON document on stdout
+	// and none of the terminal tables.
+	jsonOut bool
 }
 
 // rulesNotAppliedNotice is the line that runScan prints on stderr when
@@ -256,10 +256,10 @@ func (c *cli) loadIgnore(wd string, ids []string) *scanIgnores {
 }
 
 // configErrorHint is the line that reportScan prints after the file
-// problems, when it printed the table. It is fixed text: it holds no path and
-// no config text.
+// problems, when it printed the report (the table or the --json document). It
+// is fixed text: it holds no path and no config text.
 const configErrorHint = "mcpmoat scan: a config file has a problem; " +
-	"the table can miss servers that the client loads"
+	"the report can miss servers that the client loads"
 
 // reportScan runs the config rules on the servers of res, with the ignore list
 // ignore. When setup.connect is not nil, it also inspects the servers and
@@ -298,16 +298,9 @@ func (c *cli) reportScan(ctx context.Context, res discover.Result, configPath st
 	}
 
 	var writeErr error
-	if setup.json {
-		// Only the JSON document goes to stdout: no table, no "No MCP servers
-		// found." line and no "To accept" lines. stderr is the same as
-		// without --json.
-		mode := report.ModeNoConnect
-		if setup.connect != nil {
-			mode = report.ModeConnect
-		}
-		doc := buildScanReport(c.build.version, mode, res.Servers, rows, pr, res.Errors)
-		writeErr = report.WriteJSON(c.stdout, doc)
+	if setup.jsonOut {
+		complete := !pinFailed && len(res.Errors) == 0
+		writeErr = c.writeScanJSON(res, rows, pr, setup.connect != nil, complete)
 	} else {
 		writeErr = c.writeScanReport(res.Servers, rows, pr, configPath, len(res.Errors) > 0)
 	}

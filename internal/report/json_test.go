@@ -4,15 +4,14 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"slices"
 	"strings"
 	"testing"
-	"unicode"
-	"unicode/utf8"
 
 	"github.com/Ducarv/mcpmoat/internal/discover"
 	"github.com/Ducarv/mcpmoat/internal/discover/discovertest"
 	"github.com/Ducarv/mcpmoat/internal/report"
-	"github.com/Ducarv/mcpmoat/internal/termsafe"
+	"github.com/Ducarv/mcpmoat/internal/report/reporttest"
 )
 
 // writeJSON returns the bytes that report.WriteJSON writes for r. It fails the
@@ -90,15 +89,10 @@ func TestWriteJSONRedactionParity(t *testing.T) {
 
 	// The argv is the redacted command line, as the terminal shows it.
 	wantArgv := discover.RedactArgs(append([]string{stdio.Command}, stdio.Args.Values()...))
-	if len(got.Servers[0].Argv) != len(wantArgv) {
-		t.Fatalf("argv = %q, want %q", got.Servers[0].Argv, wantArgv)
+	if !slices.Equal(got.Servers[0].Argv, wantArgv) {
+		t.Errorf("argv = %q, want %q", got.Servers[0].Argv, wantArgv)
 	}
-	for i := range wantArgv {
-		if got.Servers[0].Argv[i] != wantArgv[i] {
-			t.Errorf("argv[%d] = %q, want %q", i, got.Servers[0].Argv[i], wantArgv[i])
-		}
-	}
-	if !contains(got.Servers[0].Argv, discover.Mask) {
+	if !slices.Contains(got.Servers[0].Argv, discover.Mask) {
 		t.Errorf("argv = %q, want the secret masked with %q", got.Servers[0].Argv, discover.Mask)
 	}
 	// Same text as the COMMAND cell of WriteServers (no part needs quoting here).
@@ -141,15 +135,6 @@ func TestWriteJSONRedactionParity(t *testing.T) {
 	}
 }
 
-func contains(list []string, want string) bool {
-	for _, s := range list {
-		if s == want {
-			return true
-		}
-	}
-	return false
-}
-
 func TestWriteJSONEscaping(t *testing.T) {
 	t.Parallel()
 
@@ -168,9 +153,9 @@ func TestWriteJSONEscaping(t *testing.T) {
 	for name, s := range hostile {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
-			r := newReport(nil, []report.JSONDiff{{Server: s, Tool: s, Kind: "changed", Diff: "+" + s + "\n"}})
+			r := newReport(nil, []report.JSONDiff{{Server: s, Tool: s, Kind: report.DiffChanged.String(), Diff: "+" + s + "\n"}})
 			out := writeJSON(t, r)
-			assertSafeBytes(t, out)
+			reporttest.AssertSafeBytes(t, out)
 			got := decodeJSON(t, out)
 			if got.Diffs[0].Tool != s || got.Diffs[0].Server != s || got.Diffs[0].Diff != "+"+s+"\n" {
 				t.Errorf("round trip changed the text: got %q, want %q", got.Diffs[0].Tool, s)
@@ -182,7 +167,7 @@ func TestWriteJSONEscaping(t *testing.T) {
 		t.Parallel()
 		bad := "a\xffb\xc3"
 		out := writeJSON(t, newReport(nil, []report.JSONDiff{{Tool: bad, Diff: bad}}))
-		assertSafeBytes(t, out)
+		reporttest.AssertSafeBytes(t, out)
 		got := decodeJSON(t, out)
 		want := "a\ufffdb\ufffd"
 		if got.Diffs[0].Tool != want || got.Diffs[0].Diff != want {
@@ -198,7 +183,7 @@ func TestWriteJSONEscaping(t *testing.T) {
 		}
 		js := report.NewJSONServer(discover.Server{Name: all.String(), Source: all.String(), Transport: discover.TransportStdio}, report.InspectionNotRun)
 		out := writeJSON(t, newReport([]report.JSONServer{js}, nil))
-		assertSafeBytes(t, out)
+		reporttest.AssertSafeBytes(t, out)
 		if got := decodeJSON(t, out); got.Servers[0].Name != all.String() || got.Servers[0].Source != all.String() {
 			t.Error("round trip changed the name or the source")
 		}
@@ -215,33 +200,6 @@ func TestWriteJSONEscaping(t *testing.T) {
 			t.Errorf("tool = %q, want %q", got.Diffs[0].Tool, s)
 		}
 	})
-}
-
-// assertSafeBytes fails if out holds a raw byte or rune that could act on a
-// terminal: a control byte other than newline, or a non-ASCII rune that is
-// not printable or not visible.
-func assertSafeBytes(t *testing.T, out []byte) {
-	t.Helper()
-	if !utf8.Valid(out) {
-		t.Error("output is not valid UTF-8")
-	}
-	if bytes.IndexByte(out, 0x1b) >= 0 {
-		t.Error("output holds a raw ESC byte")
-	}
-	for _, r := range string(out) {
-		switch {
-		case r == '\n':
-		case r < 0x20 || r == 0x7f:
-			t.Errorf("output holds raw control character %U", r)
-		case r >= utf8.RuneSelf && (!unicode.IsPrint(r) || termsafe.IsInvisible(r)):
-			t.Errorf("output holds raw unsafe rune %U", r)
-		}
-	}
-	for _, r := range []rune{0x9b, 0x202e, 0x2066, 0x200b, 0xe0041} {
-		if bytes.ContainsRune(out, r) {
-			t.Errorf("output holds raw %U", r)
-		}
-	}
 }
 
 func TestWriteJSONEmptyReport(t *testing.T) {
@@ -325,10 +283,12 @@ func TestDiffKindString(t *testing.T) {
 	}
 }
 
-func TestNewJSONDiffUsesKindName(t *testing.T) {
+// TestNewJSONDiffCopiesFields checks every field of NewJSONDiff. The kind is
+// a literal on purpose: it is the stable name in the schema.
+func TestNewJSONDiffCopiesFields(t *testing.T) {
 	t.Parallel()
-	got := report.NewJSONDiff(report.ToolDiff{Server: "s", Tool: "t", Kind: report.DiffNew, Diff: "+x\n", Truncated: true})
-	want := report.JSONDiff{Server: "s", Tool: "t", Kind: "new", Diff: "+x\n", Truncated: true}
+	got := report.NewJSONDiff(report.ToolDiff{Server: "s", Tool: "t", Kind: report.DiffNew, Diff: "a note", Truncated: true, IsNote: true})
+	want := report.JSONDiff{Server: "s", Tool: "t", Kind: "new", Diff: "a note", Truncated: true, DiffIsNote: true}
 	if got != want {
 		t.Errorf("NewJSONDiff() = %+v, want %+v", got, want)
 	}

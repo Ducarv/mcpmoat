@@ -47,6 +47,10 @@ type ToolDiff struct {
 	// Truncated is true when the stored diff was cut, so Diff is not the whole
 	// diff. WriteDiffs does not use it. The JSON report shows it.
 	Truncated bool
+	// IsNote is true when Diff is a fixed note, not a unified diff (see
+	// pins.Change.DiffIsNote). WriteDiffs does not use it. The JSON report
+	// shows it.
+	IsNote bool
 }
 
 // DiffKind is the kind of tool that a ToolDiff shows.

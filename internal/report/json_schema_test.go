@@ -2,54 +2,16 @@ package report_test
 
 import (
 	"encoding/json"
-	"errors"
 	"fmt"
-	"os"
 	"reflect"
 	"slices"
 	"strings"
 	"testing"
 
-	"github.com/google/jsonschema-go/jsonschema"
-
 	"github.com/Ducarv/mcpmoat/internal/discover"
 	"github.com/Ducarv/mcpmoat/internal/report"
+	"github.com/Ducarv/mcpmoat/internal/report/reporttest"
 )
-
-// schemaFile is the path of the schema file for report.SchemaVersion, as the
-// tests see it, and its repo-relative name for messages.
-func schemaFile() (path, name string) {
-	name = fmt.Sprintf("docs/schema/scan-output.v%d.json", report.SchemaVersion)
-	return "../../" + name, name
-}
-
-// loadSchema returns the bytes of the schema file for the current version.
-func loadSchema(t *testing.T) []byte {
-	t.Helper()
-	path, name := schemaFile()
-	b, err := os.ReadFile(path) //nolint:gosec // G304: path is a fixed schema file in the repo
-	if errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("schema_version is %[1]d but %[2]s does not exist; add the new schema file", report.SchemaVersion, name)
-	}
-	if err != nil {
-		t.Fatalf("read schema: %v", err)
-	}
-	return b
-}
-
-// resolvedSchema loads, parses and resolves the schema for validation.
-func resolvedSchema(t *testing.T) *jsonschema.Resolved {
-	t.Helper()
-	var s jsonschema.Schema
-	if err := json.Unmarshal(loadSchema(t), &s); err != nil {
-		t.Fatalf("parse schema: %v", err)
-	}
-	rs, err := s.Resolve(nil)
-	if err != nil {
-		t.Fatalf("resolve schema: %v", err)
-	}
-	return rs
-}
 
 // TestSchemaMatchesGoTypes is the guard for FR-15: the json tags of ScanReport
 // and its nested types must match the schema file. Changing a field name
@@ -58,7 +20,7 @@ func TestSchemaMatchesGoTypes(t *testing.T) {
 	t.Parallel()
 
 	var root map[string]any
-	if err := json.Unmarshal(loadSchema(t), &root); err != nil {
+	if err := json.Unmarshal(reporttest.SchemaBytes(t), &root); err != nil {
 		t.Fatalf("parse schema: %v", err)
 	}
 
@@ -103,11 +65,19 @@ func checkSchemaObject(t *testing.T, root map[string]any, typ reflect.Type, s an
 	for name := range props {
 		gotNames = append(gotNames, name)
 	}
-	for _, v := range obj["required"].([]any) {
-		gotRequired = append(gotRequired, v.(string))
+	required, ok := obj["required"].([]any)
+	if !ok {
+		t.Fatalf("schema of %s has no required list", typ.Name())
+	}
+	for _, v := range required {
+		name, ok := v.(string)
+		if !ok {
+			t.Fatalf("schema of %s has a required entry that is not a string: %v", typ.Name(), v)
+		}
+		gotRequired = append(gotRequired, name)
 	}
 
-	_, file := schemaFile()
+	file := reporttest.SchemaName()
 	if d := setDiff(wantNames, gotNames); d != "" {
 		t.Errorf("field set of %s differs from %s: %s. Renaming, removing or changing a field needs a schema_version bump and a new schema file.", typ.Name(), file, d)
 	}
@@ -132,6 +102,7 @@ func checkSchemaObject(t *testing.T, root map[string]any, typ reflect.Type, s an
 	}
 }
 
+// mapOf returns v as a JSON object, or nil when it is not one.
 func mapOf(v any) map[string]any {
 	m, _ := v.(map[string]any)
 	return m
@@ -175,7 +146,7 @@ func setDiff(want, got []string) string {
 }
 
 // richReport covers every inspection status, every diff kind, a truncated
-// diff, a file error, findings, stdio and http servers, and both scopes.
+// diff, a diff note, a file error, findings, stdio and http servers, and both scopes.
 func richReport() report.ScanReport {
 	stdio := func(name string, scope discover.Scope, state discover.State, status report.InspectionStatus) report.JSONServer {
 		s := discover.Server{
@@ -200,6 +171,7 @@ func richReport() report.ScanReport {
 		SchemaVersion: report.SchemaVersion,
 		Tool:          report.ToolInfo{Name: "mcpmoat", Version: "1.2.3"},
 		Mode:          report.ModeConnect,
+		Complete:      true,
 		Servers: []report.JSONServer{
 			stdio("a", discover.ScopeGlobal, discover.StateEnabled, report.InspectionOK),
 			stdio("b", discover.ScopeProject, discover.StateUnapproved, report.InspectionRefused),
@@ -217,6 +189,7 @@ func richReport() report.ScanReport {
 			report.NewJSONDiff(report.ToolDiff{Server: "a", Tool: "t1", Kind: report.DiffChanged, Diff: "--- a\n+++ b\n@@\n-x\n+y\n"}),
 			report.NewJSONDiff(report.ToolDiff{Server: "a", Tool: "t2", Kind: report.DiffNew, Diff: "+x\n"}),
 			report.NewJSONDiff(report.ToolDiff{Server: "a", Tool: "t3", Kind: report.DiffUnverified, Diff: "+x\n", Truncated: true}),
+			report.NewJSONDiff(report.ToolDiff{Server: "a", Tool: "t4", Kind: report.DiffChanged, Diff: "a fixed note", IsNote: true}),
 		},
 		Errors: []report.JSONFileError{
 			report.NewJSONFileError(&discover.FileError{Path: "/p/mcp.json", ProjectPath: "/p", Server: "s", Line: 3, Col: 9, Reason: "invalid JSON", Untrusted: true}),
@@ -237,7 +210,7 @@ func decodeAny(t *testing.T, b []byte) any {
 
 func TestWriteJSONValidatesAgainstSchema(t *testing.T) {
 	t.Parallel()
-	rs := resolvedSchema(t)
+	rs := reporttest.Schema(t)
 
 	empty := report.ScanReport{
 		SchemaVersion: report.SchemaVersion,
@@ -264,7 +237,7 @@ func TestWriteJSONValidatesAgainstSchema(t *testing.T) {
 
 func TestSchemaRejectsBadDocuments(t *testing.T) {
 	t.Parallel()
-	rs := resolvedSchema(t)
+	rs := reporttest.Schema(t)
 	valid := writeJSON(t, richReport())
 
 	// first returns the first element of the list at doc[key].
@@ -282,6 +255,9 @@ func TestSchemaRejectsBadDocuments(t *testing.T) {
 		{"schema_version 2", func(d map[string]any) { d["schema_version"] = 2 }},
 		{"unknown diff kind", func(d map[string]any) { first(d, "diffs")["kind"] = "renamed" }},
 		{"diff kind unknown is not allowed", func(d map[string]any) { first(d, "diffs")["kind"] = "unknown" }},
+		{"state unknown is not allowed", func(d map[string]any) { first(d, "servers")["state"] = "unknown" }},
+		{"missing complete", func(d map[string]any) { delete(d, "complete") }},
+		{"missing diff_is_note", func(d map[string]any) { delete(first(d, "diffs"), "diff_is_note") }},
 		{"unknown inspection status", func(d map[string]any) {
 			first(d, "servers")["inspection"].(map[string]any)["status"] = "skipped"
 		}},

@@ -39,6 +39,13 @@ linters:
           deny:
             - pkg: github.com/Ducarv/mcpmoat/internal/inspect/inspecttest
               desc: test helpers; import inspecttest only from _test.go files
+        # reporttest imports the testing package and the schema validator.
+        reporttest-only-in-tests:
+          files:
+            - "!$test"
+          deny:
+            - pkg: github.com/Ducarv/mcpmoat/internal/report/reporttest
+              desc: test helpers; import reporttest only from _test.go files
         # NFR-06: MCP protocol details stay behind the interface in
         # internal/inspect, so a spec change stays in one package.
         mcp-sdk-only-in-inspect:

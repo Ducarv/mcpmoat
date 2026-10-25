@@ -41,15 +41,14 @@ mcpmoat scan --json | jq -r '.findings[] | "\(.rule_id) \(.server)"'
 - **stderr** gets the warnings, the notices and the errors. They are the same as in a run without
   `--json`.
 - **Exit codes** do not change: 0, 1 or 2 (see [Pins and rug pulls](#pins-and-rug-pulls)).
-- The document never holds env or header values, the working directory of a server, or the error
-  text of a server or of the OS. A server entry holds no env or header data. A finding names the
-  key it is about, for example `GITHUB_TOKEN`. It holds the key name only, never its value.
-- Text from servers and configs is kept as it is. Control characters (including DEL, `0x7f`),
-  invisible characters and bidi characters are written as `\uXXXX` escapes, so it is safe to print
-  the raw document in a terminal. A JSON parser gives the original text back. Decoded values are
-  raw server text. A tool such as `jq -r` can print terminal control sequences, so do not print
-  decoded values (names, diffs) to a terminal without escaping them. Use `jq` without `-r` to keep
-  the escapes.
+- **`complete`** is `false` when the report can miss results, for example when a config file has a
+  problem or `pins.json` cannot be read. The exit code is then 2, and the reason is on stderr.
+- The document never holds env or header values. A finding names the key it is about, for example
+  `GITHUB_TOKEN`, never its value. See [JSON output](docs/ARCHITECTURE.md#json-output) for the full
+  redaction and escaping rules.
+- Decoded values are raw server text. A tool such as `jq -r` can print terminal control sequences,
+  so do not print decoded values (names, diffs) to a terminal without escaping them. Use `jq`
+  without `-r` to keep the escapes.
 - The format has a `schema_version` (now `1`). The schema is
   [docs/schema/scan-output.v1.json](docs/schema/scan-output.v1.json). See
   [JSON output](docs/ARCHITECTURE.md#json-output) for the shape and the version policy.

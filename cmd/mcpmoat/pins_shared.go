@@ -79,7 +79,7 @@ func pinnable(id pins.Identity, tools []inspect.Tool) (pins.ServerPins, error) {
 // diffOf returns the diff of one change for the report. The change must have a
 // diff (see appendDiff). server is the name that the report shows.
 func diffOf(server string, ch pins.Change) report.ToolDiff {
-	d := report.ToolDiff{Server: server, Tool: ch.Tool, Diff: ch.Diff, Truncated: ch.Truncated}
+	d := report.ToolDiff{Server: server, Tool: ch.Tool, Diff: ch.Diff, Truncated: ch.Truncated, IsNote: ch.DiffIsNote()}
 	switch ch.Kind {
 	case pins.KindNew:
 		d.Kind = report.DiffNew

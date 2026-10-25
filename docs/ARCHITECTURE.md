@@ -471,18 +471,27 @@ terminal report, in the same order. The report types hold plain strings, bools a
 Shape (`schema_version` 1):
 
 - Top level: `schema_version`, `tool` (`name`, `version`), `mode` (`no-connect` or `connect`),
-  `servers`, `findings`, `diffs` and `errors`. An empty list is `[]`, never `null`.
+  `complete`, `servers`, `findings`, `diffs` and `errors`. An empty list is `[]`, never `null`.
+- `complete` is `false` when the report can miss results: a config file has a problem (see
+  `errors`), or the inspection or the pin step failed as a whole (for example, `pins.json` cannot
+  be read). The exit code is then 2, and the reason is on stderr only. A failed save of new pins
+  comes after the document is written, so it does not change `complete`: the findings are whole,
+  and the exit code is 2.
 - A server has `name`, `client`, `scope`, `project_path`, `untrusted`, `state`, `transport`,
   `source`, `inspection.status` (`not_run`, `ok`, `timeout`, `failed` or `refused`) and either
   `argv` (stdio) or `url` (http and sse). Both are redacted like in the terminal report.
   `not_run` means that mcpmoat did not connect. This is the case in `no-connect` mode. It also
   happens in `connect` mode when the inspection or the pin step fails as a whole (for example,
-  `pins.json` cannot be read). Then `mode` is `connect`, every server is `not_run`, the exit code
-  is 2 and the reason is on stderr.
+  `pins.json` cannot be read). Then `mode` is `connect`, every server is `not_run`, `complete` is
+  `false`, the exit code is 2 and the reason is on stderr.
 - A finding has `rule_id`, `severity`, `server`, `field`, `key` and `related`. `related` holds key
   names only, never values.
-- A diff has `server`, `tool`, `kind` (`changed`, `new` or `unverified`), `diff` and
-  `diff_truncated`.
+- A diff has `server`, `tool`, `kind` (`changed`, `new` or `unverified`), `diff`,
+  `diff_truncated` and `diff_is_note`. When `diff_is_note` is true, `diff` is a fixed note of
+  mcpmoat, not a unified diff: the diff could not be made, or the change does not show in the
+  rendered text.
+- Every enum in the schema lists all the values that mcpmoat writes. The Go `String` methods have
+  an `unknown` fallback for an invalid value. That value is a bug, and the schema rejects it.
 - A file problem in `errors` has `path`, `project_path`, `server`, `line`, `col`, `reason` and
   `untrusted`. `reason` is fixed text.
 
@@ -498,22 +507,27 @@ names the key it is about in `key` (and `related`): the key name only, never its
 terminal table. `ScanReport` has no field for the rest. The `argv` and the `url` are redacted when
 the JSON types are built.
 
-Escaping: names, paths and diffs come from untrusted servers and configs. The text stays exact, so
-a JSON parser gets the original back. `WriteJSON` writes every control, invisible or bidi character
-as a `\uXXXX` escape (DEL, `0x7f`, too), so it is safe to print the raw output in a terminal. A
-program that decodes the JSON (for example `jq -r`) gets the raw text, which can hold terminal
-control sequences. It must escape that text before it prints it. This is the JSON form of
-the rule in [Where untrusted text is escaped](#where-untrusted-text-is-escaped).
-`termsafe` quotes text for the terminal. JSON escaping does the same job here.
+Escaping: names, paths and diffs come from untrusted servers and configs. Valid UTF-8 text stays
+exact, so a JSON parser gets the original back. `encoding/json` writes invalid UTF-8 as U+FFFD.
+`WriteJSON` writes every control, invisible or bidi character as a `\uXXXX` escape (DEL, `0x7f`,
+too), so it is safe to print the raw output in a terminal. A program that decodes the JSON (for
+example `jq -r`) gets the raw text, which can hold terminal control sequences. It must escape that
+text before it prints it. This is the JSON form of the rule in
+[Where untrusted text is escaped](#where-untrusted-text-is-escaped). `termsafe` quotes text for the
+terminal. JSON escaping does the same job here.
 
-Version policy: a rename, a removal, or a change of the type or the meaning of a field bumps
-`SchemaVersion` and adds `docs/schema/scan-output.v<N>.json`.
-A test in `internal/report` compares the struct tags of the Go types with the schema file of the
-current version, and fails when they differ. A second test validates sample output against the
-schema. The limit: the tests cannot stop someone from editing the v1 schema file in place. The
-reviewer must catch that. An old schema file is kept as it was released.
+Version policy: a rename, a removal, an added field, or a change of the type or the meaning of a
+field bumps `SchemaVersion` and adds `docs/schema/scan-output.v<N>.json`. A new field also needs a
+new version, because every object in the schema sets `additionalProperties: false`, so the old
+schema rejects it. `internal/report/reporttest` loads the schema file of the current version for
+the tests in `internal/report` and `cmd/mcpmoat`. A test in `internal/report` compares the struct
+tags of the Go types with the schema file of the current version, and fails when they differ. A
+second test validates sample output against the schema. The limit: the tests cannot stop someone
+from editing the v1 schema file in place. The reviewer must catch that. An old schema file is kept
+as it was released.
 
-Not in version 1: accept hints, ignored counts, a summary, `pin --json` and `--fail-on` (#65).
+Not in version 1: accept hints (#169), ignored counts (#175), a summary, `pin --json` and `--fail-on`
+(#65).
 
 ## Where untrusted text is escaped
 

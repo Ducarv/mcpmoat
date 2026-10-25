@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"unicode"
 	"unicode/utf16"
 	"unicode/utf8"
 
@@ -53,13 +52,18 @@ const (
 // ints only, never a discover type, so no secret can reach the output by
 // accident.
 type ScanReport struct {
-	SchemaVersion int             `json:"schema_version"`
-	Tool          ToolInfo        `json:"tool"`
-	Mode          Mode            `json:"mode"`
-	Servers       []JSONServer    `json:"servers"`
-	Findings      []JSONFinding   `json:"findings"`
-	Diffs         []JSONDiff      `json:"diffs"`
-	Errors        []JSONFileError `json:"errors"`
+	SchemaVersion int      `json:"schema_version"`
+	Tool          ToolInfo `json:"tool"`
+	Mode          Mode     `json:"mode"`
+	// Complete is false when the report can miss results, and scan then
+	// exits with 2: a config file has a problem (see Errors), or the
+	// inspection or the pin step failed as a whole (pins.json cannot be read,
+	// for example). The reason is on stderr only.
+	Complete bool            `json:"complete"`
+	Servers  []JSONServer    `json:"servers"`
+	Findings []JSONFinding   `json:"findings"`
+	Diffs    []JSONDiff      `json:"diffs"`
+	Errors   []JSONFileError `json:"errors"`
 }
 
 // ToolInfo names the program that made the report.
@@ -109,6 +113,10 @@ type JSONDiff struct {
 	Kind      string `json:"kind"`
 	Diff      string `json:"diff"`
 	Truncated bool   `json:"diff_truncated"`
+	// DiffIsNote is true when Diff is a fixed note of mcpmoat, not a unified
+	// diff: the diff could not be made, or the change does not show in the
+	// rendered text.
+	DiffIsNote bool `json:"diff_is_note"`
 }
 
 // JSONFileError is one config problem in the JSON report. Reason is fixed
@@ -157,11 +165,12 @@ func NewJSONFinding(r FindingRow) JSONFinding {
 // NewJSONDiff converts a tool diff to its JSON form.
 func NewJSONDiff(d ToolDiff) JSONDiff {
 	return JSONDiff{
-		Server:    d.Server,
-		Tool:      d.Tool,
-		Kind:      d.Kind.String(),
-		Diff:      d.Diff,
-		Truncated: d.Truncated,
+		Server:     d.Server,
+		Tool:       d.Tool,
+		Kind:       d.Kind.String(),
+		Diff:       d.Diff,
+		Truncated:  d.Truncated,
+		DiffIsNote: d.IsNote,
 	}
 }
 
@@ -185,8 +194,8 @@ func NewJSONFileError(e *discover.FileError) JSONFileError {
 // The output never holds env or header values: ScanReport has no field for
 // them, and commands and URLs are redacted when the JSON types are built.
 //
-// Names, paths and diffs come from untrusted servers. The text stays lossless,
-// but every non-ASCII character that is not printable or not visible is
+// Names, paths and diffs come from untrusted servers. Valid UTF-8 text stays
+// lossless (encoding/json writes invalid bytes as U+FFFD), but every non-ASCII character that is not printable or not visible is
 // written as a \uXXXX escape, in addition to the escapes of encoding/json for
 // control characters. So a terminal that shows the output does not run
 // control sequences or bidi tricks.
@@ -233,7 +242,8 @@ func escapeUnsafeRunes(b []byte) []byte {
 	out := make([]byte, 0, len(b))
 	for len(b) > 0 {
 		r, size := utf8.DecodeRune(b)
-		if r == 0x7f || (r >= utf8.RuneSelf && (!unicode.IsPrint(r) || termsafe.IsInvisible(r))) {
+		// The bound keeps the newlines and spaces of the indented output.
+		if r >= 0x7f && termsafe.NeedsEscape(r) {
 			if r >= 0x10000 {
 				// Above U+FFFF JSON needs a surrogate pair.
 				r1, r2 := utf16.EncodeRune(r)

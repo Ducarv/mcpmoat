@@ -139,13 +139,15 @@ type pinner struct {
 }
 
 // recordInspection stores the inspection status of o (see pinReport.inspection).
-// Two servers with one identity should not happen. If they do, the first
-// outcome keeps its status, like checkOutcome, which checks the tools of the
-// first one only.
+// Two servers with one identity should not happen. If they do, they share one
+// status: ok when one of them was inspected, because checkOutcome then checks
+// the tools of the first one that was inspected. Otherwise the first outcome
+// keeps its status.
 func (p *pinner) recordInspection(o inspect.Outcome) {
 	id := serverIdentity(o.Server)
-	if _, seen := p.res.inspection[id]; !seen {
-		p.res.inspection[id] = inspectionStatus(o)
+	status := inspectionStatus(o)
+	if old, seen := p.res.inspection[id]; !seen || (old != report.InspectionOK && status == report.InspectionOK) {
+		p.res.inspection[id] = status
 	}
 }
 
