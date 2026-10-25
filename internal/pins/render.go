@@ -59,9 +59,6 @@ type renderedTool struct {
 //	outputSchema:
 //	  <line of the indented JSON>
 //
-// The small fields come before the schemas, so a diff that is cut after a large
-// schema keeps a change in _meta or icons.
-//
 // A name, a title or a description with line breaks gives one line for each of
 // its lines, and each line has the prefix. So text from a server cannot make
 // a line that looks like another field.
@@ -97,8 +94,10 @@ func render(canonical string) (string, error) {
 	writePrefixed(&b, "title: ", t.Title)
 	writePrefixed(&b, "description: ", t.Description)
 
-	// The small sections come before the schemas, so a diff that is cut after a
-	// large unchanged schema does not hide a change in _meta or icons.
+	// annotations, _meta and icons come before the schemas, so a large unchanged
+	// schema cannot push a change in them out of a cut diff. The server controls
+	// the size of _meta, so a large _meta change can still push a schema change
+	// out (issue #162).
 	sections := []struct {
 		label string
 		raw   json.RawMessage
