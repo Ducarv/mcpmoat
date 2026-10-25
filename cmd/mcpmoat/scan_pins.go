@@ -171,12 +171,12 @@ func (p *pinner) checkOutcome(o inspect.Outcome) {
 		return
 	}
 	if p.handled[id] {
-		p.addUnverified(s, reasonListedTwice, fixListedTwice, p.unverifiedSeverity(id))
+		p.addUnverified(s, reasonListedTwice, riskServerUnverified, fixListedTwice, p.unverifiedSeverity(id))
 		return
 	}
 	p.handled[id] = true
 	if !filepath.IsAbs(s.Source) {
-		p.addUnverified(s, reasonRelativeSource, fixRelativeSource, pins.UnverifiedSeverity(true))
+		p.addUnverified(s, reasonRelativeSource, riskServerUnverified, fixRelativeSource, pins.UnverifiedSeverity(true))
 		return
 	}
 
@@ -210,13 +210,13 @@ func (p *pinner) add(row report.FindingRow) bool {
 // with the given severity. reason and fix must be fixed texts: they are shown
 // in the report. fix replaces the remediation of pins.KindUnverified, because
 // scan prints no "To accept" line for these rows, so "pin --accept" cannot
-// solve them (see the fix constants). The risk is riskServerUnverified: the
-// row is about the whole server, which may have no pin at all, not about the
-// pin of one tool.
-func (p *pinner) addUnverified(s discover.Server, reason, fix, severity string) {
+// solve them (see the fix constants). risk replaces the risk of
+// pins.KindUnverified too: the row is about the whole server, which may have
+// no pin at all, not about the pin of one tool (see the risk constants).
+func (p *pinner) addUnverified(s discover.Server, reason, risk, fix, severity string) {
 	row := pinRow(pins.KindUnverified, s, "", severity)
 	row.Related = reason
-	row.Risk = riskServerUnverified
+	row.Risk = risk
 	row.Remediation = fix
 	p.add(row)
 }
@@ -248,7 +248,7 @@ func (p *pinner) notInspected(s discover.Server, id pins.Identity, err error) {
 		return
 	}
 	if _, pinned := p.store.Get(id); pinned && !p.handled[id] && !p.failed[id] {
-		p.addUnverified(s, reasonNotInspected, fixNotInspected, pins.UnverifiedSeverity(true))
+		p.addUnverified(s, reasonNotInspected, riskServerUnverified, fixNotInspected, pins.UnverifiedSeverity(true))
 		p.failed[id] = true
 	}
 }
@@ -265,7 +265,7 @@ func (p *pinner) firstPin(s discover.Server, id pins.Identity, tools []inspect.T
 	if err != nil {
 		// The row gets the fixed reason, never the error text (see
 		// pinnableReason).
-		p.addUnverified(s, pinnableReason(err), fixNotPinnable, pins.UnverifiedSeverity(true))
+		p.addUnverified(s, pinnableReason(err), riskServerUnverified, fixNotPinnable, pins.UnverifiedSeverity(true))
 		return
 	}
 	p.res.pinned = append(p.res.pinned, pinnedServer{id: id, snap: snap, name: s.Name, tools: len(tools)})
@@ -293,7 +293,7 @@ func (p *pinner) firstPin(s discover.Server, id pins.Identity, tools []inspect.T
 func (p *pinner) compare(s discover.Server, id pins.Identity, tools []inspect.Tool, stored pins.ServerPins) {
 	snap, pinErr := pinnable(id, tools)
 	if pinErr != nil && pins.ReasonOf(pinErr) == "" {
-		p.addUnverified(s, pinnableReason(pinErr), fixNotPinnable, pins.UnverifiedSeverity(true))
+		p.addUnverified(s, pinnableReason(pinErr), riskPinnedNotPinnable, fixNotPinnable, pins.UnverifiedSeverity(true))
 	}
 	h := acceptHint{name: s.Name, id: id}
 	kept := false // true when at least one row of this server is not ignored
@@ -337,9 +337,17 @@ const (
 	reasonRelativeSource = "the config path is not absolute"
 )
 
-// riskServerUnverified is the risk of the MOAT-T2-004 rows that scan makes
-// itself (see addUnverified). It holds no server text.
-const riskServerUnverified = "mcpmoat cannot check the tools of this server against pins, so a changed or hostile tool could pass without a review."
+// Fixed risks for the MOAT-T2-004 rows that scan makes itself (see
+// addUnverified). They hold no server text.
+const (
+	// riskServerUnverified is the risk when scan did not check the tools of
+	// the server against pins: a server listed twice, a relative config path,
+	// a pinned server that was not inspected, or a first run that cannot pin.
+	riskServerUnverified = "mcpmoat cannot check the tools of this server against pins, so a changed or hostile tool could pass without a review."
+	// riskPinnedNotPinnable is the risk when scan compared the tools of a
+	// pinned server, but the current tools cannot be pinned (see compare).
+	riskPinnedNotPinnable = "The current tools of this pinned server cannot be pinned, so no change of them can be accepted, and the pins stay on an older version of the server."
+)
 
 // Fixed remediations for the MOAT-T2-004 rows that scan makes itself, one for
 // each reason above (a reason from pinnableReason uses fixNotPinnable). They
@@ -428,9 +436,9 @@ func (pr pinReport) serverStatuses(servers []discover.Server, configFindings []i
 			Status:    report.StatusNotInspected,
 		}
 	}
-	// An index outside servers, or a configFindings shorter than servers,
-	// cannot happen when the caller passes the slices of one scan. Skip the
-	// bad entry rather than panic.
+	// An index outside servers, or a configFindings of another length, cannot
+	// happen when the caller passes the slices of one scan. Use only what fits
+	// rather than panic.
 	for _, entry := range pr.statuses {
 		if entry.index >= 0 && entry.index < len(out) {
 			out[entry.index] = entry.status

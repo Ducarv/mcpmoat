@@ -184,7 +184,7 @@ func (c *cli) parseGlobals(args []string) (options, []string, error) {
 	return options{noColor: colorDisabled(*noColor, c.getenv)}, fs.Args(), nil
 }
 
-// colorDisabled reports whether colored output must stay off. Color is off if
+// colorDisabled reports whether colored output must stay off. Colour is off if
 // the --no-color flag is set or if NO_COLOR has any non-empty value, even "0"
 // (see https://no-color.org/ and PRD FR-14).
 //

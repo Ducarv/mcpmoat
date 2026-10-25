@@ -1048,6 +1048,13 @@ func TestScanPinsHugeMetaFailsClosed(t *testing.T) {
 		if hints := splitPinOutput(t, got.stdout).hints; len(hints) != 0 {
 			t.Errorf("hints = %q, want none: pin --accept would refuse these tools", hints)
 		}
+		// The tools were compared, so the row names the real risk: they can
+		// never be accepted.
+		for _, f := range parseFindings(t, got.stdout) {
+			if f.RuleID == "MOAT-T2-004" && f.Risk != riskPinnedNotPinnable {
+				t.Errorf("MOAT-T2-004 Risk = %q, want %q", f.Risk, riskPinnedNotPinnable)
+			}
+		}
 		if after := readFileBytes(t, e.pinsPath()); !bytes.Equal(pinsBefore, after) {
 			t.Errorf("scan changed pins.json of a pinned server")
 		}
