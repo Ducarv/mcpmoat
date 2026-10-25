@@ -6,7 +6,8 @@
 > servers, pins their tools on the first run, and reports new, removed and changed tools on later
 > runs (T2). It prints a diff for each new and each changed tool. `mcpmoat pin --accept <server>
 > --expect <digest>` accepts the changes. The YAML rules are not
-> applied to tools yet (#143).
+> applied to tools yet (#143). `mcpmoat scan --json` writes the same report as one JSON document
+> (FR-15, see [JSON output](#json-output)).
 
 This page is the one place for the package layout, the import direction, the data flow, the
 `internal/inspect` interface and the rules for untrusted text. The [PRD](PRD.md) holds the product
@@ -25,7 +26,7 @@ internal/
     inspecttest/        test helpers for inspect, including Fake
   rules/                loads YAML rules, applies regex and heuristics
   pins/                 tool hash, pins.json store, change detection and diff
-  report/               terminal output
+  report/               terminal and JSON output
 rules/                  built-in rules (go:embed)
 testdata/               fixtures for tests and the demo
   configs/              example client configs
@@ -56,7 +57,8 @@ docs/                   PRD and other documentation
   tool whose pin cannot be checked. See [Tool hash](#tool-hash), [Tool set digest](#tool-set-digest)
   and [The `pins.json` store](#the-pinsjson-store).
 - `internal/report`: writes the terminal output: the servers (`WriteServers`), the findings
-  (`WriteFindings`) and the diffs of changed, new and not verified tools (`WriteDiffs`).
+  (`WriteFindings`) and the diffs of changed, new and not verified tools (`WriteDiffs`). It also
+  renders the JSON report of `scan --json` (`WriteJSON`). See [JSON output](#json-output).
 - `rules/`: the built-in rule files (`rules/*.yaml`) and `data/popular-servers.txt`. The Go file
   `rules/embed.go` embeds both with `go:embed`. It holds data only. `internal/rules` parses it.
 - `testdata/`: fixtures. `testdata/servers` holds malicious example servers. `testdata/configs`
@@ -118,7 +120,9 @@ go list -f '{{.ImportPath}}: {{join .Imports " "}}' ./...
    `report.WriteFindings` prints a blank line and a table of them. The table holds the rule ID, the
    severity, the server, the field and the key or related name. It never holds a value. Last,
    `reportScan` prints the ignored count for each rule ID on stderr (only rule IDs and counts, no
-   server names).
+   server names). With `--json`, step 6 is different: `buildScanReport` (`cmd/mcpmoat/scan_json.go`)
+   makes one `report.ScanReport` from the same servers, findings and diffs, and `report.WriteJSON`
+   writes it on stdout instead of the tables. See [JSON output](#json-output).
 
 Steps 1 and 2 always run. Steps 3 to 6 run in both modes. Without `--no-connect`, `scan` adds
 the connect and pin steps between step 5 and step 6:
@@ -219,7 +223,7 @@ tool with a new name, next to a removed tool of the same server (a likely rename
 tool alone), MOAT-T2-003 (removed tool) or a medium MOAT-T2-004 (an unpinned tool name, or an
 unpinned server that is listed twice). The code is 2 for an execution error, and that includes a
 `pins.json` that `scan` cannot read or save, and a signal. `scan` prints the report first.
-Exit code 2 wins over 1. `internal/report` has no JSON output.
+Exit code 2 wins over 1. `--json` does not change the exit codes.
 
 `mcpmoat pin --accept <server> [--project <path>] [--expect <digest>]` (FR-13) does these steps:
 
@@ -263,8 +267,8 @@ tool rules (descriptions and schemas) do not run
 yet (#143). `scan` loads the rules from `--rules` and checks them, but does not apply them. It
 prints a notice on stderr that says so.
 
-Known gaps: the store has no lock (#150), only a read just before the save. `--fail-on` (#65) and
-the JSON output (#64) are not implemented.
+Known gaps: the store has no lock (#150), only a read just before the save. `--fail-on` (#65) is
+not implemented.
 
 Known limit: a renamed or moved server (a new name, config file or project path) has a new identity.
 `scan` pins it again as a new server, and it does not report the old pin. A follow-up issue will
@@ -280,7 +284,7 @@ The target flow is `discover -> inspect -> rules -> pins -> report`. The `discov
 - `rules` applies the rules and the heuristics to what `inspect` read.
 - `pins` hashes each tool and reports new, removed and changed tools (rug pulls). This part is
   built (see above).
-- `report` prints the findings, as a table and as JSON.
+- `report` prints the findings, as a table and as JSON. Both are built (see above).
 - The exit code is 1 when a finding is at or above `--fail-on`.
 
 ## Tool hash
@@ -455,6 +459,57 @@ Known limits:
   The policy for a full file (which servers to keep) is not decided yet.
 - `Save` writes indented JSON, and the 32 MiB cap applies to that form. A compact file near the cap,
   for example from a hand edit, loads but cannot be saved.
+
+## JSON output
+
+`mcpmoat scan --json` (FR-15) writes the report as one JSON document on stdout. The schema is
+[docs/schema/scan-output.v1.json](schema/scan-output.v1.json). The Go types are in
+`internal/report/json.go`. `cmd/mcpmoat/scan_json.go` fills them from the same data as the
+terminal report, in the same order. The report types hold plain strings, bools and ints, never a
+`discover` type, so a secret cannot reach the output by accident.
+
+Shape (`schema_version` 1):
+
+- Top level: `schema_version`, `tool` (`name`, `version`), `mode` (`no-connect` or `connect`),
+  `servers`, `findings`, `diffs` and `errors`. An empty list is `[]`, never `null`.
+- A server has `name`, `client`, `scope`, `project_path`, `untrusted`, `state`, `transport`,
+  `source`, `inspection.status` (`not_run`, `ok`, `timeout`, `failed` or `refused`) and either
+  `argv` (stdio) or `url` (http and sse). Both are redacted like in the terminal report.
+- A finding has `rule_id`, `severity`, `server`, `field`, `key` and `related`. `related` holds key
+  names only, never values.
+- A diff has `server`, `tool`, `kind` (`changed`, `new` or `unverified`), `diff` and
+  `diff_truncated`.
+- A file problem in `errors` has `path`, `project_path`, `server`, `line`, `col`, `reason` and
+  `untrusted`. `reason` is fixed text.
+
+What stays on stderr: the warnings, the notices and the errors. They are byte-identical to a run
+without `--json`. With `--json`, stdout holds no table, no "No MCP servers found." line and no
+`To accept` line. The exit codes do not change. When `scan` makes no report (for example,
+`--config` cannot be loaded), stdout is empty. If `WriteJSON` fails, `scan` exits with 2, like a
+failed table write.
+
+Redaction: the document never holds env or header values, the working directory of a server, or
+error text from a server or from the OS. A server entry holds no env or header data. A finding
+names the key it is about in `key` (and `related`): the key name only, never its value, as in the
+terminal table. `ScanReport` has no field for the rest. The `argv` and the `url` are redacted when
+the JSON types are built.
+
+Escaping: names, paths and diffs come from untrusted servers and configs. The text stays exact, so
+a JSON parser gets the original back. `WriteJSON` writes every control, invisible or bidi character
+as a `\uXXXX` escape (DEL, `0x7f`, too), so it is safe to print the raw output in a terminal. A
+program that decodes the JSON (for example `jq -r`) gets the raw text, which can hold terminal
+control sequences. It must escape that text before it prints it. This is the JSON form of
+the rule in [Where untrusted text is escaped](#where-untrusted-text-is-escaped).
+`termsafe` quotes text for the terminal. JSON escaping does the same job here.
+
+Version policy: a rename, a removal, or a change of the type or the meaning of a field bumps
+`SchemaVersion` and adds `docs/schema/scan-output.v<N>.json`.
+A test in `internal/report` compares the struct tags of the Go types with the schema file of the
+current version, and fails when they differ. A second test validates sample output against the
+schema. The limit: the tests cannot stop someone from editing the v1 schema file in place. The
+reviewer must catch that. An old schema file is kept as it was released.
+
+Not in version 1: accept hints, ignored counts, a summary, `pin --json` and `--fail-on` (#65).
 
 ## Where untrusted text is escaped
 

@@ -10,8 +10,10 @@ package main
 import (
 	"bytes"
 	"cmp"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"maps"
 	"os"
 	"os/exec"
@@ -594,6 +596,76 @@ func TestE2EScanConfigFindings(t *testing.T) {
 				if slices.Contains(findingIDs(rows), id) {
 					t.Errorf("finding %s shows, but it is ignored\nstdout:\n%s", id, stdout)
 				}
+			}
+		})
+	}
+}
+
+// TestE2EScanJSON runs scan --json with the real binary. Stdout is one JSON
+// document, and --json changes neither stderr nor the exit code.
+func TestE2EScanJSON(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name         string
+		setup        func(t *testing.T) (home, work string)
+		wantCode     int
+		wantFindings bool
+	}{
+		{
+			name: "dangerous",
+			setup: func(t *testing.T) (string, string) {
+				return discovertest.CopyFixture(t, filepath.Join("..", "..", "testdata", "configs", "dangerous"))
+			},
+			wantCode:     exitFindings,
+			wantFindings: true,
+		},
+		{
+			name:     "benign",
+			setup:    func(t *testing.T) (string, string) { return benignHome(t, "benign-srv") },
+			wantCode: exitOK,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			home, work := tt.setup(t)
+
+			plainOut, plainErr, plainCode := runBin(t, home, work, "scan", "--no-connect")
+			stdout, stderr, code := runBin(t, home, work, "scan", "--no-connect", "--json")
+
+			if code != tt.wantCode || plainCode != tt.wantCode {
+				t.Errorf("exit codes: --json %d, plain %d, want %d\nstderr:\n%s", code, plainCode, tt.wantCode, stderr)
+			}
+			if stderr != plainErr {
+				t.Errorf("stderr with --json = %q, without = %q", stderr, plainErr)
+			}
+			assertContainsNone(t, "stdout", stdout, dangerousCanaries)
+			assertContainsNone(t, "stderr", stderr, dangerousCanaries)
+			assertContainsNone(t, "stdout", stdout, []string{pinEnvCanary})
+			if plainOut == stdout {
+				t.Errorf("--json stdout equals the table output:\n%s", stdout)
+			}
+
+			dec := json.NewDecoder(strings.NewReader(stdout))
+			var doc map[string]any
+			if err := dec.Decode(&doc); err != nil {
+				t.Fatalf("stdout is not JSON: %v\n%s", err, stdout)
+			}
+			if err := dec.Decode(new(any)); !errors.Is(err, io.EOF) {
+				t.Errorf("stdout has more than one JSON document (err = %v):\n%s", err, stdout)
+			}
+			if doc["schema_version"] != float64(1) || doc["mode"] != "no-connect" {
+				t.Errorf("schema_version = %v, mode = %v, want 1 and no-connect", doc["schema_version"], doc["mode"])
+			}
+			if servers, _ := doc["servers"].([]any); len(servers) == 0 {
+				t.Errorf("servers = %v, want a non-empty array", doc["servers"])
+			}
+			findings, ok := doc["findings"].([]any)
+			if !ok {
+				t.Fatalf("findings = %#v, want an array (an empty one is [], not null)", doc["findings"])
+			}
+			if (len(findings) > 0) != tt.wantFindings {
+				t.Errorf("got %d findings, want findings: %v", len(findings), tt.wantFindings)
 			}
 		})
 	}

@@ -44,6 +44,9 @@ type ToolDiff struct {
 	// Kind says what the diff shows, and so its header. The zero value is
 	// DiffChanged.
 	Kind DiffKind
+	// Truncated is true when the stored diff was cut, so Diff is not the whole
+	// diff. WriteDiffs does not use it. The JSON report shows it.
+	Truncated bool
 }
 
 // DiffKind is the kind of tool that a ToolDiff shows.
@@ -62,6 +65,22 @@ const (
 	// tool.
 	DiffUnverified
 )
+
+// String returns the fixed name of k: "changed", "new" or "unverified". The
+// JSON report uses these names. They are a stable contract. Any other value
+// gives "unknown".
+func (k DiffKind) String() string {
+	switch k {
+	case DiffChanged:
+		return "changed"
+	case DiffNew:
+		return "new"
+	case DiffUnverified:
+		return "unverified"
+	default:
+		return "unknown"
+	}
+}
 
 // WriteDiffs writes one unified diff for each element of diffs to w, in the
 // given order. When diffs is empty it writes nothing and returns nil.

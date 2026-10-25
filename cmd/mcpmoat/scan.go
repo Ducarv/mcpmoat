@@ -31,6 +31,7 @@ func (c *cli) runScan(_ options, args []string) int {
 	// package prints nothing and the flags have no usage text.
 	fs.SetOutput(io.Discard)
 	noConnect := fs.Bool("no-connect", false, "")
+	jsonOut := fs.Bool("json", false, "")
 	timeout := fs.Duration("timeout", inspect.DefaultTimeout, "")
 	concurrency := fs.Int("concurrency", inspect.DefaultConcurrency, "")
 
@@ -102,7 +103,7 @@ func (c *cli) runScan(_ options, args []string) int {
 		fprintf(c.stderr, "mcpmoat scan: internal error: built-in typosquat list is invalid\n")
 		return exitError
 	}
-	setup := scanSetup{checks: configChecks{set: set, typo: typo}, connect: connect}
+	setup := scanSetup{checks: configChecks{set: set, typo: typo}, connect: connect, json: *jsonOut}
 
 	// The context ends when the process gets SIGINT, SIGTERM or SIGHUP (see
 	// main). scan starts stdio servers in their own session, so the terminal
@@ -117,6 +118,9 @@ type scanSetup struct {
 	// connect is nil with --no-connect. Otherwise it holds the options for
 	// inspect.Run, and scan inspects the servers and checks their pins.
 	connect *inspect.Options
+	// json is true with --json: scan writes one JSON document on stdout and
+	// none of the terminal tables.
+	json bool
 }
 
 // rulesNotAppliedNotice is the line that runScan prints on stderr when
@@ -260,7 +264,8 @@ const configErrorHint = "mcpmoat scan: a config file has a problem; " +
 // reportScan runs the config rules on the servers of res, with the ignore list
 // ignore. When setup.connect is not nil, it also inspects the servers and
 // checks their pins (see inspectAndPin). configPath is the --config value, or
-// empty. It prints the report on stdout (see writeScanReport), and the
+// empty. It prints the report on stdout (see writeScanReport, or the JSON
+// document with --json), and the
 // file problems and warnings on stderr, and returns the exit code (the contract
 // is in the usage text, see usage in cli.go). When the ignore list dropped at
 // least one finding, it prints one line on stderr after the report, with the
@@ -292,7 +297,17 @@ func (c *cli) reportScan(ctx context.Context, res discover.Result, configPath st
 		ignored = mergeIgnored(ignored, pr.ignored)
 	}
 
-	if err := c.writeScanReport(res.Servers, rows, pr, configPath, len(res.Errors) > 0); err != nil {
+	var writeErr error
+	if setup.json {
+		// Only the JSON document goes to stdout: no table, no "No MCP servers
+		// found." line and no "To accept" lines. stderr is the same as
+		// without --json.
+		doc := buildScanReport(c.build.version, setup.connect != nil, res.Servers, rows, pr, res.Errors)
+		writeErr = report.WriteJSON(c.stdout, doc)
+	} else {
+		writeErr = c.writeScanReport(res.Servers, rows, pr, configPath, len(res.Errors) > 0)
+	}
+	if writeErr != nil {
 		c.cmdPrintf("scan", "cannot write output")
 		// stderr can still work. The file problems are the reason for a
 		// failed scan, so the user must still see them. New pins are not

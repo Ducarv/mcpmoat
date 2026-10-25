@@ -22,9 +22,37 @@ These methods will work from the first release:
 ```sh
 mcpmoat scan                 # discover, connect, pin or compare the tools, and report
 mcpmoat scan --no-connect    # static config analysis only; runs no server, reads no pins
+mcpmoat scan --json          # the same report as one JSON document on stdout
 mcpmoat pin --accept <name> --expect <digest>  # accept the tools of a server, only if they match the digest from scan
 mcpmoat version              # print the version, commit and build date
 ```
+
+## JSON output
+
+`mcpmoat scan --json` prints the report as one JSON document. It works with `--no-connect` too.
+List the rule ID and the server of each finding:
+
+```sh
+mcpmoat scan --json | jq -r '.findings[] | "\(.rule_id) \(.server)"'
+```
+
+- **stdout** holds exactly one JSON document. It has no table, no `To accept` line and no other
+  text. If `scan` makes no report (for example, `--config` cannot be loaded), stdout is empty.
+- **stderr** gets the warnings, the notices and the errors. They are the same as in a run without
+  `--json`.
+- **Exit codes** do not change: 0, 1 or 2 (see [Pins and rug pulls](#pins-and-rug-pulls)).
+- The document never holds env or header values, the working directory of a server, or the error
+  text of a server or of the OS. A server entry holds no env or header data. A finding names the
+  key it is about, for example `GITHUB_TOKEN`. It holds the key name only, never its value.
+- Text from servers and configs is kept as it is. Control characters (including DEL, `0x7f`),
+  invisible characters and bidi characters are written as `\uXXXX` escapes, so it is safe to print
+  the raw document in a terminal. A JSON parser gives the original text back. Decoded values are
+  raw server text. A tool such as `jq -r` can print terminal control sequences, so do not print
+  decoded values (names, diffs) to a terminal without escaping them. Use `jq` without `-r` to keep
+  the escapes.
+- The format has a `schema_version` (now `1`). The schema is
+  [docs/schema/scan-output.v1.json](docs/schema/scan-output.v1.json). See
+  [JSON output](docs/ARCHITECTURE.md#json-output) for the shape and the version policy.
 
 ## Pins and rug pulls
 
@@ -188,7 +216,7 @@ go build -o mcpmoat ./cmd/mcpmoat
   into a tool description, and then that text is stored in `pins.json`. mcpmoat does not start a
   server from an untrusted project file or a turned-off server, and no flag allows it yet. The YAML
   tool rules do not run yet, so exit code 0 does not mean that the tools are safe.
-- Not done yet: a lock for `pins.json` (#150), `--fail-on` (#65) and JSON output (#64).
+- Not done yet: a lock for `pins.json` (#150) and `--fail-on` (#65).
 - `scan --rules <dir>` loads and checks extra rule files, but `scan` does not apply them yet. It
   prints `mcpmoat scan: rules from --rules are loaded and checked, but not applied yet` on stderr.
 
