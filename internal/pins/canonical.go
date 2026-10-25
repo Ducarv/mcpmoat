@@ -192,27 +192,25 @@ func canonicalSchema(field string, raw []byte) (jsontext.Value, error) {
 	// Canonicalize rewrites the bytes in place. raw shares its backing array
 	// with the caller's Tool, so work on a copy: the Tool must not change.
 	v := jsontext.Value(bytes.Clone(raw))
-	// Canonicalize changes a number out of range to the largest float64, with
-	// no error. Check the numbers first.
-	if err := checkNumbers(field, v); err != nil {
-		return nil, err
-	}
-	// By default, Canonicalize rejects duplicate object keys, invalid UTF-8,
-	// lone surrogates and invalid JSON.
-	// This pass maps errors to the field name and rejects trailing values; the
-	// final Canonicalize of the whole document makes the bytes canonical.
+	// By default, Canonicalize rejects invalid JSON (a trailing value
+	// included), duplicate object keys, invalid UTF-8 and lone surrogates.
+	// This pass puts the field name in the error; the final Canonicalize of
+	// the whole document makes the bytes canonical.
 	if err := v.Canonicalize(); err != nil {
 		return nil, schemaError(field, err)
+	}
+	// Canonicalize changes a number out of range to the largest float64, with
+	// no error. So check the numbers as the server wrote them, in raw.
+	if err := checkNumbers(field, raw); err != nil {
+		return nil, err
 	}
 	return v, nil
 }
 
-// checkNumbers returns an error when a token in v is invalid (bad syntax, a
-// duplicate object key or invalid UTF-8), or when a number in v overflows a
-// float64. It reads v as a stream, so it does not reject trailing top-level
-// values: Canonicalize in canonicalSchema does.
-func checkNumbers(field string, v jsontext.Value) error {
-	dec := jsontext.NewDecoder(bytes.NewReader(v))
+// checkNumbers returns an error when a number in raw overflows a float64.
+// raw must be one valid JSON value.
+func checkNumbers(field string, raw []byte) error {
+	dec := jsontext.NewDecoder(bytes.NewReader(raw))
 	for {
 		tok, err := dec.ReadToken()
 		if errors.Is(err, io.EOF) {

@@ -1,13 +1,13 @@
 package pins
 
-// This file holds the mutation generators of TestHashMutations and
-// TestHashFalseHintIsNil, and the JSON span walker that finds the parts of a
-// schema to change.
+// This file holds the mutation generators of TestHashMutations, and the JSON
+// span walker that finds the parts of a schema to change.
 
 import (
 	"bytes"
 	"encoding/json/jsontext"
 	"math"
+	"slices"
 	"strconv"
 	"testing"
 	"unicode/utf8"
@@ -25,19 +25,6 @@ type hashMutation struct {
 // change: zero width space, byte order mark and the tag character "A".
 var hashInvisible = []string{"\u200b", "\ufeff", "\U000E0041"}
 
-// hashHints are the four hints of inspect.ToolAnnotations. falseIsNull marks
-// the hints that the canonical form writes as null when they are false.
-var hashHints = []struct {
-	field       string
-	ptr         func(*inspect.ToolAnnotations) **bool
-	falseIsNull bool
-}{
-	{"readOnlyHint", func(a *inspect.ToolAnnotations) **bool { return &a.ReadOnlyHint }, true},
-	{"destructiveHint", func(a *inspect.ToolAnnotations) **bool { return &a.DestructiveHint }, false},
-	{"idempotentHint", func(a *inspect.ToolAnnotations) **bool { return &a.IdempotentHint }, true},
-	{"openWorldHint", func(a *inspect.ToolAnnotations) **bool { return &a.OpenWorldHint }, false},
-}
-
 // hashMutations returns changed copies of tool. Each one must have another
 // hash than tool. None of them changes tool.
 func hashMutations(t testing.TB, tool inspect.Tool) []hashMutation {
@@ -47,15 +34,10 @@ func hashMutations(t testing.TB, tool inspect.Tool) []hashMutation {
 	return append(muts, hashSchemaFieldMutations(t, tool)...)
 }
 
-// hashMutated returns a copy of tool, changed by change. The copy has its own
-// annotations, so change cannot alter the annotations of tool. change must
-// replace a schema, never write into its bytes.
+// hashMutated returns a copy of tool (see cloneTool), changed by change.
+// change must replace a schema, never write into its bytes.
 func hashMutated(tool inspect.Tool, name string, change func(*inspect.Tool)) hashMutation {
-	c := tool
-	if tool.Annotations != nil {
-		ann := *tool.Annotations
-		c.Annotations = &ann
-	}
+	c := cloneTool(tool)
 	change(&c)
 	return hashMutation{name: name, tool: c}
 }
@@ -114,7 +96,6 @@ func hashHintMutations(tool inspect.Tool) []hashMutation {
 		if tool.Annotations != nil {
 			cur = *hf.ptr(tool.Annotations)
 		}
-		// new(true) (Go 1.26+) returns a pointer to a new bool set to true.
 		for _, v := range []*bool{nil, new(true), new(false)} {
 			if hashHintJSON(cur, hf.falseIsNull) == hashHintJSON(v, hf.falseIsNull) {
 				continue
@@ -182,7 +163,8 @@ func hashSchemaMutations(t testing.TB, raw []byte) []hashSchemaMutation {
 }
 
 // hashStringMutations changes one character of each string or key in spans,
-// and adds each invisible character at its start.
+// and adds each invisible character at its start. It skips a changed key
+// that matches a sibling key: a duplicate key has no canonical form.
 func hashStringMutations(t testing.TB, raw []byte, spans []hashSpan) []hashSchemaMutation {
 	t.Helper()
 	quote := func(v string) []byte {
@@ -193,21 +175,21 @@ func hashStringMutations(t testing.TB, raw []byte, spans []hashSpan) []hashSchem
 		return q
 	}
 	var muts []hashSchemaMutation
+	add := func(name string, schema []byte) {
+		// The default options of IsValid reject a duplicate key.
+		if jsontext.Value(schema).IsValid() {
+			muts = append(muts, hashSchemaMutation{name: name, schema: schema})
+		}
+	}
 	for _, s := range spans {
 		tok := raw[s.start:s.end]
 		str, err := jsontext.AppendUnquote(nil, tok)
 		if err != nil {
 			t.Fatalf("unquote %s: %v", tok, err)
 		}
-		muts = append(muts, hashSchemaMutation{
-			name:   "string " + string(tok) + ": one character changed",
-			schema: hashSplice(raw, s, quote(hashChangeOneChar(string(str)))),
-		})
+		add("string "+string(tok)+": one character changed", hashSplice(raw, s, quote(hashChangeOneChar(string(str)))))
 		for _, inv := range hashInvisible {
-			muts = append(muts, hashSchemaMutation{
-				name:   "string " + string(tok) + ": " + strconv.QuoteToASCII(inv) + " added",
-				schema: hashSplice(raw, s, quote(inv+string(str))),
-			})
+			add("string "+string(tok)+": "+strconv.QuoteToASCII(inv)+" added", hashSplice(raw, s, quote(inv+string(str))))
 		}
 	}
 	return muts
@@ -256,20 +238,14 @@ func hashArraySwaps(t testing.TB, raw []byte, arrays [][]hashSpan) []hashSchemaM
 	t.Helper()
 	var muts []hashSchemaMutation
 	for _, elems := range arrays {
-		for i := 0; i+1 < len(elems); i++ {
+		for i := range len(elems) - 1 {
 			a, b := elems[i], elems[i+1]
 			if canonicalForm(t, raw[a.start:a.end]) == canonicalForm(t, raw[b.start:b.end]) {
 				continue
 			}
-			var out []byte
-			out = append(out, raw[:a.start]...)
-			out = append(out, raw[b.start:b.end]...)
-			out = append(out, raw[a.end:b.start]...)
-			out = append(out, raw[a.start:a.end]...)
-			out = append(out, raw[b.end:]...)
 			muts = append(muts, hashSchemaMutation{
 				name:   "array elements " + string(raw[a.start:a.end]) + " and " + string(raw[b.start:b.end]) + " swapped",
-				schema: out,
+				schema: slices.Concat(raw[:a.start], raw[b.start:b.end], raw[a.end:b.start], raw[a.start:a.end], raw[b.end:]),
 			})
 		}
 	}
@@ -343,9 +319,7 @@ func hashWalk(dec *jsontext.Decoder, p *hashSchemaParts) (hashSpan, error) {
 
 // hashSplice returns a copy of raw with the span s replaced by repl.
 func hashSplice(raw []byte, s hashSpan, repl []byte) []byte {
-	out := append([]byte(nil), raw[:s.start]...)
-	out = append(out, repl...)
-	return append(out, raw[s.end:]...)
+	return slices.Concat(raw[:s.start], repl, raw[s.end:])
 }
 
 // hashChangeOneChar returns s with its first character replaced by another

@@ -10,16 +10,6 @@ import (
 	"github.com/Ducarv/mcpmoat/internal/inspect"
 )
 
-// mustCanonical returns Canonical(tool) and fails the test on an error.
-func mustCanonical(t testing.TB, tool inspect.Tool) string {
-	t.Helper()
-	got, err := Canonical(tool)
-	if err != nil {
-		t.Fatalf("Canonical() error = %v, want nil", err)
-	}
-	return string(got)
-}
-
 func TestCanonicalExactBytes(t *testing.T) {
 	t.Parallel()
 	const want = `{"annotations":{"destructiveHint":null,"idempotentHint":null,"openWorldHint":null,"readOnlyHint":null,"title":""},"description":"","inputSchema":null,"name":"x","outputSchema":null,"title":""}`
@@ -226,7 +216,7 @@ func TestCanonicalNumbers(t *testing.T) {
 		{name: "underflow to zero", schema: `{"a":1e-400}`, want: `{"a":0}`},
 		{name: "negative underflow to zero", schema: `{"a":[-1e-400]}`, want: `{"a":[0]}`},
 		{name: "largest float64", schema: `{"a":1.7976931348623157e308}`, want: `{"a":1.7976931348623157e+308}`},
-		{name: "smallest float64", schema: `{"a":-1.7976931348623157e308}`, want: `{"a":-1.7976931348623157e+308}`},
+		{name: "most negative float64", schema: `{"a":-1.7976931348623157e308}`, want: `{"a":-1.7976931348623157e+308}`},
 		{name: "out of range text in a string", schema: `{"1e400":"1e400"}`, want: `{"1e400":"1e400"}`},
 	}
 	for _, tt := range tests {
@@ -312,6 +302,9 @@ func TestCanonicalErrors(t *testing.T) {
 		{name: "truncated input schema", tool: input(`{"SECRET":"a`), reason: "invalid JSON in inputSchema"},
 		{name: "trailing data in input schema", tool: input(`{"a":1} "SECRET"`), reason: "invalid JSON in inputSchema"},
 		{name: "two values in output schema", tool: output(`{} {"SECRET":1}`), reason: "invalid JSON in outputSchema"},
+		// A trailing value is invalid JSON, whatever it holds.
+		{name: "out of range number in a trailing value", tool: input(`{} {"SECRET":1e400}`), reason: "invalid JSON in inputSchema"},
+		{name: "duplicate key in a trailing value", tool: input(`{} {"SECRET":1,"SECRET":2}`), reason: "invalid JSON in inputSchema"},
 		{name: "not JSON", tool: input(`SECRET`), reason: "invalid JSON in inputSchema"},
 		{name: "duplicate top-level key", tool: input(`{"SECRET":1,"SECRET":2}`), reason: "duplicate object key in inputSchema"},
 		{name: "duplicate nested key", tool: input(`{"a":{"SECRET":1,"b":2,"SECRET":3}}`), reason: "duplicate object key in inputSchema"},

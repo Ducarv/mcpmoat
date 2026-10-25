@@ -1,8 +1,6 @@
 package pins
 
 import (
-	"crypto/sha256"
-	"encoding/hex"
 	"math/rand/v2"
 	"regexp"
 	"testing"
@@ -24,14 +22,6 @@ func TestHashFormat(t *testing.T) {
 			}
 			if !hashFormat.MatchString(h) {
 				t.Errorf("Hash() = %q, want %s:<64 lowercase hex digits>", h, HashVersion)
-			}
-			canon, err := Canonical(f.Tool)
-			if err != nil {
-				t.Fatalf("Canonical() error = %v", err)
-			}
-			sum := sha256.Sum256(canon)
-			if want := HashVersion + ":" + hex.EncodeToString(sum[:]); h != want {
-				t.Errorf("Hash() = %q, want HashVersion:hex(sha256(Canonical())) = %q", h, want)
 			}
 		})
 	}
@@ -62,7 +52,7 @@ func TestHashKeyOrder(t *testing.T) {
 			if err != nil {
 				t.Fatalf("Hash() error = %v", err)
 			}
-			r := rand.New(rand.NewPCG(58, uint64(i))) //nolint:gosec // G404: fixed seed for a reproducible test shuffle, not for security
+			r := rand.New(rand.NewPCG(testSeed, uint64(i))) //nolint:gosec // G404: fixed seed for a reproducible test shuffle, not for security
 			for n := range 200 {
 				shuffled := f.Tool
 				if shuffled.InputSchema != nil {
@@ -81,6 +71,43 @@ func TestHashKeyOrder(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// TestHashRugPull checks threat T2 with the rugpull fixtures: the tool
+// description changes after the pin, so the hash must change.
+func TestHashRugPull(t *testing.T) {
+	t.Parallel()
+	hashes := map[string]string{}
+	for _, f := range loadHashFixtures(t) {
+		h, err := Hash(f.Tool)
+		if err != nil {
+			t.Fatalf("Hash(%s) error = %v", f.Name, err)
+		}
+		hashes[f.Name] = h
+	}
+	before, after := hashes["rugpull-before"], hashes["rugpull-after"]
+	if before == "" || after == "" {
+		t.Fatalf("tools.json must hold the fixtures rugpull-before and rugpull-after")
+	}
+	if before == after {
+		t.Errorf("Hash() of rugpull-before and rugpull-after = %q, want different hashes", before)
+	}
+}
+
+// TestHashSchemaMutationsKeyCollision checks that a changed key that matches
+// a sibling key gives no mutation: a duplicate key has no hash.
+func TestHashSchemaMutationsKeyCollision(t *testing.T) {
+	t.Parallel()
+	// The key "b" changes to "a", and "a" changes to "b".
+	muts := hashSchemaMutations(t, []byte(`{"b":{},"a":{}}`))
+	if len(muts) == 0 {
+		t.Fatal("hashSchemaMutations() = no mutations, want the invisible-character ones")
+	}
+	for _, m := range muts {
+		if _, err := Hash(inspect.Tool{Name: "x", InputSchema: m.schema}); err != nil {
+			t.Errorf("%s: schema %s: Hash() error = %v", m.name, m.schema, err)
+		}
 	}
 }
 
@@ -130,8 +157,9 @@ func TestHashFalseHintIsNil(t *testing.T) {
 			t.Run(f.Name+"/"+h.field, func(t *testing.T) {
 				t.Parallel()
 				set := func(v *bool) string {
-					m := hashMutated(f.Tool, "", func(c *inspect.Tool) { *h.ptr(hashAnnotations(c)) = v })
-					got, err := Hash(m.tool)
+					c := cloneTool(f.Tool)
+					*h.ptr(hashAnnotations(&c)) = v
+					got, err := Hash(c)
 					if err != nil {
 						t.Fatalf("Hash() error = %v", err)
 					}

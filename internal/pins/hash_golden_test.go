@@ -30,7 +30,9 @@ type hashFixture struct {
 }
 
 // hashFixtureFile is the JSON shape of one entry in tools.json. inspect.Tool
-// has no json tags, so the file is decoded into this local shape first.
+// has no json tags, so the file is decoded into this local shape first. It
+// does not use the canonical types, so a new HashVersion does not change the
+// fixture format.
 type hashFixtureFile struct {
 	Fixture string `json:"fixture"`
 	Tool    struct {
@@ -39,17 +41,24 @@ type hashFixtureFile struct {
 		Description string `json:"description"`
 		// A jsontext.Value keeps the raw schema bytes exactly as in the file
 		// (spaces and number forms included). An absent schema stays nil.
-		InputSchema  jsontext.Value `json:"inputSchema"`
-		OutputSchema jsontext.Value `json:"outputSchema"`
-		// canonicalAnnotations has json tags and the fields of
-		// inspect.ToolAnnotations, so a type conversion turns one into the
-		// other.
-		Annotations *canonicalAnnotations `json:"annotations"`
+		InputSchema  jsontext.Value          `json:"inputSchema"`
+		OutputSchema jsontext.Value          `json:"outputSchema"`
+		Annotations  *hashFixtureAnnotations `json:"annotations"`
 	} `json:"tool"`
 }
 
+// hashFixtureAnnotations has the fields of inspect.ToolAnnotations, with json
+// tags. A type conversion ignores tags, so it turns one into the other.
+type hashFixtureAnnotations struct {
+	Title           string `json:"title"`
+	ReadOnlyHint    *bool  `json:"readOnlyHint"`
+	DestructiveHint *bool  `json:"destructiveHint"`
+	IdempotentHint  *bool  `json:"idempotentHint"`
+	OpenWorldHint   *bool  `json:"openWorldHint"`
+}
+
 // loadHashFixtures reads the tools in testdata/pins/hash/tools.json, in file
-// order.
+// order. Each fixture name must be unique.
 func loadHashFixtures(t testing.TB) []hashFixture {
 	t.Helper()
 	data, err := os.ReadFile(hashFixturesPath)
@@ -62,7 +71,12 @@ func loadHashFixtures(t testing.TB) []hashFixture {
 		t.Fatalf("decode %s: %v", hashFixturesPath, err)
 	}
 	fixtures := make([]hashFixture, 0, len(entries))
+	seen := map[string]bool{}
 	for _, e := range entries {
+		if seen[e.Fixture] {
+			t.Fatalf("%s: fixture %q appears more than once", hashFixturesPath, e.Fixture)
+		}
+		seen[e.Fixture] = true
 		tool := inspect.Tool{
 			Name:         e.Tool.Name,
 			Title:        e.Tool.Title,

@@ -134,7 +134,7 @@ func TestShuffleJSON(t *testing.T) {
 			in := []byte(tt.in)
 			wantCanon := canonicalForm(t, in)
 			wantSorted := sortedRawForm(t, in)
-			r := rand.New(rand.NewPCG(1, 2)) //nolint:gosec // G404: fixed seed for a reproducible test shuffle, not for security
+			r := rand.New(rand.NewPCG(testSeed, 2)) //nolint:gosec // G404: fixed seed for a reproducible test shuffle, not for security
 			reordered := false
 			for range 16 {
 				out := shuffleJSON(t, in, r)
@@ -158,16 +158,6 @@ func TestShuffleJSON(t *testing.T) {
 			}
 		})
 	}
-}
-
-// canonicalForm returns the RFC 8785 (JCS) form of v.
-func canonicalForm(t testing.TB, v []byte) string {
-	t.Helper()
-	c := jsontext.Value(bytes.Clone(v))
-	if err := c.Canonicalize(); err != nil {
-		t.Fatalf("Canonicalize(%q): %v", v, err)
-	}
-	return string(c)
 }
 
 // compactForm returns v without whitespace and with raw tokens and member
