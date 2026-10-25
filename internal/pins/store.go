@@ -1,9 +1,9 @@
 package pins
 
 import (
-	"bytes"
 	"cmp"
-	"encoding/json"
+	"encoding/json/jsontext"
+	"encoding/json/v2"
 	"errors"
 	"fmt"
 	"io"
@@ -23,6 +23,12 @@ const CurrentVersion = 1
 
 // maxFileSize is the largest pins.json that Load reads, in bytes.
 const maxFileSize = 8 << 20
+
+// maxServerSize is the largest entry of one server that Set accepts, in bytes
+// of compact JSON. A server with 100 tools needs about 10 KiB. A server sends
+// its own tool names, so this cap stops one server from filling the file
+// alone and making Save fail for all servers.
+const maxServerSize = 256 << 10
 
 // ErrUnsupportedVersion means that pins.json has a format version that this
 // mcpmoat does not know, because the file is newer. Load never reads such a
@@ -50,13 +56,18 @@ type Identity struct {
 
 // ServerPins maps a tool name to the hash of that tool. A hash is an opaque
 // non-empty string here: the hashing code owns its format.
+//
+// The server chose the tool names, and they can hold control characters. Code
+// that prints a name from the store must escape it (internal/termsafe), as it
+// does for a name from a live server.
 type ServerPins map[string]string
 
 // Store holds the pins of all servers and the path of the pins file.
 //
 // A Store is safe for use by several goroutines. Two processes that save to
 // the same path do not corrupt the file (the write is atomic), but the last
-// writer wins.
+// writer wins. So a run can drop the first pins that a parallel run saved,
+// and the next run then sees that server as new, with no alert.
 type Store struct {
 	path string
 
@@ -73,11 +84,11 @@ type fileFormat struct {
 
 // fileServer is one server entry in pins.json.
 type fileServer struct {
-	Client      string            `json:"client"`
-	Source      string            `json:"source"`
-	ProjectPath string            `json:"project_path"`
-	Name        string            `json:"name"`
-	Tools       map[string]string `json:"tools"`
+	Client      string     `json:"client"`
+	Source      string     `json:"source"`
+	ProjectPath string     `json:"project_path"`
+	Name        string     `json:"name"`
+	Tools       ServerPins `json:"tools"`
 }
 
 // DefaultPath returns the path of pins.json.
@@ -111,9 +122,9 @@ func DefaultPath() (string, error) {
 // never replaces a bad file with an empty store, because that would pin a
 // poisoned server as trusted. The errors name the path and the position of the
 // problem, and never hold file content. A file with a newer format version
-// gives an error that wraps ErrUnsupportedVersion. A pins.json symlink that
-// points outside its directory is refused (safefile.ErrOutsideRoot); Save
-// replaces a symlink with a regular file.
+// gives an error that wraps ErrUnsupportedVersion. A pins.json symlink is
+// refused (safefile.ErrOutsideRoot) when it is absolute or leaves its
+// directory; Save replaces a symlink with a regular file.
 func Load(path string) (*Store, error) {
 	s := &Store{path: path, servers: make(map[Identity]ServerPins)}
 
@@ -128,8 +139,9 @@ func Load(path string) (*Store, error) {
 	// Read the version first with a loose decode. A future version may change
 	// the rest of the shape, and the user must then see the version error and
 	// not a shape error. This holds while the top level stays an object with an
-	// integer "version", so a format change must keep that. json.Unmarshal also
-	// rejects trailing data, so the strict decode does not need its own check.
+	// integer "version", so a format change must keep that. json.Unmarshal
+	// (encoding/json/v2) rejects trailing data, duplicate keys and invalid
+	// UTF-8, and it matches key names with their exact case.
 	var probe struct {
 		Version *int `json:"version"`
 	}
@@ -149,9 +161,7 @@ func Load(path string) (*Store, error) {
 	// Strict decode: an unknown field is an error, so a typo or a field from a
 	// different format is not dropped silently.
 	var f fileFormat
-	dec := json.NewDecoder(bytes.NewReader(data))
-	dec.DisallowUnknownFields()
-	if err := dec.Decode(&f); err != nil {
+	if err := json.Unmarshal(data, &f, json.RejectUnknownMembers(true)); err != nil {
 		return nil, fmt.Errorf("parse %s: %s", path, describeJSONError(err))
 	}
 
@@ -169,7 +179,9 @@ func Load(path string) (*Store, error) {
 }
 
 // Get returns a copy of the pins of the server id. The bool is false when the
-// server has no pins. Changing the returned map does not change the Store.
+// store has no entry for the server. An entry with an empty map is a server
+// that was pinned with no tools. Changing the returned map does not change
+// the Store.
 func (s *Store) Get(id Identity) (ServerPins, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -182,8 +194,27 @@ func (s *Store) Get(id Identity) (ServerPins, bool) {
 }
 
 // Set stores a copy of p as the pins of the server id. It replaces the pins of
-// that server only. It does not write the file: call Save.
-func (s *Store) Set(id Identity, p ServerPins) {
+// that server only. A nil or empty p pins the server with no tools. Set does
+// not write the file: call Save.
+//
+// Set refuses a server that Load would refuse: an empty server name, an empty
+// tool name, an empty hash or text that is not valid UTF-8. It also refuses a
+// server whose entry is larger than 256 KiB as compact JSON. Then the store
+// does not change, and the caller can skip that one server and still save the
+// others. The errors hold no tool names, because the server chose them.
+func (s *Store) Set(id Identity, p ServerPins) error {
+	if err := validateServer(id, p); err != nil {
+		return err
+	}
+	entry, err := json.Marshal(newFileServer(id, p))
+	if err != nil {
+		return fmt.Errorf("encode server pins: %w", err)
+	}
+	if len(entry) > maxServerSize {
+		return fmt.Errorf("server pins are %d bytes as JSON, larger than the %d byte limit",
+			len(entry), maxServerSize)
+	}
+
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -192,10 +223,11 @@ func (s *Store) Set(id Identity, p ServerPins) {
 		s.servers = make(map[Identity]ServerPins)
 	}
 	s.servers[id] = cloneOrEmpty(p)
+	return nil
 }
 
 // cloneOrEmpty returns a copy of p. A nil p gives an empty map, not nil.
-func cloneOrEmpty(p map[string]string) ServerPins {
+func cloneOrEmpty(p ServerPins) ServerPins {
 	c := maps.Clone(p)
 	if c == nil {
 		c = ServerPins{}
@@ -204,35 +236,31 @@ func cloneOrEmpty(p map[string]string) ServerPins {
 }
 
 // Save writes the store to its path, atomically, with file mode 0o600. A new
-// directory gets mode 0o700. The servers are sorted, so the same store always
-// gives the same bytes.
+// directory gets mode 0o700. The servers and the tool names are sorted, so the
+// same store always gives the same bytes.
 //
-// Save refuses a store that Load would refuse: an empty server name, an empty
-// tool name, an empty hash, text that is not valid UTF-8, or data larger than
-// the size limit of Load.
+// Load and Set check each server, so Save checks only the whole file: it
+// refuses data larger than the size limit of Load, and the old file stays.
+// Save of a zero-value Store is an error, because it has no path: make a
+// Store with Load.
 func (s *Store) Save() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	if s.path == "" {
+		return errors.New("save pins: the store has no path (make it with Load)")
+	}
 	ids := slices.SortedFunc(maps.Keys(s.servers), compareIdentity)
 	f := fileFormat{Version: CurrentVersion, Servers: make([]fileServer, 0, len(ids))}
 	for _, id := range ids {
-		tools := s.servers[id]
-		if err := validateServer(id, tools); err != nil {
-			return fmt.Errorf("save %s: %w", s.path, err)
-		}
-		f.Servers = append(f.Servers, fileServer{
-			Client:      id.Client,
-			Source:      id.Source,
-			ProjectPath: id.ProjectPath,
-			Name:        id.Name,
-			Tools:       tools, // encoding/json sorts map keys.
-		})
+		f.Servers = append(f.Servers, newFileServer(id, s.servers[id]))
 	}
 
-	data, err := json.MarshalIndent(f, "", "  ")
+	// Deterministic sorts the map keys. encoding/json/v2 does not escape <, >
+	// and &, so such a tool name keeps its size in the file.
+	data, err := json.Marshal(f, jsontext.WithIndent("  "), json.Deterministic(true))
 	if err != nil {
-		return fmt.Errorf("encode pins: %w", err)
+		return fmt.Errorf("save %s: encode: %w", s.path, err)
 	}
 	data = append(data, '\n')
 	// Check the size before the write, so the old file stays valid.
@@ -247,6 +275,17 @@ func (s *Store) Save() error {
 	return nil
 }
 
+// newFileServer returns the file entry of the server id.
+func newFileServer(id Identity, tools ServerPins) fileServer {
+	return fileServer{
+		Client:      id.Client,
+		Source:      id.Source,
+		ProjectPath: id.ProjectPath,
+		Name:        id.Name,
+		Tools:       tools,
+	}
+}
+
 // compareIdentity orders identities by Client, Source, ProjectPath and Name.
 func compareIdentity(a, b Identity) int {
 	return cmp.Or(
@@ -257,22 +296,22 @@ func compareIdentity(a, b Identity) int {
 	)
 }
 
-// validateServer checks the rules that Load and Save share. The errors do not
+// validateServer checks the rules that Load and Set share. The errors do not
 // hold tool names, because a server that we do not trust chose them.
-func validateServer(id Identity, tools map[string]string) error {
+func validateServer(id Identity, tools ServerPins) error {
 	if id.Name == "" {
-		return errors.New("server name is empty")
+		return errors.New("the server name is empty")
 	}
-	// encoding/json replaces bad UTF-8 with U+FFFD, so such text would not
-	// round-trip and the server would look new on each run. Only Save can
-	// hit this check: Load gets text that encoding/json has already decoded.
+	// The file must be valid UTF-8, and Load refuses a file that is not. Only
+	// Set can hit this check: Load has already refused such text. Checking
+	// here gives an error with no content, before the store changes.
 	if !utf8.ValidString(id.Client) || !utf8.ValidString(id.Source) ||
 		!utf8.ValidString(id.ProjectPath) || !utf8.ValidString(id.Name) {
-		return errors.New("server identity is not valid UTF-8")
+		return errors.New("the server identity is not valid UTF-8")
 	}
 	for name, hash := range tools {
 		if name == "" {
-			return errors.New("tool name is empty")
+			return errors.New("a tool name is empty")
 		}
 		if hash == "" {
 			return errors.New("a tool hash is empty")
@@ -289,16 +328,22 @@ func validateServer(id Identity, tools map[string]string) error {
 
 // describeJSONError turns a decode error into text with a position and no file
 // content. The text of an encoding/json error can hold input, for example an
-// unknown field name, so we write our own text.
+// unknown or a duplicate key, so we write our own text.
 func describeJSONError(err error) string {
-	if se, ok := errors.AsType[*json.SyntaxError](err); ok {
-		return fmt.Sprintf("invalid JSON at byte %d", se.Offset)
-	}
-	if te, ok := errors.AsType[*json.UnmarshalTypeError](err); ok {
-		return fmt.Sprintf("wrong JSON type near byte %d, expected %s", te.Offset, te.Type)
-	}
-	if errors.Is(err, io.ErrUnexpectedEOF) || errors.Is(err, io.EOF) {
+	if errors.Is(err, io.ErrUnexpectedEOF) {
 		return "unexpected end of the JSON data"
 	}
-	return "unknown field or invalid value"
+	if se, ok := errors.AsType[*jsontext.SyntacticError](err); ok {
+		if errors.Is(err, jsontext.ErrDuplicateName) {
+			return fmt.Sprintf("duplicate key at byte %d", se.ByteOffset)
+		}
+		return fmt.Sprintf("invalid JSON at byte %d", se.ByteOffset)
+	}
+	if se, ok := errors.AsType[*json.SemanticError](err); ok {
+		if errors.Is(err, json.ErrUnknownName) {
+			return fmt.Sprintf("unknown field at byte %d", se.ByteOffset)
+		}
+		return fmt.Sprintf("wrong JSON type at byte %d", se.ByteOffset)
+	}
+	return "invalid JSON"
 }

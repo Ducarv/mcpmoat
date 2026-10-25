@@ -32,8 +32,7 @@ type atomicWriter struct {
 	beforeRename func(tmp string) error
 }
 
-// writeFileAtomic writes data to path with the production settings: no hooks,
-// directory mode 0o700 and file mode 0o600.
+// writeFileAtomic writes data to path with no test hooks.
 func writeFileAtomic(path string, data []byte) error {
 	return atomicWriter{}.writeFile(path, data)
 }

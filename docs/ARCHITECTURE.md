@@ -41,8 +41,7 @@ docs/                   PRD and other documentation
 - `internal/rules`: loads and checks the YAML rules, runs the config heuristics and the shadowing
   check, and reads `.mcpmoat-ignore`.
 - `internal/pins`: the versioned `pins.json` store: `Load`, `Get`, `Set`, `Save` and `DefaultPath`. See
-  [The `pins.json` store](#the-pinsjson-store). The hashing of a tool and the change detection are
-  planned and not in the package yet.
+  [The `pins.json` store](#the-pinsjson-store).
 - `internal/report`: writes the terminal tables: the servers (`WriteServers`) and the config findings
   (`WriteFindings`).
 - `rules/`: the built-in rule files (`rules/*.yaml`) and `data/popular-servers.txt`. The Go file
@@ -162,8 +161,8 @@ is [How mcpmoat starts stdio servers](stdio-servers.md).
 ## The `pins.json` store
 
 `internal/pins` keeps the tool hashes of each server in one file, `pins.json`, so that a later run
-can see a changed tool (a rug pull). The store is built and tested. Nothing calls it yet. The
-hashing of a tool, the change detection and `pin --accept` are planned.
+can see a changed tool (a rug pull). The hashing of a tool, the change detection and `pin --accept`
+are planned.
 
 - Path: `DefaultPath` returns `$XDG_CONFIG_HOME/mcpmoat/pins.json` when `XDG_CONFIG_HOME` is set to
   an absolute path, and `~/.config/mcpmoat/pins.json` otherwise. It does not use `os.UserConfigDir`,
@@ -189,38 +188,49 @@ hashing of a tool, the change detection and `pin --accept` are planned.
 - Identity: a server is `client`, `source`, `project_path` and `name`. `project_path` is empty for a
   global server. Claude Code project servers in `~/.claude.json` share the same `source` and can share
   a `name`, so `project_path` tells them apart. Two entries with the same identity are an error.
-  The identity fields, the tool names and the hashes must be valid UTF-8. `Save` refuses any other
-  value, because `encoding/json` would change the bytes and the identity would not match on the
-  next run. `Load` never sees invalid UTF-8: `encoding/json` reads it as U+FFFD.
+  The identity fields, the tool names and the hashes must be valid UTF-8. `Set` refuses any other
+  value, and `Load` refuses a file with invalid UTF-8 or a lone surrogate escape such as `\ud800`.
 - Hashes: a tool hash is an opaque non-empty string for the store. The hashing code owns its format.
+- Tool names: the server chose them, and they can hold control characters. Code that prints a name
+  from the store escapes it with `internal/termsafe`, as it does for a name from a live server.
 - No secrets: the file holds the identity, the tool names and the hashes. It never holds args, a URL,
   env, headers or a command.
 - Read: `Load` reads the file through `safefile` with a cap of 8 MiB. A missing file (or directory)
-  is the first run and gives an empty store. A corrupt file, an unknown field, a bad shape or a newer
-  `version` is an error (a newer version wraps `ErrUnsupportedVersion`). `Load` never resets a bad
-  file to an empty store, because an empty store would hide a rug pull. The errors name the path and
-  the byte position and hold no file content.
-- Write: `Save` writes a temp file in the same directory, syncs it, sets mode `0600` and renames it
+  is the first run and gives an empty store. A corrupt file, an unknown field, a duplicate key, a bad
+  shape or a newer `version` is an error (a newer version wraps `ErrUnsupportedVersion`). `Load`
+  decodes with `encoding/json/v2`, so a key must match its documented name exactly, in the same
+  case. `Load` never resets a bad file to an empty store, because an empty store would hide a rug
+  pull. The errors name the path and the byte position and hold no file content.
+- Change: `Set` replaces the pins of one server. It refuses a server that `Load` would refuse (an
+  empty name or hash, invalid UTF-8) and a server whose entry is larger than 256 KiB as compact JSON.
+  A server sends its own tool names, so the caller skips that one server and still saves the others.
+  An empty map means "pinned with no tools", which is not the same as "never pinned".
+- Write: `Save` writes a temp file in the same directory, sets mode `0600`, syncs it and renames it
   over `pins.json`. A new directory gets mode `0700`. The mode of an existing directory does not
-  change. The servers are sorted, so the same store gives the same bytes. `Save` refuses to write
-  when the encoded data is larger than the 8 MiB read cap, so it never writes a file that `Load`
-  refuses. The old file stays.
+  change. The servers and the tool names are sorted, so the same store gives the same bytes. `<`, `>`
+  and `&` are not escaped. `Save` refuses to write when the encoded data is larger than the 8 MiB read
+  cap, so it never writes a file that `Load` refuses. The old file stays.
 
 Known limits:
 
 - There is no file lock. With two parallel runs, the last writer wins. A parallel `pin --accept` and
-  a scan can undo each other. Issue #150 tracks this and the missing-file limit below.
+  a scan can undo each other. A run can also drop the first pins that a parallel run saved, and the
+  next run then sees that server as new, with no alert. Issue #150 tracks this and the missing-file
+  limit below.
 - An existing config directory keeps its mode. mcpmoat creates a new directory with `0700`, but it
   does not check or tighten one that exists. If other users can write to the directory, they can
-  replace `pins.json`.
+  replace `pins.json`. Issue #154 tracks this.
 - A crash (for example SIGKILL or a power loss) can leave a `.pins-*.tmp` file in the directory. It
   holds only names and hashes and has mode `0600`. mcpmoat does not remove old temp files, because
   one can belong to a parallel run that is still writing.
 - A missing `pins.json` looks like a first run, so a deleted file resets the pins without an alert.
-- `Load` follows a `pins.json` symlink that stays inside the directory. It refuses one that points
-  outside (`safefile.ErrOutsideRoot`). `Save` replaces a symlink with a regular file.
+- `Load` follows a relative `pins.json` symlink that stays inside the directory. It refuses an
+  absolute symlink, even one that points back inside, and one that leaves the directory
+  (`safefile.ErrOutsideRoot`). `Save` replaces a symlink with a regular file.
 - On Windows the mode bits are mostly ignored and the directory sync is skipped.
-- A duplicate tool name inside one `tools` object is not detected. `encoding/json` keeps the last one.
+- The cap for each server keeps one server from filling the file alone. Many servers near that cap
+  (16 in the worst case) can still make the file larger than 8 MiB, and then `Save` fails for all
+  servers.
 
 ## Where untrusted text is escaped
 

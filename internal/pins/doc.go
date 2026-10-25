@@ -3,14 +3,13 @@
 //
 // The store is a JSON file with a format version (CurrentVersion). A file with
 // a newer version is refused with ErrUnsupportedVersion and is never
-// overwritten. The file is $XDG_CONFIG_HOME/mcpmoat/pins.json when
-// XDG_CONFIG_HOME is an absolute path, and ~/.config/mcpmoat/pins.json
-// otherwise (DefaultPath). It is written atomically (temp file, sync, rename)
-// with mode 0600 in a directory of mode 0700.
+// overwritten. DefaultPath gives the path, Load reads the file, Set checks and
+// changes the pins of one server, and Save writes the file atomically.
 //
 // A hash is an opaque string for the store. The file holds server identities
 // (client, config path, project path, name), tool names and hashes. It holds no
-// secret value: no env, headers, args or URLs.
+// secret value: no env, headers, args or URLs. The servers chose the tool
+// names, so they are untrusted text (see ServerPins).
 //
 // Canonical hashing and change detection (new, removed and changed tools) are
 // not part of the store yet.

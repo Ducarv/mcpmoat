@@ -5,8 +5,8 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
-	"reflect"
 	"runtime"
+	"slices"
 	"testing"
 )
 
@@ -68,7 +68,7 @@ func TestWriteFileAtomicCreatesDirAndFile(t *testing.T) {
 	// MkdirAll gives every directory it creates the same mode.
 	wantPerm(t, dir, dirMode)
 	wantPerm(t, filepath.Join(root, "a"), dirMode)
-	if names, want := dirNames(t, dir), []string{"pins.json"}; !reflect.DeepEqual(names, want) {
+	if names, want := dirNames(t, dir), []string{"pins.json"}; !slices.Equal(names, want) {
 		t.Errorf("dir entries = %v, want %v", names, want)
 	}
 }
@@ -125,7 +125,7 @@ func TestWriteFileAtomicReplacesExistingFile(t *testing.T) {
 				t.Errorf("content = %q, want %q", got, tt.newData)
 			}
 			wantPerm(t, path, fileMode)
-			if names, want := dirNames(t, dir), []string{"pins.json"}; !reflect.DeepEqual(names, want) {
+			if names, want := dirNames(t, dir), []string{"pins.json"}; !slices.Equal(names, want) {
 				t.Errorf("dir entries = %v, want %v", names, want)
 			}
 		})
@@ -190,7 +190,7 @@ func TestWriteFileAtomicHookFailure(t *testing.T) {
 					if !bytes.Equal(got, oldData) {
 						t.Errorf("target = %q, want old content %q", got, oldData)
 					}
-					if names, want := dirNames(t, dir), []string{"pins.json"}; !reflect.DeepEqual(names, want) {
+					if names, want := dirNames(t, dir), []string{"pins.json"}; !slices.Equal(names, want) {
 						t.Errorf("dir entries = %v, want %v", names, want)
 					}
 					return
@@ -327,7 +327,7 @@ func TestWriteFileAtomicParentIsFile(t *testing.T) {
 			if string(got) != "not a dir" {
 				t.Errorf("blocker file = %q, want it unchanged", got)
 			}
-			if names, want := dirNames(t, root), []string{"blocker"}; !reflect.DeepEqual(names, want) {
+			if names, want := dirNames(t, root), []string{"blocker"}; !slices.Equal(names, want) {
 				t.Errorf("dir entries = %v, want %v", names, want)
 			}
 		})
@@ -351,7 +351,7 @@ func TestWriteFileAtomicTargetIsDir(t *testing.T) {
 		t.Fatal("writeFileAtomic() error = nil, want error when the target is a directory")
 	}
 
-	if names, want := dirNames(t, dir), []string{"pins.json"}; !reflect.DeepEqual(names, want) {
+	if names, want := dirNames(t, dir), []string{"pins.json"}; !slices.Equal(names, want) {
 		t.Errorf("dir entries = %v, want %v (no temp file)", names, want)
 	}
 }

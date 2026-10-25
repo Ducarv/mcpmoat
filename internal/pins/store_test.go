@@ -13,7 +13,6 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/Ducarv/mcpmoat/internal/discover/discovertest"
 	"github.com/Ducarv/mcpmoat/internal/pins"
 	"github.com/Ducarv/mcpmoat/internal/safefile"
 )
@@ -65,6 +64,14 @@ func storeTestMustLoad(t *testing.T, path string) *pins.Store {
 	return s
 }
 
+// storeTestMustSet sets the pins of id and fails the test on an error.
+func storeTestMustSet(t *testing.T, s *pins.Store, id pins.Identity, p pins.ServerPins) {
+	t.Helper()
+	if err := s.Set(id, p); err != nil {
+		t.Fatalf("Set(%+v) error = %v, want nil", id, err)
+	}
+}
+
 // storeTestMustSave saves s and fails the test on an error.
 func storeTestMustSave(t *testing.T, s *pins.Store) {
 	t.Helper()
@@ -100,9 +107,9 @@ func TestRoundTrip(t *testing.T) {
 	t.Parallel()
 	path := storeTestPath(t)
 	s := storeTestMustLoad(t, path)
-	s.Set(idA, storeTestPins("read", "h1", "write", "h2"))
-	s.Set(idB, storeTestPins("search", "h3"))
-	s.Set(idC, storeTestPins())
+	storeTestMustSet(t, s, idA, storeTestPins("read", "h1", "write", "h2"))
+	storeTestMustSet(t, s, idB, storeTestPins("search", "h3"))
+	storeTestMustSet(t, s, idC, storeTestPins())
 	storeTestMustSave(t, s)
 
 	got := storeTestMustLoad(t, path)
@@ -119,7 +126,8 @@ func TestSaveFormat(t *testing.T) {
 	t.Parallel()
 	path := storeTestPath(t)
 	s := storeTestMustLoad(t, path)
-	s.Set(pins.Identity{Client: "c", Source: "s", Name: "n"}, storeTestPins("b", "2", "a", "1"))
+	// "<b>&" also shows that <, > and & are not escaped as \u003c and so on.
+	storeTestMustSet(t, s, pins.Identity{Client: "c", Source: "s", Name: "n"}, storeTestPins("<b>&", "2", "a", "1"))
 	storeTestMustSave(t, s)
 
 	want := `{
@@ -131,8 +139,8 @@ func TestSaveFormat(t *testing.T) {
       "project_path": "",
       "name": "n",
       "tools": {
-        "a": "1",
-        "b": "2"
+        "<b>&": "2",
+        "a": "1"
       }
     }
   ]
@@ -276,7 +284,7 @@ func TestDefaultPathEndToEnd(t *testing.T) {
 		t.Fatal(err)
 	}
 	s := storeTestMustLoad(t, path)
-	s.Set(idA, storeTestPins("read", "h1"))
+	storeTestMustSet(t, s, idA, storeTestPins("read", "h1"))
 	storeTestMustSave(t, s)
 
 	want := filepath.Join(xdg, "mcpmoat", "pins.json")
@@ -361,6 +369,14 @@ func TestLoadErrors(t *testing.T) {
 			`{"version":1,"servers":[{"client":"c","source":"s","name":"` + leakToken + `","tools":{}},{"client":"c","source":"s","name":"` + leakToken + `","tools":{}}]}`,
 			nil, "duplicate",
 		},
+		{"duplicate top-level key", `{"version":1,"servers":[],"servers":[]}`, nil, "duplicate key"},
+		{"duplicate server key", `{"version":1,"servers":[{"client":"c","source":"s","name":"` + leakToken + `","tools":{},"name":"m"}]}`, nil, "duplicate key"},
+		{"duplicate tool name", `{"version":1,"servers":[{"client":"c","source":"s","name":"n","tools":{"` + leakToken + `":"1","` + leakToken + `":"2"}}]}`, nil, "duplicate key"},
+		{"key in other case", `{"version":1,"servers":[{"CLIENT":"c","source":"s","name":"n","tools":{}}]}`, nil, "unknown field"},
+		{"version key in other case", `{"VERSION":1,"servers":[]}`, nil, "version field is missing"},
+		{"invalid UTF-8", "{\"version\":1,\"servers\":[{\"client\":\"c\",\"source\":\"s\",\"name\":\"n\xff\",\"tools\":{}}]}", nil, "invalid JSON"},
+		{"lone surrogate", `{"version":1,"servers":[{"client":"c","source":"s","name":"n\ud800","tools":{}}]}`, nil, "invalid JSON"},
+		{"top level array type", `[1]`, nil, "wrong JSON type at byte 0"},
 		{"empty server name", `{"version":1,"servers":[{"client":"c","source":"s","name":"","tools":{"` + leakToken + `":"h"}}]}`, nil, "name is empty"},
 		{"missing server name", `{"version":1,"servers":[{"client":"c","source":"s","tools":{"` + leakToken + `":"h"}}]}`, nil, "name is empty"},
 		{"empty tool name", `{"version":1,"servers":[{"client":"c","source":"s","name":"n","tools":{"":"` + leakToken + `"}}]}`, nil, "tool name is empty"},
@@ -411,9 +427,9 @@ func TestLoadBadFileDoesNotChangeIt(t *testing.T) {
 func TestLoadTooLarge(t *testing.T) {
 	t.Parallel()
 	path := storeTestPath(t)
-	// One byte over the cap of 8 MiB. Zero bytes are not valid JSON, but the
-	// size check comes first.
-	if err := os.WriteFile(path, make([]byte, 8<<20+1), 0o600); err != nil {
+	// One byte over the cap. Zero bytes are not valid JSON, but the size check
+	// comes first.
+	if err := os.WriteFile(path, make([]byte, pins.MaxFileSize+1), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := pins.Load(path); !errors.Is(err, safefile.ErrTooLarge) {
@@ -423,10 +439,9 @@ func TestLoadTooLarge(t *testing.T) {
 
 func TestLoadAtSizeCap(t *testing.T) {
 	t.Parallel()
-	// Exactly 8 MiB of valid JSON must pass the size check.
-	const limit = 8 << 20
+	// Valid JSON of exactly the cap must pass the size check.
 	head := `{"version":1,"servers":[]}`
-	content := head + strings.Repeat(" ", limit-len(head))
+	content := head + strings.Repeat(" ", pins.MaxFileSize-len(head))
 	storeTestMustLoad(t, storeTestWrite(t, content))
 }
 
@@ -463,7 +478,7 @@ func TestIdentitiesAreSeparate(t *testing.T) {
 	path := storeTestPath(t)
 	s := storeTestMustLoad(t, path)
 	for i, id := range ids {
-		s.Set(id, storeTestPins("tool", fmt.Sprintf("hash-%d", i)))
+		storeTestMustSet(t, s, id, storeTestPins("tool", fmt.Sprintf("hash-%d", i)))
 	}
 	storeTestMustSave(t, s)
 
@@ -477,13 +492,13 @@ func TestSetReplacesOneServer(t *testing.T) {
 	t.Parallel()
 	path := storeTestPath(t)
 	s := storeTestMustLoad(t, path)
-	s.Set(idA, storeTestPins("old", "h1", "keep", "h2"))
-	s.Set(idB, storeTestPins("b", "h3"))
-	s.Set(idC, storeTestPins("c", "h4"))
+	storeTestMustSet(t, s, idA, storeTestPins("old", "h1", "keep", "h2"))
+	storeTestMustSet(t, s, idB, storeTestPins("b", "h3"))
+	storeTestMustSet(t, s, idC, storeTestPins("c", "h4"))
 	storeTestMustSave(t, s)
 
 	s = storeTestMustLoad(t, path)
-	s.Set(idA, storeTestPins("new", "h9"))
+	storeTestMustSet(t, s, idA, storeTestPins("new", "h9"))
 	storeTestMustSave(t, s)
 
 	got := storeTestMustLoad(t, path)
@@ -496,8 +511,8 @@ func TestSetNilClearsPins(t *testing.T) {
 	t.Parallel()
 	path := storeTestPath(t)
 	s := storeTestMustLoad(t, path)
-	s.Set(idA, storeTestPins("t", "h"))
-	s.Set(idA, nil)
+	storeTestMustSet(t, s, idA, storeTestPins("t", "h"))
+	storeTestMustSet(t, s, idA, nil)
 	storeTestMustSave(t, s)
 	storeTestWantPins(t, storeTestMustLoad(t, path), idA, storeTestPins())
 }
@@ -505,17 +520,19 @@ func TestSetNilClearsPins(t *testing.T) {
 func TestZeroValueStore(t *testing.T) {
 	t.Parallel()
 	var s pins.Store
-	s.Set(idA, storeTestPins("t", "h"))
+	storeTestMustSet(t, &s, idA, storeTestPins("t", "h"))
 	storeTestWantPins(t, &s, idA, storeTestPins("t", "h"))
-	if err := s.Save(); err == nil {
-		t.Error("Save() of a zero-value Store error = nil, want an error (empty path)")
+	// The empty path is refused before anything is written, so no temp file
+	// reaches the working directory.
+	if err := s.Save(); err == nil || !strings.Contains(err.Error(), "no path") {
+		t.Errorf("Save() of a zero-value Store error = %v, want the no-path error", err)
 	}
 }
 
 func TestGetReturnsCopy(t *testing.T) {
 	t.Parallel()
 	s := storeTestMustLoad(t, storeTestPath(t))
-	s.Set(idA, storeTestPins("t", "h"))
+	storeTestMustSet(t, s, idA, storeTestPins("t", "h"))
 
 	got, _ := s.Get(idA)
 	got["t"] = "changed"
@@ -530,7 +547,7 @@ func TestSetStoresCopy(t *testing.T) {
 	path := storeTestPath(t)
 	s := storeTestMustLoad(t, path)
 	in := storeTestPins("t", "h")
-	s.Set(idA, in)
+	storeTestMustSet(t, s, idA, in)
 	in["t"] = "changed"
 	in["extra"] = "x"
 
@@ -555,7 +572,7 @@ func TestSaveDeterministic(t *testing.T) {
 		path := storeTestPath(t)
 		s := storeTestMustLoad(t, path)
 		for _, i := range order {
-			s.Set(entries[i].id, entries[i].p)
+			storeTestMustSet(t, s, entries[i].id, entries[i].p)
 		}
 		storeTestMustSave(t, s)
 		return storeTestRead(t, path)
@@ -597,8 +614,8 @@ func TestSaveIsStableAcrossLoad(t *testing.T) {
 	t.Parallel()
 	path := storeTestPath(t)
 	s := storeTestMustLoad(t, path)
-	s.Set(idA, storeTestPins("t", "h"))
-	s.Set(idB, storeTestPins())
+	storeTestMustSet(t, s, idA, storeTestPins("t", "h"))
+	storeTestMustSet(t, s, idB, storeTestPins())
 	storeTestMustSave(t, s)
 	first := storeTestRead(t, path)
 
@@ -608,7 +625,7 @@ func TestSaveIsStableAcrossLoad(t *testing.T) {
 	}
 }
 
-func TestSaveRefusesInvalid(t *testing.T) {
+func TestSetRefusesInvalid(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
 		name string
@@ -617,7 +634,7 @@ func TestSaveRefusesInvalid(t *testing.T) {
 		want string
 	}{
 		{"empty server name", pins.Identity{Client: "c", Source: "s"}, storeTestPins("t", "h"), "name is empty"},
-		{"empty tool name", idA, storeTestPins("", "h"), "tool name is empty"},
+		{"empty tool name", idA, storeTestPins("", "h"), "a tool name is empty"},
 		{"empty hash", idA, storeTestPins("t", ""), "hash is empty"},
 		{"client not UTF-8", pins.Identity{Client: "c\xff", Source: "s", Name: "n"}, storeTestPins("t", "h"), "server identity is not valid UTF-8"},
 		{"source not UTF-8", pins.Identity{Client: "c", Source: "s\xff", Name: "n"}, storeTestPins("t", "h"), "server identity is not valid UTF-8"},
@@ -630,65 +647,92 @@ func TestSaveRefusesInvalid(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			path := storeTestPath(t)
-			s := storeTestMustLoad(t, path)
-			s.Set(tt.id, tt.p)
-			err := s.Save()
+			s := storeTestMustLoad(t, storeTestPath(t))
+			err := s.Set(tt.id, tt.p)
 			if err == nil {
-				t.Fatal("Save() error = nil, want error")
+				t.Fatal("Set() error = nil, want error")
 			}
 			if !strings.Contains(err.Error(), tt.want) {
-				t.Errorf("Save() error = %q, want text %q", err, tt.want)
+				t.Errorf("Set() error = %q, want text %q", err, tt.want)
 			}
 			// The bad value must not reach the error text.
 			if strings.Contains(err.Error(), "\xff") || strings.Contains(err.Error(), "\xe2") {
-				t.Errorf("Save() error echoes the bad value: %q", err)
+				t.Errorf("Set() error echoes the bad value: %q", err)
 			}
-			if _, statErr := os.Stat(path); !errors.Is(statErr, os.ErrNotExist) {
-				t.Errorf("Save() wrote a file despite the error (stat error = %v)", statErr)
+			if _, ok := s.Get(tt.id); ok {
+				t.Error("Get() ok = true after a refused Set, want false")
 			}
 		})
 	}
 }
 
-func TestSaveRefusalKeepsOldFile(t *testing.T) {
+func TestSetRefusalKeepsOldPins(t *testing.T) {
 	t.Parallel()
+	s := storeTestMustLoad(t, storeTestPath(t))
+	storeTestMustSet(t, s, idA, storeTestPins("t", "h"))
+	if err := s.Set(idA, storeTestPins("t", "")); err == nil {
+		t.Fatal("Set() error = nil, want error")
+	}
+	storeTestWantPins(t, s, idA, storeTestPins("t", "h"))
+}
+
+func TestSetSizeLimit(t *testing.T) {
+	t.Parallel()
+	// The entry of one server as compact JSON, with an empty tool name. Each
+	// byte of the tool name adds one byte.
+	id := pins.Identity{Client: "c", Source: "s", Name: "n"}
+	overhead := len(`{"client":"c","source":"s","project_path":"","name":"n","tools":{"":"h"}}`)
+	withName := func(n int) pins.ServerPins { return storeTestPins(strings.Repeat("a", n), "h") }
+
 	path := storeTestPath(t)
 	s := storeTestMustLoad(t, path)
-	s.Set(idA, storeTestPins("t", "h"))
-	storeTestMustSave(t, s)
-	before := storeTestRead(t, path)
+	storeTestMustSet(t, s, idA, storeTestPins("t", "h"))
+	storeTestMustSet(t, s, id, withName(pins.MaxServerSize-overhead))
 
-	s.Set(idB, storeTestPins("t", ""))
-	if err := s.Save(); err == nil {
-		t.Fatal("Save() error = nil, want error")
+	// One byte over is refused, the old pins of the server stay, and the
+	// other servers still save.
+	err := s.Set(id, withName(pins.MaxServerSize-overhead+1))
+	want := fmt.Sprintf("server pins are %d bytes as JSON, larger than the %d byte limit", pins.MaxServerSize+1, pins.MaxServerSize)
+	if err == nil || err.Error() != want {
+		t.Fatalf("Set() error = %v, want %q", err, want)
 	}
-	if after := storeTestRead(t, path); !bytes.Equal(before, after) {
-		t.Errorf("failed Save changed the file:\n%s\nwant\n%s", after, before)
-	}
+	storeTestWantPins(t, s, id, withName(pins.MaxServerSize-overhead))
+	storeTestMustSave(t, s)
+	storeTestWantPins(t, storeTestMustLoad(t, path), idA, storeTestPins("t", "h"))
 }
 
 func TestSaveSizeLimit(t *testing.T) {
 	t.Parallel()
-	const limit = 8 << 20
-	// One tool with a long name: the file size grows by one byte for each name
-	// byte. Measure the fixed overhead with a one-byte name.
-	saveWithToolName := func(t *testing.T, path string, n int) error {
+	const limit = pins.MaxFileSize
+	// Set caps each server below the file limit, so the test fills the file
+	// with many servers of one tool each. The tool names are "a" repeated, so
+	// each extra name byte adds one byte to the file.
+	const servers = 64
+	sizeID := func(i int) pins.Identity {
+		return pins.Identity{Client: "c", Source: "s", Name: fmt.Sprintf("n%03d", i)}
+	}
+	saveWithExtra := func(t *testing.T, path string, extra int) error {
 		t.Helper()
 		s := storeTestMustLoad(t, path)
-		s.Set(idA, storeTestPins(strings.Repeat("a", n), "h"))
+		for i := range servers {
+			n := 1 + extra/servers
+			if i < extra%servers {
+				n++
+			}
+			storeTestMustSet(t, s, sizeID(i), storeTestPins(strings.Repeat("a", n), "h"))
+		}
 		return s.Save()
 	}
 	probe := storeTestPath(t)
-	if err := saveWithToolName(t, probe, 1); err != nil {
+	if err := saveWithExtra(t, probe, 0); err != nil {
 		t.Fatal(err)
 	}
-	overhead := len(storeTestRead(t, probe)) - 1
+	base := len(storeTestRead(t, probe))
 
 	t.Run("exactly at the limit saves and loads", func(t *testing.T) {
 		t.Parallel()
 		path := storeTestPath(t)
-		if err := saveWithToolName(t, path, limit-overhead); err != nil {
+		if err := saveWithExtra(t, path, limit-base); err != nil {
 			t.Fatalf("Save() at the limit error = %v, want nil", err)
 		}
 		if got := len(storeTestRead(t, path)); got != limit {
@@ -701,11 +745,12 @@ func TestSaveSizeLimit(t *testing.T) {
 		t.Parallel()
 		path := storeTestPath(t)
 		old := storeTestMustLoad(t, path)
-		old.Set(idA, storeTestPins("t", "h")) // The oversized save replaces idA, so the size is exact.
+		// The oversized save replaces this server, so the size is exact.
+		storeTestMustSet(t, old, sizeID(0), storeTestPins("t", "h"))
 		storeTestMustSave(t, old)
 		before := storeTestRead(t, path)
 
-		err := saveWithToolName(t, path, limit-overhead+1)
+		err := saveWithExtra(t, path, limit-base+1)
 		if err == nil {
 			t.Fatal("Save() error = nil, want error over the limit")
 		}
@@ -740,7 +785,7 @@ func TestSymlinkedConfigDir(t *testing.T) {
 
 	path := filepath.Join(link, "pins.json")
 	s := storeTestMustLoad(t, path) // Missing file through the link.
-	s.Set(idA, storeTestPins("t", "h"))
+	storeTestMustSet(t, s, idA, storeTestPins("t", "h"))
 	storeTestMustSave(t, s)
 
 	if _, err := os.Stat(filepath.Join(realDir, "pins.json")); err != nil {
@@ -752,37 +797,19 @@ func TestSymlinkedConfigDir(t *testing.T) {
 	storeTestWantPins(t, storeTestMustLoad(t, path), idA, storeTestPins("t", "h"))
 }
 
-// TestFileHasNoSecrets checks the format, not the server config: Identity has
-// no field for a secret, so a secret cannot reach the file. The test builds a
-// fake server config with canary values, saves a pin for it with the identity
-// fields only, and checks the JSON keys and the canary values.
+// TestFileHasNoSecrets checks the format, not a server config: Identity has
+// no field for a secret (args, URL, env, headers, command), so no secret can
+// reach the file. The test checks that the file holds only the documented
+// keys at each level. A test that builds an Identity from a real server
+// config belongs with the caller that does it.
 func TestFileHasNoSecrets(t *testing.T) {
 	t.Parallel()
-	const apiKey = "sk-CANARY-SECRET"
-	serverConfig := struct {
-		Command string
-		Args    []string
-		URL     string
-		Env     map[string]string
-		Headers map[string]string
-	}{
-		Command: "npx",
-		Args:    []string{"--token", discovertest.CanaryArgs},
-		URL:     "https://example.test/mcp?key=" + discovertest.CanaryURL,
-		Env:     map[string]string{"API_KEY": apiKey, "OTHER": discovertest.CanaryEnv},
-		Headers: map[string]string{"Authorization": "Bearer " + discovertest.CanaryHeader},
-	}
-	_ = serverConfig // Nothing below can take it: that is the point.
-
 	path := storeTestPath(t)
 	s := storeTestMustLoad(t, path)
-	s.Set(pins.Identity{Client: "claude-code", Source: "/home/u/.claude.json", Name: "alpha"},
+	storeTestMustSet(t, s, pins.Identity{Client: "claude-code", Source: "/home/u/.claude.json", Name: "alpha"},
 		storeTestPins("read", "sha256:3f2a", "write", "sha256:9c1b"))
 	storeTestMustSave(t, s)
 	data := storeTestRead(t, path)
-
-	secrets := append(discovertest.Canaries(), apiKey)
-	discovertest.AssertNoLeak(t, "pins.json", string(data), secrets...)
 
 	// Only the documented keys appear, at each level.
 	var doc map[string]any
@@ -886,7 +913,7 @@ func FuzzLoad(f *testing.F) {
 			if !ok {
 				t.Fatalf("Get(%+v) ok = false for an identity in the file", id)
 			}
-			saved.Set(id, p)
+			storeTestMustSet(t, saved, id, p)
 		}
 		if err := saved.Save(); err != nil {
 			t.Fatalf("Save() of a loaded store: %v", err)
