@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"flag"
 	"fmt"
@@ -40,6 +41,24 @@ type cli struct {
 	homeDir func() (string, error)
 	// getwd returns the current working directory. run sets it to os.Getwd.
 	getwd func() (string, error)
+	// inspector connects to the servers when scan runs without --no-connect.
+	// run sets it to the SDK inspector. Tests inject a fake from
+	// internal/inspect/inspecttest, so they start no process and open no
+	// connection.
+	inspector inspect.Inspector
+	// ctx ends when the process gets a signal (see main). It is a field and
+	// not a parameter of command.run, so that every command keeps one
+	// signature. Use the context method, which also handles a nil ctx.
+	ctx context.Context
+}
+
+// context returns the context of the process. A cli built without one (in a
+// test, for example) gets a context that never ends.
+func (c *cli) context() context.Context {
+	if c.ctx == nil {
+		return context.Background()
+	}
+	return c.ctx
 }
 
 // command is one subcommand of mcpmoat.
@@ -49,19 +68,32 @@ type command struct {
 	run     func(opts options, args []string) int
 }
 
-// run builds a cli from the real process environment and runs it. It returns
-// the exit code. main passes that code to os.Exit.
+// run is runWithContext with a context that never ends: no signal stops it.
+// Tests use it. main uses runWithContext.
+func run(args []string, stdout, stderr io.Writer) int {
+	return runWithContext(context.Background(), args, stdout, stderr)
+}
+
+// runWithContext builds a cli from the real process environment and runs it.
+// It returns the exit code. main passes that code to os.Exit. When ctx ends,
+// scan and pin stop the servers that they started and exit with 2 (see
+// runScan).
 //
 // This is the only place that reads the linker variables (version, commit and
 // date), the home directory and the working directory.
-func run(args []string, stdout, stderr io.Writer) int {
+func runWithContext(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	c := &cli{
+		ctx:     ctx,
 		stdout:  stdout,
 		stderr:  stderr,
 		getenv:  os.Getenv,
 		build:   resolveBuildInfo(buildInfo{version: version, commit: commit, date: date}, debug.ReadBuildInfo),
 		homeDir: os.UserHomeDir,
 		getwd:   os.Getwd,
+		// The zero SDKOptions refuse servers from untrusted project files and
+		// servers that the client config turns off. scan has no flag to allow
+		// them.
+		inspector: inspect.New(inspect.SDKOptions{}),
 	}
 	return c.dispatch(args)
 }
@@ -169,12 +201,17 @@ func (c *cli) usage(w io.Writer) {
 	fprintf(w, "\n")
 	scanUsage(w)
 
+	fprintf(w, "\n")
+	pinUsage(w)
+
 	fprintf(w, "\nExit codes:\n")
 	fprintf(w, "  0  no findings\n")
 	fprintf(w, "  1  findings at or above --fail-on\n")
 	fprintf(w, "  2  execution error\n")
-	fprintf(w, "     (scan also exits 2 when a config file has a problem; a missing file is not a problem\n")
-	fprintf(w, "     in auto-discovery, but a missing --config file is)\n")
+	fprintf(w, "     (scan also exits 2 when a config file has a problem or when pins.json cannot be read\n")
+	fprintf(w, "     or saved, or when it is stopped by a signal; a missing file is not a problem in auto-discovery,\n")
+	fprintf(w, "     but a missing --config file is. A server that fails or times out is a warning and does not\n")
+	fprintf(w, "     change the exit code, unless its pins are already stored: then it is a finding)\n")
 }
 
 // scanUsage writes the flags and the output notes of the scan command to w.
@@ -194,12 +231,22 @@ func scanUsage(w io.Writer) {
 	fprintf(tw, "  \tThe two flags above apply when scan connects to servers. --no-connect ignores them, but still checks them\n")
 	fprintf(tw, "  --ignore <rule-id>\tIgnore all findings of this rule; repeatable\n")
 	fprintf(tw, "  \tA %s file in the working directory also ignores findings: one \"RULE-ID [server[/tool]]\" per line; \"# ...\" on its own line or after the entry is a comment\n", rules.IgnoreFileName)
+	fprintf(tw, "  \tThe file cannot ignore the pin rules (MOAT-T2-*): it can come from a cloned repository. Use --ignore for them\n")
 	_ = tw.Flush() // the write error is ignored on purpose, see fprintf
 
 	fprintf(w, "\nScan output:\n")
 	fprintf(w, "  A heuristic masks secret-like arguments. Review the output before you share it.\n")
-	fprintf(w, "  --no-connect: scan runs only the built-in config rules (T4 and T5). The tool rules need a connection.\n")
-	fprintf(w, "  Rules from --rules are loaded and checked, but not applied yet.\n")
+	fprintf(w, "  scan connects to each server (a stdio server is started) and lists its tools, then checks them against the pins in\n")
+	fprintf(w, "  pins.json ($XDG_CONFIG_HOME/mcpmoat/, else ~/.config/mcpmoat/). The first run pins the tools of a server.\n")
+	fprintf(w, "  Later runs report a changed tool (MOAT-T2-001), a new tool (MOAT-T2-002), a removed tool (MOAT-T2-003) and a tool\n")
+	fprintf(w, "  that cannot be verified (MOAT-T2-004), with a diff for each changed tool. \"pin --accept <server>\" accepts the changes.\n")
+	fprintf(w, "  For each pinned server with a finding, scan prints \"To accept <server>: mcpmoat pin --accept <server> --expect <digest>\".\n")
+	fprintf(w, "  The digest covers the tools that scan saw, so pin saves only those tools. Review the diff, then run that line.\n")
+	fprintf(w, "  A server that fails, times out, or that scan refuses to start (an untrusted or turned-off server) is a warning on stderr.\n")
+	fprintf(w, "  If that server is already pinned, it is also a finding (MOAT-T2-004, medium): its pinned tools were not checked.\n")
+	fprintf(w, "  scan reads pins.json before it starts a server. Ctrl-C (or SIGTERM or SIGHUP) stops the servers, saves no pins and exits 2.\n")
+	fprintf(w, "  --no-connect: scan runs only the built-in config rules (T4 and T5). It reads and writes no pins.\n")
+	fprintf(w, "  The tool rules (YAML) are not applied to tools yet. Rules from --rules are loaded and checked, but not applied yet.\n")
 	fprintf(w, "  Exit code 1 means a finding of severity high or above that is not ignored.\n")
 }
 

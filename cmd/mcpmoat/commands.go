@@ -9,12 +9,6 @@ import (
 // command.run: it gets the resolved global options and its own arguments, and
 // returns the exit code.
 
-// runPin is a stub for "mcpmoat pin". M5 (pins) replaces it.
-func (c *cli) runPin(_ options, _ []string) int {
-	fprintf(c.stderr, "mcpmoat pin: not implemented\n")
-	return exitError
-}
-
 // runVersion implements "mcpmoat version".
 func (c *cli) runVersion(_ options, args []string) int {
 	if c.rejectArgs("version", args) {

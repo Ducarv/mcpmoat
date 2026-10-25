@@ -12,6 +12,9 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/Ducarv/mcpmoat/internal/inspect"
+	"github.com/Ducarv/mcpmoat/internal/inspect/inspecttest"
 )
 
 // scanRulesResult is the outcome of one scan run.
@@ -28,10 +31,18 @@ func scanRulesEmpty(t *testing.T, args ...string) scanRulesResult {
 }
 
 // scanIn runs "mcpmoat scan args..." with the given home and working
-// directory.
+// directory. The inspector is an empty fake: it knows no server, so a scan that
+// finds no server never needs it.
 func scanIn(t *testing.T, home, work string, args ...string) scanRulesResult {
 	t.Helper()
+	return scanInWith(t, &inspecttest.Fake{}, home, work, args...)
+}
+
+// scanInWith is scanIn with the given fake inspector.
+func scanInWith(t *testing.T, fake *inspecttest.Fake, home, work string, args ...string) scanRulesResult {
+	t.Helper()
 	c, stdout, stderr := dirsCLI(t, home, work)
+	c.inspector = fake
 	code := c.dispatch(append([]string{"scan"}, args...))
 	return scanRulesResult{code: code, stdout: stdout.String(), stderr: stderr.String()}
 }
@@ -116,25 +127,34 @@ func TestScanRulesAccepted(t *testing.T) {
 }
 
 // TestScanRulesWithConnect checks the mode without --no-connect. The rules
-// are loaded before the step that connects, so valid rules give the same
-// result as a scan without --rules (today: exit code 2, "not implemented
-// yet", because connecting is not built). The scan never starts a server:
-// home and working directory are empty.
+// are loaded before the step that connects, and scan does not apply them, so
+// valid rules give the same result as a scan without --rules plus the notice
+// that the rules are not applied. The scan never starts a server: the
+// inspector is a fake. The first scan pins the tools of the server, so the
+// second scan, with --rules, has no pin notice and no pin finding.
 func TestScanRulesWithConnect(t *testing.T) {
 	t.Parallel()
 
 	home, work := t.TempDir(), t.TempDir()
-	base := scanIn(t, home, work)
-	if base.code != exitError || !strings.Contains(base.stderr, "connecting to servers is not implemented yet") {
-		t.Fatalf("scan without --rules: exit code = %d, stderr = %q", base.code, base.stderr)
-	}
+	writeServers(t, home, ".claude.json", okServer)
+	fake := &inspecttest.Fake{Results: map[string]inspect.Result{"ok-srv": inspecttest.BenignResult()}}
 
-	got := scanIn(t, home, work, "--rules", scanRulesFixture("extra"))
+	base := scanInWith(t, fake, home, work)
+	assertScanResult(t, base.code, base.stdout, base.stderr, scanWant{
+		code:   exitOK,
+		stdout: []string{"ok-srv"},
+		stderr: []string{"mcpmoat scan: pinned 2 tools for ok-srv\n"},
+	})
 
-	if got != base {
-		t.Errorf("valid --rules changes the result\ngot:  %+v\nwant: %+v", got, base)
+	got := scanInWith(t, fake, home, work, "--rules", scanRulesFixture("extra"))
+
+	assertScanResult(t, got.code, got.stdout, got.stderr, scanWant{code: exitOK, stderr: []string{rulesNotAppliedNotice}})
+	if got.stdout != base.stdout {
+		t.Errorf("valid --rules changes stdout\ngot:  %q\nwant: %q", got.stdout, base.stdout)
 	}
-	assertScanErrorLines(t, got.stderr)
+	if want := rulesNotAppliedNotice + "\n"; got.stderr != want {
+		t.Errorf("stderr = %q, want %q", got.stderr, want)
+	}
 }
 
 // noRuleFilesText is the reason text of a --rules folder with no rule file. It
@@ -211,7 +231,7 @@ func TestScanRulesErrors(t *testing.T) {
 					stderr: tt.wantStderr,
 				})
 				assertEmptyStdout(t, got.stdout)
-				if strings.Contains(got.stderr, "not implemented yet") {
+				if strings.Contains(got.stderr, "pinned") || strings.Contains(got.stderr, "cannot inspect") {
 					t.Errorf("the rules error must come before the connect step\nstderr: %q", got.stderr)
 				}
 				if lines := nonEmptyLines(got.stderr); len(lines) != 1 {
@@ -307,7 +327,7 @@ func TestScanRulesFlagErrors(t *testing.T) {
 			name:       "value that looks like a flag",
 			args:       []string{"--rules", "--no-connect"},
 			wantStderr: []string{"--rules needs a folder name"},
-			noStderr:   []string{"cannot read directory", "not implemented yet"},
+			noStderr:   []string{"cannot read directory", "pinned", "cannot inspect"},
 		},
 		{
 			name:       "value that looks like a flag with a value",
@@ -685,7 +705,8 @@ func TestScanRulesCreatesNothing(t *testing.T) {
 		wantCode int
 	}{
 		{"valid rules, --no-connect", []string{"--no-connect", "--rules", rulesDir}, exitOK},
-		{"valid rules, no --no-connect", []string{"--rules", rulesDir}, exitError},
+		// The home has no server, so scan inspects none and writes no pins.
+		{"valid rules, no --no-connect", []string{"--rules", rulesDir}, exitOK},
 		{"bad rules, --no-connect", []string{"--no-connect", "--rules", badDir}, exitError},
 		{"bad rules, no --no-connect", []string{"--rules", badDir}, exitError},
 	}

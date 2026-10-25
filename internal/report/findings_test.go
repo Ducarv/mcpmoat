@@ -49,13 +49,41 @@ func TestWriteFindingsExact(t *testing.T) {
 				"T2-002   medium     remote   args    other\n",
 		},
 		{
-			name: "key wins over related",
+			name: "key and related are both shown",
 			rows: []report.FindingRow{
 				{RuleID: "R", Severity: "low", Server: "s", Field: "f", Key: "KEY", Related: "REL"},
 			},
 			want: "\n" +
 				"RULE   SEVERITY   SERVER   FIELD   KEY/RELATED\n" +
+				"R      low        s        f       KEY (REL)\n",
+		},
+		{
+			// A reason with spaces is quoted like any other name.
+			name: "related with spaces is quoted",
+			rows: []report.FindingRow{
+				{RuleID: "R", Severity: "low", Server: "s", Field: "tool", Key: "send", Related: "duplicate tool name"},
+			},
+			want: "\n" +
+				"RULE   SEVERITY   SERVER   FIELD   KEY/RELATED\n" +
+				"R      low        s        tool    send (\"duplicate tool name\")\n",
+		},
+		{
+			name: "only key",
+			rows: []report.FindingRow{
+				{RuleID: "R", Severity: "low", Server: "s", Field: "f", Key: "KEY"},
+			},
+			want: "\n" +
+				"RULE   SEVERITY   SERVER   FIELD   KEY/RELATED\n" +
 				"R      low        s        f       KEY\n",
+		},
+		{
+			name: "dash key with related",
+			rows: []report.FindingRow{
+				{RuleID: "R", Severity: "low", Server: "s", Field: "f", Key: "-", Related: "REL"},
+			},
+			want: "\n" +
+				"RULE   SEVERITY   SERVER   FIELD   KEY/RELATED\n" +
+				"R      low        s        f       \"-\" (REL)\n",
 		},
 		{
 			name: "related used when key is empty",
@@ -188,6 +216,67 @@ func TestWriteFindingsLongCellIsCut(t *testing.T) {
 	}
 	if strings.Contains(out, strings.Repeat("x", maxShortCellRunes+1)) {
 		t.Errorf("output holds more than %d runes of one cell:\n%q", maxShortCellRunes, out)
+	}
+}
+
+func TestWriteFindingsKeyAndRelatedHostileText(t *testing.T) {
+	t.Parallel()
+
+	// None of these values holds a space, so termsafe.Quote is the exact part.
+	tests := []struct {
+		name    string
+		key     string
+		related string
+	}{
+		{name: "ESC in key", key: "a\x1b[31mb", related: "REL"},
+		{name: "ESC in related", key: "KEY", related: "a\x1b[31mb"},
+		{name: "bidi in key", key: "a\u202eb", related: "REL"},
+		{name: "bidi in related", key: "KEY", related: "a\u202eb"},
+		{name: "both hostile", key: "a\x1b]8;;x\x07b", related: "a\u202eb"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			out := writeFindings(t, report.FindingRow{
+				RuleID: "R", Severity: "low", Server: "s", Field: "f", Key: tt.key, Related: tt.related,
+			})
+
+			want := termsafe.Quote(tt.key) + " (" + termsafe.Quote(tt.related) + ")"
+			if !strings.Contains(out, want) {
+				t.Errorf("output does not hold the cell %s:\n%q", want, out)
+			}
+			if got := strings.Count(out, "\n"); got != 3 {
+				t.Errorf("output has %d newlines, want 3:\n%q", got, out)
+			}
+			for i := range len(out) {
+				if out[i] < 0x20 && out[i] != '\n' {
+					t.Errorf("output holds raw control byte 0x%02x at %d:\n%q", out[i], i, out)
+					break
+				}
+			}
+			if strings.ContainsRune(out, '\u202e') {
+				t.Errorf("output holds a raw U+202E:\n%q", out)
+			}
+		})
+	}
+}
+
+func TestWriteFindingsKeyAndRelatedAreCutApart(t *testing.T) {
+	t.Parallel()
+
+	long := strings.Repeat("x", maxShortCellRunes*3)
+	out := writeFindings(t, report.FindingRow{
+		RuleID: "R", Severity: "low", Server: "s", Field: "f", Key: long, Related: long,
+	})
+
+	// Each part is cut on its own, so the cell holds two cut parts.
+	cut := strings.Repeat("x", maxShortCellRunes) + termsafe.CutMarker
+	want := cut + " (" + cut + ")"
+	if !strings.Contains(out, want) {
+		t.Errorf("output does not hold %q:\n%q", want, out)
+	}
+	if strings.Contains(out, strings.Repeat("x", maxShortCellRunes+1)) {
+		t.Errorf("output holds more than %d runes of one part:\n%q", maxShortCellRunes, out)
 	}
 }
 

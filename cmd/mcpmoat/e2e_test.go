@@ -24,6 +24,8 @@ import (
 	"time"
 
 	"github.com/Ducarv/mcpmoat/internal/discover/discovertest"
+	"github.com/Ducarv/mcpmoat/internal/inspect/inspecttest"
+	"github.com/Ducarv/mcpmoat/internal/pins"
 	"github.com/Ducarv/mcpmoat/internal/rules"
 )
 
@@ -36,9 +38,11 @@ var (
 	buildErr  error
 )
 
-// TestMain only exists to remove the build directory after the tests.
+// TestMain only exists to remove the build directories after the tests: the
+// one of the mcpmoat binary and the one of the fixture servers.
 func TestMain(m *testing.M) {
 	code := m.Run()
+	inspecttest.RemoveBuilds()
 	if buildDir != "" {
 		_ = os.RemoveAll(buildDir)
 	}
@@ -85,15 +89,17 @@ func binaryPath(t *testing.T) string {
 // runBin runs the mcpmoat binary with args, in directory dir, with home as the
 // only home directory. It returns stdout, stderr and the exit code.
 //
-// The child process gets a new environment with only HOME and PATH. It never
-// sees the real environment, so it can never read the real home directory.
+// The child process gets a new environment with only HOME, XDG_CONFIG_HOME and
+// PATH. XDG_CONFIG_HOME is home/.config (see pinsPath), so pins.json is always
+// below the fake home. The child never sees the real environment, so it can
+// never read or write the real home directory or the real pins.json.
 func runBin(t *testing.T, home, dir string, args ...string) (stdout, stderr string, code int) {
 	t.Helper()
 	bin := binaryPath(t)
 
 	cmd := exec.Command(bin, args...) //nolint:gosec // G204: the test runs the binary it just built
 	cmd.Dir = dir
-	cmd.Env = []string{"HOME=" + home, "PATH=/usr/bin:/bin"}
+	cmd.Env = []string{"HOME=" + home, "XDG_CONFIG_HOME=" + filepath.Join(home, ".config"), "PATH=/usr/bin:/bin"}
 	var outBuf, errBuf bytes.Buffer
 	cmd.Stdout = &outBuf
 	cmd.Stderr = &errBuf
@@ -108,6 +114,11 @@ func runBin(t *testing.T, home, dir string, args ...string) (stdout, stderr stri
 		code = exitErr.ExitCode()
 	}
 	return outBuf.String(), errBuf.String(), code
+}
+
+// pinsPath returns the pins.json path of a run of runBin with this home.
+func pinsPath(home string) string {
+	return filepath.Join(home, ".config", "mcpmoat", "pins.json")
 }
 
 func TestE2EScanAllClients(t *testing.T) {
@@ -385,14 +396,22 @@ func TestE2EScanConfigErrors(t *testing.T) {
 	}
 }
 
+// TestE2EScanWithoutNoConnect checks that scan with no config at all starts
+// nothing and pins nothing: the empty-state notice, exit code 0 and no
+// pins.json.
 func TestE2EScanWithoutNoConnect(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
 
 	stdout, stderr, code := runBin(t, dir, dir, "scan")
 
-	assertScanResult(t, code, stdout, stderr, scanWant{code: exitError, stderr: []string{"not implemented"}})
-	assertEmptyStdout(t, stdout)
+	assertScanResult(t, code, stdout, stderr, scanWant{code: exitOK})
+	if stdout != emptyScanOutput {
+		t.Errorf("stdout = %q, want %q", stdout, emptyScanOutput)
+	}
+	if _, err := os.Stat(pinsPath(dir)); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("pins.json exists or cannot be checked (err = %v), want no file", err)
+	}
 }
 
 // TestE2EScanTimeoutFlags checks --timeout and --concurrency in the real
@@ -733,9 +752,6 @@ func TestE2EScanRulesErrors(t *testing.T) {
 					stderr: tt.wantErr,
 				})
 				assertEmptyStdout(t, stdout)
-				if strings.Contains(stderr, "not implemented") {
-					t.Errorf("stderr reaches the connect step, but the rules are wrong:\n%s", stderr)
-				}
 			})
 		}
 	}
@@ -857,4 +873,149 @@ func TestE2EScanRulesIDClashFlood(t *testing.T) {
 
 	assertFast(t, start)
 	assertIDFloodResult(t, code, stdout, stderr, builtinClashText, idFloodFiles-floodCap)
+}
+
+// pinEnvCanary is a plain env value that must never reach pins.json or an output.
+const pinEnvCanary = "e2e-plain-env-value-7c1f"
+
+// benignHome makes a fake home with a trusted global Claude Code config. The
+// config has one stdio server, name, that runs the benign fixture. The server
+// has a canary env value, which must never reach a file or an output. The
+// value looks like plain text, so the config rules do not flag it. It
+// returns the home and an empty working directory.
+func benignHome(t *testing.T, name string) (home, work string) {
+	t.Helper()
+	home, work = t.TempDir(), t.TempDir()
+	writeServers(t, home, ".claude.json", map[string]any{
+		name: map[string]any{
+			"command": inspecttest.Fixture(t, "benign"),
+			"env":     map[string]string{"E2E_MODE": pinEnvCanary},
+		},
+	})
+	return home, work
+}
+
+// TestE2EPinAccept runs the pin journey on the real binary: the first scan pins
+// the tools, a second scan finds nothing, "pin --accept" of an unchanged
+// server changes nothing, and a bad name or an ambiguous name is exit code 2.
+func TestE2EPinAccept(t *testing.T) {
+	t.Parallel()
+	const name = "benign-srv"
+	home, work := benignHome(t, name)
+	pinsJSON := pinsPath(home)
+
+	// scanClean runs a scan that must find nothing: exit code 0, no MOAT-T2
+	// row, and the server in the table.
+	scanClean := func(t *testing.T, wantStderr []string) {
+		t.Helper()
+		stdout, stderr, code := runBin(t, home, work, "scan")
+		assertScanResult(t, code, stdout, stderr, scanWant{code: exitOK, noStdout: []string{"MOAT-T2"}, stderr: wantStderr})
+		if got := column(tableRows(t, stdout), 0); !slices.Equal(got, []string{name}) {
+			t.Errorf("server names = %v, want [%s]\nstdout:\n%s", got, name, stdout)
+		}
+		if len(wantStderr) == 0 {
+			assertCleanStderr(t, stderr)
+		}
+		assertContainsNone(t, "stdout", stdout, []string{pinEnvCanary})
+		assertContainsNone(t, "stderr", stderr, []string{pinEnvCanary})
+	}
+
+	// Step 1: the first scan pins the two tools of the fixture.
+	scanClean(t, []string{"mcpmoat scan: pinned 2 tools for " + name})
+	info, err := os.Stat(pinsJSON)
+	if err != nil {
+		t.Fatalf("pins.json is missing after the first scan: %v", err)
+	}
+	if mode := info.Mode().Perm(); mode != 0o600 {
+		t.Errorf("pins.json mode = %o, want 600", mode)
+	}
+	data, err := os.ReadFile(pinsJSON) //nolint:gosec // G304: the path is below the t.TempDir() home
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(data), pinEnvCanary) || strings.Contains(string(data), "E2E_MODE") {
+		t.Errorf("pins.json holds the env of the server config:\n%s", data)
+	}
+	pinned := string(data)
+
+	// Step 2: a scan of a pinned server finds nothing and writes nothing.
+	scanClean(t, nil)
+	if got, _ := os.ReadFile(pinsJSON); string(got) != pinned { //nolint:gosec // G304: the path is below the t.TempDir() home
+		t.Errorf("pins.json changed after a scan of a pinned server:\n%s", got)
+	}
+
+	// Step 3: accepting an unchanged server counts no change. Without --expect,
+	// stderr holds the one note that pin trusts what the server returns.
+	stdout, stderr, code := runBin(t, home, work, "pin", "--accept", name)
+	if want := "accepted " + name + ": 0 new, 0 changed, 0 removed\n"; code != exitOK || stdout != want || stderr != noExpectNote {
+		t.Errorf("pin --accept: exit code %d, stdout %q, stderr %q, want exit code %d, stdout %q and stderr %q", code, stdout, stderr, exitOK, want, noExpectNote)
+	}
+	scanClean(t, nil)
+
+	// Step 3b: --expect with a valid digest of other tools is exit code 2, and
+	// pins.json stays as it was.
+	const wrongDigest = "pd1:00000000000000000000000000000000"
+	stdout, stderr, code = runBin(t, home, work, "pin", "--accept", name, "--expect", wrongDigest)
+	if code != exitError || stdout != "" ||
+		!strings.Contains(stderr, "mcpmoat pin: the tools of "+name+" differ from what scan showed (digest pd1:") ||
+		!strings.Contains(stderr, "expected "+wrongDigest+"); nothing was saved. Run scan again and review the diff.") {
+		t.Errorf("pin --expect wrong digest: exit code %d, stdout %q, stderr %q, want exit code %d, no stdout and the digest mismatch error", code, stdout, stderr, exitError)
+	}
+	if got, _ := os.ReadFile(pinsJSON); string(got) != pinned { //nolint:gosec // G304: the path is below the t.TempDir() home
+		t.Errorf("pins.json changed after a pin with the wrong digest:\n%s", got)
+	}
+	assertNoLeakBoth(t, stdout, stderr)
+
+	// Step 3c: the mismatch error names the digest of the tools that the server
+	// returns now. With that digest, pin accepts and prints no note.
+	_, rest, _ := strings.Cut(stderr, "(digest ")
+	digest, _, _ := strings.Cut(rest, ",")
+	if !pins.ValidDigest(digest) {
+		t.Fatalf("no valid digest in the mismatch error: %q", stderr)
+	}
+	stdout, stderr, code = runBin(t, home, work, "pin", "--accept", name, "--expect", digest)
+	if want := "accepted " + name + ": 0 new, 0 changed, 0 removed\n"; code != exitOK || stdout != want || stderr != "" {
+		t.Errorf("pin --expect right digest: exit code %d, stdout %q, stderr %q, want exit code %d, stdout %q and no stderr", code, stdout, stderr, exitOK, want)
+	}
+	scanClean(t, nil)
+
+	// Step 3d: a malformed digest is a usage error before any server starts.
+	stdout, stderr, code = runBin(t, home, work, "pin", "--accept", name, "--expect", "not-a-digest")
+	if code != exitError || stdout != "" || !strings.Contains(stderr, "mcpmoat pin: --expect needs a digest such as pd1:<32 hex>") {
+		t.Errorf("pin --expect bad digest: exit code %d, stdout %q, stderr %q, want exit code %d, no stdout and the digest usage error", code, stdout, stderr, exitError)
+	}
+
+	// Step 4: an unknown name is exit code 2 and changes nothing.
+	stdout, stderr, code = runBin(t, home, work, "pin", "--accept", "unknown")
+	if code != exitError || stdout != "" || !strings.Contains(stderr, "mcpmoat pin: unknown server") {
+		t.Errorf("pin --accept unknown: exit code %d, stdout %q, stderr %q, want exit code %d, no stdout and the unknown server error", code, stdout, stderr, exitError)
+	}
+	if got, _ := os.ReadFile(pinsJSON); string(got) != pinned { //nolint:gosec // G304: the path is below the t.TempDir() home
+		t.Errorf("pins.json changed after a refused pin:\n%s", got)
+	}
+
+	// Step 5: a missing --accept is a usage error.
+	stdout, stderr, code = runBin(t, home, work, "pin")
+	if code != exitError || stdout != "" || !strings.Contains(stderr, "--accept") {
+		t.Errorf("pin without --accept: exit code %d, stdout %q, stderr %q, want exit code %d, no stdout and a --accept error", code, stdout, stderr, exitError)
+	}
+	assertNoLeakBoth(t, stdout, stderr)
+}
+
+// TestE2EPinAcceptAmbiguous checks that a name that two config files use is
+// exit code 2, and that pin lists the sources and writes no pins.json.
+func TestE2EPinAcceptAmbiguous(t *testing.T) {
+	t.Parallel()
+	home, work := benignHome(t, "dup")
+	writeServers(t, work, ".mcp.json", map[string]any{"dup": map[string]any{"command": "run"}})
+
+	stdout, stderr, code := runBin(t, home, work, "pin", "--accept", "dup")
+
+	if code != exitError || stdout != "" || !strings.Contains(stderr, "2 servers are named dup") {
+		t.Errorf("exit code %d, stdout %q, stderr %q, want exit code %d, no stdout and the ambiguous name error", code, stdout, stderr, exitError)
+	}
+	if _, err := os.Stat(pinsPath(home)); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("pins.json exists or cannot be checked (err = %v), want no file", err)
+	}
+	assertNoLeakBoth(t, stdout, stderr)
 }

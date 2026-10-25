@@ -4,20 +4,25 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/Ducarv/mcpmoat/internal/inspect"
+	"github.com/Ducarv/mcpmoat/internal/inspect/inspecttest"
 )
 
 // TestScanConnectFlags checks --timeout and --concurrency of "mcpmoat scan".
 // Both flags are checked in both modes: with --no-connect, which does not use
-// them yet, and without it, where scan stops with "not implemented yet" after
-// the check. A bad value is a usage error with exit code 2, and stdout stays
-// empty.
+// them, and without it, where scan inspects the servers with a fake inspector
+// after the check. A bad value is a usage error with exit code 2, and stdout
+// stays empty.
 func TestScanConnectFlags(t *testing.T) {
 	t.Parallel()
 
 	const (
 		timeoutMsg     = "mcpmoat scan: --timeout must be greater than 0\n"
 		concurrencyMsg = "mcpmoat scan: --concurrency must be at least 1\n"
-		notImplemented = "connecting to servers is not implemented yet"
+		// pinned is the stderr notice of the first scan of ok-srv with the
+		// fake inspector: it shows that scan connected to the server.
+		pinned = "mcpmoat scan: pinned 2 tools for ok-srv\n"
 	)
 
 	tests := []struct {
@@ -155,57 +160,59 @@ func TestScanConnectFlags(t *testing.T) {
 		// Without --no-connect.
 		{
 			name:       "valid values without --no-connect",
-			args:       []string{"--timeout", "2s", "--concurrency", "2"},
-			wantCode:   exitError,
-			wantStderr: []string{"mcpmoat scan: ", notImplemented, "use --no-connect"},
+			args:       []string{"--config", "CONFIG", "--timeout", "2s", "--concurrency", "2"},
+			wantCode:   exitOK,
+			wantStdout: []string{"ok-srv"},
+			wantStderr: []string{pinned},
 		},
 		{
 			name:       "defaults without --no-connect",
-			args:       nil,
-			wantCode:   exitError,
-			wantStderr: []string{notImplemented},
+			args:       []string{"--config", "CONFIG"},
+			wantCode:   exitOK,
+			wantStdout: []string{"ok-srv"},
+			wantStderr: []string{pinned},
 		},
 		{
 			name:       "timeout 0 without --no-connect",
 			args:       []string{"--timeout", "0"},
 			wantCode:   exitError,
 			wantStderr: []string{timeoutMsg, usageHint},
-			noStderr:   []string{notImplemented},
+			noStderr:   []string{"pinned"},
 		},
 		{
 			name:       "negative timeout without --no-connect",
 			args:       []string{"--timeout", "-5s"},
 			wantCode:   exitError,
 			wantStderr: []string{timeoutMsg, usageHint},
-			noStderr:   []string{notImplemented},
+			noStderr:   []string{"pinned"},
 		},
 		{
 			name:       "timeout that is no duration without --no-connect",
 			args:       []string{"--timeout", "abc"},
 			wantCode:   exitError,
 			wantStderr: []string{"mcpmoat scan: ", "timeout", usageHint},
-			noStderr:   []string{notImplemented},
+			noStderr:   []string{"pinned"},
 		},
 		{
 			name:       "concurrency 0 without --no-connect",
 			args:       []string{"--concurrency", "0"},
 			wantCode:   exitError,
 			wantStderr: []string{concurrencyMsg, usageHint},
-			noStderr:   []string{notImplemented},
+			noStderr:   []string{"pinned"},
 		},
 		{
 			name:       "negative concurrency without --no-connect",
 			args:       []string{"--concurrency", "-1"},
 			wantCode:   exitError,
 			wantStderr: []string{concurrencyMsg, usageHint},
-			noStderr:   []string{notImplemented},
+			noStderr:   []string{"pinned"},
 		},
 		{
 			name:       "concurrency that is no number without --no-connect",
 			args:       []string{"--concurrency", "x"},
 			wantCode:   exitError,
 			wantStderr: []string{"mcpmoat scan: ", "concurrency", usageHint},
-			noStderr:   []string{notImplemented},
+			noStderr:   []string{"pinned"},
 		},
 
 		// --config must not take the next flag as its file name.
@@ -231,6 +238,9 @@ func TestScanConnectFlags(t *testing.T) {
 			// The home is an empty directory.
 			path := writeServers(t, t.TempDir(), "mcp.json", okServer)
 			c, stdout, stderr := scanConfigCLI(t, t.TempDir())
+			// Without --no-connect, scan inspects ok-srv with this fake. A
+			// bad flag value never reaches it.
+			c.inspector = &inspecttest.Fake{Results: map[string]inspect.Result{"ok-srv": inspecttest.BenignResult()}}
 
 			args := append([]string{"scan"}, replaceToken(tt.args, "CONFIG", path)...)
 
@@ -245,7 +255,7 @@ func TestScanConnectFlags(t *testing.T) {
 			if len(tt.wantStdout) == 0 && stdout.Len() != 0 {
 				t.Errorf("stdout = %q, want empty", stdout)
 			}
-			if tt.wantCode == exitOK {
+			if tt.wantCode == exitOK && len(tt.wantStderr) == 0 {
 				assertCleanStderr(t, stderr.String())
 			}
 			assertNoLeakBoth(t, stdout.String(), stderr.String())

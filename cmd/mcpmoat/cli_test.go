@@ -232,10 +232,13 @@ func TestCLIRun(t *testing.T) {
 			wantStdoutEmpty: true,
 		},
 		{
-			name:            "scan without --no-connect is not implemented",
+			// scan without --no-connect needs the home directory first, like
+			// scan --no-connect. The default test cli has none, so scan stops
+			// before it reaches the inspector (which is nil here).
+			name:            "scan without --no-connect with no home directory",
 			args:            []string{"scan"},
 			wantCode:        exitError,
-			wantStderr:      []string{"not implemented", "use --no-connect"},
+			wantStderr:      []string{"cannot find the home directory"},
 			wantStdoutEmpty: true,
 		},
 		{
@@ -248,10 +251,10 @@ func TestCLIRun(t *testing.T) {
 			wantStdoutEmpty: true,
 		},
 		{
-			name:            "pin is not implemented",
+			name:            "pin without --accept is a usage error",
 			args:            []string{"pin"},
 			wantCode:        exitError,
-			wantStderr:      []string{"not implemented"},
+			wantStderr:      []string{"mcpmoat pin: --accept <server> is required", usageHint},
 			wantStdoutEmpty: true,
 		},
 	}
@@ -357,12 +360,23 @@ func TestUsageContent(t *testing.T) {
 		"  0  no findings\n",
 		"  1  findings at or above --fail-on\n",
 		"  2  execution error\n",
-		"     (scan also exits 2 when a config file has a problem; a missing file is not a problem\n" +
-			"     in auto-discovery, but a missing --config file is)\n",
+		"     (scan also exits 2 when a config file has a problem or when pins.json cannot be read\n" +
+			"     or saved, or when it is stopped by a signal; a missing file is not a problem in auto-discovery,\n" +
+			"     but a missing --config file is. A server that fails or times out is a warning and does not\n" +
+			"     change the exit code, unless its pins are already stored: then it is a finding)\n",
+		"The file cannot ignore the pin rules (MOAT-T2-*)",
+		"  If that server is already pinned, it is also a finding (MOAT-T2-004, medium): its pinned tools were not checked.\n",
+		"  scan reads pins.json before it starts a server. Ctrl-C (or SIGTERM or SIGHUP) stops the servers, saves no pins and exits 2.\n",
+		"Ctrl-C stops the server and saves nothing (exit 2)",
+		"Pin flags (after \"pin\"):\n",
+		"  --accept <server> ",
+		"MOAT-T2-001",
+		"MOAT-T2-004",
+		"\"pin --accept <server>\" accepts the changes.\n",
 		"Scan output:\n",
 		"  A heuristic masks secret-like arguments. Review the output before you share it.\n",
-		"  --no-connect: scan runs only the built-in config rules (T4 and T5). The tool rules need a connection.\n",
-		"  Rules from --rules are loaded and checked, but not applied yet.\n",
+		"  --no-connect: scan runs only the built-in config rules (T4 and T5). It reads and writes no pins.\n",
+		"  The tool rules (YAML) are not applied to tools yet. Rules from --rules are loaded and checked, but not applied yet.\n",
 		"  Exit code 1 means a finding of severity high or above that is not ignored.\n",
 	} {
 		if !strings.Contains(got, want) {

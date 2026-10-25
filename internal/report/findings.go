@@ -27,7 +27,8 @@ type FindingRow struct {
 	// Key is the key name in Field, for example an env variable name.
 	Key string
 	// Related is a second name that the finding refers to, for example a
-	// second server. WriteFindings shows it only when Key is empty.
+	// second server, or a fixed reason text. WriteFindings shows it alone when
+	// Key is empty, and as "<key> (<related>)" when Key is set too.
 	Related string
 }
 
@@ -41,7 +42,13 @@ type FindingRow struct {
 //	SEVERITY      the severity word
 //	SERVER        the server name
 //	FIELD         the config field
-//	KEY/RELATED   Key when it is set, else Related, else "-"
+//	KEY/RELATED   "<key> (<related>)" when both are set, else Key, else
+//	              Related, else "-"
+//
+// Key and Related each go through findingCell on their own, so each part is
+// escaped, cut and quoted alone. A part with a space shows in quotes, for
+// example: tool ("duplicate tool name"). KEY/RELATED is the last column, so
+// the added text is not padded.
 //
 // Any other empty cell shows "-". A name that is exactly "-" shows as "\"-\"".
 //
@@ -84,16 +91,13 @@ func WriteFindings(w io.Writer, rows []FindingRow) error {
 
 	write("RULE\tSEVERITY\tSERVER\tFIELD\tKEY/RELATED\n")
 	for _, r := range rows {
-		keyOrRelated := r.Key
-		if keyOrRelated == "" {
-			keyOrRelated = r.Related
-		}
+		keyOrRelated := keyRelatedCell(r.Key, r.Related)
 		write("%s\t%s\t%s\t%s\t%s\n",
 			findingCell(r.RuleID),
 			findingCell(r.Severity),
 			findingCell(r.Server),
 			findingCell(r.Field),
-			findingCell(keyOrRelated),
+			keyOrRelated,
 		)
 	}
 
@@ -114,4 +118,17 @@ func findingCell(s string) string {
 		return termsafe.QuoteIf(s, true)
 	}
 	return cell(s, maxShortCellRunes)
+}
+
+// keyRelatedCell returns the KEY/RELATED cell. With both key and related set
+// it is "<key> (<related>)", and each part goes through findingCell. With one
+// part set, it is that part. With none, it is emptyCell.
+func keyRelatedCell(key, related string) string {
+	if key != "" && related != "" {
+		return findingCell(key) + " (" + findingCell(related) + ")"
+	}
+	if key == "" {
+		return findingCell(related)
+	}
+	return findingCell(key)
 }

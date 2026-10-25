@@ -17,25 +17,81 @@ These methods will work from the first release:
 - GitHub Releases: download a static binary for macOS or Linux (amd64, arm64) from the
   [releases page](https://github.com/Ducarv/mcpmoat/releases).
 
-## Planned usage
+## Usage
 
 ```sh
-mcpmoat scan                 # discover, connect, check and report
-mcpmoat scan --no-connect    # static config analysis only; runs no server
-mcpmoat pin --accept <name>  # accept a changed server after you review it
+mcpmoat scan                 # discover, connect, pin or compare the tools, and report
+mcpmoat scan --no-connect    # static config analysis only; runs no server, reads no pins
+mcpmoat pin --accept <name> --expect <digest>  # accept the tools of a server, only if they match the digest from scan
 mcpmoat version              # print the version, commit and build date
 ```
 
+## Pins and rug pulls
+
+`mcpmoat scan` connects to each server and lists its tools. A stdio server is started. See
+[How mcpmoat starts stdio servers](docs/stdio-servers.md).
+
+- **First run:** mcpmoat pins the tools of each server in `pins.json`. After it saves the file, it
+  prints `mcpmoat scan: pinned N tools for <server>` on stderr. The file is
+  `$XDG_CONFIG_HOME/mcpmoat/pins.json`, or `~/.config/mcpmoat/pins.json` when `XDG_CONFIG_HOME` is
+  not set. The file has mode `0600`. It stores each tool's hash and text. It never stores env,
+  header, args or URL values from your configs.
+- **Later runs:** `scan` compares the tools with the pins. It reports `MOAT-T2-001` (changed tool,
+  high), `MOAT-T2-002` (new tool, medium), `MOAT-T2-003` (removed tool, low) and `MOAT-T2-004`
+  (tool not verified). `MOAT-T2-004` is high when the tool name is pinned, because a duplicate,
+  invalid or unverifiable copy of a pinned tool can hide a rug pull. Else it is medium. For each
+  changed tool, `scan` prints a unified diff of the pinned and the current text after the findings
+  table. You can ignore these IDs with `--ignore` only (see
+  [Ignore findings](#ignore-findings)).
+- **Accept:** `scan` never changes the pins of a pinned server. Read the diff. If you trust the
+  change, run `mcpmoat pin --accept <server> --expect <digest>`. The name must match one server
+  exactly. If two clients or projects use it, narrow it with `--config <file>`. If a config file has
+  any problem, `pin --accept` prints it and exits with code 2, because a broken file can hide a
+  second server with the same name. `pin --accept` connects to that one server and stores new pins
+  for it only. It prints the diff of each changed tool, then
+  `accepted <server>: N new, N changed, N removed`.
+- **Recommended flow:** run `mcpmoat scan` and review the diff. After the diffs, `scan` prints one
+  line for each pinned server that has a pin finding:
+  `To accept <server>: mcpmoat pin --accept <server> --expect pd1:<32 hex>`. Copy that line and run
+  it. The digest (version `pd1`) covers the tools that `scan` showed you. `pin --accept --expect`
+  saves the pins only if the tools that the server returns now give the same digest. Else it prints
+  the diff and `the tools of <server> differ from what scan showed ...; nothing was saved`, saves
+  nothing and exits with code 2. Run `scan` again and review the new diff. A hostile server can
+  show harmless tools to `scan` and harmful tools to `pin --accept`. The digest stops that attack.
+  An invalid or empty `--expect` exits with code 2 before any server starts.
+- Without `--expect`, `pin --accept` works as before, but it trusts the tools that the server
+  returns now. It prints a note on stderr to say so. Use `--expect` unless you have a reason not to.
+- `scan` prints no `To accept` line for a server that is pinned for the first time, for a server
+  that it could not inspect, for a finding that you ignored, or for tools that cannot be pinned. If
+  the server name has a character that is not safe to paste in a shell, the line has the digest but
+  no command. The name in the command is quoted for a POSIX shell. On Windows (`cmd.exe` or
+  PowerShell) you may need to change the quotes.
+- A server that fails, times out or is refused (an untrusted or turned-off server) is a warning on
+  stderr and does not change the exit code. If the server is already pinned, it is also a
+  `MOAT-T2-004` finding (medium) with the reason `pinned server could not be inspected`.
+- `scan` and `pin --accept` read `pins.json` before they start any server. A `pins.json` that
+  cannot be read exits with code 2 before a server starts.
+- Press Ctrl-C (or send `SIGTERM` or `SIGHUP`) to stop a run. mcpmoat stops the stdio servers that
+  it started. `scan` and `pin --accept` print `interrupted; no pins were saved`, save nothing and
+  exit with code 2.
+- A changed tool gives exit code 1. The default threshold is high, so a new tool (`MOAT-T2-002`), a
+  removed tool (`MOAT-T2-003`) and a medium `MOAT-T2-004` do not give exit code 1. A `pins.json`
+  that `scan` cannot read or save gives exit code 2.
+
 ## Ignore findings
 
-`mcpmoat scan --no-connect` applies the built-in config rules (dangerous config, T4, and
-typosquatting, T5) to every server it finds. The ignore list below drops findings of these rules.
-The tool rules need a connection to the server. That is not implemented yet, so they do not run.
+`mcpmoat scan` applies the built-in config rules (dangerous config, T4, and typosquatting, T5) to
+every server it finds. The ignore list below drops findings of these rules. The pin findings
+(`MOAT-T2-001` to `MOAT-T2-004`) are different: only `--ignore` drops them (see below). The YAML tool rules (descriptions and schemas) are not applied to
+tools yet, so they do not run.
 `scan` exits with code 1 when a finding that is not ignored has severity high or above.
 
 `--ignore <rule-id>` ignores all findings of one rule. You can use the flag more than one time.
 
-A `.mcpmoat-ignore` file in the working directory also ignores findings. Write one entry on each
+A `.mcpmoat-ignore` file in the working directory also ignores findings of the config rules. It
+cannot ignore the pin rules `MOAT-T2-001` to `MOAT-T2-004`, because the file can come from a cloned
+repository and must not silence the rug-pull alarm. Use `--ignore` on the command line for them.
+When the file has such an entry, `scan` prints a warning. Write one entry on each
 line: `RULE-ID [server[/tool]]`. A line that starts with `#` is a comment. After the rule ID, a
 `#` as a separate word starts a comment to the end of the line. A server name cannot start with `#`.
 
@@ -87,13 +143,14 @@ go build -o mcpmoat ./cmd/mcpmoat
 - It does not analyse server source code, so it does not find malware inside a server.
 - It does not protect against prompt injection that arrives in content the agent reads (for example
   a GitHub issue). That is planned for a later phase.
-- `mcpmoat scan` cannot connect to servers yet. Until it can, `scan` needs `--no-connect`. Without
-  it, `scan` prints an error and exits with code 2. It cannot check the tools of a server, so the
-  tool rules do not run, and exit code 0 does not mean that the tools are safe. When connecting is
-  wired in, `mcpmoat scan` will by default start each configured stdio server, with the same
-  command your client already runs. mcpmoat will use no shell. The server will get only the env
-  from its config plus a small allowlist of safe variables, such as `PATH` and `HOME`. This env
-  scrub is not a sandbox: the server runs as you and can read your files and use the network.
+- `mcpmoat scan` starts each configured stdio server, with the same command your client already
+  runs. mcpmoat uses no shell. The server gets only the env from its config plus a small allowlist
+  of safe variables, such as `PATH` and `HOME`. This env scrub is not a sandbox: the server runs as
+  you and can read your files and use the network. A server can also echo a configured env value
+  into a tool description, and then that text is stored in `pins.json`. mcpmoat does not start a
+  server from an untrusted project file or a turned-off server, and no flag allows it yet. The YAML
+  tool rules do not run yet, so exit code 0 does not mean that the tools are safe.
+- Not done yet: a lock for `pins.json` (#150), `--fail-on` (#65) and JSON output (#64).
 - `scan --rules <dir>` loads and checks extra rule files, but `scan` does not apply them yet. It
   prints `mcpmoat scan: rules from --rules are loaded and checked, but not applied yet` on stderr.
 
