@@ -96,8 +96,8 @@ go list -f '{{.ImportPath}}: {{join .Imports " "}}' ./...
 
 `mcpmoat scan` does these steps today:
 
-1. `cmd/mcpmoat` parses the flags and checks `--timeout` and `--concurrency`. A bad value is a
-   usage error with exit code 2.
+1. `cmd/mcpmoat` parses the flags and checks `--timeout`, `--concurrency` and `--fail-on`. A bad
+   value is a usage error with exit code 2.
 2. It loads the rules with `rules.Builtin` and, with `--rules`, `rules.LoadDir`. Then
    `rules.NewSet` checks for duplicate rule IDs and for clashes with built-in IDs. This only loads
    and checks the rules. A bad rule file or an ID problem gives exit code 2.
@@ -210,16 +210,20 @@ the connect and pin steps between step 5 and step 6:
 
 `--no-connect` starts no process and reads and writes no `pins.json`.
 
-The exit codes (`cmd/mcpmoat/cli.go`) are: 0 when no finding has severity high or above; 1 when a
-finding that is not ignored has severity high or above (the PRD default of `--fail-on`, which is not
-a flag yet). A changed tool is high, so it gives exit code 1. So does a high MOAT-T2-004 finding: a
-pinned tool name that cannot be verified, a pinned server that fails or times out, a server whose
-tools cannot be pinned, or a pinned server that is listed twice. A new tool, or a not verified
-tool with a new name, next to a removed tool of the same server (a likely rename) is high too. The default does not fail on MOAT-T2-002 (a new
-tool alone), MOAT-T2-003 (removed tool) or a medium MOAT-T2-004 (an unpinned tool name, or an
-unpinned server that is listed twice). The code is 2 for an execution error, and that includes a
-`pins.json` that `scan` cannot read or save, and a signal. `scan` prints the report first.
-Exit code 2 wins over 1. `internal/report` has no JSON output.
+In `reportScan`, a signal during the inspection or a report write error returns 2 at once.
+Otherwise `reportScan` prints the report and then gets the exit code from `scanExitCode` in
+`cmd/mcpmoat/scan_findings.go`. A config file problem gives 2, and so does a `pins.json` that
+`scan` cannot read or save, or a signal that stops the save of new pins after the report. Exit code
+2 wins over 1. Otherwise `hasFailingFinding` gives 1 when a finding that is not ignored has a
+severity at or above `--fail-on` (default `high`).
+It compares `rules.Severity` `Rank()` values, and a finding with an unknown severity always counts.
+A changed tool is high, so it gives exit code 1 at the default. So does a high MOAT-T2-004 finding:
+a pinned tool name that cannot be verified, a pinned server that fails or times out, a server whose
+tools cannot be pinned, or a pinned server that is listed twice. A new tool, or a not verified tool
+with a new name, next to a removed tool of the same server (a likely rename) is high too. The
+default does not fail on MOAT-T2-002 (a new tool alone), MOAT-T2-003 (removed tool) or a medium
+MOAT-T2-004 (an unpinned tool name, or an unpinned server that is listed twice). `pin` has no
+`--fail-on` and never exits with 1. `internal/report` has no JSON output.
 
 `mcpmoat pin --accept <server> [--project <path>] [--expect <digest>]` (FR-13) does these steps:
 
@@ -263,8 +267,8 @@ tool rules (descriptions and schemas) do not run
 yet (#143). `scan` loads the rules from `--rules` and checks them, but does not apply them. It
 prints a notice on stderr that says so.
 
-Known gaps: the store has no lock (#150), only a read just before the save. `--fail-on` (#65) and
-the JSON output (#64) are not implemented.
+Known gaps: the store has no lock (#150), only a read just before the save. The JSON output (#64)
+is not implemented.
 
 Known limit: a renamed or moved server (a new name, config file or project path) has a new identity.
 `scan` pins it again as a new server, and it does not report the old pin. A follow-up issue will
@@ -281,7 +285,6 @@ The target flow is `discover -> inspect -> rules -> pins -> report`. The `discov
 - `pins` hashes each tool and reports new, removed and changed tools (rug pulls). This part is
   built (see above).
 - `report` prints the findings, as a table and as JSON.
-- The exit code is 1 when a finding is at or above `--fail-on`.
 
 ## Tool hash
 

@@ -587,6 +587,10 @@ with `--no-color`).
 - No findings at or above the threshold: exit 0.
 - At least one non-ignored finding at or above `--fail-on`: exit 1.
 - Invalid flags, invalid rules, unreadable `--config`: exit 2.
+- Findings and an execution error together: exit 2. Exit 2 wins over 1, and the report still
+  prints first.
+- `--fail-on` accepts only `low`, `medium`, `high` and `critical`. Another value is a usage error
+  (exit 2). It is a `scan` flag only.
 - A per-server connection failure alone does not cause exit 2 (it is reported; see FR-06).
 - Tests cover every branch, including `--fail-on low|medium|high|critical`.
 

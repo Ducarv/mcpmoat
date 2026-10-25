@@ -8,12 +8,19 @@ mcpmoat finds the MCP servers that Claude Code, Cursor and Codex load on your ma
 they expose, and checks them for tool poisoning, rug pulls, shadowing, dangerous config and
 typosquatting. It runs locally, needs no account and sends no telemetry.
 
-## Install (planned)
+## Install
 
-These methods will work from the first release:
+This works today:
+
+```sh
+go install github.com/Ducarv/mcpmoat/cmd/mcpmoat@latest
+```
+
+It builds the latest commit on `main`. It needs Go 1.27 or later (see [go.mod](go.mod)).
+
+These methods come with the first release:
 
 - Homebrew: `brew install Ducarv/tap/mcpmoat`
-- Go: `go install github.com/Ducarv/mcpmoat/cmd/mcpmoat@latest`
 - GitHub Releases: download a static binary for macOS or Linux (amd64, arm64) from the
   [releases page](https://github.com/Ducarv/mcpmoat/releases).
 
@@ -22,6 +29,7 @@ These methods will work from the first release:
 ```sh
 mcpmoat scan                 # discover, connect, pin or compare the tools, and report
 mcpmoat scan --no-connect    # static config analysis only; runs no server, reads no pins
+mcpmoat scan --fail-on medium  # exit 1 for a finding of medium or above (default high)
 mcpmoat pin --accept <name> --expect <digest>  # accept the tools of a server, only if they match the digest from scan
 mcpmoat version              # print the version, commit and build date
 ```
@@ -38,8 +46,8 @@ mcpmoat version              # print the version, commit and build date
   header, args or URL values from your configs.
 - **Later runs:** `scan` compares the tools with the pins. It reports `MOAT-T2-001` (changed tool,
   high), `MOAT-T2-002` (new tool, medium), `MOAT-T2-003` (removed tool, low) and `MOAT-T2-004`
-  (tool not verified). A new tool is medium, so alone it does not give exit code 1: read the
-  report, not only the exit code. A new tool, or a not verified tool with a new name, is high when
+  (tool not verified). A new tool is medium, so alone it does not give exit code 1 at the default
+  `--fail-on high`: read the report, not only the exit code. A new tool, or a not verified tool with a new name, is high when
   the same server also lost a tool in that scan, because a server can rename a tool to avoid the
   changed-tool check. A server whose tools cannot be pinned (a duplicate or empty tool
   name, invalid tool data, or more than 2 MiB) is a high `MOAT-T2-004`, because mcpmoat can never
@@ -91,8 +99,8 @@ mcpmoat version              # print the version, commit and build date
   covers those changes too.
 - A server that fails, times out or is refused (an untrusted or turned-off server) is a warning on
   stderr. If the server is not pinned, it does not change the exit code. If the server is already
-  pinned and fails or times out, it is also a `MOAT-T2-004` finding (high, exit code 1) with the
-  reason `pinned server could not be inspected`, because a hostile server must not avoid the
+  pinned and fails or times out, it is also a `MOAT-T2-004` finding (high, so exit code 1 at the
+  default `--fail-on high`) with the reason `pinned server could not be inspected`, because a hostile server must not avoid the
   rug-pull check by failing on purpose. A pinned server that is refused stays a warning: your
   client config turns it off or does not approve it, and the server cannot choose that.
 - `scan` and `pin --accept` print the warnings of the inspection on stderr: secrets that go over
@@ -109,12 +117,11 @@ mcpmoat version              # print the version, commit and build date
 - Press Ctrl-C (or send `SIGTERM` or `SIGHUP`) to stop a run. mcpmoat stops the stdio servers that
   it started. `scan` and `pin --accept` print `interrupted; no pins were saved`, save nothing and
   exit with code 2.
-- A changed tool gives exit code 1. So does a high `MOAT-T2-004` (a pinned tool name that cannot be
-  verified, a pinned server that fails or times out, or a server whose tools cannot be pinned), and
-  a new tool next to a removed one. The default threshold is high, so a new tool (`MOAT-T2-002`)
+- At the default `--fail-on high`, a changed tool gives exit code 1. So does a high `MOAT-T2-004`
+  (a pinned tool name that cannot be verified, a pinned server that fails or times out, or a server
+  whose tools cannot be pinned), and a new tool next to a removed one. A new tool (`MOAT-T2-002`)
   alone, a removed tool (`MOAT-T2-003`) and a medium `MOAT-T2-004` (an unpinned tool name) do not
-  give exit code 1. A `pins.json`
-  that `scan` cannot read or save gives exit code 2.
+  give exit code 1 at the default. A `pins.json` that `scan` cannot read or save gives exit code 2.
 
 ## Ignore findings
 
@@ -122,7 +129,8 @@ mcpmoat version              # print the version, commit and build date
 every server it finds. The ignore list below drops findings of these rules. The pin findings
 (`MOAT-T2-001` to `MOAT-T2-004`) are different: only `--ignore` drops them (see below). The YAML tool rules (descriptions and schemas) are not applied to
 tools yet, so they do not run.
-`scan` exits with code 1 when a finding that is not ignored has severity high or above.
+`scan` exits with code 1 when a finding that is not ignored has severity high or above, at the
+default `--fail-on high` (see [Exit codes](#exit-codes)).
 
 `--ignore <rule-id>` ignores all findings of one rule. You can use the flag more than one time.
 
@@ -165,6 +173,33 @@ table. It gives the count for each rule ID, for example
 `.mcpmoat-ignore` in a repository that you did not write can hide findings, so check this line and
 the file. Ignored findings do not count for the exit code, so the file can turn exit code 1 into 0.
 
+## Exit codes
+
+`mcpmoat scan` exits with one of these codes:
+
+| Code | Meaning |
+|---|---|
+| 0 | No finding that is not ignored has severity at or above `--fail-on`. |
+| 1 | At least one finding that is not ignored has severity at or above `--fail-on`. |
+| 2 | Execution error. |
+
+- `--fail-on low|medium|high|critical` sets the lowest severity that gives exit code 1. The default
+  is `high`. Only these exact lowercase words work. Another value, an empty value or a second
+  `--fail-on` is a usage error (exit code 2). It is a `scan` flag only. `pin` never exits with
+  code 1.
+- A finding with a severity that mcpmoat does not know always counts.
+- Ignored findings (`.mcpmoat-ignore` or `--ignore`) never give exit code 1.
+- Exit code 2 comes from invalid flags, invalid rules, an unreadable `--config` file, a problem in
+  a config file, a `pins.json` that cannot be read or saved, or an interrupt (Ctrl-C, `SIGTERM`,
+  `SIGHUP`). Exit code 2 wins over 1. The report still prints first.
+- An unpinned server that fails or times out is a warning on stderr only. It does not change the
+  exit code. A pinned server that fails or times out is a high `MOAT-T2-004` finding, so it gives
+  exit code 1 at the default `--fail-on high`.
+- No built-in rule is critical today. So `--fail-on critical` never gives exit code 1, also on a
+  rug pull (`MOAT-T2-001` is high).
+
+To use the exit code in CI or in a git hook, see [docs/ci.md](docs/ci.md).
+
 ## Build from source
 
 ```sh
@@ -188,7 +223,7 @@ go build -o mcpmoat ./cmd/mcpmoat
   into a tool description, and then that text is stored in `pins.json`. mcpmoat does not start a
   server from an untrusted project file or a turned-off server, and no flag allows it yet. The YAML
   tool rules do not run yet, so exit code 0 does not mean that the tools are safe.
-- Not done yet: a lock for `pins.json` (#150), `--fail-on` (#65) and JSON output (#64).
+- Not done yet: a lock for `pins.json` (#150) and JSON output (#64).
 - `scan --rules <dir>` loads and checks extra rule files, but `scan` does not apply them yet. It
   prints `mcpmoat scan: rules from --rules are loaded and checked, but not applied yet` on stderr.
 
@@ -196,6 +231,7 @@ go build -o mcpmoat ./cmd/mcpmoat
 
 - [docs/README.md](docs/README.md): the index of all docs and which file owns each topic.
 - [CONTRIBUTING.md](CONTRIBUTING.md): how to add a rule, build the binary and open a PR.
+- [docs/ci.md](docs/ci.md): how to run mcpmoat in CI and in git hooks.
 - [SECURITY.md](SECURITY.md): how to report a vulnerability in mcpmoat.
 
 ## Credits
