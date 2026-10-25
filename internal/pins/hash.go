@@ -31,6 +31,13 @@ func Hash(t inspect.Tool) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	sum := sha256.Sum256(b)
-	return HashVersion + ":" + hex.EncodeToString(sum[:]), nil
+	return hashCanonical(b), nil
+}
+
+// hashCanonical returns the pin hash of a canonical form: HashVersion, a
+// colon, and the lowercase hex SHA-256 of canonical. Hash and the pin check in
+// Compare both use it, so the algorithm is written once.
+func hashCanonical(canonical []byte) string {
+	sum := sha256.Sum256(canonical)
+	return HashVersion + ":" + hex.EncodeToString(sum[:])
 }

@@ -20,16 +20,28 @@ import (
 
 // CurrentVersion is the format version of pins.json that this mcpmoat reads
 // and writes.
+//
+// The shape of version 1 changed in place before the first release, so no
+// released file has an older v1 shape. Any change of the shape after the first
+// release needs a version bump.
 const CurrentVersion = 1
 
-// maxFileSize is the largest pins.json that Load reads, in bytes.
-const maxFileSize = 8 << 20
+// maxFileSize is the largest pins.json that Load reads and Save writes, in
+// bytes of indented JSON. It is a ceiling for the whole file: servers that
+// together hold more than this make Save fail (see maxServerSize).
+const maxFileSize = 32 << 20
 
 // maxServerSize is the largest entry of one server that Load and Set accept,
-// in bytes of compact JSON. A server with 100 tools needs about 10 KiB. A server sends
-// its own tool names, so this cap stops one server from filling the file
-// alone and making Save fail for all servers.
-const maxServerSize = 256 << 10
+// in bytes of compact JSON. Each tool stores its canonical text next to its
+// hash, so a server with 100 tools needs about 100 KiB or more. A server sends
+// its own tool names and schemas, so this cap stops one server from filling
+// the file alone.
+//
+// The cap does not stop several servers together: maxFileSize divided by
+// maxServerSize is 16, so 16 hostile servers at full size make Save fail for
+// the whole file, and then no server is pinned. The caller must report that
+// error. It is a known ceiling, not a silent loss.
+const maxServerSize = 2 << 20
 
 // ErrUnsupportedVersion means that pins.json has a format version that this
 // mcpmoat does not know, because the file is newer. Load never reads such a
@@ -55,13 +67,27 @@ type Identity struct {
 	Name string
 }
 
-// ServerPins maps a tool name to the hash of that tool. A hash is an opaque
-// non-empty string here: the hashing code owns its format.
+// Pin is the stored state of one tool: its hash and its canonical text. The
+// text lets a later run show a diff of a changed tool.
+//
+// Both fields are required and not empty. The store does not check their
+// format: the hashing code owns it. The canonical text comes from a server that
+// we do not trust, so code that prints it must escape it (internal/termsafe).
+type Pin struct {
+	// Hash is the hash of the tool, as Hash returns it, for example
+	// "sha256-v1:...".
+	Hash string `json:"hash"`
+	// Canonical is the canonical JSON text of the tool, as Canonical returns it.
+	// It is the input of Hash.
+	Canonical string `json:"canonical"`
+}
+
+// ServerPins maps a tool name to the Pin of that tool.
 //
 // The server chose the tool names, and they can hold control characters. Code
 // that prints a name from the store must escape it (internal/termsafe), as it
 // does for a name from a live server.
-type ServerPins map[string]string
+type ServerPins map[string]Pin
 
 // Store holds the pins of all servers and the path of the pins file.
 //
@@ -171,7 +197,7 @@ func Load(path string) (*Store, error) {
 			return nil, fmt.Errorf("parse %s: servers[%d]: a field is missing or null", path, i)
 		}
 		id := Identity{Client: *srv.Client, Source: *srv.Source, ProjectPath: *srv.ProjectPath, Name: *srv.Name}
-		if err := validateServer(id, *srv.Tools); err != nil {
+		if err := ValidateServer(id, *srv.Tools); err != nil {
 			return nil, fmt.Errorf("parse %s: servers[%d]: %w", path, i, err)
 		}
 		if _, dup := s.servers[id]; dup {
@@ -249,7 +275,8 @@ func checkVersion(path string, data []byte) error {
 // Get returns a copy of the pins of the server id. The bool is false when the
 // store has no entry for the server. An entry with an empty map is a server
 // that was pinned with no tools. Changing the returned map does not change
-// the Store.
+// the Store. A Pin holds only strings, so the copy shares nothing with the
+// Store.
 func (s *Store) Get(id Identity) (ServerPins, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -266,11 +293,11 @@ func (s *Store) Get(id Identity) (ServerPins, bool) {
 // not write the file: call Save.
 //
 // Set refuses a server that Load would refuse: an empty server name, an empty
-// tool name, an empty hash, text that is not valid UTF-8, or an entry larger
-// than maxServerSize (256 KiB) as compact JSON. Every error from Set is such a
-// refusal. Then the store does not change, and the caller can still save the
-// other servers. The errors hold no tool names, because the server chose
-// them, and no server context: the caller adds it.
+// tool name, an empty hash, an empty canonical text, text that is not valid
+// UTF-8, or an entry larger than maxServerSize (2 MiB) as compact JSON. Every
+// error from Set is such a refusal. Then the store does not change, and the
+// caller can still save the other servers. The errors hold no tool names,
+// because the server chose them, and no server context: the caller adds it.
 //
 // The server chose the data that Set refuses, so a hostile server can make
 // itself impossible to pin. The caller must report a refused server (for
@@ -280,7 +307,7 @@ func (s *Store) Set(id Identity, p ServerPins) error {
 	// Check the copy that is stored, so a caller that changes p later cannot
 	// change what was checked.
 	c := cloneOrEmpty(p)
-	if err := validateServer(id, c); err != nil {
+	if err := ValidateServer(id, c); err != nil {
 		return err
 	}
 
@@ -309,10 +336,18 @@ func cloneOrEmpty(p ServerPins) ServerPins {
 // same store always gives the same bytes.
 //
 // Load and Set check each server, so Save checks only the whole file: it
-// refuses data larger than maxFileSize (8 MiB), the limit of Load, and the old
+// refuses data larger than maxFileSize (32 MiB), the limit of Load, and the old
 // file stays.
+//
 // Save writes indented JSON, so the limit applies to that form. A compact file
 // near the limit, for example from a hand edit, loads but cannot be saved.
+//
+// The limit is a ceiling for all servers together. Set caps one server at
+// maxServerSize (2 MiB), so 16 servers at full size, which hostile servers can
+// send, make the file larger than maxFileSize and Save fails for the whole
+// file. Then no server is saved. The caller must report the error and must not
+// treat the run as pinned.
+//
 // Save of a zero-value Store is an error, because it has no path: make a
 // Store with Load.
 func (s *Store) Save() error {
@@ -374,10 +409,12 @@ func compareIdentity(a, b Identity) int {
 	)
 }
 
-// validateServer checks the rules that Load and Set share, also the size cap
-// of one server (maxServerSize). The errors do not hold tool names, because a
-// server that we do not trust chose them.
-func validateServer(id Identity, tools ServerPins) error {
+// ValidateServer checks the rules that Load and Set share, also the size cap
+// of one server (maxServerSize). It returns the error that Set would return for
+// the same pins, so a caller can learn whether a server can be pinned without a
+// store. The errors do not hold tool names, because a server that we do not
+// trust chose them.
+func ValidateServer(id Identity, tools ServerPins) error {
 	if id.Name == "" {
 		return errors.New("the server name is empty")
 	}
@@ -388,18 +425,26 @@ func validateServer(id Identity, tools ServerPins) error {
 		!utf8.ValidString(id.ProjectPath) || !utf8.ValidString(id.Name) {
 		return errors.New("the server identity is not valid UTF-8")
 	}
-	for name, hash := range tools {
+	for name, pin := range tools {
 		if name == "" {
 			return errors.New("a tool name is empty")
 		}
-		if hash == "" {
-			return errors.New("a tool hash is empty")
+		// A missing key or a null in pins.json gives an empty string, so Load
+		// refuses it here too.
+		if pin.Hash == "" {
+			return errors.New("a tool hash is empty or missing")
+		}
+		if pin.Canonical == "" {
+			return errors.New("a tool canonical text is empty or missing")
 		}
 		if !utf8.ValidString(name) {
 			return errors.New("a tool name is not valid UTF-8")
 		}
-		if !utf8.ValidString(hash) {
+		if !utf8.ValidString(pin.Hash) {
 			return errors.New("a tool hash is not valid UTF-8")
+		}
+		if !utf8.ValidString(pin.Canonical) {
+			return errors.New("a tool canonical text is not valid UTF-8")
 		}
 	}
 	entry, err := json.Marshal(newFileServer(id, tools))

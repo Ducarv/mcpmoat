@@ -60,6 +60,11 @@ jobs:
         run: go vet ./...
 
       - name: Test
+        # The E2E pin tests run a stdio server, so the binary makes a run
+        # directory below the fake HOME. It refuses a parent that other users
+        # can write to, such as /tmp on Linux, so t.TempDir must be private.
+        env:
+          TMPDIR: ${{ runner.temp }}
         run: go test -race -shuffle=on ./...
 
       - name: Check for known vulnerabilities

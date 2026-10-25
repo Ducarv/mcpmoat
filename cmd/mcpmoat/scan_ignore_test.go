@@ -130,7 +130,7 @@ func TestScanIgnoreFlag(t *testing.T) {
 			args:       []string{"--ignore", "--no-connect"},
 			wantCode:   exitError,
 			wantStderr: []string{`invalid value "--no-connect" ` + ignoreUsageMsg, usageHint},
-			noStderr:   []string{"not implemented"},
+			noStderr:   []string{"cannot inspect", "pinned"},
 		},
 		{
 			name:       "value with a slash",
@@ -167,7 +167,7 @@ func TestScanIgnoreFlag(t *testing.T) {
 			args:       []string{"--ignore", "bad/id"},
 			wantCode:   exitError,
 			wantStderr: []string{ignoreUsageMsg, usageHint},
-			noStderr:   []string{"not implemented"},
+			noStderr:   []string{"cannot inspect", "pinned"},
 		},
 		{
 			name:       "value with an escape sequence",

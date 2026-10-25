@@ -1,6 +1,7 @@
 package inspect
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"strings"
@@ -265,5 +266,24 @@ func TestGateErrorFromCheckGates(t *testing.T) {
 				t.Errorf("Reason = %q, want %q", ce.Reason, tt.wantReason)
 			}
 		})
+	}
+}
+
+// TestRefused checks that Refused finds each gate error, also through the
+// *ConnectError that Inspect returns, and nothing else.
+func TestRefused(t *testing.T) {
+	t.Parallel()
+	for _, err := range []error{errDisabled, errUnapproved, errProjectApproved, errUntrusted} {
+		if !Refused(err) {
+			t.Errorf("Refused(%v) = false, want true", err)
+		}
+		if ce := gateError(discover.Server{Name: "s"}, err); !Refused(ce) {
+			t.Errorf("Refused(gateError(%v)) = false, want true", err)
+		}
+	}
+	for _, err := range []error{nil, errors.New("boom"), context.DeadlineExceeded} {
+		if Refused(err) {
+			t.Errorf("Refused(%v) = true, want false", err)
+		}
 	}
 }

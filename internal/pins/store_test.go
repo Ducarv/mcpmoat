@@ -27,15 +27,27 @@ var (
 	idC = pins.Identity{Client: "cursor", Source: "/home/u/.cursor/mcp.json", Name: "gamma"}
 )
 
+// storeTestPin returns the pin of a hash. The canonical text derives from the
+// hash, so two different hashes always give two different pins.
+func storeTestPin(hash string) pins.Pin {
+	return pins.Pin{Hash: hash, Canonical: "c-" + hash}
+}
+
+// storeTestPinJSON returns the pins.json text of storeTestPin(hash).
+func storeTestPinJSON(hash string) string {
+	return `{"hash":"` + hash + `","canonical":"c-` + hash + `"}`
+}
+
 // storeTestPins returns a fresh pins map from name, hash pairs. Each call
-// gives a new map, so tests do not share state.
+// gives a new map, so tests do not share state. The canonical text of each
+// tool is "c-" plus its hash.
 func storeTestPins(pairs ...string) pins.ServerPins {
 	if len(pairs)%2 != 0 {
 		panic("storeTestPins needs name, hash pairs")
 	}
 	p := pins.ServerPins{}
 	for kv := range slices.Chunk(pairs, 2) {
-		p[kv[0]] = kv[1]
+		p[kv[0]] = storeTestPin(kv[1])
 	}
 	return p
 }
@@ -131,8 +143,14 @@ func TestSaveFormat(t *testing.T) {
       "project_path": "",
       "name": "n",
       "tools": {
-        "<b>&": "2",
-        "a": "1"
+        "<b>&": {
+          "hash": "2",
+          "canonical": "c-2"
+        },
+        "a": {
+          "hash": "1",
+          "canonical": "c-1"
+        }
       }
     }
   ]
@@ -347,7 +365,7 @@ func TestLoadValid(t *testing.T) {
 		},
 		{
 			"one server",
-			`{"version":1,"servers":[{"client":"claude-code","source":"/home/u/.claude.json","project_path":"","name":"alpha","tools":{"t":"h"}}]}`,
+			`{"version":1,"servers":[{"client":"claude-code","source":"/home/u/.claude.json","project_path":"","name":"alpha","tools":{"t":` + storeTestPinJSON("h") + `}}]}`,
 			storeTestPins("t", "h"),
 		},
 	}
@@ -371,7 +389,7 @@ func TestLoadValid(t *testing.T) {
 
 func TestLoadErrors(t *testing.T) {
 	t.Parallel()
-	const server = `{"client":"c","source":"s","project_path":"","name":"n","tools":{"t":"h"}}`
+	server := `{"client":"c","source":"s","project_path":"","name":"n","tools":{"t":` + storeTestPinJSON("h") + `}}`
 	tests := []struct {
 		name     string
 		content  string
@@ -393,7 +411,7 @@ func TestLoadErrors(t *testing.T) {
 		{"top level null", `null`, nil, "version"},
 		{"empty file", ``, nil, ""},
 		{"corrupt JSON", `{not json ` + leakToken, nil, ""},
-		{"truncated JSON", `{"version":1,"servers":[{"client":"c","source":"s","project_path":"","name":"n","tools":{"t":"` + leakToken, nil, ""},
+		{"truncated JSON", `{"version":1,"servers":[{"client":"c","source":"s","project_path":"","name":"n","tools":{"t":{"hash":"` + leakToken, nil, ""},
 		{"truncated mid key", `{"version":1,"serv`, nil, ""},
 		{"unknown top-level field", `{"version":1,"servers":[],"` + leakToken + `":true}`, nil, ""},
 		{"unknown server field", `{"version":1,"servers":[{"client":"c","source":"s","project_path":"","name":"n","tools":{},"` + leakToken + `":"x"}]}`, nil, ""},
@@ -401,6 +419,12 @@ func TestLoadErrors(t *testing.T) {
 		{"second document", `{"version":1,"servers":[]}{"version":1,"servers":[]}`, nil, ""},
 		{"servers wrong type", `{"version":1,"servers":{"` + leakToken + `":1}}`, nil, ""},
 		{"tools wrong type", `{"version":1,"servers":[{"client":"c","source":"s","project_path":"","name":"n","tools":{"` + leakToken + `":5}}]}`, nil, ""},
+		{"tool is a string (old shape)", `{"version":1,"servers":[{"client":"c","source":"s","project_path":"","name":"n","tools":{"t":"` + leakToken + `"}}]}`, nil, "invalid value at byte"},
+		{"tool is an array", `{"version":1,"servers":[{"client":"c","source":"s","project_path":"","name":"n","tools":{"t":["` + leakToken + `"]}}]}`, nil, "invalid value at byte"},
+		{"tool has an unknown field", `{"version":1,"servers":[{"client":"c","source":"s","project_path":"","name":"n","tools":{"t":{"hash":"h","canonical":"c","` + leakToken + `":"x"}}}]}`, nil, "unknown field at byte"},
+		{"tool hash is a number", `{"version":1,"servers":[{"client":"c","source":"s","project_path":"","name":"n","tools":{"t":{"hash":` + `5,"canonical":"` + leakToken + `"}}}]}`, nil, "invalid value at byte"},
+		{"tool canonical is an object", `{"version":1,"servers":[{"client":"c","source":"s","project_path":"","name":"n","tools":{"t":{"hash":"h","canonical":{"` + leakToken + `":1}}}}]}`, nil, "invalid value at byte"},
+		{"duplicate hash key", `{"version":1,"servers":[{"client":"c","source":"s","project_path":"","name":"n","tools":{"t":{"hash":"h","hash":"` + leakToken + `","canonical":"c"}}}]}`, nil, "duplicate key"},
 		{"duplicate identity", `{"version":1,"servers":[` + server + `,` + server + `]}`, nil, "duplicate"},
 		{
 			"duplicate identity with token name",
@@ -409,7 +433,7 @@ func TestLoadErrors(t *testing.T) {
 		},
 		{"duplicate top-level key", `{"version":1,"servers":[],"servers":[]}`, nil, "duplicate key"},
 		{"duplicate server key", `{"version":1,"servers":[{"client":"c","source":"s","project_path":"","name":"` + leakToken + `","tools":{},"name":"m"}]}`, nil, "duplicate key"},
-		{"duplicate tool name", `{"version":1,"servers":[{"client":"c","source":"s","project_path":"","name":"n","tools":{"` + leakToken + `":"1","` + leakToken + `":"2"}}]}`, nil, "duplicate key"},
+		{"duplicate tool name", `{"version":1,"servers":[{"client":"c","source":"s","project_path":"","name":"n","tools":{"` + leakToken + `":` + storeTestPinJSON("1") + `,"` + leakToken + `":` + storeTestPinJSON("2") + `}}]}`, nil, "duplicate key"},
 		{"key in other case", `{"version":1,"servers":[{"CLIENT":"c","source":"s","project_path":"","name":"n","tools":{}}]}`, nil, "unknown field"},
 		{"version key in other case", `{"VERSION":1,"servers":[]}`, nil, "version field is missing"},
 		{"invalid UTF-8", "{\"version\":1,\"servers\":[{\"client\":\"c\",\"source\":\"s\",\"name\":\"n\xff\",\"tools\":{}}]}", nil, "invalid JSON"},
@@ -425,10 +449,12 @@ func TestLoadErrors(t *testing.T) {
 		{"tools missing", `{"version":1,"servers":[{"client":"c","source":"s","project_path":"","name":"n"}]}`, nil, "a field is missing or null"},
 		{"tools null", `{"version":1,"servers":[{"client":"c","source":"s","project_path":"","name":"n","tools":null}]}`, nil, "a field is missing or null"},
 		{"name null", `{"version":1,"servers":[{"client":"c","source":"s","project_path":"","name":null,"tools":{}}]}`, nil, "a field is missing or null"},
-		{"empty server name", `{"version":1,"servers":[{"client":"c","source":"s","project_path":"","name":"","tools":{"` + leakToken + `":"h"}}]}`, nil, "name is empty"},
-		{"missing server name", `{"version":1,"servers":[{"client":"c","source":"s","project_path":"","tools":{"` + leakToken + `":"h"}}]}`, nil, "a field is missing or null"},
-		{"empty tool name", `{"version":1,"servers":[{"client":"c","source":"s","project_path":"","name":"n","tools":{"":"` + leakToken + `"}}]}`, nil, "tool name is empty"},
-		{"empty hash", `{"version":1,"servers":[{"client":"c","source":"s","project_path":"","name":"n","tools":{"` + leakToken + `":""}}]}`, nil, "hash is empty"},
+		{"empty server name", `{"version":1,"servers":[{"client":"c","source":"s","project_path":"","name":"","tools":{"` + leakToken + `":` + storeTestPinJSON("h") + `}}]}`, nil, "name is empty"},
+		{"missing server name", `{"version":1,"servers":[{"client":"c","source":"s","project_path":"","tools":{"` + leakToken + `":` + storeTestPinJSON("h") + `}}]}`, nil, "a field is missing or null"},
+		{"empty tool name", `{"version":1,"servers":[{"client":"c","source":"s","project_path":"","name":"n","tools":{"":{"hash":"h","canonical":"` + leakToken + `"}}}]}`, nil, "tool name is empty"},
+		{"canonical invalid UTF-8", "{\"version\":1,\"servers\":[{\"client\":\"c\",\"source\":\"s\",\"project_path\":\"\",\"name\":\"n\",\"tools\":{\"t\":{\"hash\":\"h\",\"canonical\":\"" + leakToken + "\xff\"}}}]}", nil, "invalid JSON at byte"},
+		{"canonical lone surrogate", `{"version":1,"servers":[{"client":"c","source":"s","project_path":"","name":"n","tools":{"t":{"hash":"h","canonical":"` + leakToken + `\ud800"}}}]}`, nil, "invalid JSON at byte"},
+		{"hash invalid UTF-8", "{\"version\":1,\"servers\":[{\"client\":\"c\",\"source\":\"s\",\"project_path\":\"\",\"name\":\"n\",\"tools\":{\"t\":{\"hash\":\"" + leakToken + "\xff\",\"canonical\":\"c\"}}}]}", nil, "invalid JSON at byte"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -583,8 +609,8 @@ func TestGetReturnsCopy(t *testing.T) {
 	storeTestMustSet(t, s, idA, storeTestPins("t", "h", "u", "h2"))
 
 	got, _ := s.Get(idA)
-	got["t"] = "changed"
-	got["extra"] = "x"
+	got["t"] = storeTestPin("changed")
+	got["extra"] = storeTestPin("x")
 	delete(got, "u")
 
 	storeTestWantPins(t, s, idA, storeTestPins("t", "h", "u", "h2"))
@@ -596,8 +622,8 @@ func TestSetStoresCopy(t *testing.T) {
 	s := storeTestMustLoad(t, path)
 	in := storeTestPins("t", "h")
 	storeTestMustSet(t, s, idA, in)
-	in["t"] = "changed"
-	in["extra"] = "x"
+	in["t"] = storeTestPin("changed")
+	in["extra"] = storeTestPin("x")
 
 	storeTestWantPins(t, s, idA, storeTestPins("t", "h"))
 	storeTestMustSave(t, s)
@@ -690,6 +716,11 @@ func TestSetRefusesInvalid(t *testing.T) {
 		{"server name not UTF-8", pins.Identity{Client: "c", Source: "s", Name: "n\xff"}, storeTestPins("t", "h"), "server identity is not valid UTF-8"},
 		{"tool name not UTF-8", idA, storeTestPins("t\xff", "h"), "a tool name is not valid UTF-8"},
 		{"hash not UTF-8", idA, storeTestPins("t", "h\xff"), "a tool hash is not valid UTF-8"},
+		{"empty canonical", idA, pins.ServerPins{"t": {Hash: "h"}}, "canonical text is empty"},
+		{"empty hash and canonical", idA, pins.ServerPins{"t": {}}, "hash is empty"},
+		{"canonical not UTF-8", idA, pins.ServerPins{"t": {Hash: "h", Canonical: "c\xff"}}, "a tool canonical text is not valid UTF-8"},
+		{"truncated multibyte canonical", idA, pins.ServerPins{"t": {Hash: "h", Canonical: "c\xe2\x82"}}, "a tool canonical text is not valid UTF-8"},
+		{"one bad pin among good ones", idA, pins.ServerPins{"a": storeTestPin("1"), "b": {Hash: "2"}, "c": storeTestPin("3")}, "canonical text is empty"},
 		{"truncated multibyte tool name", idA, storeTestPins("t\xe2\x82", "h"), "a tool name is not valid UTF-8"},
 	}
 	for _, tt := range tests {
@@ -718,7 +749,7 @@ func TestLoadServerTooLarge(t *testing.T) {
 	t.Parallel()
 	// Load applies the cap of one server, as Set does.
 	name := strings.Repeat("a", pins.MaxServerSize)
-	content := `{"version":1,"servers":[{"client":"c","source":"s","project_path":"","name":"n","tools":{"` + name + `":"h"}}]}`
+	content := `{"version":1,"servers":[{"client":"c","source":"s","project_path":"","name":"n","tools":{"` + name + `":` + storeTestPinJSON("h") + `}}]}`
 	_, err := pins.Load(storeTestWrite(t, content))
 	if err == nil || !strings.Contains(err.Error(), "servers[0]: server pins are") {
 		t.Fatalf("Load() error = %v, want the size error for servers[0]", err)
@@ -727,37 +758,236 @@ func TestLoadServerTooLarge(t *testing.T) {
 
 func TestSetRefusalKeepsOldPins(t *testing.T) {
 	t.Parallel()
-	s := storeTestMustLoad(t, storeTestPath(t))
-	storeTestMustSet(t, s, idA, storeTestPins("t", "h"))
-	if err := s.Set(idA, storeTestPins("t", "")); err == nil {
-		t.Fatal("Set() error = nil, want error")
+	tests := []struct {
+		name string
+		p    pins.ServerPins
+	}{
+		{"empty hash", pins.ServerPins{"t": {Canonical: "c"}}},
+		{"empty canonical", pins.ServerPins{"t": {Hash: "h"}}},
+		{"canonical not UTF-8", pins.ServerPins{"t": {Hash: "h", Canonical: "\xff"}}},
+		{"empty tool name", pins.ServerPins{"": storeTestPin("h")}},
 	}
-	storeTestWantPins(t, s, idA, storeTestPins("t", "h"))
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			path := storeTestPath(t)
+			s := storeTestMustLoad(t, path)
+			storeTestMustSet(t, s, idA, storeTestPins("t", "h"))
+			storeTestMustSet(t, s, idB, storeTestPins("u", "h2"))
+			if err := s.Set(idA, tt.p); err == nil {
+				t.Fatal("Set() error = nil, want error")
+			}
+			// A refused Set of a new server adds nothing.
+			if err := s.Set(idC, tt.p); err == nil {
+				t.Fatal("Set() of a new server error = nil, want error")
+			}
+			if _, ok := s.Get(idC); ok {
+				t.Error("Get() of the refused new server ok = true, want false")
+			}
+			storeTestWantPins(t, s, idA, storeTestPins("t", "h"))
+			storeTestWantPins(t, s, idB, storeTestPins("u", "h2"))
+			storeTestMustSave(t, s)
+			got := storeTestMustLoad(t, path)
+			storeTestWantPins(t, got, idA, storeTestPins("t", "h"))
+			storeTestWantPins(t, got, idB, storeTestPins("u", "h2"))
+		})
+	}
+}
+
+func TestRoundTripPinContent(t *testing.T) {
+	t.Parallel()
+	// The canonical text is JSON, so it holds quotes and backslashes. It also
+	// holds characters that a JSON encoder may escape.
+	canonical := `{"description":"say \"hi\" <b>&</b>\n\tline\u0007","inputSchema":{"type":"object"},"name":"read \u2603 \U0001F600"}`
+	in := pins.ServerPins{
+		"read":            {Hash: "sha256-v1:aaaa", Canonical: canonical},
+		"<b>&\"q\"\n\x07": {Hash: "sha256-v1:bbbb", Canonical: "x"},
+		"unicode \u2603":  {Hash: "sha256-v1:cccc", Canonical: "\u2028\u2029\u00e9\U0001F600"},
+	}
+	path := storeTestPath(t)
+	s := storeTestMustLoad(t, path)
+	storeTestMustSet(t, s, idA, in)
+	storeTestMustSave(t, s)
+
+	storeTestWantPins(t, storeTestMustLoad(t, path), idA, in)
+	// The file shows the stored fields under their keys.
+	var doc struct {
+		Servers []struct {
+			Tools map[string]struct {
+				Hash      string `json:"hash"`
+				Canonical string `json:"canonical"`
+			} `json:"tools"`
+		} `json:"servers"`
+	}
+	if err := json.Unmarshal(pins.ReadFile(t, path), &doc); err != nil {
+		t.Fatal(err)
+	}
+	if len(doc.Servers) != 1 || doc.Servers[0].Tools["read"].Hash != "sha256-v1:aaaa" || doc.Servers[0].Tools["read"].Canonical != canonical {
+		t.Errorf("file tools = %+v, want hash and canonical of %q", doc.Servers, "read")
+	}
+}
+
+func TestLoadIncompletePin(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		tool string // the JSON value of the tool
+		want string
+	}{
+		{"hash missing", `{"canonical":"c"}`, "hash is empty or missing"},
+		{"hash null", `{"hash":null,"canonical":"c"}`, "hash is empty or missing"},
+		{"hash empty", `{"hash":"","canonical":"c"}`, "hash is empty or missing"},
+		{"canonical missing", `{"hash":"h"}`, "canonical text is empty or missing"},
+		{"canonical null", `{"hash":"h","canonical":null}`, "canonical text is empty or missing"},
+		{"canonical empty", `{"hash":"h","canonical":""}`, "canonical text is empty or missing"},
+		{"both missing", `{}`, "hash is empty or missing"},
+		{"tool null", `null`, "hash is empty or missing"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			content := `{"version":1,"servers":[{"client":"c","source":"s","project_path":"","name":"n","tools":{"` + leakToken + `":` + tt.tool + `}}]}`
+			path := storeTestWrite(t, content)
+			s, err := pins.Load(path)
+			if err == nil {
+				t.Fatal("Load() error = nil, want error")
+			}
+			if s != nil {
+				t.Errorf("Load() store = %v, want nil on error", s)
+			}
+			if !strings.Contains(err.Error(), tt.want) || !strings.Contains(err.Error(), "servers[0]") {
+				t.Errorf("Load() error = %q, want servers[0] and %q", err, tt.want)
+			}
+			if strings.Contains(err.Error(), leakToken) {
+				t.Errorf("Load() error echoes the tool name: %q", err)
+			}
+		})
+	}
+}
+
+// TestLoadOldShape checks a file in the earlier format, where a tool maps to
+// its hash string. Load must refuse it and never replace it with an empty
+// store.
+func TestLoadOldShape(t *testing.T) {
+	t.Parallel()
+	content := `{"version":1,"servers":[{"client":"c","source":"s","project_path":"","name":"n","tools":{"read":"sha256-v1:` + leakToken + `"}}]}`
+	path := storeTestWrite(t, content)
+	s, err := pins.Load(path)
+	if err == nil {
+		t.Fatal("Load() error = nil, want error for the old shape")
+	}
+	if s != nil {
+		t.Errorf("Load() store = %v, want nil", s)
+	}
+	if errors.Is(err, pins.ErrUnsupportedVersion) {
+		t.Errorf("Load() error = %v, must not wrap ErrUnsupportedVersion", err)
+	}
+	for _, leak := range []string{leakToken, "read", "sha256"} {
+		if strings.Contains(err.Error(), leak) {
+			t.Errorf("Load() error echoes file content %q: %q", leak, err)
+		}
+	}
+	if !strings.Contains(err.Error(), path) {
+		t.Errorf("Load() error = %q, want the path", err)
+	}
+	if got := string(pins.ReadFile(t, path)); got != content {
+		t.Errorf("Load changed the file to %q", got)
+	}
+}
+
+// serverSizeCases are the two ways that one server grows: a long tool name and
+// a long canonical text (the usual way). overhead is the size of the entry of
+// the server n with no growth, as compact JSON. pins(n) adds n bytes to it.
+var serverSizeCases = []struct {
+	name     string
+	overhead int
+	pins     func(n int) pins.ServerPins
+}{
+	{
+		"tool name",
+		len(`{"client":"c","source":"s","project_path":"","name":"n","tools":{"":{"hash":"h","canonical":"c"}}}`),
+		func(n int) pins.ServerPins {
+			return pins.ServerPins{strings.Repeat("a", n): {Hash: "h", Canonical: "c"}}
+		},
+	},
+	{
+		"canonical",
+		len(`{"client":"c","source":"s","project_path":"","name":"n","tools":{"t":{"hash":"h","canonical":""}}}`),
+		func(n int) pins.ServerPins {
+			return pins.ServerPins{"t": {Hash: "h", Canonical: strings.Repeat("a", n)}}
+		},
+	},
 }
 
 func TestSetSizeLimit(t *testing.T) {
 	t.Parallel()
-	// The entry of one server as compact JSON, with an empty tool name. Each
-	// byte of the tool name adds one byte.
 	id := pins.Identity{Client: "c", Source: "s", Name: "n"}
-	overhead := len(`{"client":"c","source":"s","project_path":"","name":"n","tools":{"":"h"}}`)
-	withName := func(n int) pins.ServerPins { return storeTestPins(strings.Repeat("a", n), "h") }
+	for _, tt := range serverSizeCases {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			atCap := tt.pins(pins.MaxServerSize - tt.overhead)
+			path := storeTestPath(t)
+			s := storeTestMustLoad(t, path)
+			storeTestMustSet(t, s, idA, storeTestPins("t", "h"))
+			storeTestMustSet(t, s, id, atCap)
 
-	path := storeTestPath(t)
-	s := storeTestMustLoad(t, path)
-	storeTestMustSet(t, s, idA, storeTestPins("t", "h"))
-	storeTestMustSet(t, s, id, withName(pins.MaxServerSize-overhead))
-
-	// One byte over is refused, the old pins of the server stay, and the
-	// other servers still save.
-	err := s.Set(id, withName(pins.MaxServerSize-overhead+1))
-	want := fmt.Sprintf("server pins are %d bytes as JSON, larger than the %d byte limit", pins.MaxServerSize+1, pins.MaxServerSize)
-	if err == nil || err.Error() != want {
-		t.Fatalf("Set() error = %v, want %q", err, want)
+			// One byte over is refused, the old pins of the server stay, and the
+			// other servers still save.
+			err := s.Set(id, tt.pins(pins.MaxServerSize-tt.overhead+1))
+			want := fmt.Sprintf("server pins are %d bytes as JSON, larger than the %d byte limit", pins.MaxServerSize+1, pins.MaxServerSize)
+			if err == nil || err.Error() != want {
+				t.Fatalf("Set() error = %v, want %q", err, want)
+			}
+			storeTestWantPins(t, s, id, atCap)
+			storeTestMustSave(t, s)
+			got := storeTestMustLoad(t, path)
+			storeTestWantPins(t, got, idA, storeTestPins("t", "h"))
+			storeTestWantPins(t, got, id, atCap)
+		})
 	}
-	storeTestWantPins(t, s, id, withName(pins.MaxServerSize-overhead))
-	storeTestMustSave(t, s)
-	storeTestWantPins(t, storeTestMustLoad(t, path), idA, storeTestPins("t", "h"))
+}
+
+// TestLoadServerSizeLimit checks the cap of one server in Load: exactly the
+// cap loads, one byte over does not.
+func TestLoadServerSizeLimit(t *testing.T) {
+	t.Parallel()
+	for _, tt := range serverSizeCases {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			write := func(n int) string {
+				// Compact JSON, as ValidateServer measures the entry.
+				data, err := json.Marshal(map[string]any{
+					"version": 1,
+					"servers": []any{map[string]any{
+						"client": "c", "source": "s", "project_path": "", "name": "n",
+						"tools": tt.pins(n),
+					}},
+				})
+				if err != nil {
+					t.Fatal(err)
+				}
+				return storeTestWrite(t, string(data))
+			}
+			if _, err := pins.Load(write(pins.MaxServerSize - tt.overhead)); err != nil {
+				t.Errorf("Load() at the cap error = %v, want nil", err)
+			}
+			_, err := pins.Load(write(pins.MaxServerSize - tt.overhead + 1))
+			if err == nil || !strings.Contains(err.Error(), "servers[0]: server pins are") {
+				t.Errorf("Load() one byte over error = %v, want the size error for servers[0]", err)
+			}
+		})
+	}
+}
+
+// TestLimits pins the two caps, so a change of a limit is a visible decision.
+func TestLimits(t *testing.T) {
+	t.Parallel()
+	if pins.MaxServerSize != 2<<20 {
+		t.Errorf("MaxServerSize = %d, want %d", pins.MaxServerSize, 2<<20)
+	}
+	if pins.MaxFileSize != 32<<20 {
+		t.Errorf("MaxFileSize = %d, want %d", pins.MaxFileSize, 32<<20)
+	}
 }
 
 func TestSaveSizeLimit(t *testing.T) {
@@ -891,15 +1121,20 @@ func TestFileHasNoSecrets(t *testing.T) {
 	if !ok {
 		t.Fatalf("tools = %T, want object", srv["tools"])
 	}
-	for name, h := range tools {
-		if _, isString := h.(string); !isString {
-			t.Errorf("tool %q value = %T, want string hash", name, h)
+	for name, v := range tools {
+		pin, ok := v.(map[string]any)
+		if !ok {
+			t.Errorf("tool %q value = %T, want object", name, v)
+			continue
+		}
+		if got, want := slices.Sorted(maps.Keys(pin)), []string{"canonical", "hash"}; !slices.Equal(got, want) {
+			t.Errorf("tool %q keys = %v, want %v", name, got, want)
 		}
 	}
 }
 
 func FuzzLoad(f *testing.F) {
-	const server = `{"client":"c","source":"s","project_path":"","name":"n","tools":{"t":"h"}}`
+	const server = `{"client":"c","source":"s","project_path":"","name":"n","tools":{"t":{"hash":"h","canonical":"c"}}}`
 	seeds := []string{
 		`{"version":1,"servers":[` + server + `]}`,
 		`{"version":1,"servers":[` + server + `,{"client":"c","source":"s","project_path":"/p","name":"n","tools":{}}]}`,
@@ -912,8 +1147,12 @@ func FuzzLoad(f *testing.F) {
 		`{"servers":[]}`,
 		`{"version":1,"servers":[` + server + `,` + server + `]}`,
 		`{"version":1,"servers":[{"client":"c","source":"s","project_path":"","name":"","tools":{}}]}`,
-		`{"version":1,"servers":[{"client":"c","source":"s","project_path":"","name":"n","tools":{"":"h"}}]}`,
+		`{"version":1,"servers":[{"client":"c","source":"s","project_path":"","name":"n","tools":{"":{"hash":"h","canonical":"c"}}}]}`,
 		`{"version":1,"servers":[{"client":"c","source":"s","project_path":"","name":"n","tools":{"t":""}}]}`,
+		`{"version":1,"servers":[{"client":"c","source":"s","project_path":"","name":"n","tools":{"t":{"hash":"","canonical":"c"}}}]}`,
+		`{"version":1,"servers":[{"client":"c","source":"s","project_path":"","name":"n","tools":{"t":{"hash":"h","canonical":""}}}]}`,
+		`{"version":1,"servers":[{"client":"c","source":"s","project_path":"","name":"n","tools":{"t":{"hash":"h"}}}]}`,
+		`{"version":1,"servers":[{"client":"c","source":"s","project_path":"","name":"n","tools":{"t":{"hash":null,"canonical":"c"}}}]}`,
 		`{"version":1,"servers":[],"extra":1}`,
 		`{"version":1,"servers":[]} trailing`,
 		`{"version":1,"servers":[` + server,

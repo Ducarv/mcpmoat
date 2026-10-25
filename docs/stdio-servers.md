@@ -1,8 +1,8 @@
 # How mcpmoat starts stdio servers
 
 > **Status:** this page describes how the `internal/inspect` code starts stdio servers.
-> `mcpmoat scan` does not call that code yet. See [ARCHITECTURE.md](ARCHITECTURE.md#data-flow) for
-> what is wired today.
+> `mcpmoat scan` (without `--no-connect`) and `mcpmoat pin --accept <server>` call that code. See
+> [ARCHITECTURE.md](ARCHITECTURE.md#data-flow) for what is wired today.
 
 A stdio server is a local program that your MCP client starts. To read its tools, mcpmoat starts
 the same program. This page tells you what the program gets from mcpmoat.
@@ -216,7 +216,8 @@ The server starts in a new session with no controlling terminal, in its own proc
 defence in depth, not a guarantee:
 
 - The server cannot open `/dev/tty`.
-- Ctrl-C and other signals from your terminal do not go to the server. mcpmoat stops it.
+- Ctrl-C and other signals from your terminal do not go to the server. When mcpmoat gets Ctrl-C,
+  `SIGTERM` or `SIGHUP`, it stops the server and exits with code 2. It saves no pins.
 - The server cannot push fake input into your terminal with `TIOCSTI`.
 
 But you own your terminal device (`/dev/pts/N` on Linux, `/dev/ttysNNN` on macOS). The server runs
@@ -266,8 +267,8 @@ untrusted and disabled, unapproved or project-approved needs both opt-ins.
 mcpmoat checks the state first, then whether the server is untrusted. When both checks refuse a
 server, the error tells about the state.
 
-No command-line flag exists for these opt-ins yet. They come when `mcpmoat scan` connects to
-servers.
+No command-line flag exists for these opt-ins yet. So `mcpmoat scan` and `mcpmoat pin --accept` do
+not start such a server. They print a warning (scan) or an error with exit code 2 (pin) instead.
 
 ## Platforms
 

@@ -13,8 +13,9 @@ import (
 // Without -ldflags the defaults stay, and resolveBuildInfo tries the data that
 // the Go toolchain embeds in the binary.
 //
-// run() in cli.go is the only place that reads these variables. Everything
-// else gets a buildInfo value, so tests never have to change a package variable.
+// runWithContext in cli.go is the only place that reads these variables.
+// Everything else gets a buildInfo value, so tests never have to change a
+// package variable.
 //
 // The defaults come from the constants below. -X still works, because the
 // initial value is a constant expression.

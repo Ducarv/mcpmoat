@@ -1,19 +1,12 @@
 package main
 
 import (
-	"fmt"
 	"strings"
 )
 
 // This file holds the command handlers. Each one has the signature of
 // command.run: it gets the resolved global options and its own arguments, and
 // returns the exit code.
-
-// runPin is a stub for "mcpmoat pin". M5 (pins) replaces it.
-func (c *cli) runPin(_ options, _ []string) int {
-	fprintf(c.stderr, "mcpmoat pin: not implemented\n")
-	return exitError
-}
 
 // runVersion implements "mcpmoat version".
 func (c *cli) runVersion(_ options, args []string) int {
@@ -53,7 +46,7 @@ func (c *cli) rejectArgs(name string, args []string) bool {
 // must escape untrusted text in a before the call (see quoteArg and
 // termsafe.Quote).
 func (c *cli) usageError(name, format string, a ...any) int {
-	fprintf(c.stderr, "mcpmoat %s: %s\n", name, fmt.Sprintf(format, a...))
+	c.cmdPrintf(name, format, a...)
 	fprintf(c.stderr, "Run \"mcpmoat help\" for usage.\n")
 	return exitError
 }

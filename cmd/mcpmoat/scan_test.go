@@ -157,10 +157,12 @@ func TestScanFlags(t *testing.T) {
 			wantStderr: []string{"file not found"},
 		},
 		{
+			// scan connects to the servers in this mode, but a config file
+			// that does not exist stops it before any inspection.
 			name:       "config without --no-connect",
 			args:       []string{"scan", "--config", "x"},
 			wantCode:   exitError,
-			wantStderr: []string{"not implemented", "use --no-connect"},
+			wantStderr: []string{"x", "file not found"},
 		},
 	}
 

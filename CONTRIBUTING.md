@@ -367,6 +367,10 @@ go test -race -shuffle=on ./...
 govulncheck ./...
 ```
 
+On Linux, `TMPDIR` is usually `/tmp`, which other users can write to. Some E2E tests then skip,
+because mcpmoat refuses to make its run directory below such a directory. To run them, set `TMPDIR`
+to a private directory, for example `TMPDIR=$(mktemp -d ~/.cache/mcpmoat-test.XXXXXX)`. CI does this.
+
 Agent-oriented variants (scoped tests, E2E scenario, golden files, fuzz) are in the Commands table of
 [.agents/project.md](.agents/project.md#commands).
 

@@ -472,10 +472,9 @@
 //     bool. For these two hints, an absent hint and false look the same, so
 //     ToolAnnotations has nil for both. False is the spec default, so a flip
 //     to true is always visible.
-//   - The CLI does not show warnings (Result.Warnings and
-//     ConnectError.Warnings) yet, and no CLI flag sets AllowUntrusted or
-//     AllowDisabled yet, because mcpmoat scan does not connect to servers
-//     yet.
+//   - No CLI flag sets AllowUntrusted or AllowDisabled yet. scan and pin
+//     print the warnings (Result.Warnings and ConnectError.Warnings) on
+//     stderr, one line each.
 //   - The tool schemas are decoded and encoded again (see Tool.InputSchema).
 //   - A server can still tell mcpmoat apart from a real client by the
 //     version, the capabilities, the timing and the User-Agent (see Client
