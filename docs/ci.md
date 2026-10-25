@@ -4,8 +4,9 @@ Run `mcpmoat scan --no-connect` on the MCP config of a repository, so that a dan
 `.mcp.json` fails a pull request or a commit. With `--no-connect`, mcpmoat checks the config only.
 It starts no server, opens no connection and reads no `pins.json`, so the job needs no saved state.
 
-The examples scan a Claude Code project config, `.mcp.json`, in the root of the repository. For
-another file, change the `--config` value.
+The examples scan a Claude Code project config, `.mcp.json`, in the root of the repository. The
+GitHub Actions workflow also scans a Cursor project config, `.cursor/mcp.json`. For another file,
+change the `--config` value.
 
 ## GitHub Actions
 
@@ -18,13 +19,14 @@ on:
   pull_request:
     paths:
       - '.mcp.json'
+      - '.cursor/mcp.json'
       - '.mcpmoat-ignore'
 
 permissions:
   contents: read
 
 jobs:
-  scan:
+  mcpmoat-scan:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -36,10 +38,11 @@ jobs:
           cache: false
 
       - name: Install mcpmoat
-        # There is no tagged release yet. This pins one commit of main, and
-        # the Go checksum database checks it. For newer rules and --fail-on,
-        # use a newer pseudo-version of main:
-        # go list -m github.com/Ducarv/mcpmoat@<commit> prints one.
+        # There is no tagged release yet, so this pins one commit of main,
+        # and the Go checksum database checks it. This commit has no
+        # --fail-on. For --fail-on and newer rules, pin a newer commit:
+        # go list -m github.com/Ducarv/mcpmoat@<commit> prints its
+        # pseudo-version. Issue #171 moves this to a release tag.
         run: go install github.com/Ducarv/mcpmoat/cmd/mcpmoat@v0.0.0-20261025220440-f51b6705da29
 
       # The install runs before the checkout, so it never runs in the tree of
@@ -53,32 +56,34 @@ jobs:
         # A pull request that deletes .mcp.json has nothing to scan.
         if: hashFiles('.mcp.json') != ''
         run: mcpmoat scan --no-connect --config .mcp.json
+
+      - name: Scan .cursor/mcp.json
+        # Keep this step also when your repository has no .cursor/mcp.json:
+        # a pull request can add one, and Cursor loads it. !cancelled() runs
+        # it also when the step above failed, so you see both reports.
+        if: ${{ !cancelled() && hashFiles('.cursor/mcp.json') != '' }}
+        run: mcpmoat scan --no-connect --config .cursor/mcp.json
 ```
 
 `setup-go` adds `$(go env GOPATH)/bin` to `PATH`, so the `mcpmoat` command works in the next step.
-The `paths` filter runs the job only when a pull request changes `.mcp.json` or `.mcpmoat-ignore`.
-If you make the job a required check, remove the filter: GitHub keeps a required check that did
-not run in the pending state.
-
-mcpmoat also reads a Cursor project config, `.cursor/mcp.json`. If your repository has one, add
-`'.cursor/mcp.json'` to `paths` and add a second scan step:
-
-```yaml
-      - name: Scan .cursor/mcp.json
-        if: hashFiles('.cursor/mcp.json') != ''
-        run: mcpmoat scan --no-connect --config .cursor/mcp.json
-```
+The `paths` filter runs the job only when a pull request changes `.mcp.json`, `.cursor/mcp.json`
+or `.mcpmoat-ignore`. If you make the job a required check, remove the filter: GitHub keeps a
+required check that did not run in the pending state.
 
 `--config` reads a file in a folder named `.cursor` as a Cursor config, and the repository root
 is its project.
 
 ## A plain git hook
 
-Run this in the root of your repository. It saves the hook and makes it executable:
+Run this in the root of your repository. It saves the hook and makes it executable. If a
+pre-commit hook already exists, it changes nothing and prints a message:
 
 ```sh
 hook=$(git rev-parse --git-path hooks)/pre-commit
-cat > "$hook" <<'EOF'
+if [ -e "$hook" ]; then
+  echo "$hook exists; add the mcpmoat line to it" >&2
+else
+  cat > "$hook" <<'EOF'
 #!/bin/sh
 # Scan the MCP config with mcpmoat before each commit.
 if [ ! -f .mcp.json ]; then
@@ -86,22 +91,30 @@ if [ ! -f .mcp.json ]; then
 fi
 exec mcpmoat scan --no-connect --config .mcp.json
 EOF
-chmod +x "$hook"
+  chmod +x "$hook"
+fi
+```
+
+If you already have a pre-commit hook, add this line to it, after the first line (`#!/bin/sh`):
+
+```sh
+if [ -f .mcp.json ]; then mcpmoat scan --no-connect --config .mcp.json || exit $?; fi
 ```
 
 `git rev-parse --git-path hooks` finds the hooks folder also in a linked worktree or a submodule.
-When `core.hooksPath` is set, it gives that folder: the folder must exist, and the block replaces
-any pre-commit hook in it.
+When `core.hooksPath` is set, it gives that folder, and the folder must exist.
 
 The hook needs `mcpmoat` on `PATH`. It exits with code 0 when there is no `.mcp.json`. Else it
 exits with the exit code of mcpmoat, so a code that is not 0 stops the commit. To change the
-threshold, add `--fail-on` to the last line of the hook:
+threshold, add `--fail-on` to the last line of the hook. For example, `--fail-on medium` also
+stops a commit for a medium finding:
 
 ```sh
-exec mcpmoat scan --no-connect --config .mcp.json --fail-on critical
+exec mcpmoat scan --no-connect --config .mcp.json --fail-on medium
 ```
 
-[Exit codes](../README.md#exit-codes) in the README tells which findings each value fails on.
+Do not use `--fail-on critical`: no built-in rule is critical yet, so it passes every built-in
+finding (see [Exit codes](../README.md#exit-codes)).
 
 `git commit --no-verify` skips the hook. So the hook helps you, but it does not replace the CI job.
 
@@ -128,7 +141,7 @@ test the hook now, run `pre-commit run --all-files`.
 
 `language: system` runs the `mcpmoat` command from your `PATH`, so install mcpmoat first. The hook
 runs only when the commit changes `.mcp.json` or `.mcpmoat-ignore`. To change the threshold, add
-`--fail-on` after `.mcp.json`, inside the quotes of `entry`. pre-commit shows the output of a hook
+`--fail-on` after `.mcp.json`, inside the quotes of `entry`, for example `--fail-on medium`. pre-commit shows the output of a hook
 only when the hook fails. To see the findings each time, add `verbose: true` to the hook. A remote
 hook (`repo: https://github.com/Ducarv/mcpmoat`) comes after the first tagged release.
 
@@ -152,23 +165,29 @@ known.
 
   ```text
   # .github/CODEOWNERS
-  /.mcp.json                     @example-org/security
-  /.cursor/mcp.json              @example-org/security
-  /.mcpmoat-ignore               @example-org/security
-  /.github/workflows/mcpmoat.yml @example-org/security
+  /.mcp.json           @example-org/security
+  /.cursor/mcp.json    @example-org/security
+  /.mcpmoat-ignore     @example-org/security
+  /.github/CODEOWNERS  @example-org/security
+  /.github/workflows/  @example-org/security
   ```
+
+  The entry covers the whole `.github/workflows/` folder, because a pull request can also add a
+  new workflow with a job of the same name that always passes. When you add the required check `mcpmoat-scan`, choose GitHub Actions as its
+  source, so that another app cannot report a check with the same name.
 
 - When `.mcpmoat-ignore` gives entries, `scan` prints `mcpmoat scan: using N entries from
   .mcpmoat-ignore` (or `using 1 entry`) on stderr. Look for this line in the job log.
 - The plain git hook scans the file in the working tree, not the staged version. If you stage only
   a part of your changes, the hook can check other text than the commit holds. The pre-commit
   framework hides the changes that are not staged while the hooks run, so it checks the staged
-  version.
+  version. Untracked files still apply, such as a local `.mcpmoat-ignore` that you did not stage.
 
 ## Try it
 
-The fixture in [testdata/ci/](../testdata/ci/README.md) is a small example repository. From the root
-of the mcpmoat repository, copy it to a temporary folder and scan it:
+The fixture in [testdata/ci/](../testdata/ci/README.md) is a small example repository. Scan it
+only with `--no-connect`. Never open its folder in an MCP client, and never approve its servers.
+From the root of the mcpmoat repository, copy it to a temporary folder and scan it:
 
 ```sh
 dir=$(mktemp -d)
