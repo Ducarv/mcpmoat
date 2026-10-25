@@ -18,8 +18,10 @@ These methods will work from the first release:
 - Go: `go install github.com/Ducarv/mcpmoat/cmd/mcpmoat@latest`
 - GitHub Releases: download the archive for your system from the
   [releases page](https://github.com/Ducarv/mcpmoat/releases). The archives are
-  `mcpmoat_<version>_<os>_<arch>.tar.gz` for `darwin` or `linux` and `amd64` or `arm64`. Each one
-  holds a static `mcpmoat` binary. Extract it and put it on your `PATH`.
+  `mcpmoat_<version>_<os>_<arch>.tar.gz` for `darwin` or `linux` and `amd64` or `arm64`.
+  `<version>` is the release number without the `v`, for example `0.1.0`. Each archive holds one
+  `mcpmoat` binary. The Linux binary is static. On macOS, Go binaries always link libSystem. Extract
+  the binary and put it on your `PATH`.
 
 Run `mcpmoat version` to check the install. A release binary prints
 `mcpmoat v<version> (commit <c>, built <d>)`. The `go install` build above prints `commit none, built
@@ -47,6 +49,11 @@ gh attestation verify mcpmoat_<version>_<os>_<arch>.tar.gz -R Ducarv/mcpmoat \
 
 The check proves which repo, workflow and tag built the archive. It does not prove that the code
 was reviewed.
+
+Homebrew does not check the attestation. `brew install` checks only the sha256 values in the cask
+from the tap. To check the cask, run the command above on `checksums.txt`, with the same flags.
+Then compare its lines with the sha256 values in `Casks/mcpmoat.rb` of the
+[tap](https://github.com/Ducarv/homebrew-tap).
 
 The macOS binaries are not notarized yet. The Homebrew cask removes the quarantine flag on install,
 so Gatekeeper does not check the binary. Verify the archive if that matters to you.

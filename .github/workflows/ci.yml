@@ -136,10 +136,20 @@ jobs:
         run: |
           set -euo pipefail
 
-          want=4 # 2 goos x 2 goarch in .goreleaser.yaml
+          # The goos x goarch list in .goreleaser.yaml: one archive each, no others.
+          targets=(darwin_amd64 darwin_arm64 linux_amd64 linux_arm64)
+          for t in "${targets[@]}"; do
+            n=$(find dist -maxdepth 1 -name "mcpmoat_*_$t.tar.gz" | wc -l)
+            if [ "$n" -ne 1 ]; then
+              echo "expected 1 archive for $t in dist/, found $n:"
+              ls -l dist
+              exit 1
+            fi
+          done
+          want=${#targets[@]}
           count=$(find dist -maxdepth 1 -name '*.tar.gz' | wc -l)
           if [ "$count" -ne "$want" ]; then
-            echo "expected $want archives in dist/, found $count:"
+            echo "expected only the archives for ${targets[*]} in dist/, found $count:"
             ls -l dist
             exit 1
           fi
@@ -165,12 +175,13 @@ jobs:
               ;;
           esac
 
+          want_v="mcpmoat v$(jq -r .version dist/metadata.json) "
           out=$("$bin" version)
           echo "$out"
           case "$out" in
-            "mcpmoat v"*) ;;
+            "$want_v"*) ;;
             *)
-              echo "version output does not start with 'mcpmoat v'"
+              echo "version output does not start with '$want_v'"
               exit 1
               ;;
           esac

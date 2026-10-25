@@ -13,6 +13,8 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  # An intended subset of ci.yml. main already passed ci.yml; this job
+  # checks the tagged commit again before the release.
   test:
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -40,6 +42,9 @@ jobs:
           TMPDIR: ${{ runner.temp }}
         run: go test -race -shuffle=on ./...
 
+      - name: Check for known vulnerabilities
+        run: go run golang.org/x/vuln/cmd/govulncheck@v1.9.0 ./...
+
   release:
     needs: test
     runs-on: ubuntu-latest
@@ -49,6 +54,10 @@ jobs:
       contents: write # create the GitHub release and upload the archives
       id-token: write # get the OIDC token that signs the attestation
       attestations: write # store the attestation
+    env:
+      # Dependabot does not bump this version string. Keep it equal to
+      # ci.yml (release-check) and CONTRIBUTING.md.
+      GORELEASER_VERSION: v2.19.0
     steps:
       - name: Check out the code
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -58,9 +67,12 @@ jobs:
           persist-credentials: false
 
       # A guard against mistakes, such as a tag on a feature branch. The tag
-      # ruleset and the required reviewer on the release environment are the
-      # real control. fetch-depth: 0 also fetches origin/main.
+      # ruleset and the required reviewer on the release environment add to
+      # it. With one maintainer, the approval is a self-approval: it stops an
+      # accidental tag, not a stolen maintainer account. fetch-depth: 0 also
+      # fetches origin/main.
       - name: Check that the tagged commit is on main
+        shell: bash
         run: |
           if ! git merge-base --is-ancestor "$GITHUB_SHA" origin/main; then
             echo "$GITHUB_SHA is not on main. Tag a commit on main."
@@ -83,9 +95,7 @@ jobs:
         uses: goreleaser/goreleaser-action@a4f02ab5355a589de60d917a659ce617ed19b3de # v7.3.0
         with:
           distribution: goreleaser
-          # Dependabot does not bump this version string. Update it by hand and
-          # keep it equal to ci.yml (release-check) and CONTRIBUTING.md.
-          version: v2.19.0
+          version: ${{ env.GORELEASER_VERSION }}
           args: release --clean
         # The tap token lives on this step only.
         env:
@@ -107,8 +117,17 @@ jobs:
       - name: Verify the uploaded files
         env:
           GH_TOKEN: ${{ github.token }}
+        shell: bash
         run: |
           set -euo pipefail
+          # The draft must hold exactly the files in dist/, no more and no less.
+          want=$(cd dist && find . -maxdepth 1 -type f \( -name '*.tar.gz' -o -name checksums.txt \) | sed 's|^\./||' | sort)
+          got=$(gh release view "$GITHUB_REF_NAME" -R "$GITHUB_REPOSITORY" --json assets -q '.assets[].name' | sort)
+          if [ "$got" != "$want" ]; then
+            echo "The draft assets do not match dist/:"
+            diff <(echo "$want") <(echo "$got") || true
+            exit 1
+          fi
           gh release download "$GITHUB_REF_NAME" -R "$GITHUB_REPOSITORY" \
             --pattern '*.tar.gz' --pattern checksums.txt -D published
           for f in dist/*.tar.gz dist/checksums.txt; do
@@ -118,6 +137,7 @@ jobs:
             gh attestation verify "$f" -R "$GITHUB_REPOSITORY" \
               --signer-workflow "$GITHUB_REPOSITORY/.github/workflows/release.yml" \
               --source-ref "$GITHUB_REF" \
+              --source-digest "$GITHUB_SHA" \
               --deny-self-hosted-runners
           done
 

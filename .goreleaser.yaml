@@ -31,13 +31,19 @@ builds:
 archives:
   - ids:
       - mcpmoat
-    # README.md and CONTRIBUTING.md name the archives with this pattern.
+    # README.md names the archives with this pattern.
     name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
     formats:
       - tar.gz
+    # Use the commit date, not the checkout time, so the archive digests do
+    # not change from run to run. mod_timestamp does the same for the binary.
     files:
-      - LICENSE
-      - README.md
+      - src: LICENSE
+        info:
+          mtime: "{{ .CommitDate }}"
+      - src: README.md
+        info:
+          mtime: "{{ .CommitDate }}"
 
 checksum:
   name_template: checksums.txt
