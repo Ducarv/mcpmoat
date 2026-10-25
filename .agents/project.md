@@ -65,6 +65,7 @@ A row that links to another file means: run the commands at the link target.
 | Root-cause diagnosis | `debugger` |
 | Final compile and vet check | `typecheck` |
 | Security-flagged tasks after the dev agent | `review-security` |
+| Release and CI config: `.goreleaser.yaml`, `.github/workflows/`, `.github/scripts/` | `general-purpose` (no dedicated agent), then `review-security` |
 | Docs: `*.md`, `docs/`, `.github/` templates, `.claude/` agent and skill text | `general-purpose` (no dedicated docs agent; follow the owner docs in [docs/README.md](../docs/README.md)). |
 
 ## Git and pull requests

@@ -354,8 +354,9 @@ You can also use `brew install golangci-lint`, or follow the
 
 You need [GoReleaser](https://goreleaser.com/) v2.19.0 only when you change `.goreleaser.yaml`. CI and
 the release workflow pin the same version. To bump it, change `GORELEASER_VERSION` in `ci.yml` and
-`release.yml` and every `v2.19.0` in this file. `go run github.com/goreleaser/goreleaser/v2@v2.19.0 <cmd>`
-needs no install. You can also use `brew install goreleaser`.
+`release.yml` and every `v2.19.0` in this file. The `release-check` CI job fails if they differ.
+`go run github.com/goreleaser/goreleaser/v2@v2.19.0 <cmd>` needs no install. You can also use
+`brew install goreleaser`.
 
 ### Checks
 
@@ -377,11 +378,13 @@ because mcpmoat refuses to make its run directory below such a directory. To run
 to a private directory, for example `TMPDIR=$(mktemp -d ~/.cache/mcpmoat-test.XXXXXX)`. CI does this.
 
 If you change `.goreleaser.yaml`, also run these checks. A snapshot build needs no token and
-publishes nothing. It writes the archives to `dist/`.
+publishes nothing. It writes the archives to `dist/`. The last script needs `jq`, and it runs on
+Linux and macOS.
 
 ```sh
 go run github.com/goreleaser/goreleaser/v2@v2.19.0 check                       # config is valid
 go run github.com/goreleaser/goreleaser/v2@v2.19.0 release --snapshot --clean  # build all archives
+.github/scripts/check-snapshot.sh                                              # check the archives
 ```
 
 Agent-oriented variants (scoped tests, E2E scenario, golden files, fuzz) are in the Commands table of
@@ -391,8 +394,8 @@ Agent-oriented variants (scoped tests, E2E scenario, golden files, fuzz) are in 
 
 CI (`.github/workflows/ci.yml`) runs on every pull request. On Linux and macOS it runs build, vet, race
 tests, golangci-lint and the version smoke test. On Linux only it also runs the gofmt check, the
-`go mod tidy` check and govulncheck. The `release-check` job runs `goreleaser check`, a snapshot
-build and checks on the snapshot artifacts.
+`go mod tidy` check and govulncheck. The `release-check` job checks that the GoReleaser version pins
+match, then runs `goreleaser check`, a snapshot build and `.github/scripts/check-snapshot.sh`.
 
 ### Build the binary
 
@@ -438,6 +441,10 @@ GoReleaser config is `.goreleaser.yaml`.
 
 ### One-time setup
 
+Do all of these steps before you push the first release tag. If the `release` environment does not
+exist, GitHub creates it on the first run, with no reviewer and no tag limit. The release job then
+stops before GoReleaser runs, because the environment has no tap secret.
+
 1. Create the public repo `Ducarv/homebrew-tap`. GoReleaser writes the cask to its `Casks/` folder.
    Protect its default branch so that only the maintainer, who owns the token below, can push.
 2. Create a fine-grained personal access token. Give it access to only `Ducarv/homebrew-tap`, with
@@ -448,8 +455,8 @@ GoReleaser config is `.goreleaser.yaml`.
    not make it a repository secret: only jobs in the `release` environment can read an environment
    secret.
 4. Add a tag ruleset for `v[0-9]*` that restricts creations, updates and deletes. Let only the
-   maintainer bypass it. Then nobody else can push a release tag, and nobody can move or remove
-   one.
+   maintainer bypass it. Then only the maintainer can push, move or delete a release tag. After a
+   release is published, Immutable releases (step 5) lock its tag for everyone.
 5. In the settings of `Ducarv/mcpmoat`, turn on "Immutable releases". The workflow publishes a
    draft, so the assets lock when the release is published, after the attestations verify.
 6. Protect the maintainer account: use 2FA or passkeys, keep no classic PATs with `repo` scope and
@@ -466,11 +473,12 @@ git push origin v0.1.0
 
 The tag starts the release workflow. The `test` job runs vet, the race tests and govulncheck. Then
 the `release` job waits for the maintainer to approve it in the `release` environment. It fails if
-the tagged commit is not on `main`. It builds the archives with GoReleaser, creates a draft GitHub
-release and pushes the cask to the tap. Only the GoReleaser step gets the tap token. Then it attests
-the build provenance of `dist/*.tar.gz` and `dist/checksums.txt`. It checks that the draft release
-holds exactly those files, downloads them, checks that they match `dist/` and verifies each
-attestation with `gh attestation verify`. Last, it publishes the release.
+the tagged commit is not on `main`, or if the environment has no tap secret. It builds the archives
+with GoReleaser, creates a draft GitHub release and pushes the cask to the tap. Only the GoReleaser
+step gets the tap token. Then it attests the build provenance of `dist/*.tar.gz` and
+`dist/checksums.txt`. It checks that the draft release holds exactly those files, downloads them,
+checks that they match `dist/` and verifies each attestation with `gh attestation verify`. Then it
+publishes the release, and checks the published files against `dist/` once more.
 
 Try a prerelease tag first, for example `v0.1.0-rc.1`. GoReleaser marks it as a prerelease and does
 not update the tap.
@@ -478,19 +486,24 @@ not update the tap.
 ### Verify a release
 
 Verify an archive and the tap cask with the steps in
-[README.md](README.md#verify-a-download). Then check the install:
+[README.md](README.md#verify-a-download). Then check the install. For a stable tag, install from the
+tap:
 
 ```sh
 brew install --cask Ducarv/tap/mcpmoat
 mcpmoat version
 ```
 
+A prerelease tag does not update the tap. For an rc, extract the binary from the archive and run
+`./mcpmoat version`.
+
 Known limit: GoReleaser pushes the cask before the attest step runs. If a later step fails, the
 release stays a draft, so it is not public. But the cask is already in the tap, and its URLs return
 404 until the release is published. What to do depends on the cause:
 
-- An external or transient cause, such as the tap token, a missing approval or the network: fix it
-  and re-run the workflow. The re-run replaces the draft. Or check the draft and publish it by hand.
+- An external or transient cause, such as the tap token or the network: fix it and re-run the
+  workflow. The re-run replaces the draft. Do not publish the draft by hand: only the workflow
+  verifies the attestations before it publishes, and a published release cannot change.
 - A cause in the code or config of the tagged commit: a re-run builds the same commit and fails
   again. Delete the draft, revert the tap commit, fix the cause on `main` and cut a new patch or rc
   tag.

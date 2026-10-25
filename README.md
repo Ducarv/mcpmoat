@@ -20,12 +20,12 @@ These methods will work from the first release:
   [releases page](https://github.com/Ducarv/mcpmoat/releases). The archives are
   `mcpmoat_<version>_<os>_<arch>.tar.gz` for `darwin` or `linux` and `amd64` or `arm64`.
   `<version>` is the release number without the `v`, for example `0.1.0`. Each archive holds one
-  `mcpmoat` binary. The Linux binary is static. On macOS, Go binaries always link libSystem. Extract
-  the binary and put it on your `PATH`.
+  `mcpmoat` binary. The Linux binary is static. The macOS binary links only the macOS system
+  library (libSystem), like every Go binary on macOS. Extract the binary and put it on your `PATH`.
 
 Run `mcpmoat version` to check the install. A release binary prints
 `mcpmoat v<version> (commit <c>, built <d>)`. The `go install` build above prints `commit none, built
-unknown`, because only release binaries carry the commit and date.
+unknown`, because `go install` builds from the Go module cache, which has no git data.
 
 ### Verify a download
 
