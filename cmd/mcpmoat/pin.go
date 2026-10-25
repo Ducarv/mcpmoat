@@ -226,7 +226,7 @@ func (c *cli) acceptTools(ctx context.Context, server discover.Server, tools []i
 // save step.
 func (c *cli) checkExpect(name string, snap pins.ServerPins, expect string) bool {
 	if expect == "" {
-		fprintf(c.stderr, "%s\n", pinNoExpectNote)
+		c.cmdPrintf("pin", "%s", pinNoExpectNote)
 		return true
 	}
 	if got := pins.Digest(snap); got != expect {
@@ -240,7 +240,7 @@ func (c *cli) checkExpect(name string, snap pins.ServerPins, expect string) bool
 
 // pinNoExpectNote is the line that pin prints on stderr, before it saves, when
 // --expect is not given. It is fixed text.
-const pinNoExpectNote = "mcpmoat pin: note: without --expect, pin trusts the tools the server returns now; " +
+const pinNoExpectNote = "note: without --expect, pin trusts the tools the server returns now; " +
 	"use the digest from scan to be sure they match what you reviewed."
 
 // pinUsage writes the flags of the pin command to w. usage includes it, and
@@ -257,7 +257,8 @@ func pinUsage(w io.Writer) {
 	fprintf(tw, "  \t\"To accept <server>: mcpmoat pin --accept <server> --expect <digest>\". If the tools differ, pin prints\n")
 	fprintf(tw, "  \tthe diff, saves nothing and exits 2. Without it, pin trusts the tools the server returns now (a note on stderr)\n")
 	fprintf(tw, "  --config <file>\tRead only this file, like \"scan --config\"; skips auto-discovery\n")
-	fprintf(tw, "  --project <path>\tAccept the server of this project only (the project path of ~/.claude.json, or the folder of a project file)\n")
+	fprintf(tw, "  --project <path>\tAccept the server of this project only (the project path of ~/.claude.json, or the folder of a project file;\n")
+	fprintf(tw, "  \ta relative path is read from the working directory)\n")
 	fprintf(tw, "  \tWithout it, when one name is in several places, pin takes the one outside any project, if there is exactly one\n")
 	fprintf(tw, "  --timeout <duration>\tTime limit for the server, a Go duration such as 10s or 1m30s (default %s)\n", inspect.DefaultTimeout)
 	_ = tw.Flush() // the write error is ignored on purpose, see fprintf
@@ -295,7 +296,12 @@ func (c *cli) findPinServer(ctx context.Context, accept, configPath, project str
 	}
 
 	if project != "" {
-		// discover cleans the project paths, so "/p/a/" means "/p/a".
+		// discover stores clean, absolute project paths, so "/p/a/" means
+		// "/p/a", and a relative path is joined with the working directory,
+		// like --config.
+		if wd, err := c.getwd(); err == nil && !filepath.IsAbs(project) {
+			project = filepath.Join(wd, project)
+		}
 		project = filepath.Clean(project)
 	}
 	matches := selectServers(res.Servers, accept, project)

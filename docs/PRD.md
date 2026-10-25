@@ -478,8 +478,9 @@ text diff.
   `MOAT-T2-001` changed tool (`high`), `MOAT-T2-002` new tool (`medium`, or `high` next to a
   removed tool), `MOAT-T2-003` removed tool (`low`) and `MOAT-T2-004` tool not verified (`high` when
   the tool name is pinned, else `medium`).
-- A new tool is `high` when the same server also lost a tool in that scan. A server can rename a
-  pinned tool (drop `read_file`, add `read_fi1e` with new text) to avoid the `MOAT-T2-001` check.
+- A new tool, or a not verified tool with a new name, is `high` when the same server also lost a
+  tool in that scan. A server can rename a pinned tool (drop `read_file`, add `read_fi1e` with new
+  text, or with data that cannot be verified) to avoid the `MOAT-T2-001` check.
   An honest rename then needs one `pin --accept`. A new tool alone stays `medium` (owner decision,
   polish round 3).
 - A tool that is pinned but cannot be verified (a duplicate name, invalid tool data, another hash

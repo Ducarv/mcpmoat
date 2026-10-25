@@ -82,3 +82,23 @@ func hasFailingFinding(rows []report.FindingRow) bool {
 	}
 	return false
 }
+
+// addIgnored adds n to the count of the rule ID in dst and returns dst. It makes
+// a new map when dst is nil, so the callers keep the map nil until a finding is
+// dropped.
+func addIgnored(dst map[string]int, ruleID string, n int) map[string]int {
+	if dst == nil {
+		dst = make(map[string]int)
+	}
+	dst[ruleID] += n
+	return dst
+}
+
+// mergeIgnored adds the counts of extra to dst and returns dst. It makes a new
+// map when dst is nil and extra is not.
+func mergeIgnored(dst, extra map[string]int) map[string]int {
+	for id, n := range extra {
+		dst = addIgnored(dst, id, n)
+	}
+	return dst
+}

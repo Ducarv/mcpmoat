@@ -13,7 +13,6 @@ import (
 
 	"github.com/Ducarv/mcpmoat/internal/discover"
 	"github.com/Ducarv/mcpmoat/internal/inspect"
-	"github.com/Ducarv/mcpmoat/internal/pins"
 	"github.com/Ducarv/mcpmoat/internal/report"
 	"github.com/Ducarv/mcpmoat/internal/rules"
 	"github.com/Ducarv/mcpmoat/internal/termsafe"
@@ -239,11 +238,8 @@ func (c *cli) loadIgnore(wd string, ids []string) *scanIgnores {
 		for _, w := range warnings {
 			c.scanWarnf("%s", w)
 		}
-		switch n := fromFile.Len(); {
-		case n == 1:
-			fprintf(c.stderr, "mcpmoat scan: using 1 entry from %s\n", rules.IgnoreFileName)
-		case n > 1:
-			fprintf(c.stderr, "mcpmoat scan: using %d entries from %s\n", n, rules.IgnoreFileName)
+		if n := fromFile.Len(); n > 0 {
+			c.cmdPrintf("scan", "using %d %s from %s", n, plural(n, "entry", "entries"), rules.IgnoreFileName)
 		}
 		ign.all = fromFile
 	}
@@ -287,7 +283,6 @@ func (c *cli) reportScan(ctx context.Context, res discover.Result, configPath st
 		if errors.Is(err, errInterrupted) {
 			// Nothing is saved and no report is printed: the user stopped
 			// the scan, so the result would be partial.
-			c.cmdPrintf("scan", "%s", interruptedText)
 			return exitError
 		}
 		// Any other error is already on stderr. The report of the config
@@ -377,7 +372,7 @@ func (c *cli) savePinned(ctx context.Context, pr pinReport) bool {
 		if other, found := store.Get(ps.id); found {
 			// Another run pinned the server meanwhile. Its pins stay, but
 			// this scan did not compare them with the tools that it saw.
-			if pins.Digest(other) != pins.Digest(ps.snap) {
+			if !maps.Equal(other, ps.snap) {
 				c.scanWarnf("server %s was pinned by another run with other tools during this scan; run scan again", cutName(ps.name))
 			}
 			continue
@@ -413,7 +408,7 @@ func (c *cli) savePinned(ctx context.Context, pr pinReport) bool {
 // The message is already written on stderr.
 //
 // The error is errInterrupted when ctx ended during the inspection (the process
-// got a signal). It writes nothing then: the caller prints interruptedText.
+// got a signal). It has written interruptedText then (see interrupted).
 // Nothing is saved: inspectAndPin never saves.
 func (c *cli) inspectAndPin(ctx context.Context, servers []discover.Server, opts inspect.Options, ignore *scanIgnores) (pinReport, error) {
 	store, ok := c.readPins("scan")
@@ -422,7 +417,7 @@ func (c *cli) inspectAndPin(ctx context.Context, servers []discover.Server, opts
 	}
 
 	outcomes, err := inspect.Run(ctx, servers, opts, c.inspector)
-	if ctx.Err() != nil {
+	if c.interrupted(ctx, "scan") {
 		return pinReport{}, errInterrupted
 	}
 	if err != nil {

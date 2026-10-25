@@ -44,9 +44,7 @@ func TestScanNewToolDiff(t *testing.T) {
 	t.Run("a new tool has a diff", func(t *testing.T) {
 		t.Parallel()
 		e := newPinEnv(t, oneServer("srv"))
-		if got := e.scan(fakeServers(map[string][]inspect.Tool{"srv": pinned})); got.code != exitOK {
-			t.Fatalf("first scan: exit code = %d, stderr:\n%s", got.code, got.stderr)
-		}
+		firstScan(t, e, pinned...)
 
 		got := e.scan(fakeServers(map[string][]inspect.Tool{"srv": current}))
 
@@ -68,9 +66,7 @@ func TestScanNewToolDiff(t *testing.T) {
 	t.Run("--ignore drops the row and the diff", func(t *testing.T) {
 		t.Parallel()
 		e := newPinEnv(t, oneServer("srv"))
-		if got := e.scan(fakeServers(map[string][]inspect.Tool{"srv": pinned})); got.code != exitOK {
-			t.Fatalf("first scan: exit code = %d, stderr:\n%s", got.code, got.stderr)
-		}
+		firstScan(t, e, pinned...)
 
 		got := e.scan(fakeServers(map[string][]inspect.Tool{"srv": current}), "--ignore", "MOAT-T2-002")
 
@@ -84,9 +80,7 @@ func TestScanNewToolDiff(t *testing.T) {
 	t.Run("--ignore of another rule keeps the diff", func(t *testing.T) {
 		t.Parallel()
 		e := newPinEnv(t, oneServer("srv"))
-		if got := e.scan(fakeServers(map[string][]inspect.Tool{"srv": pinned})); got.code != exitOK {
-			t.Fatalf("first scan: exit code = %d, stderr:\n%s", got.code, got.stderr)
-		}
+		firstScan(t, e, pinned...)
 
 		got := e.scan(fakeServers(map[string][]inspect.Tool{"srv": current}), "--ignore", "MOAT-T2-001")
 
@@ -97,9 +91,7 @@ func TestScanNewToolDiff(t *testing.T) {
 	t.Run("a new tool and a changed tool each have a diff, in tool order", func(t *testing.T) {
 		t.Parallel()
 		e := newPinEnv(t, oneServer("srv"))
-		if got := e.scan(fakeServers(map[string][]inspect.Tool{"srv": pinned})); got.code != exitOK {
-			t.Fatalf("first scan: exit code = %d, stderr:\n%s", got.code, got.stderr)
-		}
+		firstScan(t, e, pinned...)
 
 		got := e.scan(fakeServers(map[string][]inspect.Tool{"srv": {mkTool("a", "Add. X."), mkTool("b", "New.")}}))
 
@@ -221,9 +213,7 @@ func TestDiffTruncationWarning(t *testing.T) {
 			t.Parallel()
 			e := newPinEnv(t, oneServer("srv"))
 			if tt.pinned != nil {
-				if got := e.scan(fakeServers(map[string][]inspect.Tool{"srv": tt.pinned})); got.code != exitOK {
-					t.Fatalf("first scan: exit code = %d, stderr:\n%s", got.code, got.stderr)
-				}
+				firstScan(t, e, tt.pinned...)
 			}
 			fake := fakeServers(map[string][]inspect.Tool{"srv": tt.current})
 

@@ -121,6 +121,15 @@ func pinsPath(home string) string {
 	return filepath.Join(home, ".config", "mcpmoat", "pins.json")
 }
 
+// assertNoPinsFile fails the test when pins.json exists below home, or when
+// its state cannot be checked.
+func assertNoPinsFile(t *testing.T, home string) {
+	t.Helper()
+	if _, err := os.Stat(pinsPath(home)); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("pins.json exists or cannot be checked (err = %v), want no file", err)
+	}
+}
+
 func TestE2EScanAllClients(t *testing.T) {
 	t.Parallel()
 	home, work := discovertest.CopyFixture(t, fixtureDir("all", "full"))
@@ -409,9 +418,7 @@ func TestE2EScanWithoutNoConnect(t *testing.T) {
 	if stdout != emptyScanOutput {
 		t.Errorf("stdout = %q, want %q", stdout, emptyScanOutput)
 	}
-	if _, err := os.Stat(pinsPath(dir)); !errors.Is(err, os.ErrNotExist) {
-		t.Errorf("pins.json exists or cannot be checked (err = %v), want no file", err)
-	}
+	assertNoPinsFile(t, dir)
 }
 
 // TestE2EScanTimeoutFlags checks --timeout and --concurrency in the real
@@ -1019,9 +1026,7 @@ func TestE2EPinAcceptAmbiguous(t *testing.T) {
 	if code != exitError || stdout != "" || !strings.Contains(stderr, "2 servers are named dup") {
 		t.Errorf("exit code %d, stdout %q, stderr %q, want exit code %d, no stdout and the ambiguous name error", code, stdout, stderr, exitError)
 	}
-	if _, err := os.Stat(pinsPath(home)); !errors.Is(err, os.ErrNotExist) {
-		t.Errorf("pins.json exists or cannot be checked (err = %v), want no file", err)
-	}
+	assertNoPinsFile(t, home)
 	assertNoLeakBoth(t, stdout, stderr)
 }
 
@@ -1045,9 +1050,7 @@ func TestE2EPinAcceptProject(t *testing.T) {
 	if code != exitError || stdout != "" || !strings.Contains(stderr, "server dup: failed: ") || !strings.Contains(stderr, "needs explicit opt-in") {
 		t.Errorf("--project: exit code %d, stdout %q, stderr %q, want exit code %d and the gate refusal", code, stdout, stderr, exitError)
 	}
-	if _, err := os.Stat(pinsPath(home)); !errors.Is(err, os.ErrNotExist) {
-		t.Errorf("pins.json exists after a refused pin (err = %v), want no file", err)
-	}
+	assertNoPinsFile(t, home)
 
 	stdout, stderr, code = runBin(t, home, work, "pin", "--accept", "dup")
 

@@ -2,6 +2,7 @@ package pins
 
 import (
 	"cmp"
+	"errors"
 	"slices"
 	"strings"
 
@@ -66,6 +67,22 @@ const (
 	// pinned hash, so the pin is corrupt or was edited.
 	ReasonPinMismatch = "pinned text does not match its hash"
 )
+
+// ReasonOf returns the reason constant for an error of Snapshot or Canonical:
+// ReasonDuplicateName, ReasonEmptyName or ReasonInvalidTool. It returns the
+// empty string for any other error. Compare gives the same reason for the same
+// tool, so a first run and a later run name a bad tool in the same way.
+func ReasonOf(err error) string {
+	switch {
+	case errors.Is(err, ErrDuplicateTool):
+		return ReasonDuplicateName
+	case errors.Is(err, ErrEmptyName):
+		return ReasonEmptyName
+	case errors.Is(err, ErrInvalidTool):
+		return ReasonInvalidTool
+	}
+	return ""
+}
 
 // ruleIDPrefix is the start of every rule ID that ChangeKind.RuleID returns.
 const ruleIDPrefix = "MOAT-T2-"
@@ -144,9 +161,9 @@ type Change struct {
 	Reason string
 	// Severity is the severity of the finding for this change: "high", "medium"
 	// or "low". Compare always sets it. It equals Kind.Severity(), except for a
-	// KindUnverified change whose Tool is a pinned name, and for a KindNew
-	// change next to a KindRemoved change (a likely rename, see Compare): those
-	// are "high".
+	// KindUnverified change whose Tool is a pinned name, and for a KindNew or
+	// KindUnverified change next to a KindRemoved change (a likely rename, see
+	// Compare): those are "high".
 	//
 	// A pinned tool that Compare cannot verify (a duplicate name, invalid tool
 	// data, another hash version or a corrupt pin) can hide a rug pull. A hostile
@@ -179,9 +196,11 @@ type Change struct {
 // by name is KindRemoved. A current tool with an invalid or duplicate name
 // counts as present, so it is not also reported as removed.
 //
-// A KindNew change is "high", not "medium", when the result also has a
-// KindRemoved change: a server can rename a pinned tool (drop "read_file", add
-// "read_fi1e" with new text) to avoid the "high" KindChanged check.
+// A KindNew change, and a KindUnverified change of a name that is not pinned,
+// is "high", not "medium", when the result also has a KindRemoved change: a
+// server can rename a pinned tool (drop "read_file", add "read_fi1e" with new
+// text, or with data that cannot be verified) to avoid the "high" KindChanged
+// check.
 func Compare(stored ServerPins, current []inspect.Tool) []Change {
 	counts := make(map[string]int, len(current))
 	for _, t := range current {
@@ -212,7 +231,7 @@ func Compare(stored ServerPins, current []inspect.Tool) []Change {
 	}
 	if removed {
 		for i := range changes {
-			if changes[i].Kind == KindNew {
+			if changes[i].Kind == KindNew || changes[i].Kind == KindUnverified {
 				changes[i].Severity = severityHigh
 			}
 		}

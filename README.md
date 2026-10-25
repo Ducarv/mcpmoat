@@ -39,8 +39,9 @@ mcpmoat version              # print the version, commit and build date
 - **Later runs:** `scan` compares the tools with the pins. It reports `MOAT-T2-001` (changed tool,
   high), `MOAT-T2-002` (new tool, medium), `MOAT-T2-003` (removed tool, low) and `MOAT-T2-004`
   (tool not verified). A new tool is medium, so alone it does not give exit code 1: read the
-  report, not only the exit code. A new tool is high when the same server also lost a tool in that
-  scan, because a server can rename a tool to avoid the changed-tool check. A server whose tools cannot be pinned (a duplicate or empty tool
+  report, not only the exit code. A new tool, or a not verified tool with a new name, is high when
+  the same server also lost a tool in that scan, because a server can rename a tool to avoid the
+  changed-tool check. A server whose tools cannot be pinned (a duplicate or empty tool
   name, invalid tool data, or more than 2 MiB) is a high `MOAT-T2-004`, because mcpmoat can never
   check its tools for changes. `MOAT-T2-004` is high when the tool name is pinned, because a duplicate,
   invalid or unverifiable copy of a pinned tool can hide a rug pull. Else it is medium. For each

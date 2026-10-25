@@ -10,10 +10,10 @@ import (
 // ErrDuplicateTool is the error that Snapshot wraps when two tools in the
 // list have the same name. The pins are keyed by tool name, so one of the two
 // tools would replace the other.
-var ErrDuplicateTool = errors.New("duplicate tool name")
+var ErrDuplicateTool = errors.New(ReasonDuplicateName)
 
 // ErrEmptyName is the error that Snapshot wraps when a tool has an empty name.
-var ErrEmptyName = errors.New("empty tool name")
+var ErrEmptyName = errors.New(ReasonEmptyName)
 
 // Snapshot returns the pins of a server: for each tool, the Hash and the
 // Canonical form, stored under the tool name.

@@ -847,6 +847,7 @@ func TestSetSelectors(t *testing.T) {
 	projA := discover.Server{Name: "gh", Client: discover.ClientClaudeCode, Source: "/h/.claude.json", ProjectPath: "/p/a"}
 	projB := discover.Server{Name: "gh", Client: discover.ClientClaudeCode, Source: "/h/.claude.json", ProjectPath: "/p/b"}
 	cursor := discover.Server{Name: "gh", Client: discover.ClientCursor, Source: "/h/.cursor/mcp.json"}
+	projAFile := discover.Server{Name: "gh", Client: discover.ClientClaudeCode, Source: "/p/a/.mcp.json", ProjectPath: "/p/a"}
 
 	tests := []struct {
 		name          string
@@ -860,6 +861,10 @@ func TestSetSelectors(t *testing.T) {
 		{"project next to the global one", []discover.Server{global, projA, projB}, projA, "/p/a", false},
 		{"one project server alone", []discover.Server{projB}, projB, "", false},
 		{"two globals", []discover.Server{global, cursor}, cursor, "", true},
+		// Two projects use the name in ~/.claude.json and one in a project
+		// file: --project alone matches two servers, so pin needs --config
+		// and --project together.
+		{"same project in two files", []discover.Server{projA, projB, projAFile}, projA, "/p/a", true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

@@ -101,9 +101,7 @@ func TestScanPinsUnchanged(t *testing.T) {
 
 	e := newPinEnv(t, oneServer("srv"))
 	a, b := mkTool("a", "A."), mkTool("b", "B.")
-	if got := e.scan(fakeServers(map[string][]inspect.Tool{"srv": {a, b}})); got.code != exitOK {
-		t.Fatalf("first scan: exit code = %d, stderr:\n%s", got.code, got.stderr)
-	}
+	firstScan(t, e, a, b)
 	before := readFileBytes(t, e.pinsPath())
 
 	got := e.scan(fakeServers(map[string][]inspect.Tool{"srv": {b, a}}))
@@ -207,9 +205,7 @@ func TestScanPinsFindings(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			e := newPinEnv(t, oneServer("srv"))
-			if got := e.scan(fakeServers(map[string][]inspect.Tool{"srv": tt.pinned})); got.code != exitOK {
-				t.Fatalf("first scan: exit code = %d, stderr:\n%s", got.code, got.stderr)
-			}
+			firstScan(t, e, tt.pinned...)
 			pinsBefore := readFileBytes(t, e.pinsPath())
 
 			got := e.scan(fakeServers(map[string][]inspect.Tool{"srv": tt.current}))
@@ -278,9 +274,7 @@ func TestScanPinsRelatedReason(t *testing.T) {
 	t.Run("duplicate tool name of a pinned server", func(t *testing.T) {
 		t.Parallel()
 		e := newPinEnv(t, oneServer("srv"))
-		if got := e.scan(fakeServers(map[string][]inspect.Tool{"srv": {mkTool("a", "Add.")}})); got.code != exitOK {
-			t.Fatalf("first scan: exit code = %d, stderr:\n%s", got.code, got.stderr)
-		}
+		firstScan(t, e, mkTool("a", "Add."))
 
 		got := e.scan(fakeServers(map[string][]inspect.Tool{"srv": {mkTool("a", "Add."), mkTool("a", "Copy.")}}))
 
@@ -295,9 +289,7 @@ func TestScanPinsRelatedReason(t *testing.T) {
 		t.Parallel()
 		e := newPinEnv(t, oneServer("srv"))
 		tools := []inspect.Tool{mkTool("a", "Add.")}
-		if got := e.scan(fakeServers(map[string][]inspect.Tool{"srv": tools})); got.code != exitOK {
-			t.Fatalf("first scan: exit code = %d, stderr:\n%s", got.code, got.stderr)
-		}
+		firstScan(t, e, tools...)
 		breakPinHashVersion(t, e)
 
 		got := e.scan(fakeServers(map[string][]inspect.Tool{"srv": tools}))
@@ -385,9 +377,7 @@ func TestScanPinsNotInspected(t *testing.T) {
 	t.Run("a pinned server that fails is an unverified finding", func(t *testing.T) {
 		t.Parallel()
 		e := newPinEnv(t, oneServer("srv"))
-		if got := e.scan(fakeServers(map[string][]inspect.Tool{"srv": {mkTool("a", "Add.")}})); got.code != exitOK {
-			t.Fatalf("first scan: exit code = %d, stderr:\n%s", got.code, got.stderr)
-		}
+		firstScan(t, e, mkTool("a", "Add."))
 		before := readFileBytes(t, e.pinsPath())
 
 		got := e.scan(&inspecttest.Fake{Errors: map[string]error{"srv": errors.New("boom")}})
@@ -415,9 +405,7 @@ func TestScanPinsNotInspected(t *testing.T) {
 	t.Run("a pinned server that times out is an unverified finding", func(t *testing.T) {
 		t.Parallel()
 		e := newPinEnv(t, oneServer("srv"))
-		if got := e.scan(fakeServers(map[string][]inspect.Tool{"srv": {mkTool("a", "Add.")}})); got.code != exitOK {
-			t.Fatalf("first scan: exit code = %d, stderr:\n%s", got.code, got.stderr)
-		}
+		firstScan(t, e, mkTool("a", "Add."))
 
 		got := e.scan(blockingInspector{}, "--timeout", "20ms")
 
@@ -498,9 +486,7 @@ func TestScanPinsToolTextEscaped(t *testing.T) {
 
 	e := newPinEnv(t, oneServer("srv"))
 	pinned := []inspect.Tool{mkTool("evil", "Add.")}
-	if got := e.scan(fakeServers(map[string][]inspect.Tool{"srv": pinned})); got.code != exitOK {
-		t.Fatalf("first scan: exit code = %d, stderr:\n%s", got.code, got.stderr)
-	}
+	firstScan(t, e, pinned...)
 
 	got := e.scan(fakeServers(map[string][]inspect.Tool{"srv": {
 		mkTool("evil", "Add.\x1b[2J\u202e hidden \u200b"),
@@ -697,9 +683,7 @@ func TestScanPinsIgnore(t *testing.T) {
 			if tt.ignoreFile != "" {
 				writeTestFile(t, e.work, rules.IgnoreFileName, tt.ignoreFile)
 			}
-			if got := e.scan(fakeServers(map[string][]inspect.Tool{"srv": pinned})); got.code != exitOK {
-				t.Fatalf("first scan: exit code = %d, stderr:\n%s", got.code, got.stderr)
-			}
+			firstScan(t, e, pinned...)
 
 			got := e.scan(fakeServers(map[string][]inspect.Tool{"srv": tt.current}), tt.flags...)
 
@@ -744,9 +728,7 @@ func TestScanPinsNoConnect(t *testing.T) {
 	t.Run("an existing pins file is not changed", func(t *testing.T) {
 		t.Parallel()
 		e := newPinEnv(t, oneServer("srv"))
-		if got := e.scan(fakeServers(map[string][]inspect.Tool{"srv": {mkTool("a", "Add.")}})); got.code != exitOK {
-			t.Fatalf("first scan: exit code = %d, stderr:\n%s", got.code, got.stderr)
-		}
+		firstScan(t, e, mkTool("a", "Add."))
 		before := dirSnapshot(t, e.xdg)
 
 		// A nil inspector would make a connecting scan fail with exit 2.
@@ -881,9 +863,7 @@ func TestScanPinsIgnoreFileWarningPerRule(t *testing.T) {
 	e := newPinEnv(t, oneServer("srv"))
 	writeTestFile(t, e.work, rules.IgnoreFileName, "MOAT-T2-001\nMOAT-T2-002\nMOAT-T2-003\n")
 	pinned := []inspect.Tool{mkTool("a", "Add."), mkTool("b", "Echo."), mkTool("c", "Keep.")}
-	if got := e.scan(fakeServers(map[string][]inspect.Tool{"srv": pinned})); got.code != exitOK {
-		t.Fatalf("first scan: exit code = %d, stderr:\n%s", got.code, got.stderr)
-	}
+	firstScan(t, e, pinned...)
 
 	got := e.scan(fakeServers(map[string][]inspect.Tool{"srv": {
 		mkTool("a", "Add. X."), mkTool("b", "Echo. Y."), mkTool("d", "New."), mkTool("e", "New too."),
@@ -908,9 +888,7 @@ func TestScanPinsUnverifiedSeverity(t *testing.T) {
 	t.Parallel()
 
 	e := newPinEnv(t, oneServer("srv"))
-	if got := e.scan(fakeServers(map[string][]inspect.Tool{"srv": {mkTool("a", "Add.")}})); got.code != exitOK {
-		t.Fatalf("first scan: exit code = %d, stderr:\n%s", got.code, got.stderr)
-	}
+	firstScan(t, e, mkTool("a", "Add."))
 
 	got := e.scan(fakeServers(map[string][]inspect.Tool{"srv": {
 		mkTool("a", "Add."), mkTool("a", "Add. Copy."), // pinned name

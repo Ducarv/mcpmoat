@@ -321,8 +321,10 @@ func assertNoPinRows(t *testing.T, stdout string) {
 	if strings.Contains(stdout, "MOAT-T2-") {
 		t.Errorf("stdout has a pin finding, want none:\n%s", stdout)
 	}
-	if strings.Contains(stdout, "Changed tool") {
-		t.Errorf("stdout has a diff, want none:\n%s", stdout)
+	for _, header := range []string{"Changed tool ", "New tool ", "Not verified tool "} {
+		if strings.Contains(stdout, header) {
+			t.Errorf("stdout has a diff (%q), want none:\n%s", header, stdout)
+		}
 	}
 }
 

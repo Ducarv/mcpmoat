@@ -214,8 +214,8 @@ The exit codes (`cmd/mcpmoat/cli.go`) are: 0 when no finding has severity high o
 finding that is not ignored has severity high or above (the PRD default of `--fail-on`, which is not
 a flag yet). A changed tool is high, so it gives exit code 1. So does a high MOAT-T2-004 finding: a
 pinned tool name that cannot be verified, a pinned server that fails or times out, a server whose
-tools cannot be pinned, or a pinned server that is listed twice. A new tool next to a removed tool
-of the same server (a likely rename) is high too. The default does not fail on MOAT-T2-002 (a new
+tools cannot be pinned, or a pinned server that is listed twice. A new tool, or a not verified
+tool with a new name, next to a removed tool of the same server (a likely rename) is high too. The default does not fail on MOAT-T2-002 (a new
 tool alone), MOAT-T2-003 (removed tool) or a medium MOAT-T2-004 (an unpinned tool name, or an
 unpinned server that is listed twice). The code is 2 for an execution error, and that includes a
 `pins.json` that `scan` cannot read or save, and a signal. `scan` prints the report first.

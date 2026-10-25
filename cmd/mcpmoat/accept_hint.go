@@ -65,17 +65,16 @@ const (
 // change (a cut diff, a change that --ignore hid, or a diff that is a fixed
 // note), when the name and --project do not select the server, when a config
 // file has a problem, or when the name, the project or configPath is not a bare
-// shell word. Before the
-// colon the name is escaped and cut for the terminal. The digest is made by
-// mcpmoat from hex, so it needs no escape. The line ends with hintCutNote,
-// hintIgnoredNote or hintNoTextNote for each change that the user did not see.
-// writeAcceptHints returns the first write error: the caller must check it,
-// like for the report.
+// shell word. Before the colon the name is escaped and cut for the terminal.
+// The digest is made by mcpmoat from hex, so it needs no escape. The line ends
+// with hintCutNote, hintIgnoredNote or hintNoTextNote for each change that the
+// user did not see. writeAcceptHints returns the first write error: the caller
+// must check it, like for the report.
 func writeAcceptHints(w io.Writer, hints []acceptHint, configPath string, configProblem bool) error {
 	for _, h := range hints {
 		text, ok := acceptCommand(h.name, h.project, configPath, h.digest)
-		if !ok || h.truncated || h.ignored || h.noText || h.ambiguous || configProblem {
-			text = acceptSteps(configPath, h.project, h.ambiguous || configProblem, configProblem, h.digest)
+		if !ok || !h.fullyReviewed() || h.ambiguous || configProblem {
+			text = acceptSteps(h, configPath, configProblem)
 		}
 		line := "To accept " + cutName(h.name) + ": " + text
 		if h.truncated {
@@ -115,20 +114,29 @@ func acceptCommand(name, project, configPath, digest string) (string, bool) {
 	return cmd + " --expect " + digest, true
 }
 
-// acceptSteps returns the text of a "To accept" line that has no command: what
-// to run, and the digest. project is the --project value that pin needs, or
-// empty. needConfig is true when pin needs a --config that names the config
-// file of the server. configProblem is true when a config file has a problem:
-// pin refuses to run until it is fixed, also with --config.
-func acceptSteps(configPath, project string, needConfig, configProblem bool, digest string) string {
+// fullyReviewed reports whether the report showed the user every change that
+// the digest covers: no diff was cut, --ignore hid no change, and no diff is
+// only a fixed note.
+func (h acceptHint) fullyReviewed() bool {
+	return !h.truncated && !h.ignored && !h.noText
+}
+
+// acceptSteps returns the text of a "To accept" line for h that has no
+// command: what to run, and the digest. configPath is the --config of the
+// scan, or empty. pin needs a --config that names the config file of the
+// server when the name is ambiguous or a config file has a problem
+// (configProblem); with a problem, pin refuses to run until the file is fixed,
+// also with --config.
+func acceptSteps(h acceptHint, configPath string, configProblem bool) string {
+	digest := h.digest
 	parts := []string{"this server name"}
 	switch {
 	case configPath != "":
 		parts = append(parts, "--config with the file of this scan")
-	case needConfig:
+	case h.ambiguous || configProblem:
 		parts = append(parts, "--config with its config file")
 	}
-	if project != "" {
+	if h.project != "" {
 		parts = append(parts, "--project with its project path")
 	}
 	sep := " and "
@@ -172,19 +180,37 @@ func isBareShellWord(s string, maxLen int) bool {
 
 // setSelectors sets project and ambiguous on each hint: it checks which server
 // "pin --accept <name>" would select among servers (see selectServers), first
-// without --project, then with the project path of the server.
+// without --project, then with the project path of the server. When neither
+// selects it, the hint is ambiguous: pin needs --config with the config file of
+// the server. project is then the --project that pin still needs among the
+// servers of that one file.
 func setSelectors(hints []acceptHint, servers []discover.Server) {
-	selects := func(h acceptHint, project string) bool {
-		m := selectServers(servers, h.name, project)
+	selects := func(among []discover.Server, h acceptHint, project string) bool {
+		m := selectServers(among, h.name, project)
 		return len(m) == 1 && serverIdentity(m[0]) == h.id
 	}
-	for i, h := range hints {
+	project := func(among []discover.Server, h acceptHint) (string, bool) {
 		switch {
-		case selects(h, ""):
-		case h.id.ProjectPath != "" && selects(h, h.id.ProjectPath):
-			hints[i].project = h.id.ProjectPath
-		default:
-			hints[i].ambiguous = true
+		case selects(among, h, ""):
+			return "", true
+		case h.id.ProjectPath != "" && selects(among, h, h.id.ProjectPath):
+			return h.id.ProjectPath, true
 		}
+		return "", false
+	}
+	for i := range hints {
+		h := &hints[i]
+		if p, ok := project(servers, *h); ok {
+			h.project = p
+			continue
+		}
+		h.ambiguous = true
+		var sameFile []discover.Server
+		for _, s := range servers {
+			if s.Source == h.id.Source {
+				sameFile = append(sameFile, s)
+			}
+		}
+		h.project, _ = project(sameFile, *h)
 	}
 }

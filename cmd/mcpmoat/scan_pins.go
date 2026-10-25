@@ -12,7 +12,8 @@ import (
 )
 
 // This file holds the pin step of scan: the pinner, which checks the tools of
-// each inspected server against pins.json, and the ignore lists of the pin rules.
+// each inspected server against pins.json, and the ignore lists of the pin
+// rules.
 
 // pinReport is the result of the pin step: what scan adds to its report, and
 // what it must still save.
@@ -66,7 +67,7 @@ type scanIgnores struct {
 // rule only the --ignore list counts. The second result is true when the
 // .mcpmoat-ignore file has an entry that matches k but is not applied, so
 // that the caller can warn about it.
-func (s *scanIgnores) ignored(k rules.FindingKey) (ignored, fileBlocked bool) {
+func (s *scanIgnores) ignored(k rules.FindingKey) (drop, fileBlocked bool) {
 	if !pins.IsPinRuleID(k.RuleID) {
 		return s.all.Ignored(k), false
 	}
@@ -143,7 +144,7 @@ func (p *pinner) checkOutcome(o inspect.Outcome) {
 	s := o.Server
 	id := serverIdentity(s)
 	if o.Status != inspect.StatusOK {
-		p.notInspected(s, id, o.Err)
+		p.notInspected(s.Name, id, o.Err)
 		return
 	}
 	if p.handled[id] {
@@ -192,8 +193,8 @@ func (p *pinner) addUnverified(name, reason, severity string) {
 }
 
 // unverifiedSeverity returns the severity of a MOAT-T2-004 row about the server
-// id: "high" when the store holds pins for it, because a pinned server that scan
-// cannot check can hide a rug pull, and "medium" when it is not pinned.
+// id: "high" when the store holds pins for it, because a pinned server that
+// scan cannot check can hide a rug pull, and "medium" when it is not pinned.
 func (p *pinner) unverifiedSeverity(id pins.Identity) string {
 	_, pinned := p.store.Get(id)
 	return pins.UnverifiedSeverity(pinned)
@@ -213,12 +214,12 @@ func (p *pinner) unverifiedSeverity(id pins.Identity) string {
 // server that is not in the store is only a warning (FR-06). A server that this
 // run already inspected gets no row: the first outcome checked its tools. A
 // second failing outcome with one identity gives no second row (see failed).
-func (p *pinner) notInspected(s discover.Server, id pins.Identity, err error) {
+func (p *pinner) notInspected(name string, id pins.Identity, err error) {
 	if inspect.Refused(err) {
 		return
 	}
 	if _, pinned := p.store.Get(id); pinned && !p.handled[id] && !p.failed[id] {
-		p.addUnverified(s.Name, reasonNotInspected, pins.UnverifiedSeverity(true))
+		p.addUnverified(name, reasonNotInspected, pins.UnverifiedSeverity(true))
 		p.failed[id] = true
 	}
 }
@@ -244,10 +245,10 @@ func (p *pinner) firstPin(s discover.Server, id pins.Identity, tools []inspect.T
 // compare compares the tools of a pinned server with its pins (pins.Compare).
 // Each change is one finding row. The rule ID comes from the change kind and
 // the severity from Change.Severity (a pinned name that cannot be verified is
-// high), not from the rule set, which does not hold the pin rules. A changed
-// or new tool, and a pinned tool whose pin cannot be checked, also gets a diff
-// (see appendDiff). The store is never changed. When at least one row is kept (not
-// ignored), compare also records the digest for the "--expect" hint (see
+// high), not from the rule set, which does not hold the pin rules. A changed or
+// new tool, and a pinned tool whose pin cannot be checked, also gets a diff
+// (see appendDiff). The store is never changed. When at least one row is kept
+// (not ignored), compare also records the digest for the "--expect" hint (see
 // addHint). The hint says so when a kept diff was cut, or when the ignore list
 // dropped a row: the digest covers that change, but the report shows no diff
 // for it.
@@ -270,7 +271,7 @@ func (p *pinner) compare(s discover.Server, id pins.Identity, tools []inspect.To
 		p.res.diffs = p.c.appendDiff("scan", p.res.diffs, s.Name, ch)
 	}
 	if kept {
-		p.addHint(h, id, tools)
+		p.addHint(h, tools)
 	}
 }
 
@@ -278,8 +279,8 @@ func (p *pinner) compare(s discover.Server, id pins.Identity, tools []inspect.To
 // can print the "--expect" line (see writeAcceptHints). Tools that cannot be
 // pinned (see pinnable) cannot be accepted either, so there is no hint for
 // them. The error text is not printed.
-func (p *pinner) addHint(h acceptHint, id pins.Identity, tools []inspect.Tool) {
-	if snap, err := pinnable(id, tools); err == nil {
+func (p *pinner) addHint(h acceptHint, tools []inspect.Tool) {
+	if snap, err := pinnable(h.id, tools); err == nil {
 		h.digest = pins.Digest(snap)
 		p.res.hints = append(p.res.hints, h)
 	}
@@ -338,24 +339,4 @@ func (c *cli) warnNotInspected(outcomes []inspect.Outcome) {
 		}
 		c.warnInspection("scan", o)
 	}
-}
-
-// addIgnored adds n to the count of the rule ID in dst and returns dst. It makes
-// a new map when dst is nil, so the callers keep the map nil until a finding is
-// dropped.
-func addIgnored(dst map[string]int, ruleID string, n int) map[string]int {
-	if dst == nil {
-		dst = make(map[string]int)
-	}
-	dst[ruleID] += n
-	return dst
-}
-
-// mergeIgnored adds the counts of extra to dst and returns dst. It makes a new
-// map when dst is nil and extra is not.
-func mergeIgnored(dst, extra map[string]int) map[string]int {
-	for id, n := range extra {
-		dst = addIgnored(dst, id, n)
-	}
-	return dst
 }

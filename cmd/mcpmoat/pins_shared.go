@@ -81,12 +81,13 @@ func pinnable(id pins.Identity, tools []inspect.Tool) (pins.ServerPins, error) {
 func diffOf(server string, ch pins.Change) report.ToolDiff {
 	d := report.ToolDiff{Server: server, Tool: ch.Tool, Diff: ch.Diff}
 	switch ch.Kind {
-	case pins.KindChanged:
-		d.Kind = report.DiffChanged
 	case pins.KindNew:
 		d.Kind = report.DiffNew
 	case pins.KindUnverified:
 		d.Kind = report.DiffUnverified
+	default:
+		// KindChanged. A kind without a diff never gets here (see the doc).
+		d.Kind = report.DiffChanged
 	}
 	return d
 }
@@ -119,13 +120,8 @@ func cutName(name string) string {
 // returns the error text: scan and pin print only fixed reasons, so a later
 // error text cannot leak server text.
 func pinnableReason(err error) string {
-	switch {
-	case errors.Is(err, pins.ErrDuplicateTool):
-		return pins.ReasonDuplicateName
-	case errors.Is(err, pins.ErrEmptyName):
-		return pins.ReasonEmptyName
-	case errors.Is(err, pins.ErrInvalidTool):
-		return pins.ReasonInvalidTool
+	if r := pins.ReasonOf(err); r != "" {
+		return r
 	}
 	return reasonNotPinnable
 }

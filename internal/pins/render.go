@@ -118,8 +118,8 @@ func writePrefixed(b *strings.Builder, prefix, value string) {
 // empty text gives one line with only lead. The work is linear in len(text).
 //
 // Every line keeps at most maxIndent bytes of lead, and cont keeps contMarker
-// after the cut. cont must end with contMarker. A lead is a short prefix or spaces, so
-// a cut inside it is safe.
+// after the cut. cont must end with contMarker. A lead is a short prefix or
+// spaces, so a cut inside it is safe.
 func writeWrapped(b *strings.Builder, lead, cont, text string) {
 	lead = lead[:min(len(lead), maxIndent)]
 	if len(cont) > maxIndent+len(contMarker) {
