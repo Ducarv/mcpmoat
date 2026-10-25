@@ -194,19 +194,30 @@ var failOnLevels = []rules.Severity{
 	rules.SeverityLow, rules.SeverityMedium, rules.SeverityHigh, rules.SeverityCritical,
 }
 
-// levelWant returns want[level]. A test table keys its expectations by
-// --fail-on value. levelWant fails the test when want does not hold exactly
-// the four values of failOnLevels, so no table can skip a level.
-func levelWant[T any](t *testing.T, want map[rules.Severity]T, level rules.Severity) T {
+// perLevel holds one expected value for each --fail-on level. Write a value
+// with positional fields, in the order low, medium, high, critical, for
+// example perLevel[int]{exitFindings, exitOK, exitOK, exitOK}. Then the
+// compiler checks that the table gives all four values.
+type perLevel[T any] struct{ low, medium, high, critical T }
+
+// at returns the value for level s. It fails the test for a level that is not
+// one of the four.
+func (p perLevel[T]) at(t *testing.T, s rules.Severity) T {
 	t.Helper()
-	if len(want) != len(failOnLevels) {
-		t.Fatalf("the test table has %d --fail-on values, want the %d of failOnLevels: %v", len(want), len(failOnLevels), want)
+	var v T
+	switch s {
+	case rules.SeverityLow:
+		v = p.low
+	case rules.SeverityMedium:
+		v = p.medium
+	case rules.SeverityHigh:
+		v = p.high
+	case rules.SeverityCritical:
+		v = p.critical
+	default:
+		t.Fatalf("perLevel has no value for --fail-on %q", s)
 	}
-	got, ok := want[level]
-	if !ok {
-		t.Fatalf("the test table has no expectation for --fail-on %s: %v", level, want)
-	}
-	return got
+	return v
 }
 
 // column returns word i (0 is NAME) of each row. It skips a row that is too

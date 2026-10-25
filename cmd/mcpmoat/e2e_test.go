@@ -1109,16 +1109,14 @@ func TestE2EScanFailOn(t *testing.T) {
 		}
 	})
 
-	config, err := os.ReadFile(testdataPath("ci", "repo", ".mcp.json"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	// runCI runs command with extra args in a new project that holds the CI
-	// example config, and checks that scan writes no pins file.
+	// runCI runs command with extra args in a copy of the CI example repo, and
+	// checks that scan writes no pins file.
 	runCI := func(t *testing.T, extra ...string) (stdout, stderr string, code int) {
 		t.Helper()
 		home, work := t.TempDir(), t.TempDir()
-		writeTestFile(t, work, ".mcp.json", string(config))
+		if err := os.CopyFS(work, os.DirFS(testdataPath("ci", "repo"))); err != nil {
+			t.Fatal(err)
+		}
 		args := append(strings.Fields(command)[1:], extra...)
 		stdout, stderr, code = runBin(t, home, work, args...)
 		assertNoPinsFile(t, home)
@@ -1139,8 +1137,6 @@ func TestE2EScanFailOn(t *testing.T) {
 		assertEmptyStdout(t, stdout)
 	})
 
-	all := []string{"MOAT-T4-001", "MOAT-T4-003", "MOAT-T4-004"}
-	notIgnored := []string{"MOAT-T4-003", "MOAT-T4-004"}
 	// The ignored finding is never silent: stderr counts it, by rule ID.
 	ignoredLine := "MOAT-T4-001 (1)"
 
@@ -1149,34 +1145,59 @@ func TestE2EScanFailOn(t *testing.T) {
 	tests := []struct {
 		name       string
 		args       []string
-		wantCode   int
 		wantIDs    []string // sorted rule IDs of the findings table
 		wantStderr []string
+		// wantDefault is the exit code with no --fail-on flag.
+		wantDefault int
+		// wantCode is the exit code for --fail-on low, medium, high and
+		// critical.
+		wantCode perLevel[int]
 	}{
-		{name: "default", wantCode: exitFindings, wantIDs: all},
-		{name: "low", args: []string{"--fail-on", "low"}, wantCode: exitFindings, wantIDs: all},
-		{name: "medium", args: []string{"--fail-on", "medium"}, wantCode: exitFindings, wantIDs: all},
-		{name: "high", args: []string{"--fail-on", "high"}, wantCode: exitFindings, wantIDs: all},
-		{name: "critical", args: []string{"--fail-on", "critical"}, wantCode: exitOK, wantIDs: all},
-		{name: "ignore", args: []string{"--ignore", "MOAT-T4-001"}, wantCode: exitOK, wantIDs: notIgnored, wantStderr: []string{ignoredLine}},
-		{name: "ignore low", args: []string{"--ignore", "MOAT-T4-001", "--fail-on", "low"}, wantCode: exitFindings, wantIDs: notIgnored, wantStderr: []string{ignoredLine}},
-		{name: "ignore medium", args: []string{"--ignore", "MOAT-T4-001", "--fail-on", "medium"}, wantCode: exitFindings, wantIDs: notIgnored, wantStderr: []string{ignoredLine}},
-		{name: "ignore high", args: []string{"--ignore", "MOAT-T4-001", "--fail-on", "high"}, wantCode: exitOK, wantIDs: notIgnored, wantStderr: []string{ignoredLine}},
-		{name: "ignore critical", args: []string{"--ignore", "MOAT-T4-001", "--fail-on", "critical"}, wantCode: exitOK, wantIDs: notIgnored, wantStderr: []string{ignoredLine}},
+		{
+			name:        "no ignore",
+			wantIDs:     []string{"MOAT-T4-001", "MOAT-T4-003", "MOAT-T4-004"},
+			wantDefault: exitFindings,
+			wantCode:    perLevel[int]{exitFindings, exitFindings, exitFindings, exitOK},
+		},
+		{
+			name:        "--ignore MOAT-T4-001",
+			args:        []string{"--ignore", "MOAT-T4-001"},
+			wantIDs:     []string{"MOAT-T4-003", "MOAT-T4-004"},
+			wantStderr:  []string{ignoredLine},
+			wantDefault: exitOK,
+			wantCode:    perLevel[int]{exitFindings, exitFindings, exitOK, exitOK},
+		},
 	}
 	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
-
-			stdout, stderr, code := runCI(t, tt.args...)
-
-			assertScanResult(t, code, stdout, stderr, scanWant{code: tt.wantCode, stderr: tt.wantStderr})
-			if got := slices.Sorted(slices.Values(column(tableRows(t, stdout), 0))); !slices.Equal(got, []string{"files", "notes", "remote"}) {
-				t.Errorf("server names = %v, want files, notes and remote\nstdout:\n%s", got, stdout)
+		// The empty level is the run with no --fail-on flag. The other runs
+		// add --fail-on <level>.
+		levels := append([]rules.Severity{""}, failOnLevels...)
+		for _, level := range levels {
+			name := "default"
+			if level != "" {
+				name = "fail-on " + string(level)
 			}
-			if got := sortedFindingIDs(t, stdout); !slices.Equal(got, tt.wantIDs) {
-				t.Errorf("finding rule IDs = %v, want %v\nstdout:\n%s", got, tt.wantIDs, stdout)
-			}
-		})
+			t.Run(tt.name+"/"+name, func(t *testing.T) {
+				t.Parallel()
+				args := slices.Clone(tt.args)
+				wantCode := tt.wantDefault
+				if level != "" {
+					args = append(args, "--fail-on", string(level))
+					wantCode = tt.wantCode.at(t, level)
+				}
+
+				stdout, stderr, code := runCI(t, args...)
+
+				assertScanResult(t, code, stdout, stderr, scanWant{code: wantCode, stderr: tt.wantStderr})
+				names := column(tableRows(t, stdout), 0)
+				slices.Sort(names)
+				if !slices.Equal(names, []string{"files", "notes", "remote"}) {
+					t.Errorf("server names = %v, want files, notes and remote\nstdout:\n%s", names, stdout)
+				}
+				if got := sortedFindingIDs(t, stdout); !slices.Equal(got, tt.wantIDs) {
+					t.Errorf("finding rule IDs = %v, want %v\nstdout:\n%s", got, tt.wantIDs, stdout)
+				}
+			})
+		}
 	}
 }

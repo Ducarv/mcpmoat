@@ -2,6 +2,7 @@ package main
 
 import (
 	"errors"
+	"fmt"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -54,6 +55,13 @@ func failOnFake(servers map[string]any) *inspecttest.Fake {
 	return fakeServers(tools)
 }
 
+// failOnInvalid is the flag error for a bad --fail-on value v, without the
+// "mcpmoat scan: " prefix. The flag package writes it as
+// `invalid value "<v>" for flag -fail-on: <msg>`.
+func failOnInvalid(v string) string {
+	return fmt.Sprintf("invalid value %q for flag -fail-on: --fail-on needs low, medium, high or critical", v)
+}
+
 // TestScanFailOnThresholds checks the exit code for every --fail-on value on
 // configs with findings of known severities. A finding at or above the value
 // gives 1, else 0. No built-in config rule is critical, so --fail-on critical
@@ -62,44 +70,41 @@ func failOnFake(servers map[string]any) *inspecttest.Fake {
 func TestScanFailOnThresholds(t *testing.T) {
 	t.Parallel()
 
-	// byLevel is the exit code for each --fail-on value.
-	type byLevel = map[rules.Severity]int
-	low, medium, high, critical := rules.SeverityLow, rules.SeverityMedium, rules.SeverityHigh, rules.SeverityCritical
-
 	tests := []struct {
 		name    string
 		servers map[string]any
 		wantIDs []string // sorted; nil for no findings table
-		want    byLevel
+		// want is the exit code for low, medium, high and critical.
+		want perLevel[int]
 	}{
 		{
 			name:    "clean config",
 			servers: map[string]any{"clean-srv": failOnCleanServer},
-			want:    byLevel{low: exitOK, medium: exitOK, high: exitOK, critical: exitOK},
+			want:    perLevel[int]{exitOK, exitOK, exitOK, exitOK},
 		},
 		{
 			name:    "low finding",
 			servers: map[string]any{"low-srv": failOnLowServer, "clean-srv": failOnCleanServer},
 			wantIDs: []string{"MOAT-T4-004"},
-			want:    byLevel{low: exitFindings, medium: exitOK, high: exitOK, critical: exitOK},
+			want:    perLevel[int]{exitFindings, exitOK, exitOK, exitOK},
 		},
 		{
 			name:    "medium finding",
 			servers: map[string]any{"medium-srv": failOnMediumServer},
 			wantIDs: []string{"MOAT-T4-003"},
-			want:    byLevel{low: exitFindings, medium: exitFindings, high: exitOK, critical: exitOK},
+			want:    perLevel[int]{exitFindings, exitFindings, exitOK, exitOK},
 		},
 		{
 			name:    "high finding",
 			servers: map[string]any{"high-srv": failOnHighServer},
 			wantIDs: []string{"MOAT-T4-001"},
-			want:    byLevel{low: exitFindings, medium: exitFindings, high: exitFindings, critical: exitOK},
+			want:    perLevel[int]{exitFindings, exitFindings, exitFindings, exitOK},
 		},
 		{
 			name:    "low, medium and high findings",
 			servers: failOnMixedServers(),
 			wantIDs: failOnMixedIDs,
-			want:    byLevel{low: exitFindings, medium: exitFindings, high: exitFindings, critical: exitOK},
+			want:    perLevel[int]{exitFindings, exitFindings, exitFindings, exitOK},
 		},
 	}
 
@@ -113,8 +118,8 @@ func TestScanFailOnThresholds(t *testing.T) {
 
 					got := e.scan(failOnFake(tt.servers), args...)
 
-					want := scanWant{code: levelWant(t, tt.want, failOn)}
-					if mode.args == nil {
+					want := scanWant{code: tt.want.at(t, failOn)}
+					if !slices.Contains(mode.args, "--no-connect") {
 						// The first run pins the servers: the notice shows
 						// that scan connected.
 						want.stderr = []string{"mcpmoat scan: pinned 1 tool for "}
@@ -232,8 +237,6 @@ func TestScanFailOnIgnored(t *testing.T) {
 func TestScanFailOnUsageErrors(t *testing.T) {
 	t.Parallel()
 
-	const needs = "--fail-on needs low, medium, high or critical"
-
 	tests := []struct {
 		name string
 		// args come after "scan --config <file>" and the mode flags.
@@ -242,18 +245,18 @@ func TestScanFailOnUsageErrors(t *testing.T) {
 		// missingConfig gives a --config file that does not exist.
 		missingConfig bool
 	}{
-		{name: "empty value", args: []string{"--fail-on", ""}, wantMsg: `invalid value "" for flag -fail-on: ` + needs},
-		{name: "upper case", args: []string{"--fail-on", "HIGH"}, wantMsg: `invalid value "HIGH" for flag -fail-on: ` + needs},
-		{name: "upper case with equals", args: []string{"--fail-on=High"}, wantMsg: `invalid value "High" for flag -fail-on: ` + needs},
-		{name: "unknown word", args: []string{"--fail-on", "bogus"}, wantMsg: `invalid value "bogus" for flag -fail-on: ` + needs},
-		{name: "short form", args: []string{"--fail-on", "med"}, wantMsg: `invalid value "med" for flag -fail-on: ` + needs},
-		{name: "value with a space", args: []string{"--fail-on", " high"}, wantMsg: `invalid value " high" for flag -fail-on: ` + needs},
-		{name: "number", args: []string{"--fail-on", "3"}, wantMsg: `invalid value "3" for flag -fail-on: ` + needs},
+		{name: "empty value", args: []string{"--fail-on", ""}, wantMsg: failOnInvalid("")},
+		{name: "upper case", args: []string{"--fail-on", "HIGH"}, wantMsg: failOnInvalid("HIGH")},
+		{name: "upper case with equals", args: []string{"--fail-on=High"}, wantMsg: failOnInvalid("High")},
+		{name: "unknown word", args: []string{"--fail-on", "bogus"}, wantMsg: failOnInvalid("bogus")},
+		{name: "short form", args: []string{"--fail-on", "med"}, wantMsg: failOnInvalid("med")},
+		{name: "value with a space", args: []string{"--fail-on", " high"}, wantMsg: failOnInvalid(" high")},
+		{name: "number", args: []string{"--fail-on", "3"}, wantMsg: failOnInvalid("3")},
 		{
 			// The flag package takes the next argument as the value.
 			name:    "flag name taken as the value",
 			args:    []string{"--fail-on", "--no-connect"},
-			wantMsg: `invalid value "--no-connect" for flag -fail-on: ` + needs,
+			wantMsg: failOnInvalid("--no-connect"),
 		},
 		{name: "no value", args: []string{"--fail-on"}, wantMsg: "flag needs an argument: -fail-on"},
 		{
@@ -269,7 +272,7 @@ func TestScanFailOnUsageErrors(t *testing.T) {
 		{
 			name:          "bad value before a missing config file",
 			args:          []string{"--fail-on", "bogus"},
-			wantMsg:       `invalid value "bogus" for flag -fail-on: ` + needs,
+			wantMsg:       failOnInvalid("bogus"),
 			missingConfig: true,
 		},
 	}
@@ -318,12 +321,12 @@ func TestScanFailOnExecErrors(t *testing.T) {
 		name string
 		// setup prepares e and returns the arguments after "scan" and before
 		// the mode flags.
-		setup      func(t *testing.T, e *pinEnv) []string
-		modes      []string // the scanModes names to run; nil runs both
-		wantStdout []string
+		setup func(t *testing.T, e *pinEnv) []string
+		modes []string // the scanModes names to run; nil runs both
 		// early is true when scan stops before it has findings: stdout must
 		// be empty, and the case runs with --fail-on low only.
 		early      bool
+		wantStdout []string
 		wantStderr []string
 	}{
 		{
@@ -427,15 +430,20 @@ func TestScanFailOnServerFailure(t *testing.T) {
 		got := e.scan(failing(), "--fail-on", "low")
 
 		// The warning must be in scanWant: assertScanRun wants an empty
-		// stderr for exit code 0 otherwise.
+		// stderr for exit code 0 otherwise. A substring in scanWant also
+		// turns off the clean-stderr rule, so check the exact stderr too:
+		// the warning is the only line.
 		assertScanRun(t, got, scanWant{code: exitOK, stdout: []string{"srv"}, stderr: []string{failWarning}})
+		if got.stderr != failWarning {
+			t.Errorf("stderr = %q, want exactly %q", got.stderr, failWarning)
+		}
 		if rows := findingRows(t, got.stdout); len(rows) != 0 {
 			t.Errorf("findings table has %d rows, want none\nstdout:\n%s", len(rows), got.stdout)
 		}
 	})
 
-	low, medium, high, critical := rules.SeverityLow, rules.SeverityMedium, rules.SeverityHigh, rules.SeverityCritical
-	pinnedWant := map[rules.Severity]int{low: exitFindings, medium: exitFindings, high: exitFindings, critical: exitOK}
+	// pinnedWant is the exit code for low, medium, high and critical.
+	pinnedWant := perLevel[int]{exitFindings, exitFindings, exitFindings, exitOK}
 	for _, failOn := range failOnLevels {
 		t.Run("pinned server with --fail-on "+string(failOn), func(t *testing.T) {
 			t.Parallel()
@@ -447,7 +455,7 @@ func TestScanFailOnServerFailure(t *testing.T) {
 			// The finding shows at every value: --fail-on changes only the
 			// exit code.
 			assertScanRun(t, got, scanWant{
-				code:   levelWant(t, pinnedWant, failOn),
+				code:   pinnedWant.at(t, failOn),
 				stdout: []string{"MOAT-T2-004", "high", "srv"},
 				stderr: []string{failWarning},
 			})

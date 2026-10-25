@@ -275,29 +275,29 @@ func severityRows(severities ...string) []report.FindingRow {
 func TestHasFailingFinding(t *testing.T) {
 	t.Parallel()
 
-	// byLevel is the result for each --fail-on value.
-	type byLevel = map[rules.Severity]bool
-	low, medium, high, critical := rules.SeverityLow, rules.SeverityMedium, rules.SeverityHigh, rules.SeverityCritical
-	never := byLevel{low: false, medium: false, high: false, critical: false}
-	always := byLevel{low: true, medium: true, high: true, critical: true}
+	// The want values are in the order low, medium, high, critical.
+	never := perLevel[bool]{false, false, false, false}
+	always := perLevel[bool]{true, true, true, true}
+	upToMedium := perLevel[bool]{true, true, false, false}
+	upToHigh := perLevel[bool]{true, true, true, false}
 
 	tests := []struct {
 		name string
 		rows []report.FindingRow
-		want byLevel
+		want perLevel[bool]
 	}{
 		{"nil rows", nil, never},
 		{"empty rows", severityRows(), never},
-		{"low", severityRows("low"), byLevel{low: true, medium: false, high: false, critical: false}},
-		{"medium", severityRows("medium"), byLevel{low: true, medium: true, high: false, critical: false}},
-		{"high", severityRows("high"), byLevel{low: true, medium: true, high: true, critical: false}},
+		{"low", severityRows("low"), perLevel[bool]{true, false, false, false}},
+		{"medium", severityRows("medium"), upToMedium},
+		{"high", severityRows("high"), upToHigh},
 		{"critical", severityRows("critical"), always},
 		{"unknown severity word", severityRows("bogus"), always},
 		{"empty severity", severityRows(""), always},
 		{"wrong case is unknown", severityRows("HIGH"), always},
-		{"low and medium", severityRows("low", "medium"), byLevel{low: true, medium: true, high: false, critical: false}},
-		{"low and high", severityRows("low", "high"), byLevel{low: true, medium: true, high: true, critical: false}},
-		{"high and low", severityRows("high", "low"), byLevel{low: true, medium: true, high: true, critical: false}},
+		{"low and medium", severityRows("low", "medium"), upToMedium},
+		{"low and high", severityRows("low", "high"), upToHigh},
+		{"high and low", severityRows("high", "low"), upToHigh},
 		{"medium and critical", severityRows("medium", "critical"), always},
 		{"low and unknown", severityRows("low", "bogus"), always},
 		{"every severity", severityRows("low", "medium", "high", "critical"), always},
@@ -306,7 +306,7 @@ func TestHasFailingFinding(t *testing.T) {
 		for _, failOn := range failOnLevels {
 			t.Run(tt.name+"/fail-on "+string(failOn), func(t *testing.T) {
 				t.Parallel()
-				want := levelWant(t, tt.want, failOn)
+				want := tt.want.at(t, failOn)
 				if got := hasFailingFinding(tt.rows, failOn); got != want {
 					t.Errorf("hasFailingFinding(%v, %q) = %v, want %v", tt.rows, failOn, got, want)
 				}
@@ -340,35 +340,44 @@ func TestHasFailingFinding(t *testing.T) {
 func TestScanExitCode(t *testing.T) {
 	t.Parallel()
 
-	t.Run("no failure, finding below --fail-on gives 0", func(t *testing.T) {
-		t.Parallel()
-		if got := scanExitCode(false, severityRows("low"), rules.SeverityHigh); got != exitOK {
-			t.Errorf("scanExitCode(false, low row, high) = %d, want %d", got, exitOK)
-		}
-	})
-	t.Run("no failure, finding at --fail-on gives 1", func(t *testing.T) {
-		t.Parallel()
-		if got := scanExitCode(false, severityRows("high"), rules.SeverityHigh); got != exitFindings {
-			t.Errorf("scanExitCode(false, high row, high) = %d, want %d", got, exitFindings)
-		}
-	})
+	// The want values are in the order low, medium, high, critical.
+	alwaysError := perLevel[int]{exitError, exitError, exitError, exitError}
 
-	// A failed scan gives 2 for no rows, for a row that fails at every
-	// threshold (critical) and for a row with an unknown severity.
-	failed := []struct {
+	tests := []struct {
 		name string
-		rows []report.FindingRow
+		// execFailed is the first argument of scanExitCode: true when the
+		// scan had an execution error.
+		execFailed bool
+		rows       []report.FindingRow
+		want       perLevel[int]
 	}{
-		{"no findings", nil},
-		{"a critical finding", severityRows("critical")},
-		{"an unknown severity", severityRows("bogus")},
+		{
+			name: "no failure, no findings",
+			want: perLevel[int]{exitOK, exitOK, exitOK, exitOK},
+		},
+		{
+			name: "no failure, a low finding",
+			rows: severityRows("low"),
+			want: perLevel[int]{exitFindings, exitOK, exitOK, exitOK},
+		},
+		{
+			name: "no failure, a high finding",
+			rows: severityRows("high"),
+			want: perLevel[int]{exitFindings, exitFindings, exitFindings, exitOK},
+		},
+		// A failed scan gives 2 for no rows, for a row that fails at every
+		// threshold (critical) and for a row with an unknown severity.
+		{name: "failed with no findings", execFailed: true, want: alwaysError},
+		{name: "failed with a critical finding", execFailed: true, rows: severityRows("critical"), want: alwaysError},
+		{name: "failed with an unknown severity", execFailed: true, rows: severityRows("bogus"), want: alwaysError},
 	}
-	for _, tt := range failed {
+	for _, tt := range tests {
 		for _, failOn := range failOnLevels {
-			t.Run("failed with "+tt.name+"/fail-on "+string(failOn), func(t *testing.T) {
+			t.Run(tt.name+"/fail-on "+string(failOn), func(t *testing.T) {
 				t.Parallel()
-				if got := scanExitCode(true, tt.rows, failOn); got != exitError {
-					t.Errorf("scanExitCode(true, %v, %q) = %d, want %d", tt.rows, failOn, got, exitError)
+				want := tt.want.at(t, failOn)
+				if got := scanExitCode(tt.execFailed, tt.rows, failOn); got != want {
+					t.Errorf("scanExitCode(%v, %v, %q) = %d, want %d", tt.execFailed, tt.rows, failOn, got, want)
 				}
 			})
 		}
