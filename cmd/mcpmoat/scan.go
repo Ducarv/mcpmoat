@@ -13,6 +13,7 @@ import (
 
 	"github.com/Ducarv/mcpmoat/internal/discover"
 	"github.com/Ducarv/mcpmoat/internal/inspect"
+	"github.com/Ducarv/mcpmoat/internal/pins"
 	"github.com/Ducarv/mcpmoat/internal/report"
 	"github.com/Ducarv/mcpmoat/internal/rules"
 	"github.com/Ducarv/mcpmoat/internal/termsafe"
@@ -364,8 +365,7 @@ func (c *cli) savePinned(ctx context.Context, pr pinReport) bool {
 	}
 	// A signal while the report printed means the user stopped the scan: save
 	// nothing.
-	if ctx.Err() != nil {
-		c.cmdPrintf("scan", "%s", interruptedText)
+	if c.interrupted(ctx, "scan") {
 		return false
 	}
 	store, ok := c.readPins("scan")
@@ -374,7 +374,12 @@ func (c *cli) savePinned(ctx context.Context, pr pinReport) bool {
 	}
 	var saved []pinnedServer
 	for _, ps := range pr.pinned {
-		if _, found := store.Get(ps.id); found {
+		if other, found := store.Get(ps.id); found {
+			// Another run pinned the server meanwhile. Its pins stay, but
+			// this scan did not compare them with the tools that it saw.
+			if pins.Digest(other) != pins.Digest(ps.snap) {
+				c.scanWarnf("server %s was pinned by another run with other tools during this scan; run scan again", cutName(ps.name))
+			}
 			continue
 		}
 		// pinOutcomes checked the pins with the same rules, so an error here

@@ -45,7 +45,7 @@ func (c *cli) runPin(_ options, args []string) int {
 	// The context ends on a signal, like in runScan.
 	ctx := c.ctxOrBackground()
 
-	server, ok := c.findPinServer(ctx, a.accept, a.configPath)
+	server, ok := c.findPinServer(ctx, a.accept, a.configPath, a.project)
 	if !ok {
 		return exitError
 	}
@@ -63,6 +63,7 @@ func (c *cli) runPin(_ options, args []string) int {
 type pinArgs struct {
 	accept     string // the server name; never empty
 	configPath string // --config, or empty for auto-discovery
+	project    string // --project, or empty
 	// expect is the --expect digest, or empty. It is a valid digest: it passed
 	// pins.ValidDigest.
 	expect   string
@@ -82,6 +83,7 @@ func (c *cli) parsePinArgs(args []string) (a pinArgs, code int, ok bool) {
 	// a result that is not "" means the flag was given.
 	pathFlag(fs, "accept", "a server name", &a.accept)
 	pathFlag(fs, "config", "a file name", &a.configPath)
+	pathFlag(fs, "project", "a project path", &a.project)
 	pathFlag(fs, "expect", "a digest", &a.expect)
 
 	if err := fs.Parse(args); err != nil {
@@ -122,8 +124,7 @@ func (c *cli) parsePinArgs(args []string) (a pinArgs, code int, ok bool) {
 // second case as a warning, but here it is an error: nothing is accepted.
 func (c *cli) inspectOne(ctx context.Context, server discover.Server, opts inspect.Options) ([]inspect.Tool, bool) {
 	outcomes, err := inspect.Run(ctx, []discover.Server{server}, opts, c.inspector)
-	if ctx.Err() != nil {
-		c.cmdPrintf("pin", "%s", interruptedText)
+	if c.interrupted(ctx, "pin") {
 		return nil, false
 	}
 	if err != nil {
@@ -136,6 +137,7 @@ func (c *cli) inspectOne(ctx context.Context, server discover.Server, opts inspe
 		c.cmdPrintf("pin", "server %s: not inspected", cutName(server.Name))
 		return nil, false
 	}
+	c.warnInspection("pin", outcomes[0])
 	if outcomes[0].Status != inspect.StatusOK {
 		c.cmdPrintf("pin", "%s", notInspectedText(outcomes[0]))
 		return nil, false
@@ -172,11 +174,11 @@ func (c *cli) acceptTools(ctx context.Context, server discover.Server, tools []i
 		return exitError
 	}
 
-	// The same check as the "To accept" hint of scan (see pinnable). The error
-	// text is not printed: it can name a tool of the server.
+	// The same check as the "To accept" hint of scan (see pinnable). Only the
+	// fixed reason is printed (see pinnableReason).
 	snap, err := pinnable(id, tools)
 	if err != nil {
-		c.cmdPrintf("pin", "cannot pin the tools of server %s: %s", name, snapshotReason(err))
+		c.cmdPrintf("pin", "cannot pin the tools of server %s: %s", name, pinnableReason(err))
 		return exitError
 	}
 
@@ -195,21 +197,13 @@ func (c *cli) acceptTools(ctx context.Context, server discover.Server, tools []i
 		return exitError
 	}
 
-	if expect == "" {
-		// The note comes before the save, so it shows whenever the run reaches
-		// the save step.
-		fprintf(c.stderr, "%s\n", pinNoExpectNote)
-	} else if got := pins.Digest(snap); got != expect {
-		// The two digests are hex made by mcpmoat (expect passed ValidDigest),
-		// so they need no escape.
-		c.cmdPrintf("pin", "the tools of %s differ from what scan showed (digest %s, expected %s); nothing was saved. Run scan again and review the diff.", name, got, expect)
+	if !c.checkExpect(name, snap, expect) {
 		return exitError
 	}
 
 	// A signal while the diffs printed means the user stopped pin: save
 	// nothing.
-	if ctx.Err() != nil {
-		c.cmdPrintf("pin", "%s", interruptedText)
+	if c.interrupted(ctx, "pin") {
 		return exitError
 	}
 	if err := store.Set(id, snap); err != nil {
@@ -223,6 +217,25 @@ func (c *cli) acceptTools(ctx context.Context, server discover.Server, tools []i
 
 	fprintf(c.stdout, "accepted %s: %s\n", name, counts)
 	return exitOK
+}
+
+// checkExpect compares expect, when it is not empty, with pins.Digest of snap,
+// the tools of the server name. It returns false, after a message on stderr,
+// when they differ. Without expect it prints pinNoExpectNote and returns true:
+// the note comes before the save, so it shows whenever the run reaches the
+// save step.
+func (c *cli) checkExpect(name string, snap pins.ServerPins, expect string) bool {
+	if expect == "" {
+		fprintf(c.stderr, "%s\n", pinNoExpectNote)
+		return true
+	}
+	if got := pins.Digest(snap); got != expect {
+		// The two digests are hex made by mcpmoat (expect passed ValidDigest),
+		// so they need no escape.
+		c.cmdPrintf("pin", "the tools of %s differ from what scan showed (digest %s, expected %s); nothing was saved. Run scan again and review the diff.", name, got, expect)
+		return false
+	}
+	return true
 }
 
 // pinNoExpectNote is the line that pin prints on stderr, before it saves, when
@@ -239,11 +252,13 @@ func pinUsage(w io.Writer) {
 	fprintf(tw, "  --accept <server>\tAccept the tools that the server offers now as its new pins (required)\n")
 	fprintf(tw, "  \tpin connects to this one server (a stdio server is started). Review the diff of \"scan\" first\n")
 	fprintf(tw, "  \tpin prints the diff of each changed, new or not verified tool, then \"accepted ...\". Ctrl-C stops the server and saves nothing (exit 2)\n")
-	fprintf(tw, "  \tThe name must match exactly one server. If two clients or projects use it, narrow it with --config\n")
+	fprintf(tw, "  \tThe name must match exactly one server. If two clients or projects use it, narrow it with --config or --project\n")
 	fprintf(tw, "  --expect <digest>\tSave the tools only if their digest is this one (pd1:<64 hex>); scan prints it as\n")
 	fprintf(tw, "  \t\"To accept <server>: mcpmoat pin --accept <server> --expect <digest>\". If the tools differ, pin prints\n")
 	fprintf(tw, "  \tthe diff, saves nothing and exits 2. Without it, pin trusts the tools the server returns now (a note on stderr)\n")
 	fprintf(tw, "  --config <file>\tRead only this file, like \"scan --config\"; skips auto-discovery\n")
+	fprintf(tw, "  --project <path>\tAccept the server of this project only (the project path of ~/.claude.json, or the folder of a project file)\n")
+	fprintf(tw, "  \tWithout it, when one name is in several places, pin takes the one outside any project, if there is exactly one\n")
 	fprintf(tw, "  --timeout <duration>\tTime limit for the server, a Go duration such as 10s or 1m30s (default %s)\n", inspect.DefaultTimeout)
 	_ = tw.Flush() // the write error is ignored on purpose, see fprintf
 	fprintf(w, "  A problem with a config file is an error (exit 2): it can hide a second server with the same name. Fix the file or use --config\n")
@@ -251,18 +266,19 @@ func pinUsage(w io.Writer) {
 	fprintf(w, "  A server that fails, times out, or that pin refuses to start is an error (exit 2) and pin changes nothing.\n")
 }
 
-// findPinServer finds the one server that has the name accept, exactly. It
-// reads the config files like scan does (see loadConfigs): only configPath when
-// it is not empty, else auto-discovery. It returns false, after a message on
-// stderr, when the server is unknown, when more than one server has the name,
-// or when the configs cannot be read at all.
+// findPinServer finds the one server that has the name accept, exactly, and
+// the project path project when it is not empty (see selectServers). It reads
+// the config files like scan does (see loadConfigs): only configPath when it is
+// not empty, else auto-discovery. It returns false, after a message on stderr,
+// when the server is unknown, when more than one server matches, or when the
+// configs cannot be read at all.
 //
 // pin fails closed on a config problem. If discovery reports any problem with
 // a config file, findPinServer prints each problem on stderr and returns false,
 // even when exactly one server matches: the broken file can hide a second
 // server with the same name, and "pin --accept" could trust the wrong one. The
 // user fixes the file or narrows the search with --config.
-func (c *cli) findPinServer(ctx context.Context, accept, configPath string) (discover.Server, bool) {
+func (c *cli) findPinServer(ctx context.Context, accept, configPath, project string) (discover.Server, bool) {
 	// pin does not read .mcpmoat-ignore, so it does not need the working
 	// directory.
 	res, _, ok := c.loadConfigs(ctx, "pin", configPath)
@@ -278,35 +294,57 @@ func (c *cli) findPinServer(ctx context.Context, accept, configPath string) (dis
 		return discover.Server{}, false
 	}
 
-	matches := serversNamed(res.Servers, accept)
+	if project != "" {
+		// discover cleans the project paths, so "/p/a/" means "/p/a".
+		project = filepath.Clean(project)
+	}
+	matches := selectServers(res.Servers, accept, project)
 	if len(matches) == 1 {
 		return matches[0], true
 	}
 	if len(matches) == 0 {
-		c.cmdPrintf("pin", "unknown server %s", cutName(accept))
+		if project != "" {
+			c.cmdPrintf("pin", "unknown server %s in project %s", cutName(accept), termsafe.QuoteCut(project, maxWarnPathRunes))
+		} else {
+			c.cmdPrintf("pin", "unknown server %s", cutName(accept))
+		}
 		return discover.Server{}, false
 	}
 	c.printAmbiguous(accept, matches)
 	return discover.Server{}, false
 }
 
-// serversNamed returns the servers that have exactly the name name, in the
-// order of servers.
-func serversNamed(servers []discover.Server, name string) []discover.Server {
-	var matches []discover.Server
+// selectServers returns the servers that "pin --accept name [--project
+// project]" selects, in the order of servers. They have exactly the name name.
+// With a project, they also have exactly that ProjectPath. Without one, when
+// more than one server has the name and exactly one of them is outside any
+// project (an empty ProjectPath), only that one is kept: ~/.claude.json can use
+// one name in its global section and in several projects. scan uses the same
+// function for its "To accept" line, so the line selects the server that it
+// names.
+func selectServers(servers []discover.Server, name, project string) []discover.Server {
+	var named, global []discover.Server
 	for _, s := range servers {
-		if s.Name == name {
-			matches = append(matches, s)
+		if s.Name != name || (project != "" && s.ProjectPath != project) {
+			continue
+		}
+		named = append(named, s)
+		if s.ProjectPath == "" {
+			global = append(global, s)
 		}
 	}
-	return matches
+	if project == "" && len(named) > 1 && len(global) == 1 {
+		return global
+	}
+	return named
 }
 
 // printAmbiguous tells the user that more than one server has the name accept,
-// and lists where each one comes from, so the user can narrow it with --config.
+// and lists where each one comes from, so the user can narrow it with --config
+// or --project.
 // The fields come from config files, so they are escaped and cut.
 func (c *cli) printAmbiguous(accept string, matches []discover.Server) {
-	c.cmdPrintf("pin", "%d servers are named %s; narrow it with --config <file>:", len(matches), cutName(accept))
+	c.cmdPrintf("pin", "%d servers are named %s; narrow it with --config <file> or --project <path>:", len(matches), cutName(accept))
 	for _, s := range matches {
 		line := "  client " + cutName(string(s.Client)) +
 			", source " + termsafe.QuoteCut(s.Source, maxWarnPathRunes) +

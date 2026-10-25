@@ -9,9 +9,11 @@ import (
 
 // ErrDuplicateTool is the error that Snapshot wraps when two tools in the
 // list have the same name. The pins are keyed by tool name, so one of the two
-// tools would replace the other. Its text is the reason that a finding shows
-// (ReasonDuplicateName).
-var ErrDuplicateTool = errors.New(ReasonDuplicateName)
+// tools would replace the other.
+var ErrDuplicateTool = errors.New("duplicate tool name")
+
+// ErrEmptyName is the error that Snapshot wraps when a tool has an empty name.
+var ErrEmptyName = errors.New("empty tool name")
 
 // Snapshot returns the pins of a server: for each tool, the Hash and the
 // Canonical form, stored under the tool name.
@@ -23,7 +25,7 @@ var ErrDuplicateTool = errors.New(ReasonDuplicateName)
 // mistake. The caller must show the server as not verified.
 //
 // Snapshot returns an error in these cases:
-//   - A tool name is empty. The error wraps ErrInvalidTool.
+//   - A tool name is empty. The error wraps ErrEmptyName.
 //   - Two tools have the same name. The error wraps ErrDuplicateTool.
 //   - Canonical fails for a tool. The error wraps ErrInvalidTool.
 //
@@ -37,7 +39,7 @@ func Snapshot(tools []inspect.Tool) (ServerPins, error) {
 	pinned := make(ServerPins, len(tools))
 	for i, t := range tools {
 		if t.Name == "" {
-			return nil, fmt.Errorf("tool %d: the name is empty: %w", i, ErrInvalidTool)
+			return nil, fmt.Errorf("tool %d: %w", i, ErrEmptyName)
 		}
 		if _, ok := pinned[t.Name]; ok {
 			return nil, fmt.Errorf("tool %d: %w", i, ErrDuplicateTool)

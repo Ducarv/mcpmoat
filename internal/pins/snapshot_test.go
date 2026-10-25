@@ -112,13 +112,13 @@ func TestSnapshotErrors(t *testing.T) {
 		{
 			name:      "empty name first",
 			tools:     []inspect.Tool{{Name: "", Description: snapshotCanary}},
-			want:      ErrInvalidTool,
+			want:      ErrEmptyName,
 			wantIndex: "tool 0:",
 		},
 		{
 			name:      "empty name last",
 			tools:     []inspect.Tool{ok[0], ok[1], {Description: snapshotCanary}},
-			want:      ErrInvalidTool,
+			want:      ErrEmptyName,
 			wantIndex: "tool 2:",
 		},
 		{

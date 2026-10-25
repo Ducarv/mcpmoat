@@ -103,6 +103,16 @@ func (c *cli) printFileErrors(cmd string, errs []*discover.FileError) {
 	}
 }
 
+// interrupted reports whether ctx ended (the process got a signal). When it
+// did, it writes interruptedText on stderr for the command cmd first.
+func (c *cli) interrupted(ctx context.Context, cmd string) bool {
+	if ctx.Err() == nil {
+		return false
+	}
+	c.cmdPrintf(cmd, "%s", interruptedText)
+	return true
+}
+
 // plural returns one when n is 1, and many otherwise.
 func plural(n int, one, many string) string {
 	if n == 1 {

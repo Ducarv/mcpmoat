@@ -365,7 +365,7 @@ func TestUsageContent(t *testing.T) {
 			"     but a missing --config file is. A server that fails or times out is a warning and does not\n" +
 			"     change the exit code, unless its pins are already stored: then it is a high finding and scan exits 1)\n",
 		"The file cannot ignore the pin rules (MOAT-T2-*)",
-		"  If that server is already pinned, it is also a finding (MOAT-T2-004, high, exit code 1): its pinned tools were not checked.\n",
+		"  If that server is already pinned and failed or timed out, it is also a finding (MOAT-T2-004, high, exit code 1).\n",
 		"  scan reads pins.json before it starts a server, and reads it again just before it saves the first-run pins.\n",
 		"  Ctrl-C (or SIGTERM or SIGHUP) stops the servers, saves no pins and exits 2.\n",
 		"  pin changes only the entry of this server: it reads pins.json again just before it saves, and keeps the other entries.\n",

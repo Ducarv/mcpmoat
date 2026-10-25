@@ -168,7 +168,8 @@ func TestScanPinsFindings(t *testing.T) {
 			wantRows: []pinFindingRow{
 				{"MOAT-T2-001", "high", "srv", "tool", "a"},
 				{"MOAT-T2-003", "low", "srv", "tool", "b"},
-				{"MOAT-T2-002", "medium", "srv", "tool", "d"},
+				// A new tool next to a removed one is a likely rename: high.
+				{"MOAT-T2-002", "high", "srv", "tool", "d"},
 			},
 			// A changed tool and a new tool have a diff. The removed tool has none.
 			wantCode: exitFindings, wantDiffs: []string{"a", "+d"},
@@ -267,7 +268,7 @@ func TestScanPinsRelatedReason(t *testing.T) {
 
 		assertScanRun(t, got, scanWant{
 			code:   exitFindings,
-			stdout: []string{"MOAT-T2-004", "high", "srv", "invalid tool data"},
+			stdout: []string{"MOAT-T2-004", "high", "srv", "empty tool name"},
 		})
 		if _, err := os.Stat(e.pinsPath()); !errors.Is(err, os.ErrNotExist) {
 			t.Errorf("pins.json exists after a snapshot failure (stat error = %v), want nothing stored", err)

@@ -475,15 +475,22 @@ text diff.
   `scan` and `pin` print a warning on stderr that names the tool and the server: `the diff of tool
   <tool> on server <server> was cut at the size limit; review the full tool before you accept it`.
 - A changed tool is a finding with severity `high` (T2). The rule IDs and severities are:
-  `MOAT-T2-001` changed tool (`high`), `MOAT-T2-002` new tool (`medium`), `MOAT-T2-003` removed tool
-  (`low`) and `MOAT-T2-004` tool not verified (`high` when the tool name is pinned, else `medium`).
+  `MOAT-T2-001` changed tool (`high`), `MOAT-T2-002` new tool (`medium`, or `high` next to a
+  removed tool), `MOAT-T2-003` removed tool (`low`) and `MOAT-T2-004` tool not verified (`high` when
+  the tool name is pinned, else `medium`).
+- A new tool is `high` when the same server also lost a tool in that scan. A server can rename a
+  pinned tool (drop `read_file`, add `read_fi1e` with new text) to avoid the `MOAT-T2-001` check.
+  An honest rename then needs one `pin --accept`. A new tool alone stays `medium` (owner decision,
+  polish round 3).
 - A tool that is pinned but cannot be verified (a duplicate name, invalid tool data, another hash
   version or a corrupt pin) can hide a rug pull. A hostile server can return a pinned name twice to
   avoid the `MOAT-T2-001` check. So that finding is `high`. An unverified tool whose name is not
   pinned is `medium`.
-- A pinned server that cannot be inspected (it failed, timed out or was refused) is a `MOAT-T2-004`
-  finding (`high`) with the reason `pinned server could not be inspected`. A hostile server must not
-  avoid the rug-pull check by failing on purpose. A server that is listed twice (two entries with
+- A pinned server that cannot be inspected (it failed or timed out) is a `MOAT-T2-004` finding
+  (`high`) with the reason `pinned server could not be inspected`. A hostile server must not avoid
+  the rug-pull check by failing on purpose. A pinned server that a gate refuses (the client config
+  turns it off or does not approve it) stays a warning: the config of the user sets that state, not
+  the server, and the client does not load such a server. A server that is listed twice (two entries with
   one identity) is also a `MOAT-T2-004` finding, with the reason `the server is listed twice`: `high`
   when the identity is pinned, else `medium`. A server that is not pinned and cannot be inspected
   stays a warning only (FR-06).
@@ -492,7 +499,7 @@ text diff.
   never pinned, so its tools are never checked for changes: a hostile server could send one bad tool
   on purpose to stay outside the rug-pull check.
 - The default threshold of `--fail-on` is `high`. So the default does not fail on `MOAT-T2-002`
-  (new tool), `MOAT-T2-003` (removed tool) or a `medium` `MOAT-T2-004` (an unpinned tool name on a
+  (a new tool alone), `MOAT-T2-003` (removed tool) or a `medium` `MOAT-T2-004` (an unpinned tool name on a
   pinned server, or an unpinned server that is listed twice). It does fail on `MOAT-T2-001` and on a
   `high` `MOAT-T2-004`. The scan usage text and the README say that a new tool alone does not give
   exit code 1.
@@ -508,13 +515,16 @@ text diff.
 - After `pin --accept <server>`, the next scan reports no pin changes for that server.
 - Pins for other servers are not changed.
 - Accepting an unknown server name exits with code 2.
-- A name that more than one server has exits with code 2 and lists the matches. `--config` narrows
-  the search.
+- `--project <path>` keeps only the server of that project. Without it, when one name is in more
+  than one place and exactly one of them is outside any project, `pin` takes that one:
+  `~/.claude.json` can use one name in its global section and in several projects. A name that
+  still matches more than one server exits with code 2 and lists the matches. `--config` or
+  `--project` narrows the search.
 - Any config file problem exits with code 2, because a broken file can hide a second server with
   the same name. `pin` prints each problem and `fix the config file or choose one with --config
   <file>`, and it does not inspect or write anything.
-- `pin --accept` prints the diff of each changed tool and of each new tool before the `accepted ...`
-  line, so you see what the accept changes. For a server that is not pinned yet, it shows every tool
+- `pin --accept` prints the diff of each changed, new and not verified tool before the
+  `accepted ...` line, so you see what the accept changes. For a server that is not pinned yet, it shows every tool
   as a new tool.
 - `pin --accept <server> --expect <digest>` saves the pins only if the tools that the server
   returns now give the same digest. A hostile server picks the tools that it shows, so it could
@@ -526,17 +536,20 @@ text diff.
   returns now.
 - After the diffs, `scan` prints one line for each pinned server that has a pin finding that is not
   ignored: `To accept <server>: mcpmoat pin --accept <server> --expect pd1:<64 hex>`. After
-  `scan --config <file>`, the command holds `--config <file>` too. The command holds the server name
-  and the path only when each one is a bare shell word (ASCII `[A-Za-z0-9._@/:+=-]`, starting with a
-  letter, `_` or `/`), which every shell, also `cmd.exe` and PowerShell, reads as plain text. Else
-  the line says what to run and gives the digest, with no command. The line has no command either
-  when a diff of that server was cut, when another server has the same name, or when a config file
-  has a problem. When a diff of that server was cut
-  at the size limit, the line ends with ` (the diff was cut: review the full tool first)`. When
-  `--ignore` dropped a pin finding of that server, the line ends with
-  ` (--ignore hid some changes: run scan without it to review them first)`: the digest covers those
-  changes too. There is no line for a server pinned for the first time, a server that
+  `scan --config <file>`, the command holds `--config <file>` too, and `--project <path>` when `pin`
+  needs it to select the server. The command holds the server name and the paths only when each one
+  is a bare shell word (ASCII `[A-Za-z0-9._@/:+=-]`, starting with a letter, `_` or `/`), which
+  every shell, also `cmd.exe` and PowerShell, reads as plain text. Else the line says what to run
+  and gives the digest, with no command. The line has no command either when the user did not see
+  every change (a cut diff, a change that `--ignore` hid, or a diff that is only a note), when the
+  name cannot select the server, or when a config file has a problem. The line ends with
+  ` (the diff was cut: review the full tool first)`, ` (--ignore hid some changes: run scan without
+  it to review them first)` or ` (a change has no diff text: review the tool first)` for each
+  change that the user did not see: the digest covers those changes too. There is no line for a server pinned for the first time, a server that
   could not be inspected, an ignored finding, or tools that cannot be pinned.
+- `scan` and `pin --accept` print the inspection warnings on stderr, one line each, with keys and
+  fixed names only: `cleartext-secrets`, `undeclared-capability` (the cloaking signal) and
+  `dns-pin-unavailable`.
 - The digest (`pins.Digest`, version `pd1`) is the full SHA-256 over the sorted tool names and their
   hashes. The server picks both tool sets, so a collision costs about 2^(n/2) work for n bits (the
   birthday bound): about 2^64 for 128 bits, which a funded attacker can pay, and about 2^128 for 256

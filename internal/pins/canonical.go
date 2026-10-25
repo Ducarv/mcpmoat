@@ -14,9 +14,8 @@ import (
 )
 
 // ErrInvalidTool is the error that Canonical and Hash wrap when a tool has no
-// canonical form. Canonical lists the cases. Its text is the reason that a
-// finding shows (ReasonInvalidTool).
-var ErrInvalidTool = errors.New(ReasonInvalidTool)
+// canonical form. Canonical lists the cases.
+var ErrInvalidTool = errors.New("invalid tool data")
 
 // canonicalTool is the fixed shape of the canonical form. The field order
 // does not matter, because JCS sorts the keys. The json tags have no

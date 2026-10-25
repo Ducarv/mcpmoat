@@ -68,6 +68,10 @@ const (
 
 	// FieldName is the server name.
 	FieldName = "name"
+
+	// FieldTool is a tool of the server. The pin findings (MOAT-T2-*) use it,
+	// and their Key names the tool.
+	FieldTool = "tool"
 )
 
 // Finding is one result of a native check. It says which rule fired and where.

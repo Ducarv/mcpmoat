@@ -20,6 +20,10 @@ const (
 	// A deeply nested JSON line would else start with so many spaces that the
 	// report cuts the line before its text, and its change would not show.
 	maxIndent = 200
+
+	// contMarker ends the lead of a wrapped chunk after the first one (see
+	// render). No real line has it at that place.
+	contMarker = "+ "
 )
 
 // renderedTool is the shape of the canonical form that render reads. The
@@ -102,7 +106,7 @@ func render(canonical string) (string, error) {
 // writePrefixed writes value to b, one line for each line of value, and puts
 // prefix at the start of every line. A long line is wrapped (see writeWrapped).
 func writePrefixed(b *strings.Builder, prefix, value string) {
-	cont := strings.TrimSuffix(prefix, ": ") + "+ "
+	cont := strings.TrimSuffix(prefix, ": ") + contMarker
 	for line := range strings.SplitSeq(value, "\n") {
 		writeWrapped(b, prefix, cont, line)
 	}
@@ -113,13 +117,13 @@ func writePrefixed(b *strings.Builder, prefix, value string) {
 // text. It cuts only between runes, so a valid UTF-8 character never splits. An
 // empty text gives one line with only lead. The work is linear in len(text).
 //
-// Every line keeps at most maxIndent bytes of lead, and cont keeps its last two
-// bytes (the "+ " marker) after the cut. A lead is a short prefix or spaces, so
+// Every line keeps at most maxIndent bytes of lead, and cont keeps contMarker
+// after the cut. cont must end with contMarker. A lead is a short prefix or spaces, so
 // a cut inside it is safe.
 func writeWrapped(b *strings.Builder, lead, cont, text string) {
 	lead = lead[:min(len(lead), maxIndent)]
-	if len(cont) > maxIndent+2 {
-		cont = cont[:maxIndent] + cont[len(cont)-2:]
+	if len(cont) > maxIndent+len(contMarker) {
+		cont = cont[:maxIndent] + contMarker
 	}
 	b.WriteString(lead)
 	runes := 0
@@ -157,7 +161,7 @@ func writeIndented(b *strings.Builder, label string, raw json.RawMessage) error 
 	for line := range strings.SplitSeq("  "+buf.String(), "\n") {
 		text := strings.TrimLeft(line, " ")
 		indent := line[:len(line)-len(text)]
-		writeWrapped(b, indent, indent+"+ ", text)
+		writeWrapped(b, indent, indent+contMarker, text)
 	}
 	return nil
 }

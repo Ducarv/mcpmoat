@@ -28,6 +28,7 @@ import (
 
 	"github.com/Ducarv/mcpmoat/internal/discover"
 	"github.com/Ducarv/mcpmoat/internal/inspect"
+	"github.com/Ducarv/mcpmoat/internal/inspect/inspecttest"
 	"github.com/Ducarv/mcpmoat/internal/pins"
 	"github.com/Ducarv/mcpmoat/internal/report"
 )
@@ -46,31 +47,6 @@ type hookInspector struct {
 func (h hookInspector) Inspect(ctx context.Context, s discover.Server) (inspect.Result, error) {
 	h.hook(s)
 	return h.inner.Inspect(ctx, s)
-}
-
-// writePinsAside simulates another mcpmoat run: it reads the pins file at path,
-// sets the pins of the server id to tools and saves the file. It reports an
-// error with t.Errorf and not t.Fatalf, because it can run in a goroutine of
-// inspect.Run.
-func writePinsAside(t *testing.T, path string, id pins.Identity, tools ...inspect.Tool) {
-	t.Helper()
-	store, err := pins.Load(path)
-	if err != nil {
-		t.Errorf("pins.Load(%q) error = %v, want nil", path, err)
-		return
-	}
-	snap, err := pins.Snapshot(tools)
-	if err != nil {
-		t.Errorf("pins.Snapshot() error = %v, want nil", err)
-		return
-	}
-	if err := store.Set(id, snap); err != nil {
-		t.Errorf("Store.Set() error = %v, want nil", err)
-		return
-	}
-	if err := store.Save(); err != nil {
-		t.Errorf("Store.Save() error = %v, want nil", err)
-	}
 }
 
 // corruptPinsAside writes content to the pins file at path, so that it cannot be
@@ -272,6 +248,10 @@ func TestScanPinnedNotInspectedExit(t *testing.T) {
 // TestScanFreshStoreKeepsOtherRun checks the lost-update narrowing of scan: scan
 // reads pins.json again before it saves the first-run pins, and sets only the
 // identities that the fresh store does not hold.
+// parallelPinWarning is the warning of scan when another run pinned a server
+// with other tools during the scan.
+const parallelPinWarning = "mcpmoat scan: warning: server srv was pinned by another run with other tools during this scan; run scan again\n"
+
 func TestScanFreshStoreKeepsOtherRun(t *testing.T) {
 	t.Parallel()
 
@@ -303,9 +283,11 @@ func TestScanFreshStoreKeepsOtherRun(t *testing.T) {
 			stderr:   []string{"mcpmoat scan: pinned 1 tool for other\n"},
 			noStdout: []string{"MOAT-T2-"},
 		})
-		// No notice for the identity that the other run pinned.
+		// No notice for the identity that the other run pinned, but a warning:
+		// the other run pinned other tools than this scan saw.
 		assertContainsNone(t, "stderr", got.stderr, []string{"for srv"})
-		if n := strings.Count(got.stderr, "pinned "); n != 1 {
+		assertContainsAll(t, "stderr", got.stderr, []string{parallelPinWarning})
+		if n := strings.Count(got.stderr, "mcpmoat scan: pinned "); n != 1 {
 			t.Errorf("stderr has %d pinned notices, want 1\nstderr:\n%s", n, got.stderr)
 		}
 		file := e.readPins()
@@ -334,9 +316,9 @@ func TestScanFreshStoreKeepsOtherRun(t *testing.T) {
 
 		got := e.scan(insp)
 
-		assertScanRun(t, got, scanWant{code: exitOK, stdout: []string{"srv"}})
-		if got.stderr != "" {
-			t.Errorf("stderr = %q, want empty (no pinned notice)", got.stderr)
+		assertScanRun(t, got, scanWant{code: exitOK, stdout: []string{"srv"}, stderr: []string{parallelPinWarning}})
+		if got.stderr != parallelPinWarning {
+			t.Errorf("stderr = %q, want only %q (no pinned notice)", got.stderr, parallelPinWarning)
 		}
 		srvTools, ok := e.readPins().tools("srv")
 		if got := slices.Sorted(maps.Keys(srvTools)); !ok || !slices.Equal(got, []string{"x"}) {
@@ -976,5 +958,120 @@ func TestRelativeConfigPathIsNotPinned(t *testing.T) {
 		if _, err := os.Stat(e.pinsPath()); !errors.Is(err, os.ErrNotExist) {
 			t.Errorf("pins.json exists after a refused pin (stat error = %v)", err)
 		}
+	})
+}
+
+// TestPinnedServerRefusedIsWarningOnly checks that a pinned server that a gate
+// refuses (here: the client config turns it off) gives no finding, while a
+// pinned server that fails gives a high one. The user, not the server, sets the
+// state that a gate reads.
+func TestPinnedServerRefusedIsWarningOnly(t *testing.T) {
+	t.Parallel()
+
+	srv := discover.Server{Name: "srv", Client: discover.ClientClaudeCode, Source: "/cfg/mcp.json", State: discover.StateDisabled}
+	_, refused := inspect.New(inspect.SDKOptions{}).Inspect(t.Context(), srv)
+	if !inspect.Refused(refused) {
+		t.Fatalf("Inspect() error = %v, want a gate refusal", refused)
+	}
+
+	for _, tt := range []struct {
+		name     string
+		err      error
+		wantRows int
+	}{
+		{"refused by a gate", refused, 0},
+		{"failed", errors.New("boom"), 1},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			e := newPinEnv(t, oneServer("srv"))
+			writePinsAside(t, e.pinsPath(), serverIdentity(srv), mkTool("a", "Add."))
+			c, _, _ := e.cli(nil)
+			store, ok := c.readPins("scan")
+			if !ok {
+				t.Fatal("readPins() = false, want true")
+			}
+
+			pr := c.pinOutcomes(store, []inspect.Outcome{{Server: srv, Status: inspect.StatusFailed, Err: tt.err}}, &scanIgnores{})
+
+			if len(pr.rows) != tt.wantRows {
+				t.Errorf("rows = %+v, want %d", pr.rows, tt.wantRows)
+			}
+		})
+	}
+}
+
+// TestWarningText checks the stderr text of each inspection warning: keys and
+// fixed names only, escaped.
+func TestWarningText(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		w    inspect.Warning
+		want string
+	}{
+		{
+			"cleartext secrets",
+			inspect.Warning{Kind: inspect.WarnCleartextSecrets, HeaderKeys: []string{"Authorization", "X-Key\x1b[2J"}, URLUserInfo: true, URLSecrets: true},
+			`server srv: cleartext-secrets: secrets go over plain http to a host that is not loopback: header Authorization, header "X-Key\x1b[2J", the user info of the URL, secret parts of the URL`,
+		},
+		{
+			"undeclared capability",
+			inspect.Warning{Kind: inspect.WarnUndeclaredCapability, Capabilities: []string{"tools", "prompts"}},
+			"server srv: undeclared-capability: the server answered lists that it did not declare (it can show other lists to other clients): tools, prompts",
+		},
+		{
+			"dns pin unavailable",
+			inspect.Warning{Kind: inspect.WarnDNSPinUnavailable},
+			"server srv: dns-pin-unavailable: a proxy from the environment resolves the host, so the DNS pin and the address checks do not apply",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if got := warningText("srv", tt.w); got != tt.want {
+				t.Errorf("warningText() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+// TestScanAndPinPrintInspectionWarnings checks that scan and pin print the
+// warnings of an inspection on stderr, also for a server that failed.
+func TestScanAndPinPrintInspectionWarnings(t *testing.T) {
+	t.Parallel()
+
+	undeclared := inspect.Warning{Kind: inspect.WarnUndeclaredCapability, Capabilities: []string{"tools"}}
+	const line = "warning: server srv: undeclared-capability: "
+
+	t.Run("scan, inspected", func(t *testing.T) {
+		t.Parallel()
+		e := newPinEnv(t, oneServer("srv"))
+		fake := &inspecttest.Fake{Results: map[string]inspect.Result{"srv": {Tools: []inspect.Tool{mkTool("a", "Add.")}, Warnings: []inspect.Warning{undeclared}}}}
+
+		got := e.scan(fake)
+
+		assertContainsAll(t, "stderr", got.stderr, []string{"mcpmoat scan: " + line})
+	})
+
+	t.Run("scan, failed", func(t *testing.T) {
+		t.Parallel()
+		e := newPinEnv(t, oneServer("srv"))
+		fake := &inspecttest.Fake{Errors: map[string]error{"srv": &inspect.ConnectError{Kind: inspect.KindNetwork, Server: "srv", Reason: "refused", Warnings: []inspect.Warning{undeclared}}}}
+
+		got := e.scan(fake)
+
+		assertContainsAll(t, "stderr", got.stderr, []string{"mcpmoat scan: " + line})
+	})
+
+	t.Run("pin", func(t *testing.T) {
+		t.Parallel()
+		e := newPinEnv(t, oneServer("srv"))
+		fake := &inspecttest.Fake{Results: map[string]inspect.Result{"srv": {Tools: []inspect.Tool{mkTool("a", "Add.")}, Warnings: []inspect.Warning{undeclared}}}}
+
+		got := e.pin(fake, "--accept", "srv")
+
+		assertContainsAll(t, "stderr", got.stderr, []string{"mcpmoat pin: " + line})
 	})
 }

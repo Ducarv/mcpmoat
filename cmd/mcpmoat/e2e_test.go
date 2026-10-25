@@ -1007,12 +1007,12 @@ func TestE2EPinAccept(t *testing.T) {
 	assertNoLeakBoth(t, stdout, stderr)
 }
 
-// TestE2EPinAcceptAmbiguous checks that a name that two config files use is
-// exit code 2, and that pin lists the sources and writes no pins.json.
+// TestE2EPinAcceptAmbiguous checks that a name that two global config files
+// use is exit code 2, and that pin lists the sources and writes no pins.json.
 func TestE2EPinAcceptAmbiguous(t *testing.T) {
 	t.Parallel()
 	home, work := benignHome(t, "dup")
-	writeServers(t, work, ".mcp.json", map[string]any{"dup": map[string]any{"command": "run"}})
+	writeServers(t, filepath.Join(home, ".cursor"), "mcp.json", map[string]any{"dup": map[string]any{"command": "run"}})
 
 	stdout, stderr, code := runBin(t, home, work, "pin", "--accept", "dup")
 
@@ -1021,6 +1021,38 @@ func TestE2EPinAcceptAmbiguous(t *testing.T) {
 	}
 	if _, err := os.Stat(pinsPath(home)); !errors.Is(err, os.ErrNotExist) {
 		t.Errorf("pins.json exists or cannot be checked (err = %v), want no file", err)
+	}
+	assertNoLeakBoth(t, stdout, stderr)
+}
+
+// TestE2EPinAcceptProject checks the selection of a name that the global
+// config and a project file both use: without --project pin takes the global
+// server, and --project takes the project server (which pin then refuses, as
+// a gate refuses a project server by default).
+func TestE2EPinAcceptProject(t *testing.T) {
+	t.Parallel()
+	home, work := benignHome(t, "dup")
+	writeServers(t, work, ".mcp.json", map[string]any{"dup": map[string]any{"command": "run"}})
+	// The project path is the working directory that the binary sees, with
+	// symlinks resolved (on macOS /var is /private/var).
+	project, err := filepath.EvalSymlinks(work)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	stdout, stderr, code := runBin(t, home, work, "pin", "--accept", "dup", "--project", project)
+
+	if code != exitError || stdout != "" || !strings.Contains(stderr, "server dup: failed: ") || !strings.Contains(stderr, "needs explicit opt-in") {
+		t.Errorf("--project: exit code %d, stdout %q, stderr %q, want exit code %d and the gate refusal", code, stdout, stderr, exitError)
+	}
+	if _, err := os.Stat(pinsPath(home)); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("pins.json exists after a refused pin (err = %v), want no file", err)
+	}
+
+	stdout, stderr, code = runBin(t, home, work, "pin", "--accept", "dup")
+
+	if code != exitOK || !strings.Contains(stdout, "accepted dup: 2 new, 0 changed, 0 removed\n") {
+		t.Errorf("no --project: exit code %d, stdout %q, stderr %q, want exit code %d and the accepted line", code, stdout, stderr, exitOK)
 	}
 	assertNoLeakBoth(t, stdout, stderr)
 }

@@ -30,23 +30,6 @@ const pinPrefix = "mcpmoat pin: "
 const noExpectNote = "mcpmoat pin: note: without --expect, pin trusts the tools the server returns now; " +
 	"use the digest from scan to be sure they match what you reviewed.\n"
 
-// assertNoExpectNote fails the test unless stderr is exactly the note of a
-// successful pin without --expect.
-func assertNoExpectNote(t *testing.T, stderr string) {
-	t.Helper()
-	if stderr != noExpectNote {
-		t.Errorf("stderr = %q, want exactly the no --expect note %q", stderr, noExpectNote)
-	}
-}
-
-// assertPinRun checks a pin run like assertScanRun does a scan run. Every
-// stderr line of a usage error starts with "mcpmoat pin: ", and the usage hint
-// is the one exception (it starts with "Run").
-func assertPinRun(t *testing.T, r pinRunResult, want scanWant) {
-	t.Helper()
-	assertRun(t, pinPrefix, pinRunWithoutHint(r), want)
-}
-
 // pinRunWithoutHint returns r without the usage hint line on stderr, which has
 // no prefix. The hint is checked on its own in the usage error tests.
 func pinRunWithoutHint(r pinRunResult) pinRunResult {
@@ -233,7 +216,7 @@ func TestPinServerLookup(t *testing.T) {
 
 		// The lines under the first one list the matches, with no prefix.
 		assertRun(t, "", got, scanWant{code: exitError, stderr: []string{
-			"mcpmoat pin: 2 servers are named dup; narrow it with --config <file>:\n",
+			"mcpmoat pin: 2 servers are named dup; narrow it with --config <file> or --project <path>:\n",
 			"  client claude-code, source ",
 			"  client cursor, source ",
 			"scope ",
@@ -415,7 +398,7 @@ func TestPinSnapshotFailure(t *testing.T) {
 		reason string
 	}{
 		{"duplicate tool name", []inspect.Tool{mkTool("a", "One."), mkTool("a", "Two.")}, "duplicate tool name"},
-		{"empty tool name", []inspect.Tool{mkTool("", "No name.")}, "invalid tool data"},
+		{"empty tool name", []inspect.Tool{mkTool("", "No name.")}, "empty tool name"},
 		{"server over 2 MiB", []inspect.Tool{mkTool("a", strings.Repeat("x", 2<<20))}, "the tools cannot be pinned"},
 	}
 	for _, tt := range tests {

@@ -3,6 +3,7 @@ package main
 import (
 	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/Ducarv/mcpmoat/internal/discover"
 	"github.com/Ducarv/mcpmoat/internal/inspect"
@@ -62,7 +63,8 @@ func (c *cli) readPins(cmd string) (*pins.Store, bool) {
 // pinnable returns the pins of the tools of the server id. It returns an error
 // when pins.Snapshot refuses the tools, or when the pins break a rule of the
 // store file (pins.ValidateServer), so Store.Set would refuse them too. The
-// error text can name a tool: do not print it.
+// errors hold no tool text, but callers print only pinnableReason, so that a
+// later error cannot leak server text.
 func pinnable(id pins.Identity, tools []inspect.Tool) (pins.ServerPins, error) {
 	snap, err := pins.Snapshot(tools)
 	if err != nil {
@@ -112,12 +114,16 @@ func cutName(name string) string {
 	return termsafe.QuoteCut(name, maxWarnNameRunes)
 }
 
-// snapshotReason maps an error of pinnable to a fixed reason
-// text. It never returns the error text, which can name a tool.
-func snapshotReason(err error) string {
+// pinnableReason maps an error of pinnable to a fixed reason text, the same
+// text that pins.Compare gives for the same tool on a pinned server. It never
+// returns the error text: scan and pin print only fixed reasons, so a later
+// error text cannot leak server text.
+func pinnableReason(err error) string {
 	switch {
 	case errors.Is(err, pins.ErrDuplicateTool):
 		return pins.ReasonDuplicateName
+	case errors.Is(err, pins.ErrEmptyName):
+		return pins.ReasonEmptyName
 	case errors.Is(err, pins.ErrInvalidTool):
 		return pins.ReasonInvalidTool
 	}
@@ -137,4 +143,48 @@ func notInspectedText(o inspect.Outcome) string {
 		cutName(o.Server.Name),
 		termsafe.Quote(string(o.Status)),
 		termsafe.QuoteCut(reason, maxWarnErrRunes))
+}
+
+// warnInspection writes the warnings of the inspection of o on stderr for the
+// command cmd ("scan" or "pin"): one line for each inspect.Warning, also for a
+// server that failed (ConnectError.Warnings). A Warning holds keys and fixed
+// names only, never values, URLs or server text (see inspect.Warning).
+func (c *cli) warnInspection(cmd string, o inspect.Outcome) {
+	warnings := o.Result.Warnings
+	var ce *inspect.ConnectError
+	if o.Status != inspect.StatusOK && errors.As(o.Err, &ce) {
+		warnings = ce.Warnings
+	}
+	for _, w := range warnings {
+		c.warnf(cmd, "%s", warningText(o.Server.Name, w))
+	}
+}
+
+// warningText returns "server <name>: <kind>: <what it means>" for one
+// inspection warning. The server name and the header keys come from the config
+// file, so they are escaped and cut.
+func warningText(name string, w inspect.Warning) string {
+	var detail string
+	switch w.Kind {
+	case inspect.WarnCleartextSecrets:
+		var parts []string
+		for _, k := range w.HeaderKeys {
+			parts = append(parts, "header "+cutName(k))
+		}
+		if w.URLUserInfo {
+			parts = append(parts, "the user info of the URL")
+		}
+		if w.URLSecrets {
+			parts = append(parts, "secret parts of the URL")
+		}
+		detail = "secrets go over plain http to a host that is not loopback: " + strings.Join(parts, ", ")
+	case inspect.WarnUndeclaredCapability:
+		detail = "the server answered lists that it did not declare (it can show other lists to other clients): " +
+			termsafe.Quote(strings.Join(w.Capabilities, ", "))
+	case inspect.WarnDNSPinUnavailable:
+		detail = "a proxy from the environment resolves the host, so the DNS pin and the address checks do not apply"
+	default:
+		detail = "unknown warning"
+	}
+	return fmt.Sprintf("server %s: %s: %s", cutName(name), termsafe.Quote(string(w.Kind)), detail)
 }

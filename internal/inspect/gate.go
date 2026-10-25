@@ -34,6 +34,16 @@ var errProjectApproved = errors.New("inspect: " + reasonProjectApproved)
 // package doc, Untrusted files.
 var errUntrusted = errors.New("inspect: server from an untrusted project file needs an explicit opt-in")
 
+// Refused reports whether err says that a gate refused the server: the client
+// config turns it off or does not approve it, or it comes from an untrusted
+// project file and the user did not opt in. The config of the user sets these
+// states, not the server. err can be the Err of an Outcome: Refused looks
+// through a *ConnectError to its cause.
+func Refused(err error) bool {
+	return errors.Is(err, errDisabled) || errors.Is(err, errUnapproved) ||
+		errors.Is(err, errProjectApproved) || errors.Is(err, errUntrusted)
+}
+
 // The reasons of the gates in a *ConnectError (see gateError). The state
 // gate reasons are the texts of their errors without the "inspect: " prefix.
 // The untrusted gate reasons name what the opt-in allows: to start a stdio

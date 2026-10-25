@@ -43,10 +43,7 @@ func (cc configChecks) findings(ignore *rules.IgnoreList, servers []discover.Ser
 		for _, f := range found {
 			key := rules.FindingKey{RuleID: f.RuleID, Server: f.Server, Tool: f.Tool}
 			if ignore.Ignored(key) {
-				if ignored == nil {
-					ignored = make(map[string]int)
-				}
-				ignored[f.RuleID]++
+				ignored = addIgnored(ignored, f.RuleID, 1)
 				continue
 			}
 			rows = append(rows, report.FindingRow{

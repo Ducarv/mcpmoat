@@ -39,7 +39,8 @@ mcpmoat version              # print the version, commit and build date
 - **Later runs:** `scan` compares the tools with the pins. It reports `MOAT-T2-001` (changed tool,
   high), `MOAT-T2-002` (new tool, medium), `MOAT-T2-003` (removed tool, low) and `MOAT-T2-004`
   (tool not verified). A new tool is medium, so alone it does not give exit code 1: read the
-  report, not only the exit code. A server whose tools cannot be pinned (a duplicate or empty tool
+  report, not only the exit code. A new tool is high when the same server also lost a tool in that
+  scan, because a server can rename a tool to avoid the changed-tool check. A server whose tools cannot be pinned (a duplicate or empty tool
   name, invalid tool data, or more than 2 MiB) is a high `MOAT-T2-004`, because mcpmoat can never
   check its tools for changes. `MOAT-T2-004` is high when the tool name is pinned, because a duplicate,
   invalid or unverifiable copy of a pinned tool can hide a rug pull. Else it is medium. For each
@@ -53,7 +54,10 @@ mcpmoat version              # print the version, commit and build date
   You can ignore these IDs with `--ignore` only (see [Ignore findings](#ignore-findings)).
 - **Accept:** `scan` never changes the pins of a pinned server. Read the diff. If you trust the
   change, run `mcpmoat pin --accept <server> --expect <digest>`. The name must match one server
-  exactly. If two clients or projects use it, narrow it with `--config <file>`. If a config file has
+  exactly. If two clients use it, narrow it with `--config <file>`. If one file uses it in several
+  places (`~/.claude.json` has a global section and project sections), `pin` takes the server
+  outside any project, if there is exactly one. Add `--project <path>` to take the server of one
+  project. If a config file has
   any problem, `pin --accept` prints it and exits with code 2, because a broken file can hide a
   second server with the same name. `pin --accept` connects to that one server and stores new pins
   for it only. It prints the diff of each changed, new and not verified tool, then
@@ -73,20 +77,27 @@ mcpmoat version              # print the version, commit and build date
   returns now. It prints a note on stderr, before it saves, to say so. Use `--expect` unless you have a reason not to.
 - `scan` prints no `To accept` line for a server that is pinned for the first time, for a server
   that it could not inspect, for a finding that you ignored, or for tools that cannot be pinned. The
-  line holds a command only when the server name (and the `--config` path) uses only the characters
-  `A-Z a-z 0-9 . _ @ / : + = -` and starts with a letter, `_` or `/`. Every shell, also `cmd.exe`
-  and PowerShell, reads such a word as plain text. Else the line says what to run and gives the
-  digest, but no command. The line has no command either when a diff of that server was cut, when
-  another server has the same name, or when a config file has a problem, because you must review
-  the tool first or `pin` needs `--config`. If a diff of that server was cut, the line ends with
-  `(the diff was cut: review the full tool first)`. If `--ignore` dropped a pin finding of that
-  server, the line ends with `(--ignore hid some changes: run scan without it to review them
-  first)`, because the digest covers those changes too.
+  command holds `--project <path>` when `pin` needs it to select the server. The line holds a
+  command only when the server name (and the `--project` and `--config` paths) uses only the
+  characters `A-Z a-z 0-9 . _ @ / : + = -` and starts with a letter, `_` or `/`. Every shell, also
+  `cmd.exe` and PowerShell, reads such a word as plain text. Else the line says what to run and
+  gives the digest, but no command. The line has no command either when you did not see every
+  change (a cut diff, a change that `--ignore` hid, or a diff that is only a note), when the name
+  cannot select the server, or when a config file has a problem. Then you must review the tool
+  first, or `pin` needs `--config`. The line ends with a note for each change that you did not see:
+  `(the diff was cut: review the full tool first)`, `(--ignore hid some changes: run scan without
+  it to review them first)` or `(a change has no diff text: review the tool first)`. The digest
+  covers those changes too.
 - A server that fails, times out or is refused (an untrusted or turned-off server) is a warning on
   stderr. If the server is not pinned, it does not change the exit code. If the server is already
-  pinned, it is also a `MOAT-T2-004` finding (high, exit code 1) with the reason
-  `pinned server could not be inspected`, because a hostile server must not avoid the rug-pull
-  check by failing on purpose. A server that is listed twice is a `MOAT-T2-004` finding too: high
+  pinned and fails or times out, it is also a `MOAT-T2-004` finding (high, exit code 1) with the
+  reason `pinned server could not be inspected`, because a hostile server must not avoid the
+  rug-pull check by failing on purpose. A pinned server that is refused stays a warning: your
+  client config turns it off or does not approve it, and the server cannot choose that.
+- `scan` and `pin --accept` print the warnings of the inspection on stderr: secrets that go over
+  plain http (`cleartext-secrets`), lists that the server answered but did not declare
+  (`undeclared-capability`), and a proxy that skips the DNS pin (`dns-pin-unavailable`). The lines
+  hold keys and fixed names only, never values. A server that is listed twice is a `MOAT-T2-004` finding too: high
   when it is pinned, else medium.
 - `scan` and `pin --accept` read `pins.json` before they start any server. A `pins.json` that
   cannot be read exits with code 2 before a server starts. They read it again just before they
@@ -98,9 +109,10 @@ mcpmoat version              # print the version, commit and build date
   it started. `scan` and `pin --accept` print `interrupted; no pins were saved`, save nothing and
   exit with code 2.
 - A changed tool gives exit code 1. So does a high `MOAT-T2-004` (a pinned tool name that cannot be
-  verified, or a pinned server that cannot be inspected). The default threshold is high, so a new
-  tool (`MOAT-T2-002`), a removed tool (`MOAT-T2-003`) and a medium `MOAT-T2-004` (an unpinned
-  tool name or a first-run snapshot that fails) do not give exit code 1. A `pins.json`
+  verified, a pinned server that fails or times out, or a server whose tools cannot be pinned), and
+  a new tool next to a removed one. The default threshold is high, so a new tool (`MOAT-T2-002`)
+  alone, a removed tool (`MOAT-T2-003`) and a medium `MOAT-T2-004` (an unpinned tool name) do not
+  give exit code 1. A `pins.json`
   that `scan` cannot read or save gives exit code 2.
 
 ## Ignore findings

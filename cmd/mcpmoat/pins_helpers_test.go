@@ -428,3 +428,64 @@ func (i cancelingInspector) Inspect(ctx context.Context, s discover.Server) (ins
 	i.cancel()
 	return i.inner.Inspect(ctx, s)
 }
+
+// writePinsAside simulates another mcpmoat run: it reads the pins file at path,
+// sets the pins of the server id to tools and saves the file. It reports an
+// error with t.Errorf and not t.Fatalf, because it can run in a goroutine of
+// inspect.Run.
+func writePinsAside(t *testing.T, path string, id pins.Identity, tools ...inspect.Tool) {
+	t.Helper()
+	store, err := pins.Load(path)
+	if err != nil {
+		t.Errorf("pins.Load(%q) error = %v, want nil", path, err)
+		return
+	}
+	snap, err := pins.Snapshot(tools)
+	if err != nil {
+		t.Errorf("pins.Snapshot() error = %v, want nil", err)
+		return
+	}
+	if err := store.Set(id, snap); err != nil {
+		t.Errorf("Store.Set() error = %v, want nil", err)
+		return
+	}
+	if err := store.Save(); err != nil {
+		t.Errorf("Store.Save() error = %v, want nil", err)
+	}
+}
+
+// digestOf returns the digest that scan and pin compute for tools. It fails the
+// test when the tools cannot be pinned.
+func digestOf(t *testing.T, tools ...inspect.Tool) string {
+	t.Helper()
+	snap, err := pins.Snapshot(tools)
+	if err != nil {
+		t.Fatalf("Snapshot() error = %v, want nil", err)
+	}
+	return pins.Digest(snap)
+}
+
+// firstScan pins tools as the first run of the server srv of e.
+func firstScan(t *testing.T, e *pinEnv, tools ...inspect.Tool) {
+	t.Helper()
+	if got := e.scan(fakeServers(map[string][]inspect.Tool{"srv": tools})); got.code != exitOK {
+		t.Fatalf("first scan: exit code = %d, stderr:\n%s", got.code, got.stderr)
+	}
+}
+
+// assertPinRun checks a pin run like assertScanRun does a scan run. Every
+// stderr line of a usage error starts with "mcpmoat pin: ", and the usage hint
+// is the one exception (it starts with "Run").
+func assertPinRun(t *testing.T, r pinRunResult, want scanWant) {
+	t.Helper()
+	assertRun(t, pinPrefix, pinRunWithoutHint(r), want)
+}
+
+// assertNoExpectNote fails the test unless stderr is exactly the note of a
+// successful pin without --expect.
+func assertNoExpectNote(t *testing.T, stderr string) {
+	t.Helper()
+	if stderr != noExpectNote {
+		t.Errorf("stderr = %q, want exactly the no --expect note %q", stderr, noExpectNote)
+	}
+}

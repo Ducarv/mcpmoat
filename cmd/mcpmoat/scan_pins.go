@@ -34,7 +34,7 @@ type pinReport struct {
 	// the ignore list does not drop, in the order of the servers. Each one
 	// holds the digest of the tools that scan saw, for the line "To accept ...
 	// --expect <digest>" (see writeAcceptHints). A server whose tools cannot be
-	// pinned has no hint: pin --accept would refuse those tools (see hint).
+	// pinned has no hint: pin --accept would refuse those tools (see addHint).
 	hints []acceptHint
 }
 
@@ -95,16 +95,14 @@ func (c *cli) pinOutcomes(store *pins.Store, outcomes []inspect.Outcome, ign *sc
 		failed:  make(map[pins.Identity]bool),
 		warned:  make(map[string]bool),
 	}
-	names := make(map[string]int, len(outcomes))
-	for _, o := range outcomes {
-		p.outcome(o)
-		names[o.Server.Name]++
+	servers := make([]discover.Server, len(outcomes))
+	for i, o := range outcomes {
+		p.checkOutcome(o)
+		servers[i] = o.Server
 	}
-	// pin finds its server by name among all the servers, also the ones that
-	// were not inspected, so a name that two of them use needs --config.
-	for i := range p.res.hints {
-		p.res.hints[i].shared = names[p.res.hints[i].name] > 1
-	}
+	// pin selects its server among all the servers, also the ones that were
+	// not inspected.
+	setSelectors(p.res.hints, servers)
 	return p.res
 }
 
@@ -130,9 +128,9 @@ type pinner struct {
 	warned map[string]bool
 }
 
-// outcome checks one outcome. A server that was not inspected is a warning,
-// and also a high MOAT-T2-004 finding when it is pinned (see notInspected). For
-// a server that was inspected:
+// checkOutcome checks one outcome. A server that was not inspected is a
+// warning, and also a high MOAT-T2-004 finding when it is pinned and failed or
+// timed out (see notInspected). For a server that was inspected:
 //   - one that is not in the store is pinned (see firstPin);
 //   - one that is in the store is compared with its pins (see compare);
 //   - a second server with the same identity is a MOAT-T2-004 finding, so that
@@ -141,20 +139,20 @@ type pinner struct {
 //   - a server whose config path is not absolute (the working directory is not
 //     known) is a high MOAT-T2-004 finding. Its identity would not match the
 //     one in the store, so it would be pinned again with no comparison.
-func (p *pinner) outcome(o inspect.Outcome) {
+func (p *pinner) checkOutcome(o inspect.Outcome) {
 	s := o.Server
 	id := serverIdentity(s)
 	if o.Status != inspect.StatusOK {
-		p.notInspected(s, id)
+		p.notInspected(s, id, o.Err)
 		return
 	}
 	if p.handled[id] {
-		p.unverified(s.Name, reasonListedTwice, p.unverifiedSeverity(id))
+		p.addUnverified(s.Name, reasonListedTwice, p.unverifiedSeverity(id))
 		return
 	}
 	p.handled[id] = true
 	if !filepath.IsAbs(s.Source) {
-		p.unverified(s.Name, reasonRelativeSource, pins.UnverifiedSeverity(true))
+		p.addUnverified(s.Name, reasonRelativeSource, pins.UnverifiedSeverity(true))
 		return
 	}
 
@@ -184,9 +182,10 @@ func (p *pinner) add(row report.FindingRow) bool {
 	return true
 }
 
-// unverified adds the MOAT-T2-004 row of a server that scan cannot verify, with
-// the given severity. reason must be a fixed text: it is shown in the report.
-func (p *pinner) unverified(name, reason, severity string) {
+// addUnverified adds the MOAT-T2-004 row of a server that scan cannot verify,
+// with the given severity. reason must be a fixed text: it is shown in the
+// report.
+func (p *pinner) addUnverified(name, reason, severity string) {
 	row := pinRow(pins.KindUnverified, name, "", severity)
 	row.Related = reason
 	p.add(row)
@@ -202,16 +201,24 @@ func (p *pinner) unverifiedSeverity(id pins.Identity) string {
 
 // notInspected handles a server that failed, timed out or was refused. The
 // warning on stderr is already written (see warnNotInspected). A server that
-// was pinned before this run also gets a MOAT-T2-004 finding with severity high
-// and the fixed reason reasonNotInspected, so scan exits with 1: its pinned
-// tools could not be checked, and a hostile server must not be able to avoid the
-// rug-pull check by failing on purpose. A server that is not in the store is
-// only a warning (FR-06). A server that this run already inspected gets no row:
-// the first outcome checked its tools. A second failing outcome with one
-// identity gives no second row (see failed).
-func (p *pinner) notInspected(s discover.Server, id pins.Identity) {
+// was pinned before this run and failed or timed out also gets a MOAT-T2-004
+// finding with severity high and the fixed reason reasonNotInspected, so scan
+// exits with 1: its pinned tools could not be checked, and a hostile server
+// must not be able to avoid the rug-pull check by failing on purpose.
+//
+// A server that a gate refused (inspect.Refused: the client config turns it
+// off or does not approve it, or it is in an untrusted project file) stays a
+// warning only, also when it is pinned. The config of the user sets that
+// state, not the server, and the client does not load such a server. A
+// server that is not in the store is only a warning (FR-06). A server that this
+// run already inspected gets no row: the first outcome checked its tools. A
+// second failing outcome with one identity gives no second row (see failed).
+func (p *pinner) notInspected(s discover.Server, id pins.Identity, err error) {
+	if inspect.Refused(err) {
+		return
+	}
 	if _, pinned := p.store.Get(id); pinned && !p.handled[id] && !p.failed[id] {
-		p.unverified(s.Name, reasonNotInspected, pins.UnverifiedSeverity(true))
+		p.addUnverified(s.Name, reasonNotInspected, pins.UnverifiedSeverity(true))
 		p.failed[id] = true
 	}
 }
@@ -226,9 +233,9 @@ func (p *pinner) notInspected(s discover.Server, id pins.Identity) {
 func (p *pinner) firstPin(s discover.Server, id pins.Identity, tools []inspect.Tool) {
 	snap, err := pinnable(id, tools)
 	if err != nil {
-		// The error text is not printed: it can name a tool. The row gets a
-		// fixed reason instead.
-		p.unverified(s.Name, snapshotReason(err), pins.UnverifiedSeverity(true))
+		// The row gets the fixed reason, never the error text (see
+		// pinnableReason).
+		p.addUnverified(s.Name, pinnableReason(err), pins.UnverifiedSeverity(true))
 		return
 	}
 	p.res.pinned = append(p.res.pinned, pinnedServer{id: id, snap: snap, name: s.Name, tools: len(tools)})
@@ -241,11 +248,11 @@ func (p *pinner) firstPin(s discover.Server, id pins.Identity, tools []inspect.T
 // or new tool, and a pinned tool whose pin cannot be checked, also gets a diff
 // (see appendDiff). The store is never changed. When at least one row is kept (not
 // ignored), compare also records the digest for the "--expect" hint (see
-// hint). The hint says so when a kept diff was cut, or when the ignore list
+// addHint). The hint says so when a kept diff was cut, or when the ignore list
 // dropped a row: the digest covers that change, but the report shows no diff
 // for it.
 func (p *pinner) compare(s discover.Server, id pins.Identity, tools []inspect.Tool, stored pins.ServerPins) {
-	h := acceptHint{name: s.Name}
+	h := acceptHint{name: s.Name, id: id}
 	kept := false // true when at least one row of this server is not ignored
 	for _, ch := range pins.Compare(stored, tools) {
 		row := pinRow(ch.Kind, s.Name, ch.Tool, ch.Severity)
@@ -263,15 +270,15 @@ func (p *pinner) compare(s discover.Server, id pins.Identity, tools []inspect.To
 		p.res.diffs = p.c.appendDiff("scan", p.res.diffs, s.Name, ch)
 	}
 	if kept {
-		p.hint(h, id, tools)
+		p.addHint(h, id, tools)
 	}
 }
 
-// hint records h with the pins.Digest of the tools that scan saw, so scan can
-// print the "--expect" line (see writeAcceptHints). Tools that cannot be pinned
-// (see pinnable) cannot be accepted either, so there is no hint for them. The
-// error text is not printed.
-func (p *pinner) hint(h acceptHint, id pins.Identity, tools []inspect.Tool) {
+// addHint records h with the pins.Digest of the tools that scan saw, so scan
+// can print the "--expect" line (see writeAcceptHints). Tools that cannot be
+// pinned (see pinnable) cannot be accepted either, so there is no hint for
+// them. The error text is not printed.
+func (p *pinner) addHint(h acceptHint, id pins.Identity, tools []inspect.Tool) {
 	if snap, err := pinnable(id, tools); err == nil {
 		h.digest = pins.Digest(snap)
 		p.res.hints = append(p.res.hints, h)
@@ -302,7 +309,7 @@ func pinRow(kind pins.ChangeKind, server, tool, severity string) report.FindingR
 		RuleID:   kind.RuleID(),
 		Severity: severity,
 		Server:   server,
-		Field:    "tool",
+		Field:    rules.FieldTool,
 		Key:      tool,
 	}
 }
@@ -322,12 +329,14 @@ func (c *cli) printPinned(servers []pinnedServer) {
 // "mcpmoat scan: warning: server foo: timeout: inspect: no answer within 10s".
 // It writes the warning only, never exit code 2 (FR-06, FR-16). For a server
 // that is pinned, pinOutcomes also adds a high MOAT-T2-004 finding (see
-// notInspected).
+// notInspected). It also writes the inspection warnings of every outcome (see
+// warnInspection).
 func (c *cli) warnNotInspected(outcomes []inspect.Outcome) {
 	for _, o := range outcomes {
 		if o.Status != inspect.StatusOK {
 			c.scanWarnf("%s", notInspectedText(o))
 		}
+		c.warnInspection("scan", o)
 	}
 }
 

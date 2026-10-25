@@ -24,25 +24,6 @@ import (
 	"github.com/Ducarv/mcpmoat/internal/pins"
 )
 
-// digestOf returns the digest that scan and pin compute for tools. It fails the
-// test when the tools cannot be pinned.
-func digestOf(t *testing.T, tools ...inspect.Tool) string {
-	t.Helper()
-	snap, err := pins.Snapshot(tools)
-	if err != nil {
-		t.Fatalf("Snapshot() error = %v, want nil", err)
-	}
-	return pins.Digest(snap)
-}
-
-// firstScan pins tools as the first run of the server srv of e.
-func firstScan(t *testing.T, e *pinEnv, tools ...inspect.Tool) {
-	t.Helper()
-	if got := e.scan(fakeServers(map[string][]inspect.Tool{"srv": tools})); got.code != exitOK {
-		t.Fatalf("first scan: exit code = %d, stderr:\n%s", got.code, got.stderr)
-	}
-}
-
 // TestPinExpectUsageErrors checks that a bad --expect is a usage error: exit
 // code 2, an empty stdout, the message, and no discovery. The inspector is not
 // called and nothing is written, also when the server name is unknown, because
@@ -613,23 +594,26 @@ func TestAcceptCommand(t *testing.T) {
 
 	const d = "pd1:00"
 	tests := []struct {
-		name, server, config, want string
+		name, server, project, config, want string
 	}{
-		{"no config", "srv", "", "mcpmoat pin --accept srv --expect pd1:00"},
-		{"bare config", "srv", "/home/u/.cursor/mcp.json", "mcpmoat pin --accept srv --config /home/u/.cursor/mcp.json --expect pd1:00"},
-		{"relative config", "srv", "cfg/mcp.json", "mcpmoat pin --accept srv --config cfg/mcp.json --expect pd1:00"},
-		{"config with a space", "srv", "/Users/u/Application Support/c.json", ""},
-		{"config with a quote", "srv", "/tmp/a'b.json", ""},
-		{"config that starts with a dash", "srv", "-x.json", ""},
-		{"config that starts with a dot", "srv", "./mcp.json", ""},
-		{"config over 500 bytes", "srv", "/" + strings.Repeat("a", 500), ""},
-		{"name that is not bare, with config", "a b", "/c.json", ""},
-		{"name that is not bare, no config", "a b", "", ""},
+		{"no config", "srv", "", "", "mcpmoat pin --accept srv --expect pd1:00"},
+		{"project", "srv", "/home/u/proj", "", "mcpmoat pin --accept srv --project /home/u/proj --expect pd1:00"},
+		{"project and config", "srv", "/p", "/c.json", "mcpmoat pin --accept srv --project /p --config /c.json --expect pd1:00"},
+		{"project with a space", "srv", "/home/u/my proj", "", ""},
+		{"bare config", "srv", "", "/home/u/.cursor/mcp.json", "mcpmoat pin --accept srv --config /home/u/.cursor/mcp.json --expect pd1:00"},
+		{"relative config", "srv", "", "cfg/mcp.json", "mcpmoat pin --accept srv --config cfg/mcp.json --expect pd1:00"},
+		{"config with a space", "srv", "", "/Users/u/Application Support/c.json", ""},
+		{"config with a quote", "srv", "", "/tmp/a'b.json", ""},
+		{"config that starts with a dash", "srv", "", "-x.json", ""},
+		{"config that starts with a dot", "srv", "", "./mcp.json", ""},
+		{"config over 500 bytes", "srv", "", "/" + strings.Repeat("a", 500), ""},
+		{"name that is not bare, with config", "a b", "", "/c.json", ""},
+		{"name that is not bare, no config", "a b", "", "", ""},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			got, ok := acceptCommand(tt.server, tt.config, d)
+			got, ok := acceptCommand(tt.server, tt.project, tt.config, d)
 			if got != tt.want || ok != (tt.want != "") {
 				t.Errorf("acceptCommand(%q, %q) = (%q, %v), want (%q, %v)", tt.server, tt.config, got, ok, tt.want, tt.want != "")
 			}
@@ -662,7 +646,10 @@ func TestWriteAcceptHints(t *testing.T) {
 		{"cut diff and ignored rows", acceptHint{name: "srv", digest: d, truncated: true, ignored: true}, "", false,
 			steps + hintCutNote + hintIgnoredNote},
 		// pin refuses a name that two servers use, and any config problem.
-		{"shared name: no command", acceptHint{name: "srv", digest: d, shared: true}, "", false, stepsConfig},
+		{"ambiguous name: no command", acceptHint{name: "srv", digest: d, ambiguous: true}, "", false, stepsConfig},
+		{"project", acceptHint{name: "srv", digest: d, project: "/p"}, "", false, "To accept srv: mcpmoat pin --accept srv --project /p --expect pd1:00"},
+		{"project that is not bare", acceptHint{name: "srv", digest: d, project: "/my p"}, "", false,
+			"To accept srv: run pin --accept with this server name, --project with its project path, and --expect pd1:00"},
 		{"config problem: no command", acceptHint{name: "srv", digest: d}, "", true,
 			"To accept srv: fix the config file first, then run pin --accept with this server name, --config with its config file, and --expect pd1:00"},
 		{"config problem with --config", acceptHint{name: "srv", digest: d}, "/c.json", true,
@@ -684,7 +671,7 @@ func TestWriteAcceptHints(t *testing.T) {
 	}
 }
 
-// TestScanAcceptHintSharedName checks that two servers with one name in
+// TestScanAcceptHintSharedName checks that two global servers with one name in
 // different config files get hints with no command, because pin refuses the
 // name without --config.
 func TestScanAcceptHintSharedName(t *testing.T) {
@@ -708,8 +695,8 @@ func TestScanAcceptHintSharedName(t *testing.T) {
 		{Server: srvB, Status: inspect.StatusOK, Result: inspect.Result{Tools: changed}},
 	}, &scanIgnores{})
 
-	if len(pr.hints) != 2 || !pr.hints[0].shared || !pr.hints[1].shared {
-		t.Errorf("hints = %+v, want two shared hints", pr.hints)
+	if len(pr.hints) != 2 || !pr.hints[0].ambiguous || !pr.hints[1].ambiguous {
+		t.Errorf("hints = %+v, want two ambiguous hints", pr.hints)
 	}
 }
 
@@ -805,5 +792,83 @@ func TestBareShellWordReadByShell(t *testing.T) {
 	}
 	if entries, err := os.ReadDir(dir); err != nil || len(entries) != 0 {
 		t.Errorf("the shell created files: %v, error %v", entries, err)
+	}
+}
+
+// TestSelectServers checks which servers "pin --accept <name> [--project
+// <path>]" selects.
+func TestSelectServers(t *testing.T) {
+	t.Parallel()
+
+	global := discover.Server{Name: "gh", Source: "/h/.claude.json"}
+	projA := discover.Server{Name: "gh", Source: "/h/.claude.json", ProjectPath: "/p/a"}
+	projB := discover.Server{Name: "gh", Source: "/h/.claude.json", ProjectPath: "/p/b"}
+	cursor := discover.Server{Name: "gh", Source: "/h/.cursor/mcp.json"}
+	other := discover.Server{Name: "x", Source: "/h/.claude.json"}
+
+	tests := []struct {
+		name    string
+		servers []discover.Server
+		project string
+		want    []discover.Server
+	}{
+		{"one server", []discover.Server{global, other}, "", []discover.Server{global}},
+		{"unknown name", []discover.Server{other}, "", nil},
+		{"global and projects: the global one", []discover.Server{projA, global, projB}, "", []discover.Server{global}},
+		{"projects only: ambiguous", []discover.Server{projA, projB}, "", []discover.Server{projA, projB}},
+		{"two globals: ambiguous", []discover.Server{global, cursor, projA}, "", []discover.Server{global, cursor, projA}},
+		{"project selects one", []discover.Server{projA, global, projB}, "/p/b", []discover.Server{projB}},
+		{"unknown project", []discover.Server{projA, global}, "/p/c", nil},
+		{"one project server, no flag", []discover.Server{projA, other}, "", []discover.Server{projA}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			ids := func(servers []discover.Server) []pins.Identity {
+				var out []pins.Identity
+				for _, s := range servers {
+					out = append(out, serverIdentity(s))
+				}
+				return out
+			}
+			if got := selectServers(tt.servers, "gh", tt.project); !slices.Equal(ids(got), ids(tt.want)) {
+				t.Errorf("selectServers(%q) = %+v, want %+v", tt.project, ids(got), ids(tt.want))
+			}
+		})
+	}
+}
+
+// TestSetSelectors checks the --project value of a hint, and when the name
+// cannot select the server at all.
+func TestSetSelectors(t *testing.T) {
+	t.Parallel()
+
+	global := discover.Server{Name: "gh", Client: discover.ClientClaudeCode, Source: "/h/.claude.json"}
+	projA := discover.Server{Name: "gh", Client: discover.ClientClaudeCode, Source: "/h/.claude.json", ProjectPath: "/p/a"}
+	projB := discover.Server{Name: "gh", Client: discover.ClientClaudeCode, Source: "/h/.claude.json", ProjectPath: "/p/b"}
+	cursor := discover.Server{Name: "gh", Client: discover.ClientCursor, Source: "/h/.cursor/mcp.json"}
+
+	tests := []struct {
+		name          string
+		servers       []discover.Server
+		hint          discover.Server
+		wantProject   string
+		wantAmbiguous bool
+	}{
+		{"only server", []discover.Server{global}, global, "", false},
+		{"global next to projects", []discover.Server{global, projA, projB}, global, "", false},
+		{"project next to the global one", []discover.Server{global, projA, projB}, projA, "/p/a", false},
+		{"one project server alone", []discover.Server{projB}, projB, "", false},
+		{"two globals", []discover.Server{global, cursor}, cursor, "", true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			hints := []acceptHint{{name: tt.hint.Name, id: serverIdentity(tt.hint)}}
+			setSelectors(hints, tt.servers)
+			if hints[0].project != tt.wantProject || hints[0].ambiguous != tt.wantAmbiguous {
+				t.Errorf("hint = %+v, want project %q and ambiguous %v", hints[0], tt.wantProject, tt.wantAmbiguous)
+			}
+		})
 	}
 }
