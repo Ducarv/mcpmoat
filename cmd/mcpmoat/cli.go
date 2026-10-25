@@ -48,13 +48,13 @@ type cli struct {
 	inspector inspect.Inspector
 	// ctx ends when the process gets a signal (see main). It is a field and
 	// not a parameter of command.run, so that every command keeps one
-	// signature. Use the context method, which also handles a nil ctx.
+	// signature. Use the ctxOrBackground method, which also handles a nil ctx.
 	ctx context.Context
 }
 
-// context returns the context of the process. A cli built without one (in a
-// test, for example) gets a context that never ends.
-func (c *cli) context() context.Context {
+// ctxOrBackground returns the context of the process. A cli built without one
+// (in a test, for example) gets a context that never ends.
+func (c *cli) ctxOrBackground() context.Context {
 	if c.ctx == nil {
 		return context.Background()
 	}
@@ -205,7 +205,7 @@ func (c *cli) usage(w io.Writer) {
 	fprintf(w, "     (scan also exits 2 when a config file has a problem or when pins.json cannot be read\n")
 	fprintf(w, "     or saved, or when it is stopped by a signal; a missing file is not a problem in auto-discovery,\n")
 	fprintf(w, "     but a missing --config file is. A server that fails or times out is a warning and does not\n")
-	fprintf(w, "     change the exit code, unless its pins are already stored: then it is a finding)\n")
+	fprintf(w, "     change the exit code, unless its pins are already stored: then it is a high finding and scan exits 1)\n")
 }
 
 // scanUsage writes the flags and the output notes of the scan command to w.
@@ -237,8 +237,9 @@ func scanUsage(w io.Writer) {
 	fprintf(w, "  For each pinned server with a finding, scan prints \"To accept <server>: mcpmoat pin --accept <server> --expect <digest>\".\n")
 	fprintf(w, "  The digest covers the tools that scan saw, so pin saves only those tools. Review the diff, then run that line.\n")
 	fprintf(w, "  A server that fails, times out, or that scan refuses to start (an untrusted or turned-off server) is a warning on stderr.\n")
-	fprintf(w, "  If that server is already pinned, it is also a finding (MOAT-T2-004, medium): its pinned tools were not checked.\n")
-	fprintf(w, "  scan reads pins.json before it starts a server. Ctrl-C (or SIGTERM or SIGHUP) stops the servers, saves no pins and exits 2.\n")
+	fprintf(w, "  If that server is already pinned, it is also a finding (MOAT-T2-004, high, exit code 1): its pinned tools were not checked.\n")
+	fprintf(w, "  scan reads pins.json before it starts a server, and reads it again just before it saves the first-run pins.\n")
+	fprintf(w, "  Ctrl-C (or SIGTERM or SIGHUP) stops the servers, saves no pins and exits 2.\n")
 	fprintf(w, "  --no-connect: scan runs only the built-in config rules (T4 and T5). It reads and writes no pins.\n")
 	fprintf(w, "  The tool rules (YAML) are not applied to tools yet. Rules from --rules are loaded and checked, but not applied yet.\n")
 	fprintf(w, "  Exit code 1 means a finding of severity high or above that is not ignored.\n")

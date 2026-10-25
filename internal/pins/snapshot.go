@@ -24,7 +24,7 @@ var ErrDuplicateTool = errors.New("duplicate tool name")
 // Snapshot returns an error in these cases:
 //   - A tool name is empty. The error wraps ErrInvalidTool.
 //   - Two tools have the same name. The error wraps ErrDuplicateTool.
-//   - Canonical or Hash fails for a tool. The error wraps ErrInvalidTool.
+//   - Canonical fails for a tool. The error wraps ErrInvalidTool.
 //
 // Tool names, descriptions and schemas come from the server and are not
 // trusted. The error text never includes them. It names the tool only by its
@@ -46,11 +46,7 @@ func Snapshot(tools []inspect.Tool) (ServerPins, error) {
 		if err != nil {
 			return nil, fmt.Errorf("tool %d: %w", i, err)
 		}
-		hash, err := Hash(t)
-		if err != nil {
-			return nil, fmt.Errorf("tool %d: %w", i, err)
-		}
-		pinned[t.Name] = Pin{Hash: hash, Canonical: string(canonical)}
+		pinned[t.Name] = Pin{Hash: hashCanonical(canonical), Canonical: string(canonical)}
 	}
 	return pinned, nil
 }

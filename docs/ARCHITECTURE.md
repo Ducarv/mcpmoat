@@ -125,8 +125,8 @@ the connect and pin steps between step 5 and step 6:
   inspector is `inspect.New` with the zero `SDKOptions`. So a server from an untrusted project file,
   and a server that the client config turns off or leaves unapproved, is refused. `scan` has no flag
   that allows them. A stdio server runs with a scrubbed environment (NFR-04). A server that fails,
-  times out or is refused gives a warning on stderr. It does not change the exit code (FR-06). It is
-  also a finding when the server is pinned (see 5b).
+  times out or is refused gives a warning on stderr. It does not change the exit code (FR-06), unless
+  the server is pinned: then it is also a high finding (see 5b).
 - Signals: `main` passes a context that ends on Ctrl-C, `SIGTERM` or `SIGHUP`. The stdio servers run
   in their own session, so the terminal does not signal them. When the context ends, `inspect.Run`
   stops them. `scan` then prints `mcpmoat scan: interrupted; no pins were saved`, saves nothing,
@@ -136,8 +136,12 @@ the connect and pin steps between step 5 and step 6:
     `pins.Snapshot`), the server gets a MOAT-T2-004 finding, so that it never passes in silence.
     `scan` prints `mcpmoat scan: pinned N tools for <server>` on stderr only after the save worked.
   - A pinned server that was not inspected (it failed, timed out or was refused) gets a MOAT-T2-004
-    finding (medium) with the reason `pinned server could not be inspected`. A hostile server must
-    not avoid the check by failing on purpose. A server that is not pinned stays a warning only.
+    finding (high, exit 1) with the reason `pinned server could not be inspected`
+    (`pinner.notInspected`). A hostile server must not avoid the check by failing on purpose. A
+    server that is not pinned stays a warning only (FR-06).
+  - A second entry with the same identity gets a MOAT-T2-004 finding with the reason `the server is
+    listed twice`, so that its tools are not skipped. It is high when the identity is pinned, else
+    medium (`pinner.unverifiedSeverity`).
   - A server that is in the store goes through `pins.Compare` (`pinner.compare`). The findings are MOAT-T2-001
     (changed tool, high), MOAT-T2-002 (new tool, medium), MOAT-T2-003 (removed tool, low) and
     MOAT-T2-004 (not verified). The severity of MOAT-T2-004 is high when the tool name is pinned,
@@ -155,7 +159,8 @@ the connect and pin steps between step 5 and step 6:
 - 5c. For a pinned server with at least one pin finding that is not ignored, `pinOutcomes` also keeps
   the `pins.Digest` of the tools that `scan` saw (`acceptHint` in `cmd/mcpmoat/scan_pins.go`). A
   server whose tools `pins.Snapshot` refuses has no hint. A first-run server, a server that was not
-  inspected and an ignored finding give no hint.
+  inspected and an ignored finding give no hint. A hint keeps `truncated` when a diff of that server
+  was cut.
 - The pin findings join the config findings in one table. A changed tool and a new tool also get a
   diff, so the user can review the content of a new tool before they accept it. A new tool has the
   header `New tool <tool> on server <server>:` and only added lines. A finding that the user ignored
@@ -164,21 +169,26 @@ the connect and pin steps between step 5 and step 6:
   server: `the diff of tool <tool> on server <server> was cut at the size limit; review the full tool
   before you accept it`. Then `writeAcceptHints` prints one
   line for each hint on stdout:
-  `To accept <server>: mcpmoat pin --accept <server> --expect pd1:<32 hex>`. The server name in the
+  `To accept <server>: mcpmoat pin --accept <server> --expect pd1:<32 hex>`. When a diff of that
+  server was cut, the line ends with ` (the diff was cut: review the full tool first)`. The server name in the
   command goes through `shellArg`: a name of plain ASCII characters stays bare, and any other safe
   name goes in single quotes (POSIX shell quoting; on Windows `cmd.exe` or PowerShell the user may
   need to change it). A name that is too long, that `termsafe` would escape, or that starts with a
   dash (`pin` would read it as a flag, even in quotes) gets no command, only the digest.
-- `scan` saves the new pins after it prints the report, so a save error never hides the report.
-  The `pinned N tools` lines come after the save.
+- `scan` saves the new pins after it prints the report, so a save error never hides the report
+  (`savePinned` in `cmd/mcpmoat/scan.go`). `savePinned` reads `pins.json` again, sets only the
+  first-run servers that the file does not hold yet (another run may have pinned them meanwhile),
+  and saves. The `pinned N tools` lines come after the save, only for the servers it set.
 
 `--no-connect` starts no process and reads and writes no `pins.json`.
 
 The exit codes (`cmd/mcpmoat/cli.go`) are: 0 when no finding has severity high or above; 1 when a
 finding that is not ignored has severity high or above (the PRD default of `--fail-on`, which is not
-a flag yet). A changed tool is high, so it gives exit code 1. So does a MOAT-T2-004 finding of a
-pinned tool name (high). The default does not fail on MOAT-T2-002 (new tool), MOAT-T2-003 (removed
-tool) or a medium MOAT-T2-004. The code is 2 for an execution error, and that includes a `pins.json`
+a flag yet). A changed tool is high, so it gives exit code 1. So does a high MOAT-T2-004 finding: a
+pinned tool name that cannot be verified, a pinned server that cannot be inspected, or a pinned
+server that is listed twice. The default does not fail on MOAT-T2-002 (new tool), MOAT-T2-003
+(removed tool) or a medium MOAT-T2-004 (an unpinned tool name, a first-run snapshot that fails, or
+an unpinned server that is listed twice). The code is 2 for an execution error, and that includes a `pins.json`
 that `scan` cannot read or save, and a signal. `scan` prints the report first.
 Exit code 2 wins over 1. `internal/report` has no JSON output.
 
@@ -190,7 +200,8 @@ Exit code 2 wins over 1. `internal/report` has no JSON output.
    broken file can hide a second server with the same name. It prints each problem, then
    `mcpmoat pin: fix the config file or choose one with --config <file>`, and exits with 2. It
    inspects nothing and writes nothing.
-2. It reads `pins.json` (`pins.Load`). A bad file exits with 2 before any server starts.
+2. It reads `pins.json` (`pins.Load`). A bad file exits with 2 before any server starts. It reads
+   the file again just before step 6.
 3. It inspects that one server with `--timeout`, with the same inspector as `scan`. A server that
    fails, times out or is refused exits with 2, and nothing is written.
 4. It makes the pins of the tools (`pins.Snapshot`) and counts the differences with `pins.Compare`.
@@ -205,11 +216,12 @@ Exit code 2 wins over 1. `internal/report` has no JSON output.
    harmless tools to `scan` and harmful tools to `pin`. `pin` checks the flag with
    `pins.ValidDigest` right after it parses the flags, so an invalid or empty `--expect` exits with 2
    before it reads any file or starts any server.
-6. It sets the pins of this server only (`Store.Set`) and saves the file. Other servers keep their
-   pins. A `pins.json` problem exits with 2.
+6. It sets the pins of this server only (`Store.Set`) on the store that it read again, and saves
+   the file. Other servers keep their pins, and so do entries that another run wrote since step 2.
+   A `pins.json` problem exits with 2.
 7. It prints `accepted <server>: N new, N changed, N removed` on stdout, with `, N not verified`
    added only when N is above 0. Without `--expect`, it also prints a note on stderr that it trusts
-   the tools that the server returns now.
+   the tools that the server returns now. The note comes before the save (step 6).
 
 A signal during step 3 (Ctrl-C, `SIGTERM` or `SIGHUP`, see Signals above) stops the server. `pin`
 saves nothing, prints `mcpmoat pin: interrupted; no pins were saved` and exits with 2.
@@ -219,7 +231,7 @@ tool rules (descriptions and schemas) do not run
 yet (#143). `scan` loads the rules from `--rules` and checks them, but does not apply them. It
 prints a notice on stderr that says so.
 
-Known gaps: the store has no lock (#150). `--fail-on` (#65) and the JSON output (#64) are not
+Known gaps: the store has no lock (#150), only a read just before the save. `--fail-on` (#65) and the JSON output (#64) are not
 implemented.
 
 Known limit: a renamed or moved server (a new name, config file or project path) has a new identity.
@@ -375,10 +387,12 @@ a changed tool (a rug pull). `scan` writes the pins of a server on its first run
 
 Known limits:
 
-- There is no file lock. With two parallel runs, the last writer wins. A parallel `pin --accept` and
-  a scan can undo each other. A run can also drop the first pins that a parallel run saved, and the
-  next run then sees that server as new, with no alert. Issue #150 tracks this and the missing-file
-  limit below.
+- There is no file lock. `scan` and `pin --accept` read the file again just before they save, and
+  they change only their own entries (`scan` adds only first-run servers that the file does not
+  hold). This narrows the window for a lost update, but two runs that read and save at the same
+  moment can still undo each other, and the last writer wins. A run can then drop the first pins
+  that a parallel run saved, and the next run sees that server as new, with no alert. Issue #150
+  tracks the full lock and the missing-file limit below.
 - An existing config directory keeps its mode. mcpmoat creates a new directory with `0700`, but it
   does not check or tighten one that exists, and `Load` does not check the mode or the owner of an
   existing `pins.json`. If other users can write to the directory or the file, they can replace the

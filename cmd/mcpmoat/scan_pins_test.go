@@ -758,16 +758,16 @@ func TestScanPinsNotInspected(t *testing.T) {
 		got := e.scan(&inspecttest.Fake{Errors: map[string]error{"srv": errors.New("boom")}})
 
 		// A failing server must not avoid the rug-pull check (S3): one
-		// MOAT-T2-004 medium row for the server, with no tool name, and exit 0.
+		// MOAT-T2-004 high row for the server, with no tool name, and exit 1.
 		// The warning stays on stderr.
 		assertScanRun(t, got, scanWant{
-			code:   exitOK,
-			stdout: []string{"MOAT-T2-004", "medium", "srv", "pinned server could not be inspected"},
+			code:   exitFindings,
+			stdout: []string{"MOAT-T2-004", "high", "srv", "pinned server could not be inspected"},
 			stderr: []string{"mcpmoat scan: warning: server srv: failed: inspect: boom\n"},
 		})
 		out := splitPinOutput(t, got.stdout)
-		if len(out.rows) != 1 || out.rows[0].rule != "MOAT-T2-004" || out.rows[0].severity != "medium" || out.rows[0].server != "srv" {
-			t.Errorf("pin rows = %+v, want one MOAT-T2-004 medium row for srv\nstdout:\n%s", out.rows, got.stdout)
+		if len(out.rows) != 1 || out.rows[0].rule != "MOAT-T2-004" || out.rows[0].severity != "high" || out.rows[0].server != "srv" {
+			t.Errorf("pin rows = %+v, want one MOAT-T2-004 high row for srv\nstdout:\n%s", out.rows, got.stdout)
 		}
 		if strings.Contains(got.stdout, "Changed tool") {
 			t.Errorf("stdout has a diff, want none:\n%s", got.stdout)
@@ -787,8 +787,8 @@ func TestScanPinsNotInspected(t *testing.T) {
 		got := e.scan(blockingInspector{}, "--timeout", "20ms")
 
 		assertScanRun(t, got, scanWant{
-			code:   exitOK,
-			stdout: []string{"MOAT-T2-004", "medium", "srv", "pinned server could not be inspected"},
+			code:   exitFindings,
+			stdout: []string{"MOAT-T2-004", "high", "srv", "pinned server could not be inspected"},
 			stderr: []string{"warning: server srv: timeout: "},
 		})
 	})

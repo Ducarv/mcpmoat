@@ -367,9 +367,10 @@ not break the scan.
 - A fixture server that crashes on start is reported as failed, and other servers are still scanned.
 - A failed or timed-out server contributes an error entry to the report, not a crash.
 - A failed, timed-out or refused server is only a warning, and it does not change the exit code.
-  One exception: when the server is already pinned, it is also a `MOAT-T2-004` finding (medium) with
-  the reason `pinned server could not be inspected` (see FR-12). A hostile server must not avoid the
-  rug-pull check by failing on purpose.
+  One exception: when the server is already pinned, it is also a `MOAT-T2-004` finding (`high`, so
+  exit code 1) with the reason `pinned server could not be inspected` (see FR-12). A hostile server
+  must not avoid the rug-pull check by failing on purpose. A server that is not pinned stays a
+  warning only.
 - Ctrl-C, `SIGTERM` or `SIGHUP` cancels the run. mcpmoat stops the stdio servers that it started,
   because they run in their own session and the terminal does not signal them. `scan` prints
   `interrupted; no pins were saved`, saves nothing and exits with code 2. `pin --accept` does the
@@ -479,14 +480,21 @@ text diff.
   avoid the `MOAT-T2-001` check. So that finding is `high`. An unverified tool whose name is not
   pinned is `medium`.
 - A pinned server that cannot be inspected (it failed, timed out or was refused) is a `MOAT-T2-004`
-  finding (`medium`) with the reason `pinned server could not be inspected`. A server that is not
-  pinned stays a warning only (FR-06).
+  finding (`high`) with the reason `pinned server could not be inspected`. A hostile server must not
+  avoid the rug-pull check by failing on purpose. A server that is listed twice (two entries with
+  one identity) is also a `MOAT-T2-004` finding, with the reason `the server is listed twice`: `high`
+  when the identity is pinned, else `medium`. A server that is not pinned and cannot be inspected
+  stays a warning only (FR-06).
 - The default threshold of `--fail-on` is `high`. So the default does not fail on `MOAT-T2-002`
-  (new tool), `MOAT-T2-003` (removed tool) or a `medium` `MOAT-T2-004`. It does fail on
+  (new tool), `MOAT-T2-003` (removed tool) or a `medium` `MOAT-T2-004` (an unpinned tool name, a
+  first-run snapshot that fails, or an unpinned server that is listed twice). It does fail on
   `MOAT-T2-001` and on a `high` `MOAT-T2-004`.
 - `scan` and `pin --accept` read `pins.json` before they start any server. A bad `pins.json` exits
-  with code 2 before a server starts. The `pinned N tools for <server>` lines appear only after the
-  pins are saved.
+  with code 2 before a server starts. They read it again just before they save, to keep what
+  another run wrote meanwhile. `scan` sets only the first-run servers that the file does not hold
+  yet, and prints `pinned N tools for <server>` only for those, after the save. `pin --accept`
+  changes only the entry of its server. This narrows the lost-update window. It does not close it:
+  a lock is issue #150.
 
 **FR-13: Accept changes.** `mcpmoat pin --accept <server>` accepts the new version.
 
@@ -507,12 +515,14 @@ text diff.
   If the digests differ, `pin` prints the diff and `the tools of <server> differ from what scan
   showed ...; nothing was saved`, saves nothing and exits with code 2. An invalid or empty
   `--expect` exits with code 2 before any server starts. Without `--expect`, `pin --accept` works as
-  before and prints a note on stderr that it trusts the tools that the server returns now.
+  before and prints a note on stderr, before it saves, that it trusts the tools that the server
+  returns now.
 - After the diffs, `scan` prints one line for each pinned server that has a pin finding that is not
   ignored: `To accept <server>: mcpmoat pin --accept <server> --expect pd1:<32 hex>`. The server
   name in the command is quoted for a POSIX shell when needed. A name with a character that is not
   safe to paste, or that starts with `-`, gets no command, only the digest. On Windows (`cmd.exe` or PowerShell) the user may
-  need to change the quotes. There is no line for a server pinned for the first time, a server that
+  need to change the quotes. When a diff of that server was cut at the size limit, the line ends with
+  ` (the diff was cut: review the full tool first)`. There is no line for a server pinned for the first time, a server that
   could not be inspected, an ignored finding, or tools that cannot be pinned.
 - The digest (`pins.Digest`, version `pd1`) is the first 128 bits of SHA-256 over the sorted tool
   names and their hashes. 128 bits, because the server picks both tool sets, so a collision costs

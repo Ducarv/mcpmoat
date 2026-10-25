@@ -25,8 +25,8 @@ import (
 //  3. loadPinStore: read pins.json. This comes before the next step, so a
 //     corrupt or newer file stops pin before it starts a stdio server.
 //  4. inspectOne: inspect only that server.
-//  5. acceptTools: show the diffs, check --expect, set the pins of this server
-//     only and save the file.
+//  5. acceptTools: show the diffs, check --expect, read pins.json again, set the
+//     pins of this server only and save the file.
 //
 // Nothing is written unless every step before the save worked. The server runs
 // in its own session, so the terminal does not signal it. When the process gets
@@ -40,7 +40,7 @@ func (c *cli) runPin(_ options, args []string) int {
 	}
 
 	// The context ends on a signal, like in runScan.
-	ctx := c.context()
+	ctx := c.ctxOrBackground()
 
 	server, ok := c.findPinServer(ctx, a.accept, a.configPath)
 	if !ok {
@@ -119,12 +119,12 @@ func (c *cli) parsePinArgs(args []string) (a pinArgs, code int, ok bool) {
 func (c *cli) loadPinStore() (*pins.Store, bool) {
 	path, err := pins.DefaultPath(c.getenv, c.homeDir)
 	if err != nil {
-		c.pinErrorf("cannot find the pins file: %s", termsafe.Quote(err.Error()))
+		c.cmdErr("pin", "cannot find the pins file", err)
 		return nil, false
 	}
 	store, err := pins.Load(path)
 	if err != nil {
-		c.pinErrorf("cannot read the pins file: %s", termsafe.Quote(err.Error()))
+		c.cmdErr("pin", "cannot read the pins file", err)
 		return nil, false
 	}
 	return store, true
@@ -138,21 +138,20 @@ func (c *cli) loadPinStore() (*pins.Store, bool) {
 func (c *cli) inspectOne(ctx context.Context, server discover.Server, opts inspect.Options) ([]inspect.Tool, bool) {
 	outcomes, err := inspect.Run(ctx, []discover.Server{server}, opts, c.inspector)
 	if ctx.Err() != nil {
-		// The text is fixed.
-		c.pinErrorf("interrupted; no pins were saved")
+		c.pinErrorf("%s", interruptedText)
 		return nil, false
 	}
 	if err != nil {
 		// The text of an inspect.Run error holds only our own words.
-		c.pinErrorf("cannot inspect the server: %s", termsafe.Quote(err.Error()))
+		c.cmdErr("pin", "cannot inspect the server", err)
 		return nil, false
 	}
-	// Run gives one outcome for one server.
-	if len(outcomes) == 0 {
+	// Run gives one outcome for one server. Any other number is a bug.
+	if len(outcomes) != 1 {
 		c.pinErrorf("server %s: not inspected", cutName(server.Name))
 		return nil, false
 	}
-	if len(outcomes) != 1 || outcomes[0].Status != inspect.StatusOK {
+	if outcomes[0].Status != inspect.StatusOK {
 		c.pinErrorf("%s", notInspectedText(outcomes[0]))
 		return nil, false
 	}
@@ -163,13 +162,20 @@ func (c *cli) inspectOne(ctx context.Context, server discover.Server, opts inspe
 // prints the diff of each changed or new tool first, so the user sees what the
 // accept changes. It returns the exit code.
 //
+// store is the store that pin read before it started the server. It only gives
+// the pins to compare with. Just before the save, acceptTools reads pins.json
+// again and sets the pins of this server in that fresh store, so it keeps an
+// entry that another run wrote in the meantime. An accept always overwrites the
+// entry of this one server. This makes the window for a lost update short but
+// does not close it. A lock on the file is issue #150.
+//
 // With a non-empty expect, it compares that digest with pins.Digest of the
 // tools that it just inspected. This closes a time-of-check to time-of-use gap:
 // a hostile server can show good tools to "scan", which the user reviews, and
 // bad tools to "pin --accept", which then saves them (see writeAcceptHints). If
 // the digests differ, pin saves nothing. Without expect, pin trusts the tools
 // that the server returns now, and prints the note pinNoExpectNote on stderr
-// after a successful save.
+// before it saves.
 func (c *cli) acceptTools(store *pins.Store, server discover.Server, tools []inspect.Tool, expect string) int {
 	name := cutName(server.Name)
 
@@ -191,31 +197,38 @@ func (c *cli) acceptTools(store *pins.Store, server discover.Server, tools []ins
 		return exitError
 	}
 
-	// The two digests are hex made by mcpmoat (expect passed ValidDigest), so
-	// they need no escape.
-	if got := pins.Digest(snap); expect != "" && got != expect {
+	if expect == "" {
+		// The note comes before the save, so it shows whenever the run reaches
+		// the save step.
+		fprintf(c.stderr, "%s\n", pinNoExpectNote)
+	} else if got := pins.Digest(snap); got != expect {
+		// The two digests are hex made by mcpmoat (expect passed ValidDigest),
+		// so they need no escape.
 		c.pinErrorf("the tools of %s differ from what scan showed (digest %s, expected %s); nothing was saved. Run scan again and review the diff.", name, got, expect)
 		return exitError
 	}
 
-	if err := store.Set(id, snap); err != nil {
-		c.pinErrorf("cannot set the pins of server %s: %s", name, termsafe.Quote(err.Error()))
+	// Read the file again, so that the save keeps what another run wrote since
+	// the first read. A read error stops pin before the save.
+	fresh, ok := c.loadPinStore()
+	if !ok {
 		return exitError
 	}
-	if err := store.Save(); err != nil {
-		c.pinErrorf("cannot save the pins file: %s", termsafe.Quote(err.Error()))
+	if err := fresh.Set(id, snap); err != nil {
+		c.cmdErr("pin", "cannot set the pins of server "+name, err)
+		return exitError
+	}
+	if err := fresh.Save(); err != nil {
+		c.cmdErr("pin", "cannot save the pins file", err)
 		return exitError
 	}
 
 	fprintf(c.stdout, "accepted %s: %s\n", name, counts)
-	if expect == "" {
-		fprintf(c.stderr, "%s\n", pinNoExpectNote)
-	}
 	return exitOK
 }
 
-// pinNoExpectNote is the line that pin prints on stderr, after a successful
-// save, when --expect is not given. It is fixed text.
+// pinNoExpectNote is the line that pin prints on stderr, before it saves, when
+// --expect is not given. It is fixed text.
 const pinNoExpectNote = "mcpmoat pin: note: without --expect, pin trusts the tools the server returns now; " +
 	"use the digest from scan to be sure they match what you reviewed."
 
@@ -233,7 +246,8 @@ func pinUsage(w io.Writer) {
 	fprintf(w, "  --config <file>      Read only this file, like \"scan --config\"; skips auto-discovery\n")
 	fprintf(w, "  --timeout <duration> Time limit for the server, a Go duration such as 10s or 1m30s (default %s)\n", inspect.DefaultTimeout)
 	fprintf(w, "  A problem with a config file is an error (exit 2): it can hide a second server with the same name. Fix the file or use --config\n")
-	fprintf(w, "  Other servers keep their pins. A server that fails, times out, or that pin refuses to start is an error (exit 2) and pin changes nothing.\n")
+	fprintf(w, "  pin changes only the entry of this server: it reads pins.json again just before it saves, and keeps the other entries.\n")
+	fprintf(w, "  A server that fails, times out, or that pin refuses to start is an error (exit 2) and pin changes nothing.\n")
 }
 
 // pinErrorf writes one error line on stderr, with the prefix "mcpmoat pin: ".

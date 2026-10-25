@@ -107,16 +107,13 @@ func (c *cli) runScan(_ options, args []string) int {
 	// The context ends when the process gets SIGINT, SIGTERM or SIGHUP (see
 	// main). scan starts stdio servers in their own session, so the terminal
 	// does not reach them: only this context stops them.
-	return c.scanConfigs(c.context(), configPath, ignoreIDs, setup)
+	return c.scanConfigs(c.ctxOrBackground(), configPath, ignoreIDs, setup)
 }
 
 // scanSetup holds what scan has built before it reads the config files.
 type scanSetup struct {
 	// checks are the config rules (T4 and T5).
 	checks configChecks
-	// ignore is the ignore list. scanConfigs sets it, because the working
-	// directory (where .mcpmoat-ignore is) is known only after the load.
-	ignore *scanIgnores
 	// connect is nil with --no-connect. Otherwise it holds the options for
 	// inspect.Run, and scan inspects the servers and checks their pins.
 	connect *inspect.Options
@@ -196,7 +193,7 @@ func (c *cli) scanConfigs(ctx context.Context, configPath string, ignoreIDs []st
 	if wd == "" {
 		c.scanWarnf("cannot read the working directory; %s is not read", rules.IgnoreFileName)
 	}
-	setup.ignore = c.loadIgnore(wd, ignoreIDs)
+	ignore := c.loadIgnore(wd, ignoreIDs)
 
 	// A file that failed to load and gave no servers is a plain error. The
 	// "No MCP servers found." line would be wrong and misleading here, so we
@@ -205,7 +202,7 @@ func (c *cli) scanConfigs(ctx context.Context, configPath string, ignoreIDs []st
 		c.printFileErrors("scan", res.Errors)
 		return exitError
 	}
-	return c.reportScan(ctx, res, setup)
+	return c.reportScan(ctx, res, setup, ignore)
 }
 
 // scanWarnf prints one scan warning line on stderr.
@@ -263,8 +260,8 @@ func (c *cli) loadIgnore(wd string, ids []string) *scanIgnores {
 const configErrorHint = "mcpmoat scan: a config file has a problem; " +
 	"the table can miss servers that the client loads"
 
-// reportScan runs the config rules on the servers of res. When setup.connect is
-// not nil, it also inspects the servers and checks their pins (see
+// reportScan runs the config rules on the servers of res, with the ignore list
+// ignore. When setup.connect is not nil, it also inspects the servers and checks their pins (see
 // inspectAndPin). It prints the report on stdout (see writeScanReport), and the
 // file problems and warnings on stderr, and returns the exit code (the contract
 // is in the usage text, see usage in cli.go). When the ignore list dropped at
@@ -275,8 +272,8 @@ const configErrorHint = "mcpmoat scan: a config file has a problem; " +
 // written, so one table holds them all and hasFailingFinding sees them all.
 // New pins are saved after the report is printed, so a save error never hides
 // the report. The "pinned N tools" notices come after a successful save.
-func (c *cli) reportScan(ctx context.Context, res discover.Result, setup scanSetup) int {
-	rows, ignored := setup.checks.findings(&setup.ignore.all, res.Servers)
+func (c *cli) reportScan(ctx context.Context, res discover.Result, setup scanSetup, ignore *scanIgnores) int {
+	rows, ignored := setup.checks.findings(&ignore.all, res.Servers)
 
 	var pr pinReport
 	var pinFailed bool
@@ -284,11 +281,11 @@ func (c *cli) reportScan(ctx context.Context, res discover.Result, setup scanSet
 	// does not read pins.json.
 	if setup.connect != nil && len(res.Servers) > 0 {
 		var interrupted bool
-		pr, pinFailed, interrupted = c.inspectAndPin(ctx, res.Servers, *setup.connect, setup.ignore)
+		pr, pinFailed, interrupted = c.inspectAndPin(ctx, res.Servers, *setup.connect, ignore)
 		if interrupted {
 			// Nothing is saved and no report is printed: the user stopped
 			// the scan, so the result would be partial.
-			fprintf(c.stderr, "%s\n", interruptedNotice)
+			c.cmdErrorf("scan", "%s", interruptedText)
 			return exitError
 		}
 		rows = append(rows, pr.rows...)
@@ -341,39 +338,70 @@ func (c *cli) writeScanReport(servers []discover.Server, rows []report.FindingRo
 	return writeAcceptHints(c.stdout, pr.hints)
 }
 
-// savePinned saves the new pins of the pin step and, only when the save
-// worked, prints the "pinned N tools" notices. It returns false when the save
-// failed. The report is already out, so a save error cannot hide it.
+// savePinned saves the first-run pins of the pin step and, only when the save
+// worked, prints the "pinned N tools" notices. It returns false when the store
+// cannot be read again or saved. The report is already out, so an error here
+// cannot hide it. It writes nothing when no server was pinned, so a scan of
+// pinned servers never writes pins.json (only "pin --accept" re-pins).
+//
+// The scan took a long time since it read pins.json first (it connected to the
+// servers), and another scan or "pin --accept" may have changed the file. So
+// savePinned reads the file again and adds each server only if the new store has
+// no entry for it. It never overwrites an entry that another run wrote, and it
+// prints no notice for it. This makes the window for a lost update short. It does
+// not close it: two runs can still read and save at the same moment. A lock on
+// the file is issue #150.
 func (c *cli) savePinned(pr pinReport) bool {
-	if err := pr.save(); err != nil {
-		c.scanStoreErrorf("cannot save the pins file", err)
+	if len(pr.pinned) == 0 {
+		return true
+	}
+	store, err := c.loadPins()
+	if err != nil {
+		c.cmdErr("scan", "cannot read the pins file", err)
 		return false
 	}
-	c.printPinned(pr.pinned)
+	var saved []pinnedServer
+	for _, ps := range pr.pinned {
+		if _, found := store.Get(ps.id); found {
+			continue
+		}
+		// pinOutcomes checked the pins with the same rules, so an error here
+		// is not expected.
+		if err := store.Set(ps.id, ps.snap); err != nil {
+			c.cmdErr("scan", "cannot set the pins of a server", err)
+			return false
+		}
+		saved = append(saved, ps)
+	}
+	if len(saved) == 0 {
+		return true
+	}
+	if err := store.Save(); err != nil {
+		c.cmdErr("scan", "cannot save the pins file", err)
+		return false
+	}
+	c.printPinned(saved)
 	return true
 }
-
-// interruptedNotice is the line that scan prints on stderr when the process
-// got a signal while it inspected the servers. It is fixed text.
-const interruptedNotice = "mcpmoat scan: interrupted; no pins were saved"
 
 // inspectAndPin reads the pins store, inspects the servers with c.inspector,
 // writes a warning for each server that was not inspected, and checks the tools
 // against the pins (see pinOutcomes).
 //
 // The store is read first, before inspect.Run starts any server, so a corrupt
-// or newer pins.json gives exit code 2 before a stdio server runs. The second
+// or newer pins.json gives exit code 2 before a stdio server runs. savePinned
+// reads it again before it saves. The second
 // result is true when scan must exit with 2: the store could not be read, or
 // inspect.Run refused its input (no inspector, or bad options; the flags are
 // already checked, so this is a bug). The error is already written on stderr.
 //
 // The third result is true when ctx ended during the inspection (the process
-// got a signal). The caller prints interruptedNotice and exits with 2. Nothing
+// got a signal). The caller prints interruptedText and exits with 2. Nothing
 // is saved: inspectAndPin never saves.
 func (c *cli) inspectAndPin(ctx context.Context, servers []discover.Server, opts inspect.Options, ignore *scanIgnores) (pr pinReport, failed, interrupted bool) {
 	store, err := c.loadPins()
 	if err != nil {
-		c.scanStoreErrorf("cannot read the pins file", err)
+		c.cmdErr("scan", "cannot read the pins file", err)
 		return pinReport{}, true, false
 	}
 
@@ -383,7 +411,7 @@ func (c *cli) inspectAndPin(ctx context.Context, servers []discover.Server, opts
 	}
 	if err != nil {
 		// The text of an inspect.Run error holds only our own words.
-		c.scanStoreErrorf("cannot inspect the servers", err)
+		c.cmdErr("scan", "cannot inspect the servers", err)
 		return pinReport{}, true, false
 	}
 	c.warnNotInspected(outcomes)

@@ -64,22 +64,32 @@ mcpmoat version              # print the version, commit and build date
   show harmless tools to `scan` and harmful tools to `pin --accept`. The digest stops that attack.
   An invalid or empty `--expect` exits with code 2 before any server starts.
 - Without `--expect`, `pin --accept` works as before, but it trusts the tools that the server
-  returns now. It prints a note on stderr to say so. Use `--expect` unless you have a reason not to.
+  returns now. It prints a note on stderr, before it saves, to say so. Use `--expect` unless you have a reason not to.
 - `scan` prints no `To accept` line for a server that is pinned for the first time, for a server
   that it could not inspect, for a finding that you ignored, or for tools that cannot be pinned. If
   the server name has a character that is not safe to paste in a shell, or starts with `-`, the line
   has the digest but no command. The name in the command is quoted for a POSIX shell. On Windows (`cmd.exe` or
-  PowerShell) you may need to change the quotes.
+  PowerShell) you may need to change the quotes. If a diff of that server was cut, the line ends
+  with `(the diff was cut: review the full tool first)`.
 - A server that fails, times out or is refused (an untrusted or turned-off server) is a warning on
-  stderr and does not change the exit code. If the server is already pinned, it is also a
-  `MOAT-T2-004` finding (medium) with the reason `pinned server could not be inspected`.
+  stderr. If the server is not pinned, it does not change the exit code. If the server is already
+  pinned, it is also a `MOAT-T2-004` finding (high, exit code 1) with the reason
+  `pinned server could not be inspected`, because a hostile server must not avoid the rug-pull
+  check by failing on purpose. A server that is listed twice is a `MOAT-T2-004` finding too: high
+  when it is pinned, else medium.
 - `scan` and `pin --accept` read `pins.json` before they start any server. A `pins.json` that
-  cannot be read exits with code 2 before a server starts.
+  cannot be read exits with code 2 before a server starts. They read it again just before they
+  save. `scan` pins only the first-run servers that the file does not hold yet, and prints
+  `pinned` only for those. `pin --accept` changes only the entry of its server and keeps entries
+  that another run wrote meanwhile. A parallel run can still lose an update until the lock (#150)
+  exists.
 - Press Ctrl-C (or send `SIGTERM` or `SIGHUP`) to stop a run. mcpmoat stops the stdio servers that
   it started. `scan` and `pin --accept` print `interrupted; no pins were saved`, save nothing and
   exit with code 2.
-- A changed tool gives exit code 1. The default threshold is high, so a new tool (`MOAT-T2-002`), a
-  removed tool (`MOAT-T2-003`) and a medium `MOAT-T2-004` do not give exit code 1. A `pins.json`
+- A changed tool gives exit code 1. So does a high `MOAT-T2-004` (a pinned tool name that cannot be
+  verified, or a pinned server that cannot be inspected). The default threshold is high, so a new
+  tool (`MOAT-T2-002`), a removed tool (`MOAT-T2-003`) and a medium `MOAT-T2-004` (an unpinned
+  tool name or a first-run snapshot that fails) do not give exit code 1. A `pins.json`
   that `scan` cannot read or save gives exit code 2.
 
 ## Ignore findings

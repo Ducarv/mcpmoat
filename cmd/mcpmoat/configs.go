@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 
 	"github.com/Ducarv/mcpmoat/internal/discover"
+	"github.com/Ducarv/mcpmoat/internal/termsafe"
 )
 
 // This file holds the code that scan and pin share to read the client configs,
@@ -107,6 +108,18 @@ func (c *cli) printFileErrors(cmd string, errs []*discover.FileError) {
 func (c *cli) cmdErrorf(cmd, format string, a ...any) {
 	fprintf(c.stderr, "mcpmoat %s: %s\n", cmd, fmt.Sprintf(format, a...))
 }
+
+// cmdErr writes one error line on stderr, with the prefix "mcpmoat <cmd>: ":
+// "what: <err>". what is fixed text from the caller. The text of err can hold
+// a path from the environment or output of a server, so it is escaped.
+func (c *cli) cmdErr(cmd, what string, err error) {
+	c.cmdErrorf(cmd, "%s: %s", what, termsafe.Quote(err.Error()))
+}
+
+// interruptedText is the text after the prefix of the error line that scan and
+// pin print when the process got a signal while they inspected. It is fixed
+// text.
+const interruptedText = "interrupted; no pins were saved"
 
 // warnf writes one warning line on stderr, with the prefix
 // "mcpmoat <cmd>: warning: ". The caller must escape untrusted text in a.

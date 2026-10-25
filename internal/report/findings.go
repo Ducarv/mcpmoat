@@ -91,13 +91,12 @@ func WriteFindings(w io.Writer, rows []FindingRow) error {
 
 	write("RULE\tSEVERITY\tSERVER\tFIELD\tKEY/RELATED\n")
 	for _, r := range rows {
-		keyOrRelated := keyRelatedCell(r.Key, r.Related)
 		write("%s\t%s\t%s\t%s\t%s\n",
 			findingCell(r.RuleID),
 			findingCell(r.Severity),
 			findingCell(r.Server),
 			findingCell(r.Field),
-			keyOrRelated,
+			keyRelatedCell(r.Key, r.Related),
 		)
 	}
 

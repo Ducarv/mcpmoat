@@ -386,7 +386,7 @@ func TestScanAcceptHintAbsent(t *testing.T) {
 			insp: func() inspect.Inspector {
 				return &inspecttest.Fake{Errors: map[string]error{"srv": errors.New("boom")}}
 			},
-			wantCode: exitOK, wantRow: "MOAT-T2-004",
+			wantCode: exitFindings, wantRow: "MOAT-T2-004",
 		},
 		{
 			name: "every finding is dropped by --ignore", pinFirst: true,

@@ -115,7 +115,7 @@ func WriteDiffs(w io.Writer, diffs []ToolDiff) error {
 			b.WriteString(noDiffNote)
 			b.WriteByte('\n')
 		} else {
-			for _, line := range strings.Split(text, "\n") {
+			for line := range strings.SplitSeq(text, "\n") {
 				b.WriteString(diffLine(line))
 				b.WriteByte('\n')
 			}
