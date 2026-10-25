@@ -144,21 +144,21 @@ func Canonical(t inspect.Tool) ([]byte, error) {
 		}
 	}
 
-	in, err := canonicalSchema("inputSchema", t.InputSchema)
+	in, err := canonicalJSON("inputSchema", t.InputSchema)
 	if err != nil {
 		return nil, err
 	}
-	out, err := canonicalSchema("outputSchema", t.OutputSchema)
+	out, err := canonicalJSON("outputSchema", t.OutputSchema)
 	if err != nil {
 		return nil, err
 	}
-	// _meta and icons use the same checks as the schemas. The error names only
-	// the field, never a value.
-	meta, err := canonicalSchema("_meta", t.Meta)
+	// _meta and icons use the same function and checks as the schemas. The
+	// error names only the field, never a value.
+	meta, err := canonicalJSON("_meta", t.Meta)
 	if err != nil {
 		return nil, err
 	}
-	icons, err := canonicalSchema("icons", t.Icons)
+	icons, err := canonicalJSON("icons", t.Icons)
 	if err != nil {
 		return nil, err
 	}
@@ -205,9 +205,10 @@ func falseToNil(p *bool) *bool {
 	return p
 }
 
-// canonicalSchema returns the JCS form of one schema, or null when raw is nil
-// or zero-length. field is the fixed key name for the error message.
-func canonicalSchema(field string, raw []byte) (jsontext.Value, error) {
+// canonicalJSON returns the JCS form of one schema, `_meta` or icons value, or
+// null when raw is nil or zero-length. field is the fixed key name for the
+// error message.
+func canonicalJSON(field string, raw []byte) (jsontext.Value, error) {
 	if len(raw) == 0 {
 		return jsontext.Value("null"), nil
 	}
@@ -219,7 +220,7 @@ func canonicalSchema(field string, raw []byte) (jsontext.Value, error) {
 	// This pass puts the field name in the error; the final Canonicalize of
 	// the whole document makes the bytes canonical.
 	if err := v.Canonicalize(); err != nil {
-		return nil, schemaError(field, err)
+		return nil, fieldError(field, err)
 	}
 	// Canonicalize changes a number out of range to the largest float64, with
 	// no error. So check the numbers as the server wrote them, in raw.
@@ -239,7 +240,7 @@ func checkNumbers(field string, raw []byte) error {
 			return nil
 		}
 		if err != nil {
-			return schemaError(field, err)
+			return fieldError(field, err)
 		}
 		if tok.Kind() != '0' {
 			continue
@@ -253,10 +254,10 @@ func checkNumbers(field string, raw []byte) error {
 	}
 }
 
-// schemaError maps a jsontext error for a schema to a fixed reason. The
-// jsontext error message can quote the schema (key names, string parts), so
-// it is not wrapped.
-func schemaError(field string, err error) error {
+// fieldError maps a jsontext error for a schema, `_meta` or icons value to a
+// fixed reason. The jsontext error message can quote the value (key names,
+// string parts), so it is not wrapped.
+func fieldError(field string, err error) error {
 	if errors.Is(err, jsontext.ErrDuplicateName) {
 		return invalidTool("duplicate object key in " + field)
 	}

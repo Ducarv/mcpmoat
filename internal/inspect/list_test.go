@@ -1287,6 +1287,9 @@ func TestListAllSchemaConversion(t *testing.T) {
 	}
 }
 
+// TestListAllMetaIcons checks that tools keep _meta and icons as raw JSON,
+// that empty values become nil, that encoding does not escape HTML, that map
+// keys are sorted, and that errors do not hold values.
 func TestListAllMetaIcons(t *testing.T) {
 	t.Parallel()
 
@@ -1350,6 +1353,8 @@ func TestListAllMetaIcons(t *testing.T) {
 			meta:       mcp.Meta{"bad": math.Inf(1), "other": canary},
 			wantErrSub: "list tools: meta:",
 		},
+		// No icons marshal-error case: []mcp.Icon holds only typed string
+		// fields, so encoding cannot fail. The "icons:" wrap in list.go is a guard.
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -1387,7 +1392,8 @@ func TestListAllMetaIcons(t *testing.T) {
 }
 
 // checkRawString checks that raw is nil when want is empty, and otherwise is
-// exactly want, byte for byte.
+// exactly want, byte for byte. It compares bytes and not decoded JSON because
+// byte order shows key order and escaping, which checkRaw cannot see.
 func checkRawString(t *testing.T, field string, raw json.RawMessage, want string) {
 	t.Helper()
 	if want == "" {

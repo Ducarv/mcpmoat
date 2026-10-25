@@ -457,17 +457,18 @@ and `openWorldHint`. An absent hint is different from a set hint. A tool without
 - The pins file has a format version field and is written atomically (temp file plus rename).
 - `XDG_CONFIG_HOME` is honoured when set.
 
-Known limits: the Go SDK decodes `readOnlyHint` and `idempotentHint` as a plain `bool`. So for
-these two hints, "absent" and "false" are the same. A change to `true` is always visible. The SDK
-decode and the canonical serialisation pass every schema number through `float64`. So a number that
-a `float64` cannot hold exactly is rounded (an integer above 2^53, a long decimal, or a value that
-underflows to zero), and a change only in such digits does not change the hash. The hash covers a tool's
-`_meta` and `icons` with limits. Numbers in `_meta` go through `float64`, as above. The SDK
+Known limits: the Go SDK decodes `readOnlyHint` and `idempotentHint` as a plain `bool`. So for these
+two hints, "absent" and "false" are the same. A change to `true` is always visible. The SDK decode
+and the canonical serialisation pass every schema number through `float64`. So a number that a
+`float64` cannot hold exactly is rounded (an integer above 2^53, a long decimal, or a value that
+underflows to zero), and a change only in such digits does not change the hash. The hash covers a
+tool's `_meta` and `icons` with limits. Numbers in `_meta` go through `float64`, as above. The SDK
 decodes each icon into a typed struct, so an unknown key inside an icon is dropped and is not
 covered. A server that puts changing data in `_meta` (a timestamp or a trace id) raises
 `MOAT-T2-001` on every scan. A large `_meta` can push a server over the 2 MiB pin cap for each
 server. Then the pin fails closed as `MOAT-T2-004`. The `_meta` and `icons` of prompts, resources
-and resource templates are not hashed, because only tools are pinned.
+and resource templates are not hashed, because only tools are pinned. The SDK omits empty icon
+fields (`mimeType`, `sizes`, `theme`), so an empty value and an absent value hash the same.
 
 **FR-12: Detect changes.** On later runs, warn about new, removed or changed tools, showing the
 text diff.

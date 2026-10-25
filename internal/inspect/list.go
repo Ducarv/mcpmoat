@@ -346,19 +346,13 @@ func listTools(ctx context.Context, cs sessionLister, raw *rawLists) ([]Tool, er
 			if err != nil {
 				return Tool{}, fmt.Errorf("output schema: %w", err)
 			}
-			// A nil map or slice inside an any is not a nil any, so
-			// marshalSchema would encode it as null. Skip the empty
-			// values: absent or empty gives a nil RawMessage.
-			var meta, icons json.RawMessage
-			if len(t.Meta) > 0 {
-				if meta, err = marshalSchema(t.Meta); err != nil {
-					return Tool{}, fmt.Errorf("meta: %w", err)
-				}
+			meta, err := marshalNonEmpty(len(t.Meta), t.Meta)
+			if err != nil {
+				return Tool{}, fmt.Errorf("meta: %w", err)
 			}
-			if len(t.Icons) > 0 {
-				if icons, err = marshalSchema(t.Icons); err != nil {
-					return Tool{}, fmt.Errorf("icons: %w", err)
-				}
+			icons, err := marshalNonEmpty(len(t.Icons), t.Icons)
+			if err != nil {
+				return Tool{}, fmt.Errorf("icons: %w", err)
 			}
 			return Tool{
 				Name:         t.Name,
@@ -590,4 +584,17 @@ func marshalSchema(v any) (json.RawMessage, error) {
 	}
 	// Encode adds a trailing newline. It is not part of the schema.
 	return json.RawMessage(bytes.TrimSuffix(buf.Bytes(), []byte("\n"))), nil
+}
+
+// marshalNonEmpty encodes v like marshalSchema, but returns nil when n is 0.
+// n is the length of v, which must be a map or a slice.
+//
+// A nil map or slice inside an any is not a nil any, so marshalSchema would
+// encode it as null. This helper skips the empty values: absent or empty gives
+// a nil RawMessage.
+func marshalNonEmpty(n int, v any) (json.RawMessage, error) {
+	if n == 0 {
+		return nil, nil
+	}
+	return marshalSchema(v)
 }

@@ -301,8 +301,8 @@ The diff of a changed tool (`unifiedDiff` in `internal/pins/diff.go`, with `go-u
 of a new tool (`newToolDiff`, a diff from empty text, so every content line is an added line) work
 on a rendered form of the tool: one item for each line (name, title, description, annotations,
 `_meta`, icons, inputSchema, outputSchema, the last six as indented JSON). The small fields come
-before the schemas, so a cut diff keeps a change in them. A line of more than
-about 200 runes is wrapped, so a change in a long line still shows. The diff trims the lines that both texts share at
+before the schemas, so a cut diff keeps a change in them. A line of more than about 200 runes is
+wrapped, so a change in a long line still shows. The diff trims the lines that both texts share at
 the start and at the end, keeps 3 lines of context, and only then cuts the rest to 64 KiB and 2000
 lines. When the cut applies, the diff ends with a marker line and `Change.Truncated` is true, so
 `scan` and `pin` can warn the user. The labels are `pinned` and `current`. A changed or new tool
@@ -318,7 +318,8 @@ stored hash of another version. Read them with `go doc ./internal/pins Canonical
 changing value in `_meta` raises `MOAT-T2-001` on every scan, and an unknown key inside an icon is
 not covered. `HashVersion` stays `sha256-v1`. The form got `_meta` and `icons` in place before the
 first release, as the [`pins.json` store](#the-pinsjson-store) section says.
-Logs and errors never print a `_meta` value.
+The pin diff shows `_meta` and icons values, escaped by `termsafe` like all server text. Logs and
+errors never print a `_meta` value.
 
 ## Tool set digest
 

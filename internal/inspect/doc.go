@@ -486,7 +486,9 @@
 //     stderr, one line each.
 //   - The tool schemas, _meta and icons are decoded and encoded again (see
 //     Tool.InputSchema). Numbers pass through float64, and the SDK drops an
-//     unknown key inside an icon.
+//     unknown key inside an icon. The SDK also omits the empty icon fields
+//     (mimeType, sizes and theme), so an empty value and an absent value
+//     hash the same.
 //   - A server can still tell mcpmoat apart from a real client by the
 //     version, the capabilities, the timing and the User-Agent (see Client
 //     identity).
