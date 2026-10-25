@@ -282,9 +282,16 @@ func (p *pinner) firstPin(s discover.Server, id pins.Identity, tools []inspect.T
 // Tools that cannot be pinned (see pinnable) cannot be accepted either, so
 // they get no hint, and every row of the server gets the fix fixNotPinnable:
 // the remediation of the change kind names the "To accept" command, which scan
-// does not print for them. The error text is not printed.
+// does not print for them. The error text is not printed. pins.Compare reports
+// a duplicate, empty or invalid tool itself. For any other reason (the entry is
+// over the size limit of pins.json), compare adds the high MOAT-T2-004 row of
+// firstPin, so the server fails the default --fail-on high: no change of its
+// tools could ever be accepted.
 func (p *pinner) compare(s discover.Server, id pins.Identity, tools []inspect.Tool, stored pins.ServerPins) {
 	snap, pinErr := pinnable(id, tools)
+	if pinErr != nil && pins.ReasonOf(pinErr) == "" {
+		p.addUnverified(s, pinnableReason(pinErr), fixNotPinnable, pins.UnverifiedSeverity(true))
+	}
 	h := acceptHint{name: s.Name, id: id}
 	kept := false // true when at least one row of this server is not ignored
 	for _, ch := range pins.Compare(stored, tools) {
@@ -335,7 +342,7 @@ const (
 const (
 	fixListedTwice    = "Remove the duplicate entry of this server from the config file, then run mcpmoat scan again."
 	fixNotInspected   = "Find out why the server could not be inspected (see its status in the summary), fix it, then run mcpmoat scan again."
-	fixNotPinnable    = "Do not use this server until its tools are valid and have unique names, then run mcpmoat scan again."
+	fixNotPinnable    = "Do not use this server until its tools are valid, have unique names and fit the size limit of pins.json, then run mcpmoat scan again."
 	fixRelativeSource = "Run mcpmoat scan again with an absolute --config path, or from a working directory that mcpmoat can read."
 )
 

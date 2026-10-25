@@ -981,7 +981,10 @@ func bigMeta() string {
 // MOAT-T2-004 (high) and exits 1, and pins.json holds nothing of the server.
 // On a run of a pinned server the huge _meta is a change: MOAT-T2-001 (high),
 // exit 1, and the diff is cut at its size limit with a warning, so the output
-// stays small. The first run never prints the _meta. The diff of the second run
+// stays small. The tools of the pinned server can no longer be pinned, so it
+// also gets the MOAT-T2-004 (high) of the first run, also when the only change
+// is a new tool (MOAT-T2-002, medium): no change of its tools could ever be
+// accepted. The first run never prints the _meta. The diff of the second run
 // shows a cut part of the new _meta, as it does for any changed _meta, so the
 // test does not check the canary there.
 func TestScanPinsHugeMetaFailsClosed(t *testing.T) {
@@ -1014,13 +1017,37 @@ func TestScanPinsHugeMetaFailsClosed(t *testing.T) {
 			stdout: []string{"[truncated: text over the limit]"},
 			stderr: []string{"was cut at the size limit"},
 		})
-		assertPinRows(t, got.stdout, pinFinding{"MOAT-T2-001", "high", "srv", "a", ""})
+		assertPinRows(t, got.stdout,
+			pinFinding{"MOAT-T2-004", "high", "srv", "", `"the tools cannot be pinned"`},
+			pinFinding{"MOAT-T2-001", "high", "srv", "a", ""})
 		// The diff is cut: the output is far smaller than the 2 MiB _meta.
 		if len(got.stdout) > 256<<10 {
 			t.Errorf("stdout has %d bytes, want the diff cut well below the 2 MiB _meta", len(got.stdout))
 		}
 		assertContainsNone(t, "stderr", got.stderr, []string{metaCanary})
 		// scan never rewrites the entry of a pinned server.
+		if after := readFileBytes(t, e.pinsPath()); !bytes.Equal(pinsBefore, after) {
+			t.Errorf("scan changed pins.json of a pinned server")
+		}
+	})
+
+	t.Run("pinned server with a huge new tool", func(t *testing.T) {
+		t.Parallel()
+		e := newPinEnv(t, oneServer("srv"))
+		small := mkTool("a", "Add.")
+		firstScan(t, e, small)
+		pinsBefore := readFileBytes(t, e.pinsPath())
+
+		got := e.scan(fakeServers(map[string][]inspect.Tool{"srv": {small, metaTool("n", bigMeta(), "")}}))
+
+		// The new tool alone is medium. The high MOAT-T2-004 makes scan exit 1.
+		assertScanRun(t, got, scanWant{code: exitFindings})
+		assertPinRows(t, got.stdout,
+			pinFinding{"MOAT-T2-004", "high", "srv", "", `"the tools cannot be pinned"`},
+			pinFinding{"MOAT-T2-002", "medium", "srv", "n", ""})
+		if hints := splitPinOutput(t, got.stdout).hints; len(hints) != 0 {
+			t.Errorf("hints = %q, want none: pin --accept would refuse these tools", hints)
+		}
 		if after := readFileBytes(t, e.pinsPath()); !bytes.Equal(pinsBefore, after) {
 			t.Errorf("scan changed pins.json of a pinned server")
 		}

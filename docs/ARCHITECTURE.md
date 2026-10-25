@@ -150,9 +150,10 @@ the connect and pin steps between step 5 and step 6:
   - A pinned server that failed or timed out gets a MOAT-T2-004 finding (high, exit 1) with the
     reason `pinned server could not be inspected` (`pinner.notInspected`). A hostile server must not
     avoid the check by failing on purpose. A pinned server that a gate refused (`inspect.Refused`:
-    the client config turns it off or does not approve it) shows only its status `not inspected` in
-    the summary, with no finding: the config of the user sets that state, not the server. A server
-    that is not pinned shows only its status too (FR-06).
+    the client config turns it off or does not approve it) shows its status `not inspected` and its
+    reason in the summary, with no pin finding: the config of the user sets that state, not the
+    server. A server that is not pinned shows its status and reason too, with no pin finding
+    (FR-06).
   - A second entry with the same identity gets a MOAT-T2-004 finding with the reason `the server is
     listed twice`, so that its tools are not skipped. It is high when the identity is pinned, else
     medium (`pinner.unverifiedSeverity`).
@@ -171,7 +172,9 @@ the connect and pin steps between step 5 and step 6:
     never holds server text. For the last two reasons the pin cannot be trusted, so the change also
     has a diff of the whole current tool (`Change.Diff`). The `--ignore` flag drops them by rule ID,
     server and tool name. The `.mcpmoat-ignore` file does not (see step 3). `scan` never re-pins a
-    server that is in the store.
+    server that is in the store. When the tools of a pinned server no longer fit the size limit of
+    pins.json (`pins.ValidateServer`), `pins.Compare` has no reason for it, so `pinner.compare`
+    adds the high MOAT-T2-004 finding `the tools cannot be pinned` that a first run gives.
 - 5c. For a pinned server with at least one pin finding that is not ignored, `pinOutcomes` also keeps
   the `pins.Digest` of the tools that `scan` saw (`acceptHint` in `cmd/mcpmoat/accept_hint.go`). A
   server whose tools cannot be pinned (`pinnable`: `pins.Snapshot` and `pins.ValidateServer`, the

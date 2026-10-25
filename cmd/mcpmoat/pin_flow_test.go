@@ -214,7 +214,7 @@ func TestPinOutcomesRemediation(t *testing.T) {
 		return inspect.Outcome{Server: s, Status: inspect.StatusOK, Result: inspect.Result{Tools: ts}}
 	}
 	failed := inspect.Outcome{Server: srv, Status: inspect.StatusFailed, Err: errors.New("boom")}
-	const notPinnable = "Do not use this server until its tools are valid and have unique names, then run mcpmoat scan again."
+	const notPinnable = "Do not use this server until its tools are valid, have unique names and fit the size limit of pins.json, then run mcpmoat scan again."
 
 	tests := []struct {
 		name      string

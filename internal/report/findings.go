@@ -259,7 +259,7 @@ func findingCell(s string) string {
 	return cell(s, maxShortCellRunes)
 }
 
-// keyRelatedCell returns the text of the Tool, Reason or Where line. With both
+// keyRelatedCell returns the text of the Tool or Where line. With both
 // key and related set it is "<key> (<related>)", and each part goes through
 // findingCell. With one part set, it is that part. With none, it is emptyCell.
 func keyRelatedCell(key, related string) string {

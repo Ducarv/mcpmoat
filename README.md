@@ -136,9 +136,9 @@ MEDIUM (1)
   in the summary on stdout. If the server is not pinned, it does not change the exit code. If the
   server is already pinned and fails or times out, it is also a `MOAT-T2-004` finding (high, exit
   code 1) with the reason `pinned server could not be inspected`, because a hostile server must not
-  avoid the rug-pull check by failing on purpose. A pinned server that is refused shows only its
-  status `not inspected` in the summary, with no finding: your client config turns it off or does
-  not approve it, and the server cannot choose that.
+  avoid the rug-pull check by failing on purpose. A pinned server that is refused shows its status
+  `not inspected` and its reason in the summary, with no pin finding: your client config turns it
+  off or does not approve it, and the server cannot choose that.
 - `scan` shows the warnings of the inspection in the summary on stdout. `pin --accept` prints them
   on stderr. They are: secrets that go over plain http (`cleartext-secrets`), lists that the server
   answered but did not declare (`undeclared-capability`), and a proxy that skips the DNS pin (`dns-pin-unavailable`). The lines
