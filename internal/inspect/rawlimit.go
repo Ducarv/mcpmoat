@@ -126,7 +126,7 @@ func (r *rawLimit) spend(res mcp.Result) error {
 }
 
 // jsonSize returns the size of v as JSON, with HTML escaping off, the same
-// as marshalSchema. So "<", ">" and "&" in plain strings count one byte
+// as marshalJSON. So "<", ">" and "&" in plain strings count one byte
 // each, as a server sends them, not six. A field type with its own
 // MarshalJSON that calls json.Marshal (for example the tool annotations of
 // the SDK) still gets HTML escapes, so it can count a little more than the
