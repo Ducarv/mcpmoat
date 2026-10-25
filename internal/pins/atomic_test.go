@@ -211,8 +211,8 @@ func TestWriteFileAtomicHookFailure(t *testing.T) {
 // makes the final rename atomic.
 func TestWriteFileAtomicTempFileState(t *testing.T) {
 	t.Parallel()
-	data := []byte(`{"version":1,"pins":{"a":"sha256:abc"}}`)
-	oldData := []byte(`{"old":true}`)
+	data := []byte("new content")
+	oldData := []byte("old content")
 
 	t.Run("beforeWrite", func(t *testing.T) {
 		t.Parallel()

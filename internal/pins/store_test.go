@@ -2,7 +2,7 @@ package pins_test
 
 import (
 	"bytes"
-	"encoding/json"
+	"encoding/json/v2"
 	"errors"
 	"fmt"
 	"maps"
@@ -28,9 +28,12 @@ var (
 	idC = pins.Identity{Client: "cursor", Source: "/home/u/.cursor/mcp.json", Name: "gamma"}
 )
 
-// storeTestPins returns a fresh pins map. Each call gives a new map, so tests
-// do not share state.
+// storeTestPins returns a fresh pins map from name, hash pairs. Each call
+// gives a new map, so tests do not share state.
 func storeTestPins(pairs ...string) pins.ServerPins {
+	if len(pairs)%2 != 0 {
+		panic("storeTestPins needs name, hash pairs")
+	}
 	p := pins.ServerPins{}
 	for i := 0; i+1 < len(pairs); i += 2 {
 		p[pairs[i]] = pairs[i+1]
@@ -213,25 +216,45 @@ func TestLoadMissing(t *testing.T) {
 }
 
 func TestDefaultPath(t *testing.T) {
-	// No t.Parallel: t.Setenv panics in a parallel test.
+	t.Parallel()
 	xdg := t.TempDir()
 	home := t.TempDir()
+	errNoHome := errors.New("no home")
+	homeAt := func(dir string) func() (string, error) {
+		return func() (string, error) { return dir, nil }
+	}
 
 	tests := []struct {
-		name string
-		xdg  string
-		want string
+		name    string
+		xdg     string
+		homeDir func() (string, error)
+		want    string
+		wantErr string
 	}{
-		{"absolute XDG", xdg, filepath.Join(xdg, "mcpmoat", "pins.json")},
-		{"relative XDG is ignored", filepath.Join("rel", "dir"), filepath.Join(home, ".config", "mcpmoat", "pins.json")},
-		{"empty XDG", "", filepath.Join(home, ".config", "mcpmoat", "pins.json")},
+		{name: "absolute XDG", xdg: xdg, homeDir: homeAt(home), want: filepath.Join(xdg, "mcpmoat", "pins.json")},
+		// The home directory is not needed, so its error does not matter.
+		{name: "absolute XDG does not read home", xdg: xdg, homeDir: func() (string, error) { return "", errNoHome }, want: filepath.Join(xdg, "mcpmoat", "pins.json")},
+		{name: "relative XDG is ignored", xdg: filepath.Join("rel", "dir"), homeDir: homeAt(home), want: filepath.Join(home, ".config", "mcpmoat", "pins.json")},
+		{name: "empty XDG", xdg: "", homeDir: homeAt(home), want: filepath.Join(home, ".config", "mcpmoat", "pins.json")},
+		{name: "relative home", xdg: "", homeDir: homeAt(filepath.Join("relative", "dir")), wantErr: "the home directory for pins.json is not an absolute path"},
+		{name: "home error", xdg: "", homeDir: func() (string, error) { return "", errNoHome }, wantErr: "find the home directory for pins.json: no home"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			t.Setenv("HOME", home)
-			t.Setenv("USERPROFILE", home)
-			t.Setenv("XDG_CONFIG_HOME", tt.xdg)
-			got, err := pins.DefaultPath()
+			t.Parallel()
+			getenv := func(key string) string {
+				if key == "XDG_CONFIG_HOME" {
+					return tt.xdg
+				}
+				return ""
+			}
+			got, err := pins.DefaultPath(getenv, tt.homeDir)
+			if tt.wantErr != "" {
+				if err == nil || err.Error() != tt.wantErr {
+					t.Fatalf("DefaultPath() = %q, error = %v, want error %q", got, err, tt.wantErr)
+				}
+				return
+			}
 			if err != nil {
 				t.Fatalf("DefaultPath() error = %v", err)
 			}
@@ -240,36 +263,6 @@ func TestDefaultPath(t *testing.T) {
 			}
 		})
 	}
-
-	t.Run("relative home", func(t *testing.T) {
-		t.Setenv("HOME", filepath.Join("relative", "dir"))
-		t.Setenv("USERPROFILE", filepath.Join("relative", "dir"))
-		t.Setenv("XDG_CONFIG_HOME", "")
-		got, err := pins.DefaultPath()
-		if err == nil {
-			t.Fatalf("DefaultPath() = %q, error = nil, want error for a relative home", got)
-		}
-		if want := "the home directory for pins.json is not an absolute path"; err.Error() != want {
-			t.Errorf("DefaultPath() error = %q, want %q", err, want)
-		}
-	})
-
-	t.Run("unset XDG", func(t *testing.T) {
-		t.Setenv("HOME", home)
-		t.Setenv("USERPROFILE", home)
-		// t.Setenv registers the restore; Unsetenv then removes the variable.
-		t.Setenv("XDG_CONFIG_HOME", "")
-		if err := os.Unsetenv("XDG_CONFIG_HOME"); err != nil {
-			t.Fatal(err)
-		}
-		got, err := pins.DefaultPath()
-		if err != nil {
-			t.Fatalf("DefaultPath() error = %v", err)
-		}
-		if want := filepath.Join(home, ".config", "mcpmoat", "pins.json"); got != want {
-			t.Errorf("DefaultPath() = %q, want %q", got, want)
-		}
-	})
 }
 
 func TestDefaultPathEndToEnd(t *testing.T) {
@@ -279,7 +272,9 @@ func TestDefaultPathEndToEnd(t *testing.T) {
 	t.Setenv("USERPROFILE", t.TempDir())
 	t.Setenv("XDG_CONFIG_HOME", xdg)
 
-	path, err := pins.DefaultPath()
+	// The production arguments: this test checks that the real environment
+	// reaches the path.
+	path, err := pins.DefaultPath(os.Getenv, os.UserHomeDir)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -302,18 +297,16 @@ func TestLoadValid(t *testing.T) {
 		id      pins.Identity
 		want    pins.ServerPins // nil means the server must be absent
 	}{
-		{"no servers key", `{"version":1}`, idA, nil},
-		{"servers null", `{"version":1,"servers":null}`, idA, nil},
 		{"empty servers", `{"version":1,"servers":[]}`, idA, nil},
 		{"trailing whitespace", "{\"version\":1,\"servers\":[]}\n\n  ", idA, nil},
 		{
-			"tools null",
-			`{"version":1,"servers":[{"client":"claude-code","source":"/home/u/.claude.json","name":"alpha","tools":null}]}`,
+			"no tools",
+			`{"version":1,"servers":[{"client":"claude-code","source":"/home/u/.claude.json","project_path":"","name":"alpha","tools":{}}]}`,
 			idA, storeTestPins(),
 		},
 		{
 			"one server",
-			`{"version":1,"servers":[{"client":"claude-code","source":"/home/u/.claude.json","name":"alpha","tools":{"t":"h"}}]}`,
+			`{"version":1,"servers":[{"client":"claude-code","source":"/home/u/.claude.json","project_path":"","name":"alpha","tools":{"t":"h"}}]}`,
 			idA, storeTestPins("t", "h"),
 		},
 	}
@@ -321,6 +314,9 @@ func TestLoadValid(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			s := storeTestMustLoad(t, storeTestWrite(t, tt.content))
+			if got, ok := s.Get(tt.id); ok && got == nil {
+				t.Error("Get() = nil map, want a non-nil map")
+			}
 			if tt.want == nil {
 				if _, ok := s.Get(tt.id); ok {
 					t.Error("Get() ok = true, want false")
@@ -334,7 +330,7 @@ func TestLoadValid(t *testing.T) {
 
 func TestLoadErrors(t *testing.T) {
 	t.Parallel()
-	const server = `{"client":"c","source":"s","name":"n","tools":{"t":"h"}}`
+	const server = `{"client":"c","source":"s","project_path":"","name":"n","tools":{"t":"h"}}`
 	tests := []struct {
 		name     string
 		content  string
@@ -343,7 +339,8 @@ func TestLoadErrors(t *testing.T) {
 	}{
 		{"future version", `{"version":2,"servers":[]}`, pins.ErrUnsupportedVersion, "upgrade"},
 		{"future version with other shape", `{"version":2,"x":1,"` + leakToken + `":[1]}`, pins.ErrUnsupportedVersion, "upgrade"},
-		{"far future version", `{"version":99,"servers":` + leakToken + `}`, nil, ""},
+		// Invalid JSON wins over a future version: the probe decode fails first.
+		{"future version with invalid JSON", `{"version":99,"servers":` + leakToken + `}`, nil, "invalid JSON"},
 		{"version zero", `{"version":0,"servers":[]}`, nil, "invalid version"},
 		{"version negative", `{"version":-1,"servers":[]}`, nil, "invalid version"},
 		{"version missing", `{"servers":[]}`, nil, "version"},
@@ -355,32 +352,42 @@ func TestLoadErrors(t *testing.T) {
 		{"top level null", `null`, nil, "version"},
 		{"empty file", ``, nil, ""},
 		{"corrupt JSON", `{not json ` + leakToken, nil, ""},
-		{"truncated JSON", `{"version":1,"servers":[{"client":"c","source":"s","name":"n","tools":{"t":"` + leakToken, nil, ""},
+		{"truncated JSON", `{"version":1,"servers":[{"client":"c","source":"s","project_path":"","name":"n","tools":{"t":"` + leakToken, nil, ""},
 		{"truncated mid key", `{"version":1,"serv`, nil, ""},
 		{"unknown top-level field", `{"version":1,"servers":[],"` + leakToken + `":true}`, nil, ""},
-		{"unknown server field", `{"version":1,"servers":[{"client":"c","source":"s","name":"n","tools":{},"` + leakToken + `":"x"}]}`, nil, ""},
+		{"unknown server field", `{"version":1,"servers":[{"client":"c","source":"s","project_path":"","name":"n","tools":{},"` + leakToken + `":"x"}]}`, nil, ""},
 		{"trailing data", `{"version":1,"servers":[]} ` + leakToken, nil, ""},
 		{"second document", `{"version":1,"servers":[]}{"version":1,"servers":[]}`, nil, ""},
 		{"servers wrong type", `{"version":1,"servers":{"` + leakToken + `":1}}`, nil, ""},
-		{"tools wrong type", `{"version":1,"servers":[{"client":"c","source":"s","name":"n","tools":{"` + leakToken + `":5}}]}`, nil, ""},
+		{"tools wrong type", `{"version":1,"servers":[{"client":"c","source":"s","project_path":"","name":"n","tools":{"` + leakToken + `":5}}]}`, nil, ""},
 		{"duplicate identity", `{"version":1,"servers":[` + server + `,` + server + `]}`, nil, "duplicate"},
 		{
 			"duplicate identity with token name",
-			`{"version":1,"servers":[{"client":"c","source":"s","name":"` + leakToken + `","tools":{}},{"client":"c","source":"s","name":"` + leakToken + `","tools":{}}]}`,
+			`{"version":1,"servers":[{"client":"c","source":"s","project_path":"","name":"` + leakToken + `","tools":{}},{"client":"c","source":"s","project_path":"","name":"` + leakToken + `","tools":{}}]}`,
 			nil, "duplicate",
 		},
 		{"duplicate top-level key", `{"version":1,"servers":[],"servers":[]}`, nil, "duplicate key"},
-		{"duplicate server key", `{"version":1,"servers":[{"client":"c","source":"s","name":"` + leakToken + `","tools":{},"name":"m"}]}`, nil, "duplicate key"},
-		{"duplicate tool name", `{"version":1,"servers":[{"client":"c","source":"s","name":"n","tools":{"` + leakToken + `":"1","` + leakToken + `":"2"}}]}`, nil, "duplicate key"},
-		{"key in other case", `{"version":1,"servers":[{"CLIENT":"c","source":"s","name":"n","tools":{}}]}`, nil, "unknown field"},
+		{"duplicate server key", `{"version":1,"servers":[{"client":"c","source":"s","project_path":"","name":"` + leakToken + `","tools":{},"name":"m"}]}`, nil, "duplicate key"},
+		{"duplicate tool name", `{"version":1,"servers":[{"client":"c","source":"s","project_path":"","name":"n","tools":{"` + leakToken + `":"1","` + leakToken + `":"2"}}]}`, nil, "duplicate key"},
+		{"key in other case", `{"version":1,"servers":[{"CLIENT":"c","source":"s","project_path":"","name":"n","tools":{}}]}`, nil, "unknown field"},
 		{"version key in other case", `{"VERSION":1,"servers":[]}`, nil, "version field is missing"},
 		{"invalid UTF-8", "{\"version\":1,\"servers\":[{\"client\":\"c\",\"source\":\"s\",\"name\":\"n\xff\",\"tools\":{}}]}", nil, "invalid JSON"},
-		{"lone surrogate", `{"version":1,"servers":[{"client":"c","source":"s","name":"n\ud800","tools":{}}]}`, nil, "invalid JSON"},
-		{"top level array type", `[1]`, nil, "wrong JSON type at byte 0"},
-		{"empty server name", `{"version":1,"servers":[{"client":"c","source":"s","name":"","tools":{"` + leakToken + `":"h"}}]}`, nil, "name is empty"},
-		{"missing server name", `{"version":1,"servers":[{"client":"c","source":"s","tools":{"` + leakToken + `":"h"}}]}`, nil, "name is empty"},
-		{"empty tool name", `{"version":1,"servers":[{"client":"c","source":"s","name":"n","tools":{"":"` + leakToken + `"}}]}`, nil, "tool name is empty"},
-		{"empty hash", `{"version":1,"servers":[{"client":"c","source":"s","name":"n","tools":{"` + leakToken + `":""}}]}`, nil, "hash is empty"},
+		{"lone surrogate", `{"version":1,"servers":[{"client":"c","source":"s","project_path":"","name":"n\ud800","tools":{}}]}`, nil, "invalid JSON"},
+		{"top level array type", `[1]`, nil, "invalid value at byte 0"},
+		{"version not an integer", `{"version":2.0,"servers":[]}`, nil, "invalid value"},
+		{"version too large", `{"version":99999999999999999999,"servers":[]}`, nil, "invalid value"},
+		{"servers missing", `{"version":1}`, nil, "servers field is missing or null"},
+		{"servers null", `{"version":1,"servers":null}`, nil, "servers field is missing or null"},
+		{"client missing", `{"version":1,"servers":[{"source":"s","project_path":"","name":"n","tools":{}}]}`, nil, "servers[0]: a field is missing or null"},
+		{"source missing", `{"version":1,"servers":[{"client":"c","project_path":"","name":"n","tools":{}}]}`, nil, "a field is missing or null"},
+		{"project path missing", `{"version":1,"servers":[{"client":"c","source":"s","name":"n","tools":{}}]}`, nil, "a field is missing or null"},
+		{"tools missing", `{"version":1,"servers":[{"client":"c","source":"s","project_path":"","name":"n"}]}`, nil, "a field is missing or null"},
+		{"tools null", `{"version":1,"servers":[{"client":"c","source":"s","project_path":"","name":"n","tools":null}]}`, nil, "a field is missing or null"},
+		{"name null", `{"version":1,"servers":[{"client":"c","source":"s","project_path":"","name":null,"tools":{}}]}`, nil, "a field is missing or null"},
+		{"empty server name", `{"version":1,"servers":[{"client":"c","source":"s","project_path":"","name":"","tools":{"` + leakToken + `":"h"}}]}`, nil, "name is empty"},
+		{"missing server name", `{"version":1,"servers":[{"client":"c","source":"s","project_path":"","tools":{"` + leakToken + `":"h"}}]}`, nil, "a field is missing or null"},
+		{"empty tool name", `{"version":1,"servers":[{"client":"c","source":"s","project_path":"","name":"n","tools":{"":"` + leakToken + `"}}]}`, nil, "tool name is empty"},
+		{"empty hash", `{"version":1,"servers":[{"client":"c","source":"s","project_path":"","name":"n","tools":{"` + leakToken + `":""}}]}`, nil, "hash is empty"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -532,14 +539,14 @@ func TestZeroValueStore(t *testing.T) {
 func TestGetReturnsCopy(t *testing.T) {
 	t.Parallel()
 	s := storeTestMustLoad(t, storeTestPath(t))
-	storeTestMustSet(t, s, idA, storeTestPins("t", "h"))
+	storeTestMustSet(t, s, idA, storeTestPins("t", "h", "u", "h2"))
 
 	got, _ := s.Get(idA)
 	got["t"] = "changed"
 	got["extra"] = "x"
-	delete(got, "nothing")
+	delete(got, "u")
 
-	storeTestWantPins(t, s, idA, storeTestPins("t", "h"))
+	storeTestWantPins(t, s, idA, storeTestPins("t", "h", "u", "h2"))
 }
 
 func TestSetStoresCopy(t *testing.T) {
@@ -771,6 +778,21 @@ func TestSaveSizeLimit(t *testing.T) {
 	})
 }
 
+func TestLoadDanglingSymlink(t *testing.T) {
+	t.Parallel()
+	path := storeTestPath(t)
+	if err := os.Symlink("gone.json", path); err != nil {
+		t.Skipf("symlinks not available: %v", err)
+	}
+	s, err := pins.Load(path)
+	if err == nil || !strings.Contains(err.Error(), "the target of the symlink is missing") {
+		t.Fatalf("Load() error = %v, want the missing-target error", err)
+	}
+	if s != nil {
+		t.Errorf("Load() store = %v, want nil", s)
+	}
+}
+
 func TestSymlinkedConfigDir(t *testing.T) {
 	t.Parallel()
 	root := t.TempDir()
@@ -855,9 +877,9 @@ func FuzzLoad(f *testing.F) {
 		`{"version":0}`,
 		`{"servers":[]}`,
 		`{"version":1,"servers":[` + server + `,` + server + `]}`,
-		`{"version":1,"servers":[{"client":"c","source":"s","name":"","tools":{}}]}`,
-		`{"version":1,"servers":[{"client":"c","source":"s","name":"n","tools":{"":"h"}}]}`,
-		`{"version":1,"servers":[{"client":"c","source":"s","name":"n","tools":{"t":""}}]}`,
+		`{"version":1,"servers":[{"client":"c","source":"s","project_path":"","name":"","tools":{}}]}`,
+		`{"version":1,"servers":[{"client":"c","source":"s","project_path":"","name":"n","tools":{"":"h"}}]}`,
+		`{"version":1,"servers":[{"client":"c","source":"s","project_path":"","name":"n","tools":{"t":""}}]}`,
 		`{"version":1,"servers":[],"extra":1}`,
 		`{"version":1,"servers":[]} trailing`,
 		`{"version":1,"servers":[` + server,
@@ -901,14 +923,17 @@ func FuzzLoad(f *testing.F) {
 		if err := json.Unmarshal(data, &doc); err != nil {
 			t.Fatalf("Load accepted data that json.Unmarshal rejects: %v", err)
 		}
+		ids := make([]pins.Identity, 0, len(doc.Servers))
+		for _, srv := range doc.Servers {
+			ids = append(ids, pins.Identity{Client: srv.Client, Source: srv.Source, ProjectPath: srv.ProjectPath, Name: srv.Name})
+		}
 
 		dst := filepath.Join(dir, "sub", "copy.json")
 		saved, err := pins.Load(dst)
 		if err != nil {
 			t.Fatal(err)
 		}
-		for _, srv := range doc.Servers {
-			id := pins.Identity{Client: srv.Client, Source: srv.Source, ProjectPath: srv.ProjectPath, Name: srv.Name}
+		for _, id := range ids {
 			p, ok := s.Get(id)
 			if !ok {
 				t.Fatalf("Get(%+v) ok = false for an identity in the file", id)
@@ -922,8 +947,7 @@ func FuzzLoad(f *testing.F) {
 		if err != nil {
 			t.Fatalf("Load() of a saved store: %v", err)
 		}
-		for _, srv := range doc.Servers {
-			id := pins.Identity{Client: srv.Client, Source: srv.Source, ProjectPath: srv.ProjectPath, Name: srv.Name}
+		for _, id := range ids {
 			want, _ := s.Get(id)
 			got, ok := again.Get(id)
 			if !ok || !maps.Equal(got, want) {

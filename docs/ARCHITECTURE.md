@@ -166,8 +166,8 @@ are planned.
 
 - Path: `DefaultPath` returns `$XDG_CONFIG_HOME/mcpmoat/pins.json` when `XDG_CONFIG_HOME` is set to
   an absolute path, and `~/.config/mcpmoat/pins.json` otherwise. It does not use `os.UserConfigDir`,
-  so macOS also uses `~/.config`. It returns an error when the home directory is not an absolute
-  path.
+  so macOS also uses `~/.config`. The caller passes `getenv` and `homeDir`, as the `cli` in
+  `cmd/mcpmoat` does for `discover`, so the package reads no process state.
 - Format, version 1:
 
   ```json
@@ -188,28 +188,18 @@ are planned.
 - Identity: a server is `client`, `source`, `project_path` and `name`. `project_path` is empty for a
   global server. Claude Code project servers in `~/.claude.json` share the same `source` and can share
   a `name`, so `project_path` tells them apart. Two entries with the same identity are an error.
-  The identity fields, the tool names and the hashes must be valid UTF-8. `Set` refuses any other
-  value, and `Load` refuses a file with invalid UTF-8 or a lone surrogate escape such as `\ud800`.
+  Every key is required, also an empty `project_path`, and a key must not be `null`.
 - Hashes: a tool hash is an opaque non-empty string for the store. The hashing code owns its format.
 - Tool names: the server chose them, and they can hold control characters. Code that prints a name
   from the store escapes it with `internal/termsafe`, as it does for a name from a live server.
 - No secrets: the file holds the identity, the tool names and the hashes. It never holds args, a URL,
   env, headers or a command.
-- Read: `Load` reads the file through `safefile` with a cap of 8 MiB. A missing file (or directory)
-  is the first run and gives an empty store. A corrupt file, an unknown field, a duplicate key, a bad
-  shape or a newer `version` is an error (a newer version wraps `ErrUnsupportedVersion`). `Load`
-  decodes with `encoding/json/v2`, so a key must match its documented name exactly, in the same
-  case. `Load` never resets a bad file to an empty store, because an empty store would hide a rug
-  pull. The errors name the path and the byte position and hold no file content.
-- Change: `Set` replaces the pins of one server. It refuses a server that `Load` would refuse (an
-  empty name or hash, invalid UTF-8) and a server whose entry is larger than 256 KiB as compact JSON.
-  A server sends its own tool names, so the caller skips that one server and still saves the others.
-  An empty map means "pinned with no tools", which is not the same as "never pinned".
-- Write: `Save` writes a temp file in the same directory, sets mode `0600`, syncs it and renames it
-  over `pins.json`. A new directory gets mode `0700`. The mode of an existing directory does not
-  change. The servers and the tool names are sorted, so the same store gives the same bytes. `<`, `>`
-  and `&` are not escaped. `Save` refuses to write when the encoded data is larger than the 8 MiB read
-  cap, so it never writes a file that `Load` refuses. The old file stays.
+- Read, change and write: `Load` reads the file through `safefile` and fails closed. A bad file is
+  an error and never an empty store, because an empty store would hide a rug pull. `Set` checks one
+  server and refuses it on its own, with a size cap for each server, so the caller can skip one
+  hostile server and still save the others. `Save` writes atomically (temp file, mode `0600`, sync,
+  rename). A new directory gets mode `0700`. The rules, the caps and the error texts are in the doc
+  comments of `Load`, `Set` and `Save` in `internal/pins/store.go`.
 
 Known limits:
 
@@ -224,13 +214,16 @@ Known limits:
   holds only names and hashes and has mode `0600`. mcpmoat does not remove old temp files, because
   one can belong to a parallel run that is still writing.
 - A missing `pins.json` looks like a first run, so a deleted file resets the pins without an alert.
+  A `pins.json` symlink whose target is missing is an error, not a first run.
 - `Load` follows a relative `pins.json` symlink that stays inside the directory. It refuses an
   absolute symlink, even one that points back inside, and one that leaves the directory
   (`safefile.ErrOutsideRoot`). `Save` replaces a symlink with a regular file.
 - On Windows the mode bits are mostly ignored and the directory sync is skipped.
 - The cap for each server keeps one server from filling the file alone. Many servers near that cap
   (16 in the worst case) can still make the file larger than 8 MiB, and then `Save` fails for all
-  servers.
+  servers. One project config can declare that many servers, but a server from an untrusted project
+  file starts only with `AllowUntrusted`. The store cannot tell a hostile server from a real one, so
+  the policy for a full file (which servers to keep) belongs to the caller, #60.
 
 ## Where untrusted text is escaped
 

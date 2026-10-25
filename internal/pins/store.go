@@ -76,19 +76,22 @@ type Store struct {
 	servers map[Identity]ServerPins
 }
 
-// fileFormat is the shape of pins.json, version 1.
+// fileFormat is the shape of pins.json, version 1. Every key is required and
+// must not be null. encoding/json/v2 has no option for a required key, so the
+// fields are pointers: a missing key or a null leaves the pointer nil, and
+// Load refuses it.
 type fileFormat struct {
-	Version int          `json:"version"`
-	Servers []fileServer `json:"servers"`
+	Version int           `json:"version"`
+	Servers *[]fileServer `json:"servers"`
 }
 
 // fileServer is one server entry in pins.json.
 type fileServer struct {
-	Client      string     `json:"client"`
-	Source      string     `json:"source"`
-	ProjectPath string     `json:"project_path"`
-	Name        string     `json:"name"`
-	Tools       ServerPins `json:"tools"`
+	Client      *string     `json:"client"`
+	Source      *string     `json:"source"`
+	ProjectPath *string     `json:"project_path"`
+	Name        *string     `json:"name"`
+	Tools       *ServerPins `json:"tools"`
 }
 
 // DefaultPath returns the path of pins.json.
@@ -98,10 +101,14 @@ type fileServer struct {
 // specification says that a relative value is invalid and must be ignored. We
 // do not use os.UserConfigDir, because on macOS it returns
 // ~/Library/Application Support and the PRD (FR-11) fixes ~/.config.
-func DefaultPath() (string, error) {
-	base := os.Getenv("XDG_CONFIG_HOME")
+//
+// The caller passes the environment and the home directory (os.Getenv and
+// os.UserHomeDir in production), so the package reads no process state.
+// homeDir runs only when XDG_CONFIG_HOME is not used.
+func DefaultPath(getenv func(string) string, homeDir func() (string, error)) (string, error) {
+	base := getenv("XDG_CONFIG_HOME")
 	if base == "" || !filepath.IsAbs(base) {
-		home, err := os.UserHomeDir()
+		home, err := homeDir()
 		if err != nil {
 			return "", fmt.Errorf("find the home directory for pins.json: %w", err)
 		}
@@ -118,13 +125,14 @@ func DefaultPath() (string, error) {
 // Load reads the pins file at path.
 //
 // A missing file (or a missing directory) is the first run: Load returns an
-// empty Store that saves to path. Any other problem is an error, and Load
-// never replaces a bad file with an empty store, because that would pin a
-// poisoned server as trusted. The errors name the path and the position of the
+// empty Store that saves to path. Any other problem is an error, also a
+// missing or null key, and Load never replaces a bad file with an empty store,
+// because that would pin a poisoned server as trusted. The errors name the path and the position of the
 // problem, and never hold file content. A file with a newer format version
 // gives an error that wraps ErrUnsupportedVersion. A pins.json symlink is
 // refused (safefile.ErrOutsideRoot) when it is absolute or leaves its
-// directory; Save replaces a symlink with a regular file.
+// directory, and it is an error when its target is missing. Save replaces a
+// symlink with a regular file.
 func Load(path string) (*Store, error) {
 	s := &Store{path: path, servers: make(map[Identity]ServerPins)}
 
@@ -133,6 +141,12 @@ func Load(path string) (*Store, error) {
 		return nil, fmt.Errorf("read %s: %w", path, err)
 	}
 	if !found {
+		// safefile reports a symlink with a missing target as not found. Then
+		// the real file is gone, which is not a first run, and Save would
+		// replace the link.
+		if fi, err := os.Lstat(path); err == nil && fi.Mode()&os.ModeSymlink != 0 {
+			return nil, fmt.Errorf("read %s: the target of the symlink is missing", path)
+		}
 		return s, nil
 	}
 
@@ -165,15 +179,22 @@ func Load(path string) (*Store, error) {
 		return nil, fmt.Errorf("parse %s: %s", path, describeJSONError(err))
 	}
 
-	for i, srv := range f.Servers {
-		id := Identity{Client: srv.Client, Source: srv.Source, ProjectPath: srv.ProjectPath, Name: srv.Name}
-		if err := validateServer(id, srv.Tools); err != nil {
+	if f.Servers == nil {
+		return nil, fmt.Errorf("parse %s: servers field is missing or null", path)
+	}
+	for i, srv := range *f.Servers {
+		if srv.Client == nil || srv.Source == nil || srv.ProjectPath == nil || srv.Name == nil || srv.Tools == nil {
+			return nil, fmt.Errorf("parse %s: servers[%d]: a field is missing or null", path, i)
+		}
+		id := Identity{Client: *srv.Client, Source: *srv.Source, ProjectPath: *srv.ProjectPath, Name: *srv.Name}
+		if err := validateServer(id, *srv.Tools); err != nil {
 			return nil, fmt.Errorf("parse %s: servers[%d]: %w", path, i, err)
 		}
 		if _, dup := s.servers[id]; dup {
 			return nil, fmt.Errorf("parse %s: servers[%d]: duplicate server identity", path, i)
 		}
-		s.servers[id] = cloneOrEmpty(srv.Tools)
+		// The decoder made this map, and nothing else holds it.
+		s.servers[id] = *srv.Tools
 	}
 	return s, nil
 }
@@ -208,7 +229,8 @@ func (s *Store) Set(id Identity, p ServerPins) error {
 	}
 	entry, err := json.Marshal(newFileServer(id, p))
 	if err != nil {
-		return fmt.Errorf("encode server pins: %w", err)
+		// Not wrapped: the error text of encoding/json can hold a tool name.
+		return errors.New("encode server pins: the pins cannot be encoded as JSON")
 	}
 	if len(entry) > maxServerSize {
 		return fmt.Errorf("server pins are %d bytes as JSON, larger than the %d byte limit",
@@ -244,6 +266,8 @@ func cloneOrEmpty(p ServerPins) ServerPins {
 // Save of a zero-value Store is an error, because it has no path: make a
 // Store with Load.
 func (s *Store) Save() error {
+	// The lock also covers the write, so two Saves of one Store run one at a
+	// time and the last call writes the last state.
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -251,16 +275,18 @@ func (s *Store) Save() error {
 		return errors.New("save pins: the store has no path (make it with Load)")
 	}
 	ids := slices.SortedFunc(maps.Keys(s.servers), compareIdentity)
-	f := fileFormat{Version: CurrentVersion, Servers: make([]fileServer, 0, len(ids))}
+	servers := make([]fileServer, 0, len(ids))
 	for _, id := range ids {
-		f.Servers = append(f.Servers, newFileServer(id, s.servers[id]))
+		servers = append(servers, newFileServer(id, s.servers[id]))
 	}
+	f := fileFormat{Version: CurrentVersion, Servers: &servers}
 
 	// Deterministic sorts the map keys. encoding/json/v2 does not escape <, >
 	// and &, so such a tool name keeps its size in the file.
 	data, err := json.Marshal(f, jsontext.WithIndent("  "), json.Deterministic(true))
 	if err != nil {
-		return fmt.Errorf("save %s: encode: %w", s.path, err)
+		// Not wrapped: the error text of encoding/json can hold a tool name.
+		return fmt.Errorf("save %s: the pins cannot be encoded as JSON", s.path)
 	}
 	data = append(data, '\n')
 	// Check the size before the write, so the old file stays valid.
@@ -275,14 +301,16 @@ func (s *Store) Save() error {
 	return nil
 }
 
-// newFileServer returns the file entry of the server id.
+// newFileServer returns the file entry of the server id. The pointers point
+// to the parameters, which are copies. The tools map itself is shared, and
+// the encoder only reads it.
 func newFileServer(id Identity, tools ServerPins) fileServer {
 	return fileServer{
-		Client:      id.Client,
-		Source:      id.Source,
-		ProjectPath: id.ProjectPath,
-		Name:        id.Name,
-		Tools:       tools,
+		Client:      &id.Client,
+		Source:      &id.Source,
+		ProjectPath: &id.ProjectPath,
+		Name:        &id.Name,
+		Tools:       &tools,
 	}
 }
 
@@ -343,7 +371,8 @@ func describeJSONError(err error) string {
 		if errors.Is(err, json.ErrUnknownName) {
 			return fmt.Sprintf("unknown field at byte %d", se.ByteOffset)
 		}
-		return fmt.Sprintf("wrong JSON type at byte %d", se.ByteOffset)
+		// A wrong type, or a number that is not an integer or is too large.
+		return fmt.Sprintf("invalid value at byte %d", se.ByteOffset)
 	}
 	return "invalid JSON"
 }
