@@ -386,7 +386,7 @@ func TestScanPinsNotInspected(t *testing.T) {
 	t.Run("failed", func(t *testing.T) {
 		t.Parallel()
 		e := newPinEnv(t, oneServer("srv"))
-		fake := &inspecttest.Fake{Errors: map[string]error{"srv": errors.New("boom")}}
+		fake := failingFake("srv")
 
 		got := e.scan(fake)
 
@@ -418,7 +418,7 @@ func TestScanPinsNotInspected(t *testing.T) {
 		firstScan(t, e, mkTool("a", "Add."))
 		before := readFileBytes(t, e.pinsPath())
 
-		got := e.scan(&inspecttest.Fake{Errors: map[string]error{"srv": errors.New("boom")}})
+		got := e.scan(failingFake("srv"))
 
 		// A failing server must not avoid the rug-pull check (S3): one
 		// MOAT-T2-004 high row for the server, with no tool name, and exit 1.

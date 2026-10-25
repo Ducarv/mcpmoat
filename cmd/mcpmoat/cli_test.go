@@ -363,10 +363,11 @@ func TestUsageContent(t *testing.T) {
 		// exact contract, so the usage text points to it.
 		"  2  execution or usage error, also when there are findings\n",
 		"     (README \"Exit codes\" lists the causes and when the report still prints)\n",
-		// The --fail-on flag line and its continuation line. Only the text is
+		// The --fail-on flag line and its continuation lines. Only the text is
 		// checked, not the padding that tabwriter prints.
 		"  --fail-on <severity>  Exit 1 for a finding of this severity or above: low, medium, high or critical (default high)\n",
-		"No built-in rule is critical yet, so critical passes every built-in finding\n",
+		"No built-in rule is critical yet, so critical passes every built-in finding and scan prints a note\n",
+		"An unknown rule ID or severity still gives exit 1 (fail closed)\n",
 		"The file cannot ignore the pin rules (MOAT-T2-*)",
 		"  A new tool is medium, so alone it does not give exit code 1 with the default --fail-on high; next to a removed tool (a likely rename) it is high.\n",
 		"  If that server is already pinned and failed or timed out, it is also a finding (MOAT-T2-004, high).\n",
@@ -414,7 +415,6 @@ func TestUsageContent(t *testing.T) {
 		"  2  execution error\n",
 		"when it is stopped by a signal",
 		"stops the servers, saves no pins and exits 2",
-		"critical fails only on an unknown severity or rule ID",
 	} {
 		if strings.Contains(got, gone) {
 			t.Errorf("usage text holds the old text %q\n--- got ---\n%s", gone, got)

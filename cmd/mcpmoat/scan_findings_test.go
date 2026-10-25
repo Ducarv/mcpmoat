@@ -9,6 +9,7 @@ import (
 
 	"github.com/Ducarv/mcpmoat/internal/discover"
 	"github.com/Ducarv/mcpmoat/internal/discover/discovertest"
+	"github.com/Ducarv/mcpmoat/internal/pins"
 	"github.com/Ducarv/mcpmoat/internal/report"
 	"github.com/Ducarv/mcpmoat/internal/rules"
 )
@@ -266,6 +267,30 @@ func severityRows(severities ...string) []report.FindingRow {
 		rows = append(rows, report.FindingRow{RuleID: "MOAT-T4-001", Severity: sev})
 	}
 	return rows
+}
+
+// TestNoBuiltinCriticalSeverity checks that no built-in rule and no pin change
+// kind is critical. failOnCriticalNotice, the --fail-on help text and README
+// "Exit codes" say so. When a critical rule is added, change those texts and
+// this test.
+func TestNoBuiltinCriticalSeverity(t *testing.T) {
+	t.Parallel()
+
+	builtin, errs := rules.Builtin()
+	if len(errs) > 0 {
+		t.Fatalf("rules.Builtin() errors: %v", errs)
+	}
+	for _, r := range builtin {
+		if r.Severity == rules.SeverityCritical {
+			t.Errorf("built-in rule %s is critical", r.ID)
+		}
+	}
+	// A pin change can be raised to high, never above (pins.Compare).
+	for _, k := range []pins.ChangeKind{pins.KindChanged, pins.KindNew, pins.KindRemoved, pins.KindUnverified} {
+		if rules.Severity(k.Severity()) == rules.SeverityCritical {
+			t.Errorf("pin change kind %s is critical", k)
+		}
+	}
 }
 
 // TestHasFailingFinding checks the exit-code rule of FR-16 for every --fail-on

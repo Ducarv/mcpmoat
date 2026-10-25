@@ -56,23 +56,10 @@ func (c *cli) runScan(_ options, args []string) int {
 		return nil
 	})
 
-	// --fail-on takes one exact severity word. Valid refuses an empty value,
-	// another case ("HIGH") and a flag name that the flag package took as the
-	// value. The flag error already holds the value, so the message does not
-	// repeat it. failOnSet tells a second use apart from the default.
-	failOn := rules.SeverityHigh
-	var failOnSet bool
-	fs.Func("fail-on", "", func(value string) error {
-		if failOnSet {
-			return errors.New("--fail-on given more than once")
-		}
-		if !rules.Severity(value).Valid() {
-			return errors.New("--fail-on needs low, medium, high or critical")
-		}
-		failOn = rules.Severity(value)
-		failOnSet = true
-		return nil
-	})
+	// severityFlag refuses an empty value, so an empty result means the flag
+	// was not given: then the default is high.
+	var failOn rules.Severity
+	severityFlag(fs, "fail-on", &failOn)
 
 	if err := fs.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
@@ -87,6 +74,9 @@ func (c *cli) runScan(_ options, args []string) int {
 	}
 	if c.rejectArgs("scan", fs.Args()) {
 		return exitError
+	}
+	if failOn == "" {
+		failOn = rules.SeverityHigh
 	}
 
 	// Check the values in both modes, so a bad value is a usage error even
@@ -112,6 +102,12 @@ func (c *cli) runScan(_ options, args []string) int {
 	// built-in config checks. Say so, or such a rule would pass in silence.
 	if rulesDir != "" {
 		fprintf(c.stderr, "%s\n", rulesNotAppliedNotice)
+	}
+	// No built-in rule is critical, so --fail-on critical gives exit code 0
+	// for every built-in finding. Say so, or a CI log shows no sign that the
+	// gate cannot fail.
+	if failOn == rules.SeverityCritical {
+		fprintf(c.stderr, "%s\n", failOnCriticalNotice)
 	}
 
 	// The typosquat check is built once and used for every server. An error
@@ -145,6 +141,10 @@ type scanSetup struct {
 // rulesNotAppliedNotice is the line that runScan prints on stderr when
 // --rules is given. It is fixed text: it holds no path and no rule text.
 const rulesNotAppliedNotice = "mcpmoat scan: rules from --rules are loaded and checked, but not applied yet"
+
+// failOnCriticalNotice is the line that runScan prints on stderr for
+// --fail-on critical. TestNoBuiltinCriticalSeverity keeps it true.
+const failOnCriticalNotice = "mcpmoat scan: note: no built-in rule is critical yet, so with --fail-on critical no built-in finding gives exit code 1"
 
 // connectOptions builds the inspect options from the --timeout and
 // --concurrency flags. inspect.Options.Validate holds the rules. Its messages
@@ -180,6 +180,23 @@ func pathFlag(fs *flag.FlagSet, name, what string, dest *string) {
 			return fmt.Errorf("--%s needs %s", name, what)
 		}
 		*dest = value
+		return nil
+	})
+}
+
+// severityFlag adds a flag to fs that takes one severity word and stores it in
+// *dest. The flag can be given once. Valid refuses an empty value, another
+// case ("HIGH") and a flag name that the flag package took as the value. The
+// flag error already holds the value, so the message does not repeat it.
+func severityFlag(fs *flag.FlagSet, name string, dest *rules.Severity) {
+	fs.Func(name, "", func(value string) error {
+		if *dest != "" {
+			return fmt.Errorf("--%s given more than once", name)
+		}
+		if !rules.Severity(value).Valid() {
+			return fmt.Errorf("--%s needs low, medium, high or critical", name)
+		}
+		*dest = rules.Severity(value)
 		return nil
 	})
 }
@@ -295,8 +312,9 @@ const configErrorHint = "mcpmoat scan: a config file has a problem; " +
 // New pins are saved after the report is printed, so a save error never hides
 // the report. The "pinned N tools" notices come after a successful save.
 //
-// A file problem or a pin error gives exit code 2 also when there are
-// findings at or above setup.failOn (see scanExitCode). The report is already
+// A config file problem, a pins.json read or save error, an inspect.Run error
+// or a signal before the save of new pins gives exit code 2, also when there
+// are findings at or above setup.failOn (see scanExitCode). The report is already
 // printed when reportScan calls scanExitCode, so the user still sees the
 // findings. Only a signal during the inspection and a failed write of the
 // report return exit code 2 without a full report.

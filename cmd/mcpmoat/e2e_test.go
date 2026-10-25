@@ -1168,10 +1168,10 @@ func TestE2EScanFailOn(t *testing.T) {
 			wantCode:    perLevel[int]{exitFindings, exitFindings, exitOK, exitOK},
 		},
 	}
+	// The empty level is the run with no --fail-on flag. The other runs add
+	// --fail-on <level>.
+	levels := append([]rules.Severity{""}, failOnLevels...)
 	for _, tt := range tests {
-		// The empty level is the run with no --fail-on flag. The other runs
-		// add --fail-on <level>.
-		levels := append([]rules.Severity{""}, failOnLevels...)
 		for _, level := range levels {
 			name := "default"
 			if level != "" {
@@ -1181,14 +1181,18 @@ func TestE2EScanFailOn(t *testing.T) {
 				t.Parallel()
 				args := slices.Clone(tt.args)
 				wantCode := tt.wantDefault
+				wantStderr := slices.Clone(tt.wantStderr)
 				if level != "" {
 					args = append(args, "--fail-on", string(level))
 					wantCode = tt.wantCode.at(t, level)
 				}
+				if level == rules.SeverityCritical {
+					wantStderr = append(wantStderr, failOnCriticalNotice+"\n")
+				}
 
 				stdout, stderr, code := runCI(t, args...)
 
-				assertScanResult(t, code, stdout, stderr, scanWant{code: wantCode, stderr: tt.wantStderr})
+				assertScanResult(t, code, stdout, stderr, scanWant{code: wantCode, stderr: wantStderr})
 				names := column(tableRows(t, stdout), 0)
 				slices.Sort(names)
 				if !slices.Equal(names, []string{"files", "notes", "remote"}) {

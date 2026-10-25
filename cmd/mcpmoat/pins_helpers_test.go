@@ -203,6 +203,12 @@ func fakeServers(tools map[string][]inspect.Tool) *inspecttest.Fake {
 	return f
 }
 
+// failingFake returns a fake inspector that fails for the server with the
+// fixed error "boom", so a test can check the exact warning text.
+func failingFake(server string) *inspecttest.Fake {
+	return &inspecttest.Fake{Errors: map[string]error{server: errors.New("boom")}}
+}
+
 // oneServer returns the server map of a config with one stdio server.
 func oneServer(name string) map[string]any {
 	return map[string]any{name: map[string]any{"command": "npx"}}

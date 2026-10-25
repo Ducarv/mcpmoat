@@ -86,10 +86,9 @@ func hasFailingFinding(rows []report.FindingRow, failOn rules.Severity) bool {
 }
 
 // scanExitCode maps the result of a scan to its exit code (FR-16). execFailed
-// is true when the scan is incomplete: a config file problem, a pins.json read
-// or save error, an inspect.Run error or a signal that stopped the save of new
-// pins (see reportScan). Exit code 2 wins over 1: the result is incomplete, so
-// "only findings" would claim more than scan knows.
+// is true when the scan is incomplete (see reportScan). Exit code 2 wins over
+// 1: the result is incomplete, so "only findings" would claim more than scan
+// knows.
 func scanExitCode(execFailed bool, rows []report.FindingRow, failOn rules.Severity) int {
 	switch {
 	case execFailed:

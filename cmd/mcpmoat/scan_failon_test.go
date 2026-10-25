@@ -1,7 +1,6 @@
 package main
 
 import (
-	"errors"
 	"fmt"
 	"path/filepath"
 	"slices"
@@ -124,6 +123,9 @@ func TestScanFailOnThresholds(t *testing.T) {
 						// that scan connected.
 						want.stderr = []string{"mcpmoat scan: pinned 1 tool for "}
 					}
+					if failOn == rules.SeverityCritical {
+						want.stderr = append(want.stderr, failOnCriticalNotice+"\n")
+					}
 					assertScanRun(t, got, want)
 					if ids := sortedFindingIDs(t, got.stdout); !slices.Equal(ids, tt.wantIDs) {
 						t.Errorf("finding IDs = %v, want %v\nstdout:\n%s", ids, tt.wantIDs, got.stdout)
@@ -136,13 +138,14 @@ func TestScanFailOnThresholds(t *testing.T) {
 	// The default is high, the PRD default, and --fail-on=<value> is the same
 	// as --fail-on <value>.
 	for _, tc := range []struct {
-		name string
-		args []string
-		want int
+		name       string
+		args       []string
+		want       int
+		wantStderr []string
 	}{
-		{"default is high", nil, exitFindings},
-		{"equals form critical", []string{"--fail-on=critical"}, exitOK},
-		{"equals form high", []string{"--fail-on=high"}, exitFindings},
+		{"default is high", nil, exitFindings, nil},
+		{"equals form critical", []string{"--fail-on=critical"}, exitOK, []string{failOnCriticalNotice + "\n"}},
+		{"equals form high", []string{"--fail-on=high"}, exitFindings, nil},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
@@ -150,7 +153,7 @@ func TestScanFailOnThresholds(t *testing.T) {
 
 			got := e.scan(nil, append([]string{"--no-connect"}, tc.args...)...)
 
-			assertScanRun(t, got, scanWant{code: tc.want, stdout: []string{"MOAT-T4-001"}})
+			assertScanRun(t, got, scanWant{code: tc.want, stdout: []string{"MOAT-T4-001"}, stderr: tc.wantStderr})
 		})
 	}
 }
@@ -322,7 +325,9 @@ func TestScanFailOnExecErrors(t *testing.T) {
 		// setup prepares e and returns the arguments after "scan" and before
 		// the mode flags.
 		setup func(t *testing.T, e *pinEnv) []string
-		modes []string // the scanModes names to run; nil runs both
+		// connectOnly skips the --no-connect mode, for a case that needs
+		// the pins.
+		connectOnly bool
 		// early is true when scan stops before it has findings: stdout must
 		// be empty, and the case runs with --fail-on low only.
 		early      bool
@@ -367,15 +372,15 @@ func TestScanFailOnExecErrors(t *testing.T) {
 				readOnlyPinsDir(t, e)
 				return []string{"--config", e.config}
 			},
-			modes:      []string{"without --no-connect"},
-			wantStdout: failOnMixedIDs,
-			wantStderr: []string{"mcpmoat scan: cannot save the pins file: "},
+			connectOnly: true,
+			wantStdout:  failOnMixedIDs,
+			wantStderr:  []string{"mcpmoat scan: cannot save the pins file: "},
 		},
 	}
 
 	for _, tt := range tests {
 		for _, mode := range scanModes {
-			if tt.modes != nil && !slices.Contains(tt.modes, mode.name) {
+			if tt.connectOnly && slices.Contains(mode.args, "--no-connect") {
 				continue
 			}
 			levels := failOnLevels
@@ -417,17 +422,11 @@ func TestScanFailOnServerFailure(t *testing.T) {
 	t.Parallel()
 
 	const failWarning = "mcpmoat scan: warning: server srv: failed: inspect: boom\n"
-	// failing is the inspecttest fake that the scan_pins tests also use for
-	// a server that fails. Its error is fixed, so the warning is exact.
-	failing := func() *inspecttest.Fake {
-		return &inspecttest.Fake{Errors: map[string]error{"srv": errors.New("boom")}}
-	}
-
 	t.Run("unpinned server with --fail-on low", func(t *testing.T) {
 		t.Parallel()
 		e := newPinEnv(t, oneServer("srv"))
 
-		got := e.scan(failing(), "--fail-on", "low")
+		got := e.scan(failingFake("srv"), "--fail-on", "low")
 
 		// The warning must be in scanWant: assertScanRun wants an empty
 		// stderr for exit code 0 otherwise. A substring in scanWant also
@@ -450,7 +449,7 @@ func TestScanFailOnServerFailure(t *testing.T) {
 			e := newPinEnv(t, oneServer("srv"))
 			firstScan(t, e, mkTool("a", "Add."))
 
-			got := e.scan(failing(), "--fail-on", string(failOn))
+			got := e.scan(failingFake("srv"), "--fail-on", string(failOn))
 
 			// The finding shows at every value: --fail-on changes only the
 			// exit code.
