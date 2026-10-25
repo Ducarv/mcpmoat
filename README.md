@@ -12,10 +12,39 @@ typosquatting. It runs locally, needs no account and sends no telemetry.
 
 These methods will work from the first release:
 
-- Homebrew: `brew install Ducarv/tap/mcpmoat`
+- Homebrew (macOS and Linux): `brew install --cask Ducarv/tap/mcpmoat`. The tap gets stable
+  releases only, not pre-releases. The macOS binaries are not notarized yet, and the cask removes
+  the quarantine flag on install, so Gatekeeper does not check the binary. Verify the archive (see
+  below) if that matters to you.
 - Go: `go install github.com/Ducarv/mcpmoat/cmd/mcpmoat@latest`
-- GitHub Releases: download a static binary for macOS or Linux (amd64, arm64) from the
-  [releases page](https://github.com/Ducarv/mcpmoat/releases).
+- GitHub Releases: download the archive for your system from the
+  [releases page](https://github.com/Ducarv/mcpmoat/releases). The archives are
+  `mcpmoat_<version>_<os>_<arch>.tar.gz` for `darwin` or `linux` and `amd64` or `arm64`. Each one
+  holds a static `mcpmoat` binary. Extract it and put it on your `PATH`.
+
+Run `mcpmoat version` to check the install. It prints `mcpmoat v<version> (commit <c>, built <d>)`.
+
+### Verify a download
+
+Each release has a `checksums.txt` file. Download it to the same folder as the archive, then check
+the archive:
+
+```sh
+shasum -a 256 --ignore-missing -c checksums.txt   # macOS
+sha256sum --ignore-missing -c checksums.txt       # Linux
+```
+
+Each archive and `checksums.txt` also have a build provenance attestation. Check it with the
+[GitHub CLI](https://cli.github.com/):
+
+```sh
+gh attestation verify mcpmoat_<version>_<os>_<arch>.tar.gz -R Ducarv/mcpmoat \
+  --signer-workflow Ducarv/mcpmoat/.github/workflows/release.yml \
+  --source-ref refs/tags/v<version>
+```
+
+The check proves which repo, workflow and tag built the archive. It does not prove that the code
+was reviewed.
 
 ## Usage
 

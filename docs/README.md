@@ -7,12 +7,14 @@ This page is the index. Each topic has one owner doc. Update the owner doc. Do n
 | Topic | Owner |
 |---|---|
 | Product pitch, install and usage | [README.md](../README.md) |
+| Verify a release download | [README.md](../README.md#verify-a-download) |
 | Requirements, milestones and FR/NFR IDs | [docs/PRD.md](PRD.md) |
 | Threat model | [docs/PRD.md](PRD.md#53-threats) |
 | Package layout and data flow (docs/PRD.md section 8 is the target design) | [docs/ARCHITECTURE.md](ARCHITECTURE.md) |
 | Commands (gates) | [CONTRIBUTING.md](../CONTRIBUTING.md#checks) |
 | Rule authoring | [CONTRIBUTING.md](../CONTRIBUTING.md#contributing-a-rule) |
 | PR docs rule | [CONTRIBUTING.md](../CONTRIBUTING.md#pull-requests) |
+| Release process (maintainers) | [CONTRIBUTING.md](../CONTRIBUTING.md#releasing) |
 | Conventions (code style, git, language, agent routing, review, release notes) | [.agents/project.md](../.agents/project.md) |
 | Security reporting | [SECURITY.md](../SECURITY.md) |
 | How stdio servers start | [docs/stdio-servers.md](stdio-servers.md) |

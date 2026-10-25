@@ -614,12 +614,13 @@ of the route to a configured server, so mcpmoat honours it (and `NO_PROXY`).
   asserts no other connection is attempted. The test clears the proxy variables.
 
 **NFR-02: Distribution.** Single static binary for macOS and Linux (amd64, arm64), published with
-GoReleaser, Homebrew formula in an own tap, checksums and GitHub attestation.
+GoReleaser, Homebrew cask in an own tap, checksums and GitHub attestation. The static-binary check
+applies to Linux. Go binaries on macOS always link libSystem dynamically.
 
 - Release artefacts exist for darwin/amd64, darwin/arm64, linux/amd64, linux/arm64.
 - Binaries are built with `CGO_ENABLED=0`.
 - A `checksums.txt` file and GitHub artifact attestations are published with each release.
-- `brew install <login>/tap/mcpmoat` installs the latest release.
+- `brew install --cask <login>/tap/mcpmoat` installs the latest release.
 
 **NFR-03: Performance.** A typical scan (up to 10 servers) finishes in under 15 s, mostly waiting
 for servers to start. Analysis itself under 1 s.

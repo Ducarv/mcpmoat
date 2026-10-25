@@ -352,6 +352,10 @@ go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.15.0
 You can also use `brew install golangci-lint`, or follow the
 [install guide](https://golangci-lint.run/welcome/install/).
 
+You need [GoReleaser](https://goreleaser.com/) v2.19.0 only when you change `.goreleaser.yaml`. CI and
+the release workflow pin the same version. `go run github.com/goreleaser/goreleaser/v2@v2.19.0 <cmd>`
+needs no install. You can also use `brew install goreleaser`.
+
 ### Checks
 
 Run these checks before you open a pull request:
@@ -371,6 +375,14 @@ On Linux, `TMPDIR` is usually `/tmp`, which other users can write to. Some E2E t
 because mcpmoat refuses to make its run directory below such a directory. To run them, set `TMPDIR`
 to a private directory, for example `TMPDIR=$(mktemp -d ~/.cache/mcpmoat-test.XXXXXX)`. CI does this.
 
+If you change `.goreleaser.yaml`, also run these checks. A snapshot build needs no token and
+publishes nothing. It writes the archives to `dist/`.
+
+```sh
+go run github.com/goreleaser/goreleaser/v2@v2.19.0 check                       # config is valid
+go run github.com/goreleaser/goreleaser/v2@v2.19.0 release --snapshot --clean  # build all archives
+```
+
 Agent-oriented variants (scoped tests, E2E scenario, golden files, fuzz) are in the Commands table of
 [.agents/project.md](.agents/project.md#commands).
 
@@ -378,7 +390,9 @@ Agent-oriented variants (scoped tests, E2E scenario, golden files, fuzz) are in 
 
 CI (`.github/workflows/ci.yml`) runs on every pull request. On Linux and macOS it runs build, vet, race
 tests, golangci-lint and the version smoke test. On Linux only it also runs the gofmt check, the
-`go mod tidy` check and govulncheck.
+`go mod tidy` check and govulncheck. The `release-check` job runs `goreleaser check` and a snapshot
+build. Then it checks that `dist/` has 4 archives that match `checksums.txt`, that the linux amd64
+binary is statically linked, and that its `mcpmoat version` output starts with `mcpmoat v`.
 
 ### Build the binary
 
@@ -397,6 +411,9 @@ output of the command above is `mcpmoat 1.2.3 (commit abc123, built 2026-01-01T0
 
 CI builds with `-ldflags "-X main.version=ci-smoke"` and checks that `mcpmoat version` prints that value.
 
+Release builds set these values through GoReleaser (`.goreleaser.yaml`): `main.version` is the tag
+with its `v`, `main.commit` is the short commit and `main.date` is the commit date.
+
 ## Pull requests
 
 - One change per pull request. A new rule is a good size.
@@ -413,6 +430,64 @@ CI builds with `-ldflags "-X main.version=ci-smoke"` and checks that `mcpmoat ve
   check it against the diff. A change to security-relevant behaviour always needs an owner-doc
   update, whatever the reason says, and even when the owner doc already states the behaviour. In that
   case, update at least its status line or its wording.
+
+## Releasing
+
+This section is for maintainers. The release workflow is `.github/workflows/release.yml`. The
+GoReleaser config is `.goreleaser.yaml`.
+
+### One-time setup
+
+1. Create the public repo `Ducarv/homebrew-tap`. GoReleaser writes the cask to its `Casks/` folder.
+2. Create a fine-grained personal access token. Give it access to only `Ducarv/homebrew-tap`, with
+   the Contents permission set to read and write. Give it an expiry date.
+3. In `Ducarv/mcpmoat`, create the GitHub environment `release`. Limit its deployment branches and
+   tags to tags that match `v[0-9]*`. Add the maintainer as a required reviewer, so each release
+   waits for approval. Add the token to it as the environment secret `HOMEBREW_TAP_GITHUB_TOKEN`. Do
+   not make it a repository secret: only jobs in the `release` environment can read an environment
+   secret.
+4. Add a tag ruleset for `v[0-9]*` that restricts creations, updates and deletes. Let only the
+   maintainer bypass it. Then nobody else can push a release tag, and nobody can move or remove
+   one.
+
+### Cut a release
+
+Tag a commit on `main` and push the tag:
+
+```sh
+git tag v0.1.0
+git push origin v0.1.0
+```
+
+The tag starts the release workflow. The `test` job runs vet and the race tests. Then the `release`
+job waits for the maintainer to approve it in the `release` environment. It fails if the tagged
+commit is not on `main`. It builds the archives with GoReleaser, creates a draft GitHub release and
+pushes the cask to the tap. Only the GoReleaser step gets the tap token. Then it attests the build
+provenance of `dist/*.tar.gz` and `dist/checksums.txt`. It downloads those files from the draft
+release, checks that they match `dist/` and verifies each attestation with `gh attestation verify`.
+Last, it publishes the release.
+
+Try a prerelease tag first, for example `v0.1.0-rc.1`. GoReleaser marks it as a prerelease and does
+not update the tap.
+
+### Verify a release
+
+Download an archive from the GitHub release, then run:
+
+```sh
+gh attestation verify <archive> -R Ducarv/mcpmoat \
+  --signer-workflow Ducarv/mcpmoat/.github/workflows/release.yml
+brew install --cask Ducarv/tap/mcpmoat
+mcpmoat version
+```
+
+`brew install` does not check the attestation. It checks only the cask's sha256 from the tap. To
+check the cask, compare its sha256 with the line for the same archive in the attested
+`checksums.txt`.
+
+Known limit: GoReleaser pushes the cask before the attest step runs. If a later step fails, the
+release stays a draft, so it is not public. But the cask is already in the tap, and its URLs return
+404 until the release is published. Fix the cause and publish the release, or revert the tap commit.
 
 ## Security issues
 
