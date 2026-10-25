@@ -10,8 +10,8 @@ import (
 	"github.com/Ducarv/mcpmoat/internal/inspect"
 )
 
-// canonMust returns Canonical(tool) and fails the test on an error.
-func canonMust(t testing.TB, tool inspect.Tool) string {
+// mustCanonical returns Canonical(tool) and fails the test on an error.
+func mustCanonical(t testing.TB, tool inspect.Tool) string {
 	t.Helper()
 	got, err := Canonical(tool)
 	if err != nil {
@@ -23,7 +23,7 @@ func canonMust(t testing.TB, tool inspect.Tool) string {
 func TestCanonicalExactBytes(t *testing.T) {
 	t.Parallel()
 	const want = `{"annotations":{"destructiveHint":null,"idempotentHint":null,"openWorldHint":null,"readOnlyHint":null,"title":""},"description":"","inputSchema":null,"name":"x","outputSchema":null,"title":""}`
-	if got := canonMust(t, inspect.Tool{Name: "x"}); got != want {
+	if got := mustCanonical(t, inspect.Tool{Name: "x"}); got != want {
 		t.Errorf("Canonical(Tool{Name: \"x\"}) =\n%s\nwant\n%s", got, want)
 	}
 }
@@ -101,7 +101,7 @@ func TestCanonicalEqual(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			a, b := canonMust(t, tt.a), canonMust(t, tt.b)
+			a, b := mustCanonical(t, tt.a), mustCanonical(t, tt.b)
 			if a != b {
 				t.Errorf("Canonical() differs, want equal:\n a = %s\n b = %s", a, b)
 			}
@@ -157,7 +157,7 @@ func TestCanonicalDiffer(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			a, b := canonMust(t, tt.a), canonMust(t, tt.b)
+			a, b := mustCanonical(t, tt.a), mustCanonical(t, tt.b)
 			if a == b {
 				t.Errorf("Canonical() equal, want different: %s", a)
 			}
@@ -171,21 +171,11 @@ func TestCanonicalDiffer(t *testing.T) {
 // values distinct.
 func TestCanonicalHints(t *testing.T) {
 	t.Parallel()
-	tests := []struct {
-		name        string
-		set         func(v *bool) *inspect.ToolAnnotations // returns annotations with one hint set to v
-		falseIsNull bool
-	}{
-		{"readOnlyHint", func(v *bool) *inspect.ToolAnnotations { return &inspect.ToolAnnotations{ReadOnlyHint: v} }, true},
-		{"destructiveHint", func(v *bool) *inspect.ToolAnnotations { return &inspect.ToolAnnotations{DestructiveHint: v} }, false},
-		{"idempotentHint", func(v *bool) *inspect.ToolAnnotations { return &inspect.ToolAnnotations{IdempotentHint: v} }, true},
-		{"openWorldHint", func(v *bool) *inspect.ToolAnnotations { return &inspect.ToolAnnotations{OpenWorldHint: v} }, false},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
+	for _, h := range hashHints {
+		t.Run(h.field, func(t *testing.T) {
 			t.Parallel()
 			falseJSON := "false"
-			if tt.falseIsNull {
+			if h.falseIsNull {
 				falseJSON = "null"
 			}
 			// new(true) (Go 1.26+) returns a pointer to a new bool set to true.
@@ -200,12 +190,14 @@ func TestCanonicalHints(t *testing.T) {
 			}
 			outputs := map[string]string{} // JSON value of the hint -> output
 			for _, val := range values {
-				got := canonMust(t, inspect.Tool{Name: "x", Annotations: tt.set(val.v)})
-				if want := `"` + tt.name + `":` + val.want; !strings.Contains(got, want) {
-					t.Errorf("%s = %s: Canonical() = %s, want it to contain %s", tt.name, val.label, got, want)
+				a := &inspect.ToolAnnotations{}
+				*h.ptr(a) = val.v
+				got := mustCanonical(t, inspect.Tool{Name: "x", Annotations: a})
+				if want := `"` + h.field + `":` + val.want; !strings.Contains(got, want) {
+					t.Errorf("%s = %s: Canonical() = %s, want it to contain %s", h.field, val.label, got, want)
 				}
 				if prev, ok := outputs[val.want]; ok && prev != got {
-					t.Errorf("%s: two values give %s but different outputs:\n%s\n%s", tt.name, val.want, prev, got)
+					t.Errorf("%s: two values give %s but different outputs:\n%s\n%s", h.field, val.want, prev, got)
 				}
 				outputs[val.want] = got
 			}
@@ -213,7 +205,7 @@ func TestCanonicalHints(t *testing.T) {
 			seen := map[string]bool{}
 			for _, out := range outputs {
 				if seen[out] {
-					t.Errorf("%s: different hint values give the same output %s", tt.name, out)
+					t.Errorf("%s: different hint values give the same output %s", h.field, out)
 				}
 				seen[out] = true
 			}
@@ -240,11 +232,11 @@ func TestCanonicalNumbers(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			in := canonMust(t, inspect.Tool{Name: "x", InputSchema: []byte(tt.schema)})
+			in := mustCanonical(t, inspect.Tool{Name: "x", InputSchema: []byte(tt.schema)})
 			if want := `"inputSchema":` + tt.want; !strings.Contains(in, want) {
 				t.Errorf("Canonical() = %s, want it to contain %s", in, want)
 			}
-			out := canonMust(t, inspect.Tool{Name: "x", OutputSchema: []byte(tt.schema)})
+			out := mustCanonical(t, inspect.Tool{Name: "x", OutputSchema: []byte(tt.schema)})
 			if want := `"outputSchema":` + tt.want; !strings.Contains(out, want) {
 				t.Errorf("Canonical() = %s, want it to contain %s", out, want)
 			}
@@ -275,7 +267,7 @@ func TestCanonicalIdempotent(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			got := canonMust(t, tt.tool)
+			got := mustCanonical(t, tt.tool)
 			// canonicalForm fails the test when got is not valid JSON.
 			if again := canonicalForm(t, []byte(got)); again != got {
 				t.Errorf("Canonicalize(output) =\n%s\nwant unchanged\n%s", again, got)
@@ -394,9 +386,9 @@ func TestCanonicalKeepsInvisible(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			plain := canonMust(t, inspect.Tool{Name: "x", Description: "ab", InputSchema: []byte(`{"d":"ab"}`)})
+			plain := mustCanonical(t, inspect.Tool{Name: "x", Description: "ab", InputSchema: []byte(`{"d":"ab"}`)})
 
-			desc := canonMust(t, inspect.Tool{Name: "x", Description: "a" + tt.char + "b", InputSchema: []byte(`{"d":"ab"}`)})
+			desc := mustCanonical(t, inspect.Tool{Name: "x", Description: "a" + tt.char + "b", InputSchema: []byte(`{"d":"ab"}`)})
 			if want := `"description":"a` + tt.char + `b"`; !strings.Contains(desc, want) {
 				t.Errorf("Canonical() = %+q, want it to contain %+q", desc, want)
 			}
@@ -404,7 +396,7 @@ func TestCanonicalKeepsInvisible(t *testing.T) {
 				t.Errorf("character in description does not change the output")
 			}
 
-			sch := canonMust(t, inspect.Tool{Name: "x", Description: "ab", InputSchema: []byte(`{"d":"a` + tt.char + `b"}`)})
+			sch := mustCanonical(t, inspect.Tool{Name: "x", Description: "ab", InputSchema: []byte(`{"d":"a` + tt.char + `b"}`)})
 			if want := `"inputSchema":{"d":"a` + tt.char + `b"}`; !strings.Contains(sch, want) {
 				t.Errorf("Canonical() = %+q, want it to contain %+q", sch, want)
 			}

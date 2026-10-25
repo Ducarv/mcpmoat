@@ -71,7 +71,7 @@ func FuzzCanonical(f *testing.F) {
 		if len(schema) == 0 {
 			return // nil or empty schema is null; there is nothing to shuffle
 		}
-		r := rand.New(rand.NewPCG(seed, seed)) //nolint:gosec // seeded shuffle for a reproducible fuzz case, not for security
+		r := rand.New(rand.NewPCG(seed, seed)) //nolint:gosec // G404: seeded shuffle for a reproducible fuzz case, not for security
 		shuffled := inspect.Tool{Name: name, InputSchema: shuffleJSON(t, schema, r)}
 		gotHash, err := Hash(shuffled)
 		if err != nil {

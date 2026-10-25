@@ -87,22 +87,25 @@ type canonicalAnnotations struct {
 // such characters, so the hash must see them.
 //
 // Known limits:
-//   - Schema numbers pass through an IEEE 754 double (float64) twice: in the
-//     SDK decode, and in JCS, which converts every number. Integers above 2^53
-//     can collapse, also in raw bytes from a source other than the SDK. Two
-//     schemas that differ only there can get the same hash. For the same
+//   - Every schema number passes through an IEEE 754 double (float64): in the
+//     SDK decode, and in JCS, which converts every number. This is also true
+//     for raw bytes from a source other than the SDK. A number that a float64
+//     cannot hold exactly is rounded: integers above 2^53 can collapse, long
+//     decimals round (0.1000000000000000000001 is equal to 0.1), very small
+//     numbers underflow to zero (1e-400 is equal to 0), and -0 is equal to 0.
+//     Two schemas that differ only there get the same hash. For the same
 //     reason, 1, 1.0 and 1e0 are equal. They are the same value in JSON
 //     Schema.
-//   - A schema number that does not fit in a float64, such as 1e400, is an
-//     error, because JCS would silently change it to the largest float64.
+//   - Only overflow is an error: a number beyond the float64 range, such as
+//     1e400, because JCS would silently change it to the largest float64.
 //   - The SDK keeps the last value of a duplicate object key, and replaces
 //     invalid UTF-8 and lone surrogates with U+FFFD, when it decodes the
 //     server message. A schema from the SDK therefore has no duplicate keys
 //     and no invalid UTF-8. Canonical still rejects them for tools from other
 //     sources.
 //   - The MCP fields _meta and icons are not part of the hash, because
-//     inspect drops them. This is an accepted limit (PRD FR-11). A follow-up
-//     issue adds them before v1.0.0.
+//     inspect drops them. This is an accepted limit (PRD FR-11). Issue #153
+//     adds them before v1.0.0.
 //
 // Canonical returns an error that wraps ErrInvalidTool when a string field
 // holds invalid UTF-8, or when a schema is not valid JSON (this includes
@@ -196,14 +199,18 @@ func canonicalSchema(field string, raw []byte) (jsontext.Value, error) {
 	}
 	// By default, Canonicalize rejects duplicate object keys, invalid UTF-8,
 	// lone surrogates and invalid JSON.
+	// This pass maps errors to the field name and rejects trailing values; the
+	// final Canonicalize of the whole document makes the bytes canonical.
 	if err := v.Canonicalize(); err != nil {
 		return nil, schemaError(field, err)
 	}
 	return v, nil
 }
 
-// checkNumbers returns an error when v is not valid JSON, or when a number in
-// v does not fit in a float64.
+// checkNumbers returns an error when a token in v is invalid (bad syntax, a
+// duplicate object key or invalid UTF-8), or when a number in v overflows a
+// float64. It reads v as a stream, so it does not reject trailing top-level
+// values: Canonicalize in canonicalSchema does.
 func checkNumbers(field string, v jsontext.Value) error {
 	dec := jsontext.NewDecoder(bytes.NewReader(v))
 	for {
@@ -218,7 +225,8 @@ func checkNumbers(field string, v jsontext.Value) error {
 			continue
 		}
 		// For a number, tok.String is the number as written. ParseFloat
-		// returns an error (ErrRange) when it does not fit in a float64.
+		// returns an error (ErrRange) only when it overflows a float64; it
+		// rounds other numbers and underflows tiny ones to zero, with no error.
 		if _, err := strconv.ParseFloat(tok.String(), 64); err != nil {
 			return invalidTool("number out of range in " + field)
 		}

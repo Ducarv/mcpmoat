@@ -134,7 +134,7 @@ func TestShuffleJSON(t *testing.T) {
 			in := []byte(tt.in)
 			wantCanon := canonicalForm(t, in)
 			wantSorted := sortedRawForm(t, in)
-			r := rand.New(rand.NewPCG(1, 2)) //nolint:gosec // fixed seed for a reproducible test shuffle, not for security
+			r := rand.New(rand.NewPCG(1, 2)) //nolint:gosec // G404: fixed seed for a reproducible test shuffle, not for security
 			reordered := false
 			for range 16 {
 				out := shuffleJSON(t, in, r)
