@@ -11,7 +11,6 @@ package main
 import (
 	"bytes"
 	"context"
-	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -171,14 +170,12 @@ func TestScanPinsFindings(t *testing.T) {
 			name:     "same _meta keys in another order is no change",
 			pinned:   []inspect.Tool{metaTool("a", `{"ui":{"resourceUri":"ui://widget/a","csp":"x"},"z":1,"b":[1,2]}`, "")},
 			current:  []inspect.Tool{metaTool("a", `{"b":[1,2],"z":1,"ui":{"csp":"x","resourceUri":"ui://widget/a"}}`, "")},
-			wantRows: nil,
 			wantCode: exitOK,
 		},
 		{
 			name:     "same icon keys in another order is no change",
 			pinned:   []inspect.Tool{metaTool("a", "", `[{"src":"https://example.invalid/a.png","mimeType":"image/png"}]`)},
 			current:  []inspect.Tool{metaTool("a", "", `[{"mimeType":"image/png","src":"https://example.invalid/a.png"}]`)},
-			wantRows: nil,
 			wantCode: exitOK,
 		},
 		{
@@ -895,15 +892,16 @@ func TestScanPinsNoSecretLeak(t *testing.T) {
 	assertContainsNone(t, "pins.json", pinsText, []string{"API_TOKEN", "Authorization", "example.invalid", "--token"})
 }
 
-// metaCanary is a secret-like value that sits in the _meta of the tools of
+// metaCanary is a secret-like value that sits in the bad _meta or icons of
 // TestScanPinsMetaNeverInOutput. It must not reach stdout, stderr or pins.json
-// when the _meta cannot be hashed.
+// when the value cannot be hashed.
 const metaCanary = "SECRET-CANARY-153"
 
 // TestScanPinsMetaNeverInOutput checks that a _meta that cannot be hashed gives
 // a fixed reason ("invalid tool data") and that no _meta value, here the
 // canary, reaches stdout, stderr or pins.json. It tests a bad _meta on the
-// first run and on a run of a pinned server, and a bad icons array.
+// first run and on a run of a pinned server, and a bad icons array. On the
+// first run nothing is stored, and a pinned server keeps its pins.json bytes.
 func TestScanPinsMetaNeverInOutput(t *testing.T) {
 	t.Parallel()
 
@@ -927,8 +925,10 @@ func TestScanPinsMetaNeverInOutput(t *testing.T) {
 				t.Parallel()
 				e := newPinEnv(t, oneServer("srv"))
 				bad := metaTool("a", tt.meta, tt.icons)
+				var pinsBefore []byte
 				if pinnedFirst {
-					firstScan(t, e, metaTool("a", `{"k":"`+metaCanary+`"}`, ""))
+					firstScan(t, e, metaTool("a", `{"k":"v"}`, ""))
+					pinsBefore = readFileBytes(t, e.pinsPath())
 				}
 
 				got := e.scan(fakeServers(map[string][]inspect.Tool{"srv": {bad}}))
@@ -940,7 +940,11 @@ func TestScanPinsMetaNeverInOutput(t *testing.T) {
 				})
 				assertContainsNone(t, "stdout", got.stdout, []string{metaCanary})
 				assertContainsNone(t, "stderr", got.stderr, []string{metaCanary})
-				if !pinnedFirst {
+				if pinnedFirst {
+					if after := readFileBytes(t, e.pinsPath()); !bytes.Equal(pinsBefore, after) {
+						t.Errorf("pins.json changed after a tool that cannot be hashed\nbefore: %s\nafter:  %s", pinsBefore, after)
+					}
+				} else {
 					// Nothing is stored for a server that cannot be pinned.
 					e.assertNoPinsFile(t, "a snapshot failure")
 				}
@@ -1184,17 +1188,4 @@ func TestScanPinsCanceledBeforeInspection(t *testing.T) {
 	if strings.Contains(stdout.String(), "MOAT-T2-") {
 		t.Errorf("stdout has a pin finding:\n%s", stdout)
 	}
-}
-
-// metaTool returns a tool like mkTool(name, "Add.") with the raw JSON _meta and
-// icons given. An empty string means the field is not set.
-func metaTool(name, meta, icons string) inspect.Tool {
-	t := mkTool(name, "Add.")
-	if meta != "" {
-		t.Meta = json.RawMessage(meta)
-	}
-	if icons != "" {
-		t.Icons = json.RawMessage(icons)
-	}
-	return t
 }

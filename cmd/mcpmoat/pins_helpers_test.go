@@ -181,6 +181,19 @@ func mkTool(name, description string) inspect.Tool {
 	}
 }
 
+// metaTool returns a tool like mkTool(name, "Add.") with the raw JSON _meta and
+// icons given. An empty string means the field is not set.
+func metaTool(name, meta, icons string) inspect.Tool {
+	t := mkTool(name, "Add.")
+	if meta != "" {
+		t.Meta = json.RawMessage(meta)
+	}
+	if icons != "" {
+		t.Icons = json.RawMessage(icons)
+	}
+	return t
+}
+
 // fakeServers returns a fake inspector that gives each server name its tools.
 func fakeServers(tools map[string][]inspect.Tool) *inspecttest.Fake {
 	f := &inspecttest.Fake{Results: map[string]inspect.Result{}}
