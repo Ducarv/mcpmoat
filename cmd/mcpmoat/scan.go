@@ -25,8 +25,8 @@ import (
 // it is checked in both modes.
 //
 // docs/ARCHITECTURE.md describes the data flow. The usage text (scanUsage and
-// usage in cli.go) is the one place that lists the flags and the exit codes
-// (FR-16).
+// usage in cli.go) lists the flags. README.md#exit-codes is the exit-code
+// contract (FR-16), and the usage text summarises it.
 func (c *cli) runScan(_ options, args []string) int {
 	fs := flag.NewFlagSet("mcpmoat scan", flag.ContinueOnError)
 	// We print our own messages and scanUsage prints the help, so the flag
@@ -284,10 +284,11 @@ const configErrorHint = "mcpmoat scan: a config file has a problem; " +
 // ignore. When setup.connect is not nil, it also inspects the servers and
 // checks their pins (see inspectAndPin). configPath is the --config value, or
 // empty. It prints the report on stdout (see writeScanReport), and the
-// file problems and warnings on stderr, and returns the exit code (the contract
-// is in the usage text, see usage in cli.go). When the ignore list dropped at
-// least one finding, it prints one line on stderr after the report, with the
-// rule IDs and their counts (see printIgnored).
+// file problems and warnings on stderr, and returns the exit code (see
+// scanExitCode; README.md#exit-codes is the contract, and the usage text in
+// cli.go summarises it). When the ignore list dropped at least one finding, it
+// prints one line on stderr after the report, with the rule IDs and their
+// counts (see printIgnored).
 //
 // The pin findings are merged with the config findings before the table is
 // written, so one table holds them all and scanExitCode sees them all.
@@ -295,7 +296,10 @@ const configErrorHint = "mcpmoat scan: a config file has a problem; " +
 // the report. The "pinned N tools" notices come after a successful save.
 //
 // A file problem or a pin error gives exit code 2 also when there are
-// findings at or above setup.failOn (see scanExitCode).
+// findings at or above setup.failOn (see scanExitCode). The report is already
+// printed when reportScan calls scanExitCode, so the user still sees the
+// findings. Only a signal during the inspection and a failed write of the
+// report return exit code 2 without a full report.
 func (c *cli) reportScan(ctx context.Context, res discover.Result, configPath string, setup scanSetup, ignore *scanIgnores) int {
 	rows, ignored := setup.checks.findings(&ignore.all, res.Servers)
 
@@ -318,7 +322,8 @@ func (c *cli) reportScan(ctx context.Context, res discover.Result, configPath st
 		ignored = mergeIgnored(ignored, pr.ignored)
 	}
 
-	if err := c.writeScanReport(res.Servers, rows, pr, configPath, len(res.Errors) > 0); err != nil {
+	configProblem := len(res.Errors) > 0
+	if err := c.writeScanReport(res.Servers, rows, pr, configPath, configProblem); err != nil {
 		c.cmdPrintf("scan", "cannot write output")
 		// stderr can still work. The file problems are the reason for a
 		// failed scan, so the user must still see them. New pins are not
@@ -332,12 +337,12 @@ func (c *cli) reportScan(ctx context.Context, res discover.Result, configPath st
 		pinFailed = true
 	}
 
-	if len(res.Errors) > 0 {
+	if configProblem {
 		// Print the problems in the order of the result, then the hint.
 		c.printFileErrors("scan", res.Errors)
 		fprintf(c.stderr, "%s\n", configErrorHint)
 	}
-	return scanExitCode(len(res.Errors) > 0 || pinFailed, rows, setup.failOn)
+	return scanExitCode(configProblem || pinFailed, rows, setup.failOn)
 }
 
 // writeScanReport writes the report on c.stdout: the server table, the findings, the

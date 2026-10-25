@@ -15,10 +15,11 @@ import (
 	"github.com/Ducarv/mcpmoat/internal/termsafe"
 )
 
-// Exit codes (PRD FR-16): 0 no findings, 1 findings at or above --fail-on,
-// 2 execution or usage error.
+// Exit codes (PRD FR-16): 0 no finding that is not ignored at or above
+// --fail-on, 1 such a finding, 2 execution or usage error. README.md#exit-codes
+// is the exact contract.
 const (
-	exitOK       = 0 // success, no findings
+	exitOK       = 0 // success: no finding that is not ignored at or above --fail-on
 	exitFindings = 1 // a finding that is not ignored has severity at or above --fail-on (default high)
 	exitError    = 2 // execution or usage error
 )
@@ -199,15 +200,10 @@ func (c *cli) usage(w io.Writer) {
 	pinUsage(w)
 
 	fprintf(w, "\nExit codes:\n")
-	fprintf(w, "  0  no findings\n")
-	fprintf(w, "  1  findings at or above --fail-on\n")
-	fprintf(w, "  2  execution error; it wins over findings\n")
-	fprintf(w, "     (scan also exits 2 when a config file has a problem, when pins.json cannot be read or saved,\n")
-	fprintf(w, "     or when a signal stops it. The report still prints for a config file or pins.json problem,\n")
-	fprintf(w, "     but not for a --config file that gives no server or for a signal during the inspection.\n")
-	fprintf(w, "     A missing file is not a problem in auto-discovery, but a missing --config file is.\n")
-	fprintf(w, "     A server that fails or times out is a warning and does not change the exit code, unless its pins\n")
-	fprintf(w, "     are already stored: then it is a high finding, and scan exits 1 at the default --fail-on high)\n")
+	fprintf(w, "  0  no finding at or above --fail-on\n")
+	fprintf(w, "  1  a finding at or above --fail-on (default high)\n")
+	fprintf(w, "  2  execution or usage error, also when there are findings\n")
+	fprintf(w, "     (README \"Exit codes\" lists the causes and when the report still prints)\n")
 }
 
 // scanUsage writes the flags and the output notes of the scan command to w.
@@ -226,8 +222,7 @@ func scanUsage(w io.Writer) {
 	fprintf(tw, "  --concurrency <n>\tMaximum number of servers inspected at the same time (default %d)\n", inspect.DefaultConcurrency)
 	fprintf(tw, "  \tThe two flags above apply when scan connects to servers. --no-connect ignores them, but still checks them\n")
 	fprintf(tw, "  --fail-on <severity>\tExit 1 for a finding of this severity or above: low, medium, high or critical (default high)\n")
-	fprintf(tw, "  \tA finding severity that mcpmoat does not know always counts\n")
-	fprintf(tw, "  \tNo built-in rule is critical yet, so critical fails only on an unknown severity or rule ID\n")
+	fprintf(tw, "  \tNo built-in rule is critical yet, so critical passes every built-in finding\n")
 	fprintf(tw, "  --ignore <rule-id>\tIgnore all findings of this rule; repeatable\n")
 	fprintf(tw, "  \tA %s file in the working directory also ignores findings: one \"RULE-ID [server[/tool]]\" per line; \"# ...\" on its own line or after the entry is a comment\n", rules.IgnoreFileName)
 	fprintf(tw, "  \tThe file cannot ignore the pin rules (MOAT-T2-*): it can come from a cloned repository. Use --ignore for them\n")
@@ -247,7 +242,7 @@ func scanUsage(w io.Writer) {
 	fprintf(w, "  If that server is already pinned and failed or timed out, it is also a finding (MOAT-T2-004, high).\n")
 	fprintf(w, "  The warnings of an inspection (cleartext-secrets, undeclared-capability, dns-pin-unavailable) go to stderr.\n")
 	fprintf(w, "  scan reads pins.json before it starts a server, and reads it again just before it saves the first-run pins.\n")
-	fprintf(w, "  Ctrl-C (or SIGTERM or SIGHUP) stops the servers, saves no pins and exits 2.\n")
+	fprintf(w, "  Ctrl-C (or SIGTERM or SIGHUP) during the inspection, or before scan saves new pins, stops scan with exit 2 and saves no pins.\n")
 	fprintf(w, "  --no-connect: scan runs only the built-in config rules (T4 and T5). It reads and writes no pins.\n")
 	fprintf(w, "  The tool rules (YAML) are not applied to tools yet. Rules from --rules are loaded and checked, but not applied yet.\n")
 	fprintf(w, "  Exit code 1 means a finding that is not ignored, with severity at or above --fail-on (default high).\n")
