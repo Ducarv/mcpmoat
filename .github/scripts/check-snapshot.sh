@@ -12,9 +12,9 @@ fail() {
   exit 1
 }
 
-# binary prints the path of the binary for an OS and an arch, from
+# binary_path prints the path of the binary for an OS and an arch, from
 # dist/artifacts.json.
-binary() {
+binary_path() {
   local path
   path=$(jq -r --arg os "$1" --arg arch "$2" \
     '.[] | select(.type == "Binary" and .goos == $os and .goarch == $arch) | .path' \
@@ -56,8 +56,9 @@ if ! (cd dist && "${sha256[@]}" -c checksums.txt); then
 fi
 
 # The Linux binaries must be static. file reads them on any host.
-for arch in amd64 arm64; do
-  bin=$(binary linux "$arch")
+for t in "${targets[@]}"; do
+  [[ $t == linux_* ]] || continue
+  bin=$(binary_path linux "${t#linux_}")
   info=$(file "$bin")
   echo "$info"
   case "$info" in
@@ -67,7 +68,7 @@ for arch in amd64 arm64; do
 done
 
 # Run the binary for this host and check the version that the ldflags set.
-bin=$(binary "$(go env GOOS)" "$(go env GOARCH)")
+bin=$(binary_path "$(go env GOOS)" "$(go env GOARCH)")
 want_prefix="mcpmoat v$(jq -r .version dist/metadata.json) "
 out=$("$bin" version)
 echo "$out"
