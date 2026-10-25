@@ -57,10 +57,10 @@ func (s Style) heading(text string) string {
 	return s.paint(sgrBold, text)
 }
 
-// status colours text for the server status word st: green for "ok", yellow
+// status colours text for the server status word: green for "ok", yellow
 // for "timeout" and "failed". Any other status stays plain.
-func (s Style) status(st, text string) string {
-	switch st {
+func (s Style) status(word, text string) string {
+	switch word {
 	case StatusOK:
 		return s.paint(sgrGreen, text)
 	case StatusTimeout, StatusFailed:

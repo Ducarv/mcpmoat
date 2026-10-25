@@ -196,12 +196,14 @@ func TestPinOutcomesUnverifiedSeverity(t *testing.T) {
 	}
 }
 
-// TestPinOutcomesUnverifiedRemediation checks the Fix text of each MOAT-T2-004
-// row. A row that scan makes itself gets its own fixed text, and the text does
-// not tell the user to run "pin --accept": scan prints no "To accept" line for
-// these rows, and pin --accept would refuse them. A row from pins.Compare keeps
-// the text of the kind.
-func TestPinOutcomesUnverifiedRemediation(t *testing.T) {
+// TestPinOutcomesRemediation checks the Fix text of the pin rows. A
+// MOAT-T2-004 row that scan makes itself gets its own fixed text. A row from
+// pins.Compare keeps the text of its kind, unless the tools of the server
+// cannot be pinned: then scan prints no "To accept" line, so every row of the
+// server gets the fixed text for tools that cannot be pinned. A row with no
+// "To accept" line never tells the user to run "pin --accept", which would
+// refuse those tools.
+func TestPinOutcomesRemediation(t *testing.T) {
 	t.Parallel()
 
 	srv := discover.Server{Name: "srv", Client: discover.ClientClaudeCode, Source: "/cfg/mcp.json"}
@@ -212,45 +214,62 @@ func TestPinOutcomesUnverifiedRemediation(t *testing.T) {
 		return inspect.Outcome{Server: s, Status: inspect.StatusOK, Result: inspect.Result{Tools: ts}}
 	}
 	failed := inspect.Outcome{Server: srv, Status: inspect.StatusFailed, Err: errors.New("boom")}
+	const notPinnable = "Do not use this server until its tools are valid and have unique names, then run mcpmoat scan again."
 
 	tests := []struct {
 		name      string
 		pinBefore bool
 		outcomes  []inspect.Outcome
-		want      string
-		// scanMade is true for a row that scan makes itself.
-		scanMade bool
+		// want holds the rule ID and the Fix text of each row, in row order.
+		want [][2]string
+		// hint is true when scan prints a "To accept" line for the server.
+		hint bool
 	}{
 		{
 			name:     "listed twice",
 			outcomes: []inspect.Outcome{okWith(srv, tools), okWith(srv, tools)},
-			want:     "Remove the duplicate entry of this server from the config file, then run mcpmoat scan again.",
-			scanMade: true,
+			want:     [][2]string{{"MOAT-T2-004", "Remove the duplicate entry of this server from the config file, then run mcpmoat scan again."}},
 		},
 		{
 			name:     "relative config path",
 			outcomes: []inspect.Outcome{okWith(relative, tools)},
-			want:     "Run mcpmoat scan again with an absolute --config path, or from a working directory that mcpmoat can read.",
-			scanMade: true,
+			want:     [][2]string{{"MOAT-T2-004", "Run mcpmoat scan again with an absolute --config path, or from a working directory that mcpmoat can read."}},
 		},
 		{
 			name:      "pinned server not inspected",
 			pinBefore: true,
 			outcomes:  []inspect.Outcome{failed},
-			want:      "Find out why the server could not be inspected (see its status in the summary), fix it, then run mcpmoat scan again.",
-			scanMade:  true,
+			want:      [][2]string{{"MOAT-T2-004", "Find out why the server could not be inspected (see its status in the summary), fix it, then run mcpmoat scan again."}},
 		},
 		{
 			name:     "tools cannot be pinned",
 			outcomes: []inspect.Outcome{okWith(srv, dup)},
-			want:     "Do not use this server until its tools are valid and have unique names, then run mcpmoat scan again.",
-			scanMade: true,
+			want:     [][2]string{{"MOAT-T2-004", notPinnable}},
 		},
 		{
-			name:      "row from pins.Compare keeps the text of the kind",
+			name:      "row from pins.Compare for tools that cannot be pinned",
 			pinBefore: true,
 			outcomes:  []inspect.Outcome{okWith(srv, dup)},
-			want:      pins.KindUnverified.Remediation(),
+			want:      [][2]string{{"MOAT-T2-004", notPinnable}},
+		},
+		{
+			name:      "changed tool next to a duplicate tool name",
+			pinBefore: true,
+			outcomes:  []inspect.Outcome{okWith(srv, []inspect.Tool{mkTool("a", "Changed."), mkTool("b", "One."), mkTool("b", "Two.")})},
+			want:      [][2]string{{"MOAT-T2-001", notPinnable}, {"MOAT-T2-004", notPinnable}},
+		},
+		{
+			name:      "new tool next to an empty tool name",
+			pinBefore: true,
+			outcomes:  []inspect.Outcome{okWith(srv, []inspect.Tool{mkTool("", "No name."), mkTool("a", "Add."), mkTool("n", "New.")})},
+			want:      [][2]string{{"MOAT-T2-004", notPinnable}, {"MOAT-T2-002", notPinnable}},
+		},
+		{
+			name:      "changed tool keeps the text of the kind",
+			pinBefore: true,
+			outcomes:  []inspect.Outcome{okWith(srv, []inspect.Tool{mkTool("a", "Changed.")})},
+			want:      [][2]string{{"MOAT-T2-001", pins.KindChanged.Remediation()}},
+			hint:      true,
 		},
 	}
 	for _, tt := range tests {
@@ -261,15 +280,18 @@ func TestPinOutcomesUnverifiedRemediation(t *testing.T) {
 
 			pr := c.pinOutcomes(store, tt.outcomes, &scanIgnores{})
 
-			if len(pr.rows) != 1 || pr.rows[0].RuleID != "MOAT-T2-004" {
-				t.Fatalf("rows = %+v, want one MOAT-T2-004 row", pr.rows)
+			got := make([][2]string, len(pr.rows))
+			for i, r := range pr.rows {
+				got[i] = [2]string{r.RuleID, r.Remediation}
+				if !tt.hint && strings.Contains(r.Remediation, "pin --accept") {
+					t.Errorf("%s Remediation = %q, must not point to pin --accept", r.RuleID, r.Remediation)
+				}
 			}
-			got := pr.rows[0].Remediation
-			if got != tt.want {
-				t.Errorf("Remediation = %q, want %q", got, tt.want)
+			if !slices.Equal(got, tt.want) {
+				t.Errorf("rows (rule ID, Fix) =\n%q\nwant\n%q", got, tt.want)
 			}
-			if tt.scanMade && strings.Contains(got, "pin --accept") {
-				t.Errorf("Remediation = %q, must not point to pin --accept", got)
+			if gotHint := len(pr.hints) > 0; gotHint != tt.hint {
+				t.Errorf("hint = %v, want %v (hints %+v)", gotHint, tt.hint, pr.hints)
 			}
 		})
 	}

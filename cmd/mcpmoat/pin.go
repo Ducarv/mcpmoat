@@ -137,7 +137,7 @@ func (c *cli) inspectOne(ctx context.Context, server discover.Server, opts inspe
 		c.cmdPrintf("pin", "server %s: not inspected", cutName(server.Name))
 		return nil, false
 	}
-	c.warnInspection("pin", outcomes[0])
+	c.warnInspection(outcomes[0])
 	if outcomes[0].Status != inspect.StatusOK {
 		c.cmdPrintf("pin", "%s", notInspectedText(outcomes[0]))
 		return nil, false

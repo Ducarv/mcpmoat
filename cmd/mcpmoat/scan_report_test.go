@@ -21,7 +21,6 @@ import (
 	"testing"
 	"unicode/utf8"
 
-	"github.com/Ducarv/mcpmoat/internal/discover/discovertest"
 	"github.com/Ducarv/mcpmoat/internal/inspect"
 	"github.com/Ducarv/mcpmoat/internal/inspect/inspecttest"
 )
@@ -360,42 +359,19 @@ func TestRunWithContextBufferHasNoColor(t *testing.T) {
 	}
 }
 
-// TestScanReportNoColorWithoutTerminal checks that a scan without a terminal
-// and without any flag writes no ESC byte, in both modes and with findings in
-// the report.
+// TestScanReportNoColorWithoutTerminal checks that a scan that connects, with
+// no terminal and no flag, writes no ESC byte, also with a pin finding and a
+// diff in the report. TestScanColorGolden covers the --no-connect report.
 func TestScanReportNoColorWithoutTerminal(t *testing.T) {
 	t.Parallel()
 
-	t.Run("no-connect", func(t *testing.T) {
-		t.Parallel()
+	e := newPinEnv(t, oneServer("srv"))
+	firstScan(t, e, mkTool("read", "Read files."))
 
-		home, work := discovertest.CopyFixture(t, fixtureDir("all", "full"))
-		c, stdout, stderr := dirsCLI(t, home, work)
-		c.stdoutIsTTY = false
-		c.getenv = fakeGetenv(nil)
+	got := scanRunTTY(e, fakeServers(map[string][]inspect.Tool{"srv": {mkTool("read", "Changed.")}}), false)
 
-		code := c.dispatch([]string{"scan", "--no-connect"})
-
-		if code != exitOK {
-			t.Fatalf("exit code = %d, want %d\nstderr:\n%s", code, exitOK, stderr)
-		}
-		if stdout.Len() == 0 {
-			t.Fatal("stdout is empty")
-		}
-		assertNoEscape(t, stdout.String(), stderr.String())
-	})
-
-	t.Run("connect, changed tool", func(t *testing.T) {
-		t.Parallel()
-
-		e := newPinEnv(t, oneServer("srv"))
-		firstScan(t, e, mkTool("read", "Read files."))
-
-		got := scanRunTTY(e, fakeServers(map[string][]inspect.Tool{"srv": {mkTool("read", "Changed.")}}), false)
-
-		if strings.TrimSpace(got.stdout) == "" {
-			t.Fatal("stdout is empty")
-		}
-		assertNoEscape(t, got.stdout, got.stderr)
-	})
+	if strings.TrimSpace(got.stdout) == "" {
+		t.Fatal("stdout is empty")
+	}
+	assertNoEscape(t, got.stdout, got.stderr)
 }

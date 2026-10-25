@@ -147,19 +147,28 @@ func outcomeReason(o inspect.Outcome) string {
 	return "no error text"
 }
 
-// warnInspection writes the warnings of the inspection of o on stderr for the
-// command cmd ("scan" or "pin"): one line for each inspect.Warning, also for a
-// server that failed (ConnectError.Warnings). A Warning holds keys and fixed
-// names only, never values, URLs or server text (see inspect.Warning).
-func (c *cli) warnInspection(cmd string, o inspect.Outcome) {
-	warnings := o.Result.Warnings
+// warnInspection writes the warnings of the inspection of o on stderr, for
+// pin: one line for each warning of outcomeWarnings. scan shows them in its
+// summary on stdout instead (see outcomeSummary).
+func (c *cli) warnInspection(o inspect.Outcome) {
+	for _, w := range outcomeWarnings(o) {
+		c.warnf("pin", "%s", warningText(o.Server.Name, w))
+	}
+}
+
+// outcomeWarnings returns the warnings of the inspection of o: Result.Warnings
+// for a server that inspect read, and ConnectError.Warnings for a server that
+// failed. A Warning holds keys and fixed names only, never values, URLs or
+// server text (see inspect.Warning).
+func outcomeWarnings(o inspect.Outcome) []inspect.Warning {
+	if o.Status == inspect.StatusOK {
+		return o.Result.Warnings
+	}
 	var ce *inspect.ConnectError
-	if o.Status != inspect.StatusOK && errors.As(o.Err, &ce) {
-		warnings = ce.Warnings
+	if errors.As(o.Err, &ce) {
+		return ce.Warnings
 	}
-	for _, w := range warnings {
-		c.warnf(cmd, "%s", warningText(o.Server.Name, w))
-	}
+	return nil
 }
 
 // warningText returns "server <name>: <kind>: <what it means>" for one

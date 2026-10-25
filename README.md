@@ -88,7 +88,8 @@ MEDIUM (1)
   name, invalid tool data, or more than 2 MiB) is a high `MOAT-T2-004`, because mcpmoat can never
   check its tools for changes. `MOAT-T2-004` is high when the tool name is pinned, because a duplicate,
   invalid or unverifiable copy of a pinned tool can hide a rug pull. Else it is medium. For each
-  changed tool, `scan` prints a unified diff of the pinned and the current text after the findings. For each new tool, it prints the full text of the tool as added lines, under the header
+  changed tool, `scan` prints a unified diff of the pinned and the current text after the findings.
+  For each new tool, it prints the full text of the tool as added lines, under the header
   `New tool <tool> on server <server>:`, so you can review it before you accept it. A pinned tool
   whose pin cannot be checked (another hash version, or a pinned text that does not match its hash)
   gets its full current text too, under `Not verified tool <tool> on server <server> (current
@@ -132,14 +133,15 @@ MEDIUM (1)
   it to review them first)` or `(a change has no diff text: review the tool first)`. The digest
   covers those changes too.
 - A server that fails, times out or is refused (an untrusted or turned-off server) shows its status
-  in the summary on stdout. If the server is not pinned, it does not change the exit code. If the server is already
-  pinned and fails or times out, it is also a `MOAT-T2-004` finding (high, exit code 1) with the
-  reason `pinned server could not be inspected`, because a hostile server must not avoid the
-  rug-pull check by failing on purpose. A pinned server that is refused stays a warning: your
-  client config turns it off or does not approve it, and the server cannot choose that.
+  in the summary on stdout. If the server is not pinned, it does not change the exit code. If the
+  server is already pinned and fails or times out, it is also a `MOAT-T2-004` finding (high, exit
+  code 1) with the reason `pinned server could not be inspected`, because a hostile server must not
+  avoid the rug-pull check by failing on purpose. A pinned server that is refused shows only its
+  status `not inspected` in the summary, with no finding: your client config turns it off or does
+  not approve it, and the server cannot choose that.
 - `scan` shows the warnings of the inspection in the summary on stdout. `pin --accept` prints them
-  on stderr. They are: secrets that go over plain http (`cleartext-secrets`), lists that the server answered but did not declare
-  (`undeclared-capability`), and a proxy that skips the DNS pin (`dns-pin-unavailable`). The lines
+  on stderr. They are: secrets that go over plain http (`cleartext-secrets`), lists that the server
+  answered but did not declare (`undeclared-capability`), and a proxy that skips the DNS pin (`dns-pin-unavailable`). The lines
   hold keys and fixed names only, never values. A server that is listed twice is a `MOAT-T2-004` finding too: high
   when it is pinned, else medium.
 - `scan` and `pin --accept` read `pins.json` before they start any server. A `pins.json` that
@@ -201,7 +203,8 @@ When the file gives entries, mcpmoat prints `using N entries from .mcpmoat-ignor
 `using 1 entry from .mcpmoat-ignore`) on stderr. If you see this line, read the file before you
 trust a clean result.
 
-When the ignore list drops findings, `scan` also prints one line on stderr after the report. It gives the count for each rule ID, for example
+When the ignore list drops findings, `scan` also prints one line on stderr after the report. It
+gives the count for each rule ID, for example
 `mcpmoat scan: 2 findings ignored: MOAT-T4-002 (2)`. It shows only rule IDs and counts. A
 `.mcpmoat-ignore` in a repository that you did not write can hide findings, so check this line and
 the file. Ignored findings do not count for the exit code, so the file can turn exit code 1 into 0.

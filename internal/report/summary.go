@@ -24,9 +24,7 @@ const (
 )
 
 // maxReasonRunes caps the failure reason of a server, in runes of raw text.
-// The reason can hold server or system error text. It is the same number as
-// maxWarnErrRunes in cmd/mcpmoat (the cap of the stderr of pin), so both
-// streams cut a reason at the same length.
+// The reason can hold server or system error text.
 const maxReasonRunes = 500
 
 // maxSummaryNameRunes caps a header key in a warning line, in runes of raw

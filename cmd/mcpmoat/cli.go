@@ -37,7 +37,8 @@ type cli struct {
 	getenv         func(string) string
 	build          buildInfo
 	// stdoutIsTTY is true when stdout is a terminal. runWithContext sets it
-	// from os.Stdout. Tests set it directly.
+	// from the stdout writer, when that writer is an *os.File (see
+	// isTerminal). Tests set it directly.
 	stdoutIsTTY bool
 	// homeDir returns the user's home directory. runWithContext sets it to
 	// os.UserHomeDir. Tests inject a fixture path.

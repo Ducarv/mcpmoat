@@ -269,10 +269,10 @@ func builtinSet(t *testing.T) *rules.Set {
 	return set
 }
 
-// TestFindingSeverity checks the severity of a row: the YAML severity for a
-// known rule, and "critical" (fail closed) for a rule that the set does not
-// have, also when the set is nil.
-func TestFindingSeverity(t *testing.T) {
+// TestFindingRule checks the rule and the severity of a row: the rule and its
+// YAML severity for a known rule, and a zero rule with "critical" (fail closed)
+// for a rule that the set does not have, also when the set is nil.
+func TestFindingRule(t *testing.T) {
 	t.Parallel()
 	set := builtinSet(t)
 
@@ -281,20 +281,29 @@ func TestFindingSeverity(t *testing.T) {
 		set  *rules.Set
 		id   string
 		want string
+		// known is true when the set has the rule, so the result is that rule.
+		known bool
 	}{
-		{"insecure url is high", set, rules.RuleInsecureURL, "high"},
-		{"plaintext secret is high", set, rules.RulePlaintextSecret, "high"},
-		{"unpinned package is medium", set, rules.RuleUnpinnedPackage, "medium"},
-		{"auto install is low", set, rules.RuleAutoInstall, "low"},
-		{"unknown rule fails closed", set, "MOAT-X-999", "critical"},
-		{"empty rule ID fails closed", set, "", "critical"},
-		{"nil set fails closed", nil, rules.RuleInsecureURL, "critical"},
+		{"insecure url is high", set, rules.RuleInsecureURL, "high", true},
+		{"plaintext secret is high", set, rules.RulePlaintextSecret, "high", true},
+		{"unpinned package is medium", set, rules.RuleUnpinnedPackage, "medium", true},
+		{"auto install is low", set, rules.RuleAutoInstall, "low", true},
+		{"unknown rule fails closed", set, "MOAT-X-999", "critical", false},
+		{"empty rule ID fails closed", set, "", "critical", false},
+		{"nil set fails closed", nil, rules.RuleInsecureURL, "critical", false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			if got := findingSeverity(tt.set, tt.id); got != tt.want {
-				t.Errorf("findingSeverity(%q) = %q, want %q", tt.id, got, tt.want)
+			rule, got := findingRule(tt.set, tt.id)
+			if got != tt.want {
+				t.Errorf("findingRule(%q) severity = %q, want %q", tt.id, got, tt.want)
+			}
+			if tt.known && (rule.ID != tt.id || rule.Risk == "" || rule.Remediation == "") {
+				t.Errorf("findingRule(%q) rule = %+v, want the rule of the set", tt.id, rule)
+			}
+			if !tt.known && rule.ID+rule.Title+rule.Risk+rule.Remediation != "" {
+				t.Errorf("findingRule(%q) rule = %+v, want a zero rule (empty texts)", tt.id, rule)
 			}
 		})
 	}

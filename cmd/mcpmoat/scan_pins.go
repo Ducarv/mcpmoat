@@ -1,7 +1,6 @@
 package main
 
 import (
-	"errors"
 	"path/filepath"
 
 	"github.com/Ducarv/mcpmoat/internal/discover"
@@ -36,7 +35,7 @@ type pinReport struct {
 	// the ignore list does not drop, in the order of the servers. Each one
 	// holds the digest of the tools that scan saw, for the line "To accept ...
 	// --expect <digest>" (see writeAcceptHints). A server whose tools cannot be
-	// pinned has no hint: pin --accept would refuse those tools (see addHint).
+	// pinned has no hint: pin --accept would refuse those tools (see compare).
 	hints []acceptHint
 	// statuses holds the inspection result of each outcome, in the order of
 	// the outcomes (not of the config). serverStatuses puts them in the order
@@ -275,11 +274,17 @@ func (p *pinner) firstPin(s discover.Server, id pins.Identity, tools []inspect.T
 // high), not from the rule set, which does not hold the pin rules. A changed or
 // new tool, and a pinned tool whose pin cannot be checked, also gets a diff
 // (see appendDiff). The store is never changed. When at least one row is kept
-// (not ignored), compare also records the digest for the "--expect" hint (see
-// addHint). The hint says so when a kept diff was cut, or when the ignore list
-// dropped a row: the digest covers that change, but the report shows no diff
-// for it.
+// (not ignored), compare also records the digest for the "--expect" hint
+// (see writeAcceptHints). The hint says so when a kept diff was cut, or when
+// the ignore list dropped a row: the digest covers that change, but the report
+// shows no diff for it.
+//
+// Tools that cannot be pinned (see pinnable) cannot be accepted either, so
+// they get no hint, and every row of the server gets the fix fixNotPinnable:
+// the remediation of the change kind names the "To accept" command, which scan
+// does not print for them. The error text is not printed.
 func (p *pinner) compare(s discover.Server, id pins.Identity, tools []inspect.Tool, stored pins.ServerPins) {
+	snap, pinErr := pinnable(id, tools)
 	h := acceptHint{name: s.Name, id: id}
 	kept := false // true when at least one row of this server is not ignored
 	for _, ch := range pins.Compare(stored, tools) {
@@ -287,6 +292,9 @@ func (p *pinner) compare(s discover.Server, id pins.Identity, tools []inspect.To
 		if ch.Kind == pins.KindUnverified {
 			// ch.Reason is a fixed text from internal/pins.
 			row.Related = ch.Reason
+		}
+		if pinErr != nil {
+			row.Remediation = fixNotPinnable
 		}
 		if !p.add(row) {
 			h.ignored = true
@@ -297,17 +305,7 @@ func (p *pinner) compare(s discover.Server, id pins.Identity, tools []inspect.To
 		h.noText = h.noText || ch.DiffIsNote()
 		p.res.diffs = p.c.appendDiff("scan", p.res.diffs, s.Name, ch)
 	}
-	if kept {
-		p.addHint(h, tools)
-	}
-}
-
-// addHint records h with the pins.Digest of the tools that scan saw, so scan
-// can print the "--expect" line (see writeAcceptHints). Tools that cannot be
-// pinned (see pinnable) cannot be accepted either, so there is no hint for
-// them. The error text is not printed.
-func (p *pinner) addHint(h acceptHint, tools []inspect.Tool) {
-	if snap, err := pinnable(h.id, tools); err == nil {
+	if kept && pinErr == nil {
 		h.digest = pins.Digest(snap)
 		p.res.hints = append(p.res.hints, h)
 	}
@@ -342,7 +340,7 @@ const (
 )
 
 // pinRow returns the report row of one pin change on the server s. The caller
-// gives the severity: findingSeverity would answer "critical" for these rule
+// gives the severity: findingRule would answer "critical" for these rule
 // IDs, because the rule set has no rule for them. The risk and the remediation
 // are the fixed texts of the change kind (see pins.ChangeKind). The pin rules
 // have no title, so the row has an empty Title and the report leaves the
@@ -368,39 +366,34 @@ func pinRow(kind pins.ChangeKind, s discover.Server, tool, severity string) repo
 //   - A server that a gate refused (the client config turns it off, or it is
 //     untrusted) was not started, so it gives "not inspected".
 //
-// The warnings of the inspection come from Result.Warnings, or, for a server
-// that failed, from ConnectError.Warnings. They hold keys and fixed names,
-// never values.
+// The warnings of the inspection come from outcomeWarnings.
 func outcomeSummary(o inspect.Outcome, findings int) report.ServerStatus {
-	st := report.ServerStatus{
+	status := report.ServerStatus{
 		ServerRef: report.NewServerRef(o.Server),
 		Findings:  findings,
+		Warnings:  outcomeWarnings(o),
 	}
 	if o.Status == inspect.StatusOK {
-		st.Status = report.StatusOK
-		st.Tools = len(o.Result.Tools)
-		st.Warnings = o.Result.Warnings
-		return st
+		status.Status = report.StatusOK
+		status.Tools = len(o.Result.Tools)
+		return status
 	}
 	switch {
 	case inspect.Refused(o.Err):
-		st.Status = report.StatusNotInspected
+		status.Status = report.StatusNotInspected
 	case o.Status == inspect.StatusTimeout:
-		st.Status = report.StatusTimeout
+		status.Status = report.StatusTimeout
 	default:
-		st.Status = report.StatusFailed
+		status.Status = report.StatusFailed
 	}
-	st.Reason = outcomeReason(o)
-	var ce *inspect.ConnectError
-	if errors.As(o.Err, &ce) {
-		st.Warnings = ce.Warnings
-	}
-	return st
+	status.Reason = outcomeReason(o)
+	return status
 }
 
 // serverStatuses returns the summary of all servers, in the order of servers
 // (the config order), so it lines up with the server table. configFindings
-// holds the number of config findings of each server, by index in servers.
+// holds the number of config findings of each server, by index in servers: it
+// must have one entry for each server (configChecks.findings makes it so).
 //
 // servers must be the slice that scan gave to inspect.Run. An outcome belongs
 // to the server at its Index (see inspect.Outcome.Index). The outcomes come

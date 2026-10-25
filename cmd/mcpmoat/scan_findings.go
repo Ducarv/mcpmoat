@@ -31,20 +31,18 @@ type configChecks struct {
 // set (rule ID, field, key, related). It never holds a Finding.Message or a
 // config value.
 //
-// The second result counts the findings that the ignore list dropped, by rule
-// ID. It is nil when the list dropped nothing. The caller must tell the user
+// ignored counts the findings that the ignore list dropped, by rule ID. It is
+// nil when the list dropped nothing. The caller must tell the user
 // about these findings, because an ignore file can come from an untrusted
 // folder and hide a finding. The map holds only rule IDs and counts.
 //
-// The third result holds, for each server, the number of rows that the server
-// got. The index is the index in servers, so two servers with the same name
-// are counted apart.
+// perServer holds, for each server, the number of rows that the server got.
+// The index is the index in servers, so two servers with the same name are
+// counted apart.
 //
 // A nil ignore list ignores nothing.
-func (cc configChecks) findings(ignore *rules.IgnoreList, servers []discover.Server) ([]report.FindingRow, map[string]int, []int) {
-	var rows []report.FindingRow
-	var ignored map[string]int
-	counts := make([]int, len(servers))
+func (cc configChecks) findings(ignore *rules.IgnoreList, servers []discover.Server) (rows []report.FindingRow, ignored map[string]int, perServer []int) {
+	perServer = make([]int, len(servers))
 	for i, s := range servers {
 		ref := report.NewServerRef(s)
 		found := rules.CheckConfig(s)
@@ -55,35 +53,33 @@ func (cc configChecks) findings(ignore *rules.IgnoreList, servers []discover.Ser
 				ignored = addIgnored(ignored, f.RuleID, 1)
 				continue
 			}
-			row := report.FindingRow{
-				ServerRef: ref,
-				RuleID:    f.RuleID,
-				Severity:  findingSeverity(cc.set, f.RuleID),
-				Field:     f.Field,
-				Key:       f.Key,
-				Related:   f.Related,
-			}
-			// A rule that is not in the set keeps empty texts.
-			if rule, ok := cc.set.Get(f.RuleID); ok {
-				row.Title = rule.Title
-				row.Risk = rule.Risk
-				row.Remediation = rule.Remediation
-			}
-			rows = append(rows, row)
-			counts[i]++
+			rule, severity := findingRule(cc.set, f.RuleID)
+			rows = append(rows, report.FindingRow{
+				ServerRef:   ref,
+				RuleID:      f.RuleID,
+				Severity:    severity,
+				Title:       rule.Title,
+				Risk:        rule.Risk,
+				Remediation: rule.Remediation,
+				Field:       f.Field,
+				Key:         f.Key,
+				Related:     f.Related,
+			})
+			perServer[i]++
 		}
 	}
-	return rows, ignored, counts
+	return rows, ignored, perServer
 }
 
-// findingSeverity returns the severity word of the rule with the given ID. It
-// returns "critical" when the set has no such rule (fail closed).
-func findingSeverity(set *rules.Set, id string) string {
+// findingRule returns the rule with the given ID and its severity word. When
+// the set has no such rule, it returns a zero Rule, so the texts are empty,
+// and "critical" (fail closed).
+func findingRule(set *rules.Set, id string) (rules.Rule, string) {
 	rule, ok := set.Get(id)
 	if !ok {
-		return string(rules.SeverityCritical)
+		return rules.Rule{}, string(rules.SeverityCritical)
 	}
-	return string(rule.Severity)
+	return rule, string(rule.Severity)
 }
 
 // hasFailingFinding reports whether any row has severity high or above, which

@@ -1,9 +1,9 @@
 package report
 
 import (
+	"fmt"
 	"io"
 	"slices"
-	"strconv"
 	"strings"
 
 	"github.com/Ducarv/mcpmoat/internal/discover"
@@ -183,7 +183,7 @@ func WriteFindings(w io.Writer, rows []FindingRow, st Style) error {
 		if len(group) == 0 {
 			continue
 		}
-		b.WriteString(st.severity(sev, strings.ToUpper(sev)+" ("+strconv.Itoa(len(group))+")"))
+		b.WriteString(st.severity(sev, fmt.Sprintf("%s (%d)", strings.ToUpper(sev), len(group))))
 		b.WriteString("\n")
 		for _, r := range group {
 			writeFinding(&b, r)
@@ -209,7 +209,7 @@ func writeFinding(b *strings.Builder, r FindingRow) {
 	case r.Field == fieldTool && r.Key == "":
 		// No tool name: the row is about the whole server, and Related is the
 		// reason. A "Tool:" line would show the reason as a tool name.
-		writeLine(b, "Reason", keyRelatedCell(r.Key, r.Related))
+		writeLine(b, "Reason", findingCell(r.Related))
 	case r.Field == fieldTool:
 		writeLine(b, "Tool", keyRelatedCell(r.Key, r.Related))
 	case r.Field != "" || r.Key != "" || r.Related != "":

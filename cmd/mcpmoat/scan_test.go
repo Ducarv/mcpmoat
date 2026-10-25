@@ -1239,67 +1239,6 @@ func TestScanTerminalSafety(t *testing.T) {
 	}
 }
 
-func TestScanNoColor(t *testing.T) {
-	t.Parallel()
-
-	home, work := discovertest.CopyFixture(t, fixtureDir("all", "full"))
-
-	// runWith runs the scan with one set of args and one environment on the
-	// same home and working directory copies. tty is the answer to "is stdout
-	// a terminal": colour is possible only when it is true.
-	runWith := func(tty bool, args []string, env map[string]string) (string, string, int) {
-		c, stdout, stderr := dirsCLI(t, home, work)
-		c.stdoutIsTTY = tty
-		c.getenv = fakeGetenv(env)
-		code := c.dispatch(args)
-		return stdout.String(), stderr.String(), code
-	}
-
-	plain, plainErr, plainCode := runWith(false, []string{"scan", "--no-connect"}, nil)
-	if plainCode != exitOK || plainErr != "" {
-		t.Fatalf("plain run: exit code = %d, stderr = %q", plainCode, plainErr)
-	}
-	assertNoEscape(t, plain, plainErr)
-
-	// Control: on a terminal with nothing that turns colour off, the output
-	// has colour. Without this, the cases below would pass for any output.
-	colored, coloredErr, coloredCode := runWith(true, []string{"scan", "--no-connect"}, nil)
-	if coloredCode != exitOK || coloredErr != "" {
-		t.Fatalf("colour run: exit code = %d, stderr = %q", coloredCode, coloredErr)
-	}
-	if !strings.Contains(colored, "\x1b[") || stripSGR(colored) != plain {
-		t.Fatalf("on a terminal the output must be the plain output with SGR sequences\n%q", colored)
-	}
-
-	tests := []struct {
-		name string
-		args []string
-		env  map[string]string
-	}{
-		{name: "--no-color flag", args: []string{"--no-color", "scan", "--no-connect"}},
-		{name: "--no-color after scan", args: []string{"scan", "--no-connect", "--no-color"}},
-		{name: "NO_COLOR=1", args: []string{"scan", "--no-connect"}, env: map[string]string{"NO_COLOR": "1"}},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
-
-			got, gotErr, code := runWith(true, tt.args, tt.env)
-
-			if code != exitOK {
-				t.Errorf("exit code = %d, want %d", code, exitOK)
-			}
-			if got != plain {
-				t.Errorf("stdout differs from the plain run\n--- got ---\n%s\n--- want ---\n%s", got, plain)
-			}
-			if gotErr != plainErr {
-				t.Errorf("stderr = %q, want %q", gotErr, plainErr)
-			}
-			assertNoEscape(t, got, gotErr)
-		})
-	}
-}
-
 // scanFailWriter is a writer that always fails, like a closed pipe.
 type scanFailWriter struct{}
 

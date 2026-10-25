@@ -150,8 +150,9 @@ the connect and pin steps between step 5 and step 6:
   - A pinned server that failed or timed out gets a MOAT-T2-004 finding (high, exit 1) with the
     reason `pinned server could not be inspected` (`pinner.notInspected`). A hostile server must not
     avoid the check by failing on purpose. A pinned server that a gate refused (`inspect.Refused`:
-    the client config turns it off or does not approve it) stays a warning: the config of the user
-    sets that state, not the server. A server that is not pinned stays a warning only (FR-06).
+    the client config turns it off or does not approve it) shows only its status `not inspected` in
+    the summary, with no finding: the config of the user sets that state, not the server. A server
+    that is not pinned shows only its status too (FR-06).
   - A second entry with the same identity gets a MOAT-T2-004 finding with the reason `the server is
     listed twice`, so that its tools are not skipped. It is high when the identity is pinned, else
     medium (`pinner.unverifiedSeverity`).
@@ -163,8 +164,10 @@ the connect and pin steps between step 5 and step 6:
     when its name is empty or used twice, when it has no canonical form, when it is pinned with
     another hash version, or when its pinned text does not match its hash. These are native rule
     IDs: there is no YAML file for them, because pins handle T2. A MOAT-T2-004 finding shows a fixed
-    reason text on the `Where` line of the finding: `duplicate tool name`, `empty tool name`, `invalid tool
-    data`, `pinned with another hash version` or `pinned text does not match its hash`. The reason
+    reason text in brackets after the tool name on the `Tool` line, or on a `Reason` line when the
+    finding has no tool name (it is about the whole server, or the tool name is empty):
+    `duplicate tool name`, `empty tool name`, `invalid tool data`, `pinned with another hash
+    version` or `pinned text does not match its hash`. The reason
     never holds server text. For the last two reasons the pin cannot be trusted, so the change also
     has a diff of the whole current tool (`Change.Diff`). The `--ignore` flag drops them by rule ID,
     server and tool name. The `.mcpmoat-ignore` file does not (see step 3). `scan` never re-pins a
@@ -474,13 +477,17 @@ Known limits:
    `dns-pin-unavailable`) are indented under the server. They hold header keys, never values.
 3. `FINDINGS` (`report.WriteFindings`): groups by severity, the worst first, only the groups that
    have findings. Each finding has the rule ID and title, the server as `name (client, scope)`
-   (so two servers with the same name in two configs differ), a `Where` line (field and key) or a
-   `Tool` line, a `Risk` line and a `Fix` line.
+   (so two servers with the same name in two configs differ), a `Where` line (field and key), a
+   `Tool` line (a pin finding about one tool) or a `Reason` line (a pin finding about the whole
+   server), a `Risk` line and a `Fix` line.
 4. The diffs (`report.WriteDiffs`) and the `To accept` lines.
 
 The `Risk` and `Fix` text of a built-in rule comes from its YAML file (the `risk` and
 `remediation` fields). The pin rules MOAT-T2-001 to 004 have fixed texts in `internal/pins`
-(`ChangeKind.Risk` and `ChangeKind.Remediation`).
+(`ChangeKind.Risk` and `ChangeKind.Remediation`). These remediations name the `To accept` command.
+`scan` prints no such line for a server whose tools cannot be pinned, so it gives every pin finding
+of that server a fixed text of its own (`fixNotPinnable` in `cmd/mcpmoat/scan_pins.go`). The
+MOAT-T2-004 findings that `scan` makes itself get their own fixed texts too.
 
 The summary and the findings are the report. They are not logs, so they stay on stdout. Warnings
 do not change the exit code, which counts findings only (FR-16).
@@ -531,9 +538,9 @@ The diff of a changed or new tool is the first place where a tool description re
 the unified prefix (`@@`, `---`, `+++`, `+`, `-` or a space) and the rest. It writes the prefix as it
 is and sends the rest through `termsafe.QuoteCut`, with a cap of 2000 runes for each line. A control
 character, an escape sequence, a bidi override or invalid UTF-8 shows as a visible escape. The
-tool and server names in the diff header are escaped too. The summary of `scan` and the stderr lines of `scan` and `pin`
-that name a server or carry server output (the pinned notice, the warnings and the errors) are
-escaped and cut in the same way.
+tool and server names in the diff header are escaped too. The summary of `scan` and the stderr
+lines of `scan` and `pin` that name a server or carry server output (the pinned notice, the
+warnings and the errors) are escaped and cut in the same way.
 
 For secrets in output, see [Code style](../.agents/project.md#code-style).
 
