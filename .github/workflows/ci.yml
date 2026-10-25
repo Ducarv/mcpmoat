@@ -91,11 +91,14 @@ jobs:
   # fails here and not at tag time. It uses no secrets: a snapshot does not
   # publish, so the tap token is not needed.
   release-check:
-    name: release-check
     runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:
       contents: read
+    env:
+      # Dependabot does not bump this version string. Keep it equal to
+      # release.yml and CONTRIBUTING.md.
+      GORELEASER_VERSION: v2.19.0
     steps:
       - name: Check out the code
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -118,17 +121,14 @@ jobs:
         uses: goreleaser/goreleaser-action@a4f02ab5355a589de60d917a659ce617ed19b3de # v7.3.0
         with:
           distribution: goreleaser
-          # Dependabot does not bump this version string. Keep it equal to
-          # the version in release.yml.
-          version: v2.19.0
+          version: ${{ env.GORELEASER_VERSION }}
           args: check
 
       - name: Build a snapshot
         uses: goreleaser/goreleaser-action@a4f02ab5355a589de60d917a659ce617ed19b3de # v7.3.0
         with:
           distribution: goreleaser
-          # Keep equal to the version in release.yml (see above).
-          version: v2.19.0
+          version: ${{ env.GORELEASER_VERSION }}
           args: release --snapshot --clean
 
       - name: Check the snapshot artifacts
@@ -136,9 +136,10 @@ jobs:
         run: |
           set -euo pipefail
 
+          want=4 # 2 goos x 2 goarch in .goreleaser.yaml
           count=$(find dist -maxdepth 1 -name '*.tar.gz' | wc -l)
-          if [ "$count" -ne 4 ]; then
-            echo "expected 4 archives in dist/, found $count:"
+          if [ "$count" -ne "$want" ]; then
+            echo "expected $want archives in dist/, found $count:"
             ls -l dist
             exit 1
           fi

@@ -439,6 +439,7 @@ GoReleaser config is `.goreleaser.yaml`.
 ### One-time setup
 
 1. Create the public repo `Ducarv/homebrew-tap`. GoReleaser writes the cask to its `Casks/` folder.
+   Protect its default branch so that only the maintainer, who owns the token below, can push.
 2. Create a fine-grained personal access token. Give it access to only `Ducarv/homebrew-tap`, with
    the Contents permission set to read and write. Give it an expiry date.
 3. In `Ducarv/mcpmoat`, create the GitHub environment `release`. Limit its deployment branches and
@@ -449,6 +450,8 @@ GoReleaser config is `.goreleaser.yaml`.
 4. Add a tag ruleset for `v[0-9]*` that restricts creations, updates and deletes. Let only the
    maintainer bypass it. Then nobody else can push a release tag, and nobody can move or remove
    one.
+5. In the settings of `Ducarv/mcpmoat`, turn on "Immutable releases". The workflow publishes a
+   draft, so the assets lock when the release is published, after the attestations verify.
 
 ### Cut a release
 
@@ -472,11 +475,10 @@ not update the tap.
 
 ### Verify a release
 
-Download an archive from the GitHub release, then run:
+Verify an archive with the attestation command in
+[README.md](README.md#verify-a-download). Then check the tap:
 
 ```sh
-gh attestation verify <archive> -R Ducarv/mcpmoat \
-  --signer-workflow Ducarv/mcpmoat/.github/workflows/release.yml
 brew install --cask Ducarv/tap/mcpmoat
 mcpmoat version
 ```
@@ -487,7 +489,8 @@ check the cask, compare its sha256 with the line for the same archive in the att
 
 Known limit: GoReleaser pushes the cask before the attest step runs. If a later step fails, the
 release stays a draft, so it is not public. But the cask is already in the tap, and its URLs return
-404 until the release is published. Fix the cause and publish the release, or revert the tap commit.
+404 until the release is published. Fix the cause and re-run the workflow: the re-run replaces the
+draft. Or check the draft and publish it by hand. Or revert the tap commit.
 
 ## Security issues
 

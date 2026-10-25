@@ -28,7 +28,7 @@ jobs:
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: go.mod
-          # No cache in the release workflow, so a poisoned cache cannot reach it.
+          # No cache here, so a poisoned cache cannot reach the release binaries.
           cache: false
 
       - name: Vet
@@ -83,13 +83,17 @@ jobs:
         uses: goreleaser/goreleaser-action@a4f02ab5355a589de60d917a659ce617ed19b3de # v7.3.0
         with:
           distribution: goreleaser
-          # Dependabot does not bump this version string. Update it by hand.
+          # Dependabot does not bump this version string. Update it by hand and
+          # keep it equal to ci.yml (release-check) and CONTRIBUTING.md.
           version: v2.19.0
           args: release --clean
         # The tap token lives on this step only.
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           HOMEBREW_TAP_GITHUB_TOKEN: ${{ secrets.HOMEBREW_TAP_GITHUB_TOKEN }}
+          # Build the pushed tag. Without this, GoReleaser picks a tag on HEAD
+          # by sort order, which can be another tag on the same commit.
+          GORELEASER_CURRENT_TAG: ${{ github.ref_name }}
 
       - name: Attest build provenance
         uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
@@ -113,7 +117,8 @@ jobs:
           for f in published/*; do
             gh attestation verify "$f" -R "$GITHUB_REPOSITORY" \
               --signer-workflow "$GITHUB_REPOSITORY/.github/workflows/release.yml" \
-              --source-ref "$GITHUB_REF"
+              --source-ref "$GITHUB_REF" \
+              --deny-self-hosted-runners
           done
 
       - name: Publish the release

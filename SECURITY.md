@@ -23,12 +23,9 @@ Examples of issues we want to hear about privately:
 - A crafted tool description or config makes mcpmoat hang, crash or run code.
 - mcpmoat makes a network connection that is not to a configured server or (with `--llm`) the LLM
   provider.
-- A problem in the release supply chain (checksums, attestations, the Homebrew cask in the tap).
-  Release archives and `checksums.txt` carry GitHub artifact attestations. Verify an archive with
-  `gh attestation verify <archive> -R Ducarv/mcpmoat --signer-workflow
-  Ducarv/mcpmoat/.github/workflows/release.yml`. The macOS binaries are not notarized yet, and the
-  cask removes the quarantine flag on install, so Gatekeeper does not check the binary. Verify the
-  archive if that matters to you.
+- A problem in the release supply chain, for example an archive whose attestation does not verify.
+  [README.md](README.md#verify-a-download) tells how to verify a download and why the macOS
+  binaries skip Gatekeeper.
 
 ## What is not a vulnerability
 

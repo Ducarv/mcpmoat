@@ -5,6 +5,10 @@ project_name: mcpmoat
 
 # No before.hooks on purpose: a hook would run with the tap token in its env.
 
+git:
+  # Sort v0.1.0-rc.1 before v0.1.0 when both tags point at the same commit.
+  prerelease_suffix: "-"
+
 builds:
   - id: mcpmoat
     main: ./cmd/mcpmoat
@@ -27,6 +31,8 @@ builds:
 archives:
   - ids:
       - mcpmoat
+    # README.md and CONTRIBUTING.md name the archives with this pattern.
+    name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
     formats:
       - tar.gz
     files:
@@ -42,6 +48,8 @@ snapshot:
 release:
   # The release workflow publishes the draft after the attestations verify.
   draft: true
+  # A re-run after a failed attest, verify or publish step replaces the old draft.
+  replace_existing_draft: true
   prerelease: auto
 
 homebrew_casks:
@@ -58,7 +66,7 @@ homebrew_casks:
     commit_author:
       name: goreleaserbot
       email: bot@goreleaser.com
-    # auto keeps prerelease tags (for example v0.1.0-rc1) out of the tap.
+    # auto keeps prerelease tags (for example v0.1.0-rc.1) out of the tap.
     skip_upload: auto
     hooks:
       post:
