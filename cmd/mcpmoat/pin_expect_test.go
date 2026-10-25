@@ -13,7 +13,6 @@ import (
 	"maps"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"runtime"
 	"slices"
 	"strings"
@@ -51,8 +50,8 @@ func firstScan(t *testing.T, e *pinEnv, tools ...inspect.Tool) {
 func TestPinExpectUsageErrors(t *testing.T) {
 	t.Parallel()
 
-	const good = "pd1:0123456789abcdef0123456789abcdef"
-	const invalidMsg = "mcpmoat pin: --expect needs a digest such as pd1:<32 hex>\n"
+	const good = "pd1:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+	const invalidMsg = "mcpmoat pin: --expect needs a digest such as pd1:<64 hex>\n"
 
 	tests := []struct {
 		name       string
@@ -235,9 +234,9 @@ func TestPinExpectMismatch(t *testing.T) {
 		pinsBefore := readFileBytes(t, e.pinsPath())
 
 		got := e.pin(fakeServers(map[string][]inspect.Tool{"srv": {mkTool("a", "Add.")}}),
-			"--accept", "srv", "--expect", "pd1:00000000000000000000000000000000")
+			"--accept", "srv", "--expect", "pd1:0000000000000000000000000000000000000000000000000000000000000000")
 
-		assertPinRun(t, got, scanWant{code: exitError, stderr: []string{"expected pd1:00000000000000000000000000000000); nothing was saved."}})
+		assertPinRun(t, got, scanWant{code: exitError, stderr: []string{"expected pd1:0000000000000000000000000000000000000000000000000000000000000000); nothing was saved."}})
 		if after := readFileBytes(t, e.pinsPath()); !bytes.Equal(pinsBefore, after) {
 			t.Errorf("pins.json changed after a digest mismatch\nbefore: %s\nafter:  %s", pinsBefore, after)
 		}
@@ -265,12 +264,13 @@ func TestPinExpectFullFlow(t *testing.T) {
 	if !ok {
 		t.Fatalf("hint = %q, want it to hold a pin command", hints[0])
 	}
-	args := strings.Fields(cmdLine) // pin --accept srv --expect <digest>
-	if len(args) != 5 || args[0] != "pin" || args[1] != "--accept" || args[2] != "srv" || args[3] != "--expect" {
-		t.Fatalf("hint command = %q, want pin --accept srv --expect <digest>", cmdLine)
+	args := strings.Fields(cmdLine) // pin --accept srv --config <file> --expect <digest>
+	if len(args) != 7 || args[0] != "pin" || args[1] != "--accept" || args[2] != "srv" ||
+		args[3] != "--config" || args[4] != e.config || args[5] != "--expect" {
+		t.Fatalf("hint command = %q, want pin --accept srv --config %s --expect <digest>", cmdLine, e.config)
 	}
 
-	got := e.raw(current, append(args[:1:1], append([]string{"--config", e.config}, args[1:]...)...)...)
+	got := e.raw(current, args...)
 
 	assertPinRun(t, got, scanWant{code: exitOK, stdout: []string{"accepted srv: 1 new, 1 changed, 1 removed\n"}})
 	assertCleanStderr(t, got.stderr)
@@ -295,6 +295,7 @@ func TestScanAcceptHintPresent(t *testing.T) {
 		breakHash bool
 		wantCode  int
 		wantRule  string
+		wantNote  string // the note at the end of the hint line, or ""
 	}{
 		{name: "changed tool", current: []inspect.Tool{mkTool("a", "Add. X."), mkTool("b", "Echo.")}, wantCode: exitFindings, wantRule: "MOAT-T2-001"},
 		{name: "new tool", current: []inspect.Tool{mkTool("a", "Add."), mkTool("b", "Echo."), mkTool("c", "New.")}, wantCode: exitOK, wantRule: "MOAT-T2-002"},
@@ -306,6 +307,8 @@ func TestScanAcceptHintPresent(t *testing.T) {
 			current:  []inspect.Tool{mkTool("a", "Add. X."), mkTool("b", "Echo."), mkTool("c", "New.")},
 			flags:    []string{"--ignore", "MOAT-T2-001"},
 			wantCode: exitOK, wantRule: "MOAT-T2-002",
+			// The digest covers the changed tool that --ignore hid.
+			wantNote: hintIgnoredNote,
 		},
 	}
 	for _, tt := range tests {
@@ -321,7 +324,7 @@ func TestScanAcceptHintPresent(t *testing.T) {
 			got := e.scan(fakeServers(map[string][]inspect.Tool{"srv": tt.current}), tt.flags...)
 
 			assertScanRun(t, got, scanWant{code: tt.wantCode, stdout: []string{tt.wantRule}, stderr: stderrOf(tt.flags)})
-			wantLine := acceptHintPrefix + "srv: mcpmoat pin --accept srv --expect " + digestOf(t, tt.current...) + "\n"
+			wantLine := acceptHintPrefix + "srv: mcpmoat pin --accept srv --config " + e.config + " --expect " + digestOf(t, tt.current...) + tt.wantNote + "\n"
 			if !strings.HasSuffix(got.stdout, "\n"+wantLine) {
 				t.Errorf("stdout does not end with the hint %q\n%s", wantLine, got.stdout)
 			}
@@ -334,6 +337,14 @@ func TestScanAcceptHintPresent(t *testing.T) {
 			}
 			if after := readFileBytes(t, e.pinsPath()); !bytes.Equal(pinsBefore, after) {
 				t.Errorf("scan changed pins.json of a pinned server")
+			}
+			if tt.breakHash {
+				// The pins can not be checked, so the report shows the whole
+				// current text of each tool that the digest covers.
+				assertContainsAll(t, "stdout", got.stdout, []string{
+					"Not verified tool a on server srv (current text):\n",
+					"Not verified tool b on server srv (current text):\n",
+				})
 			}
 		})
 	}
@@ -402,6 +413,15 @@ func TestScanAcceptHintAbsent(t *testing.T) {
 			wantCode: exitFindings, wantRow: "MOAT-T2-004",
 		},
 		{
+			// Store.Set refuses a server over 2 MiB, so pin --accept could
+			// never save these tools.
+			name: "tools over the size limit of one server", pinFirst: true,
+			insp: func() inspect.Inspector {
+				return fakeServers(map[string][]inspect.Tool{"srv": {mkTool("a", strings.Repeat("x", 2<<20))}})
+			},
+			wantCode: exitFindings, wantRow: "MOAT-T2-001",
+		},
+		{
 			name: "empty tool name: the tools cannot be pinned", pinFirst: true,
 			insp: func() inspect.Inspector {
 				return fakeServers(map[string][]inspect.Tool{"srv": {mkTool("a", "Add."), mkTool("", "No name.")}})
@@ -437,9 +457,9 @@ func TestScanAcceptHintListedTwice(t *testing.T) {
 
 	e := newPinEnv(t, oneServer("srv"))
 	c, _, _ := e.cli(nil)
-	store, err := c.loadPins()
-	if err != nil {
-		t.Fatalf("loadPins() error = %v, want nil", err)
+	store, ok := c.readPins("scan")
+	if !ok {
+		t.Fatal("readPins() = false, want true")
 	}
 	srv := discover.Server{Name: "srv", Client: discover.ClientClaudeCode, Source: "/cfg/mcp.json"}
 	outcome := func(tools ...inspect.Tool) inspect.Outcome {
@@ -498,9 +518,9 @@ func TestScanAcceptHintTwoServers(t *testing.T) {
 }
 
 // TestScanAcceptHintServerNames checks how the hint shows a server name that
-// comes from a config file: bare when it is plain, in POSIX single quotes when
-// it needs them, and with no command when no safe quoting exists. The text
-// before the colon is always escaped for the terminal.
+// comes from a config file: in the command when it is a bare shell word, and
+// with no command otherwise, because no quoting is safe in every shell. The
+// text before the colon is always escaped for the terminal.
 func TestScanAcceptHintServerNames(t *testing.T) {
 	t.Parallel()
 
@@ -515,10 +535,11 @@ func TestScanAcceptHintServerNames(t *testing.T) {
 	}{
 		{"plain", "my-srv.v1", "my-srv.v1", "my-srv.v1"},
 		{"all bare characters", "A_b.c@d/e:f+g=h-9", "A_b.c@d/e:f+g=h-9", "A_b.c@d/e:f+g=h-9"},
-		{"space and quote", "it's a b", "it's a b", `'it'\''s a b'`},
+		{"space and quote: no command", "it's a b", "it's a b", ""},
 		{"starts with a dash: no command", "-dash", "-dash", ""},
-		{"shell metacharacters", "a;b $(x) `y` *", "a;b $(x) `y` *", "'a;b $(x) `y` *'"},
-		{"non-ASCII letters", "café", "café", "'café'"},
+		{"starts with @: no command", "@args", "@args", ""},
+		{"shell metacharacters: no command", "a;b $(x) `y` *", "a;b $(x) `y` *", ""},
+		{"non-ASCII letters: no command", "café", "café", ""},
 		{"escape sequence: no command", "evil\x1b[31m", `"evil\x1b[31m"`, ""},
 		{"newline: no command", "a\nb", `"a\nb"`, ""},
 		{"bidi override: no command", "a\u202eb", `"a\u202eb"`, ""},
@@ -541,9 +562,9 @@ func TestScanAcceptHintServerNames(t *testing.T) {
 			}
 			_, hints := cutAcceptHints(got.stdout)
 			digest := digestOf(t, current...)
-			want := acceptHintPrefix + tt.wantLabel + ": mcpmoat pin --accept " + tt.wantArg + " --expect " + digest
+			want := acceptHintPrefix + tt.wantLabel + ": mcpmoat pin --accept " + tt.wantArg + " --config " + e.config + " --expect " + digest
 			if tt.wantArg == "" {
-				want = acceptHintPrefix + tt.wantLabel + ": run pin --accept with this server name and --expect " + digest
+				want = acceptHintPrefix + tt.wantLabel + ": run pin --accept with this server name, --config with the file of this scan, and --expect " + digest
 			}
 			if !slices.Equal(hints, []string{want}) {
 				t.Errorf("hints = %q, want [%q]", hints, want)
@@ -554,9 +575,10 @@ func TestScanAcceptHintServerNames(t *testing.T) {
 	}
 }
 
-// TestPinAcceptsQuotedName checks the round trip for a name that needs quotes:
-// the digest of the hint works with the exact server name.
-func TestPinAcceptsQuotedName(t *testing.T) {
+// TestPinAcceptsNameWithoutCommand checks the round trip for a name that is not
+// a bare shell word: the hint has no command, but its digest works with the
+// exact server name.
+func TestPinAcceptsNameWithoutCommand(t *testing.T) {
 	t.Parallel()
 
 	const name = "it's a b"
@@ -578,99 +600,116 @@ func TestPinAcceptsQuotedName(t *testing.T) {
 	assertCleanStderr(t, got.stderr)
 }
 
-// TestShellArg checks shellArg on its own: the result, and the second result
-// for a name that has no safe form.
-func TestShellArg(t *testing.T) {
+// TestAcceptCommand checks the text after the colon of a "To accept" line: the
+// command with --config when scan had one, and the text without a command when
+// the name or the config path is not a bare shell word.
+func TestAcceptCommand(t *testing.T) {
 	t.Parallel()
 
+	const d = "pd1:00"
 	tests := []struct {
-		name   string
-		in     string
-		want   string
-		wantOK bool
+		name, server, config, want string
 	}{
-		{"plain", "srv", "srv", true},
-		{"every bare character", "aZ09._@/:+=-", "aZ09._@/:+=-", true},
-		{"dash inside", "a-b", "a-b", true},
-		// pin would read a name that starts with a dash as a flag, even in
-		// quotes, so there is no safe form.
-		{"starts with a dash: no safe form", "-x", "", false},
-		{"only a dash: no safe form", "-", "", false},
-		{"two dashes: no safe form", "--", "", false},
-		{"empty", "", "''", true},
-		{"space", "a b", "'a b'", true},
-		{"one quote", "it's", `'it'\''s'`, true},
-		{"only a quote", "'", `''\'''`, true},
-		{"two quotes in a row", "a''b", `'a'\'''\''b'`, true},
-		{"dollar", "$HOME", "'$HOME'", true},
-		{"double quote: no safe form", `"a"`, "", false},
-		{"backslash", `a\b`, `'a\b'`, true},
-		{"glob and tilde", "~/*", "'~/*'", true},
-		{"hash and bang", "#a!b", "'#a!b'", true},
-		{"non-ASCII", "naïve", "'naïve'", true},
-		{"escape", "a\x1bb", "", false},
-		{"newline", "a\nb", "", false},
-		{"tab", "a\tb", "", false},
-		{"nul", "a\x00b", "", false},
-		{"invalid UTF-8", "a\xffb", "", false},
-		{"bidi override", "a\u202eb", "", false},
-		{"zero width space", "a\u200bb", "", false},
-		{"100 runes", strings.Repeat("é", 100), "'" + strings.Repeat("é", 100) + "'", true},
-		{"101 runes", strings.Repeat("é", 101), "", false},
+		{"no config", "srv", "", "mcpmoat pin --accept srv --expect pd1:00"},
+		{"bare config", "srv", "/home/u/.cursor/mcp.json", "mcpmoat pin --accept srv --config /home/u/.cursor/mcp.json --expect pd1:00"},
+		{"config with a space", "srv", "/Users/u/Application Support/c.json", "run pin --accept with this server name, --config with the file of this scan, and --expect pd1:00"},
+		{"config with a quote", "srv", "/tmp/a'b.json", "run pin --accept with this server name, --config with the file of this scan, and --expect pd1:00"},
+		{"config that starts with a dash", "srv", "-x.json", "run pin --accept with this server name, --config with the file of this scan, and --expect pd1:00"},
+		{"config over 500 bytes", "srv", strings.Repeat("a", 501), "run pin --accept with this server name, --config with the file of this scan, and --expect pd1:00"},
+		{"name that is not bare, with config", "a b", "/c.json", "run pin --accept with this server name, --config with the file of this scan, and --expect pd1:00"},
+		{"name that is not bare, no config", "a b", "", "run pin --accept with this server name and --expect pd1:00"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			got, ok := shellArg(tt.in)
-			if got != tt.want || ok != tt.wantOK {
-				t.Errorf("shellArg(%q) = (%q, %v), want (%q, %v)", tt.in, got, ok, tt.want, tt.wantOK)
+			if got := acceptCommand(tt.server, tt.config, d); got != tt.want {
+				t.Errorf("acceptCommand(%q, %q) = %q, want %q", tt.server, tt.config, got, tt.want)
 			}
 		})
 	}
 }
 
-// TestShellArgReadByShell checks the quoting against a real POSIX shell: sh must
-// read the result back as the one word that went in, and must run nothing.
-func TestShellArgReadByShell(t *testing.T) {
+// TestIsBareShellWord checks isBareShellWord on its own.
+func TestIsBareShellWord(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		in   string
+		want bool
+	}{
+		{"plain", "srv", true},
+		{"every bare character", "aZ09._@/:+=-", true},
+		{"dash inside", "a-b", true},
+		{"@ inside", "a@b", true},
+		{"exactly the cap", strings.Repeat("a", 20), true},
+		{"over the cap", strings.Repeat("a", 21), false},
+		// pin would read a word that starts with a dash as a flag.
+		{"starts with a dash", "-x", false},
+		{"only a dash", "-", false},
+		{"two dashes", "--", false},
+		// PowerShell reads @name as splatting.
+		{"starts with @", "@x", false},
+		{"empty", "", false},
+		{"space", "a b", false},
+		{"quote", "it's", false},
+		{"double quote", `"a"`, false},
+		{"dollar", "$HOME", false},
+		{"backslash", `a\b`, false},
+		{"glob and tilde", "~/*", false},
+		{"semicolon", "a;b", false},
+		{"ampersand", "a&b", false},
+		{"pipe", "a|b", false},
+		{"percent", "%PATH%", false},
+		{"caret", "a^b", false},
+		{"backtick", "a`b", false},
+		{"comma", "a,b", false},
+		{"non-ASCII", "naïve", false},
+		{"escape", "a\x1bb", false},
+		{"newline", "a\nb", false},
+		{"nul", "a\x00b", false},
+		{"invalid UTF-8", "a\xffb", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if got := isBareShellWord(tt.in, 20); got != tt.want {
+				t.Errorf("isBareShellWord(%q, 20) = %v, want %v", tt.in, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestBareShellWordReadByShell checks bare words against a real POSIX shell: sh
+// must read each one back as the word that went in, and must run nothing.
+func TestBareShellWordReadByShell(t *testing.T) {
 	t.Parallel()
 
 	if runtime.GOOS == "windows" {
-		t.Skip("the quoting is for a POSIX shell")
+		t.Skip("the check uses a POSIX shell")
 	}
 	shell, err := exec.LookPath("sh")
 	if err != nil {
 		t.Skip("no sh in PATH")
 	}
 	dir := t.TempDir()
-	names := []string{
-		"srv", "a-n", "a b", "it's a b", "'", "''", `a\b`, "$HOME", "$(touch pwned)",
-		"`touch pwned`", "a;touch pwned", "a|b", "a&b", "*", "~", "#a", "!x", "{a,b}", "a=b", "naïve",
-	}
-	// sh would read "-n" as an option of printf, and pin would read a name that
-	// starts with a dash as a flag: there is no safe form, so nothing is quoted.
-	for _, name := range []string{"-n", "-", "--", "-e x"} {
-		if arg, ok := shellArg(name); ok || arg != "" {
-			t.Errorf("shellArg(%q) = (%q, %v), want (\"\", false)", name, arg, ok)
-		}
-	}
-	for _, name := range names {
-		arg, ok := shellArg(name)
-		if !ok {
-			t.Fatalf("shellArg(%q) has no safe form, want one", name)
+	for _, word := range []string{"srv", "a-n", "a=b", "a:b", "a+b", "a@b", "a/b.c", "aZ09._@/:+=-"} {
+		if !isBareShellWord(word, maxWarnNameRunes) {
+			t.Fatalf("isBareShellWord(%q) = false, want true", word)
 		}
 		// printf prints its argument; the script holds only the word under test.
-		cmd := exec.CommandContext(t.Context(), shell, "-c", "printf '%s' "+arg) //nolint:gosec // G204: the argument is test data, and the test checks that sh reads it back as one word
-		cmd.Dir = dir                                                            // a command that ran would create "pwned" here
+		cmd := exec.CommandContext(t.Context(), shell, "-c", "printf '%s' "+word) //nolint:gosec // G204: the argument is test data, and the test checks that sh reads it back as one word
+		cmd.Dir = dir                                                             // a command that ran would create files here
 		out, err := cmd.Output()
 		if err != nil {
-			t.Errorf("sh printf %s: %v", arg, err)
+			t.Errorf("sh printf %s: %v", word, err)
 			continue
 		}
-		if string(out) != name {
-			t.Errorf("sh read %s as %q, want %q", arg, out, name)
+		if string(out) != word {
+			t.Errorf("sh read %s as %q, want %q", word, out, word)
 		}
 	}
-	if _, err := os.Stat(filepath.Join(dir, "pwned")); err == nil {
-		t.Error("a quoted name ran a command in the shell")
+	if entries, err := os.ReadDir(dir); err != nil || len(entries) != 0 {
+		t.Errorf("the shell created files: %v, error %v", entries, err)
 	}
 }

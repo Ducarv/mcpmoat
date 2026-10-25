@@ -42,8 +42,10 @@ mcpmoat version              # print the version, commit and build date
   invalid or unverifiable copy of a pinned tool can hide a rug pull. Else it is medium. For each
   changed tool, `scan` prints a unified diff of the pinned and the current text after the findings
   table. For each new tool, it prints the full text of the tool as added lines, under the header
-  `New tool <tool> on server <server>:`, so you can review it before you accept it. An ignored
-  finding gets no diff. If a diff is longer than 64 KiB or 2000 lines, `scan` cuts it and prints a
+  `New tool <tool> on server <server>:`, so you can review it before you accept it. A pinned tool
+  whose pin cannot be checked (another hash version, or a pinned text that does not match its hash)
+  gets its full current text too, under `Not verified tool <tool> on server <server> (current
+  text):`. An ignored finding gets no diff. If a diff is longer than 64 KiB or 2000 lines, `scan` cuts it and prints a
   warning on stderr with the tool and the server name. Review the full tool before you accept it.
   You can ignore these IDs with `--ignore` only (see [Ignore findings](#ignore-findings)).
 - **Accept:** `scan` never changes the pins of a pinned server. Read the diff. If you trust the
@@ -51,13 +53,14 @@ mcpmoat version              # print the version, commit and build date
   exactly. If two clients or projects use it, narrow it with `--config <file>`. If a config file has
   any problem, `pin --accept` prints it and exits with code 2, because a broken file can hide a
   second server with the same name. `pin --accept` connects to that one server and stores new pins
-  for it only. It prints the diff of each changed tool and of each new tool, then
+  for it only. It prints the diff of each changed, new and not verified tool, then
   `accepted <server>: N new, N changed, N removed`. If the server is not pinned yet, every tool is
   new, so `pin --accept` shows every tool. It prints the same warning when it cuts a diff.
 - **Recommended flow:** run `mcpmoat scan` and review the diff. After the diffs, `scan` prints one
   line for each pinned server that has a pin finding:
-  `To accept <server>: mcpmoat pin --accept <server> --expect pd1:<32 hex>`. Copy that line and run
-  it. The digest (version `pd1`) covers the tools that `scan` showed you. `pin --accept --expect`
+  `To accept <server>: mcpmoat pin --accept <server> --expect pd1:<64 hex>`. After
+  `scan --config <file>`, the command holds `--config <file>` too. Copy that line and run it. The
+  digest (version `pd1`, the full SHA-256) covers the tools that `scan` showed you. `pin --accept --expect`
   saves the pins only if the tools that the server returns now give the same digest. Else it prints
   the diff and `the tools of <server> differ from what scan showed ...; nothing was saved`, saves
   nothing and exits with code 2. Run `scan` again and review the new diff. A hostile server can
@@ -66,11 +69,14 @@ mcpmoat version              # print the version, commit and build date
 - Without `--expect`, `pin --accept` works as before, but it trusts the tools that the server
   returns now. It prints a note on stderr, before it saves, to say so. Use `--expect` unless you have a reason not to.
 - `scan` prints no `To accept` line for a server that is pinned for the first time, for a server
-  that it could not inspect, for a finding that you ignored, or for tools that cannot be pinned. If
-  the server name has a character that is not safe to paste in a shell, or starts with `-`, the line
-  has the digest but no command. The name in the command is quoted for a POSIX shell. On Windows (`cmd.exe` or
-  PowerShell) you may need to change the quotes. If a diff of that server was cut, the line ends
-  with `(the diff was cut: review the full tool first)`.
+  that it could not inspect, for a finding that you ignored, or for tools that cannot be pinned. The
+  line holds a command only when the server name (and the `--config` path) uses only the characters
+  `A-Z a-z 0-9 . _ @ / : + = -` and does not start with `-` or `@`. Every shell, also `cmd.exe` and
+  PowerShell, reads such a word as plain text. Else the line says what to run and gives the digest,
+  but no command. If a diff of that server was cut, the line ends with
+  `(the diff was cut: review the full tool first)`. If `--ignore` dropped a pin finding of that
+  server, the line ends with `(--ignore hid some changes: run scan without it to review them
+  first)`, because the digest covers those changes too.
 - A server that fails, times out or is refused (an untrusted or turned-off server) is a warning on
   stderr. If the server is not pinned, it does not change the exit code. If the server is already
   pinned, it is also a `MOAT-T2-004` finding (high, exit code 1) with the reason

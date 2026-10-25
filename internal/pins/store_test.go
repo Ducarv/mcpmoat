@@ -955,7 +955,7 @@ func TestLoadServerSizeLimit(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			write := func(n int) string {
-				// Compact JSON, as validateServer measures the entry.
+				// Compact JSON, as ValidateServer measures the entry.
 				data, err := json.Marshal(map[string]any{
 					"version": 1,
 					"servers": []any{map[string]any{

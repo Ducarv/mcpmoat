@@ -39,7 +39,7 @@ func TestDigestOrderIndependent(t *testing.T) {
 func TestDigestEmptySetStable(t *testing.T) {
 	t.Parallel()
 
-	const want = "pd1:e3b0c44298fc1c149afbf4c8996fb924" // first 16 bytes of SHA-256 of no bytes
+	const want = "pd1:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855" // SHA-256 of no bytes
 	for name, p := range map[string]ServerPins{"nil": nil, "empty": {}} {
 		if got := Digest(p); got != want {
 			t.Errorf("%s: Digest = %q, want %q", name, got, want)
@@ -53,7 +53,7 @@ func TestDigestGolden(t *testing.T) {
 	// This pins the encoding. If it fails, the encoding changed: change
 	// DigestVersion and update the value.
 	p := pinsOf(t, "write", "sha256-v1:bb", "read", "sha256-v1:aa")
-	const want = "pd1:da4d80c9661fbb08630769dc5e97be3b"
+	const want = "pd1:da4d80c9661fbb08630769dc5e97be3be297bcff9ec5a102f3b7d5463883984d"
 	if got := Digest(p); got != want {
 		t.Errorf("Digest = %q, want %q", got, want)
 	}
@@ -100,36 +100,37 @@ func TestDigestFormat(t *testing.T) {
 	if !ValidDigest(got) {
 		t.Errorf("ValidDigest(Digest(...)) is false for %q", got)
 	}
-	if !strings.HasPrefix(got, DigestVersion+":") || len(got) != len(DigestVersion)+1+32 {
-		t.Errorf("Digest = %q, want %q, a colon and 32 hex characters", got, DigestVersion)
+	if !strings.HasPrefix(got, DigestVersion+":") || len(got) != len(DigestVersion)+1+64 {
+		t.Errorf("Digest = %q, want %q, a colon and 64 hex characters", got, DigestVersion)
 	}
 }
 
 func TestValidDigest(t *testing.T) {
 	t.Parallel()
 
-	const hex32 = "0123456789abcdef0123456789abcdef"
+	const hex64 = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
 	tests := []struct {
 		name string
 		in   string
 		want bool
 	}{
-		{"valid", "pd1:" + hex32, true},
-		{"all zero", "pd1:" + strings.Repeat("0", 32), true},
+		{"valid", "pd1:" + hex64, true},
+		{"all zero", "pd1:" + strings.Repeat("0", 64), true},
 		{"empty", "", false},
 		{"prefix only", "pd1:", false},
-		{"upper case", "pd1:" + strings.ToUpper(hex32), false},
-		{"one upper case char", "pd1:A123456789abcdef0123456789abcdef", false},
-		{"too short", "pd1:" + hex32[:31], false},
-		{"too long", "pd1:" + hex32 + "0", false},
-		{"wrong prefix", "pd2:" + hex32, false},
-		{"no prefix", hex32, false},
-		{"no colon", "pd1" + hex32, false},
-		{"upper case prefix", "PD1:" + hex32, false},
-		{"non hex", "pd1:0123456789abcdef0123456789abcdeg", false},
-		{"leading space", " pd1:" + hex32, false},
-		{"trailing newline", "pd1:" + hex32 + "\n", false},
-		{"non ASCII", "pd1:0123456789abcdef0123456789abcdé", false},
+		{"upper case", "pd1:" + strings.ToUpper(hex64), false},
+		{"one upper case char", "pd1:A" + hex64[1:], false},
+		{"128-bit form", "pd1:" + hex64[:32], false},
+		{"too short", "pd1:" + hex64[:63], false},
+		{"too long", "pd1:" + hex64 + "0", false},
+		{"wrong prefix", "pd2:" + hex64, false},
+		{"no prefix", hex64, false},
+		{"no colon", "pd1" + hex64, false},
+		{"upper case prefix", "PD1:" + hex64, false},
+		{"non hex", "pd1:" + hex64[:63] + "g", false},
+		{"leading space", " pd1:" + hex64, false},
+		{"trailing newline", "pd1:" + hex64 + "\n", false},
+		{"non ASCII", "pd1:" + hex64[:62] + "é", false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

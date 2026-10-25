@@ -197,7 +197,7 @@ func Load(path string) (*Store, error) {
 			return nil, fmt.Errorf("parse %s: servers[%d]: a field is missing or null", path, i)
 		}
 		id := Identity{Client: *srv.Client, Source: *srv.Source, ProjectPath: *srv.ProjectPath, Name: *srv.Name}
-		if err := validateServer(id, *srv.Tools); err != nil {
+		if err := ValidateServer(id, *srv.Tools); err != nil {
 			return nil, fmt.Errorf("parse %s: servers[%d]: %w", path, i, err)
 		}
 		if _, dup := s.servers[id]; dup {
@@ -307,7 +307,7 @@ func (s *Store) Set(id Identity, p ServerPins) error {
 	// Check the copy that is stored, so a caller that changes p later cannot
 	// change what was checked.
 	c := cloneOrEmpty(p)
-	if err := validateServer(id, c); err != nil {
+	if err := ValidateServer(id, c); err != nil {
 		return err
 	}
 
@@ -409,10 +409,12 @@ func compareIdentity(a, b Identity) int {
 	)
 }
 
-// validateServer checks the rules that Load and Set share, also the size cap
-// of one server (maxServerSize). The errors do not hold tool names, because a
-// server that we do not trust chose them.
-func validateServer(id Identity, tools ServerPins) error {
+// ValidateServer checks the rules that Load and Set share, also the size cap
+// of one server (maxServerSize). It returns the error that Set would return for
+// the same pins, so a caller can learn whether a server can be pinned without a
+// store. The errors do not hold tool names, because a server that we do not
+// trust chose them.
+func ValidateServer(id Identity, tools ServerPins) error {
 	if id.Name == "" {
 		return errors.New("the server name is empty")
 	}

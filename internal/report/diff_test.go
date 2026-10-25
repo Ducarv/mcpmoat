@@ -246,6 +246,16 @@ func TestWriteDiffsExact(t *testing.T) {
 				"\nNew tool t2 on server a:\n+y\n",
 		},
 		{
+			name:  "not verified tool gets its own header",
+			diffs: []report.ToolDiff{{Server: "fs", Tool: "read", Unverified: true, Diff: "+++ current\n+a\n"}},
+			want:  "\nNot verified tool read on server fs (current text):\n+++ current\n+a\n",
+		},
+		{
+			name:  "not verified tool with hostile names",
+			diffs: []report.ToolDiff{{Server: "evil\x1b[2J", Tool: "t\x1b]0;x\a", Unverified: true, Diff: "+a\n"}},
+			want:  "\nNot verified tool \"t\\x1b]0;x\\a\" on server \"evil\\x1b[2J\" (current text):\n+a\n",
+		},
+		{
 			name: "two diffs in order, each with a blank line before",
 			diffs: []report.ToolDiff{
 				{Server: "a", Tool: "t1", Diff: "+x\n"},

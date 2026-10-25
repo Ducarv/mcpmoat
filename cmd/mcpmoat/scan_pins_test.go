@@ -64,6 +64,24 @@ func (e *pinEnv) pinsPath() string {
 	return filepath.Join(e.xdg, "mcpmoat", "pins.json")
 }
 
+// readOnlyPinsDir makes the folder of pins.json read-only, so that a save
+// fails but a read finds no file. It skips the test when the user can write
+// there anyway.
+func readOnlyPinsDir(t *testing.T, e *pinEnv) {
+	t.Helper()
+	if runtime.GOOS == "windows" || os.Geteuid() == 0 {
+		t.Skip("a read-only directory does not stop this user")
+	}
+	dir := filepath.Dir(e.pinsPath())
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(dir, 0o500); err != nil { //nolint:gosec // G302: the test makes the folder read-only on purpose
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(dir, 0o700) }) //nolint:gosec // G302: restores the folder so that t.TempDir can remove it
+}
+
 // cli builds a cli for this world with the given inspector.
 func (e *pinEnv) cli(insp inspect.Inspector) (*cli, *bytes.Buffer, *bytes.Buffer) {
 	e.t.Helper()
@@ -224,13 +242,18 @@ func cutAcceptHints(stdout string) (rest string, hints []string) {
 }
 
 // hintDigest returns the digest in the hint line of server in stdout. It fails
-// the test when there is no such line, or when the line is not of the form "To accept <server>: mcpmoat pin --accept <arg> --expect
-// pd1:<32 hex>". The server name of the tests needs no quoting.
+// the test when there is no such line, or when the line is not of the form "To
+// accept <server>: mcpmoat pin --accept <server> [--config <file>] --expect
+// pd1:<64 hex>". The server name of the tests is a bare shell word.
 func hintDigest(t *testing.T, stdout, server string) string {
 	t.Helper()
-	prefix := acceptHintPrefix + server + ": mcpmoat pin --accept " + server + " --expect "
+	prefix := acceptHintPrefix + server + ": mcpmoat pin --accept " + server + " "
 	for _, line := range strings.Split(stdout, "\n") {
-		if digest, ok := strings.CutPrefix(line, prefix); ok {
+		if rest, ok := strings.CutPrefix(line, prefix); ok {
+			config, digest, _ := strings.Cut(rest, "--expect ")
+			if config != "" && !strings.HasPrefix(config, "--config ") {
+				t.Fatalf("hint line %q has %q before --expect", line, config)
+			}
 			if !pins.ValidDigest(digest) {
 				t.Fatalf("hint line %q has no valid digest", line)
 			}
@@ -521,18 +544,23 @@ func TestScanPinsFindings(t *testing.T) {
 // entry of tools, in order, each with the pinned and current file headers, and
 // no other block. An entry "name" is a changed tool ("Changed tool name on
 // server <server>:"). An entry "+name" is a new tool ("New tool name on server
-// <server>:"), and the body of its block must have added lines only.
+// <server>:"), and an entry "?name" is a pinned tool that is not verified ("Not
+// verified tool name on server <server> (current text):"). The body of a "+" or
+// "?" block must have added lines only.
 func assertDiffsOf(t *testing.T, diffs, server string, tools []string) {
 	t.Helper()
 	headers := make([]string, len(tools))
 	for i, tool := range tools {
-		if name, isNew := strings.CutPrefix(tool, "+"); isNew {
-			headers[i] = "New tool " + name + " on server " + server + ":\n"
-		} else {
+		switch {
+		case strings.HasPrefix(tool, "+"):
+			headers[i] = "New tool " + tool[1:] + " on server " + server + ":\n"
+		case strings.HasPrefix(tool, "?"):
+			headers[i] = "Not verified tool " + tool[1:] + " on server " + server + " (current text):\n"
+		default:
 			headers[i] = "Changed tool " + tool + " on server " + server + ":\n"
 		}
 	}
-	if n := strings.Count(diffs, "Changed tool ") + strings.Count(diffs, "New tool "); n != len(tools) {
+	if n := strings.Count(diffs, "Changed tool ") + strings.Count(diffs, "New tool ") + strings.Count(diffs, "Not verified tool "); n != len(tools) {
 		t.Errorf("diff text has %d diffs, want %d (%v)\n%s", n, len(tools), tools, diffs)
 	}
 	if len(tools) == 0 {
@@ -555,7 +583,7 @@ func assertDiffsOf(t *testing.T, diffs, server string, tools []string) {
 		t.Errorf("diff text has %d \"--- pinned\" lines, want %d\n%s", n, len(tools), diffs)
 	}
 	for i, tool := range tools {
-		if !strings.HasPrefix(tool, "+") {
+		if !strings.HasPrefix(tool, "+") && !strings.HasPrefix(tool, "?") {
 			continue
 		}
 		end := len(diffs)
@@ -940,18 +968,8 @@ func TestScanPinsStoreErrors(t *testing.T) {
 
 	t.Run("save error exits 2 after the report", func(t *testing.T) {
 		t.Parallel()
-		if runtime.GOOS == "windows" || os.Geteuid() == 0 {
-			t.Skip("a read-only directory does not stop this user")
-		}
 		e := newPinEnv(t, oneServer("srv"))
-		dir := filepath.Join(e.xdg, "mcpmoat")
-		if err := os.MkdirAll(dir, 0o700); err != nil {
-			t.Fatal(err)
-		}
-		if err := os.Chmod(dir, 0o500); err != nil { //nolint:gosec // G302: the test makes the folder read-only on purpose
-			t.Fatal(err)
-		}
-		t.Cleanup(func() { _ = os.Chmod(dir, 0o700) }) //nolint:gosec // G302: restores the folder so that t.TempDir can remove it
+		readOnlyPinsDir(t, e)
 
 		got := e.scan(fakeServers(map[string][]inspect.Tool{"srv": {mkTool("a", "Add.")}}))
 
@@ -1164,9 +1182,9 @@ func TestScanPinsSameIdentityTwice(t *testing.T) {
 		return inspect.Outcome{Server: srv, Status: inspect.StatusOK, Result: inspect.Result{Tools: tools}}
 	}
 
-	store, err := c.loadPins()
-	if err != nil {
-		t.Fatalf("loadPins() error = %v, want nil", err)
+	store, ok := c.readPins("scan")
+	if !ok {
+		t.Fatal("readPins() = false, want true")
 	}
 	pr := c.pinOutcomes(store, []inspect.Outcome{
 		outcome(mkTool("a", "Add.")),

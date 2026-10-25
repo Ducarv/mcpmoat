@@ -349,7 +349,7 @@ func TestCompareHashVersionMismatch(t *testing.T) {
 			// tell the tool from an unchanged one.
 			stored := ServerPins{tool.Name: {Hash: tt.hash, Canonical: good.Canonical}}
 			got := Compare(stored, []inspect.Tool{tool})
-			want := []Change{{Kind: KindUnverified, Tool: tool.Name, Reason: ReasonHashVersion, Severity: "high"}}
+			want := []Change{{Kind: KindUnverified, Tool: tool.Name, Diff: mustCurrentDiff(t, tool), Reason: ReasonHashVersion, Severity: "high"}}
 			if !reflect.DeepEqual(got, want) {
 				t.Errorf("Compare() = %+v, want %+v", got, want)
 			}
@@ -358,7 +358,8 @@ func TestCompareHashVersionMismatch(t *testing.T) {
 }
 
 // TestCompareHashVersionMismatchNeverChanged checks that a pin with another
-// hash version is not compared: it is unverified also when the tool differs.
+// hash version is not compared: it is unverified also when the tool differs,
+// and its Diff shows the whole current tool.
 func TestCompareHashVersionMismatchNeverChanged(t *testing.T) {
 	t.Parallel()
 	tool := compareTools()[0]
@@ -367,7 +368,7 @@ func TestCompareHashVersionMismatchNeverChanged(t *testing.T) {
 	cur := cloneTool(tool)
 	cur.Description = "different"
 	got := Compare(stored, []inspect.Tool{cur})
-	want := []Change{{Kind: KindUnverified, Tool: tool.Name, Reason: ReasonHashVersion, Severity: "high"}}
+	want := []Change{{Kind: KindUnverified, Tool: tool.Name, Diff: mustCurrentDiff(t, cur), Reason: ReasonHashVersion, Severity: "high"}}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("Compare() = %+v, want %+v", got, want)
 	}
@@ -375,7 +376,8 @@ func TestCompareHashVersionMismatchNeverChanged(t *testing.T) {
 
 // TestCompareCorruptStoredCanonical checks that a pinned canonical text that
 // does not match the pinned hash is unverified, not changed: the diff of such a
-// text would show a tool that was never pinned.
+// text would show a tool that was never pinned. Its Diff shows the whole
+// current tool instead.
 func TestCompareCorruptStoredCanonical(t *testing.T) {
 	t.Parallel()
 	tool := compareTools()[0]
@@ -389,7 +391,7 @@ func TestCompareCorruptStoredCanonical(t *testing.T) {
 			t.Parallel()
 			stored := ServerPins{tool.Name: {Hash: good.Hash, Canonical: canonical}}
 			got := Compare(stored, []inspect.Tool{cur})
-			want := []Change{{Kind: KindUnverified, Tool: tool.Name, Reason: ReasonPinMismatch, Severity: "high"}}
+			want := []Change{{Kind: KindUnverified, Tool: tool.Name, Diff: mustCurrentDiff(t, cur), Reason: ReasonPinMismatch, Severity: "high"}}
 			if !reflect.DeepEqual(got, want) {
 				t.Fatalf("Compare() = %+v, want %+v", got, want)
 			}
@@ -449,8 +451,32 @@ func TestCompareChangedDiffNeverEmpty(t *testing.T) {
 	}
 }
 
+// mustCurrentDiff returns the diff of the whole tool from empty text, as Compare
+// makes it for a new tool and for a pin that can not be checked.
+func mustCurrentDiff(t testing.TB, tool inspect.Tool) string {
+	t.Helper()
+	diff, truncated, err := newToolDiff(mustCanonical(t, tool))
+	if err != nil || truncated {
+		t.Fatalf("newToolDiff() = truncated %v, error %v; want a full diff", truncated, err)
+	}
+	return diff
+}
+
+// toolNamed returns the tool of tools with the given name.
+func toolNamed(t testing.TB, tools []inspect.Tool, name string) inspect.Tool {
+	t.Helper()
+	for _, tool := range tools {
+		if tool.Name == name {
+			return tool
+		}
+	}
+	t.Fatalf("no tool named %q", name)
+	return inspect.Tool{}
+}
+
 // TestCompareUnverifiedReasons checks the Reason of each unverified case, and
-// that the other kinds have no Reason.
+// that the other kinds have no Reason. Only the two reasons of a pin that can
+// not be checked come with a Diff of the current tool.
 func TestCompareUnverifiedReasons(t *testing.T) {
 	t.Parallel()
 	base := compareTools()
@@ -494,13 +520,13 @@ func TestCompareUnverifiedReasons(t *testing.T) {
 			name:    "hash version",
 			stored:  badHash,
 			current: compareTools(),
-			want:    []Change{{Kind: KindUnverified, Tool: "list", Reason: ReasonHashVersion, Severity: "high"}},
+			want:    []Change{{Kind: KindUnverified, Tool: "list", Diff: mustCurrentDiff(t, toolNamed(t, base, "list")), Reason: ReasonHashVersion, Severity: "high"}},
 		},
 		{
 			name:    "pin mismatch",
 			stored:  mismatch,
 			current: changedList,
-			want:    []Change{{Kind: KindUnverified, Tool: "list", Reason: ReasonPinMismatch, Severity: "high"}},
+			want:    []Change{{Kind: KindUnverified, Tool: "list", Diff: mustCurrentDiff(t, toolNamed(t, changedList, "list")), Reason: ReasonPinMismatch, Severity: "high"}},
 		},
 		{
 			name:    "no reason for new and removed",

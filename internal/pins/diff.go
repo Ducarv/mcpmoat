@@ -98,19 +98,19 @@ func diffRendered(before, after string) (diff string, truncated bool, err error)
 }
 
 // trimCommon removes the whole lines that a and b share at the start and at the
-// end, and keeps context of them on each side. It returns the two middle
+// end, and keeps keep lines of them on each side. It returns the two middle
 // windows and the number of lines it removed at the start. The work is linear
 // in the length of the texts.
 //
 // A line is shared at the start when both texts have it at the same position,
 // and shared at the end when both texts have it at the same distance from the
 // end. The two kinds never overlap. The texts must not be equal.
-func trimCommon(a, b string, context int) (trimmedA, trimmedB string, skipped int) {
-	// Start: the first whole line that differs, then back up by context lines.
+func trimCommon(a, b string, keep int) (trimmedA, trimmedB string, skipped int) {
+	// Start: the first whole line that differs, then back up by keep lines.
 	p := commonPrefixLen(a, b)
 	firstDiffLineStart := strings.LastIndexByte(a[:p], '\n') + 1
 	start := firstDiffLineStart
-	for range context {
+	for range keep {
 		if start == 0 {
 			break
 		}
@@ -119,7 +119,7 @@ func trimCommon(a, b string, context int) (trimmedA, trimmedB string, skipped in
 	skipped = strings.Count(a[:start], "\n")
 
 	// End: the shared tail, but not into the lines at the start. Then move
-	// forward to a line start, and move on by context lines.
+	// forward to a line start, and move on by keep lines.
 	shorterLen := min(len(a), len(b))
 	q := min(commonSuffixLen(a, b), shorterLen-firstDiffLineStart)
 	endA, endB := len(a)-q, len(b)-q
@@ -134,7 +134,7 @@ func trimCommon(a, b string, context int) (trimmedA, trimmedB string, skipped in
 		endA += n + 1
 		endB += n + 1
 	}
-	for range context {
+	for range keep {
 		n := strings.IndexByte(a[endA:], '\n')
 		if n < 0 {
 			endA, endB = len(a), len(b)

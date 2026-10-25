@@ -491,18 +491,8 @@ func TestPinStoreErrors(t *testing.T) {
 
 	t.Run("save error", func(t *testing.T) {
 		t.Parallel()
-		if os.Geteuid() == 0 || filepath.Separator == '\\' {
-			t.Skip("a read-only directory does not stop this user")
-		}
 		e := newPinEnv(t, oneServer("srv"))
-		dir := filepath.Join(e.xdg, "mcpmoat")
-		if err := os.MkdirAll(dir, 0o700); err != nil {
-			t.Fatal(err)
-		}
-		if err := os.Chmod(dir, 0o500); err != nil { //nolint:gosec // G302: the test makes the folder read-only on purpose
-			t.Fatal(err)
-		}
-		t.Cleanup(func() { _ = os.Chmod(dir, 0o700) }) //nolint:gosec // G302: restores the folder so that t.TempDir can remove it
+		readOnlyPinsDir(t, e)
 
 		got := e.pin(fake(), "--accept", "srv")
 
@@ -564,6 +554,8 @@ func TestPinAccept(t *testing.T) {
 			current:    []inspect.Tool{mkTool("a", "Add."), mkTool("b", "Echo.")},
 			breakHash:  true,
 			wantStdout: "accepted srv: 0 new, 0 changed, 0 removed, 2 not verified\n",
+			// The pins can not be checked, so pin shows the whole current text.
+			wantDiffs: []string{"?a", "?b"},
 		},
 	}
 	for _, tt := range tests {

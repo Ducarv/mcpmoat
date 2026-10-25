@@ -22,11 +22,12 @@ import (
 // The steps, each in its own function:
 //  1. parsePinArgs: read and check the flags.
 //  2. findPinServer: find the one server that has the --accept name.
-//  3. loadPinStore: read pins.json. This comes before the next step, so a
-//     corrupt or newer file stops pin before it starts a stdio server.
+//  3. readPins: check that pins.json can be read. This comes before the next
+//     step, so a corrupt or newer file stops pin before it starts a stdio
+//     server.
 //  4. inspectOne: inspect only that server.
-//  5. acceptTools: show the diffs, check --expect, read pins.json again, set the
-//     pins of this server only and save the file.
+//  5. acceptTools: read pins.json again, show the diffs, check --expect, set
+//     the pins of this server only and save the file.
 //
 // Nothing is written unless every step before the save worked. The server runs
 // in its own session, so the terminal does not signal it. When the process gets
@@ -46,15 +47,14 @@ func (c *cli) runPin(_ options, args []string) int {
 	if !ok {
 		return exitError
 	}
-	store, ok := c.loadPinStore()
-	if !ok {
+	if _, ok := c.readPins("pin"); !ok {
 		return exitError
 	}
 	tools, ok := c.inspectOne(ctx, server, a.connOpts)
 	if !ok {
 		return exitError
 	}
-	return c.acceptTools(store, server, tools, a.expect)
+	return c.acceptTools(server, tools, a.expect)
 }
 
 // pinArgs holds the checked flags of "pin".
@@ -100,7 +100,7 @@ func (c *cli) parsePinArgs(args []string) (a pinArgs, code int, ok bool) {
 	// Check the digest before discovery, so a typo stops pin before it reads a
 	// file or starts a server. The value is not printed: it is untrusted argv.
 	if a.expect != "" && !pins.ValidDigest(a.expect) {
-		return pinArgs{}, c.usageError("pin", "--expect needs a digest such as %s:<32 hex>", pins.DigestVersion), false
+		return pinArgs{}, c.usageError("pin", "--expect needs a digest such as %s:<64 hex>", pins.DigestVersion), false
 	}
 
 	// The concurrency is 1 for the one server. connectOptions gives the same
@@ -111,23 +111,6 @@ func (c *cli) parsePinArgs(args []string) (a pinArgs, code int, ok bool) {
 	}
 	a.connOpts = connOpts
 	return a, exitOK, true
-}
-
-// loadPinStore reads pins.json. It returns false, after a message on stderr,
-// when the path is not known or the file cannot be read (a corrupt file, an
-// unsupported version). pin never replaces a bad store with an empty one.
-func (c *cli) loadPinStore() (*pins.Store, bool) {
-	path, err := pins.DefaultPath(c.getenv, c.homeDir)
-	if err != nil {
-		c.cmdErr("pin", "cannot find the pins file", err)
-		return nil, false
-	}
-	store, err := pins.Load(path)
-	if err != nil {
-		c.cmdErr("pin", "cannot read the pins file", err)
-		return nil, false
-	}
-	return store, true
 }
 
 // inspectOne inspects the one server and returns its tools. It returns false,
@@ -162,12 +145,13 @@ func (c *cli) inspectOne(ctx context.Context, server discover.Server, opts inspe
 // prints the diff of each changed or new tool first, so the user sees what the
 // accept changes. It returns the exit code.
 //
-// store is the store that pin read before it started the server. It only gives
-// the pins to compare with. Just before the save, acceptTools reads pins.json
-// again and sets the pins of this server in that fresh store, so it keeps an
-// entry that another run wrote in the meantime. An accept always overwrites the
-// entry of this one server. This makes the window for a lost update short but
-// does not close it. A lock on the file is issue #150.
+// The server can run for a long time, so acceptTools reads pins.json again
+// after the inspection. The diffs, the counts and the save all use that fresh
+// store: the diffs show the change against the entry that the save replaces,
+// and the save keeps an entry that another run wrote in the meantime. An
+// accept always overwrites the entry of this one server. This makes the window
+// for a lost update short but does not close it. A lock on the file is issue
+// #150.
 //
 // With a non-empty expect, it compares that digest with pins.Digest of the
 // tools that it just inspected. This closes a time-of-check to time-of-use gap:
@@ -176,7 +160,7 @@ func (c *cli) inspectOne(ctx context.Context, server discover.Server, opts inspe
 // the digests differ, pin saves nothing. Without expect, pin trusts the tools
 // that the server returns now, and prints the note pinNoExpectNote on stderr
 // before it saves.
-func (c *cli) acceptTools(store *pins.Store, server discover.Server, tools []inspect.Tool, expect string) int {
+func (c *cli) acceptTools(server discover.Server, tools []inspect.Tool, expect string) int {
 	name := cutName(server.Name)
 
 	// The error text is not printed: it can name a tool of the server.
@@ -186,6 +170,11 @@ func (c *cli) acceptTools(store *pins.Store, server discover.Server, tools []ins
 		return exitError
 	}
 
+	// A read error stops pin before the save.
+	store, ok := c.readPins("pin")
+	if !ok {
+		return exitError
+	}
 	id := serverIdentity(server)
 	counts, diffs := c.pinChanges(store, id, server.Name, tools)
 
@@ -208,17 +197,11 @@ func (c *cli) acceptTools(store *pins.Store, server discover.Server, tools []ins
 		return exitError
 	}
 
-	// Read the file again, so that the save keeps what another run wrote since
-	// the first read. A read error stops pin before the save.
-	fresh, ok := c.loadPinStore()
-	if !ok {
-		return exitError
-	}
-	if err := fresh.Set(id, snap); err != nil {
+	if err := store.Set(id, snap); err != nil {
 		c.cmdErr("pin", "cannot set the pins of server "+name, err)
 		return exitError
 	}
-	if err := fresh.Save(); err != nil {
+	if err := store.Save(); err != nil {
 		c.cmdErr("pin", "cannot save the pins file", err)
 		return exitError
 	}
@@ -238,9 +221,9 @@ func pinUsage(w io.Writer) {
 	fprintf(w, "Pin flags (after \"pin\"):\n")
 	fprintf(w, "  --accept <server>    Accept the tools that the server offers now as its new pins (required)\n")
 	fprintf(w, "                       pin connects to this one server (a stdio server is started). Review the diff of \"scan\" first\n")
-	fprintf(w, "                       pin prints the diff of each changed tool, then \"accepted ...\". Ctrl-C stops the server and saves nothing (exit 2)\n")
+	fprintf(w, "                       pin prints the diff of each changed, new or not verified tool, then \"accepted ...\". Ctrl-C stops the server and saves nothing (exit 2)\n")
 	fprintf(w, "                       The name must match exactly one server. If two clients or projects use it, narrow it with --config\n")
-	fprintf(w, "  --expect <digest>    Save the tools only if their digest is this one (pd1:<32 hex>); scan prints it as\n")
+	fprintf(w, "  --expect <digest>    Save the tools only if their digest is this one (pd1:<64 hex>); scan prints it as\n")
 	fprintf(w, "                       \"To accept <server>: mcpmoat pin --accept <server> --expect <digest>\". If the tools differ, pin prints\n")
 	fprintf(w, "                       the diff, saves nothing and exits 2. Without it, pin trusts the tools the server returns now (a note on stderr)\n")
 	fprintf(w, "  --config <file>      Read only this file, like \"scan --config\"; skips auto-discovery\n")

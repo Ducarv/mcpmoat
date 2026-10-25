@@ -954,7 +954,7 @@ func TestE2EPinAccept(t *testing.T) {
 
 	// Step 3b: --expect with a valid digest of other tools is exit code 2, and
 	// pins.json stays as it was.
-	const wrongDigest = "pd1:00000000000000000000000000000000"
+	const wrongDigest = "pd1:0000000000000000000000000000000000000000000000000000000000000000"
 	stdout, stderr, code = runBin(t, home, work, "pin", "--accept", name, "--expect", wrongDigest)
 	if code != exitError || stdout != "" ||
 		!strings.Contains(stderr, "mcpmoat pin: the tools of "+name+" differ from what scan showed (digest pd1:") ||
@@ -981,7 +981,7 @@ func TestE2EPinAccept(t *testing.T) {
 
 	// Step 3d: a malformed digest is a usage error before any server starts.
 	stdout, stderr, code = runBin(t, home, work, "pin", "--accept", name, "--expect", "not-a-digest")
-	if code != exitError || stdout != "" || !strings.Contains(stderr, "mcpmoat pin: --expect needs a digest such as pd1:<32 hex>") {
+	if code != exitError || stdout != "" || !strings.Contains(stderr, "mcpmoat pin: --expect needs a digest such as pd1:<64 hex>") {
 		t.Errorf("pin --expect bad digest: exit code %d, stdout %q, stderr %q, want exit code %d, no stdout and the digest usage error", code, stdout, stderr, exitError)
 	}
 

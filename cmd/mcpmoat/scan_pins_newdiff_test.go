@@ -5,14 +5,11 @@ package main
 // helpers of scan_pins_test.go and a fake inspector, so no server starts.
 
 import (
-	"errors"
 	"slices"
 	"strings"
 	"testing"
 
-	"github.com/Ducarv/mcpmoat/internal/discover"
 	"github.com/Ducarv/mcpmoat/internal/inspect"
-	"github.com/Ducarv/mcpmoat/internal/pins"
 )
 
 // linesDescription returns a description of n lines. Over 2000 lines, the diff
@@ -63,7 +60,7 @@ func TestScanNewToolDiff(t *testing.T) {
 			t.Errorf("pin rows = %+v, want %+v", out.rows, want)
 		}
 		assertDiffsOf(t, out.diffs, "srv", []string{"+b"})
-		if want := []string{acceptHintPrefix + "srv: mcpmoat pin --accept srv --expect " + digestOf(t, current...)}; !slices.Equal(out.hints, want) {
+		if want := []string{acceptHintPrefix + "srv: mcpmoat pin --accept srv --config " + e.config + " --expect " + digestOf(t, current...)}; !slices.Equal(out.hints, want) {
 			t.Errorf("hints = %q, want %q", out.hints, want)
 		}
 	})
@@ -322,118 +319,6 @@ func TestDiffTruncationWarningNames(t *testing.T) {
 				if !strings.Contains(got.stdout, header) {
 					t.Errorf("stdout has no header %q\nstdout:\n%s", header, got.stdout)
 				}
-			}
-		})
-	}
-}
-
-// TestPinOutcomesNotInspectedAfterDuplicate checks the MOAT-T2-004 row for a
-// pinned server that was not inspected. A second outcome with an identity that
-// the run already handled gets no "pinned server could not be inspected" row:
-// the server was not pinned before this run, or it was checked in this run.
-// Discovery cannot give two servers with one identity, so the test calls
-// pinOutcomes with outcomes that it builds.
-func TestPinOutcomesNotInspectedAfterDuplicate(t *testing.T) {
-	t.Parallel()
-
-	srv := discover.Server{Name: "srv", Client: discover.ClientClaudeCode, Source: "/cfg/mcp.json"}
-	tools := []inspect.Tool{mkTool("a", "Add.")}
-	ok := inspect.Outcome{Server: srv, Status: inspect.StatusOK, Result: inspect.Result{Tools: tools}}
-	boom := errors.New("boom")
-	failed := inspect.Outcome{Server: srv, Status: inspect.StatusFailed, Err: boom}
-	timedOut := inspect.Outcome{Server: srv, Status: inspect.StatusTimeout, Err: boom}
-
-	tests := []struct {
-		name string
-		// pinBefore says that srv is in the store before the run.
-		pinBefore bool
-		outcomes  []inspect.Outcome
-		// wantReasons are the Related texts of the MOAT-T2-004 rows, in order.
-		wantReasons []string
-		// wantPinned is the number of servers that the run pinned for the first
-		// time.
-		wantPinned int
-	}{
-		{
-			name:       "pinned in this run, then not inspected: no row",
-			outcomes:   []inspect.Outcome{ok, failed},
-			wantPinned: 1,
-		},
-		{
-			name:       "pinned in this run, then timeout: no row",
-			outcomes:   []inspect.Outcome{ok, timedOut},
-			wantPinned: 1,
-		},
-		{
-			name:        "pinned before the run and not inspected: row",
-			pinBefore:   true,
-			outcomes:    []inspect.Outcome{failed},
-			wantReasons: []string{reasonNotInspected},
-		},
-		{
-			name:        "pinned before the run and timeout: row",
-			pinBefore:   true,
-			outcomes:    []inspect.Outcome{timedOut},
-			wantReasons: []string{reasonNotInspected},
-		},
-		{
-			name:      "pinned before the run, checked in this run, then not inspected: no row",
-			pinBefore: true,
-			outcomes:  []inspect.Outcome{ok, failed},
-		},
-		{
-			name:        "not inspected first, then inspected: row for the first only",
-			pinBefore:   true,
-			outcomes:    []inspect.Outcome{failed, ok},
-			wantReasons: []string{reasonNotInspected},
-		},
-		{
-			name:     "not in the store and not inspected: only a warning, no row",
-			outcomes: []inspect.Outcome{failed},
-		},
-		{
-			name:        "second inspected outcome is listed twice, not not inspected",
-			outcomes:    []inspect.Outcome{ok, ok, failed},
-			wantReasons: []string{reasonListedTwice},
-			wantPinned:  1,
-		},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
-			e := newPinEnv(t, oneServer("srv"))
-			c, _, stderr := e.cli(nil)
-			store, err := c.loadPins()
-			if err != nil {
-				t.Fatalf("loadPins() error = %v, want nil", err)
-			}
-			if tt.pinBefore {
-				snap, err := pins.Snapshot(tools)
-				if err != nil {
-					t.Fatal(err)
-				}
-				if err := store.Set(serverIdentity(srv), snap); err != nil {
-					t.Fatal(err)
-				}
-			}
-
-			pr := c.pinOutcomes(store, tt.outcomes, &scanIgnores{})
-
-			var reasons []string
-			for _, row := range pr.rows {
-				if row.RuleID != "MOAT-T2-004" {
-					t.Errorf("row = %+v, want only MOAT-T2-004 rows", row)
-				}
-				reasons = append(reasons, row.Related)
-			}
-			if !slices.Equal(reasons, tt.wantReasons) {
-				t.Errorf("row reasons = %q, want %q", reasons, tt.wantReasons)
-			}
-			if len(pr.pinned) != tt.wantPinned {
-				t.Errorf("pinned = %+v, want %d entries", pr.pinned, tt.wantPinned)
-			}
-			if stderr.Len() != 0 {
-				t.Errorf("stderr = %q, want empty (pinOutcomes prints no warning here)", stderr.String())
 			}
 		})
 	}

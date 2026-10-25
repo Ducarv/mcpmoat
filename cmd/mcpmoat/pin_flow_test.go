@@ -1,10 +1,11 @@
 package main
 
-// In-process tests of the changes of review round 2 to the pin step:
+// In-process tests of the pin flow across scan and "pin --accept":
 //
-//   - a pinned server that was not inspected is a high MOAT-T2-004 finding;
-//   - scan and "pin --accept" read pins.json again just before they save, and
-//     keep what another run wrote in the meantime;
+//   - a pinned server that was not inspected is a high MOAT-T2-004 finding,
+//     also after a second outcome with the same identity;
+//   - scan and "pin --accept" read pins.json again before they save, and keep
+//     what another run wrote in the meantime;
 //   - the "To accept" line says when a diff was cut;
 //   - pin prints its --expect note before it saves.
 //
@@ -20,7 +21,6 @@ import (
 	"maps"
 	"os"
 	"path/filepath"
-	"runtime"
 	"slices"
 	"strings"
 	"sync"
@@ -102,9 +102,9 @@ func onceFor(name string, fn func(discover.Server)) func(discover.Server) {
 func storeFor(t *testing.T, e *pinEnv, pinned bool, srv discover.Server, tools []inspect.Tool) (*cli, *pins.Store) {
 	t.Helper()
 	c, _, _ := e.cli(nil)
-	store, err := c.loadPins()
-	if err != nil {
-		t.Fatalf("loadPins() error = %v, want nil", err)
+	store, ok := c.readPins("scan")
+	if !ok {
+		t.Fatal("readPins() = false, want true")
 	}
 	if pinned {
 		snap, err := pins.Snapshot(tools)
@@ -470,6 +470,25 @@ func TestPinAcceptFreshStoreKeepsOtherEntries(t *testing.T) {
 			}
 		})
 
+		t.Run("the diff and the counts use the entry that the save replaces "+fs.name, func(t *testing.T) {
+			t.Parallel()
+			e := prepare(t)
+			// Another run accepts the same tools while this pin inspects the
+			// server, so the accept changes nothing.
+			insp := hookInspector{
+				inner: current,
+				hook: onceFor("target", func(s discover.Server) {
+					writePinsAside(t, e.pinsPath(), serverIdentity(s), mkTool("a", "Add. Changed."))
+				}),
+			}
+
+			got := e.pin(insp, append([]string{"--accept", "target"}, fs.flags...)...)
+
+			if want := "accepted target: 0 new, 0 changed, 0 removed\n"; got.code != exitOK || got.stdout != want {
+				t.Errorf("exit code %d, stdout %q, want exit code %d and stdout %q", got.code, got.stdout, exitOK, want)
+			}
+		})
+
 		t.Run("an unreadable pins file at save time exits 2 and saves nothing "+fs.name, func(t *testing.T) {
 			t.Parallel()
 			const corrupt = "{this is not json"
@@ -559,9 +578,13 @@ func TestScanAcceptHintCutNote(t *testing.T) {
 			if got.code != exitOK && got.code != exitFindings {
 				t.Fatalf("exit code = %d, want 0 or 1\nstderr:\n%s", got.code, got.stderr)
 			}
-			line := acceptHintPrefix + "srv: mcpmoat pin --accept srv --expect " + digestOf(t, tt.current...)
+			line := acceptHintPrefix + "srv: mcpmoat pin --accept srv --config " + e.config + " --expect " + digestOf(t, tt.current...)
 			if tt.wantCut {
 				line += hintCutText
+			}
+			if len(tt.flags) > 0 {
+				// --ignore dropped a row, so the line says so too.
+				line += hintIgnoredNote
 			}
 			if !strings.HasSuffix(got.stdout, "\n"+line+"\n") {
 				t.Errorf("stdout does not end with the hint %q\nstdout tail:\n%s", line, tail(got.stdout, 400))
@@ -601,8 +624,8 @@ func TestScanAcceptHintCutNotePerServer(t *testing.T) {
 	}
 	_, hints := cutAcceptHints(got.stdout)
 	want := []string{
-		acceptHintPrefix + "cut: mcpmoat pin --accept cut --expect " + digestOf(t, cutTools...) + hintCutText,
-		acceptHintPrefix + "small: mcpmoat pin --accept small --expect " + digestOf(t, smallTools...),
+		acceptHintPrefix + "cut: mcpmoat pin --accept cut --config " + e.config + " --expect " + digestOf(t, cutTools...) + hintCutText,
+		acceptHintPrefix + "small: mcpmoat pin --accept small --config " + e.config + " --expect " + digestOf(t, smallTools...),
 	}
 	if !slices.Equal(hints, want) {
 		t.Errorf("hint lines = %q, want %q", hints, want)
@@ -634,24 +657,6 @@ func (e *pinEnv) pinShared(insp inspect.Inspector, args ...string) (code int, ou
 	c.stdout, c.stderr = &buf, &buf
 	code = c.dispatch(append([]string{"pin", "--config", e.config}, args...))
 	return code, buf.String()
-}
-
-// readOnlyPinsDir makes the folder of pins.json read-only, so that a save
-// fails but a read finds no file. It skips the test when the user can write
-// there anyway.
-func readOnlyPinsDir(t *testing.T, e *pinEnv) {
-	t.Helper()
-	if runtime.GOOS == "windows" || os.Geteuid() == 0 {
-		t.Skip("a read-only directory does not stop this user")
-	}
-	dir := filepath.Dir(e.pinsPath())
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Chmod(dir, 0o500); err != nil { //nolint:gosec // G302: the test makes the folder read-only on purpose
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = os.Chmod(dir, 0o700) }) //nolint:gosec // G302: restores the folder so that t.TempDir can remove it
 }
 
 // TestPinNoExpectNoteOrder checks that the note of a pin without --expect comes
@@ -698,7 +703,7 @@ func TestPinNoExpectNoteOrder(t *testing.T) {
 		assertContainsNone(t, "output", out, []string{"accepted"})
 	})
 
-	t.Run("the note shows when the pins file cannot be read again", func(t *testing.T) {
+	t.Run("a pins file that cannot be read again stops pin before the diff and the note", func(t *testing.T) {
 		t.Parallel()
 		e := newPinEnv(t, oneServer("srv"))
 		insp := hookInspector{
@@ -715,10 +720,10 @@ func TestPinNoExpectNoteOrder(t *testing.T) {
 		if code != exitError {
 			t.Fatalf("exit code = %d, want %d\noutput:\n%s", code, exitError, out)
 		}
-		note, failure := strings.Index(out, noExpectNote), strings.Index(out, "mcpmoat pin: cannot read the pins file: ")
-		if note < 0 || failure < 0 || note > failure {
-			t.Errorf("want the note (%d) before the read error (%d)\noutput:\n%s", note, failure, out)
-		}
+		// pin reads the file again before it shows the diff, so the diff is
+		// made against the entry that the save would replace.
+		assertContainsAll(t, "output", out, []string{"mcpmoat pin: cannot read the pins file: "})
+		assertContainsNone(t, "output", out, []string{newDiff, noExpectNote, "accepted"})
 	})
 
 	t.Run("with --expect there is no note", func(t *testing.T) {
@@ -767,5 +772,117 @@ func TestFindingsTableHoldsNotInspectedReason(t *testing.T) {
 		if !strings.Contains(out.String(), want) {
 			t.Errorf("findings table has no %q\n%s", want, out.String())
 		}
+	}
+}
+
+// TestPinOutcomesNotInspectedAfterDuplicate checks the MOAT-T2-004 row for a
+// pinned server that was not inspected. A second outcome with an identity that
+// the run already handled gets no "pinned server could not be inspected" row:
+// the server was not pinned before this run, or it was checked in this run.
+// Discovery cannot give two servers with one identity, so the test calls
+// pinOutcomes with outcomes that it builds.
+func TestPinOutcomesNotInspectedAfterDuplicate(t *testing.T) {
+	t.Parallel()
+
+	srv := discover.Server{Name: "srv", Client: discover.ClientClaudeCode, Source: "/cfg/mcp.json"}
+	tools := []inspect.Tool{mkTool("a", "Add.")}
+	ok := inspect.Outcome{Server: srv, Status: inspect.StatusOK, Result: inspect.Result{Tools: tools}}
+	boom := errors.New("boom")
+	failed := inspect.Outcome{Server: srv, Status: inspect.StatusFailed, Err: boom}
+	timedOut := inspect.Outcome{Server: srv, Status: inspect.StatusTimeout, Err: boom}
+
+	tests := []struct {
+		name string
+		// pinBefore says that srv is in the store before the run.
+		pinBefore bool
+		outcomes  []inspect.Outcome
+		// wantReasons are the Related texts of the MOAT-T2-004 rows, in order.
+		wantReasons []string
+		// wantPinned is the number of servers that the run pinned for the first
+		// time.
+		wantPinned int
+	}{
+		{
+			name:       "pinned in this run, then not inspected: no row",
+			outcomes:   []inspect.Outcome{ok, failed},
+			wantPinned: 1,
+		},
+		{
+			name:       "pinned in this run, then timeout: no row",
+			outcomes:   []inspect.Outcome{ok, timedOut},
+			wantPinned: 1,
+		},
+		{
+			name:        "pinned before the run and not inspected: row",
+			pinBefore:   true,
+			outcomes:    []inspect.Outcome{failed},
+			wantReasons: []string{reasonNotInspected},
+		},
+		{
+			name:        "pinned before the run and timeout: row",
+			pinBefore:   true,
+			outcomes:    []inspect.Outcome{timedOut},
+			wantReasons: []string{reasonNotInspected},
+		},
+		{
+			name:      "pinned before the run, checked in this run, then not inspected: no row",
+			pinBefore: true,
+			outcomes:  []inspect.Outcome{ok, failed},
+		},
+		{
+			name:        "not inspected first, then inspected: row for the first only",
+			pinBefore:   true,
+			outcomes:    []inspect.Outcome{failed, ok},
+			wantReasons: []string{reasonNotInspected},
+		},
+		{
+			name:     "not in the store and not inspected: only a warning, no row",
+			outcomes: []inspect.Outcome{failed},
+		},
+		{
+			name:        "second inspected outcome is listed twice, not not inspected",
+			outcomes:    []inspect.Outcome{ok, ok, failed},
+			wantReasons: []string{reasonListedTwice},
+			wantPinned:  1,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			e := newPinEnv(t, oneServer("srv"))
+			c, _, stderr := e.cli(nil)
+			store, ok := c.readPins("scan")
+			if !ok {
+				t.Fatal("readPins() = false, want true")
+			}
+			if tt.pinBefore {
+				snap, err := pins.Snapshot(tools)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := store.Set(serverIdentity(srv), snap); err != nil {
+					t.Fatal(err)
+				}
+			}
+
+			pr := c.pinOutcomes(store, tt.outcomes, &scanIgnores{})
+
+			var reasons []string
+			for _, row := range pr.rows {
+				if row.RuleID != "MOAT-T2-004" {
+					t.Errorf("row = %+v, want only MOAT-T2-004 rows", row)
+				}
+				reasons = append(reasons, row.Related)
+			}
+			if !slices.Equal(reasons, tt.wantReasons) {
+				t.Errorf("row reasons = %q, want %q", reasons, tt.wantReasons)
+			}
+			if len(pr.pinned) != tt.wantPinned {
+				t.Errorf("pinned = %+v, want %d entries", pr.pinned, tt.wantPinned)
+			}
+			if stderr.Len() != 0 {
+				t.Errorf("stderr = %q, want empty (pinOutcomes prints no warning here)", stderr.String())
+			}
+		})
 	}
 }

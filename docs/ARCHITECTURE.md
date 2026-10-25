@@ -48,12 +48,13 @@ docs/                   PRD and other documentation
 - `internal/pins`: computes the canonical hash of each tool (`Canonical`, `Hash`), makes the pins of
   a server (`Snapshot`), keeps the versioned `pins.json` store (`Load`, `Get`, `Set`, `Save` and
   `DefaultPath`), compares the pins with the current tools (`Compare`), and makes the digest of a tool
-  set (`Digest`, `ValidDigest`). `Compare` finds changed,
-  new, removed and not verified tools and makes the unified diff of a changed or new tool. See
+  set (`Digest`, `ValidDigest`). `Compare` finds changed, new, removed and not verified tools. It
+  makes the unified diff of a changed or new tool, and shows the whole current text of a pinned tool
+  whose pin cannot be checked. See
   [Tool hash](#tool-hash), [Tool set digest](#tool-set-digest) and
   [The `pins.json` store](#the-pinsjson-store).
 - `internal/report`: writes the terminal output: the servers (`WriteServers`), the findings
-  (`WriteFindings`) and the diffs of changed and new tools (`WriteDiffs`).
+  (`WriteFindings`) and the diffs of changed, new and not verified tools (`WriteDiffs`).
 - `rules/`: the built-in rule files (`rules/*.yaml`) and `data/popular-servers.txt`. The Go file
   `rules/embed.go` embeds both with `go:embed`. It holds data only. `internal/rules` parses it.
 - `testdata/`: fixtures. `testdata/servers` holds malicious example servers. `testdata/configs`
@@ -142,39 +143,44 @@ the connect and pin steps between step 5 and step 6:
   - A second entry with the same identity gets a MOAT-T2-004 finding with the reason `the server is
     listed twice`, so that its tools are not skipped. It is high when the identity is pinned, else
     medium (`pinner.unverifiedSeverity`).
-  - A server that is in the store goes through `pins.Compare` (`pinner.compare`). The findings are MOAT-T2-001
-    (changed tool, high), MOAT-T2-002 (new tool, medium), MOAT-T2-003 (removed tool, low) and
-    MOAT-T2-004 (not verified). The severity of MOAT-T2-004 is high when the tool name is pinned,
-    because a duplicate, invalid or unverifiable copy of a pinned tool can hide a rug pull, and
-    medium otherwise (`Change.Severity` in `internal/pins/compare.go`). A tool is not verified when
-    its name is empty or used twice,
-    when it has no canonical form, when it is pinned with another hash version, or when its pinned
-    text does not match its hash. These are native rule IDs: there is no YAML file for them, because
+  - A server that is in the store goes through `pins.Compare` (`pinner.compare`). The findings are
+    MOAT-T2-001 (changed tool, high), MOAT-T2-002 (new tool, medium), MOAT-T2-003 (removed tool,
+    low) and MOAT-T2-004 (not verified). The severity of MOAT-T2-004 is high when the tool name is
+    pinned, because a duplicate, invalid or unverifiable copy of a pinned tool can hide a rug pull,
+    and medium otherwise (`Change.Severity` in `internal/pins/compare.go`). A tool is not verified
+    when its name is empty or used twice, when it has no canonical form, when it is pinned with
+    another hash version, or when its pinned text does not match its hash. These are native rule IDs: there is no YAML file for them, because
     pins handle T2. A MOAT-T2-004 finding shows a fixed reason text in the KEY/RELATED column:
     `duplicate tool name`, `empty tool name`, `invalid tool data`,
     `pinned with another hash version` or `pinned text does not match its hash`. The reason never
-    holds server text. The `--ignore` flag drops them by rule ID, server and tool name. The
+    holds server text. For the last two reasons the pin cannot be trusted, so the change also has a
+    diff of the whole current tool (`Change.Diff`). The `--ignore` flag drops them by rule ID, server and tool name. The
     `.mcpmoat-ignore` file does not (see step 3). `scan` never re-pins a server that is in the
     store.
 - 5c. For a pinned server with at least one pin finding that is not ignored, `pinOutcomes` also keeps
   the `pins.Digest` of the tools that `scan` saw (`acceptHint` in `cmd/mcpmoat/scan_pins.go`). A
-  server whose tools `pins.Snapshot` refuses has no hint. A first-run server, a server that was not
-  inspected and an ignored finding give no hint. A hint keeps `truncated` when a diff of that server
-  was cut.
+  server whose tools cannot be pinned (`pinnable`: `pins.Snapshot` and `pins.ValidateServer`, the
+  rules of `Store.Set`) has no hint, because `pin --accept` would refuse them. A first-run server, a
+  server that was not inspected and an ignored finding give no hint. A hint keeps `truncated` when a
+  diff of that server was cut, and `ignored` when `--ignore` dropped a pin finding of that server.
 - The pin findings join the config findings in one table. A changed tool and a new tool also get a
   diff, so the user can review the content of a new tool before they accept it. A new tool has the
-  header `New tool <tool> on server <server>:` and only added lines. A finding that the user ignored
-  gets no diff. `report.WriteDiffs` prints the diffs after the findings table. When a diff was cut at
+  header `New tool <tool> on server <server>:` and only added lines. A not verified tool with a diff
+  (see 5b) has the header `Not verified tool <tool> on server <server> (current text):` and only
+  added lines. A finding that the user ignored gets no diff. `report.WriteDiffs` prints the diffs after the findings table. When a diff was cut at
   the size limit (`Change.Truncated`), `scan` prints a warning on stderr that names the tool and the
   server: `the diff of tool <tool> on server <server> was cut at the size limit; review the full tool
-  before you accept it`. Then `writeAcceptHints` prints one
-  line for each hint on stdout:
-  `To accept <server>: mcpmoat pin --accept <server> --expect pd1:<32 hex>`. When a diff of that
-  server was cut, the line ends with ` (the diff was cut: review the full tool first)`. The server name in the
-  command goes through `shellArg`: a name of plain ASCII characters stays bare, and any other safe
-  name goes in single quotes (POSIX shell quoting; on Windows `cmd.exe` or PowerShell the user may
-  need to change it). A name that is too long, that `termsafe` would escape, or that starts with a
-  dash (`pin` would read it as a flag, even in quotes) gets no command, only the digest.
+  before you accept it`. Then `writeAcceptHints` prints one line for each hint on stdout:
+  `To accept <server>: mcpmoat pin --accept <server> --expect pd1:<64 hex>`. After
+  `scan --config <file>`, the command holds `--config <file>` too, so `pin` reads the same file.
+  When a diff of that server was cut, the line ends with
+  ` (the diff was cut: review the full tool first)`. When `--ignore` dropped a pin finding of that
+  server, it ends with ` (--ignore hid some changes: run scan without it to review them first)`.
+  The command holds the server name and the config path only when each one is a bare shell word
+  (`isBareShellWord`: the ASCII characters `[A-Za-z0-9._@/:+=-]`, not starting with `-` or `@`, and
+  not too long). POSIX shells, `cmd.exe` and PowerShell all read such a word as plain text. No
+  quoting is safe in all of them, so any other name or path gives a line with no command
+  (`acceptCommand`).
 - `scan` saves the new pins after it prints the report, so a save error never hides the report
   (`savePinned` in `cmd/mcpmoat/scan.go`). `savePinned` reads `pins.json` again, sets only the
   first-run servers that the file does not hold yet (another run may have pinned them meanwhile),
@@ -295,9 +301,10 @@ a `scan` to the later `pin --accept --expect`.
   the bytes. A tool name comes from the server and can hold any byte, so plain separators could give
   the same input for two different sets. The length prefix makes the encoding unambiguous. The map
   order does not matter. An empty set has a defined digest: SHA-256 of no bytes.
-- The digest keeps the first 128 bits of SHA-256. The server picks both tool sets (the one that it
-  shows to `scan` and the one that it shows to `pin`), so it can search for a collision. That costs
-  about 2^(n/2) work for an n-bit digest (the birthday bound), so about 2^64 here.
+- The digest keeps the whole SHA-256 sum (64 hex characters). The server picks both tool sets (the
+  one that it shows to `scan` and the one that it shows to `pin`), so it can search for a collision.
+  That costs about 2^(n/2) work for an n-bit digest (the birthday bound). 128 bits would give about
+  2^64, which a funded attacker can pay. 256 bits give about 2^128.
 - Only `Pin.Hash` goes in. The hash already covers the whole tool.
 
 ## The `internal/inspect` interface

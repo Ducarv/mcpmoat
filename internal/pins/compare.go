@@ -43,8 +43,8 @@ const (
 	// diffUnavailable is the Diff of a changed tool when the diff can not be
 	// made.
 	diffUnavailable = "pinned text could not be rendered"
-	// diffNewUnavailable is the Diff of a new tool when the diff can not be
-	// made.
+	// diffNewUnavailable is the Diff of a new tool, or of a pinned tool that
+	// can not be verified, when the diff of its current text can not be made.
 	diffNewUnavailable = "current text could not be rendered"
 	// diffNotVisible is the Diff when the hashes differ but the rendered texts
 	// are equal. The canonical form has a key that render does not show, or two
@@ -123,14 +123,20 @@ type Change struct {
 	// Tool is the tool name. For KindUnverified it can be empty.
 	Tool string
 	// Diff is the unified diff between the pinned and the current tool. It is
-	// set only for KindChanged and KindNew, and it is never empty there: when no
+	// set for KindChanged and KindNew, and it is never empty there: when no
 	// diff text exists, it is a fixed note. For KindNew the diff is from empty
 	// text, so every content line is an added line. The labels are "--- pinned"
 	// and "+++ current".
+	//
+	// A KindUnverified change with ReasonHashVersion or ReasonPinMismatch has a
+	// Diff too, made like the one of KindNew: the pin can not be trusted, so the
+	// diff shows the whole current tool. The user must see that text before they
+	// accept it. The other KindUnverified changes have no single current tool to
+	// show, so their Diff is empty.
 	Diff string
 	// Truncated is true when the diff window was cut by the size caps (64 KiB
-	// or 2000 lines) and Diff ends with a truncated marker line. It is only
-	// true for KindChanged and KindNew.
+	// or 2000 lines) and Diff ends with a truncated marker line. It can only be
+	// true when Diff is set.
 	Truncated bool
 	// Reason says why a tool is KindUnverified. It is always one of the Reason
 	// constants, never text from a server, so it is safe to print. It is empty
@@ -225,14 +231,18 @@ func compareTool(stored ServerPins, t inspect.Tool) (Change, bool) {
 	if !ok {
 		// The user must see a new tool before they accept it, so it has a diff
 		// too: all its lines are added lines.
-		diff, truncated, err := newToolDiff(string(canonical))
-		if err != nil {
-			diff, truncated = diffNewUnavailable, false
-		}
+		diff, truncated := currentToolDiff(canonical)
 		return Change{Kind: KindNew, Tool: t.Name, Diff: diff, Truncated: truncated, Severity: KindNew.Severity()}, true
 	}
+	// The pin can not be checked in the next two cases, so the change shows the
+	// whole current tool, like a new tool.
+	unverifiedWithText := func(reason string) (Change, bool) {
+		c := unverifiedChange(stored, t.Name, reason)
+		c.Diff, c.Truncated = currentToolDiff(canonical)
+		return c, true
+	}
 	if !strings.HasPrefix(pin.Hash, HashVersion+":") {
-		return unverified(ReasonHashVersion)
+		return unverifiedWithText(ReasonHashVersion)
 	}
 	if pin.Hash == hash {
 		return Change{}, false
@@ -240,7 +250,7 @@ func compareTool(stored ServerPins, t inspect.Tool) (Change, bool) {
 	// The verdict comes from the hash, and the diff from the canonical text.
 	// They must belong together, or the diff would show another tool.
 	if hashCanonical([]byte(pin.Canonical)) != pin.Hash {
-		return unverified(ReasonPinMismatch)
+		return unverifiedWithText(ReasonPinMismatch)
 	}
 
 	diff, truncated, err := unifiedDiff(pin.Canonical, string(canonical))
@@ -251,6 +261,17 @@ func compareTool(stored ServerPins, t inspect.Tool) (Change, bool) {
 		diff = diffNotVisible
 	}
 	return Change{Kind: KindChanged, Tool: t.Name, Diff: diff, Truncated: truncated, Severity: KindChanged.Severity()}, true
+}
+
+// currentToolDiff returns the diff of the whole current tool from empty text,
+// and whether it was cut. When the diff can not be made, it returns the fixed
+// note diffNewUnavailable.
+func currentToolDiff(canonical []byte) (diff string, truncated bool) {
+	diff, truncated, err := newToolDiff(string(canonical))
+	if err != nil {
+		return diffNewUnavailable, false
+	}
+	return diff, truncated
 }
 
 // unverifiedChange returns a KindUnverified change. Its severity is "high" when

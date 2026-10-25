@@ -27,13 +27,13 @@ var diffPrefixes = []string{"@@", "---", "+++", "+", "-", " "}
 // available, so an empty diff is not mistaken for an error in the report.
 const noDiffNote = "  (no diff text available)"
 
-// ToolDiff is the unified diff of one changed tool, as the report prints it.
-// The caller builds Diff from the pinned tool and the tool that the server
-// offers now.
+// ToolDiff is the unified diff of one changed, new or not verified tool, as the
+// report prints it. The caller builds Diff from the pinned tool and the tool
+// that the server offers now.
 type ToolDiff struct {
 	// Server is the name of the server that offers the tool.
 	Server string
-	// Tool is the name of the changed tool.
+	// Tool is the name of the tool.
 	Tool string
 	// Diff is the unified diff text. Each line starts with "---", "+++",
 	// "@@", "+", "-" or " ", or it is a marker line such as
@@ -44,6 +44,9 @@ type ToolDiff struct {
 	// New is true for a tool that is new on a pinned server: the server offers
 	// it, but the pins do not hold it. Its Diff has only added lines.
 	New bool
+	// Unverified is true for a pinned tool whose pin can not be checked (see
+	// pins.Change.Diff). Its Diff has only added lines: the whole current tool.
+	Unverified bool
 }
 
 // WriteDiffs writes one unified diff for each element of diffs to w, in the
@@ -56,6 +59,10 @@ type ToolDiff struct {
 // When New is true, the header says that the tool is new:
 //
 //	New tool <tool> on server <server>:
+//
+// When Unverified is true, the header says that the diff is the current text:
+//
+//	Not verified tool <tool> on server <server> (current text):
 //
 // The diff lines follow, one output line for each line of Diff.
 //
@@ -98,14 +105,20 @@ func WriteDiffs(w io.Writer, diffs []ToolDiff) error {
 		var b strings.Builder
 
 		// The blank line separates the diff from the output before it.
-		if d.New {
+		switch {
+		case d.New:
 			b.WriteString("\nNew tool ")
-		} else {
+		case d.Unverified:
+			b.WriteString("\nNot verified tool ")
+		default:
 			b.WriteString("\nChanged tool ")
 		}
 		b.WriteString(findingCell(d.Tool))
 		b.WriteString(" on server ")
 		b.WriteString(findingCell(d.Server))
+		if d.Unverified {
+			b.WriteString(" (current text)")
+		}
 		b.WriteString(":\n")
 
 		// A final newline ends the last line. It does not start a new one.

@@ -445,7 +445,9 @@ the title and the four hints `readOnlyHint`, `destructiveHint`, `idempotentHint`
   shows the tool as not verified. It never accepts the tool silently.
 - A tool or hash that cannot be verified is reported as not verified (`MOAT-T2-004`). Examples are a
   duplicate or empty tool name, a stored text that does not match its hash, and a server that
-  cannot be pinned. Only `pin --accept` pins such a server again, never `scan`.
+  cannot be pinned. Only `pin --accept` pins such a server again, never `scan`. When the stored hash
+  has another version or does not match its text, `scan` and `pin` show the whole current text of
+  the tool, so the user can review it before they accept it.
 - `pins.json` also stores the canonical text of each tool, next to its hash, so that a later run
   can show the diff. It never stores env, header, args or URL values from the configs.
 - The pins file has a format version field and is written atomically (temp file plus rename).
@@ -518,15 +520,20 @@ text diff.
   before and prints a note on stderr, before it saves, that it trusts the tools that the server
   returns now.
 - After the diffs, `scan` prints one line for each pinned server that has a pin finding that is not
-  ignored: `To accept <server>: mcpmoat pin --accept <server> --expect pd1:<32 hex>`. The server
-  name in the command is quoted for a POSIX shell when needed. A name with a character that is not
-  safe to paste, or that starts with `-`, gets no command, only the digest. On Windows (`cmd.exe` or PowerShell) the user may
-  need to change the quotes. When a diff of that server was cut at the size limit, the line ends with
-  ` (the diff was cut: review the full tool first)`. There is no line for a server pinned for the first time, a server that
+  ignored: `To accept <server>: mcpmoat pin --accept <server> --expect pd1:<64 hex>`. After
+  `scan --config <file>`, the command holds `--config <file>` too. The command holds the server name
+  and the path only when each one is a bare shell word (ASCII `[A-Za-z0-9._@/:+=-]`, not starting
+  with `-` or `@`), which every shell, also `cmd.exe` and PowerShell, reads as plain text. Else the
+  line says what to run and gives the digest, with no command. When a diff of that server was cut
+  at the size limit, the line ends with ` (the diff was cut: review the full tool first)`. When
+  `--ignore` dropped a pin finding of that server, the line ends with
+  ` (--ignore hid some changes: run scan without it to review them first)`: the digest covers those
+  changes too. There is no line for a server pinned for the first time, a server that
   could not be inspected, an ignored finding, or tools that cannot be pinned.
-- The digest (`pins.Digest`, version `pd1`) is the first 128 bits of SHA-256 over the sorted tool
-  names and their hashes. 128 bits, because the server picks both tool sets, so a collision costs
-  about 2^64 work (the birthday bound).
+- The digest (`pins.Digest`, version `pd1`) is the full SHA-256 over the sorted tool names and their
+  hashes. The server picks both tool sets, so a collision costs about 2^(n/2) work for n bits (the
+  birthday bound): about 2^64 for 128 bits, which a funded attacker can pay, and about 2^128 for 256
+  bits.
 
 ### 6.5 Output
 

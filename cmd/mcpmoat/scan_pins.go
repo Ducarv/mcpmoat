@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"io"
 	"strings"
-	"unicode/utf8"
 
 	"github.com/Ducarv/mcpmoat/internal/discover"
 	"github.com/Ducarv/mcpmoat/internal/inspect"
@@ -56,8 +55,8 @@ type pinReport struct {
 	// hints lists the pinned servers that have at least one pin finding that
 	// the ignore list does not drop, in the order of the servers. Each one
 	// holds the digest of the tools that scan saw, for the line "To accept ...
-	// --expect <digest>" (see writeAcceptHints). A server whose tools
-	// pins.Snapshot refuses has no hint: those tools cannot be accepted.
+	// --expect <digest>" (see writeAcceptHints). A server whose tools cannot be
+	// pinned has no hint: pin --accept would refuse those tools (see hint).
 	hints []acceptHint
 }
 
@@ -77,11 +76,20 @@ type acceptHint struct {
 	// truncated is true when at least one diff of the server, in the report, was
 	// cut at the size limit: the user did not see the full tool.
 	truncated bool
+	// ignored is true when --ignore dropped at least one pin finding of the
+	// server. The digest still covers that change, but the report shows no diff
+	// for it.
+	ignored bool
 }
 
-// hintCutNote ends the "To accept" line of a server that has a cut diff. It is
-// fixed text.
-const hintCutNote = " (the diff was cut: review the full tool first)"
+// The notes at the end of a "To accept" line. They are fixed text.
+const (
+	// hintCutNote ends the line of a server that has a cut diff.
+	hintCutNote = " (the diff was cut: review the full tool first)"
+	// hintIgnoredNote ends the line of a server with a pin finding that
+	// --ignore dropped.
+	hintIgnoredNote = " (--ignore hid some changes: run scan without it to review them first)"
+)
 
 // writeAcceptHints writes one line on w for each hint:
 //
@@ -90,21 +98,26 @@ const hintCutNote = " (the diff was cut: review the full tool first)"
 // The user reviews the diff of scan, then runs the line. "pin --accept" saves
 // the tools only when they have the same digest, so a server cannot show good
 // tools to scan and bad tools to pin (a time-of-check to time-of-use attack).
-// The server name comes from a config file. Before the colon it is escaped and
-// cut for the terminal. In the command it is quoted for the shell (see
-// shellArg), and when no safe quoting exists the line has no command. The
-// digest is made by mcpmoat from hex, so it needs no escape. When a diff of the
-// server was cut, the line ends with hintCutNote. writeAcceptHints returns the
+// configPath is the --config of the scan, or empty. pin must read the same
+// file, so the command holds "--config <configPath>" too.
+//
+// The server name and configPath come from untrusted sources. Before the colon
+// the name is escaped and cut for the terminal. The command holds them only
+// when they are bare shell words (see isBareShellWord), which every shell
+// (POSIX, PowerShell, cmd.exe) reads as plain text. Quotes would not be safe:
+// each shell escapes them in its own way. Else the line has no command and says
+// what to run. The digest is made by mcpmoat from hex, so it needs no escape.
+// The line ends with hintCutNote when a diff of the server was cut, and with
+// hintIgnoredNote when --ignore dropped a change. writeAcceptHints returns the
 // first write error: the caller must check it, like for the report.
-func writeAcceptHints(w io.Writer, hints []acceptHint) error {
+func writeAcceptHints(w io.Writer, hints []acceptHint, configPath string) error {
 	for _, h := range hints {
-		label := termsafe.QuoteCut(h.name, maxWarnNameRunes)
-		line := fmt.Sprintf("To accept %s: run pin --accept with this server name and --expect %s", label, h.digest)
-		if arg, ok := shellArg(h.name); ok {
-			line = fmt.Sprintf("To accept %s: mcpmoat pin --accept %s --expect %s", label, arg, h.digest)
-		}
+		line := "To accept " + cutName(h.name) + ": " + acceptCommand(h.name, configPath, h.digest)
 		if h.truncated {
 			line += hintCutNote
+		}
+		if h.ignored {
+			line += hintIgnoredNote
 		}
 		if _, err := io.WriteString(w, line+"\n"); err != nil {
 			return err
@@ -113,40 +126,34 @@ func writeAcceptHints(w io.Writer, hints []acceptHint) error {
 	return nil
 }
 
-// shellArg returns name as one argument that is safe to paste in a POSIX shell,
-// and true. It returns false when no safe form exists: the name is over
-// maxWarnNameRunes, or it has a rune that termsafe would escape (a control
-// character, a bidi or invisible rune, invalid UTF-8), so the user could not
-// see what they paste. A name that starts with a dash has no safe form either:
-// even in quotes, pin would read it as a flag.
-//
-// A name of plain ASCII characters stays bare. Any other safe name goes in
-// single quotes, where the shell reads every character as text. Each single
-// quote in the name closes the quotes, adds an escaped quote and opens the
-// quotes again (the four characters quote, backslash, quote, quote). This is
-// POSIX-shell quoting: cmd.exe does not read single quotes, and PowerShell
-// escapes a single quote by doubling it, so on Windows the user may need to
-// adapt the line.
-func shellArg(name string) (string, bool) {
-	if strings.HasPrefix(name, "-") ||
-		utf8.RuneCountInString(name) > maxWarnNameRunes || termsafe.Quote(name) != name {
-		return "", false
+// acceptCommand returns the part of a "To accept" line after the colon: the
+// command, or, when the name or configPath is not a bare shell word, the text
+// that says what to run.
+func acceptCommand(name, configPath, digest string) string {
+	config := ""
+	if configPath != "" {
+		config = " --config " + configPath
 	}
-	if isBareShellWord(name) {
-		return name, true
+	if !isBareShellWord(name, maxWarnNameRunes) || (configPath != "" && !isBareShellWord(configPath, maxWarnErrRunes)) {
+		if configPath != "" {
+			config = ", --config with the file of this scan,"
+		}
+		return "run pin --accept with this server name" + config + " and --expect " + digest
 	}
-	return "'" + strings.ReplaceAll(name, "'", `'\''`) + "'", true
+	return "mcpmoat pin --accept " + name + config + " --expect " + digest
 }
 
-// isBareShellWord reports whether name is not empty, does not start with a
-// dash, and holds only the ASCII characters [A-Za-z0-9._@/:+=-], which no
-// shell treats as special.
-func isBareShellWord(name string) bool {
-	if name == "" || name[0] == '-' {
+// isBareShellWord reports whether s is not empty, has at most maxLen bytes, and
+// holds only the ASCII characters [A-Za-z0-9._@/:+=-], which no shell treats as
+// special. It must not start with a dash, because pin would read a word such as
+// -config or -expect as a flag, or with "@", which PowerShell reads as a
+// variable (splatting).
+func isBareShellWord(s string, maxLen int) bool {
+	if s == "" || len(s) > maxLen || s[0] == '-' || s[0] == '@' {
 		return false
 	}
-	for i := range len(name) {
-		c := name[i]
+	for i := range len(s) {
+		c := s[i]
 		switch {
 		case c >= 'a' && c <= 'z', c >= 'A' && c <= 'Z', c >= '0' && c <= '9':
 		case strings.IndexByte("._@/:+=-", c) >= 0:
@@ -186,21 +193,28 @@ func (s *scanIgnores) ignored(k rules.FindingKey) (ignored, fileBlocked bool) {
 	return false, s.all.Ignored(k)
 }
 
-// loadPins reads the pins store, from pins.DefaultPath with the getenv and
-// homeDir of the cli. An error from the path or from pins.Load (a corrupt
-// file, an unsupported version) is returned. scan never replaces a bad store
-// with an empty one. scan calls loadPins before it starts any server, so a bad
-// file stops the scan before a stdio server runs (exit code 2).
-func (c *cli) loadPins() (*pins.Store, error) {
+// readPins reads the pins store, from pins.DefaultPath with the getenv and
+// homeDir of the cli. It returns false, after a message on stderr for the
+// command cmd ("scan" or "pin"), when the path is not known or the file cannot
+// be read (a corrupt file, an unsupported version). scan and pin never replace
+// a bad store with an empty one. Both read the store before they start any
+// server, so a bad file stops them before a stdio server runs (exit code 2).
+func (c *cli) readPins(cmd string) (*pins.Store, bool) {
 	path, err := pins.DefaultPath(c.getenv, c.homeDir)
 	if err != nil {
-		return nil, err
+		c.cmdErr(cmd, "cannot find the pins file", err)
+		return nil, false
 	}
-	return pins.Load(path)
+	store, err := pins.Load(path)
+	if err != nil {
+		c.cmdErr(cmd, "cannot read the pins file", err)
+		return nil, false
+	}
+	return store, true
 }
 
 // pinOutcomes checks the tools of the servers that were inspected against
-// the pins store (FR-11 and FR-12). It gets the store from loadPins, which
+// the pins store (FR-11 and FR-12). It gets the store from readPins, which
 // scan calls before the servers are inspected. It only reads the store and
 // writes nothing. The servers to pin for the first time are in the result:
 // savePinned writes them after the report is printed.
@@ -214,7 +228,6 @@ func (c *cli) pinOutcomes(store *pins.Store, outcomes []inspect.Outcome, ign *sc
 		c:       c,
 		ign:     ign,
 		store:   store,
-		check:   new(pins.Store),
 		handled: make(map[pins.Identity]bool),
 		failed:  make(map[pins.Identity]bool),
 		warned:  make(map[string]bool),
@@ -232,10 +245,6 @@ type pinner struct {
 	// store is the store that scan read before it started the servers. The
 	// pinner only reads it.
 	store *pins.Store
-	// check is an empty store that firstPin uses to run the rules of
-	// Store.Set on the tools of a new server. It is never saved: savePinned
-	// writes the pins into a store that it reads again.
-	check *pins.Store
 	res   pinReport
 	// handled holds the servers that this run already checked or pinned. Two
 	// servers with one identity should not happen, but if they do, the second
@@ -251,8 +260,9 @@ type pinner struct {
 	warned map[string]bool
 }
 
-// outcome checks one outcome. A server that was not inspected is a warning
-// only (see notInspected). For a server that was inspected:
+// outcome checks one outcome. A server that was not inspected is a warning,
+// and also a high MOAT-T2-004 finding when it is pinned (see notInspected). For
+// a server that was inspected:
 //   - one that is not in the store is pinned (see firstPin);
 //   - one that is in the store is compared with its pins (see compare);
 //   - a second server with the same identity is a MOAT-T2-004 finding, so that
@@ -273,7 +283,7 @@ func (p *pinner) outcome(o inspect.Outcome) {
 
 	tools := o.Result.Tools
 	if stored, found := p.store.Get(id); found {
-		p.compare(s, tools, stored)
+		p.compare(s, id, tools, stored)
 		return
 	}
 	p.firstPin(s, id, tools)
@@ -310,14 +320,10 @@ func (p *pinner) unverified(name, reason, severity string) {
 // cannot check can hide a rug pull, and "medium" when it is not pinned.
 func (p *pinner) unverifiedSeverity(id pins.Identity) string {
 	if _, pinned := p.store.Get(id); pinned {
-		return severityHigh
+		return string(rules.SeverityHigh)
 	}
 	return pins.KindUnverified.Severity()
 }
-
-// severityHigh is the severity word for a pin finding that makes scan exit
-// with 1 (see hasFailingFinding).
-const severityHigh = "high"
 
 // notInspected handles a server that failed, timed out or was refused. The
 // warning on stderr is already written (see warnNotInspected). A server that
@@ -330,7 +336,7 @@ const severityHigh = "high"
 // identity gives no second row (see failed).
 func (p *pinner) notInspected(s discover.Server, id pins.Identity) {
 	if _, pinned := p.store.Get(id); pinned && !p.handled[id] && !p.failed[id] {
-		p.unverified(s.Name, reasonNotInspected, severityHigh)
+		p.unverified(s.Name, reasonNotInspected, string(rules.SeverityHigh))
 		p.failed[id] = true
 	}
 }
@@ -338,17 +344,12 @@ func (p *pinner) notInspected(s discover.Server, id pins.Identity) {
 // firstPin records the tools of a server that is not in the store yet, so that
 // savePinned can pin them. The store is not changed here. scan prints "pinned N
 // tools for <server>" on stderr only after savePinned saved the server (see
-// printPinned). When pins.Snapshot or Store.Set refuses the tools, nothing is
+// printPinned). When the tools cannot be pinned (see pinnable), nothing is
 // recorded and the server gets a MOAT-T2-004 finding (not verified, medium: the
 // server was never pinned): a server that cannot be pinned must never pass in
 // silence.
 func (p *pinner) firstPin(s discover.Server, id pins.Identity, tools []inspect.Tool) {
-	snap, err := pins.Snapshot(tools)
-	if err == nil {
-		// Set checks the pins with the rules of the store file. The empty
-		// check store keeps the real store unchanged.
-		err = p.check.Set(id, snap)
-	}
+	snap, err := pinnable(id, tools)
 	if err != nil {
 		// The error text is not printed: it can name a tool. The row gets a
 		// fixed reason instead.
@@ -362,12 +363,15 @@ func (p *pinner) firstPin(s discover.Server, id pins.Identity, tools []inspect.T
 // Each change is one finding row. The rule ID comes from the change kind and
 // the severity from Change.Severity (a pinned name that cannot be verified is
 // high), not from the rule set, which does not hold the pin rules. A changed
-// or new tool also gets a diff. The store is never changed. When at least one
-// row is kept (not ignored), compare also records the digest for the
-// "--expect" hint (see hint). The hint says so when a kept diff was cut.
-func (p *pinner) compare(s discover.Server, tools []inspect.Tool, stored pins.ServerPins) {
-	kept := false      // true when at least one row of this server is not ignored
-	truncated := false // true when a kept diff of this server was cut
+// or new tool, and a pinned tool that cannot be verified, also gets a diff (see
+// hasDiff). The store is never changed. When at least one row is kept (not
+// ignored), compare also records the digest for the "--expect" hint (see
+// hint). The hint says so when a kept diff was cut, or when the ignore list
+// dropped a row: the digest covers that change, but the report shows no diff
+// for it.
+func (p *pinner) compare(s discover.Server, id pins.Identity, tools []inspect.Tool, stored pins.ServerPins) {
+	h := acceptHint{name: s.Name}
+	kept := false // true when at least one row of this server is not ignored
 	for _, ch := range pins.Compare(stored, tools) {
 		row := pinRow(ch.Kind, s.Name, ch.Tool, ch.Severity)
 		if ch.Kind == pins.KindUnverified {
@@ -375,39 +379,61 @@ func (p *pinner) compare(s discover.Server, tools []inspect.Tool, stored pins.Se
 			row.Related = ch.Reason
 		}
 		if !p.add(row) {
+			h.ignored = true
 			continue
 		}
 		kept = true
-		if hasDiff(ch) && ch.Truncated {
-			truncated = true
-		}
+		h.truncated = h.truncated || ch.Truncated
 		p.res.diffs = p.c.appendDiff("scan", p.res.diffs, s.Name, ch)
 	}
 	if kept {
-		p.hint(s.Name, tools, truncated)
+		p.hint(h, id, tools)
 	}
 }
 
-// hint records the pins.Digest of the tools that scan saw, so scan can print
-// the "--expect" line (see writeAcceptHints). truncated is true when a diff of
-// the server was cut. The error text is not printed. Tools that cannot be pinned
-// cannot be accepted either, so there is no hint for them.
-func (p *pinner) hint(server string, tools []inspect.Tool, truncated bool) {
-	if snap, err := pins.Snapshot(tools); err == nil {
-		p.res.hints = append(p.res.hints, acceptHint{name: server, digest: pins.Digest(snap), truncated: truncated})
+// hint records h with the pins.Digest of the tools that scan saw, so scan can
+// print the "--expect" line (see writeAcceptHints). Tools that cannot be pinned
+// (see pinnable) cannot be accepted either, so there is no hint for them. The
+// error text is not printed.
+func (p *pinner) hint(h acceptHint, id pins.Identity, tools []inspect.Tool) {
+	if snap, err := pinnable(id, tools); err == nil {
+		h.digest = pins.Digest(snap)
+		p.res.hints = append(p.res.hints, h)
 	}
+}
+
+// pinnable returns the pins of the tools of the server id. It returns an error
+// when pins.Snapshot refuses the tools, or when the pins break a rule of the
+// store file (pins.ValidateServer), so Store.Set would refuse them too. The
+// error text can name a tool: do not print it.
+func pinnable(id pins.Identity, tools []inspect.Tool) (pins.ServerPins, error) {
+	snap, err := pins.Snapshot(tools)
+	if err != nil {
+		return nil, err
+	}
+	if err := pins.ValidateServer(id, snap); err != nil {
+		return nil, err
+	}
+	return snap, nil
 }
 
 // diffOf returns the diff of one change for the report. The change must have a
 // diff (see hasDiff). server is the name that the report shows.
 func diffOf(server string, ch pins.Change) report.ToolDiff {
-	return report.ToolDiff{Server: server, Tool: ch.Tool, Diff: ch.Diff, New: ch.Kind == pins.KindNew}
+	return report.ToolDiff{
+		Server:     server,
+		Tool:       ch.Tool,
+		Diff:       ch.Diff,
+		New:        ch.Kind == pins.KindNew,
+		Unverified: ch.Kind == pins.KindUnverified,
+	}
 }
 
-// hasDiff reports whether the change is one that has a diff: a changed tool or
-// a new tool. The user must see the content of a new tool before they accept it.
+// hasDiff reports whether the change has a diff: a changed tool, a new tool, or
+// a pinned tool whose pin cannot be checked (see pins.Change.Diff). The user
+// must see the content of a tool before they accept it.
 func hasDiff(ch pins.Change) bool {
-	return ch.Kind == pins.KindChanged || ch.Kind == pins.KindNew
+	return ch.Diff != ""
 }
 
 // appendDiff adds the diff of ch to diffs and returns the result. A change
@@ -444,7 +470,7 @@ const (
 	reasonNotPinnable = "the tools cannot be pinned"
 )
 
-// snapshotReason maps an error of pins.Snapshot or Store.Set to a fixed reason
+// snapshotReason maps an error of pinnable to a fixed reason
 // text. It never returns the error text, which can name a tool.
 func snapshotReason(err error) string {
 	switch {
@@ -479,15 +505,16 @@ func (c *cli) printPinned(servers []pinnedServer) {
 		if p.tools == 1 {
 			noun = "tool"
 		}
-		fprintf(c.stderr, "mcpmoat scan: pinned %d %s for %s\n", p.tools, noun, termsafe.QuoteCut(p.name, maxWarnNameRunes))
+		fprintf(c.stderr, "mcpmoat scan: pinned %d %s for %s\n", p.tools, noun, cutName(p.name))
 	}
 }
 
 // warnNotInspected writes one line on stderr for each outcome that is not
 // inspect.StatusOK, for example
 // "mcpmoat scan: warning: server foo: timeout: inspect: no answer within 10s".
-// A server that was not inspected is a warning, not a finding and not exit
-// code 2 (FR-06, FR-16).
+// It writes the warning only, never exit code 2 (FR-06, FR-16). For a server
+// that is pinned, pinOutcomes also adds a high MOAT-T2-004 finding (see
+// notInspected).
 func (c *cli) warnNotInspected(outcomes []inspect.Outcome) {
 	for _, o := range outcomes {
 		if o.Status != inspect.StatusOK {
