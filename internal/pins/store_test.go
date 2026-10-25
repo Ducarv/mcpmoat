@@ -8,7 +8,6 @@ import (
 	"maps"
 	"os"
 	"path/filepath"
-	"runtime"
 	"slices"
 	"strings"
 	"testing"
@@ -165,22 +164,8 @@ func TestFirstRun(t *testing.T) {
 	}
 	storeTestMustSave(t, s)
 
-	if runtime.GOOS != "windows" {
-		fi, err := os.Stat(path)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if got := fi.Mode().Perm(); got != 0o600 {
-			t.Errorf("file mode = %o, want 600", got)
-		}
-		di, err := os.Stat(filepath.Dir(path))
-		if err != nil {
-			t.Fatal(err)
-		}
-		if got := di.Mode().Perm(); got != 0o700 {
-			t.Errorf("directory mode = %o, want 700", got)
-		}
-	}
+	pins.WantPerm(t, path, 0o600)
+	pins.WantPerm(t, filepath.Dir(path), 0o700)
 
 	// An empty store is a valid file.
 	storeTestMustLoad(t, path)
@@ -196,12 +181,13 @@ func TestLoadMissing(t *testing.T) {
 		{"missing directory", func(t *testing.T) string {
 			return filepath.Join(t.TempDir(), "no", "such", "pins.json")
 		}},
-		{"parent is a file", func(t *testing.T) string {
-			parent := filepath.Join(t.TempDir(), "file")
-			if err := os.WriteFile(parent, []byte("x"), 0o600); err != nil {
-				t.Fatal(err)
+		{"directory symlink with no pins file", func(t *testing.T) string {
+			root := t.TempDir()
+			link := filepath.Join(root, "link")
+			if err := os.Symlink(t.TempDir(), link); err != nil {
+				t.Skipf("symlinks not available: %v", err)
 			}
-			return filepath.Join(parent, "pins.json")
+			return filepath.Join(link, "pins.json")
 		}},
 	}
 	for _, tt := range tests {
@@ -215,14 +201,72 @@ func TestLoadMissing(t *testing.T) {
 	}
 }
 
+// TestLoadNotFirstRun checks the paths that safefile reports as not found
+// but that are not a first run: the real file is gone, so Load must not
+// return an empty store.
+func TestLoadNotFirstRun(t *testing.T) {
+	t.Parallel()
+	symlink := func(t *testing.T, target, link string) {
+		t.Helper()
+		if err := os.Symlink(target, link); err != nil {
+			t.Skipf("symlinks not available: %v", err)
+		}
+	}
+	tests := []struct {
+		name string
+		path func(t *testing.T) string
+		want string
+	}{
+		{"pins.json symlink with a missing target", func(t *testing.T) string {
+			path := storeTestPath(t)
+			symlink(t, "gone.json", path)
+			return path
+		}, "the target of the symlink is missing"},
+		{"directory symlink with a missing target", func(t *testing.T) string {
+			link := filepath.Join(t.TempDir(), "mcpmoat")
+			symlink(t, filepath.Join(t.TempDir(), "gone"), link)
+			return filepath.Join(link, "pins.json")
+		}, "is not a directory, or it is a symlink with a missing target"},
+		{"directory is a file", func(t *testing.T) string {
+			dir := filepath.Join(t.TempDir(), "mcpmoat")
+			if err := os.WriteFile(dir, []byte("x"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			return filepath.Join(dir, "pins.json")
+		}, "is not a directory, or it is a symlink with a missing target"},
+		{"a parent of the directory is a file", func(t *testing.T) string {
+			file := filepath.Join(t.TempDir(), "file")
+			if err := os.WriteFile(file, []byte("x"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			return filepath.Join(file, "mcpmoat", "pins.json")
+		}, "not a directory"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			path := tt.path(t)
+			s, err := pins.Load(path)
+			if err == nil || !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("Load() error = %v, want text %q", err, tt.want)
+			}
+			if s != nil {
+				t.Errorf("Load() store = %v, want nil", s)
+			}
+		})
+	}
+}
+
 func TestDefaultPath(t *testing.T) {
 	t.Parallel()
 	xdg := t.TempDir()
 	home := t.TempDir()
-	errNoHome := errors.New("no home")
 	homeAt := func(dir string) func() (string, error) {
 		return func() (string, error) { return dir, nil }
 	}
+	noHome := func() (string, error) { return "", errors.New("no home") }
+	inXDG := filepath.Join(xdg, "mcpmoat", "pins.json")
+	inHome := filepath.Join(home, ".config", "mcpmoat", "pins.json")
 
 	tests := []struct {
 		name    string
@@ -231,13 +275,16 @@ func TestDefaultPath(t *testing.T) {
 		want    string
 		wantErr string
 	}{
-		{name: "absolute XDG", xdg: xdg, homeDir: homeAt(home), want: filepath.Join(xdg, "mcpmoat", "pins.json")},
+		{name: "absolute XDG", xdg: xdg, homeDir: homeAt(home), want: inXDG},
 		// The home directory is not needed, so its error does not matter.
-		{name: "absolute XDG does not read home", xdg: xdg, homeDir: func() (string, error) { return "", errNoHome }, want: filepath.Join(xdg, "mcpmoat", "pins.json")},
-		{name: "relative XDG is ignored", xdg: filepath.Join("rel", "dir"), homeDir: homeAt(home), want: filepath.Join(home, ".config", "mcpmoat", "pins.json")},
-		{name: "empty XDG", xdg: "", homeDir: homeAt(home), want: filepath.Join(home, ".config", "mcpmoat", "pins.json")},
-		{name: "relative home", xdg: "", homeDir: homeAt(filepath.Join("relative", "dir")), wantErr: "the home directory for pins.json is not an absolute path"},
-		{name: "home error", xdg: "", homeDir: func() (string, error) { return "", errNoHome }, wantErr: "find the home directory for pins.json: no home"},
+		{name: "absolute XDG does not read home", xdg: xdg, homeDir: noHome, want: inXDG},
+		{name: "relative XDG is ignored", xdg: filepath.Join("rel", "dir"), homeDir: homeAt(home), want: inHome},
+		{name: "empty XDG", xdg: "", homeDir: homeAt(home), want: inHome},
+		{
+			name: "relative home", xdg: "", homeDir: homeAt(filepath.Join("relative", "dir")),
+			wantErr: "the home directory for pins.json is not an absolute path",
+		},
+		{name: "home error", xdg: "", homeDir: noHome, wantErr: "find the home directory for pins.json: no home"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -294,36 +341,35 @@ func TestLoadValid(t *testing.T) {
 	tests := []struct {
 		name    string
 		content string
-		id      pins.Identity
-		want    pins.ServerPins // nil means the server must be absent
+		want    pins.ServerPins // nil means idA must be absent
 	}{
-		{"empty servers", `{"version":1,"servers":[]}`, idA, nil},
-		{"trailing whitespace", "{\"version\":1,\"servers\":[]}\n\n  ", idA, nil},
+		{"empty servers", `{"version":1,"servers":[]}`, nil},
+		{"trailing whitespace", "{\"version\":1,\"servers\":[]}\n\n  ", nil},
 		{
 			"no tools",
 			`{"version":1,"servers":[{"client":"claude-code","source":"/home/u/.claude.json","project_path":"","name":"alpha","tools":{}}]}`,
-			idA, storeTestPins(),
+			storeTestPins(),
 		},
 		{
 			"one server",
 			`{"version":1,"servers":[{"client":"claude-code","source":"/home/u/.claude.json","project_path":"","name":"alpha","tools":{"t":"h"}}]}`,
-			idA, storeTestPins("t", "h"),
+			storeTestPins("t", "h"),
 		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			s := storeTestMustLoad(t, storeTestWrite(t, tt.content))
-			if got, ok := s.Get(tt.id); ok && got == nil {
-				t.Error("Get() = nil map, want a non-nil map")
-			}
+			got, ok := s.Get(idA)
 			if tt.want == nil {
-				if _, ok := s.Get(tt.id); ok {
+				if ok {
 					t.Error("Get() ok = true, want false")
 				}
 				return
 			}
-			storeTestWantPins(t, s, tt.id, tt.want)
+			if !ok || got == nil || !maps.Equal(got, tt.want) {
+				t.Errorf("Get() = %v, %v; want a non-nil %v", got, ok, tt.want)
+			}
 		})
 	}
 }
@@ -673,6 +719,17 @@ func TestSetRefusesInvalid(t *testing.T) {
 	}
 }
 
+func TestLoadServerTooLarge(t *testing.T) {
+	t.Parallel()
+	// Load applies the cap of one server, as Set does.
+	name := strings.Repeat("a", pins.MaxServerSize)
+	content := `{"version":1,"servers":[{"client":"c","source":"s","project_path":"","name":"n","tools":{"` + name + `":"h"}}]}`
+	_, err := pins.Load(storeTestWrite(t, content))
+	if err == nil || !strings.Contains(err.Error(), "servers[0]: server pins are") {
+		t.Fatalf("Load() error = %v, want the size error for servers[0]", err)
+	}
+}
+
 func TestSetRefusalKeepsOldPins(t *testing.T) {
 	t.Parallel()
 	s := storeTestMustLoad(t, storeTestPath(t))
@@ -776,21 +833,6 @@ func TestSaveSizeLimit(t *testing.T) {
 			t.Errorf("directory has %d entries, want only pins.json", len(entries))
 		}
 	})
-}
-
-func TestLoadDanglingSymlink(t *testing.T) {
-	t.Parallel()
-	path := storeTestPath(t)
-	if err := os.Symlink("gone.json", path); err != nil {
-		t.Skipf("symlinks not available: %v", err)
-	}
-	s, err := pins.Load(path)
-	if err == nil || !strings.Contains(err.Error(), "the target of the symlink is missing") {
-		t.Fatalf("Load() error = %v, want the missing-target error", err)
-	}
-	if s != nil {
-		t.Errorf("Load() store = %v, want nil", s)
-	}
 }
 
 func TestSymlinkedConfigDir(t *testing.T) {

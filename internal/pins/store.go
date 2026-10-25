@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"maps"
 	"os"
 	"path/filepath"
@@ -37,7 +38,8 @@ var ErrUnsupportedVersion = errors.New("unsupported pins.json version")
 
 // Identity names one MCP server in the pins store.
 //
-// The fields hold the client, the config file and the server name only. They
+// The fields hold the client, the config file, the project path and the
+// server name only. They
 // never hold a secret: no args, URL, env, headers or command. ProjectPath is
 // empty for a global server.
 //
@@ -71,15 +73,15 @@ type ServerPins map[string]string
 type Store struct {
 	path string
 
-	mu sync.Mutex
-	// servers is keyed by server identity.
+	mu      sync.Mutex // guards servers
 	servers map[Identity]ServerPins
 }
 
 // fileFormat is the shape of pins.json, version 1. Every key is required and
 // must not be null. encoding/json/v2 has no option for a required key, so the
 // fields are pointers: a missing key or a null leaves the pointer nil, and
-// Load refuses it.
+// Load refuses it. Version is a plain int, because Load checks it first with
+// its own decode (checkVersion).
 type fileFormat struct {
 	Version int           `json:"version"`
 	Servers *[]fileServer `json:"servers"`
@@ -126,12 +128,14 @@ func DefaultPath(getenv func(string) string, homeDir func() (string, error)) (st
 //
 // A missing file (or a missing directory) is the first run: Load returns an
 // empty Store that saves to path. Any other problem is an error, also a
-// missing or null key, and Load never replaces a bad file with an empty store,
-// because that would pin a poisoned server as trusted. The errors name the path and the position of the
-// problem, and never hold file content. A file with a newer format version
-// gives an error that wraps ErrUnsupportedVersion. A pins.json symlink is
-// refused (safefile.ErrOutsideRoot) when it is absolute or leaves its
-// directory, and it is an error when its target is missing. Save replaces a
+// missing or null key, and Load never replaces a bad file with an empty
+// store, because that would pin a poisoned server as trusted. The errors name
+// the path and the position of the problem, and never hold file content. A
+// file with a newer format version gives an error that wraps
+// ErrUnsupportedVersion. A pins.json symlink is refused
+// (safefile.ErrOutsideRoot) when it is absolute or leaves its directory. A
+// pins.json symlink or a directory symlink with a missing target, and a
+// directory path that is not a directory, are errors too. Save replaces a
 // symlink with a regular file.
 func Load(path string) (*Store, error) {
 	s := &Store{path: path, servers: make(map[Identity]ServerPins)}
@@ -141,35 +145,13 @@ func Load(path string) (*Store, error) {
 		return nil, fmt.Errorf("read %s: %w", path, err)
 	}
 	if !found {
-		// safefile reports a symlink with a missing target as not found. Then
-		// the real file is gone, which is not a first run, and Save would
-		// replace the link.
-		if fi, err := os.Lstat(path); err == nil && fi.Mode()&os.ModeSymlink != 0 {
-			return nil, fmt.Errorf("read %s: the target of the symlink is missing", path)
+		if err := checkFirstRun(path); err != nil {
+			return nil, err
 		}
 		return s, nil
 	}
-
-	// Read the version first with a loose decode. A future version may change
-	// the rest of the shape, and the user must then see the version error and
-	// not a shape error. This holds while the top level stays an object with an
-	// integer "version", so a format change must keep that. json.Unmarshal
-	// (encoding/json/v2) rejects trailing data, duplicate keys and invalid
-	// UTF-8, and it matches key names with their exact case.
-	var probe struct {
-		Version *int `json:"version"`
-	}
-	if err := json.Unmarshal(data, &probe); err != nil {
-		return nil, fmt.Errorf("parse %s: %s", path, describeJSONError(err))
-	}
-	switch {
-	case probe.Version == nil:
-		return nil, fmt.Errorf("parse %s: version field is missing", path)
-	case *probe.Version < 1:
-		return nil, fmt.Errorf("parse %s: invalid version %d", path, *probe.Version)
-	case *probe.Version > CurrentVersion:
-		return nil, fmt.Errorf("%s has version %d, newer than this mcpmoat supports (%d); upgrade mcpmoat: %w",
-			path, *probe.Version, CurrentVersion, ErrUnsupportedVersion)
+	if err := checkVersion(path, data); err != nil {
+		return nil, err
 	}
 
 	// Strict decode: an unknown field is an error, so a typo or a field from a
@@ -199,6 +181,53 @@ func Load(path string) (*Store, error) {
 	return s, nil
 }
 
+// checkFirstRun returns an error when safefile did not find the pins file but
+// the path is not simply missing. safefile reports a symlink with a missing
+// target, and a directory path that is not a directory, as not found. Then the
+// real file is gone, which is not a first run, and Save would replace the link
+// or fail after the scan.
+func checkFirstRun(path string) error {
+	if fi, err := os.Lstat(path); err == nil && fi.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf("read %s: the target of the symlink is missing", path)
+	}
+	dir := filepath.Dir(path)
+	if _, err := os.Lstat(dir); err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return nil // The directory is missing too: a first run.
+		}
+		return fmt.Errorf("read %s: %w", path, err)
+	}
+	if fi, err := os.Stat(dir); err != nil || !fi.IsDir() {
+		return fmt.Errorf("read %s: %s is not a directory, or it is a symlink with a missing target", path, dir)
+	}
+	return nil
+}
+
+// checkVersion reads the version first with a loose decode. A future version
+// may change the rest of the shape, and the user must then see the version
+// error and not a shape error. This holds while the top level stays an object
+// with an integer "version", so a format change must keep that.
+// json.Unmarshal (encoding/json/v2) rejects trailing data, duplicate keys and
+// invalid UTF-8, and it matches key names with their exact case.
+func checkVersion(path string, data []byte) error {
+	var probe struct {
+		Version *int `json:"version"`
+	}
+	if err := json.Unmarshal(data, &probe); err != nil {
+		return fmt.Errorf("parse %s: %s", path, describeJSONError(err))
+	}
+	switch {
+	case probe.Version == nil:
+		return fmt.Errorf("parse %s: version field is missing", path)
+	case *probe.Version < 1:
+		return fmt.Errorf("parse %s: invalid version %d", path, *probe.Version)
+	case *probe.Version > CurrentVersion:
+		return fmt.Errorf("%s has version %d, newer than this mcpmoat supports (%d); upgrade mcpmoat: %w",
+			path, *probe.Version, CurrentVersion, ErrUnsupportedVersion)
+	}
+	return nil
+}
+
 // Get returns a copy of the pins of the server id. The bool is false when the
 // store has no entry for the server. An entry with an empty map is a server
 // that was pinned with no tools. Changing the returned map does not change
@@ -219,22 +248,21 @@ func (s *Store) Get(id Identity) (ServerPins, bool) {
 // not write the file: call Save.
 //
 // Set refuses a server that Load would refuse: an empty server name, an empty
-// tool name, an empty hash or text that is not valid UTF-8. It also refuses a
-// server whose entry is larger than 256 KiB as compact JSON. Then the store
-// does not change, and the caller can skip that one server and still save the
-// others. The errors hold no tool names, because the server chose them.
+// tool name, an empty hash, text that is not valid UTF-8, or an entry larger
+// than 256 KiB as compact JSON. Then the store does not change, and the
+// caller can still save the other servers. The errors hold no tool names,
+// because the server chose them, and no server context: the caller adds it.
+//
+// The server chose the data that Set refuses, so a hostile server can make
+// itself impossible to pin. The caller must report a refused server (for
+// example as a finding), never skip it silently: a server that is never
+// pinned looks new on each run, and its changes are never reported.
 func (s *Store) Set(id Identity, p ServerPins) error {
-	if err := validateServer(id, p); err != nil {
+	// Check the copy that is stored, so a caller that changes p later cannot
+	// change what was checked.
+	c := cloneOrEmpty(p)
+	if err := validateServer(id, c); err != nil {
 		return err
-	}
-	entry, err := json.Marshal(newFileServer(id, p))
-	if err != nil {
-		// Not wrapped: the error text of encoding/json can hold a tool name.
-		return errors.New("encode server pins: the pins cannot be encoded as JSON")
-	}
-	if len(entry) > maxServerSize {
-		return fmt.Errorf("server pins are %d bytes as JSON, larger than the %d byte limit",
-			len(entry), maxServerSize)
 	}
 
 	s.mu.Lock()
@@ -244,7 +272,7 @@ func (s *Store) Set(id Identity, p ServerPins) error {
 	if s.servers == nil {
 		s.servers = make(map[Identity]ServerPins)
 	}
-	s.servers[id] = cloneOrEmpty(p)
+	s.servers[id] = c
 	return nil
 }
 
@@ -263,6 +291,8 @@ func cloneOrEmpty(p ServerPins) ServerPins {
 //
 // Load and Set check each server, so Save checks only the whole file: it
 // refuses data larger than the size limit of Load, and the old file stays.
+// Save writes indented JSON, so the limit applies to that form. A compact file
+// near the limit, for example from a hand edit, loads but cannot be saved.
 // Save of a zero-value Store is an error, because it has no path: make a
 // Store with Load.
 func (s *Store) Save() error {
@@ -324,8 +354,9 @@ func compareIdentity(a, b Identity) int {
 	)
 }
 
-// validateServer checks the rules that Load and Set share. The errors do not
-// hold tool names, because a server that we do not trust chose them.
+// validateServer checks the rules that Load and Set share, also the size cap
+// of one server (maxServerSize). The errors do not hold tool names, because a
+// server that we do not trust chose them.
 func validateServer(id Identity, tools ServerPins) error {
 	if id.Name == "" {
 		return errors.New("the server name is empty")
@@ -350,6 +381,15 @@ func validateServer(id Identity, tools ServerPins) error {
 		if !utf8.ValidString(hash) {
 			return errors.New("a tool hash is not valid UTF-8")
 		}
+	}
+	entry, err := json.Marshal(newFileServer(id, tools))
+	if err != nil {
+		// Not wrapped: the error text of encoding/json can hold a tool name.
+		return errors.New("the server pins cannot be encoded as JSON")
+	}
+	if len(entry) > maxServerSize {
+		return fmt.Errorf("server pins are %d bytes as JSON, larger than the %d byte limit",
+			len(entry), maxServerSize)
 	}
 	return nil
 }

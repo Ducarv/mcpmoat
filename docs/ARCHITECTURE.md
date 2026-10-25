@@ -196,9 +196,10 @@ are planned.
   env, headers or a command.
 - Read, change and write: `Load` reads the file through `safefile` and fails closed. A bad file is
   an error and never an empty store, because an empty store would hide a rug pull. `Set` checks one
-  server and refuses it on its own, with a size cap for each server, so the caller can skip one
-  hostile server and still save the others. `Save` writes atomically (temp file, mode `0600`, sync,
-  rename). A new directory gets mode `0700`. The rules, the caps and the error texts are in the doc
+  server and refuses it on its own, with a size cap for each server, so the caller can still save
+  the others. The server chose the data that `Set` refuses, so the caller must report a refused
+  server, never skip it silently: a server that is never pinned looks new on each run, and its
+  changes are never reported. `Save` writes atomically (temp file, mode `0600`, sync, rename). A new directory gets mode `0700`. The rules, the caps and the error texts are in the doc
   comments of `Load`, `Set` and `Save` in `internal/pins/store.go`.
 
 Known limits:
@@ -214,7 +215,8 @@ Known limits:
   holds only names and hashes and has mode `0600`. mcpmoat does not remove old temp files, because
   one can belong to a parallel run that is still writing.
 - A missing `pins.json` looks like a first run, so a deleted file resets the pins without an alert.
-  A `pins.json` symlink whose target is missing is an error, not a first run.
+  A `pins.json` symlink or a directory symlink whose target is missing, and a directory path that is
+  not a directory, are errors, not a first run.
 - `Load` follows a relative `pins.json` symlink that stays inside the directory. It refuses an
   absolute symlink, even one that points back inside, and one that leaves the directory
   (`safefile.ErrOutsideRoot`). `Save` replaces a symlink with a regular file.
@@ -224,6 +226,8 @@ Known limits:
   servers. One project config can declare that many servers, but a server from an untrusted project
   file starts only with `AllowUntrusted`. The store cannot tell a hostile server from a real one, so
   the policy for a full file (which servers to keep) belongs to the caller, #60.
+- `Save` writes indented JSON, and the 8 MiB cap applies to that form. A compact file near the cap,
+  for example from a hand edit, loads but cannot be saved.
 
 ## Where untrusted text is escaped
 

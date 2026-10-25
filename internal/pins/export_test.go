@@ -5,3 +5,6 @@ const (
 	MaxFileSize   = maxFileSize
 	MaxServerSize = maxServerSize
 )
+
+// WantPerm checks the mode bits of a path (see wantPerm in atomic_test.go).
+var WantPerm = wantPerm

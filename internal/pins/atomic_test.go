@@ -24,10 +24,16 @@ func dirNames(t *testing.T, dir string) []string {
 	return names
 }
 
-// readFile reads path. It is the one place that carries the gosec exception.
-func readFile(t *testing.T, path string) ([]byte, error) {
+// readFile reads path and fails the test on an error. It is the one place
+// that carries the gosec exception. The hooks run on the test goroutine, so
+// they can call it too: t.Fatal there still runs the cleanup in writeFile.
+func readFile(t *testing.T, path string) []byte {
 	t.Helper()
-	return os.ReadFile(path) //nolint:gosec // G304: the test builds path under t.TempDir().
+	data, err := os.ReadFile(path) //nolint:gosec // G304: the test builds path under t.TempDir().
+	if err != nil {
+		t.Fatalf("ReadFile(%q) error = %v", path, err)
+	}
+	return data
 }
 
 // wantPerm fails the test if the mode bits of path differ from want.
@@ -57,10 +63,7 @@ func TestWriteFileAtomicCreatesDirAndFile(t *testing.T) {
 		t.Fatalf("writeFileAtomic() error = %v", err)
 	}
 
-	got, err := readFile(t, path)
-	if err != nil {
-		t.Fatalf("ReadFile() error = %v", err)
-	}
+	got := readFile(t, path)
 	if !bytes.Equal(got, data) {
 		t.Errorf("content = %q, want %q", got, data)
 	}
@@ -117,10 +120,7 @@ func TestWriteFileAtomicReplacesExistingFile(t *testing.T) {
 				t.Fatalf("writeFileAtomic() error = %v", err)
 			}
 
-			got, err := readFile(t, path)
-			if err != nil {
-				t.Fatalf("ReadFile() error = %v", err)
-			}
+			got := readFile(t, path)
 			if !bytes.Equal(got, tt.newData) {
 				t.Errorf("content = %q, want %q", got, tt.newData)
 			}
@@ -183,10 +183,7 @@ func TestWriteFileAtomicHookFailure(t *testing.T) {
 					t.Errorf("temp file %q still exists (Stat error = %v)", tmp, statErr)
 				}
 				if existing {
-					got, readErr := readFile(t, path)
-					if readErr != nil {
-						t.Fatalf("ReadFile() error = %v", readErr)
-					}
+					got := readFile(t, path)
 					if !bytes.Equal(got, oldData) {
 						t.Errorf("target = %q, want old content %q", got, oldData)
 					}
@@ -261,20 +258,12 @@ func TestWriteFileAtomicTempFileState(t *testing.T) {
 			if tmp == path {
 				t.Error("temp path equals target path")
 			}
-			got, err := readFile(t, tmp)
-			if err != nil {
-				t.Errorf("ReadFile(tmp) error = %v", err)
-				return nil
-			}
+			got := readFile(t, tmp)
 			if !bytes.Equal(got, data) {
 				t.Errorf("temp content = %q, want the full data %q", got, data)
 			}
 			// The reader still sees the old file until the rename.
-			old, err := readFile(t, path)
-			if err != nil {
-				t.Errorf("ReadFile(target) error = %v", err)
-				return nil
-			}
+			old := readFile(t, path)
 			if !bytes.Equal(old, oldData) {
 				t.Errorf("target = %q before rename, want old content %q", old, oldData)
 			}
@@ -287,10 +276,7 @@ func TestWriteFileAtomicTempFileState(t *testing.T) {
 		if !called {
 			t.Fatal("beforeRename was not called")
 		}
-		got, err := readFile(t, path)
-		if err != nil {
-			t.Fatalf("ReadFile() error = %v", err)
-		}
+		got := readFile(t, path)
 		if !bytes.Equal(got, data) {
 			t.Errorf("target = %q after rename, want %q", got, data)
 		}
@@ -320,10 +306,7 @@ func TestWriteFileAtomicParentIsFile(t *testing.T) {
 			if err == nil {
 				t.Fatal("writeFileAtomic() error = nil, want error when the parent is a regular file")
 			}
-			got, readErr := readFile(t, blocker)
-			if readErr != nil {
-				t.Fatalf("ReadFile() error = %v", readErr)
-			}
+			got := readFile(t, blocker)
 			if string(got) != "not a dir" {
 				t.Errorf("blocker file = %q, want it unchanged", got)
 			}
