@@ -364,6 +364,60 @@ func TestRunDoesNotChangeInput(t *testing.T) {
 	}
 }
 
+// TestRunOutcomeIndex checks that Outcome.Index points back to the input
+// server, for unsorted input and for every way an Outcome is made: a success, a
+// failure, a panic and a server that is not started because ctx is done. Two
+// servers that are equal in every sort field (they differ only in Untrusted)
+// must keep their input order and get their own index.
+func TestRunOutcomeIndex(t *testing.T) {
+	t.Parallel()
+
+	twinA, twinB := fakeServer("twin"), fakeServer("twin")
+	twinA.Untrusted = false
+	twinB.Untrusted = true
+	servers := []discover.Server{
+		fakeServer("zulu"),
+		twinB,
+		fakeServer("alpha"),
+		twinA,
+		fakeServer("mike"),
+		fakeServer("bravo"),
+	}
+	insp := &fakeInspector{byName: map[string]fakeBehaviour{
+		"mike":  failNow(errFake),
+		"bravo": panicWith("boom"),
+	}}
+	cancelled, cancel := context.WithCancel(t.Context())
+	cancel()
+
+	tests := []struct {
+		name string
+		ctx  context.Context
+	}{
+		{name: "inspected", ctx: t.Context()},
+		{name: "ctx done", ctx: cancelled},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			outs := mustRun(tt.ctx, t, servers, inspect.Options{Timeout: time.Second, Concurrency: 3}, insp)
+			seen := make(map[int]bool)
+			for i, o := range outs {
+				if o.Index < 0 || o.Index >= len(servers) {
+					t.Fatalf("outcome %d has Index %d, want 0 to %d", i, o.Index, len(servers)-1)
+				}
+				if seen[o.Index] {
+					t.Errorf("outcome %d repeats Index %d", i, o.Index)
+				}
+				seen[o.Index] = true
+				if !reflect.DeepEqual(o.Server, servers[o.Index]) {
+					t.Errorf("outcome %d (Index %d) has server %q, want %q", i, o.Index, o.Server.Name, servers[o.Index].Name)
+				}
+			}
+		})
+	}
+}
+
 func TestRunConcurrencyBound(t *testing.T) {
 	t.Parallel()
 

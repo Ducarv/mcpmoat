@@ -196,6 +196,85 @@ func TestPinOutcomesUnverifiedSeverity(t *testing.T) {
 	}
 }
 
+// TestPinOutcomesUnverifiedRemediation checks the Fix text of each MOAT-T2-004
+// row. A row that scan makes itself gets its own fixed text, and the text does
+// not tell the user to run "pin --accept": scan prints no "To accept" line for
+// these rows, and pin --accept would refuse them. A row from pins.Compare keeps
+// the text of the kind.
+func TestPinOutcomesUnverifiedRemediation(t *testing.T) {
+	t.Parallel()
+
+	srv := discover.Server{Name: "srv", Client: discover.ClientClaudeCode, Source: "/cfg/mcp.json"}
+	relative := discover.Server{Name: "srv", Client: discover.ClientClaudeCode, Source: "cfg/mcp.json"}
+	tools := []inspect.Tool{mkTool("a", "Add.")}
+	dup := []inspect.Tool{mkTool("a", "One."), mkTool("a", "Two.")}
+	okWith := func(s discover.Server, ts []inspect.Tool) inspect.Outcome {
+		return inspect.Outcome{Server: s, Status: inspect.StatusOK, Result: inspect.Result{Tools: ts}}
+	}
+	failed := inspect.Outcome{Server: srv, Status: inspect.StatusFailed, Err: errors.New("boom")}
+
+	tests := []struct {
+		name      string
+		pinBefore bool
+		outcomes  []inspect.Outcome
+		want      string
+		// scanMade is true for a row that scan makes itself.
+		scanMade bool
+	}{
+		{
+			name:     "listed twice",
+			outcomes: []inspect.Outcome{okWith(srv, tools), okWith(srv, tools)},
+			want:     "Remove the duplicate entry of this server from the config file, then run mcpmoat scan again.",
+			scanMade: true,
+		},
+		{
+			name:     "relative config path",
+			outcomes: []inspect.Outcome{okWith(relative, tools)},
+			want:     "Run mcpmoat scan again with an absolute --config path, or from a working directory that mcpmoat can read.",
+			scanMade: true,
+		},
+		{
+			name:      "pinned server not inspected",
+			pinBefore: true,
+			outcomes:  []inspect.Outcome{failed},
+			want:      "Find out why the server could not be inspected (see its status in the summary), fix it, then run mcpmoat scan again.",
+			scanMade:  true,
+		},
+		{
+			name:     "tools cannot be pinned",
+			outcomes: []inspect.Outcome{okWith(srv, dup)},
+			want:     "Do not use this server until its tools are valid and have unique names, then run mcpmoat scan again.",
+			scanMade: true,
+		},
+		{
+			name:      "row from pins.Compare keeps the text of the kind",
+			pinBefore: true,
+			outcomes:  []inspect.Outcome{okWith(srv, dup)},
+			want:      pins.KindUnverified.Remediation(),
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			e := newPinEnv(t, oneServer("srv"))
+			c, store := storeFor(t, e, tt.pinBefore, srv, tools)
+
+			pr := c.pinOutcomes(store, tt.outcomes, &scanIgnores{})
+
+			if len(pr.rows) != 1 || pr.rows[0].RuleID != "MOAT-T2-004" {
+				t.Fatalf("rows = %+v, want one MOAT-T2-004 row", pr.rows)
+			}
+			got := pr.rows[0].Remediation
+			if got != tt.want {
+				t.Errorf("Remediation = %q, want %q", got, tt.want)
+			}
+			if tt.scanMade && strings.Contains(got, "pin --accept") {
+				t.Errorf("Remediation = %q, must not point to pin --accept", got)
+			}
+		})
+	}
+}
+
 // TestScanPinnedNotInspectedExit checks that scan exits 1 for a pinned server
 // that was not inspected, shows the high row in the report and the failure in
 // the SUMMARY block (not on stderr), and that --ignore of the rule is the only

@@ -140,11 +140,14 @@ const (
 
 // The fixed remediation texts of the pin changes. They name the command that
 // scan prints in its "To accept" line, and they hold no text from a server.
+// remediationUnverified says "if scan prints a To accept line" because scan
+// prints none when the tools cannot be pinned (a duplicate or empty name, or
+// invalid tool data), and pin --accept would refuse those tools.
 const (
 	remediationChanged    = "Read the diff, and if the change is expected, run mcpmoat pin --accept <server> --expect <digest>; if not, remove the server or do not use it."
 	remediationNew        = "Read the diff to see what the new tool does, and if the tool is expected, run mcpmoat pin --accept <server> --expect <digest>; if not, remove the server or do not use it."
 	remediationRemoved    = "Check that the server dropped the tool on purpose, and if the change is expected, run mcpmoat pin --accept <server> --expect <digest>; if not, remove the server or do not use it."
-	remediationUnverified = "Read the reason and the diff to see why the tool cannot be checked, and if the tools are as expected, run mcpmoat pin --accept <server> --expect <digest>; if not, remove the server or do not use it."
+	remediationUnverified = "Read the reason and the diff to see why the tool cannot be checked, and if scan prints a \"To accept\" line for the server and the tools are as expected, run that command; if not, remove the server or do not use it."
 	remediationUnknown    = "Read the change and review the tools of the server, and remove the server or do not use it if you do not trust the change."
 )
 

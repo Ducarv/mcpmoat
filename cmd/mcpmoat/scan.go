@@ -268,13 +268,13 @@ const configErrorHint = "mcpmoat scan: a config file has a problem; " +
 // reportScan runs the config rules on the servers of res, with the ignore list
 // ignore. When setup.connect is not nil, it also inspects the servers and
 // checks their pins (see inspectAndPin). configPath is the --config value, or
-// empty. It prints the report on stdout (see writeScanReport), and the
-// file problems and the other warnings on stderr, and returns the exit code (the
+// empty. It prints the report on stdout (see writeScanReport), and the file
+// problems and the other warnings on stderr, and returns the exit code (the
 // contract is in the usage text, see usage in cli.go). The status of each
 // server and the warnings of its inspection are part of the report on stdout
-// (the summary), not warnings on stderr. They never change the exit code. When the ignore list dropped at
-// least one finding, it prints one line on stderr after the report, with the
-// rule IDs and their counts (see printIgnored).
+// (the summary), not warnings on stderr. They never change the exit code. When
+// the ignore list dropped at least one finding, it prints one line on stderr
+// after the report, with the rule IDs and their counts (see printIgnored).
 //
 // The pin findings are merged with the config findings before the table is
 // written, so one table holds them all and hasFailingFinding sees them all.

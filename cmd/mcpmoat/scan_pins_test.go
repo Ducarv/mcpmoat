@@ -1202,70 +1202,68 @@ func TestScanPinsCanceledBeforeInspection(t *testing.T) {
 	}
 }
 
-// TestServerStatusesSameIdentity checks the matching of outcomes to servers
-// when two servers share the identity (client, config file, project and name)
-// and differ in another field, here the command. Each outcome must go to the
-// server that is equal in every field, whatever the order is, and a server with
-// no outcome stays "not inspected".
-func TestServerStatusesSameIdentity(t *testing.T) {
+// TestServerStatusesByIndex checks the matching of outcomes to servers. An
+// outcome goes to the server at its index, whatever the order of the outcomes
+// is, also when servers are equal in every field. A server with no outcome stays
+// "not inspected".
+func TestServerStatusesByIndex(t *testing.T) {
 	t.Parallel()
 
-	newServer := func(command string) discover.Server {
-		return discover.Server{
-			Name: "dup", Client: discover.ClientClaudeCode, Scope: discover.ScopeGlobal,
-			Source: "/home/u/.claude.json", Command: command,
-		}
+	srv := discover.Server{
+		Name: "dup", Client: discover.ClientClaudeCode, Scope: discover.ScopeGlobal,
+		Source: "/home/u/.claude.json", Command: "run",
 	}
-	a, b, other := newServer("run-a"), newServer("run-b"), newServer("run-other")
-	outcome := func(s discover.Server, tools int) outcomeStatus {
+	outcome := func(index, tools int) outcomeStatus {
 		return outcomeStatus{
-			server: s,
-			status: report.ServerStatus{ServerRef: report.NewServerRef(s), Status: report.StatusOK, Tools: tools},
+			index:  index,
+			status: report.ServerStatus{ServerRef: report.NewServerRef(srv), Status: report.StatusOK, Tools: tools},
 		}
 	}
 	tests := []struct {
 		name     string
-		servers  []discover.Server
+		servers  int
 		statuses []outcomeStatus
 		want     []string // "status/tools/findings" of each server
 	}{
 		{
 			name:     "outcomes in the opposite order",
-			servers:  []discover.Server{a, b},
-			statuses: []outcomeStatus{outcome(b, 2), outcome(a, 1)},
+			servers:  2,
+			statuses: []outcomeStatus{outcome(1, 2), outcome(0, 1)},
 			want:     []string{"ok/1/1", "ok/2/1"},
 		},
 		{
 			name:     "server with no outcome",
-			servers:  []discover.Server{a, b},
-			statuses: []outcomeStatus{outcome(b, 2)},
+			servers:  2,
+			statuses: []outcomeStatus{outcome(1, 2)},
 			want:     []string{"not inspected/0/1", "ok/2/1"},
 		},
 		{
-			name:     "outcome for a server that is not in the list",
-			servers:  []discover.Server{a},
-			statuses: []outcomeStatus{outcome(other, 3)},
-			want:     []string{"not inspected/0/1"},
+			name:     "equal servers get one outcome each",
+			servers:  2,
+			statuses: []outcomeStatus{outcome(0, 1), outcome(1, 5)},
+			want:     []string{"ok/1/1", "ok/5/1"},
 		},
 		{
-			name:     "equal servers use one outcome each",
-			servers:  []discover.Server{a, a},
-			statuses: []outcomeStatus{outcome(a, 1)},
-			want:     []string{"ok/1/1", "not inspected/0/1"},
+			name:     "index outside the servers is skipped",
+			servers:  1,
+			statuses: []outcomeStatus{outcome(3, 3), outcome(-1, 4)},
+			want:     []string{"not inspected/0/1"},
 		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 
-			pr := pinReport{statuses: tt.statuses}
-			configFindings := make([]int, len(tt.servers))
-			for i := range configFindings {
+			servers := make([]discover.Server, tt.servers)
+			configFindings := make([]int, tt.servers)
+			for i := range servers {
+				servers[i] = srv
+				// Each server has one config finding, and serverStatuses adds
+				// it to the findings of the outcome (none here).
 				configFindings[i] = 1
 			}
-			// Each server has one config finding, and serverStatuses adds it
-			// to the findings of the outcome (none here).
-			got := pr.serverStatuses(tt.servers, configFindings)
+			pr := pinReport{statuses: tt.statuses}
+			got := pr.serverStatuses(servers, configFindings)
 			if len(got) != len(tt.want) {
 				t.Fatalf("serverStatuses() returned %d entries, want %d", len(got), len(tt.want))
 			}

@@ -302,3 +302,39 @@ func TestWriteSummaryWriteError(t *testing.T) {
 		}
 	})
 }
+
+// TestWarningText checks the one-line text of each inspection warning: keys
+// and fixed names only, escaped.
+func TestWarningText(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		w    inspect.Warning
+		want string
+	}{
+		{
+			"cleartext secrets",
+			inspect.Warning{Kind: inspect.WarnCleartextSecrets, HeaderKeys: []string{"Authorization", "X-Key\x1b[2J"}, URLUserInfo: true, URLSecrets: true},
+			`cleartext-secrets: secrets go over plain http to a host that is not loopback: header Authorization, header "X-Key\x1b[2J", the user info of the URL, secret parts of the URL`,
+		},
+		{
+			"undeclared capability",
+			inspect.Warning{Kind: inspect.WarnUndeclaredCapability, Capabilities: []string{"tools", "prompts"}},
+			"undeclared-capability: the server answered lists that it did not declare (it can show other lists to other clients): tools, prompts",
+		},
+		{
+			"dns pin unavailable",
+			inspect.Warning{Kind: inspect.WarnDNSPinUnavailable},
+			"dns-pin-unavailable: a proxy from the environment resolves the host, so the DNS pin and the address checks do not apply",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if got := report.WarningText(tt.w); got != tt.want {
+				t.Errorf("WarningText() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}

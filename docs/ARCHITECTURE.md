@@ -359,8 +359,9 @@ func Run(ctx context.Context, servers []discover.Server, opts Options, insp Insp
   server, in a stable order. One broken or hung server does not stop the others.
 - `Options` has `Timeout` and `Concurrency`. For the defaults, see `DefaultOptions` in
   `internal/inspect/inspect.go`.
-- `Outcome` has `Server`, `Status`, `Result` and `Err`. `Status` is `StatusOK`, `StatusTimeout` or
-  `StatusFailed`.
+- `Outcome` has `Server`, `Index`, `Status`, `Result` and `Err`. `Index` is the position of the
+  server in the slice given to `Run`, so a caller can match the sorted outcomes to its own order.
+  `Status` is `StatusOK`, `StatusTimeout` or `StatusFailed`.
 - `Result` holds the server identity, the instructions text and the lists of `Tool`, `Prompt`,
   `Resource` and `ResourceTemplate`, plus `Warning` values.
 - `SDKInspector` is the real `Inspector`. Make one with `New(SDKOptions{AllowUntrusted, AllowDisabled})`.

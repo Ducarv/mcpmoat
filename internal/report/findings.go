@@ -2,6 +2,7 @@ package report
 
 import (
 	"io"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -24,7 +25,25 @@ const (
 // WriteFindings: the worst first. A row with any other severity word goes to
 // the first group, "critical" (fail closed, like findingSeverity in
 // cmd/mcpmoat).
-var severityOrder = []string{"critical", "high", "medium", "low"}
+var severityOrder = []string{severityCritical, severityHigh, severityMedium, severityLow}
+
+// The severity words of a finding.
+const (
+	severityCritical = "critical"
+	severityHigh     = "high"
+	severityMedium   = "medium"
+	severityLow      = "low"
+)
+
+// groupSeverity returns s when it is a known severity word, and "critical"
+// otherwise. An unknown severity fails closed: it is grouped and coloured as
+// the worst one.
+func groupSeverity(s string) string {
+	if slices.Contains(severityOrder, s) {
+		return s
+	}
+	return severityCritical
+}
 
 // ServerRef names one server and says which config it comes from. Two servers
 // can have the same name in two clients or two scopes, so the name alone does
@@ -102,7 +121,8 @@ type FindingRow struct {
 }
 
 // fieldTool is the Field of a row about a tool (see rules.FieldTool). This
-// package does not import rules, so it has its own copy of the word.
+// package does not import rules, so it has its own copy of the word. A test
+// checks that the two stay equal.
 const fieldTool = "tool"
 
 // WriteFindings writes the findings to w, in groups by severity. When rows is
@@ -147,10 +167,7 @@ func WriteFindings(w io.Writer, rows []FindingRow, st Style) error {
 	// group.
 	groups := make(map[string][]FindingRow, len(severityOrder))
 	for _, r := range rows {
-		sev := r.Severity
-		if sev != "high" && sev != "medium" && sev != "low" {
-			sev = "critical"
-		}
+		sev := groupSeverity(r.Severity)
 		groups[sev] = append(groups[sev], r)
 	}
 

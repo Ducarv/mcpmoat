@@ -24,6 +24,7 @@ import (
 //     depend on timing or on opts.Concurrency. The sort is stable: servers
 //     that are equal in all these fields (they can differ only in Env, Headers
 //     or Untrusted) keep their input order. The input slice is not changed.
+//     Outcome.Index is the index of the server in the input slice.
 //   - Every server gets an Outcome with a non-empty Status. For zero servers,
 //     Run returns a nil slice and a nil error.
 //   - At most opts.Concurrency servers are inspected at the same time. The
@@ -65,9 +66,21 @@ func Run(ctx context.Context, servers []discover.Server, opts Options, insp Insp
 		return nil, nil
 	}
 
-	// Work on a copy: sorting must not change the caller's slice.
-	sorted := slices.Clone(servers)
-	slices.SortStableFunc(sorted, compareServers)
+	// Sort the indexes, not the servers: the caller's slice stays as it is,
+	// and each Outcome can tell which input server it belongs to (see
+	// Outcome.Index). The sort is stable, so servers that compare equal keep
+	// their input order.
+	order := make([]int, len(servers))
+	for i := range order {
+		order[i] = i
+	}
+	slices.SortStableFunc(order, func(a, b int) int {
+		return compareServers(servers[a], servers[b])
+	})
+	sorted := make([]discover.Server, len(order))
+	for i, idx := range order {
+		sorted[i] = servers[idx]
+	}
 
 	// Each worker writes only to out[i] for the index i it took from jobs.
 	// Distinct slice elements are distinct memory, so the writes do not race,
@@ -80,7 +93,7 @@ func Run(ctx context.Context, servers []discover.Server, opts Options, insp Insp
 	// ever left with an empty Status.
 	out := make([]Outcome, len(sorted))
 	for i := range sorted {
-		out[i] = Outcome{Server: sorted[i], Status: StatusFailed, Err: errNotFinished}
+		out[i] = Outcome{Index: order[i], Server: sorted[i], Status: StatusFailed, Err: errNotFinished}
 	}
 
 	// This is a worker pool. The jobs channel is buffered for every index, so
@@ -102,6 +115,7 @@ func Run(ctx context.Context, servers []discover.Server, opts Options, insp Insp
 				// out[i] is filled, but no new server starts.
 				if err := ctx.Err(); err != nil {
 					out[i] = Outcome{
+						Index:  order[i],
 						Server: sorted[i],
 						Status: StatusFailed,
 						Err:    fmt.Errorf("inspect: not started: %w", err),
@@ -109,6 +123,7 @@ func Run(ctx context.Context, servers []discover.Server, opts Options, insp Insp
 					continue
 				}
 				out[i] = runOne(ctx, sorted[i], opts, insp)
+				out[i].Index = order[i]
 			}
 		})
 	}

@@ -7,6 +7,7 @@ import (
 
 	"github.com/Ducarv/mcpmoat/internal/discover"
 	"github.com/Ducarv/mcpmoat/internal/report"
+	"github.com/Ducarv/mcpmoat/internal/rules"
 	"github.com/Ducarv/mcpmoat/internal/termsafe"
 )
 
@@ -418,4 +419,14 @@ func TestWriteFindingsWriteError(t *testing.T) {
 			t.Errorf("WriteFindings(nil) error = %v, want nil", err)
 		}
 	})
+}
+
+// TestFieldToolMatchesRules checks that the copy of the "tool" field word in
+// this package is the same word as rules.FieldTool.
+func TestFieldToolMatchesRules(t *testing.T) {
+	t.Parallel()
+
+	if report.FieldTool != rules.FieldTool {
+		t.Errorf("report fieldTool = %q, want rules.FieldTool = %q", report.FieldTool, rules.FieldTool)
+	}
 }

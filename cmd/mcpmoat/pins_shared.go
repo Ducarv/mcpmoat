@@ -3,7 +3,6 @@ package main
 import (
 	"errors"
 	"fmt"
-	"strings"
 
 	"github.com/Ducarv/mcpmoat/internal/discover"
 	"github.com/Ducarv/mcpmoat/internal/inspect"
@@ -164,30 +163,8 @@ func (c *cli) warnInspection(cmd string, o inspect.Outcome) {
 }
 
 // warningText returns "server <name>: <kind>: <what it means>" for one
-// inspection warning. The server name and the header keys come from the config
-// file, so they are escaped and cut.
+// inspection warning. The server name is escaped and cut here. The rest comes
+// from report.WarningText, the one owner of the warning wording.
 func warningText(name string, w inspect.Warning) string {
-	var detail string
-	switch w.Kind {
-	case inspect.WarnCleartextSecrets:
-		var parts []string
-		for _, k := range w.HeaderKeys {
-			parts = append(parts, "header "+cutName(k))
-		}
-		if w.URLUserInfo {
-			parts = append(parts, "the user info of the URL")
-		}
-		if w.URLSecrets {
-			parts = append(parts, "secret parts of the URL")
-		}
-		detail = "secrets go over plain http to a host that is not loopback: " + strings.Join(parts, ", ")
-	case inspect.WarnUndeclaredCapability:
-		detail = "the server answered lists that it did not declare (it can show other lists to other clients): " +
-			termsafe.Quote(strings.Join(w.Capabilities, ", "))
-	case inspect.WarnDNSPinUnavailable:
-		detail = "a proxy from the environment resolves the host, so the DNS pin and the address checks do not apply"
-	default:
-		detail = "unknown warning"
-	}
-	return fmt.Sprintf("server %s: %s: %s", cutName(name), termsafe.Quote(string(w.Kind)), detail)
+	return "server " + cutName(name) + ": " + report.WarningText(w)
 }

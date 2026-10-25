@@ -71,8 +71,8 @@ type ServerStatus struct {
 //	github (cursor, project:/x (untrusted)): failed (<reason>), 0 findings
 //	other (codex, global): not inspected, 1 finding
 //
-// Each warning has its own line under the server. The warning text is the
-// text that "mcpmoat pin" prints on stderr. It shows header keys, never header
+// Each warning has its own line under the server. The warning text is
+// WarningText, the text that "mcpmoat pin" prints on stderr. It shows header keys, never header
 // values.
 //
 // Every text from a config file or a server goes through internal/termsafe,
@@ -111,7 +111,7 @@ func WriteSummary(w io.Writer, servers []ServerStatus, st Style) error {
 
 		for _, warning := range s.Warnings {
 			b.WriteString("    warning: ")
-			b.WriteString(warningText(warning))
+			b.WriteString(WarningText(warning))
 			b.WriteString("\n")
 		}
 	}
@@ -120,7 +120,8 @@ func WriteSummary(w io.Writer, servers []ServerStatus, st Style) error {
 	return err
 }
 
-// plural returns one when n is 1, else many.
+// plural returns one when n is 1, else many. It is the same as plural in
+// cmd/mcpmoat; report cannot import main.
 func plural(n int, one, many string) string {
 	if n == 1 {
 		return one
@@ -128,20 +129,24 @@ func plural(n int, one, many string) string {
 	return many
 }
 
-// warningText returns "<kind>: <what it means>" for one inspection warning.
-// The wording is the same as the warning text of "mcpmoat pin" in
-// cmd/mcpmoat. The header keys come from a config file, so they are escaped
-// and cut. Nothing here prints a header value, a URL or the user info of a
-// URL: a Warning holds none.
-func warningText(w inspect.Warning) string {
+// WarningText returns "<kind>: <what it means>" for one inspection warning:
+// the escaped, capped, one-line detail of a warning. It never holds a header
+// value. "mcpmoat pin" prints it on stderr after a "server <name>: " prefix,
+// and WriteSummary prints it under the server.
+//
+// The header keys come from a config file, so they are escaped and cut, and
+// at most maxSummaryHeaderKeys of them show. Nothing here prints a header
+// value, a URL or the user info of a URL: a Warning holds none.
+func WarningText(w inspect.Warning) string {
 	var detail string
 	switch w.Kind {
 	case inspect.WarnCleartextSecrets:
-		var parts []string
 		keys := w.HeaderKeys
 		if len(keys) > maxSummaryHeaderKeys {
 			keys = keys[:maxSummaryHeaderKeys]
 		}
+		// At most: the keys, "and N more", the user info and the URL secrets.
+		parts := make([]string, 0, len(keys)+3)
 		for _, k := range keys {
 			parts = append(parts, "header "+termsafe.QuoteCut(k, maxSummaryNameRunes))
 		}

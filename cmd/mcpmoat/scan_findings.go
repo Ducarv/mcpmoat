@@ -25,10 +25,11 @@ type configChecks struct {
 //
 // The severity, the title, the risk and the remediation of a row come from the
 // rule set. A finding whose rule is not in the set gets severity "critical"
-// (an unknown rule must never pass silently) and empty texts, which the report
-// prints as "-". A row holds the names of the server and the rule text from
-// the built-in rule set (rule ID, field, key, related). It never holds a
-// Finding.Message or a config value.
+// (an unknown rule must never pass silently) and empty texts. The report
+// leaves out an empty title and prints "-" for an empty risk or remediation.
+// A row holds the names of the server and the rule text from the built-in rule
+// set (rule ID, field, key, related). It never holds a Finding.Message or a
+// config value.
 //
 // The second result counts the findings that the ignore list dropped, by rule
 // ID. It is nil when the list dropped nothing. The caller must tell the user

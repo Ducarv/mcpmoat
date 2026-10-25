@@ -3,8 +3,6 @@ package main
 import (
 	"errors"
 	"path/filepath"
-	"reflect"
-	"slices"
 
 	"github.com/Ducarv/mcpmoat/internal/discover"
 	"github.com/Ducarv/mcpmoat/internal/inspect"
@@ -46,11 +44,13 @@ type pinReport struct {
 	statuses []outcomeStatus
 }
 
-// outcomeStatus is the summary entry of one outcome, with the server that it
-// belongs to. The report.ServerStatus holds only the pin findings of the
-// server: serverStatuses adds the findings of the config rules.
+// outcomeStatus is the summary entry of one outcome, with the index of the
+// server that it belongs to. The report.ServerStatus holds only the pin
+// findings of the server: serverStatuses adds the findings of the config rules.
 type outcomeStatus struct {
-	server discover.Server
+	// index is inspect.Outcome.Index: the index of the server in the servers
+	// slice that scan gave to inspect.Run.
+	index  int
 	status report.ServerStatus
 }
 
@@ -120,7 +120,7 @@ func (c *cli) pinOutcomes(store *pins.Store, outcomes []inspect.Outcome, ign *sc
 		// outcome. Counting here (not by name) keeps two servers with one
 		// name apart.
 		p.res.statuses = append(p.res.statuses, outcomeStatus{
-			server: o.Server,
+			index:  o.Index,
 			status: outcomeSummary(o, len(p.res.rows)-before),
 		})
 	}
@@ -171,12 +171,12 @@ func (p *pinner) checkOutcome(o inspect.Outcome) {
 		return
 	}
 	if p.handled[id] {
-		p.addUnverified(s, reasonListedTwice, p.unverifiedSeverity(id))
+		p.addUnverified(s, reasonListedTwice, fixListedTwice, p.unverifiedSeverity(id))
 		return
 	}
 	p.handled[id] = true
 	if !filepath.IsAbs(s.Source) {
-		p.addUnverified(s, reasonRelativeSource, pins.UnverifiedSeverity(true))
+		p.addUnverified(s, reasonRelativeSource, fixRelativeSource, pins.UnverifiedSeverity(true))
 		return
 	}
 
@@ -207,11 +207,14 @@ func (p *pinner) add(row report.FindingRow) bool {
 }
 
 // addUnverified adds the MOAT-T2-004 row of a server that scan cannot verify,
-// with the given severity. reason must be a fixed text: it is shown in the
-// report.
-func (p *pinner) addUnverified(s discover.Server, reason, severity string) {
+// with the given severity. reason and fix must be fixed texts: they are shown
+// in the report. fix replaces the remediation of pins.KindUnverified, because
+// scan prints no "To accept" line for these rows, so "pin --accept" cannot
+// solve them (see the fix constants).
+func (p *pinner) addUnverified(s discover.Server, reason, fix, severity string) {
 	row := pinRow(pins.KindUnverified, s, "", severity)
 	row.Related = reason
+	row.Remediation = fix
 	p.add(row)
 }
 
@@ -242,7 +245,7 @@ func (p *pinner) notInspected(s discover.Server, id pins.Identity, err error) {
 		return
 	}
 	if _, pinned := p.store.Get(id); pinned && !p.handled[id] && !p.failed[id] {
-		p.addUnverified(s, reasonNotInspected, pins.UnverifiedSeverity(true))
+		p.addUnverified(s, reasonNotInspected, fixNotInspected, pins.UnverifiedSeverity(true))
 		p.failed[id] = true
 	}
 }
@@ -259,7 +262,7 @@ func (p *pinner) firstPin(s discover.Server, id pins.Identity, tools []inspect.T
 	if err != nil {
 		// The row gets the fixed reason, never the error text (see
 		// pinnableReason).
-		p.addUnverified(s, pinnableReason(err), pins.UnverifiedSeverity(true))
+		p.addUnverified(s, pinnableReason(err), fixNotPinnable, pins.UnverifiedSeverity(true))
 		return
 	}
 	p.res.pinned = append(p.res.pinned, pinnedServer{id: id, snap: snap, name: s.Name, tools: len(tools)})
@@ -325,11 +328,24 @@ const (
 	reasonRelativeSource = "the config path is not absolute"
 )
 
+// Fixed remediations for the MOAT-T2-004 rows that scan makes itself, one for
+// each reason above (a reason from pinnableReason uses fixNotPinnable). They
+// are not the text of pins.KindUnverified: scan prints no "To accept" line for
+// these rows, and pin --accept would refuse them. Each is one plain sentence
+// with no server text.
+const (
+	fixListedTwice    = "Remove the duplicate entry of this server from the config file, then run mcpmoat scan again."
+	fixNotInspected   = "Find out why the server could not be inspected (see its status in the summary), fix it, then run mcpmoat scan again."
+	fixNotPinnable    = "Do not use this server until its tools are valid and have unique names, then run mcpmoat scan again."
+	fixRelativeSource = "Run mcpmoat scan again with an absolute --config path, or from a working directory that mcpmoat can read."
+)
+
 // pinRow returns the report row of one pin change on the server s. The caller
 // gives the severity: findingSeverity would answer "critical" for these rule
 // IDs, because the rule set has no rule for them. The risk and the remediation
 // are the fixed texts of the change kind (see pins.ChangeKind). The pin rules
-// have no title, so the report prints "-" for it.
+// have no title, so the row has an empty Title and the report leaves the
+// title out of the finding line.
 func pinRow(kind pins.ChangeKind, s discover.Server, tool, severity string) report.FindingRow {
 	return report.FindingRow{
 		ServerRef:   report.NewServerRef(s),
@@ -385,47 +401,34 @@ func outcomeSummary(o inspect.Outcome, findings int) report.ServerStatus {
 // (the config order), so it lines up with the server table. configFindings
 // holds the number of config findings of each server, by index in servers.
 //
-// An outcome belongs to a server when both hold the same data. The outcomes
-// come sorted, so the index does not match. The name does not tell two servers
-// apart either (two clients can both have a server "github"), so serverStatuses
-// compares the whole discover.Server with reflect.DeepEqual and uses each
-// outcome once. Two servers that are equal in every field cannot be told apart,
-// but they also have the same result. A server with no outcome (scan inspected
-// nothing, for example with --no-connect) is "not inspected" and has only its
-// config findings.
-//
-// To avoid comparing every server with every outcome, serverStatuses first
-// sorts the outcomes into buckets by serverIdentity (client, config file,
-// project and name). Servers with different identities are never equal, so a
-// server needs reflect.DeepEqual only against the outcomes in its own bucket.
-// The identity is a struct of strings, so it can be a map key.
+// servers must be the slice that scan gave to inspect.Run. An outcome belongs
+// to the server at its Index (see inspect.Outcome.Index). The outcomes come
+// sorted, so their position does not tell which server they are for, and the
+// data of a server does not either: two servers can be equal in every field.
+// A server with no outcome (scan inspected nothing, for example with
+// --no-connect) is "not inspected" and has only its config findings.
 func (pr pinReport) serverStatuses(servers []discover.Server, configFindings []int) []report.ServerStatus {
 	if len(servers) == 0 {
 		return nil
 	}
-	// buckets maps an identity to the indexes of its outcomes in pr.statuses.
-	// An index leaves its bucket when an outcome is used.
-	buckets := make(map[pins.Identity][]int, len(pr.statuses))
-	for j, entry := range pr.statuses {
-		id := serverIdentity(entry.server)
-		buckets[id] = append(buckets[id], j)
-	}
+	// One slot for each server. A slot stays "not inspected" until an outcome
+	// with its index fills it.
 	out := make([]report.ServerStatus, len(servers))
 	for i, s := range servers {
-		st := report.ServerStatus{
+		out[i] = report.ServerStatus{
 			ServerRef: report.NewServerRef(s),
 			Status:    report.StatusNotInspected,
 		}
-		id := serverIdentity(s)
-		for k, j := range buckets[id] {
-			if reflect.DeepEqual(pr.statuses[j].server, s) {
-				st = pr.statuses[j].status
-				buckets[id] = slices.Delete(buckets[id], k, k+1)
-				break
-			}
+	}
+	for _, entry := range pr.statuses {
+		// An index outside servers cannot happen when the caller passes the
+		// slice that went to inspect.Run. Skip it rather than panic.
+		if entry.index >= 0 && entry.index < len(out) {
+			out[entry.index] = entry.status
 		}
-		st.Findings += configFindings[i]
-		out[i] = st
+	}
+	for i := range out {
+		out[i].Findings += configFindings[i]
 	}
 	return out
 }

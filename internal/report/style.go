@@ -41,12 +41,12 @@ func (s Style) paint(code, text string) string {
 // red for "high", yellow for "medium" and cyan for "low". Any other word has
 // the style of "critical", so an unknown severity never looks harmless.
 func (s Style) severity(sev, text string) string {
-	switch sev {
-	case "high":
+	switch groupSeverity(sev) {
+	case severityHigh:
 		return s.paint(sgrRed, text)
-	case "medium":
+	case severityMedium:
 		return s.paint(sgrYellow, text)
-	case "low":
+	case severityLow:
 		return s.paint(sgrCyan, text)
 	}
 	return s.paint(sgrBoldRed, text)
