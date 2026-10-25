@@ -352,11 +352,11 @@ go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.15.0
 You can also use `brew install golangci-lint`, or follow the
 [install guide](https://golangci-lint.run/welcome/install/).
 
-You need [GoReleaser](https://goreleaser.com/) v2.19.0 only when you change `.goreleaser.yaml`. CI and
-the release workflow pin the same version. To bump it, change `GORELEASER_VERSION` in `ci.yml` and
-`release.yml` and every `v2.19.0` in this file. The `release-check` CI job fails if they differ.
-`go run github.com/goreleaser/goreleaser/v2@v2.19.0 <cmd>` needs no install. You can also use
-`brew install goreleaser`.
+You need [GoReleaser](https://goreleaser.com/) only when you change `.goreleaser.yaml`. CI and the
+release workflow pin one version. `go run github.com/goreleaser/goreleaser/v2@v2.19.0 <cmd>` runs that
+version and needs no install. `brew install goreleaser` also works, but it can give another version.
+To bump the version, change `GORELEASER_VERSION` in `ci.yml` and `release.yml` and every
+`goreleaser/v2@` command in this file. The `release-check` CI job fails if they differ.
 
 ### Checks
 
@@ -452,8 +452,9 @@ stops before GoReleaser runs, because the environment has no tap secret.
 3. In `Ducarv/mcpmoat`, create the GitHub environment `release`. Limit its deployment branches and
    tags to tags that match `v[0-9]*`. Add the maintainer as a required reviewer, so each release
    waits for approval. Add the token to it as the environment secret `HOMEBREW_TAP_GITHUB_TOKEN`. Do
-   not make it a repository secret: only jobs in the `release` environment can read an environment
-   secret.
+   not make it a repository or organization secret: only jobs in the `release` environment can read
+   an environment secret. The release job stops when the secret is missing, but a repository or
+   organization secret with the same name hides a missing environment from that check.
 4. Add a tag ruleset for `v[0-9]*` that restricts creations, updates and deletes. Let only the
    maintainer bypass it. Then only the maintainer can push, move or delete a release tag. After a
    release is published, Immutable releases (step 5) lock its tag for everyone.
@@ -477,11 +478,17 @@ the tagged commit is not on `main`, or if the environment has no tap secret. It 
 with GoReleaser, creates a draft GitHub release and pushes the cask to the tap. Only the GoReleaser
 step gets the tap token. Then it attests the build provenance of `dist/*.tar.gz` and
 `dist/checksums.txt`. It checks that the draft release holds exactly those files, downloads them,
-checks that they match `dist/` and verifies each attestation with `gh attestation verify`. Then it
-publishes the release, and checks the published files against `dist/` once more.
+checks that they match `dist/` and verifies each attestation with `gh attestation verify`. It checks
+that the tag still points at the commit that it built. Then it publishes the release, and checks the
+published files against `dist/` once more.
 
 Try a prerelease tag first, for example `v0.1.0-rc.1`. GoReleaser marks it as a prerelease and does
 not update the tap.
+
+The workflow runs one release at a time. Push one tag, and push the next only after its run ends:
+GitHub cancels a waiting run when a newer one queues behind it. Do not release an older version
+after a newer one, for example a fix for an old minor line. Its run would point the tap at the older
+version and mark it as the latest release.
 
 ### Verify a release
 
