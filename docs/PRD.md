@@ -465,8 +465,8 @@ underflows to zero), and a change only in such digits does not change the hash. 
 tool's `_meta` and `icons` with limits. Numbers in `_meta` go through `float64`, as above. The SDK
 decodes each icon into a typed struct, so an unknown key inside an icon is dropped and is not
 covered. A server that puts changing data in `_meta` (a timestamp or a trace id) raises
-`MOAT-T2-001` on every scan. A large `_meta` can push a server over the 2 MiB pin cap for each
-server. Then the pin fails closed as `MOAT-T2-004`. The `_meta` and `icons` of prompts, resources
+`MOAT-T2-001` on every scan. A large `_meta`, or many icons with inline `data:` URIs, can push a
+server over the 2 MiB pin cap for each server. Then the pin fails closed as `MOAT-T2-004`. The `_meta` and `icons` of prompts, resources
 and resource templates are not hashed, because only tools are pinned. The SDK omits empty icon
 fields (`mimeType`, `sizes`, `theme`), so an empty value and an absent value hash the same.
 

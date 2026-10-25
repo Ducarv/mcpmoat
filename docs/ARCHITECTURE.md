@@ -302,25 +302,22 @@ of a new tool (`newToolDiff`, a diff from empty text, so every content line is a
 on a rendered form of the tool: one item for each line (name, title, description, annotations,
 `_meta`, icons, inputSchema, outputSchema, the last five as indented JSON). The annotations,
 `_meta` and icons come before the schemas, so a large unchanged schema cannot push a change in them
-out of a cut diff. A large `_meta` change can still push a schema change out (#162). A line of
-more than about 200 runes is wrapped, so a change in a long line still shows. The diff trims the lines that both texts share at
-the start and at the end, keeps 3 lines of context, and only then cuts the rest to 64 KiB and 2000
-lines. When the cut applies, the diff ends with a marker line and `Change.Truncated` is true, so
-`scan` and `pin` can warn the user. The labels are `pinned` and `current`. A changed or new tool
-always has diff text, or a fixed note when the diff cannot be made or the change is not visible in
-the rendered text. Server text is raw in the diff. The report layer escapes it (see [Where untrusted
-text is escaped](#where-untrusted-text-is-escaped)).
+out of a cut diff. A large `_meta` change, or a large `_meta` or icons value in a new tool, can
+still push the schemas out (#162). A line of more than about 200 runes is wrapped, so a change in a
+long line still shows. The diff trims the lines that both texts share at the start and at the end,
+keeps 3 lines of context, and only then cuts the rest to 64 KiB and 2000 lines. When the cut
+applies, the diff ends with a marker line and `Change.Truncated` is true, so `scan` and `pin` can
+warn the user. The labels are `pinned` and `current`. A changed or new tool always has diff text, or
+a fixed note when the diff cannot be made or the change is not visible in the rendered text. Server
+text is raw in the diff. The report layer escapes it (see [Where untrusted text is
+escaped](#where-untrusted-text-is-escaped)).
 
 The doc comments own the rules. `Canonical` owns the shape, null handling, errors, no normalisation
 and the known limits. `HashVersion` owns when the version changes and what the store does with a
 stored hash of another version. Read them with `go doc ./internal/pins Canonical` and
-`go doc ./internal/pins HashVersion`. The known limits are requirements in
-[PRD FR-11](PRD.md#64-pins-rug-pull-detection). They include the `_meta` and `icons` limits: a
-changing value in `_meta` raises `MOAT-T2-001` on every scan, and an unknown key inside an icon is
-not covered. `HashVersion` stays `sha256-v1`. The form got `_meta` and `icons` in place before the
-first release, as the [`pins.json` store](#the-pinsjson-store) section says.
-The pin diff shows `_meta` and icons values, escaped by `termsafe` like all server text. Logs and
-errors never print a `_meta` value.
+`go doc ./internal/pins HashVersion`. The known limits, also those of `_meta` and `icons`, are
+requirements in [PRD FR-11](PRD.md#64-pins-rug-pull-detection). Logs and errors never print a
+`_meta` value.
 
 ## Tool set digest
 

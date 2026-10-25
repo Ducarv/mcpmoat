@@ -96,8 +96,8 @@ func render(canonical string) (string, error) {
 
 	// annotations, _meta and icons come before the schemas, so a large unchanged
 	// schema cannot push a change in them out of a cut diff. The server controls
-	// the size of _meta, so a large _meta change can still push a schema change
-	// out (issue #162).
+	// the size of _meta, so a large _meta change, or a large _meta or icons
+	// value in a new tool, can still push the schemas out (issue #162).
 	sections := []struct {
 		label string
 		raw   json.RawMessage
