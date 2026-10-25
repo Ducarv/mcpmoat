@@ -246,7 +246,6 @@ func TestScanJSONPinsGolden(t *testing.T) {
 	})
 	assertNoTempPath(t, got, e.home, e.work, e.xdg, filepath.Dir(e.config))
 	assertScanGolden(t, "scan_json_pins_changed", []byte(got))
-
 }
 
 // TestScanJSONDiffKinds checks the diffs of a pinned tool whose pin cannot be
