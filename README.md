@@ -16,7 +16,9 @@ This works today:
 go install github.com/Ducarv/mcpmoat/cmd/mcpmoat@latest
 ```
 
-It builds the latest commit on `main`. It needs Go 1.27 or later (see [go.mod](go.mod)).
+It builds the latest commit on `main`. It needs Go 1.27 or later (see [go.mod](go.mod)). For a
+repeatable install, as in CI, pin one commit instead of `@latest`: see
+[docs/ci.md](docs/ci.md#github-actions).
 
 These methods come with the first release:
 
@@ -117,9 +119,9 @@ mcpmoat version               # print the version, commit and build date
   that another run wrote meanwhile. A parallel run can still lose an update until the lock (#150)
   exists.
 - Press Ctrl-C (or send `SIGTERM` or `SIGHUP`) to stop a run. mcpmoat stops the stdio servers that
-  it started. A signal during the inspection, or after it but before new pins are saved, makes
-  `scan` and `pin --accept` print `interrupted; no pins were saved`, save nothing and exit with
-  code 2. [Exit codes](#exit-codes) tells what `scan` does at other times.
+  it started. A signal during the inspection, or after it but before new pins are saved (only when
+  there are new pins), makes `scan` and `pin --accept` print `interrupted; no pins were saved`,
+  save nothing and exit with code 2. [Exit codes](#exit-codes) tells what `scan` does at other times.
 - [Exit codes](#exit-codes) tells which of these findings give exit code 1 at each `--fail-on`
   value.
 

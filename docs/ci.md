@@ -76,11 +76,12 @@ is its project.
 ## A plain git hook
 
 Run this in the root of your repository. It saves the hook and makes it executable. If a
-pre-commit hook already exists, it changes nothing and prints a message:
+pre-commit hook (or a symlink with that name) already exists, it changes nothing and prints a
+message:
 
 ```sh
 hook=$(git rev-parse --git-path hooks)/pre-commit
-if [ -e "$hook" ]; then
+if [ -e "$hook" ] || [ -L "$hook" ]; then
   echo "$hook exists; add the mcpmoat line to it" >&2
 else
   cat > "$hook" <<'EOF'

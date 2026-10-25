@@ -212,12 +212,11 @@ the connect and pin steps between step 5 and step 6:
 
 In `reportScan`, a signal during the inspection or a report write error returns 2 at once.
 Otherwise `reportScan` prints the report and then gets the exit code from `scanExitCode` in
-`cmd/mcpmoat/scan_findings.go`. A config file problem gives 2, and so does a `pins.json` that
-`scan` cannot read or save, an `inspect.Run` error, or a signal that stops the save of new pins
-after the report. Exit code 2 wins over 1. Otherwise `hasFailingFinding` gives 1 when a row (the
-ignored findings are already dropped) has a severity at or above `--fail-on`. It compares
-`rules.Severity` `Rank()` values, and a severity with rank 0 (unknown) always counts. The user
-contract is in [README.md](../README.md#exit-codes). `internal/report` has no JSON output.
+`cmd/mcpmoat/scan_findings.go`. An execution error gives 2, and 2 wins over 1. Otherwise
+`hasFailingFinding` gives 1 when a row (the ignored findings are already dropped) has a severity at
+or above `--fail-on`. It compares `rules.Severity` `Rank()` values, and a severity with rank 0
+(unknown) always counts. The user contract, with the list of execution errors, is in
+[README.md](../README.md#exit-codes). `internal/report` has no JSON output.
 
 `mcpmoat pin --accept <server> [--project <path>] [--expect <digest>]` (FR-13) does these steps:
 
