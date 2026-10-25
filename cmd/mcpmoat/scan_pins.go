@@ -43,7 +43,7 @@ type pinReport struct {
 	// are not in the order of the server table. A server that is not in the
 	// map was not inspected: the --json report shows it as not run (see
 	// inspectionOf). It is nil when scan inspected nothing.
-	inspection map[pins.Identity]string
+	inspection map[pins.Identity]report.InspectionStatus
 }
 
 // pinnedServer is one server that scan pinned for the first time. It holds what
@@ -103,7 +103,7 @@ func (c *cli) pinOutcomes(store *pins.Store, outcomes []inspect.Outcome, ign *sc
 		failed:  make(map[pins.Identity]bool),
 		warned:  make(map[string]bool),
 	}
-	p.res.inspection = make(map[pins.Identity]string, len(outcomes))
+	p.res.inspection = make(map[pins.Identity]report.InspectionStatus, len(outcomes))
 	servers := make([]discover.Server, len(outcomes))
 	for i, o := range outcomes {
 		p.recordInspection(o)
@@ -153,7 +153,7 @@ func (p *pinner) recordInspection(o inspect.Outcome) {
 // constant. It reads the status and the kind of the error, never the error
 // text. A refusal comes first: a gate that refuses a server also sets
 // inspect.StatusFailed.
-func inspectionStatus(o inspect.Outcome) string {
+func inspectionStatus(o inspect.Outcome) report.InspectionStatus {
 	if inspect.Refused(o.Err) {
 		return report.InspectionRefused
 	}
@@ -170,7 +170,7 @@ func inspectionStatus(o inspect.Outcome) string {
 // inspectionOf returns the inspection status of the server s for the --json
 // report. A server that scan did not inspect (--no-connect, or no outcome)
 // has the status report.InspectionNotRun.
-func (r pinReport) inspectionOf(s discover.Server) string {
+func (r pinReport) inspectionOf(s discover.Server) report.InspectionStatus {
 	if status, ok := r.inspection[serverIdentity(s)]; ok {
 		return status
 	}

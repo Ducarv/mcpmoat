@@ -18,27 +18,35 @@ import (
 // or changes type or meaning.
 const SchemaVersion = 1
 
+// Mode tells if a scan connected to the servers. It is the type of
+// ScanReport.Mode.
+type Mode string
+
 // The values of ScanReport.Mode.
 const (
 	// ModeNoConnect is a scan that only reads configs (--no-connect).
-	ModeNoConnect = "no-connect"
+	ModeNoConnect Mode = "no-connect"
 	// ModeConnect is a scan that also connects to the servers.
-	ModeConnect = "connect"
+	ModeConnect Mode = "connect"
 )
+
+// InspectionStatus tells what happened when mcpmoat inspected one server. It
+// is the type of JSONInspection.Status.
+type InspectionStatus string
 
 // The values of JSONInspection.Status.
 const (
 	// InspectionNotRun means that mcpmoat did not connect to the server.
-	InspectionNotRun = "not_run"
+	InspectionNotRun InspectionStatus = "not_run"
 	// InspectionOK means that mcpmoat connected and listed the tools.
-	InspectionOK = "ok"
+	InspectionOK InspectionStatus = "ok"
 	// InspectionTimeout means that the server did not answer in time.
-	InspectionTimeout = "timeout"
+	InspectionTimeout InspectionStatus = "timeout"
 	// InspectionFailed means that the connection or the tool list failed.
-	InspectionFailed = "failed"
+	InspectionFailed InspectionStatus = "failed"
 	// InspectionRefused means that mcpmoat chose not to connect, for example
 	// to a disabled or untrusted server.
-	InspectionRefused = "refused"
+	InspectionRefused InspectionStatus = "refused"
 )
 
 // ScanReport is the JSON report of one scan. It holds plain strings, bools and
@@ -47,7 +55,7 @@ const (
 type ScanReport struct {
 	SchemaVersion int             `json:"schema_version"`
 	Tool          ToolInfo        `json:"tool"`
-	Mode          string          `json:"mode"`
+	Mode          Mode            `json:"mode"`
 	Servers       []JSONServer    `json:"servers"`
 	Findings      []JSONFinding   `json:"findings"`
 	Diffs         []JSONDiff      `json:"diffs"`
@@ -80,7 +88,7 @@ type JSONServer struct {
 // JSONInspection tells what happened when mcpmoat inspected a server.
 type JSONInspection struct {
 	// Status is one of the Inspection constants.
-	Status string `json:"status"`
+	Status InspectionStatus `json:"status"`
 }
 
 // JSONFinding is one finding in the JSON report. An empty string means that
@@ -118,7 +126,7 @@ type JSONFileError struct {
 // NewJSONServer converts s to its JSON form. status is one of the Inspection
 // constants. The command line and the URL are redacted like in WriteServers.
 // The text is not quoted: JSON escaping does that job (see WriteJSON).
-func NewJSONServer(s discover.Server, status string) JSONServer {
+func NewJSONServer(s discover.Server, status InspectionStatus) JSONServer {
 	js := JSONServer{
 		Name:        s.Name,
 		Client:      string(s.Client),
@@ -226,8 +234,9 @@ func escapeUnsafeRunes(b []byte) []byte {
 	for len(b) > 0 {
 		r, size := utf8.DecodeRune(b)
 		if r == 0x7f || (r >= utf8.RuneSelf && (!unicode.IsPrint(r) || termsafe.IsInvisible(r))) {
-			// EncodeRune gives U+FFFD for r below U+10000 and a pair above.
-			if r1, r2 := utf16.EncodeRune(r); r1 != unicode.ReplacementChar {
+			if r >= 0x10000 {
+				// Above U+FFFF JSON needs a surrogate pair.
+				r1, r2 := utf16.EncodeRune(r)
 				out = fmt.Appendf(out, `\u%04x\u%04x`, r1, r2)
 			} else {
 				out = fmt.Appendf(out, `\u%04x`, r)

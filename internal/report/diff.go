@@ -68,7 +68,8 @@ const (
 
 // String returns the fixed name of k: "changed", "new" or "unverified". The
 // JSON report uses these names. They are a stable contract. Any other value
-// gives "unknown".
+// gives "unknown". That is a defensive value for an invalid kind. It is not
+// valid in the JSON schema.
 func (k DiffKind) String() string {
 	switch k {
 	case DiffChanged:

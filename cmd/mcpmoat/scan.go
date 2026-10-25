@@ -265,11 +265,11 @@ const configErrorHint = "mcpmoat scan: a config file has a problem; " +
 // ignore. When setup.connect is not nil, it also inspects the servers and
 // checks their pins (see inspectAndPin). configPath is the --config value, or
 // empty. It prints the report on stdout (see writeScanReport, or the JSON
-// document with --json), and the
-// file problems and warnings on stderr, and returns the exit code (the contract
-// is in the usage text, see usage in cli.go). When the ignore list dropped at
-// least one finding, it prints one line on stderr after the report, with the
-// rule IDs and their counts (see printIgnored).
+// document with --json), and the file problems and warnings on stderr, and
+// returns the exit code (the contract is in the usage text, see usage in
+// cli.go). When the ignore list dropped at least one finding, it prints one
+// line on stderr after the report, with the rule IDs and their counts (see
+// printIgnored).
 //
 // The pin findings are merged with the config findings before the table is
 // written, so one table holds them all and hasFailingFinding sees them all.
@@ -302,7 +302,11 @@ func (c *cli) reportScan(ctx context.Context, res discover.Result, configPath st
 		// Only the JSON document goes to stdout: no table, no "No MCP servers
 		// found." line and no "To accept" lines. stderr is the same as
 		// without --json.
-		doc := buildScanReport(c.build.version, setup.connect != nil, res.Servers, rows, pr, res.Errors)
+		mode := report.ModeNoConnect
+		if setup.connect != nil {
+			mode = report.ModeConnect
+		}
+		doc := buildScanReport(c.build.version, mode, res.Servers, rows, pr, res.Errors)
 		writeErr = report.WriteJSON(c.stdout, doc)
 	} else {
 		writeErr = c.writeScanReport(res.Servers, rows, pr, configPath, len(res.Errors) > 0)

@@ -149,7 +149,7 @@
       "required": ["status"],
       "properties": {
         "status": {
-          "description": "\"not_run\": mcpmoat did not connect. \"ok\": it connected and listed the tools. \"timeout\": the server did not answer in time. \"failed\": the connection or the tool list failed. \"refused\": mcpmoat chose not to connect, for example to a disabled or untrusted server.",
+          "description": "\"not_run\": mcpmoat did not connect. This happens in no-connect mode. It also happens in connect mode when the inspection or the pin step fails as a whole (for example, pins.json cannot be read): then every server is \"not_run\", the exit code is 2 and the reason is on stderr. \"ok\": it connected and listed the tools. \"timeout\": the server did not answer in time. \"failed\": the connection or the tool list failed. \"refused\": mcpmoat chose not to connect, for example to a disabled or untrusted server.",
           "enum": ["not_run", "ok", "timeout", "failed", "refused"]
         }
       }

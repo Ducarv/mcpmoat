@@ -47,7 +47,7 @@ func newReport(servers []report.JSONServer, diffs []report.JSONDiff) report.Scan
 	}
 }
 
-func TestWriteJSON_RedactionParity(t *testing.T) {
+func TestWriteJSONRedactionParity(t *testing.T) {
 	t.Parallel()
 
 	stdio := discover.Server{
@@ -150,7 +150,7 @@ func contains(list []string, want string) bool {
 	return false
 }
 
-func TestWriteJSON_Escaping(t *testing.T) {
+func TestWriteJSONEscaping(t *testing.T) {
 	t.Parallel()
 
 	// Untrusted text with every kind of unsafe character.
@@ -244,7 +244,7 @@ func assertSafeBytes(t *testing.T, out []byte) {
 	}
 }
 
-func TestWriteJSON_EmptyReport(t *testing.T) {
+func TestWriteJSONEmptyReport(t *testing.T) {
 	t.Parallel()
 
 	r := report.ScanReport{
@@ -272,7 +272,7 @@ func TestWriteJSON_EmptyReport(t *testing.T) {
 	}
 }
 
-func TestWriteJSON_NilListsDoNotChangeCaller(t *testing.T) {
+func TestWriteJSONNilListsDoNotChangeCaller(t *testing.T) {
 	t.Parallel()
 	// WriteJSON takes the report by value, so the caller's nil slices stay nil.
 	r := report.ScanReport{}
@@ -282,7 +282,7 @@ func TestWriteJSON_NilListsDoNotChangeCaller(t *testing.T) {
 	}
 }
 
-func TestWriteJSON_StdioWithoutArgsHasArgv(t *testing.T) {
+func TestWriteJSONStdioWithoutArgsHasArgv(t *testing.T) {
 	t.Parallel()
 	js := report.NewJSONServer(discover.Server{Name: "s", Transport: discover.TransportStdio, Command: "mycmd"}, report.InspectionNotRun)
 	out := writeJSON(t, newReport([]report.JSONServer{js}, nil))
@@ -295,7 +295,7 @@ func TestWriteJSON_StdioWithoutArgsHasArgv(t *testing.T) {
 	}
 }
 
-func TestWriteJSON_Deterministic(t *testing.T) {
+func TestWriteJSONDeterministic(t *testing.T) {
 	t.Parallel()
 	r := richReport()
 	first := writeJSON(t, r)
@@ -306,7 +306,7 @@ func TestWriteJSON_Deterministic(t *testing.T) {
 	}
 }
 
-func TestDiffKind_String(t *testing.T) {
+func TestDiffKindString(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
 		kind report.DiffKind
@@ -325,7 +325,7 @@ func TestDiffKind_String(t *testing.T) {
 	}
 }
 
-func TestNewJSONDiff_UsesKindName(t *testing.T) {
+func TestNewJSONDiffUsesKindName(t *testing.T) {
 	t.Parallel()
 	got := report.NewJSONDiff(report.ToolDiff{Server: "s", Tool: "t", Kind: report.DiffNew, Diff: "+x\n", Truncated: true})
 	want := report.JSONDiff{Server: "s", Tool: "t", Kind: "new", Diff: "+x\n", Truncated: true}
@@ -334,7 +334,7 @@ func TestNewJSONDiff_UsesKindName(t *testing.T) {
 	}
 }
 
-func TestNewJSONFileError_NeverCopiesErr(t *testing.T) {
+func TestNewJSONFileErrorNeverCopiesErr(t *testing.T) {
 	t.Parallel()
 	e := &discover.FileError{
 		Path: "/p/mcp.json", Server: "s", Line: 3, Col: 7, Reason: "invalid JSON", Untrusted: true,
@@ -353,7 +353,7 @@ type failWriter struct{ err error }
 
 func (w failWriter) Write([]byte) (int, error) { return 0, w.err }
 
-func TestWriteJSON_WriteError(t *testing.T) {
+func TestWriteJSONWriteError(t *testing.T) {
 	t.Parallel()
 	sentinel := errors.New("pipe closed")
 	err := report.WriteJSON(failWriter{sentinel}, richReport())

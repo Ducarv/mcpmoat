@@ -475,6 +475,10 @@ Shape (`schema_version` 1):
 - A server has `name`, `client`, `scope`, `project_path`, `untrusted`, `state`, `transport`,
   `source`, `inspection.status` (`not_run`, `ok`, `timeout`, `failed` or `refused`) and either
   `argv` (stdio) or `url` (http and sse). Both are redacted like in the terminal report.
+  `not_run` means that mcpmoat did not connect. This is the case in `no-connect` mode. It also
+  happens in `connect` mode when the inspection or the pin step fails as a whole (for example,
+  `pins.json` cannot be read). Then `mode` is `connect`, every server is `not_run`, the exit code
+  is 2 and the reason is on stderr.
 - A finding has `rule_id`, `severity`, `server`, `field`, `key` and `related`. `related` holds key
   names only, never values.
 - A diff has `server`, `tool`, `kind` (`changed`, `new` or `unverified`), `diff` and
@@ -484,9 +488,9 @@ Shape (`schema_version` 1):
 
 What stays on stderr: the warnings, the notices and the errors. They are byte-identical to a run
 without `--json`. With `--json`, stdout holds no table, no "No MCP servers found." line and no
-`To accept` line. The exit codes do not change. When `scan` makes no report (for example,
-`--config` cannot be loaded), stdout is empty. If `WriteJSON` fails, `scan` exits with 2, like a
-failed table write.
+`To accept` line. The exit codes do not change. When `scan` stops before the report (for
+example, `--config` cannot be loaded, or an interrupt), stdout is empty and the exit code is 2.
+If `WriteJSON` fails, `scan` exits with 2, like a failed table write.
 
 Redaction: the document never holds env or header values, the working directory of a server, or
 error text from a server or from the OS. A server entry holds no env or header data. A finding

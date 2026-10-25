@@ -5,8 +5,8 @@ import (
 	"github.com/Ducarv/mcpmoat/internal/report"
 )
 
-// toolName is the name that the JSON report gives in its "tool" object.
-const toolName = "mcpmoat"
+// programName is the name that the JSON report gives in its "tool" object.
+const programName = "mcpmoat"
 
 // buildScanReport builds the report that scan --json writes on stdout (FR-15).
 // It holds the same data as the terminal report, in the same order:
@@ -17,24 +17,16 @@ const toolName = "mcpmoat"
 //     status report.InspectionNotRun;
 //   - fileErrors are the config problems that discover found;
 //   - version is the version that "mcpmoat version" prints;
-//   - connected is true when scan runs without --no-connect.
+//   - mode is report.ModeConnect when scan runs without --no-connect, and
+//     report.ModeNoConnect otherwise.
 //
 // The report types hold plain text only. They have no field for env or header
 // values, and no field for the text of an inspection error or of a warning.
-func buildScanReport(version string, connected bool, servers []discover.Server, rows []report.FindingRow, pr pinReport, fileErrors []*discover.FileError) report.ScanReport {
-	mode := report.ModeNoConnect
-	if connected {
-		mode = report.ModeConnect
-	}
-
+func buildScanReport(version string, mode report.Mode, servers []discover.Server, rows []report.FindingRow, pr pinReport, fileErrors []*discover.FileError) report.ScanReport {
 	r := report.ScanReport{
 		SchemaVersion: report.SchemaVersion,
-		Tool:          report.ToolInfo{Name: toolName, Version: version},
+		Tool:          report.ToolInfo{Name: programName, Version: version},
 		Mode:          mode,
-		Servers:       make([]report.JSONServer, 0, len(servers)),
-		Findings:      make([]report.JSONFinding, 0, len(rows)),
-		Diffs:         make([]report.JSONDiff, 0, len(pr.diffs)),
-		Errors:        make([]report.JSONFileError, 0, len(fileErrors)),
 	}
 	for _, s := range servers {
 		r.Servers = append(r.Servers, report.NewJSONServer(s, pr.inspectionOf(s)))

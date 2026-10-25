@@ -177,7 +177,7 @@ func setDiff(want, got []string) string {
 // richReport covers every inspection status, every diff kind, a truncated
 // diff, a file error, findings, stdio and http servers, and both scopes.
 func richReport() report.ScanReport {
-	stdio := func(name string, scope discover.Scope, state discover.State, status string) report.JSONServer {
+	stdio := func(name string, scope discover.Scope, state discover.State, status report.InspectionStatus) report.JSONServer {
 		s := discover.Server{
 			Name: name, Client: discover.ClientClaudeCode, Scope: scope, State: state,
 			Source: "/home/u/.claude.json", Transport: discover.TransportStdio,
@@ -189,7 +189,7 @@ func richReport() report.ScanReport {
 		}
 		return report.NewJSONServer(s, status)
 	}
-	remote := func(name string, tr discover.Transport, status string) report.JSONServer {
+	remote := func(name string, tr discover.Transport, status report.InspectionStatus) report.JSONServer {
 		return report.NewJSONServer(discover.Server{
 			Name: name, Client: discover.ClientCursor, Scope: discover.ScopeGlobal,
 			Source: "/home/u/.cursor/mcp.json", Transport: tr,
@@ -235,7 +235,7 @@ func decodeAny(t *testing.T, b []byte) any {
 	return v
 }
 
-func TestWriteJSON_ValidatesAgainstSchema(t *testing.T) {
+func TestWriteJSONValidatesAgainstSchema(t *testing.T) {
 	t.Parallel()
 	rs := resolvedSchema(t)
 

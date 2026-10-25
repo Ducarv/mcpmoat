@@ -153,8 +153,8 @@ func assertNoRawControl(t *testing.T, stdout string) {
 
 // inspectionByName returns the inspection status of each server of doc, by
 // server name. The names of the tests are unique.
-func inspectionByName(doc report.ScanReport) map[string]string {
-	got := make(map[string]string, len(doc.Servers))
+func inspectionByName(doc report.ScanReport) map[string]report.InspectionStatus {
+	got := make(map[string]report.InspectionStatus, len(doc.Servers))
 	for _, s := range doc.Servers {
 		got[s.Name] = s.Inspection.Status
 	}
@@ -246,7 +246,7 @@ func TestScanJSONPinsGolden(t *testing.T) {
 	if firstDoc.Mode != report.ModeConnect {
 		t.Errorf("first scan: mode = %q, want %q", firstDoc.Mode, report.ModeConnect)
 	}
-	wantFirst := map[string]string{"alpha": report.InspectionOK, "broken": report.InspectionFailed}
+	wantFirst := map[string]report.InspectionStatus{"alpha": report.InspectionOK, "broken": report.InspectionFailed}
 	if got := inspectionByName(firstDoc); !maps.Equal(got, wantFirst) {
 		t.Errorf("first scan: inspection statuses = %v, want %v", got, wantFirst)
 	}
@@ -340,7 +340,7 @@ func TestScanJSONInspectionStatus(t *testing.T) {
 		got := e.scan(insp, "--json", "--timeout", "300ms")
 
 		doc := decodeScanJSON(t, got.stdout)
-		want := map[string]string{
+		want := map[string]report.InspectionStatus{
 			"good": report.InspectionOK,
 			"bad":  report.InspectionFailed,
 			"slow": report.InspectionTimeout,
