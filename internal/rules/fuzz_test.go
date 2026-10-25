@@ -194,6 +194,21 @@ var fuzzTexts = []string{
 	strings.Repeat("\u0430b ", 100),                                  // more than MaxHits mixed words
 }
 
+// fuzzLookalikeTexts are seed texts with runes of skeletonTable (#140):
+// letters of other scripts that look like ASCII letters, a spacing mark that
+// maps only in the first pass of foldSkeleton, and invalid UTF-8 next to a
+// rune that maps.
+var fuzzLookalikeTexts = []string{
+	"~/.\u0455\u0455\u04bb",                             // Cyrillic "ssh"
+	"\u0456\u0581\u0578\u043e\u0433\u0435 all",          // Cyrillic and Armenian "ignore"
+	"Ign\u0c02re previous",                              // Telugu anusvara as "o"
+	"i\u0261nore",                                       // U+0261 script g
+	"d\u212eny",                                         // U+212E estimated sign as "e"
+	"\u03ac\U0001D6C2 \u03f2\u03f9",                     // folds to a table rune; lunate sigma
+	"\xd0\xd0\xb0\xff\u0455\xe2\x80",                    // invalid bytes around U+0430 and U+0455
+	strings.Repeat("\u0430", MaxMatchInputBytes/2+1024), // over the cap, every rune maps
+}
+
 // fuzzLongText is a seed a bit longer than MaxMatchInputBytes, with a keyword
 // after the cap.
 var fuzzLongText = strings.Repeat("a ", MaxMatchInputBytes/2) + "ignore previous"
@@ -410,10 +425,14 @@ func FuzzNormalize(f *testing.F) {
 }
 
 // FuzzRegexForms checks the bounds that the cost comment in match.go relies
-// on: foldMarks never makes a valid text longer, regexForms gives at most
-// maxRegexForms forms (the base forms and their folds) and keywordForms at
+// on: foldMarks, skeleton and foldSkeleton never make a valid text longer,
+// the regex fold and the keyword fold of each base form are not longer than
+// that base form, regexForms gives at most maxRegexForms forms (the base
+// forms, their plain folds and their skeleton folds) and keywordForms at
 // most maxKeywordForms, with no duplicates, each at most MaxMatchInputBytes
-// long and valid UTF-8 when the input is.
+// long and valid UTF-8 when the input is. regexForms also holds the plain
+// fold and the skeleton fold of every base form, so the skeleton fold never
+// replaces a form from before it (#140).
 func FuzzRegexForms(f *testing.F) {
 	for _, s := range fuzzTexts {
 		f.Add(s)
@@ -424,9 +443,13 @@ func FuzzRegexForms(f *testing.F) {
 	f.Add(noSeqText)
 	f.Add(noC0CSIText)
 	f.Add(allFormsText)
+	f.Add("\u0430" + allFormsText) // Cyrillic a: maxRegexForms forms
 	f.Add(strings.Repeat("\ufdfa", 1000) + " \uff29\uff47\uff4e\uff4f\uff52\uff45 previous")
 	f.Add("\u00bd\u2177\ud55c\uffa1\uffc2e\u0301")
 	for _, s := range fuzzControlTexts {
+		f.Add(s)
+	}
+	for _, s := range fuzzLookalikeTexts {
 		f.Add(s)
 	}
 	f.Fuzz(func(t *testing.T, s string) {
@@ -437,8 +460,29 @@ func FuzzRegexForms(f *testing.F) {
 		if folded := foldMarks(s); valid && len(folded) > len(s) {
 			t.Errorf("len(foldMarks(s)) = %d, want at most len(s) = %d", len(folded), len(s))
 		}
+		checkFuzzSkeleton(t, s)
 		p := prepareText(s)
-		checkFuzzForms(t, "regexForms", p.regexForms(), maxRegexForms, valid)
+		regex := p.regexForms()
+		for i, base := range matchForms(s) {
+			kw, rx := foldMarks(base), foldSkeleton(base)
+			// build adds both folds of every base form, also an invalid one.
+			if !slices.Contains(regex, kw) {
+				t.Errorf("base form %d: regexForms lacks its plain fold %q", i, kw)
+			}
+			if !slices.Contains(regex, rx) {
+				t.Errorf("base form %d: regexForms lacks its skeleton fold %q", i, rx)
+			}
+			if !utf8.ValidString(base) {
+				continue // foldMarks keeps an invalid byte; the bound is for valid text
+			}
+			if len(kw) > len(base) {
+				t.Errorf("base form %d: len(foldMarks) = %d, want at most %d", i, len(kw), len(base))
+			}
+			if len(rx) > len(base) {
+				t.Errorf("base form %d: len(foldSkeleton) = %d, want at most %d", i, len(rx), len(base))
+			}
+		}
+		checkFuzzForms(t, "regexForms", regex, maxRegexForms, valid)
 		checkFuzzForms(t, "keywordForms", p.keywordForms(), maxKeywordForms, valid)
 	})
 }
@@ -462,6 +506,68 @@ func checkFuzzForms(t *testing.T, label string, forms []string, limit int, valid
 			t.Errorf("%s: form %d is a duplicate", label, i)
 		}
 	}
+}
+
+// checkFuzzSkeleton fails the test if skeleton or foldSkeleton breaks a
+// property for s. For any s, skeleton(s) is not longer than s, is
+// idempotent, and differs from s only where a rune of skeletonTable became
+// its ASCII letter (so no rune of the table is left). An invalid byte counts
+// as U+FFFD on both sides, so it must stay. For valid s, foldSkeleton(s) is
+// not longer than s and holds no rune of the table either.
+func checkFuzzSkeleton(t *testing.T, s string) {
+	t.Helper()
+	sk := skeleton(s)
+	if len(sk) > len(s) {
+		t.Errorf("len(skeleton(s)) = %d, want at most len(s) = %d", len(sk), len(s))
+	}
+	if again := skeleton(sk); again != sk {
+		t.Errorf("skeleton is not idempotent: skeleton(%q) = %q", sk, again)
+	}
+	in, out := []rune(s), []rune(sk)
+	if len(in) != len(out) {
+		t.Fatalf("skeleton(s) has %d runes, want %d", len(out), len(in))
+	}
+	for i, r := range in {
+		c, ok := skeletonOf(r)
+		switch {
+		case ok && out[i] != rune(c):
+			t.Errorf("rune %d: skeleton maps U+%04X to %q, want %q", i, r, out[i], c)
+		case !ok && out[i] != r:
+			t.Errorf("rune %d: skeleton changed U+%04X to U+%04X, want it kept", i, r, out[i])
+		}
+	}
+	if !utf8.ValidString(s) {
+		return // foldMarks keeps an invalid byte; the bounds below are for valid text
+	}
+	fs := foldSkeleton(s)
+	if len(fs) > len(s) {
+		t.Errorf("len(foldSkeleton(s)) = %d, want at most len(s) = %d", len(fs), len(s))
+	}
+	for i, r := range fs {
+		if _, ok := skeletonOf(r); ok {
+			t.Errorf("foldSkeleton(s) keeps U+%04X of skeletonTable at offset %d", r, i)
+			return
+		}
+	}
+}
+
+// FuzzSkeleton checks skeleton and foldSkeleton directly (see
+// checkFuzzSkeleton), also on inputs longer than MaxMatchInputBytes. skeleton
+// does not cut the text, and no other code limits it. foldSkeleton cuts the
+// text at MaxMatchInputBytes through foldMarks.
+func FuzzSkeleton(f *testing.F) {
+	for _, s := range fuzzLookalikeTexts {
+		f.Add(s)
+	}
+	for _, s := range fuzzTexts {
+		f.Add(s)
+	}
+	f.Fuzz(func(t *testing.T, s string) {
+		if len(s) > maxFuzzInput {
+			return
+		}
+		checkFuzzSkeleton(t, s)
+	})
 }
 
 // isKnownIgnoreReason reports whether w.Reason is fixed text of ParseIgnore:

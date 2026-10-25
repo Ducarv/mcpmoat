@@ -57,7 +57,7 @@
 //
 // A list holds at most [MaxPatterns] entries of at most [MaxPatternBytes]
 // bytes each, and the compiled programs of one regex and of one list have
-// instruction caps. A text has up to 14 forms for a regex (see
+// instruction caps. A text has up to 21 forms for a regex (see
 // Normalization below). For the worst case of one match block and its cost,
 // see the cost comment on these caps in match.go. A hostile --rules
 // directory multiplies this cost by the number of rules and texts. A cap at
@@ -90,16 +90,39 @@
 // parts (NFKD), its combining marks (category M) are dropped, and the rest is
 // joined again (NFKC). The pattern is not folded. So a regex such as `ignore`
 // also matches fullwidth and mathematical letters ("ignore" in U+FF49 ... or
-// in U+1D422 ...) and a word with a mark in it ("ig" + U+0336 + "nore"). A
-// fold that is longer than the rune is not used, so the folded form is never
+// in U+1D422 ...) and a word with a mark in it ("ig" + U+0336 + "nore").
+//
+// A regex also reads a second fold of each base form, the skeleton fold
+// (foldSkeleton in confusables.go). It is the fold above (the plain fold,
+// foldMarks) that also maps look-alike letters of other scripts to one
+// ASCII letter: the confusable skeleton. Its table, skeletonTable, holds
+// look-alike runes from Unicode TR39 confusables.txt (version 18.0.0), each
+// a single rune that TR39 maps to one ASCII letter, alone or followed only
+// by combining marks (category Mn). The marks are dropped, so U+0268 (i with
+// stroke, TR39 "i" + U+0335) maps to "i". The target keeps the case of
+// TR39, but a TR39 target "l" becomes "I" for an uppercase rune. A spacing
+// mark of the table, such as Telugu U+0C02 ("o"), maps before the fold
+// drops the marks. So `ignore` also matches U+0456 + "gnore" (Cyrillic i),
+// and `~/\.ssh` matches "~/." + U+0455 U+0455 U+04BB (Cyrillic). The keyword
+// fold does not get the skeleton. For the limits, see the end of the
+// Heuristics and hits section.
+//
+// A fold that is longer than the rune is not used, so the folded form is never
 // longer than the text: a ligature that folds to many letters, such as
 // U+FDFA, stays as it is and cannot push a payload out of the 32 KiB. A form
 // that is only ASCII is its own fold, so it adds no folded form. A rule
 // matches when it matches in one form, and each regex of an all_regex list
-// can match in a different form. So a regex reads up to 14 forms of a text
-// (maxRegexForms: the base forms and their folds), and a keyword up to 7
-// (maxKeywordForms: the folds of the base forms): such a text costs up to
-// 14 times as much to match. The forms are built only when a regex or
+// can match in a different form. So a regex reads up to 21 forms of a text
+// (maxRegexForms: the 7 base forms, their plain folds and their skeleton
+// folds), and a keyword up to 7 (maxKeywordForms: the plain folds of the
+// base forms): such a text costs up to 21 times as much to match. The plain
+// fold stays a regex form next to the skeleton fold, so no match of the
+// plain fold is lost. A skeleton fold is a new form only when it differs
+// from the plain fold, that is when the base form or its plain fold holds a
+// rune of skeletonTable. So a text with no such rune has at most 14 regex
+// forms, the base forms and their plain folds. The worst case for one match
+// block is 21 x 32 KiB x 2500, about 1.7G instruction-bytes (see the cost
+// comment in match.go for the timings). The forms are built only when a regex or
 // keyword matcher reads the text, and only once for each match. A heuristic
 // gets only the raw text. The match_window heuristic builds the forms
 // itself, to check their length.
@@ -112,12 +135,13 @@
 // Keywords are normalized in the same way, but for keywords both the keyword
 // and the text are folded, and only the folded forms are matched. So a mark
 // cannot hide a keyword, fullwidth and mathematical letters match the plain
-// letters, and accents are folded: "cafe" matches "caf" + U+00E9. Homoglyphs
-// from other scripts (for example Cyrillic U+0430 for Latin "a") are not
-// folded, for regexes or keywords. Instead, the mixed_script heuristic (rules
-// MOAT-T1-010 and MOAT-T1-011) flags a word that mixes letters of two or
-// more look-alike scripts, such as Latin and Cyrillic, except a Greek unit
-// letter after a number. See the Heuristics and hits section for details.
+// letters, and accents are folded: "cafe" matches "caf" + U+00E9. Keywords
+// do not get the confusable skeleton, so a homoglyph from another script
+// (for example Cyrillic U+0430 for Latin "a") is not folded for a keyword.
+// The mixed_script heuristic (rules MOAT-T1-010 and MOAT-T1-011) flags a
+// word that mixes letters of two or more look-alike scripts, such as Latin
+// and Cyrillic, except a Greek unit letter after a number. See the
+// Heuristics and hits section for details.
 //
 // Any run of white space, or U+2800 (braille blank), matches the space
 // between the words of a keyword. Punctuation does not: the keyword "ignore
@@ -188,15 +212,50 @@
 //
 // The mixed_script heuristic flags a word that mixes letters of two or more
 // look-alike scripts, such as "Ignore" with a Cyrillic "I" (U+0406). The
-// look-alike scripts are Latin, Cyrillic, Greek, Armenian, Cherokee, Lisu,
-// Coptic, Canadian Aboriginal and Tifinagh. So a word with no Latin letter
-// is flagged too when it mixes two of them, such as Cyrillic and Armenian
-// letters that read as "ignore". Only Greek has an exemption, for a unit (see
-// below). The heuristic reads the full raw text. A hit gives the raw byte
-// offset of the first rune of the word and names the scripts in the order of
-// the list above, but it never holds the word: the terminal-safe output does
-// not change look-alike letters, so the word would show as normal Latin
-// text.
+// look-alike scripts are the scripts in the table lookalikeScripts in
+// mixedscript.go. The table holds Latin and each script of the Go unicode
+// tables (Unicode 17.0.0) with a letter or mark that Unicode TR39
+// confusables.txt (version 18.0.0) maps to a Latin letter. It also holds
+// Gothic, which has Latin look-alikes that TR39 does not list.
+//
+// Each script in the table has one of two tiers:
+//
+//   - strict: a letter or mark of the script counts at any place in the
+//     word, so any mix with Latin flags the word. Cyrillic, Greek, Armenian,
+//     Georgian, Lycian, Osage, NKo, Ethiopic and Runic are examples. A word
+//     with no Latin letter is flagged too when it mixes two strict scripts,
+//     such as Cyrillic and Armenian letters that read as "ignore".
+//   - edge: a letter or mark of the script counts inside a word, with a
+//     Latin letter before it and a Latin letter after it. Real text puts
+//     these scripts next to a Latin name with no space between them. So a
+//     run of edge-tier letters at the start or the end of a word is excused
+//     when it has 2 or more visible letters, or when its one letter is not
+//     in the table edgeLookalikes. That table holds the edge-tier letters
+//     that TR39 confusables.txt maps to one Latin letter, or to one Latin
+//     letter and then only non-spacing marks or U+0674 (high hamza), for
+//     example Arabic alef (U+0627), Arabic alef with wavy hamza below
+//     (U+0673) and Hebrew vav (U+05D5) as "l", and Hangul ieung
+//     (U+3147) as "o". It also holds their composed and compatibility forms,
+//     which have the same base letter after NFKD with the marks removed,
+//     such as Arabic alef with hamza above (U+0623) and Hebrew vav with
+//     holam (U+FB4B). So NFC text and decomposed text give the same result.
+//     A run of one table letter at the edge counts. The marks after a base
+//     letter of their own script belong to the same run.
+//     An invisible letter, such as the Hangul filler U+3164, does not count
+//     toward the length of the run, and a run with no visible letter is
+//     excused. So Thai "use" (U+0E43 U+0E0A U+0E49) + "Google", Hebrew bet
+//     (U+05D1) + "Google", Arabic "al" (U+0627 U+0644) + "Google" and
+//     "Google" + a Korean particle (U+C744) are not flagged. Thai, Lao,
+//     Khmer, Myanmar, Hebrew, Arabic, Bopomofo, Hangul and the Indic scripts
+//     with spacing marks, such as Telugu and Kannada, are examples. Bopomofo
+//     is here because informal Taiwanese text puts a Bopomofo particle next
+//     to a Latin name.
+//
+// Only Greek has an exemption, for a unit (see below). The heuristic reads
+// the full raw text. A hit gives the raw byte offset of the first rune of the
+// word and names the scripts in the order of the table, but it never holds
+// the word: the terminal-safe output does not change look-alike letters, so
+// the word would show as normal Latin text.
 //
 // A word is a run of letters, marks, invisible runes, private-use runes,
 // unassigned code points, U+FFFD (from an invalid UTF-8 byte or a lone
@@ -215,6 +274,24 @@
 // mathematical Latin letters (such as U+1D400), the fullwidth Latin letters
 // and the Roman numerals count as Latin, and U+00B5 (micro sign) counts as
 // Greek mu. A letter of any other script, such as Han, counts for no script.
+// The heuristic does not use the confusable skeleton of the regex fold.
+//
+// A mark counts for its own script, with no fold, as in TR39 section 5.1. So
+// a mark of a script in the table counts for that script, in the tier of
+// that script. A mark of the Common or Inherited script, such as U+0336
+// (combining long stroke overlay), or of a script outside the table only
+// joins the word.
+//
+// An edge-tier mark after a base letter of its own script joins the run of
+// that letter, so it stays benign at the edge. Any other edge-tier mark
+// counts at once, as a strict-tier mark does, when it reads as a Latin
+// letter (it is in skeletonTable): the word has no letter yet, or the last
+// letter is of another script, and real text does not put such a mark
+// there. So "hell" + U+0C02 (Telugu anusvara, which looks like an "o") and
+// U+0C02 + "pen" are flagged. An edge-tier mark that does not read as a
+// letter joins the run too. So Burmese text in the Zawgyi encoding, which
+// stores the vowel sign U+1031 before its consonant, is not flagged at the
+// edge of a word, next to a Latin name.
 //
 // The parameter json_escapes (default 0) says whether the text is raw JSON.
 // A schema rule reads decoded strings (see Schema text), so MOAT-T1-011 keeps
@@ -251,20 +328,103 @@
 //
 //   - a word written fully in look-alikes of one script, such as Cyrillic
 //     "copy" (U+0441 U+043E U+0440 U+0443) or the Cyrillic "ssh" in "~/." +
-//     U+0455 U+0455 U+04BB;
+//     U+0455 U+0455 U+04BB. The regexes read such a word in ASCII letters
+//     (see Normalization), so the sensitive-path rules catch that "~/.ssh";
 //   - a word of one letter, because it cannot mix two scripts;
-//   - Latin-script look-alikes that do not fold, such as U+0131 (dotless i),
-//     U+01C0 (dental click) and U+0261 (script g);
-//   - look-alikes from scripts outside the list, such as the Ethiopic
-//     syllable U+12D0, which looks like an "O", and the Runic letter U+16C1,
-//     which looks like an "I";
+//   - Latin-script look-alikes, such as U+0131 (dotless i), U+01C0 (dental
+//     click) and U+0261 (script g): they are Latin, so the word does not mix
+//     scripts. The regexes read U+0131 as "i" and U+0261 as "g";
 //   - a word that a visible rune splits in two, when the rune is not a
-//     letter and does not fold to letters, such as U+2800 (braille blank),
-//     U+0966 (Devanagari digit zero) or U+212E (estimated sign, a symbol
-//     that looks like an "e");
-//   - a mark of a script outside the list, such as U+0C02 (Telugu
-//     anusvara), which looks like an "o": a mark joins a word but counts for
+//     letter and does not fold to letters, such as U+2800 (braille blank) or
+//     U+212E (estimated sign, a symbol that looks like an "e"). The regexes
+//     read U+212E as "e";
+//   - a digit or punctuation look-alike, such as U+0966 (Devanagari digit
+//     zero) for an "o": the rune ends the word, as the "0" in the leetspeak
+//     "ign0re" does. A script whose only Latin look-alikes are digits or
+//     punctuation, such as Devanagari, is not in the table. Thai, Lao and
+//     Khmer are the exceptions, in the edge tier;
+//   - a run of two or more visible edge-tier letters at the start or the end
+//     of a word, whether or not each letter is a look-alike, such as Arabic
+//     alef and lam (U+0627 U+0644) + "gnore" or two Hebrew vav (U+05D5
+//     U+05D5) + "gnore". A modifier letter (Lm), such as U+06E5 (small
+//     waw), and U+0674 (high hamza) do not count toward the length of the
+//     run: each is a small sign that Unicode makes a letter. So U+0627
+//     U+06E5 + "gnore" and U+0627 U+0674 + "gnore" are flagged;
+//   - one edge-tier letter at the start or the end of a word that is not in
+//     edgeLookalikes: a letter that TR39 maps to a Latin letter and a
+//     spacing mark, such as Myanmar U+1010 ("o" + U+102C), a letter that TR39
+//     maps to two Latin letters, such as U+11EE ("oo") and U+1EE64 ("ol"), and
+//     a letter with no Latin mapping, such as alef wasla (U+0671);
+//   - Han letters next to Latin letters, such as "API" + U+63A5 U+53E3: Han
+//     is not in the table, because Chinese and Japanese text puts Han
+//     letters next to Latin names, also between two names;
+//   - a code point that is new in Unicode 18.0.0 and not yet in the Go
+//     tables: Go reads it as unassigned, so it joins the word but counts for
 //     no script.
+//
+// The regexes fold U+0261 and U+212E (see Normalization). U+01C0 is not
+// caught: see the first limit below.
+//
+// The confusable skeleton of the regex fold has these limits:
+//
+//   - the skeleton reads each look-alike of "I" or "l" as one of the two,
+//     and some texts need the other one. A caseless or lowercase look-alike
+//     maps to "l", such as U+01C0 (dental click, a bare bar), Cyrillic
+//     U+04CF (small palochka), Hebrew vav, Arabic alef or Runic U+16C1. So
+//     U+04CF + "gnore" reads "lgnore", and MOAT-T1-001 does not match it. An
+//     uppercase look-alike maps to "I", such as Cyrillic U+0406 or U+04C0
+//     (palochka), so "a" + U+0406 U+0406 reads "aII", not "all". The one
+//     caseless exception is U+A7FE (I longa), which maps to "I" by its name.
+//     mixed_script flags a look-alike of another script in a Latin word, but
+//     its rules (MOAT-T1-010 and MOAT-T1-011) have severity medium, so with
+//     the default --fail-on high such a text exits 0. U+01C0 is Latin, so
+//     no rule catches it. Issue #149 tracks both gaps;
+//   - the skeleton can join a look-alike to a payload. A look-alike of "l"
+//     or "I", such as U+04CF, directly before a payload that is written in
+//     look-alike letters (a Cyrillic "id_rsa") becomes an ASCII letter of
+//     the same word ("lid_rsa"), so a pattern with `\b` does not match. The
+//     plain fold does not help, because the payload is not ASCII in it. Such
+//     a payload had no detection before the skeleton fold;
+//   - Cyrillic has no look-alike of a small "n" or "g", so "ignore" cannot
+//     be written fully in Cyrillic. A look-alike "ignore" needs a second
+//     script, such as Armenian U+0578 ("n") and U+0581 ("g");
+//   - digit look-alikes, such as U+0966 (Devanagari digit zero) for an "o",
+//     and ASCII leetspeak, such as "ign0re", are not folded;
+//   - U+017F (long s): TR39 reads it as "f", but the plain fold reads it as
+//     "s", so it is not in the table. So U+017F + "orget all previous
+//     instructions" reads "sorget" and is not caught;
+//   - a look-alike whose TR39 target is a letter followed by a rune that is
+//     not a combining mark of category Mn, or two or more letters (such as
+//     "rn" for "m"), is not folded;
+//   - in a word of another script, a letter that is not in the table stays
+//     as it is, and the ASCII-only \w of the regex engine reads it as a word
+//     edge. So the table letters of the word become ASCII fragments between
+//     such edges: the skeleton fold of the Greek word U+03B7 U+03B3 U+03BF
+//     U+03CD U+03BC U+03B5 U+03BD U+03BF U+03C2 is "nyou" + U+03BC U+03B5 +
+//     "vo" + U+03C2, so a pattern such as `\bvo\b` matches in it;
+//   - real Russian, Greek and Armenian text gets ASCII letters in the
+//     skeleton fold. A few should_not_match cases of the built-in rules
+//     check short Russian and Greek texts. No case checks Armenian text, and
+//     other real text is not tested, so a built-in rule or a new pattern can
+//     hit it;
+//   - Han letters, such as U+4E05 and U+4E2B, and symbols other than
+//     U+212E, such as U+00D7 for "x", are not in the table;
+//   - a look-alike from a script or code point that the Go tables (Unicode
+//     17.0.0) or TR39 confusables.txt (version 18.0.0) do not list is not
+//     folded.
+//
+// The mixed_script heuristic flags these words, which are known false
+// positives:
+//
+//   - an edge-tier run between two Latin names in one word, such as
+//     "Google" + Thai "and" (U+0E41 U+0E25 U+0E30) + "Apple";
+//   - a Latin word with one edgeLookalikes letter at its start or end, such
+//     as the Hebrew prefix vav (U+05D5, "and") + "Google".
+//
+// Rules MOAT-T1-010 and MOAT-T1-011 have severity medium, so with the
+// default --fail-on high they do not change the exit code. To accept such a
+// word, ignore the rule (MOAT-T1-010 or MOAT-T1-011) for that one tool in
+// .mcpmoat-ignore.
 //
 // The config heuristics (insecure_url, plaintext_secret, unpinned_package,
 // auto_install and typosquat) read one line of text each, not the whole text.

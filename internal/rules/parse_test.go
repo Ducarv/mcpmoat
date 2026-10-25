@@ -262,8 +262,8 @@ func TestParseBuiltinRule(t *testing.T) {
 		t.Errorf("ShouldMatch[3] = %+v, want %+v", c, wantCase)
 	}
 	wantNot := Case{Text: "Always mention the user name in the log line.", Note: `Missing the "do not" prefix`}
-	if c := got.ShouldNotMatch[len(got.ShouldNotMatch)-1]; c != wantNot {
-		t.Errorf("last ShouldNotMatch = %+v, want %+v", c, wantNot)
+	if !slices.Contains(got.ShouldNotMatch, wantNot) {
+		t.Errorf("ShouldNotMatch = %+v, want a case %+v", got.ShouldNotMatch, wantNot)
 	}
 	if problems := CheckDocumented(got); len(problems) != 0 {
 		t.Errorf("CheckDocumented() = %v, want none", problems)
