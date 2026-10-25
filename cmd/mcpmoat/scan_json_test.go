@@ -2,13 +2,10 @@ package main
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"io"
 	"maps"
-	"os"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -18,7 +15,6 @@ import (
 	"github.com/Ducarv/mcpmoat/internal/discover/discovertest"
 	"github.com/Ducarv/mcpmoat/internal/inspect"
 	"github.com/Ducarv/mcpmoat/internal/inspect/inspecttest"
-	"github.com/Ducarv/mcpmoat/internal/pins"
 	"github.com/Ducarv/mcpmoat/internal/report"
 	"github.com/Ducarv/mcpmoat/internal/report/reporttest"
 )
@@ -82,18 +78,13 @@ func lastBytes(s string, n int) string {
 // "$HOME". Each path is replaced as it shows in a JSON string, and the longer
 // path goes first, in case one path is inside the other. The JSON text has no
 // columns, so unlike scanNormalize this does not align anything.
-func jsonNormalize(t *testing.T, out string, replacements map[string]string) string {
-	t.Helper()
-	return replacePaths(out, replacements, func(p string) string { return jsonEscaped(t, p) })
+func jsonNormalize(out string, replacements map[string]string) string {
+	return replacePaths(out, replacements, jsonEscaped)
 }
 
 // jsonEscaped returns s as it shows inside a JSON string, without the quotes.
-func jsonEscaped(t *testing.T, s string) string {
-	t.Helper()
-	b, err := json.Marshal(s)
-	if err != nil {
-		t.Fatal(err)
-	}
+func jsonEscaped(s string) string {
+	b, _ := json.Marshal(s) // a string always marshals
 	return string(b[1 : len(b)-1])
 }
 
@@ -101,7 +92,7 @@ func jsonEscaped(t *testing.T, s string) string {
 func assertNoTempPath(t *testing.T, out string, paths ...string) {
 	t.Helper()
 	for _, p := range paths {
-		if strings.Contains(out, p) || strings.Contains(out, jsonEscaped(t, p)) {
+		if strings.Contains(out, p) || strings.Contains(out, jsonEscaped(p)) {
 			t.Errorf("normalized output still holds the real path %q:\n%s", p, out)
 		}
 	}
@@ -154,7 +145,7 @@ func TestScanJSONNoConnectGolden(t *testing.T) {
 		t.Errorf("second run wrote other bytes\nfirst:\n%s\nsecond:\n%s", first, again)
 	}
 
-	got := jsonNormalize(t, first, map[string]string{home: "$HOME", work: "$WORK"})
+	got := jsonNormalize(first, map[string]string{home: "$HOME", work: "$WORK"})
 	assertNoTempPath(t, got, home, work)
 	assertScanGolden(t, "scan_json_no_connect_full", []byte(got))
 }
@@ -250,7 +241,7 @@ func TestScanJSONPinsGolden(t *testing.T) {
 		t.Errorf("finding rule IDs = %v, want at least one MOAT-T2 pin finding", rules)
 	}
 
-	got := jsonNormalize(t, second.stdout, map[string]string{
+	got := jsonNormalize(second.stdout, map[string]string{
 		e.home: "$HOME", e.work: "$WORK", e.xdg: "$XDG", filepath.Dir(e.config): "$CONFIG",
 	})
 	assertNoTempPath(t, got, e.home, e.work, e.xdg, filepath.Dir(e.config))
@@ -488,9 +479,7 @@ func TestScanJSONMatchesTerminal(t *testing.T) {
 				if got, want := findingRuleIDs(doc), column(findingRows(t, termOut), 0); !slices.Equal(got, want) {
 					t.Errorf("finding rule IDs = %v, want %v (the order of the findings table)", got, want)
 				}
-			}
-
-			if len(doc.Servers) == 0 {
+			} else {
 				if !strings.Contains(jsonOut, `"servers": []`) {
 					t.Errorf("stdout has no \"servers\": [] (a null list breaks consumers):\n%s", jsonOut)
 				}
@@ -694,31 +683,4 @@ func TestScanJSONEscapesUntrustedText(t *testing.T) {
 		t.Errorf("servers = %+v, want one server named %q", doc.Servers, wantName)
 	}
 	assertContainsAll(t, "stdout", out, []string{`\u001b`, `\u0085`, `\u202e`})
-}
-
-// setPinCanonical sets the canonical text of the pinned tool in pins.json of
-// e, with the matching hash, so the store still loads it.
-func setPinCanonical(t *testing.T, e *pinEnv, tool, canonical string) {
-	t.Helper()
-	var doc map[string]any
-	if err := json.Unmarshal(readFileBytes(t, e.pinsPath()), &doc); err != nil {
-		t.Fatal(err)
-	}
-	servers, _ := doc["servers"].([]any)
-	if len(servers) != 1 {
-		t.Fatalf("pins.json has %d servers, want 1", len(servers))
-	}
-	tools, _ := servers[0].(map[string]any)["tools"].(map[string]any)
-	if _, ok := tools[tool]; !ok {
-		t.Fatalf("pins.json has no tool %q", tool)
-	}
-	sum := sha256.Sum256([]byte(canonical))
-	tools[tool] = map[string]any{"hash": pins.HashVersion + ":" + hex.EncodeToString(sum[:]), "canonical": canonical}
-	data, err := json.Marshal(doc)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(e.pinsPath(), data, 0o600); err != nil {
-		t.Fatal(err)
-	}
 }

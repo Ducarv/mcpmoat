@@ -13,8 +13,9 @@ import (
 )
 
 // SchemaVersion is the version of the JSON report format (FR-15). Bump it,
-// and add docs/schema/scan-output.v<N>.json, when a field is renamed, removed
-// or changes type or meaning.
+// and add docs/schema/scan-output.v<N>.json, when a field is added, renamed or
+// removed, or changes type or meaning. An added field needs a bump too: every
+// object in the schema sets additionalProperties to false.
 const SchemaVersion = 1
 
 // Mode tells if a scan connected to the servers. It is the type of
@@ -91,7 +92,7 @@ type JSONServer struct {
 
 // JSONInspection tells what happened when mcpmoat inspected a server.
 type JSONInspection struct {
-	// Status is one of the Inspection constants.
+	// Status is one of the InspectionStatus constants.
 	Status InspectionStatus `json:"status"`
 }
 
@@ -131,8 +132,8 @@ type JSONFileError struct {
 	Untrusted   bool   `json:"untrusted"`
 }
 
-// NewJSONServer converts s to its JSON form. status is one of the Inspection
-// constants. The command line and the URL are redacted like in WriteServers.
+// NewJSONServer converts s to its JSON form. status is one of the
+// InspectionStatus constants. The command line and the URL are redacted like in WriteServers.
 // The text is not quoted: JSON escaping does that job (see WriteJSON).
 func NewJSONServer(s discover.Server, status InspectionStatus) JSONServer {
 	js := JSONServer{
@@ -195,9 +196,9 @@ func NewJSONFileError(e *discover.FileError) JSONFileError {
 // them, and commands and URLs are redacted when the JSON types are built.
 //
 // Names, paths and diffs come from untrusted servers. Valid UTF-8 text stays
-// lossless (encoding/json writes invalid bytes as U+FFFD), but every non-ASCII character that is not printable or not visible is
-// written as a \uXXXX escape, in addition to the escapes of encoding/json for
-// control characters. So a terminal that shows the output does not run
+// lossless (encoding/json writes invalid bytes as U+FFFD), but every non-ASCII
+// character that is not printable or not visible is written as a \uXXXX
+// escape, in addition to the escapes of encoding/json for control characters. So a terminal that shows the output does not run
 // control sequences or bidi tricks.
 //
 // WriteJSON writes once, after it has built the whole output, and wraps the

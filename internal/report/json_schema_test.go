@@ -24,8 +24,8 @@ func TestSchemaMatchesGoTypes(t *testing.T) {
 		t.Fatalf("parse schema: %v", err)
 	}
 
-	props, _ := root["properties"].(map[string]any)
-	if sv, _ := props["schema_version"].(map[string]any); !reflect.DeepEqual(sv["const"], float64(report.SchemaVersion)) {
+	props := mapOf(root["properties"])
+	if sv := mapOf(props["schema_version"]); !reflect.DeepEqual(sv["const"], float64(report.SchemaVersion)) {
 		t.Errorf("schema_version in the schema is %v, want {const: %d}", props["schema_version"], report.SchemaVersion)
 	}
 
@@ -33,8 +33,7 @@ func TestSchemaMatchesGoTypes(t *testing.T) {
 	checkSchemaObject(t, root, reflect.TypeFor[report.ScanReport](), root, visited)
 
 	// Every definition must be used by some Go type. An orphan is a stale one.
-	defs, _ := root["$defs"].(map[string]any)
-	for name := range defs {
+	for name := range mapOf(root["$defs"]) {
 		if !visited[name] {
 			t.Errorf("$defs/%s is not used by any field of ScanReport", name)
 		}
@@ -49,7 +48,7 @@ func checkSchemaObject(t *testing.T, root map[string]any, typ reflect.Type, s an
 	if obj["additionalProperties"] != false {
 		t.Errorf("schema of %s must set additionalProperties to false", typ.Name())
 	}
-	props, _ := obj["properties"].(map[string]any)
+	props := mapOf(obj["properties"])
 	var wantNames, wantRequired []string // from the Go type
 	for f := range typ.Fields() {
 		name, opts, _ := strings.Cut(f.Tag.Get("json"), ",")
@@ -78,11 +77,12 @@ func checkSchemaObject(t *testing.T, root map[string]any, typ reflect.Type, s an
 	}
 
 	file := reporttest.SchemaName()
+	const bumpHint = "Adding, renaming, removing or changing a field needs a schema_version bump and a new schema file."
 	if d := setDiff(wantNames, gotNames); d != "" {
-		t.Errorf("field set of %s differs from %s: %s. Renaming, removing or changing a field needs a schema_version bump and a new schema file.", typ.Name(), file, d)
+		t.Errorf("field set of %s differs from %s: %s. %s", typ.Name(), file, d, bumpHint)
 	}
 	if d := setDiff(wantRequired, gotRequired); d != "" {
-		t.Errorf("required fields of %s differ from %s: %s. Renaming, removing or changing a field needs a schema_version bump and a new schema file.", typ.Name(), file, d)
+		t.Errorf("required fields of %s differ from %s: %s. %s", typ.Name(), file, d, bumpHint)
 	}
 
 	// Walk into nested structs and slices of structs.

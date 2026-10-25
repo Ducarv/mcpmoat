@@ -213,9 +213,9 @@ func TestScanHelpMatchesUsage(t *testing.T) {
 	}
 }
 
-// replacePaths replaces each path of replacements, in the form that form
-// gives, with its placeholder. The longer path goes first, in case one path is
-// inside the other.
+// replacePaths replaces each path of replacements with its placeholder. form
+// maps a path to the text to search for: the raw path, or its JSON-escaped
+// form. The longer path goes first, in case one path is inside the other.
 func replacePaths(out string, replacements map[string]string, form func(string) string) string {
 	paths := slices.SortedFunc(maps.Keys(replacements), func(a, b string) int { return cmp.Compare(len(b), len(a)) })
 	for _, p := range paths {

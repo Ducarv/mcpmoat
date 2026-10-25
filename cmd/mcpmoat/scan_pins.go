@@ -15,8 +15,11 @@ import (
 // each inspected server against pins.json, and the ignore lists of the pin
 // rules.
 
-// pinReport is the result of the pin step: what scan adds to its report, and
-// what it must still save.
+// pinReport is the result of the connect step of scan: the inspection status
+// of each server, and from the pin step what scan adds to its report and what
+// it must still save. The status lives here because inspectAndPin returns only
+// this value, and because two servers with one identity get their status by
+// the same rule that checkOutcome uses (see recordInspection).
 type pinReport struct {
 	// rows are the pin findings that the ignore list does not drop, in the
 	// order of the servers, then of the tools.
@@ -38,7 +41,7 @@ type pinReport struct {
 	// pinned has no hint: pin --accept would refuse those tools (see addHint).
 	hints []acceptHint
 	// inspection holds the inspection status of each server that scan
-	// inspected, as one of the report.Inspection constants. It is keyed by
+	// inspected, as one of the report.InspectionStatus constants. It is keyed by
 	// serverIdentity, because inspect.Run sorts the servers, so the outcomes
 	// are not in the order of the server table. A server that is not in the
 	// map was not inspected: the --json report shows it as not run (see
@@ -102,8 +105,8 @@ func (c *cli) pinOutcomes(store *pins.Store, outcomes []inspect.Outcome, ign *sc
 		handled: make(map[pins.Identity]bool),
 		failed:  make(map[pins.Identity]bool),
 		warned:  make(map[string]bool),
+		res:     pinReport{inspection: make(map[pins.Identity]report.InspectionStatus, len(outcomes))},
 	}
-	p.res.inspection = make(map[pins.Identity]report.InspectionStatus, len(outcomes))
 	servers := make([]discover.Server, len(outcomes))
 	for i, o := range outcomes {
 		p.recordInspection(o)
@@ -151,8 +154,8 @@ func (p *pinner) recordInspection(o inspect.Outcome) {
 	}
 }
 
-// inspectionStatus maps the outcome of an inspection to a report.Inspection
-// constant. It reads the status and the kind of the error, never the error
+// inspectionStatus maps the outcome of an inspection to a
+// report.InspectionStatus constant. It reads the status and the kind of the error, never the error
 // text. A refusal comes first: a gate that refuses a server also sets
 // inspect.StatusFailed.
 func inspectionStatus(o inspect.Outcome) report.InspectionStatus {

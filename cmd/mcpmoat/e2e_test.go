@@ -28,6 +28,7 @@ import (
 	"github.com/Ducarv/mcpmoat/internal/discover/discovertest"
 	"github.com/Ducarv/mcpmoat/internal/inspect/inspecttest"
 	"github.com/Ducarv/mcpmoat/internal/pins"
+	"github.com/Ducarv/mcpmoat/internal/report"
 	"github.com/Ducarv/mcpmoat/internal/rules"
 )
 
@@ -654,8 +655,8 @@ func TestE2EScanJSON(t *testing.T) {
 			if err := dec.Decode(new(any)); !errors.Is(err, io.EOF) {
 				t.Errorf("stdout has more than one JSON document (err = %v):\n%s", err, stdout)
 			}
-			if doc["schema_version"] != float64(1) || doc["mode"] != "no-connect" {
-				t.Errorf("schema_version = %v, mode = %v, want 1 and no-connect", doc["schema_version"], doc["mode"])
+			if doc["schema_version"] != float64(report.SchemaVersion) || doc["mode"] != "no-connect" {
+				t.Errorf("schema_version = %v, mode = %v, want %d and no-connect", doc["schema_version"], doc["mode"], report.SchemaVersion)
 			}
 			if servers, _ := doc["servers"].([]any); len(servers) == 0 {
 				t.Errorf("servers = %v, want a non-empty array", doc["servers"])

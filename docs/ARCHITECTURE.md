@@ -27,6 +27,7 @@ internal/
   rules/                loads YAML rules, applies regex and heuristics
   pins/                 tool hash, pins.json store, change detection and diff
   report/               terminal and JSON output
+    reporttest/         test helpers for report: schema loader, unsafe-byte check
 rules/                  built-in rules (go:embed)
 testdata/               fixtures for tests and the demo
   configs/              example client configs
@@ -63,16 +64,21 @@ docs/                   PRD and other documentation
   `rules/embed.go` embeds both with `go:embed`. It holds data only. `internal/rules` parses it.
 - `testdata/`: fixtures. `testdata/servers` holds malicious example servers. `testdata/configs`
   holds example client configs. Other folders hold fixtures for single packages.
-- `internal/discover/discovertest` and `internal/inspect/inspecttest`: helpers for tests in other
-  packages. `inspecttest.Fake` is an `Inspector` that returns canned results. A test that uses
-  `Fake` never starts a real server. `inspecttest.Fixture` builds one fixture server
-  under `testdata/servers/` and returns the path of its binary. The test starts it.
+- `internal/discover/discovertest`, `internal/inspect/inspecttest` and
+  `internal/report/reporttest`: helpers for tests in other packages. `inspecttest.Fake` is an
+  `Inspector` that returns canned results. A test that uses `Fake` never starts a real server.
+  `inspecttest.Fixture` builds one fixture server under `testdata/servers/` and returns the path of
+  its binary. The test starts it. `reporttest` loads the JSON Schema of the current
+  `schema_version` and checks output for raw bytes that can act on a terminal.
 
 ## Import direction
 
 Imports go one way. A package in the table imports only the packages in its row. The table lists
-the product packages and non-test imports. Tests also import `inspecttest` and `discovertest`.
-`inspecttest` imports `discover` and `inspect`. `discovertest` imports no module package.
+the product packages and non-test imports. Tests also import `inspecttest`, `discovertest` and
+`reporttest`. `inspecttest` imports `discover` and `inspect`. `discovertest` imports no module
+package. `reporttest` imports `report`, `termsafe` and the external module
+`github.com/google/jsonschema-go`. A depguard rule in `.golangci.yml` allows each of the three
+only in `_test.go` files, so none of them reaches the binary.
 
 | Package | Imports (module packages only) |
 |---|---|
@@ -483,9 +489,12 @@ Shape (`schema_version` 1):
   `not_run` means that mcpmoat did not connect. This is the case in `no-connect` mode. It also
   happens in `connect` mode when the inspection or the pin step fails as a whole (for example,
   `pins.json` cannot be read). Then `mode` is `connect`, every server is `not_run`, `complete` is
-  `false`, the exit code is 2 and the reason is on stderr.
-- A finding has `rule_id`, `severity`, `server`, `field`, `key` and `related`. `related` holds key
-  names only, never values.
+  `false`, the exit code is 2 and the reason is on stderr. Two servers with the same identity
+  (client, source, project path and name) share one status: `ok` when one of them was inspected,
+  because `checkOutcome` then checks the tools of the first one that was inspected. The duplicate
+  also gives a `MOAT-T2-004` finding.
+- A finding has `rule_id`, `severity`, `server`, `field`, `key` and `related`. `related` is a
+  second name (a key or a server) or a fixed reason text, never a value.
 - A diff has `server`, `tool`, `kind` (`changed`, `new` or `unverified`), `diff`,
   `diff_truncated` and `diff_is_note`. When `diff_is_note` is true, `diff` is a fixed note of
   mcpmoat, not a unified diff: the diff could not be made, or the change does not show in the
@@ -516,10 +525,9 @@ text before it prints it. This is the JSON form of the rule in
 [Where untrusted text is escaped](#where-untrusted-text-is-escaped). `termsafe` quotes text for the
 terminal. JSON escaping does the same job here.
 
-Version policy: a rename, a removal, an added field, or a change of the type or the meaning of a
-field bumps `SchemaVersion` and adds `docs/schema/scan-output.v<N>.json`. A new field also needs a
-new version, because every object in the schema sets `additionalProperties: false`, so the old
-schema rejects it. `internal/report/reporttest` loads the schema file of the current version for
+Version policy: a rename, a removal, an added field (every object in the schema sets
+`additionalProperties: false`, so the old schema rejects it), or a change of the type or the
+meaning of a field bumps `SchemaVersion` and adds `docs/schema/scan-output.v<N>.json`. `internal/report/reporttest` loads the schema file of the current version for
 the tests in `internal/report` and `cmd/mcpmoat`. A test in `internal/report` compares the struct
 tags of the Go types with the schema file of the current version, and fails when they differ. A
 second test validates sample output against the schema. The limit: the tests cannot stop someone

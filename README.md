@@ -43,6 +43,8 @@ mcpmoat scan --json | jq -r '.findings[] | "\(.rule_id) \(.server)"'
 - **Exit codes** do not change: 0, 1 or 2 (see [Pins and rug pulls](#pins-and-rug-pulls)).
 - **`complete`** is `false` when the report can miss results, for example when a config file has a
   problem or `pins.json` cannot be read. The exit code is then 2, and the reason is on stderr.
+  `complete` can be `true` with exit code 2 when the save of new pins fails after the report, so
+  always check the exit code too.
 - The document never holds env or header values. A finding names the key it is about, for example
   `GITHUB_TOKEN`, never its value. See [JSON output](docs/ARCHITECTURE.md#json-output) for the full
   redaction and escaping rules.

@@ -299,8 +299,12 @@ func (c *cli) reportScan(ctx context.Context, res discover.Result, configPath st
 
 	var writeErr error
 	if setup.jsonOut {
+		mode := report.ModeNoConnect
+		if setup.connect != nil {
+			mode = report.ModeConnect
+		}
 		complete := !pinFailed && len(res.Errors) == 0
-		writeErr = c.writeScanJSON(res, rows, pr, setup.connect != nil, complete)
+		writeErr = c.writeScanJSON(mode, complete, res, rows, pr)
 	} else {
 		writeErr = c.writeScanReport(res.Servers, rows, pr, configPath, len(res.Errors) > 0)
 	}
