@@ -8,8 +8,9 @@ on:
 permissions: {}
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
-  # Never stop a release half way through.
+  # One release at a time, for all tags, so an older run cannot finish last
+  # and move the tap back. Never stop a release half way through.
+  group: ${{ github.workflow }}
   cancel-in-progress: false
 
 jobs:
@@ -89,8 +90,10 @@ jobs:
 
       # GitHub creates a missing environment on the first run, with no
       # reviewer and no tag limit. Its secret is missing too, so stop here,
-      # before GoReleaser writes anything. The expression gives only true or
-      # false, so the token itself never reaches this step.
+      # before GoReleaser writes anything. A repository or organization secret
+      # with the same name also passes this check, so keep the token an
+      # environment secret only. The expression gives only true or false, so
+      # the token itself never reaches this step.
       - name: Check that the release environment is set up
         env:
           HAS_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_GITHUB_TOKEN != '' }}
@@ -167,13 +170,24 @@ jobs:
           }
 
           check_assets draft
+          # --cert-identity is an exact match on the signing workflow and its
+          # ref. Some gh versions match --signer-workflow as a prefix only.
           for f in draft/*; do
             gh attestation verify "$f" -R "$GITHUB_REPOSITORY" \
-              --signer-workflow "$GITHUB_REPOSITORY/.github/workflows/release.yml" \
+              --cert-identity "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/.github/workflows/release.yml@$GITHUB_REF" \
               --source-ref "$GITHUB_REF" \
               --source-digest "$GITHUB_SHA" \
               --deny-self-hosted-runners
           done
+
+          # The tag must still point at the commit that this run built, or
+          # the published release would lock on another commit. The commits
+          # API resolves an annotated tag to its commit.
+          tag_sha=$(gh api "repos/$GITHUB_REPOSITORY/commits/refs/tags/$GITHUB_REF_NAME" -q .sha)
+          if [ "$tag_sha" != "$GITHUB_SHA" ]; then
+            echo "The tag $GITHUB_REF_NAME now points at $tag_sha, not at $GITHUB_SHA. Not publishing."
+            exit 1
+          fi
 
           gh release edit "$GITHUB_REF_NAME" -R "$GITHUB_REPOSITORY" --draft=false
 

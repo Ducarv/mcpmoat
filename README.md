@@ -19,8 +19,8 @@ These methods will work from the first release:
 - GitHub Releases: download the archive for your system from the
   [releases page](https://github.com/Ducarv/mcpmoat/releases). The archives are
   `mcpmoat_<version>_<os>_<arch>.tar.gz` for `darwin` or `linux` and `amd64` or `arm64`.
-  `<version>` is the release number without the `v`, for example `0.1.0`. Each archive holds one
-  `mcpmoat` binary. The Linux binary is static. The macOS binary links only the macOS system
+  `<version>` is the release number without the `v`, for example `0.1.0`. Each archive holds the
+  `mcpmoat` binary, `LICENSE` and `README.md`. The Linux binary is static. The macOS binary links only the macOS system
   library (libSystem), like every Go binary on macOS. Extract the binary and put it on your `PATH`.
 
 Run `mcpmoat version` to check the install. A release binary prints
@@ -43,12 +43,14 @@ The real check is the build provenance attestation of the archive. Check it with
 
 ```sh
 gh attestation verify mcpmoat_<version>_<os>_<arch>.tar.gz -R Ducarv/mcpmoat \
-  --signer-workflow Ducarv/mcpmoat/.github/workflows/release.yml \
+  --cert-identity https://github.com/Ducarv/mcpmoat/.github/workflows/release.yml@refs/tags/v<version> \
   --source-ref refs/tags/v<version> --deny-self-hosted-runners
 ```
 
 The check proves which repo, workflow and tag built the archive. It does not prove that the code
-was reviewed.
+was reviewed. Use `--cert-identity` as above, not `--signer-workflow`: some `gh` versions match
+`--signer-workflow` as a prefix only, so `release.yml` would also match another workflow file
+whose name starts with `release.yml`.
 
 Homebrew does not check the attestation. `brew install` checks only the sha256 values in the cask
 from the tap. To check the cask, run the command above on `checksums.txt`, with the same flags.
