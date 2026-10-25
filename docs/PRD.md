@@ -419,20 +419,29 @@ references:
 
 ### 6.4 Pins (rug-pull detection)
 
-**FR-11: Store pins.** On first run, store the SHA-256 of each tool's name, description, schema and
-annotations in `~/.config/mcpmoat/pins.json`. The annotations are the title and the four hints
-`readOnlyHint`, `destructiveHint`, `idempotentHint` and `openWorldHint`. An absent hint is different
-from a set hint.
+**FR-11: Store pins.** On first run, store the SHA-256 of each tool's name, title, description,
+input schema, output schema and annotations in `~/.config/mcpmoat/pins.json`. The annotations are
+the title and the four hints `readOnlyHint`, `destructiveHint`, `idempotentHint` and
+`openWorldHint`. An absent hint is different from a set hint.
 
 - The hash input is a canonical serialisation: the same tool with JSON keys in a different order
   gives the same hash.
-- A change of one character in name, description or schema gives a different hash.
+- A change of one character in the name, title, description or a schema gives a different hash,
+  except a number change within the float64 limit below.
 - A change of one annotation hint gives a different hash.
+- Each hash starts with its version (`sha256-v1:`). When a stored hash has another version, mcpmoat
+  shows the tool as not verified and pins it again. It never accepts the tool silently.
 - The pins file has a format version field and is written atomically (temp file plus rename).
 - `XDG_CONFIG_HOME` is honoured when set.
 
-Known limit: the Go SDK decodes `readOnlyHint` and `idempotentHint` as a plain `bool`. So for these
-two hints, "absent" and "false" are the same. A change to `true` is always visible.
+Known limits: the Go SDK decodes `readOnlyHint` and `idempotentHint` as a plain `bool`. So for
+these two hints, "absent" and "false" are the same. A change to `true` is always visible. The SDK
+decode and the canonical serialisation pass every schema number through `float64`. So a number that
+a `float64` cannot hold exactly is rounded (an integer above 2^53, a long decimal, or a value that
+underflows to zero), and a change only in such digits does not change the hash. The hash does not
+cover a tool's `_meta` and `icons`, because `inspect` drops them. So a change only in `_meta` or
+`icons` does not change the hash. This is an accepted limit. Issue #153 will keep them in `inspect`
+and hash them before v1.0.0.
 
 **FR-12: Detect changes.** On later runs, warn about new, removed or changed tools, showing the
 text diff.

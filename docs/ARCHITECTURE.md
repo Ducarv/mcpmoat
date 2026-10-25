@@ -20,7 +20,7 @@ internal/
   inspect/              connects to servers, reads tools, prompts and resources
     inspecttest/        test helpers for inspect, including Fake
   rules/                loads YAML rules, applies regex and heuristics
-  pins/                 pins.json store (hashing and diff planned)
+  pins/                 tool hash and pins.json store (diff planned)
   report/               terminal output
 rules/                  built-in rules (go:embed)
 testdata/               fixtures for tests and the demo
@@ -40,8 +40,9 @@ docs/                   PRD and other documentation
   package that imports the MCP SDK (see [The `internal/inspect` interface](#the-internalinspect-interface)).
 - `internal/rules`: loads and checks the YAML rules, runs the config heuristics and the shadowing
   check, and reads `.mcpmoat-ignore`.
-- `internal/pins`: the versioned `pins.json` store: `Load`, `Get`, `Set`, `Save` and `DefaultPath`. See
-  [The `pins.json` store](#the-pinsjson-store).
+- `internal/pins`: computes the canonical hash of each tool (`Canonical`, `Hash`), and keeps the
+  versioned `pins.json` store (`Load`, `Get`, `Set`, `Save` and `DefaultPath`). See
+  [Tool hash](#tool-hash) and [The `pins.json` store](#the-pinsjson-store).
 - `internal/report`: writes the terminal tables: the servers (`WriteServers`) and the config findings
   (`WriteFindings`).
 - `rules/`: the built-in rule files (`rules/*.yaml`) and `data/popular-servers.txt`. The Go file
@@ -67,7 +68,7 @@ the product packages and non-test imports. Tests also import `inspecttest` and `
 | `internal/inspect` | `discover` |
 | `internal/rules` | `discover`, `inspect`, `safefile`, `termsafe`, `rules` (the embedded data) |
 | `internal/report` | `discover`, `termsafe` |
-| `internal/pins` | `safefile` |
+| `internal/pins` | `inspect`, `safefile` |
 | `cmd/mcpmoat` | `discover`, `inspect`, `report`, `rules`, `termsafe` |
 
 `internal/inspect` does not import `termsafe`. The report layer escapes what `inspect` returns.
@@ -124,6 +125,22 @@ The target flow is `discover -> inspect -> rules -> pins -> report`:
 - `pins` hashes each tool and reports new, removed and changed tools (rug pulls).
 - `report` prints the findings, as a table and as JSON.
 - The exit code is 1 when a finding is at or above `--fail-on`.
+
+## Tool hash
+
+`pins.Hash` gives the pin hash of one `inspect.Tool` (FR-11, threat T2).
+
+- Input: the six `inspect.Tool` fields, in a canonical form that uses RFC 8785 (JCS), through the
+  standard library `encoding/json/jsontext`.
+- Output: `sha256-v1:<hex>`. The prefix is `HashVersion`.
+- Golden hashes: `testdata/pins/hash/golden.txt`, for the fixtures in
+  `testdata/pins/hash/tools.json`.
+
+The doc comments own the rules. `Canonical` owns the shape, null handling, errors, no normalisation
+and the known limits. `HashVersion` owns when the version changes and what the store does with a
+stored hash of another version. Read them with `go doc ./internal/pins Canonical` and
+`go doc ./internal/pins HashVersion`. The accepted limits are requirements in
+[PRD FR-11](PRD.md#64-pins-rug-pull-detection).
 
 ## The `internal/inspect` interface
 
