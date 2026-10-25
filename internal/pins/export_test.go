@@ -6,5 +6,9 @@ const (
 	MaxServerSize = maxServerSize
 )
 
-// WantPerm checks the mode bits of a path (see wantPerm in atomic_test.go).
-var WantPerm = wantPerm
+// Test helpers from atomic_test.go, shared with the external test package.
+var (
+	WantPerm = wantPerm
+	ReadFile = readFile
+	DirNames = dirNames
+)

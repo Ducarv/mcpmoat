@@ -25,7 +25,7 @@ func dirNames(t *testing.T, dir string) []string {
 }
 
 // readFile reads path and fails the test on an error. It is the one place
-// that carries the gosec exception. The hooks run on the test goroutine, so
+// that carries the gosec exception; store_test.go uses it as pins.ReadFile. The hooks run on the test goroutine, so
 // they can call it too: t.Fatal there still runs the cleanup in writeFile.
 func readFile(t *testing.T, path string) []byte {
 	t.Helper()

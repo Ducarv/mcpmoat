@@ -25,8 +25,8 @@ const CurrentVersion = 1
 // maxFileSize is the largest pins.json that Load reads, in bytes.
 const maxFileSize = 8 << 20
 
-// maxServerSize is the largest entry of one server that Set accepts, in bytes
-// of compact JSON. A server with 100 tools needs about 10 KiB. A server sends
+// maxServerSize is the largest entry of one server that Load and Set accept,
+// in bytes of compact JSON. A server with 100 tools needs about 10 KiB. A server sends
 // its own tool names, so this cap stops one server from filling the file
 // alone and making Save fail for all servers.
 const maxServerSize = 256 << 10
@@ -39,9 +39,8 @@ var ErrUnsupportedVersion = errors.New("unsupported pins.json version")
 // Identity names one MCP server in the pins store.
 //
 // The fields hold the client, the config file, the project path and the
-// server name only. They
-// never hold a secret: no args, URL, env, headers or command. ProjectPath is
-// empty for a global server.
+// server name only. They never hold a secret: no args, URL, env, headers or
+// command. ProjectPath is empty for a global server.
 //
 // All fields are strings, so Identity is comparable and a valid map key.
 type Identity struct {
@@ -117,7 +116,7 @@ func DefaultPath(getenv func(string) string, homeDir func() (string, error)) (st
 		// A relative home would put pins.json under the working directory, which
 		// can be a cloned repository.
 		if !filepath.IsAbs(home) {
-			return "", errors.New("the home directory for pins.json is not an absolute path")
+			return "", fmt.Errorf("the home directory %q for pins.json is not an absolute path", home)
 		}
 		base = filepath.Join(home, ".config")
 	}
@@ -127,15 +126,18 @@ func DefaultPath(getenv func(string) string, homeDir func() (string, error)) (st
 // Load reads the pins file at path.
 //
 // A missing file (or a missing directory) is the first run: Load returns an
-// empty Store that saves to path. Any other problem is an error, also a
-// missing or null key, and Load never replaces a bad file with an empty
-// store, because that would pin a poisoned server as trusted. The errors name
-// the path and the position of the problem, and never hold file content. A
-// file with a newer format version gives an error that wraps
-// ErrUnsupportedVersion. A pins.json symlink is refused
-// (safefile.ErrOutsideRoot) when it is absolute or leaves its directory. A
-// pins.json symlink or a directory symlink with a missing target, and a
-// directory path that is not a directory, are errors too. Save replaces a
+// empty Store that saves to path.
+//
+// Any other problem is an error, also a missing or null key or a server that
+// Set would refuse. Load never replaces a bad file with an empty store,
+// because that would pin a poisoned server as trusted. The errors name the
+// path and the position of the problem, and never hold file content. A file
+// with a newer format version gives an error that wraps ErrUnsupportedVersion.
+//
+// A pins.json symlink is refused (safefile.ErrOutsideRoot) when it is
+// absolute or leaves its directory. A symlink with a missing target (the file,
+// its directory or a parent of the directory) and a directory path that is
+// not a directory are errors, not a first run. Save replaces a pins.json
 // symlink with a regular file.
 func Load(path string) (*Store, error) {
 	s := &Store{path: path, servers: make(map[Identity]ServerPins)}
@@ -186,16 +188,32 @@ func Load(path string) (*Store, error) {
 // target, and a directory path that is not a directory, as not found. Then the
 // real file is gone, which is not a first run, and Save would replace the link
 // or fail after the scan.
+//
+// The path can change between the read and these checks. Only a process that
+// can already write the directory can do that, and it could change pins.json
+// directly, so the race is accepted.
 func checkFirstRun(path string) error {
 	if fi, err := os.Lstat(path); err == nil && fi.Mode()&os.ModeSymlink != 0 {
 		return fmt.Errorf("read %s: the target of the symlink is missing", path)
 	}
+	// Find the nearest directory on the path that exists. Lstat does not
+	// follow a symlink at the end, so a dangling symlink (for example
+	// ~/.config to a volume that is not mounted) is found here, and the Stat
+	// below refuses it. Save creates the missing directories under it.
 	dir := filepath.Dir(path)
-	if _, err := os.Lstat(dir); err != nil {
-		if errors.Is(err, fs.ErrNotExist) {
-			return nil // The directory is missing too: a first run.
+	for {
+		_, err := os.Lstat(dir)
+		if err == nil {
+			break
 		}
-		return fmt.Errorf("read %s: %w", path, err)
+		if !errors.Is(err, fs.ErrNotExist) {
+			return fmt.Errorf("read %s: %w", path, err)
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			return nil // Nothing on the path exists.
+		}
+		dir = parent
 	}
 	if fi, err := os.Stat(dir); err != nil || !fi.IsDir() {
 		return fmt.Errorf("read %s: %s is not a directory, or it is a symlink with a missing target", path, dir)
@@ -249,9 +267,10 @@ func (s *Store) Get(id Identity) (ServerPins, bool) {
 //
 // Set refuses a server that Load would refuse: an empty server name, an empty
 // tool name, an empty hash, text that is not valid UTF-8, or an entry larger
-// than 256 KiB as compact JSON. Then the store does not change, and the
-// caller can still save the other servers. The errors hold no tool names,
-// because the server chose them, and no server context: the caller adds it.
+// than maxServerSize (256 KiB) as compact JSON. Every error from Set is such a
+// refusal. Then the store does not change, and the caller can still save the
+// other servers. The errors hold no tool names, because the server chose
+// them, and no server context: the caller adds it.
 //
 // The server chose the data that Set refuses, so a hostile server can make
 // itself impossible to pin. The caller must report a refused server (for
@@ -290,7 +309,8 @@ func cloneOrEmpty(p ServerPins) ServerPins {
 // same store always gives the same bytes.
 //
 // Load and Set check each server, so Save checks only the whole file: it
-// refuses data larger than the size limit of Load, and the old file stays.
+// refuses data larger than maxFileSize (8 MiB), the limit of Load, and the old
+// file stays.
 // Save writes indented JSON, so the limit applies to that form. A compact file
 // near the limit, for example from a hand edit, loads but cannot be saved.
 // Save of a zero-value Store is an error, because it has no path: make a

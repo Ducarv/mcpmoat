@@ -199,8 +199,9 @@ are planned.
   server and refuses it on its own, with a size cap for each server, so the caller can still save
   the others. The server chose the data that `Set` refuses, so the caller must report a refused
   server, never skip it silently: a server that is never pinned looks new on each run, and its
-  changes are never reported. `Save` writes atomically (temp file, mode `0600`, sync, rename). A new directory gets mode `0700`. The rules, the caps and the error texts are in the doc
-  comments of `Load`, `Set` and `Save` in `internal/pins/store.go`.
+  changes are never reported. `Save` writes atomically (temp file, mode `0600`, sync, rename). A
+  new directory gets mode `0700`. The rules, the caps and the error texts are in the doc comments
+  of `Load`, `Set` and `Save` in `internal/pins/store.go`.
 
 Known limits:
 
@@ -209,14 +210,15 @@ Known limits:
   next run then sees that server as new, with no alert. Issue #150 tracks this and the missing-file
   limit below.
 - An existing config directory keeps its mode. mcpmoat creates a new directory with `0700`, but it
-  does not check or tighten one that exists. If other users can write to the directory, they can
-  replace `pins.json`. Issue #154 tracks this.
+  does not check or tighten one that exists, and `Load` does not check the mode or the owner of an
+  existing `pins.json`. If other users can write to the directory or the file, they can replace the
+  pins. Issue #154 tracks this.
 - A crash (for example SIGKILL or a power loss) can leave a `.pins-*.tmp` file in the directory. It
   holds only names and hashes and has mode `0600`. mcpmoat does not remove old temp files, because
   one can belong to a parallel run that is still writing.
 - A missing `pins.json` looks like a first run, so a deleted file resets the pins without an alert.
-  A `pins.json` symlink or a directory symlink whose target is missing, and a directory path that is
-  not a directory, are errors, not a first run.
+  A symlink whose target is missing (`pins.json`, its directory or a parent of the directory), and a
+  directory path that is not a directory, are errors, not a first run.
 - `Load` follows a relative `pins.json` symlink that stays inside the directory. It refuses an
   absolute symlink, even one that points back inside, and one that leaves the directory
   (`safefile.ErrOutsideRoot`). `Save` replaces a symlink with a regular file.

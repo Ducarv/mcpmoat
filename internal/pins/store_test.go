@@ -34,8 +34,8 @@ func storeTestPins(pairs ...string) pins.ServerPins {
 		panic("storeTestPins needs name, hash pairs")
 	}
 	p := pins.ServerPins{}
-	for i := 0; i+1 < len(pairs); i += 2 {
-		p[pairs[i]] = pairs[i+1]
+	for kv := range slices.Chunk(pairs, 2) {
+		p[kv[0]] = kv[1]
 	}
 	return p
 }
@@ -80,16 +80,6 @@ func storeTestMustSave(t *testing.T, s *pins.Store) {
 	if err := s.Save(); err != nil {
 		t.Fatalf("Save() error = %v, want nil", err)
 	}
-}
-
-// storeTestRead returns the content of path.
-func storeTestRead(t *testing.T, path string) []byte {
-	t.Helper()
-	data, err := os.ReadFile(path) //nolint:gosec // G304: the test builds path under t.TempDir().
-	if err != nil {
-		t.Fatal(err)
-	}
-	return data
 }
 
 // storeTestWantPins checks that s holds exactly want for id.
@@ -148,7 +138,7 @@ func TestSaveFormat(t *testing.T) {
   ]
 }
 `
-	if got := string(storeTestRead(t, path)); got != want {
+	if got := string(pins.ReadFile(t, path)); got != want {
 		t.Errorf("file =\n%s\nwant\n%s", got, want)
 	}
 }
@@ -234,6 +224,11 @@ func TestLoadNotFirstRun(t *testing.T) {
 			}
 			return filepath.Join(dir, "pins.json")
 		}, "is not a directory, or it is a symlink with a missing target"},
+		{"a parent of the directory is a symlink with a missing target", func(t *testing.T) string {
+			link := filepath.Join(t.TempDir(), "config")
+			symlink(t, filepath.Join(t.TempDir(), "gone"), link)
+			return filepath.Join(link, "mcpmoat", "pins.json")
+		}, "is not a directory, or it is a symlink with a missing target"},
 		{"a parent of the directory is a file", func(t *testing.T) string {
 			file := filepath.Join(t.TempDir(), "file")
 			if err := os.WriteFile(file, []byte("x"), 0o600); err != nil {
@@ -282,7 +277,7 @@ func TestDefaultPath(t *testing.T) {
 		{name: "empty XDG", xdg: "", homeDir: homeAt(home), want: inHome},
 		{
 			name: "relative home", xdg: "", homeDir: homeAt(filepath.Join("relative", "dir")),
-			wantErr: "the home directory for pins.json is not an absolute path",
+			wantErr: fmt.Sprintf("the home directory %q for pins.json is not an absolute path", filepath.Join("relative", "dir")),
 		},
 		{name: "home error", xdg: "", homeDir: noHome, wantErr: "find the home directory for pins.json: no home"},
 	}
@@ -472,7 +467,7 @@ func TestLoadBadFileDoesNotChangeIt(t *testing.T) {
 	if _, err := pins.Load(path); !errors.Is(err, pins.ErrUnsupportedVersion) {
 		t.Fatalf("Load() error = %v, want ErrUnsupportedVersion", err)
 	}
-	if got := string(storeTestRead(t, path)); got != content {
+	if got := string(pins.ReadFile(t, path)); got != content {
 		t.Errorf("file changed to %q", got)
 	}
 }
@@ -628,7 +623,7 @@ func TestSaveDeterministic(t *testing.T) {
 			storeTestMustSet(t, s, entries[i].id, entries[i].p)
 		}
 		storeTestMustSave(t, s)
-		return storeTestRead(t, path)
+		return pins.ReadFile(t, path)
 	}
 	first := save([]int{0, 1, 2, 3})
 	for _, order := range [][]int{{3, 2, 1, 0}, {2, 0, 3, 1}, {1, 3, 0, 2}} {
@@ -670,10 +665,10 @@ func TestSaveIsStableAcrossLoad(t *testing.T) {
 	storeTestMustSet(t, s, idA, storeTestPins("t", "h"))
 	storeTestMustSet(t, s, idB, storeTestPins())
 	storeTestMustSave(t, s)
-	first := storeTestRead(t, path)
+	first := pins.ReadFile(t, path)
 
 	storeTestMustSave(t, storeTestMustLoad(t, path))
-	if second := storeTestRead(t, path); !bytes.Equal(first, second) {
+	if second := pins.ReadFile(t, path); !bytes.Equal(first, second) {
 		t.Errorf("Load+Save changed the file:\n%s\nwant\n%s", second, first)
 	}
 }
@@ -778,8 +773,9 @@ func TestSaveSizeLimit(t *testing.T) {
 	saveWithExtra := func(t *testing.T, path string, extra int) error {
 		t.Helper()
 		s := storeTestMustLoad(t, path)
+		share := 1 + extra/servers // Each name has one byte plus an even share of extra.
 		for i := range servers {
-			n := 1 + extra/servers
+			n := share
 			if i < extra%servers {
 				n++
 			}
@@ -791,7 +787,7 @@ func TestSaveSizeLimit(t *testing.T) {
 	if err := saveWithExtra(t, probe, 0); err != nil {
 		t.Fatal(err)
 	}
-	base := len(storeTestRead(t, probe))
+	base := len(pins.ReadFile(t, probe))
 
 	t.Run("exactly at the limit saves and loads", func(t *testing.T) {
 		t.Parallel()
@@ -799,7 +795,7 @@ func TestSaveSizeLimit(t *testing.T) {
 		if err := saveWithExtra(t, path, limit-base); err != nil {
 			t.Fatalf("Save() at the limit error = %v, want nil", err)
 		}
-		if got := len(storeTestRead(t, path)); got != limit {
+		if got := len(pins.ReadFile(t, path)); got != limit {
 			t.Fatalf("file size = %d, want %d", got, limit)
 		}
 		storeTestMustLoad(t, path)
@@ -812,7 +808,7 @@ func TestSaveSizeLimit(t *testing.T) {
 		// The oversized save replaces this server, so the size is exact.
 		storeTestMustSet(t, old, sizeID(0), storeTestPins("t", "h"))
 		storeTestMustSave(t, old)
-		before := storeTestRead(t, path)
+		before := pins.ReadFile(t, path)
 
 		err := saveWithExtra(t, path, limit-base+1)
 		if err == nil {
@@ -822,15 +818,11 @@ func TestSaveSizeLimit(t *testing.T) {
 		if err.Error() != want {
 			t.Errorf("Save() error = %q, want %q", err, want)
 		}
-		if after := storeTestRead(t, path); !bytes.Equal(before, after) {
+		if after := pins.ReadFile(t, path); !bytes.Equal(before, after) {
 			t.Error("failed Save changed the old file")
 		}
-		entries, readErr := os.ReadDir(filepath.Dir(path))
-		if readErr != nil {
-			t.Fatal(readErr)
-		}
-		if len(entries) != 1 || entries[0].Name() != "pins.json" {
-			t.Errorf("directory has %d entries, want only pins.json", len(entries))
+		if names, want := pins.DirNames(t, filepath.Dir(path)), []string{"pins.json"}; !slices.Equal(names, want) {
+			t.Errorf("dir entries = %v, want %v", names, want)
 		}
 	})
 }
@@ -873,7 +865,7 @@ func TestFileHasNoSecrets(t *testing.T) {
 	storeTestMustSet(t, s, pins.Identity{Client: "claude-code", Source: "/home/u/.claude.json", Name: "alpha"},
 		storeTestPins("read", "sha256:3f2a", "write", "sha256:9c1b"))
 	storeTestMustSave(t, s)
-	data := storeTestRead(t, path)
+	data := pins.ReadFile(t, path)
 
 	// Only the documented keys appear, at each level.
 	var doc map[string]any
@@ -998,11 +990,11 @@ func FuzzLoad(f *testing.F) {
 		}
 
 		// Save is a fixed point: Load then Save gives the same bytes.
-		first := storeTestRead(t, dst)
+		first := pins.ReadFile(t, dst)
 		if err := again.Save(); err != nil {
 			t.Fatal(err)
 		}
-		second := storeTestRead(t, dst)
+		second := pins.ReadFile(t, dst)
 		if !bytes.Equal(first, second) {
 			t.Fatalf("Save is not stable:\n%s\nvs\n%s", first, second)
 		}

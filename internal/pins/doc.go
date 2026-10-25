@@ -3,8 +3,9 @@
 //
 // The store is a JSON file with a format version (CurrentVersion). A file with
 // a newer version is refused with ErrUnsupportedVersion and is never
-// overwritten. DefaultPath gives the path, Load reads the file, Set checks and
-// changes the pins of one server, and Save writes the file atomically.
+// overwritten. DefaultPath gives the path, Load reads the file, Get returns a
+// copy of the pins of one server, Set checks and changes the pins of one
+// server, and Save writes the file atomically.
 //
 // A hash is an opaque string for the store. The file holds server identities
 // (client, config path, project path, name), tool names and hashes. It holds no
