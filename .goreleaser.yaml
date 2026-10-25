@@ -19,7 +19,8 @@ builds:
     main: ./cmd/mcpmoat
     binary: mcpmoat
     env:
-      # CGO off gives a static binary with no libc dependency.
+      # CGO off gives a static binary on Linux, with no libc dependency. On
+      # macOS, Go binaries always link the system libraries dynamically.
       - CGO_ENABLED=0
     flags:
       - -trimpath

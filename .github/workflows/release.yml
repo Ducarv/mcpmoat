@@ -47,6 +47,8 @@ jobs:
           TMPDIR: ${{ runner.temp }}
         run: go test -race -shuffle=on ./...
 
+      # The pin check in ci.yml (release-check) keeps this version equal to
+      # the one in ci.yml.
       - name: Check for known vulnerabilities
         run: go run golang.org/x/vuln/cmd/govulncheck@v1.9.0 ./...
 
@@ -61,7 +63,8 @@ jobs:
       attestations: write # store the attestation
     env:
       # Dependabot does not bump this version string. The release-check job
-      # in ci.yml checks that ci.yml and CONTRIBUTING.md pin the same version.
+      # in ci.yml checks that this pin matches the pins in ci.yml and
+      # CONTRIBUTING.md.
       GORELEASER_VERSION: v2.19.0
     steps:
       - name: Check out the code
@@ -80,11 +83,16 @@ jobs:
         shell: bash
         run: |
           if ! git rev-parse --verify --quiet origin/main >/dev/null; then
-            echo "origin/main is missing. Check the checkout step."
+            echo "::error::origin/main is missing. Check the checkout step."
             exit 1
           fi
-          if ! git merge-base --is-ancestor "$GITHUB_SHA" origin/main; then
-            echo "$GITHUB_SHA is not on main. Tag a commit on main."
+          # Accept only the first-parent history of main: merge commits and
+          # direct pushes. A commit from inside a merged PR branch is not a
+          # release. grep is not -q here: an early exit would kill git with
+          # SIGPIPE, and pipefail would then fail the step.
+          on_main=$(git rev-list --first-parent origin/main | grep -Fx "$GITHUB_SHA" || true)
+          if [ -z "$on_main" ]; then
+            echo "::error::$GITHUB_SHA is not on the first-parent history of main. Tag a merge commit on main."
             exit 1
           fi
 
@@ -99,8 +107,7 @@ jobs:
           HAS_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_GITHUB_TOKEN != '' }}
         run: |
           if [ "$HAS_TAP_TOKEN" != true ]; then
-            echo "The release environment has no HOMEBREW_TAP_GITHUB_TOKEN secret."
-            echo "Do the one-time setup in CONTRIBUTING.md (Releasing) first."
+            echo "::error::The release environment has no HOMEBREW_TAP_GITHUB_TOKEN secret. Do the one-time setup in CONTRIBUTING.md (Releasing) first."
             exit 1
           fi
 
@@ -158,15 +165,27 @@ jobs:
             got=$(gh release view "$GITHUB_REF_NAME" -R "$GITHUB_REPOSITORY" \
               --json assets -q '.assets[].name' | sort) || return 1
             if [ "$got" != "$want" ]; then
-              echo "The release assets do not match dist/:"
+              echo "::error::The release assets do not match dist/:"
               diff <(echo "$want") <(echo "$got") || true
               return 1
             fi
             gh release download "$GITHUB_REF_NAME" -R "$GITHUB_REPOSITORY" \
               --pattern '*.tar.gz' --pattern checksums.txt -D "$1" || return 1
-            for f in dist/*.tar.gz dist/checksums.txt; do
-              cmp "$f" "$1/$(basename "$f")" || return 1
-            done
+            while read -r f; do
+              cmp "dist/$f" "$1/$f" || return 1
+            done <<<"$want"
+          }
+
+          # check_tag fails unless the tag still points at the commit that
+          # this run built. The commits API resolves an annotated tag to its
+          # commit.
+          check_tag() {
+            local tag_sha
+            tag_sha=$(gh api "repos/$GITHUB_REPOSITORY/commits/refs/tags/$GITHUB_REF_NAME" -q .sha) || return 1
+            if [ "$tag_sha" != "$GITHUB_SHA" ]; then
+              echo "::error::The tag $GITHUB_REF_NAME points at $tag_sha, not at $GITHUB_SHA."
+              return 1
+            fi
           }
 
           check_assets draft
@@ -180,18 +199,13 @@ jobs:
               --deny-self-hosted-runners
           done
 
-          # The tag must still point at the commit that this run built, or
-          # the published release would lock on another commit. The commits
-          # API resolves an annotated tag to its commit.
-          tag_sha=$(gh api "repos/$GITHUB_REPOSITORY/commits/refs/tags/$GITHUB_REF_NAME" -q .sha)
-          if [ "$tag_sha" != "$GITHUB_SHA" ]; then
-            echo "The tag $GITHUB_REF_NAME now points at $tag_sha, not at $GITHUB_SHA. Not publishing."
-            exit 1
-          fi
+          # A moved tag would lock the published release on another commit.
+          check_tag
 
           gh release edit "$GITHUB_REF_NAME" -R "$GITHUB_REPOSITORY" --draft=false
 
-          if ! check_assets published; then
-            echo "::error::The release is public, but its assets changed after the verify step. Check it and delete it."
+          # The tag and the assets lock at publish, so this check is final.
+          if ! check_tag || ! check_assets published; then
+            echo "::error::The release is public, but its tag or assets changed after the checks. Check it and delete it."
             exit 1
           fi
