@@ -10,6 +10,8 @@ tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
 
 wf=.github/workflows
+# workflows is the list of check-tool-pins.sh.
+workflows=(ci release govulncheck)
 failed=0
 total=0
 
@@ -30,6 +32,11 @@ sub() {
     return 1
   fi
   mv "$1.new" "$1"
+}
+
+# after_call adds a line right after the call line of a file of the copy.
+after_call() {
+  awk -v add="$2" '{ print } /run: go run "golang/ { print add }' "$1" >"$1.new" && mv "$1.new" "$1"
 }
 
 # append adds a line to a file of the copy.
@@ -82,8 +89,8 @@ decoy_pin() {
 # same_extra_pin_everywhere adds the same second pin to all three workflows.
 same_extra_pin_everywhere() {
   local f
-  for f in ci release govulncheck; do
-    append_step "$wf/$f.yml" v0.0.1
+  for f in "${workflows[@]}"; do
+    append_step "$wf/$f.yml" v0.0.1 || return 1
   done
 }
 
@@ -91,7 +98,7 @@ same_extra_pin_everywhere() {
 # file that holds it. Go reads a short version as a query for the newest match.
 float_govulncheck() {
   local f
-  for f in ci release govulncheck; do
+  for f in "${workflows[@]}"; do
     sub "$wf/$f.yml" 's/(GOVULNCHECK_VERSION: v[0-9]+\.[0-9]+)\.[0-9]+/\1/' || return 1
   done
 }
@@ -107,8 +114,8 @@ float_goreleaser() {
 # number of padding lines: a large file has more output than a pipe holds.
 fourth_workflow() {
   {
-    printf 'name: extra\njobs:\n  x:\n    steps:\n      - run: go run golang.org/x/vuln/cmd/govulncheck@latest ./...\n'
-    awk -v n="$2" 'BEGIN { for (i = 0; i < n; i++) print "      - run: echo padding padding padding padding" }'
+    printf 'name: extra\njobs:\n  x:\n    steps:\n      - run: go run golang.org/x/vuln/cmd/govulncheck@latest ./...\n' &&
+      awk -v n="$2" 'BEGIN { for (i = 0; i < n; i++) print "      - run: echo padding padding padding padding" }'
   } >"$wf/$1"
 }
 
@@ -128,28 +135,30 @@ check_case "govulncheck: two pins in ci.yml" 1 "ci.yml must pin one version of g
 check_case "govulncheck: same extra pin in all files" 1 "ci.yml must pin one version of govulncheck" same_extra_pin_everywhere
 
 # The call of govulncheck.
-check_case "hard-coded version" 1 "has no call line" sub "$wf/release.yml" 's/govulncheck@\$GOVULNCHECK_VERSION/govulncheck@v0.0.1/'
-check_case "@latest" 1 "has no call line" sub "$wf/govulncheck.yml" 's/govulncheck@\$GOVULNCHECK_VERSION/govulncheck@latest/'
-check_case "braces form" 1 "has no call line" sub "$wf/govulncheck.yml" 's/\$GOVULNCHECK_VERSION"/${GOVULNCHECK_VERSION}"/'
-check_case "variable name with a suffix" 1 "has no call line" sub "$wf/govulncheck.yml" 's/\$GOVULNCHECK_VERSION"/$GOVULNCHECK_VERSION_X"/'
-check_case "quote before @latest" 1 "has no call line" sub "$wf/govulncheck.yml" 's|run: go run .*|run: go run "golang.org/x/vuln/cmd/govulncheck"@latest ./...|'
-check_case "variable set in the run line" 1 "has no call line" sub "$wf/govulncheck.yml" 's|run: go run|run: GOVULNCHECK_VERSION=latest; go run|'
-check_case "go install @latest and the call" 1 "has no call line" sub "$wf/release.yml" 's|run: go run|run: go install golang.org/x/vuln/cmd/govulncheck@latest \&\& go run|'
-check_case "inline comment after the call" 1 "has no call line" sub "$wf/release.yml" 's@^(.*run: go run .*)$@\1 # x@'
-check_case "|| true after the call" 1 "has no call line" sub "$wf/release.yml" 's@^(.*run: go run .*)$@\1 || true@'
-check_case "continuation line after the call" 1 "continues the call line" append "$wf/govulncheck.yml" '          || true'
+check_case "call: hard-coded version" 1 "release.yml has no call line" sub "$wf/release.yml" 's/govulncheck@\$GOVULNCHECK_VERSION/govulncheck@v0.0.1/'
+check_case "call: @latest" 1 "govulncheck.yml has no call line" sub "$wf/govulncheck.yml" 's/govulncheck@\$GOVULNCHECK_VERSION/govulncheck@latest/'
+check_case "call: braces form" 1 "govulncheck.yml has no call line" sub "$wf/govulncheck.yml" 's/\$GOVULNCHECK_VERSION"/${GOVULNCHECK_VERSION}"/'
+check_case "call: variable name with a suffix" 1 "govulncheck.yml has no call line" sub "$wf/govulncheck.yml" 's/\$GOVULNCHECK_VERSION"/$GOVULNCHECK_VERSION_X"/'
+check_case "call: quote before @latest" 1 "govulncheck.yml has no call line" sub "$wf/govulncheck.yml" 's|run: go run .*|run: go run "golang.org/x/vuln/cmd/govulncheck"@latest ./...|'
+check_case "call: variable set in the run line" 1 "govulncheck.yml has no call line" sub "$wf/govulncheck.yml" 's|run: go run|run: GOVULNCHECK_VERSION=latest; go run|'
+check_case "call: go install @latest and the call" 1 "release.yml has no call line" sub "$wf/release.yml" 's|run: go run|run: go install golang.org/x/vuln/cmd/govulncheck@latest \&\& go run|'
+check_case "call: inline comment after the call" 1 "release.yml has no call line" sub "$wf/release.yml" 's@^(.*run: go run .*)$@\1 # x@'
+check_case "call: || true after the call" 1 "release.yml has no call line" sub "$wf/release.yml" 's@^(.*run: go run .*)$@\1 || true@'
+check_case "continuation line after the call" 1 "govulncheck.yml has a line that continues the call line" after_call "$wf/govulncheck.yml" '          || true'
+check_case "continuation line after the call in release.yml" 1 "release.yml has a line that continues the call line" after_call "$wf/release.yml" '          || true'
 check_case "continue-on-error in a step" 1 "uses continue-on-error" append "$wf/govulncheck.yml" '        continue-on-error: true'
 check_case "continue-on-error as the first key of a step" 1 "uses continue-on-error" append "$wf/govulncheck.yml" '      - continue-on-error: true'
 check_case "govulncheck-action step" 1 "is not the pin, the call line or a name" append "$wf/govulncheck.yml" '      - uses: golang/govulncheck-action@v1'
-check_case "bare govulncheck line in a run block" 1 "is not the pin, the call line or a name" append "$wf/govulncheck.yml" '          govulncheck:'
+check_case "bare govulncheck: line after the call" 1 "is not the pin, the call line or a name" after_call "$wf/govulncheck.yml" '          govulncheck:'
 check_case "job ID govulncheck in ci.yml" 1 "is not the pin, the call line or a name" append "$wf/ci.yml" '  govulncheck:'
-check_case "no call in release.yml" 1 "has no call line" sub "$wf/release.yml" '/govulncheck@/d'
+check_case "call: no call in release.yml" 1 "release.yml has no call line" sub "$wf/release.yml" '/govulncheck@/d'
 check_case "comment names govulncheck@v1.2.3" 0 "" append "$wf/release.yml" '# see govulncheck@v1.2.3'
 
 # A workflow outside the list.
-check_case "fourth workflow runs govulncheck" 1 "Add it to the workflows list" fourth_workflow extra.yml 0
-check_case "fourth workflow with the .yaml extension" 1 "Add it to the workflows list" fourth_workflow extra.yaml 0
-check_case "large fourth workflow runs govulncheck" 1 "Add it to the workflows list" fourth_workflow extra.yml 4000
+check_case "fourth workflow with a space in its name" 1 "mentions govulncheck" fourth_workflow "ci release.yml" 0
+check_case "fourth workflow runs govulncheck" 1 "mentions govulncheck" fourth_workflow extra.yml 0
+check_case "fourth workflow with the .yaml extension" 1 "mentions govulncheck" fourth_workflow extra.yaml 0
+check_case "large fourth workflow runs govulncheck" 1 "mentions govulncheck" fourth_workflow extra.yml 4000
 
 # Missing files.
 check_case "ci.yml missing" 1 "ci.yml is missing" rm "$wf/ci.yml"
@@ -161,6 +170,10 @@ check_case "CONTRIBUTING.md missing" 1 "CONTRIBUTING.md is missing" rm CONTRIBUT
 check_case "GoReleaser: different pin in release.yml" 1 "The GoReleaser pins differ" sub "$wf/release.yml" 's/GORELEASER_VERSION: v[0-9.]+/GORELEASER_VERSION: v0.0.1/'
 check_case "GoReleaser: different pin in CONTRIBUTING.md" 1 "The GoReleaser pins differ" sub CONTRIBUTING.md 's|(goreleaser/v[0-9]+)@v[0-9.]+|\1@v0.0.1|g'
 check_case "GoReleaser: different pin in one command only" 1 "The GoReleaser pins differ" sub CONTRIBUTING.md '/ check /s|(goreleaser/v[0-9]+)@v[0-9.]+|\1@v0.0.1|'
+check_case "GoReleaser: pin value latest in release.yml" 1 "not a full version" append "$wf/release.yml" '      GORELEASER_VERSION: latest'
+check_case "GoReleaser: short pin value in ci.yml" 1 "not a full version" append "$wf/ci.yml" '      GORELEASER_VERSION: v2.19'
+check_case "GoReleaser: @latest in one CONTRIBUTING.md command" 1 "The GoReleaser pins differ" sub CONTRIBUTING.md '/ check /s|(goreleaser/v[0-9]+)@v[0-9.]+|\1@latest|'
+check_case "GoReleaser: short version in one CONTRIBUTING.md command" 1 "The GoReleaser pins differ" sub CONTRIBUTING.md '/ check /s|(goreleaser/v[0-9]+@v[0-9]+\.[0-9]+)\.[0-9]+|\1|'
 check_case "GoReleaser: two pins in ci.yml" 1 "ci.yml must pin one version of GoReleaser" append "$wf/ci.yml" '      GORELEASER_VERSION: v0.0.1'
 check_case "GoReleaser: no pin in ci.yml" 1 "ci.yml must pin one version of GoReleaser" sub "$wf/ci.yml" '/GORELEASER_VERSION: v/d'
 check_case "GoReleaser: no pin in release.yml" 1 "The GoReleaser pins differ" sub "$wf/release.yml" '/GORELEASER_VERSION: v/d'

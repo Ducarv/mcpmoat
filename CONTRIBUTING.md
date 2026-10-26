@@ -74,12 +74,13 @@ Agent-oriented variants (scoped tests, E2E scenario, golden files, fuzz) are in 
 
 CI (`.github/workflows/ci.yml`) runs on every pull request. On Linux and macOS it runs build, vet, race
 tests, golangci-lint and the version smoke test. On Linux only it also runs the gofmt check, the
-`go mod tidy` check and govulncheck. The `release-check` job runs `.github/scripts/check-tool-pins.sh`.
+`go mod tidy` check and govulncheck. The `release-check` job first runs the test of the pin check,
+`.github/scripts/check-tool-pins-test.sh`. Then it runs the pin check, `.github/scripts/check-tool-pins.sh`.
 The script checks that the GoReleaser pins match. It also checks that the govulncheck pins in
 `ci.yml`, `release.yml` and `govulncheck.yml` match, and that each file runs govulncheck only
 through `$GOVULNCHECK_VERSION`. Then the job runs `goreleaser check`, a snapshot build and
-`.github/scripts/check-snapshot.sh`. To run the pin check on your machine, call
-`.github/scripts/check-tool-pins.sh`. The test of the script is `.github/scripts/check-tool-pins-test.sh`.
+`.github/scripts/check-snapshot.sh`. If you change a workflow or a tool pin, run the test and the
+check on your machine. Call both scripts from any directory.
 
 The weekly `govulncheck` workflow (`.github/workflows/govulncheck.yml`) checks `main` every Monday.
 A maintainer finds how to run it by hand and what to do after a failed run in

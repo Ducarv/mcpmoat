@@ -113,7 +113,7 @@ schedule only from the file on `dev`.
 - GitHub disables a schedule after 60 days with no repository activity. When you cut a release, open
   the `govulncheck` workflow in the Actions tab. If GitHub shows it as disabled, click Enable
   workflow. Then the failure notices go to you. If it is enabled but the last run is more than 8 days
-  old, run it by hand and look for the reason.
+  old (one week plus one day), run it by hand and look for the reason.
 - After a failed run, fix the cause on `dev`, merge `dev` into `main` and cut a release (see
   [Cut a release](#cut-a-release)).
 
