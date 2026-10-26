@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io/fs"
 	"log/slog"
+	"net"
 	"os"
 	"slices"
 	"strings"
@@ -32,6 +33,14 @@ type SDKOptions struct {
 	// It is separate from AllowUntrusted: an untrusted server that is also
 	// off needs both.
 	AllowDisabled bool
+
+	// Dial is a test hook that records the connections to remote servers
+	// (NFR-01). It is nil in production, and nil uses a net.Dialer. Dial
+	// sees only the addresses after the DNS pin and the address guard. So
+	// the guard still applies, and a refused address never reaches Dial.
+	// With a proxy, Dial sees the address of the proxy. Dial must connect
+	// to the address that it gets. It has no effect on stdio servers.
+	Dial func(ctx context.Context, network, address string) (net.Conn, error)
 }
 
 // SDKInspector is the [Inspector] that uses the official MCP Go SDK. It
@@ -168,6 +177,7 @@ func (i *SDKInspector) Inspect(ctx context.Context, s discover.Server) (Result, 
 		result, err := Remote(ctx, expanded, RemoteOptions{
 			AllowUntrusted: i.opts.AllowUntrusted,
 			AllowDisabled:  i.opts.AllowDisabled,
+			dial:           i.opts.Dial,
 			secrets:        rec.values,
 		})
 		if ce, ok := errors.AsType[*ConnectError](err); ok {
