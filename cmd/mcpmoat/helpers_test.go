@@ -11,6 +11,9 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"net"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -18,6 +21,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 	"unicode"
@@ -302,17 +306,32 @@ type scanFinding struct {
 	// Severity is the lower-case word of the group heading that holds the
 	// finding: "critical", "high", "medium" or "low".
 	Severity string
-	// Title is the text after the rule ID. Empty when the line has none.
+	// Title is the text after the rule ID, without the " [LLM]" marker of an
+	// LLM finding. Empty when the line has none.
 	Title string
+	// LLM is true for an LLM finding (scan --llm): its first line ends with
+	// " [LLM]" and it has a "Source:" line. parseFindings fails the test when a
+	// finding has only one of the two.
+	LLM bool
 	// Server is the label "name (client, scope)", and Name is the server name.
 	Server, Name string
+	// Source is the text of the "Source:" line of an LLM finding, for example
+	// "LLM classification (advisory)". Empty for a rule finding.
+	Source string
 	// Where is the text of the "Where:" line, for example "env API_KEY". Tool
 	// is the text of the "Tool:" line, and Reason the text of the "Reason:" line
 	// (a finding about a whole server). A finding has one of them, or none.
 	Where, Tool, Reason string
 	// Risk and Fix are the texts of the "Risk:" and "Fix:" lines.
 	Risk, Fix string
+	// Details are the detail lines ("Label: text") in the printed order, each
+	// without its leading spaces. A test that checks the order of the lines
+	// reads them here.
+	Details []string
 }
+
+// llmMarker is the end of the first line of an LLM finding.
+const llmMarker = " [LLM]"
 
 var (
 	findingGroupPattern = regexp.MustCompile(`^(CRITICAL|HIGH|MEDIUM|LOW) \((\d+)\)$`)
@@ -322,8 +341,9 @@ var (
 // parseFindings parses the FINDINGS block of a plain stdout into the findings,
 // in the printed order. It returns nil when stdout has no FINDINGS block. It
 // fails the test when a line has an unexpected shape, when a finding has no
-// Server, Risk or Fix line, or when the count in a group heading is not the
-// number of findings under it.
+// Server, Risk or Fix line, when a finding has the [LLM] marker without a
+// Source line (or the reverse), or when the count in a group heading is not
+// the number of findings under it.
 func parseFindings(t *testing.T, stdout string) []scanFinding {
 	t.Helper()
 	block := splitScanSections(stdout).Findings
@@ -333,6 +353,8 @@ func parseFindings(t *testing.T, stdout string) []scanFinding {
 		groupWant int
 		groupGot  int
 		cur       *scanFinding
+		// marked is true when the first line of cur ends with llmMarker.
+		marked bool
 	)
 	closeGroup := func() {
 		if group != "" && groupGot != groupWant {
@@ -345,6 +367,10 @@ func parseFindings(t *testing.T, stdout string) []scanFinding {
 		}
 		if cur.Server == "" || cur.Risk == "" || cur.Fix == "" {
 			t.Errorf("finding %s has no Server, Risk or Fix line\nstdout:\n%s", cur.RuleID, stdout)
+		}
+		if hasSource := cur.Source != ""; marked != hasSource {
+			t.Errorf("finding %s: [LLM] marker = %v, Source line = %v; want both or neither\nstdout:\n%s",
+				cur.RuleID, marked, hasSource, stdout)
 		}
 		out = append(out, *cur)
 		cur = nil
@@ -366,9 +392,13 @@ func parseFindings(t *testing.T, stdout string) []scanFinding {
 			if !ok {
 				t.Fatalf("findings line %q is not \"Label: text\":\n%s", line, stdout)
 			}
+			cur.Details = append(cur.Details, text)
 			switch label {
 			case "Server":
 				cur.Server, cur.Name = value, serverLabelName(value)
+			case "Source":
+				cur.Source = value
+				cur.LLM = true
 			case "Where":
 				cur.Where = value
 			case "Tool":
@@ -390,6 +420,10 @@ func parseFindings(t *testing.T, stdout string) []scanFinding {
 		}
 		closeFinding()
 		cur = &scanFinding{RuleID: m[1], Title: m[2], Severity: group}
+		if title, ok := strings.CutSuffix(cur.Title, llmMarker); ok {
+			cur.Title, cur.LLM = title, true
+		}
+		marked = cur.LLM
 		groupGot++
 	}
 	closeFinding()
@@ -431,6 +465,20 @@ func findingRows(t *testing.T, stdout string) [][]string {
 		rows = append(rows, row)
 	}
 	return rows
+}
+
+// countNewConns sets srv.Config.ConnState so that it counts the new
+// connections of srv (http.StateNew), and returns the counter. Call it before
+// srv.Start: the server reads its config when it starts. It replaces any
+// ConnState hook that srv had.
+func countNewConns(srv *httptest.Server) *atomic.Int32 {
+	n := &atomic.Int32{}
+	srv.Config.ConnState = func(_ net.Conn, s http.ConnState) {
+		if s == http.StateNew {
+			n.Add(1)
+		}
+	}
+	return n
 }
 
 // findingIDs returns the rule ID (the first word) of each findings row. It

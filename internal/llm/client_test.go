@@ -11,6 +11,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/netip"
 	"net/url"
 	"os"
 	"os/exec"
@@ -933,6 +934,278 @@ func TestEncodeJSONNoHTMLEscape(t *testing.T) {
 	}
 	if _, err := encodeJSON(func() {}); !errors.Is(err, errBuildRequest) {
 		t.Errorf("encodeJSON(func) error = %v, want errBuildRequest", err)
+	}
+}
+
+// fakeResolver answers every lookup with addrs and err, and records the
+// lookups.
+type fakeResolver struct {
+	addrs []netip.Addr
+	err   error
+
+	mu       sync.Mutex
+	lookups  []string
+	networks []string
+}
+
+func (r *fakeResolver) LookupNetIP(_ context.Context, network, host string) ([]netip.Addr, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.lookups = append(r.lookups, host)
+	r.networks = append(r.networks, network)
+	return slices.Clone(r.addrs), r.err
+}
+
+// calls returns the hosts and networks of the lookups so far.
+func (r *fakeResolver) calls() (hosts, networks []string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return slices.Clone(r.lookups), slices.Clone(r.networks)
+}
+
+// addrs parses each of ips as a netip.Addr.
+func addrs(ips ...string) []netip.Addr {
+	out := make([]netip.Addr, 0, len(ips))
+	for _, ip := range ips {
+		out = append(out, netip.MustParseAddr(ip))
+	}
+	return out
+}
+
+// TestClassifyHTTPLoopbackOnly checks the dialer of an http base URL: the
+// host must resolve to loopback addresses only, and the client dials those
+// addresses, never the name. Otherwise no connection is opened, so the key
+// never goes in clear text to another machine.
+func TestClassifyHTTPLoopbackOnly(t *testing.T) {
+	t.Parallel()
+	const (
+		nonLoopback = "192.0.2.10" // TEST-NET-1, never routed
+		lookupLeak  = "lookup localhost on 10.0.0.53:53: no such host"
+	)
+	wantRefused := "LLM provider request failed: network error: host does not resolve to a loopback address"
+	errNoLookup := errors.New("lookup not expected")
+
+	tests := []struct {
+		name string
+		// host is the host of the base URL; the port of the server is added.
+		host string
+		// answer and lookupErr are the answer of the resolver for a name.
+		answer    []netip.Addr
+		lookupErr error
+		// wantLookups is the hosts that the resolver must see.
+		wantLookups []string
+		// wantDials is the addresses that Config.Dial must see, without
+		// the port. Nil means no dial and a refused request.
+		wantDials []string
+	}{
+		{
+			name:        "localhost resolves to IPv4 loopback",
+			host:        "localhost",
+			answer:      addrs("127.0.0.1"),
+			wantLookups: []string{"localhost"},
+			wantDials:   []string{"127.0.0.1"},
+		},
+		{
+			// The test dialer refuses ::1, so the client tries the next
+			// address.
+			name:        "localhost resolves to IPv6 and IPv4 loopback",
+			host:        "localhost",
+			answer:      addrs("::1", "127.0.0.1"),
+			wantLookups: []string{"localhost"},
+			wantDials:   []string{"[::1]", "127.0.0.1"},
+		},
+		{
+			name:      "IPv4 loopback literal",
+			host:      "127.0.0.1",
+			lookupErr: errNoLookup,
+			wantDials: []string{"127.0.0.1"},
+		},
+		{
+			name:      "IPv4-mapped loopback literal",
+			host:      "[::ffff:127.0.0.1]",
+			lookupErr: errNoLookup,
+			wantDials: []string{"127.0.0.1"},
+		},
+		{
+			name:        "localhost resolves to a non-loopback address",
+			host:        "localhost",
+			answer:      addrs(nonLoopback),
+			wantLookups: []string{"localhost"},
+		},
+		{
+			name:        "loopback and non-loopback answers",
+			host:        "localhost",
+			answer:      addrs("127.0.0.1", nonLoopback),
+			wantLookups: []string{"localhost"},
+		},
+		{
+			name:        "non-loopback answer first",
+			host:        "localhost",
+			answer:      addrs(nonLoopback, "::1"),
+			wantLookups: []string{"localhost"},
+		},
+		{
+			name:        "IPv4-mapped non-loopback answer",
+			host:        "localhost",
+			answer:      addrs("::ffff:" + nonLoopback),
+			wantLookups: []string{"localhost"},
+		},
+		{
+			name:        "unspecified address",
+			host:        "localhost",
+			answer:      addrs("0.0.0.0"),
+			wantLookups: []string{"localhost"},
+		},
+		{
+			name:        "no answer",
+			host:        "localhost",
+			wantLookups: []string{"localhost"},
+		},
+		{
+			name:        "lookup error",
+			host:        "localhost",
+			lookupErr:   errors.New(lookupLeak + " " + llmBodyCanary),
+			wantLookups: []string{"localhost"},
+		},
+	}
+	for _, p := range bothProviders {
+		for _, tt := range tests {
+			t.Run(string(p)+"/"+tt.name, func(t *testing.T) {
+				t.Parallel()
+				r := &fakeResolver{addrs: tt.answer, err: tt.lookupErr}
+				srv := startServer(t, reply(http.StatusOK, validReply(p, RiskLow, CategoryOther)))
+				_, port, err := net.SplitHostPort(srv.Listener.Addr().String())
+				if err != nil {
+					t.Fatalf("server address: %v", err)
+				}
+				var (
+					mu    sync.Mutex
+					dials []string
+				)
+				dial := func(ctx context.Context, network, addr string) (net.Conn, error) {
+					mu.Lock()
+					dials = append(dials, addr)
+					mu.Unlock()
+					// The test server listens on IPv4 only.
+					if strings.HasPrefix(addr, "[::1]") {
+						return nil, errors.New("connection refused")
+					}
+					var d net.Dialer
+					return d.DialContext(ctx, network, addr)
+				}
+				c, err := newClient(Config{
+					Provider: p,
+					Model:    llmTestModel,
+					BaseURL:  "http://" + net.JoinHostPort(strings.Trim(tt.host, "[]"), port),
+					APIKey:   testSecret(),
+					Dial:     dial,
+				}, r)
+				if err != nil {
+					t.Fatalf("newClient() error = %v", err)
+				}
+				t.Cleanup(c.CloseIdleConnections)
+
+				v, err := c.Classify(t.Context(), Input{ToolName: "t", Description: "d"})
+
+				hosts, networks := r.calls()
+				if !slices.Equal(hosts, tt.wantLookups) {
+					t.Errorf("lookups = %q, want %q", hosts, tt.wantLookups)
+				}
+				for _, n := range networks {
+					if n != "ip" {
+						t.Errorf("lookup network = %q, want ip", n)
+					}
+				}
+				mu.Lock()
+				gotDials := slices.Clone(dials)
+				mu.Unlock()
+
+				if tt.wantDials == nil {
+					if err == nil || err.Error() != wantRefused {
+						t.Fatalf("Classify() = %+v, %v; want error %q", v, err, wantRefused)
+					}
+					if !errors.Is(err, ErrTransport) || !errors.Is(err, ErrProvider) {
+						t.Errorf("Classify() error = %v, want ErrTransport", err)
+					}
+					if len(gotDials) != 0 {
+						t.Errorf("dials = %q, want none", gotDials)
+					}
+					if n := srv.hits.Load(); n != 0 {
+						t.Errorf("server requests = %d, want 0", n)
+					}
+					assertNoLeak(t, err, "localhost", nonLoopback, "::", "10.0.0.53", "no such host", port, srv.URL)
+					return
+				}
+
+				if err != nil {
+					t.Fatalf("Classify() error = %v", err)
+				}
+				if want := (Verdict{Risk: RiskLow, Category: CategoryOther}); v != want {
+					t.Errorf("Classify() = %+v, want %+v", v, want)
+				}
+				wantDials := make([]string, len(tt.wantDials))
+				for i, d := range tt.wantDials {
+					wantDials[i] = d + ":" + port
+				}
+				if !slices.Equal(gotDials, wantDials) {
+					t.Errorf("dials = %q, want %q", gotDials, wantDials)
+				}
+				if n := srv.hits.Load(); n != 1 {
+					t.Errorf("server requests = %d, want 1", n)
+				}
+			})
+		}
+	}
+}
+
+// TestClassifyHTTPSNoLoopbackCheck checks that an https base URL does not use
+// the loopback check: the resolver of the client is never asked. TLS
+// protects the key on any network.
+func TestClassifyHTTPSNoLoopbackCheck(t *testing.T) {
+	t.Parallel()
+	r := &fakeResolver{addrs: addrs("192.0.2.10")}
+	c, err := newClient(Config{
+		Provider: ProviderAnthropic,
+		BaseURL:  "https://api.example.invalid",
+		APIKey:   testSecret(),
+		Dial: func(context.Context, string, string) (net.Conn, error) {
+			return nil, errors.New("blocked")
+		},
+	}, r)
+	if err != nil {
+		t.Fatalf("newClient() error = %v", err)
+	}
+	t.Cleanup(c.CloseIdleConnections)
+
+	_, err = c.Classify(t.Context(), Input{ToolName: "t", Description: "d"})
+	if !errors.Is(err, ErrTransport) || errors.Is(err, errNotLoopback) {
+		t.Errorf("Classify() error = %v, want ErrTransport and not errNotLoopback", err)
+	}
+	if hosts, _ := r.calls(); len(hosts) != 0 {
+		t.Errorf("lookups = %q, want none", hosts)
+	}
+}
+
+func TestLoopbackDialBadInput(t *testing.T) {
+	t.Parallel()
+	var dials atomic.Int32
+	dial := loopbackDial(func(context.Context, string, string) (net.Conn, error) {
+		dials.Add(1)
+		return nil, errors.New("dial not expected")
+	}, &fakeResolver{addrs: addrs("127.0.0.1")})
+
+	// An address without a port is refused before any lookup or dial.
+	if _, err := dial(t.Context(), "tcp", "localhost"); !errors.Is(err, errNotLoopback) {
+		t.Errorf("dial(no port) error = %v, want errNotLoopback", err)
+	}
+	if n := dials.Load(); n != 0 {
+		t.Errorf("dials = %d, want 0", n)
+	}
+
+	for network, want := range map[string]string{"tcp": "ip", "tcp4": "ip4", "tcp6": "ip6", "": "ip"} {
+		if got := lookupNetwork(network); got != want {
+			t.Errorf("lookupNetwork(%q) = %q, want %q", network, got, want)
+		}
 	}
 }
 

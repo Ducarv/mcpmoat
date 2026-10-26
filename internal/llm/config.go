@@ -75,17 +75,23 @@ var (
 // "openai", in lower case. Another value gives an error that wraps
 // ErrUnknownProvider. The error does not hold name.
 func ParseProvider(name string) (Provider, error) {
-	switch p := Provider(name); p {
-	case ProviderAnthropic, ProviderOpenAI:
-		return p, nil
-	default:
-		return "", fmt.Errorf("%w: use %q or %q", ErrUnknownProvider, ProviderAnthropic, ProviderOpenAI)
+	p := Provider(name)
+	if !p.Valid() {
+		return "", unknownProviderError()
 	}
+	return p, nil
 }
 
 // Valid reports whether p is a supported provider.
 func (p Provider) Valid() bool {
 	return p == ProviderAnthropic || p == ProviderOpenAI
+}
+
+// unknownProviderError returns the error for a provider that is not
+// supported. It wraps ErrUnknownProvider, names the supported providers and
+// never holds the name that was given.
+func unknownProviderError() error {
+	return fmt.Errorf("%w: use %q or %q", ErrUnknownProvider, ProviderAnthropic, ProviderOpenAI)
 }
 
 // DefaultBaseURL returns the base URL of p, or "" for an unknown provider.
@@ -109,9 +115,8 @@ func (p Provider) DefaultModel() string {
 	return ""
 }
 
-// Config holds the settings of an LLM client. The clients in anthropic.go and
-// openai.go take a Config. Call Resolve before use: it fills in the defaults
-// and checks every field.
+// Config holds the settings of an LLM client. New takes a Config and calls
+// Resolve, which fills in the defaults and checks every field.
 //
 // Config is safe to print: APIKey is a discover.Secret and prints as a mask.
 type Config struct {
@@ -137,11 +142,9 @@ type Config struct {
 // Resolve returns a copy of c with the defaults filled in, and checks it with
 // Validate. An empty Model becomes Provider.DefaultModel and an empty BaseURL
 // becomes Provider.DefaultBaseURL. Resolve removes a final "/" from BaseURL,
-// so the client can add a path that starts with "/".
+// so the client can add a path that starts with "/". An unknown provider has
+// no defaults, and Validate refuses it.
 func (c Config) Resolve() (Config, error) {
-	if !c.Provider.Valid() {
-		return Config{}, fmt.Errorf("%w: use %q or %q", ErrUnknownProvider, ProviderAnthropic, ProviderOpenAI)
-	}
 	if c.Model == "" {
 		c.Model = c.Provider.DefaultModel()
 	}
@@ -161,7 +164,7 @@ func (c Config) Resolve() (Config, error) {
 // and the key (ValidKey). Dial can be nil.
 func (c Config) Validate() error {
 	if !c.Provider.Valid() {
-		return fmt.Errorf("%w: use %q or %q", ErrUnknownProvider, ProviderAnthropic, ProviderOpenAI)
+		return unknownProviderError()
 	}
 	if err := validModel(c.Model); err != nil {
 		return err

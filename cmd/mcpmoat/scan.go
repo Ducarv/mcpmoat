@@ -64,16 +64,9 @@ func (c *cli) runScan(opts options, args []string) int {
 	var failOn rules.Severity
 	severityFlag(fs, "fail-on", &failOn)
 
-	// The LLM flags (FR-17). --llm is off by default. The other three refuse
-	// an empty value (see pathFlag), so an empty result means that the flag
-	// was not given. checkLLMFlags checks them all.
+	// The LLM flags (FR-17), see addLLMFlags.
 	var llmOpts llmFlags
-	fs.BoolVar(&llmOpts.on, "llm", false, "")
-	pathFlag(fs, "llm-provider", "a provider name", &llmOpts.provider)
-	pathFlag(fs, "llm-model", "a model name", &llmOpts.model)
-	// The base URL can hold a user:password, so its flag errors never hold
-	// the value (see secretPathFlag).
-	baseURLFlag := secretPathFlag(fs, "llm-base-url", "a URL", &llmOpts.baseURL)
+	baseURLFlag := addLLMFlags(fs, &llmOpts)
 
 	if err := fs.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
@@ -105,21 +98,14 @@ func (c *cli) runScan(opts options, args []string) int {
 		return c.usageError("scan", "%v", err)
 	}
 
-	// Check the LLM flags and the API key before scan reads a config file.
-	// Without --llm, llmSet is nil: no key is read and no client is built.
-	llmSet, ok := c.checkLLMFlags(llmOpts, *noConnect)
+	// Check the LLM flags and the API key before scan reads a config file
+	// (see setupLLM). Without --llm, classifier is nil: no key is read and no
+	// client is built.
+	classifier, ok := c.setupLLM(llmOpts, *noConnect)
 	if !ok {
 		return exitError
 	}
-	var classifier toolClassifier // nil without --llm
-	if llmSet != nil {
-		// The warning comes before the client is built and before any
-		// request, also with --json (FR-17).
-		c.scanWarnf("%s", llmSet.warningText())
-		classifier, ok = c.buildClassifier(llmSet.cfg)
-		if !ok {
-			return exitError
-		}
+	if classifier != nil {
 		defer closeClassifier(classifier)
 	}
 
@@ -448,26 +434,20 @@ func (c *cli) reportScan(ctx context.Context, res discover.Result, configPath st
 	}
 
 	// The LLM step (--llm) runs after the pin step, on the tools of the
-	// servers that scan inspected. It only adds rows: it never changes or
-	// drops a rule row, and it never touches pins, diffs or hints.
-	var llmFailed bool
-	if setup.classifier != nil && len(outcomes) > 0 {
-		lr, err := classifyTools(ctx, outcomes, setup.classifier, ignore)
-		if err != nil {
-			// classifyTools fails only when ctx ended: the user stopped the
-			// scan. Act as for a signal during the inspection: no report and
-			// no saved pins.
-			c.cmdPrintf("scan", "%s", interruptedText)
-			return exitError
-		}
-		// A failed request or the tool cap makes the result incomplete: the
-		// report still prints, and scan exits with 2.
-		llmFailed = lr.incomplete()
-		c.printLLMProblems(lr)
-		rows = append(rows, lr.rows...)
-		ignored = mergeIgnored(ignored, lr.ignored)
-		addLLMCounts(counts, lr.counts)
+	// servers that scan inspected (see llmStep). It only adds rows: it never
+	// changes or drops a rule row, and it never touches pins, diffs or hints.
+	lr, ok := c.llmStep(ctx, setup.classifier, outcomes, ignore)
+	if !ok {
+		// The user stopped the scan, as for a signal during the inspection:
+		// no report and no saved pins.
+		return exitError
 	}
+	// A failed request or the tool cap makes the result incomplete: the
+	// report still prints, and scan exits with 2.
+	llmFailed := lr.incomplete()
+	rows = append(rows, lr.rows...)
+	ignored = mergeIgnored(ignored, lr.ignored)
+	addLLMCounts(counts, lr.counts)
 
 	configProblem := len(res.Errors) > 0
 	var writeErr error

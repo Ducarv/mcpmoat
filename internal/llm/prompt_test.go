@@ -214,6 +214,33 @@ func TestToolMessageWorstCaseSize(t *testing.T) {
 	}
 }
 
+// TestToolMessageNeverTooLarge checks that errMessageTooLarge cannot happen:
+// a name cut to MaxToolNameBytes of the characters that JSON escapes grow the
+// most, with an empty description, fits in MaxToolMessageBytes. toolMessage
+// can always fall back to that message.
+func TestToolMessageNeverTooLarge(t *testing.T) {
+	t.Parallel()
+
+	// A control byte and an invalid UTF-8 byte each grow to six bytes
+	// (\u0001, \ufffd). The others grow less, but are checked too.
+	worst := []string{"\x00", "\x01", "\x1f", "\xff", "\x80", `"`, `\`, "\u2028", "\U0001F600"}
+	for _, s := range worst {
+		name, _ := cutUTF8(strings.Repeat(s, MaxToolNameBytes), MaxToolNameBytes)
+		msg, err := encodePayload(name, "", true)
+		if err != nil {
+			t.Fatalf("encodePayload(%q) error = %v", s, err)
+		}
+		if len(msg) > MaxToolMessageBytes {
+			t.Errorf("message with an empty description and a name of %q = %d bytes, want <= %d", s, len(msg), MaxToolMessageBytes)
+		}
+
+		in := Input{ToolName: strings.Repeat(s, 2*MaxToolNameBytes), Description: strings.Repeat(s, 2*MaxDescriptionBytes)}
+		if _, err := toolMessage(in); err != nil {
+			t.Errorf("toolMessage(name and description of %q) error = %v, want nil", s, err)
+		}
+	}
+}
+
 func TestToolMessageInvalidUTF8(t *testing.T) {
 	t.Parallel()
 

@@ -7,9 +7,7 @@ package main
 // the DNS lookup of the .invalid fixture host in the run without a proxy.
 
 import (
-	"encoding/json"
 	"io"
-	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/http/httputil"
@@ -30,8 +28,9 @@ import (
 const (
 	// e2eLLMKey is the API key canary. It is visible ASCII, so llm.ValidKey
 	// accepts it. It may only show in the x-api-key header of a request to
-	// the fake provider.
-	e2eLLMKey = "sk-e2e-llm-key-canary-3Fq8Zp"
+	// the fake provider. It holds no word, so no part of it shows in an output
+	// by chance: llmAssertNoKey looks for every part of 8 bytes.
+	e2eLLMKey = "sk-Rv5yM2wQ9cXh4Tn7Bd3Kz8Lp"
 	// e2eNetRemoteHost is the host of the remote fixture server. The .invalid
 	// top-level domain never resolves (RFC 6761).
 	e2eNetRemoteHost = "mcp.fixture.invalid"
@@ -61,12 +60,13 @@ type e2eNetRequest struct {
 // request and a CONNECT request reach the handler like any other request.
 type e2eNetServer struct {
 	srv *httptest.Server
-	// conns counts the new connections, the ones of settle included.
-	conns atomic.Int64
+	// conns counts the new connections, the ones of settle included (see
+	// countNewConns).
+	conns *atomic.Int32
 
 	mu      sync.Mutex
 	reqs    []e2eNetRequest
-	settles int64
+	settles int32
 }
 
 // e2eNetStart starts an e2eNetServer that records each request and then
@@ -100,11 +100,7 @@ func e2eNetStart(t *testing.T, respond func(w http.ResponseWriter, body []byte))
 		s.mu.Unlock()
 		respond(w, body)
 	}))
-	s.srv.Config.ConnState = func(_ net.Conn, state http.ConnState) {
-		if state == http.StateNew {
-			s.conns.Add(1)
-		}
-	}
+	s.conns = countNewConns(s.srv)
 	s.srv.Start()
 	t.Cleanup(s.srv.Close)
 	return s
@@ -115,7 +111,7 @@ func e2eNetStart(t *testing.T, respond func(w http.ResponseWriter, body []byte))
 // connection and waits for the answer. The server accepts connections in
 // order and counts each one before it serves it, so every connection that the
 // binary opened before it exited is counted, also one that sent nothing.
-func (s *e2eNetServer) settle(t *testing.T) (conns int64, reqs []e2eNetRequest) {
+func (s *e2eNetServer) settle(t *testing.T) (conns int32, reqs []e2eNetRequest) {
 	t.Helper()
 	// No proxy and no keep-alive: the request goes straight to the server on
 	// one new connection.
@@ -146,15 +142,13 @@ func e2eNetAssertNoKey(t *testing.T, who string, reqs []e2eNetRequest) {
 }
 
 // e2eNetAssertNoKeyOutput fails the test when stdout or stderr holds the API
-// key canary or a raw escape byte, or any canary of discovertest.
+// key canary or a part of it of 8 bytes or more (see llmAssertNoKey), a raw
+// escape byte, or any canary of discovertest.
 func e2eNetAssertNoKeyOutput(t *testing.T, stdout, stderr string) {
 	t.Helper()
-	assertContainsNone(t, "stdout", stdout, []string{e2eLLMKey})
-	assertContainsNone(t, "stderr", stderr, []string{e2eLLMKey})
+	llmAssertNoKey(t, e2eLLMKey, stdout, stderr)
 	assertNoLeakBoth(t, stdout, stderr)
-	if strings.Contains(stdout, "\x1b") || strings.Contains(stderr, "\x1b") {
-		t.Errorf("output has a raw ESC byte\nstdout: %q\nstderr: %q", stdout, stderr)
-	}
+	assertNoEscape(t, stdout, stderr)
 }
 
 // e2eNetAssertMarker checks whether the marker file of writeMarkerScript
@@ -330,45 +324,13 @@ var e2eLLMBenignTools = map[string]string{
 // other tools none.
 const e2eLLMRiskyTool = "echo"
 
-// e2eLLMRequest is the part of an Anthropic Messages request that the test
-// reads.
-type e2eLLMRequest struct {
-	Messages []struct {
-		Role    string `json:"role"`
-		Content string `json:"content"`
-	} `json:"messages"`
-}
-
-// e2eLLMToolMessage is the user message of a request: the tool text.
-type e2eLLMToolMessage struct {
-	ToolName        string `json:"tool_name"`
-	ToolDescription string `json:"tool_description"`
-	Truncated       bool   `json:"truncated"`
-}
-
-// e2eLLMParse returns the tool message of a request body. ok is false when
-// the body is not a Messages request with one user message that holds one
-// tool message.
-func e2eLLMParse(body []byte) (msg e2eLLMToolMessage, ok bool) {
-	var req e2eLLMRequest
-	if err := json.Unmarshal(body, &req); err != nil || len(req.Messages) != 1 || req.Messages[0].Role != "user" {
-		return msg, false
-	}
-	dec := json.NewDecoder(strings.NewReader(req.Messages[0].Content))
-	dec.DisallowUnknownFields()
-	if err := dec.Decode(&msg); err != nil {
-		return msg, false
-	}
-	return msg, true
-}
-
 // e2eLLMAnthropic answers like the Anthropic Messages API: one tool_use block
 // named classify. It rates e2eLLMRiskyTool high (hidden-instructions) and
-// every other tool none. A body that it cannot read gets 400, which fails the
-// scan with exit code 2.
+// every other tool none. A body that it cannot read (see llmRequestPayload)
+// gets 400, which fails the scan with exit code 2.
 func e2eLLMAnthropic(w http.ResponseWriter, body []byte) {
-	msg, ok := e2eLLMParse(body)
-	if !ok {
+	msg, err := llmRequestPayload(body)
+	if err != nil {
 		w.WriteHeader(http.StatusBadRequest)
 		return
 	}
@@ -390,8 +352,7 @@ func e2eLLMWarning(t *testing.T, url string) string {
 	if !ok {
 		t.Fatalf("provider URL %q is not http", url)
 	}
-	return scanWarnPrefix + "--llm sends the name and description of every tool to the LLM provider anthropic at " +
-		host + ". This data leaves your machine."
+	return llmWarning("anthropic", host)
 }
 
 // e2eLLMAssertRequests checks every request to the fake provider: the
@@ -429,9 +390,9 @@ func e2eLLMAssertRequests(t *testing.T, reqs []e2eNetRequest, forbidden []string
 				t.Errorf("request %d: body holds %q from the config:\n%s", i, bad, r.body)
 			}
 		}
-		msg, ok := e2eLLMParse([]byte(r.body))
-		if !ok {
-			t.Errorf("request %d: body is not a Messages request with one tool message:\n%s", i, r.body)
+		msg, err := llmRequestPayload([]byte(r.body))
+		if err != nil {
+			t.Errorf("request %d: body is not a Messages request with one tool message (%v):\n%s", i, err, r.body)
 			continue
 		}
 		if want, known := e2eLLMBenignTools[msg.ToolName]; !known || msg.ToolDescription != want || msg.Truncated {

@@ -42,11 +42,8 @@ const (
 	RiskHigh Risk = "high"
 )
 
-// risks lists every valid Risk, from low to high. The verdict schema uses the
-// same values.
-var risks = []Risk{RiskNone, RiskLow, RiskMedium, RiskHigh}
-
-// Valid reports whether r is one of the risk levels.
+// Valid reports whether r is one of the risk levels. A test keeps the risk
+// enum of the verdict schema in sync with these values.
 func (r Risk) Valid() bool {
 	switch r {
 	case RiskNone, RiskLow, RiskMedium, RiskHigh:
@@ -89,39 +86,34 @@ const (
 	// CategoryToolShadowing is text that changes how the agent uses other
 	// tools.
 	CategoryToolShadowing Category = "tool-shadowing"
-	// CategoryKeyAccess is text that makes the agent read secrets,
+	// CategoryCredentialAccess is text that makes the agent read secrets,
 	// keys or private files.
-	CategoryKeyAccess Category = "credential-access"
+	CategoryCredentialAccess Category = "credential-access" //nolint:gosec // G101: a category name, not a credential
 	// CategoryOther is any other risk.
 	CategoryOther Category = "other"
 )
 
-// categories lists every valid Category. The verdict schema uses the same
-// values.
-var categories = []Category{
-	CategoryHiddenInstructions,
-	CategoryDataExfiltration,
-	CategoryConcealFromUser,
-	CategoryToolShadowing,
-	CategoryKeyAccess,
-	CategoryOther,
-}
-
-// categoryText holds the fixed risk text of each category. Every category in
-// categories has a non-empty entry.
-var categoryText = map[Category]string{
+// categoryText holds the fixed risk text of each category. A test checks that
+// every valid Category has an entry.
+var categoryText = map[Category]string{ //nolint:gosec // G101: risk texts keyed by category, not credentials
 	CategoryHiddenInstructions: "An LLM classifier rated this tool description as likely to hold hidden instructions for the AI agent.",
 	CategoryDataExfiltration:   "An LLM classifier rated this tool description as likely to make the AI agent send data to an outside party.",
 	CategoryConcealFromUser:    "An LLM classifier rated this tool description as likely to make the AI agent hide its actions from the user.",
 	CategoryToolShadowing:      "An LLM classifier rated this tool description as likely to change how the AI agent uses other tools.",
-	CategoryKeyAccess:          "An LLM classifier rated this tool description as likely to make the AI agent read secrets, keys or private files.",
+	CategoryCredentialAccess:   "An LLM classifier rated this tool description as likely to make the AI agent read secrets, keys or private files.",
 	CategoryOther:              "An LLM classifier rated this tool description as likely to manipulate the AI agent.",
 }
 
-// Valid reports whether c is one of the categories.
+// Valid reports whether c is one of the categories. A test keeps the
+// category enum of the verdict schema in sync with these values.
 func (c Category) Valid() bool {
-	_, ok := categoryText[c]
-	return ok
+	switch c {
+	case CategoryHiddenInstructions, CategoryDataExfiltration, CategoryConcealFromUser,
+		CategoryToolShadowing, CategoryCredentialAccess, CategoryOther:
+		return true
+	default:
+		return false
+	}
 }
 
 // Text returns the fixed risk text of c for a finding. It never holds model
@@ -163,8 +155,8 @@ type Verdict struct {
 	Category Category
 }
 
-// Field names of the verdict JSON object. The verdict schema uses the same
-// names.
+// Field names of the verdict JSON object. A test keeps the keys of the
+// verdict schema in sync with these names.
 const (
 	fieldRisk     = "risk"
 	fieldCategory = "category"

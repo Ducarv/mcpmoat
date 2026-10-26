@@ -60,12 +60,11 @@ func TestOpenAIRequestShape(t *testing.T) {
 	}
 
 	checkRawBody(t, req.Body)
-	body := decodeKeys(t, "body", req.Body, "model", "temperature", "messages", "response_format")
+	// No temperature: OpenAI reasoning models refuse any value but the
+	// default (HTTP 400).
+	body := decodeKeys(t, "body", req.Body, "model", "messages", "response_format")
 	if got := decodeAs[string](t, "model", body["model"]); got != llmTestModel {
 		t.Errorf("model = %q, want %q", got, llmTestModel)
-	}
-	if got := string(body["temperature"]); got != "0" {
-		t.Errorf("temperature = %s, want 0", got)
 	}
 
 	wantMessage, err := toolMessage(shapeInput)
@@ -224,7 +223,7 @@ func TestOpenAIClassifyOutputErrors(t *testing.T) {
 // FuzzOpenAIParseResponse checks that any body gives a valid verdict or one
 // of the two documented error classes, and never panics.
 func FuzzOpenAIParseResponse(f *testing.F) {
-	f.Add([]byte(openAIReply(RiskMedium, CategoryKeyAccess)))
+	f.Add([]byte(openAIReply(RiskMedium, CategoryCredentialAccess)))
 	f.Add([]byte(`{"choices":[{"message":{"content":null,"refusal":"no"}}]}`))
 	f.Add([]byte(`{"choices":[{"finish_reason":"length","message":{"content":"{"}}]}`))
 	f.Add([]byte(`null`))

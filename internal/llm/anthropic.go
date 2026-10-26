@@ -34,17 +34,11 @@ type anthropicRequest struct {
 	Model     string `json:"model"`
 	MaxTokens int    `json:"max_tokens"`
 	// Temperature has no omitempty: 0 must be sent.
-	Temperature float64            `json:"temperature"`
-	System      string             `json:"system"`
-	Messages    []anthropicMessage `json:"messages"`
-	Tools       []anthropicTool    `json:"tools"`
-	ToolChoice  anthropicChoice    `json:"tool_choice"`
-}
-
-// anthropicMessage is one message of the request.
-type anthropicMessage struct {
-	Role    string `json:"role"`
-	Content string `json:"content"`
+	Temperature float64         `json:"temperature"`
+	System      string          `json:"system"`
+	Messages    []chatMessage   `json:"messages"`
+	Tools       []anthropicTool `json:"tools"`
+	ToolChoice  anthropicChoice `json:"tool_choice"`
 }
 
 // anthropicTool is one tool of the request.
@@ -85,7 +79,7 @@ func (anthropicAPI) requestBody(model, message string) any {
 		MaxTokens:   anthropicMaxTokens,
 		Temperature: 0,
 		System:      SystemPrompt,
-		Messages:    []anthropicMessage{{Role: "user", Content: message}},
+		Messages:    []chatMessage{{Role: "user", Content: message}},
 		Tools: []anthropicTool{{
 			Name:        anthropicToolName,
 			Description: anthropicToolDescription,

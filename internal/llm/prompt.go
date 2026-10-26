@@ -1,7 +1,6 @@
 package llm
 
 import (
-	"bytes"
 	"encoding/json"
 	"errors"
 	"unicode/utf8"
@@ -61,9 +60,10 @@ Answer only with one JSON object that matches the given schema: {"risk": ..., "c
 // for one (the OpenAI json_schema response format).
 const VerdictSchemaName = "mcpmoat_verdict"
 
-// verdictSchema is the JSON Schema of the verdict object. Its enums hold the
-// values of risks and categories, and its keys are fieldRisk and
-// fieldCategory. It uses only the subset of JSON Schema that the strict
+// verdictSchema is the JSON Schema of the verdict object. It is a hand-written
+// string: TestVerdictSchema keeps its enums in sync with the Risk and
+// Category values, and its keys with fieldRisk and fieldCategory. It uses
+// only the subset of JSON Schema that the strict
 // structured output modes of both providers accept: every property is
 // required and additionalProperties is false.
 const verdictSchema = `{"type":"object",` +
@@ -159,19 +159,16 @@ func toolMessage(in Input) (string, error) {
 	return string(best), nil
 }
 
-// encodePayload encodes one toolPayload as JSON, with HTML escaping off and
-// without the final newline that json.Encoder writes.
+// encodePayload encodes one toolPayload as JSON with encodeJSON: HTML
+// escaping is off and there is no final newline.
 func encodePayload(name, desc string, truncated bool) ([]byte, error) {
-	var buf bytes.Buffer
-	enc := json.NewEncoder(&buf)
-	enc.SetEscapeHTML(false)
-	err := enc.Encode(toolPayload{ToolName: name, ToolDescription: desc, Truncated: truncated})
+	msg, err := encodeJSON(toolPayload{ToolName: name, ToolDescription: desc, Truncated: truncated})
 	if err != nil {
 		// Encoding strings and a bool cannot fail. The error is fixed text
 		// and does not wrap err, so it can never hold tool text.
 		return nil, errEncodeMessage
 	}
-	return bytes.TrimSuffix(buf.Bytes(), []byte("\n")), nil
+	return msg, nil
 }
 
 // cutUTF8 returns the longest prefix of s with at most limit bytes that does

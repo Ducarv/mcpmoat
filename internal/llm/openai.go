@@ -17,19 +17,14 @@ const openAIPath = "/chat/completions"
 // schema in strict mode, so the message content is the verdict.
 type openAIAPI struct{}
 
-// openAIRequest is the request body.
+// openAIRequest is the request body. It has no temperature: OpenAI reasoning
+// models (the o-series and the gpt-5 family) accept only the default value
+// and answer HTTP 400 to any other. The strict json_schema response format
+// keeps the output in the verdict format.
 type openAIRequest struct {
-	Model string `json:"model"`
-	// Temperature has no omitempty: 0 must be sent.
-	Temperature    float64              `json:"temperature"`
-	Messages       []openAIMessage      `json:"messages"`
+	Model          string               `json:"model"`
+	Messages       []chatMessage        `json:"messages"`
 	ResponseFormat openAIResponseFormat `json:"response_format"`
-}
-
-// openAIMessage is one message of the request.
-type openAIMessage struct {
-	Role    string `json:"role"`
-	Content string `json:"content"`
 }
 
 // openAIResponseFormat is the response_format of the request.
@@ -68,9 +63,8 @@ func (openAIAPI) path() string { return openAIPath }
 // requestBody returns the Chat Completions request for model and message.
 func (openAIAPI) requestBody(model, message string) any {
 	return openAIRequest{
-		Model:       model,
-		Temperature: 0,
-		Messages: []openAIMessage{
+		Model: model,
+		Messages: []chatMessage{
 			{Role: "system", Content: SystemPrompt},
 			{Role: "user", Content: message},
 		},

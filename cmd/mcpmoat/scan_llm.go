@@ -4,6 +4,7 @@ import (
 	"cmp"
 	"context"
 	"errors"
+	"flag"
 	"fmt"
 	"net/url"
 	"slices"
@@ -30,6 +31,18 @@ const (
 	llmWorkers = 4
 )
 
+// noLLMClientText is the text after the prefix of the error line that scan
+// prints when it has no LLM client. This is a bug in mcpmoat, not a user
+// error. It is fixed text.
+const noLLMClientText = "internal error: no LLM client"
+
+// noToolNameKey is the Key of an LLM finding row for a tool with an empty
+// name. A hostile server can list such a tool. The report writers treat a
+// row with an empty Key as a row about the whole server, so the row gets
+// this fixed text instead. The request to the provider still has the real
+// (empty) name.
+const noToolNameKey = "(no name)"
+
 // toolClassifier rates one tool. *llm.Client implements it. Tests use a fake,
 // so they send no request.
 type toolClassifier interface {
@@ -48,6 +61,38 @@ func newLLMClassifier(cfg llm.Config) (toolClassifier, error) {
 	return client, nil
 }
 
+// addLLMFlags adds the four LLM flags of scan (FR-17) to fs. They store
+// their values in f. --llm is off by default. The other three refuse an
+// empty value (see pathFlag), so an empty value in f means that the flag was
+// not given. checkLLMFlags checks them all.
+//
+// The base URL can hold a user:password, so the errors of its flag never
+// hold the value. addLLMFlags returns that flag: when Parse fails, the
+// caller prints its problem in place of the Parse error (see secretPathFlag).
+func addLLMFlags(fs *flag.FlagSet, f *llmFlags) *secretFlag {
+	fs.BoolVar(&f.on, "llm", false, "")
+	pathFlag(fs, "llm-provider", "a provider name", &f.provider)
+	pathFlag(fs, "llm-model", "a model name", &f.model)
+	return secretPathFlag(fs, "llm-base-url", "a URL", &f.baseURL)
+}
+
+// setupLLM checks the LLM flags (see checkLLMFlags) and, with --llm, prints
+// the warning on stderr and builds the classifier (see buildClassifier).
+// runScan calls it before it reads a config file. The warning comes before
+// the client is built and before any request, also with --json (FR-17).
+//
+// It returns a nil classifier and true without --llm: then it reads no API
+// key and builds no client. On a problem it has printed the error and
+// returns false, and scan exits with 2.
+func (c *cli) setupLLM(f llmFlags, noConnect bool) (toolClassifier, bool) {
+	setup, ok := c.checkLLMFlags(f, noConnect)
+	if !ok || setup == nil {
+		return nil, ok
+	}
+	c.scanWarnf("%s", setup.warningText())
+	return c.buildClassifier(setup.cfg)
+}
+
 // buildClassifier gets the classifier for cfg from c.newClassifier. This is
 // the only place that calls it, and runScan calls it only with --llm. On an
 // error it prints one line on stderr and returns false. The errors of llm.New
@@ -55,7 +100,7 @@ func newLLMClassifier(cfg llm.Config) (toolClassifier, error) {
 // set any factory.
 func (c *cli) buildClassifier(cfg llm.Config) (toolClassifier, bool) {
 	if c.newClassifier == nil {
-		fprintf(c.stderr, "mcpmoat scan: internal error: no LLM client\n")
+		c.cmdPrintf("scan", "%s", noLLMClientText)
 		return nil, false
 	}
 	cl, err := c.newClassifier(cfg)
@@ -64,7 +109,7 @@ func (c *cli) buildClassifier(cfg llm.Config) (toolClassifier, bool) {
 		return nil, false
 	}
 	if cl == nil {
-		fprintf(c.stderr, "mcpmoat scan: internal error: no LLM client\n")
+		c.cmdPrintf("scan", "%s", noLLMClientText)
 		return nil, false
 	}
 	return cl, true
@@ -87,6 +132,21 @@ type llmFlags struct {
 	baseURL  string // --llm-base-url
 }
 
+// strayLLMFlag returns the name of the first LLM flag in f that needs --llm,
+// for example "--llm-model", or "" when f has none.
+func strayLLMFlag(f llmFlags) string {
+	for _, given := range []struct{ name, value string }{
+		{"--llm-provider", f.provider},
+		{"--llm-model", f.model},
+		{"--llm-base-url", f.baseURL},
+	} {
+		if given.value != "" {
+			return given.name
+		}
+	}
+	return ""
+}
+
 // llmSetup is the checked LLM config of one scan.
 type llmSetup struct {
 	// cfg is the resolved config, with the defaults filled in and the API key
@@ -95,6 +155,19 @@ type llmSetup struct {
 	// host is the host of cfg.BaseURL, with the port if it has one. The
 	// warning names it.
 	host string
+}
+
+// newLLMSetup returns the llmSetup of cfg, a config that Resolve returned.
+// Resolve checked cfg.BaseURL with llm.ValidateBaseURL, so the URL parses
+// and has a host: the error is only a guard. It is llm.ErrInvalidBaseURL
+// and never the url.Parse error, because that text quotes the URL, which
+// can hold a secret.
+func newLLMSetup(cfg llm.Config) (*llmSetup, error) {
+	u, err := url.Parse(cfg.BaseURL)
+	if err != nil || u.Host == "" {
+		return nil, llm.ErrInvalidBaseURL
+	}
+	return &llmSetup{cfg: cfg, host: u.Host}, nil
 }
 
 // warningText returns the text of the warning that scan prints on stderr
@@ -118,15 +191,9 @@ func (c *cli) checkLLMFlags(f llmFlags, noConnect bool) (*llmSetup, bool) {
 	if !f.on {
 		// An LLM flag without --llm would do nothing. Say so, or the user
 		// could think that the scan used the LLM.
-		for _, given := range []struct{ name, value string }{
-			{"--llm-provider", f.provider},
-			{"--llm-model", f.model},
-			{"--llm-base-url", f.baseURL},
-		} {
-			if given.value != "" {
-				c.usageError("scan", "%s needs --llm", given.name)
-				return nil, false
-			}
+		if name := strayLLMFlag(f); name != "" {
+			c.usageError("scan", "%s needs --llm", name)
+			return nil, false
 		}
 		return nil, true
 	}
@@ -175,14 +242,12 @@ func (c *cli) checkLLMFlags(f llmFlags, noConnect bool) (*llmSetup, bool) {
 		}
 		return nil, false
 	}
-	// Resolve checked the URL with ValidateBaseURL, so it parses and has a
-	// host. The error text of url.Parse quotes the URL, so it is not printed.
-	u, err := url.Parse(cfg.BaseURL)
-	if err != nil || u.Host == "" {
-		c.usageError("scan", "--llm-base-url: %v", llm.ErrInvalidBaseURL)
+	setup, err := newLLMSetup(cfg)
+	if err != nil {
+		c.usageError("scan", "--llm-base-url: %v", err)
 		return nil, false
 	}
-	return &llmSetup{cfg: cfg, host: u.Host}, true
+	return setup, true
 }
 
 // llmJob is one tool to classify.
@@ -190,19 +255,61 @@ type llmJob struct {
 	// index is the index of the server in the servers of the scan
 	// (inspect.Outcome.Index).
 	index int
-	// server is the server name from the config file. It is untrusted.
-	server string
-	// ref is the server of the finding row.
+	// ref is the server of the finding row. ref.Name is the server name
+	// from the config file. It is untrusted.
 	ref report.ServerRef
 	// in is what the classifier gets: the tool name and description only.
 	in llm.Input
 }
 
+// answerKind sorts the result of one Classify call. sortAnswer is the only
+// place that sorts the errors of Classify.
+type answerKind int
+
+const (
+	// answerNotRun means that the job did not run. It is the zero value.
+	answerNotRun answerKind = iota
+	// answerVerdict means that Classify returned a verdict.
+	answerVerdict
+	// answerUnusable means that the answer for this tool cannot be used: the
+	// model output is not a valid verdict, or another error about this tool
+	// or the client. The tool gets an llm.RuleIDInvalid row.
+	answerUnusable
+	// answerStopped means that the context of the request ended: a signal,
+	// or the cancel after the first provider failure.
+	answerStopped
+	// answerProviderFailed means that the request to the provider failed
+	// (llm.ErrProvider). It stops the LLM step.
+	answerProviderFailed
+)
+
+// sortAnswer returns the kind of the result of Classify with the error err.
+//
+// Only an llm.ErrProvider error is a provider failure. Any other error (for
+// example a request that is too large, a nil client or an encode error) is
+// about one tool or about the client, not about the provider. Such an error
+// must not stop the other tools or be reported as a failed provider, so the
+// tool gets an llm.RuleIDInvalid row (its answer could not be used), like
+// invalid model output.
+func sortAnswer(err error) answerKind {
+	switch {
+	case err == nil:
+		return answerVerdict
+	case errors.Is(err, llm.ErrInvalidOutput):
+		return answerUnusable
+	case errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded):
+		return answerStopped
+	case errors.Is(err, llm.ErrProvider):
+		return answerProviderFailed
+	default:
+		return answerUnusable
+	}
+}
+
 // llmAnswer is the result of one job.
 type llmAnswer struct {
-	done    bool // true when Classify returned
-	verdict llm.Verdict
-	err     error
+	kind    answerKind
+	verdict llm.Verdict // set only for answerVerdict
 }
 
 // llmResult is the result of the LLM step.
@@ -219,8 +326,9 @@ type llmResult struct {
 	// overCap is the number of tools after the first maxLLMTools. They were
 	// not sent.
 	overCap int
-	// failure is the first error of the provider. It is nil when no request
-	// failed. Its text is fixed (see llmFailureText).
+	// failure is the first error of the provider (llm.ErrProvider). It is
+	// nil when no request to the provider failed. Its text is fixed (see
+	// llmFailureText).
 	failure error
 	// skipped is the number of tools under the cap that got no verdict: the
 	// tool whose request failed, and the tools that were not sent after it.
@@ -233,6 +341,28 @@ func (r llmResult) incomplete() bool {
 	return r.overCap > 0 || r.failure != nil || r.skipped > 0
 }
 
+// llmStep runs the LLM step of scan (see classifyTools) on the tools of the
+// inspected servers in outcomes, and prints its problems on stderr (see
+// printLLMProblems). It returns an empty result and true when cl is nil
+// (no --llm) or when no server was inspected: then it sends nothing.
+//
+// It returns false when the process got a signal during the step. It has
+// written interruptedText then (see interrupted), and scan must print no
+// report and save no pins.
+func (c *cli) llmStep(ctx context.Context, cl toolClassifier, outcomes []inspect.Outcome, ignore *scanIgnores) (llmResult, bool) {
+	if cl == nil || len(outcomes) == 0 {
+		return llmResult{}, true
+	}
+	lr, err := classifyTools(ctx, outcomes, cl, ignore)
+	// classifyTools fails only when ctx ended, so interrupted is true then
+	// and writes the line. The check of err is only a guard.
+	if c.interrupted(ctx, "scan") || err != nil {
+		return llmResult{}, false
+	}
+	c.printLLMProblems(lr)
+	return lr, true
+}
+
 // classifyTools sends the name and the description of each tool of each
 // inspected server (inspect.StatusOK) to cl, and returns the LLM findings.
 // It sends nothing else of the tool and nothing of the server.
@@ -243,15 +373,17 @@ func (r llmResult) incomplete() bool {
 // the tools, whatever the order in which the requests end.
 //
 // A verdict with risk none gives no row. A verdict with risk low, medium or
-// high gives one llm.RuleID row with that severity (never critical). Output
-// that is not a valid verdict gives one llm.RuleIDInvalid row with severity
-// medium. Every row is a report.SourceLLM row with fixed texts from package
-// llm: no model output reaches it. The ignore list drops rows like the
-// findings of the config rules (see scanIgnores).
+// high gives one llm.RuleID row with that severity (never critical). An
+// answer that cannot be used (see answerUnusable) gives one
+// llm.RuleIDInvalid row with severity medium. Every row is a
+// report.SourceLLM row with fixed texts from package llm: no model output
+// reaches it. The ignore list drops rows like the findings of the config
+// rules (see scanIgnores).
 //
-// The first request that fails stops the step: the requests that run end and
-// no new one starts. The result then holds the error (see
-// llmResult.failure), and the tools without a verdict get no row.
+// The first request to the provider that fails (see sortAnswer) stops the
+// step: the requests that run end and no new one starts. The result then
+// holds the error (see llmResult.failure), and the tools without a verdict
+// get no row.
 //
 // The error is not nil only when ctx ended (the process got a signal). The
 // caller then handles it like a signal during the inspection.
@@ -270,19 +402,19 @@ func classifyTools(ctx context.Context, outcomes []inspect.Outcome, cl toolClass
 	res.failure = failure
 
 	for i, job := range jobs {
-		a := answers[i]
-		row, ok, counted := llmRow(job, a)
-		if !counted {
+		outcome, row := llmRow(job, answers[i])
+		switch outcome {
+		case llmNoVerdict:
 			res.skipped++
 			continue
-		}
-		if !ok {
+		case llmNoRisk:
 			continue // risk none: no finding
 		}
-		key := rules.FindingKey{RuleID: row.RuleID, Server: job.server, Tool: job.in.ToolName}
+		key := rules.FindingKey{RuleID: row.RuleID, Server: job.ref.Name, Tool: job.in.ToolName}
 		// The LLM rule IDs are not pin rules, so the entries of
-		// .mcpmoat-ignore and of --ignore both apply.
-		if drop, _ := ignore.ignored(key); drop {
+		// .mcpmoat-ignore and of --ignore both apply, as for the config
+		// rules.
+		if ignore.all.Ignored(key) {
 			res.ignored = addIgnored(res.ignored, row.RuleID, 1)
 			continue
 		}
@@ -310,10 +442,9 @@ func llmJobs(outcomes []inspect.Outcome) []llmJob {
 		ref := report.NewServerRef(o.Server)
 		for _, t := range o.Result.Tools {
 			jobs = append(jobs, llmJob{
-				index:  o.Index,
-				server: o.Server.Name,
-				ref:    ref,
-				in:     llm.Input{ToolName: t.Name, Description: t.Description},
+				index: o.Index,
+				ref:   ref,
+				in:    llm.Input{ToolName: t.Name, Description: t.Description},
 			})
 		}
 	}
@@ -322,9 +453,9 @@ func llmJobs(outcomes []inspect.Outcome) []llmJob {
 
 // runLLMJobs runs the jobs with llmWorkers requests at the same time, and
 // returns one answer for each job, in the order of jobs. A job that did not
-// run has done set to false.
+// run has the kind answerNotRun.
 //
-// The first error that is not a stop of the context is the failure: it stops
+// The first provider failure (answerProviderFailed) is the failure: it stops
 // the requests that run (it cancels their context) and no new job starts.
 // When ctx ends, no new job starts either; the caller checks ctx.
 func runLLMJobs(ctx context.Context, jobs []llmJob, cl toolClassifier) ([]llmAnswer, error) {
@@ -354,10 +485,11 @@ func runLLMJobs(ctx context.Context, jobs []llmJob, cl toolClassifier) ([]llmAns
 		wg.Go(func() {
 			defer func() { <-sem }()
 			v, err := cl.Classify(runCtx, job.in)
+			kind := sortAnswer(err)
 			// Each goroutine writes only its own element, so this needs no
 			// lock.
-			answers[i] = llmAnswer{done: true, verdict: v, err: err}
-			if err == nil || errors.Is(err, llm.ErrInvalidOutput) || stoppedByContext(err) {
+			answers[i] = llmAnswer{kind: kind, verdict: v}
+			if kind != answerProviderFailed {
 				return
 			}
 			mu.Lock()
@@ -372,29 +504,37 @@ func runLLMJobs(ctx context.Context, jobs []llmJob, cl toolClassifier) ([]llmAns
 	return answers, failure
 }
 
-// stoppedByContext reports whether err means that the context of the request
-// ended: a signal, or the cancel after the first failure.
-func stoppedByContext(err error) bool {
-	return errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)
-}
+// llmOutcome is what one answer gives to the report.
+type llmOutcome int
 
-// llmRow returns the finding row of one answer. ok is false when the answer
-// gives no row (risk none). counted is false when the tool got no verdict:
-// the job did not run, it was stopped, or its request failed.
-func llmRow(job llmJob, a llmAnswer) (row report.FindingRow, ok, counted bool) {
-	row = report.FindingRow{
+const (
+	// llmNoVerdict means that the tool got no verdict: the job did not run,
+	// it was stopped, or the request to the provider failed. It gives no row.
+	llmNoVerdict llmOutcome = iota
+	// llmNoRisk means a verdict with risk none. It gives no row.
+	llmNoRisk
+	// llmFinding means one finding row.
+	llmFinding
+)
+
+// llmRow returns what the answer a of job gives. The row is set only for
+// llmFinding.
+func llmRow(job llmJob, a llmAnswer) (llmOutcome, report.FindingRow) {
+	key := job.in.ToolName
+	if key == "" {
+		key = noToolNameKey
+	}
+	row := report.FindingRow{
 		ServerRef: job.ref,
 		Source:    report.SourceLLM,
 		Field:     rules.FieldTool,
-		Key:       job.in.ToolName,
+		Key:       key,
 	}
-	switch {
-	case !a.done:
-		return report.FindingRow{}, false, false
-	case a.err == nil:
+	switch a.kind {
+	case answerVerdict:
 		severity, hasRisk := a.verdict.Risk.Severity()
 		if !hasRisk {
-			return report.FindingRow{}, false, true
+			return llmNoRisk, report.FindingRow{}
 		}
 		row.RuleID = llm.RuleID
 		row.Title = llm.Title
@@ -404,17 +544,19 @@ func llmRow(job llmJob, a llmAnswer) (row report.FindingRow, ok, counted bool) {
 		// The category is one of the fixed llm.Category values: parseVerdict
 		// refuses any other.
 		row.Related = string(a.verdict.Category)
-		return row, true, true
-	case errors.Is(a.err, llm.ErrInvalidOutput):
+		return llmFinding, row
+	case answerUnusable:
 		row.RuleID = llm.RuleIDInvalid
 		row.Title = llm.InvalidTitle
 		row.Severity = string(rules.SeverityMedium)
 		row.Risk = llm.InvalidText
 		row.Remediation = llm.InvalidRemediation
-		return row, true, true
-	default:
-		return report.FindingRow{}, false, false
+		return llmFinding, row
+	case answerNotRun, answerStopped, answerProviderFailed:
+		return llmNoVerdict, report.FindingRow{}
 	}
+	// Not reached: the cases above name every answerKind.
+	return llmNoVerdict, report.FindingRow{}
 }
 
 // addLLMCounts adds the LLM row counts of each server to counts, the

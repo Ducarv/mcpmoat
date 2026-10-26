@@ -6,15 +6,12 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"math/rand/v2"
-	"net"
 	"net/http"
 	"net/http/httptest"
 	"regexp"
 	"runtime"
 	"slices"
-	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -26,13 +23,14 @@ import (
 	"github.com/Ducarv/mcpmoat/internal/inspect/inspecttest"
 	"github.com/Ducarv/mcpmoat/internal/llm"
 	"github.com/Ducarv/mcpmoat/internal/report"
+	"github.com/Ducarv/mcpmoat/internal/rules"
 )
 
-// This file tests "mcpmoat scan --llm" (FR-17) in process. Most tests inject
+// This file tests "mcpmoat scan --llm" (FR-17) in process. The tests inject
 // a fake classifier through cli.newClassifier, so they send no request. The
-// tests that need the real client (llm.New) send it to a fake Anthropic API
-// on a loopback httptest server. network_test.go holds the no-network proof
-// (NFR-01).
+// tests that need the real client (llm.New) are in scan_llm_client_test.go:
+// they send their requests to a fake Anthropic API on a loopback httptest
+// server. network_test.go holds the no-network proof (NFR-01).
 
 // llmTestKey is the fake API key of the tests. It is visible ASCII, so
 // llm.ValidKey accepts it. It holds no word, so no part of it shows in
@@ -74,7 +72,7 @@ func llmAnswerFor(in llm.Input) (llm.Verdict, error) {
 	case strings.Contains(d, llmMarkInvalid):
 		return llm.Verdict{}, fmt.Errorf("%w: test", llm.ErrInvalidOutput)
 	case strings.Contains(d, llmMarkHigh):
-		return llm.Verdict{Risk: llm.RiskHigh, Category: llm.CategoryKeyAccess}, nil
+		return llm.Verdict{Risk: llm.RiskHigh, Category: llm.CategoryCredentialAccess}, nil
 	case strings.Contains(d, llmMarkMedium):
 		return llm.Verdict{Risk: llm.RiskMedium, Category: llm.CategoryHiddenInstructions}, nil
 	case strings.Contains(d, llmMarkLow):
@@ -252,89 +250,23 @@ func llmWarning(provider, host string) string {
 		provider + " at " + host + ". This data leaves your machine."
 }
 
-// llmBlock is one finding of the FINDINGS block of a plain stdout: the
-// severity of its group, its first line and its detail lines, each without
-// its leading spaces. parseFindings in helpers_test.go does not know the
-// "Source:" line of an LLM finding, so the --llm tests use this parser.
-type llmBlock struct {
-	severity string
-	head     string
-	details  []string
-}
-
-// isLLM reports whether the block is an LLM finding: its first line ends
-// with the [LLM] marker.
-func (b llmBlock) isLLM() bool { return strings.HasSuffix(b.head, " [LLM]") }
-
-// detail returns the text of the detail line with the label, or "".
-func (b llmBlock) detail(label string) string {
-	for _, d := range b.details {
-		if v, ok := strings.CutPrefix(d, label+": "); ok {
-			return v
-		}
-	}
-	return ""
-}
-
-// text returns the block as one string, for comparisons.
-func (b llmBlock) text() string {
-	return b.severity + "|" + b.head + "|" + strings.Join(b.details, "|")
-}
-
-// llmBlocks parses the FINDINGS block of a plain stdout into its findings, in
-// the printed order. It fails the test when a line has an unexpected shape or
-// a group count is wrong. It returns nil when stdout has no FINDINGS block.
-func llmBlocks(t *testing.T, stdout string) []llmBlock {
-	t.Helper()
-	var (
-		out   []llmBlock
-		group string
-		want  int
-		got   int
-	)
-	closeGroup := func() {
-		if group != "" && got != want {
-			t.Errorf("group %s says %d findings, has %d\nstdout:\n%s", strings.ToUpper(group), want, got, stdout)
-		}
-	}
-	for _, line := range nonEmptyLines(splitScanSections(stdout).Findings) {
-		if m := findingGroupPattern.FindStringSubmatch(line); m != nil {
-			closeGroup()
-			group = strings.ToLower(m[1])
-			want, _ = strconv.Atoi(m[2]) // the pattern holds only digits
-			got = 0
-			continue
-		}
-		if d, ok := strings.CutPrefix(line, "    "); ok {
-			if len(out) == 0 {
-				t.Fatalf("findings line %q has no finding before it:\n%s", line, stdout)
-			}
-			out[len(out)-1].details = append(out[len(out)-1].details, d)
-			continue
-		}
-		head, ok := strings.CutPrefix(line, "  ")
-		if !ok || group == "" || strings.HasPrefix(head, " ") {
-			t.Fatalf("findings line %q is not a group, a finding or a detail line:\n%s", line, stdout)
-		}
-		out = append(out, llmBlock{severity: group, head: head})
-		got++
-	}
-	closeGroup()
-	return out
-}
-
-// llmSplitBlocks returns the LLM findings and the rule findings of blocks,
-// each in the printed order.
-func llmSplitBlocks(blocks []llmBlock) (llmRows, ruleRows []llmBlock) {
-	for _, b := range blocks {
-		if b.isLLM() {
-			llmRows = append(llmRows, b)
+// llmSplitFindings returns the LLM findings and the rule findings of found
+// (from parseFindings), each in the printed order.
+func llmSplitFindings(found []scanFinding) (llmRows, ruleRows []scanFinding) {
+	for _, f := range found {
+		if f.LLM {
+			llmRows = append(llmRows, f)
 		} else {
-			ruleRows = append(ruleRows, b)
+			ruleRows = append(ruleRows, f)
 		}
 	}
 	return llmRows, ruleRows
 }
+
+// llmFindingText returns all the parsed parts of f as one string, in Go
+// syntax, for comparisons. Two findings with the same text have the same
+// first line and the same detail lines in the same order.
+func llmFindingText(f scanFinding) string { return fmt.Sprintf("%#v", f) }
 
 // llmHit is the part of an LLM finding that the tests compare: rule, severity,
 // server name and tool.
@@ -343,43 +275,44 @@ type llmHit struct {
 }
 
 // llmRowsOf returns the rule, the severity, the server name and the tool of
-// each LLM block, in order. It also checks the fixed parts of each LLM block:
-// the title with the marker, the Source line, the risk and the fix texts.
-func llmRowsOf(t *testing.T, blocks []llmBlock) []llmHit {
+// each LLM finding of found (from parseFindings), in order. It also checks the
+// fixed parts of each LLM finding: the title (parseFindings checks the [LLM]
+// marker), the Source line right after the Server line, the risk and the fix
+// texts.
+func llmRowsOf(t *testing.T, found []scanFinding) []llmHit {
 	t.Helper()
 	var rows []llmHit
-	for _, b := range blocks {
-		if !b.isLLM() {
+	for _, f := range found {
+		if !f.LLM {
 			continue
 		}
-		rule, _, _ := strings.Cut(b.head, " ")
-		switch rule {
+		switch f.RuleID {
 		case llm.RuleID:
-			if b.head != llmHead001 {
-				t.Errorf("LLM finding head = %q, want %q", b.head, llmHead001)
+			if f.Title != llm.Title {
+				t.Errorf("%s title = %q, want %q", f.RuleID, f.Title, llm.Title)
 			}
-			if b.detail("Fix") != llm.Remediation {
-				t.Errorf("%s Fix = %q, want %q", rule, b.detail("Fix"), llm.Remediation)
+			if f.Fix != llm.Remediation {
+				t.Errorf("%s Fix = %q, want %q", f.RuleID, f.Fix, llm.Remediation)
 			}
 		case llm.RuleIDInvalid:
-			if b.head != llmHead002 {
-				t.Errorf("LLM finding head = %q, want %q", b.head, llmHead002)
+			if f.Title != llm.InvalidTitle {
+				t.Errorf("%s title = %q, want %q", f.RuleID, f.Title, llm.InvalidTitle)
 			}
-			if b.detail("Risk") != llm.InvalidText || b.detail("Fix") != llm.InvalidRemediation {
-				t.Errorf("%s Risk, Fix = %q, %q; want the fixed texts of package llm", rule, b.detail("Risk"), b.detail("Fix"))
+			if f.Risk != llm.InvalidText || f.Fix != llm.InvalidRemediation {
+				t.Errorf("%s Risk, Fix = %q, %q; want the fixed texts of package llm", f.RuleID, f.Risk, f.Fix)
 			}
-			if b.severity != "medium" {
-				t.Errorf("%s is in group %q, want medium", rule, b.severity)
+			if f.Severity != "medium" {
+				t.Errorf("%s is in group %q, want medium", f.RuleID, f.Severity)
 			}
 		default:
-			t.Errorf("finding %q has the [LLM] marker but is not an LLM rule", b.head)
+			t.Errorf("finding %s %q has the [LLM] marker but is not an LLM rule", f.RuleID, f.Title)
 		}
 		// The Source line comes right after the Server line.
-		if len(b.details) < 2 || !strings.HasPrefix(b.details[0], "Server: ") || b.details[1] != "Source: "+llmSourceTxt {
-			t.Errorf("LLM finding %q details = %q, want the Server line and then \"Source: %s\"", b.head, b.details, llmSourceTxt)
+		if len(f.Details) < 2 || !strings.HasPrefix(f.Details[0], "Server: ") || f.Details[1] != "Source: "+llmSourceTxt {
+			t.Errorf("LLM finding %s details = %q, want the Server line and then \"Source: %s\"", f.RuleID, f.Details, llmSourceTxt)
 		}
-		tool, _, _ := strings.Cut(b.detail("Tool"), " ")
-		rows = append(rows, llmHit{rule, b.severity, serverLabelName(b.detail("Server")), tool})
+		tool, _, _ := strings.Cut(f.Tool, " ")
+		rows = append(rows, llmHit{f.RuleID, f.Severity, f.Name, tool})
 	}
 	return rows
 }
@@ -444,15 +377,10 @@ func newLLMGuardWorld(t *testing.T, env map[string]string) *llmGuardWorld {
 // test passes its URL as --llm-base-url to prove that no request is made.
 func llmCountingServer(t *testing.T) (url string, conns *atomic.Int32) {
 	t.Helper()
-	conns = &atomic.Int32{}
 	srv := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusTeapot)
 	}))
-	srv.Config.ConnState = func(_ net.Conn, s http.ConnState) {
-		if s == http.StateNew {
-			conns.Add(1)
-		}
-	}
+	conns = countNewConns(srv)
 	srv.Start()
 	t.Cleanup(srv.Close)
 	return srv.URL, conns
@@ -498,6 +426,11 @@ func TestScanLLMUsageErrors(t *testing.T) {
 		{name: "openai without a model", args: []string{"--llm", "--llm-provider", "openai", "--llm-base-url", "$SRV"}, env: validKey,
 			want: "--llm-provider openai needs --llm-model"},
 		{name: "http base URL on a public host", args: []string{"--llm", "--llm-base-url", "http://llm.example.invalid"}, env: validKey,
+			want: "--llm-base-url: invalid LLM base URL: http is allowed only for a loopback host, use https"},
+		{name: "http base URL on example.com", args: []string{"--llm", "--llm-base-url", "http://example.com"}, env: validKey,
+			want: "--llm-base-url: invalid LLM base URL: http is allowed only for a loopback host, use https"},
+		// A name that starts like a loopback address is not a loopback host.
+		{name: "http base URL on a name that starts with 127.0.0.1", args: []string{"--llm", "--llm-base-url", "http://127.0.0.1.example.com:8080/v1"}, env: validKey,
 			want: "--llm-base-url: invalid LLM base URL: http is allowed only for a loopback host, use https"},
 		{name: "base URL with user info", args: []string{"--llm", "--llm-base-url", "https://u:" + discovertest.CanaryURL + "@llm.example.invalid"}, env: validKey,
 			want: "--llm-base-url: invalid LLM base URL: user info is not allowed"},
@@ -706,40 +639,45 @@ func TestScanLLMMarking(t *testing.T) {
 		if r.code != exitFindings {
 			t.Errorf("exit code = %d, want %d (a high LLM finding)\nstderr:\n%s", r.code, exitFindings, r.stderr)
 		}
-		blocks := llmBlocks(t, r.stdout)
-		llmRows, ruleRows := llmSplitBlocks(blocks)
+		found := parseFindings(t, r.stdout)
+		llmRows, ruleRows := llmSplitFindings(found)
 		got := llmRowsOf(t, llmRows)
 		// The terminal groups the findings by severity; inside a group they
 		// keep the order of the servers, then of the tools.
 		want := []llmHit{wantLLM[0], wantLLM[1], wantLLM[2], wantLLM[3]}
 		if !slices.Equal(got, want) {
-			t.Errorf("LLM findings = %+v, want %+v\nstdout:\n%s", got, want, r.stdout)
+			t.Fatalf("LLM findings = %+v, want %+v\nstdout:\n%s", got, want, r.stdout)
 		}
 		// The risk text is the fixed text of the category, never model text.
-		if b := llmRows[0]; b.detail("Risk") != llm.CategoryKeyAccess.Text() || b.detail("Tool") != "t1 (credential-access)" {
-			t.Errorf("t1 Risk, Tool = %q, %q; want %q, %q", b.detail("Risk"), b.detail("Tool"), llm.CategoryKeyAccess.Text(), "t1 (credential-access)")
+		if f := llmRows[0]; f.Risk != llm.CategoryCredentialAccess.Text() || f.Tool != "t1 (credential-access)" {
+			t.Errorf("t1 Risk, Tool = %q, %q; want %q, %q", f.Risk, f.Tool, llm.CategoryCredentialAccess.Text(), "t1 (credential-access)")
 		}
-		if b := llmRows[1]; b.detail("Tool") != "t2" {
-			t.Errorf("t2 Tool = %q, want \"t2\" (no category for an invalid answer)", b.detail("Tool"))
+		if f := llmRows[1]; f.Tool != "t2" {
+			t.Errorf("t2 Tool = %q, want \"t2\" (no category for an invalid answer)", f.Tool)
 		}
-		if len(ruleRows) != 1 || !strings.HasPrefix(ruleRows[0].head, "MOAT-T4-003") {
+		if len(ruleRows) != 1 || ruleRows[0].RuleID != "MOAT-T4-003" {
 			t.Fatalf("rule findings = %+v, want one MOAT-T4-003\nstdout:\n%s", ruleRows, r.stdout)
 		}
-		for _, d := range ruleRows[0].details {
-			if strings.HasPrefix(d, "Source:") {
-				t.Errorf("rule finding has the line %q, want no Source line", d)
-			}
+		if f := ruleRows[0]; f.Source != "" || slices.ContainsFunc(f.Details, func(d string) bool { return strings.HasPrefix(d, "Source:") }) {
+			t.Errorf("rule finding has the lines %q, want no Source line", f.Details)
 		}
+		// Raw checks on the text: the exact first lines and Source lines.
 		if n := strings.Count(r.stdout, "[LLM]"); n != len(wantLLM) {
 			t.Errorf("stdout holds [LLM] %d times, want %d", n, len(wantLLM))
+		}
+		if n := strings.Count(r.stdout, "\n  "+llmHead001+"\n"); n != 3 {
+			t.Errorf("stdout holds the line %q %d times, want 3", llmHead001, n)
+		}
+		if n := strings.Count(r.stdout, "\n  "+llmHead002+"\n"); n != 1 {
+			t.Errorf("stdout holds the line %q %d times, want 1", llmHead002, n)
 		}
 		if n := strings.Count(r.stdout, "    Source: "+llmSourceTxt+"\n"); n != len(wantLLM) {
 			t.Errorf("stdout holds the Source line %d times, want %d", n, len(wantLLM))
 		}
 		// The summary counts the rule and the LLM findings of each server.
 		perServer := map[string]int{}
-		for _, b := range blocks {
-			perServer[serverLabelName(b.detail("Server"))]++
+		for _, f := range found {
+			perServer[f.Name]++
 		}
 		for _, row := range summaryRows(t, r.stdout) {
 			if row.Findings != perServer[row.Name] {
@@ -765,24 +703,24 @@ func TestScanLLMMarking(t *testing.T) {
 		if got := llmJSONRows(t, doc); !slices.Equal(got, wantLLM) {
 			t.Errorf("LLM findings = %+v, want %+v\nstdout:\n%s", got, wantLLM, r.stdout)
 		}
-		rules := 0
+		ruleCount := 0
 		for _, f := range doc.Findings {
 			switch f.RuleID {
 			case llm.RuleID:
 				// The category is the related text of a MOAT-LLM-001 row.
-				if f.Key == "t1" && f.Related != string(llm.CategoryKeyAccess) {
-					t.Errorf("t1 related = %q, want %q", f.Related, llm.CategoryKeyAccess)
+				if f.Key == "t1" && f.Related != string(llm.CategoryCredentialAccess) {
+					t.Errorf("t1 related = %q, want %q", f.Related, llm.CategoryCredentialAccess)
 				}
 			case llm.RuleIDInvalid:
 				if f.Related != "" {
 					t.Errorf("MOAT-LLM-002 related = %q, want empty", f.Related)
 				}
 			default:
-				rules++
+				ruleCount++
 			}
 		}
-		if rules != 1 {
-			t.Errorf("JSON has %d rule findings, want 1 (MOAT-T4-003)", rules)
+		if ruleCount != 1 {
+			t.Errorf("JSON has %d rule findings, want 1 (MOAT-T4-003)", ruleCount)
 		}
 		// Raw check on the text too: the decoder ignores the case of a key.
 		if n := strings.Count(r.stdout, `"source": "llm"`); n != len(wantLLM) {
@@ -832,7 +770,7 @@ func TestScanLLMFailOn(t *testing.T) {
 				if r.code != wantCode {
 					t.Errorf("exit code = %d, want %d\nstdout:\n%s\nstderr:\n%s", r.code, wantCode, r.stdout, r.stderr)
 				}
-				rows := llmRowsOf(t, llmBlocks(t, r.stdout))
+				rows := llmRowsOf(t, parseFindings(t, r.stdout))
 				switch {
 				case tt.rule == "" && len(rows) != 0:
 					t.Errorf("LLM findings = %+v, want none", rows)
@@ -928,7 +866,7 @@ func TestScanLLMIgnore(t *testing.T) {
 				if jsonOut {
 					got = llmJSONRows(t, decodeScanJSON(t, r.stdout))
 				} else {
-					got = llmRowsOf(t, llmBlocks(t, r.stdout))
+					got = llmRowsOf(t, parseFindings(t, r.stdout))
 					slices.SortStableFunc(got, func(a, b llmHit) int { return strings.Compare(a.server+a.tool, b.server+b.tool) })
 				}
 				if !slices.Equal(got, tt.want) {
@@ -956,12 +894,11 @@ func TestScanLLMIgnore(t *testing.T) {
 		if r.code != exitFindings {
 			t.Errorf("exit code = %d, want %d (MOAT-T2-001 stays)\nstderr:\n%s", r.code, exitFindings, r.stderr)
 		}
-		blocks := llmBlocks(t, r.stdout)
-		llmRows, ruleRows := llmSplitBlocks(blocks)
+		llmRows, ruleRows := llmSplitFindings(parseFindings(t, r.stdout))
 		if len(llmRows) != 0 {
 			t.Errorf("LLM findings = %+v, want none", llmRowsOf(t, llmRows))
 		}
-		if len(ruleRows) != 1 || !strings.HasPrefix(ruleRows[0].head, "MOAT-T2-001") {
+		if len(ruleRows) != 1 || ruleRows[0].RuleID != "MOAT-T2-001" {
 			t.Errorf("rule findings = %+v, want one MOAT-T2-001", ruleRows)
 		}
 		assertContainsAll(t, "stderr", r.stderr, []string{ignoreFileWarning, "mcpmoat scan: 1 finding ignored: MOAT-LLM-001 (1)\n"})
@@ -1051,17 +988,17 @@ func llmAssertSameRuleTerminal(t *testing.T, name, base, got string, wantLLM int
 	if b.Rest != g.Rest {
 		t.Errorf("%s: the diffs or the accept hints changed\nbase:\n%s\ngot:\n%s", name, b.Rest, g.Rest)
 	}
-	_, baseRules := llmSplitBlocks(llmBlocks(t, base))
-	gotLLM, gotRules := llmSplitBlocks(llmBlocks(t, got))
+	_, baseRules := llmSplitFindings(parseFindings(t, base))
+	gotLLM, gotRules := llmSplitFindings(parseFindings(t, got))
 	if len(baseRules) == 0 {
 		t.Fatalf("%s: the baseline has no rule finding", name)
 	}
 	bt, gt := make([]string, len(baseRules)), make([]string, len(gotRules))
 	for i, r := range baseRules {
-		bt[i] = r.text()
+		bt[i] = llmFindingText(r)
 	}
 	for i, r := range gotRules {
-		gt[i] = r.text()
+		gt[i] = llmFindingText(r)
 	}
 	if !slices.Equal(bt, gt) {
 		t.Errorf("%s: the rule findings changed\nbase: %q\ngot:  %q", name, bt, gt)
@@ -1073,7 +1010,7 @@ func llmAssertSameRuleTerminal(t *testing.T, name, base, got string, wantLLM int
 	// grows only by the LLM findings of the server.
 	llmPer := map[string]int{}
 	for _, r := range gotLLM {
-		llmPer[serverLabelName(r.detail("Server"))]++
+		llmPer[r.Name]++
 	}
 	bs, gs := summaryRows(t, base), summaryRows(t, got)
 	if len(bs) != len(gs) {
@@ -1418,364 +1355,6 @@ func TestScanLLMSendsOnlyNameAndDescription(t *testing.T) {
 	assertNoLeakBoth(t, r.stdout, r.stderr)
 }
 
-// llmSyncLog is the stdout and the stderr of a cli that a request handler
-// reads while the scan runs. It keeps the writes of both streams in order.
-// It is safe for concurrent use.
-type llmSyncLog struct {
-	mu     sync.Mutex
-	out    strings.Builder
-	err    strings.Builder
-	events []llmEvent
-}
-
-// llmEvent is one write to the log.
-type llmEvent struct {
-	stdout bool
-	text   string
-}
-
-// llmLogWriter writes to one stream of an llmSyncLog.
-type llmLogWriter struct {
-	log    *llmSyncLog
-	stdout bool
-}
-
-// Write implements io.Writer.
-func (w llmLogWriter) Write(p []byte) (int, error) {
-	w.log.mu.Lock()
-	defer w.log.mu.Unlock()
-	if w.stdout {
-		w.log.out.Write(p)
-	} else {
-		w.log.err.Write(p)
-	}
-	w.log.events = append(w.log.events, llmEvent{stdout: w.stdout, text: string(p)})
-	return len(p), nil
-}
-
-// stderr returns the text written to stderr so far.
-func (l *llmSyncLog) stderr() string {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	return l.err.String()
-}
-
-// snapshot returns the two texts and the events so far.
-func (l *llmSyncLog) snapshot() (stdout, stderr string, events []llmEvent) {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	return l.out.String(), l.err.String(), slices.Clone(l.events)
-}
-
-// llmAPI is a fake Anthropic Messages API on a loopback httptest server. It
-// answers each request with the verdict of llmAnswerFor for the tool in the
-// request, and records each request.
-type llmAPI struct {
-	srv *httptest.Server
-	// host is the host and port of the server.
-	host string
-	// status, when not 0, is the status of every answer.
-	status int
-	// onRequest, when not nil, runs first for each request, in the handler
-	// goroutine.
-	onRequest func()
-
-	newConns atomic.Int32
-	requests atomic.Int32
-
-	mu      sync.Mutex
-	bodies  [][]byte
-	headers []http.Header
-	paths   []string
-}
-
-// newLLMAPI starts a fake API. Set status and onRequest before the first
-// request.
-func newLLMAPI(t *testing.T) *llmAPI {
-	t.Helper()
-	a := &llmAPI{}
-	a.srv = httptest.NewUnstartedServer(http.HandlerFunc(a.handle))
-	a.srv.Config.ConnState = func(_ net.Conn, s http.ConnState) {
-		if s == http.StateNew {
-			a.newConns.Add(1)
-		}
-	}
-	a.srv.Start()
-	t.Cleanup(a.srv.Close)
-	a.host = a.srv.Listener.Addr().String()
-	return a
-}
-
-// handle answers one request.
-func (a *llmAPI) handle(w http.ResponseWriter, r *http.Request) {
-	a.requests.Add(1)
-	if a.onRequest != nil {
-		a.onRequest()
-	}
-	body, err := io.ReadAll(io.LimitReader(r.Body, 1<<20))
-	a.mu.Lock()
-	a.bodies = append(a.bodies, body)
-	a.headers = append(a.headers, r.Header.Clone())
-	a.paths = append(a.paths, r.URL.Path)
-	a.mu.Unlock()
-	if err != nil {
-		http.Error(w, "read error", http.StatusBadRequest)
-		return
-	}
-	if a.status != 0 {
-		w.WriteHeader(a.status)
-		return
-	}
-	in, err := llmRequestInput(body)
-	if err != nil {
-		http.Error(w, "bad request", http.StatusBadRequest)
-		return
-	}
-	v, verr := llmAnswerFor(in)
-	var se *llm.StatusError
-	switch {
-	case errors.As(verr, &se):
-		w.WriteHeader(se.Code)
-		return
-	case verr != nil:
-		// A refusal: the client reports an invalid answer.
-		writeLLMJSON(w, map[string]any{"stop_reason": "refusal", "content": []any{}})
-		return
-	}
-	writeLLMJSON(w, map[string]any{
-		"stop_reason": "tool_use",
-		"content": []any{map[string]any{
-			"type":  "tool_use",
-			"name":  "classify",
-			"input": map[string]string{"risk": string(v.Risk), "category": string(v.Category)},
-		}},
-	})
-}
-
-// writeLLMJSON writes v as a JSON answer.
-func writeLLMJSON(w http.ResponseWriter, v any) {
-	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(v)
-}
-
-// llmToolPayload is the user message of a request. Its fields are all the
-// keys that the client may send.
-type llmToolPayload struct {
-	ToolName        string `json:"tool_name"`
-	ToolDescription string `json:"tool_description"`
-	Truncated       bool   `json:"truncated"`
-}
-
-// llmRequestInput decodes the tool message of an Anthropic request body. The
-// message must have exactly the keys of llmToolPayload.
-func llmRequestInput(body []byte) (llm.Input, error) {
-	var req struct {
-		Messages []struct {
-			Role    string `json:"role"`
-			Content string `json:"content"`
-		} `json:"messages"`
-	}
-	if err := json.Unmarshal(body, &req); err != nil {
-		return llm.Input{}, err
-	}
-	if len(req.Messages) != 1 || req.Messages[0].Role != "user" {
-		return llm.Input{}, errors.New("want one user message")
-	}
-	dec := json.NewDecoder(strings.NewReader(req.Messages[0].Content))
-	dec.DisallowUnknownFields()
-	var p llmToolPayload
-	if err := dec.Decode(&p); err != nil {
-		return llm.Input{}, err
-	}
-	return llm.Input{ToolName: p.ToolName, Description: p.ToolDescription}, nil
-}
-
-// snapshot returns copies of the recorded bodies, headers and paths.
-func (a *llmAPI) snapshot() (bodies [][]byte, headers []http.Header, paths []string) {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	return slices.Clone(a.bodies), slices.Clone(a.headers), slices.Clone(a.paths)
-}
-
-// TestScanLLMRealClient runs scan --llm with the real client against a fake
-// API on a loopback server. It checks that the warning is printed before the
-// configs are read, before the client is built and before the first request
-// (the handler checks the stderr text when the request arrives), that it is
-// printed once and before the report, also with --json, and what the
-// requests hold: the key only in the x-api-key header, and in the body only
-// the name and the description of each tool (no config or schema canary).
-func TestScanLLMRealClient(t *testing.T) {
-	t.Parallel()
-
-	const toolCanary = "mcpmoat-tool-canary-Jk8Rf3"
-	tool := func(name, desc string) inspect.Tool {
-		tl := mkTool(name, desc)
-		tl.InputSchema = json.RawMessage(`{"type":"object","description":"` + toolCanary + `"}`)
-		tl.Meta = json.RawMessage(`{"k":"` + toolCanary + `"}`)
-		return tl
-	}
-	tools := map[string][]inspect.Tool{"alpha": {tool("t1", "Read keys. "+llmMarkHigh), tool("t2", "Add two numbers.")}}
-	servers := map[string]any{"alpha": map[string]any{
-		"command": "npx",
-		"args":    []string{"@acme/fixture-clean@2.0.0", "--token", discovertest.CanaryArgs},
-		"env":     map[string]string{"FIXTURE_MODE": discovertest.CanaryEnv},
-	}}
-	canaries := append(discovertest.Canaries(), toolCanary)
-
-	tests := []struct {
-		name     string
-		json     bool
-		status   int
-		wantCode int
-	}{
-		{name: "terminal", wantCode: exitFindings},
-		{name: "json", json: true, wantCode: exitFindings},
-		{name: "HTTP 503", status: http.StatusServiceUnavailable, wantCode: exitError},
-		{name: "HTTP 503 json", json: true, status: http.StatusServiceUnavailable, wantCode: exitError},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
-			api := newLLMAPI(t)
-			api.status = tt.status
-			warning := llmWarning("anthropic", api.host)
-			log := &llmSyncLog{}
-			// sawWarning checks that stderr already holds the warning when
-			// the hook runs. It counts the hooks that ran without it.
-			var early atomic.Int32
-			sawWarning := func() {
-				if !strings.Contains(log.stderr(), warning+"\n") {
-					early.Add(1)
-				}
-			}
-			api.onRequest = sawWarning
-
-			home := t.TempDir()
-			writeServers(t, home, ".claude.json", servers)
-			xdg := t.TempDir()
-			c, _, _ := dirsCLI(t, home, t.TempDir())
-			c.stdout = llmLogWriter{log: log, stdout: true}
-			c.stderr = llmLogWriter{log: log}
-			c.homeDir = func() (string, error) { sawWarning(); return home, nil }
-			c.getenv = fakeGetenv(map[string]string{"XDG_CONFIG_HOME": xdg, "HOME": home, llm.KeyEnv: llmTestKey})
-			c.inspector = fakeServers(tools)
-			var builds atomic.Int32
-			c.newClassifier = func(cfg llm.Config) (toolClassifier, error) {
-				builds.Add(1)
-				sawWarning()
-				if cfg.APIKey.Reveal() != llmTestKey || cfg.Provider != llm.ProviderAnthropic || cfg.BaseURL != api.srv.URL || cfg.Model != llm.DefaultAnthropicModel {
-					t.Errorf("newClassifier config = %+v, want the key from %s, anthropic, the base URL and the default model", cfg, llm.KeyEnv)
-				}
-				return newLLMClassifier(cfg)
-			}
-			args := []string{"scan", "--llm", "--llm-base-url", api.srv.URL}
-			if tt.json {
-				args = append(args, "--json")
-			}
-
-			code := c.dispatch(args)
-
-			stdout, stderr, events := log.snapshot()
-			if code != tt.wantCode {
-				t.Errorf("exit code = %d, want %d\nstdout:\n%s\nstderr:\n%s", code, tt.wantCode, stdout, stderr)
-			}
-			if n := early.Load(); n != 0 {
-				t.Errorf("%d steps (config read, client build or request) ran before the warning", n)
-			}
-			if builds.Load() != 1 {
-				t.Errorf("newClassifier calls = %d, want 1", builds.Load())
-			}
-			// One request for each tool. The first failed request stops the
-			// step, so with HTTP 503 the second request may never start.
-			if n := api.requests.Load(); n != 2 && (tt.status == 0 || n != 1) {
-				t.Errorf("the API got %d requests, want 2 (one per tool; 1 is also fine after a failure)", n)
-			}
-			// The warning is the first line on stderr, it shows once, and no
-			// stdout write comes before it.
-			lines := nonEmptyLines(stderr)
-			if len(lines) == 0 || lines[0] != warning {
-				t.Errorf("first stderr line = %q, want the warning %q", lines, warning)
-			}
-			if n := strings.Count(stderr, "leaves your machine"); n != 1 {
-				t.Errorf("stderr holds the warning %d times, want 1", n)
-			}
-			if len(events) == 0 || events[0].stdout || !strings.Contains(events[0].text, warning) {
-				t.Errorf("first write = %+v, want the warning on stderr before any stdout", events[:min(len(events), 1)])
-			}
-			if tt.json {
-				doc := decodeScanJSON(t, stdout)
-				if doc.Complete != (tt.status == 0) {
-					t.Errorf("complete = %v, want %v", doc.Complete, tt.status == 0)
-				}
-			} else if !strings.Contains(stdout, summaryHeading) {
-				t.Errorf("stdout has no SUMMARY block\nstdout:\n%s", stdout)
-			}
-			if tt.status != 0 {
-				m := llmNotClassified.FindStringSubmatch(stderr)
-				if m == nil || m[1] != "HTTP 503" || m[2] != "2" {
-					t.Errorf("stderr has no line \"the LLM provider failed (HTTP 503); 2 tools were not classified\":\n%s", stderr)
-				}
-			} else {
-				rows := llmJSONOrTerminalRows(t, stdout, tt.json)
-				if want := []llmHit{{llm.RuleID, "high", "alpha", "t1"}}; !slices.Equal(rows, want) {
-					t.Errorf("LLM findings = %+v, want %+v", rows, want)
-				}
-			}
-			llmAssertNoKey(t, llmTestKey, stdout, stderr)
-			assertNoLeakBoth(t, stdout, stderr)
-
-			bodies, headers, paths := api.snapshot()
-			var got []llm.Input
-			for i, body := range bodies {
-				if paths[i] != "/v1/messages" {
-					t.Errorf("request path = %q, want /v1/messages", paths[i])
-				}
-				if headers[i].Get("x-api-key") != llmTestKey {
-					t.Errorf("request %d has no x-api-key header with the key", i)
-				}
-				for name, values := range headers[i] {
-					if name == "X-Api-Key" {
-						continue
-					}
-					llmAssertNoKey(t, llmTestKey, strings.Join(values, ","))
-				}
-				llmAssertNoKey(t, llmTestKey, string(body))
-				for _, c := range canaries {
-					if bytes.Contains(body, []byte(c)) {
-						t.Errorf("request %d body holds the canary %q", i, c)
-					}
-				}
-				in, err := llmRequestInput(body)
-				if err != nil {
-					t.Errorf("request %d: %v\nbody: %s", i, err, body)
-					continue
-				}
-				got = append(got, in)
-			}
-			slices.SortFunc(got, func(a, b llm.Input) int { return strings.Compare(a.ToolName, b.ToolName) })
-			want := []llm.Input{{ToolName: "t1", Description: "Read keys. " + llmMarkHigh}, {ToolName: "t2", Description: "Add two numbers."}}
-			if tt.status == 0 && !slices.Equal(got, want) {
-				t.Errorf("tool messages = %+v, want %+v", got, want)
-			}
-			for _, in := range got {
-				if !slices.Contains(want, in) {
-					t.Errorf("tool message %+v is not one of %+v", in, want)
-				}
-			}
-		})
-	}
-}
-
-// llmJSONOrTerminalRows returns the LLM findings of stdout, from the JSON
-// document or from the terminal report.
-func llmJSONOrTerminalRows(t *testing.T, stdout string, jsonOut bool) []llmHit {
-	t.Helper()
-	if jsonOut {
-		return llmJSONRows(t, decodeScanJSON(t, stdout))
-	}
-	return llmRowsOf(t, llmBlocks(t, stdout))
-}
-
 // TestLLMAssertNoKey checks the leak helper itself: it must find the whole
 // key and a part of it, and pass text without it.
 func TestLLMAssertNoKey(t *testing.T) {
@@ -1798,5 +1377,19 @@ func TestLLMAssertNoKey(t *testing.T) {
 				t.Errorf("llmKeyLeak(%q) = %v, want %v", tt.out, leak, tt.leak)
 			}
 		})
+	}
+}
+
+// TestLLMRuleIDsValid checks that the IDs of the LLM findings follow the rule
+// ID syntax of internal/rules, so --ignore and .mcpmoat-ignore accept them
+// (FR-10, FR-17). Package llm must not import internal/rules, so the check
+// sits here, where both packages are imported.
+func TestLLMRuleIDsValid(t *testing.T) {
+	t.Parallel()
+
+	for _, id := range []string{llm.RuleID, llm.RuleIDInvalid} {
+		if !rules.ValidRuleID(id) {
+			t.Errorf("rules.ValidRuleID(%q) = false, want true", id)
+		}
 	}
 }

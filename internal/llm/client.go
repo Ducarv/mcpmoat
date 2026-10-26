@@ -10,6 +10,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/netip"
 	"net/url"
 	"time"
 
@@ -24,7 +25,8 @@ const (
 	dialKeepAlive       = 30 * time.Second
 	tlsHandshakeTimeout = 10 * time.Second
 	idleConnTimeout     = 30 * time.Second
-	// maxIdleConns lets the four scan workers keep one connection each.
+	// maxIdleConns lets each scan worker keep one connection. It must
+	// change together with llmWorkers in cmd/mcpmoat/scan_llm.go.
 	maxIdleConns = 4
 	// maxResponseHeaderBytes caps the response headers.
 	maxResponseHeaderBytes = 64 << 10
@@ -76,6 +78,10 @@ var (
 	errBuildRequest = errors.New("cannot build LLM request")
 	// errNilClient means that Classify was called on a nil or zero Client.
 	errNilClient = errors.New("LLM client not initialized, use llm.New")
+	// errNotLoopback means that the host of an http base URL does not
+	// resolve to loopback addresses only, so the client does not connect.
+	// The text never holds the host or an address.
+	errNotLoopback = fmt.Errorf("%w: host does not resolve to a loopback address", ErrTransport)
 )
 
 // StatusError means that the provider answered with a status code that is
@@ -123,6 +129,21 @@ type api interface {
 	parseResponse(body []byte) (Verdict, error)
 }
 
+// chatMessage is one message of a request, for both providers.
+type chatMessage struct {
+	Role    string `json:"role"`
+	Content string `json:"content"`
+}
+
+// dialFunc opens a network connection, as net.Dialer.DialContext does.
+type dialFunc = func(ctx context.Context, network, addr string) (net.Conn, error)
+
+// resolver looks up the IP addresses of a host name. *net.Resolver
+// implements it. Tests use a fake.
+type resolver interface {
+	LookupNetIP(ctx context.Context, network, host string) ([]netip.Addr, error)
+}
+
 // Client rates tool descriptions with an LLM provider. Make one with New.
 // A Client is safe for concurrent use: Classify does not change it.
 //
@@ -143,8 +164,15 @@ type Client struct {
 //
 // The client uses its own http.Transport, never http.DefaultTransport. It
 // honours HTTP_PROXY, HTTPS_PROXY and NO_PROXY, uses TLS 1.2 or later, and
-// dials with cfg.Dial when it is not nil.
+// dials with cfg.Dial when it is not nil. For an http base URL, it connects
+// only when the host resolves to loopback addresses only (see loopbackDial).
 func New(cfg Config) (*Client, error) {
+	return newClient(cfg, net.DefaultResolver)
+}
+
+// newClient is New with the resolver that an http base URL uses. Tests give
+// a fake resolver.
+func newClient(cfg Config, r resolver) (*Client, error) {
 	cfg, err := cfg.Resolve()
 	if err != nil {
 		return nil, err
@@ -157,28 +185,110 @@ func New(cfg Config) (*Client, error) {
 		a = openAIAPI{}
 	default:
 		// Resolve refuses an unknown provider, so this is a guard only.
-		return nil, fmt.Errorf("%w: use %q or %q", ErrUnknownProvider, ProviderAnthropic, ProviderOpenAI)
+		return nil, unknownProviderError()
 	}
 	endpoint := cfg.BaseURL + a.path()
 	// ValidateBaseURL parsed the base URL, and the path is fixed, so this
 	// cannot fail. The error is fixed text: a url.Parse error quotes the URL.
-	if _, err := url.Parse(endpoint); err != nil {
+	u, err := url.Parse(endpoint)
+	if err != nil {
 		return nil, errBuildRequest
+	}
+	dial := cfg.Dial
+	if dial == nil {
+		dial = (&net.Dialer{Timeout: dialTimeout, KeepAlive: dialKeepAlive}).DialContext
+	}
+	// url.Parse gives the scheme in lower case. https needs no check: TLS
+	// protects the key on any network.
+	if u.Scheme == "http" {
+		dial = loopbackDial(dial, r)
 	}
 	return &Client{
 		api:   a,
 		url:   endpoint,
 		model: cfg.Model,
 		key:   cfg.APIKey,
-		http:  newHTTPClient(cfg.Dial),
+		http:  newHTTPClient(dial),
 	}, nil
 }
 
-// newHTTPClient returns the HTTP client of a Client. dial can be nil.
-func newHTTPClient(dial func(ctx context.Context, network, addr string) (net.Conn, error)) *http.Client {
-	if dial == nil {
-		dial = (&net.Dialer{Timeout: dialTimeout, KeepAlive: dialKeepAlive}).DialContext
+// loopbackDial returns a dial function for an http base URL. Over http the
+// API key crosses the connection in clear text, so ValidateBaseURL allows
+// http only for a loopback host. But the name "localhost" is loopback only
+// by its text: the system resolver can map it to any address, for example
+// when /etc/hosts has no entry for it.
+//
+// So the returned function resolves the host (an IP literal is used as it
+// is), requires that every address is a loopback address, and dials only
+// those addresses, in order, with dial. Otherwise it returns errNotLoopback
+// and opens no connection. net/http never sends a request for a loopback
+// host through a proxy, so addr is always the host of the base URL.
+func loopbackDial(dial dialFunc, r resolver) dialFunc {
+	return func(ctx context.Context, network, addr string) (net.Conn, error) {
+		host, port, err := net.SplitHostPort(addr)
+		if err != nil {
+			return nil, errNotLoopback
+		}
+		ips, err := resolveLoopback(ctx, r, network, host)
+		if err != nil {
+			return nil, err
+		}
+		var dialErr error
+		for _, ip := range ips {
+			conn, err := dial(ctx, network, net.JoinHostPort(ip.String(), port))
+			if err == nil {
+				return conn, nil
+			}
+			dialErr = err
+		}
+		return nil, dialErr
 	}
+}
+
+// resolveLoopback returns the addresses of host. It returns errNotLoopback
+// when the lookup fails, gives no address, or gives one address that is not
+// a loopback address. The lookup error is not wrapped: it holds the host.
+func resolveLoopback(ctx context.Context, r resolver, network, host string) ([]netip.Addr, error) {
+	var found []netip.Addr
+	if ip, err := netip.ParseAddr(host); err == nil {
+		found = []netip.Addr{ip}
+	} else {
+		found, err = r.LookupNetIP(ctx, lookupNetwork(network), host)
+		if err != nil {
+			return nil, errNotLoopback
+		}
+	}
+	if len(found) == 0 {
+		return nil, errNotLoopback
+	}
+	ips := make([]netip.Addr, 0, len(found))
+	for _, ip := range found {
+		// Unmap turns ::ffff:127.0.0.1 into 127.0.0.1, so that IsLoopback
+		// sees the IPv4 address.
+		ip = ip.Unmap()
+		if !ip.IsLoopback() {
+			return nil, errNotLoopback
+		}
+		ips = append(ips, ip)
+	}
+	return ips, nil
+}
+
+// lookupNetwork returns the network name of LookupNetIP for a dial network.
+func lookupNetwork(network string) string {
+	switch network {
+	case "tcp4":
+		return "ip4"
+	case "tcp6":
+		return "ip6"
+	default:
+		return "ip"
+	}
+}
+
+// newHTTPClient returns the HTTP client of a Client. Every connection uses
+// dial.
+func newHTTPClient(dial dialFunc) *http.Client {
 	transport := &http.Transport{
 		// Honour the user's HTTP_PROXY, HTTPS_PROXY and NO_PROXY (NFR-01).
 		Proxy:               proxyFromEnvironment,
@@ -303,6 +413,8 @@ func transportError(parent, reqCtx context.Context, err error) error {
 	case errors.Is(reqCtx.Err(), context.DeadlineExceeded),
 		errors.As(err, &urlErr) && urlErr.Timeout():
 		return fmt.Errorf("%w: timed out after %s", ErrTransport, requestTimeout)
+	case errors.Is(err, errNotLoopback):
+		return errNotLoopback
 	case errors.As(err, &certErr):
 		return fmt.Errorf("%w: TLS certificate not trusted", ErrTransport)
 	default:

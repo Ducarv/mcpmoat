@@ -2,17 +2,27 @@ package llm
 
 import (
 	"errors"
-	"regexp"
 	"strings"
 	"testing"
 	"unicode"
 )
 
-// ruleIDPattern and maxRuleIDBytes are copies of the rule ID syntax in
-// internal/rules/ignore.go. The llm package must not import internal/rules.
-var ruleIDPattern = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9]*(?:[-_.][A-Za-z0-9]+)*$`)
+// risks lists every valid Risk, from low to high. TestVerdictSchema checks
+// that the risk enum of the verdict schema holds the same values, in the
+// same order.
+var risks = []Risk{RiskNone, RiskLow, RiskMedium, RiskHigh}
 
-const maxRuleIDBytes = 64
+// categories lists every valid Category. TestVerdictSchema checks that the
+// category enum of the verdict schema holds the same values, in the same
+// order.
+var categories = []Category{
+	CategoryHiddenInstructions,
+	CategoryDataExfiltration,
+	CategoryConcealFromUser,
+	CategoryToolShadowing,
+	CategoryCredentialAccess,
+	CategoryOther,
+}
 
 func TestParseVerdictValid(t *testing.T) {
 	t.Parallel()
@@ -220,6 +230,16 @@ func TestRiskAndCategoryValid(t *testing.T) {
 	if len(categoryText) != len(categories) {
 		t.Errorf("categoryText has %d entries, categories has %d", len(categoryText), len(categories))
 	}
+	for _, c := range categories {
+		if categoryText[c] == "" {
+			t.Errorf("categoryText has no entry for %q", c)
+		}
+	}
+	for c := range categoryText {
+		if !c.Valid() {
+			t.Errorf("categoryText has an entry for %q, which is not valid", c)
+		}
+	}
 }
 
 func TestFixedTexts(t *testing.T) {
@@ -262,12 +282,15 @@ func TestFixedTexts(t *testing.T) {
 func TestRuleIDs(t *testing.T) {
 	t.Parallel()
 
+	// TestLLMRuleIDsValid in cmd/mcpmoat checks both IDs with
+	// rules.ValidRuleID. This package must not import internal/rules, so this
+	// test checks only the simple shape.
 	if RuleID == RuleIDInvalid {
 		t.Errorf("RuleID and RuleIDInvalid are both %q", RuleID)
 	}
 	for _, id := range []string{RuleID, RuleIDInvalid} {
-		if len(id) > maxRuleIDBytes || !ruleIDPattern.MatchString(id) {
-			t.Errorf("rule ID %q is not a valid rule ID", id)
+		if id == "" || !strings.HasPrefix(id, "MOAT-LLM-") {
+			t.Errorf("rule ID %q does not start with %q", id, "MOAT-LLM-")
 		}
 	}
 }

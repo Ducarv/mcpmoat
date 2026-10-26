@@ -300,6 +300,32 @@ type netWorld struct {
 	marker string
 }
 
+// netProxyVars are the proxy variables that skipIfProxyEnv checks, in upper
+// case. It checks the lower-case names too.
+var netProxyVars = []string{"HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY"}
+
+// skipIfProxyEnv skips the test when the real process environment sets a
+// proxy variable (netProxyVars, in upper or lower case) to a value that is
+// not empty.
+//
+// net/http reads the proxy variables only once in each process
+// (http.ProxyFromEnvironment caches them with a sync.Once). When a variable
+// is set, a request can go to the proxy whatever the test does later, and
+// t.Setenv(name, "") cannot clear the cached value. Then the test cannot
+// prove that scan connects only to the configured servers, so it skips. CI
+// sets no proxy, so the tests run there.
+func skipIfProxyEnv(t *testing.T) {
+	t.Helper()
+	for _, upper := range netProxyVars {
+		for _, name := range []string{upper, strings.ToLower(upper)} {
+			if os.Getenv(name) != "" {
+				t.Skipf("the environment sets %s: net/http caches the proxy settings once per process, "+
+					"so this test cannot prove that scan connects only to the configured servers (CI sets no proxy)", name)
+			}
+		}
+	}
+}
+
 // newNetWorld installs the recorder and builds the world: a private home
 // with a trusted global config that has the benign stdio fixture, a remote
 // server on a loopback httptest server and a remote server whose name cannot
@@ -309,6 +335,7 @@ type netWorld struct {
 // not get the key.
 func newNetWorld(t *testing.T, marker bool) *netWorld {
 	t.Helper()
+	skipIfProxyEnv(t)
 	w := &netWorld{rec: &netRecorder{}, home: t.TempDir(), work: t.TempDir(), xdg: t.TempDir()}
 	requirePrivateChain(t, w.home)
 	benign := inspecttest.Fixture(t, "benign")
@@ -320,6 +347,9 @@ func newNetWorld(t *testing.T, marker bool) *netWorld {
 	t.Setenv("XDG_CACHE_HOME", filepath.Join(w.home, ".cache"))
 	t.Setenv("XDG_CONFIG_HOME", w.xdg)
 	t.Setenv(llm.KeyEnv, llmTestKey)
+	// skipIfProxyEnv found no proxy variable, so this clearing changes nothing
+	// that is cached. It keeps the child environment and any code that reads
+	// the variables again free of a proxy.
 	for _, name := range []string{"HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY"} {
 		t.Setenv(name, "")
 		t.Setenv(strings.ToLower(name), "")
@@ -333,15 +363,10 @@ func newNetWorld(t *testing.T, marker bool) *netWorld {
 		net.DefaultResolver = oldResolver
 	})
 
-	w.mcpConns = &atomic.Int32{}
 	srv := httptest.NewUnstartedServer(http.HandlerFunc(func(rw http.ResponseWriter, _ *http.Request) {
 		http.Error(rw, "not an MCP server", http.StatusNotFound)
 	}))
-	srv.Config.ConnState = func(_ net.Conn, s http.ConnState) {
-		if s == http.StateNew {
-			w.mcpConns.Add(1)
-		}
-	}
+	w.mcpConns = countNewConns(srv)
 	srv.Start()
 	t.Cleanup(srv.Close)
 	w.mcpAddr = srv.Listener.Addr().String()
@@ -363,8 +388,8 @@ func newNetWorld(t *testing.T, marker bool) *netWorld {
 }
 
 // cli builds a cli for the world with the real SDK inspector, whose dial hook
-// is the recorder. newClassifier is the classifier factory; nil means a stub
-// that fails the test when it is called.
+// is the recorder. newClassifier is the classifier factory; nil means an
+// llmFactory without a client, which fails the test when it is called.
 func (w *netWorld) cli(t *testing.T, newClassifier func(llm.Config) (toolClassifier, error)) (*cli, *netCountingInspector, func() (stdout, stderr string)) {
 	t.Helper()
 	c, stdout, stderr := dirsCLI(t, w.home, w.work)
@@ -372,10 +397,7 @@ func (w *netWorld) cli(t *testing.T, newClassifier func(llm.Config) (toolClassif
 	insp := &netCountingInspector{inner: inspect.New(inspect.SDKOptions{Dial: w.rec.dial})}
 	c.inspector = insp
 	if newClassifier == nil {
-		newClassifier = func(llm.Config) (toolClassifier, error) {
-			t.Error("cli.newClassifier was called without --llm")
-			return nil, errors.New("test: no LLM client")
-		}
+		newClassifier = (&llmFactory{t: t}).newClassifier
 	}
 	c.newClassifier = newClassifier
 	return c, insp, func() (string, string) { return stdout.String(), stderr.String() }
