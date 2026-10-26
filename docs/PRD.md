@@ -372,9 +372,10 @@ not break the scan.
   must not avoid the rug-pull check by failing on purpose. A server that is not pinned stays a
   warning only.
 - Ctrl-C, `SIGTERM` or `SIGHUP` cancels the run. mcpmoat stops the stdio servers that it started,
-  because they run in their own session and the terminal does not signal them. `scan` prints
-  `interrupted; no pins were saved`, saves nothing and exits with code 2. `pin --accept` does the
-  same.
+  because they run in their own session and the terminal does not signal them. A signal during the
+  inspection, or before new pins are saved, makes `scan` and `pin --accept` print
+  `interrupted; no pins were saved`, save nothing and exit with code 2. The README section
+  [Exit codes](../README.md#exit-codes) gives the exact `scan` behavior.
 
 ### 6.3 Rules
 
@@ -556,8 +557,8 @@ text diff.
   it to review them first)` or ` (a change has no diff text: review the tool first)` for each
   change that the user did not see: the digest covers those changes too. There is no line for a server pinned for the first time, a server that
   could not be inspected, an ignored finding, or tools that cannot be pinned.
-- `scan` and `pin --accept` print the inspection warnings on stderr, one line each, with keys and
-  fixed names only: `cleartext-secrets`, `undeclared-capability` (the cloaking signal) and
+- `scan` shows the inspection warnings in the summary of the server on stdout (on stderr with
+  `--json`), and `pin --accept` prints them on stderr, one line each, with keys and fixed names only: `cleartext-secrets`, `undeclared-capability` (the cloaking signal) and
   `dns-pin-unavailable`.
 - The digest (`pins.Digest`, version `pd1`) is the full SHA-256 over the sorted tool names and their
   hashes. The server picks both tool sets, so a collision costs about 2^(n/2) work for n bits (the
@@ -587,6 +588,11 @@ with `--no-color`).
 - No findings at or above the threshold: exit 0.
 - At least one non-ignored finding at or above `--fail-on`: exit 1.
 - Invalid flags, invalid rules, unreadable `--config`: exit 2.
+- Findings and an execution error together: exit 2. Exit 2 wins over 1.
+- `--fail-on` accepts only `low`, `medium`, `high` and `critical`. Another value is a usage error
+  (exit 2). It is a `scan` flag only.
+- The exact contract, with the errors that still print the report, is the README section
+  [Exit codes](../README.md#exit-codes).
 - A per-server connection failure alone does not cause exit 2 (it is reported; see FR-06).
 - Tests cover every branch, including `--fail-on low|medium|high|critical`.
 

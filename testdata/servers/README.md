@@ -2,10 +2,11 @@
 
 Every folder here is a **test fixture** for mcpmoat. These are fake servers for tests and the demo.
 They are not products. No fixture makes a network call. The malicious fixtures (`poisoned/`,
-`shadowing/` and `mailer/`) start no process and write no file. Their malicious text is inert data.
-`benign/` has test-only flags that can write a file or start a copy of itself. See its
-[README](benign/README.md). `TestFixtureImports` in `internal/rules/fixtures_imports_test.go`
-checks the imports of every fixture. Do not install any fixture in a real client.
+`shadowing/`, `mailer/` and `rugpull/`) start no process and write no file. Their malicious text
+is inert data. `benign/` has test-only flags that can write a file or start a copy of itself. See
+its [README](benign/README.md). `TestFixtureImports` in
+`internal/rules/fixtures_imports_test.go` checks the imports of every fixture. Do not install any
+fixture in a real client.
 
 Each fixture is one self-contained `main` package, on purpose: a reader can audit one malicious
 fixture alone, without a shared helper that could hide behaviour. So the small `run()` and exit-code
@@ -16,7 +17,7 @@ block is repeated in each folder.
 | `benign/` | none (negative baseline) | none; see its [README](benign/README.md) for the test-only flags |
 | `poisoned/` | T1 tool poisoning | MOAT-T1-002, MOAT-T1-003, MOAT-T1-004, MOAT-T1-005, MOAT-T1-006, MOAT-T1-007, MOAT-T1-008, MOAT-T1-009, MOAT-T1-012, MOAT-T1-017, MOAT-T1-019, MOAT-T1-020 (MOAT-T1-007 and MOAT-T1-017 on the `padded_notes` tool); see its README for the marker of each ID |
 | `shadowing/` + `mailer/` | T3 cross-server shadowing | MOAT-T1-003 and MOAT-T1-005 (`shadowing/` alone); MOAT-T3-001 (two sources, see the note below) |
-| (none yet) | T2 rug pull | Fixtures come with the M5 Pins milestone |
+| `rugpull/` | T2 rug pull | MOAT-T2-001 on `get_time` with `-variant injected` (high); no YAML rule; see its [README](rugpull/README.md) |
 
 MOAT-T3-001 comes from two checks. Only tests run them. For what `scan` runs today, see
 [Data flow](../../docs/ARCHITECTURE.md#data-flow).

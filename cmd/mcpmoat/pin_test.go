@@ -352,7 +352,7 @@ func TestPinInspectFailure(t *testing.T) {
 		{
 			name: "failed",
 			insp: func() inspect.Inspector {
-				return &inspecttest.Fake{Errors: map[string]error{"srv": errors.New("boom")}}
+				return failingFake("srv")
 			},
 			wantStderr: []string{"mcpmoat pin: server srv: failed: inspect: boom\n"},
 		},
@@ -661,7 +661,7 @@ func TestPinAcceptKeepsOtherServers(t *testing.T) {
 	next := e.scan(current)
 	assertScanRun(t, next, scanWant{code: exitFindings, stdout: []string{"MOAT-T2-001"}})
 	out := splitPinOutput(t, next.stdout)
-	want := []pinFindingRow{{"MOAT-T2-001", "high", "other", "tool", "o"}}
+	want := []pinFinding{{"MOAT-T2-001", "high", "other", "o", ""}}
 	if !slices.Equal(out.rows, want) {
 		t.Errorf("rows after pin = %+v, want %+v", out.rows, want)
 	}
@@ -682,8 +682,11 @@ func TestPinAcceptAfterScanReview(t *testing.T) {
 	review := e.scan(changed)
 	assertScanRun(t, review, scanWant{
 		code:   exitFindings,
-		stdout: []string{"MOAT-T2-001", "high", "Changed tool a on server srv:", "--- pinned", "+++ current", "reads your keys"},
+		stdout: []string{"MOAT-T2-001", "Changed tool a on server srv:", "--- pinned", "+++ current", "reads your keys"},
 	})
+	if f := parseFindings(t, review.stdout); len(f) != 1 || f[0].RuleID != "MOAT-T2-001" || f[0].Severity != "high" {
+		t.Errorf("findings = %+v, want one high MOAT-T2-001 finding", f)
+	}
 	digest := hintDigest(t, review.stdout, "srv")
 
 	accepted := e.pin(changed, "--accept", "srv", "--expect", digest)
@@ -730,7 +733,7 @@ func TestPinNoSecretLeak(t *testing.T) {
 		assertContainsNone(t, "stderr", got.stderr, []string{envValue, headerValue})
 	}
 	// An error path: the inspector fails.
-	failed := e.pin(&inspecttest.Fake{Errors: map[string]error{"stdio-srv": errors.New("boom")}}, "--accept", "stdio-srv")
+	failed := e.pin(failingFake("stdio-srv"), "--accept", "stdio-srv")
 	assertPinRun(t, failed, scanWant{code: exitError, stderr: []string{"failed"}})
 	assertContainsNone(t, "stderr", failed.stderr, []string{envValue, headerValue})
 

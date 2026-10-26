@@ -42,4 +42,4 @@ MOAT-T1-010 and MOAT-T1-011 (mixed-script word) have no marker here yet.
 
 - `TestFixtureBuiltinT1` in `internal/rules/fixtures_test.go` asserts the exact MOAT-T1-* IDs of
   each poisoned tool, in its description and schema.
-- T2 (rug pull) fixtures come in milestone M5 (Pins). This server never changes its tools.
+- This server never changes its tools, and the rug pull (T2) fixture is in [`../rugpull/`](../rugpull/).

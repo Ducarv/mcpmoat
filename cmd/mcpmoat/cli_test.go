@@ -357,17 +357,22 @@ func TestUsageContent(t *testing.T) {
 		"  --config <file> ",
 		"A file that is not your own global config is read as an untrusted project file\n",
 		"Exit codes:\n",
-		"  0  no findings\n",
-		"  1  findings at or above --fail-on\n",
-		"  2  execution error\n",
-		"     (scan also exits 2 when a config file has a problem or when pins.json cannot be read\n" +
-			"     or saved, or when it is stopped by a signal; a missing file is not a problem in auto-discovery,\n" +
-			"     but a missing --config file is. A server that fails or times out is a warning and does not\n" +
-			"     change the exit code, unless its pins are already stored: then it is a high finding and scan exits 1)\n",
+		"  0  no finding that is not ignored at or above --fail-on\n",
+		"  1  a finding that is not ignored at or above --fail-on (default high)\n",
+		// Exit code 2 wins over 1 (FR-16). README.md#exit-codes owns the
+		// exact contract, so the usage text points to it.
+		"  2  execution or usage error, also when there are findings\n",
+		"     (https://github.com/Ducarv/mcpmoat#exit-codes lists the causes and when the report still prints)\n",
+		// The --fail-on flag line and its continuation lines. Only the text is
+		// checked, not the padding that tabwriter prints.
+		"  --fail-on <severity>  Exit 1 for a finding of this severity or above: low, medium, high or critical (default high)\n",
+		"No built-in rule is critical yet, so critical passes every built-in finding and scan prints a note\n",
+		"An unknown rule ID or severity still gives exit 1 (fail closed)\n",
 		"The file cannot ignore the pin rules (MOAT-T2-*)",
-		"  If that server is already pinned and failed or timed out, it is also a finding (MOAT-T2-004, high, exit code 1).\n",
+		"  A new tool is medium, so alone it does not give exit code 1 with the default --fail-on high; next to a removed tool (a likely rename) it is high.\n",
+		"  If that server is already pinned and failed or timed out, it is also a finding (MOAT-T2-004, high).\n",
 		"  scan reads pins.json before it starts a server, and reads it again just before it saves the first-run pins.\n",
-		"  Ctrl-C (or SIGTERM or SIGHUP) stops the servers, saves no pins and exits 2.\n",
+		"  Ctrl-C (or SIGTERM or SIGHUP) during the inspection, or after it while scan has new pins to save, stops scan with exit 2 and saves no pins.\n",
 		"  pin changes only the entry of this server: it reads pins.json again just before it saves, and keeps the other entries.\n",
 		"Ctrl-C stops the server and saves nothing (exit 2)",
 		"Pin flags (after \"pin\"):\n",
@@ -379,7 +384,7 @@ func TestUsageContent(t *testing.T) {
 		"  A heuristic masks secret-like arguments. Review the output before you share it.\n",
 		"  --no-connect: scan runs only the built-in config rules (T4 and T5). It reads and writes no pins.\n",
 		"  The tool rules (YAML) are not applied to tools yet. Rules from --rules are loaded and checked, but not applied yet.\n",
-		"  Exit code 1 means a finding of severity high or above that is not ignored.\n",
+		"  Exit code 1 means a finding that is not ignored, with severity at or above --fail-on (default high).\n",
 	} {
 		if !strings.Contains(got, want) {
 			t.Errorf("usage text does not contain %q\n--- got ---\n%s", want, got)
@@ -387,17 +392,30 @@ func TestUsageContent(t *testing.T) {
 	}
 	// The scan help says once which rules scan runs, and says that the
 	// --no-connect line lists and checks the configs. The old text said that
-	// scan applies no rules: it must be gone.
+	// scan applies no rules: it must be gone. The failing-server note is only
+	// in the scan notes, not in the exit code block too.
 	for _, once := range []string{
 		"built-in config rules (T4 and T5)",
 		"List the servers in the configs and check the configs.",
 		"not applied yet",
+		"failed or timed out",
 	} {
 		if n := strings.Count(got, once); n != 1 {
 			t.Errorf("usage text holds %q %d times, want 1\n--- got ---\n%s", once, n, got)
 		}
 	}
-	for _, gone := range []string{"no rules", "applies no rules", "No rules were applied"} {
+	// Text that is not true and must not come back: the old "no rules"
+	// lines, the limit fixed at high from before --fail-on, a bare exit code
+	// 0 or 2 line, and the claim that any signal gives exit 2.
+	for _, gone := range []string{
+		"no rules", "applies no rules", "No rules were applied",
+		"a finding of severity high or above",
+		"(MOAT-T2-004, high, exit code 1)",
+		"  0  no findings\n",
+		"  2  execution error\n",
+		"when it is stopped by a signal",
+		"stops the servers, saves no pins and exits 2",
+	} {
 		if strings.Contains(got, gone) {
 			t.Errorf("usage text holds the old text %q\n--- got ---\n%s", gone, got)
 		}

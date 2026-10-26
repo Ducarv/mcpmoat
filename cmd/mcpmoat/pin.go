@@ -137,7 +137,7 @@ func (c *cli) inspectOne(ctx context.Context, server discover.Server, opts inspe
 		c.cmdPrintf("pin", "server %s: not inspected", cutName(server.Name))
 		return nil, false
 	}
-	c.warnInspection("pin", outcomes[0])
+	c.warnInspection(outcomes[0])
 	if outcomes[0].Status != inspect.StatusOK {
 		c.cmdPrintf("pin", "%s", notInspectedText(outcomes[0]))
 		return nil, false
@@ -404,4 +404,34 @@ func (c *cli) pinChanges(store *pins.Store, id pins.Identity, server string, too
 		diffs = c.appendDiff("pin", diffs, server, ch)
 	}
 	return n, diffs
+}
+
+// notInspectedText returns "server <name>: <status>: <reason>" for an outcome
+// that is not inspect.StatusOK. pin shows it as an error. scan shows the status
+// in its summary on stdout (see outcomeSummary), and uses this text only with
+// --json, as a warning on stderr (see warnNotInspected).
+// The server name and the error text come from untrusted sources (the error can
+// carry server output), so both are escaped and cut.
+func notInspectedText(o inspect.Outcome) string {
+	return fmt.Sprintf("server %s: %s: %s",
+		cutName(o.Server.Name),
+		termsafe.Quote(string(o.Status)),
+		termsafe.QuoteCut(outcomeReason(o), maxWarnErrRunes))
+}
+
+// warnInspection writes the warnings of the inspection of o on stderr, for
+// pin: one line for each warning of outcomeWarnings. scan shows them in its
+// summary on stdout instead (see outcomeSummary), or on stderr with --json
+// (see warnNotInspected).
+func (c *cli) warnInspection(o inspect.Outcome) {
+	for _, w := range outcomeWarnings(o) {
+		c.warnf("pin", "%s", warningText(o.Server.Name, w))
+	}
+}
+
+// warningText returns "server <name>: <kind>: <what it means>" for one
+// inspection warning. The server name is escaped and cut here. The rest comes
+// from report.WarningText, the one owner of the warning wording.
+func warningText(name string, w inspect.Warning) string {
+	return "server " + cutName(name) + ": " + report.WarningText(w)
 }

@@ -287,6 +287,12 @@
 // The text of a [ConnectError] can still hold text that the server controls
 // (see "Untrusted data" below).
 //
+// scan prints the failure reason of a server in the SUMMARY on stdout, and pin
+// prints it on stderr. So the known gap in the scrubbing (an expanded value
+// shorter than 8 bytes is not removed, see "Known limits") applies to stdout
+// too: a hostile server can echo such a value in its error text, and scan then
+// prints it.
+//
 // Plain http:// has no encryption, so anyone on the network path can read
 // the secrets. When Remote sends config headers, URL user info or secrets in
 // the URL query or path over http:// to a host that is not loopback, it adds
@@ -478,9 +484,9 @@
 //     bool. For these two hints, an absent hint and false look the same, so
 //     ToolAnnotations has nil for both. False is the spec default, so a flip
 //     to true is always visible.
-//   - No CLI flag sets AllowUntrusted or AllowDisabled yet. scan and pin
-//     print the warnings (Result.Warnings and ConnectError.Warnings) on
-//     stderr, one line each.
+//   - No CLI flag sets AllowUntrusted or AllowDisabled yet. pin prints the
+//     warnings (Result.Warnings and ConnectError.Warnings) on stderr, one
+//     line each. scan prints them in the SUMMARY on stdout.
 //   - The tool schemas, _meta and icons are decoded and encoded again (see
 //     Tool.InputSchema). Numbers pass through float64, and the SDK drops an
 //     unknown key inside an icon. The SDK also omits the empty icon fields

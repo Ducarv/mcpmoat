@@ -3,11 +3,13 @@ package main
 import (
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 
 	"github.com/Ducarv/mcpmoat/internal/discover"
 	"github.com/Ducarv/mcpmoat/internal/discover/discovertest"
+	"github.com/Ducarv/mcpmoat/internal/pins"
 	"github.com/Ducarv/mcpmoat/internal/report"
 	"github.com/Ducarv/mcpmoat/internal/rules"
 )
@@ -15,7 +17,9 @@ import (
 // Tests for the findings block of "scan --no-connect" on the fixtures under
 // testdata/configs (the rule checks themselves are tested in internal/rules,
 // see fixtures_test.go). Each test runs the scan on a copy of the fixture, in
-// auto-discovery and with --config, and compares the whole findings table.
+// auto-discovery and with --config, and compares the whole FINDINGS block.
+// The findings are grouped by severity, highest first, and keep the order of
+// the servers inside one group.
 
 // findingsFixtureHost is the host of the remote servers of the fixtures. The
 // server table may show it, the findings block must not.
@@ -41,14 +45,14 @@ func findingsScan(t *testing.T, fixture, mode string) (code int, stdout, stderr 
 	return runScanArgs(c, out, errOut, args...)
 }
 
-// assertFindingRows fails the test unless the findings table of stdout has
+// assertFindingRows fails the test unless the FINDINGS block of stdout has
 // exactly the rows in want, in this order. A row is RULE, SEVERITY, SERVER,
-// FIELD and KEY/RELATED, as printed.
+// FIELD and KEY/RELATED, as findingRows builds it from the printed lines.
 func assertFindingRows(t *testing.T, stdout string, want [][]string) {
 	t.Helper()
 	got := findingRows(t, stdout)
 	if len(got) != len(want) {
-		t.Errorf("findings table has %d rows, want %d\nstdout:\n%s", len(got), len(want), stdout)
+		t.Errorf("findings block has %d rows, want %d\nstdout:\n%s", len(got), len(want), stdout)
 	}
 	for i := range min(len(got), len(want)) {
 		if !slices.Equal(got[i], want[i]) {
@@ -57,12 +61,44 @@ func assertFindingRows(t *testing.T, stdout string, want [][]string) {
 	}
 }
 
-// findingsBlock returns the part of stdout after the first blank line, which
-// is the findings table. It fails the test when stdout has no blank line.
+// assertFindingRuleText fails the test unless every finding of stdout shows
+// the title, the risk and the fix of its built-in rule, and sits in the group
+// of the severity of that rule. It checks that the text of the rule reaches
+// the output. It fails when stdout holds no finding.
+func assertFindingRuleText(t *testing.T, stdout string) {
+	t.Helper()
+	set := builtinSet(t)
+	found := parseFindings(t, stdout)
+	if len(found) == 0 {
+		t.Fatalf("stdout holds no finding\nstdout:\n%s", stdout)
+	}
+	for _, f := range found {
+		rule, ok := set.Get(f.RuleID)
+		if !ok {
+			t.Errorf("finding %s is not a built-in rule", f.RuleID)
+			continue
+		}
+		if f.Title != rule.Title {
+			t.Errorf("%s Title = %q, want %q", f.RuleID, f.Title, rule.Title)
+		}
+		if f.Risk != rule.Risk {
+			t.Errorf("%s Risk = %q, want %q", f.RuleID, f.Risk, rule.Risk)
+		}
+		if f.Fix != rule.Remediation {
+			t.Errorf("%s Fix = %q, want %q", f.RuleID, f.Fix, rule.Remediation)
+		}
+		if f.Severity != string(rule.Severity) {
+			t.Errorf("%s is in group %q, want %q", f.RuleID, f.Severity, rule.Severity)
+		}
+	}
+}
+
+// findingsBlock returns the FINDINGS block of stdout, without its heading. It
+// fails the test when stdout has no such block.
 func findingsBlock(t *testing.T, stdout string) string {
 	t.Helper()
-	_, block, found := splitScanOutput(stdout)
-	if !found {
+	block := splitScanSections(stdout).Findings
+	if block == "" {
 		t.Fatalf("stdout has no findings block\nstdout:\n%s", stdout)
 	}
 	return block
@@ -70,9 +106,11 @@ func findingsBlock(t *testing.T, stdout string) string {
 
 // TestScanFindingsDangerousFixture scans testdata/configs/dangerous: nine
 // servers, with findings of every T4 rule. It has high findings, so the exit
-// code is 1. The rows are sorted by server name, and the T4 checks keep the
-// order of rules.CheckConfig inside one server. No secret of the fixture
-// shows, and the findings block names no host.
+// code is 1. The findings come in groups from high to low. Inside a group they
+// follow the server order (sorted by name), and the T4 checks keep the order
+// of rules.CheckConfig inside one server. Each finding shows the title, the
+// risk and the fix of its rule. No secret of the fixture shows, and the
+// findings block names no host.
 func TestScanFindingsDangerousFixture(t *testing.T) {
 	t.Parallel()
 
@@ -81,18 +119,21 @@ func TestScanFindingsDangerousFixture(t *testing.T) {
 		"npx-git-unpinned", "remote-local", "remote-plain", "remote-url-secret",
 	}
 	wantRows := [][]string{
+		// high
 		{"MOAT-T4-002", "high", "docker-arg-secret", "args", "-"},
-		{"MOAT-T4-003", "medium", "docker-untagged", "args", "registry.invalid/example/mcp-server"},
 		{"MOAT-T4-002", "high", "env-secret", "env", "GITHUB_TOKEN"},
-		{"MOAT-T4-004", "low", "env-secret", "args", "-"},
-		{"MOAT-T4-003", "medium", "latest-pkg", "args", "@example-corp/files-mcp"},
-		{"MOAT-T4-004", "low", "latest-pkg", "args", "-"},
-		{"MOAT-T4-004", "low", "npx-git-pinned", "args", "-"},
-		{"MOAT-T4-003", "medium", "npx-git-unpinned", "args", "-"},
-		{"MOAT-T4-004", "low", "npx-git-unpinned", "args", "-"},
 		{"MOAT-T4-001", "high", "remote-plain", "url", "-"},
 		{"MOAT-T4-002", "high", "remote-plain", "headers", "X-Api-Key"},
 		{"MOAT-T4-002", "high", "remote-url-secret", "url", "-"},
+		// medium
+		{"MOAT-T4-003", "medium", "docker-untagged", "args", "registry.invalid/example/mcp-server"},
+		{"MOAT-T4-003", "medium", "latest-pkg", "args", "@example-corp/files-mcp"},
+		{"MOAT-T4-003", "medium", "npx-git-unpinned", "args", "-"},
+		// low
+		{"MOAT-T4-004", "low", "env-secret", "args", "-"},
+		{"MOAT-T4-004", "low", "latest-pkg", "args", "-"},
+		{"MOAT-T4-004", "low", "npx-git-pinned", "args", "-"},
+		{"MOAT-T4-004", "low", "npx-git-unpinned", "args", "-"},
 	}
 	canaries := dangerousCanaries
 
@@ -109,6 +150,7 @@ func TestScanFindingsDangerousFixture(t *testing.T) {
 				t.Errorf("table servers = %v, want %v\nstdout:\n%s", got, wantServers, stdout)
 			}
 			assertFindingRows(t, stdout, wantRows)
+			assertFindingRuleText(t, stdout)
 			assertContainsNone(t, "the findings block", findingsBlock(t, stdout), []string{findingsFixtureHost})
 		})
 	}
@@ -129,15 +171,16 @@ func TestScanFindingsDangerousFixture(t *testing.T) {
 
 // TestScanFindingsTyposquatFixture scans testdata/configs/typosquat: three
 // servers, with T5 (medium) and T4-004 (low) findings only. Nothing reaches
-// severity high, so the exit code is 0.
+// severity high, so the exit code is 0. The medium findings come before the
+// low ones, and each finding shows the text of its rule.
 func TestScanFindingsTyposquatFixture(t *testing.T) {
 	t.Parallel()
 
 	wantServers := []string{"filesystem", "mcp-server-fecth", "memory"}
 	wantRows := [][]string{
-		{"MOAT-T4-004", "low", "filesystem", "args", "-"},
 		{"MOAT-T5-001", "medium", "filesystem", "args", "@modelcontextprotocol/server-filesystem"},
 		{"MOAT-T5-001", "medium", "mcp-server-fecth", "name", "mcp-server-fetch"},
+		{"MOAT-T4-004", "low", "filesystem", "args", "-"},
 		{"MOAT-T4-004", "low", "memory", "args", "-"},
 	}
 
@@ -152,6 +195,7 @@ func TestScanFindingsTyposquatFixture(t *testing.T) {
 				t.Errorf("table servers = %v, want %v\nstdout:\n%s", got, wantServers, stdout)
 			}
 			assertFindingRows(t, stdout, wantRows)
+			assertFindingRuleText(t, stdout)
 			assertContainsNone(t, "the findings block", findingsBlock(t, stdout), []string{findingsFixtureHost})
 		})
 	}
@@ -227,10 +271,10 @@ func builtinSet(t *testing.T) *rules.Set {
 	return set
 }
 
-// TestFindingSeverity checks the severity of a row: the YAML severity for a
-// known rule, and "critical" (fail closed) for a rule that the set does not
-// have, also when the set is nil.
-func TestFindingSeverity(t *testing.T) {
+// TestFindingRule checks the rule and the severity of a row: the rule and its
+// YAML severity for a known rule, and a zero rule with "critical" (fail closed)
+// for a rule that the set does not have, also when the set is nil.
+func TestFindingRule(t *testing.T) {
 	t.Parallel()
 	set := builtinSet(t)
 
@@ -239,68 +283,188 @@ func TestFindingSeverity(t *testing.T) {
 		set  *rules.Set
 		id   string
 		want string
+		// known is true when the set has the rule, so the result is that rule.
+		known bool
 	}{
-		{"insecure url is high", set, rules.RuleInsecureURL, "high"},
-		{"plaintext secret is high", set, rules.RulePlaintextSecret, "high"},
-		{"unpinned package is medium", set, rules.RuleUnpinnedPackage, "medium"},
-		{"auto install is low", set, rules.RuleAutoInstall, "low"},
-		{"unknown rule fails closed", set, "MOAT-X-999", "critical"},
-		{"empty rule ID fails closed", set, "", "critical"},
-		{"nil set fails closed", nil, rules.RuleInsecureURL, "critical"},
+		{"insecure url is high", set, rules.RuleInsecureURL, "high", true},
+		{"plaintext secret is high", set, rules.RulePlaintextSecret, "high", true},
+		{"unpinned package is medium", set, rules.RuleUnpinnedPackage, "medium", true},
+		{"auto install is low", set, rules.RuleAutoInstall, "low", true},
+		{"unknown rule fails closed", set, "MOAT-X-999", "critical", false},
+		{"empty rule ID fails closed", set, "", "critical", false},
+		{"nil set fails closed", nil, rules.RuleInsecureURL, "critical", false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			if got := findingSeverity(tt.set, tt.id); got != tt.want {
-				t.Errorf("findingSeverity(%q) = %q, want %q", tt.id, got, tt.want)
+			rule, got := findingRule(tt.set, tt.id)
+			if got != tt.want {
+				t.Errorf("findingRule(%q) severity = %q, want %q", tt.id, got, tt.want)
+			}
+			if tt.known && (rule.ID != tt.id || rule.Risk == "" || rule.Remediation == "") {
+				t.Errorf("findingRule(%q) rule = %+v, want the rule of the set", tt.id, rule)
+			}
+			if !tt.known && rule.ID+rule.Title+rule.Risk+rule.Remediation != "" {
+				t.Errorf("findingRule(%q) rule = %+v, want a zero rule (empty texts)", tt.id, rule)
 			}
 		})
 	}
 }
 
-// TestHasFailingFinding checks the exit-code rule: high and critical fail,
-// low and medium do not, and an unknown severity fails closed.
+// severityRows returns one report row for each severity word, in order.
+func severityRows(severities ...string) []report.FindingRow {
+	var rows []report.FindingRow
+	for _, sev := range severities {
+		rows = append(rows, report.FindingRow{RuleID: "MOAT-T4-001", Severity: sev})
+	}
+	return rows
+}
+
+// TestNoBuiltinCriticalSeverity checks that no built-in rule and no pin change
+// kind is critical. failOnCriticalNotice, the --fail-on help text and README
+// "Exit codes" say so. When a critical rule is added, change those texts and
+// this test.
+func TestNoBuiltinCriticalSeverity(t *testing.T) {
+	t.Parallel()
+
+	builtin, errs := rules.Builtin()
+	if len(errs) > 0 {
+		t.Fatalf("rules.Builtin() errors: %v", errs)
+	}
+	for _, r := range builtin {
+		if r.Severity == rules.SeverityCritical {
+			t.Errorf("built-in rule %s is critical", r.ID)
+		}
+	}
+	// A pin change can be raised to high, never above (pins.Compare).
+	for _, k := range []pins.ChangeKind{pins.KindChanged, pins.KindNew, pins.KindRemoved, pins.KindUnverified} {
+		if rules.Severity(k.Severity()) == rules.SeverityCritical {
+			t.Errorf("pin change kind %s is critical", k)
+		}
+	}
+}
+
+// TestHasFailingFinding checks the exit-code rule of FR-16 for every --fail-on
+// value: a row fails when its severity is at or above the threshold. An
+// unknown row severity fails at every threshold (fail closed), and so does
+// every row when the threshold itself is unknown (rank 0).
 func TestHasFailingFinding(t *testing.T) {
 	t.Parallel()
-	rowsOf := func(severities ...string) []report.FindingRow {
-		var rows []report.FindingRow
-		for _, sev := range severities {
-			rows = append(rows, report.FindingRow{RuleID: "MOAT-T4-001", Severity: sev})
-		}
-		return rows
-	}
+
+	// The want values are in the order low, medium, high, critical.
+	never := perLevel[bool]{false, false, false, false}
+	always := perLevel[bool]{true, true, true, true}
+	upToMedium := perLevel[bool]{true, true, false, false}
+	upToHigh := perLevel[bool]{true, true, true, false}
+	onlyLow := perLevel[bool]{true, false, false, false}
 
 	tests := []struct {
 		name string
 		rows []report.FindingRow
-		want bool
+		want perLevel[bool]
 	}{
-		{"nil rows", nil, false},
-		{"empty rows", rowsOf(), false},
-		{"low only", rowsOf("low"), false},
-		{"medium only", rowsOf("medium"), false},
-		{"low and medium", rowsOf("low", "medium"), false},
-		{"high", rowsOf("high"), true},
-		{"critical", rowsOf("critical"), true},
-		{"unknown severity word", rowsOf("bogus"), true},
-		{"empty severity", rowsOf(""), true},
-		{"wrong case is unknown", rowsOf("HIGH"), true},
-		{"low and high", rowsOf("low", "high"), true},
-		{"high and low", rowsOf("high", "low"), true},
-		{"low and unknown", rowsOf("low", "bogus"), true},
+		{"nil rows", nil, never},
+		{"empty rows", severityRows(), never},
+		{"low", severityRows("low"), onlyLow},
+		{"medium", severityRows("medium"), upToMedium},
+		{"high", severityRows("high"), upToHigh},
+		{"critical", severityRows("critical"), always},
+		{"unknown severity word", severityRows("bogus"), always},
+		{"empty severity", severityRows(""), always},
+		{"wrong case is unknown", severityRows("HIGH"), always},
+		{"low and medium", severityRows("low", "medium"), upToMedium},
+		{"low and high", severityRows("low", "high"), upToHigh},
+		{"high and low", severityRows("high", "low"), upToHigh},
+		{"medium and critical", severityRows("medium", "critical"), always},
+		{"low and unknown", severityRows("low", "bogus"), always},
+		{"every severity", severityRows("low", "medium", "high", "critical"), always},
 	}
 	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
+		for _, failOn := range failOnLevels {
+			t.Run(tt.name+"/fail-on "+string(failOn), func(t *testing.T) {
+				t.Parallel()
+				want := tt.want.at(t, failOn)
+				if got := hasFailingFinding(tt.rows, failOn); got != want {
+					t.Errorf("hasFailingFinding(%v, %q) = %v, want %v", tt.rows, failOn, got, want)
+				}
+			})
+		}
+	}
+
+	// runScan accepts only a known --fail-on value. If an unknown one gets
+	// through anyway, its rank is 0, so every finding fails (fail closed).
+	// No finding still passes.
+	for _, failOn := range []rules.Severity{"", "bogus", "HIGH"} {
+		t.Run("unknown threshold "+strconv.Quote(string(failOn)), func(t *testing.T) {
 			t.Parallel()
-			if got := hasFailingFinding(tt.rows); got != tt.want {
-				t.Errorf("hasFailingFinding(%v) = %v, want %v", tt.rows, got, tt.want)
+			for _, sev := range []string{"low", "medium", "high", "critical", "bogus"} {
+				if !hasFailingFinding(severityRows(sev), failOn) {
+					t.Errorf("hasFailingFinding(%s row, %q) = false, want true", sev, failOn)
+				}
+			}
+			if hasFailingFinding(nil, failOn) {
+				t.Errorf("hasFailingFinding(nil, %q) = true, want false", failOn)
 			}
 		})
 	}
 }
 
+// TestScanExitCode checks how scanExitCode maps its inputs to an exit code
+// (FR-16): 2 when the scan failed, else 1 when a finding is at or above the
+// threshold, else 0. TestHasFailingFinding covers the threshold rule for every
+// severity, so this test checks only the mapping and the precedence: exit code
+// 2 wins over 1 at every --fail-on value, whatever the rows are.
+func TestScanExitCode(t *testing.T) {
+	t.Parallel()
+
+	// The want values are in the order low, medium, high, critical.
+	alwaysError := perLevel[int]{exitError, exitError, exitError, exitError}
+	alwaysOK := perLevel[int]{exitOK, exitOK, exitOK, exitOK}
+
+	tests := []struct {
+		name string
+		// execFailed is the first argument of scanExitCode: true when the
+		// scan had an execution error.
+		execFailed bool
+		rows       []report.FindingRow
+		want       perLevel[int]
+	}{
+		{
+			name: "no failure, no findings",
+			want: alwaysOK,
+		},
+		{
+			name: "no failure, a low finding",
+			rows: severityRows("low"),
+			want: perLevel[int]{exitFindings, exitOK, exitOK, exitOK},
+		},
+		{
+			name: "no failure, a high finding",
+			rows: severityRows("high"),
+			want: perLevel[int]{exitFindings, exitFindings, exitFindings, exitOK},
+		},
+		// A failed scan gives 2 for no rows, for a row that fails at every
+		// threshold (critical) and for a row with an unknown severity.
+		{name: "failed with no findings", execFailed: true, want: alwaysError},
+		{name: "failed with a critical finding", execFailed: true, rows: severityRows("critical"), want: alwaysError},
+		{name: "failed with an unknown severity", execFailed: true, rows: severityRows("bogus"), want: alwaysError},
+	}
+	for _, tt := range tests {
+		for _, failOn := range failOnLevels {
+			t.Run(tt.name+"/fail-on "+string(failOn), func(t *testing.T) {
+				t.Parallel()
+				want := tt.want.at(t, failOn)
+				if got := scanExitCode(tt.execFailed, tt.rows, failOn); got != want {
+					t.Errorf("scanExitCode(%v, %v, %q) = %d, want %d", tt.execFailed, tt.rows, failOn, got, want)
+				}
+			})
+		}
+	}
+}
+
 // TestConfigFindings checks configChecks.findings with servers built in the
-// test: the rows, the severity of every row, the ignore list and the secrets.
+// test: the rows, the severity and the rule text of every row, the rows of
+// each server, the ignore list and the secrets.
 func TestConfigFindings(t *testing.T) {
 	t.Parallel()
 	set := builtinSet(t)
@@ -346,7 +510,7 @@ func TestConfigFindings(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			rows, ignored := configChecks{set: set, typo: typo}.findings(tt.ignore, servers)
+			rows, ignored, counts := configChecks{set: set, typo: typo}.findings(tt.ignore, servers)
 
 			if got := hasRule(rows, rules.RulePlaintextSecret); got != tt.wantSecret {
 				t.Errorf("rows hold %s = %v, want %v\nrows: %+v", rules.RulePlaintextSecret, got, tt.wantSecret, rows)
@@ -356,6 +520,17 @@ func TestConfigFindings(t *testing.T) {
 				if !hasRule(rows, id) {
 					t.Errorf("rows have no %s finding\nrows: %+v", id, rows)
 				}
+			}
+			// One count for each server, and the counts add up to the rows.
+			if len(counts) != len(servers) {
+				t.Fatalf("counts = %v, want %d entries", counts, len(servers))
+			}
+			total := 0
+			for _, n := range counts {
+				total += n
+			}
+			if total != len(rows) {
+				t.Errorf("counts = %v add up to %d, want %d rows", counts, total, len(rows))
 			}
 			if len(ignored) != len(tt.wantIgnored) {
 				t.Errorf("ignored = %v, want %v", ignored, tt.wantIgnored)
@@ -370,11 +545,18 @@ func TestConfigFindings(t *testing.T) {
 				if r.Severity == "" {
 					t.Errorf("row %d (%s) has an empty Severity", i, r.RuleID)
 				}
+				rule, ok := set.Get(r.RuleID)
+				if !ok {
+					t.Errorf("row %d (%s) is not a built-in rule", i, r.RuleID)
+				} else if r.Title != rule.Title || r.Risk != rule.Risk || r.Remediation != rule.Remediation {
+					t.Errorf("row %d (%s) has Title %q, Risk %q, Remediation %q, want the text of the rule",
+						i, r.RuleID, r.Title, r.Risk, r.Remediation)
+				}
 				if r.RuleID == rules.RulePlaintextSecret && r.Severity != "high" {
 					t.Errorf("row %d (%s) Severity = %q, want high", i, r.RuleID, r.Severity)
 				}
 				for name, field := range map[string]string{
-					"RuleID": r.RuleID, "Severity": r.Severity, "Server": r.Server,
+					"RuleID": r.RuleID, "Severity": r.Severity, "Server": r.Name,
 					"Field": r.Field, "Key": r.Key, "Related": r.Related,
 				} {
 					if strings.Contains(field, canary) {
