@@ -1,0 +1,229 @@
+name: release
+
+on:
+  push:
+    tags: ['v[0-9]*']
+
+# Each job asks for only the permissions it needs.
+permissions: {}
+
+concurrency:
+  # One release at a time, for all tags, so an older run cannot finish last
+  # and move the tap back. Never stop a release half way through. GitHub
+  # keeps one pending run per group: a newer queued run cancels an older
+  # pending one, so push the next tag only after the run ends.
+  group: ${{ github.workflow }}
+  cancel-in-progress: false
+
+jobs:
+  # A subset of ci.yml, run again on the tagged commit. main already passed
+  # all of ci.yml. This job keeps the checks that guard the release: vet,
+  # the race tests and govulncheck, which can find a new advisory after the
+  # merge. It leaves out gofmt, go mod tidy, golangci-lint, the version smoke
+  # test and the macOS runner: they cannot give a new result on the same
+  # commit, and the release cross-compiles on Linux.
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - name: Check out the code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          # No cache here, so a poisoned cache cannot reach the release binaries.
+          cache: false
+
+      - name: Vet
+        run: go vet ./...
+
+      - name: Test
+        # The E2E pin tests need a private t.TempDir. See ci.yml.
+        env:
+          TMPDIR: ${{ runner.temp }}
+        run: go test -race -shuffle=on ./...
+
+      - name: Check for known vulnerabilities
+        env:
+          # The release-check job in ci.yml checks that ci.yml pins the same
+          # version.
+          GOVULNCHECK_VERSION: v1.9.0
+        run: go run "golang.org/x/vuln/cmd/govulncheck@$GOVULNCHECK_VERSION" ./...
+
+  release:
+    needs: test
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    environment: release
+    permissions:
+      contents: write # create the GitHub release and upload the archives
+      id-token: write # get the OIDC token that signs the attestation
+      attestations: write # store the attestation
+    env:
+      # Dependabot does not bump this version string. The release-check job
+      # in ci.yml checks that this pin matches the pins in ci.yml and
+      # CONTRIBUTING.md.
+      GORELEASER_VERSION: v2.19.0
+    steps:
+      - name: Check out the code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # GoReleaser needs the full history and tags to build the changelog.
+          fetch-depth: 0
+          persist-credentials: false
+
+      # A guard against mistakes, such as a tag on a feature branch. The tag
+      # ruleset and the required reviewer on the release environment add to
+      # it. With one maintainer, the approval is a self-approval: it stops an
+      # accidental tag, not a stolen maintainer account. fetch-depth: 0 also
+      # fetches origin/main.
+      - name: Check that the tagged commit is on main
+        shell: bash
+        run: |
+          if ! git rev-parse --verify --quiet origin/main >/dev/null; then
+            echo "::error::origin/main is missing. Check the checkout step."
+            exit 1
+          fi
+          # Accept only the first-parent history of main: merge commits and
+          # direct pushes. A commit from inside a merged PR branch is not a
+          # release. grep is not -q here: an early exit would kill git with
+          # SIGPIPE, and pipefail would then fail the step.
+          on_main=$(git rev-list --first-parent origin/main | grep -Fx "$GITHUB_SHA" || true)
+          if [ -z "$on_main" ]; then
+            echo "::error::$GITHUB_SHA is not on the first-parent history of main. Tag a merge commit on main."
+            exit 1
+          fi
+
+      # GitHub creates a missing environment on the first run, with no
+      # reviewer and no tag limit. Its secret is missing too, so stop here,
+      # before GoReleaser writes anything. A repository or organization secret
+      # with the same name also passes this check, so keep the token an
+      # environment secret only. The expression gives only true or false, so
+      # the token itself never reaches this step.
+      - name: Check that the release environment is set up
+        env:
+          HAS_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_GITHUB_TOKEN != '' }}
+        run: |
+          if [ "$HAS_TAP_TOKEN" != true ]; then
+            echo "::error::The release environment has no HOMEBREW_TAP_GITHUB_TOKEN secret. Do the one-time setup in CONTRIBUTING.md (Releasing) first."
+            exit 1
+          fi
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          # No cache here, so a poisoned cache cannot reach the release binaries.
+          cache: false
+
+      # goreleaser-action verifies the GoReleaser signature only when cosign
+      # is on PATH. Without it, it checks only the checksum. The check is
+      # best effort: if a download of the signature or checksum file fails,
+      # the action logs a warning and goes on with less checking (#174).
+      - name: Install cosign
+        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+
+      - name: Run GoReleaser
+        uses: goreleaser/goreleaser-action@a4f02ab5355a589de60d917a659ce617ed19b3de # v7.3.0
+        with:
+          distribution: goreleaser
+          version: ${{ env.GORELEASER_VERSION }}
+          args: release --clean
+        # The tap token lives on this step only.
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          HOMEBREW_TAP_GITHUB_TOKEN: ${{ secrets.HOMEBREW_TAP_GITHUB_TOKEN }}
+          # Build the pushed tag. Without this, GoReleaser picks a tag on HEAD
+          # by sort order, which can be another tag on the same commit.
+          GORELEASER_CURRENT_TAG: ${{ github.ref_name }}
+
+      - name: Attest build provenance
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-path: |
+            dist/*.tar.gz
+            dist/checksums.txt
+
+      # GoReleaser makes a draft release. Publish it only after the
+      # attestations of the uploaded files verify. With Immutable releases,
+      # the assets lock at publish, so check them once more after it: a file
+      # that changed between the verify and the publish shows up there.
+      - name: Verify and publish the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          # check_assets downloads the release assets to $1 and checks that
+          # they are exactly the files in dist/, no more and no less. Each
+          # command has its own "|| return 1", because set -e is off inside
+          # a function that runs as an if condition.
+          check_assets() {
+            local want got f
+            want=$(cd dist && find . -maxdepth 1 -type f \
+              \( -name '*.tar.gz' -o -name checksums.txt \) | sed 's|^\./||' | sort) || return 1
+            got=$(gh release view "$GITHUB_REF_NAME" -R "$GITHUB_REPOSITORY" \
+              --json assets -q '.assets[].name' | sort) || return 1
+            if [ "$got" != "$want" ]; then
+              echo "::error::The release assets do not match dist/:"
+              diff <(echo "$want") <(echo "$got") || true
+              return 1
+            fi
+            gh release download "$GITHUB_REF_NAME" -R "$GITHUB_REPOSITORY" \
+              --pattern '*.tar.gz' --pattern checksums.txt -D "$1" || return 1
+            while read -r f; do
+              cmp "dist/$f" "$1/$f" || return 1
+            done <<<"$want"
+          }
+
+          # check_immutable fails unless GitHub locked the published release.
+          # That needs "Immutable releases" on (CONTRIBUTING.md, step 5).
+          check_immutable() {
+            local immutable
+            immutable=$(gh api "repos/$GITHUB_REPOSITORY/releases/tags/$GITHUB_REF_NAME" -q .immutable) || return 1
+            if [ "$immutable" != true ]; then
+              echo "::error::The release is not immutable. Turn on Immutable releases (CONTRIBUTING.md, step 5)."
+              return 1
+            fi
+          }
+
+          # check_tag fails unless the tag still points at the commit that
+          # this run built. The commits API resolves an annotated tag to its
+          # commit.
+          check_tag() {
+            local tag_sha
+            tag_sha=$(gh api "repos/$GITHUB_REPOSITORY/commits/refs/tags/$GITHUB_REF_NAME" -q .sha) || return 1
+            if [ "$tag_sha" != "$GITHUB_SHA" ]; then
+              echo "::error::The tag $GITHUB_REF_NAME points at $tag_sha, not at $GITHUB_SHA."
+              return 1
+            fi
+          }
+
+          check_assets draft
+          # --cert-identity is an exact match on the signing workflow and its
+          # ref. Some gh versions match --signer-workflow as a prefix only.
+          for f in draft/*; do
+            gh attestation verify "$f" -R "$GITHUB_REPOSITORY" \
+              --cert-identity "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/.github/workflows/release.yml@$GITHUB_REF" \
+              --source-ref "$GITHUB_REF" \
+              --source-digest "$GITHUB_SHA" \
+              --deny-self-hosted-runners
+          done
+
+          # A moved tag would lock the published release on another commit.
+          check_tag
+
+          gh release edit "$GITHUB_REF_NAME" -R "$GITHUB_REPOSITORY" --draft=false
+
+          # An immutable release locks its tag and assets at publish, so these
+          # checks are final.
+          if ! check_immutable || ! check_tag || ! check_assets published; then
+            echo "::error::The release is public, but it is not locked, or its tag or assets changed after the checks. Check it, and delete it if it is wrong."
+            exit 1
+          fi

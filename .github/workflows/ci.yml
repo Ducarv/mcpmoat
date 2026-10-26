@@ -31,9 +31,6 @@ jobs:
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: go.mod
-          # There is no go.sum yet, so key the cache on go.mod. Change this
-          # to go.sum when the first dependency is added.
-          cache-dependency-path: go.mod
 
       - name: Check formatting
         if: runner.os == 'Linux'
@@ -69,7 +66,11 @@ jobs:
 
       - name: Check for known vulnerabilities
         if: runner.os == 'Linux'
-        run: go run golang.org/x/vuln/cmd/govulncheck@v1.9.0 ./...
+        env:
+          # Dependabot does not bump this version string. The release-check
+          # job checks that release.yml pins the same version.
+          GOVULNCHECK_VERSION: v1.9.0
+        run: go run "golang.org/x/vuln/cmd/govulncheck@$GOVULNCHECK_VERSION" ./...
 
       - name: Version smoke test
         shell: bash
@@ -89,3 +90,72 @@ jobs:
         uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9.3.0
         with:
           version: v2.15.0
+
+  # Checks .goreleaser.yaml and builds a snapshot, so a broken release config
+  # fails here and not at tag time. It uses no secrets: a snapshot does not
+  # publish, so the tap token is not needed.
+  release-check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    env:
+      # Dependabot does not bump this version string. The "Check the tool
+      # version pins" step below checks that release.yml and CONTRIBUTING.md
+      # pin the same version.
+      GORELEASER_VERSION: v2.19.0
+    steps:
+      - name: Check out the code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # GoReleaser reads the git tags to compute the version.
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Check the tool version pins
+        run: |
+          # pin prints the version of an "  NAME: vX.Y.Z" line in a file.
+          pin() {
+            sed -nE 's/^ *'"$1"': *"?(v[0-9][0-9A-Za-z.+-]*[0-9A-Za-z])"? *(#.*)?$/\1/p' "$2"
+          }
+          rel=$(pin GORELEASER_VERSION .github/workflows/release.yml)
+          # CONTRIBUTING.md names the version only in goreleaser/v<major>@<version>.
+          doc=$(grep -oE 'goreleaser(/v[0-9]+)?@v[0-9][0-9A-Za-z.+-]*[0-9A-Za-z]' CONTRIBUTING.md | sed 's/.*@//' | sort -u || true)
+          if [ "$rel" != "$GORELEASER_VERSION" ] || [ "$doc" != "$GORELEASER_VERSION" ]; then
+            echo "::error::The GoReleaser pins differ. ci.yml: $GORELEASER_VERSION. release.yml: $rel. CONTRIBUTING.md: $doc."
+            exit 1
+          fi
+          # The release test job runs govulncheck too, with the same pin.
+          vuln_ci=$(pin GOVULNCHECK_VERSION .github/workflows/ci.yml)
+          vuln_rel=$(pin GOVULNCHECK_VERSION .github/workflows/release.yml)
+          if [ -z "$vuln_ci" ] || [ "$vuln_ci" != "$vuln_rel" ]; then
+            echo "::error::The govulncheck pins differ. ci.yml: $vuln_ci. release.yml: $vuln_rel."
+            exit 1
+          fi
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+
+      # goreleaser-action verifies the GoReleaser signature only when cosign
+      # is on PATH. Without it, it checks only the checksum.
+      - name: Install cosign
+        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+
+      - name: Check the GoReleaser config
+        uses: goreleaser/goreleaser-action@a4f02ab5355a589de60d917a659ce617ed19b3de # v7.3.0
+        with:
+          distribution: goreleaser
+          version: ${{ env.GORELEASER_VERSION }}
+          args: check
+
+      - name: Build a snapshot
+        uses: goreleaser/goreleaser-action@a4f02ab5355a589de60d917a659ce617ed19b3de # v7.3.0
+        with:
+          distribution: goreleaser
+          version: ${{ env.GORELEASER_VERSION }}
+          args: release --snapshot --clean
+
+      - name: Check the snapshot artifacts
+        run: .github/scripts/check-snapshot.sh

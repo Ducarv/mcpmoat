@@ -65,6 +65,7 @@ A row that links to another file means: run the commands at the link target.
 | Root-cause diagnosis | `debugger` |
 | Final compile and vet check | `typecheck` |
 | Security-flagged tasks after the dev agent | `review-security` |
+| Release and CI config: `.goreleaser.yaml`, `.github/workflows/`, `.github/scripts/` | `general-purpose` (no dedicated agent), then `review-security` |
 | Docs: `*.md`, `docs/`, `.github/` templates, `.claude/` agent and skill text | `general-purpose` (no dedicated docs agent; follow the owner docs in [docs/README.md](../docs/README.md)). |
 
 ## Git and pull requests
@@ -88,7 +89,7 @@ A row that links to another file means: run the commands at the link target.
 ## Review
 
 - Extra sensitive path tokens: `inspect`, `exec`, `env`, `pins`, `hash`, `release`, `goreleaser`,
-  `workflows`, `.agents`, `.claude`, `CLAUDE.md`, `.golangci.yml`.
+  `workflows`, `scripts`, `.agents`, `.claude`, `CLAUDE.md`, `.golangci.yml`.
 - Path tokens to ignore: none.
 - Security-flagged files: `.claude/agents/review-*.md`, `.claude/skills/review-pr/SKILL.md`,
   `.claude/skills/polish-pr/SKILL.md`, `.claude/skills/pr/SKILL.md`,

@@ -1,0 +1,102 @@
+# GoReleaser v2 config. Check it with: goreleaser check
+version: 2
+
+project_name: mcpmoat
+
+# No before.hooks on purpose: a hook would run with the tap token in its env.
+
+git:
+  # Sort v0.1.0-rc.1 before v0.1.0 when both tags point at the same commit.
+  prerelease_suffix: "-"
+  # A stable release skips rc tags when it looks for the previous tag, so its
+  # changelog starts at the last stable release. This runs before GoReleaser
+  # parses the tag, so read the tag from the env that release.yml sets.
+  ignore_tags:
+    - '{{ if not (contains (index .Env "GORELEASER_CURRENT_TAG") "-") }}*-*{{ end }}'
+
+builds:
+  - id: mcpmoat
+    main: ./cmd/mcpmoat
+    binary: mcpmoat
+    env:
+      # CGO off gives a static binary on Linux, with no libc dependency. On
+      # macOS, Go binaries always link the system libraries dynamically.
+      - CGO_ENABLED=0
+    flags:
+      - -trimpath
+    mod_timestamp: "{{ .CommitTimestamp }}"
+    ldflags:
+      - -s -w
+      - -X main.version=v{{ .Version }}
+      # 12 characters, the same as a go build in a git checkout prints.
+      - -X main.commit={{ slice .FullCommit 0 12 }}
+      - -X main.date={{ .CommitDate }}
+    goos:
+      - darwin
+      - linux
+    goarch:
+      - amd64
+      - arm64
+
+archives:
+  - ids:
+      - mcpmoat
+    # README.md names the archives with this pattern.
+    name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    formats:
+      - tar.gz
+    # Fix the tar header of each file: the commit date, not the checkout
+    # time, and a fixed owner and mode, not the build user and umask. Then a
+    # rebuild of the same commit with the same Go version gives the same
+    # archive digests. Every new file needs the same info.
+    builds_info:
+      owner: root
+      group: root
+      mode: 0o755
+      mtime: "{{ .CommitDate }}"
+    files:
+      - src: LICENSE
+        info: &file_info
+          owner: root
+          group: root
+          mode: 0o644
+          mtime: "{{ .CommitDate }}"
+      - src: README.md
+        info: *file_info
+
+checksum:
+  name_template: checksums.txt
+
+snapshot:
+  version_template: "{{ incpatch .Version }}-next"
+
+release:
+  # The release workflow publishes the draft after the attestations verify.
+  draft: true
+  # A re-run after a failed attest, verify or publish step replaces the old draft.
+  replace_existing_draft: true
+  prerelease: auto
+
+homebrew_casks:
+  - name: mcpmoat
+    binaries:
+      - mcpmoat
+    repository:
+      owner: Ducarv
+      name: homebrew-tap
+      token: "{{ .Env.HOMEBREW_TAP_GITHUB_TOKEN }}"
+    directory: Casks
+    homepage: https://github.com/Ducarv/mcpmoat
+    description: Offline scanner for malicious or tampered MCP servers
+    commit_author:
+      name: goreleaserbot
+      email: bot@goreleaser.com
+    # auto keeps prerelease tags (for example v0.1.0-rc.1) out of the tap.
+    skip_upload: auto
+    hooks:
+      post:
+        # The binary is not notarized, so macOS would quarantine it. Clear the flag on install.
+        install_steps: |
+          on_macos do
+            run "/usr/bin/xattr", args: ["-dr", "com.apple.quarantine", "{{ .StagedPath }}/mcpmoat"]
+          end

@@ -54,7 +54,7 @@ hook or CI.
   heuristics.
 - G4. Detect rug pulls by pinning a hash of every tool and reporting changes with a diff.
 - G5. Give clear output for humans (coloured terminal) and machines (versioned JSON, exit codes).
-- G6. Ship as a single static binary through GitHub Releases, Homebrew and `go install`.
+- G6. Ship as a single binary (static on Linux) through GitHub Releases, Homebrew and `go install`.
 - G7. Stay offline, account-free and telemetry-free.
 
 ### 2.2 Non-goals (phase 1)
@@ -619,13 +619,14 @@ of the route to a configured server, so mcpmoat honours it (and `NO_PROXY`).
 - A test runs a full scan with network access denied for anything other than fixture servers, and
   asserts no other connection is attempted. The test clears the proxy variables.
 
-**NFR-02: Distribution.** Single static binary for macOS and Linux (amd64, arm64), published with
-GoReleaser, Homebrew formula in an own tap, checksums and GitHub attestation.
+**NFR-02: Distribution.** Single binary for macOS and Linux (amd64, arm64), static on Linux,
+published with GoReleaser, Homebrew cask in an own tap, checksums and GitHub attestation. Go binaries
+on macOS always link the system libraries dynamically.
 
 - Release artefacts exist for darwin/amd64, darwin/arm64, linux/amd64, linux/arm64.
 - Binaries are built with `CGO_ENABLED=0`.
 - A `checksums.txt` file and GitHub artifact attestations are published with each release.
-- `brew install <login>/tap/mcpmoat` installs the latest release.
+- `brew install --cask <login>/tap/mcpmoat` installs the latest release.
 
 **NFR-03: Performance.** A typical scan (up to 10 servers) finishes in under 15 s, mostly waiting
 for servers to start. Analysis itself under 1 s.
@@ -725,7 +726,7 @@ Each milestone can be published on its own.
 | M3 | Inspection | FR-04 to FR-06 | `mcpmoat scan` connects to stdio and HTTP fixture servers and lists tools, prompts and resources; timeouts and isolated failures tested; scrubbed environment tested (NFR-04). |
 | M4 | Rules | FR-07 to FR-10 | YAML engine with embedded and external rules; at least 15 rules with positive and negative tests; malicious fixture servers for T1, T3, T4, T5; ignore list works. |
 | M5 | Pins | FR-11 to FR-13 | Pins stored on first run; rug-pull fixture detected with a diff on second run; `pin --accept` clears it. |
-| M6 | Output & distribution | FR-14 to FR-16, NFR-02 | Terminal and JSON output with JSON Schema; exit-code contract tested; GoReleaser builds static binaries with checksums and attestation; Homebrew tap works. |
+| M6 | Output & distribution | FR-14 to FR-16, NFR-02 | Terminal and JSON output with JSON Schema; exit-code contract tested; GoReleaser builds the binaries (static on Linux) with checksums and attestation; Homebrew tap works. |
 | M7 | Launch | Release `v1.0.0` of phase 1 | End-to-end test detects T1 to T5; README with demo GIF, install, limitations and credits; launch post, Show HN and Reddit drafts; `v1.0.0` published. |
 | M8 | Optional LLM | FR-17 | `--llm` works behind an explicit opt-in with a warning; a test proves no network calls happen without it. |
 
