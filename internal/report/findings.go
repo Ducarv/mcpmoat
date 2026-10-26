@@ -88,6 +88,18 @@ func (r ServerRef) label() string {
 		scopeCell(r.Scope, r.ProjectPath, r.Untrusted) + ")"
 }
 
+// Source tells what made a finding. It is the type of FindingRow.Source.
+type Source string
+
+// The values of FindingRow.Source. The zero value "" means SourceRule.
+const (
+	// SourceRule is a finding from a rule in rules/.
+	SourceRule Source = "rule"
+	// SourceLLM is a finding from the optional LLM classification (--llm). It
+	// is advisory: a model made it, not a rule.
+	SourceLLM Source = "llm"
+)
+
 // FindingRow is one finding as the report prints it. It holds names and the
 // text of the rule, never a value from a config. The caller fills Severity,
 // Title, Risk and Remediation from the rule set, because this package does not
@@ -95,6 +107,10 @@ func (r ServerRef) label() string {
 type FindingRow struct {
 	// ServerRef is the server that the finding is about.
 	ServerRef
+
+	// Source tells what made the finding. The zero value means SourceRule.
+	// WriteFindings marks a SourceLLM row as advisory.
+	Source Source
 
 	// RuleID is the ID of the rule that matched.
 	RuleID string
@@ -149,6 +165,10 @@ const fieldTool = "tool"
 // a fixed reason in Related) the line is "Reason: <related>" instead, because
 // no tool is named. An empty Risk or Remediation shows as "-".
 //
+// A row with Source SourceLLM gets " [LLM]" after the title on its first
+// line, and a line "Source: LLM classification (advisory)" after the Server
+// line. A rule row (Source SourceRule or "") has neither.
+//
 // Names go through findingCell, so each is escaped, cut and quoted alone. Title,
 // Risk and Remediation go through [termsafe.QuoteCut]: a rule file can hold
 // control characters. WriteFindings prints only names and rule text. It never
@@ -202,8 +222,16 @@ func writeFinding(b *strings.Builder, r FindingRow) {
 		b.WriteString("  ")
 		b.WriteString(termsafe.QuoteCut(r.Title, maxTitleRunes))
 	}
+	llm := r.Source == SourceLLM
+	if llm {
+		// Fixed text, so it needs no escape.
+		b.WriteString(" [LLM]")
+	}
 	b.WriteString("\n")
 	writeLine(b, "Server", r.label())
+	if llm {
+		writeLine(b, "Source", "LLM classification (advisory)")
+	}
 
 	switch {
 	case r.Field == fieldTool && r.Key == "":

@@ -223,15 +223,52 @@ func TestWriteJSONValidatesAgainstSchema(t *testing.T) {
 	}{
 		{"rich report", richReport()},
 		{"empty report", empty},
+		{"rule and llm findings", ruleAndLLMReport()},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			out := writeJSON(t, tt.r)
+			reporttest.AssertSafeBytes(t, out)
 			if err := rs.Validate(decodeAny(t, out)); err != nil {
 				t.Errorf("output does not match the schema: %v\n%s", err, out)
 			}
 		})
+	}
+}
+
+// hostileName holds an ANSI sequence, a newline, a bidi override and a
+// zero-width space: the kinds of text an untrusted tool name can carry.
+const hostileName = "evil\x1b[31m\u202e\u200b\nname"
+
+// ruleAndLLMReport has one finding from a rule and one advisory finding from
+// the LLM classification. The LLM finding names a tool with hostile text.
+func ruleAndLLMReport() report.ScanReport {
+	r := newReport(nil, nil)
+	r.Complete = true
+	r.Findings = []report.JSONFinding{
+		report.NewJSONFinding(report.FindingRow{RuleID: "MOAT-T2-004", Severity: "high", ServerRef: report.ServerRef{Name: "a"}, Field: "env", Key: "API_KEY"}),
+		report.NewJSONFinding(report.FindingRow{
+			RuleID: "MOAT-LLM-001", Severity: "medium", Source: report.SourceLLM,
+			ServerRef: report.ServerRef{Name: "a"}, Field: "tool", Key: hostileName, Related: hostileName,
+		}),
+	}
+	return r
+}
+
+func TestWriteJSONFindingSource(t *testing.T) {
+	t.Parallel()
+	out := writeJSON(t, ruleAndLLMReport())
+	reporttest.AssertSafeBytes(t, out)
+	got := decodeJSON(t, out).Findings
+	if len(got) != 2 {
+		t.Fatalf("findings = %+v, want 2", got)
+	}
+	if got[0].Source != "rule" || got[1].Source != "llm" {
+		t.Errorf("sources = %q, %q, want \"rule\", \"llm\"", got[0].Source, got[1].Source)
+	}
+	if got[1].Key != hostileName || got[1].Related != hostileName {
+		t.Errorf("llm finding key = %q, related = %q, want both %q", got[1].Key, got[1].Related, hostileName)
 	}
 }
 
@@ -252,7 +289,12 @@ func TestSchemaRejectsBadDocuments(t *testing.T) {
 		{"unknown server field", func(d map[string]any) { first(d, "servers")["env"] = map[string]any{} }},
 		{"missing required field", func(d map[string]any) { delete(d, "mode") }},
 		{"missing nested required field", func(d map[string]any) { delete(first(d, "diffs"), "diff_truncated") }},
-		{"schema_version 2", func(d map[string]any) { d["schema_version"] = 2 }},
+		{"schema_version below current", func(d map[string]any) { d["schema_version"] = report.SchemaVersion - 1 }},
+		{"schema_version above current", func(d map[string]any) { d["schema_version"] = report.SchemaVersion + 1 }},
+		{"unknown finding source", func(d map[string]any) { first(d, "findings")["source"] = "other" }},
+		{"empty finding source", func(d map[string]any) { first(d, "findings")["source"] = "" }},
+		{"finding source in capitals", func(d map[string]any) { first(d, "findings")["source"] = "LLM" }},
+		{"missing finding source", func(d map[string]any) { delete(first(d, "findings"), "source") }},
 		{"unknown diff kind", func(d map[string]any) { first(d, "diffs")["kind"] = "renamed" }},
 		{"diff kind unknown is not allowed", func(d map[string]any) { first(d, "diffs")["kind"] = "unknown" }},
 		{"state unknown is not allowed", func(d map[string]any) { first(d, "servers")["state"] = "unknown" }},

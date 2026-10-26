@@ -16,7 +16,9 @@ import (
 // and add docs/schema/scan-output.v<N>.json, when a field is added, renamed or
 // removed, or changes type or meaning. An added field needs a bump too: every
 // object in the schema sets additionalProperties to false.
-const SchemaVersion = 1
+//
+// Version 2 adds JSONFinding.Source.
+const SchemaVersion = 2
 
 // Mode tells if a scan connected to the servers. It is the type of
 // ScanReport.Mode.
@@ -59,7 +61,8 @@ type ScanReport struct {
 	// Complete is false when the report can miss results, and scan then
 	// exits with 2: a config file has a problem (see Errors), or the
 	// inspection or the pin step failed as a whole (pins.json cannot be read,
-	// for example). The reason is on stderr only.
+	// for example), or the LLM provider failed in a --llm scan. The reason is
+	// on stderr only.
 	Complete bool            `json:"complete"`
 	Servers  []JSONServer    `json:"servers"`
 	Findings []JSONFinding   `json:"findings"`
@@ -97,7 +100,7 @@ type JSONInspection struct {
 }
 
 // JSONFinding is one finding in the JSON report. An empty string means that
-// the field does not apply.
+// the field does not apply, except for Source, which is never empty.
 type JSONFinding struct {
 	RuleID   string `json:"rule_id"`
 	Severity string `json:"severity"`
@@ -105,6 +108,9 @@ type JSONFinding struct {
 	Field    string `json:"field"`
 	Key      string `json:"key"`
 	Related  string `json:"related"`
+	// Source is "rule" for a finding from a rule, and "llm" for an advisory
+	// finding from the LLM classification (see SourceRule and SourceLLM).
+	Source string `json:"source"`
 }
 
 // JSONDiff is the diff of one tool in the JSON report.
@@ -160,10 +166,15 @@ func NewJSONServer(s discover.Server, status InspectionStatus) JSONServer {
 	return js
 }
 
-// NewJSONFinding converts a finding row to its JSON form. Schema version 1
-// has only the server name: the client, the scope, the title and the rule
-// texts of the terminal report are not in it (a new field bumps the version).
+// NewJSONFinding converts a finding row to its JSON form. An empty
+// r.Source becomes "rule". The JSON form has only the server name: the client,
+// the scope, the title and the rule texts of the terminal report are not in it
+// (a new field bumps the version).
 func NewJSONFinding(r FindingRow) JSONFinding {
+	src := r.Source
+	if src == "" {
+		src = SourceRule
+	}
 	return JSONFinding{
 		RuleID:   r.RuleID,
 		Severity: r.Severity,
@@ -171,6 +182,7 @@ func NewJSONFinding(r FindingRow) JSONFinding {
 		Field:    r.Field,
 		Key:      r.Key,
 		Related:  r.Related,
+		Source:   string(src),
 	}
 }
 

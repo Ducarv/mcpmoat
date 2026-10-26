@@ -41,6 +41,7 @@ var hostile = []struct {
 	{"reset", "a\x1b[0mb"},
 	{"bidi override", "a\u202eb"},
 	{"bidi isolate", "a\u2066b"},
+	{"zero width space", "a\u200bb"},
 	{"newline", "a\nb"},
 	{"carriage return", "a\rb"},
 	{"invalid UTF-8", "a\xffb"},
@@ -98,6 +99,19 @@ func places() []place {
 		findingPlace("tool key", func(r *report.FindingRow, v string) { r.Field, r.Key = "tool", v }, quote),
 		findingPlace("key and related", func(r *report.FindingRow, v string) { r.Key, r.Related = v, v },
 			func(v string) string { return quote(v) + " (" + quote(v) + ")" }),
+		// An LLM row has an extra mark and line, and escapes like a rule row.
+		findingPlace("llm name", func(r *report.FindingRow, v string) { r.Source, r.Name = report.SourceLLM, v }, quote),
+		findingPlace("llm title", func(r *report.FindingRow, v string) { r.Source, r.Title = report.SourceLLM, v }, quote),
+		findingPlace("llm key", func(r *report.FindingRow, v string) { r.Source, r.Key = report.SourceLLM, v }, quote),
+		findingPlace("llm tool key", func(r *report.FindingRow, v string) {
+			r.Source, r.Field, r.Key = report.SourceLLM, "tool", v
+		}, quote),
+		findingPlace("llm tool key and related", func(r *report.FindingRow, v string) {
+			r.Source, r.Field, r.Key, r.Related = report.SourceLLM, "tool", v, v
+		}, func(v string) string { return quote(v) + " (" + quote(v) + ")" }),
+		findingPlace("llm reason", func(r *report.FindingRow, v string) {
+			r.Source, r.Field, r.Key, r.Related = report.SourceLLM, "tool", "", v
+		}, quote),
 		summaryPlace("name", func(s *report.ServerStatus, v string) { s.Name = v }, quote),
 		summaryPlace("client", func(s *report.ServerStatus, v string) { s.Client = discover.Client(v) }, quote),
 		summaryPlace("project path", func(s *report.ServerStatus, v string) {
@@ -151,7 +165,7 @@ func TestHostileTextNeverReachesTheOutputRaw(t *testing.T) {
 							break
 						}
 					}
-					for _, r := range []rune{'\u202e', '\u2066'} {
+					for _, r := range []rune{'\u202e', '\u2066', '\u200b'} {
 						if strings.ContainsRune(out, r) {
 							t.Errorf("Color=%v: output holds raw %U:\n%q", st.Color, r, out)
 						}
