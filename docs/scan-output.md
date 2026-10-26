@@ -39,6 +39,35 @@ MEDIUM (1)
 - **Findings:** each finding has the rule ID and title, the server with its client and scope (so two
   servers with the same name in two configs differ), where it matched (the field and key, or the
   tool), and a `Risk` and a `Fix` line.
+- **Tool rule findings:** when `scan` connects to the servers, it applies the description and
+  schema rules (T1 and T3, built-in and from `--rules`) to every tool. A finding of these rules has
+  a `Tool:` line in place of `Where:`: the tool name, then `(description)` or `(schema)`, the part
+  of the tool that matched. The finding never shows the tool text or the pattern.
+- **Time budget:** the rule analysis of each server has 5 seconds. A server that uses it up keeps
+  the findings found so far, and gets one high `MOAT-T1-023` finding with a `Reason:` line in place
+  of `Tool:`. `scan` also prints one warning on stderr. This finding is not an error: it counts for
+  `--fail-on` like any other finding (exit code 1 with the default), not exit code 2.
+- **Counts:** the tool rule findings and `MOAT-T1-023` count in the findings of their server in
+  the summary.
+
+A short sample of these two kinds of finding:
+
+```text
+HIGH (2)
+  MOAT-T1-003  Tool description tells the model to hide actions from the user
+    Server: notes (claude-code, global)
+    Tool: daily_quote (description)
+    Risk: ...
+    Fix: ...
+  MOAT-T1-023  Rule analysis stopped at the time budget
+    Server: slow (claude-code, global)
+    Reason: "rule analysis time budget used up; 3 of 8 tools not fully checked"
+    Risk: mcpmoat did not check all the tools of this server ...
+    Fix: Do not use this server until you have read its tool descriptions and schemas yourself ...
+```
+
+The other notes on the terminal output:
+
 - **Colour:** colour is on only when stdout is a terminal. `--no-color` (before or after the command, as in
   `mcpmoat scan --no-color`) or a non-empty `NO_COLOR` environment variable turns it off. Colour
   marks the headings, the severity lines and the status words only. The words carry the meaning, so
@@ -67,7 +96,11 @@ mcpmoat scan --json | jq -r '.findings[] | "\(.rule_id) \(.server)"'
   tool: a provider failure, an internal error of the LLM step, or more than 500 tools. The exit
   code is then 2, and the reason is on stderr.
   `complete` can be `true` with exit code 2 when the save of new pins fails after the report, so
-  always check the exit code too.
+  always check the exit code too. A server that uses up its rule time budget does not make
+  `complete` `false`: the `MOAT-T1-023` finding tells you about it.
+- A tool rule finding has `"field": "tool"`, the tool name in `key`, and `description` or `schema`
+  in `related`. The `MOAT-T1-023` finding has `"field": "tool"`, an empty `key`, and the reason
+  (`rule analysis time budget used up; N of M tools not fully checked`) in `related`.
 - The document never holds env or header values. A finding names the key it is about, for example
   `GITHUB_TOKEN`, never its value. See [JSON output](ARCHITECTURE.md#json-output) for the full
   redaction and escaping rules.

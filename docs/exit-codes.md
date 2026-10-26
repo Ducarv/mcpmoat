@@ -24,12 +24,18 @@ here.
   no built-in finding gives exit code 1`.
 - An unpinned server that fails or times out is a warning only (in the summary, or on stderr with
   `--json`). It does not change the exit code. A pinned server that fails or times out is a high `MOAT-T2-004` finding.
+- A server whose rule analysis uses up its time budget (5 seconds for each server) is a high
+  `MOAT-T1-023` finding. It is not an execution error: it gives exit code 1 with the default
+  `--fail-on`, and the JSON `complete` stays `true`. `scan` also prints a warning on stderr, and
+  the other servers still get their own budget.
 
-Exit code 2 comes, for example, from a usage error (invalid flags), invalid rules, an unreadable
+Exit code 2 comes, for example, from a usage error (invalid flags), invalid rules (also a regex in
+a `--rules` file that does not compile, with or without `--no-connect`), an unreadable
 `--config` file, a problem in a config file, a `pins.json` that cannot be read or saved, a report
 that cannot be written (a closed stdout), an unknown home or working directory in auto-discovery,
 an `--llm` problem (a missing or invalid `MCPMOAT_LLM_API_KEY`, a provider failure, an internal
-error of the LLM step, or more than 500 tools), or an internal error. Some of these errors still
+error of the LLM step, or more than 500 tools), an internal error of the tool rule step, or another
+internal error. Some of these errors still
 print the report on stdout first, so you can read the findings:
 
 | Execution error | Report |
@@ -40,7 +46,8 @@ print the report on stdout first, so you can read the findings:
 | An LLM provider failure, an internal error of the LLM step, or more than 500 tools with `--llm` | Printed |
 | A signal before the save of new pins | Printed |
 | A usage error (also a bad `--llm-*` flag or a missing API key), invalid rules, or an unknown home or working directory | Not printed |
-| A signal during the inspection or the LLM step | Not printed |
+| A signal during the inspection, the tool rule step or the LLM step | Not printed |
+| An internal error of the tool rule step. `scan` prints `mcpmoat scan: server <name>: the rule analysis failed (internal error)` | Not printed |
 | A report that cannot be written | Not printed |
 
 A signal is Ctrl-C, `SIGTERM` or `SIGHUP`. It gives exit code 2 at these times:
@@ -52,6 +59,9 @@ A signal is Ctrl-C, `SIGTERM` or `SIGHUP`. It gives exit code 2 at these times:
   it prints the report and the `pins.json` error, without the line below.
 - During the inspection. `scan` stops the stdio servers that it started, prints
   `mcpmoat scan: interrupted; no pins were saved`, saves nothing and prints no report.
+- During the tool rule step, which applies the description and schema rules to the tools after
+  the inspection. `scan` stops the rule analysis, prints the same line, saves nothing and prints no
+  report.
 - During the LLM step of a `--llm` scan. `scan` stops the requests and then does the same: it
   prints the same line, saves nothing and prints no report.
 - After the report, before the save of new pins. `scan` prints the same line and saves nothing.

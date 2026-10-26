@@ -1,15 +1,18 @@
 # Ignore findings
 
 `mcpmoat scan` applies the built-in config rules (dangerous config, T4, and typosquatting, T5) to
-every server it finds. The ignore list below drops findings of these rules. The pin findings
-(`MOAT-T2-001` to `MOAT-T2-004`) and, with `--llm`, the LLM findings (`MOAT-LLM-001` and
-`MOAT-LLM-002`) are different: only `--ignore` drops them (see below). The YAML tool rules
-(descriptions and schemas) are not applied to tools yet, so they do not run.
+every server it finds. When it connects to the servers, it also applies the description and schema
+rules (tool poisoning, T1, and shadowing, T3) to their tools. The ignore list below drops findings
+of these rules, and also the `MOAT-T1-023` finding of a server that used up its rule time budget.
+The pin findings (`MOAT-T2-001` to `MOAT-T2-004`) and, with `--llm`, the LLM findings
+(`MOAT-LLM-001` and `MOAT-LLM-002`) are different: only `--ignore` drops them (see below).
 [Exit codes](exit-codes.md) tells how the findings set the exit code.
 
 `--ignore <rule-id>` ignores all findings of one rule. You can use the flag more than one time.
 
-A `.mcpmoat-ignore` file in the working directory also ignores findings of the config rules. It
+A `.mcpmoat-ignore` file in the working directory also ignores findings of the config rules, the
+description and schema rules, and `MOAT-T1-023`. `MOAT-T1-023` is about the whole server, not a
+tool, so only an entry without a tool (`MOAT-T1-023` or `MOAT-T1-023 <server>`) drops it. The file
 cannot ignore the pin rules `MOAT-T2-001` to `MOAT-T2-004` or the LLM rules `MOAT-LLM-001` and
 `MOAT-LLM-002`, because the file can come from a cloned repository. It must not silence the
 rug-pull alarm, or the LLM classifier for every server of a user who runs `scan --llm` there. Use
@@ -40,9 +43,10 @@ space, because they can hide text in a terminal. mcpmoat skips a malformed line 
 warning with its line number.
 
 **Security note:** mcpmoat reads `.mcpmoat-ignore` from the directory you run it in, also in a
-repository that you cloned. A repository can use this file to hide config findings for any server,
-also for your global servers: an entry without a server, such as `MOAT-T1-003`, applies to every
-server. It cannot hide the pin findings or the LLM findings (see above). When the file gives
+repository that you cloned. A repository can use this file to hide config, tool rule and
+`MOAT-T1-023` findings for any server, also for your global servers: an entry without a server, such
+as `MOAT-T1-003`, applies to every server. It cannot hide the pin findings or the LLM findings (see
+above). When the file gives
 entries, mcpmoat prints `using N entries from .mcpmoat-ignore` (or
 `using 1 entry from .mcpmoat-ignore`) on stderr. If you see this line, read the file before you
 trust a clean result.

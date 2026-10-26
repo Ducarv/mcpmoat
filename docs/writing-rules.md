@@ -244,6 +244,12 @@ Guidelines:
   long gap causes false positives. `\s+` between two words is fine. A block between a pair of tags,
   such as `<instructions>...</instructions>`, can be unbounded (`[\s\S]+?`): the closing tag
   ends it. Go uses RE2, so there is no catastrophic backtracking.
+- Keep the cost of a rule low. A regex runs on up to 21 forms of each text (see above), for each
+  tool of each server. `scan` gives the rule analysis of each server a time budget of 5 seconds,
+  for the built-in rules and the rules from `--rules` together. A server that uses it up gets a
+  high `MOAT-T1-023` finding, and the rest of its tools are not fully checked. So a slow rule can
+  give a false alarm on a benign server. Prefer a few short patterns. A long alternation with many
+  branches, or a large bounded repeat such as `{0,1000}`, costs time on every form.
 - Prefer a lower severity when you are not sure. False positives make people stop using the tool.
 - Add at least one reference (research, advisory, OWASP MCP Top 10 entry).
 
@@ -317,7 +323,7 @@ with each new rule.
 You can test a rule without building it in. Put it in a folder and run:
 
 ```sh
-mcpmoat scan --rules ./my-rules --no-connect
+mcpmoat scan --rules ./my-rules
 ```
 
 mcpmoat loads every `*.yaml` and `*.yml` file in that folder, in addition to the built-in rules. It does
@@ -325,7 +331,23 @@ not read subfolders and it refuses symlinks inside the folder. A symlink as the 
 followed, like any path you type, so run `--rules` only on a folder you trust or have looked at. A
 folder holds at most 1000 such files. An external rule can use any safe ID (see the `id` field above),
 but it must not use the ID of a built-in rule, in any case (`moat-t1-003` clashes with `MOAT-T1-003`).
-An invalid file or a clashing ID gives exit code 2 and the message names the file.
+
+`scan` loads the rules and compiles their regexes when it starts, before it starts a server, also
+with `--no-connect`. An invalid file, a clashing ID or a regex that does not compile gives exit
+code 2, and the message names the file. For a bad regex, it also names the field `match`. So
+`mcpmoat scan --rules ./my-rules --no-connect` checks your files and starts no server.
+
+What `scan` does with the rules from `--rules`:
+
+- A rule with `target: description` or `target: schema` runs on the tools of each server when
+  `scan` connects to the servers, like a built-in rule. Its findings have the severity of the rule,
+  and `--ignore` and `.mcpmoat-ignore` drop them like other rule findings. With `--no-connect`,
+  `scan` gets no tools, so these rules do not run, and `scan` prints a note on stderr.
+- A rule with `target: config` is loaded and checked, but `scan` does not apply it. `scan` runs only
+  its built-in config checks, and prints this note on stderr:
+  `mcpmoat scan: rules from --rules with target config are not applied; scan applies only the built-in config checks`.
+- Your rules share the 5-second time budget of each server with the built-in rules (see the
+  guideline on rule cost in step 2).
 
 ## See also
 

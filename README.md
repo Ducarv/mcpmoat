@@ -8,13 +8,14 @@
 An offline scanner for malicious or tampered MCP servers, built for the individual developer.
 
 mcpmoat finds the MCP servers that Claude Code, Cursor and Codex load on your machine, reads the tools
-they expose, and checks them for rug pulls, dangerous config and typosquatting. Checks for tool
-poisoning and shadowing come next.
+they expose, and checks them for tool poisoning, shadowing, rug pulls, dangerous config and
+typosquatting.
 
-**Status: early release, [v0.1.0](https://github.com/Ducarv/mcpmoat/releases/tag/v0.1.0).** The YAML
-tool rules (tool poisoning and shadowing) do not run yet, so a clean scan (exit code 0) does not mean
-that the tools are safe. The config checks and the rug-pull check do run. See
-[what this does not do](#what-this-does-not-do).
+**Status: early release, [v0.1.0](https://github.com/Ducarv/mcpmoat/releases/tag/v0.1.0).** v0.1.0
+runs the config checks and the rug-pull check. From the next release (build from `dev` to try it),
+`scan` also applies the tool poisoning and shadowing rules to the description and the input schema
+of each tool when it connects to the servers. A clean scan (exit code 0) does not mean that the
+tools are safe. See [what this does not do](#what-this-does-not-do).
 
 ## Features
 
@@ -22,6 +23,8 @@ that the tools are safe. The config checks and the rug-pull check do run. See
   LLM provider only if you use `--llm`.
 - **Checks the config.** It flags plaintext secrets, unpinned packages, insecure URLs, auto-install
   flags and look-alike package names.
+- **Checks the tools** (next release, not in v0.1.0). It flags hidden instructions, invisible
+  characters, exfiltration and shadowing in the description and the input schema of each tool.
 - **Catches rug pulls.** It pins every tool and reports a tool that changes, appears or goes away.
 - **Built for CI.** Exit code 0, 1 or 2, a `--fail-on` threshold, and one JSON document with `--json`.
 - **Optional LLM rating** (next release, not in v0.1.0). Off by default. With `--llm`, tool names and
@@ -87,8 +90,9 @@ mcpmoat scan --json | jq '.findings[] | {rule_id, server}'
 ```
 
 **Check for a rug pull.** A `scan` pins the tools of each new server. Later runs show a diff when they
-change. Review the diff, then accept it with the digest that `scan` prints. See
-[docs/pins.md](docs/pins.md).
+change. Review the diff, then accept it with the digest that `scan` prints. An accept does not make
+the new text safe: from the next release, a tool poisoning finding on the new text stays after the
+accept. See [docs/pins.md](docs/pins.md).
 
 ```sh
 mcpmoat pin --accept <server> --expect <digest>
@@ -117,7 +121,9 @@ mcpmoat scan --llm
 - `scan` starts your configured stdio servers. It passes them only a few env variables, but this is not
   a sandbox: a server runs as you and can read your files and use the network. It never starts a
   server from an untrusted project file.
-- A clean scan (exit code 0) does not mean that the tools are safe. The tool rules do not run yet.
+- A clean scan (exit code 0) does not mean that the tools are safe. The tool rules find only known
+  patterns, and v0.1.0 does not apply them (the next release does). They do not run with
+  `--no-connect`. The check that compares the tools of two servers for shadowing does not run yet.
 
 The full list is in [docs/limits.md](https://github.com/Ducarv/mcpmoat/blob/HEAD/docs/limits.md).
 
