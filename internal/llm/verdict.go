@@ -8,8 +8,9 @@ import (
 	"io"
 )
 
-// Rule IDs of LLM findings. Both pass rules.ValidRuleID, so a user can put
-// them in .mcpmoat-ignore.
+// Rule IDs of LLM findings. Both pass rules.ValidRuleID, so a user can give
+// them to scan --ignore. A .mcpmoat-ignore file cannot ignore them: it can
+// come from a cloned repository (FR-10).
 const (
 	// RuleID is the rule ID of a finding for a verdict with a risk above
 	// RiskNone.

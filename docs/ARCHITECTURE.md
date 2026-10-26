@@ -147,10 +147,13 @@ offline CI job are the proof.
    and checks the rules. A bad rule file or an ID problem gives exit code 2.
 3. It reads `.mcpmoat-ignore` with `rules.ReadIgnoreFile` and adds the `--ignore` rule IDs. It keeps
    two lists (`scanIgnores` in `cmd/mcpmoat/scan_pins.go`): one for the config rules, with the file
-   and the flags, and one for the pin rules, with the flags only. The file can come from a cloned
-   repository, so it cannot ignore a pin rule. The guard is `pins.IsPinRuleID`: a rule ID is a pin
-   rule when it starts with `MOAT-T2-` (the unexported `ruleIDPrefix`). `scan` prints a warning for
-   each such rule ID, and tells the user to use `--ignore`.
+   and the flags, and one for the pin rules and the LLM rules, with the flags only. The file can come
+   from a cloned repository, so it cannot ignore a pin rule or an LLM rule. The guard is
+   `fileCannotIgnore`: it is true for a pin rule (`pins.IsPinRuleID`: the rule ID starts with
+   `MOAT-T2-`, the unexported `ruleIDPrefix`) and for `llm.RuleID` and `llm.RuleIDInvalid`
+   (`MOAT-LLM-001` and `MOAT-LLM-002`). When a file entry for such a rule matches a finding, `scan`
+   keeps the finding, prints one warning for each such rule ID (`warnFileCannotIgnore`), and tells
+   the user to use `--ignore`.
 4. It finds the servers with `loadConfigs` in `cmd/mcpmoat/configs.go`. That function runs
    `discover.Discover`, or reads one file with `discover.ReadConfig` when `--config` is set. `pin`
    uses the same function, so both commands read the configs with the same trust rules.
@@ -233,9 +236,9 @@ the connect and pin steps between step 5 and step 6:
 - 5d. Only with `--llm` (FR-17), `classifyTools` in `cmd/mcpmoat/scan_llm.go` runs after the pin
   step. It sends the name and description of each tool of each server with status `StatusOK` to the
   classifier, and adds one advisory row for each tool that the model rates as risky. It only adds
-  rows: it never changes or drops a rule finding, and it never touches pins, diffs or hints. The
-  ignore list drops LLM rows like config findings (both `.mcpmoat-ignore` and `--ignore`), and the
-  ignored count includes them. See [The `--llm` classifier](#the---llm-classifier).
+  rows: it never changes or drops a rule finding, and it never touches pins, diffs or hints. Only
+  `--ignore` drops LLM rows, as for the pin rows. The `.mcpmoat-ignore` file does not (see step 3).
+  The ignored count includes the dropped LLM rows. See [The `--llm` classifier](#the---llm-classifier).
 - The pin findings join the config findings in one report. A changed tool and a new tool also get a
   diff, so the user can review the content of a new tool before they accept it. A new tool has the
   header `New tool <tool> on server <server>:` and only added lines. A not verified tool with a diff
@@ -742,8 +745,8 @@ is too large, and a 2xx body that is not a valid API answer (for example `{}`, o
 the key, a URL, a header, a response body or model output.
 
 `classifyTools` only adds rows. It never changes or drops a rule finding, a pin, a diff or a
-`To accept` line. The ignore list applies to LLM rows as to config findings, and the pin rules keep
-their exception: the file cannot ignore them (step 3).
+`To accept` line. The LLM rules share the exception of the pin rules: only `--ignore` drops LLM
+rows, and the file cannot ignore them (step 3).
 
 The proof that nothing is sent without `--llm` is the network tests in `cmd/mcpmoat` and the
 offline CI job. The depguard fence (see [Import direction](#import-direction)) only keeps the

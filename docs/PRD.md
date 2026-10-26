@@ -428,9 +428,11 @@ references:
 - `.mcpmoat-ignore` in the working directory supports one entry per line, comments with `#`, and
   entries scoped to a rule ID, optionally limited to a server and tool.
 - Ignored findings do not affect the exit code and are counted as "ignored" in the summary.
-- `.mcpmoat-ignore` cannot ignore the pin rules (`MOAT-T2-001` to `MOAT-T2-004`). The file can come
-  from a cloned repository, and it must not silence the rug-pull alarm. Only `--ignore` on the
-  command line ignores a pin rule. `scan` prints a warning when the file has such an entry.
+- `.mcpmoat-ignore` cannot ignore the pin rules (`MOAT-T2-001` to `MOAT-T2-004`) or the LLM rules
+  (`MOAT-LLM-001` and `MOAT-LLM-002`). The file can come from a cloned repository, and it must not
+  silence the rug-pull alarm or the LLM classifier (FR-17) for every server of the user. Only
+  `--ignore` on the command line ignores these rules. `scan` keeps the finding and prints a warning
+  when a file entry for such a rule matches a finding.
 
 ### 6.4 Pins (rug-pull detection)
 
@@ -620,8 +622,9 @@ the machine**.
   bytes) and the tool description (cut at 16 KiB, with a flag that says it was cut), in one JSON
   user message with a fixed system prompt. mcpmoat never puts configs, env values, headers,
   arguments, URLs, schemas or pins into a request. At most 500 tools per scan and 4 requests at the
-  same time. `--ignore` and `.mcpmoat-ignore` hide LLM findings from the report, but they do not
-  stop a tool from being sent: to keep a server out of `--llm`, scan it with a separate config.
+  same time. Only `--ignore` hides LLM findings from the report. `.mcpmoat-ignore` cannot, because
+  it can come from a cloned repository (FR-10). `--ignore` does not stop a tool from being sent: to
+  keep a server out of `--llm`, scan it with a separate config.
 - A tool whose name or description was cut before it was sent always gives at least one
   `MOAT-LLM-001` finding of at least `medium` severity with the category `other`, whatever the
   model answers, because the part that was not sent can hold the payload. A model answer of
@@ -639,7 +642,8 @@ the machine**.
   model answer gives `MOAT-LLM-002`.
 - LLM findings carry a distinct source marker: `[LLM]` in the terminal and `"source": "llm"` in the
   JSON output (schema version 2). They only add to the rule findings and never remove or change
-  them. They count for `--fail-on`, and `--ignore` and `.mcpmoat-ignore` apply to them.
+  them. They count for `--fail-on`. Only `--ignore` applies to them; `.mcpmoat-ignore` does not
+  (FR-10).
 - The result is advisory. No finding does not mean that a tool is safe: a model can be wrong, and a
   hostile description can try to influence it.
 - A provider failure (network, TLS, timeout, HTTP error, a response that is too large), an internal

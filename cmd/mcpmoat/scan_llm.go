@@ -353,6 +353,11 @@ type llmResult struct {
 	// ignored counts the LLM findings that the ignore list dropped, by rule
 	// ID. It is nil when the list dropped nothing.
 	ignored map[string]int
+	// fileBlocked lists the LLM rule IDs that have a .mcpmoat-ignore entry
+	// that matches a kept row but is not applied (see scanIgnores). Each ID is
+	// in it once, in the order of the first row that it matched. llmStep
+	// prints one warning for each.
+	fileBlocked []string
 	// counts holds the number of rows of each server, by the index of the
 	// server in the servers of the scan (see addLLMCounts).
 	counts map[int]int
@@ -374,8 +379,10 @@ func (r llmResult) incomplete() bool {
 }
 
 // llmStep runs the LLM step of scan (see classifyTools) on the tools of the
-// inspected servers in outcomes, and prints its problems on stderr (see
-// printLLMProblems). It returns an empty result and true when cl is nil
+// inspected servers in outcomes. It prints on stderr one warning for each LLM
+// rule that .mcpmoat-ignore cannot ignore (see llmResult.fileBlocked), then
+// the problems of the step (see printLLMProblems). It returns an empty result
+// and true when cl is nil
 // (no --llm) or when no server was inspected: then it sends nothing.
 //
 // It returns false when the process got a signal during a step that had a tool
@@ -391,6 +398,9 @@ func (c *cli) llmStep(ctx context.Context, cl toolClassifier, outcomes []inspect
 	lr, err := classifyTools(ctx, outcomes, cl, ignore)
 	if c.llmStepStopped(ctx, err) {
 		return llmResult{}, false
+	}
+	for _, id := range lr.fileBlocked {
+		c.warnFileCannotIgnore(id)
 	}
 	c.printLLMProblems(lr)
 	return lr, true
@@ -430,8 +440,9 @@ func (c *cli) llmStepStopped(ctx context.Context, err error) bool {
 // the text llm.TruncatedText. An answer that cannot be used (see
 // answerUnusable) gives one llm.RuleIDInvalid row with severity medium. Every
 // row is a report.SourceLLM row with fixed texts from package llm: no model
-// output reaches it. The ignore list drops rows like the findings of the config
-// rules (see scanIgnores).
+// output reaches it. Only the --ignore entries drop rows, as for the pin
+// rules: .mcpmoat-ignore cannot ignore the LLM rules (see scanIgnores). A
+// file entry that matches a kept row is recorded in llmResult.fileBlocked.
 //
 // The first request that fails (a provider failure or an internal error, see
 // sortAnswer) stops the step: the requests that run end and no new one
@@ -468,12 +479,15 @@ func classifyTools(ctx context.Context, outcomes []inspect.Outcome, cl toolClass
 			continue // risk none: no finding
 		}
 		key := rules.FindingKey{RuleID: row.RuleID, Server: job.ref.Name, Tool: job.in.ToolName}
-		// The LLM rule IDs are not pin rules, so the entries of
-		// .mcpmoat-ignore and of --ignore both apply, as for the config
-		// rules.
-		if ignore.all.Ignored(key) {
+		// Only --ignore drops an LLM row. An entry of .mcpmoat-ignore that
+		// matches is not applied (see scanIgnores).
+		drop, fileBlocked := ignore.ignored(key)
+		if drop {
 			res.ignored = addIgnored(res.ignored, row.RuleID, 1)
 			continue
+		}
+		if fileBlocked && !slices.Contains(res.fileBlocked, row.RuleID) {
+			res.fileBlocked = append(res.fileBlocked, row.RuleID)
 		}
 		res.rows = append(res.rows, row)
 		if res.counts == nil {

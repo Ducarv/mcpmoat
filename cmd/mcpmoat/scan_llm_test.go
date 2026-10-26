@@ -864,9 +864,19 @@ func TestScanLLMTruncatedFloor(t *testing.T) {
 	}
 }
 
-// TestScanLLMIgnore checks that --ignore and .mcpmoat-ignore drop LLM
-// findings like the findings of the config rules (FR-10, FR-17), and that
-// scan counts the dropped findings on stderr.
+// llmFileWarning returns the stderr line that scan prints when a
+// .mcpmoat-ignore entry matches a finding of the LLM rule id but is not
+// applied. It is the line of the pin rules (see ignoreFileWarning).
+func llmFileWarning(id string) string {
+	return "mcpmoat scan: warning: .mcpmoat-ignore cannot ignore " + id + "; use --ignore on the command line\n"
+}
+
+// TestScanLLMIgnore checks that only --ignore drops LLM findings (FR-10,
+// FR-17), and that scan counts the dropped findings on stderr. A
+// .mcpmoat-ignore file can come from a cloned repository, so it cannot ignore
+// the LLM rules, as for the pin rules: the findings stay in the report, the
+// exit code follows --fail-on, and scan warns once for each rule that a file
+// entry matches.
 func TestScanLLMIgnore(t *testing.T) {
 	t.Parallel()
 
@@ -874,6 +884,7 @@ func TestScanLLMIgnore(t *testing.T) {
 		"alpha": {mkTool("t1", llmMarkHigh), mkTool("t2", llmMarkInvalid)},
 		"beta":  {mkTool("t3", llmMarkMedium)},
 	}
+	allRows := []llmHit{{llm.RuleID, "high", "alpha", "t1"}, {llm.RuleIDInvalid, "medium", "alpha", "t2"}, {llm.RuleID, "medium", "beta", "t3"}}
 	tests := []struct {
 		name       string
 		args       []string
@@ -881,12 +892,14 @@ func TestScanLLMIgnore(t *testing.T) {
 		want       []llmHit
 		wantCode   int
 		wantStderr []string
+		// warned lists the rule IDs that get the warning that the file
+		// cannot ignore them. Each must show once, and no other one.
+		warned []string
 	}{
 		{
-			name:       "no ignore",
-			want:       []llmHit{{llm.RuleID, "high", "alpha", "t1"}, {llm.RuleIDInvalid, "medium", "alpha", "t2"}, {llm.RuleID, "medium", "beta", "t3"}},
-			wantCode:   exitFindings,
-			wantStderr: nil,
+			name:     "no ignore",
+			want:     allRows,
+			wantCode: exitFindings,
 		},
 		{
 			name:       "--ignore MOAT-LLM-001",
@@ -902,21 +915,47 @@ func TestScanLLMIgnore(t *testing.T) {
 			wantStderr: []string{"mcpmoat scan: 3 findings ignored: MOAT-LLM-001 (2), MOAT-LLM-002 (1)\n"},
 		},
 		{
+			name:       "ignore file with rule entries",
+			ignoreFile: "MOAT-LLM-001\nMOAT-LLM-002\n",
+			want:       allRows,
+			wantCode:   exitFindings,
+			wantStderr: []string{"mcpmoat scan: using 2 entries from .mcpmoat-ignore\n"},
+			warned:     []string{llm.RuleID, llm.RuleIDInvalid},
+		},
+		{
 			name:       "ignore file with a tool and a server entry",
 			ignoreFile: "MOAT-LLM-001 alpha/t1\nMOAT-LLM-002 alpha # model refusals\n",
-			want:       []llmHit{{llm.RuleID, "medium", "beta", "t3"}},
+			want:       allRows,
+			wantCode:   exitFindings,
+			wantStderr: []string{"mcpmoat scan: using 2 entries from .mcpmoat-ignore\n"},
+			warned:     []string{llm.RuleID, llm.RuleIDInvalid},
+		},
+		{
+			// The file does not change the exit code: it follows --fail-on
+			// with all the LLM findings.
+			name:       "ignore file with --fail-on critical",
+			args:       []string{"--fail-on", "critical"},
+			ignoreFile: "MOAT-LLM-001\n",
+			want:       allRows,
 			wantCode:   exitOK,
-			wantStderr: []string{
-				"mcpmoat scan: using 2 entries from .mcpmoat-ignore\n",
-				"mcpmoat scan: 2 findings ignored: MOAT-LLM-001 (1), MOAT-LLM-002 (1)\n",
-			},
+			warned:     []string{llm.RuleID},
+		},
+		{
+			// --ignore drops the rows, so the file entry matches no kept
+			// row and gives no warning.
+			name:       "ignore file and --ignore for one rule",
+			args:       []string{"--ignore", llm.RuleID},
+			ignoreFile: "MOAT-LLM-001\n",
+			want:       []llmHit{{llm.RuleIDInvalid, "medium", "alpha", "t2"}},
+			wantCode:   exitOK,
+			wantStderr: []string{"mcpmoat scan: 2 findings ignored: MOAT-LLM-001 (2)\n"},
 		},
 		{
 			name:       "ignore file entry for another tool",
-			ignoreFile: "MOAT-LLM-001 beta/other\n",
-			want:       []llmHit{{llm.RuleID, "high", "alpha", "t1"}, {llm.RuleIDInvalid, "medium", "alpha", "t2"}, {llm.RuleID, "medium", "beta", "t3"}},
+			ignoreFile: "MOAT-LLM-001 beta/other\nMOAT-LLM-002 beta\n",
+			want:       allRows,
 			wantCode:   exitFindings,
-			wantStderr: []string{"mcpmoat scan: using 1 entry from .mcpmoat-ignore\n"},
+			wantStderr: []string{"mcpmoat scan: using 2 entries from .mcpmoat-ignore\n"},
 		},
 	}
 	for _, tt := range tests {
@@ -949,12 +988,21 @@ func TestScanLLMIgnore(t *testing.T) {
 				if len(tt.wantStderr) == 0 && strings.Contains(r.stderr, "ignored") {
 					t.Errorf("stderr counts ignored findings, want none:\n%s", r.stderr)
 				}
+				for _, id := range tt.warned {
+					if n := strings.Count(r.stderr, llmFileWarning(id)); n != 1 {
+						t.Errorf("the warning for %s shows %d times, want 1\nstderr:\n%s", id, n, r.stderr)
+					}
+				}
+				if n := strings.Count(r.stderr, "cannot ignore"); n != len(tt.warned) {
+					t.Errorf("stderr has %d \"cannot ignore\" warnings, want %d\nstderr:\n%s", n, len(tt.warned), r.stderr)
+				}
 			})
 		}
 	}
 
-	// The pin rules keep their exception: .mcpmoat-ignore cannot drop a
-	// MOAT-T2 finding, but the same file drops an LLM finding.
+	// The pin rules and the LLM rules share the exception: .mcpmoat-ignore
+	// drops neither a MOAT-T2 finding nor an LLM finding, and scan warns once
+	// for each rule.
 	t.Run("ignore file and a pin finding", func(t *testing.T) {
 		t.Parallel()
 		e := newPinEnv(t, oneServer("srv"))
@@ -968,13 +1016,48 @@ func TestScanLLMIgnore(t *testing.T) {
 			t.Errorf("exit code = %d, want %d (MOAT-T2-001 stays)\nstderr:\n%s", r.code, exitFindings, r.stderr)
 		}
 		llmRows, ruleRows := llmSplitFindings(parseFindings(t, r.stdout))
-		if len(llmRows) != 0 {
-			t.Errorf("LLM findings = %+v, want none", llmRowsOf(t, llmRows))
+		if got, want := llmRowsOf(t, llmRows), []llmHit{{llm.RuleID, "high", "srv", "t1"}}; !slices.Equal(got, want) {
+			t.Errorf("LLM findings = %+v, want %+v", got, want)
 		}
 		if len(ruleRows) != 1 || ruleRows[0].RuleID != "MOAT-T2-001" {
 			t.Errorf("rule findings = %+v, want one MOAT-T2-001", ruleRows)
 		}
-		assertContainsAll(t, "stderr", r.stderr, []string{ignoreFileWarning, "mcpmoat scan: 1 finding ignored: MOAT-LLM-001 (1)\n"})
+		assertContainsAll(t, "stderr", r.stderr, []string{ignoreFileWarning, llmFileWarning(llm.RuleID)})
+		if strings.Contains(r.stderr, "ignored") {
+			t.Errorf("stderr counts ignored findings, want none:\n%s", r.stderr)
+		}
+	})
+
+	// A file entry for a config rule still drops its finding. Only the LLM
+	// entry of the same file gets the warning.
+	t.Run("ignore file and a config rule", func(t *testing.T) {
+		t.Parallel()
+		e := newPinEnv(t, map[string]any{"alpha": failOnHighServer}) // MOAT-T4-001 (high)
+		writeTestFile(t, e.work, ".mcpmoat-ignore", "MOAT-T4-001 alpha\nMOAT-LLM-001 alpha\n")
+		alphaTools := map[string][]inspect.Tool{"alpha": {mkTool("t1", llmMarkMedium)}}
+
+		r := llmScan(t, e, alphaTools, &llmFake{}, "--llm", "--json")
+
+		// The medium LLM finding stays, and the high MOAT-T4-001 is ignored.
+		if r.code != exitOK {
+			t.Errorf("exit code = %d, want %d\nstderr:\n%s", r.code, exitOK, r.stderr)
+		}
+		doc := decodeScanJSON(t, r.stdout)
+		for _, f := range doc.Findings {
+			if f.RuleID == "MOAT-T4-001" {
+				t.Errorf("MOAT-T4-001 is in the report, want it ignored by the file")
+			}
+		}
+		if got, want := llmJSONRows(t, doc), []llmHit{{llm.RuleID, "medium", "alpha", "t1"}}; !slices.Equal(got, want) {
+			t.Errorf("LLM findings = %+v, want %+v", got, want)
+		}
+		assertContainsAll(t, "stderr", r.stderr, []string{
+			llmFileWarning(llm.RuleID),
+			"mcpmoat scan: 1 finding ignored: MOAT-T4-001 (1)\n",
+		})
+		if n := strings.Count(r.stderr, "cannot ignore"); n != 1 {
+			t.Errorf("stderr has %d \"cannot ignore\" warnings, want 1\nstderr:\n%s", n, r.stderr)
+		}
 	})
 }
 

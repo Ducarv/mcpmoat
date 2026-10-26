@@ -285,18 +285,22 @@ mcpmoat scan --json | jq -r '.findings[] | "\(.rule_id) \(.server)"'
 ## Ignore findings
 
 `mcpmoat scan` applies the built-in config rules (dangerous config, T4, and typosquatting, T5) to
-every server it finds. The ignore list below drops findings of these rules, and of the LLM rules
-`MOAT-LLM-001` and `MOAT-LLM-002` with `--llm`. The pin findings
-(`MOAT-T2-001` to `MOAT-T2-004`) are different: only `--ignore` drops them (see below). The YAML tool rules (descriptions and schemas) are not applied to
-tools yet, so they do not run.
+every server it finds. The ignore list below drops findings of these rules. The pin findings
+(`MOAT-T2-001` to `MOAT-T2-004`) and, with `--llm`, the LLM findings (`MOAT-LLM-001` and
+`MOAT-LLM-002`) are different: only `--ignore` drops them (see below). The YAML tool rules
+(descriptions and schemas) are not applied to tools yet, so they do not run.
 [Exit codes](#exit-codes) tells how the findings set the exit code.
 
 `--ignore <rule-id>` ignores all findings of one rule. You can use the flag more than one time.
 
 A `.mcpmoat-ignore` file in the working directory also ignores findings of the config rules. It
-cannot ignore the pin rules `MOAT-T2-001` to `MOAT-T2-004`, because the file can come from a cloned
-repository and must not silence the rug-pull alarm. Use `--ignore` on the command line for them.
-When the file has such an entry, `scan` prints a warning. Write one entry on each
+cannot ignore the pin rules `MOAT-T2-001` to `MOAT-T2-004` or the LLM rules `MOAT-LLM-001` and
+`MOAT-LLM-002`, because the file can come from a cloned repository. It must not silence the
+rug-pull alarm, or the LLM classifier for every server of a user who runs `scan --llm` there. Use
+`--ignore` on the command line for these rules. When a file entry for one of these rules matches a
+finding, `scan` keeps the finding and prints a warning on stderr:
+`mcpmoat scan: warning: .mcpmoat-ignore cannot ignore MOAT-LLM-001; use --ignore on the command line`.
+Write one entry on each
 line: `RULE-ID [server[/tool]]`. A line that starts with `#` is a comment. After the rule ID, a
 `#` as a separate word starts a comment to the end of the line. A server name cannot start with `#`.
 
@@ -320,9 +324,10 @@ space, because they can hide text in a terminal. mcpmoat skips a malformed line 
 warning with its line number.
 
 **Security note:** mcpmoat reads `.mcpmoat-ignore` from the directory you run it in, also in a
-repository that you cloned. A repository can use this file to hide findings for any server, also
-for your global servers: an entry without a server, such as `MOAT-T1-003`, applies to every server.
-When the file gives entries, mcpmoat prints `using N entries from .mcpmoat-ignore` (or
+repository that you cloned. A repository can use this file to hide config findings for any server,
+also for your global servers: an entry without a server, such as `MOAT-T1-003`, applies to every
+server. It cannot hide the pin findings or the LLM findings (see above). When the file gives
+entries, mcpmoat prints `using N entries from .mcpmoat-ignore` (or
 `using 1 entry from .mcpmoat-ignore`) on stderr. If you see this line, read the file before you
 trust a clean result.
 
@@ -366,9 +371,9 @@ mcpmoat scan --llm --llm-provider openai --llm-model <model> \
 - **What is sent:** one request for each tool of each server that `scan` inspected (status `ok`).
   The request holds the tool name (cut at 512 bytes) and the tool description (cut at 16 KiB, or
   less when the whole message would pass 24 KiB once it is JSON-escaped), with a flag that says
-  that text was cut, and a fixed instruction text from mcpmoat. `--ignore` and
-  `.mcpmoat-ignore` hide LLM findings from the report, but they do not stop a tool from being sent.
-  To keep a server out of `--llm`, scan it with a separate config.
+  that text was cut, and a fixed instruction text from mcpmoat. `--ignore` hides LLM findings from
+  the report, but it does not stop a tool from being sent. To keep a server out of `--llm`, scan it
+  with a separate config.
 - **What mcpmoat never puts in a request:** your config files, env values, headers, args, URLs, the
   tool schemas and `pins.json`. The key goes only in the auth header of the provider.
 - **The description goes as the server wrote it:** mcpmoat does not remove secret values from it.
@@ -427,8 +432,10 @@ mcpmoat scan --llm --llm-provider openai --llm-model <model> \
   A hostile server can cause this on purpose: it can list more than 500 tools, or write a
   description that makes the provider answer with an HTTP 4xx (a content filter or a context
   limit). The rule findings still print.
-- **Ignore:** `--ignore` and `.mcpmoat-ignore` work for `MOAT-LLM-001` and `MOAT-LLM-002`. The
-  ignored count on stderr includes them (see [Ignore findings](#ignore-findings)).
+- **Ignore:** only `--ignore` works for `MOAT-LLM-001` and `MOAT-LLM-002`. `.mcpmoat-ignore`
+  cannot ignore them, because the file can come from a cloned repository: `scan` keeps the finding
+  and prints a warning (see [Ignore findings](#ignore-findings)). The ignored count on stderr
+  includes the findings that `--ignore` drops.
 - **OpenAI temperature:** the OpenAI request does not set a temperature, so models with a fixed
   temperature work.
 

@@ -5,6 +5,7 @@ import (
 
 	"github.com/Ducarv/mcpmoat/internal/discover"
 	"github.com/Ducarv/mcpmoat/internal/inspect"
+	"github.com/Ducarv/mcpmoat/internal/llm"
 	"github.com/Ducarv/mcpmoat/internal/pins"
 	"github.com/Ducarv/mcpmoat/internal/report"
 	"github.com/Ducarv/mcpmoat/internal/rules"
@@ -14,7 +15,7 @@ import (
 // This file holds the connect step of scan after inspect.Run: the inspection
 // status of each server for the --json report, the pinner, which checks the
 // tools of each inspected server against pins.json, and the ignore lists of
-// the pin rules.
+// the pin rules and the LLM rules.
 
 // pinReport is the result of the connect step of scan: the inspection status
 // of each server, and from the pin step what scan adds to its report and what
@@ -77,29 +78,49 @@ type pinnedServer struct {
 //
 // A .mcpmoat-ignore file can come from a cloned repository, and the user did
 // not write it. If it could ignore a pin finding (MOAT-T2-*), a hostile
-// project could silence the rug-pull alarm for the user's own servers. So the
-// file never ignores a pin rule. Only --ignore on the command line does,
-// because the user typed it.
+// project could silence the rug-pull alarm for the user's own servers. If it
+// could ignore an LLM finding (MOAT-LLM-001 or MOAT-LLM-002), it could silence
+// the classifier for every server of a user who runs "scan --llm" there. So
+// the file never ignores these rules (see fileCannotIgnore). Only --ignore on
+// the command line does, because the user typed it.
 type scanIgnores struct {
 	// all holds the entries of .mcpmoat-ignore and of --ignore. It drops
-	// the findings of the config rules.
+	// the findings of the config rules. It does not drop the findings of the
+	// pin rules and of the LLM rules (see ignored).
 	all rules.IgnoreList
-	// flags holds only the --ignore entries. It drops the pin findings.
+	// flags holds only the --ignore entries. It drops the findings of the pin
+	// rules and of the LLM rules.
 	flags rules.IgnoreList
 }
 
+// fileCannotIgnore reports whether the rule id is one that .mcpmoat-ignore
+// cannot ignore: a pin rule (MOAT-T2-*), llm.RuleID or llm.RuleIDInvalid.
+// Only --ignore drops the findings of these rules (see scanIgnores).
+func fileCannotIgnore(id string) bool {
+	return pins.IsPinRuleID(id) || id == llm.RuleID || id == llm.RuleIDInvalid
+}
+
 // ignored reports whether the user asked to ignore the finding k. For a pin
-// rule only the --ignore list counts. The second result is true when the
-// .mcpmoat-ignore file has an entry that matches k but is not applied, so
-// that the caller can warn about it.
+// rule or an LLM rule (see fileCannotIgnore) only the --ignore list counts.
+// The second result is true when the .mcpmoat-ignore file has an entry that
+// matches k but is not applied, so that the caller can warn about it (see
+// warnFileCannotIgnore).
 func (s *scanIgnores) ignored(k rules.FindingKey) (drop, fileBlocked bool) {
-	if !pins.IsPinRuleID(k.RuleID) {
+	if !fileCannotIgnore(k.RuleID) {
 		return s.all.Ignored(k), false
 	}
 	if s.flags.Ignored(k) {
 		return true, false
 	}
 	return false, s.all.Ignored(k)
+}
+
+// warnFileCannotIgnore prints the warning that .mcpmoat-ignore has an entry
+// for the rule ruleID that is not applied (see scanIgnores). The pin step and
+// the LLM step print it once for each rule ID.
+func (c *cli) warnFileCannotIgnore(ruleID string) {
+	c.scanWarnf("%s cannot ignore %s; use --ignore on the command line",
+		rules.IgnoreFileName, termsafe.Quote(ruleID))
 }
 
 // pinOutcomes checks the tools of the servers that were inspected against
@@ -251,8 +272,7 @@ func (p *pinner) add(row report.FindingRow) bool {
 	dropped, blocked := p.ign.ignored(key)
 	if blocked && !p.warned[row.RuleID] {
 		p.warned[row.RuleID] = true
-		p.c.scanWarnf("%s cannot ignore %s; use --ignore on the command line",
-			rules.IgnoreFileName, termsafe.Quote(row.RuleID))
+		p.c.warnFileCannotIgnore(row.RuleID)
 	}
 	if dropped {
 		p.res.ignored = addIgnored(p.res.ignored, row.RuleID, 1)

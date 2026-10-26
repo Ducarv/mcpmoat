@@ -403,20 +403,27 @@ func TestScanLLMNoToolName(t *testing.T) {
 	// classifyTools matches the ignore list with the real tool name, which is
 	// empty here, and not with "(no name)". A tool entry can name no empty
 	// tool, and an entry cannot hold "(no name)" (it has a space, so the line
-	// has too many fields). So only a rule entry or a server entry drops such
-	// a finding.
+	// has too many fields). .mcpmoat-ignore cannot ignore the LLM rules (see
+	// scanIgnores), so a file entry never drops such a finding: a server entry
+	// matches it and gives the warning, and a tool entry does not match it.
+	// --ignore drops it.
 	ignoreTests := []struct {
 		name       string
 		args       []string
 		ignoreFile string
 		want       []llmHit
 		wantStderr []string
+		noStderr   []string
 	}{
 		{
 			name:       "server entry",
 			ignoreFile: "MOAT-LLM-001 alpha\n",
-			want:       []llmHit{{llm.RuleIDInvalid, "medium", "beta", noToolNameKey}, {llm.RuleID, "medium", "beta", "t1"}},
-			wantStderr: []string{"mcpmoat scan: 1 finding ignored: MOAT-LLM-001 (1)\n"},
+			want: []llmHit{
+				{llm.RuleID, "high", "alpha", noToolNameKey},
+				{llm.RuleIDInvalid, "medium", "beta", noToolNameKey},
+				{llm.RuleID, "medium", "beta", "t1"},
+			},
+			wantStderr: []string{llmFileWarning(llm.RuleID)},
 		},
 		{
 			name:       "tool entry for another tool",
@@ -426,6 +433,7 @@ func TestScanLLMNoToolName(t *testing.T) {
 				{llm.RuleIDInvalid, "medium", "beta", noToolNameKey},
 				{llm.RuleID, "medium", "beta", "t1"},
 			},
+			noStderr: []string{"cannot ignore"},
 		},
 		{
 			name:       "entry with the placeholder is malformed",
@@ -460,8 +468,14 @@ func TestScanLLMNoToolName(t *testing.T) {
 				t.Errorf("LLM findings = %+v, want %+v", got, tt.want)
 			}
 			assertContainsAll(t, "stderr", r.stderr, tt.wantStderr)
-			if len(tt.wantStderr) == 0 && strings.Contains(r.stderr, "ignored") {
+			if !slices.ContainsFunc(tt.wantStderr, func(s string) bool { return strings.Contains(s, "ignored") }) &&
+				strings.Contains(r.stderr, "ignored") {
 				t.Errorf("stderr counts ignored findings, want none:\n%s", r.stderr)
+			}
+			for _, s := range tt.noStderr {
+				if strings.Contains(r.stderr, s) {
+					t.Errorf("stderr holds %q, want not:\n%s", s, r.stderr)
+				}
 			}
 		})
 	}

@@ -334,8 +334,9 @@ func (c *cli) scanWarnf(format string, a ...any) {
 
 // loadIgnore builds the ignore lists (see scanIgnores). The list for the
 // config rules holds the entries of .mcpmoat-ignore in the directory wd, then
-// one entry for each --ignore ID in ids. The list for the pin rules holds only
-// the --ignore entries, because the file is untrusted (see scanIgnores). ids
+// one entry for each --ignore ID in ids. The list for the pin rules and the
+// LLM rules holds only the --ignore entries, because the file is untrusted
+// (see scanIgnores). ids
 // holds only valid rule IDs: the --ignore flag checks them. An empty wd means
 // that the working directory is not known, so loadIgnore reads no file.
 //
@@ -346,8 +347,9 @@ func (c *cli) scanWarnf(format string, a ...any) {
 // loadIgnore prints their number, because the file is untrusted and can hide
 // findings. The --ignore IDs come from the user, so they give no notice.
 //
-// An entry of the file for a pin rule (MOAT-T2-*) is not applied: scan warns
-// when such an entry matches a finding (see pinOutcomes).
+// An entry of the file for a pin rule (MOAT-T2-*) or an LLM rule
+// (MOAT-LLM-001 or MOAT-LLM-002) is not applied: scan warns when such an
+// entry matches a finding (see pinOutcomes and classifyTools).
 func (c *cli) loadIgnore(wd string, ids []string) *scanIgnores {
 	var ign scanIgnores
 	if wd != "" {
