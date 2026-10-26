@@ -20,9 +20,8 @@ This page lists what mcpmoat does not do, so you know how far to trust a clean s
   hostile description can try to influence the model. Its findings are advisory, and with `--llm`
   your tool names and descriptions leave your machine.
 - Not done yet: a lock for `pins.json` (#150).
-- The owner and mode check of the pins directory and `pins.json` has limits: it skips parent
-  directories, ACLs, Windows and some symlink targets. A directory that root owns is refused for you,
-  and the reverse. `scan` then exits with code 2. See [Known
+- The owner and mode check of the pins directory and `pins.json` does not cover everything. For
+  example, it skips parent directories, ACLs and Windows. See [Known
   limits](ARCHITECTURE.md#the-pinsjson-store).
 - `scan --rules <dir>` loads and checks extra rule files, but `scan` does not apply them yet. It
   prints `mcpmoat scan: rules from --rules are loaded and checked, but not applied yet` on stderr.

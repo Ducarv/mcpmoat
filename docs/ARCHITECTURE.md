@@ -128,7 +128,8 @@ files only:
 So a non-test file in another package that imports `net`, `net/http`, `net/smtp`, `net/rpc`,
 `crypto/tls` or `os/exec` fails the lint gate (NFR-01, NFR-04). The fence is defence in depth, not
 a proof. It does not cover `os.StartProcess`, `syscall` (`cmd/mcpmoat`, `internal/inspect`,
-`internal/pins` and `internal/safefile` import it) or the imports of third-party packages. The network tests in `cmd/mcpmoat` and the offline CI job are the proof.
+`internal/pins` and `internal/safefile` import it) or the imports of third-party packages. The
+network tests in `cmd/mcpmoat` and the offline CI job are the proof.
 
 ## Data flow
 
@@ -495,20 +496,20 @@ a changed tool (a rug pull). `scan` writes the pins of a server on its first run
   run, and its changes are never reported. `Save` writes atomically (temp file, mode `0600`, sync,
   rename). A new directory gets mode `0700`. The rules, the caps and the error texts are in the doc
   comments of `Load`, `Set` and `Save` in `internal/pins/store.go`.
-- Owner and mode check: `Load` and `Save` refuse a pins directory or a `pins.json` that another
-  user owns or that group or others can write (mode bits `0o022`). The error wraps
-  `ErrInsecurePermissions` and names the path and the mode. It gives a hint for each problem:
-  `chmod go-w -- '<path>'` for a mode problem, and `ask the owner or root to
-  run chown, or remove the path` for an owner problem. mcpmoat never changes a mode itself.
+- Owner and mode check: `Load` refuses an unsafe pins directory or `pins.json`, and `Save` refuses
+  an unsafe pins directory. Unsafe means that another user owns the path, or that group or others
+  can write it (mode bits `0o022`). The error wraps `ErrInsecurePermissions` and names the path, the
+  mode and a fix (the texts are in [docs/pins.md](pins.md)). mcpmoat never changes a mode itself.
   `scan` and `pin --accept` exit with 2 (FR-16). The first read runs before any server starts.
   Both commands read the file again just before they save, and then they save. That second read and
   the save can refuse after the servers ran, because a mode can change while `scan` inspects them.
 - `Load` checks the directory by path before it reads the file, also on a first run when the
   directory exists. It checks `pins.json` on the open file descriptor, after the read and before the
   parse, so the file check has no path race. `Save` checks the directory only, because it replaces
-  the file by rename. A missing path passes. A pins directory path that is not a directory (or whose
-  parent is a regular file) also skips the mode check, and `Load` and `Save` fail with a "not a
-  directory" error as before. Modes such as `0755`
+  the file by rename. It checks after it created a missing directory (`atomicWriter.writeFile`), so a
+  directory that another user made in the meantime is refused too. A missing path passes. A pins
+  directory path that is not a directory (or whose parent is a regular file) also skips the mode
+  check, and `Load` and `Save` fail with a "not a directory" error as before. Modes such as `0755`
   for a directory and `0644` for a file pass: pins are not secret, so this is an integrity check.
   The code is in `internal/pins` (`perm.go`, `perm_unix.go`, `perm_other.go`).
 
