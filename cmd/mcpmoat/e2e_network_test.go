@@ -137,12 +137,12 @@ func (s *e2eNetServer) settle(t *testing.T) (conns int32, reqs []e2eNetRequest) 
 }
 
 // e2eNetAssertNoKey fails the test when a request holds the API key canary,
-// or a part of it of 8 bytes or more (see llmKeyLeak), anywhere: request
+// or a part of it of 8 bytes or more (see secretPartLeak), anywhere: request
 // line, headers or body.
 func e2eNetAssertNoKey(t *testing.T, who string, reqs []e2eNetRequest) {
 	t.Helper()
 	for i, r := range reqs {
-		if part, ok := llmKeyLeak(llmTestKey, r.dump); ok {
+		if part, ok := secretPartLeak(llmTestKey, r.dump); ok {
 			t.Errorf("%s request %d (%s %s) holds a part of the API key (%q)", who, i, r.method, r.url, part)
 		}
 	}
@@ -156,19 +156,6 @@ func e2eNetAssertNoKeyOutput(t *testing.T, stdout, stderr string) {
 	llmAssertNoKey(t, llmTestKey, stdout, stderr)
 	assertNoLeakBoth(t, stdout, stderr)
 	assertNoEscape(t, stdout, stderr)
-}
-
-// e2eNetAssertMarker checks whether the marker file of writeMarkerScript
-// exists.
-func e2eNetAssertMarker(t *testing.T, marker string, want bool) {
-	t.Helper()
-	_, err := os.Stat(marker)
-	switch {
-	case want && err != nil:
-		t.Errorf("marker file is missing (err = %v): the server did not start", err)
-	case !want && !errors.Is(err, fs.ErrNotExist):
-		t.Errorf("marker file exists or cannot be checked (err = %v): mcpmoat started a server", err)
-	}
 }
 
 // TestE2ENoNetworkWithoutLLM proves NFR-01 and the first FR-17 criterion on
@@ -226,7 +213,7 @@ func TestE2ENoNetworkWithoutLLM(t *testing.T) {
 	// Step 1: --no-connect starts no server and opens no connection (FR-05).
 	stdout, stderr, code := runBinEnv(t, home, work, proxyEnv, "scan", "--no-connect")
 	checkRun(t, stdout, stderr, code)
-	e2eNetAssertMarker(t, marker, false)
+	assertMarker(t, marker, false)
 	if conns, reqs := proxy.settle(t); conns != 0 || len(reqs) != 0 {
 		t.Errorf("--no-connect: the proxy got %d connections and %d requests, want none", conns, len(reqs))
 	}
@@ -236,7 +223,7 @@ func TestE2ENoNetworkWithoutLLM(t *testing.T) {
 	checkRun(t, stdout, stderr, code)
 	// The marker proves that this run starts the stdio servers, so the check
 	// of step 1 can fail.
-	e2eNetAssertMarker(t, marker, true)
+	assertMarker(t, marker, true)
 	_, proxied := proxy.settle(t)
 	if len(proxied) == 0 {
 		t.Fatal("the proxy got no request: scan did not use HTTP_PROXY for the remote server")
@@ -310,7 +297,7 @@ func TestE2ELLMMissingKey(t *testing.T) {
 			}
 			assertContainsNone(t, "stderr", stderr, tt.leak)
 			e2eNetAssertNoKeyOutput(t, stdout, stderr)
-			e2eNetAssertMarker(t, marker, false)
+			assertMarker(t, marker, false)
 			assertNoPinsFile(t, home)
 			if conns, reqs := provider.settle(t); conns != 0 || len(reqs) != 0 {
 				t.Errorf("the LLM provider got %d connections and %d requests, want none", conns, len(reqs))
@@ -377,8 +364,8 @@ func e2eLLMAssertRequests(t *testing.T, reqs []e2eNetRequest, forbidden []string
 			t.Errorf("request %d: no anthropic-version header", i)
 		}
 		// The rest of the request gets the rule of e2eNetAssertNoKey: no
-		// part of the key of 8 bytes or more (see llmKeyLeak).
-		if part, ok := llmKeyLeak(llmTestKey, r.url+"\n"+r.body); ok {
+		// part of the key of 8 bytes or more (see secretPartLeak).
+		if part, ok := secretPartLeak(llmTestKey, r.url+"\n"+r.body); ok {
 			t.Errorf("request %d: the URL or the body holds a part of the API key (%q)", i, part)
 		}
 		for name, values := range r.header {
@@ -386,7 +373,7 @@ func e2eLLMAssertRequests(t *testing.T, reqs []e2eNetRequest, forbidden []string
 				continue
 			}
 			for _, v := range values {
-				if part, ok := llmKeyLeak(llmTestKey, v); ok {
+				if part, ok := secretPartLeak(llmTestKey, v); ok {
 					t.Errorf("request %d: header %s holds a part of the API key (%q)", i, name, part)
 				}
 			}

@@ -536,9 +536,7 @@ func TestScanNetworkNoConnect(t *testing.T) {
 	if n := w.mcpConns.Load(); n != 0 {
 		t.Errorf("the configured server got %d connections, want 0", n)
 	}
-	if _, err := os.Stat(w.marker); !errors.Is(err, os.ErrNotExist) {
-		t.Errorf("marker file exists or cannot be checked (err = %v): a server process ran", err)
-	}
+	assertMarker(t, w.marker, false)
 	if _, err := os.Stat(w.envFile); !errors.Is(err, os.ErrNotExist) {
 		t.Errorf("the benign server wrote its environment (err = %v): it ran", err)
 	}

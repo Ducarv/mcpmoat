@@ -37,3 +37,36 @@ T4 (dangerous config) and T5 (typosquat) are config fixtures, not servers. They 
 |---|---|---|
 | `configs/dangerous/` | T4 | MOAT-T4-001, MOAT-T4-002, MOAT-T4-003, MOAT-T4-004 |
 | `configs/typosquat/` | T5 | MOAT-T4-004, MOAT-T5-001 |
+
+## End-to-end acceptance test
+
+`TestE2EAcceptance` in `cmd/mcpmoat/e2e_acceptance_test.go` runs the real binary on all these
+fixtures together. The trusted global config runs the five stdio servers: `benign`, `poisoned`,
+`shadowing`, `mailer` and `rugpull` (clean). An untrusted Cursor project file holds the servers of
+the T4 and T5 config fixtures, in a copy that the test scans without `--no-connect`. The
+untrusted-project gate refuses every project server, so none of them starts, but the config rules
+still check them. The test also checks that no project server process starts (the `npx` and
+`docker` of `PATH` are marker scripts) and that no remote project server gets a connection.
+
+1. Scan 1 pins the five stdio servers.
+2. The config switches `rugpull` to `-variant injected`.
+3. Scan 2 runs as text, then again with `--json`.
+
+Every scan exits with code 1, because the T4 findings are high.
+
+The test checks the exact rule IDs and severities of each server:
+
+| Server | Threat | Rule IDs the test asserts |
+|---|---|---|
+| `benign` | none | none |
+| `rugpull` | T2 | `MOAT-T2-001` (high) on `get_time`, in scan 2 only; none in scan 1 |
+| `dangerous` config servers | T4 | the IDs of each server in [its README](../configs/dangerous/README.md): MOAT-T4-001, MOAT-T4-002, MOAT-T4-003, MOAT-T4-004; none on `remote-local` |
+| `typosquat` config servers | T5 | the IDs of each server in [its README](../configs/typosquat/README.md): MOAT-T4-004, MOAT-T5-001 |
+| `poisoned`, `shadowing`, `mailer` | T1, T3 | none, for now (see below) |
+
+`scan` does not apply the T1 and T3 description and schema rules yet (issue #143). So the test
+asserts an empty set for `poisoned`, `shadowing` and `mailer`, and only `MOAT-T2-001` for the
+injected `rugpull`. When #143 lands, the expected sets for `poisoned`, `shadowing` and `mailer`
+get the IDs that `scan` then reports (the first table of this file lists the IDs that the rule
+tests expect today), and the injected `rugpull` gets the T1 IDs of its `get_time`. The
+[rugpull README](rugpull/README.md) names the T1 markers of that text, but not their rule IDs.
