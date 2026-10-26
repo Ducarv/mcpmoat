@@ -3,6 +3,8 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"os"
@@ -201,6 +203,12 @@ func fakeServers(tools map[string][]inspect.Tool) *inspecttest.Fake {
 		f.Results[name] = inspect.Result{ServerName: name, Tools: ts}
 	}
 	return f
+}
+
+// failingFake returns a fake inspector that fails for the server with the
+// fixed error "boom", so a test can check the exact warning text.
+func failingFake(server string) *inspecttest.Fake {
+	return &inspecttest.Fake{Errors: map[string]error{server: errors.New("boom")}}
 }
 
 // oneServer returns the server map of a config with one stdio server.
@@ -465,6 +473,36 @@ func breakPinHashVersion(t *testing.T, e *pinEnv) {
 		t.Fatalf("pins.json has no sha256-v1 hash to change:\n%s", data)
 	}
 	if err := os.WriteFile(e.pinsPath(), changed, 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// setPinCanonical sets the canonical text of the pinned tool in pins.json of
+// e, with the matching hash, so the store still loads it. The hash is built
+// like the unexported hashCanonical in internal/pins: HashVersion, a colon,
+// and the lowercase hex SHA-256 of the canonical text. If that format
+// changes, the store refuses the pin and the test fails.
+func setPinCanonical(t *testing.T, e *pinEnv, tool, canonical string) {
+	t.Helper()
+	var doc map[string]any
+	if err := json.Unmarshal(readFileBytes(t, e.pinsPath()), &doc); err != nil {
+		t.Fatal(err)
+	}
+	servers, _ := doc["servers"].([]any)
+	if len(servers) != 1 {
+		t.Fatalf("pins.json has %d servers, want 1", len(servers))
+	}
+	tools, _ := servers[0].(map[string]any)["tools"].(map[string]any)
+	if _, ok := tools[tool]; !ok {
+		t.Fatalf("pins.json has no tool %q", tool)
+	}
+	sum := sha256.Sum256([]byte(canonical))
+	tools[tool] = map[string]any{"hash": pins.HashVersion + ":" + hex.EncodeToString(sum[:]), "canonical": canonical}
+	data, err := json.Marshal(doc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(e.pinsPath(), data, 0o600); err != nil {
 		t.Fatal(err)
 	}
 }

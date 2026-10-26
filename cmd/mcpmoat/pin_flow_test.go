@@ -117,16 +117,21 @@ func TestPinOutcomesUnverifiedSeverity(t *testing.T) {
 		pinBefore bool
 		outcomes  []inspect.Outcome
 		want      []row
+		// status is the inspection status that the --json report shows for
+		// the identity.
+		status report.InspectionStatus
 	}{
 		{
 			name: "listed twice on a pinned identity is high", pinBefore: true,
 			outcomes: []inspect.Outcome{okWith(tools), okWith(tools)},
 			want:     []row{{"MOAT-T2-004", "high", reasonListedTwice}},
+			status:   report.InspectionOK,
 		},
 		{
 			name:     "listed twice on an identity that is not pinned is medium",
 			outcomes: []inspect.Outcome{okWith(tools), okWith(tools)},
 			want:     []row{{"MOAT-T2-004", "medium", reasonListedTwice}},
+			status:   report.InspectionOK,
 		},
 		{
 			name: "listed three times on a pinned identity gives a row for each extra", pinBefore: true,
@@ -135,30 +140,36 @@ func TestPinOutcomesUnverifiedSeverity(t *testing.T) {
 				{"MOAT-T2-004", "high", reasonListedTwice},
 				{"MOAT-T2-004", "high", reasonListedTwice},
 			},
+			status: report.InspectionOK,
 		},
 		{
 			name: "not inspected on a pinned identity is high", pinBefore: true,
 			outcomes: []inspect.Outcome{failed},
 			want:     []row{{"MOAT-T2-004", "high", reasonNotInspected}},
+			status:   report.InspectionFailed,
 		},
 		{
 			name: "two failing outcomes with one pinned identity give one row", pinBefore: true,
 			outcomes: []inspect.Outcome{failed, timedOut},
 			want:     []row{{"MOAT-T2-004", "high", reasonNotInspected}},
+			status:   report.InspectionFailed,
 		},
 		{
 			name: "three failing outcomes with one pinned identity give one row", pinBefore: true,
 			outcomes: []inspect.Outcome{failed, timedOut, failed},
 			want:     []row{{"MOAT-T2-004", "high", reasonNotInspected}},
+			status:   report.InspectionFailed,
 		},
 		{
 			name:     "two failing outcomes with an identity that is not pinned give no row",
 			outcomes: []inspect.Outcome{failed, timedOut},
+			status:   report.InspectionFailed,
 		},
 		{
 			name: "inspected after a failed outcome is still compared: no change", pinBefore: true,
 			outcomes: []inspect.Outcome{failed, okWith(tools)},
 			want:     []row{{"MOAT-T2-004", "high", reasonNotInspected}},
+			status:   report.InspectionOK,
 		},
 		{
 			name: "inspected after a failed outcome is still compared: change", pinBefore: true,
@@ -167,6 +178,7 @@ func TestPinOutcomesUnverifiedSeverity(t *testing.T) {
 				{"MOAT-T2-004", "high", reasonNotInspected},
 				{"MOAT-T2-001", "high", ""},
 			},
+			status: report.InspectionOK,
 		},
 		{
 			name: "failed, failed, then inspected: one failed row and the comparison", pinBefore: true,
@@ -175,6 +187,7 @@ func TestPinOutcomesUnverifiedSeverity(t *testing.T) {
 				{"MOAT-T2-004", "high", reasonNotInspected},
 				{"MOAT-T2-001", "high", ""},
 			},
+			status: report.InspectionOK,
 		},
 	}
 	for _, tt := range tests {
@@ -191,6 +204,9 @@ func TestPinOutcomesUnverifiedSeverity(t *testing.T) {
 			}
 			if !slices.Equal(got, tt.want) {
 				t.Errorf("rows = %+v, want %+v", got, tt.want)
+			}
+			if got := pr.inspectionOf(srv); got != tt.status {
+				t.Errorf("inspectionOf() = %q, want %q", got, tt.status)
 			}
 		})
 	}
@@ -1164,7 +1180,8 @@ func TestWarningText(t *testing.T) {
 
 // TestScanAndPinPrintInspectionWarnings checks where the warnings of an
 // inspection go, also for a server that failed. scan shows them in the SUMMARY
-// block on stdout and nothing on stderr. pin prints them on stderr.
+// block on stdout and nothing on stderr. With --json there is no summary, so
+// scan prints them on stderr, like pin.
 func TestScanAndPinPrintInspectionWarnings(t *testing.T) {
 	t.Parallel()
 
@@ -1203,6 +1220,24 @@ func TestScanAndPinPrintInspectionWarnings(t *testing.T) {
 		got := e.scan(fake)
 
 		assertScanWarning(t, got, "failed")
+	})
+
+	t.Run("scan --json, failed", func(t *testing.T) {
+		t.Parallel()
+		e := newPinEnv(t, oneServer("srv"))
+		fake := &inspecttest.Fake{Errors: map[string]error{"srv": &inspect.ConnectError{Kind: inspect.KindNetwork, Server: "srv", Reason: "refused", Warnings: []inspect.Warning{undeclared}}}}
+
+		got := e.scan(fake, "--json")
+
+		lines := nonEmptyLines(got.stderr)
+		if len(lines) != 2 || !strings.HasPrefix(lines[0], "mcpmoat scan: warning: server srv: failed: ") ||
+			!strings.HasPrefix(lines[1], "mcpmoat scan: warning: server srv: "+text) {
+			t.Errorf("stderr = %q, want the failed line, then the warning", got.stderr)
+		}
+		if got.code != exitOK {
+			t.Errorf("exit code = %d, want %d: the warnings do not change it", got.code, exitOK)
+		}
+		decodeScanJSON(t, got.stdout)
 	})
 
 	t.Run("pin", func(t *testing.T) {

@@ -216,6 +216,17 @@ func TestScanHelpMatchesUsage(t *testing.T) {
 	}
 }
 
+// replacePaths replaces each path of replacements with its placeholder. form
+// maps a path to the text to search for: the raw path, or its JSON-escaped
+// form. The longer path goes first, in case one path is inside the other.
+func replacePaths(out string, replacements map[string]string, form func(string) string) string {
+	paths := slices.SortedFunc(maps.Keys(replacements), func(a, b string) int { return cmp.Compare(len(b), len(a)) })
+	for _, p := range paths {
+		out = strings.ReplaceAll(out, form(p), replacements[p])
+	}
+	return out
+}
+
 // scanNormalize makes the scan output the same on every machine. The tests
 // copy the fixture into a temporary directory, so the output holds those
 // paths. Normalizing does three things:
@@ -232,12 +243,7 @@ func TestScanHelpMatchesUsage(t *testing.T) {
 //   - It turns backslashes into slashes, for Windows paths.
 func scanNormalize(t *testing.T, out string, replacements map[string]string) string {
 	t.Helper()
-	// Replace the longer path first, in case one path is inside the other.
-	paths := slices.SortedFunc(maps.Keys(replacements), func(a, b string) int { return cmp.Compare(len(b), len(a)) })
-	for _, p := range paths {
-		out = strings.ReplaceAll(out, p, replacements[p])
-	}
-	out = filepath.ToSlash(out)
+	out = filepath.ToSlash(replacePaths(out, replacements, func(p string) string { return p }))
 
 	table, rest, found := strings.Cut(out, "\n\n")
 	gap := regexp.MustCompile(` {3,}`)

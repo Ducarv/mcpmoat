@@ -26,6 +26,7 @@ import (
 	"github.com/Ducarv/mcpmoat/internal/discover/discovertest"
 	"github.com/Ducarv/mcpmoat/internal/inspect/inspecttest"
 	"github.com/Ducarv/mcpmoat/internal/pins"
+	"github.com/Ducarv/mcpmoat/internal/report"
 	"github.com/Ducarv/mcpmoat/internal/rules"
 )
 
@@ -571,7 +572,7 @@ func TestE2EScanConfigFindings(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			home, work := discovertest.CopyFixture(t, filepath.Join("..", "..", "testdata", "configs", "dangerous"))
+			home, work := discovertest.CopyFixture(t, testdataPath("configs", "dangerous"))
 
 			stdout, stderr, code := runBin(t, home, work, tt.args...)
 
@@ -671,6 +672,67 @@ func TestE2EScanReport(t *testing.T) {
 			}
 			if len(seen) < 2 {
 				t.Errorf("findings have severities %v, want at least two\nstdout:\n%s", slices.Sorted(maps.Keys(seen)), stdout)
+			}
+		})
+	}
+}
+
+// TestE2EScanJSON runs scan --json with the real binary. Stdout is one JSON
+// document, and --json changes neither stderr nor the exit code.
+func TestE2EScanJSON(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name         string
+		setup        func(t *testing.T) (home, work string)
+		wantCode     int
+		wantFindings bool
+	}{
+		{
+			name: "dangerous",
+			setup: func(t *testing.T) (string, string) {
+				return discovertest.CopyFixture(t, testdataPath("configs", "dangerous"))
+			},
+			wantCode:     exitFindings,
+			wantFindings: true,
+		},
+		{
+			name:     "benign",
+			setup:    func(t *testing.T) (string, string) { return benignHome(t, "benign-srv") },
+			wantCode: exitOK,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			home, work := tt.setup(t)
+
+			plainOut, plainErr, plainCode := runBin(t, home, work, "scan", "--no-connect")
+			stdout, stderr, code := runBin(t, home, work, "scan", "--no-connect", "--json")
+
+			if code != tt.wantCode || plainCode != tt.wantCode {
+				t.Errorf("exit codes: --json %d, plain %d, want %d\nstderr:\n%s", code, plainCode, tt.wantCode, stderr)
+			}
+			if stderr != plainErr {
+				t.Errorf("stderr with --json = %q, without = %q", stderr, plainErr)
+			}
+			assertContainsNone(t, "stdout", stdout, dangerousCanaries)
+			assertContainsNone(t, "stderr", stderr, dangerousCanaries)
+			assertContainsNone(t, "stdout", stdout, []string{pinEnvCanary})
+			if plainOut == stdout {
+				t.Errorf("--json stdout equals the table output:\n%s", stdout)
+			}
+
+			// decodeScanJSON checks: one document, schema_version, and the
+			// schema, which also rejects a null list.
+			doc := decodeScanJSON(t, stdout)
+			if doc.Mode != report.ModeNoConnect {
+				t.Errorf("mode = %q, want %q", doc.Mode, report.ModeNoConnect)
+			}
+			if len(doc.Servers) == 0 {
+				t.Error("servers is empty, want the servers of the fixture")
+			}
+			if (len(doc.Findings) > 0) != tt.wantFindings {
+				t.Errorf("got %d findings, want findings: %v", len(doc.Findings), tt.wantFindings)
 			}
 		})
 	}
@@ -1165,4 +1227,118 @@ func TestE2EPinAcceptProject(t *testing.T) {
 		t.Errorf("no --project: exit code %d, stdout %q, stderr %q, want exit code %d and the accepted line", code, stdout, stderr, exitOK)
 	}
 	assertNoLeakBoth(t, stdout, stderr)
+}
+
+// TestE2EScanFailOn checks the exit codes of --fail-on and --ignore in the
+// real binary, on the CI example repo of testdata/ci. It also checks that
+// docs/ci.md shows the same command, so the doc and the test do not drift
+// apart.
+func TestE2EScanFailOn(t *testing.T) {
+	t.Parallel()
+	const command = "mcpmoat scan --no-connect --config .mcp.json"
+
+	t.Run("docs/ci.md shows the command", func(t *testing.T) {
+		t.Parallel()
+		doc, err := os.ReadFile(repoPath("docs", "ci.md"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !strings.Contains(string(doc), command) {
+			t.Errorf("docs/ci.md does not contain %q", command)
+		}
+	})
+
+	// runCI runs command with extra args in a copy of the CI example repo, and
+	// checks that scan writes no pins file.
+	runCI := func(t *testing.T, extra ...string) (stdout, stderr string, code int) {
+		t.Helper()
+		home, work := t.TempDir(), t.TempDir()
+		if err := os.CopyFS(work, os.DirFS(testdataPath("ci", "repo"))); err != nil {
+			t.Fatal(err)
+		}
+		args := append(strings.Fields(command)[1:], extra...)
+		stdout, stderr, code = runBin(t, home, work, args...)
+		assertNoPinsFile(t, home)
+		return stdout, stderr, code
+	}
+
+	t.Run("bogus", func(t *testing.T) {
+		t.Parallel()
+
+		stdout, stderr, code := runCI(t, "--fail-on", "bogus")
+
+		// A usage error ends with the usage hint, which has no
+		// "mcpmoat scan: " prefix, so assertScanResult does not fit.
+		if code != exitError {
+			t.Errorf("exit code = %d, want %d\nstdout:\n%s\nstderr:\n%s", code, exitError, stdout, stderr)
+		}
+		assertContainsAll(t, "stderr", stderr, []string{"mcpmoat scan: ", "-fail-on", usageHint})
+		assertEmptyStdout(t, stdout)
+	})
+
+	// The ignored finding is never silent: stderr counts it, by rule ID.
+	ignoredLine := "MOAT-T4-001 (1)"
+
+	// This table holds the expected exit code of the CI example for each
+	// --fail-on value, with and without --ignore MOAT-T4-001.
+	tests := []struct {
+		name       string
+		args       []string
+		wantIDs    []string // sorted rule IDs of the findings table
+		wantStderr []string
+		// wantDefault is the exit code with no --fail-on flag.
+		wantDefault int
+		// wantCode is the exit code for --fail-on low, medium, high and
+		// critical.
+		wantCode perLevel[int]
+	}{
+		{
+			name:        "no ignore",
+			wantIDs:     []string{"MOAT-T4-001", "MOAT-T4-003", "MOAT-T4-004"},
+			wantDefault: exitFindings,
+			wantCode:    perLevel[int]{exitFindings, exitFindings, exitFindings, exitOK},
+		},
+		{
+			name:        "--ignore MOAT-T4-001",
+			args:        []string{"--ignore", "MOAT-T4-001"},
+			wantIDs:     []string{"MOAT-T4-003", "MOAT-T4-004"},
+			wantStderr:  []string{ignoredLine},
+			wantDefault: exitOK,
+			wantCode:    perLevel[int]{exitFindings, exitFindings, exitOK, exitOK},
+		},
+	}
+	// The empty level is the run with no --fail-on flag. The other runs add
+	// --fail-on <level>.
+	levels := append([]rules.Severity{""}, failOnLevels...)
+	for _, tt := range tests {
+		for _, level := range levels {
+			name := "default"
+			if level != "" {
+				name = "fail-on " + string(level)
+			}
+			t.Run(tt.name+"/"+name, func(t *testing.T) {
+				t.Parallel()
+				args := slices.Clone(tt.args)
+				wantCode := tt.wantDefault
+				wantStderr := slices.Clone(tt.wantStderr)
+				if level != "" {
+					args = append(args, "--fail-on", string(level))
+					wantCode = tt.wantCode.at(t, level)
+				}
+				if level == rules.SeverityCritical {
+					wantStderr = append(wantStderr, failOnCriticalNotice+"\n")
+				}
+
+				stdout, stderr, code := runCI(t, args...)
+
+				assertScanResult(t, code, stdout, stderr, scanWant{code: wantCode, stderr: wantStderr})
+				names := column(tableRows(t, stdout), 0)
+				slices.Sort(names)
+				if !slices.Equal(names, []string{"files", "notes", "remote"}) {
+					t.Errorf("server names = %v, want files, notes and remote\nstdout:\n%s", names, stdout)
+				}
+				assertFindingIDs(t, stdout, tt.wantIDs)
+			})
+		}
+	}
 }

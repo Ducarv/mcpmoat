@@ -408,7 +408,8 @@ func (c *cli) pinChanges(store *pins.Store, id pins.Identity, server string, too
 
 // notInspectedText returns "server <name>: <status>: <reason>" for an outcome
 // that is not inspect.StatusOK. pin shows it as an error. scan shows the status
-// in its summary on stdout (see outcomeSummary) and does not use this text.
+// in its summary on stdout (see outcomeSummary), and uses this text only with
+// --json, as a warning on stderr (see warnNotInspected).
 // The server name and the error text come from untrusted sources (the error can
 // carry server output), so both are escaped and cut.
 func notInspectedText(o inspect.Outcome) string {
@@ -420,7 +421,8 @@ func notInspectedText(o inspect.Outcome) string {
 
 // warnInspection writes the warnings of the inspection of o on stderr, for
 // pin: one line for each warning of outcomeWarnings. scan shows them in its
-// summary on stdout instead (see outcomeSummary).
+// summary on stdout instead (see outcomeSummary), or on stderr with --json
+// (see warnNotInspected).
 func (c *cli) warnInspection(o inspect.Outcome) {
 	for _, w := range outcomeWarnings(o) {
 		c.warnf("pin", "%s", warningText(o.Server.Name, w))

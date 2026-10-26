@@ -24,6 +24,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/Ducarv/mcpmoat/internal/discover/discovertest"
+	"github.com/Ducarv/mcpmoat/internal/rules"
 )
 
 // run is runWithContext with a context that never ends: no signal stops it.
@@ -38,10 +39,16 @@ const usageHint = `Run "mcpmoat help" for usage.`
 // emptyScanOutput is the stdout of "scan --no-connect" when it finds no server.
 const emptyScanOutput = "No MCP servers found.\n"
 
+// repoPath returns the path of a file or directory relative to the repository
+// root. Tests run in cmd/mcpmoat, so the root is two levels up.
+func repoPath(parts ...string) string {
+	return filepath.Join(append([]string{"..", ".."}, parts...)...)
+}
+
 // testdataPath returns the path of a directory under testdata/<kind> at the
-// repository root. Tests run in cmd/mcpmoat, so the root is two levels up.
+// repository root.
 func testdataPath(kind string, parts ...string) string {
-	return filepath.Join(append([]string{"..", "..", "testdata", kind}, parts...)...)
+	return repoPath(append([]string{"testdata", kind}, parts...)...)
 }
 
 // fixtureDir returns the path of a fixture under the repository's
@@ -451,6 +458,48 @@ func scanServersArgs(t *testing.T, mode, home string, servers map[string]any) []
 		t.Fatalf("unknown scan mode %q", mode)
 	}
 	return args
+}
+
+// assertFindingIDs checks that the rule IDs of the findings table of stdout,
+// sorted, equal want. want must be sorted. Use nil for no findings table.
+func assertFindingIDs(t *testing.T, stdout string, want []string) {
+	t.Helper()
+	ids := findingIDs(findingRows(t, stdout))
+	slices.Sort(ids)
+	if !slices.Equal(ids, want) {
+		t.Errorf("finding IDs = %v, want %v\nstdout:\n%s", ids, want, stdout)
+	}
+}
+
+// failOnLevels are the four --fail-on values, from low to critical.
+var failOnLevels = []rules.Severity{
+	rules.SeverityLow, rules.SeverityMedium, rules.SeverityHigh, rules.SeverityCritical,
+}
+
+// perLevel holds one expected value for each --fail-on level. Write a value
+// with positional fields, in the order low, medium, high, critical, for
+// example perLevel[int]{exitFindings, exitOK, exitOK, exitOK}. Then the
+// compiler checks that the table gives all four values.
+type perLevel[T any] struct{ low, medium, high, critical T }
+
+// at returns the value for level s. It fails the test for a level that is not
+// one of the four.
+func (p perLevel[T]) at(t *testing.T, s rules.Severity) T {
+	t.Helper()
+	var v T
+	switch s {
+	case rules.SeverityLow:
+		v = p.low
+	case rules.SeverityMedium:
+		v = p.medium
+	case rules.SeverityHigh:
+		v = p.high
+	case rules.SeverityCritical:
+		v = p.critical
+	default:
+		t.Fatalf("perLevel has no value for --fail-on %q", s)
+	}
+	return v
 }
 
 // column returns word i (0 is NAME) of each row. It skips a row that is too

@@ -352,7 +352,7 @@ func TestPinInspectFailure(t *testing.T) {
 		{
 			name: "failed",
 			insp: func() inspect.Inspector {
-				return &inspecttest.Fake{Errors: map[string]error{"srv": errors.New("boom")}}
+				return failingFake("srv")
 			},
 			wantStderr: []string{"mcpmoat pin: server srv: failed: inspect: boom\n"},
 		},
@@ -733,7 +733,7 @@ func TestPinNoSecretLeak(t *testing.T) {
 		assertContainsNone(t, "stderr", got.stderr, []string{envValue, headerValue})
 	}
 	// An error path: the inspector fails.
-	failed := e.pin(&inspecttest.Fake{Errors: map[string]error{"stdio-srv": errors.New("boom")}}, "--accept", "stdio-srv")
+	failed := e.pin(failingFake("stdio-srv"), "--accept", "stdio-srv")
 	assertPinRun(t, failed, scanWant{code: exitError, stderr: []string{"failed"}})
 	assertContainsNone(t, "stderr", failed.stderr, []string{envValue, headerValue})
 
