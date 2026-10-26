@@ -356,7 +356,9 @@ You need [GoReleaser](https://goreleaser.com/) only when you change `.goreleaser
 release workflow pin one version. `go run github.com/goreleaser/goreleaser/v2@v2.19.0 <cmd>` runs that
 version and needs no install. `brew install goreleaser` also works, but it can give another version.
 To bump the version, change `GORELEASER_VERSION` in `ci.yml` and `release.yml` and every
-`goreleaser/v2@` command in this file. The `release-check` CI job fails if they differ.
+`goreleaser/v2@` command in this file. The `release-check` CI job fails if they differ. Then build a
+snapshot and check that `dist/homebrew/Casks/mcpmoat.rb` still matches the cask list in
+[README.md](README.md#verify-a-download).
 
 ### Checks
 
@@ -416,7 +418,8 @@ output of the command above is `mcpmoat v1.2.3 (commit abc123, built 2026-01-01T
 CI builds with `-ldflags "-X main.version=ci-smoke"` and checks that `mcpmoat version` prints that value.
 
 Release builds set these values through GoReleaser (`.goreleaser.yaml`): `main.version` is the tag
-with its `v`, `main.commit` is the short commit and `main.date` is the commit date.
+with its `v`, `main.commit` is the first 12 characters of the commit (the same as a `go install`
+build) and `main.date` is the commit date.
 
 ## Pull requests
 
@@ -461,7 +464,8 @@ Do all of these steps before you push the first release tag. Step 3 says why.
    maintainer bypass it. Then only the maintainer can push, move or delete a release tag. After a
    release is published, Immutable releases (step 5) lock its tag for everyone.
 5. In the settings of `Ducarv/mcpmoat`, turn on "Immutable releases". The workflow publishes a
-   draft, so the assets lock when the release is published, after the attestations verify.
+   draft, so the assets lock when the release is published, after the attestations verify. The
+   release job fails if the published release is not immutable.
 6. Protect the maintainer account: use 2FA or passkeys, keep no classic PATs with `repo` scope and
    no fine-grained tokens with Deployments or Administration write access on `Ducarv/mcpmoat`.
 
@@ -483,7 +487,8 @@ to the tap. Only the GoReleaser step gets the tap token. Then it attests the bui
 `dist/*.tar.gz` and `dist/checksums.txt`. It checks that the draft release holds exactly those
 files. It downloads them and checks that they match `dist/`. It verifies each attestation with
 `gh attestation verify`. It checks that the tag still points at the commit that it built. Then it
-publishes the release. Last, it checks the tag and the published files once more.
+publishes the release. Last, it checks that the release is immutable, and checks the tag and the
+published files once more.
 
 Try a prerelease tag first, for example `v0.1.0-rc.1`. GoReleaser marks it as a prerelease and does
 not update the tap.

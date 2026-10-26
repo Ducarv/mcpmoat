@@ -25,7 +25,8 @@ These methods will work from the first release:
   `PATH`.
 
 Run `mcpmoat version` to check the install. A release binary prints
-`mcpmoat v<version> (commit <c>, built <d>)`. The `go install` build above prints `commit none, built
+`mcpmoat v<version> (commit <c>, built <d>)`. `<d>` is the commit date, not the build time, so the
+same commit always gives the same binary. The `go install` build above prints `commit none, built
 unknown`, because `go install` builds from the Go module cache, which has no git data.
 
 ### Verify a download
@@ -55,20 +56,37 @@ whose name starts with `release.yml`.
 
 Homebrew does not check the attestation. `brew install` checks only the sha256 values in the cask
 from the tap. A cask is Ruby code that Homebrew runs on install, so matching sha256 values alone do
-not prove that the cask is safe. To check the cask, first verify `checksums.txt` with the command
-above, with the same flags. Then open `Casks/mcpmoat.rb` in the
-[tap](https://github.com/Ducarv/homebrew-tap) and check these points:
+not prove that the cask is safe. To check the cask, first verify `checksums.txt`:
+
+```sh
+gh attestation verify checksums.txt -R Ducarv/mcpmoat \
+  --cert-identity https://github.com/Ducarv/mcpmoat/.github/workflows/release.yml@refs/tags/v<version> \
+  --source-ref refs/tags/v<version> --deny-self-hosted-runners
+```
+
+Then open `Casks/mcpmoat.rb` in the [tap](https://github.com/Ducarv/homebrew-tap) and check these
+points:
 
 - The `version` line is the release number without the `v`, for example `"0.1.0"`.
-- Every `url` starts with `https://github.com/Ducarv/mcpmoat/releases/download/v#{version}/`.
-  Homebrew fills in `#{version}` from the `version` line.
-- Each `sha256` is the hash on the `checksums.txt` line for the archive that the `url` in the same
-  block names.
+- Each `url` is exactly
+  `https://github.com/Ducarv/mcpmoat/releases/download/v#{version}/mcpmoat_#{version}_<os>_<arch>.tar.gz`.
+  `<os>` is `darwin` in the `on_macos` block and `linux` in the `on_linux` block. `<arch>` is
+  `arm64` in the `on_arm` block and `amd64` in the `on_intel` block. Homebrew fills in `#{version}`
+  from the `version` line.
+- `#{version}` is the only `#{` in the file. In Ruby, any other `#{...}` in a string runs code when
+  Homebrew loads the cask.
+- Each `sha256` is a literal hex string of 64 characters. It is the hash on the `checksums.txt` line
+  for the archive that the `url` in the same block names.
 - The only block that runs a command is `postflight_steps`. It holds one `on_macos` block with one
   `xattr` line that removes the quarantine flag from `mcpmoat`.
-- There is no other code. The cask holds only these parts: `version`; `on_macos` and `on_linux`,
-  each with `on_arm` and `on_intel` blocks that hold `url` and `sha256`; `name`, `desc` and
-  `homepage`; `livecheck` with one `skip` line; `binary`; and `postflight_steps`.
+- There is no other code. The cask holds only these parts:
+  - `version`
+  - `on_macos` and `on_linux`, each with an `on_arm` and an `on_intel` block that holds `url` and
+    `sha256`
+  - `name`, `desc` and `homepage`
+  - `livecheck`, with one `skip` line
+  - `binary`
+  - `postflight_steps`
 
 The macOS binaries are not notarized yet. The Homebrew cask removes the quarantine flag on install,
 so Gatekeeper does not check the binary. Verify the archive if that matters to you.

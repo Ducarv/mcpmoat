@@ -23,9 +23,11 @@ Examples of issues we want to hear about privately:
 - A crafted tool description or config makes mcpmoat hang, crash or run code.
 - mcpmoat makes a network connection that is not to a configured server or (with `--llm`) the LLM
   provider.
-- A problem in the release supply chain, for example an archive whose attestation does not verify,
-  or a cask in `Ducarv/homebrew-tap` whose sha256 does not match the attested `checksums.txt`, or
-  that holds code other than the steps that README.md lists.
+- A problem in the release supply chain. Some examples:
+  - An archive whose attestation does not verify.
+  - A cask in `Ducarv/homebrew-tap` whose sha256 does not match the attested `checksums.txt`.
+  - A cask that holds code other than the parts that README.md lists.
+
   [README.md](README.md#verify-a-download) tells how to verify a download and why the macOS
   binaries skip Gatekeeper.
 

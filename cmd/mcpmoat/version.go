@@ -5,8 +5,9 @@ import (
 	"runtime/debug"
 )
 
-// Build information. Only the linker writes these variables. A release build
-// sets them like this:
+// Build information. Only the linker writes these variables. Release builds
+// set them through GoReleaser (.goreleaser.yaml). A build by hand sets them
+// like this:
 //
 //	go build -ldflags "-X main.version=v1.2.3 -X main.commit=abc -X main.date=2026-01-01T00:00:00Z"
 //
