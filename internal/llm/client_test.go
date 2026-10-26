@@ -47,9 +47,9 @@ type capturedRequest struct {
 }
 
 // testServer is a loopback httptest server that counts requests and keeps
-// the last one. Loopback addresses are never proxied by net/http, so the
-// tests that use it do not depend on HTTP_PROXY of the machine
-// (TestClassifyProxySettings checks this).
+// the last one. Its URL is an http URL, and the client never uses a proxy
+// for http, so the tests that use it do not depend on HTTP_PROXY of the
+// machine (the "httpnoproxy" mode of TestClassifyProxySettings checks this).
 type testServer struct {
 	*httptest.Server
 	hits atomic.Int32
@@ -1192,7 +1192,7 @@ func TestLoopbackDialBadInput(t *testing.T) {
 	dial := loopbackDial(func(context.Context, string, string) (net.Conn, error) {
 		dials.Add(1)
 		return nil, errors.New("dial not expected")
-	}, &fakeResolver{addrs: addrs("127.0.0.1")})
+	}, &fakeResolver{addrs: addrs("127.0.0.1")}, loopbackAddrTimeout)
 
 	// An address without a port is refused before any lookup or dial.
 	if _, err := dial(t.Context(), "tcp", "localhost"); !errors.Is(err, errNotLoopback) {
@@ -1206,6 +1206,143 @@ func TestLoopbackDialBadInput(t *testing.T) {
 		if got := lookupNetwork(network); got != want {
 			t.Errorf("lookupNetwork(%q) = %q, want %q", network, got, want)
 		}
+	}
+}
+
+// TestLoopbackDialAddrTimeout checks that an address that does not answer
+// gets only the short timeout of one address, so the next address is tried
+// long before the full dial timeout.
+func TestLoopbackDialAddrTimeout(t *testing.T) {
+	t.Parallel()
+	// addrTimeout is small so that the test is fast. The client uses
+	// loopbackAddrTimeout.
+	const addrTimeout = 50 * time.Millisecond
+
+	t.Run("first address does not answer", func(t *testing.T) {
+		t.Parallel()
+		// The parent context has the full dial timeout. If the first address
+		// waited for it, the parent would end before the second dial.
+		parent, cancel := context.WithTimeout(t.Context(), dialTimeout)
+		defer cancel()
+		parentDeadline, _ := parent.Deadline()
+		var (
+			mu        sync.Mutex
+			dials     []string
+			deadlines []time.Time
+		)
+		dial := func(ctx context.Context, _, addr string) (net.Conn, error) {
+			deadline, _ := ctx.Deadline()
+			mu.Lock()
+			dials = append(dials, addr)
+			deadlines = append(deadlines, deadline)
+			mu.Unlock()
+			if strings.HasPrefix(addr, "[::1]") {
+				// Like a firewall that drops the packets: wait until the
+				// context ends.
+				<-ctx.Done()
+				return nil, ctx.Err()
+			}
+			client, server := net.Pipe()
+			t.Cleanup(func() {
+				_ = client.Close()
+				_ = server.Close()
+			})
+			return client, nil
+		}
+		d := loopbackDial(dial, &fakeResolver{addrs: addrs("::1", "127.0.0.1")}, addrTimeout)
+
+		before := time.Now()
+		conn, err := d(parent, "tcp", "localhost:11434")
+		after := time.Now()
+		if err != nil || conn == nil {
+			t.Fatalf("dial() = %v, %v; want a connection", conn, err)
+		}
+		if parent.Err() != nil {
+			t.Fatalf("parent context ended (%v): the first address used the full dial timeout", parent.Err())
+		}
+		mu.Lock()
+		defer mu.Unlock()
+		if want := []string{"[::1]:11434", "127.0.0.1:11434"}; !slices.Equal(dials, want) {
+			t.Fatalf("dials = %q, want %q", dials, want)
+		}
+		// The first address had addrTimeout from the start of its dial.
+		if first := deadlines[0]; first.Before(before.Add(addrTimeout)) || first.After(after.Add(addrTimeout)) {
+			t.Errorf("first dial deadline = %v after the start, want %v", first.Sub(before), addrTimeout)
+		}
+		// The last address gets the time that is left of the parent.
+		if last := deadlines[1]; !last.Equal(parentDeadline) {
+			t.Errorf("last dial deadline = %v, want the parent deadline %v", last, parentDeadline)
+		}
+	})
+
+	t.Run("caller gives up", func(t *testing.T) {
+		t.Parallel()
+		parent, cancel := context.WithCancel(t.Context())
+		defer cancel()
+		var dials atomic.Int32
+		dial := func(context.Context, string, string) (net.Conn, error) {
+			dials.Add(1)
+			cancel()
+			return nil, context.Canceled
+		}
+		d := loopbackDial(dial, &fakeResolver{addrs: addrs("::1", "127.0.0.1")}, addrTimeout)
+		if _, err := d(parent, "tcp", "localhost:11434"); err == nil {
+			t.Fatal("dial() error = nil, want an error")
+		}
+		if n := dials.Load(); n != 1 {
+			t.Errorf("dials = %d, want 1 (no next address after the caller gave up)", n)
+		}
+	})
+
+	t.Run("every address fails", func(t *testing.T) {
+		t.Parallel()
+		const dialCanary = "DIALCANARY-every"
+		c, err := newClient(Config{
+			Provider: ProviderAnthropic,
+			BaseURL:  "http://localhost:11434",
+			APIKey:   testSecret(),
+			Dial: func(_ context.Context, _, addr string) (net.Conn, error) {
+				return nil, errors.New(dialCanary + " " + addr)
+			},
+		}, &fakeResolver{addrs: addrs("::1", "127.0.0.1")})
+		if err != nil {
+			t.Fatalf("newClient() error = %v", err)
+		}
+		t.Cleanup(c.CloseIdleConnections)
+		_, err = c.Classify(t.Context(), Input{ToolName: "t", Description: "d"})
+		if err == nil || err.Error() != ErrTransport.Error() {
+			t.Fatalf("Classify() error = %v, want %q", err, ErrTransport)
+		}
+		assertNoLeak(t, err, dialCanary, "::1", "11434", "localhost")
+	})
+}
+
+// TestNewProxyOnlyForHTTPS checks the proxy setting of the transport: an
+// http base URL (always a loopback host) never uses a proxy, and an https
+// base URL uses the proxy settings of the environment.
+func TestNewProxyOnlyForHTTPS(t *testing.T) {
+	t.Parallel()
+	tests := map[string]bool{
+		"http://127.0.0.1:8080":       false,
+		"http://localhost:11434/v1":   false,
+		"http://[::1%25lo0]:8080":     false,
+		"https://api.example.invalid": true,
+	}
+	for base, wantProxy := range tests {
+		t.Run(base, func(t *testing.T) {
+			t.Parallel()
+			c, err := New(Config{Provider: ProviderOpenAI, Model: llmTestModel, BaseURL: base, APIKey: testSecret()})
+			if err != nil {
+				t.Fatalf("New() error = %v", err)
+			}
+			tr, ok := c.http.Transport.(*http.Transport)
+			if !ok {
+				t.Fatalf("transport type = %T, want *http.Transport", c.http.Transport)
+			}
+			if got := tr.Proxy != nil; got != wantProxy {
+				t.Errorf("transport has a proxy func = %t, want %t", got, wantProxy)
+			}
+		})
 	}
 }
 
@@ -1223,7 +1360,8 @@ var proxyEnvNames = []string{"HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "REQUEST_M
 
 // TestClassifyProxySettings runs TestProxyHelperProcess in a child process
 // for each proxy setting. net/http reads the proxy variables only one time
-// for each process, so t.Setenv cannot change them in this process.
+// for each process, so t.Setenv cannot change them in this process. The child
+// does not get the proxy variables of this process.
 func TestClassifyProxySettings(t *testing.T) {
 	t.Parallel()
 	exe, err := os.Executable()
@@ -1234,17 +1372,30 @@ func TestClassifyProxySettings(t *testing.T) {
 		name, _, _ := strings.Cut(kv, "=")
 		return slices.Contains(proxyEnvNames, strings.ToUpper(name))
 	})
+	// recorder is a real proxy address for the "httpnoproxy" mode. It must
+	// get no connection.
+	recorder := startProxyRecorder(t)
+	recorderURL := "http://" + recorder.ln.Addr().String()
 	tests := []struct {
 		mode string
 		env  []string
+		// proxy, when it is not nil, must get no connection.
+		proxy *proxyRecorder
 	}{
-		// net/http ignores a proxy value that it cannot parse. Its only
-		// proxy error is HTTP_PROXY in a CGI process (REQUEST_METHOD set),
-		// for an http URL, even a loopback one.
+		// net/http refuses HTTP_PROXY in a CGI process (REQUEST_METHOD set)
+		// for every http URL, even a loopback one. The client uses no proxy
+		// for http, so the request still goes to the loopback server.
 		{mode: "cgi", env: []string{"REQUEST_METHOD=GET", "HTTP_PROXY=http://user:" + proxyCanary + "@proxy.test:3128"}},
 		{mode: "proxy", env: []string{"HTTPS_PROXY=http://proxy.test:3128"}},
 		{mode: "noproxy", env: []string{"HTTPS_PROXY=http://proxy.test:3128", "NO_PROXY=api.example.invalid"}},
 		{mode: "loopback", env: []string{"HTTP_PROXY=http://proxy.test:3128", "HTTPS_PROXY=http://proxy.test:3128"}},
+		// Over http the key is in clear text, so a request to an http base
+		// URL never goes through a proxy, whatever the proxy variables say.
+		{
+			mode:  "httpnoproxy",
+			env:   []string{"HTTP_PROXY=" + recorderURL, "http_proxy=" + recorderURL, "HTTPS_PROXY=" + recorderURL},
+			proxy: recorder,
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.mode, func(t *testing.T) {
@@ -1258,7 +1409,72 @@ func TestClassifyProxySettings(t *testing.T) {
 			if !bytes.Contains(out, []byte("--- PASS: TestProxyHelperProcess")) {
 				t.Fatalf("helper process did not pass, output:\n%s", out)
 			}
+			if tt.proxy != nil {
+				if n := tt.proxy.connections(t); n != 0 {
+					t.Errorf("proxy connections = %d, want 0", n)
+				}
+			}
 		})
+	}
+}
+
+// proxyRecorder is a TCP listener in place of a proxy. It closes each
+// connection that it accepts and records its remote address.
+type proxyRecorder struct {
+	ln   net.Listener
+	seen chan string
+	done chan struct{}
+}
+
+// startProxyRecorder starts a proxyRecorder on a loopback port. The cleanup
+// of t stops it.
+func startProxyRecorder(t *testing.T) *proxyRecorder {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	p := &proxyRecorder{ln: ln, seen: make(chan string), done: make(chan struct{})}
+	go func() {
+		for {
+			conn, err := ln.Accept()
+			if err != nil {
+				return // the listener is closed
+			}
+			remote := conn.RemoteAddr().String()
+			_ = conn.Close()
+			select {
+			case p.seen <- remote:
+			case <-p.done:
+				return
+			}
+		}
+	}()
+	t.Cleanup(func() {
+		close(p.done)
+		_ = ln.Close()
+	})
+	return p
+}
+
+// connections returns the number of connections that p accepted before this
+// call. It opens one marker connection and counts the connections that come
+// before it. The listener accepts connections in order, so no wait is
+// needed.
+func (p *proxyRecorder) connections(t *testing.T) int {
+	t.Helper()
+	marker, err := net.Dial("tcp", p.ln.Addr().String())
+	if err != nil {
+		t.Fatalf("dial the proxy recorder: %v", err)
+	}
+	defer func() { _ = marker.Close() }()
+	want := marker.LocalAddr().String()
+	n := 0
+	for {
+		if remote := <-p.seen; remote == want {
+			return n
+		}
+		n++
 	}
 }
 
@@ -1287,6 +1503,11 @@ func TestProxyHelperProcess(t *testing.T) {
 		record(addr)
 		return nil, errors.New("blocked")
 	}
+	direct := func(ctx context.Context, network, addr string) (net.Conn, error) {
+		record(addr)
+		var d net.Dialer
+		return d.DialContext(ctx, network, addr)
+	}
 	classify := func(base string, dial func(context.Context, string, string) (net.Conn, error)) (Verdict, error) {
 		c, err := New(Config{Provider: ProviderAnthropic, BaseURL: base, APIKey: testSecret(), Dial: dial})
 		if err != nil {
@@ -1299,19 +1520,16 @@ func TestProxyHelperProcess(t *testing.T) {
 	switch mode {
 	case "cgi":
 		srv := startServer(t, reply(http.StatusOK, anthropicReply(RiskLow, CategoryOther)))
-		_, err := classify(srv.URL, blocked)
-		if !errors.Is(err, ErrTransport) || !errors.Is(err, errProxy) {
-			t.Errorf("Classify() error = %v, want ErrTransport and errProxy", err)
+		_, err := classify(srv.URL, direct)
+		if err != nil {
+			t.Fatalf("Classify() error = %v, want nil (no proxy for http)", err)
 		}
-		if want := "LLM provider request failed: network error: " + errProxy.Error(); err == nil || err.Error() != want {
-			t.Errorf("Classify() error = %v, want %q", err, want)
+		assertNoLeak(t, err, proxyCanary)
+		if got, want := dialed(), []string{srv.Listener.Addr().String()}; !slices.Equal(got, want) {
+			t.Errorf("dials = %q, want %q", got, want)
 		}
-		assertNoLeak(t, err, proxyCanary, "user", "proxy.test", srv.URL)
-		if got := dialed(); len(got) != 0 {
-			t.Errorf("dials = %q, want none", got)
-		}
-		if n := srv.hits.Load(); n != 0 {
-			t.Errorf("server requests = %d, want 0", n)
+		if n := srv.hits.Load(); n != 1 {
+			t.Errorf("server requests = %d, want 1", n)
 		}
 	case "proxy", "noproxy":
 		_, err := classify("https://api.example.invalid", blocked)
@@ -1327,16 +1545,44 @@ func TestProxyHelperProcess(t *testing.T) {
 		}
 	case "loopback":
 		srv := startServer(t, reply(http.StatusOK, anthropicReply(RiskLow, CategoryOther)))
-		direct := func(ctx context.Context, network, addr string) (net.Conn, error) {
-			record(addr)
-			var d net.Dialer
-			return d.DialContext(ctx, network, addr)
-		}
 		if _, err := classify(srv.URL, direct); err != nil {
 			t.Fatalf("Classify() error = %v", err)
 		}
 		if got, want := dialed(), []string{srv.Listener.Addr().String()}; !slices.Equal(got, want) {
 			t.Errorf("dials = %q, want %q (loopback is never proxied)", got, want)
+		}
+	case "httpnoproxy":
+		proxyAddr := strings.TrimPrefix(os.Getenv("HTTP_PROXY"), "http://")
+		srv := startServer(t, reply(http.StatusOK, anthropicReply(RiskLow, CategoryOther)))
+		srvAddr := srv.Listener.Addr().String()
+		_, port, err := net.SplitHostPort(srvAddr)
+		if err != nil {
+			t.Fatalf("server address: %v", err)
+		}
+		// toServer dials an address with a zone at the test server, so the
+		// test does not need IPv6. It dials every other address as it is,
+		// so a request through the proxy would reach the proxy recorder.
+		toServer := func(ctx context.Context, network, addr string) (net.Conn, error) {
+			if host, _, err := net.SplitHostPort(addr); err == nil && strings.Contains(host, "%") {
+				record(addr)
+				var d net.Dialer
+				return d.DialContext(ctx, network, srvAddr)
+			}
+			return direct(ctx, network, addr)
+		}
+		// ValidateBaseURL accepts "::1%lo0" as loopback. The client must
+		// not send it through the proxy, whatever net/http thinks of a
+		// zone.
+		for _, base := range []string{srv.URL, "http://[::1%25lo0]:" + port} {
+			if _, err := classify(base, toServer); err != nil {
+				t.Errorf("Classify(%s) error = %v", base, err)
+			}
+		}
+		if got := dialed(); slices.Contains(got, proxyAddr) {
+			t.Errorf("dials = %q, want no dial to the proxy %s", got, proxyAddr)
+		}
+		if n := srv.hits.Load(); n != 2 {
+			t.Errorf("server requests = %d, want 2", n)
 		}
 	default:
 		t.Fatalf("unknown helper mode %q", mode)

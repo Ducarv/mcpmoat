@@ -30,6 +30,9 @@ const (
 	maxIdleConns = 4
 	// maxResponseHeaderBytes caps the response headers.
 	maxResponseHeaderBytes = 64 << 10
+	// loopbackAddrTimeout bounds the dial of one loopback address when
+	// another address is left to try (see loopbackDial).
+	loopbackAddrTimeout = 2 * time.Second
 )
 
 // Errors of Classify. All of them have fixed text: no error from this file
@@ -163,9 +166,11 @@ type Client struct {
 // request.
 //
 // The client uses its own http.Transport, never http.DefaultTransport. It
-// honours HTTP_PROXY, HTTPS_PROXY and NO_PROXY, uses TLS 1.2 or later, and
-// dials with cfg.Dial when it is not nil. For an http base URL, it connects
-// only when the host resolves to loopback addresses only (see loopbackDial).
+// uses TLS 1.2 or later and dials with cfg.Dial when it is not nil. For an
+// https base URL, it honours HTTPS_PROXY and NO_PROXY. An http base URL is
+// always a loopback host (see ValidateBaseURL): the client never sends it
+// through a proxy, and connects only when the host resolves to loopback
+// addresses only (see loopbackDial).
 func New(cfg Config) (*Client, error) {
 	return newClient(cfg, net.DefaultResolver)
 }
@@ -198,17 +203,21 @@ func newClient(cfg Config, r resolver) (*Client, error) {
 	if dial == nil {
 		dial = (&net.Dialer{Timeout: dialTimeout, KeepAlive: dialKeepAlive}).DialContext
 	}
-	// url.Parse gives the scheme in lower case. https needs no check: TLS
-	// protects the key on any network.
+	proxy := proxyFromEnvironment
+	// url.Parse gives the scheme in lower case. https needs no loopback
+	// check: TLS protects the key on any network.
 	if u.Scheme == "http" {
-		dial = loopbackDial(dial, r)
+		dial = loopbackDial(dial, r, loopbackAddrTimeout)
+		// Never use a proxy for http. The key is in clear text, so it must
+		// go only to the loopback server, never to a proxy.
+		proxy = nil
 	}
 	return &Client{
 		api:   a,
 		url:   endpoint,
 		model: cfg.Model,
 		key:   cfg.APIKey,
-		http:  newHTTPClient(dial),
+		http:  newHTTPClient(dial, proxy),
 	}, nil
 }
 
@@ -221,9 +230,13 @@ func newClient(cfg Config, r resolver) (*Client, error) {
 // So the returned function resolves the host (an IP literal is used as it
 // is), requires that every address is a loopback address, and dials only
 // those addresses, in order, with dial. Otherwise it returns errNotLoopback
-// and opens no connection. net/http never sends a request for a loopback
-// host through a proxy, so addr is always the host of the base URL.
-func loopbackDial(dial dialFunc, r resolver) dialFunc {
+// and opens no connection. The transport of an http base URL has no proxy
+// (see newClient), so addr is always the host of the base URL.
+//
+// Each address except the last one gets at most addrTimeout. So when one
+// address does not answer (for example a firewall drops packets to ::1), the
+// next address is tried soon. The last address gets the time that is left.
+func loopbackDial(dial dialFunc, r resolver, addrTimeout time.Duration) dialFunc {
 	return func(ctx context.Context, network, addr string) (net.Conn, error) {
 		host, port, err := net.SplitHostPort(addr)
 		if err != nil {
@@ -234,15 +247,33 @@ func loopbackDial(dial dialFunc, r resolver) dialFunc {
 			return nil, err
 		}
 		var dialErr error
-		for _, ip := range ips {
-			conn, err := dial(ctx, network, net.JoinHostPort(ip.String(), port))
+		for i, ip := range ips {
+			target := net.JoinHostPort(ip.String(), port)
+			var conn net.Conn
+			if i < len(ips)-1 {
+				conn, err = dialWithTimeout(ctx, dial, network, target, addrTimeout)
+			} else {
+				conn, err = dial(ctx, network, target)
+			}
 			if err == nil {
 				return conn, nil
 			}
 			dialErr = err
+			// The caller gave up, so do not try the next address.
+			if ctx.Err() != nil {
+				break
+			}
 		}
 		return nil, dialErr
 	}
+}
+
+// dialWithTimeout calls dial with a context that ends after timeout. The end
+// of that context does not close a connection that dial already opened.
+func dialWithTimeout(ctx context.Context, dial dialFunc, network, addr string, timeout time.Duration) (net.Conn, error) {
+	ctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	return dial(ctx, network, addr)
 }
 
 // resolveLoopback returns the addresses of host. It returns errNotLoopback
@@ -287,11 +318,12 @@ func lookupNetwork(network string) string {
 }
 
 // newHTTPClient returns the HTTP client of a Client. Every connection uses
-// dial.
-func newHTTPClient(dial dialFunc) *http.Client {
+// dial. proxy picks the proxy of a request; nil means no proxy.
+func newHTTPClient(dial dialFunc, proxy func(*http.Request) (*url.URL, error)) *http.Client {
 	transport := &http.Transport{
-		// Honour the user's HTTP_PROXY, HTTPS_PROXY and NO_PROXY (NFR-01).
-		Proxy:               proxyFromEnvironment,
+		// For https, proxyFromEnvironment honours the user's HTTPS_PROXY and
+		// NO_PROXY (NFR-01). For http, proxy is nil.
+		Proxy:               proxy,
 		DialContext:         dial,
 		TLSClientConfig:     &tls.Config{MinVersion: tls.VersionTLS12},
 		TLSHandshakeTimeout: tlsHandshakeTimeout,

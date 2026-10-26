@@ -235,12 +235,16 @@ func TestValidateBaseURL(t *testing.T) {
 		{name: "http localhost", raw: "http://localhost", ok: true},
 		{name: "http localhost with port", raw: "http://localhost:11434/v1", ok: true},
 		{name: "http ipv6 loopback with port", raw: "http://[::1]:8080", ok: true},
+		{name: "http ipv6 loopback with zone", raw: "http://[::1%25lo0]:8080", ok: true},
 		{name: "exactly max length", raw: exact2048, ok: true},
 
 		{name: "empty", raw: ""},
 		{name: "http remote", raw: "http://example.com/" + canary},
 		{name: "http private address", raw: "http://10.0.0.1/" + canary},
 		{name: "http localhost suffix", raw: "http://localhost.example.com/" + canary},
+		// Only "localhost" in lower case, without a final dot, is loopback.
+		{name: "http upper-case localhost", raw: "http://LOCALHOST:11434"},
+		{name: "http localhost with final dot", raw: "http://localhost.:11434"},
 		{name: "other scheme", raw: "ftp://api.example.com/" + canary},
 		{name: "ws on loopback", raw: "ws://localhost/" + canary},
 		{name: "file", raw: "file:///etc/" + canary},
