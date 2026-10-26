@@ -21,8 +21,9 @@ import (
 )
 
 // This file holds the helpers of the in-process pin tests (scan_pins_test.go,
-// pin_test.go, pin_flow_test.go, pin_expect_test.go, pins_diff_test.go and
-// e2e_test.go): the pinEnv world, the fake servers, and the checks of the output.
+// pin_test.go, pin_flow_test.go, pin_expect_test.go and pins_diff_test.go) and
+// of e2e_test.go, which runs the real binary. The helpers are the pinEnv world,
+// the fake servers, and the checks of the output.
 
 // pinRunResult is the outcome of one in-process run.
 type pinRunResult struct {
@@ -251,7 +252,8 @@ type pinOutput struct {
 const acceptHintPrefix = "To accept "
 
 // wrongDigest is a well-formed digest that no tool set has. It is the --expect
-// value of the tests that check a digest mismatch.
+// value of TestE2EPinAccept and TestE2ERugPull in e2e_test.go, which check a
+// digest mismatch.
 const wrongDigest = "pd1:0000000000000000000000000000000000000000000000000000000000000000"
 
 // assertPinsFileMode fails the test when the file at path is missing or
@@ -260,10 +262,10 @@ func assertPinsFileMode(t *testing.T, path string) {
 	t.Helper()
 	info, err := os.Stat(path)
 	if err != nil {
-		t.Fatalf("pins.json is missing: %v", err)
+		t.Fatalf("pins.json %s is missing: %v", path, err)
 	}
 	if mode := info.Mode().Perm(); mode != 0o600 {
-		t.Errorf("pins.json mode = %o, want 600", mode)
+		t.Errorf("pins.json %s mode = %o, want 600", path, mode)
 	}
 }
 

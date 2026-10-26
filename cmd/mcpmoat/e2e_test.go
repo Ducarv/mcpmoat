@@ -1,8 +1,9 @@
 package main
 
-// End-to-end tests. They build the real mcpmoat binary once and run it as a
-// child process with a fake HOME. They check the exit code, stdout and stderr
-// of whole commands, the way a user sees them.
+// End-to-end tests. This file builds the mcpmoat binary and the fixture servers.
+// Most tests run mcpmoat as a child process with a fake HOME. They check the
+// exit code, stdout and stderr of whole commands, the way a user sees them.
+// TestE2ERugPullExitCodes runs a fixture binary with only PATH set.
 //
 // These tests use os/exec and not the testscript module, because the project
 // adds no new modules for tests.
@@ -1379,6 +1380,11 @@ func TestE2ERugPull(t *testing.T) {
 // (exit code 1) is not covered here.
 func TestE2ERugPullExitCodes(t *testing.T) {
 	t.Parallel()
+	// wantExitUsage is exitUsage of the fixture, which is in its package main.
+	// The test cannot import it, so it keeps the value here.
+	const wantExitUsage = 2
+	// usage is the help text of the fixture, as flag.FlagSet prints it.
+	const usage = "Usage of rugpull:\n  -variant string\n    \tclean | injected (default \"clean\")\n"
 	bin := inspecttest.Fixture(t, "rugpull")
 	tests := []struct {
 		name       string
@@ -1388,16 +1394,16 @@ func TestE2ERugPullExitCodes(t *testing.T) {
 		{
 			name:       "bad flag",
 			args:       []string{"-nope"},
-			wantStderr: "flag provided but not defined: -nope\nUsage of rugpull:\n  -variant string\n    \tclean | injected (default \"clean\")\n",
+			wantStderr: "flag provided but not defined: -nope\n" + usage,
 		},
 		{
 			name:       "help",
 			args:       []string{"-h"},
-			wantStderr: "Usage of rugpull:\n  -variant string\n    \tclean | injected (default \"clean\")\n",
+			wantStderr: usage,
 		},
 		{
 			name:       "unknown variant",
-			args:       []string{"-variant", "nope"},
+			args:       []string{rugpullFlag, "nope"},
 			wantStderr: "rugpull: unknown variant \"nope\"\n",
 		},
 		{
@@ -1420,16 +1426,16 @@ func TestE2ERugPullExitCodes(t *testing.T) {
 			if !ok {
 				t.Fatalf("run %s %v: err = %v, want an *exec.ExitError", bin, tt.args, err)
 			}
-			// The fixture keeps its exit code 2 in the constant exitUsage, in
-			// package main of the fixture. The test cannot import it, so it uses 2.
-			if got := exitErr.ExitCode(); got != 2 {
-				t.Errorf("exit code = %d, want 2\nstdout: %q\nstderr: %q", got, outBuf.String(), errBuf.String())
+			stdout := outBuf.String()
+			stderr := errBuf.String()
+			if got := exitErr.ExitCode(); got != wantExitUsage {
+				t.Errorf("exit code = %d, want %d\nstdout: %q\nstderr: %q", got, wantExitUsage, stdout, stderr)
 			}
-			if got := outBuf.String(); got != "" {
-				t.Errorf("stdout = %q, want empty", got)
+			if stdout != "" {
+				t.Errorf("stdout = %q, want empty", stdout)
 			}
-			if got := errBuf.String(); got != tt.wantStderr {
-				t.Errorf("stderr = %q, want %q", got, tt.wantStderr)
+			if stderr != tt.wantStderr {
+				t.Errorf("stderr = %q, want %q", stderr, tt.wantStderr)
 			}
 		})
 	}

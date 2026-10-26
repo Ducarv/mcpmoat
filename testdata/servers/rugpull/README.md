@@ -65,8 +65,9 @@ description, so the pinned hash no longer matches. The tool changed after the pi
 three steps above. Then it checks that a wrong `--expect` digest exits 2 and saves nothing,
 and it ends with a clean scan after the accept.
 
-`TestE2ERugPullExitCodes` in the same file checks that the server exits with code 2 on a bad
-flag, `-h`, an unknown variant and an extra argument. It does not cover exit code 1.
+`TestE2ERugPullExitCodes` in the same file checks the exit codes listed in the Notes section.
+Each case has empty stdout and the exact stderr text. It does not cover exit code 1 (serve
+error).
 
 ## Notes
 
