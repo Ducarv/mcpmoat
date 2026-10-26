@@ -33,6 +33,11 @@ const acceptanceGuard = 60 * time.Second
 // its fixture.
 var acceptanceStdioServers = []string{"benign", "poisoned", "shadowing", "mailer"}
 
+// acceptanceLocalServer is the server of the dangerous config fixture whose url
+// is a loopback address. The test points it at a server that counts its
+// connections.
+const acceptanceLocalServer = "remote-local"
+
 // acceptanceConfigFindings are the sorted findings of each server of the
 // project file, as "RULE severity". The rule IDs are the ones that the READMEs
 // of testdata/configs/dangerous (T4) and testdata/configs/typosquat (T5) list.
@@ -40,20 +45,31 @@ var acceptanceStdioServers = []string{"benign", "poisoned", "shadowing", "mailer
 // finding.
 var acceptanceConfigFindings = map[string][]string{
 	// testdata/configs/dangerous
-	"remote-plain":      {"MOAT-T4-001 high", "MOAT-T4-002 high"},
-	"remote-local":      nil,
-	"env-secret":        {"MOAT-T4-002 high", "MOAT-T4-004 low"},
-	"latest-pkg":        {"MOAT-T4-003 medium", "MOAT-T4-004 low"},
-	"docker-untagged":   {"MOAT-T4-003 medium"},
-	"docker-arg-secret": {"MOAT-T4-002 high"},
-	"remote-url-secret": {"MOAT-T4-002 high"},
-	"npx-git-unpinned":  {"MOAT-T4-003 medium", "MOAT-T4-004 low"},
-	"npx-git-pinned":    {"MOAT-T4-004 low"},
+	"remote-plain":        {"MOAT-T4-001 high", "MOAT-T4-002 high"},
+	acceptanceLocalServer: nil,
+	"env-secret":          {"MOAT-T4-002 high", "MOAT-T4-004 low"},
+	"latest-pkg":          {"MOAT-T4-003 medium", "MOAT-T4-004 low"},
+	"docker-untagged":     {"MOAT-T4-003 medium"},
+	"docker-arg-secret":   {"MOAT-T4-002 high"},
+	"remote-url-secret":   {"MOAT-T4-002 high"},
+	"npx-git-unpinned":    {"MOAT-T4-003 medium", "MOAT-T4-004 low"},
+	"npx-git-pinned":      {"MOAT-T4-004 low"},
 	// testdata/configs/typosquat
 	"filesystem":       {"MOAT-T4-004 low", "MOAT-T5-001 medium"},
 	"mcp-server-fecth": {"MOAT-T5-001 medium"},
 	"memory":           {"MOAT-T4-004 low"},
 }
+
+// acceptanceProjectNames are the sorted names of the project servers.
+var acceptanceProjectNames = slices.Sorted(maps.Keys(acceptanceConfigFindings))
+
+// acceptancePinnedNames are the sorted names of the servers that scan pins:
+// the trusted stdio servers.
+var acceptancePinnedNames = slices.Sorted(slices.Values(append(slices.Clone(acceptanceStdioServers), rugpullServer)))
+
+// acceptanceGateReason is the text of the reason of a project server that the
+// inspect gate refuses.
+const acceptanceGateReason = "untrusted project server; "
 
 // acceptanceRugPullFinding is the finding of the changed get_time of
 // rugpullServer in scan 2.
@@ -63,7 +79,7 @@ const acceptanceRugPullFinding = "MOAT-T2-001 high"
 // pins.json: the canaries and the other secret-like values of the dangerous
 // config fixture. The key names (API_TOKEN, API_KEY) can show, the values
 // cannot.
-var acceptanceSecrets = append(slices.Clone(dangerousCanaries), "Bearer ${env:API_TOKEN}", "${env:API_TOKEN}", "${env:API_KEY}")
+var acceptanceSecrets = append(slices.Clone(dangerousCanaries), "${env:API_TOKEN}", "${env:API_KEY}")
 
 // isProjectServer reports whether name is a server of the untrusted project
 // file.
@@ -74,32 +90,50 @@ func isProjectServer(name string) bool {
 
 // assertNoSecrets fails the test when got holds a string of
 // acceptanceSecrets, or a part of a canary of dangerousCanaries of 8 bytes or
-// more (see llmKeyLeak). The message names the canary by its index only.
+// more (see secretPartLeak). The message names the secret by its index only,
+// never by its value. tmpNames are the temporary folder names that the part
+// check ignores.
 //
-// The part check first replaces with "<tmp>" each folder name of
-// llmKeyPart bytes or more in the paths of the fixture build folder and the
-// binary build folder. Both are below the temporary folder of every
-// t.TempDir(). These names are not output of mcpmoat, and a name such as
-// "mcpmoat-test.X" or "mcpmoat-fixtures-N" holds "mcpmoat-", the first 8
-// bytes of dangerousCanaries[0]. The check replaces names, not whole paths,
-// because scan masks some folder names of a path. A canary holds no "/", so
-// a shorter name cannot hold a part. The whole-string check uses the text as
-// it is.
-func assertNoSecrets(t *testing.T, what, got string) {
+// The part check first replaces with "<tmp>" each name of tmpNames that is
+// secretPartLen bytes or more. These names are not output of mcpmoat, and a
+// name such as "mcpmoat-test.X" or "mcpmoat-fixtures-N" holds "mcpmoat-", the
+// first 8 bytes of dangerousCanaries[0]. The check replaces names, not whole
+// paths, because scan masks some folder names of a path. A canary holds no
+// "/", so a shorter name cannot hold a part. The whole-string check uses the
+// text as it is. A TMPDIR that is a symlink to a folder with another name can
+// fail the part check, because scan can print the resolved name.
+func assertNoSecrets(t *testing.T, what, got string, tmpNames []string) {
 	t.Helper()
-	assertContainsNone(t, what, got, acceptanceSecrets)
-	for _, root := range []string{filepath.Dir(inspecttest.Fixture(t, acceptanceStdioServers[0])), filepath.Dir(binaryPath(t))} {
-		for _, name := range strings.Split(root, string(filepath.Separator)) {
-			if len(name) >= llmKeyPart {
-				got = strings.ReplaceAll(got, name, "<tmp>")
-			}
+	for i, secret := range acceptanceSecrets {
+		if strings.Contains(got, secret) {
+			t.Errorf("%s holds acceptanceSecrets[%d]", what, i)
 		}
 	}
+	for _, name := range tmpNames {
+		got = strings.ReplaceAll(got, name, "<tmp>")
+	}
 	for i, canary := range dangerousCanaries {
-		if _, ok := llmKeyLeak(canary, got); ok {
+		if _, ok := secretPartLeak(canary, got); ok {
 			t.Errorf("%s holds a part of dangerousCanaries[%d]", what, i)
 		}
 	}
+}
+
+// acceptanceTmpNames returns the folder names of secretPartLen bytes or more in
+// the paths of the fixture build folder and the binary build folder. Both are
+// below the temporary folder of every t.TempDir(), and every fixture builds
+// into the same folder.
+func acceptanceTmpNames(t *testing.T) []string {
+	t.Helper()
+	var names []string
+	for _, root := range []string{filepath.Dir(inspecttest.Fixture(t, rugpullServer)), filepath.Dir(binaryPath(t))} {
+		for _, name := range strings.Split(root, string(filepath.Separator)) {
+			if len(name) >= secretPartLen {
+				names = append(names, name)
+			}
+		}
+	}
+	return names
 }
 
 // writeAcceptanceHome writes home/.claude.json with the fixture servers of
@@ -118,11 +152,11 @@ func writeAcceptanceHome(t *testing.T, home, variant string) {
 // acceptanceProjectServers returns the merged mcpServers maps of the Cursor
 // configs of testdata/configs/dangerous and testdata/configs/typosquat. Each
 // server stays raw JSON, so its secret values are never decoded or logged. A
-// name in both files fails the test. The url of remote-local becomes
+// name in both files fails the test. The url of acceptanceLocalServer becomes
 // localURL, a server of the test that counts its connections.
 func acceptanceProjectServers(t *testing.T, localURL string) map[string]any {
 	t.Helper()
-	merged := map[string]any{}
+	merged := map[string]json.RawMessage{}
 	for _, fixture := range []string{"dangerous", "typosquat"} {
 		path := testdataPath("configs", fixture, "home", ".cursor", "mcp.json")
 		var cfg struct {
@@ -141,18 +175,21 @@ func acceptanceProjectServers(t *testing.T, localURL string) map[string]any {
 		}
 	}
 	gotNames := slices.Sorted(maps.Keys(merged))
-	wantNames := slices.Sorted(maps.Keys(acceptanceConfigFindings))
-	if !slices.Equal(gotNames, wantNames) {
+	if !slices.Equal(gotNames, acceptanceProjectNames) {
 		t.Fatalf("project servers = %v, want the servers of acceptanceConfigFindings", gotNames)
 	}
 	// remote-local holds no secret, so the test can decode it.
 	var local map[string]any
-	if err := json.Unmarshal(merged["remote-local"].(json.RawMessage), &local); err != nil {
-		t.Fatalf("decode remote-local: %v", err)
+	if err := json.Unmarshal(merged[acceptanceLocalServer], &local); err != nil {
+		t.Fatalf("decode %s: %v", acceptanceLocalServer, err)
 	}
 	local["url"] = localURL
-	merged["remote-local"] = local
-	return merged
+	servers := make(map[string]any, len(merged))
+	for name, server := range merged {
+		servers[name] = server
+	}
+	servers[acceptanceLocalServer] = local
+	return servers
 }
 
 // acceptanceWantFindings returns the expected sorted findings of every server,
@@ -183,6 +220,15 @@ func textFindings(t *testing.T, stdout string) []acceptanceFinding {
 	var out []acceptanceFinding
 	for _, row := range findingRows(t, stdout) {
 		out = append(out, acceptanceFinding{server: row[2], rule: row[0], severity: row[1]})
+	}
+	return out
+}
+
+// jsonFindings returns the findings of a --json report.
+func jsonFindings(doc report.ScanReport) []acceptanceFinding {
+	var out []acceptanceFinding
+	for _, f := range doc.Findings {
+		out = append(out, acceptanceFinding{server: f.Server, rule: f.RuleID, severity: f.Severity})
 	}
 	return out
 }
@@ -237,10 +283,16 @@ type acceptanceRun struct {
 	env []string
 	// marker is the marker file of the npx and docker shims.
 	marker string
-	// proxy is the HTTP_PROXY and HTTPS_PROXY of the child. local is the url
-	// of remote-local. Go never sends a loopback url through a proxy, so the
-	// proxy guards the other remote servers and local guards remote-local.
+	// proxy is the HTTP_PROXY and HTTPS_PROXY of the child. local is the
+	// counting server that the url of remote-local points at. Go never sends a
+	// loopback url through a proxy, so the proxy guards the other remote
+	// servers and local guards remote-local.
 	proxy, local *e2eNetServer
+	// tmpNames are the folder names that assertNoSecrets ignores.
+	tmpNames []string
+	// seen is the number of connections and requests that each counting server
+	// had after the last scan.
+	seen map[*e2eNetServer]int
 }
 
 // newAcceptanceRun writes the fake home. The trusted global config runs the
@@ -250,7 +302,7 @@ func newAcceptanceRun(t *testing.T) *acceptanceRun {
 	t.Helper()
 	// The project file is only untrusted when work is not the home folder, so
 	// the test needs two separate folders.
-	r := &acceptanceRun{home: t.TempDir(), work: t.TempDir()}
+	r := &acceptanceRun{home: t.TempDir(), work: t.TempDir(), tmpNames: acceptanceTmpNames(t), seen: map[*e2eNetServer]int{}}
 	requirePrivateChain(t, r.home)
 	// os/exec uses the last value of a duplicate key, so this PATH replaces
 	// the PATH of runBinEnv. A started npx or docker only creates the marker.
@@ -274,28 +326,33 @@ func newAcceptanceRun(t *testing.T) *acceptanceRun {
 }
 
 // scan runs mcpmoat with args and checks the guards that hold after every
-// run: no started npx or docker, no connection to the proxy or to
+// run: no started npx or docker, no new connection to the proxy or to
 // remote-local, no secret in stdout, stderr or pins.json, and only the stdio
 // servers pinned.
 func (r *acceptanceRun) scan(t *testing.T, args ...string) (stdout, stderr string, code int) {
 	t.Helper()
 	stdout, stderr, code = runBinEnv(t, r.home, r.work, r.env, args...)
 	assertMarker(t, r.marker, false)
-	if conns, reqs := r.proxy.settle(t); conns != 0 || len(reqs) != 0 {
-		t.Errorf("the proxy got %d connections and %d requests, want none: a remote project server was inspected", conns, len(reqs))
-	}
-	if conns, reqs := r.local.settle(t); conns != 0 || len(reqs) != 0 {
-		t.Errorf("remote-local got %d connections and %d requests, want none: it was inspected", conns, len(reqs))
-	}
-	assertNoSecrets(t, "stdout", stdout)
-	assertNoSecrets(t, "stderr", stderr)
-	assertNoSecrets(t, "pins.json", string(readFileBytes(t, pinsPath(r.home))))
-	wantPinned := append(slices.Clone(acceptanceStdioServers), rugpullServer)
-	slices.Sort(wantPinned)
-	if got := readPinsFile(t, pinsPath(r.home)).serverNames(); !slices.Equal(got, wantPinned) {
-		t.Errorf("pinned servers = %v, want %v", got, wantPinned)
+	r.assertNoNewTraffic(t, "the proxy", r.proxy, args)
+	r.assertNoNewTraffic(t, acceptanceLocalServer, r.local, args)
+	assertNoSecrets(t, "stdout", stdout, r.tmpNames)
+	assertNoSecrets(t, "stderr", stderr, r.tmpNames)
+	assertNoSecrets(t, "pins.json", string(readFileBytes(t, pinsPath(r.home))), r.tmpNames)
+	if got := readPinsFile(t, pinsPath(r.home)).serverNames(); !slices.Equal(got, acceptancePinnedNames) {
+		t.Errorf("pinned servers = %v, want %v", got, acceptancePinnedNames)
 	}
 	return stdout, stderr, code
+}
+
+// assertNoNewTraffic fails the test when s got a connection or a request since
+// the last call: a remote project server was inspected by the scan with args.
+func (r *acceptanceRun) assertNoNewTraffic(t *testing.T, what string, s *e2eNetServer, args []string) {
+	t.Helper()
+	conns, reqs := s.settle(t) // the counts are cumulative
+	if n := int(conns) + len(reqs); n != r.seen[s] {
+		t.Errorf("%s got %d new connections or requests in `scan %v`, want none: a remote project server was inspected", what, n-r.seen[s], args)
+		r.seen[s] = n
+	}
 }
 
 // assertScan runs one plain scan and checks it: exit code 1 (the T4 findings
@@ -322,6 +379,9 @@ func (r *acceptanceRun) assertScan(t *testing.T, wantStderr []lineWant, want map
 		if row.Status != wantStatus {
 			t.Errorf("server %s: status = %q (%s), want %q", row.Name, row.Status, row.Reason, wantStatus)
 		}
+		if isProjectServer(row.Name) && !strings.Contains(row.Reason, acceptanceGateReason) {
+			t.Errorf("server %s: reason = %q, want it to hold %q", row.Name, row.Reason, acceptanceGateReason)
+		}
 	}
 	return stdout
 }
@@ -338,9 +398,8 @@ func assertAcceptanceJSON(t *testing.T, stdout, stderr string, code int) {
 	assertNoLeakBoth(t, stdout, stderr)
 	assertNoEscape(t, stdout, stderr)
 	var wantWarnings []lineWant
-	projectNames := slices.Sorted(maps.Keys(acceptanceConfigFindings))
-	for _, name := range projectNames {
-		wantWarnings = append(wantWarnings, prefixLine(scanWarnPrefix+"server "+name+": failed: inspect: "+name+": untrusted project server; "))
+	for _, name := range acceptanceProjectNames {
+		wantWarnings = append(wantWarnings, prefixLine(scanWarnPrefix+"server "+name+": failed: inspect: "+name+": "+acceptanceGateReason))
 	}
 	assertStderrLines(t, stderr, wantWarnings)
 	for _, line := range nonEmptyLines(stderr) {
@@ -363,11 +422,7 @@ func assertAcceptanceJSON(t *testing.T, stdout, stderr string, code int) {
 			t.Errorf("--json: server %s: inspection status = %q, want %q", s.Name, s.Inspection.Status, wantStatus)
 		}
 	}
-	var findings []acceptanceFinding
-	for _, f := range doc.Findings {
-		findings = append(findings, acceptanceFinding{server: f.Server, rule: f.RuleID, severity: f.Severity})
-	}
-	assertFindingsByServer(t, "--json", findingsByServer(t, names, findings), acceptanceWantFindings([]string{acceptanceRugPullFinding}))
+	assertFindingsByServer(t, "--json", findingsByServer(t, names, jsonFindings(doc)), acceptanceWantFindings([]string{acceptanceRugPullFinding}))
 	if len(doc.Diffs) != 1 || doc.Diffs[0].Server != rugpullServer || doc.Diffs[0].Tool != "get_time" ||
 		!strings.Contains(doc.Diffs[0].Diff, "+description: "+rugpullInjected+"\n") {
 		t.Errorf("--json diffs = %+v, want one diff of %s get_time with the injected description", doc.Diffs, rugpullServer)
@@ -403,7 +458,8 @@ func TestE2EAcceptance(t *testing.T) {
 		exactLine("mcpmoat scan: pinned 2 tools for " + rugpullServer),
 		exactLine("mcpmoat scan: pinned 1 tool for shadowing"),
 	}, acceptanceWantFindings(nil))
-	assertContainsNone(t, "scan 1 stdout", stdout, []string{"MOAT-T2", acceptHintPrefix})
+	assertNoPinRows(t, stdout)
+	assertContainsNone(t, "scan 1 stdout", stdout, []string{acceptHintPrefix})
 
 	// Scan 2: the config switches rugpull to the injected variant. The other
 	// four servers stay the same, so only the description of rugpull get_time

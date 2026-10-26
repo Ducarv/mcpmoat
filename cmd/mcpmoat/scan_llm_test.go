@@ -220,27 +220,27 @@ func llmEnv(t *testing.T, tools map[string][]inspect.Tool) *pinEnv {
 	return newPinEnv(t, servers)
 }
 
-// llmKeyPart is the length of the shortest part of the key that
-// llmKeyLeak looks for.
-const llmKeyPart = 8
+// secretPartLen is the length of the shortest part of a secret that
+// secretPartLeak looks for.
+const secretPartLen = 8
 
-// llmKeyLeak returns the first part of key of llmKeyPart bytes that out
-// holds, and true. It returns false when out holds no such part.
-func llmKeyLeak(key, out string) (string, bool) {
-	for i := 0; i+llmKeyPart <= len(key); i++ {
-		if strings.Contains(out, key[i:i+llmKeyPart]) {
-			return key[i : i+llmKeyPart], true
+// secretPartLeak returns the first part of secret of secretPartLen bytes that
+// out holds, and true. It returns false when out holds no such part.
+func secretPartLeak(key, out string) (string, bool) {
+	for i := 0; i+secretPartLen <= len(key); i++ {
+		if strings.Contains(out, key[i:i+secretPartLen]) {
+			return key[i : i+secretPartLen], true
 		}
 	}
 	return "", false
 }
 
-// llmAssertNoKey fails the test when key, or a part of it of llmKeyPart bytes
+// llmAssertNoKey fails the test when key, or a part of it of secretPartLen bytes
 // or more, shows in one of the outputs.
 func llmAssertNoKey(t *testing.T, key string, outputs ...string) {
 	t.Helper()
 	for _, out := range outputs {
-		if part, ok := llmKeyLeak(key, out); ok {
+		if part, ok := secretPartLeak(key, out); ok {
 			t.Errorf("output holds a part of the API key (%q)\noutput:\n%s", part, out)
 		}
 	}
@@ -1903,8 +1903,8 @@ func TestLLMAssertNoKey(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			if _, leak := llmKeyLeak(llmTestKey, tt.out); leak != tt.leak {
-				t.Errorf("llmKeyLeak(%q) = %v, want %v", tt.out, leak, tt.leak)
+			if _, leak := secretPartLeak(llmTestKey, tt.out); leak != tt.leak {
+				t.Errorf("secretPartLeak(%q) = %v, want %v", tt.out, leak, tt.leak)
 			}
 		})
 	}

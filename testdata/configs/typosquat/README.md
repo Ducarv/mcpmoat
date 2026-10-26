@@ -8,10 +8,10 @@ and the fixture makes no network calls. All packages are pinned and the remote
 URL uses https, so no T4-001, T4-002 or T4-003 rule fires. The npx entries use
 `-y`, so MOAT-T4-004 fires on them.
 
-Scan this home only with `--no-connect`. The one exception is `TestE2EAcceptance`: it
-scans a copy of its `mcpServers` in an untrusted project `.cursor/mcp.json` without
-`--no-connect`, but the untrusted-project gate refuses every server there, so nothing
-starts. As a second guard, the npx entries pass `--registry https://registry.invalid/` and
+Scan this home only with `--no-connect`. The one exception is `TestE2EAcceptance`. See
+[testdata/servers/README.md](../../servers/README.md#end-to-end-acceptance-test): the
+untrusted-project gate refuses every server of the copy that it scans, so nothing starts.
+As a second guard, the npx entries pass `--registry https://registry.invalid/` and
 the remote host is `mcp.example.invalid`: the reserved `.invalid` domain (RFC 2606) never
 resolves, so a scan that connects by mistake fetches nothing.
 

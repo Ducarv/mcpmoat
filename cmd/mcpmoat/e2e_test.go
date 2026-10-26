@@ -100,7 +100,8 @@ func runBin(t *testing.T, home, dir string, args ...string) (stdout, stderr stri
 	return runBinEnv(t, home, dir, nil, args...)
 }
 
-// e2eBasePath is the PATH of every child process that a test runs.
+// e2eBasePath is the PATH of a child process that a test runs, unless the test
+// replaces it through the extra environment of runBinEnv.
 const e2eBasePath = "/usr/bin:/bin"
 
 // runBinEnv is runBin with extra "KEY=value" entries in the child environment.

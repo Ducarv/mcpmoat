@@ -1014,9 +1014,7 @@ func TestScanStartsNoProcess(t *testing.T) {
 		}
 	}
 	if marker != "" {
-		if _, err := os.Stat(marker); !errors.Is(err, os.ErrNotExist) {
-			t.Errorf("marker file exists or cannot be checked (err = %v): the script ran", err)
-		}
+		assertMarker(t, marker, false)
 	}
 }
 

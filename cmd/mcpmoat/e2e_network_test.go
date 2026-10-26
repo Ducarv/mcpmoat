@@ -137,12 +137,12 @@ func (s *e2eNetServer) settle(t *testing.T) (conns int32, reqs []e2eNetRequest) 
 }
 
 // e2eNetAssertNoKey fails the test when a request holds the API key canary,
-// or a part of it of 8 bytes or more (see llmKeyLeak), anywhere: request
+// or a part of it of 8 bytes or more (see secretPartLeak), anywhere: request
 // line, headers or body.
 func e2eNetAssertNoKey(t *testing.T, who string, reqs []e2eNetRequest) {
 	t.Helper()
 	for i, r := range reqs {
-		if part, ok := llmKeyLeak(llmTestKey, r.dump); ok {
+		if part, ok := secretPartLeak(llmTestKey, r.dump); ok {
 			t.Errorf("%s request %d (%s %s) holds a part of the API key (%q)", who, i, r.method, r.url, part)
 		}
 	}
@@ -364,8 +364,8 @@ func e2eLLMAssertRequests(t *testing.T, reqs []e2eNetRequest, forbidden []string
 			t.Errorf("request %d: no anthropic-version header", i)
 		}
 		// The rest of the request gets the rule of e2eNetAssertNoKey: no
-		// part of the key of 8 bytes or more (see llmKeyLeak).
-		if part, ok := llmKeyLeak(llmTestKey, r.url+"\n"+r.body); ok {
+		// part of the key of 8 bytes or more (see secretPartLeak).
+		if part, ok := secretPartLeak(llmTestKey, r.url+"\n"+r.body); ok {
 			t.Errorf("request %d: the URL or the body holds a part of the API key (%q)", i, part)
 		}
 		for name, values := range r.header {
@@ -373,7 +373,7 @@ func e2eLLMAssertRequests(t *testing.T, reqs []e2eNetRequest, forbidden []string
 				continue
 			}
 			for _, v := range values {
-				if part, ok := llmKeyLeak(llmTestKey, v); ok {
+				if part, ok := secretPartLeak(llmTestKey, v); ok {
 					t.Errorf("request %d: header %s holds a part of the API key (%q)", i, name, part)
 				}
 			}

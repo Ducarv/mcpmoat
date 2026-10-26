@@ -43,9 +43,10 @@ T4 (dangerous config) and T5 (typosquat) are config fixtures, not servers. They 
 `TestE2EAcceptance` in `cmd/mcpmoat/e2e_acceptance_test.go` runs the real binary on all these
 fixtures together. The trusted global config runs the five stdio servers: `benign`, `poisoned`,
 `shadowing`, `mailer` and `rugpull` (clean). An untrusted Cursor project file holds the servers of
-the T4 and T5 config fixtures. The untrusted-project gate refuses every project server, so none
-of them starts, but the config rules still check them. The test also checks that no process
-starts and no connection to a remote project server happens.
+the T4 and T5 config fixtures, in a copy that the test scans without `--no-connect`. The
+untrusted-project gate refuses every project server, so none of them starts, but the config rules
+still check them. The test also checks that no project server process starts (the `npx` and
+`docker` of `PATH` are marker scripts) and that no remote project server gets a connection.
 
 1. Scan 1 pins the five stdio servers.
 2. The config switches `rugpull` to `-variant injected`.
