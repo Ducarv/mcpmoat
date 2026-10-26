@@ -25,6 +25,7 @@ This file owns conventions, agent routing, release notes and review criteria. It
 | Typecheck | `go build ./... && go vet ./...` |
 | Tests (scoped) | `go test -race ./internal/<pkg>/ -run '<TestName>' -v` |
 | E2E scenario | `go test ./cmd/mcpmoat/ -run 'TestE2E<Name>' -v` |
+| Offline E2E (NFR-01, Linux only, needs sudo and a private `TMPDIR`) | `.github/scripts/run-offline.sh` |
 | Update golden files | `go test ./<pkg>/ -update` (review the diff afterwards) |
 | Fuzz a parser | `go test -fuzz=FuzzX -fuzztime=30s ./<pkg>/` |
 
@@ -88,8 +89,8 @@ A row that links to another file means: run the commands at the link target.
 
 ## Review
 
-- Extra sensitive path tokens: `inspect`, `exec`, `env`, `pins`, `hash`, `release`, `goreleaser`,
-  `workflows`, `scripts`, `.agents`, `.claude`, `CLAUDE.md`, `.golangci.yml`.
+- Extra sensitive path tokens: `inspect`, `exec`, `env`, `pins`, `hash`, `llm`, `release`,
+  `goreleaser`, `workflows`, `scripts`, `.agents`, `.claude`, `CLAUDE.md`, `.golangci.yml`.
 - Path tokens to ignore: none.
 - Security-flagged files: `.claude/agents/review-*.md`, `.claude/skills/review-pr/SKILL.md`,
   `.claude/skills/polish-pr/SKILL.md`, `.claude/skills/pr/SKILL.md`,

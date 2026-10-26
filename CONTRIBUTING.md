@@ -402,6 +402,18 @@ tests, golangci-lint and the version smoke test. On Linux only it also runs the 
 govulncheck version pins match. Then it runs `goreleaser check`, a snapshot build and
 `.github/scripts/check-snapshot.sh`.
 
+The `offline` job proves that a scan makes no network call that it should not make (NFR-01). It
+runs the `TestE2E` tests, the network tests of `cmd/mcpmoat/e2e_network_test.go` included, through
+`.github/scripts/run-offline.sh`, in a Linux network namespace (`sudo unshare --net`) that has only
+loopback. The script first checks that DNS and outside TCP connections fail and that loopback
+works, then runs the tests as the normal user (`setpriv`) with `GOPROXY=off`. To run it on Linux,
+run `.github/scripts/run-offline.sh` from the repository root. It needs `go`, `sudo`, `unshare`,
+`setpriv`, `ip`, `getent` and `timeout`. It also needs a private `TMPDIR`: no directory in the
+`TMPDIR` path may be writable by its group or by others. With the default `/tmp`, or on a system
+that is not Linux, the script stops with exit code 2. On macOS there is no network namespace:
+`go test ./cmd/mcpmoat/` runs the in-process network tests (`cmd/mcpmoat/network_test.go`) and the
+E2E tests as usual, without the kernel check.
+
 ### Build the binary
 
 ```sh
