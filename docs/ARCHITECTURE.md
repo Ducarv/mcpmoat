@@ -31,7 +31,7 @@ internal/
 rules/                  built-in rules (go:embed)
 testdata/               fixtures for tests and the demo
   configs/              example client configs
-  servers/              example MCP servers (benign, poisoned, mailer, shadowing)
+  servers/              example MCP servers (benign, poisoned, mailer, shadowing, rugpull)
 docs/                   PRD and other documentation
 ```
 
