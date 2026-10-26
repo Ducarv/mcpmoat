@@ -13,6 +13,7 @@ This page is the index. Each topic has one owner doc. Update the owner doc. Do n
 | Ignore findings (`--ignore`, `.mcpmoat-ignore`) | [docs/ignore.md](ignore.md) |
 | Optional LLM classification (`--llm`) | [docs/llm.md](llm.md) |
 | Exit codes (the contract) | [docs/exit-codes.md](exit-codes.md) |
+| What mcpmoat does not do (limits and non-goals) | [docs/limits.md](limits.md) |
 | Verify a release download | [docs/install.md](install.md#verify-a-download) |
 | Requirements, milestones and FR/NFR IDs | [docs/PRD.md](PRD.md) |
 | Threat model | [docs/PRD.md](PRD.md#53-threats) |
