@@ -9,7 +9,9 @@ permissions: {}
 
 concurrency:
   # One release at a time, for all tags, so an older run cannot finish last
-  # and move the tap back. Never stop a release half way through.
+  # and move the tap back. Never stop a release half way through. GitHub
+  # keeps one pending run per group: a newer queued run cancels an older
+  # pending one, so push the next tag only after the run ends.
   group: ${{ github.workflow }}
   cancel-in-progress: false
 
@@ -47,10 +49,12 @@ jobs:
           TMPDIR: ${{ runner.temp }}
         run: go test -race -shuffle=on ./...
 
-      # The pin check in ci.yml (release-check) keeps this version equal to
-      # the one in ci.yml.
       - name: Check for known vulnerabilities
-        run: go run golang.org/x/vuln/cmd/govulncheck@v1.9.0 ./...
+        env:
+          # The release-check job in ci.yml checks that ci.yml pins the same
+          # version.
+          GOVULNCHECK_VERSION: v1.9.0
+        run: go run "golang.org/x/vuln/cmd/govulncheck@$GOVULNCHECK_VERSION" ./...
 
   release:
     needs: test
@@ -119,7 +123,9 @@ jobs:
           cache: false
 
       # goreleaser-action verifies the GoReleaser signature only when cosign
-      # is on PATH. Without it, it checks only the checksum.
+      # is on PATH. Without it, it checks only the checksum. The check is
+      # best effort: if a download of the signature or checksum file fails,
+      # the action logs a warning and goes on with less checking (#174).
       - name: Install cosign
         uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
 
@@ -176,6 +182,17 @@ jobs:
             done <<<"$want"
           }
 
+          # check_immutable fails unless GitHub locked the published release.
+          # That needs "Immutable releases" on (CONTRIBUTING.md, step 5).
+          check_immutable() {
+            local immutable
+            immutable=$(gh api "repos/$GITHUB_REPOSITORY/releases/tags/$GITHUB_REF_NAME" -q .immutable) || return 1
+            if [ "$immutable" != true ]; then
+              echo "::error::The release is not immutable. Turn on Immutable releases (CONTRIBUTING.md, step 5)."
+              return 1
+            fi
+          }
+
           # check_tag fails unless the tag still points at the commit that
           # this run built. The commits API resolves an annotated tag to its
           # commit.
@@ -204,8 +221,9 @@ jobs:
 
           gh release edit "$GITHUB_REF_NAME" -R "$GITHUB_REPOSITORY" --draft=false
 
-          # The tag and the assets lock at publish, so this check is final.
-          if ! check_tag || ! check_assets published; then
-            echo "::error::The release is public, but its tag or assets changed after the checks. Check it and delete it."
+          # An immutable release locks its tag and assets at publish, so these
+          # checks are final.
+          if ! check_immutable || ! check_tag || ! check_assets published; then
+            echo "::error::The release is public, but it is not locked, or its tag or assets changed after the checks. Check it, and delete it if it is wrong."
             exit 1
           fi

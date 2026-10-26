@@ -28,7 +28,8 @@ builds:
     ldflags:
       - -s -w
       - -X main.version=v{{ .Version }}
-      - -X main.commit={{ .ShortCommit }}
+      # 12 characters, the same as the commit that go install builds print.
+      - -X main.commit={{ slice .FullCommit 0 12 }}
       - -X main.date={{ .CommitDate }}
     goos:
       - darwin
