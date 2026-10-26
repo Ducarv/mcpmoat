@@ -111,6 +111,15 @@ func tableRows(t *testing.T, stdout string) [][]string {
 	return rows
 }
 
+// assertServerNames fails the test unless the server table of stdout lists
+// exactly want, in order.
+func assertServerNames(t *testing.T, stdout string, want ...string) {
+	t.Helper()
+	if got := column(tableRows(t, stdout), 0); !slices.Equal(got, want) {
+		t.Errorf("server names = %v, want %v\nstdout:\n%s", got, want, stdout)
+	}
+}
+
 // The headings of the report blocks after the server table.
 const (
 	summaryHeading  = "SUMMARY"
