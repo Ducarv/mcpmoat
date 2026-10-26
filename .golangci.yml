@@ -59,6 +59,74 @@ linters:
             # A deny entry matches by prefix, so this covers every SDK package.
             - pkg: github.com/modelcontextprotocol/go-sdk
               desc: only internal/inspect may import the MCP SDK (NFR-06)
+        # NFR-01: the network fence. Outside internal/inspect and
+        # internal/llm, a non-test file may not import net/http (and the
+        # packages below it), the bare net package, net/smtp, net/rpc or
+        # crypto/tls. Test files may: tests run loopback servers.
+        # This is defence in depth, not a proof. It does not cover
+        # os.StartProcess, syscall or the imports of third-party packages.
+        # The tests (cmd/mcpmoat/network_test.go and the offline CI job)
+        # are the proof that no request leaves without --llm.
+        net-http-only-in-inspect-and-llm:
+          files:
+            - "$all"
+            - "!$test"
+            - "!**/internal/inspect/*.go"
+            - "!**/internal/llm/*.go"
+          deny:
+            # The prefix match covers net/http/httptrace, net/http/httputil
+            # and the other net/http packages too.
+            - pkg: net/http
+              desc: only internal/inspect and internal/llm may make HTTP calls (NFR-01)
+        # The bare net package can dial and listen. The "$" suffix makes the
+        # match exact, so net/url, net/netip and net/mail stay allowed.
+        net-only-in-inspect-and-llm:
+          files:
+            - "$all"
+            - "!$test"
+            - "!**/internal/inspect/*.go"
+            - "!**/internal/llm/*.go"
+          deny:
+            - pkg: net$
+              desc: only internal/inspect and internal/llm may open connections (NFR-01)
+        # Other standard packages that dial or wrap a connection. The prefix
+        # match covers net/rpc/jsonrpc too.
+        net-dial-only-in-inspect-and-llm:
+          files:
+            - "$all"
+            - "!$test"
+            - "!**/internal/inspect/*.go"
+            - "!**/internal/llm/*.go"
+          deny:
+            - pkg: net/smtp
+              desc: only internal/inspect and internal/llm may open connections (NFR-01)
+            - pkg: net/rpc
+              desc: only internal/inspect and internal/llm may open connections (NFR-01)
+            - pkg: crypto/tls
+              desc: only internal/inspect and internal/llm may open TLS connections (NFR-01)
+        # NFR-04: only internal/inspect starts processes (stdio servers).
+        # inspecttest builds the fixture servers with "go build"; it is only
+        # imported from tests (see inspecttest-only-in-tests).
+        os-exec-only-in-inspect:
+          files:
+            - "$all"
+            - "!$test"
+            - "!**/internal/inspect/*.go"
+            - "!**/internal/inspect/inspecttest/*.go"
+          deny:
+            - pkg: os/exec
+              desc: only internal/inspect may start processes (NFR-01, NFR-04)
+        # FR-17, NFR-01: the LLM client runs only behind scan --llm, which
+        # cmd/mcpmoat wires. Test files may import it.
+        llm-only-in-cmd:
+          files:
+            - "$all"
+            - "!$test"
+            - "!**/cmd/mcpmoat/*.go"
+            - "!**/internal/llm/*.go"
+          deny:
+            - pkg: github.com/Ducarv/mcpmoat/internal/llm
+              desc: only cmd/mcpmoat may import internal/llm (FR-17, NFR-01)
     # misspell: the locale is left unset on purpose. The docs mix US and UK
     # spellings ("color" and "colour"), so only common misspellings are
     # reported, not US/UK differences.

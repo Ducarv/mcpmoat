@@ -91,6 +91,41 @@ jobs:
         with:
           version: v2.15.0
 
+  # NFR-01: runs the E2E tests in a network namespace that has only loopback,
+  # so a scan that connects to anything else fails the job. It uses no
+  # secrets: the tests use fake keys and loopback servers.
+  offline:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - name: Check out the code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+
+      # The tests run with GOPROXY=off, so fill the module and build caches
+      # while the network is still there.
+      - name: Download modules and build the tests
+        run: |
+          go mod download
+          go version
+          go test -count=1 -run '^$' ./cmd/mcpmoat/
+          go build ./testdata/servers/...
+
+      - name: Run the E2E tests without network
+        # The script makes a private temp dir below TMPDIR: the E2E tests
+        # refuse a temp dir that other users can write, such as /tmp.
+        env:
+          TMPDIR: ${{ runner.temp }}
+        run: .github/scripts/run-offline.sh
+
   # Checks .goreleaser.yaml and builds a snapshot, so a broken release config
   # fails here and not at tag time. It uses no secrets: a snapshot does not
   # publish, so the tap token is not needed.
