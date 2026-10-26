@@ -30,8 +30,9 @@ or one commit gives a repeatable install, as in CI: see [docs/ci.md](docs/ci.md#
 
 Run `mcpmoat version` to check the install. A release binary prints
 `mcpmoat v<version> (commit <c>, built <d>)`. `<d>` is the commit date, not the build time, so the
-same commit always gives the same binary. The `go install` build above prints `commit none, built
-unknown`, because `go install` builds from the Go module cache, which has no git data.
+same commit always gives the same binary. A `go install` build, whatever the `@version`, prints
+`commit none, built unknown`, because `go install` builds from the Go module cache, which has no git
+data.
 
 ### Verify a download
 
