@@ -1,9 +1,8 @@
 name: govulncheck
 
-# GitHub reads a schedule only from the file on the default branch (dev), but
-# this job checks out main, the released code. Dependabot does not bump the
-# version string below. The release-check job in ci.yml checks the pin. See
-# CONTRIBUTING.md for the failure notice and the 60-day rule.
+# GitHub reads a schedule only from the file on the default branch (dev).
+# This job checks out main, the released code. For the failure notice and the
+# 60-day rule, see docs/releasing.md, Weekly vulnerability check.
 on:
   schedule:
     - cron: '17 6 * * 1' # Monday 06:17 UTC
@@ -28,11 +27,12 @@ jobs:
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: go.mod
+          # No cache here, so a cache from another workflow cannot change the scan.
           cache: false
 
       - name: Check for known vulnerabilities
         env:
-          # Dependabot does not bump this version. The release-check job in
-          # ci.yml checks that it matches the pins in ci.yml and release.yml.
+          # Dependabot does not bump this version string. The release-check
+          # job checks that ci.yml and release.yml pin the same version.
           GOVULNCHECK_VERSION: v1.9.0
         run: go run "golang.org/x/vuln/cmd/govulncheck@$GOVULNCHECK_VERSION" ./...
