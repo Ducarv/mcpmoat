@@ -60,8 +60,11 @@ func (t Target) Valid() bool {
 }
 
 // RuleAnalysisBudget is a native rule ID with no YAML file in rules/. mcpmoat
-// scan reports it as a high finding for a server when the per-server rule
-// analysis time budget runs out. The ID passes ValidRuleID.
+// scan reports it as a finding for a server when the per-server rule analysis
+// time budget runs out. The finding has the highest severity of the
+// description and schema rules (Analyzer.MaxSeverity), but never lower than
+// high. The ID passes ValidRuleID. It is reserved: NewSet refuses an external
+// rule with this ID (see ReservedRuleID).
 const RuleAnalysisBudget = "MOAT-T1-023"
 
 // Match is the `match:` block of a rule. Parse checks only its shape, and

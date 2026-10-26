@@ -11,6 +11,7 @@ import (
 	"github.com/Ducarv/mcpmoat/internal/inspect"
 	"github.com/Ducarv/mcpmoat/internal/report"
 	"github.com/Ducarv/mcpmoat/internal/rules"
+	"github.com/Ducarv/mcpmoat/internal/termsafe"
 )
 
 // This file holds the tool rule step of scan: it applies the description and
@@ -25,6 +26,16 @@ import (
 // up. A server that uses up the budget gets a rules.RuleAnalysisBudget
 // finding (see budgetRow).
 const toolRulesBudget = 5 * time.Second
+
+// maxToolKeyRunes caps the tool name in the Key of a tool rule row (see
+// toolKey). A hostile server can send a tool name of up to the size limit of
+// its answer, and one tool can give one row for each rule. Without the cap,
+// the --json report could hold the long name many times. It is the same
+// number as the cap of the tool name in an LLM request (llm.MaxToolNameBytes),
+// but in runes: termsafe.Cut, which the report writers use too, counts runes.
+// So a Key has at most 4 bytes for each rune of valid UTF-8, and 1 byte for
+// each byte that is not valid UTF-8, before the JSON encoder escapes it.
+const maxToolKeyRunes = 512
 
 // toolRulesResult is the result of the tool rule step.
 type toolRulesResult struct {
@@ -68,14 +79,13 @@ const (
 // server in the order that the server lists them, one after the other. Each
 // server gets its own context with the time limit budget (toolRulesBudget in
 // a real scan). When the budget of a server is used up, the step keeps the
-// rows that it found for that server, adds one high
-// rules.RuleAnalysisBudget row (see budgetRow), prints one warning on
-// stderr, and goes on with the next server. A budget of 0 or less is used up
-// at once.
+// rows that it found for that server, adds one rules.RuleAnalysisBudget row
+// (see budgetRow and budgetSeverity), prints one warning on stderr, and goes
+// on with the next server. A budget of 0 or less is used up at once.
 //
-// A finding row holds the rule ID, the tool name in Key (noToolNameKey for
-// an empty name) and the target ("description" or "schema") in Related. It
-// never holds tool text or pattern text. The ignore list drops rows like the
+// A finding row holds the rule ID, the tool name in Key (see toolKey) and the
+// target ("description" or "schema") in Related. It never holds tool text or
+// pattern text. The ignore list compares the real tool name, not the Key. The ignore list drops rows like the
 // rows of the config rules (see scanIgnores.ignored). The step prints one
 // warning for each rule ID that .mcpmoat-ignore cannot ignore.
 //
@@ -94,7 +104,10 @@ func (c *cli) toolRulesStep(ctx context.Context, a *rules.Analyzer, set *rules.S
 	if a == nil {
 		return toolRulesResult{}, nil
 	}
-	run := toolRulesRun{c: c, a: a, set: set, ignore: ignore, budget: budget, counts: counts}
+	run := toolRulesRun{
+		c: c, a: a, set: set, ignore: ignore, budget: budget, counts: counts,
+		budgetSeverity: budgetSeverity(a),
+	}
 	// inspect.Run sorts the outcomes, so their order is not the order of the
 	// servers.
 	sorted := slices.SortedStableFunc(slices.Values(outcomes), func(x, y inspect.Outcome) int {
@@ -121,8 +134,12 @@ type toolRulesRun struct {
 	set    *rules.Set
 	ignore *scanIgnores
 	budget time.Duration
-	counts []int
-	res    toolRulesResult
+	// budgetSeverity is the severity of a rules.RuleAnalysisBudget row (see
+	// budgetSeverity). It is the same for each server, so the step computes
+	// it once.
+	budgetSeverity rules.Severity
+	counts         []int
+	res            toolRulesResult
 	// fileBlocked lists the rule IDs that have a .mcpmoat-ignore entry that
 	// matches a kept row but is not applied (see scanIgnores). Each ID is in
 	// it once, in the order of the first row that it matched.
@@ -157,7 +174,7 @@ func (r *toolRulesRun) checkServer(ctx context.Context, o inspect.Outcome) error
 			// The budget of this server is used up. The tool at i was cut,
 			// so it counts as not fully checked.
 			notChecked := len(tools) - i
-			r.add(o.Index, "", budgetRow(ref, notChecked, len(tools)))
+			r.add(o.Index, "", budgetRow(ref, r.budgetSeverity, notChecked, len(tools)))
 			r.c.scanWarnf("server %s: the rule analysis stopped after %s; %d of %d %s not fully checked",
 				cutName(o.Server.Name), r.budget, notChecked, len(tools), plural(len(tools), "tool", "tools"))
 			return nil
@@ -194,14 +211,9 @@ func (r *toolRulesRun) add(index int, toolName string, row report.FindingRow) {
 // textRow returns the finding row of the rule hit f on the tool toolName of
 // the server ref. The severity, the title, the risk and the remediation come
 // from the rule set, as for the config rules (see findingRule). The Key is
-// the tool name, or noToolNameKey for an empty name: the report writers
-// treat a row with an empty Key as a row about the whole server.
+// toolKey(toolName).
 func textRow(set *rules.Set, ref report.ServerRef, toolName string, f rules.TextFinding) report.FindingRow {
 	rule, severity := findingRule(set, f.RuleID)
-	key := toolName
-	if key == "" {
-		key = noToolNameKey
-	}
 	return report.FindingRow{
 		ServerRef:   ref,
 		RuleID:      f.RuleID,
@@ -210,22 +222,54 @@ func textRow(set *rules.Set, ref report.ServerRef, toolName string, f rules.Text
 		Risk:        rule.Risk,
 		Remediation: rule.Remediation,
 		Field:       rules.FieldTool,
-		Key:         key,
+		Key:         toolKey(toolName),
 		Related:     string(f.Target),
 	}
 }
 
-// budgetRow returns the high rules.RuleAnalysisBudget row of the server ref,
-// whose rule analysis used up its time budget. notChecked is the number of
-// tools that were not fully checked, out of total. The row is about the whole
-// server, so its Key is empty. All its texts are fixed (see budgetTitle),
-// apart from the two numbers in Related. They do not come from the rule set:
-// a rule from --rules could use the same ID.
-func budgetRow(ref report.ServerRef, notChecked, total int) report.FindingRow {
+// toolKey returns the Key of a tool rule row for the tool name: the name cut
+// to maxToolKeyRunes runes, with termsafe.CutMarker at the end when it was
+// cut. An empty name gives noToolNameKey: the report writers treat a row with
+// an empty Key as a row about the whole server. The Key is raw text: the
+// report writers escape it, as they escape every Key.
+func toolKey(name string) string {
+	if name == "" {
+		return noToolNameKey
+	}
+	short, cut := termsafe.Cut(name, maxToolKeyRunes)
+	if cut {
+		return short + termsafe.CutMarker
+	}
+	return short
+}
+
+// budgetSeverity returns the severity of a rules.RuleAnalysisBudget row: the
+// highest severity of the description and schema rules of a (see
+// rules.Analyzer.MaxSeverity), but never lower than high.
+//
+// The rules that did not run could have given a finding of that severity. So
+// a server cannot make a critical finding go away when it uses up the budget:
+// with a critical rule (from --rules) the budget row is critical too, and
+// "--fail-on critical" still gives exit code 1.
+func budgetSeverity(a *rules.Analyzer) rules.Severity {
+	if s := a.MaxSeverity(); s.Rank() > rules.SeverityHigh.Rank() {
+		return s
+	}
+	return rules.SeverityHigh
+}
+
+// budgetRow returns the rules.RuleAnalysisBudget row of the server ref, whose
+// rule analysis used up its time budget. severity is the severity of the row
+// (see budgetSeverity). notChecked is the number of tools that were not fully
+// checked, out of total. The row is about the whole server, so its Key is
+// empty. All its texts are fixed (see budgetTitle), apart from the two
+// numbers in Related. They do not come from the rule set: a rule from --rules
+// could use the same ID.
+func budgetRow(ref report.ServerRef, severity rules.Severity, notChecked, total int) report.FindingRow {
 	return report.FindingRow{
 		ServerRef:   ref,
 		RuleID:      rules.RuleAnalysisBudget,
-		Severity:    string(rules.SeverityHigh),
+		Severity:    string(severity),
 		Title:       budgetTitle,
 		Risk:        budgetRisk,
 		Remediation: budgetRemediation,

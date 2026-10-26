@@ -19,13 +19,18 @@ here.
 - mcpmoat fails closed. A finding with a severity that mcpmoat does not know always counts, at
   every `--fail-on` value. A finding whose rule ID is not in the rule set counts as critical.
 - No built-in rule is critical yet, so `--fail-on critical` passes every built-in finding, also a
-  rug pull (`MOAT-T2-001` is high). It fails only in the two fail-closed cases above. `scan` says
-  so on stderr: `mcpmoat scan: note: no built-in rule is critical yet, so with --fail-on critical
-  no built-in finding gives exit code 1`.
+  rug pull (`MOAT-T2-001` is high). `scan` says so on stderr: `mcpmoat scan: note: no built-in
+  rule is critical yet, so with --fail-on critical no built-in finding gives exit code 1`. It fails
+  only in the two fail-closed cases above, or when a description or schema rule from `--rules` is
+  critical: then a finding of that rule and a `MOAT-T1-023` budget finding (see below) give exit
+  code 1.
 - An unpinned server that fails or times out is a warning only (in the summary, or on stderr with
   `--json`). It does not change the exit code. A pinned server that fails or times out is a high `MOAT-T2-004` finding.
-- A server whose rule analysis uses up its time budget (5 seconds for each server) is a high
-  `MOAT-T1-023` finding. It is not an execution error: it gives exit code 1 with the default
+- A server whose rule analysis uses up its time budget (5 seconds for each server) is a
+  `MOAT-T1-023` finding. Its severity is the highest severity of the description and schema rules
+  that `scan` applies, but never lower than high. So it is high with the built-in rules, and
+  critical when a description or schema rule from `--rules` is critical. Then `--fail-on critical`
+  gives exit code 1 for it. It is not an execution error: it gives exit code 1 with the default
   `--fail-on`, and the JSON `complete` stays `true`. `scan` also prints a warning on stderr, and
   the other servers still get their own budget.
 

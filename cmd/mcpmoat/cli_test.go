@@ -393,7 +393,8 @@ func TestUsageContent(t *testing.T) {
 		"Rules with target description or schema apply to the tools. Rules with target config are not applied\n",
 		"  When scan connects to the servers, it applies the description and schema rules (T1 and T3, built-in and from --rules)\n",
 		"  to the tools of each server. --no-connect applies none of them, and scan prints a note when --rules has such a rule.\n",
-		"  The rule analysis of each server has a time budget of 5s. A server that uses it up is a high finding (MOAT-T1-023).\n",
+		"  The rule analysis of each server has a time budget of 5s. A server that uses it up is a finding (MOAT-T1-023):\n",
+		"  high, or critical when a description or schema rule from --rules is critical.\n",
 		"  Rules from --rules with target config are not applied: scan runs only its built-in config checks, and prints a note.\n",
 		"  Exit code 1 means a finding that is not ignored, with severity at or above --fail-on (default high).\n",
 		// The LLM flags (FR-17). The first line says that --llm is the one

@@ -709,3 +709,222 @@ func TestNewSetErrorCap(t *testing.T) {
 		}
 	})
 }
+
+// reservedIDText is the documented Error() text of a ReasonReservedID error
+// for the external rule file ext.yaml.
+const reservedIDText = "ext.yaml: field id: rule ID is reserved for a native mcpmoat rule"
+
+func TestReservedRuleID(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		id   string
+		want bool
+	}{
+		// The rule analysis budget finding: one exact ID, in any case.
+		{id: "MOAT-T1-023", want: true},
+		{id: "moat-t1-023", want: true},
+		{id: "Moat-T1-023", want: true},
+		// The pin findings: the whole MOAT-T2- family, in any case.
+		{id: "MOAT-T2-001", want: true},
+		{id: "MOAT-T2-002", want: true},
+		{id: "MOAT-T2-003", want: true},
+		{id: "MOAT-T2-004", want: true},
+		{id: "MOAT-T2-999", want: true},
+		{id: "MOAT-T2-", want: true},
+		{id: "moat-t2-001", want: true},
+		{id: "Moat-t2-004", want: true},
+		// The LLM findings: the whole MOAT-LLM- family, in any case.
+		{id: "MOAT-LLM-001", want: true},
+		{id: "MOAT-LLM-002", want: true},
+		{id: "MOAT-LLM-003", want: true},
+		{id: "moat-llm-001", want: true},
+		{id: "Moat-Llm-002", want: true},
+		// IDs that only look close to a reserved ID.
+		{id: ""},
+		{id: "MOAT-T1-001"},
+		{id: "MOAT-T1-022"},
+		{id: "MOAT-T1-024"},
+		{id: "MOAT-T1-0230"},
+		{id: "MOAT-T1-023-x"},
+		{id: "MOAT-T2"},
+		{id: "MOAT-T3-001"},
+		{id: "MOAT-T12-001"},
+		{id: "MOAT-LLM"},
+		{id: "XMOAT-T2-001"},
+		{id: "ACME-T2-001"},
+		{id: "ACME-LLM-001"},
+		{id: "MOAT_T2_001"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.id, func(t *testing.T) {
+			t.Parallel()
+			if got := ReservedRuleID(tt.id); got != tt.want {
+				t.Errorf("ReservedRuleID(%q) = %v, want %v", tt.id, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestNewSetReservedID checks that NewSet refuses an external rule with a
+// reserved ID, in any case, with the documented error, and that it accepts a
+// normal external ID.
+func TestNewSetReservedID(t *testing.T) {
+	t.Parallel()
+	builtin := []Rule{testRule("MOAT-T1-001", "builtin.yaml")}
+	tests := []struct {
+		id       string
+		reserved bool
+	}{
+		{id: RuleAnalysisBudget, reserved: true},
+		{id: "moat-t1-023", reserved: true},
+		{id: "Moat-T1-023", reserved: true},
+		{id: "MOAT-T2-001", reserved: true},
+		{id: "MOAT-T2-002", reserved: true},
+		{id: "MOAT-T2-003", reserved: true},
+		{id: "MOAT-T2-004", reserved: true},
+		{id: "moat-t2-001", reserved: true},
+		{id: "mOaT-T2-003", reserved: true},
+		{id: "MOAT-T2-077", reserved: true},
+		{id: "MOAT-LLM-001", reserved: true},
+		{id: "MOAT-LLM-002", reserved: true},
+		{id: "moat-llm-002", reserved: true},
+		{id: "Moat-Llm-001", reserved: true},
+		{id: "ACME-001"},
+		{id: "MOAT-T1-024"},
+		{id: "MOAT-T3-777"},
+		{id: "acme.t2-001"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.id, func(t *testing.T) {
+			t.Parallel()
+			external := []Rule{testRule("ACME-OK-1", "ok.yaml"), testRule(tt.id, "ext.yaml")}
+			s, errs := NewSet(builtin, external)
+			if !tt.reserved {
+				if len(errs) != 0 || s == nil {
+					t.Fatalf("NewSet() = (%v, %v), want a set and no errors", s, errs)
+				}
+				if _, ok := s.Get(tt.id); !ok {
+					t.Errorf("Get(%q) ok = false, want true", tt.id)
+				}
+				return
+			}
+			if s != nil {
+				t.Errorf("NewSet() set = %v, want nil when there are errors", s)
+			}
+			if _, ok := s.Get(tt.id); ok {
+				t.Errorf("Get(%q) ok = true, want false for a reserved ID", tt.id)
+			}
+			if len(errs) != 1 {
+				t.Fatalf("NewSet() returned %d errors (%v), want 1", len(errs), errs)
+			}
+			e := errs[0]
+			if e.Reason != ReasonReservedID || e.File != "ext.yaml" || e.Field != "id" || e.Err != nil {
+				t.Errorf("error = {File:%q Field:%q Reason:%q Err:%v}, want {File:%q Field:%q Reason:%q Err:<nil>}",
+					e.File, e.Field, e.Reason, e.Err, "ext.yaml", "id", ReasonReservedID)
+			}
+			if got := e.Error(); got != reservedIDText {
+				t.Errorf("Error() = %q, want %q", got, reservedIDText)
+			}
+		})
+	}
+}
+
+// TestNewSetReservedIDOrder checks that a reserved ID error comes in input
+// order among the other errors, and that a reserved ID used twice gives two
+// reserved ID errors and no duplicate ID error.
+func TestNewSetReservedIDOrder(t *testing.T) {
+	t.Parallel()
+	builtin := []Rule{testRule("B-1", "b1.yaml"), testRule("B-1", "b1dup.yaml")}
+	external := []Rule{
+		testRule("E-1", "e1.yaml"),
+		testRule("MOAT-T2-001", "pin1.yaml"),
+		testRule("B-1", "clash.yaml"),
+		testRule("moat-t2-001", "pin2.yaml"),
+		testRule("E-1", "e1dup.yaml"),
+		testRule("MOAT-T2-001", "pin3.yaml"),
+	}
+	want := []struct {
+		file   string
+		reason Reason
+	}{
+		{"b1dup.yaml", ReasonDuplicateID},
+		{"pin1.yaml", ReasonReservedID},
+		{"clash.yaml", ReasonBuiltinIDClash},
+		{"pin2.yaml", ReasonReservedID},
+		{"e1dup.yaml", ReasonDuplicateID},
+		{"pin3.yaml", ReasonReservedID},
+	}
+	s, errs := NewSet(builtin, external)
+	if s != nil {
+		t.Errorf("set = %v, want nil", s)
+	}
+	if len(errs) != len(want) {
+		t.Fatalf("got %d errors (%v), want %d", len(errs), errs, len(want))
+	}
+	for i, e := range errs {
+		if e.File != want[i].file || e.Reason != want[i].reason {
+			t.Errorf("errs[%d] = {File:%q Reason:%q}, want {File:%q Reason:%q}",
+				i, e.File, e.Reason, want[i].file, want[i].reason)
+		}
+	}
+}
+
+// TestNewSetReservedIDErrorCap checks that the reserved ID errors count
+// toward maxSetErrors, alone and together with the clash errors.
+func TestNewSetReservedIDErrorCap(t *testing.T) {
+	t.Parallel()
+	reservedIDs := []string{RuleAnalysisBudget, "MOAT-T2-001", "moat-llm-002"}
+
+	tests := []struct {
+		name      string
+		n         int  // number of external rules
+		withClash bool // every second external rule clashes with a built-in rule
+		wantErrs  int  // length of the returned slice
+		wantMore  int  // 0 means no summary entry
+	}{
+		{name: "reserved only, at the cap", n: 100, wantErrs: 100},
+		{name: "reserved only, over the cap", n: 150, wantErrs: 101, wantMore: 50},
+		{name: "reserved and clash, over the cap", n: 160, withClash: true, wantErrs: 101, wantMore: 60},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			builtin := []Rule{testRule("B-1", "builtin.yaml")}
+			external := make([]Rule, tt.n)
+			wantReasons := make([]Reason, tt.n)
+			for i := range external {
+				file := fmt.Sprintf("ext%04d.yaml", i)
+				if tt.withClash && i%2 == 1 {
+					external[i] = testRule("B-1", file)
+					wantReasons[i] = ReasonBuiltinIDClash
+					continue
+				}
+				external[i] = testRule(reservedIDs[i%len(reservedIDs)], file)
+				wantReasons[i] = ReasonReservedID
+			}
+
+			s, errs := NewSet(builtin, external)
+			if s != nil {
+				t.Errorf("set = non-nil, want nil")
+			}
+			if len(errs) != tt.wantErrs {
+				t.Fatalf("got %d errors, want %d", len(errs), tt.wantErrs)
+			}
+			shown := min(tt.n, maxSetErrors)
+			for i, e := range errs[:shown] {
+				wantFile := fmt.Sprintf("ext%04d.yaml", i)
+				if e.File != wantFile || e.Reason != wantReasons[i] {
+					t.Fatalf("errs[%d] = {File:%q Reason:%q}, want {File:%q Reason:%q}",
+						i, e.File, e.Reason, wantFile, wantReasons[i])
+				}
+			}
+			if tt.wantMore == 0 {
+				if errs[len(errs)-1].Reason == ReasonTooManyErrors {
+					t.Errorf("unexpected summary error %q", errs[len(errs)-1].Error())
+				}
+				return
+			}
+			requireCapSummary(t, errs[len(errs)-1], tt.wantMore)
+		})
+	}
+}

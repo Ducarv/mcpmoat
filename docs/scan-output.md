@@ -42,10 +42,12 @@ MEDIUM (1)
 - **Tool rule findings:** when `scan` connects to the servers, it applies the description and
   schema rules (T1 and T3, built-in and from `--rules`) to every tool. A finding of these rules has
   a `Tool:` line in place of `Where:`: the tool name, then `(description)` or `(schema)`, the part
-  of the tool that matched. The finding never shows the tool text or the pattern.
+  of the tool that matched. A tool name longer than 512 characters (runes) is cut to 512 and ends
+  with `...`. The finding never shows the tool text or the pattern.
 - **Time budget:** the rule analysis of each server has 5 seconds. A server that uses it up keeps
-  the findings found so far, and gets one high `MOAT-T1-023` finding with a `Reason:` line in place
-  of `Tool:`. `scan` also prints one warning on stderr. This finding is not an error: it counts for
+  the findings found so far, and gets one `MOAT-T1-023` finding with a `Reason:` line in place of
+  `Tool:`. The finding is high, or critical when a description or schema rule from `--rules` is
+  critical. `scan` also prints one warning on stderr. This finding is not an error: it counts for
   `--fail-on` like any other finding (exit code 1 with the default), not exit code 2.
 - **Counts:** the tool rule findings and `MOAT-T1-023` count in the findings of their server in
   the summary.
@@ -99,7 +101,8 @@ mcpmoat scan --json | jq -r '.findings[] | "\(.rule_id) \(.server)"'
   always check the exit code too. A server that uses up its rule time budget does not make
   `complete` `false`: the `MOAT-T1-023` finding tells you about it.
 - A tool rule finding has `"field": "tool"`, the tool name in `key`, and `description` or `schema`
-  in `related`. The `MOAT-T1-023` finding has `"field": "tool"`, an empty `key`, and the reason
+  in `related`. A tool name longer than 512 characters (runes) is cut to 512 in `key` and ends
+  with `...`. The `MOAT-T1-023` finding has `"field": "tool"`, an empty `key`, and the reason
   (`rule analysis time budget used up; N of M tools not fully checked`) in `related`.
 - The document never holds env or header values. A finding names the key it is about, for example
   `GITHUB_TOKEN`, never its value. See [JSON output](ARCHITECTURE.md#json-output) for the full

@@ -208,7 +208,7 @@ The fields:
 
 | Field | Meaning |
 |---|---|
-| `id` | Unique ID. Built-in rules: `MOAT-T<1-5>-NNN`. External rules: letters, digits, `.`, `_` and `-`, up to 64 characters, starting with a letter or digit. No spaces and no `/`. |
+| `id` | Unique ID. Built-in rules: `MOAT-T<1-5>-NNN`. External rules: letters, digits, `.`, `_` and `-`, up to 64 characters, starting with a letter or digit. No spaces and no `/`. An external rule must not use a built-in ID or a reserved native ID (see [Try an external rule](#5-try-an-external-rule)). |
 | `title` | Short name, up to 200 characters. |
 | `severity` | `low`, `medium`, `high` or `critical`. |
 | `target` | What the rule inspects: `description`, `schema` or `config`. Every test case of a `target: schema` rule must be valid JSON, such as a tool input schema. The tests report a case that is not. |
@@ -247,7 +247,9 @@ Guidelines:
 - Keep the cost of a rule low. A regex runs on up to 21 forms of each text (see above), for each
   tool of each server. `scan` gives the rule analysis of each server a time budget of 5 seconds,
   for the built-in rules and the rules from `--rules` together. A server that uses it up gets a
-  high `MOAT-T1-023` finding, and the rest of its tools are not fully checked. So a slow rule can
+  `MOAT-T1-023` finding, and the rest of its tools are not fully checked. This finding has the
+  highest severity of the description and schema rules, but never lower than high. So a critical
+  rule from `--rules` makes it critical too. So a slow rule can
   give a false alarm on a benign server. Prefer a few short patterns. A long alternation with many
   branches, or a large bounded repeat such as `{0,1000}`, costs time on every form.
 - Prefer a lower severity when you are not sure. False positives make people stop using the tool.
@@ -331,9 +333,18 @@ not read subfolders and it refuses symlinks inside the folder. A symlink as the 
 followed, like any path you type, so run `--rules` only on a folder you trust or have looked at. A
 folder holds at most 1000 such files. An external rule can use any safe ID (see the `id` field above),
 but it must not use the ID of a built-in rule, in any case (`moat-t1-003` clashes with `MOAT-T1-003`).
+It must not use a reserved native ID either, in any case. mcpmoat makes these findings in Go code,
+with no YAML file:
+
+- `MOAT-T1-023`, the time budget finding;
+- any ID that starts with `MOAT-T2-`, the pin findings;
+- any ID that starts with `MOAT-LLM-`, the `--llm` findings.
+
+Such a rule gives the error `<file>: field id: rule ID is reserved for a native mcpmoat rule`, and
+`scan` exits with code 2.
 
 `scan` loads the rules and compiles their regexes when it starts, before it starts a server, also
-with `--no-connect`. An invalid file, a clashing ID or a regex that does not compile gives exit
+with `--no-connect`. An invalid file, a clashing or reserved ID or a regex that does not compile gives exit
 code 2, and the message names the file. For a bad regex, it also names the field `match`. So
 `mcpmoat scan --rules ./my-rules --no-connect` checks your files and starts no server.
 
@@ -347,7 +358,9 @@ What `scan` does with the rules from `--rules`:
   its built-in config checks, and prints this note on stderr:
   `mcpmoat scan: rules from --rules with target config are not applied; scan applies only the built-in config checks`.
 - Your rules share the 5-second time budget of each server with the built-in rules (see the
-  guideline on rule cost in step 2).
+  guideline on rule cost in step 2). When one of your description or schema rules is critical, the
+  `MOAT-T1-023` finding of a server that uses up the budget is critical too, so
+  `--fail-on critical` gives exit code 1 for it.
 
 ## See also
 

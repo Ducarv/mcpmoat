@@ -516,8 +516,10 @@ const configErrorHint = "mcpmoat scan: a config file has a problem; " +
 // (see classifyTools) are merged with the config findings before the report
 // (the table or the JSON document) is written, so the report holds them all
 // and scanExitCode sees them all: an LLM finding counts for --fail-on like any
-// other. A server whose rule analysis uses up setup.toolBudget gets a high
+// other. A server whose rule analysis uses up setup.toolBudget gets a
 // MOAT-T1-023 finding and a warning on stderr; that alone is not exit code 2.
+// The finding is high, or critical when a description or schema rule from
+// --rules is critical (see budgetSeverity).
 // New pins are saved after the report is printed, so a save error never hides
 // the report. The "pinned N tools" notices come after a successful save.
 //

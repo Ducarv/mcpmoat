@@ -29,14 +29,11 @@ This page lists what mcpmoat does not do, so you know how far to trust a clean s
   config checks, and prints `mcpmoat scan: rules from --rules with target config are not applied;
   scan applies only the built-in config checks` on stderr.
 - The rule analysis of each server has a time budget of 5 seconds. A server that uses it up gets
-  one high `MOAT-T1-023` finding, and its tools that were not fully checked can hide a malicious
-  text. The finding counts for `--fail-on` like any other (see [Exit codes](exit-codes.md)).
+  one `MOAT-T1-023` finding (high, or critical when a description or schema rule from `--rules` is
+  critical), and its tools that were not fully checked can hide a malicious text. The finding counts for `--fail-on` like any other (see [Exit codes](exit-codes.md)).
 - The budget cannot stop the build of the match forms of one text. For a very hostile text (for
   example 128 KiB of one run of invisible characters), this build can take about a second, so the
   analysis of a server can end that much after its budget (#146).
-- A rule from `--rules` can use the ID `MOAT-T1-023` of the budget finding, because mcpmoat does
-  not reserve its native rule IDs against `--rules` yet. The budget finding keeps its own texts
-  and severity.
 - `--llm` does not make a scan complete or reliable. A model can miss a malicious tool, and a
   hostile description can try to influence the model. Its findings are advisory, and with `--llm`
   your tool names and descriptions leave your machine.

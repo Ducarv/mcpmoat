@@ -410,6 +410,101 @@ func TestNewAnalyzerEmpty(t *testing.T) {
 	})
 }
 
+// TestAnalyzerMaxSeverity checks that MaxSeverity gives the highest severity
+// of the description and schema rules, and the empty Severity when there is
+// no such rule. Config rules do not count: CheckTool never runs them.
+func TestAnalyzerMaxSeverity(t *testing.T) {
+	t.Parallel()
+
+	// criticalDir holds one valid external description rule that is critical.
+	criticalDir := t.TempDir()
+	writeFile(t, criticalDir, "critical.yaml", "id: MOAT-X-900\ntitle: Critical fixture\nseverity: critical\ntarget: description\n"+
+		"match:\n  keywords:\n    - zqcriticalmark\n"+
+		"risk: Fixture.\nremediation: Fixture.\n"+
+		"should_match:\n  - A zqcriticalmark here.\n"+
+		"should_not_match:\n  - Lists the files in a folder.\n")
+	keywords := Match{Keywords: []string{"marker"}}
+
+	tests := []struct {
+		name string
+		set  func(t *testing.T) *Set
+		want Severity
+	}{
+		{name: "nil set", set: func(*testing.T) *Set { return nil }, want: ""},
+		{name: "empty set", set: func(*testing.T) *Set { return &Set{} }, want: ""},
+		{
+			name: "config rules only",
+			set: func(*testing.T) *Set {
+				return &Set{rules: []Rule{{ID: "A", Target: TargetConfig, Severity: SeverityCritical}}}
+			},
+			want: "",
+		},
+		{
+			// No built-in rule is critical (see TestNoBuiltinCriticalSeverity
+			// in cmd/mcpmoat), and several description rules are high.
+			name: "built-in rules",
+			set:  builtinSet,
+			want: SeverityHigh,
+		},
+		{
+			name: "built-in rules and an external critical rule",
+			set: func(t *testing.T) *Set {
+				t.Helper()
+				rs, errs := LoadDir(criticalDir)
+				if len(errs) > 0 {
+					t.Fatalf("LoadDir(%q) errors = %v, want none", criticalDir, errs)
+				}
+				set, errs := NewSet(mustBuiltin(t), rs)
+				if len(errs) > 0 {
+					t.Fatalf("NewSet() errors = %v, want none", errs)
+				}
+				return set
+			},
+			want: SeverityCritical,
+		},
+		{
+			name: "a critical config rule does not count",
+			set: func(*testing.T) *Set {
+				return &Set{rules: []Rule{
+					{ID: "A-CONFIG", Target: TargetConfig, Severity: SeverityCritical},
+					{ID: "B-DESC", Target: TargetDescription, Severity: SeverityLow, Match: keywords},
+					{ID: "C-SCHEMA", Target: TargetSchema, Severity: SeverityMedium, Match: keywords},
+				}}
+			},
+			want: SeverityMedium,
+		},
+		{
+			// Validate refuses such a rule, so only a Set built by hand has
+			// one. It counts as critical (fail closed).
+			name: "a severity that is not valid counts as critical",
+			set: func(*testing.T) *Set {
+				return &Set{rules: []Rule{
+					{ID: "A-DESC", Target: TargetDescription, Severity: SeverityHigh, Match: keywords},
+					{ID: "B-DESC", Target: TargetDescription, Severity: Severity("bogus"), Match: keywords},
+				}}
+			},
+			want: SeverityCritical,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			a := mustAnalyzer(t, tt.set(t))
+			if got := a.MaxSeverity(); got != tt.want {
+				t.Errorf("MaxSeverity() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+
+	t.Run("nil Analyzer", func(t *testing.T) {
+		t.Parallel()
+		var a *Analyzer
+		if got := a.MaxSeverity(); got != "" {
+			t.Errorf("(*Analyzer)(nil).MaxSeverity() = %q, want the empty Severity", got)
+		}
+	})
+}
+
 // TestAnalyzerBudgetRuleID checks that the native ID of the budget finding
 // is a valid ID that no built-in YAML rule uses.
 func TestAnalyzerBudgetRuleID(t *testing.T) {

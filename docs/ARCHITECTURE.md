@@ -149,7 +149,9 @@ offline CI job are the proof.
    classifier. This all happens before the rules load (see
    [The `--llm` classifier](#the---llm-classifier)).
 2. It loads the rules with `rules.Builtin` and, with `--rules`, `rules.LoadDir`. Then
-   `rules.NewSet` checks for duplicate rule IDs and for clashes with built-in IDs. Last,
+   `rules.NewSet` checks for duplicate rule IDs, for clashes with built-in IDs and for reserved
+   native IDs (`rules.ReservedRuleID`): a rule from `--rules` must not use `MOAT-T1-023` or an ID
+   that starts with `MOAT-T2-` or `MOAT-LLM-`, in any case. Last,
    `rules.NewAnalyzer` compiles the match block of each description and schema rule once (it skips
    the config rules). A rule whose regex does not compile gives a load error with the file, the
    field `match` and the reason. A bad rule file, an ID problem or a bad regex gives exit code 2,
@@ -262,6 +264,8 @@ the connect, pin, tool rule and LLM steps between step 5 and step 6:
     order: the description rules, then the schema rules, each in rule ID order.
   - Rows: one row for each rule with a hit. The row has the field `tool`, the tool name as the key
     and `description` or `schema` as the related name. It never holds tool text or pattern text.
+    The key is cut to 512 runes and then ends with `...` (`toolKey`, `maxToolKeyRunes`), so a long
+    tool name cannot fill the report.
     The rule set gives the severity, the title, the risk and the remediation. The ignore list drops
     rows like the config rows (see step 3).
   - Budget: each server gets its own wall-clock budget of 5 seconds (`toolRulesBudget`), as a
@@ -269,8 +273,12 @@ the connect, pin, tool rule and LLM steps between step 5 and step 6:
     the schema strings and the seams. So it stops at most about one regex on one form after the
     deadline (under about 1 s in the measured worst case), plus one build of the forms of one text,
     which cannot be stopped (#146). A server that uses up its budget keeps the rows found so far and
-    gets one high finding `MOAT-T1-023` (`rules.RuleAnalysisBudget`, a native rule with no YAML
-    file). Its related text is `rule analysis time budget used up; N of M tools not fully checked`.
+    gets one finding `MOAT-T1-023` (`rules.RuleAnalysisBudget`, a native rule with no YAML file).
+    Its severity is the highest severity of the description and schema rules that `scan` applies,
+    but never lower than high (`budgetSeverity`, `rules.Analyzer.MaxSeverity`). So it is high with
+    the built-in rules, and critical when a description or schema rule from `--rules` is
+    critical. Its related text is `rule analysis time budget used up; N of M tools not fully
+    checked`.
     `scan` also prints one fixed warning on stderr for that server. This is a finding, not an
     execution error: the exit code follows `--fail-on` (1 with the default), and the JSON
     `complete` stays `true`. The other servers still run, each with its own budget.
@@ -370,10 +378,7 @@ saves nothing, prints `mcpmoat pin: interrupted; no pins were saved` and exits w
 The code below is built and tested, but `scan` does not call it yet: `rules.CheckShadowing`
 (#200).
 
-Known gaps: the store has no lock (#150), only a read just before the save. A rule from `--rules`
-can use the native ID `MOAT-T1-023`, because the native rule IDs are not reserved against
-`--rules` yet. A follow-up issue will fix this. The budget row keeps its own fixed texts and
-severity, so such a rule does not change it.
+Known gap: the store has no lock (#150), only a read just before the save.
 
 Known limit: a renamed or moved server (a new name, config file or project path) has a new identity.
 `scan` pins it again as a new server, and it does not report the old pin. A follow-up issue will

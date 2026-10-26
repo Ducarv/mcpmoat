@@ -17,6 +17,9 @@ import (
 type Analyzer struct {
 	description []analyzerRule // the description rules, in rule ID order
 	schema      []analyzerRule // the schema rules, in rule ID order
+	// maxSeverity is the highest severity of the rules in description and
+	// schema, or "" when there is no rule (see MaxSeverity).
+	maxSeverity Severity
 }
 
 // analyzerRule is one rule of an Analyzer with its compiled match block.
@@ -74,11 +77,43 @@ func NewAnalyzer(set *Set) (*Analyzer, []*LoadError) {
 		} else {
 			a.schema = append(a.schema, ar)
 		}
+		a.maxSeverity = higherSeverity(a.maxSeverity, r.Severity)
 	}
 	if len(errs) > 0 {
 		return nil, errs
 	}
 	return a, nil
+}
+
+// MaxSeverity returns the highest severity of the description and schema
+// rules of a: the most serious finding that CheckTool can give. A rule
+// severity that is not valid counts as SeverityCritical, so the result fails
+// closed. Validate refuses such a rule, so this does not occur with a loaded
+// set.
+//
+// A nil Analyzer, or one with no description or schema rule, returns the
+// empty Severity (its Rank is 0).
+//
+// scan uses it for the severity of the rule analysis budget finding
+// (RuleAnalysisBudget): the rules that did not run could have given a finding
+// of this severity.
+func (a *Analyzer) MaxSeverity() Severity {
+	if a == nil {
+		return ""
+	}
+	return a.maxSeverity
+}
+
+// higherSeverity returns the more serious of cur and s. A severity s that is
+// not valid counts as SeverityCritical (see MaxSeverity).
+func higherSeverity(cur, s Severity) Severity {
+	if !s.Valid() {
+		s = SeverityCritical
+	}
+	if s.Rank() > cur.Rank() {
+		return s
+	}
+	return cur
 }
 
 // CheckTool runs every description rule on t.Description and every schema

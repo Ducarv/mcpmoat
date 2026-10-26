@@ -22,6 +22,7 @@ import (
 	"github.com/Ducarv/mcpmoat/internal/inspect/inspecttest"
 	"github.com/Ducarv/mcpmoat/internal/report"
 	"github.com/Ducarv/mcpmoat/internal/rules"
+	"github.com/Ducarv/mcpmoat/internal/termsafe"
 )
 
 // The tool texts of the tests. Each poisoned text fires exactly one built-in
@@ -682,4 +683,232 @@ func TestScanToolsInterrupted(t *testing.T) {
 			assertDirUnchanged(t, e.xdg, pinsBefore)
 		})
 	}
+}
+
+// TestScanToolsBudgetIgnore checks that the ignore list drops a
+// rules.RuleAnalysisBudget row like any other rule row: --ignore and a
+// .mcpmoat-ignore entry for the rule, or for the rule and the server, drop it.
+// The row is about the whole server (its tool is ""), so an entry for one
+// tool of the server does not drop it (see rules.IgnoreList.Ignored). The
+// stderr warning of the used-up budget still prints when the row is dropped:
+// the user must still know that the tools were not fully checked.
+func TestScanToolsBudgetIgnore(t *testing.T) {
+	t.Parallel()
+
+	const budget = time.Nanosecond
+	const usingOneEntry = scanPrefix + "using 1 entry from " + rules.IgnoreFileName
+	warning := budgetWarning("srv", budget, 2, 2)
+	ignoredLine := scanPrefix + "1 finding ignored: " + rules.RuleAnalysisBudget + " (1)"
+	budgetFinding := toolFinding{rules.RuleAnalysisBudget, "high", "srv", "", quotedCell(budgetReason(2, 2))}
+
+	tests := []struct {
+		name string
+		// file is the content of .mcpmoat-ignore in the working directory,
+		// or "" for no file.
+		file  string
+		flags []string
+		code  int
+		want  []toolFinding
+		// stderr are the exact stderr lines, in order.
+		stderr []string
+	}{
+		{
+			name:   "no ignore keeps the row",
+			code:   exitFindings,
+			want:   []toolFinding{budgetFinding},
+			stderr: []string{warning, pinnedLine("srv", 2)},
+		},
+		{
+			name:   "--ignore drops the row",
+			flags:  []string{"--ignore", rules.RuleAnalysisBudget},
+			code:   exitOK,
+			stderr: []string{warning, ignoredLine, pinnedLine("srv", 2)},
+		},
+		{
+			name:   ".mcpmoat-ignore entry for the rule drops the row",
+			file:   rules.RuleAnalysisBudget + "\n",
+			code:   exitOK,
+			stderr: []string{usingOneEntry, warning, ignoredLine, pinnedLine("srv", 2)},
+		},
+		{
+			name:   ".mcpmoat-ignore entry for the rule and the server drops the row",
+			file:   rules.RuleAnalysisBudget + " srv\n",
+			code:   exitOK,
+			stderr: []string{usingOneEntry, warning, ignoredLine, pinnedLine("srv", 2)},
+		},
+		{
+			name:   ".mcpmoat-ignore entry for a tool of the server keeps the row",
+			file:   rules.RuleAnalysisBudget + " srv/read_file\n",
+			code:   exitFindings,
+			want:   []toolFinding{budgetFinding},
+			stderr: []string{usingOneEntry, warning, pinnedLine("srv", 2)},
+		},
+		{
+			name:   ".mcpmoat-ignore entry for another server keeps the row",
+			file:   rules.RuleAnalysisBudget + " other\n",
+			code:   exitFindings,
+			want:   []toolFinding{budgetFinding},
+			stderr: []string{usingOneEntry, warning, pinnedLine("srv", 2)},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			e := newPinEnv(t, oneServer("srv"))
+			if tt.file != "" {
+				writeTestFile(t, e.work, rules.IgnoreFileName, tt.file)
+			}
+			insp := fakeServers(map[string][]inspect.Tool{"srv": {poisonedTool("read_file"), mkTool("add_numbers", "Add.")}})
+
+			got := scanWithBudget(e, insp, budget, tt.flags...)
+
+			assertScanRun(t, got, scanWant{code: tt.code, stderr: tt.stderr})
+			assertToolFindings(t, got.stdout, tt.want...)
+			assertStderrLines(t, got.stderr, exactLines(tt.stderr))
+			assertNoToolText(t, got.stderr, "read_file", "add_numbers")
+			if row := summaryRowOf(t, got.stdout, "srv"); row.Findings != len(tt.want) {
+				t.Errorf("SUMMARY findings of srv = %d, want %d (only the kept rows)", row.Findings, len(tt.want))
+			}
+		})
+	}
+}
+
+// criticalRulesDir writes one critical description rule from --rules in a new
+// folder and returns it. The rule is valid: its should_match and
+// should_not_match cases pass. It does not match the tool texts of the
+// tests, so with a 1ns budget only the budget row shows.
+func criticalRulesDir(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	writeTestFile(t, dir, "critical.yaml", "id: EXTRA-CRIT-001\ntitle: Critical fixture\nseverity: critical\ntarget: description\n"+
+		"match:\n  keywords:\n    - zqcriticalmark\n"+
+		"risk: Fixture.\nremediation: Fixture.\n"+
+		"should_match:\n  - A zqcriticalmark here.\n"+
+		"should_not_match:\n  - Lists the files in a folder.\n")
+	return dir
+}
+
+// TestScanToolsBudgetSeverity checks the severity of the
+// rules.RuleAnalysisBudget row (see budgetSeverity). With the built-in rules
+// only, the highest rule severity is high, so the row is high and
+// "--fail-on critical" gives exit code 0. With a critical description rule
+// from --rules, the row is critical: a hostile server that uses up the
+// budget before the critical rule runs on its poisoned tool still makes
+// "--fail-on critical" give exit code 1.
+func TestScanToolsBudgetSeverity(t *testing.T) {
+	t.Parallel()
+
+	const budget = time.Nanosecond
+	tests := []struct {
+		name     string
+		critical bool // add the critical rule with --rules
+		severity string
+		code     int // the exit code with --fail-on critical
+	}{
+		{name: "built-in rules only", severity: "high", code: exitOK},
+		{name: "with a critical rule from --rules", critical: true, severity: "critical", code: exitFindings},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			var flags []string
+			if tt.critical {
+				flags = []string{"--rules", criticalRulesDir(t)}
+			}
+			insp := func() *inspecttest.Fake {
+				return fakeServers(map[string][]inspect.Tool{"srv": {poisonedTool("read_file"), mkTool("add_numbers", "Add.")}})
+			}
+			wantStderr := []string{failOnCriticalNotice, budgetWarning("srv", budget, 2, 2), pinnedLine("srv", 2)}
+
+			e := newPinEnv(t, oneServer("srv"))
+			got := scanWithBudget(e, insp(), budget, append(slices.Clone(flags), "--fail-on", "critical")...)
+
+			assertScanRun(t, got, scanWant{code: tt.code, stderr: wantStderr})
+			assertToolFindings(t, got.stdout,
+				toolFinding{rules.RuleAnalysisBudget, tt.severity, "srv", "", quotedCell(budgetReason(2, 2))})
+			assertStderrLines(t, got.stderr, exactLines(wantStderr))
+
+			// The servers are pinned now, so this run prints only the
+			// notice and the warning on stderr.
+			jsonRun := scanWithBudget(e, insp(), budget, append(slices.Clone(flags), "--fail-on", "critical", "--json")...)
+
+			if jsonRun.code != tt.code {
+				t.Errorf("--json exit code = %d, want %d\nstderr:\n%s", jsonRun.code, tt.code, jsonRun.stderr)
+			}
+			want := []report.JSONFinding{{
+				RuleID: rules.RuleAnalysisBudget, Severity: tt.severity, Server: "srv",
+				Field: rules.FieldTool, Related: budgetReason(2, 2), Source: report.SourceRule,
+			}}
+			if rows := jsonFindings(t, jsonRun.stdout); !slices.Equal(rows, want) {
+				t.Errorf("JSON findings = %+v\nwant            %+v", rows, want)
+			}
+		})
+	}
+}
+
+// TestScanToolsLongToolName checks the cap on the Key of a tool rule row: a
+// tool with a 100 KiB name gives a row whose Key is the name cut to
+// maxToolKeyRunes runes and termsafe.CutMarker, in the --json findings. The
+// terminal report cuts the Key again to its own cell cap. Neither stdout nor
+// stderr holds the full name.
+func TestScanToolsLongToolName(t *testing.T) {
+	t.Parallel()
+
+	// The tail marker is at the end of the name, after the cut, so it must
+	// not show anywhere.
+	const tail = "ZQNAMETAIL"
+	name := strings.Repeat("n", 100<<10-len(tail)) + tail
+	e := newPinEnv(t, oneServer("srv"))
+	insp := fakeServers(map[string][]inspect.Tool{"srv": {poisonedTool(name)}})
+
+	text := e.scan(insp)
+	jsonRun := e.scan(insp, "--json")
+
+	if text.code != exitFindings || jsonRun.code != exitFindings {
+		t.Errorf("exit codes = %d (terminal), %d (json), want %d\nstderr:\n%s%s", text.code, jsonRun.code, exitFindings, text.stderr, jsonRun.stderr)
+	}
+	wantKey := strings.Repeat("n", maxToolKeyRunes) + termsafe.CutMarker
+	var jsonRows []report.JSONFinding
+	for _, f := range jsonFindings(t, jsonRun.stdout) {
+		if f.RuleID == "MOAT-T1-001" {
+			jsonRows = append(jsonRows, f)
+		}
+	}
+	if want := []report.JSONFinding{toolRow("MOAT-T1-001", "srv", wantKey, "description")}; !slices.Equal(jsonRows, want) {
+		t.Errorf("JSON MOAT-T1-001 rows have keys of %d bytes, want one row with a key of %d bytes", keyLens(jsonRows), len(wantKey))
+	}
+	var textRows int
+	for _, f := range toolFindings(t, text.stdout) {
+		if f.rule != "MOAT-T1-001" {
+			continue
+		}
+		textRows++
+		if !strings.HasPrefix(f.tool, "nnnn") || !strings.HasSuffix(f.tool, termsafe.CutMarker+" (description)") || len(f.tool) > len(wantKey) {
+			t.Errorf("Tool line of MOAT-T1-001 = %d bytes, want the cut name with the cut marker and (description)", len(f.tool))
+		}
+	}
+	if textRows != 1 {
+		t.Errorf("terminal MOAT-T1-001 rows = %d, want 1", textRows)
+	}
+	tooLong := strings.Repeat("n", maxToolKeyRunes+1)
+	for _, out := range []struct{ name, text string }{
+		{"terminal stdout", text.stdout}, {"terminal stderr", text.stderr},
+		{"json stdout", jsonRun.stdout}, {"json stderr", jsonRun.stderr},
+	} {
+		if strings.Contains(out.text, tail) || strings.Contains(out.text, tooLong) {
+			t.Errorf("%s holds the tool name beyond the cap (%d bytes of output)", out.name, len(out.text))
+		}
+	}
+}
+
+// keyLens returns the byte length of the Key of each row. A failed check
+// prints it instead of a 100 KiB name.
+func keyLens(rows []report.JSONFinding) []int {
+	out := make([]int, len(rows))
+	for i, r := range rows {
+		out[i] = len(r.Key)
+	}
+	return out
 }
