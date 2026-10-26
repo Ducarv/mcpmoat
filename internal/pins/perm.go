@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io/fs"
 	"os"
+	"path/filepath"
 
 	"github.com/Ducarv/mcpmoat/internal/safefile"
 )
@@ -26,7 +27,8 @@ const (
 // checkDirPerm returns an error that wraps ErrInsecurePermissions when the
 // pins directory at path is owned by another user or is writable by its group
 // or by others. Load and writeFile call it for the pins directory. Load checks
-// pins.json on the open file instead (checkOwnerAndMode).
+// pins.json on the open file instead (checkFilePerm, and checkFilePermByPath
+// when it cannot open the file).
 //
 // It follows symlinks (os.Stat), so it checks the target. A missing path is
 // not an error: it is the first run, and Save creates the directory with mode
@@ -66,8 +68,17 @@ func checkFilePerm(path string, info fs.FileInfo) error {
 // its group or others can write it. Then the user gets the fix hint and not
 // only "permission denied". It returns nil when it cannot tell: a Stat error,
 // or a path that is not a regular file. The caller then reports the read error.
+//
+// It stats the file through an os.Root of the pins directory, as Load opens it.
+// So a symlink that leaves the directory is not followed, and the hint never
+// names a file outside the pins directory.
 func checkFilePermByPath(path string, uid int) error {
-	info, err := os.Stat(path)
+	root, err := safefile.OpenRoot(filepath.Dir(path))
+	if err != nil {
+		return nil
+	}
+	defer func() { _ = root.Close() }()
+	info, err := root.Stat(filepath.Base(path))
 	if err != nil || !info.Mode().IsRegular() {
 		return nil
 	}

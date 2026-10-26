@@ -367,6 +367,21 @@ func TestCheckFilePermByPath(t *testing.T) {
 		})
 	}
 
+	// A symlink that leaves the pins directory is not followed, so the hint
+	// never names a file outside the directory.
+	t.Run("symlink that leaves the directory", func(t *testing.T) {
+		t.Parallel()
+		outside := seedPins(t, newPinsDir(t, 0o700), 0o666)
+		dir := newPinsDir(t, 0o700)
+		link := filepath.Join(dir, "pins.json")
+		if err := os.Symlink(outside, link); err != nil {
+			t.Fatalf("Symlink() error = %v", err)
+		}
+		if err := checkFilePermByPath(link, os.Geteuid()+1); err != nil {
+			t.Errorf("checkFilePermByPath() error = %v, want nil for a link that leaves the directory", err)
+		}
+	})
+
 	// It cannot tell for a missing path or for a path that is not a regular
 	// file, so it returns nil and the caller reports the read error.
 	t.Run("missing path and a directory", func(t *testing.T) {
