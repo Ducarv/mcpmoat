@@ -604,12 +604,19 @@ func TestAnswerKindAnswered(t *testing.T) {
 }
 
 // TestLLMRowTruncated checks llmRow directly for a cut tool text: the floor
-// to medium applies only to a verdict, never to an answer that cannot be used
-// (that is a medium MOAT-LLM-002 row already) or to a job without an answer.
+// to medium applies to a verdict with risk none or low or with a risk that
+// is not valid, and to an answer that cannot be used (it gives the MOAT-LLM-001
+// floor row, not a MOAT-LLM-002 row). It never applies to a job without an
+// answer, and a medium or high verdict keeps its own rating.
 func TestLLMRowTruncated(t *testing.T) {
 	t.Parallel()
 
 	cut := llm.Verdict{Risk: llm.RiskNone, Category: llm.CategoryCredentialAccess, Truncated: true}
+	cutWith := func(r llm.Risk) llm.Verdict {
+		v := cut
+		v.Risk = r
+		return v
+	}
 	tests := []struct {
 		name         string
 		answer       llmAnswer
@@ -621,11 +628,25 @@ func TestLLMRowTruncated(t *testing.T) {
 	}{
 		{name: "verdict none cut", answer: llmAnswer{kind: answerVerdict, verdict: cut}, wantOK: true,
 			wantRule: llm.RuleID, wantSeverity: "medium", wantRisk: llm.TruncatedText, wantRelated: string(llm.CategoryOther)},
+		{name: "verdict low cut", answer: llmAnswer{kind: answerVerdict, verdict: cutWith(llm.RiskLow)}, wantOK: true,
+			wantRule: llm.RuleID, wantSeverity: "medium", wantRisk: llm.TruncatedText, wantRelated: string(llm.CategoryOther)},
+		// A risk that is not valid fails closed: the cut tool still gets the
+		// floor row.
+		{name: "verdict invalid risk cut", answer: llmAnswer{kind: answerVerdict, verdict: cutWith("critical")}, wantOK: true,
+			wantRule: llm.RuleID, wantSeverity: "medium", wantRisk: llm.TruncatedText, wantRelated: string(llm.CategoryOther)},
+		{name: "verdict medium cut", answer: llmAnswer{kind: answerVerdict, verdict: cutWith(llm.RiskMedium)}, wantOK: true,
+			wantRule: llm.RuleID, wantSeverity: "medium", wantRisk: llm.CategoryCredentialAccess.Text(), wantRelated: string(llm.CategoryCredentialAccess)},
+		{name: "verdict high cut", answer: llmAnswer{kind: answerVerdict, verdict: cutWith(llm.RiskHigh)}, wantOK: true,
+			wantRule: llm.RuleID, wantSeverity: "high", wantRisk: llm.CategoryCredentialAccess.Text(), wantRelated: string(llm.CategoryCredentialAccess)},
 		{name: "verdict none not cut", answer: llmAnswer{kind: answerVerdict, verdict: llm.Verdict{Risk: llm.RiskNone, Category: llm.CategoryOther}}},
-		{name: "unusable cut", answer: llmAnswer{kind: answerUnusable, verdict: cut}, wantOK: true,
+		{name: "unusable cut", answer: llmAnswer{kind: answerUnusable, verdict: llm.Verdict{Truncated: true}}, wantOK: true,
+			wantRule: llm.RuleID, wantSeverity: "medium", wantRisk: llm.TruncatedText, wantRelated: string(llm.CategoryOther)},
+		{name: "unusable not cut", answer: llmAnswer{kind: answerUnusable}, wantOK: true,
 			wantRule: llm.RuleIDInvalid, wantSeverity: "medium", wantRisk: llm.InvalidText},
 		{name: "not run cut", answer: llmAnswer{kind: answerNotRun, verdict: cut}},
 		{name: "stopped cut", answer: llmAnswer{kind: answerStopped, verdict: cut}},
+		{name: "provider failed cut", answer: llmAnswer{kind: answerProviderFailed, verdict: cut}},
+		{name: "internal failed cut", answer: llmAnswer{kind: answerInternalFailed, verdict: cut}},
 	}
 	job := llmJob{in: llm.Input{ToolName: "t1"}}
 	for _, tt := range tests {
@@ -646,6 +667,52 @@ func TestLLMRowTruncated(t *testing.T) {
 					row.RuleID, row.Severity, row.Risk, row.Related, tt.wantRule, tt.wantSeverity, tt.wantRisk, tt.wantRelated)
 			}
 		})
+	}
+}
+
+// TestNewLLMAnswer checks what newLLMAnswer keeps of the verdict: all of it
+// for a verdict, only Truncated for an answer that cannot be used, and
+// nothing for the kinds without an answer.
+func TestNewLLMAnswer(t *testing.T) {
+	t.Parallel()
+
+	full := llm.Verdict{Risk: llm.RiskHigh, Category: llm.CategoryCredentialAccess, Truncated: true}
+	want := map[answerKind]llm.Verdict{
+		answerNotRun:         {},
+		answerVerdict:        full,
+		answerUnusable:       {Truncated: true},
+		answerStopped:        {},
+		answerProviderFailed: {},
+		answerInternalFailed: {},
+	}
+	for k, w := range want {
+		if got := newLLMAnswer(k, full); got.kind != k || got.verdict != w {
+			t.Errorf("newLLMAnswer(%v) = %v %+v, want %v %+v", k, got.kind, got.verdict, k, w)
+		}
+	}
+}
+
+// TestAnswerKindString checks that every answerKind up to the last one
+// (answerInternalFailed) has a name. A new kind without a case in String
+// gives the numeric fallback and fails this test. Add the new kind here when
+// it comes after answerInternalFailed.
+func TestAnswerKindString(t *testing.T) {
+	t.Parallel()
+
+	const last = answerInternalFailed
+	seen := make(map[string]answerKind)
+	for k := answerNotRun; k <= last; k++ {
+		got := k.String()
+		if fallback := fmt.Sprintf("answerKind(%d)", int(k)); got == fallback {
+			t.Errorf("answerKind %d has no name in String", int(k))
+		}
+		if other, dup := seen[got]; dup {
+			t.Errorf("answerKind %d and %d have the same name %q", int(other), int(k), got)
+		}
+		seen[got] = k
+	}
+	if got, want := (last + 1).String(), fmt.Sprintf("answerKind(%d)", int(last+1)); got != want {
+		t.Errorf("answerKind %d String() = %q, want the fallback %q: update last", int(last+1), got, want)
 	}
 }
 

@@ -61,9 +61,9 @@ type ScanReport struct {
 	// Complete is false when the report can miss results, and scan then
 	// exits with 2: a config file has a problem (see Errors), or the
 	// inspection or the pin step failed as a whole (pins.json cannot be read,
-	// for example), or the LLM step of a --llm scan is incomplete (a provider
-	// failure, or more tools than the --llm cap). The reason is on stderr
-	// only.
+	// for example), or the LLM step did not classify every tool: a provider
+	// failure, an internal error of the LLM step, or more tools than the
+	// --llm cap. The reason is on stderr only.
 	Complete bool            `json:"complete"`
 	Servers  []JSONServer    `json:"servers"`
 	Findings []JSONFinding   `json:"findings"`
@@ -167,15 +167,12 @@ func NewJSONServer(s discover.Server, status InspectionStatus) JSONServer {
 	return js
 }
 
-// NewJSONFinding converts a finding row to its JSON form. An empty
-// r.Source becomes "rule". The JSON form has only the server name: the client,
-// the scope, the title and the rule texts of the terminal report are not in it
-// (a new field bumps the version).
+// NewJSONFinding converts a finding row to its JSON form. Any r.Source other
+// than "llm" (an empty or an unknown value) becomes "rule", as in the terminal
+// report. The JSON form has only the server name: the client, the scope, the
+// title and the rule texts of the terminal report are not in it (a new field
+// bumps the version).
 func NewJSONFinding(r FindingRow) JSONFinding {
-	src := r.Source
-	if src == "" {
-		src = SourceRule
-	}
 	return JSONFinding{
 		RuleID:   r.RuleID,
 		Severity: r.Severity,
@@ -183,7 +180,7 @@ func NewJSONFinding(r FindingRow) JSONFinding {
 		Field:    r.Field,
 		Key:      r.Key,
 		Related:  r.Related,
-		Source:   src,
+		Source:   r.Source.normalize(),
 	}
 }
 

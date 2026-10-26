@@ -336,9 +336,9 @@ func (c *cli) scanWarnf(format string, a ...any) {
 // config rules holds the entries of .mcpmoat-ignore in the directory wd, then
 // one entry for each --ignore ID in ids. The list for the pin rules and the
 // LLM rules holds only the --ignore entries, because the file is untrusted
-// (see scanIgnores). ids
-// holds only valid rule IDs: the --ignore flag checks them. An empty wd means
-// that the working directory is not known, so loadIgnore reads no file.
+// (see scanIgnores). ids holds only valid rule IDs: the --ignore flag checks
+// them. An empty wd means that the working directory is not known, so
+// loadIgnore reads no file.
 //
 // Every problem with the file is a warning on stderr, not an error: the scan
 // goes on. A file that loadIgnore cannot read gives no entries. The warnings
@@ -404,9 +404,8 @@ const configErrorHint = "mcpmoat scan: a config file has a problem; " +
 // an incomplete LLM step (a failed request, or more tools than maxLLMTools) or
 // a signal before the save of new pins (when there are new pins) gives exit
 // code 2, also when there are findings at or above setup.failOn (see
-// scanExitCode). The report is already
-// printed when reportScan calls scanExitCode, so the user still sees the
-// findings. Only a signal during the inspection or the LLM step and a failed
+// scanExitCode). The report is already printed when reportScan calls
+// scanExitCode, so the user still sees the findings. Only a signal during the inspection or the LLM step and a failed
 // write of the report return exit code 2 without a full report.
 func (c *cli) reportScan(ctx context.Context, res discover.Result, configPath string, setup scanSetup, ignore *scanIgnores) int {
 	// counts holds the findings of each server for the summary. It starts

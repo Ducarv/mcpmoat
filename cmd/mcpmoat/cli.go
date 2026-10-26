@@ -101,8 +101,9 @@ func runWithContext(ctx context.Context, args []string, stdout, stderr io.Writer
 		getwd:   os.Getwd,
 		// The zero SDKOptions refuse servers from untrusted project files and
 		// servers that the client config turns off. scan has no flag to allow
-		// them.
-		inspector: inspect.New(inspect.SDKOptions{}),
+		// them. HiddenEnv keeps the API key of --llm out of every ${VAR}
+		// placeholder, so that no server config can send it to a server.
+		inspector: inspect.New(inspect.SDKOptions{HiddenEnv: []string{llm.KeyEnv}}),
 		// Called only by scan --llm. It sends no request.
 		newClassifier: newLLMClassifier,
 	}

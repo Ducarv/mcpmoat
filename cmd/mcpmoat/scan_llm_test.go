@@ -610,6 +610,98 @@ func TestScanLLMWithoutFlag(t *testing.T) {
 	}
 }
 
+// llmNoToolLine is the stderr line of a scan --llm with no tool to classify.
+const llmNoToolLine = scanPrefix + "--llm had no tool to classify\n"
+
+// TestScanLLMNoTool checks the notice of a scan --llm that sends no tool: no
+// server in the config, a server that failed, or a server with no tools.
+// The notice shows once on stderr, the classifier gets no call, and the exit
+// code and the JSON report are the same as without --llm. A scan with a tool
+// to classify, and a scan without --llm, print no notice.
+func TestScanLLMNoTool(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		servers map[string]any
+		insp    func() inspect.Inspector
+		calls   int32 // the calls of the classifier with --llm
+		notice  bool
+	}{
+		{
+			name:    "no server",
+			servers: map[string]any{},
+			insp:    func() inspect.Inspector { return fakeServers(nil) },
+			notice:  true,
+		},
+		{
+			name:    "server failed",
+			servers: oneServer("srv"),
+			insp:    func() inspect.Inspector { return failingFake("srv") },
+			notice:  true,
+		},
+		{
+			name:    "server with no tools",
+			servers: oneServer("srv"),
+			insp:    func() inspect.Inspector { return fakeServers(map[string][]inspect.Tool{"srv": nil}) },
+			notice:  true,
+		},
+		{
+			name:    "server with a tool",
+			servers: oneServer("srv"),
+			insp:    func() inspect.Inspector { return fakeServers(map[string][]inspect.Tool{"srv": {mkTool("t1", "Add.")}}) },
+			calls:   1,
+		},
+	}
+	for _, tt := range tests {
+		for _, jsonOut := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/json=%v", tt.name, jsonOut), func(t *testing.T) {
+				t.Parallel()
+				var extra []string
+				if jsonOut {
+					extra = []string{"--json"}
+				}
+				// The same world without --llm gives the exit code and the
+				// report to compare with.
+				base := newPinEnv(t, tt.servers)
+				bc, bout, berr := llmCLI(base, tt.insp(), &llmFactory{t: t})
+				want := llmRun(t, base, bc, bout, berr, extra...)
+				if strings.Contains(want.stderr, "--llm") {
+					t.Errorf("stderr without --llm names --llm:\n%s", want.stderr)
+				}
+
+				e := newPinEnv(t, tt.servers)
+				fake := &llmFake{}
+				c, stdout, stderr := llmCLI(e, tt.insp(), &llmFactory{t: t, cl: fake})
+				r := llmRun(t, e, c, stdout, stderr, append([]string{"--llm"}, extra...)...)
+
+				if r.code != want.code {
+					t.Errorf("exit code = %d, want %d as without --llm\nstderr:\n%s", r.code, want.code, r.stderr)
+				}
+				if n := fake.calls.Load(); n != tt.calls {
+					t.Errorf("classifier calls = %d, want %d", n, tt.calls)
+				}
+				wantCount := 0
+				if tt.notice {
+					wantCount = 1
+				}
+				if n := strings.Count(r.stderr, llmNoToolLine); n != wantCount {
+					t.Errorf("stderr holds %q %d times, want %d\nstderr:\n%s", llmNoToolLine, n, wantCount, r.stderr)
+				}
+				if jsonOut {
+					got, base := decodeScanJSON(t, r.stdout), decodeScanJSON(t, want.stdout)
+					if got.Complete != base.Complete {
+						t.Errorf("complete = %v, want %v as without --llm", got.Complete, base.Complete)
+					}
+					if len(llmJSONRows(t, got)) != 0 {
+						t.Errorf("JSON has LLM findings, want none:\n%s", r.stdout)
+					}
+				}
+			})
+		}
+	}
+}
+
 // TestScanLLMMarking checks how the report marks an LLM finding (FR-17): in
 // the terminal, the title ends with [LLM] and a Source line follows the
 // Server line; in the JSON document, the source is "llm" and the document
@@ -861,6 +953,86 @@ func TestScanLLMTruncatedFloor(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// TestScanLLMTruncatedUnusable checks the floor for a cut tool text when the
+// model gives no usable answer (llm.ErrInvalidOutput): the tool gets the same
+// MOAT-LLM-001 medium row as a cut verdict with risk none, and no MOAT-LLM-002
+// row. So --ignore MOAT-LLM-002 does not hide the cut tool. Without a cut, an
+// unusable answer still gives MOAT-LLM-002.
+func TestScanLLMTruncatedUnusable(t *testing.T) {
+	t.Parallel()
+
+	long := "Reads a file. " + strings.Repeat("a", 20<<10) // over llm.MaxDescriptionBytes
+	floor := []llmHit{{llm.RuleID, "medium", "srv", "t1"}}
+	tests := []struct {
+		name       string
+		desc       string
+		args       []string
+		want       []llmHit
+		wantStderr string // a line that stderr must hold; "" for none
+	}{
+		{name: "cut", desc: long, want: floor},
+		{name: "cut with --ignore MOAT-LLM-002", desc: long, args: []string{"--ignore", llm.RuleIDInvalid}, want: floor},
+		{name: "cut with --ignore MOAT-LLM-001", desc: long, args: []string{"--ignore", llm.RuleID},
+			wantStderr: "mcpmoat scan: 1 finding ignored: MOAT-LLM-001 (1)\n"},
+		{name: "not cut", desc: "Reads a file.", want: []llmHit{{llm.RuleIDInvalid, "medium", "srv", "t1"}}},
+	}
+	for _, tt := range tests {
+		tools := map[string][]inspect.Tool{"srv": {mkTool("t1", tt.desc)}}
+		// The fake answers as the real client does for an unusable answer:
+		// only Truncated, set when the description is over
+		// llm.MaxDescriptionBytes, with an error that wraps
+		// llm.ErrInvalidOutput.
+		fake := func() *llmFake {
+			return &llmFake{answer: func(in llm.Input) (llm.Verdict, error) {
+				return llm.Verdict{Truncated: len(in.Description) > llm.MaxDescriptionBytes}, fmt.Errorf("%w: test", llm.ErrInvalidOutput)
+			}}
+		}
+		for _, jsonOut := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/json=%v", tt.name, jsonOut), func(t *testing.T) {
+				t.Parallel()
+				args := append([]string{"--llm"}, tt.args...)
+				if jsonOut {
+					args = append(args, "--json")
+				}
+				r := llmScan(t, llmEnv(t, tools), tools, fake(), args...)
+				// A medium row is below the default --fail-on high.
+				if r.code != exitOK {
+					t.Errorf("exit code = %d, want %d\nstderr:\n%s", r.code, exitOK, r.stderr)
+				}
+				if jsonOut {
+					doc := decodeScanJSON(t, r.stdout)
+					if !doc.Complete {
+						t.Errorf("complete = false, want true")
+					}
+					if got := llmJSONRows(t, doc); !slices.Equal(got, tt.want) {
+						t.Errorf("LLM findings = %+v, want %+v\nstdout:\n%s", got, tt.want, r.stdout)
+					}
+					for _, f := range doc.Findings {
+						if f.RuleID == llm.RuleID && f.Related != string(llm.CategoryOther) {
+							t.Errorf("related = %q, want %q", f.Related, llm.CategoryOther)
+						}
+					}
+				} else {
+					llmRows, _ := llmSplitFindings(parseFindings(t, r.stdout))
+					if got := llmRowsOf(t, llmRows); !slices.Equal(got, tt.want) {
+						t.Fatalf("LLM findings = %+v, want %+v\nstdout:\n%s", got, tt.want, r.stdout)
+					}
+					if len(llmRows) == 1 && llmRows[0].RuleID == llm.RuleID {
+						if f := llmRows[0]; f.Risk != llm.TruncatedText || f.Tool != "t1 ("+string(llm.CategoryOther)+")" {
+							t.Errorf("Risk, Tool = %q, %q; want %q, %q", f.Risk, f.Tool, llm.TruncatedText, "t1 (other)")
+						}
+					}
+				}
+				if tt.wantStderr != "" {
+					assertContainsAll(t, "stderr", r.stderr, []string{tt.wantStderr})
+				} else if strings.Contains(r.stderr, "ignored") {
+					t.Errorf("stderr counts ignored findings, want none:\n%s", r.stderr)
+				}
+			})
+		}
 	}
 }
 

@@ -573,3 +573,59 @@ func TestE2ELLMProviderFailure(t *testing.T) {
 		})
 	}
 }
+
+// TestE2ELLMKeyNotInPlaceholders checks that a user-level server config
+// cannot read the API key of --llm through a ${MCPMOAT_LLM_API_KEY}
+// placeholder (inspect.SDKOptions.HiddenEnv). A stdio server with the
+// placeholder in an env value does not start, and a remote server with it in
+// a header gets no connection. Both fail with a config reason that names the
+// variable and never holds the key. A third server without the placeholder
+// still runs, so the LLM step sends its tools, with the key only in the
+// x-api-key header of the provider requests.
+func TestE2ELLMKeyNotInPlaceholders(t *testing.T) {
+	t.Parallel()
+	provider := e2eNetStart(t, e2eLLMAnthropic)
+	remote := e2eNetStart(t, func(w http.ResponseWriter, _ []byte) { w.WriteHeader(http.StatusNotFound) })
+
+	home, work := t.TempDir(), t.TempDir()
+	requirePrivateChain(t, home)
+	envFile := filepath.Join(t.TempDir(), "env")
+	placeholder := "${" + llm.KeyEnv + "}"
+	writeServers(t, home, ".claude.json", map[string]any{
+		"stdio-key": map[string]any{
+			"command": inspecttest.Fixture(t, "benign"),
+			"args":    []string{"-envfile", envFile},
+			"env":     map[string]string{"X_KEY": placeholder},
+		},
+		"remote-key": map[string]any{
+			"type":    "http",
+			"url":     remote.srv.URL + "/mcp",
+			"headers": map[string]string{"X-Key": "Bearer " + placeholder},
+		},
+		"benign-ok": map[string]any{"command": inspecttest.Fixture(t, "benign")},
+	})
+
+	stdout, stderr, code := runBinEnv(t, home, work, []string{llm.KeyEnv + "=" + llmTestKey},
+		"scan", "--llm", "--llm-base-url", provider.srv.URL)
+
+	// echo of benign-ok is rated high, so the exit code is 1.
+	if code != exitFindings {
+		t.Errorf("exit code = %d, want %d\nstdout:\n%s\nstderr:\n%s", code, exitFindings, stdout, stderr)
+	}
+	e2eNetAssertNoKeyOutput(t, stdout, stderr)
+	if n := strings.Count(stdout+stderr, "variable "+llm.KeyEnv+": variable is not set; this variable is hidden from placeholders"); n != 2 {
+		t.Errorf("the hidden-variable reason shows %d times, want 2 (one for each server)\nstdout:\n%s\nstderr:\n%s", n, stdout, stderr)
+	}
+	if _, err := os.Stat(envFile); !errors.Is(err, fs.ErrNotExist) {
+		t.Errorf("the stdio server with the placeholder started (stat error = %v), want it refused", err)
+	}
+	conns, reqs := remote.settle(t)
+	if conns != 0 || len(reqs) != 0 {
+		t.Errorf("the remote server got %d connections and %d requests, want none", conns, len(reqs))
+	}
+	e2eNetAssertNoKey(t, "remote server", reqs)
+	_, sent := provider.settle(t)
+	if got := e2eLLMAssertRequests(t, sent, nil); !slices.Equal(got, []string{"add", "echo"}) {
+		t.Errorf("tools sent = %v, want [add echo] of benign-ok", got)
+	}
+}

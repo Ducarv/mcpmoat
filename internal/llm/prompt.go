@@ -135,8 +135,13 @@ func toolMessage(in Input) (msg string, truncated bool, err error) {
 	}
 
 	// Binary search for the longest description prefix whose message fits.
-	// lo always fits (0 does, see below); hi never fits. Every message from
-	// here on has a cut description, so it is truncated.
+	// full, the message with the whole description and the flag above (false
+	// when nothing was cut), is over the cap. Every candidate below has a cut
+	// description, so it has truncated=true on purpose. lo always fits (0
+	// does, see below). hi starts at len(desc), the whole description, and
+	// the search never tries it again: full is over the cap, and the whole
+	// description with truncated=true would carry a flag of true with nothing
+	// cut.
 	lo, hi := 0, len(desc)
 	best, err := encodePayload(name, "", true)
 	if err != nil {

@@ -294,9 +294,10 @@ func TestNewJSONDiffCopiesFields(t *testing.T) {
 	}
 }
 
-// TestNewJSONFindingSource checks every field of NewJSONFinding, and that the
-// zero Source becomes "rule". The wanted sources are literals on purpose: they
-// are the stable names in the schema.
+// TestNewJSONFindingSource checks every field of NewJSONFinding, and that
+// every Source other than "llm" becomes "rule", the same as in the terminal
+// report (see TestWriteFindingsExact). The wanted sources are literals on
+// purpose: they are the stable names in the schema.
 func TestNewJSONFindingSource(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
@@ -307,8 +308,10 @@ func TestNewJSONFindingSource(t *testing.T) {
 		{name: "zero value is rule", source: "", want: "rule"},
 		{name: "rule", source: report.SourceRule, want: "rule"},
 		{name: "llm", source: report.SourceLLM, want: "llm"},
-		// The schema rejects any other value, so a bad value shows up there.
-		{name: "other is copied as is", source: "other", want: "other"},
+		// The terminal prints an unknown source as a rule row, so the JSON
+		// says "rule" too.
+		{name: "unknown value is rule", source: "other", want: "rule"},
+		{name: "llm in upper case is rule", source: "LLM", want: "rule"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

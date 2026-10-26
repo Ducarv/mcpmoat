@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/tls"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -561,23 +562,38 @@ func TestClassifyTruncated(t *testing.T) {
 	}
 }
 
-// TestClassifyTruncatedError checks that a failed Classify returns the zero
-// Verdict, also for a cut description: Truncated is set only with a verdict.
+// TestClassifyTruncatedError checks that a failed Classify returns only
+// Truncated in the Verdict: true for a cut description, false for a tool that
+// was not cut. Risk and Category stay zero. The caller needs Truncated with
+// an unusable answer (ErrInvalidOutput) to rate a cut tool medium.
 func TestClassifyTruncatedError(t *testing.T) {
 	t.Parallel()
+	tests := []struct {
+		name    string
+		desc    string
+		status  int
+		wantErr error
+		want    Verdict
+	}{
+		{name: "cut and unusable", desc: strings.Repeat("d", MaxDescriptionBytes+1), status: http.StatusOK, wantErr: ErrInvalidOutput, want: Verdict{Truncated: true}},
+		{name: "not cut and unusable", desc: "d", status: http.StatusOK, wantErr: ErrInvalidOutput, want: Verdict{}},
+		{name: "cut and provider failure", desc: strings.Repeat("d", MaxDescriptionBytes+1), status: http.StatusServiceUnavailable, wantErr: ErrProvider, want: Verdict{Truncated: true}},
+	}
 	for _, p := range bothProviders {
-		t.Run(string(p), func(t *testing.T) {
-			t.Parallel()
-			srv := startServer(t, reply(http.StatusOK, validReply(p, "critical", CategoryOther)))
-			c := newTestClient(t, p, srv.URL)
-			v, err := c.Classify(t.Context(), Input{ToolName: "t", Description: strings.Repeat("d", MaxDescriptionBytes+1)})
-			if !errors.Is(err, ErrInvalidOutput) {
-				t.Fatalf("Classify() error = %v, want ErrInvalidOutput", err)
-			}
-			if v != (Verdict{}) {
-				t.Errorf("Classify() = %+v, want zero Verdict on error", v)
-			}
-		})
+		for _, tt := range tests {
+			t.Run(string(p)+"/"+tt.name, func(t *testing.T) {
+				t.Parallel()
+				srv := startServer(t, reply(tt.status, validReply(p, "critical", CategoryOther)))
+				c := newTestClient(t, p, srv.URL)
+				v, err := c.Classify(t.Context(), Input{ToolName: "t", Description: tt.desc})
+				if !errors.Is(err, tt.wantErr) {
+					t.Fatalf("Classify() error = %v, want %v", err, tt.wantErr)
+				}
+				if v != tt.want {
+					t.Errorf("Classify() = %+v, want %+v on error", v, tt.want)
+				}
+			})
+		}
 	}
 }
 
@@ -1643,5 +1659,42 @@ func TestProxyHelperProcess(t *testing.T) {
 		}
 	default:
 		t.Fatalf("unknown helper mode %q", mode)
+	}
+}
+
+// TestJSONNullAndAbsent checks the two helpers for a JSON value: jsonNull is
+// true for a missing field and for null, and jsonAbsent also for an empty
+// JSON string. White space around the value does not count.
+func TestJSONNullAndAbsent(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		raw        string
+		wantNull   bool
+		wantAbsent bool
+	}{
+		{raw: "", wantNull: true, wantAbsent: true},
+		{raw: " \t\r\n", wantNull: true, wantAbsent: true},
+		{raw: "null", wantNull: true, wantAbsent: true},
+		{raw: " null\n", wantNull: true, wantAbsent: true},
+		{raw: `""`, wantAbsent: true},
+		{raw: ` "" `, wantAbsent: true},
+		{raw: `"no"`},
+		{raw: "{}"},
+		{raw: "false"},
+		{raw: "0"},
+		{raw: `"null"`},
+		{raw: "nul"},
+	}
+	for _, tt := range tests {
+		raw := json.RawMessage(tt.raw)
+		if got := jsonNull(raw); got != tt.wantNull {
+			t.Errorf("jsonNull(%q) = %v, want %v", tt.raw, got, tt.wantNull)
+		}
+		if got := jsonAbsent(raw); got != tt.wantAbsent {
+			t.Errorf("jsonAbsent(%q) = %v, want %v", tt.raw, got, tt.wantAbsent)
+		}
+	}
+	if !jsonNull(nil) || !jsonAbsent(nil) {
+		t.Error("jsonNull(nil) or jsonAbsent(nil) = false, want true")
 	}
 }

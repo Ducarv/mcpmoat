@@ -101,6 +101,16 @@ const (
 	SourceLLM Source = "llm"
 )
 
+// normalize returns the source that the writers use for s: SourceLLM stays
+// SourceLLM, and every other value ("" or an unknown value) is SourceRule.
+// So the terminal and the JSON report always agree on the source of a row.
+func (s Source) normalize() Source {
+	if s == SourceLLM {
+		return SourceLLM
+	}
+	return SourceRule
+}
+
 // FindingRow is one finding as the report prints it. It holds names and the
 // text of the rule, never a value from a config. The caller fills Severity,
 // Title, Risk and Remediation from the rule set, because this package does not
@@ -224,7 +234,7 @@ func writeFinding(b *strings.Builder, r FindingRow) {
 		b.WriteString("  ")
 		b.WriteString(termsafe.QuoteCut(r.Title, maxTitleRunes))
 	}
-	isLLM := r.Source == SourceLLM
+	isLLM := r.Source.normalize() == SourceLLM
 	if isLLM {
 		// Fixed text, so it needs no escape.
 		b.WriteString(" [LLM]")

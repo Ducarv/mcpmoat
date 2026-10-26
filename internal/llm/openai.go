@@ -104,11 +104,10 @@ func (openAIAPI) parseResponse(body []byte) (Verdict, error) {
 		return Verdict{}, ErrBadResponse
 	}
 	choices := *resp.Choices
-	switch len(choices) {
-	case 0:
+	if len(choices) == 0 {
 		return Verdict{}, invalidOutput("no choices")
-	case 1:
-	default:
+	}
+	if len(choices) > 1 {
 		return Verdict{}, invalidOutput("more than one choice")
 	}
 	choice := choices[0]
@@ -132,9 +131,8 @@ func (openAIAPI) parseResponse(body []byte) (Verdict, error) {
 	return parseVerdict([]byte(content))
 }
 
-// jsonAbsent reports whether raw is a missing field, JSON null or an empty
-// JSON string.
+// jsonAbsent reports whether raw is a missing field, JSON null (see
+// jsonNull) or an empty JSON string.
 func jsonAbsent(raw json.RawMessage) bool {
-	raw = bytes.TrimSpace(raw)
-	return len(raw) == 0 || string(raw) == "null" || string(raw) == `""`
+	return jsonNull(raw) || string(bytes.TrimSpace(raw)) == `""`
 }

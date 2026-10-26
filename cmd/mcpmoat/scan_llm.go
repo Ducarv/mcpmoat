@@ -339,10 +339,33 @@ type llmFailure struct {
 // LLM step failed for a reason that is not the provider. It is fixed text.
 const llmInternalText = "the LLM step failed (internal error)"
 
+// llmNoToolText is the text after the prefix of the stderr line when --llm
+// is given but the step has no tool to classify: no server was inspected, or
+// the inspected servers list no tools. It is fixed text. It is a notice: it
+// changes neither the exit code nor the JSON report.
+const llmNoToolText = "--llm had no tool to classify"
+
 // llmAnswer is the result of one job.
 type llmAnswer struct {
-	kind    answerKind
-	verdict llm.Verdict // set only for answerVerdict
+	kind answerKind
+	// verdict is the whole verdict for answerVerdict. For answerUnusable,
+	// only verdict.Truncated is set (see llm.Client.Classify), so that
+	// llmRow can rate a cut tool. For the other kinds it is zero.
+	verdict llm.Verdict
+}
+
+// newLLMAnswer returns the answer of kind k for the verdict v that Classify
+// returned. It keeps of v only what llmAnswer.verdict documents, so a
+// classifier that returns more with an error changes no row.
+func newLLMAnswer(k answerKind, v llm.Verdict) llmAnswer {
+	switch k {
+	case answerVerdict:
+		return llmAnswer{kind: k, verdict: v}
+	case answerUnusable:
+		return llmAnswer{kind: k, verdict: llm.Verdict{Truncated: v.Truncated}}
+	default:
+		return llmAnswer{kind: k}
+	}
 }
 
 // llmResult is the result of the LLM step.
@@ -370,6 +393,10 @@ type llmResult struct {
 	// skipped is the number of tools under the cap that got no verdict: the
 	// tool whose request failed, and the tools that were not sent after it.
 	skipped int
+	// tools is the number of tools that the step had to classify: every tool
+	// of the inspected servers, also the ones over the cap. With 0, llmStep
+	// prints llmNoToolText.
+	tools int
 }
 
 // incomplete reports whether the LLM step missed tools. scan then exits
@@ -382,8 +409,13 @@ func (r llmResult) incomplete() bool {
 // inspected servers in outcomes. It prints on stderr one warning for each LLM
 // rule that .mcpmoat-ignore cannot ignore (see llmResult.fileBlocked), then
 // the problems of the step (see printLLMProblems). It returns an empty result
-// and true when cl is nil
-// (no --llm) or when no server was inspected: then it sends nothing.
+// and true when cl is nil (no --llm): then it sends nothing and prints
+// nothing.
+//
+// With --llm and no tool to classify (outcomes is empty, no server was
+// inspected, or the inspected servers list no tools), it sends nothing and
+// prints one llmNoToolText line, so the user knows that no tool was rated.
+// The line changes neither the exit code nor the JSON report.
 //
 // It returns false when the process got a signal during a step that had a tool
 // to classify. It has written interruptedText then (see interrupted), and scan
@@ -392,12 +424,15 @@ func (r llmResult) incomplete() bool {
 // one llmInternalText line, when classifyTools fails while ctx is still alive
 // (see llmStepStopped).
 func (c *cli) llmStep(ctx context.Context, cl toolClassifier, outcomes []inspect.Outcome, ignore *scanIgnores) (llmResult, bool) {
-	if cl == nil || len(outcomes) == 0 {
+	if cl == nil {
 		return llmResult{}, true
 	}
 	lr, err := classifyTools(ctx, outcomes, cl, ignore)
 	if c.llmStepStopped(ctx, err) {
 		return llmResult{}, false
+	}
+	if lr.tools == 0 {
+		c.cmdPrintf("scan", "%s", llmNoToolText)
 	}
 	for _, id := range lr.fileBlocked {
 		c.warnFileCannotIgnore(id)
@@ -438,11 +473,14 @@ func (c *cli) llmStepStopped(ctx context.Context, err error) bool {
 // verdict for a cut tool text (llm.Verdict.Truncated) is never below medium:
 // with risk none or low, it gives one llm.RuleID row with severity medium and
 // the text llm.TruncatedText. An answer that cannot be used (see
-// answerUnusable) gives one llm.RuleIDInvalid row with severity medium. Every
-// row is a report.SourceLLM row with fixed texts from package llm: no model
-// output reaches it. Only the --ignore entries drop rows, as for the pin
-// rules: .mcpmoat-ignore cannot ignore the LLM rules (see scanIgnores). A
-// file entry that matches a kept row is recorded in llmResult.fileBlocked.
+// answerUnusable) gives one llm.RuleIDInvalid row with severity medium, or,
+// for a cut tool text, the same llm.RuleID medium row as a cut verdict with
+// risk none or low (see llmRow). So --ignore MOAT-LLM-002 never hides a cut
+// tool. Every row is a report.SourceLLM row with fixed texts from package
+// llm: no model output reaches it. Only the --ignore entries drop rows, as
+// for the pin rules: .mcpmoat-ignore cannot ignore the LLM rules (see
+// scanIgnores). A file entry that matches a kept row is recorded in
+// llmResult.fileBlocked.
 //
 // The first request that fails (a provider failure or an internal error, see
 // sortAnswer) stops the step: the requests that run end and no new one
@@ -456,6 +494,7 @@ func (c *cli) llmStepStopped(ctx context.Context, err error) bool {
 func classifyTools(ctx context.Context, outcomes []inspect.Outcome, cl toolClassifier, ignore *scanIgnores) (llmResult, error) {
 	var res llmResult
 	jobs := llmJobs(outcomes)
+	res.tools = len(jobs)
 	if len(jobs) > maxLLMTools {
 		res.overCap = len(jobs) - maxLLMTools
 		jobs = jobs[:maxLLMTools]
@@ -560,7 +599,7 @@ func runLLMJobs(ctx context.Context, jobs []llmJob, cl toolClassifier) ([]llmAns
 			kind := sortAnswer(err)
 			// Each goroutine writes only its own element, so this needs no
 			// lock.
-			answers[i] = llmAnswer{kind: kind, verdict: v}
+			answers[i] = newLLMAnswer(kind, v)
 			if !kind.stepFails() {
 				return
 			}
@@ -584,6 +623,12 @@ func runLLMJobs(ctx context.Context, jobs []llmJob, cl toolClassifier) ([]llmAns
 // llmRow returns the finding row that the answer a of job gives, and true. It
 // returns false when a gives no row: a verdict with risk none (and no cut
 // text), or a job without an answer (see answerKind.answered).
+//
+// A cut tool text (llm.Verdict.Truncated) gets the floor row (see
+// truncatedRow) when the model rated it none or low, gave a risk that is not
+// valid, or gave no usable answer (answerUnusable). So a cut tool always
+// gets an llm.RuleID row of at least medium, and never an llm.RuleIDInvalid
+// row.
 func llmRow(job llmJob, a llmAnswer) (report.FindingRow, bool) {
 	key := job.in.ToolName
 	if key == "" {
@@ -597,20 +642,12 @@ func llmRow(job llmJob, a llmAnswer) (report.FindingRow, bool) {
 	}
 	switch a.kind {
 	case answerVerdict:
+		if a.verdict.Truncated && belowMedium(a.verdict.Risk) {
+			return truncatedRow(row), true
+		}
 		row.RuleID = llm.RuleID
 		row.Title = llm.Title
 		row.Remediation = llm.Remediation
-		if a.verdict.Truncated && a.verdict.Risk != llm.RiskMedium && a.verdict.Risk != llm.RiskHigh {
-			// The tool text was cut, and the model rated it below medium
-			// (none or low). The part after the cut was not rated, and a
-			// prompt injection before the cut can ask for a low rating. So
-			// the row is medium, with a fixed text and category, whatever the
-			// model answered.
-			row.Severity = string(rules.SeverityMedium)
-			row.Risk = llm.TruncatedText
-			row.Related = string(llm.CategoryOther)
-			return row, true
-		}
 		severity, hasRisk := a.verdict.Risk.Severity()
 		if !hasRisk {
 			return report.FindingRow{}, false
@@ -622,6 +659,9 @@ func llmRow(job llmJob, a llmAnswer) (report.FindingRow, bool) {
 		row.Related = string(a.verdict.Category)
 		return row, true
 	case answerUnusable:
+		if a.verdict.Truncated {
+			return truncatedRow(row), true
+		}
 		row.RuleID = llm.RuleIDInvalid
 		row.Title = llm.InvalidTitle
 		row.Severity = string(rules.SeverityMedium)
@@ -633,6 +673,29 @@ func llmRow(job llmJob, a llmAnswer) (report.FindingRow, bool) {
 		// answerInternalFailed: the tool got no answer.
 		return report.FindingRow{}, false
 	}
+}
+
+// belowMedium reports whether the risk r of a verdict for a cut tool text
+// asks for the floor row: r is none or low, or r is not a valid risk. An
+// unknown risk counts too, so it fails closed. parseVerdict never returns
+// one, but a classifier in a test can.
+func belowMedium(r llm.Risk) bool {
+	return r == llm.RiskNone || r == llm.RiskLow || !r.Valid()
+}
+
+// truncatedRow fills row, an LLM row of a tool whose text was cut, as the
+// floor row: llm.RuleID, severity medium, the fixed text llm.TruncatedText
+// and the category other, whatever the model answered. The part after the
+// cut was not rated, and a prompt injection before the cut can ask for a low
+// rating or make the model refuse.
+func truncatedRow(row report.FindingRow) report.FindingRow {
+	row.RuleID = llm.RuleID
+	row.Title = llm.Title
+	row.Remediation = llm.Remediation
+	row.Severity = string(rules.SeverityMedium)
+	row.Risk = llm.TruncatedText
+	row.Related = string(llm.CategoryOther)
+	return row
 }
 
 // addLLMCounts adds the LLM row counts of each server to counts, the

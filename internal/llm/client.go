@@ -365,10 +365,12 @@ func proxyFromEnvironment(req *http.Request) (*url.URL, error) {
 // verdict. It sends only the system prompt, the verdict schema and the tool
 // message of in (see the package doc). It does not retry.
 //
-// The request has a timeout of requestTimeout. On success, the verdict has
-// Truncated set when toolMessage cut the tool name or description. See the
-// error variables above for how to sort an error. Classify is safe for
-// concurrent use.
+// The request has a timeout of requestTimeout. The verdict has Truncated
+// set when toolMessage cut the tool name or description. On an error, only
+// Truncated is set, and only when toolMessage succeeded: the caller can then
+// still rate a cut tool when the answer is not usable (ErrInvalidOutput).
+// Risk and Category stay zero on an error. See the error variables above for
+// how to sort an error. Classify is safe for concurrent use.
 func (c *Client) Classify(ctx context.Context, in Input) (Verdict, error) {
 	if c == nil || c.api == nil || c.http == nil {
 		return Verdict{}, errNilClient
@@ -380,6 +382,18 @@ func (c *Client) Classify(ctx context.Context, in Input) (Verdict, error) {
 	if err != nil {
 		return Verdict{}, err
 	}
+	v, err := c.send(ctx, message)
+	if err != nil {
+		return Verdict{Truncated: truncated}, err
+	}
+	v.Truncated = truncated
+	return v, nil
+}
+
+// send sends one request with the tool message message and returns the
+// verdict of the model, without Truncated. Every error has fixed text (see
+// Classify).
+func (c *Client) send(ctx context.Context, message string) (Verdict, error) {
 	body, err := encodeJSON(c.api.requestBody(c.model, message))
 	if err != nil {
 		return Verdict{}, err
@@ -419,12 +433,7 @@ func (c *Client) Classify(ctx context.Context, in Input) (Verdict, error) {
 	if len(data) > MaxResponseBodyBytes {
 		return Verdict{}, ErrTooLarge
 	}
-	v, err := c.api.parseResponse(data)
-	if err != nil {
-		return Verdict{}, err
-	}
-	v.Truncated = truncated
-	return v, nil
+	return c.api.parseResponse(data)
 }
 
 // CloseIdleConnections closes the idle connections of the client. Call it
@@ -507,8 +516,15 @@ func decodeEnvelope(body []byte, v any) error {
 	if err := json.Unmarshal(body, &e); err != nil {
 		return ErrBadResponse
 	}
-	if e.Error != nil && !bytes.Equal(bytes.TrimSpace(e.Error), []byte("null")) {
+	if !jsonNull(e.Error) {
 		return ErrBadResponse
 	}
 	return nil
+}
+
+// jsonNull reports whether raw is a missing field (empty) or the JSON
+// literal null, with white space around it or not.
+func jsonNull(raw json.RawMessage) bool {
+	raw = bytes.TrimSpace(raw)
+	return len(raw) == 0 || string(raw) == "null"
 }
