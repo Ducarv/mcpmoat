@@ -18,6 +18,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"maps"
 	"os"
 	"path/filepath"
@@ -1249,4 +1250,233 @@ func TestScanAndPinPrintInspectionWarnings(t *testing.T) {
 
 		assertContainsAll(t, "stderr", got.stderr, []string{"mcpmoat pin: warning: server srv: " + text})
 	})
+}
+
+// insecurePinsCommands are the two commands that read pins.json before they
+// start any server. Each has a name for the subtests, a run function and an
+// assert function that checks the run like assertScanRun or assertPinRun.
+var insecurePinsCommands = []struct {
+	name   string
+	run    func(e *pinEnv, insp inspect.Inspector) pinRunResult
+	assert func(t *testing.T, r pinRunResult, want scanWant)
+}{
+	{"scan", func(e *pinEnv, insp inspect.Inspector) pinRunResult { return e.scan(insp) }, assertScanRun},
+	{"pin --accept", func(e *pinEnv, insp inspect.Inspector) pinRunResult { return e.pin(insp, "--accept", "srv") }, assertPinRun},
+}
+
+// TestPinsInsecurePermissionsRefused checks that scan and "pin --accept" refuse
+// a pins folder or a pins.json that group or others can write: exit code 2, the
+// message names the path, the mode and the fix, nothing is printed on stdout,
+// no server starts, and the run changes neither the mode nor the bytes of
+// pins.json (FR-16, T2).
+func TestPinsInsecurePermissionsRefused(t *testing.T) {
+	t.Parallel()
+
+	tools := map[string][]inspect.Tool{"srv": {mkTool("a", "Add.")}}
+	cases := []struct {
+		kind string // "directory" or "file"
+		mode os.FileMode
+	}{
+		{"directory", 0o777},
+		{"directory", 0o770},
+		{"directory", 0o707},
+		{"file", 0o666},
+		{"file", 0o660},
+		{"file", 0o606},
+	}
+	for _, cmd := range insecurePinsCommands {
+		for _, tc := range cases {
+			t.Run(fmt.Sprintf("%s, %s %04o", cmd.name, tc.kind, tc.mode), func(t *testing.T) {
+				t.Parallel()
+				e := newPinEnv(t, oneServer("srv"))
+				firstScan(t, e, tools["srv"]...)
+				setPinsMode(t, e, tc.kind, tc.mode)
+				path := pinsStorePath(t, e, tc.kind)
+				before := readFileBytes(t, e.pinsPath())
+				fake := fakeServers(tools)
+
+				got := cmd.run(e, fake)
+
+				cmd.assert(t, got, scanWant{code: exitError, stderr: []string{
+					"cannot read the pins file",
+					"pins " + tc.kind + " " + path + " is not safe",
+					fmt.Sprintf("mode %04o", tc.mode),
+					"writable by group or others",
+					chmodHint(path),
+					pins.ErrInsecurePermissions.Error(),
+				}})
+				// scan still lists the servers and shows them as not inspected;
+				// it prints no finding. pin --accept prints nothing.
+				assertContainsNone(t, "stdout", got.stdout, []string{"FINDINGS", "MOAT-", "accepted"})
+				if cmd.name == "scan" {
+					assertContainsAll(t, "stdout", got.stdout, []string{"not inspected, 0 findings (scan stopped before it inspected the servers"})
+				} else if got.stdout != "" {
+					t.Errorf("stdout = %q, want empty", got.stdout)
+				}
+				if calls := fake.Calls(); len(calls) != 0 {
+					t.Errorf("the inspector got the calls %v, want none: no server may start", calls)
+				}
+				if mode := modeOf(t, path); mode != tc.mode {
+					t.Errorf("mode of %s = %04o after the run, want %04o: the run must not change it", path, mode, tc.mode)
+				}
+				if after := readFileBytes(t, e.pinsPath()); !bytes.Equal(after, before) {
+					t.Errorf("pins.json changed:\nbefore:\n%s\nafter:\n%s", before, after)
+				}
+			})
+		}
+	}
+}
+
+// chmodHint is the fix that the refusal message gives for an unsafe path: the
+// chmod command with "--" and the path in single quotes.
+func chmodHint(path string) string {
+	return "chmod go-w -- '" + path + "'"
+}
+
+// TestPinsInsecureHintQuotesPath checks that the fix in the refusal message keeps
+// a path with a space or a single quote as one shell word: the path is in single
+// quotes, and a single quote inside it becomes quote, backslash, quote, quote.
+// The user copies this text into a shell.
+func TestPinsInsecureHintQuotesPath(t *testing.T) {
+	t.Parallel()
+
+	tools := map[string][]inspect.Tool{"srv": {mkTool("a", "Add.")}}
+	cases := []struct {
+		name   string
+		folder string // the name of the XDG_CONFIG_HOME folder under a temp folder
+		quoted string // the folder name as the shell quoting writes it
+	}{
+		{"space", "my config", "my config"},
+		{"single quote", "it's", `it'\''s`},
+	}
+	for _, cmd := range insecurePinsCommands {
+		for _, tc := range cases {
+			t.Run(cmd.name+", "+tc.name, func(t *testing.T) {
+				t.Parallel()
+				e := newPinEnv(t, oneServer("srv"))
+				root := e.xdg
+				e.xdg = filepath.Join(root, tc.folder)
+				if err := os.MkdirAll(e.xdg, 0o700); err != nil {
+					t.Fatal(err)
+				}
+				firstScan(t, e, tools["srv"]...)
+				setPinsMode(t, e, "directory", 0o777)
+				dir := filepath.Dir(e.pinsPath())
+				fake := fakeServers(tools)
+
+				got := cmd.run(e, fake)
+
+				wantDir := filepath.Join(root, tc.quoted, "mcpmoat")
+				cmd.assert(t, got, scanWant{code: exitError, stderr: []string{
+					"cannot read the pins file",
+					"mode 0777",
+					"writable by group or others",
+					"chmod go-w -- '" + wantDir + "'",
+					pins.ErrInsecurePermissions.Error(),
+				}})
+				if calls := fake.Calls(); len(calls) != 0 {
+					t.Errorf("the inspector got the calls %v, want none: no server may start", calls)
+				}
+				if mode := modeOf(t, dir); mode != 0o777 {
+					t.Errorf("mode of %s = %04o after the run, want 0777: the run must not change it", dir, mode)
+				}
+			})
+		}
+	}
+}
+
+// TestPinsSafePermissionsWork checks that the normal modes still work: the
+// folder 0700 with pins.json 0600 that mcpmoat makes itself, and the common
+// modes 0755 and 0644, which group and others can read but not write.
+func TestPinsSafePermissionsWork(t *testing.T) {
+	t.Parallel()
+
+	tools := map[string][]inspect.Tool{"srv": {mkTool("a", "Add.")}}
+	modes := []struct{ dir, file os.FileMode }{
+		{0o700, 0o600},
+		{0o755, 0o644},
+	}
+	for _, cmd := range insecurePinsCommands {
+		for _, m := range modes {
+			t.Run(fmt.Sprintf("%s, directory %04o and file %04o", cmd.name, m.dir, m.file), func(t *testing.T) {
+				t.Parallel()
+				e := newPinEnv(t, oneServer("srv"))
+				firstScan(t, e, tools["srv"]...)
+				setPinsMode(t, e, "directory", m.dir)
+				setPinsMode(t, e, "file", m.file)
+				fake := fakeServers(tools)
+
+				got := cmd.run(e, fake)
+
+				// The tools did not change, so the run finds nothing. A scan
+				// prints nothing on stderr. A pin --accept prints its
+				// --expect note, which is not an error.
+				want := scanWant{code: exitOK, noStdout: []string{"MOAT-T2-"}}
+				if cmd.name != "scan" {
+					want.stderr = []string{noExpectNote}
+				}
+				cmd.assert(t, got, want)
+				if calls := fake.Calls(); !slices.Equal(calls, []string{"srv"}) {
+					t.Errorf("the inspector got the calls %v, want [srv]", calls)
+				}
+				if mode := modeOf(t, filepath.Dir(e.pinsPath())); mode != m.dir {
+					t.Errorf("mode of the folder = %04o after the run, want %04o", mode, m.dir)
+				}
+				// pin --accept saves pins.json again, with a new file of mode
+				// 0600; scan finds no change and does not save.
+				wantFile := m.file
+				if cmd.name != "scan" {
+					wantFile = 0o600
+				}
+				if mode := modeOf(t, e.pinsPath()); mode != wantFile {
+					t.Errorf("mode of pins.json = %04o after the run, want %04o", mode, wantFile)
+				}
+			})
+		}
+	}
+}
+
+// TestPinsFolderUnsafeBeforeSave checks the read that scan and "pin --accept"
+// do again before they save: when a folder that did not exist at the first
+// read has become writable by others during the inspection, the run refuses it
+// with exit code 2, saves nothing and creates no pins.json. The first read
+// already checks the folder, and the second read checks it again, so the check
+// in Store.Save is not reachable from here without a hook that production code
+// does not have. The tests of internal/pins cover Save.
+func TestPinsFolderUnsafeBeforeSave(t *testing.T) {
+	t.Parallel()
+
+	tools := map[string][]inspect.Tool{"srv": {mkTool("a", "Add.")}}
+	for _, cmd := range insecurePinsCommands {
+		t.Run(cmd.name, func(t *testing.T) {
+			t.Parallel()
+			skipWithoutModeBits(t)
+			e := newPinEnv(t, oneServer("srv"))
+			dir := filepath.Dir(e.pinsPath())
+			restorePinsModes(t, e)
+			insp := hookInspector{
+				inner: fakeServers(tools),
+				hook: onceFor("srv", func(discover.Server) {
+					// Another user makes the folder, and lets everybody write it.
+					if err := os.MkdirAll(dir, 0o700); err != nil {
+						t.Errorf("make the folder: %v", err)
+						return
+					}
+					if err := os.Chmod(dir, 0o777); err != nil { //nolint:gosec // G302: the test makes the folder unsafe on purpose
+						t.Errorf("chmod the folder: %v", err)
+					}
+				}),
+			}
+
+			got := cmd.run(e, insp)
+
+			cmd.assert(t, got, scanWant{code: exitError, stderr: []string{
+				"cannot read the pins file",
+				"pins directory " + dir + " is not safe",
+				"mode 0777",
+				chmodHint(dir),
+			}, noStdout: []string{"accepted"}})
+			e.assertNoPinsFile(t, "a refused folder")
+		})
+	}
 }

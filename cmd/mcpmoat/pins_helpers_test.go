@@ -85,6 +85,67 @@ func readOnlyPinsDir(t *testing.T, e *pinEnv) {
 	t.Cleanup(func() { _ = os.Chmod(dir, 0o700) }) //nolint:gosec // G302: restores the folder so that t.TempDir can remove it
 }
 
+// setPinsMode sets the mode of the folder of pins.json (kind "directory") or of
+// pins.json (kind "file") with os.Chmod, so that a test can make the path
+// unsafe (mode&0o022 != 0) or check a safe mode. The path must exist. It
+// registers a cleanup that sets the folder back to 0700 and the file back to
+// 0600, so that t.TempDir can remove them. It skips the test on Windows, where
+// the mode bits mean nothing, and for root, who owns every path and can write
+// anywhere.
+func setPinsMode(t *testing.T, e *pinEnv, kind string, mode os.FileMode) {
+	t.Helper()
+	skipWithoutModeBits(t)
+	path := pinsStorePath(t, e, kind)
+	restorePinsModes(t, e)
+	if err := os.Chmod(path, mode); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// skipWithoutModeBits skips the test when the mode bits do not stop the user
+// (Windows, root).
+func skipWithoutModeBits(t *testing.T) {
+	t.Helper()
+	if runtime.GOOS == "windows" || os.Geteuid() == 0 {
+		t.Skip("the mode bits do not apply to this user")
+	}
+}
+
+// pinsStorePath returns the path of pins.json for kind "file" and the path of
+// its folder for kind "directory". It fails the test for another kind.
+func pinsStorePath(t *testing.T, e *pinEnv, kind string) string {
+	t.Helper()
+	switch kind {
+	case "directory":
+		return filepath.Dir(e.pinsPath())
+	case "file":
+		return e.pinsPath()
+	}
+	t.Fatalf("unknown pins path kind %q, want directory or file", kind)
+	return ""
+}
+
+// restorePinsModes registers a cleanup that sets the folder of pins.json back
+// to 0700 and pins.json back to 0600, so that t.TempDir can remove them. The
+// cleanup ignores a missing path.
+func restorePinsModes(t *testing.T, e *pinEnv) {
+	t.Helper()
+	t.Cleanup(func() {
+		_ = os.Chmod(filepath.Dir(e.pinsPath()), 0o700) //nolint:gosec // G302: restores the folder so that t.TempDir can remove it
+		_ = os.Chmod(e.pinsPath(), 0o600)
+	})
+}
+
+// modeOf returns the permission bits of path and fails the test on an error.
+func modeOf(t *testing.T, path string) os.FileMode {
+	t.Helper()
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return info.Mode().Perm()
+}
+
 // cli builds a cli for this world with the given inspector.
 func (e *pinEnv) cli(insp inspect.Inspector) (*cli, *bytes.Buffer, *bytes.Buffer) {
 	e.t.Helper()

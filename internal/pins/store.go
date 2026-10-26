@@ -154,6 +154,13 @@ func DefaultPath(getenv func(string) string, homeDir func() (string, error)) (st
 // A missing file (or a missing directory) is the first run: Load returns an
 // empty Store that saves to path.
 //
+// Load refuses a pins directory or a pins.json that another user owns or that
+// its group or others can write, with an error that wraps ErrInsecurePermissions
+// (see Save). It checks the directory by path before it reads the file. It checks
+// the file on the open file descriptor after the read and before it parses the
+// data, so the checked file is the file that was read. Parent directories, for
+// example ~/.config, are not checked.
+//
 // Any other problem is an error, also a missing or null key or a server that
 // Set would refuse. Load never replaces a bad file with an empty store,
 // because that would pin a poisoned server as trusted. The errors name the
@@ -168,7 +175,10 @@ func DefaultPath(getenv func(string) string, homeDir func() (string, error)) (st
 func Load(path string) (*Store, error) {
 	s := &Store{path: path, servers: make(map[Identity]ServerPins)}
 
-	data, found, err := safefile.ReadBoundedRegularFile(filepath.Dir(path), filepath.Base(path), maxFileSize)
+	if err := checkStorePerm(filepath.Dir(path), "directory"); err != nil {
+		return nil, err
+	}
+	data, info, found, err := safefile.ReadBoundedRegularFileInfo(filepath.Dir(path), filepath.Base(path), maxFileSize)
 	if err != nil {
 		return nil, fmt.Errorf("read %s: %w", path, err)
 	}
@@ -177,6 +187,11 @@ func Load(path string) (*Store, error) {
 			return nil, err
 		}
 		return s, nil
+	}
+	// info comes from the open file, so the owner and the mode belong to the
+	// bytes that we parse. There is no path race and no "missing" case.
+	if err := checkOwnerAndMode(path, "file", info, os.Geteuid()); err != nil {
+		return nil, err
 	}
 	if err := checkVersion(path, data); err != nil {
 		return nil, err
@@ -335,6 +350,12 @@ func cloneOrEmpty(p ServerPins) ServerPins {
 // directory gets mode 0o700. The servers and the tool names are sorted, so the
 // same store always gives the same bytes.
 //
+// Save refuses an existing pins directory that another user owns or that its
+// group or others can write, with an error that wraps ErrInsecurePermissions.
+// It never changes the mode of an existing directory. Save does not check the
+// old pins.json, because the rename replaces it. Parent directories, for
+// example ~/.config, are not checked.
+//
 // Load and Set check each server, so Save checks only the whole file: it
 // refuses data larger than maxFileSize (32 MiB), the limit of Load, and the old
 // file stays.
@@ -380,6 +401,12 @@ func (s *Store) Save() error {
 			s.path, len(data), maxFileSize)
 	}
 
+	// The directory is checked here, and not in writeFile, so that the mode rule
+	// sits next to the one in Load. A missing directory passes: writeFile
+	// creates it with mode 0o700.
+	if err := checkStorePerm(filepath.Dir(s.path), "directory"); err != nil {
+		return err
+	}
 	if err := writeFileAtomic(s.path, data); err != nil {
 		return fmt.Errorf("save %s: %w", s.path, err)
 	}

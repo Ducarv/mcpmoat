@@ -20,6 +20,19 @@ This page lists what mcpmoat does not do, so you know how far to trust a clean s
   hostile description can try to influence the model. Its findings are advisory, and with `--llm`
   your tool names and descriptions leave your machine.
 - Not done yet: a lock for `pins.json` (#150).
+- The owner and mode check of the pins directory and `pins.json` does not cover parent directories
+  such as `~/.config`. It reads the owner and the mode bits only, not ACLs, and it is skipped on
+  Windows.
+- The owner check compares the owner with the current user. A directory that root owns is refused
+  for a user who is not root. The reverse is refused too: `sudo mcpmoat scan` with the HOME or
+  `XDG_CONFIG_HOME` of the user, and a root container with a bind-mounted config that a host uid
+  owns, fail with exit code 2.
+- A relative `pins.json` symlink that stays inside the pins directory is followed. The check covers
+  the pins directory and the target file, but not a subdirectory that holds the target. If others
+  can write that subdirectory, an attacker can swap the target. This needs an unusual setup. It is
+  an accepted limit.
+- A parent of the pins directory that is a regular file skips the check. `Load` reports it with the
+  same error as before.
 - `scan --rules <dir>` loads and checks extra rule files, but `scan` does not apply them yet. It
   prints `mcpmoat scan: rules from --rules are loaded and checked, but not applied yet` on stderr.
 
