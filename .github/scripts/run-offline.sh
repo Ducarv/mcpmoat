@@ -12,7 +12,7 @@ set -euo pipefail
 cd "$(dirname "$0")/../.."
 
 # The tests that must pass. A test that skips or does not run fails the script.
-required=(TestE2ENoNetworkWithoutLLM TestE2ELLMMissingKey TestE2ELLMFindings TestE2ELLMProviderFailure TestE2ELLMKeyNotInPlaceholders)
+required=(TestE2ENoNetworkWithoutLLM TestE2ELLMMissingKey TestE2ELLMFindings TestE2ELLMProviderFailure TestE2ELLMKeyNotInPlaceholders TestE2EAcceptance)
 
 # fail prints an error to stderr and stops the script with exit code 1.
 fail() {

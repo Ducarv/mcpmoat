@@ -7,9 +7,12 @@ checks the static config rules of threat T4. All secrets in it are synthetic
 canaries. They are not real credentials. The servers do not exist, and the
 tests only read the config, so they make no network calls.
 
-Use this home only with `--no-connect`. As a second guard, every remote name in
-it points at the reserved `.invalid` top-level domain (RFC 2606), which never
-resolves. The one other host is a loopback address. The hosts in this fixture are:
+Use this home only with `--no-connect`. `TestE2EAcceptance` scans a copy of its
+`mcpServers` in an untrusted project `.cursor/mcp.json` without `--no-connect`, but
+the untrusted-project gate refuses every server there, so nothing starts. As a second
+guard, every remote name in it points at the reserved `.invalid` top-level domain
+(RFC 2606), which never resolves. The one other host is a loopback address. The hosts
+in this fixture are:
 
 - `mcp.example.invalid`: the remote URL hosts (`remote-plain` and `remote-url-secret`).
 - `registry.invalid`: the `--registry` of the registry npx entries, and the docker images
