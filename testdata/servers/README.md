@@ -43,16 +43,17 @@ T4 (dangerous config) and T5 (typosquat) are config fixtures, not servers. They 
 `TestE2EAcceptance` in `cmd/mcpmoat/e2e_acceptance_test.go` runs the real binary on all these
 fixtures together. The trusted global config runs the five stdio servers: `benign`, `poisoned`,
 `shadowing`, `mailer` and `rugpull` (clean). An untrusted Cursor project file holds the servers of
-the T4 and T5 config fixtures. The gate refuses every project server, so none of them starts, but
-the config rules still check them.
+the T4 and T5 config fixtures. The untrusted-project gate refuses every project server, so none
+of them starts, but the config rules still check them. The test also checks that no process
+starts and no connection to a remote project server happens.
 
 1. Scan 1 pins the five stdio servers.
 2. The config switches `rugpull` to `-variant injected`.
-3. Scan 2 runs again, as text and as `--json`.
+3. Scan 2 runs as text, then again with `--json`.
 
 Every scan exits with code 1, because the T4 findings are high.
 
-The test checks the exact set of rule IDs on each server:
+The test checks the exact rule IDs and severities of each server:
 
 | Server | Threat | Rule IDs the test asserts |
 |---|---|---|
@@ -64,5 +65,7 @@ The test checks the exact set of rule IDs on each server:
 
 `scan` does not apply the T1 and T3 description and schema rules yet (issue #143). So the test
 asserts an empty set for `poisoned`, `shadowing` and `mailer`, and only `MOAT-T2-001` for the
-injected `rugpull`. When #143 lands, those sets must get the IDs that `scan` then reports. The
-first table above lists the IDs that the rule tests expect today.
+injected `rugpull`. When #143 lands, the expected sets for `poisoned`, `shadowing` and `mailer`
+get the IDs that `scan` then reports (the first table of this file lists the IDs that the rule
+tests expect today), and the injected `rugpull` gets the T1 IDs of its `get_time`. The
+[rugpull README](rugpull/README.md) names the T1 markers of that text, but not their rule IDs.

@@ -4,14 +4,14 @@
 
 It is a Cursor config (`home/.cursor/mcp.json`) with unsafe settings. It
 checks the static config rules of threat T4. All secrets in it are synthetic
-canaries. They are not real credentials. The servers do not exist, and the
-tests only read the config, so they make no network calls.
+canaries. They are not real credentials. The servers do not exist, and no
+test starts them or connects to them (see below).
 
-Use this home only with `--no-connect`. `TestE2EAcceptance` scans a copy of its
-`mcpServers` in an untrusted project `.cursor/mcp.json` without `--no-connect`, but
-the untrusted-project gate refuses every server there, so nothing starts. As a second
-guard, every remote name in it points at the reserved `.invalid` top-level domain
-(RFC 2606), which never resolves. The one other host is a loopback address. The hosts
+Scan this home only with `--no-connect`. The one exception is `TestE2EAcceptance`: it
+scans a copy of its `mcpServers` in an untrusted project `.cursor/mcp.json` without
+`--no-connect`, but the untrusted-project gate refuses every server there, so nothing
+starts. As a second guard, every remote name in it points at the reserved `.invalid`
+top-level domain (RFC 2606), which never resolves. The one other host is a loopback address. The hosts
 in this fixture are:
 
 - `mcp.example.invalid`: the remote URL hosts (`remote-plain` and `remote-url-secret`).
@@ -20,9 +20,10 @@ in this fixture are:
 - `git.invalid`: the two npx git specs, `git+https://git.invalid/example/example-server.git`.
 - `127.0.0.1`: the `remote-local` URL. It is a loopback address and never leaves the machine.
 
-So a scan that connects by mistake fetches nothing and sends the canary header nowhere. No
-network call happens, because the fixture is read with `--no-connect` and nothing fetches
-the package.
+So a scan that connects by mistake fetches nothing and sends the canary header nowhere. In
+the tests, nothing fetches a package or opens a connection: a test either reads the fixture
+with `--no-connect`, or the untrusted-project gate refuses its servers (as
+`TestE2EAcceptance` shows).
 
 | Server | Expected rule IDs |
 |---|---|

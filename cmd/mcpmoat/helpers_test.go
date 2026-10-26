@@ -808,15 +808,31 @@ func relativePathCases() []relativePathCase {
 // path and the path of its marker file. The script creates the marker file
 // when it runs, so a test can prove that a configured command never started.
 // The script is executable, so a start would really work. It needs a Unix
-// shell.
+// shell. The script quotes the marker path, so a dir with a single quote
+// fails the test.
 func writeMarkerScript(t *testing.T, dir string) (script, marker string) {
 	t.Helper()
 	marker = filepath.Join(dir, "marker")
+	if strings.Contains(marker, "'") {
+		t.Fatalf("marker path %q holds a single quote, which the script cannot quote", marker)
+	}
 	script = filepath.Join(dir, "server.sh")
-	if err := os.WriteFile(script, []byte("#!/bin/sh\ntouch "+marker+"\n"), 0o700); err != nil { //nolint:gosec // G306: the script must be executable
+	if err := os.WriteFile(script, []byte("#!/bin/sh\ntouch '"+marker+"'\n"), 0o700); err != nil { //nolint:gosec // G306: the script must be executable
 		t.Fatal(err)
 	}
 	return script, marker
+}
+
+// assertMarker checks whether the marker file of writeMarkerScript exists.
+func assertMarker(t *testing.T, marker string, want bool) {
+	t.Helper()
+	_, err := os.Stat(marker)
+	switch {
+	case want && err != nil:
+		t.Errorf("marker file is missing (err = %v): the server did not start", err)
+	case !want && !errors.Is(err, fs.ErrNotExist):
+		t.Errorf("marker file exists or cannot be checked (err = %v): mcpmoat started a server", err)
+	}
 }
 
 // symlink makes link point to target. It creates the parent directory of
@@ -975,11 +991,11 @@ const maxFloodLines = 101
 // show that the loader stopped early.
 const floodGuard = 30 * time.Second
 
-// assertFast fails the test when more than floodGuard has passed since start.
-func assertFast(t *testing.T, start time.Time) {
+// assertFast fails the test when more than limit has passed since start.
+func assertFast(t *testing.T, start time.Time, limit time.Duration) {
 	t.Helper()
-	if d := time.Since(start); d > floodGuard {
-		t.Errorf("the scan took %v, want less than %v", d, floodGuard)
+	if d := time.Since(start); d > limit {
+		t.Errorf("the scan took %v, want less than %v", d, limit)
 	}
 }
 

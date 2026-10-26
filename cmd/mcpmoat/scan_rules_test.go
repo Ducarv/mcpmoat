@@ -651,7 +651,7 @@ func TestScanRulesErrorFlood(t *testing.T) {
 
 	got := scanRulesEmpty(t, "--no-connect", "--rules", dir)
 
-	assertFast(t, start)
+	assertFast(t, start, floodGuard)
 	assertFloodResult(t, got.code, got.stdout, got.stderr)
 }
 
@@ -682,7 +682,7 @@ func TestScanRulesIDClashFlood(t *testing.T) {
 
 			got := scanRulesEmpty(t, "--no-connect", "--rules", dir)
 
-			assertFast(t, start)
+			assertFast(t, start, floodGuard)
 			assertIDFloodResult(t, got.code, got.stdout, got.stderr, tt.reason, tt.more)
 			assertDirUnchanged(t, dir, before)
 		})
