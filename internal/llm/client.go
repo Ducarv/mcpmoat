@@ -335,7 +335,9 @@ func newHTTPClient(dial dialFunc, proxy func(*http.Request) (*url.URL, error)) *
 		IdleConnTimeout:     idleConnTimeout,
 		// No gzip: the response is small, and so the body cap counts the
 		// bytes on the wire.
-		DisableCompression:     true,
+		DisableCompression: true,
+		// ResponseHeaderTimeout, http.Client.Timeout below and the context
+		// deadline in send all use requestTimeout on purpose (see send).
 		ResponseHeaderTimeout:  requestTimeout,
 		MaxResponseHeaderBytes: maxResponseHeaderBytes,
 	}
@@ -347,6 +349,8 @@ func newHTTPClient(dial dialFunc, proxy func(*http.Request) (*url.URL, error)) *
 		CheckRedirect: func(*http.Request, []*http.Request) error {
 			return http.ErrUseLastResponse
 		},
+		// The same limit as the context deadline in send, on purpose: this
+		// one also bounds the read of the response body.
 		Timeout: requestTimeout,
 	}
 }
@@ -402,6 +406,10 @@ func (c *Client) send(ctx context.Context, message string) (Verdict, error) {
 		return Verdict{}, errRequestTooLarge
 	}
 
+	// The deadline is requestTimeout, the same as http.Client.Timeout and
+	// ResponseHeaderTimeout (see newHTTPClient), on purpose: with the deadline
+	// in reqCtx, transportError can see that the request timed out and give
+	// the fixed timeout text.
 	reqCtx, cancel := context.WithTimeout(ctx, requestTimeout)
 	defer cancel()
 	req, err := http.NewRequestWithContext(reqCtx, http.MethodPost, c.url, bytes.NewReader(body))

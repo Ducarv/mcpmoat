@@ -416,13 +416,15 @@ type expandPolicy struct {
 	hidden func(name string) bool
 }
 
-// The notes of expandPolicy for the untrusted servers, and the note for a
-// hidden variable (see expandError).
+// The notes of expandPolicy for the untrusted servers (see expandError).
 const (
 	reasonBaseOnly = "; a stdio server from an untrusted project file reads only the base environment variables"
 	reasonNoEnv    = "; a remote server from an untrusted project file reads no environment variables and no workspace folder"
-	reasonHidden   = "; this variable is hidden from placeholders"
 )
+
+// errHiddenVariable is the end of the reason for a placeholder of a hidden
+// variable, in place of discover.ErrMissingVariable (see expandError).
+var errHiddenVariable = errors.New("hidden from placeholders")
 
 // hide returns p with the variables in names refused for every server, on
 // top of what p refuses already. The names compare without case (see
@@ -478,10 +480,12 @@ func expandPolicyFor(s discover.Server) expandPolicy {
 // folder when policy.workspace is false and s has a ProjectPath. A name that
 // is not a plain variable name is empty in the ExpandError; no filter but
 // the one of a trusted server accepts it, and a trusted server has no note.
-// A missing variable that policy.hidden reports gets reasonHidden instead
-// of policy.note, for every server: the variable can be set, and the
-// untrusted note would give the wrong cause. The reason never says whether
-// a hidden variable is set.
+// A missing variable that policy.hidden reports gets its own reason, for
+// every server: "cannot expand <field>: variable <name>: hidden from
+// placeholders" (see errHiddenVariable). It has no policy.note, because the
+// untrusted note would give the wrong cause, and no "variable is not set",
+// because the variable can be set. So the reason never says whether a
+// hidden variable is set. The cause still wraps discover.ErrMissingVariable.
 func expandError(s discover.Server, err error, policy expandPolicy) *ConnectError {
 	reason := "cannot expand the variables in the server config"
 	if ee, ok := errors.AsType[*discover.ExpandError](err); ok {
@@ -492,7 +496,8 @@ func expandError(s discover.Server, err error, policy expandPolicy) *ConnectErro
 		refusedWorkspace := errors.Is(err, discover.ErrNoWorkspaceFolder) && !policy.workspace && s.ProjectPath != ""
 		switch {
 		case hiddenVar:
-			reason += reasonHidden
+			hidden := discover.ExpandError{Field: ee.Field, Name: ee.Name, Err: errHiddenVariable}
+			reason = hidden.Error()
 		case refusedVar || refusedWorkspace:
 			reason += policy.note
 		}

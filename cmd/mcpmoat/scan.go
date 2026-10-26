@@ -1,6 +1,7 @@
 package main
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"flag"
@@ -8,6 +9,7 @@ import (
 	"io"
 	"maps"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 
@@ -68,6 +70,11 @@ func (c *cli) runScan(opts options, args []string) int {
 	var llmOpts llmFlags
 	baseURLFlag := addLLMFlags(fs, &llmOpts)
 
+	// The error of another flag, or the list of unexpected arguments, can
+	// hold a base URL value too: for example "--timeout --llm-base-url=URL"
+	// makes the flag package quote the whole argument. hider removes every
+	// base URL value of args from that text (see newArgHider).
+	hider := newArgHider(args, baseURLFlag.name)
 	if err := fs.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
 			scanUsage(c.stdout)
@@ -82,9 +89,9 @@ func (c *cli) runScan(opts options, args []string) int {
 		// termsafe.Quote escapes the whole message, and quotes it only when
 		// it holds an unsafe rune. See dispatch in cli.go for why this
 		// differs from quoteArg.
-		return c.usageError("scan", "%s", termsafe.Quote(err.Error()))
+		return c.usageError("scan", "%s", termsafe.Quote(hider.hide(err.Error())))
 	}
-	if c.rejectArgs("scan", fs.Args()) {
+	if c.rejectArgs("scan", hider.hideAll(fs.Args())) {
 		return exitError
 	}
 	if failOn == "" {
@@ -266,6 +273,84 @@ func (f *secretFlag) Set(value string) error {
 	return nil
 }
 
+// hiddenArgText replaces the value of a secret flag in an error message.
+const hiddenArgText = "(hidden)"
+
+// argHider removes the values of one secret flag from the error text of the
+// argument checks. The zero argHider changes nothing.
+type argHider struct {
+	r *strings.Replacer // nil when the args give no value
+}
+
+// newArgHider returns an argHider for the values that args gives to the flag
+// name: the value of each "-name=value" and "--name=value", and the argument
+// after each bare "-name" and "--name". It looks at every argument, also after
+// "--" and after a flag that took "--name" as its own value, so it can find
+// more values than Parse uses: that only hides more. Any number of dashes
+// counts, because the flag package prints "---name=value" in its "bad flag
+// syntax" error.
+func newArgHider(args []string, name string) argHider {
+	var values []string
+	for i, arg := range args {
+		rest := strings.TrimLeft(arg, "-")
+		if rest == arg {
+			continue // not a flag
+		}
+		if v, ok := strings.CutPrefix(rest, name+"="); ok {
+			values = append(values, v)
+		} else if rest == name && i+1 < len(args) {
+			values = append(values, args[i+1])
+		}
+	}
+	// The flag package quotes a value with %q in `invalid value "..."`, so a
+	// value with a quote, a backslash or a control rune shows escaped. Hide
+	// that form too.
+	var olds []string
+	for _, v := range values {
+		if v == "" {
+			continue
+		}
+		olds = append(olds, v)
+		if q := strconv.Quote(v); q[1:len(q)-1] != v {
+			olds = append(olds, q[1:len(q)-1])
+		}
+	}
+	if len(olds) == 0 {
+		return argHider{}
+	}
+	// strings.Replacer tries the old strings in the order given, so the
+	// longest goes first: a value that holds another value is hidden whole.
+	// The text order of equal lengths puts duplicates side by side for
+	// slices.Compact.
+	slices.SortFunc(olds, func(a, b string) int {
+		return cmp.Or(cmp.Compare(len(b), len(a)), strings.Compare(a, b))
+	})
+	olds = slices.Compact(olds)
+	pairs := make([]string, 0, 2*len(olds))
+	for _, o := range olds {
+		pairs = append(pairs, o, hiddenArgText)
+	}
+	return argHider{r: strings.NewReplacer(pairs...)}
+}
+
+// hide returns s with every value of the secret flag replaced by
+// hiddenArgText. The rest of s stays as it is.
+func (h argHider) hide(s string) string {
+	if h.r == nil {
+		return s
+	}
+	return h.r.Replace(s)
+}
+
+// hideAll returns a copy of args with hide applied to each argument.
+func (h argHider) hideAll(args []string) []string {
+	out := make([]string, len(args))
+	for i, a := range args {
+		out[i] = h.hide(a)
+	}
+	return out
+}
+
 // severityFlag adds a flag to fs that takes one severity word and stores it in
 // *dest. The flag can be given once. Valid refuses an empty value, another
 // case ("HIGH") and a flag name that the flag package took as the value. The
@@ -396,17 +481,18 @@ const configErrorHint = "mcpmoat scan: a config file has a problem; " +
 // The pin findings and, with --llm, the LLM findings (see classifyTools) are
 // merged with the config findings before the report (the table or the JSON
 // document) is written, so the report holds them all and scanExitCode sees
-// them all: an LLM finding counts for --fail-on like any other.
-// New pins are saved after the report is printed, so a save error never hides
-// the report. The "pinned N tools" notices come after a successful save.
+// them all: an LLM finding counts for --fail-on like any other. New pins are
+// saved after the report is printed, so a save error never hides the report.
+// The "pinned N tools" notices come after a successful save.
 //
 // A config file problem, a pins.json read or save error, an inspect.Run error,
 // an incomplete LLM step (a failed request, or more tools than maxLLMTools) or
 // a signal before the save of new pins (when there are new pins) gives exit
 // code 2, also when there are findings at or above setup.failOn (see
 // scanExitCode). The report is already printed when reportScan calls
-// scanExitCode, so the user still sees the findings. Only a signal during the inspection or the LLM step and a failed
-// write of the report return exit code 2 without a full report.
+// scanExitCode, so the user still sees the findings. Only a signal during the
+// inspection or the LLM step and a failed write of the report return exit
+// code 2 without a full report.
 func (c *cli) reportScan(ctx context.Context, res discover.Result, configPath string, setup scanSetup, ignore *scanIgnores) int {
 	// counts holds the findings of each server for the summary. It starts
 	// with the config findings, and the LLM step adds its own.
@@ -435,16 +521,23 @@ func (c *cli) reportScan(ctx context.Context, res discover.Result, configPath st
 	// The LLM step (--llm) runs after the pin step, on the tools of the
 	// servers that scan inspected (see llmStep). It only adds rows: it never
 	// changes or drops a rule row, and it never touches pins, diffs or hints.
-	lr, ok := c.llmStep(ctx, setup.classifier, outcomes, ignore)
-	if !ok {
-		// The user stopped the scan, as for a signal during the inspection,
-		// or the guard of llmStep caught an error: no report and no saved
-		// pins. llmStep wrote the line on stderr.
-		return exitError
+	// When the pin step failed, no server was inspected and the error is
+	// already on stderr, so the step does not run: its llmNoToolText notice
+	// would give the wrong cause.
+	var lr llmResult
+	if !pinFailed {
+		var ok bool
+		lr, ok = c.llmStep(ctx, setup.classifier, outcomes, ignore)
+		if !ok {
+			// The user stopped the scan, as for a signal during the
+			// inspection, or the guard of llmStep caught an error: no report
+			// and no saved pins. llmStep wrote the line on stderr.
+			return exitError
+		}
 	}
 	// A failed request or the tool cap makes the result incomplete: the
 	// report still prints, and scan exits with 2.
-	llmFailed := lr.incomplete()
+	llmIncomplete := lr.incomplete()
 	rows = append(rows, lr.rows...)
 	ignored = mergeIgnored(ignored, lr.ignored)
 	addLLMCounts(counts, lr.counts)
@@ -456,7 +549,7 @@ func (c *cli) reportScan(ctx context.Context, res discover.Result, configPath st
 		if setup.connect != nil {
 			mode = report.ModeConnect
 		}
-		complete := !pinFailed && !configProblem && !llmFailed
+		complete := !pinFailed && !configProblem && !llmIncomplete
 		writeErr = c.writeScanJSON(mode, complete, res, rows, pr)
 	} else {
 		statuses := pr.serverStatuses(res.Servers, counts)
@@ -488,7 +581,7 @@ func (c *cli) reportScan(ctx context.Context, res discover.Result, configPath st
 		c.printFileErrors("scan", res.Errors)
 		fprintf(c.stderr, "%s\n", configErrorHint)
 	}
-	return scanExitCode(configProblem || pinFailed || llmFailed, rows, setup.failOn)
+	return scanExitCode(configProblem || pinFailed || llmIncomplete, rows, setup.failOn)
 }
 
 // writeScanReport writes the report on c.stdout, in this order: the server

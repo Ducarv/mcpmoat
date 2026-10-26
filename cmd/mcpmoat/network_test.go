@@ -350,7 +350,7 @@ func newNetWorld(t *testing.T, marker bool) *netWorld {
 	// skipIfProxyEnv found no proxy variable, so this clearing changes nothing
 	// that is cached. It keeps the child environment and any code that reads
 	// the variables again free of a proxy.
-	for _, name := range []string{"HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY"} {
+	for _, name := range append(slices.Clone(netProxyVars), "NO_PROXY") {
 		t.Setenv(name, "")
 		t.Setenv(strings.ToLower(name), "")
 	}
@@ -486,8 +486,8 @@ func TestScanNetworkOnlyConfiguredServers(t *testing.T) {
 			w.assertNetAllowed(t, []string{w.mcpAddr}, []string{netInvalidHost})
 			if n := w.dialsTo(w.mcpAddr); n == 0 {
 				t.Errorf("no dial to the configured server %s: the dial hook saw nothing", w.mcpAddr)
-			} else if c := int(w.mcpConns.Load()); c > n {
-				t.Errorf("the configured server got %d connections, the dial hook saw %d: a connection went around the hook", c, n)
+			} else if conns := int(w.mcpConns.Load()); conns > n {
+				t.Errorf("the configured server got %d connections, the dial hook saw %d: a connection went around the hook", conns, n)
 			}
 			if _, lookups, _ := w.rec.snapshot(); !slices.Contains(lookups, netInvalidHost) {
 				t.Errorf("lookups = %q, want a lookup of %s: the resolver hook saw nothing", lookups, netInvalidHost)
@@ -577,8 +577,8 @@ func TestScanNetworkWithLLM(t *testing.T) {
 	w.assertNetAllowed(t, []string{w.mcpAddr, api.host}, []string{netInvalidHost})
 	if n := w.dialsTo(api.host); n == 0 {
 		t.Errorf("no dial to the LLM provider %s: the LLM dial hook saw nothing", api.host)
-	} else if c := int(api.newConns.Load()); c > n {
-		t.Errorf("the LLM provider got %d connections, the dial hook saw %d: a connection went around the hook", c, n)
+	} else if conns := int(api.newConns.Load()); conns > n {
+		t.Errorf("the LLM provider got %d connections, the dial hook saw %d: a connection went around the hook", conns, n)
 	}
 	if n := w.dialsTo(w.mcpAddr); n == 0 {
 		t.Errorf("no dial to the configured server %s", w.mcpAddr)

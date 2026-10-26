@@ -9,6 +9,7 @@ import (
 	"math/rand/v2"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"regexp"
 	"runtime"
 	"slices"
@@ -514,6 +515,130 @@ func TestScanLLMUsageErrors(t *testing.T) {
 	}
 }
 
+// TestScanBaseURLHiddenInArgErrors checks that a --llm-base-url value never
+// shows in the error of another flag, of the flag package or of the
+// unexpected-argument check (FR-17, FR-16). The value can hold a
+// user:password. Every form gives exit code 2 and empty stdout, the error
+// line keeps its other text and shows hiddenArgText in place of the value,
+// and no config is read.
+func TestScanBaseURLHiddenInArgErrors(t *testing.T) {
+	t.Parallel()
+
+	const passCanary = "CANARYPASS7"
+	const canaryURL = "https://user:" + passCanary + "@h.example"
+	// quoteURL has a quote and a backslash, which the flag package escapes
+	// with %q in `invalid value "..."`.
+	const quoteURL = `https://user:` + passCanary + `"q\x@h.example`
+	tests := []struct {
+		name string
+		args []string
+		want string // the error line after "mcpmoat scan: "
+	}{
+		{name: "--timeout takes --llm-base-url=URL", args: []string{"--timeout", "--llm-base-url=" + canaryURL},
+			want: `invalid value "--llm-base-url=(hidden)" for flag -timeout: parse error`},
+		{name: "-timeout takes -llm-base-url=URL", args: []string{"-timeout", "-llm-base-url=" + canaryURL},
+			want: `invalid value "-llm-base-url=(hidden)" for flag -timeout: parse error`},
+		{name: "--timeout takes --llm-base-url URL", args: []string{"--timeout", "--llm-base-url", canaryURL},
+			want: `invalid value "--llm-base-url" for flag -timeout: parse error`},
+		{name: "--timeout takes -llm-base-url URL", args: []string{"--timeout", "-llm-base-url", canaryURL},
+			want: `invalid value "-llm-base-url" for flag -timeout: parse error`},
+		{name: "--timeout takes a value with a quote", args: []string{"--timeout", "--llm-base-url=" + quoteURL},
+			want: `invalid value "--llm-base-url=(hidden)" for flag -timeout: parse error`},
+		{name: "--concurrency takes --llm-base-url=URL", args: []string{"--concurrency", "--llm-base-url=" + canaryURL},
+			want: `invalid value "--llm-base-url=(hidden)" for flag -concurrency: parse error`},
+		{name: "--concurrency takes --llm-base-url URL", args: []string{"--concurrency", "--llm-base-url", canaryURL},
+			want: `invalid value "--llm-base-url" for flag -concurrency: parse error`},
+		{name: "--ignore takes --llm-base-url=URL", args: []string{"--ignore", "--llm-base-url=" + canaryURL},
+			want: `invalid value "--llm-base-url=(hidden)" for flag -ignore: --ignore needs a rule ID`},
+		{name: "-ignore takes -llm-base-url URL", args: []string{"-ignore", "-llm-base-url", canaryURL},
+			want: `invalid value "-llm-base-url" for flag -ignore: --ignore needs a rule ID`},
+		{name: "--fail-on takes --llm-base-url=URL", args: []string{"--fail-on", "--llm-base-url=" + canaryURL},
+			want: `invalid value "--llm-base-url=(hidden)" for flag -fail-on: --fail-on needs low, medium, high or critical`},
+		{name: "--fail-on takes --llm-base-url URL", args: []string{"--fail-on", "--llm-base-url", canaryURL},
+			want: `invalid value "--llm-base-url" for flag -fail-on: --fail-on needs low, medium, high or critical`},
+		{name: "--config takes --llm-base-url=URL", args: []string{"--config", "--llm-base-url=" + canaryURL},
+			want: `invalid value "--llm-base-url=(hidden)" for flag -config: --config needs a file name`},
+		{name: "--config takes --llm-base-url URL", args: []string{"--config", "--llm-base-url", canaryURL},
+			want: `invalid value "--llm-base-url" for flag -config: --config needs a file name`},
+		{name: "--llm-provider takes --llm-base-url=URL", args: []string{"--llm", "--llm-provider", "--llm-base-url=" + canaryURL},
+			want: `invalid value "--llm-base-url=(hidden)" for flag -llm-provider: --llm-provider needs a provider name`},
+		{name: "--llm-provider takes --llm-base-url URL", args: []string{"--llm", "--llm-provider", "--llm-base-url", canaryURL},
+			want: `invalid value "--llm-base-url" for flag -llm-provider: --llm-provider needs a provider name`},
+		{name: "--llm-model takes -llm-base-url=URL", args: []string{"--llm", "--llm-model", "-llm-base-url=" + canaryURL},
+			want: `invalid value "-llm-base-url=(hidden)" for flag -llm-model: --llm-model needs a model name`},
+		{name: "--llm-model takes --llm-base-url URL", args: []string{"--llm", "--llm-model", "--llm-base-url", canaryURL},
+			want: `invalid value "--llm-base-url" for flag -llm-model: --llm-model needs a model name`},
+		{name: "flag not defined before the URL", args: []string{"--bogus", "--llm-base-url=" + canaryURL},
+			want: "flag provided but not defined: -bogus"},
+		{name: "three dashes", args: []string{"---llm-base-url=" + canaryURL},
+			want: "bad flag syntax: ---llm-base-url=(hidden)"},
+		{name: "positional --llm-base-url=URL", args: []string{"extra", "--llm-base-url=" + canaryURL},
+			want: `unexpected arguments ["extra" "--llm-base-url=(hidden)"]`},
+		{name: "positional -llm-base-url URL", args: []string{"extra", "-llm-base-url", canaryURL},
+			want: `unexpected arguments ["extra" "-llm-base-url" "(hidden)"]`},
+		{name: "positional after --", args: []string{"--", "--llm-base-url=" + canaryURL},
+			want: `unexpected arguments ["--llm-base-url=(hidden)"]`},
+		{name: "positional after the flag", args: []string{"--llm-base-url", canaryURL, "extra"},
+			want: `unexpected arguments ["extra"]`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			w := newLLMGuardWorld(t, map[string]string{llm.KeyEnv: llmTestKey})
+
+			code := w.c.dispatch(append([]string{"scan"}, tt.args...))
+
+			stdout, stderr := w.stdout.String(), w.stderr.String()
+			if code != exitError {
+				t.Errorf("exit code = %d, want %d\nstderr:\n%s", code, exitError, stderr)
+			}
+			assertEmptyStdout(t, stdout)
+			if strings.Contains(stdout+stderr, passCanary) {
+				t.Errorf("the output holds the password %q\nstdout:\n%s\nstderr:\n%s", passCanary, stdout, stderr)
+			}
+			assertStderrLines(t, stderr, []lineWant{exactLine(scanPrefix + tt.want), exactLine(usageHint)})
+			assertTerminalSafe(t, stderr)
+			if n := w.dirCalls.Load(); n != 0 {
+				t.Errorf("homeDir or getwd was called %d times, want 0: scan read the configs", n)
+			}
+		})
+	}
+}
+
+// TestArgHider checks newArgHider on its own: which arguments give a value,
+// that the longest value wins, and that the zero argHider changes nothing.
+func TestArgHider(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		args []string
+		in   string
+		want string
+	}{
+		{name: "no value", args: []string{"--timeout", "5s"}, in: "--timeout 5s", want: "--timeout 5s"},
+		{name: "empty inline value", args: []string{"--llm-base-url="}, in: "x --llm-base-url= y", want: "x --llm-base-url= y"},
+		{name: "bare flag at the end", args: []string{"--llm-base-url"}, in: "--llm-base-url", want: "--llm-base-url"},
+		{name: "inline value", args: []string{"--llm-base-url=SECRET"}, in: "a SECRET b", want: "a (hidden) b"},
+		{name: "next argument", args: []string{"-llm-base-url", "SECRET"}, in: "a SECRET b", want: "a (hidden) b"},
+		{name: "longest first", args: []string{"--llm-base-url=AB", "--llm-base-url=ABCD"}, in: "ABCD AB", want: "(hidden) (hidden)"},
+		{name: "quoted form", args: []string{`--llm-base-url=a"b`}, in: `"a\"b" a"b`, want: `"(hidden)" (hidden)`},
+		{name: "other flag name", args: []string{"--llm-base-urlx=SECRET"}, in: "SECRET", want: "SECRET"},
+		{name: "not a flag", args: []string{"llm-base-url=SECRET"}, in: "SECRET", want: "SECRET"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if got := newArgHider(tt.args, "llm-base-url").hide(tt.in); got != tt.want {
+				t.Errorf("hide(%q) = %q, want %q", tt.in, got, tt.want)
+			}
+		})
+	}
+	if got := (argHider{}).hide("SECRET"); got != "SECRET" {
+		t.Errorf("zero argHider hide() = %q, want the text as it is", got)
+	}
+}
+
 // TestScanLLMConfig checks how the LLM flags and the key reach the client
 // config (FR-17): the defaults of each provider, the key from
 // MCPMOAT_LLM_API_KEY only, no dial hook in production, and the host that the
@@ -617,7 +742,9 @@ const llmNoToolLine = scanPrefix + "--llm had no tool to classify\n"
 // server in the config, a server that failed, or a server with no tools.
 // The notice shows once on stderr, the classifier gets no call, and the exit
 // code and the JSON report are the same as without --llm. A scan with a tool
-// to classify, and a scan without --llm, print no notice.
+// to classify, and a scan without --llm, print no notice. When the pin step
+// failed (pins.json cannot be read, or inspect.Run refused its input), the
+// error on stderr is the cause, so the notice does not show either.
 func TestScanLLMNoTool(t *testing.T) {
 	t.Parallel()
 
@@ -625,8 +752,10 @@ func TestScanLLMNoTool(t *testing.T) {
 		name    string
 		servers map[string]any
 		insp    func() inspect.Inspector
-		calls   int32 // the calls of the classifier with --llm
-		notice  bool
+		// corruptPins writes a pins.json that cannot be read.
+		corruptPins bool
+		calls       int32 // the calls of the classifier with --llm
+		notice      bool
 	}{
 		{
 			name:    "no server",
@@ -652,6 +781,18 @@ func TestScanLLMNoTool(t *testing.T) {
 			insp:    func() inspect.Inspector { return fakeServers(map[string][]inspect.Tool{"srv": {mkTool("t1", "Add.")}}) },
 			calls:   1,
 		},
+		{
+			name:        "pins unreadable",
+			servers:     oneServer("srv"),
+			insp:        func() inspect.Inspector { return fakeServers(map[string][]inspect.Tool{"srv": {mkTool("t1", "Add.")}}) },
+			corruptPins: true,
+		},
+		{
+			// A nil inspector makes inspect.Run refuse its input.
+			name:    "inspect.Run failed",
+			servers: oneServer("srv"),
+			insp:    func() inspect.Inspector { return nil },
+		},
 	}
 	for _, tt := range tests {
 		for _, jsonOut := range []bool{false, true} {
@@ -664,6 +805,9 @@ func TestScanLLMNoTool(t *testing.T) {
 				// The same world without --llm gives the exit code and the
 				// report to compare with.
 				base := newPinEnv(t, tt.servers)
+				if tt.corruptPins {
+					writeTestFile(t, filepath.Join(base.xdg, "mcpmoat"), "pins.json", "{this is not json")
+				}
 				bc, bout, berr := llmCLI(base, tt.insp(), &llmFactory{t: t})
 				want := llmRun(t, base, bc, bout, berr, extra...)
 				if strings.Contains(want.stderr, "--llm") {
@@ -671,6 +815,9 @@ func TestScanLLMNoTool(t *testing.T) {
 				}
 
 				e := newPinEnv(t, tt.servers)
+				if tt.corruptPins {
+					writeTestFile(t, filepath.Join(e.xdg, "mcpmoat"), "pins.json", "{this is not json")
+				}
 				fake := &llmFake{}
 				c, stdout, stderr := llmCLI(e, tt.insp(), &llmFactory{t: t, cl: fake})
 				r := llmRun(t, e, c, stdout, stderr, append([]string{"--llm"}, extra...)...)

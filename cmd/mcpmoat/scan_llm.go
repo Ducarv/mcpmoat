@@ -290,6 +290,27 @@ const (
 	answerInternalFailed
 )
 
+// String returns the name of the kind, so a test failure or a debug print
+// shows a name and not a number. Every kind has a name.
+func (k answerKind) String() string {
+	switch k {
+	case answerNotRun:
+		return "answerNotRun"
+	case answerVerdict:
+		return "answerVerdict"
+	case answerUnusable:
+		return "answerUnusable"
+	case answerStopped:
+		return "answerStopped"
+	case answerProviderFailed:
+		return "answerProviderFailed"
+	case answerInternalFailed:
+		return "answerInternalFailed"
+	default:
+		return fmt.Sprintf("answerKind(%d)", int(k))
+	}
+}
+
 // sortAnswer returns the kind of the result of Classify with the error err.
 //
 // It fails closed. Only llm.ErrInvalidOutput gives an llm.RuleIDInvalid row
@@ -340,9 +361,12 @@ type llmFailure struct {
 const llmInternalText = "the LLM step failed (internal error)"
 
 // llmNoToolText is the text after the prefix of the stderr line when --llm
-// is given but the step has no tool to classify: no server was inspected, or
-// the inspected servers list no tools. It is fixed text. It is a notice: it
-// changes neither the exit code nor the JSON report.
+// is given but the step has no tool to classify: the config has no server, no
+// server was inspected successfully, or the inspected servers list no tools.
+// It is fixed text. It is a notice: it changes neither the exit code nor the
+// JSON report. When the pin step failed (pins.json cannot be read, or
+// inspect.Run failed), reportScan does not run the LLM step, so this notice
+// does not show: the error on stderr is the cause.
 const llmNoToolText = "--llm had no tool to classify"
 
 // llmAnswer is the result of one job.
@@ -415,7 +439,8 @@ func (r llmResult) incomplete() bool {
 // With --llm and no tool to classify (outcomes is empty, no server was
 // inspected, or the inspected servers list no tools), it sends nothing and
 // prints one llmNoToolText line, so the user knows that no tool was rated.
-// The line changes neither the exit code nor the JSON report.
+// The line changes neither the exit code nor the JSON report. reportScan does
+// not call llmStep when the pin step failed.
 //
 // It returns false when the process got a signal during a step that had a tool
 // to classify. It has written interruptedText then (see interrupted), and scan
@@ -468,19 +493,11 @@ func (c *cli) llmStepStopped(ctx context.Context, err error) bool {
 // sent. llmWorkers requests run at the same time. The rows keep the order of
 // the tools, whatever the order in which the requests end.
 //
-// A verdict with risk none gives no row. A verdict with risk low, medium or
-// high gives one llm.RuleID row with that severity (never critical). A
-// verdict for a cut tool text (llm.Verdict.Truncated) is never below medium:
-// with risk none or low, it gives one llm.RuleID row with severity medium and
-// the text llm.TruncatedText. An answer that cannot be used (see
-// answerUnusable) gives one llm.RuleIDInvalid row with severity medium, or,
-// for a cut tool text, the same llm.RuleID medium row as a cut verdict with
-// risk none or low (see llmRow). So --ignore MOAT-LLM-002 never hides a cut
-// tool. Every row is a report.SourceLLM row with fixed texts from package
-// llm: no model output reaches it. Only the --ignore entries drop rows, as
-// for the pin rules: .mcpmoat-ignore cannot ignore the LLM rules (see
-// scanIgnores). A file entry that matches a kept row is recorded in
-// llmResult.fileBlocked.
+// Each answered tool gives at most one report.SourceLLM row with fixed texts
+// from package llm, so no model output reaches it: see llmRow. Only the
+// --ignore entries drop rows, as for the pin rules: .mcpmoat-ignore cannot
+// ignore the LLM rules (see scanIgnores). A file entry that matches a kept
+// row is recorded in llmResult.fileBlocked.
 //
 // The first request that fails (a provider failure or an internal error, see
 // sortAnswer) stops the step: the requests that run end and no new one
@@ -624,11 +641,12 @@ func runLLMJobs(ctx context.Context, jobs []llmJob, cl toolClassifier) ([]llmAns
 // returns false when a gives no row: a verdict with risk none (and no cut
 // text), or a job without an answer (see answerKind.answered).
 //
-// A cut tool text (llm.Verdict.Truncated) gets the floor row (see
-// truncatedRow) when the model rated it none or low, gave a risk that is not
-// valid, or gave no usable answer (answerUnusable). So a cut tool always
-// gets an llm.RuleID row of at least medium, and never an llm.RuleIDInvalid
-// row.
+// A verdict whose risk or category is not valid counts as an answer that
+// cannot be used, so it fails closed. parseVerdict never returns one, but a
+// classifier in a test can. A cut tool text (llm.Verdict.Truncated) gets the
+// floor row (see truncatedRow) when the model rated it none or low, or gave
+// no usable answer. So a cut tool always gets an llm.RuleID row of at least
+// medium, and never an llm.RuleIDInvalid row.
 func llmRow(job llmJob, a llmAnswer) (report.FindingRow, bool) {
 	key := job.in.ToolName
 	if key == "" {
@@ -642,32 +660,24 @@ func llmRow(job llmJob, a llmAnswer) (report.FindingRow, bool) {
 	}
 	switch a.kind {
 	case answerVerdict:
-		if a.verdict.Truncated && belowMedium(a.verdict.Risk) {
+		v := a.verdict
+		if !v.Risk.Valid() || !v.Category.Valid() {
+			return unusableRow(row, v.Truncated), true
+		}
+		if v.Truncated && belowMedium(v.Risk) {
 			return truncatedRow(row), true
 		}
-		row.RuleID = llm.RuleID
-		row.Title = llm.Title
-		row.Remediation = llm.Remediation
-		severity, hasRisk := a.verdict.Risk.Severity()
+		severity, hasRisk := v.Risk.Severity()
 		if !hasRisk {
-			return report.FindingRow{}, false
+			return report.FindingRow{}, false // risk none
 		}
+		row = llmRuleRow(row)
 		row.Severity = severity
-		row.Risk = a.verdict.Category.Text()
-		// The category is one of the fixed llm.Category values: parseVerdict
-		// refuses any other.
-		row.Related = string(a.verdict.Category)
+		row.Risk = v.Category.Text()
+		row.Related = string(v.Category)
 		return row, true
 	case answerUnusable:
-		if a.verdict.Truncated {
-			return truncatedRow(row), true
-		}
-		row.RuleID = llm.RuleIDInvalid
-		row.Title = llm.InvalidTitle
-		row.Severity = string(rules.SeverityMedium)
-		row.Risk = llm.InvalidText
-		row.Remediation = llm.InvalidRemediation
-		return row, true
+		return unusableRow(row, a.verdict.Truncated), true
 	default:
 		// answerNotRun, answerStopped, answerProviderFailed and
 		// answerInternalFailed: the tool got no answer.
@@ -675,12 +685,34 @@ func llmRow(job llmJob, a llmAnswer) (report.FindingRow, bool) {
 	}
 }
 
-// belowMedium reports whether the risk r of a verdict for a cut tool text
-// asks for the floor row: r is none or low, or r is not a valid risk. An
-// unknown risk counts too, so it fails closed. parseVerdict never returns
-// one, but a classifier in a test can.
+// belowMedium reports whether the valid risk r of a verdict for a cut tool
+// text asks for the floor row: r is none or low.
 func belowMedium(r llm.Risk) bool {
-	return r == llm.RiskNone || r == llm.RiskLow || !r.Valid()
+	return r == llm.RiskNone || r == llm.RiskLow
+}
+
+// llmRuleRow fills the fixed texts of an llm.RuleID row into row: the rule
+// ID, the title and the remediation.
+func llmRuleRow(row report.FindingRow) report.FindingRow {
+	row.RuleID = llm.RuleID
+	row.Title = llm.Title
+	row.Remediation = llm.Remediation
+	return row
+}
+
+// unusableRow fills row for an answer that cannot be used: the floor row
+// (see truncatedRow) when the tool text was cut, else an llm.RuleIDInvalid
+// row with severity medium and the fixed texts of package llm.
+func unusableRow(row report.FindingRow, truncated bool) report.FindingRow {
+	if truncated {
+		return truncatedRow(row)
+	}
+	row.RuleID = llm.RuleIDInvalid
+	row.Title = llm.InvalidTitle
+	row.Severity = string(rules.SeverityMedium)
+	row.Risk = llm.InvalidText
+	row.Remediation = llm.InvalidRemediation
+	return row
 }
 
 // truncatedRow fills row, an LLM row of a tool whose text was cut, as the
@@ -689,9 +721,7 @@ func belowMedium(r llm.Risk) bool {
 // cut was not rated, and a prompt injection before the cut can ask for a low
 // rating or make the model refuse.
 func truncatedRow(row report.FindingRow) report.FindingRow {
-	row.RuleID = llm.RuleID
-	row.Title = llm.Title
-	row.Remediation = llm.Remediation
+	row = llmRuleRow(row)
 	row.Severity = string(rules.SeverityMedium)
 	row.Risk = llm.TruncatedText
 	row.Related = string(llm.CategoryOther)
@@ -735,16 +765,25 @@ func llmFailureLine(f *llmFailure) string {
 	return fmt.Sprintf("the LLM provider failed (%s)", llmFailureText(f.err))
 }
 
-// llmFailureText returns the reason of a failed request to the provider:
-// "HTTP <code>" for a status code, else the error text. The errors of package
-// llm have fixed text. The text of llm.ErrProvider at the start is cut, because
-// the line already says "the LLM provider failed". termsafe.Quote still
-// escapes the text, because a classifier in a test can return any error that
-// wraps llm.ErrProvider.
+// llmFailureText returns the reason of a failed request to the provider. For
+// a status code it is "HTTP <code>", with a fixed hint for some codes:
+// "HTTP 401 (the API key was refused)" for 401 and 403 (llm.ErrAuth), and
+// "HTTP 302 (redirect refused)" for a 3xx. Else it is the error text. The
+// errors of package llm have fixed text. The text of llm.ErrProvider at the
+// start is cut, because the line already says "the LLM provider failed".
+// termsafe.Quote still escapes the text, because a classifier in a test can
+// return any error that wraps llm.ErrProvider.
 func llmFailureText(err error) string {
 	var status *llm.StatusError
-	if errors.As(err, &status) {
+	if !errors.As(err, &status) {
+		return termsafe.Quote(strings.TrimPrefix(err.Error(), llm.ErrProvider.Error()+": "))
+	}
+	switch {
+	case errors.Is(err, llm.ErrAuth):
+		return fmt.Sprintf("HTTP %d (the API key was refused)", status.Code)
+	case status.Code >= 300 && status.Code < 400:
+		return fmt.Sprintf("HTTP %d (redirect refused)", status.Code)
+	default:
 		return fmt.Sprintf("HTTP %d", status.Code)
 	}
-	return termsafe.Quote(strings.TrimPrefix(err.Error(), llm.ErrProvider.Error()+": "))
 }

@@ -613,8 +613,12 @@ func TestE2ELLMKeyNotInPlaceholders(t *testing.T) {
 		t.Errorf("exit code = %d, want %d\nstdout:\n%s\nstderr:\n%s", code, exitFindings, stdout, stderr)
 	}
 	e2eNetAssertNoKeyOutput(t, stdout, stderr)
-	if n := strings.Count(stdout+stderr, "variable "+llm.KeyEnv+": variable is not set; this variable is hidden from placeholders"); n != 2 {
+	if n := strings.Count(stdout+stderr, "variable "+llm.KeyEnv+": hidden from placeholders"); n != 2 {
 		t.Errorf("the hidden-variable reason shows %d times, want 2 (one for each server)\nstdout:\n%s\nstderr:\n%s", n, stdout, stderr)
+	}
+	// The key is set, so a reason that says "not set" would be wrong.
+	if strings.Contains(stdout+stderr, "not set") {
+		t.Errorf("the output says \"not set\" for the hidden variable\nstdout:\n%s\nstderr:\n%s", stdout, stderr)
 	}
 	if _, err := os.Stat(envFile); !errors.Is(err, fs.ErrNotExist) {
 		t.Errorf("the stdio server with the placeholder started (stat error = %v), want it refused", err)

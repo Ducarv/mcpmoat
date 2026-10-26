@@ -18,8 +18,9 @@ import (
 const sdkHiddenValue = "mcpmoat-hidden-canary-sdk-3Vb9Qx"
 
 // sdkHiddenNote is the end of the reason for a placeholder of a hidden
-// variable.
-const sdkHiddenNote = "; this variable is hidden from placeholders"
+// variable, after the variable name. The reason never says "not set": the
+// variable can be set.
+const sdkHiddenNote = ": hidden from placeholders"
 
 // sdkHiddenParent is sdkExpandParent plus the hidden variable.
 func sdkHiddenParent(t *testing.T, dir string) []string {
@@ -55,26 +56,26 @@ func TestSDKInspectHiddenEnvRefused(t *testing.T) {
 			client:     discover.ClientClaudeCode,
 			args:       []string{"-pidfile", "PIDFILE"},
 			env:        map[string]string{"MCPMOAT_TEST_KEY": "${MCPMOAT_TEST_HIDDEN}"},
-			wantReason: "cannot expand env: variable MCPMOAT_TEST_HIDDEN: variable is not set" + sdkHiddenNote,
+			wantReason: "cannot expand env: variable MCPMOAT_TEST_HIDDEN" + sdkHiddenNote,
 		},
 		{
 			name:       "trusted cursor stdio arg",
 			client:     discover.ClientCursor,
 			args:       []string{"-pidfile", "PIDFILE", "--key=${env:MCPMOAT_TEST_HIDDEN}"},
-			wantReason: "cannot expand args: variable MCPMOAT_TEST_HIDDEN: variable is not set" + sdkHiddenNote,
+			wantReason: "cannot expand args: variable MCPMOAT_TEST_HIDDEN" + sdkHiddenNote,
 		},
 		{
 			name:       "trusted claude code remote header",
 			client:     discover.ClientClaudeCode,
 			url:        "URL",
 			headers:    map[string]string{"X-Key": "${MCPMOAT_TEST_HIDDEN}"},
-			wantReason: "cannot expand headers: variable MCPMOAT_TEST_HIDDEN: variable is not set" + sdkHiddenNote,
+			wantReason: "cannot expand headers: variable MCPMOAT_TEST_HIDDEN" + sdkHiddenNote,
 		},
 		{
 			name:       "trusted cursor remote URL",
 			client:     discover.ClientCursor,
 			url:        "URL?k=${env:MCPMOAT_TEST_HIDDEN}",
-			wantReason: "cannot expand url: variable MCPMOAT_TEST_HIDDEN: variable is not set" + sdkHiddenNote,
+			wantReason: "cannot expand url: variable MCPMOAT_TEST_HIDDEN" + sdkHiddenNote,
 		},
 		{
 			name:       "hidden name in another case",
@@ -82,7 +83,7 @@ func TestSDKInspectHiddenEnvRefused(t *testing.T) {
 			hidden:     []string{"mcpmoat_test_hidden"},
 			url:        "URL",
 			headers:    map[string]string{"X-Key": "${MCPMOAT_TEST_HIDDEN}"},
-			wantReason: "cannot expand headers: variable MCPMOAT_TEST_HIDDEN: variable is not set" + sdkHiddenNote,
+			wantReason: "cannot expand headers: variable MCPMOAT_TEST_HIDDEN" + sdkHiddenNote,
 		},
 		{
 			// The hidden note wins over the untrusted note: the cause is
@@ -92,7 +93,7 @@ func TestSDKInspectHiddenEnvRefused(t *testing.T) {
 			untrusted:  true,
 			args:       []string{"-pidfile", "PIDFILE"},
 			env:        map[string]string{"MCPMOAT_TEST_KEY": "${MCPMOAT_TEST_HIDDEN}"},
-			wantReason: "cannot expand env: variable MCPMOAT_TEST_HIDDEN: variable is not set" + sdkHiddenNote,
+			wantReason: "cannot expand env: variable MCPMOAT_TEST_HIDDEN" + sdkHiddenNote,
 		},
 		{
 			name:       "untrusted claude code remote header",
@@ -100,7 +101,7 @@ func TestSDKInspectHiddenEnvRefused(t *testing.T) {
 			untrusted:  true,
 			url:        "URL",
 			headers:    map[string]string{"X-Key": "${MCPMOAT_TEST_HIDDEN}"},
-			wantReason: "cannot expand headers: variable MCPMOAT_TEST_HIDDEN: variable is not set" + sdkHiddenNote,
+			wantReason: "cannot expand headers: variable MCPMOAT_TEST_HIDDEN" + sdkHiddenNote,
 		},
 	}
 	for _, tt := range tests {

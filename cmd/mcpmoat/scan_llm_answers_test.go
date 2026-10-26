@@ -10,6 +10,7 @@ import (
 	"sync/atomic"
 	"testing"
 
+	"github.com/Ducarv/mcpmoat/internal/discover"
 	"github.com/Ducarv/mcpmoat/internal/inspect"
 	"github.com/Ducarv/mcpmoat/internal/llm"
 	"github.com/Ducarv/mcpmoat/internal/report"
@@ -670,6 +671,73 @@ func TestLLMRowTruncated(t *testing.T) {
 	}
 }
 
+// verdictClassifier is a toolClassifier that returns its own verdict, with no
+// error, for every tool.
+type verdictClassifier llm.Verdict
+
+// Classify implements toolClassifier.
+func (v verdictClassifier) Classify(context.Context, llm.Input) (llm.Verdict, error) {
+	return llm.Verdict(v), nil
+}
+
+// TestClassifyToolsInvalidVerdict checks that a verdict with a risk or a
+// category that is not valid fails closed, like an answer that cannot be
+// used: a MOAT-LLM-002 row, or the MOAT-LLM-001 floor row for a cut tool
+// text. parseVerdict refuses such a verdict, so only a fake classifier can
+// return one. A valid verdict keeps its own row, as a control.
+func TestClassifyToolsInvalidVerdict(t *testing.T) {
+	t.Parallel()
+
+	srv := discover.Server{Name: "srv", Client: discover.ClientClaudeCode, Source: "/cfg/mcp.json"}
+	outcomes := []inspect.Outcome{{Server: srv, Status: inspect.StatusOK, Result: inspect.Result{Tools: []inspect.Tool{mkTool("t1", "Add.")}}}}
+	tests := []struct {
+		name         string
+		verdict      llm.Verdict
+		wantRule     string
+		wantSeverity string
+		wantRisk     string
+		wantRelated  string
+	}{
+		{name: "invalid risk", verdict: llm.Verdict{Risk: "critical", Category: llm.CategoryCredentialAccess},
+			wantRule: llm.RuleIDInvalid, wantSeverity: "medium", wantRisk: llm.InvalidText},
+		{name: "empty risk", verdict: llm.Verdict{Category: llm.CategoryOther},
+			wantRule: llm.RuleIDInvalid, wantSeverity: "medium", wantRisk: llm.InvalidText},
+		{name: "invalid category, risk high", verdict: llm.Verdict{Risk: llm.RiskHigh, Category: "bogus"},
+			wantRule: llm.RuleIDInvalid, wantSeverity: "medium", wantRisk: llm.InvalidText},
+		{name: "invalid category, risk none", verdict: llm.Verdict{Risk: llm.RiskNone, Category: ""},
+			wantRule: llm.RuleIDInvalid, wantSeverity: "medium", wantRisk: llm.InvalidText},
+		{name: "invalid risk, cut", verdict: llm.Verdict{Risk: "critical", Category: llm.CategoryCredentialAccess, Truncated: true},
+			wantRule: llm.RuleID, wantSeverity: "medium", wantRisk: llm.TruncatedText, wantRelated: string(llm.CategoryOther)},
+		{name: "invalid category, risk high, cut", verdict: llm.Verdict{Risk: llm.RiskHigh, Category: "bogus", Truncated: true},
+			wantRule: llm.RuleID, wantSeverity: "medium", wantRisk: llm.TruncatedText, wantRelated: string(llm.CategoryOther)},
+		{name: "valid verdict", verdict: llm.Verdict{Risk: llm.RiskHigh, Category: llm.CategoryCredentialAccess},
+			wantRule: llm.RuleID, wantSeverity: "high", wantRisk: llm.CategoryCredentialAccess.Text(), wantRelated: string(llm.CategoryCredentialAccess)},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			res, err := classifyTools(t.Context(), outcomes, verdictClassifier(tt.verdict), &scanIgnores{})
+			if err != nil {
+				t.Fatalf("classifyTools() error = %v", err)
+			}
+			if res.incomplete() {
+				t.Errorf("classifyTools() result is incomplete: %+v", res)
+			}
+			if len(res.rows) != 1 {
+				t.Fatalf("classifyTools() rows = %+v, want one row", res.rows)
+			}
+			row := res.rows[0]
+			if row.RuleID != tt.wantRule || row.Severity != tt.wantSeverity || row.Risk != tt.wantRisk || row.Related != tt.wantRelated {
+				t.Errorf("row = %s %s %q %q, want %s %s %q %q",
+					row.RuleID, row.Severity, row.Risk, row.Related, tt.wantRule, tt.wantSeverity, tt.wantRisk, tt.wantRelated)
+			}
+			if row.Source != report.SourceLLM || row.Key != "t1" {
+				t.Errorf("row source, key = %q, %q; want %q, %q", row.Source, row.Key, report.SourceLLM, "t1")
+			}
+		})
+	}
+}
+
 // TestNewLLMAnswer checks what newLLMAnswer keeps of the verdict: all of it
 // for a verdict, only Truncated for an answer that cannot be used, and
 // nothing for the kinds without an answer.
@@ -726,30 +794,10 @@ func TestCloseClassifierNil(t *testing.T) {
 	closeClassifier(client)
 }
 
-// String returns the name of the kind, so a test failure shows a name and not
-// a number. Every kind has a name.
-func (k answerKind) String() string {
-	switch k {
-	case answerNotRun:
-		return "answerNotRun"
-	case answerVerdict:
-		return "answerVerdict"
-	case answerUnusable:
-		return "answerUnusable"
-	case answerStopped:
-		return "answerStopped"
-	case answerProviderFailed:
-		return "answerProviderFailed"
-	case answerInternalFailed:
-		return "answerInternalFailed"
-	default:
-		return fmt.Sprintf("answerKind(%d)", int(k))
-	}
-}
-
 // TestLLMFailureLine checks the start of the stderr line of a failed LLM step:
 // only a provider failure names the provider, and an internal failure has
-// fixed text.
+// fixed text. A status code gets a fixed hint for 401 and 403 (the key) and
+// for a 3xx (the redirect), and no hint for other codes.
 func TestLLMFailureLine(t *testing.T) {
 	t.Parallel()
 
@@ -762,6 +810,13 @@ func TestLLMFailureLine(t *testing.T) {
 		{"internal", &llmFailure{kind: answerInternalFailed}, llmInternalText},
 		{"provider without error", &llmFailure{kind: answerProviderFailed}, llmInternalText},
 		{"provider status", &llmFailure{kind: answerProviderFailed, err: &llm.StatusError{Code: http.StatusServiceUnavailable}}, "the LLM provider failed (HTTP 503)"},
+		{"provider status 429", &llmFailure{kind: answerProviderFailed, err: &llm.StatusError{Code: http.StatusTooManyRequests}}, "the LLM provider failed (HTTP 429)"},
+		{"provider status 401", &llmFailure{kind: answerProviderFailed, err: &llm.StatusError{Code: http.StatusUnauthorized}}, "the LLM provider failed (HTTP 401 (the API key was refused))"},
+		{"provider status 403", &llmFailure{kind: answerProviderFailed, err: &llm.StatusError{Code: http.StatusForbidden}}, "the LLM provider failed (HTTP 403 (the API key was refused))"},
+		{"provider status 401 wrapped", &llmFailure{kind: answerProviderFailed, err: fmt.Errorf("test: %w", &llm.StatusError{Code: http.StatusUnauthorized})}, "the LLM provider failed (HTTP 401 (the API key was refused))"},
+		{"provider status 302", &llmFailure{kind: answerProviderFailed, err: &llm.StatusError{Code: http.StatusFound}}, "the LLM provider failed (HTTP 302 (redirect refused))"},
+		{"provider status 307", &llmFailure{kind: answerProviderFailed, err: &llm.StatusError{Code: http.StatusTemporaryRedirect}}, "the LLM provider failed (HTTP 307 (redirect refused))"},
+		{"provider status 400", &llmFailure{kind: answerProviderFailed, err: &llm.StatusError{Code: http.StatusBadRequest}}, "the LLM provider failed (HTTP 400)"},
 		{"provider transport", &llmFailure{kind: answerProviderFailed, err: llm.ErrTransport}, "the LLM provider failed (network error)"},
 	}
 	for _, tt := range tests {
