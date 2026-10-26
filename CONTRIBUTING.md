@@ -394,8 +394,9 @@ Agent-oriented variants (scoped tests, E2E scenario, golden files, fuzz) are in 
 
 CI (`.github/workflows/ci.yml`) runs on every pull request. On Linux and macOS it runs build, vet, race
 tests, golangci-lint and the version smoke test. On Linux only it also runs the gofmt check, the
-`go mod tidy` check and govulncheck. The `release-check` job checks that the GoReleaser version pins
-match, then runs `goreleaser check`, a snapshot build and `.github/scripts/check-snapshot.sh`.
+`go mod tidy` check and govulncheck. The `release-check` job checks that the GoReleaser and
+govulncheck version pins match. Then it runs `goreleaser check`, a snapshot build and
+`.github/scripts/check-snapshot.sh`.
 
 ### Build the binary
 

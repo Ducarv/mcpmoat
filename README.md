@@ -59,12 +59,16 @@ not prove that the cask is safe. To check the cask, first verify `checksums.txt`
 above, with the same flags. Then open `Casks/mcpmoat.rb` in the
 [tap](https://github.com/Ducarv/homebrew-tap) and check these points:
 
-- Every `url` starts with `https://github.com/Ducarv/mcpmoat/releases/download/v<version>/`.
-- Every `sha256` value is a line of the verified `checksums.txt`.
-- The only block that runs a command is `postflight_steps`, with one `xattr` line that removes the
-  quarantine flag from `mcpmoat`.
-- There is no other code. The cask holds only `version`, the `on_macos` and `on_linux` blocks with
-  `url` and `sha256`, `name`, `desc`, `homepage`, `livecheck`, `binary` and `postflight_steps`.
+- The `version` line is the release number without the `v`, for example `"0.1.0"`.
+- Every `url` starts with `https://github.com/Ducarv/mcpmoat/releases/download/v#{version}/`.
+  Homebrew fills in `#{version}` from the `version` line.
+- Each `sha256` is the hash on the `checksums.txt` line for the archive that the `url` in the same
+  block names.
+- The only block that runs a command is `postflight_steps`. It holds one `on_macos` block with one
+  `xattr` line that removes the quarantine flag from `mcpmoat`.
+- There is no other code. The cask holds only these parts: `version`; `on_macos` and `on_linux`,
+  each with `on_arm` and `on_intel` blocks that hold `url` and `sha256`; `name`, `desc` and
+  `homepage`; `livecheck` with one `skip` line; `binary`; and `postflight_steps`.
 
 The macOS binaries are not notarized yet. The Homebrew cask removes the quarantine flag on install,
 so Gatekeeper does not check the binary. Verify the archive if that matters to you.
