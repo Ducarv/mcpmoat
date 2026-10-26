@@ -69,25 +69,27 @@ const (
 		"and found out why they take so long to check. Then run mcpmoat scan again."
 )
 
-// toolRulesStep applies the description and schema rules of a to the tools
-// of the inspected servers in outcomes (FR-07, FR-09). set gives the severity
-// and the texts of each finding (see findingRule). It skips a server that was
-// not inspected (inspect.StatusOK is not set) or that lists no tools. A nil
-// analyzer checks nothing.
+// toolRulesStep applies the description and schema rules of setup.analyzer
+// to the tools of the inspected servers in outcomes (FR-07, FR-09). The rule
+// set setup.checks.set gives the severity and the texts of each finding (see
+// findingRule). It skips a server that was not inspected (inspect.StatusOK is
+// not set) or that lists no tools. A nil analyzer checks nothing.
 //
 // The servers go in the order of inspect.Outcome.Index, and the tools of a
 // server in the order that the server lists them, one after the other. Each
-// server gets its own context with the time limit budget (toolRulesBudget in
-// a real scan). When the budget of a server is used up, the step keeps the
-// rows that it found for that server, adds one rules.RuleAnalysisBudget row
-// (see budgetRow and budgetSeverity), prints one warning on stderr, and goes
-// on with the next server. A budget of 0 or less is used up at once.
+// server gets its own context with the time limit setup.toolBudget
+// (toolRulesBudget in a real scan). When the budget of a server is used up,
+// the step keeps the rows that it found for that server, adds one
+// rules.RuleAnalysisBudget row (see budgetRow and budgetSeverity), prints one
+// warning on stderr, and goes on with the next server. A budget of 0 or less
+// is used up at once.
 //
 // A finding row holds the rule ID, the tool name in Key (see toolKey) and the
 // target ("description" or "schema") in Related. It never holds tool text or
-// pattern text. The ignore list compares the real tool name, not the Key. The ignore list drops rows like the
-// rows of the config rules (see scanIgnores.ignored). The step prints one
-// warning for each rule ID that .mcpmoat-ignore cannot ignore.
+// pattern text. The ignore list ignore drops rows like the rows of the config
+// rules (see scanIgnores.ignored). It compares the real tool name, not the
+// Key. The step prints one warning for each rule ID that .mcpmoat-ignore
+// cannot ignore.
 //
 // counts holds the finding counts of each server by the index of the server
 // (see serverStatuses). The step adds the rows that it keeps for a server to
@@ -100,13 +102,19 @@ const (
 //     analyzer ran. The line is interruptedText (see interrupted).
 //   - errToolRulesFailed when the analyzer failed for any other reason. The
 //     line is toolRulesInternalText, after the server label.
-func (c *cli) toolRulesStep(ctx context.Context, a *rules.Analyzer, set *rules.Set, outcomes []inspect.Outcome, ignore *scanIgnores, budget time.Duration, counts []int) (toolRulesResult, error) {
+func (c *cli) toolRulesStep(ctx context.Context, setup scanSetup, outcomes []inspect.Outcome, ignore *scanIgnores, counts []int) (toolRulesResult, error) {
+	a := setup.analyzer
 	if a == nil {
 		return toolRulesResult{}, nil
 	}
 	run := toolRulesRun{
-		c: c, a: a, set: set, ignore: ignore, budget: budget, counts: counts,
+		c:              c,
+		a:              a,
+		set:            setup.checks.set,
+		ignore:         ignore,
+		budget:         setup.toolBudget,
 		budgetSeverity: budgetSeverity(a),
+		counts:         counts,
 	}
 	// inspect.Run sorts the outcomes, so their order is not the order of the
 	// servers.
@@ -166,10 +174,13 @@ func (r *toolRulesRun) checkServer(ctx context.Context, o inspect.Outcome) error
 		if err == nil {
 			continue
 		}
-		switch {
-		case r.c.interrupted(ctx, "scan"):
-			// The process got a signal. interrupted wrote the line.
+		// Check the parent context first: when the process got a signal, the
+		// scan stops, also when the budget is used up too.
+		if r.c.interrupted(ctx, "scan") {
+			// interrupted wrote the line.
 			return errInterrupted
+		}
+		switch {
 		case errors.Is(err, context.DeadlineExceeded) && serverCtx.Err() != nil:
 			// The budget of this server is used up. The tool at i was cut,
 			// so it counts as not fully checked.
@@ -251,6 +262,12 @@ func toolKey(name string) string {
 // a server cannot make a critical finding go away when it uses up the budget:
 // with a critical rule (from --rules) the budget row is critical too, and
 // "--fail-on critical" still gives exit code 1.
+//
+// MaxSeverity counts every description and schema rule that the analyzer
+// applies, also a rule whose findings --ignore or .mcpmoat-ignore drops. This
+// is on purpose, so the severity fails closed: the budget row is the sign in
+// the report that a rule did not run, and an ignored rule cannot make it
+// less severe. To drop the budget row itself, ignore rules.RuleAnalysisBudget.
 func budgetSeverity(a *rules.Analyzer) rules.Severity {
 	if s := a.MaxSeverity(); s.Rank() > rules.SeverityHigh.Rank() {
 		return s

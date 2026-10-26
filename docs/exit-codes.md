@@ -25,14 +25,15 @@ here.
   critical: then a finding of that rule and a `MOAT-T1-023` budget finding (see below) give exit
   code 1.
 - An unpinned server that fails or times out is a warning only (in the summary, or on stderr with
-  `--json`). It does not change the exit code. A pinned server that fails or times out is a high `MOAT-T2-004` finding.
+  `--json`). It does not change the exit code. A pinned server that fails or times out is a high
+  `MOAT-T2-004` finding.
 - A server whose rule analysis uses up its time budget (5 seconds for each server) is a
   `MOAT-T1-023` finding. Its severity is the highest severity of the description and schema rules
   that `scan` applies, but never lower than high. So it is high with the built-in rules, and
-  critical when a description or schema rule from `--rules` is critical. Then `--fail-on critical`
-  gives exit code 1 for it. It is not an execution error: it gives exit code 1 with the default
-  `--fail-on`, and the JSON `complete` stays `true`. `scan` also prints a warning on stderr, and
-  the other servers still get their own budget.
+  critical when a description or schema rule from `--rules` is critical (see the
+  `--fail-on critical` item above). It is not an execution error: it gives exit code 1 with the
+  default `--fail-on`, and the JSON `complete` stays `true`. `scan` also prints a warning on
+  stderr, and the other servers still get their own budget.
 
 Exit code 2 comes, for example, from a usage error (invalid flags), invalid rules (also a regex in
 a `--rules` file that does not compile, with or without `--no-connect`), an unreadable

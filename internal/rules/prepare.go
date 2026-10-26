@@ -11,7 +11,7 @@ import (
 const maxRegexForms = 3 * maxBaseForms
 
 // maxKeywordForms is the largest number of forms that keywordForms returns:
-// the folds of the base forms of matchForms.
+// the folds of the base forms of baseFormsCut.
 const maxKeywordForms = maxBaseForms
 
 // preparedText is one target text and the match forms built from it. The
@@ -49,7 +49,7 @@ type preparedText struct {
 
 	baseOnce sync.Once // guards buildBase (step one)
 	base     []string  // the base forms of baseFormsCut (dedup)
-	cut      bool      // the cut flag of baseFormsCut (see matchWindowCut)
+	cut      bool      // the cut flag of baseFormsCut
 
 	foldOnce sync.Once // guards buildFolds (step two)
 	regex    []string  // base forms, then their plain and skeleton folds (dedup)
@@ -65,8 +65,8 @@ func prepareText(raw string) *preparedText {
 	return &preparedText{raw: raw}
 }
 
-// windowCut reports whether the match window cuts raw: the flag of
-// matchWindowCut(raw). It runs step one (buildBase) when it did not run yet,
+// windowCut reports whether the match window cuts raw: the cut flag of
+// baseFormsCut(raw). It runs step one (buildBase) when it did not run yet,
 // and it does not build the folds.
 func (p *preparedText) windowCut() bool {
 	p.baseOnce.Do(p.buildBase)
@@ -84,7 +84,7 @@ func (p *preparedText) schema() *preparedSchema {
 }
 
 // regexForms returns the forms that the regex matchers (any_regex and
-// all_regex) read: the base forms of matchForms, and then, for each base
+// all_regex) read: the base forms of baseFormsCut, and then, for each base
 // form that is not only ASCII, its plain fold (foldMarks) and its skeleton
 // fold (foldSkeleton), each one when it is a new form. A regex matches when
 // it matches in one form. So the regex `ignore` also matches the fullwidth
@@ -116,7 +116,7 @@ func (p *preparedText) regexForms() []string {
 }
 
 // keywordForms returns the forms that the keyword matcher reads: the fold
-// (foldMarks) of each base form of matchForms, without the confusable
+// (foldMarks) of each base form of baseFormsCut, without the confusable
 // skeleton of the regex forms. Equal folds are kept only once, so there are
 // at most maxKeywordForms forms, each at most MaxMatchInputBytes long.
 //

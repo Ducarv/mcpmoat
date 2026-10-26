@@ -247,10 +247,8 @@ Guidelines:
 - Keep the cost of a rule low. A regex runs on up to 21 forms of each text (see above), for each
   tool of each server. `scan` gives the rule analysis of each server a time budget of 5 seconds,
   for the built-in rules and the rules from `--rules` together. A server that uses it up gets a
-  `MOAT-T1-023` finding, and the rest of its tools are not fully checked. This finding has the
-  highest severity of the description and schema rules, but never lower than high. So a critical
-  rule from `--rules` makes it critical too. So a slow rule can
-  give a false alarm on a benign server. Prefer a few short patterns. A long alternation with many
+  `MOAT-T1-023` finding, and the rest of its tools are not fully checked. So a slow rule can give a
+  false alarm on a benign server. Prefer a few short patterns. A long alternation with many
   branches, or a large bounded repeat such as `{0,1000}`, costs time on every form.
 - Prefer a lower severity when you are not sure. False positives make people stop using the tool.
 - Add at least one reference (research, advisory, OWASP MCP Top 10 entry).
@@ -344,9 +342,9 @@ Such a rule gives the error `<file>: field id: rule ID is reserved for a native 
 `scan` exits with code 2.
 
 `scan` loads the rules and compiles their regexes when it starts, before it starts a server, also
-with `--no-connect`. An invalid file, a clashing or reserved ID or a regex that does not compile gives exit
-code 2, and the message names the file. For a bad regex, it also names the field `match`. So
-`mcpmoat scan --rules ./my-rules --no-connect` checks your files and starts no server.
+with `--no-connect`. An invalid file, a clashing or reserved ID or a regex that does not compile
+gives exit code 2, and the message names the file. For a bad regex, it also names the field
+`match`. So `mcpmoat scan --rules ./my-rules --no-connect` checks your files and starts no server.
 
 What `scan` does with the rules from `--rules`:
 
@@ -357,10 +355,9 @@ What `scan` does with the rules from `--rules`:
 - A rule with `target: config` is loaded and checked, but `scan` does not apply it. `scan` runs only
   its built-in config checks, and prints this note on stderr:
   `mcpmoat scan: rules from --rules with target config are not applied; scan applies only the built-in config checks`.
-- Your rules share the 5-second time budget of each server with the built-in rules (see the
-  guideline on rule cost in step 2). When one of your description or schema rules is critical, the
-  `MOAT-T1-023` finding of a server that uses up the budget is critical too, so
-  `--fail-on critical` gives exit code 1 for it.
+- Your rules share the time budget of each server with the built-in rules (see the guideline on
+  rule cost in step 2). A critical description or schema rule changes the severity of the
+  `MOAT-T1-023` finding (see [Exit codes](exit-codes.md)).
 
 ## See also
 

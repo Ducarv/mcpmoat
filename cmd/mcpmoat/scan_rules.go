@@ -18,8 +18,8 @@ type loadedRules struct {
 }
 
 // loadRules loads the built-in rules and, when dir is not empty, the extra
-// rules in dir. Then it compiles the description and schema rules of the
-// joined set once (rules.NewAnalyzer). It returns the result and true, or a
+// rules in dir. Then it compiles the rules of the joined set once
+// (rules.NewAnalyzer). It returns the result and true, or a
 // zero loadedRules and false after it printed every problem on stderr. Scan
 // then exits with code 2 (FR-07, FR-16), also with --no-connect: a rule whose
 // regex does not compile is an invalid rule.
@@ -61,8 +61,9 @@ func (c *cli) loadRules(dir string) (loadedRules, bool) {
 		return loadedRules{}, false
 	}
 
-	// NewAnalyzer compiles the match block of each description and schema
-	// rule. A bad regex in a rule from --rules shows up here.
+	// NewAnalyzer compiles the match block of each rule. It keeps the
+	// description and schema rules and drops the config rules, which scan
+	// applies natively. A bad regex in a rule from --rules shows up here.
 	analyzer, errs := rules.NewAnalyzer(set)
 	if len(errs) > 0 {
 		c.printRuleErrors(errs)

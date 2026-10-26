@@ -39,6 +39,19 @@ func (s Severity) Rank() int {
 	}
 }
 
+// higherSeverity returns the more serious of cur and s. A severity s that is
+// not valid counts as SeverityCritical, so the result fails closed (see
+// Analyzer.MaxSeverity).
+func higherSeverity(cur, s Severity) Severity {
+	if !s.Valid() {
+		s = SeverityCritical
+	}
+	if s.Rank() > cur.Rank() {
+		return s
+	}
+	return cur
+}
+
 // Target is the part of an MCP server that a rule inspects.
 type Target string
 

@@ -570,7 +570,7 @@ func (c *cli) reportScan(ctx context.Context, res discover.Result, configPath st
 		// The tool rule step applies the description and schema rules (T1
 		// and T3) and adds its rows to counts (see toolRulesStep). A server
 		// that uses up its time budget gets a MOAT-T1-023 row, not exit 2.
-		tr, err := c.toolRulesStep(ctx, setup.analyzer, setup.checks.set, outcomes, ignore, setup.toolBudget, counts)
+		tr, err := c.toolRulesStep(ctx, setup, outcomes, ignore, counts)
 		if err != nil {
 			// The user stopped the scan, as for a signal during the
 			// inspection, or the guard of toolRulesStep caught an error: no

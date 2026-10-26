@@ -61,9 +61,10 @@ type cli struct {
 	// stub that fails to prove that it is never called.
 	newClassifier func(llm.Config) (toolClassifier, error)
 	// toolBudget is the time that the tool rule step of scan can use for the
-	// tools of one server. Zero means toolRulesBudget, so runWithContext does
-	// not set it. Tests set a tiny value (1ns, for example) to use up the
-	// budget at once (see toolRulesStep).
+	// tools of one server. Zero means the default, toolRulesBudget, so
+	// runWithContext does not set it. A negative value is used up at once
+	// (see toolRulesStep): tests set -1ns for that. A tiny positive value is
+	// not enough, because the context can still be live for a short time.
 	toolBudget time.Duration
 	// ctx ends when the process gets a signal (see main). It is a field and
 	// not a parameter of command.run, so that every command keeps one

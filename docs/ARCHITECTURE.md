@@ -151,14 +151,14 @@ offline CI job are the proof.
 2. It loads the rules with `rules.Builtin` and, with `--rules`, `rules.LoadDir`. Then
    `rules.NewSet` checks for duplicate rule IDs, for clashes with built-in IDs and for reserved
    native IDs (`rules.ReservedRuleID`): a rule from `--rules` must not use `MOAT-T1-023` or an ID
-   that starts with `MOAT-T2-` or `MOAT-LLM-`, in any case. Last,
-   `rules.NewAnalyzer` compiles the match block of each description and schema rule once (it skips
-   the config rules). A rule whose regex does not compile gives a load error with the file, the
-   field `match` and the reason. A bad rule file, an ID problem or a bad regex gives exit code 2,
-   also with `--no-connect` (`loadRules` in `cmd/mcpmoat/scan_rules.go`). Then `scan` prints a
-   fixed notice on stderr for the rules from `--rules` that it does not apply: `configRulesNotice`
-   when a rule has the target `config` (`scan` runs only its built-in config checks), and
-   `toolRulesNoConnectNotice` when a rule has the target `description` or `schema` and
+   that starts with `MOAT-T2-` or `MOAT-LLM-`, in any case. Last, `rules.NewAnalyzer` compiles the
+   match block of each rule once. It compiles a config rule only to check it and drops its matcher,
+   and it keeps the description and schema rules. A rule whose regex does not compile gives a load
+   error with the file, the field `match` and the reason. A bad rule file, an ID problem or a bad
+   regex gives exit code 2, also with `--no-connect` (`loadRules` in `cmd/mcpmoat/scan_rules.go`).
+   Then `scan` prints a fixed notice on stderr for the rules from `--rules` that it does not apply:
+   `configRulesNotice` when a rule has the target `config` (`scan` runs only its built-in config
+   checks), and `toolRulesNoConnectNotice` when a rule has the target `description` or `schema` and
    `--no-connect` is set.
 3. It reads `.mcpmoat-ignore` with `rules.ReadIgnoreFile` and adds the `--ignore` rule IDs. It keeps
    two lists (`scanIgnores` in `cmd/mcpmoat/scan_pins.go`): one for the config rules and the tool
@@ -276,10 +276,11 @@ the connect, pin, tool rule and LLM steps between step 5 and step 6:
     gets one finding `MOAT-T1-023` (`rules.RuleAnalysisBudget`, a native rule with no YAML file).
     Its severity is the highest severity of the description and schema rules that `scan` applies,
     but never lower than high (`budgetSeverity`, `rules.Analyzer.MaxSeverity`). So it is high with
-    the built-in rules, and critical when a description or schema rule from `--rules` is
-    critical. Its related text is `rule analysis time budget used up; N of M tools not fully
-    checked`.
-    `scan` also prints one fixed warning on stderr for that server. This is a finding, not an
+    the built-in rules, and critical when a description or schema rule from `--rules` is critical.
+    This severity counts every applied description or schema rule, also one that `--ignore` drops,
+    on purpose: the rules that did not run could have given a finding (fail closed). Its related
+    text is `rule analysis time budget used up; N of M tools not fully checked`. `scan` also prints
+    one fixed warning on stderr for that server. This is a finding, not an
     execution error: the exit code follows `--fail-on` (1 with the default), and the JSON
     `complete` stays `true`. The other servers still run, each with its own budget.
   - Errors: a signal during the step prints the interrupted line, prints no report and gives exit
@@ -288,21 +289,22 @@ the connect, pin, tool rule and LLM steps between step 5 and step 6:
     error)`, prints no report and gives exit code 2.
 - 5e. Only with `--llm` (FR-17), `classifyTools` in `cmd/mcpmoat/scan_llm.go` runs after the tool
   rule step. It sends the name and description of each tool of each server with status `StatusOK`
-  to the classifier, and adds one advisory row for each tool that the model rates as risky, for each tool
-  with an unusable answer, and for each cut tool (see the verdict rules in
+  to the classifier, and adds one advisory row for each tool that the model rates as risky, for
+  each tool with an unusable answer, and for each cut tool (see the verdict rules in
   [The `--llm` classifier](#the---llm-classifier)). It only adds rows: it never changes or drops a
   rule finding, and it never touches pins, diffs or hints. Only `--ignore` drops LLM rows, as for
-  the pin rows. The `.mcpmoat-ignore` file does not (see step 3).
-  The ignored count includes the dropped LLM rows.
+  the pin rows. The `.mcpmoat-ignore` file does not (see step 3). The ignored count includes the
+  dropped LLM rows.
 - The pin findings and the tool rule findings join the config findings in one report. A changed
-  tool and a new tool also get a diff, so the user can review the content of a new tool before they accept it. A new tool has the
-  header `New tool <tool> on server <server>:` and only added lines. A not verified tool with a diff
-  (see 5b) has the header `Not verified tool <tool> on server <server> (current text):` and only
-  added lines. A finding that the user ignored gets no diff. `report.WriteDiffs` prints the diffs
-  after the findings. When a diff was cut at
-  the size limit (`Change.Truncated`), `scan` prints a warning on stderr that names the tool and the
-  server: `the diff of tool <tool> on server <server> was cut at the size limit; review the full tool
-  before you accept it`. Then `writeAcceptHints` prints one line for each hint on stdout:
+  tool and a new tool also get a diff, so the user can review the content of a new tool before
+  they accept it. A new tool has the header `New tool <tool> on server <server>:` and only added
+  lines. A not verified tool with a diff (see 5b) has the header
+  `Not verified tool <tool> on server <server> (current text):` and only added lines. A finding
+  that the user ignored gets no diff. `report.WriteDiffs` prints the diffs after the findings.
+  When a diff was cut at the size limit (`Change.Truncated`), `scan` prints a warning on stderr
+  that names the tool and the server: `the diff of tool <tool> on server <server> was cut at the
+  size limit; review the full tool before you accept it`. Then `writeAcceptHints` prints one line
+  for each hint on stdout:
   `To accept <server>: mcpmoat pin --accept <server> --expect pd1:<64 hex>`. After
   `scan --config <file>`, the command holds `--config <file>` too, so `pin` reads the same file, and
   `--project <path>` when the hint has a project. When a diff of that server was cut, the line ends

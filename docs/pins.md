@@ -37,6 +37,9 @@
   for it only. It prints the diff of each changed, new and not verified tool, then
   `accepted <server>: N new, N changed, N removed`. If the server is not pinned yet, every tool is
   new, so `pin --accept` shows every tool. It prints the same warning when it cuts a diff.
+  `pin --accept` records the new text as the baseline. It does not clear tool poisoning findings:
+  the T1 and T3 rules still apply to the accepted text, so the next `scan` can still exit with
+  code 1.
 - **Recommended flow:** run `mcpmoat scan` and review the diff. After the diffs, `scan` prints one
   line for each pinned server that has a pin finding:
   `To accept <server>: mcpmoat pin --accept <server> --expect pd1:<64 hex>`. After

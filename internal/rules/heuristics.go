@@ -39,8 +39,8 @@ const (
 	HeuristicMixedScript = "mixed_script"
 	// HeuristicMatchWindow flags a text that the regex and keyword matchers
 	// do not read in full: the text is longer than the raw scan limit, or
-	// a form of matchForms is cut at MaxMatchInputBytes. The OSC text of a
-	// form, such as a link URL, does not count (see matchWindowCut). So a
+	// a form of baseFormsCut is cut at MaxMatchInputBytes. The OSC text of a
+	// form, such as a link URL, does not count (see baseFormsCut). So a
 	// payload that padding pushes out of the match window still gives a hit.
 	// It has no parameters.
 	HeuristicMatchWindow = "match_window"
@@ -99,33 +99,34 @@ type paramSpec struct {
 }
 
 // compileHeuristic returns the function of the heuristic name, with its
-// parameters checked and set. The function reads the raw text. Every error
-// is a *FieldError. Match.compile wraps the function in a heuristicFunc, and
-// for match_window it uses matchWindowPrepared instead.
-func compileHeuristic(name string, params map[string]any) (func(raw string) []Hit, error) {
+// parameters checked and set. Every error is a *FieldError. The function of
+// match_window is matchWindowPrepared, which reads the cut flag of the shared
+// preparedText. Each other function reads only the raw text (see
+// rawHeuristic).
+func compileHeuristic(name string, params map[string]any) (heuristicFunc, error) {
 	switch name {
 	case HeuristicInvisibleUnicode:
 		if _, err := readParams(params); err != nil {
 			return nil, err
 		}
-		return invisibleUnicode, nil
+		return rawHeuristic(invisibleUnicode), nil
 	case HeuristicMatchWindow:
 		if _, err := readParams(params); err != nil {
 			return nil, err
 		}
-		return matchWindow, nil
+		return matchWindowPrepared, nil
 	case HeuristicTagBidiOverride:
 		if _, err := readParams(params); err != nil {
 			return nil, err
 		}
-		return tagBidiOverride, nil
+		return rawHeuristic(tagBidiOverride), nil
 	case HeuristicMaxLength:
 		v, err := readParams(params, paramSpec{name: "max_runes", def: 4096, min: 1, max: 1 << 24})
 		if err != nil {
 			return nil, err
 		}
 		maxRunes := v[0]
-		return func(raw string) []Hit { return maxLength(raw, maxRunes) }, nil
+		return rawHeuristic(func(raw string) []Hit { return maxLength(raw, maxRunes) }), nil
 	case HeuristicBase64Blob:
 		v, err := readParams(params,
 			paramSpec{name: "min_length", def: 32, min: 8, max: 4096},
@@ -136,14 +137,14 @@ func compileHeuristic(name string, params map[string]any) (func(raw string) []Hi
 			return nil, err
 		}
 		minLength, minText, minWords := v[0], v[1], v[2]
-		return func(raw string) []Hit { return base64Blob(raw, minLength, minText, minWords) }, nil
+		return rawHeuristic(func(raw string) []Hit { return base64Blob(raw, minLength, minText, minWords) }), nil
 	case HeuristicMixedScript:
 		v, err := readParams(params, paramSpec{name: "json_escapes", def: 0, min: 0, max: 1})
 		if err != nil {
 			return nil, err
 		}
 		jsonEscapes := v[0] == 1
-		return func(raw string) []Hit { return mixedScript(raw, jsonEscapes) }, nil
+		return rawHeuristic(func(raw string) []Hit { return mixedScript(raw, jsonEscapes) }), nil
 	case HeuristicTyposquat:
 		if _, err := readParams(params); err != nil {
 			return nil, err
@@ -153,13 +154,13 @@ func compileHeuristic(name string, params map[string]any) (func(raw string) []Hi
 			// The popular list is built in, so its text is safe to show.
 			return nil, &FieldError{Field: "heuristic", Msg: "load popular server list: " + err.Error()}
 		}
-		return fn, nil
+		return rawHeuristic(fn), nil
 	}
 	if fn, ok := configTextChecks[name]; ok {
 		if _, err := readParams(params); err != nil {
 			return nil, err
 		}
-		return fn, nil
+		return rawHeuristic(fn), nil
 	}
 	// The given name is not echoed: it comes from the rule file.
 	return nil, &FieldError{Field: "heuristic", Msg: "unknown heuristic; valid: " + heuristicNames}
@@ -229,10 +230,10 @@ const (
 // start, end or cancel an ANSI escape sequence (see ansiToSpace): they show
 // as nothing, and a terminal runs them. A raw ESC before a letter can make
 // the letter the final byte of a CSI, so a terminal does not show the "I" of
-// "\x1b[Ignore". The fifth and the seventh form of matchForms give back that
+// "\x1b[Ignore". The fifth and the seventh form of baseFormsCut give back that
 // letter, and the text of an OSC, so the regexes and keywords still read them
 // (see keepSeqText and seqText). This heuristic still flags the ESC. It also
-// flags each text that defeats all the forms (see matchForms), because each
+// flags each text that defeats all the forms (see baseFormsCut), because each
 // such text holds an invisible rune.
 //
 // An emoji can hold a VS15 or VS16 and a ZWJ (see isPictograph), so some of
@@ -318,23 +319,11 @@ func maxLength(raw string, maxRunes int) []Hit {
 	return []Hit{{Offset: offset, Detail: fmt.Sprintf("text has %d characters, over the limit of %d", n, maxRunes)}}
 }
 
-// matchWindow flags raw when the regex and keyword matchers do not read all
-// of it (see matchWindowCut). The hit is about the whole text, so it has the
-// offset NoOffset.
-//
-// matchWindow is the raw text entry of the match_window heuristic, for
-// compileHeuristic and the tests. It builds a new preparedText for raw. A
-// compiled match_window Matcher does not call it: it calls
-// matchWindowPrepared on the preparedText that the rules of a text share,
-// so the base forms are built once. Both read the same cut flag, from
-// baseFormsCut (see preparedText.windowCut).
-func matchWindow(raw string) []Hit {
-	return matchWindowPrepared(prepareText(raw))
-}
-
-// matchWindowPrepared flags p.raw as matchWindow does, with the cut flag of
-// p (see preparedText.windowCut). It builds only the base forms of p, once,
-// so the regex and keyword rules that share p reuse them.
+// matchWindowPrepared is the match_window heuristic. It flags p.raw when the
+// regex and keyword matchers do not read all of it: the cut flag of p (see
+// preparedText.windowCut). The hit is about the whole text, so it has the
+// offset NoOffset. It builds only the base forms of p, once, so the regex
+// and keyword rules that share p reuse them.
 func matchWindowPrepared(p *preparedText) []Hit {
 	if !p.windowCut() {
 		return nil

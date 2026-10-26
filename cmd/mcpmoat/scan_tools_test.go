@@ -106,13 +106,35 @@ func jsonFindings(t *testing.T, stdout string) []report.JSONFinding {
 	return out
 }
 
-// toolRow returns the JSON finding of a rule hit on the tool key of server.
-// related is "description" or "schema".
-func toolRow(rule, server, key, related string) report.JSONFinding {
+// toolRow returns the JSON finding of a hit of rule, with severity, on the
+// tool key of server. related is "description" or "schema".
+func toolRow(rule, severity, server, key, related string) report.JSONFinding {
 	return report.JSONFinding{
-		RuleID: rule, Severity: "high", Server: server,
+		RuleID: rule, Severity: severity, Server: server,
 		Field: rules.FieldTool, Key: key, Related: related, Source: report.SourceRule,
 	}
+}
+
+// budgetJSONRow returns the JSON finding of the rules.RuleAnalysisBudget row
+// of server, with severity, when notChecked of total tools were not fully
+// checked. The row is about the whole server, so its key is empty.
+func budgetJSONRow(server, severity string, notChecked, total int) report.JSONFinding {
+	return report.JSONFinding{
+		RuleID: rules.RuleAnalysisBudget, Severity: severity, Server: server,
+		Field: rules.FieldTool, Related: budgetReason(notChecked, total), Source: report.SourceRule,
+	}
+}
+
+// jsonRowsOf returns the rows of rows whose rule ID is ruleID, in order. It
+// returns nil when there is none.
+func jsonRowsOf(rows []report.JSONFinding, ruleID string) []report.JSONFinding {
+	var out []report.JSONFinding
+	for _, f := range rows {
+		if f.RuleID == ruleID {
+			out = append(out, f)
+		}
+	}
+	return out
 }
 
 // budgetReason is the Related text of a rules.RuleAnalysisBudget row. The
@@ -145,6 +167,16 @@ func exactLines(lines []string) []lineWant {
 	}
 	return out
 }
+
+// usedUpBudget is a tool budget that is used up before the first rule runs.
+// It is negative on purpose. context.WithTimeout cancels the context at once,
+// in the same goroutine, only when the deadline is not in the future. With a
+// tiny positive budget (1ns) the deadline can still be ahead for a moment,
+// because the monotonic clock ticks in steps (about 41.7 ns on Apple
+// Silicon). Then a rule can run before the cut, and the rows and the counts
+// change. toolBudgetOrDefault maps only 0 to the default, so a negative value
+// reaches context.WithTimeout as it is.
+const usedUpBudget = -time.Nanosecond
 
 // scanWithBudget runs "mcpmoat scan --config <file> args..." in e with insp,
 // and with budget as the time budget of the tool rule step of each server.
@@ -212,9 +244,9 @@ func TestScanToolsRuleRows(t *testing.T) {
 		assertScanRun(t, got, scanWant{code: exitFindings})
 		assertCleanStderr(t, got.stderr)
 		want := []report.JSONFinding{
-			toolRow("MOAT-T1-001", "srv-a", "read_file", "description"),
-			toolRow("MOAT-T1-009", "srv-a", "write_file", "schema"),
-			toolRow("MOAT-T1-001", "srv-b", "fetch_url", "description"),
+			toolRow("MOAT-T1-001", "high", "srv-a", "read_file", "description"),
+			toolRow("MOAT-T1-009", "high", "srv-a", "write_file", "schema"),
+			toolRow("MOAT-T1-001", "high", "srv-b", "fetch_url", "description"),
 		}
 		if rows := jsonFindings(t, got.stdout); !slices.Equal(rows, want) {
 			t.Errorf("JSON findings = %+v\nwant            %+v", rows, want)
@@ -246,13 +278,8 @@ func TestScanToolsEmptyName(t *testing.T) {
 	if want := []toolFinding{{"MOAT-T1-001", "high", "srv", quotedCell(noToolNameKey) + " (description)", ""}}; !slices.Equal(textRows, want) {
 		t.Errorf("MOAT-T1-001 rows = %+v, want %+v\nstdout:\n%s", textRows, want, text.stdout)
 	}
-	var jsonRows []report.JSONFinding
-	for _, f := range jsonFindings(t, jsonRun.stdout) {
-		if f.RuleID == "MOAT-T1-001" {
-			jsonRows = append(jsonRows, f)
-		}
-	}
-	if want := []report.JSONFinding{toolRow("MOAT-T1-001", "srv", noToolNameKey, "description")}; !slices.Equal(jsonRows, want) {
+	jsonRows := jsonRowsOf(jsonFindings(t, jsonRun.stdout), "MOAT-T1-001")
+	if want := []report.JSONFinding{toolRow("MOAT-T1-001", "high", "srv", noToolNameKey, "description")}; !slices.Equal(jsonRows, want) {
 		t.Errorf("JSON MOAT-T1-001 rows = %+v, want %+v", jsonRows, want)
 	}
 }
@@ -344,64 +371,41 @@ func TestScanToolsIgnore(t *testing.T) {
 }
 
 // TestScanToolsNoConnect checks that --no-connect inspects no server, so the
-// tool rule step checks no tool: the poisoned tools of the fake give no row.
-// A description rule from --rules gives the fixed notice that it is not
-// applied.
+// tool rule step checks no tool: the poisoned tools of the fake give no row
+// for the built-in rules, and stderr is empty. The test
+// TestScanRulesNoConnectSkipsToolRules checks a description rule from --rules
+// and its notice.
 func TestScanToolsNoConnect(t *testing.T) {
 	t.Parallel()
 
-	rulesDir := t.TempDir()
-	writeTestFile(t, rulesDir, "extra.yaml", "id: EXTRA-001\ntitle: Extra fixture\nseverity: high\ntarget: description\n"+
-		"match:\n  keywords:\n    - reads\nrisk: Fixture.\nremediation: Fixture.\n")
+	e := newPinEnv(t, oneServer("srv"))
+	insp := fakeServers(map[string][]inspect.Tool{"srv": {poisonedTool("read_file"), schemaTool("write_file")}})
 
-	tests := []struct {
-		name  string
-		flags []string
-		// stderr are the exact stderr lines, in order.
-		stderr []string
-	}{
-		{name: "built-in rules only"},
-		{
-			name:   "with a description rule from --rules",
-			flags:  []string{"--rules", rulesDir},
-			stderr: []string{toolRulesNoConnectNotice},
-		},
+	got := e.scan(insp, "--no-connect")
+
+	assertScanRun(t, got, scanWant{code: exitOK, noStdout: []string{"MOAT-T1-", findingsHeading}})
+	assertCleanStderr(t, got.stderr)
+	if calls := insp.Calls(); len(calls) != 0 {
+		t.Errorf("inspector calls = %q, want none with --no-connect", calls)
 	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
-
-			e := newPinEnv(t, oneServer("srv"))
-			insp := fakeServers(map[string][]inspect.Tool{"srv": {poisonedTool("read_file"), schemaTool("write_file")}})
-
-			got := e.scan(insp, append([]string{"--no-connect"}, tt.flags...)...)
-
-			assertScanRun(t, got, scanWant{code: exitOK, stderr: tt.stderr, noStdout: []string{"MOAT-T1-", "EXTRA-001", findingsHeading}})
-			assertStderrLines(t, got.stderr, exactLines(tt.stderr))
-			if calls := insp.Calls(); len(calls) != 0 {
-				t.Errorf("inspector calls = %q, want none with --no-connect", calls)
-			}
-			e.assertNoPinsFile(t, "a scan with --no-connect")
-		})
-	}
+	e.assertNoPinsFile(t, "a scan with --no-connect")
 }
 
-// TestScanToolsBudgetUsedUp checks a budget that is used up at once (1ns):
-// each server gets one high MOAT-T1-023 row about the whole server and one
-// fixed warning on stderr, with the number of tools that were not fully
-// checked. Each server has its own deadline, so both servers get their own
-// row. The row is high, so the exit code follows --fail-on (1 by default, 0
-// with --fail-on critical): a used-up budget alone is not exit code 2, and
-// the JSON document stays complete. The warning holds no tool text.
+// TestScanToolsBudgetUsedUp checks a budget that is used up at once
+// (usedUpBudget): each server gets one high MOAT-T1-023 row about the whole
+// server and one fixed warning on stderr, with the number of tools that were
+// not fully checked. Each server has its own deadline, so both servers get
+// their own row. The row is high, so the exit code follows --fail-on (1 by
+// default, 0 with --fail-on critical): a used-up budget alone is not exit code
+// 2, and the JSON document stays complete. The warning holds no tool text.
 //
-// With 1ns, the context of each server has ended before the first rule runs
-// (context.WithTimeout cancels at once when the deadline has passed), so no
-// tool row can come before the cut, and every tool counts as not fully
-// checked.
+// With a negative budget, the context of each server has ended before the
+// first rule runs (see usedUpBudget), so no tool row can come before the cut,
+// and every tool counts as not fully checked.
 func TestScanToolsBudgetUsedUp(t *testing.T) {
 	t.Parallel()
 
-	const budget = time.Nanosecond
+	const budget = usedUpBudget
 	toolNames := []string{"read_file", "write_file", "add_numbers", "fetch_url", "echo_text"}
 	insp := func() *inspecttest.Fake {
 		return fakeServers(map[string][]inspect.Tool{
@@ -457,13 +461,7 @@ func TestScanToolsBudgetUsedUp(t *testing.T) {
 		assertScanRun(t, got, scanWant{code: exitFindings})
 		assertStderrLines(t, got.stderr, append(slices.Clone(warnings), pinned...))
 		assertNoToolText(t, got.stderr, toolNames...)
-		budgetRowOf := func(server string, notChecked, total int) report.JSONFinding {
-			return report.JSONFinding{
-				RuleID: rules.RuleAnalysisBudget, Severity: "high", Server: server,
-				Field: rules.FieldTool, Related: budgetReason(notChecked, total), Source: report.SourceRule,
-			}
-		}
-		want := []report.JSONFinding{budgetRowOf("srv-a", 3, 3), budgetRowOf("srv-b", 2, 2)}
+		want := []report.JSONFinding{budgetJSONRow("srv-a", "high", 3, 3), budgetJSONRow("srv-b", "high", 2, 2)}
 		if rows := jsonFindings(t, got.stdout); !slices.Equal(rows, want) {
 			t.Errorf("JSON findings = %+v\nwant            %+v", rows, want)
 		}
@@ -496,9 +494,10 @@ func hostileDescription() string {
 // forms of a 32 KiB text (Apple M1 Pro, see match.go). So without a budget,
 // one tool with hostileDescription costs about 3 x 15.9 s, about 48 s, plus
 // the built-in rules. One scan of TestScanToolsHostileServerBudget without a
-// budget took about 52 s (Apple M1 Pro, without -race). The IDs start with "HOSTILE", which sorts before
-// "MOAT", so these rules run first on each text (the analyzer runs the rules
-// in ID order).
+// budget took about 52 s (Apple M1 Pro, without -race).
+//
+// The IDs start with "HOSTILE", which sorts before "MOAT", so these rules run
+// first on each text (the analyzer runs the rules in ID order).
 func hostileRulesDir(t *testing.T) string {
 	t.Helper()
 	dir := t.TempDir()
@@ -695,7 +694,7 @@ func TestScanToolsInterrupted(t *testing.T) {
 func TestScanToolsBudgetIgnore(t *testing.T) {
 	t.Parallel()
 
-	const budget = time.Nanosecond
+	const budget = usedUpBudget
 	const usingOneEntry = scanPrefix + "using 1 entry from " + rules.IgnoreFileName
 	warning := budgetWarning("srv", budget, 2, 2)
 	ignoredLine := scanPrefix + "1 finding ignored: " + rules.RuleAnalysisBudget + " (1)"
@@ -777,7 +776,7 @@ func TestScanToolsBudgetIgnore(t *testing.T) {
 // criticalRulesDir writes one critical description rule from --rules in a new
 // folder and returns it. The rule is valid: its should_match and
 // should_not_match cases pass. It does not match the tool texts of the
-// tests, so with a 1ns budget only the budget row shows.
+// tests, so with usedUpBudget only the budget row shows.
 func criticalRulesDir(t *testing.T) string {
 	t.Helper()
 	dir := t.TempDir()
@@ -799,7 +798,7 @@ func criticalRulesDir(t *testing.T) string {
 func TestScanToolsBudgetSeverity(t *testing.T) {
 	t.Parallel()
 
-	const budget = time.Nanosecond
+	const budget = usedUpBudget
 	tests := []struct {
 		name     string
 		critical bool // add the critical rule with --rules
@@ -837,10 +836,7 @@ func TestScanToolsBudgetSeverity(t *testing.T) {
 			if jsonRun.code != tt.code {
 				t.Errorf("--json exit code = %d, want %d\nstderr:\n%s", jsonRun.code, tt.code, jsonRun.stderr)
 			}
-			want := []report.JSONFinding{{
-				RuleID: rules.RuleAnalysisBudget, Severity: tt.severity, Server: "srv",
-				Field: rules.FieldTool, Related: budgetReason(2, 2), Source: report.SourceRule,
-			}}
+			want := []report.JSONFinding{budgetJSONRow("srv", tt.severity, 2, 2)}
 			if rows := jsonFindings(t, jsonRun.stdout); !slices.Equal(rows, want) {
 				t.Errorf("JSON findings = %+v\nwant            %+v", rows, want)
 			}
@@ -870,13 +866,8 @@ func TestScanToolsLongToolName(t *testing.T) {
 		t.Errorf("exit codes = %d (terminal), %d (json), want %d\nstderr:\n%s%s", text.code, jsonRun.code, exitFindings, text.stderr, jsonRun.stderr)
 	}
 	wantKey := strings.Repeat("n", maxToolKeyRunes) + termsafe.CutMarker
-	var jsonRows []report.JSONFinding
-	for _, f := range jsonFindings(t, jsonRun.stdout) {
-		if f.RuleID == "MOAT-T1-001" {
-			jsonRows = append(jsonRows, f)
-		}
-	}
-	if want := []report.JSONFinding{toolRow("MOAT-T1-001", "srv", wantKey, "description")}; !slices.Equal(jsonRows, want) {
+	jsonRows := jsonRowsOf(jsonFindings(t, jsonRun.stdout), "MOAT-T1-001")
+	if want := []report.JSONFinding{toolRow("MOAT-T1-001", "high", "srv", wantKey, "description")}; !slices.Equal(jsonRows, want) {
 		t.Errorf("JSON MOAT-T1-001 rows have keys of %d bytes, want one row with a key of %d bytes", keyLens(jsonRows), len(wantKey))
 	}
 	var textRows int

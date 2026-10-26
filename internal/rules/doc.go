@@ -12,8 +12,10 @@
 // the Matcher reads its text (see Schema text below). [Match.Compile] is
 // CompileFor with the description target. The loader compiles at load time
 // only through a [Compiler] given with [WithCompiler], and only to check the
-// block. [NewAnalyzer] compiles the description and schema rules that
-// mcpmoat scan applies, once each.
+// block. [NewAnalyzer] compiles every rule of a set once, and keeps the
+// description and schema rules that mcpmoat scan applies. It also compiles
+// the config rules, so a match block that does not compile is an error for
+// every target.
 // Every error from CompileFor is a *[FieldError] that names the field, for
 // example "any_regex[2]". An error never holds text from the rule file (a
 // pattern, a keyword or a parameter key) or input text, so it is safe to
@@ -33,10 +35,10 @@
 // visible text (or after the first 128 KiB of raw text) are not seen by regex
 // and keyword rules. The match_window heuristic closes it: a high rule with
 // it fires on a text longer than 128 KiB, and when the window cuts one of
-// the forms (see matchForms), also when only one of them is cut. The OSC
+// the forms (see baseFormsCut), also when only one of them is cut. The OSC
 // text of a form does not count: the OSC text, such as an OSC 8 link URL,
 // makes a benign text long in the forms that keep sequence text only (see
-// matchWindowCut). The max_length heuristic also flags a long text. It reads
+// baseFormsCut). The max_length heuristic also flags a long text. It reads
 // the full raw text, as the other text heuristics do. The match_window
 // heuristic reads the window cut flag that the build of the base forms sets,
 // so it shares that build with the regex and keyword rules.
@@ -77,8 +79,8 @@
 // forms of at most 32 KiB for the description (the keyword forms are among
 // them), plus the schema strings and seams with their forms.
 //
-// mcpmoat scan also gives the rule analysis of each server a deadline of 5
-// seconds (toolRulesBudget in cmd/mcpmoat). The analyzer checks the context
+// mcpmoat scan also gives the rule analysis of each server a per-server
+// deadline set by the caller (see cmd/mcpmoat). The analyzer checks the context
 // before each regex or keyword reads each form, and before each schema
 // string, seam and raw text pass. So the analysis stops at most about one
 // regex on one form (or one heuristic call) after the deadline, which is
@@ -104,7 +106,7 @@
 // The regex and keyword matchers read a few base forms of the text, and
 // each form handles the invisible runes and the escape sequences in another
 // way, so that an invisible rune or a sequence cannot hide a word in all of
-// them. The doc comment of matchForms in normalize.go lists the forms, when
+// them. The doc comment of baseFormsCut in normalize.go lists the forms, when
 // each one is built and the texts that still defeat all of them, and
 // docs/writing-rules.md has the same list for rule authors. A text without
 // invisible runes and escape sequences has one form, so it costs no more.
@@ -324,12 +326,13 @@
 // The parameter json_escapes (default 0) says whether the text is raw JSON.
 // A schema rule reads decoded strings (see Schema text), so MOAT-T1-011 keeps
 // the default 0 too. With json_escapes: 1 the heuristic decodes JSON
-// escapes: \b, \f, \n, \r, \t, \\, \", \/ and \u plus exactly 4 hex digits. A surrogate pair is one rune, and a lone surrogate
-// is U+FFFD. The decoded rune acts like a raw rune: a letter, a mark or an
-// invisible rune joins the word, and any other rune ends it. So the escape
-// of U+0406 is a Cyrillic letter in the word. A description is decoded text,
-// so rule MOAT-T1-010 keeps the default 0: a backslash is a normal rune that
-// ends a word, as the model reads it. A schema string is decoded before the
+// escapes: \b, \f, \n, \r, \t, \\, \", \/ and \u plus exactly 4 hex
+// digits. A surrogate pair is one rune, and a lone surrogate is U+FFFD. The
+// decoded rune acts like a raw rune: a letter, a mark or an invisible rune
+// joins the word, and any other rune ends it. So the escape of U+0406 is a
+// Cyrillic letter in the word. A description is decoded text, so rule
+// MOAT-T1-010 keeps the default 0: a backslash is a normal rune that ends a
+// word, as the model reads it. A schema string is decoded before the
 // heuristic reads it, so a second decode would turn a literal "\b" into a
 // backspace.
 //

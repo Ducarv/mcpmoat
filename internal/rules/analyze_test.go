@@ -30,21 +30,21 @@ const (
 )
 
 // builtinSet returns the built-in rules as a Set, the way scan builds it.
-func builtinSet(t *testing.T) *Set {
-	t.Helper()
-	set, errs := NewSet(mustBuiltin(t), nil)
+func builtinSet(tb testing.TB) *Set {
+	tb.Helper()
+	set, errs := NewSet(mustBuiltin(tb), nil)
 	if len(errs) > 0 {
-		t.Fatalf("NewSet(builtin) errors = %v, want none", errs)
+		tb.Fatalf("NewSet(builtin) errors = %v, want none", errs)
 	}
 	return set
 }
 
 // mustAnalyzer returns NewAnalyzer(set) and fails the test on an error.
-func mustAnalyzer(t *testing.T, set *Set) *Analyzer {
-	t.Helper()
+func mustAnalyzer(tb testing.TB, set *Set) *Analyzer {
+	tb.Helper()
 	a, errs := NewAnalyzer(set)
 	if len(errs) > 0 || a == nil {
-		t.Fatalf("NewAnalyzer() = (%v, %v), want an Analyzer and no error", a, errs)
+		tb.Fatalf("NewAnalyzer() = (%v, %v), want an Analyzer and no error", a, errs)
 	}
 	return a
 }
@@ -208,8 +208,8 @@ func TestAnalyzerCheckToolEqualsMatch(t *testing.T) {
 	}
 }
 
-// TestAnalyzerSkipsConfigRules checks that NewAnalyzer neither keeps nor
-// compiles a config rule, or a rule with a target that Validate refuses.
+// TestAnalyzerSkipsConfigRules checks that NewAnalyzer compiles but does not
+// keep a config rule, or a rule with a target that Validate refuses.
 func TestAnalyzerSkipsConfigRules(t *testing.T) {
 	t.Parallel()
 
@@ -240,16 +240,16 @@ func TestAnalyzerSkipsConfigRules(t *testing.T) {
 		}
 	})
 
-	t.Run("config rule is not compiled", func(t *testing.T) {
+	t.Run("config rule is compiled but not kept", func(t *testing.T) {
 		t.Parallel()
-		// The regex cannot compile, so NewAnalyzer would fail if it compiled
-		// the rule.
-		bad := Match{AnyRegex: []string{"(unclosed"}}
+		// Each rule matches the tool text, so CheckTool would give a finding
+		// for each rule that the Analyzer kept.
+		marker := Match{Keywords: []string{"marker"}}
 		set := &Set{rules: []Rule{
-			{ID: "A-CONFIG", Target: TargetConfig, Match: bad},
-			{ID: "B-DESC", Target: TargetDescription, Match: Match{Keywords: []string{"marker"}}},
-			{ID: "C-NO-TARGET", Match: bad},
-			{ID: "D-BOGUS", Target: Target("bogus"), Match: bad},
+			{ID: "A-CONFIG", Target: TargetConfig, Match: marker},
+			{ID: "B-DESC", Target: TargetDescription, Match: marker},
+			{ID: "C-NO-TARGET", Match: marker},
+			{ID: "D-BOGUS", Target: Target("bogus"), Match: marker},
 		}}
 		a := mustAnalyzer(t, set)
 		if got, want := analyzerIDs(a), []string{"B-DESC"}; !slices.Equal(got, want) {
@@ -258,6 +258,24 @@ func TestAnalyzerSkipsConfigRules(t *testing.T) {
 		got, err := a.CheckTool(t.Context(), inspect.Tool{Description: "a marker here", InputSchema: json.RawMessage(`{"x":"marker"}`)})
 		if want := []TextFinding{{RuleID: "B-DESC", Target: TargetDescription}}; err != nil || !slices.Equal(got, want) {
 			t.Errorf("CheckTool() = (%v, %v), want (%v, nil)", got, err, want)
+		}
+	})
+
+	t.Run("bad match block fails for every target", func(t *testing.T) {
+		t.Parallel()
+		// The regex cannot compile. NewAnalyzer compiles every rule, so it
+		// fails also when CheckTool would not run the rule.
+		bad := Match{AnyRegex: []string{"(unclosed"}}
+		for _, target := range []Target{TargetConfig, "", "bogus"} {
+			set := &Set{rules: []Rule{{ID: "A-BAD", Target: target, Match: bad, Source: "a-bad.yaml"}}}
+			a, errs := NewAnalyzer(set)
+			if a != nil || len(errs) != 1 {
+				t.Fatalf("target %q: NewAnalyzer() = (%v, %v), want (nil, 1 error)", target, a, errs)
+			}
+			if e := errs[0]; e.File != "a-bad.yaml" || e.Field != "match" || e.Reason != ReasonInvalidValue {
+				t.Errorf("target %q: error = {File: %q, Field: %q, Reason: %q}, want {File: a-bad.yaml, Field: match, Reason: %q}",
+					target, e.File, e.Field, e.Reason, ReasonInvalidValue)
+			}
 		}
 	})
 
@@ -324,24 +342,95 @@ func TestNewAnalyzerBadRegex(t *testing.T) {
 	}
 }
 
+// configRuleYAML returns the badregex fixture rule with the ID id and the
+// target config. With bad false, its regex compiles.
+func configRuleYAML(t *testing.T, id string, bad bool) string {
+	t.Helper()
+	text := strings.Replace(badRegexYAML(t, id), "target: description", "target: config", 1)
+	if !bad {
+		text = strings.Replace(text, "'(unclosed'", "'unclosed'", 1)
+	}
+	return text
+}
+
+// TestNewAnalyzerConfigRule checks an external config rule from YAML: a regex
+// that does not compile gives an error, as for the other targets, and a valid
+// config rule compiles but the Analyzer does not keep it.
+func TestNewAnalyzerConfigRule(t *testing.T) {
+	t.Parallel()
+
+	t.Run("bad regex", func(t *testing.T) {
+		t.Parallel()
+		dir := t.TempDir()
+		path := writeFile(t, dir, "config.yaml", configRuleYAML(t, "MOAT-X-910", true))
+		a, errs := NewAnalyzer(loadSet(t, dir))
+		if a != nil {
+			t.Errorf("NewAnalyzer() Analyzer = %v, want nil", a)
+		}
+		if len(errs) != 1 {
+			t.Fatalf("NewAnalyzer() errors = %v, want exactly 1", errs)
+		}
+		e := errs[0]
+		if e.File != path || e.Field != "match" || e.Reason != ReasonInvalidValue {
+			t.Errorf("error = {File: %q, Field: %q, Reason: %q}, want {File: %q, Field: match, Reason: %q}",
+				e.File, e.Field, e.Reason, path, ReasonInvalidValue)
+		}
+		msg := e.Error()
+		for _, want := range []string{path, "field match", "missing closing )"} {
+			if !strings.Contains(msg, want) {
+				t.Errorf("Error() = %q, want it to contain %q", msg, want)
+			}
+		}
+	})
+
+	t.Run("valid regex", func(t *testing.T) {
+		t.Parallel()
+		dir := t.TempDir()
+		writeFile(t, dir, "config.yaml", configRuleYAML(t, "MOAT-X-911", false))
+		a := mustAnalyzer(t, loadSet(t, dir))
+		if ids := analyzerIDs(a); len(ids) != 0 {
+			t.Errorf("Analyzer rule IDs = %q, want none (a config rule is not kept)", ids)
+		}
+		if got := a.MaxSeverity(); got != "" {
+			t.Errorf("MaxSeverity() = %q, want the empty Severity", got)
+		}
+	})
+}
+
 func TestNewAnalyzerErrorCap(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
-		name     string
-		n        int // bad rules in the set
-		wantErrs int
-		wantLeft int // rules not checked; 0 means no summary error
+		name      string
+		n         int // bad description rules in the set
+		badConfig int // bad config rules, after the description rules
+		goodRules int // valid config rules, after the bad rules
+		wantErrs  int
+		wantLeft  int // rules not checked; 0 means no summary error
 	}{
 		{name: "exactly at the cap", n: maxSetErrors, wantErrs: maxSetErrors},
+		{name: "exactly at the cap with valid rules", n: maxSetErrors, goodRules: 3, wantErrs: maxSetErrors + 1, wantLeft: 3},
 		{name: "over the cap", n: maxSetErrors + 5, wantErrs: maxSetErrors + 1, wantLeft: 5},
+		{
+			// The bad config rules count for the cap, and the valid config
+			// rules after the cap count as not checked.
+			name: "over the cap with config rules", n: maxSetErrors - 2, badConfig: 4, goodRules: 3,
+			wantErrs: maxSetErrors + 1, wantLeft: 2 + 3,
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			dir := t.TempDir()
-			for i := range tt.n {
-				writeFile(t, dir, fmt.Sprintf("r%03d.yaml", i), badRegexYAML(t, fmt.Sprintf("MOAT-X-%03d", i)))
+			// The file names and the IDs share the index, so the ID order is
+			// the order of the files.
+			for i := range tt.n + tt.badConfig + tt.goodRules {
+				id := fmt.Sprintf("MOAT-X-%03d", i)
+				text := badRegexYAML(t, id)
+				if i >= tt.n {
+					text = configRuleYAML(t, id, i < tt.n+tt.badConfig)
+				}
+				writeFile(t, dir, fmt.Sprintf("r%03d.yaml", i), text)
 			}
 			a, errs := NewAnalyzer(loadSet(t, dir))
 			if a != nil {
@@ -383,7 +472,7 @@ func TestNewAnalyzerEmpty(t *testing.T) {
 	}{
 		{name: "nil set", set: nil},
 		{name: "empty set", set: &Set{}},
-		{name: "config rules only", set: &Set{rules: []Rule{{ID: "A", Target: TargetConfig}}}},
+		{name: "config rules only", set: &Set{rules: []Rule{{ID: "A", Target: TargetConfig, Match: Match{Keywords: []string{"marker"}}}}}},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
@@ -435,7 +524,7 @@ func TestAnalyzerMaxSeverity(t *testing.T) {
 		{
 			name: "config rules only",
 			set: func(*testing.T) *Set {
-				return &Set{rules: []Rule{{ID: "A", Target: TargetConfig, Severity: SeverityCritical}}}
+				return &Set{rules: []Rule{{ID: "A", Target: TargetConfig, Severity: SeverityCritical, Match: keywords}}}
 			},
 			want: "",
 		},
@@ -443,7 +532,7 @@ func TestAnalyzerMaxSeverity(t *testing.T) {
 			// No built-in rule is critical (see TestNoBuiltinCriticalSeverity
 			// in cmd/mcpmoat), and several description rules are high.
 			name: "built-in rules",
-			set:  builtinSet,
+			set:  func(t *testing.T) *Set { return builtinSet(t) },
 			want: SeverityHigh,
 		},
 		{
@@ -466,7 +555,7 @@ func TestAnalyzerMaxSeverity(t *testing.T) {
 			name: "a critical config rule does not count",
 			set: func(*testing.T) *Set {
 				return &Set{rules: []Rule{
-					{ID: "A-CONFIG", Target: TargetConfig, Severity: SeverityCritical},
+					{ID: "A-CONFIG", Target: TargetConfig, Severity: SeverityCritical, Match: keywords},
 					{ID: "B-DESC", Target: TargetDescription, Severity: SeverityLow, Match: keywords},
 					{ID: "C-SCHEMA", Target: TargetSchema, Severity: SeverityMedium, Match: keywords},
 				}}
@@ -506,23 +595,13 @@ func TestAnalyzerMaxSeverity(t *testing.T) {
 }
 
 // TestAnalyzerBudgetRuleID checks that the native ID of the budget finding
-// is a valid ID that no built-in YAML rule uses.
+// is a valid ID. TestBuiltinRulesUseNoReservedID and TestReservedRuleID check
+// that no rule can use it.
 func TestAnalyzerBudgetRuleID(t *testing.T) {
 	t.Parallel()
 
 	if !ValidRuleID(RuleAnalysisBudget) {
 		t.Errorf("ValidRuleID(%q) = false, want true", RuleAnalysisBudget)
-	}
-	set := builtinSet(t)
-	if set.Len() == 0 {
-		t.Fatal("no built-in rule; the check would pass with no rule")
-	}
-	for _, r := range set.Rules() {
-		// NewSet refuses an external ID that differs from a built-in ID only
-		// in case, so compare without case too.
-		if strings.EqualFold(r.ID, RuleAnalysisBudget) {
-			t.Errorf("built-in rule %s (%s) uses the native ID %s", r.ID, r.Source, RuleAnalysisBudget)
-		}
 	}
 }
 

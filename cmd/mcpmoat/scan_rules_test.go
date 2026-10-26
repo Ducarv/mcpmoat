@@ -16,6 +16,7 @@ import (
 
 	"github.com/Ducarv/mcpmoat/internal/inspect"
 	"github.com/Ducarv/mcpmoat/internal/inspect/inspecttest"
+	"github.com/Ducarv/mcpmoat/internal/report"
 )
 
 // scanRulesResult is the outcome of one scan run.
@@ -123,11 +124,8 @@ func TestScanRulesAccepted(t *testing.T) {
 		// wantNotices are the lines that scan adds on stderr, in this order.
 		wantNotices []string
 	}{
-		{
-			name:        "valid external rule",
-			dir:         func(*testing.T) string { return scanRulesFixture("extra") },
-			wantNotices: []string{toolRulesNoConnectNotice},
-		},
+		// The fixture folder "extra" as it is: see
+		// TestScanRulesNoConnectSkipsToolRules.
 		{
 			name: "yml file name",
 			dir: func(t *testing.T) string {
@@ -392,22 +390,9 @@ func TestScanRulesWithConnectJSON(t *testing.T) {
 		t.Errorf("stderr = %q, want %q", got.stderr, scanRulesPinned)
 	}
 	doc := decodeScanJSON(t, got.stdout)
-	if len(doc.Findings) != 1 {
-		t.Fatalf("got %d findings, want 1: %+v", len(doc.Findings), doc.Findings)
-	}
-	f := doc.Findings[0]
-	want := map[string][2]string{
-		"rule_id":  {f.RuleID, "MOAT-X-001"},
-		"severity": {f.Severity, "low"},
-		"server":   {f.Server, "ok-srv"},
-		"field":    {f.Field, "tool"},
-		"key":      {f.Key, "lookup"},
-		"related":  {f.Related, "description"},
-	}
-	for name, pair := range want {
-		if pair[0] != pair[1] {
-			t.Errorf("finding %s = %q, want %q", name, pair[0], pair[1])
-		}
+	want := []report.JSONFinding{toolRow("MOAT-X-001", "low", "ok-srv", "lookup", "description")}
+	if !slices.Equal(doc.Findings, want) {
+		t.Errorf("JSON findings = %+v\nwant            %+v", doc.Findings, want)
 	}
 }
 
@@ -415,7 +400,9 @@ func TestScanRulesWithConnectJSON(t *testing.T) {
 // description rule from --rules, also when the server has a tool that the rule
 // would match: scan does not start the server, prints exactly
 // toolRulesNoConnectNotice on stderr and gives no finding, also with
-// --fail-on low.
+// --fail-on low. It reads and writes no pins. This is the one test of that
+// notice with a description rule; TestScanRulesAccepted checks other folder
+// shapes and TestScanToolsNoConnect the built-in rules.
 func TestScanRulesNoConnectSkipsToolRules(t *testing.T) {
 	t.Parallel()
 
@@ -427,9 +414,10 @@ func TestScanRulesNoConnectSkipsToolRules(t *testing.T) {
 	got := scanInWith(t, fake, home, work, "--no-connect", "--fail-on", "low", "--rules", scanRulesFixture("extra"))
 
 	assertScanResult(t, got.code, got.stdout, got.stderr, scanWant{
-		code:   exitOK,
-		stdout: []string{"ok-srv"},
-		stderr: []string{toolRulesNoConnectNotice},
+		code:     exitOK,
+		stdout:   []string{"ok-srv"},
+		noStdout: append([]string{"MOAT-X-001", findingsHeading}, scanRulesToolTexts...),
+		stderr:   []string{toolRulesNoConnectNotice},
 	})
 	if want := toolRulesNoConnectNotice + "\n"; got.stderr != want {
 		t.Errorf("stderr = %q, want %q", got.stderr, want)
@@ -440,49 +428,61 @@ func TestScanRulesNoConnectSkipsToolRules(t *testing.T) {
 	if calls := fake.Calls(); len(calls) != 0 {
 		t.Errorf("inspector calls = %q, want none with --no-connect", calls)
 	}
-	// --no-connect reads and writes no pins.
+	// --no-connect reads and writes no pins. Without XDG_CONFIG_HOME,
+	// pins.json is under home (see pins.DefaultPath), so an unchanged home
+	// means that no pins were written.
 	assertDirUnchanged(t, home, homeBefore)
 }
 
 // TestScanRulesBadRegex checks a rule from --rules whose regex does not
-// compile. Scan compiles every description and schema rule before it looks at
-// --no-connect, so both modes give exit code 2, an empty stdout and one stderr
-// line that names the file and the field "match". Scan never starts the server
-// and writes no pins.
+// compile. Scan compiles every rule from --rules before it looks at
+// --no-connect, also a config rule that it never applies. So both modes give
+// exit code 2, an empty stdout and one stderr line that names the file and the
+// field "match". Scan never starts the server and writes no pins.
 func TestScanRulesBadRegex(t *testing.T) {
 	t.Parallel()
 
-	dir := scanRulesFixture("badregex")
-	file := filepath.Join(dir, "MOAT-X-002.yaml")
+	tests := []struct {
+		name string
+		// fixture is the folder under testdata/rules, and file the rule file
+		// in it.
+		fixture, file string
+	}{
+		{name: "description rule", fixture: "badregex", file: "MOAT-X-002.yaml"},
+		{name: "config rule", fixture: "badregexconfig", file: "MOAT-X-005.yaml"},
+	}
+	for _, tt := range tests {
+		dir := scanRulesFixture(tt.fixture)
+		file := filepath.Join(dir, tt.file)
+		for _, mode := range scanModes {
+			t.Run(tt.name+" "+mode.name, func(t *testing.T) {
+				t.Parallel()
+				home, work := t.TempDir(), t.TempDir()
+				writeServers(t, home, ".claude.json", okServer)
+				fake := fakeServers(map[string][]inspect.Tool{"ok-srv": {scanRulesDeprecatedTool}})
+				homeBefore := dirSnapshot(t, home)
+				dirBefore := dirSnapshot(t, dir)
 
-	for _, mode := range scanModes {
-		t.Run(mode.name, func(t *testing.T) {
-			t.Parallel()
-			home, work := t.TempDir(), t.TempDir()
-			writeServers(t, home, ".claude.json", okServer)
-			fake := fakeServers(map[string][]inspect.Tool{"ok-srv": {scanRulesDeprecatedTool}})
-			homeBefore := dirSnapshot(t, home)
-			dirBefore := dirSnapshot(t, dir)
+				got := scanInWith(t, fake, home, work, append(slices.Clone(mode.args), "--rules", dir)...)
 
-			got := scanInWith(t, fake, home, work, append(slices.Clone(mode.args), "--rules", dir)...)
-
-			assertScanResult(t, got.code, got.stdout, got.stderr, scanWant{
-				code:   exitError,
-				stderr: []string{"mcpmoat scan: " + file + ": ", "field match"},
+				assertScanResult(t, got.code, got.stdout, got.stderr, scanWant{
+					code:   exitError,
+					stderr: []string{"mcpmoat scan: " + file + ": ", "field match"},
+				})
+				assertEmptyStdout(t, got.stdout)
+				if lines := nonEmptyLines(got.stderr); len(lines) != 1 {
+					t.Errorf("stderr has %d lines, want 1\nstderr: %q", len(lines), got.stderr)
+				}
+				// The pattern text of the rule never shows.
+				assertContainsNone(t, "stderr", got.stderr, []string{"(unclosed"})
+				assertTerminalSafe(t, got.stderr)
+				if calls := fake.Calls(); len(calls) != 0 {
+					t.Errorf("inspector calls = %q, want none: the rules error comes before the connect step", calls)
+				}
+				assertDirUnchanged(t, home, homeBefore)
+				assertDirUnchanged(t, dir, dirBefore)
 			})
-			assertEmptyStdout(t, got.stdout)
-			if lines := nonEmptyLines(got.stderr); len(lines) != 1 {
-				t.Errorf("stderr has %d lines, want 1\nstderr: %q", len(lines), got.stderr)
-			}
-			// The pattern text of the rule never shows.
-			assertContainsNone(t, "stderr", got.stderr, []string{"(unclosed"})
-			assertTerminalSafe(t, got.stderr)
-			if calls := fake.Calls(); len(calls) != 0 {
-				t.Errorf("inspector calls = %q, want none: the rules error comes before the connect step", calls)
-			}
-			assertDirUnchanged(t, home, homeBefore)
-			assertDirUnchanged(t, dir, dirBefore)
-		})
+		}
 	}
 }
 

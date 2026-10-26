@@ -25,10 +25,10 @@ import (
 // x 2500, about 82M instruction-bytes. That is about 0.75 s on an Apple M1
 // Pro (about 9.2 ns for each instruction-byte: the BenchmarkWorstCaseBlock
 // time below divided by 21 forms). A text can have more forms (see
-// matchForms and preparedText):
+// baseFormsCut and preparedText):
 //
 //   - keywords read up to maxKeywordForms (7) forms: the plain folds of the
-//     base forms of matchForms;
+//     base forms of baseFormsCut;
 //   - any_regex and all_regex read up to maxRegexForms (21) forms: the seven
 //     base forms, their seven plain folds and their seven skeleton folds,
 //     when the text is not only ASCII.
@@ -63,21 +63,21 @@ import (
 // preparedText and Matcher.matchCtx). It also stops the analysis of a server
 // at a deadline: matchCtx checks the context before each regex reads each
 // form, so the overshoot past the deadline is at most about one regex on one
-// form, or one build of the forms of one text.
+// form plus one build of the forms of one text.
 //
 // Building the forms has a cost too. The slowest known input is a run of
 // U+009D, because each one can start an OSC (see oscExprC0): 128 KiB of it
 // takes about 240 ms for each form that reads with ansiSeq.
-// BenchmarkOSCStartRun times one matchForms and one matchWindowCut call,
-// which are two baseFormsCut calls: about 1.7 s (Apple M1 Pro, five runs
-// with -benchtime=5x). A scan calls baseFormsCut once for each text, for all
-// its rules, so it pays about half of that.
+// BenchmarkOSCStartRun times two baseFormsCut calls (through the test
+// helpers matchForms and matchWindowCut): about 1.7 s (Apple M1 Pro, five
+// runs with -benchtime=5x). A scan calls baseFormsCut once for each text,
+// for all its rules, so it pays about half of that.
 //
 // A text longer than the window is cut, so padding can push a payload out of
 // the reach of the regex and keyword rules. The match_window heuristic closes
 // this evasion: a high rule with it fires when the window cuts one of the
-// forms of matchForms. The OSC text of a form, such as a link URL, does not
-// count (see matchWindowCut).
+// forms of baseFormsCut. The OSC text of a form, such as a link URL, does not
+// count (see baseFormsCut).
 //
 // A schema target is many short texts (see matchSchemaPrepared). An
 // any_regex, all_regex or keywords rule reads one schema in three passes:
@@ -217,16 +217,15 @@ func (m Match) compile() (*Matcher, error) {
 
 	switch {
 	case m.Heuristic != "":
-		fn, err := compileHeuristic(m.Heuristic, m.Params)
+		h, err := compileHeuristic(m.Heuristic, m.Params)
 		if err != nil {
 			return nil, err
 		}
-		mode, h := schemaAll, rawHeuristic(fn)
+		mode := schemaAll
 		if m.Heuristic == HeuristicMatchWindow {
-			// fn is matchWindow, the raw text entry. The matcher reads the
-			// cut flag of the shared preparedText instead, so the forms of a
-			// text are built once for all its rules.
-			mode, h = schemaWindow, matchWindowPrepared
+			// match_window reports the schemas that the regex and keyword
+			// rules cannot read in full (see schemaWindowHit).
+			mode = schemaWindow
 		}
 		return &Matcher{kind: kindHeuristic, mode: mode, heuristic: h}, nil
 	case m.AnyRegex != nil:
@@ -256,11 +255,11 @@ func compileRegexMatcher(kind string, list []string, build func(entry, s string)
 // invisible character cannot split a keyword. Regexes read the forms of
 // preparedText.regexForms, which also hold the folded forms, so a fullwidth
 // letter or a combining mark cannot hide a word from a regex. Keywords read
-// the forms of preparedText.keywordForms, the base forms of matchForms folded
+// the forms of preparedText.keywordForms, the base forms of baseFormsCut folded
 // with foldMarks. A regex or a keyword matches when it matches in one form.
 // In all_regex, each regex must match, but each one can match in a different
 // form. A heuristic reads the full raw text. The match_window heuristic
-// reads the cut flag of the base forms (see matchWindow).
+// reads the cut flag of the base forms (see matchWindowPrepared).
 //
 // A regex or keyword hit has the offset NoOffset, whatever form it matched
 // in, because a form has no byte offsets in the raw text.
@@ -325,7 +324,7 @@ func (m *Matcher) matchPrepared(p *preparedText) []Hit {
 // builds the forms, before each regex or keyword reads each form, and before
 // the heuristic. For a schema, matchSchemaPrepared also checks it before
 // each string, seam and raw text. So when ctx ends, the extra work is at
-// most one regex on one form, one build of the forms of one text, or one
+// most one build of the forms of one text plus one regex on one form, or one
 // heuristic call. matchCtx then returns the hits that it found so far, and
 // an error that wraps ctx.Err(). The error names the kind and the list
 // index, never input text. With a context that is never done, the error is

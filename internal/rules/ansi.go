@@ -29,7 +29,7 @@ const oscExprC0 = `(?:\x1b\]|\x{9d})[^\x07\x1b\x{9c}\x{9d}]{0,256}(?:\x07|\x1b\\
 // so it cannot swallow the rest of the text; its ESC is an invisible control
 // rune, so step 4 of normalizeForMatch drops it, and its text stays.
 //
-// A CSI here holds no C0 control rune. The forms 1 to 3 of matchForms read
+// A CSI here holds no C0 control rune. The forms 1 to 3 of baseFormsCut read
 // the sequences with ansiSeq. The forms 4 to 7 read them with ansiSeqC0.
 var ansiSeq = regexp.MustCompile(`(?:\x1b\[|\x{9b})[0-?]*[ -/]*[@-~]|` + oscExpr)
 
@@ -48,7 +48,7 @@ const csiC0 = `\x00-\x17\x19\x1c-\x1f\x7f`
 // The final byte of a CSI can be a letter of the text: in ESC [ "Ignore",
 // the CSI is ESC [ I, as for a terminal. And a C0 rune lets a CSI take
 // parameter bytes of the text: ESC [ LF "<IMPORTANT>" is the CSI ESC [ LF < I.
-// So only the forms 4 to 7 of matchForms read the sequences with ansiSeqC0,
+// So only the forms 4 to 7 of baseFormsCut read the sequences with ansiSeqC0,
 // and the fifth and the seventh form give back the text of a CSI with a
 // letter final byte (see ansiKeepText).
 var ansiSeqC0 = regexp.MustCompile(
@@ -78,14 +78,14 @@ func ansiToSpace(s string) string {
 
 // ansiC0ToSpace is ansiToSpace with ansiSeqC0: it replaces each ANSI escape
 // sequence, also a CSI that holds C0 control runes, with U+0020. It is the
-// ANSI step of the fourth and the sixth form of matchForms. A sequence is at
+// ANSI step of the fourth and the sixth form of baseFormsCut. A sequence is at
 // least 2 bytes long, so the text does not grow.
 func ansiC0ToSpace(s string) string {
 	return ansiSeqC0.ReplaceAllLiteralString(s, " ")
 }
 
 // ansiKeepText is the ANSI step of the fifth and the seventh form of
-// matchForms (see keepSeqText and keepSeqTextSpaced). It replaces each ANSI
+// baseFormsCut (see keepSeqText and keepSeqTextSpaced). It replaces each ANSI
 // escape sequence (see ansiSeqC0) with the text that seqText gives for it.
 // So a CSI that takes characters of the text gives them back, and the text
 // of an OSC, which a terminal does not show but a model reads, is matched.
@@ -107,7 +107,8 @@ func ansiKeepText(s string) string {
 }
 
 // ansiKeepCSIText is ansiKeepText, but an OSC becomes two U+0020, without
-// its text. matchWindowCut reads the fifth and the seventh form with it, so
+// its text. The cut flag of baseFormsCut reads the fifth and the seventh form
+// with it, so
 // every byte of these forms counts for the window except the text of an
 // OSC: the two U+0020 of an OSC with no text count too.
 func ansiKeepCSIText(s string) string {

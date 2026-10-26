@@ -401,18 +401,7 @@ func BenchmarkSchemaWorstCase(b *testing.B) {
 // of the built-in rule set.
 func builtinAnalyzer(tb testing.TB) *Analyzer {
 	tb.Helper()
-	rs, errs := Builtin()
-	if len(errs) > 0 {
-		tb.Fatalf("Builtin() errors = %v", errs)
-	}
-	set, errs := NewSet(rs, nil)
-	if len(errs) > 0 {
-		tb.Fatalf("NewSet() errors = %v", errs)
-	}
-	a, errs := NewAnalyzer(set)
-	if len(errs) > 0 {
-		tb.Fatalf("NewAnalyzer() errors = %v", errs)
-	}
+	a := mustAnalyzer(tb, builtinSet(tb))
 	if len(a.description) == 0 || len(a.schema) == 0 {
 		tb.Fatalf("builtin Analyzer has %d description and %d schema rules, want both > 0", len(a.description), len(a.schema))
 	}

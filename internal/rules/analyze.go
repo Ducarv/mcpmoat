@@ -38,8 +38,14 @@ type TextFinding struct {
 	Target Target
 }
 
-// NewAnalyzer compiles the match block of each description and schema rule
-// of set once. It skips config rules: scan checks them natively.
+// NewAnalyzer compiles the match block of each rule of set once, and keeps
+// the compiled description and schema rules.
+//
+// It compiles the config rules too, but it does not keep them: scan checks
+// them natively. So a match block that does not compile is an error for every
+// rule, whatever its target, as the docs of the exit codes say. The same is
+// true for a rule whose target Validate would refuse, which only a Set built
+// by hand can hold.
 //
 // A rule whose match block does not compile gives a *LoadError with the same
 // text and fields as the loader gives with a compiler (see loadFile). After
@@ -57,14 +63,12 @@ func NewAnalyzer(set *Set) (*Analyzer, []*LoadError) {
 	var errs []*LoadError
 	for i, r := range set.rules {
 		if len(errs) >= maxSetErrors {
-			// Only ints in the text: no untrusted text.
+			// NewAnalyzer compiles every rule, so the rules from i on are the
+			// rules that it did not check. Only ints in the text: no
+			// untrusted text.
 			stop := fmt.Errorf("stopped after %d errors; %d rules not checked", maxSetErrors, len(set.rules)-i)
 			errs = append(errs, newLoadError(setLabel, ReasonTooManyErrors).wrap(stop))
 			break
-		}
-		if r.Target != TargetDescription && r.Target != TargetSchema {
-			// Config rules, and any target that Validate would refuse.
-			continue
 		}
 		m, err := r.Match.CompileFor(r.Target)
 		if err != nil {
@@ -72,10 +76,15 @@ func NewAnalyzer(set *Set) (*Analyzer, []*LoadError) {
 			continue
 		}
 		ar := analyzerRule{id: r.ID, m: m}
-		if r.Target == TargetDescription {
+		switch r.Target {
+		case TargetDescription:
 			a.description = append(a.description, ar)
-		} else {
+		case TargetSchema:
 			a.schema = append(a.schema, ar)
+		default:
+			// A config rule, or a target that Validate would refuse: the
+			// match block compiles, but CheckTool does not run it.
+			continue
 		}
 		a.maxSeverity = higherSeverity(a.maxSeverity, r.Severity)
 	}
@@ -102,18 +111,6 @@ func (a *Analyzer) MaxSeverity() Severity {
 		return ""
 	}
 	return a.maxSeverity
-}
-
-// higherSeverity returns the more serious of cur and s. A severity s that is
-// not valid counts as SeverityCritical (see MaxSeverity).
-func higherSeverity(cur, s Severity) Severity {
-	if !s.Valid() {
-		s = SeverityCritical
-	}
-	if s.Rank() > cur.Rank() {
-		return s
-	}
-	return cur
 }
 
 // CheckTool runs every description rule on t.Description and every schema

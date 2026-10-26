@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"reflect"
 	"slices"
 	"strconv"
@@ -14,7 +15,8 @@ import (
 	"time"
 )
 
-// Tests for matchSchema (schemamatch.go). Non-ASCII runes are Go escape
+// Tests for matchSchemaPrepared (schemamatch.go), most of them through the
+// test adapter matchSchema (compat_test.go). Non-ASCII runes are Go escape
 // sequences, so this file stays pure ASCII.
 
 // windowCutDetail is the Detail of the schemaWindow hit when the caps of
@@ -1241,6 +1243,11 @@ func TestPreparedSchemaBuiltOnce(t *testing.T) {
 
 	// After all the rules, every string and seam is prepared, text and seam
 	// return the kept pointers, and the raw pass built its forms on p itself.
+	// ps keeps only the first fit strings (see TestPreparedSchemaKeepsOnlyFit),
+	// and here all the strings fit.
+	if len(ps.texts) != len(ps.strs) {
+		t.Fatalf("len(texts) = %d, want all %d strings", len(ps.texts), len(ps.strs))
+	}
 	for i, x := range ps.texts {
 		if x == nil {
 			t.Errorf("string %d was never prepared", i+1)
@@ -1289,6 +1296,82 @@ func TestPreparedSchemaLazy(t *testing.T) {
 		if !ps.empty || ps.strs != nil || ps.texts != nil {
 			t.Errorf("prepareSchema(%q) = %+v, want empty and not decoded", raw, ps)
 		}
+	}
+}
+
+// TestPreparedSchemaKeepsOnlyFit checks that a preparedSchema keeps the
+// preparedText of the first fit strings only (#143): a string after the caps
+// gets a new preparedText on each call. The hits of the rules that share p
+// are still the hits of Match, also for a heuristic that hits on a string
+// after the caps.
+func TestPreparedSchemaKeepsOnlyFit(t *testing.T) {
+	t.Parallel()
+
+	// The strings differ, so schemaStrings keeps each one. The last string
+	// holds a ZWSP, so invisible_unicode hits after the caps.
+	strs := make([]string, maxSchemaMatchStrings+3)
+	for i := range strs {
+		strs[i] = fmt.Sprintf("s%d", i)
+	}
+	last := len(strs) - 1
+	strs[last] = "late\u200bstring"
+	raw := mustJSON(t, strs)
+
+	p := prepareText(raw)
+	ps := p.schema()
+	if !ps.complete || !ps.cut || ps.fit != maxSchemaMatchStrings || len(ps.strs) != len(strs) {
+		t.Fatalf("precondition: complete = %v, cut = %v, fit = %d, strings = %d; want true, true, %d, %d",
+			ps.complete, ps.cut, ps.fit, len(ps.strs), maxSchemaMatchStrings, len(strs))
+	}
+
+	matchers := map[string]*Matcher{}
+	for name, m := range map[string]Match{
+		"invisible_unicode": {Heuristic: HeuristicInvisibleUnicode},
+		"match_window":      {Heuristic: HeuristicMatchWindow},
+		"keywords":          {Keywords: []string{"s5"}},
+	} {
+		c, err := m.CompileFor(TargetSchema)
+		if err != nil {
+			t.Fatalf("%s: CompileFor() error = %v", name, err)
+		}
+		matchers[name] = c
+	}
+	for _, sr := range builtinSchemaRules(t) {
+		matchers[sr.rule.ID] = sr.m
+	}
+	for _, name := range slices.Sorted(maps.Keys(matchers)) {
+		m := matchers[name]
+		got, err := m.matchCtx(t.Context(), p)
+		if err != nil {
+			t.Fatalf("%s: matchCtx() error = %v", name, err)
+		}
+		if want := m.Match(raw); !slices.Equal(got, want) {
+			t.Errorf("%s: shared hits = %v, want the hits of Match %v", name, got, want)
+		}
+	}
+	wantLate := fmt.Sprintf("schema string %d: ", last+1)
+	if got := matchers["invisible_unicode"].Match(raw); len(got) != 1 || !strings.HasPrefix(got[0].Detail, wantLate) {
+		t.Errorf("invisible_unicode hits = %v, want one hit with the prefix %q", got, wantLate)
+	}
+
+	// The rules read every string, but ps keeps only the first fit.
+	if len(ps.texts) != ps.fit {
+		t.Errorf("len(texts) = %d, want fit = %d", len(ps.texts), ps.fit)
+	}
+	for i, x := range ps.texts {
+		if x == nil {
+			t.Fatalf("string %d was never prepared", i+1)
+		}
+		if ps.text(i) != x {
+			t.Fatalf("text(%d) = a new pointer, want the kept one", i)
+		}
+	}
+	a, b := ps.text(last), ps.text(last)
+	if a == b {
+		t.Errorf("text(%d) twice = the same pointer, want a new preparedText on each call", last)
+	}
+	if a.raw != strs[last] || b.raw != strs[last] {
+		t.Errorf("text(%d).raw = %q and %q, want %q", last, a.raw, b.raw, strs[last])
 	}
 }
 

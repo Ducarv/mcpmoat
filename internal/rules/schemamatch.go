@@ -8,7 +8,8 @@ import (
 	"unicode/utf8"
 )
 
-// Cost caps for one tool schema in matchSchema. A description is one text, and
+// Cost caps for one tool schema in matchSchemaPrepared. A description is one
+// text, and
 // the regex and keyword matchers read at most MaxMatchInputBytes of it. A
 // schema is many short texts, so it gets its own caps.
 //
@@ -70,7 +71,8 @@ const (
 // jsonSpace holds the four white-space characters of JSON.
 const jsonSpace = " \t\r\n"
 
-// schemaMode tells matchSchema how to read the strings of a schema. The zero
+// schemaMode tells matchSchemaPrepared how to read the strings of a schema. The
+// zero
 // value is schemaBudget, the mode of the regex and keyword kinds.
 type schemaMode int
 
@@ -82,7 +84,8 @@ const (
 	// cost is linear in the input, so they need no cap.
 	schemaAll
 	// schemaWindow is for the match_window heuristic. It reports the schemas
-	// that the schemaBudget mode cannot read in full (see matchSchema).
+	// that the schemaBudget mode cannot read in full (see
+	// matchSchemaPrepared).
 	schemaWindow
 )
 
@@ -102,12 +105,17 @@ func (m schemaMode) String() string {
 // preparedSchema is one tool schema, decoded once, with the preparedText of
 // each text that the schema rules read in it. prepareSchemaFrom decodes the
 // schema with schemaStrings and applies the caps of schemaFit once. The
-// preparedText of each string and of each seam is made on its first use and
-// then kept. So when the rules of one tool share one preparedSchema, each
-// string and each seam is normalized at most once, whatever the number of
-// rules that read it. The raw text has one preparedText too, for the raw
-// text pass (see matchSchemaPrepared). For a schema that preparedText.schema
-// decodes, it is that preparedText itself.
+// preparedText of each string that fits in the caps, and of each seam, is
+// made on its first use and then kept. So when the rules of one tool share
+// one preparedSchema, each of these strings and seams is normalized at most
+// once, whatever the number of rules that read it. The raw text has one
+// preparedText too, for the raw text pass (see matchSchemaPrepared). For a
+// schema that preparedText.schema decodes, it is that preparedText itself.
+//
+// The strings after the first fit strings are not kept (see text). Only the
+// heuristics read them, and the heuristics read only the raw text of a
+// string, so a kept preparedText would only hold memory: a schema can have up
+// to maxSchemaValues strings.
 //
 // A preparedSchema is safe for concurrent use. The fields above mu do not
 // change after prepareSchemaFrom. mu guards texts and seams. The forms of each
@@ -123,15 +131,8 @@ type preparedSchema struct {
 	cut      bool          // the caps cut the strings (schemaFit)
 
 	mu    sync.Mutex      // guards texts and seams
-	texts []*preparedText // texts[i] is for strs[i]; nil until its first use
+	texts []*preparedText // texts[i] is for strs[i], i < fit; nil until its first use
 	seams []*preparedText // seams[i-1] joins strs[i-1] and strs[i]; nil until its first use
-}
-
-// prepareSchema decodes raw and returns its preparedSchema, with a new
-// preparedText for raw (see prepareSchemaFrom). It is for the callers that
-// have only the schema text, such as matchSchema.
-func prepareSchema(raw string) *preparedSchema {
-	return prepareSchemaFrom(prepareText(raw))
 }
 
 // prepareSchemaFrom decodes p.raw and returns its preparedSchema. The raw
@@ -152,13 +153,21 @@ func prepareSchemaFrom(p *preparedText) *preparedSchema {
 	}
 	ps.strs, ps.complete = schemaStrings([]byte(raw))
 	ps.fit, ps.cut = schemaFit(ps.strs)
-	ps.texts = make([]*preparedText, len(ps.strs))
+	ps.texts = make([]*preparedText, ps.fit)
 	return ps
 }
 
-// text returns the preparedText of strs[i]. The first call for i makes it,
-// and the next calls return the same one.
+// text returns the preparedText of strs[i]. For i < fit, the first call for
+// i makes it, and the next calls return the same one. For i >= fit, each call
+// makes a new preparedText that ps does not keep. Only the schemaAll mode
+// reads these strings, and its heuristics read only p.raw, so they do not
+// share forms (see preparedSchema).
 func (ps *preparedSchema) text(i int) *preparedText {
+	if i >= ps.fit {
+		// strs and fit do not change after prepareSchemaFrom, so this needs
+		// no lock.
+		return prepareText(ps.strs[i])
+	}
 	ps.mu.Lock()
 	defer ps.mu.Unlock()
 	if ps.texts[i] == nil {
@@ -189,28 +198,13 @@ func (ps *preparedSchema) seam(i int) *preparedText {
 // hits of one rule in p.raw, read as one text. It must not change p.
 type schemaMatchFunc func(ctx context.Context, p *preparedText) ([]Hit, error)
 
-// matchSchema runs match on the strings, seams and raw text of the schema
-// raw, as matchSchemaPrepared does, and returns the hits. It is a thin
-// adapter for the callers that have one schema and one rule: it makes a new
-// preparedSchema for raw, so nothing is shared with other rules. It uses a
-// background context and a match that cannot fail, so it has no error to
-// return.
-func matchSchema(raw string, mode schemaMode, match func(string) []Hit) []Hit {
-	inner := func(_ context.Context, p *preparedText) ([]Hit, error) {
-		return match(p.raw), nil
-	}
-	// The error is always nil here: context.Background is never done, and
-	// inner never fails.
-	hits, _ := matchSchemaPrepared(context.Background(), prepareSchema(raw), mode, inner)
-	return hits
-}
-
 // matchSchemaPrepared runs match on a tool schema, ps, and returns the hits.
 //
-// The schema is decoded with schemaStrings (see prepareSchema). match runs on
-// each key and string value alone, with the preparedText that ps keeps for
-// it. So the rules that share ps also share the forms of each string, seam
-// and raw text. Each hit gets the offset NoOffset and the detail
+// The schema is decoded with schemaStrings (see prepareSchemaFrom). match
+// runs on each key and string value alone, with the preparedText that
+// preparedSchema.text gives for it. So the rules that share ps also share the
+// forms of each string that fits in the caps, of each seam and of the raw
+// text. Each hit gets the offset NoOffset and the detail
 // "schema string N: <inner detail>", where N is the 1-based place of the
 // string in the list of schemaStrings.
 //
@@ -261,9 +255,8 @@ func matchSchema(raw string, mode schemaMode, match func(string) []Hit) []Hit {
 // reads every string and no seam.
 //
 // The window rule: in the schemaWindow mode, matchSchemaPrepared does not
-// return the
-// hits of match. It returns one hit when the regex and keyword rules can miss
-// a part of the schema:
+// return the hits of match. It returns one hit when the regex and keyword
+// rules can miss a part of the schema:
 //
 //   - the decode is not complete, so the rules read only a part of the
 //     strings, and the raw text in a window;

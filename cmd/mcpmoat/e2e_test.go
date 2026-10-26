@@ -904,6 +904,13 @@ func TestE2EScanRulesErrors(t *testing.T) {
 			wantErr: []string{"MOAT-X-002.yaml", "match"},
 		},
 		{
+			// Scan never applies a config rule from --rules, but it still
+			// compiles its regex.
+			name:    "config rule regex that does not compile",
+			dir:     func(t *testing.T) string { return e2eRulesDir(t, "badregexconfig") },
+			wantErr: []string{"MOAT-X-005.yaml", "field match"},
+		},
+		{
 			name:    "missing folder",
 			dir:     func(t *testing.T) string { return filepath.Join(t.TempDir(), "missing") },
 			wantErr: []string{"cannot read directory"},
