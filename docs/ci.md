@@ -38,11 +38,11 @@ jobs:
           cache: false
 
       - name: Install mcpmoat
-        # There is no tagged release yet, so this pins one commit of main,
-        # and the Go checksum database checks it. This commit has no
-        # --fail-on. For --fail-on and newer rules, pin a newer commit:
-        # go list -m github.com/Ducarv/mcpmoat@<commit> prints its
-        # pseudo-version. Issue #171 moves this to a release tag.
+        # This pins one commit of main, and the Go checksum database checks
+        # it. This commit has no --fail-on. Issue #171 moves this pin to a
+        # release tag, because v0.1.0 exists. Until then, for --fail-on and
+        # newer rules, pin a newer commit: go list -m
+        # github.com/Ducarv/mcpmoat@<commit> prints its pseudo-version.
         run: go install github.com/Ducarv/mcpmoat/cmd/mcpmoat@v0.0.0-20261025220440-f51b6705da29
 
       # The install runs before the checkout, so it never runs in the tree of
