@@ -136,7 +136,7 @@ hidden instructions or leak data.
 | ID | Attack | Detection |
 |---|---|---|
 | T1 | Tool poisoning: hidden instruction in a tool's description or schema | Pattern rules: imperative phrases aimed at the model, mentions of other tools, "don't tell the user", invisible characters, very long text, base64, mixed-script words |
-| T2 | Rug pull: the description, schema or annotations of a tool change after the pin | Per-tool hash stored in a pins file; differences raise an alert |
+| T2 | Rug pull: the description, schema, annotations, `_meta` or icons of a tool change after the pin | Per-tool hash stored in a pins file; differences raise an alert |
 | T3 | Shadowing: a tool that tries to redefine another tool's behaviour ("when using send_email, always...") | Rule: tool text (description, title, annotations title, or the description and title strings of the input and output schema) cites the name of a tool from another server |
 | T4 | Dangerous config: remote server over `http://` without TLS, plaintext secret in config, unpinned package (`npx package@latest`) | Static config analysis |
 | T5 | Basic typosquatting: name very close to a known server | Compare with a short list of popular servers (edit distance: one edit. Two edits when the shorter name has more than 8 characters and either the edits only add or drop characters at the end of the popular name, or the part after the last separator the two names share has 5 or more characters. With no shared separator, that part is the whole shorter name) |
@@ -346,7 +346,7 @@ Rules:
 ### 6.2 Inspection
 
 **FR-04: Connect and list.** Connect to each server via MCP and list tools (with their
-annotations), prompts, resources and resource templates (name, description, schema).
+annotations, `_meta` and `icons`), prompts, resources and resource templates (name, description, schema).
 
 - Against the benign fixture server, inspection returns its exact tools, prompts, resources and
   resource templates with names, descriptions, input schemas and tool annotations.
@@ -372,9 +372,10 @@ not break the scan.
   must not avoid the rug-pull check by failing on purpose. A server that is not pinned stays a
   warning only.
 - Ctrl-C, `SIGTERM` or `SIGHUP` cancels the run. mcpmoat stops the stdio servers that it started,
-  because they run in their own session and the terminal does not signal them. `scan` prints
-  `interrupted; no pins were saved`, saves nothing and exits with code 2. `pin --accept` does the
-  same.
+  because they run in their own session and the terminal does not signal them. A signal during the
+  inspection, or before new pins are saved, makes `scan` and `pin --accept` print
+  `interrupted; no pins were saved`, save nothing and exit with code 2. The README section
+  [Exit codes](../README.md#exit-codes) gives the exact `scan` behavior.
 
 ### 6.3 Rules
 
@@ -432,15 +433,19 @@ references:
 ### 6.4 Pins (rug-pull detection)
 
 **FR-11: Store pins.** On first run, store the SHA-256 of each tool's name, title, description,
-input schema, output schema and annotations in `~/.config/mcpmoat/pins.json`. The annotations are
-the title and the four hints `readOnlyHint`, `destructiveHint`, `idempotentHint` and
-`openWorldHint`. An absent hint is different from a set hint.
+input schema, output schema, annotations, `_meta` and `icons` in `~/.config/mcpmoat/pins.json`. The
+annotations are the title and the four hints `readOnlyHint`, `destructiveHint`, `idempotentHint`
+and `openWorldHint`. An absent hint is different from a set hint. A tool without `_meta` or
+`icons` has `null` for them in the hash input.
 
 - The hash input is a canonical serialisation: the same tool with JSON keys in a different order
   gives the same hash.
 - A change of one character in the name, title, description or a schema gives a different hash,
   except a number change within the float64 limit below.
 - A change of one annotation hint gives a different hash.
+- A change only in `_meta` gives a different hash, and so does a change only in `icons`. Both raise
+  `MOAT-T2-001`. A different key order inside `_meta` gives the same hash. The order of the icons
+  in the array does change the hash.
 - Each hash starts with its version (`sha256-v1:`). When a stored hash has another version, mcpmoat
   shows the tool as not verified. It never accepts the tool silently.
 - A tool or hash that cannot be verified is reported as not verified (`MOAT-T2-004`). Examples are a
@@ -453,14 +458,18 @@ the title and the four hints `readOnlyHint`, `destructiveHint`, `idempotentHint`
 - The pins file has a format version field and is written atomically (temp file plus rename).
 - `XDG_CONFIG_HOME` is honoured when set.
 
-Known limits: the Go SDK decodes `readOnlyHint` and `idempotentHint` as a plain `bool`. So for
-these two hints, "absent" and "false" are the same. A change to `true` is always visible. The SDK
-decode and the canonical serialisation pass every schema number through `float64`. So a number that
-a `float64` cannot hold exactly is rounded (an integer above 2^53, a long decimal, or a value that
-underflows to zero), and a change only in such digits does not change the hash. The hash does not
-cover a tool's `_meta` and `icons`, because `inspect` drops them. So a change only in `_meta` or
-`icons` does not change the hash. This is an accepted limit. Issue #153 will keep them in `inspect`
-and hash them before v1.0.0.
+Known limits: the Go SDK decodes `readOnlyHint` and `idempotentHint` as a plain `bool`. So for these
+two hints, "absent" and "false" are the same. A change to `true` is always visible. The SDK decode
+and the canonical serialisation pass every schema number through `float64`. So a number that a
+`float64` cannot hold exactly is rounded (an integer above 2^53, a long decimal, or a value that
+underflows to zero), and a change only in such digits does not change the hash. The hash covers a
+tool's `_meta` and `icons` with limits. Numbers in `_meta` go through `float64`, as above. The SDK
+decodes each icon into a typed struct, so an unknown key inside an icon is dropped and is not
+covered. A server that puts changing data in `_meta` (a timestamp or a trace id) raises
+`MOAT-T2-001` on every scan. A large `_meta`, or many icons with inline `data:` URIs, can push a
+server over the 2 MiB pin cap for each server. Then the pin fails closed as `MOAT-T2-004`. The `_meta` and `icons` of prompts, resources
+and resource templates are not hashed, because only tools are pinned. The SDK omits empty icon
+fields (`mimeType`, `sizes`, `theme`), so an empty value and an absent value hash the same.
 
 **FR-12: Detect changes.** On later runs, warn about new, removed or changed tools, showing the
 text diff.
@@ -548,8 +557,8 @@ text diff.
   it to review them first)` or ` (a change has no diff text: review the tool first)` for each
   change that the user did not see: the digest covers those changes too. There is no line for a server pinned for the first time, a server that
   could not be inspected, an ignored finding, or tools that cannot be pinned.
-- `scan` and `pin --accept` print the inspection warnings on stderr, one line each, with keys and
-  fixed names only: `cleartext-secrets`, `undeclared-capability` (the cloaking signal) and
+- `scan` shows the inspection warnings in the summary of the server on stdout (on stderr with
+  `--json`), and `pin --accept` prints them on stderr, one line each, with keys and fixed names only: `cleartext-secrets`, `undeclared-capability` (the cloaking signal) and
   `dns-pin-unavailable`.
 - The digest (`pins.Digest`, version `pd1`) is the full SHA-256 over the sorted tool names and their
   hashes. The server picks both tool sets, so a collision costs about 2^(n/2) work for n bits (the
@@ -579,6 +588,11 @@ with `--no-color`).
 - No findings at or above the threshold: exit 0.
 - At least one non-ignored finding at or above `--fail-on`: exit 1.
 - Invalid flags, invalid rules, unreadable `--config`: exit 2.
+- Findings and an execution error together: exit 2. Exit 2 wins over 1.
+- `--fail-on` accepts only `low`, `medium`, `high` and `critical`. Another value is a usage error
+  (exit 2). It is a `scan` flag only.
+- The exact contract, with the errors that still print the report, is the README section
+  [Exit codes](../README.md#exit-codes).
 - A per-server connection failure alone does not cause exit 2 (it is reported; see FR-06).
 - Tests cover every branch, including `--fail-on low|medium|high|critical`.
 

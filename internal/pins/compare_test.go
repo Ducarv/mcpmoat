@@ -10,6 +10,8 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/Ducarv/mcpmoat/internal/inspect"
 )
@@ -328,6 +330,95 @@ func TestCompareInvisibleCharInDiff(t *testing.T) {
 	}
 	if !strings.Contains(got[0].Diff, "+description: safe\u200b\n") {
 		t.Errorf("Diff does not keep the invisible character:\n%q", got[0].Diff)
+	}
+}
+
+// TestCompareMetaAndIcons checks that a change that only touches _meta or icons
+// is a high "changed" tool with a real diff of the changed line, and that the
+// key order of _meta or of an icon is no change.
+func TestCompareMetaAndIcons(t *testing.T) {
+	t.Parallel()
+	meta := func(s string) func(*inspect.Tool) { return func(x *inspect.Tool) { x.Meta = []byte(s) } }
+	icons := func(s string) func(*inspect.Tool) { return func(x *inspect.Tool) { x.Icons = []byte(s) } }
+	pinnedMeta := meta(`{"ui":{"resourceUri":"ui://good/app","visibility":["model"]}}`)
+	pinnedIcons := icons(`[{"src":"https://good.example/a.png","mimeType":"image/png"}]`)
+
+	tests := []struct {
+		name     string
+		pinned   func(*inspect.Tool)
+		current  func(*inspect.Tool)
+		wantDiff []string // empty: no change
+	}{
+		{
+			name:     "_meta value changed",
+			pinned:   pinnedMeta,
+			current:  meta(`{"ui":{"resourceUri":"ui://evil/app","visibility":["model"]}}`),
+			wantDiff: []string{"-      \"resourceUri\": \"ui://good/app\",\n", "+      \"resourceUri\": \"ui://evil/app\",\n"},
+		},
+		{
+			name:     "_meta added",
+			pinned:   func(*inspect.Tool) {},
+			current:  pinnedMeta,
+			wantDiff: []string{"-  null\n", "+      \"resourceUri\": \"ui://good/app\",\n"},
+		},
+		{
+			name:     "_meta removed",
+			pinned:   pinnedMeta,
+			current:  func(*inspect.Tool) {},
+			wantDiff: []string{"-      \"resourceUri\": \"ui://good/app\",\n", "+  null\n"},
+		},
+		{
+			name:    "_meta same keys in another order",
+			pinned:  pinnedMeta,
+			current: meta(`{ "ui" : {"visibility":["model"], "resourceUri":"ui://good/app"} }`),
+		},
+		{
+			name:     "icon src changed",
+			pinned:   pinnedIcons,
+			current:  icons(`[{"src":"https://evil.example/a.png","mimeType":"image/png"}]`),
+			wantDiff: []string{"-      \"src\": \"https://good.example/a.png\"\n", "+      \"src\": \"https://evil.example/a.png\"\n"},
+		},
+		{
+			name:     "icon added",
+			pinned:   pinnedIcons,
+			current:  icons(`[{"src":"https://good.example/a.png","mimeType":"image/png"},{"src":"https://evil.example/b.png"}]`),
+			wantDiff: []string{"+      \"src\": \"https://evil.example/b.png\"\n"},
+		},
+		{
+			name:    "icon keys in another order",
+			pinned:  pinnedIcons,
+			current: icons(`[{"mimeType":"image/png","src":"https://good.example/a.png"}]`),
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			base := compareTools()
+			stored := mustSnapshot(t, withTool(t, base, "read_file", tt.pinned))
+			current := withTool(t, base, "read_file", tt.current)
+			got := Compare(stored, current)
+			if len(tt.wantDiff) == 0 {
+				if len(got) != 0 {
+					t.Fatalf("Compare() = %+v, want no change", got)
+				}
+				return
+			}
+			if len(got) != 1 {
+				t.Fatalf("Compare() = %+v, want one change", got)
+			}
+			c := got[0]
+			if c.Kind != KindChanged || c.Tool != "read_file" || c.Severity != "high" {
+				t.Fatalf("Compare()[0] = %+v, want a high changed read_file", c)
+			}
+			if c.DiffIsNote() {
+				t.Errorf("Diff = the fixed note %q, want a real diff", c.Diff)
+			}
+			for _, want := range tt.wantDiff {
+				if !strings.Contains(c.Diff, want) {
+					t.Errorf("Diff lacks %q:\n%s", want, c.Diff)
+				}
+			}
+		})
 	}
 }
 
@@ -1041,6 +1132,71 @@ func TestReasonOf(t *testing.T) {
 	} {
 		if got := ReasonOf(tt.err); got != tt.want {
 			t.Errorf("ReasonOf(%v) = %q, want %q", tt.err, got, tt.want)
+		}
+	}
+}
+
+// TestChangeKindRiskRemediation checks the fixed texts of every kind: they are
+// not empty, are valid UTF-8, hold no control character (so no ESC) and, for a
+// known kind, differ from the generic text of an unknown kind. The last check
+// catches a known kind that falls through to the generic text.
+func TestChangeKindRiskRemediation(t *testing.T) {
+	t.Parallel()
+	unknown := ChangeKind("no-such-kind")
+	tests := []struct {
+		name  string
+		kind  ChangeKind
+		known bool
+	}{
+		{name: "changed", kind: KindChanged, known: true},
+		{name: "new", kind: KindNew, known: true},
+		{name: "removed", kind: KindRemoved, known: true},
+		{name: "unverified", kind: KindUnverified, known: true},
+		{name: "unknown", kind: unknown},
+		{name: "empty kind", kind: ChangeKind("")},
+	}
+	texts := []struct {
+		name string
+		get  func(ChangeKind) string
+	}{
+		{name: "Risk", get: ChangeKind.Risk},
+		{name: "Remediation", get: ChangeKind.Remediation},
+	}
+	for _, tt := range tests {
+		for _, text := range texts {
+			t.Run(tt.name+"/"+text.name, func(t *testing.T) {
+				t.Parallel()
+				got := text.get(tt.kind)
+				if got == "" {
+					t.Fatalf("%s() of %q is empty", text.name, tt.kind)
+				}
+				if !utf8.ValidString(got) {
+					t.Errorf("%s() of %q is not valid UTF-8: %q", text.name, tt.kind, got)
+				}
+				for _, r := range got {
+					if unicode.IsControl(r) {
+						t.Errorf("%s() of %q holds control character %U: %q", text.name, tt.kind, r, got)
+					}
+				}
+				generic := text.get(unknown)
+				if tt.known && got == generic {
+					t.Errorf("%s() of %q = the generic text of an unknown kind: %q", text.name, tt.kind, got)
+				}
+				if !tt.known && got != generic {
+					t.Errorf("%s() of %q = %q, want the generic text %q", text.name, tt.kind, got, generic)
+				}
+			})
+		}
+	}
+	// The four known kinds must also differ from each other.
+	for _, text := range texts {
+		seen := map[string]ChangeKind{}
+		for _, k := range []ChangeKind{KindChanged, KindNew, KindRemoved, KindUnverified} {
+			s := text.get(k)
+			if prev, dup := seen[s]; dup {
+				t.Errorf("%s() of %q and %q are the same text: %q", text.name, prev, k, s)
+			}
+			seen[s] = k
 		}
 	}
 }

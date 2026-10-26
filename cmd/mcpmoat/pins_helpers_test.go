@@ -3,7 +3,10 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -52,6 +55,15 @@ func newPinEnv(t *testing.T, servers map[string]any) *pinEnv {
 // pinsPath is the path of pins.json: XDG_CONFIG_HOME/mcpmoat/pins.json.
 func (e *pinEnv) pinsPath() string {
 	return filepath.Join(e.xdg, "mcpmoat", "pins.json")
+}
+
+// assertNoPinsFile fails the test if pins.json exists. after names the run,
+// for example "a snapshot failure".
+func (e *pinEnv) assertNoPinsFile(t *testing.T, after string) {
+	t.Helper()
+	if _, err := os.Stat(e.pinsPath()); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("pins.json exists after %s (stat error = %v), want nothing stored", after, err)
+	}
 }
 
 // readOnlyPinsDir makes the folder of pins.json read-only, so that a save
@@ -171,6 +183,19 @@ func mkTool(name, description string) inspect.Tool {
 	}
 }
 
+// metaTool returns a tool like mkTool(name, "Add.") with the raw JSON _meta and
+// icons given. An empty string means the field is not set.
+func metaTool(name, meta, icons string) inspect.Tool {
+	t := mkTool(name, "Add.")
+	if meta != "" {
+		t.Meta = json.RawMessage(meta)
+	}
+	if icons != "" {
+		t.Icons = json.RawMessage(icons)
+	}
+	return t
+}
+
 // fakeServers returns a fake inspector that gives each server name its tools.
 func fakeServers(tools map[string][]inspect.Tool) *inspecttest.Fake {
 	f := &inspecttest.Fake{Results: map[string]inspect.Result{}}
@@ -178,6 +203,12 @@ func fakeServers(tools map[string][]inspect.Tool) *inspecttest.Fake {
 		f.Results[name] = inspect.Result{ServerName: name, Tools: ts}
 	}
 	return f
+}
+
+// failingFake returns a fake inspector that fails for the server with the
+// fixed error "boom", so a test can check the exact warning text.
+func failingFake(server string) *inspecttest.Fake {
+	return &inspecttest.Fake{Errors: map[string]error{server: errors.New("boom")}}
 }
 
 // oneServer returns the server map of a config with one stdio server.
@@ -194,18 +225,22 @@ func (blockingInspector) Inspect(ctx context.Context, _ discover.Server) (inspec
 	return inspect.Result{}, ctx.Err()
 }
 
-// pinFindingRow is one parsed row of the findings table.
-type pinFindingRow struct {
-	rule, severity, server, field, tool string
+// pinFinding is one finding of a pin rule in the FINDINGS block: the rule, the
+// severity of its group, the server name, and the text of its "Tool:" line or
+// its "Reason:" line. A pin rule about a tool has a "Tool:" line with the tool
+// name, then its reason in parentheses and quotes when it has one. A rule about
+// a whole server has a "Reason:" line with the reason alone, and no "Tool:"
+// line. A finding has one of the two lines, so one of tool and reason is empty.
+type pinFinding struct {
+	rule, severity, server, tool, reason string
 }
 
-// pinOutput is the stdout of a scan, split in its parts.
+// pinOutput is the stdout of a scan, split for the pin tests.
 type pinOutput struct {
-	// rows are the rows of the findings table.
-	rows []pinFindingRow
-	// findingsText is the text of the findings table.
-	findingsText string
-	// diffs is the text after the findings table, without the accept hints.
+	// rows are the pin findings, in the printed order: by severity, then by
+	// tool name.
+	rows []pinFinding
+	// diffs is the text after the FINDINGS block, without the accept hints.
 	diffs string
 	// hints are the "To accept ..." lines at the end of stdout, in order, each
 	// without its newline.
@@ -254,40 +289,68 @@ func hintDigest(t *testing.T, stdout, server string) string {
 	return ""
 }
 
-// splitPinOutput splits the stdout of a scan into the findings rows and the
-// diff text. The server table comes first, then a blank line, then the
-// findings table, and then one block for each diff, which starts with a blank
-// line. The tool names of the tests hold no space, so word 4 of a row is the
-// tool name.
+// splitPinOutput splits the plain stdout of a scan for the pin tests. It cuts
+// the "To accept" lines off the end, checks that the summary and the findings
+// agree (assertReportConsistent), and that a pin rule row has no title and no
+// "Where:" line: the rule has no fixed title, and the tool is on the "Tool:"
+// line. The diffs are the text after the FINDINGS block.
 func splitPinOutput(t *testing.T, stdout string) pinOutput {
 	t.Helper()
-	stdout, hints := cutAcceptHints(stdout)
-	_, after, found := splitScanOutput(stdout)
-	if !found {
-		return pinOutput{hints: hints}
-	}
-	findings, diffs, _ := strings.Cut(after, "\n\n")
-	lines := strings.Split(strings.TrimSuffix(findings, "\n"), "\n")
-	if !slices.Equal(strings.Fields(lines[0]), findingsHeader) {
-		t.Fatalf("the text after the server table does not start with the findings header:\n%s", stdout)
-	}
-	out := pinOutput{findingsText: findings, diffs: diffs, hints: hints}
-	for _, line := range lines[1:] {
-		w := strings.Fields(line)
-		if len(w) < 5 {
-			t.Fatalf("findings row %q has fewer than 5 words:\n%s", line, stdout)
+	body, hints := cutAcceptHints(stdout)
+	assertReportConsistent(t, body)
+	out := pinOutput{diffs: splitScanSections(body).Rest, hints: hints}
+	for _, f := range parseFindings(t, body) {
+		if f.Title != "" || f.Where != "" {
+			t.Errorf("pin finding %s has the title %q and the Where line %q, want neither", f.RuleID, f.Title, f.Where)
 		}
-		out.rows = append(out.rows, pinFindingRow{rule: w[0], severity: w[1], server: w[2], field: w[3], tool: w[4]})
+		out.rows = append(out.rows, pinFinding{f.RuleID, f.Severity, f.Name, f.Tool, f.Reason})
 	}
 	return out
 }
 
+// assertPinRows fails the test unless the pin findings of stdout are exactly
+// want, in the printed order.
+func assertPinRows(t *testing.T, stdout string, want ...pinFinding) {
+	t.Helper()
+	if rows := splitPinOutput(t, stdout).rows; !slices.Equal(rows, want) {
+		t.Errorf("pin rows = %+v, want %+v\nstdout:\n%s", rows, want, stdout)
+	}
+}
+
+// summaryRowOf returns the SUMMARY row of the server with the given name. It
+// fails the test when stdout has no such row.
+func summaryRowOf(t *testing.T, stdout, name string) summaryRow {
+	t.Helper()
+	for _, row := range summaryRows(t, stdout) {
+		if row.Name == name {
+			return row
+		}
+	}
+	t.Fatalf("the SUMMARY has no row for the server %q:\n%s", name, stdout)
+	return summaryRow{}
+}
+
+// assertSummaryStatus checks that the SUMMARY of stdout shows the server with
+// the given status and reason, and that stderr holds no warning line: scan
+// prints the problems of a server in the SUMMARY, and "pin" prints them on
+// stderr. reason is the exact text in the parentheses ("" for none).
+func assertSummaryStatus(t *testing.T, r pinRunResult, name, status, reason string) {
+	t.Helper()
+	row := summaryRowOf(t, r.stdout, name)
+	if row.Status != status || row.Reason != reason {
+		t.Errorf("SUMMARY row of %q = status %q, reason %q; want status %q, reason %q\nstdout:\n%s", name, row.Status, row.Reason, status, reason, r.stdout)
+	}
+	if strings.Contains(r.stderr, "warning: server") {
+		t.Errorf("stderr has a server warning, want it in the SUMMARY only:\n%s", r.stderr)
+	}
+}
+
 // assertScanRun checks the exit code, stdout and stderr of a scan run against
-// want, like assertScanResult, with one difference: a stderr line may be a
-// warning, because a server that was not inspected is a warning and not an
-// error. Every stderr line still starts with "mcpmoat scan: ". An exit code 0
-// with no wanted stderr text must print nothing on stderr. No canary value
-// leaks and no raw escape byte shows.
+// want, like assertScanResult. Every stderr line starts with "mcpmoat scan: ".
+// A server that was not inspected, and the warnings of an inspection, show in
+// the SUMMARY block on stdout and not on stderr. An exit code 0 with no wanted
+// stderr text must print nothing on stderr. No canary value leaks and no raw
+// escape byte shows.
 func assertScanRun(t *testing.T, r pinRunResult, want scanWant) {
 	t.Helper()
 	assertRun(t, scanPrefix, r, want)
@@ -410,6 +473,36 @@ func breakPinHashVersion(t *testing.T, e *pinEnv) {
 		t.Fatalf("pins.json has no sha256-v1 hash to change:\n%s", data)
 	}
 	if err := os.WriteFile(e.pinsPath(), changed, 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// setPinCanonical sets the canonical text of the pinned tool in pins.json of
+// e, with the matching hash, so the store still loads it. The hash is built
+// like the unexported hashCanonical in internal/pins: HashVersion, a colon,
+// and the lowercase hex SHA-256 of the canonical text. If that format
+// changes, the store refuses the pin and the test fails.
+func setPinCanonical(t *testing.T, e *pinEnv, tool, canonical string) {
+	t.Helper()
+	var doc map[string]any
+	if err := json.Unmarshal(readFileBytes(t, e.pinsPath()), &doc); err != nil {
+		t.Fatal(err)
+	}
+	servers, _ := doc["servers"].([]any)
+	if len(servers) != 1 {
+		t.Fatalf("pins.json has %d servers, want 1", len(servers))
+	}
+	tools, _ := servers[0].(map[string]any)["tools"].(map[string]any)
+	if _, ok := tools[tool]; !ok {
+		t.Fatalf("pins.json has no tool %q", tool)
+	}
+	sum := sha256.Sum256([]byte(canonical))
+	tools[tool] = map[string]any{"hash": pins.HashVersion + ":" + hex.EncodeToString(sum[:]), "canonical": canonical}
+	data, err := json.Marshal(doc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(e.pinsPath(), data, 0o600); err != nil {
 		t.Fatal(err)
 	}
 }

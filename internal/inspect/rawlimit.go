@@ -18,8 +18,10 @@ import (
 //
 // The page cap and the item cap of listAll bound the number of requests and
 // items, not the bytes: each page can be one very large frame, and the SDK
-// keeps the fields that mcpmoat drops (_meta, icons) in its decoded page. So
-// rawLimit measures each result before listAll converts it.
+// keeps the fields that mcpmoat drops in its decoded page (_meta and icons of
+// prompts, resources and resource templates). Tools keep _meta and icons, and
+// they count toward the limit like all other bytes. So rawLimit measures each result before
+// listAll converts it.
 //
 // It counts JSON bytes, not memory. Decoded JSON can need many times its
 // size in memory: a page of many small empty objects needs about 20 times
@@ -124,7 +126,7 @@ func (r *rawLimit) spend(res mcp.Result) error {
 }
 
 // jsonSize returns the size of v as JSON, with HTML escaping off, the same
-// as marshalSchema. So "<", ">" and "&" in plain strings count one byte
+// as marshalJSON. So "<", ">" and "&" in plain strings count one byte
 // each, as a server sends them, not six. A field type with its own
 // MarshalJSON that calls json.Marshal (for example the tool annotations of
 // the SDK) still gets HTML escapes, so it can count a little more than the

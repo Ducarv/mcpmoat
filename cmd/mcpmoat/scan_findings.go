@@ -23,21 +23,28 @@ type configChecks struct {
 // config file, not at what a shell would run. Disabled servers are checked
 // too, because a user can turn a disabled server on later.
 //
-// The severity of a row comes from the rule set. A finding whose rule is not
-// in the set gets severity "critical": an unknown rule must never pass
-// silently. A row holds only names (rule ID, server, field, key, related). It
-// never holds a Finding.Message or a config value.
+// The severity, the title, the risk and the remediation of a row come from the
+// rule set. A finding whose rule is not in the set gets severity "critical"
+// (an unknown rule must never pass silently) and empty texts. The report
+// leaves out an empty title and prints "-" for an empty risk or remediation.
+// A row holds the names of the server and the rule text from the built-in rule
+// set (rule ID, field, key, related). It never holds a Finding.Message or a
+// config value.
 //
-// The second result counts the findings that the ignore list dropped, by rule
-// ID. It is nil when the list dropped nothing. The caller must tell the user
+// ignored counts the findings that the ignore list dropped, by rule ID. It is
+// nil when the list dropped nothing. The caller must tell the user
 // about these findings, because an ignore file can come from an untrusted
 // folder and hide a finding. The map holds only rule IDs and counts.
 //
+// perServer holds, for each server, the number of rows that the server got.
+// The index is the index in servers, so two servers with the same name are
+// counted apart.
+//
 // A nil ignore list ignores nothing.
-func (cc configChecks) findings(ignore *rules.IgnoreList, servers []discover.Server) ([]report.FindingRow, map[string]int) {
-	var rows []report.FindingRow
-	var ignored map[string]int
-	for _, s := range servers {
+func (cc configChecks) findings(ignore *rules.IgnoreList, servers []discover.Server) (rows []report.FindingRow, ignored map[string]int, perServer []int) {
+	perServer = make([]int, len(servers))
+	for i, s := range servers {
+		ref := report.NewServerRef(s)
 		found := rules.CheckConfig(s)
 		found = append(found, cc.typo.Check(s)...)
 		for _, f := range found {
@@ -46,41 +53,64 @@ func (cc configChecks) findings(ignore *rules.IgnoreList, servers []discover.Ser
 				ignored = addIgnored(ignored, f.RuleID, 1)
 				continue
 			}
+			rule, severity := findingRule(cc.set, f.RuleID)
 			rows = append(rows, report.FindingRow{
-				RuleID:   f.RuleID,
-				Severity: findingSeverity(cc.set, f.RuleID),
-				Server:   f.Server,
-				Field:    f.Field,
-				Key:      f.Key,
-				Related:  f.Related,
+				ServerRef:   ref,
+				RuleID:      f.RuleID,
+				Severity:    severity,
+				Title:       rule.Title,
+				Risk:        rule.Risk,
+				Remediation: rule.Remediation,
+				Field:       f.Field,
+				Key:         f.Key,
+				Related:     f.Related,
 			})
+			perServer[i]++
 		}
 	}
-	return rows, ignored
+	return rows, ignored, perServer
 }
 
-// findingSeverity returns the severity word of the rule with the given ID. It
-// returns "critical" when the set has no such rule (fail closed).
-func findingSeverity(set *rules.Set, id string) string {
+// findingRule returns the rule with the given ID and its severity word. When
+// the set has no such rule, it returns a zero Rule, so the texts are empty,
+// and "critical" (fail closed).
+func findingRule(set *rules.Set, id string) (rules.Rule, string) {
 	rule, ok := set.Get(id)
 	if !ok {
-		return string(rules.SeverityCritical)
+		return rules.Rule{}, string(rules.SeverityCritical)
 	}
-	return string(rule.Severity)
+	return rule, string(rule.Severity)
 }
 
-// hasFailingFinding reports whether any row has severity high or above, which
-// makes scan exit with code 1 (FR-16). A severity that mcpmoat does not know
-// counts as failing (fail closed).
-func hasFailingFinding(rows []report.FindingRow) bool {
-	high := rules.SeverityHigh.Rank()
+// hasFailingFinding reports whether any row has severity failOn or above,
+// which makes scan exit with code 1 (FR-16). A row severity that mcpmoat does
+// not know counts as failing at every threshold (fail closed). An invalid or
+// zero failOn has rank 0, so every finding fails (fail closed). runScan always
+// sets a valid failOn, so this case does not occur in a normal run.
+func hasFailingFinding(rows []report.FindingRow, failOn rules.Severity) bool {
+	limit := failOn.Rank()
 	for _, r := range rows {
 		rank := rules.Severity(r.Severity).Rank()
-		if rank == 0 || rank >= high {
+		if rank == 0 || rank >= limit {
 			return true
 		}
 	}
 	return false
+}
+
+// scanExitCode maps the result of a scan to its exit code (FR-16). execFailed
+// is true when the scan is incomplete (see reportScan). Exit code 2 wins over
+// 1: the result is incomplete, so "only findings" would claim more than scan
+// knows.
+func scanExitCode(execFailed bool, rows []report.FindingRow, failOn rules.Severity) int {
+	switch {
+	case execFailed:
+		return exitError
+	case hasFailingFinding(rows, failOn):
+		return exitFindings
+	default:
+		return exitOK
+	}
 }
 
 // addIgnored adds n to the count of the rule ID in dst and returns dst. It makes

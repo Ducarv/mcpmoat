@@ -26,6 +26,7 @@ import (
 	"github.com/Ducarv/mcpmoat/internal/discover/discovertest"
 	"github.com/Ducarv/mcpmoat/internal/inspect/inspecttest"
 	"github.com/Ducarv/mcpmoat/internal/pins"
+	"github.com/Ducarv/mcpmoat/internal/report"
 	"github.com/Ducarv/mcpmoat/internal/rules"
 )
 
@@ -95,11 +96,17 @@ func binaryPath(t *testing.T) string {
 // never read or write the real home directory or the real pins.json.
 func runBin(t *testing.T, home, dir string, args ...string) (stdout, stderr string, code int) {
 	t.Helper()
+	return runBinEnv(t, home, dir, nil, args...)
+}
+
+// runBinEnv is runBin with extra "KEY=value" entries in the child environment.
+func runBinEnv(t *testing.T, home, dir string, extraEnv []string, args ...string) (stdout, stderr string, code int) {
+	t.Helper()
 	bin := binaryPath(t)
 
 	cmd := exec.Command(bin, args...) //nolint:gosec // G204: the test runs the binary it just built
 	cmd.Dir = dir
-	cmd.Env = []string{"HOME=" + home, "XDG_CONFIG_HOME=" + filepath.Join(home, ".config"), "PATH=/usr/bin:/bin"}
+	cmd.Env = append([]string{"HOME=" + home, "XDG_CONFIG_HOME=" + filepath.Join(home, ".config"), "PATH=/usr/bin:/bin"}, extraEnv...)
 	var outBuf, errBuf bytes.Buffer
 	cmd.Stdout = &outBuf
 	cmd.Stderr = &errBuf
@@ -565,7 +572,7 @@ func TestE2EScanConfigFindings(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			home, work := discovertest.CopyFixture(t, filepath.Join("..", "..", "testdata", "configs", "dangerous"))
+			home, work := discovertest.CopyFixture(t, testdataPath("configs", "dangerous"))
 
 			stdout, stderr, code := runBin(t, home, work, tt.args...)
 
@@ -594,6 +601,138 @@ func TestE2EScanConfigFindings(t *testing.T) {
 				if slices.Contains(findingIDs(rows), id) {
 					t.Errorf("finding %s shows, but it is ignored\nstdout:\n%s", id, stdout)
 				}
+			}
+		})
+	}
+}
+
+// TestE2EScanReport scans the dangerous config fixture, which has findings in
+// the high, medium and low severities. The child's stdout is a pipe, so it is
+// not a terminal and the report has no colour, with or without NO_COLOR and
+// --no-color.
+func TestE2EScanReport(t *testing.T) {
+	t.Parallel()
+	severityRank := map[string]int{"critical": 0, "high": 1, "medium": 2, "low": 3}
+
+	tests := []struct {
+		name string
+		env  []string
+		args []string
+	}{
+		{name: "piped", args: []string{"scan", "--no-connect"}},
+		{name: "NO_COLOR", env: []string{"NO_COLOR=1"}, args: []string{"scan", "--no-connect"}},
+		{name: "no-color after scan", args: []string{"scan", "--no-color", "--no-connect"}},
+		{name: "no-color before scan", args: []string{"--no-color", "scan", "--no-connect"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			home, work := discovertest.CopyFixture(t, filepath.Join("..", "..", "testdata", "configs", "dangerous"))
+
+			stdout, stderr, code := runBinEnv(t, home, work, tt.env, tt.args...)
+
+			assertScanResult(t, code, stdout, stderr, scanWant{code: exitFindings})
+			assertCleanStderr(t, stderr)
+			if strings.Contains(stdout, "\x1b") {
+				t.Errorf("stdout has an escape byte, want plain text\nstdout:\n%q", stdout)
+			}
+
+			// SUMMARY: every server, none inspected, counts add up.
+			servers := column(tableRows(t, stdout), 0)
+			summary := summaryRows(t, stdout)
+			var names []string
+			total := 0
+			for _, row := range summary {
+				names = append(names, row.Name)
+				total += row.Findings
+				if row.Status != "not inspected" {
+					t.Errorf("server %s: status = %q, want %q", row.Name, row.Status, "not inspected")
+				}
+			}
+			if !slices.Equal(names, servers) {
+				t.Errorf("summary servers = %v, want table servers %v", names, servers)
+			}
+
+			// FINDINGS: severity order, and the text of the built-in rules.
+			findings := parseFindings(t, stdout)
+			if total != len(findings) || total == 0 {
+				t.Errorf("summary counts add up to %d, FINDINGS block has %d findings (want equal and above 0)", total, len(findings))
+			}
+			seen := map[string]bool{}
+			for i, f := range findings {
+				seen[f.Severity] = true
+				if i > 0 && severityRank[f.Severity] < severityRank[findings[i-1].Severity] {
+					t.Errorf("finding %d (%s) has severity %s after %s", i, f.RuleID, f.Severity, findings[i-1].Severity)
+				}
+				for field, text := range map[string]string{"Server": f.Server, "Risk": f.Risk, "Fix": f.Fix} {
+					if text == "" || text == "-" {
+						t.Errorf("finding %d (%s): %s = %q, want the rule text", i, f.RuleID, field, text)
+					}
+				}
+			}
+			if len(seen) < 2 {
+				t.Errorf("findings have severities %v, want at least two\nstdout:\n%s", slices.Sorted(maps.Keys(seen)), stdout)
+			}
+		})
+	}
+}
+
+// TestE2EScanJSON runs scan --json with the real binary. Stdout is one JSON
+// document, and --json changes neither stderr nor the exit code.
+func TestE2EScanJSON(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name         string
+		setup        func(t *testing.T) (home, work string)
+		wantCode     int
+		wantFindings bool
+	}{
+		{
+			name: "dangerous",
+			setup: func(t *testing.T) (string, string) {
+				return discovertest.CopyFixture(t, testdataPath("configs", "dangerous"))
+			},
+			wantCode:     exitFindings,
+			wantFindings: true,
+		},
+		{
+			name:     "benign",
+			setup:    func(t *testing.T) (string, string) { return benignHome(t, "benign-srv") },
+			wantCode: exitOK,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			home, work := tt.setup(t)
+
+			plainOut, plainErr, plainCode := runBin(t, home, work, "scan", "--no-connect")
+			stdout, stderr, code := runBin(t, home, work, "scan", "--no-connect", "--json")
+
+			if code != tt.wantCode || plainCode != tt.wantCode {
+				t.Errorf("exit codes: --json %d, plain %d, want %d\nstderr:\n%s", code, plainCode, tt.wantCode, stderr)
+			}
+			if stderr != plainErr {
+				t.Errorf("stderr with --json = %q, without = %q", stderr, plainErr)
+			}
+			assertContainsNone(t, "stdout", stdout, dangerousCanaries)
+			assertContainsNone(t, "stderr", stderr, dangerousCanaries)
+			assertContainsNone(t, "stdout", stdout, []string{pinEnvCanary})
+			if plainOut == stdout {
+				t.Errorf("--json stdout equals the table output:\n%s", stdout)
+			}
+
+			// decodeScanJSON checks: one document, schema_version, and the
+			// schema, which also rejects a null list.
+			doc := decodeScanJSON(t, stdout)
+			if doc.Mode != report.ModeNoConnect {
+				t.Errorf("mode = %q, want %q", doc.Mode, report.ModeNoConnect)
+			}
+			if len(doc.Servers) == 0 {
+				t.Error("servers is empty, want the servers of the fixture")
+			}
+			if (len(doc.Findings) > 0) != tt.wantFindings {
+				t.Errorf("got %d findings, want findings: %v", len(doc.Findings), tt.wantFindings)
 			}
 		})
 	}
@@ -1193,11 +1332,11 @@ func TestE2ERugPull(t *testing.T) {
 	// Step 3: the second scan finds the change. It exits with code 1 (findings).
 	stdout, stderr, code = runBin(t, home, work, "scan")
 	assertScanResult(t, code, stdout, stderr, scanWant{code: exitFindings})
-	// splitPinOutput cuts the findings table from the diff, so its rows hold
-	// only the findings. The only row is get_time: the tool add has no row.
+	// splitPinOutput cuts the findings from the diff, so its rows hold only the
+	// findings. The only row is get_time: the tool add has no row.
 	out := splitPinOutput(t, stdout)
-	wantRow := pinFindingRow{"MOAT-T2-001", "high", server, "tool", "get_time"}
-	if !slices.Equal(out.rows, []pinFindingRow{wantRow}) {
+	wantRow := pinFinding{rule: "MOAT-T2-001", severity: "high", server: server, tool: "get_time"}
+	if !slices.Equal(out.rows, []pinFinding{wantRow}) {
 		t.Errorf("findings rows = %+v, want one row %+v\nstdout:\n%s", out.rows, wantRow, stdout)
 	}
 	// The diff has one block, for get_time only.
@@ -1255,4 +1394,118 @@ func TestE2ERugPull(t *testing.T) {
 	stdout, stderr, code = runBin(t, home, work, "scan")
 	assertScanResult(t, code, stdout, stderr, scanWant{code: exitOK, noStdout: []string{"MOAT-T2", acceptHintPrefix}})
 	assertServerNames(t, stdout)
+}
+
+// TestE2EScanFailOn checks the exit codes of --fail-on and --ignore in the
+// real binary, on the CI example repo of testdata/ci. It also checks that
+// docs/ci.md shows the same command, so the doc and the test do not drift
+// apart.
+func TestE2EScanFailOn(t *testing.T) {
+	t.Parallel()
+	const command = "mcpmoat scan --no-connect --config .mcp.json"
+
+	t.Run("docs/ci.md shows the command", func(t *testing.T) {
+		t.Parallel()
+		doc, err := os.ReadFile(repoPath("docs", "ci.md"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !strings.Contains(string(doc), command) {
+			t.Errorf("docs/ci.md does not contain %q", command)
+		}
+	})
+
+	// runCI runs command with extra args in a copy of the CI example repo, and
+	// checks that scan writes no pins file.
+	runCI := func(t *testing.T, extra ...string) (stdout, stderr string, code int) {
+		t.Helper()
+		home, work := t.TempDir(), t.TempDir()
+		if err := os.CopyFS(work, os.DirFS(testdataPath("ci", "repo"))); err != nil {
+			t.Fatal(err)
+		}
+		args := append(strings.Fields(command)[1:], extra...)
+		stdout, stderr, code = runBin(t, home, work, args...)
+		assertNoPinsFile(t, home)
+		return stdout, stderr, code
+	}
+
+	t.Run("bogus", func(t *testing.T) {
+		t.Parallel()
+
+		stdout, stderr, code := runCI(t, "--fail-on", "bogus")
+
+		// A usage error ends with the usage hint, which has no
+		// "mcpmoat scan: " prefix, so assertScanResult does not fit.
+		if code != exitError {
+			t.Errorf("exit code = %d, want %d\nstdout:\n%s\nstderr:\n%s", code, exitError, stdout, stderr)
+		}
+		assertContainsAll(t, "stderr", stderr, []string{"mcpmoat scan: ", "-fail-on", usageHint})
+		assertEmptyStdout(t, stdout)
+	})
+
+	// The ignored finding is never silent: stderr counts it, by rule ID.
+	ignoredLine := "MOAT-T4-001 (1)"
+
+	// This table holds the expected exit code of the CI example for each
+	// --fail-on value, with and without --ignore MOAT-T4-001.
+	tests := []struct {
+		name       string
+		args       []string
+		wantIDs    []string // sorted rule IDs of the findings table
+		wantStderr []string
+		// wantDefault is the exit code with no --fail-on flag.
+		wantDefault int
+		// wantCode is the exit code for --fail-on low, medium, high and
+		// critical.
+		wantCode perLevel[int]
+	}{
+		{
+			name:        "no ignore",
+			wantIDs:     []string{"MOAT-T4-001", "MOAT-T4-003", "MOAT-T4-004"},
+			wantDefault: exitFindings,
+			wantCode:    perLevel[int]{exitFindings, exitFindings, exitFindings, exitOK},
+		},
+		{
+			name:        "--ignore MOAT-T4-001",
+			args:        []string{"--ignore", "MOAT-T4-001"},
+			wantIDs:     []string{"MOAT-T4-003", "MOAT-T4-004"},
+			wantStderr:  []string{ignoredLine},
+			wantDefault: exitOK,
+			wantCode:    perLevel[int]{exitFindings, exitFindings, exitOK, exitOK},
+		},
+	}
+	// The empty level is the run with no --fail-on flag. The other runs add
+	// --fail-on <level>.
+	levels := append([]rules.Severity{""}, failOnLevels...)
+	for _, tt := range tests {
+		for _, level := range levels {
+			name := "default"
+			if level != "" {
+				name = "fail-on " + string(level)
+			}
+			t.Run(tt.name+"/"+name, func(t *testing.T) {
+				t.Parallel()
+				args := slices.Clone(tt.args)
+				wantCode := tt.wantDefault
+				wantStderr := slices.Clone(tt.wantStderr)
+				if level != "" {
+					args = append(args, "--fail-on", string(level))
+					wantCode = tt.wantCode.at(t, level)
+				}
+				if level == rules.SeverityCritical {
+					wantStderr = append(wantStderr, failOnCriticalNotice+"\n")
+				}
+
+				stdout, stderr, code := runCI(t, args...)
+
+				assertScanResult(t, code, stdout, stderr, scanWant{code: wantCode, stderr: wantStderr})
+				names := column(tableRows(t, stdout), 0)
+				slices.Sort(names)
+				if !slices.Equal(names, []string{"files", "notes", "remote"}) {
+					t.Errorf("server names = %v, want files, notes and remote\nstdout:\n%s", names, stdout)
+				}
+				assertFindingIDs(t, stdout, tt.wantIDs)
+			})
+		}
+	}
 }

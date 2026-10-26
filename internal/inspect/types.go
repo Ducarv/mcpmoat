@@ -45,6 +45,20 @@ type Tool struct {
 	// rule input (PRD FR-11), so a server that flips a hint after approval
 	// changes the pin.
 	Annotations *ToolAnnotations
+
+	// Meta is the _meta object of the tool, as raw JSON. The SDK decodes it,
+	// so this is the server's JSON encoded again, with the same notes as
+	// InputSchema: key order can differ, and numbers pass through float64. It
+	// is nil when the server sends none or an empty object. It is untrusted
+	// server text.
+	Meta json.RawMessage
+
+	// Icons is the icons array of the tool, as raw JSON. The SDK decodes it
+	// into typed icon structs, so this is the SDK's JSON encoded again, with
+	// the same notes as InputSchema. A key inside an icon that the SDK does
+	// not know is dropped. It is nil when the server sends none or an empty
+	// array. It is untrusted server text.
+	Icons json.RawMessage
 }
 
 // ToolAnnotations are the hints that a server gives about the behaviour of a

@@ -236,6 +236,12 @@
 // the pin hash and of the rule input (PRD FR-11), so a server that flips a
 // hint changes the pin.
 //
+// Each tool also keeps its _meta object and its icons array as raw JSON, with
+// the notes in Tool.Meta and Tool.Icons. Both fields are part of the pin hash.
+// Prompts, resources and resource templates still drop their _meta and
+// icons. The wire limits (jsonshape.go: depth, value count and string size)
+// and the 8 MiB raw limit cover these fields like all others.
+//
 // mcpmoat always sends all four list requests, also for a capability that the
 // server did not declare in the handshake (listAll). A hostile server can
 // leave a capability out of the handshake and still answer the list request
@@ -280,6 +286,12 @@
 //
 // The text of a [ConnectError] can still hold text that the server controls
 // (see "Untrusted data" below).
+//
+// scan prints the failure reason of a server in the SUMMARY on stdout, and pin
+// prints it on stderr. So the known gap in the scrubbing (an expanded value
+// shorter than 8 bytes is not removed, see "Known limits") applies to stdout
+// too: a hostile server can echo such a value in its error text, and scan then
+// prints it.
 //
 // Plain http:// has no encryption, so anyone on the network path can read
 // the secrets. When Remote sends config headers, URL user info or secrets in
@@ -472,10 +484,14 @@
 //     bool. For these two hints, an absent hint and false look the same, so
 //     ToolAnnotations has nil for both. False is the spec default, so a flip
 //     to true is always visible.
-//   - No CLI flag sets AllowUntrusted or AllowDisabled yet. scan and pin
-//     print the warnings (Result.Warnings and ConnectError.Warnings) on
-//     stderr, one line each.
-//   - The tool schemas are decoded and encoded again (see Tool.InputSchema).
+//   - No CLI flag sets AllowUntrusted or AllowDisabled yet. pin prints the
+//     warnings (Result.Warnings and ConnectError.Warnings) on stderr, one
+//     line each. scan prints them in the SUMMARY on stdout.
+//   - The tool schemas, _meta and icons are decoded and encoded again (see
+//     Tool.InputSchema). Numbers pass through float64, and the SDK drops an
+//     unknown key inside an icon. The SDK also omits the empty icon fields
+//     (mimeType, sizes and theme), so an empty value and an absent value
+//     hash the same.
 //   - A server can still tell mcpmoat apart from a real client by the
 //     version, the capabilities, the timing and the User-Agent (see Client
 //     identity).

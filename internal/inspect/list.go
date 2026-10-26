@@ -338,13 +338,21 @@ func listTools(ctx context.Context, cs sessionLister, raw *rawLists) ([]Tool, er
 			return page, res.NextCursor, nil
 		},
 		func(t *mcp.Tool) (Tool, error) {
-			in, err := marshalSchema(t.InputSchema)
+			in, err := marshalJSON(t.InputSchema)
 			if err != nil {
 				return Tool{}, fmt.Errorf("input schema: %w", err)
 			}
-			out, err := marshalSchema(t.OutputSchema)
+			out, err := marshalJSON(t.OutputSchema)
 			if err != nil {
 				return Tool{}, fmt.Errorf("output schema: %w", err)
+			}
+			meta, err := marshalNonEmpty(len(t.Meta), t.Meta)
+			if err != nil {
+				return Tool{}, fmt.Errorf("_meta: %w", err)
+			}
+			icons, err := marshalNonEmpty(len(t.Icons), t.Icons)
+			if err != nil {
+				return Tool{}, fmt.Errorf("icons: %w", err)
 			}
 			return Tool{
 				Name:         t.Name,
@@ -353,6 +361,8 @@ func listTools(ctx context.Context, cs sessionLister, raw *rawLists) ([]Tool, er
 				InputSchema:  in,
 				OutputSchema: out,
 				Annotations:  toolAnnotations(t.Annotations),
+				Meta:         meta,
+				Icons:        icons,
 			}, nil
 		})
 }
@@ -554,15 +564,15 @@ func paginate[S, T any](
 	}
 }
 
-// marshalSchema encodes a schema value as raw JSON. The SDK decodes the
-// server's schema into an any, so this encodes it again. It returns nil for a
-// nil value.
+// marshalJSON encodes a value that the SDK decoded (a schema, _meta or icons)
+// as raw JSON. The SDK decodes the server's JSON into Go values, so this
+// encodes it again. It returns nil for a nil value.
 //
 // The encoder does not escape HTML. json.Marshal would write "<", ">" and "&"
 // as \u003c, \u003e and \u0026, and a rule that looks for a payload such as
 // "<IMPORTANT>" in the schema text would miss it. Rules must see the text the
 // server sent.
-func marshalSchema(v any) (json.RawMessage, error) {
+func marshalJSON(v any) (json.RawMessage, error) {
 	if v == nil {
 		return nil, nil
 	}
@@ -572,6 +582,19 @@ func marshalSchema(v any) (json.RawMessage, error) {
 	if err := enc.Encode(v); err != nil {
 		return nil, err
 	}
-	// Encode adds a trailing newline. It is not part of the schema.
+	// Encode adds a trailing newline. It is not part of the value.
 	return json.RawMessage(bytes.TrimSuffix(buf.Bytes(), []byte("\n"))), nil
+}
+
+// marshalNonEmpty encodes v like marshalJSON, but returns nil when n is 0.
+// n is the length of v, which must be a map or a slice.
+//
+// A nil map or slice inside an any is not a nil any, so marshalJSON would
+// encode it as null. This helper skips the empty values: absent or empty gives
+// a nil RawMessage.
+func marshalNonEmpty(n int, v any) (json.RawMessage, error) {
+	if n == 0 {
+		return nil, nil
+	}
+	return marshalJSON(v)
 }

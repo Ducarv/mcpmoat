@@ -24,6 +24,7 @@ import (
 //     depend on timing or on opts.Concurrency. The sort is stable: servers
 //     that are equal in all these fields (they can differ only in Env, Headers
 //     or Untrusted) keep their input order. The input slice is not changed.
+//     Outcome.Index is the index of the server in the input slice.
 //   - Every server gets an Outcome with a non-empty Status. For zero servers,
 //     Run returns a nil slice and a nil error.
 //   - At most opts.Concurrency servers are inspected at the same time. The
@@ -65,9 +66,17 @@ func Run(ctx context.Context, servers []discover.Server, opts Options, insp Insp
 		return nil, nil
 	}
 
-	// Work on a copy: sorting must not change the caller's slice.
-	sorted := slices.Clone(servers)
-	slices.SortStableFunc(sorted, compareServers)
+	// Sort the indexes, not the servers: the caller's slice stays as it is,
+	// and each Outcome can tell which input server it belongs to (see
+	// Outcome.Index). The sort is stable, so servers that compare equal keep
+	// their input order. order[i] is the input index of the server at place i.
+	order := make([]int, len(servers))
+	for i := range order {
+		order[i] = i
+	}
+	slices.SortStableFunc(order, func(a, b int) int {
+		return compareServers(servers[a], servers[b])
+	})
 
 	// Each worker writes only to out[i] for the index i it took from jobs.
 	// Distinct slice elements are distinct memory, so the writes do not race,
@@ -78,22 +87,22 @@ func Run(ctx context.Context, servers []discover.Server, opts Options, insp Insp
 	// A runtime.Goexit inside Inspect ends the worker before the write, and
 	// recover cannot stop a Goexit. The default then stays, so no Outcome is
 	// ever left with an empty Status.
-	out := make([]Outcome, len(sorted))
-	for i := range sorted {
-		out[i] = Outcome{Server: sorted[i], Status: StatusFailed, Err: errNotFinished}
+	out := make([]Outcome, len(order))
+	for i, idx := range order {
+		out[i] = Outcome{Server: servers[idx], Status: StatusFailed, Err: errNotFinished}
 	}
 
 	// This is a worker pool. The jobs channel is buffered for every index, so
 	// we can fill it and close it before the workers start. Each worker takes
 	// indexes until the channel is empty. The number of workers is the limit
 	// on concurrent inspections.
-	jobs := make(chan int, len(sorted))
-	for i := range sorted {
+	jobs := make(chan int, len(order))
+	for i := range order {
 		jobs <- i
 	}
 	close(jobs)
 
-	workers := min(opts.Concurrency, len(sorted))
+	workers := min(opts.Concurrency, len(order))
 	var wg sync.WaitGroup
 	for range workers {
 		wg.Go(func() {
@@ -102,17 +111,23 @@ func Run(ctx context.Context, servers []discover.Server, opts Options, insp Insp
 				// out[i] is filled, but no new server starts.
 				if err := ctx.Err(); err != nil {
 					out[i] = Outcome{
-						Server: sorted[i],
+						Server: servers[order[i]],
 						Status: StatusFailed,
 						Err:    fmt.Errorf("inspect: not started: %w", err),
 					}
 					continue
 				}
-				out[i] = runOne(ctx, sorted[i], opts, insp)
+				out[i] = runOne(ctx, servers[order[i]], opts, insp)
 			}
 		})
 	}
 	wg.Wait()
+
+	// Set Index here, once, for every Outcome: also for the default ones of a
+	// worker that ended with runtime.Goexit. A new path above cannot forget it.
+	for i := range out {
+		out[i].Index = order[i]
+	}
 
 	return out, nil
 }

@@ -128,6 +128,66 @@ func (k ChangeKind) Severity() string {
 	return ""
 }
 
+// The fixed risk texts of the pin changes. They follow the style of the risk
+// field of the rules: one plain sentence, with no text from a server.
+const (
+	riskChanged    = "A pinned tool differs from the version the user accepted, so the server may have swapped in hostile instructions after the approval (a rug pull)."
+	riskNew        = "A pinned server now offers a tool that is not pinned, so the server may have added a hostile tool, or renamed a pinned tool to avoid the check."
+	riskRemoved    = "A pinned tool is no longer on the server, so the server changed, or it renamed the tool to avoid the check of the pin."
+	riskUnverified = "mcpmoat cannot check this tool against its pin, so a changed tool could pass without a review."
+	riskUnknown    = "mcpmoat found a change of the pins that it does not know, so the tools of the server may differ from the ones the user accepted."
+)
+
+// The fixed remediation texts of the pin changes. They name the command that
+// scan prints in its "To accept" line, and they hold no text from a server.
+// remediationUnverified says "if scan prints a To accept line" because scan
+// prints none when the tools cannot be pinned (a duplicate or empty name, or
+// invalid tool data), and pin --accept would refuse those tools.
+const (
+	remediationChanged    = "Read the diff, and if the change is expected, run mcpmoat pin --accept <server> --expect <digest>; if not, remove the server or do not use it."
+	remediationNew        = "Read the diff to see what the new tool does, and if the tool is expected, run mcpmoat pin --accept <server> --expect <digest>; if not, remove the server or do not use it."
+	remediationRemoved    = "Check that the server dropped the tool on purpose, and if the change is expected, run mcpmoat pin --accept <server> --expect <digest>; if not, remove the server or do not use it."
+	remediationUnverified = "Read the reason and the diff to see why the tool cannot be checked, and if scan prints a \"To accept\" line for the server and the tools are as expected, run that command; if not, remove the server or do not use it."
+	remediationUnknown    = "Read the change and review the tools of the server, and remove the server or do not use it if you do not trust the change."
+)
+
+// Risk returns one fixed sentence that says what the risk is for this kind of
+// pin change. The text is the same for every change of the kind and holds no
+// text from a server. It returns a generic text for an unknown kind, so a new
+// kind never gets an empty risk.
+func (k ChangeKind) Risk() string {
+	switch k {
+	case KindChanged:
+		return riskChanged
+	case KindNew:
+		return riskNew
+	case KindRemoved:
+		return riskRemoved
+	case KindUnverified:
+		return riskUnverified
+	}
+	return riskUnknown
+}
+
+// Remediation returns one fixed sentence that says what the user should do for
+// this kind of pin change: review the diff, then run "mcpmoat pin --accept" if
+// the change is expected. The text is the same for every change of the kind and
+// holds no text from a server. It returns a generic text for an unknown kind,
+// so a new kind never gets an empty remediation.
+func (k ChangeKind) Remediation() string {
+	switch k {
+	case KindChanged:
+		return remediationChanged
+	case KindNew:
+		return remediationNew
+	case KindRemoved:
+		return remediationRemoved
+	case KindUnverified:
+		return remediationUnverified
+	}
+	return remediationUnknown
+}
+
 // Change is one difference between the pins of a server and its current tools.
 //
 // Tool and Diff hold raw text from the server, which is not trusted. They can

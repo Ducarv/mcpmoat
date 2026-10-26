@@ -21,16 +21,20 @@ import (
 // runScan implements "mcpmoat scan": it reads the client configs, runs the
 // built-in config rules (T4 and T5) on every server and, unless --no-connect
 // is given, inspects the servers and checks their tools against pins.json.
+// --fail-on sets the lowest severity that gives exit code 1. Like --timeout,
+// it is checked in both modes.
 //
 // docs/ARCHITECTURE.md describes the data flow. The usage text (scanUsage and
-// usage in cli.go) is the one place that lists the flags and the exit codes
-// (FR-16).
-func (c *cli) runScan(_ options, args []string) int {
+// usage in cli.go) lists the flags. README.md#exit-codes is the exit-code
+// contract (FR-16), and the usage text summarises it.
+func (c *cli) runScan(opts options, args []string) int {
 	fs := flag.NewFlagSet("mcpmoat scan", flag.ContinueOnError)
 	// We print our own messages and scanUsage prints the help, so the flag
 	// package prints nothing and the flags have no usage text.
 	fs.SetOutput(io.Discard)
 	noConnect := fs.Bool("no-connect", false, "")
+	noColor := fs.Bool("no-color", false, "")
+	jsonOut := fs.Bool("json", false, "")
 	timeout := fs.Duration("timeout", inspect.DefaultTimeout, "")
 	concurrency := fs.Int("concurrency", inspect.DefaultConcurrency, "")
 
@@ -54,6 +58,11 @@ func (c *cli) runScan(_ options, args []string) int {
 		return nil
 	})
 
+	// severityFlag refuses an empty value, so an empty result means the flag
+	// was not given: then the default is high.
+	var failOn rules.Severity
+	severityFlag(fs, "fail-on", &failOn)
+
 	if err := fs.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
 			scanUsage(c.stdout)
@@ -67,6 +76,9 @@ func (c *cli) runScan(_ options, args []string) int {
 	}
 	if c.rejectArgs("scan", fs.Args()) {
 		return exitError
+	}
+	if failOn == "" {
+		failOn = rules.SeverityHigh
 	}
 
 	// Check the values in both modes, so a bad value is a usage error even
@@ -93,6 +105,12 @@ func (c *cli) runScan(_ options, args []string) int {
 	if rulesDir != "" {
 		fprintf(c.stderr, "%s\n", rulesNotAppliedNotice)
 	}
+	// No built-in rule is critical, so --fail-on critical gives exit code 0
+	// for every built-in finding. Say so, or a CI log shows no sign that the
+	// gate cannot fail.
+	if failOn == rules.SeverityCritical {
+		fprintf(c.stderr, "%s\n", failOnCriticalNotice)
+	}
 
 	// The typosquat check is built once and used for every server. An error
 	// means a bug in mcpmoat (the list is part of the binary), so the message
@@ -102,7 +120,12 @@ func (c *cli) runScan(_ options, args []string) int {
 		fprintf(c.stderr, "mcpmoat scan: internal error: built-in typosquat list is invalid\n")
 		return exitError
 	}
-	setup := scanSetup{checks: configChecks{set: set, typo: typo}, connect: connect}
+	// Colour is on only when stdout is a terminal, --no-color is not set and
+	// NO_COLOR is empty (FR-14). opts.noColor holds the combined result of the
+	// global flag (before "scan") and the environment variable. The scan flag
+	// --no-color (after "scan") is read here, so both positions work.
+	style := report.Style{Color: !opts.noColor && !*noColor && c.stdoutIsTTY}
+	setup := scanSetup{checks: configChecks{set: set, typo: typo}, connect: connect, style: style, failOn: failOn, jsonOut: *jsonOut}
 
 	// The context ends when the process gets SIGINT, SIGTERM or SIGHUP (see
 	// main). scan starts stdio servers in their own session, so the terminal
@@ -117,11 +140,23 @@ type scanSetup struct {
 	// connect is nil with --no-connect. Otherwise it holds the options for
 	// inspect.Run, and scan inspects the servers and checks their pins.
 	connect *inspect.Options
+	// style tells the report writers whether to use colour.
+	style report.Style
+	// failOn is the --fail-on value: a finding at or above it gives exit
+	// code 1 (see scanExitCode).
+	failOn rules.Severity
+	// jsonOut is true with --json: scan writes one JSON document on stdout
+	// and none of the terminal tables.
+	jsonOut bool
 }
 
 // rulesNotAppliedNotice is the line that runScan prints on stderr when
 // --rules is given. It is fixed text: it holds no path and no rule text.
 const rulesNotAppliedNotice = "mcpmoat scan: rules from --rules are loaded and checked, but not applied yet"
+
+// failOnCriticalNotice is the line that runScan prints on stderr for
+// --fail-on critical. TestNoBuiltinCriticalSeverity keeps it true.
+const failOnCriticalNotice = "mcpmoat scan: note: no built-in rule is critical yet, so with --fail-on critical no built-in finding gives exit code 1"
 
 // connectOptions builds the inspect options from the --timeout and
 // --concurrency flags. inspect.Options.Validate holds the rules. Its messages
@@ -157,6 +192,23 @@ func pathFlag(fs *flag.FlagSet, name, what string, dest *string) {
 			return fmt.Errorf("--%s needs %s", name, what)
 		}
 		*dest = value
+		return nil
+	})
+}
+
+// severityFlag adds a flag to fs that takes one severity word and stores it in
+// *dest. The flag can be given once. Valid refuses an empty value, another
+// case ("HIGH") and a flag name that the flag package took as the value. The
+// flag error already holds the value, so the message does not repeat it.
+func severityFlag(fs *flag.FlagSet, name string, dest *rules.Severity) {
+	fs.Func(name, "", func(value string) error {
+		if *dest != "" {
+			return fmt.Errorf("--%s given more than once", name)
+		}
+		if !rules.Severity(value).Valid() {
+			return fmt.Errorf("--%s needs low, medium, high or critical", name)
+		}
+		*dest = rules.Severity(value)
 		return nil
 	})
 }
@@ -252,26 +304,38 @@ func (c *cli) loadIgnore(wd string, ids []string) *scanIgnores {
 }
 
 // configErrorHint is the line that reportScan prints after the file
-// problems, when it printed the table. It is fixed text: it holds no path and
-// no config text.
+// problems, when it printed the report (the table or the --json document). It
+// is fixed text: it holds no path and no config text.
 const configErrorHint = "mcpmoat scan: a config file has a problem; " +
-	"the table can miss servers that the client loads"
+	"the report can miss servers that the client loads"
 
 // reportScan runs the config rules on the servers of res, with the ignore list
 // ignore. When setup.connect is not nil, it also inspects the servers and
 // checks their pins (see inspectAndPin). configPath is the --config value, or
-// empty. It prints the report on stdout (see writeScanReport), and the
-// file problems and warnings on stderr, and returns the exit code (the contract
-// is in the usage text, see usage in cli.go). When the ignore list dropped at
-// least one finding, it prints one line on stderr after the report, with the
-// rule IDs and their counts (see printIgnored).
+// empty. It prints the report on stdout (see writeScanReport, or the JSON
+// document with --json), and the file problems and warnings on stderr, and
+// returns the exit code (see scanExitCode; README.md#exit-codes is the
+// contract, and the usage text in cli.go summarises it). The status of each
+// server and the warnings of its inspection are part of the report on stdout
+// (the summary), not warnings on stderr. They never change the exit code. When
+// the ignore list dropped at least one finding, it prints one line on stderr
+// after the report, with the rule IDs and their counts (see printIgnored).
 //
-// The pin findings are merged with the config findings before the table is
-// written, so one table holds them all and hasFailingFinding sees them all.
+// The pin findings are merged with the config findings before the report (the
+// table or the JSON document) is written, so the report holds them all and
+// scanExitCode sees them all.
 // New pins are saved after the report is printed, so a save error never hides
 // the report. The "pinned N tools" notices come after a successful save.
+//
+// A config file problem, a pins.json read or save error, an inspect.Run error
+// or a signal before the save of new pins (when there are new pins) gives exit
+// code 2, also when there are findings at or above setup.failOn (see
+// scanExitCode). The report is already
+// printed when reportScan calls scanExitCode, so the user still sees the
+// findings. Only a signal during the inspection and a failed write of the
+// report return exit code 2 without a full report.
 func (c *cli) reportScan(ctx context.Context, res discover.Result, configPath string, setup scanSetup, ignore *scanIgnores) int {
-	rows, ignored := setup.checks.findings(&ignore.all, res.Servers)
+	rows, ignored, configCounts := setup.checks.findings(&ignore.all, res.Servers)
 
 	var pr pinReport
 	var pinFailed bool
@@ -279,7 +343,7 @@ func (c *cli) reportScan(ctx context.Context, res discover.Result, configPath st
 	// does not read pins.json.
 	if setup.connect != nil && len(res.Servers) > 0 {
 		var err error
-		pr, err = c.inspectAndPin(ctx, res.Servers, *setup.connect, ignore)
+		pr, err = c.inspectAndPin(ctx, res.Servers, *setup.connect, ignore, setup.jsonOut)
 		if errors.Is(err, errInterrupted) {
 			// Nothing is saved and no report is printed: the user stopped
 			// the scan, so the result would be partial.
@@ -292,7 +356,27 @@ func (c *cli) reportScan(ctx context.Context, res discover.Result, configPath st
 		ignored = mergeIgnored(ignored, pr.ignored)
 	}
 
-	if err := c.writeScanReport(res.Servers, rows, pr, configPath, len(res.Errors) > 0); err != nil {
+	configProblem := len(res.Errors) > 0
+	var writeErr error
+	if setup.jsonOut {
+		mode := report.ModeNoConnect
+		if setup.connect != nil {
+			mode = report.ModeConnect
+		}
+		complete := !pinFailed && !configProblem
+		writeErr = c.writeScanJSON(mode, complete, res, rows, pr)
+	} else {
+		statuses := pr.serverStatuses(res.Servers, configCounts)
+		if pinFailed {
+			// The pin step stopped before any server was inspected. Say so, or
+			// each line would look like a refused server. The error is on stderr.
+			for i := range statuses {
+				statuses[i].Reason = reasonPinStepFailed
+			}
+		}
+		writeErr = c.writeScanReport(res.Servers, statuses, rows, pr, setup.style, configPath, configProblem)
+	}
+	if writeErr != nil {
 		c.cmdPrintf("scan", "cannot write output")
 		// stderr can still work. The file problems are the reason for a
 		// failed scan, so the user must still see them. New pins are not
@@ -306,32 +390,30 @@ func (c *cli) reportScan(ctx context.Context, res discover.Result, configPath st
 		pinFailed = true
 	}
 
-	if len(res.Errors) > 0 {
+	if configProblem {
 		// Print the problems in the order of the result, then the hint.
 		c.printFileErrors("scan", res.Errors)
 		fprintf(c.stderr, "%s\n", configErrorHint)
-		return exitError
 	}
-	if pinFailed {
-		return exitError
-	}
-	if hasFailingFinding(rows) {
-		return exitFindings
-	}
-	return exitOK
+	return scanExitCode(configProblem || pinFailed, rows, setup.failOn)
 }
 
-// writeScanReport writes the report on c.stdout: the server table, the findings, the
-// diffs of the changed and new tools, then the "To accept" lines. It returns the
-// first write error. Do not use fprintf for it: a write error (a closed pipe,
-// for example) must give exit code 2. configPath is the --config value, or
-// empty, and configProblem is true when a config file has a problem: the "To
-// accept" lines depend on both (see writeAcceptHints).
-func (c *cli) writeScanReport(servers []discover.Server, rows []report.FindingRow, pr pinReport, configPath string, configProblem bool) error {
+// writeScanReport writes the report on c.stdout, in this order: the server
+// table, the summary of each server (statuses, in the order of servers), the
+// findings, the diffs of the changed and new tools, then the "To accept" lines.
+// st sets the colour of the summary and the findings. It returns the first
+// write error. Do not use fprintf for it: a write error (a closed pipe, for
+// example) must give exit code 2. configPath is the --config value, or empty,
+// and configProblem is true when a config file has a problem: the "To accept"
+// lines depend on both (see writeAcceptHints).
+func (c *cli) writeScanReport(servers []discover.Server, statuses []report.ServerStatus, rows []report.FindingRow, pr pinReport, st report.Style, configPath string, configProblem bool) error {
 	if err := report.WriteServers(c.stdout, servers); err != nil {
 		return err
 	}
-	if err := report.WriteFindings(c.stdout, rows); err != nil {
+	if err := report.WriteSummary(c.stdout, statuses, st); err != nil {
+		return err
+	}
+	if err := report.WriteFindings(c.stdout, rows, st); err != nil {
 		return err
 	}
 	if err := report.WriteDiffs(c.stdout, pr.diffs); err != nil {
@@ -397,8 +479,11 @@ func (c *cli) savePinned(ctx context.Context, pr pinReport) bool {
 }
 
 // inspectAndPin reads the pins store, inspects the servers with c.inspector,
-// writes a warning for each server that was not inspected, and checks the tools
-// against the pins (see pinOutcomes).
+// and checks the tools against the pins (see pinOutcomes). Without --json it
+// writes no warning for a server that was not inspected, and none for the
+// warnings of an inspection: the pin report holds them, and the summary on
+// stdout shows them (see serverStatuses). With --json (jsonOut) there is no
+// summary, so it writes them on stderr (see warnNotInspected).
 //
 // The store is read first, before inspect.Run starts any server, so a corrupt
 // or newer pins.json gives exit code 2 before a stdio server runs. savePinned
@@ -410,7 +495,7 @@ func (c *cli) savePinned(ctx context.Context, pr pinReport) bool {
 // The error is errInterrupted when ctx ended during the inspection (the process
 // got a signal). It has written interruptedText then (see interrupted).
 // Nothing is saved: inspectAndPin never saves.
-func (c *cli) inspectAndPin(ctx context.Context, servers []discover.Server, opts inspect.Options, ignore *scanIgnores) (pinReport, error) {
+func (c *cli) inspectAndPin(ctx context.Context, servers []discover.Server, opts inspect.Options, ignore *scanIgnores, jsonOut bool) (pinReport, error) {
 	store, ok := c.readPins("scan")
 	if !ok {
 		return pinReport{}, errPinsUnreadable
@@ -425,8 +510,25 @@ func (c *cli) inspectAndPin(ctx context.Context, servers []discover.Server, opts
 		c.cmdErr("scan", "cannot inspect the servers", err)
 		return pinReport{}, err
 	}
-	c.warnNotInspected(outcomes)
+	if jsonOut {
+		c.warnNotInspected(outcomes)
+	}
 	return c.pinOutcomes(store, outcomes, ignore), nil
+}
+
+// warnNotInspected writes on stderr, for --json, what the summary shows
+// without it: one line for each outcome that is not inspect.StatusOK (see
+// notInspectedText), and one line for each warning of an inspection (see
+// outcomeWarnings). It never changes the exit code (FR-06, FR-16).
+func (c *cli) warnNotInspected(outcomes []inspect.Outcome) {
+	for _, o := range outcomes {
+		if o.Status != inspect.StatusOK {
+			c.scanWarnf("%s", notInspectedText(o))
+		}
+		for _, w := range outcomeWarnings(o) {
+			c.scanWarnf("%s", warningText(o.Server.Name, w))
+		}
+	}
 }
 
 // The errors of inspectAndPin that have no other error to return. Their text
@@ -438,6 +540,10 @@ var (
 	// errPinsUnreadable means that readPins failed and wrote the message.
 	errPinsUnreadable = errors.New("cannot read the pins file")
 )
+
+// reasonPinStepFailed is the summary reason of every server when inspectAndPin
+// failed before it inspected any server (pinFailed in reportScan).
+const reasonPinStepFailed = "scan stopped before it inspected the servers, see the error on stderr"
 
 // printIgnored writes one line on stderr that counts the findings which the
 // ignore list dropped, for example

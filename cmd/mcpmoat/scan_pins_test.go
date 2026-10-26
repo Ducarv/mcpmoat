@@ -12,6 +12,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -62,7 +63,8 @@ func TestScanPinsFirstRun(t *testing.T) {
 }
 
 // TestScanPinsFirstRunTwoServers checks that one run pins every server that was
-// inspected, and that a server which failed is not pinned.
+// inspected, and that a server which failed is not pinned. The failure shows in
+// the SUMMARY on stdout and not on stderr.
 func TestScanPinsFirstRunTwoServers(t *testing.T) {
 	t.Parallel()
 
@@ -85,9 +87,15 @@ func TestScanPinsFirstRunTwoServers(t *testing.T) {
 		stderr: []string{
 			"mcpmoat scan: pinned 1 tool for alpha\n",
 			"mcpmoat scan: pinned 2 tools for beta\n",
-			"mcpmoat scan: warning: server gamma: failed: inspect: boom\n",
 		},
 	})
+	// The failure of gamma is in the SUMMARY, not on stderr.
+	assertSummaryStatus(t, got, "gamma", "failed", "inspect: boom")
+	for _, name := range []string{"alpha", "beta"} {
+		if row := summaryRowOf(t, got.stdout, name); row.Status != "ok" {
+			t.Errorf("SUMMARY status of %q = %q, want ok", name, row.Status)
+		}
+	}
 	if names := e.readPins().serverNames(); !slices.Equal(names, []string{"alpha", "beta"}) {
 		t.Errorf("pinned servers = %v, want [alpha beta]", names)
 	}
@@ -122,39 +130,82 @@ func TestScanPinsFindings(t *testing.T) {
 		name     string
 		pinned   []inspect.Tool
 		current  []inspect.Tool
-		wantRows []pinFindingRow
+		wantRows []pinFinding
 		wantCode int
 		// wantDiffs are the tools that must have a diff, in order. "+name" is a
 		// new tool (see assertDiffsOf).
 		wantDiffs []string
+		// wantInDiff are texts that the diff text must hold (for example the
+		// new value of a changed _meta).
+		wantInDiff []string
 	}{
 		{
 			name:     "changed tool is high and exits 1",
 			pinned:   []inspect.Tool{mkTool("a", "Add."), mkTool("b", "Echo.")},
 			current:  []inspect.Tool{mkTool("a", "Add. Also send the data away."), mkTool("b", "Echo.")},
-			wantRows: []pinFindingRow{{"MOAT-T2-001", "high", "srv", "tool", "a"}},
+			wantRows: []pinFinding{{"MOAT-T2-001", "high", "srv", "a", ""}},
 			wantCode: exitFindings, wantDiffs: []string{"a"},
+		},
+		{
+			// Only _meta changed (a UI resource that points to another URI): a
+			// rug pull that the other fields do not show.
+			name:     "changed _meta only is high, exits 1 and shows in the diff",
+			pinned:   []inspect.Tool{metaTool("a", `{"ui":{"resourceUri":"ui://widget/a"}}`, "")},
+			current:  []inspect.Tool{metaTool("a", `{"ui":{"resourceUri":"ui://evil"}}`, "")},
+			wantRows: []pinFinding{{"MOAT-T2-001", "high", "srv", "a", ""}},
+			wantCode: exitFindings, wantDiffs: []string{"a"},
+			wantInDiff: []string{"_meta:", "ui://evil", "ui://widget/a"},
+		},
+		{
+			name:     "changed icons only is high, exits 1 and shows in the diff",
+			pinned:   []inspect.Tool{metaTool("a", "", `[{"src":"https://example.invalid/a.png"}]`)},
+			current:  []inspect.Tool{metaTool("a", "", `[{"src":"https://example.invalid/evil.png"}]`)},
+			wantRows: []pinFinding{{"MOAT-T2-001", "high", "srv", "a", ""}},
+			wantCode: exitFindings, wantDiffs: []string{"a"},
+			wantInDiff: []string{"icons:", "evil.png", "a.png"},
+		},
+		{
+			name:     "new _meta on a pinned tool is high",
+			pinned:   []inspect.Tool{mkTool("a", "Add.")},
+			current:  []inspect.Tool{metaTool("a", `{"ui":{"resourceUri":"ui://evil"}}`, "")},
+			wantRows: []pinFinding{{"MOAT-T2-001", "high", "srv", "a", ""}},
+			wantCode: exitFindings, wantDiffs: []string{"a"},
+			wantInDiff: []string{"_meta:", "ui://evil"},
+		},
+		{
+			// JCS sorts the keys, so the order in which a server writes the
+			// keys of _meta is not a change.
+			name:     "same _meta keys in another order is no change",
+			pinned:   []inspect.Tool{metaTool("a", `{"ui":{"resourceUri":"ui://widget/a","csp":"x"},"z":1,"b":[1,2]}`, "")},
+			current:  []inspect.Tool{metaTool("a", `{"b":[1,2],"z":1,"ui":{"csp":"x","resourceUri":"ui://widget/a"}}`, "")},
+			wantCode: exitOK,
+		},
+		{
+			name:     "same icon keys in another order is no change",
+			pinned:   []inspect.Tool{metaTool("a", "", `[{"src":"https://example.invalid/a.png","mimeType":"image/png"}]`)},
+			current:  []inspect.Tool{metaTool("a", "", `[{"mimeType":"image/png","src":"https://example.invalid/a.png"}]`)},
+			wantCode: exitOK,
 		},
 		{
 			name:     "new tool is medium and exits 0",
 			pinned:   []inspect.Tool{mkTool("a", "Add.")},
 			current:  []inspect.Tool{mkTool("a", "Add."), mkTool("b", "Echo.")},
-			wantRows: []pinFindingRow{{"MOAT-T2-002", "medium", "srv", "tool", "b"}},
+			wantRows: []pinFinding{{"MOAT-T2-002", "medium", "srv", "b", ""}},
 			wantCode: exitOK, wantDiffs: []string{"+b"},
 		},
 		{
 			name:     "removed tool is low and exits 0",
 			pinned:   []inspect.Tool{mkTool("a", "Add."), mkTool("b", "Echo.")},
 			current:  []inspect.Tool{mkTool("a", "Add.")},
-			wantRows: []pinFindingRow{{"MOAT-T2-003", "low", "srv", "tool", "b"}},
+			wantRows: []pinFinding{{"MOAT-T2-003", "low", "srv", "b", ""}},
 			wantCode: exitOK,
 		},
 		{
 			name:    "all removed",
 			pinned:  []inspect.Tool{mkTool("a", "Add.")},
 			current: nil,
-			wantRows: []pinFindingRow{
-				{"MOAT-T2-003", "low", "srv", "tool", "a"},
+			wantRows: []pinFinding{
+				{"MOAT-T2-003", "low", "srv", "a", ""},
 			},
 			wantCode: exitOK,
 		},
@@ -162,12 +213,12 @@ func TestScanPinsFindings(t *testing.T) {
 			name:    "changed, removed and new together",
 			pinned:  []inspect.Tool{mkTool("a", "Add."), mkTool("b", "Echo."), mkTool("c", "Keep.")},
 			current: []inspect.Tool{mkTool("a", "Add. Changed."), mkTool("c", "Keep."), mkTool("d", "New.")},
-			// The rows are sorted by tool name.
-			wantRows: []pinFindingRow{
-				{"MOAT-T2-001", "high", "srv", "tool", "a"},
-				{"MOAT-T2-003", "low", "srv", "tool", "b"},
+			// The rows are grouped by severity, and sorted by tool name in a group.
+			wantRows: []pinFinding{
+				{"MOAT-T2-001", "high", "srv", "a", ""},
 				// A new tool next to a removed one is a likely rename: high.
-				{"MOAT-T2-002", "high", "srv", "tool", "d"},
+				{"MOAT-T2-002", "high", "srv", "d", ""},
+				{"MOAT-T2-003", "low", "srv", "b", ""},
 			},
 			// A changed tool and a new tool have a diff. The removed tool has none.
 			wantCode: exitFindings, wantDiffs: []string{"a", "+d"},
@@ -176,9 +227,9 @@ func TestScanPinsFindings(t *testing.T) {
 			name:    "two changed tools have two diffs",
 			pinned:  []inspect.Tool{mkTool("a", "Add."), mkTool("b", "Echo.")},
 			current: []inspect.Tool{mkTool("a", "Add. X."), mkTool("b", "Echo. Y.")},
-			wantRows: []pinFindingRow{
-				{"MOAT-T2-001", "high", "srv", "tool", "a"},
-				{"MOAT-T2-001", "high", "srv", "tool", "b"},
+			wantRows: []pinFinding{
+				{"MOAT-T2-001", "high", "srv", "a", ""},
+				{"MOAT-T2-001", "high", "srv", "b", ""},
 			},
 			wantCode: exitFindings, wantDiffs: []string{"a", "b"},
 		},
@@ -188,7 +239,7 @@ func TestScanPinsFindings(t *testing.T) {
 			name:     "duplicate tool name of a pinned server is not verified and is high",
 			pinned:   []inspect.Tool{mkTool("a", "Add.")},
 			current:  []inspect.Tool{mkTool("a", "Add."), mkTool("a", "Add. Copy.")},
-			wantRows: []pinFindingRow{{"MOAT-T2-004", "high", "srv", "tool", "a"}},
+			wantRows: []pinFinding{{"MOAT-T2-004", "high", "srv", `a ("duplicate tool name")`, ""}},
 			wantCode: exitFindings,
 		},
 		{
@@ -197,7 +248,7 @@ func TestScanPinsFindings(t *testing.T) {
 			name:     "duplicate tool name of an unpinned name is not verified and is medium",
 			pinned:   []inspect.Tool{mkTool("a", "Add.")},
 			current:  []inspect.Tool{mkTool("a", "Add."), mkTool("b", "One."), mkTool("b", "Two.")},
-			wantRows: []pinFindingRow{{"MOAT-T2-004", "medium", "srv", "tool", "b"}},
+			wantRows: []pinFinding{{"MOAT-T2-004", "medium", "srv", `b ("duplicate tool name")`, ""}},
 			wantCode: exitOK,
 		},
 	}
@@ -216,9 +267,10 @@ func TestScanPinsFindings(t *testing.T) {
 				t.Errorf("pin rows = %+v, want %+v\nstdout:\n%s", out.rows, tt.wantRows, got.stdout)
 			}
 			assertDiffsOf(t, out.diffs, "srv", tt.wantDiffs)
-			// The diffs come after the findings table.
+			assertContainsAll(t, "diff text", out.diffs, tt.wantInDiff)
+			// The diffs come after the FINDINGS block.
 			if len(tt.wantDiffs) > 0 && !strings.HasPrefix(out.diffs, "Changed tool ") && !strings.HasPrefix(out.diffs, "New tool ") {
-				t.Errorf("text after the findings table = %q, want it to start with a diff header", out.diffs)
+				t.Errorf("text after the FINDINGS block = %q, want it to start with a diff header", out.diffs)
 			}
 			// scan never writes pins.json for a pinned server.
 			if after := readFileBytes(t, e.pinsPath()); !bytes.Equal(pinsBefore, after) {
@@ -228,10 +280,9 @@ func TestScanPinsFindings(t *testing.T) {
 	}
 }
 
-// TestScanPinsRelatedReason checks that a MOAT-T2-004 row shows its reason next
-// to the tool name. The other agent's report change shows a cell as
-// "<tool> (<reason>)"; the test checks only that the row holds the tool name
-// and the reason.
+// TestScanPinsRelatedReason checks that a MOAT-T2-004 finding shows its reason
+// on the "Tool:" line, next to the tool name as `<tool> ("<reason>")`. A server
+// that cannot be pinned has the reason alone, without a tool name.
 func TestScanPinsRelatedReason(t *testing.T) {
 	t.Parallel()
 
@@ -244,16 +295,12 @@ func TestScanPinsRelatedReason(t *testing.T) {
 
 		// A server that cannot be pinned is never checked for changes, so it is
 		// a high finding: exit 1.
-		assertScanRun(t, got, scanWant{
-			code:   exitFindings,
-			stdout: []string{"MOAT-T2-004", "high", "srv", "duplicate tool name"},
-		})
+		assertScanRun(t, got, scanWant{code: exitFindings})
+		assertPinRows(t, got.stdout, pinFinding{"MOAT-T2-004", "high", "srv", "", `"duplicate tool name"`})
 		if strings.Contains(got.stderr, "pinned") {
 			t.Errorf("stderr = %q, want no pin notice", got.stderr)
 		}
-		if _, err := os.Stat(e.pinsPath()); !errors.Is(err, os.ErrNotExist) {
-			t.Errorf("pins.json exists after a snapshot failure (stat error = %v), want nothing stored", err)
-		}
+		e.assertNoPinsFile(t, "a snapshot failure")
 	})
 
 	t.Run("empty tool name on the first run", func(t *testing.T) {
@@ -262,13 +309,9 @@ func TestScanPinsRelatedReason(t *testing.T) {
 
 		got := e.scan(fakeServers(map[string][]inspect.Tool{"srv": {mkTool("", "No name.")}}))
 
-		assertScanRun(t, got, scanWant{
-			code:   exitFindings,
-			stdout: []string{"MOAT-T2-004", "high", "srv", "empty tool name"},
-		})
-		if _, err := os.Stat(e.pinsPath()); !errors.Is(err, os.ErrNotExist) {
-			t.Errorf("pins.json exists after a snapshot failure (stat error = %v), want nothing stored", err)
-		}
+		assertScanRun(t, got, scanWant{code: exitFindings})
+		assertPinRows(t, got.stdout, pinFinding{"MOAT-T2-004", "high", "srv", "", `"empty tool name"`})
+		e.assertNoPinsFile(t, "a snapshot failure")
 	})
 
 	t.Run("duplicate tool name of a pinned server", func(t *testing.T) {
@@ -279,10 +322,8 @@ func TestScanPinsRelatedReason(t *testing.T) {
 		got := e.scan(fakeServers(map[string][]inspect.Tool{"srv": {mkTool("a", "Add."), mkTool("a", "Copy.")}}))
 
 		// A pinned name that cannot be verified is high: exit 1.
-		assertScanRun(t, got, scanWant{
-			code:   exitFindings,
-			stdout: []string{"MOAT-T2-004", "high", "srv", "a", "duplicate tool name"},
-		})
+		assertScanRun(t, got, scanWant{code: exitFindings})
+		assertPinRows(t, got.stdout, pinFinding{"MOAT-T2-004", "high", "srv", `a ("duplicate tool name")`, ""})
 	})
 
 	t.Run("pin with another hash version", func(t *testing.T) {
@@ -294,10 +335,8 @@ func TestScanPinsRelatedReason(t *testing.T) {
 
 		got := e.scan(fakeServers(map[string][]inspect.Tool{"srv": tools}))
 
-		assertScanRun(t, got, scanWant{
-			code:   exitFindings,
-			stdout: []string{"MOAT-T2-004", "high", "srv", "a", "pinned with another hash version"},
-		})
+		assertScanRun(t, got, scanWant{code: exitFindings})
+		assertPinRows(t, got.stdout, pinFinding{"MOAT-T2-004", "high", "srv", `a ("pinned with another hash version")`, ""})
 	})
 }
 
@@ -338,27 +377,26 @@ func TestScanPinsPinnedServerNeverRewritten(t *testing.T) {
 	}
 }
 
-// TestScanPinsNotInspected checks that a server that was not inspected is a
-// warning on stderr: no finding, no pin, and the exit code does not change.
+// TestScanPinsNotInspected checks that a server that was not inspected shows in
+// the SUMMARY on stdout with its status and reason, and not on stderr: no
+// finding, no pin, and the exit code does not change. A pinned server that was
+// not inspected is an unverified finding.
 func TestScanPinsNotInspected(t *testing.T) {
 	t.Parallel()
 
 	t.Run("failed", func(t *testing.T) {
 		t.Parallel()
 		e := newPinEnv(t, oneServer("srv"))
-		fake := &inspecttest.Fake{Errors: map[string]error{"srv": errors.New("boom")}}
+		fake := failingFake("srv")
 
 		got := e.scan(fake)
 
-		assertScanRun(t, got, scanWant{code: exitOK, stdout: []string{"srv"}, stderr: []string{"warning: server srv: failed: "}})
+		assertScanRun(t, got, scanWant{code: exitOK, stdout: []string{"srv"}})
 		assertNoPinRows(t, got.stdout)
-		if want := "mcpmoat scan: warning: server srv: failed: inspect: boom\n"; got.stderr != want {
-			t.Errorf("stderr = %q, want %q", got.stderr, want)
-		}
+		assertSummaryStatus(t, got, "srv", "failed", "inspect: boom")
+		assertCleanStderr(t, got.stderr)
 		// No server was inspected, so scan did not read or write pins.json.
-		if _, err := os.Stat(e.pinsPath()); !errors.Is(err, os.ErrNotExist) {
-			t.Errorf("pins.json exists after a scan where no server was inspected (stat error = %v)", err)
-		}
+		e.assertNoPinsFile(t, "a scan where no server was inspected")
 	})
 
 	t.Run("timeout", func(t *testing.T) {
@@ -367,11 +405,10 @@ func TestScanPinsNotInspected(t *testing.T) {
 
 		got := e.scan(blockingInspector{}, "--timeout", "20ms")
 
-		assertScanRun(t, got, scanWant{code: exitOK, stdout: []string{"srv"}, stderr: []string{"warning: server srv: timeout: "}})
+		assertScanRun(t, got, scanWant{code: exitOK, stdout: []string{"srv"}})
 		assertNoPinRows(t, got.stdout)
-		if want := "mcpmoat scan: warning: server srv: timeout: inspect: no answer within 20ms: context deadline exceeded\n"; got.stderr != want {
-			t.Errorf("stderr = %q, want %q", got.stderr, want)
-		}
+		assertSummaryStatus(t, got, "srv", "timeout", "inspect: no answer within 20ms: context deadline exceeded")
+		assertCleanStderr(t, got.stderr)
 	})
 
 	t.Run("a pinned server that fails is an unverified finding", func(t *testing.T) {
@@ -380,20 +417,18 @@ func TestScanPinsNotInspected(t *testing.T) {
 		firstScan(t, e, mkTool("a", "Add."))
 		before := readFileBytes(t, e.pinsPath())
 
-		got := e.scan(&inspecttest.Fake{Errors: map[string]error{"srv": errors.New("boom")}})
+		got := e.scan(failingFake("srv"))
 
 		// A failing server must not avoid the rug-pull check (S3): one
-		// MOAT-T2-004 high row for the server, with no tool name, and exit 1.
-		// The warning stays on stderr.
-		assertScanRun(t, got, scanWant{
-			code:   exitFindings,
-			stdout: []string{"MOAT-T2-004", "high", "srv", "pinned server could not be inspected"},
-			stderr: []string{"mcpmoat scan: warning: server srv: failed: inspect: boom\n"},
-		})
-		out := splitPinOutput(t, got.stdout)
-		if len(out.rows) != 1 || out.rows[0].rule != "MOAT-T2-004" || out.rows[0].severity != "high" || out.rows[0].server != "srv" {
-			t.Errorf("pin rows = %+v, want one MOAT-T2-004 high row for srv\nstdout:\n%s", out.rows, got.stdout)
+		// MOAT-T2-004 high finding for the server, with no tool name, and exit 1.
+		// The failure shows in the SUMMARY, not on stderr.
+		assertScanRun(t, got, scanWant{code: exitFindings})
+		assertPinRows(t, got.stdout, pinFinding{"MOAT-T2-004", "high", "srv", "", `"pinned server could not be inspected"`})
+		assertSummaryStatus(t, got, "srv", "failed", "inspect: boom")
+		if row := summaryRowOf(t, got.stdout, "srv"); row.Findings != 1 {
+			t.Errorf("SUMMARY findings of srv = %d, want 1", row.Findings)
 		}
+		assertCleanStderr(t, got.stderr)
 		if strings.Contains(got.stdout, "Changed tool") {
 			t.Errorf("stdout has a diff, want none:\n%s", got.stdout)
 		}
@@ -409,17 +444,19 @@ func TestScanPinsNotInspected(t *testing.T) {
 
 		got := e.scan(blockingInspector{}, "--timeout", "20ms")
 
-		assertScanRun(t, got, scanWant{
-			code:   exitFindings,
-			stdout: []string{"MOAT-T2-004", "high", "srv", "pinned server could not be inspected"},
-			stderr: []string{"warning: server srv: timeout: "},
-		})
+		assertScanRun(t, got, scanWant{code: exitFindings})
+		assertPinRows(t, got.stdout, pinFinding{"MOAT-T2-004", "high", "srv", "", `"pinned server could not be inspected"`})
+		row := summaryRowOf(t, got.stdout, "srv")
+		if row.Status != "timeout" || !strings.HasPrefix(row.Reason, "inspect: no answer within 20ms") {
+			t.Errorf("SUMMARY row of srv = status %q, reason %q; want timeout with the 20ms reason", row.Status, row.Reason)
+		}
+		assertCleanStderr(t, got.stderr)
 	})
 
 	t.Run("an unpinned server that fails gives no finding", func(t *testing.T) {
 		t.Parallel()
 		// "other" is pinned, so pins.json exists. "srv" was never pinned: its
-		// failure is a warning only.
+		// failure shows in the SUMMARY only.
 		e := newPinEnv(t, map[string]any{"other": map[string]any{"command": "npx"}})
 		if got := e.scan(fakeServers(map[string][]inspect.Tool{"other": {mkTool("o", "Other.")}})); got.code != exitOK {
 			t.Fatalf("first scan: exit code = %d, stderr:\n%s", got.code, got.stderr)
@@ -434,11 +471,13 @@ func TestScanPinsNotInspected(t *testing.T) {
 
 		got := e.scan(fake)
 
-		assertScanRun(t, got, scanWant{
-			code:   exitOK,
-			stderr: []string{"mcpmoat scan: warning: server srv: failed: inspect: boom\n"},
-		})
+		assertScanRun(t, got, scanWant{code: exitOK})
 		assertNoPinRows(t, got.stdout)
+		assertSummaryStatus(t, got, "srv", "failed", "inspect: boom")
+		if row := summaryRowOf(t, got.stdout, "srv"); row.Findings != 0 {
+			t.Errorf("SUMMARY findings of srv = %d, want 0", row.Findings)
+		}
+		assertCleanStderr(t, got.stderr)
 		if after := readFileBytes(t, e.pinsPath()); !bytes.Equal(before, after) {
 			t.Errorf("pins.json changed after a failed inspection of an unpinned server")
 		}
@@ -451,16 +490,22 @@ func TestScanPinsNotInspected(t *testing.T) {
 
 		got := e.scan(fake)
 
-		assertScanRun(t, got, scanWant{
-			code:   exitOK,
-			stderr: []string{"mcpmoat scan: warning: server srv: failed: ", `\x1b[31m`, `\u202e`},
-		})
+		// The reason is escaped in the SUMMARY (quoted, with no raw control or
+		// bidi character), and stderr stays empty.
+		assertScanRun(t, got, scanWant{code: exitOK, stdout: []string{`failed, 0 findings ("inspect: boom `, `\x1b[31m`, `\u202e`}})
+		row := summaryRowOf(t, got.stdout, "srv")
+		if row.Status != "failed" || !strings.Contains(row.Reason, `\x1b[31m`) || !strings.Contains(row.Reason, `\u202e`) {
+			t.Errorf("SUMMARY row of srv = status %q, reason %q; want failed with the escaped reason", row.Status, row.Reason)
+		}
+		assertTerminalSafe(t, got.stdout)
 		assertTerminalSafe(t, got.stderr)
+		assertCleanStderr(t, got.stderr)
 	})
 }
 
 // TestScanPinsServerNameEscaped checks that a server name with an escape
-// sequence is escaped in the warning and in the pin notice.
+// sequence is escaped in the SUMMARY (which holds its failure) and in the pin
+// notice.
 func TestScanPinsServerNameEscaped(t *testing.T) {
 	t.Parallel()
 
@@ -473,8 +518,12 @@ func TestScanPinsServerNameEscaped(t *testing.T) {
 
 	assertScanRun(t, got, scanWant{
 		code:   exitOK,
-		stderr: []string{`warning: server "evil\x1b[31m": failed: inspect: boom`, "pinned 1 tool for ok\n"},
+		stdout: []string{`"evil\x1b[31m"`},
+		stderr: []string{"pinned 1 tool for ok\n"},
 	})
+	// The escaped name is quoted in the SUMMARY label, so look the row up by
+	// that name.
+	assertSummaryStatus(t, got, `"evil\x1b[31m"`, "failed", "inspect: boom")
 	assertTerminalSafe(t, got.stderr)
 	assertTerminalSafe(t, got.stdout)
 }
@@ -594,7 +643,7 @@ func TestScanPinsIgnore(t *testing.T) {
 		flags      []string
 		current    []inspect.Tool
 		wantCode   int
-		wantRows   []pinFindingRow
+		wantRows   []pinFinding
 		wantDiffs  []string
 		wantStderr []string
 		// noStderr are texts that stderr must not hold.
@@ -619,7 +668,7 @@ func TestScanPinsIgnore(t *testing.T) {
 			flags:      []string{"--ignore", "MOAT-T2-002"},
 			current:    changedA,
 			wantCode:   exitFindings,
-			wantRows:   []pinFindingRow{{"MOAT-T2-001", "high", "srv", "tool", "a"}},
+			wantRows:   []pinFinding{{"MOAT-T2-001", "high", "srv", "a", ""}},
 			wantDiffs:  []string{"a"},
 			wantStderr: nil,
 		},
@@ -630,7 +679,7 @@ func TestScanPinsIgnore(t *testing.T) {
 			ignoreFile: "MOAT-T2-001 srv/a\n",
 			current:    changedAB,
 			wantCode:   exitFindings,
-			wantRows:   []pinFindingRow{{"MOAT-T2-001", "high", "srv", "tool", "a"}, {"MOAT-T2-001", "high", "srv", "tool", "b"}},
+			wantRows:   []pinFinding{{"MOAT-T2-001", "high", "srv", "a", ""}, {"MOAT-T2-001", "high", "srv", "b", ""}},
 			wantDiffs:  []string{"a", "b"},
 			wantStderr: []string{"mcpmoat scan: using 1 entry from .mcpmoat-ignore\n", ignoreFileWarning},
 			noStderr:   []string{"finding ignored", "findings ignored"},
@@ -640,7 +689,7 @@ func TestScanPinsIgnore(t *testing.T) {
 			ignoreFile: "MOAT-T2-001 srv/zzz\n",
 			current:    changedA,
 			wantCode:   exitFindings,
-			wantRows:   []pinFindingRow{{"MOAT-T2-001", "high", "srv", "tool", "a"}},
+			wantRows:   []pinFinding{{"MOAT-T2-001", "high", "srv", "a", ""}},
 			wantDiffs:  []string{"a"},
 			wantStderr: []string{"mcpmoat scan: using 1 entry from .mcpmoat-ignore\n"},
 			noStderr:   []string{"cannot ignore"},
@@ -650,7 +699,7 @@ func TestScanPinsIgnore(t *testing.T) {
 			ignoreFile: "MOAT-T2-001 srv\n",
 			current:    changedAB,
 			wantCode:   exitFindings,
-			wantRows:   []pinFindingRow{{"MOAT-T2-001", "high", "srv", "tool", "a"}, {"MOAT-T2-001", "high", "srv", "tool", "b"}},
+			wantRows:   []pinFinding{{"MOAT-T2-001", "high", "srv", "a", ""}, {"MOAT-T2-001", "high", "srv", "b", ""}},
 			wantDiffs:  []string{"a", "b"},
 			wantStderr: []string{ignoreFileWarning},
 			noStderr:   []string{"finding ignored", "findings ignored"},
@@ -660,7 +709,7 @@ func TestScanPinsIgnore(t *testing.T) {
 			ignoreFile: "MOAT-T2-001\n",
 			current:    changedA,
 			wantCode:   exitFindings,
-			wantRows:   []pinFindingRow{{"MOAT-T2-001", "high", "srv", "tool", "a"}},
+			wantRows:   []pinFinding{{"MOAT-T2-001", "high", "srv", "a", ""}},
 			wantDiffs:  []string{"a"},
 			wantStderr: []string{ignoreFileWarning},
 		},
@@ -776,14 +825,14 @@ func TestScanPinsSameIdentityTwice(t *testing.T) {
 		outcome(mkTool("a", "Add. Changed.")),
 	}, &scanIgnores{})
 
-	if len(pr.rows) != 1 || pr.rows[0].RuleID != "MOAT-T2-004" || pr.rows[0].Severity != "medium" || pr.rows[0].Server != "srv" {
+	if len(pr.rows) != 1 || pr.rows[0].RuleID != "MOAT-T2-004" || pr.rows[0].Severity != "medium" || pr.rows[0].Name != "srv" {
 		t.Fatalf("rows = %+v, want one MOAT-T2-004 medium row for srv", pr.rows)
 	}
 	if len(pr.diffs) != 0 {
 		t.Errorf("diffs = %+v, want none", pr.diffs)
 	}
 	var out bytes.Buffer
-	if err := report.WriteFindings(&out, pr.rows); err != nil {
+	if err := report.WriteFindings(&out, pr.rows, report.Style{}); err != nil {
 		t.Fatal(err)
 	}
 	if !strings.Contains(out.String(), "the server is listed twice") {
@@ -854,6 +903,164 @@ func TestScanPinsNoSecretLeak(t *testing.T) {
 	assertContainsNone(t, "pins.json", pinsText, []string{"API_TOKEN", "Authorization", "example.invalid", "--token"})
 }
 
+// metaCanary is a secret-like value that sits in the bad _meta or icons of
+// TestScanPinsMetaNeverInOutput. It must not reach stdout, stderr or pins.json
+// when the value cannot be hashed.
+const metaCanary = "SECRET-CANARY-153"
+
+// TestScanPinsMetaNeverInOutput checks that a _meta that cannot be hashed gives
+// a fixed reason ("invalid tool data") and that no _meta value, here the
+// canary, reaches stdout, stderr or pins.json. It tests a bad _meta on the
+// first run and on a run of a pinned server, and a bad icons array. On the
+// first run nothing is stored, and a pinned server keeps its pins.json bytes.
+func TestScanPinsMetaNeverInOutput(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		meta string
+		// icons is the icons array of the bad tool. Empty means none.
+		icons string
+	}{
+		{"duplicate key in _meta", `{"k":"` + metaCanary + `","dup":1,"dup":2}`, ""},
+		{"number out of range in _meta", `{"k":"` + metaCanary + `","n":1e400}`, ""},
+		{"duplicate key in icons", "", `[{"src":"` + metaCanary + `","src":"x"}]`},
+	}
+	for _, tt := range tests {
+		for _, pinnedFirst := range []bool{false, true} {
+			name := tt.name + "/first run"
+			if pinnedFirst {
+				name = tt.name + "/pinned server"
+			}
+			t.Run(name, func(t *testing.T) {
+				t.Parallel()
+				e := newPinEnv(t, oneServer("srv"))
+				bad := metaTool("a", tt.meta, tt.icons)
+				var pinsBefore []byte
+				if pinnedFirst {
+					firstScan(t, e, metaTool("a", `{"k":"v"}`, ""))
+					pinsBefore = readFileBytes(t, e.pinsPath())
+				}
+
+				got := e.scan(fakeServers(map[string][]inspect.Tool{"srv": {bad}}))
+
+				// A tool that cannot be hashed is not verified: high, exit 1. The
+				// reason is a fixed text, never a value of the tool.
+				assertScanRun(t, got, scanWant{code: exitFindings})
+				// A pinned server shows the tool name too. A server that cannot be
+				// pinned shows the reason alone.
+				want := pinFinding{"MOAT-T2-004", "high", "srv", "", `"invalid tool data"`}
+				if pinnedFirst {
+					want = pinFinding{"MOAT-T2-004", "high", "srv", `a ("invalid tool data")`, ""}
+				}
+				assertPinRows(t, got.stdout, want)
+				assertContainsNone(t, "stdout", got.stdout, []string{metaCanary})
+				assertContainsNone(t, "stderr", got.stderr, []string{metaCanary})
+				if pinnedFirst {
+					if after := readFileBytes(t, e.pinsPath()); !bytes.Equal(pinsBefore, after) {
+						t.Errorf("pins.json changed after a tool that cannot be hashed\nbefore: %s\nafter:  %s", pinsBefore, after)
+					}
+				} else {
+					// Nothing is stored for a server that cannot be pinned.
+					e.assertNoPinsFile(t, "a snapshot failure")
+				}
+			})
+		}
+	}
+}
+
+// bigMeta returns a valid JSON _meta object of more than 2 MiB (the size cap of
+// one server entry in pins.json) that holds the canary.
+func bigMeta() string {
+	return `{"k":"` + metaCanary + strings.Repeat("x", 2<<20+1024) + `"}`
+}
+
+// TestScanPinsHugeMetaFailsClosed checks that a tool whose _meta pushes the pin
+// entry of its server over the size cap of pins.json (2 MiB) never passes
+// silently. On the first run the server is not pinned: the scan reports
+// MOAT-T2-004 (high) and exits 1, and pins.json holds nothing of the server.
+// On a run of a pinned server the huge _meta is a change: MOAT-T2-001 (high),
+// exit 1, and the diff is cut at its size limit with a warning, so the output
+// stays small. The tools of the pinned server can no longer be pinned, so it
+// also gets the MOAT-T2-004 (high) of the first run, also when the only change
+// is a new tool (MOAT-T2-002, medium): no change of its tools could ever be
+// accepted. The first run never prints the _meta. The diff of the second run
+// shows a cut part of the new _meta, as it does for any changed _meta, so the
+// test does not check the canary there.
+func TestScanPinsHugeMetaFailsClosed(t *testing.T) {
+	t.Parallel()
+
+	t.Run("first run", func(t *testing.T) {
+		t.Parallel()
+		e := newPinEnv(t, oneServer("srv"))
+
+		got := e.scan(fakeServers(map[string][]inspect.Tool{"srv": {metaTool("a", bigMeta(), "")}}))
+
+		assertScanRun(t, got, scanWant{code: exitFindings})
+		assertPinRows(t, got.stdout, pinFinding{"MOAT-T2-004", "high", "srv", "", `"the tools cannot be pinned"`})
+		assertContainsNone(t, "stdout", got.stdout, []string{metaCanary})
+		assertContainsNone(t, "stderr", got.stderr, []string{metaCanary})
+		// Nothing is stored for a server that cannot be pinned.
+		e.assertNoPinsFile(t, "a snapshot failure")
+	})
+
+	t.Run("pinned server", func(t *testing.T) {
+		t.Parallel()
+		e := newPinEnv(t, oneServer("srv"))
+		firstScan(t, e, metaTool("a", `{"k":"small"}`, ""))
+		pinsBefore := readFileBytes(t, e.pinsPath())
+
+		got := e.scan(fakeServers(map[string][]inspect.Tool{"srv": {metaTool("a", bigMeta(), "")}}))
+
+		assertScanRun(t, got, scanWant{
+			code:   exitFindings,
+			stdout: []string{"[truncated: text over the limit]"},
+			stderr: []string{"was cut at the size limit"},
+		})
+		assertPinRows(t, got.stdout,
+			pinFinding{"MOAT-T2-004", "high", "srv", "", `"the tools cannot be pinned"`},
+			pinFinding{"MOAT-T2-001", "high", "srv", "a", ""})
+		// The diff is cut: the output is far smaller than the 2 MiB _meta.
+		if len(got.stdout) > 256<<10 {
+			t.Errorf("stdout has %d bytes, want the diff cut well below the 2 MiB _meta", len(got.stdout))
+		}
+		assertContainsNone(t, "stderr", got.stderr, []string{metaCanary})
+		// scan never rewrites the entry of a pinned server.
+		if after := readFileBytes(t, e.pinsPath()); !bytes.Equal(pinsBefore, after) {
+			t.Errorf("scan changed pins.json of a pinned server")
+		}
+	})
+
+	t.Run("pinned server with a huge new tool", func(t *testing.T) {
+		t.Parallel()
+		e := newPinEnv(t, oneServer("srv"))
+		small := mkTool("a", "Add.")
+		firstScan(t, e, small)
+		pinsBefore := readFileBytes(t, e.pinsPath())
+
+		got := e.scan(fakeServers(map[string][]inspect.Tool{"srv": {small, metaTool("n", bigMeta(), "")}}))
+
+		// The new tool alone is medium. The high MOAT-T2-004 makes scan exit 1.
+		assertScanRun(t, got, scanWant{code: exitFindings})
+		assertPinRows(t, got.stdout,
+			pinFinding{"MOAT-T2-004", "high", "srv", "", `"the tools cannot be pinned"`},
+			pinFinding{"MOAT-T2-002", "medium", "srv", "n", ""})
+		if hints := splitPinOutput(t, got.stdout).hints; len(hints) != 0 {
+			t.Errorf("hints = %q, want none: pin --accept would refuse these tools", hints)
+		}
+		// The tools were compared, so the row names the real risk: they can
+		// never be accepted.
+		for _, f := range parseFindings(t, got.stdout) {
+			if f.RuleID == "MOAT-T2-004" && f.Risk != riskPinnedNotPinnable {
+				t.Errorf("MOAT-T2-004 Risk = %q, want %q", f.Risk, riskPinnedNotPinnable)
+			}
+		}
+		if after := readFileBytes(t, e.pinsPath()); !bytes.Equal(pinsBefore, after) {
+			t.Errorf("scan changed pins.json of a pinned server")
+		}
+	})
+}
+
 // TestScanPinsIgnoreFileWarningPerRule checks that the warning about a
 // .mcpmoat-ignore entry that cannot ignore a pin rule comes once for each rule
 // ID, in the order of the findings, and not once for each finding.
@@ -877,8 +1084,8 @@ func TestScanPinsIgnoreFileWarningPerRule(t *testing.T) {
 	if n := strings.Count(got.stderr, "cannot ignore"); n != 3 {
 		t.Errorf("stderr has %d ignore file warnings, want 3 (one for each rule ID)\n%s", n, got.stderr)
 	}
-	if len(splitPinOutput(t, got.stdout).rows) != 5 {
-		t.Errorf("want 5 pin rows (2 changed, 2 new, 1 removed)\n%s", got.stdout)
+	if rows := splitPinOutput(t, got.stdout).rows; len(rows) != 5 {
+		t.Errorf("pin rows = %+v, want 5 (2 changed, 2 new, 1 removed)\n%s", rows, got.stdout)
 	}
 }
 
@@ -896,13 +1103,10 @@ func TestScanPinsUnverifiedSeverity(t *testing.T) {
 	}}))
 
 	assertScanRun(t, got, scanWant{code: exitFindings})
-	want := []pinFindingRow{
-		{"MOAT-T2-004", "high", "srv", "tool", "a"},
-		{"MOAT-T2-004", "medium", "srv", "tool", "n"},
-	}
-	if rows := splitPinOutput(t, got.stdout).rows; !slices.Equal(rows, want) {
-		t.Errorf("pin rows = %+v, want %+v\nstdout:\n%s", rows, want, got.stdout)
-	}
+	assertPinRows(t, got.stdout,
+		pinFinding{"MOAT-T2-004", "high", "srv", `a ("duplicate tool name")`, ""},
+		pinFinding{"MOAT-T2-004", "medium", "srv", `n ("duplicate tool name")`, ""},
+	)
 }
 
 // TestScanPinsInterrupted checks that a signal during the inspection (S1) gives
@@ -956,8 +1160,8 @@ func TestScanPinsInterrupted(t *testing.T) {
 				if after := readFileBytes(t, e.pinsPath()); !bytes.Equal(pinsBefore, after) {
 					t.Errorf("pins.json changed in an interrupted scan\nbefore: %s\nafter:  %s", pinsBefore, after)
 				}
-			} else if _, err := os.Stat(e.pinsPath()); !errors.Is(err, os.ErrNotExist) {
-				t.Errorf("pins.json exists after an interrupted scan (stat error = %v), want nothing stored", err)
+			} else {
+				e.assertNoPinsFile(t, "an interrupted scan")
 			}
 		})
 	}
@@ -965,7 +1169,8 @@ func TestScanPinsInterrupted(t *testing.T) {
 
 // TestScanPinsCorruptStoreStartsNoServer checks that a pins.json that cannot be
 // read stops scan before the inspector is called, for a corrupt file, a newer
-// version and a pins path that is a folder (M2).
+// version and a pins path that is a folder (M2). The summary says why the
+// server was not inspected.
 func TestScanPinsCorruptStoreStartsNoServer(t *testing.T) {
 	t.Parallel()
 
@@ -994,6 +1199,10 @@ func TestScanPinsCorruptStoreStartsNoServer(t *testing.T) {
 			got := e.scan(fake)
 
 			assertScanRun(t, got, scanWant{code: exitError, stderr: []string{"mcpmoat scan: cannot read the pins file: "}})
+			row := summaryRowOf(t, got.stdout, "srv")
+			if row.Status != "not inspected" || row.Reason != reasonPinStepFailed {
+				t.Errorf("SUMMARY row of srv = status %q, reason %q; want not inspected with %q", row.Status, row.Reason, reasonPinStepFailed)
+			}
 			if calls := fake.Calls(); len(calls) != 0 {
 				t.Errorf("the inspector was called for %v, want no call", calls)
 			}
@@ -1026,10 +1235,83 @@ func TestScanPinsCanceledBeforeInspection(t *testing.T) {
 	if calls := fake.Calls(); len(calls) != 0 {
 		t.Errorf("the inspector was called for %v, want no call", calls)
 	}
-	if _, err := os.Stat(e.pinsPath()); !errors.Is(err, os.ErrNotExist) {
-		t.Errorf("pins.json exists after a canceled scan (stat error = %v), want nothing stored", err)
-	}
+	e.assertNoPinsFile(t, "a canceled scan")
 	if strings.Contains(stdout.String(), "MOAT-T2-") {
 		t.Errorf("stdout has a pin finding:\n%s", stdout)
+	}
+}
+
+// TestServerStatusesByIndex checks the matching of outcomes to servers. An
+// outcome goes to the server at its index, whatever the order of the outcomes
+// is, also when servers are equal in every field. A server with no outcome stays
+// "not inspected".
+func TestServerStatusesByIndex(t *testing.T) {
+	t.Parallel()
+
+	srv := discover.Server{
+		Name: "dup", Client: discover.ClientClaudeCode, Scope: discover.ScopeGlobal,
+		Source: "/home/u/.claude.json", Command: "run",
+	}
+	outcome := func(index, tools int) outcomeStatus {
+		return outcomeStatus{
+			index:  index,
+			status: report.ServerStatus{ServerRef: report.NewServerRef(srv), Status: report.StatusOK, Tools: tools},
+		}
+	}
+	tests := []struct {
+		name     string
+		servers  int
+		statuses []outcomeStatus
+		want     []string // "status/tools/findings" of each server
+	}{
+		{
+			name:     "outcomes in the opposite order",
+			servers:  2,
+			statuses: []outcomeStatus{outcome(1, 2), outcome(0, 1)},
+			want:     []string{"ok/1/1", "ok/2/1"},
+		},
+		{
+			name:     "server with no outcome",
+			servers:  2,
+			statuses: []outcomeStatus{outcome(1, 2)},
+			want:     []string{"not inspected/0/1", "ok/2/1"},
+		},
+		{
+			name:     "equal servers get one outcome each",
+			servers:  2,
+			statuses: []outcomeStatus{outcome(0, 1), outcome(1, 5)},
+			want:     []string{"ok/1/1", "ok/5/1"},
+		},
+		{
+			name:     "index outside the servers is skipped",
+			servers:  1,
+			statuses: []outcomeStatus{outcome(3, 3), outcome(-1, 4)},
+			want:     []string{"not inspected/0/1"},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			servers := make([]discover.Server, tt.servers)
+			configFindings := make([]int, tt.servers)
+			for i := range servers {
+				servers[i] = srv
+				// Each server has one config finding, and serverStatuses adds
+				// it to the findings of the outcome (none here).
+				configFindings[i] = 1
+			}
+			pr := pinReport{statuses: tt.statuses}
+			got := pr.serverStatuses(servers, configFindings)
+			if len(got) != len(tt.want) {
+				t.Fatalf("serverStatuses() returned %d entries, want %d", len(got), len(tt.want))
+			}
+			for i, st := range got {
+				line := fmt.Sprintf("%s/%d/%d", st.Status, st.Tools, st.Findings)
+				if line != tt.want[i] {
+					t.Errorf("server %d = %q, want %q", i, line, tt.want[i])
+				}
+			}
+		})
 	}
 }

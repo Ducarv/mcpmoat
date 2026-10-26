@@ -28,6 +28,8 @@ type canonicalTool struct {
 	// checks that it is valid JSON.
 	InputSchema  jsontext.Value       `json:"inputSchema"`
 	OutputSchema jsontext.Value       `json:"outputSchema"`
+	Meta         jsontext.Value       `json:"_meta"`
+	Icons        jsontext.Value       `json:"icons"`
 	Annotations  canonicalAnnotations `json:"annotations"`
 }
 
@@ -51,19 +53,20 @@ type canonicalAnnotations struct {
 // (PRD FR-11, threat T2). Canonical does not change t.
 //
 // Rug-pull detection depends on the canonical form: it must change when, and
-// only when, the tool changes. The notes below are its contract. Any change
-// to them needs a new HashVersion.
+// only when, the tool changes. The notes below are its contract. After the
+// first release, any change to them needs a new HashVersion (see HashVersion).
 //
-// Field set. The canonical form holds all six fields of inspect.Tool: name,
-// title, description, inputSchema, outputSchema and annotations. The
-// annotations hold their title and the four hints.
+// Field set. The canonical form holds all eight fields of inspect.Tool: name,
+// title, description, inputSchema, outputSchema, _meta, icons and
+// annotations. The annotations hold their title and the four hints.
 //
 // Shape. The canonical form is one JSON object with a fixed shape. Every key
 // is always present, also when the server did not send the field:
 //
-//	{"annotations":{"destructiveHint":null|bool,"idempotentHint":null|bool,
-//	 "openWorldHint":null|bool,"readOnlyHint":null|bool,"title":""},
-//	 "description":"","inputSchema":<schema>|null,"name":"",
+//	{"_meta":<obj>|null,"annotations":{"destructiveHint":null|bool,
+//	 "idempotentHint":null|bool,"openWorldHint":null|bool,
+//	 "readOnlyHint":null|bool,"title":""},"description":"",
+//	 "icons":<array>|null,"inputSchema":<schema>|null,"name":"",
 //	 "outputSchema":<schema>|null,"title":""}
 //
 // The line breaks are for this comment only: the real form has no
@@ -74,7 +77,12 @@ type canonicalAnnotations struct {
 // Absent values. A nil hint is null. Nil annotations give the same bytes as
 // empty annotations. A nil or zero-length schema and the JSON literal null
 // are all null, so "no schema" is different from the empty object schema {}.
-// A schema of only whitespace is not "no schema": it is invalid JSON.
+// A schema of only whitespace is not "no schema": it is invalid JSON. _meta
+// and icons follow the same rules as the schemas: nil, zero-length and the
+// literal null are null. A {} or [] given directly is different from null,
+// but inspect turns an empty _meta or icons into nil, so a tool from inspect
+// never has that difference. JCS sorts the keys of _meta. The order of the
+// icons array is kept, so a reordered array changes the hash.
 // readOnlyHint and idempotentHint map false to null, so false and absent are
 // the same for these two hints: the SDK cannot tell them apart (see
 // inspect.ToolAnnotations). A change to true always changes the hash.
@@ -103,15 +111,18 @@ type canonicalAnnotations struct {
 //     server message. A schema from the SDK therefore has no duplicate keys
 //     and no invalid UTF-8. Canonical still rejects them for tools from other
 //     sources.
-//   - The MCP fields _meta and icons are not part of the hash, because
-//     inspect drops them. This is an accepted limit (PRD FR-11). Issue #153
-//     adds them before v1.0.0.
+//   - The numbers in _meta pass through float64 too: inspect re-encodes the
+//     _meta of the SDK, so the limits of the first bullet apply to it.
+//   - The SDK drops the unknown keys inside an icon, so a change in such a key
+//     does not change the hash. The known icon fields (src, mimeType, sizes
+//     and theme) are part of the hash.
 //
 // Canonical returns an error that wraps ErrInvalidTool when a string field
-// holds invalid UTF-8, or when a schema is not valid JSON (this includes
-// invalid UTF-8 and lone surrogates in the schema), has a duplicate object
-// key or has a number out of range. The error message names the field but
-// never holds server text.
+// holds invalid UTF-8, or when a schema, _meta or icons is not valid JSON
+// (this includes invalid UTF-8 and lone surrogates), has a duplicate object
+// key or has a number out of range, and when _meta is not an object or null
+// or icons is not an array or null. The error message names the field but
+// never holds server text or _meta values.
 func Canonical(t inspect.Tool) ([]byte, error) {
 	// Nil annotations and empty annotations must give the same bytes, so use
 	// the zero value when there are none.
@@ -134,13 +145,27 @@ func Canonical(t inspect.Tool) ([]byte, error) {
 		}
 	}
 
-	in, err := canonicalSchema("inputSchema", t.InputSchema)
+	in, err := canonicalJSON("inputSchema", t.InputSchema)
 	if err != nil {
 		return nil, err
 	}
-	out, err := canonicalSchema("outputSchema", t.OutputSchema)
+	out, err := canonicalJSON("outputSchema", t.OutputSchema)
 	if err != nil {
 		return nil, err
+	}
+	meta, err := canonicalJSON("_meta", t.Meta)
+	if err != nil {
+		return nil, err
+	}
+	if k := meta.Kind(); k != '{' && k != 'n' {
+		return nil, invalidTool("_meta is not an object")
+	}
+	icons, err := canonicalJSON("icons", t.Icons)
+	if err != nil {
+		return nil, err
+	}
+	if k := icons.Kind(); k != '[' && k != 'n' {
+		return nil, invalidTool("icons is not an array")
 	}
 
 	// The type conversion copies every field, and stops compiling when
@@ -155,6 +180,8 @@ func Canonical(t inspect.Tool) ([]byte, error) {
 		Description:  t.Description,
 		InputSchema:  in,
 		OutputSchema: out,
+		Meta:         meta,
+		Icons:        icons,
 		Annotations:  a,
 	})
 	if err != nil {
@@ -183,9 +210,10 @@ func falseToNil(p *bool) *bool {
 	return p
 }
 
-// canonicalSchema returns the JCS form of one schema, or null when raw is nil
-// or zero-length. field is the fixed key name for the error message.
-func canonicalSchema(field string, raw []byte) (jsontext.Value, error) {
+// canonicalJSON returns the JCS form of one schema, _meta or icons value, or
+// null when raw is nil or zero-length. field is the fixed key name for the
+// error message.
+func canonicalJSON(field string, raw []byte) (jsontext.Value, error) {
 	if len(raw) == 0 {
 		return jsontext.Value("null"), nil
 	}
@@ -197,7 +225,7 @@ func canonicalSchema(field string, raw []byte) (jsontext.Value, error) {
 	// This pass puts the field name in the error; the final Canonicalize of
 	// the whole document makes the bytes canonical.
 	if err := v.Canonicalize(); err != nil {
-		return nil, schemaError(field, err)
+		return nil, fieldError(field, err)
 	}
 	// Canonicalize changes a number out of range to the largest float64, with
 	// no error. So check the numbers as the server wrote them, in raw.
@@ -217,7 +245,7 @@ func checkNumbers(field string, raw []byte) error {
 			return nil
 		}
 		if err != nil {
-			return schemaError(field, err)
+			return fieldError(field, err)
 		}
 		if tok.Kind() != '0' {
 			continue
@@ -231,10 +259,10 @@ func checkNumbers(field string, raw []byte) error {
 	}
 }
 
-// schemaError maps a jsontext error for a schema to a fixed reason. The
-// jsontext error message can quote the schema (key names, string parts), so
-// it is not wrapped.
-func schemaError(field string, err error) error {
+// fieldError maps a jsontext error for a schema, _meta or icons value to a
+// fixed reason. The jsontext error message can quote the value (key names,
+// string parts), so it is not wrapped.
+func fieldError(field string, err error) error {
 	if errors.Is(err, jsontext.ErrDuplicateName) {
 		return invalidTool("duplicate object key in " + field)
 	}
