@@ -28,7 +28,7 @@ builds:
     ldflags:
       - -s -w
       - -X main.version=v{{ .Version }}
-      # 12 characters, the same as the commit that go install builds print.
+      # 12 characters, the same as a go build in a git checkout prints.
       - -X main.commit={{ slice .FullCommit 0 12 }}
       - -X main.date={{ .CommitDate }}
     goos:

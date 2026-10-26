@@ -25,6 +25,10 @@ binary_path() {
   echo "$path"
 }
 
+for f in checksums.txt artifacts.json metadata.json; do
+  [ -f "dist/$f" ] || fail "dist/$f is missing: run goreleaser release --snapshot --clean first"
+done
+
 # The goos x goarch list in .goreleaser.yaml: one archive each, no others.
 targets=(darwin_amd64 darwin_arm64 linux_amd64 linux_arm64)
 for t in "${targets[@]}"; do
