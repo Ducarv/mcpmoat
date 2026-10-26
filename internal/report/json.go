@@ -61,8 +61,8 @@ type ScanReport struct {
 	// Complete is false when the report can miss results, and scan then
 	// exits with 2: a config file has a problem (see Errors), or the
 	// inspection or the pin step failed as a whole (pins.json cannot be read,
-	// for example), or the LLM provider failed in a --llm scan. The reason is
-	// on stderr only.
+	// for example), or the LLM step of a --llm scan is incomplete (a provider
+	// failure, or more than 500 tools). The reason is on stderr only.
 	Complete bool            `json:"complete"`
 	Servers  []JSONServer    `json:"servers"`
 	Findings []JSONFinding   `json:"findings"`

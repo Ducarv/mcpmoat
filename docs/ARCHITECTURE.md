@@ -573,8 +573,8 @@ first, so an escape sequence in that text never reaches the terminal as one.
 ## JSON output
 
 `mcpmoat scan --json` (FR-15) writes the report as one JSON document on stdout. The schema is
-[docs/schema/scan-output.v2.json](schema/scan-output.v2.json). The version 1 schema,
-[docs/schema/scan-output.v1.json](schema/scan-output.v1.json), stays as it was released. The Go
+[docs/schema/scan-output.v2.json](schema/scan-output.v2.json). The version 1 schema file,
+[docs/schema/scan-output.v1.json](schema/scan-output.v1.json), stays unchanged. The Go
 types are in
 `internal/report/json.go`. `cmd/mcpmoat/scan_json.go` fills them from the same data as the
 terminal report, in the same order. The one difference: `findings` keeps the order of the rows,
@@ -677,7 +677,9 @@ Setup (`checkLLMFlags` in `cmd/mcpmoat/scan_llm.go`):
   base URL, and a missing or invalid key are usage errors (exit 2). The error texts are fixed and
   never hold the key, the model name or the URL.
 - The base URL must be `https`, or `http` only for a loopback host (a local model server), so the
-  key never crosses a network in clear text. User info, a query and a fragment are refused.
+  key never crosses a network in clear text. With `http`, every address that the host name
+  resolves to must be a loopback address: a name that resolves to another address is refused, and
+  no request is sent. User info, a query and a fragment are refused.
 - Then `scan` prints this warning on stderr, also with `--json`, before it builds the client and
   before any request: `mcpmoat scan: warning: --llm sends the name and description of every tool to
   the LLM provider <provider> at <host>. This data leaves your machine.` The host is escaped with
@@ -691,7 +693,9 @@ that text was cut. mcpmoat never puts the client config, the command, its argume
 names or values, the server URL, the tool schemas or the pins into the request. The description
 goes as the server returned it: mcpmoat does not remove secret values from it (see the security
 notes below). The key goes only in the auth header of the provider (`x-api-key` for Anthropic,
-`Authorization: Bearer` for OpenAI).
+`Authorization: Bearer` for OpenAI). `--ignore` and `.mcpmoat-ignore` hide LLM findings from the
+report, but they do not stop a tool from being sent. To keep a server out of `--llm`, scan it with
+a separate config.
 
 Limits of a scan:
 

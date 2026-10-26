@@ -102,9 +102,11 @@ echo "run-offline: the namespace has loopback only; run the E2E tests as uid $ui
 # The job proves that no IP traffic leaves the namespace. Unix sockets on the
 # filesystem are out of its scope, but --clear-groups drops the supplementary
 # groups of the user (on GitHub runners: docker, which can open the Docker
-# socket). The user keeps its own uid and gid, so it can still read its Go
-# caches and the private TMPDIR, which it owns.
-exec setpriv --reuid="$uid" --regid="$gid" --clear-groups -- \
+# socket). --no-new-privs stops sudo and other setuid binaries from giving
+# the tests root again (the runner user has passwordless sudo, and root could
+# reach the host network namespace). The user keeps its own uid and gid, so it
+# can still read its Go caches and the private TMPDIR, which it owns.
+exec setpriv --reuid="$uid" --regid="$gid" --clear-groups --no-new-privs -- \
   env -i \
   HOME="$home" \
   PATH="$goroot/bin:/usr/bin:/bin" \

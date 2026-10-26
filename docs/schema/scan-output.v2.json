@@ -28,7 +28,7 @@
       "enum": ["no-connect", "connect"]
     },
     "complete": {
-      "description": "False when the report can miss results: a config file has a problem (see \"errors\"), or the inspection or the pin step failed as a whole (for example, pins.json cannot be read), or the LLM provider failed in a --llm scan. The exit code is then 2, and the reason is on stderr. A failed save of new pins comes after the document is written, so \"complete\" can be true while the exit code is 2. Always check the exit code too.",
+      "description": "False when the report can miss results: a config file has a problem (see \"errors\"), or the inspection or the pin step failed as a whole (for example, pins.json cannot be read), or the LLM step of a --llm scan is incomplete (a provider failure, or more than 500 tools). The exit code is then 2, and the reason is on stderr. A failed save of new pins comes after the document is written, so \"complete\" can be true while the exit code is 2. Always check the exit code too.",
       "type": "boolean"
     },
     "servers": {
@@ -197,7 +197,7 @@
           "type": "string"
         },
         "source": {
-          "description": "What made the finding. \"rule\": a rule in rules/ matched. \"llm\": the optional LLM classification (--llm) made it. An \"llm\" finding is advisory: a model made it, not a rule.",
+          "description": "What made the finding. \"rule\": a finding from a mcpmoat rule (a built-in check or a rule file), not from the LLM. \"llm\": the optional LLM classification (--llm) made it. An \"llm\" finding is advisory: a model made it, not a rule.",
           "enum": ["rule", "llm"]
         }
       }

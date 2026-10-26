@@ -93,7 +93,8 @@ type Source string
 
 // The values of FindingRow.Source. The zero value "" means SourceRule.
 const (
-	// SourceRule is a finding from a rule in rules/.
+	// SourceRule is a finding from a mcpmoat rule (a built-in check or a rule
+	// file), not from the LLM.
 	SourceRule Source = "rule"
 	// SourceLLM is a finding from the optional LLM classification (--llm). It
 	// is advisory: a model made it, not a rule.
@@ -222,14 +223,14 @@ func writeFinding(b *strings.Builder, r FindingRow) {
 		b.WriteString("  ")
 		b.WriteString(termsafe.QuoteCut(r.Title, maxTitleRunes))
 	}
-	llm := r.Source == SourceLLM
-	if llm {
+	isLLM := r.Source == SourceLLM
+	if isLLM {
 		// Fixed text, so it needs no escape.
 		b.WriteString(" [LLM]")
 	}
 	b.WriteString("\n")
 	writeLine(b, "Server", r.label())
-	if llm {
+	if isLLM {
 		writeLine(b, "Source", "LLM classification (advisory)")
 	}
 

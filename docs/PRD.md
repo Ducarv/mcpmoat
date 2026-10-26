@@ -620,7 +620,8 @@ the machine**.
   bytes) and the tool description (cut at 16 KiB, with a flag that says it was cut), in one JSON
   user message with a fixed system prompt. mcpmoat never puts configs, env values, headers,
   arguments, URLs, schemas or pins into a request. At most 500 tools per scan and 4 requests at the
-  same time.
+  same time. `--ignore` and `.mcpmoat-ignore` hide LLM findings from the report, but they do not
+  stop a tool from being sent: to keep a server out of `--llm`, scan it with a separate config.
 - The description is sent as the server returned it. mcpmoat does not remove configured secret
   values from it. A server that got a token through its env or headers can put that token into its
   description, and `--llm` then sends it to the provider. The server already holds the value. The

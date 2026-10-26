@@ -177,8 +177,8 @@ mcpmoat scan --json | jq -r '.findings[] | "\(.rule_id) \(.server)"'
   inspected, and the warnings of an inspection.
 - **Exit codes** do not change: 0, 1 or 2 (see [Pins and rug pulls](#pins-and-rug-pulls)).
 - **`complete`** is `false` when the report can miss results, for example when a config file has a
-  problem, `pins.json` cannot be read, or the LLM provider failed in a `--llm` scan. The exit code
-  is then 2, and the reason is on stderr.
+  problem, `pins.json` cannot be read, or the LLM step of a `--llm` scan is incomplete (a provider
+  failure, or more than 500 tools). The exit code is then 2, and the reason is on stderr.
   `complete` can be `true` with exit code 2 when the save of new pins fails after the report, so
   always check the exit code too.
 - The document never holds env or header values. A finding names the key it is about, for example
@@ -355,7 +355,9 @@ mcpmoat scan --llm --llm-provider openai --llm-model <model> \
   default model for `anthropic`.
 - **`--llm-base-url <url>`:** the base URL of the API. The default is the public API of the
   provider. It must use `https`, or `http` only for a loopback host such as `127.0.0.1` or
-  `localhost`. A user name, a password, a query or a fragment in the URL is refused.
+  `localhost`. With `http`, every address that the host name resolves to must be a loopback
+  address. Otherwise `scan` refuses the URL and sends no request. A user name, a password, a query
+  or a fragment in the URL is refused.
 - Each `--llm-*` flag needs `--llm`. `--llm` does not work with `--no-connect`, because without a
   connection there are no tools to send. Both are usage errors (exit code 2).
 - **Warning line:** before the first request, `scan` prints this line on stderr, also with `--json`:
@@ -363,7 +365,9 @@ mcpmoat scan --llm --llm-provider openai --llm-model <model> \
   <provider> at <host>. This data leaves your machine.`
 - **What is sent:** one request for each tool of each server that `scan` inspected (status `ok`).
   The request holds the tool name (cut at 512 bytes) and the tool description (cut at 16 KiB, with
-  a flag that says it was cut), with a fixed instruction text from mcpmoat.
+  a flag that says it was cut), with a fixed instruction text from mcpmoat. `--ignore` and
+  `.mcpmoat-ignore` hide LLM findings from the report, but they do not stop a tool from being sent.
+  To keep a server out of `--llm`, scan it with a separate config.
 - **What mcpmoat never puts in a request:** your config files, env values, headers, args, URLs, the
   tool schemas and `pins.json`. The key goes only in the auth header of the provider.
 - **The description goes as the server wrote it:** mcpmoat does not remove secret values from it.
@@ -407,9 +411,8 @@ mcpmoat scan --llm --llm-provider openai --llm-model <model> \
   limit). The rule findings still print.
 - **Ignore:** `--ignore` and `.mcpmoat-ignore` work for `MOAT-LLM-001` and `MOAT-LLM-002`. The
   ignored count on stderr includes them (see [Ignore findings](#ignore-findings)).
-- **OpenAI reasoning models:** mcpmoat sends `temperature` 0, and some OpenAI reasoning models
-  accept only the default temperature, so they answer HTTP 400 and `scan` reports a provider
-  failure.
+- **OpenAI temperature:** the OpenAI request does not set a temperature, so models with a fixed
+  temperature work.
 
 ## Exit codes
 
