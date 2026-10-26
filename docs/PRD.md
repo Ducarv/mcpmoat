@@ -146,7 +146,9 @@ hidden instructions or leak data.
 Note on `--llm` (FR-17, not a new threat ID). The optional classifier reads untrusted tool text
 with a model. So it adds four threats to T1: prompt injection against the classifier, untrusted
 model output, a name or description that is cut so that the payload is hidden, and data that
-leaves the machine. The mitigations:
+leaves the machine. One risk stays: while `--llm` runs, the key is in the environment of the
+mcpmoat process, and a stdio server runs as the same user and can read it (for example
+`/proc/<pid>/environ` on Linux). The mitigations:
 
 - Prompt injection: a fixed system prompt, and the tool text goes only as a JSON string in the user
   message.
@@ -156,6 +158,9 @@ leaves the machine. The mitigations:
   that the model rates `none` or `low`, or whose answer is unusable.
 - Data that leaves the machine: `--llm` is opt-in, and a warning is printed before any request.
 - A hostile config that hides the LLM findings: only `--ignore` hides them, not `.mcpmoat-ignore`.
+- The key in the mcpmoat environment: mcpmoat does not give the key to a server through its
+  environment or a placeholder, and the README advises a key made for `--llm` with a low spend
+  limit.
 
 The code-level notes are in the package doc comment of `internal/llm/doc.go`.
 
@@ -639,10 +644,8 @@ the machine**.
   description (each cut at a fixed size, with a flag that says it was cut), in one JSON user
   message with a fixed system prompt. mcpmoat never puts configs, env values, headers, arguments,
   URLs, schemas or pins into a request. A cap on the number of tools per scan (500): more tools
-  than the cap give exit code 2. The README holds the sizes and the other limits. Only `--ignore`
-  hides LLM findings from the report. `.mcpmoat-ignore` cannot, because
-  it can come from a cloned repository (FR-10). `--ignore` does not stop a tool from being sent: to
-  keep a server out of `--llm`, scan it with a separate config.
+  than the cap give exit code 2. The README holds the sizes and the other limits. `--ignore` does
+  not stop a tool from being sent: to keep a server out of `--llm`, scan it with a separate config.
 - A tool whose name or description was cut is never rated below `medium`, and an unusable model
   answer for it does not hide it. The code enforces this, not only the system prompt. The
   [README](../README.md#optional-llm-classification-sends-data-off-your-machine) holds the full
@@ -668,9 +671,8 @@ the machine**.
   field is `false`. The README holds the list of failures and the exact stderr lines.
 - A hostile server can make `scan --llm` exit with 2: it can list more tools than the cap, or write a
   description that makes the provider answer with an HTTP 4xx (a content filter or a context
-  limit). A provider failure stops the other requests and gives exit 2 (fail closed). The rule
-  findings still print. A follow-up may make a 400, 413 or 422 for one tool a result for that tool
-  only.
+  limit). The rule findings still print. A follow-up may make a 400, 413 or 422 for one tool a
+  result for that tool only.
 
 ---
 

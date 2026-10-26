@@ -240,7 +240,7 @@ the connect and pin steps between step 5 and step 6:
   [The `--llm` classifier](#the---llm-classifier)). It only adds rows: it never changes or drops a
   rule finding, and it never touches pins, diffs or hints. Only `--ignore` drops LLM rows, as for
   the pin rows. The `.mcpmoat-ignore` file does not (see step 3).
-  The ignored count includes the dropped LLM rows. See [The `--llm` classifier](#the---llm-classifier).
+  The ignored count includes the dropped LLM rows.
 - The pin findings join the config findings in one report. A changed tool and a new tool also get a
   diff, so the user can review the content of a new tool before they accept it. A new tool has the
   header `New tool <tool> on server <server>:` and only added lines. A not verified tool with a diff

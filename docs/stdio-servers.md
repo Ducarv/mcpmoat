@@ -117,10 +117,13 @@ Rules:
 - The values come from your environment, the one that you start mcpmoat in. A placeholder can
   read any variable, not only the base set. So a config can pass a variable such as
   `GITHUB_TOKEN` to the server, the same as in your client.
-- Exception for hidden variables: some variables are hidden from every placeholder. `scan` hides
-  `MCPMOAT_LLM_API_KEY`. A placeholder for a hidden variable fails for every server, trusted or
-  not, stdio or remote, with a config error that says the variable is hidden from placeholders.
-  The code is `SDKOptions.HiddenEnv` in `internal/inspect`.
+- Exception for hidden variables: some variables are hidden from every placeholder. `scan` and `pin` hide
+  `MCPMOAT_LLM_API_KEY`, also without `--llm`. To a placeholder, a hidden variable is not set, and
+  mcpmoat never reads its value. Without a default, the placeholder fails for every server, trusted
+  or not, stdio or remote, with a config error that says the variable is hidden from placeholders.
+  `pin --accept` of such a server fails the same way. With a default, such as
+  `${MCPMOAT_LLM_API_KEY:-x}`, the default applies. The code is `SDKOptions.HiddenEnv` in
+  `internal/inspect`.
 - Exception: a server from a project file that a repository can ship (see
   [Project servers](#project-servers)) runs only when you opt in, and it reads less. A stdio
   server reads only the base set, which it gets anyway. A remote server reads no variable at all,

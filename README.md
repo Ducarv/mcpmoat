@@ -354,7 +354,7 @@ mcpmoat scan --llm --llm-provider openai --llm-model <model> \
 - **API key:** mcpmoat reads it only from the `MCPMOAT_LLM_API_KEY` environment variable. There is no
   flag for it, because command-line arguments show in `ps` and in your shell history. With `--llm`
   and no key, `scan` exits with code 2 and names the variable. A local server needs a key too: use
-  any value that it accepts.
+  any value that it accepts (see `--llm-base-url` below).
 - **`--llm-provider anthropic|openai`:** the API. The default is `anthropic`. `openai` also works
   with a server that speaks the OpenAI Chat Completions API.
 - **`--llm-model <name>`:** the model. It is required for `openai`. `mcpmoat scan -h` shows the
@@ -363,7 +363,9 @@ mcpmoat scan --llm --llm-provider openai --llm-model <model> \
   provider. It must use `https`, or `http` only for a loopback host such as `127.0.0.1` or
   `localhost`. With `http`, every address that the host name resolves to must be a loopback
   address. Otherwise `scan` refuses the URL and sends no request. A user name, a password, a query
-  or a fragment in the URL is refused.
+  or a fragment in the URL is refused. With an `http` base URL, any process on this machine that
+  listens on that port gets the key in clear text. So use a key made for that local server or
+  gateway, not a real provider key.
 - Each `--llm-*` flag needs `--llm`. `--llm` does not work with `--no-connect`, because without a
   connection there are no tools to send. Both are usage errors (exit code 2).
 - **Warning line:** before the first request, `scan` prints this line on stderr, also with `--json`:
@@ -422,8 +424,10 @@ mcpmoat scan --llm --llm-provider openai --llm-model <model> \
 - **What `--llm` does not check:** mcpmoat sends no input schema, so `--llm` does not rate text
   that is hidden in a parameter description of a schema.
 - **Your API key and the servers:** mcpmoat does not pass the key to a server through the server
-  environment or through a placeholder. A `${MCPMOAT_LLM_API_KEY}` placeholder in a server config
-  fails with an error (see [Placeholders](docs/stdio-servers.md#placeholders)). But a stdio server
+  environment or through a placeholder. `scan` and `pin` hide the variable from every placeholder. A
+  `${MCPMOAT_LLM_API_KEY}` placeholder in a server config fails with an error. A placeholder with a
+  default, such as `${MCPMOAT_LLM_API_KEY:-x}`, gets the default (see
+  [Placeholders](docs/stdio-servers.md#placeholders)). But a stdio server
   runs as your user and can read the environment of the mcpmoat process. Use a key made for this,
   with a low spend limit, for `--llm`.
 - **Exit codes:** LLM findings count for `--fail-on` like any finding. A provider failure (a
