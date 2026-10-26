@@ -97,8 +97,10 @@ With a PR number:
 gh pr view <n> --json title,body,baseRefName,headRefName,url,additions,deletions,changedFiles,files
 ```
 
-Without a PR number, review the current branch. The base is the profile's default PR base
-branch, else the repo default branch:
+Without a PR number, review the current branch. The base is the base of the open PR for the
+branch (`gh pr view --json baseRefName`), else the profile's default PR base branch, else the repo
+default branch. A hotfix or release branch has base `main`: if the branch is cut from `main`, ask
+the user which base to use:
 
 ```bash
 BASE_BRANCH=<from profile, else: git remote show origin | sed -n 's/.*HEAD branch: //p'>

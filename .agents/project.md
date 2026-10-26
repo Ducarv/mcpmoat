@@ -71,7 +71,9 @@ A row that links to another file means: run the commands at the link target.
 
 ## Git and pull requests
 
-- Default PR base branch: `main`.
+- Default PR base branch: `dev`. `dev` is the default branch of the repo. Only the maintainer's
+  release PR (`dev` into `main`) and a hotfix PR use `main` as the base. Branch from `dev`.
+  Skills use the base of an open PR first, then this default.
 - Branch names: `feat/<issue>-<slug>`, `fix/<issue>-<slug>`, `chore/<issue>-<slug>`, `docs/<issue>-<slug>`.
 - Commit style: Conventional Commits. Scopes: `cli`, `discover`, `inspect`, `rules`, `pins`,
   `report`, `release`, `ci`, `docs`.

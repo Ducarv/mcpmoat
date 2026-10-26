@@ -15,6 +15,7 @@ This page is the index. Each topic has one owner doc. Update the owner doc. Do n
 | Commands (gates) | [CONTRIBUTING.md](../CONTRIBUTING.md#checks) |
 | Rule authoring | [CONTRIBUTING.md](../CONTRIBUTING.md#contributing-a-rule) |
 | PR docs rule | [CONTRIBUTING.md](../CONTRIBUTING.md#pull-requests) |
+| Branch model (`dev` and `main`) | [CONTRIBUTING.md](../CONTRIBUTING.md#branches-and-releases) |
 | Release process (maintainers) | [CONTRIBUTING.md](../CONTRIBUTING.md#releasing) |
 | Conventions (code style, git, language, agent routing, review, release notes) | [.agents/project.md](../.agents/project.md) |
 | Security reporting | [SECURITY.md](../SECURITY.md) |
