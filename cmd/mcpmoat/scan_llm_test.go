@@ -568,7 +568,35 @@ func TestScanBaseURLHiddenInArgErrors(t *testing.T) {
 			want: `invalid value "-llm-base-url=(hidden)" for flag -llm-model: --llm-model needs a model name`},
 		{name: "--llm-model takes --llm-base-url URL", args: []string{"--llm", "--llm-model", "--llm-base-url", canaryURL},
 			want: `invalid value "--llm-base-url" for flag -llm-model: --llm-model needs a model name`},
+		// The forms with "=": the value of another flag holds the base URL
+		// flag, so the flag package quotes it whole in the error.
+		{name: "--timeout=--llm-base-url=URL", args: []string{"--timeout=--llm-base-url=" + canaryURL},
+			want: `invalid value "--llm-base-url=(hidden)" for flag -timeout: parse error`},
+		{name: "-timeout=-llm-base-url=URL", args: []string{"-timeout=-llm-base-url=" + canaryURL},
+			want: `invalid value "-llm-base-url=(hidden)" for flag -timeout: parse error`},
+		{name: "--timeout= with a value with a quote", args: []string{"--timeout=--llm-base-url=" + quoteURL},
+			want: `invalid value "--llm-base-url=(hidden)" for flag -timeout: parse error`},
+		{name: "--timeout= with text before the flag name", args: []string{"--timeout=x--llm-base-url=" + canaryURL},
+			want: `invalid value "x--llm-base-url=(hidden)" for flag -timeout: parse error`},
+		{name: "--timeout= with the flag name twice", args: []string{"--timeout=--llm-base-url=a-llm-base-url=" + canaryURL},
+			want: `invalid value "--llm-base-url=(hidden)" for flag -timeout: parse error`},
+		{name: "--concurrency=---llm-base-url=URL", args: []string{"--concurrency=---llm-base-url=" + canaryURL},
+			want: `invalid value "---llm-base-url=(hidden)" for flag -concurrency: parse error`},
+		{name: "--ignore=--llm-base-url=URL", args: []string{"--ignore=--llm-base-url=" + canaryURL},
+			want: `invalid value "--llm-base-url=(hidden)" for flag -ignore: --ignore needs a rule ID`},
+		{name: "--fail-on=-llm-base-url=URL", args: []string{"--fail-on=-llm-base-url=" + canaryURL},
+			want: `invalid value "-llm-base-url=(hidden)" for flag -fail-on: --fail-on needs low, medium, high or critical`},
+		{name: "--config=--llm-base-url=URL", args: []string{"--config=--llm-base-url=" + canaryURL},
+			want: `invalid value "--llm-base-url=(hidden)" for flag -config: --config needs a file name`},
+		{name: "--llm=--llm-base-url=URL", args: []string{"--llm=--llm-base-url=" + canaryURL},
+			want: `invalid boolean value "--llm-base-url=(hidden)" for -llm: parse error`},
+		{name: "--llm-provider=--llm-base-url=URL", args: []string{"--llm", "--llm-provider=--llm-base-url=" + canaryURL},
+			want: `invalid value "--llm-base-url=(hidden)" for flag -llm-provider: --llm-provider needs a provider name`},
+		{name: "--timeout=--llm-base-url URL", args: []string{"--timeout=--llm-base-url", canaryURL},
+			want: `invalid value "--llm-base-url" for flag -timeout: parse error`},
 		{name: "flag not defined before the URL", args: []string{"--bogus", "--llm-base-url=" + canaryURL},
+			want: "flag provided but not defined: -bogus"},
+		{name: "flag not defined with the URL", args: []string{"--bogus=--llm-base-url=" + canaryURL},
 			want: "flag provided but not defined: -bogus"},
 		{name: "three dashes", args: []string{"---llm-base-url=" + canaryURL},
 			want: "bad flag syntax: ---llm-base-url=(hidden)"},
@@ -580,6 +608,10 @@ func TestScanBaseURLHiddenInArgErrors(t *testing.T) {
 			want: `unexpected arguments ["--llm-base-url=(hidden)"]`},
 		{name: "positional after the flag", args: []string{"--llm-base-url", canaryURL, "extra"},
 			want: `unexpected arguments ["extra"]`},
+		{name: "positional --x=--llm-base-url=URL", args: []string{"--", "--x=--llm-base-url=" + canaryURL},
+			want: `unexpected arguments ["--x=--llm-base-url=(hidden)"]`},
+		{name: "positional --x=--llm-base-url URL", args: []string{"--", "--x=--llm-base-url", canaryURL},
+			want: `unexpected arguments ["--x=--llm-base-url" "(hidden)"]`},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -610,6 +642,8 @@ func TestScanBaseURLHiddenInArgErrors(t *testing.T) {
 func TestArgHider(t *testing.T) {
 	t.Parallel()
 
+	const passCanary = "CANARYPASS7"
+	const canaryURL = "https://user:" + passCanary + "@h.example"
 	tests := []struct {
 		name string
 		args []string
@@ -625,11 +659,28 @@ func TestArgHider(t *testing.T) {
 		{name: "quoted form", args: []string{`--llm-base-url=a"b`}, in: `"a\"b" a"b`, want: `"(hidden)" (hidden)`},
 		{name: "other flag name", args: []string{"--llm-base-urlx=SECRET"}, in: "SECRET", want: "SECRET"},
 		{name: "not a flag", args: []string{"llm-base-url=SECRET"}, in: "SECRET", want: "SECRET"},
+		// The flag name inside the value of another flag.
+		{name: "value of another flag", args: []string{"--timeout=--llm-base-url=" + canaryURL},
+			in: `"--llm-base-url=` + canaryURL + `"`, want: `"--llm-base-url=(hidden)"`},
+		{name: "value of a bool flag", args: []string{"--llm=-llm-base-url=" + canaryURL},
+			in: `"-llm-base-url=` + canaryURL + `"`, want: `"-llm-base-url=(hidden)"`},
+		{name: "text before the flag name", args: []string{"--ignore=x---llm-base-url=" + canaryURL},
+			in: `"x---llm-base-url=` + canaryURL + `"`, want: `"x---llm-base-url=(hidden)"`},
+		{name: "flag name twice", args: []string{"--a=--llm-base-url=b-llm-base-url=" + canaryURL},
+			in: canaryURL + " b-llm-base-url=" + canaryURL, want: "(hidden) (hidden)"},
+		{name: "flag name at the end of a value", args: []string{"--timeout=--llm-base-url", canaryURL},
+			in: "a " + canaryURL, want: "a (hidden)"},
+		{name: "positional with the flag name", args: []string{"extra-llm-base-url=" + canaryURL},
+			in: canaryURL, want: "(hidden)"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			if got := newArgHider(tt.args, "llm-base-url").hide(tt.in); got != tt.want {
+			got := newArgHider(tt.args, flagLLMBaseURL).hide(tt.in)
+			if strings.Contains(got, passCanary) {
+				t.Errorf("hide(%q) = %q, which holds the password %q", tt.in, got, passCanary)
+			}
+			if got != tt.want {
 				t.Errorf("hide(%q) = %q, want %q", tt.in, got, tt.want)
 			}
 		})

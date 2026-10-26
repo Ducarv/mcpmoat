@@ -72,9 +72,10 @@ func (c *cli) runScan(opts options, args []string) int {
 
 	// The error of another flag, or the list of unexpected arguments, can
 	// hold a base URL value too: for example "--timeout --llm-base-url=URL"
-	// makes the flag package quote the whole argument. hider removes every
-	// base URL value of args from that text (see newArgHider).
-	hider := newArgHider(args, baseURLFlag.name)
+	// and "--timeout=--llm-base-url=URL" make the flag package quote the
+	// whole value. hider removes every base URL value of args from that text
+	// (see newArgHider).
+	hider := newArgHider(args, flagLLMBaseURL)
 	if err := fs.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
 			scanUsage(c.stdout)
@@ -283,22 +284,35 @@ type argHider struct {
 }
 
 // newArgHider returns an argHider for the values that args gives to the flag
-// name: the value of each "-name=value" and "--name=value", and the argument
-// after each bare "-name" and "--name". It looks at every argument, also after
-// "--" and after a flag that took "--name" as its own value, so it can find
-// more values than Parse uses: that only hides more. Any number of dashes
-// counts, because the flag package prints "---name=value" in its "bad flag
-// syntax" error.
+// name. It looks for the text "-name" in each argument, with one dash or more
+// before name:
+//   - "-name=" anywhere in the argument: the rest of the argument after each
+//     "-name=" is a value. So "--name=value" counts, and so does the value of
+//     another flag, as in "--timeout=--name=value", which the flag package
+//     quotes whole in its error.
+//   - "-name" at the end of the argument: the next argument is a value. So a
+//     bare "--name" counts, and so does "--timeout=--name".
+//
+// It looks at every argument, also after "--" and after a flag that took
+// "--name" as its own value, so it can find more values than Parse uses: that
+// only hides more. A short value, for example one letter, also hides that
+// text in the other words of the message: that is on purpose, because it
+// fails safe.
 func newArgHider(args []string, name string) argHider {
+	token := "-" + name
 	var values []string
 	for i, arg := range args {
-		rest := strings.TrimLeft(arg, "-")
-		if rest == arg {
-			continue // not a flag
-		}
-		if v, ok := strings.CutPrefix(rest, name+"="); ok {
+		// Each "-name=" gives a value. A later value is the end of an
+		// earlier one. It is kept for a text that shows only that end.
+		for rest := arg; ; {
+			_, v, ok := strings.Cut(rest, token+"=")
+			if !ok {
+				break
+			}
 			values = append(values, v)
-		} else if rest == name && i+1 < len(args) {
+			rest = v
+		}
+		if strings.HasSuffix(arg, token) && i+1 < len(args) {
 			values = append(values, args[i+1])
 		}
 	}
@@ -521,9 +535,10 @@ func (c *cli) reportScan(ctx context.Context, res discover.Result, configPath st
 	// The LLM step (--llm) runs after the pin step, on the tools of the
 	// servers that scan inspected (see llmStep). It only adds rows: it never
 	// changes or drops a rule row, and it never touches pins, diffs or hints.
-	// When the pin step failed, no server was inspected and the error is
-	// already on stderr, so the step does not run: its llmNoToolText notice
-	// would give the wrong cause.
+	// When the pin step failed (pins.json cannot be read, or inspect.Run
+	// failed), no server was inspected and the error is already on stderr,
+	// so the step does not run: its llmNoToolText notice would give the wrong
+	// cause.
 	var lr llmResult
 	if !pinFailed {
 		var ok bool

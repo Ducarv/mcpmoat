@@ -62,6 +62,14 @@ func newLLMClassifier(cfg llm.Config) (toolClassifier, error) {
 	return client, nil
 }
 
+// The names of the LLM flags of scan (FR-17), without the dashes.
+const (
+	flagLLM         = "llm"
+	flagLLMProvider = "llm-provider"
+	flagLLMModel    = "llm-model"
+	flagLLMBaseURL  = "llm-base-url"
+)
+
 // addLLMFlags adds the four LLM flags of scan (FR-17) to fs. They store
 // their values in f. --llm is off by default. The other three refuse an
 // empty value (see onceStringFlag), so an empty value in f means that the
@@ -72,10 +80,10 @@ func newLLMClassifier(cfg llm.Config) (toolClassifier, error) {
 // caller prints its problem in place of the Parse error (see
 // secretStringFlag).
 func addLLMFlags(fs *flag.FlagSet, f *llmFlags) *secretFlag {
-	fs.BoolVar(&f.on, "llm", false, "")
-	onceStringFlag(fs, "llm-provider", "a provider name", &f.provider)
-	onceStringFlag(fs, "llm-model", "a model name", &f.model)
-	return secretStringFlag(fs, "llm-base-url", "a URL", &f.baseURL)
+	fs.BoolVar(&f.on, flagLLM, false, "")
+	onceStringFlag(fs, flagLLMProvider, "a provider name", &f.provider)
+	onceStringFlag(fs, flagLLMModel, "a model name", &f.model)
+	return secretStringFlag(fs, flagLLMBaseURL, "a URL", &f.baseURL)
 }
 
 // setupLLM checks the LLM flags (see checkLLMFlags) and, with --llm, prints
@@ -139,9 +147,9 @@ type llmFlags struct {
 // for example "--llm-model", or "" when f has none.
 func strayLLMFlag(f llmFlags) string {
 	for _, given := range []struct{ name, value string }{
-		{"--llm-provider", f.provider},
-		{"--llm-model", f.model},
-		{"--llm-base-url", f.baseURL},
+		{"--" + flagLLMProvider, f.provider},
+		{"--" + flagLLMModel, f.model},
+		{"--" + flagLLMBaseURL, f.baseURL},
 	} {
 		if given.value != "" {
 			return given.name
@@ -311,6 +319,18 @@ func (k answerKind) String() string {
 	}
 }
 
+// stepFails reports whether an answer of kind k stops the LLM step.
+func (k answerKind) stepFails() bool {
+	return k == answerProviderFailed || k == answerInternalFailed
+}
+
+// answered reports whether the provider answered the job of an answer of
+// kind k: with a verdict, or with an answer that cannot be used. For the
+// other kinds, the tool was not classified (see llmResult.skipped).
+func (k answerKind) answered() bool {
+	return k == answerVerdict || k == answerUnusable
+}
+
 // sortAnswer returns the kind of the result of Classify with the error err.
 //
 // It fails closed. Only llm.ErrInvalidOutput gives an llm.RuleIDInvalid row
@@ -334,18 +354,6 @@ func sortAnswer(err error) answerKind {
 	}
 }
 
-// stepFails reports whether an answer of kind k stops the LLM step.
-func (k answerKind) stepFails() bool {
-	return k == answerProviderFailed || k == answerInternalFailed
-}
-
-// answered reports whether the provider answered the job of an answer of
-// kind k: with a verdict, or with an answer that cannot be used. For the
-// other kinds, the tool was not classified (see llmResult.skipped).
-func (k answerKind) answered() bool {
-	return k == answerVerdict || k == answerUnusable
-}
-
 // llmFailure is the first failure of the LLM step.
 type llmFailure struct {
 	// kind is answerProviderFailed or answerInternalFailed.
@@ -364,9 +372,7 @@ const llmInternalText = "the LLM step failed (internal error)"
 // is given but the step has no tool to classify: the config has no server, no
 // server was inspected successfully, or the inspected servers list no tools.
 // It is fixed text. It is a notice: it changes neither the exit code nor the
-// JSON report. When the pin step failed (pins.json cannot be read, or
-// inspect.Run failed), reportScan does not run the LLM step, so this notice
-// does not show: the error on stderr is the cause.
+// JSON report.
 const llmNoToolText = "--llm had no tool to classify"
 
 // llmAnswer is the result of one job.
@@ -439,8 +445,7 @@ func (r llmResult) incomplete() bool {
 // With --llm and no tool to classify (outcomes is empty, no server was
 // inspected, or the inspected servers list no tools), it sends nothing and
 // prints one llmNoToolText line, so the user knows that no tool was rated.
-// The line changes neither the exit code nor the JSON report. reportScan does
-// not call llmStep when the pin step failed.
+// The line changes neither the exit code nor the JSON report.
 //
 // It returns false when the process got a signal during a step that had a tool
 // to classify. It has written interruptedText then (see interrupted), and scan
