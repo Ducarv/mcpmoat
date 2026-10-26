@@ -302,7 +302,7 @@ func TestNewJSONFindingSource(t *testing.T) {
 	tests := []struct {
 		name   string
 		source report.Source
-		want   string
+		want   report.Source
 	}{
 		{name: "zero value is rule", source: "", want: "rule"},
 		{name: "rule", source: report.SourceRule, want: "rule"},

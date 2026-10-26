@@ -524,6 +524,63 @@ func TestClassifyRequestBodyStaysUnderCap(t *testing.T) {
 	}
 }
 
+// TestClassifyTruncated checks that Classify sets Verdict.Truncated when the
+// tool name or description was cut, and only then. The model answers risk
+// none: Classify keeps the model risk, and the caller applies the floor.
+func TestClassifyTruncated(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		in   Input
+		want bool
+	}{
+		{name: "short tool", in: Input{ToolName: "read_file", Description: "Reads a file."}, want: false},
+		{name: "description at limit", in: Input{ToolName: "t", Description: strings.Repeat("d", MaxDescriptionBytes)}, want: false},
+		{name: "description over limit", in: Input{ToolName: "t", Description: strings.Repeat("d", MaxDescriptionBytes+1)}, want: true},
+		{name: "name over limit", in: Input{ToolName: strings.Repeat("n", MaxToolNameBytes+1), Description: "d"}, want: true},
+		// The description is not over MaxDescriptionBytes, but each control
+		// character grows to six bytes in JSON, so only the message cap cuts it.
+		{name: "cut by message cap", in: Input{ToolName: "t", Description: strings.Repeat("\x01", MaxDescriptionBytes)}, want: true},
+	}
+	for _, p := range bothProviders {
+		for _, tt := range tests {
+			t.Run(string(p)+"/"+tt.name, func(t *testing.T) {
+				t.Parallel()
+				srv := startServer(t, reply(http.StatusOK, validReply(p, RiskNone, CategoryOther)))
+				c := newTestClient(t, p, srv.URL)
+				v, err := c.Classify(t.Context(), tt.in)
+				if err != nil {
+					t.Fatalf("Classify() error = %v, want nil", err)
+				}
+				want := Verdict{Risk: RiskNone, Category: CategoryOther, Truncated: tt.want}
+				if v != want {
+					t.Errorf("Classify() = %+v, want %+v", v, want)
+				}
+			})
+		}
+	}
+}
+
+// TestClassifyTruncatedError checks that a failed Classify returns the zero
+// Verdict, also for a cut description: Truncated is set only with a verdict.
+func TestClassifyTruncatedError(t *testing.T) {
+	t.Parallel()
+	for _, p := range bothProviders {
+		t.Run(string(p), func(t *testing.T) {
+			t.Parallel()
+			srv := startServer(t, reply(http.StatusOK, validReply(p, "critical", CategoryOther)))
+			c := newTestClient(t, p, srv.URL)
+			v, err := c.Classify(t.Context(), Input{ToolName: "t", Description: strings.Repeat("d", MaxDescriptionBytes+1)})
+			if !errors.Is(err, ErrInvalidOutput) {
+				t.Fatalf("Classify() error = %v, want ErrInvalidOutput", err)
+			}
+			if v != (Verdict{}) {
+				t.Errorf("Classify() = %+v, want zero Verdict on error", v)
+			}
+		})
+	}
+}
+
 // sizedAPI is the Anthropic API with a request body that is one JSON string
 // of exactly size bytes. No real Input can pass the request cap, so the
 // guard is tested with this fake.

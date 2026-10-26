@@ -707,7 +707,7 @@ func TestBaseTransportPinsAcrossConnections(t *testing.T) {
 	srv := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		_, _ = io.WriteString(w, "ok")
 	}))
-	srv.Config.ConnState = countNewConns(&newConns)
+	srv.Config.ConnState = connStateCounter(&newConns)
 	srv.Start()
 	t.Cleanup(srv.Close)
 
@@ -1730,7 +1730,7 @@ func TestBaseTransportGuard(t *testing.T) {
 	srv := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		_, _ = io.WriteString(w, "ok")
 	}))
-	srv.Config.ConnState = countNewConns(&newConns)
+	srv.Config.ConnState = connStateCounter(&newConns)
 	srv.Start()
 	t.Cleanup(srv.Close)
 

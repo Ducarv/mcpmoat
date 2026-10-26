@@ -105,9 +105,7 @@ func (c *cli) runScan(opts options, args []string) int {
 	if !ok {
 		return exitError
 	}
-	if classifier != nil {
-		defer closeClassifier(classifier)
-	}
+	defer closeClassifier(classifier)
 
 	// Load and check the rules in both modes, so a bad rule file gives exit
 	// code 2 also with --no-connect. The set gives the severity of the

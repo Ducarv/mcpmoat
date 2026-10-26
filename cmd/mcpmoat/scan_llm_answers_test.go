@@ -12,6 +12,7 @@ import (
 
 	"github.com/Ducarv/mcpmoat/internal/inspect"
 	"github.com/Ducarv/mcpmoat/internal/llm"
+	"github.com/Ducarv/mcpmoat/internal/report"
 )
 
 // This file tests how scan --llm (FR-17, FR-16) handles each kind of answer of
@@ -565,6 +566,83 @@ func TestSortAnswer(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestAnswerKindAnswered checks which kinds count as an answer: only a
+// verdict and an answer that cannot be used. A tool with any other kind is
+// counted as not classified.
+func TestAnswerKindAnswered(t *testing.T) {
+	t.Parallel()
+
+	want := map[answerKind]bool{
+		answerNotRun:         false,
+		answerVerdict:        true,
+		answerUnusable:       true,
+		answerStopped:        false,
+		answerProviderFailed: false,
+		answerInternalFailed: false,
+	}
+	for k, w := range want {
+		if got := k.answered(); got != w {
+			t.Errorf("%v.answered() = %v, want %v", k, got, w)
+		}
+	}
+}
+
+// TestLLMRowTruncated checks llmRow directly for a cut tool text: the floor
+// to medium applies only to a verdict, never to an answer that cannot be used
+// (that is a medium MOAT-LLM-002 row already) or to a job without an answer.
+func TestLLMRowTruncated(t *testing.T) {
+	t.Parallel()
+
+	cut := llm.Verdict{Risk: llm.RiskNone, Category: llm.CategoryCredentialAccess, Truncated: true}
+	tests := []struct {
+		name         string
+		answer       llmAnswer
+		wantOK       bool
+		wantRule     string
+		wantSeverity string
+		wantRisk     string
+		wantRelated  string
+	}{
+		{name: "verdict none cut", answer: llmAnswer{kind: answerVerdict, verdict: cut}, wantOK: true,
+			wantRule: llm.RuleID, wantSeverity: "medium", wantRisk: llm.TruncatedText, wantRelated: string(llm.CategoryOther)},
+		{name: "verdict none not cut", answer: llmAnswer{kind: answerVerdict, verdict: llm.Verdict{Risk: llm.RiskNone, Category: llm.CategoryOther}}},
+		{name: "unusable cut", answer: llmAnswer{kind: answerUnusable, verdict: cut}, wantOK: true,
+			wantRule: llm.RuleIDInvalid, wantSeverity: "medium", wantRisk: llm.InvalidText},
+		{name: "not run cut", answer: llmAnswer{kind: answerNotRun, verdict: cut}},
+		{name: "stopped cut", answer: llmAnswer{kind: answerStopped, verdict: cut}},
+	}
+	job := llmJob{in: llm.Input{ToolName: "t1"}}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			row, ok := llmRow(job, tt.answer)
+			if ok != tt.wantOK {
+				t.Fatalf("llmRow() ok = %v, want %v", ok, tt.wantOK)
+			}
+			if !ok {
+				if row != (report.FindingRow{}) {
+					t.Errorf("llmRow() row = %+v, want the zero row", row)
+				}
+				return
+			}
+			if row.RuleID != tt.wantRule || row.Severity != tt.wantSeverity || row.Risk != tt.wantRisk || row.Related != tt.wantRelated {
+				t.Errorf("llmRow() = %s %s %q %q, want %s %s %q %q",
+					row.RuleID, row.Severity, row.Risk, row.Related, tt.wantRule, tt.wantSeverity, tt.wantRisk, tt.wantRelated)
+			}
+		})
+	}
+}
+
+// TestCloseClassifierNil checks that closeClassifier does nothing for a nil
+// classifier (scan without --llm) and for a nil *llm.Client.
+func TestCloseClassifierNil(t *testing.T) {
+	t.Parallel()
+
+	closeClassifier(nil)
+	var client *llm.Client
+	closeClassifier(client)
 }
 
 // String returns the name of the kind, so a test failure shows a name and not

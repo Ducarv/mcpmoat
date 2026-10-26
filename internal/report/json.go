@@ -111,7 +111,7 @@ type JSONFinding struct {
 	Related  string `json:"related"`
 	// Source is "rule" for a finding from a rule, and "llm" for an advisory
 	// finding from the LLM classification (see SourceRule and SourceLLM).
-	Source string `json:"source"`
+	Source Source `json:"source"`
 }
 
 // JSONDiff is the diff of one tool in the JSON report.
@@ -183,7 +183,7 @@ func NewJSONFinding(r FindingRow) JSONFinding {
 		Field:    r.Field,
 		Key:      r.Key,
 		Related:  r.Related,
-		Source:   string(src),
+		Source:   src,
 	}
 }
 

@@ -118,7 +118,8 @@ func (c *cli) buildClassifier(cfg llm.Config) (toolClassifier, bool) {
 }
 
 // closeClassifier closes the idle connections of cl, when cl has such a
-// method (*llm.Client has one). A fake from a test usually has none.
+// method (*llm.Client has one). A fake from a test usually has none. cl can
+// be nil (no --llm): the type assertion is then false, and it does nothing.
 func closeClassifier(cl toolClassifier) {
 	if closer, ok := cl.(interface{ CloseIdleConnections() }); ok {
 		closer.CloseIdleConnections()
@@ -317,6 +318,13 @@ func (k answerKind) stepFails() bool {
 	return k == answerProviderFailed || k == answerInternalFailed
 }
 
+// answered reports whether the provider answered the job of an answer of
+// kind k: with a verdict, or with an answer that cannot be used. For the
+// other kinds, the tool was not classified (see llmResult.skipped).
+func (k answerKind) answered() bool {
+	return k == answerVerdict || k == answerUnusable
+}
+
 // llmFailure is the first failure of the LLM step.
 type llmFailure struct {
 	// kind is answerProviderFailed or answerInternalFailed.
@@ -416,11 +424,13 @@ func (c *cli) llmStepStopped(ctx context.Context, err error) bool {
 // the tools, whatever the order in which the requests end.
 //
 // A verdict with risk none gives no row. A verdict with risk low, medium or
-// high gives one llm.RuleID row with that severity (never critical). An
-// answer that cannot be used (see answerUnusable) gives one
-// llm.RuleIDInvalid row with severity medium. Every row is a
-// report.SourceLLM row with fixed texts from package llm: no model output
-// reaches it. The ignore list drops rows like the findings of the config
+// high gives one llm.RuleID row with that severity (never critical). A
+// verdict for a cut tool text (llm.Verdict.Truncated) is never below medium:
+// with risk none or low, it gives one llm.RuleID row with severity medium and
+// the text llm.TruncatedText. An answer that cannot be used (see
+// answerUnusable) gives one llm.RuleIDInvalid row with severity medium. Every
+// row is a report.SourceLLM row with fixed texts from package llm: no model
+// output reaches it. The ignore list drops rows like the findings of the config
 // rules (see scanIgnores).
 //
 // The first request that fails (a provider failure or an internal error, see
@@ -449,12 +459,12 @@ func classifyTools(ctx context.Context, outcomes []inspect.Outcome, cl toolClass
 	res.failure = failure
 
 	for i, job := range jobs {
-		outcome, row := llmRow(job, answers[i])
-		switch outcome {
-		case llmNoVerdict:
+		if !answers[i].kind.answered() {
 			res.skipped++
 			continue
-		case llmNoRisk:
+		}
+		row, ok := llmRow(job, answers[i])
+		if !ok {
 			continue // risk none: no finding
 		}
 		key := rules.FindingKey{RuleID: row.RuleID, Server: job.ref.Name, Tool: job.in.ToolName}
@@ -557,22 +567,10 @@ func runLLMJobs(ctx context.Context, jobs []llmJob, cl toolClassifier) ([]llmAns
 	return answers, failure
 }
 
-// llmOutcome is what one answer gives to the report.
-type llmOutcome int
-
-const (
-	// llmNoVerdict means that the tool got no verdict: the job did not run,
-	// it was stopped, or its request failed. It gives no row.
-	llmNoVerdict llmOutcome = iota
-	// llmNoRisk means a verdict with risk none. It gives no row.
-	llmNoRisk
-	// llmFinding means one finding row.
-	llmFinding
-)
-
-// llmRow returns what the answer a of job gives. The row is set only for
-// llmFinding.
-func llmRow(job llmJob, a llmAnswer) (llmOutcome, report.FindingRow) {
+// llmRow returns the finding row that the answer a of job gives, and true. It
+// returns false when a gives no row: a verdict with risk none (and no cut
+// text), or a job without an answer (see answerKind.answered).
+func llmRow(job llmJob, a llmAnswer) (report.FindingRow, bool) {
 	key := job.in.ToolName
 	if key == "" {
 		key = noToolNameKey
@@ -585,31 +583,42 @@ func llmRow(job llmJob, a llmAnswer) (llmOutcome, report.FindingRow) {
 	}
 	switch a.kind {
 	case answerVerdict:
-		severity, hasRisk := a.verdict.Risk.Severity()
-		if !hasRisk {
-			return llmNoRisk, report.FindingRow{}
-		}
 		row.RuleID = llm.RuleID
 		row.Title = llm.Title
+		row.Remediation = llm.Remediation
+		if a.verdict.Truncated && a.verdict.Risk != llm.RiskMedium && a.verdict.Risk != llm.RiskHigh {
+			// The tool text was cut, and the model rated it below medium
+			// (none or low). The part after the cut was not rated, and a
+			// prompt injection before the cut can ask for a low rating. So
+			// the row is medium, with a fixed text and category, whatever the
+			// model answered.
+			row.Severity = string(rules.SeverityMedium)
+			row.Risk = llm.TruncatedText
+			row.Related = string(llm.CategoryOther)
+			return row, true
+		}
+		severity, hasRisk := a.verdict.Risk.Severity()
+		if !hasRisk {
+			return report.FindingRow{}, false
+		}
 		row.Severity = severity
 		row.Risk = a.verdict.Category.Text()
-		row.Remediation = llm.Remediation
 		// The category is one of the fixed llm.Category values: parseVerdict
 		// refuses any other.
 		row.Related = string(a.verdict.Category)
-		return llmFinding, row
+		return row, true
 	case answerUnusable:
 		row.RuleID = llm.RuleIDInvalid
 		row.Title = llm.InvalidTitle
 		row.Severity = string(rules.SeverityMedium)
 		row.Risk = llm.InvalidText
 		row.Remediation = llm.InvalidRemediation
-		return llmFinding, row
-	case answerNotRun, answerStopped, answerProviderFailed, answerInternalFailed:
-		return llmNoVerdict, report.FindingRow{}
+		return row, true
+	default:
+		// answerNotRun, answerStopped, answerProviderFailed and
+		// answerInternalFailed: the tool got no answer.
+		return report.FindingRow{}, false
 	}
-	// Not reached: the cases above name every answerKind.
-	return llmNoVerdict, report.FindingRow{}
 }
 
 // addLLMCounts adds the LLM row counts of each server to counts, the

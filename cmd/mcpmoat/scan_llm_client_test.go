@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"maps"
 	"net/http"
 	"net/http/httptest"
 	"slices"
@@ -13,6 +14,7 @@ import (
 	"sync/atomic"
 	"testing"
 
+	"github.com/Ducarv/mcpmoat/internal/discover"
 	"github.com/Ducarv/mcpmoat/internal/discover/discovertest"
 	"github.com/Ducarv/mcpmoat/internal/inspect"
 	"github.com/Ducarv/mcpmoat/internal/llm"
@@ -145,20 +147,34 @@ func (a *llmAPI) handle(w http.ResponseWriter, r *http.Request) {
 		writeLLMJSON(w, map[string]any{"stop_reason": "refusal", "content": []any{}})
 		return
 	}
-	writeLLMJSON(w, map[string]any{
-		"stop_reason": "tool_use",
-		"content": []any{map[string]any{
-			"type":  "tool_use",
-			"name":  "classify",
-			"input": map[string]string{"risk": string(v.Risk), "category": string(v.Category)},
-		}},
-	})
+	writeLLMVerdict(w, v)
 }
 
 // writeLLMJSON writes v as a JSON answer.
 func writeLLMJSON(w http.ResponseWriter, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(v)
+}
+
+// writeLLMVerdict writes the answer of the Anthropic Messages API for the
+// verdict v: one tool_use block named classify, whose input is the risk and
+// the category of v. llmAPI and the fake provider of the E2E tests
+// (e2e_network_test.go) both use it.
+func writeLLMVerdict(w http.ResponseWriter, v llm.Verdict) {
+	writeLLMJSON(w, map[string]any{
+		"id":          "msg_test",
+		"type":        "message",
+		"role":        "assistant",
+		"model":       "claude-test",
+		"stop_reason": "tool_use",
+		"content": []any{map[string]any{
+			"type":  "tool_use",
+			"id":    "toolu_test",
+			"name":  "classify",
+			"input": map[string]string{"risk": string(v.Risk), "category": string(v.Category)},
+		}},
+		"usage": map[string]int{"input_tokens": 1, "output_tokens": 1},
+	})
 }
 
 // llmToolPayload is the user message of a request. Its fields are all the
@@ -378,6 +394,48 @@ func TestScanLLMRealClient(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// TestScanLLMRealClientTruncated runs scan --llm with the real client on a
+// tool whose description is over llm.MaxDescriptionBytes. The fake API rates
+// it none, but the client sends a cut text, so the tool gets one MOAT-LLM-001
+// row with severity medium and the fixed text llm.TruncatedText. A short tool
+// that the API rates none gets no row.
+func TestScanLLMRealClientTruncated(t *testing.T) {
+	t.Parallel()
+
+	api := newLLMAPI(t)
+	cl, err := newLLMClassifier(llm.Config{Provider: llm.ProviderAnthropic, BaseURL: api.srv.URL, APIKey: discover.NewSecret(llmTestKey)})
+	if err != nil {
+		t.Fatalf("newLLMClassifier() error = %v", err)
+	}
+	t.Cleanup(func() { closeClassifier(cl) })
+	tools := map[string][]inspect.Tool{"alpha": {
+		mkTool("t1", "Reads a file. "+strings.Repeat("a", 20<<10)),
+		mkTool("t2", "Add two numbers."),
+	}}
+
+	r := llmScan(t, llmEnv(t, tools), tools, cl, "--llm")
+
+	llmRows, _ := llmSplitFindings(parseFindings(t, r.stdout))
+	if got, want := llmRowsOf(t, llmRows), []llmHit{{llm.RuleID, "medium", "alpha", "t1"}}; !slices.Equal(got, want) {
+		t.Fatalf("LLM findings = %+v, want %+v\nstdout:\n%s\nstderr:\n%s", got, want, r.stdout, r.stderr)
+	}
+	if f := llmRows[0]; f.Risk != llm.TruncatedText || f.Tool != "t1 (other)" {
+		t.Errorf("t1 Risk, Tool = %q, %q; want %q, %q", f.Risk, f.Tool, llm.TruncatedText, "t1 (other)")
+	}
+	bodies, _, _ := api.snapshot()
+	truncated := map[string]bool{}
+	for _, body := range bodies {
+		p, err := llmRequestPayload(body)
+		if err != nil {
+			t.Fatalf("request: %v", err)
+		}
+		truncated[p.ToolName] = p.Truncated
+	}
+	if want := map[string]bool{"t1": true, "t2": false}; !maps.Equal(truncated, want) {
+		t.Errorf("truncated of each request = %v, want %v", truncated, want)
 	}
 }
 

@@ -60,9 +60,9 @@ func (r *dialRecorder) dials() []string {
 	return slices.Clone(r.addrs)
 }
 
-// countNewConns returns an http.Server.ConnState hook that adds 1 to n for
+// connStateCounter returns an http.Server.ConnState hook that adds 1 to n for
 // each new connection.
-func countNewConns(n *atomic.Int32) func(net.Conn, http.ConnState) {
+func connStateCounter(n *atomic.Int32) func(net.Conn, http.ConnState) {
 	return func(_ net.Conn, state http.ConnState) {
 		if state == http.StateNew {
 			n.Add(1)
@@ -78,7 +78,7 @@ func dhServer(t *testing.T) (srv *httptest.Server, port string, newConns *atomic
 	srv = httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		_, _ = io.WriteString(w, "ok")
 	}))
-	srv.Config.ConnState = countNewConns(newConns)
+	srv.Config.ConnState = connStateCounter(newConns)
 	srv.Start()
 	t.Cleanup(srv.Close)
 	u, err := url.Parse(srv.URL)
@@ -314,7 +314,7 @@ func TestDialHookSDKInspect(t *testing.T) {
 		t.Run(string(rmKind(sse)), func(t *testing.T) {
 			t.Parallel()
 			var newConns atomic.Int32
-			ts, _ := startFixture(t, fixtureOpts{SSE: sse, ConnState: countNewConns(&newConns)})
+			ts, _ := startFixture(t, fixtureOpts{SSE: sse, ConnState: connStateCounter(&newConns)})
 
 			rec := &dialRecorder{}
 			inspector := New(SDKOptions{Dial: rec.dial})

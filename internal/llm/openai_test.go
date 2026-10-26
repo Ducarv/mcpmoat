@@ -67,7 +67,7 @@ func TestOpenAIRequestShape(t *testing.T) {
 		t.Errorf("model = %q, want %q", got, llmTestModel)
 	}
 
-	wantMessage, err := toolMessage(shapeInput)
+	wantMessage, _, err := toolMessage(shapeInput)
 	if err != nil {
 		t.Fatalf("toolMessage() error = %v", err)
 	}

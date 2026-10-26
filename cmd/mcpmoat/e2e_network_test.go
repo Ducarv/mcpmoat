@@ -7,7 +7,9 @@ package main
 // the DNS lookup of the .invalid fixture host in the run without a proxy.
 
 import (
+	"errors"
 	"io"
+	"io/fs"
 	"net/http"
 	"net/http/httptest"
 	"net/http/httputil"
@@ -25,12 +27,12 @@ import (
 	"github.com/Ducarv/mcpmoat/internal/report"
 )
 
+// The API key canary of these tests is llmTestKey (scan_llm_test.go). It may
+// only show in the x-api-key header of a request to the fake provider.
+// runBinEnv gives the binary only the environment that the test names, so
+// the key reaches the binary only when the test puts it there.
+
 const (
-	// e2eLLMKey is the API key canary. It is visible ASCII, so llm.ValidateKey
-	// accepts it. It may only show in the x-api-key header of a request to
-	// the fake provider. It holds no word, so no part of it shows in an output
-	// by chance: llmAssertNoKey looks for every part of 8 bytes.
-	e2eLLMKey = "sk-Rv5yM2wQ9cXh4Tn7Bd3Kz8Lp"
 	// e2eNetRemoteHost is the host of the remote fixture server. The .invalid
 	// top-level domain never resolves (RFC 6761).
 	e2eNetRemoteHost = "mcp.fixture.invalid"
@@ -139,7 +141,7 @@ func (s *e2eNetServer) settle(t *testing.T) (conns int32, reqs []e2eNetRequest) 
 func e2eNetAssertNoKey(t *testing.T, who string, reqs []e2eNetRequest) {
 	t.Helper()
 	for i, r := range reqs {
-		if strings.Contains(r.dump, e2eLLMKey) {
+		if strings.Contains(r.dump, llmTestKey) {
 			t.Errorf("%s request %d (%s %s) holds the API key", who, i, r.method, r.url)
 		}
 	}
@@ -150,7 +152,7 @@ func e2eNetAssertNoKey(t *testing.T, who string, reqs []e2eNetRequest) {
 // escape byte, or any canary of discovertest.
 func e2eNetAssertNoKeyOutput(t *testing.T, stdout, stderr string) {
 	t.Helper()
-	llmAssertNoKey(t, e2eLLMKey, stdout, stderr)
+	llmAssertNoKey(t, llmTestKey, stdout, stderr)
 	assertNoLeakBoth(t, stdout, stderr)
 	assertNoEscape(t, stdout, stderr)
 }
@@ -163,7 +165,7 @@ func e2eNetAssertMarker(t *testing.T, marker string, want bool) {
 	switch {
 	case want && err != nil:
 		t.Errorf("marker file is missing (err = %v): the server did not start", err)
-	case !want && !os.IsNotExist(err):
+	case !want && !errors.Is(err, fs.ErrNotExist):
 		t.Errorf("marker file exists or cannot be checked (err = %v): mcpmoat started a server", err)
 	}
 }
@@ -193,7 +195,7 @@ func TestE2ENoNetworkWithoutLLM(t *testing.T) {
 		"marker-net": map[string]any{"command": script},
 	})
 	baseEnv := []string{
-		llm.KeyEnv + "=" + e2eLLMKey,
+		llm.KeyEnv + "=" + llmTestKey,
 		"ANTHROPIC_BASE_URL=" + provider.srv.URL,
 		"OPENAI_BASE_URL=" + provider.srv.URL,
 	}
@@ -268,9 +270,9 @@ var e2eLLMMissingKeyCases = []struct {
 		// The key comes only from llm.KeyEnv, never from the variables of the
 		// provider SDKs.
 		name:    "key in other variables",
-		env:     []string{"ANTHROPIC_API_KEY=" + e2eLLMKey, "OPENAI_API_KEY=" + e2eLLMKey},
+		env:     []string{"ANTHROPIC_API_KEY=" + llmTestKey, "OPENAI_API_KEY=" + llmTestKey},
 		wantErr: llm.ErrMissingKey,
-		leak:    []string{e2eLLMKey},
+		leak:    []string{llmTestKey},
 	},
 	{
 		name:    "key with a space",
@@ -338,14 +340,11 @@ func e2eLLMAnthropic(w http.ResponseWriter, body []byte) {
 		w.WriteHeader(http.StatusBadRequest)
 		return
 	}
-	verdict := `{"risk":"none","category":"other"}`
+	verdict := llm.Verdict{Risk: llm.RiskNone, Category: llm.CategoryOther}
 	if msg.ToolName == e2eLLMRiskyTool {
-		verdict = `{"risk":"high","category":"hidden-instructions"}`
+		verdict = llm.Verdict{Risk: llm.RiskHigh, Category: llm.CategoryHiddenInstructions}
 	}
-	w.Header().Set("Content-Type", "application/json")
-	_, _ = io.WriteString(w, `{"id":"msg_e2e","type":"message","role":"assistant","model":"claude-e2e",`+
-		`"content":[{"type":"tool_use","id":"toolu_e2e","name":"classify","input":`+verdict+`}],`+
-		`"stop_reason":"tool_use","usage":{"input_tokens":1,"output_tokens":1}}`)
+	writeLLMVerdict(w, verdict)
 }
 
 // e2eLLMWarning returns the warning line that scan --llm prints first on
@@ -370,13 +369,13 @@ func e2eLLMAssertRequests(t *testing.T, reqs []e2eNetRequest, forbidden []string
 		if r.method != http.MethodPost || r.path != "/v1/messages" {
 			t.Errorf("request %d: %s %s, want POST /v1/messages", i, r.method, r.url)
 		}
-		if got := r.header.Get("X-Api-Key"); got != e2eLLMKey {
+		if got := r.header.Get("X-Api-Key"); got != llmTestKey {
 			t.Errorf("request %d: x-api-key header is %d bytes, want the key", i, len(got))
 		}
 		if got := r.header.Get("Anthropic-Version"); got == "" {
 			t.Errorf("request %d: no anthropic-version header", i)
 		}
-		if strings.Contains(r.url, e2eLLMKey) || strings.Contains(r.body, e2eLLMKey) {
+		if strings.Contains(r.url, llmTestKey) || strings.Contains(r.body, llmTestKey) {
 			t.Errorf("request %d: the URL or the body holds the API key", i)
 		}
 		for name, values := range r.header {
@@ -384,7 +383,7 @@ func e2eLLMAssertRequests(t *testing.T, reqs []e2eNetRequest, forbidden []string
 				continue
 			}
 			for _, v := range values {
-				if strings.Contains(v, e2eLLMKey) {
+				if strings.Contains(v, llmTestKey) {
 					t.Errorf("request %d: header %s holds the API key", i, name)
 				}
 			}
@@ -436,7 +435,7 @@ func TestE2ELLMFindings(t *testing.T) {
 		},
 	})
 	forbidden := []string{server, argsCanary, envKeyInCfg, discovertest.CanaryEnv, fixture, home, envDir, "-envfile"}
-	env := []string{llm.KeyEnv + "=" + e2eLLMKey}
+	env := []string{llm.KeyEnv + "=" + llmTestKey}
 	llmArgs := []string{"scan", "--llm", "--llm-base-url", provider.srv.URL}
 	warning := e2eLLMWarning(t, provider.srv.URL)
 
@@ -476,7 +475,7 @@ func TestE2ELLMFindings(t *testing.T) {
 	if !slices.Contains(envLines, envKeyInCfg+"="+discovertest.CanaryEnv) {
 		t.Errorf("env dump has no line %s=<canary>, so it is not the env of the server:\n%s", envKeyInCfg, dump)
 	}
-	if strings.Contains(string(dump), llm.KeyEnv) || strings.Contains(string(dump), e2eLLMKey) {
+	if strings.Contains(string(dump), llm.KeyEnv) || strings.Contains(string(dump), llmTestKey) {
 		t.Errorf("the stdio server got %s in its environment", llm.KeyEnv)
 	}
 
@@ -495,8 +494,8 @@ func TestE2ELLMFindings(t *testing.T) {
 		t.Error("complete = false, want true")
 	}
 	wantFindings := []report.JSONFinding{
-		{RuleID: "MOAT-T4-002", Severity: "high", Server: server, Field: "env", Key: envKeyInCfg, Source: string(report.SourceRule)},
-		{RuleID: llm.RuleID, Severity: "high", Server: server, Field: "tool", Key: e2eLLMRiskyTool, Related: "hidden-instructions", Source: string(report.SourceLLM)},
+		{RuleID: "MOAT-T4-002", Severity: "high", Server: server, Field: "env", Key: envKeyInCfg, Source: report.SourceRule},
+		{RuleID: llm.RuleID, Severity: "high", Server: server, Field: "tool", Key: e2eLLMRiskyTool, Related: "hidden-instructions", Source: report.SourceLLM},
 	}
 	for _, want := range wantFindings {
 		if !slices.Contains(doc.Findings, want) {
@@ -536,7 +535,7 @@ func TestE2ELLMProviderFailure(t *testing.T) {
 			home, work := benignHome(t, server)
 			args := append([]string{"scan", "--llm", "--llm-base-url", provider.srv.URL}, tt.args...)
 
-			stdout, stderr, code := runBinEnv(t, home, work, []string{llm.KeyEnv + "=" + e2eLLMKey}, args...)
+			stdout, stderr, code := runBinEnv(t, home, work, []string{llm.KeyEnv + "=" + llmTestKey}, args...)
 
 			if code != exitError {
 				t.Errorf("exit code = %d, want %d\nstdout:\n%s\nstderr:\n%s", code, exitError, stdout, stderr)
@@ -561,7 +560,7 @@ func TestE2ELLMProviderFailure(t *testing.T) {
 					t.Errorf("servers = %+v, want only %s", doc.Servers, server)
 				}
 				for _, f := range doc.Findings {
-					if f.Source == string(report.SourceLLM) {
+					if f.Source == report.SourceLLM {
 						t.Errorf("LLM finding %+v after a failed request", f)
 					}
 				}

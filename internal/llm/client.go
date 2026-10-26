@@ -17,7 +17,11 @@ import (
 	"github.com/Ducarv/mcpmoat/internal/discover"
 )
 
-// Timeouts and pool size of the client transport.
+// MaxConcurrentRequests is the number of requests that a caller should run at
+// the same time. The transport keeps one idle connection for each of them.
+const MaxConcurrentRequests = 4
+
+// Timeouts and limits of the client transport.
 const (
 	// requestTimeout bounds one whole request: connect, send and read.
 	requestTimeout      = 30 * time.Second
@@ -25,10 +29,6 @@ const (
 	dialKeepAlive       = 30 * time.Second
 	tlsHandshakeTimeout = 10 * time.Second
 	idleConnTimeout     = 30 * time.Second
-	// MaxConcurrentRequests is the number of requests that a caller should
-	// run at the same time. The transport keeps one idle connection for
-	// each of them.
-	MaxConcurrentRequests = 4
 	// maxResponseHeaderBytes caps the response headers.
 	maxResponseHeaderBytes = 64 << 10
 	// loopbackAddrTimeout bounds the dial of one loopback address when
@@ -100,12 +100,13 @@ type StatusError struct {
 	Code int
 }
 
-// Error returns a fixed text with the status code.
+// Error returns a fixed text with the status code. It starts with the text of
+// ErrProvider.
 func (e *StatusError) Error() string {
 	if e.Code >= 300 && e.Code < 400 {
-		return fmt.Sprintf("LLM provider request failed: HTTP %d (redirect refused)", e.Code)
+		return fmt.Sprintf("%s: HTTP %d (redirect refused)", ErrProvider.Error(), e.Code)
 	}
-	return fmt.Sprintf("LLM provider request failed: HTTP %d", e.Code)
+	return fmt.Sprintf("%s: HTTP %d", ErrProvider.Error(), e.Code)
 }
 
 // Unwrap returns ErrAuth for 401 and 403, and ErrProvider for other codes.
@@ -364,8 +365,10 @@ func proxyFromEnvironment(req *http.Request) (*url.URL, error) {
 // verdict. It sends only the system prompt, the verdict schema and the tool
 // message of in (see the package doc). It does not retry.
 //
-// The request has a timeout of 30 seconds. See the error variables above
-// for how to sort an error. Classify is safe for concurrent use.
+// The request has a timeout of requestTimeout. On success, the verdict has
+// Truncated set when toolMessage cut the tool name or description. See the
+// error variables above for how to sort an error. Classify is safe for
+// concurrent use.
 func (c *Client) Classify(ctx context.Context, in Input) (Verdict, error) {
 	if c == nil || c.api == nil || c.http == nil {
 		return Verdict{}, errNilClient
@@ -373,7 +376,7 @@ func (c *Client) Classify(ctx context.Context, in Input) (Verdict, error) {
 	if err := ctx.Err(); err != nil {
 		return Verdict{}, stopped(err)
 	}
-	message, err := toolMessage(in)
+	message, truncated, err := toolMessage(in)
 	if err != nil {
 		return Verdict{}, err
 	}
@@ -416,7 +419,12 @@ func (c *Client) Classify(ctx context.Context, in Input) (Verdict, error) {
 	if len(data) > MaxResponseBodyBytes {
 		return Verdict{}, ErrTooLarge
 	}
-	return c.api.parseResponse(data)
+	v, err := c.api.parseResponse(data)
+	if err != nil {
+		return Verdict{}, err
+	}
+	v.Truncated = truncated
+	return v, nil
 }
 
 // CloseIdleConnections closes the idle connections of the client. Call it

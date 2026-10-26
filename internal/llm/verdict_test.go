@@ -48,10 +48,10 @@ func TestParseVerdictValid(t *testing.T) {
 		input string
 		want  Verdict
 	}{
-		{name: "keys in other order", input: `{"category":"tool-shadowing","risk":"none"}`, want: Verdict{RiskNone, CategoryToolShadowing}},
-		{name: "white space around", input: " \n\t{ \"risk\" : \"high\" ,\r\n \"category\" : \"other\" }\n ", want: Verdict{RiskHigh, CategoryOther}},
-		{name: "escaped key", input: `{"\u0072isk":"low","category":"other"}`, want: Verdict{RiskLow, CategoryOther}},
-		{name: "padded to max length", input: `{"risk":"low","category":"other"}` + strings.Repeat(" ", MaxVerdictBytes-len(`{"risk":"low","category":"other"}`)), want: Verdict{RiskLow, CategoryOther}},
+		{name: "keys in other order", input: `{"category":"tool-shadowing","risk":"none"}`, want: Verdict{Risk: RiskNone, Category: CategoryToolShadowing}},
+		{name: "white space around", input: " \n\t{ \"risk\" : \"high\" ,\r\n \"category\" : \"other\" }\n ", want: Verdict{Risk: RiskHigh, Category: CategoryOther}},
+		{name: "escaped key", input: `{"\u0072isk":"low","category":"other"}`, want: Verdict{Risk: RiskLow, Category: CategoryOther}},
+		{name: "padded to max length", input: `{"risk":"low","category":"other"}` + strings.Repeat(" ", MaxVerdictBytes-len(`{"risk":"low","category":"other"}`)), want: Verdict{Risk: RiskLow, Category: CategoryOther}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -83,6 +83,9 @@ func TestParseVerdictInvalid(t *testing.T) {
 		{name: "missing risk", input: `{"category":"other"}`},
 		{name: "unknown field", input: `{"risk":"high","category":"other","` + canary + `":"x"}`},
 		{name: "unknown field first", input: `{"reason":"` + canary + `","risk":"high","category":"other"}`},
+		// Truncated comes only from Classify, never from the model.
+		{name: "truncated key", input: `{"risk":"high","category":"other","truncated":"true"}`},
+		{name: "truncated bool", input: `{"risk":"none","category":"other","truncated":false}`},
 		{name: "duplicate risk", input: `{"risk":"high","risk":"none","category":"other"}`},
 		{name: "duplicate category", input: `{"risk":"high","category":"other","category":"other"}`},
 		{name: "wrong-case key", input: `{"RISK":"high","category":"other"}`},
@@ -142,6 +145,7 @@ func FuzzParseVerdict(f *testing.F) {
 		`{"risk":1,"category":"other"}`,
 		`{"risk":"high","category":"other","x":{"y":[1,2]}}`,
 		`{"\u0072isk":"low","category":"other"}`,
+		`{"risk":"none","category":"other","truncated":true}`,
 		"",
 		"null",
 		"[",
@@ -163,6 +167,9 @@ func FuzzParseVerdict(f *testing.F) {
 		}
 		if !v.Risk.Valid() || !v.Category.Valid() {
 			t.Fatalf("parseVerdict(%q) = %+v, nil; want valid enums", data, v)
+		}
+		if v.Truncated {
+			t.Fatalf("parseVerdict(%q) set Truncated, want it set only by Classify", data)
 		}
 		if len(data) > MaxVerdictBytes {
 			t.Fatalf("parseVerdict accepted %d bytes, max %d", len(data), MaxVerdictBytes)

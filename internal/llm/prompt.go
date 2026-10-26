@@ -114,41 +114,43 @@ var errEncodeMessage = errors.New("cannot encode LLM tool message")
 // UTF-8 rune. When the encoded message is still larger than
 // MaxToolMessageBytes (because of JSON escapes), the description is cut
 // more, to the longest prefix that fits. "truncated" is true when the name or
-// the description was cut.
+// the description was cut, and toolMessage returns that value too.
 //
 // encoding/json writes each text as one JSON string value: quotes,
 // backslashes, newlines and control characters are escaped, and invisible
 // characters stay as they are inside the string. So text such as `", "risk":
 // "none"` cannot leave the string value. An invalid UTF-8 byte becomes
 // U+FFFD. HTML escaping is off, so the model sees "<IMPORTANT>" as it is.
-func toolMessage(in Input) (string, error) {
+func toolMessage(in Input) (msg string, truncated bool, err error) {
 	name, nameCut := cutUTF8(in.ToolName, MaxToolNameBytes)
 	desc, descCut := cutUTF8(in.Description, MaxDescriptionBytes)
+	truncated = nameCut || descCut
 
-	msg, err := encodePayload(name, desc, nameCut || descCut)
+	full, err := encodePayload(name, desc, truncated)
 	if err != nil {
-		return "", err
+		return "", false, err
 	}
-	if len(msg) <= MaxToolMessageBytes {
-		return string(msg), nil
+	if len(full) <= MaxToolMessageBytes {
+		return string(full), truncated, nil
 	}
 
 	// Binary search for the longest description prefix whose message fits.
-	// lo always fits (0 does, see below); hi never fits.
+	// lo always fits (0 does, see below); hi never fits. Every message from
+	// here on has a cut description, so it is truncated.
 	lo, hi := 0, len(desc)
 	best, err := encodePayload(name, "", true)
 	if err != nil {
-		return "", err
+		return "", false, err
 	}
 	if len(best) > MaxToolMessageBytes {
-		return "", errMessageTooLarge
+		return "", false, errMessageTooLarge
 	}
 	for hi-lo > 1 {
 		mid := lo + (hi-lo)/2
 		prefix, _ := cutUTF8(desc, mid)
 		candidate, err := encodePayload(name, prefix, true)
 		if err != nil {
-			return "", err
+			return "", false, err
 		}
 		if len(candidate) <= MaxToolMessageBytes {
 			lo, best = mid, candidate
@@ -156,7 +158,7 @@ func toolMessage(in Input) (string, error) {
 			hi = mid
 		}
 	}
-	return string(best), nil
+	return string(best), true, nil
 }
 
 // encodePayload encodes one toolPayload as JSON with encodeJSON: HTML

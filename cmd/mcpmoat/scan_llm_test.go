@@ -33,9 +33,10 @@ import (
 // they send their requests to a fake Anthropic API on a loopback httptest
 // server. network_test.go holds the no-network proof (NFR-01).
 
-// llmTestKey is the fake API key of the tests. It is visible ASCII, so
-// llm.ValidateKey accepts it. It holds no word, so no part of it shows in
-// an output by chance. It must never show on stdout or stderr.
+// llmTestKey is the fake API key of the tests, the E2E tests of
+// e2e_network_test.go too. It is visible ASCII, so llm.ValidateKey accepts
+// it. It holds no word, so no part of it shows in an output by chance. It
+// must never show on stdout or stderr.
 const llmTestKey = "sk-Kq7vX2pLw9TzR4mNb8HcYf3J"
 
 // The markers that a tool description holds to choose the answer of the fake
@@ -326,9 +327,9 @@ func llmJSONRows(t *testing.T, doc report.ScanReport) []llmHit {
 	var rows []llmHit
 	for _, f := range doc.Findings {
 		isLLM := strings.HasPrefix(f.RuleID, "MOAT-LLM-")
-		want := string(report.SourceRule)
+		want := report.SourceRule
 		if isLLM {
-			want = string(report.SourceLLM)
+			want = report.SourceLLM
 		}
 		if f.Source != want {
 			t.Errorf("finding %s of %s has source %q, want %q", f.RuleID, f.Server, f.Source, want)
@@ -753,43 +754,114 @@ func TestScanLLMFailOn(t *testing.T) {
 		{mark: "risk none", want: perLevel[int]{exitOK, exitOK, exitOK, exitOK}},
 	}
 	for _, tt := range tests {
-		for _, level := range append([]string{"default"}, levelNames()...) {
-			t.Run(tt.mark+"/"+level, func(t *testing.T) {
+		tools := map[string][]inspect.Tool{"srv": {mkTool("t1", "Text. "+tt.mark)}}
+		// run scans with args after --llm and checks the exit code and the
+		// one LLM finding.
+		run := func(t *testing.T, wantCode int, args ...string) {
+			t.Helper()
+			r := llmScan(t, llmEnv(t, tools), tools, &llmFake{}, append([]string{"--llm"}, args...)...)
+			if r.code != wantCode {
+				t.Errorf("exit code = %d, want %d\nstdout:\n%s\nstderr:\n%s", r.code, wantCode, r.stdout, r.stderr)
+			}
+			rows := llmRowsOf(t, parseFindings(t, r.stdout))
+			switch {
+			case tt.rule == "" && len(rows) != 0:
+				t.Errorf("LLM findings = %+v, want none", rows)
+			case tt.rule != "" && (len(rows) != 1 || rows[0].rule != tt.rule):
+				t.Errorf("LLM findings = %+v, want one %s", rows, tt.rule)
+			}
+		}
+		t.Run(tt.mark+"/default", func(t *testing.T) {
+			t.Parallel()
+			run(t, tt.want.high)
+		})
+		for _, level := range failOnLevels {
+			t.Run(tt.mark+"/"+string(level), func(t *testing.T) {
 				t.Parallel()
-				tools := map[string][]inspect.Tool{"srv": {mkTool("t1", "Text. "+tt.mark)}}
-				args := []string{"--llm"}
-				wantCode := tt.want.high
-				if level != "default" {
-					args = append(args, "--fail-on", level)
-					for _, s := range failOnLevels {
-						if string(s) == level {
-							wantCode = tt.want.at(t, s)
-						}
-					}
-				}
-				r := llmScan(t, llmEnv(t, tools), tools, &llmFake{}, args...)
-				if r.code != wantCode {
-					t.Errorf("exit code = %d, want %d\nstdout:\n%s\nstderr:\n%s", r.code, wantCode, r.stdout, r.stderr)
-				}
-				rows := llmRowsOf(t, parseFindings(t, r.stdout))
-				switch {
-				case tt.rule == "" && len(rows) != 0:
-					t.Errorf("LLM findings = %+v, want none", rows)
-				case tt.rule != "" && (len(rows) != 1 || rows[0].rule != tt.rule):
-					t.Errorf("LLM findings = %+v, want one %s", rows, tt.rule)
-				}
+				run(t, tt.want.at(t, level), "--fail-on", string(level))
 			})
 		}
 	}
 }
 
-// levelNames returns the four --fail-on values as strings.
-func levelNames() []string {
-	names := make([]string, len(failOnLevels))
-	for i, s := range failOnLevels {
-		names[i] = string(s)
+// TestScanLLMTruncatedFloor checks that a verdict for a cut tool text
+// (llm.Verdict.Truncated) is never below medium. With risk none or low, the
+// tool gets one MOAT-LLM-001 row with severity medium, the fixed text
+// llm.TruncatedText and the category "other", whatever category the model
+// gave. With risk medium or high, the row of the model stays as it is. Without
+// a cut, risk none still gives no row.
+func TestScanLLMTruncatedFloor(t *testing.T) {
+	t.Parallel()
+
+	long := "Reads a file. " + strings.Repeat("a", 20<<10) // over llm.MaxDescriptionBytes
+	tests := []struct {
+		name     string
+		desc     string
+		risk     llm.Risk
+		category llm.Category
+		// severity, related and risk are the parts of the one LLM row; an
+		// empty severity means no row.
+		severity, related, riskText string
+	}{
+		{name: "none cut", desc: long, risk: llm.RiskNone, category: llm.CategoryCredentialAccess,
+			severity: "medium", related: string(llm.CategoryOther), riskText: llm.TruncatedText},
+		{name: "low cut", desc: long, risk: llm.RiskLow, category: llm.CategoryDataExfiltration,
+			severity: "medium", related: string(llm.CategoryOther), riskText: llm.TruncatedText},
+		{name: "medium cut", desc: long, risk: llm.RiskMedium, category: llm.CategoryToolShadowing,
+			severity: "medium", related: string(llm.CategoryToolShadowing), riskText: llm.CategoryToolShadowing.Text()},
+		{name: "high cut", desc: long, risk: llm.RiskHigh, category: llm.CategoryCredentialAccess,
+			severity: "high", related: string(llm.CategoryCredentialAccess), riskText: llm.CategoryCredentialAccess.Text()},
+		{name: "none not cut", desc: "Reads a file.", risk: llm.RiskNone, category: llm.CategoryOther},
+		{name: "low not cut", desc: "Reads a file.", risk: llm.RiskLow, category: llm.CategoryDataExfiltration,
+			severity: "low", related: string(llm.CategoryDataExfiltration), riskText: llm.CategoryDataExfiltration.Text()},
 	}
-	return names
+	for _, tt := range tests {
+		tools := map[string][]inspect.Tool{"srv": {mkTool("t1", tt.desc)}}
+		// The fake sets Truncated as the real client does: when the
+		// description is over llm.MaxDescriptionBytes.
+		fake := func() *llmFake {
+			return &llmFake{answer: func(in llm.Input) (llm.Verdict, error) {
+				return llm.Verdict{Risk: tt.risk, Category: tt.category, Truncated: len(in.Description) > llm.MaxDescriptionBytes}, nil
+			}}
+		}
+		var want []llmHit
+		if tt.severity != "" {
+			want = []llmHit{{llm.RuleID, tt.severity, "srv", "t1"}}
+		}
+
+		t.Run(tt.name+"/terminal", func(t *testing.T) {
+			t.Parallel()
+			r := llmScan(t, llmEnv(t, tools), tools, fake(), "--llm")
+			llmRows, _ := llmSplitFindings(parseFindings(t, r.stdout))
+			if got := llmRowsOf(t, llmRows); !slices.Equal(got, want) {
+				t.Fatalf("LLM findings = %+v, want %+v\nstdout:\n%s\nstderr:\n%s", got, want, r.stdout, r.stderr)
+			}
+			if len(want) == 0 {
+				return
+			}
+			f := llmRows[0]
+			if f.Risk != tt.riskText {
+				t.Errorf("Risk = %q, want %q", f.Risk, tt.riskText)
+			}
+			if wantTool := "t1 (" + tt.related + ")"; f.Tool != wantTool {
+				t.Errorf("Tool = %q, want %q", f.Tool, wantTool)
+			}
+		})
+
+		t.Run(tt.name+"/json", func(t *testing.T) {
+			t.Parallel()
+			r := llmScan(t, llmEnv(t, tools), tools, fake(), "--llm", "--json")
+			doc := decodeScanJSON(t, r.stdout)
+			if got := llmJSONRows(t, doc); !slices.Equal(got, want) {
+				t.Fatalf("LLM findings = %+v, want %+v\nstdout:\n%s\nstderr:\n%s", got, want, r.stdout, r.stderr)
+			}
+			for _, f := range doc.Findings {
+				if f.RuleID == llm.RuleID && f.Related != tt.related {
+					t.Errorf("related = %q, want %q", f.Related, tt.related)
+				}
+			}
+		})
+	}
 }
 
 // TestScanLLMIgnore checks that --ignore and .mcpmoat-ignore drop LLM
@@ -1036,7 +1108,7 @@ func llmAssertSameRuleJSON(t *testing.T, name, base, got string, wantLLM int) {
 	var gotRules []report.JSONFinding
 	nLLM := 0
 	for _, f := range gd.Findings {
-		if f.Source == string(report.SourceLLM) {
+		if f.Source == report.SourceLLM {
 			nLLM++
 			continue
 		}

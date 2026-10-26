@@ -145,14 +145,27 @@ const InvalidText = "The LLM classifier gave no valid rating for this tool descr
 // finding.
 const InvalidRemediation = "Read the full tool description and check it by hand."
 
+// TruncatedText is the fixed risk text of a RuleID finding for a tool whose
+// name or description was cut (see Verdict.Truncated) and that the model
+// rated none or low. The caller rates such a tool medium, whatever the model
+// answered: text after the cut can hold the attack, and a prompt injection in
+// the part before the cut can ask the model for a low rating.
+const TruncatedText = "The tool description is too long to classify in full. " +
+	"The part after the cut was not rated and can hold hidden instructions for the AI agent."
+
 // Verdict is the rating of one tool description by the model. Only
-// parseVerdict makes a Verdict from model output, so both fields are always
-// valid. With RiskNone, the category has no meaning.
+// parseVerdict makes a Verdict from model output, so Risk and Category are
+// always valid. With RiskNone, the category has no meaning.
 type Verdict struct {
 	// Risk is the risk level.
 	Risk Risk
 	// Category is the kind of risk.
 	Category Category
+	// Truncated is true when the tool name or description was cut before it
+	// was sent (see MaxToolNameBytes, MaxDescriptionBytes and
+	// MaxToolMessageBytes). Classify sets it. It never comes from the model
+	// output: parseVerdict never sets it.
+	Truncated bool
 }
 
 // Field names of the verdict JSON object. A test keeps the keys of the

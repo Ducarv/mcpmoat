@@ -109,9 +109,12 @@ func TestToolMessageRoundTrip(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			msg, err := toolMessage(tt.in)
+			msg, truncated, err := toolMessage(tt.in)
 			if err != nil {
 				t.Fatalf("toolMessage() error = %v", err)
+			}
+			if truncated {
+				t.Error("toolMessage() truncated = true, want false")
 			}
 			p := decodeMessage(t, msg)
 			want := toolPayload{ToolName: tt.in.ToolName, ToolDescription: tt.in.Description}
@@ -122,7 +125,7 @@ func TestToolMessageRoundTrip(t *testing.T) {
 	}
 
 	// HTML escaping is off, so the model sees tags as they are.
-	msg, err := toolMessage(Input{Description: "<IMPORTANT>&"})
+	msg, _, err := toolMessage(Input{Description: "<IMPORTANT>&"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -159,11 +162,14 @@ func TestToolMessageTruncation(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			msg, err := toolMessage(tt.in)
+			msg, truncated, err := toolMessage(tt.in)
 			if err != nil {
 				t.Fatalf("toolMessage() error = %v", err)
 			}
 			p := decodeMessage(t, msg)
+			if truncated != p.Truncated {
+				t.Errorf("toolMessage() returns truncated %v, message has %v", truncated, p.Truncated)
+			}
 			if len(p.ToolName) != tt.wantName || len(p.ToolDescription) != tt.wantDesc || p.Truncated != tt.wantCut {
 				t.Errorf("toolMessage() name %d, description %d, truncated %v; want %d, %d, %v",
 					len(p.ToolName), len(p.ToolDescription), p.Truncated, tt.wantName, tt.wantDesc, tt.wantCut)
@@ -199,9 +205,12 @@ func TestToolMessageWorstCaseSize(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			msg, err := toolMessage(tt.in)
+			msg, truncated, err := toolMessage(tt.in)
 			if err != nil {
 				t.Fatalf("toolMessage() error = %v", err)
+			}
+			if !truncated {
+				t.Error("toolMessage() returns truncated false, want true")
 			}
 			if len(msg) > MaxToolMessageBytes {
 				t.Fatalf("len(toolMessage()) = %d, want <= %d", len(msg), MaxToolMessageBytes)
@@ -255,7 +264,7 @@ func TestToolMessageNeverTooLarge(t *testing.T) {
 		}
 
 		in := Input{ToolName: strings.Repeat(s, 2*MaxToolNameBytes), Description: strings.Repeat(s, 2*MaxDescriptionBytes)}
-		if _, err := toolMessage(in); err != nil {
+		if _, _, err := toolMessage(in); err != nil {
 			t.Errorf("toolMessage(name and description of %q) error = %v, want nil", s, err)
 		}
 	}
@@ -272,11 +281,14 @@ func TestToolMessageInvalidUTF8(t *testing.T) {
 		{ToolName: strings.Repeat("\xbf", 600), Description: strings.Repeat("\xbf", 17000)},
 	}
 	for i, in := range inputs {
-		msg, err := toolMessage(in)
+		msg, truncated, err := toolMessage(in)
 		if err != nil {
 			t.Fatalf("case %d: toolMessage() error = %v", i, err)
 		}
 		p := decodeMessage(t, msg)
+		if truncated != p.Truncated {
+			t.Errorf("case %d: toolMessage() returns truncated %v, message has %v", i, truncated, p.Truncated)
+		}
 		if !utf8.ValidString(p.ToolName) || !utf8.ValidString(p.ToolDescription) {
 			t.Errorf("case %d: decoded text is not valid UTF-8", i)
 		}
