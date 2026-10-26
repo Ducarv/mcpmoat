@@ -33,6 +33,7 @@ jobs:
       - name: Check for known vulnerabilities
         env:
           # Dependabot does not bump this version string. The release-check
-          # job checks that ci.yml and release.yml pin the same version.
+          # job in ci.yml checks that ci.yml and release.yml pin the same
+          # version.
           GOVULNCHECK_VERSION: v1.9.0
         run: go run "golang.org/x/vuln/cmd/govulncheck@$GOVULNCHECK_VERSION" ./...

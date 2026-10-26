@@ -74,16 +74,16 @@ Agent-oriented variants (scoped tests, E2E scenario, golden files, fuzz) are in 
 
 CI (`.github/workflows/ci.yml`) runs on every pull request. On Linux and macOS it runs build, vet, race
 tests, golangci-lint and the version smoke test. On Linux only it also runs the gofmt check, the
-`go mod tidy` check and govulncheck. The `release-check` job runs `.github/scripts/check-pins.sh`.
+`go mod tidy` check and govulncheck. The `release-check` job runs `.github/scripts/check-tool-pins.sh`.
 The script checks that the GoReleaser pins match. It also checks that the govulncheck pins in
 `ci.yml`, `release.yml` and `govulncheck.yml` match, and that each file runs govulncheck only
-through `$GOVULNCHECK_VERSION`. To run it on your machine, call it from any directory. Then the job
-runs `goreleaser check`, a snapshot build and `.github/scripts/check-snapshot.sh`.
+through `$GOVULNCHECK_VERSION`. Then the job runs `goreleaser check`, a snapshot build and
+`.github/scripts/check-snapshot.sh`. To run the pin check on your machine, call
+`.github/scripts/check-tool-pins.sh`. The test of the script is `.github/scripts/check-tool-pins-test.sh`.
 
 The weekly `govulncheck` workflow (`.github/workflows/govulncheck.yml`) checks `main` every Monday.
-GitHub reads the schedule only from the file on `dev`. To run it by hand, open the Actions tab and
-run it from `dev`. GitHub uses the workflow file of the branch you pick. A maintainer finds the
-steps for a failed run in [docs/releasing.md](docs/releasing.md#weekly-vulnerability-check).
+A maintainer finds how to run it by hand and what to do after a failed run in
+[docs/releasing.md](docs/releasing.md#weekly-vulnerability-check).
 
 The `offline` job proves that a scan makes no network call that it should not make (NFR-01). It
 runs the `TestE2E` tests, the network tests of `cmd/mcpmoat/e2e_network_test.go` included, through

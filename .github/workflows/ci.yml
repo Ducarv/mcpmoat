@@ -148,8 +148,11 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
+      - name: Test the pin check
+        run: .github/scripts/check-tool-pins-test.sh
+
       - name: Check the tool version pins
-        run: .github/scripts/check-pins.sh
+        run: .github/scripts/check-tool-pins.sh
 
       - name: Set up Go
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0

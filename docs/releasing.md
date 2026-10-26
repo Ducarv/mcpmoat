@@ -103,12 +103,15 @@ After any re-run of part of the workflow, check the tap's `Casks/mcpmoat.rb` wit
 ## Weekly vulnerability check
 
 The `govulncheck` workflow (`.github/workflows/govulncheck.yml`) scans `main` every Monday at
-06:17 UTC. It finds a new advisory against the released code between two releases.
+06:17 UTC. It finds a new advisory against the released code between two releases. GitHub reads the
+schedule only from the file on `dev`.
 
+- To run it by hand, open the Actions tab and run it from `dev`. GitHub uses the workflow file of the
+  branch that you pick. A run that you start by hand notifies you.
 - A failed scheduled run sends a notice only to the maintainer who last edited the cron line. Keep
-  GitHub Actions notifications on for that account. A run that you start by hand notifies you.
-- GitHub disables a schedule after 60 days with no repository activity. Look at the Actions tab now
-  and then. If the last run is old, enable the workflow again.
+  GitHub Actions notifications on for that account.
+- GitHub disables a schedule after 60 days with no repository activity. If the last run is more than
+  8 days old, enable the workflow again.
 - After a failed run, fix the cause on `dev`, merge `dev` into `main` and cut a release (see
   [Cut a release](#cut-a-release)).
 
