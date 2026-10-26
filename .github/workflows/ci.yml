@@ -162,18 +162,32 @@ jobs:
             exit 1
           fi
           # The release test job and the weekly govulncheck workflow run
-          # govulncheck too, with the same pin.
-          vuln_ci=$(pin GOVULNCHECK_VERSION .github/workflows/ci.yml)
-          vuln_rel=$(pin GOVULNCHECK_VERSION .github/workflows/release.yml)
-          vuln_weekly=$(pin GOVULNCHECK_VERSION .github/workflows/govulncheck.yml)
-          if [ -z "$vuln_ci" ] || [ "$vuln_ci" != "$vuln_rel" ] || [ "$vuln_ci" != "$vuln_weekly" ]; then
-            echo "::error::The govulncheck pins differ. ci.yml: $vuln_ci. release.yml: $vuln_rel. govulncheck.yml: $vuln_weekly."
-            exit 1
-          fi
-          # Each run line must use the pin, not a hardcoded version.
+          # govulncheck too. ci.yml is the reference. Each file must have the
+          # same pin. The check also lists every govulncheck version token
+          # outside comment lines. Each token must use the pin variable. This is
+          # a best-effort guard against drift. Review is the real control.
+          # The script builds its search text from $at, so it does not match
+          # itself in this file.
+          at=@
+          tok="govulncheck[$at][^[:space:]\"]*"
+          ok="govulncheck${at}\$GOVULNCHECK_VERSION"
+          want=
           for f in ci release govulncheck; do
-            if ! grep -E '^ *run: ' ".github/workflows/$f.yml" | grep -qF "govulncheck@\$GOVULNCHECK_VERSION"; then
-              echo "::error::The run line of $f.yml does not use govulncheck@\$GOVULNCHECK_VERSION."
+            file=".github/workflows/$f.yml"
+            v=$(pin GOVULNCHECK_VERSION "$file" || true)
+            if [ -z "$v" ]; then
+              echo "::error::$f.yml has no GOVULNCHECK_VERSION pin."
+              exit 1
+            fi
+            if [ -z "$want" ]; then want=$v; fi
+            if [ "$v" != "$want" ]; then
+              echo "::error::The govulncheck pin of $f.yml is $v, expected $want (the pin in ci.yml)."
+              exit 1
+            fi
+            toks=$(grep -v '^ *#' "$file" | grep -o "$tok" || true)
+            bad=$(printf '%s\n' "$toks" | grep -vxF "$ok" || true)
+            if [ -z "$toks" ] || [ -n "$bad" ]; then
+              echo "::error::$f.yml has no govulncheck version token, or a token that does not use the pin variable: $bad"
               exit 1
             fi
           done
