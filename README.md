@@ -177,8 +177,9 @@ mcpmoat scan --json | jq -r '.findings[] | "\(.rule_id) \(.server)"'
   inspected, and the warnings of an inspection.
 - **Exit codes** do not change: 0, 1 or 2 (see [Pins and rug pulls](#pins-and-rug-pulls)).
 - **`complete`** is `false` when the report can miss results, for example when a config file has a
-  problem, `pins.json` cannot be read, or the LLM step of a `--llm` scan is incomplete (a provider
-  failure, or more than 500 tools). The exit code is then 2, and the reason is on stderr.
+  problem, `pins.json` cannot be read, or the LLM step of a `--llm` scan did not classify every
+  tool: a provider failure, an internal error of the LLM step, or more than 500 tools. The exit
+  code is then 2, and the reason is on stderr.
   `complete` can be `true` with exit code 2 when the save of new pins fails after the report, so
   always check the exit code too.
 - The document never holds env or header values. A finding names the key it is about, for example
@@ -380,6 +381,9 @@ mcpmoat scan --llm --llm-provider openai --llm-model <model> \
   A server that got a token through its env or headers can put that token into a description, and
   `--llm` then sends it to the provider. Run `--llm` only if you accept that a tool description can
   leave your machine as the server wrote it.
+- **No tool to send:** when no server was inspected, or the inspected servers list no tools,
+  `scan` prints `mcpmoat scan: --llm had no tool to classify` on stderr. The exit code does not
+  change.
 - **Limits:** at most 500 tools in one scan and 4 requests at the same time. Each request has 30
   seconds. mcpmoat does not retry and does not follow redirects. The request and the response are
   each capped at 64 KiB. The cost of a scan grows with the number and the size of the tool
@@ -393,12 +397,11 @@ mcpmoat scan --llm --llm-provider openai --llm-model <model> \
   - `MOAT-LLM-002` (medium): the model refused, or its answer did not match the fixed format. A
     description written to confuse the model can cause this. Only an unusable model answer gives
     this finding. Any other error stops the LLM step (see **Exit codes** below).
-  - A tool name or description that was cut before it was sent always gives at least one
-    `MOAT-LLM-001` finding of severity `medium` with the category `other`, whatever the model
-    answers, because the part that was not sent can hold the payload. The risk text says: "The
-    tool description is too long to classify in full. The part after the cut was not rated and can
-    hold hidden instructions for the AI agent." If the model rates a cut description `medium` or
-    `high`, the finding keeps the severity and the category of the model.
+  - When the model answers `none` or `low`, or the answer is unusable, for a tool whose name or
+    description was cut, the tool gets one `MOAT-LLM-001` finding of severity `medium` with
+    category `other`. An answer of `medium` or `high` keeps its severity and category. An unusable
+    answer for a tool that was not cut still gives `MOAT-LLM-002`. The part after the cut was not
+    rated and can hold the payload, and the risk text of the finding says so.
 
   An LLM finding is marked `[LLM]` and has a `Source` line. In JSON its `source` is `llm`, and
   `related` holds the category. A short sample:
@@ -418,9 +421,9 @@ mcpmoat scan --llm --llm-provider openai --llm-model <model> \
   the rule findings. They never remove or change a rule finding, and they never change the pins.
 - **What `--llm` does not check:** mcpmoat sends no input schema, so `--llm` does not rate text
   that is hidden in a parameter description of a schema.
-- **Your API key and the servers:** a config file that you trust can expand
-  `${MCPMOAT_LLM_API_KEY}` into the env of a server, as the client would, and that server then gets
-  the key.
+- **Your API key and the servers:** mcpmoat never gives the key to a server, not through the
+  environment and not through a placeholder. A `${MCPMOAT_LLM_API_KEY}` placeholder in a server
+  config fails like an unset variable.
 - **Exit codes:** LLM findings count for `--fail-on` like any finding. A provider failure (a
   network, TLS or proxy error, a timeout, an HTTP error, a response that is too large) or more than
   500 tools gives exit code 2. The report still prints, `complete` is `false` in JSON, and stderr

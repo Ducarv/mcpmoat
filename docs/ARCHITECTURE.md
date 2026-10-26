@@ -235,8 +235,9 @@ the connect and pin steps between step 5 and step 6:
   server, and `ambiguous` when the name cannot select it.
 - 5d. Only with `--llm` (FR-17), `classifyTools` in `cmd/mcpmoat/scan_llm.go` runs after the pin
   step. It sends the name and description of each tool of each server with status `StatusOK` to the
-  classifier, and adds one advisory row for each tool that the model rates as risky. It only adds
-  rows: it never changes or drops a rule finding, and it never touches pins, diffs or hints. Only
+  classifier, and adds one advisory row for each tool that the model rates as risky, for each tool
+  with an unusable answer, and for each cut tool (see the verdict rules in
+  [The `--llm` classifier](#the---llm-classifier)). It only adds rows: it never changes or drops a rule finding, and it never touches pins, diffs or hints. Only
   `--ignore` drops LLM rows, as for the pin rows. The `.mcpmoat-ignore` file does not (see step 3).
   The ignored count includes the dropped LLM rows. See [The `--llm` classifier](#the---llm-classifier).
 - The pin findings join the config findings in one report. A changed tool and a new tool also get a
@@ -592,9 +593,9 @@ Shape (`schema_version` 2):
   `complete`, `servers`, `findings`, `diffs` and `errors`. An empty list is `[]`, never `null`.
 - `complete` is `false` when the report can miss results: a config file has a problem (see
   `errors`), or the inspection or the pin step failed as a whole (for example, `pins.json` cannot
-  be read), or the LLM step of a `--llm` scan is incomplete (a provider failure, or more than 500
-  tools). The exit code is then 2, and the reason is on stderr only. A failed save of new pins
-  comes after the document is written, so it does not change `complete`: the findings are whole,
+  be read), or the LLM step of a `--llm` scan did not classify every tool: a provider failure, an
+  internal error of the LLM step, or more tools than the `--llm` cap. The exit code is then 2, and
+  the reason is on stderr only. A failed save of new pins comes after the document is written, so it does not change `complete`: the findings are whole,
   and the exit code is 2.
 - A server has `name`, `client`, `scope`, `project_path`, `untrusted`, `state`, `transport`,
   `source`, `inspection.status` (`not_run`, `ok`, `timeout`, `failed` or `refused`) and either
@@ -656,7 +657,7 @@ an old schema file in place. The reviewer must catch that. An old schema file is
 released.
 
 History: version 1 is the first format. Version 2 adds the required finding field `source` (for
-`--llm`, FR-17), and `complete` is also `false` when the LLM step is incomplete. The other fields
+`--llm`, FR-17), and `complete` is also `false` when the LLM step did not classify every tool. The other fields
 keep their names and types.
 
 Not in version 2: accept hints (#169), ignored counts (#175), a summary, `pin --json` and
@@ -673,7 +674,8 @@ This section holds the code structure and the design reasons. Other files own th
 - The user contract (flags, warning, what is sent, limits, findings, exit codes and security notes)
   is in [README.md](../README.md#optional-llm-classification-sends-data-off-your-machine).
 - The requirements are in FR-17 of [PRD](PRD.md).
-- The package doc comment in `internal/llm/doc.go` owns the threat model.
+- The threat model is in [PRD section 5.3](PRD.md#53-threats), which owns it. The package doc
+  comment in `internal/llm/doc.go` holds the code-level notes of the threat model.
 
 Setup:
 
@@ -712,9 +714,9 @@ value, never into the system prompt, so it cannot change the instructions of the
 [Import direction](#import-direction)). The cuts are made at a rune boundary: `llm.MaxToolNameBytes`,
 `llm.MaxDescriptionBytes` and, for the whole message, `llm.MaxToolMessageBytes`. `Classify` sets
 `Verdict.Truncated` when it cut the name or the description. The flag never comes from the model
-output. A cut description is a sign of risk,
-because the part that is not shown can hold the payload. The system prompt tells the model to rate
-it at least `medium`, but the code does not trust the model for this (see the verdict below).
+output. A cut name or description is a sign of risk, because the part that is not shown can hold
+the payload. The system prompt tells the model to rate it at least `medium`, but the code does not
+trust the model for this (see the verdict below).
 
 The verdict: `parseVerdict` reads the model answer strictly: exactly one JSON object with the keys
 `risk` and `category`, exact keys and case, no duplicate key, no other key, nothing after the
@@ -722,13 +724,16 @@ object. The values come from fixed lists. `classifyTools` turns a verdict into r
 
 - A risk of `low`, `medium` or `high` gives one `MOAT-LLM-001` finding with that severity. The
   category goes in `related`. `none` gives no finding. The severity is never `critical`.
-- A cut description (`Verdict.Truncated`) always gives a `MOAT-LLM-001` finding of at least
-  `medium`, whatever the model answered. The finding has the category `other` and the fixed text
-  `llm.TruncatedText`. A model answer of `medium` or `high` keeps the severity and the category of
-  the model. This is enforced in code and not only in the system prompt. A prompt injection in the
-  part before the cut could ask the model for `none`, and the part after the cut was never rated.
-- An answer that cannot be used gives `MOAT-LLM-002` (medium). That is an invalid answer, a refusal
-  or an answer cut at the token limit. Only `llm.ErrInvalidOutput` gives this finding.
+- When the model answers `none` or `low`, or the answer is unusable, for a tool whose name or
+  description was cut (`Verdict.Truncated`), the tool gets one `MOAT-LLM-001` finding of severity
+  `medium` with category `other`. The finding has the fixed text `llm.TruncatedText`. An answer of
+  `medium` or `high` keeps its severity and category. An unusable answer for a tool that was not
+  cut still gives `MOAT-LLM-002`. This is enforced in code and not only in the system prompt. A
+  prompt injection in the part before the cut could ask the model for `none`, and the part after
+  the cut was never rated.
+- An answer that cannot be used for a tool that was not cut gives `MOAT-LLM-002` (medium). That is
+  an invalid answer, a refusal or an answer cut at the token limit. Only `llm.ErrInvalidOutput`
+  gives this finding.
 - The finding texts are fixed in `internal/llm`, so no text from the model reaches the terminal or
   the JSON output.
 

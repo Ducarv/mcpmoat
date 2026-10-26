@@ -143,6 +143,22 @@ hidden instructions or leak data.
 | T4 | Dangerous config: remote server over `http://` without TLS, plaintext secret in config, unpinned package (`npx package@latest`) | Static config analysis |
 | T5 | Basic typosquatting: name very close to a known server | Compare with a short list of popular servers (edit distance: one edit. Two edits when the shorter name has more than 8 characters and either the edits only add or drop characters at the end of the popular name, or the part after the last separator the two names share has 5 or more characters. With no shared separator, that part is the whole shorter name) |
 
+Note on `--llm` (FR-17, not a new threat ID). The optional classifier reads untrusted tool text
+with a model. So it adds four threats to T1: prompt injection against the classifier, untrusted
+model output, a name or description that is cut so that the payload is hidden, and data that
+leaves the machine. The mitigations:
+
+- Prompt injection: a fixed system prompt, and the tool text goes only as a JSON string in the user
+  message.
+- Untrusted model output: a strict parse of the verdict against fixed lists, and no model text in
+  the report.
+- A cut that hides the payload: the cut-text rule of FR-17 gives a `medium` finding for a cut tool
+  that the model rates `none` or `low`, or whose answer is unusable.
+- Data that leaves the machine: `--llm` is opt-in, and a warning is printed before any request.
+- A hostile config that hides the LLM findings: only `--ignore` hides them, not `.mcpmoat-ignore`.
+
+The code-level notes are in the package doc comment of `internal/llm/doc.go`.
+
 ### 5.4 Out of scope for phase 1
 
 - Prompt injection coming from **content** (for example a GitHub issue the agent reads).
@@ -602,14 +618,15 @@ with `--no-color`).
 
 ### 6.6 Optional LLM
 
-**FR-17: `--llm`.** Sends each tool description to a model and asks for a risk classification.
+**FR-17: `--llm`.** Sends the name and description of each tool to a model and asks for a risk classification.
 Off by default; key from an environment variable; README warns that this option **sends data off
 the machine**.
 
 - Without `--llm`, no LLM code path runs and no request is made (see NFR-01).
 - The API key comes only from the environment variable `MCPMOAT_LLM_API_KEY`. There is no key flag,
   because command-line arguments show in `ps` and in the shell history. With `--llm` and no valid
-  key, the command exits with code 2 and names the variable.
+  key, the command exits with code 2 and names the variable. mcpmoat never gives the key to a
+  server: a `${MCPMOAT_LLM_API_KEY}` placeholder in a server config fails like an unset variable.
 - Flags (scan only): `--llm`, `--llm-provider anthropic|openai` (default `anthropic`),
   `--llm-model` (required for `openai`; `anthropic` has a default model) and `--llm-base-url`
   (`https`, or `http` only for a loopback host; no user info, query or fragment). The provider,
@@ -618,18 +635,19 @@ the machine**.
   tools to classify.
 - With `--llm`, a warning that data leaves the machine is printed on stderr before any request,
   also with `--json`.
-- What is sent: for each tool of each server that was inspected, only the tool name (cut at 512
-  bytes) and the tool description (cut at 16 KiB, with a flag that says it was cut), in one JSON
-  user message with a fixed system prompt. mcpmoat never puts configs, env values, headers,
-  arguments, URLs, schemas or pins into a request. At most 500 tools per scan and 4 requests at the
-  same time. Only `--ignore` hides LLM findings from the report. `.mcpmoat-ignore` cannot, because
+- What is sent: for each tool of each server that was inspected, only the tool name and the tool
+  description (each cut at a fixed size, with a flag that says it was cut), in one JSON user
+  message with a fixed system prompt. mcpmoat never puts configs, env values, headers, arguments,
+  URLs, schemas or pins into a request. A cap on the number of tools per scan (500): more tools
+  than the cap give exit code 2. The README holds the sizes and the other limits. Only `--ignore`
+  hides LLM findings from the report. `.mcpmoat-ignore` cannot, because
   it can come from a cloned repository (FR-10). `--ignore` does not stop a tool from being sent: to
   keep a server out of `--llm`, scan it with a separate config.
-- A tool whose name or description was cut before it was sent always gives at least one
-  `MOAT-LLM-001` finding of at least `medium` severity with the category `other`, whatever the
-  model answers, because the part that was not sent can hold the payload. A model answer of
-  `medium` or `high` keeps the severity and the category of the model. The code enforces this, not
-  only the system prompt.
+- When the model answers `none` or `low`, or the answer is unusable, for a tool whose name or
+  description was cut, the tool gets one `MOAT-LLM-001` finding of severity `medium` with category
+  `other`. An answer of `medium` or `high` keeps its severity and category. An unusable answer for
+  a tool that was not cut still gives `MOAT-LLM-002`. The part that was not sent can hold the
+  payload. The code enforces this, not only the system prompt.
 - The description is sent as the server returned it. mcpmoat does not remove configured secret
   values from it. A server that got a token through its env or headers can put that token into its
   description, and `--llm` then sends it to the provider. The server already holds the value. The
@@ -639,7 +657,7 @@ the machine**.
   fixed list. No model text reaches the output. Rule `MOAT-LLM-001` reports a risk of `low`,
   `medium` or `high` with that severity (never `critical`); `none` gives no finding. Rule
   `MOAT-LLM-002` (medium) reports an answer that is invalid or a refusal. Only such an unusable
-  model answer gives `MOAT-LLM-002`.
+  model answer for a tool that was not cut gives `MOAT-LLM-002`.
 - LLM findings carry a distinct source marker: `[LLM]` in the terminal and `"source": "llm"` in the
   JSON output (schema version 2). They only add to the rule findings and never remove or change
   them. They count for `--fail-on`. Only `--ignore` applies to them; `.mcpmoat-ignore` does not
@@ -647,13 +665,11 @@ the machine**.
 - The result is advisory. No finding does not mean that a tool is safe: a model can be wrong, and a
   hostile description can try to influence it.
 - A provider failure (network, TLS, timeout, HTTP error, a response that is too large), an internal
-  error of the LLM step, or more than 500 tools gives exit 2. A provider failure or an internal
+  error of the LLM step, or more tools than the cap gives exit 2. A provider failure or an internal
   error stops the step (fail closed). The report still prints, the JSON `complete` field is
-  `false`, and stderr says how many tools were not classified:
-  `mcpmoat scan: the LLM provider failed (<reason>); N tools were not classified` or
-  `mcpmoat scan: the LLM step failed (internal error); N tools were not classified`. The text of an
-  internal error is never printed.
-- A hostile server can make `scan --llm` exit with 2: it can list more than 500 tools, or write a
+  `false`, and stderr says how many tools were not classified. The text of an internal error is
+  never printed. The README holds the exact stderr lines.
+- A hostile server can make `scan --llm` exit with 2: it can list more tools than the cap, or write a
   description that makes the provider answer with an HTTP 4xx (a content filter or a context
   limit). A provider failure stops the other requests and gives exit 2 (fail closed). The rule
   findings still print. A follow-up may make a 400, 413 or 422 for one tool a result for that tool
