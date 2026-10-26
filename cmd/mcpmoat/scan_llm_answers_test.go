@@ -38,14 +38,20 @@ func llmByTool(replies map[string]llmReply) func(llm.Input) (llm.Verdict, error)
 	}
 }
 
-// TestScanLLMErrorSorting checks how scan sorts the errors of the classifier.
-// Only an error that wraps llm.ErrProvider is a provider failure: it stops
-// the LLM step, scan exits with 2, the JSON complete field is false and
-// stderr has the "LLM provider failed" line. llm.ErrInvalidOutput and any
-// other error (for example a local error such as a request that is too large)
-// give that tool one MOAT-LLM-002 finding (medium) and the other tools still
-// get their answer: the step is complete and the exit code follows the
-// findings. The text of such an error never shows.
+// TestScanLLMErrorSorting checks how scan sorts the errors of the classifier
+// (see sortAnswer). It fails closed:
+//
+//   - llm.ErrInvalidOutput gives that tool one MOAT-LLM-002 finding (medium).
+//     The other tools still get their answer, the step is complete and the
+//     exit code follows the findings.
+//   - An error that wraps llm.ErrProvider stops the LLM step with the line
+//     "the LLM provider failed (<reason>); N tools were not classified".
+//   - Any other error (a local error, an unknown error) stops the step too,
+//     with the line "the LLM step failed (internal error); N tools were not
+//     classified". It gives no MOAT-LLM-002 finding.
+//
+// A step that stops still prints the report, the JSON complete field is
+// false and scan exits with 2. The text of a generic error never shows.
 func TestScanLLMErrorSorting(t *testing.T) {
 	t.Parallel()
 
@@ -58,15 +64,27 @@ func TestScanLLMErrorSorting(t *testing.T) {
 	status503 := llmReply{err: &llm.StatusError{Code: http.StatusServiceUnavailable}}
 	wrappedProvider := llmReply{err: fmt.Errorf("test: %w", llm.ErrProvider)}
 
+	// stepFailure is how the LLM step must end.
+	type stepFailure int
+	const (
+		noFailure       stepFailure = iota // the step is complete
+		providerFailure                    // the provider line
+		internalFailure                    // the internal error line
+		eitherFailure                      // the first failure decides the line
+	)
+
 	tests := []struct {
 		name    string
 		tools   []string            // the tool names of the one server "srv", in order
 		replies map[string]llmReply // by tool name; a tool not named gets risk none
-		// provider is true when the step must stop with a provider failure.
-		// wantReason is then the reason in the failure line.
-		provider   bool
+		failure stepFailure
+		// wantReason is the reason in the provider line, for a provider
+		// failure (or eitherFailure when the provider line shows).
 		wantReason string
-		// wantRows are the LLM findings. For a provider failure, the other
+		// wantCount is the count of tools that were not classified in the
+		// failure line; "" means any count of 1 or more.
+		wantCount string
+		// wantRows are the LLM findings. When the step fails, the other
 		// tools can end before or after the cancel, so the rows must only be
 		// a part of wantRows, in order.
 		wantRows []llmHit
@@ -80,8 +98,9 @@ func TestScanLLMErrorSorting(t *testing.T) {
 			name:       "provider error that wraps ErrProvider",
 			tools:      []string{"t1"},
 			replies:    map[string]llmReply{"t1": wrappedProvider},
-			provider:   true,
+			failure:    providerFailure,
 			wantReason: "test: LLM provider request failed",
+			wantCount:  "1",
 			wantCode:   exitError,
 			wantMedium: exitError,
 			wantCalls:  1,
@@ -90,8 +109,9 @@ func TestScanLLMErrorSorting(t *testing.T) {
 			name:       "provider status 503",
 			tools:      []string{"t1"},
 			replies:    map[string]llmReply{"t1": status503},
-			provider:   true,
+			failure:    providerFailure,
 			wantReason: "HTTP 503",
+			wantCount:  "1",
 			wantCode:   exitError,
 			wantMedium: exitError,
 			wantCalls:  1,
@@ -106,54 +126,61 @@ func TestScanLLMErrorSorting(t *testing.T) {
 			wantCalls:  1,
 		},
 		{
+			// Fail closed: an unknown error is not a MOAT-LLM-002 finding.
 			name:       "generic error",
 			tools:      []string{"t1"},
 			replies:    map[string]llmReply{"t1": generic},
-			wantRows:   []llmHit{{llm.RuleIDInvalid, "medium", "srv", "t1"}},
-			wantCode:   exitOK,
-			wantMedium: exitFindings,
+			failure:    internalFailure,
+			wantCount:  "1",
+			wantCode:   exitError,
+			wantMedium: exitError,
 			wantCalls:  1,
 		},
 		{
-			// A generic error does not cancel the other jobs: every tool is
-			// sent and every tool gets its own row.
-			name:    "generic error on every tool",
-			tools:   []string{"t1", "t2", "t3", "t4", "t5", "t6"},
-			replies: map[string]llmReply{"t1": generic, "t2": generic, "t3": generic, "t4": generic, "t5": generic, "t6": generic},
-			wantRows: []llmHit{
-				{llm.RuleIDInvalid, "medium", "srv", "t1"},
-				{llm.RuleIDInvalid, "medium", "srv", "t2"},
-				{llm.RuleIDInvalid, "medium", "srv", "t3"},
-				{llm.RuleIDInvalid, "medium", "srv", "t4"},
-				{llm.RuleIDInvalid, "medium", "srv", "t5"},
-				{llm.RuleIDInvalid, "medium", "srv", "t6"},
-			},
-			wantCode:   exitOK,
-			wantMedium: exitFindings,
-			wantCalls:  6,
+			// The first generic error stops the step. No tool gets a row,
+			// and every tool counts as not classified.
+			name:       "generic error on every tool",
+			tools:      []string{"t1", "t2", "t3", "t4", "t5", "t6"},
+			replies:    map[string]llmReply{"t1": generic, "t2": generic, "t3": generic, "t4": generic, "t5": generic, "t6": generic},
+			failure:    internalFailure,
+			wantCount:  "6",
+			wantCode:   exitError,
+			wantMedium: exitError,
 		},
 		{
-			name:    "mixed tools without a provider failure",
+			name:    "mixed tools without a failure",
 			tools:   []string{"t1", "t2", "t3", "t4"},
-			replies: map[string]llmReply{"t1": high, "t2": invalid, "t3": generic},
+			replies: map[string]llmReply{"t1": high, "t2": invalid},
 			wantRows: []llmHit{
 				{llm.RuleID, "high", "srv", "t1"},
 				{llm.RuleIDInvalid, "medium", "srv", "t2"},
-				{llm.RuleIDInvalid, "medium", "srv", "t3"},
 			},
 			wantCode:   exitFindings,
 			wantMedium: exitFindings,
 			wantCalls:  4,
 		},
 		{
-			// The provider failure wins over the generic error of another
-			// tool. That tool can still get its row when it ended first.
-			name:       "mixed tools with a provider failure",
+			// The generic error stops the step. The other tools can still
+			// get their row when they ended first.
+			name:    "mixed tools with a generic error",
+			tools:   []string{"t1", "t2", "t3", "t4"},
+			replies: map[string]llmReply{"t1": high, "t2": invalid, "t3": generic},
+			failure: internalFailure,
+			wantRows: []llmHit{
+				{llm.RuleID, "high", "srv", "t1"},
+				{llm.RuleIDInvalid, "medium", "srv", "t2"},
+			},
+			wantCode:   exitError,
+			wantMedium: exitError,
+		},
+		{
+			// Both errors stop the step. The first failure decides the
+			// line, and the order of the requests is not fixed.
+			name:       "mixed tools with a generic error and a provider failure",
 			tools:      []string{"t1", "t2"},
 			replies:    map[string]llmReply{"t1": generic, "t2": status503},
-			provider:   true,
+			failure:    eitherFailure,
 			wantReason: "HTTP 503",
-			wantRows:   []llmHit{{llm.RuleIDInvalid, "medium", "srv", "t1"}},
 			wantCode:   exitError,
 			wantMedium: exitError,
 		},
@@ -190,16 +217,47 @@ func TestScanLLMErrorSorting(t *testing.T) {
 						}
 					}
 
-					m := llmNotClassified.FindAllStringSubmatch(r.stderr, -1)
-					if tt.provider {
-						if len(m) != 1 {
-							t.Fatalf("stderr has %d LLM failure lines, want 1:\n%s", len(m), r.stderr)
+					provider := llmNotClassified.FindAllStringSubmatch(r.stderr, -1)
+					internal := llmInternalFailed.FindAllStringSubmatch(r.stderr, -1)
+					var count string
+					switch tt.failure {
+					case noFailure:
+						if len(provider)+len(internal) != 0 || strings.Contains(r.stderr, "LLM provider failed") || strings.Contains(r.stderr, "LLM step failed") {
+							t.Errorf("stderr reports a failure of the LLM step, want none:\n%s", r.stderr)
 						}
-						if m[0][1] != tt.wantReason {
-							t.Errorf("failure reason = %q, want %q", m[0][1], tt.wantReason)
+					case providerFailure:
+						if len(provider) != 1 || len(internal) != 0 {
+							t.Fatalf("stderr has %d provider lines and %d internal lines, want 1 and 0:\n%s", len(provider), len(internal), r.stderr)
 						}
-					} else if len(m) != 0 || strings.Contains(r.stderr, "provider failed") {
-						t.Errorf("stderr reports a provider failure, want none:\n%s", r.stderr)
+						count = provider[0][2]
+						if provider[0][1] != tt.wantReason {
+							t.Errorf("failure reason = %q, want %q", provider[0][1], tt.wantReason)
+						}
+					case internalFailure:
+						if len(internal) != 1 || len(provider) != 0 {
+							t.Fatalf("stderr has %d internal lines and %d provider lines, want 1 and 0:\n%s", len(internal), len(provider), r.stderr)
+						}
+						count = internal[0][1]
+					case eitherFailure:
+						if len(provider)+len(internal) != 1 {
+							t.Fatalf("stderr has %d provider lines and %d internal lines, want 1 in total:\n%s", len(provider), len(internal), r.stderr)
+						}
+						if len(provider) == 1 {
+							count = provider[0][2]
+							if provider[0][1] != tt.wantReason {
+								t.Errorf("failure reason = %q, want %q", provider[0][1], tt.wantReason)
+							}
+						} else {
+							count = internal[0][1]
+						}
+					}
+					if tt.failure != noFailure {
+						if tt.wantCount != "" && count != tt.wantCount {
+							t.Errorf("not classified count = %s, want %s", count, tt.wantCount)
+						}
+						if count == "0" {
+							t.Errorf("not classified count = 0, want at least 1")
+						}
 					}
 					for _, out := range []string{r.stdout, r.stderr} {
 						if strings.Contains(out, genericCanary) {
@@ -210,8 +268,11 @@ func TestScanLLMErrorSorting(t *testing.T) {
 					var got []llmHit
 					if jsonOut {
 						doc := decodeScanJSON(t, r.stdout)
-						if doc.Complete == tt.provider {
-							t.Errorf("complete = %v, want %v", doc.Complete, !tt.provider)
+						if wantComplete := tt.failure == noFailure; doc.Complete != wantComplete {
+							t.Errorf("complete = %v, want %v", doc.Complete, wantComplete)
+						}
+						if len(doc.Servers) != 1 {
+							t.Errorf("JSON has %d servers, want 1: the report must still print", len(doc.Servers))
 						}
 						got = llmJSONRows(t, doc)
 					} else {
@@ -220,7 +281,7 @@ func TestScanLLMErrorSorting(t *testing.T) {
 						}
 						got = llmRowsOf(t, parseFindings(t, r.stdout))
 					}
-					if tt.provider {
+					if tt.failure != noFailure {
 						if !llmIsSubsequence(got, tt.wantRows) {
 							t.Errorf("LLM findings = %+v, want a part of %+v", got, tt.wantRows)
 						}
@@ -448,10 +509,136 @@ func TestScanLLMInterruptedAfterLastAnswer(t *testing.T) {
 			}
 			assertEmptyStdout(t, r.stdout)
 			assertContainsAll(t, "stderr", r.stderr, []string{scanPrefix + interruptedText + "\n"})
-			if llmNotClassified.MatchString(r.stderr) {
-				t.Errorf("stderr reports a provider failure for a signal:\n%s", r.stderr)
+			if llmNotClassified.MatchString(r.stderr) || llmInternalFailed.MatchString(r.stderr) {
+				t.Errorf("stderr reports a failure of the LLM step for a signal:\n%s", r.stderr)
 			}
 			e.assertNoPinsFile(t, "a signal with the last LLM answer")
+		})
+	}
+}
+
+// TestSortAnswer lists every error class that the LLM client can return, and
+// the answerKind that sortAnswer must give it. A new error class must get its
+// own row here, so its kind is a conscious decision. sortAnswer fails closed:
+// only llm.ErrInvalidOutput gives a MOAT-LLM-002 row, and an error that it
+// does not know stops the step as an internal failure. The unexported local
+// errors of package llm (a request that is too large, a request that cannot
+// be built, a nil client, a refused proxy setting) wrap nothing, so the
+// "unknown error" row covers them.
+func TestSortAnswer(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name      string
+		err       error
+		want      answerKind
+		wantStops bool // answerKind.stepFails
+	}{
+		{"nil", nil, answerVerdict, false},
+		{"invalid output", llm.ErrInvalidOutput, answerUnusable, false},
+		{"wrapped invalid output", fmt.Errorf("test: %w", llm.ErrInvalidOutput), answerUnusable, false},
+		{"context canceled", context.Canceled, answerStopped, false},
+		{"context deadline exceeded", context.DeadlineExceeded, answerStopped, false},
+		{"wrapped context canceled", fmt.Errorf("test: stopped: %w", context.Canceled), answerStopped, false},
+		{"auth", llm.ErrAuth, answerProviderFailed, true},
+		{"status 401", &llm.StatusError{Code: http.StatusUnauthorized}, answerProviderFailed, true},
+		{"status 429", &llm.StatusError{Code: http.StatusTooManyRequests}, answerProviderFailed, true},
+		{"status 503", &llm.StatusError{Code: http.StatusServiceUnavailable}, answerProviderFailed, true},
+		{"status 307 redirect", &llm.StatusError{Code: http.StatusTemporaryRedirect}, answerProviderFailed, true},
+		{"transport", llm.ErrTransport, answerProviderFailed, true},
+		{"response too large", llm.ErrTooLarge, answerProviderFailed, true},
+		{"bad response", llm.ErrBadResponse, answerProviderFailed, true},
+		{"provider", llm.ErrProvider, answerProviderFailed, true},
+		{"wrapped provider", fmt.Errorf("test: %w", llm.ErrProvider), answerProviderFailed, true},
+		{"unknown error", errors.New("local-error-canary"), answerInternalFailed, true},
+		{"wrapped unknown error", fmt.Errorf("test: %w", errors.New("inner")), answerInternalFailed, true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got := sortAnswer(tt.err)
+			if got != tt.want {
+				t.Errorf("sortAnswer(%v) = %d, want %d", tt.err, got, tt.want)
+			}
+			if stops := got.stepFails(); stops != tt.wantStops {
+				t.Errorf("sortAnswer(%v).stepFails() = %v, want %v", tt.err, stops, tt.wantStops)
+			}
+		})
+	}
+}
+
+// TestLLMFailureLine checks the start of the stderr line of a failed LLM step:
+// only a provider failure names the provider, and an internal failure has
+// fixed text.
+func TestLLMFailureLine(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		failure *llmFailure
+		want    string
+	}{
+		{"no failure", nil, llmInternalText},
+		{"internal", &llmFailure{kind: answerInternalFailed}, llmInternalText},
+		{"provider without error", &llmFailure{kind: answerProviderFailed}, llmInternalText},
+		{"provider status", &llmFailure{kind: answerProviderFailed, err: &llm.StatusError{Code: http.StatusServiceUnavailable}}, "the LLM provider failed (HTTP 503)"},
+		{"provider transport", &llmFailure{kind: answerProviderFailed, err: llm.ErrTransport}, "the LLM provider failed (LLM provider request failed: network error)"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if got := llmFailureLine(tt.failure); got != tt.want {
+				t.Errorf("llmFailureLine() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+	if llmInternalText != "the LLM step failed (internal error)" {
+		t.Errorf("llmInternalText = %q, want %q", llmInternalText, "the LLM step failed (internal error)")
+	}
+}
+
+// TestLLMStepStopped checks the guard of llmStep. classifyTools fails only
+// when the context ended, so the fake classifier cannot reach the guard
+// through llmStep: the test calls llmStepStopped directly. An error while the
+// context is alive must give one fixed line, never the text of the error.
+// When the context ended, the line is interruptedText, as for a signal.
+func TestLLMStepStopped(t *testing.T) {
+	t.Parallel()
+
+	const canary = "guard-error-canary-Kp3Zv8"
+	canceled, cancel := context.WithCancel(t.Context())
+	cancel()
+
+	tests := []struct {
+		name       string
+		ctx        context.Context
+		err        error
+		want       bool
+		wantStderr string
+	}{
+		{"alive without error", t.Context(), nil, false, ""},
+		{"alive with error", t.Context(), errors.New(canary), true, scanPrefix + llmInternalText + "\n"},
+		{"ended with context error", canceled, context.Canceled, true, scanPrefix + interruptedText + "\n"},
+		{"ended without error", canceled, nil, true, scanPrefix + interruptedText + "\n"},
+		{"ended with other error", canceled, errors.New(canary), true, scanPrefix + interruptedText + "\n"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			var stdout, stderr strings.Builder
+			c := &cli{stdout: &stdout, stderr: &stderr}
+			if got := c.llmStepStopped(tt.ctx, tt.err); got != tt.want {
+				t.Errorf("llmStepStopped() = %v, want %v", got, tt.want)
+			}
+			if stderr.String() != tt.wantStderr {
+				t.Errorf("stderr = %q, want %q", stderr.String(), tt.wantStderr)
+			}
+			if stdout.Len() != 0 {
+				t.Errorf("stdout = %q, want empty", stdout.String())
+			}
+			if strings.Contains(stderr.String(), canary) {
+				t.Errorf("stderr holds the text of the error: %q", stderr.String())
+			}
 		})
 	}
 }

@@ -383,7 +383,8 @@ mcpmoat scan --llm --llm-provider openai --llm-model <model> \
   - `MOAT-LLM-001`: the model rates the tool as risky. The severity is the risk level: `low`,
     `medium` or `high`, never `critical`. A risk level of `none` gives no finding.
   - `MOAT-LLM-002` (medium): the model refused, or its answer did not match the fixed format. A
-    description written to confuse the model can cause this.
+    description written to confuse the model can cause this. Only an unusable model answer gives
+    this finding. Any other error stops the LLM step (see **Exit codes** below).
 
   An LLM finding is marked `[LLM]` and has a `Source` line. In JSON its `source` is `llm`, and
   `related` holds the category. A short sample:
@@ -406,6 +407,9 @@ mcpmoat scan --llm --llm-provider openai --llm-model <model> \
   500 tools gives exit code 2. The report still prints, `complete` is `false` in JSON, and stderr
   says how many tools were not classified, for example
   `mcpmoat scan: the LLM provider failed (HTTP 401); 12 tools were not classified`.
+  An internal error of the LLM step also stops the step with exit code 2, and stderr then says
+  `mcpmoat scan: the LLM step failed (internal error); 12 tools were not classified`. mcpmoat
+  never prints the text of that error.
   A hostile server can cause this on purpose: it can list more than 500 tools, or write a
   description that makes the provider answer with an HTTP 4xx (a content filter or a context
   limit). The rule findings still print.
@@ -444,8 +448,8 @@ here.
 Exit code 2 comes, for example, from a usage error (invalid flags), invalid rules, an unreadable
 `--config` file, a problem in a config file, a `pins.json` that cannot be read or saved, a report
 that cannot be written (a closed stdout), an unknown home or working directory in auto-discovery,
-an `--llm` problem (a missing or invalid `MCPMOAT_LLM_API_KEY`, a provider failure, or more than
-500 tools), or an internal error. Some of these errors still print the report on stdout first, so
+an `--llm` problem (a missing or invalid `MCPMOAT_LLM_API_KEY`, a provider failure, an internal
+error of the LLM step, or more than 500 tools), or an internal error. Some of these errors still print the report on stdout first, so
 you can read the findings:
 
 | Execution error | Report |
@@ -453,7 +457,7 @@ you can read the findings:
 | A problem in a config file | Printed, then the problems. A `--config` file with a problem and no server prints only the problem. |
 | A `pins.json` that cannot be read or saved | Printed |
 | An internal error of the inspection (`inspect.Run`) | Printed |
-| An LLM provider failure, or more than 500 tools with `--llm` | Printed |
+| An LLM provider failure, an internal error of the LLM step, or more than 500 tools with `--llm` | Printed |
 | A signal before the save of new pins | Printed |
 | A usage error (also a bad `--llm-*` flag or a missing API key), invalid rules, or an unknown home or working directory | Not printed |
 | A signal during the inspection or the LLM step | Not printed |

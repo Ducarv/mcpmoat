@@ -707,9 +707,10 @@ Limits of a scan:
   location.
 - The request body is at most 64 KiB (a larger body is not sent) and the response body at most
   64 KiB. The body of an answer that is not 2xx is never read.
-- The client has its own `http.Transport` with TLS 1.2 or later. Like the server connections, it
-  honours `HTTPS_PROXY`, `HTTP_PROXY` and `NO_PROXY`. Go ignores a proxy value that it cannot parse
-  and then connects directly.
+- The client has its own `http.Transport` with TLS 1.2 or later. For an `https` base URL it
+  honours `HTTPS_PROXY` and `NO_PROXY`, like the server connections. Go ignores a proxy value that
+  it cannot parse and then connects directly. An `http` base URL is always a loopback host, and the
+  client never uses a proxy for it, so the key never goes to a proxy in clear text.
 - Every error of `internal/llm` has fixed text. It never holds the key, a URL, a header, a response
   body or model output.
 
@@ -719,7 +720,9 @@ The verdict: the model may answer only with one JSON object with the keys `risk`
 strictly: exact keys and case, no duplicate key, no other key, nothing after the object. A risk of
 `low`, `medium` or `high` gives one `MOAT-LLM-001` finding with that severity, and the category goes
 in `related`. `none` gives no finding. An invalid answer, a refusal, or an answer cut at the token
-limit gives one `MOAT-LLM-002` finding (medium). The severity is never `critical`, so the model
+limit gives one `MOAT-LLM-002` finding (medium). Only these unusable answers
+(`llm.ErrInvalidOutput`) give `MOAT-LLM-002`. `sortAnswer` in `cmd/mcpmoat` fails closed: any other
+error of `Classify` stops the step (see below). The severity is never `critical`, so the model
 alone can never give the highest severity. The finding texts are fixed in `internal/llm`, so no
 text from the model reaches the terminal or the JSON output.
 
@@ -739,10 +742,15 @@ Exit code 2 cases of the LLM step:
   not a valid API answer. The first failure stops the step: the running requests end and no new one
   starts. `scan` prints `mcpmoat scan: the LLM provider failed (<reason>); N tools were not
   classified` on stderr.
+- An internal error: any error of `Classify` that is not `llm.ErrInvalidOutput`, not
+  `llm.ErrProvider` and not the end of the context (for example a request that is too large, or an
+  error that `sortAnswer` does not know). It stops the step like a provider failure. `scan` prints
+  `mcpmoat scan: the LLM step failed (internal error); N tools were not classified` on stderr. The
+  text of the error is never printed. The first failure decides the line.
 - More than 500 tools: `scan` prints `mcpmoat scan: --llm classifies at most 500 tools in one scan;
   N tools were not classified` on stderr.
-- In both cases the report still prints, the JSON `complete` field is `false`, and the exit code is
-  2, also when there are findings at or above `--fail-on`.
+- In all these cases the report still prints, the JSON `complete` field is `false`, and the exit
+  code is 2, also when there are findings at or above `--fail-on`.
 - A signal during the LLM step works as a signal during the inspection: `scan` prints
   `mcpmoat scan: interrupted; no pins were saved`, prints no report, saves no pins and exits with 2.
 

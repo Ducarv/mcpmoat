@@ -630,15 +630,20 @@ the machine**.
 - The model may answer only with a risk (`none`, `low`, `medium`, `high`) and a category from a
   fixed list. No model text reaches the output. Rule `MOAT-LLM-001` reports a risk of `low`,
   `medium` or `high` with that severity (never `critical`); `none` gives no finding. Rule
-  `MOAT-LLM-002` (medium) reports an answer that is invalid or a refusal.
+  `MOAT-LLM-002` (medium) reports an answer that is invalid or a refusal. Only such an unusable
+  model answer gives `MOAT-LLM-002`.
 - LLM findings carry a distinct source marker: `[LLM]` in the terminal and `"source": "llm"` in the
   JSON output (schema version 2). They only add to the rule findings and never remove or change
   them. They count for `--fail-on`, and `--ignore` and `.mcpmoat-ignore` apply to them.
 - The result is advisory. No finding does not mean that a tool is safe: a model can be wrong, and a
   hostile description can try to influence it.
-- A provider failure (network, TLS, timeout, HTTP error, a response that is too large) or more than
-  500 tools gives exit 2. The report still prints, the JSON `complete` field is `false`, and stderr
-  says how many tools were not classified.
+- A provider failure (network, TLS, timeout, HTTP error, a response that is too large), an internal
+  error of the LLM step, or more than 500 tools gives exit 2. A provider failure or an internal
+  error stops the step (fail closed). The report still prints, the JSON `complete` field is
+  `false`, and stderr says how many tools were not classified:
+  `mcpmoat scan: the LLM provider failed (<reason>); N tools were not classified` or
+  `mcpmoat scan: the LLM step failed (internal error); N tools were not classified`. The text of an
+  internal error is never printed.
 - A hostile server can make `scan --llm` exit with 2: it can list more than 500 tools, or write a
   description that makes the provider answer with an HTTP 4xx (a content filter or a context
   limit). A provider failure stops the other requests and gives exit 2 (fail closed). The rule

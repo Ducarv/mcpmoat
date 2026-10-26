@@ -1062,9 +1062,13 @@ func llmAssertSameRuleJSON(t *testing.T, name, base, got string, wantLLM int) {
 	}
 }
 
-// llmNotClassified matches the stderr line of a failed LLM step and captures
-// the reason and the count.
+// llmNotClassified matches the stderr line of an LLM step that a provider
+// failure stopped, and captures the reason and the count.
 var llmNotClassified = regexp.MustCompile(`(?m)^mcpmoat scan: the LLM provider failed \(([^)]*)\); (\d+) (?:tool was|tools were) not classified$`)
+
+// llmInternalFailed matches the stderr line of an LLM step that an internal
+// error stopped, and captures the count.
+var llmInternalFailed = regexp.MustCompile(`(?m)^mcpmoat scan: the LLM step failed \(internal error\); (\d+) (?:tool was|tools were) not classified$`)
 
 // TestScanLLMProviderFailure checks a failed request (FR-17, FR-16): the
 // report still prints, the JSON complete field is false, the exit code is 2
@@ -1177,8 +1181,8 @@ func TestScanLLMToolCap(t *testing.T) {
 				t.Errorf("exit code = %d, complete = %v; want 2 and false", r.code, doc.Complete)
 			}
 			assertContainsAll(t, "stderr", r.stderr, []string{capLine})
-			if llmNotClassified.MatchString(r.stderr) {
-				t.Errorf("stderr reports a provider failure, want only the cap line:\n%s", r.stderr)
+			if llmNotClassified.MatchString(r.stderr) || llmInternalFailed.MatchString(r.stderr) {
+				t.Errorf("stderr reports a failure of the LLM step, want only the cap line:\n%s", r.stderr)
 			}
 		})
 	}
@@ -1291,8 +1295,8 @@ func TestScanLLMInterrupted(t *testing.T) {
 			}
 			assertEmptyStdout(t, r.stdout)
 			assertContainsAll(t, "stderr", r.stderr, []string{scanPrefix + interruptedText + "\n"})
-			if llmNotClassified.MatchString(r.stderr) {
-				t.Errorf("stderr reports a provider failure for a signal:\n%s", r.stderr)
+			if llmNotClassified.MatchString(r.stderr) || llmInternalFailed.MatchString(r.stderr) {
+				t.Errorf("stderr reports a failure of the LLM step for a signal:\n%s", r.stderr)
 			}
 			e.assertNoPinsFile(t, "a signal during the LLM step")
 		})

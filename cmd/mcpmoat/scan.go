@@ -438,8 +438,9 @@ func (c *cli) reportScan(ctx context.Context, res discover.Result, configPath st
 	// changes or drops a rule row, and it never touches pins, diffs or hints.
 	lr, ok := c.llmStep(ctx, setup.classifier, outcomes, ignore)
 	if !ok {
-		// The user stopped the scan, as for a signal during the inspection:
-		// no report and no saved pins.
+		// The user stopped the scan, as for a signal during the inspection,
+		// or the guard of llmStep caught an error: no report and no saved
+		// pins. llmStep wrote the line on stderr.
 		return exitError
 	}
 	// A failed request or the tool cap makes the result incomplete: the
