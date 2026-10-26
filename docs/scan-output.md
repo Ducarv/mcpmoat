@@ -11,20 +11,20 @@ risk and fix texts are shortened):
 ```text
 SUMMARY
   github (claude-code, global): ok, 12 tools, 0 findings
-  files (cursor, project:/work/app (untrusted)): ok, 4 tools, 2 findings
+  files (cursor, global): ok, 4 tools, 2 findings
     warning: cleartext-secrets: secrets go over plain http to a host that is not loopback: header X-Api-Key
   search (codex, global): timeout, 0 findings (...)
 
 FINDINGS
 HIGH (1)
   MOAT-T4-002  Plaintext secret in config
-    Server: files (cursor, project:/work/app (untrusted))
+    Server: files (cursor, global)
     Where: env GITHUB_TOKEN
     Risk: A secret is written in clear text in the client config ...
     Fix: Move the secret out of the config: use an environment variable reference ...
 MEDIUM (1)
   MOAT-T4-003  Package runner uses an unpinned package
-    Server: files (cursor, project:/work/app (untrusted))
+    Server: files (cursor, global)
     Where: args @example-corp/files-mcp
     Risk: The server starts from a package that is not fixed ...
     Fix: Pin an exact version, for example npx @scope/server@1.4.2 ...
