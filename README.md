@@ -50,16 +50,17 @@ sha256sum --ignore-missing -c checksums.txt       # Linux
 ```
 
 The real check is the build provenance attestation of the archive. Check it with the
-[GitHub CLI](https://cli.github.com/):
+[GitHub CLI](https://cli.github.com/). The first command gets the commit that the tag points at:
 
 ```sh
+sha=$(gh api repos/Ducarv/mcpmoat/commits/refs/tags/v<version> -q .sha)
 gh attestation verify mcpmoat_<version>_<os>_<arch>.tar.gz -R Ducarv/mcpmoat \
   --cert-identity https://github.com/Ducarv/mcpmoat/.github/workflows/release.yml@refs/tags/v<version> \
-  --source-ref refs/tags/v<version> --deny-self-hosted-runners
+  --source-ref refs/tags/v<version> --source-digest "$sha" --deny-self-hosted-runners
 ```
 
-The check proves which repo, workflow and tag built the archive. It does not prove that the code
-was reviewed. Use `--cert-identity` as above, not `--signer-workflow`: some `gh` versions match
+The check proves which repo, workflow, tag and commit built the archive. It does not prove that the
+code was reviewed. Use `--cert-identity` as above, not `--signer-workflow`: some `gh` versions match
 `--signer-workflow` as a prefix only, so `release.yml` would also match another workflow file
 whose name starts with `release.yml`.
 
@@ -70,7 +71,7 @@ not prove that the cask is safe. To check the cask, first verify `checksums.txt`
 ```sh
 gh attestation verify checksums.txt -R Ducarv/mcpmoat \
   --cert-identity https://github.com/Ducarv/mcpmoat/.github/workflows/release.yml@refs/tags/v<version> \
-  --source-ref refs/tags/v<version> --deny-self-hosted-runners
+  --source-ref refs/tags/v<version> --source-digest "$sha" --deny-self-hosted-runners
 ```
 
 Then open `Casks/mcpmoat.rb` in the [tap](https://github.com/Ducarv/homebrew-tap) and check these

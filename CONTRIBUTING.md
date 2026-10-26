@@ -357,8 +357,10 @@ release workflow pin one version. `go run github.com/goreleaser/goreleaser/v2@v2
 version and needs no install. `brew install goreleaser` also works, but it can give another version.
 To bump the version, change `GORELEASER_VERSION` in `ci.yml` and `release.yml` and every
 `goreleaser/v2@` command in this file. The `release-check` CI job fails if they differ. Then build a
-snapshot and check that `dist/homebrew/Casks/mcpmoat.rb` still matches the cask list in
-[README.md](README.md#verify-a-download).
+snapshot and check that `dist/homebrew/Casks/mcpmoat.rb` still has the parts in the cask list in
+[README.md](README.md#verify-a-download). In a snapshot, the `version` line is the snapshot version
+and the urls hold the literal snapshot tag (for example `v0.0.0`) in place of `v#{version}`. Only a
+real tag gives the exact urls.
 
 ### Checks
 
@@ -418,8 +420,8 @@ output of the command above is `mcpmoat v1.2.3 (commit abc123, built 2026-01-01T
 CI builds with `-ldflags "-X main.version=ci-smoke"` and checks that `mcpmoat version` prints that value.
 
 Release builds set these values through GoReleaser (`.goreleaser.yaml`): `main.version` is the tag
-with its `v`, `main.commit` is the first 12 characters of the commit (the same as a `go install`
-build) and `main.date` is the commit date.
+with its `v`, `main.commit` is the first 12 characters of the commit (the same as a `go build` in a
+git checkout) and `main.date` is the commit date.
 
 ## Pull requests
 
@@ -465,7 +467,9 @@ Do all of these steps before you push the first release tag. Step 3 says why.
    release is published, Immutable releases (step 5) lock its tag for everyone.
 5. In the settings of `Ducarv/mcpmoat`, turn on "Immutable releases". The workflow publishes a
    draft, so the assets lock when the release is published, after the attestations verify. The
-   release job fails if the published release is not immutable.
+   release job can check this only after the publish, because `GITHUB_TOKEN` cannot read the
+   setting. So before each tag, check that `gh api repos/Ducarv/mcpmoat/immutable-releases` prints
+   `"enabled":true`.
 6. Protect the maintainer account: use 2FA or passkeys, keep no classic PATs with `repo` scope and
    no fine-grained tokens with Deployments or Administration write access on `Ducarv/mcpmoat`.
 
@@ -512,9 +516,9 @@ mcpmoat version
 A prerelease tag does not update the tap. For an rc, extract the binary from the archive and run
 `./mcpmoat version`.
 
-Known limit: GoReleaser pushes the cask before the attest step runs. If a later step fails, the
-release stays a draft, so it is not public. But the cask is already in the tap, and its URLs return
-404 until the release is published. What to do depends on the cause:
+Known limit: GoReleaser pushes the cask before the attest step runs. If a step before the publish
+fails, the release stays a draft, so it is not public. But the cask is already in the tap, and its
+URLs return 404 until the release is published. What to do depends on the cause:
 
 - An external or transient cause, such as the tap token or the network: fix it and re-run the
   workflow. The re-run replaces the draft. Do not publish the draft by hand: only the workflow
@@ -522,6 +526,11 @@ release stays a draft, so it is not public. But the cask is already in the tap, 
 - A cause in the code or config of the tagged commit: a re-run builds the same commit and fails
   again. Delete the draft, revert the tap commit, fix the cause on `main` and cut a new patch or rc
   tag.
+
+If a check after the publish fails, the release is already public. Do not re-run the workflow: on a
+release that is not immutable, a re-run uploads the assets again with no check. Check the release
+with the steps in [README.md](README.md#verify-a-download). If it is wrong, delete it, revert the tap
+commit and cut a new patch tag.
 
 After any re-run of part of the workflow, check the tap's `Casks/mcpmoat.rb` with the cask steps in
 [README.md](README.md#verify-a-download). Its sha256 values must match the draft's `checksums.txt`.
