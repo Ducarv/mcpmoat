@@ -689,7 +689,8 @@ What is sent: one request for each tool. It holds the fixed system prompt (`llm.
 fixed verdict schema and one user message, a JSON object with `tool_name`, `tool_description` and
 `truncated`. The name is cut at 512 bytes and the description at 16 KiB, at a rune boundary. The
 description is cut more when the encoded message would pass 24 KiB. `truncated` tells the model
-that text was cut. mcpmoat never puts the client config, the command, its arguments, env or header
+that text was cut, and the system prompt tells it to rate a cut description at least `medium`,
+because the part that is not shown can hold the payload. mcpmoat never puts the client config, the command, its arguments, env or header
 names or values, the server URL, the tool schemas or the pins into the request. The description
 goes as the server returned it: mcpmoat does not remove secret values from it (see the security
 notes below). The key goes only in the auth header of the provider (`x-api-key` for Anthropic,
@@ -739,7 +740,8 @@ Exit code 2 cases of the LLM step:
 
 - A provider failure: a network, TLS, proxy or timeout error, an HTTP status that is not 2xx
   (401 and 403 mean that the key was refused), a response that is too large, or a response that is
-  not a valid API answer. The first failure stops the step: the running requests end and no new one
+  not a valid API answer (a 2xx body without the envelope of the provider, such as `{}`, or with a
+  top-level `error`, is a provider failure and not a `MOAT-LLM-002` finding). The first failure stops the step: the running requests end and no new one
   starts. `scan` prints `mcpmoat scan: the LLM provider failed (<reason>); N tools were not
   classified` on stderr.
 - An internal error: any error of `Classify` that is not `llm.ErrInvalidOutput`, not

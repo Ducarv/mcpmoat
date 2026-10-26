@@ -127,7 +127,7 @@
           "enum": ["stdio", "http", "sse"]
         },
         "source": {
-          "description": "Path of the config file that declares the server. Untrusted text.",
+          "description": "Path of the config file that declares the server. Untrusted text. Not the origin of a finding: that is findings[].source.",
           "type": "string"
         },
         "argv": {
@@ -193,11 +193,11 @@
           "type": "string"
         },
         "related": {
-          "description": "A second name that the finding refers to, for example a second server, or a fixed reason text. Untrusted text. Empty string means none.",
+          "description": "A second name that the finding refers to, for example a second server, a fixed reason text, or, for MOAT-LLM-001, the category of the verdict. Untrusted text. Empty string means none.",
           "type": "string"
         },
         "source": {
-          "description": "What made the finding. \"rule\": a finding from a mcpmoat rule (a built-in check or a rule file), not from the LLM. \"llm\": the optional LLM classification (--llm) made it. An \"llm\" finding is advisory: a model made it, not a rule.",
+          "description": "What made the finding (not the config file of a server: that is servers[].source). \"rule\": a finding from a mcpmoat rule (a built-in check or a rule file), not from the LLM. \"llm\": the optional LLM classification (--llm) made it. An \"llm\" finding is advisory: a model made it, not a rule.",
           "enum": ["rule", "llm"]
         }
       }

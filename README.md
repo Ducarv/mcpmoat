@@ -376,8 +376,10 @@ mcpmoat scan --llm --llm-provider openai --llm-model <model> \
   leave your machine as the server wrote it.
 - **Limits:** at most 500 tools in one scan and 4 requests at the same time. Each request has 30
   seconds. mcpmoat does not retry and does not follow redirects. The request and the response are
-  each capped at 64 KiB. The LLM requests honour `HTTPS_PROXY` and `NO_PROXY`, like the
-  connections to your servers.
+  each capped at 64 KiB. The cost of a scan grows with the number and the size of the tool
+  descriptions. The LLM requests honour `HTTPS_PROXY` and `NO_PROXY`, like the connections to your
+  servers, when the base URL is `https`. A base URL with `http` (a loopback host only) never uses a
+  proxy.
 - **Findings:** the model can answer only with a risk level and a category from a fixed list.
   mcpmoat shows no text from the model.
   - `MOAT-LLM-001`: the model rates the tool as risky. The severity is the risk level: `low`,
@@ -449,8 +451,8 @@ Exit code 2 comes, for example, from a usage error (invalid flags), invalid rule
 `--config` file, a problem in a config file, a `pins.json` that cannot be read or saved, a report
 that cannot be written (a closed stdout), an unknown home or working directory in auto-discovery,
 an `--llm` problem (a missing or invalid `MCPMOAT_LLM_API_KEY`, a provider failure, an internal
-error of the LLM step, or more than 500 tools), or an internal error. Some of these errors still print the report on stdout first, so
-you can read the findings:
+error of the LLM step, or more than 500 tools), or an internal error. Some of these errors still
+print the report on stdout first, so you can read the findings:
 
 | Execution error | Report |
 |---|---|
