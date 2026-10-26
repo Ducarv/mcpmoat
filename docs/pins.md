@@ -11,7 +11,7 @@
 - **Later runs:** `scan` compares the tools with the pins. It reports `MOAT-T2-001` (changed tool,
   high), `MOAT-T2-002` (new tool, medium), `MOAT-T2-003` (removed tool, low) and `MOAT-T2-004` (tool
   not verified). A new tool is medium. Read the report, not only the exit code (see [Exit
-  codes](exit-codes.md#exit-codes)). A new tool, or a not verified tool with
+  codes](exit-codes.md)). A new tool, or a not verified tool with
   a new name, is high when the same server also lost a tool in that scan, because a server can
   rename a tool to avoid the changed-tool check. A server whose tools cannot be pinned (a duplicate
   or empty tool name, invalid tool data, or more than 2 MiB) is a high `MOAT-T2-004`, because
@@ -25,7 +25,7 @@
   (current text):`. An ignored finding gets no diff. If a diff is longer than 64 KiB or 2000 lines,
   `scan` cuts it and prints a warning on stderr with the tool and the server name. Review the full
   tool before you accept it. You can ignore these IDs with `--ignore` only (see [Ignore
-  findings](ignore.md#ignore-findings)).
+  findings](ignore.md)).
 - **Accept:** `scan` never changes the pins of a pinned server. Read the diff. If you trust the
   change, run `mcpmoat pin --accept <server> --expect <digest>`. The name must match one server
   exactly. If two clients use it, narrow it with `--config <file>`. If one file uses it in several
@@ -65,7 +65,7 @@
 - A server that fails, times out or is refused (an untrusted or turned-off server) shows its status
   in the summary on stdout. If the server is not pinned, it does not change the exit code. If the
   server is already pinned and fails or times out, it is also a high `MOAT-T2-004` finding (see
-  [Exit codes](exit-codes.md#exit-codes)) with the reason `pinned server could not be inspected`, because a hostile server must not
+  [Exit codes](exit-codes.md)) with the reason `pinned server could not be inspected`, because a hostile server must not
   avoid the rug-pull check by failing on purpose. A pinned server that is refused shows its status
   `not inspected` and its reason in the summary, with no pin finding: your client config turns it
   off or does not approve it, and the server cannot choose that.
@@ -83,8 +83,8 @@
 - Press Ctrl-C (or send `SIGTERM` or `SIGHUP`) to stop a run. mcpmoat stops the stdio servers that
   it started. A signal during the inspection, or after it but before new pins are saved (for
   `scan`, only when there are new pins), makes `scan` and `pin --accept` print `interrupted; no
-  pins were saved`, save nothing and exit with code 2. [Exit codes](exit-codes.md#exit-codes) tells what `scan` does at other times.
-- [Exit codes](exit-codes.md#exit-codes) tells which of these findings give exit code 1 at each `--fail-on`
+  pins were saved`, save nothing and exit with code 2. [Exit codes](exit-codes.md) tells what `scan` does at other times.
+- [Exit codes](exit-codes.md) tells which of these findings give exit code 1 at each `--fail-on`
   value.
 
 ## See also

@@ -116,7 +116,7 @@ exec mcpmoat scan --no-connect --config .mcp.json --fail-on medium
 ```
 
 Do not use `--fail-on critical`: no built-in rule is critical yet, so it passes every built-in
-finding (see [Exit codes](exit-codes.md#exit-codes)).
+finding (see [Exit codes](exit-codes.md)).
 
 `git commit --no-verify` skips the hook. So the hook helps you, but it does not replace the CI job.
 

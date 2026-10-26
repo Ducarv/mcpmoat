@@ -233,7 +233,7 @@ func (c *cli) usage(w io.Writer) {
 	fprintf(w, "  0  no finding that is not ignored at or above --fail-on\n")
 	fprintf(w, "  1  a finding that is not ignored at or above --fail-on (default high)\n")
 	fprintf(w, "  2  execution or usage error, also when there are findings\n")
-	fprintf(w, "     (https://github.com/Ducarv/mcpmoat#exit-codes lists the causes and when the report still prints)\n")
+	fprintf(w, "     (https://github.com/Ducarv/mcpmoat/blob/HEAD/docs/exit-codes.md lists the causes and when the report still prints)\n")
 }
 
 // scanUsage writes the flags and the output notes of the scan command to w.

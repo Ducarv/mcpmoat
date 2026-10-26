@@ -31,6 +31,6 @@ No other rule must fire. In particular, the package names do not match
 
 In the `repo` folder, `mcpmoat scan --no-connect --config .mcp.json` exits
 with 1, because `MOAT-T4-001` is high. With `--fail-on critical`, it exits
-with 0 (see [Exit codes](../../docs/exit-codes.md#exit-codes)). `TestE2EScanFailOn` in
+with 0 (see [Exit codes](../../docs/exit-codes.md)). `TestE2EScanFailOn` in
 `cmd/mcpmoat/e2e_test.go` holds the expected exit code for each `--fail-on`
 and `--ignore` value.

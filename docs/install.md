@@ -1,5 +1,8 @@
 # Install
 
+This page lists the ways to install mcpmoat, how to check the version and how to verify a release
+download.
+
 - Homebrew (macOS and Linux): `brew install --cask Ducarv/tap/mcpmoat`. The tap gets stable
   releases only, not prereleases. The macOS binaries are not notarized yet: see
   [Verify a download](#verify-a-download).
@@ -14,7 +17,7 @@
   [go.mod](../go.mod)).
 
 `@latest` builds the latest tagged release, and `@main` builds the latest commit on `main`. A tag
-or one commit gives a repeatable install, as in CI: see [docs/ci.md](ci.md#github-actions).
+or one commit gives a repeatable install, as in CI: see [Using mcpmoat in CI](ci.md#github-actions).
 
 Run `mcpmoat version` to check the install. A release binary prints
 `mcpmoat v<version> (commit <c>, built <d>)`. `<d>` is the commit date, not the build time, so the

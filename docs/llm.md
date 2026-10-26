@@ -104,7 +104,7 @@ mcpmoat scan --llm --llm-provider openai --llm-model <model> \
   limit). The rule findings still print.
 - **Ignore:** only `--ignore` works for `MOAT-LLM-001` and `MOAT-LLM-002`. `.mcpmoat-ignore`
   cannot ignore them, because the file can come from a cloned repository: `scan` keeps the finding
-  and prints a warning (see [Ignore findings](ignore.md#ignore-findings)). The ignored count on stderr
+  and prints a warning (see [Ignore findings](ignore.md)). The ignored count on stderr
   includes the findings that `--ignore` drops.
 - **OpenAI temperature:** the OpenAI request does not set a temperature, so models with a fixed
   temperature work.

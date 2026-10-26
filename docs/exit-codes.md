@@ -60,7 +60,7 @@ A signal is Ctrl-C, `SIGTERM` or `SIGHUP`. It gives exit code 2 at these times:
 At other times the scan ends with exit code 0 or 1, as if no signal came. A second signal ends
 mcpmoat at once.
 
-To use the exit code in CI or in a git hook, see [docs/ci.md](ci.md).
+To use the exit code in CI or in a git hook, see [Using mcpmoat in CI and git hooks](ci.md).
 
 ## See also
 

@@ -26,7 +26,7 @@ Examples of issues we want to hear about privately:
 - A problem in the release supply chain. Some examples:
   - An archive whose attestation does not verify.
   - A cask in `Ducarv/homebrew-tap` whose sha256 does not match the attested `checksums.txt`.
-  - A cask that holds code other than the parts that README.md lists.
+  - A cask that holds code other than the parts that [docs/install.md](docs/install.md#verify-a-download) lists.
 
   [docs/install.md](docs/install.md#verify-a-download) tells how to verify a download and why the macOS
   binaries skip Gatekeeper.

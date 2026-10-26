@@ -5,7 +5,7 @@ every server it finds. The ignore list below drops findings of these rules. The 
 (`MOAT-T2-001` to `MOAT-T2-004`) and, with `--llm`, the LLM findings (`MOAT-LLM-001` and
 `MOAT-LLM-002`) are different: only `--ignore` drops them (see below). The YAML tool rules
 (descriptions and schemas) are not applied to tools yet, so they do not run.
-[Exit codes](exit-codes.md#exit-codes) tells how the findings set the exit code.
+[Exit codes](exit-codes.md) tells how the findings set the exit code.
 
 `--ignore <rule-id>` ignores all findings of one rule. You can use the flag more than one time.
 

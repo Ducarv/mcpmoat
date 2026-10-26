@@ -11,7 +11,7 @@ mcpmoat finds the MCP servers that Claude Code, Cursor and Codex load on your ma
 they expose, and checks them for tool poisoning, rug pulls, shadowing, dangerous config and
 typosquatting. It runs locally, needs no account and sends no telemetry. It connects only to the
 servers you configured, and to an LLM provider only when you opt in with `scan --llm` (see
-[Optional LLM classification](docs/llm.md#optional-llm-classification-sends-data-off-your-machine)).
+[Optional LLM classification](docs/llm.md)).
 
 ## Install
 
@@ -22,8 +22,9 @@ go install github.com/Ducarv/mcpmoat/cmd/mcpmoat@v0.1.0    # needs Go 1.27 or la
 
 You can also download an archive from the [releases page](https://github.com/Ducarv/mcpmoat/releases).
 Run `mcpmoat version` to check the install. [docs/install.md](docs/install.md) has all methods and
-the version output. [Verify a download](docs/install.md#verify-a-download) shows how to check an
-archive and the Homebrew cask.
+the version output. [Verify a download](https://github.com/Ducarv/mcpmoat/blob/HEAD/docs/install.md#verify-a-download)
+shows how to check an archive and the Homebrew cask. The macOS binaries are not notarized yet. The
+Homebrew tap gets stable releases only.
 
 ## Usage
 
@@ -43,15 +44,15 @@ rules and the JSON format.
 
 ## Pins and rug pulls
 
-The first `mcpmoat scan` pins the tools of each server in `pins.json`. Later runs report a changed,
-new or removed tool, with a diff. `scan` never changes a pin. To accept a change, review the diff
+A `mcpmoat scan` pins the tools of each new server in `pins.json`. Later runs report a changed, new,
+removed or not verified tool, and show a diff for each changed and new tool. `scan` never changes a pin. To accept a change, review the diff
 and run `mcpmoat pin --accept <server> --expect <digest>`. See [docs/pins.md](docs/pins.md).
 
 ## Ignore findings
 
 `--ignore <rule-id>` and a `.mcpmoat-ignore` file drop findings of a rule. A repository that you
 cloned can hide findings with its `.mcpmoat-ignore`, so read the file before you trust a clean result.
-See [docs/ignore.md](docs/ignore.md).
+The file cannot drop the pin findings or the LLM findings. Only `--ignore` can. See [docs/ignore.md](docs/ignore.md).
 
 ## Optional LLM classification (sends data off your machine)
 
@@ -60,8 +61,8 @@ This data leaves your machine.** The option is off by default. See [docs/llm.md]
 
 ## Exit codes
 
-`mcpmoat scan` exits with 0 when no finding is at or above `--fail-on`, with 1 when one is, and with
-2 on an execution or usage error. See [docs/exit-codes.md](docs/exit-codes.md) for the contract.
+`mcpmoat scan` exits with 0 when no finding that is not ignored is at or above `--fail-on`, with 1 when
+one is, and with 2 on an execution or usage error. Exit code 2 wins over 1. See [docs/exit-codes.md](docs/exit-codes.md) for the contract.
 
 ## Build from source
 

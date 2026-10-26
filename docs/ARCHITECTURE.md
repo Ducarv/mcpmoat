@@ -676,7 +676,7 @@ inspected tool. It is off by default. Without `--llm`, `runScan` reads no API ke
 This section holds the code structure and the design reasons. Other files own the rest:
 
 - The user contract (flags, warning, what is sent, limits, findings, exit codes and security notes)
-  is in [docs/llm.md](llm.md#optional-llm-classification-sends-data-off-your-machine).
+  is in [docs/llm.md](llm.md).
 - The requirements are in FR-17 of [PRD](PRD.md).
 - The threat model is in [PRD section 5.3](PRD.md#53-threats), which owns it. The package doc
   comment in `internal/llm/doc.go` holds the code-level notes of the threat model.
@@ -707,7 +707,7 @@ redirect would carry the key to another location. It never uses a proxy for an `
 the key never goes to a proxy in clear text. For `https` it honours `HTTPS_PROXY` and `NO_PROXY`,
 like the server connections. Go ignores a proxy value that it cannot parse and then connects
 directly. The limits of a scan (tool count, workers, timeout, body size) are in the
-[docs/llm.md](llm.md#optional-llm-classification-sends-data-off-your-machine). They live in
+[docs/llm.md](llm.md). They live in
 `cmd/mcpmoat` (`maxLLMTools`, `llmWorkers`) and `internal/llm`.
 
 What is sent: `internal/llm` builds one request for each tool from the fixed system prompt
@@ -731,9 +731,9 @@ object. The values come from fixed lists. `classifyTools` turns a verdict into r
 - `llmRow` builds the row. For a tool with `Verdict.Truncated` set, it returns `truncatedRow` when
   `belowMedium` is true for the risk or the answer is unusable. That row has the fixed text
   `llm.TruncatedText`. The code enforces the rule, not only the system prompt, because a prompt
-  injection in the part before the cut could ask the model for `none`. The README owns the rule
+  injection in the part before the cut could ask the model for `none`. docs/llm.md owns the rule
   that the user sees: see
-  [`--llm`](llm.md#optional-llm-classification-sends-data-off-your-machine).
+  [`--llm`](llm.md).
 - An answer that cannot be used for a tool that was not cut gives `MOAT-LLM-002` (medium). That is
   an invalid answer, a refusal or an answer cut at the token limit. Only `llm.ErrInvalidOutput`
   gives this finding.
@@ -744,9 +744,9 @@ object. The values come from fixed lists. `classifyTools` turns a verdict into r
 `MOAT-LLM-002`, the end of the context is a stop, and `llm.ErrProvider` is a provider failure. Any
 other error is an internal error. Both failures stop the step. The first failure stops the running
 requests, starts no new one and decides the stderr line. So a new error path can never make a
-failed step look like a complete scan. The README lists the provider failures and the texts of the
-exit-code-2 cases (see [`--llm`](llm.md#optional-llm-classification-sends-data-off-your-machine)
-and [Exit codes](exit-codes.md#exit-codes)). Every error of `internal/llm` has fixed text. It never
+failed step look like a complete scan. docs/llm.md and docs/exit-codes.md list the provider failures and the texts of the
+exit-code-2 cases (see [`--llm`](llm.md)
+and [Exit codes](exit-codes.md)). Every error of `internal/llm` has fixed text. It never
 holds the key, a URL, a header, a response body or model output.
 
 `classifyTools` only adds rows. It never changes or drops a rule finding, a pin, a diff or a
@@ -801,7 +801,7 @@ For secrets in output, see [Code style](../.agents/project.md#code-style).
 ## How to add a rule
 
 A rule is one file, `rules/<ID>.yaml`, plus its test cases. The steps and the required cases are
-in [Contributing a rule](writing-rules.md#contributing-a-rule).
+in [Contributing a rule](writing-rules.md).
 
 ## See also
 

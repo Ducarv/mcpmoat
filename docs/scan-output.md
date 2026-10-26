@@ -1,5 +1,7 @@
 # Scan output
 
+This page tells what `mcpmoat scan` prints in the terminal and with `--json`.
+
 ## What `scan` prints
 
 `scan` prints the server table, then a summary with one line for each server, then the findings
@@ -43,7 +45,7 @@ MEDIUM (1)
   the output is the same without colour. `scan` escapes every config, server and rule text first,
   so terminal escape sequences in a config or from a server do not reach your terminal.
 - **Exit code:** warnings and statuses do not change it. Only findings do (see
-  [Exit codes](exit-codes.md#exit-codes)).
+  [Exit codes](exit-codes.md)).
 
 ## JSON output
 
@@ -59,7 +61,7 @@ mcpmoat scan --json | jq -r '.findings[] | "\(.rule_id) \(.server)"'
 - **stderr** gets the warnings, the notices and the errors. They are the same as in a run without
   `--json`, plus the lines that the summary shows without `--json`: a server that was not
   inspected, and the warnings of an inspection.
-- **Exit codes** do not change: 0, 1 or 2 (see [Pins and rug pulls](pins.md#pins-and-rug-pulls)).
+- **Exit codes** do not change: 0, 1 or 2 (see [Exit codes](exit-codes.md)).
 - **`complete`** is `false` when the report can miss results, for example when a config file has a
   problem, `pins.json` cannot be read, or the LLM step of a `--llm` scan did not classify every
   tool: a provider failure, an internal error of the LLM step, or more than 500 tools. The exit
@@ -75,7 +77,7 @@ mcpmoat scan --json | jq -r '.findings[] | "\(.rule_id) \(.server)"'
 - Each finding has a `source`: `rule` for a rule finding, `llm` for an advisory finding of
   `--llm`.
 - The format has a `schema_version` (now `2`; version 2 added `source`). The schema is
-  [docs/schema/scan-output.v2.json](schema/scan-output.v2.json). See
+  [schema/scan-output.v2.json](schema/scan-output.v2.json). See
   [JSON output](ARCHITECTURE.md#json-output) for the shape and the version policy.
 
 ## See also

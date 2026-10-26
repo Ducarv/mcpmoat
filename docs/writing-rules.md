@@ -5,7 +5,7 @@ A rule is **one YAML file with its test cases inside**. You do not need to know 
 ## 1. Pick a threat
 
 Rules map to the phase 1 threats T1 to T5. The IDs and their meaning are in
-[docs/PRD.md](PRD.md#53-threats). T2 (rug pull) is handled by pins, not by rules.
+[the threat list in the PRD](PRD.md#53-threats). T2 (rug pull) is handled by pins, not by rules.
 
 Look for open issues labelled [`type:rule`](https://github.com/Ducarv/mcpmoat/labels/type%3Arule)
 and [`good first issue`](https://github.com/Ducarv/mcpmoat/labels/good%20first%20issue).

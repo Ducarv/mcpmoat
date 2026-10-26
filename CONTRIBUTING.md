@@ -4,8 +4,7 @@ Thank you for helping. The easiest and most useful way to contribute is a **dete
 
 ## Contributing a rule
 
-A rule is **one YAML file with its test cases inside**. You do not need to know the whole codebase.
-[docs/writing-rules.md](docs/writing-rules.md) has the five steps: pick a threat, write the rule, add
+A rule is one YAML file that holds its own test cases. [docs/writing-rules.md](docs/writing-rules.md) has the five steps: pick a threat, write the rule, add
 test cases, run the tests and try an external rule. Open your PR against `dev`.
 
 ## Building and testing
