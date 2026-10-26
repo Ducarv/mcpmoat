@@ -145,7 +145,7 @@ func isInvisibleFormat(r rune) bool {
 //
 // Some texts still defeat all the forms, and the fifth form can make a
 // token from a rare CSI that a terminal does not show (a false positive).
-// CONTRIBUTING.md ("How mcpmoat prepares the text") is the one list of both,
+// docs/writing-rules.md ("How mcpmoat prepares the text") is the one list of both,
 // with examples. The "known limit" cases of TestMatchForms pin them, and the
 // invisible_unicode heuristic flags each such text in a description.
 //

@@ -82,7 +82,7 @@
 // way, so that an invisible rune or a sequence cannot hide a word in all of
 // them. The doc comment of matchForms in normalize.go lists the forms, when
 // each one is built and the texts that still defeat all of them, and
-// CONTRIBUTING.md has the same list for rule authors. A text without
+// docs/writing-rules.md has the same list for rule authors. A text without
 // invisible runes and escape sequences has one form, so it costs no more.
 //
 // A regex reads these base forms, and also a folded form of each. The text

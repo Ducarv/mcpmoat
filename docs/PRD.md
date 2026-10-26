@@ -397,8 +397,8 @@ not break the scan.
 - Ctrl-C, `SIGTERM` or `SIGHUP` cancels the run. mcpmoat stops the stdio servers that it started,
   because they run in their own session and the terminal does not signal them. A signal during the
   inspection, or before new pins are saved, makes `scan` and `pin --accept` print
-  `interrupted; no pins were saved`, save nothing and exit with code 2. The README section
-  [Exit codes](../README.md#exit-codes) gives the exact `scan` behavior.
+  `interrupted; no pins were saved`, save nothing and exit with code 2. The page
+  [Exit codes](exit-codes.md#exit-codes) gives the exact `scan` behavior.
 
 ### 6.3 Rules
 
@@ -616,8 +616,8 @@ with `--no-color`).
 - Findings and an execution error together: exit 2. Exit 2 wins over 1.
 - `--fail-on` accepts only `low`, `medium`, `high` and `critical`. Another value is a usage error
   (exit 2). It is a `scan` flag only.
-- The exact contract, with the errors that still print the report, is the README section
-  [Exit codes](../README.md#exit-codes).
+- The exact contract, with the errors that still print the report, is the page
+  [Exit codes](exit-codes.md#exit-codes).
 - A per-server connection failure alone does not cause exit 2 (it is reported; see FR-06).
 - Tests cover every branch, including `--fail-on low|medium|high|critical`.
 
@@ -648,7 +648,7 @@ the machine**.
   not stop a tool from being sent: to keep a server out of `--llm`, scan it with a separate config.
 - A tool whose name or description was cut is never rated below `medium`, and an unusable model
   answer for it does not hide it. The code enforces this, not only the system prompt. The
-  [README](../README.md#optional-llm-classification-sends-data-off-your-machine) holds the full
+  [LLM page](llm.md#optional-llm-classification-sends-data-off-your-machine) holds the full
   rule.
 - The description is sent as the server returned it. mcpmoat does not remove configured secret
   values from it. A server that got a token through its env or headers can put that token into its

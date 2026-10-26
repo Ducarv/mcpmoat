@@ -31,3 +31,6 @@ go.work.sum
 # Test fixtures that model Claude Code settings files. This negation also
 # overrides a global excludes pattern such as **/.claude/settings.local.json.
 !/testdata/discover/**/.claude/settings.local.json
+
+# Backups from local text-cleaning tools
+*.bak

@@ -18,7 +18,7 @@ import (
 )
 
 // Exit codes (PRD FR-16): 0 no finding that is not ignored at or above
-// --fail-on, 1 such a finding, 2 execution or usage error. README.md#exit-codes
+// --fail-on, 1 such a finding, 2 execution or usage error. docs/exit-codes.md
 // is the exact contract.
 const (
 	exitOK       = 0 // success; for scan: no finding that counts for --fail-on
