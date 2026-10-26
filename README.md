@@ -3,7 +3,7 @@
 An offline scanner for malicious or tampered MCP servers, built for the individual developer.
 
 **Status: early release, [v0.1.0](https://github.com/Ducarv/mcpmoat/releases/tag/v0.1.0).** Phase 1
-is in progress. The tool rules for tool poisoning and shadowing do not run yet: see
+is in progress. The YAML tool rules (tool poisoning and shadowing) do not run yet: see
 [What this does not do](#what-this-does-not-do).
 
 mcpmoat finds the MCP servers that Claude Code, Cursor and Codex load on your machine, reads the tools
@@ -23,9 +23,10 @@ typosquatting. It runs locally, needs no account and sends no telemetry.
   only macOS system libraries, like every Go binary on macOS. Extract the binary and put it on your
   `PATH`.
 - Go: `go install github.com/Ducarv/mcpmoat/cmd/mcpmoat@v0.1.0`. It needs Go 1.27 or later (see
-  [go.mod](go.mod)). `@latest` builds the latest tagged release. To build the latest commit on
-  `main`, use `@main`. For a repeatable install, as in CI, pin one commit: see
-  [docs/ci.md](docs/ci.md#github-actions).
+  [go.mod](go.mod)).
+
+`@latest` builds the latest tagged release, and `@main` builds the latest commit on `main`. A tag
+or one commit gives a repeatable install, as in CI: see [docs/ci.md](docs/ci.md#github-actions).
 
 Run `mcpmoat version` to check the install. A release binary prints
 `mcpmoat v<version> (commit <c>, built <d>)`. `<d>` is the commit date, not the build time, so the
