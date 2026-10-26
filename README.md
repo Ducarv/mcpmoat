@@ -364,8 +364,9 @@ mcpmoat scan --llm --llm-provider openai --llm-model <model> \
   `mcpmoat scan: warning: --llm sends the name and description of every tool to the LLM provider
   <provider> at <host>. This data leaves your machine.`
 - **What is sent:** one request for each tool of each server that `scan` inspected (status `ok`).
-  The request holds the tool name (cut at 512 bytes) and the tool description (cut at 16 KiB, with
-  a flag that says it was cut), with a fixed instruction text from mcpmoat. `--ignore` and
+  The request holds the tool name (cut at 512 bytes) and the tool description (cut at 16 KiB, or
+  less when the whole message would pass 24 KiB once it is JSON-escaped), with a flag that says
+  that text was cut, and a fixed instruction text from mcpmoat. `--ignore` and
   `.mcpmoat-ignore` hide LLM findings from the report, but they do not stop a tool from being sent.
   To keep a server out of `--llm`, scan it with a separate config.
 - **What mcpmoat never puts in a request:** your config files, env values, headers, args, URLs, the
@@ -387,6 +388,12 @@ mcpmoat scan --llm --llm-provider openai --llm-model <model> \
   - `MOAT-LLM-002` (medium): the model refused, or its answer did not match the fixed format. A
     description written to confuse the model can cause this. Only an unusable model answer gives
     this finding. Any other error stops the LLM step (see **Exit codes** below).
+  - A tool name or description that was cut before it was sent always gives at least one
+    `MOAT-LLM-001` finding of severity `medium` with the category `other`, whatever the model
+    answers, because the part that was not sent can hold the payload. The risk text says: "The
+    tool description is too long to classify in full. The part after the cut was not rated and can
+    hold hidden instructions for the AI agent." If the model rates a cut description `medium` or
+    `high`, the finding keeps the severity and the category of the model.
 
   An LLM finding is marked `[LLM]` and has a `Source` line. In JSON its `source` is `llm`, and
   `related` holds the category. A short sample:
@@ -404,6 +411,11 @@ mcpmoat scan --llm --llm-provider openai --llm-model <model> \
 - **Advisory only:** a model can be wrong. No LLM finding does not mean that a tool is safe. A
   hostile tool description can try to talk the model into a low rating. LLM findings only add to
   the rule findings. They never remove or change a rule finding, and they never change the pins.
+- **What `--llm` does not check:** mcpmoat sends no input schema, so `--llm` does not rate text
+  that is hidden in a parameter description of a schema.
+- **Your API key and the servers:** a config file that you trust can expand
+  `${MCPMOAT_LLM_API_KEY}` into the env of a server, as the client would, and that server then gets
+  the key.
 - **Exit codes:** LLM findings count for `--fail-on` like any finding. A provider failure (a
   network, TLS or proxy error, a timeout, an HTTP error, a response that is too large) or more than
   500 tools gives exit code 2. The report still prints, `complete` is `false` in JSON, and stderr

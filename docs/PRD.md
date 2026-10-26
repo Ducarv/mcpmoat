@@ -622,6 +622,11 @@ the machine**.
   arguments, URLs, schemas or pins into a request. At most 500 tools per scan and 4 requests at the
   same time. `--ignore` and `.mcpmoat-ignore` hide LLM findings from the report, but they do not
   stop a tool from being sent: to keep a server out of `--llm`, scan it with a separate config.
+- A tool whose name or description was cut before it was sent always gives at least one
+  `MOAT-LLM-001` finding of at least `medium` severity with the category `other`, whatever the
+  model answers, because the part that was not sent can hold the payload. A model answer of
+  `medium` or `high` keeps the severity and the category of the model. The code enforces this, not
+  only the system prompt.
 - The description is sent as the server returned it. mcpmoat does not remove configured secret
   values from it. A server that got a token through its env or headers can put that token into its
   description, and `--llm` then sends it to the provider. The server already holds the value. The
