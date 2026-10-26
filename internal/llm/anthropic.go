@@ -55,11 +55,16 @@ type anthropicChoice struct {
 	Name string `json:"name"`
 }
 
+// anthropicMessageType is the "type" of a Messages API response.
+const anthropicMessageType = "message"
+
 // anthropicResponse is the part of the response body that the client reads.
-// Other fields are ignored.
+// Other fields are ignored. Type and Content are pointers, so the client can
+// tell a missing or null field (nil) from an empty string or array.
 type anthropicResponse struct {
-	StopReason string                  `json:"stop_reason"`
-	Content    []anthropicContentBlock `json:"content"`
+	Type       *string                  `json:"type"`
+	StopReason string                   `json:"stop_reason"`
+	Content    *[]anthropicContentBlock `json:"content"`
 }
 
 // anthropicContentBlock is one content block of the response.
@@ -96,14 +101,24 @@ func (anthropicAPI) setAuth(h http.Header, key discover.Secret) {
 }
 
 // parseResponse reads a Messages API response. The verdict is the input of
-// the one tool_use block named anthropicToolName. A body that is not a JSON
-// object gives ErrBadResponse. A refusal, an output cut at max_tokens, no
-// such block or more than one gives ErrInvalidOutput. parseVerdict checks the
-// tool input.
+// the one tool_use block named anthropicToolName.
+//
+// A body that is not the API envelope gives ErrBadResponse: a body that is
+// not a JSON object, a top-level "error" that is not null, a "type" that is
+// present and not "message", or a "content" that is missing or null. An
+// envelope whose message is not usable gives ErrInvalidOutput: a refusal, an
+// output cut at max_tokens, or no such block or more than one (an empty
+// "content" array has none). parseVerdict checks the tool input.
 func (anthropicAPI) parseResponse(body []byte) (Verdict, error) {
 	var resp anthropicResponse
 	if err := decodeEnvelope(body, &resp); err != nil {
 		return Verdict{}, err
+	}
+	if resp.Type != nil && *resp.Type != anthropicMessageType {
+		return Verdict{}, ErrBadResponse
+	}
+	if resp.Content == nil {
+		return Verdict{}, ErrBadResponse
 	}
 	switch resp.StopReason {
 	case "refusal":
@@ -115,7 +130,7 @@ func (anthropicAPI) parseResponse(body []byte) (Verdict, error) {
 		input json.RawMessage
 		found int
 	)
-	for _, block := range resp.Content {
+	for _, block := range *resp.Content {
 		if block.Type == "tool_use" && block.Name == anthropicToolName {
 			input = block.Input
 			found++

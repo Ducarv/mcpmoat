@@ -124,6 +124,7 @@ func TestOpenAIParseResponseValid(t *testing.T) {
 		{name: "no finish reason", body: `{"choices":[{"message":{"content":` + verdict + `}}]}`},
 		{name: "white space in the content", body: openAIContentReply("\n {\"risk\" : \"low\", \"category\":\"other\"}\n")},
 		{name: "unknown fields", body: `{"x":{},"choices":[{"logprobs":null,"message":{"tool_calls":[],"content":` + verdict + `}}]}`},
+		{name: "null error", body: `{"error":null,"choices":[{"message":{"content":` + verdict + `}}]}`},
 	}
 	for _, tt := range shapes {
 		t.Run(tt.name, func(t *testing.T) {
@@ -162,11 +163,18 @@ func TestOpenAIParseResponseInvalid(t *testing.T) {
 		{name: "string", body: `"x"`, wantBad: true},
 		{name: "number", body: `1`, wantBad: true},
 		{name: "whitespace only", body: " \n", wantBad: true},
+		// A JSON object, but no envelope: FR-17 keeps MOAT-LLM-002 for a model
+		// answer, so these must not look like one.
+		{name: "empty object", body: `{}`, wantBad: true},
+		{name: "null choices", body: `{"choices":null}`, wantBad: true},
+		{name: "other keys only", body: `{"id":"x","object":"chat.completion"}`, wantBad: true},
+		{name: "error object", body: `{"error":{"message":"` + outputCanary + `","type":"server_error"}}`, wantBad: true},
+		{name: "error string", body: `{"error":"` + outputCanary + `"}`, wantBad: true},
+		{name: "error with choices", body: `{"error":{"message":"x"},"choices":[` + choice + `]}`, wantBad: true},
+		{name: "error with empty choices", body: `{"error":{},"choices":[]}`, wantBad: true},
 
 		// The API answered, but the output is no verdict: ErrInvalidOutput.
-		{name: "empty object", body: `{}`},
 		{name: "no choices", body: `{"choices":[]}`},
-		{name: "null choices", body: `{"choices":null}`},
 		{name: "two choices", body: `{"choices":[` + choice + `,` + choice + `]}`},
 		{name: "refusal", body: openAIChoiceReply(`"stop"`, `{"content":null,"refusal":"`+outputCanary+`"}`)},
 		{name: "refusal with content", body: openAIChoiceReply(`"stop"`, `{"content":`+verdict+`,"refusal":"no"}`)},
@@ -205,6 +213,7 @@ func TestOpenAIClassifyOutputErrors(t *testing.T) {
 		wantBad bool
 	}{
 		{name: "html", body: "<html>" + outputCanary + "</html>", wantBad: true},
+		{name: "error with HTTP 200", body: `{"error":{"message":"` + outputCanary + `"}}`, wantBad: true},
 		{name: "refusal", body: openAIChoiceReply(`"stop"`, `{"content":null,"refusal":"`+outputCanary+`"}`)},
 		{name: "bad verdict", body: openAIContentReply(`{"risk":"low","category":"` + outputCanary + `"}`)},
 	}

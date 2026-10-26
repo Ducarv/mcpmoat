@@ -41,9 +41,10 @@ type openAIJSONSchema struct {
 }
 
 // openAIResponse is the part of the response body that the client reads.
-// Other fields are ignored.
+// Other fields are ignored. Choices is a pointer, so the client can tell a
+// missing or null "choices" (nil) from an empty array.
 type openAIResponse struct {
-	Choices []openAIChoice `json:"choices"`
+	Choices *[]openAIChoice `json:"choices"`
 }
 
 // openAIChoice is one choice of the response.
@@ -85,24 +86,32 @@ func (openAIAPI) setAuth(h http.Header, key discover.Secret) {
 }
 
 // parseResponse reads a Chat Completions response. The verdict is the
-// content string of the message of the one choice. A body that is not a JSON
-// object gives ErrBadResponse. No choice or more than one, a refusal, an
-// output cut at the token limit or by a content filter, or a content that is
-// empty or not a JSON string gives ErrInvalidOutput. parseVerdict checks the
+// content string of the message of the one choice.
+//
+// A body that is not the API envelope gives ErrBadResponse: a body that is
+// not a JSON object, a top-level "error" that is not null, or a "choices"
+// that is missing or null. An envelope whose message is not usable gives
+// ErrInvalidOutput: an empty "choices" array or more than one choice, a
+// refusal, an output cut at the token limit or by a content filter, or a
+// content that is empty or not a JSON string. parseVerdict checks the
 // content.
 func (openAIAPI) parseResponse(body []byte) (Verdict, error) {
 	var resp openAIResponse
 	if err := decodeEnvelope(body, &resp); err != nil {
 		return Verdict{}, err
 	}
-	switch len(resp.Choices) {
+	if resp.Choices == nil {
+		return Verdict{}, ErrBadResponse
+	}
+	choices := *resp.Choices
+	switch len(choices) {
 	case 0:
 		return Verdict{}, invalidOutput("no choices")
 	case 1:
 	default:
 		return Verdict{}, invalidOutput("more than one choice")
 	}
-	choice := resp.Choices[0]
+	choice := choices[0]
 	if !jsonAbsent(choice.Message.Refusal) {
 		return Verdict{}, invalidOutput("the model refused")
 	}

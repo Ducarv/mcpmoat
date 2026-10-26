@@ -217,6 +217,10 @@ func TestAnthropicParseResponseValid(t *testing.T) {
 			name: "white space in the input",
 			body: "{\"content\":[{\"type\":\"tool_use\",\"name\":\"classify\",\"input\":\n {\"risk\" : \"low\",\n\"category\":\"other\"} }]}\n",
 		},
+		{
+			name: "null type and null error",
+			body: `{"type":null,"error":null,"content":[{"type":"tool_use","name":"classify","input":{"risk":"low","category":"other"}}]}`,
+		},
 	}
 	for _, tt := range shapes {
 		t.Run(tt.name, func(t *testing.T) {
@@ -282,12 +286,24 @@ func TestAnthropicParseResponseInvalid(t *testing.T) {
 		{name: "short string", body: `"x"`, wantBad: true},
 		{name: "number", body: `1`, wantBad: true},
 		{name: "whitespace only", body: " \n", wantBad: true},
+		// A JSON object, but no envelope: FR-17 keeps MOAT-LLM-002 for a model
+		// answer, so these must not look like one.
+		{name: "empty object", body: `{}`, wantBad: true},
+		{name: "no content key", body: `{"type":"message","stop_reason":"tool_use"}`, wantBad: true},
+		{name: "null content", body: `{"type":"message","content":null}`, wantBad: true},
+		{name: "refusal without content", body: `{"stop_reason":"refusal"}`, wantBad: true},
+		{name: "error type", body: `{"type":"error","error":{"type":"overloaded_error","message":"` + outputCanary + `"}}`, wantBad: true},
+		{name: "error type with content", body: `{"type":"error","content":[` + valid + `]}`, wantBad: true},
+		{name: "empty type", body: `{"type":"","content":[` + valid + `]}`, wantBad: true},
+		{name: "type not a string", body: `{"type":1,"content":[` + valid + `]}`, wantBad: true},
+		{name: "error with content", body: `{"type":"message","error":{"message":"x"},"content":[` + valid + `]}`, wantBad: true},
+		{name: "error string", body: `{"error":"` + outputCanary + `","content":[]}`, wantBad: true},
 
 		// The API answered, but the output is no verdict: ErrInvalidOutput.
 		{name: "refusal", body: `{"stop_reason":"refusal","content":[` + valid + `]}`},
 		{name: "cut at max_tokens", body: `{"stop_reason":"max_tokens","content":[` + valid + `]}`},
-		{name: "empty object", body: `{}`},
 		{name: "no content", body: `{"stop_reason":"tool_use","content":[]}`},
+		{name: "message with empty content", body: `{"type":"message","content":[]}`},
 		{name: "text only", body: `{"content":[{"type":"text","text":"{\"risk\":\"none\",\"category\":\"other\"} ` + outputCanary + `"}]}`},
 		{name: "two classify calls", body: `{"content":[` + valid + `,` + valid + `]}`},
 		{name: "tool name in other case", body: `{"content":[{"type":"tool_use","name":"Classify","input":{"risk":"none","category":"other"}}]}`},
@@ -321,6 +337,7 @@ func TestAnthropicClassifyOutputErrors(t *testing.T) {
 		wantBad bool
 	}{
 		{name: "html", body: "<html>" + outputCanary + "</html>", wantBad: true},
+		{name: "error with HTTP 200", body: `{"type":"error","error":{"type":"api_error","message":"` + outputCanary + `"}}`, wantBad: true},
 		{name: "refusal", body: `{"stop_reason":"refusal","content":[{"type":"text","text":"` + outputCanary + `"}]}`},
 		{name: "bad verdict", body: `{"content":[{"type":"tool_use","name":"classify","input":{"risk":"low","category":"` + outputCanary + `"}}]}`},
 	}

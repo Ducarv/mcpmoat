@@ -79,12 +79,12 @@ func (c *cli) parsePinArgs(args []string) (a pinArgs, code int, ok bool) {
 	fs.SetOutput(io.Discard)
 	timeout := fs.Duration("timeout", inspect.DefaultTimeout, "")
 
-	// pathFlag refuses an empty value and a value that looks like a flag, so
-	// a result that is not "" means the flag was given.
-	pathFlag(fs, "accept", "a server name", &a.accept)
-	pathFlag(fs, "config", "a file name", &a.configPath)
-	pathFlag(fs, "project", "a project path", &a.project)
-	pathFlag(fs, "expect", "a digest", &a.expect)
+	// onceStringFlag refuses an empty value and a value that looks like a
+	// flag, so a result that is not "" means the flag was given.
+	onceStringFlag(fs, "accept", "a server name", &a.accept)
+	onceStringFlag(fs, "config", "a file name", &a.configPath)
+	onceStringFlag(fs, "project", "a project path", &a.project)
+	onceStringFlag(fs, "expect", "a digest", &a.expect)
 
 	if err := fs.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {

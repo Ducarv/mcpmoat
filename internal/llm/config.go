@@ -45,7 +45,7 @@ const DefaultAnthropicModel = "claude-haiku-5-5"
 
 // Limits on config values.
 const (
-	// MaxKeyBytes is the longest API key that ValidKey accepts.
+	// MaxKeyBytes is the longest API key that ValidateKey accepts.
 	MaxKeyBytes = 4096
 	// MaxModelBytes is the longest model name that Config.Validate accepts.
 	MaxModelBytes = 256
@@ -131,7 +131,7 @@ type Config struct {
 	// rules.
 	BaseURL string
 	// APIKey is the API key from KeyEnv. Call APIKey.Reveal only where the
-	// client sets the auth header. See ValidKey for the rules.
+	// client sets the auth header. See ValidateKey for the rules.
 	APIKey discover.Secret
 	// Dial, when it is not nil, opens every network connection of the
 	// client in place of the default dialer. Tests use it to see or block
@@ -141,9 +141,10 @@ type Config struct {
 
 // Resolve returns a copy of c with the defaults filled in, and checks it with
 // Validate. An empty Model becomes Provider.DefaultModel and an empty BaseURL
-// becomes Provider.DefaultBaseURL. Resolve removes a final "/" from BaseURL,
-// so the client can add a path that starts with "/". An unknown provider has
-// no defaults, and Validate refuses it.
+// becomes Provider.DefaultBaseURL. Resolve removes all final "/" characters
+// from BaseURL, so the client can add a path that starts with "/". It checks
+// the base URL after it removes them, so "https:///" fails. An unknown
+// provider has no defaults, and Validate refuses it.
 func (c Config) Resolve() (Config, error) {
 	if c.Model == "" {
 		c.Model = c.Provider.DefaultModel()
@@ -151,7 +152,7 @@ func (c Config) Resolve() (Config, error) {
 	if c.BaseURL == "" {
 		c.BaseURL = c.Provider.DefaultBaseURL()
 	}
-	c.BaseURL = strings.TrimSuffix(c.BaseURL, "/")
+	c.BaseURL = strings.TrimRight(c.BaseURL, "/")
 	if err := c.Validate(); err != nil {
 		return Config{}, err
 	}
@@ -160,26 +161,26 @@ func (c Config) Resolve() (Config, error) {
 
 // Validate checks c as it is. It does not fill in defaults, so an empty Model
 // or BaseURL is an error: call Resolve to fill them in first. It checks the
-// provider, the model name (see validModel), the base URL (ValidateBaseURL)
-// and the key (ValidKey). Dial can be nil.
+// provider, the model name (see validateModel), the base URL (ValidateBaseURL)
+// and the key (ValidateKey). Dial can be nil.
 func (c Config) Validate() error {
 	if !c.Provider.Valid() {
 		return unknownProviderError()
 	}
-	if err := validModel(c.Model); err != nil {
+	if err := validateModel(c.Model); err != nil {
 		return err
 	}
 	if err := ValidateBaseURL(c.BaseURL); err != nil {
 		return err
 	}
-	return ValidKey(c.APIKey.Reveal())
+	return ValidateKey(c.APIKey.Reveal())
 }
 
-// validModel checks a model name. The name goes into the JSON request body,
+// validateModel checks a model name. The name goes into the JSON request body,
 // so the check is only a sanity check: 1 to MaxModelBytes bytes of visible
 // ASCII (no space). Real model names such as "gpt-4o-mini",
 // "claude-haiku-5-5" or "llama3:8b" pass.
-func validModel(model string) error {
+func validateModel(model string) error {
 	if model == "" {
 		return fmt.Errorf("%w: the model name is empty (set it for this provider)", ErrInvalidModel)
 	}
@@ -241,14 +242,14 @@ func ValidateBaseURL(raw string) error {
 	}
 }
 
-// ValidKey checks an API key before the client puts it in an HTTP header.
+// ValidateKey checks an API key before the client puts it in an HTTP header.
 // An empty key gives an error that wraps ErrMissingKey. A key longer than
 // MaxKeyBytes, or with a byte that is not visible ASCII (a control character
 // such as CR, LF, tab or DEL, a space, or a non-ASCII byte), gives an error
 // that wraps ErrInvalidKey. Real API keys are visible ASCII.
 //
 // The error text is fixed and never holds the key or a part of it.
-func ValidKey(key string) error {
+func ValidateKey(key string) error {
 	if key == "" {
 		return ErrMissingKey
 	}

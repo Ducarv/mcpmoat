@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"errors"
 	"flag"
+	"fmt"
 	"slices"
 	"strconv"
 	"strings"
@@ -402,7 +403,7 @@ func TestUsageContent(t *testing.T) {
 		"  --llm-base-url <url>  The base URL of the API: https, or http for a loopback host only (default: the public API)\n",
 		"  --llm: the LLM findings (MOAT-LLM-001, and MOAT-LLM-002 for an invalid answer) are advisory and marked [LLM].\n",
 		"  They are high at most, and they count for --fail-on. They never remove a rule finding.\n",
-		"  scan sends at most 500 tools. A provider error or more tools than that gives exit 2; the report still prints.\n",
+		fmt.Sprintf("  scan sends at most %d tools. A provider error or more tools than that gives exit 2; the report still prints.\n", maxLLMTools),
 	} {
 		if !strings.Contains(got, want) {
 			t.Errorf("usage text does not contain %q\n--- got ---\n%s", want, got)

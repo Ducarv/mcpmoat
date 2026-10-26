@@ -558,12 +558,33 @@ func TestSortAnswer(t *testing.T) {
 			t.Parallel()
 			got := sortAnswer(tt.err)
 			if got != tt.want {
-				t.Errorf("sortAnswer(%v) = %d, want %d", tt.err, got, tt.want)
+				t.Errorf("sortAnswer(%v) = %v, want %v", tt.err, got, tt.want)
 			}
 			if stops := got.stepFails(); stops != tt.wantStops {
 				t.Errorf("sortAnswer(%v).stepFails() = %v, want %v", tt.err, stops, tt.wantStops)
 			}
 		})
+	}
+}
+
+// String returns the name of the kind, so a test failure shows a name and not
+// a number. Every kind has a name.
+func (k answerKind) String() string {
+	switch k {
+	case answerNotRun:
+		return "answerNotRun"
+	case answerVerdict:
+		return "answerVerdict"
+	case answerUnusable:
+		return "answerUnusable"
+	case answerStopped:
+		return "answerStopped"
+	case answerProviderFailed:
+		return "answerProviderFailed"
+	case answerInternalFailed:
+		return "answerInternalFailed"
+	default:
+		return fmt.Sprintf("answerKind(%d)", int(k))
 	}
 }
 
@@ -582,7 +603,7 @@ func TestLLMFailureLine(t *testing.T) {
 		{"internal", &llmFailure{kind: answerInternalFailed}, llmInternalText},
 		{"provider without error", &llmFailure{kind: answerProviderFailed}, llmInternalText},
 		{"provider status", &llmFailure{kind: answerProviderFailed, err: &llm.StatusError{Code: http.StatusServiceUnavailable}}, "the LLM provider failed (HTTP 503)"},
-		{"provider transport", &llmFailure{kind: answerProviderFailed, err: llm.ErrTransport}, "the LLM provider failed (LLM provider request failed: network error)"},
+		{"provider transport", &llmFailure{kind: answerProviderFailed, err: llm.ErrTransport}, "the LLM provider failed (network error)"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -601,7 +622,8 @@ func TestLLMFailureLine(t *testing.T) {
 // when the context ended, so the fake classifier cannot reach the guard
 // through llmStep: the test calls llmStepStopped directly. An error while the
 // context is alive must give one fixed line, never the text of the error.
-// When the context ended, the line is interruptedText, as for a signal.
+// When the context ended and the error is not nil, the line is
+// interruptedText, as for a signal. With no error, the step is done.
 func TestLLMStepStopped(t *testing.T) {
 	t.Parallel()
 
@@ -619,7 +641,7 @@ func TestLLMStepStopped(t *testing.T) {
 		{"alive without error", t.Context(), nil, false, ""},
 		{"alive with error", t.Context(), errors.New(canary), true, scanPrefix + llmInternalText + "\n"},
 		{"ended with context error", canceled, context.Canceled, true, scanPrefix + interruptedText + "\n"},
-		{"ended without error", canceled, nil, true, scanPrefix + interruptedText + "\n"},
+		{"ended without error", canceled, nil, false, ""},
 		{"ended with other error", canceled, errors.New(canary), true, scanPrefix + interruptedText + "\n"},
 	}
 	for _, tt := range tests {

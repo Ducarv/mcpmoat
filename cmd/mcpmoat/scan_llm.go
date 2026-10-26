@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"net/url"
 	"slices"
+	"strings"
 	"sync"
 
 	"github.com/Ducarv/mcpmoat/internal/discover"
@@ -28,7 +29,7 @@ const (
 	// provider. It bounds the cost and the time of a scan.
 	maxLLMTools = 500
 	// llmWorkers is the number of requests that run at the same time.
-	llmWorkers = 4
+	llmWorkers = llm.MaxConcurrentRequests
 )
 
 // noLLMClientText is the text after the prefix of the error line that scan
@@ -63,17 +64,18 @@ func newLLMClassifier(cfg llm.Config) (toolClassifier, error) {
 
 // addLLMFlags adds the four LLM flags of scan (FR-17) to fs. They store
 // their values in f. --llm is off by default. The other three refuse an
-// empty value (see pathFlag), so an empty value in f means that the flag was
-// not given. checkLLMFlags checks them all.
+// empty value (see onceStringFlag), so an empty value in f means that the
+// flag was not given. checkLLMFlags checks them all.
 //
 // The base URL can hold a user:password, so the errors of its flag never
 // hold the value. addLLMFlags returns that flag: when Parse fails, the
-// caller prints its problem in place of the Parse error (see secretPathFlag).
+// caller prints its problem in place of the Parse error (see
+// secretStringFlag).
 func addLLMFlags(fs *flag.FlagSet, f *llmFlags) *secretFlag {
 	fs.BoolVar(&f.on, "llm", false, "")
-	pathFlag(fs, "llm-provider", "a provider name", &f.provider)
-	pathFlag(fs, "llm-model", "a model name", &f.model)
-	return secretPathFlag(fs, "llm-base-url", "a URL", &f.baseURL)
+	onceStringFlag(fs, "llm-provider", "a provider name", &f.provider)
+	onceStringFlag(fs, "llm-model", "a model name", &f.model)
+	return secretStringFlag(fs, "llm-base-url", "a URL", &f.baseURL)
 }
 
 // setupLLM checks the LLM flags (see checkLLMFlags) and, with --llm, prints
@@ -222,7 +224,7 @@ func (c *cli) checkLLMFlags(f llmFlags, noConnect bool) (*llmSetup, bool) {
 		}
 	}
 	key := c.getenv(llm.KeyEnv)
-	if err := llm.ValidKey(key); err != nil {
+	if err := llm.ValidateKey(key); err != nil {
 		// The error text names llm.KeyEnv and never holds the key.
 		c.usageError("scan", "--llm: %v", err)
 		return nil, false
@@ -368,11 +370,12 @@ func (r llmResult) incomplete() bool {
 // printLLMProblems). It returns an empty result and true when cl is nil
 // (no --llm) or when no server was inspected: then it sends nothing.
 //
-// It returns false when the process got a signal during the step. It has
-// written interruptedText then (see interrupted), and scan must print no
-// report and save no pins. It returns false too, with one llmInternalText
-// line, when classifyTools fails while ctx is still alive (see
-// llmStepStopped).
+// It returns false when the process got a signal during a step that had a tool
+// to classify. It has written interruptedText then (see interrupted), and scan
+// must print no report and save no pins. With no tool to classify, a signal
+// is not an error of the step, as without --llm. It returns false too, with
+// one llmInternalText line, when classifyTools fails while ctx is still alive
+// (see llmStepStopped).
 func (c *cli) llmStep(ctx context.Context, cl toolClassifier, outcomes []inspect.Outcome, ignore *scanIgnores) (llmResult, bool) {
 	if cl == nil || len(outcomes) == 0 {
 		return llmResult{}, true
@@ -386,19 +389,21 @@ func (c *cli) llmStep(ctx context.Context, cl toolClassifier, outcomes []inspect
 }
 
 // llmStepStopped reports whether scan must stop after classifyTools returned
-// err, and writes the reason on stderr. When ctx ended (a signal), it writes
-// interruptedText (see interrupted). classifyTools fails only when ctx
-// ended, so the other case is a guard: an error while ctx is alive writes
-// llmInternalText, never the text of err.
+// err, and writes the reason on stderr. With no error, the step is done, also
+// when ctx ended: classifyTools returns no error when it had no tool to
+// classify, and then scan behaves as without --llm. When ctx ended (a signal)
+// and err is not nil, it writes interruptedText (see interrupted).
+// classifyTools fails only when ctx ended, so the other case is a guard: an
+// error while ctx is alive writes llmInternalText, never the text of err.
 func (c *cli) llmStepStopped(ctx context.Context, err error) bool {
+	if err == nil {
+		return false
+	}
 	if c.interrupted(ctx, "scan") {
 		return true
 	}
-	if err != nil {
-		c.cmdPrintf("scan", "%s", llmInternalText)
-		return true
-	}
-	return false
+	c.cmdPrintf("scan", "%s", llmInternalText)
+	return true
 }
 
 // classifyTools sends the name and the description of each tool of each
@@ -423,8 +428,10 @@ func (c *cli) llmStepStopped(ctx context.Context, err error) bool {
 // starts. The result then holds the failure (see llmResult.failure), and the
 // tools without a verdict get no row.
 //
-// The error is not nil only when ctx ended (the process got a signal). The
-// caller then handles it like a signal during the inspection.
+// The error is not nil only when ctx ended (the process got a signal) and at
+// least one tool was to be classified. The caller then handles it like a
+// signal during the inspection. With no tool, the result is empty and the
+// error is nil.
 func classifyTools(ctx context.Context, outcomes []inspect.Outcome, cl toolClassifier, ignore *scanIgnores) (llmResult, error) {
 	var res llmResult
 	jobs := llmJobs(outcomes)
@@ -434,7 +441,9 @@ func classifyTools(ctx context.Context, outcomes []inspect.Outcome, cl toolClass
 	}
 
 	answers, failure := runLLMJobs(ctx, jobs, cl)
-	if err := ctx.Err(); err != nil {
+	// With no job, the step did nothing, so a signal that comes now is not
+	// an LLM error. The caller handles it later, as without --llm.
+	if err := ctx.Err(); err != nil && len(jobs) > 0 {
 		return llmResult{}, err
 	}
 	res.failure = failure
@@ -642,12 +651,14 @@ func llmFailureLine(f *llmFailure) string {
 
 // llmFailureText returns the reason of a failed request to the provider:
 // "HTTP <code>" for a status code, else the error text. The errors of package
-// llm have fixed text. termsafe.Quote still escapes the text, because a
-// classifier in a test can return any error that wraps llm.ErrProvider.
+// llm have fixed text. The text of llm.ErrProvider at the start is cut, because
+// the line already says "the LLM provider failed". termsafe.Quote still
+// escapes the text, because a classifier in a test can return any error that
+// wraps llm.ErrProvider.
 func llmFailureText(err error) string {
 	var status *llm.StatusError
 	if errors.As(err, &status) {
 		return fmt.Sprintf("HTTP %d", status.Code)
 	}
-	return termsafe.Quote(err.Error())
+	return termsafe.Quote(strings.TrimPrefix(err.Error(), llm.ErrProvider.Error()+": "))
 }

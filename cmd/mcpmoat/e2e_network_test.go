@@ -26,7 +26,7 @@ import (
 )
 
 const (
-	// e2eLLMKey is the API key canary. It is visible ASCII, so llm.ValidKey
+	// e2eLLMKey is the API key canary. It is visible ASCII, so llm.ValidateKey
 	// accepts it. It may only show in the x-api-key header of a request to
 	// the fake provider. It holds no word, so no part of it shows in an output
 	// by chance: llmAssertNoKey looks for every part of 8 bytes.
@@ -116,7 +116,11 @@ func (s *e2eNetServer) settle(t *testing.T) (conns int32, reqs []e2eNetRequest) 
 	// No proxy and no keep-alive: the request goes straight to the server on
 	// one new connection.
 	client := &http.Client{Transport: &http.Transport{Proxy: nil, DisableKeepAlives: true}}
-	resp, err := client.Get(s.srv.URL + e2eNetSettlePath)
+	req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, s.srv.URL+e2eNetSettlePath, nil)
+	if err != nil {
+		t.Fatalf("settle request: %v", err)
+	}
+	resp, err := client.Do(req)
 	if err != nil {
 		t.Fatalf("settle request: %v", err)
 	}

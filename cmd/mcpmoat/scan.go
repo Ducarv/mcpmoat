@@ -39,11 +39,11 @@ func (c *cli) runScan(opts options, args []string) int {
 	timeout := fs.Duration("timeout", inspect.DefaultTimeout, "")
 	concurrency := fs.Int("concurrency", inspect.DefaultConcurrency, "")
 
-	// pathFlag refuses an empty value, so a result that is not "" means the
-	// flag was given.
+	// onceStringFlag refuses an empty value, so a result that is not ""
+	// means the flag was given.
 	var configPath, rulesDir string
-	pathFlag(fs, "config", "a file name", &configPath)
-	pathFlag(fs, "rules", "a folder name", &rulesDir)
+	onceStringFlag(fs, "config", "a file name", &configPath)
+	onceStringFlag(fs, "rules", "a folder name", &rulesDir)
 
 	// fs.Func calls the function once for each --ignore, so the user can
 	// give the flag more than once. ValidRuleID also refuses an empty value
@@ -210,19 +210,19 @@ func connectOptions(timeout time.Duration, concurrency int) (inspect.Options, er
 	}
 }
 
-// pathFlag adds a flag to fs that takes one path and stores it in *dest. The
-// flag can be given once. An empty value, or a value that looks like another
-// flag (see isFlagOf), is refused. what names the missing value in the error
-// message, for example "a file name".
-func pathFlag(fs *flag.FlagSet, name, what string, dest *string) {
+// onceStringFlag adds a flag to fs that takes one non-empty value and stores
+// it in *dest. The flag can be given once. An empty value, or a value that
+// looks like another flag (see isFlagOf), is refused. what names the missing
+// value in the error message, for example "a file name".
+func onceStringFlag(fs *flag.FlagSet, name, what string, dest *string) {
 	fs.Func(name, "", func(value string) error {
-		return setPath(fs, name, what, dest, value)
+		return setOnce(fs, name, what, dest, value)
 	})
 }
 
-// setPath does the checks of pathFlag and stores value in *dest. The error
-// text holds only the flag name and what, never the value.
-func setPath(fs *flag.FlagSet, name, what string, dest *string, value string) error {
+// setOnce does the checks of onceStringFlag and stores value in *dest. The
+// error text holds only the flag name and what, never the value.
+func setOnce(fs *flag.FlagSet, name, what string, dest *string, value string) error {
 	if *dest != "" {
 		return fmt.Errorf("--%s given more than once", name)
 	}
@@ -233,12 +233,12 @@ func setPath(fs *flag.FlagSet, name, what string, dest *string, value string) er
 	return nil
 }
 
-// secretFlag is a flag.Value for a pathFlag whose value can hold a secret,
-// for example a URL with a user:password. On a Set error, the flag package
-// returns `invalid value "<value>" for flag ...`, so that error must not be
-// printed. Set records the problem in problem, and the caller prints problem
-// when Parse fails. Set still returns an error, so Parse stops at the same
-// argument as for the other flags.
+// secretFlag is a flag.Value for a onceStringFlag whose value can hold a
+// secret, for example a URL with a user:password. On a Set error, the flag
+// package returns `invalid value "<value>" for flag ...`, so that error must
+// not be printed. Set records the problem in problem, and the caller prints
+// problem when Parse fails. Set still returns an error, so Parse stops at the
+// same argument as for the other flags.
 type secretFlag struct {
 	fs      *flag.FlagSet
 	name    string
@@ -247,9 +247,9 @@ type secretFlag struct {
 	problem error
 }
 
-// secretPathFlag adds a flag to fs like pathFlag, but returns the flag so
-// that the caller can print its problem in place of the Parse error.
-func secretPathFlag(fs *flag.FlagSet, name, what string, dest *string) *secretFlag {
+// secretStringFlag adds a flag to fs like onceStringFlag, but returns the flag
+// so that the caller can print its problem in place of the Parse error.
+func secretStringFlag(fs *flag.FlagSet, name, what string, dest *string) *secretFlag {
 	f := &secretFlag{fs: fs, name: name, what: what, dest: dest}
 	fs.Var(f, name, "")
 	return f
@@ -259,9 +259,9 @@ func secretPathFlag(fs *flag.FlagSet, name, what string, dest *string) *secretFl
 // The flag package can call it on a zero secretFlag.
 func (f *secretFlag) String() string { return "" }
 
-// Set checks value like pathFlag and stores it.
+// Set checks value like onceStringFlag and stores it.
 func (f *secretFlag) Set(value string) error {
-	if err := setPath(f.fs, f.name, f.what, f.dest, value); err != nil {
+	if err := setOnce(f.fs, f.name, f.what, f.dest, value); err != nil {
 		f.problem = err
 		return err
 	}

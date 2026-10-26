@@ -132,8 +132,9 @@ type FindingRow struct {
 	// Key is the key name in Field, for example an env variable name.
 	Key string
 	// Related is a second name that the finding refers to, for example a
-	// second server, or a fixed reason text. WriteFindings shows it alone when
-	// Key is empty, and as "<key> (<related>)" when Key is set too.
+	// second server, a fixed reason text, or, for MOAT-LLM-001, the category
+	// of the verdict. WriteFindings shows it alone when Key is empty, and as
+	// "<key> (<related>)" when Key is set too.
 	Related string
 }
 

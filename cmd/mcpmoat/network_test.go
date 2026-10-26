@@ -461,12 +461,19 @@ func assertNetSummary(t *testing.T, stdout string) {
 // builds no LLM client, although the LLM key is set. The stdio child does not
 // get the key.
 func TestScanNetworkOnlyConfiguredServers(t *testing.T) {
-	for _, jsonOut := range []bool{false, true} {
-		t.Run(map[bool]string{false: "terminal", true: "json"}[jsonOut], func(t *testing.T) {
+	tests := []struct {
+		name    string
+		jsonOut bool
+	}{
+		{"terminal", false},
+		{"json", true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
 			w := newNetWorld(t, false)
 			c, insp, out := w.cli(t, nil)
 			args := []string{"scan"}
-			if jsonOut {
+			if tt.jsonOut {
 				args = append(args, "--json")
 			}
 
@@ -489,7 +496,7 @@ func TestScanNetworkOnlyConfiguredServers(t *testing.T) {
 				t.Errorf("Inspect calls = %d, want 3", n)
 			}
 			w.assertChildEnv(t)
-			if jsonOut {
+			if tt.jsonOut {
 				doc := decodeScanJSON(t, stdout)
 				got := inspectionByName(doc)
 				for name, want := range map[string]string{"net-stdio": "ok", "net-local": "failed", "net-invalid": "failed"} {

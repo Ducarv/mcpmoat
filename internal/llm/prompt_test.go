@@ -67,6 +67,26 @@ func TestSystemPrompt(t *testing.T) {
 	}
 }
 
+// TestSystemPromptTruncatedRule checks the rule for a cut description. A
+// hostile server can put harmless text first and the attack after the cut,
+// so the model never sees it. The prompt must rate a cut text at least
+// medium.
+func TestSystemPromptTruncatedRule(t *testing.T) {
+	t.Parallel()
+
+	for _, want := range []string{
+		`When "truncated" is true`,
+		"sign of risk",
+		"the rest can hold the attack",
+		`at least "` + string(RiskMedium) + `"`,
+		`the category "` + string(CategoryOther) + `" when no other category fits`,
+	} {
+		if !strings.Contains(SystemPrompt, want) {
+			t.Errorf("SystemPrompt does not contain %q", want)
+		}
+	}
+}
+
 func TestToolMessageRoundTrip(t *testing.T) {
 	t.Parallel()
 

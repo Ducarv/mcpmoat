@@ -18,6 +18,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Ducarv/mcpmoat/internal/discover"
 	"github.com/Ducarv/mcpmoat/internal/discover/discovertest"
 	"github.com/Ducarv/mcpmoat/internal/inspect"
 	"github.com/Ducarv/mcpmoat/internal/inspect/inspecttest"
@@ -33,7 +34,7 @@ import (
 // server. network_test.go holds the no-network proof (NFR-01).
 
 // llmTestKey is the fake API key of the tests. It is visible ASCII, so
-// llm.ValidKey accepts it. It holds no word, so no part of it shows in
+// llm.ValidateKey accepts it. It holds no word, so no part of it shows in
 // an output by chance. It must never show on stdout or stderr.
 const llmTestKey = "sk-Kq7vX2pLw9TzR4mNb8HcYf3J"
 
@@ -1395,5 +1396,79 @@ func TestLLMRuleIDsValid(t *testing.T) {
 		if !rules.ValidRuleID(id) {
 			t.Errorf("rules.ValidRuleID(%q) = false, want true", id)
 		}
+	}
+}
+
+// TestLLMRiskSeveritiesValid checks that each risk with a finding gives a
+// severity that internal/rules knows, so the report and --fail-on handle an
+// LLM finding like any other. Package llm must not import internal/rules, so
+// the check sits here, next to TestLLMRuleIDsValid.
+func TestLLMRiskSeveritiesValid(t *testing.T) {
+	t.Parallel()
+
+	for _, risk := range []llm.Risk{llm.RiskLow, llm.RiskMedium, llm.RiskHigh} {
+		t.Run(string(risk), func(t *testing.T) {
+			t.Parallel()
+			severity, ok := risk.Severity()
+			if !ok {
+				t.Fatalf("%q.Severity() ok = false, want true", risk)
+			}
+			if !rules.Severity(severity).Valid() {
+				t.Errorf("%q.Severity() = %q, which is not a valid rules.Severity", risk, severity)
+			}
+			if rules.Severity(severity) == rules.SeverityCritical {
+				t.Errorf("%q.Severity() = %q, want a severity below critical", risk, severity)
+			}
+		})
+	}
+}
+
+// failClassifier is a toolClassifier that fails the test when it is called.
+type failClassifier struct{ t *testing.T }
+
+// Classify implements toolClassifier.
+func (f failClassifier) Classify(context.Context, llm.Input) (llm.Verdict, error) {
+	f.t.Error("Classify was called, want no call")
+	return llm.Verdict{}, errors.New("unexpected call")
+}
+
+// TestClassifyToolsContext checks classifyTools with a context that ended. With
+// no tool to classify, the step did nothing: it returns an empty result and no
+// error, so a signal after the inspection does not drop the report only with
+// --llm. With a tool, it returns the context error.
+func TestClassifyToolsContext(t *testing.T) {
+	t.Parallel()
+
+	srv := discover.Server{Name: "srv", Client: discover.ClientClaudeCode, Source: "/cfg/mcp.json"}
+	canceled, cancel := context.WithCancel(t.Context())
+	cancel()
+
+	tests := []struct {
+		name     string
+		ctx      context.Context
+		outcomes []inspect.Outcome
+		wantErr  error
+	}{
+		{"no outcomes, ended", canceled, nil, nil},
+		{"failed server, ended", canceled, []inspect.Outcome{{Server: srv, Status: inspect.StatusFailed, Err: errors.New("boom")}}, nil},
+		{"server without tools, ended", canceled, []inspect.Outcome{{Server: srv, Status: inspect.StatusOK}}, nil},
+		{"no outcomes, alive", t.Context(), nil, nil},
+		{"one tool, ended", canceled, []inspect.Outcome{{Server: srv, Status: inspect.StatusOK, Result: inspect.Result{Tools: []inspect.Tool{mkTool("t1", "Add.")}}}}, context.Canceled},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			var cl toolClassifier = failClassifier{t}
+			if tt.wantErr != nil {
+				cl = &llmFake{}
+			}
+			res, err := classifyTools(tt.ctx, tt.outcomes, cl, &scanIgnores{})
+			if !errors.Is(err, tt.wantErr) {
+				t.Errorf("classifyTools() error = %v, want %v", err, tt.wantErr)
+			}
+			if len(res.rows) != 0 || res.ignored != nil || res.counts != nil || res.failure != nil || res.skipped != 0 || res.overCap != 0 {
+				t.Errorf("classifyTools() result = %+v, want empty", res)
+			}
+		})
 	}
 }

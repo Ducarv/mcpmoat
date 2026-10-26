@@ -127,6 +127,18 @@ func TestConfigResolve(t *testing.T) {
 			wantURL:   "http://localhost:11434/v1",
 		},
 		{
+			name:      "all trailing slashes trimmed",
+			cfg:       Config{Provider: ProviderOpenAI, Model: "gpt-4o-mini", BaseURL: "https://h/v1//", APIKey: key},
+			wantModel: "gpt-4o-mini",
+			wantURL:   "https://h/v1",
+		},
+		{
+			name:      "many slashes after the host",
+			cfg:       Config{Provider: ProviderAnthropic, BaseURL: "https://llm.example.com///", APIKey: key},
+			wantModel: DefaultAnthropicModel,
+			wantURL:   "https://llm.example.com",
+		},
+		{
 			name:    "openai without model",
 			cfg:     Config{Provider: ProviderOpenAI, APIKey: key},
 			wantErr: ErrInvalidModel,
@@ -159,6 +171,22 @@ func TestConfigResolve(t *testing.T) {
 		{
 			name:    "base URL only a slash",
 			cfg:     Config{Provider: ProviderAnthropic, BaseURL: "/", APIKey: key},
+			wantErr: ErrInvalidBaseURL,
+		},
+		{
+			name:    "base URL only slashes",
+			cfg:     Config{Provider: ProviderAnthropic, BaseURL: "///", APIKey: key},
+			wantErr: ErrInvalidBaseURL,
+		},
+		{
+			// After the trim this is "https:", which has no host.
+			name:    "empty host with slashes",
+			cfg:     Config{Provider: ProviderAnthropic, BaseURL: "https:///", APIKey: key},
+			wantErr: ErrInvalidBaseURL,
+		},
+		{
+			name:    "no host with many slashes",
+			cfg:     Config{Provider: ProviderOpenAI, Model: "m", BaseURL: "https://////", APIKey: key},
 			wantErr: ErrInvalidBaseURL,
 		},
 		{
@@ -258,6 +286,7 @@ func TestValidateBaseURL(t *testing.T) {
 		{name: "opaque", raw: "https:" + canary + ".example.com"},
 		{name: "mailto", raw: "mailto:" + canary + "@example.com"},
 		{name: "no host", raw: "https://"},
+		{name: "scheme only", raw: "https:"},
 		{name: "empty host with path", raw: "https:///" + canary},
 		{name: "port only", raw: "https://:443/" + canary},
 		{name: "relative path", raw: "/v1/" + canary},
@@ -293,7 +322,7 @@ func TestValidateBaseURL(t *testing.T) {
 	}
 }
 
-func TestValidKey(t *testing.T) {
+func TestValidateKey(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
@@ -320,21 +349,21 @@ func TestValidKey(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			err := ValidKey(tt.key)
+			err := ValidateKey(tt.key)
 			if tt.wantErr == nil {
 				if err != nil {
-					t.Fatalf("ValidKey() = %v, want nil", err)
+					t.Fatalf("ValidateKey() = %v, want nil", err)
 				}
 				return
 			}
 			if !errors.Is(err, tt.wantErr) {
-				t.Fatalf("ValidKey() = %v, want %v", err, tt.wantErr)
+				t.Fatalf("ValidateKey() = %v, want %v", err, tt.wantErr)
 			}
 			if !strings.Contains(err.Error(), KeyEnv) {
-				t.Errorf("ValidKey() error %q does not name %s", err, KeyEnv)
+				t.Errorf("ValidateKey() error %q does not name %s", err, KeyEnv)
 			}
 			if strings.Contains(err.Error(), canary) {
-				t.Errorf("ValidKey() error %q holds the key", err)
+				t.Errorf("ValidateKey() error %q holds the key", err)
 			}
 		})
 	}

@@ -25,9 +25,10 @@ const (
 	dialKeepAlive       = 30 * time.Second
 	tlsHandshakeTimeout = 10 * time.Second
 	idleConnTimeout     = 30 * time.Second
-	// maxIdleConns lets each scan worker keep one connection. It must
-	// change together with llmWorkers in cmd/mcpmoat/scan_llm.go.
-	maxIdleConns = 4
+	// MaxConcurrentRequests is the number of requests that a caller should
+	// run at the same time. The transport keeps one idle connection for
+	// each of them.
+	MaxConcurrentRequests = 4
 	// maxResponseHeaderBytes caps the response headers.
 	maxResponseHeaderBytes = 64 << 10
 	// loopbackAddrTimeout bounds the dial of one loopback address when
@@ -328,8 +329,8 @@ func newHTTPClient(dial dialFunc, proxy func(*http.Request) (*url.URL, error)) *
 		TLSClientConfig:     &tls.Config{MinVersion: tls.VersionTLS12},
 		TLSHandshakeTimeout: tlsHandshakeTimeout,
 		ForceAttemptHTTP2:   true,
-		MaxIdleConns:        maxIdleConns,
-		MaxIdleConnsPerHost: maxIdleConns,
+		MaxIdleConns:        MaxConcurrentRequests,
+		MaxIdleConnsPerHost: MaxConcurrentRequests,
 		IdleConnTimeout:     idleConnTimeout,
 		// No gzip: the response is small, and so the body cap counts the
 		// bytes on the wire.
@@ -472,17 +473,33 @@ func encodeJSON(v any) ([]byte, error) {
 	return bytes.TrimSuffix(buf.Bytes(), []byte("\n")), nil
 }
 
+// errorEnvelope is the top-level "error" key that both providers use for an
+// error body.
+type errorEnvelope struct {
+	Error json.RawMessage `json:"error"`
+}
+
 // decodeEnvelope decodes a 2xx response body into v, the envelope struct of
 // a provider. A body that is not one JSON object gives ErrBadResponse. The
 // check comes first because json.Unmarshal accepts the literal null for a
 // struct and leaves it unchanged, so a null body would look like an empty
-// envelope. The error is fixed text: the decoder error can quote the body.
+// envelope. A body with a top-level "error" key that is not null gives
+// ErrBadResponse too: it is an error from the API, sent with a 2xx status,
+// not an answer of the model. The error is fixed text: the decoder error can
+// quote the body.
 func decodeEnvelope(body []byte, v any) error {
 	trimmed := bytes.TrimLeft(body, " \t\r\n")
 	if len(trimmed) == 0 || trimmed[0] != '{' {
 		return ErrBadResponse
 	}
 	if err := json.Unmarshal(body, v); err != nil {
+		return ErrBadResponse
+	}
+	var e errorEnvelope
+	if err := json.Unmarshal(body, &e); err != nil {
+		return ErrBadResponse
+	}
+	if e.Error != nil && !bytes.Equal(bytes.TrimSpace(e.Error), []byte("null")) {
 		return ErrBadResponse
 	}
 	return nil
