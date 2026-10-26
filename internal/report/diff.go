@@ -111,7 +111,7 @@ func (k DiffKind) String() string {
 // "(no diff text available)". The note is a constant of this package. It is
 // never server text.
 //
-// The tool and server names go through findingCell, like the cells of
+// The tool and server names go through findingCell, like the names in
 // WriteFindings: an empty name shows as "-", and a name is escaped and cut at
 // maxShortCellRunes.
 //

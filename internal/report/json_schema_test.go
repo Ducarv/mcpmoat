@@ -181,8 +181,8 @@ func richReport() report.ScanReport {
 			remote("f", discover.TransportSSE, report.InspectionOK),
 		},
 		Findings: []report.JSONFinding{
-			report.NewJSONFinding(report.FindingRow{RuleID: "MOAT-T2-004", Severity: "high", Server: "a", Field: "env", Key: "API_KEY"}),
-			report.NewJSONFinding(report.FindingRow{RuleID: "MOAT-T4-001", Severity: "medium", Server: "b", Related: "a"}),
+			report.NewJSONFinding(report.FindingRow{RuleID: "MOAT-T2-004", Severity: "high", ServerRef: report.ServerRef{Name: "a"}, Field: "env", Key: "API_KEY"}),
+			report.NewJSONFinding(report.FindingRow{RuleID: "MOAT-T4-001", Severity: "medium", ServerRef: report.ServerRef{Name: "b"}, Related: "a"}),
 			report.NewJSONFinding(report.FindingRow{RuleID: "X", Severity: "custom-severity"}),
 		},
 		Diffs: []report.JSONDiff{

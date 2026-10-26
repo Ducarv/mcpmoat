@@ -2,8 +2,6 @@ package main
 
 import (
 	"errors"
-	"fmt"
-	"strings"
 
 	"github.com/Ducarv/mcpmoat/internal/discover"
 	"github.com/Ducarv/mcpmoat/internal/inspect"
@@ -13,8 +11,9 @@ import (
 )
 
 // This file holds the helpers of the pin step that scan and pin both use: the
-// server identity, the read of pins.json, the pinnable check, the diffs and the
-// fixed texts for stderr.
+// server identity, the read of pins.json, the pinnable check, the diffs, the
+// reason and the warnings of an outcome, and the caps of untrusted text on the
+// terminal. The stderr texts that only pin prints are in pin.go.
 
 // maxWarnNameRunes, maxWarnPathRunes and maxWarnErrRunes cap the untrusted text
 // that a line on the terminal shows: a server name from a config file, a path
@@ -126,61 +125,27 @@ func pinnableReason(err error) string {
 	return reasonNotPinnable
 }
 
-// notInspectedText returns "server <name>: <status>: <reason>" for an outcome
-// that is not inspect.StatusOK. scan shows it as a warning and pin as an error.
-// The server name and the error text come from untrusted sources (the error can
-// carry server output), so both are escaped and cut.
-func notInspectedText(o inspect.Outcome) string {
-	reason := "no error text"
+// outcomeReason returns the raw text that says why o was not inspected: the
+// error text, or "no error text" when there is none. The text is untrusted
+// (see inspect.Outcome.Err). The caller must escape it before it prints it.
+func outcomeReason(o inspect.Outcome) string {
 	if o.Err != nil {
-		reason = o.Err.Error()
+		return o.Err.Error()
 	}
-	return fmt.Sprintf("server %s: %s: %s",
-		cutName(o.Server.Name),
-		termsafe.Quote(string(o.Status)),
-		termsafe.QuoteCut(reason, maxWarnErrRunes))
+	return "no error text"
 }
 
-// warnInspection writes the warnings of the inspection of o on stderr for the
-// command cmd ("scan" or "pin"): one line for each inspect.Warning, also for a
-// server that failed (ConnectError.Warnings). A Warning holds keys and fixed
-// names only, never values, URLs or server text (see inspect.Warning).
-func (c *cli) warnInspection(cmd string, o inspect.Outcome) {
-	warnings := o.Result.Warnings
+// outcomeWarnings returns the warnings of the inspection of o: Result.Warnings
+// for a server that inspect read, and ConnectError.Warnings for a server that
+// failed. A Warning holds keys and fixed names only, never values, URLs or
+// server text (see inspect.Warning).
+func outcomeWarnings(o inspect.Outcome) []inspect.Warning {
+	if o.Status == inspect.StatusOK {
+		return o.Result.Warnings
+	}
 	var ce *inspect.ConnectError
-	if o.Status != inspect.StatusOK && errors.As(o.Err, &ce) {
-		warnings = ce.Warnings
+	if errors.As(o.Err, &ce) {
+		return ce.Warnings
 	}
-	for _, w := range warnings {
-		c.warnf(cmd, "%s", warningText(o.Server.Name, w))
-	}
-}
-
-// warningText returns "server <name>: <kind>: <what it means>" for one
-// inspection warning. The server name and the header keys come from the config
-// file, so they are escaped and cut.
-func warningText(name string, w inspect.Warning) string {
-	var detail string
-	switch w.Kind {
-	case inspect.WarnCleartextSecrets:
-		var parts []string
-		for _, k := range w.HeaderKeys {
-			parts = append(parts, "header "+cutName(k))
-		}
-		if w.URLUserInfo {
-			parts = append(parts, "the user info of the URL")
-		}
-		if w.URLSecrets {
-			parts = append(parts, "secret parts of the URL")
-		}
-		detail = "secrets go over plain http to a host that is not loopback: " + strings.Join(parts, ", ")
-	case inspect.WarnUndeclaredCapability:
-		detail = "the server answered lists that it did not declare (it can show other lists to other clients): " +
-			termsafe.Quote(strings.Join(w.Capabilities, ", "))
-	case inspect.WarnDNSPinUnavailable:
-		detail = "a proxy from the environment resolves the host, so the DNS pin and the address checks do not apply"
-	default:
-		detail = "unknown warning"
-	}
-	return fmt.Sprintf("server %s: %s: %s", cutName(name), termsafe.Quote(string(w.Kind)), detail)
+	return nil
 }

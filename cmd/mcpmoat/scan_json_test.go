@@ -1,6 +1,7 @@
 package main
 
 import (
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
@@ -476,14 +477,17 @@ func TestScanJSONMatchesTerminal(t *testing.T) {
 				t.Errorf("complete = %v, want %v", doc.Complete, wantComplete)
 			}
 
-			// The document holds the same servers and findings as the tables,
-			// in the same order. The names of the fixtures hold no space.
+			// The document holds the same servers and findings as the terminal
+			// report. The servers are in the same order. The findings keep the
+			// order of the rows, and the terminal report groups them by severity
+			// with a stable order inside a group (see report.WriteFindings). The
+			// names of the fixtures hold no space.
 			if len(doc.Servers) > 0 {
 				if got, want := serverNames(doc), column(tableRows(t, termOut), 0); !slices.Equal(got, want) {
 					t.Errorf("server names = %v, want %v (the order of the server table)", got, want)
 				}
-				if got, want := findingRuleIDs(doc), column(findingRows(t, termOut), 0); !slices.Equal(got, want) {
-					t.Errorf("finding rule IDs = %v, want %v (the order of the findings table)", got, want)
+				if got, want := findingRuleIDsBySeverity(doc), column(findingRows(t, termOut), 0); !slices.Equal(got, want) {
+					t.Errorf("finding rule IDs by severity = %v, want %v (the order of the FINDINGS block)", got, want)
 				}
 			} else {
 				if !strings.Contains(jsonOut, `"servers": []`) {
@@ -514,6 +518,20 @@ func serverNames(doc report.ScanReport) []string {
 func findingRuleIDs(doc report.ScanReport) []string {
 	ids := make([]string, len(doc.Findings))
 	for i, f := range doc.Findings {
+		ids[i] = f.RuleID
+	}
+	return ids
+}
+
+// findingRuleIDsBySeverity returns the rule IDs of the findings of doc in the
+// order of the terminal FINDINGS block: grouped from critical to low, with the
+// order of doc inside a group. The fixtures hold built-in severities only.
+func findingRuleIDsBySeverity(doc report.ScanReport) []string {
+	rank := map[string]int{"critical": 0, "high": 1, "medium": 2, "low": 3}
+	findings := slices.Clone(doc.Findings)
+	slices.SortStableFunc(findings, func(a, b report.JSONFinding) int { return cmp.Compare(rank[a.Severity], rank[b.Severity]) })
+	ids := make([]string, len(findings))
+	for i, f := range findings {
 		ids[i] = f.RuleID
 	}
 	return ids

@@ -212,9 +212,121 @@ func TestPinOutcomesUnverifiedSeverity(t *testing.T) {
 	}
 }
 
+// TestPinOutcomesRemediation checks the Fix text of the pin rows. A
+// MOAT-T2-004 row that scan makes itself gets its own fixed text. A row from
+// pins.Compare keeps the text of its kind, unless the tools of the server
+// cannot be pinned: then scan prints no "To accept" line, so every row of the
+// server gets the fixed text for tools that cannot be pinned. A row with no
+// "To accept" line never tells the user to run "pin --accept", which would
+// refuse those tools.
+func TestPinOutcomesRemediation(t *testing.T) {
+	t.Parallel()
+
+	srv := discover.Server{Name: "srv", Client: discover.ClientClaudeCode, Source: "/cfg/mcp.json"}
+	relative := discover.Server{Name: "srv", Client: discover.ClientClaudeCode, Source: "cfg/mcp.json"}
+	tools := []inspect.Tool{mkTool("a", "Add.")}
+	dup := []inspect.Tool{mkTool("a", "One."), mkTool("a", "Two.")}
+	okWith := func(s discover.Server, ts []inspect.Tool) inspect.Outcome {
+		return inspect.Outcome{Server: s, Status: inspect.StatusOK, Result: inspect.Result{Tools: ts}}
+	}
+	failed := inspect.Outcome{Server: srv, Status: inspect.StatusFailed, Err: errors.New("boom")}
+	const notPinnable = "Do not use this server until its tools are valid, have unique names and fit the size limit of pins.json, then run mcpmoat scan again."
+
+	tests := []struct {
+		name      string
+		pinBefore bool
+		outcomes  []inspect.Outcome
+		// want holds the rule ID and the Fix text of each row, in row order.
+		want [][2]string
+		// hint is true when scan prints a "To accept" line for the server.
+		hint bool
+		// scanMade is true when scan makes the one row itself. It is about
+		// the whole server, so it has the server-level risk text.
+		scanMade bool
+	}{
+		{
+			name:     "listed twice",
+			outcomes: []inspect.Outcome{okWith(srv, tools), okWith(srv, tools)},
+			want:     [][2]string{{"MOAT-T2-004", "Remove the duplicate entry of this server from the config file, then run mcpmoat scan again."}},
+			scanMade: true,
+		},
+		{
+			name:     "relative config path",
+			outcomes: []inspect.Outcome{okWith(relative, tools)},
+			want:     [][2]string{{"MOAT-T2-004", "Run mcpmoat scan again with an absolute --config path, or from a working directory that mcpmoat can read."}},
+			scanMade: true,
+		},
+		{
+			name:      "pinned server not inspected",
+			pinBefore: true,
+			outcomes:  []inspect.Outcome{failed},
+			want:      [][2]string{{"MOAT-T2-004", "Find out why the server could not be inspected (see its status in the summary), fix it, then run mcpmoat scan again."}},
+			scanMade:  true,
+		},
+		{
+			name:     "tools cannot be pinned",
+			outcomes: []inspect.Outcome{okWith(srv, dup)},
+			want:     [][2]string{{"MOAT-T2-004", notPinnable}},
+			scanMade: true,
+		},
+		{
+			name:      "row from pins.Compare for tools that cannot be pinned",
+			pinBefore: true,
+			outcomes:  []inspect.Outcome{okWith(srv, dup)},
+			want:      [][2]string{{"MOAT-T2-004", notPinnable}},
+		},
+		{
+			name:      "changed tool next to a duplicate tool name",
+			pinBefore: true,
+			outcomes:  []inspect.Outcome{okWith(srv, []inspect.Tool{mkTool("a", "Changed."), mkTool("b", "One."), mkTool("b", "Two.")})},
+			want:      [][2]string{{"MOAT-T2-001", notPinnable}, {"MOAT-T2-004", notPinnable}},
+		},
+		{
+			name:      "new tool next to an empty tool name",
+			pinBefore: true,
+			outcomes:  []inspect.Outcome{okWith(srv, []inspect.Tool{mkTool("", "No name."), mkTool("a", "Add."), mkTool("n", "New.")})},
+			want:      [][2]string{{"MOAT-T2-004", notPinnable}, {"MOAT-T2-002", notPinnable}},
+		},
+		{
+			name:      "changed tool keeps the text of the kind",
+			pinBefore: true,
+			outcomes:  []inspect.Outcome{okWith(srv, []inspect.Tool{mkTool("a", "Changed.")})},
+			want:      [][2]string{{"MOAT-T2-001", pins.KindChanged.Remediation()}},
+			hint:      true,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			e := newPinEnv(t, oneServer("srv"))
+			c, store := storeFor(t, e, tt.pinBefore, srv, tools)
+
+			pr := c.pinOutcomes(store, tt.outcomes, &scanIgnores{})
+
+			got := make([][2]string, len(pr.rows))
+			for i, r := range pr.rows {
+				got[i] = [2]string{r.RuleID, r.Remediation}
+				if !tt.hint && strings.Contains(r.Remediation, "pin --accept") {
+					t.Errorf("%s Remediation = %q, must not point to pin --accept", r.RuleID, r.Remediation)
+				}
+			}
+			if !slices.Equal(got, tt.want) {
+				t.Errorf("rows (rule ID, Fix) =\n%q\nwant\n%q", got, tt.want)
+			}
+			if tt.scanMade && (len(pr.rows) != 1 || pr.rows[0].Risk != riskServerUnverified) {
+				t.Errorf("rows = %+v, want one row with the risk %q", pr.rows, riskServerUnverified)
+			}
+			if gotHint := len(pr.hints) > 0; gotHint != tt.hint {
+				t.Errorf("hint = %v, want %v (hints %+v)", gotHint, tt.hint, pr.hints)
+			}
+		})
+	}
+}
+
 // TestScanPinnedNotInspectedExit checks that scan exits 1 for a pinned server
-// that was not inspected, shows the high row and the reason in the report, and
-// that --ignore of the rule is the only way to exit 0.
+// that was not inspected, shows the high row in the report and the failure in
+// the SUMMARY block (not on stderr), and that --ignore of the rule is the only
+// way to exit 0.
 func TestScanPinnedNotInspectedExit(t *testing.T) {
 	t.Parallel()
 
@@ -229,9 +341,13 @@ func TestScanPinnedNotInspectedExit(t *testing.T) {
 
 		assertScanRun(t, got, scanWant{
 			code:   exitFindings,
-			stdout: []string{"MOAT-T2-004", "high", "pinned server could not be inspected"},
-			stderr: []string{"warning: server srv: timeout: "},
+			stdout: []string{"MOAT-T2-004", "pinned server could not be inspected"},
 		})
+		assertSummaryStatus(t, got, "srv", "timeout", "inspect: no answer within 20ms: context deadline exceeded")
+		findings := parseFindings(t, got.stdout)
+		if len(findings) != 1 || findings[0].RuleID != "MOAT-T2-004" || findings[0].Severity != "high" || findings[0].Name != "srv" {
+			t.Errorf("findings = %+v, want one high MOAT-T2-004 finding for srv", findings)
+		}
 		// A server that was not inspected has no tools to show, so no hint.
 		assertContainsNone(t, "stdout", got.stdout, []string{acceptHintPrefix})
 	})
@@ -245,9 +361,10 @@ func TestScanPinnedNotInspectedExit(t *testing.T) {
 
 		assertScanRun(t, got, scanWant{
 			code:     exitOK,
-			stderr:   []string{"warning: server srv: timeout: ", "1 finding ignored: MOAT-T2-004 (1)"},
+			stderr:   []string{"1 finding ignored: MOAT-T2-004 (1)"},
 			noStdout: []string{"MOAT-T2-004"},
 		})
+		assertSummaryStatus(t, got, "srv", "timeout", "inspect: no answer within 20ms: context deadline exceeded")
 	})
 
 	t.Run("an unpinned server that fails exits 0", func(t *testing.T) {
@@ -256,7 +373,8 @@ func TestScanPinnedNotInspectedExit(t *testing.T) {
 
 		got := e.scan(blockingInspector{}, "--timeout", "20ms")
 
-		assertScanRun(t, got, scanWant{code: exitOK, stderr: []string{"warning: server srv: timeout: "}})
+		assertScanRun(t, got, scanWant{code: exitOK})
+		assertSummaryStatus(t, got, "srv", "timeout", "inspect: no answer within 20ms: context deadline exceeded")
 		assertNoPinRows(t, got.stdout)
 	})
 }
@@ -752,8 +870,8 @@ func TestPinNoExpectNoteOrder(t *testing.T) {
 	})
 }
 
-// TestFindingsTableHoldsNotInspectedReason checks that the findings table of a
-// pinned server that was not inspected shows the severity and the reason.
+// TestFindingsTableHoldsNotInspectedReason checks that the FINDINGS block of a
+// pinned server that was not inspected shows the severity group and the reason.
 func TestFindingsTableHoldsNotInspectedReason(t *testing.T) {
 	t.Parallel()
 
@@ -764,13 +882,20 @@ func TestFindingsTableHoldsNotInspectedReason(t *testing.T) {
 	pr := c.pinOutcomes(store, []inspect.Outcome{{Server: srv, Status: inspect.StatusFailed, Err: errors.New("boom")}}, &scanIgnores{})
 
 	var out bytes.Buffer
-	if err := report.WriteFindings(&out, pr.rows); err != nil {
+	if err := report.WriteFindings(&out, pr.rows, report.Style{}); err != nil {
 		t.Fatal(err)
 	}
-	for _, want := range []string{"MOAT-T2-004", "high", "srv", "pinned server could not be inspected"} {
-		if !strings.Contains(out.String(), want) {
-			t.Errorf("findings table has no %q\n%s", want, out.String())
-		}
+	// WriteFindings starts with a blank line, as it follows a table in a scan.
+	got := parseFindings(t, "\n"+out.String())
+	if len(got) != 1 {
+		t.Fatalf("findings = %+v, want one\n%s", got, out.String())
+	}
+	f := got[0]
+	if f.RuleID != "MOAT-T2-004" || f.Severity != "high" || f.Name != "srv" {
+		t.Errorf("finding = %s %s on %q, want a high MOAT-T2-004 finding on srv", f.RuleID, f.Severity, f.Name)
+	}
+	if f.Tool != "" || !strings.Contains(f.Reason, reasonNotInspected) {
+		t.Errorf("Tool line = %q and Reason line = %q, want no Tool line and the reason %q", f.Tool, f.Reason, reasonNotInspected)
 	}
 }
 
@@ -1053,13 +1178,29 @@ func TestWarningText(t *testing.T) {
 	}
 }
 
-// TestScanAndPinPrintInspectionWarnings checks that scan and pin print the
-// warnings of an inspection on stderr, also for a server that failed.
+// TestScanAndPinPrintInspectionWarnings checks where the warnings of an
+// inspection go, also for a server that failed. scan shows them in the SUMMARY
+// block on stdout and nothing on stderr. With --json there is no summary, so
+// scan prints them on stderr, like pin.
 func TestScanAndPinPrintInspectionWarnings(t *testing.T) {
 	t.Parallel()
 
 	undeclared := inspect.Warning{Kind: inspect.WarnUndeclaredCapability, Capabilities: []string{"tools"}}
-	const line = "warning: server srv: undeclared-capability: "
+	const text = "undeclared-capability: "
+
+	// assertScanWarning checks that the one SUMMARY row of srv holds the warning
+	// and that stderr holds no warning.
+	assertScanWarning := func(t *testing.T, got pinRunResult, status string) {
+		t.Helper()
+		rows := summaryRows(t, got.stdout)
+		if len(rows) != 1 || rows[0].Name != "srv" || rows[0].Status != status {
+			t.Fatalf("summary rows = %+v, want one row for srv with the status %q\nstdout:\n%s", rows, status, got.stdout)
+		}
+		if len(rows[0].Warnings) != 1 || !strings.HasPrefix(rows[0].Warnings[0], text) {
+			t.Errorf("warnings of srv = %q, want one that starts with %q", rows[0].Warnings, text)
+		}
+		assertContainsNone(t, "stderr", got.stderr, []string{"warning"})
+	}
 
 	t.Run("scan, inspected", func(t *testing.T) {
 		t.Parallel()
@@ -1068,7 +1209,7 @@ func TestScanAndPinPrintInspectionWarnings(t *testing.T) {
 
 		got := e.scan(fake)
 
-		assertContainsAll(t, "stderr", got.stderr, []string{"mcpmoat scan: " + line})
+		assertScanWarning(t, got, "ok")
 	})
 
 	t.Run("scan, failed", func(t *testing.T) {
@@ -1078,7 +1219,25 @@ func TestScanAndPinPrintInspectionWarnings(t *testing.T) {
 
 		got := e.scan(fake)
 
-		assertContainsAll(t, "stderr", got.stderr, []string{"mcpmoat scan: " + line})
+		assertScanWarning(t, got, "failed")
+	})
+
+	t.Run("scan --json, failed", func(t *testing.T) {
+		t.Parallel()
+		e := newPinEnv(t, oneServer("srv"))
+		fake := &inspecttest.Fake{Errors: map[string]error{"srv": &inspect.ConnectError{Kind: inspect.KindNetwork, Server: "srv", Reason: "refused", Warnings: []inspect.Warning{undeclared}}}}
+
+		got := e.scan(fake, "--json")
+
+		lines := nonEmptyLines(got.stderr)
+		if len(lines) != 2 || !strings.HasPrefix(lines[0], "mcpmoat scan: warning: server srv: failed: ") ||
+			!strings.HasPrefix(lines[1], "mcpmoat scan: warning: server srv: "+text) {
+			t.Errorf("stderr = %q, want the failed line, then the warning", got.stderr)
+		}
+		if got.code != exitOK {
+			t.Errorf("exit code = %d, want %d: the warnings do not change it", got.code, exitOK)
+		}
+		decodeScanJSON(t, got.stdout)
 	})
 
 	t.Run("pin", func(t *testing.T) {
@@ -1088,6 +1247,6 @@ func TestScanAndPinPrintInspectionWarnings(t *testing.T) {
 
 		got := e.pin(fake, "--accept", "srv")
 
-		assertContainsAll(t, "stderr", got.stderr, []string{"mcpmoat pin: " + line})
+		assertContainsAll(t, "stderr", got.stderr, []string{"mcpmoat pin: warning: server srv: " + text})
 	})
 }

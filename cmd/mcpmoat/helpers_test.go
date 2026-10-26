@@ -13,8 +13,10 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -85,8 +87,8 @@ var tableHeader = []string{"NAME", "CLIENT", "SCOPE", "TRANSPORT", "STATE", "SOU
 // tableRows splits the server table on stdout into data rows. Each row is its
 // list of whitespace-separated words. It fails the test when the first line
 // is not the table header, and it drops that line. The table ends at the first
-// blank line: the findings table, when there is one, follows after it (see
-// findingRows).
+// blank line: the SUMMARY and FINDINGS blocks follow after it (see
+// splitScanSections).
 //
 // CLIENT never holds a space, and report quotes a NAME, SCOPE or SOURCE cell
 // that holds one. The test names and paths hold no space, so the first two
@@ -109,41 +111,322 @@ func tableRows(t *testing.T, stdout string) [][]string {
 	return rows
 }
 
-// findingsHeader is the header row of the findings table, split into words.
-var findingsHeader = []string{"RULE", "SEVERITY", "SERVER", "FIELD", "KEY/RELATED"}
+// The headings of the report blocks after the server table.
+const (
+	summaryHeading  = "SUMMARY"
+	findingsHeading = "FINDINGS"
+)
 
-// findingRows returns the rows of the findings table on stdout. The table
-// starts after the first blank line. Each row is its list of
-// whitespace-separated words. It returns nil when stdout has no blank line,
-// which is the case when scan finds nothing. It fails the test when the line
-// after the blank line is not the findings header, and it drops that line.
-//
-// A cell can be quoted when it holds a space, so use only the first four
-// words of a row (RULE, SEVERITY, SERVER, FIELD) when the names hold no
-// space.
-func findingRows(t *testing.T, stdout string) [][]string {
+// scanSections is the stdout of a scan, cut at its block headings. Every field
+// is plain text: it keeps its trailing newline, and it does not hold the
+// blank line that separates it from the next block.
+type scanSections struct {
+	// Table is the server table, or the whole of stdout when it has no
+	// SUMMARY or FINDINGS block (for example "No MCP servers found.").
+	Table string
+	// Summary is the block after the SUMMARY heading, without the heading.
+	// Empty when there is no such block.
+	Summary string
+	// Findings is the block after the FINDINGS heading, without the heading.
+	// Empty when there is no such block.
+	Findings string
+	// Rest is what comes after the findings block (or after the summary block
+	// when there are no findings): the diffs and the "To accept" lines.
+	Rest string
+}
+
+// splitScanSections cuts the plain stdout of a scan into its blocks. It finds
+// a block by its heading line, which comes after a blank line, and not by the
+// first "\n\n": the order is table, SUMMARY, FINDINGS, then the diffs. A block
+// ends at the next blank line. Colour makes the heading lines hard to find, so
+// strip it first (see stripSGR).
+func splitScanSections(stdout string) scanSections {
+	s := scanSections{Table: stdout}
+	// cut takes the block that starts with heading from the start of text,
+	// where text starts at a blank line that precedes the heading. It returns
+	// the body and what follows the body.
+	cut := func(text, heading string) (body, after string, ok bool) {
+		afterHeading, ok := strings.CutPrefix(text, "\n"+heading+"\n")
+		if !ok {
+			return "", text, false
+		}
+		body, after, found := strings.Cut(afterHeading, "\n\n")
+		if found {
+			return body + "\n", after, true
+		}
+		return body, "", true
+	}
+
+	// The table ends at the first blank line that precedes a heading.
+	i := strings.Index(stdout, "\n\n"+summaryHeading+"\n")
+	if j := strings.Index(stdout, "\n\n"+findingsHeading+"\n"); i < 0 || (j >= 0 && j < i) {
+		i = j
+	}
+	if i < 0 {
+		return s
+	}
+	s.Table = stdout[:i+1]
+	rest := stdout[i+1:] // starts with the blank line
+
+	if body, after, ok := cut(rest, summaryHeading); ok {
+		s.Summary = body
+		rest = "\n" + after
+		if after == "" {
+			rest = ""
+		}
+	}
+	if body, after, ok := cut(rest, findingsHeading); ok {
+		s.Findings = body
+		rest = after
+	}
+	s.Rest = rest
+	return s
+}
+
+// sgrPattern matches an ANSI SGR (colour) sequence.
+var sgrPattern = regexp.MustCompile(`\x1b\[[0-9;]*m`)
+
+// stripSGR removes the SGR colour sequences from s. The parsers below read
+// plain text, so a test that scans with colour on strips the output first.
+func stripSGR(s string) string { return sgrPattern.ReplaceAllString(s, "") }
+
+// summaryRow is one server line of the SUMMARY block, with the warning lines
+// that follow it.
+type summaryRow struct {
+	// Server is the label "name (client, scope)".
+	Server string
+	// Name is the part of Server before the first " (".
+	Name string
+	// Status is "ok", "timeout", "failed" or "not inspected".
+	Status string
+	// Reason is the text in parentheses at the end of the line. Empty when
+	// none.
+	Reason string
+	// Tools is the tool count. HasTools is false when the line shows none
+	// (only a server with status ok shows its tools).
+	Tools    int
+	HasTools bool
+	// Findings is the finding count of the server.
+	Findings int
+	// Warnings are the texts after "warning: " in the lines under the server.
+	Warnings []string
+}
+
+var (
+	summaryFindingsPattern = regexp.MustCompile(`^, (\d+) findings?`)
+	summaryToolsPattern    = regexp.MustCompile(`^, (\d+) tools?`)
+	summaryStatuses        = []string{"not inspected", "timeout", "failed", "ok"}
+)
+
+// summaryRows parses the SUMMARY block of a plain stdout into one row for each
+// server, in the printed order. It returns nil when stdout has no SUMMARY block.
+// A server line is "  <label>: <status>[, N tools], M findings[ (<reason>)]".
+// It splits the label at the first ": ", so it needs a server name without
+// that text. It reads the rest from the left, because only the reason at the
+// end can hold server text. It fails the test on a line it cannot read.
+func summaryRows(t *testing.T, stdout string) []summaryRow {
 	t.Helper()
-	_, after, found := splitScanOutput(stdout)
-	if !found {
-		return nil
-	}
-	lines := strings.Split(strings.TrimSuffix(after, "\n"), "\n")
-	if !slices.Equal(strings.Fields(lines[0]), findingsHeader) {
-		t.Fatalf("the text after the blank line does not start with the findings header %q:\n%s", findingsHeader, stdout)
-	}
-	var rows [][]string
-	for _, line := range lines[1:] {
-		rows = append(rows, strings.Fields(line))
+	block := splitScanSections(stdout).Summary
+	var rows []summaryRow
+	for _, line := range nonEmptyLines(block) {
+		if text, ok := strings.CutPrefix(line, "    warning: "); ok {
+			if len(rows) == 0 {
+				t.Fatalf("summary warning line %q has no server line before it:\n%s", line, stdout)
+			}
+			last := &rows[len(rows)-1]
+			last.Warnings = append(last.Warnings, text)
+			continue
+		}
+		text, ok := strings.CutPrefix(line, "  ")
+		if !ok || strings.HasPrefix(text, " ") {
+			t.Fatalf("summary line %q is not a server line or a warning line:\n%s", line, stdout)
+		}
+		label, rest, ok := strings.Cut(text, ": ")
+		if !ok {
+			t.Fatalf("summary line %q has no \": \":\n%s", line, stdout)
+		}
+		row := summaryRow{Server: label, Name: serverLabelName(label)}
+		for _, st := range summaryStatuses {
+			// A status is followed by ", ": a longer word that only starts
+			// with the status does not match.
+			if after, ok := strings.CutPrefix(rest, st); ok && strings.HasPrefix(after, ", ") {
+				row.Status, rest = st, after
+				break
+			}
+		}
+		if row.Status == "" {
+			t.Fatalf("summary line %q has an unknown status:\n%s", line, stdout)
+		}
+		if m := summaryToolsPattern.FindStringSubmatch(rest); m != nil {
+			row.Tools, _ = strconv.Atoi(m[1])
+			row.HasTools = true
+			rest = rest[len(m[0]):]
+		}
+		m := summaryFindingsPattern.FindStringSubmatch(rest)
+		if m == nil {
+			t.Fatalf("summary line %q has no finding count after the status:\n%s", line, stdout)
+		}
+		row.Findings, _ = strconv.Atoi(m[1])
+		rest = rest[len(m[0]):]
+		if rest != "" {
+			reason, ok := strings.CutPrefix(rest, " (")
+			if !ok || !strings.HasSuffix(reason, ")") {
+				t.Fatalf("summary line %q has text after the counts that is not a reason:\n%s", line, stdout)
+			}
+			row.Reason = strings.TrimSuffix(reason, ")")
+		}
+		rows = append(rows, row)
 	}
 	return rows
 }
 
-// splitScanOutput splits the stdout of a scan at the first blank line: the
-// server table comes before it, the findings table after it. found is false
-// when stdout has no blank line (no findings).
-func splitScanOutput(stdout string) (table, findings string, found bool) {
-	return strings.Cut(stdout, "\n\n")
+// serverLabelName returns the server name of a label "name (client, scope)".
+func serverLabelName(label string) string {
+	name, _, _ := strings.Cut(label, " (")
+	return name
 }
+
+// scanFinding is one finding of the FINDINGS block.
+type scanFinding struct {
+	// RuleID is the rule ID, for example "MOAT-T4-002".
+	RuleID string
+	// Severity is the lower-case word of the group heading that holds the
+	// finding: "critical", "high", "medium" or "low".
+	Severity string
+	// Title is the text after the rule ID. Empty when the line has none.
+	Title string
+	// Server is the label "name (client, scope)", and Name is the server name.
+	Server, Name string
+	// Where is the text of the "Where:" line, for example "env API_KEY". Tool
+	// is the text of the "Tool:" line, and Reason the text of the "Reason:" line
+	// (a finding about a whole server). A finding has one of them, or none.
+	Where, Tool, Reason string
+	// Risk and Fix are the texts of the "Risk:" and "Fix:" lines.
+	Risk, Fix string
+}
+
+var (
+	findingGroupPattern = regexp.MustCompile(`^(CRITICAL|HIGH|MEDIUM|LOW) \((\d+)\)$`)
+	findingStartPattern = regexp.MustCompile(`^  (\S+)(?:  (.*))?$`)
+)
+
+// parseFindings parses the FINDINGS block of a plain stdout into the findings,
+// in the printed order. It returns nil when stdout has no FINDINGS block. It
+// fails the test when a line has an unexpected shape, when a finding has no
+// Server, Risk or Fix line, or when the count in a group heading is not the
+// number of findings under it.
+func parseFindings(t *testing.T, stdout string) []scanFinding {
+	t.Helper()
+	block := splitScanSections(stdout).Findings
+	var (
+		out       []scanFinding
+		group     string
+		groupWant int
+		groupGot  int
+		cur       *scanFinding
+	)
+	closeGroup := func() {
+		if group != "" && groupGot != groupWant {
+			t.Errorf("group %s says %d findings, has %d\nstdout:\n%s", strings.ToUpper(group), groupWant, groupGot, stdout)
+		}
+	}
+	closeFinding := func() {
+		if cur == nil {
+			return
+		}
+		if cur.Server == "" || cur.Risk == "" || cur.Fix == "" {
+			t.Errorf("finding %s has no Server, Risk or Fix line\nstdout:\n%s", cur.RuleID, stdout)
+		}
+		out = append(out, *cur)
+		cur = nil
+	}
+	for _, line := range nonEmptyLines(block) {
+		if m := findingGroupPattern.FindStringSubmatch(line); m != nil {
+			closeFinding()
+			closeGroup()
+			group = strings.ToLower(m[1])
+			groupWant, _ = strconv.Atoi(m[2])
+			groupGot = 0
+			continue
+		}
+		if text, ok := strings.CutPrefix(line, "    "); ok {
+			if cur == nil {
+				t.Fatalf("findings line %q has no finding before it:\n%s", line, stdout)
+			}
+			label, value, ok := strings.Cut(text, ": ")
+			if !ok {
+				t.Fatalf("findings line %q is not \"Label: text\":\n%s", line, stdout)
+			}
+			switch label {
+			case "Server":
+				cur.Server, cur.Name = value, serverLabelName(value)
+			case "Where":
+				cur.Where = value
+			case "Tool":
+				cur.Tool = value
+			case "Reason":
+				cur.Reason = value
+			case "Risk":
+				cur.Risk = value
+			case "Fix":
+				cur.Fix = value
+			default:
+				t.Fatalf("findings line %q has the unknown label %q:\n%s", line, label, stdout)
+			}
+			continue
+		}
+		m := findingStartPattern.FindStringSubmatch(line)
+		if m == nil || group == "" {
+			t.Fatalf("findings line %q is not a group, a finding or a detail line:\n%s", line, stdout)
+		}
+		closeFinding()
+		cur = &scanFinding{RuleID: m[1], Title: m[2], Severity: group}
+		groupGot++
+	}
+	closeFinding()
+	closeGroup()
+	return out
+}
+
+// findingRows returns the findings of a plain stdout as rows of words, in the
+// printed order. A row is RULE, SEVERITY, SERVER (the name only), FIELD, and
+// then the words of the key or related text. FIELD and the key come from the
+// "Where:" line, or from the "Tool:" line (FIELD is then "tool") or the
+// "Reason:" line (FIELD is then "reason"). A part that is missing shows as
+// "-". It is a view of parseFindings for the tests that compare rows. It
+// returns nil when stdout has no FINDINGS block.
+//
+// A cell can be quoted when it holds a space, so use only the first four
+// words of a row (RULE, SEVERITY, SERVER, FIELD) when the names hold no space.
+func findingRows(t *testing.T, stdout string) [][]string {
+	t.Helper()
+	var rows [][]string
+	for _, f := range parseFindings(t, stdout) {
+		row := []string{f.RuleID, f.Severity, f.Name}
+		switch {
+		case f.Tool != "":
+			row = append(row, "tool")
+			row = append(row, strings.Fields(f.Tool)...)
+		case f.Reason != "":
+			row = append(row, "reason")
+			row = append(row, strings.Fields(f.Reason)...)
+		case f.Where != "":
+			words := strings.Fields(f.Where)
+			row = append(row, words...)
+			if len(words) == 1 {
+				row = append(row, "-")
+			}
+		default:
+			row = append(row, "-", "-")
+		}
+		rows = append(rows, row)
+	}
+	return rows
+}
+
+// findingIDs returns the rule ID (the first word) of each findings row. It
+// accepts the rows of findingRows.
+func findingIDs(rows [][]string) []string { return column(rows, 0) }
 
 // dangerousCanaries are the synthetic canaries of testdata/configs/dangerous:
 // a header value, a token, an arg and a URL query value. They are not
@@ -176,9 +459,6 @@ func scanServersArgs(t *testing.T, mode, home string, servers map[string]any) []
 	}
 	return args
 }
-
-// findingIDs returns the rule ID (the first word) of each findings row.
-func findingIDs(rows [][]string) []string { return column(rows, 0) }
 
 // assertFindingIDs checks that the rule IDs of the findings table of stdout,
 // sorted, equal want. want must be sorted. Use nil for no findings table.

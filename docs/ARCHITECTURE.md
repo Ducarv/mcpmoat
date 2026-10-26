@@ -57,9 +57,11 @@ docs/                   PRD and other documentation
   It makes the unified diff of a changed or new tool, and shows the whole current text of a pinned
   tool whose pin cannot be checked. See [Tool hash](#tool-hash), [Tool set digest](#tool-set-digest)
   and [The `pins.json` store](#the-pinsjson-store).
-- `internal/report`: writes the terminal output: the servers (`WriteServers`), the findings
-  (`WriteFindings`) and the diffs of changed, new and not verified tools (`WriteDiffs`). It also
-  renders the JSON report of `scan --json` (`WriteJSON`). See [JSON output](#json-output).
+- `internal/report`: writes the terminal output: the servers (`WriteServers`), a summary with one
+  line for each server (`WriteSummary`), the findings grouped by severity (`WriteFindings`) and the
+  diffs of changed, new and not verified tools (`WriteDiffs`). `Style` (`style.go`) decides the
+  colour. See [Terminal report](#terminal-report). It also renders the JSON report of
+  `scan --json` (`WriteJSON`). See [JSON output](#json-output).
 - `rules/`: the built-in rule files (`rules/*.yaml`) and `data/popular-servers.txt`. The Go file
   `rules/embed.go` embeds both with `go:embed`. It holds data only. `internal/rules` parses it.
 - `testdata/`: fixtures. `testdata/servers` holds malicious example servers. `testdata/configs`
@@ -87,7 +89,7 @@ only in `_test.go` files, so none of them reaches the binary.
 | `internal/discover` | `safefile`, `termsafe` |
 | `internal/inspect` | `discover` |
 | `internal/rules` | `discover`, `inspect`, `safefile`, `termsafe`, `rules` (the embedded data) |
-| `internal/report` | `discover`, `termsafe` |
+| `internal/report` | `discover`, `inspect`, `termsafe` |
 | `internal/pins` | `inspect`, `safefile`, and the module `github.com/aymanbagabas/go-udiff` |
 | `cmd/mcpmoat` | `discover`, `inspect`, `pins`, `report`, `rules`, `termsafe` |
 
@@ -122,13 +124,14 @@ go list -f '{{.ImportPath}}: {{join .Imports " "}}' ./...
    gives it. `rules.CheckConfig` gives the T4 findings (MOAT-T4-001 to 004). The typosquat check
    from `rules.NewBuiltinTyposquat` gives the T5 finding (MOAT-T5-001). The ignore list drops
    some findings. The rule set gives the severity of each one that is left.
-6. `report.WriteServers` prints the servers. Then, only when findings are left,
-   `report.WriteFindings` prints a blank line and a table of them. The table holds the rule ID, the
-   severity, the server, the field and the key or related name. It never holds a value. Last,
-   `reportScan` prints the ignored count for each rule ID on stderr (only rule IDs and counts, no
-   server names). With `--json`, step 6 is different: `buildScanReport` (`cmd/mcpmoat/scan_json.go`)
-   makes one `report.ScanReport` from the same servers, findings and diffs, and `report.WriteJSON`
-   writes it on stdout instead of the tables. See [JSON output](#json-output).
+6. `writeScanReport` prints the report on stdout (see [Terminal report](#terminal-report)):
+   `report.WriteServers` prints the server table, `report.WriteSummary` prints the summary, and
+   `report.WriteFindings` prints the findings, only when findings are left. It never prints a
+   value. Last, `reportScan` prints the ignored count for each rule ID on stderr (only rule IDs and
+   counts, no server names).
+   With `--json`, step 6 is different: `buildScanReport` (`cmd/mcpmoat/scan_json.go`) makes one
+   `report.ScanReport` from the same servers, findings and diffs, and `report.WriteJSON` writes it
+   on stdout instead of the terminal report. See [JSON output](#json-output).
 
 Steps 1 and 2 always run. Steps 3 to 6 run in both modes. Without `--no-connect`, `scan` adds
 the connect and pin steps between step 5 and step 6:
@@ -138,10 +141,12 @@ the connect and pin steps between step 5 and step 6:
   The inspector is `inspect.New` with the zero `SDKOptions`. So a server from an untrusted project
   file, and a server that the client config turns off or leaves unapproved, is refused. `scan` has
   no flag that allows them. A stdio server runs with a scrubbed environment (NFR-04). A server that
-  fails, times out or is refused gives a warning on stderr. It does not change the exit code
-  (FR-06), unless the server is pinned and failed or timed out: then it is also a high finding (see
-  5b). The inspection warnings (`Result.Warnings`, and `ConnectError.Warnings` of a failed server)
-  go to stderr too, one line each (`warnInspection` in `cmd/mcpmoat/pins_shared.go`).
+  fails, times out or is refused shows its status in the summary on stdout (`failed`, `timeout` or
+  `not inspected`). It does not change the exit code (FR-06), unless the server is pinned and failed
+  or timed out: then it is also a high finding (see 5b). The inspection warnings
+  (`Result.Warnings`, and `ConnectError.Warnings` of a failed server) go to the summary of that
+  server too (`outcomeSummary` in `cmd/mcpmoat/scan_pins.go`). `pin` still prints them on stderr
+  (`warnInspection` in `cmd/mcpmoat/pins_shared.go`).
 - Signals: `main` passes a context that ends on Ctrl-C, `SIGTERM` or `SIGHUP`. The stdio servers run
   in their own session, so the terminal does not signal them. When the context ends, `inspect.Run`
   stops them. `scan` then prints `mcpmoat scan: interrupted; no pins were saved`, saves nothing,
@@ -156,8 +161,10 @@ the connect and pin steps between step 5 and step 6:
   - A pinned server that failed or timed out gets a MOAT-T2-004 finding (high, exit 1) with the
     reason `pinned server could not be inspected` (`pinner.notInspected`). A hostile server must not
     avoid the check by failing on purpose. A pinned server that a gate refused (`inspect.Refused`:
-    the client config turns it off or does not approve it) stays a warning: the config of the user
-    sets that state, not the server. A server that is not pinned stays a warning only (FR-06).
+    the client config turns it off or does not approve it) shows its status `not inspected` and its
+    reason in the summary, with no pin finding: the config of the user sets that state, not the
+    server. A server that is not pinned shows its status and reason too, with no pin finding
+    (FR-06).
   - A second entry with the same identity gets a MOAT-T2-004 finding with the reason `the server is
     listed twice`, so that its tools are not skipped. It is high when the identity is pinned, else
     medium (`pinner.unverifiedSeverity`).
@@ -169,12 +176,16 @@ the connect and pin steps between step 5 and step 6:
     when its name is empty or used twice, when it has no canonical form, when it is pinned with
     another hash version, or when its pinned text does not match its hash. These are native rule
     IDs: there is no YAML file for them, because pins handle T2. A MOAT-T2-004 finding shows a fixed
-    reason text in the KEY/RELATED column: `duplicate tool name`, `empty tool name`, `invalid tool
-    data`, `pinned with another hash version` or `pinned text does not match its hash`. The reason
+    reason text in brackets after the tool name on the `Tool` line, or on a `Reason` line when the
+    finding has no tool name (it is about the whole server, or the tool name is empty):
+    `duplicate tool name`, `empty tool name`, `invalid tool data`, `pinned with another hash
+    version` or `pinned text does not match its hash`. The reason
     never holds server text. For the last two reasons the pin cannot be trusted, so the change also
     has a diff of the whole current tool (`Change.Diff`). The `--ignore` flag drops them by rule ID,
     server and tool name. The `.mcpmoat-ignore` file does not (see step 3). `scan` never re-pins a
-    server that is in the store.
+    server that is in the store. When the tools of a pinned server no longer fit the size limit of
+    pins.json (`pins.ValidateServer`), `pins.Compare` has no reason for it, so `pinner.compare`
+    adds the high MOAT-T2-004 finding `the tools cannot be pinned` that a first run gives.
 - 5c. For a pinned server with at least one pin finding that is not ignored, `pinOutcomes` also keeps
   the `pins.Digest` of the tools that `scan` saw (`acceptHint` in `cmd/mcpmoat/accept_hint.go`). A
   server whose tools cannot be pinned (`pinnable`: `pins.Snapshot` and `pins.ValidateServer`, the
@@ -185,12 +196,12 @@ the connect and pin steps between step 5 and step 6:
   which server `pin --accept <name>` would select among all servers of the scan (`selectServers`,
   the same function that `pin` uses). It sets `project` when `pin` needs `--project` to select the
   server, and `ambiguous` when the name cannot select it.
-- The pin findings join the config findings in one table. A changed tool and a new tool also get a
+- The pin findings join the config findings in one report. A changed tool and a new tool also get a
   diff, so the user can review the content of a new tool before they accept it. A new tool has the
   header `New tool <tool> on server <server>:` and only added lines. A not verified tool with a diff
   (see 5b) has the header `Not verified tool <tool> on server <server> (current text):` and only
   added lines. A finding that the user ignored gets no diff. `report.WriteDiffs` prints the diffs
-  after the findings table. When a diff was cut at
+  after the findings. When a diff was cut at
   the size limit (`Change.Truncated`), `scan` prints a warning on stderr that names the tool and the
   server: `the diff of tool <tool> on server <server> was cut at the size limit; review the full tool
   before you accept it`. Then `writeAcceptHints` prints one line for each hint on stdout:
@@ -361,8 +372,9 @@ func Run(ctx context.Context, servers []discover.Server, opts Options, insp Insp
   server, in a stable order. One broken or hung server does not stop the others.
 - `Options` has `Timeout` and `Concurrency`. For the defaults, see `DefaultOptions` in
   `internal/inspect/inspect.go`.
-- `Outcome` has `Server`, `Status`, `Result` and `Err`. `Status` is `StatusOK`, `StatusTimeout` or
-  `StatusFailed`.
+- `Outcome` has `Server`, `Index`, `Status`, `Result` and `Err`. `Index` is the position of the
+  server in the slice given to `Run`, so a caller can match the sorted outcomes to its own order.
+  `Status` is `StatusOK`, `StatusTimeout` or `StatusFailed`.
 - `Result` holds the server identity, the instructions text and the lists of `Tool`, `Prompt`,
   `Resource` and `ResourceTemplate`, plus `Warning` values.
 - `SDKInspector` is the real `Inspector`. Make one with `New(SDKOptions{AllowUntrusted, AllowDisabled})`.
@@ -462,12 +474,59 @@ Known limits:
 - `Save` writes indented JSON, and the 32 MiB cap applies to that form. A compact file near the cap,
   for example from a hand edit, loads but cannot be saved.
 
+## Terminal report
+
+`scan` prints the report on stdout in this order (`writeScanReport` in `cmd/mcpmoat/scan.go`):
+
+1. The server table (`report.WriteServers`).
+2. `SUMMARY` (`report.WriteSummary`): one line for each server, in config order. The line has the
+   name with the client and the scope, the status, the tool count (status `ok` only) and the
+   finding count. The status is `ok`, `timeout`, `failed` or `not inspected`. A server that
+   `--no-connect` skipped, or that `scan` refused to start, is `not inspected`. A server that is
+   not `ok` and has a reason shows it last, after the counts: the reason can hold server text, so
+   it must not be able to fake a count or push the real one off the line. The inspection warnings
+   (`cleartext-secrets`, `undeclared-capability`, `dns-pin-unavailable`) are indented under the
+   server. They hold header keys, never values.
+3. `FINDINGS` (`report.WriteFindings`): groups by severity, the worst first, only the groups that
+   have findings. Each finding has the rule ID and title, the server as `name (client, scope)`
+   (so two servers with the same name in two configs differ), a `Where` line (field and key), a
+   `Tool` line (a pin finding about one tool) or a `Reason` line (a pin finding about the whole
+   server), a `Risk` line and a `Fix` line.
+4. The diffs (`report.WriteDiffs`) and the `To accept` lines.
+
+The `Risk` and `Fix` text of a built-in rule comes from its YAML file (the `risk` and
+`remediation` fields). The pin rules MOAT-T2-001 to 004 have fixed texts in `internal/pins`
+(`ChangeKind.Risk` and `ChangeKind.Remediation`). These remediations name the `To accept` command.
+`scan` prints no such line for a server whose tools cannot be pinned, so it gives every pin finding
+of that server a fixed text of its own (`fixNotPinnable` in `cmd/mcpmoat/scan_pins.go`). The
+MOAT-T2-004 findings that `scan` makes itself get their own fixed texts too.
+
+The summary and the findings are the report. They are not logs, so they stay on stdout. Warnings
+do not change the exit code, which counts findings only (FR-16).
+
+The failure reason of a server in the summary can hold error text from the server. `scan` prints it
+on stdout, and `pin` prints it on stderr. So the known gap of `internal/inspect` (an expanded
+variable value shorter than 8 bytes is not scrubbed from error text, see "Secrets" in
+`internal/inspect/doc.go`) applies to stdout too. `termsafe` makes the text safe for a terminal,
+but it does not remove a secret.
+
+Colour (FR-14, NFR-07) is decoration. Every severity and status also shows as a word, so the plain
+output is complete. `report.Style` holds one switch, `Color`. `cmd/mcpmoat` sets it in `runScan`
+and `internal/report` does not read the environment. `Color` is true only when stdout is a
+terminal (`isTerminal` in `cmd/mcpmoat/cli.go` checks `os.ModeCharDevice` on the stdout writer when
+it is an `*os.File`, with no dependency; any other writer, such as a buffer, is never a terminal),
+`--no-color` is not set (before or after `scan`), and `NO_COLOR` is empty. Only the headings, the severity
+group lines and the status words get colour (ANSI SGR codes in `internal/report/style.go`, the
+only place that writes the ESC byte). All config, server and rule text goes through `termsafe`
+first, so an escape sequence in that text never reaches the terminal as one.
+
 ## JSON output
 
 `mcpmoat scan --json` (FR-15) writes the report as one JSON document on stdout. The schema is
 [docs/schema/scan-output.v1.json](schema/scan-output.v1.json). The Go types are in
 `internal/report/json.go`. `cmd/mcpmoat/scan_json.go` fills them from the same data as the
-terminal report, in the same order. The report types hold plain strings, bools and ints, never a
+terminal report, in the same order. The one difference: `findings` keeps the order of the rows,
+and the terminal report groups them by severity. The report types hold plain strings, bools and ints, never a
 `discover` type, so a secret cannot reach the output by accident.
 
 Shape (`schema_version` 1):
@@ -503,7 +562,10 @@ Shape (`schema_version` 1):
   `untrusted`. `reason` is fixed text.
 
 What stays on stderr: the warnings, the notices and the errors. They are byte-identical to a run
-without `--json`. With `--json`, stdout holds no table, no "No MCP servers found." line and no
+without `--json`, with one addition: there is no summary, so `scan` writes on stderr the lines that
+the summary shows without `--json` (a server that was not inspected, and the warnings of an
+inspection, see `warnNotInspected` in `cmd/mcpmoat/scan.go`). With `--no-connect` there are no
+such lines. With `--json`, stdout holds no table, no "No MCP servers found." line and no
 `To accept` line. The exit codes do not change. When `scan` stops before the report (for
 example, `--config` cannot be loaded, or an interrupt), stdout is empty and the exit code is 2.
 If `WriteJSON` fails, `scan` exits with 2, like a failed table write.
@@ -566,9 +628,9 @@ The diff of a changed or new tool is the first place where a tool description re
 the unified prefix (`@@`, `---`, `+++`, `+`, `-` or a space) and the rest. It writes the prefix as it
 is and sends the rest through `termsafe.QuoteCut`, with a cap of 2000 runes for each line. A control
 character, an escape sequence, a bidi override or invalid UTF-8 shows as a visible escape. The
-tool and server names in the diff header are escaped too. The stderr lines of `scan` and `pin`
-that name a server or carry server output (the pinned notice, the warnings and the errors) are
-escaped and cut in the same way.
+tool and server names in the diff header are escaped too. The summary of `scan` and the stderr
+lines of `scan` and `pin` that name a server or carry server output (the pinned notice, the
+warnings and the errors) are escaped and cut in the same way.
 
 For secrets in output, see [Code style](../.agents/project.md#code-style).
 

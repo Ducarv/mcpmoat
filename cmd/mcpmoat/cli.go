@@ -36,6 +36,10 @@ type cli struct {
 	stdout, stderr io.Writer
 	getenv         func(string) string
 	build          buildInfo
+	// stdoutIsTTY is true when stdout is a terminal. runWithContext sets it
+	// from the stdout writer, when that writer is an *os.File (see
+	// isTerminal). Tests set it directly.
+	stdoutIsTTY bool
 	// homeDir returns the user's home directory. runWithContext sets it to
 	// os.UserHomeDir. Tests inject a fixture path.
 	homeDir func() (string, error)
@@ -75,7 +79,9 @@ type command struct {
 // runScan).
 //
 // This is the only place that reads the linker variables (version, commit and
-// date), the home directory and the working directory.
+// date), the home directory and the working directory. It also decides about
+// colour: only when stdout is an *os.File that is a terminal (see isTerminal).
+// Any other writer gets plain text.
 func runWithContext(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	c := &cli{
 		ctx:     ctx,
@@ -90,7 +96,20 @@ func runWithContext(ctx context.Context, args []string, stdout, stderr io.Writer
 		// them.
 		inspector: inspect.New(inspect.SDKOptions{}),
 	}
+	// Decide from the writer that the report goes to, not from os.Stdout. A
+	// writer that is not a file (a buffer, a pipe wrapper) is never a terminal.
+	if f, ok := stdout.(*os.File); ok {
+		c.stdoutIsTTY = isTerminal(f)
+	}
 	return c.dispatch(args)
+}
+
+// isTerminal reports whether f is a terminal. It uses only the standard
+// library: a terminal is a character device. /dev/null is a character device
+// too, so output sent there may get colour. That is harmless.
+func isTerminal(f *os.File) bool {
+	fi, err := f.Stat()
+	return err == nil && fi.Mode()&os.ModeCharDevice != 0
 }
 
 // commands returns the subcommands in the order that help shows them.
@@ -165,12 +184,12 @@ func (c *cli) parseGlobals(args []string) (options, []string, error) {
 	return options{noColor: colorDisabled(*noColor, c.getenv)}, fs.Args(), nil
 }
 
-// colorDisabled reports whether colored output must stay off. Color is off if
+// colorDisabled reports whether colored output must stay off. Colour is off if
 // the --no-color flag is set or if NO_COLOR has any non-empty value, even "0"
 // (see https://no-color.org/ and PRD FR-14).
 //
-// Terminal detection (color only when stdout is a terminal) comes in M6 with
-// the report output. Until then no command prints color.
+// scan uses this result together with cli.stdoutIsTTY: colour is on only when
+// stdout is a terminal and neither --no-color nor NO_COLOR is set.
 func colorDisabled(noColorFlag bool, getenv func(string) string) bool {
 	return noColorFlag || getenv("NO_COLOR") != ""
 }
@@ -227,12 +246,16 @@ func scanUsage(w io.Writer) {
 	fprintf(tw, "  --json\tPrint the report as one JSON document on stdout (schema: docs/schema/scan-output.v1.json)\n")
 	fprintf(tw, "  \tWarnings stay on stderr. The exit codes are the same\n")
 	fprintf(tw, "  \tstdout is empty when the scan stops before the report (exit 2)\n")
+	fprintf(tw, "  --no-color\tDisable colored output (also set by the NO_COLOR environment variable). It works before or after \"scan\"\n")
 	fprintf(tw, "  --ignore <rule-id>\tIgnore all findings of this rule; repeatable\n")
 	fprintf(tw, "  \tA %s file in the working directory also ignores findings: one \"RULE-ID [server[/tool]]\" per line; \"# ...\" on its own line or after the entry is a comment\n", rules.IgnoreFileName)
 	fprintf(tw, "  \tThe file cannot ignore the pin rules (MOAT-T2-*): it can come from a cloned repository. Use --ignore for them\n")
 	_ = tw.Flush() // the write error is ignored on purpose, see fprintf
 
 	fprintf(w, "\nScan output:\n")
+	fprintf(w, "  The report shows the server table, a summary for each server and the findings grouped by severity, each with its risk and fix.\n")
+	fprintf(w, "  The summary of a server has its status (ok, timeout, failed or not inspected), its tool and finding counts and its connection warnings.\n")
+	fprintf(w, "  Color is on only when stdout is a terminal. --no-color or the NO_COLOR environment variable turns it off.\n")
 	fprintf(w, "  A heuristic masks secret-like arguments. Review the output before you share it.\n")
 	fprintf(w, "  scan connects to each server (a stdio server is started) and lists its tools, then checks them against the pins in\n")
 	fprintf(w, "  pins.json ($XDG_CONFIG_HOME/mcpmoat/, else ~/.config/mcpmoat/). The first run pins the tools of a server.\n")
@@ -242,9 +265,10 @@ func scanUsage(w io.Writer) {
 	fprintf(w, "  A server whose tools cannot be pinned is high (MOAT-T2-004).\n")
 	fprintf(w, "  For each pinned server with a finding, scan prints \"To accept <server>: mcpmoat pin --accept <server> --expect <digest>\".\n")
 	fprintf(w, "  The digest covers the tools that scan saw, so pin saves only those tools. Review the diff, then run that line.\n")
-	fprintf(w, "  A server that fails, times out, or that scan refuses to start (an untrusted or turned-off server) is a warning on stderr.\n")
+	fprintf(w, "  A server that fails, times out, or that scan refuses to start (an untrusted or turned-off server) is a warning in its summary on stdout.\n")
 	fprintf(w, "  If that server is already pinned and failed or timed out, it is also a finding (MOAT-T2-004, high).\n")
-	fprintf(w, "  The warnings of an inspection (cleartext-secrets, undeclared-capability, dns-pin-unavailable) go to stderr.\n")
+	fprintf(w, "  The warnings of an inspection (cleartext-secrets, undeclared-capability, dns-pin-unavailable) show in the summary of that server, on stdout.\n")
+	fprintf(w, "  With --json there is no summary: these warnings go to stderr.\n")
 	fprintf(w, "  scan reads pins.json before it starts a server, and reads it again just before it saves the first-run pins.\n")
 	fprintf(w, "  Ctrl-C (or SIGTERM or SIGHUP) during the inspection, or after it while scan has new pins to save, stops scan with exit 2 and saves no pins.\n")
 	fprintf(w, "  --no-connect: scan runs only the built-in config rules (T4 and T5). It reads and writes no pins.\n")
@@ -258,8 +282,8 @@ func scanUsage(w io.Writer) {
 // "_, _ =" in this one place means the rest of the code stays short, and the
 // errcheck linter has nothing to flag.
 //
-// Use it only for help and diagnostic text. Do not use it for the findings
-// report (M6): if that write fails, the exit code must say so (exit 2), or a
+// Use it only for help and diagnostic text. Do not use it for the report on
+// stdout: if that write fails, the exit code must say so (exit 2), or a
 // broken pipe could look like "no findings".
 func fprintf(w io.Writer, format string, a ...any) {
 	_, _ = fmt.Fprintf(w, format, a...)

@@ -17,7 +17,9 @@ import (
 // Tests for the findings block of "scan --no-connect" on the fixtures under
 // testdata/configs (the rule checks themselves are tested in internal/rules,
 // see fixtures_test.go). Each test runs the scan on a copy of the fixture, in
-// auto-discovery and with --config, and compares the whole findings table.
+// auto-discovery and with --config, and compares the whole FINDINGS block.
+// The findings are grouped by severity, highest first, and keep the order of
+// the servers inside one group.
 
 // findingsFixtureHost is the host of the remote servers of the fixtures. The
 // server table may show it, the findings block must not.
@@ -43,14 +45,14 @@ func findingsScan(t *testing.T, fixture, mode string) (code int, stdout, stderr 
 	return runScanArgs(c, out, errOut, args...)
 }
 
-// assertFindingRows fails the test unless the findings table of stdout has
+// assertFindingRows fails the test unless the FINDINGS block of stdout has
 // exactly the rows in want, in this order. A row is RULE, SEVERITY, SERVER,
-// FIELD and KEY/RELATED, as printed.
+// FIELD and KEY/RELATED, as findingRows builds it from the printed lines.
 func assertFindingRows(t *testing.T, stdout string, want [][]string) {
 	t.Helper()
 	got := findingRows(t, stdout)
 	if len(got) != len(want) {
-		t.Errorf("findings table has %d rows, want %d\nstdout:\n%s", len(got), len(want), stdout)
+		t.Errorf("findings block has %d rows, want %d\nstdout:\n%s", len(got), len(want), stdout)
 	}
 	for i := range min(len(got), len(want)) {
 		if !slices.Equal(got[i], want[i]) {
@@ -59,12 +61,44 @@ func assertFindingRows(t *testing.T, stdout string, want [][]string) {
 	}
 }
 
-// findingsBlock returns the part of stdout after the first blank line, which
-// is the findings table. It fails the test when stdout has no blank line.
+// assertFindingRuleText fails the test unless every finding of stdout shows
+// the title, the risk and the fix of its built-in rule, and sits in the group
+// of the severity of that rule. It checks that the text of the rule reaches
+// the output. It fails when stdout holds no finding.
+func assertFindingRuleText(t *testing.T, stdout string) {
+	t.Helper()
+	set := builtinSet(t)
+	found := parseFindings(t, stdout)
+	if len(found) == 0 {
+		t.Fatalf("stdout holds no finding\nstdout:\n%s", stdout)
+	}
+	for _, f := range found {
+		rule, ok := set.Get(f.RuleID)
+		if !ok {
+			t.Errorf("finding %s is not a built-in rule", f.RuleID)
+			continue
+		}
+		if f.Title != rule.Title {
+			t.Errorf("%s Title = %q, want %q", f.RuleID, f.Title, rule.Title)
+		}
+		if f.Risk != rule.Risk {
+			t.Errorf("%s Risk = %q, want %q", f.RuleID, f.Risk, rule.Risk)
+		}
+		if f.Fix != rule.Remediation {
+			t.Errorf("%s Fix = %q, want %q", f.RuleID, f.Fix, rule.Remediation)
+		}
+		if f.Severity != string(rule.Severity) {
+			t.Errorf("%s is in group %q, want %q", f.RuleID, f.Severity, rule.Severity)
+		}
+	}
+}
+
+// findingsBlock returns the FINDINGS block of stdout, without its heading. It
+// fails the test when stdout has no such block.
 func findingsBlock(t *testing.T, stdout string) string {
 	t.Helper()
-	_, block, found := splitScanOutput(stdout)
-	if !found {
+	block := splitScanSections(stdout).Findings
+	if block == "" {
 		t.Fatalf("stdout has no findings block\nstdout:\n%s", stdout)
 	}
 	return block
@@ -72,9 +106,11 @@ func findingsBlock(t *testing.T, stdout string) string {
 
 // TestScanFindingsDangerousFixture scans testdata/configs/dangerous: nine
 // servers, with findings of every T4 rule. It has high findings, so the exit
-// code is 1. The rows are sorted by server name, and the T4 checks keep the
-// order of rules.CheckConfig inside one server. No secret of the fixture
-// shows, and the findings block names no host.
+// code is 1. The findings come in groups from high to low. Inside a group they
+// follow the server order (sorted by name), and the T4 checks keep the order
+// of rules.CheckConfig inside one server. Each finding shows the title, the
+// risk and the fix of its rule. No secret of the fixture shows, and the
+// findings block names no host.
 func TestScanFindingsDangerousFixture(t *testing.T) {
 	t.Parallel()
 
@@ -83,18 +119,21 @@ func TestScanFindingsDangerousFixture(t *testing.T) {
 		"npx-git-unpinned", "remote-local", "remote-plain", "remote-url-secret",
 	}
 	wantRows := [][]string{
+		// high
 		{"MOAT-T4-002", "high", "docker-arg-secret", "args", "-"},
-		{"MOAT-T4-003", "medium", "docker-untagged", "args", "registry.invalid/example/mcp-server"},
 		{"MOAT-T4-002", "high", "env-secret", "env", "GITHUB_TOKEN"},
-		{"MOAT-T4-004", "low", "env-secret", "args", "-"},
-		{"MOAT-T4-003", "medium", "latest-pkg", "args", "@example-corp/files-mcp"},
-		{"MOAT-T4-004", "low", "latest-pkg", "args", "-"},
-		{"MOAT-T4-004", "low", "npx-git-pinned", "args", "-"},
-		{"MOAT-T4-003", "medium", "npx-git-unpinned", "args", "-"},
-		{"MOAT-T4-004", "low", "npx-git-unpinned", "args", "-"},
 		{"MOAT-T4-001", "high", "remote-plain", "url", "-"},
 		{"MOAT-T4-002", "high", "remote-plain", "headers", "X-Api-Key"},
 		{"MOAT-T4-002", "high", "remote-url-secret", "url", "-"},
+		// medium
+		{"MOAT-T4-003", "medium", "docker-untagged", "args", "registry.invalid/example/mcp-server"},
+		{"MOAT-T4-003", "medium", "latest-pkg", "args", "@example-corp/files-mcp"},
+		{"MOAT-T4-003", "medium", "npx-git-unpinned", "args", "-"},
+		// low
+		{"MOAT-T4-004", "low", "env-secret", "args", "-"},
+		{"MOAT-T4-004", "low", "latest-pkg", "args", "-"},
+		{"MOAT-T4-004", "low", "npx-git-pinned", "args", "-"},
+		{"MOAT-T4-004", "low", "npx-git-unpinned", "args", "-"},
 	}
 	canaries := dangerousCanaries
 
@@ -111,6 +150,7 @@ func TestScanFindingsDangerousFixture(t *testing.T) {
 				t.Errorf("table servers = %v, want %v\nstdout:\n%s", got, wantServers, stdout)
 			}
 			assertFindingRows(t, stdout, wantRows)
+			assertFindingRuleText(t, stdout)
 			assertContainsNone(t, "the findings block", findingsBlock(t, stdout), []string{findingsFixtureHost})
 		})
 	}
@@ -131,15 +171,16 @@ func TestScanFindingsDangerousFixture(t *testing.T) {
 
 // TestScanFindingsTyposquatFixture scans testdata/configs/typosquat: three
 // servers, with T5 (medium) and T4-004 (low) findings only. Nothing reaches
-// severity high, so the exit code is 0.
+// severity high, so the exit code is 0. The medium findings come before the
+// low ones, and each finding shows the text of its rule.
 func TestScanFindingsTyposquatFixture(t *testing.T) {
 	t.Parallel()
 
 	wantServers := []string{"filesystem", "mcp-server-fecth", "memory"}
 	wantRows := [][]string{
-		{"MOAT-T4-004", "low", "filesystem", "args", "-"},
 		{"MOAT-T5-001", "medium", "filesystem", "args", "@modelcontextprotocol/server-filesystem"},
 		{"MOAT-T5-001", "medium", "mcp-server-fecth", "name", "mcp-server-fetch"},
+		{"MOAT-T4-004", "low", "filesystem", "args", "-"},
 		{"MOAT-T4-004", "low", "memory", "args", "-"},
 	}
 
@@ -154,6 +195,7 @@ func TestScanFindingsTyposquatFixture(t *testing.T) {
 				t.Errorf("table servers = %v, want %v\nstdout:\n%s", got, wantServers, stdout)
 			}
 			assertFindingRows(t, stdout, wantRows)
+			assertFindingRuleText(t, stdout)
 			assertContainsNone(t, "the findings block", findingsBlock(t, stdout), []string{findingsFixtureHost})
 		})
 	}
@@ -229,10 +271,10 @@ func builtinSet(t *testing.T) *rules.Set {
 	return set
 }
 
-// TestFindingSeverity checks the severity of a row: the YAML severity for a
-// known rule, and "critical" (fail closed) for a rule that the set does not
-// have, also when the set is nil.
-func TestFindingSeverity(t *testing.T) {
+// TestFindingRule checks the rule and the severity of a row: the rule and its
+// YAML severity for a known rule, and a zero rule with "critical" (fail closed)
+// for a rule that the set does not have, also when the set is nil.
+func TestFindingRule(t *testing.T) {
 	t.Parallel()
 	set := builtinSet(t)
 
@@ -241,20 +283,29 @@ func TestFindingSeverity(t *testing.T) {
 		set  *rules.Set
 		id   string
 		want string
+		// known is true when the set has the rule, so the result is that rule.
+		known bool
 	}{
-		{"insecure url is high", set, rules.RuleInsecureURL, "high"},
-		{"plaintext secret is high", set, rules.RulePlaintextSecret, "high"},
-		{"unpinned package is medium", set, rules.RuleUnpinnedPackage, "medium"},
-		{"auto install is low", set, rules.RuleAutoInstall, "low"},
-		{"unknown rule fails closed", set, "MOAT-X-999", "critical"},
-		{"empty rule ID fails closed", set, "", "critical"},
-		{"nil set fails closed", nil, rules.RuleInsecureURL, "critical"},
+		{"insecure url is high", set, rules.RuleInsecureURL, "high", true},
+		{"plaintext secret is high", set, rules.RulePlaintextSecret, "high", true},
+		{"unpinned package is medium", set, rules.RuleUnpinnedPackage, "medium", true},
+		{"auto install is low", set, rules.RuleAutoInstall, "low", true},
+		{"unknown rule fails closed", set, "MOAT-X-999", "critical", false},
+		{"empty rule ID fails closed", set, "", "critical", false},
+		{"nil set fails closed", nil, rules.RuleInsecureURL, "critical", false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			if got := findingSeverity(tt.set, tt.id); got != tt.want {
-				t.Errorf("findingSeverity(%q) = %q, want %q", tt.id, got, tt.want)
+			rule, got := findingRule(tt.set, tt.id)
+			if got != tt.want {
+				t.Errorf("findingRule(%q) severity = %q, want %q", tt.id, got, tt.want)
+			}
+			if tt.known && (rule.ID != tt.id || rule.Risk == "" || rule.Remediation == "") {
+				t.Errorf("findingRule(%q) rule = %+v, want the rule of the set", tt.id, rule)
+			}
+			if !tt.known && rule.ID+rule.Title+rule.Risk+rule.Remediation != "" {
+				t.Errorf("findingRule(%q) rule = %+v, want a zero rule (empty texts)", tt.id, rule)
 			}
 		})
 	}
@@ -412,7 +463,8 @@ func TestScanExitCode(t *testing.T) {
 }
 
 // TestConfigFindings checks configChecks.findings with servers built in the
-// test: the rows, the severity of every row, the ignore list and the secrets.
+// test: the rows, the severity and the rule text of every row, the rows of
+// each server, the ignore list and the secrets.
 func TestConfigFindings(t *testing.T) {
 	t.Parallel()
 	set := builtinSet(t)
@@ -458,7 +510,7 @@ func TestConfigFindings(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			rows, ignored := configChecks{set: set, typo: typo}.findings(tt.ignore, servers)
+			rows, ignored, counts := configChecks{set: set, typo: typo}.findings(tt.ignore, servers)
 
 			if got := hasRule(rows, rules.RulePlaintextSecret); got != tt.wantSecret {
 				t.Errorf("rows hold %s = %v, want %v\nrows: %+v", rules.RulePlaintextSecret, got, tt.wantSecret, rows)
@@ -468,6 +520,17 @@ func TestConfigFindings(t *testing.T) {
 				if !hasRule(rows, id) {
 					t.Errorf("rows have no %s finding\nrows: %+v", id, rows)
 				}
+			}
+			// One count for each server, and the counts add up to the rows.
+			if len(counts) != len(servers) {
+				t.Fatalf("counts = %v, want %d entries", counts, len(servers))
+			}
+			total := 0
+			for _, n := range counts {
+				total += n
+			}
+			if total != len(rows) {
+				t.Errorf("counts = %v add up to %d, want %d rows", counts, total, len(rows))
 			}
 			if len(ignored) != len(tt.wantIgnored) {
 				t.Errorf("ignored = %v, want %v", ignored, tt.wantIgnored)
@@ -482,11 +545,18 @@ func TestConfigFindings(t *testing.T) {
 				if r.Severity == "" {
 					t.Errorf("row %d (%s) has an empty Severity", i, r.RuleID)
 				}
+				rule, ok := set.Get(r.RuleID)
+				if !ok {
+					t.Errorf("row %d (%s) is not a built-in rule", i, r.RuleID)
+				} else if r.Title != rule.Title || r.Risk != rule.Risk || r.Remediation != rule.Remediation {
+					t.Errorf("row %d (%s) has Title %q, Risk %q, Remediation %q, want the text of the rule",
+						i, r.RuleID, r.Title, r.Risk, r.Remediation)
+				}
 				if r.RuleID == rules.RulePlaintextSecret && r.Severity != "high" {
 					t.Errorf("row %d (%s) Severity = %q, want high", i, r.RuleID, r.Severity)
 				}
 				for name, field := range map[string]string{
-					"RuleID": r.RuleID, "Severity": r.Severity, "Server": r.Server,
+					"RuleID": r.RuleID, "Severity": r.Severity, "Server": r.Name,
 					"Field": r.Field, "Key": r.Key, "Related": r.Related,
 				} {
 					if strings.Contains(field, canary) {

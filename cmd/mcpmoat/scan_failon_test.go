@@ -406,8 +406,8 @@ func TestScanFailOnExecErrors(t *testing.T) {
 }
 
 // TestScanFailOnServerFailure checks how a server that fails to answer counts
-// for --fail-on. A server with no pins is a warning only, so it never changes
-// the exit code, not even with --fail-on low. A pinned server that fails is a
+// for --fail-on. A server with no pins shows its status in the summary only,
+// so it never changes the exit code, not even with --fail-on low. A pinned server that fails is a
 // MOAT-T2-004 high finding: it gives 1 up to --fail-on high and 0 at critical.
 //
 // This test covers only the --fail-on dimension. TestScanPinnedNotInspectedExit
@@ -417,21 +417,16 @@ func TestScanFailOnExecErrors(t *testing.T) {
 func TestScanFailOnServerFailure(t *testing.T) {
 	t.Parallel()
 
-	const failWarning = "mcpmoat scan: warning: server srv: failed: inspect: boom\n"
 	t.Run("unpinned server with --fail-on low", func(t *testing.T) {
 		t.Parallel()
 		e := newPinEnv(t, oneServer("srv"))
 
 		got := e.scan(failingFake("srv"), "--fail-on", "low")
 
-		// The warning must be in scanWant: assertScanRun wants an empty
-		// stderr for exit code 0 otherwise. A substring in scanWant also
-		// turns off the clean-stderr rule, so check the exact stderr too:
-		// the warning is the only line.
-		assertScanRun(t, got, scanWant{code: exitOK, stdout: []string{"srv"}, stderr: []string{failWarning}})
-		if got.stderr != failWarning {
-			t.Errorf("stderr = %q, want exactly %q", got.stderr, failWarning)
-		}
+		// assertScanRun wants an empty stderr for exit code 0: the status is
+		// in the summary on stdout, not a warning on stderr.
+		assertScanRun(t, got, scanWant{code: exitOK})
+		assertSummaryStatus(t, got, "srv", "failed", "inspect: boom")
 		if rows := findingRows(t, got.stdout); len(rows) != 0 {
 			t.Errorf("findings table has %d rows, want none\nstdout:\n%s", len(rows), got.stdout)
 		}
@@ -449,11 +444,16 @@ func TestScanFailOnServerFailure(t *testing.T) {
 
 			// The finding shows at every value: --fail-on changes only the
 			// exit code.
-			assertScanRun(t, got, scanWant{
-				code:   pinnedWant.at(t, failOn),
-				stdout: []string{"MOAT-T2-004", "high", "srv"},
-				stderr: []string{failWarning},
-			})
+			want := scanWant{code: pinnedWant.at(t, failOn), stdout: []string{"MOAT-T2-004", "srv"}}
+			if failOn == rules.SeverityCritical {
+				want.stderr = []string{failOnCriticalNotice}
+			}
+			assertScanRun(t, got, want)
+			assertSummaryStatus(t, got, "srv", "failed", "inspect: boom")
+			findings := parseFindings(t, got.stdout)
+			if len(findings) != 1 || findings[0].RuleID != "MOAT-T2-004" || findings[0].Severity != "high" {
+				t.Errorf("findings = %+v, want one high MOAT-T2-004 finding", findings)
+			}
 		})
 	}
 }

@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"cmp"
+	"context"
 	"errors"
 	"flag"
 	"fmt"
@@ -22,6 +23,8 @@ import (
 
 	"github.com/Ducarv/mcpmoat/internal/discover"
 	"github.com/Ducarv/mcpmoat/internal/discover/discovertest"
+	"github.com/Ducarv/mcpmoat/internal/inspect"
+	"github.com/Ducarv/mcpmoat/internal/inspect/inspecttest"
 )
 
 // update rewrites the golden files. Run "go test ./cmd/mcpmoat/ -run
@@ -224,31 +227,38 @@ func replacePaths(out string, replacements map[string]string, form func(string) 
 	return out
 }
 
-// scanNormalize makes the table output the same on every machine. The tests
+// scanNormalize makes the scan output the same on every machine. The tests
 // copy the fixture into a temporary directory, so the output holds those
 // paths. Normalizing does three things:
-//   - It replaces the two temporary paths with $HOME and $WORK.
-//   - It aligns the columns again. tabwriter pads each column to its widest
-//     cell, and the SOURCE column holds the temporary paths, so the padding
-//     depends on the length of the path. The function splits each line at
-//     runs of three or more spaces (the gap between two columns is always at
-//     least three, and no cell holds three spaces in a row) and writes the
-//     cells through a new tabwriter with the same settings as report.WriteServers.
+//   - It replaces the temporary paths with placeholders such as $HOME and $WORK.
+//   - It aligns the columns of the server table again. tabwriter pads each
+//     column to its widest cell, and the SOURCE column holds the temporary
+//     paths, so the padding depends on the length of the path. The function
+//     splits each table line at runs of three or more spaces (the gap between
+//     two columns is always at least three, and no cell holds three spaces in
+//     a row) and writes the cells through a new tabwriter with the same
+//     settings as report.WriteServers. The table ends at the first blank line.
+//     The blocks after it (SUMMARY, FINDINGS, the diffs) are not tables: they
+//     keep their own spaces, and their indentation is part of the contract.
 //   - It turns backslashes into slashes, for Windows paths.
 func scanNormalize(t *testing.T, out string, replacements map[string]string) string {
 	t.Helper()
 	out = filepath.ToSlash(replacePaths(out, replacements, func(p string) string { return p }))
 
+	table, rest, found := strings.Cut(out, "\n\n")
 	gap := regexp.MustCompile(` {3,}`)
 	var buf bytes.Buffer
 	tw := tabwriter.NewWriter(&buf, 0, 0, 3, ' ', 0)
-	for line := range strings.SplitSeq(strings.TrimSuffix(out, "\n"), "\n") {
+	for line := range strings.SplitSeq(strings.TrimSuffix(table, "\n"), "\n") {
 		if _, err := fmt.Fprintln(tw, gap.ReplaceAllString(line, "\t")); err != nil {
 			t.Fatal(err)
 		}
 	}
 	if err := tw.Flush(); err != nil {
 		t.Fatal(err)
+	}
+	if found {
+		buf.WriteString("\n" + rest)
 	}
 	return buf.String()
 }
@@ -275,6 +285,52 @@ func assertScanGolden(t *testing.T, name string, got []byte) {
 	}
 }
 
+// assertReportConsistent checks that the SUMMARY and the FINDINGS block of a
+// plain stdout agree, the way a reader relies on them:
+//   - the finding counts of the summary add up to the number of findings;
+//   - for each server label, the summary count is the number of findings that
+//     name that label, and every finding names a server of the summary;
+//   - every finding has a Risk and a Fix text, and every label shows a client
+//     and a scope ("name (client, scope)").
+//
+// parseFindings already checks that each group count is right.
+func assertReportConsistent(t *testing.T, stdout string) {
+	t.Helper()
+	summary := summaryRows(t, stdout)
+	findings := parseFindings(t, stdout)
+
+	perLabel := make(map[string]int)
+	total := 0
+	for _, row := range summary {
+		if !strings.HasSuffix(row.Server, ")") || !strings.Contains(row.Server, ", ") {
+			t.Errorf("summary label %q does not show a client and a scope", row.Server)
+		}
+		if _, dup := perLabel[row.Server]; dup {
+			t.Errorf("summary label %q is not unique", row.Server)
+		}
+		perLabel[row.Server] = row.Findings
+		total += row.Findings
+	}
+	if total != len(findings) {
+		t.Errorf("the summary counts %d findings, the findings block has %d\nstdout:\n%s", total, len(findings), stdout)
+	}
+	seen := make(map[string]int)
+	for _, f := range findings {
+		seen[f.Server]++
+		if _, ok := perLabel[f.Server]; !ok {
+			t.Errorf("finding %s names the server %q, which is not in the summary", f.RuleID, f.Server)
+		}
+		if f.Risk == "" || f.Risk == "-" || f.Fix == "" || f.Fix == "-" {
+			t.Errorf("finding %s of %s has an empty Risk or Fix: %+v", f.RuleID, f.Server, f)
+		}
+	}
+	for label, want := range perLabel {
+		if seen[label] != want {
+			t.Errorf("server %q: the summary says %d findings, the findings block has %d\nstdout:\n%s", label, want, seen[label], stdout)
+		}
+	}
+}
+
 func TestScanNoConnectGolden(t *testing.T) {
 	t.Parallel()
 
@@ -283,13 +339,236 @@ func TestScanNoConnectGolden(t *testing.T) {
 	code := c.dispatch([]string{"scan", "--no-connect"})
 
 	// The findings in this fixture are medium (unpinned) and low (npx -y)
-	// only, so the exit code stays 0. The golden file holds the findings block.
+	// only, so the exit code stays 0. The golden file holds the whole report:
+	// the table, the summary and the findings.
 	if code != exitOK {
 		t.Fatalf("exit code = %d, want %d; stderr:\n%s", code, exitOK, stderr)
 	}
 	assertCleanStderr(t, stderr.String())
+	assertReportConsistent(t, stdout.String())
 	got := scanNormalize(t, stdout.String(), map[string]string{home: "$HOME", work: "$WORK"})
 	assertScanGolden(t, "scan_no_connect_full", []byte(got))
+}
+
+// TestScanColorGolden pins the bytes of a scan on a terminal: the golden file
+// holds the raw SGR sequences. The same scan with colour off must be the same
+// text without the sequences, whatever turns the colour off: --no-color before
+// or after "scan", NO_COLOR, or stdout that is not a terminal.
+func TestScanColorGolden(t *testing.T) {
+	t.Parallel()
+
+	// run scans the "all/full" fixture and returns the normalized stdout. tty
+	// is the answer to "is stdout a terminal". The environment is a fake one,
+	// so the test does not touch the real variables and can run in parallel.
+	run := func(t *testing.T, tty bool, env map[string]string, args ...string) string {
+		t.Helper()
+		c, stdout, stderr, home, work := scanCLI(t, "all", "full")
+		c.stdoutIsTTY = tty
+		c.getenv = fakeGetenv(env)
+
+		code := c.dispatch(args)
+
+		if code != exitOK {
+			t.Fatalf("exit code = %d, want %d; stderr:\n%s", code, exitOK, stderr)
+		}
+		assertCleanStderr(t, stderr.String())
+		return scanNormalize(t, stdout.String(), map[string]string{home: "$HOME", work: "$WORK"})
+	}
+
+	colored := run(t, true, nil, "scan", "--no-connect")
+	assertScanGolden(t, "scan_no_connect_full_color", []byte(colored))
+	if !strings.Contains(colored, "\x1b[") {
+		t.Fatalf("colour is on, but the output has no SGR sequence:\n%q", colored)
+	}
+	// Colour is decoration only: without the sequences the text is the plain
+	// report, and it is still a consistent one.
+	plain := stripSGR(colored)
+	if strings.Contains(plain, "\x1b") {
+		t.Fatalf("a raw ESC is left once the SGR sequences are removed:\n%q", plain)
+	}
+	assertReportConsistent(t, plain)
+
+	tests := []struct {
+		name string
+		tty  bool
+		env  map[string]string
+		args []string
+	}{
+		{name: "stdout is not a terminal", tty: false, args: []string{"scan", "--no-connect"}},
+		{name: "--no-color before scan", tty: true, args: []string{"--no-color", "scan", "--no-connect"}},
+		{name: "--no-color after scan", tty: true, args: []string{"scan", "--no-connect", "--no-color"}},
+		{name: "NO_COLOR=1", tty: true, env: map[string]string{"NO_COLOR": "1"}, args: []string{"scan", "--no-connect"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			got := run(t, tt.tty, tt.env, tt.args...)
+
+			if strings.Contains(got, "\x1b") {
+				t.Errorf("colour is off, but the output has an ESC byte:\n%q", got)
+			}
+			if got != plain {
+				t.Errorf("output differs from the colour golden without its SGR sequences\n--- got ---\n%s\n--- want ---\n%s", got, plain)
+			}
+		})
+	}
+}
+
+// TestScanSameNameTwoScopesGolden checks that two servers with one name stay
+// apart in the SUMMARY and in the FINDINGS: the label shows the client and the
+// scope. Claude Code has a global "github" in ~/.claude.json and a project
+// "github" in .mcp.json (untrusted). The global one has a plaintext secret in
+// its env, the project one a package with no version. The secret value is a
+// fake one and must never show.
+func TestScanSameNameTwoScopesGolden(t *testing.T) {
+	t.Parallel()
+
+	const scopeCanary = "mcpmoat-fake-scope-secret-4Zt8Kq"
+	home, work := t.TempDir(), t.TempDir()
+	writeServers(t, home, ".claude.json", map[string]any{
+		"github": map[string]any{
+			"command": "/usr/local/bin/github-mcp",
+			"env":     map[string]string{"GITHUB_TOKEN": scopeCanary},
+		},
+	})
+	writeServers(t, work, ".mcp.json", map[string]any{
+		"github": map[string]any{"command": "npx", "args": []string{"-y", "github-mcp"}},
+	})
+	c, stdout, stderr := dirsCLI(t, home, work)
+
+	code := c.dispatch([]string{"scan", "--no-connect"})
+
+	// The secret in the env is high (MOAT-T4-002), so the exit code is 1.
+	assertScanResult(t, code, stdout.String(), stderr.String(), scanWant{code: exitFindings, noStdout: []string{scopeCanary}})
+	assertContainsNone(t, "stderr", stderr.String(), []string{scopeCanary})
+	assertReportConsistent(t, stdout.String())
+
+	// Two summary rows with the same name and two different labels.
+	summary := summaryRows(t, stdout.String())
+	if len(summary) != 2 || summary[0].Name != "github" || summary[1].Name != "github" || summary[0].Server == summary[1].Server {
+		t.Fatalf("summary = %+v, want two github rows with different labels\nstdout:\n%s", summary, stdout)
+	}
+	// Each label owns its findings: the global one the secret, the project one
+	// the package rules.
+	byLabel := make(map[string][]string)
+	for _, f := range parseFindings(t, stdout.String()) {
+		byLabel[f.Server] = append(byLabel[f.Server], f.RuleID)
+	}
+	if got := byLabel[summary[0].Server]; !slices.Equal(got, []string{"MOAT-T4-002"}) {
+		t.Errorf("findings of %q = %v, want [MOAT-T4-002]", summary[0].Server, got)
+	}
+	if got := byLabel[summary[1].Server]; !slices.Equal(got, []string{"MOAT-T4-003", "MOAT-T4-004"}) {
+		t.Errorf("findings of %q = %v, want [MOAT-T4-003 MOAT-T4-004]", summary[1].Server, got)
+	}
+	if !strings.Contains(summary[1].Server, "(untrusted)") {
+		t.Errorf("label %q of the project server does not say untrusted", summary[1].Server)
+	}
+
+	got := scanNormalize(t, stdout.String(), map[string]string{home: "$HOME", work: "$WORK"})
+	assertScanGolden(t, "scan_same_name_two_scopes", []byte(got))
+}
+
+// slowInspector is an inspect.Inspector for servers that do not answer: a
+// server in slow waits until its context ends, which is the --timeout, and
+// returns the context error. Any other server goes to inner.
+type slowInspector struct {
+	inner inspect.Inspector
+	slow  map[string]bool
+}
+
+func (i slowInspector) Inspect(ctx context.Context, s discover.Server) (inspect.Result, error) {
+	if i.slow[s.Name] {
+		<-ctx.Done()
+		return inspect.Result{}, ctx.Err()
+	}
+	return i.inner.Inspect(ctx, s)
+}
+
+// TestScanConnectStatusGolden pins the report of a scan with a fake inspector,
+// with one server of each outcome: "ok" with its tools and a cleartext-secrets
+// warning (the header key only), "timeout" and "failed". The status and the
+// warnings are part of the SUMMARY on stdout. They are no warning lines on
+// stderr any more: stderr holds only the "pinned" notice of the first run.
+func TestScanConnectStatusGolden(t *testing.T) {
+	t.Parallel()
+
+	const fakeHeader = "mcpmoat-fake-bearer-3Wm7Ps"
+	home, work, xdg := t.TempDir(), t.TempDir(), t.TempDir()
+	writeServers(t, home, ".claude.json", map[string]any{
+		"web": map[string]any{
+			"type":    "http",
+			"url":     "http://tools.example.com/mcp",
+			"headers": map[string]string{"Authorization": "Bearer " + fakeHeader},
+		},
+		"slow":   map[string]any{"command": "/usr/local/bin/slow-mcp"},
+		"broken": map[string]any{"command": "/usr/local/bin/broken-mcp"},
+	})
+	c, stdout, stderr := dirsCLI(t, home, work)
+	// pins.json goes to a temporary folder, never to the real one.
+	c.getenv = fakeGetenv(map[string]string{"XDG_CONFIG_HOME": xdg, "HOME": home})
+	fake := &inspecttest.Fake{
+		Results: map[string]inspect.Result{"web": inspecttest.BenignResult()},
+		Errors:  map[string]error{"broken": errors.New("connection refused")},
+	}
+	web := fake.Results["web"]
+	web.Warnings = []inspect.Warning{{Kind: inspect.WarnCleartextSecrets, HeaderKeys: []string{"Authorization"}}}
+	fake.Results["web"] = web
+	c.inspector = slowInspector{inner: fake, slow: map[string]bool{"slow": true}}
+
+	code := c.dispatch([]string{"scan", "--timeout", "50ms"})
+
+	out, errOut := stdout.String(), stderr.String()
+	// The plain http URL and its Authorization header give two config findings
+	// (MOAT-T4-001 and MOAT-T4-002, both high), so the exit code is 1. The
+	// servers that were not inspected are not findings: they are not pinned.
+	if code != exitFindings {
+		t.Fatalf("exit code = %d, want %d\nstdout:\n%s\nstderr:\n%s", code, exitFindings, out, errOut)
+	}
+	assertStderrLines(t, errOut, []lineWant{exactLine("mcpmoat scan: pinned 2 tools for web")})
+	assertContainsNone(t, "stderr", errOut, []string{"warning", "timeout", "refused", "cleartext"})
+	assertContainsNone(t, "stdout", out, []string{fakeHeader})
+	assertNoLeakBoth(t, out, errOut)
+	assertNoEscape(t, out, errOut)
+	assertReportConsistent(t, out)
+
+	want := map[string]struct {
+		status   string
+		tools    int
+		hasTools bool
+		warnings int
+		findings int
+	}{
+		"web":    {status: "ok", tools: 2, hasTools: true, warnings: 1, findings: 2},
+		"slow":   {status: "timeout"},
+		"broken": {status: "failed"},
+	}
+	summary := summaryRows(t, out)
+	if len(summary) != len(want) {
+		t.Fatalf("summary has %d rows, want %d\nstdout:\n%s", len(summary), len(want), out)
+	}
+	for _, row := range summary {
+		w, ok := want[row.Name]
+		if !ok {
+			t.Errorf("unexpected summary row %+v", row)
+			continue
+		}
+		if row.Status != w.status || row.Tools != w.tools || row.HasTools != w.hasTools || len(row.Warnings) != w.warnings || row.Findings != w.findings {
+			t.Errorf("summary row %+v, want status %q, %d tools (shown: %v), %d warnings, %d findings", row, w.status, w.tools, w.hasTools, w.warnings, w.findings)
+		}
+		if w.status != "ok" && row.Reason == "" {
+			t.Errorf("summary row %+v has no reason", row)
+		}
+	}
+	// The warning names the header key and never the value.
+	for _, row := range summary {
+		for _, w := range row.Warnings {
+			assertContainsAll(t, "the warning", w, []string{"cleartext-secrets", "header Authorization"})
+		}
+	}
+
+	got := scanNormalize(t, out, map[string]string{home: "$HOME", work: "$WORK"})
+	assertScanGolden(t, "scan_connect_statuses", []byte(got))
 }
 
 // stateCells maps the NAME of each table row to its STATE cell. STATE is the
@@ -879,7 +1158,7 @@ func TestScanNoLeak(t *testing.T) {
 func scanAssertNoSecret(t *testing.T, stdout, stderr string) {
 	t.Helper()
 	assertNoLeakBoth(t, stdout, stderr)
-	serverTable, _, _ := splitScanOutput(stdout)
+	serverTable := splitScanSections(stdout).Table
 	for name, out := range map[string]string{"server table": serverTable, "stderr": stderr} {
 		if strings.Contains(out, "API_KEY") {
 			t.Errorf("%s shows the env key API_KEY, but it must show no env at all\n%s", name, out)
@@ -902,76 +1181,68 @@ func TestScanTerminalSafety(t *testing.T) {
 	wantName := strconv.Quote("a\x1b[31mb")
 	wantCommand := discover.Mask + " " + discover.Mask
 
-	c, stdout, stderr := scanConfigCLI(t, t.TempDir())
-	path := writeTestFile(t, t.TempDir(), ".mcp.json", config)
-
-	code := c.dispatch([]string{"scan", "--no-connect", "--config", path})
-
-	assertScanResult(t, code, stdout.String(), stderr.String(), scanWant{code: exitOK})
-	out := stdout.String()
-	if strings.Contains(out, "\t") {
-		t.Errorf("stdout has a raw tab\n%q", out)
-	}
-	if strings.Contains(out, "\u202e") {
-		t.Errorf("stdout has a raw U+202E\n%q", out)
-	}
-	for _, want := range []string{wantName, wantCommand} {
-		if !strings.Contains(out, want) {
-			t.Errorf("stdout does not contain %s\n%q", want, out)
+	// Colour on adds the SGR sequences of the report. They are the only ESC
+	// bytes allowed: once they are stripped, no ESC and no other unsafe rune
+	// may remain, and the output is the same text as the plain run.
+	for _, color := range []bool{false, true} {
+		name := "color off"
+		if color {
+			name = "color on"
 		}
-	}
-	// The row must keep its shape: header line and one row line.
-	if lines := nonEmptyLines(out); len(lines) != 2 {
-		t.Errorf("stdout has %d lines, want 2\n%q", len(lines), out)
-	}
-}
-
-func TestScanNoColor(t *testing.T) {
-	t.Parallel()
-
-	home, work := discovertest.CopyFixture(t, fixtureDir("all", "full"))
-
-	// runWith runs the scan with one set of args and one environment on the
-	// same home and working directory copies.
-	runWith := func(args []string, env map[string]string) (string, string, int) {
-		c, stdout, stderr := dirsCLI(t, home, work)
-		c.getenv = fakeGetenv(env)
-		code := c.dispatch(args)
-		return stdout.String(), stderr.String(), code
-	}
-
-	plain, plainErr, plainCode := runWith([]string{"scan", "--no-connect"}, nil)
-	if plainCode != exitOK || plainErr != "" {
-		t.Fatalf("plain run: exit code = %d, stderr = %q", plainCode, plainErr)
-	}
-
-	tests := []struct {
-		name string
-		args []string
-		env  map[string]string
-	}{
-		{name: "--no-color flag", args: []string{"--no-color", "scan", "--no-connect"}},
-		{name: "NO_COLOR=1", args: []string{"scan", "--no-connect"}, env: map[string]string{"NO_COLOR": "1"}},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
+		t.Run(name, func(t *testing.T) {
 			t.Parallel()
 
-			got, gotErr, code := runWith(tt.args, tt.env)
+			c, stdout, stderr := scanConfigCLI(t, t.TempDir())
+			c.stdoutIsTTY = color
+			path := writeTestFile(t, t.TempDir(), ".mcp.json", config)
 
-			if code != exitOK {
-				t.Errorf("exit code = %d, want %d", code, exitOK)
+			code := c.dispatch([]string{"scan", "--no-connect", "--config", path})
+
+			out := stdout.String()
+			if !color {
+				assertScanResult(t, code, out, stderr.String(), scanWant{code: exitOK})
+			} else {
+				if code != exitOK {
+					t.Fatalf("exit code = %d, want %d\nstderr:\n%s", code, exitOK, stderr)
+				}
+				assertCleanStderr(t, stderr.String())
+				assertNoLeakBoth(t, out, stderr.String())
+				if !strings.Contains(out, "\x1b[") {
+					t.Errorf("colour is on, but stdout has no SGR sequence\n%q", out)
+				}
+				out = stripSGR(out)
 			}
-			if got != plain {
-				t.Errorf("stdout differs from the plain run\n--- got ---\n%s\n--- want ---\n%s", got, plain)
+			if strings.Contains(out, "\x1b") {
+				t.Errorf("stdout has a raw ESC outside the SGR sequences\n%q", out)
 			}
-			if gotErr != plainErr {
-				t.Errorf("stderr = %q, want %q", gotErr, plainErr)
+			assertTerminalSafe(t, out)
+			if strings.Contains(out, "\t") {
+				t.Errorf("stdout has a raw tab\n%q", out)
 			}
-			assertNoEscape(t, got, gotErr)
+			if strings.Contains(out, "\u202e") {
+				t.Errorf("stdout has a raw U+202E\n%q", out)
+			}
+			for _, want := range []string{wantName, wantCommand} {
+				if !strings.Contains(out, want) {
+					t.Errorf("stdout does not contain %s\n%q", want, out)
+				}
+			}
+			// The table keeps its shape: header line and one row line. The
+			// name shows in the summary too, escaped the same way, and the
+			// server has no finding.
+			sections := splitScanSections(out)
+			if lines := nonEmptyLines(sections.Table); len(lines) != 2 {
+				t.Errorf("the table has %d lines, want 2\n%q", len(lines), sections.Table)
+			}
+			sum := summaryRows(t, out)
+			if len(sum) != 1 || !strings.HasPrefix(sum[0].Server, wantName+" (") || sum[0].Status != "not inspected" || sum[0].Findings != 0 {
+				t.Errorf("summary = %+v, want one escaped, not inspected server with 0 findings\n%q", sum, out)
+			}
+			if sections.Findings != "" {
+				t.Errorf("the config has no finding, but stdout has a findings block\n%q", out)
+			}
 		})
 	}
-	assertNoEscape(t, plain, plainErr)
 }
 
 // scanFailWriter is a writer that always fails, like a closed pipe.
@@ -1028,14 +1299,14 @@ func TestScanWriteError(t *testing.T) {
 	}
 }
 
-// scanFailOnFindingsWriter writes to buf, but fails on the header of the
-// findings table. So the server table is written and the findings table is
-// not. The table writer sends a lone newline for each line, so the writer
-// cannot tell the blank line before the findings from the end of a row.
+// scanFailOnFindingsWriter writes to buf, but fails on the write that holds
+// the heading of the findings block. So the server table and the summary are
+// written and the findings are not. The report writers build each block and
+// write it with one call, so the heading is always in one write.
 type scanFailOnFindingsWriter struct{ buf *bytes.Buffer }
 
 func (w scanFailOnFindingsWriter) Write(p []byte) (int, error) {
-	if bytes.Contains(p, []byte("RULE")) {
+	if bytes.Contains(p, []byte(findingsHeading)) {
 		return 0, errors.New("broken pipe")
 	}
 	return w.buf.Write(p)
@@ -1070,6 +1341,13 @@ func TestScanFindingsExitCodes(t *testing.T) {
 		})
 		if got := column(tableRows(t, table.String()), 0); !slices.Equal(got, []string{"leaky"}) {
 			t.Errorf("table servers = %v, want [leaky]\ntable:\n%s", got, table.String())
+		}
+		// The summary came before the findings, so it was written.
+		if got := summaryRows(t, table.String()); len(got) != 1 || got[0].Name != "leaky" || got[0].Findings != 1 {
+			t.Errorf("summary = %+v, want one row for leaky with 1 finding\ntable:\n%s", got, table.String())
+		}
+		if strings.Contains(table.String(), findingsHeading) {
+			t.Errorf("the failed write still reached the buffer\n%s", table.String())
 		}
 		if got := nonEmptyLines(stderr.String()); len(got) != 1 {
 			t.Errorf("stderr has %d lines, want 1\nstderr:\n%s", len(got), stderr)

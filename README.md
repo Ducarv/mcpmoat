@@ -37,6 +37,51 @@ mcpmoat pin --accept <name> --expect <digest>  # accept the tools of a server, o
 mcpmoat version               # print the version, commit and build date
 ```
 
+### What `scan` prints
+
+`scan` prints the server table, then a summary with one line for each server, then the findings
+grouped by severity (the worst first). This is a short sample (the table is left out, and the long
+risk and fix texts are shortened):
+
+```text
+SUMMARY
+  github (claude-code, global): ok, 12 tools, 0 findings
+  files (cursor, project:/work/app (untrusted)): ok, 4 tools, 2 findings
+    warning: cleartext-secrets: secrets go over plain http to a host that is not loopback: header X-Api-Key
+  search (codex, global): timeout, 0 findings (...)
+
+FINDINGS
+HIGH (1)
+  MOAT-T4-002  Plaintext secret in config
+    Server: files (cursor, project:/work/app (untrusted))
+    Where: env GITHUB_TOKEN
+    Risk: A secret is written in clear text in the client config ...
+    Fix: Move the secret out of the config: use an environment variable reference ...
+MEDIUM (1)
+  MOAT-T4-003  Package runner uses an unpinned package
+    Server: files (cursor, project:/work/app (untrusted))
+    Where: args @example-corp/files-mcp
+    Risk: The server starts from a package that is not fixed ...
+    Fix: Pin an exact version, for example npx @scope/server@1.4.2 ...
+```
+
+- **Summary:** the status of a server is `ok`, `timeout`, `failed` or `not inspected`. A server
+  that `--no-connect` skipped, or that `scan` refused to start (an untrusted or turned-off server),
+  is `not inspected`. A server that failed, timed out or was refused shows its reason in brackets
+  at the end of its line (shortened as `(...)` above), and so does every server when `scan` cannot
+  read pins.json. A server with status `ok` also shows its tool count. The connection warnings of
+  a server show under its line. They hold header keys only, never values.
+- **Findings:** each finding has the rule ID and title, the server with its client and scope (so two
+  servers with the same name in two configs differ), where it matched (the field and key, or the
+  tool), and a `Risk` and a `Fix` line.
+- **Colour:** colour is on only when stdout is a terminal. `--no-color` (before or after the command, as in
+  `mcpmoat scan --no-color`) or a non-empty `NO_COLOR` environment variable turns it off. Colour
+  marks the headings, the severity lines and the status words only. The words carry the meaning, so
+  the output is the same without colour. `scan` escapes every config, server and rule text first,
+  so terminal escape sequences in a config or from a server do not reach your terminal.
+- **Exit code:** warnings and statuses do not change it. Only findings do (see
+  [Exit codes](#exit-codes)).
+
 ## JSON output
 
 `mcpmoat scan --json` prints the report as one JSON document. It works with `--no-connect` too.
@@ -49,7 +94,8 @@ mcpmoat scan --json | jq -r '.findings[] | "\(.rule_id) \(.server)"'
 - **stdout** holds exactly one JSON document. It has no table, no `To accept` line and no other
   text. If `scan` makes no report (for example, `--config` cannot be loaded), stdout is empty.
 - **stderr** gets the warnings, the notices and the errors. They are the same as in a run without
-  `--json`.
+  `--json`, plus the lines that the summary shows without `--json`: a server that was not
+  inspected, and the warnings of an inspection.
 - **Exit codes** do not change: 0, 1 or 2 (see [Pins and rug pulls](#pins-and-rug-pulls)).
 - **`complete`** is `false` when the report can miss results, for example when a config file has a
   problem or `pins.json` cannot be read. The exit code is then 2, and the reason is on stderr.
@@ -85,7 +131,7 @@ mcpmoat scan --json | jq -r '.findings[] | "\(.rule_id) \(.server)"'
   mcpmoat can never check its tools for changes. `MOAT-T2-004` is high when the tool name is pinned,
   because a duplicate, invalid or unverifiable copy of a pinned tool can hide a rug pull. Else it is
   medium. For each changed tool, `scan` prints a unified diff of the pinned and the current text
-  after the findings table. For each new tool, it prints the full text of the tool as added lines,
+  after the findings. For each new tool, it prints the full text of the tool as added lines,
   under the header `New tool <tool> on server <server>:`, so you can review it before you accept it.
   A pinned tool whose pin cannot be checked (another hash version, or a pinned text that does not
   match its hash) gets its full current text too, under `Not verified tool <tool> on server <server>
@@ -129,16 +175,16 @@ mcpmoat scan --json | jq -r '.findings[] | "\(.rule_id) \(.server)"'
   `(the diff was cut: review the full tool first)`, `(--ignore hid some changes: run scan without
   it to review them first)` or `(a change has no diff text: review the tool first)`. The digest
   covers those changes too.
-- A server that fails, times out or is refused (an untrusted or turned-off server) is a warning on
-  stderr. If the server is not pinned, it is only a warning. If the server is already pinned and
-  fails or times out, it is also a high `MOAT-T2-004` finding (see [Exit codes](#exit-codes)) with
-  the reason `pinned server could not be inspected`, because a
-  hostile server must not avoid the rug-pull check by failing on purpose. A pinned server that is
-  refused stays a warning: your client config turns it off or does not approve it, and the server
-  cannot choose that.
-- `scan` and `pin --accept` print the warnings of the inspection on stderr: secrets that go over
-  plain http (`cleartext-secrets`), lists that the server answered but did not declare
-  (`undeclared-capability`), and a proxy that skips the DNS pin (`dns-pin-unavailable`). The lines
+- A server that fails, times out or is refused (an untrusted or turned-off server) shows its status
+  in the summary on stdout. If the server is not pinned, it does not change the exit code. If the
+  server is already pinned and fails or times out, it is also a high `MOAT-T2-004` finding (see
+  [Exit codes](#exit-codes)) with the reason `pinned server could not be inspected`, because a hostile server must not
+  avoid the rug-pull check by failing on purpose. A pinned server that is refused shows its status
+  `not inspected` and its reason in the summary, with no pin finding: your client config turns it
+  off or does not approve it, and the server cannot choose that.
+- `scan` shows the warnings of the inspection in the summary on stdout (on stderr with `--json`).
+  `pin --accept` prints them on stderr. They are: secrets that go over plain http (`cleartext-secrets`), lists that the server
+  answered but did not declare (`undeclared-capability`), and a proxy that skips the DNS pin (`dns-pin-unavailable`). The lines
   hold keys and fixed names only, never values. A server that is listed twice is a `MOAT-T2-004` finding too: high
   when it is pinned, else medium.
 - `scan` and `pin --accept` read `pins.json` before they start any server. A `pins.json` that
@@ -197,8 +243,8 @@ When the file gives entries, mcpmoat prints `using N entries from .mcpmoat-ignor
 `using 1 entry from .mcpmoat-ignore`) on stderr. If you see this line, read the file before you
 trust a clean result.
 
-When the ignore list drops findings, `scan` also prints one line on stderr after the findings
-table. It gives the count for each rule ID, for example
+When the ignore list drops findings, `scan` also prints one line on stderr after the report. It
+gives the count for each rule ID, for example
 `mcpmoat scan: 2 findings ignored: MOAT-T4-002 (2)`. It shows only rule IDs and counts. A
 `.mcpmoat-ignore` in a repository that you did not write can hide findings, so check this line and
 the file. Ignored findings do not count for the exit code, so the file can turn exit code 1 into 0.
@@ -225,8 +271,8 @@ here.
   rug pull (`MOAT-T2-001` is high). It fails only in the two fail-closed cases above. `scan` says
   so on stderr: `mcpmoat scan: note: no built-in rule is critical yet, so with --fail-on critical
   no built-in finding gives exit code 1`.
-- An unpinned server that fails or times out is a warning on stderr only. It does not change the
-  exit code. A pinned server that fails or times out is a high `MOAT-T2-004` finding.
+- An unpinned server that fails or times out is a warning only (in the summary, or on stderr with
+  `--json`). It does not change the exit code. A pinned server that fails or times out is a high `MOAT-T2-004` finding.
 
 Exit code 2 comes, for example, from a usage error (invalid flags), invalid rules, an unreadable
 `--config` file, a problem in a config file, a `pins.json` that cannot be read or saved, a report

@@ -160,10 +160,18 @@ func NewJSONServer(s discover.Server, status InspectionStatus) JSONServer {
 	return js
 }
 
-// NewJSONFinding converts a finding row to its JSON form.
+// NewJSONFinding converts a finding row to its JSON form. Schema version 1
+// has only the server name: the client, the scope, the title and the rule
+// texts of the terminal report are not in it (a new field bumps the version).
 func NewJSONFinding(r FindingRow) JSONFinding {
-	// This conversion fails to compile if FindingRow and JSONFinding drift apart.
-	return JSONFinding(r)
+	return JSONFinding{
+		RuleID:   r.RuleID,
+		Severity: r.Severity,
+		Server:   r.Name,
+		Field:    r.Field,
+		Key:      r.Key,
+		Related:  r.Related,
+	}
 }
 
 // NewJSONDiff converts a tool diff to its JSON form.

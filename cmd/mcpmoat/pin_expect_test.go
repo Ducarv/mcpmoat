@@ -428,7 +428,11 @@ func TestScanAcceptHintAbsent(t *testing.T) {
 				t.Errorf("exit code = %d, want %d\nstdout:\n%s\nstderr:\n%s", got.code, tt.wantCode, got.stdout, got.stderr)
 			}
 			assertContainsAll(t, "stdout", got.stdout, []string{tt.wantRow})
-			assertContainsNone(t, "stdout", got.stdout, []string{acceptHintPrefix, "pin --accept", "--expect"})
+			assertContainsNone(t, "stdout", got.stdout, []string{acceptHintPrefix})
+			// The Fix line of a MOAT-T2 finding names "pin --accept ... --expect"
+			// in general. Only the text after the FINDINGS block (the diffs and
+			// the hint lines) must hold neither.
+			assertContainsNone(t, "stdout after the findings", splitScanSections(got.stdout).Rest, []string{"pin --accept", "--expect"})
 			assertContainsNone(t, "stderr", got.stderr, []string{"--expect"})
 		})
 	}

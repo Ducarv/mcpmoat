@@ -116,6 +116,11 @@ func (o Options) Validate() error {
 
 // Outcome is the result of inspecting one server.
 type Outcome struct {
+	// Index is the index of the server in the servers slice that was given to
+	// Run. Run sorts the outcomes, so the position of an Outcome does not tell
+	// which input server it belongs to; Index does, also for servers that are
+	// equal in every field.
+	Index int
 	// Server is the server that was inspected.
 	Server discover.Server
 	// Status tells how the inspection ended.
