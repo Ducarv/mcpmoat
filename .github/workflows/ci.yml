@@ -68,7 +68,8 @@ jobs:
         if: runner.os == 'Linux'
         env:
           # Dependabot does not bump this version string. The release-check
-          # job checks that release.yml pins the same version.
+          # job checks that release.yml and govulncheck.yml pin the same
+          # version.
           GOVULNCHECK_VERSION: v1.9.0
         run: go run "golang.org/x/vuln/cmd/govulncheck@$GOVULNCHECK_VERSION" ./...
 
@@ -160,13 +161,22 @@ jobs:
             echo "::error::The GoReleaser pins differ. ci.yml: $GORELEASER_VERSION. release.yml: $rel. CONTRIBUTING.md: $doc."
             exit 1
           fi
-          # The release test job runs govulncheck too, with the same pin.
+          # The release test job and the weekly govulncheck workflow run
+          # govulncheck too, with the same pin.
           vuln_ci=$(pin GOVULNCHECK_VERSION .github/workflows/ci.yml)
           vuln_rel=$(pin GOVULNCHECK_VERSION .github/workflows/release.yml)
-          if [ -z "$vuln_ci" ] || [ "$vuln_ci" != "$vuln_rel" ]; then
-            echo "::error::The govulncheck pins differ. ci.yml: $vuln_ci. release.yml: $vuln_rel."
+          vuln_weekly=$(pin GOVULNCHECK_VERSION .github/workflows/govulncheck.yml)
+          if [ -z "$vuln_ci" ] || [ "$vuln_ci" != "$vuln_rel" ] || [ "$vuln_ci" != "$vuln_weekly" ]; then
+            echo "::error::The govulncheck pins differ. ci.yml: $vuln_ci. release.yml: $vuln_rel. govulncheck.yml: $vuln_weekly."
             exit 1
           fi
+          # Each run line must use the pin, not a hardcoded version.
+          for f in ci release govulncheck; do
+            if ! grep -E '^ *run: ' ".github/workflows/$f.yml" | grep -qF "govulncheck@\$GOVULNCHECK_VERSION"; then
+              echo "::error::The run line of $f.yml does not use govulncheck@\$GOVULNCHECK_VERSION."
+              exit 1
+            fi
+          done
 
       - name: Set up Go
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0

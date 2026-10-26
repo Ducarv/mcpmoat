@@ -1,0 +1,47 @@
+name: govulncheck
+
+# A scheduled workflow runs the file on the default branch (dev), but this
+# job checks out main. A new advisory against the released code shows up
+# within a week. Dependabot and the dependency graph watch dev. Without this
+# job, govulncheck on main runs only when a release is cut.
+# GitHub sends a failure notice only to the user who last edited the cron
+# line, or to the repo owner if GitHub disabled the schedule.
+# GitHub disables a scheduled workflow in a public repo after 60 days with
+# no repo activity. If `main` is renamed, the checkout fails.
+# No secrets are used.
+on:
+  schedule:
+    - cron: '17 6 * * 1' # Monday 06:17 UTC
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: false
+
+jobs:
+  govulncheck:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - name: Check out main
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: main
+          persist-credentials: false
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: false
+
+      - name: Check for known vulnerabilities
+        env:
+          # Dependabot does not bump this version. The release-check job in
+          # ci.yml checks that it matches the pins in ci.yml and release.yml.
+          GOVULNCHECK_VERSION: v1.9.0
+        run: go run "golang.org/x/vuln/cmd/govulncheck@$GOVULNCHECK_VERSION" ./...
