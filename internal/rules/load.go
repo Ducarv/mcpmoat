@@ -53,8 +53,11 @@ type Option func(*loadOptions)
 
 // WithCompiler makes the loader compile the Match section of every rule it
 // parses, and report a compile failure as a LoadError for that rule. The
-// Matcher that the compiler returns is discarded for now. A nil Compiler (the
-// default) means that the loader does not compile.
+// loader compiles only to check that the match block is valid, so it drops
+// the Matcher that the compiler returns. A nil Compiler (the default) means
+// that the loader does not compile: it only parses and validates the rule.
+// mcpmoat scan loads without a compiler, because NewAnalyzer compiles the
+// rules that scan applies.
 func WithCompiler(c Compiler) Option {
 	return func(o *loadOptions) { o.compiler = c }
 }
@@ -276,7 +279,10 @@ func loadFile(fsys fs.FS, name, display string, o loadOptions) (Rule, []*LoadErr
 		return Rule{}, errs
 	}
 	if o.compiler != nil {
-		// The Matcher is discarded in this version; issue #35 will use it.
+		// The compile only checks that the match block is valid, so the
+		// Matcher is dropped. Without a compiler, the loader only parses.
+		// NewAnalyzer compiles the rules that mcpmoat scan applies, once
+		// each, and reports a failure with the same error text.
 		if _, err := o.compiler(rule.Match, rule.Target); err != nil {
 			return Rule{}, []*LoadError{newLoadError(display, ReasonInvalidValue).inField("match").wrap(err)}
 		}

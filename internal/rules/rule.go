@@ -59,6 +59,11 @@ func (t Target) Valid() bool {
 	}
 }
 
+// RuleAnalysisBudget is a native rule ID with no YAML file in rules/. mcpmoat
+// scan reports it as a high finding for a server when the per-server rule
+// analysis time budget runs out. The ID passes ValidRuleID.
+const RuleAnalysisBudget = "MOAT-T1-023"
+
 // Match is the `match:` block of a rule. Parse checks only its shape, and
 // Compile checks the rest: exactly one kind is set (AnyRegex, AllRegex,
 // Keywords or Heuristic), and Params is only for Heuristic, with integer

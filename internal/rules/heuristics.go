@@ -100,7 +100,8 @@ type paramSpec struct {
 
 // compileHeuristic returns the function of the heuristic name, with its
 // parameters checked and set. The function reads the raw text. Every error
-// is a *FieldError.
+// is a *FieldError. Match.compile wraps the function in a heuristicFunc, and
+// for match_window it uses matchWindowPrepared instead.
 func compileHeuristic(name string, params map[string]any) (func(raw string) []Hit, error) {
 	switch name {
 	case HeuristicInvisibleUnicode:
@@ -320,8 +321,22 @@ func maxLength(raw string, maxRunes int) []Hit {
 // matchWindow flags raw when the regex and keyword matchers do not read all
 // of it (see matchWindowCut). The hit is about the whole text, so it has the
 // offset NoOffset.
+//
+// matchWindow is the raw text entry of the match_window heuristic, for
+// compileHeuristic and the tests. It builds a new preparedText for raw. A
+// compiled match_window Matcher does not call it: it calls
+// matchWindowPrepared on the preparedText that the rules of a text share,
+// so the base forms are built once. Both read the same cut flag, from
+// baseFormsCut (see preparedText.windowCut).
 func matchWindow(raw string) []Hit {
-	if !matchWindowCut(raw) {
+	return matchWindowPrepared(prepareText(raw))
+}
+
+// matchWindowPrepared flags p.raw as matchWindow does, with the cut flag of
+// p (see preparedText.windowCut). It builds only the base forms of p, once,
+// so the regex and keyword rules that share p reuse them.
+func matchWindowPrepared(p *preparedText) []Hit {
+	if !p.windowCut() {
 		return nil
 	}
 	return []Hit{{Offset: NoOffset, Detail: "text is longer than the match window"}}

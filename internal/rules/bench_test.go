@@ -1,16 +1,25 @@
 package rules
 
 import (
+	"context"
 	"fmt"
 	"slices"
 	"strings"
 	"testing"
 	"unicode/utf8"
+
+	"github.com/Ducarv/mcpmoat/internal/inspect"
 )
 
-// Benchmarks for the matchers (#35, NFR-03). Run them with:
+// Benchmarks for the matchers (#35, NFR-03) and for the scan path. Run them
+// with:
 //
 //	go test -run '^$' -bench . -benchmem ./internal/rules/
+//
+// A scan builds the forms of each tool text once and shares them between all
+// the rules that read the text (#143). Each pair of benchmarks with and
+// without the PerMatcher or PerRule suffix compares the shared forms with a
+// Match call for each rule, which builds the forms again for each rule.
 //
 // Non-ASCII runes are Go escape sequences, so this file stays pure ASCII.
 
@@ -87,8 +96,8 @@ func benchText(size, first int) string {
 }
 
 // matchAll runs every matcher on text and returns the number of hits. It
-// builds the forms of text once and shares them between the matchers, as the
-// engine must do for one target text (#143).
+// builds the forms of text once and shares them between the matchers, as
+// Analyzer.CheckTool does for each target text of a tool.
 func matchAll(ms []*Matcher, text string) int {
 	p := prepareText(text)
 	n := 0
@@ -272,7 +281,7 @@ func benchWorstCaseBlock(b *testing.B, text string, wantForms, minLen int) {
 // seven forms are built. Each U+009D can start an OSC, so this is the slowest
 // known input for the OSC part of ansiSeq (see oscExprC0).
 func BenchmarkOSCStartRun(b *testing.B) {
-	text := strings.Repeat("\u009d", maxRawScanBytes/2-3) + "\x01\x1b\u200b"
+	text := oscStartRun()
 	if got := len(formModes(text)); got != maxBaseForms {
 		b.Fatalf("len(formModes(text)) = %d, want %d", got, maxBaseForms)
 	}
@@ -282,6 +291,12 @@ func BenchmarkOSCStartRun(b *testing.B) {
 		matchForms(text)
 		matchWindowCut(text)
 	}
+}
+
+// oscStartRun returns about maxRawScanBytes of U+009D, then U+0001, ESC and
+// ZWSP: the text of BenchmarkOSCStartRun.
+func oscStartRun() string {
+	return strings.Repeat("\u009d", maxRawScanBytes/2-3) + "\x01\x1b\u200b"
 }
 
 // worstSchema returns a JSON array of n distinct strings that fills the caps
@@ -378,6 +393,104 @@ func BenchmarkSchemaWorstCase(b *testing.B) {
 					b.Fatal("Match() != nil, want no match")
 				}
 			}
+		})
+	}
+}
+
+// builtinAnalyzer returns an Analyzer with the description and schema rules
+// of the built-in rule set.
+func builtinAnalyzer(tb testing.TB) *Analyzer {
+	tb.Helper()
+	rs, errs := Builtin()
+	if len(errs) > 0 {
+		tb.Fatalf("Builtin() errors = %v", errs)
+	}
+	set, errs := NewSet(rs, nil)
+	if len(errs) > 0 {
+		tb.Fatalf("NewSet() errors = %v", errs)
+	}
+	a, errs := NewAnalyzer(set)
+	if len(errs) > 0 {
+		tb.Fatalf("NewAnalyzer() errors = %v", errs)
+	}
+	if len(a.description) == 0 || len(a.schema) == 0 {
+		tb.Fatalf("builtin Analyzer has %d description and %d schema rules, want both > 0", len(a.description), len(a.schema))
+	}
+	return a
+}
+
+// checkToolPerRule is Analyzer.CheckTool without the shared forms: it calls
+// Match for each rule, so each rule builds the forms of the text again. It
+// returns the number of rules with a hit and no error, so that it has the
+// type of the check of benchCheckTool.
+func checkToolPerRule(a *Analyzer, t inspect.Tool) (int, error) {
+	n := 0
+	for _, r := range a.description {
+		if len(r.m.Match(t.Description)) > 0 {
+			n++
+		}
+	}
+	for _, r := range a.schema {
+		if len(r.m.Match(string(t.InputSchema))) > 0 {
+			n++
+		}
+	}
+	return n, nil
+}
+
+// BenchmarkCheckToolBuiltin times one Analyzer.CheckTool call with the
+// built-in rules on each tool of benchCheckTool. The rules of one target share
+// the forms of its text, so the forms are built once for each text.
+func BenchmarkCheckToolBuiltin(b *testing.B) {
+	benchCheckTool(b, func(a *Analyzer, t inspect.Tool) (int, error) {
+		f, err := a.CheckTool(context.Background(), t)
+		return len(f), err
+	})
+}
+
+// BenchmarkCheckToolBuiltinPerRule is BenchmarkCheckToolBuiltin with a Match
+// call for each rule (checkToolPerRule), the way before #143. It uses the
+// same matchers, so only the sharing of the forms differs.
+func BenchmarkCheckToolBuiltinPerRule(b *testing.B) {
+	benchCheckTool(b, checkToolPerRule)
+}
+
+// benchCheckTool runs check with the built-in Analyzer on four tools, one
+// sub-benchmark each:
+//
+//   - a plain description of 1 KiB, with one form;
+//   - a description of MaxMatchInputBytes that starts with worstPrefix, so it
+//     has all 21 regex forms;
+//   - the oscStartRun description, the slowest known input to build forms;
+//   - a schema of 256 strings of 512 bytes from worstSchema, each with all 21
+//     regex forms, and an empty description.
+//
+// The findings metric is the number of rules with a hit, so the two
+// benchmarks can be checked to do the same work.
+func benchCheckTool(b *testing.B, check func(*Analyzer, inspect.Tool) (int, error)) {
+	a := builtinAnalyzer(b)
+	allForms := worstPrefix + strings.Repeat("a", MaxMatchInputBytes-len(worstPrefix))
+	tools := []struct {
+		name string
+		tool inspect.Tool
+	}{
+		{"1KiB plain", inspect.Tool{Description: benchText(1<<10, 0)}},
+		{"32KiB all forms", inspect.Tool{Description: allForms}},
+		{"128KiB OSC run", inspect.Tool{Description: oscStartRun()}},
+		{"schema 256 strings", inspect.Tool{InputSchema: []byte(worstSchema(b, 256))}},
+	}
+	for _, tc := range tools {
+		b.Run(tc.name, func(b *testing.B) {
+			b.SetBytes(int64(len(tc.tool.Description) + len(tc.tool.InputSchema)))
+			b.ReportAllocs()
+			n := 0
+			for b.Loop() {
+				var err error
+				if n, err = check(a, tc.tool); err != nil {
+					b.Fatalf("check() error = %v", err)
+				}
+			}
+			b.ReportMetric(float64(n), "findings/op")
 		})
 	}
 }

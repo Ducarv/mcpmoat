@@ -40,9 +40,6 @@ var ansiSeq = regexp.MustCompile(`(?:\x1b\[|\x{9b})[0-?]*[ -/]*[@-~]|` + oscExpr
 // a new one. It holds TAB, LF and CR too.
 const csiC0 = `\x00-\x17\x19\x1c-\x1f\x7f`
 
-// csiC0Rune matches one rune of csiC0 (see hasSeqC0).
-var csiC0Rune = regexp.MustCompile(`[` + csiC0 + `]`)
-
 // ansiSeqC0 is ansiSeq, but a CSI can hold C0 control runes (see csiC0), as
 // in a terminal: between ESC and "[", and among the parameter and
 // intermediate bytes. So ESC + U+0001 + "[8m" and U+009B + U+0001 + "8m" are

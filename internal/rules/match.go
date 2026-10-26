@@ -1,6 +1,7 @@
 package rules
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"regexp"
@@ -45,22 +46,32 @@ import (
 // -benchtime=1x, 15.60 s to 16.03 s, go1.27.3). In the same run, the 14
 // forms of BenchmarkWorstCaseBlockNoSkeleton took about 10.7 s, the same as
 // before #140. So the seven skeleton folds add about 49%, in line with 21/14
-// forms. The package doc says how the rule count multiplies this cost.
+// forms. These times are for one Match call: one rule on one text. The
+// package doc says how the rule count multiplies this cost.
 //
 // The server alone picks the forms, so its text alone can raise the cost of
 // one text about 18 times with the built-in rules. Before #140, the 13
 // description rules on 32 KiB took about 50 ms for plain text and about
-// 612 ms with a prefix that gave all fourteen forms (Apple M1 Pro). For the
-// current code, scaled by the ratio of the two benchmarks above (15.9 s /
-// 10.7 s, about 1.49), the all-forms time is about 0.91 s. This is an
-// estimate, not a new measurement. The plain text has one form, so it stays
-// at about 50 ms. The scan engine (#143) needs a time or bytes budget.
+// 612 ms with a prefix that gave all fourteen forms (Apple M1 Pro), one
+// Match call for each rule. For the current code, scaled by the ratio of the
+// two benchmarks above (15.9 s / 10.7 s, about 1.49), the all-forms time is
+// about 0.91 s. This is an estimate, not a new measurement. The plain text
+// has one form, so it stays at about 50 ms.
+//
+// A scan does not pay this cost without a limit. It builds the forms of each
+// text once and shares them across all the rules that read the text (see
+// preparedText and Matcher.matchCtx). It also stops the analysis of a server
+// at a deadline: matchCtx checks the context before each regex reads each
+// form, so the overshoot past the deadline is at most about one regex on one
+// form, or one build of the forms of one text.
 //
 // Building the forms has a cost too. The slowest known input is a run of
 // U+009D, because each one can start an OSC (see oscExprC0): 128 KiB of it
-// takes about 240 ms for each form that reads with ansiSeq, and about 1.5 s
-// for one matchForms and one matchWindowCut call (BenchmarkOSCStartRun).
-// Match builds the forms again for each rule. #146 tracks this cost.
+// takes about 240 ms for each form that reads with ansiSeq.
+// BenchmarkOSCStartRun times one matchForms and one matchWindowCut call,
+// which are two baseFormsCut calls: about 1.7 s (Apple M1 Pro, five runs
+// with -benchtime=5x). A scan calls baseFormsCut once for each text, for all
+// its rules, so it pays about half of that.
 //
 // A text longer than the window is cut, so padding can push a payload out of
 // the reach of the regex and keyword rules. The match_window heuristic closes
@@ -68,18 +79,21 @@ import (
 // forms of matchForms. The OSC text of a form, such as a link URL, does not
 // count (see matchWindowCut).
 //
-// A schema target is many short texts (see matchSchema). An any_regex,
-// all_regex or keywords rule reads one schema in three passes: its strings
-// (at most maxSchemaMatchBytes, 128 KiB, and maxSchemaMatchStrings strings),
-// the seams of neighbour strings (at most maxSeamBytes, 128 KiB), and, when
-// the JSON cannot be read in full, the raw text once, in the window of one
-// description. So one schema costs about nine times the bound of one
-// description: the seam pass doubles the cost of the string pass.
+// A schema target is many short texts (see matchSchemaPrepared). An
+// any_regex, all_regex or keywords rule reads one schema in three passes:
+// its strings (at most maxSchemaMatchBytes, 128 KiB, and
+// maxSchemaMatchStrings strings), the seams of neighbour strings (at most
+// maxSeamBytes, 128 KiB), and, when the JSON cannot be read in full, the raw
+// text once, in the window of one description. So one schema costs about
+// nine times the bound of one description: the seam pass doubles the cost of
+// the string pass.
 // BenchmarkSchemaWorstCase measured at most about 63.0 s for one Match call
 // (4 strings of 32 KiB, 21 forms each), about 4 times the description worst
-// case. The match_window heuristic fires on a schema whose strings these
-// caps cut, but not when the seam budget is used up. The package doc gives
-// the details.
+// case. In a scan, the schema rules of one tool share the decoded schema and
+// the forms of each string, seam and raw text (see preparedText.schema), and
+// the deadline above stops them too. The match_window heuristic fires on a
+// schema whose strings these caps cut, but not when the seam budget is used
+// up. The package doc gives the details.
 const (
 	// MaxPatternBytes is the largest regex or keyword, in bytes, before
 	// compilation.
@@ -126,7 +140,7 @@ type Hit struct {
 	// Offset is a byte offset in the raw text, or NoOffset for regex and
 	// keyword hits: they run on the normalized text, so no raw offset is
 	// known. Every hit of a schema target has NoOffset too, also a hit of a
-	// heuristic or of the raw JSON text (see matchSchema).
+	// heuristic or of the raw JSON text (see matchSchemaPrepared).
 	Offset int
 	// Detail is short printable ASCII that mcpmoat builds. It never holds
 	// text from the input.
@@ -146,10 +160,24 @@ const (
 // Match.CompileFor. A Matcher is immutable and safe for concurrent use.
 type Matcher struct {
 	kind      string
-	target    Target                 // how Match reads the text
-	mode      schemaMode             // how Match reads a schema
-	regexps   []*regexp.Regexp       // any_regex, all_regex and keywords
-	heuristic func(raw string) []Hit // heuristic
+	target    Target           // how Match reads the text
+	mode      schemaMode       // how Match reads a schema
+	regexps   []*regexp.Regexp // any_regex, all_regex and keywords
+	heuristic heuristicFunc    // heuristic
+}
+
+// heuristicFunc is the compiled function of a heuristic. It reads the
+// prepared text p and returns its hits. It must not change p.
+//
+// Most heuristics read only p.raw (see rawHeuristic), so they build no forms
+// of p. The match_window heuristic reads p.windowCut, so it shares the base
+// forms of p with the regex and keyword rules (see matchWindowPrepared).
+type heuristicFunc func(p *preparedText) []Hit
+
+// rawHeuristic turns a heuristic that reads the raw text into a
+// heuristicFunc. The result reads only p.raw.
+func rawHeuristic(fn func(raw string) []Hit) heuristicFunc {
+	return func(p *preparedText) []Hit { return fn(p.raw) }
 }
 
 // CompileFor checks the match block and compiles it for the target t. Every
@@ -193,11 +221,14 @@ func (m Match) compile() (*Matcher, error) {
 		if err != nil {
 			return nil, err
 		}
-		mode := schemaAll
+		mode, h := schemaAll, rawHeuristic(fn)
 		if m.Heuristic == HeuristicMatchWindow {
-			mode = schemaWindow
+			// fn is matchWindow, the raw text entry. The matcher reads the
+			// cut flag of the shared preparedText instead, so the forms of a
+			// text are built once for all its rules.
+			mode, h = schemaWindow, matchWindowPrepared
 		}
-		return &Matcher{kind: kindHeuristic, mode: mode, heuristic: fn}, nil
+		return &Matcher{kind: kindHeuristic, mode: mode, heuristic: h}, nil
 	case m.AnyRegex != nil:
 		return compileRegexMatcher(kindAnyRegex, m.AnyRegex, nil)
 	case m.AllRegex != nil:
@@ -228,13 +259,15 @@ func compileRegexMatcher(kind string, list []string, build func(entry, s string)
 // the forms of preparedText.keywordForms, the base forms of matchForms folded
 // with foldMarks. A regex or a keyword matches when it matches in one form.
 // In all_regex, each regex must match, but each one can match in a different
-// form. A heuristic reads the full raw text.
+// form. A heuristic reads the full raw text. The match_window heuristic
+// reads the cut flag of the base forms (see matchWindow).
 //
 // A regex or keyword hit has the offset NoOffset, whatever form it matched
 // in, because a form has no byte offsets in the raw text.
 //
 // For the schema target, text is a JSON schema, and Match runs the steps
-// above on each decoded object key and string value (see matchSchema).
+// above on each decoded object key and string value (see
+// matchSchemaPrepared).
 // Every hit then has the offset NoOffset, and its detail starts with a label
 // such as "schema string N" (the package doc lists the labels). The schema
 // mode depends on the kind:
@@ -261,53 +294,86 @@ func (m *Matcher) Match(text string) []Hit {
 	return m.matchPrepared(prepareText(text))
 }
 
-// matchPrepared returns the hits of the matcher in p, as Match does. The
-// forms of p are built at most once, so the matchers of many rules can share
-// one p for the same text (see preparedText). A heuristic gets only p.raw,
-// so it does not build the forms of p. The match_window heuristic builds
-// its own forms of p.raw (see matchWindowCut). matchPrepared never writes
-// into the forms of p.
-//
-// For the schema target, p.raw is a JSON schema, and matchPrepared reads it
-// with matchSchema. The forms of p are then not built and not shared:
-// matchSchema calls matchText on each string, seam and raw text, and
-// matchText builds a new preparedText for each of them.
+// matchPrepared returns the hits of the matcher in p, as Match does. It is
+// matchCtx with a context that is never done, so it never stops early and
+// has no error.
 //
 // m and p must not be nil. Match does the nil check for m.
 func (m *Matcher) matchPrepared(p *preparedText) []Hit {
-	if m.target == TargetSchema {
-		return matchSchema(p.raw, m.mode, m.matchText)
-	}
-	return m.matchOne(p)
+	// The error is always nil here: context.Background is never done, and
+	// matchCtx fails only when its context is done.
+	hits, _ := m.matchCtx(context.Background(), p)
+	return hits
 }
 
-// matchText returns the hits of m in one text, as Match describes for a text
-// that is not a schema. For a schema, matchSchema calls it on each string,
-// and in some cases on seams and on the raw text (see matchSchema). It builds
-// a new preparedText for text.
-func (m *Matcher) matchText(text string) []Hit {
-	return m.matchOne(prepareText(text))
+// matchCtx returns the hits of the matcher in p, as Match does, and stops
+// early when ctx is done.
+//
+// The forms of p are built at most once, so the matchers of many rules can
+// share one p for the same text (see preparedText). A heuristic other than
+// match_window gets only p.raw, so it does not build the forms of p. The
+// match_window heuristic reads p.windowCut, so it builds only the base forms
+// of p, and the regex and keyword rules then reuse them. matchCtx never
+// writes into the forms of p.
+//
+// For the schema target, p.raw is a JSON schema. matchCtx reads it with
+// matchSchemaPrepared and p.schema, so p decodes the schema once. All the
+// schema rules that share p then share the decoded strings, and the
+// preparedText of each string, seam and raw text, with its forms.
+//
+// The context: matchCtx checks ctx before it decodes a schema, before it
+// builds the forms, before each regex or keyword reads each form, and before
+// the heuristic. For a schema, matchSchemaPrepared also checks it before
+// each string, seam and raw text. So when ctx ends, the extra work is at
+// most one regex on one form, one build of the forms of one text, or one
+// heuristic call. matchCtx then returns the hits that it found so far, and
+// an error that wraps ctx.Err(). The error names the kind and the list
+// index, never input text. With a context that is never done, the error is
+// nil, and the hits are the hits of Match.
+//
+// m and p must not be nil.
+func (m *Matcher) matchCtx(ctx context.Context, p *preparedText) ([]Hit, error) {
+	// Check before p.schema too, so a done ctx does not decode a schema.
+	if err := ctx.Err(); err != nil {
+		return nil, fmt.Errorf("match %s: %w", m.kind, err)
+	}
+	if m.target == TargetSchema {
+		return matchSchemaPrepared(ctx, p.schema(), m.mode, m.matchOne)
+	}
+	return m.matchOne(ctx, p)
 }
 
 // matchOne returns the hits of m in p.raw, read as one text (not as a
-// schema), with the forms of p.
-func (m *Matcher) matchOne(p *preparedText) []Hit {
+// schema), with the forms of p. It is the schemaMatchFunc of a schema rule
+// (see matchCtx), and it checks ctx as matchCtx says.
+func (m *Matcher) matchOne(ctx context.Context, p *preparedText) ([]Hit, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, fmt.Errorf("match %s: %w", m.kind, err)
+	}
 	switch m.kind {
 	case kindHeuristic:
-		return m.heuristic(p.raw)
+		return m.heuristic(p), nil
 	case kindAnyRegex:
 		forms := p.regexForms()
 		for i, re := range m.regexps {
-			if matchesAny(re, forms) {
-				return []Hit{{Offset: NoOffset, Detail: fmt.Sprintf("any_regex[%d] matched", i)}}
+			ok, err := matchesAny(ctx, re, forms)
+			if err != nil {
+				return nil, fmt.Errorf("match any_regex[%d]: %w", i, err)
+			}
+			if ok {
+				return []Hit{{Offset: NoOffset, Detail: fmt.Sprintf("any_regex[%d] matched", i)}}, nil
 			}
 		}
-		return nil
+		return nil, nil
 	case kindAllRegex:
 		forms := p.regexForms()
-		for _, re := range m.regexps {
-			if !matchesAny(re, forms) {
-				return nil
+		for i, re := range m.regexps {
+			ok, err := matchesAny(ctx, re, forms)
+			if err != nil {
+				return nil, fmt.Errorf("match all_regex[%d]: %w", i, err)
+			}
+			if !ok {
+				return nil, nil
 			}
 		}
 		var l hitList
@@ -316,28 +382,38 @@ func (m *Matcher) matchOne(p *preparedText) []Hit {
 				l.hits = append(l.hits, Hit{Offset: NoOffset, Detail: fmt.Sprintf("all_regex[%d] matched", i)})
 			}
 		}
-		return l.result("patterns")
+		return l.result("patterns"), nil
 	case kindKeywords:
 		forms := p.keywordForms()
 		var l hitList
 		for i, re := range m.regexps {
-			if matchesAny(re, forms) && l.keep(NoOffset) {
+			ok, err := matchesAny(ctx, re, forms)
+			if err != nil {
+				// The keywords before i are read in full, so their hits stay.
+				return l.result("keywords"), fmt.Errorf("match keywords[%d]: %w", i, err)
+			}
+			if ok && l.keep(NoOffset) {
 				l.hits = append(l.hits, Hit{Offset: NoOffset, Detail: fmt.Sprintf("keywords[%d] matched", i)})
 			}
 		}
-		return l.result("keywords")
+		return l.result("keywords"), nil
 	}
-	return nil
+	return nil, nil
 }
 
-// matchesAny reports whether re matches one of forms.
-func matchesAny(re *regexp.Regexp, forms []string) bool {
+// matchesAny reports whether re matches one of forms. It checks ctx before
+// each form, so it stops after at most one regex call on one form when ctx
+// ends. It then returns ctx.Err() as it is; the caller adds the context.
+func matchesAny(ctx context.Context, re *regexp.Regexp, forms []string) (bool, error) {
 	for _, f := range forms {
+		if err := ctx.Err(); err != nil {
+			return false, err
+		}
 		if re.MatchString(f) {
-			return true
+			return true, nil
 		}
 	}
-	return false
+	return false, nil
 }
 
 // compileRegexList compiles the entries of the list named field, with the
