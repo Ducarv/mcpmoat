@@ -1,6 +1,7 @@
 # mcpmoat
 
-An offline scanner for malicious or tampered MCP servers, built for the individual developer.
+An offline scanner for malicious or tampered MCP servers, built for the individual developer. It
+stays offline unless you use `--llm`.
 
 **Status: early release, [v0.1.0](https://github.com/Ducarv/mcpmoat/releases/tag/v0.1.0).** Phase 1
 is in progress. The YAML tool rules (tool poisoning and shadowing) do not run yet: see
@@ -8,7 +9,9 @@ is in progress. The YAML tool rules (tool poisoning and shadowing) do not run ye
 
 mcpmoat finds the MCP servers that Claude Code, Cursor and Codex load on your machine, reads the tools
 they expose, and checks them for tool poisoning, rug pulls, shadowing, dangerous config and
-typosquatting. It runs locally, needs no account and sends no telemetry.
+typosquatting. It runs locally, needs no account and sends no telemetry. It connects only to the
+servers you configured, and to an LLM provider only when you opt in with `scan --llm` (see
+[Optional LLM classification](#optional-llm-classification-sends-data-off-your-machine)).
 
 ## Install
 
@@ -104,6 +107,7 @@ mcpmoat scan                  # discover, connect, pin or compare the tools, and
 mcpmoat scan --no-connect     # static config analysis only; runs no server, reads no pins
 mcpmoat scan --fail-on medium # exit 1 also for a medium finding (default high)
 mcpmoat scan --json           # the same report as one JSON document on stdout
+mcpmoat scan --llm            # also ask an LLM to rate each tool; sends data off your machine
 mcpmoat pin --accept <name> --expect <digest>  # accept the tools of a server, only if they match the digest from scan
 mcpmoat version               # print the version, the commit and its date
 ```
@@ -169,7 +173,9 @@ mcpmoat scan --json | jq -r '.findings[] | "\(.rule_id) \(.server)"'
   inspected, and the warnings of an inspection.
 - **Exit codes** do not change: 0, 1 or 2 (see [Pins and rug pulls](#pins-and-rug-pulls)).
 - **`complete`** is `false` when the report can miss results, for example when a config file has a
-  problem or `pins.json` cannot be read. The exit code is then 2, and the reason is on stderr.
+  problem, `pins.json` cannot be read, or the LLM step of a `--llm` scan did not classify every
+  tool: a provider failure, an internal error of the LLM step, or more than 500 tools. The exit
+  code is then 2, and the reason is on stderr.
   `complete` can be `true` with exit code 2 when the save of new pins fails after the report, so
   always check the exit code too.
 - The document never holds env or header values. A finding names the key it is about, for example
@@ -178,8 +184,10 @@ mcpmoat scan --json | jq -r '.findings[] | "\(.rule_id) \(.server)"'
 - Decoded values are raw server text. A tool such as `jq -r` can print terminal control sequences,
   so do not print decoded values (names, diffs) to a terminal without escaping them. Use `jq`
   without `-r` to keep the escapes.
-- The format has a `schema_version` (now `1`). The schema is
-  [docs/schema/scan-output.v1.json](docs/schema/scan-output.v1.json). See
+- Each finding has a `source`: `rule` for a rule finding, `llm` for an advisory finding of
+  `--llm`.
+- The format has a `schema_version` (now `2`; version 2 added `source`). The schema is
+  [docs/schema/scan-output.v2.json](docs/schema/scan-output.v2.json). See
   [JSON output](docs/ARCHITECTURE.md#json-output) for the shape and the version policy.
 
 ## Pins and rug pulls
@@ -275,16 +283,21 @@ mcpmoat scan --json | jq -r '.findings[] | "\(.rule_id) \(.server)"'
 
 `mcpmoat scan` applies the built-in config rules (dangerous config, T4, and typosquatting, T5) to
 every server it finds. The ignore list below drops findings of these rules. The pin findings
-(`MOAT-T2-001` to `MOAT-T2-004`) are different: only `--ignore` drops them (see below). The YAML tool rules (descriptions and schemas) are not applied to
-tools yet, so they do not run.
+(`MOAT-T2-001` to `MOAT-T2-004`) and, with `--llm`, the LLM findings (`MOAT-LLM-001` and
+`MOAT-LLM-002`) are different: only `--ignore` drops them (see below). The YAML tool rules
+(descriptions and schemas) are not applied to tools yet, so they do not run.
 [Exit codes](#exit-codes) tells how the findings set the exit code.
 
 `--ignore <rule-id>` ignores all findings of one rule. You can use the flag more than one time.
 
 A `.mcpmoat-ignore` file in the working directory also ignores findings of the config rules. It
-cannot ignore the pin rules `MOAT-T2-001` to `MOAT-T2-004`, because the file can come from a cloned
-repository and must not silence the rug-pull alarm. Use `--ignore` on the command line for them.
-When the file has such an entry, `scan` prints a warning. Write one entry on each
+cannot ignore the pin rules `MOAT-T2-001` to `MOAT-T2-004` or the LLM rules `MOAT-LLM-001` and
+`MOAT-LLM-002`, because the file can come from a cloned repository. It must not silence the
+rug-pull alarm, or the LLM classifier for every server of a user who runs `scan --llm` there. Use
+`--ignore` on the command line for these rules. When a file entry for one of these rules matches a
+finding, `scan` keeps the finding and prints a warning on stderr:
+`mcpmoat scan: warning: .mcpmoat-ignore cannot ignore MOAT-LLM-001; use --ignore on the command line`.
+Write one entry on each
 line: `RULE-ID [server[/tool]]`. A line that starts with `#` is a comment. After the rule ID, a
 `#` as a separate word starts a comment to the end of the line. A server name cannot start with `#`.
 
@@ -308,9 +321,10 @@ space, because they can hide text in a terminal. mcpmoat skips a malformed line 
 warning with its line number.
 
 **Security note:** mcpmoat reads `.mcpmoat-ignore` from the directory you run it in, also in a
-repository that you cloned. A repository can use this file to hide findings for any server, also
-for your global servers: an entry without a server, such as `MOAT-T1-003`, applies to every server.
-When the file gives entries, mcpmoat prints `using N entries from .mcpmoat-ignore` (or
+repository that you cloned. A repository can use this file to hide config findings for any server,
+also for your global servers: an entry without a server, such as `MOAT-T1-003`, applies to every
+server. It cannot hide the pin findings or the LLM findings (see above). When the file gives
+entries, mcpmoat prints `using N entries from .mcpmoat-ignore` (or
 `using 1 entry from .mcpmoat-ignore`) on stderr. If you see this line, read the file before you
 trust a clean result.
 
@@ -319,6 +333,117 @@ gives the count for each rule ID, for example
 `mcpmoat scan: 2 findings ignored: MOAT-T4-002 (2)`. It shows only rule IDs and counts. A
 `.mcpmoat-ignore` in a repository that you did not write can hide findings, so check this line and
 the file. Ignored findings do not count for the exit code, so the file can turn exit code 1 into 0.
+
+## Optional LLM classification (sends data off your machine)
+
+**Warning: `scan --llm` sends the name and description of every inspected tool to an LLM provider.
+This data leaves your machine.** The option is off by default. Without `--llm`, mcpmoat reads no
+API key and sends nothing to an LLM provider.
+
+```sh
+mcpmoat scan --llm                                                # Anthropic API, default model
+mcpmoat scan --llm --llm-provider openai --llm-model <model>      # OpenAI API
+mcpmoat scan --llm --llm-provider openai --llm-model <model> \
+  --llm-base-url http://127.0.0.1:8080/v1                         # a local OpenAI-compatible server
+```
+
+- **API key:** mcpmoat reads it only from the `MCPMOAT_LLM_API_KEY` environment variable. There is no
+  flag for it, because command-line arguments show in `ps` and in your shell history. With `--llm`
+  and no key, `scan` exits with code 2 and names the variable. A local server needs a key too: use
+  any value that it accepts (see `--llm-base-url` below).
+- **`--llm-provider anthropic|openai`:** the API. The default is `anthropic`. `openai` also works
+  with a server that speaks the OpenAI Chat Completions API.
+- **`--llm-model <name>`:** the model. It is required for `openai`. `mcpmoat scan -h` shows the
+  default model for `anthropic`.
+- **`--llm-base-url <url>`:** the base URL of the API. The default is the public API of the
+  provider. It must use `https`, or `http` only for a loopback host such as `127.0.0.1` or
+  `localhost`. With `http`, every address that the host name resolves to must be a loopback
+  address. Otherwise `scan` refuses the URL and sends no request. A user name, a password, a query
+  or a fragment in the URL is refused. With an `http` base URL, any process on this machine that
+  listens on that port gets the key in clear text. So use a key made for that local server or
+  gateway, not a real provider key.
+- Each `--llm-*` flag needs `--llm`. `--llm` does not work with `--no-connect`, because without a
+  connection there are no tools to send. Both are usage errors (exit code 2).
+- **Warning line:** before the first request, `scan` prints this line on stderr, also with `--json`:
+  `mcpmoat scan: warning: --llm sends the name and description of every tool to the LLM provider
+  <provider> at <host>. This data leaves your machine.`
+- **What is sent:** one request for each tool of each server that `scan` inspected (status `ok`).
+  The request holds the tool name (cut at 512 bytes) and the tool description (cut at 16 KiB, or
+  less when the whole message would pass 24 KiB once it is JSON-escaped), with a flag that says
+  that text was cut, and a fixed instruction text from mcpmoat. `--ignore` hides LLM findings from
+  the report, but it does not stop a tool from being sent. To keep a server out of `--llm`, scan it
+  with a separate config.
+- **What mcpmoat never puts in a request:** your config files, env values, headers, args, URLs, the
+  tool schemas and `pins.json`. The key goes only in the auth header of the provider.
+- **The description goes as the server wrote it:** mcpmoat does not remove secret values from it.
+  A server that got a token through its env or headers can put that token into a description, and
+  `--llm` then sends it to the provider. Run `--llm` only if you accept that a tool description can
+  leave your machine as the server wrote it.
+- **No tool to send:** when no server was inspected, or the inspected servers list no tools,
+  `scan` prints `mcpmoat scan: --llm had no tool to classify` on stderr. The exit code does not
+  change.
+- **Limits:** at most 500 tools in one scan and 4 requests at the same time. Each request has 30
+  seconds. mcpmoat does not retry and does not follow redirects. The request and the response are
+  each capped at 64 KiB. The cost of a scan grows with the number and the size of the tool
+  descriptions. The LLM requests honour `HTTPS_PROXY` and `NO_PROXY`, like the connections to your
+  servers, when the base URL is `https`. A base URL with `http` (a loopback host only) never uses a
+  proxy.
+- **Findings:** the model can answer only with a risk level and a category from a fixed list.
+  mcpmoat shows no text from the model.
+  - `MOAT-LLM-001`: the model rates the tool as risky. The severity is the risk level: `low`,
+    `medium` or `high`, never `critical`. A risk level of `none` gives no finding.
+  - `MOAT-LLM-002` (medium): the model refused, or its answer did not match the fixed format. A
+    description written to confuse the model can cause this. Only an unusable model answer gives
+    this finding. Any other error stops the LLM step (see **Exit codes** below).
+  - When the model answers `none` or `low`, or the answer is unusable, for a tool whose name or
+    description was cut, the tool gets one `MOAT-LLM-001` finding of severity `medium` with
+    category `other`. An answer of `medium` or `high` keeps its severity and category. An unusable
+    answer for a tool that was not cut still gives `MOAT-LLM-002`. The part after the cut was not
+    rated and can hold the payload, and the risk text of the finding says so.
+
+  An LLM finding is marked `[LLM]` and has a `Source` line. In JSON its `source` is `llm`, and
+  `related` holds the category. A short sample:
+
+  ```text
+  HIGH (1)
+    MOAT-LLM-001  Language model rates this tool as risky [LLM]
+      Server: files (cursor, global)
+      Source: LLM classification (advisory)
+      Tool: read_file (credential-access)
+      Risk: An LLM classifier rated this tool description as likely to make the AI agent read ...
+      Fix: Read the full tool description and check it by hand. ...
+  ```
+
+- **Advisory only:** a model can be wrong. No LLM finding does not mean that a tool is safe. A
+  hostile tool description can try to talk the model into a low rating. LLM findings only add to
+  the rule findings. They never remove or change a rule finding, and they never change the pins.
+- **What `--llm` does not check:** mcpmoat sends no input schema, so `--llm` does not rate text
+  that is hidden in a parameter description of a schema.
+- **Your API key and the servers:** mcpmoat does not pass the key to a server through the server
+  environment or through a placeholder. `scan` and `pin` hide the variable from every placeholder. A
+  `${MCPMOAT_LLM_API_KEY}` placeholder in a server config fails with an error. A placeholder with a
+  default, such as `${MCPMOAT_LLM_API_KEY:-x}`, gets the default (see
+  [Placeholders](docs/stdio-servers.md#placeholders)). But a stdio server
+  runs as your user and can read the environment of the mcpmoat process. Use a key made for this,
+  with a low spend limit, for `--llm`.
+- **Exit codes:** LLM findings count for `--fail-on` like any finding. A provider failure (a
+  network, TLS or proxy error, a timeout, an HTTP error or a redirect, a response that is too
+  large, or a response that is not a valid API answer) or more than 500 tools gives exit code 2.
+  The report still prints, `complete` is `false` in JSON, and stderr says how many tools were not
+  classified, for example
+  `mcpmoat scan: the LLM provider failed (HTTP 401 (the API key was refused)); 12 tools were not classified`.
+  An internal error of the LLM step also stops the step with exit code 2, and stderr then says
+  `mcpmoat scan: the LLM step failed (internal error); 12 tools were not classified`. mcpmoat
+  never prints the text of that error.
+  A hostile server can cause this on purpose: it can list more than 500 tools, or write a
+  description that makes the provider answer with an HTTP 4xx (a content filter or a context
+  limit). The rule findings still print.
+- **Ignore:** only `--ignore` works for `MOAT-LLM-001` and `MOAT-LLM-002`. `.mcpmoat-ignore`
+  cannot ignore them, because the file can come from a cloned repository: `scan` keeps the finding
+  and prints a warning (see [Ignore findings](#ignore-findings)). The ignored count on stderr
+  includes the findings that `--ignore` drops.
+- **OpenAI temperature:** the OpenAI request does not set a temperature, so models with a fixed
+  temperature work.
 
 ## Exit codes
 
@@ -336,6 +461,8 @@ here.
   `--fail-on` is a usage error (exit code 2). It is a `scan` flag only. `pin` never exits with
   code 1.
 - Ignored findings (`.mcpmoat-ignore` or `--ignore`) never give exit code 1.
+- With `--llm`, the LLM findings (`MOAT-LLM-001`, `MOAT-LLM-002`) count like any other finding.
+  They are `high` at most.
 - mcpmoat fails closed. A finding with a severity that mcpmoat does not know always counts, at
   every `--fail-on` value. A finding whose rule ID is not in the rule set counts as critical.
 - No built-in rule is critical yet, so `--fail-on critical` passes every built-in finding, also a
@@ -348,17 +475,19 @@ here.
 Exit code 2 comes, for example, from a usage error (invalid flags), invalid rules, an unreadable
 `--config` file, a problem in a config file, a `pins.json` that cannot be read or saved, a report
 that cannot be written (a closed stdout), an unknown home or working directory in auto-discovery,
-or an internal error. Some of these errors still print the report on stdout first, so you can read
-the findings:
+an `--llm` problem (a missing or invalid `MCPMOAT_LLM_API_KEY`, a provider failure, an internal
+error of the LLM step, or more than 500 tools), or an internal error. Some of these errors still
+print the report on stdout first, so you can read the findings:
 
 | Execution error | Report |
 |---|---|
 | A problem in a config file | Printed, then the problems. A `--config` file with a problem and no server prints only the problem. |
 | A `pins.json` that cannot be read or saved | Printed |
 | An internal error of the inspection (`inspect.Run`) | Printed |
+| An LLM provider failure, an internal error of the LLM step, or more than 500 tools with `--llm` | Printed |
 | A signal before the save of new pins | Printed |
-| A usage error, invalid rules, or an unknown home or working directory | Not printed |
-| A signal during the inspection | Not printed |
+| A usage error (also a bad `--llm-*` flag or a missing API key), invalid rules, or an unknown home or working directory | Not printed |
+| A signal during the inspection or the LLM step | Not printed |
 | A report that cannot be written | Not printed |
 
 A signal is Ctrl-C, `SIGTERM` or `SIGHUP`. It gives exit code 2 at these times:
@@ -370,6 +499,8 @@ A signal is Ctrl-C, `SIGTERM` or `SIGHUP`. It gives exit code 2 at these times:
   it prints the report and the `pins.json` error, without the line below.
 - During the inspection. `scan` stops the stdio servers that it started, prints
   `mcpmoat scan: interrupted; no pins were saved`, saves nothing and prints no report.
+- During the LLM step of a `--llm` scan. `scan` stops the requests and then does the same: it
+  prints the same line, saves nothing and prints no report.
 - After the report, before the save of new pins. `scan` prints the same line and saves nothing.
   This applies only when the scan has new servers to pin.
 
@@ -401,6 +532,9 @@ go build -o mcpmoat ./cmd/mcpmoat
   into a tool description, and then that text is stored in `pins.json`. mcpmoat does not start a
   server from an untrusted project file or a turned-off server, and no flag allows it yet. The YAML
   tool rules do not run yet, so exit code 0 does not mean that the tools are safe.
+- `--llm` does not make a scan complete or reliable. A model can miss a malicious tool, and a
+  hostile description can try to influence the model. Its findings are advisory, and with `--llm`
+  your tool names and descriptions leave your machine.
 - Not done yet: a lock for `pins.json` (#150).
 - `scan --rules <dir>` loads and checks extra rule files, but `scan` does not apply them yet. It
   prints `mcpmoat scan: rules from --rules are loaded and checked, but not applied yet` on stderr.

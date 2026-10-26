@@ -2,7 +2,8 @@
 //
 // It discovers the MCP servers configured for Claude Code, Cursor and Codex,
 // inspects them and reports findings. It runs offline: it makes no network
-// calls except to the servers you configured.
+// calls except to the servers you configured and, only with scan --llm, to
+// the LLM provider.
 //
 // Usage:
 //

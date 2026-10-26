@@ -11,6 +11,8 @@ import (
 	"text/tabwriter"
 
 	"github.com/Ducarv/mcpmoat/internal/inspect"
+	"github.com/Ducarv/mcpmoat/internal/llm"
+	"github.com/Ducarv/mcpmoat/internal/report"
 	"github.com/Ducarv/mcpmoat/internal/rules"
 	"github.com/Ducarv/mcpmoat/internal/termsafe"
 )
@@ -51,6 +53,12 @@ type cli struct {
 	// internal/inspect/inspecttest, so they start no process and open no
 	// connection.
 	inspector inspect.Inspector
+	// newClassifier builds the LLM classifier for scan --llm (FR-17).
+	// runWithContext sets it to newLLMClassifier, a wrapper over llm.New.
+	// scan calls it only when --llm is given (see buildClassifier), so
+	// without the flag no LLM code runs (NFR-01). Tests inject a fake, or a
+	// stub that fails to prove that it is never called.
+	newClassifier func(llm.Config) (toolClassifier, error)
 	// ctx ends when the process gets a signal (see main). It is a field and
 	// not a parameter of command.run, so that every command keeps one
 	// signature. Use the ctxOrBackground method, which also handles a nil ctx.
@@ -93,8 +101,11 @@ func runWithContext(ctx context.Context, args []string, stdout, stderr io.Writer
 		getwd:   os.Getwd,
 		// The zero SDKOptions refuse servers from untrusted project files and
 		// servers that the client config turns off. scan has no flag to allow
-		// them.
-		inspector: inspect.New(inspect.SDKOptions{}),
+		// them. HiddenEnv keeps the API key of --llm out of every ${VAR}
+		// placeholder, so that no server config can send it to a server.
+		inspector: inspect.New(inspect.SDKOptions{HiddenEnv: []string{llm.KeyEnv}}),
+		// Called only by scan --llm. It sends no request.
+		newClassifier: newLLMClassifier,
 	}
 	// Decide from the writer that the report goes to, not from os.Stdout. A
 	// writer that is not a file (a buffer, a pipe wrapper) is never a terminal.
@@ -197,7 +208,7 @@ func colorDisabled(noColorFlag bool, getenv func(string) string) bool {
 // usage writes the help text to w. The command list comes from commands(), so
 // a new command shows up in help without a second edit.
 func (c *cli) usage(w io.Writer) {
-	fprintf(w, "mcpmoat finds malicious or tampered MCP servers. It runs offline.\n\n")
+	fprintf(w, "mcpmoat finds malicious or tampered MCP servers. It runs offline, unless you use scan --llm.\n\n")
 	fprintf(w, "Usage:\n  mcpmoat [--no-color] <command> [arguments]\n\n")
 
 	fprintf(w, "Commands:\n")
@@ -243,13 +254,19 @@ func scanUsage(w io.Writer) {
 	fprintf(tw, "  --fail-on <severity>\tExit 1 for a finding of this severity or above: low, medium, high or critical (default high)\n")
 	fprintf(tw, "  \tNo built-in rule is critical yet, so critical passes every built-in finding and scan prints a note\n")
 	fprintf(tw, "  \tAn unknown rule ID or severity still gives exit 1 (fail closed)\n")
-	fprintf(tw, "  --json\tPrint the report as one JSON document on stdout (schema: docs/schema/scan-output.v1.json)\n")
+	fprintf(tw, "  --json\tPrint the report as one JSON document on stdout (schema: docs/schema/scan-output.v%d.json)\n", report.SchemaVersion)
 	fprintf(tw, "  \tWarnings stay on stderr. The exit codes are the same\n")
 	fprintf(tw, "  \tstdout is empty when the scan stops before the report (exit 2)\n")
 	fprintf(tw, "  --no-color\tDisable colored output (also set by the NO_COLOR environment variable). It works before or after \"scan\"\n")
 	fprintf(tw, "  --ignore <rule-id>\tIgnore all findings of this rule; repeatable\n")
 	fprintf(tw, "  \tA %s file in the working directory also ignores findings: one \"RULE-ID [server[/tool]]\" per line; \"# ...\" on its own line or after the entry is a comment\n", rules.IgnoreFileName)
-	fprintf(tw, "  \tThe file cannot ignore the pin rules (MOAT-T2-*): it can come from a cloned repository. Use --ignore for them\n")
+	fprintf(tw, "  \tThe file cannot ignore the pin rules (MOAT-T2-*) or the LLM rules (MOAT-LLM-001, MOAT-LLM-002): it can come from a cloned repository. Use --ignore for them\n")
+	fprintf(tw, "  --llm\tAlso ask an LLM to rate each tool description. Off by default. Not with --no-connect\n")
+	fprintf(tw, "  \tIt sends the name and description of every tool to the LLM provider: this data leaves your machine\n")
+	fprintf(tw, "  \tThe API key comes only from the %s environment variable\n", llm.KeyEnv)
+	fprintf(tw, "  --llm-provider <api>\tThe LLM API: anthropic, or openai for an OpenAI-compatible API (default anthropic)\n")
+	fprintf(tw, "  --llm-model <name>\tThe model name (default for anthropic: %s; required for openai)\n", llm.DefaultAnthropicModel)
+	fprintf(tw, "  --llm-base-url <url>\tThe base URL of the API: https, or http for a loopback host only (default: the public API)\n")
 	_ = tw.Flush() // the write error is ignored on purpose, see fprintf
 
 	fprintf(w, "\nScan output:\n")
@@ -273,6 +290,9 @@ func scanUsage(w io.Writer) {
 	fprintf(w, "  Ctrl-C (or SIGTERM or SIGHUP) during the inspection, or after it while scan has new pins to save, stops scan with exit 2 and saves no pins.\n")
 	fprintf(w, "  --no-connect: scan runs only the built-in config rules (T4 and T5). It reads and writes no pins.\n")
 	fprintf(w, "  The tool rules (YAML) are not applied to tools yet. Rules from --rules are loaded and checked, but not applied yet.\n")
+	fprintf(w, "  --llm: the LLM findings (MOAT-LLM-001, and MOAT-LLM-002 for an invalid answer) are advisory and marked [LLM].\n")
+	fprintf(w, "  They are high at most, and they count for --fail-on. They never remove a rule finding.\n")
+	fprintf(w, "  scan sends at most %d tools. A provider error or more tools than that gives exit 2; the report still prints.\n", maxLLMTools)
 	fprintf(w, "  Exit code 1 means a finding that is not ignored, with severity at or above --fail-on (default high).\n")
 }
 

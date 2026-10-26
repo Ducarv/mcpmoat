@@ -7,7 +7,9 @@
 > runs (T2). It prints a diff for each new and each changed tool. `mcpmoat pin --accept <server>
 > --expect <digest>` accepts the changes. The YAML rules are not
 > applied to tools yet (#143). `mcpmoat scan --json` writes the same report as one JSON document
-> (FR-15, see [JSON output](#json-output)).
+> (FR-15, see [JSON output](#json-output)). `mcpmoat scan --llm` also asks a language model to rate
+> the name and description of each inspected tool, and adds advisory findings (FR-17, see
+> [The `--llm` classifier](#the---llm-classifier)).
 
 This page is the one place for the package layout, the import direction, the data flow, the
 `internal/inspect` interface and the rules for untrusted text. The [PRD](PRD.md) holds the product
@@ -28,6 +30,7 @@ internal/
   pins/                 tool hash, pins.json store, change detection and diff
   report/               terminal and JSON output
     reporttest/         test helpers for report: schema loader, unsafe-byte check
+  llm/                  optional --llm classifier (Anthropic or OpenAI-compatible API)
 rules/                  built-in rules (go:embed)
 testdata/               fixtures for tests and the demo
   configs/              example client configs
@@ -39,7 +42,10 @@ docs/                   PRD and other documentation
   `configs.go` holds the config loader that `scan` and `pin` share (`loadConfigs`), so both commands
   apply the same trust rules to a config file. `pins_shared.go` holds the helpers of the pin step
   that both commands use (`serverIdentity`, `readPins`, `pinnable`, `appendDiff`). `scan_pins.go`
-  holds the pin step of `scan` (`pinner`), and `accept_hint.go` the "To accept" line.
+  holds the pin step of `scan` (`pinner`), and `accept_hint.go` the "To accept" line. `scan_llm.go`
+  holds the `--llm` step: it maps each `inspect.Tool` to an `llm.Input` and calls a
+  `toolClassifier`, a small interface that `*llm.Client` implements. The `cli.newClassifier`
+  factory builds it, and tests replace the factory with a fake.
 - `internal/termsafe`: escapes untrusted text for the terminal. See
   [Where untrusted text is escaped](#where-untrusted-text-is-escaped).
 - `internal/safefile`: the one shared hardened file read. It confines the open to a directory with
@@ -62,6 +68,9 @@ docs/                   PRD and other documentation
   diffs of changed, new and not verified tools (`WriteDiffs`). `Style` (`style.go`) decides the
   colour. See [Terminal report](#terminal-report). It also renders the JSON report of
   `scan --json` (`WriteJSON`). See [JSON output](#json-output).
+- `internal/llm`: the optional `--llm` client (FR-17). It sends the name and description of one tool
+  to an Anthropic or OpenAI-compatible API and accepts only a fixed verdict. It uses the standard
+  library only. See [The `--llm` classifier](#the---llm-classifier).
 - `rules/`: the built-in rule files (`rules/*.yaml`) and `data/popular-servers.txt`. The Go file
   `rules/embed.go` embeds both with `go:embed`. It holds data only. `internal/rules` parses it.
 - `testdata/`: fixtures. `testdata/servers` holds malicious example servers. `testdata/configs`
@@ -91,14 +100,36 @@ only in `_test.go` files, so none of them reaches the binary.
 | `internal/rules` | `discover`, `inspect`, `safefile`, `termsafe`, `rules` (the embedded data) |
 | `internal/report` | `discover`, `inspect`, `termsafe` |
 | `internal/pins` | `inspect`, `safefile`, and the module `github.com/aymanbagabas/go-udiff` |
-| `cmd/mcpmoat` | `discover`, `inspect`, `pins`, `report`, `rules`, `termsafe` |
+| `internal/llm` | `discover` |
+| `cmd/mcpmoat` | `discover`, `inspect`, `llm`, `pins`, `report`, `rules`, `termsafe` |
 
 `internal/inspect` does not import `termsafe`. The report layer escapes what `inspect` returns.
+`internal/llm` does not import `inspect`: `cmd/mcpmoat` gives it only the tool name and description.
+
 You can check this table with:
 
 ```sh
 go list -f '{{.ImportPath}}: {{join .Imports " "}}' ./...
 ```
+
+Depguard rules in `.golangci.yml` also fence the network and the processes. They check non-test
+files only:
+
+- `net-http-only-in-inspect-and-llm`: only `internal/inspect` and `internal/llm` may import
+  `net/http` or a package below it, such as `net/http/httptrace`.
+- `net-only-in-inspect-and-llm`: only `internal/inspect` and `internal/llm` may import the bare
+  `net` package. The rule matches `net` exactly, so `net/url` and `net/netip` are not covered.
+- `net-dial-only-in-inspect-and-llm`: only `internal/inspect` and `internal/llm` may import
+  `net/smtp`, `net/rpc` (also `net/rpc/jsonrpc`) or `crypto/tls`.
+- `os-exec-only-in-inspect`: only `internal/inspect` and its test helper
+  `internal/inspect/inspecttest`, which builds the fixture servers, may import `os/exec`.
+- `llm-only-in-cmd`: only `cmd/mcpmoat` may import `internal/llm`.
+
+So a non-test file in another package that imports `net`, `net/http`, `net/smtp`, `net/rpc`,
+`crypto/tls` or `os/exec` fails the lint gate (NFR-01, NFR-04). The fence is defence in depth, not
+a proof. It does not cover `os.StartProcess`, `syscall` (`cmd/mcpmoat` and `internal/safefile`
+import it) or the imports of third-party packages. The network tests in `cmd/mcpmoat` and the
+offline CI job are the proof.
 
 ## Data flow
 
@@ -107,16 +138,22 @@ go list -f '{{.ImportPath}}: {{join .Imports " "}}' ./...
 `mcpmoat scan` does these steps today:
 
 1. `cmd/mcpmoat` parses the flags and checks `--timeout`, `--concurrency` and `--fail-on`. A bad
-   value is a usage error with exit code 2.
+   value is a usage error with exit code 2. Then `setupLLM` checks the `--llm` flags and the API
+   key. With `--llm`, it also prints the warning that data leaves the machine and builds the
+   classifier. This all happens before the rules load (see
+   [The `--llm` classifier](#the---llm-classifier)).
 2. It loads the rules with `rules.Builtin` and, with `--rules`, `rules.LoadDir`. Then
    `rules.NewSet` checks for duplicate rule IDs and for clashes with built-in IDs. This only loads
    and checks the rules. A bad rule file or an ID problem gives exit code 2.
 3. It reads `.mcpmoat-ignore` with `rules.ReadIgnoreFile` and adds the `--ignore` rule IDs. It keeps
    two lists (`scanIgnores` in `cmd/mcpmoat/scan_pins.go`): one for the config rules, with the file
-   and the flags, and one for the pin rules, with the flags only. The file can come from a cloned
-   repository, so it cannot ignore a pin rule. The guard is `pins.IsPinRuleID`: a rule ID is a pin
-   rule when it starts with `MOAT-T2-` (the unexported `ruleIDPrefix`). `scan` prints a warning for
-   each such rule ID, and tells the user to use `--ignore`.
+   and the flags, and one for the pin rules and the LLM rules, with the flags only. The file can come
+   from a cloned repository, so it cannot ignore a pin rule or an LLM rule. The guard is
+   `fileCannotIgnore`: it is true for a pin rule (`pins.IsPinRuleID`: the rule ID starts with
+   `MOAT-T2-`, the unexported `ruleIDPrefix`) and for `llm.RuleID` and `llm.RuleIDInvalid`
+   (`MOAT-LLM-001` and `MOAT-LLM-002`). When a file entry for such a rule matches a finding, `scan`
+   keeps the finding, prints one warning for each such rule ID (`warnFileCannotIgnore`), and tells
+   the user to use `--ignore`.
 4. It finds the servers with `loadConfigs` in `cmd/mcpmoat/configs.go`. That function runs
    `discover.Discover`, or reads one file with `discover.ReadConfig` when `--config` is set. `pin`
    uses the same function, so both commands read the configs with the same trust rules.
@@ -196,6 +233,14 @@ the connect and pin steps between step 5 and step 6:
   which server `pin --accept <name>` would select among all servers of the scan (`selectServers`,
   the same function that `pin` uses). It sets `project` when `pin` needs `--project` to select the
   server, and `ambiguous` when the name cannot select it.
+- 5d. Only with `--llm` (FR-17), `classifyTools` in `cmd/mcpmoat/scan_llm.go` runs after the pin
+  step. It sends the name and description of each tool of each server with status `StatusOK` to the
+  classifier, and adds one advisory row for each tool that the model rates as risky, for each tool
+  with an unusable answer, and for each cut tool (see the verdict rules in
+  [The `--llm` classifier](#the---llm-classifier)). It only adds rows: it never changes or drops a
+  rule finding, and it never touches pins, diffs or hints. Only `--ignore` drops LLM rows, as for
+  the pin rows. The `.mcpmoat-ignore` file does not (see step 3).
+  The ignored count includes the dropped LLM rows.
 - The pin findings join the config findings in one report. A changed tool and a new tool also get a
   diff, so the user can review the content of a new tool before they accept it. A new tool has the
   header `New tool <tool> on server <server>:` and only added lines. A not verified tool with a diff
@@ -231,7 +276,8 @@ the connect and pin steps between step 5 and step 6:
 
 `--no-connect` starts no process and reads and writes no `pins.json`.
 
-In `reportScan`, a signal during the inspection or a report write error returns 2 at once.
+In `reportScan`, a signal during the inspection or the LLM step, or a report write error, returns 2
+at once.
 Otherwise `reportScan` prints the report and then gets the exit code from `scanExitCode` in
 `cmd/mcpmoat/scan_findings.go`. An execution error gives 2, and 2 wins over 1. Otherwise
 `hasFailingFinding` gives 1 when a row (the ignored findings are already dropped) has a severity at
@@ -377,8 +423,17 @@ func Run(ctx context.Context, servers []discover.Server, opts Options, insp Insp
   `Status` is `StatusOK`, `StatusTimeout` or `StatusFailed`.
 - `Result` holds the server identity, the instructions text and the lists of `Tool`, `Prompt`,
   `Resource` and `ResourceTemplate`, plus `Warning` values.
-- `SDKInspector` is the real `Inspector`. Make one with `New(SDKOptions{AllowUntrusted, AllowDisabled})`.
-  It starts stdio servers itself and gives remote servers to `Remote(ctx, srv, RemoteOptions)`.
+- `SDKInspector` is the real `Inspector`. Make one with
+  `New(SDKOptions{AllowUntrusted, AllowDisabled})`. It starts stdio servers itself and gives remote
+  servers to `Remote(ctx, srv, RemoteOptions)`.
+- `SDKOptions.HiddenEnv` hides variables from every placeholder. `scan` passes the LLM key
+  variable. See [Placeholders](stdio-servers.md#placeholders).
+- `SDKOptions.Dial` is a test hook for NFR-01. It is nil in production, and nil uses a
+  `net.Dialer`. When it is set, every connection to a remote server goes through it. It sees only
+  the addresses that pass the DNS pin and the address guard, so the guard still applies. With a
+  proxy, it sees the address of the proxy. It has no effect on stdio servers.
+  `cmd/mcpmoat/network_test.go` uses it to prove that `scan` dials only the configured fixture
+  hosts.
 
 Among the product packages, only `internal/inspect` imports the MCP SDK (the fixture servers under
 `testdata/` also use it). The depguard rule `mcp-sdk-only-in-inspect` in `.golangci.yml` enforces
@@ -491,7 +546,9 @@ Known limits:
    have findings. Each finding has the rule ID and title, the server as `name (client, scope)`
    (so two servers with the same name in two configs differ), a `Where` line (field and key), a
    `Tool` line (a pin finding about one tool) or a `Reason` line (a pin finding about the whole
-   server), a `Risk` line and a `Fix` line.
+   server), a `Risk` line and a `Fix` line. An LLM finding (`--llm`) has ` [LLM]` after its title
+   and a `Source: LLM classification (advisory)` line after the server line, for example
+   `MOAT-LLM-001  Language model rates this tool as risky [LLM]`.
 4. The diffs (`report.WriteDiffs`) and the `To accept` lines.
 
 The `Risk` and `Fix` text of a built-in rule comes from its YAML file (the `risk` and
@@ -499,7 +556,10 @@ The `Risk` and `Fix` text of a built-in rule comes from its YAML file (the `risk
 (`ChangeKind.Risk` and `ChangeKind.Remediation`). These remediations name the `To accept` command.
 `scan` prints no such line for a server whose tools cannot be pinned, so it gives every pin finding
 of that server a fixed text of its own (`fixNotPinnable` in `cmd/mcpmoat/scan_pins.go`). The
-MOAT-T2-004 findings that `scan` makes itself get their own fixed texts too.
+MOAT-T2-004 findings that `scan` makes itself get their own fixed texts too. The LLM findings
+MOAT-LLM-001 and MOAT-LLM-002 have fixed titles, risk texts and remediations in `internal/llm`
+(`Title`, `Category.Text`, `Remediation`, `InvalidTitle`, `InvalidText`, `InvalidRemediation`). No
+text from the model reaches them.
 
 The summary and the findings are the report. They are not logs, so they stay on stdout. Warnings
 do not change the exit code, which counts findings only (FR-16).
@@ -523,21 +583,24 @@ first, so an escape sequence in that text never reaches the terminal as one.
 ## JSON output
 
 `mcpmoat scan --json` (FR-15) writes the report as one JSON document on stdout. The schema is
-[docs/schema/scan-output.v1.json](schema/scan-output.v1.json). The Go types are in
+[docs/schema/scan-output.v2.json](schema/scan-output.v2.json). The version 1 schema file,
+[docs/schema/scan-output.v1.json](schema/scan-output.v1.json), stays unchanged. The Go
+types are in
 `internal/report/json.go`. `cmd/mcpmoat/scan_json.go` fills them from the same data as the
 terminal report, in the same order. The one difference: `findings` keeps the order of the rows,
 and the terminal report groups them by severity. The report types hold plain strings, bools and ints, never a
 `discover` type, so a secret cannot reach the output by accident.
 
-Shape (`schema_version` 1):
+Shape (`schema_version` 2):
 
 - Top level: `schema_version`, `tool` (`name`, `version`), `mode` (`no-connect` or `connect`),
   `complete`, `servers`, `findings`, `diffs` and `errors`. An empty list is `[]`, never `null`.
 - `complete` is `false` when the report can miss results: a config file has a problem (see
   `errors`), or the inspection or the pin step failed as a whole (for example, `pins.json` cannot
-  be read). The exit code is then 2, and the reason is on stderr only. A failed save of new pins
-  comes after the document is written, so it does not change `complete`: the findings are whole,
-  and the exit code is 2.
+  be read), or the LLM step of a `--llm` scan did not classify every tool: a provider failure, an
+  internal error of the LLM step, or more tools than the `--llm` cap. The exit code is then 2, and
+  the reason is on stderr only. A failed save of new pins comes after the document is written, so it
+  does not change `complete`: the findings are whole, and the exit code is 2.
 - A server has `name`, `client`, `scope`, `project_path`, `untrusted`, `state`, `transport`,
   `source`, `inspection.status` (`not_run`, `ok`, `timeout`, `failed` or `refused`) and either
   `argv` (stdio) or `url` (http and sse). Both are redacted like in the terminal report.
@@ -550,8 +613,10 @@ Shape (`schema_version` 1):
   gives a `MOAT-T2-004` finding when both copies were inspected, or when the identity is pinned
   and a copy failed. An identity that is not pinned, with one copy `ok` and one that failed, gives
   only the warning on stderr.
-- A finding has `rule_id`, `severity`, `server`, `field`, `key` and `related`. `related` is a
-  second name (a key or a server) or a fixed reason text, never a value.
+- A finding has `rule_id`, `severity`, `server`, `field`, `key`, `related` and `source`. `related`
+  is a second name (a key or a server), a fixed reason text or, for `MOAT-LLM-001`, the category
+  of the verdict. It is never a value. `source` is required: `rule` for a rule finding and `llm` for
+  an advisory finding of `--llm`. It is the only finding field that is never empty.
 - A diff has `server`, `tool`, `kind` (`changed`, `new` or `unverified`), `diff`,
   `diff_truncated` and `diff_is_note`. When `diff_is_note` is true, `diff` is a fixed note of
   mcpmoat, not a unified diff: the diff could not be made, or the change does not show in the
@@ -592,11 +657,105 @@ meaning of a field bumps `SchemaVersion` and adds `docs/schema/scan-output.v<N>.
 `internal/report` and `cmd/mcpmoat`. A test in `internal/report` compares the struct tags of the
 Go types with the schema file of the current version, and fails when they differ. A second test
 validates sample output against the schema. The limit: the tests cannot stop someone from editing
-the v1 schema file in place. The reviewer must catch that. An old schema file is kept as it was
+an old schema file in place. The reviewer must catch that. An old schema file is kept as it was
 released.
 
-Not in version 1: accept hints (#169), ignored counts (#175), a summary, `pin --json` and
+History: version 1 is the first format. Version 2 adds the required finding field `source` (for
+`--llm`, FR-17), and `complete` is also `false` when the LLM step did not classify every tool. The
+other fields keep their names and types.
+
+Not in version 2: accept hints (#169), ignored counts (#175), a summary, `pin --json` and
 `--fail-on` (#65).
+
+## The `--llm` classifier
+
+`mcpmoat scan --llm` (FR-17) asks a language model to rate the name and description of each
+inspected tool. It is off by default. Without `--llm`, `runScan` reads no API key and never calls
+`cli.newClassifier`, so no LLM code sends anything (NFR-01).
+
+This section holds the code structure and the design reasons. Other files own the rest:
+
+- The user contract (flags, warning, what is sent, limits, findings, exit codes and security notes)
+  is in [README.md](../README.md#optional-llm-classification-sends-data-off-your-machine).
+- The requirements are in FR-17 of [PRD](PRD.md).
+- The threat model is in [PRD section 5.3](PRD.md#53-threats), which owns it. The package doc
+  comment in `internal/llm/doc.go` holds the code-level notes of the threat model.
+
+Setup:
+
+- `setupLLM` in `cmd/mcpmoat/scan_llm.go` runs in step 1 of the data flow. It calls
+  `checkLLMFlags`, which checks the flags, the base URL and the key and returns the LLM config. A
+  problem is a usage error (exit 2) before `scan` reads a config file. The error texts are fixed
+  and never hold the key, the model name or the URL.
+- Then `setupLLM` prints the warning on stderr with `scanWarnf`. The host in it goes through
+  `termsafe.Quote`. Only after that, `buildClassifier` calls `cli.newClassifier`. It is the only
+  call of that function, and it never runs without `--llm`.
+- The provider, model and base URL come only from flags. The API key comes only from the
+  environment (`llm.KeyEnv`), because an argument would show in `ps` and in the shell history.
+  The key is a `discover.Secret`, so it prints as a mask in `fmt` and `slog` output.
+- The base URL must be `https`, or `http` for a loopback host. The reason: the key must never
+  cross a network in clear text.
+
+The dial hook: `llm.Config.Dial` is a test hook. It is nil in production, and nil uses a
+`net.Dialer`. For an `http` base URL, `loopbackDial` wraps it. It resolves the host at connect
+time, requires that every address is a loopback address, and dials only those addresses. The check
+at connect time is needed because a name such as `localhost` is loopback only by its text: the
+system resolver can map it to another address. An address that does not answer gets a short
+timeout, so the next address is tried soon (for example when a firewall drops packets to `::1`).
+The client has its own `http.Transport` with TLS 1.2 or later. It follows no redirect, because a
+redirect would carry the key to another location. It never uses a proxy for an `http` base URL, so
+the key never goes to a proxy in clear text. For `https` it honours `HTTPS_PROXY` and `NO_PROXY`,
+like the server connections. Go ignores a proxy value that it cannot parse and then connects
+directly. The limits of a scan (tool count, workers, timeout, body size) are in the
+[README](../README.md#optional-llm-classification-sends-data-off-your-machine). They live in
+`cmd/mcpmoat` (`maxLLMTools`, `llmWorkers`) and `internal/llm`.
+
+What is sent: `internal/llm` builds one request for each tool from the fixed system prompt
+(`llm.SystemPrompt`), the fixed verdict schema and one user message. The message is a JSON object
+with `tool_name`, `tool_description` and `truncated`. The description goes into it as a JSON string
+value, never into the system prompt, so it cannot change the instructions of the model.
+`cmd/mcpmoat` gives `internal/llm` only the name and the description (see
+[Import direction](#import-direction)). The cuts are made at a rune boundary: `llm.MaxToolNameBytes`,
+`llm.MaxDescriptionBytes` and, for the whole message, `llm.MaxToolMessageBytes`. `Classify` sets
+`Verdict.Truncated` when it cut the name or the description. The flag never comes from the model
+output. A cut name or description is a sign of risk, because the part that is not shown can hold
+the payload. The system prompt tells the model to rate it at least `medium`, but the code does not
+trust the model for this (see the verdict below).
+
+The verdict: `parseVerdict` reads the model answer strictly: exactly one JSON object with the keys
+`risk` and `category`, exact keys and case, no duplicate key, no other key, nothing after the
+object. The values come from fixed lists. `classifyTools` turns a verdict into rows:
+
+- A risk of `low`, `medium` or `high` gives one `MOAT-LLM-001` finding with that severity. The
+  category goes in `related`. `none` gives no finding. The severity is never `critical`.
+- `llmRow` builds the row. For a tool with `Verdict.Truncated` set, it returns `truncatedRow` when
+  `belowMedium` is true for the risk or the answer is unusable. That row has the fixed text
+  `llm.TruncatedText`. The code enforces the rule, not only the system prompt, because a prompt
+  injection in the part before the cut could ask the model for `none`. The README owns the rule
+  that the user sees: see
+  [`--llm`](../README.md#optional-llm-classification-sends-data-off-your-machine).
+- An answer that cannot be used for a tool that was not cut gives `MOAT-LLM-002` (medium). That is
+  an invalid answer, a refusal or an answer cut at the token limit. Only `llm.ErrInvalidOutput`
+  gives this finding.
+- The finding texts are fixed in `internal/llm`, so no text from the model reaches the terminal or
+  the JSON output.
+
+`sortAnswer` sorts every error of `Classify` and fails closed. `llm.ErrInvalidOutput` gives
+`MOAT-LLM-002`, the end of the context is a stop, and `llm.ErrProvider` is a provider failure. Any
+other error is an internal error. Both failures stop the step. The first failure stops the running
+requests, starts no new one and decides the stderr line. So a new error path can never make a
+failed step look like a complete scan. The README lists the provider failures and the texts of the
+exit-code-2 cases (see [`--llm`](../README.md#optional-llm-classification-sends-data-off-your-machine)
+and [Exit codes](../README.md#exit-codes)). Every error of `internal/llm` has fixed text. It never
+holds the key, a URL, a header, a response body or model output.
+
+`classifyTools` only adds rows. It never changes or drops a rule finding, a pin, a diff or a
+`To accept` line. The LLM rules share the exception of the pin rules: only `--ignore` drops LLM
+rows, and the file cannot ignore them (step 3).
+
+The proof that nothing is sent without `--llm` is the network tests in `cmd/mcpmoat` and the
+offline CI job. The depguard fence (see [Import direction](#import-direction)) only keeps the
+network code in `internal/inspect` and `internal/llm`.
 
 ## Where untrusted text is escaped
 
@@ -631,6 +790,11 @@ character, an escape sequence, a bidi override or invalid UTF-8 shows as a visib
 tool and server names in the diff header are escaped too. The summary of `scan` and the stderr
 lines of `scan` and `pin` that name a server or carry server output (the pinned notice, the
 warnings and the errors) are escaped and cut in the same way.
+
+An LLM finding row holds the tool name and the server name, which are escaped like the names of
+any other finding. Its title, risk text, remediation and category are fixed text from
+`internal/llm`. The model output never reaches the row. The `--llm` warning escapes the host of the
+base URL, and the provider failure line holds only fixed text and numbers.
 
 For secrets in output, see [Code style](../.agents/project.md#code-style).
 

@@ -1,5 +1,5 @@
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "tool": {
     "name": "mcpmoat",
     "version": "1.2.3"
@@ -113,7 +113,8 @@
       "server": "cc-global",
       "field": "args",
       "key": "",
-      "related": "cc-global"
+      "related": "cc-global",
+      "source": "rule"
     },
     {
       "rule_id": "MOAT-T4-004",
@@ -121,7 +122,8 @@
       "server": "cc-global",
       "field": "args",
       "key": "",
-      "related": ""
+      "related": "",
+      "source": "rule"
     },
     {
       "rule_id": "MOAT-T4-003",
@@ -129,7 +131,8 @@
       "server": "cursor-global",
       "field": "args",
       "key": "",
-      "related": "cursor-global"
+      "related": "cursor-global",
+      "source": "rule"
     },
     {
       "rule_id": "MOAT-T4-003",
@@ -137,7 +140,8 @@
       "server": "codex-global",
       "field": "args",
       "key": "",
-      "related": "codex-global"
+      "related": "codex-global",
+      "source": "rule"
     },
     {
       "rule_id": "MOAT-T4-004",
@@ -145,7 +149,8 @@
       "server": "codex-global",
       "field": "args",
       "key": "",
-      "related": ""
+      "related": "",
+      "source": "rule"
     }
   ],
   "diffs": [],

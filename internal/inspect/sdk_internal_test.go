@@ -90,6 +90,69 @@ func TestLookupRecorderZeroValue(t *testing.T) {
 	}
 }
 
+// TestExpandPolicyHide checks that expandPolicy.hide refuses a hidden name,
+// in any case, for every policy (trusted, untrusted stdio and untrusted
+// remote), and keeps the other answers of the policy. It also checks that
+// the recorder of Inspect never looks up a hidden variable, so it never
+// records its value.
+func TestExpandPolicyHide(t *testing.T) {
+	t.Parallel()
+
+	const hiddenValue = "mcpmoat-hidden-canary-7gH8"
+	hidden := []string{"MCPMOAT_TEST_HIDDEN"}
+	servers := map[string]discover.Server{
+		"trusted stdio":    {Transport: discover.TransportStdio},
+		"trusted remote":   {Transport: discover.TransportHTTP},
+		"untrusted stdio":  {Transport: discover.TransportStdio, Untrusted: true},
+		"untrusted remote": {Transport: discover.TransportHTTP, Untrusted: true},
+	}
+	for name, s := range servers {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			base := expandPolicyFor(s)
+			policy := base.hide(hidden)
+			for _, v := range []string{"MCPMOAT_TEST_HIDDEN", "mcpmoat_test_hidden", "Mcpmoat_Test_Hidden"} {
+				if policy.allowed(v) {
+					t.Errorf("allowed(%q) = true, want false for a hidden name", v)
+				}
+				if policy.hidden == nil || !policy.hidden(v) {
+					t.Errorf("hidden(%q) = false, want true", v)
+				}
+			}
+			for _, v := range []string{"HOME", "MCPMOAT_TEST_OTHER", "MCPMOAT_TEST_HIDDEN_2", ""} {
+				if got, want := policy.allowed(v), base.allowed(v); got != want {
+					t.Errorf("allowed(%q) = %v, want %v as without hide", v, got, want)
+				}
+				if policy.hidden(v) {
+					t.Errorf("hidden(%q) = true, want false", v)
+				}
+			}
+			if policy.note != base.note || policy.workspace != base.workspace {
+				t.Errorf("hide changed the note or the workspace of the policy")
+			}
+
+			calls := 0
+			inner := func(name string) (string, bool) {
+				calls++
+				return environLookup([]string{"MCPMOAT_TEST_HIDDEN=" + hiddenValue})(name)
+			}
+			rec := &lookupRecorder{lookup: filterLookup(inner, policy.allowed)}
+			if v, ok := rec.Lookup("MCPMOAT_TEST_HIDDEN"); ok || v != "" {
+				t.Errorf("Lookup() = (len %d, %v), want (0, false) for a hidden name", len(v), ok)
+			}
+			if calls != 0 || len(rec.values) != 0 {
+				t.Errorf("the hidden variable was looked up %d times and %d values were recorded, want none", calls, len(rec.values))
+			}
+		})
+	}
+
+	// No names: hide returns the policy as it is.
+	p := expandPolicyFor(discover.Server{})
+	if got := p.hide(nil); got.hidden != nil || !got.allowed("MCPMOAT_TEST_HIDDEN") {
+		t.Errorf("hide(nil) changed the policy")
+	}
+}
+
 // TestEnvironLookup checks that environLookup reads "name=value" entries the
 // way os.LookupEnv does on Unix: the first entry wins, an entry with no "="
 // is skipped, and an empty name is never found.

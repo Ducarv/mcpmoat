@@ -135,8 +135,8 @@ func (c *cli) cmdErr(cmd, what string, err error) {
 }
 
 // interruptedText is the text after the prefix of the error line that scan and
-// pin print when the process got a signal while they inspected. It is fixed
-// text.
+// pin print when the process got a signal during the inspection, or during the
+// LLM step of scan (--llm). It is fixed text.
 const interruptedText = "interrupted; no pins were saved"
 
 // warnf writes one warning line on stderr, with the prefix

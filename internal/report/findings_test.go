@@ -189,6 +189,78 @@ func TestWriteFindingsExact(t *testing.T) {
 				"    Fix: Move it to a secret store.\n",
 		},
 		{
+			// A rule row prints the same with Source SourceRule as with the zero
+			// value: the want is the one of "full row".
+			name: "rule source is the same as the zero source",
+			rows: []report.FindingRow{with(func(r *report.FindingRow) { r.Source = report.SourceRule })},
+			want: "\nFINDINGS\n" +
+				"HIGH (1)\n" +
+				"  MOAT-T4-001  Secret in env\n" +
+				"    Server: github (claude-code, global)\n" +
+				"    Where: env FOO\n" +
+				"    Risk: A secret sits in the config.\n" +
+				"    Fix: Move it to a secret store.\n",
+		},
+		{
+			// Only SourceLLM is marked. Any other value prints as a rule row.
+			name: "unknown source prints as a rule row",
+			rows: []report.FindingRow{with(func(r *report.FindingRow) { r.Source = "other" })},
+			want: "\nFINDINGS\n" +
+				"HIGH (1)\n" +
+				"  MOAT-T4-001  Secret in env\n" +
+				"    Server: github (claude-code, global)\n" +
+				"    Where: env FOO\n" +
+				"    Risk: A secret sits in the config.\n" +
+				"    Fix: Move it to a secret store.\n",
+		},
+		{
+			name: "llm row is marked and has a source line",
+			rows: []report.FindingRow{with(func(r *report.FindingRow) {
+				r.Source, r.RuleID, r.Title, r.Field, r.Key = report.SourceLLM, "MOAT-LLM-001", "Suspicious tool", "tool", "send_mail"
+			})},
+			want: "\nFINDINGS\nHIGH (1)\n" +
+				"  MOAT-LLM-001  Suspicious tool [LLM]\n" +
+				"    Server: github (claude-code, global)\n" +
+				"    Source: LLM classification (advisory)\n" +
+				"    Tool: send_mail\n" +
+				"    Risk: A secret sits in the config.\n" +
+				"    Fix: Move it to a secret store.\n",
+		},
+		{
+			name: "llm row without a title is marked after the rule id",
+			rows: []report.FindingRow{with(func(r *report.FindingRow) {
+				r.Source, r.RuleID, r.Title, r.Field, r.Key = report.SourceLLM, "MOAT-LLM-001", "", "tool", "send_mail"
+			})},
+			want: "\nFINDINGS\nHIGH (1)\n" +
+				"  MOAT-LLM-001 [LLM]\n" +
+				"    Server: github (claude-code, global)\n" +
+				"    Source: LLM classification (advisory)\n" +
+				"    Tool: send_mail\n" +
+				"    Risk: A secret sits in the config.\n" +
+				"    Fix: Move it to a secret store.\n",
+		},
+		{
+			name: "llm row next to a rule row marks only the llm row",
+			rows: []report.FindingRow{
+				with(func(r *report.FindingRow) {
+					r.Source, r.RuleID, r.Title, r.Field, r.Key = report.SourceLLM, "MOAT-LLM-001", "Suspicious tool", "tool", "send_mail"
+				}),
+				full,
+			},
+			want: "\nFINDINGS\nHIGH (2)\n" +
+				"  MOAT-LLM-001  Suspicious tool [LLM]\n" +
+				"    Server: github (claude-code, global)\n" +
+				"    Source: LLM classification (advisory)\n" +
+				"    Tool: send_mail\n" +
+				"    Risk: A secret sits in the config.\n" +
+				"    Fix: Move it to a secret store.\n" +
+				"  MOAT-T4-001  Secret in env\n" +
+				"    Server: github (claude-code, global)\n" +
+				"    Where: env FOO\n" +
+				"    Risk: A secret sits in the config.\n" +
+				"    Fix: Move it to a secret store.\n",
+		},
+		{
 			name: "name with a space is quoted",
 			rows: []report.FindingRow{with(func(r *report.FindingRow) { r.Name = "my server" })},
 			want: "\nFINDINGS\nHIGH (1)\n" +

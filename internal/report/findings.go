@@ -88,6 +88,29 @@ func (r ServerRef) label() string {
 		scopeCell(r.Scope, r.ProjectPath, r.Untrusted) + ")"
 }
 
+// Source tells what made a finding. It is the type of FindingRow.Source.
+type Source string
+
+// The values of FindingRow.Source. The zero value "" means SourceRule.
+const (
+	// SourceRule is a finding from a mcpmoat rule (a built-in check or a rule
+	// file), not from the LLM.
+	SourceRule Source = "rule"
+	// SourceLLM is a finding from the optional LLM classification (--llm). It
+	// is advisory: a model made it, not a rule.
+	SourceLLM Source = "llm"
+)
+
+// normalize returns the source that the writers use for s: SourceLLM stays
+// SourceLLM, and every other value ("" or an unknown value) is SourceRule.
+// So the terminal and the JSON report always agree on the source of a row.
+func (s Source) normalize() Source {
+	if s == SourceLLM {
+		return SourceLLM
+	}
+	return SourceRule
+}
+
 // FindingRow is one finding as the report prints it. It holds names and the
 // text of the rule, never a value from a config. The caller fills Severity,
 // Title, Risk and Remediation from the rule set, because this package does not
@@ -95,6 +118,10 @@ func (r ServerRef) label() string {
 type FindingRow struct {
 	// ServerRef is the server that the finding is about.
 	ServerRef
+
+	// Source tells what made the finding. The zero value means SourceRule.
+	// WriteFindings marks a SourceLLM row as advisory.
+	Source Source
 
 	// RuleID is the ID of the rule that matched.
 	RuleID string
@@ -115,8 +142,9 @@ type FindingRow struct {
 	// Key is the key name in Field, for example an env variable name.
 	Key string
 	// Related is a second name that the finding refers to, for example a
-	// second server, or a fixed reason text. WriteFindings shows it alone when
-	// Key is empty, and as "<key> (<related>)" when Key is set too.
+	// second server, a fixed reason text, or, for MOAT-LLM-001, the category
+	// of the verdict. WriteFindings shows it alone when Key is empty, and as
+	// "<key> (<related>)" when Key is set too.
 	Related string
 }
 
@@ -148,6 +176,10 @@ const fieldTool = "tool"
 // place of Where. When its Key is empty (a finding about the whole server, with
 // a fixed reason in Related) the line is "Reason: <related>" instead, because
 // no tool is named. An empty Risk or Remediation shows as "-".
+//
+// A row with Source SourceLLM gets " [LLM]" after the title on its first
+// line, and a line "Source: LLM classification (advisory)" after the Server
+// line. A rule row (Source SourceRule or "") has neither.
 //
 // Names go through findingCell, so each is escaped, cut and quoted alone. Title,
 // Risk and Remediation go through [termsafe.QuoteCut]: a rule file can hold
@@ -202,8 +234,16 @@ func writeFinding(b *strings.Builder, r FindingRow) {
 		b.WriteString("  ")
 		b.WriteString(termsafe.QuoteCut(r.Title, maxTitleRunes))
 	}
+	isLLM := r.Source.normalize() == SourceLLM
+	if isLLM {
+		// Fixed text, so it needs no escape.
+		b.WriteString(" [LLM]")
+	}
 	b.WriteString("\n")
 	writeLine(b, "Server", r.label())
+	if isLLM {
+		writeLine(b, "Source", "LLM classification (advisory)")
+	}
 
 	switch {
 	case r.Field == fieldTool && r.Key == "":

@@ -80,6 +80,10 @@
 // ${GITHUB_TOKEN}, is refused. A trusted server reads the whole
 // environment, also when it is not enabled: its config is the user's own.
 //
+// No server reads a variable of SDKOptions.HiddenEnv, also a trusted one: a
+// placeholder for it counts as not set, and the reason says that the
+// variable is hidden. mcpmoat hides the API key of --llm this way.
+//
 // The expanded server stays inside Inspect. [Run] keeps the server as
 // discovered in Outcome.Server, and the URL of a ConnectError is the
 // redacted URL as discovered: Inspect also replaces the expanded URL with it

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io/fs"
 	"log/slog"
+	"net"
 	"os"
 	"slices"
 	"strings"
@@ -32,6 +33,22 @@ type SDKOptions struct {
 	// It is separate from AllowUntrusted: an untrusted server that is also
 	// off needs both.
 	AllowDisabled bool
+
+	// HiddenEnv holds the names of environment variables that no
+	// placeholder can read, for any server: trusted or untrusted, stdio or
+	// remote. A placeholder for one fails as if the variable were not set
+	// (a default applies). The names compare without case, as on Windows,
+	// so a name in other case is hidden too. mcpmoat hides the API key of
+	// --llm, so that a server config cannot send it to a server.
+	HiddenEnv []string
+
+	// Dial is a test hook that records the connections to remote servers
+	// (NFR-01). It is nil in production, and nil uses a net.Dialer. Dial
+	// sees only the addresses after the DNS pin and the address guard. So
+	// the guard still applies, and a refused address never reaches Dial.
+	// With a proxy, Dial sees the address of the proxy. Dial must connect
+	// to the address that it gets. It has no effect on stdio servers.
+	Dial func(ctx context.Context, network, address string) (net.Conn, error)
 }
 
 // SDKInspector is the [Inspector] that uses the official MCP Go SDK. It
@@ -147,8 +164,8 @@ func (i *SDKInspector) Inspect(ctx context.Context, s discover.Server) (Result, 
 	// expandPolicyFor and the package doc, Placeholder expansion). A server
 	// without the workspace folder gets an empty ProjectPath for Expand
 	// only, so ${workspaceFolder} fails; the expanded server keeps its
-	// ProjectPath.
-	policy := expandPolicyFor(s)
+	// ProjectPath. No server reads a name of opts.HiddenEnv.
+	policy := expandPolicyFor(s).hide(i.opts.HiddenEnv)
 	toExpand := s
 	if !policy.workspace {
 		toExpand.ProjectPath = ""
@@ -156,7 +173,8 @@ func (i *SDKInspector) Inspect(ctx context.Context, s discover.Server) (Result, 
 	// The recorder keeps every value that Expand looks up (each value one
 	// time), so that the scrub of error text removes them too: an expanded
 	// value can stand in an arg or in the URL host, where no other scrub
-	// list has it.
+	// list has it. filterLookup refuses a name before the lookup, so the
+	// value of a refused or hidden variable is never read or recorded.
 	rec := &lookupRecorder{lookup: filterLookup(environLookup(parent), policy.allowed)}
 	expanded, err := discover.Expand(toExpand, rec.Lookup)
 	if err != nil {
@@ -168,6 +186,7 @@ func (i *SDKInspector) Inspect(ctx context.Context, s discover.Server) (Result, 
 		result, err := Remote(ctx, expanded, RemoteOptions{
 			AllowUntrusted: i.opts.AllowUntrusted,
 			AllowDisabled:  i.opts.AllowDisabled,
+			dial:           i.opts.Dial,
 			secrets:        rec.values,
 		})
 		if ce, ok := errors.AsType[*ConnectError](err); ok {
@@ -392,13 +411,36 @@ type expandPolicy struct {
 	// user, so "not set" alone would be wrong. It is empty when the policy
 	// refuses nothing.
 	note string
+	// hidden reports whether the variable name is hidden from every
+	// placeholder (see hide). It is nil when no name is hidden.
+	hidden func(name string) bool
 }
 
-// The notes of expandPolicy for the untrusted servers.
+// The notes of expandPolicy for the untrusted servers (see expandError).
 const (
 	reasonBaseOnly = "; a stdio server from an untrusted project file reads only the base environment variables"
 	reasonNoEnv    = "; a remote server from an untrusted project file reads no environment variables and no workspace folder"
 )
+
+// errHiddenVariable is the end of the reason for a placeholder of a hidden
+// variable, in place of discover.ErrMissingVariable (see expandError).
+var errHiddenVariable = errors.New("hidden from placeholders")
+
+// hide returns p with the variables in names refused for every server, on
+// top of what p refuses already. The names compare without case (see
+// SDKOptions.HiddenEnv). With no names, hide returns p as it is.
+func (p expandPolicy) hide(names []string) expandPolicy {
+	if len(names) == 0 {
+		return p
+	}
+	hidden := func(name string) bool {
+		return slices.ContainsFunc(names, func(h string) bool { return strings.EqualFold(h, name) })
+	}
+	allowed := p.allowed
+	p.allowed = func(name string) bool { return !hidden(name) && allowed(name) }
+	p.hidden = hidden
+	return p
+}
 
 // expandPolicyFor returns what the placeholders of s may read. A server
 // from an untrusted project file passed the gates only with an opt-in, and
@@ -438,13 +480,25 @@ func expandPolicyFor(s discover.Server) expandPolicy {
 // folder when policy.workspace is false and s has a ProjectPath. A name that
 // is not a plain variable name is empty in the ExpandError; no filter but
 // the one of a trusted server accepts it, and a trusted server has no note.
+// A missing variable that policy.hidden reports gets its own reason, for
+// every server: "cannot expand <field>: variable <name>: hidden from
+// placeholders" (see errHiddenVariable). It has no policy.note, because the
+// untrusted note would give the wrong cause, and no "variable is not set",
+// because the variable can be set. So the reason never says whether a
+// hidden variable is set. The cause still wraps discover.ErrMissingVariable.
 func expandError(s discover.Server, err error, policy expandPolicy) *ConnectError {
 	reason := "cannot expand the variables in the server config"
 	if ee, ok := errors.AsType[*discover.ExpandError](err); ok {
 		reason = ee.Error()
-		refusedVar := errors.Is(err, discover.ErrMissingVariable) && !policy.allowed(ee.Name)
+		missingVar := errors.Is(err, discover.ErrMissingVariable)
+		hiddenVar := missingVar && policy.hidden != nil && policy.hidden(ee.Name)
+		refusedVar := missingVar && !policy.allowed(ee.Name)
 		refusedWorkspace := errors.Is(err, discover.ErrNoWorkspaceFolder) && !policy.workspace && s.ProjectPath != ""
-		if refusedVar || refusedWorkspace {
+		switch {
+		case hiddenVar:
+			hidden := discover.ExpandError{Field: ee.Field, Name: ee.Name, Err: errHiddenVariable}
+			reason = hidden.Error()
+		case refusedVar || refusedWorkspace:
 			reason += policy.note
 		}
 	} else {

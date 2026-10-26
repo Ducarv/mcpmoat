@@ -1,5 +1,5 @@
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "tool": {
     "name": "mcpmoat",
     "version": "1.2.3"
@@ -47,7 +47,8 @@
       "server": "alpha",
       "field": "tool",
       "key": "add",
-      "related": ""
+      "related": "",
+      "source": "rule"
     },
     {
       "rule_id": "MOAT-T2-002",
@@ -55,7 +56,8 @@
       "server": "alpha",
       "field": "tool",
       "key": "mul",
-      "related": ""
+      "related": "",
+      "source": "rule"
     }
   ],
   "diffs": [

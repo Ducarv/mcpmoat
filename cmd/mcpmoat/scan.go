@@ -1,6 +1,7 @@
 package main
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"flag"
@@ -8,6 +9,7 @@ import (
 	"io"
 	"maps"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 
@@ -22,7 +24,8 @@ import (
 // built-in config rules (T4 and T5) on every server and, unless --no-connect
 // is given, inspects the servers and checks their tools against pins.json.
 // --fail-on sets the lowest severity that gives exit code 1. Like --timeout,
-// it is checked in both modes.
+// it is checked in both modes. With --llm (FR-17), it also asks an LLM to
+// rate the description of each tool (see scan_llm.go).
 //
 // docs/ARCHITECTURE.md describes the data flow. The usage text (scanUsage and
 // usage in cli.go) lists the flags. README.md#exit-codes is the exit-code
@@ -38,11 +41,11 @@ func (c *cli) runScan(opts options, args []string) int {
 	timeout := fs.Duration("timeout", inspect.DefaultTimeout, "")
 	concurrency := fs.Int("concurrency", inspect.DefaultConcurrency, "")
 
-	// pathFlag refuses an empty value, so a result that is not "" means the
-	// flag was given.
+	// onceStringFlag refuses an empty value, so a result that is not ""
+	// means the flag was given.
 	var configPath, rulesDir string
-	pathFlag(fs, "config", "a file name", &configPath)
-	pathFlag(fs, "rules", "a folder name", &rulesDir)
+	onceStringFlag(fs, "config", "a file name", &configPath)
+	onceStringFlag(fs, "rules", "a folder name", &rulesDir)
 
 	// fs.Func calls the function once for each --ignore, so the user can
 	// give the flag more than once. ValidRuleID also refuses an empty value
@@ -63,18 +66,33 @@ func (c *cli) runScan(opts options, args []string) int {
 	var failOn rules.Severity
 	severityFlag(fs, "fail-on", &failOn)
 
+	// The LLM flags (FR-17), see addLLMFlags.
+	var llmOpts llmFlags
+	baseURLFlag := addLLMFlags(fs, &llmOpts)
+
+	// The error of another flag, or the list of unexpected arguments, can
+	// hold a base URL value too: for example "--timeout --llm-base-url=URL"
+	// and "--timeout=--llm-base-url=URL" make the flag package quote the
+	// whole value. hider removes every base URL value of args from that text
+	// (see newArgHider).
+	hider := newArgHider(args, flagLLMBaseURL)
 	if err := fs.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
 			scanUsage(c.stdout)
 			return exitOK
 		}
+		// The flag package puts the value into err. Print the problem that
+		// the flag recorded instead: its text holds no value.
+		if baseURLFlag.problem != nil {
+			return c.usageError("scan", "%v", baseURLFlag.problem)
+		}
 		// The flag error holds untrusted argv inside its own text, so
 		// termsafe.Quote escapes the whole message, and quotes it only when
 		// it holds an unsafe rune. See dispatch in cli.go for why this
 		// differs from quoteArg.
-		return c.usageError("scan", "%s", termsafe.Quote(err.Error()))
+		return c.usageError("scan", "%s", termsafe.Quote(hider.hide(err.Error())))
 	}
-	if c.rejectArgs("scan", fs.Args()) {
+	if c.rejectArgs("scan", hider.hideAll(fs.Args())) {
 		return exitError
 	}
 	if failOn == "" {
@@ -87,6 +105,15 @@ func (c *cli) runScan(opts options, args []string) int {
 	if err != nil {
 		return c.usageError("scan", "%v", err)
 	}
+
+	// Check the LLM flags and the API key before scan reads a config file
+	// (see setupLLM). Without --llm, classifier is nil: no key is read and no
+	// client is built.
+	classifier, ok := c.setupLLM(llmOpts, *noConnect)
+	if !ok {
+		return exitError
+	}
+	defer closeClassifier(classifier)
 
 	// Load and check the rules in both modes, so a bad rule file gives exit
 	// code 2 also with --no-connect. The set gives the severity of the
@@ -125,7 +152,14 @@ func (c *cli) runScan(opts options, args []string) int {
 	// global flag (before "scan") and the environment variable. The scan flag
 	// --no-color (after "scan") is read here, so both positions work.
 	style := report.Style{Color: !opts.noColor && !*noColor && c.stdoutIsTTY}
-	setup := scanSetup{checks: configChecks{set: set, typo: typo}, connect: connect, style: style, failOn: failOn, jsonOut: *jsonOut}
+	setup := scanSetup{
+		checks:     configChecks{set: set, typo: typo},
+		connect:    connect,
+		style:      style,
+		failOn:     failOn,
+		jsonOut:    *jsonOut,
+		classifier: classifier,
+	}
 
 	// The context ends when the process gets SIGINT, SIGTERM or SIGHUP (see
 	// main). scan starts stdio servers in their own session, so the terminal
@@ -148,6 +182,9 @@ type scanSetup struct {
 	// jsonOut is true with --json: scan writes one JSON document on stdout
 	// and none of the terminal tables.
 	jsonOut bool
+	// classifier rates the tools with an LLM (--llm, see classifyTools). It
+	// is nil without --llm, and then scan runs no LLM code.
+	classifier toolClassifier
 }
 
 // rulesNotAppliedNotice is the line that runScan prints on stderr when
@@ -179,21 +216,153 @@ func connectOptions(timeout time.Duration, concurrency int) (inspect.Options, er
 	}
 }
 
-// pathFlag adds a flag to fs that takes one path and stores it in *dest. The
-// flag can be given once. An empty value, or a value that looks like another
-// flag (see isFlagOf), is refused. what names the missing value in the error
-// message, for example "a file name".
-func pathFlag(fs *flag.FlagSet, name, what string, dest *string) {
+// onceStringFlag adds a flag to fs that takes one non-empty value and stores
+// it in *dest. The flag can be given once. An empty value, or a value that
+// looks like another flag (see isFlagOf), is refused. what names the missing
+// value in the error message, for example "a file name".
+func onceStringFlag(fs *flag.FlagSet, name, what string, dest *string) {
 	fs.Func(name, "", func(value string) error {
-		if *dest != "" {
-			return fmt.Errorf("--%s given more than once", name)
-		}
-		if value == "" || isFlagOf(fs, value) {
-			return fmt.Errorf("--%s needs %s", name, what)
-		}
-		*dest = value
-		return nil
+		return setOnce(fs, name, what, dest, value)
 	})
+}
+
+// setOnce does the checks of onceStringFlag and stores value in *dest. The
+// error text holds only the flag name and what, never the value.
+func setOnce(fs *flag.FlagSet, name, what string, dest *string, value string) error {
+	if *dest != "" {
+		return fmt.Errorf("--%s given more than once", name)
+	}
+	if value == "" || isFlagOf(fs, value) {
+		return fmt.Errorf("--%s needs %s", name, what)
+	}
+	*dest = value
+	return nil
+}
+
+// secretFlag is a flag.Value for a onceStringFlag whose value can hold a
+// secret, for example a URL with a user:password. On a Set error, the flag
+// package returns `invalid value "<value>" for flag ...`, so that error must
+// not be printed. Set records the problem in problem, and the caller prints
+// problem when Parse fails. Set still returns an error, so Parse stops at the
+// same argument as for the other flags.
+type secretFlag struct {
+	fs      *flag.FlagSet
+	name    string
+	what    string
+	dest    *string
+	problem error
+}
+
+// secretStringFlag adds a flag to fs like onceStringFlag, but returns the flag
+// so that the caller can print its problem in place of the Parse error.
+func secretStringFlag(fs *flag.FlagSet, name, what string, dest *string) *secretFlag {
+	f := &secretFlag{fs: fs, name: name, what: what, dest: dest}
+	fs.Var(f, name, "")
+	return f
+}
+
+// String returns "" so that no output of the flag package shows the value.
+// The flag package can call it on a zero secretFlag.
+func (f *secretFlag) String() string { return "" }
+
+// Set checks value like onceStringFlag and stores it.
+func (f *secretFlag) Set(value string) error {
+	if err := setOnce(f.fs, f.name, f.what, f.dest, value); err != nil {
+		f.problem = err
+		return err
+	}
+	return nil
+}
+
+// hiddenArgText replaces the value of a secret flag in an error message.
+const hiddenArgText = "(hidden)"
+
+// argHider removes the values of one secret flag from the error text of the
+// argument checks. The zero argHider changes nothing.
+type argHider struct {
+	r *strings.Replacer // nil when the args give no value
+}
+
+// newArgHider returns an argHider for the values that args gives to the flag
+// name. It looks for the text "-name" in each argument, with one dash or more
+// before name:
+//   - "-name=" anywhere in the argument: the rest of the argument after each
+//     "-name=" is a value. So "--name=value" counts, and so does the value of
+//     another flag, as in "--timeout=--name=value", which the flag package
+//     quotes whole in its error.
+//   - "-name" at the end of the argument: the next argument is a value. So a
+//     bare "--name" counts, and so does "--timeout=--name".
+//
+// It looks at every argument, also after "--" and after a flag that took
+// "--name" as its own value, so it can find more values than Parse uses: that
+// only hides more. A short value, for example one letter, also hides that
+// text in the other words of the message: that is on purpose, because it
+// fails safe.
+func newArgHider(args []string, name string) argHider {
+	token := "-" + name
+	var values []string
+	for i, arg := range args {
+		// Each "-name=" gives a value. A later value is the end of an
+		// earlier one. It is kept for a text that shows only that end.
+		for rest := arg; ; {
+			_, v, ok := strings.Cut(rest, token+"=")
+			if !ok {
+				break
+			}
+			values = append(values, v)
+			rest = v
+		}
+		if strings.HasSuffix(arg, token) && i+1 < len(args) {
+			values = append(values, args[i+1])
+		}
+	}
+	// The flag package quotes a value with %q in `invalid value "..."`, so a
+	// value with a quote, a backslash or a control rune shows escaped. Hide
+	// that form too.
+	var olds []string
+	for _, v := range values {
+		if v == "" {
+			continue
+		}
+		olds = append(olds, v)
+		if q := strconv.Quote(v); q[1:len(q)-1] != v {
+			olds = append(olds, q[1:len(q)-1])
+		}
+	}
+	if len(olds) == 0 {
+		return argHider{}
+	}
+	// strings.Replacer tries the old strings in the order given, so the
+	// longest goes first: a value that holds another value is hidden whole.
+	// The text order of equal lengths puts duplicates side by side for
+	// slices.Compact.
+	slices.SortFunc(olds, func(a, b string) int {
+		return cmp.Or(cmp.Compare(len(b), len(a)), strings.Compare(a, b))
+	})
+	olds = slices.Compact(olds)
+	pairs := make([]string, 0, 2*len(olds))
+	for _, o := range olds {
+		pairs = append(pairs, o, hiddenArgText)
+	}
+	return argHider{r: strings.NewReplacer(pairs...)}
+}
+
+// hide returns s with every value of the secret flag replaced by
+// hiddenArgText. The rest of s stays as it is.
+func (h argHider) hide(s string) string {
+	if h.r == nil {
+		return s
+	}
+	return h.r.Replace(s)
+}
+
+// hideAll returns a copy of args with hide applied to each argument.
+func (h argHider) hideAll(args []string) []string {
+	out := make([]string, len(args))
+	for i, a := range args {
+		out[i] = h.hide(a)
+	}
+	return out
 }
 
 // severityFlag adds a flag to fs that takes one severity word and stores it in
@@ -264,10 +433,11 @@ func (c *cli) scanWarnf(format string, a ...any) {
 
 // loadIgnore builds the ignore lists (see scanIgnores). The list for the
 // config rules holds the entries of .mcpmoat-ignore in the directory wd, then
-// one entry for each --ignore ID in ids. The list for the pin rules holds only
-// the --ignore entries, because the file is untrusted (see scanIgnores). ids
-// holds only valid rule IDs: the --ignore flag checks them. An empty wd means
-// that the working directory is not known, so loadIgnore reads no file.
+// one entry for each --ignore ID in ids. The list for the pin rules and the
+// LLM rules holds only the --ignore entries, because the file is untrusted
+// (see scanIgnores). ids holds only valid rule IDs: the --ignore flag checks
+// them. An empty wd means that the working directory is not known, so
+// loadIgnore reads no file.
 //
 // Every problem with the file is a warning on stderr, not an error: the scan
 // goes on. A file that loadIgnore cannot read gives no entries. The warnings
@@ -276,8 +446,9 @@ func (c *cli) scanWarnf(format string, a ...any) {
 // loadIgnore prints their number, because the file is untrusted and can hide
 // findings. The --ignore IDs come from the user, so they give no notice.
 //
-// An entry of the file for a pin rule (MOAT-T2-*) is not applied: scan warns
-// when such an entry matches a finding (see pinOutcomes).
+// An entry of the file for a pin rule (MOAT-T2-*) or an LLM rule
+// (MOAT-LLM-001 or MOAT-LLM-002) is not applied: scan warns when such an
+// entry matches a finding (see pinOutcomes and classifyTools).
 func (c *cli) loadIgnore(wd string, ids []string) *scanIgnores {
 	var ign scanIgnores
 	if wd != "" {
@@ -321,29 +492,34 @@ const configErrorHint = "mcpmoat scan: a config file has a problem; " +
 // the ignore list dropped at least one finding, it prints one line on stderr
 // after the report, with the rule IDs and their counts (see printIgnored).
 //
-// The pin findings are merged with the config findings before the report (the
-// table or the JSON document) is written, so the report holds them all and
-// scanExitCode sees them all.
-// New pins are saved after the report is printed, so a save error never hides
-// the report. The "pinned N tools" notices come after a successful save.
+// The pin findings and, with --llm, the LLM findings (see classifyTools) are
+// merged with the config findings before the report (the table or the JSON
+// document) is written, so the report holds them all and scanExitCode sees
+// them all: an LLM finding counts for --fail-on like any other. New pins are
+// saved after the report is printed, so a save error never hides the report.
+// The "pinned N tools" notices come after a successful save.
 //
-// A config file problem, a pins.json read or save error, an inspect.Run error
-// or a signal before the save of new pins (when there are new pins) gives exit
+// A config file problem, a pins.json read or save error, an inspect.Run error,
+// an incomplete LLM step (a failed request, or more tools than maxLLMTools) or
+// a signal before the save of new pins (when there are new pins) gives exit
 // code 2, also when there are findings at or above setup.failOn (see
-// scanExitCode). The report is already
-// printed when reportScan calls scanExitCode, so the user still sees the
-// findings. Only a signal during the inspection and a failed write of the
-// report return exit code 2 without a full report.
+// scanExitCode). The report is already printed when reportScan calls
+// scanExitCode, so the user still sees the findings. Only a signal during the
+// inspection or the LLM step and a failed write of the report return exit
+// code 2 without a full report.
 func (c *cli) reportScan(ctx context.Context, res discover.Result, configPath string, setup scanSetup, ignore *scanIgnores) int {
-	rows, ignored, configCounts := setup.checks.findings(&ignore.all, res.Servers)
+	// counts holds the findings of each server for the summary. It starts
+	// with the config findings, and the LLM step adds its own.
+	rows, ignored, counts := setup.checks.findings(&ignore.all, res.Servers)
 
 	var pr pinReport
 	var pinFailed bool
+	var outcomes []inspect.Outcome
 	// With no server there is nothing to inspect and nothing to pin, so scan
 	// does not read pins.json.
 	if setup.connect != nil && len(res.Servers) > 0 {
 		var err error
-		pr, err = c.inspectAndPin(ctx, res.Servers, *setup.connect, ignore, setup.jsonOut)
+		pr, outcomes, err = c.inspectAndPin(ctx, res.Servers, *setup.connect, ignore, setup.jsonOut)
 		if errors.Is(err, errInterrupted) {
 			// Nothing is saved and no report is printed: the user stopped
 			// the scan, so the result would be partial.
@@ -356,6 +532,31 @@ func (c *cli) reportScan(ctx context.Context, res discover.Result, configPath st
 		ignored = mergeIgnored(ignored, pr.ignored)
 	}
 
+	// The LLM step (--llm) runs after the pin step, on the tools of the
+	// servers that scan inspected (see llmStep). It only adds rows: it never
+	// changes or drops a rule row, and it never touches pins, diffs or hints.
+	// When the pin step failed (pins.json cannot be read, or inspect.Run
+	// failed), no server was inspected and the error is already on stderr,
+	// so the step does not run: its llmNoToolText notice would give the wrong
+	// cause.
+	var lr llmResult
+	if !pinFailed {
+		var ok bool
+		lr, ok = c.llmStep(ctx, setup.classifier, outcomes, ignore)
+		if !ok {
+			// The user stopped the scan, as for a signal during the
+			// inspection, or the guard of llmStep caught an error: no report
+			// and no saved pins. llmStep wrote the line on stderr.
+			return exitError
+		}
+	}
+	// A failed request or the tool cap makes the result incomplete: the
+	// report still prints, and scan exits with 2.
+	llmIncomplete := lr.incomplete()
+	rows = append(rows, lr.rows...)
+	ignored = mergeIgnored(ignored, lr.ignored)
+	addLLMCounts(counts, lr.counts)
+
 	configProblem := len(res.Errors) > 0
 	var writeErr error
 	if setup.jsonOut {
@@ -363,10 +564,10 @@ func (c *cli) reportScan(ctx context.Context, res discover.Result, configPath st
 		if setup.connect != nil {
 			mode = report.ModeConnect
 		}
-		complete := !pinFailed && !configProblem
+		complete := !pinFailed && !configProblem && !llmIncomplete
 		writeErr = c.writeScanJSON(mode, complete, res, rows, pr)
 	} else {
-		statuses := pr.serverStatuses(res.Servers, configCounts)
+		statuses := pr.serverStatuses(res.Servers, counts)
 		if pinFailed {
 			// The pin step stopped before any server was inspected. Say so, or
 			// each line would look like a refused server. The error is on stderr.
@@ -395,7 +596,7 @@ func (c *cli) reportScan(ctx context.Context, res discover.Result, configPath st
 		c.printFileErrors("scan", res.Errors)
 		fprintf(c.stderr, "%s\n", configErrorHint)
 	}
-	return scanExitCode(configProblem || pinFailed, rows, setup.failOn)
+	return scanExitCode(configProblem || pinFailed || llmIncomplete, rows, setup.failOn)
 }
 
 // writeScanReport writes the report on c.stdout, in this order: the server
@@ -495,25 +696,28 @@ func (c *cli) savePinned(ctx context.Context, pr pinReport) bool {
 // The error is errInterrupted when ctx ended during the inspection (the process
 // got a signal). It has written interruptedText then (see interrupted).
 // Nothing is saved: inspectAndPin never saves.
-func (c *cli) inspectAndPin(ctx context.Context, servers []discover.Server, opts inspect.Options, ignore *scanIgnores, jsonOut bool) (pinReport, error) {
+//
+// It also returns the outcomes of inspect.Run, for the LLM step (see
+// classifyTools). They are nil when it returns an error.
+func (c *cli) inspectAndPin(ctx context.Context, servers []discover.Server, opts inspect.Options, ignore *scanIgnores, jsonOut bool) (pinReport, []inspect.Outcome, error) {
 	store, ok := c.readPins("scan")
 	if !ok {
-		return pinReport{}, errPinsUnreadable
+		return pinReport{}, nil, errPinsUnreadable
 	}
 
 	outcomes, err := inspect.Run(ctx, servers, opts, c.inspector)
 	if c.interrupted(ctx, "scan") {
-		return pinReport{}, errInterrupted
+		return pinReport{}, nil, errInterrupted
 	}
 	if err != nil {
 		// The text of an inspect.Run error holds only our own words.
 		c.cmdErr("scan", "cannot inspect the servers", err)
-		return pinReport{}, err
+		return pinReport{}, nil, err
 	}
 	if jsonOut {
 		c.warnNotInspected(outcomes)
 	}
-	return c.pinOutcomes(store, outcomes, ignore), nil
+	return c.pinOutcomes(store, outcomes, ignore), outcomes, nil
 }
 
 // warnNotInspected writes on stderr, for --json, what the summary shows

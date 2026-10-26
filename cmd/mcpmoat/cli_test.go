@@ -4,10 +4,13 @@ import (
 	"bytes"
 	"errors"
 	"flag"
+	"fmt"
 	"slices"
 	"strconv"
 	"strings"
 	"testing"
+
+	"github.com/Ducarv/mcpmoat/internal/llm"
 )
 
 // testBuild is the build information that the CLI tests inject.
@@ -368,7 +371,7 @@ func TestUsageContent(t *testing.T) {
 		"  --fail-on <severity>  Exit 1 for a finding of this severity or above: low, medium, high or critical (default high)\n",
 		"No built-in rule is critical yet, so critical passes every built-in finding and scan prints a note\n",
 		"An unknown rule ID or severity still gives exit 1 (fail closed)\n",
-		"The file cannot ignore the pin rules (MOAT-T2-*)",
+		"The file cannot ignore the pin rules (MOAT-T2-*) or the LLM rules (MOAT-LLM-001, MOAT-LLM-002)",
 		"  A new tool is medium, so alone it does not give exit code 1 with the default --fail-on high; next to a removed tool (a likely rename) it is high.\n",
 		"  If that server is already pinned and failed or timed out, it is also a finding (MOAT-T2-004, high).\n",
 		"  scan reads pins.json before it starts a server, and reads it again just before it saves the first-run pins.\n",
@@ -385,6 +388,22 @@ func TestUsageContent(t *testing.T) {
 		"  --no-connect: scan runs only the built-in config rules (T4 and T5). It reads and writes no pins.\n",
 		"  The tool rules (YAML) are not applied to tools yet. Rules from --rules are loaded and checked, but not applied yet.\n",
 		"  Exit code 1 means a finding that is not ignored, with severity at or above --fail-on (default high).\n",
+		// The LLM flags (FR-17). The first line says that --llm is the one
+		// exception to "offline". The flag lines and their continuation lines
+		// are checked without the tabwriter padding where it can change.
+		"mcpmoat finds malicious or tampered MCP servers. It runs offline, unless you use scan --llm.\n",
+		"(schema: docs/schema/scan-output.v2.json)\n",
+		"  --llm ",
+		"Also ask an LLM to rate each tool description. Off by default. Not with --no-connect\n",
+		"It sends the name and description of every tool to the LLM provider: this data leaves your machine\n",
+		"The API key comes only from the MCPMOAT_LLM_API_KEY environment variable\n",
+		"  --llm-provider <api>  The LLM API: anthropic, or openai for an OpenAI-compatible API (default anthropic)\n",
+		"  --llm-model <name> ",
+		"The model name (default for anthropic: " + llm.DefaultAnthropicModel + "; required for openai)\n",
+		"  --llm-base-url <url>  The base URL of the API: https, or http for a loopback host only (default: the public API)\n",
+		"  --llm: the LLM findings (MOAT-LLM-001, and MOAT-LLM-002 for an invalid answer) are advisory and marked [LLM].\n",
+		"  They are high at most, and they count for --fail-on. They never remove a rule finding.\n",
+		fmt.Sprintf("  scan sends at most %d tools. A provider error or more tools than that gives exit 2; the report still prints.\n", maxLLMTools),
 	} {
 		if !strings.Contains(got, want) {
 			t.Errorf("usage text does not contain %q\n--- got ---\n%s", want, got)
@@ -399,6 +418,10 @@ func TestUsageContent(t *testing.T) {
 		"List the servers in the configs and check the configs.",
 		"not applied yet",
 		"failed or timed out",
+		// The key has one source, named once. The data warning is said once
+		// in the flag list; the scan notes do not repeat it.
+		"MCPMOAT_LLM_API_KEY",
+		"leaves your machine",
 	} {
 		if n := strings.Count(got, once); n != 1 {
 			t.Errorf("usage text holds %q %d times, want 1\n--- got ---\n%s", once, n, got)
@@ -415,6 +438,10 @@ func TestUsageContent(t *testing.T) {
 		"  2  execution error\n",
 		"when it is stopped by a signal",
 		"stops the servers, saves no pins and exits 2",
+		// Before --llm the tool was offline with no exception, and the JSON
+		// schema had version 1.
+		"It runs offline.\n",
+		"scan-output.v1.json",
 	} {
 		if strings.Contains(got, gone) {
 			t.Errorf("usage text holds the old text %q\n--- got ---\n%s", gone, got)

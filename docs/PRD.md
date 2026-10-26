@@ -19,6 +19,7 @@ Requirement IDs in this document are stable. Issues, pull requests and commit me
 A Go command-line tool that protects **the individual developer** against malicious or tampered MCP
 servers. It starts as a **scanner** and evolves, in phases, into a **local firewall**, a **trust
 score** and **data-flow control**. Everything runs 100% offline, with no account and no telemetry.
+The one exception is the optional, opt-in `--llm` check (FR-17).
 
 ### 1.2 Problem
 
@@ -55,7 +56,8 @@ hook or CI.
 - G4. Detect rug pulls by pinning a hash of every tool and reporting changes with a diff.
 - G5. Give clear output for humans (coloured terminal) and machines (versioned JSON, exit codes).
 - G6. Ship as a single binary (static on Linux) through GitHub Releases, Homebrew and `go install`.
-- G7. Stay offline, account-free and telemetry-free.
+- G7. Stay offline, account-free and telemetry-free. Only the opt-in `--llm` check (FR-17) sends
+  data to an outside service.
 
 ### 2.2 Non-goals (phase 1)
 
@@ -140,6 +142,27 @@ hidden instructions or leak data.
 | T3 | Shadowing: a tool that tries to redefine another tool's behaviour ("when using send_email, always...") | Rule: tool text (description, title, annotations title, or the description and title strings of the input and output schema) cites the name of a tool from another server |
 | T4 | Dangerous config: remote server over `http://` without TLS, plaintext secret in config, unpinned package (`npx package@latest`) | Static config analysis |
 | T5 | Basic typosquatting: name very close to a known server | Compare with a short list of popular servers (edit distance: one edit. Two edits when the shorter name has more than 8 characters and either the edits only add or drop characters at the end of the popular name, or the part after the last separator the two names share has 5 or more characters. With no shared separator, that part is the whole shorter name) |
+
+Note on `--llm` (FR-17, not a new threat ID). The optional classifier reads untrusted tool text
+with a model. So it adds four threats to T1: prompt injection against the classifier, untrusted
+model output, a name or description that is cut so that the payload is hidden, and data that
+leaves the machine. One risk stays: while `--llm` runs, the key is in the environment of the
+mcpmoat process, and a stdio server runs as the same user and can read it (for example
+`/proc/<pid>/environ` on Linux). The mitigations:
+
+- Prompt injection: a fixed system prompt, and the tool text goes only as a JSON string in the user
+  message.
+- Untrusted model output: a strict parse of the verdict against fixed lists, and no model text in
+  the report.
+- A cut that hides the payload: the cut-text rule of FR-17 gives a `medium` finding for a cut tool
+  that the model rates `none` or `low`, or whose answer is unusable.
+- Data that leaves the machine: `--llm` is opt-in, and a warning is printed before any request.
+- A hostile config that hides the LLM findings: only `--ignore` hides them, not `.mcpmoat-ignore`.
+- The key in the mcpmoat environment: mcpmoat does not give the key to a server through its
+  environment or a placeholder, and the README advises a key made for `--llm` with a low spend
+  limit.
+
+The code-level notes are in the package doc comment of `internal/llm/doc.go`.
 
 ### 5.4 Out of scope for phase 1
 
@@ -426,9 +449,11 @@ references:
 - `.mcpmoat-ignore` in the working directory supports one entry per line, comments with `#`, and
   entries scoped to a rule ID, optionally limited to a server and tool.
 - Ignored findings do not affect the exit code and are counted as "ignored" in the summary.
-- `.mcpmoat-ignore` cannot ignore the pin rules (`MOAT-T2-001` to `MOAT-T2-004`). The file can come
-  from a cloned repository, and it must not silence the rug-pull alarm. Only `--ignore` on the
-  command line ignores a pin rule. `scan` prints a warning when the file has such an entry.
+- `.mcpmoat-ignore` cannot ignore the pin rules (`MOAT-T2-001` to `MOAT-T2-004`) or the LLM rules
+  (`MOAT-LLM-001` and `MOAT-LLM-002`). The file can come from a cloned repository, and it must not
+  silence the rug-pull alarm or the LLM classifier (FR-17) for every server of the user. Only
+  `--ignore` on the command line ignores these rules. `scan` keeps the finding and prints a warning
+  when a file entry for such a rule matches a finding.
 
 ### 6.4 Pins (rug-pull detection)
 
@@ -598,15 +623,56 @@ with `--no-color`).
 
 ### 6.6 Optional LLM
 
-**FR-17: `--llm`.** Sends each tool description to a model and asks for a risk classification.
+**FR-17: `--llm`.** Sends the name and description of each tool to a model and asks for a risk classification.
 Off by default; key from an environment variable; README warns that this option **sends data off
 the machine**.
 
 - Without `--llm`, no LLM code path runs and no request is made (see NFR-01).
-- With `--llm` and no API key in the environment, the command exits with code 2 and names the
-  variable.
-- With `--llm`, a warning that data leaves the machine is printed before any request.
-- LLM output appears as findings with a distinct source marker and never removes rule findings.
+- The API key comes only from the environment variable `MCPMOAT_LLM_API_KEY`. There is no key flag,
+  because command-line arguments show in `ps` and in the shell history. With `--llm` and no valid
+  key, the command exits with code 2 and names the variable. mcpmoat never puts the key in the
+  environment of a server or in a placeholder.
+- Flags (scan only): `--llm`, `--llm-provider anthropic|openai` (default `anthropic`),
+  `--llm-model` (required for `openai`; `anthropic` has a default model) and `--llm-base-url`
+  (`https`, or `http` only for a loopback host; no user info, query or fragment). The provider,
+  model and base URL come only from these flags. An `--llm-*` flag without `--llm` is a usage error
+  (exit 2). `--llm` with `--no-connect` is a usage error (exit 2): without a connection there are no
+  tools to classify.
+- With `--llm`, a warning that data leaves the machine is printed on stderr before any request,
+  also with `--json`.
+- What is sent: for each tool of each server that was inspected, only the tool name and the tool
+  description (each cut at a fixed size, with a flag that says it was cut), in one JSON user
+  message with a fixed system prompt. mcpmoat never puts configs, env values, headers, arguments,
+  URLs, schemas or pins into a request. A cap on the number of tools per scan (500): more tools
+  than the cap give exit code 2. The README holds the sizes and the other limits. `--ignore` does
+  not stop a tool from being sent: to keep a server out of `--llm`, scan it with a separate config.
+- A tool whose name or description was cut is never rated below `medium`, and an unusable model
+  answer for it does not hide it. The code enforces this, not only the system prompt. The
+  [README](../README.md#optional-llm-classification-sends-data-off-your-machine) holds the full
+  rule.
+- The description is sent as the server returned it. mcpmoat does not remove configured secret
+  values from it. A server that got a token through its env or headers can put that token into its
+  description, and `--llm` then sends it to the provider. The server already holds the value. The
+  README tells the user to run `--llm` only if they accept that a tool description can leave the
+  machine as the server wrote it.
+- The model may answer only with a risk (`none`, `low`, `medium`, `high`) and a category from a
+  fixed list. No model text reaches the output. Rule `MOAT-LLM-001` reports a risk of `low`,
+  `medium` or `high` with that severity (never `critical`); `none` gives no finding. Rule
+  `MOAT-LLM-002` (medium) reports an answer that is invalid or a refusal. Only such an unusable
+  model answer for a tool that was not cut gives `MOAT-LLM-002`.
+- LLM findings carry a distinct source marker: `[LLM]` in the terminal and `"source": "llm"` in the
+  JSON output (schema version 2). They only add to the rule findings and never remove or change
+  them. They count for `--fail-on`. Only `--ignore` applies to them; `.mcpmoat-ignore` does not
+  (FR-10).
+- The result is advisory. No finding does not mean that a tool is safe: a model can be wrong, and a
+  hostile description can try to influence it.
+- A provider failure stops the step and gives exit code 2 (fail closed). So does an internal error
+  of the LLM step, or more tools than the cap. The report still prints and the JSON `complete`
+  field is `false`. The README holds the list of failures and the exact stderr lines.
+- A hostile server can make `scan --llm` exit with 2: it can list more tools than the cap, or write a
+  description that makes the provider answer with an HTTP 4xx (a content filter or a context
+  limit). The rule findings still print. A follow-up may make a 400, 413 or 422 for one tool a
+  result for that tool only.
 
 ---
 
@@ -618,6 +684,10 @@ of the route to a configured server, so mcpmoat honours it (and `NO_PROXY`).
 
 - A test runs a full scan with network access denied for anything other than fixture servers, and
   asserts no other connection is attempted. The test clears the proxy variables.
+- The tests: `cmd/mcpmoat/network_test.go` (in-process, through the test hook
+  `inspect.SDKOptions.Dial`) and `cmd/mcpmoat/e2e_network_test.go` (the real binary, with a
+  recording proxy and a fake LLM provider). The CI job `offline` runs the E2E tests in a Linux
+  network namespace that has only loopback, through `.github/scripts/run-offline.sh`.
 
 **NFR-02: Distribution.** Single binary for macOS and Linux (amd64, arm64), static on Linux,
 published with GoReleaser, Homebrew cask in an own tap, checksums and GitHub attestation. Go binaries
@@ -683,6 +753,7 @@ internal/inspect/     connects to servers, extracts tools, prompts, resources
 internal/rules/       loads YAML, applies regex and heuristics
 internal/pins/        hashes, diff and pins.json
 internal/report/      terminal and JSON output
+internal/llm/         optional --llm classifier (Anthropic or OpenAI-compatible API)
 internal/termsafe/    escapes untrusted text for the terminal (used by discover, report and rules)
 rules/                built-in rules (go:embed)
 testdata/servers/     malicious example MCP servers, for tests and demo
@@ -696,6 +767,7 @@ testdata/servers/     malicious example MCP servers, for tests and demo
 | `internal/rules` | Load and validate YAML rules; run matchers and native heuristics; ignore list | FR-07 to FR-10 |
 | `internal/pins` | Canonical hashing, `pins.json` store, change detection and diff | FR-11 to FR-13 |
 | `internal/report` | Terminal and JSON rendering; JSON schema | FR-14, FR-15, NFR-07 |
+| `internal/llm` | Optional `--llm` client: send the tool name and description, accept only a fixed verdict | FR-17, NFR-01 |
 | `internal/termsafe` | Escape untrusted text for the terminal (used by `discover`, `report` and `rules`) | FR-14 |
 | `rules/` | Built-in YAML rules and their test cases | FR-09, NFR-05 |
 | `testdata/servers/` | Benign and malicious fixture servers | NFR-05 |
@@ -708,7 +780,9 @@ Data flow for `mcpmoat scan`:
    per-server timeout, and returns tools, prompts and resources.
 4. `rules` runs description and schema rules, plus cross-server checks (T3).
 5. `pins` compares tool hashes with `pins.json` (T2) and stores pins on first run.
-6. `report` renders terminal or JSON output; `cmd/mcpmoat` sets the exit code.
+6. Only with `--llm`, `llm` rates the name and description of each inspected tool and adds
+   advisory findings (FR-17).
+7. `report` renders terminal or JSON output; `cmd/mcpmoat` sets the exit code.
 
 Phases 2 to 4 reuse `discover`, `inspect`, `rules` and `pins`. The phase 2 proxy calls the same rule
 engine on every `tools/list`.

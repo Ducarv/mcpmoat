@@ -82,6 +82,12 @@ type RemoteOptions struct {
 	// baseTransport.
 	proxy func(*http.Request) (*url.URL, error)
 
+	// dial is the dial function of the pinned dialer in the base transport
+	// that Remote makes. Nil means a net.Dialer. The pinned dialer calls it
+	// only after the DNS pin and the address guard. It has no effect when
+	// baseTransport is set. SDKInspector.Inspect passes SDKOptions.Dial.
+	dial dialFunc
+
 	// secrets are more strings that classify removes from error text, on
 	// top of the ones that Remote finds in srv (header values, URL user
 	// info, query and path parts). SDKInspector.Inspect passes the values of
@@ -177,7 +183,7 @@ func Remote(ctx context.Context, srv discover.Server, opts RemoteOptions) (Resul
 		// The same base transport that newHTTPClient makes for a nil Base,
 		// with the proxy function above, so that the requests and the DNS
 		// pin warning below use the same proxy setting.
-		t := newBaseTransport(nil, endpointURL.Hostname())
+		t := newBaseTransportDial(nil, opts.dial, endpointURL.Hostname())
 		t.Proxy = proxy
 		base = t
 	}
