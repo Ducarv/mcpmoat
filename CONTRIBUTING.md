@@ -74,9 +74,17 @@ Agent-oriented variants (scoped tests, E2E scenario, golden files, fuzz) are in 
 
 CI (`.github/workflows/ci.yml`) runs on every pull request. On Linux and macOS it runs build, vet, race
 tests, golangci-lint and the version smoke test. On Linux only it also runs the gofmt check, the
-`go mod tidy` check and govulncheck. The `release-check` job checks that the GoReleaser and
-govulncheck version pins match. Then it runs `goreleaser check`, a snapshot build and
-`.github/scripts/check-snapshot.sh`.
+`go mod tidy` check and govulncheck. The `release-check` job first runs the test of the pin check,
+`.github/scripts/check-tool-pins-test.sh`. Then it runs the pin check, `.github/scripts/check-tool-pins.sh`.
+The script checks that the GoReleaser pins match. It also checks that the govulncheck pins in
+`ci.yml`, `release.yml` and `govulncheck.yml` match, and that each file runs govulncheck only
+through `$GOVULNCHECK_VERSION`. Then the job runs `goreleaser check`, a snapshot build and
+`.github/scripts/check-snapshot.sh`. If you change a workflow or a tool pin, run the test and the
+check on your machine. Call both scripts from any directory.
+
+The weekly `govulncheck` workflow (`.github/workflows/govulncheck.yml`) checks `main` every Monday.
+A maintainer finds how to run it by hand and what to do after a failed run in
+[docs/releasing.md](docs/releasing.md#weekly-vulnerability-check).
 
 The `offline` job proves that a scan makes no network call that it should not make (NFR-01). It
 runs the `TestE2E` tests, the network tests of `cmd/mcpmoat/e2e_network_test.go` included, through
@@ -128,7 +136,9 @@ feature branch --PR--> dev --release PR (merge commit)--> main --tag vX.Y.Z--> r
   force push and no delete. `main` also needs the checks `offline` and `release-check`, and allows
   merge commits only. `dev` allows merge commits too, for the hotfix merge-back.
 - Dependabot and the dependency graph watch the default branch, so a security update lands on `dev`.
-  After you merge one, cut a release soon, so that the released code on `main` gets the fix.
+  After you merge one, cut a release soon, so that the released code on `main` gets the fix. The
+  weekly `govulncheck` workflow also checks the released code on `main`, so a new advisory shows up
+  before the next release.
 
 ## Pull requests
 
