@@ -294,7 +294,12 @@ func TestDiffTruncationWarningNames(t *testing.T) {
 			scan := e.scan(fakeServers(map[string][]inspect.Tool{tt.server: current}))
 			pin := e.pin(fakeServers(map[string][]inspect.Tool{tt.server: current}), "--accept", tt.server)
 
-			assertScanRun(t, scan, scanWant{code: exitOK, stderr: []string{wantScan}})
+			// The long description of the new tool also fires two description
+			// rules: MOAT-T1-007 (low, a long text) and MOAT-T1-017 (high,
+			// longer than the match window). The high row gives exit code 1
+			// with the default --fail-on high. pin applies no rules.
+			assertScanRun(t, scan, scanWant{code: exitFindings, stderr: []string{wantScan}})
+			assertFindingIDs(t, scan.stdout, []string{"MOAT-T1-007", "MOAT-T1-017", "MOAT-T2-002"})
 			assertPinRun(t, pin, scanWant{code: exitOK, stderr: []string{wantPin}})
 			for _, got := range []pinRunResult{scan, pin} {
 				// No raw escape, bidi or invisible rune on either stream.

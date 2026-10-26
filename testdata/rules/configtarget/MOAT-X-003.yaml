@@ -1,0 +1,17 @@
+# Test fixture: an external rule with target config. Not a built-in rule.
+# Scan loads and checks it, but does not apply it: it runs only its built-in
+# config checks, and prints a notice.
+id: MOAT-X-003
+title: Remote server URL uses plain http://
+severity: low
+target: config
+match:
+  heuristic: insecure_url
+risk: Anyone on the network path can read or change the traffic to a server that uses plain http://.
+remediation: Use the https:// URL of the server.
+references:
+  - https://example.com/mcpmoat/rules/moat-x-003
+should_match:
+  - http://mcp.example.com/sse
+should_not_match:
+  - https://mcp.example.com/sse

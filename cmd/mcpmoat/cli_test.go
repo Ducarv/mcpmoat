@@ -386,7 +386,15 @@ func TestUsageContent(t *testing.T) {
 		"Scan output:\n",
 		"  A heuristic masks secret-like arguments. Review the output before you share it.\n",
 		"  --no-connect: scan runs only the built-in config rules (T4 and T5). It reads and writes no pins.\n",
-		"  The tool rules (YAML) are not applied to tools yet. Rules from --rules are loaded and checked, but not applied yet.\n",
+		// The description and schema rules (T1 and T3) run when scan
+		// connects, with a time budget for each server. Config rules from
+		// --rules never run. The --rules continuation line is checked
+		// without the tabwriter padding.
+		"Rules with target description or schema apply to the tools. Rules with target config are not applied\n",
+		"  When scan connects to the servers, it applies the description and schema rules (T1 and T3, built-in and from --rules)\n",
+		"  to the tools of each server. --no-connect applies none of them, and scan prints a note when --rules has such a rule.\n",
+		"  The rule analysis of each server has a time budget of 5s. A server that uses it up is a high finding (MOAT-T1-023).\n",
+		"  Rules from --rules with target config are not applied: scan runs only its built-in config checks, and prints a note.\n",
 		"  Exit code 1 means a finding that is not ignored, with severity at or above --fail-on (default high).\n",
 		// The LLM flags (FR-17). The first line says that --llm is the one
 		// exception to "offline". The flag lines and their continuation lines
@@ -412,11 +420,14 @@ func TestUsageContent(t *testing.T) {
 	// The scan help says once which rules scan runs, and says that the
 	// --no-connect line lists and checks the configs. The old text said that
 	// scan applies no rules: it must be gone. The failing-server note is only
-	// in the scan notes, not in the exit code block too.
+	// in the scan notes, not in the exit code block too. The time budget and
+	// its rule ID are named once, in the scan notes.
 	for _, once := range []string{
 		"built-in config rules (T4 and T5)",
 		"List the servers in the configs and check the configs.",
-		"not applied yet",
+		"description and schema rules (T1 and T3",
+		"MOAT-T1-023",
+		"time budget",
 		"failed or timed out",
 		// The key has one source, named once. The data warning is said once
 		// in the flag list; the scan notes do not repeat it.
@@ -442,6 +453,10 @@ func TestUsageContent(t *testing.T) {
 		// schema had version 1.
 		"It runs offline.\n",
 		"scan-output.v1.json",
+		// Before issue #143 scan did not apply the tool rules (YAML) or the
+		// rules from --rules.
+		"not applied yet",
+		"are not applied to tools",
 	} {
 		if strings.Contains(got, gone) {
 			t.Errorf("usage text holds the old text %q\n--- got ---\n%s", gone, got)

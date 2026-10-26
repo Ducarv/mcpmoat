@@ -834,22 +834,47 @@ func e2eRulesDir(t *testing.T, parts ...string) string {
 	return dir
 }
 
-// TestE2EScanRulesExtra checks that a valid external rule folder changes
-// nothing yet, because scan loads the rules but does not apply them. The only
-// change is the notice on stderr that says so.
+// TestE2EScanRulesExtra checks a valid external rule folder that holds one
+// description rule (MOAT-X-001). With --no-connect, scan applies no
+// description rule, so the result is the result without --rules plus the
+// toolRulesNoConnectNotice line. With a connection, scan applies the rule to
+// the tools and prints no notice. No fixture of testdata/servers has a keyword
+// of MOAT-X-001, so the benign server has no finding.
 func TestE2EScanRulesExtra(t *testing.T) {
 	t.Parallel()
-	home, work := t.TempDir(), t.TempDir()
+	extra := e2eRulesDir(t, "extra")
 
-	stdout, stderr, code := runBin(t, home, work, "scan", "--no-connect", "--rules", e2eRulesDir(t, "extra"))
+	t.Run("with --no-connect", func(t *testing.T) {
+		t.Parallel()
+		home, work := t.TempDir(), t.TempDir()
 
-	assertScanResult(t, code, stdout, stderr, scanWant{code: exitOK, stderr: []string{rulesNotAppliedNotice}})
-	baseOut, baseErr, baseCode := runBin(t, home, work, "scan", "--no-connect")
-	wantErr := baseErr + rulesNotAppliedNotice + "\n"
-	if code != baseCode || stdout != baseOut || stderr != wantErr {
-		t.Errorf("--rules changes the result: exit code %d, want %d\nstdout:\n%s\nwant stdout:\n%s\nstderr:\n%s\nwant stderr:\n%s",
-			code, baseCode, stdout, baseOut, stderr, wantErr)
-	}
+		stdout, stderr, code := runBin(t, home, work, "scan", "--no-connect", "--rules", extra)
+
+		assertScanResult(t, code, stdout, stderr, scanWant{code: exitOK, stderr: []string{toolRulesNoConnectNotice}})
+		baseOut, baseErr, baseCode := runBin(t, home, work, "scan", "--no-connect")
+		wantErr := baseErr + toolRulesNoConnectNotice + "\n"
+		if code != baseCode || stdout != baseOut || stderr != wantErr {
+			t.Errorf("--rules changes the result: exit code %d, want %d\nstdout:\n%s\nwant stdout:\n%s\nstderr:\n%s\nwant stderr:\n%s",
+				code, baseCode, stdout, baseOut, stderr, wantErr)
+		}
+	})
+
+	t.Run("without --no-connect", func(t *testing.T) {
+		t.Parallel()
+		home, work := benignHome(t, "benign")
+
+		stdout, stderr, code := runBin(t, home, work, "scan", "--rules", extra)
+
+		wantErr := "mcpmoat scan: pinned 2 tools for benign\n"
+		assertScanResult(t, code, stdout, stderr, scanWant{code: exitOK, stderr: []string{wantErr}})
+		if stderr != wantErr {
+			t.Errorf("stderr = %q, want only %q (no notice)", stderr, wantErr)
+		}
+		assertServerNames(t, stdout, "benign")
+		if got := parseFindings(t, stdout); len(got) != 0 {
+			t.Errorf("findings = %+v, want none\nstdout:\n%s", got, stdout)
+		}
+	})
 }
 
 // TestE2EScanRulesErrors checks that a bad rule folder gives exit code 2 with
@@ -871,6 +896,12 @@ func TestE2EScanRulesErrors(t *testing.T) {
 			name:    "built-in ID clash",
 			dir:     func(t *testing.T) string { return e2eRulesDir(t, "collide") },
 			wantErr: []string{"MOAT-T1-003.yaml", builtinClashText},
+		},
+		{
+			// The file passes Validate, but its regex does not compile.
+			name:    "regex that does not compile",
+			dir:     func(t *testing.T) string { return e2eRulesDir(t, "badregex") },
+			wantErr: []string{"MOAT-X-002.yaml", "match"},
 		},
 		{
 			name:    "missing folder",
@@ -1306,8 +1337,9 @@ func TestE2EPinAcceptProject(t *testing.T) {
 // injected variant, so the next scan reports the changed get_time with its diff
 // and the accept line. The diff shows the hidden instruction, so a reviewer
 // sees it. pin --accept with a wrong digest is exit code 2 and saves nothing.
-// pin --accept with the right digest saves the new text, and the last scan is
-// clean. The tool add never changes, so it has no row and no diff.
+// pin --accept with the right digest saves the new text, and the last scan has
+// no pin finding. The injected text also gets the same T1 rows in each scan
+// that sees it. The tool add never changes, so it has no row and no diff.
 func TestE2ERugPull(t *testing.T) {
 	t.Parallel()
 	const server = rugpullServer
@@ -1335,18 +1367,46 @@ func TestE2ERugPull(t *testing.T) {
 	// description of get_time changes. The server name stays the same.
 	writeRugPullConfig(t, home, "injected")
 
+	// findingsOf returns the sorted findings of stdout as "RULE severity tool",
+	// after it checks that the SUMMARY and the FINDINGS block agree. A pin row
+	// has no title and no Where line.
+	findingsOf := func(t *testing.T, stdout string) []string {
+		t.Helper()
+		body, _ := cutAcceptHints(stdout)
+		assertReportConsistent(t, body)
+		var got []string
+		for _, f := range parseFindings(t, body) {
+			if f.Name != server {
+				t.Errorf("finding %s is on the server %q, want %q", f.RuleID, f.Name, server)
+			}
+			if strings.HasPrefix(f.RuleID, "MOAT-T2-") && (f.Title != "" || f.Where != "") {
+				t.Errorf("pin finding %s has the title %q and the Where line %q, want neither", f.RuleID, f.Title, f.Where)
+			}
+			got = append(got, f.RuleID+" "+f.Severity+" "+f.Tool)
+		}
+		slices.Sort(got)
+		return got
+	}
+	// The injected description of get_time has T1 markers (see
+	// testdata/servers/rugpull/README.md), so the T1 rules flag it in every scan
+	// that sees it, also after pin --accept.
+	wantT1 := []string{
+		"MOAT-T1-002 high get_time (description)",
+		"MOAT-T1-003 high get_time (description)",
+		"MOAT-T1-004 medium get_time (description)",
+	}
+
 	// Step 3: the second scan finds the change. It exits with code 1 (findings).
+	// The only pin row is get_time: the tool add has no row.
 	stdout, stderr, code = runBin(t, home, work, "scan")
 	assertScanResult(t, code, stdout, stderr, scanWant{code: exitFindings})
-	// splitPinOutput cuts the findings from the diff, so its rows hold only the
-	// findings. The only row is get_time: the tool add has no row.
-	out := splitPinOutput(t, stdout)
-	wantRow := pinFinding{rule: "MOAT-T2-001", severity: "high", server: server, tool: "get_time"}
-	if !slices.Equal(out.rows, []pinFinding{wantRow}) {
-		t.Errorf("findings rows = %+v, want one row %+v\nstdout:\n%s", out.rows, wantRow, stdout)
+	if got, want := findingsOf(t, stdout), append(slices.Clone(wantT1), "MOAT-T2-001 high get_time"); !slices.Equal(got, want) {
+		t.Errorf("findings = %q, want %q\nstdout:\n%s", got, want, stdout)
 	}
-	// The diff has one block, for get_time only.
-	assertDiffsOf(t, out.diffs, server, []string{"get_time"})
+	// The diff has one block, for get_time only. The diffs are the text after
+	// the FINDINGS block.
+	body, _ := cutAcceptHints(stdout)
+	assertDiffsOf(t, splitScanSections(body).Rest, server, []string{"get_time"})
 	// The parts of the diff come in the order of rugpullDiffParts.
 	assertInOrder(t, stdout, rugpullDiffParts(server))
 
@@ -1384,10 +1444,14 @@ func TestE2ERugPull(t *testing.T) {
 	assertNoLeakBoth(t, stdout, stderr)
 	assertNoArgsInPins(t)
 
-	// Step 5: the third scan is clean. The new text is now the pinned text, so
-	// there is no finding and no accept line.
+	// Step 5: the third scan has no pin finding. The new text is now the pinned
+	// text, so there is no MOAT-T2 row, no diff and no accept line. The T1 rows
+	// stay: pin --accept does not make the text safe, so the exit code is 1.
 	stdout, stderr, code = runBin(t, home, work, "scan")
-	assertScanResult(t, code, stdout, stderr, scanWant{code: exitOK, noStdout: []string{"MOAT-T2", acceptHintPrefix}})
+	assertScanResult(t, code, stdout, stderr, scanWant{code: exitFindings, noStdout: []string{"MOAT-T2", acceptHintPrefix, "Changed tool"}})
+	if got := findingsOf(t, stdout); !slices.Equal(got, wantT1) {
+		t.Errorf("findings = %q, want %q\nstdout:\n%s", got, wantT1, stdout)
+	}
 	assertServerNames(t, stdout, server)
 }
 

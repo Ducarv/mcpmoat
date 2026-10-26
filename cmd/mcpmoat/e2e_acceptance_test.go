@@ -3,9 +3,8 @@ package main
 // End-to-end acceptance test of the threats of docs/PRD.md (milestone M7). It
 // runs the real binary (see runBinEnv in e2e_test.go) on one fake home that
 // holds the fixtures of testdata/servers and testdata/configs together. It
-// covers T2, T4 and T5. Scan does not apply the T1 and T3 rules yet (issue
-// #143), so the test asserts that they report nothing (see
-// acceptanceWantFindings).
+// covers the five threats T1 to T5 (see acceptanceToolFindings and
+// acceptanceConfigFindings).
 
 import (
 	"encoding/json"
@@ -86,9 +85,32 @@ const acceptanceGateOptIn = " needs explicit opt-in"
 // a line to this file.
 const acceptancePublicText = ".mcpmoat-ignore"
 
-// acceptanceRugPullFinding is the finding of the changed get_time of
+// acceptanceToolFindings are the sorted findings of the T1 and T3 description
+// and schema rules on each server of acceptanceStdioServers, as "RULE
+// severity". The rule IDs are the ones that testdata/servers/README.md lists.
+// The severities are the ones of the rule files in rules/. nil means no
+// finding. The rugpull findings are in acceptanceRugPullFindings.
+var acceptanceToolFindings = map[string][]string{
+	"benign": nil,
+	"poisoned": {
+		"MOAT-T1-002 high", "MOAT-T1-003 high", "MOAT-T1-004 medium", "MOAT-T1-005 high",
+		"MOAT-T1-006 medium", "MOAT-T1-007 low", "MOAT-T1-008 medium", "MOAT-T1-009 high",
+		"MOAT-T1-012 medium", "MOAT-T1-017 high", "MOAT-T1-019 high", "MOAT-T1-020 high",
+	},
+	"shadowing": {"MOAT-T1-003 high", "MOAT-T1-005 high", "MOAT-T3-001 high"},
+	// mailer is the target of the shadowing, not the attacker. MOAT-T3-001
+	// from rules.CheckShadowing needs both servers, and scan does not run it.
+	"mailer": nil,
+}
+
+// acceptanceRugPullFinding is the pin finding of the changed get_time of
 // rugpullServer in scan 2.
 const acceptanceRugPullFinding = "MOAT-T2-001 high"
+
+// acceptanceRugPullFindings are the sorted findings of rugpullServer in scan 2:
+// the pin finding, and the T1 findings of the injected get_time description
+// (see testdata/servers/rugpull/README.md).
+var acceptanceRugPullFindings = []string{"MOAT-T1-002 high", "MOAT-T1-003 high", "MOAT-T1-004 medium", acceptanceRugPullFinding}
 
 // acceptanceSecrets are the strings that must never show in the output or in
 // pins.json: the canaries and the other secret-like values of the dangerous
@@ -219,17 +241,9 @@ func acceptanceProjectServers(t *testing.T, localURL string) map[string]any {
 
 // acceptanceWantFindings returns the expected sorted findings of every server,
 // as "RULE severity". rugpull holds the findings of rugpullServer.
-//
-// Scan does not apply the T1 and T3 description and schema rules yet (issue
-// #143), so the stdio servers have no T1 or T3 finding here. When #143 lands,
-// set poisoned, shadowing and mailer to the IDs that scan reports (see
-// testdata/servers/README.md), and add the T1 IDs of the injected get_time
-// (see testdata/servers/rugpull/README.md) to the rugpull set in scan 2.
 func acceptanceWantFindings(rugpull []string) map[string][]string {
 	want := maps.Clone(acceptanceConfigFindings)
-	for _, name := range acceptanceStdioServers {
-		want[name] = nil
-	}
+	maps.Copy(want, acceptanceToolFindings)
 	want[rugpullServer] = rugpull
 	return want
 }
@@ -459,16 +473,15 @@ func assertAcceptanceJSON(t *testing.T, stdout, stderr string, code int) {
 			t.Errorf("--json: server %s: inspection status = %q, want %q", s.Name, s.Inspection.Status, wantStatus)
 		}
 	}
-	assertFindingsByServer(t, "--json", acceptanceFindingsByServer(t, names, acceptanceJSONFindings(doc)), acceptanceWantFindings([]string{acceptanceRugPullFinding}))
+	assertFindingsByServer(t, "--json", acceptanceFindingsByServer(t, names, acceptanceJSONFindings(doc)), acceptanceWantFindings(acceptanceRugPullFindings))
 	if len(doc.Diffs) != 1 || doc.Diffs[0].Server != rugpullServer || doc.Diffs[0].Tool != "get_time" ||
 		!strings.Contains(doc.Diffs[0].Diff, "+description: "+rugpullInjected+"\n") {
 		t.Errorf("--json diffs = %+v, want one diff of %s get_time with the injected description", doc.Diffs, rugpullServer)
 	}
 }
 
-// TestE2EAcceptance runs one journey on the real binary that covers T2, T4 and
-// T5. T1 and T3 are asserted empty until issue #143 (see
-// acceptanceWantFindings). The inspect gate refuses every server of the
+// TestE2EAcceptance runs one journey on the real binary that covers T1 to T5.
+// The inspect gate refuses every server of the
 // project file, so none of them starts (the npx and docker commands would
 // fetch packages) and no remote one gets a connection, but the config rules
 // still check them. The npx and docker of PATH are marker scripts, the proxy
@@ -486,7 +499,7 @@ func TestE2EAcceptance(t *testing.T) {
 
 	// Scan 1: every stdio server is new, so scan pins its tools, in name
 	// order. Only the project servers are refused, and they show in the
-	// SUMMARY, not on stderr. rugpull is clean, so it has no MOAT-T2 finding.
+	// SUMMARY, not on stderr. rugpull is clean, so it has no finding.
 	stdout := r.scanAndCheck(t, []lineWant{
 		exactLine("mcpmoat scan: pinned 2 tools for benign"),
 		exactLine("mcpmoat scan: pinned 1 tool for mailer"),
@@ -501,7 +514,7 @@ func TestE2EAcceptance(t *testing.T) {
 	// four servers stay the same, so only the description of rugpull get_time
 	// changed. Nothing is pinned, so stderr is empty.
 	writeAcceptanceHome(t, r.home, "injected")
-	stdout = r.scanAndCheck(t, nil, acceptanceWantFindings([]string{acceptanceRugPullFinding}))
+	stdout = r.scanAndCheck(t, nil, acceptanceWantFindings(acceptanceRugPullFindings))
 	wantRow := []string{"MOAT-T2-001", "high", rugpullServer, "tool", "get_time"}
 	if !slices.ContainsFunc(findingRows(t, stdout), func(row []string) bool { return slices.Equal(row, wantRow) }) {
 		t.Errorf("no finding row %v\nstdout:\n%s", wantRow, stdout)
