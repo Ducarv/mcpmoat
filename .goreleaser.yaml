@@ -41,7 +41,7 @@ builds:
 archives:
   - ids:
       - mcpmoat
-    # README.md names the archives with this pattern.
+    # docs/install.md names the archives with this pattern.
     name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
     formats:
       - tar.gz

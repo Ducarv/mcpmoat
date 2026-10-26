@@ -111,7 +111,7 @@ jobs:
           HAS_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_GITHUB_TOKEN != '' }}
         run: |
           if [ "$HAS_TAP_TOKEN" != true ]; then
-            echo "::error::The release environment has no HOMEBREW_TAP_GITHUB_TOKEN secret. Do the one-time setup in CONTRIBUTING.md (Releasing) first."
+            echo "::error::The release environment has no HOMEBREW_TAP_GITHUB_TOKEN secret. Do the one-time setup in docs/releasing.md first."
             exit 1
           fi
 
@@ -183,12 +183,12 @@ jobs:
           }
 
           # check_immutable fails unless GitHub locked the published release.
-          # That needs "Immutable releases" on (CONTRIBUTING.md, step 5).
+          # That needs "Immutable releases" on (docs/releasing.md, One-time setup, step 5).
           check_immutable() {
             local immutable
             immutable=$(gh api "repos/$GITHUB_REPOSITORY/releases/tags/$GITHUB_REF_NAME" -q .immutable) || return 1
             if [ "$immutable" != true ]; then
-              echo "::error::The release is not immutable. Turn on Immutable releases (CONTRIBUTING.md, step 5)."
+              echo "::error::The release is not immutable. Turn on Immutable releases (docs/releasing.md, One-time setup, step 5)."
               return 1
             fi
           }

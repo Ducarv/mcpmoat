@@ -116,7 +116,7 @@ exec mcpmoat scan --no-connect --config .mcp.json --fail-on medium
 ```
 
 Do not use `--fail-on critical`: no built-in rule is critical yet, so it passes every built-in
-finding (see [Exit codes](../README.md#exit-codes)).
+finding (see [Exit codes](exit-codes.md)).
 
 `git commit --no-verify` skips the hook. So the hook helps you, but it does not replace the CI job.
 
@@ -151,7 +151,7 @@ the first tagged release.
 ## Exit codes and --fail-on
 
 `mcpmoat scan` exits with 0, 1 or 2, and `--fail-on` sets the lowest severity that gives 1. The
-contract is in [README.md](../README.md#exit-codes). In CI, treat every code that is not 0 as a
+contract is in [Exit codes](exit-codes.md). In CI, treat every code that is not 0 as a
 failure. Never allow exit code 2: it means that the scan did not finish, so a clean result is not
 known.
 

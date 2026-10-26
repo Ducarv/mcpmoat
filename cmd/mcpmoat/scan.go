@@ -28,7 +28,7 @@ import (
 // rate the description of each tool (see scan_llm.go).
 //
 // docs/ARCHITECTURE.md describes the data flow. The usage text (scanUsage and
-// usage in cli.go) lists the flags. README.md#exit-codes is the exit-code
+// usage in cli.go) lists the flags. docs/exit-codes.md is the exit-code
 // contract (FR-16), and the usage text summarises it.
 func (c *cli) runScan(opts options, args []string) int {
 	fs := flag.NewFlagSet("mcpmoat scan", flag.ContinueOnError)
@@ -485,7 +485,7 @@ const configErrorHint = "mcpmoat scan: a config file has a problem; " +
 // checks their pins (see inspectAndPin). configPath is the --config value, or
 // empty. It prints the report on stdout (see writeScanReport, or the JSON
 // document with --json), and the file problems and warnings on stderr, and
-// returns the exit code (see scanExitCode; README.md#exit-codes is the
+// returns the exit code (see scanExitCode; docs/exit-codes.md is the
 // contract, and the usage text in cli.go summarises it). The status of each
 // server and the warnings of its inspection are part of the report on stdout
 // (the summary), not warnings on stderr. They never change the exit code. When

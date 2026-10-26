@@ -1,20 +1,16 @@
-# Contributing to mcpmoat
-
-Thank you for helping. The easiest and most useful way to contribute is a **detection rule**.
-
-## Contributing a rule
+# Contributing a rule
 
 A rule is **one YAML file with its test cases inside**. You do not need to know the whole codebase.
 
-### 1. Pick a threat
+## 1. Pick a threat
 
 Rules map to the phase 1 threats T1 to T5. The IDs and their meaning are in
-[docs/PRD.md](docs/PRD.md#53-threats). T2 (rug pull) is handled by pins, not by rules.
+[the threat list in the PRD](PRD.md#53-threats). T2 (rug pull) is handled by pins, not by rules.
 
 Look for open issues labelled [`type:rule`](https://github.com/Ducarv/mcpmoat/labels/type%3Arule)
 and [`good first issue`](https://github.com/Ducarv/mcpmoat/labels/good%20first%20issue).
 
-### 2. Write the rule
+## 2. Write the rule
 
 Create `rules/<ID>.yaml`. The file name must equal the rule ID, for example `rules/MOAT-T1-003.yaml`.
 Built-in IDs use the form `MOAT-T<threat>-<number>`: a threat from 1 to 5 and three digits.
@@ -22,7 +18,7 @@ Built-in IDs use the form `MOAT-T<threat>-<number>`: a threat from 1 to 5 and th
 Put only rule files in `rules/`. The build embeds every `*.yaml` file in that folder, and the loader
 reads each one as a rule. Put other data in a subfolder or give it another extension.
 
-The file [`rules/MOAT-T1-003.yaml`](rules/MOAT-T1-003.yaml) is a complete, worked example. It has all
+The file [`rules/MOAT-T1-003.yaml`](../rules/MOAT-T1-003.yaml) is a complete, worked example. It has all
 the fields and the test cases. Read it as you follow the steps below.
 
 Notes on the regexes in `rules/MOAT-T1-003.yaml`:
@@ -121,7 +117,7 @@ How mcpmoat prepares the text before a match. This applies to every regex and ke
   letters can hide. The `mixed_script` heuristic (MOAT-T1-010 for a description, MOAT-T1-011 for a
   schema) flags a word that mixes letters of look-alike scripts. The look-alike fold, the rules and
   the unit exemption of `mixed_script`, and the limits of both are in the package doc of
-  `internal/rules` ([doc.go](internal/rules/doc.go)). A regex reads up to 21 forms: the seven forms,
+  `internal/rules` ([doc.go](../internal/rules/doc.go)). A regex reads up to 21 forms: the seven forms,
   their folds and their look-alike folds. A look-alike fold is a new form only when the text has a
   look-alike letter, so other text has at most 14 forms. A keyword reads up to seven, because
   mcpmoat matches a keyword only against the folds.
@@ -179,7 +175,7 @@ How mcpmoat prepares the text of a `target: schema` rule:
 - The shadowing rule MOAT-T3-001 does not read a schema this way. It reads only the `description`
   and `title` strings of the schema.
 
-#### Schema copies
+### Schema copies
 
 Most T1 description rules have a copy with `target: schema` that checks the tool input schema. The
 copy matches each schema string alone and, for a regex or keyword rule, each seam of two neighbour
@@ -269,7 +265,7 @@ at all is an error too, so a wrong folder name cannot look like a scan with extr
 
 An error names the file, the line and the column, and the field when there is one.
 
-### 3. Add test cases
+## 3. Add test cases
 
 Every rule needs cases that **must** match and cases that **must not** match. Write them in the same
 file, under `should_match` and `should_not_match`. Each item is a plain string, or a mapping with a
@@ -301,7 +297,7 @@ comment. A malicious case is synthetic: put it in a group whose comment says "sy
 header explains the line format. Run it with
 `go test -race ./internal/rules/ -run TestExfilCorpus -v`.
 
-### 4. Run the tests
+## 4. Run the tests
 
 ```sh
 go test ./internal/rules/
@@ -316,7 +312,7 @@ line and the column.
 The tests run every case. A case that does not behave as written fails the test. Write the cases
 with each new rule.
 
-### 5. Try an external rule
+## 5. Try an external rule
 
 You can test a rule without building it in. Put it in a folder and run:
 
@@ -331,253 +327,8 @@ folder holds at most 1000 such files. An external rule can use any safe ID (see 
 but it must not use the ID of a built-in rule, in any case (`moat-t1-003` clashes with `MOAT-T1-003`).
 An invalid file or a clashing ID gives exit code 2 and the message names the file.
 
-## Building and testing
+## See also
 
-### Requirements
-
-You need Go 1.27.3 or later. The `go` line in `go.mod` sets the minimum language version
-(`go 1.27.0`). The `toolchain` line sets the toolchain that builds the project and runs in CI
-(`toolchain go1.27.3`). With Go 1.21 or later and the default `GOTOOLCHAIN=auto`, the `go` command
-downloads go1.27.3 for you.
-
-`go.mod` is the source of truth. When the versions in `go.mod` change, change this section too.
-
-The project uses [golangci-lint](https://golangci-lint.run/) v2. The config is in `.golangci.yml`.
-CI pins v2.15.0. Install the same version:
-
-```sh
-go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.15.0
-```
-
-You can also use `brew install golangci-lint`, or follow the
-[install guide](https://golangci-lint.run/welcome/install/).
-
-You need [GoReleaser](https://goreleaser.com/) only when you change `.goreleaser.yaml`. CI and the
-release workflow pin one version. `go run github.com/goreleaser/goreleaser/v2@v2.19.0 <cmd>` runs that
-version and needs no install. `brew install goreleaser` also works, but it can give another version.
-To bump the version, change `GORELEASER_VERSION` in `ci.yml` and `release.yml` and every
-`goreleaser/v2@` command in this file. The `release-check` CI job fails if they differ. Then build a
-snapshot and check that `dist/homebrew/Casks/mcpmoat.rb` still has the parts in the cask list in
-[README.md](README.md#verify-a-download). In a snapshot, the `version` line is the snapshot version
-and the urls hold the literal snapshot tag (for example `v0.0.0`) in place of `v#{version}`. Only a
-real tag gives the exact urls.
-
-### Checks
-
-Run these checks before you open a pull request:
-
-```sh
-gofmt -l .                                             # must print nothing
-go mod tidy && git diff --exit-code -- go.mod go.sum   # module files are tidy
-go build ./...
-go vet ./...
-golangci-lint config verify                            # .golangci.yml is valid
-golangci-lint run ./...
-go test -race -shuffle=on ./...
-govulncheck ./...
-```
-
-On Linux, `TMPDIR` is usually `/tmp`, which other users can write to. Some E2E tests then skip,
-because mcpmoat refuses to make its run directory below such a directory. To run them, set `TMPDIR`
-to a private directory, for example `TMPDIR=$(mktemp -d ~/.cache/mcpmoat-test.XXXXXX)`. CI does this.
-
-If you change `.goreleaser.yaml`, also run these checks. A snapshot build needs no token and
-publishes nothing. It writes the archives to `dist/`. The last script needs `jq`, and it runs on
-Linux and macOS.
-
-```sh
-go run github.com/goreleaser/goreleaser/v2@v2.19.0 check                       # config is valid
-go run github.com/goreleaser/goreleaser/v2@v2.19.0 release --snapshot --clean  # build all archives
-.github/scripts/check-snapshot.sh                                              # check the archives
-```
-
-Agent-oriented variants (scoped tests, E2E scenario, golden files, fuzz) are in the Commands table of
-[.agents/project.md](.agents/project.md#commands).
-
-`go.mod` lists the dependencies. Do not change it unless your change needs a new module.
-
-CI (`.github/workflows/ci.yml`) runs on every pull request. On Linux and macOS it runs build, vet, race
-tests, golangci-lint and the version smoke test. On Linux only it also runs the gofmt check, the
-`go mod tidy` check and govulncheck. The `release-check` job checks that the GoReleaser and
-govulncheck version pins match. Then it runs `goreleaser check`, a snapshot build and
-`.github/scripts/check-snapshot.sh`.
-
-The `offline` job proves that a scan makes no network call that it should not make (NFR-01). It
-runs the `TestE2E` tests, the network tests of `cmd/mcpmoat/e2e_network_test.go` included, through
-`.github/scripts/run-offline.sh`, in a Linux network namespace (`sudo unshare --net`) that has only
-loopback. The script first checks that DNS and outside TCP connections fail and that loopback
-works, then runs the tests as the normal user (`setpriv`) with `GOPROXY=off`. To run it on Linux,
-run `.github/scripts/run-offline.sh` from the repository root. It needs `go`, `sudo`, `unshare`,
-`setpriv`, `ip`, `getent` and `timeout`. It also needs a private `TMPDIR`: no directory in the
-`TMPDIR` path may be writable by its group or by others. With the default `/tmp`, or on a system
-that is not Linux, the script stops with exit code 2. On macOS there is no network namespace:
-`go test ./cmd/mcpmoat/` runs the in-process network tests (`cmd/mcpmoat/network_test.go`) and the
-E2E tests as usual, without the kernel check.
-
-### Build the binary
-
-```sh
-go build -ldflags "-X main.version=v1.2.3 -X main.commit=abc123 -X main.date=2026-01-01T00:00:00Z" -o mcpmoat ./cmd/mcpmoat
-./mcpmoat version
-```
-
-Without `-ldflags`, mcpmoat reads the version, commit and date that Go stores in the binary. A plain
-`go build` in a git checkout prints a pseudo-version such as `v0.0.0-20261017181905-4091e6ff2614+dirty`.
-A build with `go install github.com/Ducarv/mcpmoat/cmd/mcpmoat@<version>` prints that module version.
-The version is `dev` only when Go has no data to store, for example with `-buildvcs=false` or outside
-a git checkout. With a version set by `-X main.version`, mcpmoat uses only the values that you link
-(`main.commit` and `main.date`), and prints `none` and `unknown` for the ones that you leave out. The
-output of the command above is `mcpmoat v1.2.3 (commit abc123, built 2026-01-01T00:00:00Z)`.
-
-CI builds with `-ldflags "-X main.version=ci-smoke"` and checks that `mcpmoat version` prints that value.
-
-Release builds set these values through GoReleaser (`.goreleaser.yaml`): `main.version` is the tag
-with its `v`, `main.commit` is the first 12 characters of the commit (the same as a `go build` in a
-git checkout) and `main.date` is the commit date.
-
-## Branches and releases
-
-```text
-feature branch --PR--> dev --release PR (merge commit)--> main --tag vX.Y.Z--> release
-```
-
-- `dev` is the default branch. Clone it, branch from it and open your PR against it.
-- `main` is the release branch. Only the maintainer merges `dev` into `main`, with a PR and a
-  merge commit (not a squash, so the two histories stay joined).
-- Release tags go on `main` only. The release workflow fails for a tag that is not on the
-  first-parent history of `main`.
-- Hotfix: branch from `main`, open the PR against `main`, then open a PR from `main` into `dev` and
-  merge it with a merge commit (not a squash, or the histories stop joining).
-- Both branches need a PR, the checks `test (ubuntu-latest)` and `test (macos-latest)`, and allow no
-  force push and no delete. `main` also needs the checks `offline` and `release-check`, and allows
-  merge commits only. `dev` allows merge commits too, for the hotfix merge-back.
-- Dependabot and the dependency graph watch the default branch, so a security update lands on `dev`.
-  After you merge one, cut a release soon, so that the released code on `main` gets the fix.
-
-## Pull requests
-
-- One change per pull request. A new rule is a good size.
-- Reference the issue and the PRD IDs (for example `FR-09`, `T1`) in the description.
-- Code style, dependencies, telemetry, commits and branch names: see the Code style and Git and pull
-  requests sections of [.agents/project.md](.agents/project.md).
-- Every PR either updates its owner doc (listed in [docs/README.md](docs/README.md)) or says "No doc
-  change needed because ..." in the PR.
-- A behaviour change is a change to flags, output, exit codes, rules, package layout, CLI commands,
-  the gate commands in Checks or security-relevant behaviour. A PR with a behaviour change and neither a doc update nor that sentence
-  is not ready.
-- A "No doc change needed because ..." reason is real when the diff has no behaviour change, or when
-  the owner doc already states the new behaviour. A reason from an issue or a PR body is a claim:
-  check it against the diff. A change to security-relevant behaviour always needs an owner-doc
-  update, whatever the reason says, and even when the owner doc already states the behaviour. In that
-  case, update at least its status line or its wording.
-
-## Releasing
-
-This section is for maintainers. The release workflow is `.github/workflows/release.yml`. The
-GoReleaser config is `.goreleaser.yaml`.
-
-### One-time setup
-
-Do all of these steps before you push the first release tag. Step 3 says why.
-
-1. Create the public repo `Ducarv/homebrew-tap`. GoReleaser writes the cask to its `Casks/` folder.
-   Protect its default branch so that only the maintainer, who owns the token below, can push.
-2. Create a fine-grained personal access token. Give it access to only `Ducarv/homebrew-tap`, with
-   the Contents permission set to read and write. Give it an expiry of 90 days or less. Before it
-   expires, make a new token and replace the secret in step 3.
-3. In `Ducarv/mcpmoat`, create the GitHub environment `release`. Limit its deployment branches and
-   tags to tags that match `v[0-9]*`. Add the maintainer as a required reviewer, so each release
-   waits for approval. Add the token to it as the environment secret `HOMEBREW_TAP_GITHUB_TOKEN`. Do
-   not make it a repository or organization secret: only jobs in the `release` environment can read
-   an environment secret. If the environment does not exist, GitHub creates it on the first run,
-   with no reviewer and no tag limit. The release job then stops before GoReleaser runs, because the
-   secret is missing. A repository or organization secret with the same name hides a missing
-   environment from that check.
-4. Add a tag ruleset for `v[0-9]*` that restricts creations, updates and deletes. Let only the
-   maintainer bypass it. Then only the maintainer can push, move or delete a release tag. After a
-   release is published, Immutable releases (step 5) lock its tag for everyone.
-5. In the settings of `Ducarv/mcpmoat`, turn on "Immutable releases". The workflow publishes a
-   draft, so the assets lock when the release is published, after the attestations verify. The
-   release job can check this only after the publish, because `GITHUB_TOKEN` cannot read the
-   setting. So before each tag, check that `gh api repos/Ducarv/mcpmoat/immutable-releases` prints
-   `"enabled":true`.
-6. Protect the maintainer account: use 2FA or passkeys, keep no classic PATs with `repo` scope and
-   no fine-grained tokens with Deployments or Administration write access on `Ducarv/mcpmoat`.
-
-### Cut a release
-
-Open a PR from `dev` to `main` and merge it with a merge commit, not a squash. Then tag that merge
-commit on `main` and push the tag. A clone checks out `dev` and a local `main` can be old, so name
-the commit and check it before you push:
-
-```sh
-git fetch origin
-git tag v0.1.0 origin/main
-git rev-list --first-parent origin/main | grep -Fx "$(git rev-parse 'v0.1.0^{commit}')"
-git push origin v0.1.0
-```
-
-The `grep` prints the commit if it is on the first-parent history of `main`. If it prints nothing,
-delete the local tag (`git tag -d v0.1.0`) and do not push it. A tag on the wrong commit that
-reaches the Go module proxy stays there, and you lose that version number.
-
-The tag starts the release workflow. The `test` job runs vet, the race tests and govulncheck. Then
-the `release` job waits for the maintainer to approve it in the `release` environment. It fails if
-the tagged commit is not on the first-parent history of `main`, or if the environment has no tap
-secret. It builds the archives with GoReleaser, creates a draft GitHub release and pushes the cask
-to the tap. Only the GoReleaser step gets the tap token. Then it attests the build provenance of
-`dist/*.tar.gz` and `dist/checksums.txt`. It checks that the draft release holds exactly those
-files. It downloads them and checks that they match `dist/`. It verifies each attestation with
-`gh attestation verify`. It checks that the tag still points at the commit that it built. Then it
-publishes the release. Last, it checks that the release is immutable, and checks the tag and the
-published files once more.
-
-Try a prerelease tag first, for example `v0.1.0-rc.1`. GoReleaser marks it as a prerelease and does
-not update the tap.
-
-The workflow runs one release at a time. Push one tag, and push the next only after its run ends:
-GitHub cancels a waiting run when a newer one queues behind it. Do not release an older version
-after a newer one, for example a fix for an old minor line. Its run would point the tap at the older
-version and mark it as the latest release.
-
-### Verify a release
-
-Verify an archive and the tap cask with the steps in
-[README.md](README.md#verify-a-download). Then check the install. For a stable tag, install from the
-tap:
-
-```sh
-brew install --cask Ducarv/tap/mcpmoat
-mcpmoat version
-```
-
-A prerelease tag does not update the tap. For an rc, extract the binary from the archive and run
-`./mcpmoat version`.
-
-Known limit: GoReleaser pushes the cask before the attest step runs. If a step before the publish
-fails, the release stays a draft, so it is not public. But the cask is already in the tap, and its
-URLs return 404 until the release is published. What to do depends on the cause:
-
-- An external or transient cause, such as the tap token or the network: fix it and re-run the
-  workflow. The re-run replaces the draft. Do not publish the draft by hand: only the workflow
-  verifies the attestations before it publishes, and a published release cannot change.
-- A cause in the code or config of the tagged commit: a re-run builds the same commit and fails
-  again. Delete the draft, revert the tap commit, fix the cause on `dev`, merge `dev` into `main` and
-  cut a new patch or rc tag.
-
-If a check after the publish fails, the release is already public. Do not re-run the workflow: on a
-release that is not immutable, a re-run uploads the assets again with no check. Check the release
-with the steps in [README.md](README.md#verify-a-download). If it is wrong, delete it, revert the tap
-commit and cut a new patch tag.
-
-After any re-run of part of the workflow, check the tap's `Casks/mcpmoat.rb` with the cask steps in
-[README.md](README.md#verify-a-download). Its sha256 values must match the draft's `checksums.txt`.
-
-## Security issues
-
-Do not open a public issue for a vulnerability. See [SECURITY.md](SECURITY.md).
-
-## License
-
-By contributing, you agree that your contributions are licensed under the
-[Apache-2.0 License](LICENSE).
+- [How to add a rule: where the code lives](ARCHITECTURE.md#how-to-add-a-rule)
+- [Threats T1 to T5](PRD.md#53-threats)
+- [Contributing to mcpmoat](../CONTRIBUTING.md)

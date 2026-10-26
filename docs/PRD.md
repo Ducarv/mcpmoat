@@ -159,7 +159,7 @@ mcpmoat process, and a stdio server runs as the same user and can read it (for e
 - Data that leaves the machine: `--llm` is opt-in, and a warning is printed before any request.
 - A hostile config that hides the LLM findings: only `--ignore` hides them, not `.mcpmoat-ignore`.
 - The key in the mcpmoat environment: mcpmoat does not give the key to a server through its
-  environment or a placeholder, and the README advises a key made for `--llm` with a low spend
+  environment or a placeholder, and docs/llm.md advises a key made for `--llm` with a low spend
   limit.
 
 The code-level notes are in the package doc comment of `internal/llm/doc.go`.
@@ -397,8 +397,8 @@ not break the scan.
 - Ctrl-C, `SIGTERM` or `SIGHUP` cancels the run. mcpmoat stops the stdio servers that it started,
   because they run in their own session and the terminal does not signal them. A signal during the
   inspection, or before new pins are saved, makes `scan` and `pin --accept` print
-  `interrupted; no pins were saved`, save nothing and exit with code 2. The README section
-  [Exit codes](../README.md#exit-codes) gives the exact `scan` behavior.
+  `interrupted; no pins were saved`, save nothing and exit with code 2. The page
+  [Exit codes](exit-codes.md) gives the exact `scan` behavior.
 
 ### 6.3 Rules
 
@@ -536,7 +536,7 @@ text diff.
 - The default threshold of `--fail-on` is `high`. So the default does not fail on `MOAT-T2-002`
   (a new tool alone), `MOAT-T2-003` (removed tool) or a `medium` `MOAT-T2-004` (an unpinned tool name on a
   pinned server, or an unpinned server that is listed twice). It does fail on `MOAT-T2-001` and on a
-  `high` `MOAT-T2-004`. The scan usage text and the README say that a new tool alone does not give
+  `high` `MOAT-T2-004`. The scan usage text and docs/pins.md say that a new tool alone does not give
   exit code 1.
 - `scan` and `pin --accept` read `pins.json` before they start any server. A bad `pins.json` exits
   with code 2 before a server starts. They read it again just before they save, to keep what
@@ -616,8 +616,8 @@ with `--no-color`).
 - Findings and an execution error together: exit 2. Exit 2 wins over 1.
 - `--fail-on` accepts only `low`, `medium`, `high` and `critical`. Another value is a usage error
   (exit 2). It is a `scan` flag only.
-- The exact contract, with the errors that still print the report, is the README section
-  [Exit codes](../README.md#exit-codes).
+- The exact contract, with the errors that still print the report, is the page
+  [Exit codes](exit-codes.md).
 - A per-server connection failure alone does not cause exit 2 (it is reported; see FR-06).
 - Tests cover every branch, including `--fail-on low|medium|high|critical`.
 
@@ -644,16 +644,16 @@ the machine**.
   description (each cut at a fixed size, with a flag that says it was cut), in one JSON user
   message with a fixed system prompt. mcpmoat never puts configs, env values, headers, arguments,
   URLs, schemas or pins into a request. A cap on the number of tools per scan (500): more tools
-  than the cap give exit code 2. The README holds the sizes and the other limits. `--ignore` does
+  than the cap give exit code 2. docs/llm.md holds the sizes and the other limits. `--ignore` does
   not stop a tool from being sent: to keep a server out of `--llm`, scan it with a separate config.
 - A tool whose name or description was cut is never rated below `medium`, and an unusable model
   answer for it does not hide it. The code enforces this, not only the system prompt. The
-  [README](../README.md#optional-llm-classification-sends-data-off-your-machine) holds the full
+  [LLM page](llm.md) holds the full
   rule.
 - The description is sent as the server returned it. mcpmoat does not remove configured secret
   values from it. A server that got a token through its env or headers can put that token into its
   description, and `--llm` then sends it to the provider. The server already holds the value. The
-  README tells the user to run `--llm` only if they accept that a tool description can leave the
+  docs/llm.md tells the user to run `--llm` only if they accept that a tool description can leave the
   machine as the server wrote it.
 - The model may answer only with a risk (`none`, `low`, `medium`, `high`) and a category from a
   fixed list. No model text reaches the output. Rule `MOAT-LLM-001` reports a risk of `low`,
@@ -668,7 +668,7 @@ the machine**.
   hostile description can try to influence it.
 - A provider failure stops the step and gives exit code 2 (fail closed). So does an internal error
   of the LLM step, or more tools than the cap. The report still prints and the JSON `complete`
-  field is `false`. The README holds the list of failures and the exact stderr lines.
+  field is `false`. docs/llm.md holds the list of failures and the exact stderr lines.
 - A hostile server can make `scan --llm` exit with 2: it can list more tools than the cap, or write a
   description that makes the provider answer with an HTTP 4xx (a content filter or a context
   limit). The rule findings still print. A follow-up may make a 400, 413 or 422 for one tool a

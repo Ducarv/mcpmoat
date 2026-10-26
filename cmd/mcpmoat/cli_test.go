@@ -362,10 +362,10 @@ func TestUsageContent(t *testing.T) {
 		"Exit codes:\n",
 		"  0  no finding that is not ignored at or above --fail-on\n",
 		"  1  a finding that is not ignored at or above --fail-on (default high)\n",
-		// Exit code 2 wins over 1 (FR-16). README.md#exit-codes owns the
+		// Exit code 2 wins over 1 (FR-16). docs/exit-codes.md owns the
 		// exact contract, so the usage text points to it.
 		"  2  execution or usage error, also when there are findings\n",
-		"     (https://github.com/Ducarv/mcpmoat#exit-codes lists the causes and when the report still prints)\n",
+		"     (https://github.com/Ducarv/mcpmoat/blob/HEAD/docs/exit-codes.md lists the causes and when the report still prints)\n",
 		// The --fail-on flag line and its continuation lines. Only the text is
 		// checked, not the padding that tabwriter prints.
 		"  --fail-on <severity>  Exit 1 for a finding of this severity or above: low, medium, high or critical (default high)\n",

@@ -321,8 +321,8 @@ func severityRows(severities ...string) []report.FindingRow {
 }
 
 // TestNoBuiltinCriticalSeverity checks that no built-in rule and no pin change
-// kind is critical. failOnCriticalNotice, the --fail-on help text and README
-// "Exit codes" say so. When a critical rule is added, change those texts and
+// kind is critical. failOnCriticalNotice, the --fail-on help text and docs/exit-codes.md
+// say so. When a critical rule is added, change those texts and
 // this test.
 func TestNoBuiltinCriticalSeverity(t *testing.T) {
 	t.Parallel()

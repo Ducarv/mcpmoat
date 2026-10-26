@@ -6,17 +6,23 @@ This page is the index. Each topic has one owner doc. Update the owner doc. Do n
 
 | Topic | Owner |
 |---|---|
-| Product pitch, install and usage | [README.md](../README.md) |
-| Verify a release download | [README.md](../README.md#verify-a-download) |
+| Product pitch and the short install and usage summary | [README.md](../README.md) |
+| Install methods and version output | [docs/install.md](install.md) |
+| What `scan` prints (terminal and JSON for users) | [docs/scan-output.md](scan-output.md) |
+| Pins and rug pulls | [docs/pins.md](pins.md) |
+| Ignore findings (`--ignore`, `.mcpmoat-ignore`) | [docs/ignore.md](ignore.md) |
+| Optional LLM classification (`--llm`) | [docs/llm.md](llm.md) |
+| Exit codes (the contract) | [docs/exit-codes.md](exit-codes.md) |
+| Verify a release download | [docs/install.md](install.md#verify-a-download) |
 | Requirements, milestones and FR/NFR IDs | [docs/PRD.md](PRD.md) |
 | Threat model | [docs/PRD.md](PRD.md#53-threats) |
 | Package layout and data flow (docs/PRD.md section 8 is the target design) | [docs/ARCHITECTURE.md](ARCHITECTURE.md) |
 | JSON output schema and versioning (it links the schema file) | [docs/ARCHITECTURE.md](ARCHITECTURE.md#json-output) |
 | Commands (gates) | [CONTRIBUTING.md](../CONTRIBUTING.md#checks) |
-| Rule authoring | [CONTRIBUTING.md](../CONTRIBUTING.md#contributing-a-rule) |
+| Rule authoring | [docs/writing-rules.md](writing-rules.md) |
 | PR docs rule | [CONTRIBUTING.md](../CONTRIBUTING.md#pull-requests) |
 | Branch model (`dev` and `main`) | [CONTRIBUTING.md](../CONTRIBUTING.md#branches-and-releases) |
-| Release process (maintainers) | [CONTRIBUTING.md](../CONTRIBUTING.md#releasing) |
+| Release process (maintainers) | [docs/releasing.md](releasing.md) |
 | Conventions (code style, git, language, agent routing, review, release notes) | [.agents/project.md](../.agents/project.md) |
 | Security reporting | [SECURITY.md](../SECURITY.md) |
 | How stdio servers start | [docs/stdio-servers.md](stdio-servers.md) |
