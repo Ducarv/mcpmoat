@@ -1264,6 +1264,12 @@ var insecurePinsCommands = []struct {
 	{"pin --accept", func(e *pinEnv, insp inspect.Inspector) pinRunResult { return e.pin(insp, "--accept", "srv") }, assertPinRun},
 }
 
+// pinsPermTools returns the tools that the fake inspector gives the server srv
+// in the pins permission tests. It returns a new map for each test.
+func pinsPermTools() map[string][]inspect.Tool {
+	return map[string][]inspect.Tool{"srv": {mkTool("a", "Add.")}}
+}
+
 // TestPinsInsecurePermissionsRefused checks that scan and "pin --accept" refuse
 // a pins folder or a pins.json that group or others can write: exit code 2, the
 // message names the path, the mode and the fix, nothing is printed on stdout,
@@ -1272,22 +1278,21 @@ var insecurePinsCommands = []struct {
 func TestPinsInsecurePermissionsRefused(t *testing.T) {
 	t.Parallel()
 
-	tools := map[string][]inspect.Tool{"srv": {mkTool("a", "Add.")}}
+	// The mode tables are in internal/pins. Here two modes per kind prove the wiring.
 	cases := []struct {
 		kind string // "directory" or "file"
 		mode os.FileMode
 	}{
 		{"directory", 0o777},
 		{"directory", 0o770},
-		{"directory", 0o707},
 		{"file", 0o666},
 		{"file", 0o660},
-		{"file", 0o606},
 	}
 	for _, cmd := range insecurePinsCommands {
 		for _, tc := range cases {
 			t.Run(fmt.Sprintf("%s, %s %04o", cmd.name, tc.kind, tc.mode), func(t *testing.T) {
 				t.Parallel()
+				tools := pinsPermTools()
 				e := newPinEnv(t, oneServer("srv"))
 				firstScan(t, e, tools["srv"]...)
 				setPinsMode(t, e, tc.kind, tc.mode)
@@ -1333,55 +1338,32 @@ func chmodHint(path string) string {
 	return "chmod go-w -- '" + path + "'"
 }
 
-// TestPinsInsecureHintQuotesPath checks that the fix in the refusal message keeps
-// a path with a space or a single quote as one shell word: the path is in single
-// quotes, and a single quote inside it becomes quote, backslash, quote, quote.
-// The user copies this text into a shell.
+// TestPinsInsecureHintQuotesPath checks that the fix in the refusal message
+// shell-quotes a path with a single quote, because the user copies it into a
+// shell: the quote becomes quote, backslash, quote, quote. The tests of
+// internal/pins cover the other odd paths.
 func TestPinsInsecureHintQuotesPath(t *testing.T) {
 	t.Parallel()
 
-	tools := map[string][]inspect.Tool{"srv": {mkTool("a", "Add.")}}
-	cases := []struct {
-		name   string
-		folder string // the name of the XDG_CONFIG_HOME folder under a temp folder
-		quoted string // the folder name as the shell quoting writes it
-	}{
-		{"space", "my config", "my config"},
-		{"single quote", "it's", `it'\''s`},
+	tools := pinsPermTools()
+	e := newPinEnv(t, oneServer("srv"))
+	root := e.xdg
+	e.xdg = filepath.Join(root, "it's")
+	if err := os.MkdirAll(e.xdg, 0o700); err != nil {
+		t.Fatal(err)
 	}
-	for _, cmd := range insecurePinsCommands {
-		for _, tc := range cases {
-			t.Run(cmd.name+", "+tc.name, func(t *testing.T) {
-				t.Parallel()
-				e := newPinEnv(t, oneServer("srv"))
-				root := e.xdg
-				e.xdg = filepath.Join(root, tc.folder)
-				if err := os.MkdirAll(e.xdg, 0o700); err != nil {
-					t.Fatal(err)
-				}
-				firstScan(t, e, tools["srv"]...)
-				setPinsMode(t, e, "directory", 0o777)
-				dir := filepath.Dir(e.pinsPath())
-				fake := fakeServers(tools)
+	firstScan(t, e, tools["srv"]...)
+	setPinsMode(t, e, "directory", 0o777)
+	fake := fakeServers(tools)
 
-				got := cmd.run(e, fake)
+	got := e.scan(fake)
 
-				wantDir := filepath.Join(root, tc.quoted, "mcpmoat")
-				cmd.assert(t, got, scanWant{code: exitError, stderr: []string{
-					"cannot read the pins file",
-					"mode 0777",
-					"writable by group or others",
-					"chmod go-w -- '" + wantDir + "'",
-					pins.ErrInsecurePermissions.Error(),
-				}})
-				if calls := fake.Calls(); len(calls) != 0 {
-					t.Errorf("the inspector got the calls %v, want none: no server may start", calls)
-				}
-				if mode := modeOf(t, dir); mode != 0o777 {
-					t.Errorf("mode of %s = %04o after the run, want 0777: the run must not change it", dir, mode)
-				}
-			})
-		}
+	assertScanRun(t, got, scanWant{code: exitError, stderr: []string{
+		"chmod go-w -- '" + filepath.Join(root, `it'\''s`, "mcpmoat") + "'",
+		pins.ErrInsecurePermissions.Error(),
+	}})
+	if calls := fake.Calls(); len(calls) != 0 {
+		t.Errorf("the inspector got the calls %v, want none: no server may start", calls)
 	}
 }
 
@@ -1391,7 +1373,6 @@ func TestPinsInsecureHintQuotesPath(t *testing.T) {
 func TestPinsSafePermissionsWork(t *testing.T) {
 	t.Parallel()
 
-	tools := map[string][]inspect.Tool{"srv": {mkTool("a", "Add.")}}
 	modes := []struct{ dir, file os.FileMode }{
 		{0o700, 0o600},
 		{0o755, 0o644},
@@ -1400,6 +1381,7 @@ func TestPinsSafePermissionsWork(t *testing.T) {
 		for _, m := range modes {
 			t.Run(fmt.Sprintf("%s, directory %04o and file %04o", cmd.name, m.dir, m.file), func(t *testing.T) {
 				t.Parallel()
+				tools := pinsPermTools()
 				e := newPinEnv(t, oneServer("srv"))
 				firstScan(t, e, tools["srv"]...)
 				setPinsMode(t, e, "directory", m.dir)
@@ -1446,7 +1428,6 @@ func TestPinsSafePermissionsWork(t *testing.T) {
 func TestPinsFolderUnsafeBeforeSave(t *testing.T) {
 	t.Parallel()
 
-	tools := map[string][]inspect.Tool{"srv": {mkTool("a", "Add.")}}
 	for _, cmd := range insecurePinsCommands {
 		t.Run(cmd.name, func(t *testing.T) {
 			t.Parallel()
@@ -1455,7 +1436,7 @@ func TestPinsFolderUnsafeBeforeSave(t *testing.T) {
 			dir := filepath.Dir(e.pinsPath())
 			restorePinsModes(t, e)
 			insp := hookInspector{
-				inner: fakeServers(tools),
+				inner: fakeServers(pinsPermTools()),
 				hook: onceFor("srv", func(discover.Server) {
 					// Another user makes the folder, and lets everybody write it.
 					if err := os.MkdirAll(dir, 0o700); err != nil {

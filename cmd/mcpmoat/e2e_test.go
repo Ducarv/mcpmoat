@@ -1589,48 +1589,39 @@ func e2ePinsPermChmod(t *testing.T, path string, mode os.FileMode) {
 
 // TestE2EPinsUnsafePerm checks that scan and pin --accept refuse a pins
 // directory or a pins.json that group or others can write: exit code 2 (FR-16),
-// the fix hint on stderr, no server started and no finding on stdout. A normal
-// 0700 directory with a 0600 file still works.
+// the fix hint on stderr, no server started and no finding on stdout. The mode
+// tables are in internal/pins. A normal 0700 directory with a 0600 file still
+// works.
 func TestE2EPinsUnsafePerm(t *testing.T) {
 	t.Parallel()
-	if runtime.GOOS == "windows" {
-		t.Skip("the pins permission check needs Unix modes")
-	}
-	if os.Geteuid() == 0 {
-		t.Skip("root ignores the mode bits, so the test cannot make a path that only the mode makes unsafe")
-	}
+	skipWithoutModeBits(t)
 
+	// Each setup makes the unsafe path and returns it.
+	dirSetup := func(t *testing.T, home string) string {
+		dir := filepath.Dir(pinsPath(home))
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		e2ePinsPermChmod(t, dir, 0o777)
+		return dir
+	}
+	fileSetup := func(t *testing.T, home string) string {
+		dir := filepath.Dir(pinsPath(home))
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		file := writeTestFile(t, dir, "pins.json", `{"version":1,"servers":{}}`)
+		e2ePinsPermChmod(t, file, 0o666)
+		return file
+	}
 	tests := []struct {
-		name string
-		// setup makes the pins directory and file; it returns the unsafe path.
+		name  string
 		setup func(t *testing.T, home string) string
 		args  []string
 	}{
-		{"scan, directory 0777", func(t *testing.T, home string) string {
-			dir := filepath.Dir(pinsPath(home))
-			if err := os.MkdirAll(dir, 0o700); err != nil {
-				t.Fatal(err)
-			}
-			e2ePinsPermChmod(t, dir, 0o777)
-			return dir
-		}, []string{"scan"}},
-		{"pin --accept, directory 0777", func(t *testing.T, home string) string {
-			dir := filepath.Dir(pinsPath(home))
-			if err := os.MkdirAll(dir, 0o700); err != nil {
-				t.Fatal(err)
-			}
-			e2ePinsPermChmod(t, dir, 0o777)
-			return dir
-		}, []string{"pin", "--accept", "marker-server"}},
-		{"scan, file 0666 in a 0700 directory", func(t *testing.T, home string) string {
-			dir := filepath.Dir(pinsPath(home))
-			if err := os.MkdirAll(dir, 0o700); err != nil {
-				t.Fatal(err)
-			}
-			file := writeTestFile(t, dir, "pins.json", `{"version":1,"servers":{}}`)
-			e2ePinsPermChmod(t, file, 0o666)
-			return file
-		}, []string{"scan"}},
+		{"scan, directory 0777", dirSetup, []string{"scan"}},
+		{"pin --accept, directory 0777", dirSetup, []string{"pin", "--accept", "marker-server"}},
+		{"scan, file 0666 in a 0700 directory", fileSetup, []string{"scan"}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -1643,8 +1634,8 @@ func TestE2EPinsUnsafePerm(t *testing.T) {
 			if code != exitError {
 				t.Errorf("exit code = %d, want %d\nstderr:\n%s", code, exitError, stderr)
 			}
-			// The hint shell-quotes the path, so the fix command can be pasted safely.
-			assertContainsAll(t, "stderr", stderr, []string{"cannot read the pins file", unsafe, "chmod go-w -- '" + unsafe + "'", "insecure permissions"})
+			// The hint holds the path in single quotes.
+			assertContainsAll(t, "stderr", stderr, []string{"cannot read the pins file", "chmod go-w -- '" + unsafe + "'", "insecure permissions"})
 			// scan still lists the server, marked "not inspected"; pin prints nothing.
 			if tt.args[0] == "pin" && stdout != "" {
 				t.Errorf("stdout = %q, want empty", stdout)
@@ -1670,11 +1661,7 @@ func TestE2EPinsUnsafePerm(t *testing.T) {
 			assertServerNames(t, stdout, name)
 		}
 		for path, want := range map[string]os.FileMode{filepath.Dir(pinsPath(home)): 0o700, pinsPath(home): 0o600} {
-			info, err := os.Stat(path)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if got := info.Mode().Perm(); got != want {
+			if got := modeOf(t, path); got != want {
 				t.Errorf("mode of %s = %04o, want %04o", path, got, want)
 			}
 		}

@@ -99,7 +99,7 @@ func ReadBoundedRegularFileInfo(dir, name string, maxSize int64) (data []byte, i
 		_ = f.Close()
 	}()
 
-	data, info, err = ReadOpenedInfo(f, maxSize)
+	data, info, err = readOpenedInfo(f, maxSize)
 	if err != nil {
 		return nil, nil, false, err
 	}
@@ -115,13 +115,13 @@ func ReadBoundedRegularFileInfo(dir, name string, maxSize int64) (data []byte, i
 // ReadBoundedRegularFile). The errors of Stat and of the read come back as they
 // are.
 func ReadOpened(f fs.File, maxSize int64) ([]byte, error) {
-	data, _, err := ReadOpenedInfo(f, maxSize)
+	data, _, err := readOpenedInfo(f, maxSize)
 	return data, err
 }
 
-// ReadOpenedInfo works as ReadOpened and also returns the fs.FileInfo from the
+// readOpenedInfo works as ReadOpened and also returns the fs.FileInfo from the
 // Stat of f. info is nil when err is not nil.
-func ReadOpenedInfo(f fs.File, maxSize int64) ([]byte, fs.FileInfo, error) {
+func readOpenedInfo(f fs.File, maxSize int64) ([]byte, fs.FileInfo, error) {
 	info, err := f.Stat()
 	if err != nil {
 		return nil, nil, err

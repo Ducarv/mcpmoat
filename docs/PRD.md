@@ -479,9 +479,10 @@ and `openWorldHint`. An absent hint is different from a set hint. A tool without
   has another version or does not match its text, `scan` and `pin` show the whole current text of
   the tool, so the user can review it before they accept it.
 - The pins directory and `pins.json` must belong to the user and must not be writable by group or
-  others. Otherwise mcpmoat exits with code 2 before it starts any server. The error gives the
-  fix: `chmod go-w -- '<path>'` for a mode problem, or own the path (`chown`, or remove it) for an
-  owner problem.
+  others. Otherwise mcpmoat exits with code 2. The first read runs before any server starts. The
+  second read and the save can refuse after the servers ran. The error gives the
+  fix: `chmod go-w -- '<path>'` for a mode problem, or `ask the owner or root
+  to run chown, or remove the path` for an owner problem.
 - `pins.json` also stores the canonical text of each tool, next to its hash, so that a later run
   can show the diff. It never stores env, header, args or URL values from the configs.
 - The pins file has a format version field and is written atomically (temp file plus rename).

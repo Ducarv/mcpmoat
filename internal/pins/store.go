@@ -175,7 +175,7 @@ func DefaultPath(getenv func(string) string, homeDir func() (string, error)) (st
 func Load(path string) (*Store, error) {
 	s := &Store{path: path, servers: make(map[Identity]ServerPins)}
 
-	if err := checkStorePerm(filepath.Dir(path), "directory"); err != nil {
+	if err := checkDirPerm(filepath.Dir(path)); err != nil {
 		return nil, err
 	}
 	data, info, found, err := safefile.ReadBoundedRegularFileInfo(filepath.Dir(path), filepath.Base(path), maxFileSize)
@@ -231,8 +231,8 @@ func Load(path string) (*Store, error) {
 // or fail after the scan.
 //
 // The path can change between the read and these checks. Only a process that
-// can already write the directory can do that, and it could change pins.json
-// directly, so the race is accepted.
+// can write the directory or one of its parents can do that, and it could
+// change pins.json directly, so the race is accepted.
 func checkFirstRun(path string) error {
 	if fi, err := os.Lstat(path); err == nil && fi.Mode()&os.ModeSymlink != 0 {
 		return fmt.Errorf("read %s: the target of the symlink is missing", path)
@@ -353,8 +353,9 @@ func cloneOrEmpty(p ServerPins) ServerPins {
 // Save refuses an existing pins directory that another user owns or that its
 // group or others can write, with an error that wraps ErrInsecurePermissions.
 // It never changes the mode of an existing directory. Save does not check the
-// old pins.json, because the rename replaces it. Parent directories, for
-// example ~/.config, are not checked.
+// old pins.json, because the rename replaces it: callers read the file with
+// Load first, so the file check has run. Parent directories, for example
+// ~/.config, are not checked.
 //
 // Load and Set check each server, so Save checks only the whole file: it
 // refuses data larger than maxFileSize (32 MiB), the limit of Load, and the old
@@ -404,7 +405,7 @@ func (s *Store) Save() error {
 	// The directory is checked here, and not in writeFile, so that the mode rule
 	// sits next to the one in Load. A missing directory passes: writeFile
 	// creates it with mode 0o700.
-	if err := checkStorePerm(filepath.Dir(s.path), "directory"); err != nil {
+	if err := checkDirPerm(filepath.Dir(s.path)); err != nil {
 		return err
 	}
 	if err := writeFileAtomic(s.path, data); err != nil {

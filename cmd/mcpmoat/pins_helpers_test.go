@@ -72,9 +72,7 @@ func (e *pinEnv) assertNoPinsFile(t *testing.T, after string) {
 // there anyway.
 func readOnlyPinsDir(t *testing.T, e *pinEnv) {
 	t.Helper()
-	if runtime.GOOS == "windows" || os.Geteuid() == 0 {
-		t.Skip("a read-only directory does not stop this user")
-	}
+	skipWithoutModeBits(t)
 	dir := filepath.Dir(e.pinsPath())
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		t.Fatal(err)

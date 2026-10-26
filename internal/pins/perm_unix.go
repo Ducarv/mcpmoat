@@ -30,19 +30,28 @@ func checkOwnerAndMode(path, kind string, info fs.FileInfo, uid int) error {
 	perm := info.Mode().Perm()
 	groupOrOtherWrite := perm&0o022 != 0
 
-	var problems, fixes []string
-	q := shellQuote(path)
+	var problems []string
+	var chmodFix, ownerFix string
 	if foreignOwner {
 		problems = append(problems, "owned by another user")
-		fixes = append(fixes, fmt.Sprintf(`you must own the path: chown -- "$(id -un)" %s, or remove the path`, q))
+		// Only root can chown, so a normal user cannot fix this alone.
+		ownerFix = "ask the owner or root to run chown, or remove the path"
 	}
 	if groupOrOtherWrite {
 		problems = append(problems, "writable by group or others")
-		// Put the chmod hint first when both problems exist.
-		fixes = append([]string{"chmod go-w -- " + q}, fixes...)
+		chmodFix = "chmod go-w -- " + shellQuote(path)
 	}
 	if len(problems) == 0 {
 		return nil
+	}
+
+	// The fix order is fixed: the chmod hint first, then the owner text.
+	var fixes []string
+	if chmodFix != "" {
+		fixes = append(fixes, chmodFix)
+	}
+	if ownerFix != "" {
+		fixes = append(fixes, ownerFix)
 	}
 	return fmt.Errorf("pins %s %s is not safe: mode %04o, %s (fix: %s): %w",
 		kind, path, perm, strings.Join(problems, ", "), strings.Join(fixes, "; "), ErrInsecurePermissions)

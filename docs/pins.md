@@ -9,13 +9,13 @@
   not set. The file has mode `0600`. It stores each tool's hash and text. It never stores env,
   header, args or URL values from your configs.
 - **Owner and mode:** mcpmoat refuses a pins directory or a `pins.json` that another user owns or
-  that group or others can write to. `scan` and `pin --accept` then exit with code 2 before they
-  start any server. The error names the path and the mode. For a mode problem, run
-  `chmod go-w -- '<path>'`. For an owner problem, you must own the path: use `chown`, or remove the
-  path. mcpmoat never changes the mode of an existing directory itself. A directory of `0755` and a
-  file of `0644` pass. A directory that root owns is refused for you, and your directory is refused
-  for root, for example with `sudo mcpmoat scan` or with a bind-mounted config in a root
-  container.
+  that group or others can write to. `scan` and `pin --accept` then exit with code 2. The error
+  names the path and the mode, and gives a hint. For a mode problem, run `chmod go-w -- '<path>'`.
+  For an owner problem, the hint is `ask the owner or root to run chown, or remove the
+  path`. A directory made with umask 002 (mode `0775`) or a file with mode `0664` is
+  refused until you run `chmod go-w`. A directory of `0755` and a file of `0644` pass. A directory
+  that root owns, or a root run with your config, is refused too. For the limits, see [The
+  `pins.json` store](ARCHITECTURE.md#the-pinsjson-store).
 - **Later runs:** `scan` compares the tools with the pins. It reports `MOAT-T2-001` (changed tool,
   high), `MOAT-T2-002` (new tool, medium), `MOAT-T2-003` (removed tool, low) and `MOAT-T2-004` (tool
   not verified). A new tool is medium. Read the report, not only the exit code (see [Exit
