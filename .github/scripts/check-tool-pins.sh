@@ -42,24 +42,24 @@ done
 
 # GoReleaser: ci.yml is the reference. release.yml and CONTRIBUTING.md must
 # name the same version.
-want=$(pins GORELEASER_VERSION "$wf/ci.yml")
-case $want in
-  '' | *$'\n'*) fail "ci.yml must have exactly one GORELEASER_VERSION pin. Found: $(join <<<"$want")" ;;
+goreleaser_want=$(pins GORELEASER_VERSION "$wf/ci.yml")
+case $goreleaser_want in
+  '' | *$'\n'*) fail "ci.yml must have exactly one GORELEASER_VERSION pin. Found: $(join <<<"$goreleaser_want")" ;;
 esac
 rel=$(pins GORELEASER_VERSION "$wf/release.yml")
 # CONTRIBUTING.md names the version only in goreleaser/v<major>@<version>.
 doc=$(grep -oE "goreleaser(/v[0-9]+)?@$ver_re" CONTRIBUTING.md | sed 's/.*@//' | sort -u || true)
-if [ "$rel" != "$want" ] || [ "$doc" != "$want" ]; then
-  fail "The GoReleaser pins differ. ci.yml: $want. release.yml: $(join <<<"$rel"). CONTRIBUTING.md: $(join <<<"$doc")."
+if [ "$rel" != "$goreleaser_want" ] || [ "$doc" != "$goreleaser_want" ]; then
+  fail "The GoReleaser pins differ. ci.yml: $goreleaser_want. release.yml: $(join <<<"$rel"). CONTRIBUTING.md: $(join <<<"$doc")."
 fi
 
 # govulncheck: ci.yml is the reference. Each file must have one pin with the
 # same version and one call line that uses it. No other line outside a comment
 # may mention govulncheck. This is a text check, not a YAML parser. It catches
 # drift by accident. Review is the real control.
-want=$(pins GOVULNCHECK_VERSION "$wf/ci.yml")
-case $want in
-  '' | *$'\n'*) fail "ci.yml must have exactly one GOVULNCHECK_VERSION pin. Found: $(join <<<"$want")" ;;
+vuln_want=$(pins GOVULNCHECK_VERSION "$wf/ci.yml")
+case $vuln_want in
+  '' | *$'\n'*) fail "ci.yml must have exactly one GOVULNCHECK_VERSION pin. Found: $(join <<<"$vuln_want")" ;;
 esac
 # shellcheck disable=SC2016 # the $ is regex text, not a variable
 run_re='^ *run: go run "golang\.org/x/vuln/cmd/govulncheck@\$GOVULNCHECK_VERSION" \./\.\.\.$'
@@ -67,7 +67,7 @@ for f in "${workflows[@]}"; do
   file=$wf/$f.yml
   got=$(pins GOVULNCHECK_VERSION "$file")
   [ -n "$got" ] || fail "$f.yml has no GOVULNCHECK_VERSION pin."
-  [ "$got" = "$want" ] || fail "The govulncheck pin of $f.yml is $(join <<<"$got"), expected $want (the pin in ci.yml)."
+  [ "$got" = "$vuln_want" ] || fail "The govulncheck pin of $f.yml is $(join <<<"$got"), expected $vuln_want (the pin in ci.yml)."
 
   code=$(grep -v '^ *#' "$file" || true)
   grep -qE "$run_re" <<<"$code" || fail "$f.yml has no call line that uses \$GOVULNCHECK_VERSION."
