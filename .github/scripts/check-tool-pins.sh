@@ -1,10 +1,11 @@
 #!/usr/bin/env bash
-# Checks that the tool version pins agree. The release-check job in ci.yml
-# runs it. You can also run it on your machine, from any directory: see
+# Checks that the GoReleaser and govulncheck pins agree, and that each workflow
+# runs govulncheck only through the pinned call line. The release-check job in
+# ci.yml runs it. You can also run it on your machine, from any directory: see
 # CONTRIBUTING.md, Checks. check-tool-pins-test.sh tests it.
 set -euo pipefail
 
-cd "$(dirname "$0")/../.."
+cd "$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)/../.."
 
 wf=.github/workflows
 workflows=(ci release govulncheck)
@@ -34,14 +35,20 @@ pin_re() {
   printf '^ *%s: *"?(%s)"? *(#.*)?$' "$1" "$ver_re"
 }
 
-# pins prints the sorted, unique versions of the NAME lines of a file.
+# code_of prints the lines of a file that are not comments.
+code_of() {
+  grep -v '^ *#' "$1" || true
+}
+
+# pins prints the sorted, unique versions of the NAME lines of the file $2.
+# $1 is NAME.
 pins() {
   sed -nE "s/$(pin_re "$1")/\\1/p" "$2" | sort -u
 }
 
-# need_one stops the script unless ci.yml pins exactly one version of a tool.
-# $1 is the tool, $2 is the output of pins.
-need_one() {
+# need_one_in_ci stops the script unless ci.yml pins exactly one version of a
+# tool. $1 is the tool, $2 is the output of pins for ci.yml.
+need_one_in_ci() {
   case $2 in
     '' | *$'\n'*) fail "ci.yml must pin one version of $1. Found: $(one_line <<<"$2")" ;;
   esac
@@ -55,31 +62,36 @@ done
 # GoReleaser: ci.yml is the reference. release.yml and CONTRIBUTING.md must
 # name the same version.
 goreleaser_want=$(pins GORELEASER_VERSION "$wf/ci.yml")
-need_one GoReleaser "$goreleaser_want"
-rel=$(pins GORELEASER_VERSION "$wf/release.yml")
+need_one_in_ci GoReleaser "$goreleaser_want"
+goreleaser_rel=$(pins GORELEASER_VERSION "$wf/release.yml")
 # CONTRIBUTING.md names the version only in goreleaser/v<major>@<version>.
-doc=$(grep -oE "goreleaser(/v[0-9]+)?@$ver_re" CONTRIBUTING.md | sed 's/.*@//' | sort -u || true)
-if [ "$rel" != "$goreleaser_want" ] || [ "$doc" != "$goreleaser_want" ]; then
-  fail "The GoReleaser pins differ. ci.yml: $goreleaser_want. release.yml: $(one_line <<<"$rel"). CONTRIBUTING.md: $(one_line <<<"$doc")."
+goreleaser_doc=$(grep -oE "goreleaser(/v[0-9]+)?@$ver_re" CONTRIBUTING.md | sed 's/.*@//' | sort -u || true)
+if [ "$goreleaser_rel" != "$goreleaser_want" ] || [ "$goreleaser_doc" != "$goreleaser_want" ]; then
+  fail "The GoReleaser pins differ. ci.yml: $goreleaser_want. release.yml: $(one_line <<<"$goreleaser_rel"). CONTRIBUTING.md: $(one_line <<<"$goreleaser_doc")."
 fi
 
 # govulncheck: ci.yml is the reference. Each file must have pins with the
 # same version and at least one call line that uses them. No other line
-# outside a comment may mention govulncheck, and nothing may continue the call
-# line or let the step fail without failing the job. This is a text check, not
-# a YAML parser. It catches drift by accident. Review is the real control.
+# outside a comment may mention govulncheck, no line may continue the call
+# line, and no file may use continue-on-error. This is a text check, not a YAML
+# parser. It catches drift by accident. Other step keys, such as if: or shell:,
+# are not checked. Review is the real control.
 vuln_want=$(pins GOVULNCHECK_VERSION "$wf/ci.yml")
-need_one govulncheck "$vuln_want"
+need_one_in_ci govulncheck "$vuln_want"
 # shellcheck disable=SC2016 # the $ is regex text, not a variable
 run_re='^ *run: go run "golang\.org/x/vuln/cmd/govulncheck@\$GOVULNCHECK_VERSION" \./\.\.\.$'
 
 # A workflow that is not in the list must not run govulncheck. It could use
-# another version.
-for file in "$wf"/*.yml; do
-  name=$(basename "$file" .yml)
-  case " ${workflows[*]} " in *" $name "*) continue ;; esac
-  if grep -v '^ *#' "$file" | grep -qi govulncheck; then
-    fail "$name.yml mentions govulncheck. Add it to the workflows list of check-tool-pins.sh."
+# another version. GitHub runs .yaml files too.
+for file in "$wf"/*.yml "$wf"/*.yaml; do
+  [ -e "$file" ] || continue
+  ext=${file##*.}
+  name=$(basename "$file" ".$ext")
+  if [ "$ext" = yml ]; then
+    case " ${workflows[*]} " in *" $name "*) continue ;; esac
+  fi
+  if grep -qi govulncheck <<<"$(code_of "$file")"; then
+    fail "$name.$ext mentions govulncheck. Add it to the workflows list of check-tool-pins.sh."
   fi
 done
 
@@ -89,14 +101,16 @@ for f in "${workflows[@]}"; do
   [ -n "$got" ] || fail "$f.yml has no GOVULNCHECK_VERSION pin."
   [ "$got" = "$vuln_want" ] || fail "The govulncheck pin of $f.yml is $(one_line <<<"$got"), expected $vuln_want (the pin in ci.yml)."
 
-  code=$(grep -v '^ *#' "$file" || true)
+  code=$(code_of "$file")
   grep -qE "$run_re" <<<"$code" || fail "$f.yml has no call line that uses \$GOVULNCHECK_VERSION."
-  # The call line, the pin lines, the workflow name and the job ID of
-  # govulncheck.yml are the only lines that may mention govulncheck.
+  # The call line and the pin lines are the only lines that may mention
+  # govulncheck. In govulncheck.yml the workflow name and the job ID may too.
+  names='^$'
+  if [ "$f" = govulncheck ]; then names='^name: govulncheck$|^  govulncheck:$'; fi
   other=$(grep -iE 'govulncheck' <<<"$code" |
     grep -vE "$run_re" |
     grep -vE "$(pin_re GOVULNCHECK_VERSION)" |
-    grep -vE '^name: govulncheck$|^  govulncheck:$' || true)
+    grep -vE "$names" || true)
   [ -z "$other" ] || fail "$f.yml has a govulncheck line that is not the pin, the call line or a name: $(one_line <<<"$other")"
 
   # YAML continues a value on a line that is indented deeper. Such a line after
@@ -106,7 +120,7 @@ for f in "${workflows[@]}"; do
     [ -n "${line//[[:space:]]/}" ] || continue
     indent=${line%%[! ]*}
     if [ "$call_indent" -ge 0 ] && [ "${#indent}" -gt "$call_indent" ]; then
-      fail "$f.yml has a line that continues the call line: $(one_line <<<"$line")"
+      fail "$f.yml has a line that continues the call line: $line"
     fi
     call_indent=-1
     if [[ $line =~ $run_re ]]; then call_indent=${#indent}; fi

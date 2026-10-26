@@ -108,11 +108,12 @@ schedule only from the file on `dev`.
 
 - To run it by hand, open the Actions tab and run it from `dev`. GitHub uses the workflow file of the
   branch that you pick. A run that you start by hand notifies you.
-- A failed scheduled run sends a notice only to the maintainer who last edited the cron line. Keep
-  GitHub Actions notifications on for that account.
+- A failed scheduled run sends a notice only to the maintainer who last edited the cron line, or who
+  enabled the workflow again. Keep GitHub Actions notifications on for that account.
 - GitHub disables a schedule after 60 days with no repository activity. When you cut a release, open
-  the `govulncheck` workflow in the Actions tab. If GitHub shows it as disabled, or the last run is
-  more than 8 days old, click Enable workflow.
+  the `govulncheck` workflow in the Actions tab. If GitHub shows it as disabled, click Enable
+  workflow. Then the failure notices go to you. If it is enabled but the last run is more than 8 days
+  old, run it by hand and look for the reason.
 - After a failed run, fix the cause on `dev`, merge `dev` into `main` and cut a release (see
   [Cut a release](#cut-a-release)).
 
