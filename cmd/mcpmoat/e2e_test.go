@@ -108,16 +108,21 @@ func runBinEnv(t *testing.T, home, dir string, extraEnv []string, args ...string
 	cmd := exec.Command(bin, args...) //nolint:gosec // G204: the test runs the binary it just built
 	cmd.Dir = dir
 	cmd.Env = append([]string{"HOME=" + home, "XDG_CONFIG_HOME=" + filepath.Join(home, ".config"), "PATH=/usr/bin:/bin"}, extraEnv...)
+	return runCmd(t, cmd)
+}
+
+// runCmd runs cmd and returns what it wrote to stdout and stderr and its exit
+// code. A process that does not start or does not finish fails the test.
+func runCmd(t *testing.T, cmd *exec.Cmd) (stdout, stderr string, code int) {
+	t.Helper()
 	var outBuf, errBuf bytes.Buffer
 	cmd.Stdout = &outBuf
 	cmd.Stderr = &errBuf
 
-	err := cmd.Run()
-	if err != nil {
+	if err := cmd.Run(); err != nil {
 		exitErr, ok := errors.AsType[*exec.ExitError](err)
 		if !ok {
-			// The process did not start or did not finish: this is a test problem.
-			t.Fatalf("run %s %v: %v", bin, args, err)
+			t.Fatalf("run %v: %v", cmd.Args, err)
 		}
 		code = exitErr.ExitCode()
 	}
@@ -1417,19 +1422,10 @@ func TestE2ERugPullExitCodes(t *testing.T) {
 			t.Parallel()
 			cmd := exec.CommandContext(t.Context(), bin, tt.args...) //nolint:gosec // G204: bin is the fixture that this test package built
 			cmd.Env = []string{"PATH=/usr/bin:/bin"}
-			var outBuf, errBuf bytes.Buffer
-			cmd.Stdout = &outBuf
-			cmd.Stderr = &errBuf
 
-			err := cmd.Run()
-			exitErr, ok := errors.AsType[*exec.ExitError](err)
-			if !ok {
-				t.Fatalf("run %s %v: err = %v, want an *exec.ExitError", bin, tt.args, err)
-			}
-			stdout := outBuf.String()
-			stderr := errBuf.String()
-			if got := exitErr.ExitCode(); got != wantExitUsage {
-				t.Errorf("exit code = %d, want %d\nstdout: %q\nstderr: %q", got, wantExitUsage, stdout, stderr)
+			stdout, stderr, code := runCmd(t, cmd)
+			if code != wantExitUsage {
+				t.Errorf("exit code = %d, want %d\nstdout: %q\nstderr: %q", code, wantExitUsage, stdout, stderr)
 			}
 			if stdout != "" {
 				t.Errorf("stdout = %q, want empty", stdout)

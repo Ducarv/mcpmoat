@@ -51,7 +51,7 @@ import (
 const (
 	exitOK    = 0
 	exitServe = 1 // the MCP server stopped with an error
-	exitUsage = 2 // a bad flag, an unknown variant or an unexpected argument
+	exitUsage = 2 // a bad flag, -h, an unknown variant or an unexpected argument
 )
 
 // The values of the -variant flag.

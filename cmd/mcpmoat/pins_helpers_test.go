@@ -251,18 +251,17 @@ type pinOutput struct {
 // acceptHintPrefix starts every accept hint line of scan.
 const acceptHintPrefix = "To accept "
 
-// wrongDigest is a well-formed digest that no tool set has. It is the --expect
-// value of TestE2EPinAccept and TestE2ERugPull in e2e_test.go, which check a
-// digest mismatch.
+// wrongDigest is a well-formed digest that no tool set has. Tests pass it as
+// the --expect value to force a digest mismatch.
 const wrongDigest = "pd1:0000000000000000000000000000000000000000000000000000000000000000"
 
-// assertPinsFileMode fails the test when the file at path is missing or
-// its mode is not 0o600.
+// assertPinsFileMode fails the test when the file at path cannot be read with
+// stat or its mode is not 0o600. E2E tests pass pinsPath(home) as path.
 func assertPinsFileMode(t *testing.T, path string) {
 	t.Helper()
 	info, err := os.Stat(path)
 	if err != nil {
-		t.Fatalf("pins.json %s is missing: %v", path, err)
+		t.Fatalf("stat pins.json %s: %v", path, err)
 	}
 	if mode := info.Mode().Perm(); mode != 0o600 {
 		t.Errorf("pins.json %s mode = %o, want 600", path, mode)
