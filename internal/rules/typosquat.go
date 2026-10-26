@@ -442,8 +442,9 @@ func builtinPopular() ([]string, error) {
 }
 
 // NewBuiltinTyposquat builds the T5 check from the embedded popular server
-// list. It parses the list each time it is called, so the CLI calls it once
-// per scan. It returns an error if the embedded list does not parse.
+// list. It parses the list each time it is called. A scan calls it once for
+// the native T5 check, and NewAnalyzer calls it once more when it compiles the
+// typosquat rule. It returns an error if the embedded list does not parse.
 func NewBuiltinTyposquat() (*Typosquat, error) {
 	popular, err := builtinPopular()
 	if err != nil {
