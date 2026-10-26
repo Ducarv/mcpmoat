@@ -1,3 +1,5 @@
+<!-- Open this PR against `dev`. Only the maintainer's release PR (`dev` into `main`) targets `main`. -->
+
 ## Summary
 
 <!-- What changed and why. -->

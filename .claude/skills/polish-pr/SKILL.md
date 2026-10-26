@@ -73,7 +73,7 @@ defaults: `gofmt -l .`, `go vet ./...`, `golangci-lint run`, `go test ./...`.
 ```bash
 BRANCH=$(git branch --show-current)
 N=$(gh pr view --json number -q .number 2>/dev/null)          # empty if there is no PR
-BASE_BRANCH=<profile base, else the PR base, else: git remote show origin | sed -n 's/.*HEAD branch: //p'>
+BASE_BRANCH=<the PR base if a PR exists, else the profile base, else: git remote show origin | sed -n 's/.*HEAD branch: //p'>
 LEDGER_DIR="$(git rev-parse --git-common-dir)/polish-pr"
 LEDGER="$LEDGER_DIR/$(printf '%s' "$BRANCH" | tr '/' '-').md"
 mkdir -p "$LEDGER_DIR"

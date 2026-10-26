@@ -435,6 +435,25 @@ Release builds set these values through GoReleaser (`.goreleaser.yaml`): `main.v
 with its `v`, `main.commit` is the first 12 characters of the commit (the same as a `go build` in a
 git checkout) and `main.date` is the commit date.
 
+## Branches and releases
+
+```text
+feature branch --PR--> dev --release PR (merge commit)--> main --tag vX.Y.Z--> release
+```
+
+- `dev` is the default branch. Clone it, branch from it and open your PR against it.
+- `main` is the release branch. Only the maintainer merges `dev` into `main`, with a PR and a
+  merge commit (not a squash, so the two histories stay joined).
+- Release tags go on `main` only. The release workflow fails for a tag that is not on the
+  first-parent history of `main`.
+- Hotfix: branch from `main`, open the PR against `main`, then open a PR from `main` into `dev` and
+  merge it with a merge commit (not a squash, or the histories stop joining).
+- Both branches need a PR, the checks `test (ubuntu-latest)` and `test (macos-latest)`, and allow no
+  force push and no delete. `main` also needs the checks `offline` and `release-check`, and allows
+  merge commits only. `dev` allows merge commits too, for the hotfix merge-back.
+- Dependabot and the dependency graph watch the default branch, so a security update lands on `dev`.
+  After you merge one, cut a release soon, so that the released code on `main` gets the fix.
+
 ## Pull requests
 
 - One change per pull request. A new rule is a good size.
@@ -487,13 +506,20 @@ Do all of these steps before you push the first release tag. Step 3 says why.
 
 ### Cut a release
 
-Tag a commit on the first-parent history of `main` (a merge commit or a direct push) and push the
-tag:
+Open a PR from `dev` to `main` and merge it with a merge commit, not a squash. Then tag that merge
+commit on `main` and push the tag. A clone checks out `dev` and a local `main` can be old, so name
+the commit and check it before you push:
 
 ```sh
-git tag v0.1.0
+git fetch origin
+git tag v0.1.0 origin/main
+git rev-list --first-parent origin/main | grep -Fx "$(git rev-parse 'v0.1.0^{commit}')"
 git push origin v0.1.0
 ```
+
+The `grep` prints the commit if it is on the first-parent history of `main`. If it prints nothing,
+delete the local tag (`git tag -d v0.1.0`) and do not push it. A tag on the wrong commit that
+reaches the Go module proxy stays there, and you lose that version number.
 
 The tag starts the release workflow. The `test` job runs vet, the race tests and govulncheck. Then
 the `release` job waits for the maintainer to approve it in the `release` environment. It fails if
@@ -536,8 +562,8 @@ URLs return 404 until the release is published. What to do depends on the cause:
   workflow. The re-run replaces the draft. Do not publish the draft by hand: only the workflow
   verifies the attestations before it publishes, and a published release cannot change.
 - A cause in the code or config of the tagged commit: a re-run builds the same commit and fails
-  again. Delete the draft, revert the tap commit, fix the cause on `main` and cut a new patch or rc
-  tag.
+  again. Delete the draft, revert the tap commit, fix the cause on `dev`, merge `dev` into `main` and
+  cut a new patch or rc tag.
 
 If a check after the publish fails, the release is already public. Do not re-run the workflow: on a
 release that is not immutable, a re-run uploads the assets again with no check. Check the release
