@@ -26,10 +26,11 @@
 //	    clean     the clean description (default)
 //	    injected  the description with the hidden instruction block
 //
-// It serves MCP on stdio until stdin closes. A bad flag, an unknown variant or
-// an extra argument exits with code 2. A server error other than a closed stdin
-// or a signal exits with code 1. The server writes only MCP protocol messages
-// to stdout. Errors go to stderr.
+// It serves MCP on stdio until stdin closes. A bad flag, -h (a help request,
+// ErrHelp from the flag package), an unknown variant or an extra argument exits
+// with code 2. A server error other than a closed stdin or a signal exits with
+// code 1. The server writes only MCP protocol messages to stdout. Errors go to
+// stderr.
 package main
 
 import (
@@ -50,7 +51,7 @@ import (
 const (
 	exitOK    = 0
 	exitServe = 1 // the MCP server stopped with an error
-	exitUsage = 2 // a bad flag, an unknown variant or an unexpected argument
+	exitUsage = 2 // a bad flag, -h, an unknown variant or an unexpected argument
 )
 
 // The values of the -variant flag.
