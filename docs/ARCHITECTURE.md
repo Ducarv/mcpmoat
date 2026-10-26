@@ -494,24 +494,25 @@ a changed tool (a rug pull). `scan` writes the pins of a server on its first run
   caller can still save the others. The server chose the data that `Set` refuses, so the caller must
   report a refused server, never skip it silently: a server that is never pinned looks new on each
   run, and its changes are never reported. `Save` writes atomically (temp file, mode `0600`, sync,
-  rename). A new directory gets mode `0700`. The rules, the caps and the error texts are in the doc
-  comments of `Load`, `Set` and `Save` in `internal/pins/store.go`.
+  rename). A new directory gets mode `0700`. The rules, the caps and the other error texts are in
+  the doc comments of `Load`, `Set` and `Save` in `internal/pins/store.go`.
 - Owner and mode check: `Load` refuses an unsafe pins directory or `pins.json`, and `Save` refuses
   an unsafe pins directory. Unsafe means that another user owns the path, or that group or others
   can write it (mode bits `0o022`). The error wraps `ErrInsecurePermissions` and names the path, the
-  mode and a fix (the texts are in [docs/pins.md](pins.md)). mcpmoat never changes a mode itself.
-  `scan` and `pin --accept` exit with 2 (FR-16). The first read runs before any server starts.
+  mode and a fix (the texts are in [docs/pins.md](pins.md)). mcpmoat never changes a mode itself, so
+  the user must fix an unsafe path. `scan` and `pin --accept` exit with 2 (FR-16). The first read runs before any server starts.
   Both commands read the file again just before they save, and then they save. That second read and
   the save can refuse after the servers ran, because a mode can change while `scan` inspects them.
 - `Load` checks the directory by path before it reads the file, also on a first run when the
   directory exists. It checks `pins.json` on the open file descriptor, after the read and before the
   parse, so the file check has no path race. `Save` checks the directory only, because it replaces
   the file by rename. It checks after it created a missing directory (`atomicWriter.writeFile`), so a
-  directory that another user made in the meantime is refused too. A missing path passes. A pins
-  directory path that is not a directory (or whose parent is a regular file) also skips the mode
-  check, and `Load` and `Save` fail with a "not a directory" error as before. Modes such as `0755`
-  for a directory and `0644` for a file pass: pins are not secret, so this is an integrity check.
-  The code is in `internal/pins` (`perm.go`, `perm_unix.go`, `perm_other.go`).
+  directory that another user made in the meantime is refused too. A pins.json that the user may not
+  open (for example a root-owned file with mode `0600`) gets the same check by path, so the owner
+  problem shows with its hint and not only as "permission denied". A missing path passes, and a
+  path that is not a directory skips the mode check: the later read fails with its own error. Modes
+  such as `0755` for a directory and `0644` for a file pass: pins are not secret, so this is an
+  integrity check. The code is in `internal/pins` (`perm.go`, `perm_unix.go`, `perm_other.go`).
 
 Known limits:
 
@@ -521,17 +522,18 @@ Known limits:
   moment can still undo each other, and the last writer wins. A run can then drop the first pins
   that a parallel run saved, and the next run sees that server as new, with no alert. Issue #150
   tracks the full lock and the missing-file limit below.
-- mcpmoat never changes the mode of an existing directory. It refuses an unsafe one (see the owner
-  and mode check above), and the user must fix it. It still creates a new directory with `0700` and
-  the file with `0600`.
 - The check does not cover parent directories such as `~/.config`. A user who can write a parent
-  can swap the whole `mcpmoat/` directory.
+  can swap the whole `mcpmoat/` directory, or rename or remove it. The next run then sees a first
+  run and pins the current tools without an alert, so a changed tool is not reported.
 - The check reads the owner and the mode bits only, not ACLs. On systems that are not Unix, such as
   Windows, the check and the directory sync are skipped, because the mode bits are mostly ignored
   there. Windows is a non-goal (PRD section 2.2).
-- `Load` checks the directory by path before the read, so a stat-then-read race remains for the
-  directory. Whoever can write the directory or one of its parents could edit the file in that
-  window anyway. The file check runs on the open file descriptor, so it has no path race.
+- The directory check is by path, so a stat-then-read race remains for the directory. Whoever can
+  write the directory or one of its parents could edit the file in that window anyway. Issue #203
+  tracks the fix.
+- Some file systems report fixed mode bits that `chmod` cannot change (for example FAT, some
+  network mounts and WSL `/mnt/c`). The check can then refuse the pins directory at once, also a new
+  one. Set `XDG_CONFIG_HOME` to a path on another volume.
 - A directory that root owns, for example one made with `sudo`, is refused for a user who is not
   root. The reverse is refused too. `sudo mcpmoat scan` with the HOME or `XDG_CONFIG_HOME` of the
   user, and a root container with a bind-mounted config that a host uid owns, fail because the
