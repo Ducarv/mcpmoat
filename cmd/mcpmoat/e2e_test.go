@@ -1577,11 +1577,16 @@ func e2ePinsPermHome(t *testing.T) (home, work, marker string) {
 	return home, work, marker
 }
 
-// e2ePinsPermChmod sets the mode of path. It restores mode 0o700 in
+// e2ePinsPermChmod sets the mode of path. It sets the old mode back in
 // t.Cleanup, so that t.TempDir can delete the path.
 func e2ePinsPermChmod(t *testing.T, path string, mode os.FileMode) {
 	t.Helper()
-	t.Cleanup(func() { _ = os.Chmod(path, 0o700) }) //nolint:gosec // G302: restore a test directory so t.TempDir can delete it
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	old := info.Mode().Perm()
+	t.Cleanup(func() { _ = os.Chmod(path, old) })
 	if err := os.Chmod(path, mode); err != nil {
 		t.Fatal(err)
 	}
@@ -1610,7 +1615,7 @@ func TestE2EPinsUnsafePerm(t *testing.T) {
 		if err := os.MkdirAll(dir, 0o700); err != nil {
 			t.Fatal(err)
 		}
-		file := writeTestFile(t, dir, "pins.json", `{"version":1,"servers":{}}`)
+		file := writeTestFile(t, dir, "pins.json", `{"version":1,"servers":[]}`)
 		e2ePinsPermChmod(t, file, 0o666)
 		return file
 	}
@@ -1635,7 +1640,7 @@ func TestE2EPinsUnsafePerm(t *testing.T) {
 				t.Errorf("exit code = %d, want %d\nstderr:\n%s", code, exitError, stderr)
 			}
 			// The hint holds the path in single quotes.
-			assertContainsAll(t, "stderr", stderr, []string{"cannot read the pins file", "chmod go-w -- '" + unsafe + "'", "insecure permissions"})
+			assertContainsAll(t, "stderr", stderr, []string{"cannot read the pins file", chmodHint(unsafe), "insecure permissions"})
 			// scan still lists the server, marked "not inspected"; pin prints nothing.
 			if tt.args[0] == "pin" && stdout != "" {
 				t.Errorf("stdout = %q, want empty", stdout)

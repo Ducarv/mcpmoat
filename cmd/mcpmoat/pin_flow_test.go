@@ -1252,10 +1252,10 @@ func TestScanAndPinPrintInspectionWarnings(t *testing.T) {
 	})
 }
 
-// insecurePinsCommands are the two commands that read pins.json before they
+// pinsReadingCommands are the two commands that read pins.json before they
 // start any server. Each has a name for the subtests, a run function and an
 // assert function that checks the run like assertScanRun or assertPinRun.
-var insecurePinsCommands = []struct {
+var pinsReadingCommands = []struct {
 	name   string
 	run    func(e *pinEnv, insp inspect.Inspector) pinRunResult
 	assert func(t *testing.T, r pinRunResult, want scanWant)
@@ -1288,7 +1288,7 @@ func TestPinsInsecurePermissionsRefused(t *testing.T) {
 		{"file", 0o666},
 		{"file", 0o660},
 	}
-	for _, cmd := range insecurePinsCommands {
+	for _, cmd := range pinsReadingCommands {
 		for _, tc := range cases {
 			t.Run(fmt.Sprintf("%s, %s %04o", cmd.name, tc.kind, tc.mode), func(t *testing.T) {
 				t.Parallel()
@@ -1377,7 +1377,7 @@ func TestPinsSafePermissionsWork(t *testing.T) {
 		{0o700, 0o600},
 		{0o755, 0o644},
 	}
-	for _, cmd := range insecurePinsCommands {
+	for _, cmd := range pinsReadingCommands {
 		for _, m := range modes {
 			t.Run(fmt.Sprintf("%s, directory %04o and file %04o", cmd.name, m.dir, m.file), func(t *testing.T) {
 				t.Parallel()
@@ -1428,7 +1428,7 @@ func TestPinsSafePermissionsWork(t *testing.T) {
 func TestPinsFolderUnsafeBeforeSave(t *testing.T) {
 	t.Parallel()
 
-	for _, cmd := range insecurePinsCommands {
+	for _, cmd := range pinsReadingCommands {
 		t.Run(cmd.name, func(t *testing.T) {
 			t.Parallel()
 			skipWithoutModeBits(t)

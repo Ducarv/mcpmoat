@@ -190,7 +190,7 @@ func Load(path string) (*Store, error) {
 	}
 	// info comes from the open file, so the owner and the mode belong to the
 	// bytes that we parse. There is no path race and no "missing" case.
-	if err := checkOwnerAndMode(path, "file", info, os.Geteuid()); err != nil {
+	if err := checkOwnerAndMode(path, kindFile, info, os.Geteuid()); err != nil {
 		return nil, err
 	}
 	if err := checkVersion(path, data); err != nil {
@@ -402,12 +402,8 @@ func (s *Store) Save() error {
 			s.path, len(data), maxFileSize)
 	}
 
-	// The directory is checked here, and not in writeFile, so that the mode rule
-	// sits next to the one in Load. A missing directory passes: writeFile
-	// creates it with mode 0o700.
-	if err := checkDirPerm(filepath.Dir(s.path)); err != nil {
-		return err
-	}
+	// writeFileAtomic checks the pins directory after it creates a missing one,
+	// so a directory that another user made in the meantime is refused too.
 	if err := writeFileAtomic(s.path, data); err != nil {
 		return fmt.Errorf("save %s: %w", s.path, err)
 	}

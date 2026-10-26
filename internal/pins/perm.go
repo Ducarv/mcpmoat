@@ -16,18 +16,25 @@ import (
 // must fix it. Use errors.Is to test for it.
 var ErrInsecurePermissions = errors.New("insecure permissions")
 
+// The kind of path in a permission error: the text says "pins directory" or
+// "pins file".
+const (
+	kindDir  = "directory"
+	kindFile = "file"
+)
+
 // checkDirPerm returns an error that wraps ErrInsecurePermissions when the
 // pins directory at path is owned by another user or is writable by its group
-// or by others. Load and Save call it for the pins directory. Load checks
+// or by others. Load and writeFile call it for the pins directory. Load checks
 // pins.json on the open file instead (checkOwnerAndMode).
 //
 // It follows symlinks (os.Stat), so it checks the target. A missing path is
 // not an error: it is the first run, and Save creates the directory with mode
 // 0o700. A path below a regular file (ENOTDIR) counts as missing too. A path
 // that is not a directory also passes: the later read reports "not a
-// directory" with its own text, as it did before this check existed, and the
-// mode of a regular file is not the mode of a directory. Any other Stat error
-// is an error. The error text never holds file content.
+// directory" with its own text, and the mode of a regular file is not the mode
+// of a directory. Any other Stat error is an error. The error text never holds
+// file content.
 //
 // The path can change between this check and the later read or write. Only a
 // process that can write the directory or one of its parents can do that, and
@@ -43,7 +50,7 @@ func checkDirPerm(path string) error {
 	if !info.IsDir() {
 		return nil
 	}
-	return checkOwnerAndMode(path, "directory", info, os.Geteuid())
+	return checkOwnerAndMode(path, kindDir, info, os.Geteuid())
 }
 
 // shellQuote returns s as one word for a POSIX shell: it wraps s in single

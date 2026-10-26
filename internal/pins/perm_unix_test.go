@@ -92,11 +92,15 @@ func loadWithBeta(t *testing.T, path string) *Store {
 func newTarget(t *testing.T, kind string, mode os.FileMode) string {
 	t.Helper()
 	dir := newPinsDir(t, 0o700)
-	if kind == "file" {
+	switch kind {
+	case kindFile:
 		return seedPins(t, dir, mode)
+	case kindDir:
+		chmodForTest(t, dir, mode)
+		return dir
 	}
-	chmodForTest(t, dir, mode)
-	return dir
+	t.Fatalf("unknown kind %q", kind)
+	return ""
 }
 
 // wantInsecure fails the test unless err wraps ErrInsecurePermissions, holds
@@ -139,20 +143,20 @@ func TestCheckOwnerAndMode(t *testing.T) {
 		// when not listed.
 		want []string
 	}{
-		{"dir 0700", "directory", 0o700, me, nil},
-		{"dir 0755", "directory", 0o755, me, nil},
-		{"file 0600", "file", 0o600, me, nil},
-		{"file 0644", "file", 0o644, me, nil},
-		{"dir 0770 group only", "directory", 0o770, me, []string{"mode 0770", msgWritable, msgChmod}},
-		{"dir 0707 others only", "directory", 0o707, me, []string{"mode 0707", msgWritable, msgChmod}},
-		{"dir 0777", "directory", 0o777, me, []string{"mode 0777", msgWritable, msgChmod}},
-		{"file 0660 group only", "file", 0o660, me, []string{"mode 0660", msgWritable, msgChmod}},
-		{"file 0606 others only", "file", 0o606, me, []string{"mode 0606", msgWritable, msgChmod}},
-		{"file 0666", "file", 0o666, me, []string{"mode 0666", msgWritable, msgChmod}},
-		{"foreign dir 0700", "directory", 0o700, me + 1, []string{"mode 0700", msgForeign, msgChown}},
-		{"foreign dir 0755", "directory", 0o755, me + 1, []string{"mode 0755", msgForeign, msgChown}},
-		{"foreign file 0600", "file", 0o600, me + 1, []string{"mode 0600", msgForeign, msgChown}},
-		{"foreign dir 0777", "directory", 0o777, me + 1, []string{"mode 0777", msgForeign, msgChown, msgWritable, msgChmod}},
+		{"dir 0700", kindDir, 0o700, me, nil},
+		{"dir 0755", kindDir, 0o755, me, nil},
+		{"file 0600", kindFile, 0o600, me, nil},
+		{"file 0644", kindFile, 0o644, me, nil},
+		{"dir 0770 group only", kindDir, 0o770, me, []string{"mode 0770", msgWritable, msgChmod}},
+		{"dir 0707 others only", kindDir, 0o707, me, []string{"mode 0707", msgWritable, msgChmod}},
+		{"dir 0777", kindDir, 0o777, me, []string{"mode 0777", msgWritable, msgChmod}},
+		{"file 0660 group only", kindFile, 0o660, me, []string{"mode 0660", msgWritable, msgChmod}},
+		{"file 0606 others only", kindFile, 0o606, me, []string{"mode 0606", msgWritable, msgChmod}},
+		{"file 0666", kindFile, 0o666, me, []string{"mode 0666", msgWritable, msgChmod}},
+		{"foreign dir 0700", kindDir, 0o700, me + 1, []string{"mode 0700", msgForeign, msgChown}},
+		{"foreign dir 0755", kindDir, 0o755, me + 1, []string{"mode 0755", msgForeign, msgChown}},
+		{"foreign file 0600", kindFile, 0o600, me + 1, []string{"mode 0600", msgForeign, msgChown}},
+		{"foreign dir 0777", kindDir, 0o777, me + 1, []string{"mode 0777", msgForeign, msgChown, msgWritable, msgChmod}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -170,10 +174,17 @@ func TestCheckOwnerAndMode(t *testing.T) {
 				return
 			}
 			wantInsecure(t, err, path, append(tt.want, "pins "+tt.kind+" {path}")...)
-			// Each hint appears only when listed in want.
-			for _, p := range [][2]string{{msgForeign, msgForeign}, {msgChown, msgChown}, {msgWritable, msgWritable}, {"chmod go-w", msgChmod}} {
-				if got := strings.Contains(err.Error(), p[0]); got != slices.Contains(tt.want, p[1]) {
-					t.Errorf("error = %q, contains %q = %v", err, p[0], got)
+			// Each piece appears only when listed in want. The chmod piece in want
+			// holds the path, so the error is matched against its short form.
+			pieces := []struct{ inError, inWant string }{
+				{msgForeign, msgForeign},
+				{msgChown, msgChown},
+				{msgWritable, msgWritable},
+				{"chmod go-w", msgChmod},
+			}
+			for _, p := range pieces {
+				if got := strings.Contains(err.Error(), p.inError); got != slices.Contains(tt.want, p.inWant) {
+					t.Errorf("error = %q, contains %q = %v", err, p.inError, got)
 				}
 			}
 			wantPerm(t, path, tt.mode) // refusing never changes the mode
@@ -199,7 +210,7 @@ func TestCheckOwnerAndModeExactMessages(t *testing.T) {
 		{"owner only", 0o700, me + 1, false, nil,
 			"pins directory {path} is not safe: mode 0700, owned by another user (fix: ask the owner or root to run chown, or remove the path): insecure permissions"},
 		{"mode and owner", 0o777, me + 1, false, nil,
-			"pins directory {path} is not safe: mode 0777, owned by another user, writable by group or others (fix: chmod go-w -- '{path}'; ask the owner or root to run chown, or remove the path): insecure permissions"},
+			"pins directory {path} is not safe: mode 0777, owned by another user, writable by group or others (fix: ask the owner or root to run chown, then chmod go-w -- '{path}', or remove the path): insecure permissions"},
 		{"unknown owner, nil Sys", 0o700, me, true, nil, unknownOwnerMsg},
 		{"unknown owner, Sys of another type", 0o700, me, true, "not a stat", unknownOwnerMsg},
 		{"unknown owner, Stat_t value, not pointer", 0o700, me, true, syscall.Stat_t{}, unknownOwnerMsg},
@@ -215,7 +226,7 @@ func TestCheckOwnerAndModeExactMessages(t *testing.T) {
 			if tt.fake {
 				info = fakeInfo{info, tt.sys}
 			}
-			err = checkOwnerAndMode(dir, "directory", info, tt.uid)
+			err = checkOwnerAndMode(dir, kindDir, info, tt.uid)
 			want := strings.ReplaceAll(tt.want, "{path}", dir)
 			if err == nil || err.Error() != want {
 				t.Errorf("error = %v\nwant    %q", err, want)
@@ -227,7 +238,9 @@ func TestCheckOwnerAndModeExactMessages(t *testing.T) {
 	}
 }
 
-func TestCheckDirPermNotInsecure(t *testing.T) {
+// TestCheckDirPermNoVerdict covers the paths that checkDirPerm does not judge:
+// a missing path, a path that is not a directory and a Stat error.
+func TestCheckDirPermNoVerdict(t *testing.T) {
 	t.Parallel()
 	root := t.TempDir()
 	plain := filepath.Join(root, "plain")
@@ -266,8 +279,18 @@ func TestCheckDirPermNotInsecure(t *testing.T) {
 			}
 		})
 	}
+}
 
-	// Load reports a pins directory that is a file as before: "not a directory".
+// TestLoadDirIsFile checks that Load reports a pins directory that is a file
+// with its own "not a directory" text, not as a permission error.
+func TestLoadDirIsFile(t *testing.T) {
+	t.Parallel()
+	plain := filepath.Join(t.TempDir(), "plain")
+	if err := os.WriteFile(plain, []byte(permLeakToken), 0o600); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+	chmodForTest(t, plain, 0o666)
+
 	s, err := Load(filepath.Join(plain, "pins.json"))
 	if s != nil || err == nil || !strings.Contains(err.Error(), "not a directory") {
 		t.Fatalf("Load() = %v, %v, want a \"not a directory\" error", s, err)
@@ -314,18 +337,18 @@ func TestLoadChecksPaths(t *testing.T) {
 		content  string // empty means no pins.json
 		fileMode os.FileMode
 		viaLink  bool   // pins.json is a symlink to real.json
-		wantKind string // "directory" or "file": the path that Load must name; "" means Load succeeds
+		wantKind string // kindDir or kindFile: the path that Load must name; "" means Load succeeds
 	}{
 		{"first run, dir 0700", 0o700, "", 0, false, ""},
 		{"first run, dir 0755", 0o755, "", 0, false, ""},
-		{"first run, unsafe dir 0777", 0o777, "", 0, false, "directory"},
-		{"unsafe dir, safe file", 0o770, validPins, 0o600, false, "directory"},
+		{"first run, unsafe dir 0777", 0o777, "", 0, false, kindDir},
+		{"unsafe dir, safe file", 0o770, validPins, 0o600, false, kindDir},
 		// The content is not valid JSON on purpose: Load must refuse the mode
 		// before it parses, so the token can never reach the error.
-		{"unsafe file 0666, invalid content", 0o700, permLeakToken, 0o666, false, "file"},
-		{"unsafe file 0620 group only", 0o700, validPins, 0o620, false, "file"},
-		{"readable dir 0755, unsafe file 0602 others only", 0o755, validPins, 0o602, false, "file"},
-		{"symlink to a 0666 file", 0o700, validPins, 0o666, true, "file"},
+		{"unsafe file 0666, invalid content", 0o700, permLeakToken, 0o666, false, kindFile},
+		{"unsafe file 0620 group only", 0o700, validPins, 0o620, false, kindFile},
+		{"readable dir 0755, unsafe file 0602 others only", 0o755, validPins, 0o602, false, kindFile},
+		{"symlink to a 0666 file", 0o700, validPins, 0o666, true, kindFile},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -361,7 +384,7 @@ func TestLoadChecksPaths(t *testing.T) {
 				t.Errorf("Load() store = %v, want nil on a refused path", s)
 			}
 			want, wantMode := dir, tt.dirMode
-			if tt.wantKind == "file" {
+			if tt.wantKind == kindFile {
 				want, wantMode = path, tt.fileMode
 			}
 			wantInsecure(t, err, want, "pins "+tt.wantKind+" {path}",
@@ -401,6 +424,22 @@ func TestSaveRefusesInsecureDir(t *testing.T) {
 			wantPerm(t, path, 0o600)
 		})
 	}
+}
+
+// TestWriteFileAtomicChecksDir checks that the write itself checks the
+// directory after MkdirAll, so a directory that appeared after a caller's
+// check is refused too. It writes no temp file and does not change the mode.
+func TestWriteFileAtomicChecksDir(t *testing.T) {
+	t.Parallel()
+	dir := newPinsDir(t, 0o777)
+
+	err := writeFileAtomic(filepath.Join(dir, "pins.json"), []byte(validPins))
+
+	wantInsecure(t, err, dir, "pins directory {path}", "mode 0777", msgChmod, msgWritable)
+	if got := dirNames(t, dir); len(got) != 0 {
+		t.Errorf("directory entries = %v, want none (no temp file)", got)
+	}
+	wantPerm(t, dir, 0o777)
 }
 
 func TestSaveIgnoresOldFileMode(t *testing.T) {

@@ -27,7 +27,7 @@ func TestReadBoundedRegularFileInfo(t *testing.T) {
 		{
 			name: "regular file",
 			setup: func(t *testing.T) (string, string) {
-				return fileWithMode(t, t.TempDir(), "real")
+				return readOnlyFile(t, t.TempDir(), "real")
 			},
 			wantFound: true,
 		},
@@ -35,7 +35,7 @@ func TestReadBoundedRegularFileInfo(t *testing.T) {
 			// The info is the one of the target, not of the link.
 			name: "symlink to a file inside the root",
 			setup: func(t *testing.T) (string, string) {
-				dir, _ := fileWithMode(t, t.TempDir(), "real")
+				dir, _ := readOnlyFile(t, t.TempDir(), "real")
 				symlinkTo(t, "real", dir, "link")
 				return dir, "link"
 			},
@@ -106,16 +106,6 @@ func TestReadBoundedRegularFileInfo(t *testing.T) {
 	}
 }
 
-// fileWithMode writes a 3-byte file with mode 0400 and returns dir and name.
-func fileWithMode(t *testing.T, dir, name string) (string, string) {
-	t.Helper()
-	path := writeFile(t, dir, name, []byte("abc"))
-	if err := os.Chmod(path, 0o400); err != nil {
-		t.Fatalf("chmod: %v", err)
-	}
-	return dir, name
-}
-
 func TestReadOpenedInfo(t *testing.T) {
 	t.Parallel()
 
@@ -157,4 +147,14 @@ func TestReadOpenedInfo(t *testing.T) {
 			}
 		})
 	}
+}
+
+// readOnlyFile writes a 3-byte read-only file (mode 0400) and returns dir and name.
+func readOnlyFile(t *testing.T, dir, name string) (string, string) {
+	t.Helper()
+	path := writeFile(t, dir, name, []byte("abc"))
+	if err := os.Chmod(path, 0o400); err != nil {
+		t.Fatalf("chmod: %v", err)
+	}
+	return dir, name
 }

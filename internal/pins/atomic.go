@@ -44,10 +44,15 @@ func writeFileAtomic(path string, data []byte) error {
 // processes never write to the same temp file. When an error happens before
 // the rename succeeds, the temp file is removed and the old file is not
 // touched. An existing directory keeps its mode; a new directory gets 0o700.
+// The directory is checked (checkDirPerm) after MkdirAll, so the check also
+// covers a directory that appeared between a caller's earlier check and here.
 func (w atomicWriter) writeFile(path string, data []byte) (err error) {
 	dir := filepath.Dir(path)
 	if err = os.MkdirAll(dir, dirMode); err != nil {
 		return fmt.Errorf("create directory: %w", err)
+	}
+	if err = checkDirPerm(dir); err != nil {
+		return err
 	}
 
 	f, err := os.CreateTemp(dir, ".pins-*.tmp")

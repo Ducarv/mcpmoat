@@ -64,8 +64,9 @@ func ReadBoundedRegularFile(dir, name string, maxSize int64) (data []byte, found
 // ReadBoundedRegularFileInfo works as ReadBoundedRegularFile and also returns
 // the fs.FileInfo of the file that it read. The info comes from Stat on the
 // open file, not from the path, so a caller that checks the owner or the mode
-// of the info checks the same file as the data. info is nil when found is
-// false or err is not nil.
+// of the info checks the same file as the data. found is true exactly when
+// info is not nil. Both are zero when err is not nil. found stays in the result
+// for symmetry with ReadBoundedRegularFile.
 func ReadBoundedRegularFileInfo(dir, name string, maxSize int64) (data []byte, info fs.FileInfo, found bool, err error) {
 	root, err := OpenRoot(dir)
 	if err != nil {

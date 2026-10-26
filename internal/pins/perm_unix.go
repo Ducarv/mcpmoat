@@ -5,15 +5,17 @@ package pins
 import (
 	"fmt"
 	"io/fs"
-	"strings"
 	"syscall"
 )
 
+// groupOrOtherWrite is the mode bits that let the group or others write.
+const groupOrOtherWrite fs.FileMode = 0o022
+
 // checkOwnerAndMode returns an error that wraps ErrInsecurePermissions when
 // info says that another user than uid owns the path, or that its group or
-// others can write it (mode bits 0o022). Modes such as 0o755 and 0o644 pass.
-// info is the os.Stat result of path, or the Stat result of its open file. info
-// must not be nil.
+// others can write it (mode bits groupOrOtherWrite). Modes such as 0o755 and
+// 0o644 pass. info is the os.Stat result of path, or the Stat result of its
+// open file. info must not be nil.
 //
 // uid is a parameter, so a test can fake a foreign owner without root.
 //
@@ -28,31 +30,24 @@ func checkOwnerAndMode(path, kind string, info fs.FileInfo, uid int) error {
 	// Compare as int: converting uid to uint32 can overflow (gosec G115).
 	foreignOwner := int(st.Uid) != uid
 	perm := info.Mode().Perm()
-	groupOrOtherWrite := perm&0o022 != 0
+	writable := perm&groupOrOtherWrite != 0
 
-	var problems []string
-	var chmodFix, ownerFix string
-	if foreignOwner {
-		problems = append(problems, "owned by another user")
-		// Only root can chown, so a normal user cannot fix this alone.
-		ownerFix = "ask the owner or root to run chown, or remove the path"
-	}
-	if groupOrOtherWrite {
-		problems = append(problems, "writable by group or others")
-		chmodFix = "chmod go-w -- " + shellQuote(path)
-	}
-	if len(problems) == 0 {
+	// Only the owner or root can chown or chmod a path. So when the owner is
+	// another user, the hint does not start with a command that fails for us.
+	var problem, fix string
+	switch {
+	case foreignOwner && writable:
+		problem = "owned by another user, writable by group or others"
+		fix = "ask the owner or root to run chown, then chmod go-w -- " + shellQuote(path) + ", or remove the path"
+	case foreignOwner:
+		problem = "owned by another user"
+		fix = "ask the owner or root to run chown, or remove the path"
+	case writable:
+		problem = "writable by group or others"
+		fix = "chmod go-w -- " + shellQuote(path)
+	default:
 		return nil
 	}
-
-	// The fix order is fixed: the chmod hint first, then the owner text.
-	var fixes []string
-	if chmodFix != "" {
-		fixes = append(fixes, chmodFix)
-	}
-	if ownerFix != "" {
-		fixes = append(fixes, ownerFix)
-	}
 	return fmt.Errorf("pins %s %s is not safe: mode %04o, %s (fix: %s): %w",
-		kind, path, perm, strings.Join(problems, ", "), strings.Join(fixes, "; "), ErrInsecurePermissions)
+		kind, path, perm, problem, fix, ErrInsecurePermissions)
 }
