@@ -1,4 +1,4 @@
-# What this does not do
+# What mcpmoat does not do
 
 This page lists what mcpmoat does not do, so you know how far to trust a clean scan.
 
@@ -10,10 +10,12 @@ This page lists what mcpmoat does not do, so you know how far to trust a clean s
 - `mcpmoat scan` starts each configured stdio server, with the same command your client already
   runs. mcpmoat uses no shell. The server gets only the env from its config plus a small allowlist
   of safe variables, such as `PATH` and `HOME`. This env scrub is not a sandbox: the server runs as
-  you and can read your files and use the network. A server can also echo a configured env value
-  into a tool description, and then that text is stored in `pins.json`. mcpmoat does not start a
-  server from an untrusted project file or a turned-off server, and no flag allows it yet. The YAML
-  tool rules do not run yet, so exit code 0 does not mean that the tools are safe.
+  you and can read your files and use the network.
+- A server can also echo a configured env value into a tool description, and then that text is
+  stored in `pins.json`.
+- mcpmoat does not start a server from an untrusted project file or a turned-off server, and no flag
+  allows it yet.
+- **The YAML tool rules do not run yet, so exit code 0 does not mean that the tools are safe.**
 - `--llm` does not make a scan complete or reliable. A model can miss a malicious tool, and a
   hostile description can try to influence the model. Its findings are advisory, and with `--llm`
   your tool names and descriptions leave your machine.
