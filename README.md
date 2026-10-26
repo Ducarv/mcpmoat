@@ -421,14 +421,17 @@ mcpmoat scan --llm --llm-provider openai --llm-model <model> \
   the rule findings. They never remove or change a rule finding, and they never change the pins.
 - **What `--llm` does not check:** mcpmoat sends no input schema, so `--llm` does not rate text
   that is hidden in a parameter description of a schema.
-- **Your API key and the servers:** mcpmoat never gives the key to a server, not through the
-  environment and not through a placeholder. A `${MCPMOAT_LLM_API_KEY}` placeholder in a server
-  config fails like an unset variable.
+- **Your API key and the servers:** mcpmoat does not pass the key to a server through the server
+  environment or through a placeholder. A `${MCPMOAT_LLM_API_KEY}` placeholder in a server config
+  fails with an error (see [Placeholders](docs/stdio-servers.md#placeholders)). But a stdio server
+  runs as your user and can read the environment of the mcpmoat process. Use a key made for this,
+  with a low spend limit, for `--llm`.
 - **Exit codes:** LLM findings count for `--fail-on` like any finding. A provider failure (a
-  network, TLS or proxy error, a timeout, an HTTP error, a response that is too large) or more than
-  500 tools gives exit code 2. The report still prints, `complete` is `false` in JSON, and stderr
-  says how many tools were not classified, for example
-  `mcpmoat scan: the LLM provider failed (HTTP 401); 12 tools were not classified`.
+  network, TLS or proxy error, a timeout, an HTTP error or a redirect, a response that is too
+  large, or a response that is not a valid API answer) or more than 500 tools gives exit code 2.
+  The report still prints, `complete` is `false` in JSON, and stderr says how many tools were not
+  classified, for example
+  `mcpmoat scan: the LLM provider failed (HTTP 401 (the API key was refused)); 12 tools were not classified`.
   An internal error of the LLM step also stops the step with exit code 2, and stderr then says
   `mcpmoat scan: the LLM step failed (internal error); 12 tools were not classified`. mcpmoat
   never prints the text of that error.

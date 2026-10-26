@@ -237,8 +237,9 @@ the connect and pin steps between step 5 and step 6:
   step. It sends the name and description of each tool of each server with status `StatusOK` to the
   classifier, and adds one advisory row for each tool that the model rates as risky, for each tool
   with an unusable answer, and for each cut tool (see the verdict rules in
-  [The `--llm` classifier](#the---llm-classifier)). It only adds rows: it never changes or drops a rule finding, and it never touches pins, diffs or hints. Only
-  `--ignore` drops LLM rows, as for the pin rows. The `.mcpmoat-ignore` file does not (see step 3).
+  [The `--llm` classifier](#the---llm-classifier)). It only adds rows: it never changes or drops a
+  rule finding, and it never touches pins, diffs or hints. Only `--ignore` drops LLM rows, as for
+  the pin rows. The `.mcpmoat-ignore` file does not (see step 3).
   The ignored count includes the dropped LLM rows. See [The `--llm` classifier](#the---llm-classifier).
 - The pin findings join the config findings in one report. A changed tool and a new tool also get a
   diff, so the user can review the content of a new tool before they accept it. A new tool has the
@@ -422,8 +423,11 @@ func Run(ctx context.Context, servers []discover.Server, opts Options, insp Insp
   `Status` is `StatusOK`, `StatusTimeout` or `StatusFailed`.
 - `Result` holds the server identity, the instructions text and the lists of `Tool`, `Prompt`,
   `Resource` and `ResourceTemplate`, plus `Warning` values.
-- `SDKInspector` is the real `Inspector`. Make one with `New(SDKOptions{AllowUntrusted, AllowDisabled})`.
-  It starts stdio servers itself and gives remote servers to `Remote(ctx, srv, RemoteOptions)`.
+- `SDKInspector` is the real `Inspector`. Make one with
+  `New(SDKOptions{AllowUntrusted, AllowDisabled})`. It starts stdio servers itself and gives remote
+  servers to `Remote(ctx, srv, RemoteOptions)`.
+- `SDKOptions.HiddenEnv` hides variables from every placeholder. `scan` passes the LLM key
+  variable. See [Placeholders](stdio-servers.md#placeholders).
 - `SDKOptions.Dial` is a test hook for NFR-01. It is nil in production, and nil uses a
   `net.Dialer`. When it is set, every connection to a remote server goes through it. It sees only
   the addresses that pass the DNS pin and the address guard, so the guard still applies. With a
@@ -595,8 +599,8 @@ Shape (`schema_version` 2):
   `errors`), or the inspection or the pin step failed as a whole (for example, `pins.json` cannot
   be read), or the LLM step of a `--llm` scan did not classify every tool: a provider failure, an
   internal error of the LLM step, or more tools than the `--llm` cap. The exit code is then 2, and
-  the reason is on stderr only. A failed save of new pins comes after the document is written, so it does not change `complete`: the findings are whole,
-  and the exit code is 2.
+  the reason is on stderr only. A failed save of new pins comes after the document is written, so it
+  does not change `complete`: the findings are whole, and the exit code is 2.
 - A server has `name`, `client`, `scope`, `project_path`, `untrusted`, `state`, `transport`,
   `source`, `inspection.status` (`not_run`, `ok`, `timeout`, `failed` or `refused`) and either
   `argv` (stdio) or `url` (http and sse). Both are redacted like in the terminal report.
@@ -657,8 +661,8 @@ an old schema file in place. The reviewer must catch that. An old schema file is
 released.
 
 History: version 1 is the first format. Version 2 adds the required finding field `source` (for
-`--llm`, FR-17), and `complete` is also `false` when the LLM step did not classify every tool. The other fields
-keep their names and types.
+`--llm`, FR-17), and `complete` is also `false` when the LLM step did not classify every tool. The
+other fields keep their names and types.
 
 Not in version 2: accept hints (#169), ignored counts (#175), a summary, `pin --json` and
 `--fail-on` (#65).
@@ -724,13 +728,12 @@ object. The values come from fixed lists. `classifyTools` turns a verdict into r
 
 - A risk of `low`, `medium` or `high` gives one `MOAT-LLM-001` finding with that severity. The
   category goes in `related`. `none` gives no finding. The severity is never `critical`.
-- When the model answers `none` or `low`, or the answer is unusable, for a tool whose name or
-  description was cut (`Verdict.Truncated`), the tool gets one `MOAT-LLM-001` finding of severity
-  `medium` with category `other`. The finding has the fixed text `llm.TruncatedText`. An answer of
-  `medium` or `high` keeps its severity and category. An unusable answer for a tool that was not
-  cut still gives `MOAT-LLM-002`. This is enforced in code and not only in the system prompt. A
-  prompt injection in the part before the cut could ask the model for `none`, and the part after
-  the cut was never rated.
+- `llmRow` builds the row. For a tool with `Verdict.Truncated` set, it returns `truncatedRow` when
+  `belowMedium` is true for the risk or the answer is unusable. That row has the fixed text
+  `llm.TruncatedText`. The code enforces the rule, not only the system prompt, because a prompt
+  injection in the part before the cut could ask the model for `none`. The README owns the rule
+  that the user sees: see
+  [`--llm`](../README.md#optional-llm-classification-sends-data-off-your-machine).
 - An answer that cannot be used for a tool that was not cut gives `MOAT-LLM-002` (medium). That is
   an invalid answer, a refusal or an answer cut at the token limit. Only `llm.ErrInvalidOutput`
   gives this finding.
@@ -741,13 +744,10 @@ object. The values come from fixed lists. `classifyTools` turns a verdict into r
 `MOAT-LLM-002`, the end of the context is a stop, and `llm.ErrProvider` is a provider failure. Any
 other error is an internal error. Both failures stop the step. The first failure stops the running
 requests, starts no new one and decides the stderr line. So a new error path can never make a
-failed step look like a complete scan. A provider failure covers a network, TLS or timeout error,
-a status that is not 2xx (the body of such an answer is never read), a 3xx answer, a response that
-is too large, and a 2xx body that is not a valid API answer (for example `{}`, or a top-level
-`error`). The texts of the exit-code-2 cases and the report that follows are in the
-[README](../README.md#optional-llm-classification-sends-data-off-your-machine) and in
-[Exit codes](../README.md#exit-codes). Every error of `internal/llm` has fixed text. It never holds
-the key, a URL, a header, a response body or model output.
+failed step look like a complete scan. The README lists the provider failures and the texts of the
+exit-code-2 cases (see [`--llm`](../README.md#optional-llm-classification-sends-data-off-your-machine)
+and [Exit codes](../README.md#exit-codes)). Every error of `internal/llm` has fixed text. It never
+holds the key, a URL, a header, a response body or model output.
 
 `classifyTools` only adds rows. It never changes or drops a rule finding, a pin, a diff or a
 `To accept` line. The LLM rules share the exception of the pin rules: only `--ignore` drops LLM

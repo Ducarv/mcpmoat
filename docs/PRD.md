@@ -625,8 +625,8 @@ the machine**.
 - Without `--llm`, no LLM code path runs and no request is made (see NFR-01).
 - The API key comes only from the environment variable `MCPMOAT_LLM_API_KEY`. There is no key flag,
   because command-line arguments show in `ps` and in the shell history. With `--llm` and no valid
-  key, the command exits with code 2 and names the variable. mcpmoat never gives the key to a
-  server: a `${MCPMOAT_LLM_API_KEY}` placeholder in a server config fails like an unset variable.
+  key, the command exits with code 2 and names the variable. mcpmoat never puts the key in the
+  environment of a server or in a placeholder.
 - Flags (scan only): `--llm`, `--llm-provider anthropic|openai` (default `anthropic`),
   `--llm-model` (required for `openai`; `anthropic` has a default model) and `--llm-base-url`
   (`https`, or `http` only for a loopback host; no user info, query or fragment). The provider,
@@ -643,11 +643,10 @@ the machine**.
   hides LLM findings from the report. `.mcpmoat-ignore` cannot, because
   it can come from a cloned repository (FR-10). `--ignore` does not stop a tool from being sent: to
   keep a server out of `--llm`, scan it with a separate config.
-- When the model answers `none` or `low`, or the answer is unusable, for a tool whose name or
-  description was cut, the tool gets one `MOAT-LLM-001` finding of severity `medium` with category
-  `other`. An answer of `medium` or `high` keeps its severity and category. An unusable answer for
-  a tool that was not cut still gives `MOAT-LLM-002`. The part that was not sent can hold the
-  payload. The code enforces this, not only the system prompt.
+- A tool whose name or description was cut is never rated below `medium`, and an unusable model
+  answer for it does not hide it. The code enforces this, not only the system prompt. The
+  [README](../README.md#optional-llm-classification-sends-data-off-your-machine) holds the full
+  rule.
 - The description is sent as the server returned it. mcpmoat does not remove configured secret
   values from it. A server that got a token through its env or headers can put that token into its
   description, and `--llm` then sends it to the provider. The server already holds the value. The
@@ -664,11 +663,9 @@ the machine**.
   (FR-10).
 - The result is advisory. No finding does not mean that a tool is safe: a model can be wrong, and a
   hostile description can try to influence it.
-- A provider failure (network, TLS, timeout, HTTP error, a response that is too large), an internal
-  error of the LLM step, or more tools than the cap gives exit 2. A provider failure or an internal
-  error stops the step (fail closed). The report still prints, the JSON `complete` field is
-  `false`, and stderr says how many tools were not classified. The text of an internal error is
-  never printed. The README holds the exact stderr lines.
+- A provider failure stops the step and gives exit code 2 (fail closed). So does an internal error
+  of the LLM step, or more tools than the cap. The report still prints and the JSON `complete`
+  field is `false`. The README holds the list of failures and the exact stderr lines.
 - A hostile server can make `scan --llm` exit with 2: it can list more tools than the cap, or write a
   description that makes the provider answer with an HTTP 4xx (a content filter or a context
   limit). A provider failure stops the other requests and gives exit 2 (fail closed). The rule
