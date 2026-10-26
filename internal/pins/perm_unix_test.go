@@ -208,9 +208,9 @@ func TestCheckOwnerAndModeExactMessages(t *testing.T) {
 		{"mode only", 0o777, me, false, nil,
 			"pins directory {path} is not safe: mode 0777, writable by group or others (fix: chmod go-w -- '{path}'): insecure permissions"},
 		{"owner only", 0o700, me + 1, false, nil,
-			"pins directory {path} is not safe: mode 0700, owned by another user (fix: ask the owner or root to run chown, or remove the path): insecure permissions"},
+			"pins directory {path} is not safe: mode 0700, owned by another user (fix: ask the owner or root to run chown, or to remove the path): insecure permissions"},
 		{"mode and owner", 0o777, me + 1, false, nil,
-			"pins directory {path} is not safe: mode 0777, owned by another user, writable by group or others (fix: ask the owner or root to run chown, then chmod go-w -- '{path}', or remove the path): insecure permissions"},
+			"pins directory {path} is not safe: mode 0777, owned by another user, writable by group or others (fix: ask the owner or root to run chown, then chmod go-w -- '{path}', or to remove the path): insecure permissions"},
 		{"unknown owner, nil Sys", 0o700, me, true, nil, unknownOwnerMsg},
 		{"unknown owner, Sys of another type", 0o700, me, true, "not a stat", unknownOwnerMsg},
 		{"unknown owner, Stat_t value, not pointer", 0o700, me, true, syscall.Stat_t{}, unknownOwnerMsg},
@@ -302,12 +302,19 @@ func TestLoadDirIsFile(t *testing.T) {
 
 func TestPinsDirSymlinkFollowsTarget(t *testing.T) {
 	t.Parallel()
-	for _, mode := range []os.FileMode{0o700, 0o777} {
-		t.Run(fmt.Sprintf("target %04o", mode), func(t *testing.T) {
+	tests := []struct {
+		mode    os.FileMode
+		wantErr bool // the target is unsafe, so Load and checkDirPerm refuse it
+	}{
+		{0o700, false},
+		{0o777, true},
+	}
+	for _, tt := range tests {
+		t.Run(fmt.Sprintf("target %04o", tt.mode), func(t *testing.T) {
 			t.Parallel()
 			target := newPinsDir(t, 0o700)
 			seedPins(t, target, 0o600)
-			chmodForTest(t, target, mode)
+			chmodForTest(t, target, tt.mode)
 			link := filepath.Join(t.TempDir(), "link")
 			if err := os.Symlink(target, link); err != nil {
 				t.Fatalf("Symlink() error = %v", err)
@@ -315,7 +322,7 @@ func TestPinsDirSymlinkFollowsTarget(t *testing.T) {
 
 			checkErr := checkDirPerm(link)
 			_, loadErr := Load(filepath.Join(link, "pins.json"))
-			if mode == 0o700 {
+			if !tt.wantErr {
 				if checkErr != nil || loadErr != nil {
 					t.Errorf("checkDirPerm() error = %v, Load() error = %v, want nil for a safe target", checkErr, loadErr)
 				}
@@ -326,6 +333,70 @@ func TestPinsDirSymlinkFollowsTarget(t *testing.T) {
 				t.Errorf("Load() error = %v, want ErrInsecurePermissions for an unsafe target", loadErr)
 			}
 		})
+	}
+}
+
+// TestCheckFilePermByPath covers the check that Load runs when it cannot open
+// pins.json. The foreign owner is faked with an injected uid.
+func TestCheckFilePermByPath(t *testing.T) {
+	t.Parallel()
+	me := os.Geteuid()
+	tests := []struct {
+		name string
+		mode os.FileMode
+		uid  int
+		want []string // nil means no error
+	}{
+		{"own file 0600", 0o600, me, nil},
+		{"foreign file 0600", 0o600, me + 1, []string{"mode 0600", msgForeign, msgChown}},
+		{"foreign file 0666", 0o666, me + 1, []string{"mode 0666", msgForeign, msgChown, msgWritable, msgChmod}},
+		{"own file 0666", 0o666, me, []string{"mode 0666", msgWritable, msgChmod}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			path := seedPins(t, newPinsDir(t, 0o700), tt.mode)
+			err := checkFilePermByPath(path, tt.uid)
+			if tt.want == nil {
+				if err != nil {
+					t.Errorf("checkFilePermByPath() error = %v, want nil", err)
+				}
+				return
+			}
+			wantInsecure(t, err, path, append(tt.want, "pins file {path}")...)
+		})
+	}
+
+	// It cannot tell for a missing path or for a path that is not a regular
+	// file, so it returns nil and the caller reports the read error.
+	t.Run("missing path and a directory", func(t *testing.T) {
+		t.Parallel()
+		dir := newPinsDir(t, 0o700)
+		for _, path := range []string{filepath.Join(dir, "nope.json"), dir} {
+			if err := checkFilePermByPath(path, os.Geteuid()+1); err != nil {
+				t.Errorf("checkFilePermByPath(%q) error = %v, want nil", path, err)
+			}
+		}
+	})
+}
+
+// TestLoadUnreadableFile checks that a pins.json that the user may not read
+// still gives a refusal. The owner is the user here, so Load has no owner
+// problem to report and gives the read error (not ErrInsecurePermissions).
+func TestLoadUnreadableFile(t *testing.T) {
+	t.Parallel()
+	if os.Geteuid() == 0 {
+		t.Skip("root can read a file with mode 0000")
+	}
+	path := seedPins(t, newPinsDir(t, 0o700), 0o000)
+
+	s, err := Load(path)
+
+	if s != nil || err == nil || !errors.Is(err, fs.ErrPermission) {
+		t.Fatalf("Load() = %v, %v, want a permission denied error", s, err)
+	}
+	if errors.Is(err, ErrInsecurePermissions) {
+		t.Errorf("Load() error = %v, must not claim an insecure owner or mode", err)
 	}
 }
 

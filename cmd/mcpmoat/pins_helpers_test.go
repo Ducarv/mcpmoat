@@ -83,8 +83,15 @@ func readOnlyPinsDir(t *testing.T, e *pinEnv) {
 	t.Cleanup(func() { _ = os.Chmod(dir, 0o700) }) //nolint:gosec // G302: restores the folder so that t.TempDir can remove it
 }
 
-// setPinsMode sets the mode of the folder of pins.json (kind "directory") or of
-// pins.json (kind "file") with os.Chmod, so that a test can make the path
+// The kinds of path in the pins tests: the folder of pins.json, and pins.json.
+// The words are the ones in the refusal message.
+const (
+	pinsKindDir  = "directory"
+	pinsKindFile = "file"
+)
+
+// setPinsMode sets the mode of the folder of pins.json (kind pinsKindDir) or of
+// pins.json (kind pinsKindFile) with os.Chmod, so that a test can make the path
 // unsafe (mode&0o022 != 0) or check a safe mode. The path must exist. It
 // registers a cleanup that sets the folder back to 0700 and the file back to
 // 0600, so that t.TempDir can remove them. It skips the test on Windows, where
@@ -101,7 +108,8 @@ func setPinsMode(t *testing.T, e *pinEnv, kind string, mode os.FileMode) {
 }
 
 // skipWithoutModeBits skips the test when the mode bits do not stop the user
-// (Windows, root).
+// (Windows, root). The owner and mode check itself does not depend on access,
+// but readOnlyPinsDir does, and the tests share this skip.
 func skipWithoutModeBits(t *testing.T) {
 	t.Helper()
 	if runtime.GOOS == "windows" || os.Geteuid() == 0 {
@@ -109,14 +117,14 @@ func skipWithoutModeBits(t *testing.T) {
 	}
 }
 
-// pinsStorePath returns the path of pins.json for kind "file" and the path of
-// its folder for kind "directory". It fails the test for another kind.
+// pinsStorePath returns the path of pins.json for kind pinsKindFile and the path
+// of its folder for kind pinsKindDir. It fails the test for another kind.
 func pinsStorePath(t *testing.T, e *pinEnv, kind string) string {
 	t.Helper()
 	switch kind {
-	case "directory":
+	case pinsKindDir:
 		return filepath.Dir(e.pinsPath())
-	case "file":
+	case pinsKindFile:
 		return e.pinsPath()
 	}
 	t.Fatalf("unknown pins path kind %q, want directory or file", kind)
@@ -318,11 +326,7 @@ const wrongDigest = "pd1:0000000000000000000000000000000000000000000000000000000
 // stat or its mode is not 0o600. E2E tests pass pinsPath(home) as path.
 func assertPinsFileMode(t *testing.T, path string) {
 	t.Helper()
-	info, err := os.Stat(path)
-	if err != nil {
-		t.Fatalf("stat pins.json %s: %v", path, err)
-	}
-	if mode := info.Mode().Perm(); mode != 0o600 {
+	if mode := modeOf(t, path); mode != 0o600 {
 		t.Errorf("pins.json %s mode = %o, want 600", path, mode)
 	}
 }

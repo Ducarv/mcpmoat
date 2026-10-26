@@ -1255,13 +1255,30 @@ func TestScanAndPinPrintInspectionWarnings(t *testing.T) {
 // pinsReadingCommands are the two commands that read pins.json before they
 // start any server. Each has a name for the subtests, a run function and an
 // assert function that checks the run like assertScanRun or assertPinRun.
+// The other fields say how the command differs: what it prints on stdout when
+// it refuses the pins, what it prints on stderr when it works, and whether it
+// saves pins.json again.
 var pinsReadingCommands = []struct {
-	name   string
-	run    func(e *pinEnv, insp inspect.Inspector) pinRunResult
-	assert func(t *testing.T, r pinRunResult, want scanWant)
+	name          string
+	run           func(e *pinEnv, insp inspect.Inspector) pinRunResult
+	assert        func(t *testing.T, r pinRunResult, want scanWant)
+	refusedStdout []string // must be on stdout after a refusal; nil means stdout is empty
+	okStderr      []string // must be on stderr after a run that works
+	rewritesFile  bool     // a run that works saves a new pins.json with mode 0600
 }{
-	{"scan", func(e *pinEnv, insp inspect.Inspector) pinRunResult { return e.scan(insp) }, assertScanRun},
-	{"pin --accept", func(e *pinEnv, insp inspect.Inspector) pinRunResult { return e.pin(insp, "--accept", "srv") }, assertPinRun},
+	{
+		name:          "scan",
+		run:           func(e *pinEnv, insp inspect.Inspector) pinRunResult { return e.scan(insp) },
+		assert:        assertScanRun,
+		refusedStdout: []string{"not inspected, 0 findings (scan stopped before it inspected the servers"},
+	},
+	{
+		name:         "pin --accept",
+		run:          func(e *pinEnv, insp inspect.Inspector) pinRunResult { return e.pin(insp, "--accept", "srv") },
+		assert:       assertPinRun,
+		okStderr:     []string{noExpectNote},
+		rewritesFile: true,
+	},
 }
 
 // pinsPermTools returns the tools that the fake inspector gives the server srv
@@ -1280,13 +1297,13 @@ func TestPinsInsecurePermissionsRefused(t *testing.T) {
 
 	// The mode tables are in internal/pins. Here two modes per kind prove the wiring.
 	cases := []struct {
-		kind string // "directory" or "file"
+		kind string // pinsKindDir or pinsKindFile
 		mode os.FileMode
 	}{
-		{"directory", 0o777},
-		{"directory", 0o770},
-		{"file", 0o666},
-		{"file", 0o660},
+		{pinsKindDir, 0o777},
+		{pinsKindDir, 0o770},
+		{pinsKindFile, 0o666},
+		{pinsKindFile, 0o660},
 	}
 	for _, cmd := range pinsReadingCommands {
 		for _, tc := range cases {
@@ -1313,8 +1330,8 @@ func TestPinsInsecurePermissionsRefused(t *testing.T) {
 				// scan still lists the servers and shows them as not inspected;
 				// it prints no finding. pin --accept prints nothing.
 				assertContainsNone(t, "stdout", got.stdout, []string{"FINDINGS", "MOAT-", "accepted"})
-				if cmd.name == "scan" {
-					assertContainsAll(t, "stdout", got.stdout, []string{"not inspected, 0 findings (scan stopped before it inspected the servers"})
+				if cmd.refusedStdout != nil {
+					assertContainsAll(t, "stdout", got.stdout, cmd.refusedStdout)
 				} else if got.stdout != "" {
 					t.Errorf("stdout = %q, want empty", got.stdout)
 				}
@@ -1353,7 +1370,7 @@ func TestPinsInsecureHintQuotesPath(t *testing.T) {
 		t.Fatal(err)
 	}
 	firstScan(t, e, tools["srv"]...)
-	setPinsMode(t, e, "directory", 0o777)
+	setPinsMode(t, e, pinsKindDir, 0o777)
 	fake := fakeServers(tools)
 
 	got := e.scan(fake)
@@ -1384,8 +1401,8 @@ func TestPinsSafePermissionsWork(t *testing.T) {
 				tools := pinsPermTools()
 				e := newPinEnv(t, oneServer("srv"))
 				firstScan(t, e, tools["srv"]...)
-				setPinsMode(t, e, "directory", m.dir)
-				setPinsMode(t, e, "file", m.file)
+				setPinsMode(t, e, pinsKindDir, m.dir)
+				setPinsMode(t, e, pinsKindFile, m.file)
 				fake := fakeServers(tools)
 
 				got := cmd.run(e, fake)
@@ -1393,10 +1410,7 @@ func TestPinsSafePermissionsWork(t *testing.T) {
 				// The tools did not change, so the run finds nothing. A scan
 				// prints nothing on stderr. A pin --accept prints its
 				// --expect note, which is not an error.
-				want := scanWant{code: exitOK, noStdout: []string{"MOAT-T2-"}}
-				if cmd.name != "scan" {
-					want.stderr = []string{noExpectNote}
-				}
+				want := scanWant{code: exitOK, noStdout: []string{"MOAT-T2-"}, stderr: cmd.okStderr}
 				cmd.assert(t, got, want)
 				if calls := fake.Calls(); !slices.Equal(calls, []string{"srv"}) {
 					t.Errorf("the inspector got the calls %v, want [srv]", calls)
@@ -1407,7 +1421,7 @@ func TestPinsSafePermissionsWork(t *testing.T) {
 				// pin --accept saves pins.json again, with a new file of mode
 				// 0600; scan finds no change and does not save.
 				wantFile := m.file
-				if cmd.name != "scan" {
+				if cmd.rewritesFile {
 					wantFile = 0o600
 				}
 				if mode := modeOf(t, e.pinsPath()); mode != wantFile {
@@ -1438,7 +1452,7 @@ func TestPinsFolderUnsafeBeforeSave(t *testing.T) {
 			insp := hookInspector{
 				inner: fakeServers(pinsPermTools()),
 				hook: onceFor("srv", func(discover.Server) {
-					// Another user makes the folder, and lets everybody write it.
+					// A process makes the folder during the inspection, and lets everybody write it.
 					if err := os.MkdirAll(dir, 0o700); err != nil {
 						t.Errorf("make the folder: %v", err)
 						return

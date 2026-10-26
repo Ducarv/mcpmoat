@@ -158,7 +158,9 @@ func DefaultPath(getenv func(string) string, homeDir func() (string, error)) (st
 // its group or others can write, with an error that wraps ErrInsecurePermissions
 // (see Save). It checks the directory by path before it reads the file. It checks
 // the file on the open file descriptor after the read and before it parses the
-// data, so the checked file is the file that was read. Parent directories, for
+// data, so the checked file is the file that was read. A pins.json that the
+// user may not open gets the same check by path, so that another owner shows as
+// ErrInsecurePermissions and not as "permission denied". Parent directories, for
 // example ~/.config, are not checked.
 //
 // Any other problem is an error, also a missing or null key or a server that
@@ -180,6 +182,13 @@ func Load(path string) (*Store, error) {
 	}
 	data, info, found, err := safefile.ReadBoundedRegularFileInfo(filepath.Dir(path), filepath.Base(path), maxFileSize)
 	if err != nil {
+		// A pins.json that another user owns, with mode 0600, cannot be opened.
+		// The owner problem has a fix hint, so report it before "permission denied".
+		if errors.Is(err, fs.ErrPermission) {
+			if permErr := checkFilePermByPath(path, os.Geteuid()); permErr != nil {
+				return nil, permErr
+			}
+		}
 		return nil, fmt.Errorf("read %s: %w", path, err)
 	}
 	if !found {
@@ -190,7 +199,7 @@ func Load(path string) (*Store, error) {
 	}
 	// info comes from the open file, so the owner and the mode belong to the
 	// bytes that we parse. There is no path race and no "missing" case.
-	if err := checkOwnerAndMode(path, kindFile, info, os.Geteuid()); err != nil {
+	if err := checkFilePerm(path, info); err != nil {
 		return nil, err
 	}
 	if err := checkVersion(path, data); err != nil {
@@ -352,7 +361,8 @@ func cloneOrEmpty(p ServerPins) ServerPins {
 //
 // Save refuses an existing pins directory that another user owns or that its
 // group or others can write, with an error that wraps ErrInsecurePermissions.
-// It never changes the mode of an existing directory. Save does not check the
+// It checks after it created a missing directory. It never changes the mode of
+// an existing directory. Save does not check the
 // old pins.json, because the rename replaces it: callers read the file with
 // Load first, so the file check has run. Parent directories, for example
 // ~/.config, are not checked.
@@ -402,8 +412,6 @@ func (s *Store) Save() error {
 			s.path, len(data), maxFileSize)
 	}
 
-	// writeFileAtomic checks the pins directory after it creates a missing one,
-	// so a directory that another user made in the meantime is refused too.
 	if err := writeFileAtomic(s.path, data); err != nil {
 		return fmt.Errorf("save %s: %w", s.path, err)
 	}

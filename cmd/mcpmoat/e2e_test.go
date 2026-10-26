@@ -1601,32 +1601,37 @@ func TestE2EPinsUnsafePerm(t *testing.T) {
 	t.Parallel()
 	skipWithoutModeBits(t)
 
-	// Each setup makes the unsafe path and returns it.
-	dirSetup := func(t *testing.T, home string) string {
+	// mkPinsDir makes the 0700 pins directory and returns it.
+	mkPinsDir := func(t *testing.T, home string) string {
 		dir := filepath.Dir(pinsPath(home))
 		if err := os.MkdirAll(dir, 0o700); err != nil {
 			t.Fatal(err)
 		}
+		return dir
+	}
+	// Each setup makes the unsafe path and returns it.
+	dirSetup := func(t *testing.T, home string) string {
+		dir := mkPinsDir(t, home)
 		e2ePinsPermChmod(t, dir, 0o777)
 		return dir
 	}
 	fileSetup := func(t *testing.T, home string) string {
-		dir := filepath.Dir(pinsPath(home))
-		if err := os.MkdirAll(dir, 0o700); err != nil {
-			t.Fatal(err)
-		}
+		dir := mkPinsDir(t, home)
 		file := writeTestFile(t, dir, "pins.json", `{"version":1,"servers":[]}`)
 		e2ePinsPermChmod(t, file, 0o666)
 		return file
 	}
+	// scan still lists the server, marked "not inspected"; pin prints nothing.
+	scanStdout := []string{"marker-server", "not inspected, 0 findings"}
 	tests := []struct {
-		name  string
-		setup func(t *testing.T, home string) string
-		args  []string
+		name       string
+		setup      func(t *testing.T, home string) string
+		args       []string
+		wantStdout []string // nil means stdout is empty
 	}{
-		{"scan, directory 0777", dirSetup, []string{"scan"}},
-		{"pin --accept, directory 0777", dirSetup, []string{"pin", "--accept", "marker-server"}},
-		{"scan, file 0666 in a 0700 directory", fileSetup, []string{"scan"}},
+		{"scan, directory 0777", dirSetup, []string{"scan"}, scanStdout},
+		{"pin --accept, directory 0777", dirSetup, []string{"pin", "--accept", "marker-server"}, nil},
+		{"scan, file 0666 in a 0700 directory", fileSetup, []string{"scan"}, scanStdout},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -1641,12 +1646,10 @@ func TestE2EPinsUnsafePerm(t *testing.T) {
 			}
 			// The hint holds the path in single quotes.
 			assertContainsAll(t, "stderr", stderr, []string{"cannot read the pins file", chmodHint(unsafe), "insecure permissions"})
-			// scan still lists the server, marked "not inspected"; pin prints nothing.
-			if tt.args[0] == "pin" && stdout != "" {
+			if tt.wantStdout != nil {
+				assertContainsAll(t, "stdout", stdout, tt.wantStdout)
+			} else if stdout != "" {
 				t.Errorf("stdout = %q, want empty", stdout)
-			}
-			if tt.args[0] == "scan" {
-				assertContainsAll(t, "stdout", stdout, []string{"marker-server", "not inspected, 0 findings"})
 			}
 			assertContainsNone(t, "stdout", stdout, []string{"MOAT-"})
 			assertMarker(t, marker, false)

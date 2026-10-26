@@ -3,8 +3,8 @@ package pins
 import (
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
-	"strings"
 
 	"github.com/Ducarv/mcpmoat/internal/safefile"
 )
@@ -53,11 +53,23 @@ func checkDirPerm(path string) error {
 	return checkOwnerAndMode(path, kindDir, info, os.Geteuid())
 }
 
-// shellQuote returns s as one word for a POSIX shell: it wraps s in single
-// quotes, and it replaces each single quote inside s with the four characters
-// quote, backslash, quote, quote (close, escape, open). A user can paste the
-// result into a shell command, also when the path holds spaces or shell
-// metacharacters.
-func shellQuote(s string) string {
-	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
+// checkFilePerm is checkDirPerm for pins.json. info is the Stat result of the
+// open file that Load read, so the owner and the mode belong to the bytes that
+// Load parses.
+func checkFilePerm(path string, info fs.FileInfo) error {
+	return checkOwnerAndMode(path, kindFile, info, os.Geteuid())
+}
+
+// checkFilePermByPath is for a pins.json that Load could not open because the
+// current user may not read it. It returns an error that wraps
+// ErrInsecurePermissions when another user (not uid) owns the file, or when
+// its group or others can write it. Then the user gets the fix hint and not
+// only "permission denied". It returns nil when it cannot tell: a Stat error,
+// or a path that is not a regular file. The caller then reports the read error.
+func checkFilePermByPath(path string, uid int) error {
+	info, err := os.Stat(path)
+	if err != nil || !info.Mode().IsRegular() {
+		return nil
+	}
+	return checkOwnerAndMode(path, kindFile, info, uid)
 }

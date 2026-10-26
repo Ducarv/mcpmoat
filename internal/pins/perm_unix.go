@@ -5,6 +5,7 @@ package pins
 import (
 	"fmt"
 	"io/fs"
+	"strings"
 	"syscall"
 )
 
@@ -38,10 +39,10 @@ func checkOwnerAndMode(path, kind string, info fs.FileInfo, uid int) error {
 	switch {
 	case foreignOwner && writable:
 		problem = "owned by another user, writable by group or others"
-		fix = "ask the owner or root to run chown, then chmod go-w -- " + shellQuote(path) + ", or remove the path"
+		fix = "ask the owner or root to run chown, then chmod go-w -- " + shellQuote(path) + ", or to remove the path"
 	case foreignOwner:
 		problem = "owned by another user"
-		fix = "ask the owner or root to run chown, or remove the path"
+		fix = "ask the owner or root to run chown, or to remove the path"
 	case writable:
 		problem = "writable by group or others"
 		fix = "chmod go-w -- " + shellQuote(path)
@@ -50,4 +51,13 @@ func checkOwnerAndMode(path, kind string, info fs.FileInfo, uid int) error {
 	}
 	return fmt.Errorf("pins %s %s is not safe: mode %04o, %s (fix: %s): %w",
 		kind, path, perm, problem, fix, ErrInsecurePermissions)
+}
+
+// shellQuote returns s as one word for a POSIX shell: it wraps s in single
+// quotes, and it replaces each single quote inside s with the four characters
+// quote, backslash, quote, quote (close, escape, open). A user can paste the
+// result into a shell command, also when the path holds spaces or shell
+// metacharacters.
+func shellQuote(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
 }

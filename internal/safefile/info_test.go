@@ -27,7 +27,9 @@ func TestReadBoundedRegularFileInfo(t *testing.T) {
 		{
 			name: "regular file",
 			setup: func(t *testing.T) (string, string) {
-				return readOnlyFile(t, t.TempDir(), "real")
+				dir := t.TempDir()
+				readOnlyFile(t, dir, "real")
+				return dir, "real"
 			},
 			wantFound: true,
 		},
@@ -35,7 +37,8 @@ func TestReadBoundedRegularFileInfo(t *testing.T) {
 			// The info is the one of the target, not of the link.
 			name: "symlink to a file inside the root",
 			setup: func(t *testing.T) (string, string) {
-				dir, _ := readOnlyFile(t, t.TempDir(), "real")
+				dir := t.TempDir()
+				readOnlyFile(t, dir, "real")
 				symlinkTo(t, "real", dir, "link")
 				return dir, "link"
 			},
@@ -149,12 +152,11 @@ func TestReadOpenedInfo(t *testing.T) {
 	}
 }
 
-// readOnlyFile writes a 3-byte read-only file (mode 0400) and returns dir and name.
-func readOnlyFile(t *testing.T, dir, name string) (string, string) {
+// readOnlyFile writes a 3-byte read-only file (mode 0400) named name in dir.
+func readOnlyFile(t *testing.T, dir, name string) {
 	t.Helper()
 	path := writeFile(t, dir, name, []byte("abc"))
 	if err := os.Chmod(path, 0o400); err != nil {
 		t.Fatalf("chmod: %v", err)
 	}
-	return dir, name
 }
