@@ -220,21 +220,6 @@ func llmEnv(t *testing.T, tools map[string][]inspect.Tool) *pinEnv {
 	return newPinEnv(t, servers)
 }
 
-// secretPartLen is the length of the shortest part of a secret that
-// secretPartLeak looks for.
-const secretPartLen = 8
-
-// secretPartLeak returns the first part of secret of secretPartLen bytes that
-// out holds, and true. It returns false when out holds no such part.
-func secretPartLeak(key, out string) (string, bool) {
-	for i := 0; i+secretPartLen <= len(key); i++ {
-		if strings.Contains(out, key[i:i+secretPartLen]) {
-			return key[i : i+secretPartLen], true
-		}
-	}
-	return "", false
-}
-
 // llmAssertNoKey fails the test when key, or a part of it of secretPartLen bytes
 // or more, shows in one of the outputs.
 func llmAssertNoKey(t *testing.T, key string, outputs ...string) {
@@ -1883,31 +1868,6 @@ func TestScanLLMSendsOnlyNameAndDescription(t *testing.T) {
 		}
 	}
 	assertNoLeakBoth(t, r.stdout, r.stderr)
-}
-
-// TestLLMAssertNoKey checks the leak helper itself: it must find the whole
-// key and a part of it, and pass text without it.
-func TestLLMAssertNoKey(t *testing.T) {
-	t.Parallel()
-
-	tests := []struct {
-		name string
-		out  string
-		leak bool
-	}{
-		{"clean", "mcpmoat scan: warning: x", false},
-		{"whole key", "key=" + llmTestKey, true},
-		{"part of the key", "..." + llmTestKey[5:15] + "...", true},
-		{"short part", llmTestKey[:7], false},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
-			if _, leak := secretPartLeak(llmTestKey, tt.out); leak != tt.leak {
-				t.Errorf("secretPartLeak(%q) = %v, want %v", tt.out, leak, tt.leak)
-			}
-		})
-	}
 }
 
 // TestLLMRuleIDsValid checks that the IDs of the LLM findings follow the rule

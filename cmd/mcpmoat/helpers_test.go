@@ -495,6 +495,47 @@ var dangerousCanaries = []string{
 	"Jt6Pc9Gh2Fw8Ye4Ua1Xs7Mq3",
 }
 
+// secretPartLen is the length of the shortest part of a secret that
+// secretPartLeak looks for.
+const secretPartLen = 8
+
+// secretPartLeak returns the first part of secret of secretPartLen bytes that
+// out holds, and true. It returns false when out holds no such part.
+func secretPartLeak(secret, out string) (string, bool) {
+	for i := 0; i+secretPartLen <= len(secret); i++ {
+		if strings.Contains(out, secret[i:i+secretPartLen]) {
+			return secret[i : i+secretPartLen], true
+		}
+	}
+	return "", false
+}
+
+// TestSecretPartLeak checks the leak helper itself: it must find the whole
+// secret and a part of it, and pass text without it.
+func TestSecretPartLeak(t *testing.T) {
+	t.Parallel()
+
+	secret := dangerousCanaries[1]
+	tests := []struct {
+		name string
+		out  string
+		leak bool
+	}{
+		{"clean", "mcpmoat scan: warning: x", false},
+		{"whole secret", "token=" + secret, true},
+		{"part of the secret", "..." + secret[5:15] + "...", true},
+		{"short part", secret[:7], false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if _, leak := secretPartLeak(secret, tt.out); leak != tt.leak {
+				t.Errorf("secretPartLeak(%q) = %v, want %v", tt.out, leak, tt.leak)
+			}
+		})
+	}
+}
+
 // configModes are the two ways a test gives scan its config: "auto"
 // (auto-discovery in the home folder) and "config" (--config on one file).
 var configModes = []string{"auto", "config"}
@@ -995,7 +1036,7 @@ const floodGuard = 30 * time.Second
 func assertFast(t *testing.T, start time.Time, limit time.Duration) {
 	t.Helper()
 	if d := time.Since(start); d > limit {
-		t.Errorf("the scan took %v, want less than %v", d, limit)
+		t.Errorf("the run took %v, want less than %v", d, limit)
 	}
 }
 

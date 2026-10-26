@@ -42,7 +42,9 @@ const acceptanceLocalServer = "remote-local"
 // project file, as "RULE severity". The rule IDs are the ones that the READMEs
 // of testdata/configs/dangerous (T4) and testdata/configs/typosquat (T5) list.
 // The severities are the ones of the rule files in rules/. nil means no
-// finding.
+// finding. These sets repeat the tables of the per-fixture scan tests on
+// purpose: the acceptance test is an independent oracle of what the whole
+// binary reports.
 var acceptanceConfigFindings = map[string][]string{
 	// testdata/configs/dangerous
 	"remote-plain":        {"MOAT-T4-001 high", "MOAT-T4-002 high"},
@@ -65,11 +67,24 @@ var acceptanceProjectNames = slices.Sorted(maps.Keys(acceptanceConfigFindings))
 
 // acceptancePinnedNames are the sorted names of the servers that scan pins:
 // the trusted stdio servers.
-var acceptancePinnedNames = slices.Sorted(slices.Values(append(slices.Clone(acceptanceStdioServers), rugpullServer)))
+var acceptancePinnedNames = func() []string {
+	names := append(slices.Clone(acceptanceStdioServers), rugpullServer)
+	slices.Sort(names)
+	return names
+}()
 
 // acceptanceGateReason is the text of the reason of a project server that the
 // inspect gate refuses.
 const acceptanceGateReason = "untrusted project server; "
+
+// acceptanceGateOptIn is the end of the reason of a project server that the
+// inspect gate refuses.
+const acceptanceGateOptIn = " needs explicit opt-in"
+
+// acceptancePublicText is the text of mcpmoat itself that holds a part of
+// dangerousCanaries[0]. The remediation of the T1 rules tells the user to add
+// a line to this file.
+const acceptancePublicText = ".mcpmoat-ignore"
 
 // acceptanceRugPullFinding is the finding of the changed get_time of
 // rugpullServer in scan 2.
@@ -81,34 +96,37 @@ const acceptanceRugPullFinding = "MOAT-T2-001 high"
 // cannot.
 var acceptanceSecrets = append(slices.Clone(dangerousCanaries), "${env:API_TOKEN}", "${env:API_KEY}")
 
-// isProjectServer reports whether name is a server of the untrusted project
+// isAcceptanceProject reports whether name is a server of the untrusted project
 // file.
-func isProjectServer(name string) bool {
+func isAcceptanceProject(name string) bool {
 	_, ok := acceptanceConfigFindings[name]
 	return ok
 }
 
-// assertNoSecrets fails the test when got holds a string of
+// assertAcceptanceNoSecrets fails the test when got holds a string of
 // acceptanceSecrets, or a part of a canary of dangerousCanaries of 8 bytes or
 // more (see secretPartLeak). The message names the secret by its index only,
 // never by its value. tmpNames are the temporary folder names that the part
 // check ignores.
 //
-// The part check first replaces with "<tmp>" each name of tmpNames that is
-// secretPartLen bytes or more. These names are not output of mcpmoat, and a
-// name such as "mcpmoat-test.X" or "mcpmoat-fixtures-N" holds "mcpmoat-", the
-// first 8 bytes of dangerousCanaries[0]. The check replaces names, not whole
-// paths, because scan masks some folder names of a path. A canary holds no
-// "/", so a shorter name cannot hold a part. The whole-string check uses the
-// text as it is. A TMPDIR that is a symlink to a folder with another name can
-// fail the part check, because scan can print the resolved name.
-func assertNoSecrets(t *testing.T, what, got string, tmpNames []string) {
+// The part check first replaces two kinds of text that are not secret. The
+// first is each name of tmpNames. These names are not output of mcpmoat, and
+// a name such as "mcpmoat-e2e-N", "mcpmoat-fixtures-N" or the "mcpmoat-offline.X"
+// TMPDIR of .github/scripts/run-offline.sh holds "mcpmoat-", the first 8 bytes
+// of dangerousCanaries[0]. The check replaces names, not whole paths, because
+// scan masks some folder names of a path. A canary holds no "/", so a shorter
+// name cannot hold a part. The second is acceptancePublicText, which mcpmoat
+// prints in the Fix line of the T1 rules. The whole-string check uses the text
+// as it is. A TMPDIR that is a symlink to a folder with another name can fail
+// the part check, because scan can print the resolved name.
+func assertAcceptanceNoSecrets(t *testing.T, what, got string, tmpNames []string) {
 	t.Helper()
 	for i, secret := range acceptanceSecrets {
 		if strings.Contains(got, secret) {
 			t.Errorf("%s holds acceptanceSecrets[%d]", what, i)
 		}
 	}
+	got = strings.ReplaceAll(got, acceptancePublicText, "<public>")
 	for _, name := range tmpNames {
 		got = strings.ReplaceAll(got, name, "<tmp>")
 	}
@@ -117,6 +135,13 @@ func assertNoSecrets(t *testing.T, what, got string, tmpNames []string) {
 			t.Errorf("%s holds a part of dangerousCanaries[%d]", what, i)
 		}
 	}
+}
+
+// TestAcceptanceNoSecretsPublicText checks that the part check accepts the
+// text of mcpmoat that is not secret.
+func TestAcceptanceNoSecretsPublicText(t *testing.T) {
+	t.Parallel()
+	assertAcceptanceNoSecrets(t, "text", "Add the line MOAT-T1-004 server/tool to "+acceptancePublicText+" in /tmp/mcpmoat-e2e-123/bin", []string{"mcpmoat-e2e-123"})
 }
 
 // acceptanceTmpNames returns the folder names of secretPartLen bytes or more in
@@ -214,18 +239,18 @@ type acceptanceFinding struct {
 	server, rule, severity string
 }
 
-// textFindings returns the findings of a plain stdout (see findingRows).
-func textFindings(t *testing.T, stdout string) []acceptanceFinding {
+// acceptanceTextFindings returns the findings of a plain stdout (see parseFindings).
+func acceptanceTextFindings(t *testing.T, stdout string) []acceptanceFinding {
 	t.Helper()
 	var out []acceptanceFinding
-	for _, row := range findingRows(t, stdout) {
-		out = append(out, acceptanceFinding{server: row[2], rule: row[0], severity: row[1]})
+	for _, f := range parseFindings(t, stdout) {
+		out = append(out, acceptanceFinding{server: f.Name, rule: f.RuleID, severity: f.Severity})
 	}
 	return out
 }
 
-// jsonFindings returns the findings of a --json report.
-func jsonFindings(doc report.ScanReport) []acceptanceFinding {
+// acceptanceJSONFindings returns the findings of a --json report.
+func acceptanceJSONFindings(doc report.ScanReport) []acceptanceFinding {
 	var out []acceptanceFinding
 	for _, f := range doc.Findings {
 		out = append(out, acceptanceFinding{server: f.Server, rule: f.RuleID, severity: f.Severity})
@@ -233,9 +258,9 @@ func jsonFindings(doc report.ScanReport) []acceptanceFinding {
 	return out
 }
 
-// findingsByServer returns the sorted findings of each server of names, as
+// acceptanceFindingsByServer returns the sorted findings of each server of names, as
 // "RULE severity". A finding of a server that is not in names fails the test.
-func findingsByServer(t *testing.T, names []string, findings []acceptanceFinding) map[string][]string {
+func acceptanceFindingsByServer(t *testing.T, names []string, findings []acceptanceFinding) map[string][]string {
 	t.Helper()
 	got := map[string][]string{}
 	for _, name := range names {
@@ -288,12 +313,15 @@ type acceptanceRun struct {
 	// loopback url through a proxy, so the proxy guards the other remote
 	// servers and local guards remote-local.
 	proxy, local *e2eNetServer
-	// tmpNames are the folder names that assertNoSecrets ignores.
+	// tmpNames are the folder names that assertAcceptanceNoSecrets ignores.
 	tmpNames []string
-	// seen is the number of connections and requests that each counting server
-	// had after the last scan.
-	seen map[*e2eNetServer]int
+	// seen is the traffic that each counting server had after the last scan.
+	seen map[*e2eNetServer]acceptanceTraffic
 }
+
+// acceptanceTraffic is the number of connections and requests of a counting
+// server.
+type acceptanceTraffic struct{ conns, reqs int }
 
 // newAcceptanceRun writes the fake home. The trusted global config runs the
 // five stdio fixtures, with rugpull clean. An untrusted Cursor project file
@@ -302,8 +330,11 @@ func newAcceptanceRun(t *testing.T) *acceptanceRun {
 	t.Helper()
 	// The project file is only untrusted when work is not the home folder, so
 	// the test needs two separate folders.
-	r := &acceptanceRun{home: t.TempDir(), work: t.TempDir(), tmpNames: acceptanceTmpNames(t), seen: map[*e2eNetServer]int{}}
+	r := &acceptanceRun{home: t.TempDir(), work: t.TempDir(), seen: map[*e2eNetServer]acceptanceTraffic{}}
 	requirePrivateChain(t, r.home)
+	// This builds the fixtures and the binary, so the guard of the test does not
+	// count the build.
+	r.tmpNames = acceptanceTmpNames(t)
 	// os/exec uses the last value of a duplicate key, so this PATH replaces
 	// the PATH of runBinEnv. A started npx or docker only creates the marker.
 	script, marker := writeMarkerScript(t, t.TempDir())
@@ -335,9 +366,9 @@ func (r *acceptanceRun) scan(t *testing.T, args ...string) (stdout, stderr strin
 	assertMarker(t, r.marker, false)
 	r.assertNoNewTraffic(t, "the proxy", r.proxy, args)
 	r.assertNoNewTraffic(t, acceptanceLocalServer, r.local, args)
-	assertNoSecrets(t, "stdout", stdout, r.tmpNames)
-	assertNoSecrets(t, "stderr", stderr, r.tmpNames)
-	assertNoSecrets(t, "pins.json", string(readFileBytes(t, pinsPath(r.home))), r.tmpNames)
+	assertAcceptanceNoSecrets(t, "stdout", stdout, r.tmpNames)
+	assertAcceptanceNoSecrets(t, "stderr", stderr, r.tmpNames)
+	assertAcceptanceNoSecrets(t, "pins.json", string(readFileBytes(t, pinsPath(r.home))), r.tmpNames)
 	if got := readPinsFile(t, pinsPath(r.home)).serverNames(); !slices.Equal(got, acceptancePinnedNames) {
 		t.Errorf("pinned servers = %v, want %v", got, acceptancePinnedNames)
 	}
@@ -349,37 +380,43 @@ func (r *acceptanceRun) scan(t *testing.T, args ...string) (stdout, stderr strin
 func (r *acceptanceRun) assertNoNewTraffic(t *testing.T, what string, s *e2eNetServer, args []string) {
 	t.Helper()
 	conns, reqs := s.settle(t) // the counts are cumulative
-	if n := int(conns) + len(reqs); n != r.seen[s] {
-		t.Errorf("%s got %d new connections or requests in `scan %v`, want none: a remote project server was inspected", what, n-r.seen[s], args)
-		r.seen[s] = n
+	now := acceptanceTraffic{conns: int(conns), reqs: len(reqs)}
+	if before := r.seen[s]; now != before {
+		t.Errorf("%s got %d new connections and %d new requests in `scan %v`, want none: a remote project server was inspected",
+			what, now.conns-before.conns, now.reqs-before.reqs, args)
+		r.seen[s] = now
 	}
 }
 
-// assertScan runs one plain scan and checks it: exit code 1 (the T4 findings
+// scanAndCheck runs one plain scan and checks it: exit code 1 (the T4 findings
 // are high), the stderr lines, the findings of each server, a SUMMARY that
 // agrees with the FINDINGS block, and the project servers not inspected. It
 // returns the stdout.
-func (r *acceptanceRun) assertScan(t *testing.T, wantStderr []lineWant, want map[string][]string) string {
+func (r *acceptanceRun) scanAndCheck(t *testing.T, wantStderr []lineWant, want map[string][]string) string {
 	t.Helper()
 	stdout, stderr, code := r.scan(t, "scan")
 	assertScanResult(t, code, stdout, stderr, scanWant{code: exitFindings})
 	assertStderrLines(t, stderr, wantStderr)
 	names := column(tableRows(t, stdout), 0)
-	assertFindingsByServer(t, "text", findingsByServer(t, names, textFindings(t, stdout)), want)
+	assertFindingsByServer(t, "text", acceptanceFindingsByServer(t, names, acceptanceTextFindings(t, stdout)), want)
 	assertReportConsistent(t, stdout)
 	summary := summaryRows(t, stdout)
-	if len(summary) != len(names) {
-		t.Errorf("SUMMARY has %d servers, the table has %d\nstdout:\n%s", len(summary), len(names), stdout)
+	var summaryNames []string
+	for _, row := range summary {
+		summaryNames = append(summaryNames, row.Name)
+	}
+	if !slices.Equal(slices.Sorted(slices.Values(summaryNames)), slices.Sorted(slices.Values(names))) {
+		t.Errorf("SUMMARY has the servers %v, the table has %v\nstdout:\n%s", summaryNames, names, stdout)
 	}
 	for _, row := range summary {
 		wantStatus := "ok"
-		if isProjectServer(row.Name) {
+		if isAcceptanceProject(row.Name) {
 			wantStatus = "not inspected"
 		}
 		if row.Status != wantStatus {
 			t.Errorf("server %s: status = %q (%s), want %q", row.Name, row.Status, row.Reason, wantStatus)
 		}
-		if isProjectServer(row.Name) && !strings.Contains(row.Reason, acceptanceGateReason) {
+		if isAcceptanceProject(row.Name) && !strings.Contains(row.Reason, acceptanceGateReason) {
 			t.Errorf("server %s: reason = %q, want it to hold %q", row.Name, row.Reason, acceptanceGateReason)
 		}
 	}
@@ -403,7 +440,7 @@ func assertAcceptanceJSON(t *testing.T, stdout, stderr string, code int) {
 	}
 	assertStderrLines(t, stderr, wantWarnings)
 	for _, line := range nonEmptyLines(stderr) {
-		if !strings.Contains(line, " needs explicit opt-in") {
+		if !strings.Contains(line, acceptanceGateOptIn) {
 			t.Errorf("--json stderr line %q is not a gate refusal", line)
 		}
 	}
@@ -415,14 +452,14 @@ func assertAcceptanceJSON(t *testing.T, stdout, stderr string, code int) {
 	for _, s := range doc.Servers {
 		names = append(names, s.Name)
 		wantStatus := report.InspectionOK
-		if isProjectServer(s.Name) {
+		if isAcceptanceProject(s.Name) {
 			wantStatus = report.InspectionRefused
 		}
 		if s.Inspection.Status != wantStatus {
 			t.Errorf("--json: server %s: inspection status = %q, want %q", s.Name, s.Inspection.Status, wantStatus)
 		}
 	}
-	assertFindingsByServer(t, "--json", findingsByServer(t, names, jsonFindings(doc)), acceptanceWantFindings([]string{acceptanceRugPullFinding}))
+	assertFindingsByServer(t, "--json", acceptanceFindingsByServer(t, names, acceptanceJSONFindings(doc)), acceptanceWantFindings([]string{acceptanceRugPullFinding}))
 	if len(doc.Diffs) != 1 || doc.Diffs[0].Server != rugpullServer || doc.Diffs[0].Tool != "get_time" ||
 		!strings.Contains(doc.Diffs[0].Diff, "+description: "+rugpullInjected+"\n") {
 		t.Errorf("--json diffs = %+v, want one diff of %s get_time with the injected description", doc.Diffs, rugpullServer)
@@ -445,13 +482,12 @@ func assertAcceptanceJSON(t *testing.T, stdout, stderr string, code int) {
 func TestE2EAcceptance(t *testing.T) {
 	t.Parallel()
 	r := newAcceptanceRun(t)
-	binaryPath(t) // build first, so the guard does not count the build
 	start := time.Now()
 
 	// Scan 1: every stdio server is new, so scan pins its tools, in name
 	// order. Only the project servers are refused, and they show in the
 	// SUMMARY, not on stderr. rugpull is clean, so it has no MOAT-T2 finding.
-	stdout := r.assertScan(t, []lineWant{
+	stdout := r.scanAndCheck(t, []lineWant{
 		exactLine("mcpmoat scan: pinned 2 tools for benign"),
 		exactLine("mcpmoat scan: pinned 1 tool for mailer"),
 		exactLine("mcpmoat scan: pinned 5 tools for poisoned"),
@@ -465,7 +501,7 @@ func TestE2EAcceptance(t *testing.T) {
 	// four servers stay the same, so only the description of rugpull get_time
 	// changed. Nothing is pinned, so stderr is empty.
 	writeAcceptanceHome(t, r.home, "injected")
-	stdout = r.assertScan(t, nil, acceptanceWantFindings([]string{acceptanceRugPullFinding}))
+	stdout = r.scanAndCheck(t, nil, acceptanceWantFindings([]string{acceptanceRugPullFinding}))
 	wantRow := []string{"MOAT-T2-001", "high", rugpullServer, "tool", "get_time"}
 	if !slices.ContainsFunc(findingRows(t, stdout), func(row []string) bool { return slices.Equal(row, wantRow) }) {
 		t.Errorf("no finding row %v\nstdout:\n%s", wantRow, stdout)
