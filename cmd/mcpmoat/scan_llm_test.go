@@ -1,0 +1,1802 @@
+package main
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"math/rand/v2"
+	"net"
+	"net/http"
+	"net/http/httptest"
+	"regexp"
+	"runtime"
+	"slices"
+	"strconv"
+	"strings"
+	"sync"
+	"sync/atomic"
+	"testing"
+	"time"
+
+	"github.com/Ducarv/mcpmoat/internal/discover/discovertest"
+	"github.com/Ducarv/mcpmoat/internal/inspect"
+	"github.com/Ducarv/mcpmoat/internal/inspect/inspecttest"
+	"github.com/Ducarv/mcpmoat/internal/llm"
+	"github.com/Ducarv/mcpmoat/internal/report"
+)
+
+// This file tests "mcpmoat scan --llm" (FR-17) in process. Most tests inject
+// a fake classifier through cli.newClassifier, so they send no request. The
+// tests that need the real client (llm.New) send it to a fake Anthropic API
+// on a loopback httptest server. network_test.go holds the no-network proof
+// (NFR-01).
+
+// llmTestKey is the fake API key of the tests. It is visible ASCII, so
+// llm.ValidKey accepts it. It holds no word, so no part of it shows in
+// an output by chance. It must never show on stdout or stderr.
+const llmTestKey = "sk-Kq7vX2pLw9TzR4mNb8HcYf3J"
+
+// The markers that a tool description holds to choose the answer of the fake
+// classifier and of the fake LLM server (see llmAnswerFor). A description
+// without a marker gets risk none.
+const (
+	llmMarkHigh    = "llm:high"
+	llmMarkMedium  = "llm:medium"
+	llmMarkLow     = "llm:low"
+	llmMarkInvalid = "llm:invalid"
+	llmMark503     = "llm:503"
+)
+
+// The limits of the LLM step that FR-17 sets. The tests use their own copy,
+// so a change of maxLLMTools or llmWorkers in scan_llm.go fails them.
+const (
+	llmWantCap     = 500 // tools in one scan
+	llmWantWorkers = 4   // requests at the same time
+)
+
+// The fixed texts of an LLM finding in the terminal report.
+const (
+	llmHead001   = "MOAT-LLM-001  " + llm.Title + " [LLM]"
+	llmHead002   = "MOAT-LLM-002  " + llm.InvalidTitle + " [LLM]"
+	llmSourceTxt = "LLM classification (advisory)"
+)
+
+// llmAnswerFor returns the answer for in from the marker in its description:
+// a verdict, an error that wraps llm.ErrInvalidOutput, or an
+// *llm.StatusError with code 503 (which wraps llm.ErrProvider).
+func llmAnswerFor(in llm.Input) (llm.Verdict, error) {
+	switch d := in.Description; {
+	case strings.Contains(d, llmMark503):
+		return llm.Verdict{}, &llm.StatusError{Code: http.StatusServiceUnavailable}
+	case strings.Contains(d, llmMarkInvalid):
+		return llm.Verdict{}, fmt.Errorf("%w: test", llm.ErrInvalidOutput)
+	case strings.Contains(d, llmMarkHigh):
+		return llm.Verdict{Risk: llm.RiskHigh, Category: llm.CategoryKeyAccess}, nil
+	case strings.Contains(d, llmMarkMedium):
+		return llm.Verdict{Risk: llm.RiskMedium, Category: llm.CategoryHiddenInstructions}, nil
+	case strings.Contains(d, llmMarkLow):
+		return llm.Verdict{Risk: llm.RiskLow, Category: llm.CategoryOther}, nil
+	default:
+		return llm.Verdict{Risk: llm.RiskNone, Category: llm.CategoryOther}, nil
+	}
+}
+
+// llmFake is a fake toolClassifier. It records each input and counts the
+// calls that run at the same time. It is safe for concurrent use.
+type llmFake struct {
+	// answer gives the answer for one input. Nil means llmAnswerFor.
+	answer func(llm.Input) (llm.Verdict, error)
+	// before, when not nil, runs first in each call, with the context of
+	// the call.
+	before func(ctx context.Context)
+	// shuffle makes each call yield the processor a random number of times
+	// before it answers, so the calls end in a random order.
+	shuffle bool
+
+	calls       atomic.Int32
+	inFlight    atomic.Int32
+	maxInFlight atomic.Int32
+
+	mu     sync.Mutex
+	inputs []llm.Input
+}
+
+// Classify implements toolClassifier.
+func (f *llmFake) Classify(ctx context.Context, in llm.Input) (llm.Verdict, error) {
+	f.calls.Add(1)
+	n := f.inFlight.Add(1)
+	defer f.inFlight.Add(-1)
+	for {
+		m := f.maxInFlight.Load()
+		if n <= m || f.maxInFlight.CompareAndSwap(m, n) {
+			break
+		}
+	}
+	f.mu.Lock()
+	f.inputs = append(f.inputs, in)
+	f.mu.Unlock()
+
+	if f.before != nil {
+		f.before(ctx)
+	}
+	if f.shuffle {
+		for range rand.IntN(200) { //nolint:gosec // G404: test order noise, not security
+			runtime.Gosched()
+		}
+	}
+	if err := ctx.Err(); err != nil {
+		return llm.Verdict{}, fmt.Errorf("test: stopped: %w", err)
+	}
+	if f.answer != nil {
+		return f.answer(in)
+	}
+	return llmAnswerFor(in)
+}
+
+// received returns the inputs so far, sorted by tool name.
+func (f *llmFake) received() []llm.Input {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	out := slices.Clone(f.inputs)
+	slices.SortFunc(out, func(a, b llm.Input) int { return strings.Compare(a.ToolName, b.ToolName) })
+	return out
+}
+
+// llmFactory is the cli.newClassifier of a test. It counts its calls and keeps
+// the last config. With a nil cl, every call fails the test: the scan must
+// not build a client.
+type llmFactory struct {
+	t     *testing.T
+	cl    toolClassifier
+	calls atomic.Int32
+
+	mu  sync.Mutex
+	cfg llm.Config
+}
+
+// newClassifier has the type of cli.newClassifier.
+func (f *llmFactory) newClassifier(cfg llm.Config) (toolClassifier, error) {
+	f.calls.Add(1)
+	if f.cl == nil {
+		f.t.Errorf("cli.newClassifier was called, want no LLM client")
+		return nil, errors.New("test: no LLM client")
+	}
+	f.mu.Lock()
+	f.cfg = cfg
+	f.mu.Unlock()
+	return f.cl, nil
+}
+
+// config returns the config of the last call.
+func (f *llmFactory) config() llm.Config {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.cfg
+}
+
+// llmCLI builds a cli for the world e with the inspector insp and the factory
+// f. Its environment holds the API key llmTestKey.
+func llmCLI(e *pinEnv, insp inspect.Inspector, f *llmFactory) (*cli, *bytes.Buffer, *bytes.Buffer) {
+	e.t.Helper()
+	c, stdout, stderr := e.cli(insp)
+	c.getenv = fakeGetenv(map[string]string{"XDG_CONFIG_HOME": e.xdg, "HOME": e.home, llm.KeyEnv: llmTestKey})
+	c.newClassifier = f.newClassifier
+	return c, stdout, stderr
+}
+
+// llmRun runs "mcpmoat scan --config <file> args..." on c and checks the
+// rules that hold for every run: the key never shows and no raw escape byte
+// shows.
+func llmRun(t *testing.T, e *pinEnv, c *cli, stdout, stderr *bytes.Buffer, args ...string) pinRunResult {
+	t.Helper()
+	code := c.dispatch(append([]string{"scan", "--config", e.config}, args...))
+	r := pinRunResult{code: code, stdout: stdout.String(), stderr: stderr.String()}
+	llmAssertNoKey(t, llmTestKey, r.stdout, r.stderr)
+	assertNoEscape(t, r.stdout, r.stderr)
+	return r
+}
+
+// llmScan runs one scan of e with a fake classifier cl (nil: no client may be
+// built). The inspector gives each server its tools.
+func llmScan(t *testing.T, e *pinEnv, tools map[string][]inspect.Tool, cl toolClassifier, args ...string) pinRunResult {
+	t.Helper()
+	f := &llmFactory{t: t, cl: cl}
+	c, stdout, stderr := llmCLI(e, fakeServers(tools), f)
+	return llmRun(t, e, c, stdout, stderr, args...)
+}
+
+// llmEnv returns a pinEnv whose config has one stdio server for each name in
+// tools.
+func llmEnv(t *testing.T, tools map[string][]inspect.Tool) *pinEnv {
+	t.Helper()
+	servers := make(map[string]any, len(tools))
+	for name := range tools {
+		servers[name] = map[string]any{"command": "npx", "args": []string{"@acme/fixture-clean@2.0.0"}}
+	}
+	return newPinEnv(t, servers)
+}
+
+// llmKeyPart is the length of the shortest part of the key that
+// llmKeyLeak looks for.
+const llmKeyPart = 8
+
+// llmKeyLeak returns the first part of key of llmKeyPart bytes that out
+// holds, and true. It returns false when out holds no such part.
+func llmKeyLeak(key, out string) (string, bool) {
+	for i := 0; i+llmKeyPart <= len(key); i++ {
+		if strings.Contains(out, key[i:i+llmKeyPart]) {
+			return key[i : i+llmKeyPart], true
+		}
+	}
+	return "", false
+}
+
+// llmAssertNoKey fails the test when key, or a part of it of llmKeyPart bytes
+// or more, shows in one of the outputs.
+func llmAssertNoKey(t *testing.T, key string, outputs ...string) {
+	t.Helper()
+	for _, out := range outputs {
+		if part, ok := llmKeyLeak(key, out); ok {
+			t.Errorf("output holds a part of the API key (%q)\noutput:\n%s", part, out)
+		}
+	}
+}
+
+// llmWarning returns the exact warning line that scan --llm prints for the
+// provider and host.
+func llmWarning(provider, host string) string {
+	return scanWarnPrefix + "--llm sends the name and description of every tool to the LLM provider " +
+		provider + " at " + host + ". This data leaves your machine."
+}
+
+// llmBlock is one finding of the FINDINGS block of a plain stdout: the
+// severity of its group, its first line and its detail lines, each without
+// its leading spaces. parseFindings in helpers_test.go does not know the
+// "Source:" line of an LLM finding, so the --llm tests use this parser.
+type llmBlock struct {
+	severity string
+	head     string
+	details  []string
+}
+
+// isLLM reports whether the block is an LLM finding: its first line ends
+// with the [LLM] marker.
+func (b llmBlock) isLLM() bool { return strings.HasSuffix(b.head, " [LLM]") }
+
+// detail returns the text of the detail line with the label, or "".
+func (b llmBlock) detail(label string) string {
+	for _, d := range b.details {
+		if v, ok := strings.CutPrefix(d, label+": "); ok {
+			return v
+		}
+	}
+	return ""
+}
+
+// text returns the block as one string, for comparisons.
+func (b llmBlock) text() string {
+	return b.severity + "|" + b.head + "|" + strings.Join(b.details, "|")
+}
+
+// llmBlocks parses the FINDINGS block of a plain stdout into its findings, in
+// the printed order. It fails the test when a line has an unexpected shape or
+// a group count is wrong. It returns nil when stdout has no FINDINGS block.
+func llmBlocks(t *testing.T, stdout string) []llmBlock {
+	t.Helper()
+	var (
+		out   []llmBlock
+		group string
+		want  int
+		got   int
+	)
+	closeGroup := func() {
+		if group != "" && got != want {
+			t.Errorf("group %s says %d findings, has %d\nstdout:\n%s", strings.ToUpper(group), want, got, stdout)
+		}
+	}
+	for _, line := range nonEmptyLines(splitScanSections(stdout).Findings) {
+		if m := findingGroupPattern.FindStringSubmatch(line); m != nil {
+			closeGroup()
+			group = strings.ToLower(m[1])
+			want, _ = strconv.Atoi(m[2]) // the pattern holds only digits
+			got = 0
+			continue
+		}
+		if d, ok := strings.CutPrefix(line, "    "); ok {
+			if len(out) == 0 {
+				t.Fatalf("findings line %q has no finding before it:\n%s", line, stdout)
+			}
+			out[len(out)-1].details = append(out[len(out)-1].details, d)
+			continue
+		}
+		head, ok := strings.CutPrefix(line, "  ")
+		if !ok || group == "" || strings.HasPrefix(head, " ") {
+			t.Fatalf("findings line %q is not a group, a finding or a detail line:\n%s", line, stdout)
+		}
+		out = append(out, llmBlock{severity: group, head: head})
+		got++
+	}
+	closeGroup()
+	return out
+}
+
+// llmSplitBlocks returns the LLM findings and the rule findings of blocks,
+// each in the printed order.
+func llmSplitBlocks(blocks []llmBlock) (llmRows, ruleRows []llmBlock) {
+	for _, b := range blocks {
+		if b.isLLM() {
+			llmRows = append(llmRows, b)
+		} else {
+			ruleRows = append(ruleRows, b)
+		}
+	}
+	return llmRows, ruleRows
+}
+
+// llmHit is the part of an LLM finding that the tests compare: rule, severity,
+// server name and tool.
+type llmHit struct {
+	rule, severity, server, tool string
+}
+
+// llmRowsOf returns the rule, the severity, the server name and the tool of
+// each LLM block, in order. It also checks the fixed parts of each LLM block:
+// the title with the marker, the Source line, the risk and the fix texts.
+func llmRowsOf(t *testing.T, blocks []llmBlock) []llmHit {
+	t.Helper()
+	var rows []llmHit
+	for _, b := range blocks {
+		if !b.isLLM() {
+			continue
+		}
+		rule, _, _ := strings.Cut(b.head, " ")
+		switch rule {
+		case llm.RuleID:
+			if b.head != llmHead001 {
+				t.Errorf("LLM finding head = %q, want %q", b.head, llmHead001)
+			}
+			if b.detail("Fix") != llm.Remediation {
+				t.Errorf("%s Fix = %q, want %q", rule, b.detail("Fix"), llm.Remediation)
+			}
+		case llm.RuleIDInvalid:
+			if b.head != llmHead002 {
+				t.Errorf("LLM finding head = %q, want %q", b.head, llmHead002)
+			}
+			if b.detail("Risk") != llm.InvalidText || b.detail("Fix") != llm.InvalidRemediation {
+				t.Errorf("%s Risk, Fix = %q, %q; want the fixed texts of package llm", rule, b.detail("Risk"), b.detail("Fix"))
+			}
+			if b.severity != "medium" {
+				t.Errorf("%s is in group %q, want medium", rule, b.severity)
+			}
+		default:
+			t.Errorf("finding %q has the [LLM] marker but is not an LLM rule", b.head)
+		}
+		// The Source line comes right after the Server line.
+		if len(b.details) < 2 || !strings.HasPrefix(b.details[0], "Server: ") || b.details[1] != "Source: "+llmSourceTxt {
+			t.Errorf("LLM finding %q details = %q, want the Server line and then \"Source: %s\"", b.head, b.details, llmSourceTxt)
+		}
+		tool, _, _ := strings.Cut(b.detail("Tool"), " ")
+		rows = append(rows, llmHit{rule, b.severity, serverLabelName(b.detail("Server")), tool})
+	}
+	return rows
+}
+
+// llmJSONRows returns the LLM findings of a JSON document, in order, and
+// checks that every finding has the right source: "llm" for an LLM rule and
+// "rule" for every other rule.
+func llmJSONRows(t *testing.T, doc report.ScanReport) []llmHit {
+	t.Helper()
+	var rows []llmHit
+	for _, f := range doc.Findings {
+		isLLM := strings.HasPrefix(f.RuleID, "MOAT-LLM-")
+		want := string(report.SourceRule)
+		if isLLM {
+			want = string(report.SourceLLM)
+		}
+		if f.Source != want {
+			t.Errorf("finding %s of %s has source %q, want %q", f.RuleID, f.Server, f.Source, want)
+		}
+		if isLLM {
+			if f.Field != "tool" {
+				t.Errorf("finding %s has field %q, want \"tool\"", f.RuleID, f.Field)
+			}
+			rows = append(rows, llmHit{f.RuleID, f.Severity, f.Server, f.Key})
+		}
+	}
+	return rows
+}
+
+// llmGuardWorld is a world whose hooks count every use, for the usage error
+// tests: a scan that stops at its flags must not read a config, inspect a
+// server or build a client.
+type llmGuardWorld struct {
+	c              *cli
+	stdout, stderr *bytes.Buffer
+	insp           *inspecttest.Fake
+	factory        *llmFactory
+	dirCalls       atomic.Int32
+}
+
+// newLLMGuardWorld builds a guard world. Its home holds a config with one
+// server, so a scan that went on would inspect it. env is the environment of
+// the cli.
+func newLLMGuardWorld(t *testing.T, env map[string]string) *llmGuardWorld {
+	t.Helper()
+	home := t.TempDir()
+	writeServers(t, home, ".claude.json", oneServer("srv"))
+	w := &llmGuardWorld{
+		insp:    fakeServers(map[string][]inspect.Tool{"srv": {mkTool("t1", llmMarkHigh)}}),
+		factory: &llmFactory{t: t, cl: &llmFake{}},
+	}
+	w.c, w.stdout, w.stderr = dirsCLI(t, home, t.TempDir())
+	w.c.homeDir = func() (string, error) { w.dirCalls.Add(1); return home, nil }
+	w.c.getwd = func() (string, error) { w.dirCalls.Add(1); return t.TempDir(), nil }
+	w.c.getenv = fakeGetenv(env)
+	w.c.inspector = w.insp
+	w.c.newClassifier = w.factory.newClassifier
+	return w
+}
+
+// llmCountingServer starts a loopback server that counts its connections. A
+// test passes its URL as --llm-base-url to prove that no request is made.
+func llmCountingServer(t *testing.T) (url string, conns *atomic.Int32) {
+	t.Helper()
+	conns = &atomic.Int32{}
+	srv := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusTeapot)
+	}))
+	srv.Config.ConnState = func(_ net.Conn, s http.ConnState) {
+		if s == http.StateNew {
+			conns.Add(1)
+		}
+	}
+	srv.Start()
+	t.Cleanup(srv.Close)
+	return srv.URL, conns
+}
+
+// TestScanLLMUsageErrors checks every usage error of the LLM flags (FR-17,
+// FR-16): exit code 2, empty stdout, one error line and the usage hint on
+// stderr, and no warning. The flags are checked before anything else, so no
+// config is read, no server is inspected, no client is built and the server
+// at --llm-base-url gets no connection. A message about the key names
+// MCPMOAT_LLM_API_KEY and never holds the key.
+func TestScanLLMUsageErrors(t *testing.T) {
+	t.Parallel()
+
+	const keyCanary = "sk-badkey-canary-Lm3Pq9Xv"
+	// baseURLCanary is a base URL with a password. No output may hold the
+	// password.
+	const passCanary = "CANARYPASS"
+	const baseURLCanary = "https://user:" + passCanary + "@host.example/v1"
+	validKey := map[string]string{llm.KeyEnv: llmTestKey}
+	tests := []struct {
+		name string
+		args []string // "$SRV" is replaced with the URL of the counting server
+		env  map[string]string
+		want string // the error line after "mcpmoat scan: "
+		// keyName is true when the message must name MCPMOAT_LLM_API_KEY.
+		keyName bool
+	}{
+		{name: "provider without --llm", args: []string{"--llm-provider", "anthropic"}, env: validKey,
+			want: "--llm-provider needs --llm"},
+		{name: "model without --llm", args: []string{"--llm-model", "m1"}, env: validKey,
+			want: "--llm-model needs --llm"},
+		{name: "base URL without --llm", args: []string{"--llm-base-url", "$SRV"}, env: validKey,
+			want: "--llm-base-url needs --llm"},
+		{name: "--llm=false with a model", args: []string{"--llm=false", "--llm-model", "m1"}, env: validKey,
+			want: "--llm-model needs --llm"},
+		{name: "with --no-connect", args: []string{"--llm", "--no-connect", "--llm-base-url", "$SRV"}, env: validKey,
+			want: "--llm cannot be used with --no-connect: the LLM needs a connection to each server to get its tools"},
+		{name: "unknown provider", args: []string{"--llm", "--llm-provider", "bogus", "--llm-base-url", "$SRV"}, env: validKey,
+			want: `--llm-provider: unknown LLM provider: use "anthropic" or "openai"`},
+		{name: "provider in upper case", args: []string{"--llm", "--llm-provider", "OpenAI", "--llm-model", "m1"}, env: validKey,
+			want: `--llm-provider: unknown LLM provider: use "anthropic" or "openai"`},
+		{name: "openai without a model", args: []string{"--llm", "--llm-provider", "openai", "--llm-base-url", "$SRV"}, env: validKey,
+			want: "--llm-provider openai needs --llm-model"},
+		{name: "http base URL on a public host", args: []string{"--llm", "--llm-base-url", "http://llm.example.invalid"}, env: validKey,
+			want: "--llm-base-url: invalid LLM base URL: http is allowed only for a loopback host, use https"},
+		{name: "base URL with user info", args: []string{"--llm", "--llm-base-url", "https://u:" + discovertest.CanaryURL + "@llm.example.invalid"}, env: validKey,
+			want: "--llm-base-url: invalid LLM base URL: user info is not allowed"},
+		{name: "base URL with a query", args: []string{"--llm", "--llm-base-url", "https://llm.example.invalid/?k=" + discovertest.CanaryURL}, env: validKey,
+			want: "--llm-base-url: invalid LLM base URL: a query or fragment is not allowed"},
+		{name: "base URL with another scheme", args: []string{"--llm", "--llm-base-url", "ftp://llm.example.invalid"}, env: validKey,
+			want: "--llm-base-url: invalid LLM base URL: the scheme must be https"},
+		{name: "base URL without a host", args: []string{"--llm", "--llm-base-url", "https:///v1"}, env: validKey,
+			want: "--llm-base-url: invalid LLM base URL: the URL must have a host"},
+		{name: "empty base URL", args: []string{"--llm", "--llm-base-url", ""}, env: validKey,
+			want: "--llm-base-url needs a URL"},
+		{name: "base URL that looks like a flag", args: []string{"--llm-base-url", "--llm"}, env: validKey,
+			want: "--llm-base-url needs a URL"},
+		{name: "base URL given twice, canary first", args: []string{"--llm", "--llm-base-url", baseURLCanary, "--llm-base-url", "$SRV"}, env: validKey,
+			want: "--llm-base-url given more than once"},
+		{name: "base URL given twice, canary second", args: []string{"--llm", "--llm-base-url", "$SRV", "--llm-base-url", baseURLCanary}, env: validKey,
+			want: "--llm-base-url given more than once"},
+		{name: "model given twice", args: []string{"--llm", "--llm-model", "a", "--llm-model", "b"}, env: validKey,
+			want: `invalid value "b" for flag -llm-model: --llm-model given more than once`},
+		{name: "model with a space", args: []string{"--llm", "--llm-model", "bad model", "--llm-base-url", "$SRV"}, env: validKey,
+			want: "--llm-model: invalid LLM model name: only visible ASCII characters are allowed"},
+		{name: "no key", args: []string{"--llm", "--llm-base-url", "$SRV"}, env: nil,
+			want: "--llm: MCPMOAT_LLM_API_KEY is not set", keyName: true},
+		{name: "empty key", args: []string{"--llm", "--llm-base-url", "$SRV"}, env: map[string]string{llm.KeyEnv: ""},
+			want: "--llm: MCPMOAT_LLM_API_KEY is not set", keyName: true},
+		{name: "key with a space", args: []string{"--llm", "--llm-base-url", "$SRV"}, env: map[string]string{llm.KeyEnv: keyCanary + " x"},
+			want: "--llm: invalid MCPMOAT_LLM_API_KEY: only visible ASCII characters are allowed (no spaces, tabs or line breaks)", keyName: true},
+		{name: "key with a line break", args: []string{"--llm", "--llm-base-url", "$SRV"}, env: map[string]string{llm.KeyEnv: keyCanary + "\r\nX-Injected: 1"},
+			want: "--llm: invalid MCPMOAT_LLM_API_KEY: only visible ASCII characters are allowed (no spaces, tabs or line breaks)", keyName: true},
+		{name: "key with an escape", args: []string{"--llm", "--llm-base-url", "$SRV"}, env: map[string]string{llm.KeyEnv: keyCanary + "\x1b[31m"},
+			want: "--llm: invalid MCPMOAT_LLM_API_KEY: only visible ASCII characters are allowed (no spaces, tabs or line breaks)", keyName: true},
+		{name: "key too long", args: []string{"--llm", "--llm-base-url", "$SRV"}, env: map[string]string{llm.KeyEnv: keyCanary + strings.Repeat("k", llm.MaxKeyBytes)},
+			want: "--llm: invalid MCPMOAT_LLM_API_KEY: longer than 4096 bytes", keyName: true},
+		{name: "openai with a bad key", args: []string{"--llm", "--llm-provider", "openai", "--llm-model", "m1", "--llm-base-url", "$SRV"}, env: map[string]string{llm.KeyEnv: keyCanary + "\t"},
+			want: "--llm: invalid MCPMOAT_LLM_API_KEY: only visible ASCII characters are allowed (no spaces, tabs or line breaks)", keyName: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			srvURL, conns := llmCountingServer(t)
+			w := newLLMGuardWorld(t, tt.env)
+
+			code := w.c.dispatch(append([]string{"scan"}, replaceToken(tt.args, "$SRV", srvURL)...))
+
+			stdout, stderr := w.stdout.String(), w.stderr.String()
+			if code != exitError {
+				t.Errorf("exit code = %d, want %d\nstderr:\n%s", code, exitError, stderr)
+			}
+			assertEmptyStdout(t, stdout)
+			assertStderrLines(t, stderr, []lineWant{exactLine(scanPrefix + tt.want), exactLine(usageHint)})
+			if tt.keyName && !strings.Contains(stderr, llm.KeyEnv) {
+				t.Errorf("stderr does not name %s:\n%s", llm.KeyEnv, stderr)
+			}
+			for _, secret := range []string{keyCanary, llmTestKey, discovertest.CanaryURL, passCanary} {
+				if strings.Contains(stderr, secret) {
+					t.Errorf("stderr holds the secret %q:\n%s", secret, stderr)
+				}
+				if strings.Contains(stdout, secret) {
+					t.Errorf("stdout holds the secret %q:\n%s", secret, stdout)
+				}
+			}
+			if strings.Contains(stderr, "leaves your machine") {
+				t.Errorf("stderr holds the --llm warning, want only the usage error:\n%s", stderr)
+			}
+			assertTerminalSafe(t, stderr)
+			if n := w.factory.calls.Load(); n != 0 {
+				t.Errorf("cli.newClassifier was called %d times, want 0", n)
+			}
+			if calls := w.insp.Calls(); len(calls) != 0 {
+				t.Errorf("the inspector was called for %v, want no call", calls)
+			}
+			if n := w.dirCalls.Load(); n != 0 {
+				t.Errorf("homeDir or getwd was called %d times, want 0: scan read the configs", n)
+			}
+			if n := conns.Load(); n != 0 {
+				t.Errorf("the --llm-base-url server got %d connections, want 0", n)
+			}
+		})
+	}
+}
+
+// TestScanLLMConfig checks how the LLM flags and the key reach the client
+// config (FR-17): the defaults of each provider, the key from
+// MCPMOAT_LLM_API_KEY only, no dial hook in production, and the host that the
+// warning names. The fake classifier sends no request.
+func TestScanLLMConfig(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		args     []string
+		want     llm.Config // APIKey and Dial are checked apart
+		wantHost string
+	}{
+		{
+			name:     "defaults",
+			want:     llm.Config{Provider: llm.ProviderAnthropic, Model: llm.DefaultAnthropicModel, BaseURL: llm.DefaultAnthropicBaseURL},
+			wantHost: "api.anthropic.com",
+		},
+		{
+			name:     "anthropic with a model",
+			args:     []string{"--llm-provider", "anthropic", "--llm-model", "claude-test-1"},
+			want:     llm.Config{Provider: llm.ProviderAnthropic, Model: "claude-test-1", BaseURL: llm.DefaultAnthropicBaseURL},
+			wantHost: "api.anthropic.com",
+		},
+		{
+			name:     "openai",
+			args:     []string{"--llm-provider", "openai", "--llm-model", "gpt-test"},
+			want:     llm.Config{Provider: llm.ProviderOpenAI, Model: "gpt-test", BaseURL: llm.DefaultOpenAIBaseURL},
+			wantHost: "api.openai.com",
+		},
+		{
+			name:     "loopback base URL with a final slash",
+			args:     []string{"--llm-provider", "openai", "--llm-model", "llama3:8b", "--llm-base-url", "http://127.0.0.1:11434/v1/"},
+			want:     llm.Config{Provider: llm.ProviderOpenAI, Model: "llama3:8b", BaseURL: "http://127.0.0.1:11434/v1"},
+			wantHost: "127.0.0.1:11434",
+		},
+		{
+			name:     "https base URL",
+			args:     []string{"--llm-base-url", "https://llm.example.invalid:8443/api"},
+			want:     llm.Config{Provider: llm.ProviderAnthropic, Model: llm.DefaultAnthropicModel, BaseURL: "https://llm.example.invalid:8443/api"},
+			wantHost: "llm.example.invalid:8443",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			tools := map[string][]inspect.Tool{"srv": {mkTool("t1", "Add.")}}
+			e := llmEnv(t, tools)
+			f := &llmFactory{t: t, cl: &llmFake{}}
+			c, stdout, stderr := llmCLI(e, fakeServers(tools), f)
+
+			r := llmRun(t, e, c, stdout, stderr, append([]string{"--llm"}, tt.args...)...)
+
+			if r.code != exitOK {
+				t.Errorf("exit code = %d, want %d\nstderr:\n%s", r.code, exitOK, r.stderr)
+			}
+			if n := f.calls.Load(); n != 1 {
+				t.Fatalf("newClassifier calls = %d, want 1", n)
+			}
+			got := f.config()
+			if got.Provider != tt.want.Provider || got.Model != tt.want.Model || got.BaseURL != tt.want.BaseURL {
+				t.Errorf("config = %s %q %q, want %s %q %q", got.Provider, got.Model, got.BaseURL, tt.want.Provider, tt.want.Model, tt.want.BaseURL)
+			}
+			if got.APIKey.Reveal() != llmTestKey {
+				t.Errorf("the config does not hold the key from %s", llm.KeyEnv)
+			}
+			if got.Dial != nil {
+				t.Errorf("config Dial is set, want nil (the default dialer)")
+			}
+			// The config prints as a mask, so a log of it holds no key.
+			llmAssertNoKey(t, llmTestKey, fmt.Sprintf("%v %+v", got, got))
+			assertStderrLines(t, r.stderr, []lineWant{exactLine(llmWarning(string(tt.want.Provider), tt.wantHost)), prefixLine(scanPrefix + "pinned ")})
+		})
+	}
+}
+
+// TestScanLLMWithoutFlag checks that a scan without --llm never builds a
+// client (NFR-01), also when the key is set, and that the report has no LLM
+// row and no LLM warning.
+func TestScanLLMWithoutFlag(t *testing.T) {
+	t.Parallel()
+
+	tools := map[string][]inspect.Tool{"alpha": {mkTool("t1", llmMarkHigh)}}
+	for _, args := range [][]string{nil, {"--json"}, {"--no-connect"}} {
+		t.Run(strings.Join(append([]string{"scan"}, args...), " "), func(t *testing.T) {
+			t.Parallel()
+			r := llmScan(t, llmEnv(t, tools), tools, nil, args...)
+			if r.code != exitOK {
+				t.Errorf("exit code = %d, want %d\nstderr:\n%s", r.code, exitOK, r.stderr)
+			}
+			assertContainsNone(t, "stdout", r.stdout, []string{"MOAT-LLM", "[LLM]", `"llm"`})
+			assertContainsNone(t, "stderr", r.stderr, []string{"LLM", "--llm"})
+		})
+	}
+}
+
+// TestScanLLMMarking checks how the report marks an LLM finding (FR-17): in
+// the terminal, the title ends with [LLM] and a Source line follows the
+// Server line; in the JSON document, the source is "llm" and the document
+// follows schema version 2. A rule finding keeps no marker and the source
+// "rule". The summary counts include the LLM findings.
+func TestScanLLMMarking(t *testing.T) {
+	t.Parallel()
+
+	tools := map[string][]inspect.Tool{
+		"alpha": {mkTool("t1", "Read files. "+llmMarkHigh), mkTool("t2", "Odd. "+llmMarkInvalid), mkTool("t3", "Add.")},
+		"beta":  {mkTool("t4", "Notes. "+llmMarkMedium), mkTool("t5", "Log. "+llmMarkLow)},
+	}
+	servers := map[string]any{
+		// MOAT-T4-003 (medium): a rule finding next to the LLM findings.
+		"alpha": failOnMediumServer,
+		"beta":  failOnCleanServer,
+	}
+	wantLLM := []llmHit{
+		{llm.RuleID, "high", "alpha", "t1"},
+		{llm.RuleIDInvalid, "medium", "alpha", "t2"},
+		{llm.RuleID, "medium", "beta", "t4"},
+		{llm.RuleID, "low", "beta", "t5"},
+	}
+
+	t.Run("terminal", func(t *testing.T) {
+		t.Parallel()
+		e := newPinEnv(t, servers)
+		r := llmScan(t, e, tools, &llmFake{}, "--llm")
+		if r.code != exitFindings {
+			t.Errorf("exit code = %d, want %d (a high LLM finding)\nstderr:\n%s", r.code, exitFindings, r.stderr)
+		}
+		blocks := llmBlocks(t, r.stdout)
+		llmRows, ruleRows := llmSplitBlocks(blocks)
+		got := llmRowsOf(t, llmRows)
+		// The terminal groups the findings by severity; inside a group they
+		// keep the order of the servers, then of the tools.
+		want := []llmHit{wantLLM[0], wantLLM[1], wantLLM[2], wantLLM[3]}
+		if !slices.Equal(got, want) {
+			t.Errorf("LLM findings = %+v, want %+v\nstdout:\n%s", got, want, r.stdout)
+		}
+		// The risk text is the fixed text of the category, never model text.
+		if b := llmRows[0]; b.detail("Risk") != llm.CategoryKeyAccess.Text() || b.detail("Tool") != "t1 (credential-access)" {
+			t.Errorf("t1 Risk, Tool = %q, %q; want %q, %q", b.detail("Risk"), b.detail("Tool"), llm.CategoryKeyAccess.Text(), "t1 (credential-access)")
+		}
+		if b := llmRows[1]; b.detail("Tool") != "t2" {
+			t.Errorf("t2 Tool = %q, want \"t2\" (no category for an invalid answer)", b.detail("Tool"))
+		}
+		if len(ruleRows) != 1 || !strings.HasPrefix(ruleRows[0].head, "MOAT-T4-003") {
+			t.Fatalf("rule findings = %+v, want one MOAT-T4-003\nstdout:\n%s", ruleRows, r.stdout)
+		}
+		for _, d := range ruleRows[0].details {
+			if strings.HasPrefix(d, "Source:") {
+				t.Errorf("rule finding has the line %q, want no Source line", d)
+			}
+		}
+		if n := strings.Count(r.stdout, "[LLM]"); n != len(wantLLM) {
+			t.Errorf("stdout holds [LLM] %d times, want %d", n, len(wantLLM))
+		}
+		if n := strings.Count(r.stdout, "    Source: "+llmSourceTxt+"\n"); n != len(wantLLM) {
+			t.Errorf("stdout holds the Source line %d times, want %d", n, len(wantLLM))
+		}
+		// The summary counts the rule and the LLM findings of each server.
+		perServer := map[string]int{}
+		for _, b := range blocks {
+			perServer[serverLabelName(b.detail("Server"))]++
+		}
+		for _, row := range summaryRows(t, r.stdout) {
+			if row.Findings != perServer[row.Name] {
+				t.Errorf("summary of %s counts %d findings, the FINDINGS block has %d", row.Name, row.Findings, perServer[row.Name])
+			}
+		}
+	})
+
+	t.Run("json", func(t *testing.T) {
+		t.Parallel()
+		e := newPinEnv(t, servers)
+		r := llmScan(t, e, tools, &llmFake{}, "--llm", "--json")
+		if r.code != exitFindings {
+			t.Errorf("exit code = %d, want %d\nstderr:\n%s", r.code, exitFindings, r.stderr)
+		}
+		doc := decodeScanJSON(t, r.stdout)
+		if doc.SchemaVersion != 2 {
+			t.Errorf("schema_version = %d, want 2", doc.SchemaVersion)
+		}
+		if !doc.Complete {
+			t.Errorf("complete = false, want true")
+		}
+		if got := llmJSONRows(t, doc); !slices.Equal(got, wantLLM) {
+			t.Errorf("LLM findings = %+v, want %+v\nstdout:\n%s", got, wantLLM, r.stdout)
+		}
+		rules := 0
+		for _, f := range doc.Findings {
+			switch f.RuleID {
+			case llm.RuleID:
+				// The category is the related text of a MOAT-LLM-001 row.
+				if f.Key == "t1" && f.Related != string(llm.CategoryKeyAccess) {
+					t.Errorf("t1 related = %q, want %q", f.Related, llm.CategoryKeyAccess)
+				}
+			case llm.RuleIDInvalid:
+				if f.Related != "" {
+					t.Errorf("MOAT-LLM-002 related = %q, want empty", f.Related)
+				}
+			default:
+				rules++
+			}
+		}
+		if rules != 1 {
+			t.Errorf("JSON has %d rule findings, want 1 (MOAT-T4-003)", rules)
+		}
+		// Raw check on the text too: the decoder ignores the case of a key.
+		if n := strings.Count(r.stdout, `"source": "llm"`); n != len(wantLLM) {
+			t.Errorf("stdout holds %q %d times, want %d", `"source": "llm"`, n, len(wantLLM))
+		}
+		if n := strings.Count(r.stdout, `"source": "rule"`); n != 1 {
+			t.Errorf("stdout holds %q %d times, want 1", `"source": "rule"`, n)
+		}
+	})
+}
+
+// TestScanLLMFailOn checks that an LLM finding counts for --fail-on with the
+// severity of the verdict (FR-16, FR-17). MOAT-LLM-002 is medium. Risk none
+// gives no finding. The server has no rule finding.
+func TestScanLLMFailOn(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		mark string
+		// want is the exit code for --fail-on low, medium, high (the
+		// default) and critical.
+		want perLevel[int]
+		rule string // the rule of the one LLM finding; "" for none
+	}{
+		{mark: llmMarkHigh, want: perLevel[int]{exitFindings, exitFindings, exitFindings, exitOK}, rule: llm.RuleID},
+		{mark: llmMarkMedium, want: perLevel[int]{exitFindings, exitFindings, exitOK, exitOK}, rule: llm.RuleID},
+		{mark: llmMarkLow, want: perLevel[int]{exitFindings, exitOK, exitOK, exitOK}, rule: llm.RuleID},
+		{mark: llmMarkInvalid, want: perLevel[int]{exitFindings, exitFindings, exitOK, exitOK}, rule: llm.RuleIDInvalid},
+		{mark: "risk none", want: perLevel[int]{exitOK, exitOK, exitOK, exitOK}},
+	}
+	for _, tt := range tests {
+		for _, level := range append([]string{"default"}, levelNames()...) {
+			t.Run(tt.mark+"/"+level, func(t *testing.T) {
+				t.Parallel()
+				tools := map[string][]inspect.Tool{"srv": {mkTool("t1", "Text. "+tt.mark)}}
+				args := []string{"--llm"}
+				wantCode := tt.want.high
+				if level != "default" {
+					args = append(args, "--fail-on", level)
+					for _, s := range failOnLevels {
+						if string(s) == level {
+							wantCode = tt.want.at(t, s)
+						}
+					}
+				}
+				r := llmScan(t, llmEnv(t, tools), tools, &llmFake{}, args...)
+				if r.code != wantCode {
+					t.Errorf("exit code = %d, want %d\nstdout:\n%s\nstderr:\n%s", r.code, wantCode, r.stdout, r.stderr)
+				}
+				rows := llmRowsOf(t, llmBlocks(t, r.stdout))
+				switch {
+				case tt.rule == "" && len(rows) != 0:
+					t.Errorf("LLM findings = %+v, want none", rows)
+				case tt.rule != "" && (len(rows) != 1 || rows[0].rule != tt.rule):
+					t.Errorf("LLM findings = %+v, want one %s", rows, tt.rule)
+				}
+			})
+		}
+	}
+}
+
+// levelNames returns the four --fail-on values as strings.
+func levelNames() []string {
+	names := make([]string, len(failOnLevels))
+	for i, s := range failOnLevels {
+		names[i] = string(s)
+	}
+	return names
+}
+
+// TestScanLLMIgnore checks that --ignore and .mcpmoat-ignore drop LLM
+// findings like the findings of the config rules (FR-10, FR-17), and that
+// scan counts the dropped findings on stderr.
+func TestScanLLMIgnore(t *testing.T) {
+	t.Parallel()
+
+	tools := map[string][]inspect.Tool{
+		"alpha": {mkTool("t1", llmMarkHigh), mkTool("t2", llmMarkInvalid)},
+		"beta":  {mkTool("t3", llmMarkMedium)},
+	}
+	tests := []struct {
+		name       string
+		args       []string
+		ignoreFile string // the content of .mcpmoat-ignore; "" for no file
+		want       []llmHit
+		wantCode   int
+		wantStderr []string
+	}{
+		{
+			name:       "no ignore",
+			want:       []llmHit{{llm.RuleID, "high", "alpha", "t1"}, {llm.RuleIDInvalid, "medium", "alpha", "t2"}, {llm.RuleID, "medium", "beta", "t3"}},
+			wantCode:   exitFindings,
+			wantStderr: nil,
+		},
+		{
+			name:       "--ignore MOAT-LLM-001",
+			args:       []string{"--ignore", llm.RuleID},
+			want:       []llmHit{{llm.RuleIDInvalid, "medium", "alpha", "t2"}},
+			wantCode:   exitOK,
+			wantStderr: []string{"mcpmoat scan: 2 findings ignored: MOAT-LLM-001 (2)\n"},
+		},
+		{
+			name:       "--ignore both LLM rules",
+			args:       []string{"--ignore", llm.RuleID, "--ignore", llm.RuleIDInvalid},
+			wantCode:   exitOK,
+			wantStderr: []string{"mcpmoat scan: 3 findings ignored: MOAT-LLM-001 (2), MOAT-LLM-002 (1)\n"},
+		},
+		{
+			name:       "ignore file with a tool and a server entry",
+			ignoreFile: "MOAT-LLM-001 alpha/t1\nMOAT-LLM-002 alpha # model refusals\n",
+			want:       []llmHit{{llm.RuleID, "medium", "beta", "t3"}},
+			wantCode:   exitOK,
+			wantStderr: []string{
+				"mcpmoat scan: using 2 entries from .mcpmoat-ignore\n",
+				"mcpmoat scan: 2 findings ignored: MOAT-LLM-001 (1), MOAT-LLM-002 (1)\n",
+			},
+		},
+		{
+			name:       "ignore file entry for another tool",
+			ignoreFile: "MOAT-LLM-001 beta/other\n",
+			want:       []llmHit{{llm.RuleID, "high", "alpha", "t1"}, {llm.RuleIDInvalid, "medium", "alpha", "t2"}, {llm.RuleID, "medium", "beta", "t3"}},
+			wantCode:   exitFindings,
+			wantStderr: []string{"mcpmoat scan: using 1 entry from .mcpmoat-ignore\n"},
+		},
+	}
+	for _, tt := range tests {
+		for _, jsonOut := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/json=%v", tt.name, jsonOut), func(t *testing.T) {
+				t.Parallel()
+				e := llmEnv(t, tools)
+				if tt.ignoreFile != "" {
+					writeTestFile(t, e.work, ".mcpmoat-ignore", tt.ignoreFile)
+				}
+				args := append([]string{"--llm"}, tt.args...)
+				if jsonOut {
+					args = append(args, "--json")
+				}
+				r := llmScan(t, e, tools, &llmFake{}, args...)
+				if r.code != tt.wantCode {
+					t.Errorf("exit code = %d, want %d\nstderr:\n%s", r.code, tt.wantCode, r.stderr)
+				}
+				var got []llmHit
+				if jsonOut {
+					got = llmJSONRows(t, decodeScanJSON(t, r.stdout))
+				} else {
+					got = llmRowsOf(t, llmBlocks(t, r.stdout))
+					slices.SortStableFunc(got, func(a, b llmHit) int { return strings.Compare(a.server+a.tool, b.server+b.tool) })
+				}
+				if !slices.Equal(got, tt.want) {
+					t.Errorf("LLM findings = %+v, want %+v\nstdout:\n%s", got, tt.want, r.stdout)
+				}
+				assertContainsAll(t, "stderr", r.stderr, tt.wantStderr)
+				if len(tt.wantStderr) == 0 && strings.Contains(r.stderr, "ignored") {
+					t.Errorf("stderr counts ignored findings, want none:\n%s", r.stderr)
+				}
+			})
+		}
+	}
+
+	// The pin rules keep their exception: .mcpmoat-ignore cannot drop a
+	// MOAT-T2 finding, but the same file drops an LLM finding.
+	t.Run("ignore file and a pin finding", func(t *testing.T) {
+		t.Parallel()
+		e := newPinEnv(t, oneServer("srv"))
+		firstScan(t, e, mkTool("t1", "Add."))
+		writeTestFile(t, e.work, ".mcpmoat-ignore", "MOAT-T2-001\nMOAT-LLM-001\n")
+		changed := map[string][]inspect.Tool{"srv": {mkTool("t1", "Add. "+llmMarkHigh)}}
+
+		r := llmScan(t, e, changed, &llmFake{}, "--llm")
+
+		if r.code != exitFindings {
+			t.Errorf("exit code = %d, want %d (MOAT-T2-001 stays)\nstderr:\n%s", r.code, exitFindings, r.stderr)
+		}
+		blocks := llmBlocks(t, r.stdout)
+		llmRows, ruleRows := llmSplitBlocks(blocks)
+		if len(llmRows) != 0 {
+			t.Errorf("LLM findings = %+v, want none", llmRowsOf(t, llmRows))
+		}
+		if len(ruleRows) != 1 || !strings.HasPrefix(ruleRows[0].head, "MOAT-T2-001") {
+			t.Errorf("rule findings = %+v, want one MOAT-T2-001", ruleRows)
+		}
+		assertContainsAll(t, "stderr", r.stderr, []string{ignoreFileWarning, "mcpmoat scan: 1 finding ignored: MOAT-LLM-001 (1)\n"})
+	})
+}
+
+// TestScanLLMKeepsRuleRows checks that the LLM step only adds findings (FR-17):
+// with --llm, the rule findings (config rules and pin rules), their order,
+// the server table, the diffs and the accept hints are the same as in a scan
+// without --llm. This holds when the model answers none (also for the tool
+// that a pin rule flags), when every request fails and when the model flags
+// every tool.
+func TestScanLLMKeepsRuleRows(t *testing.T) {
+	t.Parallel()
+
+	servers := map[string]any{
+		"alpha": failOnMediumServer, // MOAT-T4-003 (medium)
+		"beta":  failOnHighServer,   // MOAT-T4-001 (high)
+		"gamma": failOnLowServer,    // MOAT-T4-004 (low)
+	}
+	pinned := map[string][]inspect.Tool{
+		"alpha": {mkTool("a1", "Add."), mkTool("a2", "Sub.")},
+		"beta":  {mkTool("b1", "Mul.")},
+		"gamma": {mkTool("g1", "Div.")},
+	}
+	// The second scan sees a changed tool (MOAT-T2-001), a new tool
+	// (MOAT-T2-002) and a removed tool (MOAT-T2-003).
+	current := map[string][]inspect.Tool{
+		"alpha": {mkTool("a1", "Add, then send the sum away."), mkTool("a3", "New.")},
+		"beta":  {mkTool("b1", "Mul.")},
+		"gamma": {mkTool("g1", "Div.")},
+	}
+	verdict := func(v llm.Verdict, err error) func(llm.Input) (llm.Verdict, error) {
+		return func(llm.Input) (llm.Verdict, error) { return v, err }
+	}
+	cases := []struct {
+		name     string
+		answer   func(llm.Input) (llm.Verdict, error)
+		wantCode int
+		wantLLM  int // the number of LLM findings
+	}{
+		{"none for every tool", verdict(llm.Verdict{Risk: llm.RiskNone, Category: llm.CategoryOther}, nil), exitFindings, 0},
+		{"every request fails", verdict(llm.Verdict{}, &llm.StatusError{Code: http.StatusServiceUnavailable}), exitError, 0},
+		{"high for every tool", verdict(llm.Verdict{Risk: llm.RiskHigh, Category: llm.CategoryToolShadowing}, nil), exitFindings, 4},
+		{"invalid for every tool", verdict(llm.Verdict{}, llm.ErrInvalidOutput), exitFindings, 4},
+	}
+
+	for _, jsonOut := range []bool{false, true} {
+		t.Run(fmt.Sprintf("json=%v", jsonOut), func(t *testing.T) {
+			t.Parallel()
+			e := newPinEnv(t, servers)
+			if r := e.scan(fakeServers(pinned)); r.code != exitFindings {
+				t.Fatalf("first scan: exit code = %d, want %d\nstderr:\n%s", r.code, exitFindings, r.stderr)
+			}
+			var extra []string
+			if jsonOut {
+				extra = []string{"--json"}
+			}
+			base := llmScan(t, e, current, nil, extra...)
+			if base.code != exitFindings {
+				t.Fatalf("baseline scan: exit code = %d, want %d\nstderr:\n%s", base.code, exitFindings, base.stderr)
+			}
+			for _, tc := range cases {
+				r := llmScan(t, e, current, &llmFake{answer: tc.answer}, append([]string{"--llm"}, extra...)...)
+				if r.code != tc.wantCode {
+					t.Errorf("%s: exit code = %d, want %d\nstderr:\n%s", tc.name, r.code, tc.wantCode, r.stderr)
+				}
+				if jsonOut {
+					llmAssertSameRuleJSON(t, tc.name, base.stdout, r.stdout, tc.wantLLM)
+				} else {
+					llmAssertSameRuleTerminal(t, tc.name, base.stdout, r.stdout, tc.wantLLM)
+				}
+			}
+		})
+	}
+}
+
+// llmAssertSameRuleTerminal checks that the terminal report got has the same
+// server table, the same rule findings in the same order, and the same diffs
+// and hints as base, and wantLLM LLM findings.
+func llmAssertSameRuleTerminal(t *testing.T, name, base, got string, wantLLM int) {
+	t.Helper()
+	b, g := splitScanSections(base), splitScanSections(got)
+	if b.Table != g.Table {
+		t.Errorf("%s: the server table changed\nbase:\n%s\ngot:\n%s", name, b.Table, g.Table)
+	}
+	if b.Rest != g.Rest {
+		t.Errorf("%s: the diffs or the accept hints changed\nbase:\n%s\ngot:\n%s", name, b.Rest, g.Rest)
+	}
+	_, baseRules := llmSplitBlocks(llmBlocks(t, base))
+	gotLLM, gotRules := llmSplitBlocks(llmBlocks(t, got))
+	if len(baseRules) == 0 {
+		t.Fatalf("%s: the baseline has no rule finding", name)
+	}
+	bt, gt := make([]string, len(baseRules)), make([]string, len(gotRules))
+	for i, r := range baseRules {
+		bt[i] = r.text()
+	}
+	for i, r := range gotRules {
+		gt[i] = r.text()
+	}
+	if !slices.Equal(bt, gt) {
+		t.Errorf("%s: the rule findings changed\nbase: %q\ngot:  %q", name, bt, gt)
+	}
+	if len(gotLLM) != wantLLM {
+		t.Errorf("%s: %d LLM findings, want %d", name, len(gotLLM), wantLLM)
+	}
+	// The summary keeps the status and the tools of each server. Its count
+	// grows only by the LLM findings of the server.
+	llmPer := map[string]int{}
+	for _, r := range gotLLM {
+		llmPer[serverLabelName(r.detail("Server"))]++
+	}
+	bs, gs := summaryRows(t, base), summaryRows(t, got)
+	if len(bs) != len(gs) {
+		t.Fatalf("%s: the summary has %d rows, want %d", name, len(gs), len(bs))
+	}
+	for i := range bs {
+		want := bs[i]
+		want.Findings += llmPer[want.Name]
+		if !slices.Equal(want.Warnings, gs[i].Warnings) || want.Server != gs[i].Server || want.Status != gs[i].Status ||
+			want.Tools != gs[i].Tools || want.Reason != gs[i].Reason || want.Findings != gs[i].Findings {
+			t.Errorf("%s: summary row = %+v, want %+v", name, gs[i], want)
+		}
+	}
+}
+
+// llmAssertSameRuleJSON checks that the JSON report got has the same servers,
+// the same rule findings in the same order, and the same diffs as base, and
+// wantLLM LLM findings.
+func llmAssertSameRuleJSON(t *testing.T, name, base, got string, wantLLM int) {
+	t.Helper()
+	bd, gd := decodeScanJSON(t, base), decodeScanJSON(t, got)
+	var gotRules []report.JSONFinding
+	nLLM := 0
+	for _, f := range gd.Findings {
+		if f.Source == string(report.SourceLLM) {
+			nLLM++
+			continue
+		}
+		gotRules = append(gotRules, f)
+	}
+	if len(bd.Findings) == 0 {
+		t.Fatalf("%s: the baseline has no finding", name)
+	}
+	if !slices.Equal(bd.Findings, gotRules) {
+		t.Errorf("%s: the rule findings changed\nbase: %+v\ngot:  %+v", name, bd.Findings, gotRules)
+	}
+	if nLLM != wantLLM {
+		t.Errorf("%s: %d LLM findings, want %d", name, nLLM, wantLLM)
+	}
+	bj, _ := json.Marshal(bd.Servers)
+	gj, _ := json.Marshal(gd.Servers)
+	if !bytes.Equal(bj, gj) {
+		t.Errorf("%s: the servers changed\nbase: %s\ngot:  %s", name, bj, gj)
+	}
+	bj, _ = json.Marshal(bd.Diffs)
+	gj, _ = json.Marshal(gd.Diffs)
+	if !bytes.Equal(bj, gj) {
+		t.Errorf("%s: the diffs changed\nbase: %s\ngot:  %s", name, bj, gj)
+	}
+}
+
+// llmNotClassified matches the stderr line of a failed LLM step and captures
+// the reason and the count.
+var llmNotClassified = regexp.MustCompile(`(?m)^mcpmoat scan: the LLM provider failed \(([^)]*)\); (\d+) (?:tool was|tools were) not classified$`)
+
+// TestScanLLMProviderFailure checks a failed request (FR-17, FR-16): the
+// report still prints, the JSON complete field is false, the exit code is 2
+// and stderr gives the HTTP status and the number of tools that were not
+// classified. The key never shows.
+func TestScanLLMProviderFailure(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name      string
+		tools     []inspect.Tool
+		wantCount string // "" means any count of 1 or more
+	}{
+		{
+			name:      "every request fails",
+			tools:     []inspect.Tool{mkTool("t1", llmMark503), mkTool("t2", llmMark503), mkTool("t3", llmMark503)},
+			wantCount: "3",
+		},
+		{
+			name:  "one request fails",
+			tools: []inspect.Tool{mkTool("t1", llmMarkHigh), mkTool("t2", llmMark503), mkTool("t3", "Add."), mkTool("t4", "Sub.")},
+		},
+	}
+	for _, tt := range tests {
+		for _, jsonOut := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/json=%v", tt.name, jsonOut), func(t *testing.T) {
+				t.Parallel()
+				tools := map[string][]inspect.Tool{"srv": tt.tools}
+				e := llmEnv(t, tools)
+				args := []string{"--llm"}
+				if jsonOut {
+					args = append(args, "--json")
+				}
+
+				r := llmScan(t, e, tools, &llmFake{}, args...)
+
+				if r.code != exitError {
+					t.Errorf("exit code = %d, want %d\nstderr:\n%s", r.code, exitError, r.stderr)
+				}
+				m := llmNotClassified.FindAllStringSubmatch(r.stderr, -1)
+				if len(m) != 1 {
+					t.Fatalf("stderr has %d LLM failure lines, want 1:\n%s", len(m), r.stderr)
+				}
+				if m[0][1] != "HTTP 503" {
+					t.Errorf("failure reason = %q, want \"HTTP 503\"", m[0][1])
+				}
+				if tt.wantCount != "" && m[0][2] != tt.wantCount {
+					t.Errorf("not classified count = %s, want %s", m[0][2], tt.wantCount)
+				}
+				if m[0][2] == "0" {
+					t.Errorf("not classified count = 0, want at least 1")
+				}
+				if jsonOut {
+					doc := decodeScanJSON(t, r.stdout)
+					if doc.Complete {
+						t.Errorf("complete = true, want false")
+					}
+					if len(doc.Servers) != 1 {
+						t.Errorf("JSON has %d servers, want 1: the report must still print", len(doc.Servers))
+					}
+				} else if !strings.Contains(r.stdout, summaryHeading) {
+					t.Errorf("stdout has no SUMMARY block: the report must still print\nstdout:\n%s", r.stdout)
+				}
+				// The first-run pins are still saved: the pin step worked.
+				if _, ok := e.readPins().tools("srv"); !ok {
+					t.Errorf("pins.json has no entry for srv, want the first-run pins")
+				}
+			})
+		}
+	}
+}
+
+// TestScanLLMToolCap checks the cap of llmWantCap tools in one scan: the
+// first 500 tools are classified and the rest are not, the exit code is 2
+// and stderr gives the count. Exactly 500 tools is not over the cap.
+func TestScanLLMToolCap(t *testing.T) {
+	t.Parallel()
+
+	for _, n := range []int{llmWantCap, llmWantCap + 3} {
+		t.Run(fmt.Sprint(n), func(t *testing.T) {
+			t.Parallel()
+			many := make([]inspect.Tool, n)
+			for i := range many {
+				many[i] = mkTool(fmt.Sprintf("tool%03d", i), "Plain.")
+			}
+			tools := map[string][]inspect.Tool{"big": many}
+			fake := &llmFake{}
+
+			r := llmScan(t, llmEnv(t, tools), tools, fake, "--llm", "--json")
+
+			if got := fake.calls.Load(); got != llmWantCap {
+				t.Errorf("Classify calls = %d, want %d", got, llmWantCap)
+			}
+			got := fake.received()
+			for i, in := range got {
+				if want := fmt.Sprintf("tool%03d", i); in.ToolName != want {
+					t.Errorf("classified tool %d = %q, want %q (the first %d tools)", i, in.ToolName, want, llmWantCap)
+					break
+				}
+			}
+			doc := decodeScanJSON(t, r.stdout)
+			capLine := "mcpmoat scan: --llm classifies at most 500 tools in one scan; 3 tools were not classified\n"
+			if n == llmWantCap {
+				if r.code != exitOK || !doc.Complete || strings.Contains(r.stderr, "not classified") {
+					t.Errorf("exit code = %d, complete = %v; want 0 and true\nstderr:\n%s", r.code, doc.Complete, r.stderr)
+				}
+				return
+			}
+			if r.code != exitError || doc.Complete {
+				t.Errorf("exit code = %d, complete = %v; want 2 and false", r.code, doc.Complete)
+			}
+			assertContainsAll(t, "stderr", r.stderr, []string{capLine})
+			if llmNotClassified.MatchString(r.stderr) {
+				t.Errorf("stderr reports a provider failure, want only the cap line:\n%s", r.stderr)
+			}
+		})
+	}
+}
+
+// TestScanLLMConcurrency checks that at most llmWantWorkers requests run at the
+// same time, that the scan does use them all, and that the findings keep the
+// order of the servers and the tools whatever order the requests end in.
+func TestScanLLMConcurrency(t *testing.T) {
+	t.Parallel()
+
+	tools := map[string][]inspect.Tool{
+		"alpha": {mkTool("a1", llmMarkLow), mkTool("a2", "x"), mkTool("a3", llmMarkHigh), mkTool("a4", llmMarkInvalid), mkTool("a5", llmMarkMedium)},
+		"beta":  {mkTool("b1", llmMarkMedium), mkTool("b2", llmMarkHigh), mkTool("b3", "x")},
+		"gamma": {mkTool("c1", llmMarkInvalid), mkTool("c2", llmMarkLow), mkTool("c3", llmMarkHigh), mkTool("c4", "x")},
+	}
+	want := []llmHit{
+		{llm.RuleID, "low", "alpha", "a1"},
+		{llm.RuleID, "high", "alpha", "a3"},
+		{llm.RuleIDInvalid, "medium", "alpha", "a4"},
+		{llm.RuleID, "medium", "alpha", "a5"},
+		{llm.RuleID, "medium", "beta", "b1"},
+		{llm.RuleID, "high", "beta", "b2"},
+		{llm.RuleIDInvalid, "medium", "gamma", "c1"},
+		{llm.RuleID, "low", "gamma", "c2"},
+		{llm.RuleID, "high", "gamma", "c3"},
+	}
+
+	t.Run("at most four at once", func(t *testing.T) {
+		t.Parallel()
+		// The first calls wait until llmWantWorkers calls run, so the test sees
+		// that the scan uses them all. Then every call yields the processor
+		// many times, so a fifth call would overlap. The guard timer is not
+		// for synchronisation: it only stops a hang when the scan runs fewer
+		// calls at once. It then releases every call, and the test fails.
+		full := make(chan struct{})
+		var once sync.Once
+		release := func() { once.Do(func() { close(full) }) }
+		var timedOut atomic.Bool
+		guard := time.AfterFunc(10*time.Second, func() { timedOut.Store(true); release() })
+		defer guard.Stop()
+		fake := &llmFake{}
+		fake.before = func(ctx context.Context) {
+			if fake.inFlight.Load() >= llmWantWorkers {
+				release()
+			}
+			select {
+			case <-full:
+			case <-ctx.Done():
+			}
+			for range 500 {
+				runtime.Gosched()
+			}
+		}
+		r := llmScan(t, llmEnv(t, tools), tools, fake, "--llm", "--json")
+		if timedOut.Load() {
+			t.Errorf("the scan never ran %d calls at the same time", llmWantWorkers)
+		}
+		if r.code != exitFindings {
+			t.Errorf("exit code = %d, want %d\nstderr:\n%s", r.code, exitFindings, r.stderr)
+		}
+		if got := fake.maxInFlight.Load(); got != llmWantWorkers {
+			t.Errorf("at most %d calls ran at the same time, want %d", got, llmWantWorkers)
+		}
+		if got := fake.calls.Load(); got != 12 {
+			t.Errorf("Classify calls = %d, want 12", got)
+		}
+	})
+
+	t.Run("stable order", func(t *testing.T) {
+		t.Parallel()
+		for i := range 20 {
+			r := llmScan(t, llmEnv(t, tools), tools, &llmFake{shuffle: true}, "--llm", "--json")
+			if got := llmJSONRows(t, decodeScanJSON(t, r.stdout)); !slices.Equal(got, want) {
+				t.Fatalf("run %d: LLM findings = %+v, want %+v", i, got, want)
+			}
+		}
+	})
+}
+
+// TestScanLLMInterrupted checks a signal during the LLM step: scan prints
+// interruptedText, exits with 2, prints no report and saves no pins (the first
+// run would have pinned the server).
+func TestScanLLMInterrupted(t *testing.T) {
+	t.Parallel()
+
+	for _, jsonOut := range []bool{false, true} {
+		t.Run(fmt.Sprintf("json=%v", jsonOut), func(t *testing.T) {
+			t.Parallel()
+			tools := map[string][]inspect.Tool{"srv": {mkTool("t1", llmMarkHigh), mkTool("t2", "Add.")}}
+			e := llmEnv(t, tools)
+			ctx, cancel := context.WithCancel(t.Context())
+			defer cancel()
+			fake := &llmFake{before: func(callCtx context.Context) {
+				cancel()
+				<-callCtx.Done()
+			}}
+			f := &llmFactory{t: t, cl: fake}
+			c, stdout, stderr := llmCLI(e, fakeServers(tools), f)
+			c.ctx = ctx
+			args := []string{"--llm"}
+			if jsonOut {
+				args = append(args, "--json")
+			}
+
+			r := llmRun(t, e, c, stdout, stderr, args...)
+
+			if r.code != exitError {
+				t.Errorf("exit code = %d, want %d", r.code, exitError)
+			}
+			assertEmptyStdout(t, r.stdout)
+			assertContainsAll(t, "stderr", r.stderr, []string{scanPrefix + interruptedText + "\n"})
+			if llmNotClassified.MatchString(r.stderr) {
+				t.Errorf("stderr reports a provider failure for a signal:\n%s", r.stderr)
+			}
+			e.assertNoPinsFile(t, "a signal during the LLM step")
+		})
+	}
+}
+
+// TestScanLLMSendsOnlyNameAndDescription checks what reaches the classifier
+// (FR-17): the name and the description of each tool, and nothing else. The
+// config holds canaries in its env, args, headers and URL, and the tools hold
+// canaries in their title, schemas, annotations and _meta.
+func TestScanLLMSendsOnlyNameAndDescription(t *testing.T) {
+	t.Parallel()
+
+	const toolCanary = "mcpmoat-tool-canary-Hx5Wq2"
+	tool := func(name, desc string) inspect.Tool {
+		tl := mkTool(name, desc)
+		tl.Title = toolCanary + "-title"
+		tl.InputSchema = json.RawMessage(`{"type":"object","description":"` + toolCanary + `-in"}`)
+		tl.OutputSchema = json.RawMessage(`{"type":"object","description":"` + toolCanary + `-out"}`)
+		tl.Meta = json.RawMessage(`{"k":"` + toolCanary + `-meta"}`)
+		tl.Annotations = &inspect.ToolAnnotations{Title: toolCanary + "-ann"}
+		return tl
+	}
+	tools := map[string][]inspect.Tool{
+		"local":  {tool("t1", "Add two numbers."), tool("t2", "Echo the text.")},
+		"remote": {tool("t3", "Read a note. "+llmMarkLow)},
+	}
+	servers := map[string]any{
+		"local": map[string]any{
+			"command": "npx",
+			"args":    []string{"@acme/fixture-clean@2.0.0", "--token", discovertest.CanaryArgs},
+			"env":     map[string]string{"FIXTURE_MODE": discovertest.CanaryEnv},
+		},
+		"remote": map[string]any{
+			"type":    "http",
+			"url":     "https://mcp.example.invalid/mcp?k=" + discovertest.CanaryURL,
+			"headers": map[string]string{"X-Fixture": discovertest.CanaryHeader},
+		},
+	}
+	canaries := append(discovertest.Canaries(), toolCanary, llmTestKey)
+
+	fake := &llmFake{}
+	r := llmScan(t, newPinEnv(t, servers), tools, fake, "--llm")
+
+	want := []llm.Input{
+		{ToolName: "t1", Description: "Add two numbers."},
+		{ToolName: "t2", Description: "Echo the text."},
+		{ToolName: "t3", Description: "Read a note. " + llmMarkLow},
+	}
+	got := fake.received()
+	if !slices.Equal(got, want) {
+		t.Errorf("classifier inputs = %+v, want %+v", got, want)
+	}
+	dump := fmt.Sprintf("%#v", got)
+	for _, c := range canaries {
+		if strings.Contains(dump, c) {
+			t.Errorf("the classifier got the canary %q: %s", c, dump)
+		}
+	}
+	assertNoLeakBoth(t, r.stdout, r.stderr)
+}
+
+// llmSyncLog is the stdout and the stderr of a cli that a request handler
+// reads while the scan runs. It keeps the writes of both streams in order.
+// It is safe for concurrent use.
+type llmSyncLog struct {
+	mu     sync.Mutex
+	out    strings.Builder
+	err    strings.Builder
+	events []llmEvent
+}
+
+// llmEvent is one write to the log.
+type llmEvent struct {
+	stdout bool
+	text   string
+}
+
+// llmLogWriter writes to one stream of an llmSyncLog.
+type llmLogWriter struct {
+	log    *llmSyncLog
+	stdout bool
+}
+
+// Write implements io.Writer.
+func (w llmLogWriter) Write(p []byte) (int, error) {
+	w.log.mu.Lock()
+	defer w.log.mu.Unlock()
+	if w.stdout {
+		w.log.out.Write(p)
+	} else {
+		w.log.err.Write(p)
+	}
+	w.log.events = append(w.log.events, llmEvent{stdout: w.stdout, text: string(p)})
+	return len(p), nil
+}
+
+// stderr returns the text written to stderr so far.
+func (l *llmSyncLog) stderr() string {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.err.String()
+}
+
+// snapshot returns the two texts and the events so far.
+func (l *llmSyncLog) snapshot() (stdout, stderr string, events []llmEvent) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.out.String(), l.err.String(), slices.Clone(l.events)
+}
+
+// llmAPI is a fake Anthropic Messages API on a loopback httptest server. It
+// answers each request with the verdict of llmAnswerFor for the tool in the
+// request, and records each request.
+type llmAPI struct {
+	srv *httptest.Server
+	// host is the host and port of the server.
+	host string
+	// status, when not 0, is the status of every answer.
+	status int
+	// onRequest, when not nil, runs first for each request, in the handler
+	// goroutine.
+	onRequest func()
+
+	newConns atomic.Int32
+	requests atomic.Int32
+
+	mu      sync.Mutex
+	bodies  [][]byte
+	headers []http.Header
+	paths   []string
+}
+
+// newLLMAPI starts a fake API. Set status and onRequest before the first
+// request.
+func newLLMAPI(t *testing.T) *llmAPI {
+	t.Helper()
+	a := &llmAPI{}
+	a.srv = httptest.NewUnstartedServer(http.HandlerFunc(a.handle))
+	a.srv.Config.ConnState = func(_ net.Conn, s http.ConnState) {
+		if s == http.StateNew {
+			a.newConns.Add(1)
+		}
+	}
+	a.srv.Start()
+	t.Cleanup(a.srv.Close)
+	a.host = a.srv.Listener.Addr().String()
+	return a
+}
+
+// handle answers one request.
+func (a *llmAPI) handle(w http.ResponseWriter, r *http.Request) {
+	a.requests.Add(1)
+	if a.onRequest != nil {
+		a.onRequest()
+	}
+	body, err := io.ReadAll(io.LimitReader(r.Body, 1<<20))
+	a.mu.Lock()
+	a.bodies = append(a.bodies, body)
+	a.headers = append(a.headers, r.Header.Clone())
+	a.paths = append(a.paths, r.URL.Path)
+	a.mu.Unlock()
+	if err != nil {
+		http.Error(w, "read error", http.StatusBadRequest)
+		return
+	}
+	if a.status != 0 {
+		w.WriteHeader(a.status)
+		return
+	}
+	in, err := llmRequestInput(body)
+	if err != nil {
+		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
+	v, verr := llmAnswerFor(in)
+	var se *llm.StatusError
+	switch {
+	case errors.As(verr, &se):
+		w.WriteHeader(se.Code)
+		return
+	case verr != nil:
+		// A refusal: the client reports an invalid answer.
+		writeLLMJSON(w, map[string]any{"stop_reason": "refusal", "content": []any{}})
+		return
+	}
+	writeLLMJSON(w, map[string]any{
+		"stop_reason": "tool_use",
+		"content": []any{map[string]any{
+			"type":  "tool_use",
+			"name":  "classify",
+			"input": map[string]string{"risk": string(v.Risk), "category": string(v.Category)},
+		}},
+	})
+}
+
+// writeLLMJSON writes v as a JSON answer.
+func writeLLMJSON(w http.ResponseWriter, v any) {
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(v)
+}
+
+// llmToolPayload is the user message of a request. Its fields are all the
+// keys that the client may send.
+type llmToolPayload struct {
+	ToolName        string `json:"tool_name"`
+	ToolDescription string `json:"tool_description"`
+	Truncated       bool   `json:"truncated"`
+}
+
+// llmRequestInput decodes the tool message of an Anthropic request body. The
+// message must have exactly the keys of llmToolPayload.
+func llmRequestInput(body []byte) (llm.Input, error) {
+	var req struct {
+		Messages []struct {
+			Role    string `json:"role"`
+			Content string `json:"content"`
+		} `json:"messages"`
+	}
+	if err := json.Unmarshal(body, &req); err != nil {
+		return llm.Input{}, err
+	}
+	if len(req.Messages) != 1 || req.Messages[0].Role != "user" {
+		return llm.Input{}, errors.New("want one user message")
+	}
+	dec := json.NewDecoder(strings.NewReader(req.Messages[0].Content))
+	dec.DisallowUnknownFields()
+	var p llmToolPayload
+	if err := dec.Decode(&p); err != nil {
+		return llm.Input{}, err
+	}
+	return llm.Input{ToolName: p.ToolName, Description: p.ToolDescription}, nil
+}
+
+// snapshot returns copies of the recorded bodies, headers and paths.
+func (a *llmAPI) snapshot() (bodies [][]byte, headers []http.Header, paths []string) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return slices.Clone(a.bodies), slices.Clone(a.headers), slices.Clone(a.paths)
+}
+
+// TestScanLLMRealClient runs scan --llm with the real client against a fake
+// API on a loopback server. It checks that the warning is printed before the
+// configs are read, before the client is built and before the first request
+// (the handler checks the stderr text when the request arrives), that it is
+// printed once and before the report, also with --json, and what the
+// requests hold: the key only in the x-api-key header, and in the body only
+// the name and the description of each tool (no config or schema canary).
+func TestScanLLMRealClient(t *testing.T) {
+	t.Parallel()
+
+	const toolCanary = "mcpmoat-tool-canary-Jk8Rf3"
+	tool := func(name, desc string) inspect.Tool {
+		tl := mkTool(name, desc)
+		tl.InputSchema = json.RawMessage(`{"type":"object","description":"` + toolCanary + `"}`)
+		tl.Meta = json.RawMessage(`{"k":"` + toolCanary + `"}`)
+		return tl
+	}
+	tools := map[string][]inspect.Tool{"alpha": {tool("t1", "Read keys. "+llmMarkHigh), tool("t2", "Add two numbers.")}}
+	servers := map[string]any{"alpha": map[string]any{
+		"command": "npx",
+		"args":    []string{"@acme/fixture-clean@2.0.0", "--token", discovertest.CanaryArgs},
+		"env":     map[string]string{"FIXTURE_MODE": discovertest.CanaryEnv},
+	}}
+	canaries := append(discovertest.Canaries(), toolCanary)
+
+	tests := []struct {
+		name     string
+		json     bool
+		status   int
+		wantCode int
+	}{
+		{name: "terminal", wantCode: exitFindings},
+		{name: "json", json: true, wantCode: exitFindings},
+		{name: "HTTP 503", status: http.StatusServiceUnavailable, wantCode: exitError},
+		{name: "HTTP 503 json", json: true, status: http.StatusServiceUnavailable, wantCode: exitError},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			api := newLLMAPI(t)
+			api.status = tt.status
+			warning := llmWarning("anthropic", api.host)
+			log := &llmSyncLog{}
+			// sawWarning checks that stderr already holds the warning when
+			// the hook runs. It counts the hooks that ran without it.
+			var early atomic.Int32
+			sawWarning := func() {
+				if !strings.Contains(log.stderr(), warning+"\n") {
+					early.Add(1)
+				}
+			}
+			api.onRequest = sawWarning
+
+			home := t.TempDir()
+			writeServers(t, home, ".claude.json", servers)
+			xdg := t.TempDir()
+			c, _, _ := dirsCLI(t, home, t.TempDir())
+			c.stdout = llmLogWriter{log: log, stdout: true}
+			c.stderr = llmLogWriter{log: log}
+			c.homeDir = func() (string, error) { sawWarning(); return home, nil }
+			c.getenv = fakeGetenv(map[string]string{"XDG_CONFIG_HOME": xdg, "HOME": home, llm.KeyEnv: llmTestKey})
+			c.inspector = fakeServers(tools)
+			var builds atomic.Int32
+			c.newClassifier = func(cfg llm.Config) (toolClassifier, error) {
+				builds.Add(1)
+				sawWarning()
+				if cfg.APIKey.Reveal() != llmTestKey || cfg.Provider != llm.ProviderAnthropic || cfg.BaseURL != api.srv.URL || cfg.Model != llm.DefaultAnthropicModel {
+					t.Errorf("newClassifier config = %+v, want the key from %s, anthropic, the base URL and the default model", cfg, llm.KeyEnv)
+				}
+				return newLLMClassifier(cfg)
+			}
+			args := []string{"scan", "--llm", "--llm-base-url", api.srv.URL}
+			if tt.json {
+				args = append(args, "--json")
+			}
+
+			code := c.dispatch(args)
+
+			stdout, stderr, events := log.snapshot()
+			if code != tt.wantCode {
+				t.Errorf("exit code = %d, want %d\nstdout:\n%s\nstderr:\n%s", code, tt.wantCode, stdout, stderr)
+			}
+			if n := early.Load(); n != 0 {
+				t.Errorf("%d steps (config read, client build or request) ran before the warning", n)
+			}
+			if builds.Load() != 1 {
+				t.Errorf("newClassifier calls = %d, want 1", builds.Load())
+			}
+			// One request for each tool. The first failed request stops the
+			// step, so with HTTP 503 the second request may never start.
+			if n := api.requests.Load(); n != 2 && (tt.status == 0 || n != 1) {
+				t.Errorf("the API got %d requests, want 2 (one per tool; 1 is also fine after a failure)", n)
+			}
+			// The warning is the first line on stderr, it shows once, and no
+			// stdout write comes before it.
+			lines := nonEmptyLines(stderr)
+			if len(lines) == 0 || lines[0] != warning {
+				t.Errorf("first stderr line = %q, want the warning %q", lines, warning)
+			}
+			if n := strings.Count(stderr, "leaves your machine"); n != 1 {
+				t.Errorf("stderr holds the warning %d times, want 1", n)
+			}
+			if len(events) == 0 || events[0].stdout || !strings.Contains(events[0].text, warning) {
+				t.Errorf("first write = %+v, want the warning on stderr before any stdout", events[:min(len(events), 1)])
+			}
+			if tt.json {
+				doc := decodeScanJSON(t, stdout)
+				if doc.Complete != (tt.status == 0) {
+					t.Errorf("complete = %v, want %v", doc.Complete, tt.status == 0)
+				}
+			} else if !strings.Contains(stdout, summaryHeading) {
+				t.Errorf("stdout has no SUMMARY block\nstdout:\n%s", stdout)
+			}
+			if tt.status != 0 {
+				m := llmNotClassified.FindStringSubmatch(stderr)
+				if m == nil || m[1] != "HTTP 503" || m[2] != "2" {
+					t.Errorf("stderr has no line \"the LLM provider failed (HTTP 503); 2 tools were not classified\":\n%s", stderr)
+				}
+			} else {
+				rows := llmJSONOrTerminalRows(t, stdout, tt.json)
+				if want := []llmHit{{llm.RuleID, "high", "alpha", "t1"}}; !slices.Equal(rows, want) {
+					t.Errorf("LLM findings = %+v, want %+v", rows, want)
+				}
+			}
+			llmAssertNoKey(t, llmTestKey, stdout, stderr)
+			assertNoLeakBoth(t, stdout, stderr)
+
+			bodies, headers, paths := api.snapshot()
+			var got []llm.Input
+			for i, body := range bodies {
+				if paths[i] != "/v1/messages" {
+					t.Errorf("request path = %q, want /v1/messages", paths[i])
+				}
+				if headers[i].Get("x-api-key") != llmTestKey {
+					t.Errorf("request %d has no x-api-key header with the key", i)
+				}
+				for name, values := range headers[i] {
+					if name == "X-Api-Key" {
+						continue
+					}
+					llmAssertNoKey(t, llmTestKey, strings.Join(values, ","))
+				}
+				llmAssertNoKey(t, llmTestKey, string(body))
+				for _, c := range canaries {
+					if bytes.Contains(body, []byte(c)) {
+						t.Errorf("request %d body holds the canary %q", i, c)
+					}
+				}
+				in, err := llmRequestInput(body)
+				if err != nil {
+					t.Errorf("request %d: %v\nbody: %s", i, err, body)
+					continue
+				}
+				got = append(got, in)
+			}
+			slices.SortFunc(got, func(a, b llm.Input) int { return strings.Compare(a.ToolName, b.ToolName) })
+			want := []llm.Input{{ToolName: "t1", Description: "Read keys. " + llmMarkHigh}, {ToolName: "t2", Description: "Add two numbers."}}
+			if tt.status == 0 && !slices.Equal(got, want) {
+				t.Errorf("tool messages = %+v, want %+v", got, want)
+			}
+			for _, in := range got {
+				if !slices.Contains(want, in) {
+					t.Errorf("tool message %+v is not one of %+v", in, want)
+				}
+			}
+		})
+	}
+}
+
+// llmJSONOrTerminalRows returns the LLM findings of stdout, from the JSON
+// document or from the terminal report.
+func llmJSONOrTerminalRows(t *testing.T, stdout string, jsonOut bool) []llmHit {
+	t.Helper()
+	if jsonOut {
+		return llmJSONRows(t, decodeScanJSON(t, stdout))
+	}
+	return llmRowsOf(t, llmBlocks(t, stdout))
+}
+
+// TestLLMAssertNoKey checks the leak helper itself: it must find the whole
+// key and a part of it, and pass text without it.
+func TestLLMAssertNoKey(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		out  string
+		leak bool
+	}{
+		{"clean", "mcpmoat scan: warning: x", false},
+		{"whole key", "key=" + llmTestKey, true},
+		{"part of the key", "..." + llmTestKey[5:15] + "...", true},
+		{"short part", llmTestKey[:7], false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if _, leak := llmKeyLeak(llmTestKey, tt.out); leak != tt.leak {
+				t.Errorf("llmKeyLeak(%q) = %v, want %v", tt.out, leak, tt.leak)
+			}
+		})
+	}
+}

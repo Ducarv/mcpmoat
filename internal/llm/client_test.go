@@ -1,0 +1,1071 @@
+package llm
+
+import (
+	"bytes"
+	"context"
+	"crypto/tls"
+	"errors"
+	"fmt"
+	"io"
+	"log"
+	"net"
+	"net/http"
+	"net/http/httptest"
+	"net/url"
+	"os"
+	"os/exec"
+	"slices"
+	"strings"
+	"sync"
+	"sync/atomic"
+	"testing"
+	"time"
+
+	"github.com/Ducarv/mcpmoat/internal/discover"
+)
+
+// Canaries of the client tests. No error text may hold one of them.
+const (
+	// llmTestKey is the API key of every test client.
+	llmTestKey = "sk-KEYCANARY-7f3a9c"
+	// llmBodyCanary is put in response bodies and response headers.
+	llmBodyCanary = "BODYCANARY-91c2e"
+	// llmTestModel is the model name of the test clients.
+	llmTestModel = "test-model-1"
+)
+
+// capturedRequest is what a test server saw of one request.
+type capturedRequest struct {
+	Method     string
+	Path       string
+	RawQuery   string
+	RequestURI string
+	Host       string
+	Header     http.Header
+	Body       []byte
+}
+
+// testServer is a loopback httptest server that counts requests and keeps
+// the last one. Loopback addresses are never proxied by net/http, so the
+// tests that use it do not depend on HTTP_PROXY of the machine
+// (TestClassifyProxySettings checks this).
+type testServer struct {
+	*httptest.Server
+	hits atomic.Int32
+	mu   sync.Mutex
+	last capturedRequest
+}
+
+// startServer starts a testServer that calls h after it records the request.
+func startServer(t *testing.T, h http.HandlerFunc) *testServer {
+	t.Helper()
+	s := &testServer{}
+	s.Server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Errorf("server: read request body: %v", err)
+		}
+		s.hits.Add(1)
+		s.mu.Lock()
+		s.last = capturedRequest{
+			Method:     r.Method,
+			Path:       r.URL.Path,
+			RawQuery:   r.URL.RawQuery,
+			RequestURI: r.RequestURI,
+			Host:       r.Host,
+			Header:     r.Header.Clone(),
+			Body:       body,
+		}
+		s.mu.Unlock()
+		h(w, r)
+	}))
+	t.Cleanup(s.Close)
+	return s
+}
+
+// lastRequest returns the last request that s saw.
+func (s *testServer) lastRequest() capturedRequest {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.last
+}
+
+// reply returns a handler that answers with status and body, and puts
+// llmBodyCanary in a response header.
+func reply(status int, body string) http.HandlerFunc {
+	return func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("X-Debug", llmBodyCanary)
+		w.WriteHeader(status)
+		_, _ = io.WriteString(w, body)
+	}
+}
+
+// testSecret returns llmTestKey as a secret.
+func testSecret() discover.Secret { return discover.NewSecret(llmTestKey) }
+
+// newTestClient returns a client for provider p at base, with llmTestKey and
+// llmTestModel.
+func newTestClient(t *testing.T, p Provider, base string) *Client {
+	t.Helper()
+	c, err := New(Config{Provider: p, Model: llmTestModel, BaseURL: base, APIKey: testSecret()})
+	if err != nil {
+		t.Fatalf("New(%s) error = %v", p, err)
+	}
+	t.Cleanup(c.CloseIdleConnections)
+	return c
+}
+
+// validReply returns a 2xx response body of provider p with the verdict
+// risk and category.
+func validReply(p Provider, risk Risk, category Category) string {
+	if p == ProviderOpenAI {
+		return openAIReply(risk, category)
+	}
+	return anthropicReply(risk, category)
+}
+
+// assertNoLeak fails when the error text holds the key, a body canary, a
+// loopback address, a URL or one of extra.
+func assertNoLeak(t *testing.T, err error, extra ...string) {
+	t.Helper()
+	if err == nil {
+		return
+	}
+	msg := err.Error()
+	for _, s := range append([]string{llmTestKey, llmBodyCanary, "127.0.0.1", "://", "Bearer"}, extra...) {
+		if s != "" && strings.Contains(msg, s) {
+			t.Errorf("error %q holds %q", msg, s)
+		}
+	}
+}
+
+// bothProviders lists the providers for tests that run against each one.
+var bothProviders = []Provider{ProviderAnthropic, ProviderOpenAI}
+
+func TestNewRefusesBadConfigAndSendsNothing(t *testing.T) {
+	t.Parallel()
+	srv := startServer(t, reply(http.StatusOK, ""))
+	tests := []struct {
+		name    string
+		cfg     Config
+		wantErr error
+	}{
+		{
+			name:    "missing key",
+			cfg:     Config{Provider: ProviderAnthropic, BaseURL: srv.URL},
+			wantErr: ErrMissingKey,
+		},
+		{
+			name:    "key with a line break",
+			cfg:     Config{Provider: ProviderAnthropic, BaseURL: srv.URL, APIKey: discover.NewSecret(llmTestKey + "\r\nX: y")},
+			wantErr: ErrInvalidKey,
+		},
+		{
+			name:    "openai without model",
+			cfg:     Config{Provider: ProviderOpenAI, BaseURL: srv.URL, APIKey: testSecret()},
+			wantErr: ErrInvalidModel,
+		},
+		{
+			name:    "unknown provider",
+			cfg:     Config{Provider: "gemini", BaseURL: srv.URL, APIKey: testSecret()},
+			wantErr: ErrUnknownProvider,
+		},
+		{
+			name:    "http to a non-loopback host",
+			cfg:     Config{Provider: ProviderAnthropic, BaseURL: "http://api.example.com", APIKey: testSecret()},
+			wantErr: ErrInvalidBaseURL,
+		},
+		{
+			name:    "user info in the base URL",
+			cfg:     Config{Provider: ProviderOpenAI, Model: llmTestModel, BaseURL: strings.Replace(srv.URL, "://", "://user:pw@", 1), APIKey: testSecret()},
+			wantErr: ErrInvalidBaseURL,
+		},
+		{
+			name:    "query in the base URL",
+			cfg:     Config{Provider: ProviderAnthropic, BaseURL: srv.URL + "/?k=v", APIKey: testSecret()},
+			wantErr: ErrInvalidBaseURL,
+		},
+		{
+			name:    "not a URL",
+			cfg:     Config{Provider: ProviderAnthropic, BaseURL: "https://exa mple.com", APIKey: testSecret()},
+			wantErr: ErrInvalidBaseURL,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			c, err := New(tt.cfg)
+			if !errors.Is(err, tt.wantErr) {
+				t.Fatalf("New() error = %v, want %v", err, tt.wantErr)
+			}
+			if c != nil {
+				t.Errorf("New() client = %v, want nil", c)
+			}
+			assertNoLeak(t, err, srv.URL, "user:pw", "example.com")
+		})
+	}
+	// New must never send a request. Each subtest above is parallel, so
+	// check after they finish.
+	t.Cleanup(func() {
+		if n := srv.hits.Load(); n != 0 {
+			t.Errorf("server requests after New = %d, want 0", n)
+		}
+	})
+}
+
+func TestNewSendsNoRequest(t *testing.T) {
+	t.Parallel()
+	for _, p := range bothProviders {
+		t.Run(string(p), func(t *testing.T) {
+			t.Parallel()
+			srv := startServer(t, reply(http.StatusOK, ""))
+			c := newTestClient(t, p, srv.URL)
+			c.CloseIdleConnections()
+			if n := srv.hits.Load(); n != 0 {
+				t.Errorf("server requests after New = %d, want 0", n)
+			}
+		})
+	}
+}
+
+func TestClassifyKeyOnlyInAuthHeader(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		provider   Provider
+		authHeader string
+		authValue  string
+	}{
+		{provider: ProviderAnthropic, authHeader: "X-Api-Key", authValue: llmTestKey},
+		{provider: ProviderOpenAI, authHeader: "Authorization", authValue: "Bearer " + llmTestKey},
+	}
+	for _, tt := range tests {
+		t.Run(string(tt.provider), func(t *testing.T) {
+			t.Parallel()
+			srv := startServer(t, reply(http.StatusOK, validReply(tt.provider, RiskLow, CategoryOther)))
+			c := newTestClient(t, tt.provider, srv.URL)
+			if _, err := c.Classify(t.Context(), Input{ToolName: "t", Description: "d"}); err != nil {
+				t.Fatalf("Classify() error = %v", err)
+			}
+			req := srv.lastRequest()
+
+			if got := req.Header.Values(tt.authHeader); len(got) != 1 || got[0] != tt.authValue {
+				t.Errorf("%s header = %q, want exactly one %q", tt.authHeader, got, tt.authValue)
+			}
+			found := 0
+			for name, values := range req.Header {
+				for _, v := range values {
+					if strings.Contains(name, llmTestKey) || strings.Contains(v, llmTestKey) {
+						found++
+						if name != tt.authHeader {
+							t.Errorf("header %s holds the key", name)
+						}
+					}
+				}
+			}
+			if found != 1 {
+				t.Errorf("headers with the key = %d, want 1", found)
+			}
+			for what, s := range map[string]string{
+				"request URI": req.RequestURI,
+				"query":       req.RawQuery,
+				"host":        req.Host,
+				"body":        string(req.Body),
+			} {
+				if strings.Contains(s, llmTestKey) {
+					t.Errorf("%s holds the key", what)
+				}
+			}
+		})
+	}
+}
+
+func TestClassifyRefusesRedirect(t *testing.T) {
+	t.Parallel()
+	codes := []int{
+		http.StatusMovedPermanently,
+		http.StatusFound,
+		http.StatusSeeOther,
+		http.StatusTemporaryRedirect,
+		http.StatusPermanentRedirect,
+	}
+	for _, p := range bothProviders {
+		for _, code := range codes {
+			t.Run(fmt.Sprintf("%s/%d", p, code), func(t *testing.T) {
+				t.Parallel()
+				target := startServer(t, reply(http.StatusOK, validReply(p, RiskNone, CategoryOther)))
+				origin := startServer(t, func(w http.ResponseWriter, r *http.Request) {
+					w.Header().Set("Location", target.URL+r.URL.Path+"?leak="+llmBodyCanary)
+					w.WriteHeader(code)
+					_, _ = io.WriteString(w, llmBodyCanary)
+				})
+				c := newTestClient(t, p, origin.URL)
+
+				v, err := c.Classify(t.Context(), Input{ToolName: "t", Description: "d"})
+				var se *StatusError
+				if !errors.As(err, &se) || se.Code != code {
+					t.Fatalf("Classify() error = %v, want *StatusError{Code: %d}", err, code)
+				}
+				if !errors.Is(err, ErrProvider) || errors.Is(err, ErrAuth) || errors.Is(err, ErrInvalidOutput) {
+					t.Errorf("Classify() error = %v, want ErrProvider only", err)
+				}
+				if !strings.Contains(err.Error(), "redirect refused") {
+					t.Errorf("Classify() error = %q, want it to say redirect refused", err)
+				}
+				if v != (Verdict{}) {
+					t.Errorf("Classify() verdict = %+v, want zero", v)
+				}
+				if n := origin.hits.Load(); n != 1 {
+					t.Errorf("origin requests = %d, want 1", n)
+				}
+				if n := target.hits.Load(); n != 0 {
+					t.Errorf("redirect target requests = %d, want 0", n)
+				}
+				assertNoLeak(t, err, origin.URL, target.URL)
+			})
+		}
+	}
+}
+
+func TestClassifyStatusErrors(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		code     int
+		wantAuth bool
+	}{
+		{code: http.StatusBadRequest},
+		{code: http.StatusUnauthorized, wantAuth: true},
+		{code: http.StatusForbidden, wantAuth: true},
+		{code: http.StatusNotFound},
+		{code: http.StatusTooManyRequests},
+		{code: http.StatusInternalServerError},
+		{code: http.StatusServiceUnavailable},
+	}
+	for _, p := range bothProviders {
+		for _, tt := range tests {
+			t.Run(fmt.Sprintf("%s/%d", p, tt.code), func(t *testing.T) {
+				t.Parallel()
+				// A valid verdict in the body must be ignored.
+				srv := startServer(t, reply(tt.code, validReply(p, RiskNone, CategoryOther)+llmBodyCanary))
+				c := newTestClient(t, p, srv.URL)
+
+				v, err := c.Classify(t.Context(), Input{ToolName: "t", Description: "d"})
+				var se *StatusError
+				if !errors.As(err, &se) || se.Code != tt.code {
+					t.Fatalf("Classify() error = %v, want *StatusError{Code: %d}", err, tt.code)
+				}
+				if got := errors.Is(err, ErrAuth); got != tt.wantAuth {
+					t.Errorf("errors.Is(err, ErrAuth) = %v, want %v", got, tt.wantAuth)
+				}
+				if !errors.Is(err, ErrProvider) || errors.Is(err, ErrInvalidOutput) {
+					t.Errorf("Classify() error = %v, want ErrProvider and not ErrInvalidOutput", err)
+				}
+				if want := fmt.Sprintf("LLM provider request failed: HTTP %d", tt.code); err.Error() != want {
+					t.Errorf("Classify() error = %q, want %q", err, want)
+				}
+				if v != (Verdict{}) {
+					t.Errorf("Classify() verdict = %+v, want zero", v)
+				}
+				assertNoLeak(t, err, srv.URL)
+			})
+		}
+	}
+}
+
+func TestStatusError(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		code       int
+		wantText   string
+		wantUnwrap error
+	}{
+		{code: 301, wantText: "LLM provider request failed: HTTP 301 (redirect refused)", wantUnwrap: ErrProvider},
+		{code: 399, wantText: "LLM provider request failed: HTTP 399 (redirect refused)", wantUnwrap: ErrProvider},
+		{code: 400, wantText: "LLM provider request failed: HTTP 400", wantUnwrap: ErrProvider},
+		{code: 401, wantText: "LLM provider request failed: HTTP 401", wantUnwrap: ErrAuth},
+		{code: 403, wantText: "LLM provider request failed: HTTP 403", wantUnwrap: ErrAuth},
+		{code: 407, wantText: "LLM provider request failed: HTTP 407", wantUnwrap: ErrProvider},
+		{code: 500, wantText: "LLM provider request failed: HTTP 500", wantUnwrap: ErrProvider},
+	}
+	for _, tt := range tests {
+		t.Run(fmt.Sprint(tt.code), func(t *testing.T) {
+			t.Parallel()
+			err := &StatusError{Code: tt.code}
+			if got := err.Error(); got != tt.wantText {
+				t.Errorf("Error() = %q, want %q", got, tt.wantText)
+			}
+			if got := err.Unwrap(); !errors.Is(got, tt.wantUnwrap) || got.Error() != tt.wantUnwrap.Error() {
+				t.Errorf("Unwrap() = %v, want %v", got, tt.wantUnwrap)
+			}
+			if !errors.Is(err, ErrProvider) {
+				t.Error("errors.Is(err, ErrProvider) = false, want true")
+			}
+		})
+	}
+}
+
+// paddedReply returns a valid response body of provider p padded with
+// trailing spaces to exactly size bytes.
+func paddedReply(t *testing.T, p Provider, size int) string {
+	t.Helper()
+	body := validReply(p, RiskMedium, CategoryToolShadowing)
+	if len(body) > size {
+		t.Fatalf("reply has %d bytes, more than %d", len(body), size)
+	}
+	return body + strings.Repeat(" ", size-len(body))
+}
+
+func TestClassifyResponseBodyCap(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name          string
+		size          int
+		contentLength bool
+		wantTooLarge  bool
+	}{
+		{name: "at cap with Content-Length", size: MaxResponseBodyBytes, contentLength: true},
+		{name: "at cap chunked", size: MaxResponseBodyBytes},
+		{name: "cap plus one with Content-Length", size: MaxResponseBodyBytes + 1, contentLength: true, wantTooLarge: true},
+		{name: "cap plus one chunked", size: MaxResponseBodyBytes + 1, wantTooLarge: true},
+		{name: "much larger chunked", size: 4 * MaxResponseBodyBytes, wantTooLarge: true},
+	}
+	for _, p := range bothProviders {
+		for _, tt := range tests {
+			t.Run(string(p)+"/"+tt.name, func(t *testing.T) {
+				t.Parallel()
+				body := paddedReply(t, p, tt.size)
+				srv := startServer(t, func(w http.ResponseWriter, _ *http.Request) {
+					if tt.contentLength {
+						w.Header().Set("Content-Length", fmt.Sprint(len(body)))
+					} else {
+						// A flush before the body makes the response chunked,
+						// so it has no Content-Length.
+						w.WriteHeader(http.StatusOK)
+						w.(http.Flusher).Flush()
+					}
+					_, _ = io.WriteString(w, body)
+				})
+				c := newTestClient(t, p, srv.URL)
+
+				v, err := c.Classify(t.Context(), Input{ToolName: "t", Description: "d"})
+				if tt.wantTooLarge {
+					if !errors.Is(err, ErrTooLarge) || !errors.Is(err, ErrProvider) {
+						t.Fatalf("Classify() error = %v, want ErrTooLarge", err)
+					}
+					assertNoLeak(t, err, srv.URL)
+					return
+				}
+				if err != nil {
+					t.Fatalf("Classify() error = %v, want nil", err)
+				}
+				if want := (Verdict{Risk: RiskMedium, Category: CategoryToolShadowing}); v != want {
+					t.Errorf("Classify() = %+v, want %+v", v, want)
+				}
+			})
+		}
+	}
+}
+
+// TestClassifyDeclaredLengthTooLarge checks that a Content-Length above the
+// cap is refused before the body is read: the body here is short, so a read
+// would end in a transport error, not ErrTooLarge.
+func TestClassifyDeclaredLengthTooLarge(t *testing.T) {
+	t.Parallel()
+	body := anthropicReply(RiskLow, CategoryOther)
+	srv := startServer(t, func(w http.ResponseWriter, _ *http.Request) {
+		conn, rw, err := http.NewResponseController(w).Hijack()
+		if err != nil {
+			t.Errorf("Hijack() error = %v", err)
+			return
+		}
+		defer func() { _ = conn.Close() }()
+		_, _ = fmt.Fprintf(rw, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: %d\r\n\r\n%s", MaxResponseBodyBytes+1, body)
+		_ = rw.Flush()
+	})
+	c := newTestClient(t, ProviderAnthropic, srv.URL)
+	_, err := c.Classify(t.Context(), Input{ToolName: "t", Description: "d"})
+	if !errors.Is(err, ErrTooLarge) {
+		t.Fatalf("Classify() error = %v, want ErrTooLarge", err)
+	}
+}
+
+func TestClassifyRequestBodyStaysUnderCap(t *testing.T) {
+	t.Parallel()
+	// Each input is far above the caps of toolMessage, and made of the
+	// characters that JSON escapes grow the most.
+	inputs := []struct {
+		name string
+		in   Input
+	}{
+		{name: "quotes", in: Input{ToolName: strings.Repeat(`\`, 1000), Description: strings.Repeat(`"`, 100000)}},
+		{name: "backslashes", in: Input{ToolName: strings.Repeat(`"`, 1000), Description: strings.Repeat(`\`, 100000)}},
+		{name: "control characters", in: Input{ToolName: strings.Repeat("\x01", 1000), Description: strings.Repeat("\x01", 100000)}},
+		{name: "html characters", in: Input{ToolName: strings.Repeat("<", 1000), Description: strings.Repeat("<>&", 40000)}},
+		{name: "line separators", in: Input{ToolName: "t", Description: strings.Repeat(string(rune(0x2028)), 40000)}},
+		{name: "invalid UTF-8", in: Input{ToolName: "t", Description: strings.Repeat("\xff", 100000)}},
+	}
+	for _, p := range bothProviders {
+		for _, tt := range inputs {
+			t.Run(string(p)+"/"+tt.name, func(t *testing.T) {
+				t.Parallel()
+				srv := startServer(t, reply(http.StatusOK, validReply(p, RiskHigh, CategoryOther)))
+				c := newTestClient(t, p, srv.URL)
+				if _, err := c.Classify(t.Context(), tt.in); err != nil {
+					t.Fatalf("Classify() error = %v, want nil", err)
+				}
+				if n := srv.hits.Load(); n != 1 {
+					t.Fatalf("server requests = %d, want 1", n)
+				}
+				if n := len(srv.lastRequest().Body); n > MaxRequestBodyBytes {
+					t.Errorf("request body = %d bytes, want at most %d", n, MaxRequestBodyBytes)
+				}
+			})
+		}
+	}
+}
+
+// sizedAPI is the Anthropic API with a request body that is one JSON string
+// of exactly size bytes. No real Input can pass the request cap, so the
+// guard is tested with this fake.
+type sizedAPI struct {
+	anthropicAPI
+	size int
+}
+
+func (a sizedAPI) requestBody(string, string) any {
+	// The JSON string adds two quotes.
+	return strings.Repeat("a", a.size-2)
+}
+
+func TestClassifyRequestBodyCapGuard(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name     string
+		size     int
+		wantSent bool
+	}{
+		{name: "at cap", size: MaxRequestBodyBytes, wantSent: true},
+		{name: "cap plus one", size: MaxRequestBodyBytes + 1},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			srv := startServer(t, reply(http.StatusOK, anthropicReply(RiskNone, CategoryOther)))
+			c := newTestClient(t, ProviderAnthropic, srv.URL)
+			c.api = sizedAPI{size: tt.size}
+
+			_, err := c.Classify(t.Context(), Input{ToolName: "t", Description: "d"})
+			if tt.wantSent {
+				if err != nil {
+					t.Fatalf("Classify() error = %v, want nil", err)
+				}
+				if n := len(srv.lastRequest().Body); n != tt.size {
+					t.Errorf("request body = %d bytes, want %d", n, tt.size)
+				}
+			} else if !errors.Is(err, errRequestTooLarge) || errors.Is(err, ErrProvider) {
+				t.Errorf("Classify() error = %v, want errRequestTooLarge", err)
+			}
+			if got, want := srv.hits.Load() == 1, tt.wantSent; got != want {
+				t.Errorf("request sent = %v, want %v", got, want)
+			}
+		})
+	}
+}
+
+func TestClassifyDialHook(t *testing.T) {
+	t.Parallel()
+	for _, p := range bothProviders {
+		t.Run(string(p), func(t *testing.T) {
+			t.Parallel()
+			srv := startServer(t, reply(http.StatusOK, validReply(p, RiskLow, CategoryDataExfiltration)))
+			var (
+				mu    sync.Mutex
+				dials []string
+			)
+			c, err := New(Config{
+				Provider: p,
+				Model:    llmTestModel,
+				BaseURL:  srv.URL,
+				APIKey:   testSecret(),
+				Dial: func(ctx context.Context, network, addr string) (net.Conn, error) {
+					mu.Lock()
+					dials = append(dials, network+" "+addr)
+					mu.Unlock()
+					var d net.Dialer
+					return d.DialContext(ctx, network, addr)
+				},
+			})
+			if err != nil {
+				t.Fatalf("New() error = %v", err)
+			}
+			t.Cleanup(c.CloseIdleConnections)
+
+			if _, err := c.Classify(t.Context(), Input{ToolName: "t", Description: "d"}); err != nil {
+				t.Fatalf("Classify() error = %v", err)
+			}
+			mu.Lock()
+			defer mu.Unlock()
+			if want := []string{"tcp " + srv.Listener.Addr().String()}; !slices.Equal(dials, want) {
+				t.Errorf("dials = %q, want %q", dials, want)
+			}
+		})
+	}
+}
+
+func TestClassifyDialFailure(t *testing.T) {
+	t.Parallel()
+	const dialCanary = "DIALCANARY-blocked"
+	for _, p := range bothProviders {
+		t.Run(string(p), func(t *testing.T) {
+			t.Parallel()
+			srv := startServer(t, reply(http.StatusOK, validReply(p, RiskNone, CategoryOther)))
+			var dials atomic.Int32
+			c, err := New(Config{
+				Provider: p,
+				Model:    llmTestModel,
+				BaseURL:  srv.URL,
+				APIKey:   testSecret(),
+				Dial: func(_ context.Context, _, addr string) (net.Conn, error) {
+					dials.Add(1)
+					return nil, errors.New(dialCanary + " " + addr)
+				},
+			})
+			if err != nil {
+				t.Fatalf("New() error = %v", err)
+			}
+
+			_, err = c.Classify(t.Context(), Input{ToolName: "t", Description: "d"})
+			if !errors.Is(err, ErrTransport) || !errors.Is(err, ErrProvider) {
+				t.Fatalf("Classify() error = %v, want ErrTransport", err)
+			}
+			if errors.Is(err, context.Canceled) || errors.Is(err, ErrInvalidOutput) {
+				t.Errorf("Classify() error = %v, want only ErrTransport", err)
+			}
+			if n := dials.Load(); n != 1 {
+				t.Errorf("dials = %d, want 1 (no retry)", n)
+			}
+			if n := srv.hits.Load(); n != 0 {
+				t.Errorf("server requests = %d, want 0", n)
+			}
+			assertNoLeak(t, err, dialCanary, srv.URL)
+		})
+	}
+}
+
+func TestClassifyParentContextEnds(t *testing.T) {
+	t.Parallel()
+
+	t.Run("canceled during the request", func(t *testing.T) {
+		t.Parallel()
+		started := make(chan struct{})
+		var once sync.Once
+		srv := startServer(t, func(_ http.ResponseWriter, r *http.Request) {
+			once.Do(func() { close(started) })
+			<-r.Context().Done()
+		})
+		c := newTestClient(t, ProviderOpenAI, srv.URL)
+		ctx, cancel := context.WithCancel(t.Context())
+		defer cancel()
+		go func() {
+			<-started
+			cancel()
+		}()
+
+		_, err := c.Classify(ctx, Input{ToolName: "t", Description: "d"})
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("Classify() error = %v, want context.Canceled", err)
+		}
+		if errors.Is(err, ErrProvider) || errors.Is(err, ErrInvalidOutput) {
+			t.Errorf("Classify() error = %v, want not ErrProvider or ErrInvalidOutput", err)
+		}
+		assertNoLeak(t, err, srv.URL)
+	})
+
+	tests := []struct {
+		name    string
+		ctx     func(context.Context) (context.Context, context.CancelFunc)
+		wantErr error
+	}{
+		{
+			name: "canceled before the call",
+			ctx: func(parent context.Context) (context.Context, context.CancelFunc) {
+				ctx, cancel := context.WithCancel(parent)
+				cancel()
+				return ctx, cancel
+			},
+			wantErr: context.Canceled,
+		},
+		{
+			name: "deadline passed before the call",
+			ctx: func(parent context.Context) (context.Context, context.CancelFunc) {
+				return context.WithDeadline(parent, time.Unix(0, 0))
+			},
+			wantErr: context.DeadlineExceeded,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			srv := startServer(t, reply(http.StatusOK, anthropicReply(RiskNone, CategoryOther)))
+			c := newTestClient(t, ProviderAnthropic, srv.URL)
+			ctx, cancel := tt.ctx(t.Context())
+			defer cancel()
+
+			_, err := c.Classify(ctx, Input{ToolName: "t", Description: "d"})
+			if !errors.Is(err, tt.wantErr) || errors.Is(err, ErrProvider) {
+				t.Errorf("Classify() error = %v, want %v and not ErrProvider", err, tt.wantErr)
+			}
+			if n := srv.hits.Load(); n != 0 {
+				t.Errorf("server requests = %d, want 0", n)
+			}
+		})
+	}
+}
+
+// timeoutError is a net.Error that reports a timeout.
+type timeoutError struct{}
+
+func (timeoutError) Error() string   { return "i/o timeout " + llmBodyCanary }
+func (timeoutError) Timeout() bool   { return true }
+func (timeoutError) Temporary() bool { return true }
+
+// TestTransportError checks the error mapping of transportError directly.
+// requestTimeout is a constant (30 s), so the timeout of a real request is
+// not tested end to end; the expired request context stands in for it.
+func TestTransportError(t *testing.T) {
+	t.Parallel()
+	leakyURL := "http://127.0.0.1:1/v1/messages?" + llmTestKey
+	urlErr := func(err error) error { return &url.Error{Op: "Post", URL: leakyURL, Err: err} }
+
+	live := t.Context()
+	canceled, cancel := context.WithCancel(t.Context())
+	cancel()
+	expired, cancelExpired := context.WithDeadline(t.Context(), time.Unix(0, 0))
+	defer cancelExpired()
+
+	tests := []struct {
+		name     string
+		parent   context.Context
+		reqCtx   context.Context
+		err      error
+		wantText string
+		wantIs   []error
+		wantNot  []error
+	}{
+		{
+			name:     "parent canceled",
+			parent:   canceled,
+			reqCtx:   canceled,
+			err:      urlErr(context.Canceled),
+			wantText: "LLM request stopped: context canceled",
+			wantIs:   []error{context.Canceled},
+			wantNot:  []error{ErrProvider},
+		},
+		{
+			name:     "parent deadline",
+			parent:   expired,
+			reqCtx:   expired,
+			err:      urlErr(context.DeadlineExceeded),
+			wantText: "LLM request stopped: context deadline exceeded",
+			wantIs:   []error{context.DeadlineExceeded},
+			wantNot:  []error{ErrProvider},
+		},
+		{
+			name:     "own timeout",
+			parent:   live,
+			reqCtx:   expired,
+			err:      urlErr(context.DeadlineExceeded),
+			wantText: "LLM provider request failed: network error: timed out after 30s",
+			wantIs:   []error{ErrTransport, ErrProvider},
+			wantNot:  []error{context.DeadlineExceeded},
+		},
+		{
+			name:     "net timeout",
+			parent:   live,
+			reqCtx:   live,
+			err:      urlErr(timeoutError{}),
+			wantText: "LLM provider request failed: network error: timed out after 30s",
+			wantIs:   []error{ErrTransport},
+		},
+		{
+			name:     "proxy",
+			parent:   live,
+			reqCtx:   live,
+			err:      urlErr(errProxy),
+			wantText: "LLM provider request failed: network error: proxy setting from HTTP_PROXY or HTTPS_PROXY refused",
+			wantIs:   []error{ErrTransport, errProxy},
+		},
+		{
+			name:     "untrusted certificate",
+			parent:   live,
+			reqCtx:   live,
+			err:      urlErr(&tls.CertificateVerificationError{Err: errors.New("x509: " + llmBodyCanary)}),
+			wantText: "LLM provider request failed: network error: TLS certificate not trusted",
+			wantIs:   []error{ErrTransport},
+		},
+		{
+			name:     "other",
+			parent:   live,
+			reqCtx:   live,
+			err:      urlErr(errors.New("dial tcp 127.0.0.1:1: connection refused " + llmBodyCanary)),
+			wantText: "LLM provider request failed: network error",
+			wantIs:   []error{ErrTransport},
+		},
+		{
+			name:     "body read error",
+			parent:   live,
+			reqCtx:   live,
+			err:      io.ErrUnexpectedEOF,
+			wantText: "LLM provider request failed: network error",
+			wantIs:   []error{ErrTransport},
+			wantNot:  []error{io.ErrUnexpectedEOF},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			err := transportError(tt.parent, tt.reqCtx, tt.err)
+			if err == nil {
+				t.Fatal("transportError() = nil, want error")
+			}
+			if got := err.Error(); got != tt.wantText {
+				t.Errorf("transportError() = %q, want %q", got, tt.wantText)
+			}
+			for _, want := range tt.wantIs {
+				if !errors.Is(err, want) {
+					t.Errorf("errors.Is(err, %v) = false, want true", want)
+				}
+			}
+			for _, not := range tt.wantNot {
+				if errors.Is(err, not) {
+					t.Errorf("errors.Is(err, %v) = true, want false", not)
+				}
+			}
+			var ue *url.Error
+			if errors.As(err, &ue) {
+				t.Errorf("transportError() wraps the *url.Error %v", ue)
+			}
+			assertNoLeak(t, err)
+		})
+	}
+}
+
+func TestClassifyConcurrent(t *testing.T) {
+	t.Parallel()
+	const calls = 16
+	for _, p := range bothProviders {
+		t.Run(string(p), func(t *testing.T) {
+			t.Parallel()
+			srv := startServer(t, reply(http.StatusOK, validReply(p, RiskHigh, CategoryConcealFromUser)))
+			c := newTestClient(t, p, srv.URL)
+			want := Verdict{Risk: RiskHigh, Category: CategoryConcealFromUser}
+
+			var wg sync.WaitGroup
+			for i := range calls {
+				wg.Go(func() {
+					v, err := c.Classify(t.Context(), Input{ToolName: fmt.Sprint("tool", i), Description: "d"})
+					if err != nil || v != want {
+						t.Errorf("Classify() = %+v, %v, want %+v, nil", v, err, want)
+					}
+				})
+			}
+			wg.Wait()
+			if n := srv.hits.Load(); n != calls {
+				t.Errorf("server requests = %d, want %d", n, calls)
+			}
+		})
+	}
+}
+
+func TestClassifyUntrustedCertificate(t *testing.T) {
+	t.Parallel()
+	for _, p := range bothProviders {
+		t.Run(string(p), func(t *testing.T) {
+			t.Parallel()
+			var hits atomic.Int32
+			srv := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				hits.Add(1)
+				_, _ = io.WriteString(w, validReply(p, RiskNone, CategoryOther))
+			}))
+			// The failed handshake is expected: keep its log out of the
+			// test output.
+			srv.Config.ErrorLog = log.New(io.Discard, "", 0)
+			srv.StartTLS()
+			t.Cleanup(srv.Close)
+			c := newTestClient(t, p, srv.URL)
+
+			_, err := c.Classify(t.Context(), Input{ToolName: "t", Description: "d"})
+			if !errors.Is(err, ErrTransport) {
+				t.Fatalf("Classify() error = %v, want ErrTransport", err)
+			}
+			if want := "LLM provider request failed: network error: TLS certificate not trusted"; err.Error() != want {
+				t.Errorf("Classify() error = %q, want %q", err, want)
+			}
+			if n := hits.Load(); n != 0 {
+				t.Errorf("handler calls = %d, want 0", n)
+			}
+			assertNoLeak(t, err, srv.URL)
+		})
+	}
+}
+
+func TestClassifyNilClient(t *testing.T) {
+	t.Parallel()
+	for name, c := range map[string]*Client{"nil": nil, "zero": {}} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			_, err := c.Classify(t.Context(), Input{ToolName: "t"})
+			if !errors.Is(err, errNilClient) {
+				t.Errorf("Classify() error = %v, want errNilClient", err)
+			}
+			c.CloseIdleConnections() // must not panic
+		})
+	}
+}
+
+func TestEncodeJSONNoHTMLEscape(t *testing.T) {
+	t.Parallel()
+	got, err := encodeJSON(map[string]string{"k": "<IMPORTANT>&</IMPORTANT>"})
+	if err != nil {
+		t.Fatalf("encodeJSON() error = %v", err)
+	}
+	if want := `{"k":"<IMPORTANT>&</IMPORTANT>"}`; string(got) != want {
+		t.Errorf("encodeJSON() = %q, want %q", got, want)
+	}
+	if _, err := encodeJSON(func() {}); !errors.Is(err, errBuildRequest) {
+		t.Errorf("encodeJSON(func) error = %v, want errBuildRequest", err)
+	}
+}
+
+// proxyHelperEnv names the mode of TestProxyHelperProcess. Only
+// TestClassifyProxySettings sets it, in a child process.
+const proxyHelperEnv = "MCPMOAT_LLM_TEST_PROXY_HELPER"
+
+// proxyCanary is the password in the proxy setting of the "cgi" mode.
+const proxyCanary = "PROXYCANARY"
+
+// proxyEnvNames are the variables that net/http reads for the proxy.
+// REQUEST_METHOD is there because net/http ignores HTTP_PROXY when it is
+// set (CGI).
+var proxyEnvNames = []string{"HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "REQUEST_METHOD"}
+
+// TestClassifyProxySettings runs TestProxyHelperProcess in a child process
+// for each proxy setting. net/http reads the proxy variables only one time
+// for each process, so t.Setenv cannot change them in this process.
+func TestClassifyProxySettings(t *testing.T) {
+	t.Parallel()
+	exe, err := os.Executable()
+	if err != nil {
+		t.Fatalf("os.Executable() error = %v", err)
+	}
+	base := slices.DeleteFunc(os.Environ(), func(kv string) bool {
+		name, _, _ := strings.Cut(kv, "=")
+		return slices.Contains(proxyEnvNames, strings.ToUpper(name))
+	})
+	tests := []struct {
+		mode string
+		env  []string
+	}{
+		// net/http ignores a proxy value that it cannot parse. Its only
+		// proxy error is HTTP_PROXY in a CGI process (REQUEST_METHOD set),
+		// for an http URL, even a loopback one.
+		{mode: "cgi", env: []string{"REQUEST_METHOD=GET", "HTTP_PROXY=http://user:" + proxyCanary + "@proxy.test:3128"}},
+		{mode: "proxy", env: []string{"HTTPS_PROXY=http://proxy.test:3128"}},
+		{mode: "noproxy", env: []string{"HTTPS_PROXY=http://proxy.test:3128", "NO_PROXY=api.example.invalid"}},
+		{mode: "loopback", env: []string{"HTTP_PROXY=http://proxy.test:3128", "HTTPS_PROXY=http://proxy.test:3128"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.mode, func(t *testing.T) {
+			t.Parallel()
+			cmd := exec.CommandContext(t.Context(), exe, "-test.run=^TestProxyHelperProcess$", "-test.v", "-test.count=1")
+			cmd.Env = append(slices.Clone(base), append(tt.env, proxyHelperEnv+"="+tt.mode)...)
+			out, err := cmd.CombinedOutput()
+			if err != nil {
+				t.Fatalf("helper process error = %v, output:\n%s", err, out)
+			}
+			if !bytes.Contains(out, []byte("--- PASS: TestProxyHelperProcess")) {
+				t.Fatalf("helper process did not pass, output:\n%s", out)
+			}
+		})
+	}
+}
+
+// TestProxyHelperProcess is the child process of TestClassifyProxySettings.
+// It skips when proxyHelperEnv is not set.
+func TestProxyHelperProcess(t *testing.T) {
+	mode := os.Getenv(proxyHelperEnv)
+	if mode == "" {
+		t.Skip("helper process of TestClassifyProxySettings")
+	}
+	var (
+		mu    sync.Mutex
+		dials []string
+	)
+	record := func(addr string) {
+		mu.Lock()
+		defer mu.Unlock()
+		dials = append(dials, addr)
+	}
+	dialed := func() []string {
+		mu.Lock()
+		defer mu.Unlock()
+		return slices.Clone(dials)
+	}
+	blocked := func(_ context.Context, _, addr string) (net.Conn, error) {
+		record(addr)
+		return nil, errors.New("blocked")
+	}
+	classify := func(base string, dial func(context.Context, string, string) (net.Conn, error)) (Verdict, error) {
+		c, err := New(Config{Provider: ProviderAnthropic, BaseURL: base, APIKey: testSecret(), Dial: dial})
+		if err != nil {
+			t.Fatalf("New() error = %v", err)
+		}
+		defer c.CloseIdleConnections()
+		return c.Classify(t.Context(), Input{ToolName: "t", Description: "d"})
+	}
+
+	switch mode {
+	case "cgi":
+		srv := startServer(t, reply(http.StatusOK, anthropicReply(RiskLow, CategoryOther)))
+		_, err := classify(srv.URL, blocked)
+		if !errors.Is(err, ErrTransport) || !errors.Is(err, errProxy) {
+			t.Errorf("Classify() error = %v, want ErrTransport and errProxy", err)
+		}
+		if want := "LLM provider request failed: network error: " + errProxy.Error(); err == nil || err.Error() != want {
+			t.Errorf("Classify() error = %v, want %q", err, want)
+		}
+		assertNoLeak(t, err, proxyCanary, "user", "proxy.test", srv.URL)
+		if got := dialed(); len(got) != 0 {
+			t.Errorf("dials = %q, want none", got)
+		}
+		if n := srv.hits.Load(); n != 0 {
+			t.Errorf("server requests = %d, want 0", n)
+		}
+	case "proxy", "noproxy":
+		_, err := classify("https://api.example.invalid", blocked)
+		if !errors.Is(err, ErrTransport) {
+			t.Errorf("Classify() error = %v, want ErrTransport", err)
+		}
+		want := []string{"proxy.test:3128"}
+		if mode == "noproxy" {
+			want = []string{"api.example.invalid:443"}
+		}
+		if got := dialed(); !slices.Equal(got, want) {
+			t.Errorf("dials = %q, want %q", got, want)
+		}
+	case "loopback":
+		srv := startServer(t, reply(http.StatusOK, anthropicReply(RiskLow, CategoryOther)))
+		direct := func(ctx context.Context, network, addr string) (net.Conn, error) {
+			record(addr)
+			var d net.Dialer
+			return d.DialContext(ctx, network, addr)
+		}
+		if _, err := classify(srv.URL, direct); err != nil {
+			t.Fatalf("Classify() error = %v", err)
+		}
+		if got, want := dialed(), []string{srv.Listener.Addr().String()}; !slices.Equal(got, want) {
+			t.Errorf("dials = %q, want %q (loopback is never proxied)", got, want)
+		}
+	default:
+		t.Fatalf("unknown helper mode %q", mode)
+	}
+}
