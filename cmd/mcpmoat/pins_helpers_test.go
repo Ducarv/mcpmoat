@@ -21,8 +21,9 @@ import (
 )
 
 // This file holds the helpers of the in-process pin tests (scan_pins_test.go,
-// pin_test.go, pin_flow_test.go, pin_expect_test.go and pins_diff_test.go):
-// the pinEnv world, the fake servers, and the checks of the output.
+// pin_test.go, pin_flow_test.go, pin_expect_test.go and pins_diff_test.go) and
+// of e2e_test.go, which runs the real binary. The helpers are the pinEnv world,
+// the fake servers, and the checks of the output.
 
 // pinRunResult is the outcome of one in-process run.
 type pinRunResult struct {
@@ -249,6 +250,23 @@ type pinOutput struct {
 
 // acceptHintPrefix starts every accept hint line of scan.
 const acceptHintPrefix = "To accept "
+
+// wrongDigest is a well-formed digest that no tool set has. Tests pass it as
+// the --expect value to force a digest mismatch.
+const wrongDigest = "pd1:0000000000000000000000000000000000000000000000000000000000000000"
+
+// assertPinsFileMode fails the test when the file at path cannot be read with
+// stat or its mode is not 0o600. E2E tests pass pinsPath(home) as path.
+func assertPinsFileMode(t *testing.T, path string) {
+	t.Helper()
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("stat pins.json %s: %v", path, err)
+	}
+	if mode := info.Mode().Perm(); mode != 0o600 {
+		t.Errorf("pins.json %s mode = %o, want 600", path, mode)
+	}
+}
 
 // cutAcceptHints splits the "To accept ..." lines off the end of a scan stdout.
 // It returns the stdout without them and the lines, in order.

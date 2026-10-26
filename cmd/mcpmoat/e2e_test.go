@@ -1,8 +1,9 @@
 package main
 
-// End-to-end tests. They build the real mcpmoat binary once and run it as a
-// child process with a fake HOME. They check the exit code, stdout and stderr
-// of whole commands, the way a user sees them.
+// End-to-end tests. This file builds the mcpmoat binary and the fixture servers.
+// Most tests run mcpmoat as a child process with a fake HOME. They check the
+// exit code, stdout and stderr of whole commands, the way a user sees them.
+// TestE2ERugPullExitCodes runs a fixture binary with only PATH set.
 //
 // These tests use os/exec and not the testscript module, because the project
 // adds no new modules for tests.
@@ -107,16 +108,21 @@ func runBinEnv(t *testing.T, home, dir string, extraEnv []string, args ...string
 	cmd := exec.Command(bin, args...) //nolint:gosec // G204: the test runs the binary it just built
 	cmd.Dir = dir
 	cmd.Env = append([]string{"HOME=" + home, "XDG_CONFIG_HOME=" + filepath.Join(home, ".config"), "PATH=/usr/bin:/bin"}, extraEnv...)
+	return runCmd(t, cmd)
+}
+
+// runCmd runs cmd and returns what it wrote to stdout and stderr and its exit
+// code. A process that does not start or does not finish fails the test.
+func runCmd(t *testing.T, cmd *exec.Cmd) (stdout, stderr string, code int) {
+	t.Helper()
 	var outBuf, errBuf bytes.Buffer
 	cmd.Stdout = &outBuf
 	cmd.Stderr = &errBuf
 
-	err := cmd.Run()
-	if err != nil {
+	if err := cmd.Run(); err != nil {
 		exitErr, ok := errors.AsType[*exec.ExitError](err)
 		if !ok {
-			// The process did not start or did not finish: this is a test problem.
-			t.Fatalf("run %s %v: %v", bin, args, err)
+			t.Fatalf("run %v: %v", cmd.Args, err)
 		}
 		code = exitErr.ExitCode()
 	}
@@ -1139,9 +1145,7 @@ func TestE2EPinAccept(t *testing.T) {
 		t.Helper()
 		stdout, stderr, code := runBin(t, home, work, "scan")
 		assertScanResult(t, code, stdout, stderr, scanWant{code: exitOK, noStdout: []string{"MOAT-T2"}, stderr: wantStderr})
-		if got := column(tableRows(t, stdout), 0); !slices.Equal(got, []string{name}) {
-			t.Errorf("server names = %v, want [%s]\nstdout:\n%s", got, name, stdout)
-		}
+		assertServerNames(t, stdout, name)
 		if len(wantStderr) == 0 {
 			assertCleanStderr(t, stderr)
 		}
@@ -1151,13 +1155,7 @@ func TestE2EPinAccept(t *testing.T) {
 
 	// Step 1: the first scan pins the two tools of the fixture.
 	scanClean(t, []string{"mcpmoat scan: pinned 2 tools for " + name})
-	info, err := os.Stat(pinsJSON)
-	if err != nil {
-		t.Fatalf("pins.json is missing after the first scan: %v", err)
-	}
-	if mode := info.Mode().Perm(); mode != 0o600 {
-		t.Errorf("pins.json mode = %o, want 600", mode)
-	}
+	assertPinsFileMode(t, pinsJSON)
 	data, err := os.ReadFile(pinsJSON) //nolint:gosec // G304: the path is below the t.TempDir() home
 	if err != nil {
 		t.Fatal(err)
@@ -1192,7 +1190,6 @@ func TestE2EPinAccept(t *testing.T) {
 
 	// Step 3b: --expect with a valid digest of other tools is exit code 2, and
 	// pins.json stays as it was.
-	const wrongDigest = "pd1:0000000000000000000000000000000000000000000000000000000000000000"
 	stdout, stderr, code = runBin(t, home, work, "pin", "--accept", name, "--expect", wrongDigest)
 	if code != exitError || stdout != "" ||
 		!strings.Contains(stderr, "mcpmoat pin: the tools of "+name+" differ from what scan showed (digest pd1:") ||
@@ -1303,26 +1300,13 @@ func TestE2ERugPull(t *testing.T) {
 			t.Errorf("pins.json holds the args of the server config:\n%s", data)
 		}
 	}
-	// assertServerNames checks that the table of stdout lists only the fixture.
-	assertServerNames := func(t *testing.T, stdout string) {
-		t.Helper()
-		if got := column(tableRows(t, stdout), 0); !slices.Equal(got, []string{server}) {
-			t.Errorf("server names = %v, want [%s]\nstdout:\n%s", got, server, stdout)
-		}
-	}
 
 	// Step 1: the first scan pins the two tools of the clean fixture. It exits
 	// with code 0 and writes pins.json with mode 600.
 	stdout, stderr, code := runBin(t, home, work, "scan")
 	assertScanResult(t, code, stdout, stderr, scanWant{code: exitOK, noStdout: []string{"MOAT-T2"}, stderr: []string{"mcpmoat scan: pinned 2 tools for " + server}})
-	assertServerNames(t, stdout)
-	info, err := os.Stat(pinsPath(home))
-	if err != nil {
-		t.Fatalf("pins.json is missing after the first scan: %v", err)
-	}
-	if mode := info.Mode().Perm(); mode != 0o600 {
-		t.Errorf("pins.json mode = %o, want 600", mode)
-	}
+	assertServerNames(t, stdout, server)
+	assertPinsFileMode(t, pinsPath(home))
 	assertNoArgsInPins(t)
 
 	// Step 2: the config switches the fixture to the injected variant. Only the
@@ -1357,11 +1341,10 @@ func TestE2ERugPull(t *testing.T) {
 	// Step 3b: a digest that is well formed but wrong is exit code 2. pin still
 	// prints the diff, but it saves nothing, so pins.json keeps its bytes.
 	digest := hintDigest(t, stdout, server)
-	wrong := "pd1:" + strings.Repeat("0", 64)
 	pinsBefore := readFileBytes(t, pinsPath(home))
-	stdout, stderr, code = runBin(t, home, work, "pin", "--accept", server, "--expect", wrong)
+	stdout, stderr, code = runBin(t, home, work, "pin", "--accept", server, "--expect", wrongDigest)
 	wantErr := "mcpmoat pin: the tools of " + server + " differ from what scan showed (digest " + digest +
-		", expected " + wrong + "); nothing was saved. Run scan again and review the diff.\n"
+		", expected " + wrongDigest + "); nothing was saved. Run scan again and review the diff.\n"
 	if code != exitError || stderr != wantErr {
 		t.Errorf("pin --expect wrong digest: exit code %d, stderr %q, want exit code %d and stderr %q\nstdout:\n%s", code, stderr, exitError, wantErr, stdout)
 	}
@@ -1393,7 +1376,65 @@ func TestE2ERugPull(t *testing.T) {
 	// there is no finding and no accept line.
 	stdout, stderr, code = runBin(t, home, work, "scan")
 	assertScanResult(t, code, stdout, stderr, scanWant{code: exitOK, noStdout: []string{"MOAT-T2", acceptHintPrefix}})
-	assertServerNames(t, stdout)
+	assertServerNames(t, stdout, server)
+}
+
+// TestE2ERugPullExitCodes checks the usage errors of the rug pull fixture: a bad
+// flag, -h, an unknown variant and an extra argument. Each one exits with code 2,
+// prints nothing on stdout and prints its message on stderr. The serve error
+// (exit code 1) is not covered here.
+func TestE2ERugPullExitCodes(t *testing.T) {
+	t.Parallel()
+	// wantExitUsage is exitUsage of the fixture, which is in its package main.
+	// The test cannot import it, so it keeps the value here.
+	const wantExitUsage = 2
+	// usage is the help text of the fixture, as flag.FlagSet prints it.
+	const usage = "Usage of rugpull:\n  -variant string\n    \tclean | injected (default \"clean\")\n"
+	bin := inspecttest.Fixture(t, "rugpull")
+	tests := []struct {
+		name       string
+		args       []string
+		wantStderr string
+	}{
+		{
+			name:       "bad flag",
+			args:       []string{"-nope"},
+			wantStderr: "flag provided but not defined: -nope\n" + usage,
+		},
+		{
+			name:       "help",
+			args:       []string{"-h"},
+			wantStderr: usage,
+		},
+		{
+			name:       "unknown variant",
+			args:       []string{rugpullFlag, "nope"},
+			wantStderr: "rugpull: unknown variant \"nope\"\n",
+		},
+		{
+			name:       "extra argument",
+			args:       []string{"extra"},
+			wantStderr: "rugpull: unexpected arguments: [extra]\n",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			cmd := exec.CommandContext(t.Context(), bin, tt.args...) //nolint:gosec // G204: bin is the fixture that this test package built
+			cmd.Env = []string{"PATH=/usr/bin:/bin"}
+
+			stdout, stderr, code := runCmd(t, cmd)
+			if code != wantExitUsage {
+				t.Errorf("exit code = %d, want %d\nstdout: %q\nstderr: %q", code, wantExitUsage, stdout, stderr)
+			}
+			if stdout != "" {
+				t.Errorf("stdout = %q, want empty", stdout)
+			}
+			if stderr != tt.wantStderr {
+				t.Errorf("stderr = %q, want %q", stderr, tt.wantStderr)
+			}
+		})
+	}
 }
 
 // TestE2EScanFailOn checks the exit codes of --fail-on and --ignore in the
