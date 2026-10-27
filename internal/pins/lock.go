@@ -79,7 +79,8 @@ const lockSuffix = ".lock"
 // ErrLocked: no other process holds the lock. A read-only pins directory with
 // an existing lock file needs no create, so the lock works there. When the
 // user owns the lock file with no group or other access but may not open it
-// (mode 0400 or 0000), the error also gives the fix hint: remove the file.
+// because the owner lacks a read or write bit (mode 0400 or 0000), the error
+// also gives the fix hint: remove the file.
 // The errors have no "read <path>" prefix: the caller adds it
 // (prefixUnlessRefusal).
 func openLockFile(root *os.Root, path string) (*os.File, error) {
@@ -99,12 +100,16 @@ func openLockFile(root *os.Root, path string) (*os.File, error) {
 				return nil, checkErr
 			}
 			// The entry passed the check: the user owns a regular file with
-			// no group or other access, and still cannot open it, for
-			// example mode 0400 or 0000 after a run was killed between the
-			// create and the chmod. That does not clear by itself, and
-			// removing the file is the only fix.
-			if errors.Is(err, fs.ErrPermission) && info.Mode().IsRegular() {
-				return nil, fmt.Errorf("%w (fix: %s)", err, lockRemoveFix(lockPath, info))
+			// no group or other access. When the owner lacks a read or write
+			// bit (mode 0400 or 0000, for example after a run was killed
+			// between the create and the chmod), that does not clear by
+			// itself, and removing the file is the only fix. The hint tells
+			// the user to run again first: a run that is still making the
+			// file (see openOrCreate) sets the mode in a moment, and removing
+			// the file under it would let two runs lock two different files.
+			if errors.Is(err, fs.ErrPermission) && info.Mode().IsRegular() && info.Mode().Perm()&0o600 != 0o600 {
+				return nil, fmt.Errorf("%w (fix: %s; first run mcpmoat again, in case another run is still making the file)",
+					err, lockRemoveFix(lockPath, info))
 			}
 		}
 		return nil, err

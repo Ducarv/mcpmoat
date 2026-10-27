@@ -119,7 +119,7 @@ To use the exit code in CI or in a git hook, see [Using mcpmoat in CI and git ho
 - You own the lock file and it has no group or other access, but you cannot open it (mode 0400 or
   0000, for example after a run was killed while it made the file). The error is `open the pins
   lock file <path>: permission denied (fix: rm -- '<path>', then mcpmoat makes a new one with mode
-  0600)`.
+  0600; first run mcpmoat again, in case another run is still making the file)`.
 - The pins directory is read-only and has no lock file yet, so mcpmoat cannot create
   `pins.json.lock`. The error names the lock file and the reason, for example `create the pins
   lock file <path>: permission denied`. A read-only pins directory with a lock file gets past the

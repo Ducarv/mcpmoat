@@ -304,7 +304,7 @@ func TestLoadLockedUnopenableLockFile(t *testing.T) {
 			if errors.Is(err, pins.ErrInsecurePermissions) || errors.Is(err, pins.ErrLocked) {
 				t.Errorf("LoadLocked() error = %v, must not wrap ErrInsecurePermissions or ErrLocked", err)
 			}
-			for _, want := range []string{"open the pins lock file " + lockPath + ": ", "(fix: rm -- '" + lockPath + "'"} {
+			for _, want := range []string{"open the pins lock file " + lockPath + ": ", "(fix: rm -- '" + lockPath + "'", "first run mcpmoat again"} {
 				if !strings.Contains(err.Error(), want) {
 					t.Errorf("LoadLocked() error = %q, want it to contain %q", err, want)
 				}

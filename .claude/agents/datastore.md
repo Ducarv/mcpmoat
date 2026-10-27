@@ -91,7 +91,7 @@ Follow `Store.saveWith` (`internal/pins/store.go`) and `atomicWriter.writeFile`
   file it locked. Check the directory handle again first (`checkDirHandle`).
 - A `Store` from plain `Load` holds no directory: its `Save` opens the directory again with the
   same checks (`openPinsDir`: the parent walk, a missing directory created, the handle check).
-- Create the temp file `.pins-<16 hex>.tmp` through the root with `O_EXCL` and mode `0600`
+- Create the temp file `.pins-<26 base32 chars>.tmp` through the root with `O_EXCL` and mode `0600`
   (random name from `crypto/rand`). Write, set mode `0600` on the open file, fsync and close.
 - Then `verifyPinsDir` (`os.Stat` of the directory path and `os.SameFile` with the opened
   handle). When the directory was moved, removed or replaced, return an error that wraps

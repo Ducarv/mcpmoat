@@ -830,7 +830,7 @@ a changed tool (a rug pull). `scan` writes the pins of a server on its first run
   (`checkDirHandle`). A `Store` from `Load` holds no lock and keeps nothing open (read-only paths
   and tests use it), so its `Save` opens the directory again with the same checks as `LoadLocked`
   (`openPinsDir`: the parent walk, a missing directory created, the handle check). The steps are: a
-  temp file `.pins-<16 hex>.tmp` created through the root with `O_EXCL` and mode `0600`, the
+  temp file `.pins-<26 base32 chars>.tmp` created through the root with `O_EXCL` and mode `0600`, the
   write, fsync and close; then a check that the path still names that directory
   (`verifyPinsDir`: `os.Stat` and `os.SameFile` with the file info of the handle); then the rename
   through the root and a sync of the directory. The directory sync is best effort, and its error is
