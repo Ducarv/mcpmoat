@@ -31,6 +31,14 @@ This page lists what mcpmoat does not do, so you know how far to trust a clean s
 - The rule analysis of each server has a time budget. A server that uses it up gets a
   `MOAT-T1-023` finding (see [Exit codes](exit-codes.md)), and its tools that were not fully
   checked can hide a malicious text.
+- The budget cannot stop the build of the match forms of one text. This build takes under about
+  0.2 s in the worst case that we measured, so the analysis of a server can end that much after
+  its budget.
+- A text with more than 256 U+009D (C1 OSC controls) always gets `MOAT-T1-017` or `MOAT-T1-018`
+  (high), also a benign text in the wrong encoding. The reason and the example are in
+  [Contributing a rule](writing-rules.md#2-write-the-rule). With a custom rule at critical
+  severity and `--fail-on critical`, a text with more than 256 U+009D can hide the payload from
+  that rule and only `MOAT-T1-017` or `MOAT-T1-018` (high) fires.
 - `scan` keeps at most 1000 tool rule findings for each server. The limit counts the findings
   after the ignore list. `scan` keeps the most severe findings, and among findings of the same
   severity the ones of the first tools, so a server cannot push a severe finding out of the report
@@ -51,9 +59,6 @@ This page lists what mcpmoat does not do, so you know how far to trust a clean s
   planned as issue #223). Diffs, commands, URLs and argv are never cut. These caps and the cap of
   1000 tool findings do not bound the size of the whole JSON document: a hostile config file with a
   very large number of config findings can give a very large document.
-- The budget cannot stop the build of the match forms of one text. For a very hostile text (for
-  example 128 KiB of one run of invisible characters), this build can take about a second, so the
-  analysis of a server can end that much after its budget (#146).
 - `--llm` does not make a scan complete or reliable. A model can miss a malicious tool, and a
   hostile description can try to influence the model. Its findings are advisory, and with `--llm`
   your tool names and descriptions leave your machine.

@@ -3,19 +3,43 @@ package rules
 import (
 	"regexp"
 	"strings"
+	"unicode/utf8"
 )
 
 // oscExpr matches an OSC for ansiSeq: ESC ] (or U+009D), at most 256 runes
-// of text, and BEL, ESC \ or U+009C.
+// of text, and BEL, ESC \ or U+009C. The text can hold U+009D. So each
+// U+009D starts a match that stays open for up to 256 runes, and in a run of
+// U+009D the regex engine keeps up to 256 threads for each rune. That is
+// slow (see the cost comment in match.go), so baseFormsCut reads a text with
+// more than maxStrictOSCStarts U+009D with ansiSeqFast instead.
 const oscExpr = `(?:\x1b\]|\x{9d})[^\x07\x1b\x{9c}]{0,256}(?:\x07|\x1b\\|\x{9c})`
 
-// oscExprC0 is oscExpr for ansiSeqC0: the text of an OSC also holds no
-// U+009D, so U+009D starts a new OSC, as ESC does. In oscExpr, each U+009D
-// of a run of U+009D starts a match that stays open for up to 256 runes, so
-// the regex engine keeps up to 256 threads for each rune (see the cost
-// comment in match.go for the time). oscExprC0 keeps one thread.
-// ansiSeq keeps oscExpr, so the forms that read with ansiSeq do not change.
+// oscExprC0 is oscExpr for ansiSeqC0 and ansiSeqFast: the text of an OSC
+// also holds no U+009D, so U+009D starts a new OSC, as ESC does. The regex
+// engine then keeps one OSC thread, also in a run of U+009D.
 const oscExprC0 = `(?:\x1b\]|\x{9d})[^\x07\x1b\x{9c}\x{9d}]{0,256}(?:\x07|\x1b\\|\x{9c})`
+
+// maxStrictOSCStarts is the largest number of U+009D (C1 OSC) in a text for
+// which the strict-reading forms of baseFormsCut read the sequences with
+// ansiSeq.
+//
+// Up to it, the OSC part of ansiSeq costs at most maxStrictOSCStarts x 256
+// extra thread steps for one regex pass, which is negligible. Above it, these
+// forms read with ansiSeqFast and baseFormsCut sets the cut flag, so
+// match_window (MOAT-T1-017, MOAT-T1-018, high) flags the text. A well-formed
+// description rarely holds so many U+009D, but a benign text can: UTF-8 read
+// as Latin-1 (mojibake) turns each right double quote (E2 80 9D) into
+// U+00E2, U+20AC and U+009D, so more than 256 such quotes give a high
+// finding. This false positive is by design. The count reads the part of the
+// text that normalizeForMatch reads (see rawFormFlags). The seams of
+// matchSeams must stay at or below this count (see the check next to
+// seamSideBytes).
+const maxStrictOSCStarts = 256
+
+// csiExpr matches a CSI for ansiSeq and ansiSeqFast: ESC [ (or U+009B),
+// parameter and intermediate bytes, and a final byte. It holds no C0 control
+// rune.
+const csiExpr = `(?:\x1b\[|\x{9b})[0-?]*[ -/]*[@-~]`
 
 // ansiSeq matches an ANSI escape sequence that a terminal runs and does not
 // show:
@@ -29,9 +53,22 @@ const oscExprC0 = `(?:\x1b\]|\x{9d})[^\x07\x1b\x{9c}\x{9d}]{0,256}(?:\x07|\x1b\\
 // so it cannot swallow the rest of the text; its ESC is an invisible control
 // rune, so step 4 of normalizeForMatch drops it, and its text stays.
 //
-// A CSI here holds no C0 control rune. The forms 1 to 3 of baseFormsCut read
-// the sequences with ansiSeq. The forms 4 to 7 read them with ansiSeqC0.
-var ansiSeq = regexp.MustCompile(`(?:\x1b\[|\x{9b})[0-?]*[ -/]*[@-~]|` + oscExpr)
+// A CSI here holds no C0 control rune (see csiExpr). The strict-reading forms
+// of baseFormsCut read the sequences with ansiSeq, or with ansiSeqFast when
+// the text holds more than maxStrictOSCStarts U+009D. The other forms (the
+// ansiSeqC0 forms) read them with ansiSeqC0.
+var ansiSeq = regexp.MustCompile(csiExpr + `|` + oscExpr)
+
+// ansiSeqFast is ansiSeq with oscExprC0 for its OSC part: a U+009D ends the
+// text of an OSC and starts a new one. Its CSI part is the same as in
+// ansiSeq, so a CSI, also one that starts with U+009B, still holds no C0
+// control rune. The strict-reading forms of baseFormsCut read a text that
+// holds more than maxStrictOSCStarts U+009D with it (see ansiFastToSpace).
+// The one difference from ansiSeq: an OSC whose text holds U+009D does not
+// match from its start. So in ESC "]x" + U+009D + BEL, only U+009D BEL is an
+// OSC, and ESC "]x" stays as text (step 4 of normalizeForMatch drops the
+// ESC).
+var ansiSeqFast = regexp.MustCompile(csiExpr + `|` + oscExprC0)
 
 // csiC0 is the content of a regex class: the C0 control runes that a
 // terminal (VT500 and xterm) runs inside a CSI and then goes on with the
@@ -39,6 +76,29 @@ var ansiSeq = regexp.MustCompile(`(?:\x1b\[|\x{9b})[0-?]*[ -/]*[@-~]|` + oscExpr
 // SUB (U+001A), which cancel the sequence, and not ESC (U+001B), which starts
 // a new one. It holds TAB, LF and CR too.
 const csiC0 = `\x00-\x17\x19\x1c-\x1f\x7f`
+
+// isCSIC0 reports whether r is a C0 control rune of csiC0: U+0000 to U+0017,
+// U+0019, U+001C to U+001F, or DEL (U+007F). It is the regex class csiC0 as a
+// plain rune check, so scanFormFlags needs no regex.
+func isCSIC0(r rune) bool {
+	switch {
+	case r >= 0x00 && r <= 0x17, r == 0x19, r >= 0x1c && r <= 0x1f, r == 0x7f:
+		return true
+	}
+	return false
+}
+
+// startsSeq reports whether r is ESC, U+009B (CSI) or U+009D (OSC), a rune
+// that starts an ANSI escape sequence in ansiSeq and ansiSeqC0.
+func startsSeq(r rune) bool {
+	return startsCSI(r) || r == '\u009d'
+}
+
+// startsCSI reports whether r is ESC or U+009B, a rune that starts a CSI in
+// ansiSeq and ansiSeqC0.
+func startsCSI(r rune) bool {
+	return r == '\x1b' || r == '\u009b'
+}
 
 // ansiSeqC0 is ansiSeq, but a CSI can hold C0 control runes (see csiC0), as
 // in a terminal: between ESC and "[", and among the parameter and
@@ -48,12 +108,77 @@ const csiC0 = `\x00-\x17\x19\x1c-\x1f\x7f`
 // The final byte of a CSI can be a letter of the text: in ESC [ "Ignore",
 // the CSI is ESC [ I, as for a terminal. And a C0 rune lets a CSI take
 // parameter bytes of the text: ESC [ LF "<IMPORTANT>" is the CSI ESC [ LF < I.
-// So only the forms 4 to 7 of baseFormsCut read the sequences with ansiSeqC0,
-// and the fifth and the seventh form give back the text of a CSI with a
-// letter final byte (see ansiKeepText).
+// So only the ansiSeqC0 forms of baseFormsCut read the sequences with
+// ansiSeqC0, and the keepSeqText and keepSeqTextSpaced forms give back the
+// text of a CSI with a letter final byte (see ansiKeepText).
 var ansiSeqC0 = regexp.MustCompile(
 	`(?:\x1b[` + csiC0 + `]*\[|\x{9b})[0-?` + csiC0 + `]*[ -/` + csiC0 + `]*[@-~]` +
 		`|` + oscExprC0)
+
+// csiFinalIndex returns the index in s of the final byte of the CSI that
+// starts at s[start], an ESC or a U+009B, as ansiSeqC0 reads it once the
+// format runes (see isInvisibleFormat) are gone. It returns -1 when no CSI
+// starts there. The placeOnce runs of replaceRuns use it: in spaceFormats
+// and keepSeqTextSpaced, a run of format runes inside a CSI is dropped with
+// no space, so the ANSI step still finds the CSI.
+//
+// It reads the runes of ansiSeqC0: after ESC, the C0 runes of csiC0 and "["
+// (after U+009B, nothing), then the parameter bytes (0x30 to 0x3F) and the
+// intermediate bytes (0x20 to 0x2F), with C0 runes of csiC0 among them, and
+// a final byte (0x40 to 0x7E). It skips the format runes. Any other rune,
+// such as ESC, U+009B, CAN, SUB, NEL, a non-ASCII letter or U+FFFD for
+// invalid UTF-8, or the end of s, means no CSI, and then the runs keep their
+// space. So ESC [ + ZWSP + U+00E9 keeps the space after the "[".
+//
+// The final byte rule is the rule of ansiSeqC0 and of a terminal: an ASCII
+// letter is a final byte. So in ESC [ + ZWSP + "Ignore", the CSI is
+// ESC [ I, and the ZWSP is dropped.
+//
+// It reads s from start up to the final byte or the first rune that stops
+// it, and it allocates nothing. ESC and U+009B stop it, and replaceRuns calls
+// it at most once for each run, for the last ESC or U+009B of the run. So a
+// read ends at or before the start of the next read, each rune is read at
+// most twice, and replaceRuns stays linear in len(s).
+//
+// csiFinalIndex is a hand-written reader of the CSI of ansiSeqC0, so it must
+// agree with ansiSeqC0 (csiOracle in normalize_test.go checks it).
+func csiFinalIndex(s string, start int) int {
+	r, size := utf8.DecodeRuneInString(s[start:])
+	i := start + size
+	if r == '\x1b' {
+		for { // the C0 runes of csiC0 and "["
+			if i >= len(s) {
+				return -1
+			}
+			r, size = utf8.DecodeRuneInString(s[i:])
+			i += size
+			if r == '[' {
+				break
+			}
+			if !isCSIC0(r) && !isInvisibleFormat(r) {
+				return -1
+			}
+		}
+	} else if r != '\u009b' {
+		return -1
+	}
+	inter := false // an intermediate byte was read: no parameter byte now
+	for i < len(s) {
+		r, size = utf8.DecodeRuneInString(s[i:])
+		switch {
+		case isCSIC0(r), isInvisibleFormat(r):
+		case 0x30 <= r && r <= 0x3f && !inter: // parameter byte
+		case 0x20 <= r && r <= 0x2f: // intermediate byte
+			inter = true
+		case 0x40 <= r && r <= 0x7e: // final byte
+			return i
+		default:
+			return -1
+		}
+		i += size
+	}
+	return -1
+}
 
 // ansiToSpace replaces each ANSI escape sequence (see ansiSeq) with U+0020.
 // Without this step, ESC [ 8 m before "Ignore" leaves "[8mIgnore", and the
@@ -76,17 +201,26 @@ func ansiToSpace(s string) string {
 	return ansiSeq.ReplaceAllLiteralString(s, " ")
 }
 
+// ansiFastToSpace is ansiToSpace with ansiSeqFast: it replaces each ANSI
+// escape sequence of ansiSeqFast with U+0020. It is the ANSI step of the
+// strict-reading forms of baseFormsCut for a text that holds more than
+// maxStrictOSCStarts U+009D (see formMode.ansiStepFor). A sequence is at
+// least 2 bytes long, so the text does not grow.
+func ansiFastToSpace(s string) string {
+	return ansiSeqFast.ReplaceAllLiteralString(s, " ")
+}
+
 // ansiC0ToSpace is ansiToSpace with ansiSeqC0: it replaces each ANSI escape
 // sequence, also a CSI that holds C0 control runes, with U+0020. It is the
-// ANSI step of the fourth and the sixth form of baseFormsCut. A sequence is at
-// least 2 bytes long, so the text does not grow.
+// ANSI step of the spaceFormats and dropSeqC0 forms of baseFormsCut. A
+// sequence is at least 2 bytes long, so the text does not grow.
 func ansiC0ToSpace(s string) string {
 	return ansiSeqC0.ReplaceAllLiteralString(s, " ")
 }
 
-// ansiKeepText is the ANSI step of the fifth and the seventh form of
-// baseFormsCut (see keepSeqText and keepSeqTextSpaced). It replaces each ANSI
-// escape sequence (see ansiSeqC0) with the text that seqText gives for it.
+// ansiKeepText is the ANSI step of the keepSeqText and keepSeqTextSpaced
+// forms of baseFormsCut. It replaces each ANSI escape sequence (see
+// ansiSeqC0) with the text that seqText gives for it.
 // So a CSI that takes characters of the text gives them back, and the text
 // of an OSC, which a terminal does not show but a model reads, is matched.
 //
@@ -107,9 +241,10 @@ func ansiKeepText(s string) string {
 }
 
 // ansiKeepCSIText is ansiKeepText, but an OSC becomes two U+0020, without
-// its text. The cut flag of baseFormsCut reads the fifth and the seventh form
-// with it, so every byte of these forms counts for the window except the text
-// of an OSC: the two U+0020 of an OSC with no text count too.
+// its text. The cut flag of baseFormsCut reads the keepSeqText and
+// keepSeqTextSpaced forms with it, so every byte of these forms counts for
+// the window except the text of an OSC: the two U+0020 of an OSC with no text
+// count too.
 func ansiKeepCSIText(s string) string {
 	return ansiSeqC0.ReplaceAllStringFunc(s, func(seq string) string {
 		if _, ok := oscText(seq); ok {

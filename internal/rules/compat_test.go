@@ -1,11 +1,14 @@
 package rules
 
 // Test-only entry points. The production code has one entry point for each
-// job (baseFormsCut, prepareSchemaFrom and matchSchemaPrepared). The helpers
-// below wrap it, so a test can check one part of the result with one short
-// call.
+// job (baseFormsCut, prepareSchemaFrom, matchSchemaPrepared and
+// compileRegexTree). The helpers below wrap it, so a test can check one
+// part of the result with one short call.
 
-import "context"
+import (
+	"context"
+	"regexp"
+)
 
 // matchForms returns the base forms of s: baseFormsCut without the cut flag.
 func matchForms(s string) []string {
@@ -18,6 +21,20 @@ func matchForms(s string) []string {
 func matchWindowCut(s string) bool {
 	_, cut := baseFormsCut(s)
 	return cut
+}
+
+// formModes returns the modes of the forms that baseFormsCut builds for s,
+// in the order of the forms (see formFlags.modes). It reads the part of s
+// that normalizeForMatch reads, as baseFormsCut does (see rawFormFlags).
+func formModes(s string) []formMode {
+	return rawFormFlags(s).modes()
+}
+
+// compileRegex is compileRegexTree without the parse tree: it returns the
+// compiled regex of expr and the number of instructions of its program.
+func compileRegex(field, expr string) (*regexp.Regexp, int, error) {
+	re, _, insts, err := compileRegexTree(field, expr)
+	return re, insts, err
 }
 
 // hasSeqStart reports whether s holds ESC, U+009B or U+009D: the seqStart

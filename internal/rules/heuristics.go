@@ -38,11 +38,14 @@ const (
 	// so they keep 0.
 	HeuristicMixedScript = "mixed_script"
 	// HeuristicMatchWindow flags a text that the regex and keyword matchers
-	// do not read in full: the text is longer than the raw scan limit, or
-	// a form of baseFormsCut is cut at MaxMatchInputBytes. The OSC text of a
-	// form, such as a link URL, does not count (see baseFormsCut). So a
-	// payload that padding pushes out of the match window still gives a hit.
-	// It has no parameters.
+	// can miss a part of: the text is longer than the raw scan limit, a form
+	// of baseFormsCut is cut at MaxMatchInputBytes, or the text holds more
+	// than maxStrictOSCStarts U+009D (C1 OSC starts), so some forms read it
+	// with the faster regex ansiSeqFast. The OSC text of a form, such as a
+	// link URL, does not count (see baseFormsCut). So a payload that padding
+	// pushes out of the match window, or that many U+009D hide, still gives a
+	// hit. The hit detail names the reason (see matchWindowPrepared). It has
+	// no parameters.
 	HeuristicMatchWindow = "match_window"
 	// HeuristicTagBidiOverride flags the Unicode tag characters (U+E0000 to
 	// U+E007F), which can hide a full ASCII text, and the bidi overrides LRO
@@ -230,11 +233,11 @@ const (
 // start, end or cancel an ANSI escape sequence (see ansiToSpace): they show
 // as nothing, and a terminal runs them. A raw ESC before a letter can make
 // the letter the final byte of a CSI, so a terminal does not show the "I" of
-// "\x1b[Ignore". The fifth and the seventh form of baseFormsCut give back that
-// letter, and the text of an OSC, so the regexes and keywords still read them
-// (see keepSeqText and seqText). This heuristic still flags the ESC. It also
-// flags each text that defeats all the forms (see baseFormsCut), because each
-// such text holds an invisible rune.
+// "\x1b[Ignore". The keepSeqText and keepSeqTextSpaced forms of baseFormsCut
+// give back that letter, and the text of an OSC, so the regexes and keywords
+// still read them (see keepSeqText and seqText). This heuristic still flags
+// the ESC. It also flags each text that defeats all the forms (see
+// baseFormsCut), because each such text holds an invisible rune.
 //
 // An emoji can hold a VS15 or VS16 and a ZWJ (see isPictograph), so some of
 // these runes are not flagged:
@@ -319,16 +322,48 @@ func maxLength(raw string, maxRunes int) []Hit {
 	return []Hit{{Offset: offset, Detail: fmt.Sprintf("text has %d characters, over the limit of %d", n, maxRunes)}}
 }
 
+// Hit details of the match_window heuristic (see matchWindowPrepared). The
+// number 256 in windowOSCDetail is maxStrictOSCStarts; a test checks it.
+const (
+	// windowLongDetail is the detail when the text is too long.
+	windowLongDetail = "text is longer than the match window"
+	// windowOSCDetail is the detail when the text holds more than
+	// maxStrictOSCStarts U+009D and is not longer than MaxMatchInputBytes.
+	windowOSCDetail = "text holds more than 256 C1 OSC controls (U+009D)"
+	// windowOSCLongDetail is the detail when the text holds more than
+	// maxStrictOSCStarts U+009D and is longer than MaxMatchInputBytes.
+	windowOSCLongDetail = windowOSCDetail + " and can be longer than the match window"
+)
+
 // matchWindowPrepared is the match_window heuristic. It flags p.raw when the
-// regex and keyword matchers do not read all of it: the cut flag of p (see
+// regex and keyword matchers can miss a part of it: the cut flag of p (see
 // preparedText.windowCut). The hit is about the whole text, so it has the
 // offset NoOffset. It builds only the base forms of p, once, so the regex
 // and keyword rules that share p reuse them.
+//
+// The detail names the reason, so that a user does not add an ignore entry
+// for a long text when the reason is a count of U+009D. The cut flag does not
+// tell the reason, so a set flag costs one more scanFormFlags pass over the
+// raw window. When the text holds more than maxStrictOSCStarts U+009D, the
+// detail is windowOSCDetail. If the text is also longer than
+// MaxMatchInputBytes, a form can be cut too, and windowOSCLongDetail says so.
+// (A text up to MaxMatchInputBytes can grow past it in two cases: in NFC, a
+// rare case, and when it holds invalid UTF-8, because each bad byte becomes
+// U+FFFD, 3 bytes (see normalizeForMatch). Then a form can be cut, but the
+// detail is windowOSCDetail and names only the U+009D, which is still a
+// reason.) Without many U+009D, the reason is the length: windowLongDetail.
 func matchWindowPrepared(p *preparedText) []Hit {
 	if !p.windowCut() {
 		return nil
 	}
-	return []Hit{{Offset: NoOffset, Detail: "text is longer than the match window"}}
+	detail := windowLongDetail
+	if rawFormFlags(p.raw).manyOSCStarts() {
+		detail = windowOSCDetail
+		if len(p.raw) > MaxMatchInputBytes {
+			detail = windowOSCLongDetail
+		}
+	}
+	return []Hit{{Offset: NoOffset, Detail: detail}}
 }
 
 // Runes that tag_or_bidi_override flags, and the base of the tag flags.

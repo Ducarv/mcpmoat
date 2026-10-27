@@ -344,8 +344,10 @@ step 5 and step 6:
     context deadline. The analyzer checks the context before each regex on each form, and between
     the schema strings and the seams. So it stops at most about one regex on one form after the
     deadline (under about 1 s in the measured worst case), plus one build of the forms of one text,
-    which cannot be stopped (#146). A server that uses up its budget keeps the rows found so far and
-    gets one finding `MOAT-T1-023` (`rules.RuleAnalysisBudget`, a native rule with no YAML file).
+    which cannot be stopped (under about 0.2 s in the measured worst case, a fill of CSIs; see the
+    cost comment in `internal/rules/match.go` and `maxStrictOSCStarts`). A server that uses up its
+    budget keeps the rows found so far and gets one finding `MOAT-T1-023`
+    (`rules.RuleAnalysisBudget`, a native rule with no YAML file).
     Its severity is the highest severity of the description and schema rules that `scan` applies,
     but never lower than high (`failClosedSeverity`, `rules.Analyzer.MaxSeverity`). So it is high with
     the built-in rules, and critical when a description or schema rule from `--rules` is critical.
