@@ -29,13 +29,15 @@ func (c *cli) runHelp(_ options, args []string) int {
 // rejectArgs is for commands that take no arguments. If args is not empty, it
 // prints an error to stderr and returns true. The arguments come from the
 // user, so each one goes through quoteArg to stop terminal escape injection.
+// Before that, hideUserinfo hides the user info of any URL in it, so a stray
+// "https://user:pass@host" does not show its password (see argscrub.go).
 func (c *cli) rejectArgs(name string, args []string) bool {
 	if len(args) == 0 {
 		return false
 	}
 	quoted := make([]string, len(args))
 	for i, a := range args {
-		quoted[i] = quoteArg(a)
+		quoted[i] = quoteArg(hideUserinfo(a))
 	}
 	c.usageError(name, "unexpected arguments [%s]", strings.Join(quoted, " "))
 	return true

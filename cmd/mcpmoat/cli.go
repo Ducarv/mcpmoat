@@ -160,8 +160,10 @@ func (c *cli) dispatch(args []string) int {
 		// termsafe.Quote escapes the whole message: it stays as it is when it
 		// is safe, and it shows quoted only when it holds an unsafe rune.
 		// quoteArg, for an argument that we hold on its own, always quotes.
-		// scan.go does the same for the scan flags.
-		fprintf(c.stderr, "mcpmoat: %s\n\n", termsafe.Quote(err.Error()))
+		// scan.go does the same for the scan flags. The error can hold a
+		// secret, as in "---llm-base-url=https://user:pass@host", so
+		// argErrorText hides it first (see argscrub.go).
+		fprintf(c.stderr, "mcpmoat: %s\n\n", termsafe.Quote(argErrorText(args, err.Error())))
 		c.usage(c.stderr)
 		return exitError
 	}
@@ -178,8 +180,10 @@ func (c *cli) dispatch(args []string) int {
 		}
 	}
 
-	// The command name comes from the user, so quoteArg escapes it.
-	fprintf(c.stderr, "mcpmoat: unknown command %s\n\n", quoteArg(name))
+	// The command name comes from the user, so quoteArg escapes it, and
+	// argErrorText first hides a secret in it, as in a stray URL with a
+	// password.
+	fprintf(c.stderr, "mcpmoat: unknown command %s\n\n", quoteArg(argErrorText(args, name)))
 	c.usage(c.stderr)
 	return exitError
 }

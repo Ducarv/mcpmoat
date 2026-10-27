@@ -5,6 +5,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"path/filepath"
 	"slices"
 	"strconv"
 	"strings"
@@ -668,5 +669,127 @@ func TestCommandsOrder(t *testing.T) {
 	want := []string{"scan", "pin", "version", "help"}
 	if !slices.Equal(names, want) {
 		t.Errorf("commands() names = %q, want %q", names, want)
+	}
+}
+
+// TestArgErrorsHideURLPassword checks that no argument error of any command
+// shows the user info of a URL (FR-16, FR-17). A base URL can hold a user name
+// and a password, and the flag package and the argument checks put the user
+// argument in their error text. Each case is exit code 2, with the error kind
+// in want and no part of the canary in stdout or stderr. A case with hidden
+// set must also show hiddenArgText, so the test cannot pass when the error
+// line drops the argument.
+func TestArgErrorsHideURLPassword(t *testing.T) {
+	t.Parallel()
+
+	const canary = "CANARYpw-9f3a"
+	// passURL has a user name and a password. userURL has only a user name,
+	// which can be a token too.
+	const passURL = "https://user:" + canary + "@host.example"
+	const userURL = "https://" + canary + "@host.example"
+
+	// The worlds of the cases. worldPlain has no home and no working
+	// directory: the args must fail before scan or pin reads a config.
+	// worldPin has one server "srv" in a --config file. worldAmbiguous has
+	// two global config files in the home, each with a server named passURL.
+	const (
+		worldPlain = iota
+		worldPin
+		worldAmbiguous
+	)
+	tests := []struct {
+		name   string
+		world  int
+		args   []string
+		want   string // a part of stderr that names the error
+		hidden bool   // stderr shows hiddenArgText
+	}{
+		{name: "global bad flag syntax", args: []string{"---llm-base-url=" + passURL, "scan"},
+			want: "mcpmoat: bad flag syntax: ", hidden: true},
+		{name: "global bad flag syntax, user only", args: []string{"---llm-base-url=" + userURL, "scan"},
+			want: "mcpmoat: bad flag syntax: ", hidden: true},
+		{name: "unknown command is the URL", args: []string{passURL},
+			want: "mcpmoat: unknown command ", hidden: true},
+		{name: "unknown command is the URL, user only", args: []string{userURL},
+			want: "mcpmoat: unknown command ", hidden: true},
+		{name: "pin bad flag syntax", args: []string{"pin", "---llm-base-url=" + passURL},
+			want: "mcpmoat pin: bad flag syntax: ", hidden: true},
+		{name: "pin --timeout=URL", args: []string{"pin", "--timeout=" + passURL},
+			want: "mcpmoat pin: invalid value ", hidden: true},
+		{name: "pin --timeout URL", args: []string{"pin", "--timeout", passURL},
+			want: "mcpmoat pin: invalid value ", hidden: true},
+		{name: "pin --timeout=URL, user only", args: []string{"pin", "--timeout=" + userURL},
+			want: "mcpmoat pin: invalid value ", hidden: true},
+		{name: "pin positional URL", args: []string{"pin", "--accept", "srv", passURL},
+			want: "mcpmoat pin: unexpected arguments ", hidden: true},
+		{name: "pin --accept URL, unknown server", world: worldPin, args: []string{"pin", "--accept", passURL},
+			want: "mcpmoat pin: unknown server ", hidden: true},
+		{name: "pin --accept URL, unknown server, user only", world: worldPin, args: []string{"pin", "--accept", userURL},
+			want: "mcpmoat pin: unknown server ", hidden: true},
+		{name: "pin --accept=URL, ambiguous server", world: worldAmbiguous, args: []string{"pin", "--accept=" + passURL},
+			want: "mcpmoat pin: 2 servers are named ", hidden: true},
+		{name: "version URL", args: []string{"version", passURL},
+			want: "mcpmoat version: unexpected arguments ", hidden: true},
+		{name: "version URL, user only", args: []string{"version", userURL},
+			want: "mcpmoat version: unexpected arguments ", hidden: true},
+		{name: "help URL", args: []string{"help", passURL},
+			want: "mcpmoat help: unexpected arguments ", hidden: true},
+		{name: "scan --llm=URL", args: []string{"scan", "--llm=" + passURL},
+			want: "mcpmoat scan: invalid boolean value ", hidden: true},
+		{name: "scan --llm URL", args: []string{"scan", "--llm", passURL},
+			want: "mcpmoat scan: unexpected arguments ", hidden: true},
+		{name: "scan --llm URL, user only", args: []string{"scan", "--llm", userURL},
+			want: "mcpmoat scan: unexpected arguments ", hidden: true},
+		{name: "scan --timeout=llm-base-url=URL", args: []string{"scan", "--timeout=llm-base-url=" + passURL},
+			want: "mcpmoat scan: invalid value ", hidden: true},
+		{name: "scan --timeout=URL, user only", args: []string{"scan", "--timeout=" + userURL},
+			want: "mcpmoat scan: invalid value ", hidden: true},
+		{name: "scan --llm-base-url=URL before a bad flag", args: []string{"scan", "--llm-base-url=" + passURL, "--bogus"},
+			want: "mcpmoat scan: flag provided but not defined: -bogus"},
+		{name: "scan --llm-base-url URL after a bad flag", args: []string{"scan", "--bogus", "--llm-base-url", passURL},
+			want: "mcpmoat scan: flag provided but not defined: -bogus"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			args := tt.args
+			var c *cli
+			var stdoutBuf, stderrBuf *bytes.Buffer
+			switch tt.world {
+			case worldPlain:
+				c, stdoutBuf, stderrBuf = newTestCLI(fakeGetenv(nil), testBuild)
+			case worldPin:
+				e := newPinEnv(t, oneServer("srv"))
+				c, stdoutBuf, stderrBuf = e.cli(fakeServers(nil))
+				args = append(slices.Clone(args), "--config", e.config)
+			case worldAmbiguous:
+				e := newPinEnv(t, oneServer("srv"))
+				writeServers(t, e.home, ".claude.json", oneServer(passURL))
+				writeServers(t, e.home, filepath.Join(".cursor", "mcp.json"), oneServer(passURL))
+				c, stdoutBuf, stderrBuf = e.cli(fakeServers(nil))
+			default:
+				t.Fatalf("unknown world %d", tt.world)
+			}
+
+			code := c.dispatch(args)
+
+			stdout, stderr := stdoutBuf.String(), stderrBuf.String()
+			if code != exitError {
+				t.Errorf("exit code = %d, want %d\nstderr:\n%s", code, exitError, stderr)
+			}
+			for _, out := range []struct{ name, text string }{{"stdout", stdout}, {"stderr", stderr}} {
+				if part, leak := secretPartLeak(canary, out.text); leak {
+					t.Errorf("%s holds %q, a part of the password %q:\n%s", out.name, part, canary, out.text)
+				}
+			}
+			if !strings.Contains(stderr, tt.want) {
+				t.Errorf("stderr does not hold %q:\n%s", tt.want, stderr)
+			}
+			if got := strings.Contains(stderr, hiddenArgText); got != tt.hidden {
+				t.Errorf("stderr holds %q = %v, want %v:\n%s", hiddenArgText, got, tt.hidden, stderr)
+			}
+			assertNoEscape(t, stdout, stderr)
+		})
 	}
 }

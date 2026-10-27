@@ -91,9 +91,9 @@ func (c *cli) parsePinArgs(args []string) (a pinArgs, code int, ok bool) {
 			pinUsage(c.stdout)
 			return pinArgs{}, exitOK, false
 		}
-		// The flag error holds untrusted argv, so it is escaped. See
-		// dispatch in cli.go.
-		return pinArgs{}, c.usageError("pin", "%s", termsafe.Quote(err.Error())), false
+		// The flag error holds untrusted argv, so it is escaped, after
+		// argErrorText hides a secret in it. See dispatch in cli.go.
+		return pinArgs{}, c.usageError("pin", "%s", termsafe.Quote(argErrorText(args, err.Error()))), false
 	}
 	if c.rejectArgs("pin", fs.Args()) {
 		return pinArgs{}, exitError, false
@@ -309,10 +309,14 @@ func (c *cli) findPinServer(ctx context.Context, accept, configPath, project str
 		return matches[0], true
 	}
 	if len(matches) == 0 {
+		// accept is user-typed argv and can hold a URL with a password.
+		// hideUserinfo runs before the cut, so the cut cannot split the URL
+		// before its '@' and leave the password unhidden.
+		name := cutName(hideUserinfo(accept))
 		if project != "" {
-			c.cmdPrintf("pin", "unknown server %s in project %s", cutName(accept), termsafe.QuoteCut(project, maxWarnPathRunes))
+			c.cmdPrintf("pin", "unknown server %s in project %s", name, termsafe.QuoteCut(project, maxWarnPathRunes))
 		} else {
-			c.cmdPrintf("pin", "unknown server %s", cutName(accept))
+			c.cmdPrintf("pin", "unknown server %s", name)
 		}
 		return discover.Server{}, false
 	}
@@ -348,9 +352,10 @@ func selectServers(servers []discover.Server, name, project string) []discover.S
 // printAmbiguous tells the user that more than one server has the name accept,
 // and lists where each one comes from, so the user can narrow it with --config
 // or --project.
-// The fields come from config files, so they are escaped and cut.
+// The fields come from config files, so they are escaped and cut. accept is
+// user-typed, so hideUserinfo hides a URL password in it before the cut.
 func (c *cli) printAmbiguous(accept string, matches []discover.Server) {
-	c.cmdPrintf("pin", "%d servers are named %s; narrow it with --config <file> or --project <path>:", len(matches), cutName(accept))
+	c.cmdPrintf("pin", "%d servers are named %s; narrow it with --config <file> or --project <path>:", len(matches), cutName(hideUserinfo(accept)))
 	for _, s := range matches {
 		line := "  client " + cutName(string(s.Client)) +
 			", source " + termsafe.QuoteCut(s.Source, maxWarnPathRunes) +
