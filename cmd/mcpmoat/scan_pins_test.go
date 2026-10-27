@@ -736,7 +736,7 @@ func TestScanPinsIgnore(t *testing.T) {
 				// scan reads the file only with --use-ignore-file. Without
 				// the flag the test would not show that the file cannot drop
 				// a pin finding.
-				flags = append(flags, "--use-ignore-file")
+				flags = append(flags, useIgnoreFileFlag)
 			}
 			firstScan(t, e, pinned...)
 
@@ -1080,7 +1080,7 @@ func TestScanPinsIgnoreFileWarningPerRule(t *testing.T) {
 
 	got := e.scan(fakeServers(map[string][]inspect.Tool{"srv": {
 		mkTool("a", "Add. X."), mkTool("b", "Echo. Y."), mkTool("d", "New."), mkTool("e", "New too."),
-	}}), "--use-ignore-file")
+	}}), useIgnoreFileFlag)
 
 	assertScanRun(t, got, scanWant{code: exitFindings, stderr: []string{
 		"mcpmoat scan: warning: .mcpmoat-ignore cannot ignore MOAT-T2-001; use --ignore on the command line\n",

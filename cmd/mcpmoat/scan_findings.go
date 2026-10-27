@@ -89,10 +89,9 @@ type configHit struct {
 // configServerHits holds what findings knows about one server after the
 // per-server cap, while it waits for the scan cap.
 type configServerHits struct {
-	// ref is the server of the rows.
+	// ref is the server of the rows. Its Name is the server name, also for
+	// the ignore key of the cap row.
 	ref report.ServerRef
-	// name is the name of the server, for the ignore key of the cap row.
-	name string
 	// kept holds the findings that the per-server cap keeps, in their first
 	// order. There are at most caps.perServer of them.
 	kept []rules.Finding
@@ -216,7 +215,6 @@ func (cc configChecks) findings(ignore *scanIgnores, servers []discover.Server) 
 		kept, omitted := cutConfigHits(hits, caps.perServer)
 		sh := configServerHits{
 			ref:     report.NewServerRef(s),
-			name:    s.Name,
 			kept:    make([]rules.Finding, 0, len(kept)),
 			start:   len(all),
 			omitted: len(omitted),
@@ -270,7 +268,7 @@ func (cc configChecks) findings(ignore *scanIgnores, servers []discover.Server) 
 		}
 		// The cap row goes through the ignore list too, but only --ignore can
 		// drop it (see fileCannotIgnore).
-		if pass(rules.FindingKey{RuleID: rules.RuleConfigFindingCap, Server: sh.name}) {
+		if pass(rules.FindingKey{RuleID: rules.RuleConfigFindingCap, Server: sh.ref.Name}) {
 			rows = append(rows, configCapRow(sh.ref, severity, omitted, limit))
 			perServer[i]++
 		}
@@ -282,6 +280,9 @@ func (cc configChecks) findings(ignore *scanIgnores, servers []discover.Server) 
 // row returns the report row of the config finding f of the server ref. The
 // severity and the texts come from the rule set (see findingRule).
 func (cc configChecks) row(ref report.ServerRef, f rules.Finding) report.FindingRow {
+	// findings already looked up this rule for the severity. The second
+	// lookup is accepted: it is a map lookup, and the first needs only the
+	// severity, so findings does not keep the rule.
 	rule, severity := findingRule(cc.set, f.RuleID)
 	return report.FindingRow{
 		ServerRef:   ref,
@@ -378,6 +379,41 @@ func configCapRow(ref report.ServerRef, severity rules.Severity, omitted, limit 
 func configCapText(omitted, limit int) string {
 	return fmt.Sprintf("%d more config %s not listed; limit %d",
 		omitted, plural(omitted, "finding is", "findings are"), limit)
+}
+
+// configStep runs the config rules (T4 and T5) on the servers, with the ignore
+// lists and the row caps of checks (see configChecks.findings). findings
+// prints nothing, so configStep prints the warnings of the step on stderr: one
+// for each rule ID that .mcpmoat-ignore cannot ignore (see
+// warnFileCannotIgnore), then one line when a cap cut the rows of one or more
+// servers (see configCapWarningText). That line prints even when --ignore
+// drops the cap rows. The lines hold rule IDs and counts only: no server
+// name, key or config text.
+//
+// counts holds the number of config rows of each server, by the index of the
+// server in servers.
+func (c *cli) configStep(checks configChecks, ignore *scanIgnores, servers []discover.Server) (rows []report.FindingRow, ignored map[string]int, counts []int) {
+	rows, ignored, counts, fileBlocked, cutServers := checks.findings(ignore, servers)
+	for _, id := range fileBlocked {
+		c.warnFileCannotIgnore(id)
+	}
+	// cutServers counts the servers that lost rows, also when --ignore
+	// dropped their cap rows. The report is not complete in both cases, so
+	// the warning prints in both cases, like the warning of the tool step.
+	if cutServers > 0 {
+		c.scanWarnf("%s", configCapWarningText(cutServers))
+	}
+	return rows, ignored, counts
+}
+
+// configCapWarningText returns the text of the warning for the servers that
+// lost config rows to a cap, for example "config findings were left out for
+// 2 servers; see MOAT-T4-005". It holds the count and fixed words only: no
+// server name. The text points to the rule ID and does not say that each
+// server has a MOAT-T4-005 finding, because --ignore can drop those rows.
+func configCapWarningText(servers int) string {
+	return fmt.Sprintf("config findings were left out for %d %s; see %s",
+		servers, plural(servers, "server", "servers"), rules.RuleConfigFindingCap)
 }
 
 // findingRule returns the rule with the given ID and its severity word. When

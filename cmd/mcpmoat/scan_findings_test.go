@@ -1270,12 +1270,12 @@ func TestConfigCapCutHits(t *testing.T) {
 				}
 				return out
 			}
-			if got := indexes(kept); !slices.Equal(got, tt.wantKept) && len(got)+len(tt.wantKept) > 0 {
+			if got := indexes(kept); !slices.Equal(got, tt.wantKept) {
 				t.Errorf("kept = %v, want %v", got, tt.wantKept)
 			}
 			gotOmitted := indexes(omitted)
 			slices.Sort(gotOmitted)
-			if !slices.Equal(gotOmitted, tt.wantOmitted) && len(gotOmitted)+len(tt.wantOmitted) > 0 {
+			if !slices.Equal(gotOmitted, tt.wantOmitted) {
 				t.Errorf("omitted = %v, want %v", gotOmitted, tt.wantOmitted)
 			}
 		})
@@ -1425,7 +1425,7 @@ func TestScanConfigCap(t *testing.T) {
 		},
 		{
 			name:       ".mcpmoat-ignore cannot drop the cap rows",
-			flags:      []string{"--use-ignore-file"},
+			flags:      []string{useIgnoreFileFlag},
 			ignoreFile: rules.RuleConfigFindingCap + "\n",
 			wantCode:   exitFindings,
 			wantLines: []lineWant{

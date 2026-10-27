@@ -13,6 +13,13 @@ import (
 // T1 to T5, and three digits. It is compiled once and never changed.
 var builtinIDPattern = regexp.MustCompile(`^MOAT-T[1-5]-[0-9]{3}$`)
 
+// maxBuiltinRemediationRunes is the longest remediation of a built-in rule,
+// in runes. Validate allows longer remediation text (maxRemediationRunes),
+// but the terminal report cuts rule text at maxRuleTextRunes (500) in
+// internal/report/findings.go. A built-in rule must fit, so its "Fix:" line
+// is never cut. Keep this value equal to report.maxRuleTextRunes.
+const maxBuiltinRemediationRunes = 500
+
 // CheckDocumented checks the strict requirements for a built-in rule
 // (NFR-05, NFR-07) and returns one problem text for each violation. It
 // returns nil when the rule meets all of them.
@@ -23,7 +30,8 @@ var builtinIDPattern = regexp.MustCompile(`^MOAT-T[1-5]-[0-9]{3}$`)
 //   - Risk is not empty, has no line break and has at most maxRiskRunes runes.
 //     This is a simple stand-in for "one sentence"; the check does not parse
 //     text;
-//   - Remediation is not empty;
+//   - Remediation is not empty and has at most maxBuiltinRemediationRunes
+//     runes, so the terminal report never cuts it;
 //   - there is at least one reference;
 //   - there is at least one should_match case and one should_not_match case;
 //   - for a rule with target schema, every case text is valid JSON. A schema
@@ -54,6 +62,8 @@ func CheckDocumented(r Rule) []string {
 	checkRisk(r.Risk, add)
 	if isBlank(r.Remediation) {
 		add("remediation is empty")
+	} else if n := utf8.RuneCountInString(r.Remediation); n > maxBuiltinRemediationRunes {
+		add("remediation has %d runes (at most %d)", n, maxBuiltinRemediationRunes)
 	}
 	if !hasText(r.References) {
 		add("no reference")

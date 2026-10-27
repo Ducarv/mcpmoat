@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"os"
 	"path/filepath"
 	"slices"
@@ -805,7 +806,7 @@ func TestAnalyzerCheckToolStopsAtEveryCheck(t *testing.T) {
 	}
 	a := mustAnalyzer(t, builtinSet(t))
 
-	full := newCountCtx(int(^uint(0) >> 1))
+	full := newCountCtx(math.MaxInt)
 	want, err := a.CheckTool(full, tool)
 	if err != nil || len(want) == 0 {
 		t.Fatalf("precondition: CheckTool(never done) = (%v, %v), want findings and no error", want, err)

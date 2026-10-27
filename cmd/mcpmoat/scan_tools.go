@@ -31,18 +31,26 @@ const toolRulesBudget = 5 * time.Second
 // toolRulesStepBudget is the wall-clock time that the whole tool rule step
 // can use, for all the servers together (issue #210). Without it, a hostile
 // --rules folder with slow regexes makes each server use its full
-// toolRulesBudget, so 20 servers take more than a minute and a half.
+// toolRulesBudget, so 20 servers take about 100 seconds.
 //
 // Each server gets a fair share of the time that is left (see serverShare).
 // The step stops at most one overshoot after this limit: one regex on one
 // form of a text, plus one build of the forms of one text, which cannot be
-// stopped (issue #146). A server that the step reaches after the limit is not
-// checked: it gets a rules.RuleAnalysisBudget finding for all its tools.
+// stopped (issue #146). A server that the step reaches after the limit, or
+// with a fair share under minServerShare, is not checked: it gets a
+// rules.RuleAnalysisBudget finding for all its tools.
 //
 // That overshoot comes out of the shared limit too. So servers early in the
 // order can use up the time of later servers. Those later servers get a
 // rules.RuleAnalysisBudget finding, never a silent pass.
 const toolRulesStepBudget = 30 * time.Second
+
+// minServerShare is the smallest fair share of the step limit that a server
+// needs to be checked (see checkTools). It is the rounding unit of the budget
+// in the warning of a cut server. A share under it cannot analyse anything:
+// the server would be cut at once, with the warning "stopped after 0s". So the
+// step treats such a server as a server that it reached after the limit.
+const minServerShare = time.Millisecond
 
 // toolChecker is the part of *rules.Analyzer that the tool rule step uses.
 // The step takes this interface, not the struct, so a test can pass a fake
@@ -138,9 +146,10 @@ const (
 // one warning on stderr with the budget that the server got, and goes on with
 // the next server. A budget of 0 or less is used up at once.
 //
-// When the step limit has passed before a server starts, the step does not
-// check that server. It adds the rules.RuleAnalysisBudget row for all the
-// tools of the server, as for a server that was cut. It prints no warning for
+// When the step limit has passed before a server starts, or the fair share of
+// the server is under minServerShare, the step does not check that server or
+// any server after it. It adds the rules.RuleAnalysisBudget row for all the
+// tools of each such server, as for a server that was cut. It prints no warning for
 // each such server, but one warning at the end of the step with their count
 // (see lateServersText). The JSON "complete" field stays true: the budget row
 // marks each server that was not fully checked.
@@ -193,7 +202,7 @@ func (c *cli) checkTools(ctx context.Context, checker toolChecker, setup scanSet
 
 	run := toolRulesRun{
 		c:                  c,
-		a:                  checker,
+		checker:            checker,
 		set:                setup.checks.set,
 		ignore:             ignore,
 		budget:             setup.toolBudget,
@@ -222,12 +231,22 @@ func (c *cli) checkTools(ctx context.Context, checker toolChecker, setup scanSet
 		// The deadline is always set: context.WithTimeout set it above.
 		deadline, _ := stepCtx.Deadline()
 		left := time.Until(deadline)
-		if stepCtx.Err() != nil || left <= 0 {
+		// servers counts this server and the ones after it. A late server
+		// counts too, until the loop reaches it, as in serverShare.
+		servers := len(todo) - i
+		// fair is the share of the step time of this server, before the
+		// per-server cap. A negative left gives a negative fair.
+		fair := left / time.Duration(servers)
+		// Once one server is late, all the servers after it are late too.
+		// Else a late server would leave its share to the next one, and the
+		// step would check that one for about 1 ms and cut it, with its own
+		// warning. So the late servers are always the last ones.
+		if late > 0 || stepCtx.Err() != nil || fair < minServerShare {
 			run.addLateServer(o)
 			late++
 			continue
 		}
-		budget := serverShare(run.budget, left, len(todo)-i)
+		budget := serverShare(run.budget, left, servers)
 		if err := run.checkServer(ctx, stepCtx, o, budget); err != nil {
 			return toolRulesResult{}, err
 		}
@@ -254,7 +273,8 @@ func serverShare(perServer, left time.Duration, servers int) time.Duration {
 }
 
 // lateServersText returns the text of the warning for the servers that the
-// step did not check, because the step limit had passed before they started.
+// step did not check, because the step limit had passed before they started,
+// or their fair share was under minServerShare.
 // It holds the limit and the count, and fixed words only: no server name.
 func lateServersText(limit time.Duration, late int) string {
 	return fmt.Sprintf("the %s time limit of the rule analysis ended; %d %s not checked",
@@ -263,10 +283,10 @@ func lateServersText(limit time.Duration, late int) string {
 
 // toolRulesRun holds the state of one toolRulesStep call.
 type toolRulesRun struct {
-	c      *cli
-	a      toolChecker
-	set    *rules.Set
-	ignore *scanIgnores
+	c       *cli
+	checker toolChecker
+	set     *rules.Set
+	ignore  *scanIgnores
 	// budget is the largest time budget of one server: scanSetup.toolBudget.
 	// A server can get less (see serverShare).
 	budget time.Duration
@@ -312,7 +332,7 @@ func (r *toolRulesRun) checkServer(ctx, stepCtx context.Context, o inspect.Outco
 	ref := report.NewServerRef(o.Server)
 	tools := o.Result.Tools
 	for i, t := range tools {
-		found, err := r.a.CheckTool(serverCtx, t)
+		found, err := r.checker.CheckTool(serverCtx, t)
 		// Keep the findings also when err is not nil: every finding that
 		// CheckTool returns is a real match.
 		for _, f := range found {
@@ -353,10 +373,11 @@ func (r *toolRulesRun) checkServer(ctx, stepCtx context.Context, o inspect.Outco
 }
 
 // addLateServer adds the rules.RuleAnalysisBudget row of the inspected server
-// o, which the step did not check because the step limit had passed. All its
-// tools count as not fully checked. The row is the same as for a server that
-// was cut (see budgetRow), so the gate and the ignore list treat it the same
-// way. It prints no warning: toolRulesStep prints one for all such servers.
+// o, which the step did not check because the step limit had passed, or its
+// fair share was under minServerShare (see checkTools). All its tools count as
+// not fully checked. The row is the same as for a server that was cut (see
+// budgetRow), so the gate and the ignore list treat it the same way. It prints
+// no warning: toolRulesStep prints one for all such servers.
 func (r *toolRulesRun) addLateServer(o inspect.Outcome) {
 	total := len(o.Result.Tools)
 	ref := report.NewServerRef(o.Server)
@@ -398,8 +419,9 @@ func (r *toolRulesRun) addTool(toolName string, row report.FindingRow) {
 	}
 }
 
-// capRank returns the number that flushTools sorts a row by. A severity that is
-// not valid counts as critical, so the cap never drops such a row before a
+// capRank returns the number that the caps sort a finding by: flushTools for
+// the tool rows and cutConfigHits for the config findings. A severity that is
+// not valid counts as critical, so a cap never drops such a finding before a
 // valid one. This is the rule of hasFailingFinding and rules.higherSeverity: an
 // unknown severity fails closed.
 func capRank(severity string) int {

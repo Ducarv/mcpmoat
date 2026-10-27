@@ -48,8 +48,9 @@ MEDIUM (1)
   server gets a fair share of the time that is left, but never more than 5 seconds. A server that
   uses up its share keeps the findings found so far, and gets one `MOAT-T1-023` finding with a
   `Reason:` line in place of `Tool:`. `scan` also prints one warning on stderr for that server,
-  with the share that it got. A server that `scan` reaches after the 30 seconds is not analysed:
-  it gets the same finding for all its tools. For these servers `scan` prints one line on stderr
+  with the share that it got. A server that `scan` reaches after the 30 seconds, or with a share
+  under 1 ms, is not analysed, and the servers after it are not analysed either. Each of them gets
+  the same finding for all its tools. For these servers `scan` prints one line on stderr
   for all of them, for example `mcpmoat scan: warning: the 30s time limit of the rule analysis
   ended; 3 servers were not checked`. Its severity and exit code are in
   [Exit codes](exit-codes.md).

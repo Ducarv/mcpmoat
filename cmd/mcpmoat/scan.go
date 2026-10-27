@@ -447,7 +447,7 @@ func (c *cli) scanWarnf(format string, a ...any) {
 // ignoreFileNote is the line that noteIgnoreFile prints on stderr when
 // .mcpmoat-ignore is in the working directory but --use-ignore-file is not
 // given. It is fixed text: it holds no path and no file content.
-const ignoreFileNote = "mcpmoat scan: note: .mcpmoat-ignore is not read; add --use-ignore-file to apply it"
+const ignoreFileNote = "mcpmoat scan: note: " + rules.IgnoreFileName + " is not read; add --use-ignore-file to apply it"
 
 // noteIgnoreFile prints ignoreFileNote on stderr when the working directory wd
 // has an entry named .mcpmoat-ignore of any type. It runs only without
@@ -654,41 +654,6 @@ func (c *cli) runScanSteps(ctx context.Context, res discover.Result, setup scanS
 		// report still prints, and scan exits with 2.
 		llmIncomplete: lr.incomplete(),
 	}, true
-}
-
-// configStep runs the config rules (T4 and T5) on the servers, with the ignore
-// lists and the row caps of checks (see configChecks.findings). findings
-// prints nothing, so configStep prints the warnings of the step on stderr: one
-// for each rule ID that .mcpmoat-ignore cannot ignore (see
-// warnFileCannotIgnore), then one line when a cap cut the rows of one or more
-// servers (see configCapWarningText). That line prints even when --ignore
-// drops the cap rows. The lines hold rule IDs and counts only: no server
-// name, key or config text.
-//
-// counts holds the number of config rows of each server, by the index of the
-// server in servers.
-func (c *cli) configStep(checks configChecks, ignore *scanIgnores, servers []discover.Server) (rows []report.FindingRow, ignored map[string]int, counts []int) {
-	rows, ignored, counts, fileBlocked, cutServers := checks.findings(ignore, servers)
-	for _, id := range fileBlocked {
-		c.warnFileCannotIgnore(id)
-	}
-	// cutServers counts the servers that lost rows, also when --ignore
-	// dropped their cap rows. The report is not complete in both cases, so
-	// the warning prints in both cases, like the warning of the tool step.
-	if cutServers > 0 {
-		c.scanWarnf("%s", configCapWarningText(cutServers))
-	}
-	return rows, ignored, counts
-}
-
-// configCapWarningText returns the text of the warning for the servers that
-// lost config rows to a cap, for example "config findings were left out for
-// 2 servers; see MOAT-T4-005". It holds the count and fixed words only: no
-// server name. The text points to the rule ID and does not say that each
-// server has a MOAT-T4-005 finding, because --ignore can drop those rows.
-func configCapWarningText(servers int) string {
-	return fmt.Sprintf("config findings were left out for %d %s; see %s",
-		servers, plural(servers, "server", "servers"), rules.RuleConfigFindingCap)
 }
 
 // runToolAndLLMSteps runs the tool rule step (see toolRulesStep) and then the

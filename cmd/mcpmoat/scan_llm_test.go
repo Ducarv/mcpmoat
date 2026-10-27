@@ -1362,7 +1362,7 @@ func TestScanLLMIgnore(t *testing.T) {
 					// scan reads the file only with --use-ignore-file. Without
 					// the flag the test would not show that the file cannot
 					// drop an LLM finding.
-					args = append(args, "--use-ignore-file")
+					args = append(args, useIgnoreFileFlag)
 				}
 				if jsonOut {
 					args = append(args, "--json")
@@ -1407,7 +1407,7 @@ func TestScanLLMIgnore(t *testing.T) {
 		writeTestFile(t, e.work, ".mcpmoat-ignore", "MOAT-T2-001\nMOAT-LLM-001\n")
 		changed := map[string][]inspect.Tool{"srv": {mkTool("t1", "Add. "+llmMarkHigh)}}
 
-		r := llmScan(t, e, changed, &llmFake{}, "--llm", "--use-ignore-file")
+		r := llmScan(t, e, changed, &llmFake{}, "--llm", useIgnoreFileFlag)
 
 		if r.code != exitFindings {
 			t.Errorf("exit code = %d, want %d (MOAT-T2-001 stays)\nstderr:\n%s", r.code, exitFindings, r.stderr)
@@ -1433,7 +1433,7 @@ func TestScanLLMIgnore(t *testing.T) {
 		writeTestFile(t, e.work, ".mcpmoat-ignore", "MOAT-T4-001 alpha\nMOAT-LLM-001 alpha\n")
 		alphaTools := map[string][]inspect.Tool{"alpha": {mkTool("t1", llmMarkMedium)}}
 
-		r := llmScan(t, e, alphaTools, &llmFake{}, "--llm", "--json", "--use-ignore-file")
+		r := llmScan(t, e, alphaTools, &llmFake{}, "--llm", "--json", useIgnoreFileFlag)
 
 		// The medium LLM finding stays, and the high MOAT-T4-001 is ignored.
 		if r.code != exitOK {
@@ -1568,7 +1568,7 @@ func TestScanLLMLongToolName(t *testing.T) {
 				}
 				writeTestFile(t, e.work, ".mcpmoat-ignore", tt.ruleID+" srv/"+entryTool+"\n")
 
-				r := llmScan(t, e, tools, &llmFake{}, "--llm", "--json", "--use-ignore-file")
+				r := llmScan(t, e, tools, &llmFake{}, "--llm", "--json", useIgnoreFileFlag)
 
 				if r.code != tt.code {
 					t.Errorf("exit code = %d, want %d\nstderr:\n%s", r.code, tt.code, r.stderr)

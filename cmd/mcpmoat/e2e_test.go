@@ -776,7 +776,7 @@ func TestE2EScanIgnore(t *testing.T) {
 		// Line 2 has an invalid rule ID, so it gets a warning and is skipped.
 		writeTestFile(t, work, rules.IgnoreFileName, "MOAT-T1-003\n/onlytool\n")
 
-		stdout, stderr, code := runBin(t, home, work, "scan", "--no-connect", "--use-ignore-file", "--ignore", "MOAT-T1-001")
+		stdout, stderr, code := runBin(t, home, work, "scan", "--no-connect", useIgnoreFileFlag, "--ignore", "MOAT-T1-001")
 
 		if code != exitOK {
 			t.Errorf("exit code = %d, want %d\nstdout:\n%s\nstderr:\n%s", code, exitOK, stdout, stderr)
@@ -839,7 +839,7 @@ func TestE2EScanIgnoreFileOptIn(t *testing.T) {
 
 		stdout, stderr, code := runRepo(t)
 
-		assertScanResult(t, code, stdout, stderr, scanWant{code: exitFindings, stderr: []string{ignoreFileNote + "\n"}})
+		assertScanResult(t, code, stdout, stderr, scanWant{code: exitFindings, stderr: []string{ignoreNoteLine + "\n"}})
 		assertFindingIDs(t, stdout, []string{"MOAT-T4-001", "MOAT-T4-003", "MOAT-T4-004"})
 		if n := stderrFileEntries(t, stderr); n != 0 {
 			t.Errorf("stderr says scan uses %d entries of the ignore file, want no such line\nstderr:\n%s", n, stderr)
@@ -852,7 +852,7 @@ func TestE2EScanIgnoreFileOptIn(t *testing.T) {
 	t.Run("with the flag", func(t *testing.T) {
 		t.Parallel()
 
-		stdout, stderr, code := runRepo(t, "--use-ignore-file")
+		stdout, stderr, code := runRepo(t, useIgnoreFileFlag)
 
 		assertScanResult(t, code, stdout, stderr, scanWant{code: exitOK, stderr: []string{"MOAT-T4-001 (1)"}})
 		assertFindingIDs(t, stdout, []string{"MOAT-T4-003", "MOAT-T4-004"})
@@ -871,7 +871,7 @@ func TestE2EScanIgnoreFileOptIn(t *testing.T) {
 		if code != exitFindings {
 			t.Errorf("exit code = %d, want %d\nstdout:\n%s\nstderr:\n%s", code, exitFindings, stdout, stderr)
 		}
-		if n := strings.Count(stderr, ignoreFileNote+"\n"); n != 1 {
+		if n := strings.Count(stderr, ignoreNoteLine+"\n"); n != 1 {
 			t.Errorf("stderr has the note %d times, want 1\nstderr:\n%s", n, stderr)
 		}
 		doc := decodeScanJSON(t, stdout)
@@ -1828,7 +1828,7 @@ func TestE2EScanJSONIgnored(t *testing.T) {
 	// not empty, but the exit code is exitOK: the default --fail-on is high.
 	writeTestFile(t, work, rules.IgnoreFileName, "# "+e2eIgnoreSecret+"\nMOAT-T4-001\nMOAT-T4-002\n")
 
-	stdout, stderr, code := runBin(t, home, work, "scan", "--no-connect", "--use-ignore-file", "--json")
+	stdout, stderr, code := runBin(t, home, work, "scan", "--no-connect", useIgnoreFileFlag, "--json")
 
 	if code != exitOK {
 		t.Errorf("exit code = %d, want %d\nstdout:\n%s\nstderr:\n%s", code, exitOK, stdout, stderr)

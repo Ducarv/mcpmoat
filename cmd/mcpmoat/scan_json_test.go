@@ -464,7 +464,7 @@ func TestScanJSONMatchesTerminal(t *testing.T) {
 			if tt.ignoreFile != "" {
 				writeTestFile(t, work, rules.IgnoreFileName, tt.ignoreFile)
 				// scan reads the file only with --use-ignore-file.
-				scanArgs = append(scanArgs, "--use-ignore-file")
+				scanArgs = append(scanArgs, useIgnoreFileFlag)
 			}
 			run := func(args ...string) (code int, stdout, stderr string) {
 				c, out, errOut := dirsCLI(t, home, work)
@@ -944,7 +944,7 @@ func TestScanJSONIgnored(t *testing.T) {
 					// scan reads the file only with --use-ignore-file. The
 					// base run below gets the flag too: it reads no file,
 					// because its working directory is empty.
-					args = append(args, "--use-ignore-file")
+					args = append(args, useIgnoreFileFlag)
 				}
 				run := func(extra ...string) (string, string) {
 					c, stdout, stderr := dirsCLI(t, home, work)
@@ -1011,7 +1011,7 @@ func TestScanJSONIgnoredNoFileText(t *testing.T) {
 			t.Parallel()
 
 			home, work := t.TempDir(), t.TempDir()
-			args := append(scanServersArgs(t, mode, home, ignoreTestServers()), "--json", "--use-ignore-file")
+			args := append(scanServersArgs(t, mode, home, ignoreTestServers()), "--json", useIgnoreFileFlag)
 			writeTestFile(t, work, rules.IgnoreFileName, file)
 			c, stdout, stderr := dirsCLI(t, home, work)
 
@@ -1074,7 +1074,7 @@ func TestScanJSONIgnoreFileWithoutFlag(t *testing.T) {
 			if !maps.Equal(gotCounts, wantCounts) {
 				t.Errorf("findings of the rules in the file = %v, want %v (the file is not read)", gotCounts, wantCounts)
 			}
-			if n := strings.Count(errOut, ignoreFileNote+"\n"); n != 1 {
+			if n := strings.Count(errOut, ignoreNoteLine+"\n"); n != 1 {
 				t.Errorf("stderr has the note line %d times, want 1\nstderr:\n%s", n, errOut)
 			}
 			if fileNoticePattern.MatchString(errOut) || ignoredLinePattern.MatchString(errOut) {

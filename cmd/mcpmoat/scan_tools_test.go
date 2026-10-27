@@ -362,7 +362,7 @@ func TestScanToolsIgnore(t *testing.T) {
 		{
 			name:  ".mcpmoat-ignore drops the row of its server and tool",
 			file:  "MOAT-T1-001 srv/read_file\n",
-			flags: []string{"--use-ignore-file"},
+			flags: []string{useIgnoreFileFlag},
 			code:  exitFindings,
 			want:  []toolFinding{writeRow},
 			stderr: []string{
@@ -374,7 +374,7 @@ func TestScanToolsIgnore(t *testing.T) {
 		{
 			name:  ".mcpmoat-ignore for another tool keeps the row",
 			file:  "MOAT-T1-001 srv/write_file\n",
-			flags: []string{"--use-ignore-file"},
+			flags: []string{useIgnoreFileFlag},
 			code:  exitFindings,
 			want:  []toolFinding{readRow, writeRow},
 			stderr: []string{
@@ -410,14 +410,20 @@ func TestScanToolsIgnore(t *testing.T) {
 // (issue #208): one entry for each description and schema rule, MOAT-T1-001
 // to MOAT-T1-022 and MOAT-T3-001, and one for the budget rule MOAT-T1-023.
 // It has no server and no tool, so each entry applies to every server.
+// entries is the number of lines that it wrote, so a new rule ID in the list
+// changes it too.
 func hostileIgnoreFile() (content string, entries int) {
 	var b strings.Builder
-	for i := 1; i <= 22; i++ {
-		fmt.Fprintf(&b, "MOAT-T1-%03d\n", i)
+	add := func(id string) {
+		b.WriteString(id + "\n")
+		entries++
 	}
-	b.WriteString("MOAT-T3-001\n")
-	b.WriteString(rules.RuleAnalysisBudget + "\n")
-	return b.String(), 24
+	for i := 1; i <= 22; i++ {
+		add(fmt.Sprintf("MOAT-T1-%03d", i))
+	}
+	add("MOAT-T3-001")
+	add(rules.RuleAnalysisBudget)
+	return b.String(), entries
 }
 
 // TestScanToolsHostileIgnoreFile is the acceptance test of issue #208 (FR-10,
@@ -433,10 +439,10 @@ func hostileIgnoreFile() (content string, entries int) {
 //     stay in the --json findings, the exit code is 1, ignored.total and
 //     ignored.file_entries are 0, and stderr has the note that the file is not
 //     read. This case fails if the opt-in is removed: then the file drops the
-//     rows, the exit code is 0 and file_entries is 24.
+//     rows, the exit code is 0 and file_entries is the number of entries.
 //   - With --use-ignore-file, the user opted in, so the file drops the T1 and
 //     T3 rows. The JSON document still shows it: ignored.rules counts each
-//     dropped rule and ignored.file_entries is 24.
+//     dropped rule and ignored.file_entries is the number of entries.
 //   - With --use-ignore-file and a used-up budget, the MOAT-T1-023 row stays,
 //     and stderr has the "cannot ignore" warning. This case fails if
 //     MOAT-T1-023 is taken off the guard list (fileCannotIgnore): then the file
@@ -484,11 +490,11 @@ func TestScanToolsHostileIgnoreFile(t *testing.T) {
 			code:    exitFindings,
 			want:    poisonRows,
 			ignored: report.JSONIgnored{},
-			stderr:  []string{ignoreFileNote, pinnedLine(server, 3)},
+			stderr:  []string{ignoreNoteLine, pinnedLine(server, 3)},
 		},
 		{
 			name:   "with --use-ignore-file the drop is in the JSON ignored counts",
-			args:   []string{"--use-ignore-file"},
+			args:   []string{useIgnoreFileFlag},
 			budget: time.Hour,
 			code:   exitOK,
 			ignored: report.JSONIgnored{
@@ -504,7 +510,7 @@ func TestScanToolsHostileIgnoreFile(t *testing.T) {
 		},
 		{
 			name:    "with --use-ignore-file the file cannot drop MOAT-T1-023",
-			args:    []string{"--use-ignore-file"},
+			args:    []string{useIgnoreFileFlag},
 			budget:  usedUpBudget,
 			code:    exitFindings,
 			want:    []report.JSONFinding{budgetJSONRow(server, "high", 3, 3)},
@@ -518,7 +524,7 @@ func TestScanToolsHostileIgnoreFile(t *testing.T) {
 		},
 		{
 			name:   "--ignore drops MOAT-T1-023",
-			args:   []string{"--use-ignore-file", "--ignore", rules.RuleAnalysisBudget},
+			args:   []string{useIgnoreFileFlag, "--ignore", rules.RuleAnalysisBudget},
 			budget: usedUpBudget,
 			code:   exitOK,
 			ignored: report.JSONIgnored{
@@ -870,7 +876,7 @@ func TestScanToolsInterrupted(t *testing.T) {
 			}))
 			c.stderr = stderr
 			c.ctx = ctx
-			args := []string{"scan", "--config", e.config, "--use-ignore-file"}
+			args := []string{"scan", "--config", e.config, useIgnoreFileFlag}
 			if jsonOut {
 				args = append(args, "--json")
 			}
@@ -933,7 +939,7 @@ func nativeIgnoreCases(id, tool string) []nativeIgnoreCase {
 func (tc nativeIgnoreCase) args() []string {
 	out := slices.Clone(tc.flags)
 	if tc.file != "" {
-		out = append(out, "--use-ignore-file")
+		out = append(out, useIgnoreFileFlag)
 	}
 	return out
 }
@@ -1016,7 +1022,7 @@ func TestScanToolsBudgetFileWarningOnce(t *testing.T) {
 		"srv-b": {mkTool("mul_numbers", "Multiply."), mkTool("div_numbers", "Divide.")},
 	})
 
-	got := scanWithBudget(e, insp, budget, "--use-ignore-file")
+	got := scanWithBudget(e, insp, budget, useIgnoreFileFlag)
 
 	assertScanRun(t, got, scanWant{code: exitFindings})
 	assertToolFindings(t, got.stdout,
@@ -1678,7 +1684,7 @@ func TestScanToolsCapPerServer(t *testing.T) {
 		e := newPinEnv(t, threeServers())
 		writeTestFile(t, e.work, rules.IgnoreFileName, rules.RuleToolFindingCap+"\n")
 
-		got := scanWithCap(e, insp(), limit, "--use-ignore-file")
+		got := scanWithCap(e, insp(), limit, useIgnoreFileFlag)
 
 		assertScanRun(t, got, scanWant{code: exitFindings})
 		assertToolFindings(t, got.stdout, rows...)
@@ -1859,6 +1865,7 @@ type blockingChecker struct {
 	calls  []checkCall
 }
 
+// CheckTool records the call, runs onCall and blocks until ctx ends.
 func (b *blockingChecker) CheckTool(ctx context.Context, tl inspect.Tool) ([]rules.TextFinding, error) {
 	now := time.Now()
 	deadline, ok := ctx.Deadline()
@@ -1943,10 +1950,13 @@ func assertStepBudgetRows(t *testing.T, rows []report.FindingRow, names []string
 // of the first call plus 100 ms, because checkTools sets it before that call.
 //
 // Most servers are cut while they run and get their own warning, with the
-// budget that they got. On a busy machine the step limit can pass before the
-// last servers start. Those servers are not checked, and one summary line
-// counts them. So the test accepts any split between the two, but each server
-// must be in exactly one of them, in order.
+// budget that they got. That budget is at least minServerShare (1 ms), so the
+// warning never shows "0s". On a busy machine the overshoot of each cut eats
+// into the time of the servers after it. Then the step limit can pass before
+// the last servers start, or their share can drop under 1 ms. Those servers
+// are not checked, and one summary line counts them. They are always the last
+// servers. So the test accepts any split between the two, but each server must
+// be in exactly one of them, in order.
 func TestScanToolsStepBudgetFairShare(t *testing.T) {
 	t.Parallel()
 
@@ -1979,7 +1989,7 @@ func TestScanToolsStepBudgetFairShare(t *testing.T) {
 		t.Fatalf("CheckTool was not called, want a call for at least the first server\nstderr:\n%s", stderr)
 	}
 	late := servers - len(calls)
-	t.Logf("%d servers were cut while they ran, %d started after the step limit", len(calls), late)
+	t.Logf("%d servers were cut while they ran, %d were late", len(calls), late)
 	stepUpper := calls[0].now.Add(step)
 	for i, call := range calls {
 		// The cut comes in the first tool of each server.
@@ -2016,14 +2026,16 @@ func TestScanToolsStepBudgetFairShare(t *testing.T) {
 			continue
 		}
 		got, err := time.ParseDuration(strings.TrimSuffix(strings.TrimPrefix(line, head), tail))
-		if err != nil || got < 0 || got > step {
-			t.Errorf("stderr line %d: budget %q (error %v), want a duration from 0 to %s", i+1, line, err, step)
+		// A cut server had a share of at least 1 ms, and the warning rounds
+		// the budget to milliseconds, so it shows at least 1ms.
+		if err != nil || got < time.Millisecond || got > step {
+			t.Errorf("stderr line %d: budget %q (error %v), want a duration from 1ms to %s", i+1, line, err, step)
 			continue
 		}
 		// The first server starts with almost the whole step left, so its
-		// share is a small real budget: more than 0 and at most step/servers.
-		if i == 0 && (got <= 0 || got > step/servers) {
-			t.Errorf("stderr line 1: budget %s, want more than 0 and at most %s", got, step/servers)
+		// share is at most step/servers.
+		if i == 0 && got > step/servers {
+			t.Errorf("stderr line 1: budget %s, want at most %s", got, step/servers)
 		}
 	}
 	if late > 0 {
@@ -2079,6 +2091,161 @@ func TestScanToolsStepBudgetUsedUp(t *testing.T) {
 			}
 			assertStderrLines(t, stderr.String(), []lineWant{exactLine(lateWarning("-1ns", servers))})
 		})
+	}
+}
+
+// TestScanToolsStepBudgetShareTooSmall checks a step limit that has time left
+// but gives each server a share under minServerShare (1 ms): checkTools calls
+// CheckTool for no server, gives each server a MOAT-T1-023 row for all its
+// tools, and prints exactly one summary line with their count, and no warning
+// for each server. The line shows the step limit.
+//
+// The time left is never more than the step limit, so the share of the first
+// server is under 1 ms on any machine. The case with 20 servers and 10 ms also
+// checks that a late server stays late for the rest of the step: the 12th
+// server has only 9 servers left with it, so its own share would be about
+// 1.1 ms. Without that rule, CheckTool would get calls for the last servers.
+func TestScanToolsStepBudgetShareTooSmall(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		servers int
+		step    time.Duration
+		limit   string // the step limit as the summary line prints it
+	}{
+		{name: "20 servers and 10 ms", servers: 20, step: 10 * time.Millisecond, limit: "10ms"},
+		{name: "2 servers and 1 ms", servers: 2, step: time.Millisecond, limit: "1ms"},
+		{name: "1 server and 999 µs", servers: 1, step: 999 * time.Microsecond, limit: "999µs"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			c, _, stderr := newTestCLI(fakeGetenv(nil), testBuild)
+			checker := &blockingChecker{t: t}
+			outcomes, names := stepOutcomes(tt.servers)
+			counts := make([]int, tt.servers)
+
+			res, err := c.checkTools(t.Context(), checker, stepSetup(time.Hour, tt.step), outcomes, &scanIgnores{}, counts)
+
+			if err != nil {
+				t.Fatalf("checkTools error = %v, want nil\nstderr:\n%s", err, stderr)
+			}
+			if calls := checker.recorded(); len(calls) != 0 {
+				t.Errorf("CheckTool calls = %d, want 0 (each share is under 1 ms)", len(calls))
+			}
+			assertStepBudgetRows(t, res.rows, names)
+			if res.ignored != nil {
+				t.Errorf("ignored = %v, want nil", res.ignored)
+			}
+			for i, n := range counts {
+				if n != 1 {
+					t.Errorf("counts[%d] = %d, want 1 (the budget row)", i, n)
+				}
+			}
+			assertStderrLines(t, stderr.String(), []lineWant{exactLine(lateWarning(tt.limit, tt.servers))})
+		})
+	}
+}
+
+// overrunChecker is a fake toolChecker. Its first CheckTool call finds
+// nothing and returns only overrun after the deadline of its context, like an
+// analyzer that cannot stop at once (issue #146). So the first server uses
+// time of the servers after it. The later calls act like the calls of
+// blockingChecker.
+type overrunChecker struct {
+	blockingChecker
+	overrun time.Duration
+}
+
+// CheckTool records the call. On the first call it returns overrun after the
+// deadline of ctx. On a later call it blocks until ctx ends.
+func (o *overrunChecker) CheckTool(ctx context.Context, tl inspect.Tool) ([]rules.TextFinding, error) {
+	if len(o.recorded()) > 0 {
+		return o.blockingChecker.CheckTool(ctx, tl)
+	}
+	now := time.Now()
+	deadline, ok := ctx.Deadline()
+	o.mu.Lock()
+	o.calls = append(o.calls, checkCall{tool: tl.Name, now: now, deadline: deadline, hasDeadline: ok})
+	o.mu.Unlock()
+	if !ok {
+		o.t.Errorf("CheckTool: the context has no deadline")
+		return nil, errors.New("fake check: the context has no deadline")
+	}
+	// The timer stands for the work of the analyzer after the deadline. It
+	// is not a wait for another goroutine: ctx.Done below is that wait.
+	timer := time.NewTimer(time.Until(deadline.Add(o.overrun)))
+	defer timer.Stop()
+	<-timer.C
+	<-ctx.Done()
+	return nil, fmt.Errorf("fake check of a tool: %w", ctx.Err())
+}
+
+// TestScanToolsStepBudgetLateSticky checks that once a server is late, every
+// server after it is late too, also when the share of a later server alone
+// would be 1 ms or more. 10 servers, a step limit of 100 ms, one hour for each
+// server. The first server gets at most 10 ms and its check runs on after its
+// deadline (overrunChecker), so that at most 4 ms of the step are left after
+// it:
+//
+//   - The deadline of the first server is at most 90 ms before the step
+//     deadline (9 shares of at most 10 ms), so 86 ms after it leaves at most
+//     4 ms. The second server has 9 servers left with it, so its share is at
+//     most 0.45 ms: it is late.
+//   - On a normal machine about 4 ms are left, so the 8th server, with 3
+//     servers left, would have a share of about 1.3 ms. Without the rule that
+//     a late server stays late, CheckTool would get a call for it.
+//
+// The test asserts on the rows, the calls and the stderr lines, not on time:
+// one call (the first server, cut on tool_a, with its own warning), then one
+// summary line for the 9 late servers.
+func TestScanToolsStepBudgetLateSticky(t *testing.T) {
+	t.Parallel()
+
+	const (
+		servers = 10
+		step    = 100 * time.Millisecond
+		// overrun leaves at most 4 ms after the first server: its deadline is
+		// at most step*(servers-1)/servers before the step deadline.
+		overrun = step*(servers-1)/servers - 4*time.Millisecond
+	)
+	c, _, stderr := newTestCLI(fakeGetenv(nil), testBuild)
+	checker := &overrunChecker{blockingChecker: blockingChecker{t: t}, overrun: overrun}
+	outcomes, names := stepOutcomes(servers)
+	counts := make([]int, servers)
+
+	res, err := c.checkTools(t.Context(), checker, stepSetup(time.Hour, step), outcomes, &scanIgnores{}, counts)
+
+	if err != nil {
+		t.Fatalf("checkTools error = %v, want nil\nstderr:\n%s", err, stderr)
+	}
+	calls := checker.recorded()
+	if len(calls) != 1 || calls[0].tool != "tool_a" {
+		tools := make([]string, len(calls))
+		for i, call := range calls {
+			tools[i] = call.tool
+		}
+		t.Fatalf("CheckTool calls = %d %v, want one call for tool_a of the first server\nstderr:\n%s", len(calls), tools, stderr)
+	}
+	// The first server was cut on tool_a, so its row also counts both tools.
+	assertStepBudgetRows(t, res.rows, names)
+	if res.ignored != nil {
+		t.Errorf("ignored = %v, want nil", res.ignored)
+	}
+	for i, n := range counts {
+		if n != 1 {
+			t.Errorf("counts[%d] = %d, want 1 (the budget row)", i, n)
+		}
+	}
+	assertStderrLines(t, stderr.String(), []lineWant{
+		prefixLine(scanWarnPrefix + "server " + names[0] + ": the rule analysis stopped after "),
+		exactLine(lateWarning("100ms", servers-1)),
+	})
+	const tail = "; 2 of 2 tools not fully checked"
+	if first := nonEmptyLines(stderr.String())[0]; !strings.HasSuffix(first, tail) {
+		t.Errorf("stderr line 1 = %q, want it to end with %q", first, tail)
 	}
 }
 
@@ -2228,6 +2395,11 @@ func TestScanToolsStepInterrupted(t *testing.T) {
 func TestScanToolsNilAnalyzer(t *testing.T) {
 	t.Parallel()
 
+	// Only the used-up step limit finds a missing nil guard: a nil
+	// *rules.Analyzer is safe on both methods (CheckTool and MaxSeverity), so
+	// with one hour the step would find nothing without the guard too. That
+	// subtest shows the normal path. With a used-up limit and no guard, the
+	// step would add a late-server row for each server.
 	for _, step := range []time.Duration{time.Hour, usedUpBudget} {
 		t.Run(fmt.Sprintf("step limit %s", step), func(t *testing.T) {
 			t.Parallel()

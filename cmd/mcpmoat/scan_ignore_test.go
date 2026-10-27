@@ -33,12 +33,15 @@ const ignoreUsageMsg = "for flag -ignore: --ignore needs a rule ID"
 // getwd fails.
 const ignoreCwdWarning = "mcpmoat scan: warning: cannot read the working directory; .mcpmoat-ignore is not read"
 
-// useIgnoreFileFlag is the flag that makes scan read .mcpmoat-ignore.
+// useIgnoreFileFlag is the flag that makes scan read .mcpmoat-ignore. The
+// tests of this package use it as a scan argument.
 const useIgnoreFileFlag = "--use-ignore-file"
 
 // ignoreNoteLine is the stderr line of scan without --use-ignore-file when the
-// working directory holds an entry named .mcpmoat-ignore. The test keeps its
-// own copy of the text, so a change of the text in scan.go fails the tests.
+// working directory holds an entry named .mcpmoat-ignore. The tests keep their
+// own copy of the text (not ignoreFileNote of scan.go), so a change of the text
+// in scan.go fails the tests. Every test of this package that checks the note
+// uses this constant.
 const ignoreNoteLine = "mcpmoat scan: note: .mcpmoat-ignore is not read; add --use-ignore-file to apply it"
 
 // ignoreMarker is a marker inside the bad lines of the ignore files of these
@@ -496,10 +499,9 @@ func TestScanIgnoreHiddenHighFinding(t *testing.T) {
 
 // TestScanIgnoreFile checks the .mcpmoat-ignore file in the working directory
 // in auto-discovery mode, with --use-ignore-file. Valid entries give one
-// notice with their number. A
-// malformed line or a file that scan cannot read gives a warning. The exit
-// code and stdout stay the same as without the file, and no warning shows
-// file content.
+// notice with their number. A malformed line or a file that scan cannot read
+// gives a warning. The exit code and stdout stay the same as without the file,
+// and no warning shows file content.
 func TestScanIgnoreFile(t *testing.T) {
 	t.Parallel()
 

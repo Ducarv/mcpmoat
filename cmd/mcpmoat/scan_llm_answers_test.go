@@ -464,7 +464,7 @@ func TestScanLLMNoToolName(t *testing.T) {
 			if tt.ignoreFile != "" {
 				writeTestFile(t, e.work, ".mcpmoat-ignore", tt.ignoreFile)
 				// scan reads the file only with --use-ignore-file.
-				args = append(args, "--use-ignore-file")
+				args = append(args, useIgnoreFileFlag)
 			}
 			r := llmScan(t, e, tools, &llmFake{}, args...)
 

@@ -30,10 +30,11 @@ This page lists what mcpmoat does not do, so you know how far to trust a clean s
   scan applies only the built-in config checks` on stderr.
 - The rule analysis has a time limit of 30 seconds for all servers together. Each server gets a
   fair share of the time that is left, but never more than 5 seconds. A server that uses up its
-  share, or that `scan` reaches after the limit, gets a `MOAT-T1-023` finding (see
+  share, or that `scan` does not analyse, gets a `MOAT-T1-023` finding (see
   [Exit codes](exit-codes.md)), and its tools that were not fully checked can hide a malicious
-  text. A server reached after the limit is not analysed at all. Before this limit, each server
-  had its own 5 seconds, one after the other, so 20 servers could take about 2 minutes.
+  text. `scan` does not analyse a server that it reaches after the limit or with a share under
+  1 ms, or any server after it. Before this limit, each server
+  had its own 5 seconds, one after the other, so 20 servers could take about 100 seconds.
 - The rule analysis step takes at most 30 seconds plus one overshoot. The overshoot is the part of
   an analysis that cannot stop at its deadline: one build of the match forms of one text (#146)
   and one regex on one form (the Go `regexp` package has no context). It is up to about 1 second

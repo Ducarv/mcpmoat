@@ -217,7 +217,7 @@ func TestScanFailOnIgnored(t *testing.T) {
 				if tt.file != "" {
 					writeTestFile(t, e.work, rules.IgnoreFileName, tt.file)
 					// scan reads the file only with --use-ignore-file.
-					args = append(args, "--use-ignore-file")
+					args = append(args, useIgnoreFileFlag)
 				}
 				args = append(args, tt.flags...)
 

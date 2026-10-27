@@ -841,7 +841,8 @@ for servers to start. Analysis itself under 1 s.
 - Benchmark: rule analysis of 10 servers with 20 tools each runs in under 1 s.
 - A hostile server or `--rules` folder cannot stretch the rule analysis without limit: the step
   has a 30 s limit for all servers (at most 5 s for each), plus one regex and one form build that
-  cannot stop at the deadline (#210). A server that it cuts or does not reach gets `MOAT-T1-023`.
+  cannot stop at the deadline (#210). A server that it cuts or does not reach in time gets
+  `MOAT-T1-023`. A share under 1 ms counts as not reached, for that server and the ones after it.
 - Integration: scanning 10 fixture servers concurrently finishes in under 15 s.
 
 **NFR-04: Project's own security.** stdio servers run without inheriting extra secrets and with
