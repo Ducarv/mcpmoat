@@ -15,6 +15,7 @@ import (
 
 	"github.com/Ducarv/mcpmoat/internal/discover"
 	"github.com/Ducarv/mcpmoat/internal/inspect"
+	"github.com/Ducarv/mcpmoat/internal/pins"
 	"github.com/Ducarv/mcpmoat/internal/report"
 	"github.com/Ducarv/mcpmoat/internal/rules"
 	"github.com/Ducarv/mcpmoat/internal/termsafe"
@@ -667,19 +668,29 @@ func (c *cli) writeScanReport(servers []discover.Server, statuses []report.Serve
 }
 
 // savePinned saves the first-run pins of the pin step and, only when the save
-// worked, prints the "pinned N tools" notices. It returns false when ctx ended
-// (the user stopped the scan while the report printed), or when the store
-// cannot be read again or saved. The report is already out, so an error here
+// worked, prints the "pinned N tools" notices. Before them, it prints a notice
+// when the save created a new pins file (see printNewPinsFile). It returns
+// false when ctx ended (the user stopped the scan while the report printed),
+// when the store cannot be read again or saved, or when a server did not fit
+// in the pins file (see below). The report is already out, so an error here
 // cannot hide it. It writes nothing when no server was pinned, so a scan of
 // pinned servers never writes pins.json (only "pin --accept" re-pins).
 //
 // The scan took a long time since it read pins.json first (it connected to the
 // servers), and another scan or "pin --accept" may have changed the file. So
-// savePinned reads the file again and adds each server only if the new store has
-// no entry for it. It never overwrites an entry that another run wrote, and it
-// prints no notice for it. This makes the window for a lost update short. It does
-// not close it: two runs can still read and save at the same moment. A lock on
-// the file is issue #150.
+// savePinned reads the file again, with the lock on the pins directory (see
+// readPinsLocked), and holds the lock until the save is done. No other run
+// that locks can read or save between this read and this save, so no update is
+// lost. Only a file system that cannot lock leaves that window open, and
+// readPinsLocked warns about it. savePinned adds each server only if the
+// locked store has no entry for it. It never overwrites an entry that another
+// run wrote, and it prints no notice for it.
+//
+// Another run can also have made the file larger after the report, so a
+// server that fitted then may not fit now (pins.ErrStoreFull from Set). That
+// server is not pinned and gets a warning on stderr. The other servers are
+// still saved, and savePinned returns false, so scan exits with 2 and the
+// refusal is never silent.
 func (c *cli) savePinned(ctx context.Context, pr pinReport) bool {
 	if len(pr.pinned) == 0 {
 		return true
@@ -689,11 +700,15 @@ func (c *cli) savePinned(ctx context.Context, pr pinReport) bool {
 	if c.interrupted(ctx, "scan") {
 		return false
 	}
-	store, ok := c.readPins("scan")
+	store, path, release, ok := c.readPinsLocked(ctx, "scan")
+	// release is never nil. The deferred call frees the lock when savePinned
+	// returns, so the lock covers the read, the Set calls and the Save.
+	defer release()
 	if !ok {
 		return false
 	}
 	var saved []pinnedServer
+	full := false // true when Set refused at least one server with ErrStoreFull
 	for _, ps := range pr.pinned {
 		if other, found := store.Get(ps.id); found {
 			// Another run pinned the server meanwhile. Its pins stay, but
@@ -703,23 +718,34 @@ func (c *cli) savePinned(ctx context.Context, pr pinReport) bool {
 			}
 			continue
 		}
-		// pinOutcomes checked the pins with the same rules, so an error here
+		err := store.Set(ps.id, ps.snap)
+		if errors.Is(err, pins.ErrStoreFull) {
+			// The store did not change, so the other servers can still be
+			// saved. This one is not pinned: say so, and exit with 2.
+			c.scanWarnf("server %s not pinned: the pins file is full (%s)", cutName(ps.name), pinsFileLimit)
+			full = true
+			continue
+		}
+		// pinOutcomes checked the pins with the same rules, so any other error
 		// is not expected.
-		if err := store.Set(ps.id, ps.snap); err != nil {
+		if err != nil {
 			c.cmdErr("scan", "cannot set the pins of a server", err)
 			return false
 		}
 		saved = append(saved, ps)
 	}
 	if len(saved) == 0 {
-		return true
+		return !full
 	}
 	if err := store.Save(); err != nil {
 		c.cmdErr("scan", "cannot save the pins file", err)
 		return false
 	}
+	if !store.Existed() {
+		c.printNewPinsFile("scan", path)
+	}
 	c.printPinned(saved)
-	return true
+	return !full
 }
 
 // inspectAndPin reads the pins store, inspects the servers with c.inspector,

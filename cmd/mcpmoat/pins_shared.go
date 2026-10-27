@@ -1,7 +1,9 @@
 package main
 
 import (
+	"context"
 	"errors"
+	"path/filepath"
 
 	"github.com/Ducarv/mcpmoat/internal/discover"
 	"github.com/Ducarv/mcpmoat/internal/inspect"
@@ -46,9 +48,8 @@ func serverIdentity(s discover.Server) pins.Identity {
 // a bad store with an empty one. Both read the store before they start any
 // server, so a bad file stops them before a stdio server runs (exit code 2).
 func (c *cli) readPins(cmd string) (*pins.Store, bool) {
-	path, err := pins.DefaultPath(c.getenv, c.homeDir)
-	if err != nil {
-		c.cmdErr(cmd, "cannot find the pins file", err)
+	path, ok := c.pinsPath(cmd)
+	if !ok {
 		return nil, false
 	}
 	store, err := pins.Load(path)
@@ -57,6 +58,89 @@ func (c *cli) readPins(cmd string) (*pins.Store, bool) {
 		return nil, false
 	}
 	return store, true
+}
+
+// pinsPath returns the path of pins.json, from pins.DefaultPath with the
+// getenv and homeDir of the cli. It returns false, after a message on stderr
+// for the command cmd, when the path is not known.
+func (c *cli) pinsPath(cmd string) (string, bool) {
+	path, err := pins.DefaultPath(c.getenv, c.homeDir)
+	if err != nil {
+		c.cmdErr(cmd, "cannot find the pins file", err)
+		return "", false
+	}
+	return path, true
+}
+
+// readPinsLocked reads the pins store like readPins, but with the lock on the
+// pins directory (pins.LoadLocked), for a run that changes and saves the pins.
+// It waits up to c.pinsLockWait for another run that holds the lock. It
+// returns the store, the path of pins.json (for printNewPinsFile) and the
+// release function of the lock.
+//
+// The caller must hold the lock through Save, so it defers release at once:
+//
+//	store, path, release, ok := c.readPinsLocked(ctx, "scan")
+//	defer release()
+//	if !ok { ... }
+//
+// release is never nil, also when ok is false (then it does nothing), so the
+// defer is safe on every path.
+//
+// ok is false, after a message on stderr for the command cmd ("scan" or
+// "pin"), when the path is not known or the file cannot be read; the caller
+// then exits with 2. When another run held the lock for the whole wait, a
+// second line says so. When ctx ended during the wait (the process got a
+// signal), the message is interruptedText.
+//
+// When the file system cannot lock the pins directory, LoadLocked goes on
+// without the lock. readPinsLocked then prints one warning: a parallel run can
+// still lose an update.
+func (c *cli) readPinsLocked(ctx context.Context, cmd string) (store *pins.Store, path string, release func(), ok bool) {
+	noop := func() {}
+	path, ok = c.pinsPath(cmd)
+	if !ok {
+		return nil, "", noop, false
+	}
+	store, release, err := pins.LoadLocked(ctx, path, c.pinsLockWait)
+	if err != nil {
+		// A signal during the wait: say "interrupted", as the other steps do.
+		if c.interrupted(ctx, cmd) {
+			return nil, "", release, false
+		}
+		c.cmdErr(cmd, "cannot read the pins file", err)
+		if errors.Is(err, pins.ErrLocked) {
+			c.cmdPrintf(cmd, "%s", pinsLockedText)
+		}
+		return nil, "", release, false
+	}
+	if store.Unlocked() {
+		c.warnf(cmd, "the file system of the pins directory %s does not support file locks, so a parallel run can overwrite these pins",
+			termsafe.QuoteCut(filepath.Dir(path), maxWarnPathRunes))
+	}
+	return store, path, release, true
+}
+
+// pinsFileLimit is the size limit of pins.json, as the messages show it. It
+// must match the limit in internal/pins (maxFileSize), which Set enforces with
+// pins.ErrStoreFull.
+const pinsFileLimit = "32 MiB"
+
+// pinsLockedText is the line that readPinsLocked prints after the read error
+// when another run held the lock on the pins directory for the whole wait. It
+// is fixed text.
+const pinsLockedText = "another mcpmoat run is updating the pins file; run the command again in a moment"
+
+// printNewPinsFile prints one line on stderr for the command cmd: the save
+// created a new pins file at path. The caller prints it after a successful
+// Save when the store did not exist (pins.Store.Existed is false), before the
+// lines that say what was pinned. On a first run the line is expected. On a
+// later run it tells the user that the old file is gone, so every server
+// looked new and was pinned with no alert. path comes from the environment,
+// so it is escaped and cut.
+func (c *cli) printNewPinsFile(cmd, path string) {
+	c.cmdPrintf(cmd, "no pins file was found, so a new one was created at %s; if this is not your first run, the old file was removed or moved",
+		termsafe.QuoteCut(path, maxWarnPathRunes))
 }
 
 // pinnable returns the pins of the tools of the server id. It returns an error
