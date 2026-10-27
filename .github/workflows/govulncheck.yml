@@ -45,8 +45,8 @@ jobs:
   notify-failure:
     needs: govulncheck
     # A scan that hits its timeout may end as cancelled, not failure. Both
-    # count as a failed check. check-tool-pins.sh and notify-failure-test.sh
-    # match the next line exactly. Change all three together.
+    # count as a failed check. internal/pincheck and notify-failure-test.sh
+    # match the next value exactly. Change all three together.
     if: failure() || needs.govulncheck.result == 'cancelled'
     runs-on: ubuntu-latest
     timeout-minutes: 5

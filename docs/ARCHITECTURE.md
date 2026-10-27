@@ -32,6 +32,7 @@ internal/
   report/               terminal and JSON output
     reporttest/         test helpers for report: schema loader, unsafe-byte check
   llm/                  optional --llm classifier (Anthropic or OpenAI-compatible API)
+  pincheck/             CI-only check of the tool version pins (package main, not in the binary)
 rules/                  built-in rules (go:embed)
 testdata/               fixtures for tests and the demo
   configs/              example client configs
@@ -93,6 +94,10 @@ docs/                   PRD and other documentation
   library, the module `github.com/cenkalti/backoff/v7` for the waits between retries and, from this
   module, only `discover` (see [Import direction](#import-direction)). See
   [The `--llm` classifier](#the---llm-classifier).
+- `internal/pincheck`: the CI-only check of the tool version pins in the workflows and in
+  `CONTRIBUTING.md`. It is package `main`, and `.github/scripts/check-tool-pins.sh` runs it. It is
+  not part of the mcpmoat binary: GoReleaser builds only `./cmd/mcpmoat`. The rules are in
+  [CONTRIBUTING.md](../CONTRIBUTING.md#checks).
 - `rules/`: the built-in rule files (`rules/*.yaml`) and `data/popular-servers.txt`. The Go file
   `rules/embed.go` embeds both with `go:embed`. It holds data only. `internal/rules` parses it.
 - `testdata/`: fixtures. `testdata/servers` holds malicious example servers. `testdata/configs`
@@ -124,6 +129,10 @@ only in `_test.go` files, so none of them reaches the binary.
 | `internal/pins` | `inspect`, `safefile`, and the module `github.com/aymanbagabas/go-udiff` |
 | `internal/llm` | `discover`, and the module `github.com/cenkalti/backoff/v7` |
 | `cmd/mcpmoat` | `discover`, `inspect`, `llm`, `pins`, `report`, `rules`, `termsafe` |
+
+`internal/pincheck` is not a product package, so it is not in the table. It imports only
+`termsafe` and the module `go.yaml.in/yaml/v3`, and no package imports it (a `main` package cannot
+be imported). The depguard rules below apply to it as to any other package.
 
 `internal/inspect` does not import `termsafe`. The report layer escapes what `inspect` returns.
 `internal/rules` imports `inspect` for the `inspect.Tool` type that `Analyzer.CheckTool` reads.

@@ -58,9 +58,11 @@ because mcpmoat refuses to make its run directory below such a directory. To run
 to a private directory, for example `TMPDIR=$(mktemp -d ~/.cache/mcpmoat-test.XXXXXX)`. CI does this.
 
 If you change a workflow, a tool pin or a script in `.github/scripts/`, also run these checks. They
-need [ShellCheck](https://www.shellcheck.net/), no network and no token. Run the `shellcheck` line
-from the repository root. The scripts find the root themselves, so you can run them from any
-directory.
+need [ShellCheck](https://www.shellcheck.net/) and no token. The two pin check scripts also need Go,
+because the pin check is a Go program. Go builds it with the modules in your module cache. The first
+run can download the toolchain that `go.mod` names and the modules, so it can need the network. The
+other scripts need no network. Run the `shellcheck` line from the repository root. The scripts find
+the root themselves, so you can run them from any directory.
 
 ```sh
 shellcheck .github/scripts/*.sh                # lint the scripts
@@ -96,7 +98,7 @@ The `ci-scripts` job also runs on every pull request. It runs these scripts:
 
 - `shellcheck .github/scripts/*.sh` lints the scripts.
 - `.github/scripts/check-tool-pins-test.sh` tests the pin check.
-- `.github/scripts/check-tool-pins.sh` is the pin check.
+- `.github/scripts/check-tool-pins.sh` runs the pin check.
 - `.github/scripts/notify-failure-test.sh` uses a fake `gh`. It runs the real `run:` block of the
   `notify-failure` job of `govulncheck.yml` and checks the job keys by text. The job details are in
   [docs/releasing.md](docs/releasing.md#weekly-vulnerability-check).
@@ -105,33 +107,88 @@ The `ci-scripts` job also runs on every pull request. It runs these scripts:
 - `.github/scripts/verify-and-publish-test.sh` runs the script of the "Verify and publish the
   release" step of `release.yml` with a fake `gh`.
 
-None of them needs a network or a token.
+None of them needs a token. Only the pin check needs Go, and on its first run it can need the
+network (see above).
 
-The pin check (`.github/scripts/check-tool-pins.sh`) only reads the files. It changes nothing. It
-fails when the GoReleaser pins do not follow these rules:
+The pin check is the Go program in `internal/pincheck` (package `main`). It is a CI tool only.
+GoReleaser builds only `./cmd/mcpmoat`, so the pin check is not part of the mcpmoat binary.
+`.github/scripts/check-tool-pins.sh` runs it. You can also run it with
+`go run ./internal/pincheck -root .`. Through `go run`, any failure is exit 1 (the program itself
+exits 2 on a bad flag or a root it cannot open), and stderr gets an extra `exit status N` line.
+Its tests are in `internal/pincheck/*_test.go` (`go test ./...` runs them) and in
+`.github/scripts/check-tool-pins-test.sh`. It only reads the files. It changes nothing.
 
-- Each `goreleaser/goreleaser-action` step must have `version: ${{ env.GORELEASER_VERSION }}` in its
-  `with:` block.
-- In every `.github/workflows/*.yml` and `*.yaml` file (also a name that starts with a dot), each
-  line that has `goreleaser_version` (in any case) must be one of two lines. One is the pin line,
-  `GORELEASER_VERSION: <full version>`, in the `env:` of a job. The other is the line
-  `version: ${{ env.GORELEASER_VERSION }}`, which a `goreleaser/goreleaser-action` step needs.
-- A job with a `goreleaser/goreleaser-action` step needs the pin in its own `env:`.
-- A file under `.github/actions` that names the action fails, so that a new local action cannot
-  skip the rule.
-- A workflow line that uses a YAML form the check cannot read fails. These forms can hide a step.
-  Examples are an anchor, a tag (`!!str`), a tab, a backslash outside a block scalar, and an `env:`
-  or `with:` key that is not a plain mapping. The comment of `unreadable_yaml` in the script has the
-  full list. If a plain value has `, *` or `{*` in it, put the value in quotes.
-- The check is a best-effort text reader, not a YAML parser. It reads block style and fails on a
-  style it cannot read, so write each step in block style.
-- It does not cover other ways to install GoReleaser, such as `docker://`, a remote reusable
-  workflow, `brew install` or `go install`. It does not cover a composite action outside
-  `.github/actions`, or a `$GITHUB_ENV` write that builds the name from pieces. Review is the
-  control for those.
+It reads each `.github/workflows/*.yml` and `*.yaml` file (in any case, also a name that starts
+with a dot) with a YAML parser (`go.yaml.in/yaml/v3`). The rules read the values as the parser
+decodes them, so flow style, quotes and escapes cannot hide a value. Comments are not read. A
+workflow fails closed when it has one of these forms, because they can hide a step or make two
+YAML readers disagree:
 
-The script also makes sure that the govulncheck pins in `ci.yml`, `release.yml` and
-`govulncheck.yml` match, and that each file runs govulncheck only through `$GOVULNCHECK_VERSION`.
+- no YAML document, or more than one document
+- an alias (`*name`), an anchor (`&name`), a merge key (`<<`) or an explicit tag (such as `!!str`)
+- two keys in one mapping that are the same when case is ignored
+- a mapping key that is not a scalar, or a key with a non-ASCII character
+- more than 1 MiB, or nesting deeper than 64 levels
+- a top level that is not a mapping, or YAML that does not parse
+- an `env:` key (in any case, at the workflow, job or step level, or deeper) whose value is not a
+  mapping, for example an expression, a block scalar or an empty value
+
+The `env:` rule is there because GitHub evaluates a step `env:` over the job `env:`, so an
+expression such as `env: ${{ fromJSON(...) }}` could set `GORELEASER_VERSION` or
+`GOVULNCHECK_VERSION` to a value the check cannot see.
+
+A workflow that is a symlink, or that is not a regular file, also fails. `ci.yml`, `release.yml`,
+`govulncheck.yml` and `CONTRIBUTING.md` must exist.
+
+The GoReleaser rules:
+
+- `ci.yml` pins one full version (`vMAJOR.MINOR.PATCH`) as `GORELEASER_VERSION` in the `env:` of a
+  job. It can repeat the same pin in more jobs. `release.yml` has at least one such pin. Every pin in
+  every workflow has the version of `ci.yml`.
+- Each `goreleaser/goreleaser-action` step has `version: ${{ env.GORELEASER_VERSION }}` in its
+  `with:` mapping, and its job has the pin in its own `env:`.
+- A `with:` of a goreleaser-action step that is not a mapping fails, for example an expression. The
+  list above covers every `env:`.
+- Any other key or value in a workflow that names `goreleaser/goreleaser-action` or
+  `GORELEASER_VERSION` (in any case) fails, for example a write to `$GITHUB_ENV` or a key in another
+  case.
+- `CONTRIBUTING.md` names at least one GoReleaser version (a `goreleaser/v2@` command). Each
+  `goreleaser@` or `goreleaser/vN@` version in it is the pin of `ci.yml`.
+- A file under `.github/actions` that names the action fails, and so does a symlink there, so that a
+  new local action cannot skip the rules.
+
+The govulncheck rules:
+
+- `ci.yml` pins one full version as `GOVULNCHECK_VERSION`. `release.yml` and `govulncheck.yml` each
+  have at least one pin, and each pin has the version of `ci.yml`. A pin can be in any mapping of
+  the file.
+- Each of the three files has a step whose `run:` value is exactly
+  `go run "golang.org/x/vuln/cmd/govulncheck@$GOVULNCHECK_VERSION" ./...`.
+- In the three files, any other key or value that names `govulncheck` (in any case) fails.
+  `govulncheck.yml` may also use the name in its top-level `name:`, as a job ID, in
+  `needs: govulncheck` and in the `if:` of the `notify-failure` job.
+- The three files have no `continue-on-error` key.
+- No other workflow names `govulncheck`.
+
+Not covered:
+
+- GitHub reads the workflows with its own YAML reader, which can differ from yaml.v3. The check
+  fails on the forms where readers often differ (see the list above), but it cannot prove that
+  GitHub reads the same values.
+- Other ways to install GoReleaser, such as `docker://goreleaser/goreleaser`, a remote reusable
+  workflow, `brew install` or `go install`, and a composite action outside `.github/actions`.
+- A name that a step builds from pieces, for example in a `$GITHUB_ENV` write.
+- Where a `GOVULNCHECK_VERSION` pin is. It can be in any mapping, not only an `env:`.
+- The other keys of the step with the govulncheck call, such as `if:`, `shell:` and
+  `working-directory:`, and `defaults.run.shell` of the workflow or the job. For example,
+  `shell: "true {0}"` stops the call, and the step still passes.
+- Go variables in any `env:`, such as `GOPROXY`, `GOSUMDB`, `GONOSUMDB`, `GOPRIVATE`, `GOINSECURE`,
+  `GOFLAGS` and `GOTOOLCHAIN`. A fake proxy can make an old govulncheck look clean.
+- Other ways to install or run govulncheck, such as
+  `go install golang.org/x/vuln/cmd/...@latest`, or a tool name that a step builds from pieces. The
+  name rule sees only the full word `govulncheck`.
+
+Review must catch those. A follow-up issue tracks a stricter check.
 
 The `release-check` job runs `goreleaser check` and a snapshot build. Then it runs one test and a
 check: `.github/scripts/check-snapshot-test.sh` (positive and negative cases for the archive check)
