@@ -32,8 +32,42 @@ jobs:
 
       - name: Check for known vulnerabilities
         env:
-          # Dependabot does not bump this version string. The release-check
+          # Dependabot does not bump this version string. The tool-pins
           # job in ci.yml checks that ci.yml and release.yml pin the same
           # version.
           GOVULNCHECK_VERSION: v1.9.0
         run: go run "golang.org/x/vuln/cmd/govulncheck@$GOVULNCHECK_VERSION" ./...
+
+  # A failed scan sends a notice only to the maintainer who last edited the
+  # cron line. This job opens one issue, or adds a comment to it, so everyone
+  # sees the failure. It is a separate job so that the scan job keeps
+  # contents: read and gets no write permission. It needs no checkout.
+  notify-failure:
+    needs: govulncheck
+    if: failure()
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      issues: write
+    # One fixed group, and no cancel, so that two runs cannot make two issues.
+    concurrency:
+      group: weekly-vulnerability-check-issue
+      cancel-in-progress: false
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: Open or update the failure issue
+        run: |
+          set -euo pipefail
+          title="Weekly vulnerability check failed"
+          run_url="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+          # A list call, not a search, so a new issue shows at once.
+          number=$(gh issue list -R "$GITHUB_REPOSITORY" --label security --state open --limit 200 --json number,title |
+            jq -r --arg t "$title" '.[] | select(.title == $t) | .number' | head -n 1)
+          if [ -z "$number" ]; then
+            gh issue create -R "$GITHUB_REPOSITORY" --title "$title" --label security \
+              --body "The weekly vulnerability check failed. Open the run to read the failure: $run_url. This job does not report a disabled schedule."
+          else
+            gh issue comment "$number" -R "$GITHUB_REPOSITORY" \
+              --body "The weekly vulnerability check failed again. Run: $run_url"
+          fi
