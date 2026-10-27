@@ -198,15 +198,28 @@ func TestRemoteResultSecrets(t *testing.T) {
 			want:    []string{"Bearer bearer-cred-22", "bearer-cred-22"},
 		},
 		{
-			// The value, the base64 credential and the decoded password.
-			// The decoded name is not in the list when there is a password
-			// (see userinfoSecrets).
+			// The value, the base64 credential, the decoded name and the
+			// decoded password. The name has 8 or more bytes and a digit, so
+			// discover.IsSecretUserName counts it as a token (see
+			// userinfoSecrets). "basic-name-1" sorts before "basic-pass-1".
 			name:    "basic name and password",
 			headers: map[string]string{"Authorization": rmBasic("basic-name-1", "basic-pass-1")},
 			want: []string{
 				rmBasic("basic-name-1", "basic-pass-1"),
 				strings.TrimPrefix(rmBasic("basic-name-1", "basic-pass-1"), "Basic "),
+				"basic-name-1",
 				"basic-pass-1",
+			},
+		},
+		{
+			// A plain name (no digit, no token sign) next to a password is
+			// not in the list, though it has 8 or more bytes.
+			name:    "basic plain name and password",
+			headers: map[string]string{"Authorization": rmBasic("readonly-user", "basic-pass-2")},
+			want: []string{
+				rmBasic("readonly-user", "basic-pass-2"),
+				strings.TrimPrefix(rmBasic("readonly-user", "basic-pass-2"), "Basic "),
+				"basic-pass-2",
 			},
 		},
 		{
@@ -226,6 +239,18 @@ func TestRemoteResultSecrets(t *testing.T) {
 				rmBasic("user-name", "userinfo-pw-1"),
 				strings.TrimPrefix(rmBasic("user-name", "userinfo-pw-1"), "Basic "),
 				"userinfo-pw-1",
+			},
+		},
+		{
+			// https://<token>:x-oauth-basic@host/: the name has a token
+			// prefix, so it is in the list next to the password.
+			name: "user info token name with a password",
+			url:  func(ts *httptest.Server) string { return rmUserURL(ts, "ghp_userinfo1:x-oauth-basic") },
+			want: []string{
+				rmBasic("ghp_userinfo1", "x-oauth-basic"),
+				strings.TrimPrefix(rmBasic("ghp_userinfo1", "x-oauth-basic"), "Basic "),
+				"ghp_userinfo1",
+				"x-oauth-basic",
 			},
 		},
 		{

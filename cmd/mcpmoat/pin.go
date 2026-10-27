@@ -86,17 +86,34 @@ func (c *cli) parsePinArgs(args []string) (a pinArgs, code int, ok bool) {
 	onceStringFlag(fs, "project", "a project path", &a.project)
 	onceStringFlag(fs, "expect", "a digest", &a.expect)
 
+	// pin has no --llm-base-url flag, but the user can still type one, and
+	// its value can hold a password. hider hides it in the error text, as
+	// in scan (see argscrub.go).
+	hider := newArgHider(args, flagLLMBaseURL)
 	if err := fs.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
 			pinUsage(c.stdout)
 			return pinArgs{}, exitOK, false
 		}
 		// The flag error holds untrusted argv, so it is escaped, after
-		// argErrorText hides a secret in it. See dispatch in cli.go.
-		return pinArgs{}, c.usageError("pin", "%s", termsafe.Quote(argErrorText(args, err.Error()))), false
+		// hider.errorText hides a secret in it. See dispatch in cli.go.
+		return pinArgs{}, c.usageError("pin", "%s", termsafe.Quote(hider.errorText(err.Error()))), false
 	}
-	if c.rejectArgs("pin", fs.Args()) {
+	if c.rejectArgs("pin", hider, fs.Args()) {
 		return pinArgs{}, exitError, false
+	}
+	// isFlagOf knows only the pin flags, so "--accept --llm-base-url=URL"
+	// gives the server name "--llm-base-url=URL". The later messages print
+	// the --accept name, the --config file and the --project path, and they
+	// hide only the user info of a URL (see hideUserinfo), not a value
+	// without a scheme. So pin refuses each of these values that holds a
+	// value of --llm-base-url, and the message does not print the value.
+	for _, f := range []struct{ name, value string }{
+		{"accept", a.accept}, {"config", a.configPath}, {"project", a.project},
+	} {
+		if hider.hide(f.value) != f.value {
+			return pinArgs{}, c.usageError("pin", "--%s holds a --%s value; --%s is a scan flag and pin does not take it", f.name, flagLLMBaseURL, flagLLMBaseURL), false
+		}
 	}
 	if a.accept == "" {
 		return pinArgs{}, c.usageError("pin", "--accept <server> is required"), false
@@ -311,7 +328,8 @@ func (c *cli) findPinServer(ctx context.Context, accept, configPath, project str
 	if len(matches) == 0 {
 		// accept is user-typed argv and can hold a URL with a password.
 		// hideUserinfo runs before the cut, so the cut cannot split the URL
-		// before its '@' and leave the password unhidden.
+		// before its '@' and leave the password unhidden. accept holds no
+		// --llm-base-url value: parsePinArgs refused that.
 		name := cutName(hideUserinfo(accept))
 		if project != "" {
 			c.cmdPrintf("pin", "unknown server %s in project %s", name, termsafe.QuoteCut(project, maxWarnPathRunes))
@@ -353,7 +371,8 @@ func selectServers(servers []discover.Server, name, project string) []discover.S
 // and lists where each one comes from, so the user can narrow it with --config
 // or --project.
 // The fields come from config files, so they are escaped and cut. accept is
-// user-typed, so hideUserinfo hides a URL password in it before the cut.
+// user-typed, so hideUserinfo hides a URL password in it before the cut. It
+// holds no --llm-base-url value: parsePinArgs refused that.
 func (c *cli) printAmbiguous(accept string, matches []discover.Server) {
 	c.cmdPrintf("pin", "%d servers are named %s; narrow it with --config <file> or --project <path>:", len(matches), cutName(hideUserinfo(accept)))
 	for _, s := range matches {

@@ -48,6 +48,9 @@ var ErrJSONTooComplex = errJSONTooComplex
 // tests (see jsonTooComplexReason in errors_test.go).
 const JSONTooComplexReason = jsonTooComplexReason
 
+// RevealSecrets is revealSecrets, for the tests.
+var RevealSecrets = revealSecrets
+
 // CheckSecrets is checkSecrets, for the tests.
 var CheckSecrets = checkSecrets
 

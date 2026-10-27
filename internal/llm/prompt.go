@@ -3,7 +3,6 @@ package llm
 import (
 	"encoding/json"
 	"errors"
-	"slices"
 	"strings"
 	"unicode/utf8"
 
@@ -11,7 +10,8 @@ import (
 )
 
 // Size caps. The model output and the tool text are untrusted, so every
-// read and every request has a cap.
+// read and every request has a cap. The Max caps are exported because the
+// docs link them.
 const (
 	// MaxToolNameBytes is the most bytes of the tool name that a request
 	// holds.
@@ -74,9 +74,9 @@ const verdictSchemaName = "mcpmoat_verdict"
 // verdictSchemaJSON is the JSON Schema of the verdict object. It is a
 // hand-written string: TestVerdictSchema keeps its enums in sync with the Risk
 // and Category values, and its keys with fieldRisk and fieldCategory. It uses
-// only the subset of JSON Schema that the strict
-// structured output modes of both providers accept: every property is
-// required and additionalProperties is false.
+// only the subset of JSON Schema that the strict structured output modes of
+// both providers accept: every property is required and additionalProperties
+// is false.
 const verdictSchemaJSON = `{"type":"object",` +
 	`"properties":{` +
 	`"risk":{"type":"string","enum":["none","low","medium","high"]},` +
@@ -100,13 +100,17 @@ type Input struct {
 	ToolName string
 	// Description is the description of the tool, as the server gives it.
 	Description string
-	// Secrets are the configured secret values of the server (its env and
-	// header values). A server that got a token can put it in its tool
-	// text, so toolMessage replaces each value of at least minSecretBytes
-	// bytes (and its decoded form, see secretValues) with discover.Mask in
-	// the name and the description (FR-17).
-	// The values are never sent, logged or encoded, and they are not part
-	// of toolPayload.
+	// Secrets are the secret values that mcpmoat gave to the server: for
+	// example env and header values, expanded variable values, secret URL
+	// parts and, for a stdio server, the secrets in its args. cmd/mcpmoat
+	// copies them from inspect.Result.Secrets, which has the full list (llm
+	// does not import inspect). llm treats them as opaque values: it does
+	// not know or need the source of a value. A server that got a
+	// token can put it in its tool text, so toolMessage replaces each value
+	// of at least minSecretBytes bytes (and its decoded form, see
+	// secretValues) with discover.Mask in the name and the description
+	// (FR-17). The values are never sent, logged or encoded, and they are
+	// not part of toolPayload.
 	Secrets []discover.Secret
 }
 
@@ -143,8 +147,8 @@ type encodeFunc func(v any) ([]byte, error)
 // redactPrefix) is replaced with discover.Mask in the name and the
 // description, before any cut, so a cut can never leave a part of a secret.
 // To bound the work, redactPrefix makes only the start of each redacted text
-// that the cut below reads; the result is the same as when it redacts the
-// whole text. "redacted" is true when a Mask starts in the first
+// that the cut below reads, with the same result as a redaction of the whole
+// text (see redactPrefix). "redacted" is true when a Mask starts in the first
 // MaxToolNameBytes+1 bytes of the redacted name or in the first
 // MaxDescriptionBytes+1 bytes of the redacted description, also when a cut
 // then removes that Mask. A Mask that starts after those bytes is never sent,
@@ -281,10 +285,19 @@ func cutUTF8(s string, limit int) (string, bool) {
 // U+FFFD for a run) can still send it, as with any other encoded form.
 func secretValues(secrets []discover.Secret) []string {
 	var values []string
+	// seen holds the values in the result. A map lookup keeps the dedupe
+	// linear in the number of secrets. A search of values for each value
+	// would be quadratic: seconds for each tool with tens of thousands of argv
+	// secrets. The result keeps the order of the first occurrence.
+	// redactWindow still reads each value once for each window: see its doc
+	// for why that cost is accepted.
+	seen := make(map[string]struct{})
 	add := func(v string) {
-		if !slices.Contains(values, v) {
-			values = append(values, v)
+		if _, ok := seen[v]; ok {
+			return
 		}
+		seen[v] = struct{}{}
+		values = append(values, v)
 	}
 	for _, s := range secrets {
 		v := s.Reveal()
@@ -368,11 +381,14 @@ func redactPrefix(s string, values []string, limit int) (string, bool) {
 // bytes. A run can hold more than one secret.
 //
 // It finds every occurrence that starts in s[:end], also one that goes on
-// past end, so the marks of s[:end] are the same as the marks that all of s
-// gives. So the result is always a prefix of the redaction of all of s
-// (redactWindow(s, values, len(s), -1)): a run of marked bytes that goes on
-// past end has its Mask already, and the bytes after end can only add to the
-// result.
+// past end, so the result is always a prefix of the redaction of all of s
+// (see redactPrefix).
+//
+// The search reads each value once for each window, and for each value it
+// reads at most end+len(value)-1 bytes of s. There is no cap on the number of
+// values (the owner has not decided one). This is accepted: the window is
+// bounded (see redactPrefix), and the cost is small, about 13 ms for a 16 KiB
+// window and 50,000 values.
 //
 // The values must not be empty (secretValues gives only values of at least
 // minSecretBytes bytes). An empty value is skipped: strings.Index finds it

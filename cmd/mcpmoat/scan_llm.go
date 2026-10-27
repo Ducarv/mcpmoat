@@ -29,11 +29,15 @@ const (
 	// Each request has a limit of 30 seconds in package llm, but without
 	// this limit the step has none. The client of package llm tries a
 	// request again after HTTP 429, 502, 503, 504 and 529: 3 requests in
-	// total for one tool. Before a retry it waits for a backoff of 1 to 8
-	// seconds, or for the Retry-After time of the answer, up to 30 seconds.
-	// So in the worst case one tool takes 3 requests of 30 seconds and 2
-	// waits of 30 seconds: about 150 seconds. maxLLMTools (500) tools with
-	// llmWorkers (4) tools at the same time take 125 rounds of 150 seconds:
+	// total for one tool, so 2 waits. Each wait is the Retry-After time of
+	// the answer, when the provider sends one of up to 30 seconds. Else it
+	// is a backoff of about 0.5 to 3 seconds (about 0.5 to 1.5 seconds
+	// before the second try, about 1 to 3 seconds before the third).
+	// So one tool takes at most 3 requests of 30 seconds and 2 waits. The
+	// worst case is when the provider asks for 2 waits of 30 seconds with
+	// Retry-After: about 150 seconds. Without Retry-After it is about 95
+	// seconds. maxLLMTools (500) tools with llmWorkers (4) tools at the
+	// same time take 125 rounds of 150 seconds in the Retry-After case:
 	// about 5 hours. This limit stops the step after 10 minutes.
 	//
 	// When the limit is reached, the step stops as after a provider failure
@@ -56,12 +60,11 @@ func (c *cli) llmStepTimeoutOrDefault() time.Duration {
 	return c.llmStepTimeout
 }
 
-// stepTimeoutText returns the time limit d of the LLM step as text for the
-// stderr line and the help. The help also gives llm.RetryAfterCap with it.
-// The text is "10 minutes" for whole minutes, "30 seconds" for
-// whole seconds, else the Go form of d, such as "50ms" (a value that a test
-// sets). It holds only a number and a fixed unit.
-func stepTimeoutText(d time.Duration) string {
+// durationText returns the duration d in words, for a stderr line or the
+// help. The text is "10 minutes" for whole minutes, "30 seconds" for whole
+// seconds, else the Go form of d, such as "50ms" (a value that a test sets).
+// It holds only a number and a fixed unit.
+func durationText(d time.Duration) string {
 	switch {
 	case d >= time.Minute && d%time.Minute == 0:
 		n := d / time.Minute
@@ -87,7 +90,7 @@ type toolClassifier interface {
 }
 
 // answerKind sorts the result of one Classify call. sortAnswer is the only
-// place that sorts the errors of Classify. runLLMJobs only turns an
+// place that sorts the errors of Classify. runLLMJob only turns an
 // answerStopped into an answerDeadline when the step deadline stopped the
 // request.
 type answerKind int
@@ -549,7 +552,8 @@ func rejectedFailure(answers []llmAnswer) *llmFailure {
 //   - A request that the deadline stopped is answerDeadline, not
 //     answerStopped: it is not a signal and not the cancel after a failure.
 //   - The failure is answerDeadline, when at least one job has no answer.
-//     It replaces a failure that came after the deadline: such a failure
+//     runLLMJobs builds it after all the requests end (see runLLMJob). It
+//     replaces a failure that came after the deadline: such a failure
 //     can be a result of the deadline. A failure that came first cancelled
 //     the context first, so the cause is not errLLMStepDeadline and that
 //     failure stays. So the first cause wins. The order is the order in
@@ -609,7 +613,7 @@ func runLLMJobs(ctx context.Context, jobs []llmJob, cl toolClassifier, timeout t
 		}
 		wg.Go(func() {
 			defer func() { <-sem }()
-			a, f := runLLMJob(ctx, runCtx, job, cl, timeout)
+			a, f := runLLMJob(ctx, runCtx, job, cl)
 			// Each goroutine writes only its own element, so this needs no
 			// lock.
 			answers[i] = a
@@ -625,9 +629,12 @@ func runLLMJobs(ctx context.Context, jobs []llmJob, cl toolClassifier, timeout t
 		})
 	}
 	wg.Wait()
-	// Check the deadline here too: it can end the step while no request
-	// runs (between two jobs), and a failure that came after it must not
-	// win. Every goroutine has ended, so failure needs no lock now.
+	// This is the one place that builds the deadline failure: runLLMJob
+	// gives no failure for an answerDeadline answer. The check is also
+	// needed because the deadline can end the step while no request runs
+	// (between two jobs), and because a failure that came after the
+	// deadline must not win. Every goroutine has ended, so failure needs
+	// no lock now.
 	if endedByDeadline(ctx, runCtx) && !allAnswered(answers) {
 		failure = &llmFailure{kind: answerDeadline, timeout: timeout}
 	}
@@ -635,30 +642,35 @@ func runLLMJobs(ctx context.Context, jobs []llmJob, cl toolClassifier, timeout t
 }
 
 // runLLMJob runs one job of runLLMJobs: it sends the request with runCtx,
-// the context of the requests, and returns the answer for the job. It also
-// returns the failure of the job when the answer stops the step (see
-// answerKind.stepFails), else nil. ctx is the context of the process, and
-// timeout the time limit of the step (see runLLMJobs). runLLMJob only reads
-// them: runLLMJobs keeps the first failure and cancels the other requests.
-func runLLMJob(ctx, runCtx context.Context, job llmJob, cl toolClassifier, timeout time.Duration) (llmAnswer, *llmFailure) {
+// the context of the requests, and returns the answer for the job. ctx is
+// the context of the process. runLLMJob only reads the two contexts:
+// runLLMJobs keeps the first failure and cancels the other requests.
+//
+// It also returns the failure of the job when the answer stops the step (see
+// answerKind.stepFails), else nil. The one exception is answerDeadline: a
+// request that the step deadline stopped gets that answer kind, but no
+// failure here. runLLMJobs builds the deadline failure after all the
+// requests end. An answerDeadline answer is never answered (see
+// answerKind.answered), so that check always builds it while ctx is alive.
+// When ctx has ended by then, classifyPlan drops the result for the signal.
+// So a deadline failure built here would always be replaced or dropped.
+func runLLMJob(ctx, runCtx context.Context, job llmJob, cl toolClassifier) (llmAnswer, *llmFailure) {
 	v, err := cl.Classify(runCtx, job.in)
 	kind := sortAnswer(err)
 	if kind == answerStopped && endedByDeadline(ctx, runCtx) {
 		// The deadline of the step stopped this request, not a signal and
-		// not the cancel after a failure.
+		// not the cancel after a failure. The answer keeps this kind, so
+		// that it tells the deadline from a signal.
 		kind = answerDeadline
 	}
 	a := newLLMAnswer(kind, v, err)
-	if !kind.stepFails() {
+	if !kind.stepFails() || kind == answerDeadline {
 		return a, nil
 	}
 	f := &llmFailure{kind: kind}
-	switch kind {
-	case answerProviderFailed:
+	if kind == answerProviderFailed {
 		// Only a provider error is kept: its text is fixed.
 		f.err = err
-	case answerDeadline:
-		f.timeout = timeout
 	}
 	return a, f
 }
@@ -709,7 +721,7 @@ func (c *cli) printLLMProblems(r llmResult) {
 // the LLM step: "the LLM provider failed (<reason>)" for a provider failure
 // (see llmFailureText) and for the refusal of every answered tool (see
 // rejectedReason), "the LLM step stopped after <time>" for the step deadline
-// (see stepTimeoutText), else llmInternalText. A nil f with skipped tools
+// (see durationText), else llmInternalText. A nil f with skipped tools
 // cannot happen; it gives llmInternalText too, so it never blames the
 // provider. A provider failure or a refusal without an error gives
 // llmInternalText too.
@@ -720,7 +732,7 @@ func llmFailureLine(f *llmFailure) string {
 	switch {
 	case f.kind == answerDeadline:
 		// The deadline line holds only a number and a fixed unit.
-		return "the LLM step stopped after " + stepTimeoutText(f.timeout)
+		return "the LLM step stopped after " + durationText(f.timeout)
 	case f.err == nil:
 		return llmInternalText
 	case f.kind == answerProviderFailed:

@@ -352,6 +352,15 @@ func TestCLIRunNoArgsPrintsUsageOnStderr(t *testing.T) {
 	}
 }
 
+// wantRetryTriesLine and wantRetryAfterLine are the retry lines of the scan
+// help, as users see them (issue #188). The numbers are literal: 3 tries and
+// 30 seconds. TestUsageRetryNumbersMatchConstants checks that they are the
+// numbers of the retry policy of package llm.
+const (
+	wantRetryTriesLine = "  A provider answer of HTTP 429, 502, 503, 504 or 529 is tried again, up to 3 tries in total for each tool.\n"
+	wantRetryAfterLine = "  scan waits for a Retry-After of up to 30 seconds before the next try; a longer Retry-After means no retry.\n"
+)
+
 func TestUsageContent(t *testing.T) {
 	t.Parallel()
 
@@ -428,13 +437,13 @@ func TestUsageContent(t *testing.T) {
 		fmt.Sprintf("  scan sends at most %d tools, shared fairly between the servers. More tools than that, a provider refusal of\n", maxLLMTools),
 		"  every tool, or another provider error gives exit 2; the report still prints.\n",
 		// The retries of a busy provider and the time limit of the whole
-		// LLM step (issue #188). The two retry numbers come from the
-		// policy of package llm (llm.RetryMaxTries and llm.RetryAfterCap,
-		// 3 and "30 seconds" today), so the help follows the policy;
-		// internal/llm pins their values. The step limit is literal, so a
-		// change of llmStepTimeout must change the help too.
-		fmt.Sprintf("  A provider answer of HTTP 429, 502, 503, 504 or 529 is tried again, up to %d tries in total for each tool.\n", llm.RetryMaxTries),
-		"  When the provider asks to wait (Retry-After), scan waits at most " + stepTimeoutText(llm.RetryAfterCap) + " before the next try.\n",
+		// LLM step (issue #188). The lines are literal: this test checks
+		// the text that users see. TestUsageRetryNumbersMatchConstants
+		// checks that the two retry numbers are those of the policy of
+		// package llm, and a change of llmStepTimeout must change the help
+		// too.
+		wantRetryTriesLine,
+		wantRetryAfterLine,
 		"  The LLM step stops after 10 minutes: the tools that are not classified yet give exit 2; the report still prints.\n",
 	} {
 		if !strings.Contains(got, want) {
@@ -487,6 +496,41 @@ func TestUsageContent(t *testing.T) {
 	} {
 		if strings.Contains(got, gone) {
 			t.Errorf("usage text holds the old text %q\n--- got ---\n%s", gone, got)
+		}
+	}
+}
+
+// TestUsageRetryNumbersMatchConstants checks that the literal retry lines of
+// TestUsageContent give the numbers of the retry policy of package llm
+// (llm.RetryMaxTries and llm.RetryAfterCap). The help prints the constants, so
+// a change of the policy changes the help; this test then fails until the
+// literal lines change too. internal/llm (TestRetryPolicyDefaults) pins the
+// values of the constants.
+func TestUsageRetryNumbersMatchConstants(t *testing.T) {
+	t.Parallel()
+
+	got := usageText(t)
+	for _, tt := range []struct {
+		name      string
+		fromConst string // the line, built from the constant
+		literal   string // the line that TestUsageContent checks
+	}{
+		{
+			name:      "llm.RetryMaxTries",
+			fromConst: fmt.Sprintf("  A provider answer of HTTP 429, 502, 503, 504 or 529 is tried again, up to %d tries in total for each tool.\n", llm.RetryMaxTries),
+			literal:   wantRetryTriesLine,
+		},
+		{
+			name:      "llm.RetryAfterCap",
+			fromConst: "  scan waits for a Retry-After of up to " + durationText(llm.RetryAfterCap) + " before the next try; a longer Retry-After means no retry.\n",
+			literal:   wantRetryAfterLine,
+		},
+	} {
+		if tt.fromConst != tt.literal {
+			t.Errorf("%s: the help line from the constant is %q, but TestUsageContent checks %q", tt.name, tt.fromConst, tt.literal)
+		}
+		if !strings.Contains(got, tt.fromConst) {
+			t.Errorf("%s: usage text does not contain %q\n--- got ---\n%s", tt.name, tt.fromConst, got)
 		}
 	}
 }
@@ -704,6 +748,9 @@ func TestArgErrorsHideURLPassword(t *testing.T) {
 	// which can be a token too.
 	const passURL = "https://user:" + canary + "@host.example"
 	const userURL = "https://" + canary + "@host.example"
+	// bareURL is a --llm-base-url value without a scheme. hideUserinfo does
+	// not see it as a URL, so only the argHider of the command hides it.
+	const bareURL = "user:" + canary + "@host.example"
 
 	// The worlds of the cases. worldPlain has no home and no working
 	// directory: the args must fail before scan or pin reads a config.
@@ -765,6 +812,47 @@ func TestArgErrorsHideURLPassword(t *testing.T) {
 			want: "mcpmoat scan: flag provided but not defined: -bogus"},
 		{name: "scan --llm-base-url URL after a bad flag", args: []string{"scan", "--bogus", "--llm-base-url", passURL},
 			want: "mcpmoat scan: flag provided but not defined: -bogus"},
+
+		// Every command sends its "unexpected arguments" list through its
+		// argHider, so a --llm-base-url value without a scheme is hidden in
+		// pin, help and version too, not only in scan.
+		{name: "pin positional --llm-base-url bare value", args: []string{"pin", "x", "--llm-base-url", bareURL},
+			want: `mcpmoat pin: unexpected arguments ["x" "--llm-base-url" "` + hiddenArgText + `"]`, hidden: true},
+		{name: "help --llm-base-url=bare value", args: []string{"help", "--llm-base-url=" + bareURL},
+			want: `mcpmoat help: unexpected arguments ["--llm-base-url=` + hiddenArgText + `"]`, hidden: true},
+		{name: "version --llm-base-url bare value", args: []string{"version", "--llm-base-url", bareURL},
+			want: `mcpmoat version: unexpected arguments ["--llm-base-url" "` + hiddenArgText + `"]`, hidden: true},
+		{name: "version extra and URL", args: []string{"version", "extra", passURL},
+			want: `mcpmoat version: unexpected arguments ["extra" "https://` + hiddenArgText + `@host.example"]`, hidden: true},
+		{name: "scan --llm extra --llm-base-url=bare value", args: []string{"scan", "--llm", "extra", "--llm-base-url=" + bareURL},
+			want: `mcpmoat scan: unexpected arguments ["extra" "--llm-base-url=` + hiddenArgText + `"]`, hidden: true},
+		{name: "pin --accept srv extra", args: []string{"pin", "--accept", "srv", "extra"},
+			want: `mcpmoat pin: unexpected arguments ["extra"]`},
+		// pin has no --llm-base-url flag: the flag error names the flag and
+		// not its value.
+		{name: "pin --llm-base-url=URL", args: []string{"pin", "--llm-base-url=" + passURL},
+			want: "mcpmoat pin: flag provided but not defined: -llm-base-url\n"},
+		{name: "pin --timeout --llm-base-url=bare value", args: []string{"pin", "--timeout", "--llm-base-url=" + bareURL},
+			want: "mcpmoat pin: invalid value ", hidden: true},
+		// "--accept --llm-base-url" takes "--llm-base-url" as the server name,
+		// and the bare value is then an unexpected argument.
+		{name: "pin --accept --llm-base-url bare value", args: []string{"pin", "--accept", "--llm-base-url", bareURL},
+			want: `mcpmoat pin: unexpected arguments ["` + hiddenArgText + `"]`, hidden: true},
+		// A --accept, --config or --project value that holds a --llm-base-url
+		// value is refused with a fixed message, before pin reads a config
+		// or prints the value (see parsePinArgs).
+		{name: "pin --accept --llm-base-url=bare value", args: []string{"pin", "--accept", "--llm-base-url=" + bareURL},
+			want: pinBaseURLRefusal("accept")},
+		{name: "pin --accept=x-llm-base-url=bare value", args: []string{"pin", "--accept=x-llm-base-url=" + bareURL},
+			want: pinBaseURLRefusal("accept")},
+		{name: "pin --project --llm-base-url=bare value", args: []string{"pin", "--accept", "srv", "--project", "--llm-base-url=" + bareURL},
+			want: pinBaseURLRefusal("project")},
+		{name: "pin --project=x-llm-base-url=bare value", args: []string{"pin", "--accept", "srv", "--project=x-llm-base-url=" + bareURL},
+			want: pinBaseURLRefusal("project")},
+		{name: "pin --config --llm-base-url=bare value", args: []string{"pin", "--accept", "srv", "--config", "--llm-base-url=" + bareURL},
+			want: pinBaseURLRefusal("config")},
+		{name: "pin --config=x-llm-base-url=bare value", args: []string{"pin", "--accept", "srv", "--config=x-llm-base-url=" + bareURL},
+			want: pinBaseURLRefusal("config")},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -807,6 +895,74 @@ func TestArgErrorsHideURLPassword(t *testing.T) {
 				t.Errorf("stderr holds %q = %v, want %v:\n%s", hiddenArgText, got, tt.hidden, stderr)
 			}
 			assertNoEscape(t, stdout, stderr)
+		})
+	}
+}
+
+// pinBaseURLRefusal returns the exact stderr line of pin when the value of
+// --name holds a --llm-base-url value (see parsePinArgs). It is a copy of the
+// text, so a change of it fails the tests. The line never holds the value.
+func pinBaseURLRefusal(name string) string {
+	return "mcpmoat pin: --" + name + " holds a --llm-base-url value; --llm-base-url is a scan flag and pin does not take it\n"
+}
+
+// TestParsePinArgsBaseURLRefusal checks when parsePinArgs refuses a --accept,
+// --config or --project value because it holds a --llm-base-url value. The
+// normal values of pin are not refused (no false positive).
+//
+// The check is "the argHider changes the value", so it is fail-safe and can
+// refuse more than it must. A known edge: a very short --llm-base-url value
+// that is also inside another value is refused. In
+// "--config=./x-llm-base-url=e" the argHider takes "e" as a base URL value,
+// and "./x-llm-base-url=e" holds "e", so pin refuses the --config value. Such
+// a path is not a real use, and a refusal shows no secret.
+func TestParsePinArgsBaseURLRefusal(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		args []string
+		// refused is the flag name in the refusal line, or "" when
+		// parsePinArgs must accept the args.
+		refused string
+	}{
+		{name: "accept only", args: []string{"--accept", "srv"}},
+		{name: "accept=srv", args: []string{"--accept=srv"}},
+		{name: "all three flags", args: []string{"--accept", "srv", "--config", "./mcp.json", "--project", "./proj"}},
+		{name: "server name holds the flag name without a dash", args: []string{"--accept", "llm-base-url"}},
+		{name: "server name ends with the flag name", args: []string{"--accept", "my-llm-base-url"}},
+		{name: "known edge: short value inside the --config value", args: []string{"--accept", "srv", "--config=./x-llm-base-url=e"},
+			refused: "config"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			c, stdout, stderr := newTestCLI(fakeGetenv(nil), testBuild)
+			a, code, ok := c.parsePinArgs(tt.args)
+
+			if stdout.Len() != 0 {
+				t.Errorf("stdout = %q, want empty", stdout.String())
+			}
+			if tt.refused != "" {
+				if ok || code != exitError {
+					t.Errorf("parsePinArgs() ok = %v, code = %d, want false, %d", ok, code, exitError)
+				}
+				// usageError adds the "Run mcpmoat help" line after it.
+				if got, want := stderr.String(), pinBaseURLRefusal(tt.refused); !strings.HasPrefix(got, want) {
+					t.Errorf("stderr = %q, want it to start with %q", got, want)
+				}
+				return
+			}
+			if !ok || code != exitOK {
+				t.Fatalf("parsePinArgs() ok = %v, code = %d, want true, %d; stderr:\n%s", ok, code, exitOK, stderr.String())
+			}
+			if stderr.Len() != 0 {
+				t.Errorf("stderr = %q, want empty", stderr.String())
+			}
+			if a.accept == "" {
+				t.Errorf("accept is empty, want the server name")
+			}
 		})
 	}
 }

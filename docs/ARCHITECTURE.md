@@ -807,10 +807,10 @@ Setup:
 The dial hook: `llm.Config.Dial` is a test hook of type `llm.DialFunc`. It is nil in production,
 and nil uses a `net.Dialer`. For an `http` base URL, `loopbackDial` wraps it. It resolves the host
 at connect time, requires that every address is a loopback address, and dials only those
-addresses. The check
-at connect time is needed because a name such as `localhost` is loopback only by its text: the
-system resolver can map it to another address. An address that does not answer gets a short
-timeout, so the next address is tried soon (for example when a firewall drops packets to `::1`).
+addresses. The check at connect time is needed because a name such as `localhost` is loopback
+only by its text: the system resolver can map it to another address. An address that does not
+answer gets a short timeout, so the next address is tried soon (for example when a firewall drops
+packets to `::1`).
 The client has its own `http.Transport` with TLS 1.2 or later. It follows no redirect, because a
 redirect would carry the key to another location. It never uses a proxy for an `http` base URL, so
 the key never goes to a proxy in clear text. For `https` it honours `HTTPS_PROXY` and `NO_PROXY`,
@@ -821,9 +821,11 @@ are in the [docs/llm.md](llm.md). They live in
 
 Retries: `Classify` calls `sendWithRetry` in `internal/llm/retry.go`, which calls `send` again for
 each try, so each try builds a new request with a new body. `retryPolicy` holds the numbers: 3
-tries in total for each tool (`llm.RetryMaxTries`), a backoff of 1 s that doubles up to 8 s with a
-jitter of 0.5 to 1.5 times, and a cap of 30 s on a `Retry-After` wait (`llm.RetryAfterCap`). The
-two constants are exported only so that the usage text of `scan` takes its numbers from them.
+tries in total for each tool (`llm.RetryMaxTries`), a backoff that starts at 1 s and doubles with
+a max wait of 8 s, a jitter of 0.5 to 1.5 times, and a cap of 30 s on a `Retry-After` wait
+(`llm.RetryAfterCap`). With 3 tries there are only 2 waits: about 1 s, then about 2 s, with
+jitter, so the max wait of 8 s is not reached. The two constants are exported only so that the
+usage text of `scan` takes its numbers from them.
 `retryableStatus` lists the codes that get a retry: 429, 502, 503, 504 and 529. Every other code
 (also 400, 413 and 422), a request timeout (`requestTimeout`, 30 s for each try) and every other
 transport error stop at once. `parseRetryAfter` reads the header (seconds or an HTTP date); a
@@ -849,14 +851,13 @@ workers could take hours. When the cause is `errLLMStepDeadline` and the context
 not ended (`endedByDeadline`), a request that the deadline stopped is `answerDeadline`, not
 `answerStopped`, and the failure of the step is `answerDeadline` when at least one job has no
 answer. It is a provider failure: exit 2, `complete` false, the report prints, the rows of the
-tools that got an answer stay, and stderr says `the LLM step stopped after 10 minutes`
-(`stepTimeoutText`). A signal wins, also when the deadline is reached at the same time, because
-`endedByDeadline` and `classifyPlan` check `ctx.Err()`, the context of the caller: the cause of
-the step context does not decide it. A failure that came first cancelled the context first, so
-it stays the failure. One race is left: a provider failure that a worker got just before the
-deadline but recorded just after it can show as the deadline. Only the stderr reason changes:
-the exit code is 2 and `complete` is `false` in both cases. A test sets `cli.llmStepTimeout` to a
-short value.
+tools that got an answer stay, and stderr names the time limit (`durationText`). A signal wins,
+also when the deadline is reached at the same time, because `endedByDeadline` and `classifyPlan`
+check `ctx.Err()`, the context of the caller: the cause of the step context does not decide it.
+A failure that came first cancelled the context first, so it stays the failure. One race is left:
+a provider failure that a worker got just before the deadline but recorded just after it can show
+as the deadline. Only the stderr reason changes: the exit code is 2 and `complete` is `false` in
+both cases. A test sets `cli.llmStepTimeout` to a short value.
 
 The plan: `planLLMJobs` in `cmd/mcpmoat/scan_llm_plan.go` builds the jobs before the first request.
 `llmServerJobs` gives one job for each tool of each server with status `StatusOK`, in the order of
@@ -888,12 +889,18 @@ all of them in its tool text. So the path is:
    expanded command and args: the text that `discover.RedactArgs` masks, from
    `discover.ArgSecrets`, which runs the same code. That is the value of a secret-like flag, the
    value in `-e NAME=V`, a header line and its credential, an arg masked whole (a DSN,
-   `user:pass`, a token-like value), the secret URL parts and the masked path segments. Package
-   names and plain args are not in the list. `RedactArgs` fails closed, so some text that is not
-   secret is in the list too (a long random-looking path segment, a nix hash, a UUID, a name with
-   spaces), and `--llm` replaces it in the tool text. The limits of `RedactArgs` (such as
-   `--db mypassword` or a positional value) are in its doc comment in `internal/discover`. Each
-   value has at least 8 bytes and is in the list one time, longest first. The values are
+   `user:pass`, a token-like value), the secret URL parts and the masked path segments.
+   `ArgSecrets` also returns the smaller parts that a server can echo alone: each value after `=`
+   (or after `:` in JSON-like text) in a masked text, the query values and the password of a URL
+   masked whole (such as a JDBC URL), the bare token in `-p<token>`, `--<token>` and `<token>=1`,
+   and a user name next to a password in a URL when `discover.IsSecretUserName` says so (a
+   token-like name, or 8 bytes or more with a digit). Package names and plain args are not in the
+   list. `RedactArgs` fails closed, so some text that is not secret is in the list too (a long
+   random-looking path segment, a nix hash, a UUID, a name with spaces), and `--llm` replaces it
+   in the tool text. The inner values over-match on purpose: they can add a plain word of 8 bytes
+   or more from a masked arg, such as `Negotiate` after a header colon. The limits of `RedactArgs`
+   (such as `--db mypassword` or a positional value) are in its doc comment in `internal/discover`.
+   Each value has at least 8 bytes and is in the list one time, longest first. The values are
    `discover.Secret`, so they print and encode only as the mask.
 2. `llmServerJobs` in `cmd/mcpmoat/scan_llm_plan.go` copies the slice of each server into
    `llm.Input.Secrets` of each tool of that server. So a value of one server is removed only from
@@ -906,12 +913,12 @@ all of them in its tool text. So the path is:
    also of matches that overlap, then writes one mask for each run of marked bytes. To bound the
    work, `redactPrefix` redacts only a window of the first limit+1 bytes (the limit is
    `llm.MaxToolNameBytes` or `llm.MaxDescriptionBytes`) and doubles it while the masks make the
-   result too short. Its result is always a prefix of the full redaction, so the
-   text and the cut are the same. The message has `redacted: true` when a mask starts in the first
-   limit+1 bytes of the redacted name or description, also when the cut then removes it. The field
-   is omitted otherwise. A secret that starts or ends with `*`, or holds a whole mask, can show
-   again across a mask (a documented limit). The system prompt tells the model that the mask is
-   removed text, not an instruction.
+   result too short. Its result is always a prefix of the full redaction, so the text and the cut
+   are the same. The message has `redacted: true` when a mask starts in the first limit+1 bytes of
+   the redacted name or description, also when the cut then removes it. The field is omitted
+   otherwise. A secret that starts or ends with `*`, or holds a whole mask, can show again across
+   a mask (a documented limit). The system prompt tells the model that the mask is removed text,
+   not an instruction.
 
 The report and the JSON output do not use `Result.Secrets`: they print the tool names as the
 server sent them. docs/llm.md lists the limits of the replacement.

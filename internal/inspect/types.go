@@ -306,9 +306,11 @@ type Result struct {
 	//   - remote: each configured header value, and the credential after an
 	//     auth scheme ("Bearer <token>").
 	//   - remote: for a "Basic <base64>" header and for the URL user info, the
-	//     password. When the password is empty, the user name instead: the
-	//     name is then the credential, as in https://<token>@host/. The name
-	//     is never in the list when there is a password.
+	//     password. The user name too when the password is empty, because the
+	//     name is then the credential, as in https://<token>@host/, or when
+	//     the name looks like a token (see discover.IsSecretUserName), as in
+	//     https://<token>:x-oauth-basic@github.com/. A plain name next to a
+	//     password is not in the list.
 	//   - remote: for both of these, also the Basic token that Inspect builds
 	//     from the name and the password, alone and as "Basic <token>".
 	//   - remote: the secret query and path parts of the URL, the ones that

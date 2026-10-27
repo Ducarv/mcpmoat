@@ -19,8 +19,8 @@ tools are safe. See [what this does not do](#what-this-does-not-do).
 
 ## Features
 
-- **Offline.** No account and no telemetry. It connects only to the servers you configured, and to an
-  LLM provider only if you use `--llm`.
+- **Offline-first.** No account and no telemetry. It connects only to the servers you configured,
+  and to an LLM provider only if you use `--llm`.
 - **Checks the config.** It flags plaintext secrets, unpinned packages, insecure URLs, auto-install
   flags and look-alike package names.
 - **Checks the tools** (next release, not in v0.1.0). It flags hidden instructions, invisible

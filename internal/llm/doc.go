@@ -18,6 +18,7 @@
 // [RetryMaxTries] requests for one tool in total (see retryPolicy). Each try
 // has its own time limit (requestTimeout); the time limit of the whole LLM
 // step is in cmd/mcpmoat.
+//
 // The model output is capped: 200 tokens for Anthropic, and
 // max_completion_tokens for the default OpenAI base URL only (see
 // newOpenAIAPI). The request holds the fixed [SystemPrompt], the fixed
@@ -35,12 +36,15 @@
 // description (redactPrefix). For a value that is not valid UTF-8, it also
 // removes the form that a JSON decoder gives, with one U+FFFD for each
 // invalid byte (secretValues). It marks every byte of every match first,
-// also of matches that overlap, so no part of a secret stays. The values are
+// also of matches that overlap, so no byte of a match stays. The values are
 // the secret values that inspect gave to the server (inspect.Result.Secrets),
 // so a token that a server echoes in its tool text does not reach the
 // provider. [SystemPrompt] tells the model that the mask is removed text, not
 // an instruction. A shorter value, or an encoded form of a value (base64,
-// URL-encoded, split across words), is not removed.
+// URL-encoded, split across words), is not removed. A value that starts or
+// ends with "*", or that holds a whole [discover.Mask], can show up again
+// across a Mask, from text that the server wrote next to another secret (see
+// redactWindow).
 //
 // Nothing else is sent. In particular the request never holds the client
 // config, the server command, its arguments, env values or names, header

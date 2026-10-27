@@ -10,9 +10,10 @@ import (
 // This file hides secrets in the error text about command-line arguments. A
 // base URL can hold a user name and a password (--llm-base-url, FR-17), and the
 // flag package puts the whole argument in some of its errors. Every command
-// sends the text of such an error through argErrorText, and the "unexpected
-// arguments" list through hideUserinfo (see rejectArgs), before it escapes the
-// text for the terminal.
+// builds the argHider of its arguments (see newArgHider) and sends the text of
+// such an error, and each argument of the "unexpected arguments" list (see
+// rejectArgs), through its errorText method before it escapes the text for the
+// terminal. argErrorText does the same in one call.
 
 // hiddenArgText replaces the value of a secret flag in an error message.
 const hiddenArgText = "(hidden)"
@@ -166,16 +167,8 @@ func (h argHider) hide(s string) string {
 
 // errorText returns text, an error message about the args of h, with the
 // values of the secret flag hidden (see hide) and then the user info of every
-// URL in the text hidden (see hideUserinfo). argErrorText uses it.
+// URL in the text hidden (see hideUserinfo). argErrorText and rejectArgs use
+// it.
 func (h argHider) errorText(text string) string {
 	return hideUserinfo(h.hide(text))
-}
-
-// hideAll returns a copy of args with hide applied to each argument.
-func (h argHider) hideAll(args []string) []string {
-	out := make([]string, len(args))
-	for i, a := range args {
-		out[i] = h.hide(a)
-	}
-	return out
 }

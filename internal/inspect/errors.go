@@ -545,7 +545,7 @@ func replaceURLParts(text, rawURL, redactedURL string) string {
 // "scheme://name@host" and escapes the name, so the escaped form is replaced
 // too, and so is the user info as written in rawURL.
 func replaceUserinfo(text, rawURL string, userinfo *url.Userinfo) string {
-	rawInfo := rawUserinfo(rawURL)
+	rawInfo := discover.RawUserinfo(rawURL)
 	if userinfo == nil && rawInfo == "" {
 		return text
 	}
@@ -583,24 +583,6 @@ func replaceUserinfo(text, rawURL string, userinfo *url.Userinfo) string {
 		text = replaceForms(text, ":"+password+"@", ":"+discover.Mask+"@")
 	}
 	return text
-}
-
-// rawUserinfo returns the user info of rawURL as written, without the "@", or
-// "" if there is none. It is the part of the authority before the last "@",
-// as net/url reads it.
-func rawUserinfo(rawURL string) string {
-	_, rest, found := strings.Cut(rawURL, "//")
-	if !found {
-		return ""
-	}
-	if end := strings.IndexAny(rest, "/?#"); end >= 0 {
-		rest = rest[:end]
-	}
-	at := strings.LastIndex(rest, "@")
-	if at < 0 {
-		return ""
-	}
-	return rest[:at]
 }
 
 // truncate cuts text to maxReasonRunes runes and adds "…" if it cut

@@ -2122,6 +2122,11 @@ func TestUserinfoSecrets(t *testing.T) {
 		longName  = "tok-NOTREAL-4b1d"
 		eightName = "abcdefgh" // exactly minBareSecretLen bytes
 		sevenName = "abcdefg"  // one byte short
+		// Names next to a password.
+		prefixName = "ghp_name1" // a token prefix
+		plainName  = "readonly-user"
+		eightDigit = "abcdefg1" // 8 bytes with a digit
+		sevenDigit = "abcdef1"  // 7 bytes with a digit
 	)
 	basic := func(s string) string { return base64.StdEncoding.EncodeToString([]byte(s)) }
 	tests := []struct {
@@ -2179,10 +2184,39 @@ func TestUserinfoSecrets(t *testing.T) {
 			want: []string{basic(sevenName + ":"), "Basic " + basic(sevenName+":")},
 		},
 		{
-			// With a password, the name is a user name and not the credential.
-			name: "long name with password",
-			user: url.UserPassword(longName, "pw7"),
-			want: []string{basic(longName + ":pw7"), "Basic " + basic(longName+":pw7"), "pw7"},
+			// With a password, a name of 8 or more bytes with a digit looks
+			// like a token (discover.IsSecretUserName), so it is in the list.
+			name:         "long name with password",
+			user:         url.UserPassword(longName, "pw7"),
+			want:         []string{basic(longName + ":pw7"), "Basic " + basic(longName+":pw7"), "pw7", longName},
+			nameIsSecret: true,
+		},
+		{
+			// https://<token>:x-oauth-basic@github.com/: a token prefix.
+			name:         "token-prefix name with password",
+			user:         url.UserPassword(prefixName, "x-oauth-basic"),
+			want:         []string{basic(prefixName + ":x-oauth-basic"), "Basic " + basic(prefixName+":x-oauth-basic"), "x-oauth-basic", prefixName},
+			nameIsSecret: true,
+		},
+		{
+			// A plain name next to a password is a user name, not the
+			// credential, even when it is long.
+			name: "plain long name with password",
+			user: url.UserPassword(plainName, "pw7"),
+			want: []string{basic(plainName + ":pw7"), "Basic " + basic(plainName+":pw7"), "pw7"},
+		},
+		{
+			// 8 bytes with a digit is at the limit of both rules.
+			name:         "eight-byte name with a digit and password",
+			user:         url.UserPassword(eightDigit, "pw7"),
+			want:         []string{basic(eightDigit + ":pw7"), "Basic " + basic(eightDigit+":pw7"), "pw7", eightDigit},
+			nameIsSecret: true,
+		},
+		{
+			// 7 bytes with a digit is under the limit of both rules.
+			name: "seven-byte name with a digit and password",
+			user: url.UserPassword(sevenDigit, "pw7"),
+			want: []string{basic(sevenDigit + ":pw7"), "Basic " + basic(sevenDigit+":pw7"), "pw7"},
 		},
 	}
 	for _, tt := range tests {

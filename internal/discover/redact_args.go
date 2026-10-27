@@ -168,18 +168,33 @@ func RedactArgs(args []string) []string {
 // A piece is a whole argument ("ghp_x" after "--token", "-uadmin:pw"), the
 // value after "=" ("--api-key=x", "GITHUB_TOKEN=x") or one path segment
 // ("ghp_abc123" in "/data/ghp_abc123/x"). For a URL, the pieces are the parts
-// that RedactURL masks: the user info whole, and the password or, when there
-// is no password, the name (as written and unescaped); the secret path
-// segments and query parts (see SecretPathSegments and SecretQueryParts); and
-// the fragment. When RedactURL masks the URL whole, the piece is the whole
-// URL.
+// that RedactURL masks: the user info whole; the password; the name when
+// there is no password or when it looks like a token (see IsSecretUserName),
+// as in https://<token>:x-oauth-basic@github.com/ (each as written and
+// unescaped); the secret path segments and query parts (see
+// SecretPathSegments and SecretQueryParts); and the fragment. When RedactURL
+// masks the URL whole ("jdbc:postgresql://h/db?password=x"), the pieces are
+// the whole URL and then, as a best effort, the same parts of the text from
+// its first "//" on.
 //
-// A masked piece can be a header line or an auth value, as in -H
-// "Authorization: Bearer x". A server can echo the inner value alone, so
-// ArgSecrets also returns, after the piece: the value after "Name:" when the
-// text before the first ":" is a name ("Bearer x"), and the credential after
-// an auth scheme, a name followed by a space, when the credential has no
-// space ("x"). Both are trimmed of spaces.
+// A server can echo an inner value of a masked piece alone, so ArgSecrets
+// also returns, after the piece:
+//
+//   - for a header line or an auth value, as in -H "Authorization: Bearer
+//     x": the value after "Name:" when the text before the first ":" is a
+//     name ("Bearer x"), and the credential after an auth scheme, a name
+//     followed by a space, when the credential has no space ("x"). Both are
+//     trimmed of spaces.
+//   - for key=value pairs and JSON ("Server=h;Password=x", "host=h
+//     password=x", "session=x; other=1", "--password=x", {"token":"x"},
+//     "admin:x"): the value after the first "=" of each piece and the text
+//     after a ":" (see innerValues). This over-matches on purpose: it can
+//     return ordinary words of a masked argument.
+//   - for an argument that is masked whole because a token is glued to a
+//     flag or stands as the flag name ("-p" + token, "--" + token): the text
+//     after the dashes and before "=", and for one dash also that text
+//     without its first byte (the token). For "NAME=value" that is masked
+//     whole because NAME looks like a token ("ghp_x=1"): NAME.
 //
 // Each string is not empty. The result can hold a value more than one time,
 // and it holds short values too: the caller filters them. It is nil when
@@ -205,16 +220,77 @@ type argScanner struct {
 	secrets []string
 }
 
-// mask returns Mask in place of s. When r collects, it keeps s and the inner
-// values of s as a header line or an auth value (see headerLineParts). It
-// keeps nothing for an empty s: there is no secret to remove.
+// mask returns Mask in place of s. When r collects, it keeps s and its inner
+// values (see keep).
 func (r *argScanner) mask(s string) string {
-	if r.collect && s != "" {
-		r.secrets = append(r.secrets, s)
-		r.secrets = append(r.secrets, headerLineParts(s)...)
-	}
+	r.keep(s)
 	return Mask
 }
+
+// keep does nothing unless r collects. Then it keeps s, the inner values of
+// s as a header line or an auth value (see headerLineParts), and the values
+// inside s as key=value pairs or JSON (see innerValues). It keeps nothing for
+// an empty s: there is no secret to remove.
+func (r *argScanner) keep(s string) {
+	if !r.collect || s == "" {
+		return
+	}
+	r.secrets = append(r.secrets, s)
+	r.secrets = append(r.secrets, headerLineParts(s)...)
+	r.secrets = append(r.secrets, innerValues(s)...)
+}
+
+// innerValues returns the values inside s, a text that RedactArgs masks
+// whole, such as a connection string ("Server=h;Password=x"), libpq text
+// ("host=h password=x"), a cookie line ("session=x; other=1") or JSON
+// ({"token":"x"}). A server can echo such a value alone, so ArgSecrets
+// returns it too.
+//
+// It splits s into pieces at each ";", "&", ",", ":", "{", "}", quote and
+// space byte, and it returns, for each piece in order: the piece itself when
+// a ":" comes before it with only quotes and spaces between (a JSON value or
+// the text after "user:"), and the text after the first "=" of the piece (a
+// value of key=value). Each value is not empty. It reads s one time, so the
+// time is linear in the length of s.
+//
+// This is a fail-closed over-match: it can return ordinary words, such as a
+// host name or "disable", and the caller then removes a word of 8 or more
+// bytes from text that echoes it. The masked argument is not shown anyway,
+// so only such an echo is changed, and no secret is shown.
+func innerValues(s string) []string {
+	var values []string
+	afterColon := false // a ":" came before the next piece
+	start := 0          // index of the first byte of the current piece
+	for i := 0; i <= len(s); i++ {
+		if i < len(s) && strings.IndexByte(innerSeparators, s[i]) < 0 {
+			continue
+		}
+		if piece := s[start:i]; piece != "" {
+			if afterColon {
+				values = append(values, piece)
+			}
+			if _, value, found := strings.Cut(piece, "="); found && value != "" {
+				values = append(values, value)
+			}
+			afterColon = false
+		}
+		if i < len(s) {
+			switch s[i] {
+			case ':':
+				afterColon = true
+			case '"', '\'', ' ', '\t', '\n', '\v', '\f', '\r':
+				// Quotes and spaces can stand between ":" and a value.
+			default:
+				afterColon = false
+			}
+		}
+		start = i + 1
+	}
+	return values
+}
+
+// innerSeparators are the bytes at which innerValues splits a masked text.
+const innerSeparators = ";&,:{}\"' \t\n\v\f\r"
 
 // headerLineParts returns the inner values of s, a masked text that can be a
 // header line or an auth value: the value after "Name:", when the text
@@ -278,14 +354,18 @@ func (r *argScanner) redactArg(arg string) (shown string, maskNext bool) {
 	case !ok && strings.HasPrefix(arg, "-") && arg != "-" && arg != "--":
 		// "-uadmin:pw" or "-HX-Key:v": a value glued to a short flag, in a
 		// shape that is not a flag name.
-		return r.mask(arg), false
+		shown := r.mask(arg)
+		r.keepFlagBody(arg)
+		return shown, false
 	case !ok:
 		return r.displayValue(arg), false
 	case containsToken(name):
 		// "-p" + token, a token that starts with "-", or a long secret-like
 		// name such as "--s3-secret-access-key". With no "=value", the next
 		// argument can be the value, so mask it too (fail closed).
-		return r.mask(arg), !hasValue
+		shown := r.mask(arg)
+		r.keepFlagBody(arg)
+		return shown, !hasValue
 	case !hasValue:
 		// "--token": the value is the next argument.
 		return arg, masksValue(name)
@@ -296,6 +376,25 @@ func (r *argScanner) redactArg(arg string) (shown string, maskNext bool) {
 		return prefix + r.mask(value), false
 	}
 	return prefix + r.displayValue(value), false
+}
+
+// keepFlagBody keeps the inner pieces of arg, an argument that starts with
+// "-" and that redactArg masks whole, when r collects (see keep). A token
+// can be glued to a flag ("-p" + token) or stand where the flag name goes
+// ("--" + token), and a server can echo the token alone. The pieces are the
+// body, the text after the dashes and before the first "=", and, for an
+// argument with one dash and a body of two bytes or more, the body without
+// its first byte: the text after a one-letter flag such as "-p".
+func (r *argScanner) keepFlagBody(arg string) {
+	if !r.collect {
+		return
+	}
+	body := strings.TrimPrefix(strings.TrimPrefix(arg, "-"), "-")
+	body, _, _ = strings.Cut(body, "=")
+	r.keep(body)
+	if !strings.HasPrefix(arg, "--") && len(body) > 1 {
+		r.keep(body[1:])
+	}
 }
 
 // masksValue reports whether the value of the flag called name is always
@@ -360,12 +459,12 @@ func (r *argScanner) displayValue(s string) string {
 	if !isEnvName(name) {
 		// The text before "=" can be a secret and not a name: base64 text
 		// with "=" padding ("c2VjcmV0LXZhbHVlLTEyMzQ=") or a token followed
-		// by "=x" ("ghp_abc=1"). Mask all of it, NAME included.
-		if containsToken(name) {
-			return r.mask(s)
-		}
-		if strings.Trim(value, "=") == "" && len(name) >= minPaddedTokenLen {
-			return r.mask(s)
+		// by "=x" ("ghp_abc=1"). Mask all of it, NAME included. A server can
+		// echo the NAME alone, so when r collects, it keeps NAME too.
+		if containsToken(name) || (strings.Trim(value, "=") == "" && len(name) >= minPaddedTokenLen) {
+			shown := r.mask(s)
+			r.keep(name)
+			return shown
 		}
 	}
 	if IsSecretName(name) {
@@ -420,18 +519,22 @@ func (r *argScanner) displayShape(s string) string {
 }
 
 // displayURL returns RedactURL(s). When r collects, it keeps the parts of s
-// that RedactURL masks (see maskedURLParts), or all of s when RedactURL
-// masks it whole.
+// that RedactURL masks (see maskedURLParts), or, when RedactURL masks s
+// whole, all of s and then the best-effort parts of wholeURLParts.
 func (r *argScanner) displayURL(s string) string {
 	shown := RedactURL(s)
 	if !r.collect {
 		return shown
 	}
 	if shown == Mask {
-		return r.mask(s)
+		r.keep(s)
+		for _, part := range wholeURLParts(s) {
+			r.keep(part)
+		}
+		return Mask
 	}
 	for _, part := range maskedURLParts(s) {
-		r.mask(part)
+		r.keep(part)
 	}
 	return shown
 }

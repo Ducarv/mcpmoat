@@ -471,10 +471,13 @@ func resultFromInit(initRes *mcp.InitializeResult) Result {
 // built from the name and the password. classify removes them from error
 // text everywhere.
 //
-// The user name is in the list only when the URL has no password and the name
-// has at least minBareSecretLen bytes: then the name is the credential, as in
-// https://<token>@host/. Otherwise replaceUserinfo removes the name only where
-// it stands in a URL, so that a short name does not garble other words.
+// The user name is in the list only when it has at least minBareSecretLen
+// bytes and discover.IsSecretUserName reports true for it: when there is no
+// password, because then the name is the credential, as in
+// https://<token>@host/, or when the name looks like a token next to a
+// password, as in https://<token>:x-oauth-basic@github.com/. Otherwise
+// replaceUserinfo removes the name only where it stands in a URL, so that a
+// plain or short name does not garble other words.
 //
 // The password is in the list at any length, like a header value: a leak is
 // worse than a garbled word, and a short password is the one most likely to be
@@ -490,7 +493,8 @@ func userinfoSecrets(user *url.Userinfo) []string {
 	secrets := []string{token, "Basic " + token}
 	if password != "" {
 		secrets = append(secrets, password)
-	} else if len(name) >= minBareSecretLen {
+	}
+	if len(name) >= minBareSecretLen && discover.IsSecretUserName(name, password) {
 		secrets = append(secrets, name)
 	}
 	return secrets

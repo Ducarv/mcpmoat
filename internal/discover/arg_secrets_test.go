@@ -14,10 +14,13 @@ import (
 const argV = discovertest.CanaryArgs
 
 // TestArgSecrets checks each shape of text that ArgSecrets returns: the
-// pieces that RedactArgs masks, in the order of args, and the inner values of
-// a header line or an auth value. want is written by hand, in order, with the
-// duplicates and the short values that ArgSecrets keeps on purpose (the
-// caller filters them).
+// pieces that RedactArgs masks, in the order of args, and after each piece
+// its inner values: the parts of a header line or an auth value
+// (headerLineParts), the values of key=value pairs and JSON and the text
+// after a ":" (innerValues), the body of a dash argument masked whole
+// (keepFlagBody) and the parts of a URL masked whole (wholeURLParts). want
+// is written by hand, in order, with the duplicates and the short values
+// that ArgSecrets keeps on purpose (the caller filters them).
 func TestArgSecrets(t *testing.T) {
 	t.Parallel()
 
@@ -44,22 +47,53 @@ func TestArgSecrets(t *testing.T) {
 		{name: "value after equals", args: []string{"--token=" + argV}, want: []string{argV}},
 		{name: "env flag", args: []string{"-e", "GITHUB_TOKEN=" + argV}, want: []string{argV}},
 		{
-			// The whole token-like flag, and the next arg that can be its value.
+			// The whole token-like flag, its body after "--", and the next
+			// arg that can be its value.
 			name: "token-like flag name",
 			args: []string{"--ghp_abc123def456", "x"},
-			want: []string{"--ghp_abc123def456", "x"},
+			want: []string{"--ghp_abc123def456", "ghp_abc123def456", "x"},
+		},
+		{
+			// A token glued to "-p": the arg, the body after "-" and the body
+			// without its first byte (the token alone).
+			name: "token glued to a short flag",
+			args: []string{"-pghp_abcdefghij1234567890"},
+			want: []string{"-pghp_abcdefghij1234567890", "pghp_abcdefghij1234567890", "ghp_abcdefghij1234567890"},
+		},
+		{
+			// Known limit: "pghp_abcdef123456" is 17 bytes with no token
+			// prefix at its start, so RedactArgs shows it and nothing is kept.
+			name: "short token glued to a short flag is shown",
+			args: []string{"-pghp_abcdef123456"},
+			want: nil,
 		},
 
 		// Header lines and auth values.
 		{
 			name: "authorization header",
 			args: []string{"-H", "Authorization: Bearer " + argV},
-			want: []string{"Authorization: Bearer " + argV, "Bearer " + argV, argV},
+			// headerLineParts gives "Bearer x" and x; innerValues gives the
+			// word after the ":" ("Bearer"), which the caller drops as short.
+			want: []string{"Authorization: Bearer " + argV, "Bearer " + argV, argV, "Bearer"},
 		},
 		{
+			// headerLineParts and innerValues both give the value.
 			name: "api key header",
 			args: []string{"--header", "X-Api-Key: " + argV},
-			want: []string{"X-Api-Key: " + argV, argV},
+			want: []string{"X-Api-Key: " + argV, argV, argV},
+		},
+		{
+			// innerValues gives the word after ":" ("session=..."), its
+			// value after "=", and the value of the next pair.
+			name: "cookie header",
+			args: []string{"--header", "Cookie: session=supersecret123; other=1"},
+			want: []string{
+				"Cookie: session=supersecret123; other=1",
+				"session=supersecret123; other=1",
+				"session=supersecret123",
+				"supersecret123",
+				"1",
+			},
 		},
 		{
 			name: "positional auth value",
@@ -69,16 +103,23 @@ func TestArgSecrets(t *testing.T) {
 		{
 			name: "header parts are trimmed",
 			args: []string{"-H", "Authorization: Bearer  tok  "},
-			want: []string{"Authorization: Bearer  tok  ", "Bearer  tok", "tok"},
+			want: []string{"Authorization: Bearer  tok  ", "Bearer  tok", "tok", "Bearer"},
 		},
 		{
-			// A credential has no space, so "a b" is not split off.
+			// A credential has no space, so "a b" is not split off. innerValues
+			// gives the word after ":".
 			name: "credential with a space",
 			args: []string{"-H", "Authorization: Basic a b"},
-			want: []string{"Authorization: Basic a b", "Basic a b"},
+			want: []string{"Authorization: Basic a b", "Basic a b", "Basic"},
 		},
 		{name: "header with no value", args: []string{"-H", "Authorization:"}, want: []string{"Authorization:"}},
-		{name: "header name that is not a name", args: []string{"-H", "a b: c"}, want: []string{"a b: c"}},
+		{
+			// "a b" is not a name, so headerLineParts gives nothing, but
+			// innerValues gives the text after ":".
+			name: "header name that is not a name",
+			args: []string{"-H", "a b: c"},
+			want: []string{"a b: c", "c"},
+		},
 		{
 			// Words of a path segment with spaces are not removed one by one.
 			name: "text with spaces gives no credential part",
@@ -87,11 +128,63 @@ func TestArgSecrets(t *testing.T) {
 		},
 
 		// Values masked whole.
-		{name: "value glued to a short flag", args: []string{"-uadmin:" + argShort}, want: []string{"-uadmin:" + argShort, argShort}},
-		{name: "padded base64", args: []string{"c2VjcmV0LXZhbHVlLTEyMzQ="}, want: []string{"c2VjcmV0LXZhbHVlLTEyMzQ="}},
-		{name: "DSN", args: []string{"u:p@tcp(h)/db"}, want: []string{"u:p@tcp(h)/db", "p@tcp(h)/db"}},
-		{name: "user and password", args: []string{"admin:" + argShort}, want: []string{"admin:" + argShort, argShort}},
-		{name: "secret label", args: []string{"token:abc"}, want: []string{"token:abc", "abc"}},
+		{
+			// Each of the arg, the body "uadmin:pw" and "admin:pw" gives the
+			// password two times: from headerLineParts and innerValues.
+			name: "value glued to a short flag",
+			args: []string{"-uadmin:" + argShort},
+			want: []string{
+				"-uadmin:" + argShort, argShort, argShort,
+				"uadmin:" + argShort, argShort, argShort,
+				"admin:" + argShort, argShort, argShort,
+			},
+		},
+		{
+			// NAME is kept after the arg: the base64 text without its padding.
+			name: "padded base64",
+			args: []string{"c2VjcmV0LXZhbHVlLTEyMzQ="},
+			want: []string{"c2VjcmV0LXZhbHVlLTEyMzQ=", "c2VjcmV0LXZhbHVlLTEyMzQ"},
+		},
+		{
+			// The value "1" from innerValues, then NAME.
+			name: "token as NAME",
+			args: []string{"ghp_abcdef123456=1"},
+			want: []string{"ghp_abcdef123456=1", "1", "ghp_abcdef123456"},
+		},
+		{name: "DSN", args: []string{"u:p@tcp(h)/db"}, want: []string{"u:p@tcp(h)/db", "p@tcp(h)/db", "p@tcp(h)/db"}},
+		{name: "user and password", args: []string{"admin:" + argShort}, want: []string{"admin:" + argShort, argShort, argShort}},
+		{
+			name: "user and long password",
+			args: []string{"admin:supersecret123"},
+			want: []string{"admin:supersecret123", "supersecret123", "supersecret123"},
+		},
+		{name: "secret label", args: []string{"token:abc"}, want: []string{"token:abc", "abc", "abc"}},
+		{
+			// The segment after "Server=" is masked; innerValues gives the
+			// password.
+			name: "connection string",
+			args: []string{"--conn", "Server=h;Password=supersecret123"},
+			want: []string{"h;Password=supersecret123", "supersecret123"},
+		},
+		{
+			// libpq text: the masked value after "host=", then each value.
+			name: "libpq text",
+			args: []string{"host=h password=supersecret123 dbname=x"},
+			want: []string{"h password=supersecret123 dbname=x", "supersecret123", "x"},
+		},
+		{
+			// A flag inside an env value: the masked value, then its value
+			// after "=".
+			name: "flag in an env value",
+			args: []string{"-e", "OPTS=--password=supersecret123"},
+			want: []string{"--password=supersecret123", "supersecret123"},
+		},
+		{
+			// JSON: the value after `"token":`. The key has no ":" before it.
+			name: "JSON",
+			args: []string{"--cfg", `{"token":"supersecret123"}`},
+			want: []string{`{"token":"supersecret123"}`, "supersecret123"},
+		},
 		{name: "path segment", args: []string{"/data/ghp_abc123xyz/x"}, want: []string{"ghp_abc123xyz"}},
 
 		// URLs: the parts that RedactURL masks.
@@ -100,12 +193,43 @@ func TestArgSecrets(t *testing.T) {
 			// part, then the password.
 			name: "URL user info with a password",
 			args: []string{"postgres://u:" + argShort + "@h/db"},
-			want: []string{"u:" + argShort, argShort, argShort},
+			// headerLineParts and innerValues of the user info, then the
+			// password. "u" is a plain name next to a password: not kept.
+			want: []string{"u:" + argShort, argShort, argShort, argShort},
 		},
 		{
 			name: "URL password as written and unescaped",
 			args: []string{"https://user:p%40ssword9@h/sse"},
-			want: []string{"user:p%40ssword9", "p%40ssword9", "p%40ssword9", "p@ssword9"},
+			want: []string{"user:p%40ssword9", "p%40ssword9", "p%40ssword9", "p%40ssword9", "p@ssword9"},
+		},
+		{
+			// A long plain name next to a password is not kept alone.
+			name: "URL plain name with a password",
+			args: []string{"https://readonly-user:supersecret123@h/x"},
+			want: []string{"readonly-user:supersecret123", "supersecret123", "supersecret123", "supersecret123"},
+		},
+		{
+			// https://<token>:x-oauth-basic@github.com/: a token prefix in
+			// the name, so the name is kept after the password.
+			name: "URL token name with a password",
+			args: []string{"https://ghp_abcdef123456:x-oauth-basic@github.com/o/r"},
+			want: []string{
+				"ghp_abcdef123456:x-oauth-basic", "x-oauth-basic", "x-oauth-basic",
+				"x-oauth-basic",
+				"ghp_abcdef123456",
+			},
+		},
+		{
+			// 8 bytes or more with a digit: the name is kept.
+			name: "URL name with a digit and a password",
+			args: []string{"https://user2024x:pw@h/x"},
+			want: []string{"user2024x:pw", "pw", "pw", "pw", "user2024x"},
+		},
+		{
+			// An empty password: the name is the credential.
+			name: "URL name with an empty password",
+			args: []string{"https://tok:@h/x"},
+			want: []string{"tok:", "tok"},
 		},
 		{name: "URL name with no password", args: []string{"https://" + argV + "@h/"}, want: []string{argV, argV}},
 		{name: "URL name unescaped", args: []string{"https://ab%2Bcd@h/"}, want: []string{"ab%2Bcd", "ab%2Bcd", "ab+cd"}},
@@ -120,10 +244,72 @@ func TestArgSecrets(t *testing.T) {
 		},
 		{
 			// RedactURL masks a URL with an unknown scheme whole. "ftp" is a
-			// name before ":", so the rest is a header part.
+			// name before ":", so the rest is a header part, and innerValues
+			// gives the text after ":" too. wholeURLParts finds nothing in
+			// "//h/x".
 			name: "URL masked whole",
 			args: []string{"ftp://h/x"},
-			want: []string{"ftp://h/x", "//h/x"},
+			want: []string{"ftp://h/x", "//h/x", "//h/x"},
+		},
+		{
+			// The whole URL, its headerLineParts and innerValues, then the
+			// query values of wholeURLParts ("password" is not a token-like
+			// key, so it is not kept).
+			name: "JDBC URL with a query password",
+			args: []string{"--db", "jdbc:postgresql://h/db?user=a&password=supersecret123"},
+			want: []string{
+				"jdbc:postgresql://h/db?user=a&password=supersecret123",
+				"postgresql://h/db?user=a&password=supersecret123",
+				"postgresql",
+				"//h/db?user=a",
+				"a",
+				"supersecret123",
+				"a",
+				"supersecret123",
+			},
+		},
+		{
+			// wholeURLParts gives the user info and the password; each one
+			// then goes through headerLineParts and innerValues.
+			name: "JDBC URL with user info",
+			args: []string{"jdbc:mysql://u:supersecret123@h/db"},
+			want: []string{
+				"jdbc:mysql://u:supersecret123@h/db",
+				"mysql://u:supersecret123@h/db",
+				"mysql",
+				"//u",
+				"supersecret123@h/db",
+				"u:supersecret123", "supersecret123", "supersecret123",
+				"supersecret123",
+			},
+		},
+		{
+			// The rest after "//" does not parse (bad escape), so
+			// wholeURLParts falls back to the raw user info and password.
+			name: "URL masked whole that does not parse",
+			args: []string{"jdbc:x://u:p%zz123456@h"},
+			want: []string{
+				"jdbc:x://u:p%zz123456@h",
+				"x://u:p%zz123456@h",
+				"x",
+				"//u",
+				"p%zz123456@h",
+				"u:p%zz123456", "p%zz123456", "p%zz123456",
+				"p%zz123456",
+			},
+		},
+		{
+			// The fallback with no password keeps the name: it is the
+			// credential.
+			name: "URL masked whole that does not parse with a name only",
+			args: []string{"jdbc:x://tok%zz@h"},
+			want: []string{"jdbc:x://tok%zz@h", "x://tok%zz@h", "x", "//tok%zz@h", "tok%zz", "tok%zz"},
+		},
+		{
+			// The fallback finds no user info: nothing more.
+			name: "URL masked whole that does not parse with no user info",
+			args: []string{"jdbc:x://h%zz/x"},
+			want: []string{"jdbc:x://h%zz/x", "x://h%zz/x", "x", "//h%zz/x"},
 		},
 		{name: "URL value of an env name", args: []string{"U=https://h/?k=" + argV}, want: []string{argV}},
 
@@ -131,7 +317,7 @@ func TestArgSecrets(t *testing.T) {
 		{
 			name: "order of args",
 			args: []string{"-y", "pkg", "--token", "first-value", "-H", "X-Key: second-value", "/data/ghp_third123/x"},
-			want: []string{"first-value", "X-Key: second-value", "second-value", "ghp_third123"},
+			want: []string{"first-value", "X-Key: second-value", "second-value", "second-value", "ghp_third123"},
 		},
 	}
 	for _, tt := range tests {
@@ -161,7 +347,10 @@ func TestArgSecrets(t *testing.T) {
 //  1. Each secret, as written or percent-decoded (see percentDecode), is a
 //     substring of an arg, as written or percent-decoded with or without "+"
 //     as a space. ArgSecrets keeps raw text, the trimmed inner parts of a
-//     header line and URL parts, and nothing else. A URL part can be
+//     header line, the pieces that innerValues and keepFlagBody cut out of
+//     a masked text, and URL parts (wholeURLParts too), and nothing else.
+//     Each cut piece is a substring of its text, so no new form is needed
+//     for it. A URL part can be
 //     unescaped (a password, a fragment, url.QueryUnescape of a query part)
 //     or escaped again by url.URL (a path segment comes from EscapedPath, so
 //     a space in the arg is "%20" in the part).
@@ -290,6 +479,10 @@ func FuzzArgSecrets(f *testing.F) {
 	f.Add("--ghp_abc123def456\x00x", "/x/********\x00--flag=********")
 	// A path segment comes back from EscapedPath with the space escaped.
 	f.Add("///0\x00//0/?0", "//0/0,0 0")
+	// Shapes of innerValues, keepFlagBody and wholeURLParts.
+	f.Add("--conn\x00Server=h;Password=pw\x00host=h password=pw dbname=x", `{"token":"pw"}`)
+	f.Add("jdbc:postgresql://h/db?user=a&password=pw\x00jdbc:mysql://u:pw@h/db", "jdbc:x://u:p%zz1@h")
+	f.Add("-pghp_abcdefghij1234567890\x00ghp_abcdef123456=1", "https://ghp_abcdef123456:x@h/\x00https://tok:@h/x")
 
 	f.Fuzz(func(t *testing.T, before, after string) {
 		args := append(strings.Split(before, "\x00"), strings.Split(after, "\x00")...)

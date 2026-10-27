@@ -25,7 +25,9 @@ mcpmoat scan --llm --llm-provider openai --llm-model <model> \
   address. Otherwise `scan` refuses the URL and sends no request. A user name, a password, a query
   or a fragment in the URL is refused. With an `http` base URL, any process on this machine that
   listens on that port gets the key in clear text. So use a key made for that local server or
-  gateway, not a real provider key.
+  gateway, not a real provider key. The error text of a wrong argument hides the value of
+  `--llm-base-url` and the user info of any URL, with some limits (see
+  [What mcpmoat does not do](limits.md)).
 - Each `--llm-*` flag needs `--llm`. `--llm` does not work with `--no-connect`, because without a
   connection there are no tools to send. Both are usage errors (exit code 2).
 - **Warning line:** before the first request, `scan` prints this line on stderr, also with `--json`:
@@ -54,8 +56,15 @@ mcpmoat scan --llm --llm-provider openai --llm-model <model> \
   `********` when it shows the command: the value of a secret-like flag (`--api-key V`,
   `--token=V`), the value in `-e NAME=V`, a header line such as `Authorization: Bearer tok` (the
   line and the credential), an arg that is hidden whole (a DSN, `user:pass` or a token-like
-  value), the secret parts of a URL and a hidden path segment. Package names and other plain args
-  are not removed. A value of one server is removed only from the tools of that server. For a
+  value), the secret parts of a URL and a hidden path segment. Inside such a masked part, they are
+  also the smaller parts that the server can echo alone: each value after `=` in a `key=value`
+  text (`Server=h;Password=x`, libpq `password=x`, `Cookie: session=x; other=1`,
+  `-e OPTS=--password=x`) and after `:` in JSON-like text (`"token":"x"`), the query values and
+  the password of a URL that is masked whole (`jdbc:postgresql://h/db?user=a&password=x`), the
+  bare token in `-p<token>`, `--<token>` and `<token>=1`, and the user name next to a password in
+  a URL when the name looks like a token or has 8 bytes or more with a digit
+  (`https://<token>:x-oauth-basic@github.com/...`). Package names and other plain args are not
+  removed. A value of one server is removed only from the tools of that server. For a
   value that is not valid UTF-8 (it can come from your environment), mcpmoat also removes the form
   that the server sends in JSON, with one U+FFFD for each invalid byte. When a `********` starts in
   the part of the name or the description that mcpmoat can send (the first 512 bytes of the name
@@ -73,9 +82,12 @@ mcpmoat scan --llm --llm-provider openai --llm-model <model> \
     report hides it too, for example a long random-looking path segment (such as a segment of the
     macOS `$TMPDIR`), a nix hash, a UUID or a name with spaces. When such text is in a tool
     description, the model sees `********` in its place, and the message has `"redacted": true`.
+    The smaller parts of a hidden arg fail closed too: they can hold a plain word of 8 bytes or
+    more, such as `Negotiate` in `-H "Authorization: Negotiate x"`.
   - Some secrets in args are not found, so they are not removed: a value after a flag whose name
     does not look secret (`--db mypassword`), a plain positional value (`hunter2`), a short path
-    segment, or a value glued to a short flag (`-phunter2`).
+    segment, or a value glued to a short flag when the whole arg does not look like a token
+    (`-phunter2`, `-pghp_abc123`).
   - A secret that starts or ends with `*`, or that holds a whole `********`, can show again across
     a `********`. For example, the secret `abcdefg*` shows when the text has `abcdefg` just before
     another secret.
@@ -96,11 +108,11 @@ mcpmoat scan --llm --llm-provider openai --llm-model <model> \
   base URL is `https`. A base URL with `http` (a loopback host only) never uses a proxy.
 - **Retries:** when the provider answers HTTP 429, 502, 503, 504 or 529 (busy or overloaded),
   mcpmoat sends the same request again. Each tool gets at most 3 tries in total: the first request
-  and 2 retries. Before a retry, mcpmoat waits: the wait starts at 1 second and doubles up to 8
-  seconds, and a random part makes each wait 0.5 to 1.5 times that value. When the answer has a
-  `Retry-After` header (a number of seconds or an HTTP date), mcpmoat waits that time instead. A
-  `Retry-After` longer than 30 seconds means no retry. A value that is not valid, or a date in the
-  past, gives the normal wait. mcpmoat never reads the body of an HTTP error. These cases get no
+  and 2 retries. Before a retry, mcpmoat waits about 1 second, then about 2 seconds, with jitter: a
+  random part makes each wait 0.5 to 1.5 times that value. When the answer has a `Retry-After`
+  header (a number of seconds or an HTTP date), mcpmoat waits that time instead. A `Retry-After` of
+  up to 30 seconds is honoured; a longer one means no retry. A value that is not valid, or a date in
+  the past, gives the normal wait. mcpmoat never reads the body of an HTTP error. These cases get no
   retry: any other HTTP error (also 400, 413, 422, 401, 403, 404 and 500), a redirect, a request
   that used up its 30 seconds, and any other network error. When the last try fails, it is a
   provider failure (see **Exit codes** below).

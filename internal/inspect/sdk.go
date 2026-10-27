@@ -524,9 +524,8 @@ func expandError(s discover.Server, err error, policy expandPolicy) *ConnectErro
 
 // envSecrets returns the configured env values of at least minBareSecretLen
 // bytes, for classify to remove from error text and for Result.Secrets (see
-// resultSecrets). A shorter value is too
-// likely to match ordinary words ("1", "true", "info"), and too short to be
-// a token.
+// resultSecrets). A shorter value is too likely to match ordinary words ("1",
+// "true", "info"), and too short to be a token.
 func envSecrets(env discover.SecretMap) []string {
 	var secrets []string
 	for _, key := range env.Keys() {

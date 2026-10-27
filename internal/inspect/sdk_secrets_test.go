@@ -15,9 +15,11 @@ import (
 )
 
 // These tests cover Result.Secrets of a stdio server (issue #185): the
-// configured env values and the expanded values of at least 8 bytes, each
-// one time, longest first, and nil when the inspection fails. The remote
-// side is in secrets_test.go.
+// configured env values, the expanded values and the argv secrets (the text
+// that discover.RedactArgs masks) of at least 8 bytes, each one time,
+// longest first, and nil when the inspection fails. They also check that
+// Inspect removes an argv secret from error text. The remote side is in
+// secrets_test.go.
 
 // sdkSecretsParent is the injected parent environment of the tests below.
 // MCPMOAT_TEST_SHORT has a value under 8 bytes.
@@ -307,7 +309,7 @@ func TestSDKInspectSecretsStdioArgs(t *testing.T) {
 				t.Fatalf("Inspect() error = %v, want nil", err)
 			}
 			// The values are fake test secrets, so the messages show them.
-			values := revealAll(got.Secrets)
+			values := inspect.RevealSecrets(got.Secrets)
 			for _, w := range tt.want {
 				if !slices.Contains(values, w) {
 					t.Errorf("Result.Secrets = %q, want it to hold %q", values, w)
@@ -328,15 +330,6 @@ func TestSDKInspectSecretsStdioArgs(t *testing.T) {
 			}
 		})
 	}
-}
-
-// revealAll returns the values of secrets in order.
-func revealAll(secrets []discover.Secret) []string {
-	values := make([]string, 0, len(secrets))
-	for _, s := range secrets {
-		values = append(values, s.Reveal())
-	}
-	return values
 }
 
 // TestSDKInspectStdioArgSecretEcho checks that Inspect removes an argv

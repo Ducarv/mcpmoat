@@ -18,8 +18,8 @@ Requirement IDs in this document are stable. Issues, pull requests and commit me
 
 A Go command-line tool that protects **the individual developer** against malicious or tampered MCP
 servers. It starts as a **scanner** and evolves, in phases, into a **local firewall**, a **trust
-score** and **data-flow control**. Everything runs 100% offline, with no account and no telemetry.
-The one exception is the optional, opt-in `--llm` check (FR-17).
+score** and **data-flow control**. Everything runs 100% offline except the optional, opt-in
+`--llm` check (FR-17), with no account and no telemetry.
 
 ### 1.2 Problem
 
@@ -696,20 +696,19 @@ the machine**.
   `--fail-on high`, so a hostile server that makes the provider refuse its own tool description
   can keep its LLM rating from reaching `high`, as with an unusable answer. The rule findings still
   apply.
-- Retries: a provider answer of HTTP 429, 502, 503, 504 or 529 (busy or overloaded) is tried
-  again, with at most 3 tries in total for each tool. The wait before a retry is an exponential
-  backoff with jitter (1 s, doubling up to 8 s), or the `Retry-After` time of the answer up to 30
-  s. A longer `Retry-After` means no retry. No other status, no request timeout and no other
-  transport error is tried again. After the last try, the failure is a provider failure (below).
-- Time and cost bounds: each request has a time limit (30 s), and the whole LLM step has a fixed
-  time limit of 10 minutes, with no flag. A step that reaches it is a provider failure: the tools
-  that got an answer keep their findings, and the others are not classified. A signal is not this
-  case, and a provider failure that came first wins. The cost bound is at most 3 requests for each
-  tool, so at most 1500 requests in one scan, each with at most 24 KiB of tool text. The output of
-  the model is capped too: 200 tokens for Anthropic, and `max_completion_tokens` 2048 for the
-  default OpenAI base URL (hidden reasoning tokens are billed). Another OpenAI-compatible base URL
-  gets no output cap, because many such servers refuse that field. A cut answer is an unusable
-  answer (`MOAT-LLM-002`), not an error.
+- Retries: a provider answer that says busy or overloaded (such as HTTP 429 or 503) is tried
+  again, with a fixed, small number of tries for each tool and a wait with jitter between them. A
+  `Retry-After` time is honoured up to a cap, and a longer one means no retry. No other status, no
+  request timeout and no other transport error is tried again. After the last try, the failure is
+  a provider failure (below).
+- Time and cost bounds: each request has a time limit, and the whole LLM step has a fixed time
+  limit, with no flag. A step that reaches it is a provider failure: the tools that got an answer
+  keep their findings, and the others are not classified. A signal is not this case, and a
+  provider failure that came first wins. The tool cap, the tries for each tool and the size of
+  each request bound the cost of a scan. The output tokens of the model are capped where the API
+  allows it (hidden reasoning tokens are billed). An OpenAI-compatible base URL can get no output
+  cap, because many such servers refuse that field. A cut answer is an unusable answer
+  (`MOAT-LLM-002`), not an error. docs/llm.md holds the status codes, the waits and the numbers.
 - A provider failure stops the step and gives exit code 2 (fail closed). A provider failure is any
   other HTTP error, a redirect, a network or TLS error, a timeout, a response that is not valid,
   or the time limit of the step.

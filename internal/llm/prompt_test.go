@@ -963,7 +963,7 @@ func TestVerdictSchema(t *testing.T) {
 	dec := json.NewDecoder(bytes.NewReader(verdictSchema()))
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(&schema); err != nil {
-		t.Fatalf("VerdictSchema() is not the expected JSON: %v", err)
+		t.Fatalf("verdictSchema() is not the expected JSON: %v", err)
 	}
 
 	if schema.Type != "object" {
@@ -1007,7 +1007,7 @@ func TestVerdictSchema(t *testing.T) {
 	first := verdictSchema()
 	first[0] = 'X'
 	if second := verdictSchema(); second[0] != '{' {
-		t.Error("VerdictSchema() shares its slice between calls")
+		t.Error("verdictSchema() shares its slice between calls")
 	}
 }
 
@@ -1082,6 +1082,150 @@ func TestSecretValues(t *testing.T) {
 				t.Errorf("secretValues(%q) = %q, want %q", tt.secrets, got, tt.want)
 			}
 		})
+	}
+}
+
+// TestSecretValuesLarge checks secretValues with many secrets: 50,000 unique
+// values of 16 bytes (some not valid UTF-8), then each of them again and the
+// decoded forms as secrets of their own. The result must hold each value and
+// decoded form once, in the order of the first occurrence. The time bound is
+// very loose: it only catches a dedupe that is quadratic (seconds for this
+// list). The count and the order are the real check.
+func TestSecretValuesLarge(t *testing.T) {
+	t.Parallel()
+
+	const count = 50000
+	var raw, want []string
+	for i := range count {
+		v := fmt.Sprintf("value-%010d", i) // 16 bytes
+		if i%7 == 0 {
+			v = fmt.Sprintf("value\xff%010d", i) // 16 bytes, not valid UTF-8
+		}
+		raw = append(raw, v)
+		want = append(want, v)
+		if i%7 == 0 {
+			want = append(want, decodedPerByte(v))
+		}
+	}
+	// Duplicates: every value again in reverse order, then each decoded form
+	// as a secret. None of them may change the result or its order.
+	secrets := slices.Clone(raw)
+	for _, v := range slices.Backward(raw) {
+		secrets = append(secrets, v)
+	}
+	for _, v := range raw {
+		if !utf8.ValidString(v) {
+			secrets = append(secrets, decodedPerByte(v))
+		}
+	}
+
+	start := time.Now()
+	got := secretValues(newSecrets(secrets...))
+	elapsed := time.Since(start)
+
+	// The failure messages give counts and indexes only: the list is long.
+	if wantLen := count + (count+6)/7; len(want) != wantLen {
+		t.Fatalf("test setup: %d wanted values, want %d", len(want), wantLen)
+	}
+	if len(got) != len(want) {
+		t.Fatalf("secretValues() gives %d values, want %d", len(got), len(want))
+	}
+	seen := make(map[string]int, len(got))
+	for i, v := range got {
+		if j, ok := seen[v]; ok {
+			t.Fatalf("secretValues() value %d is the same as value %d", i, j)
+		}
+		seen[v] = i
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("secretValues() value %d is not in first-occurrence order", i)
+		}
+	}
+	if elapsed > 2*time.Second {
+		t.Errorf("secretValues() took %v for %d secrets, want less than 2s (a quadratic dedupe?)", elapsed, len(secrets))
+	}
+}
+
+// secretValuesReference is a plain reference for secretValues: the same
+// rules, with a linear search for the dedupe. It is slow for many values, so
+// use it only with short lists.
+func secretValuesReference(secrets []discover.Secret) []string {
+	var values []string
+	add := func(v string) {
+		if !slices.Contains(values, v) {
+			values = append(values, v)
+		}
+	}
+	for _, s := range secrets {
+		v := s.Reveal()
+		if len(v) < minSecretBytes {
+			continue
+		}
+		add(v)
+		if !utf8.ValidString(v) {
+			add(decodedPerByte(v))
+		}
+	}
+	return values
+}
+
+// TestSecretValuesMatchesReference compares secretValues with
+// secretValuesReference for random lists of secrets. A small set of pieces
+// makes duplicates, values near minSecretBytes and invalid UTF-8 frequent.
+// Some secrets repeat an earlier secret or its decoded form. The seed is
+// fixed, so a failure repeats.
+func TestSecretValuesMatchesReference(t *testing.T) {
+	t.Parallel()
+
+	pieces := []string{"a", "b", "ab", "\xff", "\xfe", ffd, "é"}
+	rng := rand.New(rand.NewPCG(211, 2026)) //nolint:gosec // G404: fixed seed for a reproducible test, not for security
+	var dups, decoded int
+	for range 3000 {
+		var values []string
+		for n := rng.IntN(20); n > 0; n-- {
+			switch k := rng.IntN(10); {
+			case k == 0 && len(values) > 0:
+				values = append(values, values[rng.IntN(len(values))])
+			case k == 1 && len(values) > 0:
+				values = append(values, decodedPerByte(values[rng.IntN(len(values))]))
+			default:
+				var b strings.Builder
+				for m := 4 + rng.IntN(6); m > 0; m-- {
+					b.WriteString(pieces[rng.IntN(len(pieces))])
+				}
+				values = append(values, b.String())
+			}
+		}
+		secrets := newSecrets(values...)
+		got, want := secretValues(secrets), secretValuesReference(secrets)
+		if !slices.Equal(got, want) {
+			t.Fatalf("secretValues(%q) = %q, want %q", values, got, want)
+		}
+
+		// Count the paths that the lists reach.
+		long := 0
+		for _, v := range values {
+			if len(v) >= minSecretBytes {
+				long++
+				if !utf8.ValidString(v) {
+					long++
+				}
+			}
+		}
+		if len(want) < long {
+			dups++
+		}
+		for _, v := range want {
+			if strings.Contains(v, ffd) {
+				decoded++
+				break
+			}
+		}
+	}
+	// The generator must reach each path often, or the test checks little.
+	if dups < 500 || decoded < 1000 {
+		t.Errorf("lists with a duplicate %d, with a U+FFFD value %d of 3000: too few", dups, decoded)
 	}
 }
 

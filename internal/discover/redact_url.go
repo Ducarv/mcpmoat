@@ -310,9 +310,11 @@ func SecretQueryParts(rawQuery string) []string {
 // ArgSecrets, when RedactURL does not mask raw whole:
 //
 //   - the user info as written; the password as written and unescaped; and
-//     the name as written and unescaped only when there is no password, as
-//     in https://<token>@host/ (a name next to a password is often a plain
-//     word);
+//     the name as written and unescaped when IsSecretUserName reports true
+//     for it: when there is no password, as in https://<token>@host/, or
+//     when the name looks like a token, as in
+//     https://<token>:x-oauth-basic@github.com/ (a name next to a password
+//     is often a plain word);
 //   - SecretPathSegments and SecretQueryParts;
 //   - the fragment as written and unescaped.
 //
@@ -332,14 +334,14 @@ func maskedURLParts(raw string) []string {
 		}
 	}
 	if u.User != nil {
-		info := rawUserinfo(raw)
+		info := RawUserinfo(raw)
 		add(info, "")
-		name, password, hasPassword := strings.Cut(info, ":")
-		if hasPassword {
-			plainPassword, _ := u.User.Password()
-			add(password, plainPassword)
-		} else {
-			add(name, u.User.Username())
+		name, password, _ := strings.Cut(info, ":")
+		plainName := u.User.Username()
+		plainPassword, _ := u.User.Password()
+		add(password, plainPassword)
+		if IsSecretUserName(plainName, plainPassword) {
+			add(name, plainName)
 		}
 	}
 	parts = append(parts, SecretPathSegments(raw)...)
@@ -350,11 +352,75 @@ func maskedURLParts(raw string) []string {
 	return parts
 }
 
-// rawUserinfo returns the user info of raw as written, the text between "//"
-// and the last "@" of the authority, or "" when there is none. It finds the
-// authority as url.Parse does: after the first "//" (a scheme has no "/"), up
-// to the first "/", "?" or "#".
-func rawUserinfo(raw string) string {
+// wholeURLParts returns the inner parts of raw, a text with "://" or "//"
+// that RedactURL masks whole, for ArgSecrets. RedactURL masks such a text
+// whole when the scheme is not on its list ("jdbc:postgresql://h/db?...") or
+// when it cannot show the URL safely, so ArgSecrets keeps the whole text.
+// A server can echo a password or a query value alone, so this is a best
+// effort to find them: it cuts raw at its first "//" and gives the parts of
+// the rest that maskedURLParts gives for a URL with no scheme. When the rest
+// does not parse, it gives the user info as written, found as url.Parse
+// would find it (see RawUserinfo), its password and, by the rule of
+// IsSecretUserName, its name. It over-matches at worst: raw is masked
+// already. It returns nil when raw has no "//" or no such part.
+func wholeURLParts(raw string) []string {
+	i := strings.Index(raw, "//")
+	if i < 0 {
+		return nil
+	}
+	rest := raw[i:]
+	if parts := maskedURLParts(rest); parts != nil {
+		return parts
+	}
+	info := RawUserinfo(rest)
+	if info == "" {
+		return nil
+	}
+	parts := []string{info}
+	name, password, _ := strings.Cut(info, ":")
+	if password != "" {
+		parts = append(parts, password)
+	}
+	if name != "" && IsSecretUserName(name, password) {
+		parts = append(parts, name)
+	}
+	return parts
+}
+
+// minTokenUserNameLen is the shortest user name next to a password that
+// IsSecretUserName counts as a token for its digit rule. It is the same
+// length as the shortest secret that internal/inspect removes from text
+// (minBareSecretLen there), so a short name such as "user1" is not a secret.
+const minTokenUserNameLen = 8
+
+// IsSecretUserName reports whether name, the unescaped user name of a URL or
+// of a Basic credential with the unescaped password, is a secret by itself,
+// and not only a plain word next to the password. That is so when password
+// is empty, as in https://<token>@host/, because then the name is the
+// credential. With a password, it is so when name looks like a token: by
+// the RedactArgs rules (a known token prefix such as "ghp_", or a long
+// random-looking word), or when name has minTokenUserNameLen or more bytes
+// and holds a digit. GitHub documents
+// https://<token>:x-oauth-basic@github.com/ for a token in the name.
+//
+// A caller that removes the name from other text applies its own length
+// floor. It never prints or stores name or password. It is exported so that
+// ArgSecrets and the error scrub of internal/inspect agree on the rule.
+func IsSecretUserName(name, password string) bool {
+	if password == "" || containsToken(name) {
+		return true
+	}
+	return len(name) >= minTokenUserNameLen && strings.ContainsAny(name, "0123456789")
+}
+
+// RawUserinfo returns the user info of raw as written, the text between "//"
+// and the last "@" of the authority, without the "@", or "" when there is
+// none. It finds the authority as url.Parse does: after the first "//" (a
+// scheme has no "/"), up to the first "/", "?" or "#". It works on text that
+// does not parse too. The result can hold a raw secret: never print, log or
+// store it. It is exported so that the redaction and the error scrub of
+// internal/inspect read the user info in the same way.
+func RawUserinfo(raw string) string {
 	_, authority, found := strings.Cut(raw, "//")
 	if !found {
 		return ""

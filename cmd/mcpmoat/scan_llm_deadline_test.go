@@ -37,8 +37,8 @@ import (
 //     retry.
 //
 // The fake providers of this file send "Retry-After: 0" with every retryable
-// status: cmd/mcpmoat cannot change the backoff waits of package llm (1 s
-// and more), and the wait of 0 s keeps the tests fast.
+// status: cmd/mcpmoat cannot change the backoff waits of package llm (about
+// 0.5 s and more), and the wait of 0 s keeps the tests fast.
 //
 // The step deadline is a real timer in runLLMJobs, and a test cannot fire it
 // early. So no test here needs work to finish inside a short time: each
@@ -61,7 +61,7 @@ const llmDeadlineGuard = 20 * time.Second
 // the slow requests of a test end at the deadline.
 const llmTestStepLimit = 3 * time.Second
 
-// llmTestStepLimitText is llmTestStepLimit as stepTimeoutText gives it in the
+// llmTestStepLimitText is llmTestStepLimit as durationText gives it in the
 // deadline line. It is a copy, so a change of the text fails the tests.
 const llmTestStepLimitText = "3 seconds"
 
@@ -84,7 +84,7 @@ func waitForStop(ctx context.Context) error {
 }
 
 // llmDeadlineLine returns the exact stderr line of an LLM step that its time
-// limit stopped. timeText is the time as stepTimeoutText gives it. It is a
+// limit stopped. timeText is the time as durationText gives it. It is a
 // copy of the text of printLLMProblems, so a change of it fails the tests.
 func llmDeadlineLine(timeText string, n int) string {
 	return scanPrefix + "the LLM step stopped after " + timeText + "; " + notClassifiedText(n) + "\n"
@@ -524,9 +524,9 @@ func TestEndedByDeadline(t *testing.T) {
 	}
 }
 
-// TestStepTimeoutText checks the time text of the deadline line and of the
+// TestDurationText checks the time text of the deadline line and of the
 // help.
-func TestStepTimeoutText(t *testing.T) {
+func TestDurationText(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
@@ -547,13 +547,13 @@ func TestStepTimeoutText(t *testing.T) {
 		{0, "0s"},
 	}
 	for _, tt := range tests {
-		if got := stepTimeoutText(tt.d); got != tt.want {
-			t.Errorf("stepTimeoutText(%v) = %q, want %q", tt.d, got, tt.want)
+		if got := durationText(tt.d); got != tt.want {
+			t.Errorf("durationText(%v) = %q, want %q", tt.d, got, tt.want)
 		}
 	}
 	// The production time limit is 10 minutes (issue #188).
-	if got := stepTimeoutText(llmStepTimeout); got != "10 minutes" {
-		t.Errorf("stepTimeoutText(llmStepTimeout) = %q, want \"10 minutes\"", got)
+	if got := durationText(llmStepTimeout); got != "10 minutes" {
+		t.Errorf("durationText(llmStepTimeout) = %q, want \"10 minutes\"", got)
 	}
 }
 
@@ -837,13 +837,6 @@ func TestScanLLMRetry(t *testing.T) {
 
 	const retryStep = 10 * time.Second
 	ra0 := func(code int) llmRetryStep { return llmRetryStep{code: code, retryAfter: "0"} }
-	repeat := func(s llmRetryStep, n int) []llmRetryStep {
-		out := make([]llmRetryStep, n)
-		for i := range out {
-			out[i] = s
-		}
-		return out
-	}
 	t1 := mkTool("t1", "Read keys. "+llmMarkHigh)
 	t2 := mkTool("t2", "Add.")
 	highT1 := []llmHit{{llm.RuleID, "high", "srv", "t1"}}
@@ -888,7 +881,7 @@ func TestScanLLMRetry(t *testing.T) {
 		retryCase{
 			name:      "HTTP 429 every time",
 			tools:     []inspect.Tool{t1},
-			script:    map[string][]llmRetryStep{"t1": repeat(ra0(429), 10)},
+			script:    map[string][]llmRetryStep{"t1": slices.Repeat([]llmRetryStep{ra0(429)}, 10)},
 			timeout:   retryStep,
 			wantCode:  exitError,
 			wantTries: map[string]int{"t1": llm.RetryMaxTries},
@@ -897,7 +890,7 @@ func TestScanLLMRetry(t *testing.T) {
 		retryCase{
 			name:      "HTTP 529 every time",
 			tools:     []inspect.Tool{t1},
-			script:    map[string][]llmRetryStep{"t1": repeat(ra0(529), 10)},
+			script:    map[string][]llmRetryStep{"t1": slices.Repeat([]llmRetryStep{ra0(529)}, 10)},
 			timeout:   retryStep,
 			wantCode:  exitError,
 			wantTries: map[string]int{"t1": llm.RetryMaxTries},
@@ -907,7 +900,7 @@ func TestScanLLMRetry(t *testing.T) {
 			// A Retry-After above the cap: no retry, the failure at once.
 			name:      "HTTP 429 with Retry-After 3600",
 			tools:     []inspect.Tool{t1},
-			script:    map[string][]llmRetryStep{"t1": repeat(llmRetryStep{429, "3600"}, 10)},
+			script:    map[string][]llmRetryStep{"t1": slices.Repeat([]llmRetryStep{{429, "3600"}}, 10)},
 			timeout:   retryStep,
 			wantCode:  exitError,
 			wantTries: map[string]int{"t1": 1},
@@ -917,7 +910,7 @@ func TestScanLLMRetry(t *testing.T) {
 			// Just above the cap of 30 seconds.
 			name:      "HTTP 503 with Retry-After 31",
 			tools:     []inspect.Tool{t1},
-			script:    map[string][]llmRetryStep{"t1": repeat(llmRetryStep{503, "31"}, 10)},
+			script:    map[string][]llmRetryStep{"t1": slices.Repeat([]llmRetryStep{{503, "31"}}, 10)},
 			timeout:   retryStep,
 			wantCode:  exitError,
 			wantTries: map[string]int{"t1": 1},
@@ -929,7 +922,7 @@ func TestScanLLMRetry(t *testing.T) {
 			// request.
 			name:      "HTTP 429 with Retry-After 30 ends at the deadline",
 			tools:     []inspect.Tool{t1},
-			script:    map[string][]llmRetryStep{"t1": repeat(llmRetryStep{429, "30"}, 10)},
+			script:    map[string][]llmRetryStep{"t1": slices.Repeat([]llmRetryStep{{429, "30"}}, 10)},
 			timeout:   llmTestStepLimit,
 			wantCode:  exitError,
 			wantTries: map[string]int{"t1": 1},
@@ -939,7 +932,7 @@ func TestScanLLMRetry(t *testing.T) {
 			// A refusal is never tried again, also with Retry-After.
 			name:      "HTTP 400 with Retry-After 0",
 			tools:     []inspect.Tool{mkTool("t1", "Read a file."), t2},
-			script:    map[string][]llmRetryStep{"t1": repeat(ra0(400), 10)},
+			script:    map[string][]llmRetryStep{"t1": slices.Repeat([]llmRetryStep{ra0(400)}, 10)},
 			wantCode:  exitOK,
 			wantTries: map[string]int{"t1": 1, "t2": 1},
 			wantRows:  []llmHit{{llm.RuleIDInvalid, "medium", "srv", "t1"}},
@@ -957,7 +950,7 @@ func TestScanLLMRetry(t *testing.T) {
 		tests = append(tests, retryCase{
 			name:      fmt.Sprintf("HTTP %d with Retry-After 0", tc.code),
 			tools:     []inspect.Tool{t1},
-			script:    map[string][]llmRetryStep{"t1": repeat(ra0(tc.code), 10)},
+			script:    map[string][]llmRetryStep{"t1": slices.Repeat([]llmRetryStep{ra0(tc.code)}, 10)},
 			wantCode:  exitError,
 			wantTries: map[string]int{"t1": 1},
 			wantLine:  scanPrefix + "the LLM provider failed (" + tc.reason + "); 1 tool was not classified\n",

@@ -58,13 +58,30 @@ This page lists what mcpmoat does not do, so you know how far to trust a clean s
     removed.
   - A secret in an arg that mcpmoat does not recognise is not removed, for example
     `--db mypassword`, a positional `hunter2`, a short path segment or `-phunter2`.
-  - A secret that starts or ends with `*` can show again next to a `********`.
+  - A secret that starts or ends with `*`, or holds a whole `********`, can show again across a
+    `********`.
   - A header value of 8 bytes or more is replaced also when it is not secret, for example
     `application/json`. Arg text that the report masks is replaced also when it is not secret, for
     example a long random-looking path segment, a nix hash, a UUID or a name with spaces.
 - The report on the terminal and the `--json` output show the tool names as the server sent them.
   mcpmoat does not remove secret values from them, so a server that puts a secret in a tool name
   can make it show on stdout.
+- When you give a wrong argument, every command hides the user info of each URL in the error text
+  (`https://user:pass@host` shows as `https://(hidden)@host`), and it hides the value of
+  `--llm-base-url`, also one with no scheme such as `user:pass@host`. This covers the flag errors
+  of `mcpmoat`, `scan` and `pin`, an unknown command name, the `unexpected arguments` error of
+  every command and the `pin --accept <name>` messages. The limits:
+  - `pin` has no `--llm-base-url` flag. When an `--accept`, `--config` or `--project` value holds a
+    `--llm-base-url` value (`--accept --llm-base-url=user:pass@host`), `pin` stops with exit code 2
+    and a fixed message that does not print the value. A very short `--llm-base-url` value that
+    also shows inside one of these values stops `pin` too, also when no secret is in it.
+  - A raw `/`, `?` or `#` in a password ends the user info early, so the password can show. RFC
+    3986 says that a URL must percent-encode these characters in the user info. The value of
+    `--llm-base-url` is still hidden whole.
+  - A value with no scheme is not hidden when it is the value of another flag and no dash comes
+    before the flag name, for example `--timeout=llm-base-url=user:PASS@host`.
+  - The errors about the `--config` and `--project` paths are not scrubbed, because these values
+    are paths, not URLs.
 - Not done yet: a lock for `pins.json` (#150).
 - The owner and mode check of the pins directory and `pins.json` does not cover everything. For
   example, it skips parent directories, ACLs and Windows. See [Known
