@@ -87,8 +87,9 @@ func (c *cli) pinsPath(cmd string) (string, bool) {
 //
 // release is never nil, also when ok is false (then it does nothing), so the
 // defer is safe on every path. A second call does nothing, so the caller can
-// also call release early: right after Save, before it prints, so that a slow
-// reader of stdout or stderr never holds the lock.
+// also call release early: right after Save, or before an early return, and
+// always before it prints, so that a slow reader of stdout or stderr never
+// holds the lock.
 //
 // ok is false, after a message on stderr for the command cmd ("scan" or
 // "pin"), when the path is not known or the file cannot be read. The caller
@@ -111,6 +112,9 @@ func (c *cli) pinsPath(cmd string) (string, bool) {
 // When the file system cannot lock the pins directory, LoadLocked goes on
 // without the lock. readPinsLocked then prints one warning: a parallel run can
 // still lose an update.
+//
+// readPinsLocked prints only when it holds no lock: LoadLocked holds no lock
+// after an error, and the warning is for a run without the lock.
 func (c *cli) readPinsLocked(ctx context.Context, cmd string) (store *pins.Store, release func(), ok bool) {
 	noop := func() {}
 	path, ok := c.pinsPath(cmd)
@@ -146,27 +150,26 @@ func (c *cli) readPinsLocked(ctx context.Context, cmd string) (store *pins.Store
 // the earlier read found the file and the later read did not, the file was
 // removed. A save would then write a new file with only the pins of this run,
 // and drop every older pin without a word. A later rug pull would then look
-// like a first run. So the caller saves nothing. When it returns true, it has
-// printed pinsRemovedText on stderr for the command cmd, and the caller exits
-// with 2.
-func (c *cli) pinsRemovedWhileRunning(cmd string, firstExisted bool, later *pins.Store) bool {
-	if !firstExisted || later.Existed() {
-		return false
-	}
-	c.cmdPrintf(cmd, "%s", pinsRemovedText)
-	return true
+// like a first run. So the caller saves nothing.
+//
+// It only checks and prints nothing. When it returns true, the caller prints
+// pinsRemovedText on stderr and exits with 2. A caller that holds the lock on
+// the pins directory releases the lock first, so a blocked stderr never holds
+// the lock.
+func pinsRemovedWhileRunning(firstExisted bool, later *pins.Store) bool {
+	return firstExisted && !later.Existed()
 }
 
 // pinsFullText is the shared part of the three messages for a server that
 // does not fit in pins.json (pins.ErrStoreFull): "the pins file is full
 // (32 MiB)". scan uses it at report time (reasonStoreFull) and at save time
 // (savePinned), and pin uses it in saveAccepted. The size comes from
-// pins.MaxFileSize, the limit that Set enforces, so the number is written in
-// one place. MaxFileSize>>20 is the limit in MiB (1 MiB is 1<<20 bytes).
+// pins.MaxFileSizeMiB, the limit that Set enforces, so the number is written
+// in one place.
 //
 // It is a var and not a const: Go cannot turn a number into text at compile
 // time, so fmt.Sprintf builds the text once, when the program starts.
-var pinsFullText = fmt.Sprintf("the pins file is full (%d MiB)", pins.MaxFileSize>>20)
+var pinsFullText = fmt.Sprintf("the pins file is full (%d MiB)", pins.MaxFileSizeMiB)
 
 // pinsLockedText is the line that readPinsLocked prints after the read error
 // when another process held the lock on the pins directory for the whole wait.
@@ -174,8 +177,9 @@ var pinsFullText = fmt.Sprintf("the pins file is full (%d MiB)", pins.MaxFileSiz
 // open the directory can hold the lock. It is fixed text.
 const pinsLockedText = "another process is using the pins file; run the command again in a moment"
 
-// pinsRemovedText is the line that pinsRemovedWhileRunning prints when the
-// pins file was removed while scan or pin ran. It is fixed text.
+// pinsRemovedText is the line that scan and pin print when the pins file was
+// removed while the command ran (see pinsRemovedWhileRunning). It is fixed
+// text.
 const pinsRemovedText = "the pins file was removed while this command ran, so no pins were saved; run the command again"
 
 // printNewPinsFile prints one line on stderr for the command cmd: the save

@@ -68,6 +68,9 @@ type locker struct {
 //     These errors always come from ctx, never from wait.
 //   - (release, false, err) for any other failure.
 //
+// The errors do not name the directory: the caller (loadLocked) adds the path
+// of the pins file, so the path shows once.
+//
 // release is never nil, so the caller can defer it on every path. It is safe
 // to call more than once. It releases the lock but does not close d.
 //
@@ -91,7 +94,7 @@ func (l locker) lock(ctx context.Context, d *os.File) (release func(), locked bo
 
 	for {
 		if ctxErr := ctx.Err(); ctxErr != nil {
-			return noop, false, fmt.Errorf("lock pins directory %s: %w", d.Name(), ctxErr)
+			return noop, false, fmt.Errorf("lock the pins directory: %w", ctxErr)
 		}
 
 		acquired, tryErr := try(d)
@@ -99,7 +102,7 @@ func (l locker) lock(ctx context.Context, d *os.File) (release func(), locked bo
 		case errors.Is(tryErr, errLockUnsupported):
 			return noop, false, nil
 		case tryErr != nil:
-			return noop, false, fmt.Errorf("lock pins directory %s: %w", d.Name(), tryErr)
+			return noop, false, fmt.Errorf("lock the pins directory: %w", tryErr)
 		case acquired:
 			return releaser(d), true, nil
 		}
@@ -110,7 +113,7 @@ func (l locker) lock(ctx context.Context, d *os.File) (release func(), locked bo
 		}
 		left := time.Until(deadline)
 		if l.wait <= 0 || left <= 0 {
-			return noop, false, fmt.Errorf("lock pins directory %s: %w", d.Name(), ErrLocked)
+			return noop, false, fmt.Errorf("lock the pins directory: %w", ErrLocked)
 		}
 
 		// Do not sleep past the deadline: the last attempt then happens at
@@ -119,7 +122,7 @@ func (l locker) lock(ctx context.Context, d *os.File) (release func(), locked bo
 		select {
 		case <-ctx.Done():
 			timer.Stop()
-			return noop, false, fmt.Errorf("lock pins directory %s: %w", d.Name(), ctx.Err())
+			return noop, false, fmt.Errorf("lock the pins directory: %w", ctx.Err())
 		case <-timer.C:
 		}
 	}

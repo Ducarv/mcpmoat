@@ -6,15 +6,11 @@ package main
 // of pins.json (32 MiB) at report time and at save time. They use a fake
 // inspector, so no server starts, and they never call t.Setenv: each test has
 // its own home and XDG_CONFIG_HOME in t.TempDir(). The shared pin helpers are
-// in pins_helpers_test.go. The near-full pins file (writeNearFullPins and
-// bigStoreTool) is here, and TestPinAcceptStoreFull uses it too.
+// in pins_helpers_test.go, also the near-full pins file (writeNearFullPins and
+// bigStoreTool) and the lock probe (lockProbeWriter).
 
 import (
 	"bytes"
-	"crypto/sha256"
-	"encoding/hex"
-	"errors"
-	"fmt"
 	"os"
 	"path/filepath"
 	"slices"
@@ -25,7 +21,6 @@ import (
 
 	"github.com/Ducarv/mcpmoat/internal/discover"
 	"github.com/Ducarv/mcpmoat/internal/inspect"
-	"github.com/Ducarv/mcpmoat/internal/pins"
 	"github.com/Ducarv/mcpmoat/internal/report"
 )
 
@@ -196,154 +191,6 @@ func TestScanPinsLockHeld(t *testing.T) {
 	}
 }
 
-// readIfExists returns the content of path and true, or nil and false when
-// the file does not exist. It fails the test on another error.
-func readIfExists(t *testing.T, path string) ([]byte, bool) {
-	t.Helper()
-	data, err := os.ReadFile(path) //nolint:gosec // G304: path is under the test's own t.TempDir()
-	if errors.Is(err, os.ErrNotExist) {
-		return nil, false
-	}
-	if err != nil {
-		t.Fatal(err)
-	}
-	return data, true
-}
-
-// nearFullGap is the free space that writeNearFullPins leaves below
-// pins.MaxFileSize. The entry of a server with bigStoreTool is larger than
-// it, and the entry of a server with one mkTool is far smaller.
-const nearFullGap = 16 << 10
-
-// nearFullServers is the number of filler servers in the file of
-// writeNearFullPins. With 17 and the 32 MiB of pins.MaxFileSize, each entry is
-// about 1.9 MiB, well below the limit of one server (2 MiB). If the file limit
-// grows, an entry can get larger than 2 MiB: Set then refuses a filler, and
-// writeNearFullPins fails. Then raise this number.
-const nearFullServers = 17
-
-// bigStoreTool returns a tool whose pins entry is larger than nearFullGap:
-// its _meta alone is twice that size. The size is in _meta and not in the
-// description, so no description rule (for example the one for a long
-// description) adds a row, and the rule step stays fast.
-func bigStoreTool() inspect.Tool {
-	return metaTool("big_tool", `{"k":"`+strings.Repeat("a", 2*nearFullGap)+`"}`, "")
-}
-
-// fillerIdentity returns the identity of the filler server i. The names have
-// the same length, so every filler entry has the same fixed bytes.
-func fillerIdentity(i int) pins.Identity {
-	return pins.Identity{Client: "fixture", Source: "/fixture/mcp.json", Name: fmt.Sprintf("fill-%02d", i)}
-}
-
-// fillerNames returns the names of the nearFullServers filler servers.
-func fillerNames() []string {
-	names := make([]string, nearFullServers)
-	for i := range names {
-		names[i] = fillerIdentity(i).Name
-	}
-	return names
-}
-
-// fillerPins returns the pins of a filler server: one tool "fill" with the
-// canonical text and its hash. The hash is built like the one of
-// setPinCanonical (pins.HashVersion, a colon, the hex SHA-256), so it has the
-// same length for every text.
-func fillerPins(canonical string) pins.ServerPins {
-	sum := sha256.Sum256([]byte(canonical))
-	return pins.ServerPins{"fill": {Hash: pins.HashVersion + ":" + hex.EncodeToString(sum[:]), Canonical: canonical}}
-}
-
-// saveFillers saves a new pins store at path with one filler server for each
-// canonical text (fillerIdentity(i), fillerPins(canonicals[i])) and returns
-// the size of the file. It uses the pins API only: pins.Load of a missing
-// file gives an empty store, and Save writes the directory with mode 0700
-// and the file with mode 0600, as the CLI requires.
-func saveFillers(t *testing.T, path string, canonicals ...string) int {
-	t.Helper()
-	store, err := pins.Load(path)
-	if err != nil {
-		t.Fatalf("pins.Load(%q) error = %v, want nil", path, err)
-	}
-	if store.Existed() {
-		t.Fatalf("pins.Load(%q): the file exists, want a new store", path)
-	}
-	for i, c := range canonicals {
-		if err := store.Set(fillerIdentity(i), fillerPins(c)); err != nil {
-			t.Fatalf("Store.Set(filler %d) error = %v, want nil", i, err)
-		}
-	}
-	if err := store.Save(); err != nil {
-		t.Fatalf("Store.Save() error = %v, want nil", err)
-	}
-	info, err := os.Stat(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return int(info.Size())
-}
-
-// writeNearFullPins writes a valid pins.json at path with nearFullServers
-// filler servers, so that the file has exactly pins.MaxFileSize - nearFullGap
-// bytes. A server entry larger than nearFullGap then does not fit
-// (pins.ErrStoreFull), and a small one does.
-//
-// The size of the file depends on the format of Save, so the helper measures
-// it: it saves one and two fillers with a one-byte text in scratch folders.
-// The file grows by one byte for each byte of a canonical text of letters, so
-// the sizes give the fixed bytes of the file and of one entry. The filler
-// texts share one string, so the memory use stays near the size of the file.
-func writeNearFullPins(t *testing.T, path string) {
-	t.Helper()
-	one := saveFillers(t, filepath.Join(t.TempDir(), "mcpmoat", "pins.json"), "a")
-	two := saveFillers(t, filepath.Join(t.TempDir(), "mcpmoat", "pins.json"), "a", "a")
-	entry := two - one // one entry with a one-byte text
-	fixed := one - entry
-
-	want := pins.MaxFileSize - nearFullGap
-	textBytes := want - fixed - nearFullServers*(entry-1)
-	n := textBytes / nearFullServers
-	long := strings.Repeat("a", n+textBytes%nearFullServers)
-	canonicals := make([]string, nearFullServers)
-	for i := range canonicals {
-		canonicals[i] = long[:n]
-	}
-	canonicals[nearFullServers-1] = long
-
-	if size := saveFillers(t, path, canonicals...); size != want {
-		t.Fatalf("near-full pins.json has %d bytes, want %d (the size model of Save changed)", size, want)
-	}
-}
-
-// bigPinsServerNames returns the server names in the pins file at path,
-// sorted. It is for the near-full file of writeNearFullPins: a JSON decode of
-// 32 MiB is slow with -race, so it finds each `"name": "` key with
-// bytes.Index. The key text matches the server entries only: Save writes one
-// space after the colon, and a canonical text in the file is a JSON string,
-// so its quotes are escaped (\"name\":\"...\"). The names of the tests are
-// plain words with no escape.
-func bigPinsServerNames(t *testing.T, path string) []string {
-	t.Helper()
-	const key = `"name": "`
-	data := readFileBytes(t, path)
-	var names []string
-	for {
-		i := bytes.Index(data, []byte(key))
-		if i < 0 {
-			break
-		}
-		data = data[i+len(key):]
-		end := bytes.IndexByte(data, '"')
-		if end < 0 {
-			t.Fatalf("pins file %s has a name with no end quote", path)
-		}
-		names = append(names, string(data[:end]))
-		data = data[end:]
-	}
-	slices.Sort(names)
-	return names
-}
-
 // TestScanReasonsFitShortCell checks that each fixed reason of the
 // MOAT-T2-004 rows that scan makes itself fits in a short report cell
 // (report.MaxShortCellRunes, such as the "Reason:" line of a finding), so the
@@ -444,6 +291,12 @@ func TestScanPinsStoreFullAtReport(t *testing.T) {
 // built before the scan in a scratch folder, and the hook moves it into place
 // with os.Rename, so the hook does no slow work inside inspect.Run. No
 // t.Parallel, for the reason of TestScanPinsStoreFullAtReport.
+//
+// The stderr of scan is a lockProbeWriter: savePinned collects the warning
+// while it holds the lock and prints it after the release, so the lock must be
+// free when the warning is written. Only the warning is probed: each probe
+// reads the near-full file, and TestScanPinsReleasesLockBeforeOutput already
+// probes the "pinned" lines.
 func TestScanPinsStoreFullAtSave(t *testing.T) {
 	if testing.Short() {
 		t.Skip("builds a near-32 MiB pins file; slow under -race")
@@ -473,13 +326,19 @@ func TestScanPinsStoreFullAtSave(t *testing.T) {
 		hook:  func(discover.Server) { once.Do(grow) },
 	}
 
-	got := e.scan(insp)
+	c, stdout, stderr := e.cli(insp)
+	probe := newLockProbeWriter(t, stderr, e.pinsPath(), "not pinned: ")
+	c.stderr = probe
 
+	code := c.dispatch([]string{"scan", "--config", e.config})
+
+	got := pinRunResult{code: code, stdout: stdout.String(), stderr: stderr.String()}
 	assertScanRun(t, got, scanWant{code: exitError})
 	want := scanWarnPrefix + "server big not pinned: the pins file is full (32 MiB)\n" + pinnedLine("tiny", 1) + "\n"
 	if got.stderr != want {
 		t.Errorf("stderr = %q, want %q", got.stderr, want)
 	}
+	assertLockFreeAt(t, probe, "server big not pinned: ")
 	// The report came before the save, when big still fitted.
 	assertNoPinRows(t, got.stdout)
 	assertPinsFileMode(t, e.pinsPath())
@@ -545,6 +404,48 @@ func TestScanPinsReleasesLockBeforeOutput(t *testing.T) {
 	}
 }
 
+// TestScanPinsWarnsAfterRelease checks that the warning for a server that
+// another run pinned with other tools during the scan is written after the
+// release of the lock. savePinned finds the entry while it holds the lock,
+// collects the warning, and prints it after the release, before the "pinned"
+// line of the other server. The stderr of scan is a lockProbeWriter, so each
+// of the two lines tries the lock as another run would, and the lock must be
+// free.
+//
+// The other run is simulated by the inspector (hookInspector): it pins srv
+// with another tool while scan inspects srv, like TestScanFreshStoreKeepsOtherRun.
+func TestScanPinsWarnsAfterRelease(t *testing.T) {
+	t.Parallel()
+
+	e := newPinEnv(t, map[string]any{
+		"srv":   map[string]any{"command": "npx"},
+		"other": map[string]any{"command": "npx"},
+	})
+	insp := hookInspector{
+		inner: fakeServers(map[string][]inspect.Tool{"srv": {mkTool("a", "Add.")}, "other": {mkTool("o", "Other.")}}),
+		hook: onceFor("srv", func(s discover.Server) {
+			writePinsAside(t, e.pinsPath(), serverIdentity(s), mkTool("x", "Written by another run."))
+		}),
+	}
+	c, stdout, stderr := e.cli(insp)
+	probe := newLockProbeWriter(t, stderr, e.pinsPath(), "was pinned by another run", "pinned 1 tool for other")
+	c.stderr = probe
+
+	code := c.dispatch([]string{"scan", "--config", e.config})
+
+	got := pinRunResult{code: code, stdout: stdout.String(), stderr: stderr.String()}
+	assertScanRun(t, got, scanWant{code: exitOK, stdout: []string{"srv", "other"}, stderr: []string{parallelPinWarning}})
+	// The other run created pins.json before the locked read, so there is no
+	// new pins file notice.
+	if want := parallelPinWarning + pinnedLine("other", 1) + "\n"; got.stderr != want {
+		t.Errorf("stderr = %q, want exactly %q", got.stderr, want)
+	}
+	assertLockFreeAt(t, probe, "was pinned by another run", "pinned 1 tool for other")
+	if names := e.readPins().serverNames(); !slices.Equal(names, []string{"other", "srv"}) {
+		t.Errorf("pinned servers = %v, want [other srv]", names)
+	}
+}
+
 // TestScanPinsFileRemovedDuringScan checks a pins.json that was on disk at the
 // first read of scan but is gone at the read with the lock in savePinned:
 // another process removed it while scan inspected the servers. A save would
@@ -552,7 +453,9 @@ func TestScanPinsReleasesLockBeforeOutput(t *testing.T) {
 // (here alpha), so a later rug pull would look like a first run. So scan saves
 // nothing: exit code 2, exactly the pinsRemovedText line on stderr, no
 // "pinned" line, no new pins file notice, and no pins.json. The report is
-// already out on stdout.
+// already out on stdout. The stderr of scan is a lockProbeWriter: savePinned
+// prints the pinsRemovedText line after the release, so the lock must be free
+// at that write.
 //
 // The removal runs in the inspector (hookInspector), so it comes after the
 // first read and before savePinned, like the growth of pins.json in
@@ -577,10 +480,16 @@ func TestScanPinsFileRemovedDuringScan(t *testing.T) {
 		}),
 	}
 
-	got := e.scan(insp)
+	c, stdout, stderr := e.cli(insp)
+	probe := newLockProbeWriter(t, stderr, e.pinsPath(), pinsRemovedText)
+	c.stderr = probe
 
+	code := c.dispatch([]string{"scan", "--config", e.config})
+
+	got := pinRunResult{code: code, stdout: stdout.String(), stderr: stderr.String()}
 	assertScanRun(t, got, scanWant{code: exitError, stdout: []string{"alpha", "beta"}})
 	e.assertNoPinsFile(t, "a scan whose pins file was removed while it ran")
 	assertContainsNone(t, "stderr", got.stderr, []string{"pinned ", "no pins file was found"})
 	assertStderrLines(t, got.stderr, []lineWant{exactLine(scanPrefix + pinsRemovedText)})
+	assertLockFreeAt(t, probe, pinsRemovedText)
 }

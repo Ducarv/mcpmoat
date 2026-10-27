@@ -13,7 +13,6 @@ import (
 // calls the pure function lockErrno.
 func TestLockErrno(t *testing.T) {
 	t.Parallel()
-	const name = "/home/u/.config/mcpmoat"
 	tests := []struct {
 		name            string
 		errno           syscall.Errno
@@ -36,7 +35,7 @@ func TestLockErrno(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			acquired, err := lockErrno(name, tt.errno)
+			acquired, err := lockErrno(tt.errno)
 			if acquired != tt.wantAcquired {
 				t.Errorf("lockErrno(%v) acquired = %v, want %v", tt.errno, acquired, tt.wantAcquired)
 			}

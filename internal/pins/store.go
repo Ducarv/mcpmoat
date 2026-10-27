@@ -37,6 +37,11 @@ const CurrentVersion = 1
 // messages of the CLI show the same limit.
 const MaxFileSize = 32 << 20
 
+// MaxFileSizeMiB is MaxFileSize in MiB (1 MiB is 1<<20 bytes, so the shift
+// divides by 1<<20). The error texts of the store and the messages of the CLI
+// use it, so they show the same limit.
+const MaxFileSizeMiB = MaxFileSize >> 20
+
 // maxServerSize is the largest entry of one server that Load and Set accept,
 // in bytes of compact JSON. Each tool stores its canonical text next to its
 // hash, so a server with 100 tools needs about 100 KiB or more. A server sends
@@ -53,6 +58,16 @@ const maxServerSize = 2 << 20
 
 // indent is the indent of one level of the JSON that Save writes.
 const indent = "  "
+
+// saveOptions are the JSON options of Save. entrySize uses them too, so the
+// size that Set tracks is the size that Save writes. Deterministic sorts the
+// map keys. encoding/json/v2 does not escape <, > and &, so such a tool name
+// keeps its size in the file.
+//
+// json.JoinOptions joins several options into one value. It is a var, not a
+// const: an option is a value of an interface type, and Go has no constant of
+// such a type.
+var saveOptions = json.JoinOptions(jsontext.WithIndent(indent), json.Deterministic(true))
 
 // ErrUnsupportedVersion means that pins.json has a format version that this
 // mcpmoat does not know, because the file is newer. Load never reads such a
@@ -220,12 +235,16 @@ func DefaultPath(getenv func(string) string, homeDir func() (string, error)) (st
 // not create the directory.
 //
 // Load refuses an unsafe path with an error that wraps ErrInsecurePermissions
-// (see Save). The checks run in this order:
-//   - The parent directories of the pins directory, for example ~/.config,
-//     and the owner of each symlink on the path to the pins directory
-//     (checkParents). This check is by path, by design: when no other user
-//     can write a parent or owns a symlink on the path, no other user can
-//     swap the path.
+// (see Save). Such an error names the unsafe path and has no "read <path>"
+// prefix; the other errors start with "read <path>" or "parse <path>". The
+// checks run in this order:
+//   - The path to the pins directory, resolved one component at a time
+//     (checkParents): the owner of every symlink on it, also a symlink that
+//     is reached only through the target of another symlink, and the owner
+//     and the mode of every directory above the pins directory that the walk
+//     crosses, for example ~/.config. This check is by path, by design: when
+//     no other user can write such a directory or owns such a symlink, no
+//     other user can swap the path.
 //   - The pins directory, on the handle of the directory that Load reads from
 //     (checkDirHandle): another owner, a mode that lets the group or others
 //     write, or (macOS only) an ACL that lets a user or group write.
@@ -264,12 +283,7 @@ func Load(path string) (*Store, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer func() {
-		// Both are read-only, so a close error is not useful. Closing the root
-		// does not close the files opened through it, so close both.
-		_ = d.Close()
-		_ = root.Close()
-	}()
+	defer closeDir(root, d)
 
 	s, err := loadFromRoot(path, root, name)
 	if err != nil {
@@ -346,9 +360,10 @@ func loadLocked(ctx context.Context, path string, l locker) (s *Store, release f
 	dir, name := filepath.Dir(path), filepath.Base(path)
 
 	// Check the parents before ensurePinsDir, so it never creates a directory
-	// under an unsafe parent.
+	// under an unsafe parent. The error names the unsafe path (see
+	// openCheckedDir).
 	if err := checkParents(dir); err != nil {
-		return nil, noop, fmt.Errorf("read %s: %w", path, err)
+		return nil, noop, err
 	}
 	if err := ensurePinsDir(path, dir); err != nil {
 		return nil, noop, err
@@ -385,9 +400,7 @@ func loadLocked(ctx context.Context, path string, l locker) (s *Store, release f
 	// call do nothing, so the caller can call release twice.
 	releaseAll := sync.OnceFunc(func() {
 		unlockDir()
-		// Both are read-only, so a close error is not useful.
-		_ = d.Close()
-		_ = root.Close()
+		closeDir(root, d)
 	})
 	// On any error below, release everything before the return, so no handle
 	// or lock leaks. The deferred function runs after the return statement
@@ -462,8 +475,9 @@ func ensurePinsDir(path, dir string) error {
 // owner check by path (dirOpenError).
 func openCheckedDir(path, dir string) (root *os.Root, d *os.File, missing bool, err error) {
 	if parentErr := checkParents(dir); parentErr != nil {
-		// Wrap with %w, so errors.Is still finds ErrInsecurePermissions.
-		return nil, nil, false, fmt.Errorf("read %s: %w", path, parentErr)
+		// No "read <path>" prefix: like every refusal of an unsafe path
+		// (ErrInsecurePermissions), the error names the path that is unsafe.
+		return nil, nil, false, parentErr
 	}
 
 	root, err = safefile.OpenRoot(dir)
@@ -479,12 +493,19 @@ func openCheckedDir(path, dir string) (root *os.Root, d *os.File, missing bool, 
 	}
 
 	if checkErr := checkDirHandle(dir, d); checkErr != nil {
-		// Both are read-only, so a close error is not useful.
-		_ = d.Close()
-		_ = root.Close()
+		closeDir(root, d)
 		return nil, nil, false, checkErr
 	}
 	return root, d, false, nil
+}
+
+// closeDir closes d, the handle of the pins directory, and root, the os.Root
+// that d was opened through. Closing root does not close the files opened
+// through it, so both need a close. Both are read-only, so a close error is not
+// useful and is ignored.
+func closeDir(root *os.Root, d *os.File) {
+	_ = d.Close()
+	_ = root.Close()
 }
 
 // newStore returns an empty Store that saves to path. existed and
@@ -509,7 +530,8 @@ func newStore(path string) *Store {
 func dirOpenError(path, dir string, err error) error {
 	if errors.Is(err, fs.ErrPermission) {
 		if permErr := checkDirPerm(dir); permErr != nil {
-			return fmt.Errorf("read %s: %w", path, permErr)
+			// A refusal names its own path, so it gets no "read <path>" prefix.
+			return permErr
 		}
 	}
 	return fmt.Errorf("read %s: %w", path, err)
@@ -829,7 +851,7 @@ func (s *Store) Set(id Identity, p ServerPins) error {
 	// still be possible.
 	if after > MaxFileSize && after > before {
 		return fmt.Errorf("%w: %d bytes with this server, more than the %d MiB limit",
-			ErrStoreFull, after, MaxFileSize>>20)
+			ErrStoreFull, after, MaxFileSizeMiB)
 	}
 
 	// A zero-value Store has nil maps, and writing to a nil map panics.
@@ -920,18 +942,18 @@ func fileSize(count, entryBytes int) int {
 // file that Save writes: the indent of depth 2 before its "{", the encoded
 // entry, and the ",\n" after it (fileSize corrects the last entry).
 //
-// The entry is encoded with the options of Save. In the file, every line of
-// the entry after the first starts with the indent of depth 2 (two levels).
-// WithIndentPrefix adds that prefix after each newline of the entry, but not
-// before the first line, so entrySize adds the indent before the "{" itself.
-// A newline in a JSON string is written as \n, so it gets no prefix.
+// The entry is encoded with the options of Save (saveOptions). In the file,
+// every line of the entry after the first starts with the indent of depth 2
+// (two levels). WithIndentPrefix adds that prefix after each newline of the
+// entry, but not before the first line, so entrySize adds the indent before
+// the "{" itself. A newline in a JSON string is written as \n, so it gets no
+// prefix.
 //
 // The encoder writes to a byteCounter, so a large entry is counted and not
 // kept in memory.
 func entrySize(id Identity, tools ServerPins) (int, error) {
 	var w byteCounter
-	err := json.MarshalWrite(&w, newFileServer(id, tools),
-		jsontext.WithIndent(indent), jsontext.WithIndentPrefix(indent+indent), json.Deterministic(true))
+	err := json.MarshalWrite(&w, newFileServer(id, tools), saveOptions, jsontext.WithIndentPrefix(indent+indent))
 	if err != nil {
 		// Not wrapped: the error text of encoding/json can hold a tool name.
 		return 0, errors.New("the server pins cannot be encoded as JSON")
@@ -1014,10 +1036,7 @@ func (s *Store) Save() error {
 	}
 	f := fileFormat{Version: CurrentVersion, Servers: &servers}
 
-	// Deterministic sorts the map keys. encoding/json/v2 does not escape <, >
-	// and &, so such a tool name keeps its size in the file.
-	// entrySize uses the same options: keep the two the same.
-	data, err := json.Marshal(f, jsontext.WithIndent(indent), json.Deterministic(true))
+	data, err := json.Marshal(f, saveOptions)
 	if err != nil {
 		// Not wrapped: the error text of encoding/json can hold a tool name.
 		return fmt.Errorf("save %s: the pins cannot be encoded as JSON", s.path)
@@ -1025,13 +1044,16 @@ func (s *Store) Save() error {
 	data = append(data, '\n')
 	// Check the size before the write, so the old file stays valid.
 	if len(data) > MaxFileSize {
-		// MaxFileSize>>20 is the limit in MiB (1 MiB is 1<<20 bytes), the
-		// unit that Set uses in its text too.
 		return fmt.Errorf("save %s: pins data is %d bytes, larger than the %d MiB limit",
-			s.path, len(data), MaxFileSize>>20)
+			s.path, len(data), MaxFileSizeMiB)
 	}
 
 	if err := writeFileAtomic(s.path, data); err != nil {
+		if errors.Is(err, ErrInsecurePermissions) {
+			// A refusal names the unsafe path itself, so it gets no
+			// "save <path>" prefix (the same rule as in Load).
+			return err
+		}
 		return fmt.Errorf("save %s: %w", s.path, err)
 	}
 	return nil

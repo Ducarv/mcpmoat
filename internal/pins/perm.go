@@ -6,6 +6,8 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"slices"
+	"strings"
 
 	"github.com/Ducarv/mcpmoat/internal/safefile"
 )
@@ -19,6 +21,11 @@ import (
 // another user change the pins and hide a rug-pull (T2), so Load and Save
 // refuse it. They never change the mode of an existing path: the user must fix
 // it. Use errors.Is to test for it.
+//
+// The text of such an error names the unsafe path and starts with "pins
+// directory", "pins file", "pins parent directory" or "cannot read the ACL".
+// Load, LoadLocked and Save return it as it is, with no "read <path>" or "save
+// <path>" prefix.
 var ErrInsecurePermissions = errors.New("insecure permissions")
 
 // The kind of path in a permission error: the text says "pins directory" or
@@ -89,23 +96,18 @@ func checkDirHandle(path string, d *os.File) error {
 	return checkACL(path, kindDir, d)
 }
 
-// checkFilePerm is checkDirPerm for pins.json. info is the Stat result of the
-// open file, so the owner and the mode belong to the bytes that Load parses.
-// It does not read the ACL: checkFileHandle adds that check.
-func checkFilePerm(path string, info fs.FileInfo) error {
-	return checkOwnerAndMode(path, kindFile, info, os.Geteuid())
-}
-
 // checkFileHandle is the full check of the open pins.json f: the owner and
-// the mode (checkFilePerm), then the ACL (checkACL, macOS only). info is the
-// result of f.Stat, which the caller also uses for the size check, so both
-// checks see the same file. info must not be nil. path is for the error text
-// only. The error wraps ErrInsecurePermissions.
+// the mode (checkOwnerAndMode, with the same rule as for the pins directory),
+// then the ACL (checkACL, macOS only). info is the result of f.Stat, which the
+// caller also uses for the size check, so both checks see the same file, and
+// the owner and the mode belong to the bytes that Load parses. info must not
+// be nil. path is for the error text only. The error wraps
+// ErrInsecurePermissions.
 //
 // Load calls it after f.Stat and before it reads the data, so it never reads
 // the bytes of an unsafe file.
 func checkFileHandle(path string, f *os.File, info fs.FileInfo) error {
-	if err := checkFilePerm(path, info); err != nil {
+	if err := checkOwnerAndMode(path, kindFile, info, os.Geteuid()); err != nil {
 		return err
 	}
 	return checkACL(path, kindFile, f)
@@ -146,166 +148,222 @@ func checkParents(dir string) error {
 	return checkParentsAs(dir, os.Geteuid())
 }
 
+// maxSymlinks is the largest number of symlinks that checkParentsAs follows
+// on one path. Linux follows at most 40 (MAXSYMLINKS) and macOS 32, so a
+// longer chain cannot open anyway. The limit also ends a loop such as a -> b
+// -> a.
+const maxSymlinks = 40
+
+// Labels of a path in the errors of checkParentsAs.
+const (
+	labelDir    = "pins directory"
+	labelParent = "pins parent directory"
+)
+
 // checkParentsAs is checkParents for the user uid. uid is a parameter, so a
 // test can fake a foreign owner without root.
 //
-// It checks the ancestors of dir, from filepath.Dir(dir) up to the root
-// directory (on Windows, the volume root). Of dir itself it checks only the
-// symlink rule below: checkDirHandle and checkDirPerm check its owner and
-// mode. A relative dir is made absolute first. dir can be missing (a first
-// run): an ancestor that does not exist is skipped, so the nearest existing
-// ancestor, in which Save creates the pins directory, and all directories
-// above it are still checked. An ancestor that is not a directory is skipped
-// too: then the pins directory cannot exist, and checkFirstRun (Load) or
-// MkdirAll (Save) reports the problem.
+// It resolves dir one path component at a time, as the kernel does when it
+// opens the path, and as realpath(3) and the safe_path check of OpenSSH do.
+// It does not use filepath.EvalSymlinks: that gives only the end result, and
+// a symlink that is reached only through the target of another symlink is on
+// neither the given path nor the resolved one. The walk instead checks each
+// entry that it crosses:
+//   - A symlink: another user than uid or root must not own it
+//     (checkSymlinkOwner). This holds for every symlink on the way, also for
+//     a symlink in the target of another symlink. The sticky bit of a parent
+//     such as /tmp does not protect a symlink that another user created
+//     there: that user can point it to another directory later. Then the walk
+//     reads the target (os.Readlink) and goes on with the components of the
+//     target, from the root for an absolute target, or from the directory
+//     that holds the symlink for a relative one.
+//   - A directory that is a parent of the pins directory: its owner and mode
+//     (checkParentOwnerAndMode). This covers the root directory, the
+//     directory that holds each symlink, and each directory in the target of
+//     a symlink. Each directory is checked once.
+//   - The pins directory itself, after all symlinks: nothing.
+//     checkDirHandle and checkDirPerm check its owner and mode.
 //
-// The symlink rule: dir and each ancestor on the lexical path are read with
-// os.Lstat, which does not follow a symlink at the end of the path. When the
-// entry is a symlink, another user than uid or root must not own it
-// (checkSymlinkOwner). The sticky bit of a parent such as /tmp does not
-// protect a symlink that another user created there: that user can point it
-// to another directory later. On macOS /var and /tmp are symlinks that root
-// owns, so they pass.
+// The label of a symlink in the error is "pins directory" when it is the last
+// component of the path that is left, so the pins directory itself is the
+// symlink, and "pins parent directory" otherwise.
 //
-// It walks two paths and checks each directory once:
-//   - the lexical path, for example ~/.config/mcpmoat. Each ancestor gets the
-//     symlink rule (os.Lstat), and then os.Stat, which follows symlinks, for
-//     the owner and the mode. On macOS /var and /tmp have mode 0777; their
-//     targets are checked, so they pass. The lexical walk also covers the
-//     directory that holds a symlink, so only its owner (us or root) or, with
-//     the sticky bit, the owner of the symlink can replace the symlink.
-//   - the path after filepath.EvalSymlinks, for example /data/cfg/mcpmoat when
-//     ~/.config is a symlink to /data/cfg. Then /data is checked too. When dir
-//     does not exist, the nearest existing ancestor is resolved and the
-//     missing part is added again. This path holds no symlink, so the symlink
-//     rule finds nothing new there.
+// A ".." component in a symlink target goes to the parent of the directory
+// that the walk has reached, which is what the kernel does. A lexical clean
+// of the path (filepath.Clean) would be wrong after a symlink: for a target
+// "link2/../cfg", the kernel goes to the parent of the target of link2, not
+// to the directory that holds link2. dir itself is made absolute and clean
+// first (filepath.Abs), as filepath.Join and filepath.Dir already do with the
+// paths of the callers.
 //
-// The first unsafe entry gives the error. A Lstat, Stat or EvalSymlinks error
-// other than "missing" (see safefile.IsMissing) is an error that names the
-// path.
+// The walk stops without an error when the next component is missing (see
+// safefile.IsMissing): that is a first run, and the directories above it,
+// where Save creates the pins directory, are already checked. It also stops
+// at a component that is not a directory or a symlink: then the pins
+// directory cannot exist, and checkFirstRun (Load) or MkdirAll (Save) reports
+// the problem. On macOS /var and /tmp are symlinks that root owns, with
+// targets in /private, so they pass.
+//
+// The error names the path where the entry really is, after the symlinks
+// before it are resolved: for example /private/var/... and not /var/... on
+// macOS. When more than one entry is unsafe, the error names the last one
+// that the walk found, which is the nearest to the pins directory. When the
+// walk stops on another error (an Lstat or Readlink error other than
+// "missing", or more than maxSymlinks symlinks), it returns that error, which
+// names the path, unless an unsafe entry came before: then the unsafe entry
+// wins, because it may have led the walk there.
 //
 // The check is by path, by design. When no other user (only root) can write
-// any parent, no other user can swap a component of the path between this
-// check and the open, so the path race does not help an attacker.
+// any directory on the way or owns a symlink on it, no other user can change
+// the path between this check and the open, so the path race does not help
+// an attacker.
 func checkParentsAs(dir string, uid int) error {
 	abs, err := filepath.Abs(dir) // Abs also cleans the path.
 	if err != nil {
 		return fmt.Errorf("check the parent directories of the pins directory %s: %w", dir, err)
 	}
-	resolved, err := resolveExisting(abs)
-	if err != nil {
-		return fmt.Errorf("check the parent directories of the pins directory %s: %w", dir, err)
-	}
 
-	// The pins directory itself gets only the symlink rule here.
-	if err := checkSymlinkEntry(abs, "pins directory", uid); err != nil {
+	// refusal is the last unsafe entry found so far.
+	var refusal error
+	// fail returns err, unless an unsafe entry was found before (see the doc).
+	fail := func(err error) error {
+		if refusal != nil {
+			return refusal
+		}
 		return err
 	}
 
-	// A map used as a set: the value is not used, only the key. struct{} has
-	// size zero.
+	// checked is a set of the directories whose owner and mode are checked: a
+	// map whose values are not used. struct{} has size zero.
 	checked := make(map[string]struct{})
-	for _, target := range []string{abs, resolved} {
-		if target == "" {
-			continue
-		}
-		if err := checkAncestors(target, uid, checked); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-// checkAncestors checks each ancestor of the absolute, clean path target, from
-// filepath.Dir(target) up to the root directory: first the symlink rule
-// (checkSymlinkEntry), then os.Stat and checkParentOwnerAndMode. It skips a
-// path that is already in checked, and adds each path that it checked. It
-// skips an ancestor that is missing or that is not a directory (see
-// checkParentsAs).
-func checkAncestors(target string, uid int, checked map[string]struct{}) error {
-	p := target
-	for {
-		parent := filepath.Dir(p)
-		if parent == p {
-			// filepath.Dir of the root directory is the root directory.
-			return nil
-		}
-		p = parent
+	checkParentDir := func(p string, info fs.FileInfo) {
 		if _, done := checked[p]; done {
-			continue
+			return
 		}
 		checked[p] = struct{}{}
-
-		// The entry p itself first: os.Stat below follows a symlink and sees
-		// only its target.
-		if err := checkSymlinkEntry(p, "pins parent directory", uid); err != nil {
-			return err
-		}
-		info, err := os.Stat(p)
-		if safefile.IsMissing(err) {
-			continue
-		}
-		if err != nil {
-			return fmt.Errorf("check the parent directory %s of the pins directory: %w", p, err)
-		}
-		if !info.IsDir() {
-			continue
-		}
 		if err := checkParentOwnerAndMode(p, info, uid); err != nil {
-			return err
+			refusal = err
 		}
 	}
+
+	// resolved is the directory that the walk has reached, with no symlink in
+	// it. rest holds the components that are still to walk.
+	resolved, rest := splitRoot(abs)
+	if len(rest) > 0 {
+		// The root directory is a parent of the pins directory too.
+		if err := checkRootDir(resolved, checkParentDir); err != nil {
+			return fail(err)
+		}
+	}
+	hops := 0
+	for len(rest) > 0 {
+		c := rest[0]
+		rest = rest[1:]
+		if c == ".." {
+			// filepath.Dir of the root directory is the root directory, as in
+			// the kernel.
+			resolved = filepath.Dir(resolved)
+			continue
+		}
+		next := filepath.Join(resolved, c)
+		label := labelParent
+		if len(rest) == 0 {
+			label = labelDir
+		}
+
+		// Lstat does not follow a symlink at the end of next, so it describes
+		// the entry itself. resolved holds no symlink, so this is the entry
+		// that the kernel finds.
+		info, err := os.Lstat(next)
+		if safefile.IsMissing(err) {
+			break
+		}
+		if err != nil {
+			return fail(fmt.Errorf("check the %s %s: %w", label, next, err))
+		}
+
+		switch {
+		case info.Mode()&fs.ModeSymlink != 0:
+			hops++
+			if hops > maxSymlinks {
+				return fail(fmt.Errorf("check the parent directories of the pins directory %s: too many symlinks (more than %d) at %s",
+					dir, maxSymlinks, next))
+			}
+			if err := checkSymlinkOwner(next, label, info, uid); err != nil {
+				refusal = err
+			}
+			target, err := os.Readlink(next)
+			if err != nil {
+				return fail(fmt.Errorf("check the %s %s: %w", label, next, err))
+			}
+			var targetRest []string
+			if filepath.IsAbs(target) {
+				// An absolute target starts again at the root.
+				resolved, targetRest = splitRoot(target)
+				if err := checkRootDir(resolved, checkParentDir); err != nil {
+					return fail(err)
+				}
+			} else {
+				// A relative target starts in the directory that holds the
+				// symlink, which is resolved.
+				targetRest = splitPath(target)
+			}
+			// Walk the target first, then the components after the symlink.
+			// slices.Concat makes a new slice, so rest and targetRest do not
+			// share memory.
+			rest = slices.Concat(targetRest, rest)
+		case info.IsDir():
+			resolved = next
+			if len(rest) > 0 {
+				// A parent of the pins directory. Lstat and Stat give the same
+				// owner and mode for a directory that is not a symlink.
+				checkParentDir(next, info)
+			}
+		default:
+			// Not a directory: the pins directory cannot exist below it.
+			return refusal
+		}
+	}
+	return refusal
 }
 
-// checkSymlinkEntry reads the directory entry p itself with os.Lstat. When the
-// entry is a symlink, it returns the result of checkSymlinkOwner, which refuses
-// a symlink that another user than uid or root owns. label starts the error
-// text ("pins directory" or "pins parent directory"). A missing entry (see
-// safefile.IsMissing) and an entry that is not a symlink give nil. Any other
-// Lstat error is an error that names p.
-//
-// Lstat follows the symlinks in the directories of p, but not a symlink at the
-// end of p. So it describes the entry that names p, in the directory where it
-// really is.
-func checkSymlinkEntry(p, label string, uid int) error {
-	info, err := os.Lstat(p)
+// checkRootDir checks the root directory root (for example "/") with check,
+// the parent check of checkParentsAs. A missing root is not an error, as for
+// any other component.
+func checkRootDir(root string, check func(string, fs.FileInfo)) error {
+	info, err := os.Lstat(root)
 	if safefile.IsMissing(err) {
 		return nil
 	}
 	if err != nil {
-		return fmt.Errorf("check the %s %s: %w", label, p, err)
+		return fmt.Errorf("check the %s %s: %w", labelParent, root, err)
 	}
-	if info.Mode()&fs.ModeSymlink == 0 {
-		return nil
+	if info.IsDir() {
+		check(root, info)
 	}
-	return checkSymlinkOwner(p, label, info, uid)
+	return nil
 }
 
-// resolveExisting returns the absolute, clean path abs with all symlinks
-// resolved (filepath.EvalSymlinks). When abs does not exist, it resolves the
-// nearest existing ancestor and adds the missing part of the path again. It
-// returns "" and no error when no part of the path resolves. An EvalSymlinks
-// error other than "missing" (see safefile.IsMissing) is an error.
-func resolveExisting(abs string) (string, error) {
-	p := abs
-	for {
-		target, err := filepath.EvalSymlinks(p)
-		if err == nil {
-			// p is a prefix of abs, so rest is the missing part of abs, or "."
-			// when p is abs.
-			rest, err := filepath.Rel(p, abs)
-			if err != nil {
-				return "", err
-			}
-			return filepath.Join(target, rest), nil
+// splitRoot splits the absolute path p into its root directory (the volume
+// name, which is empty on Unix, and one separator) and its other components
+// (see splitPath).
+func splitRoot(p string) (root string, rest []string) {
+	vol := filepath.VolumeName(p)
+	return vol + string(filepath.Separator), splitPath(p[len(vol):])
+}
+
+// splitPath splits the path p into its components. It drops empty components
+// (from a leading, trailing or double separator) and "." components, which
+// name the same directory. It keeps "..": its meaning depends on the
+// symlinks before it, so checkParentsAs handles it on the resolved path.
+// filepath.FromSlash makes "/" a separator on Windows too; on Unix it does
+// nothing.
+func splitPath(p string) []string {
+	var parts []string
+	for c := range strings.SplitSeq(filepath.FromSlash(p), string(filepath.Separator)) {
+		if c != "" && c != "." {
+			parts = append(parts, c)
 		}
-		if !safefile.IsMissing(err) {
-			return "", err
-		}
-		parent := filepath.Dir(p)
-		if parent == p {
-			return "", nil
-		}
-		p = parent
 	}
+	return parts
 }

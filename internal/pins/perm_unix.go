@@ -22,6 +22,23 @@ const (
 	problemForeignOwnerWritable = problemForeignOwner + ", " + problemWritable
 )
 
+// ownerUID returns the uid of the owner of the path that info describes. ok
+// is false when info has no Unix owner (info.Sys is not a *syscall.Stat_t,
+// for example a fake FileInfo). Each caller then fails closed: without the
+// owner it cannot tell that the path is safe.
+//
+// The uid is an int, so the callers compare it with the uid of the user, also
+// an int. Converting that uid to uint32 instead could overflow (gosec G115).
+func ownerUID(info fs.FileInfo) (uid int, ok bool) {
+	// A type assertion with two results: ok is false, and there is no panic,
+	// when Sys returns another type.
+	st, ok := info.Sys().(*syscall.Stat_t)
+	if !ok {
+		return 0, false
+	}
+	return int(st.Uid), true
+}
+
 // checkOwnerAndMode returns an error that wraps ErrInsecurePermissions when
 // info says that another user than uid owns the path, or that its group or
 // others can write it (mode bits groupOrOtherWrite). Modes such as 0o755 and
@@ -32,14 +49,12 @@ const (
 //
 // The check reads the owner and the mode bits only. It does not read ACLs.
 func checkOwnerAndMode(path, kind string, info fs.FileInfo, uid int) error {
-	st, ok := info.Sys().(*syscall.Stat_t)
+	owner, ok := ownerUID(info)
 	if !ok {
-		// Fail closed: without the owner we cannot tell that the path is safe.
 		return fmt.Errorf("pins %s %s is not safe: its owner is unknown: %w", kind, path, ErrInsecurePermissions)
 	}
 
-	// Compare as int: converting uid to uint32 can overflow (gosec G115).
-	foreignOwner := int(st.Uid) != uid
+	foreignOwner := owner != uid
 	perm := info.Mode().Perm()
 	writable := perm&groupOrOtherWrite != 0
 
@@ -81,19 +96,17 @@ const privateConfigHint = "or use a private XDG_CONFIG_HOME"
 //     does not fix a foreign owner.
 //   - Read and execute bits are fine, so ~/.config with mode 0o755 passes.
 //
-// info is the os.Stat result of path and must not be nil. uid is a parameter,
-// so a test can fake a foreign owner without root.
+// info is the os.Lstat or os.Stat result of the directory path (the two are
+// the same for a directory that is not a symlink) and must not be nil. uid is
+// a parameter, so a test can fake a foreign owner without root.
 //
 // The check reads the owner and the mode bits only. It does not read ACLs.
 func checkParentOwnerAndMode(path string, info fs.FileInfo, uid int) error {
-	st, ok := info.Sys().(*syscall.Stat_t)
+	owner, ok := ownerUID(info)
 	if !ok {
-		// Fail closed: without the owner we cannot tell that the path is safe.
 		return fmt.Errorf("pins parent directory %s is not safe: its owner is unknown: %w", path, ErrInsecurePermissions)
 	}
 
-	// Compare as int: converting uid to uint32 can overflow (gosec G115).
-	owner := int(st.Uid)
 	ownedByRootNotUs := owner == 0 && uid != 0
 	foreignOwner := owner != uid && owner != 0
 	mode := info.Mode()
@@ -155,13 +168,10 @@ const problemForeignSymlink = "a symlink " + problemForeignOwner
 // check reads the owner only: the mode of a symlink is not used on Linux and
 // macOS.
 func checkSymlinkOwner(path, label string, info fs.FileInfo, uid int) error {
-	st, ok := info.Sys().(*syscall.Stat_t)
+	owner, ok := ownerUID(info)
 	if !ok {
-		// Fail closed: without the owner we cannot tell that the path is safe.
 		return fmt.Errorf("%s %s is not safe: the owner of the symlink is unknown: %w", label, path, ErrInsecurePermissions)
 	}
-	// Compare as int: converting uid to uint32 can overflow (gosec G115).
-	owner := int(st.Uid)
 	if owner == uid || owner == 0 {
 		return nil
 	}

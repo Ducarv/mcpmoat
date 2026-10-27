@@ -206,7 +206,8 @@ func (c *cli) acceptTools(ctx context.Context, server discover.Server, tools []i
 	}
 	// The file can go away while the server is inspected. Then every tool
 	// would look new in the diffs, so stop before they print.
-	if c.pinsRemovedWhileRunning("pin", firstExisted, shown) {
+	if pinsRemovedWhileRunning(firstExisted, shown) {
+		c.cmdPrintf("pin", "%s", pinsRemovedText)
 		return exitError
 	}
 	diffs := c.pinChanges(shown, id, server.Name, tools)
@@ -238,9 +239,7 @@ func (c *cli) acceptTools(ctx context.Context, server discover.Server, tools []i
 // the messages. tools are the tools that snap pins. shown is the store that
 // acceptTools read for the diffs. firstExisted is the same as in acceptTools.
 //
-// saveAccepted holds the lock until the save is done. It releases the lock
-// right after the save, before it prints the notice and the "accepted" line,
-// so a blocked stdout or stderr never holds the lock. No other run that locks
+// saveAccepted holds the lock until the save is done. No other run that locks
 // can save between this read and this save, so the save keeps every entry that
 // another run wrote, and no update is lost. An accept always overwrites the
 // entry of this one server. The counts of the "accepted" line come from the
@@ -248,11 +247,19 @@ func (c *cli) acceptTools(ctx context.Context, server discover.Server, tools []i
 // another run changed that entry after the diffs printed, a warning says that
 // the diffs are against the older pins.
 //
+// saveAccepted writes nothing on stdout or stderr while it holds the lock, so
+// a blocked stdout or stderr never holds the lock. While it holds the lock, it
+// only notes what to print: whether the pins changed, and the error of Set or
+// Save. It releases the lock right after the Save, or right after the step
+// that failed, and only then prints, in this order: the warning, the error,
+// and on success the new pins file notice and the "accepted" line.
+//
 // This is the second check for a removed pins file (see acceptTools). When the
 // file existed at the first read of the command or at the read for the diffs,
 // and the locked read does not find it, it was removed while pin showed the
-// diffs: saveAccepted saves nothing and gives exit code 2. A file that is
-// missing at every read is a real first run: the save creates it.
+// diffs: saveAccepted saves nothing, prints pinsRemovedText after the release
+// and gives exit code 2. A file that is missing at every read is a real first
+// run: the save creates it.
 //
 // A Set that would make pins.json larger than its size limit
 // (pins.ErrStoreFull) saves nothing and gives exit code 2, with a message that
@@ -261,39 +268,49 @@ func (c *cli) acceptTools(ctx context.Context, server discover.Server, tools []i
 // printNewPinsFile).
 func (c *cli) saveAccepted(ctx context.Context, name string, id pins.Identity, tools []inspect.Tool, snap pins.ServerPins, shown *pins.Store, firstExisted bool) int {
 	store, release, ok := c.readPinsLocked(ctx, "pin")
-	// release is never nil. The deferred call frees the lock on every early
-	// return, so the lock covers the read, the Set and the Save. On success,
-	// release is called right after the Save (a second call does nothing).
+	// release is never nil. Each path below calls release before it prints.
+	// The deferred call is a safety net: a second call does nothing.
 	defer release()
 	if !ok {
+		// readPinsLocked holds no lock after an error, and it printed the
+		// message.
 		return exitError
 	}
 	// A file that existed at either read before this one and is gone now was
 	// removed while pin showed the diffs.
-	if c.pinsRemovedWhileRunning("pin", firstExisted || shown.Existed(), store) {
+	if pinsRemovedWhileRunning(firstExisted || shown.Existed(), store) {
+		release()
+		c.cmdPrintf("pin", "%s", pinsRemovedText)
 		return exitError
 	}
-	if pinsChanged(shown, store, id) {
-		c.warnf("pin", "another mcpmoat run changed the pins of server %s while pin showed the diff; the diff is against the older pins", name)
-	}
+	// changed is printed as a warning after the release.
+	changed := pinsChanged(shown, store, id)
 	counts := changeCounts(store, id, tools)
 
-	err := store.Set(id, snap)
-	if errors.Is(err, pins.ErrStoreFull) {
+	setErr := store.Set(id, snap)
+	var saveErr error
+	if setErr == nil {
+		saveErr = store.Save()
+	}
+	// The last step that needs the lock is done. Free the lock before the
+	// output: a blocked pipe must not keep other runs from the pins file.
+	release()
+
+	if changed {
+		c.warnf("pin", "another mcpmoat run changed the pins of server %s while pin showed the diff; the diff is against the older pins", name)
+	}
+	if errors.Is(setErr, pins.ErrStoreFull) {
 		c.cmdPrintf("pin", "cannot pin %s: %s; remove servers you no longer use from pins.json", name, pinsFullText)
 		return exitError
 	}
-	if err != nil {
-		c.cmdErr("pin", "cannot set the pins of server "+name, err)
+	if setErr != nil {
+		c.cmdErr("pin", "cannot set the pins of server "+name, setErr)
 		return exitError
 	}
-	if err := store.Save(); err != nil {
-		c.cmdErr("pin", "cannot save the pins file", err)
+	if saveErr != nil {
+		c.cmdErr("pin", "cannot save the pins file", saveErr)
 		return exitError
 	}
-	// The pins are on disk. Free the lock before the output: a blocked pipe
-	// must not keep other runs from the pins file.
-	release()
 	if !store.Existed() {
 		c.printNewPinsFile("pin", store.Path())
 	}

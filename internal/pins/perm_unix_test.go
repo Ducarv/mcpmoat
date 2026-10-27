@@ -57,6 +57,18 @@ func newNamedPinsDir(t *testing.T, name string, mode os.FileMode) string {
 	return dir
 }
 
+// realPath returns p with all symlinks resolved. The errors of the parent
+// walk name the real path of an entry (on macOS t.TempDir is below the
+// symlink /var, which points to /private/var), so a test compares with it.
+func realPath(t *testing.T, p string) string {
+	t.Helper()
+	r, err := filepath.EvalSymlinks(p)
+	if err != nil {
+		t.Fatalf("EvalSymlinks(%q) error = %v", p, err)
+	}
+	return r
+}
+
 // newPinsDir makes a pins directory with the given mode.
 func newPinsDir(t *testing.T, mode os.FileMode) string {
 	t.Helper()
@@ -810,7 +822,11 @@ func TestLoadDirHint(t *testing.T) {
 				}
 				return
 			}
-			wantInsecure(t, err, dir, "read "+path, "pins directory {path}", fmt.Sprintf("mode %04o", tt.mode), msgChmod, msgWritable)
+			wantInsecure(t, err, dir, "pins directory {path}", fmt.Sprintf("mode %04o", tt.mode), msgChmod, msgWritable)
+			// A refusal names its own path, with no "read <path>" prefix.
+			if strings.HasPrefix(err.Error(), "read ") {
+				t.Errorf("Load() error = %q, want no %q prefix", err, "read <path>: ")
+			}
 		})
 	}
 }
@@ -989,7 +1005,7 @@ func TestCheckParentsAs(t *testing.T) {
 				}
 				return
 			}
-			wantInsecure(t, err, parent, append(tt.want, "pins parent directory {path} is not safe")...)
+			wantInsecure(t, err, realPath(t, parent), append(tt.want, "pins parent directory {path} is not safe")...)
 		})
 	}
 
@@ -1060,6 +1076,12 @@ func TestCheckSymlinkOwner(t *testing.T) {
 // a symlink, must belong to the current user or root. Each symlink is made
 // by the test, so the current user owns it. A foreign owner is faked with
 // another uid: checkParentsAs then sees the symlink as owned by someone else.
+//
+// With the fake uid, every directory that the test made is foreign too, and
+// the error names the last unsafe entry of the walk. So in the cases where the
+// symlink is a parent, it points to the root directory, which root owns: then
+// the symlink is the last unsafe entry. The pins directory below it is /usr,
+// or a name that does not exist for a first run.
 func TestCheckParentsAsSymlinks(t *testing.T) {
 	t.Parallel()
 	me := os.Geteuid()
@@ -1068,14 +1090,16 @@ func TestCheckParentsAsSymlinks(t *testing.T) {
 		foreign bool // check as another user, so the symlink has a foreign owner
 		leaf    bool // the pins directory itself is the symlink, not a component above it
 		missing bool // the pins directory below the symlink does not exist (a first run)
+		toRoot  bool // the symlink points to the root directory, not to base/real
 		want    string
 	}{
 		{name: "own symlink component"},
 		{name: "own symlink component, first run", missing: true},
 		{name: "own symlink as the pins directory", leaf: true},
-		{name: "foreign symlink component", foreign: true,
+		{name: "own symlink to the root directory", toRoot: true},
+		{name: "foreign symlink component", foreign: true, toRoot: true,
 			want: "pins parent directory {path} is not safe: a symlink owned by another user"},
-		{name: "foreign symlink component, first run", foreign: true, missing: true,
+		{name: "foreign symlink component, first run", foreign: true, missing: true, toRoot: true,
 			want: "pins parent directory {path} is not safe: a symlink owned by another user"},
 		{name: "foreign symlink as the pins directory", foreign: true, leaf: true,
 			want: "pins directory {path} is not safe: a symlink owned by another user"},
@@ -1092,20 +1116,28 @@ func TestCheckParentsAsSymlinks(t *testing.T) {
 			}
 			// base/real is the target, base/link the symlink to it, as when
 			// another user made /tmp/cfg a symlink to a directory we own.
-			base := newNamedPinsDir(t, "base", 0o700)
+			base := realPath(t, newNamedPinsDir(t, "base", 0o700))
 			realDir := filepath.Join(base, "real")
 			if err := os.Mkdir(realDir, 0o700); err != nil {
 				t.Fatalf("Mkdir() error = %v", err)
 			}
+			target, child := realDir, "mcpmoat"
+			if tt.toRoot {
+				// /usr exists on Linux and macOS, and root owns it.
+				target, child = "/", "usr"
+				if tt.missing {
+					child = "mcpmoat-test-missing"
+				}
+			}
 			link := filepath.Join(base, "link")
-			if err := os.Symlink(realDir, link); err != nil {
+			if err := os.Symlink(target, link); err != nil {
 				t.Fatalf("Symlink() error = %v", err)
 			}
-			dir := filepath.Join(link, "mcpmoat")
+			dir := filepath.Join(link, child)
 			switch {
 			case tt.leaf:
 				dir = link
-			case !tt.missing:
+			case !tt.missing && !tt.toRoot:
 				if err := os.Mkdir(filepath.Join(realDir, "mcpmoat"), 0o700); err != nil {
 					t.Fatalf("Mkdir() error = %v", err)
 				}
@@ -1224,7 +1256,11 @@ func TestLoadChecksParents(t *testing.T) {
 				if s != nil {
 					t.Errorf("Load() store = %v, want nil", s)
 				}
-				wantInsecure(t, err, parent, append(tt.want, "read "+path, "pins parent directory {path} is not safe")...)
+				wantInsecure(t, err, realPath(t, parent), append(tt.want, "pins parent directory {path} is not safe")...)
+				// A refusal names its own path, with no "read <path>" prefix.
+				if strings.HasPrefix(err.Error(), "read ") {
+					t.Errorf("Load() error = %q, want no %q prefix", err, "read <path>: ")
+				}
 			}
 
 			// LoadLocked checks the parents before it creates a missing pins
@@ -1237,7 +1273,7 @@ func TestLoadChecksParents(t *testing.T) {
 				}
 				return
 			}
-			wantInsecure(t, lerr, parent, tt.want...)
+			wantInsecure(t, lerr, realPath(t, parent), tt.want...)
 			if tt.missing {
 				if _, err := os.Lstat(filepath.Dir(pinsDir)); !errors.Is(err, fs.ErrNotExist) {
 					t.Errorf("Lstat(%q) error = %v, want not exist: a refused LoadLocked must not create it", filepath.Dir(pinsDir), err)
@@ -1247,9 +1283,9 @@ func TestLoadChecksParents(t *testing.T) {
 		})
 	}
 
-	// A symlinked config directory is followed, and the walk over the resolved
-	// path checks the parents of the target too. The lexical walk alone sees
-	// only safe directories here.
+	// A symlinked config directory is followed, and the walk checks the
+	// parents of the target too. The given path alone holds only safe
+	// directories here.
 	t.Run("symlinked config, real parent", func(t *testing.T) {
 		t.Parallel()
 		for _, mode := range []os.FileMode{0o700, 0o755, 0o777, 0o775} {
@@ -1266,46 +1302,175 @@ func TestLoadChecksParents(t *testing.T) {
 	})
 }
 
-// TestResolveExisting covers the resolved path of the parent walk.
-func TestResolveExisting(t *testing.T) {
+// TestCheckParentsAsChains covers the walk over a path with several symlinks:
+// a symlink in the target of another symlink, a relative target, a ".." after
+// a symlink and a loop. Each case builds its tree below base, a private
+// directory with its symlinks resolved, and returns the pins directory to
+// check and the path that the error must name.
+func TestCheckParentsAsChains(t *testing.T) {
 	t.Parallel()
-	base := t.TempDir()
-	baseReal, err := filepath.EvalSymlinks(base)
-	if err != nil {
-		t.Fatalf("EvalSymlinks() error = %v", err)
-	}
-	if err := os.Mkdir(filepath.Join(base, "real"), 0o700); err != nil {
-		t.Fatalf("Mkdir() error = %v", err)
-	}
-	if err := os.Symlink(filepath.Join(base, "real"), filepath.Join(base, "link")); err != nil {
-		t.Fatalf("Symlink() error = %v", err)
-	}
-	loopA, loopB := filepath.Join(base, "loop-a"), filepath.Join(base, "loop-b")
-	for _, l := range [][2]string{{loopB, loopA}, {loopA, loopB}} {
-		if err := os.Symlink(l[0], l[1]); err != nil {
-			t.Fatalf("Symlink() error = %v", err)
-		}
-	}
-
+	me := os.Geteuid()
 	tests := []struct {
 		name    string
-		in      string
-		want    string
-		wantErr bool
+		foreign bool // check as another user (fake uid), so every entry that the test made is foreign
+		// setup builds the tree and returns the pins directory and the path
+		// that the error names ("" when there is no error).
+		setup   func(t *testing.T, base string) (dir, wantPath string)
+		want    []string // nil means no error; {path} stands for wantPath
+		wantErr string   // an error that is not ErrInsecurePermissions
 	}{
-		{"existing", base, baseReal, false},
-		{"missing tail", filepath.Join(base, "a", "b"), filepath.Join(baseReal, "a", "b"), false},
-		{"link with missing tail", filepath.Join(base, "link", "x", "y"), filepath.Join(baseReal, "real", "x", "y"), false},
-		{"existing link", filepath.Join(base, "link"), filepath.Join(baseReal, "real"), false},
-		{"symlink loop", filepath.Join(loopA, "x"), "", true},
+		{
+			// The case of the security review: shared has mode 0777 and no
+			// sticky bit, and is only reached through the target of .config.
+			// Neither the given path nor the fully resolved path holds it.
+			name: "writable directory that only a symlink target crosses",
+			setup: func(t *testing.T, base string) (string, string) {
+				shared := mkdirs(t, base, "shared")
+				mkdirs(t, base, "real", "mcpmoat")
+				symlink(t, filepath.Join(base, "real"), shared, "link2")
+				symlink(t, filepath.Join(shared, "link2"), mkdirs(t, base, "home"), ".config")
+				chmodForTest(t, shared, 0o777)
+				return filepath.Join(base, "home", ".config", "mcpmoat"), shared
+			},
+			want: []string{"pins parent directory {path} is not safe", "mode 0777", msgWritable, msgChmod},
+		},
+		{
+			name: "writable directory that only a relative symlink target crosses",
+			setup: func(t *testing.T, base string) (string, string) {
+				shared := mkdirs(t, base, "shared")
+				mkdirs(t, base, "real", "mcpmoat")
+				symlink(t, filepath.Join("..", "real"), shared, "link2")
+				symlink(t, filepath.Join("..", "shared", "link2"), mkdirs(t, base, "home"), ".config")
+				chmodForTest(t, shared, 0o777)
+				return filepath.Join(base, "home", ".config", "mcpmoat"), shared
+			},
+			want: []string{"pins parent directory {path} is not safe", "mode 0777", msgWritable},
+		},
+		{
+			// link2 is reached only through .config. It points to the root
+			// directory, which root owns, so link2 is the last unsafe entry
+			// of the walk when every entry of the test is foreign.
+			name:    "foreign symlink that only a symlink target crosses",
+			foreign: true,
+			setup: func(t *testing.T, base string) (string, string) {
+				shared := mkdirs(t, base, "shared")
+				symlink(t, "/", shared, "link2")
+				symlink(t, filepath.Join(shared, "link2"), mkdirs(t, base, "home"), ".config")
+				return filepath.Join(base, "home", ".config", "usr"), filepath.Join(shared, "link2")
+			},
+			want: []string{"pins parent directory {path} is not safe: a symlink owned by another user"},
+		},
+		{
+			// .config points to "inner/../cfg". The kernel goes from home to
+			// the target of inner (wide/deep), then up to wide, then to
+			// wide/cfg, which is unsafe. A lexical clean of the target gives
+			// "cfg", so home/cfg, which is safe.
+			name: "dot-dot after a symlink goes up from the target",
+			setup: func(t *testing.T, base string) (string, string) {
+				home := mkdirs(t, base, "home")
+				mkdirs(t, home, "cfg", "mcpmoat")
+				deep := mkdirs(t, base, "wide", "deep")
+				wideCfg := mkdirs(t, base, "wide", "cfg")
+				mkdirs(t, wideCfg, "mcpmoat")
+				symlink(t, deep, home, "inner")
+				// A literal string: filepath.Join would clean it to "cfg".
+				symlink(t, "inner/../cfg", home, ".config")
+				chmodForTest(t, wideCfg, 0o777)
+				return filepath.Join(home, ".config", "mcpmoat"), wideCfg
+			},
+			want: []string{"pins parent directory {path} is not safe", "mode 0777", msgWritable},
+		},
+		{
+			name: "symlink loop",
+			setup: func(t *testing.T, base string) (string, string) {
+				symlink(t, "loop-b", base, "loop-a")
+				symlink(t, "loop-a", base, "loop-b")
+				return filepath.Join(base, "loop-a", "mcpmoat"), ""
+			},
+			wantErr: "too many symlinks (more than 40) at ",
+		},
+		{
+			name: "own chain of relative and absolute symlinks",
+			setup: func(t *testing.T, base string) (string, string) {
+				// home/l1 -> ../l2 (relative), l2 -> real (absolute).
+				mkdirs(t, base, "real", "mcpmoat")
+				symlink(t, filepath.Join(base, "real"), base, "l2")
+				symlink(t, "../l2", mkdirs(t, base, "home"), "l1")
+				return filepath.Join(base, "home", "l1", "mcpmoat"), ""
+			},
+		},
+		{
+			name: "missing tail below a symlink is a first run",
+			setup: func(t *testing.T, base string) (string, string) {
+				mkdirs(t, base, "real")
+				symlink(t, filepath.Join(base, "real"), base, "l1")
+				return filepath.Join(base, "l1", "a", "b", "mcpmoat"), ""
+			},
+		},
+		{
+			name: "symlink with a missing target",
+			setup: func(t *testing.T, base string) (string, string) {
+				symlink(t, filepath.Join(base, "nothing"), base, "dangling")
+				return filepath.Join(base, "dangling", "mcpmoat"), ""
+			},
+		},
+		{
+			name: "symlink to a regular file",
+			setup: func(t *testing.T, base string) (string, string) {
+				file := filepath.Join(base, "file")
+				if err := os.WriteFile(file, nil, 0o600); err != nil {
+					t.Fatalf("WriteFile() error = %v", err)
+				}
+				symlink(t, file, base, "l1")
+				return filepath.Join(base, "l1", "mcpmoat"), ""
+			},
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			got, err := resolveExisting(tt.in)
-			if (err != nil) != tt.wantErr || got != tt.want {
-				t.Errorf("resolveExisting(%q) = %q, %v, want %q, error %v", tt.in, got, err, tt.want, tt.wantErr)
+			uid := me
+			if tt.foreign {
+				if me == 0 {
+					t.Skip("an entry owned by root is trusted, so root cannot fake a foreign owner")
+				}
+				uid = me + 1
+			}
+			base := realPath(t, newNamedPinsDir(t, "base", 0o700))
+			dir, wantPath := tt.setup(t, base)
+
+			err := checkParentsAs(dir, uid)
+			switch {
+			case tt.wantErr != "":
+				if err == nil || errors.Is(err, ErrInsecurePermissions) || !strings.Contains(err.Error(), tt.wantErr) {
+					t.Errorf("checkParentsAs(%q) error = %v, want an error with %q that is not ErrInsecurePermissions", dir, err, tt.wantErr)
+				}
+			case tt.want == nil:
+				if err != nil {
+					t.Errorf("checkParentsAs(%q) error = %v, want nil", dir, err)
+				}
+			default:
+				wantInsecure(t, err, wantPath, tt.want...)
 			}
 		})
+	}
+}
+
+// mkdirs makes the directories names below parent, one inside the other, with
+// mode 0o700, and returns the path of the last one.
+func mkdirs(t *testing.T, parent string, names ...string) string {
+	t.Helper()
+	p := filepath.Join(append([]string{parent}, names...)...)
+	if err := os.MkdirAll(p, 0o700); err != nil {
+		t.Fatalf("MkdirAll(%q) error = %v", p, err)
+	}
+	return p
+}
+
+// symlink makes the symlink dir/name that points to target.
+func symlink(t *testing.T, target, dir, name string) {
+	t.Helper()
+	if err := os.Symlink(target, filepath.Join(dir, name)); err != nil {
+		t.Fatalf("Symlink(%q, %q) error = %v", target, filepath.Join(dir, name), err)
 	}
 }

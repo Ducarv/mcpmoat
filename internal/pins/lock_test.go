@@ -293,8 +293,14 @@ func TestLoadLockedParentsCheckedAfterCreate(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			// Only t.TempDir exists. LoadLocked creates new, chain and
-			// mcpmoat, so the first parents check sees none of them.
-			ancestor := filepath.Join(t.TempDir(), "new")
+			// mcpmoat, so the first parents check sees none of them. The
+			// error names the path with its symlinks resolved (on macOS
+			// t.TempDir is below the symlink /var), so resolve it here too.
+			base, err := filepath.EvalSymlinks(t.TempDir())
+			if err != nil {
+				t.Fatalf("EvalSymlinks() error = %v", err)
+			}
+			ancestor := filepath.Join(base, "new")
 			path := filepath.Join(ancestor, "chain", "mcpmoat", "pins.json")
 
 			var hookRuns int

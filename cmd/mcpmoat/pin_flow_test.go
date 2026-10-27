@@ -380,13 +380,13 @@ func TestScanPinnedNotInspectedExit(t *testing.T) {
 	})
 }
 
-// TestScanFreshStoreKeepsOtherRun checks the lost-update narrowing of scan: scan
-// reads pins.json again before it saves the first-run pins, and sets only the
-// identities that the fresh store does not hold.
 // parallelPinWarning is the warning of scan when another run pinned a server
 // with other tools during the scan.
 const parallelPinWarning = "mcpmoat scan: warning: server srv was pinned by another run with other tools during this scan; run scan again\n"
 
+// TestScanFreshStoreKeepsOtherRun checks the lost-update narrowing of scan: scan
+// reads pins.json again before it saves the first-run pins, and sets only the
+// identities that the fresh store does not hold.
 func TestScanFreshStoreKeepsOtherRun(t *testing.T) {
 	t.Parallel()
 

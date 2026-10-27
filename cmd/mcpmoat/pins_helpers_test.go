@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -24,9 +25,12 @@ import (
 )
 
 // This file holds the helpers of the in-process pin tests (scan_pins_test.go,
-// pin_test.go, pin_flow_test.go, pin_expect_test.go and pins_diff_test.go) and
-// of e2e_test.go, which runs the real binary. The helpers are the pinEnv world,
-// the fake servers, and the checks of the output.
+// scan_pins_lock_test.go, pin_test.go, pin_flow_test.go, pin_expect_test.go,
+// pin_lock_test.go and pins_diff_test.go; other scan tests use some of them
+// too) and of e2e_test.go and e2e_pins_test.go, which run the real binary. The
+// helpers are the pinEnv world, the fake servers, the checks of the output,
+// the lock helpers (holdPinsLock and lockProbeWriter), and the near-full pins
+// file (writeNearFullPins and bigStoreTool).
 
 // pinRunResult is the outcome of one in-process run.
 type pinRunResult struct {
@@ -822,6 +826,158 @@ func assertLockFreeAt(t *testing.T, p *lockProbeWriter, want ...string) {
 				probe.line, probe.err)
 		}
 	}
+}
+
+// readIfExists returns the content of path and true, or nil and false when
+// the file does not exist. It fails the test on another error.
+func readIfExists(t *testing.T, path string) ([]byte, bool) {
+	t.Helper()
+	data, err := os.ReadFile(path) //nolint:gosec // G304: path is under the test's own t.TempDir()
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, false
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	return data, true
+}
+
+// The helpers from here to bigPinsServerNames build and read a pins file near
+// its size limit. The tests of the size limit in scan_pins_lock_test.go and
+// pin_lock_test.go use them.
+
+// nearFullGap is the free space that writeNearFullPins leaves below
+// pins.MaxFileSize. The entry of a server with bigStoreTool is larger than
+// it, and the entry of a server with one mkTool is far smaller.
+const nearFullGap = 16 << 10
+
+// nearFullServers is the number of filler servers in the file of
+// writeNearFullPins. With 17 and the 32 MiB of pins.MaxFileSize, each entry is
+// about 1.9 MiB, well below the limit of one server (2 MiB). If the file limit
+// grows, an entry can get larger than 2 MiB: Set then refuses a filler, and
+// writeNearFullPins fails. Then raise this number.
+const nearFullServers = 17
+
+// bigStoreTool returns a tool whose pins entry is larger than nearFullGap:
+// its _meta alone is twice that size. The size is in _meta and not in the
+// description, so no description rule (for example the one for a long
+// description) adds a row, and the rule step stays fast.
+func bigStoreTool() inspect.Tool {
+	return metaTool("big_tool", `{"k":"`+strings.Repeat("a", 2*nearFullGap)+`"}`, "")
+}
+
+// fillerIdentity returns the identity of the filler server i. The names have
+// the same length, so every filler entry has the same fixed bytes.
+func fillerIdentity(i int) pins.Identity {
+	return pins.Identity{Client: "fixture", Source: "/fixture/mcp.json", Name: fmt.Sprintf("fill-%02d", i)}
+}
+
+// fillerNames returns the names of the nearFullServers filler servers.
+func fillerNames() []string {
+	names := make([]string, nearFullServers)
+	for i := range names {
+		names[i] = fillerIdentity(i).Name
+	}
+	return names
+}
+
+// fillerPins returns the pins of a filler server: one tool "fill" with the
+// canonical text and its hash. The hash is built like the one of
+// setPinCanonical (pins.HashVersion, a colon, the hex SHA-256), so it has the
+// same length for every text.
+func fillerPins(canonical string) pins.ServerPins {
+	sum := sha256.Sum256([]byte(canonical))
+	return pins.ServerPins{"fill": {Hash: pins.HashVersion + ":" + hex.EncodeToString(sum[:]), Canonical: canonical}}
+}
+
+// saveFillers saves a new pins store at path with one filler server for each
+// canonical text (fillerIdentity(i), fillerPins(canonicals[i])) and returns
+// the size of the file. It uses the pins API only: pins.Load of a missing
+// file gives an empty store, and Save writes the directory with mode 0700
+// and the file with mode 0600, as the CLI requires.
+func saveFillers(t *testing.T, path string, canonicals ...string) int {
+	t.Helper()
+	store, err := pins.Load(path)
+	if err != nil {
+		t.Fatalf("pins.Load(%q) error = %v, want nil", path, err)
+	}
+	if store.Existed() {
+		t.Fatalf("pins.Load(%q): the file exists, want a new store", path)
+	}
+	for i, c := range canonicals {
+		if err := store.Set(fillerIdentity(i), fillerPins(c)); err != nil {
+			t.Fatalf("Store.Set(filler %d) error = %v, want nil", i, err)
+		}
+	}
+	if err := store.Save(); err != nil {
+		t.Fatalf("Store.Save() error = %v, want nil", err)
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return int(info.Size())
+}
+
+// writeNearFullPins writes a valid pins.json at path with nearFullServers
+// filler servers, so that the file has exactly pins.MaxFileSize - nearFullGap
+// bytes. A server entry larger than nearFullGap then does not fit
+// (pins.ErrStoreFull), and a small one does.
+//
+// The size of the file depends on the format of Save, so the helper measures
+// it: it saves one and two fillers with a one-byte text in scratch folders.
+// The file grows by one byte for each byte of a canonical text of letters, so
+// the sizes give the fixed bytes of the file and of one entry. The filler
+// texts share one string, so the memory use stays near the size of the file.
+func writeNearFullPins(t *testing.T, path string) {
+	t.Helper()
+	one := saveFillers(t, filepath.Join(t.TempDir(), "mcpmoat", "pins.json"), "a")
+	two := saveFillers(t, filepath.Join(t.TempDir(), "mcpmoat", "pins.json"), "a", "a")
+	entry := two - one // one entry with a one-byte text
+	fixed := one - entry
+
+	want := pins.MaxFileSize - nearFullGap
+	textBytes := want - fixed - nearFullServers*(entry-1)
+	n := textBytes / nearFullServers
+	long := strings.Repeat("a", n+textBytes%nearFullServers)
+	canonicals := make([]string, nearFullServers)
+	for i := range canonicals {
+		canonicals[i] = long[:n]
+	}
+	canonicals[nearFullServers-1] = long
+
+	if size := saveFillers(t, path, canonicals...); size != want {
+		t.Fatalf("near-full pins.json has %d bytes, want %d (the size model of Save changed)", size, want)
+	}
+}
+
+// bigPinsServerNames returns the server names in the pins file at path,
+// sorted. It is for the near-full file of writeNearFullPins: a JSON decode of
+// 32 MiB is slow with -race, so it finds each `"name": "` key with
+// bytes.Index. The key text matches the server entries only: Save writes one
+// space after the colon, and a canonical text in the file is a JSON string,
+// so its quotes are escaped (\"name\":\"...\"). The names of the tests are
+// plain words with no escape.
+func bigPinsServerNames(t *testing.T, path string) []string {
+	t.Helper()
+	const key = `"name": "`
+	data := readFileBytes(t, path)
+	var names []string
+	for {
+		i := bytes.Index(data, []byte(key))
+		if i < 0 {
+			break
+		}
+		data = data[i+len(key):]
+		end := bytes.IndexByte(data, '"')
+		if end < 0 {
+			t.Fatalf("pins file %s has a name with no end quote", path)
+		}
+		names = append(names, string(data[:end]))
+		data = data[end:]
+	}
+	slices.Sort(names)
+	return names
 }
 
 // TestNewPinsFileNotice checks that newPinsFileNotice gives the exact line of

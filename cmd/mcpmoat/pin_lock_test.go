@@ -5,9 +5,9 @@ package main
 // output, the size limit of pins.json (ErrStoreFull), the warning when another
 // run changed the pins of the server while pin showed the diff, and a pins
 // file that was removed meanwhile. They use the helpers of
-// pins_helpers_test.go, and the near-full pins file of writeNearFullPins
-// (scan_pins_lock_test.go). Only TestPinAcceptStoreFull does not run in
-// parallel: it builds a pins file of almost 32 MiB.
+// pins_helpers_test.go, also the near-full pins file of writeNearFullPins and
+// the lock probe (lockProbeWriter). Only TestPinAcceptStoreFull does not run
+// in parallel: it builds a pins file of almost 32 MiB.
 
 import (
 	"bytes"
@@ -141,11 +141,9 @@ func TestPinAcceptLockHeld(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			e := newPinEnv(t, oneServer("srv"))
-			if tt.pinned {
-				firstScan(t, e, mkTool("a", "Add."))
-			}
 			var before []byte
 			if tt.pinned {
+				firstScan(t, e, mkTool("a", "Add."))
 				before = readFileBytes(t, e.pinsPath())
 			}
 			release := holdPinsLock(t, e.pinsPath())
@@ -217,6 +215,10 @@ func fileDigest(t *testing.T, path string) [sha256.Size]byte {
 //
 // It does not call t.Parallel: the file is almost 32 MiB, and the runs read it
 // several times, so it runs alone to keep the memory of the test binary low.
+//
+// The stderr of the refused accept is a lockProbeWriter: saveAccepted prints
+// the "pins file is full" line after the release, so the lock must be free at
+// that write.
 func TestPinAcceptStoreFull(t *testing.T) {
 	if testing.Short() {
 		t.Skip("builds a near-32 MiB pins file; slow under -race")
@@ -236,13 +238,19 @@ func TestPinAcceptStoreFull(t *testing.T) {
 	before := fileDigest(t, e.pinsPath())
 	fake := fakeServers(map[string][]inspect.Tool{big: {bigStoreTool()}, "tiny": {mkTool("t", "Tiny.")}})
 
-	got := e.pin(fake, "--accept", big)
+	c, stdout, stderr := e.cli(fake)
+	probe := newLockProbeWriter(t, stderr, e.pinsPath(), "the pins file is full")
+	c.stderr = probe
 
+	code := c.dispatch([]string{"pin", "--config", e.config, "--accept", big})
+
+	got := pinRunResult{code: code, stdout: stdout.String(), stderr: stderr.String()}
 	const full = `mcpmoat pin: cannot pin "big\x1b[31m": the pins file is full (32 MiB); remove servers you no longer use from pins.json` + "\n"
 	assertPinRun(t, got, scanWant{code: exitError, stderr: []string{full}})
 	if !strings.HasSuffix(got.stderr, full) {
 		t.Errorf("stderr = %q, want it to end with %q", got.stderr, full)
 	}
+	assertLockFreeAt(t, probe, "the pins file is full")
 	assertTerminalSafe(t, got.stderr)
 	assertContainsNone(t, "stdout", got.stdout, []string{"accepted"})
 	assertContainsNone(t, "stderr", got.stderr, []string{"no pins file was found", "cannot save"})
@@ -287,7 +295,10 @@ func (h *hookWriter) Write(p []byte) (int, error) {
 // no warning. In every case the save holds the tools that pin saw.
 //
 // The other run is simulated by the stdout of pin: a hookWriter writes the
-// pins file when pin prints the first byte of the diff.
+// pins file when pin prints the first byte of the diff. The stderr of pin is a
+// lockProbeWriter: saveAccepted finds the change while it holds the lock and
+// prints the warning after the release, so the lock must be free at that
+// write.
 func TestPinAcceptPinsChangedDuringDiff(t *testing.T) {
 	t.Parallel()
 
@@ -363,6 +374,9 @@ func TestPinAcceptPinsChangedDuringDiff(t *testing.T) {
 				}
 				writePinsAside(t, e.pinsPath(), id, tt.aside...)
 			}}
+			const changedText = "another mcpmoat run changed the pins"
+			probe := newLockProbeWriter(t, stderr, e.pinsPath(), changedText)
+			c.stderr = probe
 
 			code := c.dispatch([]string{"pin", "--config", e.config, "--accept", "srv"})
 
@@ -372,12 +386,15 @@ func TestPinAcceptPinsChangedDuringDiff(t *testing.T) {
 			// prints no new pins file notice, also for a server that was not
 			// pinned.
 			wantStderr := noExpectNote
+			var wantProbes []string
 			if tt.wantWarning {
 				wantStderr += pinsChangedWarning("srv")
+				wantProbes = []string{changedText}
 			}
 			if got.stderr != wantStderr {
 				t.Errorf("stderr = %q, want exactly %q", got.stderr, wantStderr)
 			}
+			assertLockFreeAt(t, probe, wantProbes...)
 			diffs, accepted := splitAcceptedLine(got.stdout)
 			if accepted != tt.wantAccepted {
 				t.Errorf("accepted line = %q, want %q\nstdout:\n%s", accepted, tt.wantAccepted, got.stdout)
@@ -459,7 +476,9 @@ func TestPinAcceptReleasesLockBeforeOutput(t *testing.T) {
 // srv and drop every older pin, so pin saves nothing: exit code 2, the note
 // and then pinsRemovedText on stderr, no "accepted" line, no new pins file
 // notice, and no pins.json. A hookWriter on stdout removes the file when pin
-// prints the first byte of the diff.
+// prints the first byte of the diff. The stderr of pin is a lockProbeWriter:
+// saveAccepted prints the pinsRemovedText line after the release, so the lock
+// must be free at that write.
 //
 // The control, a real first run with no file at both reads, is
 // TestPinAcceptNewPinsFileNotice: it saves and prints the notice.
@@ -474,6 +493,8 @@ func TestPinAcceptPinsRemovedDuringDiff(t *testing.T) {
 			t.Errorf("remove pins.json while pin shows the diff: %v", err)
 		}
 	}}
+	probe := newLockProbeWriter(t, stderr, e.pinsPath(), pinsRemovedText)
+	c.stderr = probe
 
 	code := c.dispatch([]string{"pin", "--config", e.config, "--accept", "srv"})
 
@@ -483,6 +504,7 @@ func TestPinAcceptPinsRemovedDuringDiff(t *testing.T) {
 	if want := noExpectNote + removed; got.stderr != want {
 		t.Errorf("stderr = %q, want exactly %q", got.stderr, want)
 	}
+	assertLockFreeAt(t, probe, pinsRemovedText)
 	assertContainsNone(t, "stdout", got.stdout, []string{"accepted"})
 	assertContainsNone(t, "stderr", got.stderr, []string{"no pins file was found"})
 	// The diff printed before the removal, against the pins of the first read.

@@ -34,17 +34,18 @@ func tryLock(f *os.File) (acquired bool, err error) {
 	if err != nil {
 		return false, err
 	}
-	return lockErrno(f.Name(), errno)
+	return lockErrno(errno)
 }
 
-// lockErrno turns errno, the result of a non-blocking flock(2) on the file
-// called name, into the results of tryLock. It is a separate pure function,
-// so a test can check each errno without a file system that returns it.
+// lockErrno turns errno, the result of a non-blocking flock(2), into the
+// results of tryLock. It is a separate pure function, so a test can check each
+// errno without a file system that returns it. The errors do not name the
+// file: the caller adds the path.
 //
 // The errors.Is calls compare errno with each constant. A switch on the value
 // would not compile on Linux: there EWOULDBLOCK is EAGAIN and ENOTSUP is
 // EOPNOTSUPP, and a switch cannot list the same constant twice.
-func lockErrno(name string, errno syscall.Errno) (acquired bool, err error) {
+func lockErrno(errno syscall.Errno) (acquired bool, err error) {
 	switch {
 	case errno == 0:
 		return true, nil
@@ -58,9 +59,10 @@ func lockErrno(name string, errno syscall.Errno) (acquired bool, err error) {
 	case errors.Is(errno, syscall.ENOTSUP), errors.Is(errno, syscall.EOPNOTSUPP),
 		errors.Is(errno, syscall.ENOLCK), errors.Is(errno, syscall.ENOSYS),
 		errors.Is(errno, syscall.EBADF), errors.Is(errno, syscall.EINVAL):
-		return false, fmt.Errorf("lock %s: %w: %w", name, errLockUnsupported, errno)
+		// Two %w verbs: errors.Is finds both errLockUnsupported and errno.
+		return false, fmt.Errorf("%w: %w", errLockUnsupported, errno)
 	default:
-		return false, fmt.Errorf("lock %s: %w", name, errno)
+		return false, errno
 	}
 }
 
@@ -88,7 +90,7 @@ func unlock(f *os.File) error {
 func flock(f *os.File, how int) (syscall.Errno, error) {
 	rc, err := f.SyscallConn()
 	if err != nil {
-		return 0, fmt.Errorf("flock %s: %w", f.Name(), err)
+		return 0, fmt.Errorf("flock: %w", err)
 	}
 	var errno syscall.Errno
 	ctrlErr := rc.Control(func(fd uintptr) {
@@ -99,8 +101,10 @@ func flock(f *os.File, how int) (syscall.Errno, error) {
 				// errno keeps its zero value: success.
 				return
 			}
-			var e syscall.Errno
-			if !errors.As(callErr, &e) {
+			// errors.AsType returns the first error in the chain that has the
+			// type syscall.Errno, and false when there is none.
+			e, ok := errors.AsType[syscall.Errno](callErr)
+			if !ok {
 				// syscall.Flock only returns Errno values. Treat anything
 				// else as a generic I/O error.
 				errno = syscall.EIO
@@ -114,7 +118,7 @@ func flock(f *os.File, how int) (syscall.Errno, error) {
 		}
 	})
 	if ctrlErr != nil {
-		return 0, fmt.Errorf("flock %s: %w", f.Name(), ctrlErr)
+		return 0, fmt.Errorf("flock: %w", ctrlErr)
 	}
 	return errno, nil
 }
