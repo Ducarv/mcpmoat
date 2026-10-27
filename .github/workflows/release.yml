@@ -151,10 +151,35 @@ jobs:
             dist/checksums.txt
 
       # The next step runs a script from the checkout, with write permission,
-      # after the build ran repo code. Stop if the build changed a script. A
-      # new file is not caught: git diff does not list untracked files.
+      # after the build ran repo code. This step compares .github/scripts with
+      # the tagged commit, not with the index, and fails on any new file there,
+      # also an ignored one. It also refuses a file marked assume-unchanged or
+      # skip-worktree. It is hardening, not a boundary: a build that rewrites
+      # the git config or the index file itself could still hide a change.
       - name: Check that the build left the scripts unchanged
-        run: git diff --exit-code -- .github/scripts
+        shell: bash
+        run: |
+          if ! git diff --exit-code "$GITHUB_SHA" -- .github/scripts; then
+            echo "::error::The build changed .github/scripts. Stop before the publish."
+            exit 1
+          fi
+          if [ -n "$(git ls-files --others -- .github/scripts)" ]; then
+            echo "::error::The build added a file to .github/scripts. Stop before the publish."
+            exit 1
+          fi
+          # git diff can skip a file that is marked assume-unchanged, so also
+          # compare the hash of the publish script with the tagged commit.
+          script=.github/scripts/verify-and-publish.sh
+          if [ "$(git hash-object "$script")" != "$(git rev-parse "$GITHUB_SHA:$script")" ]; then
+            echo "::error::The build changed $script. Stop before the publish."
+            exit 1
+          fi
+          # In ls-files -v, only H means a normal file. h, S and s mean the
+          # build hid a change from git diff.
+          if git ls-files -v -- .github/scripts | grep -v '^H '; then
+            echo "::error::The build marked a file in .github/scripts as hidden. Stop before the publish."
+            exit 1
+          fi
 
       # GoReleaser makes a draft release. Publish it only after the
       # attestations of the uploaded files verify. With Immutable releases,
