@@ -113,6 +113,11 @@ func TestGovulncheckRules(t *testing.T) {
 	const notAllowed = `names govulncheck, but it is not the GOVULNCHECK_VERSION pin, the call or an allowed name`
 	const coe = `continue-on-error is not allowed in this file`
 	const others = `the workflow names govulncheck. Only ci.yml, release.yml and govulncheck.yml may`
+	// jobIf is the message for a job-level if: key of the job job, which runs
+	// the call, in the file p at the line line.
+	jobIf := func(p string, line int, job string) string {
+		return fmt.Sprintf(`%s:%d: the job %q runs govulncheck, so it must not have a job-level if: a skipped job would hide a vulnerability`, p, line, job)
+	}
 
 	tests := []struct {
 		name    string
@@ -485,10 +490,12 @@ func TestGovulncheckRules(t *testing.T) {
 			n:      1,
 		},
 		{
+			// The job of release.yml runs the call, so the job-level if: is also
+			// a problem (see section 4b). That gives two messages.
 			name:   "failure if in another file",
 			mutate: grReplace(releasePath, "    runs-on: ubuntu-latest\n", "    runs-on: ubuntu-latest\n    if: "+gvFailureIf+"\n"),
-			want:   []string{`release.yml:8: "` + gvFailureIf + `" ` + notAllowed},
-			n:      1,
+			want:   []string{`release.yml:8: "` + gvFailureIf + `" ` + notAllowed, jobIf(releasePath, 8, "test")},
+			n:      2,
 		},
 		{
 			name:   "failure if key in another case",
@@ -537,6 +544,91 @@ func TestGovulncheckRules(t *testing.T) {
 		{
 			name:   "continue-on-error as run text is fine",
 			mutate: extraStep(releasePath, "      - run: 'echo continue-on-error: true'\n      - run: |\n          continue-on-error: true"),
+		},
+
+		// (4b) A job-level if: on a job that runs the call. GitHub skips a job
+		// whose if is false, so the scan would not run. Each file has the rule.
+		// Each problem has a twin that is fine: the if of a job without the
+		// call, or the if of a step.
+		{
+			name:   "job if false on the call job of ci.yml",
+			mutate: grReplace(ciPath, "  test:\n    runs-on: ubuntu-latest\n", "  test:\n    if: false\n    runs-on: ubuntu-latest\n"),
+			want:   []string{jobIf(ciPath, 8, "test")},
+			n:      1,
+		},
+		{
+			name:   "job if false on the call job of release.yml",
+			mutate: grReplace(releasePath, "    runs-on: ubuntu-latest\n", "    if: false\n    runs-on: ubuntu-latest\n"),
+			want:   []string{jobIf(releasePath, 7, "test")},
+			n:      1,
+		},
+		{
+			name:   "job if false on the call job of govulncheck.yml",
+			mutate: grReplace(weeklyPath, "  govulncheck:\n    runs-on: ubuntu-latest\n", "  govulncheck:\n    if: false\n    runs-on: ubuntu-latest\n"),
+			want:   []string{jobIf(weeklyPath, 9, "govulncheck")},
+			n:      1,
+		},
+		{
+			// The if key comes after the steps. A rule that read only the first
+			// key of the job would miss it.
+			name:   "job if false after the steps of the call job",
+			mutate: grReplace(releasePath, gvTestRunLine+"\n", gvTestRunLine+"\n    if: false\n"),
+			want:   []string{jobIf(releasePath, 13, "test")},
+			n:      1,
+		},
+		{
+			name:   "job if with runner.os on the call job",
+			mutate: grReplace(releasePath, "    runs-on: ubuntu-latest\n", "    if: runner.os == 'Linux'\n    runs-on: ubuntu-latest\n"),
+			want:   []string{jobIf(releasePath, 7, "test")},
+			n:      1,
+		},
+		{
+			name:   "job if with the key IF in upper case on the call job",
+			mutate: grReplace(ciPath, "  test:\n    runs-on: ubuntu-latest\n", "  test:\n    IF : false\n    runs-on: ubuntu-latest\n"),
+			want:   []string{jobIf(ciPath, 8, "test")},
+			n:      1,
+		},
+		{
+			name:   "job if with a padded key on the call job",
+			mutate: grReplace(releasePath, "    runs-on: ubuntu-latest\n", "    \" if \": false\n    runs-on: ubuntu-latest\n"),
+			want:   []string{jobIf(releasePath, 7, "test")},
+			n:      1,
+		},
+		{
+			name:   "job if on a job without the call is fine",
+			mutate: extraJob("  other:\n    if: false\n    steps:\n      - run: echo hi"),
+		},
+		{
+			name:   "step if on the call step is fine",
+			mutate: grReplace(releasePath, "      - name: Vulnerability check\n", "      - name: Vulnerability check\n        if: runner.os == 'Linux'\n"),
+		},
+		{
+			name:   "step if with the key IF in upper case is fine",
+			mutate: grReplace(ciPath, "      - name: Vulnerability check\n", "      - name: Vulnerability check\n        IF : false\n"),
+		},
+		{
+			name:   "step if with a padded key is fine",
+			mutate: grReplace(releasePath, "      - name: Vulnerability check\n", "      - name: Vulnerability check\n        \" if \": false\n"),
+		},
+		{
+			// needs and the failure if: are names of the failure job. On the
+			// call job they are not allowed, so the name rule reports them. The
+			// job-level if: is also a problem (section 4b).
+			name: "needs and failure if on the call job of govulncheck.yml",
+			mutate: grReplace(weeklyPath, "  govulncheck:\n    runs-on: ubuntu-latest\n",
+				"  govulncheck:\n    needs: govulncheck\n    if: "+gvFailureIf+"\n    runs-on: ubuntu-latest\n"),
+			want: []string{
+				`govulncheck.yml:9: "govulncheck" ` + notAllowed,
+				`govulncheck.yml:10: "` + gvFailureIf + `" ` + notAllowed,
+				jobIf(weeklyPath, 10, "govulncheck"),
+			},
+			n: 3,
+		},
+		{
+			// The same two names on a job that runs no call are allowed.
+			name: "needs and failure if on a job without the call is fine",
+			mutate: grReplace(weeklyPath, "  notify-failure:\n",
+				"  other:\n    needs: govulncheck\n    if: "+gvFailureIf+"\n    steps:\n      - run: echo hi\n  notify-failure:\n"),
 		},
 
 		// (5) Another workflow names govulncheck.
@@ -629,5 +721,22 @@ func TestGovulncheckNilMap(t *testing.T) {
 	t.Parallel()
 	if got := checkGovulncheck(nil); len(got) != 0 {
 		t.Errorf("checkGovulncheck(nil) = %q, want no message", got)
+	}
+}
+
+// TestGvListedNames checks the list of the listed workflows that the messages
+// name. A change to gvListedPaths must show in every message that names them.
+func TestGvListedNames(t *testing.T) {
+	t.Parallel()
+	const want = "ci.yml, release.yml and govulncheck.yml"
+	if got := gvListedNames(); got != want {
+		t.Errorf("gvListedNames() = %q, want %q", got, want)
+	}
+	other := map[string]*workflow{
+		".github/workflows/other.yml": mustParse(t, ".github/workflows/other.yml", "name: govulncheck\non: push\njobs: {}\n"),
+	}
+	got := gvCheckOthers(other)
+	if len(got) != 1 || !strings.Contains(got[0], "Only "+want+" may") {
+		t.Errorf("gvCheckOthers() = %q, want one message with %q", got, "Only "+want+" may")
 	}
 }

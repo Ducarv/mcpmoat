@@ -5,10 +5,13 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"iter"
 	"strconv"
 	"strings"
 
 	"go.yaml.in/yaml/v3"
+
+	"github.com/Ducarv/mcpmoat/internal/termsafe"
 )
 
 // maxNodeDepth is the deepest nesting of YAML nodes that parseWorkflow
@@ -182,8 +185,7 @@ func (w *workflow) checkNode(n *yaml.Node, depth int) error {
 // such as the long s that folds to s).
 func (w *workflow) checkKeys(m *yaml.Node) error {
 	seen := make(map[string]int) // the folded key and the line of its first use
-	for i := 0; i+1 < len(m.Content); i += 2 {
-		k := m.Content[i]
+	for k := range pairs(m) {
 		// An alias, an anchor or a tag on the key gets its own, clearer message.
 		if k.Kind == yaml.AliasNode || k.Anchor != "" || k.Style&yaml.TaggedStyle != 0 {
 			return w.checkNode(k, 0)
@@ -214,9 +216,9 @@ func (w *workflow) lookup(m *yaml.Node, key string) (k, v *yaml.Node, err error)
 	if m == nil || m.Kind != yaml.MappingNode {
 		return nil, nil, w.errorAt(m, "looking for %q: want a mapping, found %s", key, kindName(m))
 	}
-	for i := 0; i+1 < len(m.Content); i += 2 {
-		if strings.EqualFold(m.Content[i].Value, key) {
-			return m.Content[i], m.Content[i+1], nil
+	for k, v := range pairs(m) {
+		if strings.EqualFold(k.Value, key) {
+			return k, v, nil
 		}
 	}
 	return nil, nil, nil
@@ -261,24 +263,12 @@ func (w *workflow) wrongKind(k, v *yaml.Node, want yaml.Kind) error {
 	return w.errorAt(v, "the value of %s must be %s, found %s", show(k.Value), kindWord(want), kindName(v))
 }
 
-// jobs returns the entries of the jobs mapping, in file order. It returns an
-// error when the workflow has no jobs key, when jobs is not a mapping or when
-// a job is not a mapping. GitHub needs jobs in every workflow, so a missing
-// key fails closed. It is the strict form of jobsAndProblems: on any problem
-// it returns no job at all, and the first problem.
-func (w *workflow) jobs() ([]job, error) {
-	jobs, problems := w.jobsAndProblems()
-	if len(problems) > 0 {
-		return nil, problems[0]
-	}
-	return jobs, nil
-}
-
 // jobsAndProblems returns the jobs whose body is a mapping, in file order,
 // and one error for each problem: no jobs key, a jobs value that is not a
 // mapping, or a job that is not a mapping. A bad job does not stop the walk,
 // so the good jobs are still there for a rule that must not miss a step in
-// them. The errors are *nodeError values, as from every other method.
+// them. GitHub needs jobs in every workflow, so a missing key is a problem.
+// The errors are *nodeError values, as from every other method.
 func (w *workflow) jobsAndProblems() ([]job, []error) {
 	jobsNode, err := w.mappingAt(w.top, "jobs")
 	if err != nil {
@@ -289,8 +279,7 @@ func (w *workflow) jobsAndProblems() ([]job, []error) {
 	}
 	var out []job
 	var problems []error
-	for i := 0; i+1 < len(jobsNode.Content); i += 2 {
-		k, body := jobsNode.Content[i], jobsNode.Content[i+1]
+	for k, body := range pairs(jobsNode) {
 		if body.Kind != yaml.MappingNode {
 			problems = append(problems, w.errorAt(body, "the job %s must be a mapping, found %s", show(k.Value), kindName(body)))
 			continue
@@ -337,9 +326,7 @@ func (w *workflow) envProblems() []string {
 		if n.Kind != yaml.MappingNode {
 			return
 		}
-		// Content of a mapping holds key, value, key, value and so on.
-		for i := 0; i+1 < len(n.Content); i += 2 {
-			k, v := n.Content[i], n.Content[i+1]
+		for k, v := range pairs(n) {
 			if strings.EqualFold(k.Value, "env") && v.Kind != yaml.MappingNode {
 				out = append(out, w.wrongKind(k, v, yaml.MappingNode).Error())
 			}
@@ -396,6 +383,26 @@ func (w *workflow) errorAt(n *yaml.Node, format string, args ...any) error {
 	return e
 }
 
+// problemAt returns the text of the error from errorAt, for a rule that adds
+// a message to a list of strings.
+func (w *workflow) problemAt(n *yaml.Node, format string, args ...any) string {
+	return w.errorAt(n, format, args...).Error()
+}
+
+// pairs returns the key and the value node of each entry of the mapping m, in
+// file order, for a range loop: for k, v := range pairs(m). The Content of a
+// mapping holds key, value, key, value and so on. The caller must check first
+// that m is a mapping: the pairs of a sequence would be wrong.
+func pairs(m *yaml.Node) iter.Seq2[*yaml.Node, *yaml.Node] {
+	return func(yield func(*yaml.Node, *yaml.Node) bool) {
+		for i := 0; i+1 < len(m.Content); i += 2 {
+			if !yield(m.Content[i], m.Content[i+1]) {
+				return
+			}
+		}
+	}
+}
+
 // kindName names the kind of n for a message, such as "a mapping". It names
 // a null scalar (an empty value or null) "an empty value".
 func kindName(n *yaml.Node) string {
@@ -428,26 +435,27 @@ func kindWord(k yaml.Kind) string {
 
 // show returns s for a message: cut to maxShown bytes as cutText cuts it,
 // and quoted as a Go string, so a line break or a control character shows as
-// an escape such as \n. When s was cut, "..." follows the closing quote, so
-// the marker cannot look like a part of the text. The result has at most
-// about 4*maxShown bytes (each byte can become an escape such as \x1b).
+// an escape such as \n. When s was cut, termsafe.CutMarker follows the closing
+// quote, so the marker cannot look like a part of the text. The result has at
+// most about 4*maxShown bytes (each byte can become an escape such as \x1b).
 // termsafe.QuoteCut is not used, because it cuts by runes and the bound here
 // is on bytes: 80 runes can be several times 80 bytes.
 func show(s string) string {
 	short := cutPrefix(s, maxShown)
 	if len(short) < len(s) {
-		return strconv.Quote(short) + "..."
+		return strconv.Quote(short) + termsafe.CutMarker
 	}
 	return strconv.Quote(s)
 }
 
 // cutText returns s when it has at most n bytes. Else it returns the start of
-// s cut as cutPrefix cuts it, and then "...". It does not quote. Use it for a
-// text that a message shows as it is, such as a version or an anchor name.
+// s cut as cutPrefix cuts it, and then termsafe.CutMarker. It does not quote.
+// Use it for a text that a message shows as it is, such as a version or an
+// anchor name.
 func cutText(s string, n int) string {
 	short := cutPrefix(s, n)
 	if len(short) < len(s) {
-		return short + "..."
+		return short + termsafe.CutMarker
 	}
 	return s
 }

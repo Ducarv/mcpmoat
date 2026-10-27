@@ -113,6 +113,13 @@ from_root() {
   cd / && "$src/.github/scripts/check-tool-pins.sh" "$@"
 }
 
+# not_tmp_in_output: succeeds when the output of the last check_case does not
+# hold the path of the temporary directory $tmp. It runs in a subshell, which
+# sees case_out.
+not_tmp_in_output() {
+  [[ $case_out != *"$tmp"* ]]
+}
+
 # call is the call line of govulncheck in the workflows.
 call='        run: go run "golang.org/x/vuln/cmd/govulncheck@$GOVULNCHECK_VERSION" ./...'
 
@@ -781,6 +788,18 @@ pins_case "if: line of the failure job in ci.yml" 1 "$vuln_name" append "$wfdir/
     runs-on: ubuntu-latest"
 pins_case "step that runs govulncheck" 1 "$vuln_name" append "$wfdir/govulncheck.yml" '      - run: govulncheck ./...'
 
+# A job-level if: on the job that runs the call. GitHub skips the job when the
+# if is false, so the scan would not run. The step-level if of the real ci.yml
+# call step is fine. The real files pass (the first case of this script).
+jobif_says='runs govulncheck, so it must not have a job-level if'
+pins_case "job if: false on the call job of govulncheck.yml" 1 "the job \"govulncheck\" $jobif_says" sub "$wfdir/govulncheck.yml" 's/^  govulncheck:$/  govulncheck:\n    if: false/'
+pins_case "job if: false on the call job of ci.yml" 1 "the job \"test\" $jobif_says" sub "$wfdir/ci.yml" 's/^  test:$/  test:\n    if: false/'
+pins_case "job if: false on the call job of release.yml" 1 "the job \"test\" $jobif_says" sub "$wfdir/release.yml" 's/^  test:$/  test:\n    if: false/'
+pins_case "job if: false on a job without the call is fine" 0 "" append "$wfdir/ci.yml" '  other:
+    if: false
+    runs-on: ubuntu-latest'
+pins_case "step if on the call step of govulncheck.yml is fine" 0 "" sub "$wfdir/govulncheck.yml" 's/^      - name: Check for known vulnerabilities$/&\n        if: runner.os == "Linux"/'
+
 # A pin with the form of a pre-release or with quotes is still a full version.
 pins_case "GoReleaser: rc suffix in all files" 0 "" rc_goreleaser
 pins_case "GoReleaser: rc suffix in ci.yml only" 1 "GORELEASER_VERSION is \"$gr_ver\", expected \"$gr_ver-rc.1\"" sub "$wfdir/ci.yml" 's/(GORELEASER_VERSION: v[0-9]+\.[0-9]+\.[0-9]+)/\1-rc.1/'
@@ -798,5 +817,7 @@ check_cmd "output: plain lines on stderr with GITHUB_ACTIONS empty" streams_ok '
 check_case "wrapper: real repository from /" 0 "" from_root
 check_case "wrapper: -root on a changed copy" 1 "the govulncheck pin \"v0.0.1\" differs from \"$vuln_ver\"" from_root -root "$tmp/w"
 check_case "wrapper: -root on a missing directory" 1 "open the repository root" from_root -root "$tmp/missing"
+# The output of that run does not hold the temporary directory path, so the host path does not show.
+check_cmd "wrapper: the root error shows no path" not_tmp_in_output
 
 harness_footer check-tool-pins-test

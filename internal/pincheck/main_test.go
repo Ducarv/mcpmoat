@@ -689,9 +689,9 @@ func lineOf(t *testing.T, src, sub string) int {
 func TestCheckBadJobKeepsGoodJobs(t *testing.T) {
 	t.Parallel()
 	// A job that is not a mapping must not hide the other jobs of the file
-	// from the GoReleaser rules. With the strict jobs(), the rules read no
-	// job, and the scalar scan fails the pin, the uses value and the version
-	// input of the good release job.
+	// from the GoReleaser rules. If the walk stopped at the first bad job, the
+	// rules would read no job, and the scalar scan would fail the pin, the uses
+	// value and the version input of the good release job.
 	const (
 		oldJobs  = "jobs:\n"
 		badJobs  = "jobs:\n  bad: 1\n"
@@ -940,15 +940,57 @@ func TestCheckRootCopy(t *testing.T) {
 
 func TestCheckRootMissingDir(t *testing.T) {
 	t.Parallel()
-	got, err := checkRoot(filepath.Join(t.TempDir(), "nope"))
+	dir := filepath.Join(t.TempDir(), "nope")
+	got, err := checkRoot(dir)
 	if err == nil {
 		t.Fatalf("checkRoot() = %q, nil; want an error", got)
 	}
 	if !errors.Is(err, fs.ErrNotExist) {
 		t.Errorf("checkRoot() error = %v, want it to wrap fs.ErrNotExist", err)
 	}
-	if !strings.HasPrefix(err.Error(), "open the repository root: ") {
-		t.Errorf("checkRoot() error = %q, want the open prefix", err)
+	if want := "open the repository root: no such file or directory"; err.Error() != want {
+		t.Errorf("checkRoot() error = %q, want %q", err, want)
+	}
+}
+
+// TestCheckRootErrorHidesDir checks that the error of a root that cannot be
+// opened holds no part of the directory. The message goes to stderr and to
+// CI logs, so a host path such as /home/user/repo must not show. Each part
+// of at least three bytes is checked, so the test name in t.TempDir shows too.
+func TestCheckRootErrorHidesDir(t *testing.T) {
+	t.Parallel()
+	file := filepath.Join(t.TempDir(), "plain.txt")
+	if err := os.WriteFile(file, []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	tests := []struct {
+		name string
+		dir  string
+	}{
+		{name: "missing directory", dir: filepath.Join(t.TempDir(), "missing-repo")},
+		{name: "missing nested directory", dir: filepath.Join(t.TempDir(), "a", "b", "missing-repo")},
+		{name: "regular file", dir: file},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			_, err := checkRoot(tt.dir)
+			if err == nil {
+				t.Fatalf("checkRoot(%q) error = nil, want an error", tt.dir)
+			}
+			msg := err.Error()
+			if !strings.HasPrefix(msg, "open the repository root: ") {
+				t.Errorf("checkRoot() error = %q, want the open prefix", msg)
+			}
+			if strings.Contains(msg, tt.dir) {
+				t.Errorf("checkRoot() error = %q holds the directory %q", msg, tt.dir)
+			}
+			for _, part := range strings.Split(filepath.ToSlash(tt.dir), "/") {
+				if len(part) >= 3 && strings.Contains(msg, part) {
+					t.Errorf("checkRoot() error = %q holds the path part %q of %q", msg, part, tt.dir)
+				}
+			}
+		})
 	}
 }
 

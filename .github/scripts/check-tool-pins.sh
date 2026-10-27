@@ -10,6 +10,6 @@
 set -euo pipefail
 
 # CDPATH is empty, so that cd neither prints a path nor goes to another place.
-CDPATH='' cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.."
+CDPATH='' cd -- "$(dirname -- "$0")/../.."
 
 exec go run ./internal/pincheck "$@"

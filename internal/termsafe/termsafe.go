@@ -125,6 +125,33 @@ func Cut(s string, n int) (string, bool) {
 	return s, false
 }
 
+// Escape returns s with each unsafe rune replaced by a visible escape. It adds
+// no quotes and does not cut s. An invalid UTF-8 byte, and an ASCII control
+// character such as a newline or ESC, becomes \xNN. Any other rune for which
+// NeedsEscape is true becomes \uXXXX, or \UXXXXXXXX above U+FFFF. Every other
+// byte is kept. A text with no such rune comes back unchanged.
+//
+// Escape differs from Quote. Quote adds quotes and writes a newline as \n, but
+// Escape writes it as \x0a, so every ASCII control character has one form.
+func Escape(s string) string {
+	var b strings.Builder
+	for i := 0; i < len(s); {
+		r, size := utf8.DecodeRuneInString(s[i:])
+		switch {
+		case r == utf8.RuneError && size == 1:
+			_, _ = fmt.Fprintf(&b, `\x%02x`, s[i]) // a strings.Builder write never fails
+		case r < utf8.RuneSelf && NeedsEscape(r):
+			_, _ = fmt.Fprintf(&b, `\x%02x`, r)
+		case NeedsEscape(r):
+			writeRuneEscape(&b, r)
+		default:
+			b.WriteString(s[i : i+size])
+		}
+		i += size
+	}
+	return b.String()
+}
+
 // needsQuote reports whether s starts with a double quote, holds invalid
 // UTF-8, or holds a rune for which NeedsEscape is true.
 func needsQuote(s string) bool {

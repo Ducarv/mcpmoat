@@ -1305,6 +1305,8 @@ can send any text. Raw control characters in such text can rewrite your terminal
 - `QuoteIf(s, force)` also quotes a safe `s` when `force` is true.
 - `QuoteCut(s, n)` cuts to `n` runes, quotes the result, and adds `CutMarker` when it cut.
 - `Cut(s, n)` cuts to `n` runes at a rune boundary, adds no marker, and reports whether it cut.
+- `Escape(s)` replaces each unsafe rune with a visible escape (`\xNN`, `\uXXXX`), adds no quotes
+  and does not cut. The CI tool `internal/pincheck` uses it for one-line log messages.
 - `IsInvisible(r)` tells if a rune shows as nothing.
 
 The layers that import it are `cmd/mcpmoat`, `internal/discover`, `internal/report` and

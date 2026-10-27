@@ -17,7 +17,7 @@ import (
 // The directories and the names that the GoReleaser rules read. The files are
 // ciPath, releasePath and docPath in main.go.
 const (
-	grGitHubDir  = ".github"
+	grGitHubDir  = githubDir
 	grActionsDir = "actions" // the directory of the local actions, below .github
 
 	// grPinKey is the env key of the pin. The key must have this exact case.
@@ -61,9 +61,7 @@ type grScan struct {
 // checkRequired or notLoaded.
 func checkGoreleaser(fsys fs.FS, wfs map[string]*workflow) []string {
 	var msgs []string
-	// maps.Keys returns an iterator over the keys, and slices.Sorted collects
-	// them into a sorted slice. A Go map has no order, so the sort makes the
-	// order of the messages stable.
+	// Go visits a map in a random order, so sort the paths for stable output.
 	var scans []grScan
 	for _, p := range slices.Sorted(maps.Keys(wfs)) {
 		scans = append(scans, grScanWorkflow(p, wfs[p]))
@@ -80,11 +78,11 @@ func checkGoreleaser(fsys fs.FS, wfs map[string]*workflow) []string {
 		}
 		for _, pin := range s.pins {
 			if pin.value != want {
-				msgs = append(msgs, s.w.errorAt(pin.node, "GORELEASER_VERSION is %s, expected %s (the pin in ci.yml)", show(pin.value), show(want)).Error())
+				msgs = append(msgs, s.w.problemAt(pin.node, "GORELEASER_VERSION is %s, expected %s (the pin in %s)", show(pin.value), show(want), ciName))
 			}
 		}
 		if s.path == releasePath && len(s.pins) == 0 {
-			msgs = append(msgs, s.w.errorAt(nil, "the workflow has no full GORELEASER_VERSION pin in the env of a job, expected %s (the pin in ci.yml)", show(want)).Error())
+			msgs = append(msgs, s.w.problemAt(nil, "the workflow has no full GORELEASER_VERSION pin in the env of a job, expected %s (the pin in %s)", show(want), ciName))
 		}
 	}
 	if want != "" {
@@ -110,7 +108,7 @@ func grWant(scans []grScan) (want, msg string) {
 		if found == "" {
 			return version, ""
 		}
-		return "", s.w.errorAt(nil, "ci.yml must pin one full version of GoReleaser (GORELEASER_VERSION in the env of a job). Found: %s", found).Error()
+		return "", s.w.problemAt(nil, "%s must pin one full version of GoReleaser (GORELEASER_VERSION in the env of a job). Found: %s", ciName, found)
 	}
 	return "", ""
 }
@@ -125,10 +123,11 @@ func grScanWorkflow(p string, w *workflow) grScan {
 	okPin := make(map[*yaml.Node]bool)  // pin keys, pin values and version inputs
 	okUses := make(map[*yaml.Node]bool) // uses values of goreleaser-action steps
 
-	// jobsAndProblems keeps the good jobs when one job is bad. The strict
-	// jobs() would drop them all, and the scalar scan below would then fail
-	// every pin and uses value of the file. The text of a bad-job problem is
-	// the same as in the govulncheck rule, so dedupe keeps one line.
+	// jobsAndProblems keeps the good jobs when one job is bad. A rule that
+	// gave up at the first bad job would drop all the jobs, and the scalar
+	// scan below would then fail every pin and uses value of the file. The
+	// text of a bad-job problem is the same as in the govulncheck rule, so
+	// dedupe keeps one line.
 	jobs, problems := w.jobsAndProblems()
 	for _, err := range problems {
 		s.msgs = append(s.msgs, err.Error())
@@ -149,7 +148,7 @@ func grScanWorkflow(p string, w *workflow) grScan {
 			s.msgs = append(s.msgs, msgs...)
 		}
 		if hasStep && !hasPin {
-			s.msgs = append(s.msgs, w.errorAt(j.key, "the job %s has a goreleaser-action step, but its env does not define GORELEASER_VERSION", show(j.id)).Error())
+			s.msgs = append(s.msgs, w.problemAt(j.key, "the job %s has a goreleaser-action step, but its env does not define GORELEASER_VERSION", show(j.id)))
 		}
 	}
 
@@ -159,10 +158,10 @@ func grScanWorkflow(p string, w *workflow) grScan {
 	for _, n := range w.scalars() {
 		lower := strings.ToLower(n.Value)
 		if strings.Contains(lower, grAction) && !okUses[n] {
-			s.msgs = append(s.msgs, w.errorAt(n, "the text %s names goreleaser/goreleaser-action, but it is not the uses value of a step that this check reads", show(n.Value)).Error())
+			s.msgs = append(s.msgs, w.problemAt(n, "the text %s names goreleaser/goreleaser-action, but it is not the uses value of a step that this check reads", show(n.Value)))
 		}
 		if strings.Contains(lower, grMention) && !okPin[n] {
-			s.msgs = append(s.msgs, w.errorAt(n, "the text %s mentions GORELEASER_VERSION in a form this check does not allow. Allowed: the pin GORELEASER_VERSION: <full version> in the env of a job, and the value %s of the version input of a goreleaser-action step", show(n.Value), grVersionInput).Error())
+			s.msgs = append(s.msgs, w.problemAt(n, "the text %s mentions GORELEASER_VERSION in a form this check does not allow. Allowed: the pin GORELEASER_VERSION: <full version> in the env of a job, and the value %s of the version input of a goreleaser-action step", show(n.Value), grVersionInput))
 		}
 	}
 	return s
@@ -179,8 +178,7 @@ func grJobPins(w *workflow, j job, okPin map[*yaml.Node]bool) (hasPin bool, pins
 	if env == nil {
 		return false, nil, nil
 	}
-	for i := 0; i+1 < len(env.Content); i += 2 {
-		k, v := env.Content[i], env.Content[i+1]
+	for k, v := range pairs(env) {
 		if k.Value != grPinKey {
 			continue // a key in another case is not a pin; the mention rule fails it
 		}
@@ -188,9 +186,9 @@ func grJobPins(w *workflow, j job, okPin map[*yaml.Node]bool) (hasPin bool, pins
 		okPin[k], okPin[v] = true, true
 		switch {
 		case v.Kind != yaml.ScalarNode || v.ShortTag() == "!!null":
-			msgs = append(msgs, w.errorAt(v, "the GORELEASER_VERSION pin must be a full version (vMAJOR.MINOR.PATCH), found %s", kindName(v)).Error())
+			msgs = append(msgs, w.problemAt(v, "the GORELEASER_VERSION pin must be a full version (vMAJOR.MINOR.PATCH), found %s", kindName(v)))
 		case !fullVersion.MatchString(v.Value):
-			msgs = append(msgs, w.errorAt(v, "the GORELEASER_VERSION pin %s is not a full version (vMAJOR.MINOR.PATCH)", show(v.Value)).Error())
+			msgs = append(msgs, w.problemAt(v, "the GORELEASER_VERSION pin %s is not a full version (vMAJOR.MINOR.PATCH)", show(v.Value)))
 		default:
 			pins = append(pins, grPin{node: v, value: v.Value})
 		}
@@ -218,26 +216,25 @@ func grCheckStep(w *workflow, step *yaml.Node, okPin, okUses map[*yaml.Node]bool
 		return true, []string{err.Error()}
 	}
 	if with == nil {
-		return true, []string{w.errorAt(step, "the goreleaser-action step %s has no with mapping, so it has no version input", label).Error()}
+		return true, []string{w.problemAt(step, "the goreleaser-action step %s has no with mapping, so it has no version input", label)}
 	}
 	found := false
-	for i := 0; i+1 < len(with.Content); i += 2 {
-		k, v := with.Content[i], with.Content[i+1]
+	for k, v := range pairs(with) {
 		if !strings.EqualFold(k.Value, grVersionKey) {
 			continue
 		}
 		found = true
 		switch {
 		case k.Value != grVersionKey:
-			msgs = append(msgs, w.errorAt(k, "the goreleaser-action step %s has the key %s in its with mapping. Write the version input key as version", label, show(k.Value)).Error())
+			msgs = append(msgs, w.problemAt(k, "the goreleaser-action step %s has the key %s in its with mapping. Write the version input key as version", label, show(k.Value)))
 		case v.Kind != yaml.ScalarNode || v.Value != grVersionInput:
-			msgs = append(msgs, w.errorAt(v, "the goreleaser-action step %s has a version input that is not %s", label, grVersionInput).Error())
+			msgs = append(msgs, w.problemAt(v, "the goreleaser-action step %s has a version input that is not %s", label, grVersionInput))
 		default:
 			okPin[v] = true
 		}
 	}
 	if !found {
-		msgs = append(msgs, w.errorAt(with, "the goreleaser-action step %s has no version input in its with mapping", label).Error())
+		msgs = append(msgs, w.problemAt(with, "the goreleaser-action step %s has no version input in its with mapping", label))
 	}
 	return true, msgs
 }
@@ -276,7 +273,7 @@ func grCheckDoc(fsys fs.FS, want string) []string {
 	// the match and then of each group. -1 means no limit on the matches.
 	matches := grDocVersion.FindAllSubmatchIndex(data, -1)
 	if len(matches) == 0 {
-		return []string{fmt.Sprintf("%s: names no GoReleaser version (goreleaser/vN@<version>), expected %s (the pin in ci.yml)", docPath, show(want))}
+		return []string{fmt.Sprintf("%s: names no GoReleaser version (goreleaser/vN@<version>), expected %s (the pin in %s)", docPath, show(want), ciName)}
 	}
 	var msgs []string
 	for _, m := range matches {
@@ -285,7 +282,7 @@ func grCheckDoc(fsys fs.FS, want string) []string {
 			continue
 		}
 		line := bytes.Count(data[:m[0]], []byte("\n")) + 1
-		msgs = append(msgs, fmt.Sprintf("%s:%d: the GoReleaser version %s differs from the pin %s in ci.yml", docPath, line, show(got), show(want)))
+		msgs = append(msgs, fmt.Sprintf("%s:%d: the GoReleaser version %s differs from the pin %s in %s", docPath, line, show(got), show(want), ciName))
 	}
 	return msgs
 }

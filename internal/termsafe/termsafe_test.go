@@ -151,6 +151,52 @@ func TestQuoteBlankRunes(t *testing.T) {
 	}
 }
 
+// TestEscape checks Escape. Unlike Quote, it adds no quotes, and it writes a
+// newline as \x0a. Each unsafe rune is an escape, so no raw bidi or control
+// character can show in the output.
+func TestEscape(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		class string
+		name  string
+		in    string
+		want  string
+	}{
+		{class: "unchanged", name: "empty", in: "", want: ""},
+		{class: "unchanged", name: "plain ASCII", in: "my-server_1.0", want: "my-server_1.0"},
+		{class: "unchanged", name: "plain non-ASCII", in: "café プロ", want: "café プロ"},
+		{class: "unchanged", name: "quotes are not added", in: `"name"`, want: `"name"`},
+		{class: "unchanged", name: "quote inside text", in: `a"b`, want: `a"b`},
+		{class: "control", name: "newline", in: "a\nb", want: `a\x0ab`},
+		{class: "control", name: "tab", in: "a\tb", want: `a\x09b`},
+		{class: "control", name: "ESC", in: "\x1b[31m", want: `\x1b[31m`},
+		{class: "control", name: "DEL", in: "a\x7fb", want: `a\x7fb`},
+		{class: "invalid UTF-8", name: "invalid byte", in: "a\xffb", want: `a\xffb`},
+		{class: "C1", name: "NEL U+0085", in: "a\u0085b", want: `a\u0085b`},
+		{class: "bidi", name: "override U+202E", in: "a\u202eb", want: `a\u202eb`},
+		{class: "tag", name: "tag U+E0001", in: "a\U000e0001b", want: `a\U000e0001b`},
+		{class: "blank", name: "Hangul filler U+3164", in: "a\u3164z", want: `a\u3164z`},
+		{class: "mark", name: "combining acute, decomposed", in: "a\u0301", want: `a\u0301`},
+		{class: "mixed", name: "newline and ESC", in: "x\n\x1b", want: `x\x0a\x1b`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.class+"/"+tt.name, func(t *testing.T) {
+			t.Parallel()
+			got := termsafe.Escape(tt.in)
+			if got != tt.want {
+				t.Errorf("Escape(%q) = %q, want %q", tt.in, got, tt.want)
+			}
+			if strings.Contains(tt.in, `"`) != strings.Contains(got, `"`) {
+				t.Errorf("Escape(%q) = %q: a quote was added or removed", tt.in, got)
+			}
+			if !utf8.ValidString(got) {
+				t.Errorf("Escape(%q) = %q is not valid UTF-8", tt.in, got)
+			}
+		})
+	}
+}
+
 func TestQuoteCut(t *testing.T) {
 	t.Parallel()
 

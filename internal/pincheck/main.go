@@ -10,7 +10,8 @@
 //
 // Exit codes: 0 when there is no problem, 1 when there is at least one
 // problem, 2 on a usage or setup error (a bad flag, or a root that cannot be
-// opened).
+// opened). Through .github/scripts/check-tool-pins.sh (go run), every non-zero
+// exit shows as exit 1. See CONTRIBUTING.md.
 //
 // When the environment variable GITHUB_ACTIONS is exactly "true", as GitHub
 // Actions sets it, each problem is an ::error:: workflow command on stdout.
@@ -34,7 +35,6 @@ import (
 	"regexp"
 	"slices"
 	"strings"
-	"unicode/utf8"
 
 	"github.com/Ducarv/mcpmoat/internal/termsafe"
 )
@@ -46,13 +46,18 @@ const (
 	exitUsage    = 2 // a bad flag or a setup error
 )
 
+// githubDir is the .github directory, relative to the root.
+const githubDir = ".github"
+
 // workflowDir is the directory of the GitHub workflows, relative to the root.
-const workflowDir = ".github/workflows"
+const workflowDir = githubDir + "/workflows"
 
 // The files that the rules read, as slash paths relative to the root. Every
 // list of files is built from these names, so a name is written only once.
+// ciName is the base name of ciPath, for a message.
 const (
-	ciPath      = workflowDir + "/ci.yml"          // holds the reference pins
+	ciName      = "ci.yml"
+	ciPath      = workflowDir + "/" + ciName       // holds the reference pins
 	releasePath = workflowDir + "/release.yml"     // the release workflow
 	weeklyPath  = workflowDir + "/govulncheck.yml" // the weekly govulncheck run
 	docPath     = "CONTRIBUTING.md"                // names the GoReleaser version
@@ -155,7 +160,8 @@ func moreProblems(n int) string {
 func checkRoot(dir string) ([]string, error) {
 	root, err := os.OpenRoot(dir)
 	if err != nil {
-		return nil, fmt.Errorf("open the repository root: %w", err)
+		// noPath keeps the host path of the root out of the message.
+		return nil, fmt.Errorf("open the repository root: %w", noPath(err))
 	}
 	// The root is only read, so a Close error tells nothing new. The blank
 	// identifier _ drops it on purpose.
@@ -183,7 +189,8 @@ func check(fsys fs.FS) []string {
 // checkEnv returns the envProblems of every workflow in wfs, in the sorted
 // order of the paths. The rule runs on every workflow, so it does not depend
 // on which tool rule reads a file. Go visits a map in a random order, so
-// slices.Sorted(maps.Keys(wfs)) makes the output stable.
+// slices.Sorted(maps.Keys(wfs)) makes the output stable. maps.Keys returns an
+// iterator over the keys, and slices.Sorted collects them into a sorted slice.
 func checkEnv(wfs map[string]*workflow) []string {
 	var problems []string
 	for _, p := range slices.Sorted(maps.Keys(wfs)) {
@@ -318,8 +325,7 @@ func readLimited(fsys fs.FS, name string, limit int64) ([]byte, error) {
 	if err != nil {
 		return nil, fmt.Errorf("open: %w", noPath(err))
 	}
-	// The file is only read, so a Close error tells nothing new. The blank
-	// identifier _ drops it on purpose.
+	// The file is only read, so a Close error tells nothing new.
 	defer func() { _ = f.Close() }()
 	data, err := io.ReadAll(io.LimitReader(f, limit+1))
 	if err != nil {
@@ -357,9 +363,7 @@ func onlyVersion(versions []string) (version, found string) {
 	for _, v := range versions {
 		seen[v] = true
 	}
-	// maps.Keys returns an iterator over the keys, and slices.Sorted collects
-	// them into a sorted slice. A Go map has no order, so the sort makes the
-	// message stable.
+	// Go visits a map in a random order, so sort for a stable message.
 	distinct := slices.Sorted(maps.Keys(seen))
 	switch len(distinct) {
 	case 0:
@@ -418,30 +422,10 @@ func (r reporter) problem(msg string) {
 	_, _ = fmt.Fprintln(r.stderr, msgPrefix+msg)
 }
 
-// safeText returns s with each rune that is not safe to print replaced by a
-// visible escape: \xNN for an invalid UTF-8 byte or an ASCII control
-// character (such as a newline or ESC), and \uXXXX or \UXXXXXXXX for any
-// other rune for which termsafe.NeedsEscape is true (C1 controls, bidi and
-// zero-width characters). All other text stays as it is.
+// safeText returns s with each unsafe rune escaped, as termsafe.Escape does.
+// It does not use termsafe.Quote, which adds quotes and writes a newline as \n.
 func safeText(s string) string {
-	var b strings.Builder
-	for i := 0; i < len(s); {
-		r, size := utf8.DecodeRuneInString(s[i:])
-		switch {
-		case r == utf8.RuneError && size == 1:
-			_, _ = fmt.Fprintf(&b, `\x%02x`, s[i]) // a strings.Builder write never fails
-		case r < utf8.RuneSelf && termsafe.NeedsEscape(r):
-			_, _ = fmt.Fprintf(&b, `\x%02x`, r)
-		case r > 0xffff && termsafe.NeedsEscape(r):
-			_, _ = fmt.Fprintf(&b, `\U%08x`, r)
-		case termsafe.NeedsEscape(r):
-			_, _ = fmt.Fprintf(&b, `\u%04x`, r)
-		default:
-			b.WriteString(s[i : i+size])
-		}
-		i += size
-	}
-	return b.String()
+	return termsafe.Escape(s)
 }
 
 // escapeCommandData escapes s for the data part of a GitHub workflow command,

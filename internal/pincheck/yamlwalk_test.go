@@ -369,9 +369,9 @@ func TestWalkJobs(t *testing.T) {
 	t.Run("file order", func(t *testing.T) {
 		t.Parallel()
 		w := mustParse(t, testFile, "on: push\njobs:\n  zeta: {}\n  alpha:\n    runs-on: x\n  mid: {a: 1}\n")
-		jobs, err := w.jobs()
-		if err != nil {
-			t.Fatalf("jobs() error = %v", err)
+		jobs, problems := w.jobsAndProblems()
+		if len(problems) != 0 {
+			t.Fatalf("jobsAndProblems() problems = %q, want none", problems)
 		}
 		var ids []string
 		for _, j := range jobs {
@@ -390,31 +390,40 @@ func TestWalkJobs(t *testing.T) {
 	t.Run("empty jobs mapping", func(t *testing.T) {
 		t.Parallel()
 		w := mustParse(t, testFile, "jobs: {}\n")
-		jobs, err := w.jobs()
-		if err != nil || len(jobs) != 0 {
-			t.Errorf("jobs() = %v, %v, want no jobs and no error", jobs, err)
+		jobs, problems := w.jobsAndProblems()
+		if len(problems) != 0 || len(jobs) != 0 {
+			t.Errorf("jobsAndProblems() = %v, %q, want no jobs and no problem", jobs, problems)
 		}
 	})
 
+	// A bad shape gives a problem. The good jobs of the file are still returned.
 	errTests := []struct {
-		name string
-		in   string
-		want string
+		name    string
+		in      string
+		wantIDs []string // the good jobs that are still returned
+		want    string   // a fragment of the first problem
 	}{
 		{name: "jobs missing", in: "on: push\n", want: "wf.yml:1: the workflow has no jobs mapping"},
 		{name: "jobs a sequence", in: "jobs: [a]\n", want: "the value of \"jobs\" must be a mapping, found a sequence"},
 		{name: "jobs empty", in: "jobs:\n", want: "found an empty value"},
-		{name: "job a scalar", in: "jobs:\n  a: {}\n  b: text\n", want: "wf.yml:3: the job \"b\" must be a mapping, found a scalar"},
+		{name: "job a scalar", in: "jobs:\n  a: {}\n  b: text\n", wantIDs: []string{"a"}, want: "wf.yml:3: the job \"b\" must be a mapping, found a scalar"},
 		{name: "job empty", in: "jobs:\n  a:\n", want: "the job \"a\" must be a mapping, found an empty value"},
 	}
 	for _, tt := range errTests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			w := mustParse(t, testFile, tt.in)
-			jobs, err := w.jobs()
-			wantErr(t, err, tt.want)
-			if jobs != nil {
-				t.Errorf("jobs() = %v, want nil on error", jobs)
+			jobs, problems := w.jobsAndProblems()
+			if len(problems) == 0 {
+				t.Fatalf("jobsAndProblems() problems = none, want one with %q", tt.want)
+			}
+			wantErr(t, problems[0], tt.want)
+			var ids []string
+			for _, j := range jobs {
+				ids = append(ids, j.id)
+			}
+			if !reflect.DeepEqual(ids, tt.wantIDs) {
+				t.Errorf("job IDs = %q, want %q", ids, tt.wantIDs)
 			}
 		})
 	}
@@ -456,27 +465,18 @@ func TestJobsAndProblems(t *testing.T) {
 			if !reflect.DeepEqual(errs, tt.wantErrs) {
 				t.Errorf("problems = %q, want %q", errs, tt.wantErrs)
 			}
-			// jobs is the strict form: the first problem, or all the jobs.
-			strict, err := w.jobs()
-			if len(tt.wantErrs) > 0 {
-				wantErr(t, err, tt.wantErrs[0])
-				if strict != nil {
-					t.Errorf("jobs() = %v, want nil on error", strict)
-				}
-			} else if err != nil || len(strict) != len(tt.wantIDs) {
-				t.Errorf("jobs() = %v, %v, want %d jobs", strict, err, len(tt.wantIDs))
-			}
 		})
 	}
 }
 
-// onlyJob parses src and returns its only job.
+// onlyJob parses src and returns its only job. It stops the test when src has
+// a problem or does not have exactly one job.
 func onlyJob(t *testing.T, src string) (*workflow, job) {
 	t.Helper()
 	w := mustParse(t, testFile, src)
-	jobs, err := w.jobs()
-	if err != nil || len(jobs) != 1 {
-		t.Fatalf("jobs() = %v, %v, want one job", jobs, err)
+	jobs, problems := w.jobsAndProblems()
+	if len(problems) != 0 || len(jobs) != 1 {
+		t.Fatalf("jobsAndProblems() = %v, %q, want one job and no problem", jobs, problems)
 	}
 	return w, jobs[0]
 }
