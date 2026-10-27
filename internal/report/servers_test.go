@@ -375,13 +375,22 @@ func TestWriteServersWriteError(t *testing.T) {
 	}
 }
 
-// The caps of the padded columns. They repeat report.MaxShortCellRunes and the
-// unexported maxPathRunes in servers.go as literals, so a change there must
-// change these tests on purpose.
-const (
-	maxShortCellRunes = 80  // NAME, CLIENT, TRANSPORT, STATE
-	maxPathRunes      = 256 // SCOPE, SOURCE
-)
+// maxPathRunes is the cap of the SCOPE and SOURCE columns. It repeats the
+// unexported maxPathRunes in servers.go as a literal, because this external
+// test package cannot see it, so a change there must change these tests on
+// purpose. The short columns (NAME, CLIENT, TRANSPORT, STATE) use the exported
+// report.MaxShortCellRunes, whose value TestMaxShortCellRunes spells out.
+const maxPathRunes = 256
+
+// TestMaxShortCellRunes checks the value of report.MaxShortCellRunes. The other
+// tests use the constant. This one spells the number out on purpose, so a
+// change of the cap must change a test too.
+func TestMaxShortCellRunes(t *testing.T) {
+	t.Parallel()
+	if got := report.MaxShortCellRunes; got != 80 {
+		t.Errorf("MaxShortCellRunes = %d, want 80", got)
+	}
+}
 
 // firstCell returns the first cell (NAME) of line n of out, counting from 0.
 func firstCell(t *testing.T, out string, n int) string {
@@ -434,7 +443,7 @@ func TestWriteServersPaddingAmplification(t *testing.T) {
 	if !strings.HasSuffix(cell, termsafe.CutMarker) {
 		t.Errorf("long name cell does not end with the cut marker: %q", cell)
 	}
-	if n, want := utf8.RuneCountInString(cell), maxShortCellRunes+len(termsafe.CutMarker); n != want {
+	if n, want := utf8.RuneCountInString(cell), report.MaxShortCellRunes+len(termsafe.CutMarker); n != want {
 		t.Errorf("long name cell has %d runes, want %d", n, want)
 	}
 	// The long source path is cut at the path cap and ends with the marker.
@@ -491,7 +500,7 @@ func TestWriteServersCellCap(t *testing.T) {
 		// so set returns the prefix that the cell shows before v.
 		set func(s *discover.Server, v string) (prefix string)
 	}{
-		{name: "NAME", limit: maxShortCellRunes, set: func(s *discover.Server, v string) string { s.Name = v; return "" }},
+		{name: "NAME", limit: report.MaxShortCellRunes, set: func(s *discover.Server, v string) string { s.Name = v; return "" }},
 		{name: "SOURCE", limit: maxPathRunes, set: func(s *discover.Server, v string) string { s.Source = v; return "" }},
 		{name: "SCOPE", limit: maxPathRunes, set: func(s *discover.Server, v string) string {
 			s.Scope = discover.ScopeProject
@@ -541,8 +550,8 @@ func TestWriteServersPathColumnsKeepRealPaths(t *testing.T) {
 
 	// A deep path of 150 runes is longer than the NAME cap and must show whole.
 	path := "/Users/someone/" + strings.Repeat("deep/", 27) + "mcp.json"
-	if n := len(path); n <= maxShortCellRunes || n >= maxPathRunes {
-		t.Fatalf("test path has %d runes, want between %d and %d", n, maxShortCellRunes, maxPathRunes)
+	if n := len(path); n <= report.MaxShortCellRunes || n >= maxPathRunes {
+		t.Fatalf("test path has %d runes, want between %d and %d", n, report.MaxShortCellRunes, maxPathRunes)
 	}
 	s := oneServer("srv")
 	s.Source = path
@@ -658,19 +667,19 @@ func TestWriteServersSpaceIsQuoted(t *testing.T) {
 		{
 			name: "long name with spaces is cut, then quoted",
 			set:  func(s *discover.Server) { s.Name = long },
-			want: strconv.Quote(long[:maxShortCellRunes]) + marker + "   ",
+			want: strconv.Quote(long[:report.MaxShortCellRunes]) + marker + "   ",
 		},
 		{
 			// The part after the cut is not shown, so its space does not make
 			// the cell quoted.
 			name: "space after the cut",
-			set:  func(s *discover.Server) { s.Name = strings.Repeat("n", maxShortCellRunes) + " x" },
-			want: strings.Repeat("n", maxShortCellRunes) + marker + "   ",
+			set:  func(s *discover.Server) { s.Name = strings.Repeat("n", report.MaxShortCellRunes) + " x" },
+			want: strings.Repeat("n", report.MaxShortCellRunes) + marker + "   ",
 		},
 		{
 			name: "long name that ends with the marker text",
-			set:  func(s *discover.Server) { s.Name = "a b..." + strings.Repeat("c", maxShortCellRunes) },
-			want: strconv.Quote("a b..."+strings.Repeat("c", maxShortCellRunes-len("a b..."))) + marker + "   ",
+			set:  func(s *discover.Server) { s.Name = "a b..." + strings.Repeat("c", report.MaxShortCellRunes) },
+			want: strconv.Quote("a b..."+strings.Repeat("c", report.MaxShortCellRunes-len("a b..."))) + marker + "   ",
 		},
 		{
 			name: "project path with a space",

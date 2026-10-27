@@ -244,9 +244,9 @@ func TestWriteSummaryLongTextIsCut(t *testing.T) {
 		limit int
 		set   func(s *report.ServerStatus, v string)
 	}{
-		{"name", maxShortCellRunes, func(s *report.ServerStatus, v string) { s.Name = v }},
-		{"client", maxShortCellRunes, func(s *report.ServerStatus, v string) { s.Client = discover.Client(v) }},
-		{"status", maxShortCellRunes, func(s *report.ServerStatus, v string) { s.Status = v }},
+		{"name", report.MaxShortCellRunes, func(s *report.ServerStatus, v string) { s.Name = v }},
+		{"client", report.MaxShortCellRunes, func(s *report.ServerStatus, v string) { s.Client = discover.Client(v) }},
+		{"status", report.MaxShortCellRunes, func(s *report.ServerStatus, v string) { s.Status = v }},
 		{"reason", maxReasonRunes, func(s *report.ServerStatus, v string) { s.Status, s.Reason = report.StatusFailed, v }},
 		{"header key", maxSummaryNameRunes, func(s *report.ServerStatus, v string) {
 			s.Warnings = []inspect.Warning{{Kind: inspect.WarnCleartextSecrets, HeaderKeys: []string{v}}}
