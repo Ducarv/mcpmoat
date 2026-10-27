@@ -32,7 +32,7 @@ jobs:
 
       - name: Check for known vulnerabilities
         env:
-          # Dependabot does not bump this version string. The tool-pins
+          # Dependabot does not bump this version string. The ci-scripts
           # job in ci.yml checks that ci.yml and release.yml pin the same
           # version.
           GOVULNCHECK_VERSION: v1.9.0
@@ -44,7 +44,9 @@ jobs:
   # contents: read and gets no write permission. It needs no checkout.
   notify-failure:
     needs: govulncheck
-    if: failure()
+    # A scan that hits its timeout may end as cancelled, not failure. Both
+    # count as a failed check.
+    if: failure() || needs.govulncheck.result == 'cancelled'
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:
@@ -63,7 +65,7 @@ jobs:
           run_url="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
           # A list call, not a search, so a new issue shows at once.
           number=$(gh issue list -R "$GITHUB_REPOSITORY" --label security --state open --limit 200 --json number,title |
-            jq -r --arg t "$title" '.[] | select(.title == $t) | .number' | head -n 1)
+            jq -r --arg t "$title" 'first(.[] | select(.title == $t) | .number) // empty')
           if [ -z "$number" ]; then
             gh issue create -R "$GITHUB_REPOSITORY" --title "$title" --label security \
               --body "The weekly vulnerability check failed. Open the run to read the failure: $run_url. This job does not report a disabled schedule."

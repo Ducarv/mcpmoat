@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Tests the notify-failure job of govulncheck.yml with a fake gh. The tool-pins
+# Tests the notify-failure job of govulncheck.yml with a fake gh. The ci-scripts
 # job in ci.yml runs it. Maintainers can also run it on their machine, from any
 # directory: see CONTRIBUTING.md, Checks. It needs bash, awk and jq. It needs
 # no network and no token.
@@ -238,7 +238,7 @@ no_checkout() { ! grep -q 'actions/checkout' "$tmp/job.txt"; }
 no_contents() { ! job_section permissions | grep -q 'contents:'; }
 
 check_text "lacks 'needs: govulncheck'" grep -Eq '^    needs: govulncheck *$' "$tmp/job.txt"
-check_text "lacks 'if: failure()'" grep -Eq '^    if: failure\(\) *$' "$tmp/job.txt"
+check_text "lacks the if: line for a failed or cancelled scan" grep -Eq "^    if: failure\(\) \|\| needs\.govulncheck\.result == 'cancelled' *$" "$tmp/job.txt"
 check_text "lacks 'issues: write' under permissions" can_write_issues
 check_text "has a contents permission" no_contents
 check_text "has a checkout step" no_checkout
