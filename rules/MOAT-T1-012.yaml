@@ -26,7 +26,7 @@ match:
     - '(?i)\bclaude_desktop_config\.json\b'
     - '(?i)\bgcloud[/\\](?:credentials|application_default_credentials)\b'
 risk: The tool input schema names a sensitive local file, such as an SSH key, cloud credentials or a .env file, so the model may read the file and send its secrets to the server.
-remediation: Read every key and value of the input schema to see which file it names and why. If the tool does not need that file for its job, remove the server or do not use it, and report the server to its author. If the tool needs that file, such as the key path of an SSH tool, ignore this rule for that tool only. Add the line MOAT-T1-012 server/tool to .mcpmoat-ignore, using the exact server and tool names. Do not use --ignore, because it hides the rule on every server.
+remediation: Read every key and value of the input schema to see which file it names and why. If the tool does not need that file for its job, remove the server or do not use it, and report the server to its author. If the tool needs that file, such as the key path of an SSH tool, ignore this rule for that tool only. Add the line MOAT-T1-012 server/tool to .mcpmoat-ignore, using the exact server and tool names, and run scan with --use-ignore-file. Do not use --ignore, because it hides the rule on every server.
 references:
   - https://invariantlabs.ai/blog/mcp-security-notification-tool-poisoning-attacks
   - https://owasp.org/www-project-mcp-top-10/

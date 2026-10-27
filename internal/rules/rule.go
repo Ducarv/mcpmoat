@@ -86,6 +86,14 @@ const RuleAnalysisBudget = "MOAT-T1-023"
 // NewSet refuses an external rule with this ID (see ReservedRuleID).
 const RuleToolFindingCap = "MOAT-T1-024"
 
+// RuleConfigFindingCap is a native rule ID with no YAML file in rules/.
+// mcpmoat scan reports it as one summary finding for a server when the cap
+// cuts the config findings of that server. The cap is 100 config findings per
+// server and 10,000 per scan. The ID passes ValidRuleID. It is reserved:
+// NewSet refuses an external rule with this ID (see ReservedRuleID).
+// .mcpmoat-ignore cannot drop this finding. Only --ignore can drop it.
+const RuleConfigFindingCap = "MOAT-T4-005"
+
 // Match is the `match:` block of a rule. Parse checks only its shape, and
 // Compile checks the rest: exactly one kind is set (AnyRegex, AllRegex,
 // Keywords or Heuristic), and Params is only for Heuristic, with integer

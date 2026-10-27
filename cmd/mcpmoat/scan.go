@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"io"
 	"maps"
+	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"time"
@@ -63,7 +65,7 @@ func (c *cli) runScan(opts options, args []string) int {
 	// The context ends when the process gets SIGINT, SIGTERM or SIGHUP (see
 	// main). scan starts stdio servers in their own session, so the terminal
 	// does not reach them: only this context stops them.
-	return c.scanConfigs(c.ctxOrBackground(), a.configPath, a.ignoreIDs, setup)
+	return c.scanConfigs(c.ctxOrBackground(), a.configPath, a.ignoreIDs, a.useIgnoreFile, setup)
 }
 
 // scanArgs holds the checked flags of "scan".
@@ -71,6 +73,11 @@ type scanArgs struct {
 	noConnect bool // --no-connect: static analysis only
 	noColor   bool // --no-color after "scan"
 	jsonOut   bool // --json
+	// useIgnoreFile is true with --use-ignore-file. Only then does scan read
+	// .mcpmoat-ignore from the working directory. The working directory can
+	// be a cloned repository or a pull request checkout, so the file is
+	// untrusted, and it can hide findings and change the exit code.
+	useIgnoreFile bool
 	// configPath is the --config value, or empty for auto-discovery.
 	configPath string
 	// rulesDir is the --rules folder, or empty.
@@ -97,6 +104,9 @@ func (c *cli) parseScanArgs(args []string) (a scanArgs, code int, ok bool) {
 	fs.BoolVar(&a.noConnect, "no-connect", false, "")
 	fs.BoolVar(&a.noColor, "no-color", false, "")
 	fs.BoolVar(&a.jsonOut, "json", false, "")
+	// The flag package prints no usage text here (see above), so this text
+	// is only for a reader of the code. scanUsage holds the help line.
+	fs.BoolVar(&a.useIgnoreFile, "use-ignore-file", false, "read .mcpmoat-ignore from the working directory")
 	timeout := fs.Duration("timeout", inspect.DefaultTimeout, "")
 	concurrency := fs.Int("concurrency", inspect.DefaultConcurrency, "")
 
@@ -202,22 +212,26 @@ func (c *cli) buildScanSetup(opts options, a scanArgs, loaded loadedRules, class
 	// --no-color (after "scan") is read here, so both positions work.
 	style := report.Style{Color: !opts.noColor && !a.noColor && c.stdoutIsTTY}
 	return scanSetup{
-		checks:      configChecks{set: loaded.set, typo: typo},
-		analyzer:    loaded.analyzer,
-		toolBudget:  c.toolBudgetOrDefault(),
-		maxToolRows: c.maxToolRowsOrDefault(),
-		connect:     connect,
-		style:       style,
-		failOn:      a.failOn,
-		jsonOut:     a.jsonOut,
-		classifier:  classifier,
+		// A zero perServer gives configRowsPerServer, and the zero total
+		// gives configRowsTotal (see configCaps.orDefault).
+		checks:         configChecks{set: loaded.set, typo: typo, caps: configCaps{perServer: c.maxConfigRows}},
+		analyzer:       loaded.analyzer,
+		toolBudget:     c.toolBudgetOrDefault(),
+		toolStepBudget: c.toolStepBudgetOrDefault(),
+		maxToolRows:    c.maxToolRowsOrDefault(),
+		connect:        connect,
+		style:          style,
+		failOn:         a.failOn,
+		jsonOut:        a.jsonOut,
+		classifier:     classifier,
 	}, true
 }
 
 // scanSetup holds what scan has built before it reads the config files.
 type scanSetup struct {
-	// checks are the config rules (T4 and T5). Its rule set also gives the
-	// severity and the texts of the tool rule findings (see toolRulesStep).
+	// checks are the config rules (T4 and T5) and the caps of their rows. Its
+	// rule set also gives the severity and the texts of the tool rule
+	// findings (see toolRulesStep).
 	checks configChecks
 	// analyzer applies the description and schema rules (T1 and T3) to the
 	// tools of the inspected servers (see toolRulesStep).
@@ -225,6 +239,10 @@ type scanSetup struct {
 	// toolBudget is the time that the tool rule step can use for the tools
 	// of one server (toolRulesBudget in a real scan).
 	toolBudget time.Duration
+	// toolStepBudget is the time limit of the whole tool rule step, for all
+	// the servers together (toolRulesStepBudget in a real scan). Each server
+	// gets a share of it, up to toolBudget (see serverShare).
+	toolStepBudget time.Duration
 	// maxToolRows is the largest number of tool rows that the tool rule step
 	// keeps for one server (maxToolRowsPerServer in a real scan).
 	maxToolRows int
@@ -252,6 +270,16 @@ func (c *cli) toolBudgetOrDefault() time.Duration {
 		return toolRulesBudget
 	}
 	return c.toolBudget
+}
+
+// toolStepBudgetOrDefault returns c.toolStepBudget, or toolRulesStepBudget
+// when the field is zero (a real scan). Like toolBudget, a negative value is
+// kept: the step limit is then used up at once.
+func (c *cli) toolStepBudgetOrDefault() time.Duration {
+	if c.toolStepBudget == 0 {
+		return toolRulesStepBudget
+	}
+	return c.toolStepBudget
 }
 
 // maxToolRowsOrDefault returns c.maxToolRows, or maxToolRowsPerServer when the
@@ -383,19 +411,23 @@ func isFlagOf(fs *flag.FlagSet, value string) bool {
 
 // scanConfigs loads the config files (see loadConfigs), builds the ignore
 // list and runs the scan (see reportScan). configPath is the --config value, or
-// empty for auto-discovery.
+// empty for auto-discovery. useIgnoreFile is the --use-ignore-file flag.
 //
-// The working directory is where .mcpmoat-ignore is. With --config, an unknown
-// working directory is a warning, and scan reads no ignore file.
-func (c *cli) scanConfigs(ctx context.Context, configPath string, ignoreIDs []string, setup scanSetup) int {
+// The working directory is where .mcpmoat-ignore is. scan reads the file only
+// with --use-ignore-file. Then an unknown working directory is a warning, and
+// scan reads no ignore file. Without the flag, scan never opens the file: it
+// only prints a note when the file is there (see noteIgnoreFile).
+func (c *cli) scanConfigs(ctx context.Context, configPath string, ignoreIDs []string, useIgnoreFile bool, setup scanSetup) int {
 	res, wd, ok := c.loadConfigs(ctx, "scan", configPath)
 	if !ok {
 		return exitError
 	}
-	if wd == "" {
+	if !useIgnoreFile {
+		c.noteIgnoreFile(wd)
+	} else if wd == "" {
 		c.scanWarnf("cannot read the working directory; %s is not read", rules.IgnoreFileName)
 	}
-	ignore := c.loadIgnore(wd, ignoreIDs)
+	ignore := c.loadIgnore(wd, ignoreIDs, useIgnoreFile)
 
 	// A file that failed to load and gave no servers is a plain error. The
 	// "No MCP servers found." line would be wrong and misleading here, so we
@@ -412,14 +444,39 @@ func (c *cli) scanWarnf(format string, a ...any) {
 	c.warnf("scan", format, a...)
 }
 
+// ignoreFileNote is the line that noteIgnoreFile prints on stderr when
+// .mcpmoat-ignore is in the working directory but --use-ignore-file is not
+// given. It is fixed text: it holds no path and no file content.
+const ignoreFileNote = "mcpmoat scan: note: .mcpmoat-ignore is not read; add --use-ignore-file to apply it"
+
+// noteIgnoreFile prints ignoreFileNote on stderr when the working directory wd
+// has an entry named .mcpmoat-ignore of any type. It runs only without
+// --use-ignore-file. It uses os.Lstat, so it never opens or reads the file
+// and never follows a symlink. An empty wd (the working directory is not
+// known) or any Lstat error gives no line: the file is not read anyway.
+func (c *cli) noteIgnoreFile(wd string) {
+	if wd == "" {
+		return
+	}
+	if _, err := os.Lstat(filepath.Join(wd, rules.IgnoreFileName)); err != nil {
+		return
+	}
+	fprintf(c.stderr, "%s\n", ignoreFileNote)
+}
+
 // loadIgnore builds the ignore lists (see scanIgnores). The list for the
-// config rules holds the entries of .mcpmoat-ignore in the directory wd, then
-// one entry for each --ignore ID in ids. The list for the pin rules, the LLM
-// rules, the budget rule (MOAT-T1-023) and the tool findings cap rule
-// (MOAT-T1-024) holds only the --ignore entries, because the file is untrusted
-// (see scanIgnores). ids holds only valid rule IDs: the --ignore flag checks
-// them. An empty wd means that the working directory is not known, so
-// loadIgnore reads no file.
+// config rules holds the entries of .mcpmoat-ignore in the directory wd (only
+// when useIgnoreFile is true, see below), then one entry for each --ignore ID
+// in ids. The list for the pin rules, the LLM rules, the budget rule
+// (MOAT-T1-023), the tool findings cap rule (MOAT-T1-024) and the config
+// findings cap rule (MOAT-T4-005) holds only the --ignore entries, because the
+// file is untrusted (see scanIgnores). ids holds only valid rule IDs: the
+// --ignore flag checks them.
+//
+// useIgnoreFile is the --use-ignore-file flag. When it is false, loadIgnore
+// never opens or reads the file, and the lists hold only the --ignore entries.
+// An empty wd means that the working directory is not known, so loadIgnore
+// reads no file either.
 //
 // Every problem with the file is a warning on stderr, not an error: the scan
 // goes on. A file that loadIgnore cannot read gives no entries. The warnings
@@ -429,13 +486,14 @@ func (c *cli) scanWarnf(format string, a ...any) {
 // findings. The --ignore IDs come from the user, so they give no notice.
 //
 // An entry of the file for a pin rule (MOAT-T2-*), an LLM rule
-// (MOAT-LLM-001 or MOAT-LLM-002), the budget rule (MOAT-T1-023) or the tool
-// findings cap rule (MOAT-T1-024) is not applied (see fileCannotIgnore): scan
-// warns when such an entry matches a finding (see pinOutcomes, toolRulesStep
-// and llmStep).
-func (c *cli) loadIgnore(wd string, ids []string) *scanIgnores {
+// (MOAT-LLM-001 or MOAT-LLM-002), the budget rule (MOAT-T1-023), the tool
+// findings cap rule (MOAT-T1-024) or the config findings cap rule
+// (MOAT-T4-005) is not applied (see fileCannotIgnore): scan warns when such
+// an entry matches a finding (see configChecks.findings, pinOutcomes,
+// toolRulesStep and llmStep).
+func (c *cli) loadIgnore(wd string, ids []string, useIgnoreFile bool) *scanIgnores {
 	var ign scanIgnores
-	if wd != "" {
+	if useIgnoreFile && wd != "" {
 		fromFile, warnings, err := rules.ReadIgnoreFile(wd)
 		if err != nil {
 			// The error text already starts with "read ignore file <path>",
@@ -536,7 +594,7 @@ type scanStepsResult struct {
 }
 
 // runScanSteps runs the steps of a scan on the servers of res: the config
-// rules, then, when setup.connect is not nil, the pin step (see inspectAndPin),
+// rules (see configStep), then, when setup.connect is not nil, the pin step (see inspectAndPin),
 // the tool rule step (see toolRulesStep) and the LLM step (see llmStep). It
 // merges their rows, ignored counts and per-server counts. When ok is false, the
 // scan must exit with 2 and print no report: the user stopped the scan, or the
@@ -545,7 +603,7 @@ func (c *cli) runScanSteps(ctx context.Context, res discover.Result, setup scanS
 	// counts holds the findings of each server for the summary. It starts
 	// with the config findings, and the tool rule step and the LLM step add
 	// their own.
-	rows, ignored, counts := setup.checks.findings(&ignore.all, res.Servers)
+	rows, ignored, counts := c.configStep(setup.checks, ignore, res.Servers)
 
 	var pr pinReport
 	var pinFailed bool
@@ -598,6 +656,41 @@ func (c *cli) runScanSteps(ctx context.Context, res discover.Result, setup scanS
 	}, true
 }
 
+// configStep runs the config rules (T4 and T5) on the servers, with the ignore
+// lists and the row caps of checks (see configChecks.findings). findings
+// prints nothing, so configStep prints the warnings of the step on stderr: one
+// for each rule ID that .mcpmoat-ignore cannot ignore (see
+// warnFileCannotIgnore), then one line when a cap cut the rows of one or more
+// servers (see configCapWarningText). That line prints even when --ignore
+// drops the cap rows. The lines hold rule IDs and counts only: no server
+// name, key or config text.
+//
+// counts holds the number of config rows of each server, by the index of the
+// server in servers.
+func (c *cli) configStep(checks configChecks, ignore *scanIgnores, servers []discover.Server) (rows []report.FindingRow, ignored map[string]int, counts []int) {
+	rows, ignored, counts, fileBlocked, cutServers := checks.findings(ignore, servers)
+	for _, id := range fileBlocked {
+		c.warnFileCannotIgnore(id)
+	}
+	// cutServers counts the servers that lost rows, also when --ignore
+	// dropped their cap rows. The report is not complete in both cases, so
+	// the warning prints in both cases, like the warning of the tool step.
+	if cutServers > 0 {
+		c.scanWarnf("%s", configCapWarningText(cutServers))
+	}
+	return rows, ignored, counts
+}
+
+// configCapWarningText returns the text of the warning for the servers that
+// lost config rows to a cap, for example "config findings were left out for
+// 2 servers; see MOAT-T4-005". It holds the count and fixed words only: no
+// server name. The text points to the rule ID and does not say that each
+// server has a MOAT-T4-005 finding, because --ignore can drop those rows.
+func configCapWarningText(servers int) string {
+	return fmt.Sprintf("config findings were left out for %d %s; see %s",
+		servers, plural(servers, "server", "servers"), rules.RuleConfigFindingCap)
+}
+
 // runToolAndLLMSteps runs the tool rule step (see toolRulesStep) and then the
 // LLM step (see llmStep) on the tools of the servers that scan inspected. With
 // --no-connect, or with no server, there are no outcomes, so both steps check
@@ -624,8 +717,9 @@ func (c *cli) runToolAndLLMSteps(ctx context.Context, setup scanSetup, outcomes 
 // writeScanOutput writes the report on c.stdout: the JSON document with --json,
 // or the terminal report (see writeScanReport). It returns the first write
 // error. fileEntries is the number of entries that scan read from
-// .mcpmoat-ignore: the JSON report holds it. configPath is the --config value,
-// or empty. configProblem is true when a config file has a problem.
+// .mcpmoat-ignore (0 without --use-ignore-file): the JSON report holds it.
+// configPath is the --config value, or empty. configProblem is true when a
+// config file has a problem.
 func (c *cli) writeScanOutput(res discover.Result, steps scanStepsResult, setup scanSetup, fileEntries int, configPath string, configProblem bool) error {
 	if setup.jsonOut {
 		mode := report.ModeNoConnect

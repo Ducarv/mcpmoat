@@ -13,8 +13,10 @@ import (
 	"github.com/Ducarv/mcpmoat/internal/safefile"
 )
 
-// IgnoreFileName is the name of the ignore file that mcpmoat reads from the
-// working directory (FR-10).
+// IgnoreFileName is the name of the ignore file (FR-10). mcpmoat scan reads it
+// from the working directory only with the flag --use-ignore-file. Without the
+// flag, scan does not read it. The opt-in is there because the working
+// directory can be an untrusted checkout.
 //
 // The file is untrusted: a cloned repository can ship one. So ParseIgnore
 // never fails, caps what it keeps, and its warnings never echo file content.
@@ -356,8 +358,8 @@ func moreMalformedLines(n int) string {
 }
 
 // ReadIgnoreFile reads and parses the file IgnoreFileName in the directory
-// dir (normally the working directory). See ParseIgnore for the format and
-// the warnings.
+// dir (normally the working directory). mcpmoat scan calls it only with the
+// flag --use-ignore-file. See ParseIgnore for the format and the warnings.
 //
 // When the file or dir does not exist, or dir or a parent in the path is not a
 // directory, ReadIgnoreFile returns an empty list, nil warnings and a nil

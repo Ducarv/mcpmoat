@@ -44,17 +44,32 @@ MEDIUM (1)
   a `Tool:` line in place of `Where:`: the tool name, then `(description)` or `(schema)`, the part
   of the tool that matched. A tool name longer than 80 characters (runes) is cut to 80 and ends
   with `...`. The finding never shows the tool text or the pattern.
-- **Time budget:** a server that uses up its rule time budget keeps the findings found so far, and
-  gets one `MOAT-T1-023` finding with a `Reason:` line in place of `Tool:`. `scan` also prints one
-  warning on stderr. Its severity and exit code are in [Exit codes](exit-codes.md).
+- **Time budget:** the rule analysis has a time limit of 30 seconds for all servers together. Each
+  server gets a fair share of the time that is left, but never more than 5 seconds. A server that
+  uses up its share keeps the findings found so far, and gets one `MOAT-T1-023` finding with a
+  `Reason:` line in place of `Tool:`. `scan` also prints one warning on stderr for that server,
+  with the share that it got. A server that `scan` reaches after the 30 seconds is not analysed:
+  it gets the same finding for all its tools. For these servers `scan` prints one line on stderr
+  for all of them, for example `mcpmoat scan: warning: the 30s time limit of the rule analysis
+  ended; 3 servers were not checked`. Its severity and exit code are in
+  [Exit codes](exit-codes.md).
 - **Finding cap:** a server with more than 1000 tool findings gets one `MOAT-T1-024` summary
   finding. `scan` lists the 1000 most severe findings (the ones of the first tools among findings of
   the same severity) and counts the rest. The scan stays complete, and the
   exit code follows `--fail-on`. The severity is the highest severity among the applied rules and
   never lower than high, so the finding fails closed. Only `--ignore` drops it. A `.mcpmoat-ignore`
   file cannot.
-- **Counts:** the tool rule findings, `MOAT-T1-023` and `MOAT-T1-024` count in the findings of
-  their server in the summary.
+- **Config finding cap:** `scan` lists at most 100 config findings (`MOAT-T4-*` and `MOAT-T5-*`)
+  for each server and 10,000 for the whole scan. The limits count the findings after the ignore
+  list. `scan` keeps the most severe findings, first for each server and then across the whole
+  scan, so many weak findings cannot push a severe one out. A server that loses findings gets one
+  `MOAT-T4-005` summary finding. Its `Where:` line holds the text `N more config findings are not
+  listed; limit M`. M is 100, or 10000 when the limit of the whole scan cut the findings of that
+  server. `scan` also prints one line on stderr, for example `mcpmoat scan: warning: config
+  findings were left out for 2 servers; see MOAT-T4-005`. Only `--ignore` drops the finding. A
+  `.mcpmoat-ignore` file cannot. See [Limits](limits.md).
+- **Counts:** the tool rule findings, `MOAT-T1-023`, `MOAT-T1-024` and `MOAT-T4-005` count in the
+  findings of their server in the summary.
 
 A short sample of these two kinds of finding:
 
@@ -95,7 +110,9 @@ mcpmoat scan --json | jq -r '.findings[] | "\(.rule_id) \(.server)"'
   text. If `scan` makes no report (for example, `--config` cannot be loaded), stdout is empty.
 - **stderr** gets the warnings, the notices and the errors. They are the same as in a run without
   `--json`, plus the lines that the summary shows without `--json`: a server that was not
-  inspected, and the warnings of an inspection.
+  inspected, and the warnings of an inspection. They include the note
+  `mcpmoat scan: note: .mcpmoat-ignore is not read; add --use-ignore-file to apply it` (see
+  [Ignore findings](ignore.md)) and the warnings of the time limit and the caps above.
 - **Exit codes** do not change: 0, 1 or 2 (see [Exit codes](exit-codes.md)).
 - **`complete`** is `false` when the report can miss results, for example when a config file has a
   problem, `pins.json` cannot be read, or the LLM step of a `--llm` scan did not classify every
@@ -106,15 +123,21 @@ mcpmoat scan --json | jq -r '.findings[] | "\(.rule_id) \(.server)"'
   is a `MOAT-LLM-002` finding (or `MOAT-LLM-001` when its text was cut or had a configured value removed).
   `complete` can be `true` with exit code 2 when the save of new pins fails after the report, so
   always check the exit code too. A failed write to stdout (for example a closed pipe) can leave
-  only the first part of the document. It is not valid JSON, and the exit code is 2. A server that
-  uses up its rule time budget does not make `complete` `false`: the `MOAT-T1-023` finding tells you
-  about it.
+  only the first part of the document. It is not valid JSON, and the exit code is 2.
+- **`complete` stays `true` when the rule analysis stops at its time limit.** The `MOAT-T1-023`
+  finding of each server that was cut or not analysed is the marker for an incomplete rule
+  analysis. `complete` `false` would force exit code 2, and then a hostile server or rule could
+  turn a finding into an execution error, against the meaning of the exit codes (FR-16). So a CI
+  job must check the findings for the rule ID `MOAT-T1-023`, not only `complete`. The same holds
+  for the caps: `MOAT-T1-024` and `MOAT-T4-005` mark a list that was cut, and `complete` stays
+  `true`.
 - **`ignored`** is a required field. It holds `total` (the number of findings that an ignore entry
   dropped, the same number as in the stderr line `N findings ignored: ...`), `rules` (the rule ID
   and the count of dropped findings for each rule, `{}` when none) and `file_entries` (the number of
   `.mcpmoat-ignore` entries that `scan` read, the same number as in the stderr line
-  `using N entries`; some of them may not apply to any finding). It holds rule IDs only, never text
-  of the ignore file.
+  `using N entries`; some of them may not apply to any finding). `file_entries` is 0 without
+  `--use-ignore-file`, because `scan` then does not read the file. It holds rule IDs only, never
+  text of the ignore file.
 - **`accept`** is an optional field of a server. A pinned server that has a `To accept` hint in the
   terminal has `accept` with `digest` (`pd1:` and 64 hex characters, the same digest as in the
   terminal hint) and, only when the terminal hint prints a command, `command`. It never holds the
@@ -124,13 +147,14 @@ mcpmoat scan --json | jq -r '.findings[] | "\(.rule_id) \(.server)"'
 - **`fields_truncated`** is a required boolean. It is `true` when at least one text field was cut at
   its length cap. `scan` cuts names to 512 characters and paths to 4096 characters, and each cut
   ends with `...`. It never cuts diffs, commands, URLs or argv.
-- **The size has limits, but the whole document is not bounded:** the field caps and the cap of 1000
-  tool findings for each server bound the rows and the text of the tool findings. A server with more
-  tool findings gets one `MOAT-T1-024` finding, with `"field": "tool"` and an empty `key` like
-  `MOAT-T1-023`. The config findings, the pin findings and the LLM findings are not part of that
-  cap. The number of config findings is limited only by the size of the config file, so a hostile
-  config can give a very large document. See [Limits](limits.md) for the bounds of each kind of
-  finding, and [Size bound](ARCHITECTURE.md#size-bound) for the tests.
+- **The size has limits:** the field caps and the cap of 1000 tool findings for each server bound
+  the rows and the text of the tool findings. A server with more tool findings gets one
+  `MOAT-T1-024` finding, with `"field": "tool"` and an empty `key` like `MOAT-T1-023`. The config
+  findings have their own caps: 100 for each server and 10,000 for the whole scan, plus one
+  `MOAT-T4-005` finding for each server that lost findings. That finding has an empty `field` and
+  `key`, and the text `N more config findings are not listed; limit M` in `related`. The pin
+  findings and the LLM findings have other bounds. See [Limits](limits.md) for the bounds of each
+  kind of finding, and [Size bound](ARCHITECTURE.md#size-bound) for the tests.
 - A tool rule finding has `"field": "tool"`, the tool name in `key`, and `description` or `schema`
   in `related`. An LLM finding (`MOAT-LLM-001`, `MOAT-LLM-002`) also has `"field": "tool"` and
   the tool name in `key`. In a tool rule finding and in an LLM finding, a tool name longer than

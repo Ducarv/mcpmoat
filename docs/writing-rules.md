@@ -351,8 +351,9 @@ What `scan` does with the rules from `--rules`:
 
 - A rule with `target: description` or `target: schema` runs on the tools of each server when
   `scan` connects to the servers, like a built-in rule. Its findings have the severity of the rule,
-  and `--ignore` and `.mcpmoat-ignore` drop them like other rule findings. With `--no-connect`,
-  `scan` gets no tools, so these rules do not run, and `scan` prints a note on stderr.
+  and `--ignore` and `.mcpmoat-ignore` (with `--use-ignore-file`) drop them like other rule
+  findings. With `--no-connect`, `scan` gets no tools, so these rules do not run, and `scan` prints
+  a note on stderr.
 - A rule with `target: config` is loaded and checked, but `scan` does not apply it. `scan` runs only
   its built-in config checks, and prints this note on stderr:
   `mcpmoat scan: rules from --rules with target config are not applied; scan applies only the built-in config checks`.

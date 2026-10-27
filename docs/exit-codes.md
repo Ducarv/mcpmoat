@@ -13,7 +13,9 @@ here.
   is `high`. Only these exact lowercase words work. Another value, an empty value or a second
   `--fail-on` is a usage error (exit code 2). It is a `scan` flag only. `pin` never exits with
   code 1.
-- Ignored findings (`.mcpmoat-ignore` or `--ignore`) never give exit code 1.
+- Ignored findings (`--ignore`, or `.mcpmoat-ignore` with `--use-ignore-file`) never give exit
+  code 1. Without `--use-ignore-file`, `scan` does not read the file, so it drops nothing (see
+  [Ignore findings](ignore.md)).
 - With `--llm`, the LLM findings (`MOAT-LLM-001`, `MOAT-LLM-002`) count like any other finding.
   They are `high` at most.
 - mcpmoat fails closed. A finding with a severity that mcpmoat does not know always counts, at
@@ -27,20 +29,32 @@ here.
 - An unpinned server that fails or times out is a warning only (in the summary, or on stderr with
   `--json`). It does not change the exit code. A pinned server that fails or times out is a high
   `MOAT-T2-004` finding.
-- A server whose rule analysis uses up its time budget (5 seconds for each server) is a
-  `MOAT-T1-023` finding. Its severity is the highest severity of the description and schema rules
-  that `scan` applies, but never lower than high. So it is high with the built-in rules, and
-  critical when a description or schema rule from `--rules` is critical (see the
-  `--fail-on critical` item above). It is not an execution error: it gives exit code 1 with the
-  default `--fail-on`, and the JSON `complete` stays `true`. `scan` also prints a warning on
-  stderr, and the other servers still get their own budget.
+- The rule analysis has a time limit of 30 seconds for all servers together. Each server gets a
+  fair share of the time that is left, but never more than 5 seconds. A server that uses up its
+  share is a `MOAT-T1-023` finding. A server that `scan` reaches after the 30 seconds is not
+  analysed, and it gets the same finding for all its tools. Its severity is the highest severity
+  of the description and schema rules that `scan` applies, but never lower than high. So it is
+  high with the built-in rules, and critical when a description or schema rule from `--rules` is
+  critical (see the `--fail-on critical` item above). It is not an execution error: it gives exit
+  code 1 with the default `--fail-on`, and the JSON `complete` stays `true`. Only a signal (see
+  below) stops the scan with exit code 2; the end of the time limit does not. `scan` also prints a
+  warning on stderr (see [Scan output](scan-output.md)). A `.mcpmoat-ignore` file cannot drop the
+  finding. Only `--ignore MOAT-T1-023` can.
 - `scan` lists at most 1000 tool rule findings for each server, the most severe ones. It counts the
   rest and adds one `MOAT-T1-024` finding that says how many it left out ("N more tool findings are
   not listed; limit M"). Its severity is the highest severity of the description and schema rules that `scan`
   applies, but never lower than high, as for `MOAT-T1-023`. It is not an execution error: it gives
   exit code 1 with the default `--fail-on`, and the JSON `complete` stays `true`. The exit code
-  follows `--fail-on` like for any other finding. A `.mcpmoat-ignore` file cannot drop it, because
-  it can come from a cloned repository. Only `--ignore MOAT-T1-024` can.
+  follows `--fail-on` like for any other finding. A `.mcpmoat-ignore` file cannot drop it, also
+  with `--use-ignore-file`, because it can come from a cloned repository. Only
+  `--ignore MOAT-T1-024` can.
+- `scan` lists at most 100 config findings (`MOAT-T4-*` and `MOAT-T5-*`) for each server and
+  10,000 for the whole scan, the most severe ones. A server that loses config findings to a limit
+  gets one `MOAT-T4-005` finding that says how many it left out ("N more config findings are not
+  listed; limit M"). Its severity is high, or higher when a finding that it left out is higher. It
+  is not an execution error: it gives exit code 1 with the default `--fail-on`, and the JSON
+  `complete` stays `true`. A `.mcpmoat-ignore` file cannot drop it. Only `--ignore MOAT-T4-005`
+  can (see [Limits](limits.md)).
 
 Exit code 2 comes, for example, from a usage error (invalid flags), invalid rules (also a regex in
 a `--rules` file that does not compile, with or without `--no-connect`), an unreadable
