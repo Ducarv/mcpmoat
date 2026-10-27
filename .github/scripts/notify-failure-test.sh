@@ -16,9 +16,9 @@
 #
 # The fake gh keeps a call log. It exits 99 on an unknown subcommand, on a
 # missing `-R owner/repo`, on a missing token, and on a list call without
-# `--label security --state open --limit 200 --json number,title`. A case sets the list that the
-# fake prints, runs the body, and wants an exit code, the exact calls and a
-# text in the output.
+# `--label security --state open --limit 200 --json number,title`. A case
+# sets the list that the fake prints, runs the body, and wants an exit code,
+# the exact calls and a text in the output.
 #
 # NOTIFY_WORKFLOW (a path) selects another copy of the workflow to test.
 set -euo pipefail
