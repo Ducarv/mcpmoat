@@ -57,12 +57,23 @@ var ErrOutsideRoot = errors.New("path leaves the directory")
 // maxSize is the largest file size in bytes that is read. It must not be
 // negative: with a negative maxSize every file gives ErrTooLarge.
 func ReadBoundedRegularFile(dir, name string, maxSize int64) (data []byte, found bool, err error) {
+	data, _, found, err = ReadBoundedRegularFileInfo(dir, name, maxSize)
+	return data, found, err
+}
+
+// ReadBoundedRegularFileInfo works as ReadBoundedRegularFile and also returns
+// the fs.FileInfo of the file that it read. The info comes from Stat on the
+// open file, not from the path, so a caller that checks the owner or the mode
+// of the info checks the same file as the data. found is true exactly when
+// info is not nil. Both are zero when err is not nil. found stays in the result
+// for symmetry with ReadBoundedRegularFile.
+func ReadBoundedRegularFileInfo(dir, name string, maxSize int64) (data []byte, info fs.FileInfo, found bool, err error) {
 	root, err := OpenRoot(dir)
 	if err != nil {
 		if IsMissing(err) {
-			return nil, false, nil
+			return nil, nil, false, nil
 		}
-		return nil, false, err
+		return nil, nil, false, err
 	}
 	defer func() {
 		// Closing the root does not close the files opened through it.
@@ -74,26 +85,26 @@ func ReadBoundedRegularFile(dir, name string, maxSize int64) (data []byte, found
 	case err == nil:
 		// Go on below.
 	case IsMissing(err):
-		return nil, false, nil
+		return nil, nil, false, nil
 	case !isOSError(err):
 		// os.Root refuses a path that leaves the root with an error that has no
 		// OS error number (the error type is not exported, so we cannot test
 		// for it with errors.Is). A few other refusals have no number either,
 		// for example an empty name, so the cause is kept in the error.
-		return nil, false, fmt.Errorf("%w: %w", ErrOutsideRoot, err)
+		return nil, nil, false, fmt.Errorf("%w: %w", ErrOutsideRoot, err)
 	default:
-		return nil, false, err
+		return nil, nil, false, err
 	}
 	defer func() {
 		// The file is read-only, so a close error is not useful.
 		_ = f.Close()
 	}()
 
-	data, err = ReadOpened(f, maxSize)
+	data, info, err = readOpenedInfo(f, maxSize)
 	if err != nil {
-		return nil, false, err
+		return nil, nil, false, err
 	}
-	return data, true, nil
+	return data, info, true, nil
 }
 
 // ReadOpened reads the open file f with a hard size cap. It checks the open
@@ -105,15 +116,22 @@ func ReadBoundedRegularFile(dir, name string, maxSize int64) (data []byte, found
 // ReadBoundedRegularFile). The errors of Stat and of the read come back as they
 // are.
 func ReadOpened(f fs.File, maxSize int64) ([]byte, error) {
+	data, _, err := readOpenedInfo(f, maxSize)
+	return data, err
+}
+
+// readOpenedInfo works as ReadOpened and also returns the fs.FileInfo from the
+// Stat of f. info is nil when err is not nil.
+func readOpenedInfo(f fs.File, maxSize int64) ([]byte, fs.FileInfo, error) {
 	info, err := f.Stat()
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	if !info.Mode().IsRegular() {
-		return nil, ErrNotRegular
+		return nil, nil, ErrNotRegular
 	}
 	if info.Size() > maxSize {
-		return nil, ErrTooLarge
+		return nil, nil, ErrTooLarge
 	}
 
 	// Read one byte more than the limit, so we can tell if the file grew after
@@ -124,12 +142,12 @@ func ReadOpened(f fs.File, maxSize int64) ([]byte, error) {
 	}
 	data, err := io.ReadAll(io.LimitReader(f, readMax))
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	if int64(len(data)) > maxSize {
-		return nil, ErrTooLarge
+		return nil, nil, ErrTooLarge
 	}
-	return data, nil
+	return data, info, nil
 }
 
 // OpenRoot opens the directory dir as an os.Root without blocking.

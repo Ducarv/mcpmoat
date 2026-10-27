@@ -8,6 +8,15 @@
   `$XDG_CONFIG_HOME/mcpmoat/pins.json`, or `~/.config/mcpmoat/pins.json` when `XDG_CONFIG_HOME` is
   not set. The file has mode `0600`. It stores each tool's hash and text. It never stores env,
   header, args or URL values from your configs.
+- **Owner and mode:** mcpmoat refuses a pins directory or a `pins.json` that another user owns or
+  that group or others can write to. `scan` and `pin --accept` then exit with code 2. The error
+  names the path and the mode, and gives a hint. For a mode problem, run `chmod go-w -- '<path>'`.
+  For an owner problem, the hint is `ask the owner or root to run chown, or to remove the path`.
+  When both problems exist, only the owner or root can run `chmod`, so the hint first asks the
+  owner or root to run `chown`, and then gives the `chmod go-w` command. A
+  directory made with umask 002 (mode `0775`) or a file with mode `0664` is refused until you run
+  `chmod go-w`. A directory of `0755` and a file of `0644` pass. For the limits, see [The
+  `pins.json` store](ARCHITECTURE.md#the-pinsjson-store).
 - **Later runs:** `scan` compares the tools with the pins. It reports `MOAT-T2-001` (changed tool,
   high), `MOAT-T2-002` (new tool, medium), `MOAT-T2-003` (removed tool, low) and `MOAT-T2-004` (tool
   not verified). A new tool is medium. Read the report, not only the exit code (see [Exit
