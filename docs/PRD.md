@@ -483,10 +483,12 @@ and `openWorldHint`. An absent hint is different from a set hint. A tool without
   others. On macOS, their ACL must not give a write right to any user or group. `pins.json` must
   not be a symlink. mcpmoat checks the directory and the file that it reads, not only their paths.
   Each parent directory of the pins directory must belong to the user or to root, and must not be
-  writable by group or others unless the sticky bit is set. A pins path where no part exists is an
-  error, not a first run. Otherwise mcpmoat exits with code 2 and gives a fix. The hint texts are
-  in [docs/pins.md](pins.md). Known limit: mcpmoat does not read the ACL of a parent directory, so
-  on macOS an allow entry for another user on `~/.config` or `~` is not detected (see
+  writable by group or others unless the sticky bit is set. A symlink on the path to the pins
+  directory must belong to the user or to root, also a symlink that is reached only through the
+  target of another symlink. A pins path where no part exists is an error, not a first run.
+  Otherwise mcpmoat exits with code 2 and gives a fix. The hint texts are in
+  [docs/pins.md](pins.md). Known limit: mcpmoat does not read the ACL of a parent directory, so on
+  macOS an allow entry for another user on `~/.config` or `~` is not detected (see
   [docs/limits.md](limits.md)).
 - `pins.json` also stores the canonical text of each tool, next to its hash, so that a later run
   can show the diff. It never stores env, header, args or URL values from the configs.
