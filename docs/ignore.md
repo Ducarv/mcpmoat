@@ -73,8 +73,12 @@ Also with `--use-ignore-file`, the file cannot ignore these findings:
   [Limits](limits.md)).
 
 Use `--ignore` on the command line for these rules. `MOAT-T1-023`, `MOAT-T1-024` and `MOAT-T4-005`
-are not about one tool, so `--ignore` drops them for every server. When a file entry for one of
-these rules matches a finding, `scan` keeps the finding and prints a warning on stderr:
+are not about one tool, so `--ignore` drops them for every server. `--ignore MOAT-T1-023` also
+drops the finding for the servers that `scan` did not check because earlier servers used up the time
+limit of the rule analysis (see [Limits](limits.md)). Then no finding and no exit code show that
+those servers were not checked. `scan` still prints one line on stderr with their number. When a
+file entry for one of these rules matches a finding, `scan` keeps the finding and prints a warning
+on stderr:
 `mcpmoat scan: warning: .mcpmoat-ignore cannot ignore MOAT-LLM-001; use --ignore on the command line`.
 
 So a hostile file cannot hide a poisoned tool without a sign. Without `--use-ignore-file`, it drops

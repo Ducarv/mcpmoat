@@ -78,7 +78,10 @@ type configChecks struct {
 // configHit is a config finding that the ignore list keeps, while findings
 // waits to know which ones fit under the caps. It holds the index of the
 // finding in a list, not a copy of it or of its row, so a server with very
-// many findings does not hold a row for each one.
+// many findings does not hold a row for each one. The memory before the cut is
+// not bounded by the caps: findings holds all the findings of one server while
+// it cuts them, and then up to the per-server cap for each server until the row
+// build (see docs/limits.md).
 type configHit struct {
 	// index is the index of the finding in the list that is cut: the
 	// findings of one server for the per-server cap, or the hits of all the
@@ -216,7 +219,7 @@ func (cc configChecks) findings(ignore *scanIgnores, servers []discover.Server) 
 				continue
 			}
 			_, severity := findingRule(cc.set, f.RuleID)
-			hits = append(hits, configHit{index: j, severity: severity})
+			hits = append(hits, configHit{index: j, severity: severity, untrusted: s.Untrusted})
 		}
 
 		kept, omitted := cutConfigHits(hits, caps.perServer)
@@ -229,7 +232,7 @@ func (cc configChecks) findings(ignore *scanIgnores, servers []discover.Server) 
 		}
 		for _, h := range kept {
 			sh.kept = append(sh.kept, found[h.index])
-			all = append(all, configHit{index: len(all), severity: h.severity, untrusted: s.Untrusted})
+			all = append(all, configHit{index: len(all), severity: h.severity, untrusted: h.untrusted})
 		}
 		byServer[i] = sh
 	}

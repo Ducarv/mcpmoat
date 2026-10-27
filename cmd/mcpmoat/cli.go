@@ -89,13 +89,13 @@ type cli struct {
 	// do not need a thousand findings. Use the maxToolRowsOrDefault method.
 	maxToolRows int
 	// maxConfigRows is the largest number of config finding rows that scan
-	// keeps for one server. Zero means the default (100), so runWithContext
+	// keeps for one server. Zero means the default (configRowsPerServer), so runWithContext
 	// does not set it. Tests set a small value, so that they do not need a
 	// hundred findings. The cap for the whole scan is fixed and has no hook.
 	maxConfigRows int
 	// toolStepBudget is the time limit of the whole tool rule step of scan,
-	// for all servers together. Zero means the default (30s), so
-	// runWithContext does not set it. toolBudget is the limit for one server
+	// for all servers together. Zero means the default
+	// (toolRulesStepBudget), so runWithContext does not set it. toolBudget is the limit for one server
 	// inside this step. Tests set a short value to reach the limit.
 	toolStepBudget time.Duration
 	// ctx ends when the process gets a signal (see main). It is a field and

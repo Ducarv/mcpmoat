@@ -351,11 +351,12 @@ Guidelines:
 - Keep the cost of a rule low. A regex runs on up to 21 forms of each text (see above), for each
   tool of each server. The time is shared: all servers together have one time limit, for the
   built-in rules and the rules from `--rules` together (see [Limits](limits.md)). Each server gets
-  a fair share of it: its time budget. A server that uses up its budget gets a `MOAT-T1-023` finding, and the rest of its tools are not checked. A server
-  that `scan` does not reach in time (the limit ended, or its share is under 1 ms) gets the same
-  finding for all its tools. The finding is high, or critical when a description or schema rule
-  from `--rules` is critical. Only `--ignore` drops it, not `.mcpmoat-ignore`. So a slow rule can
-  give a false alarm on a benign server, and on the servers after it. Prefer a few short patterns.
+  a fair share of it: its time budget. A server that uses up its budget gets a `MOAT-T1-023`
+  finding, and the rest of its tools are not checked. A server that `scan` does not reach in time
+  (the limit ended, or its share is under 1 ms) gets the same finding for all its tools. The
+  finding is high, or critical when a description or schema rule from `--rules` is critical. Only
+  `--ignore` drops it, not `.mcpmoat-ignore`. So a slow rule can give a false alarm on a benign
+  server, and on the servers after it. Prefer a few short patterns.
   A long alternation with many branches, or a large bounded repeat such as `{0,1000}`, costs time
   on every form.
 - Prefer a lower severity when you are not sure. False positives make people stop using the tool.

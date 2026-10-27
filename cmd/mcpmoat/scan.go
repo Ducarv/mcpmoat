@@ -212,7 +212,7 @@ func (c *cli) buildScanSetup(opts options, a scanArgs, loaded loadedRules, class
 	return scanSetup{
 		// A zero perServer gives configRowsPerServer, and the zero total
 		// gives configRowsTotal (see configCaps.orDefault).
-		checks:         configChecks{set: loaded.set, typo: typo, caps: configCaps{perServer: c.maxConfigRows}},
+		checks:         configChecks{set: loaded.set, typo: typo, caps: configCaps{perServer: c.maxConfigRows}.orDefault()},
 		analyzer:       loaded.analyzer,
 		toolBudget:     c.toolBudgetOrDefault(),
 		toolStepBudget: c.toolStepBudgetOrDefault(),
