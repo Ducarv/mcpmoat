@@ -280,9 +280,8 @@ func NewJSONFileError(e *discover.FileError) JSONFileError {
 // the write. Callers must check it: a failed write has to become exit code 2
 // in cmd/mcpmoat.
 //
-// WriteJSON writes Complete as the caller set it. The pin save of scan comes
-// after WriteJSON, so the document cannot tell if that save failed (see
-// ScanReport.Complete).
+// WriteJSON writes Complete as the caller set it. Complete does not cover the
+// pin save of scan (see ScanReport.Complete).
 func WriteJSON(w io.Writer, r ScanReport) error {
 	// A nil slice would show as null. Use empty slices, so consumers can
 	// always loop over the lists.

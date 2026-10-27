@@ -121,10 +121,10 @@
   that you did not see: `(the diff was cut: review the full tool first)`, `(--ignore hid some
   changes: run scan without it to review them first)` or `(a change has no diff text: review the
   tool first)`. The digest covers those changes too. When `pins.json` has no room, the line ends
-  with `(pins.json has no room for these tools: pin --accept fails until you remove other servers
-  from it)`. When only the project share has no room, the line ends with `(the project share of
-  pins.json has no room for these tools: pin --accept fails until you remove project servers you no
-  longer use from it)`.
+  with `(pins.json has no room for these tools: pin --accept fails until you remove servers you no
+  longer use from pins.json)`. When only the project share has no room, the line ends with `(the
+  project share of pins.json has no room for these tools: pin --accept fails until you remove
+  project servers you no longer use from pins.json)`.
 - `scan --json` gives the same digest in the field `accept` of a pinned server that has a pin
   finding with a `To accept` hint: `{ "digest": "pd1:<64 hex>", "command": "mcpmoat pin --accept ...
   --expect <digest>" }`. `command` is there only when the terminal hint prints a command. When the

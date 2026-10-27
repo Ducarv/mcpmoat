@@ -112,15 +112,8 @@ func pinKeyServer(t *testing.T) discover.Server {
 // new store in t.TempDir() and is never saved.
 func pinKeyOutcomes(t *testing.T, srv discover.Server, pinned, current []inspect.Tool, ign *scanIgnores) pinReport {
 	t.Helper()
-	store, err := pins.Load(filepath.Join(t.TempDir(), "mcpmoat", "pins.json"))
-	if err != nil {
-		t.Fatalf("pins.Load() error = %v, want nil", err)
-	}
-	snap, err := pins.Snapshot(pinned)
-	if err != nil {
-		t.Fatalf("pins.Snapshot() error = %v, want nil", err)
-	}
-	if err := store.Set(serverIdentity(srv), snap); err != nil {
+	store := newPinsStore(t, filepath.Join(t.TempDir(), "mcpmoat", "pins.json"))
+	if err := store.Set(serverIdentity(srv), snapshotOf(t, pinned...)); err != nil {
 		t.Fatalf("Store.Set() error = %v, want nil", err)
 	}
 	c, _, _ := newTestCLI(fakeGetenv(nil), testBuild)
@@ -305,15 +298,8 @@ func TestPinKeyEmptyName(t *testing.T) {
 	t.Run("pinned server not inspected", func(t *testing.T) {
 		t.Parallel()
 		srv := pinKeyServer(t)
-		store, err := pins.Load(filepath.Join(t.TempDir(), "mcpmoat", "pins.json"))
-		if err != nil {
-			t.Fatal(err)
-		}
-		snap, err := pins.Snapshot([]inspect.Tool{mkTool("keep", "Keep.")})
-		if err != nil {
-			t.Fatal(err)
-		}
-		if err := store.Set(serverIdentity(srv), snap); err != nil {
+		store := newPinsStore(t, filepath.Join(t.TempDir(), "mcpmoat", "pins.json"))
+		if err := store.Set(serverIdentity(srv), snapshotOf(t, mkTool("keep", "Keep."))); err != nil {
 			t.Fatal(err)
 		}
 		c, _, _ := newTestCLI(fakeGetenv(nil), testBuild)

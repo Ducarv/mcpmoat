@@ -1,7 +1,6 @@
 package main
 
 import (
-	"errors"
 	"path/filepath"
 
 	"github.com/Ducarv/mcpmoat/internal/discover"
@@ -199,33 +198,6 @@ func (c *cli) pinOutcomes(store *pins.Store, outcomes []inspect.Outcome, ign *sc
 	return p.res
 }
 
-// markStoreFull sets storeFull on each accept hint whose new tools (h.snap) do
-// not fit in pins.json (pins.ErrStoreFull), so the hint prints no command that
-// "pin --accept" would refuse. When only the share of the project servers is
-// full (pins.ErrProjectShareFull, which also wraps pins.ErrStoreFull), it sets
-// shareFull too, so the note of the hint names the project servers. The share
-// is tested first for that reason.
-//
-// Each hint is checked alone with CheckSet, because pin --accept saves one
-// server at a time. CheckSet runs the checks of Set but changes nothing, so
-// p.budget stays as it is by construction. Set on p.budget itself would be
-// wrong: the budget must hold only what savePinned will save, and a hint is
-// only a proposal. Any other error from CheckSet leaves the hint as it is:
-// pin --accept reports it.
-func (p *pinner) markStoreFull() {
-	for i := range p.res.hints {
-		h := &p.res.hints[i]
-		err := p.budget.CheckSet(h.id, h.snap)
-		switch {
-		case errors.Is(err, pins.ErrProjectShareFull):
-			h.storeFull = true
-			h.shareFull = true
-		case errors.Is(err, pins.ErrStoreFull):
-			h.storeFull = true
-		}
-	}
-}
-
 // pinner holds the state of one pinOutcomes call.
 type pinner struct {
 	c   *cli
@@ -404,6 +376,25 @@ func (p *pinner) notInspected(s discover.Server, id pins.Identity, err error) {
 	}
 }
 
+// markStoreFull sets full on each accept hint whose new tools (h.snap) do not
+// fit in pins.json, so the hint prints no command that "pin --accept" would
+// refuse. full is shareFull when only the share of the project servers is full
+// (pins.ErrProjectShareFull), so the note of the hint names the project
+// servers, and fileFull for any other pins.ErrStoreFull (see fullKindOf).
+//
+// Each hint is checked alone with CheckSet, because pin --accept saves one
+// server at a time. CheckSet runs the checks of Set but changes nothing, so
+// p.budget stays as it is by construction. Set on p.budget itself would be
+// wrong: the budget must hold only what savePinned will save, and a hint is
+// only a proposal. Any other error from CheckSet leaves the hint as it is:
+// pin --accept reports it.
+func (p *pinner) markStoreFull() {
+	for i := range p.res.hints {
+		h := &p.res.hints[i]
+		h.full = fullKindOf(p.budget.CheckSet(h.id, h.snap))
+	}
+}
+
 // firstPin records the tools of a server that is not in the store yet, so that
 // savePinned can pin them. The store is not changed here. scan prints "pinned N
 // tools for <server>" on stderr only after savePinned saved the server (see
@@ -432,15 +423,9 @@ func (p *pinner) firstPin(s discover.Server, id pins.Identity, tools []inspect.T
 	// pinnable checked the pins with pins.ValidateServer, so the only error
 	// that Set can give here is pins.ErrStoreFull. Any other error keeps the
 	// server in the list: savePinned calls Set again, which gives the same
-	// error, and reports it there (exit code 2). A full project share wraps
-	// pins.ErrStoreFull too, so it is tested first.
-	err = p.budget.Set(id, snap)
-	switch {
-	case errors.Is(err, pins.ErrProjectShareFull):
-		p.addUnverified(s, reasonShareFull, riskServerUnverified, fixShareFull, pins.UnverifiedSeverity(true))
-		return
-	case errors.Is(err, pins.ErrStoreFull):
-		p.addUnverified(s, reasonStoreFull, riskServerUnverified, fixStoreFull, pins.UnverifiedSeverity(true))
+	// error, and reports it there (exit code 2).
+	if kind := fullKindOf(p.budget.Set(id, snap)); kind != notFull {
+		p.addUnverified(s, kind.reason(), riskServerUnverified, kind.remediation(), pins.UnverifiedSeverity(true))
 		return
 	}
 	p.res.pinned = append(p.res.pinned, pinnedServer{id: id, snap: snap, name: s.Name, tools: len(tools)})
@@ -527,7 +512,10 @@ var reasonStoreFull = pinsFullText + ", so this server is not pinned"
 // (pins.ErrProjectShareFull, see firstPin). It must stay shorter than
 // report.MaxShortCellRunes, like reasonStoreFull. It starts with
 // pinsShareFullText, so the size is written in one place. pinsShareFullText
-// is a var, so this is a var too.
+// is a var, so this is a var too. It ends with "; this server is not pinned"
+// and not with ", so this server is not pinned" like reasonStoreFull, because
+// the ", so" form has 81 runes, one more than report.MaxShortCellRunes (80),
+// and TestScanReasonsFitShortCell would fail.
 var reasonShareFull = pinsShareFullText + "; this server is not pinned"
 
 // Fixed risks for the MOAT-T2-004 rows that scan makes itself (see

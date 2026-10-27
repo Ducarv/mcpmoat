@@ -164,7 +164,7 @@ func pinsRemovedWhileRunning(firstExisted bool, later *pins.Store) bool {
 // pinsFullText is the shared part of the three messages for a server that
 // does not fit in pins.json (pins.ErrStoreFull): "the pins file is full
 // (32 MiB)". scan uses it at report time (reasonStoreFull), and through
-// storeFullText at save time (setNewPins) and in pin (saveAccepted). The size
+// fullKind.text at save time (setNewPins) and in pin (saveAccepted). The size
 // comes from pins.MaxFileSizeMiB, the limit that Set enforces, so the number
 // is written in one place.
 //
@@ -176,32 +176,107 @@ var pinsFullText = fmt.Sprintf("the pins file is full (%d MiB)", pins.MaxFileSiz
 // server that does not fit in the share of pins.json for project servers
 // (pins.ErrProjectShareFull): "the project share of the pins file is full
 // (16 MiB)". scan uses it at report time (reasonShareFull), and through
-// storeFullText at save time (setNewPins) and in pin (saveAccepted). The size
+// fullKind.text at save time (setNewPins) and in pin (saveAccepted). The size
 // comes from pins.ProjectShareMiB, the share that Set enforces. It is a var
 // for the same reason as pinsFullText.
 var pinsShareFullText = fmt.Sprintf("the project share of the pins file is full (%d MiB)", pins.ProjectShareMiB)
 
-// storeFullText returns the text for an error of Set that wraps
-// pins.ErrStoreFull: pinsShareFullText when a project server did not fit in
-// its share, else pinsFullText. A share refusal wraps both errors, so the
-// share check must come first.
-func storeFullText(err error) string {
-	if errors.Is(err, pins.ErrProjectShareFull) {
-		return pinsShareFullText
+// fullKind says which size limit of pins.json refused a server. Four places
+// need this choice: the report row of scan (firstPin), the "To accept" hint
+// (markStoreFull and writeAcceptHints), the warning of scan at save time
+// (setNewPins) and the message of pin (saveAccepted). They all get it from
+// fullKindOf and ask the methods for the text, so the choice is written once.
+type fullKind int
+
+const (
+	// notFull means that no size limit refused the server.
+	notFull fullKind = iota
+	// fileFull means that pins.json as a whole has no room (pins.ErrStoreFull).
+	fileFull
+	// shareFull means that the share of the project servers has no room
+	// (pins.ErrProjectShareFull). Only project servers count toward the share.
+	shareFull
+)
+
+// fullKindOf returns the kind of limit that refused a server, from an error of
+// Set or CheckSet. The share is tested first: a share refusal wraps
+// pins.ErrStoreFull too, so it would else count as a full file. Any error that
+// wraps neither gives notFull.
+func fullKindOf(err error) fullKind {
+	switch {
+	case errors.Is(err, pins.ErrProjectShareFull):
+		return shareFull
+	case errors.Is(err, pins.ErrStoreFull):
+		return fileFull
 	}
-	return pinsFullText
+	return notFull
 }
 
-// storeFullFix returns what the user can do about an error of Set that wraps
-// pins.ErrStoreFull, to go after storeFullText. Only project servers count
-// toward the share, so for a share refusal it names them: removing a server of
-// the user scope frees no room in the share. The share check comes first, as
-// in storeFullText.
-func storeFullFix(err error) string {
-	if errors.Is(err, pins.ErrProjectShareFull) {
-		return "remove project servers you no longer use from pins.json"
+// text returns the shared part of the messages for a refused server:
+// pinsShareFullText for shareFull, pinsFullText for fileFull. It is empty for
+// notFull.
+func (k fullKind) text() string {
+	switch k {
+	case shareFull:
+		return pinsShareFullText
+	case fileFull:
+		return pinsFullText
 	}
-	return "remove servers you no longer use from pins.json"
+	return ""
+}
+
+// fix returns what the user can do about a refused server, in lower case, to go
+// after text or after "until you". Only project servers count toward the share,
+// so for shareFull it names them: removing a server of the user scope frees no
+// room in the share, and that server would then be pinned again on its next
+// scan with no alert. It is empty for notFull.
+func (k fullKind) fix() string {
+	switch k {
+	case shareFull:
+		return "remove project servers you no longer use from pins.json"
+	case fileFull:
+		return "remove servers you no longer use from pins.json"
+	}
+	return ""
+}
+
+// hintNote returns the note at the end of a "To accept" line for a server whose
+// new tools do not fit (see writeAcceptHints). It is built from fix, so the
+// advice of the hint and the advice of pin cannot drift apart. It is empty for
+// notFull.
+func (k fullKind) hintNote() string {
+	switch k {
+	case shareFull:
+		return " (the project share of pins.json has no room for these tools: pin --accept fails until you " + k.fix() + ")"
+	case fileFull:
+		return " (pins.json has no room for these tools: pin --accept fails until you " + k.fix() + ")"
+	}
+	return ""
+}
+
+// reason returns the fixed reason of the MOAT-T2-004 row of a first-run server
+// that is not pinned because of this limit (see firstPin). It is empty for
+// notFull.
+func (k fullKind) reason() string {
+	switch k {
+	case shareFull:
+		return reasonShareFull
+	case fileFull:
+		return reasonStoreFull
+	}
+	return ""
+}
+
+// remediation returns the fixed remediation of that row. It is empty for
+// notFull.
+func (k fullKind) remediation() string {
+	switch k {
+	case shareFull:
+		return fixShareFull
+	case fileFull:
+		return fixStoreFull
+	}
+	return ""
 }
 
 // pinsLockedText is the line that readPinsLocked prints after the read error

@@ -127,10 +127,10 @@ mcpmoat scan --json | jq -r '.findings[] | "\(.rule_id) \(.server)"'
   prose steps of a hint without a command. A server whose new tools do not fit in `pins.json` gets
   a hint with no command, because `pin --accept` would fail: its `accept` has the digest only, and
   its terminal line ends with `(pins.json has no room for these tools: pin --accept fails until you
-  remove other servers from it)`. A project server whose new tools do not fit in the project share
-  gets the same hint with the digest only, and its terminal line ends with `(the project share of
-  pins.json has no room for these tools: pin --accept fails until you remove project servers you
-  no longer use from it)`. The `To accept` line itself is not in the JSON. When two
+  remove servers you no longer use from pins.json)`. A project server whose new tools do not fit in
+  the project share gets the same hint with the digest only, and its terminal line ends with `(the
+  project share of pins.json has no room for these tools: pin --accept fails until you remove
+  project servers you no longer use from pins.json)`. The `To accept` line itself is not in the JSON. When two
   servers have the same identity (the same client, source, project path and name), `scan` prints one
   `To accept` line, and the JSON gives both servers the same `accept` object, with the same digest.
 - **`fields_truncated`** is a required boolean. It is `true` when at least one text field was cut at

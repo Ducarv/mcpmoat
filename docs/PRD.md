@@ -611,11 +611,11 @@ text diff.
   it to review them first)` or ` (a change has no diff text: review the tool first)` for each
   change that the user did not see: the digest covers those changes too. A line for a server whose
   new tools do not fit then ends with ` (pins.json has no room for these tools: pin --accept fails
-  until you remove other servers from it)`. When only the project share has no room, it ends with
-  ` (the project share of pins.json has no room for these tools: pin --accept fails until you
-  remove project servers you no longer use from it)`. There is no line for a server pinned for the
-  first time, a server that could not be inspected, an ignored finding, or tools that cannot be
-  pinned.
+  until you remove servers you no longer use from pins.json)`. When only the project share has no
+  room, it ends with ` (the project share of pins.json has no room for these tools: pin --accept
+  fails until you remove project servers you no longer use from pins.json)`. There is no line for
+  a server pinned for the first time, a server that could not be inspected, an ignored finding, or
+  tools that cannot be pinned.
 - `scan` shows the inspection warnings in the summary of the server on stdout (on stderr with
   `--json`), and `pin --accept` prints them on stderr, one line each, with keys and fixed names
   only: `cleartext-secrets`, `undeclared-capability` (the cloaking signal) and

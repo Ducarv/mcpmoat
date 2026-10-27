@@ -33,16 +33,12 @@ type acceptHint struct {
 	// noText is true when a kept change of the server has a fixed note as its
 	// diff (pins.Change.DiffIsNote): the user saw no text of that change.
 	noText bool
-	// storeFull is true when pins.json has no room for the new tools of the
-	// server, so "pin --accept" would fail: the hint then prints no command.
-	storeFull bool
-	// shareFull is true when the refusal comes from the share of the project
-	// servers (pins.ErrProjectShareFull), not from the whole file. shareFull
-	// implies storeFull. Only project servers count toward the share, so the
-	// note of the hint must not tell the user to remove other servers: removing
-	// a server of the user scope frees no room in the share, and that server
-	// would then be pinned again on its next scan with no alert.
-	shareFull bool
+	// full says whether pins.json has no room for the new tools of the server,
+	// so "pin --accept" would fail: the hint then prints no command. It is
+	// fileFull when the whole file is full, and shareFull when only the share of
+	// the project servers is full. The note of the hint differs (see
+	// fullKind.hintNote). notFull is the zero value.
+	full fullKind
 	// snap holds the new pins of the server, the pins that "pin --accept"
 	// would save. markStoreFull checks with them that they fit in pins.json.
 	// The hint never prints them.
@@ -59,13 +55,6 @@ const (
 	// hintNoTextNote ends the line of a server with a change whose diff is a
 	// fixed note.
 	hintNoTextNote = " (a change has no diff text: review the tool first)"
-	// hintStoreFullNote ends the line of a server whose new tools do not fit
-	// in pins.json.
-	hintStoreFullNote = " (pins.json has no room for these tools: pin --accept fails until you remove other servers from it)"
-	// hintShareFullNote ends the line of a project server whose new tools do
-	// not fit in the share of the project servers. It replaces
-	// hintStoreFullNote, because only project servers free room in the share.
-	hintShareFullNote = " (the project share of pins.json has no room for these tools: pin --accept fails until you remove project servers you no longer use from it)"
 )
 
 // writeAcceptHints writes one line on w for each hint:
@@ -90,8 +79,8 @@ const (
 // the name is escaped and cut for the terminal. The digest is made by mcpmoat
 // from hex, so it needs no escape. The line ends with hintCutNote,
 // hintIgnoredNote or hintNoTextNote for each change that the user did not see,
-// and then with hintStoreFullNote when pins.json has no room for the tools, or
-// hintShareFullNote when only the share of the project servers has no room.
+// and then with fileFull.hintNote when pins.json has no room for the tools, or
+// shareFull.hintNote when only the share of the project servers has no room.
 // writeAcceptHints returns the first write error: the caller must check it,
 // like for the report.
 func writeAcceptHints(w io.Writer, hints []acceptHint, configPath string, configProblem bool) error {
@@ -107,12 +96,7 @@ func writeAcceptHints(w io.Writer, hints []acceptHint, configPath string, config
 		if h.noText {
 			line += hintNoTextNote
 		}
-		switch {
-		case h.shareFull:
-			line += hintShareFullNote
-		case h.storeFull:
-			line += hintStoreFullNote
-		}
+		line += h.full.hintNote()
 		if _, err := io.WriteString(w, line+"\n"); err != nil {
 			return err
 		}
@@ -122,7 +106,8 @@ func writeAcceptHints(w io.Writer, hints []acceptHint, configPath string, config
 
 // acceptAdvice decides what the "To accept" hint of h says, in one place. text
 // is exactly the text that the terminal prints after "To accept <name>: ", before
-// the notes for a cut, ignored or no-text change. isCommand is true only when
+// the notes for a cut, ignored or no-text change and the note for a full
+// pins.json (fileFull) or a full project share (shareFull). isCommand is true only when
 // text is the shell command from acceptCommand, and false when text is the prose
 // steps from acceptSteps. The text is a command only when the name, the project
 // and configPath are bare shell words, the user saw every change, the name
@@ -133,9 +118,7 @@ func writeAcceptHints(w io.Writer, hints []acceptHint, configPath string, config
 // no I/O.
 func acceptAdvice(h acceptHint, configPath string, configProblem bool) (text string, isCommand bool) {
 	text, ok := acceptCommand(h.name, h.project, configPath, h.digest)
-	// shareFull implies storeFull. Both are tested, so a hint with only
-	// shareFull still gives no command.
-	if !ok || !h.fullyReviewed() || h.ambiguous || configProblem || h.storeFull || h.shareFull {
+	if !ok || !h.fullyReviewed() || h.ambiguous || configProblem || h.full != notFull {
 		return acceptSteps(h, configPath, configProblem), false
 	}
 	return text, true

@@ -284,8 +284,8 @@ func (c *cli) acceptTools(ctx context.Context, server discover.Server, tools []i
 // (pins.ErrStoreFull) saves nothing and gives exit code 2, with a message that
 // tells the user to remove old servers. When a project server does not fit in
 // the share of the project servers (pins.ErrProjectShareFull), the message
-// says so and tells the user to remove old project servers (see storeFullText
-// and storeFullFix). When the save created a new pins file, saveAccepted
+// says so and tells the user to remove old project servers (see fullKind.text
+// and fullKind.fix). When the save created a new pins file, saveAccepted
 // prints a notice before the "accepted" line (see printNewPinsFile).
 func (c *cli) saveAccepted(ctx context.Context, name string, id pins.Identity, tools []inspect.Tool, snap pins.ServerPins, shown *pins.Store) int {
 	store, release, ok := c.readPinsLocked(ctx, "pin")
@@ -323,10 +323,10 @@ func (c *cli) saveAccepted(ctx context.Context, name string, id pins.Identity, t
 	}
 	// Only Set returns ErrStoreFull. It gets its own fixed line, so this check
 	// comes before the general one. A refusal for the project share also
-	// matches ErrStoreFull. Only project servers count toward the share, so
-	// storeFullText and storeFullFix name them then.
-	if errors.Is(fail.err, pins.ErrStoreFull) {
-		c.cmdPrintf("pin", "cannot pin %s: %s; %s", name, storeFullText(fail.err), storeFullFix(fail.err))
+	// wraps ErrStoreFull. Only project servers count toward the share, so
+	// the text and the fix of the kind name them then.
+	if kind := fullKindOf(fail.err); kind != notFull {
+		c.cmdPrintf("pin", "cannot pin %s: %s; %s", name, kind.text(), kind.fix())
 		return exitError
 	}
 	if fail.failed() {
