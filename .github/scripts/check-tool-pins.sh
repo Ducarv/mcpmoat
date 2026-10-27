@@ -1,10 +1,22 @@
 #!/usr/bin/env bash
 # Checks that the GoReleaser and govulncheck pins agree, that each GoReleaser
 # step reads its version from the pin, and that each workflow runs govulncheck
-# only through the pinned call line. These are best-effort text checks, not a
-# YAML parser. The GoReleaser step check reads block style and fails on a style
-# that it cannot read. The tool-pins job in ci.yml runs it. You can also run it on your machine, from any directory: see
-# CONTRIBUTING.md, Checks. check-tool-pins-test.sh tests it.
+# only through the pinned call line.
+#
+# This is a best-effort text check, not a YAML parser. It reads block style
+# only, and anything it cannot read fails closed. So write the workflows in
+# block style. For GoReleaser it checks these things:
+# - Each goreleaser-action step has version: ${{ env.GORELEASER_VERSION }} in
+#   its with: block.
+# - Every line in a workflow that names GORELEASER_VERSION is that version
+#   input or the pin line in the env: of a job. Any other form fails, for
+#   example a second definition, a different case or a write to $GITHUB_ENV.
+# - A job with a goreleaser-action step has the pin in its own env:.
+# - A file under .github/actions that names goreleaser-action fails. Extend
+#   this check before you add such a file.
+# The tool-pins job in ci.yml runs it. You can also run it on your machine,
+# from any directory: see CONTRIBUTING.md, Checks. check-tool-pins-test.sh
+# tests it.
 set -euo pipefail
 
 # CDPATH is empty, so that cd neither prints a path nor goes to another place.
@@ -35,7 +47,7 @@ one_line() {
 
 # pin_re prints the regex of a "  NAME: vX.Y.Z" line. The version is group 1.
 pin_re() {
-  printf '^ *%s: *"?(%s)"? *(#.*)?$' "$1" "$ver_re"
+  printf '^ *%s: *"?(%s)"?( +#.*)? *$' "$1" "$ver_re"
 }
 
 # code_of prints the lines of a file that are not comments.
@@ -62,14 +74,19 @@ for f in "${workflows[@]}"; do
 done
 [ -f CONTRIBUTING.md ] || fail "CONTRIBUTING.md is missing."
 
+# wf_files is the list of the workflow files. GitHub runs .yaml files too.
+wf_files=()
+for file in "$wf"/*.yml "$wf"/*.yaml; do
+  if [ -e "$file" ]; then wf_files+=("$file"); fi
+done
+
 # GoReleaser: ci.yml is the reference. release.yml and CONTRIBUTING.md must
 # name the same version.
 goreleaser_want=$(pins GORELEASER_VERSION "$wf/ci.yml")
 need_one_in_ci GoReleaser "$goreleaser_want"
 # A GORELEASER_VERSION line that is not a full version could override the pin.
-# Any workflow file can hold one, so check them all. GitHub runs .yaml files too.
-for file in "$wf"/*.yml "$wf"/*.yaml; do
-  [ -e "$file" ] || continue
+# Any workflow file can hold one, so check them all.
+for file in "${wf_files[@]}"; do
   other=$(code_of "$file" | grep -E '^ *GORELEASER_VERSION:' | grep -vE "$(pin_re GORELEASER_VERSION)" || true)
   [ -z "$other" ] || fail "$(basename "$file") has a GORELEASER_VERSION line that is not a full version: $(one_line <<<"$other")"
 done
@@ -81,34 +98,92 @@ if [ "$goreleaser_rel" != "$goreleaser_want" ] || [ "$goreleaser_doc" != "$gorel
   fail "The GoReleaser pins differ. ci.yml: $goreleaser_want. release.yml: $(one_line <<<"$goreleaser_rel"). CONTRIBUTING.md: $(one_line <<<"$goreleaser_doc")."
 fi
 
+# A composite action can hold a goreleaser-action step, and this check does not
+# read it. So a file under .github/actions that names the action fails. find
+# lists the matching files. The ; form makes find succeed when none matches.
+if [ -d .github/actions ]; then
+  action_files=$(find -H .github/actions ! -type d -exec grep -liF 'goreleaser/goreleaser-action' {} \; | one_line)
+  [ -z "$action_files" ] ||
+    fail "$action_files names goreleaser/goreleaser-action. This check does not read .github/actions. Extend the check before you add such a file."
+fi
+
 # Each goreleaser/goreleaser-action step must have a version input with the
 # value ${{ env.GORELEASER_VERSION }} inside its with: block. Without it, with
 # another value such as latest, or with the key in another place such as env:,
 # the action installs another GoReleaser than the pinned one. A step starts at
 # a "- " line and ends at the next line that has the same indent or less. So a
 # version input of another step does not count.
+# The same function also checks every line that names GORELEASER_VERSION, in
+# any case. Such a line must be the version input or the pin line: exact case,
+# no space before the colon, at indent 6 in the env: of a job. Any other line
+# could change the version at run time. Examples are a second definition, a
+# flow style env, or a run: step that writes to $GITHUB_ENV. A job with a
+# goreleaser-action step must have the pin line in its own env:.
 # This is a best-effort text check, not a YAML parser. It reads block style
 # only. It counts the lines that name goreleaser/goreleaser-action and the
 # steps that it could read. When a line names the action in a style that it
 # cannot read (flow style, an anchor, a split line), it fails. So write each
 # step in block style. The govulncheck check below is a text check too.
+#
+# The awk program reads the file one line at a time and keeps this state in
+# variables. A variable that was never set is 0 or empty.
+#   indent    the number of spaces at the start of the line.
+#   top       the last key at indent 0, such as jobs.
+#   job       the last key at indent 2 under jobs: the job ID.
+#   jobkey    the last key at indent 4 in that job, such as env or steps.
+#   has_step  the jobs that have a goreleaser-action step.
+#   has_pin   the jobs that have the pin line in their env:.
+#   instep    1 while the program is inside a step (a "- " list item).
+#   start     the indent of the "- " line that began the step.
+#   first     the text of that line. The messages show it.
+#   keyind    the column where the first key of the step starts, after "- ".
+#   kpos      the column where the key of the line starts. A key of the step
+#             itself has kpos equal to keyind. A key of a child has more.
+#   inwith    1 while the program is inside the with: block of the step.
+#   childind  the indent of the keys inside with:. The first line sets it.
+#   uses      1 when the step runs goreleaser-action.
+#   seen      1 when with: has a version input.
+#   bad       1 when a version input is not ${{ env.GORELEASER_VERSION }}.
+#   mentions  the lines that name goreleaser/goreleaser-action in any style.
+#   recognised  the lines among them that are a readable "uses:" line.
+# end_step prints the errors of a step and clears the state of that step.
 goreleaser_steps() {
-  code_of "$1" | awk '
+  code_of "$1" | PIN_RE=$(pin_re GORELEASER_VERSION) awk '
     BEGIN {
       q = "\047"
       uses_re = "^uses: *[\"" q "]?goreleaser/goreleaser-action([\"" q " @]|$)"
       version_re = "^[\"" q "]?version[\"" q "]? *:"
+      pin_re = ENVIRON["PIN_RE"]
+    }
+    # is_version_line succeeds when the line is the allowed version input.
+    # A # starts a comment only after a space.
+    function is_version_line(s,   val) {
+      if (tolower(s) !~ version_re) return 0
+      val = s; sub(/^[^:]*: */, "", val)
+      return val ~ /^("\$\{\{ env\.GORELEASER_VERSION \}\}"|\$\{\{ env\.GORELEASER_VERSION \}\})( +#.*)? *$/
     }
     function end_step() {
       if (uses && !seen) print "the step \"" first "\" has no version input in its with: block."
       if (uses && bad) print "the step \"" first "\" has a version input that is not ${{ env.GORELEASER_VERSION }}."
       uses = seen = bad = inwith = 0
     }
-    tolower($0) ~ /goreleaser\/goreleaser-action/ { mentions++ }
+    tolower($0) ~ /goreleaser\/goreleaser-action/ {
+      mentions++
+      if (!(job in has_step)) { has_step[job] = 1; order[++njobs] = job }
+    }
     /^[[:space:]]*$/ { next }
     {
       match($0, /^ */)
       indent = RLENGTH
+      trimmed = $0; sub(/^ */, "", trimmed)
+      key = trimmed; sub(/:.*/, "", key)
+      if (indent == 0) { top = key; job = ""; jobkey = "" }
+      else if (top == "jobs" && indent == 2) { job = key; jobkey = "" }
+      else if (top == "jobs" && indent == 4) jobkey = key
+      if (tolower($0) ~ /goreleaser_version/) {
+        if (top == "jobs" && job != "" && indent == 6 && jobkey == "env" && trimmed ~ pin_re) has_pin[job] = 1
+        else if (!is_version_line(trimmed)) print "the line \"" trimmed "\" mentions GORELEASER_VERSION in a form this check does not allow. Allowed: the pin line in the env: of a job and the version input of a goreleaser-action step."
+      }
       if (instep && indent <= start) { end_step(); instep = 0 }
       body = $0
       kpos = indent
@@ -130,22 +205,20 @@ goreleaser_steps() {
         if (childind < 0) childind = indent
         if (indent == childind && lc ~ version_re) {
           seen = 1
-          val = body; sub(/^[^:]*: */, "", val)
-          if (val !~ /^("\$\{\{ env\.GORELEASER_VERSION \}\}"|\$\{\{ env\.GORELEASER_VERSION \}\}) *(#.*)?$/) bad = 1
+          if (!is_version_line(body)) bad = 1
         }
       }
     }
     END {
       if (instep) end_step()
       if (mentions > recognised) print "a line names goreleaser-action in a style this check cannot read. Write the step in block style."
+      for (i = 1; i <= njobs; i++)
+        if (!(order[i] in has_pin)) print "the job \"" order[i] "\" has a goreleaser-action step but its env: does not define GORELEASER_VERSION."
     }
   '
 }
-for file in "$wf"/*.yml "$wf"/*.yaml; do
-  [ -e "$file" ] || continue
+for file in "${wf_files[@]}"; do
   base=$(basename "$file")
-  bad_steps=$(goreleaser_steps "$file")
-  [ -z "$bad_steps" ] || fail "$base: $(one_line <<<"$bad_steps")"
   # A file with another GORELEASER_VERSION than ci.yml has would break the pin.
   # A file with a step but no definition would use the default of the action.
   got=$(pins GORELEASER_VERSION "$file")
@@ -154,6 +227,8 @@ for file in "$wf"/*.yml "$wf"/*.yaml; do
   if [ -z "$got" ] && grep -qi 'goreleaser/goreleaser-action' <<<"$(code_of "$file")"; then
     fail "$base has a goreleaser-action step but does not define GORELEASER_VERSION. The step would use the default of the action."
   fi
+  bad_steps=$(goreleaser_steps "$file")
+  [ -z "$bad_steps" ] || fail "$base: $(one_line <<<"$bad_steps")"
 done
 
 # govulncheck: ci.yml is the reference. Each file must have pins with the
@@ -178,9 +253,8 @@ listed() {
 }
 
 # A workflow that is not in the list must not mention govulncheck outside a
-# comment. It could use another version. GitHub runs .yaml files too.
-for file in "$wf"/*.yml "$wf"/*.yaml; do
-  [ -e "$file" ] || continue
+# comment. It could use another version.
+for file in "${wf_files[@]}"; do
   ext=${file##*.}
   name=$(basename "$file" ".$ext")
   if [ "$ext" = yml ] && listed "$name"; then continue; fi

@@ -177,6 +177,44 @@ quoted_goreleaser() {
     sub "$wf/release.yml" 's/(GORELEASER_VERSION: )(v[0-9.]+)/\1"\2" # note/'
 }
 
+# job_workflow writes a workflow, with the file name $1, with one job. The job
+# defines the pin, then the extra env text $2 (may be empty), then the steps
+# text $3. This puts a line next to the pin, where a bypass would go.
+job_workflow() {
+  printf 'name: extra\njobs:\n  x:\n    env:\n      GORELEASER_VERSION: %s\n%s\n    steps:\n%s\n' "$gr_ver" "$2" "$3" >"$wf/$1"
+}
+
+# two_jobs_workflow writes a workflow, with the file name $1, with a job "a" that
+# has a step without goreleaser and a job "b" that has the good goreleaser-action
+# step. The text $2 is the env of job "a" and the text $3 is the env of job "b".
+two_jobs_workflow() {
+  printf 'name: extra\njobs:\n  a:\n%s\n    steps:\n      - run: echo hi\n  b:\n%s\n    steps:\n      - uses: goreleaser/goreleaser-action@x\n        with:\n          version: ${{ env.GORELEASER_VERSION }}\n' "$2" "$3" >"$wf/$1"
+}
+
+# actions_file writes the composite action .github/actions/x/action.yml with the
+# text $1.
+actions_file() {
+  mkdir -p .github/actions/x && printf '%s\n' "$1" >.github/actions/x/action.yml
+}
+
+# step_workflow_top writes a workflow, with the file name $1, with the pin in the
+# env of the workflow and a good step in a job that has no env.
+step_workflow_top() {
+  printf 'name: extra\nenv:\n  GORELEASER_VERSION: %s\njobs:\n  x:\n    steps:\n      - uses: goreleaser/goreleaser-action@x\n        with:\n          version: ${{ env.GORELEASER_VERSION }}\n' "$gr_ver" >"$wf/$1"
+}
+
+# wf_pin_indent writes a workflow, with the file name $1, with the pin at the
+# indent of a job key, not in the env.
+wf_pin_indent() {
+  printf 'name: extra\njobs:\n  x:\n    GORELEASER_VERSION: %s\n    steps:\n      - uses: goreleaser/goreleaser-action@x\n        with:\n          version: ${{ env.GORELEASER_VERSION }}\n' "$gr_ver" >"$wf/$1"
+}
+
+# wf_pin_other_key writes a workflow, with the file name $1, with the pin at the
+# right indent but under another job key than env, and no env in the job.
+wf_pin_other_key() {
+  printf 'name: extra\njobs:\n  x:\n    outputs:\n      GORELEASER_VERSION: %s\n    steps:\n      - uses: goreleaser/goreleaser-action@x\n        with:\n          version: ${{ env.GORELEASER_VERSION }}\n' "$gr_ver" >"$wf/$1"
+}
+
 # The real files must pass.
 check_case "real files" 0 "" true
 
@@ -335,6 +373,76 @@ check_case "GoReleaser: new workflow, same pin" 0 "" wf_with_pin "$gr_ver"
 check_case "GoReleaser: other pin in govulncheck.yml" 1 "govulncheck.yml has GORELEASER_VERSION v0.0.1, expected" add_define_to govulncheck.yml v0.0.1
 check_case "GoReleaser: latest in govulncheck.yml" 1 "govulncheck.yml has a GORELEASER_VERSION line that is not a full version" add_define_to govulncheck.yml latest
 check_case "GoReleaser: pin in a new .yaml workflow without a step" 1 "extra.yaml has GORELEASER_VERSION v0.0.1, expected" step_workflow_pin extra.yaml v0.0.1
+
+# Ways to change the version at run time. The step reads the pin, but another
+# line could change what env.GORELEASER_VERSION holds. Each form must fail.
+w_step="      - uses: goreleaser/goreleaser-action@x
+        with:
+          $ok_ver"
+mention="mentions GORELEASER_VERSION in a form this check does not allow"
+check_case "override: job env, same pin" 0 "" job_workflow extra.yml "" "$w_step"
+check_case "override: space before the colon" 1 "$mention" job_workflow extra.yml "      GORELEASER_VERSION : latest" "$w_step"
+check_case "override: quoted key" 1 "$mention" job_workflow extra.yml '      "GORELEASER_VERSION": latest' "$w_step"
+check_case "override: single-quoted key" 1 "$mention" job_workflow extra.yml "      'GORELEASER_VERSION': latest" "$w_step"
+check_case "override: lower case key" 1 "$mention" job_workflow extra.yml "      goreleaser_version: latest" "$w_step"
+check_case "override: mixed case key" 1 "$mention" job_workflow extra.yml "      Goreleaser_Version: latest" "$w_step"
+check_case "override: mixed case key with the same version" 1 "$mention" job_workflow extra.yml "      Goreleaser_Version: $gr_ver" "$w_step"
+check_case "override: flow style env" 1 "$mention" job_workflow extra.yml "    env: {GORELEASER_VERSION: latest}" "$w_step"
+check_case "override: run step writes GITHUB_ENV" 1 "$mention" job_workflow extra.yml "" "$w_step
+      - run: echo GORELEASER_VERSION=latest >> \"\$GITHUB_ENV\""
+check_case "override: run block writes GITHUB_ENV" 1 "$mention" job_workflow extra.yml "" "      - run: |
+          echo \"GORELEASER_VERSION=latest\" >> \"\$GITHUB_ENV\"
+$w_step"
+check_case "override: run step reads the variable" 1 "$mention" job_workflow extra.yml "" "$w_step
+      - run: echo \"\${{ env.GORELEASER_VERSION }}\""
+check_case "override: step env, same pin" 1 "$mention" job_workflow extra.yml "" "$w_step
+        env:
+          GORELEASER_VERSION: $gr_ver"
+check_case "override: step env, latest" 1 "not a full version" job_workflow extra.yml "" "$w_step
+        env:
+          GORELEASER_VERSION: latest"
+check_case "override: step env, lower case latest" 1 "$mention" job_workflow extra.yml "" "$w_step
+        env:
+          goreleaser_version: latest"
+check_case "override: other variable name that holds the name" 1 "$mention" job_workflow extra.yml "      X_GORELEASER_VERSION: latest" "$w_step"
+check_case "override: the line shows in the message" 1 "the line \"goreleaser_version: latest\" mentions" job_workflow extra.yml "      goreleaser_version: latest" "$w_step"
+check_case "override: a comment may name it" 0 "" job_workflow extra.yml "      # goreleaser_version: latest" "$w_step"
+check_case "override: the file is named" 1 "extra.yaml: the line" job_workflow extra.yaml "      goreleaser_version: latest" "$w_step"
+check_case "override: in govulncheck.yml" 1 "govulncheck.yml: the line" append "$wf/govulncheck.yml" '      - run: echo GORELEASER_VERSION=latest >> "$GITHUB_ENV"'
+check_case "override: second pin from vars in the job env" 1 "not a full version" job_workflow extra.yml "      GORELEASER_VERSION: \${{ vars.X }}" "$w_step"
+
+# The scope of the pin: a job needs the pin in its own env.
+check_case "scope: pin in job a, step in job b" 1 "the job \"b\" has a goreleaser-action step but its env: does not define GORELEASER_VERSION" two_jobs_workflow extra.yml "    env:
+      GORELEASER_VERSION: $gr_ver" ""
+check_case "scope: pin in both jobs" 0 "" two_jobs_workflow extra.yml "    env:
+      GORELEASER_VERSION: $gr_ver" "    env:
+      GORELEASER_VERSION: $gr_ver"
+check_case "scope: pin in job b only" 0 "" two_jobs_workflow extra.yml "" "    env:
+      GORELEASER_VERSION: $gr_ver"
+check_case "scope: pin at the workflow level only" 1 "does not define GORELEASER_VERSION" step_workflow_top extra.yml
+check_case "scope: pin at the wrong indent in the job" 1 "$mention" wf_pin_indent extra.yml
+check_case "scope: pin under another job key" 1 "$mention" wf_pin_other_key extra.yml
+
+# The composite actions are not read, so a file that names the action fails.
+check_case "actions: composite action with goreleaser-action" 1 "action.yml names goreleaser/goreleaser-action" actions_file "runs:
+  using: composite
+  steps:
+    - uses: goreleaser/goreleaser-action@x"
+check_case "actions: other case" 1 "names goreleaser/goreleaser-action" actions_file "    - uses: GoReleaser/GoReleaser-Action@x"
+check_case "actions: other action" 0 "" actions_file "    - uses: actions/checkout@x"
+
+# A # starts a comment only after a space.
+check_case "comment: no space after the version input" 1 "has a version input that is not" step_workflow extra.yml "      - uses: goreleaser/goreleaser-action@x
+        with:
+          $ok_ver#x"
+check_case "comment: no space after the quoted version input" 1 "has a version input that is not" step_workflow extra.yml "      - uses: goreleaser/goreleaser-action@x
+        with:
+          version: \"\${{ env.GORELEASER_VERSION }}\"#x"
+check_case "comment: no space after the pin" 1 "not a full version" append "$wf/release.yml" '      GORELEASER_VERSION: v2.19.0#x'
+check_case "comment: no space after the quoted pin" 1 "not a full version" append "$wf/release.yml" '      GORELEASER_VERSION: "v2.19.0"#x'
+check_case "comment: key quoted in the version input" 0 "" step_workflow extra.yml "      - uses: goreleaser/goreleaser-action@x
+        with:
+          \"version\": \"\${{ env.GORELEASER_VERSION }}\"  # pinned"
 
 # The names that govulncheck.yml may have, with the needs line of its job.
 check_case "needs: govulncheck once more" 0 "" append "$wf/govulncheck.yml" '    needs: govulncheck'
