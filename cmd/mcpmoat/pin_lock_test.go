@@ -1,27 +1,27 @@
 package main
 
 // In-process tests of the save step of "pin --accept": the notice for a new
-// pins file, the lock on the pins directory, the size limit of pins.json
-// (ErrStoreFull), and the warning when another run changed the pins of the
-// server while pin showed the diff. They use the helpers of
-// pins_helpers_test.go. Only TestPinAcceptStoreFull does not run in parallel:
-// it builds a pins file of almost 32 MiB.
+// pins file, the lock on the pins directory and its release before the
+// output, the size limit of pins.json (ErrStoreFull), the warning when another
+// run changed the pins of the server while pin showed the diff, and a pins
+// file that was removed meanwhile. They use the helpers of
+// pins_helpers_test.go, and the near-full pins file of writeNearFullPins
+// (scan_pins_lock_test.go). Only TestPinAcceptStoreFull does not run in
+// parallel: it builds a pins file of almost 32 MiB.
 
 import (
 	"bytes"
 	"crypto/sha256"
-	"errors"
-	"fmt"
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
 
 	"github.com/Ducarv/mcpmoat/internal/discover"
 	"github.com/Ducarv/mcpmoat/internal/inspect"
-	"github.com/Ducarv/mcpmoat/internal/pins"
 )
 
 // pinsReadErrPrefix starts the line that pin prints when it cannot read the
@@ -29,9 +29,9 @@ import (
 const pinsReadErrPrefix = "mcpmoat pin: cannot read the pins file: "
 
 // pinsLockedLine is the line that pin prints after pinsReadErrPrefix when
-// another run held the lock on the pins directory. The text is spelled out
-// here, so that a change of it shows in the tests.
-const pinsLockedLine = "mcpmoat pin: another mcpmoat run is updating the pins file; run the command again in a moment\n"
+// another process held the lock on the pins directory: pinsLockedText with
+// the pin prefix.
+const pinsLockedLine = pinPrefix + pinsLockedText + "\n"
 
 // pinsChangedWarning returns the warning line that pin prints when another run
 // changed the pins of the server name between the read for the diff and the
@@ -190,48 +190,6 @@ func TestPinAcceptLockHeld(t *testing.T) {
 	}
 }
 
-// storeFullDescription is the size of the description of the large tools in
-// TestPinAcceptStoreFull. One server with one such tool is a little under the
-// 2 MiB limit of one server, so 17 of them fill most of the 32 MiB file, and
-// the space that is left is too small for one more but large enough for a
-// small server.
-const storeFullDescription = 1900 << 10
-
-// fillPinsFile saves a pins file at path that is too full for one more server
-// with the pins filler: it sets filler as the pins of the servers filler-00,
-// filler-01 and so on, until Set refuses the next one with pins.ErrStoreFull.
-// Every server shares the same filler map, so the test keeps one copy of the
-// large text in memory. It returns the number of servers in the file. Save
-// makes the folder with mode 0700 and the file with mode 0600.
-func fillPinsFile(t *testing.T, path string, filler pins.ServerPins) int {
-	t.Helper()
-	store, err := pins.Load(path)
-	if err != nil {
-		t.Fatalf("pins.Load(%q) error = %v, want nil", path, err)
-	}
-	// 32 MiB divided by the 2 MiB limit of one server is 16, so a store with
-	// many more servers than that means Set never refuses.
-	const maxServers = 64
-	for i := range maxServers {
-		id := pins.Identity{Client: "claude-code", Source: "/filler/mcp.json", Name: fmt.Sprintf("filler-%02d", i)}
-		err := store.Set(id, filler)
-		if errors.Is(err, pins.ErrStoreFull) {
-			if i == 0 {
-				t.Fatal("Set refused the first filler server, want room for some")
-			}
-			if err := store.Save(); err != nil {
-				t.Fatalf("Store.Save() error = %v, want nil", err)
-			}
-			return i
-		}
-		if err != nil {
-			t.Fatalf("Store.Set(%s) error = %v, want nil", id.Name, err)
-		}
-	}
-	t.Fatalf("Set took %d large servers and never returned ErrStoreFull", maxServers)
-	return 0
-}
-
 // fileDigest returns the SHA-256 of the file at path. A test compares two
 // digests to check that a large file did not change, without two copies of
 // the file in memory.
@@ -252,13 +210,17 @@ func fileDigest(t *testing.T, path string) [sha256.Size]byte {
 }
 
 // TestPinAcceptStoreFull checks "pin --accept" for a new server that does not
-// fit in a pins file near its 32 MiB limit: exit code 2, the "pins file is
-// full" line with the escaped server name, no "accepted" line, and pins.json
-// unchanged. A small server still fits in the same file and is accepted.
+// fit in a pins file near its 32 MiB limit (writeNearFullPins, with the tool
+// of bigStoreTool): exit code 2, the "pins file is full" line with the
+// escaped server name, no "accepted" line, and pins.json unchanged. A small
+// server still fits in the same file and is accepted.
 //
 // It does not call t.Parallel: the file is almost 32 MiB, and the runs read it
 // several times, so it runs alone to keep the memory of the test binary low.
 func TestPinAcceptStoreFull(t *testing.T) {
+	if testing.Short() {
+		t.Skip("builds a near-32 MiB pins file; slow under -race")
+	}
 	// The name holds an escape, so the test also checks that the line escapes
 	// the name of the server, which comes from a config file.
 	const big = "big\x1b[31m"
@@ -266,18 +228,13 @@ func TestPinAcceptStoreFull(t *testing.T) {
 		big:    map[string]any{"command": "npx"},
 		"tiny": map[string]any{"command": "npx"},
 	})
-	large := mkTool("a", strings.Repeat("x", storeFullDescription))
-	filler, err := pins.Snapshot([]inspect.Tool{large})
-	if err != nil {
-		t.Fatalf("pins.Snapshot() error = %v, want nil", err)
-	}
-	servers := fillPinsFile(t, e.pinsPath(), filler)
+	writeNearFullPins(t, e.pinsPath())
 	assertPinsFileMode(t, e.pinsPath())
 	if mode := modeOf(t, filepath.Dir(e.pinsPath())); mode != 0o700 {
 		t.Errorf("pins folder mode = %o, want 700", mode)
 	}
 	before := fileDigest(t, e.pinsPath())
-	fake := fakeServers(map[string][]inspect.Tool{big: {large}, "tiny": {mkTool("t", "Tiny.")}})
+	fake := fakeServers(map[string][]inspect.Tool{big: {bigStoreTool()}, "tiny": {mkTool("t", "Tiny.")}})
 
 	got := e.pin(fake, "--accept", big)
 
@@ -300,12 +257,11 @@ func TestPinAcceptStoreFull(t *testing.T) {
 	if small.stderr != noExpectNote {
 		t.Errorf("small accept: stderr = %q, want only the note %q", small.stderr, noExpectNote)
 	}
-	file := e.readPins()
-	if n := len(file.Servers); n != servers+1 {
-		t.Errorf("pins.json has %d servers, want %d (the fillers and tiny)", n, servers+1)
-	}
-	if _, ok := file.tools(big); ok {
-		t.Errorf("pins.json has an entry for %q, want none", big)
+	// bigPinsServerNames scans the bytes: a JSON decode of 32 MiB is slow
+	// with -race. The list has no entry for big.
+	wantNames := append(fillerNames(), "tiny")
+	if names := bigPinsServerNames(t, e.pinsPath()); !slices.Equal(names, wantNames) {
+		t.Errorf("pinned servers = %q, want %q (the fillers and tiny, not big)", names, wantNames)
 	}
 }
 
@@ -438,4 +394,98 @@ func TestPinAcceptPinsChangedDuringDiff(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestPinAcceptReleasesLockBeforeOutput checks that "pin --accept" releases the
+// lock on the pins directory right after the save, before it prints the new
+// pins file notice and the "accepted" line. A slow or blocked reader of
+// stdout or stderr must not keep other runs from the pins file. The stdout
+// and the stderr of pin are lockProbeWriters: each write of one of those
+// lines tries the lock as another run would, and the lock must be free.
+func TestPinAcceptReleasesLockBeforeOutput(t *testing.T) {
+	t.Parallel()
+
+	current := []inspect.Tool{mkTool("a", "Add. Changed.")}
+
+	tests := []struct {
+		name string
+		// pinned is true when a scan pins srv first, so pins.json exists and
+		// pin prints no new pins file notice.
+		pinned bool
+		// wantStderrProbes are the stderr lines at which the lock is tried.
+		wantStderrProbes []string
+		wantAccepted     string
+	}{
+		{
+			name:             "no pins file yet",
+			wantStderrProbes: []string{"no pins file was found"},
+			wantAccepted:     "accepted srv: 1 new, 0 changed, 0 removed\n",
+		},
+		{
+			name:         "pinned server",
+			pinned:       true,
+			wantAccepted: "accepted srv: 0 new, 1 changed, 0 removed\n",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			e := newPinEnv(t, oneServer("srv"))
+			if tt.pinned {
+				firstScan(t, e, mkTool("a", "Add."))
+			}
+			c, stdout, stderr := e.cli(fakeServers(map[string][]inspect.Tool{"srv": current}))
+			outProbe := newLockProbeWriter(t, stdout, e.pinsPath(), "accepted srv:")
+			errProbe := newLockProbeWriter(t, stderr, e.pinsPath(), "no pins file was found")
+			c.stdout, c.stderr = outProbe, errProbe
+
+			code := c.dispatch([]string{"pin", "--config", e.config, "--accept", "srv"})
+
+			got := pinRunResult{code: code, stdout: stdout.String(), stderr: stderr.String()}
+			assertPinRun(t, got, scanWant{code: exitOK, stdout: []string{tt.wantAccepted}, stderr: []string{noExpectNote}})
+			assertLockFreeAt(t, outProbe, "accepted srv:")
+			assertLockFreeAt(t, errProbe, tt.wantStderrProbes...)
+			// The probes left the file as the save wrote it.
+			if pinned, ok := e.readPins().tools("srv"); !ok || len(pinned) != 1 {
+				t.Errorf("pins.json has %d tools for srv (found %v), want 1", len(pinned), ok)
+			}
+		})
+	}
+}
+
+// TestPinAcceptPinsRemovedDuringDiff checks a pins.json that was on disk at the
+// read for the diff but is gone at the read with the lock: another process
+// removed it while pin showed the diff. A save would write a new file with only
+// srv and drop every older pin, so pin saves nothing: exit code 2, the note
+// and then pinsRemovedText on stderr, no "accepted" line, no new pins file
+// notice, and no pins.json. A hookWriter on stdout removes the file when pin
+// prints the first byte of the diff.
+//
+// The control, a real first run with no file at both reads, is
+// TestPinAcceptNewPinsFileNotice: it saves and prints the notice.
+func TestPinAcceptPinsRemovedDuringDiff(t *testing.T) {
+	t.Parallel()
+
+	e := newPinEnv(t, oneServer("srv"))
+	firstScan(t, e, mkTool("a", "Add."))
+	c, stdout, stderr := e.cli(fakeServers(map[string][]inspect.Tool{"srv": {mkTool("a", "Add. Changed.")}}))
+	c.stdout = &hookWriter{w: stdout, hook: func() {
+		if err := os.Remove(e.pinsPath()); err != nil {
+			t.Errorf("remove pins.json while pin shows the diff: %v", err)
+		}
+	}}
+
+	code := c.dispatch([]string{"pin", "--config", e.config, "--accept", "srv"})
+
+	got := pinRunResult{code: code, stdout: stdout.String(), stderr: stderr.String()}
+	removed := pinPrefix + pinsRemovedText + "\n"
+	assertPinRun(t, got, scanWant{code: exitError, stderr: []string{removed}})
+	if want := noExpectNote + removed; got.stderr != want {
+		t.Errorf("stderr = %q, want exactly %q", got.stderr, want)
+	}
+	assertContainsNone(t, "stdout", got.stdout, []string{"accepted"})
+	assertContainsNone(t, "stderr", got.stderr, []string{"no pins file was found"})
+	// The diff printed before the removal, against the pins of the first read.
+	assertDiffsOf(t, got.stdout, "srv", []string{"a"})
+	e.assertNoPinsFile(t, "a pin whose pins file was removed while it ran")
 }

@@ -528,7 +528,7 @@ func TestScanConnectStatusGolden(t *testing.T) {
 	}
 	pinsPath := filepath.Join(xdg, "mcpmoat", "pins.json")
 	assertStderrLines(t, errOut, []lineWant{
-		exactLine(strings.TrimSuffix(newPinsFileNotice("scan", pinsPath), "\n")),
+		exactLine(newPinsNoticeLine("scan", pinsPath)),
 		exactLine("mcpmoat scan: pinned 2 tools for web"),
 	})
 	// Check the words without the notice line: it holds a temp path.

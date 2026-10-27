@@ -1,11 +1,13 @@
 package main
 
 // In-process tests of the save step of "mcpmoat scan" (savePinned): the notice
-// for a new pins file, the lock on the pins directory, and the size limit of
-// pins.json (32 MiB) at report time and at save time. They use a fake
+// for a new pins file, the lock on the pins directory and its release before
+// the output, a pins file that was removed while scan ran, and the size limit
+// of pins.json (32 MiB) at report time and at save time. They use a fake
 // inspector, so no server starts, and they never call t.Setenv: each test has
 // its own home and XDG_CONFIG_HOME in t.TempDir(). The shared pin helpers are
-// in pins_helpers_test.go.
+// in pins_helpers_test.go. The near-full pins file (writeNearFullPins and
+// bigStoreTool) is here, and TestPinAcceptStoreFull uses it too.
 
 import (
 	"bytes"
@@ -26,6 +28,7 @@ import (
 	"github.com/Ducarv/mcpmoat/internal/inspect"
 	"github.com/Ducarv/mcpmoat/internal/inspect/inspecttest"
 	"github.com/Ducarv/mcpmoat/internal/pins"
+	"github.com/Ducarv/mcpmoat/internal/report"
 )
 
 // TestScanPinsNewFileNotice checks the stderr notice of a scan that creates a
@@ -216,7 +219,12 @@ func readIfExists(t *testing.T, path string) ([]byte, bool) {
 }
 
 // pinsFileLimitBytes is the size limit of pins.json in bytes: maxFileSize in
-// internal/pins, which the messages show as pinsFileLimit ("32 MiB").
+// internal/pins, which the messages show as pinsFileLimit ("32 MiB"). This is
+// the one copy of the number in the cmd tests. internal/pins exports it as
+// pins.MaxFileSize only to its own tests (export_test.go), so this package
+// cannot read it. If the limit changes, the store-full tests fail: with a lower
+// limit Set refuses a filler in writeNearFullPins, and with a higher one the
+// big server fits.
 const pinsFileLimitBytes = 32 << 20
 
 // nearFullGap is the free space that writeNearFullPins leaves below
@@ -351,14 +359,10 @@ func bigPinsServerNames(t *testing.T, path string) []string {
 	return names
 }
 
-// shortCellRunes is the number of runes after which the terminal report cuts
-// a short cell, such as the "Reason:" line of a finding. It is a copy of
-// maxShortCellRunes in internal/report, which this package cannot read.
-const shortCellRunes = 80
-
 // TestScanReasonsFitShortCell checks that each fixed reason of the
-// MOAT-T2-004 rows that scan makes itself fits in a short report cell, so
-// the terminal shows the full text and not a cut one.
+// MOAT-T2-004 rows that scan makes itself fits in a short report cell
+// (report.MaxShortCellRunes, such as the "Reason:" line of a finding), so the
+// terminal shows the full text and not a cut one.
 func TestScanReasonsFitShortCell(t *testing.T) {
 	t.Parallel()
 
@@ -370,8 +374,8 @@ func TestScanReasonsFitShortCell(t *testing.T) {
 		"reasonStoreFull":      reasonStoreFull,
 	}
 	for name, reason := range reasons {
-		if n := utf8.RuneCountInString(reason); n > shortCellRunes {
-			t.Errorf("%s has %d runes, want at most %d (the terminal cuts it): %q", name, n, shortCellRunes, reason)
+		if n := utf8.RuneCountInString(reason); n > report.MaxShortCellRunes {
+			t.Errorf("%s has %d runes, want at most %d (the terminal cuts it): %q", name, n, report.MaxShortCellRunes, reason)
 		}
 	}
 }
@@ -398,6 +402,9 @@ func storeFullReasonCell() string {
 // No t.Parallel: the file is almost 32 MiB, and the scan reads it and writes
 // it again, so the test keeps its memory use away from the parallel tests.
 func TestScanPinsStoreFullAtReport(t *testing.T) {
+	if testing.Short() {
+		t.Skip("builds a near-32 MiB pins file; slow under -race")
+	}
 	e := newPinEnv(t, map[string]any{
 		"big":  map[string]any{"command": "npx"},
 		"tiny": map[string]any{"command": "npx"},
@@ -467,6 +474,9 @@ func (g growPinsInspector) Inspect(ctx context.Context, s discover.Server) (insp
 // inside inspect.Run. No t.Parallel, for the reason of
 // TestScanPinsStoreFullAtReport.
 func TestScanPinsStoreFullAtSave(t *testing.T) {
+	if testing.Short() {
+		t.Skip("builds a near-32 MiB pins file; slow under -race")
+	}
 	e := newPinEnv(t, map[string]any{
 		"big":  map[string]any{"command": "npx"},
 		"tiny": map[string]any{"command": "npx"},
@@ -502,4 +512,108 @@ func TestScanPinsStoreFullAtSave(t *testing.T) {
 	if names := bigPinsServerNames(t, e.pinsPath()); !slices.Equal(names, wantNames) {
 		t.Errorf("pinned servers = %v, want %v (big is not pinned)", names, wantNames)
 	}
+}
+
+// TestScanPinsReleasesLockBeforeOutput checks that savePinned releases the lock
+// on the pins directory right after the save, before it prints the new pins
+// file notice and the "pinned" lines. A slow or blocked reader of stderr must
+// not keep other runs from the pins file. The stderr of scan is a
+// lockProbeWriter: each write of one of those lines tries the lock as another
+// run would, and the lock must be free.
+func TestScanPinsReleasesLockBeforeOutput(t *testing.T) {
+	t.Parallel()
+
+	tools := map[string][]inspect.Tool{"alpha": {mkTool("a", "A.")}, "beta": {mkTool("b", "B.")}}
+	servers := map[string]any{
+		"alpha": map[string]any{"command": "npx"},
+		"beta":  map[string]any{"command": "npx"},
+	}
+
+	tests := []struct {
+		name string
+		// pinAlpha makes a first run that pins alpha only, so pins.json
+		// exists and the probed scan has only beta to pin.
+		pinAlpha bool
+		// wantProbes are the stderr lines at which the lock is tried, in order.
+		wantProbes []string
+	}{
+		{
+			name:       "first run, no pins file",
+			wantProbes: []string{"no pins file was found", "pinned 1 tool for alpha", "pinned 1 tool for beta"},
+		},
+		{
+			name:       "existing pins file, new server",
+			pinAlpha:   true,
+			wantProbes: []string{"pinned 1 tool for beta"},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			e := newPinEnv(t, servers)
+			if tt.pinAlpha {
+				fake := fakeServers(map[string][]inspect.Tool{"alpha": tools["alpha"]})
+				fake.Errors = map[string]error{"beta": errors.New("boom")}
+				if r := e.scan(fake); r.code != exitOK {
+					t.Fatalf("first scan: exit code = %d, stderr:\n%s", r.code, r.stderr)
+				}
+			}
+			c, stdout, stderr := e.cli(fakeServers(tools))
+			probe := newLockProbeWriter(t, stderr, e.pinsPath(), "no pins file was found", "pinned ")
+			c.stderr = probe
+
+			code := c.dispatch([]string{"scan", "--config", e.config})
+
+			got := pinRunResult{code: code, stdout: stdout.String(), stderr: stderr.String()}
+			assertScanRun(t, got, scanWant{code: exitOK, stdout: []string{"alpha", "beta"}, stderr: []string{pinnedLine("beta", 1)}})
+			assertLockFreeAt(t, probe, tt.wantProbes...)
+			if names := e.readPins().serverNames(); !slices.Equal(names, []string{"alpha", "beta"}) {
+				t.Errorf("pinned servers = %v, want [alpha beta]", names)
+			}
+		})
+	}
+}
+
+// TestScanPinsFileRemovedDuringScan checks a pins.json that was on disk at the
+// first read of scan but is gone at the read with the lock in savePinned:
+// another process removed it while scan inspected the servers. A save would
+// write a new file with only the servers of this run and drop every older pin
+// (here alpha), so a later rug pull would look like a first run. So scan saves
+// nothing: exit code 2, exactly the pinsRemovedText line on stderr, no
+// "pinned" line, no new pins file notice, and no pins.json. The report is
+// already out on stdout.
+//
+// The removal runs in the inspector (hookInspector), so it comes after the
+// first read and before savePinned, like growPinsInspector in
+// TestScanPinsStoreFullAtSave. The control, a real first run with no file at
+// both reads, is TestScanPinsNewFileNotice: it saves and prints the notice.
+func TestScanPinsFileRemovedDuringScan(t *testing.T) {
+	t.Parallel()
+
+	e := newPinEnv(t, map[string]any{
+		"alpha": map[string]any{"command": "npx"},
+		"beta":  map[string]any{"command": "npx"},
+	})
+	// The first run pins alpha only: beta fails, so it is new on the next run.
+	fake := fakeServers(map[string][]inspect.Tool{"alpha": {mkTool("a", "A.")}})
+	fake.Errors = map[string]error{"beta": errors.New("boom")}
+	if r := e.scan(fake); r.code != exitOK {
+		t.Fatalf("first scan: exit code = %d, stderr:\n%s", r.code, r.stderr)
+	}
+	insp := hookInspector{
+		inner: fakeServers(map[string][]inspect.Tool{"alpha": {mkTool("a", "A.")}, "beta": {mkTool("b", "B.")}}),
+		hook: onceFor("beta", func(discover.Server) {
+			// t.Errorf, not t.Fatalf: this runs in a goroutine of inspect.Run.
+			if err := os.Remove(e.pinsPath()); err != nil {
+				t.Errorf("remove pins.json while scan inspects: %v", err)
+			}
+		}),
+	}
+
+	got := e.scan(insp)
+
+	assertScanRun(t, got, scanWant{code: exitError, stdout: []string{"alpha", "beta"}})
+	e.assertNoPinsFile(t, "a scan whose pins file was removed while it ran")
+	assertContainsNone(t, "stderr", got.stderr, []string{"pinned ", "no pins file was found"})
+	assertStderrLines(t, got.stderr, []lineWant{exactLine(scanPrefix + pinsRemovedText)})
 }

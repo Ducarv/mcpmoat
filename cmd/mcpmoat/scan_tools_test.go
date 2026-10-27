@@ -160,9 +160,9 @@ func pinnedLine(server string, n int) string {
 }
 
 // newPinsLine is the stderr line, without its newline, that a scan prints when
-// its save creates pins.json in e (see newPinsFileNotice).
+// its save creates pins.json in e (see newPinsNoticeLine).
 func newPinsLine(e *pinEnv) string {
-	return strings.TrimSuffix(newPinsFileNotice("scan", e.pinsPath()), "\n")
+	return newPinsNoticeLine("scan", e.pinsPath())
 }
 
 // withNewPinsLine returns a copy of the stderr lines of a first-run scan in e

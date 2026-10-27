@@ -2,20 +2,17 @@ package main
 
 import (
 	"os"
+	"slices"
 	"strings"
 	"testing"
-
-	"github.com/Ducarv/mcpmoat/internal/termsafe"
 )
 
 // e2eNewPinsFileNotice returns the stderr line, without the newline, that the
 // command cmd ("scan" or "pin") prints when its save creates a new pins.json,
-// for a run of runBin with this home. The path is escaped and cut as the
-// binary does it (see printNewPinsFile).
+// for a run of runBin with this home: newPinsNoticeLine for the pins file of
+// home.
 func e2eNewPinsFileNotice(cmd, home string) string {
-	return "mcpmoat " + cmd + ": no pins file was found, so a new one was created at " +
-		termsafe.QuoteCut(pinsPath(home), maxWarnPathRunes) +
-		"; if this is not your first run, the old file was removed or moved"
+	return newPinsNoticeLine(cmd, pinsPath(home))
 }
 
 // TestE2EScanNewPinsFileNotice checks the new pins file notice on the real
@@ -60,7 +57,7 @@ func TestE2EScanNewPinsFileNotice(t *testing.T) {
 			t.Parallel()
 			home, work := benignHome(t, name)
 			notice := exactLine(e2eNewPinsFileNotice(tt.cmd, home))
-			firstStderr := append(append(append([]lineWant(nil), tt.before...), notice), tt.after...)
+			firstStderr := slices.Concat(tt.before, []lineWant{notice}, tt.after)
 
 			// run runs the command once and checks the result.
 			run := func(t *testing.T, step string, wantStderr []lineWant, wantStdout string) {

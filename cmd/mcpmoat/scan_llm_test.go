@@ -748,7 +748,7 @@ func TestScanLLMConfig(t *testing.T) {
 			llmAssertNoKey(t, llmTestKey, fmt.Sprintf("%v %+v", got, got))
 			assertStderrLines(t, r.stderr, []lineWant{
 				exactLine(llmWarning(string(tt.want.Provider), tt.wantHost)),
-				exactLine(strings.TrimSuffix(newPinsFileNotice("scan", e.pinsPath()), "\n")),
+				exactLine(newPinsNoticeLine("scan", e.pinsPath())),
 				prefixLine(scanPrefix + "pinned "),
 			})
 		})

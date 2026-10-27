@@ -7,11 +7,13 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"runtime"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/Ducarv/mcpmoat/internal/discover"
@@ -667,14 +669,22 @@ func assertNoExpectNote(t *testing.T, stderr string) {
 	}
 }
 
-// newPinsFileNotice returns the exact stderr line, with its newline, that
+// newPinsNoticeLine returns the exact stderr line, without its newline, that
 // printNewPinsFile prints for the command cmd ("scan" or "pin") and the pins
-// file path. It escapes and cuts path as the production code does. Tests pass
-// e.pinsPath() as path.
-func newPinsFileNotice(cmd, path string) string {
+// file path. It escapes and cuts path as the production code does. It is the
+// one copy of the notice text in the tests: use it with exactLine, and
+// newPinsFileNotice for the line with its newline.
+func newPinsNoticeLine(cmd, path string) string {
 	return "mcpmoat " + cmd + ": no pins file was found, so a new one was created at " +
 		termsafe.QuoteCut(path, maxWarnPathRunes) +
-		"; if this is not your first run, the old file was removed or moved\n"
+		"; if this is not your first run, the old file was removed or moved"
+}
+
+// newPinsFileNotice returns newPinsNoticeLine(cmd, path) with its newline:
+// the exact text that printNewPinsFile writes. Tests pass e.pinsPath() as
+// path.
+func newPinsFileNotice(cmd, path string) string {
+	return newPinsNoticeLine(cmd, path) + "\n"
 }
 
 // withoutPinsFileNotice returns stderr without the line of newPinsFileNotice(cmd,
@@ -717,6 +727,85 @@ func holdPinsLock(t *testing.T, path string) (release func()) {
 		t.Skip("the system cannot lock the pins directory here")
 	}
 	return release
+}
+
+// lockProbe is the result of one lock attempt of a lockProbeWriter.
+type lockProbe struct {
+	// line is the text of the write that ran the attempt.
+	line string
+	// err is the error of pins.LoadLocked: nil when the lock was free.
+	err error
+	// unlocked is pins.Store.Unlocked: the system could not lock at all, so
+	// the attempt proves nothing.
+	unlocked bool
+}
+
+// lockProbeWriter is a stdout or stderr for scan or pin that checks, from
+// inside the command, whether the command still holds the lock on the pins
+// directory when it prints a line. On each write that holds one of the texts
+// in match, it calls pins.LoadLocked on path with no wait, as another run
+// would, records the result, and releases the lock again before it writes to
+// w. The test checks the records after the command returns (see
+// assertLockFreeAt), so there is no sleep and no goroutine: the attempt runs
+// at the exact moment of the write.
+type lockProbeWriter struct {
+	t     *testing.T
+	w     io.Writer
+	path  string
+	match []string
+
+	mu     sync.Mutex // guards probes, in case a write comes from another goroutine
+	probes []lockProbe
+}
+
+// newLockProbeWriter returns a lockProbeWriter that writes to w and tries the
+// lock on the pins file path at each write that holds one of the texts in
+// match.
+func newLockProbeWriter(t *testing.T, w io.Writer, path string, match ...string) *lockProbeWriter {
+	return &lockProbeWriter{t: t, w: w, path: path, match: match}
+}
+
+func (p *lockProbeWriter) Write(b []byte) (int, error) {
+	if slices.ContainsFunc(p.match, func(m string) bool { return bytes.Contains(b, []byte(m)) }) {
+		store, release, err := pins.LoadLocked(p.t.Context(), p.path, 0)
+		// Release inside the write, so the command never waits for the probe.
+		release()
+		probe := lockProbe{line: string(b), err: err}
+		if err == nil {
+			probe.unlocked = store.Unlocked()
+		}
+		p.mu.Lock()
+		p.probes = append(p.probes, probe)
+		p.mu.Unlock()
+	}
+	return p.w.Write(b)
+}
+
+// assertLockFreeAt fails the test unless p tried the lock exactly once for each
+// text of want, in order, and found it free each time: the command had
+// released the lock before it printed those lines. It skips the test when the
+// system cannot lock the pins directory, because then a free lock proves
+// nothing.
+func assertLockFreeAt(t *testing.T, p *lockProbeWriter, want ...string) {
+	t.Helper()
+	p.mu.Lock()
+	probes := slices.Clone(p.probes)
+	p.mu.Unlock()
+	if len(probes) != len(want) {
+		t.Errorf("lock attempts at %d writes, want %d (%q)\nprobes: %+v", len(probes), len(want), want, probes)
+	}
+	for i, probe := range probes {
+		if probe.unlocked {
+			t.Skip("the system cannot lock the pins directory here")
+		}
+		if i < len(want) && !strings.Contains(probe.line, want[i]) {
+			t.Errorf("lock attempt %d ran at the write %q, want the write of %q", i+1, probe.line, want[i])
+		}
+		if probe.err != nil {
+			t.Errorf("the lock was not free at the write %q: pins.LoadLocked error = %v, want nil (the command must release the lock before it prints)",
+				probe.line, probe.err)
+		}
+	}
 }
 
 // TestNewPinsFileNotice checks that newPinsFileNotice gives the exact line of
