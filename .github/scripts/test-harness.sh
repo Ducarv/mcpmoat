@@ -178,8 +178,8 @@ harness_footer() {
 # step itself. The block ends at the first line with less indent, and blank
 # lines at its end are dropped, as YAML does. A line of only spaces and tabs
 # counts as blank. Text of later steps and jobs never shows. It exits 3 when
-# there is no such step or when the first step with the name has no block,
-# even when a later step with the name has one.
+# there is no such step, when the first step with the name has no block (even
+# when a later step with the name has one), or when the block has no line.
 extract_run_block() {
   HARNESS_STEP=$2 HARNESS_JOB=${3-} awk '
     BEGIN { step = ENVIRON["HARNESS_STEP"]; job = ENVIRON["HARNESS_JOB"] }
@@ -193,6 +193,7 @@ extract_run_block() {
       if (RLENGTH < indent) exit
       for (; blank > 0; blank--) print ""
       print substr($0, indent + 1)
+      printed = 1
       next
     }
     /^[[:space:]]*(#.*)?$/ { next }
@@ -213,6 +214,6 @@ extract_run_block() {
       next
     }
     instep && ind == keyindent && /^ *run: *[|][-+]? *(#.*)?$/ { inrun = 1; found = 1 }
-    END { exit found ? 0 : 3 }
+    END { exit (found && printed) ? 0 : 3 }
   ' "$1"
 }
