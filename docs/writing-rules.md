@@ -156,10 +156,48 @@ How mcpmoat prepares the text before a match. This applies to every regex and ke
   letters can hide. The `mixed_script` heuristic (MOAT-T1-010 for a description, MOAT-T1-011 for a
   schema) flags a word that mixes letters of look-alike scripts. The look-alike fold, the rules and
   the unit exemption of `mixed_script`, and the limits of both are in the package doc of
-  `internal/rules` ([doc.go](../internal/rules/doc.go)). A regex reads up to 21 forms: the seven forms,
-  their folds and their look-alike folds. A look-alike fold is a new form only when the text has a
-  look-alike letter, so other text has at most 14 forms. A keyword reads up to seven, because
+  `internal/rules` ([doc.go](../internal/rules/doc.go)). A regex reads up to 21 forms: the seven
+  forms, their folds and their look-alike folds. A look-alike fold is a new form only when the text
+  has a look-alike letter, so other text has at most 14 forms. A keyword reads up to seven, because
   mcpmoat matches a keyword only against the folds.
+
+  Some characters look like both "I" and "l", so a text can mean either letter. The look-alike
+  fold reads each such character as one of the two letters. The plain fold also turns some
+  compatibility characters into an ASCII "I" or "l": fullwidth U+FF29, mathematical U+1D5A8, the
+  roman numerals U+2160 and U+217C, and the ligature U+FB02 ("fl"). Ordinary accented letters
+  such as U+00CF or U+013E also fold to "I" or "l", but they do not count, because they are
+  normal letters of French, Czech, Slovak and other languages. So when a rule compiles, mcpmoat
+  builds an I/l-blind twin of each `any_regex` and `all_regex` pattern. In the twin, a literal "I"
+  or "l" also matches the other letter, and under `(?i)` so do "i" and "L". A class that holds "I"
+  or "l", such as `[il]`, also gets the other letter. A negated class does not change. A wide class
+  that holds all of a-z keeps its "l" as it is, and one that holds all of A-Z keeps its "I", so
+  `[a-z]`, `[A-Z]` and `\w` do not change. So `(?i)ignore` matches Cyrillic U+04CF + "gnore", and
+  `(?i)all` matches "a" + U+0406 U+0406. The twin runs only on the twin forms: the look-alike folds,
+  and the plain folds in which a character became an ASCII "I" or "l" through a compatibility
+  mapping. The pattern itself runs on the other forms. The number of forms does not change, only
+  which pattern reads which form. The twin forms come after the other forms. The twin program is
+  never larger than the program of the pattern, so the worst-case cost of a match does not change.
+  A pattern that starts with a literal "I" or "l" can be slower on the twin forms, because its twin
+  loses the literal prefix that Go's regexp uses to search fast. No built-in rule starts this way.
+  Compiling the built-in rules takes about 2.5 times as long as before (it varies by machine), about
+  4 ms more for each scan.
+
+  The twin has limits:
+  - A keyword rule has no twin, so a look-alike of "I" or "l" in a keyword is not read as either
+    letter.
+  - A pattern that writes a lowercase "i" or an uppercase "L" without `(?i)` does not get the other
+    letter there.
+  - A text with no look-alike letter and no compatibility character that the plain fold turns into
+    "I" or "l" has no twin form, so ASCII "lgnore" does not match.
+  - When a text holds one such character, the twin reads all of its ASCII "I" and "l" both ways. So
+    ASCII "lgnore all previous instructions." next to one Cyrillic word matches MOAT-T1-001, and
+    pairs such as "all" and "ail" or "url" and "uri" can match in a text that mixes scripts.
+  - An accented "I" or "l" used as the other letter is not read both ways. So U+1ECA U+1ECA read
+    as "ll", or U+1E37 + "gnore", does not match through the twin.
+  - mcpmoat does not build a twin when its printed pattern is longer than 64 KiB or when a safety
+    check fails. The rule then runs its own pattern on the twin forms.
+  - U+01C0 and U+01C3 are click letters in some languages, so mcpmoat does not flag them by
+    themselves.
 - A regex or a keyword reads only a window of the text: the invisible characters are removed from
   the first 128 KiB of the raw text, and then each form is cut at 32 KiB. Padding can push an
   instruction past this window. The `match_window` heuristic closes this gap. It fires when the

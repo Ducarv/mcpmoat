@@ -3,11 +3,14 @@ package rules
 import (
 	"slices"
 	"sync"
+
+	"golang.org/x/text/unicode/norm"
 )
 
-// maxRegexForms is the largest number of forms that regexForms returns, 21
-// in all: the seven base forms of baseFormsCut, the seven plain folds
-// (foldMarks) and the seven skeleton folds (foldSkeleton) of the base forms.
+// maxRegexForms is the largest number of forms that regexFormParts
+// returns, 21 in all: the seven base forms of baseFormsCut, the seven plain
+// folds (foldMarks) and the seven skeleton folds (foldSkeleton) of the base
+// forms.
 const maxRegexForms = 3 * maxBaseForms
 
 // maxKeywordForms is the largest number of forms that keywordForms returns:
@@ -24,7 +27,7 @@ const maxKeywordForms = maxBaseForms
 //     and the cut flag of the match window. windowCut runs only this step,
 //     so the match_window heuristic does not build the folds.
 //   - Step two (buildFolds) builds the plain folds and the skeleton folds
-//     from the base forms of step one. regexForms and keywordForms run it,
+//     from the base forms of step one. regexFormParts and keywordForms run it,
 //     and it runs step one first when step one did not run yet.
 //
 // The other heuristics get only raw, so they build no forms of p.
@@ -51,9 +54,10 @@ type preparedText struct {
 	base     []string  // the base forms of baseFormsCut (dedup)
 	cut      bool      // the cut flag of baseFormsCut
 
-	foldOnce sync.Once // guards buildFolds (step two)
-	regex    []string  // base forms, then their plain and skeleton folds (dedup)
-	keywords []string  // the foldMarks of each base form, no skeleton (dedup)
+	foldOnce  sync.Once // guards buildFolds (step two)
+	regex     []string  // the front forms, then the twin forms (dedup; see regexFormParts)
+	twinStart int       // regex[twinStart:] are the twin forms
+	keywords  []string  // the foldMarks of each base form, no skeleton (dedup)
 
 	schemaOnce sync.Once       // guards the prepareSchemaFrom call of schema
 	sch        *preparedSchema // raw decoded as a schema; nil until schema runs
@@ -83,11 +87,12 @@ func (p *preparedText) schema() *preparedSchema {
 	return p.sch
 }
 
-// regexForms returns the forms that the regex matchers (any_regex and
-// all_regex) read: the base forms of baseFormsCut, and then, for each base
-// form that is not only ASCII, its plain fold (foldMarks) and its skeleton
-// fold (foldSkeleton), each one when it is a new form. A regex matches when
-// it matches in one form. So the regex `ignore` also matches the fullwidth
+// regexFormParts returns the forms that the regex matchers (any_regex and
+// all_regex) read, in two parts: front and then twin. The forms are the
+// base forms of baseFormsCut, and for each base form that is not only
+// ASCII, its plain fold (foldMarks) and its skeleton fold (foldSkeleton).
+// Each form is kept only when it is a new form. A regex matches when it
+// matches in one form. So the regex `ignore` also matches the fullwidth
 // "ignore" (U+FF49 ...), the mathematical bold "ignore" (U+1D422 ...),
 // "ig" + U+0336 + "nore" and U+0456 + "gnore" (Cyrillic i).
 //
@@ -97,22 +102,41 @@ func (p *preparedText) schema() *preparedSchema {
 // (Cyrillic) matches the regex `~/\.ssh`. The keyword forms do not get the
 // skeleton (see keywordForms).
 //
+// The two parts let the matchers read the twin forms with the I/l-blind
+// twin of each regex, and the front forms with the regex itself (see
+// Matcher.matchRegex):
+//
+//   - twin holds the forms that can hold a look-alike of "I" or "l" written
+//     as an ASCII letter: the skeleton folds, and the plain folds in which
+//     a compatibility mapping made a new ASCII "I" or "l" (see foldAddsIL).
+//     The matchers read them with the I/l-blind twin of each regex.
+//   - front holds the other forms: the base forms and the other plain
+//     folds. The matchers read them with each regex as it is.
+//
+// A text with no rune of skeletonTable and no compatibility rune that folds
+// to "I" or "l" has an empty twin. A plain ASCII text is such a text, and so
+// is a text whose only runes that fold to "I" or "l" are accented letters,
+// such as U+00CF and U+013E. A base form keeps each look-alike as it is, so
+// a pattern of ASCII letters does not match it there, and the twin is not
+// needed in front.
+//
 // Only the text is folded, not the pattern. So a pattern with an accent, a
 // mark or a letter of skeletonTable matches only in the base forms.
 //
-// Equal forms are kept only once, so there are at most maxRegexForms forms:
-// the maxBaseForms base forms, their plain folds and their skeleton folds.
-// When no rune of skeletonTable is in a base form or in its plain fold, its
-// skeleton fold equals its plain fold, so it adds no form: such a text has
-// only its base forms and their plain folds. Each form is at most
-// MaxMatchInputBytes long. A plain ASCII text has one form, so it costs no
-// more.
+// Equal forms are kept only once, so there are at most maxRegexForms forms
+// in the two parts: the maxBaseForms base forms, their plain folds and
+// their skeleton folds. When no rune of skeletonTable is in a base form or
+// in its plain fold, its skeleton fold equals its plain fold, so it adds no
+// form: such a text has only its base forms and their plain folds. Each
+// form is at most MaxMatchInputBytes long. A plain ASCII text has one form,
+// so it costs no more.
 //
-// The caller must not modify the returned slice or its elements: the next
-// call returns the same slice.
-func (p *preparedText) regexForms() []string {
+// front has no room after its end, so an append to it cannot write into
+// twin. The caller must not modify the returned slices or their elements:
+// the next call returns the same slices.
+func (p *preparedText) regexFormParts() (front, twin []string) {
 	p.foldOnce.Do(p.buildFolds)
-	return p.regex
+	return p.regex[:p.twinStart:p.twinStart], p.regex[p.twinStart:]
 }
 
 // keywordForms returns the forms that the keyword matcher reads: the fold
@@ -135,13 +159,24 @@ func (p *preparedText) buildBase() {
 	p.base, p.cut = baseFormsCut(p.raw)
 }
 
-// buildFolds is step two of the build (see preparedText). regexForms and
-// keywordForms call it through p.foldOnce, so it runs once. It gets the base
-// forms from step one, and it folds each base form once with foldMarks: the
-// plain fold is a keyword form and a regex form. It then adds the skeleton
-// fold (foldSkeleton) to the regex forms. A base form that is only ASCII is
-// its own fold, so it is not folded (foldMarks and foldSkeleton would return
-// it unchanged).
+// buildFolds is step two of the build (see preparedText). regexFormParts
+// and keywordForms call it through p.foldOnce, so it runs once. It gets the
+// base forms from step one, and it folds each base form once with
+// foldMarks: the plain fold is a keyword form and a regex form. It then adds
+// the skeleton fold (foldSkeleton) to the regex forms. A base form that is
+// only ASCII is its own fold, so it is not folded (foldMarks and
+// foldSkeleton would return it unchanged).
+//
+// The regex forms are built in two lists, front and twin (see
+// regexFormParts), and twinStart keeps the index of the first twin form.
+// The base forms and the plain folds go to front, but a plain fold in which
+// a compatibility mapping made a new "I" or "l" (see foldAddsIL) goes to
+// twin, and so does each skeleton fold that differs from its plain fold. A
+// skeleton fold that equals its plain fold has no rune of skeletonTable, so
+// it adds nothing. A form is added only when neither list holds it. When a
+// twin form is in front already, it moves to twin (see addTwinForm). So
+// each text is in one list only, and the texts and their count are the same
+// as with one list: at most maxRegexForms.
 //
 // The two steps have their own sync.Once, so buildFolds can call
 // p.baseOnce.Do while it runs under p.foldOnce. buildBase never calls
@@ -166,24 +201,104 @@ func (p *preparedText) buildBase() {
 func (p *preparedText) buildFolds() {
 	p.baseOnce.Do(p.buildBase)
 	base := p.base // distinct already (see appendNew)
-	// A copy: regex gets new elements, and base must stay as step one made it.
-	regex := append(make([]string, 0, maxRegexForms), base...)
+	// A copy: front gets new elements, and base must stay as step one made it.
+	front := append(make([]string, 0, maxRegexForms), base...)
+	twin := make([]string, 0, maxRegexForms)
 	keywords := make([]string, 0, maxKeywordForms)
+	type skelFold struct{ plain, skel string }
+	skels := make([]skelFold, 0, maxBaseForms) // added after all plain folds
 	for _, f := range base {
-		// An ASCII form is its own fold, and regex holds it already.
+		// An ASCII form is its own fold, and front holds it already.
 		if isASCII(f) {
 			keywords = appendNew(keywords, f)
 			continue
 		}
 		kw := foldMarks(f)
 		keywords = appendNew(keywords, kw)
-		regex = appendNew(regex, kw)
-		// Usually equal to kw (no rune of skeletonTable), so not added.
-		regex = appendNew(regex, skeletonFold(f, kw))
+		switch {
+		case foldAddsIL(f, kw):
+			front, twin = addTwinForm(front, twin, kw)
+		case !slices.Contains(twin, kw):
+			front = appendNew(front, kw)
+		}
+		skels = append(skels, skelFold{kw, skeletonFold(f, kw)})
 	}
+	for _, s := range skels {
+		// Usually equal to its plain fold (no rune of skeletonTable), so it
+		// adds nothing: the plain fold is in its list already.
+		if s.skel != s.plain {
+			front, twin = addTwinForm(front, twin, s.skel)
+		}
+	}
+	p.twinStart = len(front)
 	// Clip, so an append by a caller cannot write into the shared array.
-	p.regex = slices.Clip(regex)
+	p.regex = slices.Clip(append(front, twin...))
 	p.keywords = slices.Clip(keywords)
+}
+
+// foldAddsIL reports whether the plain fold kw = foldMarks(f) holds more
+// ASCII "I" and "l" than the canonical decomposition (NFD) of f. So it is
+// true when the fold made an "I" or an "l" from a compatibility mapping:
+// fullwidth U+FF29 and U+FF4C, the roman numerals U+2160 and U+217C,
+// U+2110 and U+2113, the ligature U+FB02 and the mathematical letters such
+// as U+1D5A8 and U+1D5C5 (sans-serif I and l, two bars). Such a rune looks
+// like the other letter as much as like its own. It is not in
+// skeletonTable, so the skeleton fold of f equals kw and adds no form. So
+// kw goes to the twin forms (see regexFormParts).
+//
+// An accented letter, such as U+00CF (I with diaeresis), U+0130 (I with dot
+// above) or U+013E (l with caron), is not a look-alike: its NFD is the ASCII
+// "I" or "l" and combining marks, and the fold only drops the marks. It is
+// a normal letter of French, Czech, Slovak, Turkish and other languages. So
+// it does not count, and a text with such a letter reads with each regex as
+// it is. NFD splits each accented "I" and "l" of f into the ASCII letter and
+// its marks, and keeps each compatibility rune as it is. So NFD(f) holds the
+// ASCII "I" and "l" of f and of its accented letters, and no other. For
+// each rune, the fold holds at least the "I" and "l" of its NFD (a test
+// checks all runes), so the counts add up rune by rune. In the Unicode
+// tables of the Go version of go.mod, 61 runes fold to exactly "I" or "l":
+// 38 of them count, and 23 are an "I" or "l" with marks (U+00CC to U+00CF,
+// U+0128, U+012A, U+012C, U+012E, U+0130, U+013A, U+013C, U+013E, U+01CF,
+// U+0208, U+020A, U+1E2C, U+1E2E, U+1E37, U+1E39, U+1E3B, U+1E3D, U+1EC8
+// and U+1ECA) that do not. The 27 runes that fold to a longer text with an
+// "I" or "l", such as U+2161 ("II") and U+FB02 ("fl"), all count.
+//
+// The first test is cheap and has no allocation: foldMarks keeps each ASCII
+// byte of f, so when kw has no more "I" and "l" than f, no rune folded to
+// them, and NFD does not run. This is the case for every ASCII f (kw is f)
+// and for most other texts. NFD runs only when a rune folded to "I" or "l",
+// and it allocates only when f is not in NFD already.
+func foldAddsIL(f, kw string) bool {
+	n := countIL(kw)
+	if n <= countIL(f) {
+		return false
+	}
+	return n > countIL(norm.NFD.String(f))
+}
+
+// countIL returns the number of the bytes "I" and "l" in s.
+func countIL(s string) int {
+	n := 0
+	for i := 0; i < len(s); i++ {
+		if s[i] == 'I' || s[i] == 'l' {
+			n++
+		}
+	}
+	return n
+}
+
+// addTwinForm adds s to the twin forms and returns both lists. It does
+// nothing when twin holds s already. When front holds s, s moves from front
+// to twin: the I/l-blind twin of a regex matches every text that the regex
+// matches (see twinFromTree), so reading s with the twin only loses no match.
+func addTwinForm(front, twin []string, s string) (newFront, newTwin []string) {
+	if slices.Contains(twin, s) {
+		return front, twin
+	}
+	if i := slices.Index(front, s); i >= 0 {
+		front = slices.Delete(front, i, i+1)
+	}
+	return front, append(twin, s)
 }
 
 // skeletonFold returns foldSkeleton(f), with kw = foldMarks(f) computed by

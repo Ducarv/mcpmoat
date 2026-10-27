@@ -82,12 +82,30 @@ type confusable struct {
 // Cyrillic U+04CF (small palochka) and Hebrew vav U+05D5. Such an entry has
 // "(TR39: l)" in its comment when it maps to "I". One caseless rune maps to
 // "I" too: U+A7FE (Latin epigraphic letter I longa), which is an "I" by its
-// name (see latinILonga in the test). The other reading is a known limit:
-// an uppercase look-alike used as "l" (U+04C0 U+04C0 for "ll"), and a
-// caseless one used as "I" (Runic U+16C1 or U+01C0, a bare bar, + "gnore" is
-// "lgnore"). The mixed_script heuristic flags a rune of another script in a
-// Latin word, so it catches U+16C1, but it cannot catch U+01C0, which is
-// Latin (issue #149).
+// name (see latinILonga in the test).
+//
+// So the table still picks one letter for each rune, and some texts need
+// the other one: an uppercase look-alike used as "l" ("a" + U+0406 U+0406
+// reads "aII") and a caseless or lowercase one used as "I" (U+01C0, a bare
+// bar, or U+04CF + "gnore" reads "lgnore"). So in the skeleton folds, the
+// any_regex and all_regex patterns run as their I/l-blind twin (see
+// twinFromTree in twin.go), which reads "I" and "l" as one letter. So
+// "lgnore" and "aII" in a skeleton fold match `(?i)ignore` and `(?i)all`,
+// also when one rune is used both ways. For such a pattern the pick of the table does not
+// matter, within the limits of the twin (a keyword, an "i" or "L" without
+// (?i), a wide or negated class: see twin.go). A plain ASCII text has no
+// skeleton fold, so ASCII "lgnore" does not match.
+//
+// The runes that are not in the table but that the plain fold (foldMarks)
+// turns into an ASCII "I" or "l" by a compatibility mapping get the same
+// reading: 38 runes fold to exactly "I" or "l", such as fullwidth U+FF29
+// and U+FF4C, the roman numerals U+2160 and U+217C, and the mathematical
+// letters U+1D5A8 and U+1D5C5, and 27 more fold to a longer text with an
+// "I" or "l", such as U+2161 ("II"). A plain fold with such a rune is read
+// with the twin too (see foldAddsIL in prepare.go). The 23 accented letters
+// that fold to "I" or "l" because the fold drops their marks, such as
+// U+00CF (I with diaeresis) and U+013E (l with caron), are normal letters,
+// not look-alikes, so they do not get the twin.
 //
 // The I/l rule uses the letter of the target, also when marks follow it:
 // U+0197 (capital I with stroke, TR39 "l" + U+0335) maps to "I", and U+019A
