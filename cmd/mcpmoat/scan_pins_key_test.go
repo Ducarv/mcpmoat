@@ -480,7 +480,7 @@ func TestScanPinKeyIgnoreFile(t *testing.T) {
 			}
 			writeTestFile(t, e.work, rules.IgnoreFileName, file.String())
 
-			got := e.scan(fakeServers(map[string][]inspect.Tool{"srv": current}), "--json")
+			got := e.scan(fakeServers(map[string][]inspect.Tool{"srv": current}), "--json", "--use-ignore-file")
 
 			if got.code != exitFindings {
 				t.Errorf("exit code = %d, want %d\nstderr:\n%s", got.code, exitFindings, got.stderr)
