@@ -1,17 +1,14 @@
 package main
 
 import (
-	"fmt"
-	"io/fs"
-	"regexp"
-	"sort"
+	"maps"
+	"slices"
 	"strings"
 
 	"go.yaml.in/yaml/v3"
 )
 
-// The govulncheck rules. They port the govulncheck part of the old
-// check-tool-pins.sh. The rules read the decoded YAML, so quotes, escapes,
+// The govulncheck rules. The rules read the decoded YAML, so quotes, escapes,
 // flow style and block scalars cannot hide a value:
 //   - ci.yml has exactly one GOVULNCHECK_VERSION pin version. It is the
 //     reference.
@@ -26,15 +23,9 @@ import (
 //   - Any other workflow does not name govulncheck.
 //
 // A pin is a mapping key that is exactly GOVULNCHECK_VERSION and has a full
-// version as its scalar value. As in the old script, the pin can be in any
-// mapping of the file.
-
-// The workflows that may name govulncheck. ci.yml holds the reference pin.
-const (
-	gvCIPath      = ".github/workflows/ci.yml"
-	gvReleasePath = ".github/workflows/release.yml"
-	gvWeeklyPath  = ".github/workflows/govulncheck.yml"
-)
+// version as its scalar value. The pin can be in any mapping of the file:
+// GitHub merges the env of the workflow, the job and the step, and the rules
+// only need every pin to have the version of ci.yml.
 
 const (
 	// gvPinKey is the name of the pin, with its exact case.
@@ -48,11 +39,6 @@ const (
 	gvFailureIf = "failure() || needs.govulncheck.result == 'cancelled'"
 )
 
-// gvVersionRe matches a full version only. A short one such as v1.9 is a
-// query, and Go picks the newest version that matches it. In Go regexp, $
-// matches only at the end of the text, so a trailing newline does not match.
-var gvVersionRe = regexp.MustCompile(`^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$`)
-
 // gvPin is one GOVULNCHECK_VERSION pin.
 type gvPin struct {
 	version string     // the decoded version, such as v1.9.0
@@ -63,57 +49,40 @@ type gvPin struct {
 // first. It is a function and not a package variable, so that no code can
 // change the list at run time.
 func gvListedPaths() []string {
-	return []string{gvCIPath, gvReleasePath, gvWeeklyPath}
+	return []string{ciPath, releasePath, weeklyPath}
 }
 
 // checkGovulncheck returns one message per problem with the govulncheck pin.
-//
-// The first parameter is the repository root. The govulncheck rules do not
-// read files other than the workflows, so it is not used. The blank name _
-// tells the reader (and the linter) that this is on purpose.
-func checkGovulncheck(_ fs.FS, wfs map[string]*workflow) []string {
-	var msgs []string
+// The rules for the listed workflows compare the three files, so they run
+// only when all three are in wfs. A missing one gives no message here: check
+// reports the missing workflow once, in checkRequired or notLoaded. The rule
+// for the other workflows always runs.
+func checkGovulncheck(wfs map[string]*workflow) []string {
+	others := gvCheckOthers(wfs)
 	for _, p := range gvListedPaths() {
-		if !gvUsable(wfs[p]) {
-			msgs = append(msgs, fmt.Sprintf("%s: the govulncheck check needs this workflow, but it is missing or did not parse", p))
+		if wfs[p] == nil {
+			return others
 		}
 	}
-	if len(msgs) == 0 {
-		want, refMsgs := gvReferencePin(wfs[gvCIPath])
-		msgs = append(msgs, refMsgs...)
-		for _, p := range gvListedPaths() {
-			msgs = append(msgs, gvCheckListed(p, wfs[p], want)...)
-		}
+	want, msgs := gvReferencePin(wfs[ciPath])
+	for _, p := range gvListedPaths() {
+		msgs = append(msgs, gvCheckListed(p, wfs[p], want)...)
 	}
-	return append(msgs, gvCheckOthers(wfs)...)
-}
-
-// gvUsable reports whether w is a parsed workflow that the rules can walk.
-func gvUsable(w *workflow) bool {
-	return w != nil && w.top != nil
+	return append(msgs, others...)
 }
 
 // gvReferencePin returns the one pin version of ci.yml. When ci.yml has no
 // pin, or pins more than one version, it returns "" and a message.
 func gvReferencePin(w *workflow) (string, []string) {
-	seen := make(map[string]bool)
 	var versions []string
 	for _, p := range gvPins(w) {
-		if !seen[p.version] {
-			seen[p.version] = true
-			versions = append(versions, p.version)
-		}
+		versions = append(versions, p.version)
 	}
-	if len(versions) == 1 {
-		return versions[0], nil
+	version, found := onlyVersion(versions)
+	if found == "" {
+		return version, nil
 	}
-	found := "none"
-	if len(versions) > 0 {
-		sort.Strings(versions)
-		// A version can be long and ci.yml can hold many, so cut the list.
-		found = cutText(strings.Join(versions, ", "), maxShown)
-	}
-	return "", []string{fmt.Sprintf("%s: the file must pin one version of govulncheck in %s (a full version such as v1.2.3), found: %s", w.file, gvPinKey, found)}
+	return "", []string{w.errorAt(nil, "the file must pin one version of govulncheck in %s (a full version such as v1.2.3), found: %s", gvPinKey, found).Error()}
 }
 
 // gvCheckListed applies the rules for one of the listed workflows. path is
@@ -123,13 +92,13 @@ func gvCheckListed(path string, w *workflow, want string) []string {
 	var msgs []string
 	pins := gvPins(w)
 	// ci.yml is the reference, so gvReferencePin checked its pins.
-	if path != gvCIPath {
+	if path != ciPath {
 		if len(pins) == 0 {
-			msgs = append(msgs, fmt.Sprintf("%s: the file has no %s pin (a full version such as v1.2.3)", w.file, gvPinKey))
+			msgs = append(msgs, w.errorAt(nil, "the file has no %s pin (a full version such as v1.2.3)", gvPinKey).Error())
 		}
 		for _, p := range pins {
 			if want != "" && p.version != want {
-				msgs = append(msgs, fmt.Sprintf("%s:%d: the govulncheck pin %s differs from %s, the pin in ci.yml", w.file, p.key.Line, cutText(p.version, maxShown), cutText(want, maxShown)))
+				msgs = append(msgs, w.errorAt(p.key, "the govulncheck pin %s differs from %s, the pin in ci.yml", show(p.version), show(want)).Error())
 			}
 		}
 	}
@@ -137,7 +106,7 @@ func gvCheckListed(path string, w *workflow, want string) []string {
 	calls, callMsgs := gvCalls(w)
 	msgs = append(msgs, callMsgs...)
 	if len(calls) == 0 {
-		msgs = append(msgs, fmt.Sprintf("%s: no step has the run value %s", w.file, gvCall))
+		msgs = append(msgs, w.errorAt(nil, "no step has the run value %s", gvCall).Error())
 	}
 
 	// allowed holds the nodes that may name govulncheck. A map with pointer
@@ -150,14 +119,14 @@ func gvCheckListed(path string, w *workflow, want string) []string {
 	for _, c := range calls {
 		allowed[c] = true
 	}
-	if path == gvWeeklyPath {
+	if path == weeklyPath {
 		for _, n := range gvWeeklyNames(w) {
 			allowed[n] = true
 		}
 	}
 	for _, s := range w.scalars() {
 		if gvNamesTool(s.Value) && !allowed[s] {
-			msgs = append(msgs, fmt.Sprintf("%s:%d: %s names govulncheck, but it is not the %s pin, the call or an allowed name", w.file, s.Line, show(s.Value), gvPinKey))
+			msgs = append(msgs, w.errorAt(s, "%s names govulncheck, but it is not the %s pin, the call or an allowed name", show(s.Value), gvPinKey).Error())
 		}
 	}
 
@@ -169,14 +138,14 @@ func gvCheckListed(path string, w *workflow, want string) []string {
 // Its key names govulncheck, so the name rule of gvCheckListed reports it.
 func gvPins(w *workflow) []gvPin {
 	var pins []gvPin
-	gvWalk(w.root(), func(n *yaml.Node) {
+	walk(w.top, func(n *yaml.Node) {
 		if n.Kind != yaml.MappingNode {
 			return
 		}
 		// Content of a mapping holds key, value, key, value and so on.
 		for i := 0; i+1 < len(n.Content); i += 2 {
 			k, v := n.Content[i], n.Content[i+1]
-			if k.Value == gvPinKey && v.Kind == yaml.ScalarNode && gvVersionRe.MatchString(v.Value) {
+			if k.Value == gvPinKey && v.Kind == yaml.ScalarNode && fullVersion.MatchString(v.Value) {
 				pins = append(pins, gvPin{version: v.Value, key: k})
 			}
 		}
@@ -188,8 +157,14 @@ func gvPins(w *workflow) []gvPin {
 // gvCall. It also returns a message for each jobs or steps value that is not
 // the shape GitHub needs, so that a broken file cannot hide a step. A run
 // value that is not a scalar is not a call; the name rule still reads it.
+// It reads the jobs with jobsAndProblems, so a bad job does not hide the call
+// in a good job, and the messages name only the real problem.
 func gvCalls(w *workflow) ([]*yaml.Node, []string) {
-	jobs, msgs := gvJobs(w)
+	jobs, problems := w.jobsAndProblems()
+	var msgs []string
+	for _, err := range problems {
+		msgs = append(msgs, err.Error())
+	}
 	var calls []*yaml.Node
 	for _, j := range jobs {
 		steps, err := w.steps(j)
@@ -210,36 +185,10 @@ func gvCalls(w *workflow) ([]*yaml.Node, []string) {
 	return calls, msgs
 }
 
-// gvJobs returns the jobs of w whose body is a mapping, in file order, and a
-// message for each problem: no jobs mapping, or a job that is not a mapping.
-// It differs from workflow.jobs, which returns no job at all on the first
-// bad one: here a bad job does not hide the call in a good job, so the
-// messages name only the real problem.
-func gvJobs(w *workflow) ([]job, []string) {
-	jobsNode, err := w.mappingAt(w.root(), "jobs")
-	if err != nil {
-		return nil, []string{err.Error()}
-	}
-	if jobsNode == nil {
-		return nil, []string{w.errorAt(w.root(), "the workflow has no jobs mapping").Error()}
-	}
-	var out []job
-	var msgs []string
-	for i := 0; i+1 < len(jobsNode.Content); i += 2 {
-		k, body := jobsNode.Content[i], jobsNode.Content[i+1]
-		if body.Kind != yaml.MappingNode {
-			// The same text as workflow.jobs, so dedupe removes the copy.
-			msgs = append(msgs, w.errorAt(body, "the job %s must be a mapping, found %s", show(k.Value), kindName(body)).Error())
-			continue
-		}
-		out = append(out, job{id: k.Value, key: k, body: body})
-	}
-	return out, msgs
-}
-
 // gvWeeklyNames returns the nodes of govulncheck.yml that may name
-// govulncheck besides the pins and the calls. The old script allowed these
-// lines, with this exact case:
+// govulncheck besides the pins and the calls. govulncheck.yml needs these
+// names for its own name, its job and its failure job, so they are allowed,
+// with this exact case only:
 //
 //	name: govulncheck                      (the top-level name)
 //	  govulncheck:                         (a job ID)
@@ -249,10 +198,10 @@ func gvJobs(w *workflow) ([]job, []string) {
 // A key with another case, a list or another value is not allowed.
 func gvWeeklyNames(w *workflow) []*yaml.Node {
 	var out []*yaml.Node
-	if v := gvExactScalar(w, w.root(), "name", gvName); v != nil {
+	if v := gvExactScalar(w, w.top, "name", gvName); v != nil {
 		out = append(out, v)
 	}
-	jobs, _ := gvJobs(w) // gvCalls reports the messages
+	jobs, _ := w.jobsAndProblems() // gvCalls reports the problems
 	for _, j := range jobs {
 		if j.id == gvName {
 			out = append(out, j.key)
@@ -285,14 +234,14 @@ func gvExactScalar(w *workflow, m *yaml.Node, key, want string) *yaml.Node {
 // in file order. The compare ignores case and the spaces around the key.
 func gvContinueOnError(w *workflow) []string {
 	var msgs []string
-	gvWalk(w.root(), func(n *yaml.Node) {
+	walk(w.top, func(n *yaml.Node) {
 		if n.Kind != yaml.MappingNode {
 			return
 		}
 		for i := 0; i+1 < len(n.Content); i += 2 {
 			k := n.Content[i]
 			if strings.EqualFold(strings.TrimSpace(k.Value), "continue-on-error") {
-				msgs = append(msgs, fmt.Sprintf("%s:%d: continue-on-error is not allowed in this file: a step that cannot fail would hide a vulnerability", w.file, k.Line))
+				msgs = append(msgs, w.errorAt(k, "continue-on-error is not allowed in this file: a step that cannot fail would hide a vulnerability").Error())
 			}
 		}
 	})
@@ -307,22 +256,16 @@ func gvCheckOthers(wfs map[string]*workflow) []string {
 	for _, p := range gvListedPaths() {
 		listed[p] = true
 	}
-	// Go visits a map in a random order, so sort the paths for stable output.
-	paths := make([]string, 0, len(wfs))
-	for p := range wfs {
-		paths = append(paths, p)
-	}
-	sort.Strings(paths)
-
 	var msgs []string
-	for _, p := range paths {
+	// Go visits a map in a random order, so sort the paths for stable output.
+	for _, p := range slices.Sorted(maps.Keys(wfs)) {
 		w := wfs[p]
-		if listed[p] || !gvUsable(w) {
+		if listed[p] {
 			continue
 		}
 		for _, s := range w.scalars() {
 			if gvNamesTool(s.Value) {
-				msgs = append(msgs, fmt.Sprintf("%s:%d: the workflow names govulncheck. Only ci.yml, release.yml and govulncheck.yml may. To add a workflow, add it to gvListedPaths in internal/pincheck/govulncheck.go", w.file, s.Line))
+				msgs = append(msgs, w.errorAt(s, "the workflow names govulncheck. Only ci.yml, release.yml and govulncheck.yml may. To add a workflow, add it to gvListedPaths in internal/pincheck/govulncheck.go").Error())
 				break
 			}
 		}
@@ -333,16 +276,4 @@ func gvCheckOthers(wfs map[string]*workflow) []string {
 // gvNamesTool reports whether s names govulncheck, in any case.
 func gvNamesTool(s string) bool {
 	return strings.Contains(strings.ToLower(s), gvName)
-}
-
-// gvWalk calls visit for n and for every node below it, in file order.
-// parseWorkflow limits the depth, so the recursion is bounded.
-func gvWalk(n *yaml.Node, visit func(*yaml.Node)) {
-	if n == nil {
-		return
-	}
-	visit(n)
-	for _, child := range n.Content {
-		gvWalk(child, visit)
-	}
 }

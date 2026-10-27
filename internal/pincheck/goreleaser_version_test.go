@@ -16,7 +16,7 @@ func TestGoreleaserVersionInput(t *testing.T) {
 		checkLabel = `the goreleaser-action step "Check" `
 		flowGood   = `        with: {distribution: goreleaser, version: "${{ env.GORELEASER_VERSION }}"}` + "\n"
 	)
-	replace := func(old, repl string) grMutation { return grReplace(grCIPath, old, repl) }
+	replace := func(old, repl string) grMutation { return grReplace(ciPath, old, repl) }
 	tests := []grCase{
 		// Positive controls.
 		{name: "block with mapping"},

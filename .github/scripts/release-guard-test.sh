@@ -20,7 +20,6 @@
 set -euo pipefail
 # shellcheck source-path=SCRIPTDIR source=test-harness.sh
 . "$(dirname -- "$0")/test-harness.sh"
-
 CDPATH='' cd -- "$(dirname -- "$0")/../.."
 workflow=${GUARD_WORKFLOW:-$PWD/.github/workflows/release.yml}
 tmp=$(mktemp -d)
@@ -42,7 +41,7 @@ grep -q '[^[:space:]]' "$tmp/run.sh" || fail "The run block of the step '$step' 
 # The run body is inline shell in the workflow, and `shellcheck
 # .github/scripts/*.sh` does not see it.
 if command -v shellcheck >/dev/null 2>&1; then
-  check_cmd "shellcheck reports a problem in the run block" shellcheck -s bash "$tmp/run.sh"
+  check_cmd "shellcheck passes on the run block" shellcheck -s bash "$tmp/run.sh"
 fi
 
 # A step starts at a line with six spaces and a dash. An unnamed step has the
@@ -85,9 +84,9 @@ next_step_name() {
 only_known_keys() { ! step_text | grep -E "^ {8}[\"']?[A-Za-z_-]+[\"']? *:" | grep -Evq '^ {8}(shell|run):'; }
 uses_bash() { step_text | grep -Eq '^ {8}shell: bash *$'; }
 runs_before_publish() { [ "$(next_step_name)" = "Verify and publish the release" ]; }
-check_cmd "the guard step: it has a key other than name, shell and run (for example if:, env: or working-directory:)" only_known_keys
-check_cmd "the guard step: it does not have 'shell: bash'" uses_bash
-check_cmd "the guard step: the next step is not 'Verify and publish the release'" runs_before_publish
+check_cmd "the guard step has no key other than name, shell and run (for example if:, env: or working-directory:)" only_known_keys
+check_cmd "the guard step has 'shell: bash'" uses_bash
+check_cmd "the step after the guard step is 'Verify and publish the release'" runs_before_publish
 
 # new_repo makes a repo with one commit and sets the global sha for the case.
 # guard_case runs it in the current shell, where set -e has no effect, so the
@@ -110,8 +109,6 @@ new_repo() {
     sha=$(git -C "$repo" rev-parse HEAD)
 }
 
-in_repo() { cd "$repo" && "$@"; } # run_setup runs it in a subshell
-
 # run_guard SHA_MODE: runs the run block in the repo. SHA_MODE good sets
 # GITHUB_SHA to the commit, unset leaves it out and wrong sets a wrong one.
 # check_case runs it in a subshell, so the cd does not leak.
@@ -132,7 +129,7 @@ guard_case() {
   local name=$1 want_code=$2 want_text=$3 sha_mode=$4
   shift 4
   new_repo || fail "$name: new_repo failed"
-  run_setup "$name" in_repo "$@"
+  run_setup "$name" in_dir "$repo" "$@"
   check_case "$name" "$want_code" "$want_text" run_guard "$sha_mode"
 }
 

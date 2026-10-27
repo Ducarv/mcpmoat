@@ -110,8 +110,8 @@ The `ci-scripts` job also runs on every pull request. It runs these scripts:
 - `.github/scripts/verify-and-publish-test.sh` runs the script of the "Verify and publish the
   release" step of `release.yml` with a fake `gh`.
 
-None of them needs a token. Only the pin check needs Go, and on its first run it can need the
-network (see above).
+None of them needs a token. Only the two pin check scripts need Go, and on the first run they can
+need the network (see above).
 
 Every `*-test.sh` script sources `.github/scripts/test-harness.sh`. To add a script test, source it
 and use its case runner (`check_case`). Do not write a new harness. The header of
@@ -131,7 +131,9 @@ GoReleaser builds only `./cmd/mcpmoat`, so the pin check is not part of the mcpm
 `go run ./internal/pincheck -root .`. Through `go run`, any failure is exit 1 (the program itself
 exits 2 on a bad flag or a root it cannot open), and stderr gets an extra `exit status N` line.
 Its tests are in `internal/pincheck/*_test.go` (`go test ./...` runs them) and in
-`.github/scripts/check-tool-pins-test.sh`. It only reads the files. It changes nothing.
+`.github/scripts/check-tool-pins-test.sh`. It only reads the files. It changes nothing. It prints
+at most 50 problems, then one line `and N more problems`. Each message cuts a key, a value or a
+name from a workflow to 80 bytes.
 
 It reads each `.github/workflows/*.yml` and `*.yaml` file (in any case, also a name that starts
 with a dot) with a YAML parser (`go.yaml.in/yaml/v3`). The rules read the values as the parser
@@ -153,7 +155,7 @@ expression such as `env: ${{ fromJSON(...) }}` could set `GORELEASER_VERSION` or
 `GOVULNCHECK_VERSION` to a value the check cannot see.
 
 A workflow that is a symlink, or that is not a regular file, also fails. `ci.yml`, `release.yml`,
-`govulncheck.yml` and `CONTRIBUTING.md` must exist.
+`govulncheck.yml` and `CONTRIBUTING.md` must exist and be regular files.
 
 The GoReleaser rules:
 
@@ -167,10 +169,12 @@ The GoReleaser rules:
 - Any other key or value in a workflow that names `goreleaser/goreleaser-action` or
   `GORELEASER_VERSION` (in any case) fails, for example a write to `$GITHUB_ENV` or a key in another
   case.
-- `CONTRIBUTING.md` names at least one GoReleaser version (a `goreleaser/v2@` command). Each
-  `goreleaser@` or `goreleaser/vN@` version in it is the pin of `ci.yml`.
-- A file under `.github/actions` that names the action fails, and so does a symlink there, so that a
-  new local action cannot skip the rules.
+- `CONTRIBUTING.md` names at least one GoReleaser version (such as a `goreleaser/v2@` command).
+  Each `goreleaser@` or `goreleaser/vN@` version in it is the pin of `ci.yml`.
+- A file under `.github/actions` that names the action (in any case) fails, so that a new local
+  action cannot skip the rules. A symlink there fails too, and so does any other entry that is not
+  a regular file or a directory. The name `.github/actions` matches in any case, for example
+  `.github/Actions`.
 
 The govulncheck rules:
 
@@ -180,8 +184,9 @@ The govulncheck rules:
 - Each of the three files has a step whose `run:` value is exactly
   `go run "golang.org/x/vuln/cmd/govulncheck@$GOVULNCHECK_VERSION" ./...`.
 - In the three files, any other key or value that names `govulncheck` (in any case) fails.
-  `govulncheck.yml` may also use the name in its top-level `name:`, as a job ID, in
-  `needs: govulncheck` and in the `if:` of the `notify-failure` job.
+  `govulncheck.yml` may also have these, with this exact case and text: `name: govulncheck` at the
+  top level, `govulncheck` as a job ID, and, in any job, `needs: govulncheck` and
+  `if: failure() || needs.govulncheck.result == 'cancelled'`.
 - The three files have no `continue-on-error` key.
 - No other workflow names `govulncheck`.
 
@@ -201,7 +206,7 @@ Not covered:
   `GOFLAGS` and `GOTOOLCHAIN`. A fake proxy can make an old govulncheck look clean.
 - Other ways to install or run govulncheck, such as
   `go install golang.org/x/vuln/cmd/...@latest`, or a tool name that a step builds from pieces. The
-  name rule sees only the full word `govulncheck`.
+  name rule sees only the text `govulncheck` in one piece.
 
 Review must catch those. A follow-up issue tracks a stricter check.
 

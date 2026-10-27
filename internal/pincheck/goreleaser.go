@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
-	"io"
 	"io/fs"
 	"maps"
 	"path"
@@ -15,13 +14,11 @@ import (
 	"go.yaml.in/yaml/v3"
 )
 
-// The files and the names that the GoReleaser rules read.
+// The directories and the names that the GoReleaser rules read. The files are
+// ciPath, releasePath and docPath in main.go.
 const (
-	grCIPath      = ".github/workflows/ci.yml"
-	grReleasePath = ".github/workflows/release.yml"
-	grDocPath     = "CONTRIBUTING.md"
-	grGitHubDir   = ".github"
-	grActionsDir  = "actions" // the directory of the local actions, below .github
+	grGitHubDir  = ".github"
+	grActionsDir = "actions" // the directory of the local actions, below .github
 
 	// grPinKey is the env key of the pin. The key must have this exact case.
 	grPinKey = "GORELEASER_VERSION"
@@ -35,16 +32,7 @@ const (
 	grAction = "goreleaser/goreleaser-action"
 	// grMention is the text, in lower case, that marks a use of the pin.
 	grMention = "goreleaser_version"
-
-	// grMaxFileBytes is the largest CONTRIBUTING.md or action file that the
-	// check reads (1 MiB). A larger file fails closed.
-	grMaxFileBytes = 1 << 20
 )
-
-// grFullVersion matches a full version, such as v2.19.0 or v2.19.0-rc.1. A
-// short one such as v2.19 is a query, and Go picks the newest version that
-// matches it. It is the ver_re of the old check-tool-pins.sh.
-var grFullVersion = regexp.MustCompile(`^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$`)
 
 // grDocVersion finds a GoReleaser version in CONTRIBUTING.md, such as
 // "goreleaser/v2@v2.19.0". Group 1 is the text after the @, up to a space, a
@@ -68,14 +56,11 @@ type grScan struct {
 }
 
 // checkGoreleaser returns one message per problem with the GoReleaser pin.
+// When ci.yml or release.yml is not in wfs, the rules that need it do not run
+// and give no message: check reports the missing workflow once, in
+// checkRequired or notLoaded.
 func checkGoreleaser(fsys fs.FS, wfs map[string]*workflow) []string {
 	var msgs []string
-	for _, p := range []string{grCIPath, grReleasePath} {
-		if wfs[p] == nil {
-			msgs = append(msgs, fmt.Sprintf("%s: the workflow is missing or did not parse. The GoReleaser check needs it.", p))
-		}
-	}
-
 	// maps.Keys returns an iterator over the keys, and slices.Sorted collects
 	// them into a sorted slice. A Go map has no order, so the sort makes the
 	// order of the messages stable.
@@ -98,8 +83,8 @@ func checkGoreleaser(fsys fs.FS, wfs map[string]*workflow) []string {
 				msgs = append(msgs, s.w.errorAt(pin.node, "GORELEASER_VERSION is %s, expected %s (the pin in ci.yml)", show(pin.value), show(want)).Error())
 			}
 		}
-		if s.path == grReleasePath && s.w != nil && len(s.pins) == 0 {
-			msgs = append(msgs, fmt.Sprintf("%s: the workflow has no full GORELEASER_VERSION pin in the env of a job, expected %s (the pin in ci.yml)", s.path, show(want)))
+		if s.path == releasePath && len(s.pins) == 0 {
+			msgs = append(msgs, s.w.errorAt(nil, "the workflow has no full GORELEASER_VERSION pin in the env of a job, expected %s (the pin in ci.yml)", show(want)).Error())
 		}
 	}
 	if want != "" {
@@ -110,40 +95,30 @@ func checkGoreleaser(fsys fs.FS, wfs map[string]*workflow) []string {
 
 // grWant returns the pin of ci.yml. ci.yml must pin exactly one full version
 // (it may repeat it in more jobs). Otherwise grWant returns an empty pin and a
-// message. It returns no message when ci.yml is missing, because
-// checkGoreleaser reports that.
+// message. It returns no pin and no message when ci.yml is not in scans,
+// because check reports a missing workflow.
 func grWant(scans []grScan) (want, msg string) {
 	for _, s := range scans {
-		if s.path != grCIPath || s.w == nil {
+		if s.path != ciPath {
 			continue
 		}
-		seen := make(map[string]bool)
+		var versions []string
 		for _, pin := range s.pins {
-			seen[pin.value] = true
+			versions = append(versions, pin.value)
 		}
-		versions := slices.Sorted(maps.Keys(seen))
-		if len(versions) == 1 {
-			return versions[0], ""
+		version, found := onlyVersion(versions)
+		if found == "" {
+			return version, ""
 		}
-		found := "none"
-		if len(versions) > 1 {
-			// A version can be long and ci.yml can hold many, so cut the list.
-			found = cutText(strings.Join(versions, ", "), maxShown)
-		}
-		return "", fmt.Sprintf("%s: ci.yml must pin one full version of GoReleaser (GORELEASER_VERSION in the env of a job). Found: %s", s.path, found)
+		return "", s.w.errorAt(nil, "ci.yml must pin one full version of GoReleaser (GORELEASER_VERSION in the env of a job). Found: %s", found).Error()
 	}
 	return "", ""
 }
 
 // grScanWorkflow applies the rules that need no pin of ci.yml to the workflow
-// w, and collects its pins. w may be nil.
+// w, and collects its pins.
 func grScanWorkflow(p string, w *workflow) grScan {
 	s := grScan{path: p, w: w}
-	if w == nil || w.top == nil {
-		s.msgs = append(s.msgs, fmt.Sprintf("%s: the workflow was not parsed, so the GoReleaser check cannot read it", p))
-		s.w = nil
-		return s
-	}
 	// The two sets hold the nodes that a rule accepts. A map with pointer keys
 	// is a set of nodes: the key is the address of a node, not its text, so a
 	// copy of the same text in another place is not in the set.
@@ -210,7 +185,7 @@ func grJobPins(w *workflow, j job, okPin map[*yaml.Node]bool) (hasPin bool, pins
 		switch {
 		case v.Kind != yaml.ScalarNode || v.ShortTag() == "!!null":
 			msgs = append(msgs, w.errorAt(v, "the GORELEASER_VERSION pin must be a full version (vMAJOR.MINOR.PATCH), found %s", kindName(v)).Error())
-		case !grFullVersion.MatchString(v.Value):
+		case !fullVersion.MatchString(v.Value):
 			msgs = append(msgs, w.errorAt(v, "the GORELEASER_VERSION pin %s is not a full version (vMAJOR.MINOR.PATCH)", show(v.Value)).Error())
 		default:
 			pins = append(pins, grPin{node: v, value: v.Value})
@@ -281,17 +256,21 @@ func grStepLabel(w *workflow, step, uses *yaml.Node) string {
 }
 
 // grCheckDoc checks that every GoReleaser version in CONTRIBUTING.md is want,
-// and that there is at least one.
+// and that there is at least one. A missing CONTRIBUTING.md gives no message
+// here, because checkRequired reports it.
 func grCheckDoc(fsys fs.FS, want string) []string {
-	data, err := grReadFile(fsys, grDocPath)
+	data, err := readLimited(fsys, docPath, maxFileBytes)
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil
+	}
 	if err != nil {
-		return []string{fmt.Sprintf("%s: %v", grDocPath, err)}
+		return []string{fmt.Sprintf("%s: %v", docPath, err)}
 	}
 	// FindAllSubmatchIndex returns, per match, the start and end offsets of
 	// the match and then of each group. -1 means no limit on the matches.
 	matches := grDocVersion.FindAllSubmatchIndex(data, -1)
 	if len(matches) == 0 {
-		return []string{fmt.Sprintf("%s: names no GoReleaser version (goreleaser/vN@<version>), expected %s (the pin in ci.yml)", grDocPath, show(want))}
+		return []string{fmt.Sprintf("%s: names no GoReleaser version (goreleaser/vN@<version>), expected %s (the pin in ci.yml)", docPath, show(want))}
 	}
 	var msgs []string
 	for _, m := range matches {
@@ -300,7 +279,7 @@ func grCheckDoc(fsys fs.FS, want string) []string {
 			continue
 		}
 		line := bytes.Count(data[:m[0]], []byte("\n")) + 1
-		msgs = append(msgs, fmt.Sprintf("%s:%d: the GoReleaser version %s differs from the pin %s in ci.yml", grDocPath, line, show(got), show(want)))
+		msgs = append(msgs, fmt.Sprintf("%s:%d: the GoReleaser version %s differs from the pin %s in ci.yml", docPath, line, show(got), show(want)))
 	}
 	return msgs
 }
@@ -326,7 +305,7 @@ func grCheckActions(fsys fs.FS) []string {
 		}
 		dir := path.Join(grGitHubDir, e.Name())
 		if e.Type()&fs.ModeSymlink != 0 {
-			msgs = append(msgs, fmt.Sprintf("%s: is a symlink. This check does not follow symlinks under .github/actions.", dir))
+			msgs = append(msgs, fmt.Sprintf("%s: is a symlink. This check does not follow symlinks under .github/actions", dir))
 			continue
 		}
 		msgs = append(msgs, grWalkActions(fsys, dir)...)
@@ -347,21 +326,21 @@ func grWalkActions(fsys fs.FS, dir string) []string {
 		}
 		switch {
 		case d.Type()&fs.ModeSymlink != 0:
-			msgs = append(msgs, fmt.Sprintf("%s: is a symlink. This check does not follow symlinks under .github/actions.", p))
+			msgs = append(msgs, fmt.Sprintf("%s: is a symlink. This check does not follow symlinks under .github/actions", p))
 			return nil
 		case d.IsDir():
 			return nil
 		case !d.Type().IsRegular():
-			msgs = append(msgs, fmt.Sprintf("%s: is not a regular file. This check reads only regular files under .github/actions.", p))
+			msgs = append(msgs, fmt.Sprintf("%s: is not a regular file. This check reads only regular files under .github/actions", p))
 			return nil
 		}
-		data, err := grReadFile(fsys, p)
+		data, err := readLimited(fsys, p, maxFileBytes)
 		if err != nil {
 			msgs = append(msgs, fmt.Sprintf("%s: %v", p, err))
 			return nil
 		}
 		if bytes.Contains(bytes.ToLower(data), []byte(grAction)) {
-			msgs = append(msgs, fmt.Sprintf("%s: names goreleaser/goreleaser-action. This check does not read .github/actions. Extend the check before you add such a file.", p))
+			msgs = append(msgs, fmt.Sprintf("%s: names goreleaser/goreleaser-action. This check does not read .github/actions. Extend the check before you add such a file", p))
 		}
 		return nil
 	})
@@ -369,25 +348,4 @@ func grWalkActions(fsys fs.FS, dir string) []string {
 		msgs = append(msgs, fmt.Sprintf("%s: walk: %v", dir, walkErr))
 	}
 	return msgs
-}
-
-// grReadFile reads the file name of fsys. It fails when the file has more than
-// grMaxFileBytes bytes. io.LimitReader stops after one byte more than the
-// limit, so a large file is never read in full.
-func grReadFile(fsys fs.FS, name string) ([]byte, error) {
-	f, err := fsys.Open(name)
-	if err != nil {
-		return nil, fmt.Errorf("open: %w", err)
-	}
-	// The file is read-only, so a Close error tells nothing new. The blank
-	// identifier _ drops it on purpose.
-	defer func() { _ = f.Close() }()
-	data, err := io.ReadAll(io.LimitReader(f, grMaxFileBytes+1))
-	if err != nil {
-		return nil, fmt.Errorf("read: %w", err)
-	}
-	if len(data) > grMaxFileBytes {
-		return nil, fmt.Errorf("the file has more than %d bytes, so the check does not read it", grMaxFileBytes)
-	}
-	return data, nil
 }

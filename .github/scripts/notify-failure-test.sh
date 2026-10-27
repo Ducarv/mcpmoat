@@ -24,7 +24,6 @@
 set -euo pipefail
 # shellcheck source-path=SCRIPTDIR source=test-harness.sh
 . "$(dirname -- "$0")/test-harness.sh"
-
 CDPATH='' cd -- "$(dirname -- "$0")/../.."
 workflow=${NOTIFY_WORKFLOW:-$PWD/.github/workflows/govulncheck.yml}
 tmp=$(mktemp -d)
@@ -43,7 +42,7 @@ grep -q '[^[:space:]]' "$tmp/run.sh" || fail "The run block of the step 'Open or
 # The run body is inline shell in the workflow, and `shellcheck
 # .github/scripts/*.sh` does not see it.
 if command -v shellcheck >/dev/null 2>&1; then
-  check_cmd "shellcheck reports a problem in the run block" shellcheck -s bash "$tmp/run.sh"
+  check_cmd "shellcheck passes on the run block" shellcheck -s bash "$tmp/run.sh"
 fi
 
 # The fake gh. The quoted delimiter keeps every $ for the fake to expand.
@@ -154,7 +153,7 @@ notify_case() {
   new_state
   run_setup "$name" "$setup"
   check_case "$name" "$want_code" "$want_text" run_body
-  check_cmd "$name: calls" calls_are "$action"
+  check_cmd "$name: the gh calls are '$action'" calls_are "$action"
 }
 
 notify_case "no open issue" 0 "" empty_list create
@@ -203,12 +202,12 @@ step_has_only_run() {
 only_issues_write() { [ "$(job_section permissions)" = "      issues: write" ]; }
 job_has_no_switch() { ! grep -Eq "^    [\"']?continue-on-error[\"']? *:" "$tmp/job.txt"; }
 
-check_cmd "the job notify-failure: lacks 'needs: govulncheck'" grep -Eq '^    needs: govulncheck *$' "$tmp/job.txt"
-check_cmd "the job notify-failure: lacks the if: line for a failed or cancelled scan" grep -Eq "^    if: failure\(\) \|\| needs\.govulncheck\.result == 'cancelled' *$" "$tmp/job.txt"
-check_cmd "the job notify-failure: the step has a key other than name and run" step_has_only_run
-check_cmd "the job notify-failure: the job has a continue-on-error: key" job_has_no_switch
-check_cmd "the job notify-failure: the permissions are not exactly 'issues: write'" only_issues_write
-check_cmd "the job notify-failure: has a checkout step" no_checkout
-check_cmd "the job notify-failure: lacks 'GH_TOKEN: \${{ github.token }}' under the job env" has_job_token
+check_cmd "the job notify-failure has 'needs: govulncheck'" grep -Eq '^    needs: govulncheck *$' "$tmp/job.txt"
+check_cmd "the job notify-failure has the if: line for a failed or cancelled scan" grep -Eq "^    if: failure\(\) \|\| needs\.govulncheck\.result == 'cancelled' *$" "$tmp/job.txt"
+check_cmd "the step of the job notify-failure has no key other than name and run" step_has_only_run
+check_cmd "the job notify-failure has no continue-on-error: key" job_has_no_switch
+check_cmd "the job notify-failure has exactly the permission 'issues: write'" only_issues_write
+check_cmd "the job notify-failure has no checkout step" no_checkout
+check_cmd "the job notify-failure has 'GH_TOKEN: \${{ github.token }}' under the job env" has_job_token
 
 harness_footer notify-failure-test

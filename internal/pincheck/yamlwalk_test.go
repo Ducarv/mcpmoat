@@ -13,12 +13,13 @@ import (
 // testFile is the file name that the tests give to parseWorkflow.
 const testFile = "wf.yml"
 
-// mustParse parses src and fails the test on an error.
-func mustParse(t *testing.T, src string) *workflow {
+// mustParse parses src as the workflow file p and stops the test on an
+// error.
+func mustParse(t *testing.T, p, src string) *workflow {
 	t.Helper()
-	w, err := parseWorkflow(testFile, []byte(src))
+	w, err := parseWorkflow(p, []byte(src))
 	if err != nil {
-		t.Fatalf("parseWorkflow(%q) error = %v, want nil", src, err)
+		t.Fatalf("parseWorkflow(%q) error = %v, want nil", p, err)
 	}
 	return w
 }
@@ -47,8 +48,8 @@ func TestParseWorkflowFailClosed(t *testing.T) {
 		want string // a substring of the error, or "" for no error
 	}{
 		// Size limit. The check runs before any decoding.
-		{name: "over the size limit", in: "a: 1\n#" + strings.Repeat("x", maxWorkflowBytes), want: "more than the limit of 1048576"},
-		{name: "at the size limit", in: "a: 1\n#" + strings.Repeat("x", maxWorkflowBytes-6), want: ""},
+		{name: "over the size limit", in: "a: 1\n#" + strings.Repeat("x", maxFileBytes), want: "more than the limit of 1048576"},
+		{name: "at the size limit", in: "a: 1\n#" + strings.Repeat("x", maxFileBytes-6), want: ""},
 
 		// Documents.
 		{name: "two documents", in: "a: 1\n---\nb: 2\n", want: "more than one YAML document"},
@@ -140,7 +141,7 @@ func TestParseWorkflowErrorLine(t *testing.T) {
 		{name: "duplicate key", in: "on: push\njobs:\n  a: {}\n  A: {}\n", wantLine: 4, wantMsg: "the key \"A\" is a duplicate", prefix: "wf.yml:4: "},
 		{name: "anchor", in: "a: 1\nb:\n  c: &x 2\n", wantLine: 3, wantMsg: "an anchor (&x)", prefix: "wf.yml:3: "},
 		{name: "second document", in: "a: 1\n---\nb: 2\n", wantLine: 2, wantMsg: "the file has more than one", prefix: "wf.yml:2: "},
-		{name: "no line for size", in: strings.Repeat("#", maxWorkflowBytes+1), wantLine: 0, wantMsg: "the file has", prefix: "wf.yml: the file has"},
+		{name: "no line for size", in: strings.Repeat("#", maxFileBytes+1), wantLine: 0, wantMsg: "the file has", prefix: "wf.yml: the file has"},
 		{name: "no line for no document", in: "", wantLine: 0, wantMsg: "the file has no YAML document", prefix: "wf.yml: the file has no"},
 	}
 	for _, tt := range tests {
@@ -225,8 +226,8 @@ func TestParseWorkflowAccepted(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			w := mustParse(t, tt.in)
-			n := w.root()
+			w := mustParse(t, testFile, tt.in)
+			n := w.top
 			for i, key := range tt.path {
 				var err error
 				if i == len(tt.path)-1 {
@@ -247,8 +248,8 @@ func TestParseWorkflowAccepted(t *testing.T) {
 
 func TestParseWorkflowFlowSequence(t *testing.T) {
 	t.Parallel()
-	w := mustParse(t, "steps: [{run: a}, {run: b}]\n")
-	seq, err := w.sequenceAt(w.root(), "steps")
+	w := mustParse(t, testFile, "steps: [{run: a}, {run: b}]\n")
+	seq, err := w.sequenceAt(w.top, "steps")
 	if err != nil || seq == nil || len(seq.Content) != 2 {
 		t.Fatalf("sequenceAt() = %v, %v, want a sequence of 2", seq, err)
 	}
@@ -260,8 +261,8 @@ func TestParseWorkflowFlowSequence(t *testing.T) {
 
 func TestWalkLookup(t *testing.T) {
 	t.Parallel()
-	w := mustParse(t, "Name: x\nlist: [1]\n")
-	top := w.root()
+	w := mustParse(t, testFile, "Name: x\nlist: [1]\n")
+	top := w.top
 	list := top.Content[3]
 
 	tests := []struct {
@@ -310,8 +311,8 @@ func TestWalkLookup(t *testing.T) {
 
 func TestWalkValueOfKind(t *testing.T) {
 	t.Parallel()
-	w := mustParse(t, "m: {a: 1}\ns: [1]\nv: text\nenv:\nnull_v: null\n")
-	top := w.root()
+	w := mustParse(t, testFile, "m: {a: 1}\ns: [1]\nv: text\nenv:\nnull_v: null\n")
+	top := w.top
 
 	type getter func(*yaml.Node, string) (*yaml.Node, error)
 	tests := []struct {
@@ -367,7 +368,7 @@ func TestWalkJobs(t *testing.T) {
 	t.Parallel()
 	t.Run("file order", func(t *testing.T) {
 		t.Parallel()
-		w := mustParse(t, "on: push\njobs:\n  zeta: {}\n  alpha:\n    runs-on: x\n  mid: {a: 1}\n")
+		w := mustParse(t, testFile, "on: push\njobs:\n  zeta: {}\n  alpha:\n    runs-on: x\n  mid: {a: 1}\n")
 		jobs, err := w.jobs()
 		if err != nil {
 			t.Fatalf("jobs() error = %v", err)
@@ -388,7 +389,7 @@ func TestWalkJobs(t *testing.T) {
 	})
 	t.Run("empty jobs mapping", func(t *testing.T) {
 		t.Parallel()
-		w := mustParse(t, "jobs: {}\n")
+		w := mustParse(t, testFile, "jobs: {}\n")
 		jobs, err := w.jobs()
 		if err != nil || len(jobs) != 0 {
 			t.Errorf("jobs() = %v, %v, want no jobs and no error", jobs, err)
@@ -409,7 +410,7 @@ func TestWalkJobs(t *testing.T) {
 	for _, tt := range errTests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			w := mustParse(t, tt.in)
+			w := mustParse(t, testFile, tt.in)
 			jobs, err := w.jobs()
 			wantErr(t, err, tt.want)
 			if jobs != nil {
@@ -419,10 +420,60 @@ func TestWalkJobs(t *testing.T) {
 	}
 }
 
+func TestJobsAndProblems(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name     string
+		in       string
+		wantIDs  []string // the good jobs, in file order
+		wantErrs []string // the text of each problem, in file order
+	}{
+		{name: "all good", in: "jobs:\n  a: {}\n  b: {x: 1}\n", wantIDs: []string{"a", "b"}},
+		{name: "a bad job between two good ones", in: "jobs:\n  a: {}\n  b: text\n  c: {}\n", wantIDs: []string{"a", "c"}, wantErrs: []string{`wf.yml:3: the job "b" must be a mapping, found a scalar`}},
+		{name: "two bad jobs", in: "jobs:\n  a: []\n  b:\n", wantErrs: []string{`wf.yml:2: the job "a" must be a mapping, found a sequence`, `wf.yml:3: the job "b" must be a mapping, found an empty value`}},
+		{name: "jobs missing", in: "on: push\n", wantErrs: []string{"wf.yml:1: the workflow has no jobs mapping"}},
+		{name: "jobs a sequence", in: "jobs: [a]\n", wantErrs: []string{`wf.yml:1: the value of "jobs" must be a mapping, found a sequence`}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			w := mustParse(t, testFile, tt.in)
+			jobs, problems := w.jobsAndProblems()
+			var ids, errs []string
+			for _, j := range jobs {
+				ids = append(ids, j.id)
+			}
+			for _, err := range problems {
+				var ne *nodeError
+				if !errors.As(err, &ne) {
+					t.Errorf("problem %v has the type %T, want *nodeError", err, err)
+				}
+				errs = append(errs, err.Error())
+			}
+			if !reflect.DeepEqual(ids, tt.wantIDs) {
+				t.Errorf("job IDs = %q, want %q", ids, tt.wantIDs)
+			}
+			if !reflect.DeepEqual(errs, tt.wantErrs) {
+				t.Errorf("problems = %q, want %q", errs, tt.wantErrs)
+			}
+			// jobs is the strict form: the first problem, or all the jobs.
+			strict, err := w.jobs()
+			if len(tt.wantErrs) > 0 {
+				wantErr(t, err, tt.wantErrs[0])
+				if strict != nil {
+					t.Errorf("jobs() = %v, want nil on error", strict)
+				}
+			} else if err != nil || len(strict) != len(tt.wantIDs) {
+				t.Errorf("jobs() = %v, %v, want %d jobs", strict, err, len(tt.wantIDs))
+			}
+		})
+	}
+}
+
 // onlyJob parses src and returns its only job.
 func onlyJob(t *testing.T, src string) (*workflow, job) {
 	t.Helper()
-	w := mustParse(t, src)
+	w := mustParse(t, testFile, src)
 	jobs, err := w.jobs()
 	if err != nil || len(jobs) != 1 {
 		t.Fatalf("jobs() = %v, %v, want one job", jobs, err)
@@ -556,7 +607,7 @@ func TestWalkEnvProblems(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			got := mustParse(t, tt.in).envProblems()
+			got := mustParse(t, testFile, tt.in).envProblems()
 			if !reflect.DeepEqual(got, tt.want) {
 				t.Errorf("envProblems() = %q, want %q", got, tt.want)
 			}
@@ -575,7 +626,7 @@ func TestWalkScalars(t *testing.T) {
 		"      - run: |\n" +
 		"          go test\n" +
 		"      - uses: x@v1 # trailing comment\n"
-	w := mustParse(t, src)
+	w := mustParse(t, testFile, src)
 	var got []string
 	var lines []int
 	for _, n := range w.scalars() {
@@ -592,7 +643,44 @@ func TestWalkScalars(t *testing.T) {
 	}
 }
 
-func TestWalkErrorAt(t *testing.T) {
+func TestWalkVisitsInFileOrder(t *testing.T) {
+	t.Parallel()
+	w := mustParse(t, testFile, "a: [x, {b: y}]\nc: z\n")
+	var got []string
+	walk(w.top, func(n *yaml.Node) {
+		if n.Kind == yaml.ScalarNode {
+			got = append(got, n.Value)
+		} else {
+			got = append(got, kindWord(n.Kind))
+		}
+	})
+	want := []string{"a mapping", "a", "a sequence", "x", "a mapping", "b", "y", "c", "z"}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("walk() visits %q, want %q", got, want)
+	}
+	walk(nil, func(*yaml.Node) { t.Error("walk(nil) called visit") })
+}
+
+func TestWalkDepthBound(t *testing.T) {
+	t.Parallel()
+	// A hand-built chain of nodes, deeper than parseWorkflow allows: each
+	// node has one child. walk must stop at maxNodeDepth levels below the
+	// start node, so it visits maxNodeDepth+1 nodes.
+	root := &yaml.Node{Kind: yaml.SequenceNode}
+	n := root
+	for range maxNodeDepth + 10 {
+		child := &yaml.Node{Kind: yaml.SequenceNode}
+		n.Content = []*yaml.Node{child}
+		n = child
+	}
+	visits := 0
+	walk(root, func(*yaml.Node) { visits++ })
+	if visits != maxNodeDepth+1 {
+		t.Errorf("walk() visited %d nodes, want %d", visits, maxNodeDepth+1)
+	}
+}
+
+func TestErrorAt(t *testing.T) {
 	t.Parallel()
 	w := &workflow{file: "f.yml"}
 	tests := []struct {
@@ -618,7 +706,7 @@ func TestWalkErrorAt(t *testing.T) {
 	}
 }
 
-func TestWalkKindName(t *testing.T) {
+func TestKindName(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
 		name string
@@ -647,7 +735,7 @@ func TestWalkKindName(t *testing.T) {
 	}
 }
 
-func TestWalkIsASCII(t *testing.T) {
+func TestIsASCII(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
 		in   string

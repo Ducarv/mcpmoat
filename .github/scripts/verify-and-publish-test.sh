@@ -18,7 +18,6 @@
 set -euo pipefail
 # shellcheck source-path=SCRIPTDIR source=test-harness.sh
 . "$(dirname -- "$0")/test-harness.sh"
-
 CDPATH='' cd -- "$(dirname -- "$0")/../.."
 src=$PWD
 script=${VERIFY_SCRIPT:-$src/.github/scripts/verify-and-publish.sh}

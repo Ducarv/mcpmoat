@@ -12,6 +12,11 @@
 // problem, 2 on a usage or setup error (a bad flag, or a root that cannot be
 // opened).
 //
+// When the environment variable GITHUB_ACTIONS is exactly "true", as GitHub
+// Actions sets it, each problem is an ::error:: workflow command on stdout.
+// Any other value, such as "1" or "TRUE", or no value, gives plain
+// "check-tool-pins: <problem>" lines on stderr.
+//
 // It writes at most 50 problem lines, and then one line "and N more
 // problems". Each message cuts a key, a value or a name from a workflow to
 // 80 bytes.
@@ -26,6 +31,7 @@ import (
 	"maps"
 	"os"
 	"path"
+	"regexp"
 	"slices"
 	"strings"
 	"unicode/utf8"
@@ -43,8 +49,31 @@ const (
 // workflowDir is the directory of the GitHub workflows, relative to the root.
 const workflowDir = ".github/workflows"
 
-// msgPrefix starts each problem line outside GitHub Actions. It is the name of
-// the old script, so the output stays the same for the people who read it.
+// The files that the rules read, as slash paths relative to the root. Every
+// list of files is built from these names, so a name is written only once.
+const (
+	ciPath      = workflowDir + "/ci.yml"          // holds the reference pins
+	releasePath = workflowDir + "/release.yml"     // the release workflow
+	weeklyPath  = workflowDir + "/govulncheck.yml" // the weekly govulncheck run
+	docPath     = "CONTRIBUTING.md"                // names the GoReleaser version
+)
+
+// maxFileBytes is the largest file that the check reads (1 MiB): a workflow,
+// CONTRIBUTING.md or a file under .github/actions. The real files are about
+// 10 KiB each, so the limit is far above real use. A larger file fails
+// closed, before any YAML decoding.
+const maxFileBytes = 1 << 20
+
+// fullVersion matches a full version, such as v2.19.0 or v2.19.0-rc.1+build.5.
+// A short one such as v2.19 is a query, and Go picks the newest version that
+// matches it, so it is not a pin. In Go regexp, $ matches only at the end of
+// the text, so a trailing newline does not match. A *regexp.Regexp is safe
+// for use by many goroutines, so one package variable serves every rule.
+var fullVersion = regexp.MustCompile(`^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$`)
+
+// msgPrefix starts each problem line outside GitHub Actions. People run the
+// check with .github/scripts/check-tool-pins.sh, so each line names that
+// script.
 const msgPrefix = "check-tool-pins: "
 
 // maxProblems is the most problem lines that run writes. A hostile or broken
@@ -53,16 +82,11 @@ const msgPrefix = "check-tool-pins: "
 // writes one line with the count of the rest, and still exits with 1.
 const maxProblems = 50
 
-// requiredFiles returns the files that must exist, as the old
-// check-tool-pins.sh required them. It is a function and not a package
-// variable, so that no code can change the list at run time.
+// requiredFiles returns the files that must exist: the rules read each of
+// them. It is a function and not a package variable, so that no code can
+// change the list at run time.
 func requiredFiles() []string {
-	return []string{
-		workflowDir + "/ci.yml",
-		workflowDir + "/release.yml",
-		workflowDir + "/govulncheck.yml",
-		"CONTRIBUTING.md",
-	}
+	return []string{ciPath, releasePath, weeklyPath, docPath}
 }
 
 func main() {
@@ -142,14 +166,17 @@ func checkRoot(dir string) ([]string, error) {
 // check runs every rule on the repository in fsys and returns the problems,
 // without duplicates. The required-file and the parse problems come first,
 // then the env problems of every workflow, then those of the GoReleaser and
-// the govulncheck rules, in the order the rules return them.
+// the govulncheck rules, in the order the rules return them. A required
+// workflow that did not load gets exactly one problem, here: the rules skip
+// it without a message.
 func check(fsys fs.FS) []string {
 	problems := checkRequired(fsys)
 	wfs, parseProblems := loadWorkflows(fsys)
 	problems = append(problems, parseProblems...)
+	problems = append(problems, notLoaded(wfs, problems)...)
 	problems = append(problems, checkEnv(wfs)...)
 	problems = append(problems, checkGoreleaser(fsys, wfs)...)
-	problems = append(problems, checkGovulncheck(fsys, wfs)...)
+	problems = append(problems, checkGovulncheck(wfs)...)
 	return dedupe(problems)
 }
 
@@ -166,8 +193,11 @@ func checkEnv(wfs map[string]*workflow) []string {
 }
 
 // checkRequired returns one problem for each file of requiredFiles that is
-// missing or is not a regular file. fs.Stat follows a symlink inside the
-// root, as the old script did; loadWorkflows fails a symlinked workflow.
+// missing or is not a regular file. fs.Stat follows a symlink, so a required
+// file can be a symlink to a regular file inside the root (the os.Root of
+// checkRoot stops a link that leaves the root). A symlinked CONTRIBUTING.md
+// is a normal file for its readers. loadWorkflows still fails a symlinked
+// workflow, because this check does not follow symlinks in workflowDir.
 func checkRequired(fsys fs.FS) []string {
 	var problems []string
 	for _, name := range requiredFiles() {
@@ -178,7 +208,40 @@ func checkRequired(fsys fs.FS) []string {
 		case err != nil:
 			problems = append(problems, fmt.Sprintf("%s: %v", name, err))
 		case !info.Mode().IsRegular():
-			problems = append(problems, name+": is not a regular file")
+			problems = append(problems, notRegular(name))
+		}
+	}
+	return problems
+}
+
+// notRegular returns the problem for the path p that is not a regular file.
+// checkRequired and loadWorkflows both use it, so a required workflow that is
+// a directory gives the same text twice, and dedupe keeps one copy.
+func notRegular(p string) string {
+	return p + ": is not a regular file"
+}
+
+// notLoaded returns one problem for each required workflow that is not in
+// wfs and that no problem in earlier names yet. checkRequired and
+// loadWorkflows report almost every such case: a missing file, a file that
+// is not regular, a symlink or a file that did not parse. One case is left:
+// fs.Stat finds the file, but the listing of workflowDir has no entry with
+// this exact name. That happens on a file system that ignores case, with
+// CI.yml in place of ci.yml, or when the directory cannot be read in full.
+// The rules skip a workflow that is not in wfs, so without this problem the
+// check could pass. Each problem from checkRequired and loadWorkflows starts
+// with the path and a colon, so the prefix finds them.
+func notLoaded(wfs map[string]*workflow, earlier []string) []string {
+	var problems []string
+	for _, p := range requiredFiles() {
+		if path.Dir(p) != workflowDir || wfs[p] != nil {
+			continue
+		}
+		reported := slices.ContainsFunc(earlier, func(m string) bool {
+			return strings.HasPrefix(m, p+":")
+		})
+		if !reported {
+			problems = append(problems, p+": the pin checks need this workflow, but it is not in the listing of "+workflowDir)
 		}
 	}
 	return problems
@@ -211,7 +274,7 @@ func loadWorkflows(fsys fs.FS) (map[string]*workflow, []string) {
 			problems = append(problems, p+": is a symlink. This check does not follow symlinks in "+workflowDir)
 			continue
 		case !e.Type().IsRegular():
-			problems = append(problems, p+": is not a regular file")
+			problems = append(problems, notRegular(p))
 			continue
 		}
 		w, err := readWorkflow(fsys, p)
@@ -226,32 +289,71 @@ func loadWorkflows(fsys fs.FS) (map[string]*workflow, []string) {
 
 // isWorkflowName reports whether name ends in .yml or .yaml, in any case. A
 // name that starts with a dot, and the names .yml and .yaml themselves,
-// count too, as in the old script.
+// count too: GitHub runs such a file, so the check must read it.
 func isWorkflowName(name string) bool {
 	lower := strings.ToLower(name)
 	return strings.HasSuffix(lower, ".yml") || strings.HasSuffix(lower, ".yaml")
 }
 
-// readWorkflow reads the file p of fsys and parses it. It reads at most
-// maxWorkflowBytes+1 bytes, so a large file is never read in full, and
-// parseWorkflow rejects it.
+// readWorkflow reads the file p of fsys with readLimited and parses it.
 func readWorkflow(fsys fs.FS, p string) (*workflow, error) {
-	f, err := fsys.Open(p)
+	data, err := readLimited(fsys, p, maxFileBytes)
 	if err != nil {
-		return nil, fmt.Errorf("%s: open: %w", p, err)
-	}
-	// The file is only read, so a Close error tells nothing new.
-	defer func() { _ = f.Close() }()
-	data, err := io.ReadAll(io.LimitReader(f, maxWorkflowBytes+1))
-	if err != nil {
-		return nil, fmt.Errorf("%s: read: %w", p, err)
+		return nil, fmt.Errorf("%s: %w", p, err)
 	}
 	return parseWorkflow(p, data)
 }
 
+// readLimited reads the file name of fsys. It fails when the file has more
+// than limit bytes. io.LimitReader stops after one byte more than the limit,
+// so a large file is never read in full. The error does not name the file:
+// the caller adds the name.
+func readLimited(fsys fs.FS, name string, limit int64) ([]byte, error) {
+	f, err := fsys.Open(name)
+	if err != nil {
+		return nil, fmt.Errorf("open: %w", err)
+	}
+	// The file is only read, so a Close error tells nothing new. The blank
+	// identifier _ drops it on purpose.
+	defer func() { _ = f.Close() }()
+	data, err := io.ReadAll(io.LimitReader(f, limit+1))
+	if err != nil {
+		return nil, fmt.Errorf("read: %w", err)
+	}
+	if int64(len(data)) > limit {
+		return nil, fmt.Errorf("the file has more than %d bytes, so the check does not read it", limit)
+	}
+	return data, nil
+}
+
+// onlyVersion looks for exactly one distinct version in versions (the same
+// version may repeat). When there is one, it returns it, and found is "".
+// Otherwise version is "" and found tells what there is, for a message:
+// "none", or the distinct versions in sorted order, joined with ", " and cut
+// to maxShown bytes (a file can hold many long versions).
+func onlyVersion(versions []string) (version, found string) {
+	seen := make(map[string]bool)
+	for _, v := range versions {
+		seen[v] = true
+	}
+	// maps.Keys returns an iterator over the keys, and slices.Sorted collects
+	// them into a sorted slice. A Go map has no order, so the sort makes the
+	// message stable.
+	distinct := slices.Sorted(maps.Keys(seen))
+	switch len(distinct) {
+	case 0:
+		return "", "none"
+	case 1:
+		return distinct[0], ""
+	default:
+		return "", cutText(strings.Join(distinct, ", "), maxShown)
+	}
+}
+
 // dedupe returns msgs without repeated messages, and keeps the first of each
-// in its place. Both rule sets can report the same structure error for the
-// same job.
+// in its place. Two rules can find the same problem, such as a job that is
+// not a mapping. They build its text with one shared helper, so the two
+// copies are equal and dedupe keeps one.
 func dedupe(msgs []string) []string {
 	seen := make(map[string]bool, len(msgs))
 	out := make([]string, 0, len(msgs))
@@ -266,9 +368,10 @@ func dedupe(msgs []string) []string {
 }
 
 // reporter writes problem lines. In GitHub Actions (actions is true) a line
-// is an ::error:: workflow command on stdout, so GitHub shows it as an
-// annotation. Otherwise it is "check-tool-pins: <message>" on stderr. These
-// are the streams and the formats of the old script.
+// is an ::error:: workflow command on stdout, because GitHub reads workflow
+// commands there and shows each as an annotation. Otherwise it is
+// "check-tool-pins: <message>" on stderr, because a problem is a log line
+// for a person, not data.
 type reporter struct {
 	stdout, stderr io.Writer
 	actions        bool

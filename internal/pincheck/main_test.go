@@ -18,12 +18,7 @@ import (
 
 // repoFiles are the real files that repoCopyFS copies, as slash paths
 // relative to the repository root.
-var repoFiles = []string{
-	".github/workflows/ci.yml",
-	".github/workflows/release.yml",
-	".github/workflows/govulncheck.yml",
-	"CONTRIBUTING.md",
-}
+var repoFiles = []string{ciPath, releasePath, weeklyPath, docPath}
 
 // readRepoFiles reads repoFiles from the real repository once. sync.OnceValues
 // runs the function on the first call only and returns the same results to
@@ -411,20 +406,21 @@ func TestCheckGoodRepo(t *testing.T) {
 	}
 }
 
+// TestCheckRequiredFiles checks each required file. It reads the list from
+// repoFiles, not from requiredFiles, so a file that drops out of
+// requiredFiles fails the test. A missing file gives exactly one problem that
+// names it: the rules that need it do not repeat it.
 func TestCheckRequiredFiles(t *testing.T) {
 	t.Parallel()
-	for _, name := range requiredFiles() {
+	for _, name := range repoFiles {
 		t.Run("missing "+name, func(t *testing.T) {
 			t.Parallel()
 			fsys := repoCopyFS(t)
 			delete(fsys, name)
 			got := check(fsys)
 			want := name + ": the file is missing"
-			if len(got) == 0 || got[0] != want {
-				t.Errorf("check() = %q, want %q first", got, want)
-			}
-			if n := countPrefix(got, want); n != 1 {
-				t.Errorf("check() has %q %d times, want 1", want, n)
+			if !slices.Equal(got, []string{want}) {
+				t.Errorf("check() = %q, want only %q", got, want)
 			}
 		})
 		t.Run("directory "+name, func(t *testing.T) {
@@ -442,7 +438,10 @@ func TestCheckRequiredFiles(t *testing.T) {
 	t.Run("all missing", func(t *testing.T) {
 		t.Parallel()
 		got := check(fstest.MapFS{})
-		for i, name := range requiredFiles() {
+		if len(got) != len(repoFiles) {
+			t.Errorf("check(empty) = %q, want %d problems", got, len(repoFiles))
+		}
+		for i, name := range repoFiles {
 			want := name + ": the file is missing"
 			if i >= len(got) || got[i] != want {
 				t.Errorf("check(empty)[%d] = %q, want %q; all: %q", i, got, want, got)
@@ -478,16 +477,41 @@ func TestCheckRequiredWorkflowDoesNotParse(t *testing.T) {
 	fsys := repoCopyFS(t)
 	fsys[wf("release.yml")] = &fstest.MapFile{Data: []byte("a: [\n")}
 	got := check(fsys)
-	if len(got) == 0 || !strings.HasPrefix(got[0], wf("release.yml")) {
-		t.Fatalf("check() = %q, want the parse problem of release.yml first", got)
+	// The parse problem is the only one: the rules that need release.yml do
+	// not repeat it.
+	if len(got) != 1 || !strings.HasPrefix(got[0], wf("release.yml")+": parse YAML: ") {
+		t.Fatalf("check() = %q, want only the parse problem of release.yml", got)
 	}
-	for _, want := range []string{
-		wf("release.yml") + ": the workflow is missing or did not parse. The GoReleaser check needs it.",
-		wf("release.yml") + ": the govulncheck check needs this workflow, but it is missing or did not parse",
-	} {
-		if n := countPrefix(got, want); n != 1 {
-			t.Errorf("check() has %q %d times, want 1: %q", want, n, got)
-		}
+}
+
+// hideEntryFS is a MapFS whose directory listing leaves out the file hide.
+// fs.Stat still finds the file. A file system that ignores case does the
+// same: Stat finds ci.yml, but the listing holds CI.yml.
+type hideEntryFS struct {
+	fstest.MapFS
+	hide string
+}
+
+// ReadDir returns the entries of the directory name without hide. fs.ReadDir
+// calls this method, because hideEntryFS implements fs.ReadDirFS.
+func (h hideEntryFS) ReadDir(name string) ([]fs.DirEntry, error) {
+	entries, err := h.MapFS.ReadDir(name)
+	return slices.DeleteFunc(entries, func(e fs.DirEntry) bool {
+		return path.Join(name, e.Name()) == h.hide
+	}), err
+}
+
+func TestCheckNotLoaded(t *testing.T) {
+	t.Parallel()
+	for _, p := range []string{ciPath, releasePath, weeklyPath} {
+		t.Run(p, func(t *testing.T) {
+			t.Parallel()
+			got := check(hideEntryFS{MapFS: repoCopyFS(t), hide: p})
+			want := []string{p + ": the pin checks need this workflow, but it is not in the listing of .github/workflows"}
+			if !slices.Equal(got, want) {
+				t.Errorf("check() = %q, want %q", got, want)
+			}
+		})
 	}
 }
 
@@ -593,6 +617,61 @@ func TestCheckDedupesSameProblem(t *testing.T) {
 	}
 	if countPrefix(got, wf("release.yml")+":3:") == 0 {
 		t.Errorf("check() = %q, want a problem at release.yml:3", got)
+	}
+}
+
+// TestCheckSameProblemOneLine checks that a problem that two rules find gives
+// one line. The rules build the text with one shared helper (wrongKind, or
+// jobsAndProblems for a job), and dedupe keeps one copy. A rule that wrote
+// its own text would give a second line here.
+func TestCheckSameProblemOneLine(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name  string
+		old   string // the text in the real release.yml
+		repl  string
+		about string // a text that every line about the problem holds
+		want  string // the one line, after the file name and the line
+	}{
+		{
+			// The GoReleaser rule (jobs) and the govulncheck rule
+			// (jobsAndProblems) read every job of release.yml.
+			name:  "job that is not a mapping",
+			old:   "jobs:\n",
+			repl:  "jobs:\n  broken: text\n",
+			about: `the job "broken"`,
+			want:  `the job "broken" must be a mapping, found a scalar`,
+		},
+		{
+			// The GoReleaser rule (jobEnv) and the env rule (envProblems)
+			// read the env of a job.
+			name:  "job env that is not a mapping",
+			old:   "jobs:\n",
+			repl:  "jobs:\n  broken:\n    env: ${{ fromJSON(vars.X) }}\n",
+			about: `the value of "env"`,
+			want:  `the value of "env" must be a mapping, found a scalar`,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			fsys := repoCopyFS(t)
+			rel := fsys[releasePath]
+			src := string(rel.Data)
+			if n := strings.Count(src, tt.old); n != 1 {
+				t.Fatalf("release.yml has %d copies of %q, want 1", n, tt.old)
+			}
+			rel.Data = []byte(strings.Replace(src, tt.old, tt.repl, 1))
+			var lines []string // the problems of release.yml about this problem
+			for _, p := range check(fsys) {
+				if strings.HasPrefix(p, releasePath+":") && strings.Contains(p, tt.about) {
+					lines = append(lines, p)
+				}
+			}
+			if len(lines) != 1 || !strings.HasSuffix(lines[0], ": "+tt.want) {
+				t.Errorf("check() lines with %q = %q, want one line that ends in %q", tt.about, lines, tt.want)
+			}
+		})
 	}
 }
 
@@ -756,7 +835,7 @@ func TestLoadWorkflowsKeys(t *testing.T) {
 func TestLoadWorkflowsTooLarge(t *testing.T) {
 	t.Parallel()
 	fsys := repoCopyFS(t)
-	fsys[wf("big.yml")] = &fstest.MapFile{Data: bytes.Repeat([]byte("#"), maxWorkflowBytes+1)}
+	fsys[wf("big.yml")] = &fstest.MapFile{Data: bytes.Repeat([]byte("#"), maxFileBytes+1)}
 	wfs, problems := loadWorkflows(fsys)
 	if wfs[wf("big.yml")] != nil {
 		t.Error("loadWorkflows() loaded a file over the size limit")
@@ -921,27 +1000,27 @@ func TestCheckManyProblemsAreCapped(t *testing.T) {
 func TestCheckLongTextIsCut(t *testing.T) {
 	t.Parallel()
 	long := strings.Repeat("a", 100<<10)
+	// other.yml gets src. It is not a listed workflow.
 	other := wf("other.yml")
 	tests := []struct {
 		name string
-		file string // the file that gets src; other.yml is not a listed workflow
 		src  string
 		want string // a text that one problem holds, to show that the case hits
 	}{
-		{name: "duplicate key", file: other, src: "on: push\njobs: {}\n? k" + long + "\n: 1\n? K" + long + "\n: 2\n", want: "is a duplicate"},
-		{name: "non-ASCII key", file: other, src: "on: push\njobs: {}\n? \u00e9" + long + "\n: 1\n", want: "has a non-ASCII character"},
-		{name: "job ID of a job that is not a mapping", file: other, src: "on: push\njobs:\n  ? j" + long + "\n  : x\n", want: "must be a mapping, found a scalar"},
-		{name: "job ID of a step that is not a mapping", file: other, src: "on: push\njobs:\n  ? j" + long + "\n  : {steps: [x]}\n", want: "a step of the job"},
-		{name: "scalar value", file: other, src: "on: push\njobs: {}\nrun: echo GORELEASER_VERSION " + long + "\n", want: "mentions GORELEASER_VERSION"},
-		{name: "anchor name", file: other, src: "on: push\njobs: {}\na: &" + long + " 1\n", want: "an anchor (&"},
-		{name: "tag", file: other, src: "on: push\njobs: {}\na: !" + long + " 1\n", want: "an explicit tag (!"},
-		{name: "unknown alias in a decoder error", file: other, src: "on: push\njobs: {}\na: *" + long + "\n", want: "parse YAML: yaml: unknown anchor"},
+		{name: "duplicate key", src: "on: push\njobs: {}\n? k" + long + "\n: 1\n? K" + long + "\n: 2\n", want: "is a duplicate"},
+		{name: "non-ASCII key", src: "on: push\njobs: {}\n? \u00e9" + long + "\n: 1\n", want: "has a non-ASCII character"},
+		{name: "job ID of a job that is not a mapping", src: "on: push\njobs:\n  ? j" + long + "\n  : x\n", want: "must be a mapping, found a scalar"},
+		{name: "job ID of a step that is not a mapping", src: "on: push\njobs:\n  ? j" + long + "\n  : {steps: [x]}\n", want: "a step of the job"},
+		{name: "scalar value", src: "on: push\njobs: {}\nrun: echo GORELEASER_VERSION " + long + "\n", want: "mentions GORELEASER_VERSION"},
+		{name: "anchor name", src: "on: push\njobs: {}\na: &" + long + " 1\n", want: "an anchor (&"},
+		{name: "tag", src: "on: push\njobs: {}\na: !" + long + " 1\n", want: "an explicit tag (!"},
+		{name: "unknown alias in a decoder error", src: "on: push\njobs: {}\na: *" + long + "\n", want: "parse YAML: yaml: unknown anchor"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			fsys := repoCopyFS(t)
-			fsys[tt.file] = &fstest.MapFile{Data: []byte(tt.src)}
+			fsys[other] = &fstest.MapFile{Data: []byte(tt.src)}
 			problems := check(fsys)
 			if !slices.ContainsFunc(problems, func(p string) bool { return strings.Contains(p, tt.want) }) {
 				t.Fatalf("check() = %.400q, want a problem with %q", problems, tt.want)

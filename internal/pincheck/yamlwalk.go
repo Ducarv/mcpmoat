@@ -11,17 +11,11 @@ import (
 	"go.yaml.in/yaml/v3"
 )
 
-// Limits for one workflow file. The workflows of this repository are about
-// 10 KiB each, so the limits are far above real use. They stop a hostile or
-// broken file before the checks walk it.
-const (
-	// maxWorkflowBytes is the largest workflow file that parseWorkflow
-	// accepts (1 MiB). The check runs before any YAML decoding.
-	maxWorkflowBytes = 1 << 20
-	// maxNodeDepth is the deepest nesting of YAML nodes that parseWorkflow
-	// accepts. The document node has depth 0 and the top mapping depth 1.
-	maxNodeDepth = 64
-)
+// maxNodeDepth is the deepest nesting of YAML nodes that parseWorkflow
+// accepts. The document node has depth 0 and the top mapping depth 1. The
+// workflows of this repository nest far less deep, so the limit is far above
+// real use. It stops a hostile or broken file before the checks walk it.
+const maxNodeDepth = 64
 
 // Limits for the text of a message. A key, a value or a name in a workflow
 // can be about 1 MiB long, so every message cuts such a text. Then a hostile
@@ -85,7 +79,7 @@ type job struct {
 // parseWorkflow parses the bytes of one workflow file. file names the file in
 // every error. It fails closed: any input that the checks cannot read with
 // certainty gives an error. These are:
-//   - input larger than maxWorkflowBytes
+//   - input larger than maxFileBytes
 //   - a YAML parse error, or a panic of the YAML decoder
 //   - no document, or more than one document
 //   - a top-level node that is not a mapping
@@ -100,8 +94,8 @@ type job struct {
 // decodes them, so the checks read Node.Value and never the raw text.
 func parseWorkflow(file string, data []byte) (*workflow, error) {
 	w := &workflow{file: file}
-	if len(data) > maxWorkflowBytes {
-		return nil, w.errorAt(nil, "the file has %d bytes, more than the limit of %d", len(data), maxWorkflowBytes)
+	if len(data) > maxFileBytes {
+		return nil, w.errorAt(nil, "the file has %d bytes, more than the limit of %d", len(data), maxFileBytes)
 	}
 	doc, err := w.decodeOne(data)
 	if err != nil {
@@ -212,12 +206,6 @@ func (w *workflow) checkKeys(m *yaml.Node) error {
 	return nil
 }
 
-// root returns the top-level mapping of the workflow. parseWorkflow checked
-// that it is a mapping.
-func (w *workflow) root() *yaml.Node {
-	return w.top
-}
-
 // lookup finds key in the mapping m, compared case-insensitively. It returns
 // the key node and the value node, or two nil nodes when m has no such key.
 // It returns an error when m is not a mapping. parseWorkflow rejected
@@ -261,32 +249,55 @@ func (w *workflow) valueOfKind(m *yaml.Node, key string, want yaml.Kind) (*yaml.
 		return nil, err
 	}
 	if v.Kind != want {
-		return nil, w.errorAt(v, "the value of %s must be %s, found %s", show(k.Value), kindWord(want), kindName(v))
+		return nil, w.wrongKind(k, v, want)
 	}
 	return v, nil
+}
+
+// wrongKind returns the error for the value v of the key k when v is not of
+// the kind want. Every rule that finds such a value uses it, so two rules
+// that find the same value give the same text, and dedupe keeps one copy.
+func (w *workflow) wrongKind(k, v *yaml.Node, want yaml.Kind) error {
+	return w.errorAt(v, "the value of %s must be %s, found %s", show(k.Value), kindWord(want), kindName(v))
 }
 
 // jobs returns the entries of the jobs mapping, in file order. It returns an
 // error when the workflow has no jobs key, when jobs is not a mapping or when
 // a job is not a mapping. GitHub needs jobs in every workflow, so a missing
-// key fails closed.
+// key fails closed. It is the strict form of jobsAndProblems: on any problem
+// it returns no job at all, and the first problem.
 func (w *workflow) jobs() ([]job, error) {
+	jobs, problems := w.jobsAndProblems()
+	if len(problems) > 0 {
+		return nil, problems[0]
+	}
+	return jobs, nil
+}
+
+// jobsAndProblems returns the jobs whose body is a mapping, in file order,
+// and one error for each problem: no jobs key, a jobs value that is not a
+// mapping, or a job that is not a mapping. A bad job does not stop the walk,
+// so the good jobs are still there for a rule that must not miss a step in
+// them. The errors are *nodeError values, as from every other method.
+func (w *workflow) jobsAndProblems() ([]job, []error) {
 	jobsNode, err := w.mappingAt(w.top, "jobs")
 	if err != nil {
-		return nil, err
+		return nil, []error{err}
 	}
 	if jobsNode == nil {
-		return nil, w.errorAt(w.top, "the workflow has no jobs mapping")
+		return nil, []error{w.errorAt(w.top, "the workflow has no jobs mapping")}
 	}
 	var out []job
+	var problems []error
 	for i := 0; i+1 < len(jobsNode.Content); i += 2 {
 		k, body := jobsNode.Content[i], jobsNode.Content[i+1]
 		if body.Kind != yaml.MappingNode {
-			return nil, w.errorAt(body, "the job %s must be a mapping, found %s", show(k.Value), kindName(body))
+			problems = append(problems, w.errorAt(body, "the job %s must be a mapping, found %s", show(k.Value), kindName(body)))
+			continue
 		}
 		out = append(out, job{id: k.Value, key: k, body: body})
 	}
-	return out, nil
+	return out, problems
 }
 
 // steps returns the step mappings of the job j, in file order. It returns no
@@ -320,27 +331,20 @@ func (w *workflow) jobEnv(j job) (*yaml.Node, error) {
 // mapping, such as an expression ${{ fromJSON(...) }}, a block scalar or an
 // empty value, can build a variable such as GORELEASER_VERSION at run time,
 // and no check can read its name. So the rule fails closed on any such value.
-// The message is the same as the one of mappingAt, so dedupe removes the copy
-// when a rule also reads the same env key.
 func (w *workflow) envProblems() []string {
 	var out []string
-	var walk func(n *yaml.Node)
-	walk = func(n *yaml.Node) {
-		if n.Kind == yaml.MappingNode {
-			for i := 0; i+1 < len(n.Content); i += 2 {
-				k, v := n.Content[i], n.Content[i+1]
-				if strings.EqualFold(k.Value, "env") && v.Kind != yaml.MappingNode {
-					err := w.errorAt(v, "the value of %s must be %s, found %s", show(k.Value), kindWord(yaml.MappingNode), kindName(v))
-					out = append(out, err.Error())
-				}
+	walk(w.top, func(n *yaml.Node) {
+		if n.Kind != yaml.MappingNode {
+			return
+		}
+		// Content of a mapping holds key, value, key, value and so on.
+		for i := 0; i+1 < len(n.Content); i += 2 {
+			k, v := n.Content[i], n.Content[i+1]
+			if strings.EqualFold(k.Value, "env") && v.Kind != yaml.MappingNode {
+				out = append(out, w.wrongKind(k, v, yaml.MappingNode).Error())
 			}
 		}
-		// parseWorkflow checked the depth, so the recursion is bounded.
-		for _, child := range n.Content {
-			walk(child)
-		}
-	}
-	walk(w.top)
+	})
 	return out
 }
 
@@ -352,17 +356,34 @@ func (w *workflow) envProblems() []string {
 // are not nodes, so scalars does not return them.
 func (w *workflow) scalars() []*yaml.Node {
 	var out []*yaml.Node
-	var walk func(n *yaml.Node)
-	walk = func(n *yaml.Node) {
+	walk(w.top, func(n *yaml.Node) {
 		if n.Kind == yaml.ScalarNode {
 			out = append(out, n)
 		}
-		for _, child := range n.Content {
-			walk(child)
-		}
-	}
-	walk(w.top)
+	})
 	return out
+}
+
+// walk calls visit for n and for every node below it, in file order: a node
+// comes before its children. visit is a func value, so each caller passes the
+// code to run on a node, and walk does the recursion in one place. walk does
+// not go deeper than maxNodeDepth levels below n. parseWorkflow already
+// rejects deeper nesting, so for a parsed workflow the bound never cuts. It
+// is a second guard: no bug and no hand-built node can make the recursion
+// unbounded.
+func walk(n *yaml.Node, visit func(*yaml.Node)) {
+	walkDepth(n, 0, visit)
+}
+
+// walkDepth is walk for the node n at the depth depth below the start node.
+func walkDepth(n *yaml.Node, depth int, visit func(*yaml.Node)) {
+	if n == nil || depth > maxNodeDepth {
+		return
+	}
+	visit(n)
+	for _, child := range n.Content {
+		walkDepth(child, depth+1, visit)
+	}
 }
 
 // errorAt returns a *nodeError for the file of w at the line of n. n may be
@@ -410,6 +431,8 @@ func kindWord(k yaml.Kind) string {
 // an escape such as \n. When s was cut, "..." follows the closing quote, so
 // the marker cannot look like a part of the text. The result has at most
 // about 4*maxShown bytes (each byte can become an escape such as \x1b).
+// termsafe.QuoteCut is not used, because it cuts by runes and the bound here
+// is on bytes: 80 runes can be several times 80 bytes.
 func show(s string) string {
 	short := cutPrefix(s, maxShown)
 	if len(short) < len(s) {

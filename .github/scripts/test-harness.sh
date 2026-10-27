@@ -12,18 +12,17 @@
 #   set -euo pipefail
 #   # shellcheck source-path=SCRIPTDIR source=test-harness.sh
 #   . "$(dirname -- "$0")/test-harness.sh"
-#   src=$(CDPATH='' cd -- "$(dirname -- "$0")/../.." && pwd)
+#   CDPATH='' cd -- "$(dirname -- "$0")/../.."  # work in the repository root
+#   src=$PWD
 #   tmp=$(mktemp -d)
 #   trap 'rm -rf "${tmp:?}"' EXIT
-#
-#   in_copy() { cd "$tmp/w" && "$@"; }  # run_setup runs it in a subshell
 #
 #   # snapshot_case NAME WANT_CODE WANT_TEXT SETUP [ARGS...]
 #   snapshot_case() {
 #     local name=$1 want_code=$2 want_text=$3
 #     shift 3
 #     rm -rf "${tmp:?}/w" && cp -R "$src/dist" "$tmp/w"  # a new dir per case
-#     run_setup "$name" in_copy "$@"  # a failure stops and names the case
+#     run_setup "$name" in_dir "$tmp/w" "$@"  # a failure stops and names the case
 #     check_case "$name" "$want_code" "$want_text" "$tmp/w/check.sh"
 #     # More checks on the same run: case_out has its output.
 #     check_output "$name: closing message" "the release is public"
@@ -43,13 +42,24 @@ case_code=0      # the exit code of the last check_case
 case_out=''      # the output (stdout and stderr) of the last check_case
 
 # record_failure MSG...: reports a failure and counts it. The run goes on. In
-# GitHub Actions it prints an ::error:: annotation, else a FAIL: line. Both go
-# to stderr.
+# GitHub Actions (GITHUB_ACTIONS is exactly "true", as GitHub sets it and as
+# internal/pincheck reads it) it prints an ::error:: annotation, else a FAIL:
+# line. Both go to stderr. MSG often holds the output of a case, so a line
+# break in it must not start a line that a reader or the runner takes for a
+# workflow command, a FAIL: line or a footer.
 record_failure() {
-  if [ -n "${GITHUB_ACTIONS:-}" ]; then
-    echo "::error::$*" >&2
+  local msg=$*
+  if [ "${GITHUB_ACTIONS:-}" = true ]; then
+    # Encode MSG as workflow command data: it stays one annotation.
+    msg=${msg//'%'/%25}
+    msg=${msg//$'\r'/%0D}
+    msg=${msg//$'\n'/%0A}
+    echo "::error::$msg" >&2
   else
-    echo "FAIL: $*" >&2
+    # Show a CR as \r and start each later line with "  > ".
+    msg=${msg//$'\r'/'\r'}
+    msg=${msg//$'\n'/$'\n'"  > "}
+    echo "FAIL: $msg" >&2
   fi
   harness_failed=$((harness_failed + 1))
 }
@@ -75,7 +85,7 @@ harness_clip() {
 # run_setup NAME CMD [ARGS...]: runs the setup of the case NAME in a subshell,
 # so that a cd in the setup does not leak. Its output shows only when it
 # fails. A failure stops the script with a message that names the case and
-# the whole command, so that a wrapper such as in_copy does not hide the real
+# the whole command, so that a wrapper such as in_dir does not hide the real
 # setup. CMD runs where set -e has no effect, so join the commands of a setup
 # function with && or end each one with || return 1.
 run_setup() {
@@ -84,6 +94,13 @@ run_setup() {
   cmd=$*
   # A newline or control character in an argument must not start a new line.
   out=$("$@" 2>&1 </dev/null) || fail "$name: the setup failed ($(harness_clip "${cmd//[[:cntrl:]]/ }")): $(harness_clip "$out")"
+}
+
+# in_dir DIR CMD [ARGS...]: runs CMD with ARGS in the directory DIR. The cd
+# changes the current shell, so pass in_dir to run_setup or check_case, which
+# run it in a subshell: run_setup "$name" in_dir "$tmp/w" "$@".
+in_dir() {
+  CDPATH='' cd -- "$1" && shift && "$@"
 }
 
 # check_case NAME WANT_CODE WANT_TEXT CMD [ARGS...]: runs one case. It runs
@@ -117,21 +134,27 @@ check_output() {
 }
 
 # check_cmd NAME CMD [ARGS...]: a case with no exit code or text to compare.
-# It runs CMD in the current shell and records the failure NAME when CMD
-# fails. The output of CMD shows. As in run_setup, set -e has no effect in CMD.
+# NAME says what the check wants, for example "the job has no checkout step".
+# It runs CMD in a subshell, with stdin from /dev/null, and records the
+# failure "NAME: the check failed", with the output of CMD, when CMD fails. As
+# in run_setup, set -e has no effect in CMD.
 check_cmd() {
-  local name=$1
+  local name=$1 out
   shift
   harness_total=$((harness_total + 1))
-  "$@" || record_failure "$name"
+  out=$("$@" 2>&1 </dev/null) || record_failure "$name: the check failed${out:+: $(harness_clip "$out")}"
 }
 
 # harness_footer NAME: the last line of a test script. It prints
-# "NAME: all M cases pass", or "NAME: N of M cases failed" on stderr and then
-# exits 1.
+# "NAME: all M cases pass". It prints "NAME: N of M cases failed", or
+# "NAME: no case ran" when M is 0, on stderr and then exits 1.
 harness_footer() {
   if [ "$harness_failed" -ne 0 ]; then
     echo "$1: $harness_failed of $harness_total cases failed" >&2
+    exit 1
+  fi
+  if [ "$harness_total" -eq 0 ]; then
+    echo "$1: no case ran" >&2
     exit 1
   fi
   echo "$1: all $harness_total cases pass"
@@ -142,13 +165,15 @@ harness_footer() {
 # indent. With JOB, it looks only in the job with that ID. The name must be
 # the first key of the step (`- name: STEP`). The run key must be a key of the
 # step itself. The block ends at the first line with less indent, and blank
-# lines at its end are dropped, as YAML does. Text of later steps and jobs
-# never shows. It exits 3 when there is no such step or the step has no block.
+# lines at its end are dropped, as YAML does. A line of only spaces and tabs
+# counts as blank. Text of later steps and jobs never shows. It exits 3 when
+# there is no such step or when the first step with the name has no block,
+# even when a later step with the name has one.
 extract_run_block() {
   HARNESS_STEP=$2 HARNESS_JOB=${3-} awk '
     BEGIN { step = ENVIRON["HARNESS_STEP"]; job = ENVIRON["HARNESS_JOB"] }
     inrun {
-      if ($0 ~ /^ *$/) { blank++; next }
+      if ($0 ~ /^[[:space:]]*$/) { blank++; next }
       match($0, /^ */)
       if (indent == 0) {
         if (RLENGTH <= keyindent) exit
@@ -159,11 +184,11 @@ extract_run_block() {
       print substr($0, indent + 1)
       next
     }
-    /^ *(#.*)?$/ { next }
+    /^[[:space:]]*(#.*)?$/ { next }
     { match($0, /^ */); ind = RLENGTH }
     ind == 0 { injobs = ($1 == "jobs:"); injob = 0 }
     ind == 2 && injobs { injob = ($1 == (job ":")) }
-    instep && ind <= dash { instep = 0 }
+    instep && ind <= dash { exit } # the end of the first step with the name
     !instep && /^ *- +name:/ && (job == "" || injob) {
       name = $0
       sub(/^ *- +name: */, "", name)

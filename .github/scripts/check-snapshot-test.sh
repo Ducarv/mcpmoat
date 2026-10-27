@@ -6,11 +6,10 @@
 # It needs go, jq and file, and sha256sum or shasum, because check-snapshot.sh
 # needs them, and it runs go env itself.
 set -euo pipefail
-
 # shellcheck source-path=SCRIPTDIR source=test-harness.sh
 . "$(dirname -- "$0")/test-harness.sh"
-
-src=$(CDPATH='' cd -- "$(dirname -- "$0")/../.." && pwd)
+CDPATH='' cd -- "$(dirname -- "$0")/../.."
+src=$PWD
 
 [ -f "$src/dist/checksums.txt" ] || fail "dist/ is missing: run goreleaser release --snapshot --clean first"
 
@@ -88,9 +87,6 @@ change_version() {
   jq '.version = "9.9.9"' dist/metadata.json >dist/metadata.new && mv dist/metadata.new dist/metadata.json
 }
 
-# in_copy runs a setup command in the copy. run_setup runs it in a subshell.
-in_copy() { cd "$tmp/w" && "$@"; }
-
 # snapshot_case NAME WANT_CODE WANT_TEXT SETUP [ARGS...] copies
 # check-snapshot.sh and dist/ to a new tree, changes the copy with SETUP, and
 # runs the script in the tree. check-snapshot.sh goes to the directory of its
@@ -103,7 +99,7 @@ snapshot_case() {
   mkdir -p "$tmp/w/.github/scripts"
   cp "$src/.github/scripts/check-snapshot.sh" "$tmp/w/.github/scripts/"
   cp -R "$src/dist" "$tmp/w/dist"
-  run_setup "$name" in_copy "$@"
+  run_setup "$name" in_dir "$tmp/w" "$@"
   check_case "$name" "$want_code" "$want_text" "$tmp/w/.github/scripts/check-snapshot.sh"
 }
 
