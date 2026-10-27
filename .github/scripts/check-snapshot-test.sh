@@ -22,8 +22,8 @@ fail() {
 
 [ -f "$src/dist/checksums.txt" ] || fail "dist/ is missing: run goreleaser release --snapshot --clean first"
 
-# The host of check-snapshot.sh: go env GOOS and GOARCH. It is read here, in
-# the repo, because go warns about a go.mod in the temp directory.
+# The host of check-snapshot.sh: go env GOOS and GOARCH. The cases use it to
+# name the binary that check-snapshot.sh looks up for this host.
 host_os=$(go env GOOS)
 host_arch=$(go env GOARCH)
 
@@ -142,10 +142,11 @@ check_case "missing line in checksums.txt" 1 "lines in dist/checksums.txt, found
 # The binaries.
 check_case "Linux binary is not statically linked" 1 "is not statically linked" dynamic_linux_binary
 
-# artifacts.json and metadata.json. On every host, the first binary that
-# check-snapshot.sh looks up is the host binary: the loop over the Linux
-# binaries stops at it on a Linux host, and the host check stops at it on
-# macOS. So the first message names the host in both cases.
+# artifacts.json and metadata.json. On every host, the first lookup that fails
+# is the one for the host binary. check-snapshot.sh looks up linux amd64, then
+# linux arm64, then the host. On a linux/amd64 host the first lookup is the host
+# binary. On a linux/arm64 host the second is. On macOS the third is. So the
+# first message names the host in all cases.
 check_case "missing Binary entry for this host" 1 "no $host_os $host_arch binary found in dist/artifacts.json (got '')" drop_host_binary
 check_case "Binary file of this host is missing on disk" 1 "no $host_os $host_arch binary found in dist/artifacts.json (got 'dist/" delete_host_binary
 check_case "missing artifacts.json" 1 "dist/artifacts.json is missing" rm dist/artifacts.json

@@ -137,6 +137,24 @@ asset_added_after() { echo add_asset >"$S/after"; }
 not_immutable() { echo false >"$S/immutable"; }
 attest_fails_last() { echo mcpmoat_9.9.9_linux_amd64.tar.gz >"$S/attest_fail"; }
 
+# check_calls reads the call log that the good release leaves in $S. It wants
+# one "attestation verify" call for each file that the script downloads (the
+# archives and checksums.txt, not the files that it ignores), and all of them
+# before "release edit", the publish.
+check_calls() {
+  local want n last_verify edit
+  total=$((total + 1))
+  want=$(find "$tmp/w/dist" -maxdepth 1 -type f \( -name '*.tar.gz' -o -name checksums.txt \) | wc -l | tr -d ' ')
+  n=$(grep -c '^attestation verify ' "$S/calls" || true)
+  last_verify=$(grep -n '^attestation verify ' "$S/calls" | tail -n 1 | cut -d: -f1 || true)
+  edit=$(grep -n '^release edit ' "$S/calls" | head -n 1 | cut -d: -f1 || true)
+  if [ "$n" != "$want" ]; then
+    record_failure "attestation calls: $n, want $want: $(cat "$S/calls")"
+  elif [ -z "$edit" ] || [ "$last_verify" -ge "$edit" ]; then
+    record_failure "an attestation verify call comes after the publish: $(cat "$S/calls")"
+  fi
+}
+
 # check_case builds a tree, runs the change $5 (with its arguments), runs the
 # script and checks three things: the exit code, the state of the release
 # (draft or published) and that the output contains the text $4. The state
@@ -163,23 +181,8 @@ check_case() {
 
 check_case "good release" 0 published "" good
 
-# check_calls reads the call log of the good release, which is still in $S.
-# It wants one "attestation verify" call for each file that the script
-# downloads (the archives and checksums.txt, not the files that it ignores),
-# and all of them before "release edit", the publish.
-check_calls() {
-  local want n last_verify edit
-  total=$((total + 1))
-  want=$(find "$tmp/w/dist" -maxdepth 1 -type f \( -name '*.tar.gz' -o -name checksums.txt \) | wc -l | tr -d ' ')
-  n=$(grep -c '^attestation verify ' "$S/calls" || true)
-  last_verify=$(grep -n '^attestation verify ' "$S/calls" | tail -n 1 | cut -d: -f1 || true)
-  edit=$(grep -n '^release edit ' "$S/calls" | head -n 1 | cut -d: -f1 || true)
-  if [ "$n" != "$want" ]; then
-    record_failure "attestation calls: $n, want $want: $(cat "$S/calls")"
-  elif [ -z "$edit" ] || [ "$last_verify" -ge "$edit" ]; then
-    record_failure "an attestation verify call comes after the publish: $(cat "$S/calls")"
-  fi
-}
+# check_calls reads the call log of the good release, so it must run right
+# after that case.
 check_calls
 
 check_case "extra asset on the draft" 1 draft "::error::The release assets do not match dist/" extra_on_draft
