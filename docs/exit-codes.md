@@ -112,9 +112,10 @@ To use the exit code in CI or in a git hook, see [Using mcpmoat in CI and git ho
 - The lock file `pins.json.lock` in the pins directory is unsafe: it is not a regular file (a
   symlink, for example), another user owns it, its group or others have any access (mode 0600
   passes, 0644 is refused), or on macOS an ACL entry lets a user or group open it. mcpmoat never
-  changes the mode of an existing lock file. The fix is `rm -- <path>`: the next run makes a new
-  lock file with mode 0600. For an ACL entry that comes back after that, the entry is inherited
-  from the pins directory. `scan` takes the lock only when it has new servers to pin.
+  changes the mode of an existing lock file. The fix is `rm -- '<path>', then mcpmoat makes a new
+  one with mode 0600` (`rmdir -- '<path>', ...` when the lock entry is a directory). For an ACL
+  entry that comes back after that, the entry is inherited from the pins directory. `scan` takes the
+  lock only when it has new servers to pin.
 - The pins directory is read-only and has no lock file yet, so mcpmoat cannot create
   `pins.json.lock`. The error names the lock file and the reason, for example `create the pins
   lock file <path>: permission denied`. A read-only pins directory with a lock file gets past the
@@ -124,8 +125,8 @@ To use the exit code in CI or in a git hook, see [Using mcpmoat in CI and git ho
   [Pins and rug pulls](pins.md)).
 - The pins directory was moved, removed or replaced while the command ran. Right before it replaces
   `pins.json`, the save checks that the path still names the directory that the command opened. If
-  not, it saves nothing, and the error says `the pins directory <path> was moved or removed while
-  this command ran, and nothing was saved`.
+  not, it saves nothing, and the error says `the pins directory <path> was moved, removed or
+  replaced while this command ran, and nothing was saved`.
 - `pins.json` existed at the first read of the command, but it was removed while the command ran.
   The command saves nothing and prints a line that says so (see [Pins and rug pulls](pins.md)). A
   real first run is not affected.
@@ -135,8 +136,8 @@ To use the exit code in CI or in a git hook, see [Using mcpmoat in CI and git ho
   that no longer fits in the share of the project servers (16 MiB).
 - `pin --accept` cannot add the server, because the new pins would make `pins.json` larger than
   32 MiB. It prints a message that the pins file is full and saves nothing. For a project-scope
-  server past the 16 MiB share of the project servers, the message says that the project servers
-  use all of their share and tells you to remove project servers you no longer use.
+  server past the 16 MiB share of the project servers, the message says `the project share of the
+  pins file is full (16 MiB)` and tells you to remove project servers you no longer use.
 
 A first-run server that does not fit when `scan` makes the report is a high `MOAT-T2-004` finding,
 not an execution error. That is also true for a first-run project-scope server past the 16 MiB

@@ -115,21 +115,24 @@
   `cmd.exe` and PowerShell, reads such a word as plain text. Else the line says what to run and
   gives the digest, but no command. The line has no command either when you did not see every
   change (a cut diff, a change that `--ignore` hid, or a diff that is only a note), when the name
-  cannot select the server, when a config file has a problem, or when `pins.json` has no room for
-  the new tools (see **Full pins file**). Then you must review the tool first, `pin` needs
-  `--config`, or you must make room first. The line ends with a note for each change that you did
-  not see: `(the diff was cut: review the full tool first)`, `(--ignore hid some changes: run scan
-  without it to review them first)` or `(a change has no diff text: review the tool first)`. The
-  digest covers those changes too. When `pins.json` has no room, the line ends with `(pins.json has
-  no room for these tools: pin --accept fails until you remove other servers from it)`.
+  cannot select the server, when a config file has a problem, or when `pins.json` or its project
+  share has no room for the new tools (see **Full pins file**). Then you must review the tool first,
+  `pin` needs `--config`, or you must make room first. The line ends with a note for each change
+  that you did not see: `(the diff was cut: review the full tool first)`, `(--ignore hid some
+  changes: run scan without it to review them first)` or `(a change has no diff text: review the
+  tool first)`. The digest covers those changes too. When `pins.json` has no room, the line ends
+  with `(pins.json has no room for these tools: pin --accept fails until you remove other servers
+  from it)`. When only the project share has no room, the line ends with `(the project share of
+  pins.json has no room for these tools: pin --accept fails until you remove project servers you no
+  longer use from it)`.
 - `scan --json` gives the same digest in the field `accept` of a pinned server that has a pin
   finding with a `To accept` hint: `{ "digest": "pd1:<64 hex>", "command": "mcpmoat pin --accept ...
   --expect <digest>" }`. `command` is there only when the terminal hint prints a command. When the
   terminal prints steps (a cut diff, a change that `--ignore` hid, a diff that is only a note, a
-  server name that more than one server uses, a config file problem, a `pins.json` with no room for
-  the tools, or a name or path that is not a plain shell word), the JSON has the digest and no
-  command. The JSON never holds the steps. Do not
-  let a CI job accept a change from this field: a person must review the diff first.
+  server name that more than one server uses, a config file problem, a `pins.json` or a project
+  share with no room for the tools, or a name or path that is not a plain shell word), the JSON has
+  the digest and no command. The JSON never holds the steps. Do not let a CI job accept a change
+  from this field: a person must review the diff first.
 - A server that fails, times out or is refused (an untrusted or turned-off server) shows its status
   in the summary on stdout. If the server is not pinned, it does not change the exit code. If the
   server is already pinned and fails or times out, it is also a high `MOAT-T2-004` finding (see
@@ -158,51 +161,55 @@
   creates the lock file with mode `0600` when it is missing. It refuses a lock file that is a
   symlink or not a regular file, that another user owns, that group or others can read, write or
   run, or (macOS) whose ACL has an allow entry that gives a read, run or write right. Then the run
-  exits with code 2, and the hint is `rm -- '<path>'`: mcpmoat makes a new one on the next run.
-  `chmod` does not help, because a process that opened the file before keeps it open. So another
-  user cannot hold the lock, and a pins directory with mode `0755` is fine. The run releases the
-  lock right after the save, before it prints. A run that takes the lock creates a missing pins
-  directory (mode `0700`) and the lock file. The lock file stays after the run, so a directory
-  with only `pins.json.lock` in it can stay when the run saves nothing. A read-only pins directory
-  (for example mode `0500`) works only when `pins.json.lock` already exists in it. Else the run
-  exits with code 2 with an error that names the lock file. Some file systems, for example some
-  network mounts, cannot lock. Then the run goes on without the lock and prints one warning:
-  `mcpmoat <cmd>: warning: the file system of the pins directory <dir> does not support file
-  locks, so a parallel run can overwrite these pins`. Windows has no lock, and the run prints the
-  same warning. mcpmoat v0.1.0 does not lock, so do not run it at the same time as a newer version.
+  exits with code 2, and the fix hint is `rm -- '<path>', then mcpmoat makes a new one with mode
+  0600` (`rmdir -- '<path>', ...` when the lock entry is a directory). `chmod` does not help,
+  because a process that opened the file before keeps it open. So another user cannot hold the lock,
+  and a pins directory with mode `0755` is fine. The run releases the lock right after the save,
+  before it prints. A run that takes the lock creates a missing pins directory (mode `0700`) and the
+  lock file. The lock file stays after the run, so a directory with only `pins.json.lock` in it can
+  stay when the run saves nothing. A read-only pins directory (for example mode `0500`) works only
+  when `pins.json.lock` already exists in it. Else the run exits with code 2 with an error that
+  names the lock file. Some file systems, for example some network mounts, cannot lock. Then the run
+  goes on without the lock and prints one warning: `mcpmoat <cmd>: warning: the file system of the
+  pins directory <dir> does not support file locks, so a parallel run can overwrite these pins`.
+  Windows has no lock, and the run prints the same warning. mcpmoat v0.1.0 does not lock, so do not
+  run it at the same time as a newer version.
 - **Pins directory changed:** the save writes to the pins directory that the run checked and
   locked. Just before it replaces `pins.json`, it checks that the path still names that directory.
   If the directory was moved, removed or replaced while the command ran, the run saves nothing and
-  exits with code 2, with an error that says that the pins directory was moved or removed and
-  nothing was saved.
-- **Full pins file:** the whole `pins.json` has a limit of 32 MiB. The project servers (from a
-  project `.mcp.json`, from `.cursor/mcp.json` and from the `projects.<path>` sections of
-  `~/.claude.json`) may use at most 16 MiB of it together. A project config can come from a
-  repository that you cloned, so this share keeps it from filling the file: the servers of your
-  user scope always keep the other 16 MiB. A first-run server that would make the file larger, or a
-  project server that would make the project servers use more than 16 MiB, is not pinned, and the
-  other servers still are. It gets a high `MOAT-T2-004` with the reason `the pins file is full
-  (32 MiB), so this server is not pinned` and the fix `Remove servers you no longer use from
-  pins.json, or remove this server from the client config, then run mcpmoat scan again.` When only
-  the project share is full, the reason is `the project share of the pins file is full (16 MiB);
-  this server is not pinned` and the fix is `Servers of the user scope are not affected: remove
-  project servers you no longer use from pins.json, or remove this server from its project config,
-  then run mcpmoat scan again.` A later change to the tools of that server is not detected. If
-  another run made the file larger after the report, `scan` prints `mcpmoat scan: warning: server
-  <server> not pinned: the pins file is full (32 MiB)` (or `... not pinned: the project servers use
-  all of their share of the pins file (16 MiB)`) instead and exits with code 2. If the new pins of
-  `pin --accept` do not fit, it prints `mcpmoat pin: cannot pin <server>: the pins file is full
-  (32 MiB); remove servers you no longer use from pins.json` (for the project share: `mcpmoat pin:
-  cannot pin <server>: the project servers use all of their share of the pins file (16 MiB);
-  remove project servers you no longer use from pins.json`), saves nothing and exits with code 2.
-  Both limits refuse only growth: new pins that are not larger than the old pins of the server are
-  always accepted, and a file that is already over the share still loads. For a pinned server whose
-  tools grew and do not fit, `scan` still prints the `To accept` line with the digest, but with no
-  `pin --accept` command, and with a note that `pins.json` has no room (see **Recommended flow**).
-  The limit is first come, first served, and mcpmoat never removes old entries. All project
-  servers share the 16 MiB, so the servers of one hostile project config can still use up the
-  share, and the servers of other projects are then not pinned. A refused server is always
-  reported. To make room, remove servers from `pins.json` by hand.
+  exits with code 2, with the error `the pins directory <dir> was moved, removed or replaced while
+  this command ran, and nothing was saved`.
+- **Full pins file:** `pins.json` has two size limits.
+  - File limit: the whole `pins.json` has a limit of 32 MiB. A first-run server that would make the
+    file larger is not pinned, and the other servers still are.
+  - Project share: the project servers (from a project `.mcp.json`, from `.cursor/mcp.json` and
+    from the `projects.<path>` sections of `~/.claude.json`) may use at most 16 MiB of the file
+    together. A project config can come from a repository that you cloned, so this share keeps it
+    from filling the file: the servers of your user scope always keep the other 16 MiB. A project
+    server that would make the project servers use more than 16 MiB is not pinned, and the other
+    servers still are. All project servers share the 16 MiB, so the servers of one hostile project
+    config can still use up the share, and the servers of other projects are then not pinned.
+  - Messages: a server that is not pinned gets a high `MOAT-T2-004` with the reason `the pins file
+    is full (32 MiB), so this server is not pinned` and the fix `Remove servers you no longer use
+    from pins.json, or remove this server from the client config, then run mcpmoat scan again.`
+    When only the project share is full, the reason is `the project share of the pins file is full
+    (16 MiB); this server is not pinned` and the fix is `Servers of the user scope are not
+    affected: remove project servers you no longer use from pins.json, or remove this server from
+    its project config, then run mcpmoat scan again.` A later change to the tools of that server is
+    not detected. If another run made the file larger after the report, `scan` prints `mcpmoat
+    scan: warning: server <server> not pinned: the pins file is full (32 MiB)` (or `... not pinned:
+    the project share of the pins file is full (16 MiB)`) instead and exits with code 2. If the new
+    pins of `pin --accept` do not fit, it prints `mcpmoat pin: cannot pin <server>: the pins file
+    is full (32 MiB); remove servers you no longer use from pins.json` (for the project share:
+    `mcpmoat pin: cannot pin <server>: the project share of the pins file is full (16 MiB); remove
+    project servers you no longer use from pins.json`), saves nothing and exits with code 2.
+  - Refuses only growth: new pins that are not larger than the old pins of the server are always
+    accepted, and a file that is already over the share still loads. For a pinned server whose
+    tools grew and do not fit, `scan` still prints the `To accept` line with the digest, but with
+    no `pin --accept` command, and with a note that `pins.json` (or its project share) has no room
+    (see **Recommended flow**). The limit is first come, first served, and mcpmoat never removes
+    old entries. A refused server is always reported. To make room, remove servers from
+    `pins.json` by hand.
 - Press Ctrl-C (or send `SIGTERM` or `SIGHUP`) to stop a run. mcpmoat stops the stdio servers that
   it started. A signal during the inspection, or after it but before new pins are saved (for
   `scan`, only when there are new pins), makes `scan` and `pin --accept` print `interrupted; no

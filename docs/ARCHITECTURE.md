@@ -295,11 +295,13 @@ step 5 and step 6:
   which server `pin --accept <name>` would select among all servers of the scan (`selectServers`,
   the same function that `pin` uses). It sets `project` when `pin` needs `--project` to select the
   server, and `ambiguous` when the name cannot select it. Then `markStoreFull` checks that the new
-  tools of each hint fit in `pins.json`. It runs after every first-run server is in the budget, as
-  the save adds them before the user can run `pin --accept`. It calls `Store.Set` on a new
-  `Clone` of the budget for each hint, because `pin --accept` saves one server at a time and the
-  budget must hold only what the save of `scan` writes. When `Set` refuses with
-  `pins.ErrStoreFull` (also for the project share), it sets `storeFull`.
+  tools of each hint (the field `snap` of `acceptHint`) fit in `pins.json`. It runs after every
+  first-run server is in the budget, as the save adds them before the user can run `pin --accept`.
+  It calls `Store.CheckSet` on the budget for each hint. `CheckSet` runs the same checks as `Set`
+  and returns the same errors, but changes nothing, so each hint is checked alone (`pin --accept`
+  saves one server at a time) and the budget holds only what the save of `scan` writes. When
+  `CheckSet` refuses with `pins.ErrProjectShareFull`, it sets `storeFull` and `shareFull`. When it
+  refuses with `pins.ErrStoreFull` only, it sets `storeFull`.
   - The JSON `accept` object (`scan --json`, schema version 3) comes from the same hint and the same
     decision as the terminal line. `acceptAdvice` (`cmd/mcpmoat/accept_hint.go`) returns the text
     of the line and `isCommand`, which is true only when the text is the `pin --accept` command
@@ -395,8 +397,10 @@ step 5 and step 6:
   with ` (the diff was cut: review the full tool first)`. When `--ignore` dropped a pin finding of
   that server, it ends with ` (--ignore hid some changes: run scan without it to review them
   first)`. When a kept diff is only a fixed note, it ends with
-  ` (a change has no diff text: review the tool first)`. When the hint has `storeFull`, it ends
-  with `hintStoreFullNote`, after the other notes.
+  ` (a change has no diff text: review the tool first)`. When the hint has `shareFull`, it ends
+  with `hintShareFullNote`, after the other notes. Else, when the hint has `storeFull`, it ends
+  with `hintStoreFullNote`. Both notes drop the command and keep the digest, in the terminal and
+  in the JSON `accept` object.
   The command holds the server name, the project and the config path only when each one is a bare
   shell word
   (`isBareShellWord`: the ASCII characters `[A-Za-z0-9._@/:+=-]`, starting with a letter, `_` or
@@ -486,7 +490,7 @@ change the exit codes.
    of step 7 come from the locked store. Other servers keep their pins, and so do entries that
    another run wrote. A `pins.json` problem exits with 2. When `Set` refuses the server with
    `pins.ErrStoreFull`, `pin` prints a message that the pins file is full, or that the project
-   servers use all of their share when the error is `pins.ErrProjectShareFull` (see [Pins and rug
+   share of the pins file is full when the error is `pins.ErrProjectShareFull` (see [Pins and rug
    pulls](pins.md)), saves nothing and exits with 2. When the save created a new pins file,
    `printNewPinsFile` prints one line on stderr before step 7.
 7. It prints `accepted <server>: N new, N changed, N removed` on stdout, with `, N not verified`
@@ -678,8 +682,9 @@ a changed tool (a rug pull). `scan` writes the pins of a server on its first run
   pinned. `Set` refuses only growth: a change that does not make the file larger, such as a smaller
   replacement of a server, is always accepted. `Clone` returns a copy of the store, so `scan` can
   call `Set` on the copy to learn whether a server fits before it prints the report (see 5b and
-  5c), without a change to the real store. The size check in `Save` stays as a backstop. The format
-  of `pins.json` did not change, so its version stays 1.
+  5c), without a change to the real store. `CheckSet` runs the same checks as `Set` and returns the
+  same errors, but changes nothing, so `scan` can test one accept hint at a time. The size check in
+  `Save` stays as a backstop. The format of `pins.json` did not change, so its version stays 1.
 - Project share: the project servers (an identity with a `project_path`: a project `.mcp.json`,
   `.cursor/mcp.json` and the `projects.<path>` servers of `~/.claude.json`) may use at most 16 MiB
   of the file together (`pins.ProjectShareMiB`, half of the file limit). The `Store` counts their
@@ -691,11 +696,13 @@ a changed tool (a rug pull). `scan` writes the pins of a server on its first run
   other 16 MiB. The share refuses only growth, like the file limit, and `Load` reads a file whose
   project servers are already over the share.
 - Owner and mode check: `Load` and `LoadLocked` refuse an unsafe pins directory or `pins.json`, and
-  `Save` refuses an unsafe pins directory. Unsafe means that another user owns the path, that group
-  or others can write it (mode bits `0o022`), or (macOS only) that its ACL lets a user or group
-  write it. The error wraps `ErrInsecurePermissions` and names the path, the mode and a fix (the
-  texts are in [docs/pins.md](pins.md)). mcpmoat never changes a mode itself, so the user must fix
-  an unsafe path. `scan` and `pin --accept` exit with 2 (FR-16). The first read runs before any
+  `Save` refuses an unsafe pins directory. The `Save` of a `Store` from plain `Load` also refuses an
+  unsafe parent directory, because it opens the directory again (`openPinsDir`, see Write). Unsafe
+  means that another user owns the path, that group or others can write it (mode bits `0o022`),
+  or (macOS only) that its ACL lets a user or group write it. The error wraps
+  `ErrInsecurePermissions` and names the path, the mode and a fix (the texts are in
+  [docs/pins.md](pins.md)). mcpmoat never changes a mode itself, so the user must fix an unsafe
+  path. `scan` and `pin --accept` exit with 2 (FR-16). The first read runs before any
   server starts. Both commands read the file again just before they save, and then they save. That
   second read and the save can refuse after the servers ran, because a mode can change while `scan`
   inspects them. Modes such as `0755` for a directory and `0644` for a file pass: pins are not
@@ -724,9 +731,10 @@ a changed tool (a rug pull). `scan` writes the pins of a server on its first run
   `os.Stat` shows only the target. The sticky bit of a parent such as `/tmp` does not stop another
   user from creating a symlink there and pointing it to another directory later.
 - Parent directories: `Load` and `LoadLocked` first check each parent directory of the pins
-  directory, up to `/` (`checkParents`). `checkParentsAs` resolves the path one part at a time, as
-  the kernel does, and does not use `filepath.EvalSymlinks`. It keeps the state of the walk in a
-  small struct (`parentWalk`), with one method for each step (`checkRoot`, `enterDir`,
+  directory, up to `/` (`checkParents`). So does the `Save` of a `Store` from plain `Load`, because
+  it opens the directory again with `openPinsDir`. `checkParentsAs` resolves the path one part at a
+  time, as the kernel does, and does not use `filepath.EvalSymlinks`. It keeps the state of the walk
+  in a small struct (`parentWalk`), with one method for each step (`checkRoot`, `enterDir`,
   `followSymlink` and `checkDir`). It starts at `/`. For a symlink it
   checks the owner, reads the target with `os.Readlink` and goes on inside the target (from `/` for
   an absolute target, from the directory that holds the link for a relative one). A `..` goes up
@@ -786,29 +794,35 @@ a changed tool (a rug pull). `scan` writes the pins of a server on its first run
   `0755` another user could hold a lock on the directory and block every save. `openLockFile`
   opens the lock file through the same `os.Root` as the directory check, after that check and
   before the read of `pins.json`. It opens an existing file with no create, and creates a missing
-  one with `O_EXCL` and mode `0600`. It refuses, with an error that wraps `ErrInsecurePermissions`,
-  a lock file that is not the directory entry itself (`os.SameFile` of the open file and
-  `root.Lstat`: a symlink or an entry swapped after the open), that is not a regular file, that
-  another user owns, that gives the group or others any access (`checkLockFile`: mode `0600`
-  passes, `0644` is refused), or (macOS only) whose ACL has an allow entry with a read, execute or
-  write right (`checkLockFileACL`). The fix hint is `rm -- '<path>'`, and the next run makes a new
-  file. mcpmoat never changes the mode of an existing lock file, and a `chmod` would not help: a
-  descriptor that another user opened before stays valid. So only the current user and root can
-  hold the lock. To have a directory for the lock file, `LoadLocked` creates a missing pins
-  directory (mode `0700`) first. The lock file stays in the directory after the run, also after a
-  run that saves nothing. A read-only pins directory (for example mode `0500`) works only when the
-  lock file already exists. Else `LoadLocked` cannot create it and returns an error that names the
-  lock file and does not wrap `ErrLocked`, and the run exits with 2. The
-  first read, before any server starts, and the read for the diffs of `pin --accept` take no lock,
-  so a slow server or a slow reader of stdout never holds it. While another run holds the lock, the
-  run tries again for up to 10 seconds (`defaultPinsLockWait` in `cmd/mcpmoat/cli.go`). Then it
-  prints the read error (which wraps `ErrLocked`) and `pinsLockedText`, and exits with 2. A signal
-  during the wait gives the interrupted line. When the system or the file system cannot lock the
-  lock file (for example some network mounts), `LoadLocked` goes on without the lock
-  (`Store.RanWithoutLock`), and the run prints one warning. The texts of both lines are in
-  [Pins and rug pulls](pins.md). `scan` and `pin --accept` release the lock right after the save,
-  before they print. The code is in `internal/pins` (`lock.go`, `lock_unix.go`, `lock_other.go`,
-  and `checkLockFile` in `perm_unix.go`).
+  one with `O_EXCL` and mode `0600`. When the create fails because another run created the file
+  meanwhile, it opens that file. When the file is gone again before that open, it creates it again,
+  at most 3 times in all (`maxLockCreates`). That open can still fail with "permission denied" for
+  a moment, when another run created the file with a very narrow umask and has not set mode `0600`
+  yet. Then the run exits with 2, and running the command again works. It refuses, with an error
+  that wraps `ErrInsecurePermissions`, a lock file that is not the directory entry itself
+  (`os.SameFile` of the open file and `root.Lstat`: a symlink or an entry swapped after the open),
+  that is not a regular file, that another user owns, that gives the group or others any access
+  (`checkLockFile`: mode `0600` passes, `0644` is refused), or (macOS only) whose ACL has an allow
+  entry with a read, execute or write right (`checkLockFileACL`). The fix hint (`lockFileFix`) is
+  `rm -- '<path>', then mcpmoat makes a new one with mode 0600`, or `rmdir -- '<path>', ...` when
+  the lock entry is a directory. The ACL refusal uses the same hint. mcpmoat never changes the mode
+  of an existing lock file, and a `chmod` would not help: a descriptor that another user opened
+  before stays valid. So only the current user and root can hold the lock. To have a directory for
+  the lock file, `LoadLocked` creates a missing pins directory (mode `0700`) first. The lock file
+  stays in the directory after the run, also after a run that saves nothing. A read-only pins
+  directory (for example mode `0500`) works only when the lock file already exists. Else
+  `LoadLocked` cannot create it and returns an error that names the lock file and does not wrap
+  `ErrLocked`, and the run exits with 2. The first read, before any server starts, and the read for
+  the diffs of `pin --accept` take no lock, so a slow server or a slow reader of stdout never holds
+  it. While another run holds the lock, the run tries again for up to 10 seconds
+  (`defaultPinsLockWait` in `cmd/mcpmoat/cli.go`). Then it prints the read error (which wraps
+  `ErrLocked`) and `pinsLockedText`, and exits with 2. A signal during the wait gives the
+  interrupted line. When the system or the file system cannot lock the lock file (for example some
+  network mounts), `LoadLocked` goes on without the lock (`Store.RanWithoutLock`), and the run
+  prints one warning. The texts of both lines are in [Pins and rug pulls](pins.md). `scan` and
+  `pin --accept` release the lock right after the save, before they print. The code is in
+  `internal/pins` (`lock.go`, `lock_unix.go`, `lock_other.go`, and `checkLockFile` in
+  `perm_unix.go`).
 - Write: `Save` writes through an open `os.Root` of the pins directory, never by path
   (`atomicWriter.writeFile` in `atomic.go`). A `Store` from `LoadLocked` keeps the root, a handle of
   the directory and its file info until the release, so `Save` writes to the directory that

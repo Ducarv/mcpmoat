@@ -108,13 +108,13 @@ mcpmoat scan --json | jq -r '.findings[] | "\(.rule_id) \(.server)"'
   is a `MOAT-LLM-002` finding (or `MOAT-LLM-001` when its text was cut or had a configured value removed).
   `complete` does not cover the save of new pins. `scan` saves them after it writes the document,
   on purpose, so that you see the report before the pins are saved. So `"complete": true` with exit
-  code 2 can mean that the save failed, for example: another process held the pins lock or the lock file was
-  unsafe, `pins.json` was removed during the run, a server no longer fit in `pins.json`, the pins
-  directory was unsafe or changed, or a signal came before the save. The reason is on stderr.
-  Always check the exit code too. A failed write to stdout (for example a closed pipe) can leave
-  only the first part of the document. It is not valid JSON, and the exit code is 2. A server that
-  uses up its rule time budget does not make `complete` `false`: the `MOAT-T1-023` finding tells you
-  about it.
+  code 2 can mean that the save failed, for example: another process held the pins lock or the
+  lock file was unsafe, `pins.json` was removed during the run, a server no longer fit in
+  `pins.json`, the pins directory was unsafe or changed, or a signal came before the save. The
+  reason is on stderr. Always check the exit code too. A failed write to stdout (for example a
+  closed pipe) can leave only the first part of the document. It is not valid JSON, and the exit
+  code is 2. A server that uses up its rule time budget does not make `complete` `false`: the
+  `MOAT-T1-023` finding tells you about it.
 - **`ignored`** is a required field. It holds `total` (the number of findings that an ignore entry
   dropped, the same number as in the stderr line `N findings ignored: ...`), `rules` (the rule ID
   and the count of dropped findings for each rule, `{}` when none) and `file_entries` (the number of
@@ -127,7 +127,10 @@ mcpmoat scan --json | jq -r '.findings[] | "\(.rule_id) \(.server)"'
   prose steps of a hint without a command. A server whose new tools do not fit in `pins.json` gets
   a hint with no command, because `pin --accept` would fail: its `accept` has the digest only, and
   its terminal line ends with `(pins.json has no room for these tools: pin --accept fails until you
-  remove other servers from it)`. The `To accept` line itself is not in the JSON. When two
+  remove other servers from it)`. A project server whose new tools do not fit in the project share
+  gets the same hint with the digest only, and its terminal line ends with `(the project share of
+  pins.json has no room for these tools: pin --accept fails until you remove project servers you
+  no longer use from it)`. The `To accept` line itself is not in the JSON. When two
   servers have the same identity (the same client, source, project path and name), `scan` prints one
   `To accept` line, and the JSON gives both servers the same `accept` object, with the same digest.
 - **`fields_truncated`** is a required boolean. It is `true` when at least one text field was cut at
