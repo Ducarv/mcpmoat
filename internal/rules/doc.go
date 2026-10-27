@@ -172,20 +172,21 @@
 // can match in a different form. So a regex reads up to 21 forms of a text
 // (maxRegexForms: the 7 base forms, their plain folds and their skeleton
 // folds), and a keyword up to 7 (maxKeywordForms: the plain folds of the
-// base forms): such a text costs up to 21 times as much to match. In a
-// twin form, the I/l twin runs in place of the pattern, not next to it, so
-// each form is still read by one regex. The plain fold stays a regex form
-// next to the skeleton fold, so no match of the plain fold is lost. A skeleton fold is a new form only when it differs
-// from the plain fold, that is when the base form or its plain fold holds a
-// rune of skeletonTable. So a text with no such rune has at most 14 regex
-// forms, the base forms and their plain folds. The worst case for one match
-// block is 21 x 32 KiB x 2500, about 1.7G instruction-bytes (see the cost
-// comment in match.go for the timings). The forms are built only when a
-// regex, keyword or match_window rule reads the text. In a scan, they are
-// built once for each text and shared by all its rules (see Cost bounds).
-// [Matcher.Match] builds them once for each call. The match_window heuristic
-// builds only the base forms, to check their length, and the regex and
-// keyword rules reuse them. The other heuristics get only the raw text.
+// base forms): such a text costs up to 21 times as much to match. In a twin
+// form, the I/l twin runs in place of the pattern, not next to it, so each
+// form is still read by one regex. The plain fold stays a regex form next to
+// the skeleton fold, so no match of the plain fold is lost. A skeleton fold
+// is a new form only when it differs from the plain fold, that is when the
+// base form or its plain fold holds a rune of skeletonTable. So a text with
+// no such rune has at most 14 regex forms, the base forms and their plain
+// folds. The worst case for one match block is 21 x 32 KiB x 2500, about 1.7G
+// instruction-bytes (see the cost comment in match.go for the timings). The
+// forms are built only when a regex, keyword or match_window rule reads the
+// text. In a scan, they are built once for each text and shared by all its
+// rules (see Cost bounds). [Matcher.Match] builds them once for each call.
+// The match_window heuristic builds only the base forms, to check their
+// length, and the regex and keyword rules reuse them. The other heuristics
+// get only the raw text.
 //
 // A regex cannot match an invisible rune (use the invisible_unicode heuristic
 // for that), and a pattern must be written in NFC: a pattern with a letter

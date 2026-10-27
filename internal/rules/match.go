@@ -388,8 +388,8 @@ func (m *Matcher) matchPrepared(p *preparedText) []Hit {
 // most one schema decode, one build of the forms of one text plus one regex
 // on one form, or one heuristic call. matchCtx then returns the hits that it
 // found so far, and an error that wraps ctx.Err(). The error names the kind
-// and the list index, never input text. With a context that is never done, the error is
-// nil, and the hits are the hits of Match.
+// and the list index, never input text. With a context that is never done,
+// the error is nil, and the hits are the hits of Match.
 //
 // m and p must not be nil.
 func (m *Matcher) matchCtx(ctx context.Context, p *preparedText) ([]Hit, error) {
@@ -644,8 +644,8 @@ func checkEntry(field, s string) error {
 	return nil
 }
 
-// compileRegex compiles expr and rejects a regex that is too large or that
-// can match the empty text (see minLen).
+// compileRegexTree compiles expr and rejects a regex that is too large or
+// that can match the empty text (see minLen).
 //
 // regexp.Compile works in three steps, and the first two are public in
 // package regexp/syntax:
@@ -661,15 +661,9 @@ func checkEntry(field, s string) error {
 // So the first two steps run here only to count the instructions, before the
 // real compilation. syntax.Perl is the flag set that regexp.Compile uses.
 //
-// compileRegex also returns the number of instructions, so the caller can
-// check the sum over a list (see maxTotalInsts).
-func compileRegex(field, expr string) (*regexp.Regexp, int, error) {
-	re, _, insts, err := compileRegexTree(field, expr)
-	return re, insts, err
-}
-
-// compileRegexTree is compileRegex, and it also returns the parse tree of
-// expr (see progSize), as the parser made it. Only the caller holds the
+// compileRegexTree also returns the parse tree of expr (see progSize), as
+// the parser made it, and the number of instructions, so the caller can
+// check the sum over a list (see maxTotalInsts). Only the caller holds the
 // tree. twinFromTree reads it and does not change it.
 func compileRegexTree(field, expr string) (*regexp.Regexp, *syntax.Regexp, int, error) {
 	tree, insts, err := progSize(expr)

@@ -86,8 +86,8 @@ func isInvisibleFormat(r rune) bool {
 // reads (the first maxRawScanBytes).
 //
 // baseFormsCut builds one form for each formMode that s needs, in the order
-// of the formMode constants (see formModes). The comments of this package
-// name a form by its mode: the spaceInvisible form is the form that
+// of the formMode constants (see formFlags.modes). The comments of this
+// package name a form by its mode: the spaceInvisible form is the form that
 // spaceInvisible builds. The doc of each mode tells how its form handles the
 // invisible runes and the escape sequences, with examples. The list gives the
 // condition for each form (formFlags.modes checks it; see isInvisibleControl,
@@ -174,7 +174,7 @@ func isInvisibleFormat(r rune) bool {
 // build, so the forms and the flag come from one call. preparedText calls it
 // once for each text (see preparedText.buildBase).
 func baseFormsCut(s string) (forms []string, cut bool) {
-	f := scanFormFlags(cutAtRune(s, maxRawScanBytes))
+	f := rawFormFlags(s)
 	cut = len(s) > maxRawScanBytes || f.manyOSCStarts()
 	forms = make([]string, 0, maxBaseForms)
 	for _, mode := range f.modes() {
@@ -192,18 +192,11 @@ func baseFormsCut(s string) (forms []string, cut bool) {
 // one form for each formMode, 7 in all.
 const maxBaseForms = int(keepSeqTextSpaced) + 1
 
-// formModes returns the modes of the forms that baseFormsCut builds for s:
-// dropInvisible always, and then each other mode that s needs. The order of
-// the list sets the order of the forms of baseFormsCut (and the form numbers
-// of docs/writing-rules.md), so it follows the order of the formMode
-// constants. It reads the part of s that normalizeForMatch reads
-// (the first maxRawScanBytes) in one loop (see scanFormFlags).
-func formModes(s string) []formMode {
-	return scanFormFlags(cutAtRune(s, maxRawScanBytes)).modes()
-}
-
 // modes returns the modes of the forms that baseFormsCut builds for a text
-// with the flags f (see formModes).
+// with the flags f: dropInvisible always, and then each other mode that the
+// text needs. The order of the list sets the order of the forms of
+// baseFormsCut (and the form numbers of docs/writing-rules.md), so it
+// follows the order of the formMode constants.
 func (f formFlags) modes() []formMode {
 	modes := []formMode{dropInvisible}
 	if f.control || f.format {
@@ -227,7 +220,8 @@ func (f formFlags) modes() []formMode {
 	return modes
 }
 
-// formFlags tells formModes which kinds of runes a text holds.
+// formFlags tells baseFormsCut which kinds of runes a text holds (see
+// rawFormFlags and formFlags.modes).
 //
 // seqStart is true when the text holds a rune that can start an ANSI escape
 // sequence in ansiSeqC0: ESC, U+009B (CSI) or U+009D (OSC) (see startsSeq).
@@ -280,6 +274,12 @@ func (f formFlags) manyOSCStarts() bool {
 // ansiSeqC0, so this difference goes away.
 func (f formFlags) hasSeqC0() bool {
 	return f.csiStart && f.csiC0
+}
+
+// rawFormFlags returns the flags of the part of s that normalizeForMatch
+// reads (the first maxRawScanBytes), in one loop (see scanFormFlags).
+func rawFormFlags(s string) formFlags {
+	return scanFormFlags(cutAtRune(s, maxRawScanBytes))
 }
 
 // scanFormFlags reads s one rune at a time, in one loop, and returns the
@@ -826,68 +826,6 @@ func replaceRuns(s string, keep func(rune) bool, repl rune, place runPlace) stri
 		i = end
 	}
 	return b.String()
-}
-
-// csiFinalIndex returns the index in s of the final byte of the CSI that
-// starts at s[start], an ESC or a U+009B, as ansiSeqC0 reads it once the
-// format runes (see isInvisibleFormat) are gone. It returns -1 when no CSI
-// starts there. The placeOnce runs of replaceRuns use it: in spaceFormats
-// and keepSeqTextSpaced, a run of format runes inside a CSI is dropped with
-// no space, so the ANSI step still finds the CSI.
-//
-// It reads the runes of ansiSeqC0: after ESC, the C0 runes of csiC0 and "["
-// (after U+009B, nothing), then the parameter bytes (0x30 to 0x3F) and the
-// intermediate bytes (0x20 to 0x2F), with C0 runes of csiC0 among them, and
-// a final byte (0x40 to 0x7E). It skips the format runes. Any other rune,
-// such as ESC, U+009B, CAN, SUB, NEL, a non-ASCII letter or U+FFFD for
-// invalid UTF-8, or the end of s, means no CSI, and then the runs keep their
-// space. So ESC [ + ZWSP + U+00E9 keeps the space after the "[".
-//
-// The final byte rule is the rule of ansiSeqC0 and of a terminal: an ASCII
-// letter is a final byte. So in ESC [ + ZWSP + "Ignore", the CSI is
-// ESC [ I, and the ZWSP is dropped.
-//
-// It reads s from start up to the final byte or the first rune that stops
-// it, and it allocates nothing. ESC and U+009B stop it, and replaceRuns calls
-// it at most once for each run, for the last ESC or U+009B of the run. So a
-// read ends at or before the start of the next read, each rune is read at
-// most twice, and replaceRuns stays linear in len(s).
-func csiFinalIndex(s string, start int) int {
-	r, size := utf8.DecodeRuneInString(s[start:])
-	i := start + size
-	if r == '\x1b' {
-		for { // the C0 runes of csiC0 and "["
-			if i >= len(s) {
-				return -1
-			}
-			r, size := utf8.DecodeRuneInString(s[i:])
-			i += size
-			if r == '[' {
-				break
-			}
-			if !isCSIC0(r) && !isInvisibleFormat(r) {
-				return -1
-			}
-		}
-	} else if r != '\u009b' {
-		return -1
-	}
-	inter := false // an intermediate byte was read: no parameter byte now
-	for i < len(s) {
-		r, size := utf8.DecodeRuneInString(s[i:])
-		switch {
-		case isCSIC0(r), isInvisibleFormat(r):
-		case 0x30 <= r && r <= 0x3f && !inter: // parameter byte
-		case 0x20 <= r && r <= 0x2f: // intermediate byte
-			inter = true
-		case 0x40 <= r && r <= 0x7e: // final byte
-			return i
-		default:
-			return -1
-		}
-		i += size
-	}
-	return -1
 }
 
 // writeRun writes run, a run of invisible runes, to b for replaceRuns: the

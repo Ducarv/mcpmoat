@@ -202,3 +202,49 @@ func TestIsCSIC0AllRunes(t *testing.T) {
 		}
 	}
 }
+
+func TestCSIFinalIndex(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name  string
+		s     string
+		start int
+		want  int
+	}{
+		{name: "SGR", s: "\x1b[8m", want: 3},
+		{name: "final right after [", s: "\x1b[m", want: 2},
+		{name: "letter final", s: "\x1b[Ignore", want: 2},
+		{name: "parameters and intermediates", s: "\x1b[1;2 !p", want: 7},
+		{name: "CSI not at the start", s: "ab\x1b[1mx", start: 2, want: 5},
+		{name: "format runes skipped", s: "\x1b\u200b[\u200b8\u2060m", want: 12},
+		{name: "csiC0 runes among the bytes", s: "\x1b[\x018\x7f;\n1m", want: 8},
+		{name: "ESC, C0 rune and [", s: "\x1b\x01[8m", want: 4},
+		{name: "C1 CSI", s: "\u009b8m", want: 3},
+		{name: "C1 CSI and a format rune", s: "\u009b\u200b8m", want: 6},
+		{name: "C1 CSI and [ as the final", s: "\u009b[8m", want: 2},
+		{name: "intermediate then parameter byte", s: "\x1b[1 2m", want: -1},
+		{name: "ESC inside", s: "\x1b[\x1b[8m", want: -1},
+		{name: "C1 CSI inside", s: "\x1b[\u009b8m", want: -1},
+		{name: "CAN inside", s: "\x1b[8\x18m", want: -1},
+		{name: "SUB inside", s: "\x1b[8\x1am", want: -1},
+		{name: "NEL inside", s: "\x1b[8\u0085m", want: -1},
+		{name: "non-ASCII letter", s: "\x1b[\u00e9", want: -1},
+		{name: "invalid UTF-8 is U+FFFD", s: "\x1b[\xffm", want: -1},
+		{name: "end of text after parameters", s: "\x1b[8", want: -1},
+		{name: "end of text after [", s: "\x1b[", want: -1},
+		{name: "lone ESC", s: "\x1b", want: -1},
+		{name: "ESC then a letter", s: "\x1bx[8m", want: -1},
+		{name: "CAN between ESC and [", s: "\x1b\x18[8m", want: -1},
+		{name: "C1 OSC starts no CSI", s: "\u009d8m", want: -1},
+		{name: "letter starts no CSI", s: "a[8m", want: -1},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if got := csiFinalIndex(tt.s, tt.start); got != tt.want {
+				t.Errorf("csiFinalIndex(%+q, %d) = %d, want %d", tt.s, tt.start, got, tt.want)
+			}
+		})
+	}
+}

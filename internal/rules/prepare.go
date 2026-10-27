@@ -2,6 +2,7 @@ package rules
 
 import (
 	"slices"
+	"strings"
 	"sync"
 
 	"golang.org/x/text/unicode/norm"
@@ -279,13 +280,7 @@ func foldAddsIL(f, kw string) bool {
 
 // countIL returns the number of the bytes "I" and "l" in s.
 func countIL(s string) int {
-	n := 0
-	for i := 0; i < len(s); i++ {
-		if s[i] == 'I' || s[i] == 'l' {
-			n++
-		}
-	}
-	return n
+	return strings.Count(s, "I") + strings.Count(s, "l")
 }
 
 // addTwinForm adds s to the twin forms and returns both lists. It does

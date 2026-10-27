@@ -347,15 +347,17 @@ const (
 // raw window. When the text holds more than maxStrictOSCStarts U+009D, the
 // detail is windowOSCDetail. If the text is also longer than
 // MaxMatchInputBytes, a form can be cut too, and windowOSCLongDetail says so.
-// (A text up to MaxMatchInputBytes can grow past it only in NFC, a rare
-// case. Then the detail names only the U+009D, which is still a reason.)
-// Without many U+009D, the reason is the length: windowLongDetail.
+// (A text up to MaxMatchInputBytes can grow past it in two cases: in NFC, a
+// rare case, and when it holds invalid UTF-8, because each bad byte becomes
+// U+FFFD, 3 bytes (see normalizeForMatch). Then a form can be cut, but the
+// detail is windowOSCDetail and names only the U+009D, which is still a
+// reason.) Without many U+009D, the reason is the length: windowLongDetail.
 func matchWindowPrepared(p *preparedText) []Hit {
 	if !p.windowCut() {
 		return nil
 	}
 	detail := windowLongDetail
-	if scanFormFlags(cutAtRune(p.raw, maxRawScanBytes)).manyOSCStarts() {
+	if rawFormFlags(p.raw).manyOSCStarts() {
 		detail = windowOSCDetail
 		if len(p.raw) > MaxMatchInputBytes {
 			detail = windowOSCLongDetail

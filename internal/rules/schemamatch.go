@@ -72,9 +72,9 @@ const (
 // a seam never holds more than maxStrictOSCStarts U+009D, and the
 // strict-reading forms of each seam read with the strict ansiSeq, not with
 // ansiSeqFast (see baseFormsCut). Then the cut flag of a seam does not come
-// from its count of U+009D. This constant fails to compile (a negative constant does not
-// convert to uint) when seamSideBytes grows so that a seam can hold more
-// U+009D than maxStrictOSCStarts.
+// from its count of U+009D. This constant fails to compile (a negative
+// constant does not convert to uint) when seamSideBytes grows so that a seam
+// can hold more U+009D than maxStrictOSCStarts.
 const _ = uint(maxStrictOSCStarts - 2*seamSideBytes/len("\u009d"))
 
 // jsonSpace holds the four white-space characters of JSON.

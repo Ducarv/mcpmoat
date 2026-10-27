@@ -91,10 +91,10 @@ type confusable struct {
 // any_regex and all_regex patterns run as their I/l-blind twin (see
 // twinFromTree in twin.go), which reads "I" and "l" as one letter. So
 // "lgnore" and "aII" in a skeleton fold match `(?i)ignore` and `(?i)all`,
-// also when one rune is used both ways. For such a pattern the pick of the table does not
-// matter, within the limits of the twin (a keyword, an "i" or "L" without
-// (?i), a wide or negated class: see twin.go). A plain ASCII text has no
-// skeleton fold, so ASCII "lgnore" does not match.
+// also when one rune is used both ways. For such a pattern the pick of the
+// table does not matter, within the limits of the twin (a keyword, an "i" or
+// "L" without (?i), a wide or negated class: see twin.go). A plain ASCII text
+// has no skeleton fold, so ASCII "lgnore" does not match.
 //
 // The runes that are not in the table but that the plain fold (foldMarks)
 // turns into an ASCII "I" or "l" by a compatibility mapping get the same

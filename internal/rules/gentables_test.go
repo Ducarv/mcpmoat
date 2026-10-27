@@ -373,9 +373,10 @@ func twoLatinOrSpacing(to []rune) bool {
 	return letters >= 2 || (letters == 1 && spacing)
 }
 
-// isASCIILetterRune reports whether r is a-z or A-Z.
+// isASCIILetterRune reports whether r is a-z or A-Z: isASCIILetter for a
+// rune.
 func isASCIILetterRune(r rune) bool {
-	return 'A' <= r && r <= 'Z' || 'a' <= r && r <= 'z'
+	return 0 <= r && r <= unicode.MaxASCII && isASCIILetter(byte(r))
 }
 
 // checkGenBlock compares the generated block gen with the block of file that

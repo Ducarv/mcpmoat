@@ -100,10 +100,11 @@ func (n nameOwners) other(identity int) (toolOwner, bool) {
 // or markdownDescription), property names and strings inside arrays. They
 // leave out only the keyword keys of schema objects, format values that are
 // registered format names (see isRegisteredFormat) and $schema values that
-// are standard meta-schema URIs (see isMetaSchemaURI), because foldText turns
-// words such as readOnly, date-time or json-schema into compound names that
-// can equal the name of a tool. Each text is scanned on its own, so a name never joins across two
-// texts. In this comment, "text" means any of them.
+// are standard meta-schema URIs (see isMetaSchemaURI), because foldText
+// turns words such as readOnly, date-time or json-schema into compound names
+// that can equal the name of a tool. Each text is scanned on its own, so a
+// name never joins across two texts. In this comment, "text" means any of
+// them.
 //
 // Names and tool text are compared in the form of foldText, as the model
 // reads them: "send-email", "sendEmail", "send\_email" and
@@ -133,15 +134,15 @@ func (n nameOwners) other(identity int) (toolOwner, bool) {
 // in a schema object is not scanned, and neither is a format value that is a
 // registered format name or a $schema value that is a standard meta-schema
 // URI. These are fixed words of the standards, not text that the server
-// chose, so they cannot carry a tool name and there is nothing to find in
-// them. Every other format and $schema value is scanned, so "send_email" as a
-// format value or "https://json-schema.org/send_email" as a $schema value is
-// found. A tool name with a byte outside letters, digits, "_" and "-" (a dot
-// or a space, for example) cannot be found as a token, so it is never a
-// candidate name. A mention of a single-word tool name is never found. A
-// space or a dot between the words ("send email") is not folded, because
-// that is normal prose, and neither are look-alike letters, such as the
-// fullwidth U+FF3F for "_" or a Cyrillic "е".
+// chose, so a mention there is not a shadowing attempt. Every other format
+// and $schema value is scanned, so "send_email" as a format value or
+// "https://json-schema.org/send_email" as a $schema value is found. A tool
+// name with a byte outside letters, digits, "_" and "-" (a dot or a space,
+// for example) cannot be found as a token, so it is never a candidate name.
+// A mention of a single-word tool name is never found. A space or a dot
+// between the words ("send email") is not folded, because that is normal
+// prose, and neither are look-alike letters, such as the fullwidth U+FF3F
+// for "_" or a Cyrillic U+0435 for "e".
 //
 // Tool names and texts are untrusted input from MCP servers. The check
 // only searches them as text. It never executes them or builds commands from
