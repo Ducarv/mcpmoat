@@ -46,7 +46,11 @@ How mcpmoat prepares the text before a match. This applies to every regex and ke
   the terminal way: a CSI can hold C0 control characters, so ESC [ U+0001 8 m is one CSI. The
   terminal way can take text into a sequence: ESC [ LF "<IMPORTANT>" is the CSI ESC [ LF < I and
   the text "MPORTANT>". So a pattern sees "[" and "<IMPORTANT>" in forms 1 to 3. Forms 4 to 7 only
-  add matches.
+  add matches. The strict way is slow on many U+009D, because each U+009D can start an OSC and can
+  also sit inside OSC text. So forms 1 to 3 keep the strict way only up to 256 U+009D in the first
+  128 KiB of the raw text. Above 256, a U+009D ends the OSC text in these forms and starts a new
+  OSC, so they can miss a match. The `match_window` heuristic fires on such a text (see below).
+  A keyword itself is always prepared the strict way.
 - A regex or a keyword is matched against up to seven forms of the text. It matches when it
   matches one form. mcpmoat builds form 1 always, and each other form only when the text has the
   characters that the form needs:
@@ -124,11 +128,15 @@ How mcpmoat prepares the text before a match. This applies to every regex and ke
 - A regex or a keyword reads only a window of the text: the invisible characters are removed from
   the first 128 KiB of the raw text, and then each form is cut at 32 KiB. Padding can push an
   instruction past this window. The `match_window` heuristic closes this gap. It fires when the
-  regex and keyword rules cannot read the whole text: the raw text is longer than 128 KiB, or one of
-  the forms is cut at 32 KiB. For forms 5 and 7, every character counts except the OSC text,
-  because OSC text (such as the URL of an OSC 8 link) makes a benign text longer than 32 KiB in
-  these forms only. So padding with ESC [ A or with empty OSCs still gives a hit. MOAT-T1-017
-  (description) and MOAT-T1-018 (schema) use it at high severity.
+  regex and keyword rules cannot read the whole text: the raw text is longer than 128 KiB, one of
+  the forms is cut at 32 KiB, or the text has more than 256 U+009D (see above). For forms 5 and 7,
+  every character counts except the OSC text, because OSC text (such as the URL of an OSC 8 link)
+  makes a benign text longer than 32 KiB in these forms only. So padding with ESC [ A or with empty
+  OSCs still gives a hit. MOAT-T1-017 (description) and MOAT-T1-018 (schema) use it at high
+  severity. The hit detail tells the reason: `text is longer than the match window`, or
+  `text holds more than 256 C1 OSC controls (U+009D)`. A benign text can get the second reason:
+  UTF-8 read as Latin-1 turns each right double quote into three characters that end in U+009D, so
+  more than 256 such quotes give a high finding. This is by design.
 
 How mcpmoat prepares the text of a `target: schema` rule:
 

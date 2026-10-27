@@ -6,16 +6,37 @@ import (
 )
 
 // oscExpr matches an OSC for ansiSeq: ESC ] (or U+009D), at most 256 runes
-// of text, and BEL, ESC \ or U+009C.
+// of text, and BEL, ESC \ or U+009C. The text can hold U+009D. So each
+// U+009D starts a match that stays open for up to 256 runes, and in a run of
+// U+009D the regex engine keeps up to 256 threads for each rune. That is
+// slow (see the cost comment in match.go), so baseFormsCut reads a text with
+// more than maxStrictOSCStarts U+009D with ansiSeqFast instead.
 const oscExpr = `(?:\x1b\]|\x{9d})[^\x07\x1b\x{9c}]{0,256}(?:\x07|\x1b\\|\x{9c})`
 
-// oscExprC0 is oscExpr for ansiSeqC0: the text of an OSC also holds no
-// U+009D, so U+009D starts a new OSC, as ESC does. In oscExpr, each U+009D
-// of a run of U+009D starts a match that stays open for up to 256 runes, so
-// the regex engine keeps up to 256 threads for each rune (see the cost
-// comment in match.go for the time). oscExprC0 keeps one thread.
-// ansiSeq keeps oscExpr, so the forms that read with ansiSeq do not change.
+// oscExprC0 is oscExpr for ansiSeqC0 and ansiSeqFast: the text of an OSC
+// also holds no U+009D, so U+009D starts a new OSC, as ESC does. The regex
+// engine then keeps one OSC thread, also in a run of U+009D.
 const oscExprC0 = `(?:\x1b\]|\x{9d})[^\x07\x1b\x{9c}\x{9d}]{0,256}(?:\x07|\x1b\\|\x{9c})`
+
+// maxStrictOSCStarts is the largest number of U+009D (C1 OSC) in a text for
+// which the forms 1 to 3 of baseFormsCut read the sequences with ansiSeq.
+// Up to it, the OSC part of ansiSeq costs at most maxStrictOSCStarts x 256
+// extra thread steps for one regex pass, which is negligible. Above it, these
+// forms read with ansiSeqFast and baseFormsCut sets the cut flag, so
+// match_window (MOAT-T1-017, MOAT-T1-018, high) flags the text. A well-formed
+// description rarely holds so many U+009D, but a benign text can: UTF-8 read
+// as Latin-1 (mojibake) turns each right double quote (E2 80 9D) into
+// U+00E2, U+20AC and U+009D, so more than 256 such quotes give a high
+// finding. The owner accepts this false positive by design (#146). The
+// count reads the part of the text that normalizeForMatch reads (see
+// scanFormFlags). The seams of matchSeams must stay at or below this count
+// (see the check next to seamSideBytes).
+const maxStrictOSCStarts = 256
+
+// csiExpr matches a CSI for ansiSeq and ansiSeqFast: ESC [ (or U+009B),
+// parameter and intermediate bytes, and a final byte. It holds no C0 control
+// rune.
+const csiExpr = `(?:\x1b\[|\x{9b})[0-?]*[ -/]*[@-~]`
 
 // ansiSeq matches an ANSI escape sequence that a terminal runs and does not
 // show:
@@ -29,9 +50,21 @@ const oscExprC0 = `(?:\x1b\]|\x{9d})[^\x07\x1b\x{9c}\x{9d}]{0,256}(?:\x07|\x1b\\
 // so it cannot swallow the rest of the text; its ESC is an invisible control
 // rune, so step 4 of normalizeForMatch drops it, and its text stays.
 //
-// A CSI here holds no C0 control rune. The forms 1 to 3 of baseFormsCut read
-// the sequences with ansiSeq. The forms 4 to 7 read them with ansiSeqC0.
-var ansiSeq = regexp.MustCompile(`(?:\x1b\[|\x{9b})[0-?]*[ -/]*[@-~]|` + oscExpr)
+// A CSI here holds no C0 control rune (see csiExpr). The forms 1 to 3 of
+// baseFormsCut read the sequences with ansiSeq, or with ansiSeqFast when the
+// text holds more than maxStrictOSCStarts U+009D. The forms 4 to 7 read them
+// with ansiSeqC0.
+var ansiSeq = regexp.MustCompile(csiExpr + `|` + oscExpr)
+
+// ansiSeqFast is ansiSeq with oscExprC0 for its OSC part: a U+009D ends the
+// text of an OSC and starts a new one. Its CSI part is the same as in
+// ansiSeq, so a CSI, also one that starts with U+009B, still holds no C0
+// control rune. The forms 1 to 3 of baseFormsCut read a text that holds more
+// than maxStrictOSCStarts U+009D with it (see ansiFastToSpace). The one
+// difference from ansiSeq: an OSC whose text holds U+009D does not match from
+// its start. So in ESC "]x" + U+009D + BEL, only U+009D BEL is an OSC, and
+// ESC "]x" stays as text (step 4 of normalizeForMatch drops the ESC).
+var ansiSeqFast = regexp.MustCompile(csiExpr + `|` + oscExprC0)
 
 // csiC0 is the content of a regex class: the C0 control runes that a
 // terminal (VT500 and xterm) runs inside a CSI and then goes on with the
@@ -97,6 +130,15 @@ var ansiSeqC0 = regexp.MustCompile(
 //     so ESC [ CAN "Ignore" is not read as ESC [ I, a CSI that hides the "I".
 func ansiToSpace(s string) string {
 	return ansiSeq.ReplaceAllLiteralString(s, " ")
+}
+
+// ansiFastToSpace is ansiToSpace with ansiSeqFast: it replaces each ANSI
+// escape sequence of ansiSeqFast with U+0020. It is the ANSI step of the
+// forms 1 to 3 of baseFormsCut for a text that holds more than
+// maxStrictOSCStarts U+009D (see formMode.ansiStepFor). A sequence is at
+// least 2 bytes long, so the text does not grow.
+func ansiFastToSpace(s string) string {
+	return ansiSeqFast.ReplaceAllLiteralString(s, " ")
 }
 
 // ansiC0ToSpace is ansiToSpace with ansiSeqC0: it replaces each ANSI escape

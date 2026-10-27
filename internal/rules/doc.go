@@ -35,7 +35,10 @@
 // visible text (or after the first 128 KiB of raw text) are not seen by regex
 // and keyword rules. The match_window heuristic closes it: a high rule with
 // it fires on a text longer than 128 KiB, and when the window cuts one of
-// the forms (see baseFormsCut), also when only one of them is cut. The OSC
+// the forms (see baseFormsCut), also when only one of them is cut. It also
+// fires on a text with more than 256 U+009D (C1 OSC starts, see
+// maxStrictOSCStarts): the forms read such a text with a faster regex that
+// can miss a match, and no real text holds so many. The OSC
 // text of a form does not count: the OSC text, such as an OSC 8 link URL,
 // makes a benign text long in the forms that keep sequence text only (see
 // baseFormsCut). The max_length heuristic also flags a long text. It reads

@@ -66,13 +66,27 @@ import (
 // form, plus one build of the forms of one text, plus one decode of a schema
 // or one heuristic call on the raw text.
 //
-// Building the forms has a cost too. The slowest known input is a run of
-// U+009D, because each one can start an OSC (see oscExprC0): 128 KiB of it
-// takes about 240 ms for each form that reads with ansiSeq.
-// BenchmarkOSCStartRun times two baseFormsCut calls (through the test
-// helpers matchForms and matchWindowCut): about 1.7 s (Apple M1 Pro, five
-// runs with -benchtime=5x). A scan calls baseFormsCut once for each text,
-// for all its rules, so it pays about half of that.
+// Building the forms has a cost too. In ansiSeq, each U+009D can start an
+// OSC that stays open for up to 256 runes (see oscExpr), so 128 KiB of
+// U+009D took about 240 ms for each form that reads with ansiSeq, and one
+// baseFormsCut call took about 0.76 s. So baseFormsCut reads a text with more
+// than maxStrictOSCStarts U+009D with ansiSeqFast and sets the cut flag.
+// Measured on an Apple M1 Pro (five runs with -benchtime=5x), one
+// baseFormsCut call now takes about 54 ms on 128 KiB of U+009D (0.76 s
+// before), about 90 ms on the pairs U+009D "a" up to 128 KiB (0.55 s
+// before), and about 70 ms on the text of BenchmarkOSCStartRun, which holds
+// the U+009D run and builds all seven forms (0.77 s before).
+// BenchmarkOSCStartRun times one baseFormsCut call in each sub-benchmark:
+// about 69 ms for oscStartRun and 88 ms for pairs. Up to maxStrictOSCStarts
+// U+009D, the OSC part of ansiSeq adds almost nothing: 128 KiB of text with
+// 256 U+009D takes about 95 ms, the same as with 257.
+//
+// The worst case that we know now is not a run of U+009D but a fill of CSIs.
+// One baseFormsCut call takes about 172 ms on a fill of ESC [ A that builds
+// all seven forms, and about 173 ms (median, 234 ms at most) on 256 U+009D
+// and then a fill of C1 CSIs (U+009B A). The code before #146 took the same
+// time on these texts. So one build of the forms takes under about 0.2 s.
+// A scan calls baseFormsCut once for each text, for all its rules.
 //
 // A text longer than the window is cut, so padding can push a payload out of
 // the reach of the regex and keyword rules. The match_window heuristic closes

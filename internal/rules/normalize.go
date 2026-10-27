@@ -85,7 +85,10 @@ func isInvisibleFormat(r rune) bool {
 // that normalizeForMatch reads (the first maxRawScanBytes).
 //
 // The forms 1 to 3 read the escape sequences with ansiSeq, which takes no C0
-// control rune inside a CSI. The forms 4 to 7 read them with ansiSeqC0,
+// control rune inside a CSI. When the text holds more than
+// maxStrictOSCStarts U+009D, they read them with ansiSeqFast instead, which
+// differs from ansiSeq only in the text of an OSC (see ansiSeqFast and the
+// cut flag below). The forms 4 to 7 read them with ansiSeqC0,
 // which does, as a terminal does. ansiSeqC0 can take more of the text into a
 // sequence: ESC [ LF "<IMPORTANT>" is the CSI ESC [ LF < I for ansiSeqC0,
 // and the text "MPORTANT>". ansiSeq does not read it as a CSI, so the forms 1
@@ -151,8 +154,8 @@ func isInvisibleFormat(r rune) bool {
 // with examples. The "known limit" cases of TestMatchForms pin them, and the
 // invisible_unicode heuristic flags each such text in a description.
 //
-// An OSC with more than 256 runes of text is not an OSC for ansiSeq or
-// ansiSeqC0. So its ESC and its end are dropped, and its text stays in every
+// An OSC with more than 256 runes of text is not an OSC for ansiSeq,
+// ansiSeqFast or ansiSeqC0. So its ESC and its end are dropped, and its text stays in every
 // form, after its "]": the matchers read that text.
 //
 // A text without invisible runes and escape sequences has one form, so it
@@ -164,6 +167,15 @@ func isInvisibleFormat(r rune) bool {
 // part of s because of a byte cap. That is so when s is longer than
 // maxRawScanBytes, or when step 6 or step 9 of normalizeForMatch cuts a form
 // at MaxMatchInputBytes (see buildFormCut).
+//
+// The flag is also set when s holds more than maxStrictOSCStarts U+009D (see
+// formFlags.manyOSCStarts). Then the forms 1 to 3 read with ansiSeqFast, and
+// an OSC whose text holds U+009D is not one sequence for them: "Ignore all
+// previous" + ESC "]x" + U+009D + BEL + "instructions" keeps "]x", so these
+// forms can miss a match that ansiSeq gives. ansiSeq is too slow for such a
+// text (see the cost comment in match.go). No real description holds so many
+// C1 OSC starts, and without the flag an attacker could add them to any text
+// to get this miss. So match_window flags the text.
 //
 // The flag checks each form, not only the first, also a form that appendNew
 // drops because it equals an earlier one. The other forms can be longer than
@@ -186,10 +198,11 @@ func isInvisibleFormat(r rune) bool {
 // build, so the forms and the flag come from one call. preparedText calls it
 // once for each text (see preparedText.buildBase).
 func baseFormsCut(s string) (forms []string, cut bool) {
-	cut = len(s) > maxRawScanBytes
+	f := scanFormFlags(cutAtRune(s, maxRawScanBytes))
+	cut = len(s) > maxRawScanBytes || f.manyOSCStarts()
 	forms = make([]string, 0, maxBaseForms)
-	for _, mode := range formModes(s) {
-		form, formCut := buildFormCut(s, mode, mode.ansiStep)
+	for _, mode := range f.modes() {
+		form, formCut := buildFormCut(s, mode, mode.ansiStepFor(f))
 		if mode.keepsSeqText() {
 			_, formCut = buildFormCut(s, mode, ansiKeepCSIText)
 		}
@@ -209,7 +222,12 @@ const maxBaseForms = int(keepSeqTextSpaced) + 1
 // the formMode constants. It reads the part of s that normalizeForMatch reads
 // (the first maxRawScanBytes) in one loop (see scanFormFlags).
 func formModes(s string) []formMode {
-	f := scanFormFlags(cutAtRune(s, maxRawScanBytes))
+	return scanFormFlags(cutAtRune(s, maxRawScanBytes)).modes()
+}
+
+// modes returns the modes of the forms that baseFormsCut builds for a text
+// with the flags f (see formModes).
+func (f formFlags) modes() []formMode {
 	modes := []formMode{dropInvisible}
 	if f.control || f.format {
 		modes = append(modes, spaceInvisible)
@@ -241,18 +259,31 @@ func formModes(s string) []formMode {
 // fifth even when the text holds no other invisible rune: a lone ESC is
 // dropped in the fifth form and is a space in the seventh. appendNew drops
 // the seventh form when it equals another form.
+//
+// oscStarts counts the U+009D of the text, up to maxStrictOSCStarts+1 (see
+// manyOSCStarts). It tells baseFormsCut which regex the forms 1 to 3 read
+// with, and whether it sets the cut flag for that reason.
 type formFlags struct {
-	control  bool // an invisible control rune (see isInvisibleControl)
-	format   bool // an invisible format rune (see isInvisibleFormat)
-	seqStart bool // ESC, U+009B or U+009D (see startsSeq)
-	csiStart bool // ESC or U+009B (see startsCSI)
-	csiC0    bool // a C0 control rune of csiC0 (see isCSIC0)
+	control   bool // an invisible control rune (see isInvisibleControl)
+	format    bool // an invisible format rune (see isInvisibleFormat)
+	seqStart  bool // ESC, U+009B or U+009D (see startsSeq)
+	csiStart  bool // ESC or U+009B (see startsCSI)
+	csiC0     bool // a C0 control rune of csiC0 (see isCSIC0)
+	oscStarts int  // the number of U+009D, at most maxStrictOSCStarts+1
 }
 
-// allSet reports whether every flag of f is true. Then scanFormFlags can
-// stop, because more runes cannot change f.
+// allSet reports whether every flag of f is true and the count of U+009D is
+// above maxStrictOSCStarts. Then scanFormFlags can stop, because more runes
+// cannot change f.
 func (f formFlags) allSet() bool {
-	return f.control && f.format && f.seqStart && f.csiStart && f.csiC0
+	return f.control && f.format && f.seqStart && f.csiStart && f.csiC0 && f.manyOSCStarts()
+}
+
+// manyOSCStarts reports whether the text holds more than maxStrictOSCStarts
+// U+009D. Then the forms 1 to 3 of baseFormsCut read the sequences with
+// ansiSeqFast, not ansiSeq, and baseFormsCut sets the cut flag.
+func (f formFlags) manyOSCStarts() bool {
+	return f.oscStarts > maxStrictOSCStarts
 }
 
 // hasSeqC0 reports whether the text holds ESC or U+009B, which start a CSI,
@@ -265,7 +296,10 @@ func (f formFlags) allSet() bool {
 // the text of an OSC (see oscExprC0). So without a C0 rune, the sixth form
 // can still differ from the first, when an OSC text holds U+009D. It is not
 // built then, but the fifth and the seventh form read the same sequences
-// with ansiSeqC0 and keep more of the text, so no match is lost.
+// with ansiSeqC0 and keep more of the text, so no match is lost. When the
+// text holds more than maxStrictOSCStarts U+009D, the first form reads with
+// ansiSeqFast, whose OSC is the OSC of ansiSeqC0, so this difference goes
+// away.
 func (f formFlags) hasSeqC0() bool {
 	return f.csiStart && f.csiC0
 }
@@ -273,6 +307,11 @@ func (f formFlags) hasSeqC0() bool {
 // scanFormFlags reads s one rune at a time, in one loop, and returns the
 // flags of formFlags. Invalid UTF-8 is read as U+FFFD (utf8.RuneError), as
 // strings.ContainsFunc and the regexp package read it. U+FFFD sets no flag.
+//
+// It also counts the U+009D of s, and stops the count at
+// maxStrictOSCStarts+1. It stops reading s only when all the flags are set
+// and the count is above maxStrictOSCStarts (see allSet), so the count is
+// right for every text, and the cost stays one pass over s.
 func scanFormFlags(s string) formFlags {
 	var f formFlags
 	for _, r := range s {
@@ -293,6 +332,9 @@ func scanFormFlags(s string) formFlags {
 		}
 		if isCSIC0(r) {
 			f.csiC0 = true
+		}
+		if r == '\u009d' && !f.manyOSCStarts() {
+			f.oscStarts++
 		}
 		if f.allSet() {
 			break
@@ -321,8 +363,13 @@ func isASCII(s string) bool {
 
 // normalizeForMatch returns the form of s that the regex and keyword matchers
 // read. So "ign" + ZWSP (U+200B) + "ore previous" still matches the keyword
-// "ignore previous". It is buildForm(s, dropInvisible), the first
-// form of baseFormsCut.
+// "ignore previous". It is buildForm(s, dropInvisible), the first form of
+// baseFormsCut up to maxStrictOSCStarts U+009D. It always reads the escape
+// sequences with the strict ansiSeq (step 3), also above that count, where
+// the first form of baseFormsCut reads with ansiSeqFast (see
+// formMode.ansiStepFor). Its callers are the keywords of a rule (see
+// keywordExpr), at most MaxPatternBytes each, so the cost of ansiSeq is
+// small there. The tests also call it.
 //
 // It works in nine steps:
 //
@@ -491,7 +538,8 @@ func (m formMode) keepsSeqText() bool {
 // for keepSeqText and keepSeqTextSpaced, ansiC0ToSpace for spaceFormats and
 // dropSeqC0, and ansiToSpace for the other modes. So the forms 1 to 3 of
 // baseFormsCut read the sequences with ansiSeq, and the forms 4 to 7 with
-// ansiSeqC0.
+// ansiSeqC0. baseFormsCut reads with ansiStepFor, which changes the forms 1
+// to 3 for a text with many U+009D. buildForm reads with ansiStep.
 func (m formMode) ansiStep(s string) string {
 	switch m {
 	case keepSeqText, keepSeqTextSpaced:
@@ -500,6 +548,21 @@ func (m formMode) ansiStep(s string) string {
 		return ansiC0ToSpace(s)
 	}
 	return ansiToSpace(s)
+}
+
+// ansiStepFor is the ANSI step of mode m for a text with the flags f. It is
+// ansiStep, but when f.manyOSCStarts() is true, the modes dropInvisible,
+// spaceInvisible and spaceControls (the forms 1 to 3 of baseFormsCut) read
+// the sequences with ansiSeqFast (see ansiFastToSpace), not ansiSeq. The
+// other modes read with ansiSeqC0, which is fast for such a text already.
+func (m formMode) ansiStepFor(f formFlags) func(string) string {
+	switch m {
+	case dropInvisible, spaceInvisible, spaceControls:
+		if f.manyOSCStarts() {
+			return ansiFastToSpace
+		}
+	}
+	return m.ansiStep
 }
 
 // buildForm runs the steps of normalizeForMatch, with the invisible
