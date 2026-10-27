@@ -140,6 +140,7 @@ test the hook now, run `pre-commit run --all-files`.
 runs only when the commit changes `.mcp.json` or `.mcpmoat-ignore`. To change the threshold, add
 `args: [--fail-on, medium]` to the hook. The `"$@"` and the trailing `--` in `entry` pass the
 `args` to `mcpmoat scan`. Keep them, or the `args` are ignored.
+
 pre-commit shows the output of a hook only when the hook fails. To see the findings each time, add
 `verbose: true` to the hook.
 
@@ -154,13 +155,14 @@ repos:
 ```
 
 `rev` must be a release tag newer than v0.1.0, because v0.1.0 has no `.pre-commit-hooks.yaml`. The
-remote hook builds the `mcpmoat` binary with Go (`language: golang`), so Go must be on the `PATH`
-of the machine that runs pre-commit. It has the same `entry` and `files` as the local hook: it runs
-only when the commit changes `.mcp.json` or `.mcpmoat-ignore`, it skips when `.mcp.json` is
-missing, and it blocks at the default `--fail-on high`. To change the threshold, add `args:` to
-the hook. The `args` go to `mcpmoat scan`, for example `args: [--fail-on, medium]`. Use the remote
-hook when you want no install step but have Go. Use the local hook when you manage the `mcpmoat`
-binary yourself.
+remote hook builds the `mcpmoat` binary with Go (`language: golang`). You do not need Go on the
+`PATH`. When pre-commit finds no `go` command, it downloads the latest stable Go toolchain into its
+own cache, so the first run needs network access and takes longer. It has the same `entry` and
+`files` as the local hook: it runs only when the commit changes `.mcp.json` or `.mcpmoat-ignore`,
+it skips when `.mcp.json` is missing, and it blocks at the default `--fail-on high`. To change the
+threshold, add `args:` to the hook. The `args` go to `mcpmoat scan`, for example
+`args: [--fail-on, medium]`. Use the remote hook when you want no install step. Use the local hook
+when you manage the `mcpmoat` binary yourself.
 
 A tag in `rev` can move, and pre-commit has no checksum database for it. The hook builds and runs
 the code of that `rev` on each developer machine. To pin it, use a full commit SHA in `rev`
