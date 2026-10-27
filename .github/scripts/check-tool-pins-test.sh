@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Tests check-tool-pins.sh on changed copies of the files that it reads. The
-# release-check job in ci.yml runs it. You can also run it on your machine,
+# tool-pins job in ci.yml runs it. You can also run it on your machine,
 # from any directory: see CONTRIBUTING.md, Checks.
 # shellcheck disable=SC2016 # the sed expressions and the call hold a literal $
 set -euo pipefail
@@ -119,6 +119,64 @@ fourth_workflow() {
   } >"$wf/$1"
 }
 
+# gr_ver is the GoReleaser pin of ci.yml. The new workflows define it, as the
+# check requires for a file with a goreleaser-action step.
+gr_ver=$(current_pin GORELEASER_VERSION)
+
+# step_workflow writes a workflow, with the file name $1, that defines the pin
+# of GoReleaser and has the steps text $2 (several lines, in the steps list).
+step_workflow() {
+  printf 'name: extra\njobs:\n  x:\n    env:\n      GORELEASER_VERSION: %s\n    steps:\n%s\n' "$gr_ver" "$2" >"$wf/$1"
+}
+
+# goreleaser_workflow writes a workflow, with the file name $1, that has one
+# goreleaser-action step. The step starts on its "- uses:" line. $2 is the
+# version line of the step. When $2 is empty, the step has no version line.
+goreleaser_workflow() {
+  local ver=''
+  if [ -n "$2" ]; then ver=$'\n'"          $2"; fi
+  step_workflow "$1" "      - uses: goreleaser/goreleaser-action@x
+        with:
+          distribution: goreleaser$ver
+          args: check"
+}
+
+# add_define_to adds a GORELEASER_VERSION line to a file of the copy.
+add_define_to() {
+  append "$wf/$1" "      GORELEASER_VERSION: $2"
+}
+
+# write_workflow_without_pin writes a workflow, with the file name $1, that has a
+# good goreleaser-action step but does not define GORELEASER_VERSION.
+write_workflow_without_pin() {
+  printf 'name: extra\njobs:\n  x:\n    steps:\n      - uses: goreleaser/goreleaser-action@x\n        with:\n          version: ${{ env.GORELEASER_VERSION }}\n' >"$wf/$1"
+}
+
+# wf_with_pin writes extra.yml with a good step and the pin value $1.
+wf_with_pin() {
+  write_workflow_without_pin extra.yml &&
+    printf '    env:\n      GORELEASER_VERSION: %s\n' "$1" >>"$wf/extra.yml"
+}
+
+# step_workflow_pin writes a workflow, with the file name $1, with the pin value
+# $2 and no goreleaser step.
+step_workflow_pin() {
+  printf 'name: extra\njobs:\n  x:\n    env:\n      GORELEASER_VERSION: %s\n    steps:\n      - run: echo hi\n' "$2" >"$wf/$1"
+}
+
+# rc_goreleaser and quoted_goreleaser change the pin of GoReleaser in every file
+# that holds it. The form is still a full version, so the files must pass.
+rc_goreleaser() {
+  sub "$wf/ci.yml" 's/(GORELEASER_VERSION: v[0-9]+\.[0-9]+\.[0-9]+)/\1-rc.1/' &&
+    sub "$wf/release.yml" 's/(GORELEASER_VERSION: v[0-9]+\.[0-9]+\.[0-9]+)/\1-rc.1/' &&
+    sub CONTRIBUTING.md 's|(goreleaser/v[0-9]+@v[0-9]+\.[0-9]+\.[0-9]+)|\1-rc.1|g'
+}
+
+quoted_goreleaser() {
+  sub "$wf/ci.yml" 's/(GORELEASER_VERSION: )(v[0-9.]+)/\1"\2" # note/' &&
+    sub "$wf/release.yml" 's/(GORELEASER_VERSION: )(v[0-9.]+)/\1"\2" # note/'
+}
+
 # The real files must pass.
 check_case "real files" 0 "" true
 
@@ -179,6 +237,116 @@ check_case "GoReleaser: no pin in ci.yml" 1 "ci.yml must pin one version of GoRe
 check_case "GoReleaser: no pin in release.yml" 1 "The GoReleaser pins differ" sub "$wf/release.yml" '/GORELEASER_VERSION: v/d'
 check_case "GoReleaser: no version in CONTRIBUTING.md" 1 "The GoReleaser pins differ" sub CONTRIBUTING.md '/goreleaser\/v2@/d'
 check_case "GoReleaser: short version in all files" 1 "ci.yml must pin one version of GoReleaser" float_goreleaser
+
+# The version input of each goreleaser-action step. The real steps are in
+# ci.yml (two) and release.yml (one). The ranges select the step of a case.
+ga_check="/Check the GoReleaser config/,/args: check/"
+ga_release="/Run GoReleaser/,/args: release/"
+check_case "goreleaser-action: hard-coded version" 1 "ci.yml: the step \"- name: Check the GoReleaser config\" has a version input that is not" sub "$wf/ci.yml" "$ga_check"'s/version: .*/version: v2.0.0/'
+check_case "goreleaser-action: version latest" 1 "release.yml: the step \"- name: Run GoReleaser\" has a version input that is not" sub "$wf/release.yml" "$ga_release"'s/version: .*/version: latest/'
+check_case "goreleaser-action: other variable" 1 "has a version input that is not" sub "$wf/release.yml" "$ga_release"'s/GORELEASER_VERSION/OTHER_VERSION/'
+check_case "goreleaser-action: text after the variable" 1 "has a version input that is not" sub "$wf/release.yml" "$ga_release"'s/(version: .*)$/\1-x/'
+check_case "goreleaser-action: no version input" 1 "release.yml: the step \"- name: Run GoReleaser\" has no version input" sub "$wf/release.yml" "$ga_release"'{/version:/d;}'
+check_case "goreleaser-action: no version input, next step has one" 1 "ci.yml: the step \"- name: Check the GoReleaser config\" has no version input" sub "$wf/ci.yml" "$ga_check"'{/version:/d;}'
+check_case "goreleaser-action: new workflow without a version" 1 "extra.yml: the step \"- uses: goreleaser/goreleaser-action@x\" has no version input" goreleaser_workflow extra.yml ""
+check_case "goreleaser-action: new .yaml workflow with latest" 1 "extra.yaml: the step" goreleaser_workflow extra.yaml "version: latest"
+check_case "goreleaser-action: new workflow, quoted pin and trailing spaces" 0 "" goreleaser_workflow extra.yml 'version: "${{ env.GORELEASER_VERSION }}"   '
+check_case "goreleaser-action: new workflow, comment after the pin" 0 "" goreleaser_workflow extra.yml 'version: ${{ env.GORELEASER_VERSION }} # pinned'
+check_case "goreleaser-action: new workflow, plain pin" 0 "" goreleaser_workflow extra.yml 'version: ${{ env.GORELEASER_VERSION }}'
+
+# The bypass classes of the step check. ok_ver is the allowed version line.
+ok_ver='version: ${{ env.GORELEASER_VERSION }}'
+w_with="        with:
+          distribution: goreleaser
+          $ok_ver"
+w_latest="        with:
+          version: latest"
+# (a) A quoted uses value.
+check_case "goreleaser-action: quoted uses, version latest" 1 "extra.yml: the step" step_workflow extra.yml "      - uses: \"goreleaser/goreleaser-action@x\"
+$w_latest"
+check_case "goreleaser-action: single-quoted uses, version latest" 1 "extra.yml: the step" step_workflow extra.yml "      - uses: 'goreleaser/goreleaser-action@x'
+$w_latest"
+check_case "goreleaser-action: quoted uses, no version" 1 "has no version input" step_workflow extra.yml "      - uses: \"goreleaser/goreleaser-action@x\""
+check_case "goreleaser-action: quoted uses, good version" 0 "" step_workflow extra.yml "      - uses: \"goreleaser/goreleaser-action@x\"
+$w_with"
+check_case "goreleaser-action: single-quoted uses, good version" 0 "" step_workflow extra.yml "      - uses: 'goreleaser/goreleaser-action@x' # note
+$w_with"
+# (b) Owner and repo names ignore case.
+check_case "goreleaser-action: other case, version latest" 1 "extra.yml: the step" step_workflow extra.yml "      - uses: GoReleaser/goreleaser-action@x
+$w_latest"
+check_case "goreleaser-action: other case, good version" 0 "" step_workflow extra.yml "      - uses: GoReleaser/GoReleaser-Action@x
+$w_with"
+# (c) Flow style, and (g) other styles that the check cannot read.
+check_case "goreleaser-action: flow style" 1 "a line names goreleaser-action in a style this check cannot read" step_workflow extra.yml "      - {uses: goreleaser/goreleaser-action@x, with: {version: latest}}"
+check_case "goreleaser-action: flow style, good version" 1 "a style this check cannot read" step_workflow extra.yml "      - {uses: goreleaser/goreleaser-action@x, with: {version: \${{ env.GORELEASER_VERSION }}}}"
+check_case "goreleaser-action: anchor before the action" 1 "a style this check cannot read" step_workflow extra.yml "      - uses: &a goreleaser/goreleaser-action@x
+$w_with"
+check_case "goreleaser-action: uses value on the next line" 1 "a style this check cannot read" step_workflow extra.yml "      - uses:
+          goreleaser/goreleaser-action@x
+$w_with"
+check_case "goreleaser-action: action path in a name line" 1 "a style this check cannot read" step_workflow extra.yml "      - name: goreleaser/goreleaser-action
+        run: echo hi"
+check_case "goreleaser-action: action word without the path in a name line" 0 "" step_workflow extra.yml "      - name: Run goreleaser-action
+        uses: goreleaser/goreleaser-action@x
+$w_with"
+check_case "goreleaser-action: local action" 0 "" step_workflow extra.yml "      - uses: ./some/local@x"
+# (d) More than one space after the dash.
+check_case "goreleaser-action: extra spaces after the dash, version latest" 1 "extra.yml: the step" step_workflow extra.yml "      -   uses: goreleaser/goreleaser-action@x
+          with:
+            version: latest"
+check_case "goreleaser-action: extra spaces after the dash, no version" 1 "has no version input" step_workflow extra.yml "      -   uses: goreleaser/goreleaser-action@x"
+check_case "goreleaser-action: extra spaces after the dash, good version" 0 "" step_workflow extra.yml "      -   uses: goreleaser/goreleaser-action@x
+          with:
+            $ok_ver"
+check_case "goreleaser-action: with on the first line, good version" 0 "" step_workflow extra.yml "      - with:
+          $ok_ver
+        uses: goreleaser/goreleaser-action@x"
+# (e) A version key outside the with: block does not count.
+check_case "goreleaser-action: version under env" 1 "has no version input" step_workflow extra.yml "      - uses: goreleaser/goreleaser-action@x
+        with:
+          distribution: goreleaser
+        env:
+          $ok_ver"
+check_case "goreleaser-action: version at the step level" 1 "has no version input" step_workflow extra.yml "      - uses: goreleaser/goreleaser-action@x
+        with:
+          distribution: goreleaser
+        $ok_ver"
+check_case "goreleaser-action: version in a nested mapping of with" 1 "has no version input" step_workflow extra.yml "      - uses: goreleaser/goreleaser-action@x
+        with:
+          extra:
+            $ok_ver"
+check_case "goreleaser-action: good version in env, latest in with" 1 "has a version input that is not" step_workflow extra.yml "      - uses: goreleaser/goreleaser-action@x
+        with:
+          version: latest
+        env:
+          $ok_ver"
+check_case "goreleaser-action: version after env, back in with" 0 "" step_workflow extra.yml "      - uses: goreleaser/goreleaser-action@x
+        with:
+          distribution: goreleaser
+          $ok_ver
+          args: check
+        env:
+          X: y"
+# (f) GORELEASER_VERSION must be a full pin that equals ci.yml, in every file.
+check_case "GoReleaser: new workflow, no definition" 1 "extra.yml has a goreleaser-action step but does not define GORELEASER_VERSION" write_workflow_without_pin extra.yml
+check_case "GoReleaser: new workflow, pin value latest" 1 "extra.yml has a GORELEASER_VERSION line that is not a full version" wf_with_pin latest
+check_case "GoReleaser: new workflow, other full pin" 1 "extra.yml has GORELEASER_VERSION v0.0.1, expected" wf_with_pin v0.0.1
+check_case "GoReleaser: new workflow, same pin" 0 "" wf_with_pin "$gr_ver"
+check_case "GoReleaser: other pin in govulncheck.yml" 1 "govulncheck.yml has GORELEASER_VERSION v0.0.1, expected" add_define_to govulncheck.yml v0.0.1
+check_case "GoReleaser: latest in govulncheck.yml" 1 "govulncheck.yml has a GORELEASER_VERSION line that is not a full version" add_define_to govulncheck.yml latest
+check_case "GoReleaser: pin in a new .yaml workflow without a step" 1 "extra.yaml has GORELEASER_VERSION v0.0.1, expected" step_workflow_pin extra.yaml v0.0.1
+
+# The names that govulncheck.yml may have, with the needs line of its job.
+check_case "needs: govulncheck once more" 0 "" append "$wf/govulncheck.yml" '    needs: govulncheck'
+check_case "needs: list form" 1 "is not the pin, the call line or a name" append "$wf/govulncheck.yml" '    needs: [govulncheck]'
+check_case "needs: other indent" 1 "is not the pin, the call line or a name" append "$wf/govulncheck.yml" '      needs: govulncheck'
+check_case "needs: in ci.yml" 1 "ci.yml has a govulncheck line that is not the pin" append "$wf/ci.yml" '    needs: govulncheck'
+check_case "step that runs govulncheck" 1 "is not the pin, the call line or a name" append "$wf/govulncheck.yml" '      - run: govulncheck ./...'
+
+# A pin with the form of a pre-release or with quotes is still a full version.
+check_case "GoReleaser: rc suffix in all files" 0 "" rc_goreleaser
+check_case "GoReleaser: rc suffix in ci.yml only" 1 "The GoReleaser pins differ" sub "$wf/ci.yml" 's/(GORELEASER_VERSION: v[0-9]+\.[0-9]+\.[0-9]+)/\1-rc.1/'
+check_case "GoReleaser: quoted pin with a comment in all files" 0 "" quoted_goreleaser
 
 if [ "$failed" -ne 0 ]; then
   echo "check-tool-pins-test: $failed of $total cases failed" >&2
