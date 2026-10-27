@@ -4,6 +4,7 @@ import (
 	"maps"
 
 	"github.com/Ducarv/mcpmoat/internal/discover"
+	"github.com/Ducarv/mcpmoat/internal/pins"
 	"github.com/Ducarv/mcpmoat/internal/report"
 )
 
@@ -34,7 +35,7 @@ type scanJSONInput struct {
 	// list dropped. It is the same map that printIgnored writes on stderr. Its
 	// keys are rule IDs from findings, never text from the ignore file.
 	ignored map[string]int
-	// fileEntries is the number of entries that scan used from
+	// fileEntries is the number of entries that scan read from
 	// .mcpmoat-ignore (see scanIgnores.fileEntries).
 	fileEntries int
 	// configPath is the --config value of the scan, or empty.
@@ -69,9 +70,10 @@ func buildScanReport(in scanJSONInput) report.ScanReport {
 		Complete:      in.complete,
 		Ignored:       jsonIgnored(in.ignored, in.fileEntries),
 	}
+	hints := hintsByID(in.pr.hints)
 	for _, s := range in.res.Servers {
 		js := report.NewJSONServer(s, in.pr.inspectionOf(s))
-		js.Accept = acceptOf(s, in.pr.hints, in.configPath, in.configProblem)
+		js.Accept = acceptOf(s, hints, in.configPath, in.configProblem)
 		r.Servers = append(r.Servers, js)
 	}
 	for _, row := range in.rows {
@@ -104,21 +106,31 @@ func jsonIgnored(ignored map[string]int, fileEntries int) report.JSONIgnored {
 // acceptOf returns the accept hint of the server s for the JSON report, or nil
 // when s has no hint (a first run, a server that cannot be pinned, unchanged
 // tools, or no pin finding kept). It finds the hint by identity, like the
-// terminal does: serverIdentity(s) must equal the id of the hint. When two
-// hints have the same identity, the first one counts. Digest is the string that
-// the terminal hint prints. Command is set only when acceptAdvice says that the
-// terminal text is a command, never for the prose steps.
-func acceptOf(s discover.Server, hints []acceptHint, configPath string, configProblem bool) *report.JSONAccept {
-	id := serverIdentity(s)
-	for _, h := range hints {
-		if h.id != id {
-			continue
-		}
-		a := &report.JSONAccept{Digest: h.digest}
-		if text, isCommand := acceptAdvice(h, configPath, configProblem); isCommand {
-			a.Command = text
-		}
-		return a
+// terminal does: serverIdentity(s) must be a key of hints (see hintsByID).
+// Digest is the string that the terminal hint prints. Command is set only when
+// acceptAdvice says that the terminal text is a command, never for the prose
+// steps.
+func acceptOf(s discover.Server, hints map[pins.Identity]acceptHint, configPath string, configProblem bool) *report.JSONAccept {
+	h, ok := hints[serverIdentity(s)]
+	if !ok {
+		return nil
 	}
-	return nil
+	a := &report.JSONAccept{Digest: h.digest}
+	if text, isCommand := acceptAdvice(h, configPath, configProblem); isCommand {
+		a.Command = text
+	}
+	return a
+}
+
+// hintsByID returns the hints by identity, so that buildScanReport finds the
+// hint of each server without a scan of the whole list (a config can hold
+// 10,000 servers). When two hints have the same identity, the first one counts.
+func hintsByID(hints []acceptHint) map[pins.Identity]acceptHint {
+	byID := make(map[pins.Identity]acceptHint, len(hints))
+	for _, h := range hints {
+		if _, dup := byID[h.id]; !dup {
+			byID[h.id] = h
+		}
+	}
+	return byID
 }

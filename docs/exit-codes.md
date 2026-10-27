@@ -34,7 +34,8 @@ here.
   `--fail-on critical` item above). It is not an execution error: it gives exit code 1 with the
   default `--fail-on`, and the JSON `complete` stays `true`. `scan` also prints a warning on
   stderr, and the other servers still get their own budget.
-- `scan` lists at most 1000 tool rule findings for each server. It counts the rest and adds one
+- `scan` lists at most 1000 tool rule findings for each server, the most severe ones. It counts the
+  rest and adds one
   `MOAT-T1-024` finding that says how many it left out ("N more tool findings are not listed;
   limit M"). Its severity is the highest severity of the description and schema rules that `scan`
   applies, but never lower than high, as for `MOAT-T1-023`. It is not an execution error: it gives

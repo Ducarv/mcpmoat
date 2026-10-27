@@ -32,7 +32,9 @@ This page lists what mcpmoat does not do, so you know how far to trust a clean s
   `MOAT-T1-023` finding (see [Exit codes](exit-codes.md)), and its tools that were not fully
   checked can hide a malicious text.
 - `scan` keeps at most 1000 tool rule findings for each server. The limit counts the findings
-  after the ignore list. It counts the rest but does not list them, and adds one `MOAT-T1-024`
+  after the ignore list. `scan` keeps the most severe findings, and among findings of the same
+  severity the ones of the first tools, so a server cannot push a severe finding out of the report
+  with many weak ones. It counts the rest but does not list them, and adds one `MOAT-T1-024`
   finding that says how many it left out. Its severity is the highest severity of the applied rules,
   and never below high. A `.mcpmoat-ignore` file cannot drop it, and only `--ignore MOAT-T1-024`
   can (see [Ignore findings](ignore.md)). The scan stays complete, and the exit code follows
@@ -40,14 +42,13 @@ This page lists what mcpmoat does not do, so you know how far to trust a clean s
   limit. The number of tools for each server (at most 10,000) bounds the pin findings (at most one
   for each current tool and one for each removed tool, plus one for the server; the pinned tools
   come from an earlier scan, so they are at most 10,000 too), and the LLM tool cap of 500 bounds
-  the LLM findings. Nothing bounds the config
-  findings except the size of the config file (32 MiB for a global file, 4 MiB for a project file),
-  and the number of servers multiplies all these bounds. A cap for the config findings is planned as
-  a follow-up (issue #213).
+  the LLM findings. Nothing bounds the config findings except the size of the config file (32 MiB
+  for a global file, 4 MiB for a project file), and the number of servers multiplies all these
+  bounds. A cap for the config findings is planned as a follow-up (issue #213).
 - In `scan --json`, a name that is longer than 512 characters and a path that is longer than 4096
   characters are cut, and each cut ends with `...`. The top-level field `fields_truncated` is true
-  when any field was cut. Two names that differ only after the cut look equal in the JSON. Diffs,
-  commands, URLs and argv are never cut. These caps and the cap of 1000 tool findings do not bound
+  when any field was cut. Two names that differ only after the cut look equal in the JSON (a fix is
+  planned as issue #223). Diffs, commands, URLs and argv are never cut. These caps and the cap of 1000 tool findings do not bound
   the size of the whole JSON document: a hostile config file with a very large number of config
   findings can give a very large document.
 - The budget cannot stop the build of the match forms of one text. For a very hostile text (for

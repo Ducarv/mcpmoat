@@ -28,6 +28,14 @@ import (
 // finding (see budgetRow).
 const toolRulesBudget = 5 * time.Second
 
+// maxToolRowsPerServer is the largest number of tool finding rows that scan
+// keeps for one server. A server with more findings gets one summary finding
+// (rules.RuleToolFindingCap) in place of the rest, so that a hostile server
+// cannot flood the report. The step keeps the most severe rows (see
+// toolRulesRun.flushTools), so a server cannot push a severe finding out of
+// the report with many weak ones.
+const maxToolRowsPerServer = 1000
+
 // maxToolKeyRunes caps the tool name in the Key of a tool rule row (see
 // toolKey). A hostile server can send a tool name of up to the size limit of
 // its answer, and one tool can give one row for each rule. Without the cap,
@@ -107,10 +115,11 @@ const (
 //
 // A server keeps at most toolRulesRun.maxRows tool rows (maxToolRowsPerServer
 // by default), counted after the ignore list: a row that the list drops does
-// not count. The rows over the limit are not kept. At the end of the check of
-// the server, the step adds one rules.RuleToolFindingCap row for them (see
-// capRow) and prints one warning on stderr. The budget row and the cap row do
-// not count toward the limit.
+// not count. The step keeps the most severe rows. Among rows of the same
+// severity it keeps the ones of the first tools. The rows over the limit are
+// not kept. At the end of the check of the server, the step adds one
+// rules.RuleToolFindingCap row for them (see capRow) and prints one warning on
+// stderr. The budget row and the cap row do not count toward the limit.
 //
 // counts holds the finding counts of each server by the index of the server
 // (see serverStatuses). The step adds the rows that it keeps for a server to
@@ -129,13 +138,12 @@ func (c *cli) toolRulesStep(ctx context.Context, setup scanSetup, outcomes []ins
 		return toolRulesResult{}, nil
 	}
 	run := toolRulesRun{
-		c:      c,
-		a:      a,
-		set:    setup.checks.set,
-		ignore: ignore,
-		budget: setup.toolBudget,
-		// maxRows caps the tool rows per server; the cli method picks the default.
-		maxRows:        c.maxToolRowsOrDefault(),
+		c:              c,
+		a:              a,
+		set:            setup.checks.set,
+		ignore:         ignore,
+		budget:         setup.toolBudget,
+		maxRows:        setup.maxToolRows,
 		budgetSeverity: budgetSeverity(a),
 		counts:         counts,
 	}
@@ -166,22 +174,23 @@ type toolRulesRun struct {
 	ignore *scanIgnores
 	budget time.Duration
 	// maxRows is the largest number of tool rows that the step keeps for one
-	// server. The caller sets it to more than zero: toolRulesStep uses
-	// cli.maxToolRowsOrDefault. The budget row and the cap row do not count
-	// toward it.
+	// server. The caller sets it to more than zero: scanSetup.maxToolRows. The
+	// budget row and the cap row do not count toward it.
 	maxRows int
-	// budgetSeverity is the severity of a rules.RuleAnalysisBudget row (see
-	// budgetSeverity). It is the same for each server, so the step computes
-	// it once.
+	// budgetSeverity is the severity of the rules.RuleAnalysisBudget row and
+	// of the rules.RuleToolFindingCap row (see budgetSeverity). It is the same
+	// for each server, so the step computes it once.
 	budgetSeverity rules.Severity
 	counts         []int
 	res            toolRulesResult
-	// kept counts the tool rows that the step kept for the server that it
-	// checks now. checkServer sets it to zero at the start of each server.
-	kept int
-	// omitted counts the tool rows that the step did not keep for the server
-	// that it checks now, because kept reached the limit. checkServer sets it
-	// to zero at the start of each server.
+	// pending holds the tool rows of the server that it checks now, after the
+	// ignore list, in tool order. flushTools keeps the most severe ones.
+	// checkServer empties it at the start of each server. A server has at most
+	// 10,000 tools, so it holds a bounded number of rows.
+	pending []report.FindingRow
+	// omitted counts the tool rows that flushTools did not keep for the server
+	// that it checks now, because there were more than maxRows. checkServer
+	// sets it to zero at the start of each server.
 	omitted int
 	// fileBlocked lists the rule IDs that have a .mcpmoat-ignore entry that
 	// matches a kept row but is not applied (see scanIgnores). Each ID is in
@@ -197,7 +206,7 @@ func (r *toolRulesRun) checkServer(ctx context.Context, o inspect.Outcome) error
 	serverCtx, cancel := context.WithTimeout(ctx, r.budget)
 	defer cancel()
 
-	r.kept, r.omitted = 0, 0
+	r.pending, r.omitted = r.pending[:0], 0
 	ref := report.NewServerRef(o.Server)
 	tools := o.Result.Tools
 	for i, t := range tools {
@@ -205,7 +214,7 @@ func (r *toolRulesRun) checkServer(ctx context.Context, o inspect.Outcome) error
 		// Keep the findings also when err is not nil: every finding that
 		// CheckTool returns is a real match.
 		for _, f := range found {
-			r.addTool(o.Index, t.Name, textRow(r.set, ref, t.Name, f))
+			r.addTool(t.Name, textRow(r.set, ref, t.Name, f))
 		}
 		if err == nil {
 			continue
@@ -221,6 +230,7 @@ func (r *toolRulesRun) checkServer(ctx context.Context, o inspect.Outcome) error
 			// The budget of this server is used up. The tool at i was cut,
 			// so it counts as not fully checked.
 			notChecked := len(tools) - i
+			r.flushTools(o.Index)
 			r.add(o.Index, "", budgetRow(ref, r.budgetSeverity, notChecked, len(tools)))
 			r.c.scanWarnf("server %s: the rule analysis stopped after %s; %s",
 				cutName(o.Server.Name), r.budget, notCheckedText(notChecked, len(tools)))
@@ -233,14 +243,15 @@ func (r *toolRulesRun) checkServer(ctx context.Context, o inspect.Outcome) error
 			return errToolRulesFailed
 		}
 	}
+	r.flushTools(o.Index)
 	r.addCapRow(o, ref)
 	return nil
 }
 
 // addCapRow adds the rules.RuleToolFindingCap row of the server o, with the
 // severity r.budgetSeverity (the same fail-closed severity as the budget row),
-// and prints one warning on stderr. It does nothing when the step kept all the
-// tool rows of the server. The row goes through the ignore list like the
+// and prints one warning on stderr. It does nothing when flushTools kept all
+// the tool rows of the server. The row goes through the ignore list like the
 // budget row: --ignore drops it, .mcpmoat-ignore does not. The warning holds
 // the server name, cut and quoted (see cutName), and two numbers. The
 // warning also appears when --ignore drops the row, as the budget warning does.
@@ -263,20 +274,42 @@ func (r *toolRulesRun) add(index int, toolName string, row report.FindingRow) {
 	}
 }
 
-// addTool keeps the tool row row of the server at index, with the limit
-// r.maxRows. A row that the ignore list drops is counted as ignored and does
-// not count toward the limit. A row over the limit is not kept: it is counted
-// in r.omitted, and addCapRow reports the count at the end of the server.
-func (r *toolRulesRun) addTool(index int, toolName string, row report.FindingRow) {
-	if !r.passIgnore(toolName, row) {
+// addTool holds the tool row row of the server for flushTools, or counts it as
+// ignored when the ignore list drops it. A dropped row does not count toward
+// the limit. The tool name is the real one (see add).
+func (r *toolRulesRun) addTool(toolName string, row report.FindingRow) {
+	if r.passIgnore(toolName, row) {
+		r.pending = append(r.pending, row)
+	}
+}
+
+// flushTools keeps the pending tool rows of the server at index, at most
+// r.maxRows of them, and counts the rest in r.omitted. It keeps the most severe
+// rows, so a server cannot push a severe finding out of the report with many
+// weak ones in front of it. Among rows of the same severity it keeps the ones
+// of the first tools (the sort is stable). The kept rows stay in tool order.
+func (r *toolRulesRun) flushTools(index int) {
+	rows := r.pending
+	r.pending = r.pending[:0]
+	if len(rows) <= r.maxRows {
+		for _, row := range rows {
+			r.keep(index, row)
+		}
 		return
 	}
-	if r.kept >= r.maxRows {
-		r.omitted++
-		return
+	r.omitted = len(rows) - r.maxRows
+	order := make([]int, len(rows))
+	for i := range order {
+		order[i] = i
 	}
-	r.kept++
-	r.keep(index, row)
+	slices.SortStableFunc(order, func(a, b int) int {
+		return cmp.Compare(rules.Severity(rows[b].Severity).Rank(), rules.Severity(rows[a].Severity).Rank())
+	})
+	kept := order[:r.maxRows]
+	slices.Sort(kept)
+	for _, i := range kept {
+		r.keep(index, rows[i])
+	}
 }
 
 // passIgnore applies the ignore list to row. It returns false, after it
@@ -339,13 +372,15 @@ func toolKey(name string) string {
 	return short
 }
 
-// budgetSeverity returns the severity of a rules.RuleAnalysisBudget row: the
-// highest severity of the description and schema rules of a (see
-// rules.Analyzer.MaxSeverity), but never lower than high.
+// budgetSeverity returns the severity of a rules.RuleAnalysisBudget row and of
+// a rules.RuleToolFindingCap row: the highest severity of the description and
+// schema rules of a (see rules.Analyzer.MaxSeverity), but never lower than
+// high.
 //
-// The rules that did not run could have given a finding of that severity. So
-// a server cannot make a critical finding go away when it uses up the budget:
-// with a critical rule (from --rules) the budget row is critical too, and
+// The rules that did not run (budget row) or whose findings the report does
+// not list (cap row) could have given a finding of that severity. So a server
+// cannot make a critical finding go away when it uses up the budget or floods
+// the report: with a critical rule (from --rules) the row is critical too, and
 // "--fail-on critical" still gives exit code 1.
 //
 // MaxSeverity counts every description and schema rule that the analyzer

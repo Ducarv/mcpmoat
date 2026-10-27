@@ -620,7 +620,7 @@ with `--no-color`).
 - The size of the text fields and of the tool findings is bounded. Names are cut to 512 characters
   and paths to 4096 characters, and `fields_truncated` tells that a field was cut. Diffs, commands,
   URLs and argv are never cut. A server with more than 1000 tool findings gets one summary finding,
-  `MOAT-T1-024`: the rest is counted, not listed. Its severity is the highest severity among the
+  `MOAT-T1-024`: the 1000 most severe are listed, and the rest is counted, not listed. Its severity is the highest severity among the
   applied rules and never lower than high. The scan stays complete, and the exit code follows
   `--fail-on`.
 - The whole document is not bounded. The config findings, the pin findings and the LLM findings are

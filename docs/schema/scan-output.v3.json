@@ -95,7 +95,7 @@
           }
         },
         "file_entries": {
-          "description": "Number of entries from .mcpmoat-ignore that mcpmoat used.",
+          "description": "Number of entries that mcpmoat read from .mcpmoat-ignore (the N in the stderr line 'using N entries'). Some of them may not apply to any finding.",
           "type": "integer",
           "minimum": 0
         }

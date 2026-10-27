@@ -98,12 +98,11 @@ type scanIgnores struct {
 	// rules, of the LLM rules, of the budget rule and of the tool findings
 	// cap.
 	flags rules.IgnoreList
-}
-
-// fileEntries returns the number of entries that scan used from the
-// .mcpmoat-ignore file: the entries of all that are not in flags.
-func (s scanIgnores) fileEntries() int {
-	return s.all.Len() - s.flags.Len()
+	// fileEntries is the number of entries that scan read from the
+	// .mcpmoat-ignore file: the N in the stderr line "using N entries". It
+	// counts the entries that the file cannot apply too (see
+	// fileCannotIgnore), and the ones that match no finding.
+	fileEntries int
 }
 
 // fileCannotIgnore reports whether the rule id is one that .mcpmoat-ignore

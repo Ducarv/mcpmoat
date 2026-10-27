@@ -267,12 +267,11 @@ func NewJSONFileError(e *discover.FileError) JSONFileError {
 //
 // WriteJSON streams the document: it encodes and escapes one list element at a
 // time, so its memory follows the largest element and not the whole output.
-// The size bound of the output is part of FR-15; no NFR sets a memory limit
-// (NFR-07 is about usability). The bytes are the same as when the whole document is encoded in
-// one call with json.Encoder and SetIndent. If a write fails, w may already
-// hold the first part of the document. WriteJSON wraps the error of the
-// encoder or of the write. Callers must check it: a failed write has to become
-// exit code 2 in cmd/mcpmoat.
+// The bytes are the same as when the whole document is encoded in one call
+// with json.Encoder and SetIndent. If a write fails, w may already hold the
+// first part of the document. WriteJSON wraps the error of the encoder or of
+// the write. Callers must check it: a failed write has to become exit code 2
+// in cmd/mcpmoat.
 func WriteJSON(w io.Writer, r ScanReport) error {
 	// A nil slice would show as null. Use empty slices, so consumers can
 	// always loop over the lists.

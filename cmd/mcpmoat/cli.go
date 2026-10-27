@@ -86,21 +86,6 @@ func (c *cli) ctxOrBackground() context.Context {
 	return c.ctx
 }
 
-// maxToolRowsPerServer is the largest number of tool finding rows that scan
-// keeps for one server. A server with more findings gets one summary finding
-// (rules.RuleToolFindingCap) in place of the rest, so that a hostile server
-// cannot flood the report.
-const maxToolRowsPerServer = 1000
-
-// maxToolRowsOrDefault returns c.maxToolRows, or maxToolRowsPerServer when the
-// field is zero (or negative).
-func (c *cli) maxToolRowsOrDefault() int {
-	if c.maxToolRows > 0 {
-		return c.maxToolRows
-	}
-	return maxToolRowsPerServer
-}
-
 // command is one subcommand of mcpmoat.
 type command struct {
 	name    string

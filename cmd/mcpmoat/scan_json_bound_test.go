@@ -56,10 +56,11 @@ const (
 // plus the pin and other rows of the server: toolRowSlack is the room for those
 // rows (measured: 1002 rows).
 //
-// Memory (checked only without -race). The scan itself holds the 1 MiB config name several times (the file
-// text, the decoded config, the server, the pin store, the report), the 3000
-// tools, and it runs 25 rules and the built-in rules on each tool. Those costs
-// do not depend on the output, so they get a fixed budget. On top of that,
+// Memory (checked only without -race). The scan itself holds the 1 MiB config
+// name several times (the file text, the decoded config, the server, the pin
+// store, the report), the 3000 tools, and it runs 25 rules and the built-in
+// rules on each tool. Those costs do not depend on the output, so they get a
+// fixed budget. On top of that,
 // writing the document may allocate at most maxJSONAllocFactor bytes for each
 // byte of output (WriteJSON streams the document; the same idea as
 // TestWriteJSONBoundsOutputAndMemory in internal/report).

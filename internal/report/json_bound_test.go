@@ -270,8 +270,7 @@ func TestWriteJSONLongNamesThatDifferAfterTheCutBecomeEqual(t *testing.T) {
 }
 
 // The caller can set FieldsTruncated; WriteJSON never sets it back to false,
-// and does not set it when nothing was cut. (The same name in json_test.go,
-// package report_test, is a different test: it checks the never-cut fields.)
+// and does not set it when nothing was cut.
 func TestWriteJSONFieldsTruncatedFlag(t *testing.T) {
 	t.Parallel()
 	tests := []struct {

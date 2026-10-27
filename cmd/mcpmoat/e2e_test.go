@@ -20,7 +20,6 @@ import (
 	"regexp"
 	"runtime"
 	"slices"
-	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -1738,16 +1737,11 @@ func TestE2EPinsUnsafePerm(t *testing.T) {
 	})
 }
 
-// The two stderr lines of a scan with an ignore file, as the JSON report must
-// repeat them: "using N entries from .mcpmoat-ignore" and "N findings ignored:
-// ID (n), ...".
-var (
-	ignoreNoticeRe  = regexp.MustCompile(`^mcpmoat scan: using (\d+) entr(?:y|ies) from ` + regexp.QuoteMeta(rules.IgnoreFileName) + `$`)
-	ignoredLineRe   = regexp.MustCompile(`^mcpmoat scan: (\d+) findings? ignored: (.+)$`)
-	ignoredPairRe   = regexp.MustCompile(`(MOAT-[A-Z0-9-]+) \((\d+)\)`)
-	acceptDigestRe  = regexp.MustCompile(`^pd1:[0-9a-f]{64}$`)
-	e2eIgnoreSecret = "distinctive-comment-line-of-the-ignore-file"
-)
+var acceptDigestRe = regexp.MustCompile(`^pd1:[0-9a-f]{64}$`)
+
+// e2eIgnoreSecret is a comment line of the ignore file that the JSON report
+// must never repeat.
+const e2eIgnoreSecret = "distinctive-comment-line-of-the-ignore-file"
 
 // TestE2EScanJSONIgnored checks that "scan --json" reports the findings that
 // the ignore file dropped in the "ignored" object, with the same numbers as the
@@ -1771,36 +1765,14 @@ func TestE2EScanJSONIgnored(t *testing.T) {
 	assertContainsNone(t, "stdout", stdout, append([]string{e2eIgnoreSecret}, dangerousCanaries...))
 	assertContainsNone(t, "stderr", stderr, append([]string{e2eIgnoreSecret}, dangerousCanaries...))
 
-	// Read the numbers from stderr, then compare the JSON with them.
-	var entries, total int
-	wantRules := map[string]int{}
-	for _, line := range nonEmptyLines(stderr) {
-		if m := ignoreNoticeRe.FindStringSubmatch(line); m != nil {
-			entries, _ = strconv.Atoi(m[1])
-		}
-		if m := ignoredLineRe.FindStringSubmatch(line); m != nil {
-			total, _ = strconv.Atoi(m[1])
-			for _, pair := range ignoredPairRe.FindAllStringSubmatch(m[2], -1) {
-				n, _ := strconv.Atoi(pair[2])
-				wantRules[pair[1]] = n
-			}
-		}
-	}
-	if entries != 2 || total < 2 || len(wantRules) != 2 {
-		t.Fatalf("stderr has entries %d, total %d, rules %v, want 2 entries and 2 rules\nstderr:\n%s", entries, total, wantRules, stderr)
-	}
-	if doc.Ignored.Total != total {
-		t.Errorf("ignored.total = %d, want %d (stderr)", doc.Ignored.Total, total)
-	}
-	if !maps.Equal(doc.Ignored.Rules, wantRules) {
-		t.Errorf("ignored.rules = %v, want %v (stderr)", doc.Ignored.Rules, wantRules)
-	}
-	if doc.Ignored.FileEntries != entries {
-		t.Errorf("ignored.file_entries = %d, want %d (stderr)", doc.Ignored.FileEntries, entries)
+	// The "ignored" object must say what the two stderr lines say.
+	assertIgnoredMatchesStderr(t, doc, stderr)
+	if entries := stderrFileEntries(t, stderr); entries != 2 || len(doc.Ignored.Rules) != 2 || doc.Ignored.Total < 2 {
+		t.Fatalf("stderr has %d file entries, the document has ignored %+v, want 2 entries and 2 rules\nstderr:\n%s", entries, doc.Ignored, stderr)
 	}
 	// The dropped rules are gone from the findings, the other T4 rules stay.
 	for _, f := range doc.Findings {
-		if _, dropped := wantRules[f.RuleID]; dropped {
+		if _, dropped := doc.Ignored.Rules[f.RuleID]; dropped {
 			t.Errorf("finding %s on %s shows, but the ignore file drops it", f.RuleID, f.Server)
 		}
 	}
@@ -1833,7 +1805,7 @@ func TestE2EScanJSONAccept(t *testing.T) {
 		}
 		doc := decodeScanJSON(t, stdout)
 		for _, f := range doc.Findings {
-			if strings.HasPrefix(f.RuleID, "MOAT-T2-") {
+			if pins.IsPinRuleID(f.RuleID) {
 				pinRows++
 			}
 		}

@@ -174,8 +174,9 @@ network tests in `cmd/mcpmoat` and the offline CI job are the proof.
    for `rules.RuleAnalysisBudget` (`MOAT-T1-023`) and for `rules.RuleToolFindingCap`
    (`MOAT-T1-024`). When a file entry for such a rule matches a finding, `scan` keeps the finding,
    prints one warning for each such rule ID (`warnFileCannotIgnore`), and tells the user to use
-   `--ignore`. `scanIgnores.fileEntries` counts the entries that `scan` used from the file (the size
-   of the first list minus the size of the flag list). The count goes to the JSON
+   `--ignore`. `scanIgnores.fileEntries` holds the number of entries that `scan` read from the file (the
+   N in the stderr line `using N entries`, set in `loadIgnore`). Some of them can be entries that the
+   file cannot apply (see above) or that match no finding. The count goes to the JSON
    `ignored.file_entries`.
 4. It finds the servers with `loadConfigs` in `cmd/mcpmoat/configs.go`. That function runs
    `discover.Discover`, or reads one file with `discover.ReadConfig` when `--config` is set. `pin`
@@ -294,15 +295,19 @@ step 5 and step 6:
     The rule set gives the severity, the title, the risk and the remediation. The ignore list drops
     rows like the config rows (see step 3), but the `MOAT-T1-023` and `MOAT-T1-024` rows only with
     `--ignore`.
-  - Row cap: a server keeps at most 1000 tool rows (`maxToolRowsPerServer` in `cmd/mcpmoat/cli.go`,
-    `addTool`). The count is after the ignore list: a row that the list drops does not count. A row
-    over the limit is not kept, but it is counted. At the end of the server, `addCapRow` adds one
-    `MOAT-T1-024` row (`rules.RuleToolFindingCap`, a native rule with no YAML file: its title, risk
+  - Row cap: a server keeps at most 1000 tool rows (`maxToolRowsPerServer` in
+    `cmd/mcpmoat/scan_tools.go`). `addTool` holds the rows after the ignore list, in tool order: a
+    row that the list drops does not count. At the end of the server, `flushTools` keeps the most
+    severe rows (a stable sort, so among rows of the same severity it keeps the ones of the first
+    tools) and leaves them in tool order. A hostile server cannot push a severe finding out of the
+    report with weak findings that come first. A row over the limit is not kept, but it is counted.
+    The pending rows of one server are bounded by its tools (at most 10,000) times the rules. Then
+    `addCapRow` adds one `MOAT-T1-024` row (`rules.RuleToolFindingCap`, a native rule with no YAML file: its title, risk
     and fix are fixed texts in `scan_tools.go`, `capTitle`, `capRisk` and `capRemediation`) and
     prints one warning on stderr. Its related text is `N more tool findings are not listed; limit M`
     (`capText`). The `MOAT-T1-023` row and the cap row do not count toward the limit. The cap row
-    has the severity of `budgetSeverity`, the same as the budget row: the rows that were not kept
-    could be of the highest severity, so the row fails closed (high with the built-in rules). Only
+    has the severity of `budgetSeverity`, the same as the budget row, so the row fails closed (high
+    with the built-in rules): a server that floods the report still fails the gate. Only
     `--ignore MOAT-T1-024` drops it, not the file (`fileCannotIgnore`), so a cloned repository
     cannot hide that findings were left out. The warning prints also when `--ignore` drops the row.
     This is a finding, not an execution error: the exit code follows `--fail-on`, and the JSON
@@ -733,7 +738,7 @@ Shape (`schema_version` 3):
 - `ignored` is always there. It has `total` (the number of findings that an ignore entry dropped:
   the number in the `N findings ignored` line on stderr), `rules` (the count for each rule ID; `{}`
   when nothing was ignored; the keys are rule IDs, never text from the ignore file) and
-  `file_entries` (the number of entries that `scan` used from `.mcpmoat-ignore`). The dropped
+  `file_entries` (the number of entries that `scan` read from `.mcpmoat-ignore`). The dropped
   findings are not in `findings`, so a CI job reads these counts to see what the ignore list hid.
 - `complete` is `false` when the report can miss results: a config file has a problem (see
   `errors`), or the inspection or the pin step failed as a whole (for example, `pins.json` cannot
@@ -842,8 +847,9 @@ bound the whole document: the config findings, the pin findings and the LLM find
    - `fields_truncated` is `true` when `WriteJSON` cut any field. A caller can also set it to
      `true`, and `WriteJSON` never sets it back to `false`. Each cut field has a `maxLength`
      (515 or 4099) in the schema.
-   - Limit: two names that differ only after the cut look equal in the output. The cut happens
-     only when `WriteJSON` writes. The ignore list and the pins use the real names.
+   - Limit: two names that differ only after the cut look equal in the output (issue #223 tracks a
+     fix). The cut happens only when `WriteJSON` writes. The ignore list and the pins use the real
+     names.
 2. Per-server row cap (see 5d). A server keeps at most 1000 tool rule rows, then one `MOAT-T1-024`
    row. The cap counts the rows after the ignore list. The `MOAT-T1-023` row and the cap row do not
    count. The cap bounds the part that grows with the number of tools times the number of rules. It

@@ -39,9 +39,10 @@ const jsonMaxPathRunes = 4096
 //
 // Never cut: JSONDiff.Diff (it has its own bound, see JSONDiff.Truncated),
 // JSONServer.Argv and JSONServer.URL (a cut command line or URL would mislead),
-// the rule ID, the severity, the finding field and source, and every enum or
-// fixed field (client, scope, state, transport, inspection status, kind,
-// reason, mode, version).
+// JSONServer.Accept (a cut digest or command would not work), the rule ID, the
+// severity, the finding field and source, and every enum or fixed field
+// (client, scope, state, transport, inspection status, kind, reason, mode,
+// version).
 //
 // boundReport never changes the data of the caller. The slices of r are shared
 // with the caller, so it copies each slice it needs to change before it writes
@@ -53,52 +54,51 @@ func boundReport(r ScanReport) (ScanReport, bool) {
 	// A ScanReport is passed by value, but a slice value is only a pointer,
 	// a length and a capacity. The copy r.Servers still points to the array of
 	// the caller. slices.Clone makes a new array, so a write to an element
-	// does not reach the caller. Clone keeps a nil slice nil, so WriteJSON
-	// still sees the same "no list" state.
+	// does not reach the caller.
 	r.Servers = slices.Clone(r.Servers)
 	for i := range r.Servers {
 		// &r.Servers[i] is a pointer to the element in the new array, so the
 		// helper can write the cut text back to it.
 		s := &r.Servers[i]
-		cutField(&s.Name, jsonMaxNameRunes, &cut)
-		cutField(&s.ProjectPath, jsonMaxPathRunes, &cut)
-		cutField(&s.Source, jsonMaxPathRunes, &cut)
+		cut = cutField(&s.Name, jsonMaxNameRunes) || cut
+		cut = cutField(&s.ProjectPath, jsonMaxPathRunes) || cut
+		cut = cutField(&s.Source, jsonMaxPathRunes) || cut
 	}
 
 	r.Findings = slices.Clone(r.Findings)
 	for i := range r.Findings {
 		f := &r.Findings[i]
-		cutField(&f.Server, jsonMaxNameRunes, &cut)
-		cutField(&f.Key, jsonMaxNameRunes, &cut)
-		cutField(&f.Related, jsonMaxNameRunes, &cut)
+		cut = cutField(&f.Server, jsonMaxNameRunes) || cut
+		cut = cutField(&f.Key, jsonMaxNameRunes) || cut
+		cut = cutField(&f.Related, jsonMaxNameRunes) || cut
 	}
 
 	r.Diffs = slices.Clone(r.Diffs)
 	for i := range r.Diffs {
 		d := &r.Diffs[i]
-		cutField(&d.Server, jsonMaxNameRunes, &cut)
-		cutField(&d.Tool, jsonMaxNameRunes, &cut)
+		cut = cutField(&d.Server, jsonMaxNameRunes) || cut
+		cut = cutField(&d.Tool, jsonMaxNameRunes) || cut
 	}
 
 	r.Errors = slices.Clone(r.Errors)
 	for i := range r.Errors {
 		e := &r.Errors[i]
-		cutField(&e.Path, jsonMaxPathRunes, &cut)
-		cutField(&e.ProjectPath, jsonMaxPathRunes, &cut)
-		cutField(&e.Server, jsonMaxNameRunes, &cut)
+		cut = cutField(&e.Path, jsonMaxPathRunes) || cut
+		cut = cutField(&e.ProjectPath, jsonMaxPathRunes) || cut
+		cut = cutField(&e.Server, jsonMaxNameRunes) || cut
 	}
 
 	return r, cut
 }
 
 // cutField cuts *s to limit runes and adds termsafe.CutMarker when *s had more
-// than limit runes. In that case it also sets *cut to true. Otherwise it changes
-// nothing, and it never sets *cut back to false.
-func cutField(s *string, limit int, cut *bool) {
+// than limit runes. It returns true in that case. Otherwise it changes nothing
+// and returns false.
+func cutField(s *string, limit int) bool {
 	short, wasCut := termsafe.Cut(*s, limit)
 	if !wasCut {
-		return
+		return false
 	}
 	*s = short + termsafe.CutMarker
-	*cut = true
+	return true
 }

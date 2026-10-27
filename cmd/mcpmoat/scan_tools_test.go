@@ -950,7 +950,7 @@ func keyLens(rows []report.JSONFinding) []int {
 }
 
 // The tests below check the cap on the tool rows of one server (issue #170,
-// rules.RuleToolFindingCap, see toolRulesRun.addTool): a server keeps at most
+// rules.RuleToolFindingCap, see toolRulesRun.flushTools): a server keeps at most
 // maxRows tool rows, counted after the ignore list, and gets one MOAT-T1-024
 // row for the rest. They set cli.maxToolRows to a small number, so a test does
 // not need a thousand tools.
@@ -1092,6 +1092,37 @@ func TestScanToolsCapRows(t *testing.T) {
 				t.Errorf("JSON findings = %+v\nwant            %+v", rows, wantJSON)
 			}
 		})
+	}
+}
+
+// TestScanToolsCapKeepsMostSevere checks that a server cannot push a severe
+// finding out of the report with weak findings in front of it. The server lists
+// four tools with a low finding (MOAT-T1-007, a very long description) and then
+// one poisoned tool (MOAT-T1-001, high). With a limit of 3 the report keeps the
+// high row and the first two low rows, in tool order, and counts the other two
+// low rows in the cap row.
+func TestScanToolsCapKeepsMostSevere(t *testing.T) {
+	t.Parallel()
+
+	const limit = 3
+	weak := func(name string) inspect.Tool {
+		return mkTool(name, strings.Repeat("Reads a file. ", 400))
+	}
+	tools := []inspect.Tool{weak("weak_1"), weak("weak_2"), weak("weak_3"), weak("weak_4"), poisonedTool("poison")}
+	e := newPinEnv(t, oneServer("srv"))
+
+	got := scanWithCap(e, fakeServers(map[string][]inspect.Tool{"srv": tools}), limit, "--json")
+
+	assertScanRun(t, got, scanWant{code: exitFindings})
+	// jsonFindings sorts the rows by rule ID, so the low rows follow the high one.
+	want := []report.JSONFinding{
+		toolRow("MOAT-T1-001", "high", "srv", "poison", "description"),
+		toolRow("MOAT-T1-007", "low", "srv", "weak_1", "description"),
+		toolRow("MOAT-T1-007", "low", "srv", "weak_2", "description"),
+		capJSONRow("srv", "high", 2, limit),
+	}
+	if rows := jsonFindings(t, got.stdout); !slices.Equal(rows, want) {
+		t.Errorf("JSON findings = %+v\nwant            %+v", rows, want)
 	}
 }
 

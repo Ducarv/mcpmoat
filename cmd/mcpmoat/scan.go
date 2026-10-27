@@ -201,14 +201,15 @@ func (c *cli) buildScanSetup(opts options, a scanArgs, loaded loadedRules, class
 	// --no-color (after "scan") is read here, so both positions work.
 	style := report.Style{Color: !opts.noColor && !a.noColor && c.stdoutIsTTY}
 	return scanSetup{
-		checks:     configChecks{set: loaded.set, typo: typo},
-		analyzer:   loaded.analyzer,
-		toolBudget: c.toolBudgetOrDefault(),
-		connect:    connect,
-		style:      style,
-		failOn:     a.failOn,
-		jsonOut:    a.jsonOut,
-		classifier: classifier,
+		checks:      configChecks{set: loaded.set, typo: typo},
+		analyzer:    loaded.analyzer,
+		toolBudget:  c.toolBudgetOrDefault(),
+		maxToolRows: c.maxToolRowsOrDefault(),
+		connect:     connect,
+		style:       style,
+		failOn:      a.failOn,
+		jsonOut:     a.jsonOut,
+		classifier:  classifier,
 	}, true
 }
 
@@ -223,6 +224,9 @@ type scanSetup struct {
 	// toolBudget is the time that the tool rule step can use for the tools
 	// of one server (toolRulesBudget in a real scan).
 	toolBudget time.Duration
+	// maxToolRows is the largest number of tool rows that the tool rule step
+	// keeps for one server (maxToolRowsPerServer in a real scan).
+	maxToolRows int
 	// connect is nil with --no-connect. Otherwise it holds the options for
 	// inspect.Run, and scan inspects the servers, checks their pins and
 	// applies the tool rules to their tools.
@@ -247,6 +251,15 @@ func (c *cli) toolBudgetOrDefault() time.Duration {
 		return toolRulesBudget
 	}
 	return c.toolBudget
+}
+
+// maxToolRowsOrDefault returns c.maxToolRows, or maxToolRowsPerServer when the
+// field is zero (or negative).
+func (c *cli) maxToolRowsOrDefault() int {
+	if c.maxToolRows > 0 {
+		return c.maxToolRows
+	}
+	return maxToolRowsPerServer
 }
 
 // failOnCriticalNotice is the line that buildScanSetup prints on stderr for
@@ -493,9 +506,10 @@ func (c *cli) scanWarnf(format string, a ...any) {
 // config rules holds the entries of .mcpmoat-ignore in the directory wd, then
 // one entry for each --ignore ID in ids. The list for the pin rules, the LLM
 // rules, the budget rule (MOAT-T1-023) and the tool findings cap rule
-// (MOAT-T1-024) holds only the --ignore entries, because the file is untrusted (see scanIgnores). ids holds only valid rule
-// IDs: the --ignore flag checks them. An empty wd means that the working
-// directory is not known, so loadIgnore reads no file.
+// (MOAT-T1-024) holds only the --ignore entries, because the file is untrusted
+// (see scanIgnores). ids holds only valid rule IDs: the --ignore flag checks
+// them. An empty wd means that the working directory is not known, so
+// loadIgnore reads no file.
 //
 // Every problem with the file is a warning on stderr, not an error: the scan
 // goes on. A file that loadIgnore cannot read gives no entries. The warnings
@@ -525,6 +539,7 @@ func (c *cli) loadIgnore(wd string, ids []string) *scanIgnores {
 			c.cmdPrintf("scan", "using %d %s from %s", n, plural(n, "entry", "entries"), rules.IgnoreFileName)
 		}
 		ign.all = fromFile
+		ign.fileEntries = fromFile.Len()
 	}
 	for _, id := range ids {
 		entry := rules.IgnoreEntry{RuleID: id}
@@ -649,8 +664,9 @@ func (c *cli) runScanSteps(ctx context.Context, res discover.Result, setup scanS
 	var tr toolRulesResult
 	var lr llmResult
 	if !pinFailed {
-		tr, lr, ok = c.runToolAndLLMSteps(ctx, setup, outcomes, ignore, counts)
-		if !ok {
+		var stepsOK bool
+		tr, lr, stepsOK = c.runToolAndLLMSteps(ctx, setup, outcomes, ignore, counts)
+		if !stepsOK {
 			return scanStepsResult{}, false
 		}
 	}
@@ -715,7 +731,7 @@ func (c *cli) writeScanOutput(res discover.Result, steps scanStepsResult, setup 
 			rows:          steps.rows,
 			pr:            steps.pr,
 			ignored:       steps.ignored,
-			fileEntries:   ignore.fileEntries(),
+			fileEntries:   ignore.fileEntries,
 			configPath:    configPath,
 			configProblem: configProblem,
 		})
