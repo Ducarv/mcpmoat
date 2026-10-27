@@ -535,6 +535,45 @@ check_case "yaml: folded block scalar with a star" 0 "" step_workflow extra.yml 
 check_case "yaml: list item block scalar with a star" 0 "" step_workflow extra.yml "      - |
         *foo"
 
+# Forms that hide the action or the pin from a reader of single lines: a flow
+# mapping with an escape, a tag, a tab, a quote that goes on in the next line.
+tab=$'\t'
+check_case "yaml: flow mapping with an escape in uses" 1 "$refs" step_workflow extra.yml "      - {uses: \"goreleaser/goreleaser-actio\\x6e@x\", with: {version: latest}}"
+check_case "yaml: tag before an escaped uses value" 1 "$refs" step_workflow extra.yml "      - uses: !!str \"goreleaser/goreleaser-actio\\x6e@x\"
+        with:
+          version: latest"
+check_case "yaml: tab after the colon of uses" 1 "$refs" step_workflow extra.yml "      - uses:${tab}\"goreleaser/goreleaser-actio\\x6e@x\"
+        with:
+          version: latest"
+check_case "yaml: tab before an anchor" 1 "$refs" step_workflow extra.yml "      - run: echo hi
+        name:${tab}&s v"
+check_case "yaml: tag before an anchor" 1 "$refs" step_workflow extra.yml "      - !!map &gr
+        run: echo hi"
+check_case "yaml: escaped quote moves the pairing in a flow list" 1 "$refs" step_workflow extra.yml "      - run: echo hi
+        needs: [{name: \"a\\\"\", run: x}, *gr, {name: \"b\"}]"
+check_case "yaml: double quote that goes on in the next line" 1 "$refs" step_workflow extra.yml "      - uses: goreleaser/goreleaser-action@x
+        with:
+          args: \"release
+          version: \${{ env.GORELEASER_VERSION }}
+          \""
+check_case "yaml: single quote that goes on in the next line" 1 "$refs" step_workflow extra.yml "      - run: echo hi
+        env:
+          OTHER: 'a
+          GORELEASER_VERSION: $gr_ver
+          '"
+check_case "yaml: tab in a block scalar is fine" 0 "" step_workflow extra.yml "      - run: |
+          a${tab}b"
+check_case "yaml: apostrophe in a plain value is fine" 0 "" step_workflow extra.yml "      - run: echo it's fine"
+check_case "yaml: apostrophe in a double-quoted value is fine" 0 "" step_workflow extra.yml "      - name: \"it's fine\"
+        run: echo hi"
+check_case "yaml: closed quotes at the start of a value are fine" 0 "" step_workflow extra.yml "      - name: 'a'
+        run: \"echo hi\""
+
+# GitHub may run a workflow whose name starts with a dot, and a plain * skips it.
+check_case "workflow file with a dot name" 1 "the step" step_workflow .hidden.yml "      - uses: goreleaser/goreleaser-action@x
+        with:
+          version: latest"
+
 # The names that govulncheck.yml may have, with the needs line of its job.
 check_case "needs: govulncheck once more" 0 "" append "$wf/govulncheck.yml" '    needs: govulncheck'
 check_case "needs: list form" 1 "is not the pin, the call line or a name" append "$wf/govulncheck.yml" '    needs: [govulncheck]'

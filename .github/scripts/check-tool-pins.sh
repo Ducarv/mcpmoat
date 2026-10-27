@@ -14,18 +14,17 @@
 # - A job with a goreleaser-action step has the pin in its own env:.
 # - A file under .github/actions that names goreleaser-action fails. Extend
 #   this check before you add such a file.
-# - A workflow line with a YAML anchor, alias or merge key fails, because an
-#   alias line can repeat a step without naming it. A uses: value in double
-#   quotes with a backslash or without a closing quote on the line fails too,
-#   and so does a quoted key with a backslash, because an escape can spell
-#   goreleaser-action without the plain text that the checks look for.
+# - A workflow line with a YAML form that this check cannot read fails: an
+#   anchor, alias or merge key (an alias line can repeat a step without naming
+#   it), a tag, a tab, a backslash inside double quotes (an escape can spell
+#   goreleaser-action without its plain text) and a quote that does not close
+#   on its line. See yaml_refs for the exact rules.
 # Not covered: other ways to install GoReleaser or govulncheck, such as
 # docker://goreleaser/goreleaser, a remote reusable workflow, brew install, go
-# install, a composite action outside .github/actions, a $GITHUB_ENV write
-# that builds the name from pieces, or an escape in a value that is not a
-# uses: value. Review is the control for these. A later
+# install, a composite action outside .github/actions, or a $GITHUB_ENV write
+# that builds the name from pieces. Review is the control for these. A later
 # issue can widen the check.
-# The tool-pins job in ci.yml runs it. You can also run it on your machine,
+# The ci-scripts job in ci.yml runs it. You can also run it on your machine,
 # from any directory: see CONTRIBUTING.md, Checks. check-tool-pins-test.sh
 # tests it.
 set -euo pipefail
@@ -85,32 +84,37 @@ for f in "${workflows[@]}"; do
 done
 [ -f CONTRIBUTING.md ] || fail "CONTRIBUTING.md is missing."
 
-# wf_files is the list of the workflow files. GitHub runs .yaml files too.
+# wf_files is the list of the workflow files. GitHub runs .yaml files too. The
+# dot patterns find a name that starts with a dot, which a plain * skips.
 wf_files=()
-for file in "$wf"/*.yml "$wf"/*.yaml; do
+for file in "$wf"/*.yml "$wf"/*.yaml "$wf"/.*.yml "$wf"/.*.yaml; do
   if [ -e "$file" ]; then wf_files+=("$file"); fi
 done
 
 # yaml_refs prints the lines of a file that use a YAML form that the checks
-# below cannot read: an anchor (&name), an alias (*name), a merge key (<<:), a
-# double-quoted uses: value with an escape or without a closing quote, or a
-# quoted key with an escape. These forms can hide a goreleaser-action step.
-# The rule is narrow, to avoid false alarms in shell text. A name is any text
-# up to a space or a flow indicator (, [ ] { }), as YAML allows. A line matches
-# when, outside quotes and comments, a token &name or *name stands at the start
-# of the line, after "- ", after ": ", or after [ { or a comma. The line
-# "<<:" matches too, with spaces before the colon. The body of a block scalar
-# (a key with | or >, such as run: |) is skipped.
+# below cannot read. These forms can hide a goreleaser-action step, because the
+# checks read one line at a time and look for the plain text of the action:
+# - an anchor (&name), an alias (*name) or a merge key (<<:). A name is any text
+#   up to a space or a flow indicator (, [ ] { }), as YAML allows. The token
+#   stands at the start of the line, after "- ", after ": ", or after [ { or a
+#   comma. The line "<<:" matches too, with spaces before the colon.
+# - a tag (! or !!str) at the start of a value.
+# - a tab, which YAML reads as a space in some places and not in others.
+# - a backslash inside a double-quoted text, because "\x6e" can spell a letter.
+# - a quote at the start of a value that does not close on the line (a text
+#   that goes on in the next line can hold a line that looks like a pin).
+# Quoted texts and comments are not searched, and the body of a block scalar (a
+# key with | or >, such as run: |) is skipped. A plain value that has ", *" or
+# "{*" in it matches the first rule, so put such a value in quotes.
 # Known limit: an unquoted apostrophe in a plain value can hide text after it.
 yaml_refs() {
   code_of "$1" | awk '
     BEGIN {
       q = "\047"
+      start = "(^|- +|: +|[[{,] *)"
       ref_re = "(^(- +)*|: +|[[{,] *)[&*][^],[{} ]+"
-      # A uses: key, plain or quoted, with a double-quoted value.
-      uses_dq_re = "^[\"" q "]?uses[\"" q "]? *: *\""
-      uses_closed_re = "^[^:]*: *\"[^\"]*\"( |$)"
-      qkey_esc_re = "^\"[^\"]*\\\\[^\"]*\" *:"
+      tag_re = start "!"
+      open_re = start "[\"" q "]"
       block_re = "^[|>][-+0-9]* *$"
     }
     /^[[:space:]]*$/ { next }
@@ -123,15 +127,13 @@ yaml_refs() {
       }
       line = $0; sub(/^ */, "", line)
       shown = line
-      raw = line
-      while (raw ~ /^- +/) sub(/^- +/, "", raw)
-      hidden = (raw ~ uses_dq_re && (raw ~ /\\/ || raw !~ uses_closed_re)) || raw ~ qkey_esc_re
-      gsub(/"[^"]*"/, "\"\"", line)
-      gsub(q "[^" q "]*" q, "\"\"", line)
+      escaped = shown ~ /"[^"]*\\/
+      gsub(/"[^"]*"/, "Q", line)
+      gsub(q "[^" q "]*" q, "Q", line)
       sub(/ +#.*$/, "", line)
       rest = line; dashes = 0
       while (rest ~ /^- +/) { match(rest, /^- +/); dashes += RLENGTH; sub(/^- +/, "", rest) }
-      if (rest ~ /^<< *:/ || line ~ ref_re || hidden) print shown
+      if (escaped || rest ~ /^<< *:/ || line ~ ref_re || line ~ tag_re || line ~ open_re || line ~ /\t/) print shown
       # A block scalar starts when the line ends with : | or - | and so on.
       # Its body is indented deeper than the key (or the dash, for - |).
       val = rest; sub(/^.*: +/, "", val)
@@ -147,7 +149,7 @@ yaml_refs() {
 for file in "${wf_files[@]}"; do
   refs=$(yaml_refs "$file")
   [ -z "$refs" ] ||
-    fail "$(basename "$file"): line uses a YAML form this check cannot read: \"${refs%%$'\n'*}\". Write the workflows without anchors, aliases, merge keys and escapes in a uses: value."
+    fail "$(basename "$file"): line uses a YAML form this check cannot read: \"${refs%%$'\n'*}\". Write the workflows without anchors, aliases, merge keys, tags, tabs, a backslash in double quotes, and a quote that does not close on its line. Put a plain value that has a comma and a star, or a brace and a star, in quotes."
 done
 
 # GoReleaser: ci.yml is the reference. release.yml and CONTRIBUTING.md must
@@ -209,6 +211,10 @@ fi
 #   bad       1 when a version input is not ${{ env.GORELEASER_VERSION }}.
 #   mentions  the lines that name goreleaser/goreleaser-action in any style.
 #   recognised  the lines among them that are a readable "uses:" line.
+#   order     the jobs that have a goreleaser-action step, in file order.
+#   njobs     how many jobs are in order.
+#   body      the line without its indent and the "- " of a step.
+#   lc        body in lower case.
 # end_step prints the errors of a step and clears the state of that step.
 goreleaser_steps() {
   code_of "$1" | PIN_RE=$(pin_re GORELEASER_VERSION) awk '
