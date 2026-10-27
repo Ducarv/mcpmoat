@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/Ducarv/mcpmoat/internal/llm"
+	"github.com/Ducarv/mcpmoat/internal/report"
 )
 
 // testBuild is the build information that the CLI tests inject.
@@ -412,7 +413,7 @@ func TestUsageContent(t *testing.T) {
 		// exception to "offline". The flag lines and their continuation lines
 		// are checked without the tabwriter padding where it can change.
 		"mcpmoat finds malicious or tampered MCP servers. It runs offline, unless you use scan --llm.\n",
-		"(schema: docs/schema/scan-output.v2.json)\n",
+		fmt.Sprintf("(schema: docs/schema/scan-output.v%d.json)\n", report.SchemaVersion),
 		"  --llm ",
 		"Also ask an LLM to rate each tool description. Off by default. Not with --no-connect\n",
 		"It sends the name and description of every tool to the LLM provider: this data leaves your machine\n",
@@ -467,6 +468,7 @@ func TestUsageContent(t *testing.T) {
 		// schema had version 1.
 		"It runs offline.\n",
 		"scan-output.v1.json",
+		"scan-output.v2.json",
 		// Before issue #143 scan did not apply the tool rules (YAML) or the
 		// rules from --rules.
 		"not applied yet",

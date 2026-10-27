@@ -1,6 +1,7 @@
 package main
 
 import (
+	"maps"
 	"os"
 	"path/filepath"
 	"slices"
@@ -393,9 +394,80 @@ func TestScanIgnoreDropsFindings(t *testing.T) {
 				// The secret value never shows, in the findings block too.
 				assertNoLeakBoth(t, out, errOut)
 				assertNoEscape(t, out, errOut)
+
+				// The same scan with --json: same exit code, same stderr, and an
+				// "ignored" object that agrees with the stderr lines above.
+				jc, jStdout, jStderr := dirsCLI(t, home, work)
+				jCode, jOut, jErrOut := runScanArgs(jc, jStdout, jStderr, append(slices.Clone(args), "--json")...)
+
+				if jCode != code {
+					t.Errorf("--json exit code = %d, want %d\nstdout:\n%s\nstderr:\n%s", jCode, code, jOut, jErrOut)
+				}
+				if jErrOut != errOut {
+					t.Errorf("--json stderr differs from the terminal run\n--- terminal ---\n%s--- json ---\n%s", errOut, jErrOut)
+				}
+				doc := decodeScanJSON(t, jOut)
+				wantTotal, wantRules := parseIgnoredLine(t, tt.wantIgnored)
+				got := doc.Ignored
+				if got.Total != wantTotal {
+					t.Errorf("ignored.total = %d, want %d", got.Total, wantTotal)
+				}
+				if got.Rules == nil {
+					// An empty object, never null, when nothing is ignored.
+					t.Errorf("ignored.rules is null, want an object")
+				}
+				if !maps.Equal(got.Rules, wantRules) {
+					t.Errorf("ignored.rules = %v, want %v", got.Rules, wantRules)
+				}
+				if want := parseNoticeEntries(t, tt.wantNotice); got.FileEntries != want {
+					t.Errorf("ignored.file_entries = %d, want %d", got.FileEntries, want)
+				}
+				assertNoLeakBoth(t, jOut, jErrOut)
 			})
 		}
 	}
+}
+
+// parseIgnoredLine reads the expected "N findings ignored" line of a table case
+// ("MOAT-T4-002 (2), MOAT-T4-003 (1)" after "ignored: ") and returns the total
+// and the count of each rule. The empty line gives 0 and an empty map. It keeps
+// the stderr text the one source of truth for the JSON "ignored" object.
+func parseIgnoredLine(t *testing.T, line string) (int, map[string]int) {
+	t.Helper()
+	byRule := map[string]int{}
+	if line == "" {
+		return 0, byRule
+	}
+	_, list, ok := strings.Cut(line, " ignored: ")
+	if !ok {
+		t.Fatalf("test table: bad ignored line %q", line)
+	}
+	total := 0
+	for _, item := range strings.Split(list, ", ") {
+		id, count, ok := strings.Cut(strings.TrimSuffix(item, ")"), " (")
+		n, err := strconv.Atoi(count)
+		if !ok || err != nil {
+			t.Fatalf("test table: bad ignored item %q in %q", item, line)
+		}
+		byRule[id] = n
+		total += n
+	}
+	return total, byRule
+}
+
+// parseNoticeEntries reads the number N of the expected "using N entries from
+// .mcpmoat-ignore" notice of a table case. The empty notice gives 0.
+func parseNoticeEntries(t *testing.T, notice string) int {
+	t.Helper()
+	if notice == "" {
+		return 0
+	}
+	fields := strings.Fields(strings.TrimPrefix(notice, "mcpmoat scan: using "))
+	n, err := strconv.Atoi(fields[0])
+	if err != nil {
+		t.Fatalf("test table: bad notice %q", notice)
+	}
+	return n
 }
 
 // TestScanIgnoreHiddenHighFinding is the security case of FR-10: a project

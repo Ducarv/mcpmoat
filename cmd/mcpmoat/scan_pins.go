@@ -101,6 +101,12 @@ type scanIgnores struct {
 	flags rules.IgnoreList
 }
 
+// fileEntries returns the number of entries that scan used from the
+// .mcpmoat-ignore file: the entries of all that are not in flags.
+func (s scanIgnores) fileEntries() int {
+	return s.all.Len() - s.flags.Len()
+}
+
 // fileCannotIgnore reports whether the rule id is one that .mcpmoat-ignore
 // cannot ignore: a pin rule (MOAT-T2-*), llm.RuleID, llm.RuleIDInvalid,
 // rules.RuleAnalysisBudget or rules.RuleToolFindingCap. Only --ignore drops

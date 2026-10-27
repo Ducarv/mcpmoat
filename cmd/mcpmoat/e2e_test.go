@@ -17,8 +17,10 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -1734,4 +1736,148 @@ func TestE2EPinsUnsafePerm(t *testing.T) {
 			}
 		}
 	})
+}
+
+// The two stderr lines of a scan with an ignore file, as the JSON report must
+// repeat them: "using N entries from .mcpmoat-ignore" and "N findings ignored:
+// ID (n), ...".
+var (
+	ignoreNoticeRe  = regexp.MustCompile(`^mcpmoat scan: using (\d+) entr(?:y|ies) from ` + regexp.QuoteMeta(rules.IgnoreFileName) + `$`)
+	ignoredLineRe   = regexp.MustCompile(`^mcpmoat scan: (\d+) findings? ignored: (.+)$`)
+	ignoredPairRe   = regexp.MustCompile(`(MOAT-[A-Z0-9-]+) \((\d+)\)`)
+	acceptDigestRe  = regexp.MustCompile(`^pd1:[0-9a-f]{64}$`)
+	e2eIgnoreSecret = "distinctive-comment-line-of-the-ignore-file"
+)
+
+// TestE2EScanJSONIgnored checks that "scan --json" reports the findings that
+// the ignore file dropped in the "ignored" object, with the same numbers as the
+// two stderr lines, and that the object holds rule IDs only, never text of the
+// ignore file.
+func TestE2EScanJSONIgnored(t *testing.T) {
+	t.Parallel()
+	home, work := discovertest.CopyFixture(t, testdataPath("configs", "dangerous"))
+	// The comment line is text that the JSON must never repeat. The two rules
+	// are the high rules of the fixture and config rules (T4), so the file
+	// may drop them. T4-003 and T4-004 stay (medium and low), so findings is
+	// not empty, but the exit code is exitOK: the default --fail-on is high.
+	writeTestFile(t, work, rules.IgnoreFileName, "# "+e2eIgnoreSecret+"\nMOAT-T4-001\nMOAT-T4-002\n")
+
+	stdout, stderr, code := runBin(t, home, work, "scan", "--no-connect", "--json")
+
+	if code != exitOK {
+		t.Errorf("exit code = %d, want %d\nstdout:\n%s\nstderr:\n%s", code, exitOK, stdout, stderr)
+	}
+	doc := decodeScanJSON(t, stdout)
+	assertContainsNone(t, "stdout", stdout, append([]string{e2eIgnoreSecret}, dangerousCanaries...))
+	assertContainsNone(t, "stderr", stderr, append([]string{e2eIgnoreSecret}, dangerousCanaries...))
+
+	// Read the numbers from stderr, then compare the JSON with them.
+	var entries, total int
+	wantRules := map[string]int{}
+	for _, line := range nonEmptyLines(stderr) {
+		if m := ignoreNoticeRe.FindStringSubmatch(line); m != nil {
+			entries, _ = strconv.Atoi(m[1])
+		}
+		if m := ignoredLineRe.FindStringSubmatch(line); m != nil {
+			total, _ = strconv.Atoi(m[1])
+			for _, pair := range ignoredPairRe.FindAllStringSubmatch(m[2], -1) {
+				n, _ := strconv.Atoi(pair[2])
+				wantRules[pair[1]] = n
+			}
+		}
+	}
+	if entries != 2 || total < 2 || len(wantRules) != 2 {
+		t.Fatalf("stderr has entries %d, total %d, rules %v, want 2 entries and 2 rules\nstderr:\n%s", entries, total, wantRules, stderr)
+	}
+	if doc.Ignored.Total != total {
+		t.Errorf("ignored.total = %d, want %d (stderr)", doc.Ignored.Total, total)
+	}
+	if !maps.Equal(doc.Ignored.Rules, wantRules) {
+		t.Errorf("ignored.rules = %v, want %v (stderr)", doc.Ignored.Rules, wantRules)
+	}
+	if doc.Ignored.FileEntries != entries {
+		t.Errorf("ignored.file_entries = %d, want %d (stderr)", doc.Ignored.FileEntries, entries)
+	}
+	// The dropped rules are gone from the findings, the other T4 rules stay.
+	for _, f := range doc.Findings {
+		if _, dropped := wantRules[f.RuleID]; dropped {
+			t.Errorf("finding %s on %s shows, but the ignore file drops it", f.RuleID, f.Server)
+		}
+	}
+	if len(doc.Findings) == 0 {
+		t.Error("findings is empty, want the rules that the ignore file keeps")
+	}
+}
+
+// TestE2EScanJSONAccept checks the "accept" object of "scan --json" on the real
+// binary. After the rug pull, the changed server has the digest of the terminal
+// hint and the command to accept it. Running that command accepts the change:
+// the next scan has no pin finding and no accept object.
+func TestE2EScanJSONAccept(t *testing.T) {
+	t.Parallel()
+	const server = rugpullServer
+	home := rugpullHome(t, "clean")
+	work := t.TempDir()
+
+	stdout, stderr, code := runBin(t, home, work, "scan")
+	assertScanResult(t, code, stdout, stderr, scanWant{code: exitOK, stderr: []string{"mcpmoat scan: pinned 2 tools for " + server}})
+	writeRugPullConfig(t, home, "injected")
+
+	// scanJSON runs a JSON scan. It returns the accept object of the server
+	// and the number of pin findings of the document.
+	scanJSON := func(t *testing.T) (acc *report.JSONAccept, pinRows int) {
+		t.Helper()
+		stdout, stderr, code := runBin(t, home, work, "scan", "--json")
+		if code != exitFindings {
+			t.Errorf("scan --json: exit code %d, want %d\nstdout:\n%s\nstderr:\n%s", code, exitFindings, stdout, stderr)
+		}
+		doc := decodeScanJSON(t, stdout)
+		for _, f := range doc.Findings {
+			if strings.HasPrefix(f.RuleID, "MOAT-T2-") {
+				pinRows++
+			}
+		}
+		for _, s := range doc.Servers {
+			if s.Name == server {
+				return s.Accept, pinRows
+			}
+		}
+		t.Fatalf("servers has no %q:\n%s", server, stdout)
+		return nil, 0
+	}
+
+	acc, pinRows := scanJSON(t)
+	if acc == nil || pinRows == 0 {
+		t.Fatalf("accept = %v, pin findings = %d, want an accept object and a pin finding", acc, pinRows)
+	}
+	if !acceptDigestRe.MatchString(acc.Digest) {
+		t.Errorf("accept.digest = %q, want pd1: and 64 lower case hex digits", acc.Digest)
+	}
+	// The terminal hint of the same state has the same digest.
+	plainOut, plainErr, _ := runBin(t, home, work, "scan")
+	if got := hintDigest(t, plainOut, server); got != acc.Digest {
+		t.Errorf("terminal hint digest = %q, accept.digest = %q, want equal\nstderr:\n%s", got, acc.Digest, plainErr)
+	}
+	if acc.Command == "" {
+		t.Fatal("accept.command is empty, want a command for this simple case")
+	}
+
+	// Run the command: the first word is the program, so the test binary
+	// takes its place. The command holds no quotes, so Fields is enough.
+	words := strings.Fields(acc.Command)
+	if len(words) < 2 || words[0] != "mcpmoat" || words[1] != "pin" {
+		t.Fatalf("accept.command = %q, want mcpmoat pin ...", acc.Command)
+	}
+	stdout, stderr, code = runBin(t, home, work, words[1:]...)
+	want := "accepted " + server + ": 0 new, 1 changed, 0 removed\n"
+	if code != exitOK || !strings.HasSuffix(stdout, want) || stderr != "" {
+		t.Errorf("accept command: exit code %d, stdout %q, stderr %q, want exit code %d, stdout ending with %q and no stderr", code, stdout, stderr, exitOK, want)
+	}
+
+	// The T1 rows of the injected text stay, so the exit code is still 1, but
+	// the pin finding and the accept object are gone.
+	acc, pinRows = scanJSON(t)
+	if acc != nil || pinRows != 0 {
+		t.Errorf("after accept: accept = %v, pin findings = %d, want none", acc, pinRows)
+	}
 }

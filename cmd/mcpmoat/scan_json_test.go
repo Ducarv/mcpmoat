@@ -8,7 +8,9 @@ import (
 	"io"
 	"maps"
 	"path/filepath"
+	"regexp"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -16,8 +18,10 @@ import (
 	"github.com/Ducarv/mcpmoat/internal/discover/discovertest"
 	"github.com/Ducarv/mcpmoat/internal/inspect"
 	"github.com/Ducarv/mcpmoat/internal/inspect/inspecttest"
+	"github.com/Ducarv/mcpmoat/internal/pins"
 	"github.com/Ducarv/mcpmoat/internal/report"
 	"github.com/Ducarv/mcpmoat/internal/report/reporttest"
+	"github.com/Ducarv/mcpmoat/internal/rules"
 )
 
 // This file tests "mcpmoat scan --json" (FR-15) in process: the exact shape of
@@ -401,6 +405,11 @@ func TestScanJSONMatchesTerminal(t *testing.T) {
 		// wantFindings and wantErrors tell whether the lists must be empty
 		// (false) or not (true).
 		wantFindings, wantErrors bool
+		// ignoreFile is the content of .mcpmoat-ignore in the working
+		// directory ("" writes no file). wantIgnored tells whether the document
+		// must show dropped findings (ignored.total above 0).
+		ignoreFile  string
+		wantIgnored bool
 	}{
 		{
 			name:         "findings below the fail level",
@@ -415,6 +424,18 @@ func TestScanJSONMatchesTerminal(t *testing.T) {
 			wantCode:     exitFindings,
 			wantServers:  9,
 			wantFindings: true,
+		},
+		{
+			// The ignore file drops every secret finding of the fixture. The
+			// document and the "N findings ignored" line on stderr must agree
+			// (checked below with assertIgnoredMatchesStderr).
+			name:         "findings dropped by the ignore file",
+			dirs:         fixtureDirs(testdataPath("configs", "dangerous")),
+			ignoreFile:   "MOAT-T4-002\n",
+			wantCode:     exitFindings,
+			wantServers:  9,
+			wantFindings: true,
+			wantIgnored:  true,
 		},
 		{
 			name:         "config error with servers",
@@ -439,6 +460,9 @@ func TestScanJSONMatchesTerminal(t *testing.T) {
 			t.Parallel()
 
 			home, work := tt.dirs(t)
+			if tt.ignoreFile != "" {
+				writeTestFile(t, work, rules.IgnoreFileName, tt.ignoreFile)
+			}
 			run := func(args ...string) (code int, stdout, stderr string) {
 				c, out, errOut := dirsCLI(t, home, work)
 				return runScanArgs(c, out, errOut, args...)
@@ -462,6 +486,13 @@ func TestScanJSONMatchesTerminal(t *testing.T) {
 			// decodeScanJSON checks: one document, no more tokens, schema_version,
 			// and the schema.
 			doc := decodeScanJSON(t, jsonOut)
+
+			// The ignored counts of the document are the ones of the stderr line
+			// of the same scan, and of the terminal run (same stderr, see above).
+			assertIgnoredMatchesStderr(t, doc, jsonErr)
+			if got := doc.Ignored.Total > 0; got != tt.wantIgnored {
+				t.Errorf("ignored.total = %d, want findings dropped: %v", doc.Ignored.Total, tt.wantIgnored)
+			}
 
 			if tt.wantServers != anyServers && len(doc.Servers) != tt.wantServers {
 				t.Errorf("servers has %d entries, want %d", len(doc.Servers), tt.wantServers)
@@ -707,4 +738,645 @@ func TestScanJSONEscapesUntrustedText(t *testing.T) {
 		t.Errorf("servers = %+v, want one server named %q", doc.Servers, wantName)
 	}
 	assertContainsAll(t, "stdout", out, []string{`\u001b`, `\u0085`, `\u202e`})
+}
+
+// The stderr lines that the "ignored" part of the document repeats (see
+// printIgnored and loadIgnore). The tests parse them, so the document is
+// compared with what the user sees on the terminal, not with a copy of the
+// code under test.
+var (
+	// ignoredLineRE matches "mcpmoat scan: 3 findings ignored: A (2), B (1)".
+	ignoredLineRE = regexp.MustCompile(`(?m)^mcpmoat scan: (\d+) findings? ignored: (.+)$`)
+	// ignoredPartRE matches one "RULE-ID (n)" part of that line.
+	ignoredPartRE = regexp.MustCompile(`^(\S+) \((\d+)\)$`)
+	// fileNoticeRE matches "mcpmoat scan: using 2 entries from .mcpmoat-ignore".
+	fileNoticeRE = regexp.MustCompile(`(?m)^mcpmoat scan: using (\d+) entr(?:y|ies) from \.mcpmoat-ignore$`)
+)
+
+// stderrIgnored parses the "N findings ignored: ..." line of stderr. It returns
+// N and the count of each rule ID. It returns 0 and an empty map when stderr has
+// no such line. It fails the test when the line is malformed, when stderr has
+// more than one such line, or when the counts do not add up to N.
+func stderrIgnored(t *testing.T, stderr string) (total int, byRule map[string]int) {
+	t.Helper()
+	byRule = map[string]int{}
+	lines := ignoredLineRE.FindAllStringSubmatch(stderr, -1)
+	switch len(lines) {
+	case 0:
+		return 0, byRule
+	case 1:
+	default:
+		t.Fatalf("stderr has %d \"findings ignored\" lines, want at most 1:\n%s", len(lines), stderr)
+	}
+	total, err := strconv.Atoi(lines[0][1])
+	if err != nil {
+		t.Fatalf("bad total in %q: %v", lines[0][0], err)
+	}
+	sum := 0
+	for _, part := range strings.Split(lines[0][2], ", ") {
+		m := ignoredPartRE.FindStringSubmatch(part)
+		if m == nil {
+			t.Fatalf("part %q of the line %q is not \"RULE-ID (n)\"", part, lines[0][0])
+		}
+		n, err := strconv.Atoi(m[2])
+		if err != nil {
+			t.Fatalf("bad count in %q: %v", part, err)
+		}
+		byRule[m[1]] = n
+		sum += n
+	}
+	if sum != total {
+		t.Fatalf("the counts of %q add up to %d, not %d", lines[0][0], sum, total)
+	}
+	return total, byRule
+}
+
+// stderrFileEntries returns N of the notice "using N entries from
+// .mcpmoat-ignore" on stderr, or 0 when there is no notice.
+func stderrFileEntries(t *testing.T, stderr string) int {
+	t.Helper()
+	m := fileNoticeRE.FindAllStringSubmatch(stderr, -1)
+	if len(m) == 0 {
+		return 0
+	}
+	if len(m) > 1 {
+		t.Fatalf("stderr has %d ignore-file notices, want at most 1:\n%s", len(m), stderr)
+	}
+	n, err := strconv.Atoi(m[0][1])
+	if err != nil {
+		t.Fatalf("bad number in %q: %v", m[0][0], err)
+	}
+	return n
+}
+
+// assertIgnoredMatchesStderr checks that the "ignored" part of doc says the same
+// as the stderr of the same scan: total is the N of "N findings ignored", rules
+// has the rule IDs and counts of that line and nothing else, and file_entries is
+// the N of the notice "using N entries from .mcpmoat-ignore".
+func assertIgnoredMatchesStderr(t *testing.T, doc report.ScanReport, stderr string) {
+	t.Helper()
+	total, byRule := stderrIgnored(t, stderr)
+	if doc.Ignored.Total != total {
+		t.Errorf("ignored.total = %d, want %d (the stderr line)\nstderr:\n%s", doc.Ignored.Total, total, stderr)
+	}
+	if doc.Ignored.Rules == nil {
+		t.Error("ignored.rules is nil, want an object (empty when nothing is ignored)")
+	}
+	if !maps.Equal(doc.Ignored.Rules, byRule) {
+		t.Errorf("ignored.rules = %v, want %v (the stderr line)", doc.Ignored.Rules, byRule)
+	}
+	if want := stderrFileEntries(t, stderr); doc.Ignored.FileEntries != want {
+		t.Errorf("ignored.file_entries = %d, want %d (the stderr notice)", doc.Ignored.FileEntries, want)
+	}
+}
+
+// rawJSON decodes out as a generic JSON object, so a test can tell a missing key
+// from a key with a zero value (the report types cannot).
+func rawJSON(t *testing.T, out string) map[string]any {
+	t.Helper()
+	var doc map[string]any
+	if err := json.Unmarshal([]byte(out), &doc); err != nil {
+		t.Fatalf("stdout is not a JSON object: %v\nstdout:\n%s", err, out)
+	}
+	return doc
+}
+
+// rawServers returns the servers of the JSON document out, as generic objects.
+func rawServers(t *testing.T, out string) []map[string]any {
+	t.Helper()
+	list, ok := rawJSON(t, out)["servers"].([]any)
+	if !ok {
+		t.Fatalf("servers is not a list:\n%s", out)
+	}
+	servers := make([]map[string]any, len(list))
+	for i, v := range list {
+		servers[i], ok = v.(map[string]any)
+		if !ok {
+			t.Fatalf("servers[%d] is not an object:\n%s", i, out)
+		}
+	}
+	return servers
+}
+
+// ignoreTestServers are the servers of the ignore tests, for writeServers:
+//   - leaky-a gives MOAT-T4-002 (a secret in env) and MOAT-T4-003 (an unpinned
+//     npx package);
+//   - leaky-b gives MOAT-T4-002 only.
+//
+// So an unfiltered scan has two MOAT-T4-002 findings and one MOAT-T4-003.
+func ignoreTestServers() map[string]any {
+	env := map[string]string{"API_KEY": discovertest.CanaryEnv}
+	return map[string]any{
+		"leaky-a": map[string]any{"command": "npx", "args": []string{"some-server"}, "env": env},
+		"leaky-b": map[string]any{"command": "run", "env": env},
+	}
+}
+
+// TestScanJSONIgnored checks the "ignored" part of the document (FR-10, FR-15):
+// it holds the same numbers as the stderr line "N findings ignored: ID (n), ..."
+// and the notice "using N entries from .mcpmoat-ignore", and it counts the
+// entries of the file only, not the --ignore flags.
+func TestScanJSONIgnored(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		// file is the content of .mcpmoat-ignore ("" writes no file).
+		file  string
+		flags []string
+		// The expected numbers. The test also compares them with stderr.
+		wantRules   map[string]int
+		wantEntries int
+	}{
+		{
+			name:        "file drops two rules",
+			file:        "MOAT-T4-002\nMOAT-T4-003\n",
+			wantRules:   map[string]int{"MOAT-T4-002": 2, "MOAT-T4-003": 1},
+			wantEntries: 2,
+		},
+		{
+			// The flags give no notice, so they are not file entries.
+			name:        "flags only",
+			flags:       []string{"--ignore", "MOAT-T4-002", "--ignore", "MOAT-T4-003"},
+			wantRules:   map[string]int{"MOAT-T4-002": 2, "MOAT-T4-003": 1},
+			wantEntries: 0,
+		},
+		{
+			name:        "file and flags",
+			file:        "MOAT-T4-002 leaky-a\n",
+			flags:       []string{"--ignore", "MOAT-T4-003", "--ignore", "MOAT-T3-001"},
+			wantRules:   map[string]int{"MOAT-T4-002": 1, "MOAT-T4-003": 1},
+			wantEntries: 1,
+		},
+		{
+			// Comments, blank lines and a malformed line are no entries.
+			name:        "comments and a malformed line",
+			file:        "# note\n\nMOAT-T4-003\n9 bad line\n",
+			wantRules:   map[string]int{"MOAT-T4-003": 1},
+			wantEntries: 1,
+		},
+		{
+			// An entry that matches no finding drops nothing, but the file is
+			// still in use, so the notice and file_entries count it.
+			name:        "entry that drops nothing",
+			file:        "MOAT-T4-002 other-srv\n",
+			wantRules:   map[string]int{},
+			wantEntries: 1,
+		},
+		{
+			name:      "nothing ignored",
+			wantRules: map[string]int{},
+		},
+	}
+
+	for _, tt := range tests {
+		for _, mode := range configModes {
+			t.Run(tt.name+"/"+mode, func(t *testing.T) {
+				t.Parallel()
+
+				home, work := t.TempDir(), t.TempDir()
+				args := scanServersArgs(t, mode, home, ignoreTestServers())
+				if tt.file != "" {
+					writeTestFile(t, work, rules.IgnoreFileName, tt.file)
+				}
+				run := func(extra ...string) (string, string) {
+					c, stdout, stderr := dirsCLI(t, home, work)
+					_, out, errOut := runScanArgs(c, stdout, stderr, append(slices.Clone(args), extra...)...)
+					return out, errOut
+				}
+				// The same scan without any ignore entry: the findings that the
+				// document must have lost.
+				var base report.ScanReport
+				{
+					plain := t.TempDir()
+					c, stdout, stderr := dirsCLI(t, home, plain)
+					_, out, _ := runScanArgs(c, stdout, stderr, append(slices.Clone(args), "--json")...)
+					base = decodeScanJSON(t, out)
+				}
+
+				out, errOut := run(append([]string{"--json"}, tt.flags...)...)
+
+				doc := decodeScanJSON(t, out)
+				assertIgnoredMatchesStderr(t, doc, errOut)
+				wantTotal := 0
+				for _, n := range tt.wantRules {
+					wantTotal += n
+				}
+				if doc.Ignored.Total != wantTotal || !maps.Equal(doc.Ignored.Rules, tt.wantRules) || doc.Ignored.FileEntries != tt.wantEntries {
+					t.Errorf("ignored = %+v, want total %d, rules %v, file_entries %d\nstderr:\n%s",
+						doc.Ignored, wantTotal, tt.wantRules, tt.wantEntries, errOut)
+				}
+				// The dropped findings are really gone from the list.
+				if got, want := len(doc.Findings), len(base.Findings)-wantTotal; got != want {
+					t.Errorf("findings has %d entries, want %d (%d without ignore entries, minus %d dropped)",
+						got, want, len(base.Findings), wantTotal)
+				}
+				if wantTotal == 0 {
+					// An empty object, never null: a consumer can read
+					// ignored.rules without a nil check.
+					if !strings.Contains(out, `"rules": {}`) {
+						t.Errorf("stdout has no \"rules\": {} (a null breaks consumers):\n%s", out)
+					}
+				}
+				assertNoLeakBoth(t, out, errOut)
+			})
+		}
+	}
+}
+
+// TestScanJSONIgnoredNoFileText checks that the document shows no text of the
+// ignore file. The file is untrusted, so only rule IDs of dropped findings may
+// reach "ignored": no server name, tool name, comment or ID of an entry that
+// dropped nothing. The entries below name a server and a tool that the scan does
+// not have, and one rule that no finding of the scan has.
+func TestScanJSONIgnoredNoFileText(t *testing.T) {
+	t.Parallel()
+
+	const file = "# ZZLEAK-comment\n" +
+		"MOAT-T4-003 ghost-server/ghost-tool\n" +
+		"MOAT-T3-001 ghost-server\n" +
+		"MOAT-T4-002 leaky-a  # ZZLEAK-trailing\n"
+	// Only the last entry drops a finding.
+	wantRules := map[string]int{"MOAT-T4-002": 1}
+
+	for _, mode := range configModes {
+		t.Run(mode, func(t *testing.T) {
+			t.Parallel()
+
+			home, work := t.TempDir(), t.TempDir()
+			args := append(scanServersArgs(t, mode, home, ignoreTestServers()), "--json")
+			writeTestFile(t, work, rules.IgnoreFileName, file)
+			c, stdout, stderr := dirsCLI(t, home, work)
+
+			_, out, errOut := runScanArgs(c, stdout, stderr, args...)
+
+			doc := decodeScanJSON(t, out)
+			assertIgnoredMatchesStderr(t, doc, errOut)
+			if !maps.Equal(doc.Ignored.Rules, wantRules) || doc.Ignored.Total != 1 || doc.Ignored.FileEntries != 3 {
+				t.Errorf("ignored = %+v, want total 1, rules %v, file_entries 3", doc.Ignored, wantRules)
+			}
+			assertContainsNone(t, "stdout", out, []string{"ZZLEAK", "ghost-server", "ghost-tool", "MOAT-T3-001"})
+			assertContainsNone(t, "stderr", errOut, []string{"ZZLEAK", "ghost-server", "ghost-tool"})
+			// "ignored" holds the three fixed keys and nothing else.
+			ignored, ok := rawJSON(t, out)["ignored"].(map[string]any)
+			if !ok {
+				t.Fatalf("ignored is not an object:\n%s", out)
+			}
+			keys := slices.Sorted(maps.Keys(ignored))
+			if want := []string{"file_entries", "rules", "total"}; !slices.Equal(keys, want) {
+				t.Errorf("ignored has the keys %v, want %v", keys, want)
+			}
+		})
+	}
+}
+
+// termHint is one "To accept" line of the terminal report, split into parts.
+type termHint struct {
+	name string
+	// text is what follows "To accept <name>: ", with no note at the end for a
+	// command.
+	text string
+	// digest is the value after "--expect " in text.
+	digest string
+	// isCommand is true when text is the command "mcpmoat pin --accept ...",
+	// and false when it is the prose steps.
+	isCommand bool
+}
+
+// parseTermHints returns the "To accept" lines at the end of the terminal
+// stdout, in order. It fails the test when a line has no valid digest.
+func parseTermHints(t *testing.T, stdout string) []termHint {
+	t.Helper()
+	_, lines := cutAcceptHints(stdout)
+	hints := make([]termHint, len(lines))
+	for i, line := range lines {
+		rest, _ := strings.CutPrefix(line, acceptHintPrefix)
+		name, text, ok := strings.Cut(rest, ": ")
+		if !ok {
+			t.Fatalf("hint line %q has no \": \"", line)
+		}
+		_, afterExpect, ok := strings.Cut(text, "--expect ")
+		if !ok {
+			t.Fatalf("hint line %q has no --expect", line)
+		}
+		digest, _, _ := strings.Cut(afterExpect, " ")
+		if !pins.ValidDigest(digest) {
+			t.Fatalf("hint line %q has no valid digest", line)
+		}
+		hints[i] = termHint{
+			name: name, text: text, digest: digest,
+			isCommand: strings.HasPrefix(text, "mcpmoat pin --accept "),
+		}
+	}
+	return hints
+}
+
+// assertAcceptMatchesTerminal checks the accept objects of the JSON document
+// jsonOut against the "To accept" lines of the terminal run termOut of the same
+// scan: the same servers in the same order, accept.digest equal to the digest of
+// the line, and accept.command equal to the command of the line. When the line
+// shows prose steps, the key "command" must be missing from the object, not
+// empty, and the prose must not be in the document. It returns the hints.
+func assertAcceptMatchesTerminal(t *testing.T, jsonOut, termOut string) []termHint {
+	t.Helper()
+	hints := parseTermHints(t, termOut)
+
+	type acceptOfServer struct {
+		name   string
+		accept map[string]any
+	}
+	var got []acceptOfServer
+	for _, s := range rawServers(t, jsonOut) {
+		raw, has := s["accept"]
+		if !has {
+			continue
+		}
+		accept, ok := raw.(map[string]any)
+		if !ok {
+			t.Fatalf("accept of server %v is not an object: %v", s["name"], raw)
+		}
+		got = append(got, acceptOfServer{name: s["name"].(string), accept: accept})
+	}
+	if len(got) != len(hints) {
+		t.Fatalf("%d servers have accept, the terminal has %d hint lines\njson:\n%s\nterminal hints: %+v", len(got), len(hints), jsonOut, hints)
+	}
+	for i, h := range hints {
+		g := got[i]
+		if g.name != h.name {
+			t.Errorf("accept %d is on server %q, the terminal hint %d is for %q", i, g.name, i, h.name)
+		}
+		if g.accept["digest"] != h.digest {
+			t.Errorf("server %q: accept.digest = %v, want %q (the terminal digest)", h.name, g.accept["digest"], h.digest)
+		}
+		command, hasCommand := g.accept["command"]
+		switch {
+		case h.isCommand && command != h.text:
+			t.Errorf("server %q: accept.command = %v, want %q (the terminal command)", h.name, command, h.text)
+		case !h.isCommand && hasCommand:
+			t.Errorf("server %q: accept has the key command (%v) but the terminal shows prose steps %q", h.name, command, h.text)
+		}
+		for key := range g.accept {
+			if key != "digest" && key != "command" {
+				t.Errorf("server %q: accept has the unknown key %q", h.name, key)
+			}
+		}
+		if !h.isCommand && strings.Contains(jsonOut, h.text) {
+			t.Errorf("server %q: the document holds the prose steps %q", h.name, h.text)
+		}
+	}
+	return hints
+}
+
+// TestScanJSONAccept checks the "accept" object of a server with changed tools
+// (FR-15), against the "To accept" line of the terminal run of the same scan.
+// A command is in the document only when the terminal shows a command. In each
+// prose case the key "command" is missing.
+func TestScanJSONAccept(t *testing.T) {
+	t.Parallel()
+
+	short := []inspect.Tool{mkTool("a", "Add.")}
+	changed := []inspect.Tool{mkTool("a", "Add. Changed.")}
+	cut := []inspect.Tool{mkTool("a", linesDescription(2500))}
+	// brokenConfig has a config file problem: scan still reports the servers of
+	// the other files, but pin refuses to run, so the hint has no command.
+	const brokenConfig = `{"mcpServers": {`
+
+	tests := []struct {
+		name string
+		// servers are the servers of the --config file, or nil for auto-discovery.
+		servers map[string]any
+		// stage writes more files before the first scan. after writes files
+		// between the first scan and the compared scan.
+		stage, after func(t *testing.T, e *pinEnv)
+		// first and current are the tools of each server at the first scan and
+		// at the compared scan.
+		first, current map[string][]inspect.Tool
+		flags          []string
+		// wantAccepts are the servers that must have an accept object, in order.
+		wantAccepts []string
+		// wantCommand tells whether the terminal must show a command.
+		wantCommand bool
+	}{
+		{
+			name:    "command",
+			servers: oneServer("srv"),
+			first:   map[string][]inspect.Tool{"srv": short}, current: map[string][]inspect.Tool{"srv": changed},
+			wantAccepts: []string{"srv"}, wantCommand: true,
+		},
+		{
+			name:    "cut diff",
+			servers: oneServer("srv"),
+			first:   map[string][]inspect.Tool{"srv": short}, current: map[string][]inspect.Tool{"srv": cut},
+			wantAccepts: []string{"srv"},
+		},
+		{
+			// MOAT-T2-002 (a new tool) is dropped by --ignore, so the report
+			// does not show that change, but the digest covers it.
+			name:    "change hidden by --ignore of the pin rule",
+			servers: oneServer("srv"),
+			first:   map[string][]inspect.Tool{"srv": short},
+			current: map[string][]inspect.Tool{"srv": {mkTool("a", "Add. Changed."), mkTool("b", "New.")}},
+			flags:   []string{"--ignore", "MOAT-T2-002"}, wantAccepts: []string{"srv"},
+		},
+		{
+			// A name with a space is not a bare shell word.
+			name:    "server name that is not a bare shell word",
+			servers: oneServer("my srv"),
+			first:   map[string][]inspect.Tool{"my srv": short}, current: map[string][]inspect.Tool{"my srv": changed},
+			wantAccepts: []string{"my srv"},
+		},
+		{
+			// Two global files with one server name: pin refuses the name
+			// without --config. Both servers have a hint.
+			name: "ambiguous server name",
+			stage: func(t *testing.T, e *pinEnv) {
+				writeServers(t, e.home, ".claude.json", oneServer("dup"))
+				writeServers(t, e.home, filepath.Join(".cursor", "mcp.json"), oneServer("dup"))
+			},
+			first: map[string][]inspect.Tool{"dup": short}, current: map[string][]inspect.Tool{"dup": changed},
+			wantAccepts: []string{"dup", "dup"},
+		},
+		{
+			name: "config problem",
+			stage: func(t *testing.T, e *pinEnv) {
+				writeServers(t, e.home, ".claude.json", oneServer("srv"))
+			},
+			after: func(t *testing.T, e *pinEnv) {
+				writeTestFile(t, filepath.Join(e.home, ".cursor"), "mcp.json", brokenConfig)
+			},
+			first: map[string][]inspect.Tool{"srv": short}, current: map[string][]inspect.Tool{"srv": changed},
+			wantAccepts: []string{"srv"},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			e := newPinEnv(t, tt.servers)
+			if tt.stage != nil {
+				tt.stage(t, e)
+			}
+			// A nil servers map means auto-discovery: scan reads the files that
+			// stage wrote in the home, not --config.
+			run := func(insp inspect.Inspector, args ...string) pinRunResult {
+				if tt.servers == nil {
+					return e.raw(insp, append([]string{"scan"}, args...)...)
+				}
+				return e.scan(insp, args...)
+			}
+			if got := run(fakeServers(tt.first)); got.code != exitOK {
+				t.Fatalf("first scan: exit code = %d, want %d\nstderr:\n%s", got.code, exitOK, got.stderr)
+			}
+			if tt.after != nil {
+				tt.after(t, e)
+			}
+
+			// The terminal run and the --json run see the same pins: a scan
+			// that finds changes does not save them.
+			term := run(fakeServers(tt.current), tt.flags...)
+			got := run(fakeServers(tt.current), append([]string{"--json"}, tt.flags...)...)
+
+			if got.code != term.code {
+				t.Errorf("--json exit code = %d, want %d (same as the terminal run)", got.code, term.code)
+			}
+			if got.stderr != term.stderr {
+				t.Errorf("--json stderr differs from the terminal run\n--json:\n%s\nterminal:\n%s", got.stderr, term.stderr)
+			}
+			assertNoLeakBoth(t, got.stdout, got.stderr)
+			reporttest.AssertSafeBytes(t, []byte(got.stdout))
+			doc := decodeScanJSON(t, got.stdout)
+			assertIgnoredMatchesStderr(t, doc, got.stderr)
+
+			hints := assertAcceptMatchesTerminal(t, got.stdout, term.stdout)
+
+			var names []string
+			for _, h := range hints {
+				names = append(names, h.name)
+				if h.isCommand != tt.wantCommand {
+					t.Errorf("terminal hint of %q is a command: %v, want %v (text %q)", h.name, h.isCommand, tt.wantCommand, h.text)
+				}
+				// The digest covers all current tools of the server, also a change
+				// that --ignore hid.
+				if want := digestOf(t, tt.current[h.name]...); h.digest != want {
+					t.Errorf("accept digest of %q = %s, want %s (the digest of its current tools)", h.name, h.digest, want)
+				}
+			}
+			if !slices.Equal(names, tt.wantAccepts) {
+				t.Errorf("hints are for %v, want %v", names, tt.wantAccepts)
+			}
+			if tt.wantCommand {
+				// The exact command: name, the --config of the scan, the digest.
+				want := "mcpmoat pin --accept srv --config " + e.config + " --expect " + digestOf(t, tt.current["srv"]...)
+				if len(hints) != 1 || hints[0].text != want {
+					t.Errorf("terminal hints = %+v, want one command %q", hints, want)
+				}
+			}
+		})
+	}
+}
+
+// TestScanJSONNoAccept checks that a server with nothing to accept has no
+// "accept" key at all: not null, not an empty object. These are the cases where
+// scan prints no "To accept" line.
+func TestScanJSONNoAccept(t *testing.T) {
+	t.Parallel()
+
+	pinned := []inspect.Tool{mkTool("a", "Add.")}
+	changed := []inspect.Tool{mkTool("a", "Add. X.")}
+
+	tests := []struct {
+		name     string
+		pinFirst bool
+		insp     func() inspect.Inspector
+		flags    []string
+	}{
+		{
+			name: "first run",
+			insp: func() inspect.Inspector { return fakeServers(map[string][]inspect.Tool{"srv": changed}) },
+		},
+		{
+			name: "first run that cannot be pinned",
+			insp: func() inspect.Inspector {
+				return fakeServers(map[string][]inspect.Tool{"srv": {mkTool("a", "One."), mkTool("a", "Two.")}})
+			},
+		},
+		{
+			name: "pinned server that did not change", pinFirst: true,
+			insp: func() inspect.Inspector { return fakeServers(map[string][]inspect.Tool{"srv": pinned}) },
+		},
+		{
+			name: "pinned server that was not inspected", pinFirst: true,
+			insp: func() inspect.Inspector { return failingFake("srv") },
+		},
+		{
+			// Every change is dropped by --ignore, so no row is kept.
+			name: "every finding is dropped by --ignore", pinFirst: true,
+			insp:  func() inspect.Inspector { return fakeServers(map[string][]inspect.Tool{"srv": changed}) },
+			flags: []string{"--ignore", "MOAT-T2-001"},
+		},
+		{
+			// The tools cannot be pinned, so they cannot be accepted either.
+			name: "tools that cannot be pinned", pinFirst: true,
+			insp: func() inspect.Inspector {
+				return fakeServers(map[string][]inspect.Tool{"srv": {mkTool("a", "Add."), mkTool("a", "Copy.")}})
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			e := newPinEnv(t, oneServer("srv"))
+			if tt.pinFirst {
+				firstScan(t, e, pinned...)
+			}
+
+			got := e.scan(tt.insp(), append([]string{"--json"}, tt.flags...)...)
+
+			doc := decodeScanJSON(t, got.stdout)
+			if len(doc.Servers) != 1 {
+				t.Fatalf("servers = %+v, want one server\nstderr:\n%s", doc.Servers, got.stderr)
+			}
+			if _, has := rawServers(t, got.stdout)[0]["accept"]; has || strings.Contains(got.stdout, `"accept"`) {
+				t.Errorf("stdout has the key accept, want none:\n%s", got.stdout)
+			}
+			if doc.Servers[0].Accept != nil {
+				t.Errorf("accept = %+v, want nil", doc.Servers[0].Accept)
+			}
+		})
+	}
+
+	// Two servers: only the one with a change gets accept.
+	t.Run("one server changed and one not", func(t *testing.T) {
+		t.Parallel()
+
+		e := newPinEnv(t, map[string]any{
+			"alpha": map[string]any{"command": "npx"},
+			"beta":  map[string]any{"command": "npx"},
+		})
+		if got := e.scan(fakeServers(map[string][]inspect.Tool{"alpha": pinned, "beta": pinned})); got.code != exitOK {
+			t.Fatalf("first scan: exit code = %d, stderr:\n%s", got.code, got.stderr)
+		}
+		current := map[string][]inspect.Tool{"alpha": changed, "beta": pinned}
+
+		term := e.scan(fakeServers(current))
+		got := e.scan(fakeServers(current), "--json")
+
+		doc := decodeScanJSON(t, got.stdout)
+		for _, s := range doc.Servers {
+			switch s.Name {
+			case "alpha":
+				if s.Accept == nil || s.Accept.Digest != digestOf(t, changed...) {
+					t.Errorf("alpha accept = %+v, want the digest of its changed tools", s.Accept)
+				}
+			case "beta":
+				if s.Accept != nil {
+					t.Errorf("beta accept = %+v, want nil: its tools did not change", s.Accept)
+				}
+			}
+		}
+		if hints := assertAcceptMatchesTerminal(t, got.stdout, term.stdout); len(hints) != 1 || hints[0].name != "alpha" {
+			t.Errorf("terminal hints = %+v, want one hint for alpha", hints)
+		}
+	})
 }
