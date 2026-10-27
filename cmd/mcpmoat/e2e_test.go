@@ -1633,3 +1633,116 @@ func TestE2EScanFailOn(t *testing.T) {
 		}
 	}
 }
+
+// e2ePinsPermHome makes a home with a client config that has one stdio server
+// that writes a marker file when it starts. It returns the home, the work
+// directory and the marker path.
+func e2ePinsPermHome(t *testing.T) (home, work, marker string) {
+	t.Helper()
+	home, work = t.TempDir(), t.TempDir()
+	requirePrivateChain(t, home)
+	script, marker := writeMarkerScript(t, t.TempDir())
+	writeServers(t, home, ".claude.json", map[string]any{
+		"marker-server": map[string]any{"command": script},
+	})
+	return home, work, marker
+}
+
+// e2ePinsPermChmod sets the mode of path. It sets the old mode back in
+// t.Cleanup, so that t.TempDir can delete the path.
+func e2ePinsPermChmod(t *testing.T, path string, mode os.FileMode) {
+	t.Helper()
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	old := info.Mode().Perm()
+	t.Cleanup(func() { _ = os.Chmod(path, old) })
+	if err := os.Chmod(path, mode); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestE2EPinsUnsafePerm checks that scan and pin --accept refuse a pins
+// directory or a pins.json that group or others can write: exit code 2 (FR-16),
+// the fix hint on stderr, no server started and no finding on stdout. The mode
+// tables are in internal/pins. A normal 0700 directory with a 0600 file still
+// works.
+func TestE2EPinsUnsafePerm(t *testing.T) {
+	t.Parallel()
+	skipWithoutModeBits(t)
+
+	// mkPinsDir makes the 0700 pins directory and returns it.
+	mkPinsDir := func(t *testing.T, home string) string {
+		dir := filepath.Dir(pinsPath(home))
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		return dir
+	}
+	// Each setup makes the unsafe path and returns it.
+	dirSetup := func(t *testing.T, home string) string {
+		dir := mkPinsDir(t, home)
+		e2ePinsPermChmod(t, dir, 0o777)
+		return dir
+	}
+	fileSetup := func(t *testing.T, home string) string {
+		dir := mkPinsDir(t, home)
+		file := writeTestFile(t, dir, "pins.json", `{"version":1,"servers":[]}`)
+		e2ePinsPermChmod(t, file, 0o666)
+		return file
+	}
+	// scan still lists the server, marked "not inspected"; pin prints nothing.
+	scanStdout := []string{"marker-server", "not inspected, 0 findings"}
+	tests := []struct {
+		name       string
+		setup      func(t *testing.T, home string) string
+		args       []string
+		wantStdout []string // nil means stdout is empty
+	}{
+		{"scan, directory 0777", dirSetup, []string{"scan"}, scanStdout},
+		{"pin --accept, directory 0777", dirSetup, []string{"pin", "--accept", "marker-server"}, nil},
+		{"scan, file 0666 in a 0700 directory", fileSetup, []string{"scan"}, scanStdout},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			home, work, marker := e2ePinsPermHome(t)
+			unsafe := tt.setup(t, home)
+
+			stdout, stderr, code := runBin(t, home, work, tt.args...)
+
+			if code != exitError {
+				t.Errorf("exit code = %d, want %d\nstderr:\n%s", code, exitError, stderr)
+			}
+			// The hint holds the path in single quotes.
+			assertContainsAll(t, "stderr", stderr, []string{"cannot read the pins file", chmodHint(unsafe), "insecure permissions"})
+			if tt.wantStdout != nil {
+				assertContainsAll(t, "stdout", stdout, tt.wantStdout)
+			} else if stdout != "" {
+				t.Errorf("stdout = %q, want empty", stdout)
+			}
+			assertContainsNone(t, "stdout", stdout, []string{"MOAT-"})
+			assertMarker(t, marker, false)
+			assertNoLeakBoth(t, stdout, stderr)
+		})
+	}
+
+	t.Run("normal modes still work", func(t *testing.T) {
+		t.Parallel()
+		const name = "benign-srv"
+		home, work := benignHome(t, name)
+
+		// The first scan writes pins.json, the second reads it.
+		for _, wantStderr := range [][]string{{"pinned 2 tools for " + name}, nil} {
+			stdout, stderr, code := runBin(t, home, work, "scan")
+			assertScanResult(t, code, stdout, stderr, scanWant{code: exitOK, noStdout: []string{"MOAT-T2"}, stderr: wantStderr})
+			assertServerNames(t, stdout, name)
+		}
+		for path, want := range map[string]os.FileMode{filepath.Dir(pinsPath(home)): 0o700, pinsPath(home): 0o600} {
+			if got := modeOf(t, path); got != want {
+				t.Errorf("mode of %s = %04o, want %04o", path, got, want)
+			}
+		}
+	})
+}

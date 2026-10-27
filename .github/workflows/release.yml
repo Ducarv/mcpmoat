@@ -51,8 +51,8 @@ jobs:
 
       - name: Check for known vulnerabilities
         env:
-          # The release-check job in ci.yml checks that ci.yml pins the same
-          # version.
+          # The release-check job in ci.yml checks that ci.yml and
+          # govulncheck.yml pin the same version.
           GOVULNCHECK_VERSION: v1.9.0
         run: go run "golang.org/x/vuln/cmd/govulncheck@$GOVULNCHECK_VERSION" ./...
 

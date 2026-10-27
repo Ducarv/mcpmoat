@@ -38,6 +38,9 @@ This page lists what mcpmoat does not do, so you know how far to trust a clean s
   hostile description can try to influence the model. Its findings are advisory, and with `--llm`
   your tool names and descriptions leave your machine.
 - Not done yet: a lock for `pins.json` (#150).
+- The owner and mode check of the pins directory and `pins.json` does not cover everything. For
+  example, it skips parent directories, ACLs and Windows. See [Known
+  limits](ARCHITECTURE.md#the-pinsjson-store).
 
 ## See also
 

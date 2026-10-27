@@ -133,9 +133,9 @@ files only:
 
 So a non-test file in another package that imports `net`, `net/http`, `net/smtp`, `net/rpc`,
 `crypto/tls` or `os/exec` fails the lint gate (NFR-01, NFR-04). The fence is defence in depth, not
-a proof. It does not cover `os.StartProcess`, `syscall` (`cmd/mcpmoat` and `internal/safefile`
-import it) or the imports of third-party packages. The network tests in `cmd/mcpmoat` and the
-offline CI job are the proof.
+a proof. It does not cover `os.StartProcess`, `syscall` (`cmd/mcpmoat`, `internal/inspect`,
+`internal/pins` and `internal/safefile` import it) or the imports of third-party packages. The
+network tests in `cmd/mcpmoat` and the offline CI job are the proof.
 
 ## Data flow
 
@@ -551,8 +551,25 @@ a changed tool (a rug pull). `scan` writes the pins of a server on its first run
   caller can still save the others. The server chose the data that `Set` refuses, so the caller must
   report a refused server, never skip it silently: a server that is never pinned looks new on each
   run, and its changes are never reported. `Save` writes atomically (temp file, mode `0600`, sync,
-  rename). A new directory gets mode `0700`. The rules, the caps and the error texts are in the doc
-  comments of `Load`, `Set` and `Save` in `internal/pins/store.go`.
+  rename). A new directory gets mode `0700`. The rules, the caps and the other error texts are in
+  the doc comments of `Load`, `Set` and `Save` in `internal/pins/store.go`.
+- Owner and mode check: `Load` refuses an unsafe pins directory or `pins.json`, and `Save` refuses
+  an unsafe pins directory. Unsafe means that another user owns the path, or that group or others
+  can write it (mode bits `0o022`). The error wraps `ErrInsecurePermissions` and names the path, the
+  mode and a fix (the texts are in [docs/pins.md](pins.md)). mcpmoat never changes a mode itself, so
+  the user must fix an unsafe path. `scan` and `pin --accept` exit with 2 (FR-16). The first read runs before any server starts.
+  Both commands read the file again just before they save, and then they save. That second read and
+  the save can refuse after the servers ran, because a mode can change while `scan` inspects them.
+- `Load` checks the directory by path before it reads the file, also on a first run when the
+  directory exists. It checks `pins.json` on the open file descriptor, after the read and before the
+  parse, so the file check has no path race. `Save` checks the directory only, because it replaces
+  the file by rename. It checks after it created a missing directory (`atomicWriter.writeFile`), so a
+  directory that another user made in the meantime is refused too. A pins.json that the user may not
+  open (for example a root-owned file with mode `0600`) gets the same check by path, so the owner
+  problem shows with its hint and not only as "permission denied". A missing path passes, and a
+  path that is not a directory skips the mode check: the later read fails with its own error. Modes
+  such as `0755` for a directory and `0644` for a file pass: pins are not secret, so this is an
+  integrity check. The code is in `internal/pins` (`perm.go`, `perm_unix.go`, `perm_other.go`).
 
 Known limits:
 
@@ -562,10 +579,22 @@ Known limits:
   moment can still undo each other, and the last writer wins. A run can then drop the first pins
   that a parallel run saved, and the next run sees that server as new, with no alert. Issue #150
   tracks the full lock and the missing-file limit below.
-- An existing config directory keeps its mode. mcpmoat creates a new directory with `0700`, but it
-  does not check or tighten one that exists, and `Load` does not check the mode or the owner of an
-  existing `pins.json`. If other users can write to the directory or the file, they can replace the
-  pins. Issue #154 tracks this.
+- The check does not cover parent directories such as `~/.config`. A user who can write a parent
+  can swap the whole `mcpmoat/` directory, or rename or remove it. The next run then sees a first
+  run and pins the current tools without an alert, so a changed tool is not reported.
+- The check reads the owner and the mode bits only, not ACLs. On systems that are not Unix, such as
+  Windows, the check and the directory sync are skipped, because the mode bits are mostly ignored
+  there. Windows is a non-goal (PRD section 2.2).
+- The directory check is by path, so a stat-then-read race remains for the directory. Whoever can
+  write the directory or one of its parents could edit the file in that window anyway. Issue #203
+  tracks the fix.
+- Some file systems report fixed mode bits that `chmod` cannot change (for example FAT, some
+  network mounts and WSL `/mnt/c`). The check can then refuse the pins directory at once, also a new
+  one. Set `XDG_CONFIG_HOME` to a path on another volume.
+- A directory that root owns, for example one made with `sudo`, is refused for a user who is not
+  root. The reverse is refused too. `sudo mcpmoat scan` with the HOME or `XDG_CONFIG_HOME` of the
+  user, and a root container with a bind-mounted config that a host uid owns, fail because the
+  owner is not the current user.
 - A crash (for example SIGKILL or a power loss) can leave a `.pins-*.tmp` file in the directory. It
   holds only names and hashes and has mode `0600`. mcpmoat does not remove old temp files, because
   one can belong to a parallel run that is still writing.
@@ -574,8 +603,10 @@ Known limits:
   directory path that is not a directory, are errors, not a first run.
 - `Load` follows a relative `pins.json` symlink that stays inside the directory. It refuses an
   absolute symlink, even one that points back inside, and one that leaves the directory
-  (`safefile.ErrOutsideRoot`). `Save` replaces a symlink with a regular file.
-- On Windows the mode bits are mostly ignored and the directory sync is skipped.
+  (`safefile.ErrOutsideRoot`). `Save` replaces a symlink with a regular file. The owner and mode
+  check covers the pins directory and the target file, but not a subdirectory that holds the target.
+  If others can write that subdirectory, an attacker can swap the target. This needs an unusual
+  setup. It is an accepted limit.
 - The cap for each server (2 MiB) keeps one server from filling the file alone. The cap for the
   whole file is 32 MiB. So about 16 servers at full size can make the file larger than 32 MiB, and
   then `Save` fails for all servers. One project config can declare that many servers, but a server

@@ -100,6 +100,23 @@ commit and cut a new patch tag.
 After any re-run of part of the workflow, check the tap's `Casks/mcpmoat.rb` with the cask steps in
 [Verify a download](install.md#verify-a-download). Its sha256 values must match the draft's `checksums.txt`.
 
+## Weekly vulnerability check
+
+The `govulncheck` workflow (`.github/workflows/govulncheck.yml`) scans `main` every Monday at
+06:17 UTC. It finds a new advisory against the released code between two releases. GitHub reads the
+schedule only from the file on `dev`.
+
+- To run it by hand, open the Actions tab and run it from `dev`. GitHub uses the workflow file of the
+  branch that you pick. A run that you start by hand notifies you.
+- A failed scheduled run sends a notice only to the maintainer who last edited the cron line, or who
+  enabled the workflow again. Keep GitHub Actions notifications on for that account.
+- GitHub disables a schedule after 60 days with no repository activity. When you cut a release, open
+  the `govulncheck` workflow in the Actions tab. If GitHub shows it as disabled, click Enable
+  workflow. Then the failure notices go to you. If it is enabled but the last run is more than 8 days
+  old (one week plus one day), run it by hand and look for the reason.
+- After a failed run, fix the cause on `dev`, merge `dev` into `main` and cut a release (see
+  [Cut a release](#cut-a-release)).
+
 ## See also
 
 - [Branches and releases](../CONTRIBUTING.md#branches-and-releases)
