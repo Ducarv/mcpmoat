@@ -61,12 +61,16 @@ commit, not with the index. It fails on any new file there, on a changed `verify
 (the check compares its bytes with the tagged commit, and ignores git replace refs and attribute
 filters), and on a file that is marked assume-unchanged or skip-worktree. This is hardening, not a
 boundary. The script `.github/scripts/release-guard-test.sh` tests this step in the `ci-scripts`
-job. The step does not catch a build that writes a git config (the repository, global or system
-config), the index or the git object store (the files under `.git`), `$GITHUB_PATH` or
-`$GITHUB_ENV`, or that leaves a background process. The runner user has passwordless `sudo` and a
-writable `$HOME`, so the build can also replace system programs (`git`, `gh`, `bash`, `cmp`) and
-tool config (the `gh` config, the sigstore cache). A separate publish job with a fresh checkout is
-the real fix, and issue #174 tracks it.
+job. The step does not catch a build that does one of these things:
+
+- It writes a git config: the repository config, the global config or the system config.
+- It writes the index or the git object store (the files under `.git`).
+- It writes `$GITHUB_PATH` or `$GITHUB_ENV`.
+- It leaves a background process.
+- It replaces a system program (`git`, `gh`, `bash`, `cmp`) or a tool config (the `gh` config, the
+  sigstore cache). The runner user has passwordless `sudo` and a writable `$HOME`.
+
+A separate publish job with a fresh checkout is the real fix, and issue #174 tracks it.
 
 The next step, "Verify and publish the release", runs `.github/scripts/verify-and-publish.sh`. It
 checks that the draft release holds exactly the files in `dist/*.tar.gz` and `dist/checksums.txt`.
@@ -75,8 +79,6 @@ It downloads them and checks that they match `dist/`. It verifies each attestati
 publishes the release. Last, it checks that the release is immutable, and checks the tag and the
 published files once more. The script `.github/scripts/verify-and-publish-test.sh` tests it with a
 fake `gh`, with no network and no token. It runs in the `ci-scripts` job.
-`.github/scripts/check-snapshot.sh` has its own test, `.github/scripts/check-snapshot-test.sh`, in
-the `release-check` job.
 
 Try a prerelease tag first, for example `v0.1.0-rc.1`. GoReleaser marks it as a prerelease and does
 not update the tap.

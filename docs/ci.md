@@ -161,14 +161,15 @@ command, it downloads the latest stable Go toolchain into its own cache, so the 
 network access and takes longer. If you want a fixed toolchain, put a Go that you chose on `PATH`.
 The remote hook has the same `entry` and `files` as the local hook. It runs only when the commit
 changes `.mcp.json` or `.mcpmoat-ignore`. It skips when `.mcp.json` is missing. It blocks at the
-default `--fail-on high`. It takes `args` in the same way as the local hook. Use the local hook when
-you manage the `mcpmoat` binary yourself.
+default `--fail-on high`. It takes `args` in the same way as the local hook. Do not put `--no-connect=false` in `args`: the
+hook would then start the stdio servers that `.mcp.json` lists. Use the local hook when you manage
+the `mcpmoat` binary yourself.
 
 A tag in `rev` can move, and pre-commit has no checksum database for it. The hook builds and runs
 the code of that `rev` on each developer machine. To pin it, use a full commit SHA in `rev`
 instead of a tag. The command `pre-commit autoupdate --freeze` does this.
 
-Both hooks scan only the `.mcp.json` file in the root of the repository. They do not scan other
+Both pre-commit hooks scan only the `.mcp.json` file in the root of the repository. They do not scan other
 client configs such as `.cursor/mcp.json`, and they do not scan a `.mcp.json` in a subfolder. To
 scan those files, use the CI job.
 

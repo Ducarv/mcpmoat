@@ -112,21 +112,23 @@ fails when the GoReleaser pins do not follow these rules:
 
 - Each `goreleaser/goreleaser-action` step must have `version: ${{ env.GORELEASER_VERSION }}` in its
   `with:` block.
-- In every `.github/workflows/*.yml` and `*.yaml` file (also a name that starts with a dot), each line that has `goreleaser_version`
-  (in any case) must be one of two lines. One is the pin line, `GORELEASER_VERSION: <full version>`,
-  in the `env:` of a job. The other is the step input `version: ${{ env.GORELEASER_VERSION }}`.
+- In every `.github/workflows/*.yml` and `*.yaml` file (also a name that starts with a dot), each
+  line that has `goreleaser_version` (in any case) must be one of two lines. One is the pin line,
+  `GORELEASER_VERSION: <full version>`, in the `env:` of a job. The other is the line
+  `version: ${{ env.GORELEASER_VERSION }}`, which a `goreleaser/goreleaser-action` step needs.
 - A job with a `goreleaser/goreleaser-action` step needs the pin in its own `env:`.
 - A file under `.github/actions` that names the action fails, so that a new local action cannot
   skip the rule.
-- A workflow line that uses a YAML form the check cannot read fails: an anchor, alias or merge key,
-  a tag (`!!str`), a tab, a line with only a dash, a backslash outside a block scalar, a line that
-  is indented deeper than the plain value before it, an `env:` key with a value on its line, or a
-  quote that does not close on its line. These forms can hide a step. If a plain value has `, *` or `{*` in it, put the value in
-  quotes.
+- A workflow line that uses a YAML form the check cannot read fails. These forms can hide a step.
+  Examples are an anchor, a tag (`!!str`), a tab, a backslash outside a block scalar, and an `env:`
+  or `with:` key that is not a plain mapping. The comment of `unreadable_yaml` in the script has the
+  full list. If a plain value has `, *` or `{*` in it, put the value in quotes.
 - The check is a best-effort text reader, not a YAML parser. It reads block style and fails on a
   style it cannot read, so write each step in block style.
 - It does not cover other ways to install GoReleaser, such as `docker://`, a remote reusable
-  workflow, `brew install` or `go install`. Review is the control for those.
+  workflow, `brew install` or `go install`. It does not cover a composite action outside
+  `.github/actions`, or a `$GITHUB_ENV` write that builds the name from pieces. Review is the
+  control for those.
 
 The script also makes sure that the govulncheck pins in `ci.yml`, `release.yml` and
 `govulncheck.yml` match, and that each file runs govulncheck only through `$GOVULNCHECK_VERSION`.
