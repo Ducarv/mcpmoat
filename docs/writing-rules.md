@@ -429,6 +429,7 @@ It must not use a reserved native ID either, in any case. mcpmoat makes these fi
 with no YAML file:
 
 - `MOAT-T1-023`, the time budget finding;
+- `MOAT-T1-024`, the finding for a server with more tool findings than the cap of 1000;
 - any ID that starts with `MOAT-T2-`, the pin findings;
 - any ID that starts with `MOAT-LLM-`, the `--llm` findings.
 

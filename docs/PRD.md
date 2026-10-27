@@ -448,13 +448,15 @@ references:
 - `--ignore MOAT-T1-003` suppresses all findings of that rule; the flag can repeat.
 - `.mcpmoat-ignore` in the working directory supports one entry per line, comments with `#`, and
   entries scoped to a rule ID, optionally limited to a server and tool.
-- Ignored findings do not affect the exit code and are counted as "ignored" in the summary.
+- Ignored findings do not affect the exit code and are counted as "ignored" in the summary. With
+  `--json` the count is in the `ignored` object (FR-15).
 - `.mcpmoat-ignore` cannot ignore the pin rules (`MOAT-T2-001` to `MOAT-T2-004`), the LLM rules
-  (`MOAT-LLM-001` and `MOAT-LLM-002`) or the budget rule (`MOAT-T1-023`). The file can come from a
-  cloned repository, and it must not silence the rug-pull alarm, the LLM classifier (FR-17) or the
-  sign that a server used up its rule time budget for every server of the user. Only
-  `--ignore` on the command line ignores these rules. `scan` keeps the finding and prints a warning
-  when a file entry for such a rule matches a finding.
+  (`MOAT-LLM-001` and `MOAT-LLM-002`), the budget rule (`MOAT-T1-023`) or the cap rule
+  (`MOAT-T1-024`). The file can come from a cloned repository, and it must not silence the rug-pull
+  alarm, the LLM classifier (FR-17), the sign that a server used up its rule time budget or the sign
+  that tool findings were left out for every server of the user. Only `--ignore` on the command line
+  ignores these rules. `scan` keeps the finding and prints a warning when a file entry for such a
+  rule matches a finding.
 
 ### 6.4 Pins (rug-pull detection)
 
@@ -480,8 +482,16 @@ and `openWorldHint`. An absent hint is different from a set hint. A tool without
   has another version or does not match its text, `scan` and `pin` show the whole current text of
   the tool, so the user can review it before they accept it.
 - The pins directory and `pins.json` must belong to the user and must not be writable by group or
-  others. Otherwise mcpmoat exits with code 2 and gives a fix. The hint texts are in
-  [docs/pins.md](pins.md).
+  others. On macOS, their ACL must not give a write right to any user or group. `pins.json` must
+  not be a symlink. mcpmoat checks the directory and the file that it reads, not only their paths.
+  Each parent directory of the pins directory must belong to the user or to root, and must not be
+  writable by group or others unless the sticky bit is set. A symlink on the path to the pins
+  directory must belong to the user or to root, also a symlink that is reached only through the
+  target of another symlink. A pins path where no part exists is an error, not a first run.
+  Otherwise mcpmoat exits with code 2 and gives a fix. The hint texts are in
+  [docs/pins.md](pins.md). Known limit: mcpmoat does not read the ACL of a parent directory, so on
+  macOS an allow entry for another user on `~/.config` or `~` is not detected (see
+  [docs/limits.md](limits.md)).
 - `pins.json` also stores the canonical text of each tool, next to its hash, so that a later run
   can show the diff. It never stores env, header, args or URL values from the configs.
 - The pins file has a format version field and is written atomically (temp file plus rename).
@@ -537,6 +547,11 @@ text diff.
   than 2 MiB, or a config path that is not absolute) is a `high` `MOAT-T2-004`. Such a server is
   never pinned, so its tools are never checked for changes: a hostile server could send one bad tool
   on purpose to stay outside the rug-pull check.
+- `pins.json` has a limit of 32 MiB. A first-run server that would make the file larger is not
+  pinned. It is a `high` `MOAT-T2-004` with a reason that says that the pins file is full, and the
+  other servers are still pinned. If the server no longer fits at save time (another run made the
+  file larger after the report), `scan` prints a warning on stderr, saves the other servers and
+  exits with code 2.
 - The default threshold of `--fail-on` is `high`. So the default does not fail on `MOAT-T2-002`
   (a new tool alone), `MOAT-T2-003` (removed tool) or a `medium` `MOAT-T2-004` (an unpinned tool name on a
   pinned server, or an unpinned server that is listed twice). It does fail on `MOAT-T2-001` and on a
@@ -546,8 +561,12 @@ text diff.
   with code 2 before a server starts. They read it again just before they save, to keep what
   another run wrote meanwhile. `scan` sets only the first-run servers that the file does not hold
   yet, and prints `pinned N tools for <server>` only for those, after the save. `pin --accept`
-  changes only the entry of its server. This narrows the lost-update window. It does not close it:
-  a lock is issue #150.
+  changes only the entry of its server. For that read and the save, they hold an advisory lock on
+  the pins directory, so two parallel runs keep each other's changes. A run waits up to 10 seconds
+  for the lock, then exits with code 2. A file system that cannot lock runs without the lock, after
+  one warning on stderr. When a save creates a new `pins.json`, `scan` and `pin --accept` print one
+  notice on stderr, because a removed file makes every server look new (see
+  [docs/pins.md](pins.md)).
 
 **FR-13: Accept changes.** `mcpmoat pin --accept <server>` accepts the new version.
 
@@ -610,6 +629,21 @@ with `--no-color`).
 - A JSON Schema file for the output is published in `docs/`, and a test validates sample output
   against it.
 - Field names do not change without a schema version bump.
+- The output holds the count of findings that an ignore entry dropped: `ignored` has `total`, the
+  count for each rule ID (`rules`) and the number of `.mcpmoat-ignore` entries read
+  (`file_entries`). It holds rule IDs only, never text of the ignore file.
+- The output holds the data to accept the changes of a pinned server: `accept` has the digest of the
+  terminal hint (FR-13) and, only when the hint prints a command, that command.
+- The size of the text fields and of the tool findings is bounded. Names are cut to 512 characters
+  and paths to 4096 characters, and `fields_truncated` tells that a field was cut. Diffs, commands,
+  URLs and argv are never cut. A server with more than 1000 tool findings gets one summary finding,
+  `MOAT-T1-024`: the 1000 most severe are listed, and the rest is counted, not listed. Its severity is the highest severity among the
+  applied rules and never lower than high. The scan stays complete, and the exit code follows
+  `--fail-on`.
+- The whole document is not bounded. The config findings, the pin findings and the LLM findings are
+  not part of the cap of 1000, and the number of servers multiplies the bound. The number of config
+  findings is limited only by the size of the config file.
+  A cap for them is planned as a follow-up (issue #213).
 
 **FR-16: Exit codes.** 0 no findings, 1 findings at or above `--fail-on` (default `high`),
 2 execution error.
@@ -665,9 +699,9 @@ the machine**.
   `MOAT-LLM-002` (medium) reports an answer that is invalid or a refusal. Only such an unusable
   model answer for a tool that was not cut gives `MOAT-LLM-002`.
 - LLM findings carry a distinct source marker: `[LLM]` in the terminal and `"source": "llm"` in the
-  JSON output (schema version 2). They only add to the rule findings and never remove or change
-  them. They count for `--fail-on`. Only `--ignore` applies to them; `.mcpmoat-ignore` does not
-  (FR-10).
+  JSON output (since schema version 2). They only add to the rule findings and never remove or
+  change them. They count for `--fail-on`. Only `--ignore` applies to them; `.mcpmoat-ignore` does
+  not (FR-10).
 - The result is advisory. No finding does not mean that a tool is safe: a model can be wrong, and a
   hostile description can try to influence it.
 - A provider failure stops the step and gives exit code 2 (fail closed). So does an internal error

@@ -115,8 +115,10 @@ func writeFileAtomic(path string, data []byte, perm fs.FileMode) (err error) {
 ```
 
 - Never use a fixed `path + ".tmp"`: two concurrent runs would corrupt each other.
-- Serialise writers inside one process with a mutex. Across processes, the rename keeps the file
-  whole; the last writer wins, which is acceptable for pins.
+- Serialise writers inside one process with a mutex. Across processes, a read-change-save of
+  `pins.json` must use `pins.LoadLocked`, hold the lock through `Save`, and release it before it
+  prints. Plain `pins.Load` takes no lock and is for read-only use. The rename keeps the file
+  whole, but without the lock the last writer wins.
 
 ## Reading
 

@@ -81,7 +81,7 @@ func NewServerRef(s discover.Server) ServerRef {
 // label returns the escaped text "name (client, scope)". The scope is the
 // SCOPE cell of WriteServers: "global", or "project:" and the path, and then
 // " (untrusted)" for an untrusted server. Name and client are cut at
-// maxShortCellRunes and the path at maxPathRunes, so a hostile config cannot
+// MaxShortCellRunes and the path at maxPathRunes, so a hostile config cannot
 // flood the screen.
 func (r ServerRef) label() string {
 	return findingCell(r.Name) + " (" + findingCell(string(r.Client)) + ", " +
@@ -296,7 +296,7 @@ func findingCell(s string) string {
 	case emptyCell:
 		return termsafe.QuoteIf(s, true)
 	}
-	return cell(s, maxShortCellRunes)
+	return cell(s, MaxShortCellRunes)
 }
 
 // keyRelatedCell returns the text of the Tool or Where line. With both

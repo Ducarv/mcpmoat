@@ -28,8 +28,9 @@ import (
 	"github.com/Ducarv/mcpmoat/internal/rules"
 )
 
-// TestScanPinsFirstRun checks that the first scan of a server pins its tools,
-// says so once on stderr, reports no finding and exits 0.
+// TestScanPinsFirstRun checks that the first scan of a server creates
+// pins.json, says so once on stderr (the new pins file notice, then the
+// "pinned" line), pins its tools, reports no finding and exits 0.
 func TestScanPinsFirstRun(t *testing.T) {
 	t.Parallel()
 
@@ -51,8 +52,8 @@ func TestScanPinsFirstRun(t *testing.T) {
 
 			assertScanRun(t, got, scanWant{code: exitOK, stdout: []string{"srv"}, stderr: []string{tt.wantNotice}})
 			assertNoPinRows(t, got.stdout)
-			if got.stderr != tt.wantNotice {
-				t.Errorf("stderr = %q, want %q", got.stderr, tt.wantNotice)
+			if want := newPinsFileNotice("scan", e.pinsPath()) + tt.wantNotice; got.stderr != want {
+				t.Errorf("stderr = %q, want %q", got.stderr, want)
 			}
 			tools, ok := e.readPins().tools("srv")
 			if !ok || len(tools) != len(tt.tools) {

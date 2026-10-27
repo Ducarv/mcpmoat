@@ -41,12 +41,45 @@ This page lists what mcpmoat does not do, so you know how far to trust a clean s
   [Contributing a rule](writing-rules.md#2-write-the-rule). With a custom rule at critical
   severity and `--fail-on critical`, a text with more than 256 U+009D can hide the payload from
   that rule and only `MOAT-T1-017` (high) fires.
+- `scan` keeps at most 1000 tool rule findings for each server. The limit counts the findings
+  after the ignore list. `scan` keeps the most severe findings, and among findings of the same
+  severity the ones of the first tools, so a server cannot push a severe finding out of the report
+  with many weak ones. It counts the rest but does not list them, and adds one `MOAT-T1-024`
+  finding that says how many it left out. Its severity is the highest severity of the applied rules,
+  and never below high. A `.mcpmoat-ignore` file cannot drop it, and only `--ignore MOAT-T1-024`
+  can (see [Ignore findings](ignore.md)). The scan stays complete, and the exit code follows
+  `--fail-on`. The config findings, the pin findings and the LLM findings are not part of this
+  limit. The number of tools for each server (at most 10,000) bounds the pin findings (at most one
+  for each current tool and one for each removed tool, plus one for the server; the pinned tools
+  come from an earlier scan, so they are at most 10,000 too), and the LLM tool cap of 500 bounds
+  the LLM findings. Nothing bounds the config findings except the size of the config file (32 MiB
+  for a global file, 4 MiB for a project file), and the number of servers multiplies all these
+  bounds. A cap for the config findings is planned as a follow-up (issue #213).
+- In `scan --json`, a name that is longer than 512 characters and a path that is longer than 4096
+  characters are cut, and each cut ends with `...`. The top-level field `fields_truncated` is true
+  when any field was cut. Two names that differ only after the cut look equal in the JSON (a fix is
+  planned as issue #223). Diffs, commands, URLs and argv are never cut. These caps and the cap of
+  1000 tool findings do not bound the size of the whole JSON document: a hostile config file with a
+  very large number of config findings can give a very large document.
 - `--llm` does not make a scan complete or reliable. A model can miss a malicious tool, and a
   hostile description can try to influence the model. Its findings are advisory, and with `--llm`
   your tool names and descriptions leave your machine.
-- Not done yet: a lock for `pins.json` (#150).
-- The owner and mode check of the pins directory and `pins.json` does not cover everything. For
-  example, it skips parent directories, ACLs and Windows. See [Known
+- The lock on the pins directory is advisory. mcpmoat v0.1.0 does not lock, so a v0.1.0 run in
+  parallel with a newer run can lose an update. A file system that cannot lock (some network
+  mounts) and Windows run without the lock, after one warning.
+- The owner and mode check covers the pins directory, `pins.json` and each parent directory of the
+  pins directory. On macOS it also checks the ACL of the pins directory and `pins.json`, but not the
+  ACL of a parent, so an allow entry for another user on `~/.config` or `~` (for example
+  `delete_child`) is not detected. On Windows the owner, mode and parent checks are skipped.
+- The check for a removed `pins.json` looks only at whether the file exists, so it can miss a file
+  that another run removes and creates again (see **New pins file** in [Pins and rug
+  pulls](pins.md)).
+- Another local user can hold the advisory lock on a pins directory with mode `0755`. Then `scan`
+  and `pin --accept` cannot pin and exit with code 2 after 10 seconds.
+- `pins.json` has a limit of 32 MiB, first come, first served, and mcpmoat never prunes old entries.
+  A hostile project config can fill the file. A server that does not fit is reported and not
+  pinned (see **Full pins file** in [Pins and rug pulls](pins.md)).
+- For the detail, see [Pins and rug pulls](pins.md) and [Known
   limits](ARCHITECTURE.md#the-pinsjson-store).
 
 ## See also

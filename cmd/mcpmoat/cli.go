@@ -27,6 +27,12 @@ const (
 	exitError    = 2 // execution or usage error
 )
 
+// defaultPinsLockWait is the time that scan and pin --accept wait for the lock
+// on the pins directory in a real run (see cli.pinsLockWait). Another run
+// holds the lock only while it reads, changes and saves pins.json, so a short
+// wait is enough.
+const defaultPinsLockWait = 10 * time.Second
+
 // options holds the resolved global flags. The cli passes it explicitly to
 // each command, so commands never read global state.
 type options struct {
@@ -66,6 +72,16 @@ type cli struct {
 	// (see toolRulesStep): tests set -1ns for that. A tiny positive value is
 	// not enough, because the context can still be live for a short time.
 	toolBudget time.Duration
+	// pinsLockWait is how long scan and pin --accept wait for another run that
+	// holds the lock on the pins directory, before they stop with exit code 2
+	// (see readPinsLocked). runWithContext sets it to defaultPinsLockWait.
+	// Tests that build a cli directly keep the zero value: try once, no wait.
+	pinsLockWait time.Duration
+	// maxToolRows is the largest number of tool finding rows that scan keeps
+	// for one server. Zero means the default, maxToolRowsPerServer, so
+	// runWithContext does not set it. Tests set a small value, so that they
+	// do not need a thousand findings. Use the maxToolRowsOrDefault method.
+	maxToolRows int
 	// ctx ends when the process gets a signal (see main). It is a field and
 	// not a parameter of command.run, so that every command keeps one
 	// signature. Use the ctxOrBackground method, which also handles a nil ctx.
@@ -113,6 +129,7 @@ func runWithContext(ctx context.Context, args []string, stdout, stderr io.Writer
 		inspector: inspect.New(inspect.SDKOptions{HiddenEnv: []string{llm.KeyEnv}}),
 		// Called only by scan --llm. It sends no request.
 		newClassifier: newLLMClassifier,
+		pinsLockWait:  defaultPinsLockWait,
 	}
 	// Decide from the writer that the report goes to, not from os.Stdout. A
 	// writer that is not a file (a buffer, a pipe wrapper) is never a terminal.
@@ -268,7 +285,7 @@ func scanUsage(w io.Writer) {
 	fprintf(tw, "  --no-color\tDisable colored output (also set by the NO_COLOR environment variable). It works before or after \"scan\"\n")
 	fprintf(tw, "  --ignore <rule-id>\tIgnore all findings of this rule; repeatable\n")
 	fprintf(tw, "  \tA %s file in the working directory also ignores findings: one \"RULE-ID [server[/tool]]\" per line; \"# ...\" on its own line or after the entry is a comment\n", rules.IgnoreFileName)
-	fprintf(tw, "  \tThe file cannot ignore the pin rules (MOAT-T2-*), the LLM rules (MOAT-LLM-001, MOAT-LLM-002) or the finding of a cut rule analysis: it can come from a cloned repository. Use --ignore for them\n")
+	fprintf(tw, "  \tThe file cannot ignore the pin rules (MOAT-T2-*), the LLM rules (MOAT-LLM-001, MOAT-LLM-002), the finding of a cut rule analysis (MOAT-T1-023) or the finding that tool findings were left out (MOAT-T1-024): it can come from a cloned repository. Use --ignore for them\n")
 	fprintf(tw, "  --llm\tAlso ask an LLM to rate each tool description. Off by default. Not with --no-connect\n")
 	fprintf(tw, "  \tIt sends the name and description of every tool to the LLM provider: this data leaves your machine\n")
 	fprintf(tw, "  \tThe API key comes only from the %s environment variable\n", llm.KeyEnv)
@@ -301,6 +318,8 @@ func scanUsage(w io.Writer) {
 	fprintf(w, "  to the tools of each server. --no-connect applies none of them, and scan prints a note when --rules has such a rule.\n")
 	fprintf(w, "  The rule analysis of each server has a time budget of %s. A server that uses it up is a finding (MOAT-T1-023):\n", toolRulesBudget)
 	fprintf(w, "  high, or critical when a description or schema rule from --rules is critical.\n")
+	fprintf(w, "  scan lists at most %d tool findings for each server. A server with more gets one finding (MOAT-T1-024),\n", maxToolRowsPerServer)
+	fprintf(w, "  at least high.\n")
 	fprintf(w, "  Rules from --rules with target config are not applied: scan runs only its built-in config checks, and prints a note.\n")
 	fprintf(w, "  --llm: the LLM findings (MOAT-LLM-001, and MOAT-LLM-002 for an invalid answer) are advisory and marked [LLM].\n")
 	fprintf(w, "  They are high at most, and they count for --fail-on. They never remove a rule finding.\n")

@@ -499,8 +499,10 @@ func TestE2EAcceptance(t *testing.T) {
 
 	// Scan 1: every stdio server is new, so scan pins its tools, in name
 	// order. Only the project servers are refused, and they show in the
-	// SUMMARY, not on stderr. rugpull is clean, so it has no finding.
+	// SUMMARY, not on stderr. rugpull is clean, so it has no finding. No
+	// pins.json exists yet, so the new pins file notice comes first.
 	stdout := r.scanAndCheck(t, []lineWant{
+		exactLine(e2eNewPinsFileNotice("scan", r.home)),
 		exactLine("mcpmoat scan: pinned 2 tools for benign"),
 		exactLine("mcpmoat scan: pinned 1 tool for mailer"),
 		exactLine("mcpmoat scan: pinned 5 tools for poisoned"),
