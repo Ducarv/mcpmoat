@@ -1372,10 +1372,7 @@ func TestScanPinsServerIndex(t *testing.T) {
 
 			assertScanRun(t, got, scanWant{code: exitFindings})
 			doc := decodeScanJSON(t, got.stdout)
-			beta := serverIndexOf(t, doc, "beta")
-			if beta < 1 {
-				t.Fatalf("beta is at position %d, want 1 or more: the test needs a server after the first one", beta)
-			}
+			beta := laterServerIndex(t, doc, "beta")
 			if len(doc.Findings) != 1 || doc.Findings[0].RuleID != tt.wantRule || doc.Findings[0].Server != "beta" {
 				t.Fatalf("findings = %+v, want one %s row of beta", doc.Findings, tt.wantRule)
 			}

@@ -1020,10 +1020,7 @@ func TestScanLLMMarking(t *testing.T) {
 		}
 		// beta is the second server, so its LLM rows carry its position in
 		// "servers" as server_index, not 0.
-		beta := serverIndexOf(t, doc, "beta")
-		if beta < 1 {
-			t.Fatalf("beta is at position %d, want 1 or more", beta)
-		}
+		beta := laterServerIndex(t, doc, "beta")
 		betaLLM := 0
 		for _, f := range doc.Findings {
 			if f.Source != report.SourceLLM || f.Server != "beta" {

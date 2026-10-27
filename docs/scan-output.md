@@ -129,9 +129,9 @@ mcpmoat scan --json | jq -r '.findings[] | "\(.rule_id) \(.server)"'
   `server_index` (0 or more). It is the position of its server in the `servers` array. Use it to
   find the server object. Do not match by the `server` text, because a cut name can be equal for
   two servers. The `errors` entries have no `server_index`, because a file error has no server
-  object. Do not match `errors[].server` to `servers[].name`: a cut name can be equal for two
-  servers, and a file error has no server object. Use `path`, `project_path`, `line` and `col` to
-  tell the errors apart. For example, print each finding with the client of its server:
+  object. Do not match `errors[].server` to `servers[].name`. Use `path`, `project_path`, `line`
+  and `col` to tell the errors apart. For example, print each finding with the client of its
+  server:
 
   ```sh
   mcpmoat scan --json | jq -r '.servers as $s | .findings[] | "\(.rule_id) \($s[.server_index].client)"'
@@ -161,7 +161,8 @@ mcpmoat scan --json | jq -r '.findings[] | "\(.rule_id) \(.server)"'
 - The format has a `schema_version` (now `4`; version 2 added `source`, version 3 added `ignored`,
   `accept` and `fields_truncated`, version 4 added `server_index` to each finding and each diff).
   The schema is [schema/scan-output.v4.json](schema/scan-output.v4.json). Files of version 1, 2 and
-  3 stay as they are. See [JSON output](ARCHITECTURE.md#json-output) for the shape and the version policy.
+  3 stay as they are. See [JSON output](ARCHITECTURE.md#json-output) for the shape and the version
+  policy.
 
 ## See also
 

@@ -885,8 +885,8 @@ versions, [version 1](schema/scan-output.v1.json), [version 2](schema/scan-outpu
 [version 3](schema/scan-output.v3.json), stay unchanged. The Go types are in
 `internal/report/json.go`. `cmd/mcpmoat/scan_json.go` fills them from the same data as the
 terminal report, in the same order. The one difference: `findings` keeps the order of the rows, and
-the terminal report groups them by severity. The report types hold plain
-strings, bools and ints, never a `discover` type, so a secret cannot reach the output by accident.
+the terminal report groups them by severity. The report types hold plain strings, bools and ints,
+never a `discover` type, so a secret cannot reach the output by accident.
 
 Shape (`schema_version` 4):
 

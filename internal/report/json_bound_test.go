@@ -242,7 +242,7 @@ func TestBoundReportKeepsNilAndEmptyLists(t *testing.T) {
 // the names are not whole. server_index (the position in servers) still tells
 // the findings and the diffs of the two servers apart. This test documents
 // both, so a change is a decision.
-func TestWriteJSONLongNamesThatDifferAfterTheCutKeepTheirServerIndex(t *testing.T) {
+func TestWriteJSONCutNamesKeepServerIndex(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
 		name string

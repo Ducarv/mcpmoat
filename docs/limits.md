@@ -57,9 +57,9 @@ This page lists what mcpmoat does not do, so you know how far to trust a clean s
   characters are cut, and each cut ends with `...`. The top-level field `fields_truncated` is true
   when any field was cut. Two server names that differ only after the cut are equal in the JSON,
   but the `server_index` of each finding and each diff tells such servers apart (see
-  [Scan output](scan-output.md#json-output)). Diffs, commands, URLs and argv are never cut. These caps and the cap of
-  1000 tool findings do not bound the size of the whole JSON document: a hostile config file with a
-  very large number of config findings can give a very large document.
+  [Scan output](scan-output.md#json-output)). Diffs, commands, URLs and argv are never cut. These
+  caps and the cap of 1000 tool findings do not bound the size of the whole JSON document: a
+  hostile config file with a very large number of config findings can give a very large document.
 - `--llm` does not make a scan complete or reliable. A model can miss a malicious tool, and a
   hostile description can try to influence the model. Its findings are advisory, and with `--llm`
   your tool names and descriptions leave your machine.

@@ -1408,6 +1408,19 @@ func serverIndexOf(t *testing.T, doc report.ScanReport, name string) int {
 	return index
 }
 
+// laterServerIndex returns the position of the one server of doc whose name is
+// name, like serverIndexOf. It also fails the test when that position is 0: a
+// test that checks server_index needs a server after the first one, because a
+// wrong index of 0 would pass for the first server.
+func laterServerIndex(t *testing.T, doc report.ScanReport, name string) int {
+	t.Helper()
+	index := serverIndexOf(t, doc, name)
+	if index < 1 {
+		t.Fatalf("%s is at position %d, want 1 or more: the test needs a server after the first one", name, index)
+	}
+	return index
+}
+
 // assertServerIndexes checks the server_index of every finding and every diff
 // of doc: it is a position in doc.Servers, and the server at that position has
 // the server name of the row. The check compares the two names as they are in
