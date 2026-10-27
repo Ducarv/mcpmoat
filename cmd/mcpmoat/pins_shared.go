@@ -74,51 +74,79 @@ func (c *cli) pinsPath(cmd string) (string, bool) {
 
 // readPinsLocked reads the pins store like readPins, but with the lock on the
 // pins directory (pins.LoadLocked), for a run that changes and saves the pins.
-// It waits up to c.pinsLockWait for another run that holds the lock. It
-// returns the store, the path of pins.json (for printNewPinsFile) and the
-// release function of the lock.
+// It waits up to c.pinsLockWait for another process that holds the lock. It
+// returns the store and the release function of the lock. The path of
+// pins.json (for printNewPinsFile) is store.Path().
 //
 // The caller must hold the lock through Save, so it defers release at once:
 //
-//	store, path, release, ok := c.readPinsLocked(ctx, "scan")
+//	store, release, ok := c.readPinsLocked(ctx, "scan")
 //	defer release()
 //	if !ok { ... }
 //
 // release is never nil, also when ok is false (then it does nothing), so the
-// defer is safe on every path.
+// defer is safe on every path. A second call does nothing, so the caller can
+// also call release early: right after Save, before it prints, so that a slow
+// reader of stdout or stderr never holds the lock.
 //
 // ok is false, after a message on stderr for the command cmd ("scan" or
 // "pin"), when the path is not known or the file cannot be read; the caller
-// then exits with 2. When another run held the lock for the whole wait, a
-// second line says so. When ctx ended during the wait (the process got a
-// signal), the message is interruptedText.
+// then exits with 2. When another process held the lock for the whole wait, a
+// second line says so (pinsLockedText). When the error is context.Canceled or
+// context.DeadlineExceeded, the message is interruptedText. LoadLocked returns
+// such an error when ctx has ended before it takes the lock, or ends during
+// the wait (the process got a signal). The lock step checks ctx first, so
+// LoadLocked then never reads the file. Thus a corrupt file also gives
+// interruptedText in this case. Any other error (unsafe permissions, a corrupt
+// file, a newer version, the lock) gets the normal "cannot read the pins file"
+// message. An ended ctx does not change this in two cases. LoadLocked checks
+// the pins directory and its parents before the lock step, so their errors
+// come before the ctx check. And LoadLocked does not check ctx after it takes
+// the lock, so a read error after that point stays a read error.
 //
 // When the file system cannot lock the pins directory, LoadLocked goes on
 // without the lock. readPinsLocked then prints one warning: a parallel run can
 // still lose an update.
-func (c *cli) readPinsLocked(ctx context.Context, cmd string) (store *pins.Store, path string, release func(), ok bool) {
+func (c *cli) readPinsLocked(ctx context.Context, cmd string) (store *pins.Store, release func(), ok bool) {
 	noop := func() {}
-	path, ok = c.pinsPath(cmd)
+	path, ok := c.pinsPath(cmd)
 	if !ok {
-		return nil, "", noop, false
+		return nil, noop, false
 	}
 	store, release, err := pins.LoadLocked(ctx, path, c.pinsLockWait)
 	if err != nil {
 		// A signal during the wait: say "interrupted", as the other steps do.
-		if c.interrupted(ctx, cmd) {
-			return nil, "", release, false
+		// Only a context error means that: a file error stays a file error.
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			c.cmdPrintf(cmd, "%s", interruptedText)
+			return nil, release, false
 		}
 		c.cmdErr(cmd, "cannot read the pins file", err)
 		if errors.Is(err, pins.ErrLocked) {
 			c.cmdPrintf(cmd, "%s", pinsLockedText)
 		}
-		return nil, "", release, false
+		return nil, release, false
 	}
 	if store.Unlocked() {
 		c.warnf(cmd, "the file system of the pins directory %s does not support file locks, so a parallel run can overwrite these pins",
-			termsafe.QuoteCut(filepath.Dir(path), maxWarnPathRunes))
+			termsafe.QuoteCut(filepath.Dir(store.Path()), maxWarnPathRunes))
 	}
-	return store, path, release, true
+	return store, release, true
+}
+
+// pinsRemovedWhileRunning reports whether the pins file was removed while the
+// command ran: the first read, without the lock, found the file (firstExisted),
+// but the read with the lock (locked) did not. A save would then write a new
+// file with only the pins of this run, and drop every older pin without a
+// word: a later rug pull would then look like a first run. So the caller saves
+// nothing. When it returns true, it has printed pinsRemovedText on stderr for
+// the command cmd, and the caller exits with 2.
+func (c *cli) pinsRemovedWhileRunning(cmd string, firstExisted bool, locked *pins.Store) bool {
+	if !firstExisted || locked.Existed() {
+		return false
+	}
+	c.cmdPrintf(cmd, "%s", pinsRemovedText)
+	return true
 }
 
 // pinsFileLimit is the size limit of pins.json, as the messages show it. It
@@ -127,9 +155,14 @@ func (c *cli) readPinsLocked(ctx context.Context, cmd string) (store *pins.Store
 const pinsFileLimit = "32 MiB"
 
 // pinsLockedText is the line that readPinsLocked prints after the read error
-// when another run held the lock on the pins directory for the whole wait. It
-// is fixed text.
-const pinsLockedText = "another mcpmoat run is updating the pins file; run the command again in a moment"
+// when another process held the lock on the pins directory for the whole wait.
+// The holder is normally another mcpmoat run, but any local process that can
+// open the directory can hold the lock. It is fixed text.
+const pinsLockedText = "another process is using the pins file; run the command again in a moment"
+
+// pinsRemovedText is the line that pinsRemovedWhileRunning prints when the
+// pins file was removed while scan or pin ran. It is fixed text.
+const pinsRemovedText = "the pins file was removed while this command ran, so no pins were saved; run the command again"
 
 // printNewPinsFile prints one line on stderr for the command cmd: the save
 // created a new pins file at path. The caller prints it after a successful

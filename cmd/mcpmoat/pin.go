@@ -156,12 +156,19 @@ func (c *cli) inspectOne(ctx context.Context, server discover.Server, opts inspe
 // store. A slow reader of stdout must not hold the lock, so the lock comes
 // only after the diffs: acceptTools then reads the file a third time with the
 // lock on the pins directory (see readPinsLocked), and holds the lock until the
-// save is done. No other run that locks can save between this read and this
-// save, so the save keeps every entry that another run wrote, and no update is
-// lost. An accept always overwrites the entry of this one server. The counts of
-// the "accepted" line come from the locked store, because they describe the
-// entry that the save replaces. If another run changed that entry after the
+// save is done. It releases the lock right after the save, before it prints the
+// notice and the "accepted" line, so a blocked stdout or stderr never holds
+// the lock. No other run that locks can save between this read and this save,
+// so the save keeps every entry that another run wrote, and no update is lost.
+// An accept always overwrites the entry of this one server. The counts of the
+// "accepted" line come from the locked store, because they describe the entry
+// that the save replaces. If another run changed that entry after the
 // diffs printed, a warning says that the diffs are against the older pins.
+//
+// When the file existed at the read for the diffs but not at the locked read,
+// it was removed while pin ran. A save would drop every older pin, so
+// acceptTools saves nothing and gives exit code 2 (see
+// pinsRemovedWhileRunning).
 //
 // A Set that would make pins.json larger than its size limit
 // (pins.ErrStoreFull) saves nothing and gives exit code 2, with a message that
@@ -201,7 +208,7 @@ func (c *cli) acceptTools(ctx context.Context, server discover.Server, tools []i
 	if !ok {
 		return exitError
 	}
-	_, diffs := c.pinChanges(shown, id, server.Name, tools)
+	diffs := c.pinChanges(shown, id, server.Name, tools)
 
 	// Show the diffs before pin saves. Do not use fprintf: a write error (a
 	// closed pipe) must stop pin before the save, because the user did not see
@@ -221,11 +228,15 @@ func (c *cli) acceptTools(ctx context.Context, server discover.Server, tools []i
 		return exitError
 	}
 
-	store, path, release, ok := c.readPinsLocked(ctx, "pin")
-	// release is never nil. The deferred call frees the lock when acceptTools
-	// returns, so the lock covers the read, the Set and the Save.
+	store, release, ok := c.readPinsLocked(ctx, "pin")
+	// release is never nil. The deferred call frees the lock on every early
+	// return, so the lock covers the read, the Set and the Save. On success,
+	// release is called right after the Save (a second call does nothing).
 	defer release()
 	if !ok {
+		return exitError
+	}
+	if c.pinsRemovedWhileRunning("pin", shown.Existed(), store) {
 		return exitError
 	}
 	if pinsChanged(shown, store, id) {
@@ -246,8 +257,11 @@ func (c *cli) acceptTools(ctx context.Context, server discover.Server, tools []i
 		c.cmdErr("pin", "cannot save the pins file", err)
 		return exitError
 	}
+	// The pins are on disk. Free the lock before the output: a blocked pipe
+	// must not keep other runs from the pins file.
+	release()
 	if !store.Existed() {
-		c.printNewPinsFile("pin", path)
+		c.printNewPinsFile("pin", store.Path())
 	}
 
 	fprintf(c.stdout, "accepted %s: %s\n", name, counts)
@@ -440,8 +454,9 @@ func (p *pinCounts) add(k pins.ChangeKind) {
 }
 
 // changeCounts counts what accepting tools changes in the pins of the server
-// id, like pinChanges, but makes no diff and prints nothing. acceptTools uses
-// it on the locked store, after pinChanges printed the diffs.
+// id. It makes no diff and prints nothing. acceptTools uses it on the locked
+// store, after pinChanges gave the diffs, because the counts describe the
+// entry that the save replaces.
 func changeCounts(store *pins.Store, id pins.Identity, tools []inspect.Tool) pinCounts {
 	var n pinCounts
 	stored, _ := store.Get(id)
@@ -451,23 +466,22 @@ func changeCounts(store *pins.Store, id pins.Identity, tools []inspect.Tool) pin
 	return n
 }
 
-// pinChanges counts what accepting tools changes in the pins of the server id,
-// and returns the diff of each changed or new tool. server is the name that the
-// diffs show. A server that is not pinned yet has no pins, so all its tools are
-// new, and each one gets a diff of added lines. It reads the store and does not
+// pinChanges returns the diff of each tool that accepting tools changes in the
+// pins of the server id: a changed tool, a new tool, and a pinned tool whose
+// pin cannot be checked (see appendDiff). server is the name that the diffs
+// show. A server that is not pinned yet has no pins, so all its tools are new,
+// and each one gets a diff of added lines. It reads the store and does not
 // change it. It prints a warning on stderr for each diff that was cut at the
-// size limit (see appendDiff).
-func (c *cli) pinChanges(store *pins.Store, id pins.Identity, server string, tools []inspect.Tool) (pinCounts, []report.ToolDiff) {
-	var n pinCounts
+// size limit. It does not count the changes: changeCounts does that.
+func (c *cli) pinChanges(store *pins.Store, id pins.Identity, server string, tools []inspect.Tool) []report.ToolDiff {
 	var diffs []report.ToolDiff
 	// An unpinned server gives nil pins, and pins.Compare then reports every
 	// valid tool as new.
 	stored, _ := store.Get(id)
 	for _, ch := range pins.Compare(stored, tools) {
-		n.add(ch.Kind)
 		diffs = c.appendDiff("pin", diffs, server, ch)
 	}
-	return n, diffs
+	return diffs
 }
 
 // notInspectedText returns "server <name>: <status>: <reason>" for an outcome

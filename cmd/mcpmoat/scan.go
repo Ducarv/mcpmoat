@@ -684,7 +684,14 @@ func (c *cli) writeScanReport(servers []discover.Server, statuses []report.Serve
 // lost. Only a file system that cannot lock leaves that window open, and
 // readPinsLocked warns about it. savePinned adds each server only if the
 // locked store has no entry for it. It never overwrites an entry that another
-// run wrote, and it prints no notice for it.
+// run wrote, and it prints no notice for it. It releases the lock right after
+// the save, before it prints the notices, so a blocked stdout or stderr never
+// holds the lock.
+//
+// When the first read found pins.json (pr.storeExisted) but the locked read
+// does not, the file was removed while scan ran. A save would drop every older
+// pin, so savePinned saves nothing and returns false (see
+// pinsRemovedWhileRunning).
 //
 // Another run can also have made the file larger after the report, so a
 // server that fitted then may not fit now (pins.ErrStoreFull from Set). That
@@ -700,11 +707,16 @@ func (c *cli) savePinned(ctx context.Context, pr pinReport) bool {
 	if c.interrupted(ctx, "scan") {
 		return false
 	}
-	store, path, release, ok := c.readPinsLocked(ctx, "scan")
-	// release is never nil. The deferred call frees the lock when savePinned
-	// returns, so the lock covers the read, the Set calls and the Save.
+	store, release, ok := c.readPinsLocked(ctx, "scan")
+	// release is never nil. The deferred call frees the lock on every early
+	// return, so the lock covers the read, the Set calls and the Save. On
+	// success, release is called right after the Save (a second call does
+	// nothing).
 	defer release()
 	if !ok {
+		return false
+	}
+	if c.pinsRemovedWhileRunning("scan", pr.storeExisted, store) {
 		return false
 	}
 	var saved []pinnedServer
@@ -741,8 +753,11 @@ func (c *cli) savePinned(ctx context.Context, pr pinReport) bool {
 		c.cmdErr("scan", "cannot save the pins file", err)
 		return false
 	}
+	// The pins are on disk. Free the lock before the output: a blocked pipe
+	// must not keep other runs from the pins file.
+	release()
 	if !store.Existed() {
-		c.printNewPinsFile("scan", path)
+		c.printNewPinsFile("scan", store.Path())
 	}
 	c.printPinned(saved)
 	return !full

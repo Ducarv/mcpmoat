@@ -55,6 +55,11 @@ type pinReport struct {
 	// map was not inspected: the --json report shows it as not run (see
 	// inspectionOf). It is nil when scan inspected nothing.
 	inspection map[pins.Identity]report.InspectionStatus
+	// storeExisted is pins.Store.Existed of the store that scan read before it
+	// started the servers. savePinned compares it with the store that it reads
+	// again with the lock, to find a pins file that was removed while scan ran
+	// (see pinsRemovedWhileRunning).
+	storeExisted bool
 }
 
 // outcomeStatus is the summary entry of one outcome, with the index of the
@@ -136,7 +141,7 @@ func (c *cli) warnFileCannotIgnore(ruleID string) {
 // writes nothing. The servers to pin for the first time are in the result:
 // savePinned writes them after the report is printed.
 //
-// pins.json has a size limit (32 MiB), and Store.Set refuses a server that
+// pins.json has a size limit (pinsFileLimit), and Store.Set refuses a server that
 // would make the file larger (pins.ErrStoreFull). The report is printed before
 // savePinned runs, so the refusal must be known now, or the report could not
 // show it. So pinOutcomes adds the first-run servers to a copy of the store
@@ -156,7 +161,10 @@ func (c *cli) pinOutcomes(store *pins.Store, outcomes []inspect.Outcome, ign *sc
 		handled: make(map[pins.Identity]bool),
 		failed:  make(map[pins.Identity]bool),
 		warned:  make(map[string]bool),
-		res:     pinReport{inspection: make(map[pins.Identity]report.InspectionStatus, len(outcomes))},
+		res: pinReport{
+			inspection:   make(map[pins.Identity]report.InspectionStatus, len(outcomes)),
+			storeExisted: store.Existed(),
+		},
 	}
 	servers := make([]discover.Server, len(outcomes))
 	for i, o := range outcomes {
@@ -452,9 +460,10 @@ const (
 	// reasonStoreFull is the reason for a first-run server whose pins would
 	// make pins.json larger than its size limit (pins.ErrStoreFull, see
 	// firstPin). The terminal report cuts a reason at 80 runes
-	// (maxShortCellRunes in internal/report), so it must stay shorter.
+	// (report.MaxShortCellRunes), so it must stay shorter. The limit comes
+	// from pinsFileLimit, so the size is written in one place.
 	// riskServerUnverified tells what the missing pins mean.
-	reasonStoreFull = "the pins file is full (32 MiB), so this server is not pinned"
+	reasonStoreFull = "the pins file is full (" + pinsFileLimit + "), so this server is not pinned"
 )
 
 // Fixed risks for the MOAT-T2-004 rows that scan makes itself (see
