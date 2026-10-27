@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Tests verify-and-publish.sh with a fake gh. The release-check job in ci.yml
+# Tests verify-and-publish.sh with a fake gh. The ci-scripts job in ci.yml
 # runs it. Maintainers can also run it on their machine, from any directory:
 # see CONTRIBUTING.md, Checks. It needs no network and no token.
 #
@@ -60,7 +60,7 @@ if [ "$args" = "release view $tag -R $repo --json assets -q .assets[].name" ]; t
   ls "$S/assets"
 # The 11 arguments are: release download TAG -R REPO --pattern *.tar.gz
 # --pattern checksums.txt -D DIR. The count rejects any extra argument that
-# the glob in the test above would accept.
+# the glob in the test on the next line would accept.
 elif [[ $args == "release download $tag -R $repo --pattern *.tar.gz --pattern checksums.txt -D "* ]] && [ $# -eq 11 ]; then
   dir=${!#}
   mkdir -p "$dir"
@@ -187,12 +187,12 @@ check_calls
 
 check_case "extra asset on the draft" 1 draft "::error::The release assets do not match dist/" extra_on_draft
 check_case "missing asset on the draft" 1 draft "::error::The release assets do not match dist/" missing_on_draft
-check_case "draft differs from dist/" 1 draft "differ" changed_draft
+check_case "draft differs from dist/" 1 draft "dist/mcpmoat_9.9.9_darwin_arm64.tar.gz draft/mcpmoat_9.9.9_darwin_arm64.tar.gz differ" changed_draft
 check_case "tag moved before the publish" 1 draft "::error::The tag v9.9.9 points at $other_sha" tag_moved
 check_case "attestation verify fails" 1 draft "attestation verify failed" attest_fails_last
 
 check_case "tag moved after the publish" 1 published "::error::The tag v9.9.9 points at $other_sha" tag_moves_after
-check_case "asset swapped after the publish" 1 published "differ" asset_swapped_after
+check_case "asset swapped after the publish" 1 published "dist/mcpmoat_9.9.9_darwin_arm64.tar.gz published/mcpmoat_9.9.9_darwin_arm64.tar.gz differ" asset_swapped_after
 check_case "asset added after the publish" 1 published "::error::The release assets do not match dist/" asset_added_after
 check_case "release is not immutable" 1 published "::error::The release is not immutable" not_immutable
 # Same setup as the case above. It checks the closing message, not the first error.

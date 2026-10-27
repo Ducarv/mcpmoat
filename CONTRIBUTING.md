@@ -32,7 +32,7 @@ You need [GoReleaser](https://goreleaser.com/) only when you change `.goreleaser
 release workflow pin one version. `go run github.com/goreleaser/goreleaser/v2@v2.19.0 <cmd>` runs that
 version and needs no install. `brew install goreleaser` also works, but it can give another version.
 To bump the version, change `GORELEASER_VERSION` in `ci.yml` and `release.yml` and every
-`goreleaser/v2@` command in this file. The `tool-pins` CI job fails if they differ. Then build a
+`goreleaser/v2@` command in this file. The `ci-scripts` CI job fails if they differ. Then build a
 snapshot and check that `dist/homebrew/Casks/mcpmoat.rb` still has the parts in the cask list in
 [docs/install.md](docs/install.md#verify-a-download). In a snapshot, the `version` line is the snapshot version
 and the urls hold the literal snapshot tag (for example `v0.0.0`) in place of `v#{version}`. Only a
@@ -66,9 +66,9 @@ themselves, so you can run them from any directory.
 shellcheck .github/scripts/*.sh                # lint the scripts
 .github/scripts/check-tool-pins-test.sh        # test the pin check
 .github/scripts/check-tool-pins.sh             # check the tool version pins
-.github/scripts/verify-and-publish-test.sh     # test the release script
 .github/scripts/notify-failure-test.sh         # test the failure issue job (needs jq)
 .github/scripts/release-guard-test.sh          # test the release guard step (needs git)
+.github/scripts/verify-and-publish-test.sh     # test the publish script (needs bash only)
 ```
 
 If you change `.goreleaser.yaml`, also run these checks. A snapshot build needs no token and
@@ -92,16 +92,18 @@ CI (`.github/workflows/ci.yml`) runs on every pull request. On Linux and macOS i
 tests, golangci-lint and the version smoke test. On Linux only it also runs the gofmt check, the
 `go mod tidy` check and govulncheck.
 
-The `tool-pins` job also runs on every pull request. It lints the scripts with
+The `ci-scripts` job also runs on every pull request. It lints the scripts with
 `shellcheck .github/scripts/*.sh`. Then it runs the test of the pin check,
 `.github/scripts/check-tool-pins-test.sh`, and the pin check, `.github/scripts/check-tool-pins.sh`.
-Then it runs `.github/scripts/notify-failure-test.sh`. That test uses a fake `gh`. It takes the real
-`run:` block of the `notify-failure` job out of `govulncheck.yml` and runs it. It also checks the
-job keys by text: `needs`, `if: failure()`, the permission `issues: write` and no `contents`
-permission, no checkout step and the `GH_TOKEN` env. It needs `bash`, `awk` and `jq`, and no network
-and no token. Last, it runs `.github/scripts/release-guard-test.sh`. That test takes the real
-`run:` block of the guard step of `release.yml` ("Check that the build left the scripts unchanged")
-and runs it in scratch git repos. It needs `bash`, `awk` and `git`, and no network and no token.
+Then it runs `.github/scripts/notify-failure-test.sh`. That test uses a fake `gh`. It runs the real
+`run:` block of the `notify-failure` job of `govulncheck.yml` and checks the job keys by text. It
+needs `bash`, `awk` and `jq`, and no network and no token. The job details are in
+[docs/releasing.md](docs/releasing.md#weekly-vulnerability-check). Then it runs
+`.github/scripts/release-guard-test.sh`. That test takes the real `run:` block of the guard step of
+`release.yml` ("Check that the build left the scripts unchanged") and runs it in scratch git repos.
+It needs `bash`, `awk` and `git`, and no network and no token. Last, it runs
+`.github/scripts/verify-and-publish-test.sh`. That test runs the script of the "Verify and publish
+the release" step of `release.yml` with a fake `gh`. It needs `bash`, and no network and no token.
 
 The pin check (`.github/scripts/check-tool-pins.sh`) only reads the files. It changes nothing. It
 fails when the GoReleaser pins do not follow these rules:
@@ -112,7 +114,9 @@ fails when the GoReleaser pins do not follow these rules:
 - A job with a `goreleaser/goreleaser-action` step needs the pin in its own `env:`.
 - A file under `.github/actions` that names the action fails, so that a new local action cannot
   skip the rule.
-- A YAML anchor, alias or merge key in a workflow file fails.
+- A YAML anchor, alias or merge key in a workflow file fails. A `uses:` value in double quotes with
+  a backslash, or without a closing quote on the line, fails too, and so does a quoted key with a
+  backslash. An escape can spell the action name without the plain text that the check looks for.
 - The check is a best-effort text reader, not a YAML parser. It reads block style and fails on a
   style it cannot read, so write each step in block style.
 - It does not cover other ways to install GoReleaser, such as `docker://`, a remote reusable
@@ -121,12 +125,9 @@ fails when the GoReleaser pins do not follow these rules:
 The script also makes sure that the govulncheck pins in `ci.yml`, `release.yml` and
 `govulncheck.yml` match, and that each file runs govulncheck only through `$GOVULNCHECK_VERSION`.
 
-The `release-check` job runs `goreleaser check` and a snapshot build. Then it runs two tests and a
-check: `.github/scripts/check-snapshot-test.sh` (positive and negative cases for the
-archive check), `.github/scripts/verify-and-publish-test.sh` (tests the script of the "Verify and publish
-the release" step in `release.yml` with a fake `gh`, with no network and no token) and
-`.github/scripts/check-snapshot.sh`. Only the two snapshot scripts read `dist/`. The test of the
-release script builds its own small `dist/` and needs no build.
+The `release-check` job runs `goreleaser check` and a snapshot build. Then it runs one test and a
+check: `.github/scripts/check-snapshot-test.sh` (positive and negative cases for the archive check)
+and `.github/scripts/check-snapshot.sh`. Both read `dist/`.
 
 The weekly `govulncheck` workflow (`.github/workflows/govulncheck.yml`) checks `main` every Monday.
 A failed scheduled or manual run makes its `notify-failure` job open one issue, "Weekly vulnerability

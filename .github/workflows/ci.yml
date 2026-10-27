@@ -67,7 +67,7 @@ jobs:
       - name: Check for known vulnerabilities
         if: runner.os == 'Linux'
         env:
-          # Dependabot does not bump this version string. The tool-pins
+          # Dependabot does not bump this version string. The ci-scripts
           # job checks that release.yml and govulncheck.yml pin the same
           # version.
           GOVULNCHECK_VERSION: v1.9.0
@@ -129,11 +129,12 @@ jobs:
 
   # Guards the tool version pins, checks the shell scripts in
   # .github/scripts/, tests the failure issue job of the weekly vulnerability
-  # check and tests the guard step of the release job. The first test needs jq
-  # and the second needs git, which this runner has. It is a separate small
-  # job, with no Go setup and no GoReleaser, so that it can be a required check
-  # on every branch.
-  tool-pins:
+  # check, tests the guard step of the release job and tests the publish
+  # script. notify-failure-test.sh needs jq and release-guard-test.sh needs git.
+  # verify-and-publish-test.sh needs only bash and a fake gh. This runner has
+  # all of them. It is a separate small job, with no Go setup and no
+  # GoReleaser, so that it can be a required check on every branch.
+  ci-scripts:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:
@@ -160,6 +161,9 @@ jobs:
       - name: Test the release guard step
         run: .github/scripts/release-guard-test.sh
 
+      - name: Test the verify and publish script
+        run: .github/scripts/verify-and-publish-test.sh
+
   # Checks .goreleaser.yaml and builds a snapshot, so a broken release config
   # fails here and not at tag time. It then tests the release scripts against
   # the snapshot and checks the snapshot artifacts. It uses no secrets: a
@@ -170,7 +174,7 @@ jobs:
     permissions:
       contents: read
     env:
-      # Dependabot does not bump this version string. The tool-pins job
+      # Dependabot does not bump this version string. The ci-scripts job
       # checks that release.yml and CONTRIBUTING.md pin the same version.
       GORELEASER_VERSION: v2.19.0
     steps:
@@ -206,13 +210,9 @@ jobs:
           args: release --snapshot --clean
 
       # check-snapshot-test.sh reads dist/ from the step above. It needs jq,
-      # file and go, which this job has. verify-and-publish-test.sh builds its
-      # own small dist/ and needs none of them.
+      # file and go, which this job has.
       - name: Test the snapshot check
         run: .github/scripts/check-snapshot-test.sh
-
-      - name: Test the verify and publish script
-        run: .github/scripts/verify-and-publish-test.sh
 
       - name: Check the snapshot artifacts
         run: .github/scripts/check-snapshot.sh

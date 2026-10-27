@@ -137,7 +137,7 @@ check_case "missing archive" 1 "expected 1 archive for linux_arm64 in dist/, fou
 check_case "changed archive" 1 "dist/checksums.txt does not match the archives" change_archive
 
 # checksums.txt.
-check_case "missing line in checksums.txt" 1 "lines in dist/checksums.txt, found 3" drop_checksum_line
+check_case "missing line in checksums.txt" 1 "lines in dist/checksums.txt, found $(($(wc -l <"$src/dist/checksums.txt") - 1))" drop_checksum_line
 
 # The binaries.
 check_case "Linux binary is not statically linked" 1 "is not statically linked" dynamic_linux_binary
