@@ -270,25 +270,25 @@ step 5 and step 6:
     listed twice`, so that its tools are not skipped. It is high when the identity is pinned, else
     medium (`pinner.unverifiedSeverity`).
   - A server that is in the store goes through `pins.CompareMasked` (`pinner.compare`, see Masked
-    diffs in [Tool hash](#tool-hash)). The findings are
-    MOAT-T2-001 (changed tool, high), MOAT-T2-002 (new tool, medium), MOAT-T2-003 (removed tool,
-    low) and MOAT-T2-004 (not verified). The severity of MOAT-T2-004 is high when the tool name is
-    pinned, because a duplicate, invalid or unverifiable copy of a pinned tool can hide a rug pull,
-    and medium otherwise (`Change.Severity` in `internal/pins/compare.go`). A tool is not verified
-    when its name is empty or used twice, when it has no canonical form, when it is pinned with
-    another hash version, or when its pinned text does not match its hash. These are native rule
-    IDs: there is no YAML file for them, because pins handle T2. A MOAT-T2-004 finding shows a fixed
+    diffs in [Tool hash](#tool-hash)). The findings are MOAT-T2-001 (changed tool, high),
+    MOAT-T2-002 (new tool, medium), MOAT-T2-003 (removed tool, low) and MOAT-T2-004 (not
+    verified). The severity of MOAT-T2-004 is high when the tool name is pinned, because a
+    duplicate, invalid or unverifiable copy of a pinned tool can hide a rug pull, and medium
+    otherwise (`Change.Severity` in `internal/pins/compare.go`). A tool is not verified when its
+    name is empty or used twice, when it has no canonical form, when it is pinned with another
+    hash version, or when its pinned text does not match its hash. These are native rule IDs:
+    there is no YAML file for them, because pins handle T2. A MOAT-T2-004 finding shows a fixed
     reason text in brackets after the tool name on the `Tool` line, or on a `Reason` line when the
     finding has no tool name (it is about the whole server, or the tool name is empty):
     `duplicate tool name`, `empty tool name`, `invalid tool data`, `pinned with another hash
-    version` or `pinned text does not match its hash`. The reason
-    never holds server text. For the last two reasons the pin cannot be trusted, so the change also
-    has a diff of the whole current tool (`Change.Diff`). The `--ignore` flag drops them by rule ID,
-    server and real tool name (`Change.RawTool`, not the masked `key`). The `.mcpmoat-ignore` file
-    does not (see step 3). `scan` never re-pins a server that is in the store. When the tools of a
-    pinned server no longer fit the size limit of pins.json (`pins.ValidateServer`), `pins.Compare`
-    has no reason for it, so `pinner.compare` adds the high MOAT-T2-004 finding `the tools cannot be
-    pinned` that a first run gives.
+    version` or `pinned text does not match its hash`. The reason never holds server text. For
+    the last two reasons the pin cannot be trusted, so the change also has a diff of the whole
+    current tool (`Change.Diff`). The `--ignore` flag drops them by rule ID, server and real tool
+    name (`Change.RawTool`, not the masked `key`). The `.mcpmoat-ignore` file does not (see step
+    3). `scan` never re-pins a server that is in the store. When the tools of a pinned server no
+    longer fit the size limit of pins.json (`pins.ValidateServer`), `pins.Compare` has no reason
+    for it, so `pinner.compare` adds the high MOAT-T2-004 finding `the tools cannot be pinned` that
+    a first run gives.
 - 5c. For a pinned server with at least one pin finding that is not ignored, `pinOutcomes` also keeps
   the `pins.Digest` of the tools that `scan` saw (`acceptHint` in `cmd/mcpmoat/accept_hint.go`). A
   server whose tools cannot be pinned (`pinnable`: `pins.Snapshot` and `pins.ValidateServer`, the
@@ -375,12 +375,13 @@ step 5 and step 6:
   credential values of that server (`inspect.Result.Credentials` goes to `llm.Input.Secrets`, and
   `internal/llm` replaces them before the request). For a stdio server, these values include the
   credentials in its expanded argv. The wide `inspect.Result.Secrets` stays for the local report:
-  it masks the `key` of each LLM row (see [Secret values](#the---llm-classifier)). It adds one
-  advisory row for each tool that the model rates as risky, for each tool with an unusable answer or
-  a refusal of the provider, and for each cut tool (see the verdict rules in [The `--llm`
-  classifier](#the---llm-classifier)). It only adds rows: it never changes or drops a rule finding,
-  and it never touches pins, diffs or hints. Only `--ignore` drops LLM rows, as for the pin rows.
-  The `.mcpmoat-ignore` file does not (see step 3). The ignored count includes the dropped LLM rows.
+  it masks the `key` of each LLM row (see Secret values in [The `--llm`
+  classifier](#the---llm-classifier)). It adds one advisory row for each tool that the model rates
+  as risky, for each tool with an unusable answer or a refusal of the provider, and for each cut
+  tool (see the verdict rules in [The `--llm` classifier](#the---llm-classifier)). It only adds
+  rows: it never changes or drops a rule finding, and it never touches pins, diffs or hints. Only
+  `--ignore` drops LLM rows, as for the pin rows. The `.mcpmoat-ignore` file does not (see step
+  3). The ignored count includes the dropped LLM rows.
 - The pin findings and the tool rule findings join the config findings in one report. A changed
   tool and a new tool also get a diff, so the user can review the content of a new tool before
   they accept it. A new tool has the header `New tool <tool> on server <server>:` and only added
@@ -562,9 +563,8 @@ there, and the escaped output then shows the value again. `CompareMasked` also m
 and keeps the real name in `Change.RawTool`, which only the ignore lookup reads and which is never
 printed. The verdicts, the hashes, the digest and `pins.json` use the raw text. When the hashes
 differ but the masked texts are equal, the diff is the fixed note `the tool changed only in text
-that holds a secret value from the config, so the diff is hidden`. Limits: a value split over two
-JSON strings, or over the name and the description, is not found, and a value that is no longer
-configured (a rotated token) can still show on the pinned side.
+that holds a secret value from the config, so the diff is hidden`. For the limits of this mask, see
+Known limits in [The `pins.json` store](#the-pinsjson-store).
 
 The doc comments own the rules. `Canonical` owns the shape, null handling, errors, no normalisation
 and the known limits. `HashVersion` owns when the version changes and what the store does with a
@@ -680,9 +680,8 @@ a changed tool (a rug pull). `scan` writes the pins of a server on its first run
   other text in the file. The same is true for a URL from the server, such as a signed icon `src`
   with a token in it. The file has mode `0600`, so treat it as private. The pin diff masks the
   configured values of the server (`pins.CompareMasked`, see Masked diffs in [Tool
-  hash](#tool-hash)), but not a URL token
-  that the server made itself, and not a value that is no longer configured (a rotated token can
-  still show on the pinned side).
+  hash](#tool-hash)), but not a URL token that the server made itself. For a value that is no
+  longer configured, see Known limits below.
 - Read, change and write: `Load` reads the file through `safefile` and fails closed. A bad file is
   an error and never an empty store, because an empty store would hide a rug pull. `Set` checks one
   server and refuses it on its own, with a size cap of 2 MiB for each server (compact JSON), so the

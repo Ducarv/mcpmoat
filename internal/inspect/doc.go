@@ -102,7 +102,8 @@
 // mask that is in the text already is not masked again, and a cut of the
 // text never leaves a short value at its end as a whole word (cutWords). The
 // same rule applies to the short configured env values and the short argv
-// pieces of a stdio server. Header values and URL passwords are removed
+// pieces of a stdio server, and to the short secret parts of the URL of a
+// remote server (urlShortSecrets). Header values and URL passwords are removed
 // wherever they stand at any length (see Secrets).
 //
 // The scrub covers error text only. The expanded values reach the server,
@@ -318,9 +319,9 @@
 // echo alone, such as the credential part after an auth scheme, the decoded
 // Basic name and password, one cookie and the URL user info (the doc of
 // Result.Secrets lists them). A password is removed wherever it stands, at
-// any length. A
-// cookie piece or a piece inside a header value that is shorter than 8 bytes
-// is removed as a whole word only.
+// any length. A cookie piece, a piece inside a header value or a secret part
+// of the URL (a query value, a path segment, the value of a matrix
+// parameter) that is shorter than 8 bytes is removed as a whole word only.
 //
 // On success, the same values and pieces of at least 8 bytes go to
 // Result.Secrets, and the ones that look like a credential also go to
@@ -516,13 +517,12 @@
 //
 // Every string in a [Result] comes from the server, and a malicious server
 // controls it. The exceptions are Result.Warnings, Result.Secrets and
-// Result.Credentials, which come from the client config and from mcpmoat (see
-// [Result]). Never
-// execute a string of a Result, never put it in a command or a format
-// string, and escape it with internal/termsafe before you print it. The same
-// is true for the text of a [ConnectError], which can hold a status text or a
-// JSON-RPC message from the server, and for the text of Outcome.Err (see
-// Outcome).
+// Result.Credentials, which come from the client config and from mcpmoat
+// (see [Result]). Never execute a string of a Result, never put it in a
+// command or a format string, and escape it with internal/termsafe before
+// you print it. The same is true for the text of a [ConnectError], which can
+// hold a status text or a JSON-RPC message from the server, and for the text
+// of Outcome.Err (see Outcome).
 //
 // # Known limits
 //

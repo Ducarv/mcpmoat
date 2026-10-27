@@ -10,7 +10,8 @@ import (
 // This file holds the whole-word scrub of error text: the helpers that
 // remove the short values (shorter than discover.MinSecretBytes) only where
 // they stand as whole words, and the cut that keeps that rule at the end of
-// the text. scrub in errors.go calls them.
+// the text. The error scrub in errors.go (scrub, safeCause and
+// showDiscoveredURL) and Remote call them.
 
 // replaceWords replaces each value in short, and the form that %q prints for
 // it (see quotedInner), with discover.Mask where it stands as a whole word.
@@ -281,14 +282,23 @@ func isHexByte(c byte) bool {
 }
 
 // cutWords cuts text to maxReasonRunes runes and adds "…" if it cut anything.
-// It counts runes, so it never cuts inside a UTF-8 sequence. A cut can end
-// the text right after a value of short that a word byte followed: "PIN
-// 1234x" cut after "1234" shows "PIN 1234…", and the value now looks like a
-// whole word that replaceWords did not mask. So when the kept text ends with
-// a value of short (or its %q form) that starts as a whole word, cutWords
-// cuts that value off too, and checks again. Each round removes at least one
-// byte, so the loop ends. text must have been through replaceWords with the
-// same short. With a nil short, cutWords only cuts.
+// It counts runes, so the cut never ends inside a valid UTF-8 sequence.
+//
+// The output can be invalid UTF-8. The server controls text, and replaceWords
+// compares bytes, so a short value that is one invalid byte, such as "\xa9",
+// can match the second byte of "é" and leave "caf\xc3" before the Mask. A
+// text that is not cut comes back as it is, with such bytes. (In a text that
+// is cut, the conversion to runes turns each invalid byte into U+FFFD.)
+// Nothing leaks that way, and the callers escape the text with
+// internal/termsafe before they print it.
+//
+// A cut can end the text right after a value of short that a word byte
+// followed: "PIN 1234x" cut after "1234" shows "PIN 1234…", and the value now
+// looks like a whole word that replaceWords did not mask. So when the kept
+// text ends with a value of short (or its %q form) that starts as a whole
+// word, cutWords cuts that value off too, and checks again. Each round
+// removes at least one byte, so the loop ends. text must have been through
+// replaceWords with the same short. With a nil short, cutWords only cuts.
 func cutWords(text string, short []string) string {
 	runes := []rune(text)
 	if len(runes) <= maxReasonRunes {

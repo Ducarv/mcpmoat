@@ -139,8 +139,10 @@ func newServer(value string) (*mcp.Server, error) {
 // the first initialize request with a JSON-RPC error whose message holds
 // value, and then returns exitServe. Other requests get "method not found".
 // The child's stderr is os.DevNull in mcpmoat, so the echo goes to stdout,
-// where a client reads it.
-func runFailEcho(stdin io.Reader, stdout io.Writer, stderr io.Writer, value string) int {
+// where a client reads it. When stdin closes before an initialize request,
+// it returns exitOK. A read error (for example a line longer than 1 MiB)
+// returns exitServe.
+func runFailEcho(stdin io.Reader, stdout, stderr io.Writer, value string) int {
 	in := bufio.NewScanner(stdin)
 	in.Buffer(make([]byte, 0, 64<<10), 1<<20)
 	out := bufio.NewWriter(stdout)
@@ -170,6 +172,13 @@ func runFailEcho(stdin io.Reader, stdout io.Writer, stderr io.Writer, value stri
 		if err := out.Flush(); err != nil {
 			fmt.Fprintf(stderr, "echo: %v\n", err)
 		}
+		return exitServe
+	}
+	// Scan returns false at the end of stdin and on a read error. Err is nil
+	// at the end of stdin, so only a real error gets here. The error text
+	// comes from the reader or bufio, never from the value.
+	if err := in.Err(); err != nil {
+		fmt.Fprintf(stderr, "echo: %v\n", err)
 		return exitServe
 	}
 	return exitOK

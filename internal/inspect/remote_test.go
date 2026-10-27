@@ -2238,7 +2238,7 @@ func TestUserinfoSecrets(t *testing.T) {
 	}
 }
 
-func TestIsAuthScheme(t *testing.T) {
+func TestIsSchemeToken(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
@@ -2267,8 +2267,8 @@ func TestIsAuthScheme(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(fmt.Sprintf("%q", tt.in), func(t *testing.T) {
 			t.Parallel()
-			if got := isAuthScheme(tt.in); got != tt.want {
-				t.Errorf("isAuthScheme(%q) = %t, want %t", tt.in, got, tt.want)
+			if got := isSchemeToken(tt.in); got != tt.want {
+				t.Errorf("isSchemeToken(%q) = %t, want %t", tt.in, got, tt.want)
 			}
 		})
 	}
@@ -3717,8 +3717,8 @@ func TestRemoteResultCredentials(t *testing.T) {
 		// url builds the configured URL. nil means fixtureURL.
 		url  func(ts *httptest.Server) string
 		wrap func(http.Handler) http.Handler
-		// secrets and credentials are RemoteOptions.expanded.long and
-		// RemoteOptions.expanded.credentials, from the expanded variables.
+		// secrets and credentials are RemoteOptions.lookedUp.long and
+		// RemoteOptions.lookedUp.credentials, from the expanded variables.
 		secrets     []string
 		credentials []string
 		wantSecrets []string
@@ -3853,7 +3853,7 @@ func TestRemoteResultCredentials(t *testing.T) {
 			}
 			srv := rmServer(discover.TransportHTTP, rawURL, tt.headers)
 
-			got, err := Remote(t.Context(), srv, RemoteOptions{expanded: secretLists{long: tt.secrets, credentials: tt.credentials}})
+			got, err := Remote(t.Context(), srv, RemoteOptions{lookedUp: secretLists{long: tt.secrets, credentials: tt.credentials}})
 			if err != nil {
 				t.Fatalf("Remote() error = %v", err)
 			}

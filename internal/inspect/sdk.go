@@ -123,10 +123,10 @@ func New(opts SDKOptions) *SDKInspector {
 // On success, Result.Secrets holds the configured values, the expanded
 // values, the credentials inside them (see valueCredentials) and, for a
 // stdio server, the argv secrets that have at least discover.MinSecretBytes
-// bytes (see Result.Secrets and resultSecrets).
-// Result.Credentials holds the values of Result.Secrets that look like a
-// credential (see Result.Credentials and resultCredentials). For a remote
-// server, [Remote] sets both.
+// bytes (see Result.Secrets and resultSecrets). Result.Credentials holds the
+// values of Result.Secrets that look like a credential (see
+// Result.Credentials and resultCredentials). For a remote server, [Remote]
+// sets both.
 //
 // For a stdio server, Inspect:
 //
@@ -198,7 +198,7 @@ func (i *SDKInspector) Inspect(ctx context.Context, s discover.Server) (Result, 
 			AllowUntrusted: i.opts.AllowUntrusted,
 			AllowDisabled:  i.opts.AllowDisabled,
 			dial:           i.opts.Dial,
-			expanded:       lookedUp,
+			lookedUp:       lookedUp,
 		})
 		if ce, ok := errors.AsType[*ConnectError](err); ok {
 			// The same short list as the one that Remote gave classify.
@@ -379,7 +379,7 @@ func newStdioClient(id *mcp.Implementation, raw *rawLists, limit *rawLimit) *mcp
 
 // lookupRecorder wraps a variable lookup for discover.Expand. It keeps each
 // non-empty value that the lookup returns, for classify to remove from error
-// text: a value of at least discover.MinSecretBytes bytes in values, which
+// text: a value of at least discover.MinSecretBytes bytes in long, which
 // classify removes wherever it stands, and a shorter one in short, which
 // classify removes as a whole word only (see replaceWords). A short value is
 // too likely to match ordinary words to remove it everywhere. It keeps each
@@ -387,42 +387,44 @@ func newStdioClient(id *mcp.Implementation, raw *rawLists, limit *rawLimit) *mcp
 // does not make the scrub lists long. It is used by one goroutine only.
 //
 // It also reads the variable name next to each value, for
-// Result.Credentials: a value of values is a credential when the name is
+// Result.Credentials: a value of long is a credential when the name is
 // secret-like or the value looks like a credential (see isCredential). The
 // same value can come first from a plain name ("A=x") and then from a
 // secret-like one ("TOKEN=x"), so a repeated lookup still checks the name.
 //
 // After each new value, it also records the credentials inside the value
 // (see valueCredentials), such as the password of a connection URL: the
-// server can echo the password alone. A long piece goes to values and to
-// credentialList, and a short piece goes to short, by the same length rule as
+// server can echo the password alone. A long piece goes to long and to
+// credentials, and a short piece goes to short, by the same length rule as
 // a whole value.
+//
+// The three lists have the names and the meaning of the fields of
+// secretLists, and lists returns them as one.
 type lookupRecorder struct {
 	lookup func(string) (string, bool)
-	// values and short hold raw values of the user's environment and the
+	// long and short hold raw values of the user's environment and the
 	// credentials inside them, each one time, in the order in which they
-	// were recorded. credentialList holds the strings of values that are
+	// were recorded. credentials holds the strings of long that are
 	// credentials, each one time, in the order in which they became one.
 	// Never print, log or encode them.
-	values         []string
-	short          []string
-	credentialList []string
+	long        []string
+	short       []string
+	credentials []string
 	// lookedUpSet holds the whole values that a lookup returned, to skip
 	// the checks of a value that was checked already.
 	lookedUpSet map[string]struct{}
-	// listedSet holds every string of values and short, whole values and
+	// listedSet holds every string of long and short, whole values and
 	// pieces alike, to keep a string out of the lists the second time.
 	listedSet map[string]struct{}
-	// credentialSet holds the strings of credentialList, to find one that
-	// is already there.
+	// credentialSet holds the strings of credentials, to find one that is
+	// already there.
 	credentialSet map[string]struct{}
 }
 
-// lists returns the recorded values as a secretLists: values in long, short
-// in short and credentialList in credentials. The slices are the ones of r,
-// not copies; the callers only read them.
+// lists returns the recorded values as a secretLists. The slices are the
+// ones of r, not copies; the callers only read them.
 func (r *lookupRecorder) lists() secretLists {
-	return secretLists{long: r.values, short: r.short, credentials: r.credentialList}
+	return secretLists{long: r.long, short: r.short, credentials: r.credentials}
 }
 
 // Lookup returns the value of the variable name and whether it is set, and
@@ -461,7 +463,7 @@ func (r *lookupRecorder) Lookup(name string) (string, bool) {
 	return value, ok
 }
 
-// record keeps s in r.values when it has at least discover.MinSecretBytes
+// record keeps s in r.long when it has at least discover.MinSecretBytes
 // bytes, or else in r.short, unless one of the lists has it already. A
 // piece of one value can be the whole of another, so the check is on the
 // lists (r.listedSet) and not on r.lookedUpSet.
@@ -474,13 +476,13 @@ func (r *lookupRecorder) record(s string) {
 	}
 	r.listedSet[s] = struct{}{}
 	if len(s) >= discover.MinSecretBytes {
-		r.values = append(r.values, s)
+		r.long = append(r.long, s)
 	} else {
 		r.short = append(r.short, s)
 	}
 }
 
-// addCredential keeps value in r.credentialList when it has at least
+// addCredential keeps value in r.credentials when it has at least
 // discover.MinSecretBytes bytes and is not there yet. A shorter value never
 // goes to Result.Secrets, so it cannot be a credential either.
 func (r *lookupRecorder) addCredential(value string) {
@@ -494,7 +496,7 @@ func (r *lookupRecorder) addCredential(value string) {
 		r.credentialSet = make(map[string]struct{})
 	}
 	r.credentialSet[value] = struct{}{}
-	r.credentialList = append(r.credentialList, value)
+	r.credentials = append(r.credentials, value)
 }
 
 // environLookup returns a lookup in env, which has the form of os.Environ:

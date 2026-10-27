@@ -409,16 +409,15 @@ func (p *pinner) firstPin(s discover.Server, id pins.Identity, tools []inspect.T
 }
 
 // compare compares the tools of a pinned server with its pins
-// (pins.CompareMasked).
-// Each change is one finding row. The rule ID comes from the change kind and
-// the severity from Change.Severity (a pinned name that cannot be verified is
-// high), not from the rule set, which does not hold the pin rules. A changed or
-// new tool, and a pinned tool whose pin cannot be checked, also gets a diff
-// (see appendDiff). The store is never changed. When at least one row is kept
-// (not ignored), compare also records the digest for the "--expect" hint
-// (see writeAcceptHints). The hint says so when a kept diff was cut, or when
-// the ignore list dropped a row: the digest covers that change, but the report
-// shows no diff for it.
+// (pins.CompareMasked). Each change is one finding row. The rule ID comes from
+// the change kind and the severity from Change.Severity (a pinned name that
+// cannot be verified is high), not from the rule set, which does not hold the
+// pin rules. A changed or new tool, and a pinned tool whose pin cannot be
+// checked, also gets a diff (see appendDiff). The store is never changed. When
+// at least one row is kept (not ignored), compare also records the digest for
+// the "--expect" hint (see writeAcceptHints). The hint says so when a kept diff
+// was cut, or when the ignore list dropped a row: the digest covers that
+// change, but the report shows no diff for it.
 //
 // Tools that cannot be pinned (see pinnable) cannot be accepted either, so
 // they get no hint, and every row of the server gets the fix fixNotPinnable:

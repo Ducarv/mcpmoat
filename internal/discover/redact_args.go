@@ -193,7 +193,11 @@ func RedactArgs(args []string) []string {
 //     password=x", "session=x; other=1", "--password=x", {"token":"x"},
 //     "admin:x"): the value after the first "=" of each piece and the text
 //     after a ":" (see innerValues). This over-matches on purpose: it can
-//     return ordinary words of a masked argument.
+//     return ordinary words of a masked argument. For a pair with a
+//     secret-like key, also the whole value, when it is quoted or holds a
+//     separator byte ("a;b" in Password="a;b", "a b" in password='a b',
+//     each with and without its quotes, and with its escapes removed; see
+//     secretPairValues).
 //   - for a user and a password ("app:pw@tcp(h:3306)/db", "u:pw@host",
 //     "scott/pw@orcl", "admin:pw"): the password ("pw"; see userPassword).
 //     "git@github.com:org/repo" and "me@example.com" have no password.
@@ -244,8 +248,9 @@ func ArgSecrets(args []string) []string {
 //   - in any masked text: the credential after an auth scheme ("x" in
 //     "Bearer x"; see IsAuthScheme), the value of a key=value pair or of a
 //     JSON key when the key is secret-like ("x" in "Password=x" and in
-//     {"token":"x"}), and every word or value that looks like a token (see
-//     TokenLike);
+//     {"token":"x"}; a quoted value or a value with a separator byte is
+//     also kept whole, as in ArgSecrets), and every word or value that
+//     looks like a token (see TokenLike);
 //   - for a URL: the user info, the password and, by the rule of
 //     IsSecretUserName, the name, always; a path segment, a matrix
 //     parameter, a query part or the fragment only when it looks like a
@@ -332,13 +337,19 @@ func (r *argScanner) keepAs(s string, kind pieceKind) {
 
 // keepCredential does nothing unless r collects credentials. Then it keeps
 // the parts of s, a masked piece of the given kind, that look like a
-// credential: s itself for pieceSecret and pieceUser, for a pieceHeader line
-// with no "Name:" form and for any s that looks like a token (see
-// TokenLike), and, when it keeps s, also the password in s (see
-// userPassword); for pieceUser also each value after a ":" (see
-// innerValues); and for every kind the inner parts that credentialParts
-// returns. Each part is also a part that keep returns for s, so
-// ArgCredentials is a subset of ArgSecrets.
+// credential:
+//
+//   - s itself, for pieceSecret and pieceUser, for a pieceHeader line with
+//     no "Name:" form, and for any s that looks like a token (see
+//     TokenLike);
+//   - when it keeps s, also the password in s (see userPassword);
+//   - for pieceUser, each value after a ":" (see innerValues);
+//   - for every kind, the inner parts that credentialParts returns. They
+//     include the whole value of each pair with a secret-like key, quoted
+//     or with separators (see secretPairValues).
+//
+// keep returns each of these parts for s too, so ArgCredentials is a subset
+// of ArgSecrets.
 func (r *argScanner) keepCredential(s string, kind pieceKind) {
 	if !r.collectCredentials || s == "" {
 		return
@@ -430,7 +441,9 @@ func isAuthSchemeWord(word string) bool {
 //     isAuthSchemeWord) is no value: in "Authorization: Bearer x" the
 //     credential is "x", not "Bearer";
 //   - the value of a key=value piece when the key is secret-like or the
-//     value looks like a token.
+//     value looks like a token;
+//   - the whole value of each pair with a secret-like key, also when it is
+//     quoted or holds a separator byte (see secretPairValues).
 //
 // So the plain words of a DSN ("host=localhost dbname=production") and a
 // path segment with a space ("My Documents") give no part.
@@ -450,7 +463,8 @@ func credentialParts(s string) []string {
 			parts = append(parts, cred)
 		}
 	}
-	return append(parts, innerCredentials(s)...)
+	parts = append(parts, innerCredentials(s)...)
+	return append(parts, secretPairValues(s)...)
 }
 
 // innerCredentials returns the values of innerValues(s) that look like a
@@ -494,12 +508,18 @@ func innerCredentials(s string) []string {
 	return creds
 }
 
-// keep does nothing unless r collects. Then it keeps s, the inner values of
-// s as a header line or an auth value (see headerLineParts), the values
-// inside s as key=value pairs or JSON (see innerValues) and the password of
-// a user and a password in s (see userPassword), when innerValues did not
-// already give it ("pw" in "admin:pw"). It keeps nothing for an empty s:
-// there is no secret to remove.
+// keep does nothing unless r collects. Then it keeps:
+//
+//   - s;
+//   - the inner values of s as a header line or an auth value (see
+//     headerLineParts);
+//   - the values inside s as key=value pairs or JSON (see innerValues);
+//   - the password of a user and a password in s (see userPassword), when
+//     innerValues did not already give it ("pw" in "admin:pw");
+//   - the whole value of each pair with a secret-like key (see
+//     secretPairValues), for a value that innerValues cuts into pieces.
+//
+// It keeps nothing for an empty s: there is no secret to remove.
 func (r *argScanner) keep(s string) {
 	if !r.collect || s == "" {
 		return
@@ -510,6 +530,31 @@ func (r *argScanner) keep(s string) {
 	r.secrets = append(r.secrets, inner...)
 	if pw, ok := userPassword(s); ok && !slices.Contains(inner, pw) {
 		r.secrets = append(r.secrets, pw)
+	}
+	r.secrets = append(r.secrets, secretPairValues(s)...)
+}
+
+// keepPairValues keeps the values of the pairs with a secret-like key in s
+// (see secretPairValues) for ArgSecrets and for ArgCredentials, when r
+// collects. It skips kept, a value that the caller has kept already.
+// displayValue uses it for a "NAME=value" argument whose NAME is
+// secret-like: it masks and keeps the value after the first "=" whole, and
+// this also finds the value of the first pair alone ("x" in "password=x
+// host=h") and a quoted value ("password='a b' host=h").
+func (r *argScanner) keepPairValues(s, kept string) {
+	if !r.collect && !r.collectCredentials {
+		return
+	}
+	for _, v := range secretPairValues(s) {
+		if v == kept {
+			continue
+		}
+		if r.collect {
+			r.secrets = append(r.secrets, v)
+		}
+		if r.collectCredentials {
+			r.credentials = append(r.credentials, v)
+		}
 	}
 }
 
@@ -564,9 +609,14 @@ func userPassword(s string) (password string, ok bool) {
 // time is linear in the length of s.
 //
 // This is a fail-closed over-match: it can return ordinary words, such as a
-// host name or "disable", and the caller then removes a word of 8 or more
-// bytes from text that echoes it. The masked argument is not shown anyway,
-// so only such an echo is changed, and no secret is shown.
+// host name or "disable". The caller removes such a value of MinSecretBytes
+// or more from echoed text, and a shorter one only as a whole word from
+// error text. The masked argument is not shown anyway, so only such an echo
+// is changed, and no secret is shown.
+//
+// The split cuts a quoted value or a value with a separator byte into
+// pieces. secretPairValues gives such a value whole when its key is
+// secret-like.
 func innerValues(s string) []string {
 	var values []string
 	afterColon := false // a ":" came before the next piece
@@ -601,6 +651,148 @@ func innerValues(s string) []string {
 
 // innerSeparators are the bytes at which innerValues splits a masked text.
 const innerSeparators = ";&,:{}\"' \t\n\v\f\r"
+
+// secretPairValues returns the values of the pairs in s whose key is
+// secret-like (see IsSecretName), each value read whole. innerValues and
+// innerCredentials split s at every separator byte, so they cut a quoted
+// value or a value with a ";", ":" or "," into short pieces. The pairs are:
+//
+//   - key=value, as in libpq ("host=h password='a b'") and in ADO.NET or
+//     JDBC text ("Server=h;Password=\"a;b\""). Spaces can stand around "=".
+//   - "key":"value" or "key"="value", as in JSON, and key: "value". After
+//     a ":", only a quoted value counts: other code reads "user:pw" and
+//     "host:port".
+//
+// For a quoted value (see quotedSpan), it returns the value with its
+// quotes, the text between the quotes, and that text with its escapes
+// removed. For a value with no quotes after "=", it returns the text up to
+// the next space or ";" (libpq). When s holds a ";", it also returns the
+// text up to the next ";", trimmed of spaces (ADO.NET, where a value can
+// hold spaces). A value with no end runs to the end of s. Each value is not
+// empty.
+//
+// The time and the total length of the values are linear in the length of
+// s: the scan goes on after the end of each value that it reads, and each
+// text between two ";" gives at most one such ";" value.
+//
+// Known limits: a value with a quote inside another quoted value ("conn=
+// 'password=\"a b\"'"), a value that ends with a "\" in a format with no
+// "\" escapes (ADO.NET "Password=\"C:\\\""), a JSON "\u" escape (only its
+// raw form is returned) and a key that is not a plain name ("User
+// Password=x" gives the key "Password", which is secret-like anyway).
+func secretPairValues(s string) []string {
+	var values []string
+	hasSemicolon := strings.Contains(s, ";")
+	fieldEnd := -1 // the end of the last ";" value, so it is not given again
+	for i := 0; i < len(s); i++ {
+		if s[i] != '=' && s[i] != ':' {
+			continue
+		}
+		if !IsSecretName(pairKey(s[:i])) {
+			continue
+		}
+		start := i + 1
+		for start < len(s) && (s[start] == ' ' || s[start] == '\t') {
+			start++
+		}
+		rest := s[start:]
+		if rest != "" && isQuote(rest[0]) {
+			span, inner, plain := quotedSpan(rest)
+			if inner != "" {
+				values = append(values, span)
+				values = appendForms(values, inner, plain)
+			}
+			i = start + len(span) - 1 // the loop adds 1
+			continue
+		}
+		if s[i] == ':' {
+			continue // after ":", only a quoted value counts
+		}
+		word := rest
+		if end := strings.IndexAny(rest, " \t\n\v\f\r;"); end >= 0 {
+			word = rest[:end]
+		}
+		if word != "" {
+			values = append(values, word)
+		}
+		if hasSemicolon && start > fieldEnd {
+			end := strings.IndexByte(rest, ';')
+			if end < 0 {
+				end = len(rest)
+			}
+			if field := strings.TrimSpace(rest[:end]); field != "" && field != word {
+				values = append(values, field)
+			}
+			fieldEnd = start + end
+		}
+		i = max(i, start+len(word)-1) // the loop adds 1
+	}
+	return values
+}
+
+// pairKey returns the key at the end of before, the text in front of a "="
+// or a ":", with spaces between them skipped. A key in quotes ("token" in
+// `"token":`) is the text between the quotes. Else the key is the run of
+// name bytes (see isName) at the end ("Password" in "Server=h;Password").
+// It returns "" when there is no key.
+//
+// Each call reads back only to the quote that opens the key, or over the
+// name run, so a scan of all the "=" and ":" bytes of a text stays linear.
+func pairKey(before string) string {
+	before = strings.TrimRight(before, " \t")
+	if before == "" {
+		return ""
+	}
+	if q := before[len(before)-1]; isQuote(q) {
+		open := strings.LastIndexByte(before[:len(before)-1], q)
+		if open < 0 {
+			return ""
+		}
+		return before[open+1 : len(before)-1]
+	}
+	start := len(before)
+	for start > 0 && isName(before[start-1:start]) {
+		start--
+	}
+	return before[start:]
+}
+
+// quotedSpan reads the quoted value at the start of s: s[0] is a quote
+// byte (see isQuote). It returns span, the value with its quotes; inner, the
+// text between the quotes as written; and plain, inner with its escapes
+// removed. An escape is a "\" and the byte after it (libpq and JSON: \' and
+// \"), or the quote byte two times in a row (ADO.NET and SQL write a quote
+// inside a value in this way).
+//
+// When there is no closing quote, the value runs to the end of s (fail
+// closed), and a "\" at the very end is dropped from plain. So plain stays
+// a prefix of the plain value of a longer text that s is the start of.
+func quotedSpan(s string) (span, inner, plain string) {
+	q := s[0]
+	var b strings.Builder
+	for i := 1; i < len(s); i++ {
+		switch c := s[i]; {
+		case c == '\\':
+			if i+1 < len(s) {
+				i++
+				b.WriteByte(s[i])
+			}
+		case c == q && i+1 < len(s) && s[i+1] == q:
+			i++
+			b.WriteByte(q)
+		case c == q:
+			return s[:i+1], s[1:i], b.String()
+		default:
+			b.WriteByte(c)
+		}
+	}
+	return s, s[1:], b.String()
+}
+
+// isQuote reports whether c is a double or a single quote.
+func isQuote(c byte) bool {
+	return c == '"' || c == '\''
+}
 
 // headerLineParts returns the inner values of s, a masked text that can be a
 // header line or an auth value: the value after "Name:", when the text
@@ -806,7 +998,9 @@ func (r *argScanner) displayValue(s string) string {
 		}
 	}
 	if IsSecretName(name) {
-		return name + "=" + r.maskAs(value, pieceSecret)
+		shown := name + "=" + r.maskAs(value, pieceSecret)
+		r.keepPairValues(s, value)
+		return shown
 	}
 	// displayShape, not displayValue: one level only. A URL value such as
 	// "U=https://h/?a=1" goes through RedactURL. Other text with a second
@@ -919,17 +1113,15 @@ func (r *argScanner) keepURLCredentials(raw string, fallback bool) {
 		if info == "" {
 			return
 		}
-		r.keepCredential(info, pieceSecret)
+		// raw does not parse, so there is no unescaped form: the name and
+		// the password as written stand in for it, as in wholeURLParts.
 		name, password, _ := strings.Cut(info, ":")
-		r.keepUserinfoParts(info, userinfoSecrets(name, password, name, password))
+		r.keepUserinfoParts(info, name, password)
 		return
 	}
 	if u.User != nil {
-		info := RawUserinfo(raw)
-		r.keepCredential(info, pieceSecret)
-		name, password, _ := strings.Cut(info, ":")
 		plainPassword, _ := u.User.Password()
-		r.keepUserinfoParts(info, userinfoSecrets(name, password, u.User.Username(), plainPassword))
+		r.keepUserinfoParts(RawUserinfo(raw), u.User.Username(), plainPassword)
 	}
 	// The same loop as SecretPathSegments.
 	for seg := range strings.SplitSeq(u.EscapedPath(), "/") {
@@ -974,14 +1166,19 @@ func (r *argScanner) keepURLCredentials(raw string, fallback bool) {
 	}
 }
 
-// keepUserinfoParts keeps parts, the parts of info (the user info of a URL;
-// see userinfoSecrets), as credentials, after keepCredential(info,
-// pieceSecret). That call already kept the password of info as written (see
-// userPassword), so a part equal to it is skipped: each value is kept one
-// time.
-func (r *argScanner) keepUserinfoParts(info string, parts []string) {
+// keepUserinfoParts keeps info, the user info of a URL as written, as a
+// credential, and then its secret parts (see userinfoSecrets): the password
+// and, by the rule of IsSecretUserName, the name. plainName and
+// plainPassword are the unescaped name and password.
+//
+// keepCredential(info, pieceSecret) already keeps the password of info as
+// written (see userPassword), so a part equal to it is skipped: each value
+// is kept one time.
+func (r *argScanner) keepUserinfoParts(info, plainName, plainPassword string) {
+	r.keepCredential(info, pieceSecret)
+	name, password, _ := strings.Cut(info, ":")
 	written, _ := userPassword(info) // "" when info has no such password
-	for _, part := range parts {
+	for _, part := range userinfoSecrets(name, password, plainName, plainPassword) {
 		if part != written {
 			r.keepCredential(part, pieceSecret)
 		}

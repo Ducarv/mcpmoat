@@ -66,9 +66,9 @@ func TestLookupRecorder(t *testing.T) {
 					t.Errorf("Lookup(%q) = (len %d, %v), want (len %d, %v)", name, len(gotV), gotOK, len(wantV), wantOK)
 				}
 			}
-			if !slices.Equal(rec.values, tt.want) {
+			if !slices.Equal(rec.long, tt.want) {
 				t.Errorf("values has %d entries, want %d (%d lookups); values equal = false",
-					len(rec.values), len(tt.want), len(tt.lookups))
+					len(rec.long), len(tt.want), len(tt.lookups))
 			}
 		})
 	}
@@ -86,8 +86,8 @@ func TestLookupRecorderZeroValue(t *testing.T) {
 			t.Fatalf("Lookup() = (len %d, %v), want (len %d, true)", len(v), ok, len(value))
 		}
 	}
-	if len(rec.values) != 1 || rec.values[0] != value {
-		t.Errorf("values has %d entries, want 1 with the value", len(rec.values))
+	if len(rec.long) != 1 || rec.long[0] != value {
+		t.Errorf("values has %d entries, want 1 with the value", len(rec.long))
 	}
 }
 
@@ -141,8 +141,8 @@ func TestExpandPolicyHide(t *testing.T) {
 			if v, ok := rec.Lookup("MCPMOAT_TEST_HIDDEN"); ok || v != "" {
 				t.Errorf("Lookup() = (len %d, %v), want (0, false) for a hidden name", len(v), ok)
 			}
-			if calls != 0 || len(rec.values) != 0 {
-				t.Errorf("the hidden variable was looked up %d times and %d values were recorded, want none", calls, len(rec.values))
+			if calls != 0 || len(rec.long) != 0 {
+				t.Errorf("the hidden variable was looked up %d times and %d values were recorded, want none", calls, len(rec.long))
 			}
 		})
 	}
@@ -210,12 +210,15 @@ func TestShowDiscoveredURL(t *testing.T) {
 		exp, base := expanded.String(), urlBase(expanded.String())
 		cause := errors.New("dial failed for " + base + " and " + exp + ": dial tcp dev7.example:8443: lookup dev7.example: no such host")
 
+		// serverLen marks the URL at the end of Reason as text of the cause,
+		// as classify does (see ConnectError.serverLen).
 		ce := &ConnectError{
-			Kind:   KindNetwork,
-			Server: "srv",
-			Reason: "cannot reach " + exp,
-			URL:    exp,
-			err:    cause,
+			Kind:      KindNetwork,
+			Server:    "srv",
+			Reason:    "cannot reach " + exp,
+			URL:       exp,
+			err:       cause,
+			serverLen: len(exp),
 		}
 		showDiscoveredURL(ce, expanded, discovered, nil)
 
@@ -243,7 +246,7 @@ func TestShowDiscoveredURL(t *testing.T) {
 		discovered := discover.NewURL("https://api.example.test/${MCP_TENANT}/mcp")
 		expanded := discover.NewURL("https://api.example.test/acme7/mcp")
 		cause := errors.New("bad status from " + expanded.String() + " at api.example.test")
-		ce := &ConnectError{Reason: "failed: " + expanded.String(), err: cause}
+		ce := &ConnectError{Reason: "failed: " + expanded.String(), err: cause, serverLen: len(expanded.String())}
 
 		showDiscoveredURL(ce, expanded, discovered, nil)
 

@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/url"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -1391,7 +1392,7 @@ func TestScrub(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 
-			got := scrub(tt.text, tt.rawURL, tt.redacted, tt.headers, nil)
+			got := scrub(tt.text, tt.rawURL, tt.redacted, secretLists{long: tt.headers})
 			if tt.want != "" || (len(tt.wantHas) == 0 && len(tt.wantNot) == 0) {
 				if got != tt.want {
 					t.Errorf("scrub() = %q, want %q", got, tt.want)
@@ -1985,7 +1986,7 @@ func TestScrubShortWords(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			// The values are fake, so the messages show them.
-			if got := scrub(tt.text, "", "", tt.secrets, tt.short); got != tt.want {
+			if got := scrub(tt.text, "", "", secretLists{long: tt.secrets, short: tt.short}); got != tt.want {
 				t.Errorf("scrub(%q, short %q) = %q, want %q", tt.text, tt.short, got, tt.want)
 			}
 		})
@@ -2082,7 +2083,7 @@ func BenchmarkScrubShortWords(b *testing.B) {
 	b.Run("scrub", func(b *testing.B) {
 		b.SetBytes(int64(len(text)))
 		for b.Loop() {
-			scrub(text, "", "", nil, short)
+			scrub(text, "", "", secretLists{short: short})
 		}
 	})
 }
@@ -2136,9 +2137,12 @@ func TestClassifyContextErrorWithShortValue(t *testing.T) {
 
 // refReplaceWords is replaceWords as it was before the prefix tree
 // (wordTrie): it tries every form at every byte. TestReplaceWordsDifferential
-// compares the two, so the faster code must give the same text.
+// compares the two, so the faster code must give the same text. The reference
+// shares no helper with the code under test (see refWordForms and
+// refWordStart), so a bug in a shared helper cannot change both sides the
+// same way.
 func refReplaceWords(text string, short []string) string {
-	forms := wordForms(text, short)
+	forms := refWordForms(text, short)
 	if len(forms) == 0 {
 		return text
 	}
@@ -2174,11 +2178,11 @@ func refWordAt(text string, i int, forms []string) int {
 		if !strings.HasPrefix(text[i:], f) {
 			continue
 		}
-		if !wordStart(text, i) {
+		if !refWordStart(text, i) {
 			return 0
 		}
 		end := i + len(f)
-		if end == len(text) || !isWordByte(text[end]) {
+		if end == len(text) || !refIsWordByte(text[end]) {
 			return len(f)
 		}
 	}
@@ -2195,6 +2199,74 @@ func refMaskedWordAt(text string, i int, forms []string) (start, n int) {
 		}
 	}
 	return 0, 0
+}
+
+// refWordForms is the old wordForms (see refReplaceWords): the forms of the
+// values in short that occur in text, each non-empty value and its %q form,
+// each one time, longest first and then by bytes.
+func refWordForms(text string, short []string) []string {
+	var forms []string
+	for _, v := range short {
+		if v == "" {
+			continue
+		}
+		q := strconv.Quote(v)
+		for _, f := range []string{v, q[1 : len(q)-1]} {
+			if strings.Contains(text, f) {
+				forms = append(forms, f)
+			}
+		}
+	}
+	slices.SortFunc(forms, func(a, b string) int {
+		if len(a) != len(b) {
+			return len(b) - len(a)
+		}
+		return strings.Compare(a, b)
+	})
+	return slices.Compact(forms)
+}
+
+// refWordStart is the old wordStart (see refReplaceWords).
+func refWordStart(text string, i int) bool {
+	return i == 0 || !refIsWordByte(text[i-1]) || refEndsWithEscape(text[:i])
+}
+
+// refIsWordByte is the old isWordByte (see refReplaceWords).
+func refIsWordByte(c byte) bool {
+	return c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' || c == '_'
+}
+
+// refEndsWithEscape is the old endsWithEscape (see refReplaceWords): s ends
+// with \a, \b, \f, \n, \r, \t, \v, \xHH, \uHHHH or \UHHHHHHHH after an odd
+// number of backslashes.
+func refEndsWithEscape(s string) bool {
+	isHex := func(c byte) bool {
+		return c >= '0' && c <= '9' || c >= 'a' && c <= 'f' || c >= 'A' && c <= 'F'
+	}
+	for _, n := range []int{1, 3, 5, 9} {
+		if len(s) < n+1 {
+			continue
+		}
+		body := s[len(s)-n:]
+		ok := false
+		switch {
+		case n == 1:
+			ok = strings.IndexByte("abfnrtv", body[0]) >= 0
+		case body[0] == 'x' && n == 3, body[0] == 'u' && n == 5, body[0] == 'U' && n == 9:
+			ok = true
+			for i := 1; i < n; i++ {
+				ok = ok && isHex(body[i])
+			}
+		}
+		if !ok {
+			continue
+		}
+		before := s[:len(s)-n]
+		if (len(before)-len(strings.TrimRight(before, `\`)))%2 == 1 {
+			return true
+		}
+	}
+	return false
 }
 
 // TestReplaceWordsDifferential compares replaceWords with refReplaceWords on
@@ -2273,8 +2345,9 @@ func TestShowDiscoveredURLHeaderShortValue(t *testing.T) {
 		t.Fatalf("remoteShortSecrets() = %q, want it to hold the expanded value and the header password", short)
 	}
 
+	// All of reason is text of the cause (see ConnectError.serverLen).
 	reason := "lookup h1pw: no such host"
-	ce := &ConnectError{Kind: KindNetwork, Server: "remote", Reason: reason}
+	ce := &ConnectError{Kind: KindNetwork, Server: "remote", Reason: reason, serverLen: len(reason)}
 	showDiscoveredURL(ce, expanded.URL, discovered, short)
 	if strings.Contains(ce.Reason, "pw") || strings.Contains(ce.Reason, "h1") {
 		t.Errorf("Reason = %q, want no short value in it", ce.Reason)
@@ -2282,7 +2355,7 @@ func TestShowDiscoveredURLHeaderShortValue(t *testing.T) {
 
 	// The expanded short values alone, the list before the fix, leave the
 	// password as a whole word. This shows that the case tests the fix.
-	old := &ConnectError{Kind: KindNetwork, Server: "remote", Reason: reason}
+	old := &ConnectError{Kind: KindNetwork, Server: "remote", Reason: reason, serverLen: len(reason)}
 	showDiscoveredURL(old, expanded.URL, discovered, lookedUp.short)
 	if !strings.Contains(old.Reason, "pw") {
 		t.Errorf("Reason with the expanded values only = %q, want the case to show %q", old.Reason, "pw")

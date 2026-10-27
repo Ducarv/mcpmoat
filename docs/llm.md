@@ -74,12 +74,20 @@ mcpmoat scan --llm --llm-provider openai --llm-model <model> \
     like a token or holds a credential.
   - For a stdio server, the parts of the command and the args (after the expansion) that look like
     a credential: the value of a secret-like flag or key (`--api-key V`, `--token=V`,
-    `GITHUB_TOKEN=V`, `"token":"V"`, libpq `password=V`), the password of a user flag
-    (`-u admin:pw`), the value after a secret-like header name in `-H` (`Authorization: Bearer
-    tok`), the credential after an auth scheme, the user info and the secret parts of a URL, and
-    each piece that looks like a token, such as `-p<token>` or `<token>=1`. The plain words of a
-    DSN (`host=localhost dbname=production user=postgres`), a path segment `My Documents`,
-    package names and other plain args do not count.
+    `GITHUB_TOKEN=V`, `"token":"V"`), the password of a user flag (`-u admin:pw`), the value after
+    a secret-like header name in `-H` (`Authorization: Bearer tok`), the credential after an auth
+    scheme, the user info and the secret parts of a URL, and each piece that looks like a token,
+    such as `-p<token>` or `<token>=1`. The plain words of a DSN (`host=localhost dbname=production
+    user=postgres`), a path segment `My Documents`, package names and other plain args do not
+    count.
+  - The value of a pair with a secret-like key, in the args and inside an env value, an expanded
+    value or a header value: `key=value` (spaces can stand around `=`), `"key":"value"`,
+    `"key"="value"` and `key: 'value'`. A quoted value is one value: in single quotes with `\'`
+    escapes (libpq), in double quotes (ADO.NET, JSON), and with a doubled quote (`''`) as an
+    escaped quote. It counts with its quotes, without them, and with its escapes removed. A value
+    with no quotes ends at the next space or `;`. When the text holds a `;` (ADO.NET), the text up
+    to the next `;` counts too, so `Server=h;Password=a b;` gives `a` and `a b`. An empty value
+    (`password=`) gives nothing.
   - The password of a DSN with no scheme: in `app:pw@db:5432/prod` and `app:pw@tcp(db:3306)/prod`
     it is the text between the first `:` and the last `@`. It counts alone, in the args and inside
     an env value, an expanded value or a header value. The password of the Oracle form
@@ -89,14 +97,14 @@ mcpmoat scan --llm --llm-provider openai --llm-model <model> \
 
   A word looks like a token when it starts with a known token prefix (`ghp_`, `sk-`), is a UUID,
   has 20 bytes or more with letters and digits, or has 32 bytes or more. A value of one server is
-  removed only from the tools of that server. For a
-  value that is not valid UTF-8 (it can come from your environment), mcpmoat also removes the form
-  that the server sends in JSON, with one U+FFFD for each invalid byte. When a `********` starts in
-  the part of the name or the description that mcpmoat can send (the first 512 bytes of the name
-  or the first 16 KiB of the description, plus one byte), the user message also has
-  `"redacted": true`, also when a cut then removes the `********`. A value after that part is never
-  sent, so it does not set the flag. The fixed instruction text tells the model that `********` is
-  removed text and not an instruction. The limits:
+  removed only from the tools of that server. For a value that is not valid UTF-8 (it can come
+  from your environment), mcpmoat also removes the form that the server sends in JSON, with one
+  U+FFFD for each invalid byte. When a `********` starts in the part of the name or the
+  description that mcpmoat can send (the first 512 bytes of the name or the first 16 KiB of the
+  description, plus one byte), the user message also has `"redacted": true`, also when a cut then
+  removes the `********`. A value after that part is never sent, so it does not set the flag. The
+  fixed instruction text tells the model that `********` is removed text and not an instruction.
+  The limits:
   - **Trade-off:** a plain config value that a server echoes reaches the provider. For example,
     the env value `production` of `NODE_ENV`, or a password under a key that does not look secret
     (such as `DB_SETTING`) when the password does not look like a token. Earlier versions removed
@@ -109,12 +117,8 @@ mcpmoat scan --llm --llm-provider openai --llm-model <model> \
     split with spaces. A value that holds a backslash sequence (the `\t` and `\n` of the Windows
     path `C:\tools\new_dir`) is not found when the server sends a real tab and newline there, and
     the JSON of the request then shows the same escapes.
-  - The check fails closed: mcpmoat also removes some text that is not secret. A word of 32 bytes
-    or more counts as a token, also a readable path segment (such as a segment of the macOS
-    `$TMPDIR`), and so does a nix hash or a UUID. A header value that starts with an auth scheme
-    word counts as a credential, also when it is not one (`Token count`). When such text is in a
-    tool description, the model sees `********` in its place, and the message has
-    `"redacted": true`.
+  - The check fails closed, so mcpmoat also removes some text that is not secret (see [What
+    mcpmoat does not do](limits.md)).
   - The decoded text `name:password` of a `Basic` header value is not removed as a whole. Only the
     password in it is removed (when it has 8 bytes or more), so the model sees the name.
   - Some secrets in args are not found, so they are not removed: a value after a flag whose name

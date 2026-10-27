@@ -15,6 +15,7 @@ import (
 	"net/http/httputil"
 	"os"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"strings"
 	"sync"
@@ -573,6 +574,31 @@ func e2eLLMRepeat(n int) []string {
 	return tools
 }
 
+// e2eAssertNoWord fails the test for each word in words that got holds as a
+// whole word: the byte before it and the byte after it are not ASCII
+// letters, digits or "_" (the \b of package regexp). Each word must start
+// and end with one of those bytes, or \b does not work as a word edge.
+//
+// Use it for a short number such as the status code "429". A plain
+// substring check fails by chance when the number is inside a longer run of
+// letters and digits that changes from one run to the next: the build
+// version in the JSON report (a pseudo-version such as
+// v0.1.1-0.20261027223903-8452665c4291 holds a commit time and a commit
+// hash), the random digits of a temporary path, or the port of the fake
+// provider. The whole-word check finds "HTTP 429" and "(429)", but not
+// "c4291" or ":54291".
+func e2eAssertNoWord(t *testing.T, what, got string, words []string) {
+	t.Helper()
+	for _, w := range words {
+		// QuoteMeta escapes the special characters of w, so MustCompile
+		// cannot panic here.
+		re := regexp.MustCompile(`\b` + regexp.QuoteMeta(w) + `\b`)
+		if loc := re.FindStringIndex(got); loc != nil {
+			t.Errorf("%s holds the word %q at byte %d:\n%s", what, w, loc[0], got)
+		}
+	}
+}
+
 // TestE2ELLMProviderFailure checks a provider that answers 503 every time:
 // the binary tries each tool llm.RetryMaxTries times (the first request and
 // 2 retries: the retry policy of internal/llm), then scan still prints the
@@ -697,9 +723,14 @@ func TestE2ELLMRetryThenSuccess(t *testing.T) {
 				t.Errorf("stderr lines = %q, want %q", got, wantStderr)
 			}
 			// Not "retry": the temporary paths in the report hold the test name.
-			retryWords := []string{"429", "Too Many", "rate limit", e2eLLMBodyCanary, "failed"}
+			retryWords := []string{"Too Many", "rate limit", e2eLLMBodyCanary, "failed"}
 			assertContainsNone(t, "stdout", stdout, retryWords)
 			assertContainsNone(t, "stderr", stderr, retryWords)
+			// The status code is a short number, so check it as a whole word
+			// only (see e2eAssertNoWord).
+			retryCode := []string{"429"}
+			e2eAssertNoWord(t, "stdout", stdout, retryCode)
+			e2eAssertNoWord(t, "stderr", stderr, retryCode)
 			doc := decodeScanJSON(t, stdout)
 			if !doc.Complete || len(doc.Errors) != 0 {
 				t.Errorf("complete = %t, errors = %+v, want a complete report without errors", doc.Complete, doc.Errors)
@@ -762,8 +793,12 @@ func TestE2ELLMRetryAfterAboveCap(t *testing.T) {
 				e2eLLMWarning(t, provider.srv.URL),
 				scanPrefix + "the LLM provider failed (HTTP 503",
 			})
-			assertContainsNone(t, "stdout", stdout, []string{e2eLLMBodyCanary, tt.retryAfter})
-			assertContainsNone(t, "stderr", stderr, []string{e2eLLMBodyCanary, tt.retryAfter})
+			assertContainsNone(t, "stdout", stdout, []string{e2eLLMBodyCanary})
+			assertContainsNone(t, "stderr", stderr, []string{e2eLLMBodyCanary})
+			// "3600" is a short number, so check the Retry-After value as a
+			// whole word only (see e2eAssertNoWord).
+			e2eAssertNoWord(t, "stdout", stdout, []string{tt.retryAfter})
+			e2eAssertNoWord(t, "stderr", stderr, []string{tt.retryAfter})
 			if doc := decodeScanJSON(t, stdout); doc.Complete {
 				t.Error("complete = true, want false")
 			}

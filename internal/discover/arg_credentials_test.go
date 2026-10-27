@@ -170,6 +170,120 @@ var argCredentialsCases = []argCredentialsCase{
 	{name: "json secret key", args: []string{`{"token":"` + credPw + `"}`}, want: []string{credPw}, redacted: []string{mk}},
 	{name: "connection string password", args: []string{"Server=h;Password=" + credPw}, want: []string{credPw}, notWant: []string{"h"}, redacted: []string{"Server=" + mk}},
 
+	// A value of a secret-like key is a credential whole, also when it is
+	// quoted or holds a separator byte (see secretPairValues). An env
+	// value goes through ArgCredentials as one arg, so these are the env
+	// cases too.
+	{
+		name:     "libpq quoted password",
+		args:     []string{"host=db password='correct horse battery'"},
+		want:     []string{"correct horse battery", "'correct horse battery'"},
+		notWant:  []string{"db", "correct"},
+		redacted: []string{"host=" + mk},
+	},
+	{
+		name:     "libpq quoted password with spaces around the equals sign",
+		args:     []string{"host=db password = 'a b c d'"},
+		want:     []string{"a b c d"},
+		notWant:  []string{"db"},
+		redacted: []string{"host=" + mk},
+	},
+	{
+		// libpq writes a quote inside a quoted value as \'.
+		name:     "libpq escaped quote",
+		args:     []string{`password='it\'s ok' host=x`},
+		want:     []string{"it's ok", `it\'s ok`, `'it\'s ok'`},
+		notWant:  []string{"x"},
+		redacted: []string{"password=" + mk},
+	},
+	{
+		// ADO.NET and SQL write a quote inside a quoted value two times.
+		name:     "doubled quote",
+		args:     []string{"password='it''s ok'"},
+		want:     []string{"it's ok", "it''s ok", "'it''s ok'"},
+		redacted: []string{"password=" + mk},
+	},
+	{
+		name:     "ado quoted password with a semicolon",
+		args:     []string{`Server=db;Password="Ab;cdefgh"`},
+		want:     []string{"Ab;cdefgh", `"Ab;cdefgh"`},
+		notWant:  []string{"db", "Ab", "cdefgh"},
+		redacted: []string{"Server=" + mk},
+	},
+	{
+		name:     "ado password with a colon and a comma",
+		args:     []string{"Server=h;User Id=sa;Password=Xy7:k9,Lm2Qq;"},
+		want:     []string{"Xy7:k9,Lm2Qq"},
+		notWant:  []string{"sa", "h"},
+		redacted: []string{"Server=" + mk},
+	},
+	{
+		name:     "ado password with spaces",
+		args:     []string{"Server=h;Password=a b c d;Database=x"},
+		want:     []string{"a b c d", "a"},
+		notWant:  []string{"h", "x"},
+		redacted: []string{"Server=" + mk},
+	},
+	{
+		name:     "json password with a colon and a comma",
+		args:     []string{`{"password":"Xy7:k9,Lm2Qq"}`},
+		want:     []string{"Xy7:k9,Lm2Qq", `"Xy7:k9,Lm2Qq"`},
+		redacted: []string{mk},
+	},
+	{
+		name:     "json api key with spaces",
+		args:     []string{`{"api_key":"abc def ghi jkl"}`},
+		want:     []string{"abc def ghi jkl"},
+		notWant:  []string{"def", "ghi", "jkl"},
+		redacted: []string{mk},
+	},
+	{
+		name:     "json escaped quote",
+		args:     []string{`{"user":"u","token":"a\"b c"}`},
+		want:     []string{`a"b c`, `a\"b c`},
+		notWant:  []string{"u"},
+		redacted: []string{mk},
+	},
+	{
+		name:     "quoted value after a secret-like name",
+		args:     []string{`pwd="a b c d e f g h"`},
+		want:     []string{"a b c d e f g h", `"a b c d e f g h"`},
+		redacted: []string{"pwd=" + mk},
+	},
+	{
+		// No closing quote: the value runs to the end (fail closed).
+		name:     "unterminated quote",
+		args:     []string{"host=db password='a b c"},
+		want:     []string{"a b c"},
+		notWant:  []string{"db"},
+		redacted: []string{"host=" + mk},
+	},
+	{
+		// IsSecretName finds "password" in "notpassword", so its value is a
+		// credential, whole and up to the first space.
+		name:     "secret word inside a longer name",
+		args:     []string{"notpassword=x y z"},
+		want:     []string{"x y z", "x"},
+		redacted: []string{"notpassword=" + mk},
+	},
+	{name: "empty password", args: []string{"password="}, want: nil, redacted: []string{"password=" + mk}},
+	{name: "empty quoted password", args: []string{"host=db password=''"}, want: nil, redacted: []string{"host=" + mk}},
+	{
+		// A quoted value of a plain key is no credential.
+		name:     "quoted plain value",
+		args:     []string{"host='my db' dbname=x"},
+		want:     nil,
+		notWant:  []string{"my db", "'my db'"},
+		redacted: []string{"host=" + mk},
+	},
+	{
+		name:     "json plain value with spaces",
+		args:     []string{`{"user":"a b c"}`},
+		want:     nil,
+		notWant:  []string{"a b c"},
+		redacted: []string{mk},
+	},
+
 	// Plain words are not credentials, though RedactArgs masks them and
 	// ArgSecrets returns them.
 	{
@@ -357,6 +471,10 @@ func FuzzArgCredentials(f *testing.F) {
 	// password.
 	f.Add("app:pw@tcp(db:3306)/x\x00-u\x00u:p@w:rd@host", "scott/pw@//h:1521/orcl\x00u:@h")
 	f.Add("git@github.com:org/repo\x00user@example.com", "https://example.com/a@b\x00a/b:c@d")
+	// Quoted values, escapes, a missing closing quote and a "\" at the end
+	// (see secretPairValues and quotedSpan).
+	f.Add(`host=db password='a\'b c'`+"\x00"+`Server=h;Pwd="x;""y";`, `{"token":"a\"b","pin":'c d'}`+"\x00"+`password='a\`)
+	f.Add(`x/password="a\/b"/y`+"\x00"+`--opt=password='a b'`, `token = "a b" : 'c'`+"\x00"+`'password'='x'`)
 
 	f.Fuzz(func(t *testing.T, before, after string) {
 		args := append(strings.Split(before, "\x00"), strings.Split(after, "\x00")...)

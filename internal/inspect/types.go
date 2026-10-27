@@ -301,10 +301,10 @@ type Result struct {
 	//     or "--api-key=", "x" in -H "Authorization: Bearer x", a token path
 	//     segment, the user info and the query values of a URL, or the
 	//     password of a DSN with no scheme ("u:pw@tcp(h:3306)/db") or of the
-	//     Oracle form "name/pw@tns". Plain
-	//     args that RedactArgs shows, such as package names and paths, are
-	//     not in the list. RedactArgs fails closed, so some text that is not
-	//     a secret (a path segment with a space) is in the list too.
+	//     Oracle form "name/pw@tns". Plain args that RedactArgs shows, such
+	//     as package names and paths, are not in the list. RedactArgs fails
+	//     closed, so some text that is not a secret (a path segment with a
+	//     space) is in the list too.
 	//   - remote: each configured header value, and the credential after an
 	//     auth scheme ("Bearer <token>").
 	//   - remote: for a Cookie or Cookie2 header, each pair ("sid=x") and
@@ -341,11 +341,11 @@ type Result struct {
 	// shows each value of Secrets that a server echoes in a tool name, title,
 	// description or schema as discover.Mask ("********"): see
 	// discover.TextRedactor, maskedToolKey and compareMask in cmd/mcpmoat,
-	// and pins.CompareMasked. The scrub of error text removes
-	// these values too. A value shorter than discover.MinSecretBytes is not
-	// in the list, so the report does not mask it. scan --llm sends Result
-	// text off the machine and removes from it only the values of
-	// Credentials, the subset that looks like a credential.
+	// and pins.CompareMasked. The scrub of error text removes these values
+	// too. A value shorter than discover.MinSecretBytes is not in the list,
+	// so the report does not mask it. scan --llm sends Result text off the
+	// machine and removes from it only the values of Credentials, the subset
+	// that looks like a credential.
 	//
 	// Never print, log, encode (JSON, gob) or store the values. A
 	// discover.Secret prints and encodes as discover.Mask, so a mistake shows

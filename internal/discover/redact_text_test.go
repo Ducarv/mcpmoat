@@ -46,6 +46,25 @@ func cutUTF8(s string, limit int) (string, bool) {
 	return s[:limit], true
 }
 
+// redactText replaces each occurrence of each value in values with Mask in
+// all of s, and reports whether it wrote a Mask. The values normally come
+// from SecretTextValues. See redactWindow for how the occurrences are found
+// and replaced.
+//
+// redactText reads all of s. The values must not be empty (SecretTextValues
+// gives only values of at least MinSecretBytes bytes). An empty value is
+// skipped.
+//
+// Only the tests use it, as the reference for RedactTextPrefix and
+// TextRedactor. It builds the search tables of the values on each call. Code
+// outside the tests uses a TextRedactor, which builds the tables once.
+func redactText(s string, values []string) (string, bool) {
+	if len(values) == 0 || s == "" {
+		return s, false
+	}
+	return redactWindow(s, values, nil, len(s), -1)
+}
+
 // redactOracle is a slow, plain form of redactText for the tests. It tries
 // each value at each start position, marks the bytes of each occurrence, and
 // writes one Mask for each run of marked bytes.
@@ -89,10 +108,10 @@ func wantRedactedFlag(starts []int, limit int) bool {
 	return slices.ContainsFunc(starts, func(at int) bool { return at <= limit })
 }
 
-// FuzzRedactSecrets compares redactText with redactOracle. The result also
+// FuzzRedactText compares redactText with redactOracle. The result also
 // never holds a value with no "*" byte: such a value cannot cross a Mask, and
 // every unmarked run is free of occurrences.
-func FuzzRedactSecrets(f *testing.F) {
+func FuzzRedactText(f *testing.F) {
 	f.Add("abcdefghXXXXXXXXX", "abcdefgh", "hXXXXXXXXX")
 	f.Add("a xxCANARY12yy b CANARY12", "CANARY12", "xxCANARY12yy")
 	f.Add("ababababab", "abababab", "")
@@ -170,6 +189,32 @@ func TestDecodedPerByte(t *testing.T) {
 		var decoded string
 		if err := json.Unmarshal([]byte(`"`+tt.in+`"`), &decoded); err != nil || decoded != got {
 			t.Errorf("json.Unmarshal(%q) = %q, %v; want decodedPerByte() = %q", tt.in, decoded, err, got)
+		}
+	}
+}
+
+// TestPerByteForm checks that PerByteForm gives the decoded form only for a
+// value that is not valid UTF-8.
+func TestPerByteForm(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		in     string
+		want   string
+		wantOK bool
+	}{
+		{in: "", want: "", wantOK: false},
+		{in: "abc", want: "", wantOK: false},
+		{in: "é€😀", want: "", wantOK: false},
+		{in: ffd, want: "", wantOK: false},
+		{in: "\xff", want: ffd, wantOK: true},
+		{in: "a\xff\xfeb", want: "a" + ffd + ffd + "b", wantOK: true},
+		{in: "\xe2\x82", want: ffd + ffd, wantOK: true},
+	}
+	for _, tt := range tests {
+		got, ok := PerByteForm(tt.in)
+		if got != tt.want || ok != tt.wantOK {
+			t.Errorf("PerByteForm(%q) = (%q, %v), want (%q, %v)", tt.in, got, ok, tt.want, tt.wantOK)
 		}
 	}
 }
@@ -468,11 +513,11 @@ func TestRedactWindowEmptyValue(t *testing.T) {
 	}
 }
 
-// TestRedactSecretsMaskEdge pins the known limit in the doc of redactWindow: a
+// TestRedactTextMaskEdge pins the known limit in the doc of redactWindow: a
 // value that ends with "*" can come back across a Mask, when the text holds
 // the rest of the value just before another secret. The bytes next to the
 // Mask are text that the server wrote itself.
-func TestRedactSecretsMaskEdge(t *testing.T) {
+func TestRedactTextMaskEdge(t *testing.T) {
 	t.Parallel()
 
 	values := []string{"abcdefg*", "SECRETxy"}

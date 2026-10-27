@@ -33,8 +33,8 @@ const noToolNameKey = "(no name)"
 // as discover.Mask, and then the name is cut to maxToolKeyRunes runes, or is
 // noToolNameKey for an empty name. The mask comes before the cut, so a cut
 // never leaves a part of a secret. All the rows below start from this row, so
-// they all get the same Key.
-// The ignore lookup in classifyPlan uses the real tool name, not the Key.
+// they all get the same Key. The ignore lookup in classifyPlan uses the real
+// tool name, not the Key.
 func llmRow(job llmJob, a llmAnswer) (report.FindingRow, bool) {
 	row := report.FindingRow{
 		ServerRef: job.ref,

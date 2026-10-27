@@ -93,6 +93,13 @@ type ConnectError struct {
 
 	// err is the cause. See Unwrap.
 	err error
+
+	// serverLen is the length in bytes of the end of Reason that is the
+	// scrubbed text of the cause (see classify): text that the server or the
+	// transport wrote. Reason[:len(Reason)-serverLen] is fixed text of
+	// mcpmoat, such as "network error: " or a whole httpReason. It is 0 when
+	// all of Reason is fixed text. showDiscoveredURL changes only the end.
+	serverLen int
 }
 
 // Error returns "<Server>: <Reason> (<URL>)". The part in parentheses is
@@ -201,9 +208,13 @@ func classify(err error, srv discover.Server, ev transportEvents, lists secretLi
 		URL:    redacted,
 	}
 	ce.Kind, ce.Reason, ce.Status = classifyCause(cause, srv, status, connected, func(text string) string {
-		return scrub(text, rawURL, redacted, lists.long, lists.short)
+		scrubbed := scrub(text, rawURL, redacted, lists)
+		// classifyCause puts the scrubbed text at the end of the reason, so
+		// its length marks where the fixed text ends.
+		ce.serverLen = len(scrubbed)
+		return scrubbed
 	})
-	ce.err = safeCause(cause, rawURL, redacted, lists.long, lists.short)
+	ce.err = safeCause(cause, rawURL, redacted, lists)
 	return ce
 }
 
@@ -249,6 +260,8 @@ func isBlockedErr(err error) bool {
 // classifyCause finds the kind, the reason and the HTTP status of cause. It
 // is the decision table of classify. connected tells whether the session was
 // connected (see transportEvents). scrubText removes secrets from error text.
+// When classifyCause calls scrubText, reason ends with its result, after
+// fixed text only: classify relies on that (see ConnectError.serverLen).
 func classifyCause(cause error, srv discover.Server, status int, connected bool, scrubText func(string) string) (kind ConnectKind, reason string, httpStatus int) {
 	for _, b := range blockedKinds {
 		if errors.Is(cause, b.err) {
@@ -427,17 +440,17 @@ func stripURLError(err error) error {
 // context error and the sentinel that cause wraps (see withText). So
 // errors.Is(err, context.DeadlineExceeded) still works when the scrub changed
 // the text, as it often does: with a short value "1", "exit status 1" changes.
-// A nil cause gives nil. secrets and short are the lists of scrub.
-func safeCause(cause error, rawURL, redactedURL string, secrets, short []string) error {
+// A nil cause gives nil. lists is the one of scrub.
+func safeCause(cause error, rawURL, redactedURL string, lists secretLists) error {
 	if cause == nil {
 		return nil
 	}
 	text := cause.Error()
-	replaced := replaceSecrets(text, rawURL, redactedURL, secrets, short)
+	replaced := replaceSecrets(text, rawURL, redactedURL, lists)
 	if replaced == text {
 		return cause
 	}
-	return withText(cause, cutWords(replaced, short))
+	return withText(cause, cutWords(replaced, lists.short))
 }
 
 // scrub removes secrets from text and shortens it, so that it is safe to
@@ -451,24 +464,28 @@ func safeCause(cause error, rawURL, redactedURL string, secrets, short []string)
 //     authority (in plain and in URL-escaped form), with discover.Mask;
 //   - every path segment of rawURL that discover.RedactURL masks, after "/",
 //     with discover.Mask;
-//   - every non-empty string in secrets with discover.Mask, longest first,
-//     wherever it stands;
-//   - then every non-empty string in short with discover.Mask, but only where
-//     it stands as a whole word (see replaceWords).
+//   - every non-empty string in lists.long with discover.Mask, longest
+//     first, wherever it stands;
+//   - then every non-empty string in lists.short with discover.Mask, but
+//     only where it stands as a whole word (see replaceWords).
 //
 // For each secret it also replaces the form that %q prints (backslashes and
-// quotes escaped). It then cuts the result to maxReasonRunes runes and adds
-// "…" if it cut anything (see cutWords: the cut never leaves a value of short
-// at the end as a whole word). The result can still hold text that the server
-// controls; callers must escape it with internal/termsafe before they print
-// it.
-func scrub(text, rawURL, redactedURL string, secrets, short []string) string {
-	return cutWords(replaceSecrets(text, rawURL, redactedURL, secrets, short), short)
+// quotes escaped). For a value of lists.long that is not valid UTF-8, it also
+// replaces the form with one U+FFFD for each invalid byte (see
+// discover.PerByteForm): a JSON decoder writes that form when the server
+// echoes the value in a JSON-RPC error. It then cuts the result to
+// maxReasonRunes runes and adds "…" if it cut anything (see cutWords: the cut
+// never leaves a value of lists.short at the end as a whole word). The result
+// can still hold text that the server controls; callers must escape it with
+// internal/termsafe before they print it. scrub does not read
+// lists.credentials.
+func scrub(text, rawURL, redactedURL string, lists secretLists) string {
+	return cutWords(replaceSecrets(text, rawURL, redactedURL, lists), lists.short)
 }
 
 // replaceSecrets does the replacements that scrub describes, without the
 // cut.
-func replaceSecrets(text, rawURL, redactedURL string, secrets, short []string) string {
+func replaceSecrets(text, rawURL, redactedURL string, lists secretLists) string {
 	if rawURL != "" {
 		text = replaceForms(text, rawURL, redactedURL)
 		text = replaceURLParts(text, rawURL, redactedURL)
@@ -477,14 +494,25 @@ func replaceSecrets(text, rawURL, redactedURL string, secrets, short []string) s
 	// Longest first: a value that is a substring of another value must not
 	// leave pieces of the longer one behind. Header values are replaced
 	// everywhere, even the short ones: a leak is worse than a garbled word.
-	values := slices.DeleteFunc(slices.Clone(secrets), func(v string) bool { return v == "" })
+	var values []string
+	for _, v := range lists.long {
+		if v == "" {
+			continue
+		}
+		values = append(values, v)
+		// The per-byte form is longer than v (U+FFFD has 3 bytes), so the
+		// sort below puts it before v.
+		if form, ok := discover.PerByteForm(v); ok {
+			values = append(values, form)
+		}
+	}
 	slices.SortFunc(values, func(a, b string) int { return len(b) - len(a) })
 	for _, v := range values {
 		text = replaceForms(text, v, discover.Mask)
 	}
 	// The short values last: a short value can be a part of a long one, and
 	// the long one must go as a whole.
-	return replaceWords(text, short)
+	return replaceWords(text, lists.short)
 }
 
 // replaceForms replaces old with replacement in text. It does the same for
@@ -627,6 +655,12 @@ func replaceUserinfo(text, rawURL string, userinfo *url.Userinfo) string {
 // removes short as whole words again, because the new URL text can change the
 // bytes next to a value, and it cuts with cutWords, so that the new cut does
 // not leave a value at the end as a whole word.
+//
+// In Reason, it changes only the end that classify took from the text of the
+// cause (see ConnectError.serverLen). The fixed text of mcpmoat before it,
+// such as an httpReason, never holds the URL, and a short value that is also
+// a word of that text must not garble it: with ${EP} = "sse", "set type =
+// sse" stays as it is.
 func showDiscoveredURL(ce *ConnectError, expanded, discovered discover.URL, short []string) {
 	to := discovered.String()
 	ce.URL = to
@@ -665,7 +699,13 @@ func showDiscoveredURL(ce *ConnectError, expanded, discovered discover.URL, shor
 		}
 		return replaceWords(text, short)
 	}
-	ce.Reason = cutWords(replace(ce.Reason), short)
+	if ce.serverLen > 0 {
+		// The guard keeps the slice in range if serverLen is ever wrong.
+		fixedLen := max(len(ce.Reason)-ce.serverLen, 0)
+		fixed, fromServer := ce.Reason[:fixedLen], ce.Reason[fixedLen:]
+		ce.Reason = cutWords(fixed+replace(fromServer), short)
+		ce.serverLen = max(len(ce.Reason)-len(fixed), 0)
+	}
 	if ce.err != nil {
 		text := ce.err.Error()
 		if replaced := replace(text); replaced != text {

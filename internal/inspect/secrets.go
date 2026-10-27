@@ -29,9 +29,10 @@ type secretLists struct {
 	credentials []string
 }
 
-// resultSecrets returns the values in lists as discover.Secret values, for
+// resultSecrets returns the values in list as discover.Secret values, for
 // Result.Secrets. It keeps only the values of at least discover.MinSecretBytes
-// bytes, each one time.
+// bytes, each one time. The callers pass secretLists.long; a test that has
+// more than one list joins them with slices.Concat.
 //
 // The scrub of error text (see scrub) also removes shorter header values and
 // a short URL password. Result.Secrets does not hold them: a consumer removes
@@ -40,20 +41,18 @@ type secretLists struct {
 // applies here only, and the lists of the error scrub stay as they are.
 //
 // The result is sorted longest first, then by value. The sort makes the
-// output stable: it does not depend on the order of a map. The consumer in
-// package llm does not need that order (redactWindow marks bytes), and its
-// secretValues removes duplicates again. It is nil when no value is long
-// enough.
+// output stable: it does not depend on the order of a map. The consumers
+// (discover.NewTextRedactor in cmd/mcpmoat, and llm through
+// Result.Credentials) do not need that order, and discover.SecretTextValues
+// removes duplicates again. It is nil when no value is long enough.
 //
 // The sort and the duplicate check compare the raw values in memory only.
 // Never print, log or encode them.
-func resultSecrets(lists ...[]string) []discover.Secret {
+func resultSecrets(list []string) []discover.Secret {
 	var values []string
-	for _, list := range lists {
-		for _, v := range list {
-			if len(v) >= discover.MinSecretBytes {
-				values = append(values, v)
-			}
+	for _, v := range list {
+		if len(v) >= discover.MinSecretBytes {
+			values = append(values, v)
 		}
 	}
 	slices.SortFunc(values, func(a, b string) int {
@@ -72,33 +71,31 @@ func resultSecrets(lists ...[]string) []discover.Secret {
 	return secrets
 }
 
-// resultCredentials returns the values of secrets that are also in one of
-// lists, for Result.Credentials. secrets is the result of resultSecrets, and
-// lists hold the values that the credential checks found (see isCredential,
+// resultCredentials returns the values of secrets that are also in list,
+// for Result.Credentials. secrets is the result of resultSecrets, and list
+// holds the values that the credential checks found (see isCredential,
 // envCredentials, argCredentials, headerCredentials, urlCredentials and
-// valueCredentials), usually secretLists.credentials.
+// valueCredentials): the callers pass secretLists.credentials.
 //
 // Credentials is a subset of Secrets by construction: the function only
 // drops values from secrets, so it cannot add a value that Secrets does not
 // hold. It keeps the order of secrets (longest first, then by value) and
-// adds no duplicate, because secrets has none. A value of lists that is not
+// adds no duplicate, because secrets has none. A value of list that is not
 // in secrets is dropped: it is shorter than discover.MinSecretBytes, or it is
 // not a value that the consumer removes from the Result text anyway. It is
 // nil when no value is a credential.
 //
 // The set compares the raw values in memory only. Never print, log or encode
 // them.
-func resultCredentials(secrets []discover.Secret, lists ...[]string) []discover.Secret {
+func resultCredentials(secrets []discover.Secret, list []string) []discover.Secret {
 	if len(secrets) == 0 {
 		return nil
 	}
 	// A map with empty struct values is the usual Go set: struct{} takes no
 	// memory, and only the keys matter.
-	found := make(map[string]struct{})
-	for _, list := range lists {
-		for _, v := range list {
-			found[v] = struct{}{}
-		}
+	found := make(map[string]struct{}, len(list))
+	for _, v := range list {
+		found[v] = struct{}{}
 	}
 	var credentials []discover.Secret
 	for _, s := range secrets {
@@ -129,9 +126,10 @@ func isCredential(name, value string) bool {
 // token of "Bearer x" or the value of "password=x" in a connection string.
 // Plain words, such as "production" or "application/json", give false.
 //
-// It is not the rule of package discover for one value: discover.TokenLike
-// alone reads value as one token, while holdsCredential splits value into
-// words and adds the checks of discover.ArgCredentials.
+// discover.TokenLike checks each word of value (it splits value with
+// strings.Fields). holdsCredential adds the check of discover.ArgCredentials
+// for a credential inside a longer value, such as the password of a
+// connection URL, which no word check finds.
 //
 // It never prints or stores value.
 func holdsCredential(value string) bool {
@@ -162,14 +160,20 @@ func holdsCredential(value string) bool {
 //
 // The results hold raw values. Never print, log or encode them.
 func valueCredentials(value string) (long, short []string) {
+	// seen holds the pieces that are in long or short already. A large value
+	// has one piece per pair, so a search in the lists for each piece would
+	// cost the square of the number of pieces (NFR-03). The lookup in a map
+	// costs the same for any number of pieces.
+	seen := make(map[string]struct{})
 	for _, v := range discover.ArgCredentials([]string{value}) {
-		switch {
-		case v == value, slices.Contains(long, v), slices.Contains(short, v):
-			// The whole value, or a piece that is in a list already. The
-			// lists are short, so a linear search is enough.
-		case len(v) >= discover.MinSecretBytes:
+		if _, dup := seen[v]; dup || v == value || v == "" {
+			// A piece that is in a list already, the whole value or empty.
+			continue
+		}
+		seen[v] = struct{}{}
+		if len(v) >= discover.MinSecretBytes {
 			long = append(long, v)
-		case v != "":
+		} else {
 			short = append(short, v)
 		}
 	}

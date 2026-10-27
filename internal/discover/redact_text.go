@@ -17,7 +17,7 @@ import (
 // SecretTextValues returns the values that [TextRedactor] and
 // [RedactTextPrefix] must remove for secrets: each secret value of at least
 // [MinSecretBytes] bytes and, for a value that is not valid UTF-8, also its
-// decoded form (see decodedPerByte). It skips shorter values (see
+// decoded form (see [PerByteForm]). It skips shorter values (see
 // MinSecretBytes) and a value that is in the result already. The minimum
 // applies to the raw configured value, so a raw value shorter than
 // MinSecretBytes gives no decoded form either, even when that form is
@@ -60,32 +60,26 @@ func SecretTextValues(secrets []Secret) []string {
 			continue
 		}
 		add(v)
-		if !utf8.ValidString(v) {
-			add(decodedPerByte(v))
+		if form, ok := PerByteForm(v); ok {
+			add(form)
 		}
 	}
 	return values
 }
 
-// redactText replaces each occurrence of each value in values with Mask in
-// all of s, and reports whether it wrote a Mask. The values normally come
-// from SecretTextValues. See redactWindow for how the occurrences are found
-// and replaced.
+// PerByteForm returns the form of v that a JSON decoder gives: one U+FFFD for
+// each byte of v that is not part of a valid UTF-8 rune (see
+// [SecretTextValues] for why). It returns that form and true only when v is
+// not valid UTF-8. For valid UTF-8 the form is v itself, so it returns "" and
+// false.
 //
-// redactText reads all of s. For a long text of which only the start is
-// shown, use RedactTextPrefix, which bounds the work.
-//
-// The values must not be empty (SecretTextValues gives only values of at
-// least MinSecretBytes bytes). An empty value is skipped.
-//
-// redactText builds the search tables of the values on each call. Only the
-// tests call it, as the reference for the other forms. Code outside the
-// package uses a TextRedactor, which builds the tables once.
-func redactText(s string, values []string) (string, bool) {
-	if len(values) == 0 || s == "" {
-		return s, false
+// v and the result are secret values when v is a secret: never pass them to
+// fmt, a logger, an error or an encoder.
+func PerByteForm(v string) (string, bool) {
+	if utf8.ValidString(v) {
+		return "", false
 	}
-	return redactWindow(s, values, nil, len(s), -1)
+	return decodedPerByte(v), true
 }
 
 // RedactTextPrefix replaces each occurrence of each value in values with
@@ -172,8 +166,8 @@ var (
 // receivers, so a *TextRedactor also gives Mask.
 type TextRedactor struct {
 	// redact keeps the values and their tables inside a closure: redact(s,
-	// -1) redacts all of s (redactText), and redact(s, limit) with limit >= 0
-	// gives the start that RedactTextPrefix gives.
+	// -1) redacts all of s, and redact(s, limit) with limit >= 0 gives the
+	// start that RedactTextPrefix gives.
 	//
 	// It is a func, not a pointer to a struct with the values. fmt prints a
 	// struct in an unexported field by reflection, and for a verb that does
