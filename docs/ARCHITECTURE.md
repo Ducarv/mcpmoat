@@ -55,8 +55,9 @@ docs/                   PRD and other documentation
 - `internal/safefile`: the one shared hardened file read. It confines the open to a directory with
   `os.Root`, refuses non-regular files, does not block on a FIFO (as the file or as the directory) and
   caps the size. `discover` and `rules` use it. A caller that must check the directory on its open
-  handle first opens it with `OpenRoot`, checks it, and then opens the file with `OpenFileInRoot` in
-  the same root, so the checked directory is the one that it reads from. `pins.Load` does this.
+  handle first opens it with `OpenRoot`, checks it, and then opens the file with
+  `OpenIfExistsInRoot` in the same root, so the checked directory is the one that it reads from.
+  `pins.Load` and `pins.LoadLocked` do this.
 - `internal/discover`: finds the MCP servers that the client configs declare. It does not start them.
 - `internal/inspect`: starts or calls each server and reads what it offers. It is the only product
   package that imports the MCP SDK (see [The `internal/inspect` interface](#the-internalinspect-interface)).
@@ -220,9 +221,8 @@ the connect, pin, tool rule and LLM steps between step 5 and step 6:
     of the save. A server that does not fit is not pinned and gets the same high MOAT-T2-004
     finding with the fixed reason `reasonStoreFull` and the fix `fixStoreFull` (the texts are in
     [Pins and rug pulls](pins.md)). The reason stays at 80 runes or less, so the terminal report
-    does not cut it. The risk
-    (`riskServerUnverified`) tells that the tools of the server are not checked against pins. The
-    servers that fit are still pinned.
+    does not cut it. The risk (`riskServerUnverified`) tells that the tools of the server are not
+    checked against pins. The servers that fit are still pinned.
     `scan` prints `mcpmoat scan: pinned N tools for <server>` on stderr only after the save worked.
   - A pinned server that failed or timed out gets a MOAT-T2-004 finding (high, exit 1) with the
     reason `pinned server could not be inspected` (`pinner.notInspected`). A hostile server must not
@@ -372,9 +372,9 @@ or above `--fail-on`. It compares `rules.Severity` `Rank()` values, and a severi
    file problem, because a broken file can hide a second server with the same name. It prints each
    problem, then `mcpmoat pin: fix the config file or choose one with --config <file>`, and exits
    with 2. It inspects nothing and writes nothing.
-2. It reads `pins.json` (`pins.Load`). A bad file exits with 2 before any server starts. It reads
-   the file again, with no lock, before step 4, and a third time, with the lock, in step 6. This
-   is the first read of the command. When the pins file existed at the first read of the command
+2. It reads `pins.json` (`pins.Load`). This is the first read of the command. A bad file exits with
+   2 before any server starts. It reads the file again, with no lock, before step 4, and a third
+   time, with the lock, in step 6. When the pins file existed at the first read of the command
    and a later read does not find it, `pin` saves nothing (steps 4 and 6).
 3. It inspects that one server with `--timeout`, with the same inspector as `scan`. A server that
    fails, times out or is refused exits with 2, and nothing is written. The inspection warnings go
@@ -402,8 +402,8 @@ or above `--fail-on`. It compares `rules.Severity` `Rank()` values, and a severi
    slow reader of stdout (a pager) never holds the lock. When the file existed at the first read
    of the command (or at the read for the diffs) but not at the locked read, it was removed while
    `pin` ran: `pin` saves nothing, prints `pinsRemovedText` and exits with 2
-   (`pinsRemovedWhileRunning`). When the entry of this server
-   changed between the two reads, `pin` warns that the diff is against the older pins. The counts
+   (`pinsRemovedWhileRunning`). When the entry of this server changed between the two reads, `pin`
+   warns that the diff is against the older pins. The counts
    of step 7 come from the locked store. Other servers keep their pins, and so do entries that
    another run wrote. A `pins.json` problem exits with 2. When `Set` refuses the server with
    `pins.ErrStoreFull`, `pin` prints a message that the pins file is full (see [Pins and rug
@@ -612,8 +612,8 @@ a changed tool (a rug pull). `scan` writes the pins of a server on its first run
   `perm_other.go`, `acl_darwin.go`, `acl_other.go`).
 - Checks on the open handles: `Load` opens the pins directory once, as an `os.Root`
   (`safefile.OpenRoot`), and checks the owner, the mode and the ACL on the open directory handle
-  (`checkDirHandle`). It opens `pins.json` through that root (`safefile.OpenFileInRoot`) and checks
-  the open file (`checkFileHandle`) before the type and size checks and before the read
+  (`checkDirHandle`). It opens `pins.json` through that root (`safefile.OpenIfExistsInRoot`) and
+  checks the open file (`checkFileHandle`) before the type and size checks and before the read
   (`readChecked`). So the checked directory and file are the ones that `Load` reads, with no path
   race between the check and the read. An unsafe file that is also larger than 32 MiB reports the
   permission problem, not the size. A pins directory or a `pins.json` that the user may not open
@@ -626,12 +626,17 @@ a changed tool (a rug pull). `scan` writes the pins of a server on its first run
   after the open is refused too. The fix is to replace the symlink with the file. A symlink that is
   absolute or that leaves the directory is refused before that (`safefile.ErrOutsideRoot`). A
   pins directory that is a symlink (for example a config directory on another volume), and a
-  symlink in a parent, are followed: the checks see the target.
+  symlink in a parent, are followed: the checks see the target. A symlink on the path, the pins
+  directory included, must belong to the current user or root (`checkSymlinkOwner`). The check
+  reads each entry with `os.Lstat`, because `os.Stat` shows only the target. The sticky bit of a
+  parent such as `/tmp` does not stop another user from creating a symlink there and pointing it
+  to another directory later.
 - Parent directories: `Load` and `LoadLocked` first check each parent directory of the pins
   directory, up to `/` (`checkParents`). They walk the lexical path and the path with the symlinks
   resolved, so when `~/.config` is a symlink to `/data/cfg`, `/data` is checked too. A parent is
   refused when a user that is neither the current user nor root owns it, or when group or others
-  can write it, unless the sticky bit is set (as on `/tmp`). The fix hint is
+  can write it, unless the sticky bit is set (as on `/tmp`), and a symlink that such a user owns is
+  refused (see the symlink rule above). The fix hint is
   `chmod go-w -- '<path>'`, or a private `XDG_CONFIG_HOME`. A missing parent (a first run) is
   skipped, so the nearest existing parent, in which the pins directory is made, and every
   directory above it are still checked. Without this check, a user who can write a parent could
@@ -674,9 +679,9 @@ a changed tool (a rug pull). `scan` writes the pins of a server on its first run
   prints the read error (which wraps `ErrLocked`) and `pinsLockedText`, and exits with 2. A signal
   during the wait gives the interrupted line. When the system or the file system cannot lock the
   directory (for example some network mounts), `LoadLocked` goes on without the lock
-  (`Store.Unlocked`), and the run prints one warning. The texts of both lines are in [Pins and rug
-  pulls](pins.md). `scan` and `pin --accept` release the lock right after the save, before they
-  print. The code is in `internal/pins` (`lock.go`, `lock_unix.go`, `lock_other.go`).
+  (`Store.RanWithoutLock`), and the run prints one warning. The texts of both lines are in
+  [Pins and rug pulls](pins.md). `scan` and `pin --accept` release the lock right after the save,
+  before they print. The code is in `internal/pins` (`lock.go`, `lock_unix.go`, `lock_other.go`).
 
 Known limits:
 

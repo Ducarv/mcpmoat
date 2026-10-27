@@ -39,11 +39,10 @@ Exit code 2 comes, for example, from a usage error (invalid flags), invalid rule
 a `--rules` file that does not compile, with or without `--no-connect`), an unreadable
 `--config` file, a problem in a config file, a `pins.json` that cannot be read or saved (see [Pins
 errors](#pins-errors)), a report that cannot be written (a closed stdout), an unknown home or
-working directory in auto-discovery,
-an `--llm` problem (a missing or invalid `MCPMOAT_LLM_API_KEY`, a provider failure, an internal
-error of the LLM step, or more than 500 tools), an internal error of the tool rule step, or another
-internal error. Some of these errors still
-print the report on stdout first, so you can read the findings:
+working directory in auto-discovery, an `--llm` problem (a missing or invalid
+`MCPMOAT_LLM_API_KEY`, a provider failure, an internal error of the LLM step, or more than 500
+tools), an internal error of the tool rule step, or another internal error. Some of these errors
+still print the report on stdout first, so you can read the findings:
 
 | Execution error | Report |
 |---|---|
@@ -86,9 +85,10 @@ To use the exit code in CI or in a git hook, see [Using mcpmoat in CI and git ho
 
 - The pins directory, a parent directory of it, or `pins.json` is unsafe: another user owns it,
   group or others can write it, a macOS ACL lets a user or group write the pins directory or
-  `pins.json`, or `pins.json` is a symlink. A parent passes when root owns it, and a parent with the
-  sticky bit (as `/tmp`) passes. The error names the path and gives a fix (see [Pins and rug
-  pulls](pins.md)).
+  `pins.json`, or `pins.json` is a symlink, or another user owns a symlink on the path to the pins
+  directory. A parent passes the owner check when root owns it (group or other write without the
+  sticky bit is still refused), and a parent with the sticky bit (as `/tmp`) passes the write
+  check. The error names the path and gives a fix (see [Pins and rug pulls](pins.md)).
 - No part of the pins path exists, or a part of it is a file.
 - Another process still holds the lock on the pins directory after 10 seconds. The command prints
   two lines on stderr: the read error, then a line that tells you to run the command again (see

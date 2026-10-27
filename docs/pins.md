@@ -35,7 +35,10 @@
   A user who can write a parent could remove or replace the whole `mcpmoat` directory, and the next
   run would pin the current tools with no alert. The hint is `chmod go-w -- '<path>'`, or a private
   `XDG_CONFIG_HOME`. A common case: a `~/.config` made with umask 002 has mode `0775`, and mcpmoat
-  refuses it until you run `chmod go-w ~/.config`.
+  refuses it until you run `chmod go-w ~/.config`. Another case is a container job where `HOME` is
+  a mount that a different user owns (for example a root job with a `HOME` that belongs to uid
+  1001). Then every `scan` that connects exits with code 2 before it inspects anything. Set a
+  private `XDG_CONFIG_HOME` that you own for that job.
 - **ACL (macOS):** on macOS, an ACL can let another user write a path that has a safe mode. mcpmoat
   refuses a pins directory or a `pins.json` whose ACL has an allow entry that gives a write right,
   for any user or group, also for your own account. The hint is `chmod -N -- '<path>'`. It removes
@@ -45,7 +48,12 @@
   detected, so check those ACLs yourself with `ls -led`.
 - **Symlinks:** mcpmoat refuses a `pins.json` that is a symlink, also when it points to a file in
   the same directory. The hint is to replace the symlink with the file. A pins directory that is a
-  symlink, for example `~/.config` on another disk, is fine: mcpmoat checks its target.
+  symlink, for example `~/.config` on another disk, is fine when you or root own the symlink:
+  mcpmoat checks its target. A symlink that another user owns is refused, on the pins directory
+  and on every parent. In a sticky directory such as `/tmp`, any user can create a symlink, and
+  that user can point it to another directory later, so the next run would see a first run. The
+  hint is to ask the owner or root to remove or replace the symlink, or to use a private
+  `XDG_CONFIG_HOME`.
 - **Later runs:** `scan` compares the tools with the pins. It reports `MOAT-T2-001` (changed tool,
   high), `MOAT-T2-002` (new tool, medium), `MOAT-T2-003` (removed tool, low) and `MOAT-T2-004` (tool
   not verified). A new tool is medium. Read the report, not only the exit code (see [Exit
@@ -55,10 +63,9 @@
   or empty tool name, invalid tool data, or more than 2 MiB) is a high `MOAT-T2-004`, because
   mcpmoat can never check its tools for changes. `MOAT-T2-004` is high when the tool name is pinned,
   because a duplicate, invalid or unverifiable copy of a pinned tool can hide a rug pull. Else it is
-  medium. For each changed tool, `scan` prints a unified diff of the pinned and the
-  current text after the findings. For each new tool, it prints the full text of the tool as added
-  lines, under the header `New tool <tool> on server <server>:`, so you can review it before you
-  accept it.
+  medium. For each changed tool, `scan` prints a unified diff of the pinned and the current text
+  after the findings. For each new tool, it prints the full text of the tool as added lines,
+  under the header `New tool <tool> on server <server>:`, so you can review it before you accept it.
   A pinned tool whose pin cannot be checked (another hash version, or a pinned text that does not
   match its hash) gets its full current text too, under `Not verified tool <tool> on server <server>
   (current text):`. An ignored finding gets no diff. If a diff is longer than 64 KiB or 2000 lines,
@@ -146,7 +153,7 @@
   detected. If another run made the file larger after the report, `scan` prints
   `mcpmoat scan: warning: server <server> not pinned: the pins file is full (32 MiB)` instead and
   exits with code 2. If the new pins of `pin --accept` do not fit, it prints `mcpmoat pin: cannot
-  pin <server>: the pins file is full (32 MiB limit); remove servers you no longer use from
+  pin <server>: the pins file is full (32 MiB); remove servers you no longer use from
   pins.json`, saves nothing and exits with code 2. `scan` checks the limit only for servers that
   it pins for the first time. A pinned server whose tools grew still gets a `To accept` line, and
   `pin --accept` can then refuse it. The limit is first come, first served, and mcpmoat never
