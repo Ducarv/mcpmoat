@@ -9,7 +9,9 @@
 # call. A case changes the state of the fake, runs the script, and wants an
 # exit code, a release state (draft or published) and a text in the output.
 #
-# VERIFY_SCRIPT (an absolute path) selects another copy of the script to test.
+# VERIFY_SCRIPT is a test hook, not a setting for normal use. Set it to an
+# absolute path to test another copy of the script, for example a copy with a
+# bug on purpose, to see that the cases fail.
 set -euo pipefail
 
 CDPATH='' cd -- "$(dirname -- "$0")/../.."
@@ -24,8 +26,9 @@ other_sha=fedcba9876543210fedcba9876543210fedcba98
 failed=0
 total=0
 
-# fail reports a failed case. It uses the GitHub error syntax in Actions.
-fail() {
+# record_failure reports a failed case and goes on with the next case. It uses
+# the GitHub error syntax in Actions.
+record_failure() {
   if [ -n "${GITHUB_ACTIONS:-}" ]; then
     echo "::error::$*" >&2
   else
@@ -39,6 +42,7 @@ mkdir -p "$tmp/bin"
 cat >"$tmp/bin/gh" <<'FAKE'
 #!/usr/bin/env bash
 # Fake gh for verify-and-publish-test.sh. State is in files in $FAKE_GH_STATE.
+# $FAKE_OTHER_SHA is the commit that a moved tag points at.
 set -euo pipefail
 S=${FAKE_GH_STATE:?}
 die() {
@@ -54,6 +58,9 @@ state=$(cat "$S/state")
 
 if [ "$args" = "release view $tag -R $repo --json assets -q .assets[].name" ]; then
   ls "$S/assets"
+# The 11 arguments are: release download TAG -R REPO --pattern *.tar.gz
+# --pattern checksums.txt -D DIR. The count rejects any extra argument that
+# the glob in the test above would accept.
 elif [[ $args == "release download $tag -R $repo --pattern *.tar.gz --pattern checksums.txt -D "* ]] && [ $# -eq 11 ]; then
   dir=${!#}
   mkdir -p "$dir"
@@ -90,7 +97,7 @@ elif [ "$args" = "release edit $tag -R $repo --draft=false" ]; then
   case $(cat "$S/after") in
   swap_asset) echo swapped >"$S/assets/$first" ;;
   add_asset) echo extra >"$S/assets/extra.zip" ;;
-  move_tag) echo fedcba9876543210fedcba9876543210fedcba98 >"$S/tag_sha" ;;
+  move_tag) echo "${FAKE_OTHER_SHA:?}" >"$S/tag_sha" ;;
   esac
 else
   die "unknown call: $args"
@@ -141,20 +148,39 @@ check_case() {
   new_tree
   "$@"
   out=$(env -i PATH="$tmp/bin:$PATH" HOME="$tmp/home" FAKE_GH_STATE="$S" \
-    GH_TOKEN=fake GITHUB_REF_NAME=v9.9.9 GITHUB_REPOSITORY=owner/repo \
+    GH_TOKEN=fake FAKE_OTHER_SHA="$other_sha" GITHUB_REF_NAME=v9.9.9 GITHUB_REPOSITORY=owner/repo \
     GITHUB_SHA="$sha" GITHUB_REF=refs/tags/v9.9.9 GITHUB_SERVER_URL=https://github.com \
     "$tmp/w/.github/scripts/verify-and-publish.sh" 2>&1) || got=$?
   state=$(cat "$S/state")
   if [ "$got" != "$want" ]; then
-    fail "$name: exit $got, want $want: $out"
+    record_failure "$name: exit $got, want $want: $out"
   elif [ "$state" != "$want_state" ]; then
-    fail "$name: the release is $state, want $want_state: $out"
+    record_failure "$name: the release is $state, want $want_state: $out"
   elif [[ $out != *"$msg"* ]]; then
-    fail "$name: the output lacks '$msg': $out"
+    record_failure "$name: the output lacks '$msg': $out"
   fi
 }
 
 check_case "good release" 0 published "" good
+
+# check_calls reads the call log of the good release, which is still in $S.
+# It wants one "attestation verify" call for each file that the script
+# downloads (the archives and checksums.txt, not the files that it ignores),
+# and all of them before "release edit", the publish.
+check_calls() {
+  local want n last_verify edit
+  total=$((total + 1))
+  want=$(find "$tmp/w/dist" -maxdepth 1 -type f \( -name '*.tar.gz' -o -name checksums.txt \) | wc -l | tr -d ' ')
+  n=$(grep -c '^attestation verify ' "$S/calls" || true)
+  last_verify=$(grep -n '^attestation verify ' "$S/calls" | tail -n 1 | cut -d: -f1 || true)
+  edit=$(grep -n '^release edit ' "$S/calls" | head -n 1 | cut -d: -f1 || true)
+  if [ "$n" != "$want" ]; then
+    record_failure "attestation calls: $n, want $want: $(cat "$S/calls")"
+  elif [ -z "$edit" ] || [ "$last_verify" -ge "$edit" ]; then
+    record_failure "an attestation verify call comes after the publish: $(cat "$S/calls")"
+  fi
+}
+check_calls
 
 check_case "extra asset on the draft" 1 draft "::error::The release assets do not match dist/" extra_on_draft
 check_case "missing asset on the draft" 1 draft "::error::The release assets do not match dist/" missing_on_draft
@@ -166,7 +192,8 @@ check_case "tag moved after the publish" 1 published "::error::The tag v9.9.9 po
 check_case "asset swapped after the publish" 1 published "differ" asset_swapped_after
 check_case "asset added after the publish" 1 published "::error::The release assets do not match dist/" asset_added_after
 check_case "release is not immutable" 1 published "::error::The release is not immutable" not_immutable
-check_case "after-publish failure says to check the release" 1 published "::error::The release is public, but it is not locked" tag_moves_after
+# Same setup as the case above. It checks the closing message, not the first error.
+check_case "tag moved after the publish: closing message says the release is public" 1 published "::error::The release is public, but it is not locked" tag_moves_after
 
 if [ "$failed" -ne 0 ]; then
   echo "verify-and-publish-test: $failed of $total cases failed" >&2

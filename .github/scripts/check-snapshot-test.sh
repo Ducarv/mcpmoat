@@ -3,7 +3,8 @@
 # ci.yml runs it after the "Build a snapshot" step. Maintainers can also run
 # it on their machine, from any directory, after
 # "goreleaser release --snapshot --clean": see CONTRIBUTING.md, Checks.
-# It needs jq, like check-snapshot.sh.
+# It needs go, jq and file, and sha256sum or shasum, because check-snapshot.sh
+# needs them, and it runs go env itself.
 set -euo pipefail
 
 src=$(CDPATH='' cd -- "$(dirname -- "$0")/../.." && pwd)
@@ -25,6 +26,13 @@ fail() {
 # the repo, because go warns about a go.mod in the temp directory.
 host_os=$(go env GOOS)
 host_arch=$(go env GOARCH)
+
+# The Linux binary that the static-link case changes: not the binary of this
+# host, so that no host-run check can fail first.
+static_arch=amd64
+if [ "$host_os" = linux ] && [ "$host_arch" = amd64 ]; then
+  static_arch=arm64
+fi
 
 tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
@@ -63,6 +71,26 @@ drop_host_binary() {
   jq --arg os "$host_os" --arg arch "$host_arch" \
     'map(select(.type == "Binary" and .goos == $os and .goarch == $arch | not))' \
     dist/artifacts.json >dist/artifacts.new && mv dist/artifacts.new dist/artifacts.json
+}
+
+# binary_path prints the path of the binary for an OS ($1) and an arch ($2)
+# in the copy, from dist/artifacts.json.
+binary_path() {
+  jq -r --arg os "$1" --arg arch "$2" \
+    '.[] | select(.type == "Binary" and .goos == $os and .goarch == $arch) | .path' \
+    dist/artifacts.json
+}
+
+# dynamic_linux_binary replaces a Linux binary that is not the host binary
+# with a text file, which file does not report as statically linked.
+dynamic_linux_binary() {
+  printf 'not a static binary\n' >"$(binary_path linux "$static_arch")"
+}
+
+# delete_host_binary deletes the binary file of this host. Its entry stays in
+# artifacts.json.
+delete_host_binary() {
+  rm "$(binary_path "$host_os" "$host_arch")"
 }
 
 # change_version sets another version in metadata.json, so that the binary
@@ -111,8 +139,15 @@ check_case "changed archive" 1 "dist/checksums.txt does not match the archives" 
 # checksums.txt.
 check_case "missing line in checksums.txt" 1 "lines in dist/checksums.txt, found 3" drop_checksum_line
 
-# artifacts.json and metadata.json.
-check_case "missing Binary entry for this host" 1 "binary found in dist/artifacts.json" drop_host_binary
+# The binaries.
+check_case "Linux binary is not statically linked" 1 "is not statically linked" dynamic_linux_binary
+
+# artifacts.json and metadata.json. On every host, the first binary that
+# check-snapshot.sh looks up is the host binary: the loop over the Linux
+# binaries stops at it on a Linux host, and the host check stops at it on
+# macOS. So the first message names the host in both cases.
+check_case "missing Binary entry for this host" 1 "no $host_os $host_arch binary found in dist/artifacts.json (got '')" drop_host_binary
+check_case "Binary file of this host is missing on disk" 1 "no $host_os $host_arch binary found in dist/artifacts.json (got 'dist/" delete_host_binary
 check_case "missing artifacts.json" 1 "dist/artifacts.json is missing" rm dist/artifacts.json
 check_case "missing checksums.txt" 1 "dist/checksums.txt is missing" rm dist/checksums.txt
 check_case "missing metadata.json" 1 "dist/metadata.json is missing" rm dist/metadata.json
