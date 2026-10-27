@@ -52,6 +52,8 @@ jobs:
     permissions:
       issues: write
     # One fixed group, and no cancel, so that two runs cannot make two issues.
+    # GitHub keeps one pending job per group. If three runs fail close
+    # together, the middle notice is lost. The red runs still show.
     concurrency:
       group: weekly-vulnerability-check-issue
       cancel-in-progress: false
@@ -68,8 +70,8 @@ jobs:
             jq -r --arg t "$title" 'first(.[] | select(.title == $t) | .number) // empty')
           if [ -z "$number" ]; then
             gh issue create -R "$GITHUB_REPOSITORY" --title "$title" --label security \
-              --body "The weekly vulnerability check failed. Open the run to read the failure: $run_url. This job does not report a disabled schedule."
+              --body "The weekly vulnerability check failed or was cancelled. Open the run to read the failure: $run_url. This job does not report a disabled schedule."
           else
             gh issue comment "$number" -R "$GITHUB_REPOSITORY" \
-              --body "The weekly vulnerability check failed again. Run: $run_url"
+              --body "The weekly vulnerability check failed or was cancelled again. Run: $run_url"
           fi

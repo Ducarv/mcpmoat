@@ -106,6 +106,12 @@ extract_run "$workflow" >"$tmp/run.sh" ||
   fail "$workflow has no run block in the step 'Open or update the failure issue' of the job notify-failure."
 grep -q '[^[:space:]]' "$tmp/run.sh" || fail "The run block of the step 'Open or update the failure issue' is empty."
 
+# The body is shell that this PR adds. CI has no other lint for it.
+if command -v shellcheck >/dev/null 2>&1; then
+  total=$((total + 1))
+  shellcheck -s bash "$tmp/run.sh" || record_failure "shellcheck reports a problem in the run block"
+fi
+
 # The fake gh. The quoted delimiter keeps every $ for the fake to expand.
 mkdir -p "$tmp/bin" "$tmp/home"
 cat >"$tmp/bin/gh" <<'FAKE'
@@ -237,8 +243,21 @@ has_job_token() { job_section env | grep -Fqx '      GH_TOKEN: ${{ github.token 
 no_checkout() { ! grep -q 'actions/checkout' "$tmp/job.txt"; }
 no_contents() { ! job_section permissions | grep -q 'contents:'; }
 
+# The step must not be switched off by a step key, and the job must not hide a
+# failure of its own.
+step_has_no_switch() {
+  ! awk '
+    /^      - name: Open or update the failure issue *$/ { s = 1; next }
+    s && /^      - / { s = 0 }
+    s && /^        (if|continue-on-error):/ { print }
+  ' "$tmp/job.txt" | grep -q .
+}
+job_has_no_switch() { ! grep -Eq '^    continue-on-error:' "$tmp/job.txt"; }
+
 check_text "lacks 'needs: govulncheck'" grep -Eq '^    needs: govulncheck *$' "$tmp/job.txt"
 check_text "lacks the if: line for a failed or cancelled scan" grep -Eq "^    if: failure\(\) \|\| needs\.govulncheck\.result == 'cancelled' *$" "$tmp/job.txt"
+check_text "the step has an if: or continue-on-error: key" step_has_no_switch
+check_text "the job has a continue-on-error: key" job_has_no_switch
 check_text "lacks 'issues: write' under permissions" can_write_issues
 check_text "has a contents permission" no_contents
 check_text "has a checkout step" no_checkout

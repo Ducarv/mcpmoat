@@ -84,6 +84,51 @@ awk -v step="$step" '
   fail "$workflow has no run block in the step '$step'."
 grep -q '[^[:space:]]' "$tmp/run.sh" || fail "The run block of the step '$step' is empty."
 
+# The body is shell that this PR adds. CI has no other lint for it.
+if command -v shellcheck >/dev/null 2>&1; then
+  total=$((total + 1))
+  shellcheck -s bash "$tmp/run.sh" || record_failure "shellcheck reports a problem in the run block"
+fi
+
+# step_text prints the lines of the guard step, up to the next step.
+step_text() {
+  awk -v step="$step" '
+    /^ *- name: / {
+      name = $0
+      sub(/^ *- name: */, "", name)
+      sub(/ *$/, "", name)
+      on = (name == step)
+    }
+    on { print }
+  ' "$workflow"
+}
+
+# next_step_name prints the name of the step after the guard step.
+next_step_name() {
+  awk -v step="$step" '
+    /^ *- name: / {
+      name = $0
+      sub(/^ *- name: */, "", name)
+      sub(/ *$/, "", name)
+      if (seen) { print name; exit }
+      seen = (name == step)
+    }
+  ' "$workflow"
+}
+
+# The body can pass while a step key turns the step off, a different shell
+# runs it, or it runs after the publish. Check these keys by text.
+check_step() {
+  total=$((total + 1))
+  "$@" || record_failure "the guard step: ${check_msg:?}"
+}
+no_switch() { ! step_text | grep -Eq '^ {8}(if|continue-on-error):'; }
+uses_bash() { step_text | grep -Eq '^ {8}shell: bash *$'; }
+runs_before_publish() { [ "$(next_step_name)" = "Verify and publish the release" ]; }
+check_msg="it has an if: or continue-on-error: key"; check_step no_switch
+check_msg="it does not have 'shell: bash'"; check_step uses_bash
+check_msg="the next step is not 'Verify and publish the release'"; check_step runs_before_publish
+
 # new_repo makes a repo with one commit and sets GITHUB_SHA for the case.
 new_repo() {
   rm -rf "${repo:?}"
