@@ -147,9 +147,17 @@ case "${1:-} ${2:-}" in
   ;;
 "issue create")
   has "-R owner/repo"
+  if [ -e "$S/create_fails" ]; then
+    echo "fake gh: the create call failed" >&2
+    exit 1
+  fi
   ;;
 "issue comment")
   has "-R owner/repo"
+  if [ -e "$S/comment_fails" ]; then
+    echo "fake gh: the comment call failed" >&2
+    exit 1
+  fi
   ;;
 *) die "unexpected call: $args" ;;
 esac
@@ -171,6 +179,8 @@ two_exact() {
   echo '[{"number":5,"title":"Weekly vulnerability check failed"},{"number":3,"title":"Weekly vulnerability check failed"}]' >"$S/list.json"
 }
 list_fails() { touch "$S/list_fails"; }
+create_fails() { empty_list && touch "$S/create_fails"; }
+comment_fails() { exact_and_similar && touch "$S/comment_fails"; }
 other_case() { echo '[{"number":4,"title":"weekly vulnerability check failed"}]' >"$S/list.json"; }
 
 # check_case runs the body with the list from the setup $3 and checks three
@@ -211,6 +221,8 @@ check_case "exact and similar title" 0 exact_and_similar "comment 9" ""
 check_case "only a similar title" 0 only_similar create ""
 check_case "two issues with the title" 0 two_exact "comment 5" ""
 check_case "the list call fails" 1 list_fails none "the list call failed"
+check_case "the create call fails" 1 create_fails create "the create call failed"
+check_case "the comment call fails" 1 comment_fails "comment 9" "the comment call failed"
 check_case "the title is case sensitive" 0 other_case create ""
 
 # The keys of the job. The cases above give the fake its token, so they cannot
@@ -251,12 +263,12 @@ step_has_only_run() {
   ! awk '
     /^      - name: Open or update the failure issue *$/ { s = 1; next }
     s && /^      - / { s = 0 }
-    s && /^        [A-Za-z_-]+:/ && $1 != "run:" { print }
+    s && /^        ["\047]?[A-Za-z_-]+["\047]? *:/ && $1 != "run:" { print }
   ' "$tmp/job.txt" | grep -q .
 }
 # The job has the permission issues: write and no other permission.
 only_issues_write() { [ "$(job_section permissions)" = "      issues: write" ]; }
-job_has_no_switch() { ! grep -Eq '^    continue-on-error:' "$tmp/job.txt"; }
+job_has_no_switch() { ! grep -Eq "^    [\"']?continue-on-error[\"']? *:" "$tmp/job.txt"; }
 
 check_text "lacks 'needs: govulncheck'" grep -Eq '^    needs: govulncheck *$' "$tmp/job.txt"
 check_text "lacks the if: line for a failed or cancelled scan" grep -Eq "^    if: failure\(\) \|\| needs\.govulncheck\.result == 'cancelled' *$" "$tmp/job.txt"

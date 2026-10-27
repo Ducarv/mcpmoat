@@ -128,16 +128,19 @@ next_step_name() {
 # The body can pass while a step key turns the step off, changes what it
 # compares, a different shell runs it, or it runs after the publish. Check
 # these keys by text.
+# check_step MESSAGE CHECK: the check is a function that must succeed.
 check_step() {
+  local msg=$1
+  shift
   total=$((total + 1))
-  "$@" || record_failure "the guard step: ${check_msg:?}"
+  "$@" || record_failure "the guard step: $msg"
 }
-only_known_keys() { ! step_text | grep -E '^ {8}[A-Za-z_-]+:' | grep -Evq '^ {8}(shell|run):'; }
+only_known_keys() { ! step_text | grep -E "^ {8}[\"']?[A-Za-z_-]+[\"']? *:" | grep -Evq '^ {8}(shell|run):'; }
 uses_bash() { step_text | grep -Eq '^ {8}shell: bash *$'; }
 runs_before_publish() { [ "$(next_step_name)" = "Verify and publish the release" ]; }
-check_msg="it has a key other than name, shell and run (for example if:, env: or working-directory:)"; check_step only_known_keys
-check_msg="it does not have 'shell: bash'"; check_step uses_bash
-check_msg="the next step is not 'Verify and publish the release'"; check_step runs_before_publish
+check_step "it has a key other than name, shell and run (for example if:, env: or working-directory:)" only_known_keys
+check_step "it does not have 'shell: bash'" uses_bash
+check_step "the next step is not 'Verify and publish the release'" runs_before_publish
 
 # new_repo makes a repo with one commit and sets GITHUB_SHA for the case.
 new_repo() {
