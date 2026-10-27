@@ -211,6 +211,12 @@ const (
 //     is returned, also a json-schema.org URI with another path, such as
 //     "https://json-schema.org/send_email": a path can hold an instruction.
 //
+// A known limit: the list holds only JSON Schema keywords, so an OpenAPI or
+// pydantic key such as discriminator (and the propertyName and mapping keys
+// inside it), externalDocs, nullable or example is returned, and a camelCase
+// key such as propertyName folds to a compound name (property_name) that can
+// equal a tool name of another server: a rare false positive.
+//
 // A key is a keyword only in a schema object. The function follows the
 // keywords that hold schemas: the top-level object is a schema; the value of
 // items, additionalProperties, not, if, then, else and the like is a schema;

@@ -39,17 +39,11 @@ import (
 // with no rune of skeletonTable has at most 14 regex forms. Only a text with
 // such a rune, which the server picks, reaches 21.
 //
-// In the twin forms (the skeleton folds, and the plain folds in which a
-// compatibility mapping made a new "I" or "l", see foldAddsIL), an any_regex
-// or all_regex pattern runs as its I/l-blind twin (see twinFromTree and
-// Matcher.matchRegex), in place of the pattern. twinFromTree keeps a twin
-// only when its program is not larger than the program of the pattern, so
-// the twin keeps maxProgInsts and maxTotalInsts, and each form is still read
-// by one regex of at most the same size. So the worst-case match bounds
-// below do not change. The typical cost can change: a twin can lose the
-// literal prefix that package regexp uses to skip ahead in the text. So a
-// user pattern that starts with a literal "I" or "l" can be much slower on
-// the twin forms. `lsass\.exe\s+dump` took under 1 us on a 32 KiB text
+// The I/l-blind twin of a regex (see the twin.go file comment) keeps
+// maxProgInsts and maxTotalInsts, and each form is still read by one regex
+// of at most the same size, so the worst-case match bounds below do not
+// change. The typical cost can change for a user pattern that starts with a
+// literal "I" or "l": `lsass\.exe\s+dump` took under 1 us on a 32 KiB text
 // with no match, and its twin `[Il]sass...` took about 0.5 ms. A text with
 // one look-alike gets twin forms, so the server can pick this cost. It stays
 // under the worst-case bound. No built-in rule has such a prefix: each one
@@ -102,15 +96,14 @@ import (
 // or one heuristic call on the raw text.
 //
 // Building the forms has a cost too. In ansiSeq, each U+009D can start an
-// OSC that stays open for up to 256 runes (see oscExpr), so 128 KiB of
-// U+009D took about 240 ms for each form that reads with ansiSeq, and one
-// baseFormsCut call took about 0.76 s. So baseFormsCut reads a text with more
-// than maxStrictOSCStarts U+009D with ansiSeqFast and sets the cut flag.
-// Measured on an Apple M1 Pro (five runs with -benchtime=5x), one
-// baseFormsCut call now takes about 54 ms on 128 KiB of U+009D (0.76 s
-// before), about 90 ms on the pairs U+009D "a" up to 128 KiB (0.55 s
-// before), and about 70 ms on the text of BenchmarkOSCStartRun, which holds
-// the U+009D run and builds all seven forms (0.77 s before).
+// OSC that stays open for up to 256 runes (see oscExpr), so ansiSeq is slow
+// on a text with many U+009D (the BenchmarkOSCStartRun comment has the
+// times). So baseFormsCut reads a text with more than maxStrictOSCStarts
+// U+009D with ansiSeqFast and sets the cut flag. Measured on an Apple M1 Pro
+// (five runs with -benchtime=5x), one baseFormsCut call takes about 54 ms on
+// 128 KiB of U+009D, about 90 ms on the pairs U+009D "a" up to 128 KiB, and
+// about 70 ms on the text of BenchmarkOSCStartRun, which holds the U+009D
+// run and builds all seven forms.
 // BenchmarkOSCStartRun times one baseFormsCut call in each sub-benchmark:
 // about 69 ms for oscStartRun and 88 ms for pairs. Up to maxStrictOSCStarts
 // U+009D, the OSC part of ansiSeq adds almost nothing: 128 KiB of text with
@@ -119,8 +112,8 @@ import (
 // The worst case that we know now is not a run of U+009D but a fill of CSIs.
 // One baseFormsCut call takes about 172 ms on a fill of ESC [ A that builds
 // all seven forms, and about 173 ms (median, 234 ms at most) on 256 U+009D
-// and then a fill of C1 CSIs (U+009B A). The code before #146 took the same
-// time on these texts. So one build of the forms takes under about 0.2 s.
+// and then a fill of C1 CSIs (U+009B A). So one build of the forms takes
+// under about 0.2 s.
 // A scan calls baseFormsCut once for each text, for all its rules.
 //
 // A text longer than the window is cut, so padding can push a payload out of
@@ -295,11 +288,9 @@ func (m Match) compile() (*Matcher, error) {
 // compileRegexList for build.
 //
 // For any_regex and all_regex, it also builds the I/l-blind twin of each
-// regex (see twinFromTree), which matchRegex runs on the skeleton folds and
-// on the plain folds in which a compatibility mapping made a new "I" or
-// "l". A twin that is the same as its regex is the same *regexp.Regexp, so
-// it costs no memory. A keywords list gets no twins: the keyword matcher
-// reads no skeleton fold (see preparedText.keywordForms).
+// regex (see the twin.go file comment). A twin that is the same as its regex
+// is the same *regexp.Regexp, so it costs no memory. A keywords list gets no
+// twins.
 func compileRegexMatcher(kind string, list []string, build func(entry, s string) (string, error)) (*Matcher, error) {
 	withTwins := kind == kindAnyRegex || kind == kindAllRegex
 	res, twins, err := compileRegexList(kind, list, build, withTwins)
@@ -320,11 +311,9 @@ func compileRegexMatcher(kind string, list []string, build func(entry, s string)
 // the forms of preparedText.keywordForms, the base forms of baseFormsCut folded
 // with foldMarks. A regex or a keyword matches when it matches in one form.
 // In all_regex, each regex must match, but each one can match in a different
-// form. In the skeleton folds, and in the plain folds in which a
-// compatibility mapping made a new "I" or "l", an any_regex or all_regex
-// pattern runs as its I/l-blind twin, which reads ASCII "I" and "l" as one
-// letter (see Matcher.matchRegex), so a look-alike of either letter matches
-// both. A heuristic reads the full raw text. The match_window heuristic
+// form. In the twin forms, an any_regex or all_regex pattern runs as its
+// I/l-blind twin (see the twin.go file comment). A heuristic reads the full
+// raw text. The match_window heuristic
 // reads the cut flag of the base forms (see matchWindowPrepared).
 //
 // A regex or keyword hit has the offset NoOffset, whatever form it matched
@@ -463,20 +452,9 @@ func (m *Matcher) matchOne(ctx context.Context, p *preparedText) ([]Hit, error) 
 
 // matchRegex reports whether regex i of an any_regex or all_regex matcher
 // matches in one regex form. front and twin are the two parts of
-// preparedText.regexFormParts. The original regex reads front: the base
-// forms and the other plain folds. The I/l-blind twin (see twinFromTree)
-// reads twin, in place of the original: the skeleton folds and the plain
-// folds in which a compatibility mapping made a new "I" or "l" (see
-// foldAddsIL). The twin matches every text that the original matches, so no
-// match of the original is lost, and it also reads a look-alike of "I" or
-// "l" as either letter. A plain ASCII text has no twin forms, so the twin
-// never reads it: "lgnore" in ASCII does not match the regex `(?i)ignore`.
-//
-// Each form is read by one regex only, and the twin program is never
-// larger (see twinFromTree), so the worst-case bound is the same as for
-// one regex on every form. A pattern that starts with a literal "I" or "l"
-// can be slower on the twin forms (see the cost comment at the top of this
-// file). It checks ctx as matchesAny does. A Matcher with no twins (not
+// preparedText.regexFormParts. The original regex reads front, and its
+// I/l-blind twin reads twin, in place of the original (see the twin.go file
+// comment). It checks ctx as matchesAny does. A Matcher with no twins (not
 // built by compileRegexMatcher) reads twin with the original regex.
 func (m *Matcher) matchRegex(ctx context.Context, i int, front, twin []string) (bool, error) {
 	re := m.regexps[i]

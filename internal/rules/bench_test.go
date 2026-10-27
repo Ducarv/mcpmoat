@@ -288,12 +288,14 @@ func benchWorstCaseBlock(b *testing.B, text string, wantForms, minLen int) {
 // with ansiSeqFast. Measured on an Apple M1 Pro with -benchtime=5x: about
 // 70 ms for oscStartRun (about 54 ms for 128 KiB of U+009D alone) and about
 // 90 ms for pairs, each call. With ansiSeq for these three forms (the code
-// before #146), they took about 0.77 s and 0.55 s. Target: about 100 ms or
-// less for these texts.
+// before #146), they took about 0.77 s and 0.55 s, and 128 KiB of U+009D
+// alone took about 240 ms for each such form and about 0.76 s for one call.
+// Target: about 100 ms or less for these texts.
 //
 // They are not the slowest input for one build of the forms now: a fill of
-// CSIs takes about 0.17 s (see the cost comment in match.go). The docs give
-// the bound for one build as under about 0.2 s.
+// CSIs takes about 0.17 s (see the cost comment in match.go). The code before
+// #146 took the same time on a fill of CSIs. The docs give the bound for one
+// build as under about 0.2 s.
 func BenchmarkOSCStartRun(b *testing.B) {
 	texts := []struct {
 		name  string

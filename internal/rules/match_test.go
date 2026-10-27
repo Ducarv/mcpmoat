@@ -35,7 +35,7 @@ var t1003Patterns = []string{
 var ignorePreviousPatterns = []string{`(?i)\bignore\s+(?:all\s+)?previous`}
 
 // progInsts returns the program size of expr, counted by the progSize that
-// compileRegex uses.
+// compileRegexTree uses.
 func progInsts(tb testing.TB, expr string) int {
 	tb.Helper()
 	_, n, err := progSize(expr)

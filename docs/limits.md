@@ -31,16 +31,14 @@ This page lists what mcpmoat does not do, so you know how far to trust a clean s
 - The rule analysis of each server has a time budget. A server that uses it up gets a
   `MOAT-T1-023` finding (see [Exit codes](exit-codes.md)), and its tools that were not fully
   checked can hide a malicious text.
-- The budget cannot stop the build of the match forms of one text. For the most hostile texts that
-  we measured, this build takes under about 0.2 s (Apple M1 Pro). The current worst case is a CSI
-  fill (ESC [ A that builds all seven forms, or 256 U+009D and then C1 CSIs), at about 0.17 s.
-  128 KiB of U+009D takes about 54 ms, and 128 KiB of U+009D "a" pairs about 90 ms (0.55 s to
-  0.8 s before #146). So the analysis of a server can end that much after its budget.
+- The budget cannot stop the build of the match forms of one text. This build takes under about
+  0.2 s in the worst case that we measured, so the analysis of a server can end that much after
+  its budget.
 - A text with more than 256 U+009D (C1 OSC controls) always gets `MOAT-T1-017` or `MOAT-T1-018`
   (high), also a benign text in the wrong encoding. The reason and the example are in
   [Contributing a rule](writing-rules.md#2-write-the-rule). With a custom rule at critical
   severity and `--fail-on critical`, a text with more than 256 U+009D can hide the payload from
-  that rule and only `MOAT-T1-017` (high) fires.
+  that rule and only `MOAT-T1-017` or `MOAT-T1-018` (high) fires.
 - `scan` keeps at most 1000 tool rule findings for each server. The limit counts the findings
   after the ignore list. `scan` keeps the most severe findings, and among findings of the same
   severity the ones of the first tools, so a server cannot push a severe finding out of the report

@@ -136,7 +136,10 @@ func (n nameOwners) other(identity int) (toolOwner, bool) {
 // URI. These are fixed words of the standards, not text that the server
 // chose, so a mention there is not a shadowing attempt. Every other format
 // and $schema value is scanned, so "send_email" as a format value or
-// "https://json-schema.org/send_email" as a $schema value is found. A tool
+// "https://json-schema.org/send_email" as a $schema value is found. Only
+// JSON Schema keywords are skipped, so an OpenAPI or pydantic key such as
+// propertyName (inside discriminator) is scanned and can give a rare false
+// positive when its fold (property_name) is a tool name. A tool
 // name with a byte outside letters, digits, "_" and "-" (a dot or a space,
 // for example) cannot be found as a token, so it is never a candidate name.
 // A mention of a single-word tool name is never found. A space or a dot

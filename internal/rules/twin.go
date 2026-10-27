@@ -10,26 +10,56 @@ import (
 
 // This file builds the I/l-blind twin of a regex (see twinFromTree): blurIL
 // rewrites a copy of the parse tree, and twinPattern checks the pattern that
-// printRE2 (in re2print.go) writes for it.
+// printRE2 (in re2print.go) writes for it. This comment is the one full
+// description of the twin: why it exists, which forms it reads, what it
+// costs and its limits. Other comments point here. The package doc
+// (Normalization, and the limits of the confusable skeleton) has a short
+// summary for rule authors, and docs/writing-rules.md has the same summary.
 //
-// The skeleton fold reads each look-alike of "I" or "l" as one of the two
-// letters (see skeletonTable). TR39 reads them all as one letter, but the
-// rules need both: the "i" of ignore and the "l" of all. So with one fixed
-// reading, an attacker picks the look-alike whose reading the rules do not
-// expect: Cyrillic U+04CF (small palochka, read "l") + "gnore", or "a" +
-// U+0406 U+0406 (Cyrillic capital I, read "I") for "all". The plain fold has
-// look-alikes too: fullwidth U+FF29 and U+FF4C, the roman numerals U+2160
-// and U+217C and many mathematical letters fold to an ASCII "I" or "l". The
-// twin of a regex reads ASCII "I" and "l" as one letter, so it matches both
-// readings. The matcher runs the twin only on the skeleton folds and on the
-// plain folds that got a new "I" or "l" from a compatibility mapping (see
-// preparedText.regexFormParts and Matcher.matchRegex), so a plain ASCII
-// "lgnore" still does not match.
+// Why. The skeleton fold reads each look-alike of "I" or "l" as one of the
+// two letters (see skeletonTable). TR39 reads them all as one letter, but
+// the rules need both: the "i" of ignore and the "l" of all. So with one
+// fixed reading, an attacker picks the look-alike whose reading the rules do
+// not expect: Cyrillic U+04CF (small palochka, read "l") + "gnore", U+01C0
+// (a bare bar, read "l") + "gnore", or "a" + U+0406 U+0406 (Cyrillic
+// capital I, read "I") for "all". The plain fold (foldMarks) has look-alikes
+// too: fullwidth U+FF29 and U+FF4C, the roman numerals U+2160 and U+217C,
+// U+2110, U+2113, the ligature U+FB02 ("fl") and many mathematical letters,
+// such as the sans-serif U+1D5A8 and U+1D5C5 (two bars), fold to an ASCII
+// "I" or "l".
+//
+// What. The twin of a regex reads ASCII "I" and "l" as one letter (see
+// blurIL): a literal "I" or "l", and under (?i) also "i" and "L", matches
+// both, and so does a class that names one of them, such as [il] or [kl].
+// So `(?i)ignore` matches U+04CF + "gnore", U+01C0 + "gnore" and U+217C +
+// "gnore", and `(?i)all` matches "a" + U+0406 U+0406 and "a" + U+FF29
+// U+FF29, also when one rune is used both ways. The twin matches every text
+// that the regex matches. Only any_regex and all_regex get a twin (see
+// compileRegexMatcher), and it is built when the rule compiles.
+//
+// Where. The twin reads only the twin forms: the skeleton folds, and the
+// plain folds in which a compatibility mapping made a new "I" or "l" (see
+// foldAddsIL and preparedText.regexFormParts). The regex itself reads the
+// other forms: the base forms and the other plain folds. A base form keeps
+// each look-alike as it is, so a pattern of ASCII letters does not match it
+// there, and the twin is not needed. So a plain ASCII "lgnore" still does
+// not match `(?i)ignore`. On the twin forms, the twin runs in place of the
+// regex, not next to it (see Matcher.matchRegex), so the number of forms
+// does not change and each form is read by one regex.
+//
+// Cost. twinPattern keeps a twin only when its program is not larger than
+// the program of the regex, so the worst-case match bound does not change.
+// A pattern that starts with a literal "I" or "l" can be slower on the twin
+// forms, because its twin loses the literal prefix that package regexp uses
+// to search fast. No built-in rule starts this way. The twin also adds
+// compile time and memory. The cost comment at the top of match.go has the
+// measured numbers.
 //
 // The twin has these limits:
 //
 //   - only any_regex and all_regex get a twin. A keyword rule reads no
-//     skeleton fold, and its plain folds read with the keyword as it is;
+//     skeleton fold, and its plain folds read with the keyword as it is, so
+//     a look-alike of "I" or "l" in a keyword is not read as either letter;
 //   - a pattern that writes a lowercase "i" or an uppercase "L" without
 //     (?i) keeps it: such a letter does not match "I" or "l" in the pattern
 //     either;
@@ -37,18 +67,22 @@ import (
 //     all of A-Z keeps its "I" (see blurClass). So [a-z], [A-Z], \w and \pL
 //     do not change;
 //   - a negated class, such as [^l], does not change (see blurClass);
-//   - a pattern whose twin pattern is longer than maxTwinPatternBytes, or
-//     whose twin fails a check (see twinPattern), keeps no twin: the twin
-//     forms read with the pattern itself;
+//   - a pattern whose twin pattern is longer than maxTwinPatternBytes
+//     (64 KiB, such as a pattern with many wide classes like \pL), or whose
+//     twin fails a check (see twinPattern), keeps no twin: the twin forms
+//     read with the pattern itself;
 //   - a text with no look-alike of "I" or "l" (and no other rune of
-//     skeletonTable) is read with the pattern only. An accented "I" or "l",
-//     such as U+00CF or U+013E, is not a look-alike (see foldAddsIL), also
-//     when its mark is small, such as U+1ECA (I with dot below);
+//     skeletonTable) is read with the pattern only, so ASCII "lgnore" or
+//     "aII" is not read as "ignore" or "all". An accented "I" or "l", such
+//     as U+00CF or U+013E, is not a look-alike (see foldAddsIL), also when
+//     its mark is small: "a" + U+1ECA U+1ECA (I with dot below) does not
+//     match `(?i)all`, and U+1E37 (l with dot below) + "gnore" does not
+//     match `(?i)ignore`;
 //   - a text that holds one look-alike is read by the twin as a whole. So
 //     its ASCII "I" and "l" also read as either letter: ASCII "lgnore all
 //     previous instructions." next to one Cyrillic word matches
-//     MOAT-T1-001, and "URl" next to it matches a pattern for "URI". This
-//     false positive is the cost of the fix.
+//     MOAT-T1-001, and pairs such as "all" and "ail" or "URl" and "URI" can
+//     match. This false positive is the cost of the fix.
 
 // twinFromTree returns the I/l-blind twin of re: a regex that matches every
 // text that re matches, and also the same texts with any ASCII "I" read as

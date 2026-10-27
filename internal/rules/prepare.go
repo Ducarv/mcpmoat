@@ -104,23 +104,12 @@ func (p *preparedText) schema() *preparedSchema {
 // (Cyrillic) matches the regex `~/\.ssh`. The keyword forms do not get the
 // skeleton (see keywordForms).
 //
-// The two parts let the matchers read the twin forms with the I/l-blind
-// twin of each regex, and the front forms with the regex itself (see
-// Matcher.matchRegex):
-//
-//   - twin holds the forms that can hold a look-alike of "I" or "l" written
-//     as an ASCII letter: the skeleton folds, and the plain folds in which
-//     a compatibility mapping made a new ASCII "I" or "l" (see foldAddsIL).
-//     The matchers read them with the I/l-blind twin of each regex.
-//   - front holds the other forms: the base forms and the other plain
-//     folds. The matchers read them with each regex as it is.
-//
-// A text with no rune of skeletonTable and no compatibility rune that folds
-// to "I" or "l" has an empty twin. A plain ASCII text is such a text, and so
-// is a text whose only runes that fold to "I" or "l" are accented letters,
-// such as U+00CF and U+013E. A base form keeps each look-alike as it is, so
-// a pattern of ASCII letters does not match it there, and the twin is not
-// needed in front.
+// twin holds the twin forms: the skeleton folds, and the plain folds for
+// which foldAddsIL is true. front holds the other forms: the base forms and
+// the other plain folds. Matcher.matchRegex reads twin with the I/l-blind
+// twin of each regex and front with the regex itself (see the twin.go file
+// comment). A text with no rune of skeletonTable and no compatibility rune
+// that folds to "I" or "l", such as a plain ASCII text, has an empty twin.
 //
 // Only the text is folded, not the pattern. So a pattern with an accent, a
 // mark or a letter of skeletonTable matches only in the base forms.
@@ -240,13 +229,11 @@ func (p *preparedText) buildFolds() {
 
 // foldAddsIL reports whether the plain fold kw = foldMarks(f) holds more
 // ASCII "I" and "l" than the canonical decomposition (NFD) of f. So it is
-// true when the fold made an "I" or an "l" from a compatibility mapping:
-// fullwidth U+FF29 and U+FF4C, the roman numerals U+2160 and U+217C,
-// U+2110 and U+2113, the ligature U+FB02 and the mathematical letters such
-// as U+1D5A8 and U+1D5C5 (sans-serif I and l, two bars). Such a rune looks
-// like the other letter as much as like its own. It is not in
-// skeletonTable, so the skeleton fold of f equals kw and adds no form. So
-// kw goes to the twin forms (see regexFormParts).
+// true when the fold made an "I" or an "l" from a compatibility mapping,
+// such as from fullwidth U+FF29 or the roman numeral U+217C (see the twin.go
+// file comment for the look-alikes). Such a rune is not in skeletonTable,
+// so the skeleton fold of f equals kw and adds no form. So kw goes to the
+// twin forms (see regexFormParts).
 //
 // An accented letter, such as U+00CF (I with diaeresis), U+0130 (I with dot
 // above) or U+013E (l with caron), is not a look-alike: its NFD is the ASCII

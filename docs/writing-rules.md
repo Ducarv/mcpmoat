@@ -89,8 +89,15 @@ How mcpmoat prepares the text before a match. This applies to every regex and ke
      a space too: ESC [ "Ignore" + ESC + "all" reads as " Ignore all".
 
   Some texts defeat all seven forms. Each case below is a known limit with its reason, and
-  `invisible_unicode` still flags it (see the end of this item). A format character inside a CSI
-  reads as if it were absent, so such a text has the same limits as the text without it.
+  `invisible_unicode` still flags it (see the end of this item). In forms 4 and 7, a format
+  character inside a CSI reads as if it were absent, so in these forms such a text has the same
+  limits as the text without it.
+  - a format character inside a CSI when only form 2 has all the word gaps ("Ignore" + ESC [ +
+    ZWSP + "0mall" + U+0001 + "previous" + ZWSP + "instructions."). Without the ZWSP inside the
+    CSI, form 2 reads "Ignore all previous instructions.". With it, form 2 makes the ZWSP a space,
+    which breaks the CSI ("Ignore [ 0mall previous instructions."), and no other form has all
+    three word gaps. Form 2 reads the strict way, so to drop the ZWSP it needs a strict way to find
+    the end of a CSI that takes no C0 control character. That fix is a separate change.
   - one kind of invisible character both inside a word and between words. Each form treats every
     run of one kind the same way, so it joins all such words or splits all of them. To tell them
     apart would need a word list or one form for each combination of runs.
@@ -182,8 +189,7 @@ How mcpmoat prepares the text before a match. This applies to every regex and ke
   never larger than the program of the pattern, so the worst-case cost of a match does not change.
   A pattern that starts with a literal "I" or "l" can be slower on the twin forms, because its twin
   loses the literal prefix that Go's regexp uses to search fast. No built-in rule starts this way.
-  Compiling the built-in rules takes about 2.5 times as long as before (it varies by machine), about
-  4 ms more for each scan.
+  The twin adds about 4 ms to a scan.
 
   The twin has limits:
   - A keyword rule has no twin, so a look-alike of "I" or "l" in a keyword is not read as either
@@ -267,7 +273,9 @@ How mcpmoat prepares the text of a `target: schema` rule:
   other `format` or `$schema` value is read, such as `send_email` or
   `https://json-schema.org/send_email`. The keys of `properties`, `patternProperties`, `$defs`,
   `definitions`, `dependentSchemas` and `dependencies` are names that the server chose, so the rule
-  always reads them. Limits: `scan` does not call the rule yet (#200).
+  always reads them. Limits: `scan` does not call the rule yet (#200). The rule skips only JSON
+  Schema keywords, so an OpenAPI or pydantic key such as `propertyName` (in `discriminator`) is
+  read as `property_name` and can rarely match a tool name of another server.
 
 ### Schema copies
 

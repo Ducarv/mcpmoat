@@ -136,33 +136,19 @@
 // fold does not get the skeleton. For the limits, see the end of the
 // Heuristics and hits section.
 //
-// The skeleton reads each look-alike of "I" or "l" as one of the two
-// letters, but a text can mean the other one. The plain fold has the same
-// problem: it folds fullwidth U+FF29 and U+FF4C, the roman numerals U+2160
-// and U+217C, U+2110, U+2113 and many mathematical letters, such as the
-// sans-serif U+1D5A8 and U+1D5C5 (two bars), to an ASCII "I" or "l". So in
-// the twin forms, each any_regex and all_regex pattern runs as its
-// I/l-blind twin, which reads "I" and "l" as one letter. The twin forms are
-// the skeleton folds and the plain folds in which a compatibility mapping
-// made a new "I" or "l". An accented "I" or "l", such as U+00CF or U+013E,
-// is a normal letter: the fold only drops its marks, so it makes no twin
-// form. In the twin, a literal "I" or "l" (and under (?i) also "i" and
-// "L") matches both, and so does a class that holds "I" or "l" but not all
-// of A-Z or a-z, such as [il] or [kl]. A class that holds all of A-Z or a-z,
-// such as [A-Z], [a-z] or \w, does not change, and neither does a negated
-// class. So `(?i)ignore` matches U+04CF + "gnore" (read "lgnore"), U+01C0 +
-// "gnore" and U+217C + "gnore", and `(?i)all` matches "a" + U+0406 U+0406
-// (read "aII") and "a" + U+FF29 U+FF29. The twin matches every text that
-// the pattern matches, and its program is never larger, so the worst-case
-// match bound does not change. A user pattern that starts with a literal
-// "I" or "l" can be slower on the twin forms, because its twin loses the
-// literal prefix that package regexp uses to search fast. The twin adds
-// compile time: about 2.5 times the compile time of the built-in rules (it
-// varies by machine; see the cost comment in match.go). The base forms and
-// the other plain folds still read with the pattern itself, so ASCII
-// "lgnore" does not match `(?i)ignore`. The twin is built when the rule
-// compiles. When a check fails, the pattern runs in the twin forms as it is
-// (see twinFromTree in twin.go).
+// The skeleton fold and the plain fold read some look-alikes as "I" or "l",
+// such as Cyrillic U+04CF and U+0406, fullwidth U+FF29 and the roman numeral
+// U+217C, but a text can mean the other letter. So in the twin forms (the
+// skeleton folds, and the plain folds in which a compatibility mapping made
+// a new "I" or "l"), each any_regex and all_regex pattern runs as its
+// I/l-blind twin, which reads "I" and "l" as one letter. So `(?i)ignore`
+// matches U+04CF + "gnore", and `(?i)all` matches "a" + U+0406 U+0406. The
+// other forms read with the pattern itself, so ASCII "lgnore" does not
+// match `(?i)ignore`. An accented "I" or "l", such as U+00CF or U+013E, is a
+// normal letter and makes no twin form. The worst-case match bound does not
+// change. The twin.go file comment tells how the twin is built, which forms
+// it reads, what it costs and all its limits. The limits of the confusable
+// skeleton (at the end of Heuristics and hits) sum up the limits of the twin.
 //
 // A fold that is longer than the rune is not used, so the folded form is never
 // longer than the text: a ligature that folds to many letters, such as
@@ -434,21 +420,16 @@
 //
 //   - the I/l twin (see Normalization) reads "I" and "l" as one letter only
 //     in the twin forms of the any_regex and all_regex rules. A keyword
-//     rule has no skeleton fold, so a look-alike of "I" or "l" in a keyword
-//     is not read as either letter. A text with no rune of skeletonTable and
-//     no compatibility rune that folds to "I" or "l" has no twin form, so
-//     ASCII "lgnore" or "aII" is not read as "ignore" or "all". An accented
-//     "I" or "l" is not read as the other letter either, also when its mark
-//     is small, such as U+1ECA (I with dot below) or U+1E37 (l with dot
-//     below): "a" + U+1ECA U+1ECA does not match `(?i)all`. A pattern that
-//     writes a lowercase "i" or an uppercase "L" without (?i), or a class
-//     that holds all of a-z or A-Z, such as [a-z], or a negated class, does
-//     not get the other letter there. A pattern whose twin pattern is
-//     longer than 64 KiB (many wide classes such as \pL) keeps no twin. The
-//     twin also reads an ASCII "I" or "l" of the text as the other letter
-//     when the text holds one look-alike, so ASCII "lgnore all previous
-//     instructions" next to one Cyrillic word matches MOAT-T1-001, and so
-//     can "URl" for a pattern for "URI";
+//     rule has no twin, so a look-alike of "I" or "l" in a keyword is not
+//     read as either letter. A text with no look-alike has no twin form, so
+//     ASCII "lgnore" is not read as "ignore". An accented "I" or "l", such
+//     as U+1ECA (I with dot below), is not read as the other letter. A
+//     lowercase "i" or an uppercase "L" without (?i), a class that holds
+//     all of a-z or A-Z, and a negated class do not get the other letter. A
+//     text that holds one look-alike is read by the twin as a whole, so
+//     ASCII "lgnore all previous instructions" next to one Cyrillic word
+//     matches MOAT-T1-001. The twin.go file comment lists each limit in
+//     full;
 //   - the skeleton can join a look-alike to a payload. A look-alike of "l"
 //     or "I", such as U+04CF, directly before a payload that is written in
 //     look-alike letters (a Cyrillic "id_rsa") becomes an ASCII letter of
