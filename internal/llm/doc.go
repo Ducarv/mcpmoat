@@ -13,14 +13,38 @@
 //
 // # What is sent
 //
-// One request for each tool. The request holds the fixed [SystemPrompt], the
-// fixed verdict schema ([VerdictSchema]) and one user message that
+// One request for each tool. When the provider is busy (HTTP 429, 502, 503,
+// 504 or 529), the client sends the same request again, at most
+// [RetryMaxTries] requests for one tool in total (see retryPolicy). Each try
+// has its own time limit (requestTimeout); the time limit of the whole LLM
+// step is in cmd/mcpmoat.
+//
+// The model output is capped: at anthropicMaxTokens tokens for Anthropic, and
+// by max_completion_tokens (openAIMaxCompletionTokens) for the default OpenAI
+// base URL only (see newOpenAIAPI). The request holds the fixed [SystemPrompt],
+// the fixed verdict schema (verdictSchema) and one user message that
 // toolMessage builds. That message holds only:
 //
 //   - the tool name, cut to [MaxToolNameBytes];
 //   - the tool description, cut to [MaxDescriptionBytes] (or less, so the
 //     encoded message fits in [MaxToolMessageBytes]);
-//   - a flag that tells the model whether one of the two was cut.
+//   - a flag that tells the model whether one of the two was cut;
+//   - a "redacted" flag, only when a secret value was removed (see below).
+//
+// Before the cut, toolMessage replaces each value in [Input.Secrets] of at
+// least discover.MinSecretBytes bytes with [discover.Mask] in the name and the
+// description (redactPrefix). For a value that is not valid UTF-8, it also
+// removes the form that a JSON decoder gives, with one U+FFFD for each
+// invalid byte (secretValues). It marks every byte of every match first,
+// also of matches that overlap, so no byte of a match stays. The values are
+// the secret values that inspect gave to the server (inspect.Result.Secrets),
+// so a token that a server echoes in its tool text does not reach the
+// provider. [SystemPrompt] tells the model that the mask is removed text, not
+// an instruction. A shorter value, or an encoded form of a value (base64,
+// URL-encoded, split across words), is not removed. A value that starts or
+// ends with "*", or that holds a whole [discover.Mask], can show up again
+// across a Mask, from text that the server wrote next to another secret (see
+// redactWindow).
 //
 // Nothing else is sent. In particular the request never holds the client
 // config, the server command, its arguments, env values or names, header
@@ -40,6 +64,12 @@
 //   - parseVerdict accepts only one small JSON object with two enum fields
 //     ([Risk] and [Category]). Any other output is an error that wraps
 //     [ErrInvalidOutput], and the caller reports it as rule [RuleIDInvalid].
+//   - A tool that the provider refused (HTTP 400, 413 or 422) gives an error
+//     that wraps [ErrRejected]. It is per tool: the caller reports rule
+//     [RuleIDInvalid] with [RejectedText] and the scan goes on. Every other
+//     status code and every transport error is global, also after the
+//     last try of a busy provider (see statusClassOf, retryPolicy and the
+//     errors of Classify at [ErrProvider]).
 //   - No free text from the model ever reaches a finding, an error or the
 //     terminal. A finding uses the fixed texts of [Category.Text] and
 //     [Remediation].
@@ -57,6 +87,11 @@
 //
 // # Imports
 //
-// The package uses the standard library and, from this module, only
-// internal/discover (for [discover.Secret] and [discover.IsLoopbackHost]).
+// The package uses the standard library, the module
+// github.com/cenkalti/backoff/v7 (the waits between the tries of a busy
+// provider, see retryPolicy) and, from this module, only internal/discover
+// (for [discover.Secret], [discover.Mask] and [discover.IsLoopbackHost]). No
+// error text of the backoff module leaves this package. It does not import
+// internal/inspect: cmd/mcpmoat copies the tool name, the description and
+// inspect.Result.Secrets into an [Input].
 package llm

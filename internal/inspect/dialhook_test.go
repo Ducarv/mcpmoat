@@ -37,7 +37,7 @@ type dialRecorder struct {
 	addrs []string
 }
 
-// dial has the dialFunc signature.
+// dial has the DialFunc signature.
 func (r *dialRecorder) dial(ctx context.Context, network, address string) (net.Conn, error) {
 	r.mu.Lock()
 	r.addrs = append(r.addrs, address)
@@ -327,7 +327,7 @@ func TestDialHookSDKInspect(t *testing.T) {
 			if err != nil {
 				t.Fatalf("Inspect() error = %v", err)
 			}
-			rmCheckResult(t, got)
+			rmCheckResult(t, got, rmHeaderSecrets...)
 
 			dials := rec.dials()
 			if len(dials) == 0 {

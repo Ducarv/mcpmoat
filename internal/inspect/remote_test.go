@@ -155,11 +155,27 @@ func (v *rmVictim) assertUntouched(t *testing.T) {
 	}
 }
 
+// rmHeaderSecrets are the values of Result.Secrets for rmHeaders: the two
+// header values and the credential after "Bearer", longest first, then by
+// value.
+var rmHeaderSecrets = []string{"Bearer " + rmBearerSecret, rmBearerSecret, rmAPIKeySecret}
+
+// rmQuerySecrets are the values of Result.Secrets for rmHeaders and
+// rmWithSecretQuery (also with the fragment: a fragment never goes to the
+// server, so it is not in Result.Secrets).
+var rmQuerySecrets = []string{"Bearer " + rmBearerSecret, rmBearerSecret, rmAPIKeySecret, rmQuerySecret}
+
 // rmCheckResult compares got with fixtureWant, the way the fixture comment
 // asks: the protocol version must be set, and the schemas are compared by
-// their property names.
-func rmCheckResult(t *testing.T, got Result) {
+// their property names. It checks got.Secrets against wantSecrets (none
+// means nil) on its own, and compares the rest without Secrets, because
+// fixtureWant holds what the server sends and Secrets does not come from the
+// server.
+func rmCheckResult(t *testing.T, got Result, wantSecrets ...string) {
 	t.Helper()
+	checkSecrets(t, got.Secrets, wantSecrets)
+	got.Secrets = nil // got is a copy
+
 	if got.ProtocolVersion == "" {
 		t.Error("ProtocolVersion is empty, want the negotiated version")
 	}
@@ -263,7 +279,12 @@ func TestRemote(t *testing.T) {
 			if err != nil {
 				t.Fatalf("Remote() error = %v", err)
 			}
-			rmCheckResult(t, got)
+			wantSecrets := rmQuerySecrets
+			if tt.cfgUA {
+				// A User-Agent of the config is a header value like the others.
+				wantSecrets = []string{"Bearer " + rmBearerSecret, cfgUA, rmBearerSecret, rmAPIKeySecret, rmQuerySecret}
+			}
+			rmCheckResult(t, got, wantSecrets...)
 
 			// The query is part of the configured URL, so the server sees it.
 			delete(headers, "user-agent")
@@ -546,7 +567,7 @@ func TestRemoteSameOriginRedirect(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Remote() error = %v", err)
 	}
-	rmCheckResult(t, got)
+	rmCheckResult(t, got, rmHeaderSecrets...)
 
 	mu.Lock()
 	defer mu.Unlock()
@@ -780,7 +801,7 @@ func TestRemoteFragment(t *testing.T) {
 				if err != nil {
 					t.Fatalf("Remote() error = %v", err)
 				}
-				rmCheckResult(t, got)
+				rmCheckResult(t, got, rmQuerySecrets...)
 				rmCheckHeaders(t, rec.requests(), headers, rmDefaultUA, sse)
 
 				urls.mu.Lock()
@@ -1020,7 +1041,7 @@ func TestRemoteUntrusted(t *testing.T) {
 				if err != nil {
 					t.Fatalf("Remote() error = %v", err)
 				}
-				rmCheckResult(t, got)
+				rmCheckResult(t, got, rmQuerySecrets...)
 				rmCheckHeaders(t, rec.requests(), headers, rmDefaultUA, sse)
 			})
 		})
@@ -1134,7 +1155,7 @@ func TestRemoteStateGate(t *testing.T) {
 					if err != nil {
 						t.Fatalf("Remote() error = %v", err)
 					}
-					rmCheckResult(t, got)
+					rmCheckResult(t, got, rmQuerySecrets...)
 					return
 				}
 				ce := rmRequireConnectError(t, err, KindConfig)
@@ -1194,7 +1215,9 @@ func TestRemoteUserinfo(t *testing.T) {
 			if err != nil {
 				t.Fatalf("Remote() error = %v", err)
 			}
-			rmCheckResult(t, got)
+			// "pw" has under 8 bytes, so only the Basic token and header value of
+			// the user info are in Secrets.
+			rmCheckResult(t, got, wantAuth, "dXNlcjpwdw==", rmQuerySecret)
 			rmCheckHeaders(t, rec.requests(), map[string]string{"Authorization": wantAuth}, rmDefaultUA, sse)
 		})
 
@@ -1209,7 +1232,9 @@ func TestRemoteUserinfo(t *testing.T) {
 				if err != nil {
 					t.Fatalf("Remote() error = %v", err)
 				}
-				rmCheckResult(t, got)
+				// The user info stays in Secrets although the config header wins: it
+				// is in the configured URL.
+				rmCheckResult(t, got, wantAuth, "Bearer "+rmBearerSecret, "dXNlcjpwdw==", rmBearerSecret, rmQuerySecret)
 				rmCheckHeaders(t, rec.requests(), headers, rmDefaultUA, sse)
 				for _, req := range rec.requests() {
 					if got := req.Header.Values("Authorization"); len(got) != 1 {
@@ -1464,7 +1489,7 @@ func TestRemoteNewProtocol(t *testing.T) {
 					t.Errorf("InputSchema = %s, want the annotation kept", hidden.InputSchema)
 				}
 				got.Tools = rest
-				rmCheckResult(t, got)
+				rmCheckResult(t, got, rmQuerySecrets...)
 
 				reqs := rec.requests()
 				rmCheckHeaders(t, reqs, headers, rmDefaultUA, false)
@@ -1594,7 +1619,7 @@ func TestRemoteStaleStatus(t *testing.T) {
 			t.Fatalf("Remote() error = %v", err)
 		}
 		requireProbe(t, p)
-		rmCheckResult(t, got)
+		rmCheckResult(t, got, rmQuerySecrets...)
 		// The recorder sits inside the wrapper, so it never saw the 404 POST.
 		rmCheckHeaders(t, rec.requests(), headers, rmDefaultUA, false)
 	})
@@ -1900,7 +1925,9 @@ func TestSDKInspectRemoteExpand(t *testing.T) {
 					if err != nil {
 						t.Fatalf("Inspect() error = %v", err)
 					}
-					rmCheckResult(t, got)
+					// The token is in the header and in the expanded values: it is
+					// in Secrets one time.
+					rmCheckResult(t, got, "Bearer "+rmExpandToken, rmExpandToken, rmTenant)
 					return
 				}
 
@@ -2093,8 +2120,13 @@ func TestUserinfoSecrets(t *testing.T) {
 
 	const (
 		longName  = "tok-NOTREAL-4b1d"
-		eightName = "abcdefgh" // exactly minBareSecretLen bytes
+		eightName = "abcdefgh" // exactly discover.MinSecretBytes bytes
 		sevenName = "abcdefg"  // one byte short
+		// Names next to a password.
+		prefixName = "ghp_name1" // a token prefix
+		plainName  = "readonly-user"
+		eightDigit = "abcdefg1" // 8 bytes with a digit
+		sevenDigit = "abcdef1"  // 7 bytes with a digit
 	)
 	basic := func(s string) string { return base64.StdEncoding.EncodeToString([]byte(s)) }
 	tests := []struct {
@@ -2141,21 +2173,50 @@ func TestUserinfoSecrets(t *testing.T) {
 			nameIsSecret: true,
 		},
 		{
-			name:         "name of exactly minBareSecretLen bytes is the token",
+			name:         "name of exactly discover.MinSecretBytes bytes is the token",
 			user:         url.User(eightName),
 			want:         []string{basic(eightName + ":"), "Basic " + basic(eightName+":"), eightName},
 			nameIsSecret: true,
 		},
 		{
-			name: "name one byte under minBareSecretLen is not",
+			name: "name one byte under discover.MinSecretBytes is not",
 			user: url.User(sevenName),
 			want: []string{basic(sevenName + ":"), "Basic " + basic(sevenName+":")},
 		},
 		{
-			// With a password, the name is a user name and not the credential.
-			name: "long name with password",
-			user: url.UserPassword(longName, "pw7"),
-			want: []string{basic(longName + ":pw7"), "Basic " + basic(longName+":pw7"), "pw7"},
+			// With a password, a name of 8 or more bytes with a digit looks
+			// like a token (discover.IsSecretUserName), so it is in the list.
+			name:         "long name with password",
+			user:         url.UserPassword(longName, "pw7"),
+			want:         []string{basic(longName + ":pw7"), "Basic " + basic(longName+":pw7"), "pw7", longName},
+			nameIsSecret: true,
+		},
+		{
+			// https://<token>:x-oauth-basic@github.com/: a token prefix.
+			name:         "token-prefix name with password",
+			user:         url.UserPassword(prefixName, "x-oauth-basic"),
+			want:         []string{basic(prefixName + ":x-oauth-basic"), "Basic " + basic(prefixName+":x-oauth-basic"), "x-oauth-basic", prefixName},
+			nameIsSecret: true,
+		},
+		{
+			// A plain name next to a password is a user name, not the
+			// credential, even when it is long.
+			name: "plain long name with password",
+			user: url.UserPassword(plainName, "pw7"),
+			want: []string{basic(plainName + ":pw7"), "Basic " + basic(plainName+":pw7"), "pw7"},
+		},
+		{
+			// 8 bytes with a digit is at the limit of both rules.
+			name:         "eight-byte name with a digit and password",
+			user:         url.UserPassword(eightDigit, "pw7"),
+			want:         []string{basic(eightDigit + ":pw7"), "Basic " + basic(eightDigit+":pw7"), "pw7", eightDigit},
+			nameIsSecret: true,
+		},
+		{
+			// 7 bytes with a digit is under the limit of both rules.
+			name: "seven-byte name with a digit and password",
+			user: url.UserPassword(sevenDigit, "pw7"),
+			want: []string{basic(sevenDigit + ":pw7"), "Basic " + basic(sevenDigit+":pw7"), "pw7"},
 		},
 	}
 	for _, tt := range tests {
@@ -2223,7 +2284,7 @@ func TestCredentialPart(t *testing.T) {
 		{name: "bearer token", value: "Bearer " + tok, want: tok},
 		{name: "token scheme", value: "Token " + tok, want: tok},
 		{name: "lower-case scheme", value: "bearer " + tok, want: tok},
-		{name: "credential of exactly minBareSecretLen bytes", value: "Bearer abcdefgh", want: "abcdefgh"},
+		{name: "credential of exactly discover.MinSecretBytes bytes", value: "Bearer abcdefgh", want: "abcdefgh"},
 		{name: "credential one byte short", value: "Bearer abcdefg", want: ""},
 		{name: "extra spaces are trimmed", value: "Bearer   " + tok + "  ", want: tok},
 		{name: "spaces do not count toward the length", value: "Bearer   abcdefg   ", want: ""},
@@ -2597,7 +2658,7 @@ func TestRemoteUndeclaredToolsFailure(t *testing.T) {
 }
 
 // TestURLSecrets checks the query and path parts that urlSecrets gives to
-// classify. Each part must have at least minBareSecretLen bytes.
+// classify. Each part must have at least discover.MinSecretBytes bytes.
 func TestURLSecrets(t *testing.T) {
 	t.Parallel()
 
@@ -2608,7 +2669,7 @@ func TestURLSecrets(t *testing.T) {
 	}{
 		{name: "no query and no secret path", rawURL: "https://h.example/v1/mcp", want: nil},
 		{name: "query value", rawURL: "https://h.example/mcp?api_key=tok-NOTREAL-q1", want: []string{"tok-NOTREAL-q1"}},
-		{name: "value of exactly minBareSecretLen bytes", rawURL: "https://h.example/mcp?k=abcdefgh", want: []string{"abcdefgh"}},
+		{name: "value of exactly discover.MinSecretBytes bytes", rawURL: "https://h.example/mcp?k=abcdefgh", want: []string{"abcdefgh"}},
 		{name: "value one byte short is dropped", rawURL: "https://h.example/mcp?k=abcdefg", want: nil},
 		{name: "the key of a value is not a secret", rawURL: "https://h.example/mcp?access_token_name=short", want: nil},
 		{name: "repeated key gives every value", rawURL: "https://h.example/mcp?t=tok-NOTREAL-a&t=tok-NOTREAL-b&t=x", want: []string{"tok-NOTREAL-a", "tok-NOTREAL-b"}},

@@ -1,10 +1,8 @@
 package llm
 
 import (
-	"context"
 	"errors"
 	"fmt"
-	"net"
 	"net/url"
 	"strings"
 
@@ -30,11 +28,11 @@ const KeyEnv = "MCPMOAT_LLM_API_KEY"
 // Default base URLs. The client of each provider adds the API path to the
 // base URL.
 const (
-	// DefaultAnthropicBaseURL is the base URL of the Anthropic API.
-	DefaultAnthropicBaseURL = "https://api.anthropic.com"
-	// DefaultOpenAIBaseURL is the base URL of the OpenAI API. It includes
+	// defaultAnthropicBaseURL is the base URL of the Anthropic API.
+	defaultAnthropicBaseURL = "https://api.anthropic.com"
+	// defaultOpenAIBaseURL is the base URL of the OpenAI API. It includes
 	// the "/v1" path.
-	DefaultOpenAIBaseURL = "https://api.openai.com/v1"
+	defaultOpenAIBaseURL = "https://api.openai.com/v1"
 )
 
 // DefaultAnthropicModel is the model that the Anthropic provider uses when
@@ -45,12 +43,12 @@ const DefaultAnthropicModel = "claude-haiku-5-5"
 
 // Limits on config values.
 const (
-	// MaxKeyBytes is the longest API key that ValidateKey accepts.
-	MaxKeyBytes = 4096
-	// MaxModelBytes is the longest model name that Config.Validate accepts.
-	MaxModelBytes = 256
-	// MaxBaseURLBytes is the longest base URL that ValidateBaseURL accepts.
-	MaxBaseURLBytes = 2048
+	// maxKeyBytes is the longest API key that ValidateKey accepts.
+	maxKeyBytes = 4096
+	// maxModelBytes is the longest model name that Config.Validate accepts.
+	maxModelBytes = 256
+	// maxBaseURLBytes is the longest base URL that ValidateBaseURL accepts.
+	maxBaseURLBytes = 2048
 )
 
 // Errors of the config checks. Each error that this file returns wraps one
@@ -94,13 +92,13 @@ func unknownProviderError() error {
 	return fmt.Errorf("%w: use %q or %q", ErrUnknownProvider, ProviderAnthropic, ProviderOpenAI)
 }
 
-// DefaultBaseURL returns the base URL of p, or "" for an unknown provider.
-func (p Provider) DefaultBaseURL() string {
+// defaultBaseURL returns the base URL of p, or "" for an unknown provider.
+func (p Provider) defaultBaseURL() string {
 	switch p {
 	case ProviderAnthropic:
-		return DefaultAnthropicBaseURL
+		return defaultAnthropicBaseURL
 	case ProviderOpenAI:
-		return DefaultOpenAIBaseURL
+		return defaultOpenAIBaseURL
 	default:
 		return ""
 	}
@@ -127,21 +125,22 @@ type Config struct {
 	// is required there.
 	Model string
 	// BaseURL is the base URL of the API. Empty means the default of the
-	// provider (Provider.DefaultBaseURL). See ValidateBaseURL for the
+	// provider (Provider.defaultBaseURL). See ValidateBaseURL for the
 	// rules.
 	BaseURL string
 	// APIKey is the API key from KeyEnv. Call APIKey.Reveal only where the
 	// client sets the auth header. See ValidateKey for the rules.
 	APIKey discover.Secret
 	// Dial, when it is not nil, opens every network connection of the
-	// client in place of the default dialer. Tests use it to see or block
-	// each connection (NFR-01). Nil means the default dialer.
-	Dial func(ctx context.Context, network, addr string) (net.Conn, error)
+	// client in place of the default dialer. Nil means the default dialer.
+	// Dial is a test hook only (see DialFunc): tests use it to see or block
+	// each connection (NFR-01). Production code must leave it nil.
+	Dial DialFunc
 }
 
 // Resolve returns a copy of c with the defaults filled in, and checks it with
 // Validate. An empty Model becomes Provider.DefaultModel and an empty BaseURL
-// becomes Provider.DefaultBaseURL. Resolve removes all final "/" characters
+// becomes Provider.defaultBaseURL. Resolve removes all final "/" characters
 // from BaseURL, so the client can add a path that starts with "/". It checks
 // the base URL after it removes them, so "https:///" fails. An unknown
 // provider has no defaults, and Validate refuses it.
@@ -150,7 +149,7 @@ func (c Config) Resolve() (Config, error) {
 		c.Model = c.Provider.DefaultModel()
 	}
 	if c.BaseURL == "" {
-		c.BaseURL = c.Provider.DefaultBaseURL()
+		c.BaseURL = c.Provider.defaultBaseURL()
 	}
 	c.BaseURL = strings.TrimRight(c.BaseURL, "/")
 	if err := c.Validate(); err != nil {
@@ -177,15 +176,15 @@ func (c Config) Validate() error {
 }
 
 // validateModel checks a model name. The name goes into the JSON request body,
-// so the check is only a sanity check: 1 to MaxModelBytes bytes of visible
+// so the check is only a sanity check: 1 to maxModelBytes bytes of visible
 // ASCII (no space). Real model names such as "gpt-4o-mini",
 // "claude-haiku-5-5" or "llama3:8b" pass.
 func validateModel(model string) error {
 	if model == "" {
 		return fmt.Errorf("%w: the model name is empty (set it for this provider)", ErrInvalidModel)
 	}
-	if len(model) > MaxModelBytes {
-		return fmt.Errorf("%w: longer than %d bytes", ErrInvalidModel, MaxModelBytes)
+	if len(model) > maxModelBytes {
+		return fmt.Errorf("%w: longer than %d bytes", ErrInvalidModel, maxModelBytes)
 	}
 	if !visibleASCII(model) {
 		return fmt.Errorf("%w: only visible ASCII characters are allowed", ErrInvalidModel)
@@ -195,7 +194,7 @@ func validateModel(model string) error {
 
 // ValidateBaseURL checks the base URL of an LLM API. The rules are:
 //
-//   - at most MaxBaseURLBytes bytes, and url.Parse accepts it;
+//   - at most maxBaseURLBytes bytes, and url.Parse accepts it;
 //   - an absolute URL with a host ("https://host" or "https://host/path");
 //   - scheme https, or scheme http only when the host is a loopback host for
 //     discover.IsLoopbackHost (a local model server), so the key never
@@ -209,8 +208,8 @@ func ValidateBaseURL(raw string) error {
 	if raw == "" {
 		return fmt.Errorf("%w: empty", ErrInvalidBaseURL)
 	}
-	if len(raw) > MaxBaseURLBytes {
-		return fmt.Errorf("%w: longer than %d bytes", ErrInvalidBaseURL, MaxBaseURLBytes)
+	if len(raw) > maxBaseURLBytes {
+		return fmt.Errorf("%w: longer than %d bytes", ErrInvalidBaseURL, maxBaseURLBytes)
 	}
 	// A '?' or '#' can only start a query or a fragment. Check the raw text,
 	// so an empty query ("https://h/?") or fragment ("https://h/#") is
@@ -244,7 +243,7 @@ func ValidateBaseURL(raw string) error {
 
 // ValidateKey checks an API key before the client puts it in an HTTP header.
 // An empty key gives an error that wraps ErrMissingKey. A key longer than
-// MaxKeyBytes, or with a byte that is not visible ASCII (a control character
+// maxKeyBytes, or with a byte that is not visible ASCII (a control character
 // such as CR, LF, tab or DEL, a space, or a non-ASCII byte), gives an error
 // that wraps ErrInvalidKey. Real API keys are visible ASCII.
 //
@@ -253,8 +252,8 @@ func ValidateKey(key string) error {
 	if key == "" {
 		return ErrMissingKey
 	}
-	if len(key) > MaxKeyBytes {
-		return fmt.Errorf("%w: longer than %d bytes", ErrInvalidKey, MaxKeyBytes)
+	if len(key) > maxKeyBytes {
+		return fmt.Errorf("%w: longer than %d bytes", ErrInvalidKey, maxKeyBytes)
 	}
 	if !visibleASCII(key) {
 		return fmt.Errorf("%w: only visible ASCII characters are allowed (no spaces, tabs or line breaks)", ErrInvalidKey)

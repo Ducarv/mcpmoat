@@ -47,3 +47,15 @@ var ErrJSONTooComplex = errJSONTooComplex
 // JSONTooComplexReason is the fixed reason of a JSON shape violation, for the
 // tests (see jsonTooComplexReason in errors_test.go).
 const JSONTooComplexReason = jsonTooComplexReason
+
+// RevealSecrets is revealSecrets, for the tests.
+var RevealSecrets = revealSecrets
+
+// CheckSecrets is checkSecrets, for the tests.
+var CheckSecrets = checkSecrets
+
+// WantSecrets is wantSecrets, for the tests.
+var WantSecrets = wantSecrets
+
+// AssertResultMasked is assertResultMasked, for the tests.
+var AssertResultMasked = assertResultMasked

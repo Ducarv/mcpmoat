@@ -18,8 +18,8 @@ Requirement IDs in this document are stable. Issues, pull requests and commit me
 
 A Go command-line tool that protects **the individual developer** against malicious or tampered MCP
 servers. It starts as a **scanner** and evolves, in phases, into a **local firewall**, a **trust
-score** and **data-flow control**. Everything runs 100% offline, with no account and no telemetry.
-The one exception is the optional, opt-in `--llm` check (FR-17).
+score** and **data-flow control**. Everything runs 100% offline except the optional, opt-in
+`--llm` check (FR-17), with no account and no telemetry.
 
 ### 1.2 Problem
 
@@ -156,6 +156,8 @@ mcpmoat process, and a stdio server runs as the same user and can read it (for e
   the report.
 - A cut that hides the payload: the cut-text rule of FR-17 gives a `medium` finding for a cut tool
   that the model rates `none` or `low`, or whose answer is unusable.
+- A config that chooses which text is removed: the same rule gives a `medium` finding for a tool
+  from whose text mcpmoat removed a configured value (the redacted-text rule of FR-17).
 - Data that leaves the machine: `--llm` is opt-in, and a warning is printed before any request.
 - A hostile config that hides the LLM findings or the rule time budget finding: only `--ignore` hides them, not `.mcpmoat-ignore`.
 - The key in the mcpmoat environment: mcpmoat does not give the key to a server through its
@@ -680,37 +682,95 @@ the machine**.
   also with `--json`.
 - What is sent: for each tool of each server that was inspected, only the tool name and the tool
   description (each cut at a fixed size, with a flag that says it was cut), in one JSON user
-  message with a fixed system prompt. mcpmoat never puts configs, env values, headers, arguments,
-  URLs, schemas or pins into a request. A cap on the number of tools per scan (500): more tools
-  than the cap give exit code 2. docs/llm.md holds the sizes and the other limits. `--ignore` does
+  message with a fixed system prompt. Secret values are removed from the name and the description
+  first (see below). mcpmoat never puts configs, env values, headers, arguments, URLs, schemas or
+  pins into a request. A cap on the number of tools per scan (500), shared fairly between the
+  servers: a server with few tools keeps all of them, and the part that it does not use goes to the
+  larger servers. Tools over the share of their server are not sent and give exit code 2. Before
+  the first request, stderr says how many tools are sent and about how much text (numbers only),
+  also with `--json`. docs/llm.md holds the sizes and the other limits. `--ignore` does
   not stop a tool from being sent: to keep a server out of `--llm`, scan it with a separate config.
 - A tool whose name or description was cut is never rated below `medium`, and an unusable model
   answer for it does not hide it. The code enforces this, not only the system prompt. The
   [LLM page](llm.md) holds the full
   rule.
-- The description is sent as the server returned it. mcpmoat does not remove configured secret
-  values from it. A server that got a token through its env or headers can put that token into its
-  description, and `--llm` then sends it to the provider. The server already holds the value. The
-  docs/llm.md tells the user to run `--llm` only if they accept that a tool description can leave the
-  machine as the server wrote it.
+- A tool from whose name or description mcpmoat removed a configured value (see the next item) gets
+  the same floor: never below `medium`, and an unusable model answer or a refusal of the provider
+  does not hide it. The finding is `MOAT-LLM-001`, with category `other` and a fixed risk text.
+  A model rating of `medium` or `high` is kept. A text that was also cut keeps the cut-text
+  finding. The reason: the removed text was not rated, and a hostile config could choose which
+  text it removes, so a part of a malicious description would never reach the model. The rule
+  engine still reads the full text, and a `medium` finding is below the default `--fail-on high`.
+  The [LLM page](llm.md) holds the full rule.
+- Secret values are removed before the cut. A server that got a token through its env, headers or
+  args can put that token into a tool name or description. So mcpmoat replaces each secret value
+  that it gave to that server with `********` in the name and the description of the tools of that
+  server, before it cuts them. The values are the configured env values, the header values, the
+  credential parts of a header, the URL user info and the secret URL parts, the expanded
+  placeholder values and, for a stdio server, the parts of the expanded command and args that the
+  report masks. The user message then has the field `redacted: true`, and the system prompt tells
+  the model that `********` is removed text and not an instruction. The limits:
+  - A value shorter than 8 bytes is not removed, because it would also match ordinary words.
+  - An encoded form of a value (base64, URL-encoded, or split across words) is not removed.
+  - A header value that is not secret but has 8 bytes or more (for example `application/json`) is
+    replaced too, and so is arg text that the report masks but that is not secret (for example a
+    UUID or a random-looking path segment). Some secrets in args are not found (for example
+    `--db mypassword`), so they are not removed.
+  - A server can write `********` itself.
+  - The local report (terminal and `--json`) prints the tool name as the server sent it, so a
+    secret that a server puts in a tool name can show on stdout. Only the LLM rows show the name
+    as the request had it, with each removed value as `********` (`Input.RedactedName`). Issue
+    #228 tracks the other rows.
+
+  docs/llm.md holds the user text of this rule.
 - The model may answer only with a risk (`none`, `low`, `medium`, `high`) and a category from a
   fixed list. No model text reaches the output. Rule `MOAT-LLM-001` reports a risk of `low`,
   `medium` or `high` with that severity (never `critical`); `none` gives no finding. Rule
-  `MOAT-LLM-002` (medium) reports an answer that is invalid or a refusal. Only such an unusable
-  model answer for a tool that was not cut gives `MOAT-LLM-002`.
+  `MOAT-LLM-002` (medium) reports an answer that is invalid or a refusal of the model, or a tool
+  that the provider refused (HTTP 400, 413 or 422), with a fixed text for each case. Only these
+  cases, for a tool that was not cut and had no value removed, give `MOAT-LLM-002`.
 - LLM findings carry a distinct source marker: `[LLM]` in the terminal and `"source": "llm"` in the
   JSON output (since schema version 2). They only add to the rule findings and never remove or
   change them. They count for `--fail-on`. Only `--ignore` applies to them; `.mcpmoat-ignore` does
   not (FR-10).
 - The result is advisory. No finding does not mean that a tool is safe: a model can be wrong, and a
   hostile description can try to influence it.
-- A provider failure stops the step and gives exit code 2 (fail closed). So does an internal error
-  of the LLM step, or more tools than the cap. The report still prints and the JSON `complete`
-  field is `false`. docs/llm.md holds the list of failures and the exact stderr lines.
-- A hostile server can make `scan --llm` exit with 2: it can list more tools than the cap, or write a
-  description that makes the provider answer with an HTTP 4xx (a content filter or a context
-  limit). The rule findings still print. A follow-up may make a 400, 413 or 422 for one tool a
-  result for that tool only.
+- An HTTP 400, 413 or 422 from the provider is a result for that one tool only (for example a
+  content filter or a context limit). The tool is not classified and gets a `medium` finding:
+  `MOAT-LLM-002`, or the `MOAT-LLM-001` floor finding when its name or description was cut or had a
+  value removed. The
+  other requests go on, and the scan can still be complete. That finding is below the default
+  `--fail-on high`, so a hostile server that makes the provider refuse its own tool description
+  can keep its LLM rating from reaching `high`, as with an unusable answer. The rule findings still
+  apply.
+- Retries: a provider answer that says busy or overloaded (such as HTTP 429 or 503) is tried
+  again, with a fixed, small number of tries for each tool and a wait with jitter between them. A
+  `Retry-After` time is honoured up to a cap, and a longer one means no retry. A `Retry-After` that
+  is longer than the time left in the step also means no retry: the tool fails at once with the
+  error of the provider, and the scan exits with 2. No other status, no
+  request timeout and no other transport error is tried again. After the last try, the failure is
+  a provider failure (below).
+- Time and cost bounds: each request has a time limit, and the whole LLM step has a fixed time
+  limit, with no flag. A step that reaches it is a provider failure: the tools that got an answer
+  keep their findings, and the others are not classified. A signal is not this case, and a
+  provider failure that came first wins. The tool cap, the tries for each tool and the size of
+  each request bound the cost of a scan. The output tokens of the model are capped where the API
+  allows it (hidden reasoning tokens are billed). An OpenAI-compatible base URL can get no output
+  cap, because many such servers refuse that field. A cut answer is an unusable answer
+  (`MOAT-LLM-002`), not an error. docs/llm.md holds the status codes, the waits and the numbers.
+- A provider failure stops the step and gives exit code 2 (fail closed). A provider failure is any
+  other HTTP error, a redirect, a network or TLS error, a timeout, a response that is not valid,
+  or the time limit of the step.
+  The step also fails closed as a provider failure when the provider refused every tool that it
+  answered, so a wrong model name or API shape that gives 400 for every tool does not look like a
+  complete scan. An internal error of the LLM step, or tools over the cap, give exit code 2 too.
+  The report still prints and the JSON `complete` field is `false`. docs/llm.md holds the list of
+  failures and the exact stderr lines.
+- A hostile server can still make `scan --llm` exit with 2: it can list more tools than its share
+  of the cap. It cannot use up the share of the other servers. Its refused tools stay per-tool
+  findings when the provider answers at least one other tool with a 2xx. When its tools are the
+  only tools in the step, it can make the step fail: it can write descriptions that the provider
+  refuses. The rule findings still print.
 
 ---
 

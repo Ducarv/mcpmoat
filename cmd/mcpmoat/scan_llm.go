@@ -1,17 +1,13 @@
 package main
 
 import (
-	"cmp"
 	"context"
 	"errors"
-	"flag"
 	"fmt"
-	"net/url"
 	"slices"
-	"strings"
 	"sync"
+	"time"
 
-	"github.com/Ducarv/mcpmoat/internal/discover"
 	"github.com/Ducarv/mcpmoat/internal/inspect"
 	"github.com/Ducarv/mcpmoat/internal/llm"
 	"github.com/Ducarv/mcpmoat/internal/report"
@@ -25,24 +21,66 @@ import (
 
 // Limits of the LLM step.
 const (
-	// maxLLMTools is the largest number of tools that one scan sends to the
-	// provider. It bounds the cost and the time of a scan.
-	maxLLMTools = 500
 	// llmWorkers is the number of requests that run at the same time.
 	llmWorkers = llm.MaxConcurrentRequests
+	// defaultLLMStepTimeout is the time limit of the whole LLM step of one
+	// scan. It is fixed: no flag changes it. A test sets the field
+	// cli.llmStepTimeout instead.
+	//
+	// Each request has a time limit in package llm, but without this limit
+	// the step has none. The client of package llm tries a request again
+	// after a busy answer of the provider (see retryPolicy in package llm),
+	// up to llm.RetryMaxTries requests in total for one tool. Between two
+	// tries it waits: for the Retry-After time of the answer when that is up
+	// to llm.RetryAfterCap (a longer Retry-After means no retry), else for a
+	// short backoff with jitter. So one tool takes at most llm.RetryMaxTries
+	// requests, each with the time limit of package llm, and the waits
+	// between them. With maxLLMTools tools and llmWorkers requests at the
+	// same time, the step can take hours in the worst case, when the provider
+	// sends a long Retry-After on every try. This limit stops the step after
+	// 10 minutes.
+	//
+	// When the limit is reached, the step stops as after a provider failure
+	// (see runLLMJobs).
+	defaultLLMStepTimeout = 10 * time.Minute
 )
 
-// noLLMClientText is the text after the prefix of the error line that scan
-// prints when it has no LLM client. This is a bug in mcpmoat, not a user
-// error. It is fixed text.
-const noLLMClientText = "internal error: no LLM client"
+// errLLMStepDeadline is the cause of the context of the LLM step when the
+// time limit is reached (see runLLMJobs). It has fixed text, and scan never
+// prints it.
+var errLLMStepDeadline = errors.New("the LLM step reached its time limit")
 
-// noToolNameKey is the Key of an LLM finding row or a tool rule row (see
-// toolKey) for a tool with an empty name. A hostile server can list such a
-// tool. The report writers treat a row with an empty Key as a row about the
-// whole server, so the row gets this fixed text instead. The request to the
-// provider still has the real (empty) name.
-const noToolNameKey = "(no name)"
+// llmStepTimeoutOrDefault returns c.llmStepTimeout, or
+// defaultLLMStepTimeout when the field is zero (a real scan).
+func (c *cli) llmStepTimeoutOrDefault() time.Duration {
+	if c.llmStepTimeout == 0 {
+		return defaultLLMStepTimeout
+	}
+	return c.llmStepTimeout
+}
+
+// durationText returns the duration d in words, for a stderr line or the
+// help. The text is "10 minutes" for whole minutes, "30 seconds" for whole
+// seconds, else the Go form of d, such as "50ms" (a value that a test sets).
+// It holds only a number and a fixed unit.
+func durationText(d time.Duration) string {
+	switch {
+	case d >= time.Minute && d%time.Minute == 0:
+		n := d / time.Minute
+		if n == 1 {
+			return "1 minute"
+		}
+		return fmt.Sprintf("%d minutes", n)
+	case d >= time.Second && d%time.Second == 0:
+		n := d / time.Second
+		if n == 1 {
+			return "1 second"
+		}
+		return fmt.Sprintf("%d seconds", n)
+	default:
+		return d.String()
+	}
+}
 
 // toolClassifier rates one tool. *llm.Client implements it. Tests use a fake,
 // so they send no request.
@@ -50,231 +88,10 @@ type toolClassifier interface {
 	Classify(ctx context.Context, in llm.Input) (llm.Verdict, error)
 }
 
-// newLLMClassifier is the real value of cli.newClassifier: it wraps llm.New.
-// It sends no request.
-func newLLMClassifier(cfg llm.Config) (toolClassifier, error) {
-	client, err := llm.New(cfg)
-	if err != nil {
-		// Return a plain nil. A nil *llm.Client in the interface would not
-		// compare equal to nil.
-		return nil, err
-	}
-	return client, nil
-}
-
-// The names of the LLM flags of scan (FR-17), without the dashes.
-const (
-	flagLLM         = "llm"
-	flagLLMProvider = "llm-provider"
-	flagLLMModel    = "llm-model"
-	flagLLMBaseURL  = "llm-base-url"
-)
-
-// addLLMFlags adds the four LLM flags of scan (FR-17) to fs. They store
-// their values in f. --llm is off by default. The other three refuse an
-// empty value (see onceStringFlag), so an empty value in f means that the
-// flag was not given. checkLLMFlags checks them all.
-//
-// The base URL can hold a user:password, so the errors of its flag never
-// hold the value. addLLMFlags returns that flag: when Parse fails, the
-// caller prints its problem in place of the Parse error (see
-// secretStringFlag).
-func addLLMFlags(fs *flag.FlagSet, f *llmFlags) *secretFlag {
-	fs.BoolVar(&f.on, flagLLM, false, "")
-	onceStringFlag(fs, flagLLMProvider, "a provider name", &f.provider)
-	onceStringFlag(fs, flagLLMModel, "a model name", &f.model)
-	return secretStringFlag(fs, flagLLMBaseURL, "a URL", &f.baseURL)
-}
-
-// setupLLM checks the LLM flags (see checkLLMFlags) and, with --llm, prints
-// the warning on stderr and builds the classifier (see buildClassifier).
-// runScan calls it before it reads a config file. The warning comes before
-// the client is built and before any request, also with --json (FR-17).
-//
-// It returns a nil classifier and true without --llm: then it reads no API
-// key and builds no client. On a problem it has printed the error and
-// returns false, and scan exits with 2.
-func (c *cli) setupLLM(f llmFlags, noConnect bool) (toolClassifier, bool) {
-	setup, ok := c.checkLLMFlags(f, noConnect)
-	if !ok || setup == nil {
-		return nil, ok
-	}
-	c.scanWarnf("%s", setup.warningText())
-	return c.buildClassifier(setup.cfg)
-}
-
-// buildClassifier gets the classifier for cfg from c.newClassifier. This is
-// the only place that calls it, and runScan calls it only with --llm. On an
-// error it prints one line on stderr and returns false. The errors of llm.New
-// have fixed text; termsafe.Quote still escapes the text, because a test can
-// set any factory.
-func (c *cli) buildClassifier(cfg llm.Config) (toolClassifier, bool) {
-	if c.newClassifier == nil {
-		c.cmdPrintf("scan", "%s", noLLMClientText)
-		return nil, false
-	}
-	cl, err := c.newClassifier(cfg)
-	if err != nil {
-		c.cmdErr("scan", "cannot set up the LLM client", err)
-		return nil, false
-	}
-	if cl == nil {
-		c.cmdPrintf("scan", "%s", noLLMClientText)
-		return nil, false
-	}
-	return cl, true
-}
-
-// closeClassifier closes the idle connections of cl, when cl has such a
-// method (*llm.Client has one). A fake from a test usually has none. cl can
-// be nil (no --llm): the type assertion is then false, and it does nothing.
-func closeClassifier(cl toolClassifier) {
-	if closer, ok := cl.(interface{ CloseIdleConnections() }); ok {
-		closer.CloseIdleConnections()
-	}
-}
-
-// llmFlags holds the values of the LLM flags as the user gave them. An empty
-// string means that the flag was not given.
-type llmFlags struct {
-	on       bool   // --llm
-	provider string // --llm-provider
-	model    string // --llm-model
-	baseURL  string // --llm-base-url
-}
-
-// strayLLMFlag returns the name of the first LLM flag in f that needs --llm,
-// for example "--llm-model", or "" when f has none.
-func strayLLMFlag(f llmFlags) string {
-	for _, given := range []struct{ name, value string }{
-		{"--" + flagLLMProvider, f.provider},
-		{"--" + flagLLMModel, f.model},
-		{"--" + flagLLMBaseURL, f.baseURL},
-	} {
-		if given.value != "" {
-			return given.name
-		}
-	}
-	return ""
-}
-
-// llmSetup is the checked LLM config of one scan.
-type llmSetup struct {
-	// cfg is the resolved config, with the defaults filled in and the API key
-	// from the environment. cfg.APIKey prints as a mask.
-	cfg llm.Config
-	// host is the host of cfg.BaseURL, with the port if it has one. The
-	// warning names it.
-	host string
-}
-
-// newLLMSetup returns the llmSetup of cfg, a config that Resolve returned.
-// Resolve checked cfg.BaseURL with llm.ValidateBaseURL, so the URL parses
-// and has a host: the error is only a guard. It is llm.ErrInvalidBaseURL
-// and never the url.Parse error, because that text quotes the URL, which
-// can hold a secret.
-func newLLMSetup(cfg llm.Config) (*llmSetup, error) {
-	u, err := url.Parse(cfg.BaseURL)
-	if err != nil || u.Host == "" {
-		return nil, llm.ErrInvalidBaseURL
-	}
-	return &llmSetup{cfg: cfg, host: u.Host}, nil
-}
-
-// warningText returns the text of the warning that scan prints on stderr
-// before it builds the client and before any request (FR-17). The provider
-// name is one of the fixed llm.Provider values. The host comes from the user,
-// so termsafe.Quote escapes it.
-func (s *llmSetup) warningText() string {
-	return fmt.Sprintf("--llm sends the name and description of every tool to the LLM provider %s at %s. This data leaves your machine.",
-		s.cfg.Provider, termsafe.Quote(s.host))
-}
-
-// checkLLMFlags checks the LLM flags and returns the LLM config of the scan.
-// It returns nil and true when --llm is not set: then it reads no API key.
-// On a problem it prints one usage error on stderr and returns false, and
-// scan exits with 2.
-//
-// The API key comes only from the environment variable llm.KeyEnv, read
-// through c.getenv. No message holds the key: the texts come from the llm
-// errors, which are fixed and never hold the key, the model name or the URL.
-func (c *cli) checkLLMFlags(f llmFlags, noConnect bool) (*llmSetup, bool) {
-	if !f.on {
-		// An LLM flag without --llm would do nothing. Say so, or the user
-		// could think that the scan used the LLM.
-		if name := strayLLMFlag(f); name != "" {
-			c.usageError("scan", "%s needs --llm", name)
-			return nil, false
-		}
-		return nil, true
-	}
-	if noConnect {
-		c.usageError("scan", "--llm cannot be used with --no-connect: the LLM needs a connection to each server to get its tools")
-		return nil, false
-	}
-
-	name := f.provider
-	if name == "" {
-		name = string(llm.ProviderAnthropic)
-	}
-	provider, err := llm.ParseProvider(name)
-	if err != nil {
-		c.usageError("scan", "--llm-provider: %v", err)
-		return nil, false
-	}
-	if f.model == "" && provider.DefaultModel() == "" {
-		c.usageError("scan", "--llm-provider %s needs --llm-model", provider)
-		return nil, false
-	}
-	if f.baseURL != "" {
-		if err := llm.ValidateBaseURL(f.baseURL); err != nil {
-			c.usageError("scan", "--llm-base-url: %v", err)
-			return nil, false
-		}
-	}
-	key := c.getenv(llm.KeyEnv)
-	if err := llm.ValidateKey(key); err != nil {
-		// The error text names llm.KeyEnv and never holds the key.
-		c.usageError("scan", "--llm: %v", err)
-		return nil, false
-	}
-
-	cfg, err := llm.Config{
-		Provider: provider,
-		Model:    f.model,
-		BaseURL:  f.baseURL,
-		APIKey:   discover.NewSecret(key),
-	}.Resolve()
-	if err != nil {
-		if errors.Is(err, llm.ErrInvalidModel) {
-			c.usageError("scan", "--llm-model: %v", err)
-		} else {
-			c.usageError("scan", "--llm: %v", err)
-		}
-		return nil, false
-	}
-	setup, err := newLLMSetup(cfg)
-	if err != nil {
-		c.usageError("scan", "--llm-base-url: %v", err)
-		return nil, false
-	}
-	return setup, true
-}
-
-// llmJob is one tool to classify.
-type llmJob struct {
-	// index is the index of the server in the servers of the scan
-	// (inspect.Outcome.Index).
-	index int
-	// ref is the server of the finding row. ref.Name is the server name
-	// from the config file. It is untrusted.
-	ref report.ServerRef
-	// in is what the classifier gets: the tool name and description only.
-	in llm.Input
-}
-
 // answerKind sorts the result of one Classify call. sortAnswer is the only
-// place that sorts the errors of Classify.
+// place that sorts the errors of Classify. runLLMJob only turns an
+// answerStopped into an answerDeadline when the step deadline stopped the
+// request.
 type answerKind int
 
 const (
@@ -286,8 +103,14 @@ const (
 	// is not a valid verdict (llm.ErrInvalidOutput). The tool gets an
 	// llm.RuleIDInvalid row.
 	answerUnusable
+	// answerRejected means that the provider refused this one tool
+	// (llm.ErrRejected: HTTP 400, 413 or 422). It does not stop the step
+	// at once: see rejectedFailure for when it does. As an llmFailure kind
+	// it is that failure.
+	answerRejected
 	// answerStopped means that the context of the request ended: a signal,
-	// or the cancel after the first failure of the step.
+	// or the cancel after the first failure of the step. A request that the
+	// step deadline stopped is answerDeadline instead.
 	answerStopped
 	// answerProviderFailed means that the request to the provider failed
 	// (llm.ErrProvider). It stops the LLM step.
@@ -296,6 +119,11 @@ const (
 	// that sortAnswer does not know. It stops the LLM step, like a provider
 	// failure. Its text is never printed, because it can hold anything.
 	answerInternalFailed
+	// answerDeadline means that the time limit of the whole LLM step
+	// stopped the request, while the process got no signal. It stops the
+	// LLM step, like a provider failure. sortAnswer never returns it (see
+	// runLLMJobs).
+	answerDeadline
 )
 
 // String returns the name of the kind, so a test failure or a debug print
@@ -308,37 +136,59 @@ func (k answerKind) String() string {
 		return "answerVerdict"
 	case answerUnusable:
 		return "answerUnusable"
+	case answerRejected:
+		return "answerRejected"
 	case answerStopped:
 		return "answerStopped"
 	case answerProviderFailed:
 		return "answerProviderFailed"
 	case answerInternalFailed:
 		return "answerInternalFailed"
+	case answerDeadline:
+		return "answerDeadline"
 	default:
 		return fmt.Sprintf("answerKind(%d)", int(k))
 	}
 }
 
-// stepFails reports whether an answer of kind k stops the LLM step.
+// stepFails reports whether an answer of kind k stops the LLM step at once.
+// answerRejected does not: only the check after all the answers can make it
+// fail the step (see rejectedFailure).
 func (k answerKind) stepFails() bool {
-	return k == answerProviderFailed || k == answerInternalFailed
+	return k == answerProviderFailed || k == answerInternalFailed || k == answerDeadline
 }
 
 // answered reports whether the provider answered the job of an answer of
-// kind k: with a verdict, or with an answer that cannot be used. For the
-// other kinds, the tool was not classified (see llmResult.skipped).
+// kind k: with a verdict, with an answer that cannot be used, or with a
+// refusal of this one tool. For the other kinds, the tool was not classified
+// (see llmResult.skipped).
 func (k answerKind) answered() bool {
+	return k == answerVerdict || k == answerUnusable || k == answerRejected
+}
+
+// got2xx reports whether the provider answered the job of an answer of kind
+// k with a 2xx status: with a verdict, or with model output that cannot be
+// used (llm.ErrInvalidOutput comes only from a 2xx body).
+func (k answerKind) got2xx() bool {
 	return k == answerVerdict || k == answerUnusable
 }
 
 // sortAnswer returns the kind of the result of Classify with the error err.
 //
-// It fails closed. Only llm.ErrInvalidOutput gives an llm.RuleIDInvalid row
-// (answerUnusable): the model answered, but its answer cannot be used. Any
-// error that sortAnswer does not know (for example a request that is too
-// large, a nil client, or a future error path that does not wrap
-// llm.ErrProvider) stops the step (answerInternalFailed). So a new error can
-// never make a failed step look like a complete scan with medium findings.
+// It fails closed. Only llm.ErrInvalidOutput (answerUnusable) and
+// llm.ErrRejected (answerRejected) give an llm.RuleIDInvalid row: the
+// provider answered, but there is no usable rating. Any error that
+// sortAnswer does not know (for example a request that is too large, a nil
+// client, or a future error path that does not wrap llm.ErrProvider) stops
+// the step (answerInternalFailed). So a new error can never make a failed
+// step look like a complete scan with medium findings.
+//
+// llm.ErrRejected wraps llm.ErrProvider, so its case must come before the
+// llm.ErrProvider case: a switch takes the first case that is true. Every
+// other provider error (401, 403, 404, 3xx, other codes, transport errors)
+// stays a global failure (answerProviderFailed) that stops the step.
+//
+// A refusal does not stop the step at once: see rejectedFailure.
 func sortAnswer(err error) answerKind {
 	switch {
 	case err == nil:
@@ -347,6 +197,9 @@ func sortAnswer(err error) answerKind {
 		return answerUnusable
 	case errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded):
 		return answerStopped
+	case errors.Is(err, llm.ErrRejected):
+		// Before the llm.ErrProvider case: ErrRejected wraps it.
+		return answerRejected
 	case errors.Is(err, llm.ErrProvider):
 		return answerProviderFailed
 	default:
@@ -356,13 +209,29 @@ func sortAnswer(err error) answerKind {
 
 // llmFailure is the first failure of the LLM step.
 type llmFailure struct {
-	// kind is answerProviderFailed or answerInternalFailed.
+	// kind is answerProviderFailed or answerInternalFailed for the first
+	// request that stopped the step, answerDeadline when the time limit of
+	// the step stopped it first (see runLLMJobs), or answerRejected when the
+	// refusals fail the step (see rejectedFailure).
+	// answerRejected and answerDeadline are provider failures too: exit 2
+	// and complete false, and the rows of the answered tools stay.
 	kind answerKind
 	// err is the error of the provider (llm.ErrProvider), whose text is
-	// fixed (see llmFailureText). It is nil for answerInternalFailed: that
-	// error text is never kept, so it can never be printed.
+	// fixed (see llmFailureText). For answerRejected it is the error of the
+	// first refused tool (llm.ErrRejected). It is nil for
+	// answerInternalFailed: that error text is never kept, so it can never
+	// be printed. It is nil for answerDeadline too.
 	err error
+	// timeout is the time limit of the step for answerDeadline, so that the
+	// stderr line names it (see llmFailureLine). It is zero for the other
+	// kinds.
+	timeout time.Duration
 }
+
+// rejectedHintText is the fixed hint of the reason of an answerRejected
+// failure (see rejectedReason). Every answered tool was refused, so it says
+// "every tool", not "this tool" as llm.Reason does.
+const rejectedHintText = "the provider refused every tool"
 
 // llmInternalText is the text after the prefix of the stderr line when the
 // LLM step failed for a reason that is not the provider. It is fixed text.
@@ -378,21 +247,32 @@ const llmNoToolText = "--llm had no tool to classify"
 // llmAnswer is the result of one job.
 type llmAnswer struct {
 	kind answerKind
-	// verdict is the whole verdict for answerVerdict. For answerUnusable,
-	// only verdict.Truncated is set (see llm.Client.Classify), so that
-	// llmRow can rate a cut tool. For the other kinds it is zero.
+	// verdict is the whole verdict for answerVerdict. For answerUnusable
+	// and answerRejected, only verdict.Truncated and verdict.Redacted are set
+	// (see llm.Client.Classify), so that llmRow can rate a tool whose text
+	// was not rated in full. For the other kinds it is zero.
 	verdict llm.Verdict
+	// err is the error of Classify for answerRejected (it wraps
+	// llm.ErrRejected and has fixed text), so that rejectedFailure can give
+	// its reason. For the other kinds it is nil. newLLMAnswer sets it.
+	err error
 }
 
-// newLLMAnswer returns the answer of kind k for the verdict v that Classify
-// returned. It keeps of v only what llmAnswer.verdict documents, so a
-// classifier that returns more with an error changes no row.
-func newLLMAnswer(k answerKind, v llm.Verdict) llmAnswer {
+// newLLMAnswer returns the answer of kind k for the verdict v and the error
+// err that Classify returned. It keeps of v only what llmAnswer.verdict
+// documents, so a classifier that returns more with an error changes no row.
+// It keeps err only for answerRejected, as llmAnswer.err documents: for the
+// other kinds it drops err, so its text can never be printed.
+func newLLMAnswer(k answerKind, v llm.Verdict, err error) llmAnswer {
 	switch k {
 	case answerVerdict:
 		return llmAnswer{kind: k, verdict: v}
 	case answerUnusable:
-		return llmAnswer{kind: k, verdict: llm.Verdict{Truncated: v.Truncated}}
+		return llmAnswer{kind: k, verdict: llm.Verdict{Truncated: v.Truncated, Redacted: v.Redacted}}
+	case answerRejected:
+		// Keep the error for the reason of rejectedFailure. Its text is
+		// fixed.
+		return llmAnswer{kind: k, verdict: llm.Verdict{Truncated: v.Truncated, Redacted: v.Redacted}, err: err}
 	default:
 		return llmAnswer{kind: k}
 	}
@@ -414,14 +294,19 @@ type llmResult struct {
 	// counts holds the number of rows of each server, by the index of the
 	// server in the servers of the scan (see addLLMCounts).
 	counts map[int]int
-	// overCap is the number of tools after the first maxLLMTools. They were
-	// not sent.
+	// overCap is the number of tools over the share of their server of the
+	// maxLLMTools cap (see fairShare), for all the servers together. They
+	// were not sent.
 	overCap int
-	// failure is the first failure of the step: a provider failure or an
-	// internal error. It is nil when no request failed.
+	// failure is the first failure of the step: a provider failure, an
+	// internal error, the time limit of the step, or the refusal of every
+	// answered tool (see rejectedFailure). It is nil when no request failed.
 	failure *llmFailure
-	// skipped is the number of tools under the cap that got no verdict: the
-	// tool whose request failed, and the tools that were not sent after it.
+	// skipped is the number of tools inside the shares that got no verdict:
+	// the tool whose request failed, and the tools that were not sent after
+	// it. After the step deadline, it is the tools whose request the
+	// deadline stopped and the tools that were not sent. When every answered
+	// tool was refused, it is every tool inside the shares.
 	skipped int
 	// tools is the number of tools that the step had to classify: every tool
 	// of the inspected servers, also the ones over the cap. With 0, llmStep
@@ -435,29 +320,46 @@ func (r llmResult) incomplete() bool {
 	return r.overCap > 0 || r.failure != nil || r.skipped > 0
 }
 
-// llmStep runs the LLM step of scan (see classifyTools) on the tools of the
-// inspected servers in outcomes. It prints on stderr one warning for each LLM
-// rule that .mcpmoat-ignore cannot ignore (see llmResult.fileBlocked), then
-// the problems of the step (see printLLMProblems). It returns an empty result
-// and true when cl is nil (no --llm): then it sends nothing and prints
-// nothing.
+// llmStep runs the LLM step of scan (see planLLMJobs and classifyPlan) on
+// the tools of the inspected servers in outcomes. It prints on stderr one
+// warning for each LLM rule that .mcpmoat-ignore cannot ignore (see
+// llmResult.fileBlocked), then the problems of the step (see
+// printLLMProblems). It returns an empty result and true when cl is nil (no
+// --llm): then it sends nothing and prints nothing.
 //
 // With --llm and no tool to classify (outcomes is empty, no server was
 // inspected, or the inspected servers list no tools), it sends nothing and
 // prints one llmNoToolText line, so the user knows that no tool was rated.
 // The line changes neither the exit code nor the JSON report.
 //
+// With at least one tool to send, it prints one notice line before the first
+// request: the number of tools that it sends and the size of their text (see
+// llmPlan.sendingNotice).
+//
 // It returns false when the process got a signal during a step that had a tool
 // to classify. It has written interruptedText then (see interrupted), and scan
 // must print no report and save no pins. With no tool to classify, a signal
 // is not an error of the step, as without --llm. It returns false too, with
-// one llmInternalText line, when classifyTools fails while ctx is still alive
+// one llmInternalText line, when classifyPlan fails while ctx is still alive
 // (see llmStepStopped).
 func (c *cli) llmStep(ctx context.Context, cl toolClassifier, outcomes []inspect.Outcome, ignore *scanIgnores) (llmResult, bool) {
 	if cl == nil {
 		return llmResult{}, true
 	}
-	lr, err := classifyTools(ctx, outcomes, cl, ignore)
+	plan := planLLMJobs(outcomes)
+	// The notice comes here, between the two other groups of --llm lines on
+	// stderr. The setup warning (see setupLLM) comes before the inspection:
+	// it names the provider, but the tools are not known yet. The lines of
+	// the result (llmNoToolText, the ignore warnings and printLLMProblems)
+	// come after the requests. Only here are the tools known and no tool text
+	// sent yet, so the notice tells the user how much data leaves the machine
+	// before it leaves. With no job it is not printed: llmNoToolText says
+	// that then. It goes to stderr also with --json, so stdout stays pure
+	// JSON.
+	if len(plan.jobs) > 0 {
+		c.cmdPrintf("scan", "%s", plan.sendingNotice())
+	}
+	lr, err := classifyPlan(ctx, plan, cl, ignore, c.llmStepTimeoutOrDefault())
 	if c.llmStepStopped(ctx, err) {
 		return llmResult{}, false
 	}
@@ -471,12 +373,12 @@ func (c *cli) llmStep(ctx context.Context, cl toolClassifier, outcomes []inspect
 	return lr, true
 }
 
-// llmStepStopped reports whether scan must stop after classifyTools returned
+// llmStepStopped reports whether scan must stop after classifyPlan returned
 // err, and writes the reason on stderr. With no error, the step is done, also
-// when ctx ended: classifyTools returns no error when it had no tool to
+// when ctx ended: classifyPlan returns no error when it had no tool to
 // classify, and then scan behaves as without --llm. When ctx ended (a signal)
 // and err is not nil, it writes interruptedText (see interrupted).
-// classifyTools fails only when ctx ended, so the other case is a guard: an
+// classifyPlan fails only when ctx ended, so the other case is a guard: an
 // error while ctx is alive writes llmInternalText, never the text of err.
 func (c *cli) llmStepStopped(ctx context.Context, err error) bool {
 	if err == nil {
@@ -489,14 +391,25 @@ func (c *cli) llmStepStopped(ctx context.Context, err error) bool {
 	return true
 }
 
-// classifyTools sends the name and the description of each tool of each
-// inspected server (inspect.StatusOK) to cl, and returns the LLM findings.
-// It sends nothing else of the tool and nothing of the server.
+// classifyPlan runs the jobs of plan, with the time limit timeout for all of
+// them together, and returns the LLM findings. llmStep builds plan with
+// planLLMJobs and then calls classifyPlan, so that it can print the notice
+// between the two. It gives c.llmStepTimeoutOrDefault() as timeout:
+// defaultLLMStepTimeout in a real scan, and the value that a test sets in
+// cli.llmStepTimeout.
+//
+// The jobs send the name and the description of each tool of each inspected
+// server (inspect.StatusOK) to cl. Nothing else of the tool and nothing of
+// the server is sent. Each request also carries the secret values of the
+// server (see llmServerJobs), so that cl removes them from the name and the
+// description before it sends them.
 //
 // The tools go in the order of the servers (inspect.Outcome.Index), then in
-// the order that the server lists them. Only the first maxLLMTools tools are
-// sent. llmWorkers requests run at the same time. The rows keep the order of
-// the tools, whatever the order in which the requests end.
+// the order that the server lists them. At most maxLLMTools tools are sent,
+// shared fairly between the servers (see planLLMJobs and fairShare): each
+// server sends its first tools, up to its share. llmWorkers requests run at
+// the same time. The rows keep the order of the tools, whatever the order in
+// which the requests end.
 //
 // Each answered tool gives at most one report.SourceLLM row with fixed texts
 // from package llm, so no model output reaches it: see llmRow. Only the
@@ -506,29 +419,42 @@ func (c *cli) llmStepStopped(ctx context.Context, err error) bool {
 //
 // The first request that fails (a provider failure or an internal error, see
 // sortAnswer) stops the step: the requests that run end and no new one
-// starts. The result then holds the failure (see llmResult.failure), and the
-// tools without a verdict get no row.
+// starts. A request that package llm tries again fails only when its last
+// try fails. The result then holds the failure (see llmResult.failure), and
+// the tools without a verdict get no row.
+//
+// A tool that the provider refused (llm.ErrRejected) gets an
+// llm.RuleIDInvalid row with llm.RejectedText. When rejectedFailure fails the
+// step, no tool gets a row (see rejectedFailure).
+//
+// The whole step has the time limit timeout. When it is reached, the step
+// stops like after a provider failure, with the failure answerDeadline (see
+// runLLMJobs). It is not a signal.
 //
 // The error is not nil only when ctx ended (the process got a signal) and at
 // least one tool was to be classified. The caller then handles it like a
 // signal during the inspection. With no tool, the result is empty and the
 // error is nil.
-func classifyTools(ctx context.Context, outcomes []inspect.Outcome, cl toolClassifier, ignore *scanIgnores) (llmResult, error) {
-	var res llmResult
-	jobs := llmJobs(outcomes)
-	res.tools = len(jobs)
-	if len(jobs) > maxLLMTools {
-		res.overCap = len(jobs) - maxLLMTools
-		jobs = jobs[:maxLLMTools]
-	}
+func classifyPlan(ctx context.Context, plan llmPlan, cl toolClassifier, ignore *scanIgnores, timeout time.Duration) (llmResult, error) {
+	res := llmResult{tools: plan.tools, overCap: plan.overCap}
+	jobs := plan.jobs
 
-	answers, failure := runLLMJobs(ctx, jobs, cl)
+	answers, failure := runLLMJobs(ctx, jobs, cl, timeout)
 	// With no job, the step did nothing, so a signal that comes now is not
 	// an LLM error. The caller handles it later, as without --llm.
 	if err := ctx.Err(); err != nil && len(jobs) > 0 {
 		return llmResult{}, err
 	}
+	if failure == nil {
+		// A global failure wins. Without one, check the refusals.
+		failure = rejectedFailure(answers)
+	}
 	res.failure = failure
+	if failure != nil && failure.kind == answerRejected {
+		// Fail closed: no tool was classified, so no tool gets a row.
+		res.skipped = len(jobs)
+		return res, nil
+	}
 
 	for i, job := range jobs {
 		if !answers[i].kind.answered() {
@@ -559,28 +485,49 @@ func classifyTools(ctx context.Context, outcomes []inspect.Outcome, cl toolClass
 	return res, nil
 }
 
-// llmJobs returns one job for each tool of each inspected server, in the order
-// of the servers (inspect.Outcome.Index), then of the tools. inspect.Run sorts
-// the outcomes, so their order is not the order of the servers.
-func llmJobs(outcomes []inspect.Outcome) []llmJob {
-	sorted := slices.SortedStableFunc(slices.Values(outcomes), func(a, b inspect.Outcome) int {
-		return cmp.Compare(a.Index, b.Index)
-	})
-	var jobs []llmJob
-	for _, o := range sorted {
-		if o.Status != inspect.StatusOK {
-			continue
+// rejectedFailure returns the failure of the step when at least one answer
+// in answers is a refusal (answerRejected) and no answered job got a 2xx
+// answer (see answerKind.got2xx). It returns nil in all other cases, also
+// when answers is empty. Jobs without an answer (answerNotRun, answerStopped,
+// a failed request) do not count.
+//
+// This is the one full statement of the rule for refusals (llm.ErrRejected).
+// A refusal alone is per tool: the tool gets an llm.RuleIDInvalid row and
+// the other requests go on. But the step fails closed when no tool got a
+// 2xx answer. After all the requests end, classifyPlan applies this rule:
+//
+//   - A global failure (answerProviderFailed, answerInternalFailed or the
+//     step deadline answerDeadline) or a signal wins: it is the failure of
+//     the step, as without refusals, and classifyPlan does not call
+//     rejectedFailure. The refused tools that were answered before it keep
+//     their rows.
+//   - Else, when at least one tool was refused and no answered tool got a
+//     2xx answer (answerVerdict or answerUnusable), the step is a provider
+//     failure with the reason of the refused tool with the lowest job index.
+//     The refused tools then get no row: they count as not classified. So a
+//     wrong model name or API shape that gives 400 for every tool exits
+//     with 2 and complete false, not with one medium row for each tool.
+//   - Else, the refused tools get their rows and the step is complete.
+//
+// Only answered jobs count. Without a global failure, a step deadline or a
+// signal, no request is cancelled, so every job inside the shares of the cap
+// (see fairShare) is answered.
+//
+// The failure holds the error of the refusal with the lowest index in
+// answers. answers is in the order of the jobs, whatever the order in which
+// the requests ended, so the reason is always the same for the same
+// answers.
+func rejectedFailure(answers []llmAnswer) *llmFailure {
+	var first *llmFailure
+	for _, a := range answers {
+		if a.kind.got2xx() {
+			return nil
 		}
-		ref := report.NewServerRef(o.Server)
-		for _, t := range o.Result.Tools {
-			jobs = append(jobs, llmJob{
-				index: o.Index,
-				ref:   ref,
-				in:    llm.Input{ToolName: t.Name, Description: t.Description},
-			})
+		if a.kind == answerRejected && first == nil {
+			first = &llmFailure{kind: answerRejected, err: a.err}
 		}
 	}
-	return jobs
+	return first
 }
 
 // runLLMJobs runs the jobs with llmWorkers requests at the same time, and
@@ -590,10 +537,55 @@ func llmJobs(outcomes []inspect.Outcome) []llmJob {
 // The first answer that stops the step (see answerKind.stepFails) is the
 // failure: it stops the requests that run (it cancels their context) and no
 // new job starts. When ctx ends, no new job starts either; the caller checks
-// ctx.
-func runLLMJobs(ctx context.Context, jobs []llmJob, cl toolClassifier) ([]llmAnswer, *llmFailure) {
+// ctx. A refused tool (answerRejected) stops nothing: the caller checks the
+// refusals after all the jobs (see rejectedFailure).
+//
+// All the jobs together have the time limit timeout. When it is reached, the
+// context of the requests ends: the requests that run stop and no new job
+// starts. The step ended by the deadline when the cause of that context is
+// errLLMStepDeadline and ctx has not ended (see endedByDeadline). Then:
+//
+//   - A request that the deadline stopped is answerDeadline, not
+//     answerStopped: it is not a signal and not the cancel after a failure.
+//   - The failure is answerDeadline, when at least one job has no answer.
+//     runLLMJobs builds it after all the requests end (see runLLMJob). It
+//     replaces a failure that came after the deadline: such a failure
+//     can be a result of the deadline. A failure that came first cancelled
+//     the context first, so the cause is not errLLMStepDeadline and that
+//     failure stays. So the first cause wins. The order is the order in
+//     which the failures are recorded, not the order in which the workers
+//     got them: a provider failure that a worker got just before the
+//     deadline, but recorded just after it, can be reported as the deadline.
+//     The exit code 2 and complete false do not change, only the reason on
+//     stderr.
+//   - When every job got an answer, the deadline came too late to change
+//     anything, and the result is as without it.
+//
+// When ctx ends (a signal), the signal wins, also when the deadline is
+// reached at the same time. The reason is not the cause of the context:
+// when the deadline came first, the cause stays errLLMStepDeadline. The
+// signal wins because endedByDeadline checks ctx.Err() first, and
+// classifyPlan checks ctx.Err() after runLLMJobs returns. So the caller
+// handles the signal, as without the deadline.
+//
+// runLLMJobs returns only after every request has ended: a deadline does
+// not leave a goroutine behind.
+func runLLMJobs(ctx context.Context, jobs []llmJob, cl toolClassifier, timeout time.Duration) ([]llmAnswer, *llmFailure) {
 	answers := make([]llmAnswer, len(jobs))
-	runCtx, cancel := context.WithCancel(ctx)
+	// WithTimeoutCause is WithTimeout with a cause: when timeout is
+	// reached, stepCtx ends, stepCtx.Err() is context.DeadlineExceeded as
+	// usual, and context.Cause(stepCtx) returns errLLMStepDeadline. The
+	// cause lets the step tell its own deadline from the cancel after a
+	// failure, and from a signal (the end of ctx) that came first. A signal
+	// that comes after the deadline does not change the cause, so
+	// endedByDeadline also checks ctx.Err(). stopTimer releases the timer
+	// when the step ends before the deadline.
+	stepCtx, stopTimer := context.WithTimeoutCause(ctx, timeout, errLLMStepDeadline)
+	defer stopTimer()
+	// runCtx is the context of the requests. cancel stops them after the
+	// first failure. When stepCtx ends first, runCtx ends too, with the
+	// same cause. When cancel comes first, the cause is context.Canceled.
+	runCtx, cancel := context.WithCancel(stepCtx)
 	defer cancel()
 
 	var (
@@ -611,24 +603,18 @@ func runLLMJobs(ctx context.Context, jobs []llmJob, cl toolClassifier) ([]llmAns
 		case <-runCtx.Done():
 		}
 		if runCtx.Err() != nil {
-			// A failure or a signal: start no new job. A slot that this
-			// iteration took stays taken, which does no harm.
+			// A failure, the deadline or a signal: start no new job. A slot
+			// that this iteration took stays taken, which does no harm.
 			break
 		}
 		wg.Go(func() {
 			defer func() { <-sem }()
-			v, err := cl.Classify(runCtx, job.in)
-			kind := sortAnswer(err)
+			a, f := runLLMJob(ctx, runCtx, job, cl)
 			// Each goroutine writes only its own element, so this needs no
 			// lock.
-			answers[i] = newLLMAnswer(kind, v)
-			if !kind.stepFails() {
+			answers[i] = a
+			if f == nil {
 				return
-			}
-			f := &llmFailure{kind: kind}
-			if kind == answerProviderFailed {
-				// Only a provider error is kept: its text is fixed.
-				f.err = err
 			}
 			mu.Lock()
 			if failure == nil {
@@ -639,115 +625,79 @@ func runLLMJobs(ctx context.Context, jobs []llmJob, cl toolClassifier) ([]llmAns
 		})
 	}
 	wg.Wait()
+	// This is the one place that builds the deadline failure: runLLMJob
+	// gives no failure for an answerDeadline answer. The check is also
+	// needed because the deadline can end the step while no request runs
+	// (between two jobs), and because a failure that came after the
+	// deadline must not win. Every goroutine has ended, so failure needs
+	// no lock now.
+	if endedByDeadline(ctx, runCtx) && !allAnswered(answers) {
+		failure = &llmFailure{kind: answerDeadline, timeout: timeout}
+	}
 	return answers, failure
 }
 
-// llmRow returns the finding row that the answer a of job gives, and true. It
-// returns false when a gives no row: a verdict with risk none (and no cut
-// text), or a job without an answer (see answerKind.answered).
+// runLLMJob runs one job of runLLMJobs: it sends the request with runCtx,
+// the context of the requests, and returns the answer for the job. ctx is
+// the context of the process. runLLMJob only reads the two contexts:
+// runLLMJobs keeps the first failure and cancels the other requests.
 //
-// A verdict whose risk or category is not valid counts as an answer that
-// cannot be used, so it fails closed. parseVerdict never returns one, but a
-// classifier in a test can. A cut tool text (llm.Verdict.Truncated) gets the
-// floor row (see truncatedRow) when the model rated it none or low, or gave
-// no usable answer. So a cut tool always gets an llm.RuleID row of at least
-// medium, and never an llm.RuleIDInvalid row.
-func llmRow(job llmJob, a llmAnswer) (report.FindingRow, bool) {
-	key := job.in.ToolName
-	if key == "" {
-		key = noToolNameKey
+// It also returns the failure of the job when the answer stops the step (see
+// answerKind.stepFails), else nil. The one exception is answerDeadline: it
+// gets no failure here, because a deadline failure built here would be
+// replaced or dropped. runLLMJobs builds it (see runLLMJobs).
+func runLLMJob(ctx, runCtx context.Context, job llmJob, cl toolClassifier) (llmAnswer, *llmFailure) {
+	v, err := cl.Classify(runCtx, job.in)
+	kind := sortAnswer(err)
+	if kind == answerStopped && endedByDeadline(ctx, runCtx) {
+		// The deadline of the step stopped this request, not a signal and
+		// not the cancel after a failure. The answer keeps this kind, so
+		// that it tells the deadline from a signal.
+		kind = answerDeadline
 	}
-	row := report.FindingRow{
-		ServerRef: job.ref,
-		Source:    report.SourceLLM,
-		Field:     rules.FieldTool,
-		Key:       key,
+	a := newLLMAnswer(kind, v, err)
+	if !kind.stepFails() || kind == answerDeadline {
+		return a, nil
 	}
-	switch a.kind {
-	case answerVerdict:
-		v := a.verdict
-		if !v.Risk.Valid() || !v.Category.Valid() {
-			return unusableRow(row, v.Truncated), true
-		}
-		if v.Truncated && belowMedium(v.Risk) {
-			return truncatedRow(row), true
-		}
-		severity, hasRisk := v.Risk.Severity()
-		if !hasRisk {
-			return report.FindingRow{}, false // risk none
-		}
-		row = llmRuleRow(row)
-		row.Severity = severity
-		row.Risk = v.Category.Text()
-		row.Related = string(v.Category)
-		return row, true
-	case answerUnusable:
-		return unusableRow(row, a.verdict.Truncated), true
-	default:
-		// answerNotRun, answerStopped, answerProviderFailed and
-		// answerInternalFailed: the tool got no answer.
-		return report.FindingRow{}, false
+	f := &llmFailure{kind: kind}
+	if kind == answerProviderFailed {
+		// Only a provider error is kept: its text is fixed.
+		f.err = err
 	}
+	return a, f
 }
 
-// belowMedium reports whether the valid risk r of a verdict for a cut tool
-// text asks for the floor row: r is none or low.
-func belowMedium(r llm.Risk) bool {
-	return r == llm.RiskNone || r == llm.RiskLow
+// endedByDeadline reports whether runCtx, the context of the requests of the
+// LLM step, ended because the time limit of the step was reached, while ctx,
+// the context of the process, is still alive (no signal).
+//
+// context.Cause returns the cause of the first reason that ended runCtx:
+// errLLMStepDeadline for the deadline (see runLLMJobs), context.Canceled for
+// the cancel after a failure, and the cause of ctx for a signal. It returns
+// nil while runCtx is alive. errors.Is is used and not ==, as the errorlint
+// gate asks; nothing wraps errLLMStepDeadline, so the two give the same
+// result.
+func endedByDeadline(ctx, runCtx context.Context) bool {
+	return ctx.Err() == nil && errors.Is(context.Cause(runCtx), errLLMStepDeadline)
 }
 
-// llmRuleRow fills the fixed texts of an llm.RuleID row into row: the rule
-// ID, the title and the remediation.
-func llmRuleRow(row report.FindingRow) report.FindingRow {
-	row.RuleID = llm.RuleID
-	row.Title = llm.Title
-	row.Remediation = llm.Remediation
-	return row
-}
-
-// unusableRow fills row for an answer that cannot be used: the floor row
-// (see truncatedRow) when the tool text was cut, else an llm.RuleIDInvalid
-// row with severity medium and the fixed texts of package llm.
-func unusableRow(row report.FindingRow, truncated bool) report.FindingRow {
-	if truncated {
-		return truncatedRow(row)
-	}
-	row.RuleID = llm.RuleIDInvalid
-	row.Title = llm.InvalidTitle
-	row.Severity = string(rules.SeverityMedium)
-	row.Risk = llm.InvalidText
-	row.Remediation = llm.InvalidRemediation
-	return row
-}
-
-// truncatedRow fills row, an LLM row of a tool whose text was cut, as the
-// floor row: llm.RuleID, severity medium, the fixed text llm.TruncatedText
-// and the category other, whatever the model answered. The part after the
-// cut was not rated, and a prompt injection before the cut can ask for a low
-// rating or make the model refuse.
-func truncatedRow(row report.FindingRow) report.FindingRow {
-	row = llmRuleRow(row)
-	row.Severity = string(rules.SeverityMedium)
-	row.Risk = llm.TruncatedText
-	row.Related = string(llm.CategoryOther)
-	return row
-}
-
-// addLLMCounts adds the LLM row counts of each server to counts, the
-// finding counts by server index that serverStatuses gets. An index outside
-// counts cannot happen; it is skipped rather than panic.
-func addLLMCounts(counts []int, llmCounts map[int]int) {
-	for i, n := range llmCounts {
-		if i >= 0 && i < len(counts) {
-			counts[i] += n
+// allAnswered reports whether every answer in answers is an answer of the
+// provider (see answerKind.answered). It is true for no answers.
+func allAnswered(answers []llmAnswer) bool {
+	for _, a := range answers {
+		if !a.kind.answered() {
+			return false
 		}
 	}
+	return true
 }
 
 // printLLMProblems writes on stderr why the LLM step is incomplete: one line
-// for a failed request and one line for the tools over the cap. All the text
-// is fixed, apart from numbers and the reason of a provider failure (see
-// llmFailureText).
+// for a failed request or the step deadline, and one line for the tools over
+// the cap. The cap line gives the total of the tools over the shares of all
+// the servers (see fairShare), so it is one line also when several servers
+// were cut. All the text is fixed, apart from numbers and the reason of a
+// provider failure (see llmFailureText).
 func (c *cli) printLLMProblems(r llmResult) {
 	if r.failure != nil || r.skipped > 0 {
 		c.cmdPrintf("scan", "%s; %d %s not classified",
@@ -760,35 +710,58 @@ func (c *cli) printLLMProblems(r llmResult) {
 }
 
 // llmFailureLine returns the start of the stderr line for the failure f of
-// the LLM step: "the LLM provider failed (<reason>)" for a provider failure,
-// else llmInternalText. A nil f with skipped tools cannot happen; it gives
-// llmInternalText too, so it never blames the provider.
+// the LLM step: "the LLM provider failed (<reason>)" for a provider failure
+// (see llmFailureText) and for the refusal of every answered tool (see
+// rejectedReason), "the LLM step stopped after <time>" for the step deadline
+// (see durationText), else llmInternalText. A nil f with skipped tools
+// cannot happen; it gives llmInternalText too, so it never blames the
+// provider. A provider failure or a refusal without an error gives
+// llmInternalText too.
 func llmFailureLine(f *llmFailure) string {
-	if f == nil || f.kind != answerProviderFailed || f.err == nil {
+	if f == nil {
 		return llmInternalText
 	}
-	return fmt.Sprintf("the LLM provider failed (%s)", llmFailureText(f.err))
+	switch {
+	case f.kind == answerDeadline:
+		// The deadline line holds only a number and a fixed unit.
+		return "the LLM step stopped after " + durationText(f.timeout)
+	case f.err == nil:
+		return llmInternalText
+	case f.kind == answerProviderFailed:
+		return fmt.Sprintf("the LLM provider failed (%s)", llmFailureText(f.err))
+	case f.kind == answerRejected:
+		return fmt.Sprintf("the LLM provider failed (%s)", rejectedReason(f.err))
+	default:
+		return llmInternalText
+	}
 }
 
-// llmFailureText returns the reason of a failed request to the provider. For
-// a status code it is "HTTP <code>", with a fixed hint for some codes:
-// "HTTP 401 (the API key was refused)" for 401 and 403 (llm.ErrAuth), and
-// "HTTP 302 (redirect refused)" for a 3xx. Else it is the error text. The
-// errors of package llm have fixed text. The text of llm.ErrProvider at the
-// start is cut, because the line already says "the LLM provider failed".
-// termsafe.Quote still escapes the text, because a classifier in a test can
-// return any error that wraps llm.ErrProvider.
-func llmFailureText(err error) string {
+// rejectedReason returns the reason of an answerRejected failure: "HTTP
+// <code>, the provider refused every tool" when err is an *llm.StatusError,
+// else rejectedHintText. It does not use llm.Reason, whose hint is in
+// parentheses and would give nested parentheses in the line. The code is an
+// int and the hint is fixed, so the text holds no server data. termsafe.Quote
+// still escapes it, as in llmFailureText.
+func rejectedReason(err error) string {
+	// errors.As finds an *llm.StatusError in the chain of err and stores it
+	// in status. A typed nil in the chain gives a nil status, so check it.
 	var status *llm.StatusError
-	if !errors.As(err, &status) {
-		return termsafe.Quote(strings.TrimPrefix(err.Error(), llm.ErrProvider.Error()+": "))
+	if errors.As(err, &status) && status != nil {
+		return termsafe.Quote(fmt.Sprintf("HTTP %d, %s", status.Code, rejectedHintText))
 	}
-	switch {
-	case errors.Is(err, llm.ErrAuth):
-		return fmt.Sprintf("HTTP %d (the API key was refused)", status.Code)
-	case status.Code >= 300 && status.Code < 400:
-		return fmt.Sprintf("HTTP %d (redirect refused)", status.Code)
-	default:
-		return fmt.Sprintf("HTTP %d", status.Code)
-	}
+	return termsafe.Quote(rejectedHintText)
+}
+
+// llmFailureText returns the reason of a failed request to the provider: the
+// fixed text of llm.Reason. For a status code it is "HTTP <code>", with a
+// fixed hint for some codes: "HTTP 401 (the API key was refused)" for 401 and
+// 403, and "HTTP 302 (redirect refused)" for a 3xx. For another provider
+// error it is the fixed text of that error, for example "network error", and
+// for an unknown error it is "unknown error". The text of llm.ErrProvider at
+// the start is not in it, because the line already says "the LLM provider
+// failed". llm.Reason never uses the text of an unknown error, so the reason
+// never holds the key, the URL or a response body. termsafe.Quote still
+// escapes the text as a second guard.
+func llmFailureText(err error) string {
+	return termsafe.Quote(llm.Reason(err))
 }

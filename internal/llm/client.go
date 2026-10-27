@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"net/netip"
 	"net/url"
+	"strings"
 	"time"
 
 	"github.com/Ducarv/mcpmoat/internal/discover"
@@ -44,8 +45,14 @@ const (
 //
 //   - ErrInvalidOutput: the provider answered, but the model refused or its
 //     output is not a valid verdict. The caller reports RuleIDInvalid.
-//   - ErrProvider: the request failed (ErrAuth, ErrTransport, ErrTooLarge,
-//     ErrBadResponse or a *StatusError). The caller reports a scan error.
+//   - ErrProvider: the request failed (the provider refused the key, a
+//     network error, a response that is too large or not valid, or a
+//     *StatusError). The caller reports a scan error, and Reason gives its
+//     fixed reason text.
+//   - ErrRejected: the provider refused this one tool (see statusClassOf).
+//     It wraps ErrProvider, so check it before ErrProvider. The caller
+//     reports RuleIDInvalid with RejectedText for the tool, and the scan
+//     goes on.
 //   - context.Canceled or context.DeadlineExceeded: the context of the
 //     caller ended (for example a signal). Classify returns this only when
 //     the context of the caller is done, never for its own timeout.
@@ -56,22 +63,56 @@ var (
 	// ErrProvider is the parent of every error that means the request to
 	// the provider failed.
 	ErrProvider = errors.New("LLM provider request failed")
-	// ErrAuth means that the provider refused the API key (HTTP 401 or
-	// 403). The error is also a *StatusError with the code.
-	ErrAuth = fmt.Errorf("%w: the API key was refused", ErrProvider)
-	// ErrTransport means a network, TLS, proxy or timeout error. The error
-	// never wraps the net/http error, because that text holds the URL.
-	ErrTransport = fmt.Errorf("%w: network error", ErrProvider)
-	// ErrTooLarge means that the response body is larger than
-	// MaxResponseBodyBytes.
-	ErrTooLarge = fmt.Errorf("%w: response body larger than %d bytes", ErrProvider, MaxResponseBodyBytes)
-	// ErrBadResponse means that a 2xx response body is not the JSON
-	// envelope of the provider API. It is not about the model output.
-	ErrBadResponse = fmt.Errorf("%w: response is not a valid API response", ErrProvider)
+
+	// ErrRejected means that the provider refused this one tool with a 4xx
+	// code that depends on the request text, not on the setup (for example
+	// a safety filter or a context window). It wraps ErrProvider, so
+	// errors.Is(err, ErrProvider) stays true, and errors.Is(err,
+	// ErrRejected) tells the per-tool case apart. A *StatusError unwraps to
+	// it for the codes of classRejected (see statusClassOf).
+	ErrRejected = fmt.Errorf("%w: %s", ErrProvider, rejectedHint)
 )
 
-// Unexported errors. They have fixed text too.
+// Fixed texts of Reason. authHint, redirectHint and rejectedHint are the
+// hints of a *StatusError (see StatusError.reason), and this is the only
+// place of them.
+const (
+	// authHint is the hint for HTTP 401 and 403. errAuth uses it too.
+	authHint = "the API key was refused"
+	// rejectedHint is the hint for the codes of classRejected. ErrRejected
+	// uses it too.
+	rejectedHint = "the provider refused this tool"
+	// redirectHint is the hint for a 3xx code.
+	redirectHint = "redirect refused"
+	// unknownReason is the text of Reason for an error that is not a known
+	// provider error.
+	unknownReason = "unknown error"
+)
+
+// Unexported errors. They have fixed text too. errAuth, errTransport,
+// errTimeout, errProxyRefused, errCertificate, errTooLarge, errBadResponse and
+// errNotLoopback wrap ErrProvider, and Reason knows each of them.
 var (
+	// errAuth means that the provider refused the API key (HTTP 401 or
+	// 403). The error is also a *StatusError with the code.
+	errAuth = fmt.Errorf("%w: %s", ErrProvider, authHint)
+	// errTransport means a network, TLS, proxy or timeout error. The error
+	// never wraps the net/http error, because that text holds the URL.
+	errTransport = fmt.Errorf("%w: network error", ErrProvider)
+	// errTimeout means that the request did not end in requestTimeout.
+	errTimeout = fmt.Errorf("%w: timed out after %s", errTransport, requestTimeout)
+	// errProxyRefused is errProxy as an error of a request. It wraps both
+	// errTransport and errProxy.
+	errProxyRefused = fmt.Errorf("%w: %w", errTransport, errProxy)
+	// errCertificate means that the TLS certificate of the server is not
+	// trusted.
+	errCertificate = fmt.Errorf("%w: TLS certificate not trusted", errTransport)
+	// errTooLarge means that the response body is larger than
+	// MaxResponseBodyBytes.
+	errTooLarge = fmt.Errorf("%w: response body larger than %d bytes", ErrProvider, MaxResponseBodyBytes)
+	// errBadResponse means that a 2xx response body is not the JSON
+	// envelope of the provider API. It is not about the model output.
+	errBadResponse = fmt.Errorf("%w: response is not a valid API response", ErrProvider)
 	// errProxy replaces any error of http.ProxyFromEnvironment. The proxy
 	// setting can hold a user name and a password.
 	errProxy = errors.New("proxy setting from HTTP_PROXY or HTTPS_PROXY refused")
@@ -85,7 +126,7 @@ var (
 	// errNotLoopback means that the host of an http base URL does not
 	// resolve to loopback addresses only, so the client does not connect.
 	// The text never holds the host or an address.
-	errNotLoopback = fmt.Errorf("%w: host does not resolve to a loopback address", ErrTransport)
+	errNotLoopback = fmt.Errorf("%w: host does not resolve to a loopback address", errTransport)
 )
 
 // StatusError means that the provider answered with a status code that is
@@ -93,32 +134,179 @@ var (
 // code is an error too, because the client never follows a redirect (the
 // API key must not go to another host).
 //
-// StatusError unwraps to ErrAuth for 401 and 403, and to ErrProvider for
-// every other code, so errors.Is(err, ErrProvider) is true for all of them.
+// StatusError unwraps to an error for a refused API key for 401 and 403, to
+// ErrRejected for the codes of classRejected, and to ErrProvider for every
+// other code, so errors.Is(err, ErrProvider) is true for all of them (see
+// statusClassOf).
+//
+// The client reads one response header, Retry-After, for the retry policy
+// (see retryPolicy). Its value is kept in unexported fields and is never part
+// of the error text.
 type StatusError struct {
 	// Code is the HTTP status code.
 	Code int
+
+	// retryAfterRaw is the value of the Retry-After header, as the server
+	// sent it, or "" when the answer had none. decide reads the wait from
+	// it (see parseRetryAfter). It is never printed.
+	retryAfterRaw string
+}
+
+// statusClass is the class of a status code that is not 2xx. The class
+// tells whether the failure is global (the setup is wrong, so every request
+// fails the same way) or per tool (the provider refused the text of this one
+// request).
+type statusClass int
+
+// The status classes. statusClassOf sorts the codes into them.
+const (
+	// classGlobal is a global failure with no hint: every code that no
+	// other class has.
+	classGlobal statusClass = iota
+	// classAuth is a global failure: the provider refused the API key
+	// (401 or 403).
+	classAuth
+	// classRedirect is a global failure: a 3xx code. The client never
+	// follows a redirect.
+	classRedirect
+	// classRejected is a per-tool failure: the provider refused this one
+	// request (400, 413 or 422), for example because of a safety filter or
+	// a context window.
+	classRejected
+)
+
+// statusClassOf returns the class of code. It is the only table of status
+// codes in this package:
+//
+//   - 400 Bad Request, 413 Content Too Large and 422 Unprocessable Content:
+//     classRejected (per tool, ErrRejected);
+//   - 401 Unauthorized and 403 Forbidden: classAuth (global, errAuth);
+//   - 3xx: classRedirect (global, ErrProvider);
+//   - any other code (also 404, 429 and 5xx): classGlobal (global,
+//     ErrProvider).
+//
+// Transport errors are not status codes: they are global too.
+//
+// The class does not tell whether the client tries again: retryableStatus
+// does (429, 502, 503, 504 and 529). When those tries fail too, the error
+// has the class of this table.
+func statusClassOf(code int) statusClass {
+	switch {
+	case code == http.StatusBadRequest,
+		code == http.StatusRequestEntityTooLarge,
+		code == http.StatusUnprocessableEntity:
+		return classRejected
+	case code == http.StatusUnauthorized, code == http.StatusForbidden:
+		return classAuth
+	case code >= 300 && code < 400:
+		return classRedirect
+	default:
+		return classGlobal
+	}
 }
 
 // Error returns a fixed text with the status code. It starts with the text of
-// ErrProvider.
+// ErrProvider. A 3xx code has the redirect hint. A 401 or 403 code, and a
+// code of classRejected, have no hint here (Reason adds it). A nil
+// *StatusError gives the text of ErrProvider.
 func (e *StatusError) Error() string {
-	if e.Code >= 300 && e.Code < 400 {
-		return fmt.Sprintf("%s: HTTP %d (redirect refused)", ErrProvider.Error(), e.Code)
+	// A typed nil in an error interface must not panic.
+	if e == nil {
+		return ErrProvider.Error()
 	}
-	return fmt.Sprintf("%s: HTTP %d", ErrProvider.Error(), e.Code)
+	switch statusClassOf(e.Code) {
+	case classAuth, classRejected:
+		// Keep the plain text that dev had for these codes. The hint is only in
+		// reason, which Reason uses for the stderr line.
+		return fmt.Sprintf("%s: HTTP %d", ErrProvider.Error(), e.Code)
+	default:
+		return ErrProvider.Error() + ": " + e.reason()
+	}
 }
 
-// Unwrap returns ErrAuth for 401 and 403, and ErrProvider for other codes.
+// Unwrap returns errAuth for 401 and 403, ErrRejected for the codes of
+// classRejected, and ErrProvider for other codes. A nil *StatusError unwraps
+// to nil.
 func (e *StatusError) Unwrap() error {
-	if e.Code == http.StatusUnauthorized || e.Code == http.StatusForbidden {
-		return ErrAuth
+	// errors.Is and errors.As call Unwrap on a typed nil too.
+	if e == nil {
+		return nil
 	}
-	return ErrProvider
+	switch statusClassOf(e.Code) {
+	case classAuth:
+		return errAuth
+	case classRejected:
+		return ErrRejected
+	default:
+		return ErrProvider
+	}
+}
+
+// reason returns "HTTP <code>" with a fixed hint: authHint for 401 and 403,
+// rejectedHint for the codes of classRejected, and redirectHint for a 3xx
+// code. Other codes have no hint. A nil *StatusError gives unknownReason.
+func (e *StatusError) reason() string {
+	// A typed nil must not panic. Reason checks for it too.
+	if e == nil {
+		return unknownReason
+	}
+	text := fmt.Sprintf("HTTP %d", e.Code)
+	switch statusClassOf(e.Code) {
+	case classAuth:
+		return text + " (" + authHint + ")"
+	case classRejected:
+		return text + " (" + rejectedHint + ")"
+	case classRedirect:
+		return text + " (" + redirectHint + ")"
+	default:
+		return text
+	}
+}
+
+// knownReasons lists the errors that Reason gives a text for, in the order
+// that Reason checks them: the more specific errors come first. The errors
+// errNotLoopback, errTimeout, errProxyRefused and errCertificate wrap
+// errTransport, so they must be checked before it.
+var knownReasons = []error{
+	errNotLoopback,
+	errTimeout,
+	errProxyRefused,
+	errCertificate,
+	errTransport,
+	errTooLarge,
+	errBadResponse,
+	errAuth,
+	ErrRejected,
+}
+
+// Reason returns the fixed reason text of the provider failure err, without
+// the text of ErrProvider at the start. For a *StatusError it is
+// "HTTP <code>", with the hint "(the API key was refused)" for 401 and 403,
+// "(the provider refused this tool)" for 400, 413 and 422, and
+// "(redirect refused)" for a 3xx code. For another error of Classify that
+// wraps ErrProvider, it is the fixed text of that error after the ErrProvider
+// text, for example "network error" or "network error: TLS certificate not
+// trusted". For any other error (also ErrProvider itself and nil), it is
+// "unknown error".
+//
+// The text never comes from err.Error() of an unknown error, so it never
+// holds the key, the URL, a response body or model output.
+func Reason(err error) string {
+	var status *StatusError
+	if errors.As(err, &status) && status != nil {
+		return status.reason()
+	}
+	for _, k := range knownReasons {
+		if errors.Is(err, k) {
+			return strings.TrimPrefix(k.Error(), ErrProvider.Error()+": ")
+		}
+	}
+	return unknownReason
 }
 
 // api is the part of a request that depends on the provider. anthropic.go
-// and openai.go implement it. Each implementation is stateless.
+// and openai.go implement it. An implementation holds only fixed settings
+// that New sets, and nothing changes them after New.
 type api interface {
 	// path is the API path, which the client adds to the base URL. It
 	// starts with "/".
@@ -130,7 +318,7 @@ type api interface {
 	// only place where the key is revealed.
 	setAuth(h http.Header, key discover.Secret)
 	// parseResponse reads a 2xx response body. Its errors wrap
-	// ErrInvalidOutput or ErrBadResponse and have fixed text.
+	// ErrInvalidOutput or errBadResponse and have fixed text.
 	parseResponse(body []byte) (Verdict, error)
 }
 
@@ -140,8 +328,13 @@ type chatMessage struct {
 	Content string `json:"content"`
 }
 
-// dialFunc opens a network connection, as net.Dialer.DialContext does.
-type dialFunc = func(ctx context.Context, network, addr string) (net.Conn, error)
+// DialFunc opens a network connection, as net.Dialer.DialContext does.
+//
+// DialFunc is the type of Config.Dial, which is a test hook only: production
+// code must not set it. A DialFunc must connect to the address that it is given
+// and to no other address: the client gives it an address that it has
+// checked (for an http base URL, a loopback address from loopbackDial).
+type DialFunc func(ctx context.Context, network, addr string) (net.Conn, error)
 
 // resolver looks up the IP addresses of a host name. *net.Resolver
 // implements it. Tests use a fake.
@@ -153,13 +346,18 @@ type resolver interface {
 // A Client is safe for concurrent use: Classify does not change it.
 //
 // The client sends requests only to the configured base URL. It never
-// follows a redirect, never retries, and logs nothing.
+// follows a redirect and logs nothing. It tries a request again only when the
+// provider is busy (HTTP 429, 502, 503, 504 or 529), at most RetryMaxTries
+// (3) requests for one tool in total (see retryPolicy).
 type Client struct {
 	api   api
 	url   string
 	model string
 	key   discover.Secret
 	http  *http.Client
+	// retry is the retry policy. The zero value is the production policy.
+	// Tests set small delays.
+	retry retryPolicy
 }
 
 // New returns a Client for cfg. It calls cfg.Resolve, so the errors of
@@ -189,7 +387,7 @@ func newClient(cfg Config, r resolver) (*Client, error) {
 	case ProviderAnthropic:
 		a = anthropicAPI{}
 	case ProviderOpenAI:
-		a = openAIAPI{}
+		a = newOpenAIAPI(cfg.BaseURL)
 	default:
 		// Resolve refuses an unknown provider, so this is a guard only.
 		return nil, unknownProviderError()
@@ -238,7 +436,7 @@ func newClient(cfg Config, r resolver) (*Client, error) {
 // Each address except the last one gets at most addrTimeout. So when one
 // address does not answer (for example a firewall drops packets to ::1), the
 // next address is tried soon. The last address gets the time that is left.
-func loopbackDial(dial dialFunc, r resolver, addrTimeout time.Duration) dialFunc {
+func loopbackDial(dial DialFunc, r resolver, addrTimeout time.Duration) DialFunc {
 	return func(ctx context.Context, network, addr string) (net.Conn, error) {
 		host, port, err := net.SplitHostPort(addr)
 		if err != nil {
@@ -272,7 +470,7 @@ func loopbackDial(dial dialFunc, r resolver, addrTimeout time.Duration) dialFunc
 
 // dialWithTimeout calls dial with a context that ends after timeout. The end
 // of that context does not close a connection that dial already opened.
-func dialWithTimeout(ctx context.Context, dial dialFunc, network, addr string, timeout time.Duration) (net.Conn, error) {
+func dialWithTimeout(ctx context.Context, dial DialFunc, network, addr string, timeout time.Duration) (net.Conn, error) {
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	return dial(ctx, network, addr)
@@ -321,7 +519,7 @@ func lookupNetwork(network string) string {
 
 // newHTTPClient returns the HTTP client of a Client. Every connection uses
 // dial. proxy picks the proxy of a request; nil means no proxy.
-func newHTTPClient(dial dialFunc, proxy func(*http.Request) (*url.URL, error)) *http.Client {
+func newHTTPClient(dial DialFunc, proxy func(*http.Request) (*url.URL, error)) *http.Client {
 	transport := &http.Transport{
 		// For https, proxyFromEnvironment honours the user's HTTPS_PROXY and
 		// NO_PROXY (NFR-01). For http, proxy is nil.
@@ -365,16 +563,23 @@ func proxyFromEnvironment(req *http.Request) (*url.URL, error) {
 	return proxy, nil
 }
 
-// Classify sends one request that asks the model to rate in, and returns the
+// Classify sends a request that asks the model to rate in, and returns the
 // verdict. It sends only the system prompt, the verdict schema and the tool
-// message of in (see the package doc). It does not retry.
+// message of in (see the package doc). When the provider is busy (HTTP 429,
+// 502, 503, 504 or 529), it waits and sends the same request again, at most
+// RetryMaxTries (3) requests in total (see retryPolicy). When all of them
+// fail, the error is the one of the last request, the same as without
+// retries. When the context of the caller ends during a wait, Classify stops
+// at once.
 //
-// The request has a timeout of requestTimeout. The verdict has Truncated
-// set when toolMessage cut the tool name or description. On an error, only
-// Truncated is set, and only when toolMessage succeeded: the caller can then
-// still rate a cut tool when the answer is not usable (ErrInvalidOutput).
-// Risk and Category stay zero on an error. See the error variables above for
-// how to sort an error. Classify is safe for concurrent use.
+// Each request has a timeout of requestTimeout. The verdict has Truncated
+// set when toolMessage cut the tool name or description, and Redacted set
+// when it removed a configured secret value from them (see Verdict). On an
+// error, only Truncated and Redacted are set, and only when toolMessage
+// succeeded: the caller can then still rate a cut or redacted tool when the
+// answer is not usable (ErrInvalidOutput). Risk and Category stay zero on an
+// error. See the error variables above for how to sort an error. Classify is
+// safe for concurrent use.
 func (c *Client) Classify(ctx context.Context, in Input) (Verdict, error) {
 	if c == nil || c.api == nil || c.http == nil {
 		return Verdict{}, errNilClient
@@ -382,21 +587,24 @@ func (c *Client) Classify(ctx context.Context, in Input) (Verdict, error) {
 	if err := ctx.Err(); err != nil {
 		return Verdict{}, stopped(err)
 	}
-	message, truncated, err := toolMessage(in)
+	message, truncated, redacted, err := toolMessage(in)
 	if err != nil {
 		return Verdict{}, err
 	}
-	v, err := c.send(ctx, message)
+	v, err := c.sendWithRetry(ctx, message)
 	if err != nil {
-		return Verdict{Truncated: truncated}, err
+		return Verdict{Truncated: truncated, Redacted: redacted}, err
 	}
 	v.Truncated = truncated
+	v.Redacted = redacted
 	return v, nil
 }
 
 // send sends one request with the tool message message and returns the
-// verdict of the model, without Truncated. Every error has fixed text (see
-// Classify).
+// verdict of the model, without Truncated. It builds a new request and body
+// on each call, so sendWithRetry can call it again. For a non-2xx answer it
+// returns a *StatusError that keeps the Retry-After header text. Every error
+// has fixed text (see Classify).
 func (c *Client) send(ctx context.Context, message string) (Verdict, error) {
 	body, err := encodeJSON(c.api.requestBody(c.model, message))
 	if err != nil {
@@ -428,18 +636,22 @@ func (c *Client) send(ctx context.Context, message string) (Verdict, error) {
 
 	if resp.StatusCode < 200 || resp.StatusCode > 299 {
 		// The body is never read: it can echo the request or hold text
-		// that must not reach the terminal.
-		return Verdict{}, &StatusError{Code: resp.StatusCode}
+		// that must not reach the terminal. Only the Retry-After header is
+		// read, for the retry policy. It is never printed.
+		return Verdict{}, &StatusError{
+			Code:          resp.StatusCode,
+			retryAfterRaw: resp.Header.Get("Retry-After"),
+		}
 	}
 	if resp.ContentLength > MaxResponseBodyBytes {
-		return Verdict{}, ErrTooLarge
+		return Verdict{}, errTooLarge
 	}
 	data, err := io.ReadAll(io.LimitReader(resp.Body, MaxResponseBodyBytes+1))
 	if err != nil {
 		return Verdict{}, transportError(ctx, reqCtx, err)
 	}
 	if len(data) > MaxResponseBodyBytes {
-		return Verdict{}, ErrTooLarge
+		return Verdict{}, errTooLarge
 	}
 	return c.api.parseResponse(data)
 }
@@ -455,7 +667,7 @@ func (c *Client) CloseIdleConnections() {
 // transportError turns an error of Do or of the body read into an error with
 // fixed text. When the context of the caller (parent) is done, it returns
 // that context error, so the caller can tell a signal from a provider
-// failure. Otherwise it returns an error that wraps ErrTransport. It never
+// failure. Otherwise it returns an error that wraps errTransport. It never
 // wraps err, because a *url.Error holds the URL.
 func transportError(parent, reqCtx context.Context, err error) error {
 	if perr := parent.Err(); perr != nil {
@@ -467,16 +679,16 @@ func transportError(parent, reqCtx context.Context, err error) error {
 	)
 	switch {
 	case errors.Is(err, errProxy):
-		return fmt.Errorf("%w: %w", ErrTransport, errProxy)
+		return errProxyRefused
 	case errors.Is(reqCtx.Err(), context.DeadlineExceeded),
 		errors.As(err, &urlErr) && urlErr.Timeout():
-		return fmt.Errorf("%w: timed out after %s", ErrTransport, requestTimeout)
+		return errTimeout
 	case errors.Is(err, errNotLoopback):
 		return errNotLoopback
 	case errors.As(err, &certErr):
-		return fmt.Errorf("%w: TLS certificate not trusted", ErrTransport)
+		return errCertificate
 	default:
-		return ErrTransport
+		return errTransport
 	}
 }
 
@@ -505,27 +717,27 @@ type errorEnvelope struct {
 }
 
 // decodeEnvelope decodes a 2xx response body into v, the envelope struct of
-// a provider. A body that is not one JSON object gives ErrBadResponse. The
+// a provider. A body that is not one JSON object gives errBadResponse. The
 // check comes first because json.Unmarshal accepts the literal null for a
 // struct and leaves it unchanged, so a null body would look like an empty
 // envelope. A body with a top-level "error" key that is not null gives
-// ErrBadResponse too: it is an error from the API, sent with a 2xx status,
+// errBadResponse too: it is an error from the API, sent with a 2xx status,
 // not an answer of the model. The error is fixed text: the decoder error can
 // quote the body.
 func decodeEnvelope(body []byte, v any) error {
 	trimmed := bytes.TrimLeft(body, " \t\r\n")
 	if len(trimmed) == 0 || trimmed[0] != '{' {
-		return ErrBadResponse
+		return errBadResponse
 	}
 	if err := json.Unmarshal(body, v); err != nil {
-		return ErrBadResponse
+		return errBadResponse
 	}
 	var e errorEnvelope
 	if err := json.Unmarshal(body, &e); err != nil {
-		return ErrBadResponse
+		return errBadResponse
 	}
 	if !jsonNull(e.Error) {
-		return ErrBadResponse
+		return errBadResponse
 	}
 	return nil
 }

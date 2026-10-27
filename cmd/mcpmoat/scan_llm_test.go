@@ -18,6 +18,7 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/Ducarv/mcpmoat/internal/discover"
 	"github.com/Ducarv/mcpmoat/internal/discover/discovertest"
@@ -26,6 +27,7 @@ import (
 	"github.com/Ducarv/mcpmoat/internal/llm"
 	"github.com/Ducarv/mcpmoat/internal/report"
 	"github.com/Ducarv/mcpmoat/internal/rules"
+	"github.com/Ducarv/mcpmoat/internal/termsafe"
 )
 
 // This file tests "mcpmoat scan --llm" (FR-17) in process. The tests inject
@@ -52,10 +54,20 @@ const (
 )
 
 // The limits of the LLM step that FR-17 sets. The tests use their own copy,
-// so a change of maxLLMTools or llmWorkers in scan_llm.go fails them.
+// so a change of maxLLMTools (scan_llm_plan.go) or llmWorkers (scan_llm.go)
+// fails them.
 const (
 	llmWantCap     = 500 // tools in one scan
 	llmWantWorkers = 4   // requests at the same time
+)
+
+// The values of package llm that the tests use. Package llm keeps them
+// unexported, so the tests use their own copy, and a change of them in
+// internal/llm/config.go fails the tests.
+const (
+	llmWantMaxKeyBytes      = 4096                        // the longest key that llm.ValidateKey accepts
+	llmWantAnthropicBaseURL = "https://api.anthropic.com" // the default base URL of anthropic
+	llmWantOpenAIBaseURL    = "https://api.openai.com/v1" // the default base URL of openai
 )
 
 // The fixed texts of an LLM finding in the terminal report.
@@ -144,6 +156,16 @@ func (f *llmFake) received() []llm.Input {
 	out := slices.Clone(f.inputs)
 	slices.SortFunc(out, func(a, b llm.Input) int { return strings.Compare(a.ToolName, b.ToolName) })
 	return out
+}
+
+// llmSameInput reports whether a and b hold the same tool name, the same
+// description and the same secret values, in the same order. llm.Input holds
+// a slice (Secrets), so == cannot compare it. The values stay in memory: the
+// helper never prints them, and %+v of an llm.Input prints each secret as
+// discover.Mask.
+func llmSameInput(a, b llm.Input) bool {
+	return a.ToolName == b.ToolName && a.Description == b.Description &&
+		slices.EqualFunc(a.Secrets, b.Secrets, func(x, y discover.Secret) bool { return x.Reveal() == y.Reveal() })
 }
 
 // llmFactory is the cli.newClassifier of a test. It counts its calls and keeps
@@ -450,7 +472,7 @@ func TestScanLLMUsageErrors(t *testing.T) {
 			want: "--llm: invalid MCPMOAT_LLM_API_KEY: only visible ASCII characters are allowed (no spaces, tabs or line breaks)", keyName: true},
 		{name: "key with an escape", args: []string{"--llm", "--llm-base-url", "$SRV"}, env: map[string]string{llm.KeyEnv: keyCanary + "\x1b[31m"},
 			want: "--llm: invalid MCPMOAT_LLM_API_KEY: only visible ASCII characters are allowed (no spaces, tabs or line breaks)", keyName: true},
-		{name: "key too long", args: []string{"--llm", "--llm-base-url", "$SRV"}, env: map[string]string{llm.KeyEnv: keyCanary + strings.Repeat("k", llm.MaxKeyBytes)},
+		{name: "key too long", args: []string{"--llm", "--llm-base-url", "$SRV"}, env: map[string]string{llm.KeyEnv: keyCanary + strings.Repeat("k", llmWantMaxKeyBytes)},
 			want: "--llm: invalid MCPMOAT_LLM_API_KEY: longer than 4096 bytes", keyName: true},
 		{name: "openai with a bad key", args: []string{"--llm", "--llm-provider", "openai", "--llm-model", "m1", "--llm-base-url", "$SRV"}, env: map[string]string{llm.KeyEnv: keyCanary + "\t"},
 			want: "--llm: invalid MCPMOAT_LLM_API_KEY: only visible ASCII characters are allowed (no spaces, tabs or line breaks)", keyName: true},
@@ -690,19 +712,19 @@ func TestScanLLMConfig(t *testing.T) {
 	}{
 		{
 			name:     "defaults",
-			want:     llm.Config{Provider: llm.ProviderAnthropic, Model: llm.DefaultAnthropicModel, BaseURL: llm.DefaultAnthropicBaseURL},
+			want:     llm.Config{Provider: llm.ProviderAnthropic, Model: llm.DefaultAnthropicModel, BaseURL: llmWantAnthropicBaseURL},
 			wantHost: "api.anthropic.com",
 		},
 		{
 			name:     "anthropic with a model",
 			args:     []string{"--llm-provider", "anthropic", "--llm-model", "claude-test-1"},
-			want:     llm.Config{Provider: llm.ProviderAnthropic, Model: "claude-test-1", BaseURL: llm.DefaultAnthropicBaseURL},
+			want:     llm.Config{Provider: llm.ProviderAnthropic, Model: "claude-test-1", BaseURL: llmWantAnthropicBaseURL},
 			wantHost: "api.anthropic.com",
 		},
 		{
 			name:     "openai",
 			args:     []string{"--llm-provider", "openai", "--llm-model", "gpt-test"},
-			want:     llm.Config{Provider: llm.ProviderOpenAI, Model: "gpt-test", BaseURL: llm.DefaultOpenAIBaseURL},
+			want:     llm.Config{Provider: llm.ProviderOpenAI, Model: "gpt-test", BaseURL: llmWantOpenAIBaseURL},
 			wantHost: "api.openai.com",
 		},
 		{
@@ -746,8 +768,12 @@ func TestScanLLMConfig(t *testing.T) {
 			}
 			// The config prints as a mask, so a log of it holds no key.
 			llmAssertNoKey(t, llmTestKey, fmt.Sprintf("%v %+v", got, got))
+			// The setup warning, then the notice before the first request
+			// (one tool, "t1" and "Add.": 6 bytes, shown as 1 KiB), then the
+			// notice of the new pins file, then the pin line.
 			assertStderrLines(t, r.stderr, []lineWant{
 				exactLine(llmWarning(string(tt.want.Provider), tt.wantHost)),
+				exactLine(llmSendingLine(1, 1)),
 				exactLine(newPinsNoticeLine("scan", e.pinsPath())),
 				prefixLine(scanPrefix + "pinned "),
 			})
@@ -1428,6 +1454,144 @@ func TestScanLLMIgnore(t *testing.T) {
 	})
 }
 
+// llmLongOutputMax is the most bytes that stdout or stderr of one scan in
+// TestScanLLMLongToolName may hold. It is far below the 100 KiB tool name,
+// and far above the size of the report with the cut name.
+const llmLongOutputMax = 16 << 10
+
+// TestScanLLMLongToolName checks the cap on the Key of an LLM row (FR-17,
+// issue #211), as TestScanToolsLongToolName does for a tool rule row. A tool
+// with a 100 KiB name gives an LLM row whose Key is the name cut to
+// maxToolKeyRunes runes and termsafe.CutMarker, in the --json findings. The
+// terminal report cuts the Key again to its own cell cap. Neither stdout nor
+// stderr holds the full name. The 'é' name has two bytes in each rune, so a
+// cut that counts bytes gives a Key of the wrong length.
+func TestScanLLMLongToolName(t *testing.T) {
+	t.Parallel()
+
+	// The tail marker is at the end of the name, after the cut, so it must
+	// not show anywhere.
+	const tail = "ZQNAMETAIL"
+	names := []struct {
+		name string
+		r    string // the rune that fills the tool name
+	}{
+		{"ascii", "n"},
+		{"multi-byte", "é"},
+	}
+	for _, nm := range names {
+		for _, jsonOut := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/json=%v", nm.name, jsonOut), func(t *testing.T) {
+				t.Parallel()
+				toolName := strings.Repeat(nm.r, (100<<10-len(tail))/len(nm.r)) + tail
+				tools := map[string][]inspect.Tool{"srv": {mkTool(toolName, llmMarkHigh)}}
+				e := llmEnv(t, tools)
+				args := []string{"--llm"}
+				if jsonOut {
+					args = append(args, "--json")
+				}
+
+				r := llmScan(t, e, tools, &llmFake{}, args...)
+
+				if r.code != exitFindings {
+					t.Errorf("exit code = %d, want %d\nstderr:\n%s", r.code, exitFindings, r.stderr)
+				}
+				wantKey := strings.Repeat(nm.r, maxToolKeyRunes) + termsafe.CutMarker
+				if jsonOut {
+					rows := llmJSONRows(t, decodeScanJSON(t, r.stdout))
+					if len(rows) != 1 || rows[0].rule != llm.RuleID || rows[0].severity != "high" || rows[0].server != "srv" {
+						t.Fatalf("JSON LLM findings = %d rows, want one %s high row of srv", len(rows), llm.RuleID)
+					}
+					key := rows[0].tool
+					short, ok := strings.CutSuffix(key, termsafe.CutMarker)
+					if n := utf8.RuneCountInString(short); !ok || n != maxToolKeyRunes || key != wantKey {
+						t.Errorf("JSON LLM Key = %d bytes, %d runes before the cut marker (marker at the end: %v), want %d runes of %q and %q",
+							len(key), n, ok, maxToolKeyRunes, nm.r, termsafe.CutMarker)
+					}
+				} else {
+					rows := llmRowsOf(t, parseFindings(t, r.stdout))
+					if len(rows) != 1 || rows[0].rule != llm.RuleID || rows[0].severity != "high" || rows[0].server != "srv" {
+						t.Fatalf("terminal LLM findings = %d rows, want one %s high row of srv", len(rows), llm.RuleID)
+					}
+					cellText := rows[0].tool
+					if !strings.HasPrefix(cellText, strings.Repeat(nm.r, 4)) || !strings.HasSuffix(cellText, termsafe.CutMarker) || len(cellText) > len(wantKey) {
+						t.Errorf("Tool line of the LLM finding = %d bytes, want the cut name with the cut marker", len(cellText))
+					}
+				}
+				tooLong := strings.Repeat(nm.r, maxToolKeyRunes+1)
+				for _, out := range []struct{ name, text string }{{"stdout", r.stdout}, {"stderr", r.stderr}} {
+					if strings.Contains(out.text, tail) || strings.Contains(out.text, tooLong) {
+						t.Errorf("%s holds the tool name beyond the cap (%d bytes of output)", out.name, len(out.text))
+					}
+					if len(out.text) > llmLongOutputMax {
+						t.Errorf("%s has %d bytes, want at most %d", out.name, len(out.text), llmLongOutputMax)
+					}
+				}
+			})
+		}
+	}
+
+	// The ignore lookup uses the real tool name, not the cut Key. Only
+	// --ignore drops an LLM finding, and it takes a rule ID only, so the
+	// sign of a match is the warning that the file cannot ignore the rule. A
+	// line of .mcpmoat-ignore has at most 4096 bytes, so these names have
+	// 600 runes: longer than the cap, short enough for one line.
+	ignoreCases := []struct {
+		name        string
+		description string
+		ruleID      string
+		severity    string
+		code        int
+		// useKey makes the entry name the cut Key instead of the real name.
+		useKey bool
+		warned bool
+	}{
+		{name: "real name MOAT-LLM-001", description: llmMarkHigh, ruleID: llm.RuleID, severity: "high", code: exitFindings, warned: true},
+		{name: "real name MOAT-LLM-002", description: llmMarkInvalid, ruleID: llm.RuleIDInvalid, severity: "medium", code: exitOK, warned: true},
+		{name: "cut key MOAT-LLM-001", description: llmMarkHigh, ruleID: llm.RuleID, severity: "high", code: exitFindings, useKey: true},
+	}
+	for _, nm := range names {
+		for _, tt := range ignoreCases {
+			t.Run("ignore file/"+nm.name+"/"+tt.name, func(t *testing.T) {
+				t.Parallel()
+				toolName := strings.Repeat(nm.r, 600)
+				key := strings.Repeat(nm.r, maxToolKeyRunes) + termsafe.CutMarker
+				tools := map[string][]inspect.Tool{"srv": {mkTool(toolName, tt.description)}}
+				e := llmEnv(t, tools)
+				entryTool := toolName
+				if tt.useKey {
+					entryTool = key
+				}
+				writeTestFile(t, e.work, ".mcpmoat-ignore", tt.ruleID+" srv/"+entryTool+"\n")
+
+				r := llmScan(t, e, tools, &llmFake{}, "--llm", "--json")
+
+				if r.code != tt.code {
+					t.Errorf("exit code = %d, want %d\nstderr:\n%s", r.code, tt.code, r.stderr)
+				}
+				// The finding stays in the report, with the cut Key.
+				want := []llmHit{{tt.ruleID, tt.severity, "srv", key}}
+				if got := llmJSONRows(t, decodeScanJSON(t, r.stdout)); !slices.Equal(got, want) {
+					t.Errorf("JSON LLM findings = %d rows, want one %s %s row of srv with the cut Key", len(got), tt.ruleID, tt.severity)
+				}
+				wantWarnings := 0
+				if tt.warned {
+					wantWarnings = 1
+				}
+				if n := strings.Count(r.stderr, llmFileWarning(tt.ruleID)); n != wantWarnings {
+					t.Errorf("the warning for %s shows %d times, want %d\nstderr:\n%s", tt.ruleID, n, wantWarnings, r.stderr)
+				}
+				if n := strings.Count(r.stderr, "cannot ignore"); n != wantWarnings {
+					t.Errorf("stderr has %d \"cannot ignore\" warnings, want %d\nstderr:\n%s", n, wantWarnings, r.stderr)
+				}
+				if strings.Contains(r.stderr, "ignored") {
+					t.Errorf("stderr counts ignored findings, want none:\n%s", r.stderr)
+				}
+			})
+		}
+	}
+}
+
 // TestScanLLMKeepsRuleRows checks that the LLM step only adds findings (FR-17):
 // with --llm, the rule findings (config rules and pin rules), their order,
 // the server table, the diffs and the accept hints are the same as in a scan
@@ -1664,9 +1828,12 @@ func TestScanLLMProviderFailure(t *testing.T) {
 	}
 }
 
-// TestScanLLMToolCap checks the cap of llmWantCap tools in one scan: the
-// first 500 tools are classified and the rest are not, the exit code is 2
-// and stderr gives the count. Exactly 500 tools is not over the cap.
+// TestScanLLMToolCap checks the cap of llmWantCap tools in one scan with one
+// server: the server gets the whole cap, so its first 500 tools are
+// classified and the rest are not, the exit code is 2 and stderr gives the
+// count. Exactly 500 tools is not over the cap. The notice before the first
+// request names the 500 tools that are sent, not the tools of the server.
+// scan_llm_limits_test.go tests the share of the cap between servers.
 func TestScanLLMToolCap(t *testing.T) {
 	t.Parallel()
 
@@ -1693,6 +1860,12 @@ func TestScanLLMToolCap(t *testing.T) {
 				}
 			}
 			doc := decodeScanJSON(t, r.stdout)
+			// 500 tools of 7 + 6 bytes ("tool000", "Plain.") are 6500 bytes:
+			// 6.3 KiB, shown rounded up as 7 KiB. The --json run prints it on
+			// stderr too.
+			if count := strings.Count(r.stderr, llmSendingLine(llmWantCap, 7)+"\n"); count != 1 {
+				t.Errorf("stderr holds the notice %q %d times, want 1\nstderr:\n%s", llmSendingLine(llmWantCap, 7), count, r.stderr)
+			}
 			capLine := "mcpmoat scan: --llm classifies at most 500 tools in one scan; 3 tools were not classified\n"
 			if n == llmWantCap {
 				if r.code != exitOK || !doc.Complete || strings.Contains(r.stderr, "not classified") {
@@ -1870,7 +2043,7 @@ func TestScanLLMSendsOnlyNameAndDescription(t *testing.T) {
 		{ToolName: "t3", Description: "Read a note. " + llmMarkLow},
 	}
 	got := fake.received()
-	if !slices.Equal(got, want) {
+	if !slices.EqualFunc(got, want, llmSameInput) {
 		t.Errorf("classifier inputs = %+v, want %+v", got, want)
 	}
 	dump := fmt.Sprintf("%#v", got)
@@ -1896,25 +2069,44 @@ func TestLLMRuleIDsValid(t *testing.T) {
 	}
 }
 
-// TestLLMRiskSeveritiesValid checks that each risk with a finding gives a
-// severity that internal/rules knows, so the report and --fail-on handle an
-// LLM finding like any other. Package llm must not import internal/rules, so
-// the check sits here, next to TestLLMRuleIDsValid.
-func TestLLMRiskSeveritiesValid(t *testing.T) {
+// TestLLMSeverity checks llmSeverity: each risk with a finding gives the
+// severity of the same name, and that severity is one that internal/rules
+// knows, so the report and --fail-on handle an LLM finding like any other. An
+// LLM finding is never critical. Risk none and a risk that is not valid give
+// no severity. Package llm must not import internal/rules, so the map sits in
+// scan_llm_rows.go and the check sits here, next to TestLLMRuleIDsValid.
+func TestLLMSeverity(t *testing.T) {
 	t.Parallel()
 
-	for _, risk := range []llm.Risk{llm.RiskLow, llm.RiskMedium, llm.RiskHigh} {
-		t.Run(string(risk), func(t *testing.T) {
+	tests := []struct {
+		name   string
+		risk   llm.Risk
+		want   rules.Severity
+		wantOK bool
+	}{
+		{"low", llm.RiskLow, rules.SeverityLow, true},
+		{"medium", llm.RiskMedium, rules.SeverityMedium, true},
+		{"high", llm.RiskHigh, rules.SeverityHigh, true},
+		{"none", llm.RiskNone, "", false},
+		{"empty", llm.Risk(""), "", false},
+		{"critical is not a risk", llm.Risk("critical"), "", false},
+		{"not valid", llm.Risk("risk-canary"), "", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			severity, ok := risk.Severity()
+			got, ok := llmSeverity(tt.risk)
+			if got != tt.want || ok != tt.wantOK {
+				t.Fatalf("llmSeverity(%q) = (%q, %v), want (%q, %v)", tt.risk, got, ok, tt.want, tt.wantOK)
+			}
 			if !ok {
-				t.Fatalf("%q.Severity() ok = false, want true", risk)
+				return
 			}
-			if !rules.Severity(severity).Valid() {
-				t.Errorf("%q.Severity() = %q, which is not a valid rules.Severity", risk, severity)
+			if !got.Valid() {
+				t.Errorf("llmSeverity(%q) = %q, which is not a valid rules.Severity", tt.risk, got)
 			}
-			if rules.Severity(severity) == rules.SeverityCritical {
-				t.Errorf("%q.Severity() = %q, want a severity below critical", risk, severity)
+			if got == rules.SeverityCritical {
+				t.Errorf("llmSeverity(%q) = %q, want a severity below critical", tt.risk, got)
 			}
 		})
 	}
@@ -1929,10 +2121,20 @@ func (f failClassifier) Classify(context.Context, llm.Input) (llm.Verdict, error
 	return llm.Verdict{}, errors.New("unexpected call")
 }
 
-// TestClassifyToolsContext checks classifyTools with a context that ended. With
-// no tool to classify, the step did nothing: it returns an empty result and no
-// error, so a signal after the inspection does not drop the report only with
-// --llm. With a tool, it returns the context error.
+// classifyTools is the LLM step without the stderr lines of llmStep: it runs
+// planLLMJobs on outcomes and then classifyPlan with the real time limit
+// defaultLLMStepTimeout. The code of scan calls the same two functions (see
+// llmStep), so the tests that call classifyTools run the code of a real
+// scan. It is a test helper: production code has no classifyTools.
+func classifyTools(ctx context.Context, outcomes []inspect.Outcome, cl toolClassifier, ignore *scanIgnores) (llmResult, error) {
+	return classifyPlan(ctx, planLLMJobs(outcomes), cl, ignore, defaultLLMStepTimeout)
+}
+
+// TestClassifyToolsContext checks planLLMJobs and classifyPlan (through the
+// classifyTools helper) with a context that ended. With no tool to classify,
+// the step did nothing: it returns an empty result and no error, so a signal
+// after the inspection does not drop the report only with --llm. With a tool,
+// it returns the context error.
 func TestClassifyToolsContext(t *testing.T) {
 	t.Parallel()
 

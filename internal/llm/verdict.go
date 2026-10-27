@@ -17,7 +17,8 @@ const (
 	RuleID = "MOAT-LLM-001"
 	// RuleIDInvalid is the rule ID of a finding for a tool whose model
 	// output was invalid or a refusal (an error that wraps
-	// ErrInvalidOutput).
+	// ErrInvalidOutput), or that the provider refused (an error that wraps
+	// ErrRejected, see RejectedText).
 	RuleIDInvalid = "MOAT-LLM-002"
 )
 
@@ -30,7 +31,8 @@ var ErrInvalidOutput = errors.New("invalid LLM output")
 type Risk string
 
 // The risk levels. There is no critical level: the model alone can never
-// give the highest severity.
+// give the highest severity. The mapping from a risk level to the severity
+// of a finding lives in cmd/mcpmoat (llmSeverity).
 const (
 	// RiskNone means that the model saw no risk. It does not mean that the
 	// tool is safe.
@@ -51,23 +53,6 @@ func (r Risk) Valid() bool {
 		return true
 	default:
 		return false
-	}
-}
-
-// Severity returns the severity of a finding for r: "low", "medium" or
-// "high". These are the names of rules.Severity and of the report. The cap is
-// "high", never "critical". For RiskNone and for an invalid Risk, ok is false
-// and there is no finding.
-func (r Risk) Severity() (severity string, ok bool) {
-	switch r {
-	case RiskLow:
-		return "low", true
-	case RiskMedium:
-		return "medium", true
-	case RiskHigh:
-		return "high", true
-	default:
-		return "", false
 	}
 }
 
@@ -142,6 +127,13 @@ const InvalidText = "The LLM classifier gave no valid rating for this tool descr
 	"The model refused, or its output did not match the verdict schema. " +
 	"A description written to confuse the classifier can cause this."
 
+// RejectedText is the fixed risk text of a RuleIDInvalid finding for a tool
+// that the provider refused (an error that wraps ErrRejected). It holds no
+// status code, no response body and no key.
+const RejectedText = "The LLM provider refused this tool description (HTTP 4xx), " +
+	"so the tool was not classified. " +
+	"A safety filter or a size limit of the provider can cause this."
+
 // InvalidRemediation is the fixed remediation text of a RuleIDInvalid
 // finding.
 const InvalidRemediation = "Read the full tool description and check it by hand."
@@ -154,6 +146,14 @@ const InvalidRemediation = "Read the full tool description and check it by hand.
 // ask the model for a low rating or make it refuse.
 const TruncatedText = "The tool description is too long to classify in full. " +
 	"The part after the cut was not rated and can hold hidden instructions for the AI agent."
+
+// RedactedText is the fixed risk text of a RuleID finding for a tool whose
+// text had a configured value removed (see Verdict.Redacted), and that the
+// model rated none or low, or gave no usable rating (ErrInvalidOutput). The
+// caller rates such a tool medium whatever the model answered, because a
+// hostile config can choose which text to remove.
+const RedactedText = "A value from your config, such as an env or header value, was removed from the tool text before it was sent to the model. " +
+	"The removed text was not rated and can hold hidden instructions for the AI agent."
 
 // Verdict is the rating of one tool description by the model. Only
 // parseVerdict makes a Verdict from model output, so Risk and Category are
@@ -169,6 +169,14 @@ type Verdict struct {
 	// tool message was built. It never comes from the model output:
 	// parseVerdict never sets it.
 	Truncated bool
+	// Redacted is true when toolMessage replaced one or more configured
+	// secret values in the tool name or description with discover.Mask,
+	// before the request. It is the same flag as the "redacted" field of
+	// the message (see toolMessage). Classify sets it, also with an error
+	// after the message was built. It never comes from the model output:
+	// parseVerdict never sets it. The removed text was not rated, so the
+	// caller rates such a tool medium (see RedactedText).
+	Redacted bool
 }
 
 // Field names of the verdict JSON object. A test keeps the keys of the
@@ -181,7 +189,7 @@ const (
 // parseVerdict reads the model output data as one verdict. The rules are
 // strict, because the output is untrusted:
 //
-//   - data has at most MaxVerdictBytes bytes;
+//   - data has at most maxVerdictBytes bytes;
 //   - data is exactly one JSON object, with optional white space around it,
 //     and nothing after it;
 //   - the object has exactly the keys "risk" and "category", each one time,
@@ -196,8 +204,8 @@ const (
 // Every error wraps ErrInvalidOutput and has fixed text. No byte of data
 // reaches the error.
 func parseVerdict(data []byte) (Verdict, error) {
-	if len(data) > MaxVerdictBytes {
-		return Verdict{}, invalidOutput(fmt.Sprintf("longer than %d bytes", MaxVerdictBytes))
+	if len(data) > maxVerdictBytes {
+		return Verdict{}, invalidOutput(fmt.Sprintf("longer than %d bytes", maxVerdictBytes))
 	}
 	dec := json.NewDecoder(bytes.NewReader(data))
 	if err := expectDelim(dec, '{'); err != nil {

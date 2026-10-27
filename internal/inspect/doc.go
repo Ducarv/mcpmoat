@@ -93,16 +93,28 @@
 // An expanded value can be a secret, and the server gets it and can echo it.
 // So Inspect records each value that it looks up (lookupRecorder), and the
 // scrub of error text removes every recorded value of at least
-// minBareSecretLen (8) bytes. A shorter value is too likely to match
+// discover.MinSecretBytes bytes. A shorter value is too likely to match
 // ordinary words, so it is not removed: a server can echo it in its error
 // text.
 //
 // The scrub covers error text only. The expanded values reach the server,
 // and the text of a [Result] (the names and descriptions of tools, prompts
 // and resources, and ServerName) is not scrubbed. So a server can echo a
-// secret in its Result. When scan is wired to inspect (issues #28 and #29),
-// the report and JSON writers must scrub the recorded values and the
-// configured values from that text.
+// secret in its Result. On success, Inspect puts the recorded values and the
+// configured values of at least 8 bytes in Result.Secrets.
+//
+// A stdio server also gets its argv, and real configs often put a token
+// there ("--api-key", -H "Authorization: Bearer <token>"). So for a stdio
+// server, Result.Secrets and the scrub of error text also hold the secrets
+// in the expanded command and args (argSecrets): the text that
+// discover.RedactArgs masks in all output (see discover.ArgSecrets), with at
+// least 8 bytes. Args that RedactArgs shows, such as package names, are not
+// in the list, so they stay readable.
+//
+// scan --llm uses Result.Secrets to replace those values in the tool names
+// and descriptions that it sends to the provider (FR-17). The report and the
+// JSON output do not use them: they print the Result text as the server
+// sent it.
 //
 // # Starting stdio servers
 //
@@ -287,6 +299,9 @@
 // builds a [ConnectError]. The package never gives the userinfo of the URL to
 // the SDK. It sends the userinfo as a Basic Authorization header, unless the
 // config sets an Authorization header.
+//
+// On success, the same values of at least 8 bytes go to Result.Secrets (see
+// Placeholder expansion).
 //
 // The text of a [ConnectError] can still hold text that the server controls
 // (see "Untrusted data" below).
@@ -476,7 +491,9 @@
 // # Untrusted data
 //
 // Every string in a [Result] comes from the server, and a malicious server
-// controls it. Never execute it, never put it in a command or a format
+// controls it. The exceptions are Result.Warnings and Result.Secrets, which
+// come from the client config and from mcpmoat (see [Result]). Never
+// execute a string of a Result, never put it in a command or a format
 // string, and escape it with internal/termsafe before you print it. The same
 // is true for the text of a [ConnectError], which can hold a status text or a
 // JSON-RPC message from the server, and for the text of Outcome.Err (see
@@ -504,7 +521,10 @@
 //   - An expanded variable value shorter than 8 bytes is not removed from
 //     error text (see Placeholder expansion).
 //   - The text of a Result is not scrubbed, so a server can echo an
-//     expanded secret in it (see Placeholder expansion).
+//     expanded or configured secret in it (see Placeholder expansion).
+//     Result.Secrets lets scan --llm remove the values of at least 8 bytes
+//     from the text that it sends. The report does not scrub Result text,
+//     so a secret in a tool name can show on stdout.
 //   - npm_config_yes=false does not stop pnpm dlx, bunx, uvx or the
 //     standalone npx from before npm 7 from installing a missing package
 //     (see Starting stdio servers).

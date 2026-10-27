@@ -57,6 +57,58 @@ This page lists what mcpmoat does not do, so you know how far to trust a clean s
 - `--llm` does not make a scan complete or reliable. A model can miss a malicious tool, and a
   hostile description can try to influence the model. Its findings are advisory, and with `--llm`
   your tool names and descriptions leave your machine.
+- `--llm` classifies at most 500 tools in one scan, shared fairly between the servers (see
+  [Optional LLM classification](llm.md)). The tools of a server over its share are not
+  classified, and the scan exits with 2. So a hostile server can make a `--llm` scan exit with 2 on
+  purpose, but it cannot use up the share of the other servers.
+- The LLM step of a `--llm` scan stops after 10 minutes, and no flag changes this. A slow or busy
+  provider can use up this time: the tools that are not classified by then give exit code 2.
+- With `--llm-provider openai` and a base URL that is not the default OpenAI API (an
+  OpenAI-compatible server), mcpmoat sets no cap on the output tokens of the model (see
+  [Output cap](llm.md)).
+- A tool that the provider refuses (HTTP 400, 413 or 422) is not classified. It gets a `medium`
+  finding, not a rating. That is below the default `--fail-on high`, so a hostile server that makes
+  the provider refuse its tool descriptions can keep their LLM rating from reaching `high`. When
+  the provider refuses every tool that it answers, the LLM step fails and the scan exits with 2.
+- `--llm` replaces the secret values of a server with `********` in the tool text that it sends,
+  also the secrets in the args of a stdio server, but not all of them (see
+  [What is sent](llm.md)):
+  - A value shorter than 8 bytes is not removed.
+  - An encoded form of a value (for example base64, URL-encoded or split with spaces) is not
+    removed.
+  - A secret in an arg that mcpmoat does not recognise is not removed, for example
+    `--db mypassword`, a positional `hunter2`, a short path segment or `-phunter2`.
+  - A secret that starts or ends with `*`, or holds a whole `********`, can show again across a
+    `********`.
+  - A header value of 8 bytes or more is replaced also when it is not secret, for example
+    `application/json`. Arg text that the report masks is replaced also when it is not secret, for
+    example a long random-looking path segment, a nix hash, a UUID or a name with spaces.
+  - A tool whose text had a configured value removed gets a `medium` finding at least, also when
+    the removed text is an ordinary word of your config (for example the env value `production`).
+    A config that you do not control can choose which text is removed, for example an env value
+    that equals an injection phrase in a tool description. The finding is `medium`, not `high`,
+    so the default `--fail-on high` does not fail on it. The rule findings still read the full
+    text.
+- The report on the terminal and the `--json` output show the tool names as the server sent them.
+  mcpmoat does not remove secret values from them, so a server that puts a secret in a tool name
+  can make it show on stdout. Only the rows of the `--llm` step hide such a value (as
+  `********`). Issue #228 tracks the other rows.
+- When you give a wrong argument, every command hides the user info of each URL in the error text
+  (`https://user:pass@host` shows as `https://(hidden)@host`), and it hides the value of
+  `--llm-base-url`, also one with no scheme such as `user:pass@host`. This covers the flag errors
+  of `mcpmoat`, `scan` and `pin`, an unknown command name, the `unexpected arguments` error of
+  every command and the `pin --accept <name>` messages. The limits:
+  - `pin` has no `--llm-base-url` flag. When an `--accept`, `--config` or `--project` value holds a
+    `--llm-base-url` value (`--accept --llm-base-url=user:pass@host`), `pin` stops with exit code 2
+    and a fixed message that does not print the value. A very short `--llm-base-url` value that
+    also shows inside one of these values stops `pin` too, also when no secret is in it.
+  - A raw `/`, `?` or `#` in a password ends the user info early, so the password can show. RFC
+    3986 says that a URL must percent-encode these characters in the user info. The value of
+    `--llm-base-url` is still hidden whole.
+  - A value with no scheme is not hidden when it is the value of another flag and no dash comes
+    before the flag name, for example `--timeout=llm-base-url=user:PASS@host`.
+  - The errors about the `--config` and `--project` paths are not scrubbed, because these values
+    are paths, not URLs.
 - The lock on the pins directory is advisory. mcpmoat v0.1.0 does not lock, so a v0.1.0 run in
   parallel with a newer run can lose an update. A file system that cannot lock (some network
   mounts) and Windows run without the lock, after one warning.

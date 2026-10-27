@@ -20,6 +20,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/Ducarv/mcpmoat/internal/discover/discovertest"
 	"github.com/Ducarv/mcpmoat/internal/inspect/inspecttest"
@@ -501,12 +502,85 @@ func TestE2ELLMFindings(t *testing.T) {
 	}
 }
 
-// TestE2ELLMProviderFailure checks a provider that answers 503: scan still
-// prints the report, marks the JSON report incomplete and exits with 2. The
-// error names the status code only, never the key or the response body.
+const (
+	// e2eLLMBodyCanary is the body of the error answers of the fake
+	// provider. The binary never reads such a body, so it must never show.
+	e2eLLMBodyCanary = "e2e-llm-body-canary-5Wv7"
+	// e2eLLMHoldMax is the longest time that e2eLLMFailing holds an answer.
+	// It only ends the hold when the binary sends fewer requests than the
+	// test wants; the request count then fails the test.
+	e2eLLMHoldMax = 10 * time.Second
+	// e2eLLMRetryGuard is the time that one run of a retry test may take.
+	// Every error answer has Retry-After 0 or a wait above the cap of 30 s,
+	// so the binary never waits for a backoff and the real time is about
+	// one second. The guard is long on purpose for a slow runner with
+	// -race. runBinEnv has no timeout, so the guard cannot catch a real
+	// hang.
+	e2eLLMRetryGuard = 30 * time.Second
+)
+
+// e2eLLMFailing returns a fake provider that answers every request with
+// HTTP 503, the Retry-After value retryAfter and the body e2eLLMBodyCanary.
+// It holds the answer to request number last of a tool until each benign
+// tool has sent last requests (or for e2eLLMHoldMax). The first tool that
+// gets its last error stops the LLM step and cancels the other requests, so
+// without the hold the request count would depend on the timing of the
+// tools.
+func e2eLLMFailing(t *testing.T, retryAfter string, last int) func(http.ResponseWriter, []byte) {
+	t.Helper()
+	var (
+		mu    sync.Mutex
+		tries = map[string]int{}
+		total int
+	)
+	allSent := make(chan struct{})
+	want := last * len(e2eLLMBenignTools)
+	return func(w http.ResponseWriter, body []byte) {
+		// A body that is not a tool message counts for the tool "":
+		// e2eLLMAssertRequests reports it.
+		msg, _ := llmRequestPayload(body)
+		mu.Lock()
+		tries[msg.ToolName]++
+		try := tries[msg.ToolName]
+		total++
+		if total == want {
+			close(allSent)
+		}
+		mu.Unlock()
+		if try == last {
+			select {
+			case <-allSent:
+			case <-t.Context().Done():
+			case <-time.After(e2eLLMHoldMax):
+			}
+		}
+		w.Header().Set("Retry-After", retryAfter)
+		w.WriteHeader(http.StatusServiceUnavailable)
+		_, _ = io.WriteString(w, e2eLLMBodyCanary)
+	}
+}
+
+// e2eLLMRepeat returns each benign tool name n times, sorted, like the
+// result of e2eLLMAssertRequests.
+func e2eLLMRepeat(n int) []string {
+	var tools []string
+	for name := range e2eLLMBenignTools {
+		for range n {
+			tools = append(tools, name)
+		}
+	}
+	slices.Sort(tools)
+	return tools
+}
+
+// TestE2ELLMProviderFailure checks a provider that answers 503 every time:
+// the binary tries each tool llm.RetryMaxTries times (the first request and
+// 2 retries: the retry policy of internal/llm), then scan still prints the
+// report, marks the JSON report incomplete and exits with 2. The error names
+// the status code only, never the key or the response body. Each answer has
+// Retry-After: 0, so the retries do not wait for the backoff.
 func TestE2ELLMProviderFailure(t *testing.T) {
 	t.Parallel()
-	const bodyCanary = "e2e-llm-body-canary-5Wv7"
 	tests := []struct {
 		name string
 		args []string
@@ -517,15 +591,14 @@ func TestE2ELLMProviderFailure(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			provider := e2eNetStart(t, func(w http.ResponseWriter, _ []byte) {
-				w.WriteHeader(http.StatusServiceUnavailable)
-				_, _ = io.WriteString(w, bodyCanary)
-			})
+			provider := e2eNetStart(t, e2eLLMFailing(t, "0", llm.RetryMaxTries))
 			const server = "benign-llm-fail"
 			home, work := benignHome(t, server)
 			args := append([]string{"scan", "--llm", "--llm-base-url", provider.srv.URL}, tt.args...)
 
+			start := time.Now()
 			stdout, stderr, code := runBinEnv(t, home, work, []string{llm.KeyEnv + "=" + llmTestKey}, args...)
+			assertFast(t, start, e2eLLMRetryGuard)
 
 			if code != exitError {
 				t.Errorf("exit code = %d, want %d\nstdout:\n%s\nstderr:\n%s", code, exitError, stdout, stderr)
@@ -535,8 +608,8 @@ func TestE2ELLMProviderFailure(t *testing.T) {
 				e2eLLMWarning(t, provider.srv.URL),
 				scanPrefix + "the LLM provider failed (HTTP 503",
 			})
-			assertContainsNone(t, "stdout", stdout, []string{bodyCanary, pinEnvCanary})
-			assertContainsNone(t, "stderr", stderr, []string{bodyCanary, pinEnvCanary})
+			assertContainsNone(t, "stdout", stdout, []string{e2eLLMBodyCanary, pinEnvCanary})
+			assertContainsNone(t, "stderr", stderr, []string{e2eLLMBodyCanary, pinEnvCanary})
 			if tt.args == nil {
 				assertServerNames(t, stdout, server)
 			} else {
@@ -554,10 +627,150 @@ func TestE2ELLMProviderFailure(t *testing.T) {
 				}
 			}
 			_, reqs := provider.settle(t)
-			if len(reqs) == 0 {
-				t.Error("the provider got no request")
+			// e2eLLMAssertRequests also checks the key header of each try.
+			if got, want := e2eLLMAssertRequests(t, reqs, []string{server, pinEnvCanary}), e2eLLMRepeat(llm.RetryMaxTries); !slices.Equal(got, want) {
+				t.Errorf("tools sent = %v, want each tool %d times: %v", got, llm.RetryMaxTries, want)
 			}
-			e2eLLMAssertRequests(t, reqs, []string{server, pinEnvCanary})
+		})
+	}
+}
+
+// TestE2ELLMRetryThenSuccess checks a provider that answers 429 with
+// Retry-After: 0 and then a valid verdict: the binary tries the request
+// again, and the scan ends as if the provider never failed. The exit code
+// comes from the findings, the JSON report is complete, and nothing in the
+// output tells about the retry. The key is in the x-api-key header of each
+// try and never in the output.
+func TestE2ELLMRetryThenSuccess(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		// perTool makes the first request of each tool fail. Otherwise only
+		// the first request of the scan fails.
+		perTool  bool
+		wantReqs int
+	}{
+		{name: "first request", wantReqs: len(e2eLLMBenignTools) + 1},
+		{name: "each tool", perTool: true, wantReqs: 2 * len(e2eLLMBenignTools)},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			var (
+				mu     sync.Mutex
+				failed = map[string]bool{}
+			)
+			provider := e2eNetStart(t, func(w http.ResponseWriter, body []byte) {
+				msg, _ := llmRequestPayload(body)
+				key := ""
+				if tt.perTool {
+					key = msg.ToolName
+				}
+				mu.Lock()
+				fail := !failed[key]
+				failed[key] = true
+				mu.Unlock()
+				if fail {
+					w.Header().Set("Retry-After", "0")
+					w.WriteHeader(http.StatusTooManyRequests)
+					_, _ = io.WriteString(w, e2eLLMBodyCanary)
+					return
+				}
+				e2eLLMAnthropic(w, body)
+			})
+			const server = "benign-llm-retry"
+			home, work := benignHome(t, server)
+
+			start := time.Now()
+			stdout, stderr, code := runBinEnv(t, home, work, []string{llm.KeyEnv + "=" + llmTestKey},
+				"scan", "--llm", "--llm-base-url", provider.srv.URL, "--json")
+			assertFast(t, start, e2eLLMRetryGuard)
+
+			// echo is rated high, so the exit code is 1.
+			if code != exitFindings {
+				t.Errorf("exit code = %d, want %d\nstdout:\n%s\nstderr:\n%s", code, exitFindings, stdout, stderr)
+			}
+			e2eNetAssertNoKeyOutput(t, stdout, stderr)
+			// The same stderr as a scan whose provider never fails.
+			wantStderr := []string{e2eLLMWarning(t, provider.srv.URL), llmSendingLine(2, 1), e2eNewPinsFileNotice("scan", home), scanPrefix + "pinned 2 tools for " + server}
+			if got := nonEmptyLines(stderr); !slices.Equal(got, wantStderr) {
+				t.Errorf("stderr lines = %q, want %q", got, wantStderr)
+			}
+			// Not "retry": the temporary paths in the report hold the test name.
+			retryWords := []string{"429", "Too Many", "rate limit", e2eLLMBodyCanary, "failed"}
+			assertContainsNone(t, "stdout", stdout, retryWords)
+			assertContainsNone(t, "stderr", stderr, retryWords)
+			doc := decodeScanJSON(t, stdout)
+			if !doc.Complete || len(doc.Errors) != 0 {
+				t.Errorf("complete = %t, errors = %+v, want a complete report without errors", doc.Complete, doc.Errors)
+			}
+			want := report.JSONFinding{RuleID: llm.RuleID, Severity: "high", Server: server, Field: "tool", Key: e2eLLMRiskyTool, Related: "hidden-instructions", Source: report.SourceLLM}
+			if !slices.Contains(doc.Findings, want) {
+				t.Errorf("no finding %+v\nfindings: %+v", want, doc.Findings)
+			}
+			for _, f := range doc.Findings {
+				if f.RuleID == llm.RuleIDInvalid {
+					t.Errorf("finding %+v after a retry that succeeded", f)
+				}
+			}
+
+			_, reqs := provider.settle(t)
+			got := e2eLLMAssertRequests(t, reqs, []string{server, pinEnvCanary})
+			if len(got) != tt.wantReqs {
+				t.Errorf("the provider got %d requests %v, want %d", len(got), got, tt.wantReqs)
+			}
+			if tt.perTool && !slices.Equal(got, e2eLLMRepeat(2)) {
+				t.Errorf("tools sent = %v, want each tool twice", got)
+			}
+			if tools := slices.Compact(slices.Clone(got)); !slices.Equal(tools, e2eLLMRepeat(1)) {
+				t.Errorf("tools sent = %v, want each benign tool", got)
+			}
+		})
+	}
+}
+
+// TestE2ELLMRetryAfterAboveCap checks a provider that answers 503 with a
+// Retry-After above the cap of 30 s, as seconds and as an HTTP-date: the
+// binary does not try again (one request for each tool), and prints the
+// failure at once and exits with 2.
+func TestE2ELLMRetryAfterAboveCap(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name       string
+		retryAfter string
+	}{
+		{name: "seconds", retryAfter: "3600"},
+		{name: "date", retryAfter: time.Now().Add(time.Hour).UTC().Format(http.TimeFormat)},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			provider := e2eNetStart(t, e2eLLMFailing(t, tt.retryAfter, 1))
+			const server = "benign-llm-cap"
+			home, work := benignHome(t, server)
+
+			start := time.Now()
+			stdout, stderr, code := runBinEnv(t, home, work, []string{llm.KeyEnv + "=" + llmTestKey},
+				"scan", "--llm", "--llm-base-url", provider.srv.URL, "--json")
+			assertFast(t, start, e2eLLMRetryGuard)
+
+			if code != exitError {
+				t.Errorf("exit code = %d, want %d\nstdout:\n%s\nstderr:\n%s", code, exitError, stdout, stderr)
+			}
+			e2eNetAssertNoKeyOutput(t, stdout, stderr)
+			assertContainsAll(t, "stderr", stderr, []string{
+				e2eLLMWarning(t, provider.srv.URL),
+				scanPrefix + "the LLM provider failed (HTTP 503",
+			})
+			assertContainsNone(t, "stdout", stdout, []string{e2eLLMBodyCanary, tt.retryAfter})
+			assertContainsNone(t, "stderr", stderr, []string{e2eLLMBodyCanary, tt.retryAfter})
+			if doc := decodeScanJSON(t, stdout); doc.Complete {
+				t.Error("complete = true, want false")
+			}
+			_, reqs := provider.settle(t)
+			if got := e2eLLMAssertRequests(t, reqs, []string{server, pinEnvCanary}); !slices.Equal(got, e2eLLMRepeat(1)) {
+				t.Errorf("tools sent = %v, want each tool once (no retry)", got)
+			}
 		})
 	}
 }

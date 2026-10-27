@@ -545,7 +545,7 @@ func replaceURLParts(text, rawURL, redactedURL string) string {
 // "scheme://name@host" and escapes the name, so the escaped form is replaced
 // too, and so is the user info as written in rawURL.
 func replaceUserinfo(text, rawURL string, userinfo *url.Userinfo) string {
-	rawInfo := rawUserinfo(rawURL)
+	rawInfo := discover.RawUserinfo(rawURL)
 	if userinfo == nil && rawInfo == "" {
 		return text
 	}
@@ -585,24 +585,6 @@ func replaceUserinfo(text, rawURL string, userinfo *url.Userinfo) string {
 	return text
 }
 
-// rawUserinfo returns the user info of rawURL as written, without the "@", or
-// "" if there is none. It is the part of the authority before the last "@",
-// as net/url reads it.
-func rawUserinfo(rawURL string) string {
-	_, rest, found := strings.Cut(rawURL, "//")
-	if !found {
-		return ""
-	}
-	if end := strings.IndexAny(rest, "/?#"); end >= 0 {
-		rest = rest[:end]
-	}
-	at := strings.LastIndex(rest, "@")
-	if at < 0 {
-		return ""
-	}
-	return rest[:at]
-}
-
 // truncate cuts text to maxReasonRunes runes and adds "…" if it cut
 // anything. It counts runes, so it never cuts inside a UTF-8 sequence.
 func truncate(text string) string {
@@ -613,23 +595,23 @@ func truncate(text string) string {
 	return string(runes[:maxReasonRunes]) + "…"
 }
 
-// showDiscoveredURL makes ce show the URL as discovered, not the expanded
-// one, for a remote server. Remote built ce from the expanded server, so its
-// URL, its Reason and its cause can hold the redacted expanded URL, and that
-// URL can show the values of variables: a host, a port or a path segment
-// that the redaction keeps, and values shorter than minBareSecretLen that no
-// scrub removes. A port in a dial error that prints the resolved IP:port
-// stays: a port is not a secret. showDiscoveredURL sets ce.URL to the discovered URL, and
-// replaces the expanded URL in Reason and in the text of the cause with it,
+// showDiscoveredURL makes ce show the URL as discovered, not the expanded one,
+// for a remote server. Remote built ce from the expanded server, so its URL,
+// its Reason and its cause can hold the redacted expanded URL, and that URL can
+// show the values of variables: a host, a port or a path segment that the
+// redaction keeps, and values shorter than discover.MinSecretBytes that no
+// scrub removes. A port in a dial error that prints the resolved IP:port stays:
+// a port is not a secret. showDiscoveredURL sets ce.URL to the discovered URL,
+// and replaces the expanded URL in Reason and in the text of the cause with it,
 // also in the form without the query and the fragment, the same forms that
-// scrub replaces. Then it replaces the expanded host (host:port, then the
-// host name alone) with the discovered one, because a DNS or dial error
-// names the host without the URL. A host can be a short word, so this can
-// garble other text of the error: a leak is worse than a garbled word. A
-// cause whose text changes becomes a new error with that text (see
-// withText), which still matches the context error and the sentinel of the
-// old cause, so errors.Is(err, context.DeadlineExceeded) still works. When
-// the two URLs are the same, only ce.URL is set.
+// scrub replaces. Then it replaces the expanded host (host:port, then the host
+// name alone) with the discovered one, because a DNS or dial error names the
+// host without the URL. A host can be a short word, so this can garble other
+// text of the error: a leak is worse than a garbled word. A cause whose text
+// changes becomes a new error with that text (see withText), which still
+// matches the context error and the sentinel of the old cause, so
+// errors.Is(err, context.DeadlineExceeded) still works. When the two URLs are
+// the same, only ce.URL is set.
 func showDiscoveredURL(ce *ConnectError, expanded, discovered discover.URL) {
 	to := discovered.String()
 	ce.URL = to

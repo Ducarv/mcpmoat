@@ -15,15 +15,15 @@ import (
 // sdk_test.go is in package inspect_test and cannot reach them.
 
 // TestLookupRecorder checks that lookupRecorder returns what the wrapped
-// lookup returns, and records each value of at least minBareSecretLen bytes
+// lookup returns, and records each value of at least discover.MinSecretBytes bytes
 // one time only, in the order of the first lookup.
 func TestLookupRecorder(t *testing.T) {
 	t.Parallel()
 
 	long1 := "mcpmoat-recorder-canary-1aB2"
 	long2 := "mcpmoat-recorder-canary-3cD4"
-	atLimit := strings.Repeat("x", minBareSecretLen)
-	belowLimit := strings.Repeat("y", minBareSecretLen-1)
+	atLimit := strings.Repeat("x", discover.MinSecretBytes)
+	belowLimit := strings.Repeat("y", discover.MinSecretBytes-1)
 	env := []string{
 		"A=" + long1,
 		"A_AGAIN=" + long1, // another variable with the same value

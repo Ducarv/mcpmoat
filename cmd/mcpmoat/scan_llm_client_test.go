@@ -78,6 +78,12 @@ func (l *llmSyncLog) snapshot() (stdout, stderr string, events []llmEvent) {
 // llmAPI is a fake Anthropic Messages API on a loopback httptest server. It
 // answers each request with the verdict of llmAnswerFor for the tool in the
 // request, and records each request.
+//
+// Every answer that is not 2xx has the header "Retry-After: 0". The client
+// tries HTTP 429, 502, 503, 504 and 529 again (3 requests for one tool in
+// total), and cmd/mcpmoat cannot change its backoff waits of 1 s and more.
+// With "Retry-After: 0" the client waits 0 s instead, so the tests stay fast.
+// The header changes nothing for the other codes: they get no retry.
 type llmAPI struct {
 	srv *httptest.Server
 	// host is the host and port of the server.
@@ -128,6 +134,7 @@ func (a *llmAPI) handle(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if a.status != 0 {
+		w.Header().Set("Retry-After", "0")
 		w.WriteHeader(a.status)
 		return
 	}
@@ -140,6 +147,7 @@ func (a *llmAPI) handle(w http.ResponseWriter, r *http.Request) {
 	var se *llm.StatusError
 	switch {
 	case errors.As(verr, &se):
+		w.Header().Set("Retry-After", "0")
 		w.WriteHeader(se.Code)
 		return
 	case verr != nil:
@@ -316,10 +324,34 @@ func TestScanLLMRealClient(t *testing.T) {
 			if builds.Load() != 1 {
 				t.Errorf("newClassifier calls = %d, want 1", builds.Load())
 			}
-			// One request for each tool. The first failed request stops the
-			// step, so with HTTP 503 the second request may never start.
-			if n := api.requests.Load(); n != 2 && (tt.status == 0 || n != 1) {
-				t.Errorf("the API got %d requests, want 2 (one per tool; 1 is also fine after a failure)", n)
+			// One request for each tool. With HTTP 503 the client tries each
+			// tool 3 times in total (the fake sends "Retry-After: 0"). The
+			// tool whose last try fails first stops the step, so it got
+			// exactly 3 requests, and the other tool got 0 to 3: its
+			// requests that the stop cancelled can end before they reach
+			// the fake.
+			bodies, headers, paths := api.snapshot()
+			perTool := llmRequestsPerTool(t, bodies)
+			if n := int(api.requests.Load()); n != len(bodies) {
+				t.Errorf("the API counted %d requests but recorded %d", n, len(bodies))
+			}
+			if tt.status == 0 {
+				if want := map[string]int{"t1": 1, "t2": 1}; !maps.Equal(perTool, want) {
+					t.Errorf("requests for each tool = %v, want %v", perTool, want)
+				}
+			} else {
+				full := 0
+				for name, n := range perTool {
+					if n > llm.RetryMaxTries {
+						t.Errorf("tool %s got %d requests, want at most %d", name, n, llm.RetryMaxTries)
+					}
+					if n == llm.RetryMaxTries {
+						full++
+					}
+				}
+				if full == 0 {
+					t.Errorf("requests for each tool = %v, want one tool with %d (the retries of the failed tool)", perTool, llm.RetryMaxTries)
+				}
 			}
 			// The warning is the first line on stderr, it shows once, and no
 			// stdout write comes before it.
@@ -355,7 +387,6 @@ func TestScanLLMRealClient(t *testing.T) {
 			llmAssertNoKey(t, llmTestKey, stdout, stderr)
 			assertNoLeakBoth(t, stdout, stderr)
 
-			bodies, headers, paths := api.snapshot()
 			var got []llm.Input
 			for i, body := range bodies {
 				if paths[i] != "/v1/messages" {
@@ -385,11 +416,11 @@ func TestScanLLMRealClient(t *testing.T) {
 			}
 			slices.SortFunc(got, func(a, b llm.Input) int { return strings.Compare(a.ToolName, b.ToolName) })
 			want := []llm.Input{{ToolName: "t1", Description: "Read keys. " + llmMarkHigh}, {ToolName: "t2", Description: "Add two numbers."}}
-			if tt.status == 0 && !slices.Equal(got, want) {
+			if tt.status == 0 && !slices.EqualFunc(got, want, llmSameInput) {
 				t.Errorf("tool messages = %+v, want %+v", got, want)
 			}
 			for _, in := range got {
-				if !slices.Contains(want, in) {
+				if !slices.ContainsFunc(want, func(w llm.Input) bool { return llmSameInput(w, in) }) {
 					t.Errorf("tool message %+v is not one of %+v", in, want)
 				}
 			}
@@ -437,6 +468,38 @@ func TestScanLLMRealClientTruncated(t *testing.T) {
 	if want := map[string]bool{"t1": true, "t2": false}; !maps.Equal(truncated, want) {
 		t.Errorf("truncated of each request = %v, want %v", truncated, want)
 	}
+}
+
+// llmRetryCodes are the HTTP status codes that the client of package llm
+// tries again: 429, 502, 503, 504 and 529 (the overload code of the Anthropic
+// API, which net/http has no name for). It is the one list of these codes in
+// the tests of this package. For such a code the client sends at most
+// llm.RetryMaxTries requests for one tool (the first request and 2 retries);
+// the tests use that constant, and TestRetryPolicyDefaults in internal/llm
+// pins its value.
+var llmRetryCodes = []int{
+	http.StatusTooManyRequests,
+	http.StatusBadGateway,
+	http.StatusServiceUnavailable,
+	http.StatusGatewayTimeout,
+	529,
+}
+
+// llmRequestsPerTool returns the number of recorded requests for each tool
+// name, from the Anthropic request bodies. A body that cannot be read fails
+// the test.
+func llmRequestsPerTool(t *testing.T, bodies [][]byte) map[string]int {
+	t.Helper()
+	out := make(map[string]int)
+	for i, body := range bodies {
+		in, err := llmRequestInput(body)
+		if err != nil {
+			t.Errorf("request %d: %v", i, err)
+			continue
+		}
+		out[in.ToolName]++
+	}
+	return out
 }
 
 // llmJSONOrTerminalRows returns the LLM findings of stdout, from the JSON

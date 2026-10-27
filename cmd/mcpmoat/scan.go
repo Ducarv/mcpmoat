@@ -1,7 +1,6 @@
 package main
 
 import (
-	"cmp"
 	"context"
 	"errors"
 	"flag"
@@ -9,7 +8,6 @@ import (
 	"io"
 	"maps"
 	"slices"
-	"strconv"
 	"strings"
 	"time"
 
@@ -130,9 +128,11 @@ func (c *cli) parseScanArgs(args []string) (a scanArgs, code int, ok bool) {
 	// The error of another flag, or the list of unexpected arguments, can
 	// hold a base URL value too: for example "--timeout --llm-base-url=URL"
 	// and "--timeout=--llm-base-url=URL" make the flag package quote the
-	// whole value. hider removes every base URL value of args from that text
-	// (see newArgHider).
-	hider := newArgHider(args, flagLLMBaseURL)
+	// whole value. hider.errorText removes every base URL value of args (see
+	// newBaseURLHider) and the user info of any URL from the flag error, and
+	// rejectArgs does the same with it for the list, as for the other
+	// commands (see argscrub.go).
+	hider := newBaseURLHider(args)
 	if err := fs.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
 			scanUsage(c.stdout)
@@ -147,9 +147,9 @@ func (c *cli) parseScanArgs(args []string) (a scanArgs, code int, ok bool) {
 		// termsafe.Quote escapes the whole message, and quotes it only when
 		// it holds an unsafe rune. See dispatch in cli.go for why this
 		// differs from quoteArg.
-		return scanArgs{}, c.usageError("scan", "%s", termsafe.Quote(hider.hide(err.Error()))), false
+		return scanArgs{}, c.usageError("scan", "%s", termsafe.Quote(hider.errorText(err.Error()))), false
 	}
-	if c.rejectArgs("scan", hider.hideAll(fs.Args())) {
+	if c.rejectArgs("scan", hider, fs.Args()) {
 		return scanArgs{}, exitError, false
 	}
 	if a.failOn == "" {
@@ -240,7 +240,7 @@ type scanSetup struct {
 	// jsonOut is true with --json: scan writes one JSON document on stdout
 	// and none of the terminal tables.
 	jsonOut bool
-	// classifier rates the tools with an LLM (--llm, see classifyTools). It
+	// classifier rates the tools with an LLM (--llm, see llmStep). It
 	// is nil without --llm, and then scan runs no LLM code.
 	classifier toolClassifier
 }
@@ -346,97 +346,6 @@ func (f *secretFlag) Set(value string) error {
 	return nil
 }
 
-// hiddenArgText replaces the value of a secret flag in an error message.
-const hiddenArgText = "(hidden)"
-
-// argHider removes the values of one secret flag from the error text of the
-// argument checks. The zero argHider changes nothing.
-type argHider struct {
-	r *strings.Replacer // nil when the args give no value
-}
-
-// newArgHider returns an argHider for the values that args gives to the flag
-// name. It looks for the text "-name" in each argument, with one dash or more
-// before name:
-//   - "-name=" anywhere in the argument: the rest of the argument after each
-//     "-name=" is a value. So "--name=value" counts, and so does the value of
-//     another flag, as in "--timeout=--name=value", which the flag package
-//     quotes whole in its error.
-//   - "-name" at the end of the argument: the next argument is a value. So a
-//     bare "--name" counts, and so does "--timeout=--name".
-//
-// It looks at every argument, also after "--" and after a flag that took
-// "--name" as its own value, so it can find more values than Parse uses: that
-// only hides more. A short value, for example one letter, also hides that
-// text in the other words of the message: that is on purpose, because it
-// fails safe.
-func newArgHider(args []string, name string) argHider {
-	token := "-" + name
-	var values []string
-	for i, arg := range args {
-		// Each "-name=" gives a value. A later value is the end of an
-		// earlier one. It is kept for a text that shows only that end.
-		for rest := arg; ; {
-			_, v, ok := strings.Cut(rest, token+"=")
-			if !ok {
-				break
-			}
-			values = append(values, v)
-			rest = v
-		}
-		if strings.HasSuffix(arg, token) && i+1 < len(args) {
-			values = append(values, args[i+1])
-		}
-	}
-	// The flag package quotes a value with %q in `invalid value "..."`, so a
-	// value with a quote, a backslash or a control rune shows escaped. Hide
-	// that form too.
-	var olds []string
-	for _, v := range values {
-		if v == "" {
-			continue
-		}
-		olds = append(olds, v)
-		if q := strconv.Quote(v); q[1:len(q)-1] != v {
-			olds = append(olds, q[1:len(q)-1])
-		}
-	}
-	if len(olds) == 0 {
-		return argHider{}
-	}
-	// strings.Replacer tries the old strings in the order given, so the
-	// longest goes first: a value that holds another value is hidden whole.
-	// The text order of equal lengths puts duplicates side by side for
-	// slices.Compact.
-	slices.SortFunc(olds, func(a, b string) int {
-		return cmp.Or(cmp.Compare(len(b), len(a)), strings.Compare(a, b))
-	})
-	olds = slices.Compact(olds)
-	pairs := make([]string, 0, 2*len(olds))
-	for _, o := range olds {
-		pairs = append(pairs, o, hiddenArgText)
-	}
-	return argHider{r: strings.NewReplacer(pairs...)}
-}
-
-// hide returns s with every value of the secret flag replaced by
-// hiddenArgText. The rest of s stays as it is.
-func (h argHider) hide(s string) string {
-	if h.r == nil {
-		return s
-	}
-	return h.r.Replace(s)
-}
-
-// hideAll returns a copy of args with hide applied to each argument.
-func (h argHider) hideAll(args []string) []string {
-	out := make([]string, len(args))
-	for i, a := range args {
-		out[i] = h.hide(a)
-	}
-	return out
-}
-
 // severityFlag adds a flag to fs that takes one severity word and stores it in
 // *dest. The flag can be given once. Valid refuses an empty value, another
 // case ("HIGH") and a flag name that the flag package took as the value. The
@@ -523,7 +432,7 @@ func (c *cli) scanWarnf(format string, a ...any) {
 // (MOAT-LLM-001 or MOAT-LLM-002), the budget rule (MOAT-T1-023) or the tool
 // findings cap rule (MOAT-T1-024) is not applied (see fileCannotIgnore): scan
 // warns when such an entry matches a finding (see pinOutcomes, toolRulesStep
-// and classifyTools).
+// and llmStep).
 func (c *cli) loadIgnore(wd string, ids []string) *scanIgnores {
 	var ign scanIgnores
 	if wd != "" {
@@ -911,7 +820,7 @@ func (c *cli) savePinned(ctx context.Context, pr pinReport) bool {
 // Nothing is saved: inspectAndPin never saves.
 //
 // It also returns the outcomes of inspect.Run, for the tool rule step (see
-// toolRulesStep) and the LLM step (see classifyTools). They are nil when it
+// toolRulesStep) and the LLM step (see llmStep). They are nil when it
 // returns an error.
 func (c *cli) inspectAndPin(ctx context.Context, servers []discover.Server, opts inspect.Options, ignore *scanIgnores, jsonOut bool) (pinReport, []inspect.Outcome, error) {
 	store, ok := c.readPins("scan")

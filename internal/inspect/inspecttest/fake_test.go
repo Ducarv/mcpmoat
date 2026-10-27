@@ -47,6 +47,7 @@ func sampleResult() inspect.Result {
 			{Kind: inspect.WarnCleartextSecrets, URLUserInfo: true},
 			{Kind: inspect.WarnUndeclaredCapability, Capabilities: []string{"tools", "prompts"}},
 		},
+		Secrets: []discover.Secret{discover.NewSecret("sample-secret-long"), discover.NewSecret("sample-secret")},
 	}
 }
 
@@ -312,6 +313,10 @@ func TestFakeInspectClonesSlices(t *testing.T) {
 		{name: "warning append", change: func(r *inspect.Result) {
 			r.Warnings = append(r.Warnings, inspect.Warning{Kind: "extra"})
 		}},
+		{name: "secret element", change: func(r *inspect.Result) { r.Secrets[0] = discover.NewSecret("changed-secret") }},
+		{name: "secret append", change: func(r *inspect.Result) {
+			r.Secrets = append(r.Secrets, discover.NewSecret("extra-secret"))
+		}},
 	}
 
 	for _, tt := range tests {
@@ -337,6 +342,30 @@ func TestFakeInspectClonesSlices(t *testing.T) {
 				t.Errorf("second Inspect() = %+v, want %+v", again, sampleResult())
 			}
 		})
+	}
+}
+
+// TestFakeInspectSecretsCloneReverse checks the other direction of the
+// Secrets clone: a change to the slice in Results after the call does not
+// reach the Result that the call returned.
+func TestFakeInspectSecretsCloneReverse(t *testing.T) {
+	t.Parallel()
+
+	f := &inspecttest.Fake{Results: map[string]inspect.Result{"a": sampleResult()}}
+	got, err := f.Inspect(t.Context(), server("a"))
+	if err != nil {
+		t.Fatalf("Inspect() error = %v", err)
+	}
+	f.Results["a"].Secrets[0] = discover.NewSecret("changed-secret")
+
+	want := sampleResult().Secrets
+	if len(got.Secrets) != len(want) {
+		t.Fatalf("len(Secrets) = %d, want %d", len(got.Secrets), len(want))
+	}
+	for i := range want {
+		if g, w := got.Secrets[i].Reveal(), want[i].Reveal(); g != w {
+			t.Errorf("Secrets[%d] = %q after a change of Results, want %q", i, g, w)
+		}
 	}
 }
 

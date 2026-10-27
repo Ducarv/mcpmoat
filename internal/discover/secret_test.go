@@ -554,6 +554,17 @@ func TestSecretMapUnmarshalJSONNull(t *testing.T) {
 	}
 }
 
+// TestMinSecretBytes pins the length threshold of secret values. The docs
+// (docs/PRD.md and docs/ARCHITECTURE.md) promise 8 bytes: a shorter value is not
+// removed from output or tool text, because it would also match ordinary
+// words. A change of the number changes that promise, so it must be deliberate.
+func TestMinSecretBytes(t *testing.T) {
+	t.Parallel()
+	if discover.MinSecretBytes != 8 {
+		t.Errorf("MinSecretBytes = %d, want 8 (the docs promise 8 bytes)", discover.MinSecretBytes)
+	}
+}
+
 // ExampleSecret shows that a Secret prints as Mask and that only Reveal gives
 // the value.
 func ExampleSecret() {

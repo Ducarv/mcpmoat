@@ -72,6 +72,12 @@ type cli struct {
 	// (see toolRulesStep): tests set -1ns for that. A tiny positive value is
 	// not enough, because the context can still be live for a short time.
 	toolBudget time.Duration
+	// llmStepTimeout is the time limit of the whole LLM step of scan --llm
+	// (FR-17). Zero means the default, the constant defaultLLMStepTimeout, so
+	// runWithContext does not set it and no flag changes it. Tests set a
+	// short value to reach the limit (see runLLMJobs). A negative value is
+	// used up at once: no request starts.
+	llmStepTimeout time.Duration
 	// pinsLockWait is how long scan and pin --accept wait for another run that
 	// holds the lock on the pins directory, before they stop with exit code 2
 	// (see readPinsLocked). runWithContext sets it to defaultPinsLockWait.
@@ -177,8 +183,10 @@ func (c *cli) dispatch(args []string) int {
 		// termsafe.Quote escapes the whole message: it stays as it is when it
 		// is safe, and it shows quoted only when it holds an unsafe rune.
 		// quoteArg, for an argument that we hold on its own, always quotes.
-		// scan.go does the same for the scan flags.
-		fprintf(c.stderr, "mcpmoat: %s\n\n", termsafe.Quote(err.Error()))
+		// scan.go does the same for the scan flags. The error can hold a
+		// secret, as in "---llm-base-url=https://user:pass@host", so
+		// argErrorText hides it first (see argscrub.go).
+		fprintf(c.stderr, "mcpmoat: %s\n\n", termsafe.Quote(argErrorText(args, err.Error())))
 		c.usage(c.stderr)
 		return exitError
 	}
@@ -195,8 +203,10 @@ func (c *cli) dispatch(args []string) int {
 		}
 	}
 
-	// The command name comes from the user, so quoteArg escapes it.
-	fprintf(c.stderr, "mcpmoat: unknown command %s\n\n", quoteArg(name))
+	// The command name comes from the user, so quoteArg escapes it, and
+	// argErrorText first hides a secret in it, as in a stray URL with a
+	// password.
+	fprintf(c.stderr, "mcpmoat: unknown command %s\n\n", quoteArg(argErrorText(args, name)))
 	c.usage(c.stderr)
 	return exitError
 }
@@ -323,7 +333,13 @@ func scanUsage(w io.Writer) {
 	fprintf(w, "  Rules from --rules with target config are not applied: scan runs only its built-in config checks, and prints a note.\n")
 	fprintf(w, "  --llm: the LLM findings (MOAT-LLM-001, and MOAT-LLM-002 for an invalid answer) are advisory and marked [LLM].\n")
 	fprintf(w, "  They are high at most, and they count for --fail-on. They never remove a rule finding.\n")
-	fprintf(w, "  scan sends at most %d tools. A provider error or more tools than that gives exit 2; the report still prints.\n", maxLLMTools)
+	fprintf(w, "  A tool that the provider refuses (HTTP 400, 413 or 422) is not classified: it gets a medium finding\n")
+	fprintf(w, "  (MOAT-LLM-002, or MOAT-LLM-001 when its text was cut or a configured value was removed from it), and the scan goes on.\n")
+	fprintf(w, "  scan sends at most %d tools, shared fairly between the servers. More tools than that, a provider refusal of\n", maxLLMTools)
+	fprintf(w, "  every tool, or another provider error gives exit 2; the report still prints.\n")
+	fprintf(w, "  A provider answer of HTTP 429, 502, 503, 504 or 529 is tried again, up to %d tries in total for each tool.\n", llm.RetryMaxTries)
+	fprintf(w, "  scan waits for a Retry-After of up to %s before the next try; a longer Retry-After means no retry.\n", durationText(llm.RetryAfterCap))
+	fprintf(w, "  The LLM step stops after %s: the tools that are not classified yet give exit 2; the report still prints.\n", durationText(defaultLLMStepTimeout))
 	fprintf(w, "  Exit code 1 means a finding that is not ignored, with severity at or above --fail-on (default high).\n")
 }
 

@@ -35,13 +35,6 @@ const (
 	// clientIdentity and docs/PRD.md section 5.5.
 	clientName    = "mcp-client"
 	clientVersion = "1.0.0"
-
-	// minBareSecretLen is the shortest part of a secret that classify
-	// removes wherever it stands in error text: a token after its auth
-	// scheme, a token used as the URL user name, a query value or a secret
-	// path segment. A server can echo such a part alone ("invalid token
-	// <token>"). A shorter part is too likely to match ordinary words.
-	minBareSecretLen = 8
 )
 
 // RemoteOptions configures Remote. The zero value is ready to use.
@@ -86,13 +79,14 @@ type RemoteOptions struct {
 	// that Remote makes. Nil means a net.Dialer. The pinned dialer calls it
 	// only after the DNS pin and the address guard. It has no effect when
 	// baseTransport is set. SDKInspector.Inspect passes SDKOptions.Dial.
-	dial dialFunc
+	dial DialFunc
 
 	// secrets are more strings that classify removes from error text, on
 	// top of the ones that Remote finds in srv (header values, URL user
 	// info, query and path parts). SDKInspector.Inspect passes the values of
 	// the variables that it expanded in srv, because they can stand in any
-	// part of the URL. They are never shown.
+	// part of the URL. They are never shown. On success, Remote also puts
+	// them in Result.Secrets.
 	secrets []string
 }
 
@@ -129,6 +123,10 @@ type RemoteOptions struct {
 // These connection warnings go to Result.Warnings on success, before the
 // warnings that the lists add (see listInto), and to ConnectError.Warnings
 // when the inspection fails after the connect started.
+//
+// On success, Result.Secrets holds the header values, the URL user info, the
+// secret URL parts and opts.secrets that have at least discover.MinSecretBytes
+// bytes (see resultSecrets).
 //
 // If ctx has no deadline, Remote adds a 10 second one. Closing the session
 // sends a DELETE request (streamable HTTP) that the SDK bounds to 5 seconds,
@@ -168,7 +166,9 @@ func Remote(ctx context.Context, srv discover.Server, opts RemoteOptions) (Resul
 	endpointURL, user := splitUserinfo(u)
 	endpoint := endpointURL.String()
 
-	// secrets are all the strings that classify removes from error text.
+	// secrets are all the strings that classify removes from error text. On
+	// success, the ones of at least discover.MinSecretBytes bytes also go to
+	// Result.Secrets.
 	headers, secrets := splitHeaders(srv.Headers)
 	secrets = append(secrets, userinfoSecrets(user)...)
 	secrets = append(secrets, urlSecrets(u.RawQuery, raw)...)
@@ -303,6 +303,12 @@ func Remote(ctx context.Context, srv discover.Server, opts RemoteOptions) (Resul
 	// listInto can have added warnings about the lists. Keep them, after
 	// the connection warnings. slices.Concat gives nil when both are empty.
 	result.Warnings = slices.Concat(warnings, result.Warnings)
+	// The same values as the error scrub, for consumers that remove them
+	// from the Result text (see Result.Secrets). resultSecrets drops the
+	// values under discover.MinSecretBytes bytes, such as a short header value or
+	// a short password: in ordinary text they would garble words. The error
+	// scrub still removes them.
+	result.Secrets = resultSecrets(secrets)
 	return result, nil
 }
 
@@ -364,15 +370,15 @@ func splitUserinfo(u *url.URL) (endpoint url.URL, user *url.Userinfo) {
 }
 
 // urlSecrets returns the secrets in rawQuery and in the path of raw, the
-// configured URL, for classify to remove wherever they stand in error text:
-// the parts that discover.RedactURL masks (discover.SecretQueryParts and
-// discover.SecretPathSegments), with at least minBareSecretLen bytes. In URL
-// form, classify removes the whole query and every secret segment anyway
+// configured URL, for classify to remove wherever they stand in error text: the
+// parts that discover.RedactURL masks (discover.SecretQueryParts and
+// discover.SecretPathSegments), with at least discover.MinSecretBytes bytes. In
+// URL form, classify removes the whole query and every secret segment anyway
 // (replaceURLParts); this list is for a server that echoes a part alone.
 func urlSecrets(rawQuery, raw string) []string {
 	var secrets []string
 	for _, s := range slices.Concat(discover.SecretQueryParts(rawQuery), discover.SecretPathSegments(raw)) {
-		if len(s) >= minBareSecretLen {
+		if len(s) >= discover.MinSecretBytes {
 			secrets = append(secrets, s)
 		}
 	}
@@ -416,17 +422,17 @@ func basicSecrets(value string) []string {
 	return userinfoSecrets(url.UserPassword(name, password))
 }
 
-// credentialPart returns the part of value after an auth scheme, as in
-// "Bearer <token>" or "Token <token>", when it has at least minBareSecretLen
-// bytes. It returns "" when value has no scheme prefix. A scheme is one word
-// of ASCII letters, digits, "-", "_" or ".", followed by a space.
+// credentialPart returns the part of value after an auth scheme, as in "Bearer
+// <token>" or "Token <token>", when it has at least discover.MinSecretBytes
+// bytes. It returns "" when value has no scheme prefix. A scheme is one word of
+// ASCII letters, digits, "-", "_" or ".", followed by a space.
 func credentialPart(value string) string {
 	scheme, rest, found := strings.Cut(value, " ")
 	if !found || !isAuthScheme(scheme) {
 		return ""
 	}
 	rest = strings.TrimSpace(rest)
-	if len(rest) < minBareSecretLen {
+	if len(rest) < discover.MinSecretBytes {
 		return ""
 	}
 	return rest
@@ -457,10 +463,13 @@ func resultFromInit(initRes *mcp.InitializeResult) Result {
 // built from the name and the password. classify removes them from error
 // text everywhere.
 //
-// The user name is in the list only when the URL has no password and the name
-// has at least minBareSecretLen bytes: then the name is the credential, as in
-// https://<token>@host/. Otherwise replaceUserinfo removes the name only where
-// it stands in a URL, so that a short name does not garble other words.
+// The user name is in the list only when it has at least
+// discover.MinSecretBytes bytes and discover.IsSecretUserName reports true for
+// it: when there is no password, because then the name is the credential, as in
+// https://<token>@host/, or when the name looks like a token next to a
+// password, as in https://<token>:x-oauth-basic@github.com/. Otherwise
+// replaceUserinfo removes the name only where it stands in a URL, so that a
+// plain or short name does not garble other words.
 //
 // The password is in the list at any length, like a header value: a leak is
 // worse than a garbled word, and a short password is the one most likely to be
@@ -476,7 +485,8 @@ func userinfoSecrets(user *url.Userinfo) []string {
 	secrets := []string{token, "Basic " + token}
 	if password != "" {
 		secrets = append(secrets, password)
-	} else if len(name) >= minBareSecretLen {
+	}
+	if len(name) >= discover.MinSecretBytes && discover.IsSecretUserName(name, password) {
 		secrets = append(secrets, name)
 	}
 	return secrets

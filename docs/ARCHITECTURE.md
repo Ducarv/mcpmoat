@@ -45,15 +45,23 @@ docs/                   PRD and other documentation
   that both commands use (`serverIdentity`, `readPins`, `readPinsLocked`, `printNewPinsFile`,
   `pinnable`, `appendDiff`). `scan_pins.go`
   holds the pin step of `scan` (`pinner`), and `accept_hint.go` the "To accept" line and its one
-  decision function (`acceptAdvice`). `scan.go` holds the parts of `scan`: `runScan` calls
+  decision function (`acceptAdvice`). `argscrub.go` hides the `--llm-base-url` values and the URL
+  user info in the text of argument errors (`argHider`, `newBaseURLHider`, `hideUserinfo`).
+  `scan.go` holds the parts of `scan`: `runScan` calls
   `parseScanArgs` (the flags, in a `scanArgs`), `buildScanSetup` (the notices and the `scanSetup`)
   and `scanConfigs`. `reportScan` then calls `runScanSteps` (the steps, in a `scanStepsResult`) and
   `writeScanOutput` (the terminal report or the JSON). `scan_json.go` builds the JSON report
   (`buildScanReport`). `scan_rules.go` loads the rules and builds the `rules.Analyzer`
-  (`loadRules`), and `scan_tools.go` holds the tool rule step (`toolRulesStep`). `scan_llm.go` holds
-  the `--llm` step: it maps each `inspect.Tool` to an `llm.Input` and calls a `toolClassifier`, a
-  small interface that `*llm.Client` implements. The `cli.newClassifier` factory builds it, and
-  tests replace the factory with a fake.
+  (`loadRules`), and `scan_tools.go` holds the tool rule step (`toolRulesStep`). Four files hold the
+  `--llm` step.
+  `scan_llm_flags.go` holds the flags, `checkLLMFlags` and the setup warning. `scan_llm_plan.go`
+  builds the jobs (`llmPlan`, `planLLMJobs`, `fairShare`, `llmServerJobs`, `maxLLMTools`): it maps
+  each `inspect.Tool` and the `inspect.Result.Secrets` of its server to an `llm.Input`.
+  `scan_llm.go` runs the step (`llmStep`, `classifyPlan`, `runLLMJobs`, `sortAnswer`,
+  `rejectedFailure` and the failure lines), and `scan_llm_rows.go` turns the answers into rows
+  (`llmRow`, `invalidRow`, `llmSeverity`). The step calls a `toolClassifier`, a small interface
+  that `*llm.Client` implements. The `cli.newClassifier` factory builds it, and tests replace the
+  factory with a fake.
 - `internal/termsafe`: escapes untrusted text for the terminal. See
   [Where untrusted text is escaped](#where-untrusted-text-is-escaped).
 - `internal/safefile`: the one shared hardened file read. It confines the open to a directory with
@@ -82,7 +90,9 @@ docs/                   PRD and other documentation
   `scan --json` (`WriteJSON`), with caps on the text fields. See [JSON output](#json-output).
 - `internal/llm`: the optional `--llm` client (FR-17). It sends the name and description of one tool
   to an Anthropic or OpenAI-compatible API and accepts only a fixed verdict. It uses the standard
-  library only. See [The `--llm` classifier](#the---llm-classifier).
+  library, the module `github.com/cenkalti/backoff/v7` for the waits between retries and, from this
+  module, only `discover` (see [Import direction](#import-direction)). See
+  [The `--llm` classifier](#the---llm-classifier).
 - `rules/`: the built-in rule files (`rules/*.yaml`) and `data/popular-servers.txt`. The Go file
   `rules/embed.go` embeds both with `go:embed`. It holds data only. `internal/rules` parses it.
 - `testdata/`: fixtures. `testdata/servers` holds malicious example servers. `testdata/configs`
@@ -112,13 +122,18 @@ only in `_test.go` files, so none of them reaches the binary.
 | `internal/rules` | `discover`, `inspect`, `safefile`, `termsafe`, `rules` (the embedded data) |
 | `internal/report` | `discover`, `inspect`, `termsafe` |
 | `internal/pins` | `inspect`, `safefile`, and the module `github.com/aymanbagabas/go-udiff` |
-| `internal/llm` | `discover` |
+| `internal/llm` | `discover`, and the module `github.com/cenkalti/backoff/v7` |
 | `cmd/mcpmoat` | `discover`, `inspect`, `llm`, `pins`, `report`, `rules`, `termsafe` |
 
 `internal/inspect` does not import `termsafe`. The report layer escapes what `inspect` returns.
 `internal/rules` imports `inspect` for the `inspect.Tool` type that `Analyzer.CheckTool` reads.
 This direction is allowed: `inspect` does not import `rules`, so there is no cycle.
-`internal/llm` does not import `inspect`: `cmd/mcpmoat` gives it only the tool name and description.
+`internal/llm` does not import `inspect`: `cmd/mcpmoat` gives it only the tool name, the
+description and the secret values of the server (`llm.Input`). `internal/llm` imports `discover`
+for the `discover.Secret` type of these values and of the API key, for `discover.Mask` and for
+`discover.IsLoopbackHost`. It imports `github.com/cenkalti/backoff/v7` (v7.0.1, MIT licence, no
+dependencies of its own) only for the backoff of its retries. No error text of that module leaves
+`internal/llm`.
 
 You can check this table with:
 
@@ -344,14 +359,17 @@ step 5 and step 6:
     code 2 (see Signals above). An internal error of the step (a guard: `CheckTool` fails only when
     its context ends) prints `mcpmoat scan: server <name>: the rule analysis failed (internal
     error)`, prints no report and gives exit code 2.
-- 5e. Only with `--llm` (FR-17), `classifyTools` in `cmd/mcpmoat/scan_llm.go` runs after the tool
-  rule step. It sends the name and description of each tool of each server with status `StatusOK`
-  to the classifier, and adds one advisory row for each tool that the model rates as risky, for
-  each tool with an unusable answer, and for each cut tool (see the verdict rules in
-  [The `--llm` classifier](#the---llm-classifier)). It only adds rows: it never changes or drops a
-  rule finding, and it never touches pins, diffs or hints. Only `--ignore` drops LLM rows, as for
-  the pin rows. The `.mcpmoat-ignore` file does not (see step 3). The ignored count includes the
-  dropped LLM rows.
+- 5e. Only with `--llm` (FR-17), `llmStep` in `cmd/mcpmoat/scan_llm.go` runs after the tool rule
+  step: `planLLMJobs` builds the jobs, and `classifyPlan` runs them. It sends the name and
+  description of each tool of each server with status `StatusOK` to the classifier, with the
+  secret values of that server (`inspect.Result.Secrets` goes to `llm.Input.Secrets`, and
+  `internal/llm` replaces them before the request). For a stdio server, these values include the
+  secrets in its expanded argv. It adds one advisory row for each tool that the model rates as
+  risky, for each tool with an unusable answer or a refusal of the provider, and for each cut tool
+  (see the verdict rules in [The `--llm` classifier](#the---llm-classifier)). It only adds rows:
+  it never changes or drops a rule finding, and it never touches pins, diffs or hints. Only
+  `--ignore` drops LLM rows, as for the pin rows. The `.mcpmoat-ignore` file does not (see step
+  3). The ignored count includes the dropped LLM rows.
 - The pin findings and the tool rule findings join the config findings in one report. A changed
   tool and a new tool also get a diff, so the user can review the content of a new tool before
   they accept it. A new tool has the header `New tool <tool> on server <server>:` and only added
@@ -573,7 +591,7 @@ func Run(ctx context.Context, servers []discover.Server, opts Options, insp Insp
   the addresses that pass the DNS pin and the address guard, so the guard still applies. With a
   proxy, it sees the address of the proxy. It has no effect on stdio servers.
   `cmd/mcpmoat/network_test.go` uses it to prove that `scan` dials only the configured fixture
-  hosts.
+  hosts. Its type is `inspect.DialFunc`, which has the signature of `net.Dialer.DialContext`.
 
 Among the product packages, only `internal/inspect` imports the MCP SDK (the fixture servers under
 `testdata/` also use it). The depguard rule `mcp-sdk-only-in-inspect` in `.golangci.yml` enforces
@@ -872,13 +890,14 @@ Shape (`schema_version` 3):
   findings are not in `findings`, so a CI job reads these counts to see what the ignore list hid.
 - `complete` is `false` when the report can miss results: a config file has a problem (see
   `errors`), or the inspection or the pin step failed as a whole (for example, `pins.json` cannot
-  be read), or the LLM step of a `--llm` scan did not classify every tool: a provider failure, an
-  internal error of the LLM step, or more tools than the `--llm` cap. The exit code is then 2, and
-  the reason is on stderr only. A failed save of new pins comes after the document is written, so it
-  does not change `complete`: the findings are whole, and the exit code is 2. A server that used up
-  its rule analysis budget does not change `complete` either: it is a `MOAT-T1-023` finding (see
-  5d). A server that has more tool findings than the row cap does not change it either: it is a
-  `MOAT-T1-024` finding.
+  be read), or the LLM step of a `--llm` scan did not classify every tool: a provider failure, a
+  provider refusal of every answered tool, an internal error of the LLM step, or tools over the
+  share of their server of the `--llm` cap. The exit code is then 2, and the reason is on stderr
+  only. A refusal of one tool alone does not change `complete`: it is a `MOAT-LLM-002` row. A
+  failed save of new pins comes after the document is written, so it does not change `complete`:
+  the findings are whole, and the exit code is 2. A server that used up its rule analysis budget
+  does not change `complete` either: it is a `MOAT-T1-023` finding (see 5d). A server that has
+  more tool findings than the row cap does not change it either: it is a `MOAT-T1-024` finding.
 - A server has `name`, `client`, `scope`, `project_path`, `untrusted`, `state`, `transport`,
   `source`, `inspection.status` (`not_run`, `ok`, `timeout`, `failed` or `refused`) and either
   `argv` (stdio) or `url` (http and sse). Both are redacted like in the terminal report. A server
@@ -1048,7 +1067,7 @@ This section holds the code structure and the design reasons. Other files own th
 
 Setup:
 
-- `setupLLM` in `cmd/mcpmoat/scan_llm.go` runs in step 1 of the data flow. It calls
+- `setupLLM` in `cmd/mcpmoat/scan_llm_flags.go` runs in step 1 of the data flow. It calls
   `checkLLMFlags`, which checks the flags, the base URL and the key and returns the LLM config. A
   problem is a usage error (exit 2) before `scan` reads a config file. The error texts are fixed
   and never hold the key, the model name or the URL.
@@ -1061,60 +1080,191 @@ Setup:
 - The base URL must be `https`, or `http` for a loopback host. The reason: the key must never
   cross a network in clear text.
 
-The dial hook: `llm.Config.Dial` is a test hook. It is nil in production, and nil uses a
-`net.Dialer`. For an `http` base URL, `loopbackDial` wraps it. It resolves the host at connect
-time, requires that every address is a loopback address, and dials only those addresses. The check
-at connect time is needed because a name such as `localhost` is loopback only by its text: the
-system resolver can map it to another address. An address that does not answer gets a short
-timeout, so the next address is tried soon (for example when a firewall drops packets to `::1`).
+The dial hook: `llm.Config.Dial` is a test hook of type `llm.DialFunc`. It is nil in production,
+and nil uses a `net.Dialer`. For an `http` base URL, `loopbackDial` wraps it. It resolves the host
+at connect time, requires that every address is a loopback address, and dials only those
+addresses. The check at connect time is needed because a name such as `localhost` is loopback
+only by its text: the system resolver can map it to another address. An address that does not
+answer gets a short timeout, so the next address is tried soon (for example when a firewall drops
+packets to `::1`).
 The client has its own `http.Transport` with TLS 1.2 or later. It follows no redirect, because a
 redirect would carry the key to another location. It never uses a proxy for an `http` base URL, so
 the key never goes to a proxy in clear text. For `https` it honours `HTTPS_PROXY` and `NO_PROXY`,
 like the server connections. Go ignores a proxy value that it cannot parse and then connects
-directly. The limits of a scan (tool count, workers, timeout, body size) are in the
-[docs/llm.md](llm.md). They live in
-`cmd/mcpmoat` (`maxLLMTools`, `llmWorkers`) and `internal/llm`.
+directly. The limits of a scan (tool count, workers, timeouts, retries, body size, output tokens)
+are in the [docs/llm.md](llm.md). They live in
+`cmd/mcpmoat` (`maxLLMTools`, `llmWorkers`, `defaultLLMStepTimeout`) and `internal/llm`.
+
+Retries: `Classify` calls `sendWithRetry` in `internal/llm/retry.go`, which calls `send` again for
+each try, so each try builds a new request with a new body. `retryPolicy` holds the numbers: 3
+tries in total for each tool (`llm.RetryMaxTries`), a backoff that starts at 1 s and doubles with
+a max wait of 8 s, a jitter of 0.5 to 1.5 times, and a cap of 30 s on a `Retry-After` wait
+(`llm.RetryAfterCap`). With 3 tries there are only 2 waits: about 1 s, then about 2 s, with
+jitter, so the max wait of 8 s is not reached. The two constants are exported only so that the
+usage text of `scan` takes its numbers from them.
+`retryableStatus` lists the codes that get a retry: 429, 502, 503, 504 and 529. Every other code
+(also 400, 413 and 422), a request timeout (`requestTimeout`, 30 s for each try) and every other
+transport error stop at once. `parseRetryAfter` reads the header (seconds or an HTTP date); a
+value that is not valid or in the past gives the normal backoff, and a value over the cap means no
+retry. `sendWithRetry` also refuses a `Retry-After` wait that is longer than the time left before
+the deadline of its context (the step deadline, see below): it returns the error of the provider
+at once, with `backoff.Permanent`, so the tool fails with the status of the provider and the scan
+exits with 2. `send` reads only this one response header of a non-2xx answer, never its body. The module
+`github.com/cenkalti/backoff/v7` runs the waits. `retryError` unwraps its errors: after the last
+try, the caller gets the error of that try as without retries, and when the context ends during a
+wait it gets the same error as when the context ends during a request. The reason: the error text
+of the module holds the text of the last error, and every error of `internal/llm` must have fixed
+text.
+
+Output cap: `anthropicAPI` sets `max_tokens` to 200. `newOpenAIAPI` sets `max_completion_tokens`
+to 2048 only for the default OpenAI base URL, because reasoning models bill hidden tokens that the
+response cap does not limit. Any other base URL gets no field, because many OpenAI-compatible
+servers know only `max_tokens` and refuse the field with 400, which would refuse every tool. A cut
+answer is `llm.ErrInvalidOutput`.
+
+The step deadline: `runLLMJobs` in `cmd/mcpmoat/scan_llm.go` runs all the jobs (`runLLMJob` for
+each job) under one context with the time limit `defaultLLMStepTimeout` (10 minutes, no flag) and the
+cause `errLLMStepDeadline` (`context.WithTimeoutCause`). The reason: each request has a limit,
+but with retries and `Retry-After` waits one tool can take about 150 s, and 500 tools with 4
+workers could take hours. When the cause is `errLLMStepDeadline` and the context of the caller has
+not ended (`endedByDeadline`), a request that the deadline stopped is `answerDeadline`, not
+`answerStopped`, and the failure of the step is `answerDeadline` when at least one job has no
+answer. It is a provider failure: exit 2, `complete` false, the report prints, the rows of the
+tools that got an answer stay, and stderr names the time limit (`durationText`). A signal wins,
+also when the deadline is reached at the same time, because `endedByDeadline` and `classifyPlan`
+check `ctx.Err()`, the context of the caller: the cause of the step context does not decide it.
+A failure that came first cancelled the context first, so it stays the failure. One race is left:
+a provider failure that a worker got just before the deadline but recorded just after it can show
+as the deadline. Only the stderr reason changes: the exit code is 2 and `complete` is `false` in
+both cases. A test sets `cli.llmStepTimeout` to a short value.
+
+The plan: `planLLMJobs` in `cmd/mcpmoat/scan_llm_plan.go` builds the jobs before the first request.
+`llmServerJobs` gives one job for each tool of each server with status `StatusOK`, in the order of
+the servers. `fairShare` splits `maxLLMTools` between the servers with a max-min fair share
+("water-filling"): a server with fewer tools than an equal part keeps all of them, the part that
+it does not use goes to the larger servers, and the remainder goes to the servers that come first,
+so the result is always the same. Each server sends its first tools up to its share. The reason: a
+hostile server that lists thousands of tools must not take the whole cap from the other servers.
+It can still make the step incomplete (exit 2) by listing more tools than its share. Then
+`llmStep` prints the notice `mcpmoat scan: sending N tools (about K KiB of text) to the LLM
+provider` (`llmPlan.sendingNotice`, numbers only) when the plan has at least one job, and
+`classifyPlan` runs the jobs. There is no byte budget for the whole scan: the cap and the caps of
+each request bound it.
 
 What is sent: `internal/llm` builds one request for each tool from the fixed system prompt
 (`llm.SystemPrompt`), the fixed verdict schema and one user message. The message is a JSON object
-with `tool_name`, `tool_description` and `truncated`. The description goes into it as a JSON string
-value, never into the system prompt, so it cannot change the instructions of the model.
-`cmd/mcpmoat` gives `internal/llm` only the name and the description (see
-[Import direction](#import-direction)). The cuts are made at a rune boundary: `llm.MaxToolNameBytes`,
-`llm.MaxDescriptionBytes` and, for the whole message, `llm.MaxToolMessageBytes`. `Classify` sets
-`Verdict.Truncated` when it cut the name or the description. The flag never comes from the model
-output. A cut name or description is a sign of risk, because the part that is not shown can hold
+with `tool_name`, `tool_description`, `truncated` and, only after a replacement, `redacted`. The
+description goes into it as a JSON string value, never into the system prompt, so it cannot change
+the instructions of the model.
+`cmd/mcpmoat` gives `internal/llm` only the name, the description and the secret values of the
+server (see [Import direction](#import-direction)).
+
+Secret values: a server gets the env values, the header values, the URL secrets and the expanded
+placeholder values from its config, and a stdio server also gets its expanded argv. It can echo
+all of them in its tool text. So the path is:
+
+1. On success, `inspect` puts these values in `inspect.Result.Secrets` (`resultSecrets` in
+   `internal/inspect/secrets.go`). For a stdio server, `argSecrets` adds the secrets in the
+   expanded command and args: the text that `discover.RedactArgs` masks, from
+   `discover.ArgSecrets`, which runs the same code. That is the value of a secret-like flag, the
+   value in `-e NAME=V`, a header line and its credential, an arg masked whole (a DSN,
+   `user:pass`, a token-like value), the secret URL parts and the masked path segments.
+   `ArgSecrets` also returns the smaller parts that a server can echo alone: each value after `=`
+   (or after `:` in JSON-like text) in a masked text, the query values and the password of a URL
+   masked whole (such as a JDBC URL), the bare token in `-p<token>`, `--<token>` and `<token>=1`,
+   and a user name next to a password in a URL when `discover.IsSecretUserName` says so (a
+   token-like name, or 8 bytes or more with a digit). Package names and plain args are not in the
+   list. `RedactArgs` fails closed, so some text that is not secret is in the list too (a long
+   random-looking path segment, a nix hash, a UUID, a name with spaces), and `--llm` replaces it
+   in the tool text. The inner values over-match on purpose: they can add a plain word of 8 bytes
+   or more from a masked arg, such as `Negotiate` after a header colon. The limits of `RedactArgs`
+   (such as `--db mypassword` or a positional value) are in its doc comment in `internal/discover`.
+   Each value has at least 8 bytes and is in the list one time, longest first. The values are
+   `discover.Secret`, so they print and encode only as the mask.
+2. `llmServerJobs` in `cmd/mcpmoat/scan_llm_plan.go` copies the slice of each server into
+   `llm.Input.Secrets` of each tool of that server. So a value of one server is removed only from
+   the tools of that server.
+3. `toolMessage` in `internal/llm` replaces each value of at least 8 bytes (`discover.MinSecretBytes`) with
+   `discover.Mask` (`********`) in the name and the description, before the cut, so a cut cannot
+   leave a part of a secret. `secretValues` adds, for a value that is not valid UTF-8, the form
+   that the JSON decoder of the SDK gives (one U+FFFD for each invalid byte), because a server
+   that echoes the value sends that form. `redactWindow` marks every byte of every match first,
+   also of matches that overlap, then writes one mask for each run of marked bytes. To bound the
+   work, `redactPrefix` redacts only a window of the first limit+1 bytes (the limit is
+   `llm.MaxToolNameBytes` or `llm.MaxDescriptionBytes`) and doubles it while the masks make the
+   result too short. Its result is always a prefix of the full redaction, so the text and the cut
+   are the same. The message has `redacted: true` when a mask starts in the first limit+1 bytes of
+   the redacted name or description, also when the cut then removes it. The field is omitted
+   otherwise. A secret that starts or ends with `*`, or holds a whole mask, can show again across
+   a mask (a documented limit). The system prompt tells the model that the mask is removed text,
+   not an instruction.
+
+The report and the JSON output do not use `Result.Secrets`: they print the tool names as the
+server sent them. docs/llm.md lists the limits of the replacement.
+
+The cuts are made at a rune boundary: `llm.MaxToolNameBytes`, `llm.MaxDescriptionBytes` and, for
+the whole message, `llm.MaxToolMessageBytes`. `Classify` sets
+`Verdict.Truncated` when it cut the name or the description, and `Verdict.Redacted` when
+`toolMessage` removed a configured value (the `redacted` field of the message). The flags never
+come from the model output. A cut name or description is a sign of risk, because the part that is not shown can hold
 the payload. The system prompt tells the model to rate it at least `medium`, but the code does not
 trust the model for this (see the verdict below).
 
 The verdict: `parseVerdict` reads the model answer strictly: exactly one JSON object with the keys
 `risk` and `category`, exact keys and case, no duplicate key, no other key, nothing after the
-object. The values come from fixed lists. `classifyTools` turns a verdict into rows:
+object. The values come from fixed lists. `classifyPlan` turns a verdict into rows with the row
+builders in `cmd/mcpmoat/scan_llm_rows.go`:
 
 - A risk of `low`, `medium` or `high` gives one `MOAT-LLM-001` finding with that severity. The
   category goes in `related`. `none` gives no finding. The severity is never `critical`.
-- `llmRow` builds the row. For a tool with `Verdict.Truncated` set, it returns `truncatedRow` when
-  `belowMedium` is true for the risk or the answer is unusable. That row has the fixed text
-  `llm.TruncatedText`. The code enforces the rule, not only the system prompt, because a prompt
-  injection in the part before the cut could ask the model for `none`. docs/llm.md owns the rule
-  that the user sees: see
-  [`--llm`](llm.md).
-- An answer that cannot be used for a tool that was not cut gives `MOAT-LLM-002` (medium). That is
-  an invalid answer, a refusal or an answer cut at the token limit. Only `llm.ErrInvalidOutput`
-  gives this finding.
+  `llmSeverity` is the one place that maps an `llm.Risk` to a
+  `rules.Severity`.
+- `llmRow` builds the row. `unrated` is true for a tool with `Verdict.Truncated` or
+  `Verdict.Redacted` set: part of its text was not rated. For such a tool, `llmRow` returns
+  `floorRow` when `belowMedium` is true for the risk or the answer is unusable. That row is
+  `MOAT-LLM-001`, `medium`, category `other`, with the fixed text `llm.TruncatedText` for a cut
+  text and `llm.RedactedText` when only a configured value was removed. A cut text wins when both
+  are true. A rating of `medium` or `high` stays. The code enforces the rule, not only the system
+  prompt, because a prompt injection in the part before the cut could ask the model for `none`,
+  and a hostile config can choose which text mcpmoat removes. docs/llm.md owns the rule that the
+  user sees: see [`--llm`](llm.md).
+- An answer that cannot be used for a tool that was not cut and had no value removed gives `MOAT-LLM-002` (medium). That is
+  an invalid answer, a refusal of the model or an answer cut at the token limit
+  (`llm.ErrInvalidOutput`, risk text `llm.InvalidText`). A tool that the provider refused
+  (`llm.ErrRejected`, HTTP 400, 413 or 422) gives the same row with the risk text
+  `llm.RejectedText` (`rejectedRow`). Both go through `invalidRow`, so an unrated tool (cut or
+  redacted) gets the floor row in both cases. Only these two errors give this finding. So a
+  hostile server that makes the provider refuse its own tool description, or makes the answer
+  unusable, keeps the LLM rating of that tool at `medium`, below the default `--fail-on high`. The rule findings still apply.
 - The finding texts are fixed in `internal/llm`, so no text from the model reaches the terminal or
   the JSON output.
 
-`sortAnswer` sorts every error of `Classify` and fails closed. `llm.ErrInvalidOutput` gives
-`MOAT-LLM-002`, the end of the context is a stop, and `llm.ErrProvider` is a provider failure. Any
-other error is an internal error. Both failures stop the step. The first failure stops the running
-requests, starts no new one and decides the stderr line. So a new error path can never make a
-failed step look like a complete scan. docs/llm.md and docs/exit-codes.md list the provider failures and the texts of the
-exit-code-2 cases (see [`--llm`](llm.md)
-and [Exit codes](exit-codes.md)). Every error of `internal/llm` has fixed text. It never
-holds the key, a URL, a header, a response body or model output.
+`sortAnswer` sorts every error of `Classify` into an `answerKind` and fails closed.
+`llm.ErrInvalidOutput` gives `answerUnusable`, the end of the context is a stop (`runLLMJob`
+turns it into `answerDeadline` after the step deadline, see above),
+`llm.ErrRejected` gives `answerRejected`, and any other `llm.ErrProvider` is a provider failure.
+`llm.ErrRejected` wraps `llm.ErrProvider`, so its case comes first. Any other error is an internal
+error. A provider failure and an internal error stop the step. The first of them stops the running
+requests, starts no new one and decides the stderr line. A refusal stops nothing. So a new error
+path can never make a failed step look like a complete scan. The table of status codes is
+`statusClassOf` in `internal/llm`: 400, 413 and 422 are per tool, and 401, 403, 3xx and every
+other code are global. Transport errors are global too.
 
-`classifyTools` only adds rows. It never changes or drops a rule finding, a pin, a diff or a
+The guard: after all the requests, when there is no global failure and no signal,
+`rejectedFailure` checks the refusals. When at least one answered tool was refused and none got a
+2xx answer (`answerKind.got2xx`: a verdict or an unusable answer), the step is a provider failure
+of kind `answerRejected`, with the reason of the refused tool with the lowest job index
+(`rejectedReason`, for example `HTTP 400, the provider refused every tool`). No tool gets an LLM
+row then. The reason: a wrong model name or API shape that gives 400 for every tool must exit
+with 2 and `complete` false, not look like a complete scan with one medium row for each tool. A
+global failure or a signal wins over the guard. docs/llm.md and docs/exit-codes.md list the
+provider failures and the texts of the exit-code-2 cases (see [`--llm`](llm.md) and
+[Exit codes](exit-codes.md)). Every error of `internal/llm` has fixed text. It never holds the
+key, a URL, a header, a response body or model output.
+For a provider failure, `llmFailureText` in `cmd/mcpmoat` quotes `llm.Reason(err)`, the fixed
+reason text, for example `HTTP 401 (the API key was refused)`.
+
+The LLM step only adds rows. It never changes or drops a rule finding, a pin, a diff or a
 `To accept` line. The LLM rules share the exception of the pin rules: only `--ignore` drops LLM
 rows, and the file cannot ignore them (step 3).
 
