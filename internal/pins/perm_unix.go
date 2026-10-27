@@ -184,6 +184,71 @@ func checkSymlinkOwner(path, label string, info fs.FileInfo, uid int) error {
 		label, path, problemForeignSymlink, privateConfigHint, ErrInsecurePermissions)
 }
 
+// groupOrOtherAny is the mode bits that give the group or others any access:
+// read, write or execute.
+const groupOrOtherAny fs.FileMode = 0o077
+
+// The problem texts of a refused pins lock file (checkLockFile).
+const (
+	problemLockNotRegular     = "not a regular file"
+	problemLockOpen           = "accessible by group or others"
+	problemLockForeignOwnOpen = problemForeignOwner + ", " + problemLockOpen
+)
+
+// checkLockFile returns an error that wraps ErrInsecurePermissions when the
+// pins lock file at path is not safe to lock. info is the Stat result of the
+// open lock file and must not be nil. uid is a parameter, so a test can fake
+// a foreign owner without root.
+//
+// The rule:
+//   - It must be a regular file. A symlink, a named pipe (FIFO), a device or
+//     a directory is refused.
+//   - uid must own it.
+//   - The group and others must have no access at all (no bit of
+//     groupOrOtherAny), so mode 0600 passes and 0640 or 0604 is refused.
+//
+// Why read access is enough to refuse: flock(2) needs only a read-only
+// descriptor. Any user who can open the file for reading can hold the lock
+// for as long as they want and block every scan and pin --accept.
+//
+// The fix hint is to remove the file, never to chmod it. A descriptor that
+// another user opened while the mode was open stays valid after a chmod, so
+// that user could still hold the lock. After rm, mcpmoat makes a new file with
+// mode 0600. The pins directory is checked to belong to the user, so the user
+// can remove the file even when another user owns it.
+func checkLockFile(path string, info fs.FileInfo, uid int) error {
+	fix := "rm -- " + shellQuote(path) + ", then mcpmoat makes a new one with mode 0600"
+
+	mode := info.Mode()
+	if !mode.IsRegular() {
+		return fmt.Errorf("pins lock file %s is not safe: %s (fix: %s): %w",
+			path, problemLockNotRegular, fix, ErrInsecurePermissions)
+	}
+
+	owner, ok := ownerUID(info)
+	if !ok {
+		return fmt.Errorf("pins lock file %s is not safe: its owner is unknown: %w", path, ErrInsecurePermissions)
+	}
+
+	foreignOwner := owner != uid
+	perm := mode.Perm()
+	open := perm&groupOrOtherAny != 0
+
+	var problem string
+	switch {
+	case foreignOwner && open:
+		problem = problemLockForeignOwnOpen
+	case foreignOwner:
+		problem = problemForeignOwner
+	case open:
+		problem = problemLockOpen
+	default:
+		return nil
+	}
+	return fmt.Errorf("pins lock file %s is not safe: mode %04o, %s (fix: %s): %w",
+		path, perm, problem, fix, ErrInsecurePermissions)
+}
+
 // shellQuote returns s as one word for a POSIX shell: it wraps s in single
 // quotes, and it replaces each single quote inside s with the four characters
 // quote, backslash, quote, quote (close, escape, open). A user can paste the

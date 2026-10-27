@@ -9,8 +9,27 @@ import (
 	"syscall"
 )
 
+// lockOpenFlags are the flags of the open of the pins lock file
+// (openLockFile). O_RDWR: on Linux, flock on NFS is emulated with a
+// byte-range lock, which needs a descriptor that can write. O_NONBLOCK, as in
+// safefile.OpenFlags: the open of a named pipe (FIFO) returns at once, also
+// when no process writes to it, so the type check of the open file can
+// refuse it. For a regular file the flag changes nothing. The flag is in this
+// Unix file because the open of a FIFO can block only on Unix.
+const lockOpenFlags = os.O_RDWR | syscall.O_NONBLOCK
+
+// lockSwappedError is the error of openLockFile when the open lock file at
+// lockPath is not the directory entry itself: a symlink, or a file that was
+// swapped after the open. It wraps ErrInsecurePermissions. The fix hint is
+// the same as in checkLockFile: remove the entry, and the next run makes a
+// new lock file.
+func lockSwappedError(lockPath string) error {
+	return fmt.Errorf("pins lock file %s is not safe: it is a symlink or was swapped while it was opened (fix: rm -- %s, then mcpmoat makes a new one with mode 0600): %w",
+		lockPath, shellQuote(lockPath), ErrInsecurePermissions)
+}
+
 // tryLock tries to take an exclusive advisory lock on the open file f
-// (normally the handle of the pins directory). It does not wait.
+// (normally the pins lock file, see openLockFile). It does not wait.
 //
 // The results are:
 //   - (true, nil): this handle now holds the lock.
@@ -20,9 +39,9 @@ import (
 //   - (false, err) for any other failure.
 //
 // The lock is flock(2). It belongs to the open file description, not to the
-// process. So two different os.Open calls on the same directory get two
-// locks that exclude each other, also in one process: a second tryLock on a
-// second handle returns busy. The unit tests rely on this. A second tryLock
+// process. So two different opens of the same file get two locks that
+// exclude each other, also in one process: a second tryLock on a second
+// handle returns busy. The unit tests rely on this. A second tryLock
 // on the same handle succeeds again (flock converts an existing lock).
 //
 // The lock is advisory: it only stops other callers of tryLock. It does not
@@ -52,10 +71,12 @@ func lockErrno(errno syscall.Errno) (acquired bool, err error) {
 	case errors.Is(errno, syscall.EWOULDBLOCK), errors.Is(errno, syscall.EAGAIN):
 		return false, nil
 	// EBADF and EINVAL: on Linux, flock on NFS is emulated with byte-range
-	// locks, which need a descriptor open for writing, so our read-only
-	// directory handle gets EBADF. Some FUSE and network file systems answer
-	// EINVAL. flock runs while the descriptor is valid (see flock), so here
-	// these errnos can only mean that the file system cannot lock.
+	// locks, which need a descriptor open for writing, and a read-only
+	// descriptor gets EBADF. The pins lock file is open for reading and
+	// writing (lockOpenFlags), but a caller can pass another file, so EBADF
+	// stays here. Some FUSE and network file systems answer EINVAL. flock
+	// runs while the descriptor is valid (see flock), so here these errnos
+	// can only mean that the file system cannot lock.
 	case errors.Is(errno, syscall.ENOTSUP), errors.Is(errno, syscall.EOPNOTSUPP),
 		errors.Is(errno, syscall.ENOLCK), errors.Is(errno, syscall.ENOSYS),
 		errors.Is(errno, syscall.EBADF), errors.Is(errno, syscall.EINVAL):

@@ -4,30 +4,196 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
+	"path/filepath"
 	"sync"
 	"time"
 )
 
-// ErrLocked means that another process held the lock on the pins directory
-// for the whole wait time. Normally that is another mcpmoat run, but the lock
-// is an advisory flock(2) on the directory, so any local process that can open
-// the directory can hold it. The caller can try again later. Test for it with
+// ErrLocked means that another process held the lock on the pins lock file
+// (see lockSuffix) for the whole wait time. Normally that is another mcpmoat
+// run. The lock is an advisory flock(2), and flock works on any open
+// descriptor, so any process that can open the lock file can hold it. That is
+// why LoadLocked refuses a lock file that another user can open
+// (checkLockFile and checkLockFileACL): then only the current user and root
+// can hold the lock. The caller can try again later. Test for it with
 // errors.Is.
+//
+// ErrLocked means only "another holder has the lock". An error that stops
+// LoadLocked from opening or creating the lock file, for example in a
+// read-only pins directory, does not wrap it.
 var ErrLocked = errors.New("the pins file is locked by another process")
 
 // errLockUnsupported means that the operating system or the file system
-// cannot lock the pins directory. tryLock returns it (lock_unix.go and
+// cannot lock the pins lock file. tryLock returns it (lock_unix.go and
 // lock_other.go), and lock then goes on without the lock, so the caller can
 // warn once.
 var errLockUnsupported = errors.New("file locking is not supported here")
+
+// lockSuffix is the end of the name of the pins lock file. The lock file is
+// the pins file name plus lockSuffix, in the pins directory: pins.json.lock
+// for pins.json.
+//
+// Why a separate lock file and not the pins directory itself: flock(2) needs
+// only a read-only descriptor, and the pins directory may have mode 0755. So
+// any local user could open the directory and hold its lock for as long as
+// they want, and every scan with a new server and every pin --accept would
+// fail. The lock file has mode 0600 and checkLockFile refuses any group or
+// other access, so another user cannot open it.
+//
+// The lock file is empty and stays in the directory after the run. Its
+// content has no meaning: only the lock on it counts.
+const lockSuffix = ".lock"
+
+// openLockFile opens the pins lock file of the pins file path (path plus
+// lockSuffix) through root, the open os.Root of the pins directory, and
+// checks it. It creates a missing lock file with mode 0o600. The caller owns
+// the file, locks it (locker.lock) and closes it.
+//
+// The open goes through root, so a symlink cannot make it leave the pins
+// directory, and it uses lockOpenFlags (lock_unix.go): O_NONBLOCK makes the
+// open of a named pipe (FIFO) return at once, and the check below then
+// refuses it. The file is open for reading and writing: on Linux, flock on
+// NFS is emulated with a byte-range lock, which needs a descriptor that can
+// write.
+//
+// The checks run on the open file, in this order:
+//   - The open file must be the directory entry itself (os.SameFile of
+//     f.Stat and root.Lstat). A symlink, also one to another file in the pins
+//     directory, or an entry that was swapped after the open is refused.
+//   - checkLockFile: a regular file that the current user owns, with no
+//     group or other access (mode 0600 passes, 0644 is refused).
+//   - checkLockFileACL (macOS only): no ACL entry that lets a user or group
+//     open the file.
+//
+// A refusal wraps ErrInsecurePermissions and names the lock file. openLockFile
+// never changes the mode of an existing lock file: an unsafe one is refused,
+// and the fix hint is to remove it. It sets mode 0o600 only on a file that it
+// has just created, so the umask cannot leave a file that the next run cannot
+// open for writing.
+//
+// Any other error names the lock file and the reason, for example "create the
+// pins lock file <path>: permission denied" in a read-only pins directory
+// (mode 0500) that has no lock file yet. Such an error does not wrap
+// ErrLocked: no other process holds the lock. A read-only pins directory with
+// an existing lock file needs no create, so the lock works there. The errors
+// have no "read <path>" prefix: the caller adds it (prefixUnlessRefusal).
+func openLockFile(root *os.Root, path string) (*os.File, error) {
+	lockPath := path + lockSuffix
+	name := filepath.Base(lockPath)
+
+	f, created, err := openOrCreate(root, name)
+	if err != nil {
+		// A lock file that the user may not open, for example one that another
+		// user owns, gives only "permission denied". Check the entry itself
+		// (Lstat does not follow a symlink), so the user gets the refusal and
+		// its fix hint instead. A symlink is refused here too.
+		if info, lerr := root.Lstat(name); lerr == nil {
+			if checkErr := checkLockFile(lockPath, info, os.Geteuid()); checkErr != nil {
+				return nil, checkErr
+			}
+		}
+		verb := "open"
+		if created {
+			verb = "create"
+		}
+		return nil, fmt.Errorf("%s the pins lock file %s: %w", verb, lockPath, pathErrCause(err))
+	}
+
+	if err := checkOpenLockFile(root, lockPath, name, f, created); err != nil {
+		_ = f.Close()
+		return nil, err
+	}
+	return f, nil
+}
+
+// openOrCreate opens the lock file name in root, and creates it when it is
+// missing. created is true when this call created the file.
+//
+// It opens an existing file first, with no O_CREATE. So a read-only pins
+// directory with an existing lock file works, and the common case is one
+// open. Only when the file is missing does it create it, with O_EXCL, so the
+// create never follows a symlink and created is true only for a file that
+// this call made. When another run creates the file between the two calls,
+// the create fails with "file exists", and openOrCreate opens that file.
+//
+// On an error, f is nil. created is then true when the create itself failed
+// (for example EACCES or EROFS in a read-only pins directory), so the caller
+// can say "create" in the error text.
+func openOrCreate(root *os.Root, name string) (f *os.File, created bool, err error) {
+	f, err = root.OpenFile(name, lockOpenFlags, 0)
+	if !errors.Is(err, fs.ErrNotExist) {
+		// Opened, or failed for another reason than a missing file.
+		return f, false, err
+	}
+	f, err = root.OpenFile(name, lockOpenFlags|os.O_CREATE|os.O_EXCL, fileMode)
+	switch {
+	case err == nil:
+		return f, true, nil
+	case !errors.Is(err, fs.ErrExist):
+		return nil, true, err
+	}
+	// The name exists now: another run created the file, or the name is a
+	// symlink with a missing target (O_EXCL does not follow it). Open it
+	// again; the caller refuses a symlink.
+	f, err = root.OpenFile(name, lockOpenFlags, 0)
+	return f, false, err
+}
+
+// checkOpenLockFile checks f, the open lock file name in root (see
+// openLockFile). lockPath is the path of the lock file, for the error texts.
+// When created is true, it first sets mode 0o600 on f: OpenFile used that
+// mode, but the umask can remove bits from it. The chmod works on the open
+// descriptor, so a swapped name cannot redirect it.
+func checkOpenLockFile(root *os.Root, lockPath, name string, f *os.File, created bool) error {
+	if created {
+		if err := f.Chmod(fileMode); err != nil {
+			return fmt.Errorf("set the mode of the pins lock file %s: %w", lockPath, pathErrCause(err))
+		}
+	}
+
+	info, err := f.Stat()
+	if err != nil {
+		return fmt.Errorf("check the pins lock file %s: %w", lockPath, pathErrCause(err))
+	}
+	// os.Root follows a symlink that stays in the directory, so f can be the
+	// target of a symlink. Lstat describes the entry itself, so os.SameFile
+	// is false for a symlink and for an entry that another file replaced
+	// after the open. An entry that is gone was swapped too. This is the
+	// same check as for pins.json (readChecked).
+	entry, err := root.Lstat(name)
+	if err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return fmt.Errorf("check the pins lock file %s: %w", lockPath, pathErrCause(err))
+	}
+	if err != nil || !os.SameFile(info, entry) {
+		return lockSwappedError(lockPath)
+	}
+
+	if err := checkLockFile(lockPath, info, os.Geteuid()); err != nil {
+		return err
+	}
+	return checkLockFileACL(lockPath, f)
+}
+
+// pathErrCause returns the cause of err when err is a *fs.PathError, and err
+// itself otherwise. The errors of os.Root name only the base name, for
+// example "openat pins.json.lock: permission denied". The callers name the
+// full path themselves, so the cause alone ("permission denied") is enough.
+// errors.Is still works on the result, for example with fs.ErrPermission.
+func pathErrCause(err error) error {
+	if pe, ok := errors.AsType[*fs.PathError](err); ok {
+		return pe.Err
+	}
+	return err
+}
 
 // defaultLockPoll is the time between two lock attempts when locker.poll is
 // zero.
 const defaultLockPoll = 50 * time.Millisecond
 
-// locker takes the advisory lock on the pins directory, so two parallel runs
-// cannot lose each other's pins.
+// locker takes the advisory lock on the pins lock file (see lockSuffix), so
+// two parallel runs cannot lose each other's pins.
 //
 // The zero value tries once, does not wait and uses the real lock function.
 // The function fields exist so that a test can inject a busy or an
@@ -52,12 +218,13 @@ type locker struct {
 	afterEnsureDir func()
 }
 
-// lock takes an exclusive advisory lock on d, the open handle of the pins
-// directory. The caller owns d and must keep it open while it holds the lock.
+// lock takes an exclusive advisory lock on f, the open pins lock file (see
+// openLockFile). The caller owns f and must keep it open while it holds the
+// lock.
 //
 // The results are:
 //   - (release, true, nil): this run holds the lock. Call release when done.
-//   - (release, false, nil): the system or the file system cannot lock d
+//   - (release, false, nil): the system or the file system cannot lock f
 //     (errLockUnsupported). The caller warns once and goes on without the
 //     lock.
 //   - (release, false, err) where errors.Is(err, ErrLocked): another run held
@@ -68,17 +235,17 @@ type locker struct {
 //     These errors always come from ctx, never from wait.
 //   - (release, false, err) for any other failure.
 //
-// The errors do not name the directory: the caller (loadLocked) adds the path
+// The errors do not name the lock file: the caller (loadLocked) adds the path
 // of the pins file, so the path shows once.
 //
 // release is never nil, so the caller can defer it on every path. It is safe
-// to call more than once. It releases the lock but does not close d.
+// to call more than once. It releases the lock but does not close f.
 //
 // Why lock polls and does not use a blocking flock: a blocking flock cannot
 // be stopped by ctx or by Ctrl-C. Go installs its signal handlers with
 // SA_RESTART, so the kernel restarts the call after a signal and the run
 // would hang until the other run ends.
-func (l locker) lock(ctx context.Context, d *os.File) (release func(), locked bool, err error) {
+func (l locker) lock(ctx context.Context, f *os.File) (release func(), locked bool, err error) {
 	try := l.tryLock
 	if try == nil {
 		try = tryLock
@@ -93,17 +260,17 @@ func (l locker) lock(ctx context.Context, d *os.File) (release func(), locked bo
 
 	for {
 		if ctxErr := ctx.Err(); ctxErr != nil {
-			return noop, false, fmt.Errorf("lock the pins directory: %w", ctxErr)
+			return noop, false, fmt.Errorf("lock the pins lock file: %w", ctxErr)
 		}
 
-		acquired, tryErr := try(d)
+		acquired, tryErr := try(f)
 		switch {
 		case errors.Is(tryErr, errLockUnsupported):
 			return noop, false, nil
 		case tryErr != nil:
-			return noop, false, fmt.Errorf("lock the pins directory: %w", tryErr)
+			return noop, false, fmt.Errorf("lock the pins lock file: %w", tryErr)
 		case acquired:
-			return releaser(d), true, nil
+			return releaser(f), true, nil
 		}
 
 		// The lock is busy.
@@ -112,7 +279,7 @@ func (l locker) lock(ctx context.Context, d *os.File) (release func(), locked bo
 		}
 		left := time.Until(deadline)
 		if l.wait <= 0 || left <= 0 {
-			return noop, false, fmt.Errorf("lock the pins directory: %w", ErrLocked)
+			return noop, false, fmt.Errorf("lock the pins lock file: %w", ErrLocked)
 		}
 
 		// Do not sleep past the deadline: the last attempt then happens at
@@ -121,21 +288,21 @@ func (l locker) lock(ctx context.Context, d *os.File) (release func(), locked bo
 		select {
 		case <-ctx.Done():
 			timer.Stop()
-			return noop, false, fmt.Errorf("lock the pins directory: %w", ctx.Err())
+			return noop, false, fmt.Errorf("lock the pins lock file: %w", ctx.Err())
 		case <-timer.C:
 		}
 	}
 }
 
 // releaser returns the release function for a lock that locker.lock took on
-// d. The function unlocks d once; later calls do nothing. It does not close
-// d, because the caller owns the handle.
-func releaser(d *os.File) func() {
+// f. The function unlocks f once; later calls do nothing. It does not close
+// f, because the caller owns the handle.
+func releaser(f *os.File) func() {
 	// sync.OnceFunc returns a function that runs its argument on the first
 	// call only.
 	return sync.OnceFunc(func() {
-		// Ignore the error: the caller closes d later, and closing the handle
+		// Ignore the error: the caller closes f later, and closing the handle
 		// releases the lock anyway.
-		_ = unlock(d)
+		_ = unlock(f)
 	})
 }

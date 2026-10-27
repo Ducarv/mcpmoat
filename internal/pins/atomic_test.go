@@ -3,10 +3,13 @@ package pins
 import (
 	"bytes"
 	"errors"
+	"io/fs"
 	"os"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"slices"
+	"strings"
 	"testing"
 )
 
@@ -52,46 +55,67 @@ func wantPerm(t *testing.T, path string, want os.FileMode) {
 	}
 }
 
-func TestWriteFileAtomicCreatesDirAndFile(t *testing.T) {
+// tempNameRE is the name of a temp file of writeFile.
+var tempNameRE = regexp.MustCompile(`^\.pins-[0-9a-f]{16}\.tmp$`)
+
+// openDir opens dir as an os.Root and a handle of the directory itself, as
+// openPinsDir does, and closes both at the end of the test.
+func openDir(t *testing.T, dir string) (*os.Root, *os.File) {
+	t.Helper()
+	root, err := os.OpenRoot(dir)
+	if err != nil {
+		t.Fatalf("OpenRoot(%q) error = %v", dir, err)
+	}
+	d, err := root.Open(".")
+	if err != nil {
+		_ = root.Close()
+		t.Fatalf("root.Open(\".\") error = %v", err)
+	}
+	t.Cleanup(func() { closeDir(root, d) })
+	return root, d
+}
+
+// countVerify returns a verifyDir function that counts its calls in *n and
+// returns err.
+func countVerify(n *int, err error) func() error {
+	return func() error {
+		*n++
+		return err
+	}
+}
+
+// writeTestFile runs w.writeFile on pins.json in dir with a verifyDir that
+// passes, and fails the test on an error.
+func writeTestFile(t *testing.T, w atomicWriter, dir string, data []byte) {
+	t.Helper()
+	root, d := openDir(t, dir)
+	var calls int
+	if err := w.writeFile(root, d, "pins.json", data, countVerify(&calls, nil)); err != nil {
+		t.Fatalf("writeFile() error = %v", err)
+	}
+	if calls != 1 {
+		t.Errorf("verifyDir calls = %d, want 1", calls)
+	}
+}
+
+func TestWriteFileCreatesFile(t *testing.T) {
 	t.Parallel()
-	root := t.TempDir()
-	dir := filepath.Join(root, "a", "b")
+	dir := t.TempDir()
 	path := filepath.Join(dir, "pins.json")
 	data := []byte(`{"version":1}`)
 
-	if err := writeFileAtomic(path, data); err != nil {
-		t.Fatalf("writeFileAtomic() error = %v", err)
-	}
+	writeTestFile(t, atomicWriter{}, dir, data)
 
-	got := readFile(t, path)
-	if !bytes.Equal(got, data) {
+	if got := readFile(t, path); !bytes.Equal(got, data) {
 		t.Errorf("content = %q, want %q", got, data)
 	}
-	wantPerm(t, path, fileMode)
-	// MkdirAll gives every directory it creates the same mode.
-	wantPerm(t, dir, dirMode)
-	wantPerm(t, filepath.Join(root, "a"), dirMode)
+	wantPerm(t, path, 0o600)
 	if names, want := dirNames(t, dir), []string{"pins.json"}; !slices.Equal(names, want) {
 		t.Errorf("dir entries = %v, want %v", names, want)
 	}
 }
 
-func TestWriteFileAtomicKeepsExistingDirMode(t *testing.T) {
-	t.Parallel()
-	dir := t.TempDir()
-	// Chmod directly: the umask can change the mode that Mkdir sets.
-	if err := os.Chmod(dir, 0o755); err != nil { //nolint:gosec // G302: the test needs a mode that is more open than 0o700.
-		t.Fatalf("Chmod() error = %v", err)
-	}
-
-	if err := writeFileAtomic(filepath.Join(dir, "pins.json"), []byte("x")); err != nil {
-		t.Fatalf("writeFileAtomic() error = %v", err)
-	}
-
-	wantPerm(t, dir, 0o755)
-}
-
-func TestWriteFileAtomicReplacesExistingFile(t *testing.T) {
+func TestWriteFileReplacesExistingFile(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
 		name    string
@@ -116,15 +140,12 @@ func TestWriteFileAtomicReplacesExistingFile(t *testing.T) {
 				t.Fatalf("Chmod() error = %v", err)
 			}
 
-			if err := writeFileAtomic(path, tt.newData); err != nil {
-				t.Fatalf("writeFileAtomic() error = %v", err)
-			}
+			writeTestFile(t, atomicWriter{}, dir, tt.newData)
 
-			got := readFile(t, path)
-			if !bytes.Equal(got, tt.newData) {
+			if got := readFile(t, path); !bytes.Equal(got, tt.newData) {
 				t.Errorf("content = %q, want %q", got, tt.newData)
 			}
-			wantPerm(t, path, fileMode)
+			wantPerm(t, path, 0o600)
 			if names, want := dirNames(t, dir), []string{"pins.json"}; !slices.Equal(names, want) {
 				t.Errorf("dir entries = %v, want %v", names, want)
 			}
@@ -132,13 +153,20 @@ func TestWriteFileAtomicReplacesExistingFile(t *testing.T) {
 	}
 }
 
-func TestWriteFileAtomicHookFailure(t *testing.T) {
+// TestWriteFileFailureKeepsOldFile checks every failure after the temp file
+// exists: a hook or verifyDir fails. The temp file is removed, and the old file
+// (when there is one) is not touched.
+func TestWriteFileFailureKeepsOldFile(t *testing.T) {
 	t.Parallel()
 	errBoom := errors.New("simulated crash")
 	tests := []struct {
 		name string
-		// writer builds the writer under test. It stores the temp path in *tmp.
+		// writer builds the writer under test. Its hooks store the temp path in
+		// *tmp. verify is the verifyDir function: it may use *tmp too.
 		writer func(tmp *string) atomicWriter
+		verify func(t *testing.T, tmp *string) func() error
+		// wantExact means the error is errBoom itself, not a wrap of it.
+		wantExact bool
 	}{
 		{
 			name: "beforeWrite fails",
@@ -151,6 +179,25 @@ func TestWriteFileAtomicHookFailure(t *testing.T) {
 			writer: func(tmp *string) atomicWriter {
 				return atomicWriter{beforeRename: func(p string) error { *tmp = p; return errBoom }}
 			},
+		},
+		{
+			name: "verifyDir fails",
+			writer: func(tmp *string) atomicWriter {
+				return atomicWriter{beforeRename: func(p string) error { *tmp = p; return nil }}
+			},
+			// verifyDir runs after beforeRename: the temp file holds the full
+			// data then.
+			verify: func(t *testing.T, tmp *string) func() error {
+				return func() error {
+					if *tmp == "" {
+						t.Error("verifyDir ran before beforeRename")
+					} else if got := readFile(t, *tmp); string(got) != `{"new":true}` {
+						t.Errorf("temp content at verifyDir = %q, want the full data", got)
+					}
+					return errBoom
+				}
+			},
+			wantExact: true,
 		},
 	}
 	for _, tt := range tests {
@@ -169,31 +216,35 @@ func TestWriteFileAtomicHookFailure(t *testing.T) {
 						t.Fatalf("WriteFile() error = %v", err)
 					}
 				}
-
+				root, d := openDir(t, dir)
 				var tmp string
-				err := tt.writer(&tmp).writeFile(path, []byte(`{"new":true}`))
+				verify := func() error { return nil }
+				if tt.verify != nil {
+					verify = tt.verify(t, &tmp)
+				}
+
+				err := tt.writer(&tmp).writeFile(root, d, "pins.json", []byte(`{"new":true}`), verify)
 
 				if !errors.Is(err, errBoom) {
 					t.Fatalf("writeFile() error = %v, want it to wrap %v", err, errBoom)
 				}
+				if tt.wantExact && err.Error() != errBoom.Error() {
+					t.Errorf("writeFile() error = %q, want the verifyDir error as it is", err)
+				}
 				if tmp == "" {
 					t.Fatal("hook was not called")
 				}
-				if _, statErr := os.Stat(tmp); !errors.Is(statErr, os.ErrNotExist) {
-					t.Errorf("temp file %q still exists (Stat error = %v)", tmp, statErr)
+				if _, statErr := os.Lstat(tmp); !errors.Is(statErr, os.ErrNotExist) {
+					t.Errorf("temp file %q still exists (Lstat error = %v)", tmp, statErr)
 				}
 				if existing {
-					got := readFile(t, path)
-					if !bytes.Equal(got, oldData) {
+					if got := readFile(t, path); !bytes.Equal(got, oldData) {
 						t.Errorf("target = %q, want old content %q", got, oldData)
 					}
 					if names, want := dirNames(t, dir), []string{"pins.json"}; !slices.Equal(names, want) {
 						t.Errorf("dir entries = %v, want %v", names, want)
 					}
 					return
-				}
-				if _, statErr := os.Stat(path); !errors.Is(statErr, os.ErrNotExist) {
-					t.Errorf("target exists after failure (Stat error = %v)", statErr)
 				}
 				if names := dirNames(t, dir); len(names) != 0 {
 					t.Errorf("dir entries = %v, want none", names)
@@ -203,40 +254,44 @@ func TestWriteFileAtomicHookFailure(t *testing.T) {
 	}
 }
 
-// TestWriteFileAtomicTempFileState checks the temp file at each hook point.
+// TestWriteFileTempFileState checks the temp file at each hook point.
 // A temp file that sits in the target directory and holds all the data is what
 // makes the final rename atomic.
-func TestWriteFileAtomicTempFileState(t *testing.T) {
+func TestWriteFileTempFileState(t *testing.T) {
 	t.Parallel()
 	data := []byte("new content")
 	oldData := []byte("old content")
 
+	// wantTempName checks that tmp is a temp file name of writeFile in dir.
+	wantTempName := func(t *testing.T, dir, tmp string) {
+		t.Helper()
+		if got := filepath.Dir(tmp); got != dir {
+			t.Errorf("temp dir = %q, want %q", got, dir)
+		}
+		if base := filepath.Base(tmp); !tempNameRE.MatchString(base) {
+			t.Errorf("temp name = %q, want it to match %s", base, tempNameRE)
+		}
+	}
+
 	t.Run("beforeWrite", func(t *testing.T) {
 		t.Parallel()
 		dir := t.TempDir()
-		path := filepath.Join(dir, "pins.json")
 		called := false
 		w := atomicWriter{beforeWrite: func(tmp string) error {
 			called = true
-			if got := filepath.Dir(tmp); got != dir {
-				t.Errorf("temp dir = %q, want %q", got, dir)
-			}
-			if tmp == path {
-				t.Error("temp path equals target path")
-			}
-			info, err := os.Stat(tmp)
+			wantTempName(t, dir, tmp)
+			info, err := os.Lstat(tmp)
 			if err != nil {
-				t.Errorf("Stat(tmp) error = %v", err)
+				t.Errorf("Lstat(tmp) error = %v", err)
 				return nil
 			}
-			if info.Size() != 0 {
-				t.Errorf("temp size = %d before write, want 0", info.Size())
+			if !info.Mode().IsRegular() || info.Size() != 0 {
+				t.Errorf("temp file mode = %v, size = %d before write, want an empty regular file", info.Mode(), info.Size())
 			}
+			wantPerm(t, tmp, 0o600)
 			return nil
 		}}
-		if err := w.writeFile(path, data); err != nil {
-			t.Fatalf("writeFile() error = %v", err)
-		}
+		writeTestFile(t, w, dir, data)
 		if !called {
 			t.Fatal("beforeWrite was not called")
 		}
@@ -252,88 +307,138 @@ func TestWriteFileAtomicTempFileState(t *testing.T) {
 		called := false
 		w := atomicWriter{beforeRename: func(tmp string) error {
 			called = true
-			if got := filepath.Dir(tmp); got != filepath.Dir(path) {
-				t.Errorf("temp dir = %q, want %q", got, filepath.Dir(path))
-			}
-			if tmp == path {
-				t.Error("temp path equals target path")
-			}
-			got := readFile(t, tmp)
-			if !bytes.Equal(got, data) {
+			wantTempName(t, dir, tmp)
+			if got := readFile(t, tmp); !bytes.Equal(got, data) {
 				t.Errorf("temp content = %q, want the full data %q", got, data)
 			}
 			// The reader still sees the old file until the rename.
-			old := readFile(t, path)
-			if !bytes.Equal(old, oldData) {
+			if old := readFile(t, path); !bytes.Equal(old, oldData) {
 				t.Errorf("target = %q before rename, want old content %q", old, oldData)
 			}
-			wantPerm(t, tmp, fileMode)
+			wantPerm(t, tmp, 0o600)
 			return nil
 		}}
-		if err := w.writeFile(path, data); err != nil {
-			t.Fatalf("writeFile() error = %v", err)
-		}
+		writeTestFile(t, w, dir, data)
 		if !called {
 			t.Fatal("beforeRename was not called")
 		}
-		got := readFile(t, path)
-		if !bytes.Equal(got, data) {
+		if got := readFile(t, path); !bytes.Equal(got, data) {
 			t.Errorf("target = %q after rename, want %q", got, data)
+		}
+		if names, want := dirNames(t, dir), []string{"pins.json"}; !slices.Equal(names, want) {
+			t.Errorf("dir entries = %v, want %v", names, want)
 		}
 	})
 }
 
-func TestWriteFileAtomicParentIsFile(t *testing.T) {
+// TestWriteFileCreateFails checks that a failed create of the temp file runs
+// verifyDir, and that an error of verifyDir wins: a removed directory then
+// gets the real cause, not "no such file or directory".
+func TestWriteFileCreateFails(t *testing.T) {
 	t.Parallel()
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows cannot remove a directory that is open")
+	}
+	errChanged := errors.New("the directory changed")
 	tests := []struct {
-		name string
-		rel  string
+		name      string
+		verifyErr error
+		wantText  string
+		wantIs    error
 	}{
-		{name: "direct parent is a file", rel: filepath.Join("blocker", "pins.json")},
-		{name: "ancestor is a file", rel: filepath.Join("blocker", "sub", "pins.json")},
+		{name: "verifyDir error wins", verifyErr: errChanged, wantText: errChanged.Error(), wantIs: errChanged},
+		{name: "verifyDir passes", verifyErr: nil, wantText: "create temp file: ", wantIs: fs.ErrNotExist},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			root := t.TempDir()
-			blocker := filepath.Join(root, "blocker")
-			if err := os.WriteFile(blocker, []byte("not a dir"), fileMode); err != nil {
-				t.Fatalf("WriteFile() error = %v", err)
+			dir := filepath.Join(t.TempDir(), "pins")
+			if err := os.Mkdir(dir, dirMode); err != nil {
+				t.Fatalf("Mkdir() error = %v", err)
 			}
+			root, d := openDir(t, dir)
+			// A removed directory cannot hold a new file, also through an open
+			// handle.
+			if err := os.Remove(dir); err != nil {
+				t.Fatalf("Remove() error = %v", err)
+			}
+			hook := func(string) error {
+				t.Error("a hook ran after a failed create")
+				return nil
+			}
+			w := atomicWriter{beforeWrite: hook, beforeRename: hook}
+			var calls int
 
-			err := writeFileAtomic(filepath.Join(root, tt.rel), []byte("x"))
+			err := w.writeFile(root, d, "pins.json", []byte("x"), countVerify(&calls, tt.verifyErr))
 
 			if err == nil {
-				t.Fatal("writeFileAtomic() error = nil, want error when the parent is a regular file")
+				t.Fatal("writeFile() error = nil, want error")
 			}
-			got := readFile(t, blocker)
-			if string(got) != "not a dir" {
-				t.Errorf("blocker file = %q, want it unchanged", got)
+			if calls != 1 {
+				t.Errorf("verifyDir calls = %d, want 1", calls)
 			}
-			if names, want := dirNames(t, root), []string{"blocker"}; !slices.Equal(names, want) {
-				t.Errorf("dir entries = %v, want %v", names, want)
+			if !strings.HasPrefix(err.Error(), tt.wantText) {
+				t.Errorf("writeFile() error = %q, want it to start with %q", err, tt.wantText)
+			}
+			if !errors.Is(err, tt.wantIs) {
+				t.Errorf("writeFile() error = %v, want errors.Is %v", err, tt.wantIs)
 			}
 		})
 	}
 }
 
-// TestWriteFileAtomicTargetIsDir checks that the rename error path also removes
+// TestWriteFileFollowsOpenDir checks that writeFile writes to the directory
+// that root opened, not to whatever the path names at the time of the write.
+func TestWriteFileFollowsOpenDir(t *testing.T) {
+	t.Parallel()
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows cannot rename a directory that is open")
+	}
+	base := t.TempDir()
+	dir := filepath.Join(base, "pins")
+	moved := filepath.Join(base, "moved")
+	if err := os.Mkdir(dir, dirMode); err != nil {
+		t.Fatalf("Mkdir() error = %v", err)
+	}
+	root, d := openDir(t, dir)
+	if err := os.Rename(dir, moved); err != nil {
+		t.Fatalf("Rename() error = %v", err)
+	}
+	if err := os.Mkdir(dir, dirMode); err != nil {
+		t.Fatalf("Mkdir() error = %v", err)
+	}
+
+	// verifyDir passes on purpose: the test checks only where the write goes.
+	if err := (atomicWriter{}).writeFile(root, d, "pins.json", []byte("x"), func() error { return nil }); err != nil {
+		t.Fatalf("writeFile() error = %v", err)
+	}
+
+	if got := readFile(t, filepath.Join(moved, "pins.json")); string(got) != "x" {
+		t.Errorf("content in the opened directory = %q, want %q", got, "x")
+	}
+	if names := dirNames(t, dir); len(names) != 0 {
+		t.Errorf("entries of the new directory at the path = %v, want none", names)
+	}
+}
+
+// TestWriteFileTargetIsDir checks that the rename error path also removes
 // the temp file and keeps the directory in place.
-func TestWriteFileAtomicTargetIsDir(t *testing.T) {
+func TestWriteFileTargetIsDir(t *testing.T) {
 	t.Parallel()
 	if runtime.GOOS == "windows" {
 		t.Skip("rename over a directory behaves differently on Windows")
 	}
 	dir := t.TempDir()
-	path := filepath.Join(dir, "pins.json")
-	if err := os.Mkdir(path, dirMode); err != nil {
+	if err := os.Mkdir(filepath.Join(dir, "pins.json"), dirMode); err != nil {
 		t.Fatalf("Mkdir() error = %v", err)
 	}
+	root, d := openDir(t, dir)
 
-	if err := writeFileAtomic(path, []byte("x")); err == nil {
-		t.Fatal("writeFileAtomic() error = nil, want error when the target is a directory")
+	err := (atomicWriter{}).writeFile(root, d, "pins.json", []byte("x"), func() error { return nil })
+
+	if err == nil || !strings.HasPrefix(err.Error(), "rename temp file: ") {
+		t.Fatalf("writeFile() error = %v, want a rename error when the target is a directory", err)
 	}
-
 	if names, want := dirNames(t, dir), []string{"pins.json"}; !slices.Equal(names, want) {
 		t.Errorf("dir entries = %v, want %v (no temp file)", names, want)
 	}

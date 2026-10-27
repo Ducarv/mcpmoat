@@ -300,6 +300,7 @@ func TestCheckFirstRunWith(t *testing.T) {
 	path := filepath.Join(string(filepath.Separator)+"a", "b", "pins.json")
 	tests := []struct {
 		name        string
+		op          string // "read" or "save"
 		path        string
 		lstat, stat func(string) (fs.FileInfo, error)
 		wantText    string   // text the error must hold
@@ -307,23 +308,27 @@ func TestCheckFirstRunWith(t *testing.T) {
 		wantNotText []string // texts the error must not hold
 	}{
 		{
-			name: "nothing on the path exists", path: path, lstat: missing, stat: missing,
+			name: "nothing on the path exists", op: "read", path: path, lstat: missing, stat: missing,
 			wantText: "read " + path + ": no directory on the path exists",
 		},
 		{
-			name: "ENOTDIR all the way up", path: path,
+			name: "save names its op", op: "save", path: path, lstat: missing, stat: missing,
+			wantText: "save " + path + ": no directory on the path exists",
+		},
+		{
+			name: "ENOTDIR all the way up", op: "read", path: path,
 			lstat: func(string) (fs.FileInfo, error) { return nil, syscall.ENOTDIR }, stat: missing,
 			wantText: "no directory on the path exists",
 		},
 		{
-			name: "lstat error that is not missing", path: path, lstat: denied, stat: missing,
+			name: "lstat error that is not missing", op: "read", path: path, lstat: denied, stat: missing,
 			wantText: "read " + path + ": ", wantIs: fs.ErrPermission, wantNotText: []string{"no directory"},
 		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			err := pins.CheckFirstRunWith(tt.path, tt.lstat, tt.stat)
+			err := pins.CheckFirstRunWith(tt.op, tt.path, tt.lstat, tt.stat)
 			if err == nil || !strings.Contains(err.Error(), tt.wantText) {
 				t.Fatalf("CheckFirstRunWith() error = %v, want text %q", err, tt.wantText)
 			}
@@ -341,7 +346,7 @@ func TestCheckFirstRunWith(t *testing.T) {
 	t.Run("real first run", func(t *testing.T) {
 		t.Parallel()
 		path := filepath.Join(t.TempDir(), "no", "such", "pins.json")
-		if err := pins.CheckFirstRunWith(path, os.Lstat, os.Stat); err != nil {
+		if err := pins.CheckFirstRunWith("save", path, os.Lstat, os.Stat); err != nil {
 			t.Errorf("CheckFirstRunWith() error = %v, want nil", err)
 		}
 	})

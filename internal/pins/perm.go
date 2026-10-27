@@ -16,14 +16,23 @@ import (
 // another user, that its group or other users can write it, or that its ACL
 // lets a user or group write it (macOS only, see checkACL). It also means that
 // a parent directory of the pins directory lets another user swap, rename or
-// remove the pins directory, or that a symlink on the path to the pins
-// directory belongs to another user (see checkParents). Such a path could let
-// another user change the pins and hide a rug-pull (T2), so Load and Save
-// refuse it. They never change the mode of an existing path: the user must fix
-// it. Use errors.Is to test for it.
+// remove the pins directory, by its owner, its mode bits or (macOS only) its
+// ACL, or that a symlink on the path to the pins directory belongs to another
+// user (see checkParents). And it means that the pins lock file is not a
+// regular file, belongs to another user, lets its group or others open it,
+// or (macOS only) has an ACL that lets a user or group open it (see
+// checkLockFile and checkLockFileACL). An unsafe pins path could let another
+// user change the pins and hide a rug-pull (T2), so Load and Save refuse it.
+// An unsafe lock file could let another user hold the lock and block every
+// save, so the code that takes the lock refuses it. mcpmoat never changes the
+// mode of an existing path: the user must fix it. Use errors.Is to test for
+// it.
 //
 // The text of such an error names the unsafe path and starts with "pins
-// directory", "pins file", "pins parent directory" or "cannot read the ACL".
+// directory", "pins file", "pins parent directory", "pins lock file" or
+// "cannot read the ACL". The last one is the fail-closed error of an ACL that
+// cannot be read: "cannot read the ACL of the pins directory", "... of the pins
+// file", "... of the pins parent directory" or "... of the pins lock file".
 // Load, LoadLocked and Save return it as it is, with no "read <path>" or "save
 // <path>" prefix. Their other errors from the same checks, for example a
 // failed Lstat or Readlink in checkParents, do not wrap ErrInsecurePermissions
@@ -39,12 +48,12 @@ const (
 
 // checkDirPerm returns an error that wraps ErrInsecurePermissions when the
 // pins directory at path is owned by another user or is writable by its group
-// or by others. Save calls it (in atomicWriter.writeFile) after it created a
-// missing directory. Load checks the directory on its open handle instead
-// (checkDirHandle), and it checks pins.json on the open file (checkFileHandle,
-// and checkFilePermByPath when it cannot open the file). dirOpenError also
-// calls it, by path, when Load or LoadLocked cannot open the directory, only
-// to give a better error text than "permission denied".
+// or by others. Its only caller is dirOpenError: when Load, LoadLocked or Save
+// cannot open the directory, it checks it by path, only to give a better error
+// text than "permission denied". Load, LoadLocked and Save check the directory
+// on its open handle instead (checkDirHandle, also after Save or LoadLocked
+// created a missing directory), and Load checks pins.json on the open file
+// (checkFileHandle, and checkFilePermByPath when it cannot open the file).
 //
 // It follows symlinks (os.Stat), so it checks the target. A missing path is
 // not an error: it is the first run, and Save creates the directory with mode
@@ -141,11 +150,16 @@ func checkFilePermByPath(path string, uid int) error {
 
 // checkParents returns an error that wraps ErrInsecurePermissions when a
 // parent directory of the pins directory dir lets another user swap, rename or
-// remove the pins directory (checkParentOwnerAndMode, Unix only), or when
-// another user owns a symlink on the path to dir, dir included
-// (checkSymlinkOwner, Unix only). Then the next run would see a first run and
-// pin the current tools without an alert (T2). It checks for the current user
-// (os.Geteuid). See checkParentsAs.
+// remove the pins directory, or when another user owns a symlink on the path
+// to dir, dir included (checkSymlinkOwner, Unix only). Then the next run would
+// see a first run and pin the current tools without an alert (T2). It checks
+// for the current user (os.Geteuid). See checkParentsAs.
+//
+// For each parent it checks the owner and the mode bits
+// (checkParentOwnerAndMode, Unix only) and, on macOS, the ACL
+// (checkParentACL): an allow entry with a write-class right refuses the
+// parent, and a deny entry such as the "everyone deny delete" entry of a home
+// directory passes.
 //
 // On a system that is not Unix, it returns nil and does not walk the path
 // (parentChecks is false, see perm_other.go). There the owner and symlink
@@ -190,11 +204,16 @@ const (
 //     target, from the root for an absolute target, or from the directory
 //     that holds the symlink for a relative one.
 //   - A directory that is a parent of the pins directory: its owner and mode
-//     (checkParentOwnerAndMode). This covers the root directory, the
-//     directory that holds each symlink, and each directory in the target of
-//     a symlink. Each directory is checked once.
+//     (checkParentOwnerAndMode), then on macOS its ACL (checkParentACL). An
+//     allow entry with a write-class right, for any principal, refuses it; a
+//     deny entry, such as the "everyone deny delete" entry of a home
+//     directory, passes. This covers the root directory (also the root of an
+//     absolute symlink target), the directory that holds each symlink, and
+//     each directory in the target of a symlink. Each directory is checked
+//     once, by its real path with no symlink in it.
 //   - The pins directory itself, after all symlinks: nothing.
-//     checkDirHandle and checkDirPerm check its owner and mode.
+//     checkDirHandle and checkDirPerm check its owner and mode, and
+//     checkDirHandle checks its ACL on the open handle.
 //
 // The label of a symlink in the error is "pins directory" when it is the last
 // component of the path that is left, so the pins directory itself is the
@@ -234,10 +253,8 @@ const (
 // The check is by path, by design. When no other user (only root) can write
 // any directory on the way or owns a symlink on it, no other user can change
 // the path between this check and the open, so the path race does not help
-// an attacker. This argument is for the mode bits, and it has one exception:
-// on macOS an ACL can let another user write a directory whose mode bits are
-// safe, and the walk does not read the ACLs of the parent directories (see
-// docs/limits.md, issue #217).
+// an attacker. On macOS an ACL can let another user write a directory whose
+// mode bits are safe, so the walk reads the ACL of each parent too.
 func checkParentsAs(dir string, uid int) error {
 	abs, err := filepath.Abs(dir) // Abs also cleans the path.
 	if err != nil {
@@ -305,8 +322,8 @@ type parentWalk struct {
 
 	hops int // the number of symlinks followed so far
 
-	// checked is a set of the directories whose owner and mode are checked:
-	// a map whose values are not used. struct{} has size zero.
+	// checked is a set of the directories that checkDir has checked: a map
+	// whose values are not used. struct{} has size zero.
 	checked map[string]struct{}
 
 	refusal error // the last unsafe entry found so far
@@ -322,9 +339,18 @@ func (w *parentWalk) fail(err error) error {
 	return err
 }
 
-// checkDir checks the owner and the mode of the parent directory p, once
-// for each p (checkParentOwnerAndMode). An unsafe directory becomes the
-// refusal of the walk, and the walk goes on.
+// checkDir checks the parent directory p, once for each p: first its owner
+// and its mode (checkParentOwnerAndMode), then, when they are safe, its ACL
+// (checkParentACL, macOS only). An unsafe directory becomes the refusal of the
+// walk, and the walk goes on. info is the Lstat result of p.
+//
+// p is always a real directory, never a symlink: the walk calls checkDir only
+// for the root directory and for a directory that it enters, and resolved
+// holds no symlink. This matters for the ACL, because checkParentACL reads it
+// with FSOPT_NOFOLLOW: on a symlink it would read the ACL of the symlink and
+// not of the directory. The ACL check runs only when the owner and the mode
+// pass, so one directory gives one error, and the owner and mode error, which
+// has its own fix hint, comes first.
 func (w *parentWalk) checkDir(p string, info fs.FileInfo) {
 	if _, done := w.checked[p]; done {
 		return
@@ -332,13 +358,18 @@ func (w *parentWalk) checkDir(p string, info fs.FileInfo) {
 	w.checked[p] = struct{}{}
 	if err := checkParentOwnerAndMode(p, info, w.uid); err != nil {
 		w.refusal = err
+		return
+	}
+	if err := checkParentACL(p, info, w.uid); err != nil {
+		w.refusal = err
 	}
 }
 
 // enterDir moves the walk into the directory next, whose Lstat result is
 // info. When components are left after next, next is a parent of the pins
 // directory, so it checks next with checkDir. Lstat and Stat give the same
-// owner and mode for a directory that is not a symlink. The pins directory
+// owner and mode for a directory that is not a symlink, and next is the real
+// path of the directory (resolved holds no symlink). The pins directory
 // itself is not checked here (see checkParentsAs).
 func (w *parentWalk) enterDir(next string, info fs.FileInfo) {
 	w.resolved = next
@@ -347,9 +378,10 @@ func (w *parentWalk) enterDir(next string, info fs.FileInfo) {
 	}
 }
 
-// checkRoot checks the root directory root (for example "/") with checkDir.
-// A missing root is not an error, as for any other component. It returns
-// only an Lstat error, without the fail rule: the caller applies it.
+// checkRoot checks the root directory root (for example "/") with checkDir:
+// its owner, its mode and its ACL. A missing root is not an error, as for any
+// other component. It returns only an Lstat error, without the fail rule: the
+// caller applies it.
 func (w *parentWalk) checkRoot(root string) error {
 	info, err := os.Lstat(root)
 	if safefile.IsMissing(err) {

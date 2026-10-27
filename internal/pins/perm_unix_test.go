@@ -544,22 +544,6 @@ func TestSaveRefusesInsecureDir(t *testing.T) {
 	}
 }
 
-// TestWriteFileAtomicChecksDir checks that the write itself checks the
-// directory after MkdirAll, so a directory that appeared after a caller's
-// check is refused too. It writes no temp file and does not change the mode.
-func TestWriteFileAtomicChecksDir(t *testing.T) {
-	t.Parallel()
-	dir := newPinsDir(t, 0o777)
-
-	err := writeFileAtomic(filepath.Join(dir, "pins.json"), []byte(validPins))
-
-	wantInsecure(t, err, dir, "pins directory {path}", "mode 0777", msgChmod, msgWritable)
-	if got := dirNames(t, dir); len(got) != 0 {
-		t.Errorf("directory entries = %v, want none (no temp file)", got)
-	}
-	wantPerm(t, dir, 0o777)
-}
-
 func TestSaveIgnoresOldFileMode(t *testing.T) {
 	t.Parallel()
 	for _, mode := range []os.FileMode{0o666, 0o644} {
