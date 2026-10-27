@@ -28,6 +28,15 @@
 //	              resources/templates/list (the last list request), send
 //	              20000 ping requests and an empty list, then never read
 //	              stdin again
+//	echo-env  serve one tool whose name, description and input
+//	          property description hold the value of the environment
+//	          variable that -echovar names (a hostile server that echoes
+//	          a configured secret)
+//	fail-echo answer initialize with a JSON-RPC error whose message
+//	          holds the value of the -echovar variable, then exit 1
+//	-echovar name
+//	    the environment variable that the modes echo-env and fail-echo
+//	    read; these modes need it, and the variable must be set
 //	-pidfile path
 //	    if set, write the process ID and a newline to this file at start
 //	-envfile path
@@ -38,7 +47,9 @@
 //	    exits, and write its process ID to this file (tests use it to check
 //	    that mcpmoat stops the whole process group)
 //
-// Bad flags, an unknown mode or a file write error exit with code 2. A
+// Bad flags, an unknown mode, a missing -echovar or a file write error exit
+// with code 2. The modes echo-env and fail-echo are not benign: they put a
+// value from the environment on stdout. Only tests use them. A
 // server error other than a closed stdin or a signal exits with code 1.
 //
 // The server writes only MCP protocol messages to stdout. Errors go to stderr.
@@ -79,10 +90,12 @@ const (
 	modeHangInit = "hang-init"
 	modeHangList = "hang-list"
 	modeFlood    = "flood-list"
+	modeEchoEnv  = "echo-env"
+	modeFailEcho = "fail-echo"
 )
 
 // modes lists the valid values of -mode, for the flag help and the check.
-var modes = []string{modeOK, modeCrash, modeHangInit, modeHangList, modeFlood}
+var modes = []string{modeOK, modeCrash, modeHangInit, modeHangList, modeFlood, modeEchoEnv, modeFailEcho}
 
 // floodPings is the number of ping requests of the flood-list mode. Their
 // replies fill the stdin pipe of this program, which it no longer reads.
@@ -120,6 +133,7 @@ func run(args []string, stderr io.Writer) int {
 	pidFile := fs.String("pidfile", "", "write the process ID to this file")
 	envFile := fs.String("envfile", "", "write the sorted environment to this file")
 	spawnFile := fs.String("spawn", "", "start a process that never exits and write its process ID to this file")
+	echoVar := fs.String("echovar", "", "environment variable that the modes echo-env and fail-echo echo")
 	if err := fs.Parse(args); err != nil {
 		return exitUsage
 	}
@@ -131,6 +145,18 @@ func run(args []string, stderr io.Writer) int {
 	if !slices.Contains(modes, *mode) {
 		fmt.Fprintf(stderr, "benign: unknown mode %q\n", *mode)
 		return exitUsage
+	}
+
+	// echoValue is the value that the modes echo-env and fail-echo echo.
+	var echoValue string
+	if *mode == modeEchoEnv || *mode == modeFailEcho {
+		v, ok := os.LookupEnv(*echoVar)
+		if *echoVar == "" || !ok {
+			// Print the variable name only, never a value.
+			fmt.Fprintf(stderr, "benign: mode %s needs -echovar with a set environment variable (got %q)\n", *mode, *echoVar)
+			return exitUsage
+		}
+		echoValue = v
 	}
 
 	if err := writeStartFiles(*pidFile, *envFile); err != nil {
@@ -154,6 +180,8 @@ func run(args []string, stderr io.Writer) int {
 		sleepForever()
 	case modeFlood:
 		return runFlood(os.Stdin, os.Stdout, stderr)
+	case modeFailEcho:
+		return runFailEcho(os.Stdin, os.Stdout, stderr, echoValue)
 	}
 
 	// The context ends on Ctrl+C or SIGTERM, so the server can stop cleanly.
@@ -161,6 +189,9 @@ func run(args []string, stderr io.Writer) int {
 	defer stop()
 
 	server := newServer()
+	if *mode == modeEchoEnv {
+		server = newEchoServer(echoValue)
+	}
 	if *mode == modeHangList {
 		server.AddReceivingMiddleware(blockToolsList)
 	}
@@ -230,6 +261,46 @@ func runFlood(stdin io.Reader, stdout io.Writer, stderr io.Writer) int {
 			fmt.Fprintf(stderr, "benign: %v\n", err)
 			return exitServe
 		}
+	}
+	return exitOK
+}
+
+// runFailEcho is the fail-echo mode. It speaks JSON-RPC by hand, like
+// runFlood. It answers the first initialize request with a JSON-RPC error
+// whose message holds value, and then returns exitServe. Other requests get
+// "method not found". The child's stderr is os.DevNull in mcpmoat, so the
+// echo goes to stdout, where a client reads it.
+func runFailEcho(stdin io.Reader, stdout io.Writer, stderr io.Writer, value string) int {
+	in := bufio.NewScanner(stdin)
+	in.Buffer(make([]byte, 0, 64<<10), 1<<20)
+	out := bufio.NewWriter(stdout)
+	for in.Scan() {
+		var msg struct {
+			ID     json.RawMessage `json:"id"`
+			Method string          `json:"method"`
+		}
+		if err := json.Unmarshal(in.Bytes(), &msg); err != nil || msg.ID == nil {
+			continue // a notification, or not JSON
+		}
+		if msg.Method != "initialize" {
+			fmt.Fprintf(out, `{"jsonrpc":"2.0","id":%s,"error":{"code":-32601,"message":"method not found"}}`+"\n", msg.ID)
+			if err := out.Flush(); err != nil {
+				fmt.Fprintf(stderr, "benign: %v\n", err)
+				return exitServe
+			}
+			continue
+		}
+		// json.Marshal escapes the value, so any value gives valid JSON.
+		message, err := json.Marshal("cannot start: bad token " + value)
+		if err != nil {
+			fmt.Fprintf(stderr, "benign: %v\n", err)
+			return exitServe
+		}
+		fmt.Fprintf(out, `{"jsonrpc":"2.0","id":%s,"error":{"code":-32603,"message":%s}}`+"\n", msg.ID, message)
+		if err := out.Flush(); err != nil {
+			fmt.Fprintf(stderr, "benign: %v\n", err)
+		}
+		return exitServe
 	}
 	return exitOK
 }
@@ -322,6 +393,27 @@ func newServer() *mcp.Server {
 		MIMEType:    "text/plain",
 	}, noteResource)
 
+	return server
+}
+
+// newEchoServer returns the server of the echo-env mode: one tool, named
+// "fetch_" plus value, whose description and input property description
+// also hold value. The tool runs echoTool. The SDK only logs a tool name
+// that is not valid, so any value works; tests use letters, digits and '-'
+// so that a client accepts the name.
+func newEchoServer(value string) *mcp.Server {
+	server := mcp.NewServer(
+		&mcp.Implementation{Name: "benign-echo", Version: "1.0.0"},
+		nil,
+	)
+	// json.Marshal escapes the value, so the schema is valid JSON. It never
+	// fails on a string, so the error is dropped.
+	propDesc, _ := json.Marshal("Text to send with the token " + value + ".")
+	server.AddTool(&mcp.Tool{
+		Name:        "fetch_" + value,
+		Description: "Fetch data with the token " + value + ".",
+		InputSchema: json.RawMessage(`{"type":"object","properties":{"text":{"type":"string","description":` + string(propDesc) + `}},"required":["text"]}`),
+	}, echoTool)
 	return server
 }
 

@@ -88,6 +88,21 @@ type RemoteOptions struct {
 	// part of the URL. They are never shown. On success, Remote also puts
 	// them in Result.Secrets.
 	secrets []string
+
+	// shortSecrets are the values of the expanded variables that are shorter
+	// than discover.MinSecretBytes. classify removes them from error text only
+	// where they stand as whole words (see replaceWords): a short value is too
+	// likely to match ordinary words to remove it everywhere.
+	// SDKInspector.Inspect sets them. They are never shown, and they do not go
+	// to Result.Secrets.
+	shortSecrets []string
+
+	// credentials are the values of secrets that are credentials (see
+	// lookupRecorder): the variable name is secret-like or the value looks
+	// like a credential. SDKInspector.Inspect sets them. On success, Remote
+	// puts them in Result.Credentials, with the credentials that it finds in
+	// srv. They are never shown.
+	credentials []string
 }
 
 // Remote connects to a remote MCP server (streamable HTTP or legacy SSE, from
@@ -126,7 +141,10 @@ type RemoteOptions struct {
 //
 // On success, Result.Secrets holds the header values, the URL user info, the
 // secret URL parts and opts.secrets that have at least discover.MinSecretBytes
-// bytes (see resultSecrets).
+// bytes (see resultSecrets). Result.Credentials holds the values of
+// Result.Secrets that look like a credential: the values of credential
+// headers (see headerCredentials), the URL user info, the URL parts of
+// urlCredentials and opts.credentials (see Result.Credentials).
 //
 // If ctx has no deadline, Remote adds a 10 second one. Closing the session
 // sends a DELETE request (streamable HTTP) that the SDK bounds to 5 seconds,
@@ -272,7 +290,7 @@ func Remote(ctx context.Context, srv discover.Server, opts RemoteOptions) (Resul
 		if ctxErr := ctx.Err(); ctxErr != nil && !errors.Is(err, ctxErr) {
 			err = joinContextErr(ctxErr, err)
 		}
-		ce := classify(err, srv, ev, secrets)
+		ce := classify(err, srv, ev, secrets, opts.shortSecrets)
 		ce.Warnings = warnings
 		return Result{}, ce
 	}
@@ -309,6 +327,12 @@ func Remote(ctx context.Context, srv discover.Server, opts RemoteOptions) (Resul
 	// a short password: in ordinary text they would garble words. The error
 	// scrub still removes them.
 	result.Secrets = resultSecrets(secrets)
+	// The values of Secrets that look like a credential, for scan --llm (see
+	// Result.Credentials). resultCredentials only filters Secrets, so
+	// Credentials is a subset of it. All the strings of userinfoSecrets count:
+	// the user info of a URL is always a credential.
+	result.Credentials = resultCredentials(result.Secrets,
+		headerCredentials(srv.Headers), userinfoSecrets(user), urlCredentials(raw), opts.credentials)
 	return result, nil
 }
 
@@ -394,15 +418,92 @@ func splitHeaders(cfg discover.SecretMap) (headers map[string]string, secrets []
 	for key, secret := range cfg {
 		value := secret.Reveal()
 		headers[key] = value
-		if value != "" {
-			secrets = append(secrets, value)
-		}
-		if cred := credentialPart(value); cred != "" {
-			secrets = append(secrets, cred)
-		}
-		secrets = append(secrets, basicSecrets(value)...)
+		secrets = append(secrets, headerSecrets(value)...)
 	}
 	return headers, secrets
+}
+
+// headerSecrets returns the secrets in one header value, for splitHeaders and
+// headerCredentials: the value when it is not empty, the credential part
+// after an auth scheme (see credentialPart) and the parts of a decoded Basic
+// value (see basicSecrets).
+func headerSecrets(value string) []string {
+	var secrets []string
+	if value != "" {
+		secrets = append(secrets, value)
+	}
+	if cred := credentialPart(value); cred != "" {
+		secrets = append(secrets, cred)
+	}
+	return append(secrets, basicSecrets(value)...)
+}
+
+// headerCredentials returns the secrets of the config headers that are
+// credentials, for Result.Credentials. For each header that isCredentialHeader
+// accepts, it returns all the secrets that splitHeaders takes from its value
+// (see headerSecrets): the whole value, the credential after the auth scheme
+// and the parts of a decoded Basic value. A Basic credential that does not
+// decode stays in the list in its encoded form (the credential part), so the
+// check fails closed. For any other header, such as "Content-Type:
+// application/json" or a plain User-Agent, it returns nothing.
+//
+// The result holds raw values. Never print, log or encode them.
+func headerCredentials(cfg discover.SecretMap) []string {
+	var credentials []string
+	for key, secret := range cfg {
+		value := secret.Reveal()
+		if isCredentialHeader(key, value) {
+			credentials = append(credentials, headerSecrets(value)...)
+		}
+	}
+	return credentials
+}
+
+// isCredentialHeader reports whether the header key with value holds a
+// credential:
+//
+//   - the key is secret-like (discover.IsSecretName): "Authorization",
+//     "Proxy-Authorization", "Cookie", "X-Api-Key" and similar;
+//   - the value has an auth scheme and text after it ("Bearer x", "Basic x",
+//     "Token x"; see discover.IsAuthScheme, the rule of
+//     discover.ArgCredentials);
+//   - the value looks like a credential by itself (see looksLikeCredential):
+//     a word of it looks like a token, as in "<word> ghp_x", or it holds a
+//     credential that discover.ArgCredentials finds.
+//
+// An empty value is no credential. It never prints or stores key or value.
+func isCredentialHeader(key, value string) bool {
+	if value == "" {
+		return false
+	}
+	if discover.IsSecretName(key) {
+		return true
+	}
+	if scheme, rest, found := strings.Cut(value, " "); found && strings.TrimSpace(rest) != "" && discover.IsAuthScheme(scheme) {
+		return true
+	}
+	return looksLikeCredential(value)
+}
+
+// urlCredentials returns the secrets of the configured URL raw that are
+// credentials, for Result.Credentials: the parts that
+// discover.ArgCredentials finds in raw as one argument, with at least
+// discover.MinSecretBytes bytes. They are the user info, the password and,
+// by the rule of discover.IsSecretUserName, the user name, always; a query
+// value when its key is secret-like ("?api_key=x"); and a path segment, a
+// matrix parameter or a query part when it looks like a token. So
+// "?workspace=engineering" gives nothing. Remote adds the strings of
+// userinfoSecrets itself: the Basic token that it builds is no part of raw.
+//
+// The result holds raw values. Never print, log or encode them.
+func urlCredentials(raw string) []string {
+	var credentials []string
+	for _, v := range discover.ArgCredentials([]string{raw}) {
+		if len(v) >= discover.MinSecretBytes {
+			credentials = append(credentials, v)
+		}
+	}
+	return credentials
 }
 
 // basicSecrets returns the secrets inside a "Basic <base64>" value: the

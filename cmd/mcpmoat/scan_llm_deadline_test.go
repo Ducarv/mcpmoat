@@ -5,13 +5,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"maps"
 	"net/http"
-	"net/http/httptest"
 	"slices"
 	"strings"
-	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -38,7 +35,7 @@ import (
 //     means no retry: the client fails at once with the provider error, and
 //     the step does not sleep until the deadline.
 //
-// The fake providers of this file send "Retry-After: 0" with every retryable
+// The fake provider (fakeProvider) sends "Retry-After: 0" with every retryable
 // status: cmd/mcpmoat cannot change the backoff waits of package llm (about
 // 0.5 s and more), and the wait of 0 s keeps the tests fast.
 //
@@ -200,7 +197,7 @@ func TestScanLLMStepDeadline(t *testing.T) {
 					tools = append(tools, mkTool(fmt.Sprintf("slow%d", i+1), "Read keys. "+llmMarkHigh))
 				}
 				var started, stopped, noDeadline atomic.Int32
-				cl := llmFuncClassifier(func(ctx context.Context, in llm.Input) (llm.Verdict, error) {
+				cl := &llmFake{answer: func(ctx context.Context, in llm.Input) (llm.Verdict, error) {
 					if strings.HasPrefix(in.ToolName, "fast") {
 						return llmAnswerFor(in)
 					}
@@ -213,7 +210,7 @@ func TestScanLLMStepDeadline(t *testing.T) {
 						stopped.Add(1)
 					}
 					return llm.Verdict{}, err
-				})
+				}}
 
 				r, e := llmDeadlineRun(t.Context(), t, tools, cl, llmTestStepLimit, out.json)
 
@@ -308,7 +305,7 @@ func TestScanLLMStepDeadlineSignal(t *testing.T) {
 				ctx, cancel := context.WithCancel(t.Context())
 				defer cancel()
 				var sawDeadline atomic.Int32
-				cl := llmFuncClassifier(func(callCtx context.Context, _ llm.Input) (llm.Verdict, error) {
+				cl := &llmFake{answer: func(callCtx context.Context, _ llm.Input) (llm.Verdict, error) {
 					if !tt.deadlineFirst {
 						cancel()
 					}
@@ -320,7 +317,7 @@ func TestScanLLMStepDeadlineSignal(t *testing.T) {
 						cancel()
 					}
 					return llm.Verdict{}, err
-				})
+				}}
 				tools := []inspect.Tool{mkTool("t1", "Read keys. "+llmMarkHigh), mkTool("t2", "Add.")}
 
 				r, e := llmDeadlineRun(ctx, t, tools, cl, tt.timeout, out.json)
@@ -398,7 +395,7 @@ func TestScanLLMStepDeadlineProviderFirst(t *testing.T) {
 		for _, out := range llmOutputs {
 			t.Run(tt.name+"/"+out.name, func(t *testing.T) {
 				t.Parallel()
-				cl := llmFuncClassifier(func(ctx context.Context, in llm.Input) (llm.Verdict, error) {
+				cl := &llmFake{answer: func(ctx context.Context, in llm.Input) (llm.Verdict, error) {
 					if tt.failAtOnce && in.ToolName == "t1" {
 						return llm.Verdict{}, status503
 					}
@@ -416,7 +413,7 @@ func TestScanLLMStepDeadlineProviderFirst(t *testing.T) {
 						return llm.Verdict{}, status503
 					}
 					return llm.Verdict{}, err
-				})
+				}}
 				tools := []inspect.Tool{mkTool("t1", "Add."), mkTool("t2", "Read keys. "+llmMarkHigh), mkTool("t3", "Sub.")}
 
 				r, _ := llmDeadlineRun(t.Context(), t, tools, cl, tt.timeout, out.json)
@@ -449,12 +446,12 @@ func TestRunLLMJobsDeadline(t *testing.T) {
 
 	t.Run("answered after the deadline", func(t *testing.T) {
 		t.Parallel()
-		cl := llmFuncClassifier(func(ctx context.Context, _ llm.Input) (llm.Verdict, error) {
+		cl := &llmFake{answer: func(ctx context.Context, _ llm.Input) (llm.Verdict, error) {
 			if err := waitForStop(ctx); errors.Is(err, errDeadlineGuard) {
 				return llm.Verdict{}, err
 			}
 			return llm.Verdict{Risk: llm.RiskHigh, Category: llm.CategoryCredentialAccess}, nil
-		})
+		}}
 		answers, failure := runLLMJobs(t.Context(), jobs, cl, timeout)
 		if failure != nil {
 			t.Errorf("failure = %+v, want nil: every job got an answer", failure)
@@ -465,9 +462,9 @@ func TestRunLLMJobsDeadline(t *testing.T) {
 	})
 	t.Run("stopped by the deadline", func(t *testing.T) {
 		t.Parallel()
-		cl := llmFuncClassifier(func(ctx context.Context, _ llm.Input) (llm.Verdict, error) {
+		cl := &llmFake{answer: func(ctx context.Context, _ llm.Input) (llm.Verdict, error) {
 			return llm.Verdict{}, waitForStop(ctx)
-		})
+		}}
 		answers, failure := runLLMJobs(t.Context(), jobs, cl, timeout)
 		if failure == nil || failure.kind != answerDeadline || failure.timeout != timeout || failure.err != nil {
 			t.Errorf("failure = %+v, want answerDeadline with the timeout %v and no error", failure, timeout)
@@ -618,144 +615,13 @@ func TestPrintLLMProblemsDeadline(t *testing.T) {
 	}
 }
 
-// llmRetryStep is one scripted answer of llmRetryAPI: the status code and the
-// Retry-After header ("" means none). When hold is true, the answer is held
-// until the client closes the request, as llmRetryAPI.hold does for every
-// request; code and retryAfter are then not used.
-type llmRetryStep struct {
-	code       int
-	retryAfter string
-	hold       bool
-}
-
-// llmRetryAPI is a fake LLM provider on a loopback httptest server, for the
-// real client. It speaks the Anthropic Messages API or the OpenAI Chat
-// Completions API, as provider says. Each tool answers with the steps of its
-// script in order, one step for each request; after the script, it answers
-// with the verdict of llmAnswerFor. When hold is true, it answers nothing:
-// it holds each request until the client closes it or the test ends.
-type llmRetryAPI struct {
-	srv      *httptest.Server
-	provider llm.Provider
-	script   map[string][]llmRetryStep
-	hold     bool
-	// release ends every held request at the end of the test, so that the
-	// server can close.
-	release chan struct{}
-	// closed gets one value for each held request that the client closed.
-	closed chan struct{}
-
-	requests atomic.Int32
-	bad      atomic.Int32
-
-	mu     sync.Mutex
-	counts map[string]int
-	bodies [][]byte
-}
-
-// newLLMRetryAPI starts a fake provider. Set script and hold before the
-// first request.
-func newLLMRetryAPI(t *testing.T, provider llm.Provider) *llmRetryAPI {
-	t.Helper()
-	a := &llmRetryAPI{
-		provider: provider,
-		release:  make(chan struct{}),
-		closed:   make(chan struct{}, 64),
-		counts:   make(map[string]int),
-	}
-	a.srv = httptest.NewServer(http.HandlerFunc(a.handle))
-	// The cleanups run in the reverse order: release the held requests
-	// first, then close the server.
-	t.Cleanup(a.srv.Close)
-	t.Cleanup(func() { close(a.release) })
-	return a
-}
-
-// handle answers one request.
-func (a *llmRetryAPI) handle(w http.ResponseWriter, r *http.Request) {
-	a.requests.Add(1)
-	body, err := io.ReadAll(io.LimitReader(r.Body, 1<<20))
-	var p llmSecretPayload
-	if err == nil {
-		var content string
-		if content, err = llmSecretUserMessage(body); err == nil {
-			p, err = llmSecretDecodePayload(content)
-		}
-	}
-	if err != nil {
-		a.bad.Add(1)
-		// 418 is a global failure without a retry: the scan fails, and so
-		// does the test.
-		w.WriteHeader(http.StatusTeapot)
-		return
-	}
-	a.mu.Lock()
-	n := a.counts[p.ToolName]
-	a.counts[p.ToolName]++
-	a.bodies = append(a.bodies, body)
-	steps := a.script[p.ToolName]
-	a.mu.Unlock()
-
-	if a.hold || (n < len(steps) && steps[n].hold) {
-		select {
-		case <-r.Context().Done():
-			// The client closed the request.
-			a.closed <- struct{}{}
-		case <-a.release:
-		}
-		return
-	}
-	if n < len(steps) {
-		if steps[n].retryAfter != "" {
-			w.Header().Set("Retry-After", steps[n].retryAfter)
-		}
-		w.WriteHeader(steps[n].code)
-		return
-	}
-	v, verr := llmAnswerFor(llm.Input{ToolName: p.ToolName, Description: p.ToolDescription})
-	if verr != nil {
-		// Use the script for an error answer in this file.
-		a.bad.Add(1)
-		w.WriteHeader(http.StatusTeapot)
-		return
-	}
-	(&llmRejectAPI{provider: a.provider}).writeVerdict(w, v)
-}
-
-// perTool returns the number of requests for each tool name so far.
-func (a *llmRetryAPI) perTool() map[string]int {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	return maps.Clone(a.counts)
-}
-
-// snapshotBodies returns copies of the request bodies so far.
-func (a *llmRetryAPI) snapshotBodies() [][]byte {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	return slices.Clone(a.bodies)
-}
-
 // llmRetryScan runs "mcpmoat scan --llm" on one server "srv" with tools, with
 // the real client against api and the time limit timeout for the LLM step
 // (0: the default).
-func llmRetryScan(t *testing.T, api *llmRetryAPI, tools []inspect.Tool, timeout time.Duration, jsonOut bool) pinRunResult {
+func llmRetryScan(t *testing.T, api *fakeProvider, tools []inspect.Tool, timeout time.Duration, jsonOut bool) pinRunResult {
 	t.Helper()
 	servers := map[string][]inspect.Tool{"srv": tools}
-	e := llmEnv(t, servers)
-	// A factory with no classifier fails the test when it is called, so the
-	// scan must use the real client below.
-	c, stdout, stderr := llmCLI(e, fakeServers(servers), &llmFactory{t: t})
-	c.newClassifier = newLLMClassifier
-	c.llmStepTimeout = timeout
-	args := []string{"--llm", "--llm-base-url", api.srv.URL}
-	if api.provider == llm.ProviderOpenAI {
-		args = append(args, "--llm-provider", "openai", "--llm-model", "m1")
-	}
-	if jsonOut {
-		args = append(args, "--json")
-	}
-	return llmRun(t, e, c, stdout, stderr, args...)
+	return llmRealScan(t, api, llmEnv(t, servers), fakeServers(servers), timeout, jsonOut)
 }
 
 // TestScanLLMStepDeadlineRealClient runs scan --llm with the real client
@@ -772,7 +638,7 @@ func TestScanLLMStepDeadlineRealClient(t *testing.T) {
 	for _, out := range llmOutputs {
 		t.Run(out.name, func(t *testing.T) {
 			t.Parallel()
-			api := newLLMRetryAPI(t, llm.ProviderAnthropic)
+			api := newFakeProvider(t, llm.ProviderAnthropic)
 			api.hold = true
 			tools := []inspect.Tool{mkTool("t1", "Read keys. "+llmMarkHigh), mkTool("t2", "Add.")}
 
@@ -842,7 +708,7 @@ func TestScanLLMRetry(t *testing.T) {
 	t.Parallel()
 
 	const retryStep = 10 * time.Second
-	ra0 := func(code int) llmRetryStep { return llmRetryStep{code: code, retryAfter: "0"} }
+	ra0 := func(code int) providerStep { return providerStep{code: code, retryAfter: "0"} }
 	t1 := mkTool("t1", "Read keys. "+llmMarkHigh)
 	t2 := mkTool("t2", "Add.")
 	highT1 := []llmHit{{llm.RuleID, "high", "srv", "t1"}}
@@ -850,7 +716,7 @@ func TestScanLLMRetry(t *testing.T) {
 	type retryCase struct {
 		name     string
 		tools    []inspect.Tool
-		script   map[string][]llmRetryStep
+		script   map[string][]providerStep
 		timeout  time.Duration
 		wantCode int
 		// wantTries is the exact number of requests for each tool.
@@ -866,7 +732,7 @@ func TestScanLLMRetry(t *testing.T) {
 		tests = append(tests, retryCase{
 			name:      fmt.Sprintf("HTTP %d once, then 200", code),
 			tools:     []inspect.Tool{t1, t2},
-			script:    map[string][]llmRetryStep{"t1": {ra0(code)}},
+			script:    map[string][]providerStep{"t1": {ra0(code)}},
 			timeout:   retryStep,
 			wantCode:  exitFindings,
 			wantTries: map[string]int{"t1": 2, "t2": 1},
@@ -878,7 +744,7 @@ func TestScanLLMRetry(t *testing.T) {
 			// The third request is the last one, and it succeeds.
 			name:      "HTTP 429 and 503, then 200",
 			tools:     []inspect.Tool{t1, t2},
-			script:    map[string][]llmRetryStep{"t1": {ra0(429), ra0(503)}},
+			script:    map[string][]providerStep{"t1": {ra0(429), ra0(503)}},
 			timeout:   retryStep,
 			wantCode:  exitFindings,
 			wantTries: map[string]int{"t1": llm.RetryMaxTries, "t2": 1},
@@ -887,7 +753,7 @@ func TestScanLLMRetry(t *testing.T) {
 		retryCase{
 			name:      "HTTP 429 every time",
 			tools:     []inspect.Tool{t1},
-			script:    map[string][]llmRetryStep{"t1": slices.Repeat([]llmRetryStep{ra0(429)}, 10)},
+			script:    map[string][]providerStep{"t1": slices.Repeat([]providerStep{ra0(429)}, 10)},
 			timeout:   retryStep,
 			wantCode:  exitError,
 			wantTries: map[string]int{"t1": llm.RetryMaxTries},
@@ -896,7 +762,7 @@ func TestScanLLMRetry(t *testing.T) {
 		retryCase{
 			name:      "HTTP 529 every time",
 			tools:     []inspect.Tool{t1},
-			script:    map[string][]llmRetryStep{"t1": slices.Repeat([]llmRetryStep{ra0(529)}, 10)},
+			script:    map[string][]providerStep{"t1": slices.Repeat([]providerStep{ra0(529)}, 10)},
 			timeout:   retryStep,
 			wantCode:  exitError,
 			wantTries: map[string]int{"t1": llm.RetryMaxTries},
@@ -906,7 +772,7 @@ func TestScanLLMRetry(t *testing.T) {
 			// A Retry-After above the cap: no retry, the failure at once.
 			name:      "HTTP 429 with Retry-After 3600",
 			tools:     []inspect.Tool{t1},
-			script:    map[string][]llmRetryStep{"t1": slices.Repeat([]llmRetryStep{{code: 429, retryAfter: "3600"}}, 10)},
+			script:    map[string][]providerStep{"t1": slices.Repeat([]providerStep{{code: 429, retryAfter: "3600"}}, 10)},
 			timeout:   retryStep,
 			wantCode:  exitError,
 			wantTries: map[string]int{"t1": 1},
@@ -916,7 +782,7 @@ func TestScanLLMRetry(t *testing.T) {
 			// Just above the cap of 30 seconds.
 			name:      "HTTP 503 with Retry-After 31",
 			tools:     []inspect.Tool{t1},
-			script:    map[string][]llmRetryStep{"t1": slices.Repeat([]llmRetryStep{{code: 503, retryAfter: "31"}}, 10)},
+			script:    map[string][]providerStep{"t1": slices.Repeat([]providerStep{{code: 503, retryAfter: "31"}}, 10)},
 			timeout:   retryStep,
 			wantCode:  exitError,
 			wantTries: map[string]int{"t1": 1},
@@ -929,7 +795,7 @@ func TestScanLLMRetry(t *testing.T) {
 			// the line is the provider line, after one request.
 			name:      "HTTP 429 with Retry-After 30 and 10 s left: no wait",
 			tools:     []inspect.Tool{t1},
-			script:    map[string][]llmRetryStep{"t1": slices.Repeat([]llmRetryStep{{code: 429, retryAfter: "30"}}, 10)},
+			script:    map[string][]providerStep{"t1": slices.Repeat([]providerStep{{code: 429, retryAfter: "30"}}, 10)},
 			timeout:   retryStep,
 			wantCode:  exitError,
 			wantTries: map[string]int{"t1": 1},
@@ -944,7 +810,7 @@ func TestScanLLMRetry(t *testing.T) {
 			// the deadline cannot hit during such a wait itself.
 			name:  "HTTP 503 with Retry-After 2, then a request that the deadline stops",
 			tools: []inspect.Tool{t1, t2},
-			script: map[string][]llmRetryStep{"t1": {
+			script: map[string][]providerStep{"t1": {
 				{code: 503, retryAfter: "2"},
 				{hold: true},
 			}},
@@ -957,7 +823,7 @@ func TestScanLLMRetry(t *testing.T) {
 			// A refusal is never tried again, also with Retry-After.
 			name:      "HTTP 400 with Retry-After 0",
 			tools:     []inspect.Tool{mkTool("t1", "Read a file."), t2},
-			script:    map[string][]llmRetryStep{"t1": slices.Repeat([]llmRetryStep{ra0(400)}, 10)},
+			script:    map[string][]providerStep{"t1": slices.Repeat([]providerStep{ra0(400)}, 10)},
 			wantCode:  exitOK,
 			wantTries: map[string]int{"t1": 1, "t2": 1},
 			wantRows:  []llmHit{{llm.RuleIDInvalid, "medium", "srv", "t1"}},
@@ -975,7 +841,7 @@ func TestScanLLMRetry(t *testing.T) {
 		tests = append(tests, retryCase{
 			name:      fmt.Sprintf("HTTP %d with Retry-After 0", tc.code),
 			tools:     []inspect.Tool{t1},
-			script:    map[string][]llmRetryStep{"t1": slices.Repeat([]llmRetryStep{ra0(tc.code)}, 10)},
+			script:    map[string][]providerStep{"t1": slices.Repeat([]providerStep{ra0(tc.code)}, 10)},
 			wantCode:  exitError,
 			wantTries: map[string]int{"t1": 1},
 			wantLine:  scanPrefix + "the LLM provider failed (" + tc.reason + "); 1 tool was not classified\n",
@@ -986,7 +852,7 @@ func TestScanLLMRetry(t *testing.T) {
 		for _, out := range llmOutputs {
 			t.Run(tt.name+"/"+out.name, func(t *testing.T) {
 				t.Parallel()
-				api := newLLMRetryAPI(t, llm.ProviderAnthropic)
+				api := newFakeProvider(t, llm.ProviderAnthropic)
 				api.script = tt.script
 
 				r := llmRetryScan(t, api, tt.tools, tt.timeout, out.json)
@@ -1034,7 +900,7 @@ func TestScanLLMRetry(t *testing.T) {
 func TestScanLLMOpenAICustomBaseURL(t *testing.T) {
 	t.Parallel()
 
-	api := newLLMRetryAPI(t, llm.ProviderOpenAI)
+	api := newFakeProvider(t, llm.ProviderOpenAI)
 	tools := []inspect.Tool{mkTool("t1", "Read keys. "+llmMarkHigh), mkTool("t2", "Add.")}
 
 	r := llmRetryScan(t, api, tools, 0, true)
@@ -1045,18 +911,18 @@ func TestScanLLMOpenAICustomBaseURL(t *testing.T) {
 	if got, want := llmDeadlineRows(t, r.stdout, true, true), []llmHit{{llm.RuleID, "high", "srv", "t1"}}; !slices.Equal(got, want) {
 		t.Errorf("LLM findings = %+v, want %+v", got, want)
 	}
-	bodies := api.snapshotBodies()
-	if len(bodies) != 2 {
-		t.Fatalf("the provider got %d requests, want 2", len(bodies))
+	reqs := api.snapshot()
+	if len(reqs) != 2 {
+		t.Fatalf("the provider got %d requests, want 2", len(reqs))
 	}
-	for i, body := range bodies {
+	for i, sent := range reqs {
 		var req map[string]json.RawMessage
-		if err := json.Unmarshal(body, &req); err != nil {
+		if err := json.Unmarshal(sent.body, &req); err != nil {
 			t.Fatalf("request %d: %v", i, err)
 		}
 		for _, key := range []string{"max_completion_tokens", "max_tokens"} {
 			if _, ok := req[key]; ok {
-				t.Errorf("request %d has the key %q, want none for a custom base URL\nbody: %s", i, key, body)
+				t.Errorf("request %d has the key %q, want none for a custom base URL\nbody: %s", i, key, sent.body)
 			}
 		}
 		if string(req["model"]) != `"m1"` {

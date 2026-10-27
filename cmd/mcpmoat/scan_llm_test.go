@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"math/rand/v2"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -95,67 +94,6 @@ func llmAnswerFor(in llm.Input) (llm.Verdict, error) {
 	default:
 		return llm.Verdict{Risk: llm.RiskNone, Category: llm.CategoryOther}, nil
 	}
-}
-
-// llmFake is a fake toolClassifier. It records each input and counts the
-// calls that run at the same time. It is safe for concurrent use.
-type llmFake struct {
-	// answer gives the answer for one input. Nil means llmAnswerFor.
-	answer func(llm.Input) (llm.Verdict, error)
-	// before, when not nil, runs first in each call, with the context of
-	// the call.
-	before func(ctx context.Context)
-	// shuffle makes each call yield the processor a random number of times
-	// before it answers, so the calls end in a random order.
-	shuffle bool
-
-	calls       atomic.Int32
-	inFlight    atomic.Int32
-	maxInFlight atomic.Int32
-
-	mu     sync.Mutex
-	inputs []llm.Input
-}
-
-// Classify implements toolClassifier.
-func (f *llmFake) Classify(ctx context.Context, in llm.Input) (llm.Verdict, error) {
-	f.calls.Add(1)
-	n := f.inFlight.Add(1)
-	defer f.inFlight.Add(-1)
-	for {
-		m := f.maxInFlight.Load()
-		if n <= m || f.maxInFlight.CompareAndSwap(m, n) {
-			break
-		}
-	}
-	f.mu.Lock()
-	f.inputs = append(f.inputs, in)
-	f.mu.Unlock()
-
-	if f.before != nil {
-		f.before(ctx)
-	}
-	if f.shuffle {
-		for range rand.IntN(200) { //nolint:gosec // G404: test order noise, not security
-			runtime.Gosched()
-		}
-	}
-	if err := ctx.Err(); err != nil {
-		return llm.Verdict{}, fmt.Errorf("test: stopped: %w", err)
-	}
-	if f.answer != nil {
-		return f.answer(in)
-	}
-	return llmAnswerFor(in)
-}
-
-// received returns the inputs so far, sorted by tool name.
-func (f *llmFake) received() []llm.Input {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	out := slices.Clone(f.inputs)
-	slices.SortFunc(out, func(a, b llm.Input) int { return strings.Compare(a.ToolName, b.ToolName) })
-	return out
 }
 
 // llmSameInput reports whether a and b hold the same tool name, the same
@@ -1133,9 +1071,9 @@ func TestScanLLMTruncatedFloor(t *testing.T) {
 		// The fake sets Truncated as the real client does: when the
 		// description is over llm.MaxDescriptionBytes.
 		fake := func() *llmFake {
-			return &llmFake{answer: func(in llm.Input) (llm.Verdict, error) {
+			return &llmFake{answer: llmUnlessStopped(func(in llm.Input) (llm.Verdict, error) {
 				return llm.Verdict{Risk: tt.risk, Category: tt.category, Truncated: len(in.Description) > llm.MaxDescriptionBytes}, nil
-			}}
+			})}
 		}
 		var want []llmHit
 		if tt.severity != "" {
@@ -1207,9 +1145,9 @@ func TestScanLLMTruncatedUnusable(t *testing.T) {
 		// llm.MaxDescriptionBytes, with an error that wraps
 		// llm.ErrInvalidOutput.
 		fake := func() *llmFake {
-			return &llmFake{answer: func(in llm.Input) (llm.Verdict, error) {
+			return &llmFake{answer: llmUnlessStopped(func(in llm.Input) (llm.Verdict, error) {
 				return llm.Verdict{Truncated: len(in.Description) > llm.MaxDescriptionBytes}, fmt.Errorf("%w: test", llm.ErrInvalidOutput)
-			}}
+			})}
 		}
 		for _, jsonOut := range []bool{false, true} {
 			t.Run(fmt.Sprintf("%s/json=%v", tt.name, jsonOut), func(t *testing.T) {
@@ -1649,7 +1587,7 @@ func TestScanLLMKeepsRuleRows(t *testing.T) {
 				t.Fatalf("baseline scan: exit code = %d, want %d\nstderr:\n%s", base.code, exitFindings, base.stderr)
 			}
 			for _, tc := range cases {
-				r := llmScan(t, e, current, &llmFake{answer: tc.answer}, append([]string{"--llm"}, extra...)...)
+				r := llmScan(t, e, current, &llmFake{answer: llmUnlessStopped(tc.answer)}, append([]string{"--llm"}, extra...)...)
 				if r.code != tc.wantCode {
 					t.Errorf("%s: exit code = %d, want %d\nstderr:\n%s", tc.name, r.code, tc.wantCode, r.stderr)
 				}
@@ -1921,7 +1859,7 @@ func TestScanLLMConcurrency(t *testing.T) {
 		guard := time.AfterFunc(10*time.Second, func() { timedOut.Store(true); release() })
 		defer guard.Stop()
 		fake := &llmFake{}
-		fake.before = func(ctx context.Context) {
+		fake.answer = func(ctx context.Context, in llm.Input) (llm.Verdict, error) {
 			if fake.inFlight.Load() >= llmWantWorkers {
 				release()
 			}
@@ -1932,6 +1870,7 @@ func TestScanLLMConcurrency(t *testing.T) {
 			for range 500 {
 				runtime.Gosched()
 			}
+			return llmUnlessStopped(llmAnswerFor)(ctx, in)
 		}
 		r := llmScan(t, llmEnv(t, tools), tools, fake, "--llm", "--json")
 		if timedOut.Load() {
@@ -1972,9 +1911,10 @@ func TestScanLLMInterrupted(t *testing.T) {
 			e := llmEnv(t, tools)
 			ctx, cancel := context.WithCancel(t.Context())
 			defer cancel()
-			fake := &llmFake{before: func(callCtx context.Context) {
+			fake := &llmFake{answer: func(callCtx context.Context, _ llm.Input) (llm.Verdict, error) {
 				cancel()
 				<-callCtx.Done()
+				return llm.Verdict{}, fmt.Errorf("test: stopped: %w", callCtx.Err())
 			}}
 			f := &llmFactory{t: t, cl: fake}
 			c, stdout, stderr := llmCLI(e, fakeServers(tools), f)
@@ -2112,15 +2052,6 @@ func TestLLMSeverity(t *testing.T) {
 	}
 }
 
-// failClassifier is a toolClassifier that fails the test when it is called.
-type failClassifier struct{ t *testing.T }
-
-// Classify implements toolClassifier.
-func (f failClassifier) Classify(context.Context, llm.Input) (llm.Verdict, error) {
-	f.t.Error("Classify was called, want no call")
-	return llm.Verdict{}, errors.New("unexpected call")
-}
-
 // classifyTools is the LLM step without the stderr lines of llmStep: it runs
 // planLLMJobs on outcomes and then classifyPlan with the real time limit
 // defaultLLMStepTimeout. The code of scan calls the same two functions (see
@@ -2157,7 +2088,11 @@ func TestClassifyToolsContext(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			var cl toolClassifier = failClassifier{t}
+			// With no tool to classify, a call fails the test.
+			cl := &llmFake{answer: func(context.Context, llm.Input) (llm.Verdict, error) {
+				t.Error("Classify was called, want no call")
+				return llm.Verdict{}, errors.New("unexpected call")
+			}}
 			if tt.wantErr != nil {
 				cl = &llmFake{}
 			}

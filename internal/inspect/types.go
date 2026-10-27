@@ -323,9 +323,14 @@ type Result struct {
 	// Secrets does not come from the server.
 	//
 	// A server gets these values and can echo them in its tools, prompts or
-	// instructions. Consumers that send Result text off the machine (scan
-	// --llm) use Secrets to remove the values from that text first. The
-	// report does not scrub Result text.
+	// instructions. Secrets is the wide list, for local use. The local report
+	// shows each value of Secrets that a server echoes in a tool name, title,
+	// description or schema as discover.Mask ("********"): see secretMask in
+	// cmd/mcpmoat and pins.CompareMasked. The scrub of error text removes
+	// these values too. A value shorter than discover.MinSecretBytes is not
+	// in the list, so the report does not mask it. scan --llm sends Result
+	// text off the machine and removes from it only the values of
+	// Credentials, the subset that looks like a credential.
 	//
 	// Never print, log, encode (JSON, gob) or store the values. A
 	// discover.Secret prints and encodes as discover.Mask, so a mistake shows
@@ -336,4 +341,37 @@ type Result struct {
 	// It is nil on error, and nil when no value is long enough. Inspect sets
 	// it on success only. A [Run] Outcome has it in Outcome.Result.
 	Secrets []discover.Secret
+
+	// Credentials is the subset of Secrets that looks like a credential.
+	// Only scan --llm uses it: it removes these values from the tool text
+	// that it sends to the provider. Plain config words in Secrets, such as
+	// an env value "production" or a "Content-Type" header value, are not in
+	// Credentials, so the text sent to the provider keeps them (issues #229
+	// and #235). Secrets stays the wide list for local use.
+	//
+	// A value of Secrets is a credential when:
+	//
+	//   - env: the key is secret-like (discover.IsSecretName), or the value
+	//     looks like a credential: a word of it looks like a token
+	//     (discover.TokenLike), or discover.ArgCredentials finds a credential
+	//     in it, such as the password of "postgres://u:pw@h/db".
+	//   - stdio args: discover.ArgCredentials returns it, for example the
+	//     value after a secret-like flag or key, a token-like piece (a UUID
+	//     or a long random segment) or a URL credential.
+	//   - header: the name is secret-like (Authorization, Cookie, X-Api-Key
+	//     and similar), the value is the credential after an auth scheme
+	//     ("Bearer <token>") or a decoded Basic value, or the value looks
+	//     like a credential as an env value does. Then every value of Secrets
+	//     that the header gives counts.
+	//   - URL: the user info and the password always; a query or path part
+	//     only when its key is secret-like or it looks like a token.
+	//   - expanded variable: the variable name is secret-like or the value
+	//     looks like a credential as an env value does.
+	//
+	// The rules of Secrets apply here too: each value has at least
+	// discover.MinSecretBytes bytes and is in the list one time. Never
+	// print, log, encode or store the values; a discover.Secret prints and
+	// encodes as discover.Mask. It is nil on error and nil when no value is
+	// a credential. Inspect sets it on success only.
+	Credentials []discover.Secret
 }

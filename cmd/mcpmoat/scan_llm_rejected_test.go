@@ -2,17 +2,14 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
+	"maps"
 	"net/http"
-	"net/http/httptest"
 	"regexp"
 	"slices"
 	"strconv"
 	"strings"
-	"sync"
 	"sync/atomic"
 	"testing"
 
@@ -33,212 +30,16 @@ import (
 // tool); N tools were not classified". A global failure (401, 403, 404, 5xx)
 // or a signal wins over that check.
 
-// llmRejectBodyCanary is in the body and in a header of every refusal of
-// llmRejectAPI. The client never reads them, so it must show in no output.
-const llmRejectBodyCanary = "mcpmoat-reject-body-canary-Hs4Qm8"
-
-// llmMarkStatus returns the marker that makes llmRejectAPI answer a tool with
-// the HTTP status code. The marker must be in the first part of a long
-// description, before the cut of llm.MaxDescriptionBytes.
-func llmMarkStatus(code int) string { return fmt.Sprintf("llm:http%d", code) }
-
-// llmRejectStatus finds the marker of llmMarkStatus in a description.
-var llmRejectStatus = regexp.MustCompile(`llm:http(\d{3})`)
-
-// llmRejectAPI is a fake LLM provider on a loopback httptest server. It
-// speaks the Anthropic Messages API or the OpenAI Chat Completions API, as
-// provider says. A tool whose description holds llmMarkStatus(code) gets that
-// status, with llmRejectBodyCanary in the body and in a header. Any other
-// tool gets the answer of llmAnswerFor: a verdict, or a 2xx answer that
-// cannot be used for llmMarkInvalid.
-type llmRejectAPI struct {
-	srv      *httptest.Server
-	provider llm.Provider
-
-	// requests counts every request. bad counts the requests that the fake
-	// could not read: it answers them with a global failure, and the test
-	// fails.
-	requests atomic.Int32
-	bad      atomic.Int32
-
-	mu    sync.Mutex
-	tools []string // the tool name of each request, in the order of arrival
-}
-
-// newLLMRejectAPI starts a fake provider of the given flavour.
-func newLLMRejectAPI(t *testing.T, provider llm.Provider) *llmRejectAPI {
-	t.Helper()
-	a := &llmRejectAPI{provider: provider}
-	a.srv = httptest.NewServer(http.HandlerFunc(a.handle))
-	t.Cleanup(a.srv.Close)
-	return a
-}
-
-// path returns the API path of the provider.
-func (a *llmRejectAPI) path() string {
-	if a.provider == llm.ProviderOpenAI {
-		return "/chat/completions"
-	}
-	return "/v1/messages"
-}
-
-// handle answers one request.
-func (a *llmRejectAPI) handle(w http.ResponseWriter, r *http.Request) {
-	a.requests.Add(1)
-	body, err := io.ReadAll(io.LimitReader(r.Body, 1<<20))
-	var content string
-	if err == nil {
-		content, err = llmSecretUserMessage(body)
-	}
-	var p llmSecretPayload
-	if err == nil {
-		p, err = llmSecretDecodePayload(content)
-	}
-	if err != nil || r.URL.Path != a.path() {
-		a.bad.Add(1)
-		// 418 is a global failure: the scan fails, and so does the test.
-		w.WriteHeader(http.StatusTeapot)
-		return
-	}
-	a.mu.Lock()
-	a.tools = append(a.tools, p.ToolName)
-	a.mu.Unlock()
-
-	if m := llmRejectStatus.FindStringSubmatch(p.ToolDescription); m != nil {
-		code, _ := strconv.Atoi(m[1])
-		a.writeStatus(w, code)
-		return
-	}
-	v, verr := llmAnswerFor(llm.Input{ToolName: p.ToolName, Description: p.ToolDescription})
-	switch {
-	case errors.Is(verr, llm.ErrInvalidOutput):
-		a.writeUnusable(w)
-	case verr != nil:
-		// Use llmMarkStatus for a status code in this file.
-		a.bad.Add(1)
-		w.WriteHeader(http.StatusTeapot)
-	default:
-		a.writeVerdict(w, v)
-	}
-}
-
-// writeStatus writes an error answer with code. The body is JSON with the
-// canary and a raw escape byte, the error shape of the provider, so a client
-// that printed it would fail the test.
-//
-// Every error answer has "Retry-After: 0". For a code that the client tries
-// again (429, 502, 503, 504, 529) it makes the client wait 0 s instead of its
-// backoff of 1 s and more, which cmd/mcpmoat cannot change. For a refusal
-// (400, 413, 422) and the other codes it must change nothing: the client
-// sends one request for that tool (see TestScanLLMRejected).
-func (a *llmRejectAPI) writeStatus(w http.ResponseWriter, code int) {
-	w.Header().Set("Content-Type", "application/json")
-	w.Header().Set("X-Request-Id", llmRejectBodyCanary)
-	w.Header().Set("Retry-After", "0")
-	w.WriteHeader(code)
-	msg := llmRejectBodyCanary + " \x1b[31mrefused\x1b[0m"
-	if a.provider == llm.ProviderOpenAI {
-		_, _ = io.WriteString(w, `{"error":{"message":"`+msg+`","type":"invalid_request_error","code":null}}`)
-		return
-	}
-	_, _ = io.WriteString(w, `{"type":"error","error":{"type":"invalid_request_error","message":"`+msg+`"}}`)
-}
-
-// writeUnusable writes a 2xx answer with no usable verdict: a refusal of the
-// model. The client gives llm.ErrInvalidOutput.
-func (a *llmRejectAPI) writeUnusable(w http.ResponseWriter) {
-	if a.provider == llm.ProviderOpenAI {
-		writeLLMJSON(w, map[string]any{
-			"id":     "chatcmpl-test",
-			"object": "chat.completion",
-			"model":  "m1",
-			"choices": []any{map[string]any{
-				"index":         0,
-				"finish_reason": "content_filter",
-				"message":       map[string]any{"role": "assistant", "content": ""},
-			}},
-		})
-		return
-	}
-	writeLLMJSON(w, map[string]any{
-		"id":          "msg_test",
-		"type":        "message",
-		"role":        "assistant",
-		"model":       "claude-test",
-		"stop_reason": "refusal",
-		"content":     []any{},
-	})
-}
-
-// writeVerdict writes the 2xx answer of the provider for the verdict v.
-func (a *llmRejectAPI) writeVerdict(w http.ResponseWriter, v llm.Verdict) {
-	if a.provider != llm.ProviderOpenAI {
-		writeLLMVerdict(w, v)
-		return
-	}
-	content, _ := json.Marshal(map[string]string{"risk": string(v.Risk), "category": string(v.Category)})
-	writeLLMJSON(w, map[string]any{
-		"id":     "chatcmpl-test",
-		"object": "chat.completion",
-		"model":  "m1",
-		"choices": []any{map[string]any{
-			"index":         0,
-			"finish_reason": "stop",
-			"message":       map[string]any{"role": "assistant", "content": string(content)},
-		}},
-	})
-}
-
-// requestsPerTool returns the number of requests for each tool name so far.
-func (a *llmRejectAPI) requestsPerTool() map[string]int {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	out := make(map[string]int)
-	for _, name := range a.tools {
-		out[name]++
-	}
-	return out
-}
-
 // llmToolTries returns the largest number of requests that the client sends
-// for tl with llmRejectAPI: llm.RetryMaxTries for a tool that gets a code of
+// for tl with fakeProvider: llm.RetryMaxTries for a tool that gets a code of
 // llmRetryCodes (a code that the client tries again), else 1.
 func llmToolTries(tl inspect.Tool) int {
-	if m := llmRejectStatus.FindStringSubmatch(tl.Description); m != nil {
+	if m := llmStatusMarker.FindStringSubmatch(tl.Description); m != nil {
 		if code, err := strconv.Atoi(m[1]); err == nil && slices.Contains(llmRetryCodes, code) {
 			return llm.RetryMaxTries
 		}
 	}
 	return 1
-}
-
-// sentTools returns the sorted tool names of the requests so far.
-func (a *llmRejectAPI) sentTools() []string {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	out := slices.Clone(a.tools)
-	slices.Sort(out)
-	return out
-}
-
-// llmRejectScan runs "mcpmoat scan --llm" on the servers of tools with the
-// real LLM client against api.
-func llmRejectScan(t *testing.T, api *llmRejectAPI, tools map[string][]inspect.Tool, jsonOut bool, extra ...string) pinRunResult {
-	t.Helper()
-	e := llmEnv(t, tools)
-	// A factory with no classifier fails the test when it is called, so the
-	// scan must use the real client below.
-	c, stdout, stderr := llmCLI(e, fakeServers(tools), &llmFactory{t: t})
-	c.newClassifier = newLLMClassifier
-
-	args := []string{"--llm", "--llm-base-url", api.srv.URL}
-	if api.provider == llm.ProviderOpenAI {
-		args = append(args, "--llm-provider", "openai", "--llm-model", "m1")
-	}
-	if jsonOut {
-		args = append(args, "--json")
-	}
-	return llmRun(t, e, c, stdout, stderr, append(args, extra...)...)
 }
 
 // llmRejectRow is the part of an LLM finding that the tests of this file
@@ -536,10 +337,10 @@ func TestScanLLMRejected(t *testing.T) {
 				}
 				t.Run(tt.name+"/"+string(provider)+"/"+out, func(t *testing.T) {
 					t.Parallel()
-					api := newLLMRejectAPI(t, provider)
+					api := newFakeProvider(t, provider)
 					tools := map[string][]inspect.Tool{"srv": tt.tools}
 
-					r := llmRejectScan(t, api, tools, jsonOut, tt.args...)
+					r := llmRealScan(t, api, llmEnv(t, tools), fakeServers(tools), 0, jsonOut, tt.args...)
 
 					if r.code != tt.wantCode {
 						t.Errorf("exit code = %d, want %d\nstdout:\n%s\nstderr:\n%s", r.code, tt.wantCode, r.stdout, r.stderr)
@@ -563,7 +364,7 @@ func TestScanLLMRejected(t *testing.T) {
 					case tt.wantReason != "" && (n < 1 || n > maxN):
 						t.Errorf("the provider got %d requests, want 1 to %d", n, maxN)
 					}
-					perTool := api.requestsPerTool()
+					perTool := api.perTool()
 					for _, tl := range tt.tools {
 						if got, limit := perTool[tl.Name], llmToolTries(tl); got > limit {
 							t.Errorf("the provider got %d requests for %s, want at most %d", got, tl.Name, limit)
@@ -575,13 +376,12 @@ func TestScanLLMRejected(t *testing.T) {
 						}
 					}
 					if tt.wantReason == "" {
-						var want []string
+						want := make(map[string]int)
 						for _, tl := range tt.tools {
-							want = append(want, tl.Name)
+							want[tl.Name] = 1
 						}
-						slices.Sort(want)
-						if got := api.sentTools(); !slices.Equal(got, want) {
-							t.Errorf("the provider got the tools %q, want %q", got, want)
+						if !maps.Equal(perTool, want) {
+							t.Errorf("the provider got the tools %v, want each of %v once", perTool, want)
 						}
 					}
 
@@ -633,7 +433,7 @@ func TestScanLLMRejected(t *testing.T) {
 
 					// The body and the headers of a refusal are never read.
 					for name, text := range map[string]string{"stdout": r.stdout, "stderr": r.stderr} {
-						if strings.Contains(text, llmRejectBodyCanary) {
+						if strings.Contains(text, llmErrorBodyCanary) {
 							t.Errorf("%s holds the canary of the refusal body:\n%s", name, text)
 						}
 						if strings.Contains(text, "refused\\x1b") || strings.Contains(text, "invalid_request_error") {
@@ -687,15 +487,6 @@ func rejectRowsSubset(got, want []llmRejectRow) bool {
 	return true
 }
 
-// llmFuncClassifier is a toolClassifier that calls its function. A test uses
-// it when it needs the context of the call.
-type llmFuncClassifier func(ctx context.Context, in llm.Input) (llm.Verdict, error)
-
-// Classify implements toolClassifier.
-func (f llmFuncClassifier) Classify(ctx context.Context, in llm.Input) (llm.Verdict, error) {
-	return f(ctx, in)
-}
-
 // TestScanLLMRejectedThenGlobalFailure runs a full scan where the provider
 // refuses t1 (HTTP 400) and then fails for t2 (HTTP 503). The fake makes the
 // order fixed: t2 answers only after t1 answered. The global failure wins:
@@ -710,9 +501,7 @@ func TestScanLLMRejectedThenGlobalFailure(t *testing.T) {
 			t.Parallel()
 			tools := map[string][]inspect.Tool{"srv": {mkTool("t1", "Read a file."), mkTool("t2", "Add.")}}
 			refusedOnce := make(chan struct{})
-			var calls atomic.Int32
-			cl := llmFuncClassifier(func(ctx context.Context, in llm.Input) (llm.Verdict, error) {
-				calls.Add(1)
+			cl := &llmFake{answer: func(ctx context.Context, in llm.Input) (llm.Verdict, error) {
 				switch in.ToolName {
 				case "t1":
 					defer close(refusedOnce)
@@ -725,7 +514,7 @@ func TestScanLLMRejectedThenGlobalFailure(t *testing.T) {
 					}
 					return llm.Verdict{}, &llm.StatusError{Code: http.StatusServiceUnavailable}
 				}
-			})
+			}}
 			args := []string{"--llm", "--fail-on", "medium"}
 			if jsonOut {
 				args = append(args, "--json")
@@ -736,7 +525,7 @@ func TestScanLLMRejectedThenGlobalFailure(t *testing.T) {
 			if r.code != exitError {
 				t.Errorf("exit code = %d, want %d\nstderr:\n%s", r.code, exitError, r.stderr)
 			}
-			if got := calls.Load(); got != 2 {
+			if got := cl.calls.Load(); got != 2 {
 				t.Errorf("Classify calls = %d, want 2", got)
 			}
 			want := []string{scanPrefix + "the LLM provider failed (HTTP 503); 1 tool was not classified\n"}
@@ -881,14 +670,14 @@ func TestClassifyToolsRejected(t *testing.T) {
 		t.Parallel()
 		// t2 answers only after t1 answered, so t1 always has its refusal.
 		refused := make(chan struct{})
-		cl := llmFuncClassifier(func(_ context.Context, in llm.Input) (llm.Verdict, error) {
+		cl := &llmFake{answer: func(_ context.Context, in llm.Input) (llm.Verdict, error) {
 			if in.ToolName == "t1" {
 				defer close(refused)
 				return llm.Verdict{}, &llm.StatusError{Code: http.StatusBadRequest}
 			}
 			<-refused
 			return llm.Verdict{}, &llm.StatusError{Code: http.StatusServiceUnavailable}
-		})
+		}}
 		res, err := classifyTools(t.Context(), rejectOutcomes(toolsOf("t1", "t2")...), cl, &scanIgnores{})
 		if err != nil {
 			t.Fatalf("classifyTools() error = %v", err)
@@ -908,13 +697,13 @@ func TestClassifyToolsRejected(t *testing.T) {
 		t.Parallel()
 		// t1 answers only after the 503 of t2 cancelled the step. Its
 		// answer is still a refusal of the provider, so it keeps its row.
-		cl := llmFuncClassifier(func(ctx context.Context, in llm.Input) (llm.Verdict, error) {
+		cl := &llmFake{answer: func(ctx context.Context, in llm.Input) (llm.Verdict, error) {
 			if in.ToolName == "t2" {
 				return llm.Verdict{}, &llm.StatusError{Code: http.StatusServiceUnavailable}
 			}
 			<-ctx.Done()
 			return llm.Verdict{}, &llm.StatusError{Code: http.StatusBadRequest}
-		})
+		}}
 		res, err := classifyTools(t.Context(), rejectOutcomes(toolsOf("t1", "t2")...), cl, &scanIgnores{})
 		if err != nil {
 			t.Fatalf("classifyTools() error = %v", err)
@@ -930,14 +719,14 @@ func TestClassifyToolsRejected(t *testing.T) {
 	t.Run("an internal failure wins over the check", func(t *testing.T) {
 		t.Parallel()
 		refused := make(chan struct{})
-		cl := llmFuncClassifier(func(_ context.Context, in llm.Input) (llm.Verdict, error) {
+		cl := &llmFake{answer: func(_ context.Context, in llm.Input) (llm.Verdict, error) {
 			if in.ToolName == "t1" {
 				defer close(refused)
 				return llm.Verdict{}, llm.ErrRejected
 			}
 			<-refused
 			return llm.Verdict{}, errors.New("local-error-canary-Np2")
-		})
+		}}
 		res, err := classifyTools(t.Context(), rejectOutcomes(toolsOf("t1", "t2")...), cl, &scanIgnores{})
 		if err != nil {
 			t.Fatalf("classifyTools() error = %v", err)
@@ -955,13 +744,13 @@ func TestClassifyToolsRejected(t *testing.T) {
 		ctx, cancel := context.WithCancel(t.Context())
 		defer cancel()
 		var answered atomic.Int32
-		cl := llmFuncClassifier(func(_ context.Context, _ llm.Input) (llm.Verdict, error) {
+		cl := &llmFake{answer: func(_ context.Context, _ llm.Input) (llm.Verdict, error) {
 			// The last refusal comes with the signal.
 			if answered.Add(1) == 3 {
 				cancel()
 			}
 			return llm.Verdict{}, &llm.StatusError{Code: http.StatusBadRequest}
-		})
+		}}
 		res, err := classifyTools(ctx, rejectOutcomes(toolsOf("t1", "t2", "t3")...), cl, &scanIgnores{})
 		if !errors.Is(err, context.Canceled) {
 			t.Fatalf("classifyTools() error = %v, want context.Canceled", err)
@@ -1097,6 +886,3 @@ func TestRejectedReason(t *testing.T) {
 		})
 	}
 }
-
-// Compile-time check: the fake of this file is a toolClassifier.
-var _ toolClassifier = llmFuncClassifier(nil)

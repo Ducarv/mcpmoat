@@ -174,7 +174,8 @@ var rmQuerySecrets = []string{"Bearer " + rmBearerSecret, rmBearerSecret, rmAPIK
 func rmCheckResult(t *testing.T, got Result, wantSecrets ...string) {
 	t.Helper()
 	checkSecrets(t, got.Secrets, wantSecrets)
-	got.Secrets = nil // got is a copy
+	// Credentials is a subset of Secrets, from the config too.
+	got.Secrets, got.Credentials = nil, nil // got is a copy
 
 	if got.ProtocolVersion == "" {
 		t.Error("ProtocolVersion is empty, want the negotiated version")
@@ -3272,4 +3273,385 @@ func TestRemoteNoSSEHintAfterHandshake(t *testing.T) {
 			t.Errorf("Reason = %q, want the SSE hint", ce.Reason)
 		}
 	})
+}
+
+// The tests below cover Result.Credentials of a remote server (issues #229
+// and #235): the subset of Result.Secrets that looks like a credential.
+// Result.Secrets stays the wide list: every header value of 8 bytes or more,
+// as before. credTok, credDSN and checkCredentials are in secrets_test.go.
+
+// rmBrowserUA is a plain browser User-Agent. It is long, but no word of it
+// looks like a token.
+const rmBrowserUA = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+
+// TestIsCredentialHeader checks which header keys and values hold a
+// credential, with the plain headers of issue #229 as cases that must not
+// match.
+func TestIsCredentialHeader(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		key   string
+		value string
+		want  bool
+	}{
+		// Must match.
+		{key: "Authorization", value: "Bearer " + credTok, want: true},
+		{key: "Authorization", value: "production", want: true},
+		{key: "Proxy-Authorization", value: rmBasic("user", "basic-pass-1"), want: true},
+		{key: "Cookie", value: "session=FAKEsession01", want: true},
+		{key: "X-Api-Key", value: "production", want: true},
+		{key: "X-Upstream", value: "Bearer plainword", want: true},
+		{key: "X-Upstream", value: "Token plainword", want: true},
+		{key: "X-Custom", value: credTok, want: true},
+		{key: "X-Custom", value: "prefix ghp_FAKE0123", want: true},
+		{key: "X-Db", value: credDSN, want: true},
+		// Must not match.
+		{key: "Content-Type", value: "application/json", want: false},
+		{key: "Accept", value: "text/event-stream, application/json", want: false},
+		{key: "User-Agent", value: rmBrowserUA, want: false},
+		{key: "User-Agent", value: "my-client/1.2.3", want: false},
+		{key: "X-Title", value: "My Documents", want: false},
+		{key: "X-Workspace", value: "engineering", want: false},
+		// An auth scheme with nothing after it is no credential.
+		{key: "X-Upstream", value: "Bearer ", want: false},
+		{key: "Authorization", value: "", want: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.key+": "+tt.value, func(t *testing.T) {
+			t.Parallel()
+			if got := isCredentialHeader(tt.key, tt.value); got != tt.want {
+				t.Errorf("isCredentialHeader(%q, %q) = %v, want %v", tt.key, tt.value, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestHeaderSecretsAndCredentials checks the header lists as Remote joins
+// them: Result.Secrets from splitHeaders (the wide list, unchanged by issue
+// #229) and Result.Credentials from headerCredentials. It runs without a
+// server, so it also covers Content-Type and Accept, which Remote refuses as
+// config headers (see isReservedHeader).
+func TestHeaderSecretsAndCredentials(t *testing.T) {
+	t.Parallel()
+
+	basic := rmBasic("basic-name-1", "basic-pass-1")
+	basicToken := strings.TrimPrefix(basic, "Basic ")
+	tests := []struct {
+		name        string
+		headers     map[string]string
+		wantSecrets []string
+		wantCreds   []string
+	}{
+		{name: "no headers", wantSecrets: nil, wantCreds: nil},
+		{
+			name:        "content type",
+			headers:     map[string]string{"Content-Type": "application/json"},
+			wantSecrets: []string{"application/json"},
+			wantCreds:   nil,
+		},
+		{
+			name:        "accept",
+			headers:     map[string]string{"Accept": "text/event-stream, application/json"},
+			wantSecrets: []string{"text/event-stream, application/json"},
+			wantCreds:   nil,
+		},
+		{
+			name:        "browser user agent",
+			headers:     map[string]string{"User-Agent": rmBrowserUA},
+			wantSecrets: []string{rmBrowserUA},
+			wantCreds:   nil,
+		},
+		{
+			// credentialPart reads "My" as a scheme, so "Documents" is in
+			// the wide list too (issue #235). Neither is a credential.
+			name:        "title of two words",
+			headers:     map[string]string{"X-Title": "My Documents"},
+			wantSecrets: []string{"My Documents", "Documents"},
+			wantCreds:   nil,
+		},
+		{
+			name:        "bearer",
+			headers:     map[string]string{"Authorization": "Bearer " + credTok},
+			wantSecrets: []string{"Bearer " + credTok, credTok},
+			wantCreds:   []string{"Bearer " + credTok, credTok},
+		},
+		{
+			name:        "basic",
+			headers:     map[string]string{"Authorization": basic},
+			wantSecrets: []string{basic, basicToken, "basic-name-1", "basic-pass-1"},
+			wantCreds:   []string{basic, basicToken, "basic-name-1", "basic-pass-1"},
+		},
+		{
+			// The value does not decode, so the encoded part stays in both
+			// lists: the check fails closed.
+			name:        "basic that does not decode",
+			headers:     map[string]string{"Authorization": "Basic !!not-base64!!"},
+			wantSecrets: []string{"Basic !!not-base64!!", "!!not-base64!!"},
+			wantCreds:   []string{"Basic !!not-base64!!", "!!not-base64!!"},
+		},
+		{
+			name:        "cookie",
+			headers:     map[string]string{"Cookie": "session=FAKEsession01"},
+			wantSecrets: []string{"session=FAKEsession01"},
+			wantCreds:   []string{"session=FAKEsession01"},
+		},
+		{
+			name: "plain and credential headers",
+			headers: map[string]string{
+				"Content-Type": "application/json",
+				"User-Agent":   "my-client/1.2.3",
+				"X-Api-Key":    "production",
+				"X-Short":      "SEVEN77",
+			},
+			wantSecrets: []string{"application/json", "my-client/1.2.3", "production"},
+			wantCreds:   []string{"production"},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			cfg := rmServer(discover.TransportHTTP, "https://example.test/mcp", tt.headers).Headers
+			_, secrets := splitHeaders(cfg)
+			r := Result{Secrets: resultSecrets(secrets)}
+			r.Credentials = resultCredentials(r.Secrets, headerCredentials(cfg))
+
+			checkSecrets(t, r.Secrets, tt.wantSecrets)
+			checkCredentials(t, r, tt.wantCreds)
+		})
+	}
+}
+
+// TestURLCredentials checks the URL parts that urlCredentials finds: the
+// user info, the password, a secret-key query value and a token-like path
+// segment, and not a plain query value.
+func TestURLCredentials(t *testing.T) {
+	t.Parallel()
+
+	const userURL = "https://user-name:userinfo-pw-1@example.test/mcp" //nolint:gosec // G101: fake test credential
+
+	tests := []struct {
+		name string
+		raw  string
+		want []string // nil means a nil result
+	}{
+		{name: "plain URL", raw: "https://example.test/mcp", want: nil},
+		{name: "plain query value", raw: "https://example.test/mcp?workspace=engineering", want: nil},
+		{name: "secret query key", raw: "https://example.test/mcp?api_key=FAKEapikey01", want: []string{"FAKEapikey01"}},
+		{
+			name: "plain and secret query values",
+			raw:  "https://example.test/mcp?workspace=engineering&api_key=FAKEapikey01",
+			want: []string{"FAKEapikey01"},
+		},
+		{
+			name: "user info",
+			raw:  userURL,
+			want: []string{"user-name:userinfo-pw-1", "userinfo-pw-1"},
+		},
+		{name: "token path segment", raw: "https://example.test/ghp_FAKEsegment0123/mcp", want: []string{"ghp_FAKEsegment0123"}},
+		{name: "short query secret", raw: "https://example.test/mcp?token=SEVEN77", want: nil},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got := urlCredentials(tt.raw)
+			if !slices.Equal(got, tt.want) || (tt.want == nil && got != nil) {
+				t.Errorf("urlCredentials(%q) = %q, want %q", tt.raw, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestRemoteResultCredentials checks Result.Secrets and Result.Credentials
+// of Remote against a live fixture server. wantSecrets is the wide list, as
+// before issues #229 and #235: every header value of 8 bytes or more, the
+// URL user info and the secret URL parts. wantCreds is the subset that
+// looks like a credential. Both are in the order of Result.Secrets.
+func TestRemoteResultCredentials(t *testing.T) {
+	t.Parallel()
+
+	const (
+		tokenSegment = "ghp_FAKEsegment0123" //nolint:gosec // G101: fake test credential
+		mixedQuery   = "?workspace=engineering&api_key=FAKEapikey01"
+	)
+	basic := rmBasic("basic-name-1", "basic-pass-1")
+	basicToken := strings.TrimPrefix(basic, "Basic ")
+	user := rmBasic("user-name", "userinfo-pw-1")
+	userToken := strings.TrimPrefix(user, "Basic ")
+	tests := []struct {
+		name    string
+		headers map[string]string
+		// url builds the configured URL. nil means fixtureURL.
+		url  func(ts *httptest.Server) string
+		wrap func(http.Handler) http.Handler
+		// secrets and credentials are RemoteOptions.secrets and
+		// RemoteOptions.credentials, from the expanded variables.
+		secrets     []string
+		credentials []string
+		wantSecrets []string
+		wantCreds   []string
+	}{
+		{
+			// Content-Type and Accept are reserved (see isReservedHeader), so
+			// X-Format carries the media type here.
+			name: "plain headers",
+			headers: map[string]string{
+				"User-Agent": rmBrowserUA,
+				"X-Format":   "application/json",
+				"X-Client":   "my-client/1.2.3",
+				"X-Title":    "My Documents",
+			},
+			wantSecrets: []string{rmBrowserUA, "application/json", "my-client/1.2.3", "My Documents", "Documents"},
+			wantCreds:   nil,
+		},
+		{
+			name:        "plain user agent",
+			headers:     map[string]string{"User-Agent": "my-client/1.2.3"},
+			wantSecrets: []string{"my-client/1.2.3"},
+			wantCreds:   nil,
+		},
+		{
+			name:        "bearer",
+			headers:     map[string]string{"Authorization": "Bearer " + credTok},
+			wantSecrets: []string{"Bearer " + credTok, credTok},
+			wantCreds:   []string{"Bearer " + credTok, credTok},
+		},
+		{
+			// The auth scheme makes it a credential, though the key is plain.
+			name:        "bearer under a plain key",
+			headers:     map[string]string{"X-Upstream": "Bearer plainword"},
+			wantSecrets: []string{"Bearer plainword", "plainword"},
+			wantCreds:   []string{"Bearer plainword", "plainword"},
+		},
+		{
+			name:        "basic",
+			headers:     map[string]string{"Authorization": basic},
+			wantSecrets: []string{basic, basicToken, "basic-name-1", "basic-pass-1"},
+			wantCreds:   []string{basic, basicToken, "basic-name-1", "basic-pass-1"},
+		},
+		{
+			name:        "cookie",
+			headers:     map[string]string{"Cookie": "session=FAKEsession01"},
+			wantSecrets: []string{"session=FAKEsession01"},
+			wantCreds:   []string{"session=FAKEsession01"},
+		},
+		{
+			name:        "api key with a plain value",
+			headers:     map[string]string{"X-Api-Key": "production"},
+			wantSecrets: []string{"production"},
+			wantCreds:   []string{"production"},
+		},
+		{
+			name:        "token-like value under a plain key",
+			headers:     map[string]string{"X-Custom": credTok},
+			wantSecrets: []string{credTok},
+			wantCreds:   []string{credTok},
+		},
+		{
+			name:        "user info",
+			url:         func(ts *httptest.Server) string { return rmUserURL(ts, "user-name:userinfo-pw-1") },
+			wantSecrets: []string{user, userToken, "userinfo-pw-1"},
+			wantCreds:   []string{user, userToken, "userinfo-pw-1"},
+		},
+		{
+			name:        "plain query value",
+			url:         func(ts *httptest.Server) string { return fixtureURL(ts) + "?workspace=engineering" },
+			wantSecrets: []string{"engineering"},
+			wantCreds:   nil,
+		},
+		{
+			name:        "secret query key",
+			url:         func(ts *httptest.Server) string { return fixtureURL(ts) + mixedQuery },
+			wantSecrets: []string{"FAKEapikey01", "engineering"},
+			wantCreds:   []string{"FAKEapikey01"},
+		},
+		{
+			name:        "token path segment",
+			url:         func(ts *httptest.Server) string { return ts.URL + "/" + tokenSegment + "/mcp" },
+			wrap:        func(next http.Handler) http.Handler { return http.StripPrefix("/"+tokenSegment, next) },
+			wantSecrets: []string{tokenSegment},
+			wantCreds:   []string{tokenSegment},
+		},
+		{
+			// A credential of the expanded values that is not in secrets is
+			// dropped: Credentials stays a subset of Secrets.
+			name:        "expanded values",
+			secrets:     []string{"expanded-plain-1", credTok},
+			credentials: []string{credTok, "not-in-secrets-1"},
+			wantSecrets: []string{credTok, "expanded-plain-1"},
+			wantCreds:   []string{credTok},
+		},
+		{
+			name: "every source",
+			headers: map[string]string{
+				"Authorization": "Bearer " + credTok,
+				"User-Agent":    "my-client/1.2.3",
+			},
+			url:         func(ts *httptest.Server) string { return fixtureURL(ts) + mixedQuery },
+			secrets:     []string{"expanded-plain-1"},
+			wantSecrets: []string{"Bearer " + credTok, credTok, "expanded-plain-1", "my-client/1.2.3", "FAKEapikey01", "engineering"},
+			wantCreds:   []string{"Bearer " + credTok, credTok, "FAKEapikey01"},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			ts, _ := startFixture(t, fixtureOpts{Wrap: tt.wrap})
+			rawURL := fixtureURL(ts)
+			if tt.url != nil {
+				rawURL = tt.url(ts)
+			}
+			srv := rmServer(discover.TransportHTTP, rawURL, tt.headers)
+
+			got, err := Remote(t.Context(), srv, RemoteOptions{secrets: tt.secrets, credentials: tt.credentials})
+			if err != nil {
+				t.Fatalf("Remote() error = %v", err)
+			}
+			rmCheckResult(t, got, tt.wantSecrets...)
+			checkCredentials(t, got, tt.wantCreds)
+		})
+	}
+}
+
+// TestSDKInspectRemoteExpandedCredentials checks that SDKInspector.Inspect
+// passes the credentials of the expanded variables to a remote server: a
+// plain value is a credential when its variable name is secret-like, also
+// when the header name is plain.
+func TestSDKInspectRemoteExpandedCredentials(t *testing.T) {
+	t.Parallel()
+
+	environ := []string{
+		"MCPMOAT_TEST_REGION=production",
+		"MCPMOAT_TEST_API_KEY=production",
+		"MCPMOAT_TEST_PLAIN=" + credTok,
+	}
+	// The header value and the expanded value are the same string, so
+	// Result.Secrets holds it one time.
+	tests := []struct {
+		name        string
+		header      string
+		wantSecrets []string
+		wantCreds   []string
+	}{
+		{name: "plain variable", header: "${MCPMOAT_TEST_REGION}", wantSecrets: []string{"production"}, wantCreds: nil},
+		{name: "secret-like variable", header: "${MCPMOAT_TEST_API_KEY}", wantSecrets: []string{"production"}, wantCreds: []string{"production"}},
+		{name: "token-like value", header: "${MCPMOAT_TEST_PLAIN}", wantSecrets: []string{credTok}, wantCreds: []string{credTok}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			ts, _ := startFixture(t, fixtureOpts{})
+			srv := rmServer(discover.TransportHTTP, fixtureURL(ts), map[string]string{"X-Tenant": tt.header})
+			srv.Client = discover.ClientClaudeCode
+			inspector := New(SDKOptions{})
+			inspector.environ = func() []string { return environ }
+
+			got, err := inspector.Inspect(t.Context(), srv)
+			if err != nil {
+				t.Fatalf("Inspect() error = %v", err)
+			}
+			rmCheckResult(t, got, tt.wantSecrets...)
+			checkCredentials(t, got, tt.wantCreds)
+		})
+	}
 }

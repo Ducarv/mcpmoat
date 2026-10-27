@@ -148,9 +148,26 @@ Rules:
   most 1 MiB. Over a limit, mcpmoat does not start the server.
 - A Cursor workspace placeholder (`${workspaceFolder}` or `${workspaceFolderBasename}`) in a
   global Cursor server gives an error, because that server has no project.
-- The server list shows the config as written, not the expanded values. mcpmoat removes the
-  expanded values of 8 bytes or more from its error messages. A shorter value is not removed, so it
-  can show in an error message that the server sends back.
+- The server list shows the config as written, not the expanded values. When a server fails,
+  mcpmoat removes the values that the server got from the error text: the env values and the
+  secrets in the args of a stdio server, the header values of a remote server, and the expanded
+  values of both. This covers the
+  reason in the summary on stdout, the error of `pin` and the stderr warning of `--json`. A value
+  of 8 bytes or more and a header value are removed wherever they stand. A value of 1 to 7 bytes
+  is removed only where it stands as a whole word: the byte before it and the byte after it are
+  not a letter, a digit or `_`, or are the edge of the text. This also applies to the quoted form
+  of the value, and an escape such as `\n` before the value counts as an edge. The longest value
+  wins, and a cut of the text never leaves a short value at its end. The costs and limits:
+  - A common word that is also a configured value is masked. With a configured value `1`,
+    `exit status 1` shows as `exit status ********`. Words such as `unknown` or `2.0` from JSON or
+    `key=value` args can be masked too, because the arg check finds more text than the secrets on
+    purpose.
+  - A short expanded port, such as `${PORT}` with the value `8080`, is masked in a dial error. The
+    URL as discovered (with the placeholder) stays in the reason.
+  - The whole-word rule stops an accidental echo only. A hostile server can glue a letter to the
+    value (`1234x`) or split it (`1_2_3_4`), and then the value shows.
+  - mcpmoat discards the stderr of a stdio server, so its echo can come only in a JSON-RPC error
+    message or in invalid output on stdout.
 
 ## npx and package installs
 

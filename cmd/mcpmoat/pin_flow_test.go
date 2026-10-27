@@ -1104,7 +1104,7 @@ func TestRelativeConfigPathIsNotPinned(t *testing.T) {
 		e := newPinEnv(t, oneServer("srv"))
 		c, stdout, stderr := e.cli(nil)
 
-		code := c.acceptTools(t.Context(), srv, tools, "", false)
+		code := c.acceptTools(t.Context(), srv, inspect.Result{Tools: tools}, "", false)
 
 		if code != exitError || stdout.Len() != 0 || !strings.Contains(stderr.String(), "the path of its config file is not absolute") {
 			t.Errorf("exit code %d, stdout %q, stderr %q, want exit code %d and the path error", code, stdout, stderr, exitError)

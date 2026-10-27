@@ -32,19 +32,28 @@
 //   - a "redacted" flag, only when a secret value was removed (see below).
 //
 // Before the cut, toolMessage replaces each value in [Input.Secrets] of at
-// least discover.MinSecretBytes bytes with [discover.Mask] in the name and the
-// description (redactPrefix). For a value that is not valid UTF-8, it also
+// least [discover.MinSecretBytes] bytes with [discover.Mask] in the name and
+// the description. The redaction code is in package discover
+// (internal/discover/redact_text.go): [discover.SecretTextValues] and
+// [discover.RedactTextPrefix]. For a value that is not valid UTF-8, it also
 // removes the form that a JSON decoder gives, with one U+FFFD for each
-// invalid byte (secretValues). It marks every byte of every match first,
-// also of matches that overlap, so no byte of a match stays. The values are
-// the secret values that inspect gave to the server (inspect.Result.Secrets),
-// so a token that a server echoes in its tool text does not reach the
-// provider. [SystemPrompt] tells the model that the mask is removed text, not
-// an instruction. A shorter value, or an encoded form of a value (base64,
-// URL-encoded, split across words), is not removed. A value that starts or
-// ends with "*", or that holds a whole [discover.Mask], can show up again
-// across a Mask, from text that the server wrote next to another secret (see
-// redactWindow).
+// invalid byte. It marks every byte of every match first, also of matches
+// that overlap, so no byte of a match stays.
+//
+// The values are only the credential values that inspect gave to the server
+// (inspect.Result.Credentials, the subset of inspect.Result.Secrets that
+// looks like a credential), so a token that a server echoes in its tool text
+// does not reach the provider. A plain config value that is not a credential
+// (for example an env value "production" or a "Content-Type" header value)
+// is not removed: when a server echoes it, it reaches the provider. Each
+// removal sets the "redacted" flag, and cmd/mcpmoat then gives the tool a
+// finding of at least medium, because a hostile config can choose the text
+// that is removed. [SystemPrompt] tells the model that the mask is removed
+// text, not an instruction. A shorter value, or an encoded form of a value
+// (base64, URL-encoded, split across words), is not removed. A value that
+// starts or ends with "*", or that holds a whole [discover.Mask], can show up
+// again across a Mask, from text that the server wrote next to another
+// secret (see discover.RedactTextPrefix).
 //
 // Nothing else is sent. In particular the request never holds the client
 // config, the server command, its arguments, env values or names, header
@@ -90,8 +99,8 @@
 // The package uses the standard library, the module
 // github.com/cenkalti/backoff/v7 (the waits between the tries of a busy
 // provider, see retryPolicy) and, from this module, only internal/discover
-// (for [discover.Secret], [discover.Mask] and [discover.IsLoopbackHost]). No
-// error text of the backoff module leaves this package. It does not import
-// internal/inspect: cmd/mcpmoat copies the tool name, the description and
-// inspect.Result.Secrets into an [Input].
+// (for [discover.Secret], [discover.Mask], [discover.IsLoopbackHost] and the
+// redaction of the tool text). No error text of the backoff module leaves
+// this package. It does not import internal/inspect: cmd/mcpmoat copies the
+// tool name, the description and inspect.Result.Credentials into an [Input].
 package llm

@@ -82,7 +82,9 @@ func sdkJSON(v any) string {
 func sdkAssertResult(t *testing.T, got, want inspect.Result, wantSecrets ...string) {
 	t.Helper()
 	inspect.CheckSecrets(t, got.Secrets, wantSecrets)
+	// Credentials is a subset of Secrets, from the config too.
 	got.Secrets, want.Secrets = nil, nil // both are copies
+	got.Credentials, want.Credentials = nil, nil
 	if reflect.DeepEqual(got, want) {
 		return
 	}
@@ -1563,7 +1565,9 @@ func TestSDKInspectStdioExpandedSecretEcho(t *testing.T) {
 	if cause := errors.Unwrap(err); cause != nil {
 		text += " | " + cause.Error()
 	}
-	if want := "unknown tenant " + discover.Mask; !strings.Contains(text, want) {
+	// Not "unknown tenant": the JSON in the -c script makes "unknown" a short
+	// argv piece (see argSecrets), so the whole-word scrub masks it too.
+	if want := "tenant " + discover.Mask; !strings.Contains(text, want) {
 		t.Errorf("reason and cause = %q, want them to contain %q", text, want)
 	}
 }

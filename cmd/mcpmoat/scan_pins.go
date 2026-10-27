@@ -299,7 +299,7 @@ func (p *pinner) checkOutcome(o inspect.Outcome) {
 
 	tools := o.Result.Tools
 	if stored, found := p.store.Get(id); found {
-		p.compare(s, id, tools, stored)
+		p.compare(s, id, tools, stored, newSecretMask(o.Result.Secrets))
 		return
 	}
 	p.firstPin(s, id, tools)
@@ -307,8 +307,13 @@ func (p *pinner) checkOutcome(o inspect.Outcome) {
 
 // add keeps a row, or counts it when the ignore list drops it. It returns false
 // for a dropped row, so the caller keeps no diff for it.
-func (p *pinner) add(row report.FindingRow) bool {
-	key := rules.FindingKey{RuleID: row.RuleID, Server: row.Name, Tool: row.Key}
+//
+// toolName is the real tool name of the row (pins.Change.RawTool), or "" for a
+// row about the whole server. The ignore list compares it, not row.Key: the
+// Key shows each secret value as discover.Mask, and an ignore entry names the
+// real tool. toolName is never printed.
+func (p *pinner) add(toolName string, row report.FindingRow) bool {
+	key := rules.FindingKey{RuleID: row.RuleID, Server: row.Name, Tool: toolName}
 	dropped, blocked := p.ign.ignored(key)
 	if blocked && !p.warned[row.RuleID] {
 		p.warned[row.RuleID] = true
@@ -334,7 +339,7 @@ func (p *pinner) addUnverified(s discover.Server, reason, risk, fix, severity st
 	row.Related = reason
 	row.Risk = risk
 	row.Remediation = fix
-	p.add(row)
+	p.add("", row)
 }
 
 // unverifiedSeverity returns the severity of a MOAT-T2-004 row about the server
@@ -403,7 +408,8 @@ func (p *pinner) firstPin(s discover.Server, id pins.Identity, tools []inspect.T
 	p.res.pinned = append(p.res.pinned, pinnedServer{id: id, snap: snap, name: s.Name, tools: len(tools)})
 }
 
-// compare compares the tools of a pinned server with its pins (pins.Compare).
+// compare compares the tools of a pinned server with its pins
+// (pins.CompareMasked).
 // Each change is one finding row. The rule ID comes from the change kind and
 // the severity from Change.Severity (a pinned name that cannot be verified is
 // high), not from the rule set, which does not hold the pin rules. A changed or
@@ -422,14 +428,22 @@ func (p *pinner) firstPin(s discover.Server, id pins.Identity, tools []inspect.T
 // over the size limit of pins.json), compare adds the high MOAT-T2-004 row of
 // firstPin, so the server fails the default --fail-on high: no change of its
 // tools could ever be accepted.
-func (p *pinner) compare(s discover.Server, id pins.Identity, tools []inspect.Tool, stored pins.ServerPins) {
+//
+// mask is the mask of the secret values of the server (see secretMask). The
+// compare is pins.CompareMasked with it: the Key of each row, the tool name of
+// each diff and the diff text show each secret value as discover.Mask. The
+// verdicts, the hashes, the digest and the ignore lookup (Change.RawTool) use
+// the real text.
+func (p *pinner) compare(s discover.Server, id pins.Identity, tools []inspect.Tool, stored pins.ServerPins, mask secretMask) {
 	snap, pinErr := pinnable(id, tools)
 	if pinErr != nil && pins.ReasonOf(pinErr) == "" {
 		p.addUnverified(s, pinnableReason(pinErr), riskPinnedNotPinnable, fixNotPinnable, pins.UnverifiedSeverity(true))
 	}
 	h := acceptHint{name: s.Name, id: id}
 	kept := false // true when at least one row of this server is not ignored
-	for _, ch := range pins.Compare(stored, tools) {
+	for _, ch := range pins.CompareMasked(stored, tools, mask.compareMask()) {
+		// ch.Tool is the masked name, for the report. ch.RawTool is the real
+		// name, for the ignore lookup only.
 		row := pinRow(ch.Kind, s, ch.Tool, ch.Severity)
 		if ch.Kind == pins.KindUnverified {
 			// ch.Reason is a fixed text from internal/pins.
@@ -438,7 +452,7 @@ func (p *pinner) compare(s discover.Server, id pins.Identity, tools []inspect.To
 		if pinErr != nil {
 			row.Remediation = fixNotPinnable
 		}
-		if !p.add(row) {
+		if !p.add(ch.RawTool, row) {
 			h.ignored = true
 			continue
 		}
@@ -509,6 +523,12 @@ const (
 // are the fixed texts of the change kind (see pins.ChangeKind). The pin rules
 // have no title, so the row has an empty Title and the report leaves the
 // title out of the finding line.
+//
+// tool is the Key of the row: the masked tool name (pins.Change.Tool from
+// pins.CompareMasked), never pins.Change.RawTool, or "" for a row about the
+// whole server. It is not cut here. The report writers can cut a Key when they
+// print it, but the mask came first, so that cut cannot leave a part of a
+// secret.
 func pinRow(kind pins.ChangeKind, s discover.Server, tool, severity string) report.FindingRow {
 	return report.FindingRow{
 		ServerRef:   report.NewServerRef(s),

@@ -1,6 +1,7 @@
 package discover
 
 import (
+	"net/url"
 	"slices"
 	"strings"
 )
@@ -208,23 +209,256 @@ func ArgSecrets(args []string) []string {
 	return r.secrets
 }
 
-// argScanner runs the rules of RedactArgs over a list of args. When collect
-// is true, it also keeps the text that it masks in secrets, for ArgSecrets
-// (see mask). The zero value collects nothing, for RedactArgs. All the
-// redaction code is in its methods, so RedactArgs and ArgSecrets cannot
-// differ. An argScanner is used by one goroutine only.
-type argScanner struct {
-	collect bool
-	// secrets holds raw values from the args. Never print, log or encode
-	// them.
-	secrets []string
+// ArgCredentials returns the pieces of args that look like a credential: a
+// subset of [ArgSecrets], in the order of args. ArgSecrets fails closed and
+// also returns plain words of a masked argument (a word of a path segment
+// with a space, a host name in a DSN). A caller that sends text off the
+// machine and must not garble plain words uses ArgCredentials instead (scan
+// --llm, through Result.Credentials in internal/inspect). It runs the same
+// code as RedactArgs and ArgSecrets.
+//
+// A piece of ArgSecrets is a credential in these cases:
+//
+//   - the value of a secret-like flag or key, whole ("x" in "--api-key x",
+//     "--token=x", "GITHUB_TOKEN=x", "token:x"), and an argument or a NAME
+//     that RedactArgs masks because it looks like a token ("-p" + token,
+//     "ghp_x=1");
+//   - the value of a user flag ("-u", "--user"), whole, and the text after
+//     its ":" (the password in "admin:pw"); the same for text with a ":"
+//     before an "@" ("u:p@tcp(h)/db");
+//   - in the value of a header flag ("-H", "--header"): the value after a
+//     secret-like header name ("Authorization", "Cookie", "X-Api-Key"), a
+//     value that looks like a token, and the whole line when it has no
+//     "Name:" form;
+//   - in any masked text: the credential after an auth scheme ("x" in
+//     "Bearer x"; see isAuthScheme), the value of a key=value pair or of a
+//     JSON key when the key is secret-like ("x" in "Password=x" and in
+//     {"token":"x"}), and every word or value that looks like a token (see
+//     tokenLike);
+//   - for a URL: the user info, the password and, by the rule of
+//     IsSecretUserName, the name, always; a path segment, a matrix
+//     parameter, a query part or the fragment only when it looks like a
+//     token or when its query key is secret-like ("?api_key=x").
+//
+// A token is a word with a known token prefix ("ghp_", "sk-"), a UUID or a
+// long random-looking word (see LooksLikeCredential). Plain words are not
+// credentials: "localhost", "production" and "postgres" in
+// "host=localhost dbname=production user=postgres", "Documents" in a path
+// segment "My Documents" ("My" is no auth scheme), "engineering" in
+// "?workspace=engineering" and "application/json" in -H "Content-Type:
+// application/json". A long readable word of minTokenLen or more bytes
+// still counts as a token: the rule fails closed.
+//
+// Like ArgSecrets, each string is not empty, the result can hold a value
+// more than one time and holds short values too: the caller filters them. It
+// is nil when no piece is a credential. ArgCredentials never changes args.
+//
+// The result holds raw secret values. Never print, log, encode or store
+// them; compare them with text in memory only.
+func ArgCredentials(args []string) []string {
+	r := argScanner{collectCredentials: true}
+	r.scan(args)
+	return r.credentials
 }
 
-// mask returns Mask in place of s. When r collects, it keeps s and its inner
-// values (see keep).
+// argScanner runs the rules of RedactArgs over a list of args. When collect
+// is true, it also keeps the text that it masks in secrets, for ArgSecrets
+// (see mask). When collectCredentials is true, it keeps the parts of that
+// text that look like a credential in credentials, for ArgCredentials (see
+// keepCredential). The zero value collects nothing, for RedactArgs. All the
+// redaction code is in its methods, so RedactArgs, ArgSecrets and
+// ArgCredentials cannot differ. An argScanner is used by one goroutine only.
+type argScanner struct {
+	collect            bool
+	collectCredentials bool
+	// secrets and credentials hold raw values from the args. Never print,
+	// log or encode them.
+	secrets     []string
+	credentials []string
+}
+
+// pieceKind tells why RedactArgs masks a piece of text. keepCredential uses
+// it to decide which parts of the piece are credentials.
+type pieceKind int
+
+const (
+	// pieceNone means "nothing to mask". redactArg returns it when the next
+	// argument is not a value that must be masked.
+	pieceNone pieceKind = iota
+	// pieceShape is text that is masked for its shape only (a space, a ":"
+	// in an unknown place). Only its parts that look like a credential count.
+	pieceShape
+	// pieceSecret is text that a secret-like name marks, or text that looks
+	// like a token. All of it is a credential.
+	pieceSecret
+	// pieceHeader is the value of a header flag: a header line.
+	pieceHeader
+	// pieceUser is the value of a user flag, or text with "user:password@".
+	// All of it is a credential, and so is each value after a ":".
+	pieceUser
+)
+
+// mask returns Mask in place of s, text that is masked for its shape only.
+// When r collects, it keeps s and its inner values (see keep and
+// keepCredential).
 func (r *argScanner) mask(s string) string {
-	r.keep(s)
+	return r.maskAs(s, pieceShape)
+}
+
+// maskAs returns Mask in place of s, a piece of the given kind. When r
+// collects, it keeps s and its inner values (see keepAs).
+func (r *argScanner) maskAs(s string, kind pieceKind) string {
+	r.keepAs(s, kind)
 	return Mask
+}
+
+// keepAs keeps s, a piece of the given kind, for ArgSecrets (see keep) and
+// for ArgCredentials (see keepCredential).
+func (r *argScanner) keepAs(s string, kind pieceKind) {
+	r.keep(s)
+	r.keepCredential(s, kind)
+}
+
+// keepCredential does nothing unless r collects credentials. Then it keeps
+// the parts of s, a masked piece of the given kind, that look like a
+// credential: s itself for pieceSecret and pieceUser, for a pieceHeader line
+// with no "Name:" form and for any s that looks like a token (see
+// tokenLike); for pieceUser also each value after a ":" (see innerValues);
+// and for every kind the inner parts that credentialParts returns. Each part
+// is also a part that keep returns for s, so ArgCredentials is a subset of
+// ArgSecrets.
+func (r *argScanner) keepCredential(s string, kind pieceKind) {
+	if !r.collectCredentials || s == "" {
+		return
+	}
+	whole := tokenLike(s)
+	switch kind {
+	case pieceSecret, pieceUser:
+		whole = true
+	case pieceHeader:
+		// A header line with no "Name:" form is badly formed. Its parts
+		// cannot be told apart, so all of it counts (fail closed).
+		if name, _, found := strings.Cut(s, ":"); !found || !isName(name) {
+			whole = true
+		}
+	}
+	if whole {
+		r.credentials = append(r.credentials, s)
+	}
+	if kind == pieceUser {
+		// innerValues gives the text after each ":", which holds the
+		// password in "admin:pw". It also gives the values of key=value
+		// pairs: the whole text is a credential, so they count too.
+		r.credentials = append(r.credentials, innerValues(s)...)
+	}
+	r.credentials = append(r.credentials, credentialParts(s)...)
+}
+
+// tokenLike reports whether s, or one of its words (the parts between
+// spaces), looks like a token (see containsToken). A credential has no
+// space, so a text with spaces is checked word by word: the length rule of
+// LooksLikeCredential would else count every long sentence.
+func tokenLike(s string) bool {
+	return slices.ContainsFunc(strings.Fields(s), containsToken)
+}
+
+// isAuthScheme reports whether word is the scheme of an Authorization
+// header ("Bearer", "Basic", "Token" and similar, in any case) or a
+// secret-like name (see IsSecretName), such as "ApiKey". The credential
+// after such a scheme is a credential. Any other word followed by a space is
+// no scheme: "My" in "My Documents" is not.
+func isAuthScheme(word string) bool {
+	return isAuthSchemeWord(word) || IsSecretName(word)
+}
+
+// isAuthSchemeWord reports whether word is one of the usual HTTP auth
+// schemes, in any case. Unlike isAuthScheme, it is false for other
+// secret-like names, so a password such as "mykey" is not taken for a
+// scheme.
+func isAuthSchemeWord(word string) bool {
+	// authSchemes are in lower case, so the match does not depend on case.
+	authSchemes := [...]string{
+		"basic", "bearer", "token", "digest", "negotiate", "ntlm", "dpop", "bot",
+	}
+	return slices.Contains(authSchemes[:], strings.ToLower(word))
+}
+
+// credentialParts returns the inner parts of s, a masked text, that look
+// like a credential. They are the parts of headerLineParts and innerValues
+// that pass these checks:
+//
+//   - the value after "Name:" when the name is secret-like (see
+//     IsSecretName) or the value looks like a token (see tokenLike);
+//   - the credential after a scheme when the scheme is an auth scheme (see
+//     isAuthScheme) or the credential looks like a token;
+//   - a value after a ":" when the text right before the ":" is a
+//     secret-like name (a JSON key or a header name), or when the value
+//     looks like a token. An auth scheme word there (see
+//     isAuthSchemeWord) is no value: in "Authorization: Bearer x" the
+//     credential is "x", not "Bearer";
+//   - the value of a key=value piece when the key is secret-like or the
+//     value looks like a token.
+//
+// So the plain words of a DSN ("host=localhost dbname=production") and a
+// path segment with a space ("My Documents") give no part.
+func credentialParts(s string) []string {
+	var parts []string
+	// The same cuts as headerLineParts.
+	value := s
+	if name, rest, found := strings.Cut(s, ":"); found && isName(name) {
+		value = strings.TrimSpace(rest)
+		if value != "" && (IsSecretName(name) || tokenLike(value)) {
+			parts = append(parts, value)
+		}
+	}
+	if scheme, rest, found := strings.Cut(value, " "); found && isName(scheme) {
+		cred := strings.TrimSpace(rest)
+		if cred != "" && !strings.ContainsAny(cred, " \t") && (isAuthScheme(scheme) || tokenLike(cred)) {
+			parts = append(parts, cred)
+		}
+	}
+	return append(parts, innerCredentials(s)...)
+}
+
+// innerCredentials returns the values of innerValues(s) that look like a
+// credential (see credentialParts). It splits s in the same way as
+// innerValues, and it also remembers the label of each ":": the piece right
+// before it, with only quotes and spaces between.
+func innerCredentials(s string) []string {
+	var creds []string
+	afterColon := false // a ":" came before the next piece
+	last := ""          // the piece before the current separators, or ""
+	label := ""         // the piece before the last ":", or ""
+	start := 0          // index of the first byte of the current piece
+	for i := 0; i <= len(s); i++ {
+		if i < len(s) && strings.IndexByte(innerSeparators, s[i]) < 0 {
+			continue
+		}
+		if piece := s[start:i]; piece != "" {
+			if afterColon && !isAuthSchemeWord(piece) && (IsSecretName(label) || tokenLike(piece)) {
+				creds = append(creds, piece)
+			}
+			if key, value, found := strings.Cut(piece, "="); found && value != "" && (IsSecretName(key) || tokenLike(value)) {
+				creds = append(creds, value)
+			}
+			afterColon = false
+			last = piece
+		}
+		if i < len(s) {
+			switch s[i] {
+			case ':':
+				afterColon = true
+				label, last = last, ""
+			case '"', '\'', ' ', '\t', '\n', '\v', '\f', '\r':
+				// Quotes and spaces can stand between a key, ":" and a value.
+			default:
+				afterColon = false
+				last = ""
+			}
+		}
+		start = i + 1
+	}
+	return creds
 }
 
 // keep does nothing unless r collects. Then it keeps s, the inner values of
@@ -320,99 +554,126 @@ func headerLineParts(s string) []string {
 // scan returns the RedactArgs result for args, which is not nil.
 func (r *argScanner) scan(args []string) []string {
 	out := make([]string, len(args))
-	// maskNext is true after a flag such as "--token" or "-H" with no
+	// next is not pieceNone after a flag such as "--token" or "-H" with no
 	// "=value", or a flag that is masked whole with no "=value": its value
-	// is the next argument, and that value is masked.
-	maskNext := false
+	// is the next argument, and that value is masked as a piece of kind
+	// next.
+	next := pieceNone
 	for i, arg := range args {
 		// A new flag (see startsNewFlag) is not the value of the flag
 		// before it, so a boolean flag such as "--no-auth" cannot use up the
 		// mask that a following "--token" needs.
-		if maskNext && !startsNewFlag(arg) {
+		if next != pieceNone && !startsNewFlag(arg) {
 			// arg can be the value, so it is masked. arg can also be a flag
 			// that masks its own value (Go-style "-token"), so if redactArg
 			// would mask the next argument, mask it here too. A zero
 			// argScanner gives that answer: the whole arg is masked, so its
 			// parts are not kept on their own.
 			var probe argScanner
-			_, maskNext = probe.redactArg(arg)
-			out[i] = r.mask(arg)
+			_, after := probe.redactArg(arg)
+			out[i] = r.maskAs(arg, next)
+			next = after
 			continue
 		}
-		out[i], maskNext = r.redactArg(arg)
+		out[i], next = r.redactArg(arg)
 	}
 	return out
 }
 
 // redactArg redacts one argument that is not the value of the flag before
-// it. shown is the text to display. maskNext is true if the next argument
-// can be the value of arg and must be masked: arg is a flag such as
-// "--token", or a flag that is masked whole, with no "=value".
-func (r *argScanner) redactArg(arg string) (shown string, maskNext bool) {
+// it. shown is the text to display. next is not pieceNone if the next
+// argument can be the value of arg and must be masked: arg is a flag such
+// as "--token", or a flag that is masked whole, with no "=value". next then
+// tells the kind of that value.
+func (r *argScanner) redactArg(arg string) (shown string, next pieceKind) {
 	name, value, hasValue, ok := parseFlag(arg)
 	switch {
 	case !ok && strings.HasPrefix(arg, "-") && arg != "-" && arg != "--":
 		// "-uadmin:pw" or "-HX-Key:v": a value glued to a short flag, in a
 		// shape that is not a flag name.
 		shown := r.mask(arg)
-		r.keepFlagBody(arg)
-		return shown, false
+		r.keepFlagBody(arg, pieceShape)
+		return shown, pieceNone
 	case !ok:
-		return r.displayValue(arg), false
+		return r.displayValue(arg), pieceNone
 	case containsToken(name):
 		// "-p" + token, a token that starts with "-", or a long secret-like
-		// name such as "--s3-secret-access-key". With no "=value", the next
-		// argument can be the value, so mask it too (fail closed).
-		shown := r.mask(arg)
-		r.keepFlagBody(arg)
-		return shown, !hasValue
+		// name such as "--s3-secret-access-key". The name looks like a
+		// token, so the whole arg counts as a credential. With no "=value",
+		// the next argument can be the value, so mask it too (fail closed).
+		shown := r.maskAs(arg, pieceSecret)
+		r.keepFlagBody(arg, pieceSecret)
+		if hasValue {
+			return shown, pieceNone
+		}
+		// The next argument is surely a value only after a secret-like
+		// name. After a token glued to a flag ("-p" + token), it is more
+		// often a new argument, so only a token there counts.
+		if IsSecretName(name) {
+			return shown, pieceSecret
+		}
+		return shown, pieceShape
 	case !hasValue:
 		// "--token": the value is the next argument.
-		return arg, masksValue(name)
+		return arg, flagValueKind(name)
 	}
 	// "--name=value": keep everything up to and including "=".
 	prefix := arg[:len(arg)-len(value)]
-	if masksValue(name) {
-		return prefix + r.mask(value), false
+	if kind := flagValueKind(name); kind != pieceNone {
+		return prefix + r.maskAs(value, kind), pieceNone
 	}
-	return prefix + r.displayValue(value), false
+	return prefix + r.displayValue(value), pieceNone
 }
 
 // keepFlagBody keeps the inner pieces of arg, an argument that starts with
-// "-" and that redactArg masks whole, when r collects (see keep). A token
+// "-" and that redactArg masks whole, when r collects (see keepAs). A token
 // can be glued to a flag ("-p" + token) or stand where the flag name goes
 // ("--" + token), and a server can echo the token alone. The pieces are the
 // body, the text after the dashes and before the first "=", and, for an
 // argument with one dash and a body of two bytes or more, the body without
 // its first byte: the text after a one-letter flag such as "-p".
-func (r *argScanner) keepFlagBody(arg string) {
-	if !r.collect {
+//
+// bodyKind is the kind of the body: pieceSecret when the flag name looks
+// like a token, else pieceShape. The text after a one-letter flag is the
+// value of that flag: a header line after "-H", a user and a password after
+// "-u", and else a piece that counts only if it looks like a token.
+func (r *argScanner) keepFlagBody(arg string, bodyKind pieceKind) {
+	if !r.collect && !r.collectCredentials {
 		return
 	}
 	body := strings.TrimPrefix(strings.TrimPrefix(arg, "-"), "-")
 	body, _, _ = strings.Cut(body, "=")
-	r.keep(body)
+	r.keepAs(body, bodyKind)
 	if !strings.HasPrefix(arg, "--") && len(body) > 1 {
-		r.keep(body[1:])
+		valueKind := pieceShape
+		switch body[0] {
+		case 'H':
+			valueKind = pieceHeader
+		case 'u':
+			valueKind = pieceUser
+		}
+		r.keepAs(body[1:], valueKind)
 	}
 }
 
-// masksValue reports whether the value of the flag called name is always
-// masked: a header flag, a user flag or a secret-like flag.
-func masksValue(name string) bool {
+// flagValueKind returns the kind of the value of the flag called name, when
+// that value is always masked: pieceHeader for a header flag, pieceUser for a
+// user flag and pieceSecret for a secret-like flag. It returns pieceNone for
+// any other flag.
+func flagValueKind(name string) pieceKind {
 	// "H" and "u" are compared as written: "-h" is usually help, and "-U"
-	// is often a user name with no password (psql).
-	if name == "H" || name == "u" || IsSecretName(name) {
-		return true
+	// is often a user name with no password (psql). The long flags match in
+	// any case.
+	switch {
+	case name == "H" || strings.EqualFold(name, "header") || strings.EqualFold(name, "headers"):
+		return pieceHeader
+	case name == "u" || strings.EqualFold(name, "user"):
+		return pieceUser
+	case IsSecretName(name):
+		return pieceSecret
+	default:
+		return pieceNone
 	}
-	// valueFlags are long header and user flags, in any case.
-	valueFlags := [...]string{"header", "headers", "user"}
-	for _, f := range valueFlags {
-		if strings.EqualFold(name, f) {
-			return true
-		}
-	}
-	return false
 }
 
 // startsNewFlag reports whether arg, which comes right after a flag whose
@@ -460,15 +721,16 @@ func (r *argScanner) displayValue(s string) string {
 		// The text before "=" can be a secret and not a name: base64 text
 		// with "=" padding ("c2VjcmV0LXZhbHVlLTEyMzQ=") or a token followed
 		// by "=x" ("ghp_abc=1"). Mask all of it, NAME included. A server can
-		// echo the NAME alone, so when r collects, it keeps NAME too.
+		// echo the NAME alone, so when r collects, it keeps NAME too. Both
+		// count as credentials: NAME looks like a token.
 		if containsToken(name) || (strings.Trim(value, "=") == "" && len(name) >= minPaddedTokenLen) {
-			shown := r.mask(s)
-			r.keep(name)
+			shown := r.maskAs(s, pieceSecret)
+			r.keepAs(name, pieceSecret)
 			return shown
 		}
 	}
 	if IsSecretName(name) {
-		return name + "=" + r.mask(value)
+		return name + "=" + r.maskAs(value, pieceSecret)
 	}
 	// displayShape, not displayValue: one level only. A URL value such as
 	// "U=https://h/?a=1" goes through RedactURL. Other text with a second
@@ -504,11 +766,17 @@ func (r *argScanner) displayShape(s string) string {
 	case strings.Contains(s, "://") || strings.HasPrefix(s, "//"):
 		return r.displayURL(s)
 	case strings.Contains(s, ":") && strings.Contains(s, "@"):
-		// "user:pass@host" or a DSN: the password has no fixed place.
-		return r.mask(s)
+		// "user:pass@host" or a DSN: the password has no fixed place. With
+		// a ":" before the last "@", the text has the "user:password@" form,
+		// so it counts as a credential. "git@host:org/repo" does not.
+		kind := pieceShape
+		if strings.IndexByte(s, ':') < strings.LastIndexByte(s, '@') {
+			kind = pieceUser
+		}
+		return r.maskAs(s, kind)
 	case hasSecretLabel(s):
 		// "x-auth-token:abc" is a header line with no space after ":".
-		return r.mask(s)
+		return r.maskAs(s, pieceSecret)
 	case !hasSafeColon(s) || !hasSafeAts(s):
 		// "admin:pw", "scott/tiger@orcl": a ":" or "@" in a place that is
 		// not on the list.
@@ -520,23 +788,141 @@ func (r *argScanner) displayShape(s string) string {
 
 // displayURL returns RedactURL(s). When r collects, it keeps the parts of s
 // that RedactURL masks (see maskedURLParts), or, when RedactURL masks s
-// whole, all of s and then the best-effort parts of wholeURLParts.
+// whole, all of s and then the best-effort parts of wholeURLParts. When r
+// collects credentials, it keeps the credential parts of the same text (see
+// keepURLCredentials).
 func (r *argScanner) displayURL(s string) string {
 	shown := RedactURL(s)
-	if !r.collect {
+	if !r.collect && !r.collectCredentials {
 		return shown
 	}
 	if shown == Mask {
-		r.keep(s)
+		r.keepAs(s, pieceShape)
 		for _, part := range wholeURLParts(s) {
 			r.keep(part)
+		}
+		// The text from the first "//" on, as wholeURLParts reads it.
+		if i := strings.Index(s, "//"); i >= 0 {
+			r.keepURLCredentials(s[i:], true)
 		}
 		return Mask
 	}
 	for _, part := range maskedURLParts(s) {
 		r.keep(part)
 	}
+	r.keepURLCredentials(s, false)
 	return shown
+}
+
+// keepURLCredentials does nothing unless r collects credentials. Then it
+// keeps the parts of raw that maskedURLParts returns and that are
+// credentials (see ArgCredentials):
+//
+//   - the user info as written, the password and, by the rule of
+//     IsSecretUserName, the name: always;
+//   - a secret path segment or matrix parameter (see SecretPathSegments):
+//     only when it looks like a token (see looksLikeEscapedCredential);
+//   - a query part (see SecretQueryParts): a value when its key is
+//     secret-like ("?api_key=x"), and any part that looks like a token;
+//   - the fragment: only when it looks like a token.
+//
+// For each part, it also keeps the inner parts that credentialParts returns
+// ("x" in a fragment "access_token=x"). fallback is true when raw is the
+// text of a URL that RedactURL masks whole: when raw then does not parse,
+// it keeps the user info and its parts, found as wholeURLParts finds them.
+func (r *argScanner) keepURLCredentials(raw string, fallback bool) {
+	if !r.collectCredentials {
+		return
+	}
+	u, err := url.Parse(raw)
+	if err != nil {
+		if !fallback {
+			return
+		}
+		info := RawUserinfo(raw)
+		if info == "" {
+			return
+		}
+		r.keepCredential(info, pieceSecret)
+		name, password, _ := strings.Cut(info, ":")
+		for _, part := range userinfoSecrets(name, password, name, password) {
+			r.keepCredential(part, pieceSecret)
+		}
+		return
+	}
+	if u.User != nil {
+		info := RawUserinfo(raw)
+		r.keepCredential(info, pieceSecret)
+		name, password, _ := strings.Cut(info, ":")
+		plainPassword, _ := u.User.Password()
+		for _, part := range userinfoSecrets(name, password, u.User.Username(), plainPassword) {
+			r.keepCredential(part, pieceSecret)
+		}
+	}
+	// The same loop as SecretPathSegments.
+	for seg := range strings.SplitSeq(u.EscapedPath(), "/") {
+		if seg == "" || redactPathSegment(seg) == seg {
+			continue
+		}
+		r.keepEscapedCredential(seg, url.PathUnescape, false)
+		if parts := strings.Split(seg, ";"); len(parts) > 1 {
+			if isSecretPathSegment(parts[0]) {
+				r.keepEscapedCredential(parts[0], url.PathUnescape, false)
+			}
+			for _, p := range parts[1:] {
+				r.keepEscapedCredential(p, url.PathUnescape, false)
+			}
+		}
+	}
+	// The same loop as SecretQueryParts.
+	isSep := func(c rune) bool { return c == '&' || c == ';' }
+	for part := range strings.FieldsFuncSeq(u.RawQuery, isSep) {
+		key, value, found := strings.Cut(part, "=")
+		if !found {
+			r.keepEscapedCredential(part, url.QueryUnescape, false)
+			continue
+		}
+		if isSecretQueryKey(key) {
+			r.keepEscapedCredential(key, url.QueryUnescape, false)
+		}
+		plainKey, err := url.QueryUnescape(key)
+		if err != nil {
+			plainKey = key
+		}
+		r.keepEscapedCredential(value, url.QueryUnescape, IsSecretName(plainKey))
+	}
+	if _, fragment, found := strings.Cut(raw, "#"); found {
+		kind := pieceShape
+		if looksLikeEscapedCredential(fragment, u.Fragment) {
+			kind = pieceSecret
+		}
+		for _, form := range appendForms(nil, fragment, u.Fragment) {
+			r.keepCredential(form, kind)
+		}
+	}
+}
+
+// keepEscapedCredential keeps the credential parts of s, an escaped part of
+// a URL, and of its unescaped form when it differs (unescape is
+// url.PathUnescape or url.QueryUnescape). Both forms are credentials when
+// secret is true or when one of them looks like a token (see
+// looksLikeEscapedCredential). Else only their inner parts can be (see
+// keepCredential). It keeps nothing for an empty s.
+func (r *argScanner) keepEscapedCredential(s string, unescape func(string) (string, error), secret bool) {
+	if s == "" {
+		return
+	}
+	plain, err := unescape(s)
+	if err != nil {
+		plain = "" // appendForms skips an empty form
+	}
+	kind := pieceShape
+	if secret || looksLikeEscapedCredential(s, plain) {
+		kind = pieceSecret
+	}
+	for _, form := range appendForms(nil, s, plain) {
+		r.keepCredential(form, kind)
+	}
 }
 
 // hasSecretLabel reports whether s has a ":" and the text before the first
@@ -688,12 +1074,12 @@ func (r *argScanner) displaySegment(seg string) string {
 }
 
 // containsToken reports whether s looks like a token (see
-// looksLikeCredential), or whether one of its pieces starts with a known
+// LooksLikeCredential), or whether one of its pieces starts with a known
 // token prefix. The pieces are the parts of s between ".", "@", ":", "+" and
 // "~", so a token after one of these bytes ("@ghp_abc", "x.sk-abc") is
 // found too.
 func containsToken(s string) bool {
-	if looksLikeCredential(s) {
+	if LooksLikeCredential(s) {
 		return true
 	}
 	pieces := strings.FieldsFunc(s, func(r rune) bool {

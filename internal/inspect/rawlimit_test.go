@@ -221,7 +221,7 @@ func TestRawLimitHandshake(t *testing.T) {
 	if !lim.exceeded() {
 		t.Errorf("rawLimit.exceeded() = false after a handshake of %d bytes, want true", lim.used.Load())
 	}
-	ce := stdioFailure(stdioServer("/bin/true"), err, nil, lim.exceeded())
+	ce := stdioFailure(stdioServer("/bin/true"), err, nil, nil, lim.exceeded())
 	if ce.Kind != KindTooLarge || !errors.Is(ce, errRawTooLarge) {
 		t.Errorf("stdioFailure() = %v (kind %q), want KindTooLarge wrapping errRawTooLarge", ce, ce.Kind)
 	}
@@ -247,7 +247,7 @@ func TestStdioFailureJSONShape(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			ce := stdioFailure(stdioServer("/bin/true"), tt.err, nil, tt.tooLarge)
+			ce := stdioFailure(stdioServer("/bin/true"), tt.err, nil, nil, tt.tooLarge)
 			if ce.Kind != KindTooLarge {
 				t.Errorf("Kind = %q, want %q", ce.Kind, KindTooLarge)
 			}

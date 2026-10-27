@@ -216,7 +216,7 @@ func TestShowDiscoveredURL(t *testing.T) {
 			URL:    exp,
 			err:    cause,
 		}
-		showDiscoveredURL(ce, expanded, discovered)
+		showDiscoveredURL(ce, expanded, discovered, nil)
 
 		mask := discover.Mask
 		if ce.URL != mask {
@@ -244,7 +244,7 @@ func TestShowDiscoveredURL(t *testing.T) {
 		cause := errors.New("bad status from " + expanded.String() + " at api.example.test")
 		ce := &ConnectError{Reason: "failed: " + expanded.String(), err: cause}
 
-		showDiscoveredURL(ce, expanded, discovered)
+		showDiscoveredURL(ce, expanded, discovered, nil)
 
 		if want := "failed: " + discovered.String(); ce.Reason != want {
 			t.Errorf("Reason = %q, want %q", ce.Reason, want)
@@ -287,7 +287,7 @@ func TestShowDiscoveredURL(t *testing.T) {
 		}
 		for _, tt := range tests {
 			ce := &ConnectError{Kind: KindTimeout, Reason: "timed out", err: tt.cause}
-			showDiscoveredURL(ce, expanded, discovered)
+			showDiscoveredURL(ce, expanded, discovered, nil)
 			for _, w := range tt.want {
 				if !errors.Is(ce, w) {
 					t.Errorf("%s: errors.Is(err, %v) = false after the rewrite", tt.name, w)
@@ -307,7 +307,7 @@ func TestShowDiscoveredURL(t *testing.T) {
 		u := discover.NewURL("https://example.test/mcp")
 		cause := errors.New("boom at " + u.String())
 		ce := &ConnectError{Reason: "boom at " + u.String(), err: cause}
-		showDiscoveredURL(ce, u, u)
+		showDiscoveredURL(ce, u, u, nil)
 		//nolint:errorlint // identity check: the cause must be the same value, not a new error
 		if ce.URL != u.String() || ce.Reason != "boom at "+u.String() || ce.err != cause {
 			t.Errorf("ConnectError = %+v, want the URL set and the rest unchanged", ce)

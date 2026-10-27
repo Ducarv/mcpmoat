@@ -45,7 +45,7 @@ func numberedLines(n int) string {
 // mustDiff returns unifiedDiff of the two tools and fails the test on an error.
 func mustDiff(t testing.TB, oldTool, newTool inspect.Tool) string {
 	t.Helper()
-	got, _, err := unifiedDiff(mustCanonical(t, oldTool), mustCanonical(t, newTool))
+	got, _, err := unifiedDiff(mustCanonical(t, oldTool), mustCanonical(t, newTool), nil)
 	if err != nil {
 		t.Fatalf("unifiedDiff() error = %v, want nil", err)
 	}
@@ -156,7 +156,7 @@ func TestRender(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			got, err := render(mustCanonical(t, tt.tool))
+			got, err := render(mustCanonical(t, tt.tool), nil)
 			if err != nil {
 				t.Fatalf("render() error = %v, want nil", err)
 			}
@@ -171,7 +171,7 @@ func TestRenderAnnotations(t *testing.T) {
 	t.Parallel()
 	tool := inspect.Tool{Name: "t"}
 	ensureAnnotations(&tool).Title = "Annotated"
-	got, err := render(mustCanonical(t, tool))
+	got, err := render(mustCanonical(t, tool), nil)
 	if err != nil {
 		t.Fatalf("render() error = %v, want nil", err)
 	}
@@ -202,7 +202,7 @@ func TestRenderInvalid(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			got, err := render(tt.input)
+			got, err := render(tt.input, nil)
 			if err == nil {
 				t.Fatalf("render(%q) = %q, error = nil, want an error", tt.input, got)
 			}
@@ -218,7 +218,7 @@ func TestRenderErrorDoesNotQuoteServerText(t *testing.T) {
 	// The input is not valid JSON. The secret stands for server text that
 	// must not leak into the error.
 	const secret = "SECRET-SERVER-TEXT"
-	_, err := render(`{"name":"ok","inputSchema":` + `{"a":"` + secret + `"` + `}x}`)
+	_, err := render(`{"name":"ok","inputSchema":`+`{"a":"`+secret+`"`+`}x}`, nil)
 	if err == nil {
 		t.Fatal("render() error = nil, want an error")
 	}
@@ -357,7 +357,7 @@ func TestUnifiedDiffErrors(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			got, truncated, err := unifiedDiff(tt.old, tt.new)
+			got, truncated, err := unifiedDiff(tt.old, tt.new, nil)
 			if err == nil {
 				t.Fatalf("unifiedDiff() = %q, error = nil, want an error", got)
 			}
@@ -622,7 +622,7 @@ func TestUnifiedDiffMetaSurvivesCut(t *testing.T) {
 	oldTool := build("old text", `{"ui":{"resourceUri":"ui://good/app"}}`)
 	newTool := build("new text", `{"ui":{"resourceUri":"ui://evil/app"}}`)
 
-	got, truncated, err := unifiedDiff(mustCanonical(t, oldTool), mustCanonical(t, newTool))
+	got, truncated, err := unifiedDiff(mustCanonical(t, oldTool), mustCanonical(t, newTool), nil)
 	if err != nil {
 		t.Fatalf("unifiedDiff() error = %v, want nil", err)
 	}
@@ -773,7 +773,7 @@ func TestRenderWrapsLongLines(t *testing.T) {
 		Description: long + "\n" + long,
 		InputSchema: []byte(`{"k":"` + long + `"}`),
 	}
-	got, err := render(mustCanonical(t, tool))
+	got, err := render(mustCanonical(t, tool), nil)
 	if err != nil {
 		t.Fatalf("render() error = %v, want nil", err)
 	}
@@ -835,7 +835,7 @@ func TestRenderWrapCutsOnRuneBoundaries(t *testing.T) {
 			t.Run(fmt.Sprintf("%d-byte rune x %d", len(r), n), func(t *testing.T) {
 				t.Parallel()
 				desc := strings.Repeat(r, n)
-				got, err := render(mustCanonical(t, inspect.Tool{Name: "t", Description: desc}))
+				got, err := render(mustCanonical(t, inspect.Tool{Name: "t", Description: desc}), nil)
 				if err != nil {
 					t.Fatalf("render() error = %v, want nil", err)
 				}
@@ -894,11 +894,11 @@ func TestRenderWrapDiffersFromLineBreak(t *testing.T) {
 	a := strings.Repeat("A", maxLineRunes)
 	wrapped := mustCanonical(t, inspect.Tool{Name: "t", Description: a + "B"})
 	broken := mustCanonical(t, inspect.Tool{Name: "t", Description: a + "\nB"})
-	rw, err := render(wrapped)
+	rw, err := render(wrapped, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	rb, err := render(broken)
+	rb, err := render(broken, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1023,7 +1023,7 @@ func FuzzRender(f *testing.F) {
 		// json.Indent passes raw bytes of the schemas through, so invalid UTF-8
 		// in the input can stay in the output. Canonical never makes such input.
 		valid := utf8.ValidString(a) && utf8.ValidString(b)
-		r, err := render(a)
+		r, err := render(a, nil)
 		if err == nil {
 			if utf8.ValidString(a) && !utf8.ValidString(r) {
 				t.Fatalf("render(%q) = %q is not valid UTF-8", a, r)
@@ -1033,7 +1033,7 @@ func FuzzRender(f *testing.F) {
 			t.Fatalf("render(%q) = %q with error %v, want empty text", a, r, err)
 		}
 
-		d, _, err := unifiedDiff(a, b)
+		d, _, err := unifiedDiff(a, b, nil)
 		if err != nil {
 			if d != "" {
 				t.Fatalf("unifiedDiff() = %q with error %v, want empty text", d, err)
@@ -1048,8 +1048,8 @@ func FuzzRender(f *testing.F) {
 		}
 		// Different rendered texts never give an empty diff: this is how a
 		// change behind a long text stays visible.
-		ra, errA := render(a)
-		rb, errB := render(b)
+		ra, errA := render(a, nil)
+		rb, errB := render(b, nil)
 		if errA == nil && errB == nil && ra != rb && d == "" {
 			t.Fatalf("unifiedDiff(%q, %q) is empty, but the rendered texts differ", a, b)
 		}
@@ -1061,7 +1061,7 @@ func FuzzRender(f *testing.F) {
 
 func TestNewToolDiffErrors(t *testing.T) {
 	t.Parallel()
-	got, truncated, err := newToolDiff("{not json")
+	got, truncated, err := newToolDiff("{not json", nil)
 	if err == nil {
 		t.Fatalf("newToolDiff() = %q, error = nil, want an error", got)
 	}

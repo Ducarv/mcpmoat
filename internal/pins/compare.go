@@ -51,6 +51,11 @@ const (
 	// are equal. The canonical form has a key that render does not show, or two
 	// keys that differ only in case.
 	diffNotVisible = "the tool changed, but the change is not visible in the rendered text"
+	// diffSecretOnly is the Diff of a changed tool when the hashes differ, the
+	// rendered texts differ, but the masked texts are equal (see
+	// CompareMasked). The change is only in text that holds a secret value, so
+	// a diff would show the secret.
+	diffSecretOnly = "the tool changed only in text that holds a secret value from the config, so the diff is hidden"
 )
 
 // The reasons of a KindUnverified change. They are fixed texts, safe to print.
@@ -190,15 +195,25 @@ func (k ChangeKind) Remediation() string {
 
 // Change is one difference between the pins of a server and its current tools.
 //
-// Tool and Diff hold raw text from the server, which is not trusted. They can
+// Tool and Diff hold text from the server, which is not trusted. They can
 // hold control characters or terminal escape sequences. The caller must escape
-// them before it writes them to a terminal or a report. Reason is not server
-// text.
+// them before it writes them to a terminal or a report. CompareMasked hides
+// secret values in them; Compare does not. RawTool is server text too, and
+// CompareMasked never masks it: never print or log it, nor a whole Change
+// (for example with %v). Reason is not server text.
 type Change struct {
 	// Kind is the kind of change.
 	Kind ChangeKind
-	// Tool is the tool name. For KindUnverified it can be empty.
+	// Tool is the tool name. For KindUnverified it can be empty. From
+	// CompareMasked it is the masked name, so it can differ from the key in
+	// the pins and from the name in the current tools.
 	Tool string
+	// RawTool is the tool name as the server sent it, before the mask of
+	// CompareMasked. Compare sets it equal to Tool. Use it only to look up
+	// the tool, for example to match an ignore entry, which names the real
+	// tool. Never print or log this field; it can hold a secret that a server
+	// echoed. Print Tool instead.
+	RawTool string
 	// Diff is the unified diff between the pinned and the current tool. It is
 	// set for KindChanged and KindNew, and it is never empty there: when no
 	// diff text exists, it is a fixed note. For KindNew the diff is from empty
@@ -261,7 +276,32 @@ type Change struct {
 // server can rename a pinned tool (drop "read_file", add "read_fi1e" with new
 // text, or with data that cannot be verified) to avoid the "high" KindChanged
 // check.
+//
+// Compare is CompareMasked with no mask: Tool and Diff hold the server text
+// as it is.
 func Compare(stored ServerPins, current []inspect.Tool) []Change {
+	return CompareMasked(stored, current, nil)
+}
+
+// CompareMasked is Compare, but it hides secret values in the text that it
+// returns. A server gets the configured env values, header values and argv,
+// and it can echo one of them in a tool name, title, description, schema,
+// _meta or icons. mask returns its input with each secret value replaced, for
+// example discover.RedactText with the secret values of the server. A nil mask
+// changes nothing.
+//
+// mask is applied to the decoded text before the diff is rendered, wrapped
+// and cut (see render), so a wrap, a cut or a JSON escape cannot leave a part
+// of a secret. It is also applied to Tool, after the sort: the order is that
+// of the raw names. Change.RawTool keeps the raw name for the lookups of the
+// caller, such as an ignore entry. The verdicts come from the raw text: the hashes, the pins
+// and the name lookups never use the mask, so a secret echo still changes the
+// hash and cannot change a pin silently.
+//
+// When the hashes differ but the masked texts are equal, the change is only
+// in masked text. Diff is then the fixed note diffSecretOnly, never an empty
+// diff.
+func CompareMasked(stored ServerPins, current []inspect.Tool, mask func(string) string) []Change {
 	counts := make(map[string]int, len(current))
 	for _, t := range current {
 		counts[t.Name]++
@@ -277,7 +317,7 @@ func Compare(stored ServerPins, current []inspect.Tool) []Change {
 			}
 			continue
 		}
-		if c, ok := compareTool(stored, t); ok {
+		if c, ok := compareTool(stored, t, mask); ok {
 			changes = append(changes, c)
 		}
 	}
@@ -303,12 +343,22 @@ func Compare(stored ServerPins, current []inspect.Tool) []Change {
 			strings.Compare(a.Kind.RuleID(), b.Kind.RuleID()),
 		)
 	})
+	// Mask the names only now: the code above needs the raw names for the
+	// lookups, and a sort by raw name gives the same order on every run.
+	// RawTool keeps the raw name for the lookups of the caller.
+	for i := range changes {
+		changes[i].RawTool = changes[i].Tool
+		if mask != nil {
+			changes[i].Tool = mask(changes[i].Tool)
+		}
+	}
 	return changes
 }
 
 // compareTool compares one current tool, which has a unique name, with its
-// pin. It returns false when there is nothing to report.
-func compareTool(stored ServerPins, t inspect.Tool) (Change, bool) {
+// pin. It returns false when there is nothing to report. mask is applied to
+// the diff text only (see CompareMasked); Tool keeps the raw name.
+func compareTool(stored ServerPins, t inspect.Tool, mask func(string) string) (Change, bool) {
 	unverified := func(reason string) (Change, bool) {
 		return unverifiedChange(stored, t.Name, reason), true
 	}
@@ -325,14 +375,14 @@ func compareTool(stored ServerPins, t inspect.Tool) (Change, bool) {
 	if !ok {
 		// The user must see a new tool before they accept it, so it has a diff
 		// too: all its lines are added lines.
-		diff, truncated := currentToolDiff(canonical)
+		diff, truncated := currentToolDiff(canonical, mask)
 		return Change{Kind: KindNew, Tool: t.Name, Diff: diff, Truncated: truncated, Severity: KindNew.Severity()}, true
 	}
 	// The pin cannot be checked in the next two cases, so the change shows the
 	// whole current tool, like a new tool.
 	unverifiedWithText := func(reason string) (Change, bool) {
 		c := unverifiedChange(stored, t.Name, reason)
-		c.Diff, c.Truncated = currentToolDiff(canonical)
+		c.Diff, c.Truncated = currentToolDiff(canonical, mask)
 		return c, true
 	}
 	if !strings.HasPrefix(pin.Hash, HashVersion+":") {
@@ -347,21 +397,39 @@ func compareTool(stored ServerPins, t inspect.Tool) (Change, bool) {
 		return unverifiedWithText(ReasonPinMismatch)
 	}
 
-	diff, truncated, err := unifiedDiff(pin.Canonical, string(canonical))
+	diff, truncated, err := unifiedDiff(pin.Canonical, string(canonical), mask)
 	switch {
 	case err != nil:
 		diff, truncated = diffUnavailable, false
 	case diff == "":
-		diff = diffNotVisible
+		diff = emptyDiffNote(pin.Canonical, string(canonical), mask)
 	}
 	return Change{Kind: KindChanged, Tool: t.Name, Diff: diff, Truncated: truncated, Severity: KindChanged.Severity()}, true
 }
 
+// emptyDiffNote returns the fixed note for a changed tool whose diff is empty,
+// that is, whose rendered texts, after mask, are equal. It is diffSecretOnly
+// when the texts without the mask differ, because then the change is only in
+// masked text. Else it is diffNotVisible. The note is never server text.
+func emptyDiffNote(oldCanonical, newCanonical string, mask func(string) string) string {
+	if mask == nil {
+		return diffNotVisible
+	}
+	// Both texts rendered with the mask, so they render without it too. On an
+	// error, the safe choice is the note that shows no text.
+	before, errBefore := render(oldCanonical, nil)
+	after, errAfter := render(newCanonical, nil)
+	if errBefore != nil || errAfter != nil || before != after {
+		return diffSecretOnly
+	}
+	return diffNotVisible
+}
+
 // currentToolDiff returns the diff of the whole current tool from empty text,
-// and whether it was cut. When the diff cannot be made, it returns the fixed
-// note diffNewUnavailable.
-func currentToolDiff(canonical []byte) (diff string, truncated bool) {
-	diff, truncated, err := newToolDiff(string(canonical))
+// and whether it was cut. mask is the one of CompareMasked. When the diff
+// cannot be made, it returns the fixed note diffNewUnavailable.
+func currentToolDiff(canonical []byte, mask func(string) string) (diff string, truncated bool) {
+	diff, truncated, err := newToolDiff(string(canonical), mask)
 	if err != nil {
 		return diffNewUnavailable, false
 	}
@@ -390,7 +458,7 @@ func UnverifiedSeverity(pinned bool) string {
 // starts with the "--- pinned" label, so it never equals a note.
 func (c Change) DiffIsNote() bool {
 	switch c.Diff {
-	case diffUnavailable, diffNewUnavailable, diffNotVisible:
+	case diffUnavailable, diffNewUnavailable, diffNotVisible, diffSecretOnly:
 		return true
 	}
 	return false

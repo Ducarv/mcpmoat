@@ -3,8 +3,10 @@ package pins
 import (
 	"bytes"
 	"encoding/json"
+	"encoding/json/jsontext"
 	"errors"
 	"fmt"
+	"io"
 	"strings"
 	"unicode/utf8"
 )
@@ -76,17 +78,29 @@ type renderedTool struct {
 // of the canonical form. A schema, _meta or icons value that the server did not
 // send is null.
 //
-// render keeps every byte of the strings as the server sent them. It does not
-// escape or normalise anything, so an added invisible character is a changed
-// line. The caller must escape the text before it writes it to a terminal.
-// render returns an error, and never panics, when canonical is not the
-// canonical form of a tool.
-func render(canonical string) (string, error) {
+// mask, when it is not nil, hides secret values (see CompareMasked). render
+// applies it to the decoded text before it wraps the lines: to the name, the
+// title and the description, and to every string (object keys included) and
+// every number in the JSON parts (see maskJSON). So a secret that would be
+// split over two wrapped lines, or hidden by a JSON escape such as \" or \\,
+// is still found. A nil mask changes nothing.
+//
+// Apart from the mask, render keeps every byte of the strings as the server
+// sent them. It does not escape or normalise anything, so an added invisible
+// character is a changed line. The caller must escape the text before it
+// writes it to a terminal. render returns an error, and never panics, when
+// canonical is not the canonical form of a tool.
+func render(canonical string, mask func(string) string) (string, error) {
 	var t renderedTool
 	if err := json.Unmarshal([]byte(canonical), &t); err != nil {
 		// The error of encoding/json can quote input, so it is not wrapped,
 		// like the error of json.Indent below. The caller adds the context.
 		return "", errors.New("parse canonical form")
+	}
+	if mask != nil {
+		if err := maskTool(&t, mask); err != nil {
+			return "", err
+		}
 	}
 
 	var b strings.Builder
@@ -114,6 +128,102 @@ func render(canonical string) (string, error) {
 		}
 	}
 	return b.String(), nil
+}
+
+// maskTool applies mask to the text fields of t and to the strings and
+// numbers of its JSON parts. mask must not be nil. The error names only the
+// part, never server text.
+func maskTool(t *renderedTool, mask func(string) string) error {
+	t.Name = mask(t.Name)
+	t.Title = mask(t.Title)
+	t.Description = mask(t.Description)
+
+	// A pointer to each field lets one loop change the field in place.
+	parts := []struct {
+		label string
+		raw   *json.RawMessage
+	}{
+		{"annotations", &t.Annotations},
+		{"_meta", &t.Meta},
+		{"icons", &t.Icons},
+		{"inputSchema", &t.InputSchema},
+		{"outputSchema", &t.OutputSchema},
+	}
+	for _, p := range parts {
+		masked, err := maskJSON(*p.raw, mask)
+		if err != nil {
+			return fmt.Errorf("mask %s: %w", p.label, err)
+		}
+		*p.raw = masked
+	}
+	return nil
+}
+
+// maskJSON returns raw with mask applied to the decoded text of every string,
+// object keys included, and of every number. A string or a number that mask
+// changes is written again as a JSON string with the minimal escapes of JCS. A
+// number becomes a string, because the masked text is no longer a number. All
+// other bytes stay as they are, so the result equals raw when mask changes
+// nothing. An empty raw stays empty. mask must not be nil.
+//
+// The mask works on the decoded text, not on the escaped JSON, so an escape
+// such as \" inside a secret cannot hide it. maskJSON returns an error when
+// raw is not one valid JSON value. The error holds no server text.
+func maskJSON(raw json.RawMessage, mask func(string) string) (json.RawMessage, error) {
+	if len(raw) == 0 {
+		return raw, nil
+	}
+	dec := jsontext.NewDecoder(bytes.NewReader(raw))
+	var out []byte // nil until mask changes a token
+	copied := 0    // raw[:copied] is in out already
+	for {
+		// InputOffset is the end of the last token read, so before ReadToken
+		// it is where the separators before the next token start.
+		prevEnd := int(dec.InputOffset())
+		tok, err := dec.ReadToken()
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		if err != nil {
+			// The jsontext error can quote raw, so it is not wrapped.
+			return nil, errors.New("parse JSON")
+		}
+		if k := tok.Kind(); k != '"' && k != '0' {
+			continue
+		}
+		// For a string, tok.String is the decoded text. For a number, it is
+		// the number as written.
+		text := tok.String()
+		masked := mask(text)
+		if masked == text {
+			continue
+		}
+		end := int(dec.InputOffset())
+		start := tokenStart(raw, prevEnd, end)
+		out = append(out, raw[copied:start]...)
+		// The input of AppendQuote must be valid UTF-8, or it returns an
+		// error. mask may give invalid UTF-8, so replace it first.
+		out, err = jsontext.AppendQuote(out, strings.ToValidUTF8(masked, "\uFFFD"))
+		if err != nil {
+			return nil, errors.New("quote masked text")
+		}
+		copied = end
+	}
+	if out == nil {
+		return raw, nil
+	}
+	return append(out, raw[copied:]...), nil
+}
+
+// tokenStart returns the index in raw where the string or number token that
+// ends at end starts. Between the end of the token before it (prevEnd) and the
+// token, raw can hold only white space, a comma and a colon.
+func tokenStart(raw []byte, prevEnd, end int) int {
+	i := prevEnd
+	for i < end && strings.IndexByte(" \t\r\n,:", raw[i]) >= 0 {
+		i++
+	}
+	return i
 }
 
 // writePrefixed writes value to b, one line for each line of value, and puts

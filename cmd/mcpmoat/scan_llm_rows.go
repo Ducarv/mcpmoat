@@ -1,8 +1,6 @@
 package main
 
 import (
-	"unicode/utf8"
-
 	"github.com/Ducarv/mcpmoat/internal/llm"
 	"github.com/Ducarv/mcpmoat/internal/report"
 	"github.com/Ducarv/mcpmoat/internal/rules"
@@ -30,19 +28,20 @@ const noToolNameKey = "(no name)"
 // always gets an llm.RuleID row of at least medium, and never an
 // llm.RuleIDInvalid row.
 //
-// The Key is toolKey of the name as the request had it (see
-// llm.Input.RedactedName; the limit keeps the maxToolKeyRunes runes that
-// toolKey shows), so that a configured value in the name shows as
-// discover.Mask and not as the value. Otherwise it is as in a tool rule row:
-// the name cut to maxToolKeyRunes runes, or noToolNameKey for an empty name.
-// All the rows below start from this row, so they all get the same Key. The
-// ignore lookup in classifyPlan uses the real tool name, not the Key.
+// The Key is job.mask.toolKey of the name, as in a tool rule row: each secret
+// value of the server (all of inspect.Result.Secrets) shows as discover.Mask,
+// and then the name is cut to maxToolKeyRunes runes, or is noToolNameKey for
+// an empty name. The mask comes before the cut, so a cut never leaves a part
+// of a secret. The Key does not use llm.Input.RedactedName: that is the name
+// that the request has, and the request can hide fewer values than the report
+// must. All the rows below start from this row, so they all get the same Key.
+// The ignore lookup in classifyPlan uses the real tool name, not the Key.
 func llmRow(job llmJob, a llmAnswer) (report.FindingRow, bool) {
 	row := report.FindingRow{
 		ServerRef: job.ref,
 		Source:    report.SourceLLM,
 		Field:     rules.FieldTool,
-		Key:       toolKey(job.in.RedactedName(utf8.UTFMax * maxToolKeyRunes)),
+		Key:       job.mask.toolKey(job.in.ToolName),
 	}
 	switch a.kind {
 	case answerVerdict:

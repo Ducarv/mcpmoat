@@ -321,10 +321,10 @@ const e2eLLMRiskyTool = "echo"
 
 // e2eLLMAnthropic answers like the Anthropic Messages API: one tool_use block
 // named classify. It rates e2eLLMRiskyTool high (hidden-instructions) and
-// every other tool none. A body that it cannot read (see llmRequestPayload)
-// gets 400, which fails the scan with exit code 2.
+// every other tool none. A body that it cannot read (see
+// decodeProviderRequest) gets 400, which fails the scan with exit code 2.
 func e2eLLMAnthropic(w http.ResponseWriter, body []byte) {
-	msg, err := llmRequestPayload(body)
+	msg, _, err := decodeProviderRequest(llm.ProviderAnthropic, body)
 	if err != nil {
 		w.WriteHeader(http.StatusBadRequest)
 		return
@@ -333,7 +333,7 @@ func e2eLLMAnthropic(w http.ResponseWriter, body []byte) {
 	if msg.ToolName == e2eLLMRiskyTool {
 		verdict = llm.Verdict{Risk: llm.RiskHigh, Category: llm.CategoryHiddenInstructions}
 	}
-	writeLLMVerdict(w, verdict)
+	writeProviderVerdict(w, llm.ProviderAnthropic, verdict)
 }
 
 // e2eLLMWarning returns the warning line that scan --llm prints first on
@@ -384,7 +384,7 @@ func e2eLLMAssertRequests(t *testing.T, reqs []e2eNetRequest, forbidden []string
 				t.Errorf("request %d: body holds %q from the config:\n%s", i, bad, r.body)
 			}
 		}
-		msg, err := llmRequestPayload([]byte(r.body))
+		msg, _, err := decodeProviderRequest(llm.ProviderAnthropic, []byte(r.body))
 		if err != nil {
 			t.Errorf("request %d: body is not a Messages request with one tool message (%v):\n%s", i, err, r.body)
 			continue
@@ -538,7 +538,7 @@ func e2eLLMFailing(t *testing.T, retryAfter string, last int) func(http.Response
 	return func(w http.ResponseWriter, body []byte) {
 		// A body that is not a tool message counts for the tool "":
 		// e2eLLMAssertRequests reports it.
-		msg, _ := llmRequestPayload(body)
+		msg, _, _ := decodeProviderRequest(llm.ProviderAnthropic, body)
 		mu.Lock()
 		tries[msg.ToolName]++
 		try := tries[msg.ToolName]
@@ -661,7 +661,7 @@ func TestE2ELLMRetryThenSuccess(t *testing.T) {
 				failed = map[string]bool{}
 			)
 			provider := e2eNetStart(t, func(w http.ResponseWriter, body []byte) {
-				msg, _ := llmRequestPayload(body)
+				msg, _, _ := decodeProviderRequest(llm.ProviderAnthropic, body)
 				key := ""
 				if tt.perTool {
 					key = msg.ToolName

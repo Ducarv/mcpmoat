@@ -44,6 +44,15 @@ MEDIUM (1)
   a `Tool:` line in place of `Where:`: the tool name, then `(description)` or `(schema)`, the part
   of the tool that matched. A tool name longer than 80 characters (runes) is cut to 80 and ends
   with `...`. The finding never shows the tool text or the pattern.
+- **Configured values in tool text:** a server gets the env values, the header values and the
+  args of its config, and it can echo one of them in a tool name, title, description or schema.
+  The report shows each such value of 8 bytes or more as `********`: in the `Tool:` line of a tool
+  rule finding, a pin finding and an LLM finding, in the tool name and the text of a pin diff, and
+  in the stderr warning about a cut diff. `pin --accept` masks its diffs in the same way. The
+  mask comes before the cut, so a cut never leaves a part of a value. A row does not say that it
+  masked a value, and a server can write `********` itself. A value shorter than 8 bytes is not
+  masked. An entry of `.mcpmoat-ignore` or `--ignore` still matches the real tool name. For the
+  limits, see [What mcpmoat does not do](limits.md).
 - **Time budget:** a server that uses up its rule time budget keeps the findings found so far, and
   gets one `MOAT-T1-023` finding with a `Reason:` line in place of `Tool:`. `scan` also prints one
   warning on stderr. Its severity and exit code are in [Exit codes](exit-codes.md).
@@ -103,7 +112,7 @@ mcpmoat scan --json | jq -r '.findings[] | "\(.rule_id) \(.server)"'
   step, an internal error of the LLM step, or tools over the 500-tool cap (see
   [Optional LLM classification](llm.md)). The exit code is then 2, and the reason is on stderr. A
   tool that the provider refused (HTTP 400, 413 or 422) alone does not make `complete` `false`: it
-  is a `MOAT-LLM-002` finding (or `MOAT-LLM-001` when its text was cut or had a configured value removed).
+  is a `MOAT-LLM-002` finding (or `MOAT-LLM-001` when its text was cut or had a credential removed).
   `complete` can be `true` with exit code 2 when the save of new pins fails after the report, so
   always check the exit code too. A failed write to stdout (for example a closed pipe) can leave
   only the first part of the document. It is not valid JSON, and the exit code is 2. A server that
@@ -135,11 +144,14 @@ mcpmoat scan --json | jq -r '.findings[] | "\(.rule_id) \(.server)"'
   in `related`. An LLM finding (`MOAT-LLM-001`, `MOAT-LLM-002`) also has `"field": "tool"` and
   the tool name in `key`. In a tool rule finding and in an LLM finding, a tool name longer than
   512 characters (runes) is cut to 512 in `key` and ends with `...`. A pin finding
-  (`MOAT-T2-001` to `MOAT-T2-003`) is not cut yet: its `key` holds the full tool name. The
+  (`MOAT-T2-001` to `MOAT-T2-003`) is not cut yet: its `key` holds the full tool name. In all
+  these `key` fields, and in the `tool` and `diff` of each entry of `diffs`, a configured value that the server echoes
+  shows as `********` (see **Configured values in tool text** above). The
   `MOAT-T1-023` finding has `"field": "tool"`, an empty `key`, and the reason
   (`rule analysis time budget used up; N of M tools not fully checked`) in `related`.
-- The document never holds env or header values. A finding names the key it is about, for example
-  `GITHUB_TOKEN`, never its value. See [JSON output](ARCHITECTURE.md#json-output) for the full
+- The document never holds env or header values from your config. A finding names the key it is
+  about, for example `GITHUB_TOKEN`, never its value. A value shorter than 8 bytes that a server
+  echoes in its tool text is not masked. See [JSON output](ARCHITECTURE.md#json-output) for the full
   redaction and escaping rules.
 - Decoded values are raw server text. A tool such as `jq -r` can print terminal control sequences,
   so do not print decoded values (names, diffs) to a terminal without escaping them. Use `jq`

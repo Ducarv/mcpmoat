@@ -1,7 +1,11 @@
 package inspect_test
 
 import (
+	"encoding/json"
 	"errors"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"slices"
@@ -373,9 +377,319 @@ func TestSDKInspectStdioArgSecretEcho(t *testing.T) {
 			if cause := errors.Unwrap(err); cause != nil {
 				text += " | " + cause.Error()
 			}
-			if !strings.Contains(text, "unknown tenant ") || !strings.Contains(text, discover.Mask) {
+			// Not "unknown tenant": the JSON in the -c script makes "unknown"
+			// a short argv piece (see argSecrets), so the whole-word scrub
+			// masks it too.
+			if !strings.Contains(text, "tenant ") || !strings.Contains(text, discover.Mask) {
 				t.Errorf("reason and cause = %q, want the echo with %q", text, discover.Mask)
 			}
+		})
+	}
+}
+
+// sdkShortPin is a fake 6-byte value of a variable that the config expands,
+// and sdkShortLiteral is a fake 6-byte value that the config writes as is.
+// Both are under discover.MinSecretBytes, so only the whole-word scrub (see
+// replaceWords) removes them from error text (issue #180).
+const (
+	sdkShortPin     = "123456"
+	sdkShortLiteral = "tok-42"
+)
+
+// sdkShortEchoParent is the parent environment of
+// TestSDKInspectShortValueEcho.
+var sdkShortEchoParent = []string{"PATH=/usr/bin:/bin", "MCPMOAT_TEST_PIN=" + sdkShortPin}
+
+// sdkShortEchoMessage is the text that the fake servers of
+// TestSDKInspectShortValueEcho send back, with the short expanded value and
+// the short literal as words.
+const sdkShortEchoMessage = "rejected pin %s with key %s"
+
+// sdkShortStdio returns a stdio server, a /bin/sh script that answers each
+// request with a JSON-RPC message: the id of the request, then member, a JSON
+// member whose one "%s" gets sdkShortEchoMessage with the two short values.
+//
+// Its env holds the expanded value inside a longer value ("pin-" + the
+// value, which the long-value scrub removes as a whole), so the 6-byte value
+// on its own is only in the list of looked-up short values. The script cuts
+// it out with cut, because a "${...}" form would be a placeholder for Claude
+// Code. The literal is a configured env value of 6 bytes.
+func sdkShortStdio(member string) discover.Server {
+	reply := `{"jsonrpc":"2.0","id":%s,` + fmt.Sprintf(member, sdkShortEchoMessage) + `}`
+	script := `pin=$(printf %s "$MCPMOAT_TEST_KEY" | cut -c5-)
+while read -r line; do
+  id=$(printf '%s\n' "$line" | sed -n 's/.*"id":\([0-9][0-9]*\).*/\1/p')
+  if [ -n "$id" ]; then
+    printf '` + reply + `\n' "$id" "$pin" "$MCPMOAT_TEST_LIT"
+  fi
+done`
+	return discover.Server{
+		Name:      "short-echo",
+		Client:    discover.ClientClaudeCode,
+		Transport: discover.TransportStdio,
+		Command:   "/bin/sh",
+		Args:      discover.NewArgs([]string{"-c", script}),
+		Env: sdkSecretEnv(map[string]string{
+			"MCPMOAT_TEST_KEY": "pin-${MCPMOAT_TEST_PIN}",
+			"MCPMOAT_TEST_LIT": sdkShortLiteral,
+		}),
+	}
+}
+
+// sdkShortRemote starts an HTTP server that answers each JSON-RPC request
+// with a JSON-RPC error that echoes two request headers: the X-Tenant value
+// without its "team-" prefix (the expanded value alone) and the X-Lit value.
+// It returns a remote server entry for it, with these headers. A remote server
+// has no env, so the literal is a header value here, which the scrub removes
+// wherever it stands; the expanded value alone is a short looked-up value.
+func sdkShortRemote(t *testing.T) discover.Server {
+	t.Helper()
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			ID json.RawMessage `json:"id"`
+		}
+		// A notification (no id) or any other request gets an empty 202.
+		if r.Method != http.MethodPost || json.NewDecoder(r.Body).Decode(&req) != nil || req.ID == nil {
+			w.WriteHeader(http.StatusAccepted)
+			return
+		}
+		pin := strings.TrimPrefix(r.Header.Get("X-Tenant"), "team-")
+		w.Header().Set("Content-Type", "application/json")
+		// The encoder escapes the message as JSON needs (Go's %q does not).
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"jsonrpc": "2.0",
+			"id":      req.ID,
+			"error":   map[string]any{"code": -32603, "message": fmt.Sprintf(sdkShortEchoMessage, pin, r.Header.Get("X-Lit"))},
+		})
+	}))
+	t.Cleanup(ts.Close)
+	return discover.Server{
+		Name:      "short-echo",
+		Client:    discover.ClientClaudeCode,
+		Transport: discover.TransportHTTP,
+		URL:       discover.NewURL(ts.URL + "/mcp"),
+		Headers: sdkSecretEnv(map[string]string{
+			"X-Tenant": "team-${MCPMOAT_TEST_PIN}",
+			"X-Lit":    sdkShortLiteral,
+		}),
+	}
+}
+
+// TestSDKInspectShortValueEcho checks that a short expanded value and a short
+// literal value that a server echoes as words do not reach the error text
+// (issue #180): not ConnectError.Error, which the scan summary prints on
+// stdout, nor its Reason or cause. The child's stderr goes to /dev/null, so
+// the stdio servers echo in a JSON-RPC error or in an invalid MCP answer.
+// Whole words cannot stop a server that glues a letter to the value; this
+// test does not claim that.
+func TestSDKInspectShortValueEcho(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name   string
+		server func(t *testing.T) discover.Server
+	}{
+		{
+			name: "stdio JSON-RPC error",
+			server: func(*testing.T) discover.Server {
+				return sdkShortStdio(`"error":{"code":-32603,"message":"%s"}`)
+			},
+		},
+		{
+			// An invalid MCP answer: the SDK quotes the protocol version of
+			// the initialize result in its error. Output that is not JSON at
+			// all gives a decoder error that quotes no server text.
+			name: "stdio invalid initialize result",
+			server: func(*testing.T) discover.Server {
+				return sdkShortStdio(`"result":{"protocolVersion":"%s"}`)
+			},
+		},
+		{name: "remote JSON-RPC error", server: sdkShortRemote},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			inspector := inspect.NewForTest(inspect.SDKOptions{}, filepath.Join(t.TempDir(), "run"), sdkShortEchoParent, 0)
+			res, err := inspector.Inspect(sdkCtx(t, sdkTimeout), tt.server(t))
+
+			_, reason := sdkAssertFailed(t, res, err, inspect.KindProtocol)
+			text := err.Error() + " | " + reason
+			if cause := errors.Unwrap(err); cause != nil {
+				text += " | " + cause.Error()
+			}
+			sdkAssertNoLeak(t, err, sdkShortPin, sdkShortLiteral)
+			discovertest.AssertNoLeak(t, "reason and cause", text, sdkShortPin, sdkShortLiteral)
+			// The echo must reach the text, masked; else the test would pass
+			// on an error that dropped the server text. Not "rejected pin":
+			// the JSON in the stdio scripts makes "rejected" a short argv
+			// piece (see argSecrets), so the whole-word scrub masks it too.
+			if want := "pin " + discover.Mask + " with key " + discover.Mask; !strings.Contains(text, want) {
+				t.Errorf("error, reason and cause = %q, want the echo %q", text, want)
+			}
+		})
+	}
+}
+
+// sdkCredTok is a fake token: 21 bytes with letters and digits, so it looks
+// like a credential whatever its name.
+const sdkCredTok = "FAKE-TOKEN-0123456789"
+
+// sdkCredDSN is a fake connection URL with a password.
+const sdkCredDSN = "postgres://app:hunter2pw@db/prod" //nolint:gosec // G101: fake test credential
+
+// sdkCredScript is the sh script of the arg cases of
+// TestSDKInspectCredentialsStdio, for the fixture "benign". discover.ArgSecrets
+// masks the value after "-c", so it is in the wide Result.Secrets. It is not a
+// credential.
+const sdkCredScript = "exec benign"
+
+// sdkCredParent returns the parent environment of
+// TestSDKInspectCredentialsStdio. PATH starts with the directory of the
+// benign fixture, so the server runs by its bare name "benign" and the argv holds no
+// temp path: the masked segments of such a path depend on the machine (see
+// sdkPathSecrets), and the lists below can then be exact. REGION and
+// API_KEY hold the same plain value under a plain and a secret-like name.
+func sdkCredParent(t *testing.T) []string {
+	t.Helper()
+	return []string{
+		"PATH=" + filepath.Dir(inspecttest.Fixture(t, "benign")) + ":/usr/bin:/bin",
+		"MCPMOAT_TEST_REGION=production",
+		"MCPMOAT_TEST_API_KEY=production",
+	}
+}
+
+// TestSDKInspectCredentialsStdio checks Result.Secrets and
+// Result.Credentials of a stdio server that succeeds (issues #229 and
+// #235). Secrets is the wide list: every env value, expanded value and argv
+// secret of 8 bytes or more. Credentials is the subset that looks like a
+// credential: plain config words, such as NODE_ENV=production, stay out of
+// it. Both lists are in the order of Result.Secrets.
+func TestSDKInspectCredentialsStdio(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		env  map[string]string
+		// args, when set, run the fixture through sh, so that the argv can
+		// hold args that the fixture would refuse. Their wantSecrets hold
+		// sdkCredScript too.
+		args        []string
+		wantSecrets []string
+		wantCreds   []string
+	}{
+		{
+			name:        "plain env values",
+			env:         map[string]string{"NODE_ENV": "production", "LOG_LEVEL": "information"},
+			wantSecrets: []string{"information", "production"},
+			wantCreds:   nil,
+		},
+		{
+			name:        "secret-like env key",
+			env:         map[string]string{"API_KEY": "production"},
+			wantSecrets: []string{"production"},
+			wantCreds:   []string{"production"},
+		},
+		{
+			name:        "token-like env value",
+			env:         map[string]string{"MCPMOAT_TEST_PLAIN": sdkCredTok},
+			wantSecrets: []string{sdkCredTok},
+			wantCreds:   []string{sdkCredTok},
+		},
+		{
+			name:        "connection URL with a password",
+			env:         map[string]string{"DATABASE_URL": sdkCredDSN},
+			wantSecrets: []string{sdkCredDSN},
+			wantCreds:   []string{sdkCredDSN},
+		},
+		{
+			name:        "connection string with no password",
+			env:         map[string]string{"PGOPTS": "host=localhost dbname=production user=postgres"},
+			wantSecrets: []string{"host=localhost dbname=production user=postgres"},
+			wantCreds:   nil,
+		},
+		{
+			name:        "expanded plain variable",
+			env:         map[string]string{"MCPMOAT_TEST_A": "${MCPMOAT_TEST_REGION}"},
+			wantSecrets: []string{"production"},
+			wantCreds:   nil,
+		},
+		{
+			// The env key and the value are plain; the variable name is not.
+			name:        "expanded secret-like variable",
+			env:         map[string]string{"MCPMOAT_TEST_A": "${MCPMOAT_TEST_API_KEY}"},
+			wantSecrets: []string{"production"},
+			wantCreds:   []string{"production"},
+		},
+		{
+			// Only the expanded value is a credential, not the longer env
+			// value that holds it.
+			name:        "expanded secret-like variable inside a value",
+			env:         map[string]string{"MCPMOAT_TEST_A": "x-${MCPMOAT_TEST_API_KEY}"},
+			wantSecrets: []string{"x-production", "production"},
+			wantCreds:   []string{"production"},
+		},
+		{
+			// The same value under a plain name and a secret-like name. The
+			// two cases swap the names, so one of them looks the value up
+			// under the plain name first, whatever order Expand uses.
+			name:        "same value, plain name in A",
+			env:         map[string]string{"MCPMOAT_TEST_A": "${MCPMOAT_TEST_REGION}", "MCPMOAT_TEST_B": "${MCPMOAT_TEST_API_KEY}"},
+			wantSecrets: []string{"production"},
+			wantCreds:   []string{"production"},
+		},
+		{
+			name:        "same value, plain name in B",
+			env:         map[string]string{"MCPMOAT_TEST_A": "${MCPMOAT_TEST_API_KEY}", "MCPMOAT_TEST_B": "${MCPMOAT_TEST_REGION}"},
+			wantSecrets: []string{"production"},
+			wantCreds:   []string{"production"},
+		},
+		{
+			name:        "secret flag with a plain value",
+			args:        []string{"--api-key", "plainvalue1"},
+			wantSecrets: []string{sdkCredScript, "plainvalue1"},
+			wantCreds:   []string{"plainvalue1"},
+		},
+		{
+			// discover.ArgSecrets masks the words of the value, so they are
+			// in the wide list. None is a credential.
+			name:        "connection string arg with no password",
+			args:        []string{"--dsn", "host=localhost dbname=production"},
+			wantSecrets: []string{"localhost dbname=production", "dbname=production", sdkCredScript, "production"},
+			wantCreds:   nil,
+		},
+		{
+			// "SEVEN77" has 7 bytes: under the limit of both lists.
+			name:        "short arg dropped",
+			args:        []string{"--token", "SEVEN77", "--api-key=EIGHT888"},
+			wantSecrets: []string{sdkCredScript, "EIGHT888"},
+			wantCreds:   []string{"EIGHT888"},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			parent := sdkCredParent(t)
+			s := discover.Server{
+				Name:      "creds",
+				Client:    discover.ClientClaudeCode,
+				Transport: discover.TransportStdio,
+				Command:   "benign",
+				Env:       sdkSecretEnv(tt.env),
+			}
+			if tt.args != nil {
+				// sh runs the fixture by name with no args. "creds" is $0,
+				// and tt.args are $1 and on, which the script ignores.
+				s.Command = "sh"
+				s.Args = discover.NewArgs(append([]string{"-c", sdkCredScript, "creds"}, tt.args...))
+			}
+
+			inspector := inspect.NewForTest(inspect.SDKOptions{}, filepath.Join(t.TempDir(), "run"), parent, 0)
+			got, err := inspector.Inspect(sdkCtx(t, sdkTimeout), s)
+			if err != nil {
+				t.Fatalf("Inspect() error = %v, want nil", err)
+			}
+			sdkAssertResult(t, got, inspecttest.BenignResult(), tt.wantSecrets...)
+			inspect.CheckCredentials(t, got, tt.wantCreds)
 		})
 	}
 }

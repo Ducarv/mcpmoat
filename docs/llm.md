@@ -45,26 +45,38 @@ mcpmoat scan --llm --llm-provider openai --llm-model <model> \
   with a separate config.
 - **What mcpmoat never puts in a request:** your config files, env values, headers, args, URLs, the
   tool schemas and `pins.json`. The key goes only in the auth header of the provider.
-- **Secret values are removed from the tool text:** a server that got a token through its env,
+- **Credentials are removed from the tool text:** a server that got a token through its env,
   headers or args can put that token into a tool name or description. So before the cut, mcpmoat
-  replaces each secret value that it gave to the server with `********` in the name and the
-  description of the tools of that server. The values are the env values and the header values of
-  the server config, the credential in a header value with an auth scheme (the token in
-  `Bearer <token>`, or the password in a `Basic` value), the user info and the secret query and
-  path parts of the URL, and the values of the expanded placeholders. For a stdio server, they are
-  also the parts of the command and the args (after the expansion) that the report hides with
-  `********` when it shows the command: the value of a secret-like flag (`--api-key V`,
-  `--token=V`), the value in `-e NAME=V`, a header line such as `Authorization: Bearer tok` (the
-  line and the credential), an arg that is hidden whole (a DSN, `user:pass` or a token-like
-  value), the secret parts of a URL and a hidden path segment. Inside such a masked part, they are
-  also the smaller parts that the server can echo alone: each value after `=` in a `key=value`
-  text (`Server=h;Password=x`, libpq `password=x`, `Cookie: session=x; other=1`,
-  `-e OPTS=--password=x`) and after `:` in JSON-like text (`"token":"x"`), the query values and
-  the password of a URL that is masked whole (`jdbc:postgresql://h/db?user=a&password=x`), the
-  bare token in `-p<token>`, `--<token>` and `<token>=1`, and the user name next to a password in
-  a URL when the name looks like a token or has 8 bytes or more with a digit
-  (`https://<token>:x-oauth-basic@github.com/...`). Package names and other plain args are not
-  removed. A value of one server is removed only from the tools of that server. For a
+  replaces each configured value of the server that looks like a credential with `********` in
+  the name and the description of the tools of that server. A configured value is a credential
+  in these cases:
+  - An env value, when the key looks secret (`API_KEY`, `GITHUB_TOKEN`), or when the value looks
+    like a token or holds a credential. So `DATABASE_URL=postgres://app:pw@db/prod` counts, but
+    `NODE_ENV=production` does not.
+  - A header value, when the header name looks secret (`Authorization`, `Proxy-Authorization`,
+    `Cookie`, `X-Api-Key`, or any name with a word such as `key` or `session`), when the value is
+    an auth scheme and a credential (`Bearer <token>`, `Basic <base64>`, `Token <token>`), or when
+    the value looks like a token. Then all the parts of that header count: the whole value, the
+    credential after the scheme, and the base64 text and the password of a `Basic` value. A
+    `Cookie` value counts as one whole line. `Content-Type: application/json` and a plain
+    `User-Agent` do not count.
+  - In the URL: the user info and the password, always. A query or path part only when its key
+    looks secret (`?api_key=x`) or it looks like a token. So `?workspace=engineering` does not
+    count.
+  - The value of an expanded placeholder, when the variable name looks secret or the value looks
+    like a token or holds a credential.
+  - For a stdio server, the parts of the command and the args (after the expansion) that look like
+    a credential: the value of a secret-like flag or key (`--api-key V`, `--token=V`,
+    `GITHUB_TOKEN=V`, `"token":"V"`, libpq `password=V`), the password of a user flag
+    (`-u admin:pw`), the value after a secret-like header name in `-H` (`Authorization: Bearer
+    tok`), the credential after an auth scheme, the user info and the secret parts of a URL, and
+    each piece that looks like a token, such as `-p<token>` or `<token>=1`. The plain words of a
+    DSN (`host=localhost dbname=production user=postgres`), a path segment `My Documents`,
+    package names and other plain args do not count.
+
+  A word looks like a token when it starts with a known token prefix (`ghp_`, `sk-`), is a UUID,
+  has 20 bytes or more with letters and digits, or has 32 bytes or more. A value of one server is
+  removed only from the tools of that server. For a
   value that is not valid UTF-8 (it can come from your environment), mcpmoat also removes the form
   that the server sends in JSON, with one U+FFFD for each invalid byte. When a `********` starts in
   the part of the name or the description that mcpmoat can send (the first 512 bytes of the name
@@ -72,18 +84,24 @@ mcpmoat scan --llm --llm-provider openai --llm-model <model> \
   `"redacted": true`, also when a cut then removes the `********`. A value after that part is never
   sent, so it does not set the flag. The fixed instruction text tells the model that `********` is
   removed text and not an instruction. The limits:
+  - **Trade-off:** a plain config value that a server echoes reaches the provider. For example,
+    the env value `production` of `NODE_ENV`, or a password under a key that does not look secret
+    (such as `DB_SETTING`) when the password does not look like a token. Earlier versions removed
+    every configured value of 8 bytes or more. Now mcpmoat removes only credentials, so a plain
+    word of your config no longer hides a part of a benign description from the model. The local
+    report still masks every configured value (see [Scan output](scan-output.md)).
   - A value shorter than 8 bytes is not removed, because it would also hide ordinary words such as
     `true` or `json`.
   - An encoded form of a value is not removed, for example the value in base64, URL-encoded, or
     split with spaces.
-  - A header value of 8 bytes or more is removed also when it is not secret, for example
-    `application/json`. The model then sees `********` in place of that text.
-  - The args fail closed: mcpmoat also removes some arg text that is not secret, because the
-    report hides it too, for example a long random-looking path segment (such as a segment of the
-    macOS `$TMPDIR`), a nix hash, a UUID or a name with spaces. When such text is in a tool
-    description, the model sees `********` in its place, and the message has `"redacted": true`.
-    The smaller parts of a hidden arg fail closed too: they can hold a plain word of 8 bytes or
-    more, such as `Negotiate` in `-H "Authorization: Negotiate x"`.
+  - The check fails closed: mcpmoat also removes some text that is not secret. A word of 32 bytes
+    or more counts as a token, also a readable path segment (such as a segment of the macOS
+    `$TMPDIR`), and so does a nix hash or a UUID. A header value that starts with an auth scheme
+    word counts as a credential, also when it is not one (`Token count`). When such text is in a
+    tool description, the model sees `********` in its place, and the message has
+    `"redacted": true`.
+  - The decoded text `name:password` of a `Basic` header value is not removed as a whole. Only the
+    password in it is removed (when it has 8 bytes or more), so the model sees the name.
   - Some secrets in args are not found, so they are not removed: a value after a flag whose name
     does not look secret (`--db mypassword`), a plain positional value (`hunter2`), a short path
     segment, or a value glued to a short flag when the whole arg does not look like a token
@@ -93,10 +111,6 @@ mcpmoat scan --llm --llm-provider openai --llm-model <model> \
     another secret.
   - A server can write `********` in its text itself, so the marker does not prove that mcpmoat
     removed a secret.
-  - The rows of the LLM step show the tool name as the request had it, with each removed value
-    shown as `********`. The other rows of the report on your terminal and the `--json` output
-    show the tool name as the server sent it, so a server that puts a secret in a tool name can
-    make it show there (see issue #228).
 - **No tool to send:** when no server was inspected, or the inspected servers list no tools,
   `scan` prints `mcpmoat scan: --llm had no tool to classify` on stderr. The exit code does not
   change.
@@ -155,24 +169,25 @@ mcpmoat scan --llm --llm-provider openai --llm-model <model> \
     category. An unusable answer or a refusal for a tool that was not cut still gives
     `MOAT-LLM-002`. The part after the cut was not rated and can hold the payload, and the risk
     text of the finding says so.
-  - The same floor applies to a tool from whose name or description mcpmoat removed a configured
-    value (see **Secret values are removed from the tool text** above), that is, when the message
+  - The same floor applies to a tool from whose name or description mcpmoat removed a credential
+    (see **Credentials are removed from the tool text** above), that is, when the message
     has `"redacted": true`. When the model answers `none` or `low`, or the answer is unusable, or
     the provider refused the tool, the tool gets one `MOAT-LLM-001` finding of severity `medium`
     with category `other`. An answer of `medium` or `high` keeps its severity and category. The
     risk text is `A value from your config, such as an env or header value, was removed from the
     tool text before it was sent to the model. The removed text was not rated and can hold hidden
     instructions for the AI agent.` The reason: a hostile config can choose which text mcpmoat
-    removes, so a part of a malicious description may never reach the model. When the text was
-    also cut, the finding has the text of the cut. Text that mcpmoat removes but that is not secret
-    (see the limits above) gives the same floor. This includes a plain word of 8 bytes or more
-    from your config, such as an env value `production` or `localhost`, and the second word of a
-    path segment with a space, when it is in the tool description. Read the description to check
-    such a finding. It is `medium`, so it does not change the exit code under the default
-    `--fail-on high`, but `--fail-on medium` gives exit 1. What you see: a tool whose description echoes a
-    secret from your config gets a `medium` finding. That is also a sign that the server echoes a
-    secret. The floor does not make the rating complete. The rule engine still reads the full
-    text, and a `medium` finding is below the default `--fail-on high`.
+    removes, so a part of a malicious description may never reach the model. For example, a config
+    can put an injection phrase in an env value under a secret-like key: mcpmoat removes the
+    phrase, and the floor still gives the tool a `medium` finding. A phrase under a key that does
+    not look secret is not removed, so the model reads it. When the text was also cut, the finding
+    has the text of the cut. Text that mcpmoat removes but that is not secret (see the fail-closed
+    limit above) gives the same floor. Read the description to check such a finding. It is
+    `medium`, so it does not change the exit code under the default `--fail-on high`, but
+    `--fail-on medium` gives exit 1. What you see: a tool whose description echoes a credential
+    from your config gets a `medium` finding. That is also a sign that the server echoes a secret.
+    The floor does not make the rating complete. The rule engine still reads the full text, and a
+    `medium` finding is below the default `--fail-on high`.
 
   An LLM finding is marked `[LLM]` and has a `Source` line. In JSON its `source` is `llm`, and
   `related` holds the category. A short sample:

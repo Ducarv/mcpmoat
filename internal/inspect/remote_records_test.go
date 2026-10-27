@@ -206,11 +206,11 @@ func TestOverlappingRequestsKeepTheirOwnRecord(t *testing.T) {
 			}
 
 			srv := rrClassifyServer()
-			pce := classify(promptsErr, srv, ev, nil)
+			pce := classify(promptsErr, srv, ev, nil, nil)
 			if pce.Kind != KindHTTP || pce.Status != http.StatusInternalServerError {
 				t.Errorf("classify(prompts error) = Kind %q, Status %d, want %q, 500 (error: %v)", pce.Kind, pce.Status, KindHTTP, pce)
 			}
-			tce := classify(toolsErr, srv, ev, nil)
+			tce := classify(toolsErr, srv, ev, nil, nil)
 			if tce.Kind != KindProtocol || tce.Status != 0 {
 				t.Errorf("classify(tools error) = Kind %q, Status %d, want %q, 0 (error: %v)", tce.Kind, tce.Status, KindProtocol, tce)
 			}
@@ -452,7 +452,7 @@ func TestJoinContextErr(t *testing.T) {
 		_ = other.recordBlocked(errOtherOrigin)
 		ev.finishCall(failed)
 		ev.finishCall(other)
-		if ce := classify(err, rrClassifyServer(), &ev, nil); ce.Kind != KindTimeout {
+		if ce := classify(err, rrClassifyServer(), &ev, nil, nil); ce.Kind != KindTimeout {
 			t.Errorf("classify Kind = %q, want %q (reason %q)", ce.Kind, KindTimeout, ce.Reason)
 		}
 	})
@@ -498,7 +498,7 @@ func TestFinishedRecordIgnoresLateRequests(t *testing.T) {
 	if status, blocked := ev.stateFor(err); blocked != nil || status != http.StatusBadGateway {
 		t.Errorf("stateFor() = (%d, %v), want (%d, nil)", status, blocked, http.StatusBadGateway)
 	}
-	if ce := classify(err, rrClassifyServer(), &ev, nil); ce.Kind != KindTimeout {
+	if ce := classify(err, rrClassifyServer(), &ev, nil, nil); ce.Kind != KindTimeout {
 		t.Errorf("classify Kind = %q, want %q (reason %q)", ce.Kind, KindTimeout, ce.Reason)
 	}
 }
@@ -1046,7 +1046,7 @@ func TestConnectBlockedFlows(t *testing.T) {
 		// The broken connection makes initialize fail before it sends a
 		// request, so its own record is empty.
 		err := rrCall(t, ev, methodInitialize, nil, errors.New("connection closed"))
-		ce := classify(err, srv, ev, nil)
+		ce := classify(err, srv, ev, nil, nil)
 		if ce.Kind != KindRedirect {
 			t.Errorf("Kind = %q, want %q (error: %v)", ce.Kind, KindRedirect, ce)
 		}
@@ -1064,7 +1064,7 @@ func TestConnectBlockedFlows(t *testing.T) {
 		}
 		ev.markConnected()
 		err := rrCall(t, ev, methodListTools, nil, &jsonrpc.Error{Code: -32603, Message: "tools backend broke"})
-		ce := classify(err, srv, ev, nil)
+		ce := classify(err, srv, ev, nil, nil)
 		if ce.Kind != KindProtocol {
 			t.Errorf("Kind = %q, want %q: the blocked server/discover is stale (error: %v)", ce.Kind, KindProtocol, ce)
 		}
@@ -1081,7 +1081,7 @@ func TestConnectBlockedFlows(t *testing.T) {
 			t.Fatalf("initialize error = %v", err)
 		}
 		ev.markConnected()
-		ce := classify(errors.New("no initialize result"), srv, ev, nil)
+		ce := classify(errors.New("no initialize result"), srv, ev, nil, nil)
 		if ce.Kind != KindProtocol {
 			t.Errorf("Kind = %q, want %q (error: %v)", ce.Kind, KindProtocol, ce)
 		}

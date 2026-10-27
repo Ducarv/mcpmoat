@@ -529,7 +529,7 @@ func withPinsNotice(pinsPath string, lines []string) []lineWant {
 // that the key and no raw escape byte shows.
 func llmLimitsScan(t *testing.T, tools map[string][]inspect.Tool, insp inspect.Inspector, notice string, args ...string) llmLimitsRun {
 	t.Helper()
-	api := newLLMAPI(t)
+	api := newFakeProvider(t, llm.ProviderAnthropic)
 	log := &llmSyncLog{}
 	var early atomic.Int32
 	api.onRequest = func() {
@@ -551,13 +551,11 @@ func llmLimitsScan(t *testing.T, tools map[string][]inspect.Tool, insp inspect.I
 	r.stdout, r.stderr, r.events = log.snapshot()
 	llmAssertNoKey(t, llmTestKey, r.stdout, r.stderr)
 	assertNoEscape(t, r.stdout, r.stderr)
-	bodies, _, _ := api.snapshot()
-	for i, body := range bodies {
-		in, err := llmRequestInput(body)
-		if err != nil {
-			t.Fatalf("request %d: %v\nbody: %s", i, err, body)
+	for i, req := range api.snapshot() {
+		if req.err != nil {
+			t.Fatalf("request %d: %v\nbody: %s", i, req.err, req.body)
 		}
-		r.sent = append(r.sent, in.ToolName)
+		r.sent = append(r.sent, req.payload.ToolName)
 	}
 	if n := int(api.requests.Load()); n != len(r.sent) {
 		t.Errorf("the API counted %d requests but recorded %d bodies", n, len(r.sent))

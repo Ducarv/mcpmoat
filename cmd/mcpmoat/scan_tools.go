@@ -7,7 +7,9 @@ import (
 	"fmt"
 	"slices"
 	"time"
+	"unicode/utf8"
 
+	"github.com/Ducarv/mcpmoat/internal/discover"
 	"github.com/Ducarv/mcpmoat/internal/inspect"
 	"github.com/Ducarv/mcpmoat/internal/report"
 	"github.com/Ducarv/mcpmoat/internal/rules"
@@ -105,9 +107,11 @@ const (
 // one warning on stderr, and goes on with the next server. A budget of 0 or
 // less is used up at once.
 //
-// A finding row holds the rule ID, the tool name in Key (see toolKey) and the
-// target ("description" or "schema") in Related. It never holds tool text or
-// pattern text. The ignore list ignore drops rows like the rows of the config
+// A finding row holds the rule ID, the tool name in Key (see
+// secretMask.toolKey: each secret value of the server, from
+// inspect.Result.Secrets, shows as discover.Mask) and the target
+// ("description" or "schema") in Related. It never holds tool text or pattern
+// text. The ignore list ignore drops rows like the rows of the config
 // rules (see scanIgnores.ignored), apart from the rules.RuleAnalysisBudget
 // row and the rules.RuleToolFindingCap row, which only --ignore drops (see
 // fileCannotIgnore). It compares the real tool name, not the Key. The step
@@ -210,13 +214,21 @@ func (r *toolRulesRun) checkServer(ctx context.Context, o inspect.Outcome) error
 
 	r.pending, r.omitted = r.pending[:0], 0
 	ref := report.NewServerRef(o.Server)
+	// One mask for the whole server: the secret values are the same for each
+	// tool, so they are read once.
+	mask := newSecretMask(o.Result.Secrets)
 	tools := o.Result.Tools
 	for i, t := range tools {
 		found, err := r.a.CheckTool(serverCtx, t)
 		// Keep the findings also when err is not nil: every finding that
-		// CheckTool returns is a real match.
-		for _, f := range found {
-			r.addTool(t.Name, textRow(r.set, ref, t.Name, f))
+		// CheckTool returns is a real match. All rows of one tool share one
+		// Key, so the mask runs once for each tool with a finding. The ignore
+		// list gets the real name, the row gets the masked Key.
+		if len(found) > 0 {
+			key := mask.toolKey(t.Name)
+			for _, f := range found {
+				r.addTool(t.Name, textRow(r.set, ref, key, f))
+			}
 		}
 		if err == nil {
 			continue
@@ -350,11 +362,13 @@ func (r *toolRulesRun) keep(index int, row report.FindingRow) {
 	}
 }
 
-// textRow returns the finding row of the rule hit f on the tool toolName of
-// the server ref. The severity, the title, the risk and the remediation come
-// from the rule set, as for the config rules (see findingRule). The Key is
-// toolKey(toolName).
-func textRow(set *rules.Set, ref report.ServerRef, toolName string, f rules.TextFinding) report.FindingRow {
+// textRow returns the finding row of the rule hit f on a tool of the server
+// ref. The severity, the title, the risk and the remediation come from the
+// rule set, as for the config rules (see findingRule). key is the Key of the
+// row: secretMask.toolKey of the tool name, so a secret value that the server
+// echoes in the name shows as discover.Mask. The ignore list never reads the
+// Key: it compares the real tool name (see passIgnore).
+func textRow(set *rules.Set, ref report.ServerRef, key string, f rules.TextFinding) report.FindingRow {
 	rule, severity := findingRule(set, f.RuleID)
 	return report.FindingRow{
 		ServerRef:   ref,
@@ -364,16 +378,19 @@ func textRow(set *rules.Set, ref report.ServerRef, toolName string, f rules.Text
 		Risk:        rule.Risk,
 		Remediation: rule.Remediation,
 		Field:       rules.FieldTool,
-		Key:         toolKey(toolName),
+		Key:         key,
 		Related:     string(f.Target),
 	}
 }
 
-// toolKey returns the Key of a tool rule row for the tool name: the name cut
-// to maxToolKeyRunes runes, with termsafe.CutMarker at the end when it was
-// cut. An empty name gives noToolNameKey: the report writers treat a row with
-// an empty Key as a row about the whole server. The Key is raw text: the
-// report writers escape it, as they escape every Key.
+// toolKey returns the name cut to maxToolKeyRunes runes, with
+// termsafe.CutMarker at the end when it was cut. An empty name gives
+// noToolNameKey: the report writers treat a row with an empty Key as a row
+// about the whole server. The Key is raw text: the report writers escape it,
+// as they escape every Key.
+//
+// toolKey does not hide secret values. A row Key comes from
+// secretMask.toolKey, which hides them first and then calls toolKey.
 func toolKey(name string) string {
 	if name == "" {
 		return noToolNameKey
@@ -383,6 +400,87 @@ func toolKey(name string) string {
 		return short + termsafe.CutMarker
 	}
 	return short
+}
+
+// secretMask hides the secret values of one server in the tool text that the
+// report prints: the tool names in the Key of the tool rule rows, the pin rows
+// and the LLM rows, and the tool names and the diffs of the pin diffs (through
+// pins.CompareMasked). A server gets the configured env values, header values
+// and argv secrets (inspect.Result.Secrets), and a hostile server can echo one
+// of them in its tool text. The project rule is that mcpmoat never prints such
+// a value (FR-14, FR-17).
+//
+// mask(s, limit) returns s with each secret value replaced with discover.Mask:
+// all of s when limit is negative (discover.RedactText), or only the start of
+// the result that discover.RedactTextPrefix gives for limit. Use the methods
+// below, not the function itself.
+//
+// Only the printed text is masked. The ignore list, the pin store, the hashes
+// and the lookups by name use the real tool text.
+//
+// secretMask is a func type, not a struct that holds the values. The function
+// keeps the values inside (a closure), and fmt prints a func as an address. So
+// a %v of a row, a job or a mask by mistake can never print a secret value.
+// Methods on a func type are a usual Go idiom (http.HandlerFunc is one).
+//
+// A nil secretMask hides nothing: every method then returns its input. This is
+// the mask of a server with no secret value of at least
+// discover.MinSecretBytes bytes.
+type secretMask func(s string, limit int) string
+
+// newSecretMask returns the mask of a server with the secret values secrets
+// (inspect.Result.Secrets). It reads the values once
+// (discover.SecretTextValues), so the caller makes one mask for each server,
+// not one for each row. It returns nil when no value is long enough.
+func newSecretMask(secrets []discover.Secret) secretMask {
+	values := discover.SecretTextValues(secrets)
+	if len(values) == 0 {
+		return nil
+	}
+	return func(s string, limit int) string {
+		if limit < 0 {
+			out, _ := discover.RedactText(s, values)
+			return out
+		}
+		out, _ := discover.RedactTextPrefix(s, values, limit)
+		return out
+	}
+}
+
+// text returns all of s with each secret value replaced with discover.Mask.
+func (m secretMask) text(s string) string {
+	if m == nil {
+		return s
+	}
+	return m(s, -1)
+}
+
+// toolKey returns the Key of a tool rule row or an LLM row for the tool name:
+// the name with each secret value replaced with discover.Mask, then cut like
+// the package function toolKey (to maxToolKeyRunes runes, or noToolNameKey
+// for an empty name).
+//
+// The mask comes before the cut, so a cut can split a Mask but never a secret
+// value. The mask reads only the start of a long name: maxToolKeyRunes runes
+// have at most utf8.UTFMax bytes each, so a masked text of more than
+// utf8.UTFMax*maxToolKeyRunes bytes has more than maxToolKeyRunes runes, and
+// the start that discover.RedactTextPrefix returns for that limit gives the
+// same cut as the whole masked name.
+func (m secretMask) toolKey(name string) string {
+	if m == nil {
+		return toolKey(name)
+	}
+	return toolKey(m(name, utf8.UTFMax*maxToolKeyRunes))
+}
+
+// compareMask returns the mask function of pins.CompareMasked: nil for a nil
+// secretMask (no mask, the same as pins.Compare), else text. A method value
+// such as m.text is never nil, also when m is nil, so this check is needed.
+func (m secretMask) compareMask() func(string) string {
+	if m == nil {
+		return nil
+	}
+	return m.text
 }
 
 // failClosedSeverity returns the severity of a rules.RuleAnalysisBudget row and
