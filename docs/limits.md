@@ -37,6 +37,13 @@ This page lists what mcpmoat does not do, so you know how far to trust a clean s
 - `--llm` does not make a scan complete or reliable. A model can miss a malicious tool, and a
   hostile description can try to influence the model. Its findings are advisory, and with `--llm`
   your tool names and descriptions leave your machine.
+- `--llm` classifies at most 500 tools in one scan, shared fairly between the servers (see
+  [Optional LLM classification](llm.md)). The tools of a server over its share are not
+  classified, and the scan exits with 2. So a hostile server can make a `--llm` scan exit with 2 on
+  purpose, but it cannot use up the share of the other servers.
+- A tool that the provider refuses (HTTP 400, 413 or 422) is not classified. It gets a `medium`
+  finding, not a rating. When the provider refuses every tool that it answers, the LLM step fails
+  and the scan exits with 2.
 - `--llm` replaces the secret values of a server with `********` in the tool text that it sends,
   but not all of them (see [What is sent](llm.md)):
   - A value shorter than 8 bytes is not removed.

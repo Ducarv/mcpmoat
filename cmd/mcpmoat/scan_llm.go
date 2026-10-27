@@ -25,7 +25,9 @@ import (
 // Limits of the LLM step.
 const (
 	// maxLLMTools is the largest number of tools that one scan sends to the
-	// provider. It bounds the cost and the time of a scan.
+	// provider. It bounds the cost and the time of a scan. The servers share
+	// it fairly (see fairShare), so one server with many tools cannot use it
+	// all and leave the other servers without a rating.
 	maxLLMTools = 500
 	// llmWorkers is the number of requests that run at the same time.
 	llmWorkers = llm.MaxConcurrentRequests
@@ -289,6 +291,13 @@ const (
 	// is not a valid verdict (llm.ErrInvalidOutput). The tool gets an
 	// llm.RuleIDInvalid row.
 	answerUnusable
+	// answerRejected means that the provider refused this one tool
+	// (llm.ErrRejected: HTTP 400, 413 or 422). It does not stop the step:
+	// the tool gets an llm.RuleIDInvalid row with llm.RejectedText, and the
+	// other requests go on. When no answered tool got a 2xx answer, the step
+	// fails closed (see rejectedFailure). As an llmFailure kind it is that
+	// failure.
+	answerRejected
 	// answerStopped means that the context of the request ended: a signal,
 	// or the cancel after the first failure of the step.
 	answerStopped
@@ -311,6 +320,8 @@ func (k answerKind) String() string {
 		return "answerVerdict"
 	case answerUnusable:
 		return "answerUnusable"
+	case answerRejected:
+		return "answerRejected"
 	case answerStopped:
 		return "answerStopped"
 	case answerProviderFailed:
@@ -322,26 +333,61 @@ func (k answerKind) String() string {
 	}
 }
 
-// stepFails reports whether an answer of kind k stops the LLM step.
+// stepFails reports whether an answer of kind k stops the LLM step at once.
+// answerRejected does not: only the check after all the answers can make it
+// fail the step (see rejectedFailure).
 func (k answerKind) stepFails() bool {
 	return k == answerProviderFailed || k == answerInternalFailed
 }
 
 // answered reports whether the provider answered the job of an answer of
-// kind k: with a verdict, or with an answer that cannot be used. For the
-// other kinds, the tool was not classified (see llmResult.skipped).
+// kind k: with a verdict, with an answer that cannot be used, or with a
+// refusal of this one tool. For the other kinds, the tool was not classified
+// (see llmResult.skipped).
 func (k answerKind) answered() bool {
+	return k == answerVerdict || k == answerUnusable || k == answerRejected
+}
+
+// got2xx reports whether the provider answered the job of an answer of kind
+// k with a 2xx status: with a verdict, or with model output that cannot be
+// used (llm.ErrInvalidOutput comes only from a 2xx body).
+func (k answerKind) got2xx() bool {
 	return k == answerVerdict || k == answerUnusable
 }
 
 // sortAnswer returns the kind of the result of Classify with the error err.
 //
-// It fails closed. Only llm.ErrInvalidOutput gives an llm.RuleIDInvalid row
-// (answerUnusable): the model answered, but its answer cannot be used. Any
-// error that sortAnswer does not know (for example a request that is too
-// large, a nil client, or a future error path that does not wrap
-// llm.ErrProvider) stops the step (answerInternalFailed). So a new error can
-// never make a failed step look like a complete scan with medium findings.
+// It fails closed. Only llm.ErrInvalidOutput (answerUnusable) and
+// llm.ErrRejected (answerRejected) give an llm.RuleIDInvalid row: the
+// provider answered, but there is no usable rating. Any error that
+// sortAnswer does not know (for example a request that is too large, a nil
+// client, or a future error path that does not wrap llm.ErrProvider) stops
+// the step (answerInternalFailed). So a new error can never make a failed
+// step look like a complete scan with medium findings.
+//
+// llm.ErrRejected wraps llm.ErrProvider, so its case must come before the
+// llm.ErrProvider case: a switch takes the first case that is true. Every
+// other provider error (401, 403, 404, 3xx, other codes, transport errors)
+// stays a global failure (answerProviderFailed) that stops the step.
+//
+// A refusal alone is per tool, but the step fails closed when no tool got a
+// 2xx answer. After all the requests end, classifyTools applies this rule
+// (see rejectedFailure):
+//
+//   - A global failure (answerProviderFailed or answerInternalFailed) or a
+//     signal wins: it is the failure of the step, as without refusals. The
+//     refused tools that were answered before it keep their rows.
+//   - Else, when at least one tool was refused and no answered tool got a
+//     2xx answer (answerVerdict or answerUnusable), the step is a provider
+//     failure with the reason of the refused tool with the lowest job index.
+//     The refused tools then get no row: they count as not classified. So a
+//     wrong model name or API shape that gives 400 for every tool exits
+//     with 2 and complete false, not with one medium row for each tool.
+//   - Else, the refused tools get their rows and the step is complete.
+//
+// Only answered jobs count. Without a global failure and a signal, no
+// request is cancelled, so every job inside the shares of the cap (see
+// fairShare) is answered.
 func sortAnswer(err error) answerKind {
 	switch {
 	case err == nil:
@@ -350,6 +396,9 @@ func sortAnswer(err error) answerKind {
 		return answerUnusable
 	case errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded):
 		return answerStopped
+	case errors.Is(err, llm.ErrRejected):
+		// Before the llm.ErrProvider case: ErrRejected wraps it.
+		return answerRejected
 	case errors.Is(err, llm.ErrProvider):
 		return answerProviderFailed
 	default:
@@ -359,13 +408,23 @@ func sortAnswer(err error) answerKind {
 
 // llmFailure is the first failure of the LLM step.
 type llmFailure struct {
-	// kind is answerProviderFailed or answerInternalFailed.
+	// kind is answerProviderFailed or answerInternalFailed for the first
+	// request that stopped the step, or answerRejected when no answered
+	// tool got a 2xx answer and at least one was refused (see
+	// rejectedFailure). answerRejected is a provider failure too.
 	kind answerKind
 	// err is the error of the provider (llm.ErrProvider), whose text is
-	// fixed (see llmFailureText). It is nil for answerInternalFailed: that
-	// error text is never kept, so it can never be printed.
+	// fixed (see llmFailureText). For answerRejected it is the error of the
+	// first refused tool (llm.ErrRejected). It is nil for
+	// answerInternalFailed: that error text is never kept, so it can never
+	// be printed.
 	err error
 }
+
+// rejectedHintText is the fixed hint of the reason of an answerRejected
+// failure (see rejectedReason). Every answered tool was refused, so it says
+// "every tool", not "this tool" as llm.Reason does.
+const rejectedHintText = "the provider refused every tool"
 
 // llmInternalText is the text after the prefix of the stderr line when the
 // LLM step failed for a reason that is not the provider. It is fixed text.
@@ -381,10 +440,15 @@ const llmNoToolText = "--llm had no tool to classify"
 // llmAnswer is the result of one job.
 type llmAnswer struct {
 	kind answerKind
-	// verdict is the whole verdict for answerVerdict. For answerUnusable,
-	// only verdict.Truncated is set (see llm.Client.Classify), so that
-	// llmRow can rate a cut tool. For the other kinds it is zero.
+	// verdict is the whole verdict for answerVerdict. For answerUnusable
+	// and answerRejected, only verdict.Truncated is set (see
+	// llm.Client.Classify), so that llmRow can rate a cut tool. For the
+	// other kinds it is zero.
 	verdict llm.Verdict
+	// err is the error of Classify for answerRejected (it wraps
+	// llm.ErrRejected and has fixed text), so that rejectedFailure can give
+	// its reason. For the other kinds it is nil. runLLMJobs sets it.
+	err error
 }
 
 // newLLMAnswer returns the answer of kind k for the verdict v that Classify
@@ -394,7 +458,7 @@ func newLLMAnswer(k answerKind, v llm.Verdict) llmAnswer {
 	switch k {
 	case answerVerdict:
 		return llmAnswer{kind: k, verdict: v}
-	case answerUnusable:
+	case answerUnusable, answerRejected:
 		return llmAnswer{kind: k, verdict: llm.Verdict{Truncated: v.Truncated}}
 	default:
 		return llmAnswer{kind: k}
@@ -417,14 +481,18 @@ type llmResult struct {
 	// counts holds the number of rows of each server, by the index of the
 	// server in the servers of the scan (see addLLMCounts).
 	counts map[int]int
-	// overCap is the number of tools after the first maxLLMTools. They were
-	// not sent.
+	// overCap is the number of tools over the share of their server of the
+	// maxLLMTools cap (see fairShare), for all the servers together. They
+	// were not sent.
 	overCap int
 	// failure is the first failure of the step: a provider failure or an
-	// internal error. It is nil when no request failed.
+	// internal error, or the refusal of every answered tool (see
+	// rejectedFailure). It is nil when no request failed.
 	failure *llmFailure
-	// skipped is the number of tools under the cap that got no verdict: the
-	// tool whose request failed, and the tools that were not sent after it.
+	// skipped is the number of tools inside the shares that got no verdict:
+	// the tool whose request failed, and the tools that were not sent after
+	// it. When every answered tool was refused, it is every tool inside the
+	// shares.
 	skipped int
 	// tools is the number of tools that the step had to classify: every tool
 	// of the inspected servers, also the ones over the cap. With 0, llmStep
@@ -450,6 +518,10 @@ func (r llmResult) incomplete() bool {
 // prints one llmNoToolText line, so the user knows that no tool was rated.
 // The line changes neither the exit code nor the JSON report.
 //
+// With at least one tool to send, it prints one notice line before the first
+// request: the number of tools that it sends and the size of their text (see
+// llmPlan.sendingNotice).
+//
 // It returns false when the process got a signal during a step that had a tool
 // to classify. It has written interruptedText then (see interrupted), and scan
 // must print no report and save no pins. With no tool to classify, a signal
@@ -460,7 +532,20 @@ func (c *cli) llmStep(ctx context.Context, cl toolClassifier, outcomes []inspect
 	if cl == nil {
 		return llmResult{}, true
 	}
-	lr, err := classifyTools(ctx, outcomes, cl, ignore)
+	plan := planLLMJobs(outcomes)
+	// The notice comes here, between the two other groups of --llm lines on
+	// stderr. The setup warning (see setupLLM) comes before the inspection:
+	// it names the provider, but the tools are not known yet. The lines of
+	// the result (llmNoToolText, the ignore warnings and printLLMProblems)
+	// come after the requests. Only here are the tools known and no tool text
+	// sent yet, so the notice tells the user how much data leaves the machine
+	// before it leaves. With no job it is not printed: llmNoToolText says
+	// that then. It goes to stderr also with --json, so stdout stays pure
+	// JSON.
+	if len(plan.jobs) > 0 {
+		c.cmdPrintf("scan", "%s", plan.sendingNotice())
+	}
+	lr, err := classifyPlan(ctx, plan, cl, ignore)
 	if c.llmStepStopped(ctx, err) {
 		return llmResult{}, false
 	}
@@ -499,9 +584,11 @@ func (c *cli) llmStepStopped(ctx context.Context, err error) bool {
 // removes them from the name and the description before it sends them.
 //
 // The tools go in the order of the servers (inspect.Outcome.Index), then in
-// the order that the server lists them. Only the first maxLLMTools tools are
-// sent. llmWorkers requests run at the same time. The rows keep the order of
-// the tools, whatever the order in which the requests end.
+// the order that the server lists them. At most maxLLMTools tools are sent,
+// shared fairly between the servers (see planLLMJobs and fairShare): each
+// server sends its first tools, up to its share. llmWorkers requests run at
+// the same time. The rows keep the order of the tools, whatever the order in
+// which the requests end.
 //
 // Each answered tool gives at most one report.SourceLLM row with fixed texts
 // from package llm, so no model output reaches it: see llmRow. Only the
@@ -514,18 +601,28 @@ func (c *cli) llmStepStopped(ctx context.Context, err error) bool {
 // starts. The result then holds the failure (see llmResult.failure), and the
 // tools without a verdict get no row.
 //
+// A tool that the provider refused (llm.ErrRejected) does not stop the step:
+// it gets an llm.RuleIDInvalid row with llm.RejectedText. But when no
+// answered tool got a 2xx answer, the step fails closed with no LLM row (see
+// sortAnswer for the rule and rejectedFailure).
+//
 // The error is not nil only when ctx ended (the process got a signal) and at
 // least one tool was to be classified. The caller then handles it like a
 // signal during the inspection. With no tool, the result is empty and the
 // error is nil.
+//
+// classifyTools is planLLMJobs and then classifyPlan. llmStep calls the two
+// itself, so that it can print the notice between them.
 func classifyTools(ctx context.Context, outcomes []inspect.Outcome, cl toolClassifier, ignore *scanIgnores) (llmResult, error) {
-	var res llmResult
-	jobs := llmJobs(outcomes)
-	res.tools = len(jobs)
-	if len(jobs) > maxLLMTools {
-		res.overCap = len(jobs) - maxLLMTools
-		jobs = jobs[:maxLLMTools]
-	}
+	return classifyPlan(ctx, planLLMJobs(outcomes), cl, ignore)
+}
+
+// classifyPlan runs the jobs of plan and returns the LLM findings. It is the
+// part of classifyTools after the jobs are built: see classifyTools for the
+// whole behaviour.
+func classifyPlan(ctx context.Context, plan llmPlan, cl toolClassifier, ignore *scanIgnores) (llmResult, error) {
+	res := llmResult{tools: plan.tools, overCap: plan.overCap}
+	jobs := plan.jobs
 
 	answers, failure := runLLMJobs(ctx, jobs, cl)
 	// With no job, the step did nothing, so a signal that comes now is not
@@ -533,7 +630,16 @@ func classifyTools(ctx context.Context, outcomes []inspect.Outcome, cl toolClass
 	if err := ctx.Err(); err != nil && len(jobs) > 0 {
 		return llmResult{}, err
 	}
+	if failure == nil {
+		// A global failure wins. Without one, check the refusals.
+		failure = rejectedFailure(answers)
+	}
 	res.failure = failure
+	if failure != nil && failure.kind == answerRejected {
+		// Fail closed: no tool was classified, so no tool gets a row.
+		res.skipped = len(jobs)
+		return res, nil
+	}
 
 	for i, job := range jobs {
 		if !answers[i].kind.answered() {
@@ -564,25 +670,163 @@ func classifyTools(ctx context.Context, outcomes []inspect.Outcome, cl toolClass
 	return res, nil
 }
 
-// llmJobs returns one job for each tool of each inspected server, in the order
-// of the servers (inspect.Outcome.Index), then of the tools. inspect.Run sorts
-// the outcomes, so their order is not the order of the servers.
+// rejectedFailure returns the failure of the step when at least one answer
+// in answers is a refusal (answerRejected) and no answered job got a 2xx
+// answer (see answerKind.got2xx). It returns nil in all other cases, also
+// when answers is empty. Jobs without an answer (answerNotRun, answerStopped,
+// a failed request) do not count. The caller calls it only when the step
+// has no global failure (see sortAnswer for the whole rule).
+//
+// The failure holds the error of the refusal with the lowest index in
+// answers. answers is in the order of the jobs, whatever the order in which
+// the requests ended, so the reason is always the same for the same
+// answers.
+func rejectedFailure(answers []llmAnswer) *llmFailure {
+	var first *llmFailure
+	for _, a := range answers {
+		if a.kind.got2xx() {
+			return nil
+		}
+		if a.kind == answerRejected && first == nil {
+			first = &llmFailure{kind: answerRejected, err: a.err}
+		}
+	}
+	return first
+}
+
+// llmPlan is the work of the LLM step, before the first request.
+type llmPlan struct {
+	// jobs are the tools to send, in the order of the servers
+	// (inspect.Outcome.Index), then of the tools. Each server has at most its
+	// share of maxLLMTools (see fairShare).
+	jobs []llmJob
+	// tools is the number of tools of the inspected servers, also the ones
+	// over the shares.
+	tools int
+	// overCap is tools minus len(jobs): the tools over the shares, for all
+	// the servers together. They are not sent.
+	overCap int
+}
+
+// planLLMJobs returns the plan of the LLM step for the inspected servers in
+// outcomes (see llmServerJobs). It splits maxLLMTools between the servers
+// with fairShare, and keeps the first tools of each server up to its share,
+// in the order that the server lists them. So a server with many tools
+// cannot take the whole cap: a hostile server that lists thousands of tools
+// still leaves a share to each other server.
+func planLLMJobs(outcomes []inspect.Outcome) llmPlan {
+	servers := llmServerJobs(outcomes)
+	counts := make([]int, len(servers))
+	for i, jobs := range servers {
+		counts[i] = len(jobs)
+	}
+	shares := fairShare(counts, maxLLMTools)
+
+	var plan llmPlan
+	for i, jobs := range servers {
+		plan.tools += len(jobs)
+		plan.jobs = append(plan.jobs, jobs[:shares[i]]...)
+	}
+	plan.overCap = plan.tools - len(plan.jobs)
+	return plan
+}
+
+// sendingNotice returns the text of the notice that llmStep prints on stderr
+// before the first request: the number of jobs, and the size of the tool
+// text that they send, in KiB rounded up. It holds numbers only: no tool
+// text, no server name and nothing from the provider.
+//
+// The size is the sum of the bytes of each tool name and description after
+// the cuts of package llm (llm.MaxToolNameBytes and llm.MaxDescriptionBytes).
+// It is approximate ("about"): the masks of the secret values, the JSON
+// escapes and the prompt change the real size of a request a little.
+func (p llmPlan) sendingNotice() string {
+	size := 0
+	for _, job := range p.jobs {
+		// min is a built-in function since Go 1.21.
+		size += min(len(job.in.ToolName), llm.MaxToolNameBytes)
+		size += min(len(job.in.Description), llm.MaxDescriptionBytes)
+	}
+	// Integer division rounds down. Adding 1023 first makes it round up, so
+	// 1 byte shows as 1 KiB and not as 0 KiB.
+	kib := (size + 1023) / 1024
+	n := len(p.jobs)
+	return fmt.Sprintf("sending %d %s (about %d KiB of text) to the LLM provider", n, plural(n, "tool", "tools"), kib)
+}
+
+// fairShare splits budget between servers that have counts[i] tools each,
+// with a max-min fair share, and returns the share of each server, in the
+// order of counts. A server never gets more than its count. A server with
+// fewer tools than an equal part keeps all of them, and the part that it does
+// not use goes to the other servers. The sum of the shares is the smaller of
+// budget and the sum of counts.
+//
+// When the parts cannot be equal, the remainder goes to the servers that come
+// first in counts, one tool each, so the result is always the same for the
+// same input. For example, counts {3, 1000, 1000} with budget 500 give
+// {3, 249, 248}. A count or a budget below 0 counts as 0.
+func fairShare(counts []int, budget int) []int {
+	shares := make([]int, len(counts))
+	// order holds the indexes of counts, the smallest count first. The sort
+	// is stable: servers with the same count keep the order of counts.
+	order := make([]int, len(counts))
+	for i := range order {
+		order[i] = i
+	}
+	slices.SortStableFunc(order, func(a, b int) int {
+		return cmp.Compare(max(counts[a], 0), max(counts[b], 0))
+	})
+
+	// This is "water-filling". Go from the smallest server to the largest.
+	// While a server has no more tools than an equal part of what is left,
+	// it gets all its tools. The first server with more tools than that part
+	// stops the loop: all the servers after it are at least as large, so they
+	// all get an equal part of what is left.
+	left := max(budget, 0)
+	for k, i := range order {
+		n := len(order) - k // the servers that have no share yet
+		count := max(counts[i], 0)
+		if count <= left/n {
+			shares[i] = count
+			left -= count
+			continue
+		}
+		// Each of the n servers gets left/n tools, and the first left%n of
+		// them in the order of counts get one tool more. Each one has more
+		// than left/n tools, so it has the tool for the extra one.
+		rest := slices.Sorted(slices.Values(order[k:]))
+		for j, idx := range rest {
+			shares[idx] = left / n
+			if j < left%n {
+				shares[idx]++
+			}
+		}
+		break
+	}
+	return shares
+}
+
+// llmServerJobs returns, for each inspected server with at least one tool,
+// one job for each of its tools, in the order of the tools. The servers are
+// in their order in the scan (inspect.Outcome.Index). inspect.Run sorts the
+// outcomes, so their order is not the order of the servers.
 //
 // Every job of a server gets the secret values of that server
 // (inspect.Result.Secrets) in llm.Input.Secrets, so that llm removes them
 // from the tool text before the request (FR-17). A server that got a token
 // can put it in a tool name or description. The jobs share the slice of the
 // outcome and never change it.
-func llmJobs(outcomes []inspect.Outcome) []llmJob {
+func llmServerJobs(outcomes []inspect.Outcome) [][]llmJob {
 	sorted := slices.SortedStableFunc(slices.Values(outcomes), func(a, b inspect.Outcome) int {
 		return cmp.Compare(a.Index, b.Index)
 	})
-	var jobs []llmJob
+	var servers [][]llmJob
 	for _, o := range sorted {
-		if o.Status != inspect.StatusOK {
+		if o.Status != inspect.StatusOK || len(o.Result.Tools) == 0 {
 			continue
 		}
 		ref := report.NewServerRef(o.Server)
+		jobs := make([]llmJob, 0, len(o.Result.Tools))
 		for _, t := range o.Result.Tools {
 			jobs = append(jobs, llmJob{
 				index: o.Index,
@@ -594,8 +838,9 @@ func llmJobs(outcomes []inspect.Outcome) []llmJob {
 				},
 			})
 		}
+		servers = append(servers, jobs)
 	}
-	return jobs
+	return servers
 }
 
 // runLLMJobs runs the jobs with llmWorkers requests at the same time, and
@@ -605,7 +850,8 @@ func llmJobs(outcomes []inspect.Outcome) []llmJob {
 // The first answer that stops the step (see answerKind.stepFails) is the
 // failure: it stops the requests that run (it cancels their context) and no
 // new job starts. When ctx ends, no new job starts either; the caller checks
-// ctx.
+// ctx. A refused tool (answerRejected) stops nothing: the caller checks the
+// refusals after all the jobs (see rejectedFailure).
 func runLLMJobs(ctx context.Context, jobs []llmJob, cl toolClassifier) ([]llmAnswer, *llmFailure) {
 	answers := make([]llmAnswer, len(jobs))
 	runCtx, cancel := context.WithCancel(ctx)
@@ -637,6 +883,11 @@ func runLLMJobs(ctx context.Context, jobs []llmJob, cl toolClassifier) ([]llmAns
 			// Each goroutine writes only its own element, so this needs no
 			// lock.
 			answers[i] = newLLMAnswer(kind, v)
+			if kind == answerRejected {
+				// Keep the error for the reason of rejectedFailure. Its
+				// text is fixed.
+				answers[i].err = err
+			}
 			if !kind.stepFails() {
 				return
 			}
@@ -665,8 +916,8 @@ func runLLMJobs(ctx context.Context, jobs []llmJob, cl toolClassifier) ([]llmAns
 // cannot be used, so it fails closed. parseVerdict never returns one, but a
 // classifier in a test can. A cut tool text (llm.Verdict.Truncated) gets the
 // floor row (see truncatedRow) when the model rated it none or low, or gave
-// no usable answer. So a cut tool always gets an llm.RuleID row of at least
-// medium, and never an llm.RuleIDInvalid row.
+// no usable answer, or the provider refused it. So a cut tool always gets an
+// llm.RuleID row of at least medium, and never an llm.RuleIDInvalid row.
 //
 // The Key is toolKey(job.in.ToolName), as in a tool rule row: the name cut to
 // maxToolKeyRunes runes, or noToolNameKey for an empty name. All the rows
@@ -699,6 +950,8 @@ func llmRow(job llmJob, a llmAnswer) (report.FindingRow, bool) {
 		return row, true
 	case answerUnusable:
 		return unusableRow(row, a.verdict.Truncated), true
+	case answerRejected:
+		return rejectedRow(row, a.verdict.Truncated), true
 	default:
 		// answerNotRun, answerStopped, answerProviderFailed and
 		// answerInternalFailed: the tool got no answer.
@@ -744,13 +997,28 @@ func llmRuleRow(row report.FindingRow) report.FindingRow {
 // (see truncatedRow) when the tool text was cut, else an llm.RuleIDInvalid
 // row with severity medium and the fixed texts of package llm.
 func unusableRow(row report.FindingRow, truncated bool) report.FindingRow {
+	return invalidRow(row, truncated, llm.InvalidText)
+}
+
+// rejectedRow fills row for a tool that the provider refused
+// (answerRejected): the same row as unusableRow, but with the risk text
+// llm.RejectedText. A cut tool gets the floor row (see truncatedRow).
+func rejectedRow(row report.FindingRow, truncated bool) report.FindingRow {
+	return invalidRow(row, truncated, llm.RejectedText)
+}
+
+// invalidRow fills row for a tool without a usable rating: the floor row
+// (see truncatedRow) when the tool text was cut, else an llm.RuleIDInvalid
+// row with severity medium, the fixed risk text risk and the other fixed
+// texts of package llm. risk is one of the fixed texts of package llm.
+func invalidRow(row report.FindingRow, truncated bool, risk string) report.FindingRow {
 	if truncated {
 		return truncatedRow(row)
 	}
 	row.RuleID = llm.RuleIDInvalid
 	row.Title = llm.InvalidTitle
 	row.Severity = string(rules.SeverityMedium)
-	row.Risk = llm.InvalidText
+	row.Risk = risk
 	row.Remediation = llm.InvalidRemediation
 	return row
 }
@@ -780,8 +1048,10 @@ func addLLMCounts(counts []int, llmCounts map[int]int) {
 }
 
 // printLLMProblems writes on stderr why the LLM step is incomplete: one line
-// for a failed request and one line for the tools over the cap. All the text
-// is fixed, apart from numbers and the reason of a provider failure (see
+// for a failed request and one line for the tools over the cap. The cap line
+// gives the total of the tools over the shares of all the servers (see
+// fairShare), so it is one line also when several servers were cut. All the
+// text is fixed, apart from numbers and the reason of a provider failure (see
 // llmFailureText).
 func (c *cli) printLLMProblems(r llmResult) {
 	if r.failure != nil || r.skipped > 0 {
@@ -795,14 +1065,38 @@ func (c *cli) printLLMProblems(r llmResult) {
 }
 
 // llmFailureLine returns the start of the stderr line for the failure f of
-// the LLM step: "the LLM provider failed (<reason>)" for a provider failure,
-// else llmInternalText. A nil f with skipped tools cannot happen; it gives
-// llmInternalText too, so it never blames the provider.
+// the LLM step: "the LLM provider failed (<reason>)" for a provider failure
+// (see llmFailureText) and for the refusal of every answered tool (see
+// rejectedReason), else llmInternalText. A nil f with skipped tools cannot
+// happen; it gives llmInternalText too, so it never blames the provider.
 func llmFailureLine(f *llmFailure) string {
-	if f == nil || f.kind != answerProviderFailed || f.err == nil {
+	if f == nil || f.err == nil {
 		return llmInternalText
 	}
-	return fmt.Sprintf("the LLM provider failed (%s)", llmFailureText(f.err))
+	switch f.kind {
+	case answerProviderFailed:
+		return fmt.Sprintf("the LLM provider failed (%s)", llmFailureText(f.err))
+	case answerRejected:
+		return fmt.Sprintf("the LLM provider failed (%s)", rejectedReason(f.err))
+	default:
+		return llmInternalText
+	}
+}
+
+// rejectedReason returns the reason of an answerRejected failure: "HTTP
+// <code>, the provider refused every tool" when err is an *llm.StatusError,
+// else rejectedHintText. It does not use llm.Reason, whose hint is in
+// parentheses and would give nested parentheses in the line. The code is an
+// int and the hint is fixed, so the text holds no server data. termsafe.Quote
+// still escapes it, as in llmFailureText.
+func rejectedReason(err error) string {
+	// errors.As finds an *llm.StatusError in the chain of err and stores it
+	// in status. A typed nil in the chain gives a nil status, so check it.
+	var status *llm.StatusError
+	if errors.As(err, &status) && status != nil {
+		return termsafe.Quote(fmt.Sprintf("HTTP %d, %s", status.Code, rejectedHintText))
+	}
+	return termsafe.Quote(rejectedHintText)
 }
 
 // llmFailureText returns the reason of a failed request to the provider: the

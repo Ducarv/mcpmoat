@@ -51,6 +51,11 @@
 //   - parseVerdict accepts only one small JSON object with two enum fields
 //     ([Risk] and [Category]). Any other output is an error that wraps
 //     [ErrInvalidOutput], and the caller reports it as rule [RuleIDInvalid].
+//   - A tool that the provider refused (HTTP 400, 413 or 422) gives an error
+//     that wraps [ErrRejected]. It is per tool: the caller reports rule
+//     [RuleIDInvalid] with [RejectedText] and the scan goes on. Every other
+//     status code and every transport error is global (see statusClassOf
+//     and the errors of Classify at [ErrProvider]).
 //   - No free text from the model ever reaches a finding, an error or the
 //     terminal. A finding uses the fixed texts of [Category.Text] and
 //     [Remediation].

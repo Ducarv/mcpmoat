@@ -296,8 +296,8 @@ the connect, pin, tool rule and LLM steps between step 5 and step 6:
   rule step. It sends the name and description of each tool of each server with status `StatusOK`
   to the classifier, with the secret values of that server (`inspect.Result.Secrets` goes to
   `llm.Input.Secrets`, and `internal/llm` replaces them before the request). It adds one advisory
-  row for each tool that the model rates as risky, for each tool with an unusable answer, and for
-  each cut tool (see the verdict rules in [The `--llm` classifier](#the---llm-classifier)). It
+  row for each tool that the model rates as risky, for each tool with an unusable answer or a
+  refusal of the provider, and for each cut tool (see the verdict rules in [The `--llm` classifier](#the---llm-classifier)). It
   only adds rows: it never changes or drops a rule finding, and it never touches pins, diffs or
   hints. Only `--ignore` drops LLM rows, as for the pin rows. The `.mcpmoat-ignore` file does not
   (see step 3). The ignored count includes the dropped LLM rows.
@@ -693,9 +693,10 @@ Shape (`schema_version` 2):
   `complete`, `servers`, `findings`, `diffs` and `errors`. An empty list is `[]`, never `null`.
 - `complete` is `false` when the report can miss results: a config file has a problem (see
   `errors`), or the inspection or the pin step failed as a whole (for example, `pins.json` cannot
-  be read), or the LLM step of a `--llm` scan did not classify every tool: a provider failure, an
-  internal error of the LLM step, or more tools than the `--llm` cap. The exit code is then 2, and
-  the reason is on stderr only. A failed save of new pins comes after the document is written, so it
+  be read), or the LLM step of a `--llm` scan did not classify every tool: a provider failure, a
+  provider refusal of every answered tool, an internal error of the LLM step, or tools over the
+  share of their server of the `--llm` cap. The exit code is then 2, and the reason is on stderr
+  only. A refusal of one tool alone does not change `complete`: it is a `MOAT-LLM-002` row. A failed save of new pins comes after the document is written, so it
   does not change `complete`: the findings are whole, and the exit code is 2. A server that used up
   its rule analysis budget does not change `complete` either: it is a `MOAT-T1-023` finding (see
   5d).
@@ -809,6 +810,19 @@ directly. The limits of a scan (tool count, workers, timeout, body size) are in 
 [docs/llm.md](llm.md). They live in
 `cmd/mcpmoat` (`maxLLMTools`, `llmWorkers`) and `internal/llm`.
 
+The plan: `planLLMJobs` in `cmd/mcpmoat/scan_llm.go` builds the jobs before the first request.
+`llmServerJobs` gives one job for each tool of each server with status `StatusOK`, in the order of
+the servers. `fairShare` splits `maxLLMTools` between the servers with a max-min fair share
+("water-filling"): a server with fewer tools than an equal part keeps all of them, the part that
+it does not use goes to the larger servers, and the remainder goes to the servers that come first,
+so the result is always the same. Each server sends its first tools up to its share. The reason: a
+hostile server that lists thousands of tools must not take the whole cap from the other servers.
+It can still make the step incomplete (exit 2) by listing more tools than its share. Then
+`llmStep` prints the notice `mcpmoat scan: sending N tools (about K KiB of text) to the LLM
+provider` (`llmPlan.sendingNotice`, numbers only) when the plan has at least one job, and
+`classifyPlan` runs the jobs. There is no byte budget for the whole scan: the cap and the caps of
+each request bound it.
+
 What is sent: `internal/llm` builds one request for each tool from the fixed system prompt
 (`llm.SystemPrompt`), the fixed verdict schema and one user message. The message is a JSON object
 with `tool_name`, `tool_description`, `truncated` and, only after a replacement, `redacted`. The
@@ -823,7 +837,7 @@ placeholder values from its config, and it can echo them in its tool text. So th
 1. On success, `inspect` puts these values in `inspect.Result.Secrets` (`resultSecrets` in
    `internal/inspect/secrets.go`). Each value has at least 8 bytes and is in the list one time,
    longest first. The values are `discover.Secret`, so they print and encode only as the mask.
-2. `llmJobs` in `cmd/mcpmoat/scan_llm.go` copies the slice of each server into
+2. `llmServerJobs` in `cmd/mcpmoat/scan_llm.go` copies the slice of each server into
    `llm.Input.Secrets` of each tool of that server. So a value of one server is removed only from
    the tools of that server.
 3. `toolMessage` in `internal/llm` replaces each value of at least 8 bytes (`minSecretBytes`) with
@@ -858,16 +872,32 @@ object. The values come from fixed lists. `classifyTools` turns a verdict into r
   that the user sees: see
   [`--llm`](llm.md).
 - An answer that cannot be used for a tool that was not cut gives `MOAT-LLM-002` (medium). That is
-  an invalid answer, a refusal or an answer cut at the token limit. Only `llm.ErrInvalidOutput`
-  gives this finding.
+  an invalid answer, a refusal of the model or an answer cut at the token limit
+  (`llm.ErrInvalidOutput`, risk text `llm.InvalidText`). A tool that the provider refused
+  (`llm.ErrRejected`, HTTP 400, 413 or 422) gives the same row with the risk text
+  `llm.RejectedText` (`rejectedRow`). Both go through `invalidRow`, so a cut tool gets the floor
+  row in both cases. Only these two errors give this finding.
 - The finding texts are fixed in `internal/llm`, so no text from the model reaches the terminal or
   the JSON output.
 
-`sortAnswer` sorts every error of `Classify` and fails closed. `llm.ErrInvalidOutput` gives
-`MOAT-LLM-002`, the end of the context is a stop, and `llm.ErrProvider` is a provider failure. Any
-other error is an internal error. Both failures stop the step. The first failure stops the running
-requests, starts no new one and decides the stderr line. So a new error path can never make a
-failed step look like a complete scan. docs/llm.md and docs/exit-codes.md list the provider failures and the texts of the
+`sortAnswer` sorts every error of `Classify` into an `answerKind` and fails closed.
+`llm.ErrInvalidOutput` gives `answerUnusable`, the end of the context is a stop,
+`llm.ErrRejected` gives `answerRejected`, and any other `llm.ErrProvider` is a provider failure.
+`llm.ErrRejected` wraps `llm.ErrProvider`, so its case comes first. Any other error is an internal
+error. A provider failure and an internal error stop the step. The first of them stops the running
+requests, starts no new one and decides the stderr line. A refusal stops nothing. So a new error
+path can never make a failed step look like a complete scan. The table of status codes is
+`statusClassOf` in `internal/llm`: 400, 413 and 422 are per tool, and 401, 403, 3xx and every
+other code are global. Transport errors are global too.
+
+The guard: after all the requests, when there is no global failure and no signal,
+`rejectedFailure` checks the refusals. When at least one answered tool was refused and none got a
+2xx answer (`answerKind.got2xx`: a verdict or an unusable answer), the step is a provider failure
+of kind `answerRejected`, with the reason of the refused tool with the lowest job index
+(`rejectedReason`, for example `HTTP 400, the provider refused every tool`). No tool gets an LLM
+row then. The reason: a wrong model name or API shape that gives 400 for every tool must exit
+with 2 and `complete` false, not look like a complete scan with one medium row for each tool. A
+global failure or a signal wins over the guard. docs/llm.md and docs/exit-codes.md list the provider failures and the texts of the
 exit-code-2 cases (see [`--llm`](llm.md)
 and [Exit codes](exit-codes.md)). Every error of `internal/llm` has fixed text. It never
 holds the key, a URL, a header, a response body or model output.

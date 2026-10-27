@@ -49,6 +49,10 @@ const (
 //     network error, a response that is too large or not valid, or a
 //     *StatusError). The caller reports a scan error, and Reason gives its
 //     fixed reason text.
+//   - ErrRejected: the provider refused this one tool (see statusClassOf).
+//     It wraps ErrProvider, so check it before ErrProvider. The caller
+//     reports RuleIDInvalid with RejectedText for the tool, and the scan
+//     goes on.
 //   - context.Canceled or context.DeadlineExceeded: the context of the
 //     caller ended (for example a signal). Classify returns this only when
 //     the context of the caller is done, never for its own timeout.
@@ -59,13 +63,25 @@ var (
 	// ErrProvider is the parent of every error that means the request to
 	// the provider failed.
 	ErrProvider = errors.New("LLM provider request failed")
+
+	// ErrRejected means that the provider refused this one tool with a 4xx
+	// code that depends on the request text, not on the setup (for example
+	// a safety filter or a context window). It wraps ErrProvider, so
+	// errors.Is(err, ErrProvider) stays true, and errors.Is(err,
+	// ErrRejected) tells the per-tool case apart. A *StatusError unwraps to
+	// it for the codes of classRejected (see statusClassOf).
+	ErrRejected = fmt.Errorf("%w: %s", ErrProvider, rejectedHint)
 )
 
-// Fixed texts of Reason. authHint and redirectHint are the hints of a
-// *StatusError (see StatusError.reason), and this is the only place of them.
+// Fixed texts of Reason. authHint, redirectHint and rejectedHint are the
+// hints of a *StatusError (see StatusError.reason), and this is the only
+// place of them.
 const (
 	// authHint is the hint for HTTP 401 and 403. errAuth uses it too.
 	authHint = "the API key was refused"
+	// rejectedHint is the hint for the codes of classRejected. ErrRejected
+	// uses it too.
+	rejectedHint = "the provider refused this tool"
 	// redirectHint is the hint for a 3xx code.
 	redirectHint = "redirect refused"
 	// unknownReason is the text of Reason for an error that is not a known
@@ -118,62 +134,114 @@ var (
 // code is an error too, because the client never follows a redirect (the
 // API key must not go to another host).
 //
-// StatusError unwraps to an error for a refused API key for 401 and 403, and
-// to ErrProvider for every other code, so errors.Is(err, ErrProvider) is true
-// for all of them.
+// StatusError unwraps to an error for a refused API key for 401 and 403, to
+// ErrRejected for the codes of classRejected, and to ErrProvider for every
+// other code, so errors.Is(err, ErrProvider) is true for all of them (see
+// statusClassOf).
 type StatusError struct {
 	// Code is the HTTP status code.
 	Code int
 }
 
+// statusClass is the class of a status code that is not 2xx. The class
+// tells whether the failure is global (the setup is wrong, so every request
+// fails the same way) or per tool (the provider refused the text of this one
+// request).
+type statusClass int
+
+// The status classes. statusClassOf sorts the codes into them.
+const (
+	// classGlobal is a global failure with no hint: every code that no
+	// other class has.
+	classGlobal statusClass = iota
+	// classAuth is a global failure: the provider refused the API key
+	// (401 or 403).
+	classAuth
+	// classRedirect is a global failure: a 3xx code. The client never
+	// follows a redirect.
+	classRedirect
+	// classRejected is a per-tool failure: the provider refused this one
+	// request (400, 413 or 422), for example because of a safety filter or
+	// a context window.
+	classRejected
+)
+
+// statusClassOf returns the class of code. It is the only table of status
+// codes in this package:
+//
+//   - 400 Bad Request, 413 Content Too Large and 422 Unprocessable Content:
+//     classRejected (per tool, ErrRejected);
+//   - 401 Unauthorized and 403 Forbidden: classAuth (global, errAuth);
+//   - 3xx: classRedirect (global, ErrProvider);
+//   - any other code (also 404, 429 and 5xx): classGlobal (global,
+//     ErrProvider).
+//
+// Transport errors are not status codes: they are global too.
+func statusClassOf(code int) statusClass {
+	switch {
+	case code == http.StatusBadRequest,
+		code == http.StatusRequestEntityTooLarge,
+		code == http.StatusUnprocessableEntity:
+		return classRejected
+	case code == http.StatusUnauthorized, code == http.StatusForbidden:
+		return classAuth
+	case code >= 300 && code < 400:
+		return classRedirect
+	default:
+		return classGlobal
+	}
+}
+
 // Error returns a fixed text with the status code. It starts with the text of
-// ErrProvider. A 3xx code has the redirect hint. A 401 or 403 code has no
-// hint here (Reason adds it). A nil *StatusError gives the text of
-// ErrProvider.
+// ErrProvider. A 3xx code has the redirect hint. A 401 or 403 code, and a
+// code of classRejected, have no hint here (Reason adds it). A nil
+// *StatusError gives the text of ErrProvider.
 func (e *StatusError) Error() string {
 	// A typed nil in an error interface must not panic.
 	if e == nil {
 		return ErrProvider.Error()
 	}
-	if e.authRefused() {
+	switch statusClassOf(e.Code) {
+	case classAuth, classRejected:
 		return fmt.Sprintf("%s: HTTP %d", ErrProvider.Error(), e.Code)
+	default:
+		return ErrProvider.Error() + ": " + e.reason()
 	}
-	return ErrProvider.Error() + ": " + e.reason()
 }
 
-// Unwrap returns errAuth for 401 and 403, and ErrProvider for other codes.
-// A nil *StatusError unwraps to nil.
+// Unwrap returns errAuth for 401 and 403, ErrRejected for the codes of
+// classRejected, and ErrProvider for other codes. A nil *StatusError unwraps
+// to nil.
 func (e *StatusError) Unwrap() error {
 	// errors.Is and errors.As call Unwrap on a typed nil too.
 	if e == nil {
 		return nil
 	}
-	if e.authRefused() {
+	switch statusClassOf(e.Code) {
+	case classAuth:
 		return errAuth
+	case classRejected:
+		return ErrRejected
+	default:
+		return ErrProvider
 	}
-	return ErrProvider
-}
-
-// authRefused reports whether the code means that the provider refused the
-// API key (401 or 403). It is false for a nil *StatusError.
-func (e *StatusError) authRefused() bool {
-	// Error, Unwrap and reason can get a typed nil.
-	return e != nil && (e.Code == http.StatusUnauthorized || e.Code == http.StatusForbidden)
 }
 
 // reason returns "HTTP <code>" with a fixed hint: authHint for 401 and 403,
-// and redirectHint for a 3xx code. Other codes have no hint. A nil
-// *StatusError gives unknownReason.
+// rejectedHint for the codes of classRejected, and redirectHint for a 3xx
+// code. Other codes have no hint. A nil *StatusError gives unknownReason.
 func (e *StatusError) reason() string {
 	// A typed nil must not panic. Reason checks for it too.
 	if e == nil {
 		return unknownReason
 	}
 	text := fmt.Sprintf("HTTP %d", e.Code)
-	switch {
-	case e.authRefused():
+	switch statusClassOf(e.Code) {
+	case classAuth:
 		return text + " (" + authHint + ")"
-	case e.Code >= 300 && e.Code < 400:
+	case classRejected:
+		return text + " (" + rejectedHint + ")"
+	case classRedirect:
 		return text + " (" + redirectHint + ")"
 	default:
 		return text
@@ -182,8 +250,9 @@ func (e *StatusError) reason() string {
 
 // Reason returns the fixed reason text of the provider failure err, without
 // the text of ErrProvider at the start. For a *StatusError it is
-// "HTTP <code>", with the hint "(the API key was refused)" for 401 and 403
-// and "(redirect refused)" for a 3xx code. For another error of Classify that
+// "HTTP <code>", with the hint "(the API key was refused)" for 401 and 403,
+// "(the provider refused this tool)" for 400, 413 and 422, and
+// "(redirect refused)" for a 3xx code. For another error of Classify that
 // wraps ErrProvider, it is the fixed text of that error after the ErrProvider
 // text, for example "network error" or "network error: TLS certificate not
 // trusted". For any other error (also ErrProvider itself and nil), it is
@@ -207,6 +276,7 @@ func Reason(err error) string {
 		errTooLarge,
 		errBadResponse,
 		errAuth,
+		ErrRejected,
 	}
 	for _, k := range known {
 		if errors.Is(err, k) {

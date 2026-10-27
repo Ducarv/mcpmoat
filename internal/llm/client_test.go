@@ -330,17 +330,23 @@ func TestClassifyRefusesRedirect(t *testing.T) {
 
 func TestClassifyStatusErrors(t *testing.T) {
 	t.Parallel()
+	// wantRejected marks the per-tool codes (ErrRejected). The other codes
+	// are global failures and must not satisfy errors.Is(err, ErrRejected).
 	tests := []struct {
-		code     int
-		wantAuth bool
+		code         int
+		wantAuth     bool
+		wantRejected bool
+		wantReason   string
 	}{
-		{code: http.StatusBadRequest},
-		{code: http.StatusUnauthorized, wantAuth: true},
-		{code: http.StatusForbidden, wantAuth: true},
-		{code: http.StatusNotFound},
-		{code: http.StatusTooManyRequests},
-		{code: http.StatusInternalServerError},
-		{code: http.StatusServiceUnavailable},
+		{code: http.StatusBadRequest, wantRejected: true, wantReason: "HTTP 400 (the provider refused this tool)"},
+		{code: http.StatusRequestEntityTooLarge, wantRejected: true, wantReason: "HTTP 413 (the provider refused this tool)"},
+		{code: http.StatusUnprocessableEntity, wantRejected: true, wantReason: "HTTP 422 (the provider refused this tool)"},
+		{code: http.StatusUnauthorized, wantAuth: true, wantReason: "HTTP 401 (the API key was refused)"},
+		{code: http.StatusForbidden, wantAuth: true, wantReason: "HTTP 403 (the API key was refused)"},
+		{code: http.StatusNotFound, wantReason: "HTTP 404"},
+		{code: http.StatusTooManyRequests, wantReason: "HTTP 429"},
+		{code: http.StatusInternalServerError, wantReason: "HTTP 500"},
+		{code: http.StatusServiceUnavailable, wantReason: "HTTP 503"},
 	}
 	for _, p := range bothProviders {
 		for _, tt := range tests {
@@ -358,15 +364,23 @@ func TestClassifyStatusErrors(t *testing.T) {
 				if got := errors.Is(err, errAuth); got != tt.wantAuth {
 					t.Errorf("errors.Is(err, errAuth) = %v, want %v", got, tt.wantAuth)
 				}
+				if got := errors.Is(err, ErrRejected); got != tt.wantRejected {
+					t.Errorf("errors.Is(err, ErrRejected) = %v, want %v", got, tt.wantRejected)
+				}
 				if !errors.Is(err, ErrProvider) || errors.Is(err, ErrInvalidOutput) {
 					t.Errorf("Classify() error = %v, want ErrProvider and not ErrInvalidOutput", err)
 				}
 				if want := fmt.Sprintf("LLM provider request failed: HTTP %d", tt.code); err.Error() != want {
 					t.Errorf("Classify() error = %q, want %q", err, want)
 				}
+				if got := Reason(err); got != tt.wantReason {
+					t.Errorf("Reason() = %q, want %q", got, tt.wantReason)
+				}
 				if v != (Verdict{}) {
 					t.Errorf("Classify() verdict = %+v, want zero", v)
 				}
+				// The body of a non-2xx answer is never read: the exact
+				// Reason above and this check keep the canary out of both.
 				assertNoLeak(t, err, srv.URL)
 			})
 		}
@@ -380,13 +394,30 @@ func TestStatusError(t *testing.T) {
 		wantText   string
 		wantUnwrap error
 	}{
+		{code: 300, wantText: "LLM provider request failed: HTTP 300 (redirect refused)", wantUnwrap: ErrProvider},
 		{code: 301, wantText: "LLM provider request failed: HTTP 301 (redirect refused)", wantUnwrap: ErrProvider},
+		{code: 302, wantText: "LLM provider request failed: HTTP 302 (redirect refused)", wantUnwrap: ErrProvider},
 		{code: 399, wantText: "LLM provider request failed: HTTP 399 (redirect refused)", wantUnwrap: ErrProvider},
-		{code: 400, wantText: "LLM provider request failed: HTTP 400", wantUnwrap: ErrProvider},
+		// 400, 413 and 422 are per tool. The text has no hint (Reason adds it).
+		{code: 400, wantText: "LLM provider request failed: HTTP 400", wantUnwrap: ErrRejected},
+		{code: 413, wantText: "LLM provider request failed: HTTP 413", wantUnwrap: ErrRejected},
+		{code: 422, wantText: "LLM provider request failed: HTTP 422", wantUnwrap: ErrRejected},
 		{code: 401, wantText: "LLM provider request failed: HTTP 401", wantUnwrap: errAuth},
 		{code: 403, wantText: "LLM provider request failed: HTTP 403", wantUnwrap: errAuth},
+		{code: 404, wantText: "LLM provider request failed: HTTP 404", wantUnwrap: ErrProvider},
 		{code: 407, wantText: "LLM provider request failed: HTTP 407", wantUnwrap: ErrProvider},
+		{code: 408, wantText: "LLM provider request failed: HTTP 408", wantUnwrap: ErrProvider},
+		// The neighbours of 413 and 422 are global.
+		{code: 412, wantText: "LLM provider request failed: HTTP 412", wantUnwrap: ErrProvider},
+		{code: 414, wantText: "LLM provider request failed: HTTP 414", wantUnwrap: ErrProvider},
+		{code: 421, wantText: "LLM provider request failed: HTTP 421", wantUnwrap: ErrProvider},
+		{code: 423, wantText: "LLM provider request failed: HTTP 423", wantUnwrap: ErrProvider},
+		{code: 429, wantText: "LLM provider request failed: HTTP 429", wantUnwrap: ErrProvider},
 		{code: 500, wantText: "LLM provider request failed: HTTP 500", wantUnwrap: ErrProvider},
+		{code: 502, wantText: "LLM provider request failed: HTTP 502", wantUnwrap: ErrProvider},
+		{code: 503, wantText: "LLM provider request failed: HTTP 503", wantUnwrap: ErrProvider},
+		{code: 504, wantText: "LLM provider request failed: HTTP 504", wantUnwrap: ErrProvider},
+		{code: 529, wantText: "LLM provider request failed: HTTP 529", wantUnwrap: ErrProvider},
 	}
 	for _, tt := range tests {
 		t.Run(fmt.Sprint(tt.code), func(t *testing.T) {
@@ -395,11 +426,84 @@ func TestStatusError(t *testing.T) {
 			if got := err.Error(); got != tt.wantText {
 				t.Errorf("Error() = %q, want %q", got, tt.wantText)
 			}
+			// The text check tells ErrRejected apart from ErrProvider, which
+			// it wraps.
 			if got := err.Unwrap(); !errors.Is(got, tt.wantUnwrap) || got.Error() != tt.wantUnwrap.Error() {
 				t.Errorf("Unwrap() = %v, want %v", got, tt.wantUnwrap)
 			}
 			if !errors.Is(err, ErrProvider) {
 				t.Error("errors.Is(err, ErrProvider) = false, want true")
+			}
+			if got, want := errors.Is(err, ErrRejected), tt.wantUnwrap == ErrRejected; got != want { //nolint:errorlint // compares two table sentinels by identity, not wrapped errors
+				t.Errorf("errors.Is(err, ErrRejected) = %v, want %v", got, want)
+			}
+			if got, want := errors.Is(err, errAuth), tt.wantUnwrap == errAuth; got != want { //nolint:errorlint // compares two table sentinels by identity, not wrapped errors
+				t.Errorf("errors.Is(err, errAuth) = %v, want %v", got, want)
+			}
+		})
+	}
+}
+
+// TestErrRejected checks that ErrRejected wraps ErrProvider and no other
+// request error, so a caller that checks ErrRejected first still sees a
+// provider failure.
+func TestErrRejected(t *testing.T) {
+	t.Parallel()
+	if !errors.Is(ErrRejected, ErrProvider) {
+		t.Error("errors.Is(ErrRejected, ErrProvider) = false, want true")
+	}
+	for _, other := range []error{errAuth, errTransport, errBadResponse, errTooLarge, ErrInvalidOutput} {
+		if errors.Is(ErrRejected, other) || errors.Is(other, ErrRejected) {
+			t.Errorf("ErrRejected and %v match each other, want no match", other)
+		}
+	}
+	if got, want := ErrRejected.Error(), "LLM provider request failed: the provider refused this tool"; got != want {
+		t.Errorf("ErrRejected.Error() = %q, want %q", got, want)
+	}
+}
+
+// TestStatusClassOf checks the one table of status codes, with the
+// boundaries of the 3xx range and the neighbours of the per-tool codes.
+func TestStatusClassOf(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		code int
+		want statusClass
+	}{
+		{code: -1, want: classGlobal},
+		{code: 0, want: classGlobal},
+		{code: 200, want: classGlobal},
+		{code: 299, want: classGlobal},
+		{code: 300, want: classRedirect},
+		{code: 302, want: classRedirect},
+		{code: 399, want: classRedirect},
+		{code: 400, want: classRejected},
+		{code: 401, want: classAuth},
+		{code: 402, want: classGlobal},
+		{code: 403, want: classAuth},
+		{code: 404, want: classGlobal},
+		{code: 407, want: classGlobal},
+		{code: 408, want: classGlobal},
+		{code: 412, want: classGlobal},
+		{code: 413, want: classRejected},
+		{code: 414, want: classGlobal},
+		{code: 421, want: classGlobal},
+		{code: 422, want: classRejected},
+		{code: 423, want: classGlobal},
+		{code: 429, want: classGlobal},
+		{code: 499, want: classGlobal},
+		{code: 500, want: classGlobal},
+		{code: 502, want: classGlobal},
+		{code: 503, want: classGlobal},
+		{code: 504, want: classGlobal},
+		{code: 529, want: classGlobal},
+		{code: 999, want: classGlobal},
+	}
+	for _, tt := range tests {
+		t.Run(fmt.Sprint(tt.code), func(t *testing.T) {
+			t.Parallel()
+			if got := statusClassOf(tt.code); got != tt.want {
+				t.Errorf("statusClassOf(%d) = %d, want %d", tt.code, got, tt.want)
 			}
 		})
 	}
@@ -422,9 +526,23 @@ func TestReason(t *testing.T) {
 		{name: "302", err: &StatusError{Code: 302}, want: "HTTP 302 (redirect refused)"},
 		{name: "399", err: &StatusError{Code: 399}, want: "HTTP 399 (redirect refused)"},
 		{name: "wrapped 302", err: wrap(&StatusError{Code: 302}), want: "HTTP 302 (redirect refused)"},
-		{name: "400", err: &StatusError{Code: 400}, want: "HTTP 400"},
+		{name: "400", err: &StatusError{Code: 400}, want: "HTTP 400 (the provider refused this tool)"},
+		{name: "413", err: &StatusError{Code: 413}, want: "HTTP 413 (the provider refused this tool)"},
+		{name: "422", err: &StatusError{Code: 422}, want: "HTTP 422 (the provider refused this tool)"},
+		{name: "wrapped 400", err: wrap(&StatusError{Code: 400}), want: "HTTP 400 (the provider refused this tool)"},
+		{name: "wrapped 422", err: wrap(&StatusError{Code: 422}), want: "HTTP 422 (the provider refused this tool)"},
+		{name: "rejected without status", err: ErrRejected, want: "the provider refused this tool"},
+		{name: "wrapped rejected without status", err: wrap(ErrRejected), want: "the provider refused this tool"},
+		{name: "404", err: &StatusError{Code: 404}, want: "HTTP 404"},
 		{name: "407", err: &StatusError{Code: 407}, want: "HTTP 407"},
+		{name: "408", err: &StatusError{Code: 408}, want: "HTTP 408"},
+		{name: "414", err: &StatusError{Code: 414}, want: "HTTP 414"},
+		{name: "429", err: &StatusError{Code: 429}, want: "HTTP 429"},
+		{name: "500", err: &StatusError{Code: 500}, want: "HTTP 500"},
+		{name: "502", err: &StatusError{Code: 502}, want: "HTTP 502"},
 		{name: "503", err: &StatusError{Code: 503}, want: "HTTP 503"},
+		{name: "504", err: &StatusError{Code: 504}, want: "HTTP 504"},
+		{name: "529", err: &StatusError{Code: 529}, want: "HTTP 529"},
 		{name: "wrapped 503", err: wrap(&StatusError{Code: 503}), want: "HTTP 503"},
 		{name: "not loopback", err: errNotLoopback, want: "network error: host does not resolve to a loopback address"},
 		{name: "wrapped not loopback", err: wrap(errNotLoopback), want: "network error: host does not resolve to a loopback address"},
@@ -485,6 +603,8 @@ func TestReasonNoLeak(t *testing.T) {
 		fmt.Errorf("%s %s: %w", llmBodyCanary, llmTestKey, &StatusError{Code: 401}),
 		fmt.Errorf("%s %s: %w", llmBodyCanary, llmTestKey, &StatusError{Code: 302}),
 		fmt.Errorf("%s %s: %w", llmBodyCanary, llmTestKey, &StatusError{Code: 503}),
+		fmt.Errorf("%s %s: %w", llmBodyCanary, llmTestKey, &StatusError{Code: 400}),
+		fmt.Errorf("%s %s: %w", llmBodyCanary, llmTestKey, ErrRejected),
 		fmt.Errorf("%s %s: %w", llmBodyCanary, llmTestKey, errTimeout),
 		fmt.Errorf("%s %s: %w", llmBodyCanary, llmTestKey, errTransport),
 		fmt.Errorf("%w: %s %s", ErrProvider, llmBodyCanary, llmTestKey),

@@ -421,7 +421,12 @@ func TestUsageContent(t *testing.T) {
 		"  --llm-base-url <url>  The base URL of the API: https, or http for a loopback host only (default: the public API)\n",
 		"  --llm: the LLM findings (MOAT-LLM-001, and MOAT-LLM-002 for an invalid answer) are advisory and marked [LLM].\n",
 		"  They are high at most, and they count for --fail-on. They never remove a rule finding.\n",
-		fmt.Sprintf("  scan sends at most %d tools. A provider error or more tools than that gives exit 2; the report still prints.\n", maxLLMTools),
+		// A refused tool is a per-tool finding, not a step failure (issue
+		// #184). The cap is shared between the servers.
+		"  A tool that the provider refuses (HTTP 400, 413 or 422) is not classified: it gets a medium finding\n",
+		"  (MOAT-LLM-002, or MOAT-LLM-001 when its text was cut), and the scan goes on.\n",
+		fmt.Sprintf("  scan sends at most %d tools, shared fairly between the servers. More tools than that, a provider refusal of\n", maxLLMTools),
+		"  every tool, or another provider error gives exit 2; the report still prints.\n",
 	} {
 		if !strings.Contains(got, want) {
 			t.Errorf("usage text does not contain %q\n--- got ---\n%s", want, got)
@@ -467,6 +472,9 @@ func TestUsageContent(t *testing.T) {
 		// rules from --rules.
 		"not applied yet",
 		"are not applied to tools",
+		// Before issue #184 one server could use the whole --llm cap, and
+		// the line did not name the refusal of every tool.
+		"A provider error or more tools than that gives exit 2",
 	} {
 		if strings.Contains(got, gone) {
 			t.Errorf("usage text holds the old text %q\n--- got ---\n%s", gone, got)

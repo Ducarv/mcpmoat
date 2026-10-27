@@ -308,7 +308,10 @@ func scanUsage(w io.Writer) {
 	fprintf(w, "  Rules from --rules with target config are not applied: scan runs only its built-in config checks, and prints a note.\n")
 	fprintf(w, "  --llm: the LLM findings (MOAT-LLM-001, and MOAT-LLM-002 for an invalid answer) are advisory and marked [LLM].\n")
 	fprintf(w, "  They are high at most, and they count for --fail-on. They never remove a rule finding.\n")
-	fprintf(w, "  scan sends at most %d tools. A provider error or more tools than that gives exit 2; the report still prints.\n", maxLLMTools)
+	fprintf(w, "  A tool that the provider refuses (HTTP 400, 413 or 422) is not classified: it gets a medium finding\n")
+	fprintf(w, "  (MOAT-LLM-002, or MOAT-LLM-001 when its text was cut), and the scan goes on.\n")
+	fprintf(w, "  scan sends at most %d tools, shared fairly between the servers. More tools than that, a provider refusal of\n", maxLLMTools)
+	fprintf(w, "  every tool, or another provider error gives exit 2; the report still prints.\n")
 	fprintf(w, "  Exit code 1 means a finding that is not ignored, with severity at or above --fail-on (default high).\n")
 }
 

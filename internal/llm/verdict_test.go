@@ -223,16 +223,21 @@ func TestFixedTexts(t *testing.T) {
 		"InvalidTitle":       InvalidTitle,
 		"Remediation":        Remediation,
 		"InvalidText":        InvalidText,
+		"RejectedText":       RejectedText,
+		"TruncatedText":      TruncatedText,
 		"InvalidRemediation": InvalidRemediation,
 	}
-	seen := map[string]Category{}
 	for _, c := range categories {
-		text := c.Text()
-		texts["Text "+string(c)] = text
+		texts["Text "+string(c)] = c.Text()
+	}
+	// No two fixed texts are the same, so a reader can tell the findings
+	// apart (for example RejectedText and InvalidText).
+	seen := map[string]string{}
+	for name, text := range texts {
 		if prev, dup := seen[text]; dup {
-			t.Errorf("%q.Text() is the same as %q.Text()", c, prev)
+			t.Errorf("%s is the same as %s", name, prev)
 		}
-		seen[text] = c
+		seen[text] = name
 	}
 	for name, text := range texts {
 		if strings.TrimSpace(text) == "" {
@@ -249,6 +254,24 @@ func TestFixedTexts(t *testing.T) {
 	// never echoes the category.
 	if got := Category(canary).Text(); got != CategoryOther.Text() {
 		t.Errorf("Category(unknown).Text() = %q, want the CategoryOther text", got)
+	}
+}
+
+// TestRejectedText checks that RejectedText is fixed, plain ASCII text with
+// no value from the server: no status code (only the class "4xx") and no
+// URL. TestFixedTexts checks that it differs from the other texts.
+func TestRejectedText(t *testing.T) {
+	t.Parallel()
+	for i := range len(RejectedText) {
+		if b := RejectedText[i]; b < ' ' || b > '~' {
+			t.Errorf("RejectedText holds the byte %#x at %d, want printable ASCII", b, i)
+		}
+	}
+	if rest := strings.ReplaceAll(RejectedText, "4xx", ""); containsAnyByte(rest, "0123456789") {
+		t.Errorf("RejectedText = %q, holds a digit outside %q", RejectedText, "4xx")
+	}
+	if strings.Contains(RejectedText, "://") {
+		t.Errorf("RejectedText = %q, holds a URL", RejectedText)
 	}
 }
 

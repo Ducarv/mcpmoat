@@ -39,9 +39,11 @@ Exit code 2 comes, for example, from a usage error (invalid flags), invalid rule
 a `--rules` file that does not compile, with or without `--no-connect`), an unreadable
 `--config` file, a problem in a config file, a `pins.json` that cannot be read or saved, a report
 that cannot be written (a closed stdout), an unknown home or working directory in auto-discovery,
-an `--llm` problem (a missing or invalid `MCPMOAT_LLM_API_KEY`, a provider failure, an internal
-error of the LLM step, or more than 500 tools), an internal error of the tool rule step, or another
-internal error. Some of these errors still
+an `--llm` problem (a missing or invalid `MCPMOAT_LLM_API_KEY`, a provider failure, a provider
+refusal of every tool, an internal error of the LLM step, or tools over the 500-tool cap), an
+internal error of the tool rule step, or another internal error. One tool that the provider
+refuses (HTTP 400, 413 or 422) is not an execution error: it is a `medium` finding, and the scan
+goes on (see [Optional LLM classification](llm.md)). Some of these errors still
 print the report on stdout first, so you can read the findings:
 
 | Execution error | Report |
@@ -49,7 +51,7 @@ print the report on stdout first, so you can read the findings:
 | A problem in a config file | Printed, then the problems. A `--config` file with a problem and no server prints only the problem. |
 | A `pins.json` that cannot be read or saved | Printed |
 | An internal error of the inspection (`inspect.Run`) | Printed |
-| An LLM provider failure, an internal error of the LLM step, or more than 500 tools with `--llm` | Printed |
+| An LLM provider failure, a provider refusal of every tool, an internal error of the LLM step, or tools over the 500-tool cap with `--llm` | Printed |
 | A signal before the save of new pins | Printed |
 | A usage error (also a bad `--llm-*` flag or a missing API key), invalid rules, or an unknown home or working directory | Not printed |
 | A signal during the inspection, the tool rule step or the LLM step | Not printed |

@@ -34,7 +34,11 @@ mcpmoat scan --llm --llm-provider openai --llm-model <model> \
 - **What is sent:** one request for each tool of each server that `scan` inspected (status `ok`).
   The request holds the tool name (cut at 512 bytes) and the tool description (cut at 16 KiB, or
   less when the whole message would pass 24 KiB once it is JSON-escaped), with a flag that says
-  that text was cut, and a fixed instruction text from mcpmoat. `--ignore` hides LLM findings from
+  that text was cut, and a fixed instruction text from mcpmoat. Before the first request, `scan`
+  prints the number of tools and the size of their text on stderr, also with `--json`:
+  `mcpmoat scan: sending 42 tools (about 37 KiB of text) to the LLM provider`. The line holds
+  numbers only. The size counts the names and descriptions after the cut, so it is approximate.
+  With no tool to send, this line does not show. `--ignore` hides LLM findings from
   the report, but it does not stop a tool from being sent. To keep a server out of `--llm`, scan it
   with a separate config.
 - **What mcpmoat never puts in a request:** your config files, env values, headers, args, URLs, the
@@ -65,21 +69,33 @@ mcpmoat scan --llm --llm-provider openai --llm-model <model> \
 - **Limits:** at most 500 tools in one scan and 4 requests at the same time. Each request has 30
   seconds. mcpmoat does not retry and does not follow redirects. The request and the response are
   each capped at 64 KiB. The cost of a scan grows with the number and the size of the tool
-  descriptions. The LLM requests honour `HTTPS_PROXY` and `NO_PROXY`, like the connections to your
+  descriptions. There is no cap on the total size of a scan, but the caps above bound it: at most
+  500 requests, each with at most 24 KiB of tool text. The LLM requests honour `HTTPS_PROXY` and `NO_PROXY`, like the connections to your
   servers, when the base URL is `https`. A base URL with `http` (a loopback host only) never uses a
   proxy.
+- **How the 500 tools are shared:** the servers share the cap fairly. A server with fewer tools
+  than an equal part keeps all its tools, and the part that it does not use goes to the larger
+  servers. When the parts cannot be equal, the servers that come first in the scan get one tool
+  more. For example, three servers with 3, 1000 and 1000 tools send 3, 249 and 248 tools. Each
+  server sends its first tools, in the order that it lists them. So one server with many tools
+  cannot leave the other servers without a rating.
 - **Findings:** the model can answer only with a risk level and a category from a fixed list.
   mcpmoat shows no text from the model.
   - `MOAT-LLM-001`: the model rates the tool as risky. The severity is the risk level: `low`,
     `medium` or `high`, never `critical`. A risk level of `none` gives no finding.
   - `MOAT-LLM-002` (medium): the model refused, or its answer did not match the fixed format. A
-    description written to confuse the model can cause this. Only an unusable model answer gives
-    this finding. Any other error stops the LLM step (see **Exit codes** below).
-  - When the model answers `none` or `low`, or the answer is unusable, for a tool whose name or
-    description was cut, the tool gets one `MOAT-LLM-001` finding of severity `medium` with
-    category `other`. An answer of `medium` or `high` keeps its severity and category. An unusable
-    answer for a tool that was not cut still gives `MOAT-LLM-002`. The part after the cut was not
-    rated and can hold the payload, and the risk text of the finding says so.
+    description written to confuse the model can cause this. It also reports a tool that the
+    provider refused with HTTP 400, 413 or 422, for example because of a safety filter or a size
+    limit. That tool was not classified, and its risk text is `The LLM provider refused this tool
+    description (HTTP 4xx), so the tool was not classified. A safety filter or a size limit of the
+    provider can cause this.` The other requests go on. Only an unusable model answer and these
+    three codes give this finding. Any other error stops the LLM step (see **Exit codes** below).
+  - When the model answers `none` or `low`, or the answer is unusable, or the provider refused the
+    tool, for a tool whose name or description was cut, the tool gets one `MOAT-LLM-001` finding of
+    severity `medium` with category `other`. An answer of `medium` or `high` keeps its severity and
+    category. An unusable answer or a refusal for a tool that was not cut still gives
+    `MOAT-LLM-002`. The part after the cut was not rated and can hold the payload, and the risk
+    text of the finding says so.
 
   An LLM finding is marked `[LLM]` and has a `Source` line. In JSON its `source` is `llm`, and
   `related` holds the category. A short sample:
@@ -106,18 +122,30 @@ mcpmoat scan --llm --llm-provider openai --llm-model <model> \
   [Placeholders](stdio-servers.md#placeholders)). But a stdio server
   runs as your user and can read the environment of the mcpmoat process. Use a key made for this,
   with a low spend limit, for `--llm`.
-- **Exit codes:** LLM findings count for `--fail-on` like any finding. A provider failure (a
-  network, TLS or proxy error, a timeout, an HTTP error or a redirect, a response that is too
-  large, or a response that is not a valid API answer) or more than 500 tools gives exit code 2.
-  The report still prints, `complete` is `false` in JSON, and stderr says how many tools were not
-  classified, for example
-  `mcpmoat scan: the LLM provider failed (HTTP 401 (the API key was refused)); 12 tools were not classified`.
-  An internal error of the LLM step also stops the step with exit code 2, and stderr then says
-  `mcpmoat scan: the LLM step failed (internal error); 12 tools were not classified`. mcpmoat
-  never prints the text of that error.
-  A hostile server can cause this on purpose: it can list more than 500 tools, or write a
-  description that makes the provider answer with an HTTP 4xx (a content filter or a context
-  limit). The rule findings still print.
+- **Exit codes:** LLM findings count for `--fail-on` like any finding. A tool that the provider
+  refused (HTTP 400, 413 or 422) is a finding, not an error: it alone does not give exit code 2,
+  and `complete` can stay `true`. These cases give exit code 2:
+  - A provider failure: a network, TLS or proxy error, a timeout, any other HTTP error (also 401,
+    403 and 404) or a redirect, a response that is too large, or a response that is not a valid
+    API answer. The first failure stops the step. stderr says how many tools were not classified,
+    for example
+    `mcpmoat scan: the LLM provider failed (HTTP 401 (the API key was refused)); 12 tools were not classified`.
+  - The provider refused every tool that it answered: at least one tool got HTTP 400, 413 or 422,
+    and no tool got a 2xx answer (a verdict, or a model answer that cannot be used). A wrong model
+    name or API shape can cause this, so mcpmoat fails closed. No tool gets an LLM finding then,
+    and stderr says, with the code of the first refused tool in the scan order,
+    `mcpmoat scan: the LLM provider failed (HTTP 400, the provider refused every tool); 12 tools were not classified`.
+  - An internal error of the LLM step. stderr then says
+    `mcpmoat scan: the LLM step failed (internal error); 12 tools were not classified`. mcpmoat
+    never prints the text of that error.
+  - Tools over the share of their server of the 500-tool cap. They are not sent, and stderr says
+    `mcpmoat scan: --llm classifies at most 500 tools in one scan; 12 tools were not classified`,
+    with the total for all the servers.
+
+  In each case the report still prints, and `complete` is `false` in JSON. A hostile server can
+  still cause exit code 2 on purpose: it can list more tools than its share. When its tools are
+  the only tools in the step, it can also write descriptions that the provider refuses. The rule
+  findings still print.
 - **Ignore:** only `--ignore` works for `MOAT-LLM-001` and `MOAT-LLM-002`. `.mcpmoat-ignore`
   cannot ignore them, because the file can come from a cloned repository: `scan` keeps the finding
   and prints a warning (see [Ignore findings](ignore.md)). The ignored count on stderr

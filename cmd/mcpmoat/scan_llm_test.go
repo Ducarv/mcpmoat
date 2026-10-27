@@ -767,7 +767,14 @@ func TestScanLLMConfig(t *testing.T) {
 			}
 			// The config prints as a mask, so a log of it holds no key.
 			llmAssertNoKey(t, llmTestKey, fmt.Sprintf("%v %+v", got, got))
-			assertStderrLines(t, r.stderr, []lineWant{exactLine(llmWarning(string(tt.want.Provider), tt.wantHost)), prefixLine(scanPrefix + "pinned ")})
+			// The setup warning, then the notice before the first request
+			// (one tool, "t1" and "Add.": 6 bytes, shown as 1 KiB), then the
+			// pin line.
+			assertStderrLines(t, r.stderr, []lineWant{
+				exactLine(llmWarning(string(tt.want.Provider), tt.wantHost)),
+				exactLine(llmSendingLine(1, 1)),
+				prefixLine(scanPrefix + "pinned "),
+			})
 		})
 	}
 }
@@ -1811,9 +1818,12 @@ func TestScanLLMProviderFailure(t *testing.T) {
 	}
 }
 
-// TestScanLLMToolCap checks the cap of llmWantCap tools in one scan: the
-// first 500 tools are classified and the rest are not, the exit code is 2
-// and stderr gives the count. Exactly 500 tools is not over the cap.
+// TestScanLLMToolCap checks the cap of llmWantCap tools in one scan with one
+// server: the server gets the whole cap, so its first 500 tools are
+// classified and the rest are not, the exit code is 2 and stderr gives the
+// count. Exactly 500 tools is not over the cap. The notice before the first
+// request names the 500 tools that are sent, not the tools of the server.
+// scan_llm_limits_test.go tests the share of the cap between servers.
 func TestScanLLMToolCap(t *testing.T) {
 	t.Parallel()
 
@@ -1840,6 +1850,12 @@ func TestScanLLMToolCap(t *testing.T) {
 				}
 			}
 			doc := decodeScanJSON(t, r.stdout)
+			// 500 tools of 7 + 6 bytes ("tool000", "Plain.") are 6500 bytes:
+			// 6.3 KiB, shown rounded up as 7 KiB. The --json run prints it on
+			// stderr too.
+			if count := strings.Count(r.stderr, llmSendingLine(llmWantCap, 7)+"\n"); count != 1 {
+				t.Errorf("stderr holds the notice %q %d times, want 1\nstderr:\n%s", llmSendingLine(llmWantCap, 7), count, r.stderr)
+			}
 			capLine := "mcpmoat scan: --llm classifies at most 500 tools in one scan; 3 tools were not classified\n"
 			if n == llmWantCap {
 				if r.code != exitOK || !doc.Complete || strings.Contains(r.stderr, "not classified") {

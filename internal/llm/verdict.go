@@ -17,7 +17,8 @@ const (
 	RuleID = "MOAT-LLM-001"
 	// RuleIDInvalid is the rule ID of a finding for a tool whose model
 	// output was invalid or a refusal (an error that wraps
-	// ErrInvalidOutput).
+	// ErrInvalidOutput), or that the provider refused (an error that wraps
+	// ErrRejected, see RejectedText).
 	RuleIDInvalid = "MOAT-LLM-002"
 )
 
@@ -125,6 +126,13 @@ const Remediation = "Read the full tool description and check it by hand. " +
 const InvalidText = "The LLM classifier gave no valid rating for this tool description. " +
 	"The model refused, or its output did not match the verdict schema. " +
 	"A description written to confuse the classifier can cause this."
+
+// RejectedText is the fixed risk text of a RuleIDInvalid finding for a tool
+// that the provider refused (an error that wraps ErrRejected). It holds no
+// status code, no response body and no key.
+const RejectedText = "The LLM provider refused this tool description (HTTP 4xx), " +
+	"so the tool was not classified. " +
+	"A safety filter or a size limit of the provider can cause this."
 
 // InvalidRemediation is the fixed remediation text of a RuleIDInvalid
 // finding.

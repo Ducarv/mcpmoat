@@ -648,8 +648,11 @@ the machine**.
   description (each cut at a fixed size, with a flag that says it was cut), in one JSON user
   message with a fixed system prompt. Secret values are removed from the name and the description
   first (see below). mcpmoat never puts configs, env values, headers, arguments, URLs, schemas or
-  pins into a request. A cap on the number of tools per scan (500): more tools
-  than the cap give exit code 2. docs/llm.md holds the sizes and the other limits. `--ignore` does
+  pins into a request. A cap on the number of tools per scan (500), shared fairly between the
+  servers: a server with few tools keeps all of them, and the part that it does not use goes to the
+  larger servers. Tools over the share of their server are not sent and give exit code 2. Before
+  the first request, stderr says how many tools are sent and about how much text (numbers only),
+  also with `--json`. docs/llm.md holds the sizes and the other limits. `--ignore` does
   not stop a tool from being sent: to keep a server out of `--llm`, scan it with a separate config.
 - A tool whose name or description was cut is never rated below `medium`, and an unusable model
   answer for it does not hide it. The code enforces this, not only the system prompt. The
@@ -674,21 +677,31 @@ the machine**.
 - The model may answer only with a risk (`none`, `low`, `medium`, `high`) and a category from a
   fixed list. No model text reaches the output. Rule `MOAT-LLM-001` reports a risk of `low`,
   `medium` or `high` with that severity (never `critical`); `none` gives no finding. Rule
-  `MOAT-LLM-002` (medium) reports an answer that is invalid or a refusal. Only such an unusable
-  model answer for a tool that was not cut gives `MOAT-LLM-002`.
+  `MOAT-LLM-002` (medium) reports an answer that is invalid or a refusal of the model, or a tool
+  that the provider refused (HTTP 400, 413 or 422), with a fixed text for each case. Only these
+  cases, for a tool that was not cut, give `MOAT-LLM-002`.
 - LLM findings carry a distinct source marker: `[LLM]` in the terminal and `"source": "llm"` in the
   JSON output (schema version 2). They only add to the rule findings and never remove or change
   them. They count for `--fail-on`. Only `--ignore` applies to them; `.mcpmoat-ignore` does not
   (FR-10).
 - The result is advisory. No finding does not mean that a tool is safe: a model can be wrong, and a
   hostile description can try to influence it.
-- A provider failure stops the step and gives exit code 2 (fail closed). So does an internal error
-  of the LLM step, or more tools than the cap. The report still prints and the JSON `complete`
-  field is `false`. docs/llm.md holds the list of failures and the exact stderr lines.
-- A hostile server can make `scan --llm` exit with 2: it can list more tools than the cap, or write a
-  description that makes the provider answer with an HTTP 4xx (a content filter or a context
-  limit). The rule findings still print. A follow-up may make a 400, 413 or 422 for one tool a
-  result for that tool only.
+- An HTTP 400, 413 or 422 from the provider is a result for that one tool only (for example a
+  content filter or a context limit). The tool is not classified and gets a `medium` finding:
+  `MOAT-LLM-002`, or the `MOAT-LLM-001` floor finding when its name or description was cut. The
+  other requests go on, and the scan can still be complete.
+- A provider failure stops the step and gives exit code 2 (fail closed). A provider failure is any
+  other HTTP error, a redirect, a network or TLS error, a timeout or a response that is not valid.
+  The step also fails closed as a provider failure when the provider refused every tool that it
+  answered, so a wrong model name or API shape that gives 400 for every tool does not look like a
+  complete scan. An internal error of the LLM step, or tools over the cap, give exit code 2 too.
+  The report still prints and the JSON `complete` field is `false`. docs/llm.md holds the list of
+  failures and the exact stderr lines.
+- A hostile server can still make `scan --llm` exit with 2: it can list more tools than its share
+  of the cap. It cannot use up the share of the other servers. Its refused tools stay per-tool
+  findings when the provider answers at least one other tool with a 2xx. When its tools are the
+  only tools in the step, it can make the step fail: it can write descriptions that the provider
+  refuses. The rule findings still print.
 
 ---
 
