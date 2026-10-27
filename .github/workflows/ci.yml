@@ -128,8 +128,9 @@ jobs:
         run: .github/scripts/run-offline.sh
 
   # Guards the tool version pins, checks the shell scripts in
-  # .github/scripts/ and tests the failure issue job of the weekly vulnerability
-  # check. That test needs jq, which this runner has. It is a separate small
+  # .github/scripts/, tests the failure issue job of the weekly vulnerability
+  # check and tests the guard step of the release job. The first test needs jq
+  # and the second needs git, which this runner has. It is a separate small
   # job, with no Go setup and no GoReleaser, so that it can be a required check
   # on every branch.
   tool-pins:
@@ -155,6 +156,9 @@ jobs:
 
       - name: Test the failure issue job
         run: .github/scripts/notify-failure-test.sh
+
+      - name: Test the release guard step
+        run: .github/scripts/release-guard-test.sh
 
   # Checks .goreleaser.yaml and builds a snapshot, so a broken release config
   # fails here and not at tag time. It then tests the release scripts against
