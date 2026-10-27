@@ -634,8 +634,8 @@ func TestCheckSameProblemOneLine(t *testing.T) {
 		want  string // the one line, after the file name and the line
 	}{
 		{
-			// The GoReleaser rule (jobs) and the govulncheck rule
-			// (jobsAndProblems) read every job of release.yml.
+			// The GoReleaser rule and the govulncheck rule both read every
+			// job of release.yml with jobsAndProblems.
 			name:  "job that is not a mapping",
 			old:   "jobs:\n",
 			repl:  "jobs:\n  broken: text\n",
@@ -670,6 +670,197 @@ func TestCheckSameProblemOneLine(t *testing.T) {
 			}
 			if len(lines) != 1 || !strings.HasSuffix(lines[0], ": "+tt.want) {
 				t.Errorf("check() lines with %q = %q, want one line that ends in %q", tt.about, lines, tt.want)
+			}
+		})
+	}
+}
+
+// lineOf returns the 1-based line of the first copy of sub in src. It fails
+// the test when src does not hold sub.
+func lineOf(t *testing.T, src, sub string) int {
+	t.Helper()
+	i := strings.Index(src, sub)
+	if i < 0 {
+		t.Fatalf("the text has no %q", sub)
+	}
+	return strings.Count(src[:i], "\n") + 1
+}
+
+func TestCheckBadJobKeepsGoodJobs(t *testing.T) {
+	t.Parallel()
+	// A job that is not a mapping must not hide the other jobs of the file
+	// from the GoReleaser rules. With the strict jobs(), the rules read no
+	// job, and the scalar scan fails the pin, the uses value and the version
+	// input of the good release job.
+	const (
+		oldJobs  = "jobs:\n"
+		badJobs  = "jobs:\n  bad: 1\n"
+		input    = "version: ${{ env.GORELEASER_VERSION }}"
+		badInput = "version: latest"
+		badJob   = `the job "bad" must be a mapping, found a scalar`
+	)
+	tests := []struct {
+		name     string
+		badInput bool // put badInput in place of input
+	}{
+		{name: "good job is still clean"},
+		{name: "good job after the bad job is still checked", badInput: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			fsys := repoCopyFS(t)
+			rel := fsys[releasePath]
+			src := string(rel.Data)
+			for _, old := range []string{oldJobs, input} {
+				if n := strings.Count(src, old); n != 1 {
+					t.Fatalf("release.yml has %d copies of %q, want 1", n, old)
+				}
+			}
+			src = strings.Replace(src, oldJobs, badJobs, 1)
+			want := []string{fmt.Sprintf("%s:%d: %s", releasePath, lineOf(t, src, "  bad: 1"), badJob)}
+			if tt.badInput {
+				src = strings.Replace(src, input, badInput, 1)
+				want = append(want, fmt.Sprintf(`%s:%d: the goreleaser-action step "Run GoReleaser" has a version input that is not %s`,
+					releasePath, lineOf(t, src, badInput), grVersionInput))
+			}
+			rel.Data = []byte(src)
+			if got := check(fsys); !slices.Equal(got, want) {
+				t.Errorf("check() = %q, want %q", got, want)
+			}
+		})
+	}
+}
+
+// assertNoHostPath fails when a problem holds the root dir, its real path or
+// the macOS /private prefix of a temporary directory. A message must name
+// only paths relative to the root.
+func assertNoHostPath(t *testing.T, problems []string, root string) {
+	t.Helper()
+	hostPaths := []string{root, "/" + "private"}
+	if resolved, err := filepath.EvalSymlinks(root); err == nil {
+		hostPaths = append(hostPaths, resolved)
+	}
+	for _, p := range problems {
+		for _, h := range hostPaths {
+			if strings.Contains(p, h) {
+				t.Errorf("problem %q holds the host path %q", p, h)
+			}
+		}
+	}
+}
+
+func TestCheckRootDocDirectory(t *testing.T) {
+	t.Parallel()
+	// A CONTRIBUTING.md that is a directory gives one line, from
+	// checkRequired. The GoReleaser rule gives no second line with the read
+	// error of the os.Root file, which holds the absolute host path.
+	root := repoCopyDir(t)
+	doc := filepath.Join(root, docPath)
+	if err := os.Remove(doc); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(doc, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	got, err := checkRoot(root)
+	if err != nil {
+		t.Fatalf("checkRoot() error = %v", err)
+	}
+	if want := []string{notRegular(docPath)}; !slices.Equal(got, want) {
+		t.Errorf("checkRoot() = %q, want %q", got, want)
+	}
+	assertNoHostPath(t, got, root)
+}
+
+// unreadable makes the file p unreadable and restores it at the end of the
+// test. It skips the test when the file stays readable, as for root or on a
+// file system without Unix modes.
+func unreadable(t *testing.T, p string) {
+	t.Helper()
+	if err := os.Chmod(p, 0); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(p, 0o600) })
+	if f, err := os.Open(filepath.Clean(p)); err == nil {
+		_ = f.Close()
+		t.Skip("the file is still readable after chmod 000 (root, or no Unix modes)")
+	}
+}
+
+func TestCheckRootDocUnreadable(t *testing.T) {
+	t.Parallel()
+	root := repoCopyDir(t)
+	unreadable(t, filepath.Join(root, docPath))
+	got, err := checkRoot(root)
+	if err != nil {
+		t.Fatalf("checkRoot() error = %v", err)
+	}
+	if len(got) != 1 || !strings.HasPrefix(got[0], docPath+": ") {
+		t.Errorf("checkRoot() = %q, want one problem for %s", got, docPath)
+	}
+	assertNoHostPath(t, got, root)
+}
+
+func TestReadLimitedNoHostPath(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	if err := os.Mkdir(filepath.Join(dir, "sub"), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	locked := filepath.Join(dir, "locked.yml")
+	if err := os.WriteFile(locked, []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	root, err := os.OpenRoot(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = root.Close() })
+
+	t.Run("directory", func(t *testing.T) {
+		_, err := readLimited(root.FS(), "sub", maxFileBytes)
+		if err == nil {
+			t.Fatal("readLimited() error = nil, want an error for a directory")
+		}
+		assertNoHostPath(t, []string{err.Error()}, dir)
+	})
+	t.Run("missing", func(t *testing.T) {
+		_, err := readLimited(root.FS(), "nope.yml", maxFileBytes)
+		if !errors.Is(err, fs.ErrNotExist) {
+			t.Errorf("readLimited() error = %v, want it to wrap fs.ErrNotExist", err)
+		}
+		assertNoHostPath(t, []string{err.Error()}, dir)
+	})
+	t.Run("unreadable", func(t *testing.T) {
+		unreadable(t, locked)
+		_, err := readLimited(root.FS(), "locked.yml", maxFileBytes)
+		if !errors.Is(err, fs.ErrPermission) {
+			t.Errorf("readLimited() error = %v, want it to wrap fs.ErrPermission", err)
+		}
+		assertNoHostPath(t, []string{err.Error()}, dir)
+	})
+}
+
+func TestNoPath(t *testing.T) {
+	t.Parallel()
+	inner := errors.New("inner")
+	pe := &fs.PathError{Op: "read", Path: "/abs/host/path", Err: inner}
+	tests := []struct {
+		name string
+		err  error
+		want error
+	}{
+		{name: "path error", err: pe, want: inner},
+		{name: "wrapped path error", err: fmt.Errorf("walk: %w", pe), want: inner},
+		{name: "other error", err: inner, want: inner},
+		{name: "nil", err: nil, want: nil},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if got := noPath(tt.err); fmt.Sprint(got) != fmt.Sprint(tt.want) {
+				t.Errorf("noPath() = %v, want %v", got, tt.want)
 			}
 		})
 	}

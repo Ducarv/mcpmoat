@@ -497,9 +497,14 @@ func TestGoreleaserDoc(t *testing.T) {
 			mutate: grDelete(docPath),
 		},
 		{
+			// checkRequired reports a CONTRIBUTING.md that is not a regular
+			// file, so the rule gives no second message.
 			name:   "directory",
 			mutate: grAll(grDelete(docPath), grSet(docPath+"/inner", &fstest.MapFile{Data: []byte("x")})),
-			want:   []grMsg{{"CONTRIBUTING.md: ", "read: "}},
+		},
+		{
+			name:   "named pipe",
+			mutate: grSet(docPath, &fstest.MapFile{Mode: fs.ModeNamedPipe}),
 		},
 		{
 			name:   "file over the limit",

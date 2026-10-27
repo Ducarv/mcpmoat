@@ -125,8 +125,12 @@ func grScanWorkflow(p string, w *workflow) grScan {
 	okPin := make(map[*yaml.Node]bool)  // pin keys, pin values and version inputs
 	okUses := make(map[*yaml.Node]bool) // uses values of goreleaser-action steps
 
-	jobs, err := w.jobs()
-	if err != nil {
+	// jobsAndProblems keeps the good jobs when one job is bad. The strict
+	// jobs() would drop them all, and the scalar scan below would then fail
+	// every pin and uses value of the file. The text of a bad-job problem is
+	// the same as in the govulncheck rule, so dedupe keeps one line.
+	jobs, problems := w.jobsAndProblems()
+	for _, err := range problems {
 		s.msgs = append(s.msgs, err.Error())
 	}
 	for _, j := range jobs {
@@ -256,13 +260,15 @@ func grStepLabel(w *workflow, step, uses *yaml.Node) string {
 }
 
 // grCheckDoc checks that every GoReleaser version in CONTRIBUTING.md is want,
-// and that there is at least one. A missing CONTRIBUTING.md gives no message
-// here, because checkRequired reports it.
+// and that there is at least one. A CONTRIBUTING.md that is missing, that
+// fs.Stat cannot read or that is not a regular file gives no message here,
+// because checkRequired reports it.
 func grCheckDoc(fsys fs.FS, want string) []string {
-	data, err := readLimited(fsys, docPath, maxFileBytes)
-	if errors.Is(err, fs.ErrNotExist) {
+	info, err := fs.Stat(fsys, docPath)
+	if err != nil || !info.Mode().IsRegular() {
 		return nil
 	}
+	data, err := readLimited(fsys, docPath, maxFileBytes)
 	if err != nil {
 		return []string{fmt.Sprintf("%s: %v", docPath, err)}
 	}
@@ -294,7 +300,7 @@ func grCheckActions(fsys fs.FS) []string {
 		return nil
 	}
 	if err != nil {
-		return []string{fmt.Sprintf("%s: read the directory: %v", grGitHubDir, err)}
+		return []string{fmt.Sprintf("%s: read the directory: %v", grGitHubDir, noPath(err))}
 	}
 	var msgs []string
 	for _, e := range entries {
@@ -321,7 +327,7 @@ func grWalkActions(fsys fs.FS, dir string) []string {
 	walkErr := fs.WalkDir(fsys, dir, func(p string, d fs.DirEntry, err error) error {
 		if err != nil {
 			// Report the problem and go on with the other entries.
-			msgs = append(msgs, fmt.Sprintf("%s: read: %v", p, err))
+			msgs = append(msgs, fmt.Sprintf("%s: read: %v", p, noPath(err)))
 			return nil
 		}
 		switch {
@@ -345,7 +351,7 @@ func grWalkActions(fsys fs.FS, dir string) []string {
 		return nil
 	})
 	if walkErr != nil {
-		msgs = append(msgs, fmt.Sprintf("%s: walk: %v", dir, walkErr))
+		msgs = append(msgs, fmt.Sprintf("%s: walk: %v", dir, noPath(walkErr)))
 	}
 	return msgs
 }

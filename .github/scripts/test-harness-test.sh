@@ -28,6 +28,16 @@ trap 'rm -rf "${tmp:?}"' EXIT
 plain_total=0
 plain_failed=0
 
+# plain_fail MSG...: counts a failed plain check and reports it with the
+# record_failure of the real harness, so that the output of a child gets the
+# same encoding as in the other test scripts. record_failure runs in a
+# subshell: when a bug makes it exit or print nothing, plain_failed still
+# counts the failure and the summary line below still shows it.
+plain_fail() {
+  plain_failed=$((plain_failed + 1))
+  (record_failure "$@") || true
+}
+
 # expect NAME WANT_CODE WANT_TEXT SCRIPT: runs SCRIPT in a new bash with
 # set -euo pipefail, GITHUB_ACTIONS unset and the harness under test sourced.
 # It wants the exit code and the fixed text in stdout and stderr.
@@ -36,11 +46,9 @@ expect() {
   plain_total=$((plain_total + 1))
   out=$(env -u GITHUB_ACTIONS "$BASH" -c 'set -euo pipefail; . "$1"; eval "$2"' _ "$under" "$script" 2>&1) || code=$?
   if [ "$code" != "$want" ]; then
-    echo "FAIL: $name: exit $code, want $want: $out" >&2
-    plain_failed=$((plain_failed + 1))
+    plain_fail "$name: exit $code, want $want: $out"
   elif [[ $out != *"$text"* ]]; then
-    echo "FAIL: $name: the output lacks '$text': $out" >&2
-    plain_failed=$((plain_failed + 1))
+    plain_fail "$name: the output lacks '$text': $out"
   fi
 }
 
@@ -65,6 +73,16 @@ expect "a FAIL: line indents the later lines of the output" 0 "indented" \
   'err=$(check_case demo 1 "" printf "x\n::stop-commands::x\rt: all 9 cases pass\n" 2>&1)
   want=$(printf "FAIL: demo: exit 0, want 1: x\n  > ::stop-commands::x\\\\rt: all 9 cases pass")
   if [ "$err" = "$want" ]; then echo indented; else printf "got %q\n" "$err"; exit 1; fi'
+# An ASCII control character but tab, LF and CR shows as \xNN, so that an ESC
+# cannot start a terminal escape sequence. A tab stays a tab.
+expect "a FAIL: line shows ESC, DEL and the other controls as \\xNN" 0 "visible" \
+  'err=$(record_failure "$(printf "a\033[31mb\tc\177d\001e\037f")" 2>&1)
+  want="FAIL: a\\x1b[31mb$(printf "\t")c\\x7fd\\x01e\\x1ff"
+  if [ "$err" = "$want" ]; then echo visible; else printf "got %q\n" "$err"; exit 1; fi'
+expect "an annotation shows the controls as \\xNN, then encodes %, CR and LF" 0 "one annotation" \
+  'err=$(GITHUB_ACTIONS=true check_case demo 1 "" printf "a%%\033[31mb\r\n\tc\177d\001e\037f" 2>&1)
+  want="::error::demo: exit 0, want 1: a%25\\x1b[31mb%0D%0A$(printf "\t")c\\x7fd\\x01e\\x1ff"
+  if [ "$err" = "$want" ]; then echo "one annotation"; else printf "got %q\n" "$err"; exit 1; fi'
 expect "fail records and exits 1" 1 "FAIL: boom" \
   'fail boom; echo after'
 expect "run_setup goes on after a good setup" 0 "after" \
@@ -118,7 +136,17 @@ expect "footer with one failure exits 1" 1 "t: 1 of 1 cases failed" \
 plain_total=$((plain_total + 1))
 out=$("$BASH" -c '. "$1"; echo "options=$-"' _ "$under" 2>&1)
 if [[ $out != options=* ]] || [[ ${out#options=} == *[eu]* ]]; then
-  echo "FAIL: sourcing the harness prints text or sets an option: $out" >&2
+  plain_fail "sourcing the harness prints text or sets an option: $out"
+fi
+
+# expect reports a failure through record_failure: a failed child with a
+# workflow command in its output gives one annotation. This check prints with
+# %q, so it still reports when record_failure is broken.
+plain_total=$((plain_total + 1))
+out=$(GITHUB_ACTIONS=true "$BASH" -c '. "$1"; eval "$2"; under=$1 plain_total=0 plain_failed=0
+  expect demo 0 "" "printf \"x\\n::stop-commands::x\\n\"; exit 1"' _ "$here/test-harness.sh" "$(declare -f plain_fail expect)" 2>&1) || true
+if [ "$out" != '::error::demo: exit 1, want 0: x%0A::stop-commands::x' ]; then
+  printf 'FAIL: expect reports a failure as one annotation: got %q\n' "$out" >&2
   plain_failed=$((plain_failed + 1))
 fi
 

@@ -46,11 +46,22 @@ case_out=''      # the output (stdout and stderr) of the last check_case
 # internal/pincheck reads it) it prints an ::error:: annotation, else a FAIL:
 # line. Both go to stderr. MSG often holds the output of a case, so a line
 # break in it must not start a line that a reader or the runner takes for a
-# workflow command, a FAIL: line or a footer.
+# workflow command, a FAIL: line or a footer. An ASCII control character
+# other than tab, LF and CR (0x01 to 0x1f, and DEL 0x7f) shows as \xNN, so
+# that an ESC cannot send a terminal escape sequence. A tab stays a tab.
+# shortcut: only ASCII controls, not C1, bidi or zero-width characters (bash
+# 3.2 cannot match them reliably); move to Go if the harness needs them.
 record_failure() {
-  local msg=$*
+  # The quotes matter: bash 5.3 doubles a 0x01 or 0x7f in local msg=$*.
+  local msg="$*" i hex c
+  for i in {1..8} 11 12 {14..31} 127; do
+    printf -v hex '%02x' "$i"
+    printf -v c '%b' "\\x$hex"
+    msg=${msg//"$c"/"\\x$hex"}
+  done
   if [ "${GITHUB_ACTIONS:-}" = true ]; then
-    # Encode MSG as workflow command data: it stays one annotation.
+    # Encode MSG as workflow command data: it stays one annotation. The \xNN
+    # escapes above hold no %, so the % encoding still covers every %.
     msg=${msg//'%'/%25}
     msg=${msg//$'\r'/%0D}
     msg=${msg//$'\n'/%0A}

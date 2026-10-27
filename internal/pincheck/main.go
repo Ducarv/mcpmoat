@@ -206,7 +206,7 @@ func checkRequired(fsys fs.FS) []string {
 		case errors.Is(err, fs.ErrNotExist):
 			problems = append(problems, name+": the file is missing")
 		case err != nil:
-			problems = append(problems, fmt.Sprintf("%s: %v", name, err))
+			problems = append(problems, fmt.Sprintf("%s: %v", name, noPath(err)))
 		case !info.Mode().IsRegular():
 			problems = append(problems, notRegular(name))
 		}
@@ -252,6 +252,11 @@ func notLoaded(wfs map[string]*workflow, earlier []string) []string {
 // ".github/workflows/ci.yml". A file that cannot be read or parsed gives one
 // problem and is not in the map. A missing workflowDir gives no problem,
 // because checkRequired reports the missing workflows.
+//
+// Every value in the map is a non-nil *workflow with a non-nil top node,
+// because parseWorkflow returns an error for any file it cannot load. So the
+// rules do not test a value for nil: a missing key is the only "not loaded"
+// state.
 func loadWorkflows(fsys fs.FS) (map[string]*workflow, []string) {
 	wfs := make(map[string]*workflow)
 	var problems []string
@@ -259,7 +264,7 @@ func loadWorkflows(fsys fs.FS) (map[string]*workflow, []string) {
 	// error does not hide the other files.
 	entries, err := fs.ReadDir(fsys, workflowDir)
 	if err != nil && !errors.Is(err, fs.ErrNotExist) {
-		problems = append(problems, fmt.Sprintf("%s: read the directory: %v", workflowDir, err))
+		problems = append(problems, fmt.Sprintf("%s: read the directory: %v", workflowDir, noPath(err)))
 	}
 	for _, e := range entries {
 		if !isWorkflowName(e.Name()) {
@@ -307,23 +312,39 @@ func readWorkflow(fsys fs.FS, p string) (*workflow, error) {
 // readLimited reads the file name of fsys. It fails when the file has more
 // than limit bytes. io.LimitReader stops after one byte more than the limit,
 // so a large file is never read in full. The error does not name the file:
-// the caller adds the name.
+// the caller adds the name. noPath removes the path of the file system error.
 func readLimited(fsys fs.FS, name string, limit int64) ([]byte, error) {
 	f, err := fsys.Open(name)
 	if err != nil {
-		return nil, fmt.Errorf("open: %w", err)
+		return nil, fmt.Errorf("open: %w", noPath(err))
 	}
 	// The file is only read, so a Close error tells nothing new. The blank
 	// identifier _ drops it on purpose.
 	defer func() { _ = f.Close() }()
 	data, err := io.ReadAll(io.LimitReader(f, limit+1))
 	if err != nil {
-		return nil, fmt.Errorf("read: %w", err)
+		return nil, fmt.Errorf("read: %w", noPath(err))
 	}
 	if int64(len(data)) > limit {
 		return nil, fmt.Errorf("the file has more than %d bytes, so the check does not read it", limit)
 	}
 	return data, nil
+}
+
+// noPath returns the inner error of the first *fs.PathError in the chain of
+// err, or err itself when there is none. A file of an os.Root keeps the
+// absolute host path in its name, so a read error can hold that path, such
+// as "read /home/me/repo/CONTRIBUTING.md: is a directory". A message must
+// name only the path relative to the root, and the caller adds that. The
+// inner error is an error value such as syscall.EISDIR, so errors.Is still
+// finds fs.ErrNotExist or fs.ErrPermission in it. errors.As looks through
+// every wrapped error and sets pe when it finds a *fs.PathError.
+func noPath(err error) error {
+	var pe *fs.PathError
+	if errors.As(err, &pe) {
+		return pe.Err
+	}
+	return err
 }
 
 // onlyVersion looks for exactly one distinct version in versions (the same
