@@ -43,7 +43,9 @@ docs/                   PRD and other documentation
   `configs.go` holds the config loader that `scan` and `pin` share (`loadConfigs`), so both commands
   apply the same trust rules to a config file. `pins_shared.go` holds the helpers of the pin step
   that both commands use (`serverIdentity`, `readPins`, `pinnable`, `appendDiff`). `scan_pins.go`
-  holds the pin step of `scan` (`pinner`), and `accept_hint.go` the "To accept" line.
+  holds the pin step of `scan` (`pinner`), and `accept_hint.go` the "To accept" line. `argscrub.go`
+  hides the `--llm-base-url` values and the URL user info in the text of argument errors
+  (`argHider`, `newBaseURLHider`, `hideUserinfo`).
   `scan_rules.go` loads the rules and builds the `rules.Analyzer` (`loadRules`), and
   `scan_tools.go` holds the tool rule step (`toolRulesStep`). Four files hold the `--llm` step.
   `scan_llm_flags.go` holds the flags, `checkLLMFlags` and the setup warning. `scan_llm_plan.go`
@@ -817,7 +819,7 @@ the key never goes to a proxy in clear text. For `https` it honours `HTTPS_PROXY
 like the server connections. Go ignores a proxy value that it cannot parse and then connects
 directly. The limits of a scan (tool count, workers, timeouts, retries, body size, output tokens)
 are in the [docs/llm.md](llm.md). They live in
-`cmd/mcpmoat` (`maxLLMTools`, `llmWorkers`, `llmStepTimeout`) and `internal/llm`.
+`cmd/mcpmoat` (`maxLLMTools`, `llmWorkers`, `defaultLLMStepTimeout`) and `internal/llm`.
 
 Retries: `Classify` calls `sendWithRetry` in `internal/llm/retry.go`, which calls `send` again for
 each try, so each try builds a new request with a new body. `retryPolicy` holds the numbers: 3
@@ -830,7 +832,10 @@ usage text of `scan` takes its numbers from them.
 (also 400, 413 and 422), a request timeout (`requestTimeout`, 30 s for each try) and every other
 transport error stop at once. `parseRetryAfter` reads the header (seconds or an HTTP date); a
 value that is not valid or in the past gives the normal backoff, and a value over the cap means no
-retry. `send` reads only this one response header of a non-2xx answer, never its body. The module
+retry. `sendWithRetry` also refuses a `Retry-After` wait that is longer than the time left before
+the deadline of its context (the step deadline, see below): it returns the error of the provider
+at once, with `backoff.Permanent`, so the tool fails with the status of the provider and the scan
+exits with 2. `send` reads only this one response header of a non-2xx answer, never its body. The module
 `github.com/cenkalti/backoff/v7` runs the waits. `retryError` unwraps its errors: after the last
 try, the caller gets the error of that try as without retries, and when the context ends during a
 wait it gets the same error as when the context ends during a request. The reason: the error text
@@ -844,7 +849,7 @@ servers know only `max_tokens` and refuse the field with 400, which would refuse
 answer is `llm.ErrInvalidOutput`.
 
 The step deadline: `runLLMJobs` in `cmd/mcpmoat/scan_llm.go` runs all the jobs (`runLLMJob` for
-each job) under one context with the time limit `llmStepTimeout` (10 minutes, no flag) and the
+each job) under one context with the time limit `defaultLLMStepTimeout` (10 minutes, no flag) and the
 cause `errLLMStepDeadline` (`context.WithTimeoutCause`). The reason: each request has a limit,
 but with retries and `Retry-After` waits one tool can take about 150 s, and 500 tools with 4
 workers could take hours. When the cause is `errLLMStepDeadline` and the context of the caller has
@@ -905,7 +910,7 @@ all of them in its tool text. So the path is:
 2. `llmServerJobs` in `cmd/mcpmoat/scan_llm_plan.go` copies the slice of each server into
    `llm.Input.Secrets` of each tool of that server. So a value of one server is removed only from
    the tools of that server.
-3. `toolMessage` in `internal/llm` replaces each value of at least 8 bytes (`minSecretBytes`) with
+3. `toolMessage` in `internal/llm` replaces each value of at least 8 bytes (`discover.MinSecretBytes`) with
    `discover.Mask` (`********`) in the name and the description, before the cut, so a cut cannot
    leave a part of a secret. `secretValues` adds, for a value that is not valid UTF-8, the form
    that the JSON decoder of the SDK gives (one U+FFFD for each invalid byte), because a server
@@ -925,8 +930,9 @@ server sent them. docs/llm.md lists the limits of the replacement.
 
 The cuts are made at a rune boundary: `llm.MaxToolNameBytes`, `llm.MaxDescriptionBytes` and, for
 the whole message, `llm.MaxToolMessageBytes`. `Classify` sets
-`Verdict.Truncated` when it cut the name or the description. The flag never comes from the model
-output. A cut name or description is a sign of risk, because the part that is not shown can hold
+`Verdict.Truncated` when it cut the name or the description, and `Verdict.Redacted` when
+`toolMessage` removed a configured value (the `redacted` field of the message). The flags never
+come from the model output. A cut name or description is a sign of risk, because the part that is not shown can hold
 the payload. The system prompt tells the model to rate it at least `medium`, but the code does not
 trust the model for this (see the verdict below).
 
@@ -939,20 +945,23 @@ builders in `cmd/mcpmoat/scan_llm_rows.go`:
   category goes in `related`. `none` gives no finding. The severity is never `critical`.
   `llmSeverity` is the one place that maps an `llm.Risk` to a
   `rules.Severity`.
-- `llmRow` builds the row. For a tool with `Verdict.Truncated` set, it returns `truncatedRow` when
-  `belowMedium` is true for the risk or the answer is unusable. That row has the fixed text
-  `llm.TruncatedText`. The code enforces the rule, not only the system prompt, because a prompt
-  injection in the part before the cut could ask the model for `none`. docs/llm.md owns the rule
-  that the user sees: see
-  [`--llm`](llm.md).
-- An answer that cannot be used for a tool that was not cut gives `MOAT-LLM-002` (medium). That is
+- `llmRow` builds the row. `unrated` is true for a tool with `Verdict.Truncated` or
+  `Verdict.Redacted` set: part of its text was not rated. For such a tool, `llmRow` returns
+  `floorRow` when `belowMedium` is true for the risk or the answer is unusable. That row is
+  `MOAT-LLM-001`, `medium`, category `other`, with the fixed text `llm.TruncatedText` for a cut
+  text and `llm.RedactedText` when only a configured value was removed. A cut text wins when both
+  are true. A rating of `medium` or `high` stays. The code enforces the rule, not only the system
+  prompt, because a prompt injection in the part before the cut could ask the model for `none`,
+  and a hostile config can choose which text mcpmoat removes. docs/llm.md owns the rule that the
+  user sees: see [`--llm`](llm.md).
+- An answer that cannot be used for a tool that was not cut and had no value removed gives `MOAT-LLM-002` (medium). That is
   an invalid answer, a refusal of the model or an answer cut at the token limit
   (`llm.ErrInvalidOutput`, risk text `llm.InvalidText`). A tool that the provider refused
   (`llm.ErrRejected`, HTTP 400, 413 or 422) gives the same row with the risk text
-  `llm.RejectedText` (`rejectedRow`). Both go through `invalidRow`, so a cut tool gets the floor
-  row in both cases. Only these two errors give this finding. So a hostile server that makes the
-  provider refuse its own tool description, or makes the answer unusable, keeps the LLM rating of
-  that tool at `medium`, below the default `--fail-on high`. The rule findings still apply.
+  `llm.RejectedText` (`rejectedRow`). Both go through `invalidRow`, so an unrated tool (cut or
+  redacted) gets the floor row in both cases. Only these two errors give this finding. So a
+  hostile server that makes the provider refuse its own tool description, or makes the answer
+  unusable, keeps the LLM rating of that tool at `medium`, below the default `--fail-on high`. The rule findings still apply.
 - The finding texts are fixed in `internal/llm`, so no text from the model reaches the terminal or
   the JSON output.
 

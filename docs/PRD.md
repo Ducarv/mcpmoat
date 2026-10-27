@@ -156,6 +156,8 @@ mcpmoat process, and a stdio server runs as the same user and can read it (for e
   the report.
 - A cut that hides the payload: the cut-text rule of FR-17 gives a `medium` finding for a cut tool
   that the model rates `none` or `low`, or whose answer is unusable.
+- A config that chooses which text is removed: the same rule gives a `medium` finding for a tool
+  from whose text mcpmoat removed a configured value (the redacted-text rule of FR-17).
 - Data that leaves the machine: `--llm` is opt-in, and a warning is printed before any request.
 - A hostile config that hides the LLM findings or the rule time budget finding: only `--ignore` hides them, not `.mcpmoat-ignore`.
 - The key in the mcpmoat environment: mcpmoat does not give the key to a server through its
@@ -658,6 +660,14 @@ the machine**.
   answer for it does not hide it. The code enforces this, not only the system prompt. The
   [LLM page](llm.md) holds the full
   rule.
+- A tool from whose name or description mcpmoat removed a configured value (see the next item) gets
+  the same floor: never below `medium`, and an unusable model answer or a refusal of the provider
+  does not hide it. The finding is `MOAT-LLM-001`, with category `other` and a fixed risk text.
+  A model rating of `medium` or `high` is kept. A text that was also cut keeps the cut-text
+  finding. The reason: the removed text was not rated, and a hostile config could choose which
+  text it removes, so a part of a malicious description would never reach the model. The rule
+  engine still reads the full text, and a `medium` finding is below the default `--fail-on high`.
+  The [LLM page](llm.md) holds the full rule.
 - Secret values are removed before the cut. A server that got a token through its env, headers or
   args can put that token into a tool name or description. So mcpmoat replaces each secret value
   that it gave to that server with `********` in the name and the description of the tools of that
@@ -674,7 +684,9 @@ the machine**.
     `--db mypassword`), so they are not removed.
   - A server can write `********` itself.
   - The local report (terminal and `--json`) prints the tool name as the server sent it, so a
-    secret that a server puts in a tool name can show on stdout.
+    secret that a server puts in a tool name can show on stdout. Only the LLM rows show the name
+    as the request had it, with each removed value as `********` (`Input.RedactedName`). Issue
+    #234 tracks the other rows.
 
   docs/llm.md holds the user text of this rule.
 - The model may answer only with a risk (`none`, `low`, `medium`, `high`) and a category from a
@@ -682,7 +694,7 @@ the machine**.
   `medium` or `high` with that severity (never `critical`); `none` gives no finding. Rule
   `MOAT-LLM-002` (medium) reports an answer that is invalid or a refusal of the model, or a tool
   that the provider refused (HTTP 400, 413 or 422), with a fixed text for each case. Only these
-  cases, for a tool that was not cut, give `MOAT-LLM-002`.
+  cases, for a tool that was not cut and had no value removed, give `MOAT-LLM-002`.
 - LLM findings carry a distinct source marker: `[LLM]` in the terminal and `"source": "llm"` in the
   JSON output (schema version 2). They only add to the rule findings and never remove or change
   them. They count for `--fail-on`. Only `--ignore` applies to them; `.mcpmoat-ignore` does not
@@ -691,14 +703,17 @@ the machine**.
   hostile description can try to influence it.
 - An HTTP 400, 413 or 422 from the provider is a result for that one tool only (for example a
   content filter or a context limit). The tool is not classified and gets a `medium` finding:
-  `MOAT-LLM-002`, or the `MOAT-LLM-001` floor finding when its name or description was cut. The
+  `MOAT-LLM-002`, or the `MOAT-LLM-001` floor finding when its name or description was cut or had a
+  value removed. The
   other requests go on, and the scan can still be complete. That finding is below the default
   `--fail-on high`, so a hostile server that makes the provider refuse its own tool description
   can keep its LLM rating from reaching `high`, as with an unusable answer. The rule findings still
   apply.
 - Retries: a provider answer that says busy or overloaded (such as HTTP 429 or 503) is tried
   again, with a fixed, small number of tries for each tool and a wait with jitter between them. A
-  `Retry-After` time is honoured up to a cap, and a longer one means no retry. No other status, no
+  `Retry-After` time is honoured up to a cap, and a longer one means no retry. A `Retry-After` that
+  is longer than the time left in the step also means no retry: the tool fails at once with the
+  error of the provider, and the scan exits with 2. No other status, no
   request timeout and no other transport error is tried again. After the last try, the failure is
   a provider failure (below).
 - Time and cost bounds: each request has a time limit, and the whole LLM step has a fixed time

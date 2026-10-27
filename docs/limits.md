@@ -65,7 +65,8 @@ This page lists what mcpmoat does not do, so you know how far to trust a clean s
     example a long random-looking path segment, a nix hash, a UUID or a name with spaces.
 - The report on the terminal and the `--json` output show the tool names as the server sent them.
   mcpmoat does not remove secret values from them, so a server that puts a secret in a tool name
-  can make it show on stdout.
+  can make it show on stdout. Only the rows of the `--llm` step hide such a value (as
+  `********`). Issue #234 tracks the other rows.
 - When you give a wrong argument, every command hides the user info of each URL in the error text
   (`https://user:pass@host` shows as `https://(hidden)@host`), and it hides the value of
   `--llm-base-url`, also one with no scheme such as `user:pass@host`. This covers the flag errors

@@ -93,8 +93,10 @@ mcpmoat scan --llm --llm-provider openai --llm-model <model> \
     another secret.
   - A server can write `********` in its text itself, so the marker does not prove that mcpmoat
     removed a secret.
-  - The report on your terminal and the `--json` output show the tool name as the server sent it.
-    A server that puts a secret in a tool name can make it show there.
+  - The rows of the LLM step show the tool name as the request had it, with each removed value
+    shown as `********`. The other rows of the report on your terminal and the `--json` output
+    show the tool name as the server sent it, so a server that puts a secret in a tool name can
+    make it show there (see issue #234).
 - **No tool to send:** when no server was inspected, or the inspected servers list no tools,
   `scan` prints `mcpmoat scan: --llm had no tool to classify` on stderr. The exit code does not
   change.
@@ -111,7 +113,10 @@ mcpmoat scan --llm --llm-provider openai --llm-model <model> \
   and 2 retries. Before a retry, mcpmoat waits about 1 second, then about 2 seconds, with jitter: a
   random part makes each wait 0.5 to 1.5 times that value. When the answer has a `Retry-After`
   header (a number of seconds or an HTTP date), mcpmoat waits that time instead. A `Retry-After` of
-  up to 30 seconds is honoured; a longer one means no retry. A value that is not valid, or a date in
+  up to 30 seconds is honoured; a longer one means no retry. A `Retry-After` that is longer than
+  the time left in the 10 minutes of the step also means no retry: mcpmoat does not wait, and the
+  tool fails at once with the error of the provider. The scan then ends with exit code 2, and the
+  stderr line shows the status of the provider (see **Exit codes** below). A value that is not valid, or a date in
   the past, gives the normal wait. mcpmoat never reads the body of an HTTP error. These cases get no
   retry: any other HTTP error (also 400, 413, 422, 401, 403, 404 and 500), a redirect, a request
   that used up its 30 seconds, and any other network error. When the last try fails, it is a
@@ -124,7 +129,9 @@ mcpmoat scan --llm --llm-provider openai --llm-model <model> \
   hidden reasoning tokens, and the 64 KiB response cap does not limit them. A request to any other
   base URL (an OpenAI-compatible server) sets no output cap, because many of these servers know
   only `max_tokens` and refuse `max_completion_tokens`. An answer that the cap cuts is an unusable
-  answer: a `MOAT-LLM-002` finding, not exit code 2.
+  answer: a `MOAT-LLM-002` finding, not exit code 2. So mcpmoat does not cap the cost of hidden
+  reasoning tokens for a base URL that is not the default. To cap that cost, set a spend limit in
+  the account of the provider.
 - **How the 500 tools are shared:** the servers share the cap fairly. A server with fewer tools
   than an equal part keeps all its tools, and the part that it does not use goes to the larger
   servers. When the parts cannot be equal, the servers that come first in the scan get one tool
@@ -148,6 +155,20 @@ mcpmoat scan --llm --llm-provider openai --llm-model <model> \
     category. An unusable answer or a refusal for a tool that was not cut still gives
     `MOAT-LLM-002`. The part after the cut was not rated and can hold the payload, and the risk
     text of the finding says so.
+  - The same floor applies to a tool from whose name or description mcpmoat removed a configured
+    value (see **Secret values are removed from the tool text** above), that is, when the message
+    has `"redacted": true`. When the model answers `none` or `low`, or the answer is unusable, or
+    the provider refused the tool, the tool gets one `MOAT-LLM-001` finding of severity `medium`
+    with category `other`. An answer of `medium` or `high` keeps its severity and category. The
+    risk text is `A value from your config, such as an env or header value, was removed from the
+    tool text before it was sent to the model. The removed text was not rated and can hold hidden
+    instructions for the AI agent.` The reason: a hostile config can choose which text mcpmoat
+    removes, so a part of a malicious description may never reach the model. When the text was
+    also cut, the finding has the text of the cut. Text that mcpmoat removes but that is not secret
+    (see the limits above) gives the same floor. What you see: a tool whose description echoes a
+    secret from your config gets a `medium` finding. That is also a sign that the server echoes a
+    secret. The floor does not make the rating complete. The rule engine still reads the full
+    text, and a `medium` finding is below the default `--fail-on high`.
 
   An LLM finding is marked `[LLM]` and has a `Source` line. In JSON its `source` is `llm`, and
   `related` holds the category. A short sample:
@@ -165,7 +186,7 @@ mcpmoat scan --llm --llm-provider openai --llm-model <model> \
 - **Advisory only:** a model can be wrong. No LLM finding does not mean that a tool is safe. A
   hostile tool description can try to talk the model into a low rating. It can also make the
   provider refuse it (HTTP 400, 413 or 422) or make the model answer unusable. The tool then gets
-  a `medium` finding at most (`MOAT-LLM-002`, or the `MOAT-LLM-001` floor of a cut tool), below
+  a `medium` finding at most (`MOAT-LLM-002`, or the `MOAT-LLM-001` floor of a cut or redacted tool), below
   the default `--fail-on high`. So a hostile server can keep its LLM rating from reaching `high`.
   The rule findings still apply, and the LLM row still shows. LLM findings only add to the rule
   findings. They never remove or change a rule finding, and they never change the pins.
