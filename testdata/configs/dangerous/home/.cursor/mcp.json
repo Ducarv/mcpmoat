@@ -12,7 +12,7 @@
     },
     "env-secret": {
       "command": "npx",
-      "args": ["-y", "--registry", "https://registry.invalid/", "@example-corp/notes-mcp@1.2.3"],
+      "args": ["-y", "--registry", "https://registry.invalid/", "@example~corp/notes~mcp@1.2.3"],
       "env": {
         "GITHUB_TOKEN": "ghp_mcpmoatcanaryZk3Qp8Vw2LxN7rTb5HcYd4M",
         "LOG_LEVEL": "debug",
@@ -21,7 +21,7 @@
     },
     "latest-pkg": {
       "command": "npx",
-      "args": ["-y", "--registry", "https://registry.invalid/", "@example-corp/files-mcp@latest"]
+      "args": ["-y", "--registry", "https://registry.invalid/", "@example~corp/files~mcp@latest"]
     },
     "docker-untagged": {
       "command": "docker",

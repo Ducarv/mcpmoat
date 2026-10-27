@@ -25,7 +25,7 @@ HIGH (1)
 MEDIUM (1)
   MOAT-T4-003  Package runner uses an unpinned package
     Server: files (cursor, global)
-    Where: args @example-corp/files-mcp
+    Where: args @example~corp/files~mcp
     Risk: The server starts from a package that is not fixed ...
     Fix: Pin an exact version, for example npx @scope/server@1.4.2 ...
 ```

@@ -127,7 +127,7 @@ func TestScanFindingsDangerousFixture(t *testing.T) {
 		{"MOAT-T4-002", "high", "remote-url-secret", "url", "-"},
 		// medium
 		{"MOAT-T4-003", "medium", "docker-untagged", "args", "registry.invalid/example/mcp-server"},
-		{"MOAT-T4-003", "medium", "latest-pkg", "args", "@example-corp/files-mcp"},
+		{"MOAT-T4-003", "medium", "latest-pkg", "args", "@example~corp/files~mcp"},
 		{"MOAT-T4-003", "medium", "npx-git-unpinned", "args", "-"},
 		// low
 		{"MOAT-T4-004", "low", "env-secret", "args", "-"},

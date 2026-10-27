@@ -400,7 +400,7 @@ func TestFixtureDangerousConfig(t *testing.T) {
 		{"remote-plain", rules.RulePlaintextSecret, rules.FieldHeaders, "X-Api-Key", ""},
 		{"env-secret", rules.RulePlaintextSecret, rules.FieldEnv, "GITHUB_TOKEN", ""},
 		{"env-secret", rules.RuleAutoInstall, rules.FieldArgs, "", ""},
-		{"latest-pkg", rules.RuleUnpinnedPackage, rules.FieldArgs, "", "@example-corp/files-mcp"},
+		{"latest-pkg", rules.RuleUnpinnedPackage, rules.FieldArgs, "", "@example~corp/files~mcp"},
 		{"latest-pkg", rules.RuleAutoInstall, rules.FieldArgs, "", ""},
 		{"docker-untagged", rules.RuleUnpinnedPackage, rules.FieldArgs, "", "registry.invalid/example/mcp-server"},
 		{"docker-arg-secret", rules.RulePlaintextSecret, rules.FieldArgs, "", ""},

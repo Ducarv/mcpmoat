@@ -41,7 +41,7 @@ No other rule must fire. In particular:
 
 - `remote-plain` header `Authorization` is a `${env:API_TOKEN}` reference, not a secret.
 - `env-secret` env `API_KEY` is a `${env:API_KEY}` reference, and `LOG_LEVEL` is not a secret.
-- `env-secret` runs a pinned package (`@example-corp/notes-mcp@1.2.3`).
+- `env-secret` runs a pinned package (`@example~corp/notes~mcp@1.2.3`).
 - `docker-arg-secret` pins its image by digest, so there is no `MOAT-T4-003`.
 - `remote-url-secret` uses `https://`, so there is no `MOAT-T4-001`.
 - `npx-git-pinned` pins a full 40-hex commit, so there is no `MOAT-T4-003`.
