@@ -21,15 +21,16 @@ import (
 // TestPrepareTextFormCounts checks.
 const (
 	// noSeqText holds a ZWSP, U+0001 and the ligature U+FB03, and no escape
-	// sequence. It yields 8 regex forms and 4 keyword forms: the forms 1 to
-	// 4 of matchForms and the fold of each.
+	// sequence. It yields 8 regex forms and 4 keyword forms: the
+	// dropInvisible, spaceInvisible, spaceControls and spaceFormats forms of
+	// matchForms and the fold of each.
 	noSeqText = "\u200bb\x01\ufb03"
 	// noC0CSIText is noSeqText with ESC [ I before the ligature. No C0
-	// control rune is inside its CSI, so its sixth form equals the first.
-	// It yields 12 regex forms and 6 keyword forms: the forms 1 to 5 and 7
-	// and the fold of each. U+FB03 folds to "ffi", 3 bytes to 3, so in
-	// BenchmarkWorstCaseBlock each folded form stays about
-	// MaxMatchInputBytes long.
+	// control rune is inside its CSI, so its dropSeqC0 form equals its
+	// dropInvisible form. It yields 12 regex forms and 6 keyword forms: each
+	// form of matchForms but dropSeqC0, and the fold of each. U+FB03 folds
+	// to "ffi", 3 bytes to 3, so in BenchmarkWorstCaseBlock each folded form
+	// stays about MaxMatchInputBytes long.
 	noC0CSIText = "\u200bb\x01\x1b[Ic\ufb03"
 	// allFormsText is noC0CSIText and ESC U+0001 [8m, a CSI that holds a C0
 	// control rune. It yields every base form: the maxBaseForms base forms of
@@ -656,8 +657,8 @@ func TestRegexForms(t *testing.T) {
 		},
 		// The fold does not change the text, so it is not added.
 		{name: "Hangul syllable not folded again", in: "\ud55c", want: []string{"\ud55c"}},
-		// The forms 1 to 5 and 7 of matchForms and their six folds. The
-		// sixth form equals the first, so it is kept once.
+		// Each form of matchForms but dropSeqC0, and their six folds. The
+		// dropSeqC0 form equals the dropInvisible form, so it is kept once.
 		{
 			name: "no C0 in a CSI",
 			in:   noC0CSIText,

@@ -25,7 +25,8 @@ const maxKeywordForms = maxBaseForms
 //
 //   - Step one (buildBase) calls baseFormsCut once. It keeps the base forms
 //     and the cut flag of the match window. windowCut runs only this step,
-//     so the match_window heuristic does not build the folds.
+//     so the match_window heuristic does not build the folds, and the regex
+//     and keyword rules that read p later reuse its base forms.
 //   - Step two (buildFolds) builds the plain folds and the skeleton folds
 //     from the base forms of step one. regexFormParts and keywordForms run it,
 //     and it runs step one first when step one did not run yet.
@@ -39,9 +40,9 @@ const maxKeywordForms = maxBaseForms
 //
 // For the schema target, raw is a JSON schema. schema decodes it once into
 // a preparedSchema and keeps it. So all schema rules of one tool that share
-// p also share the decoded strings, the preparedText of each string and of
-// each seam, and so the forms and the window cut flag of each of them (see
-// preparedSchema).
+// p also share the decoded strings, the preparedText of each string, of each
+// seam and of the raw text (p itself), and so the forms and the window cut
+// flag of each of them (see preparedSchema).
 //
 // A preparedText is safe for concurrent reads. A sync.Once guards each step
 // and the schema: the first call builds, and the other calls wait for it and

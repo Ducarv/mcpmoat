@@ -115,9 +115,9 @@ func TestANSISeqSharedCSI(t *testing.T) {
 	}
 }
 
-// TestSeqText checks what the fifth and the seventh form put in place of each
-// kind of escape sequence. Each input is one whole match of ansiSeqC0, the
-// regex whose matches ansiKeepText passes to seqText.
+// TestSeqText checks what the keepSeqText and keepSeqTextSpaced forms put in
+// place of each kind of escape sequence. Each input is one whole match of
+// ansiSeqC0, the regex whose matches ansiKeepText passes to seqText.
 func TestSeqText(t *testing.T) {
 	t.Parallel()
 

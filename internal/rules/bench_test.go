@@ -284,11 +284,12 @@ func benchWorstCaseBlock(b *testing.B, text string, wantForms, minLen int) {
 //
 // Each U+009D can start an OSC, so these are the slowest known inputs for the
 // OSC part of ansiSeq (see oscExpr). Both hold more than maxStrictOSCStarts
-// U+009D, so the forms 1 to 3 read with ansiSeqFast. Measured on an Apple
-// M1 Pro with -benchtime=5x: about 70 ms for oscStartRun (about 54 ms for
-// 128 KiB of U+009D alone) and about 90 ms for pairs, each call. With
-// ansiSeq for the forms 1 to 3 (the code before #146), they took about
-// 0.77 s and 0.55 s. Target: about 100 ms or less for these texts.
+// U+009D, so the dropInvisible, spaceInvisible and spaceControls forms read
+// with ansiSeqFast. Measured on an Apple M1 Pro with -benchtime=5x: about
+// 70 ms for oscStartRun (about 54 ms for 128 KiB of U+009D alone) and about
+// 90 ms for pairs, each call. With ansiSeq for these three forms (the code
+// before #146), they took about 0.77 s and 0.55 s. Target: about 100 ms or
+// less for these texts.
 //
 // They are not the slowest input for one build of the forms now: a fill of
 // CSIs takes about 0.17 s (see the cost comment in match.go). The docs give
@@ -301,7 +302,8 @@ func BenchmarkOSCStartRun(b *testing.B) {
 	}{
 		{"oscStartRun", oscStartRun(), maxBaseForms},
 		// U+009D sets the control and seqStart flags, so the text has the
-		// forms 1 to 3, keepSeqText and keepSeqTextSpaced.
+		// dropInvisible, spaceInvisible, spaceControls, keepSeqText and
+		// keepSeqTextSpaced forms.
 		{"pairs", strings.Repeat("\u009da", maxRawScanBytes/3), 5},
 	}
 	for _, tc := range texts {
@@ -317,12 +319,13 @@ func BenchmarkOSCStartRun(b *testing.B) {
 			if !matchWindowCut(tc.text) {
 				b.Fatal("matchWindowCut(text) = false, want true for more than maxStrictOSCStarts U+009D")
 			}
-			// The same text after an OSC whose text holds U+009D: the first
-			// form keeps "]x" only when it reads with ansiSeqFast, so this
-			// checks that the benchmark times the fast step.
+			// The same text after an OSC whose text holds U+009D: the
+			// dropInvisible form keeps "]x" only when it reads with
+			// ansiSeqFast, so this checks that the benchmark times the fast
+			// step.
 			probe := cutAtRune(oscInOSCText+tc.text, maxRawScanBytes)
 			if forms, _ := baseFormsCut(probe); !strings.HasPrefix(forms[0], "Ignore all previous]x instructions") {
-				b.Fatalf("baseFormsCut(probe) first form = %.40q, want the ansiSeqFast form", forms[0])
+				b.Fatalf("baseFormsCut(probe) dropInvisible form = %.40q, want the ansiSeqFast form", forms[0])
 			}
 			b.SetBytes(int64(len(tc.text)))
 			b.ReportAllocs()

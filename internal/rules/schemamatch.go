@@ -69,10 +69,10 @@ const (
 
 // A seam holds at most 2*seamSideBytes bytes of its two strings, and U+009D
 // is 2 bytes long in UTF-8, so a seam holds at most seamSideBytes U+009D. So
-// a seam never holds more than maxStrictOSCStarts U+009D, and the forms 1 to
-// 3 of each seam read with the strict ansiSeq, not with ansiSeqFast (see
-// baseFormsCut). Then the cut flag of a seam does not come from its count of
-// U+009D. This constant fails to compile (a negative constant does not
+// a seam never holds more than maxStrictOSCStarts U+009D, and the
+// strict-reading forms of each seam read with the strict ansiSeq, not with
+// ansiSeqFast (see baseFormsCut). Then the cut flag of a seam does not come
+// from its count of U+009D. This constant fails to compile (a negative constant does not
 // convert to uint) when seamSideBytes grows so that a seam can hold more
 // U+009D than maxStrictOSCStarts.
 const _ = uint(maxStrictOSCStarts - 2*seamSideBytes/len("\u009d"))

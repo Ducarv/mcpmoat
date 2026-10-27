@@ -19,7 +19,8 @@ const oscExpr = `(?:\x1b\]|\x{9d})[^\x07\x1b\x{9c}]{0,256}(?:\x07|\x1b\\|\x{9c})
 const oscExprC0 = `(?:\x1b\]|\x{9d})[^\x07\x1b\x{9c}\x{9d}]{0,256}(?:\x07|\x1b\\|\x{9c})`
 
 // maxStrictOSCStarts is the largest number of U+009D (C1 OSC) in a text for
-// which the forms 1 to 3 of baseFormsCut read the sequences with ansiSeq.
+// which the strict-reading forms of baseFormsCut read the sequences with
+// ansiSeq.
 // Up to it, the OSC part of ansiSeq costs at most maxStrictOSCStarts x 256
 // extra thread steps for one regex pass, which is negligible. Above it, these
 // forms read with ansiSeqFast and baseFormsCut sets the cut flag, so
@@ -50,19 +51,19 @@ const csiExpr = `(?:\x1b\[|\x{9b})[0-?]*[ -/]*[@-~]`
 // so it cannot swallow the rest of the text; its ESC is an invisible control
 // rune, so step 4 of normalizeForMatch drops it, and its text stays.
 //
-// A CSI here holds no C0 control rune (see csiExpr). The forms 1 to 3 of
-// baseFormsCut read the sequences with ansiSeq, or with ansiSeqFast when the
-// text holds more than maxStrictOSCStarts U+009D. The forms 4 to 7 read them
-// with ansiSeqC0.
+// A CSI here holds no C0 control rune (see csiExpr). The strict-reading forms
+// of baseFormsCut read the sequences with ansiSeq, or with ansiSeqFast when
+// the text holds more than maxStrictOSCStarts U+009D. The other forms (the
+// ansiSeqC0 forms) read them with ansiSeqC0.
 var ansiSeq = regexp.MustCompile(csiExpr + `|` + oscExpr)
 
 // ansiSeqFast is ansiSeq with oscExprC0 for its OSC part: a U+009D ends the
 // text of an OSC and starts a new one. Its CSI part is the same as in
 // ansiSeq, so a CSI, also one that starts with U+009B, still holds no C0
-// control rune. The forms 1 to 3 of baseFormsCut read a text that holds more
-// than maxStrictOSCStarts U+009D with it (see ansiFastToSpace). The one
-// difference from ansiSeq: an OSC whose text holds U+009D does not match from
-// its start. So in ESC "]x" + U+009D + BEL, only U+009D BEL is an OSC, and
+// control rune. The strict-reading forms of baseFormsCut read a text that
+// holds more than maxStrictOSCStarts U+009D with it (see ansiFastToSpace).
+// The one difference from ansiSeq: an OSC whose text holds U+009D does not
+// match from its start. So in ESC "]x" + U+009D + BEL, only U+009D BEL is an OSC, and
 // ESC "]x" stays as text (step 4 of normalizeForMatch drops the ESC).
 var ansiSeqFast = regexp.MustCompile(csiExpr + `|` + oscExprC0)
 
@@ -104,9 +105,9 @@ func startsCSI(r rune) bool {
 // The final byte of a CSI can be a letter of the text: in ESC [ "Ignore",
 // the CSI is ESC [ I, as for a terminal. And a C0 rune lets a CSI take
 // parameter bytes of the text: ESC [ LF "<IMPORTANT>" is the CSI ESC [ LF < I.
-// So only the forms 4 to 7 of baseFormsCut read the sequences with ansiSeqC0,
-// and the fifth and the seventh form give back the text of a CSI with a
-// letter final byte (see ansiKeepText).
+// So only the ansiSeqC0 forms of baseFormsCut read the sequences with
+// ansiSeqC0, and the keepSeqText and keepSeqTextSpaced forms give back the
+// text of a CSI with a letter final byte (see ansiKeepText).
 var ansiSeqC0 = regexp.MustCompile(
 	`(?:\x1b[` + csiC0 + `]*\[|\x{9b})[0-?` + csiC0 + `]*[ -/` + csiC0 + `]*[@-~]` +
 		`|` + oscExprC0)
@@ -134,7 +135,7 @@ func ansiToSpace(s string) string {
 
 // ansiFastToSpace is ansiToSpace with ansiSeqFast: it replaces each ANSI
 // escape sequence of ansiSeqFast with U+0020. It is the ANSI step of the
-// forms 1 to 3 of baseFormsCut for a text that holds more than
+// strict-reading forms of baseFormsCut for a text that holds more than
 // maxStrictOSCStarts U+009D (see formMode.ansiStepFor). A sequence is at
 // least 2 bytes long, so the text does not grow.
 func ansiFastToSpace(s string) string {
@@ -143,15 +144,15 @@ func ansiFastToSpace(s string) string {
 
 // ansiC0ToSpace is ansiToSpace with ansiSeqC0: it replaces each ANSI escape
 // sequence, also a CSI that holds C0 control runes, with U+0020. It is the
-// ANSI step of the fourth and the sixth form of baseFormsCut. A sequence is at
-// least 2 bytes long, so the text does not grow.
+// ANSI step of the spaceFormats and dropSeqC0 forms of baseFormsCut. A
+// sequence is at least 2 bytes long, so the text does not grow.
 func ansiC0ToSpace(s string) string {
 	return ansiSeqC0.ReplaceAllLiteralString(s, " ")
 }
 
-// ansiKeepText is the ANSI step of the fifth and the seventh form of
-// baseFormsCut (see keepSeqText and keepSeqTextSpaced). It replaces each ANSI
-// escape sequence (see ansiSeqC0) with the text that seqText gives for it.
+// ansiKeepText is the ANSI step of the keepSeqText and keepSeqTextSpaced
+// forms of baseFormsCut. It replaces each ANSI escape sequence (see
+// ansiSeqC0) with the text that seqText gives for it.
 // So a CSI that takes characters of the text gives them back, and the text
 // of an OSC, which a terminal does not show but a model reads, is matched.
 //
@@ -172,9 +173,10 @@ func ansiKeepText(s string) string {
 }
 
 // ansiKeepCSIText is ansiKeepText, but an OSC becomes two U+0020, without
-// its text. The cut flag of baseFormsCut reads the fifth and the seventh form
-// with it, so every byte of these forms counts for the window except the text
-// of an OSC: the two U+0020 of an OSC with no text count too.
+// its text. The cut flag of baseFormsCut reads the keepSeqText and
+// keepSeqTextSpaced forms with it, so every byte of these forms counts for
+// the window except the text of an OSC: the two U+0020 of an OSC with no text
+// count too.
 func ansiKeepCSIText(s string) string {
 	return ansiSeqC0.ReplaceAllStringFunc(s, func(seq string) string {
 		if _, ok := oscText(seq); ok {

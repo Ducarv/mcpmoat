@@ -37,11 +37,10 @@ This page lists what mcpmoat does not do, so you know how far to trust a clean s
   128 KiB of U+009D takes about 54 ms, and 128 KiB of U+009D "a" pairs about 90 ms (0.55 s to
   0.8 s before #146). So the analysis of a server can end that much after its budget.
 - A text with more than 256 U+009D (C1 OSC controls) always gets `MOAT-T1-017` or `MOAT-T1-018`
-  (high), because the regex rules read it with a faster regex that can miss a match. A benign
-  text in the wrong encoding can hit this: UTF-8 read as Latin-1 turns each right double quote
-  into three characters that end in U+009D, so more than 256 such quotes give a high finding.
-  With a custom rule at critical severity and `--fail-on critical`, a text with more than 256
-  U+009D can hide the payload from that rule and only `MOAT-T1-017` (high) fires.
+  (high), also a benign text in the wrong encoding. The reason and the example are in
+  [Contributing a rule](writing-rules.md#2-write-the-rule). With a custom rule at critical
+  severity and `--fail-on critical`, a text with more than 256 U+009D can hide the payload from
+  that rule and only `MOAT-T1-017` (high) fires.
 - `--llm` does not make a scan complete or reliable. A model can miss a malicious tool, and a
   hostile description can try to influence the model. Its findings are advisory, and with `--llm`
   your tool names and descriptions leave your machine.

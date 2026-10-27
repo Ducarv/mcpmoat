@@ -390,7 +390,8 @@ func FuzzMatch(f *testing.F) {
 	f.Add(fuzzLongText)
 	f.Add(noC0CSIText)
 	f.Add(allFormsText)
-	// 257 U+009D: the forms 1 to 3 read with ansiSeqFast and the cut flag is set.
+	// 257 U+009D: the dropInvisible, spaceInvisible and spaceControls forms
+	// read with ansiSeqFast and the cut flag is set.
 	f.Add(oscInOSCText + strings.Repeat("\u009d", maxStrictOSCStarts))
 	// Each matcher 0 to 3 hits, so a matcher that changed the shared forms
 	// would change the hits of the next one.
@@ -637,7 +638,8 @@ func FuzzRegexForms(f *testing.F) {
 	f.Add(noC0CSIText)
 	f.Add(allFormsText)
 	f.Add("\u0430" + allFormsText) // Cyrillic a: maxRegexForms forms
-	// 257 U+009D: the forms 1 to 3 read with ansiSeqFast.
+	// 257 U+009D: the dropInvisible, spaceInvisible and spaceControls forms
+	// read with ansiSeqFast.
 	f.Add(oscInOSCText + strings.Repeat("\u009d", maxStrictOSCStarts))
 	f.Add(strings.Repeat("\ufdfa", 1000) + " \uff29\uff47\uff4e\uff4f\uff52\uff45 previous")
 	f.Add("\u00bd\u2177\ud55c\uffa1\uffc2e\u0301")

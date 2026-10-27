@@ -374,26 +374,21 @@ func (m *Matcher) matchPrepared(p *preparedText) []Hit {
 // matchCtx returns the hits of the matcher in p, as Match does, and stops
 // early when ctx is done.
 //
-// The forms of p are built at most once, so the matchers of many rules can
-// share one p for the same text (see preparedText). A heuristic other than
-// match_window gets only p.raw, so it does not build the forms of p. The
-// match_window heuristic reads p.windowCut, so it builds only the base forms
-// of p, and the regex and keyword rules then reuse them. matchCtx never
-// writes into the forms of p.
+// The preparedText doc tells which parts of p (forms, folds, decoded schema)
+// the rules that share p build once and share. matchCtx never writes into
+// the forms of p.
 //
 // For the schema target, p.raw is a JSON schema. matchCtx reads it with
-// matchSchemaPrepared and p.schema, so p decodes the schema once. All the
-// schema rules that share p then share the decoded strings, and the
-// preparedText of each string, seam and raw text, with its forms.
+// matchSchemaPrepared and p.schema.
 //
 // The context: matchCtx checks ctx before it decodes a schema, before it
 // builds the forms, before each regex or keyword reads each form, and before
 // the heuristic. For a schema, matchSchemaPrepared also checks it before
 // each string, seam and raw text. So when ctx ends, the extra work is at
 // most one schema decode, one build of the forms of one text plus one regex
-// on one form, or one heuristic call. matchCtx then returns the hits that it found so far, and
-// an error that wraps ctx.Err(). The error names the kind and the list
-// index, never input text. With a context that is never done, the error is
+// on one form, or one heuristic call. matchCtx then returns the hits that it
+// found so far, and an error that wraps ctx.Err(). The error names the kind
+// and the list index, never input text. With a context that is never done, the error is
 // nil, and the hits are the hits of Match.
 //
 // m and p must not be nil.

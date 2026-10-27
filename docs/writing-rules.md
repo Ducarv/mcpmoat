@@ -53,37 +53,40 @@ How mcpmoat prepares the text before a match. This applies to every regex and ke
   A keyword itself is always prepared the strict way.
 - A regex or a keyword is matched against up to seven forms of the text. It matches when it
   matches one form. mcpmoat builds form 1 always, and each other form only when the text has the
-  characters that the form needs:
-  1. Always: the invisible characters are removed. So "Ig" + U+0001 + "nore" reads as "Ignore".
-  2. When the text has an invisible character: each run of invisible characters is one space, or
-     two when the run has a control character and ends with a format character. So "Ignore" +
-     ZWSP + "previous" reads as two words.
-  3. When the text has a control character: the format characters are removed, and each run of
-     control characters is one space. So a ZWSP inside a word and a control character between
-     words still match.
-  4. When the text has a control character and a format character: the control characters are
-     removed, and each run with a format character is one space, except a run inside a CSI (after
-     the "[" of ESC [ or after U+009B, before the final byte), which is dropped with no space. So a
-     control character inside a word and a ZWSP between words still match, and ESC [ + ZWSP +
-     "8mIgnore" is still the SGR ESC [ 8 m before "Ignore".
-  5. When the text has ESC, U+009B or U+009D: as form 1, but the sequences are read the terminal
-     way, and a sequence gives back the text that it takes. A CSI whose final byte is an ASCII
-     letter other than "m" keeps that letter, its parameter bytes `<`, `=`, `>` and `?` and its
-     intermediate bytes (such as `.` and `/`). It drops its digits, `;` and `:`. So ESC [
-     "Ignore" (the CSI ESC [ I) reads as " Ignore", ESC [ "<IMPORTANT>" reads as " <IMPORTANT>",
-     and ESC [ ".env" reads as " .env". A CSI with the final byte "m" is SGR (colour and bold), so
-     it is nothing, as a terminal shows it: ESC [ 1 m "iPhone" reads as "iPhone", and "Ig" +
-     ESC [ 0 m + "nore" reads as "Ignore". An OSC keeps its text: ESC ] "Ignore all" BEL reads as
-     " Ignore all ". A model reads OSC text, such as a window title or a link URL, so a rule can
-     match it. A CSI inside that text is read in the same way, so ESC ] + U+009B + "8mIgnore" BEL
-     reads as " Ignore ".
-  6. When the text has ESC or U+009B and a C0 control character: as form 1, but each sequence,
-     read the terminal way, is one space. So ESC + U+0001 + "[8mIgnore" reads as " Ignore".
-  7. When the text has ESC, U+009B or U+009D: as form 5, but each run of invisible characters is
-     one space, as in form 2, except a run inside a CSI (after the "[" of ESC [ or after U+009B,
-     before the final byte), which is dropped with no space. So ESC ] "Ignore" + ZWSP + "all" BEL
-     reads as " Ignore all ", ESC [ "Ignore" + U+0001 + "all" reads as " Ignore all", and an ESC
-     that starts no sequence is a space too: ESC [ "Ignore" + ESC + "all" reads as " Ignore all".
+  characters that the form needs. The name in parentheses is the `formMode` constant in
+  [normalize.go](../internal/rules/normalize.go) that builds the form:
+  1. Always (`dropInvisible`): the invisible characters are removed. So "Ig" + U+0001 + "nore"
+     reads as "Ignore".
+  2. When the text has an invisible character (`spaceInvisible`): each run of invisible characters
+     is one space, or two when the run has a control character and ends with a format character.
+     So "Ignore" + ZWSP + "previous" reads as two words.
+  3. When the text has a control character (`spaceControls`): the format characters are removed,
+     and each run of control characters is one space. So a ZWSP inside a word and a control
+     character between words still match.
+  4. When the text has a control character and a format character (`spaceFormats`): the control
+     characters are removed, and each run with a format character is one space, except a run
+     inside a CSI (after the "[" of ESC [ or after U+009B, before the final byte), which is dropped
+     with no space. So a control character inside a word and a ZWSP between words still match, and
+     ESC [ + ZWSP + "8mIgnore" is still the SGR ESC [ 8 m before "Ignore".
+  5. When the text has ESC, U+009B or U+009D (`keepSeqText`): as form 1, but the sequences are
+     read the terminal way, and a sequence gives back the text that it takes. A CSI whose final
+     byte is an ASCII letter other than "m" keeps that letter, its parameter bytes `<`, `=`, `>`
+     and `?` and its intermediate bytes (such as `.` and `/`). It drops its digits, `;` and `:`. So
+     ESC [ "Ignore" (the CSI ESC [ I) reads as " Ignore", ESC [ "<IMPORTANT>" reads as
+     " <IMPORTANT>", and ESC [ ".env" reads as " .env". A CSI with the final byte "m" is SGR
+     (colour and bold), so it is nothing, as a terminal shows it: ESC [ 1 m "iPhone" reads as
+     "iPhone", and "Ig" + ESC [ 0 m + "nore" reads as "Ignore". An OSC keeps its text:
+     ESC ] "Ignore all" BEL reads as " Ignore all ". A model reads OSC text, such as a window title
+     or a link URL, so a rule can match it. A CSI inside that text is read in the same way, so
+     ESC ] + U+009B + "8mIgnore" BEL reads as " Ignore ".
+  6. When the text has ESC or U+009B and a C0 control character (`dropSeqC0`): as form 1, but each
+     sequence, read the terminal way, is one space. So ESC + U+0001 + "[8mIgnore" reads as
+     " Ignore".
+  7. When the text has ESC, U+009B or U+009D (`keepSeqTextSpaced`): as form 5, but each run of
+     invisible characters is one space, as in form 2, except a run inside a CSI, which is dropped
+     as in form 4. So ESC ] "Ignore" + ZWSP + "all" BEL reads as " Ignore all ",
+     ESC [ "Ignore" + U+0001 + "all" reads as " Ignore all", and an ESC that starts no sequence is
+     a space too: ESC [ "Ignore" + ESC + "all" reads as " Ignore all".
 
   Some texts defeat all seven forms. Each case below is a known limit with its reason, and
   `invisible_unicode` still flags it (see the end of this item). A format character inside a CSI
