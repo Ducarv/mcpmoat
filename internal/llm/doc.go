@@ -19,9 +19,9 @@
 // has its own time limit (requestTimeout); the time limit of the whole LLM
 // step is in cmd/mcpmoat.
 //
-// The model output is capped: 200 tokens for Anthropic, and
-// max_completion_tokens for the default OpenAI base URL only (see
-// newOpenAIAPI). The request holds the fixed [SystemPrompt], the fixed
+// The model output is capped: at anthropicMaxTokens tokens for Anthropic,
+// and by max_completion_tokens (openAIMaxCompletionTokens) for the default
+// OpenAI base URL only (see newOpenAIAPI). The request holds the fixed [SystemPrompt], the fixed
 // verdict schema (verdictSchema) and one user message that toolMessage
 // builds. That message holds only:
 //
@@ -32,7 +32,7 @@
 //   - a "redacted" flag, only when a secret value was removed (see below).
 //
 // Before the cut, toolMessage replaces each value in [Input.Secrets] of at
-// least 8 bytes (minSecretBytes) with [discover.Mask] in the name and the
+// least discover.MinSecretBytes bytes with [discover.Mask] in the name and the
 // description (redactPrefix). For a value that is not valid UTF-8, it also
 // removes the form that a JSON decoder gives, with one U+FFFD for each
 // invalid byte (secretValues). It marks every byte of every match first,

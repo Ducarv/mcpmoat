@@ -2120,7 +2120,7 @@ func TestUserinfoSecrets(t *testing.T) {
 
 	const (
 		longName  = "tok-NOTREAL-4b1d"
-		eightName = "abcdefgh" // exactly minBareSecretLen bytes
+		eightName = "abcdefgh" // exactly discover.MinSecretBytes bytes
 		sevenName = "abcdefg"  // one byte short
 		// Names next to a password.
 		prefixName = "ghp_name1" // a token prefix
@@ -2173,13 +2173,13 @@ func TestUserinfoSecrets(t *testing.T) {
 			nameIsSecret: true,
 		},
 		{
-			name:         "name of exactly minBareSecretLen bytes is the token",
+			name:         "name of exactly discover.MinSecretBytes bytes is the token",
 			user:         url.User(eightName),
 			want:         []string{basic(eightName + ":"), "Basic " + basic(eightName+":"), eightName},
 			nameIsSecret: true,
 		},
 		{
-			name: "name one byte under minBareSecretLen is not",
+			name: "name one byte under discover.MinSecretBytes is not",
 			user: url.User(sevenName),
 			want: []string{basic(sevenName + ":"), "Basic " + basic(sevenName+":")},
 		},
@@ -2284,7 +2284,7 @@ func TestCredentialPart(t *testing.T) {
 		{name: "bearer token", value: "Bearer " + tok, want: tok},
 		{name: "token scheme", value: "Token " + tok, want: tok},
 		{name: "lower-case scheme", value: "bearer " + tok, want: tok},
-		{name: "credential of exactly minBareSecretLen bytes", value: "Bearer abcdefgh", want: "abcdefgh"},
+		{name: "credential of exactly discover.MinSecretBytes bytes", value: "Bearer abcdefgh", want: "abcdefgh"},
 		{name: "credential one byte short", value: "Bearer abcdefg", want: ""},
 		{name: "extra spaces are trimmed", value: "Bearer   " + tok + "  ", want: tok},
 		{name: "spaces do not count toward the length", value: "Bearer   abcdefg   ", want: ""},
@@ -2658,7 +2658,7 @@ func TestRemoteUndeclaredToolsFailure(t *testing.T) {
 }
 
 // TestURLSecrets checks the query and path parts that urlSecrets gives to
-// classify. Each part must have at least minBareSecretLen bytes.
+// classify. Each part must have at least discover.MinSecretBytes bytes.
 func TestURLSecrets(t *testing.T) {
 	t.Parallel()
 
@@ -2669,7 +2669,7 @@ func TestURLSecrets(t *testing.T) {
 	}{
 		{name: "no query and no secret path", rawURL: "https://h.example/v1/mcp", want: nil},
 		{name: "query value", rawURL: "https://h.example/mcp?api_key=tok-NOTREAL-q1", want: []string{"tok-NOTREAL-q1"}},
-		{name: "value of exactly minBareSecretLen bytes", rawURL: "https://h.example/mcp?k=abcdefgh", want: []string{"abcdefgh"}},
+		{name: "value of exactly discover.MinSecretBytes bytes", rawURL: "https://h.example/mcp?k=abcdefgh", want: []string{"abcdefgh"}},
 		{name: "value one byte short is dropped", rawURL: "https://h.example/mcp?k=abcdefg", want: nil},
 		{name: "the key of a value is not a secret", rawURL: "https://h.example/mcp?access_token_name=short", want: nil},
 		{name: "repeated key gives every value", rawURL: "https://h.example/mcp?t=tok-NOTREAL-a&t=tok-NOTREAL-b&t=x", want: []string{"tok-NOTREAL-a", "tok-NOTREAL-b"}},

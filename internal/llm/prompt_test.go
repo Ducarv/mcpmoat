@@ -175,7 +175,7 @@ func TestToolMessageRoundTrip(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			msg, truncated, err := toolMessage(tt.in)
+			msg, truncated, _, err := toolMessage(tt.in)
 			if err != nil {
 				t.Fatalf("toolMessage() error = %v", err)
 			}
@@ -191,7 +191,7 @@ func TestToolMessageRoundTrip(t *testing.T) {
 	}
 
 	// HTML escaping is off, so the model sees tags as they are.
-	msg, _, err := toolMessage(Input{Description: "<IMPORTANT>&"})
+	msg, _, _, err := toolMessage(Input{Description: "<IMPORTANT>&"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -228,7 +228,7 @@ func TestToolMessageTruncation(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			msg, truncated, err := toolMessage(tt.in)
+			msg, truncated, _, err := toolMessage(tt.in)
 			if err != nil {
 				t.Fatalf("toolMessage() error = %v", err)
 			}
@@ -271,7 +271,7 @@ func TestToolMessageWorstCaseSize(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			msg, truncated, err := toolMessage(tt.in)
+			msg, truncated, _, err := toolMessage(tt.in)
 			if err != nil {
 				t.Fatalf("toolMessage() error = %v", err)
 			}
@@ -330,7 +330,7 @@ func TestToolMessageNeverTooLarge(t *testing.T) {
 		}
 
 		in := Input{ToolName: strings.Repeat(s, 2*MaxToolNameBytes), Description: strings.Repeat(s, 2*MaxDescriptionBytes)}
-		if _, _, err := toolMessage(in); err != nil {
+		if _, _, _, err := toolMessage(in); err != nil {
 			t.Errorf("toolMessage(name and description of %q) error = %v, want nil", s, err)
 		}
 	}
@@ -352,14 +352,14 @@ func TestToolMessageUsesDefaults(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			msg, truncated, err := toolMessage(tt.in)
+			msg, truncated, _, err := toolMessage(tt.in)
 			if err != nil {
 				t.Fatalf("toolMessage() error = %v", err)
 			}
 			if tt.want != "" && msg != tt.want {
 				t.Errorf("toolMessage() = %s, want %s", msg, tt.want)
 			}
-			bMsg, bTruncated, bErr := buildToolMessage(tt.in, encodeJSON, MaxToolMessageBytes)
+			bMsg, bTruncated, _, bErr := buildToolMessage(tt.in, encodeJSON, MaxToolMessageBytes)
 			if bErr != nil || bMsg != msg || bTruncated != truncated {
 				t.Errorf("buildToolMessage() = (%d bytes, %v, %v), want toolMessage() = (%d bytes, %v, nil)", len(bMsg), bTruncated, bErr, len(msg), truncated)
 			}
@@ -373,13 +373,16 @@ func TestToolMessageUsesDefaults(t *testing.T) {
 func TestBuildToolMessageEncodeError(t *testing.T) {
 	t.Parallel()
 
-	in := Input{ToolName: "t", Description: canary + strings.Repeat("d", 100)}
-	empty, err := encodePayload(encodeJSON, in.ToolName, "", true)
+	// The secret is in the text, so the full message is redacted. An error
+	// return must still report redacted false.
+	in := Input{ToolName: "t", Description: canary + strings.Repeat("d", 100), Secrets: newSecrets(canary)}
+	empty, err := encodeToolPayload(encodeJSON, toolPayload{ToolName: in.ToolName, Truncated: true, Redacted: true})
 	if err != nil {
 		t.Fatal(err)
 	}
 	// The cap makes the search run: the whole message is over it, and the
-	// message with an empty description fits with room for more.
+	// message with an empty description fits with room for more. The
+	// empty message has "redacted": true, as the search sees it.
 	maxBytes := len(empty) + 10
 
 	for _, failOn := range []int{1, 2, 3} {
@@ -393,12 +396,12 @@ func TestBuildToolMessageEncodeError(t *testing.T) {
 				}
 				return encodeJSON(v)
 			}
-			msg, truncated, err := buildToolMessage(in, encode, maxBytes)
+			msg, truncated, redacted, err := buildToolMessage(in, encode, maxBytes)
 			if !errors.Is(err, errEncodeMessage) {
 				t.Fatalf("buildToolMessage() error = %v, want errEncodeMessage", err)
 			}
-			if msg != "" || truncated {
-				t.Errorf("buildToolMessage() = (%q, %v), want empty and false", msg, truncated)
+			if msg != "" || truncated || redacted {
+				t.Errorf("buildToolMessage() = (%q, %v, %v), want empty, false and false", msg, truncated, redacted)
 			}
 			if strings.Contains(err.Error(), canary) {
 				t.Errorf("error %q holds the encoder error or tool text", err)
@@ -415,8 +418,9 @@ func TestBuildToolMessageEncodeError(t *testing.T) {
 func TestBuildToolMessageTooLarge(t *testing.T) {
 	t.Parallel()
 
-	in := Input{ToolName: "t", Description: canary + strings.Repeat("d", 1000)}
-	empty, err := encodePayload(encodeJSON, in.ToolName, "", true)
+	in := Input{ToolName: "t", Description: canary + strings.Repeat("d", 1000), Secrets: newSecrets(canary)}
+	// The secret is removed, so the empty message has "redacted": true.
+	empty, err := encodeToolPayload(encodeJSON, toolPayload{ToolName: in.ToolName, Truncated: true, Redacted: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -436,13 +440,13 @@ func TestBuildToolMessageTooLarge(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			msg, truncated, err := buildToolMessage(tt.in, encodeJSON, tt.maxBytes)
+			msg, truncated, redacted, err := buildToolMessage(tt.in, encodeJSON, tt.maxBytes)
 			if tt.wantErr {
 				if !errors.Is(err, errMessageTooLarge) {
 					t.Fatalf("buildToolMessage() error = %v, want errMessageTooLarge", err)
 				}
-				if msg != "" || truncated {
-					t.Errorf("buildToolMessage() = (%q, %v), want empty and false", msg, truncated)
+				if msg != "" || truncated || redacted {
+					t.Errorf("buildToolMessage() = (%q, %v, %v), want empty, false and false", msg, truncated, redacted)
 				}
 				if strings.Contains(err.Error(), canary) {
 					t.Errorf("error %q holds tool text", err)
@@ -455,8 +459,14 @@ func TestBuildToolMessageTooLarge(t *testing.T) {
 			if len(msg) > tt.maxBytes || !truncated {
 				t.Errorf("buildToolMessage() = (%d bytes, %v), want <= %d bytes and true", len(msg), truncated, tt.maxBytes)
 			}
-			if p := decodeMessage(t, msg); p.ToolDescription != tt.wantDesc || !p.Truncated {
+			// The input has the secret, so the message has "redacted": true
+			// and the returned flag agrees with it.
+			p, hasRedacted := decodeRedactedMessage(t, msg)
+			if p.ToolDescription != tt.wantDesc || !p.Truncated {
 				t.Errorf("buildToolMessage() decodes to %+v, want description %q and truncated", p, tt.wantDesc)
+			}
+			if !redacted || !hasRedacted {
+				t.Errorf("buildToolMessage() redacted %v, message has %v; want true and true", redacted, hasRedacted)
 			}
 		})
 	}
@@ -473,7 +483,7 @@ func TestToolMessageInvalidUTF8(t *testing.T) {
 		{ToolName: strings.Repeat("\xbf", 600), Description: strings.Repeat("\xbf", 17000)},
 	}
 	for i, in := range inputs {
-		msg, truncated, err := toolMessage(in)
+		msg, truncated, _, err := toolMessage(in)
 		if err != nil {
 			t.Fatalf("case %d: toolMessage() error = %v", i, err)
 		}
@@ -513,7 +523,7 @@ func tail(s string) string {
 }
 
 // checkNoSecret fails when msg, or the payload p decoded from it, holds a
-// secret value of at least minSecretBytes bytes: the raw value or its JSON
+// secret value of at least discover.MinSecretBytes bytes: the raw value or its JSON
 // escaped form. When the text was cut, it also fails on a prefix of two or
 // more bytes of a value at the end of the name or the description (what a cut
 // before the redaction would leave). The failure messages name the secret by
@@ -523,7 +533,7 @@ func checkNoSecret(t *testing.T, msg string, p toolPayload, secrets []discover.S
 
 	for i, s := range secrets {
 		v := s.Reveal()
-		if len(v) < minSecretBytes {
+		if len(v) < discover.MinSecretBytes {
 			continue
 		}
 		quoted, err := encodeJSON(v)
@@ -589,6 +599,19 @@ func TestToolMessageRedactsSecrets(t *testing.T) {
 			name:     "in name and description",
 			in:       Input{ToolName: secretCanary + "_tool", Description: "key=" + secretCanary, Secrets: newSecrets(secretCanary)},
 			wantName: m + "_tool", wantDesc: "key=" + m, wantRedacted: true,
+		},
+		{
+			// The mask comes first and the description is cut after it, so
+			// both flags are true.
+			name:     "redacted and truncated",
+			in:       Input{ToolName: "t", Description: secretCanary + " " + strings.Repeat("d", MaxDescriptionBytes), Secrets: newSecrets(secretCanary)},
+			wantName: "t", wantDesc: m + " " + strings.Repeat("d", MaxDescriptionBytes-len(m)-1), wantRedacted: true, wantCut: true,
+		},
+		{
+			// A cut with no secret in the text is not a redaction.
+			name:     "truncated without a secret",
+			in:       Input{ToolName: "t", Description: strings.Repeat("d", MaxDescriptionBytes+1), Secrets: newSecrets(secretCanary)},
+			wantName: "t", wantDesc: strings.Repeat("d", MaxDescriptionBytes), wantCut: true,
 		},
 		{
 			name:     "7 bytes is not removed",
@@ -686,13 +709,16 @@ func TestToolMessageRedactsSecrets(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			msg, truncated, err := toolMessage(tt.in)
+			msg, truncated, redacted, err := toolMessage(tt.in)
 			if err != nil {
 				t.Fatalf("toolMessage() error = %v", err)
 			}
 			p, hasRedacted := decodeRedactedMessage(t, msg)
 			if hasRedacted != tt.wantRedacted || p.Redacted != tt.wantRedacted {
 				t.Errorf("toolMessage() redacted key %v, value %v; want %v", hasRedacted, p.Redacted, tt.wantRedacted)
+			}
+			if redacted != tt.wantRedacted || redacted != hasRedacted {
+				t.Errorf("toolMessage() returns redacted %v, message has %v; want %v", redacted, hasRedacted, tt.wantRedacted)
 			}
 			if truncated != tt.wantCut || p.Truncated != tt.wantCut {
 				t.Errorf("toolMessage() returns truncated %v, message has %v; want %v", truncated, p.Truncated, tt.wantCut)
@@ -715,7 +741,7 @@ func TestToolMessageRedactsSecrets(t *testing.T) {
 			rev := tt.in
 			rev.Secrets = slices.Clone(tt.in.Secrets)
 			slices.Reverse(rev.Secrets)
-			rMsg, rTruncated, rErr := toolMessage(rev)
+			rMsg, rTruncated, _, rErr := toolMessage(rev)
 			if rErr != nil || rMsg != msg || rTruncated != truncated {
 				t.Errorf("toolMessage() with the secrets reversed = (%d bytes, %v, %v), want (%d bytes, %v, nil)", len(rMsg), rTruncated, rErr, len(msg), truncated)
 			}
@@ -758,7 +784,7 @@ func TestToolMessageSecretsNotEncoded(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			base, baseCut, err := toolMessage(tt.in)
+			base, baseCut, _, err := toolMessage(tt.in)
 			if err != nil {
 				t.Fatalf("toolMessage() error = %v", err)
 			}
@@ -774,7 +800,7 @@ func TestToolMessageSecretsNotEncoded(t *testing.T) {
 			for name, secrets := range secretLists {
 				in := tt.in
 				in.Secrets = secrets
-				msg, cut, err := toolMessage(in)
+				msg, cut, _, err := toolMessage(in)
 				if err != nil || msg != base || cut != baseCut {
 					t.Errorf("%s: toolMessage() = (%d bytes, %v, %v), want the message without secrets (%d bytes, %v, nil)", name, len(msg), cut, err, len(base), baseCut)
 				}
@@ -854,14 +880,14 @@ func TestToolMessageRedactsRandomText(t *testing.T) {
 		shuffled := slices.Clone(secrets)
 		rng.Shuffle(len(shuffled), func(i, j int) { shuffled[i], shuffled[j] = shuffled[j], shuffled[i] })
 
-		msg, _, err := toolMessage(Input{ToolName: "t", Description: desc, Secrets: shuffled})
+		msg, _, gotRedacted, err := toolMessage(Input{ToolName: "t", Description: desc, Secrets: shuffled})
 		if err != nil {
 			t.Fatalf("case %d: toolMessage() error = %v", i, err)
 		}
 		p, hasRedacted := decodeRedactedMessage(t, msg)
 		want, wantRedacted := redactOracle(desc, values)
-		if p.ToolDescription != want || hasRedacted != wantRedacted {
-			t.Fatalf("case %d: toolMessage(%q) = (%q, redacted %v), want (%q, %v)", i, desc, p.ToolDescription, hasRedacted, want, wantRedacted)
+		if p.ToolDescription != want || hasRedacted != wantRedacted || gotRedacted != wantRedacted {
+			t.Fatalf("case %d: toolMessage(%q) = (%q, redacted %v, returned %v), want (%q, %v)", i, desc, p.ToolDescription, hasRedacted, gotRedacted, want, wantRedacted)
 		}
 		checkNoSecret(t, msg, p, shuffled)
 		if wantRedacted {
@@ -1048,8 +1074,8 @@ func TestDecodedPerByte(t *testing.T) {
 }
 
 // TestSecretValues pins which values secretValues gives: each value of at
-// least minSecretBytes bytes and, for a value that is not valid UTF-8, its
-// decoded form. minSecretBytes applies to the raw value only, so a short
+// least discover.MinSecretBytes bytes and, for a value that is not valid UTF-8, its
+// decoded form. discover.MinSecretBytes applies to the raw value only, so a short
 // value gives no decoded form, even when that form has 8 bytes or more.
 func TestSecretValues(t *testing.T) {
 	t.Parallel()
@@ -1159,7 +1185,7 @@ func secretValuesReference(secrets []discover.Secret) []string {
 	}
 	for _, s := range secrets {
 		v := s.Reveal()
-		if len(v) < minSecretBytes {
+		if len(v) < discover.MinSecretBytes {
 			continue
 		}
 		add(v)
@@ -1172,7 +1198,7 @@ func secretValuesReference(secrets []discover.Secret) []string {
 
 // TestSecretValuesMatchesReference compares secretValues with
 // secretValuesReference for random lists of secrets. A small set of pieces
-// makes duplicates, values near minSecretBytes and invalid UTF-8 frequent.
+// makes duplicates, values near discover.MinSecretBytes and invalid UTF-8 frequent.
 // Some secrets repeat an earlier secret or its decoded form. The seed is
 // fixed, so a failure repeats.
 func TestSecretValuesMatchesReference(t *testing.T) {
@@ -1206,7 +1232,7 @@ func TestSecretValuesMatchesReference(t *testing.T) {
 		// Count the paths that the lists reach.
 		long := 0
 		for _, v := range values {
-			if len(v) >= minSecretBytes {
+			if len(v) >= discover.MinSecretBytes {
 				long++
 				if !utf8.ValidString(v) {
 					long++
@@ -1263,7 +1289,7 @@ func TestToolMessageRedactsInvalidUTF8Secret(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			secrets := newSecrets(tt.secret)
-			msg, truncated, err := toolMessage(Input{ToolName: "t", Description: tt.desc, Secrets: secrets})
+			msg, truncated, _, err := toolMessage(Input{ToolName: "t", Description: tt.desc, Secrets: secrets})
 			if err != nil {
 				t.Fatalf("toolMessage() error = %v", err)
 			}
@@ -1492,7 +1518,7 @@ func TestToolMessageRedactsAroundCaps(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			secrets := newSecrets(secretCanary)
-			msg, truncated, err := toolMessage(Input{ToolName: tt.toolName, Description: tt.desc, Secrets: secrets})
+			msg, truncated, _, err := toolMessage(Input{ToolName: tt.toolName, Description: tt.desc, Secrets: secrets})
 			if err != nil {
 				t.Fatalf("toolMessage() error = %v", err)
 			}
@@ -1549,7 +1575,7 @@ func TestToolMessageLargeText(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			start := time.Now()
-			msg, _, err := toolMessage(Input{ToolName: "t", Description: tt.desc, Secrets: newSecrets(secret)})
+			msg, _, _, err := toolMessage(Input{ToolName: "t", Description: tt.desc, Secrets: newSecrets(secret)})
 			if elapsed := time.Since(start); elapsed > 20*time.Second {
 				t.Errorf("toolMessage() took %v, want well under 20s", elapsed)
 			}
@@ -1561,5 +1587,43 @@ func TestToolMessageLargeText(t *testing.T) {
 				t.Errorf("toolMessage() = (%d bytes, redacted %v), want (%d bytes, %v)", len(p.ToolDescription), hasRedacted, len(tt.wantDesc), tt.wantRedacted)
 			}
 		})
+	}
+}
+
+func TestInputRedactedName(t *testing.T) {
+	t.Parallel()
+	const token = "tok-0123456789"
+	secrets := []discover.Secret{discover.NewSecret(token), discover.NewSecret("short")}
+	tests := []struct {
+		name string
+		in   Input
+		want string
+	}{
+		{"no secret", Input{ToolName: "fetch", Secrets: secrets}, "fetch"},
+		{"no secrets given", Input{ToolName: "fetch_" + token}, "fetch_" + token},
+		{"secret in the name", Input{ToolName: "fetch_" + token, Secrets: secrets}, "fetch_" + discover.Mask},
+		{"whole name is the secret", Input{ToolName: token, Secrets: secrets}, discover.Mask},
+		{"two occurrences", Input{ToolName: token + "-" + token, Secrets: secrets}, discover.Mask + "-" + discover.Mask},
+		{"value under the minimum length stays", Input{ToolName: "a_short_b", Secrets: secrets}, "a_short_b"},
+		{"empty name", Input{Secrets: secrets}, ""},
+		{"the description is not part of it", Input{ToolName: "fetch", Description: token, Secrets: secrets}, "fetch"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if got := tt.in.RedactedName(1 << 10); got != tt.want {
+				t.Errorf("RedactedName() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+	// A long name: the result keeps the start of the whole redaction, with
+	// more than limit bytes, and a value that crosses the window is removed
+	// whole.
+	const limit = 64
+	long := Input{ToolName: strings.Repeat("a", limit-4) + token + strings.Repeat("b", 4*limit), Secrets: secrets}
+	want := strings.Repeat("a", limit-4) + discover.Mask + strings.Repeat("b", 4*limit)
+	got := long.RedactedName(limit)
+	if len(got) <= limit || !strings.HasPrefix(want, got) || strings.Contains(got, "tok-") {
+		t.Errorf("RedactedName(%d) of a long name = %q, want more than %d bytes and a prefix of %q", limit, got, limit, want)
 	}
 }

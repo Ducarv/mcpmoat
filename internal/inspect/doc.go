@@ -93,7 +93,7 @@
 // An expanded value can be a secret, and the server gets it and can echo it.
 // So Inspect records each value that it looks up (lookupRecorder), and the
 // scrub of error text removes every recorded value of at least
-// minBareSecretLen (8) bytes. A shorter value is too likely to match
+// discover.MinSecretBytes bytes. A shorter value is too likely to match
 // ordinary words, so it is not removed: a server can echo it in its error
 // text.
 //

@@ -261,6 +261,22 @@ func (e *StatusError) reason() string {
 	}
 }
 
+// knownReasons lists the errors that Reason gives a text for, in the order
+// that Reason checks them: the more specific errors come first. The errors
+// errNotLoopback, errTimeout, errProxyRefused and errCertificate wrap
+// errTransport, so they must be checked before it.
+var knownReasons = []error{
+	errNotLoopback,
+	errTimeout,
+	errProxyRefused,
+	errCertificate,
+	errTransport,
+	errTooLarge,
+	errBadResponse,
+	errAuth,
+	ErrRejected,
+}
+
 // Reason returns the fixed reason text of the provider failure err, without
 // the text of ErrProvider at the start. For a *StatusError it is
 // "HTTP <code>", with the hint "(the API key was refused)" for 401 and 403,
@@ -278,20 +294,7 @@ func Reason(err error) string {
 	if errors.As(err, &status) && status != nil {
 		return status.reason()
 	}
-	// The more specific errors come first: errNotLoopback, errTimeout,
-	// errProxyRefused and errCertificate wrap errTransport.
-	known := []error{
-		errNotLoopback,
-		errTimeout,
-		errProxyRefused,
-		errCertificate,
-		errTransport,
-		errTooLarge,
-		errBadResponse,
-		errAuth,
-		ErrRejected,
-	}
-	for _, k := range known {
+	for _, k := range knownReasons {
 		if errors.Is(err, k) {
 			return strings.TrimPrefix(k.Error(), ErrProvider.Error()+": ")
 		}
@@ -568,11 +571,13 @@ func proxyFromEnvironment(req *http.Request) (*url.URL, error) {
 // at once.
 //
 // Each request has a timeout of requestTimeout. The verdict has Truncated
-// set when toolMessage cut the tool name or description. On an error, only
-// Truncated is set, and only when toolMessage succeeded: the caller can then
-// still rate a cut tool when the answer is not usable (ErrInvalidOutput).
-// Risk and Category stay zero on an error. See the error variables above for
-// how to sort an error. Classify is safe for concurrent use.
+// set when toolMessage cut the tool name or description, and Redacted set
+// when it removed a configured secret value from them (see Verdict). On an
+// error, only Truncated and Redacted are set, and only when toolMessage
+// succeeded: the caller can then still rate a cut or redacted tool when the
+// answer is not usable (ErrInvalidOutput). Risk and Category stay zero on an
+// error. See the error variables above for how to sort an error. Classify is
+// safe for concurrent use.
 func (c *Client) Classify(ctx context.Context, in Input) (Verdict, error) {
 	if c == nil || c.api == nil || c.http == nil {
 		return Verdict{}, errNilClient
@@ -580,15 +585,16 @@ func (c *Client) Classify(ctx context.Context, in Input) (Verdict, error) {
 	if err := ctx.Err(); err != nil {
 		return Verdict{}, stopped(err)
 	}
-	message, truncated, err := toolMessage(in)
+	message, truncated, redacted, err := toolMessage(in)
 	if err != nil {
 		return Verdict{}, err
 	}
 	v, err := c.sendWithRetry(ctx, message)
 	if err != nil {
-		return Verdict{Truncated: truncated}, err
+		return Verdict{Truncated: truncated, Redacted: redacted}, err
 	}
 	v.Truncated = truncated
+	v.Redacted = redacted
 	return v, nil
 }
 

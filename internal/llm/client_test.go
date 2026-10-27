@@ -600,6 +600,34 @@ func TestReason(t *testing.T) {
 	}
 }
 
+// TestReasonKnownReasons checks the table knownReasons that Reason checks in
+// order. Each entry gives its own text, a wrapped entry gives the same text,
+// no two entries give the same text, and an entry that wraps another one
+// comes before it in the table.
+func TestReasonKnownReasons(t *testing.T) {
+	t.Parallel()
+	wrap := func(err error) error { return fmt.Errorf("x: %w", err) }
+	seen := make(map[string]int)
+	for i, k := range knownReasons {
+		got := Reason(k)
+		if got == "" || got == "unknown error" {
+			t.Errorf("knownReasons[%d] (%v): Reason() = %q, want its own text", i, k, got)
+		}
+		if j, dup := seen[got]; dup {
+			t.Errorf("knownReasons[%d] and knownReasons[%d] both give Reason() = %q", j, i, got)
+		}
+		seen[got] = i
+		if w := Reason(wrap(k)); w != got {
+			t.Errorf("Reason(wrapped knownReasons[%d]) = %q, want %q", i, w, got)
+		}
+		for j, other := range knownReasons {
+			if j != i && errors.Is(k, other) && i > j {
+				t.Errorf("knownReasons[%d] wraps knownReasons[%d], but comes after it", i, j)
+			}
+		}
+	}
+}
+
 // TestReasonTypedNilStatusError checks that Reason does not panic on a nil
 // *StatusError in an error interface.
 func TestReasonTypedNilStatusError(t *testing.T) {
@@ -861,6 +889,64 @@ func TestClassifyTruncatedError(t *testing.T) {
 				}
 				if v != tt.want {
 					t.Errorf("Classify() = %+v, want %+v on error", v, tt.want)
+				}
+			})
+		}
+	}
+}
+
+// TestClassifyRedacted checks that Classify sets Verdict.Redacted when a
+// configured secret value was removed from the tool text, on success and on
+// an error after the message was built. The secret value never reaches the
+// request body, and the mask does.
+func TestClassifyRedacted(t *testing.T) {
+	t.Parallel()
+	const secret = "tok-SECRETVALUE-33d1"
+	secrets := []discover.Secret{discover.NewSecret(secret)}
+	long := strings.Repeat("d", MaxDescriptionBytes+1)
+	tests := []struct {
+		name    string
+		in      Input
+		risk    Risk // the answer of the fake provider on a 2xx status
+		status  int
+		wantErr error
+		want    Verdict
+	}{
+		{name: "secret in description", in: Input{ToolName: "t", Description: "key " + secret, Secrets: secrets}, risk: RiskNone, status: http.StatusOK, want: Verdict{Risk: RiskNone, Category: CategoryOther, Redacted: true}},
+		{name: "secret in name", in: Input{ToolName: secret, Description: "d", Secrets: secrets}, risk: RiskNone, status: http.StatusOK, want: Verdict{Risk: RiskNone, Category: CategoryOther, Redacted: true}},
+		{name: "secret not in text", in: Input{ToolName: "t", Description: "d", Secrets: secrets}, risk: RiskNone, status: http.StatusOK, want: Verdict{Risk: RiskNone, Category: CategoryOther}},
+		{name: "redacted and truncated", in: Input{ToolName: "t", Description: secret + " " + long, Secrets: secrets}, risk: RiskNone, status: http.StatusOK, want: Verdict{Risk: RiskNone, Category: CategoryOther, Truncated: true, Redacted: true}},
+		{name: "redacted and unusable", in: Input{ToolName: "t", Description: "key " + secret, Secrets: secrets}, risk: "critical", status: http.StatusOK, wantErr: ErrInvalidOutput, want: Verdict{Redacted: true}},
+		{name: "redacted and truncated and unusable", in: Input{ToolName: "t", Description: secret + " " + long, Secrets: secrets}, risk: "critical", status: http.StatusOK, wantErr: ErrInvalidOutput, want: Verdict{Truncated: true, Redacted: true}},
+		{name: "redacted and provider failure", in: Input{ToolName: "t", Description: "key " + secret, Secrets: secrets}, risk: RiskNone, status: http.StatusServiceUnavailable, wantErr: ErrProvider, want: Verdict{Redacted: true}},
+		{name: "not redacted and provider failure", in: Input{ToolName: "t", Description: "d", Secrets: secrets}, risk: RiskNone, status: http.StatusServiceUnavailable, wantErr: ErrProvider, want: Verdict{}},
+	}
+	for _, p := range bothProviders {
+		for _, tt := range tests {
+			t.Run(string(p)+"/"+tt.name, func(t *testing.T) {
+				t.Parallel()
+				srv := startServer(t, reply(tt.status, validReply(p, tt.risk, CategoryOther)))
+				c := newTestClient(t, p, srv.URL)
+				v, err := c.Classify(t.Context(), tt.in)
+				if tt.wantErr == nil && err != nil {
+					t.Fatalf("Classify() error = %v, want nil", err)
+				}
+				if tt.wantErr != nil && !errors.Is(err, tt.wantErr) {
+					t.Fatalf("Classify() error = %v, want %v", err, tt.wantErr)
+				}
+				if v != tt.want {
+					t.Errorf("Classify() = %+v, want %+v", v, tt.want)
+				}
+				assertNoLeak(t, err, secret)
+
+				body := string(srv.lastRequest().Body)
+				if strings.Contains(body, secret) {
+					t.Error("request body holds the secret value")
+				}
+				// The system prompt names the mask too, so only a redaction
+				// is checked here, not an absence of the mask.
+				if tt.want.Redacted && !strings.Contains(body, discover.Mask) {
+					t.Error("request body has no mask, want the removed value replaced")
 				}
 			})
 		}

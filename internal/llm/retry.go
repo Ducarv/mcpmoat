@@ -177,8 +177,9 @@ func parseRetryAfter(value string, now time.Time) (time.Duration, bool) {
 }
 
 // sendWithRetry calls send and tries again as retryPolicy says. It waits
-// only inside ctx. Each try calls send again, so each try builds a new
-// request with a new body.
+// only inside ctx. When a Retry-After wait would end after the deadline of
+// ctx, it returns the provider error at once, without the wait. Each try
+// calls send again, so each try builds a new request with a new body.
 //
 // It never returns an error of the backoff library: their text holds the
 // text of the last error, so it unwraps them (see retryError). After the
@@ -203,6 +204,11 @@ func (c *Client) sendWithRetry(ctx context.Context, message string) (Verdict, er
 		}
 		switch decision, wait := p.decide(err); decision {
 		case retryWait:
+			// A retry after the deadline of ctx can never happen. Fail now
+			// with the provider error, so the worker is free at once.
+			if deadline, ok := ctx.Deadline(); ok && wait > time.Until(deadline) {
+				return Verdict{}, backoff.Permanent(err)
+			}
 			return Verdict{}, backoff.RetryAfter(wait, err)
 		case retryBackoff:
 			return Verdict{}, err

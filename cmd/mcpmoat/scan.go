@@ -74,10 +74,10 @@ func (c *cli) runScan(opts options, args []string) int {
 	// hold a base URL value too: for example "--timeout --llm-base-url=URL"
 	// and "--timeout=--llm-base-url=URL" make the flag package quote the
 	// whole value. hider.errorText removes every base URL value of args (see
-	// newArgHider) and the user info of any URL from the flag error, and
+	// newBaseURLHider) and the user info of any URL from the flag error, and
 	// rejectArgs does the same with it for the list, as for the other
 	// commands (see argscrub.go).
-	hider := newArgHider(args, flagLLMBaseURL)
+	hider := newBaseURLHider(args)
 	if err := fs.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
 			scanUsage(c.stdout)

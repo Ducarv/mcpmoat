@@ -2114,11 +2114,11 @@ func (f failClassifier) Classify(context.Context, llm.Input) (llm.Verdict, error
 
 // classifyTools is the LLM step without the stderr lines of llmStep: it runs
 // planLLMJobs on outcomes and then classifyPlan with the real time limit
-// llmStepTimeout. The code of scan calls the same two functions (see
+// defaultLLMStepTimeout. The code of scan calls the same two functions (see
 // llmStep), so the tests that call classifyTools run the code of a real
 // scan. It is a test helper: production code has no classifyTools.
 func classifyTools(ctx context.Context, outcomes []inspect.Outcome, cl toolClassifier, ignore *scanIgnores) (llmResult, error) {
-	return classifyPlan(ctx, planLLMJobs(outcomes), cl, ignore, llmStepTimeout)
+	return classifyPlan(ctx, planLLMJobs(outcomes), cl, ignore, defaultLLMStepTimeout)
 }
 
 // TestClassifyToolsContext checks planLLMJobs and classifyPlan (through the

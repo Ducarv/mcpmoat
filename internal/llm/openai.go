@@ -15,8 +15,8 @@ const openAIPath = "/chat/completions"
 // openAIMaxCompletionTokens is the output-token cap of a request to the
 // OpenAI API itself. Reasoning models bill hidden reasoning tokens that the
 // response body cap does not limit, so the cap bounds the cost of one
-// request. It is larger than the 200 tokens of Anthropic because the hidden
-// reasoning counts too. A cut answer has finish_reason "length", which
+// request. It is larger than anthropicMaxTokens because the hidden reasoning
+// counts too. A cut answer has finish_reason "length", which
 // parseResponse reports as ErrInvalidOutput.
 const openAIMaxCompletionTokens = 2048
 

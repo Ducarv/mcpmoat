@@ -14,7 +14,7 @@ import (
 // jobs to send, and the fair share of the maxLLMTools cap for each server.
 
 // maxLLMTools is the largest number of tools that one scan sends to the
-// provider. It bounds the cost of a scan, and llmStepTimeout bounds its
+// provider. It bounds the cost of a scan, and defaultLLMStepTimeout bounds its
 // time. The client of package llm sends at most 3 requests for one tool
 // (the first request and 2 retries), so one scan sends at most 1500
 // requests. The servers share the cap fairly (see fairShare), so one

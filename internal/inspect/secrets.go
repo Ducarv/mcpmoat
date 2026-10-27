@@ -9,7 +9,7 @@ import (
 )
 
 // resultSecrets returns the values in lists as discover.Secret values, for
-// Result.Secrets. It keeps only the values of at least minBareSecretLen
+// Result.Secrets. It keeps only the values of at least discover.MinSecretBytes
 // bytes, each one time.
 //
 // The scrub of error text (see scrub) also removes shorter header values and
@@ -18,10 +18,11 @@ import (
 // is too likely to match ordinary words ("1", "true", "json"). So the filter
 // applies here only, and the lists of the error scrub stay as they are.
 //
-// The result is sorted longest first, then by value, so that it does not
-// depend on the order of a map, and so that a consumer that replaces the
-// values in order does not leave pieces of a longer value behind when a
-// shorter value is part of it. It is nil when no value is long enough.
+// The result is sorted longest first, then by value. The sort makes the
+// output stable: it does not depend on the order of a map. The consumer in
+// package llm does not need that order (redactWindow marks bytes), and its
+// secretValues removes duplicates again. It is nil when no value is long
+// enough.
 //
 // The sort and the duplicate check compare the raw values in memory only.
 // Never print, log or encode them.
@@ -29,7 +30,7 @@ func resultSecrets(lists ...[]string) []discover.Secret {
 	var values []string
 	for _, list := range lists {
 		for _, v := range list {
-			if len(v) >= minBareSecretLen {
+			if len(v) >= discover.MinSecretBytes {
 				values = append(values, v)
 			}
 		}
@@ -53,7 +54,7 @@ func resultSecrets(lists ...[]string) []discover.Secret {
 // argSecrets returns the secrets in the command line of s, for classify to
 // remove from error text and for Result.Secrets (see resultSecrets): the
 // text that discover.RedactArgs masks (see discover.ArgSecrets), with at
-// least minBareSecretLen bytes. A server gets its argv and can echo it.
+// least discover.MinSecretBytes bytes. A server gets its argv and can echo it.
 //
 // s is the expanded server, so these are the command and the args that the
 // child gets as argv (see stdioCommand). The configured form is not needed:
@@ -67,7 +68,7 @@ func argSecrets(s discover.Server) []string {
 	line := append([]string{s.Command}, s.Args.Values()...)
 	var secrets []string
 	for _, v := range discover.ArgSecrets(line) {
-		if len(v) >= minBareSecretLen {
+		if len(v) >= discover.MinSecretBytes {
 			secrets = append(secrets, v)
 		}
 	}

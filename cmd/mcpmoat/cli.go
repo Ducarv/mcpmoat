@@ -67,7 +67,7 @@ type cli struct {
 	// not enough, because the context can still be live for a short time.
 	toolBudget time.Duration
 	// llmStepTimeout is the time limit of the whole LLM step of scan --llm
-	// (FR-17). Zero means the default, the constant llmStepTimeout, so
+	// (FR-17). Zero means the default, the constant defaultLLMStepTimeout, so
 	// runWithContext does not set it and no flag changes it. Tests set a
 	// short value to reach the limit (see runLLMJobs). A negative value is
 	// used up at once: no request starts.
@@ -320,7 +320,7 @@ func scanUsage(w io.Writer) {
 	fprintf(w, "  every tool, or another provider error gives exit 2; the report still prints.\n")
 	fprintf(w, "  A provider answer of HTTP 429, 502, 503, 504 or 529 is tried again, up to %d tries in total for each tool.\n", llm.RetryMaxTries)
 	fprintf(w, "  scan waits for a Retry-After of up to %s before the next try; a longer Retry-After means no retry.\n", durationText(llm.RetryAfterCap))
-	fprintf(w, "  The LLM step stops after %s: the tools that are not classified yet give exit 2; the report still prints.\n", durationText(llmStepTimeout))
+	fprintf(w, "  The LLM step stops after %s: the tools that are not classified yet give exit 2; the report still prints.\n", durationText(defaultLLMStepTimeout))
 	fprintf(w, "  Exit code 1 means a finding that is not ignored, with severity at or above --fail-on (default high).\n")
 }
 

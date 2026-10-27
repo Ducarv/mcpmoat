@@ -317,7 +317,7 @@ type Result struct {
 	//     discover.RedactURL masks.
 	//   - both: the values of the expanded variables.
 	//
-	// Each value has at least 8 bytes (minBareSecretLen) and is in the list
+	// Each value has at least discover.MinSecretBytes bytes and is in the list
 	// one time. A shorter value is too likely to match ordinary words, so a
 	// short password or name is not in the list. Unlike the other fields,
 	// Secrets does not come from the server.

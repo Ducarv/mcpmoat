@@ -23,39 +23,38 @@ import (
 const (
 	// llmWorkers is the number of requests that run at the same time.
 	llmWorkers = llm.MaxConcurrentRequests
-	// llmStepTimeout is the time limit of the whole LLM step of one scan. It
-	// is fixed: no flag changes it. A test sets cli.llmStepTimeout instead.
+	// defaultLLMStepTimeout is the time limit of the whole LLM step of one
+	// scan. It is fixed: no flag changes it. A test sets the field
+	// cli.llmStepTimeout instead.
 	//
-	// Each request has a limit of 30 seconds in package llm, but without
-	// this limit the step has none. The client of package llm tries a
-	// request again after HTTP 429, 502, 503, 504 and 529: 3 requests in
-	// total for one tool, so 2 waits. Each wait is the Retry-After time of
-	// the answer, when the provider sends one of up to 30 seconds. Else it
-	// is a backoff of about 0.5 to 3 seconds (about 0.5 to 1.5 seconds
-	// before the second try, about 1 to 3 seconds before the third).
-	// So one tool takes at most 3 requests of 30 seconds and 2 waits. The
-	// worst case is when the provider asks for 2 waits of 30 seconds with
-	// Retry-After: about 150 seconds. Without Retry-After it is about 95
-	// seconds. maxLLMTools (500) tools with llmWorkers (4) tools at the
-	// same time take 125 rounds of 150 seconds in the Retry-After case:
-	// about 5 hours. This limit stops the step after 10 minutes.
+	// Each request has a time limit in package llm, but without this limit
+	// the step has none. The client of package llm tries a request again
+	// after a busy answer of the provider (see retryPolicy in package llm),
+	// up to llm.RetryMaxTries requests in total for one tool. Between two
+	// tries it waits: for the Retry-After time of the answer when that is up
+	// to llm.RetryAfterCap (a longer Retry-After means no retry), else for a
+	// short backoff with jitter. So one tool takes at most llm.RetryMaxTries
+	// requests, each with the time limit of package llm, and the waits
+	// between them. With maxLLMTools tools and llmWorkers requests at the
+	// same time, the step can take hours in the worst case, when the provider
+	// sends a long Retry-After on every try. This limit stops the step after
+	// 10 minutes.
 	//
 	// When the limit is reached, the step stops as after a provider failure
-	// (see runLLMJobs): scan exits with 2, the JSON report has complete set
-	// to false, and the rows of the tools that got an answer stay.
-	llmStepTimeout = 10 * time.Minute
+	// (see runLLMJobs).
+	defaultLLMStepTimeout = 10 * time.Minute
 )
 
-// errLLMStepDeadline is the cause of the context of the LLM step when
-// llmStepTimeout (or cli.llmStepTimeout) is reached (see runLLMJobs). It has
-// fixed text, and scan never prints it.
+// errLLMStepDeadline is the cause of the context of the LLM step when the
+// time limit is reached (see runLLMJobs). It has fixed text, and scan never
+// prints it.
 var errLLMStepDeadline = errors.New("the LLM step reached its time limit")
 
-// llmStepTimeoutOrDefault returns c.llmStepTimeout, or llmStepTimeout when
-// the field is zero (a real scan).
+// llmStepTimeoutOrDefault returns c.llmStepTimeout, or
+// defaultLLMStepTimeout when the field is zero (a real scan).
 func (c *cli) llmStepTimeoutOrDefault() time.Duration {
 	if c.llmStepTimeout == 0 {
-		return llmStepTimeout
+		return defaultLLMStepTimeout
 	}
 	return c.llmStepTimeout
 }
@@ -105,10 +104,9 @@ const (
 	// llm.RuleIDInvalid row.
 	answerUnusable
 	// answerRejected means that the provider refused this one tool
-	// (llm.ErrRejected: HTTP 400, 413 or 422). It does not stop the step:
-	// the tool gets an llm.RuleIDInvalid row with llm.RejectedText, and the
-	// other requests go on. The refusals can still fail the step: see
-	// rejectedFailure for the rule. As an llmFailure kind it is that failure.
+	// (llm.ErrRejected: HTTP 400, 413 or 422). It does not stop the step
+	// at once: see rejectedFailure for when it does. As an llmFailure kind
+	// it is that failure.
 	answerRejected
 	// answerStopped means that the context of the request ended: a signal,
 	// or the cancel after the first failure of the step. A request that the
@@ -122,9 +120,9 @@ const (
 	// failure. Its text is never printed, because it can hold anything.
 	answerInternalFailed
 	// answerDeadline means that the time limit of the whole LLM step
-	// (llmStepTimeout) stopped the request, while the process got no
-	// signal (see runLLMJobs). It stops the LLM step, like a provider
-	// failure. sortAnswer never returns it.
+	// stopped the request, while the process got no signal. It stops the
+	// LLM step, like a provider failure. sortAnswer never returns it (see
+	// runLLMJobs).
 	answerDeadline
 )
 
@@ -190,8 +188,7 @@ func (k answerKind) got2xx() bool {
 // other provider error (401, 403, 404, 3xx, other codes, transport errors)
 // stays a global failure (answerProviderFailed) that stops the step.
 //
-// A refusal alone does not stop the step. The refusals can still fail the
-// step after all the requests end: see rejectedFailure for the rule.
+// A refusal does not stop the step at once: see rejectedFailure.
 func sortAnswer(err error) answerKind {
 	switch {
 	case err == nil:
@@ -215,7 +212,7 @@ type llmFailure struct {
 	// kind is answerProviderFailed or answerInternalFailed for the first
 	// request that stopped the step, answerDeadline when the time limit of
 	// the step stopped it first (see runLLMJobs), or answerRejected when the
-	// refusals fail the step (see rejectedFailure for the rule).
+	// refusals fail the step (see rejectedFailure).
 	// answerRejected and answerDeadline are provider failures too: exit 2
 	// and complete false, and the rows of the answered tools stay.
 	kind answerKind
@@ -251,9 +248,9 @@ const llmNoToolText = "--llm had no tool to classify"
 type llmAnswer struct {
 	kind answerKind
 	// verdict is the whole verdict for answerVerdict. For answerUnusable
-	// and answerRejected, only verdict.Truncated is set (see
-	// llm.Client.Classify), so that llmRow can rate a cut tool. For the
-	// other kinds it is zero.
+	// and answerRejected, only verdict.Truncated and verdict.Redacted are set
+	// (see llm.Client.Classify), so that llmRow can rate a tool whose text
+	// was not rated in full. For the other kinds it is zero.
 	verdict llm.Verdict
 	// err is the error of Classify for answerRejected (it wraps
 	// llm.ErrRejected and has fixed text), so that rejectedFailure can give
@@ -271,11 +268,11 @@ func newLLMAnswer(k answerKind, v llm.Verdict, err error) llmAnswer {
 	case answerVerdict:
 		return llmAnswer{kind: k, verdict: v}
 	case answerUnusable:
-		return llmAnswer{kind: k, verdict: llm.Verdict{Truncated: v.Truncated}}
+		return llmAnswer{kind: k, verdict: llm.Verdict{Truncated: v.Truncated, Redacted: v.Redacted}}
 	case answerRejected:
 		// Keep the error for the reason of rejectedFailure. Its text is
 		// fixed.
-		return llmAnswer{kind: k, verdict: llm.Verdict{Truncated: v.Truncated}, err: err}
+		return llmAnswer{kind: k, verdict: llm.Verdict{Truncated: v.Truncated, Redacted: v.Redacted}, err: err}
 	default:
 		return llmAnswer{kind: k}
 	}
@@ -398,7 +395,7 @@ func (c *cli) llmStepStopped(ctx context.Context, err error) bool {
 // them together, and returns the LLM findings. llmStep builds plan with
 // planLLMJobs and then calls classifyPlan, so that it can print the notice
 // between the two. It gives c.llmStepTimeoutOrDefault() as timeout:
-// llmStepTimeout in a real scan, and the value that a test sets in
+// defaultLLMStepTimeout in a real scan, and the value that a test sets in
 // cli.llmStepTimeout.
 //
 // The jobs send the name and the description of each tool of each inspected
@@ -426,14 +423,13 @@ func (c *cli) llmStepStopped(ctx context.Context, err error) bool {
 // try fails. The result then holds the failure (see llmResult.failure), and
 // the tools without a verdict get no row.
 //
-// A tool that the provider refused (llm.ErrRejected) does not stop the step:
-// it gets an llm.RuleIDInvalid row with llm.RejectedText. The refusals can
-// still fail the step with no LLM row: see rejectedFailure for the rule.
+// A tool that the provider refused (llm.ErrRejected) gets an
+// llm.RuleIDInvalid row with llm.RejectedText. When rejectedFailure fails the
+// step, no tool gets a row (see rejectedFailure).
 //
 // The whole step has the time limit timeout. When it is reached, the step
-// stops like after a provider failure (see runLLMJobs): the failure is
-// answerDeadline, the tools that got an answer keep their rows, and the
-// other tools count as not classified. It is not a signal.
+// stops like after a provider failure, with the failure answerDeadline (see
+// runLLMJobs). It is not a signal.
 //
 // The error is not nil only when ctx ended (the process got a signal) and at
 // least one tool was to be classified. The caller then handles it like a
@@ -647,13 +643,9 @@ func runLLMJobs(ctx context.Context, jobs []llmJob, cl toolClassifier, timeout t
 // runLLMJobs keeps the first failure and cancels the other requests.
 //
 // It also returns the failure of the job when the answer stops the step (see
-// answerKind.stepFails), else nil. The one exception is answerDeadline: a
-// request that the step deadline stopped gets that answer kind, but no
-// failure here. runLLMJobs builds the deadline failure after all the
-// requests end. An answerDeadline answer is never answered (see
-// answerKind.answered), so that check always builds it while ctx is alive.
-// When ctx has ended by then, classifyPlan drops the result for the signal.
-// So a deadline failure built here would always be replaced or dropped.
+// answerKind.stepFails), else nil. The one exception is answerDeadline: it
+// gets no failure here, because a deadline failure built here would be
+// replaced or dropped. runLLMJobs builds it (see runLLMJobs).
 func runLLMJob(ctx, runCtx context.Context, job llmJob, cl toolClassifier) (llmAnswer, *llmFailure) {
 	v, err := cl.Classify(runCtx, job.in)
 	kind := sortAnswer(err)

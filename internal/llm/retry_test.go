@@ -635,6 +635,74 @@ func TestClassifyRetryAfter(t *testing.T) {
 	}
 }
 
+// TestClassifyRetryAfterPastDeadline checks that a Retry-After wait which ends
+// after the deadline of the caller context gives the provider error at once:
+// no wait and no second request. A wait that ends before the deadline still
+// retries, and so does a context with no deadline. The waits are 50 ms or
+// more than the test deadline, and the test never sleeps for seconds: a
+// date in Retry-After is one second more than the fake clock, so its wait is
+// 50 ms.
+func TestClassifyRetryAfterPastDeadline(t *testing.T) {
+	t.Parallel()
+	soon := retryBase.Add(time.Second).Format(http.TimeFormat)
+	past := retryBase.Add(5 * time.Second).Format(http.TimeFormat)
+	atBase := func(p retryPolicy) retryPolicy {
+		p.now = func() time.Time { return retryBase }
+		return p
+	}
+	nearBase := func(p retryPolicy) retryPolicy {
+		p.now = func() time.Time { return retryBase.Add(950 * time.Millisecond) }
+		return p
+	}
+	tests := []struct {
+		name     string
+		status   int
+		header   string
+		policy   retryPolicy
+		deadline time.Duration // 0 means no deadline
+		wantHits int32         // 1: no retry; 2: one retry, then the verdict
+	}{
+		{name: "seconds past the deadline", status: http.StatusTooManyRequests, header: "5", policy: testRetry, deadline: 300 * time.Millisecond, wantHits: 1},
+		{name: "date past the deadline", status: http.StatusServiceUnavailable, header: past, policy: atBase(testRetry), deadline: 300 * time.Millisecond, wantHits: 1},
+		{name: "wait before the deadline", status: http.StatusServiceUnavailable, header: soon, policy: nearBase(slowBackoff), deadline: 5 * time.Second, wantHits: 2},
+		{name: "no deadline", status: http.StatusTooManyRequests, header: soon, policy: nearBase(slowBackoff), wantHits: 2},
+	}
+	for _, p := range bothProviders {
+		for _, tt := range tests {
+			t.Run(string(p)+"/"+tt.name, func(t *testing.T) {
+				t.Parallel()
+				srv := startServer(t, failThen(p, tt.status, 1, tt.header))
+				c := newRetryClient(t, p, srv.URL, tt.policy)
+				ctx := t.Context()
+				if tt.deadline > 0 {
+					var cancel context.CancelFunc
+					ctx, cancel = context.WithTimeout(t.Context(), tt.deadline)
+					t.Cleanup(cancel)
+				}
+				start := time.Now()
+				v, err := c.Classify(ctx, Input{ToolName: "t", Description: "d"})
+				took := time.Since(start)
+				if n := srv.hits.Load(); n != tt.wantHits {
+					t.Errorf("server requests = %d, want %d", n, tt.wantHits)
+				}
+				if tt.wantHits == 1 {
+					checkStatusError(t, err, tt.status)
+					if took >= time.Second {
+						t.Errorf("Classify() took %v, want at once (the Retry-After wait is longer than the deadline)", took)
+					}
+					return
+				}
+				if err != nil {
+					t.Fatalf("Classify() error = %v, want nil", err)
+				}
+				if v != okVerdict {
+					t.Errorf("Classify() = %+v, want %+v", v, okVerdict)
+				}
+			})
+		}
+	}
+}
+
 // TestSendReadsRetryAfter checks that send keeps the Retry-After wait of a
 // non-2xx answer in the *StatusError, and nothing else of the answer.
 func TestSendReadsRetryAfter(t *testing.T) {
@@ -810,7 +878,7 @@ func TestClassifyRetrySameRequest(t *testing.T) {
 			if len(reqs) != 3 {
 				t.Fatalf("server requests = %d, want 3", len(reqs))
 			}
-			wantMessage, _, err := toolMessage(Input{ToolName: "t", Description: "d"})
+			wantMessage, _, _, err := toolMessage(Input{ToolName: "t", Description: "d"})
 			if err != nil {
 				t.Fatalf("toolMessage() error = %v", err)
 			}

@@ -325,29 +325,42 @@ func maskedURLParts(raw string) []string {
 		return nil
 	}
 	var parts []string
-	add := func(written, plain string) {
-		if written != "" {
-			parts = append(parts, written)
-		}
-		if plain != "" && plain != written {
-			parts = append(parts, plain)
-		}
-	}
 	if u.User != nil {
 		info := RawUserinfo(raw)
-		add(info, "")
+		parts = appendForms(parts, info, "")
 		name, password, _ := strings.Cut(info, ":")
-		plainName := u.User.Username()
 		plainPassword, _ := u.User.Password()
-		add(password, plainPassword)
-		if IsSecretUserName(plainName, plainPassword) {
-			add(name, plainName)
-		}
+		parts = append(parts, userinfoSecrets(name, password, u.User.Username(), plainPassword)...)
 	}
 	parts = append(parts, SecretPathSegments(raw)...)
 	parts = append(parts, SecretQueryParts(u.RawQuery)...)
 	if _, fragment, found := strings.Cut(raw, "#"); found {
-		add(fragment, u.Fragment)
+		parts = appendForms(parts, fragment, u.Fragment)
+	}
+	return parts
+}
+
+// appendForms appends written and plain to parts. written is a part as it
+// is in the URL. plain is its unescaped form. Each one is added when it is
+// not empty, and plain is not added again when it equals written.
+func appendForms(parts []string, written, plain string) []string {
+	if written != "" {
+		parts = append(parts, written)
+	}
+	if plain != "" && plain != written {
+		parts = append(parts, plain)
+	}
+	return parts
+}
+
+// userinfoSecrets returns the secret parts of a user info: the password, and
+// the user name when IsSecretUserName says it is a secret. name and password
+// are the user info as written in the URL, and plainName and plainPassword
+// are the unescaped forms (see appendForms).
+func userinfoSecrets(name, password, plainName, plainPassword string) []string {
+	parts := appendForms(nil, password, plainPassword)
+	if IsSecretUserName(plainName, plainPassword) {
+		parts = appendForms(parts, name, plainName)
 	}
 	return parts
 }
@@ -376,22 +389,9 @@ func wholeURLParts(raw string) []string {
 	if info == "" {
 		return nil
 	}
-	parts := []string{info}
 	name, password, _ := strings.Cut(info, ":")
-	if password != "" {
-		parts = append(parts, password)
-	}
-	if name != "" && IsSecretUserName(name, password) {
-		parts = append(parts, name)
-	}
-	return parts
+	return append([]string{info}, userinfoSecrets(name, password, name, password)...)
 }
-
-// minTokenUserNameLen is the shortest user name next to a password that
-// IsSecretUserName counts as a token for its digit rule. It is the same
-// length as the shortest secret that internal/inspect removes from text
-// (minBareSecretLen there), so a short name such as "user1" is not a secret.
-const minTokenUserNameLen = 8
 
 // IsSecretUserName reports whether name, the unescaped user name of a URL or
 // of a Basic credential with the unescaped password, is a secret by itself,
@@ -399,7 +399,7 @@ const minTokenUserNameLen = 8
 // is empty, as in https://<token>@host/, because then the name is the
 // credential. With a password, it is so when name looks like a token: by
 // the RedactArgs rules (a known token prefix such as "ghp_", or a long
-// random-looking word), or when name has minTokenUserNameLen or more bytes
+// random-looking word), or when name has MinSecretBytes or more bytes
 // and holds a digit. GitHub documents
 // https://<token>:x-oauth-basic@github.com/ for a token in the name.
 //
@@ -410,7 +410,7 @@ func IsSecretUserName(name, password string) bool {
 	if password == "" || containsToken(name) {
 		return true
 	}
-	return len(name) >= minTokenUserNameLen && strings.ContainsAny(name, "0123456789")
+	return len(name) >= MinSecretBytes && strings.ContainsAny(name, "0123456789")
 }
 
 // RawUserinfo returns the user info of raw as written, the text between "//"

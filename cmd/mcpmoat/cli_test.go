@@ -440,7 +440,7 @@ func TestUsageContent(t *testing.T) {
 		// LLM step (issue #188). The lines are literal: this test checks
 		// the text that users see. TestUsageRetryNumbersMatchConstants
 		// checks that the two retry numbers are those of the policy of
-		// package llm, and a change of llmStepTimeout must change the help
+		// package llm, and a change of defaultLLMStepTimeout must change the help
 		// too.
 		wantRetryTriesLine,
 		wantRetryAfterLine,

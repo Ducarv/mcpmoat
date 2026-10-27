@@ -112,7 +112,7 @@ func New(opts SDKOptions) *SDKInspector {
 // never holds a configured env value: mcpmoat puts none there, and Inspect
 // removes from text that the server sent the configured values, the values
 // of the expanded variables and, for a stdio server, the secrets in the argv
-// (see argSecrets) that have at least minBareSecretLen bytes (a server gets
+// (see argSecrets) that have at least discover.MinSecretBytes bytes (a server gets
 // them and can echo them). Its URL is the redacted URL as discovered, not
 // the expanded one. It can hold other text that the server controls, so
 // callers must escape it with internal/termsafe before they print it.
@@ -120,7 +120,7 @@ func New(opts SDKOptions) *SDKInspector {
 //
 // On success, Result.Secrets holds the configured values, the expanded
 // values and, for a stdio server, the argv secrets that have at least
-// minBareSecretLen bytes (see Result.Secrets and resultSecrets). For a
+// discover.MinSecretBytes bytes (see Result.Secrets and resultSecrets). For a
 // remote server, [Remote] sets it.
 //
 // For a stdio server, Inspect:
@@ -306,7 +306,7 @@ func (i *SDKInspector) inspectStdio(ctx context.Context, s discover.Server, pare
 	// The configured env values, the expanded values and the argv secrets,
 	// for consumers that remove them from the Result text (see
 	// Result.Secrets). All three lists hold only values of at least
-	// minBareSecretLen bytes already.
+	// discover.MinSecretBytes bytes already.
 	result.Secrets = resultSecrets(secrets)
 	return result, nil
 }
@@ -350,7 +350,7 @@ func newStdioClient(id *mcp.Implementation, raw *rawLists, limit *rawLimit) *mcp
 }
 
 // lookupRecorder wraps a variable lookup for discover.Expand. It keeps each
-// value that the lookup returns with at least minBareSecretLen bytes, for
+// value that the lookup returns with at least discover.MinSecretBytes bytes, for
 // classify to remove from error text. A shorter value is too likely to match
 // ordinary words. It keeps each value one time only, so a config that reads
 // the same variable many times does not make the scrub list long. It is
@@ -368,7 +368,7 @@ type lookupRecorder struct {
 // records the value if it is not recorded yet.
 func (r *lookupRecorder) Lookup(name string) (string, bool) {
 	value, ok := r.lookup(name)
-	if !ok || len(value) < minBareSecretLen {
+	if !ok || len(value) < discover.MinSecretBytes {
 		return value, ok
 	}
 	if _, dup := r.seen[value]; dup {
@@ -522,14 +522,14 @@ func expandError(s discover.Server, err error, policy expandPolicy) *ConnectErro
 	return configErrorWithCause(s, reason, err)
 }
 
-// envSecrets returns the configured env values of at least minBareSecretLen
+// envSecrets returns the configured env values of at least discover.MinSecretBytes
 // bytes, for classify to remove from error text and for Result.Secrets (see
 // resultSecrets). A shorter value is too likely to match ordinary words ("1",
 // "true", "info"), and too short to be a token.
 func envSecrets(env discover.SecretMap) []string {
 	var secrets []string
 	for _, key := range env.Keys() {
-		if v := env[key].Reveal(); len(v) >= minBareSecretLen {
+		if v := env[key].Reveal(); len(v) >= discover.MinSecretBytes {
 			secrets = append(secrets, v)
 		}
 	}

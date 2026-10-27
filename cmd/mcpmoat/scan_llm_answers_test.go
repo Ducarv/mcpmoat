@@ -686,93 +686,114 @@ func TestAnswerKindGot2xx(t *testing.T) {
 	}
 }
 
-// TestLLMRowTruncated checks llmRow directly for a cut tool text: the floor
-// to medium applies to a verdict with risk none or low or with a risk that
-// is not valid, to an answer that cannot be used and to a tool that the
-// provider refused (each gives the MOAT-LLM-001 floor row, not a MOAT-LLM-002
-// row). It never applies to a job without an answer, and a medium or high
-// verdict keeps its own rating. A refused tool that was not cut gets a
-// MOAT-LLM-002 row with llm.RejectedText, not llm.InvalidText.
-func TestLLMRowTruncated(t *testing.T) {
+// rowWant is the row that llmRow must give in one case. ok false means no
+// row, and the other fields are then not compared.
+type rowWant struct {
+	ok                            bool
+	rule, severity, risk, related string
+}
+
+// TestLLMRowUnrated checks llmRow directly for each combination of a cut and a
+// redacted tool text (llm.Verdict.Truncated and llm.Verdict.Redacted) with
+// each kind of answer. An unrated text (cut or redacted) gets the MOAT-LLM-001
+// floor row, of medium with the category other, when the model rated it none
+// or low, when it gave an answer that cannot be used, or when the provider
+// refused it. A refused or unusable answer that is not unrated keeps its
+// MOAT-LLM-002 row, with llm.RejectedText or llm.InvalidText. A medium or high
+// verdict keeps its own rating. A cut text wins over a redacted one, since
+// the cut is the larger gap. A job without an answer gives no row.
+func TestLLMRowUnrated(t *testing.T) {
 	t.Parallel()
 
-	cut := llm.Verdict{Risk: llm.RiskNone, Category: llm.CategoryCredentialAccess, Truncated: true}
-	cutWith := func(r llm.Risk) llm.Verdict {
-		v := cut
-		v.Risk = r
-		return v
+	cred := llm.CategoryCredentialAccess
+	floorCut := rowWant{true, llm.RuleID, "medium", llm.TruncatedText, string(llm.CategoryOther)}
+	floorRed := rowWant{true, llm.RuleID, "medium", llm.RedactedText, string(llm.CategoryOther)}
+	kept := func(sev string) rowWant {
+		return rowWant{true, llm.RuleID, sev, cred.Text(), string(cred)}
 	}
+	invalid := rowWant{true, llm.RuleIDInvalid, "medium", llm.InvalidText, ""}
+	rejected := rowWant{true, llm.RuleIDInvalid, "medium", llm.RejectedText, ""}
+	none := rowWant{}
+
 	tests := []struct {
-		name         string
-		answer       llmAnswer
-		wantOK       bool
-		wantRule     string
-		wantSeverity string
-		wantRisk     string
-		wantRelated  string
+		name   string
+		answer llmAnswer
+		// plain, cut, redacted and both are the rows for no flag, a cut text,
+		// a redacted text and a text both cut and redacted.
+		plain, cut, redacted, both rowWant
 	}{
-		{name: "verdict none cut", answer: llmAnswer{kind: answerVerdict, verdict: cut}, wantOK: true,
-			wantRule: llm.RuleID, wantSeverity: "medium", wantRisk: llm.TruncatedText, wantRelated: string(llm.CategoryOther)},
-		{name: "verdict low cut", answer: llmAnswer{kind: answerVerdict, verdict: cutWith(llm.RiskLow)}, wantOK: true,
-			wantRule: llm.RuleID, wantSeverity: "medium", wantRisk: llm.TruncatedText, wantRelated: string(llm.CategoryOther)},
-		// A risk that is not valid fails closed: the cut tool still gets the
-		// floor row.
-		{name: "verdict invalid risk cut", answer: llmAnswer{kind: answerVerdict, verdict: cutWith("critical")}, wantOK: true,
-			wantRule: llm.RuleID, wantSeverity: "medium", wantRisk: llm.TruncatedText, wantRelated: string(llm.CategoryOther)},
-		{name: "verdict medium cut", answer: llmAnswer{kind: answerVerdict, verdict: cutWith(llm.RiskMedium)}, wantOK: true,
-			wantRule: llm.RuleID, wantSeverity: "medium", wantRisk: llm.CategoryCredentialAccess.Text(), wantRelated: string(llm.CategoryCredentialAccess)},
-		{name: "verdict high cut", answer: llmAnswer{kind: answerVerdict, verdict: cutWith(llm.RiskHigh)}, wantOK: true,
-			wantRule: llm.RuleID, wantSeverity: "high", wantRisk: llm.CategoryCredentialAccess.Text(), wantRelated: string(llm.CategoryCredentialAccess)},
-		{name: "verdict none not cut", answer: llmAnswer{kind: answerVerdict, verdict: llm.Verdict{Risk: llm.RiskNone, Category: llm.CategoryOther}}},
-		{name: "unusable cut", answer: llmAnswer{kind: answerUnusable, verdict: llm.Verdict{Truncated: true}}, wantOK: true,
-			wantRule: llm.RuleID, wantSeverity: "medium", wantRisk: llm.TruncatedText, wantRelated: string(llm.CategoryOther)},
-		{name: "unusable not cut", answer: llmAnswer{kind: answerUnusable}, wantOK: true,
-			wantRule: llm.RuleIDInvalid, wantSeverity: "medium", wantRisk: llm.InvalidText},
-		{name: "rejected cut", answer: llmAnswer{kind: answerRejected, verdict: llm.Verdict{Truncated: true}}, wantOK: true,
-			wantRule: llm.RuleID, wantSeverity: "medium", wantRisk: llm.TruncatedText, wantRelated: string(llm.CategoryOther)},
-		{name: "rejected not cut", answer: llmAnswer{kind: answerRejected}, wantOK: true,
-			wantRule: llm.RuleIDInvalid, wantSeverity: "medium", wantRisk: llm.RejectedText},
+		{name: "verdict none", answer: llmAnswer{kind: answerVerdict, verdict: llm.Verdict{Risk: llm.RiskNone, Category: cred}},
+			plain: none, cut: floorCut, redacted: floorRed, both: floorCut},
+		{name: "verdict low", answer: llmAnswer{kind: answerVerdict, verdict: llm.Verdict{Risk: llm.RiskLow, Category: cred}},
+			plain: kept("low"), cut: floorCut, redacted: floorRed, both: floorCut},
+		// A risk that is not valid fails closed: an unrated tool gets the
+		// floor row, a rated one the invalid row.
+		{name: "verdict invalid risk", answer: llmAnswer{kind: answerVerdict, verdict: llm.Verdict{Risk: "critical", Category: cred}},
+			plain: invalid, cut: floorCut, redacted: floorRed, both: floorCut},
+		{name: "verdict medium", answer: llmAnswer{kind: answerVerdict, verdict: llm.Verdict{Risk: llm.RiskMedium, Category: cred}},
+			plain: kept("medium"), cut: kept("medium"), redacted: kept("medium"), both: kept("medium")},
+		{name: "verdict high", answer: llmAnswer{kind: answerVerdict, verdict: llm.Verdict{Risk: llm.RiskHigh, Category: cred}},
+			plain: kept("high"), cut: kept("high"), redacted: kept("high"), both: kept("high")},
+		{name: "unusable", answer: llmAnswer{kind: answerUnusable},
+			plain: invalid, cut: floorCut, redacted: floorRed, both: floorCut},
+		{name: "rejected", answer: llmAnswer{kind: answerRejected},
+			plain: rejected, cut: floorCut, redacted: floorRed, both: floorCut},
 		// The error of the refusal changes nothing in the row.
-		{name: "rejected not cut with error", answer: llmAnswer{kind: answerRejected, err: &llm.StatusError{Code: http.StatusUnprocessableEntity}}, wantOK: true,
-			wantRule: llm.RuleIDInvalid, wantSeverity: "medium", wantRisk: llm.RejectedText},
-		{name: "not run cut", answer: llmAnswer{kind: answerNotRun, verdict: cut}},
-		{name: "stopped cut", answer: llmAnswer{kind: answerStopped, verdict: cut}},
-		{name: "provider failed cut", answer: llmAnswer{kind: answerProviderFailed, verdict: cut}},
-		{name: "internal failed cut", answer: llmAnswer{kind: answerInternalFailed, verdict: cut}},
-		// A request that the step deadline stopped got no answer, so it gives
-		// no row, also for a cut tool.
-		{name: "deadline cut", answer: llmAnswer{kind: answerDeadline, verdict: cut}},
+		{name: "rejected with status error", answer: llmAnswer{kind: answerRejected, err: &llm.StatusError{Code: http.StatusUnprocessableEntity}},
+			plain: rejected, cut: floorCut, redacted: floorRed, both: floorCut},
+		// A job without an answer gives no row, also when its text is unrated.
+		{name: "not run", answer: llmAnswer{kind: answerNotRun}, plain: none, cut: none, redacted: none, both: none},
+		{name: "stopped", answer: llmAnswer{kind: answerStopped}, plain: none, cut: none, redacted: none, both: none},
+		{name: "provider failed", answer: llmAnswer{kind: answerProviderFailed}, plain: none, cut: none, redacted: none, both: none},
+		{name: "internal failed", answer: llmAnswer{kind: answerInternalFailed}, plain: none, cut: none, redacted: none, both: none},
+		// A request that the step deadline stopped got no answer.
+		{name: "deadline", answer: llmAnswer{kind: answerDeadline}, plain: none, cut: none, redacted: none, both: none},
 	}
 	job := llmJob{in: llm.Input{ToolName: "t1"}}
 	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
-			row, ok := llmRow(job, tt.answer)
-			if ok != tt.wantOK {
-				t.Fatalf("llmRow() ok = %v, want %v", ok, tt.wantOK)
-			}
-			if !ok {
-				if row != (report.FindingRow{}) {
-					t.Errorf("llmRow() row = %+v, want the zero row", row)
+		flags := []struct {
+			name          string
+			cut, redacted bool
+			want          rowWant
+		}{
+			{"plain", false, false, tt.plain},
+			{"cut", true, false, tt.cut},
+			{"redacted", false, true, tt.redacted},
+			{"cut and redacted", true, true, tt.both},
+		}
+		for _, f := range flags {
+			t.Run(tt.name+"/"+f.name, func(t *testing.T) {
+				t.Parallel()
+				answer := tt.answer
+				answer.verdict.Truncated = f.cut
+				answer.verdict.Redacted = f.redacted
+				row, ok := llmRow(job, answer)
+				if ok != f.want.ok {
+					t.Fatalf("llmRow() ok = %v, want %v", ok, f.want.ok)
 				}
-				return
-			}
-			if row.RuleID != tt.wantRule || row.Severity != tt.wantSeverity || row.Risk != tt.wantRisk || row.Related != tt.wantRelated {
-				t.Errorf("llmRow() = %s %s %q %q, want %s %s %q %q",
-					row.RuleID, row.Severity, row.Risk, row.Related, tt.wantRule, tt.wantSeverity, tt.wantRisk, tt.wantRelated)
-			}
-			// The title and the fix are the fixed texts of the rule.
-			wantTitle, wantFix := llm.Title, llm.Remediation
-			if tt.wantRule == llm.RuleIDInvalid {
-				wantTitle, wantFix = llm.InvalidTitle, llm.InvalidRemediation
-			}
-			if row.Title != wantTitle || row.Remediation != wantFix {
-				t.Errorf("llmRow() title, fix = %q, %q; want %q, %q", row.Title, row.Remediation, wantTitle, wantFix)
-			}
-			if row.Source != report.SourceLLM || row.Key != "t1" {
-				t.Errorf("llmRow() source, key = %q, %q; want %q, %q", row.Source, row.Key, report.SourceLLM, "t1")
-			}
-		})
+				if !ok {
+					if row != (report.FindingRow{}) {
+						t.Errorf("llmRow() row = %+v, want the zero row", row)
+					}
+					return
+				}
+				if row.RuleID != f.want.rule || row.Severity != f.want.severity || row.Risk != f.want.risk || row.Related != f.want.related {
+					t.Errorf("llmRow() = %s %s %q %q, want %s %s %q %q",
+						row.RuleID, row.Severity, row.Risk, row.Related, f.want.rule, f.want.severity, f.want.risk, f.want.related)
+				}
+				// The title and the fix are the fixed texts of the rule.
+				wantTitle, wantFix := llm.Title, llm.Remediation
+				if f.want.rule == llm.RuleIDInvalid {
+					wantTitle, wantFix = llm.InvalidTitle, llm.InvalidRemediation
+				}
+				if row.Title != wantTitle || row.Remediation != wantFix {
+					t.Errorf("llmRow() title, fix = %q, %q; want %q, %q", row.Title, row.Remediation, wantTitle, wantFix)
+				}
+				if row.Source != report.SourceLLM || row.Key != "t1" {
+					t.Errorf("llmRow() source, key = %q, %q; want %q, %q", row.Source, row.Key, report.SourceLLM, "t1")
+				}
+			})
+		}
 	}
 }
 

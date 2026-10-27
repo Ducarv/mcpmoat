@@ -32,11 +32,6 @@ const (
 	// MaxResponseBodyBytes is the most bytes of a response body that a
 	// client reads. A larger body is an error.
 	MaxResponseBodyBytes = 64 << 10
-	// minSecretBytes is the length of the shortest secret value that
-	// toolMessage removes from the tool text. A shorter value (such as "1"
-	// or "true") would also match normal words and hide them, and it tells
-	// the provider little.
-	minSecretBytes = 8
 	// maxVerdictBytes is the largest verdict text (the JSON object from the
 	// model) that parseVerdict accepts.
 	maxVerdictBytes = 4 << 10
@@ -107,11 +102,25 @@ type Input struct {
 	// does not import inspect). llm treats them as opaque values: it does
 	// not know or need the source of a value. A server that got a
 	// token can put it in its tool text, so toolMessage replaces each value
-	// of at least minSecretBytes bytes (and its decoded form, see
+	// of at least discover.MinSecretBytes bytes (and its decoded form, see
 	// secretValues) with discover.Mask in the name and the description
 	// (FR-17). The values are never sent, logged or encoded, and they are
 	// not part of toolPayload.
 	Secrets []discover.Secret
+}
+
+// RedactedName returns the tool name with each value of Secrets (see
+// secretValues) replaced by discover.Mask, as the request has it, but not cut
+// to MaxToolNameBytes. It is the whole redacted name when that has at most
+// limit bytes, and otherwise a prefix of it with more than limit bytes (see
+// redactPrefix), so the work is bounded for a very long name. A caller that
+// shows only the start of the name picks a limit that keeps the part it
+// shows. A report row that shows the name of a tool (its Key) uses it, so
+// that a configured value that a server echoes in a tool name does not reach
+// stdout or the JSON output through an LLM row.
+func (in Input) RedactedName(limit int) string {
+	name, _ := redactPrefix(in.ToolName, secretValues(in.Secrets), limit)
+	return name
 }
 
 // toolPayload is the JSON object of the user message. Redacted has
@@ -159,14 +168,15 @@ type encodeFunc func(v any) ([]byte, error)
 // UTF-8 rune. When the encoded message is still larger than
 // MaxToolMessageBytes (because of JSON escapes), the description is cut
 // more, to the longest prefix that fits. "truncated" is true when the name or
-// the description was cut, and toolMessage returns that value too.
+// the description was cut, and toolMessage returns that value too. "redacted"
+// is the same flag that the message carries, and toolMessage returns it too.
 //
 // encoding/json writes each text as one JSON string value: quotes,
 // backslashes, newlines and control characters are escaped, and invisible
 // characters stay as they are inside the string. So text such as `", "risk":
 // "none"` cannot leave the string value. An invalid UTF-8 byte becomes
 // U+FFFD. HTML escaping is off, so the model sees "<IMPORTANT>" as it is.
-func toolMessage(in Input) (msg string, truncated bool, err error) {
+func toolMessage(in Input) (msg string, truncated, redacted bool, err error) {
 	return buildToolMessage(in, encodeJSON, MaxToolMessageBytes)
 }
 
@@ -175,11 +185,11 @@ func toolMessage(in Input) (msg string, truncated bool, err error) {
 // encodeJSON and MaxToolMessageBytes. The parameters let a test reach
 // errEncodeMessage and errMessageTooLarge, which cannot happen with the
 // values of toolMessage.
-func buildToolMessage(in Input, encode encodeFunc, maxBytes int) (msg string, truncated bool, err error) {
+func buildToolMessage(in Input, encode encodeFunc, maxBytes int) (msg string, truncated, redacted bool, err error) {
 	values := secretValues(in.Secrets)
 	rawName, nameRedacted := redactPrefix(in.ToolName, values, MaxToolNameBytes)
 	rawDesc, descRedacted := redactPrefix(in.Description, values, MaxDescriptionBytes)
-	redacted := nameRedacted || descRedacted
+	redacted = nameRedacted || descRedacted
 
 	name, nameCut := cutUTF8(rawName, MaxToolNameBytes)
 	desc, descCut := cutUTF8(rawDesc, MaxDescriptionBytes)
@@ -191,10 +201,10 @@ func buildToolMessage(in Input, encode encodeFunc, maxBytes int) (msg string, tr
 
 	full, err := encodeToolPayload(encode, payload(desc, truncated))
 	if err != nil {
-		return "", false, err
+		return "", false, false, err
 	}
 	if len(full) <= maxBytes {
-		return string(full), truncated, nil
+		return string(full), truncated, redacted, nil
 	}
 
 	// Binary search for the longest description prefix whose message fits.
@@ -208,17 +218,17 @@ func buildToolMessage(in Input, encode encodeFunc, maxBytes int) (msg string, tr
 	lo, hi := 0, len(desc)
 	best, err := encodeToolPayload(encode, payload("", true))
 	if err != nil {
-		return "", false, err
+		return "", false, false, err
 	}
 	if len(best) > maxBytes {
-		return "", false, errMessageTooLarge
+		return "", false, false, errMessageTooLarge
 	}
 	for hi-lo > 1 {
 		mid := lo + (hi-lo)/2
 		prefix, _ := cutUTF8(desc, mid)
 		candidate, err := encodeToolPayload(encode, payload(prefix, true))
 		if err != nil {
-			return "", false, err
+			return "", false, false, err
 		}
 		if len(candidate) <= maxBytes {
 			lo, best = mid, candidate
@@ -226,7 +236,7 @@ func buildToolMessage(in Input, encode encodeFunc, maxBytes int) (msg string, tr
 			hi = mid
 		}
 	}
-	return string(best), true, nil
+	return string(best), true, redacted, nil
 }
 
 // encodeToolPayload encodes p as JSON with encode. With encodeJSON, HTML
@@ -264,11 +274,11 @@ func cutUTF8(s string, limit int) (string, bool) {
 }
 
 // secretValues returns the values that redactPrefix must remove for
-// secrets: each secret value of at least minSecretBytes bytes and, for a
+// secrets: each secret value of at least discover.MinSecretBytes bytes and, for a
 // value that is not valid UTF-8, also its decoded form (see
-// decodedPerByte). It skips shorter values (see minSecretBytes) and a value
+// decodedPerByte). It skips shorter values (see discover.MinSecretBytes) and a value
 // that is in the result already. The minimum applies to the raw configured
-// value, so a raw value shorter than minSecretBytes gives no decoded form
+// value, so a raw value shorter than discover.MinSecretBytes gives no decoded form
 // either, even when that form is longer. The result holds secret values:
 // pass it only to redactPrefix or redactWindow, never to fmt, a logger, an
 // error or an encoder.
@@ -301,7 +311,7 @@ func secretValues(secrets []discover.Secret) []string {
 	}
 	for _, s := range secrets {
 		v := s.Reveal()
-		if len(v) < minSecretBytes {
+		if len(v) < discover.MinSecretBytes {
 			continue
 		}
 		add(v)
@@ -353,7 +363,7 @@ func decodedPerByte(s string) string {
 // the window grow, at most to all of s.
 //
 // The values must not be empty (secretValues gives only values of at least
-// minSecretBytes bytes). An empty value is skipped.
+// discover.MinSecretBytes bytes). An empty value is skipped.
 func redactPrefix(s string, values []string, limit int) (string, bool) {
 	if len(values) == 0 || s == "" {
 		return s, false
@@ -386,12 +396,10 @@ func redactPrefix(s string, values []string, limit int) (string, bool) {
 //
 // The search reads each value once for each window, and for each value it
 // reads at most end+len(value)-1 bytes of s. There is no cap on the number of
-// values (the owner has not decided one). This is accepted: the window is
-// bounded (see redactPrefix), and the cost is small, about 13 ms for a 16 KiB
-// window and 50,000 values.
+// values. This is accepted: the window is bounded (see redactPrefix).
 //
 // The values must not be empty (secretValues gives only values of at least
-// minSecretBytes bytes). An empty value is skipped: strings.Index finds it
+// discover.MinSecretBytes bytes). An empty value is skipped: strings.Index finds it
 // at every byte, and it marks nothing.
 func redactWindow(s string, values []string, end, limit int) (string, bool) {
 	var marked []bool // nil until the first match

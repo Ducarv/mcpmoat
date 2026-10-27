@@ -25,7 +25,7 @@ import (
 // --llm" (FR-17, FR-16, issue #188), and the retries of the real client at
 // scan level:
 //
-//   - When the time limit (llmStepTimeout, or cli.llmStepTimeout in a test)
+//   - When the time limit (defaultLLMStepTimeout, or cli.llmStepTimeout in a test)
 //     is reached, scan exits with 2, the JSON report has complete false, the
 //     rows of the tools that got an answer stay, and stderr has the line
 //     "the LLM step stopped after <time>; N tools were not classified".
@@ -34,7 +34,9 @@ import (
 //   - The real client tries HTTP 429, 502, 503, 504 and 529 again
 //     (llmRetryCodes), llm.RetryMaxTries requests in total for one tool. It
 //     honours Retry-After up to 30 seconds; a longer Retry-After means no
-//     retry.
+//     retry. A Retry-After whose wait would end after the step deadline also
+//     means no retry: the client fails at once with the provider error, and
+//     the step does not sleep until the deadline.
 //
 // The fake providers of this file send "Retry-After: 0" with every retryable
 // status: cmd/mcpmoat cannot change the backoff waits of package llm (about
@@ -552,8 +554,8 @@ func TestDurationText(t *testing.T) {
 		}
 	}
 	// The production time limit is 10 minutes (issue #188).
-	if got := durationText(llmStepTimeout); got != "10 minutes" {
-		t.Errorf("durationText(llmStepTimeout) = %q, want \"10 minutes\"", got)
+	if got := durationText(defaultLLMStepTimeout); got != "10 minutes" {
+		t.Errorf("durationText(defaultLLMStepTimeout) = %q, want \"10 minutes\"", got)
 	}
 }
 
@@ -616,11 +618,14 @@ func TestPrintLLMProblemsDeadline(t *testing.T) {
 	}
 }
 
-// llmRetryStep is one scripted error answer of llmRetryAPI: the status code
-// and the Retry-After header ("" means none).
+// llmRetryStep is one scripted answer of llmRetryAPI: the status code and the
+// Retry-After header ("" means none). When hold is true, the answer is held
+// until the client closes the request, as llmRetryAPI.hold does for every
+// request; code and retryAfter are then not used.
 type llmRetryStep struct {
 	code       int
 	retryAfter string
+	hold       bool
 }
 
 // llmRetryAPI is a fake LLM provider on a loopback httptest server, for the
@@ -691,7 +696,7 @@ func (a *llmRetryAPI) handle(w http.ResponseWriter, r *http.Request) {
 	steps := a.script[p.ToolName]
 	a.mu.Unlock()
 
-	if a.hold {
+	if a.hold || (n < len(steps) && steps[n].hold) {
 		select {
 		case <-r.Context().Done():
 			// The client closed the request.
@@ -820,11 +825,12 @@ func TestScanLLMStepDeadlineRealClient(t *testing.T) {
 // field and the failure line.
 //
 // The step limit of most cases is retryStep (10 s). It only bounds a broken
-// client: a client that honoured a Retry-After above the cap of 30 s would
-// wait until that limit, and the line would be the deadline line, not the
-// provider line. The case of a Retry-After at the cap uses
-// llmTestStepLimit: the first request reaches the fake in milliseconds, and
-// then the deadline ends the wait of 30 s.
+// client: a client that waited for a Retry-After above the cap of 30 s, or
+// above the time left, would wait until that limit, and the line would be the
+// deadline line, not the provider line. A Retry-After of 30 s is not honoured
+// in a 10 s step, so that case gets the provider line after one request. The
+// case with a 2 s Retry-After in a 4 s step waits for the retry, and the
+// retry is held, so the deadline line shows after two requests.
 //
 // This test does not prove that the client honours "Retry-After: 0" (no
 // backoff wait). At scan level that proof needs a step limit just under the
@@ -900,7 +906,7 @@ func TestScanLLMRetry(t *testing.T) {
 			// A Retry-After above the cap: no retry, the failure at once.
 			name:      "HTTP 429 with Retry-After 3600",
 			tools:     []inspect.Tool{t1},
-			script:    map[string][]llmRetryStep{"t1": slices.Repeat([]llmRetryStep{{429, "3600"}}, 10)},
+			script:    map[string][]llmRetryStep{"t1": slices.Repeat([]llmRetryStep{{code: 429, retryAfter: "3600"}}, 10)},
 			timeout:   retryStep,
 			wantCode:  exitError,
 			wantTries: map[string]int{"t1": 1},
@@ -910,23 +916,42 @@ func TestScanLLMRetry(t *testing.T) {
 			// Just above the cap of 30 seconds.
 			name:      "HTTP 503 with Retry-After 31",
 			tools:     []inspect.Tool{t1},
-			script:    map[string][]llmRetryStep{"t1": slices.Repeat([]llmRetryStep{{503, "31"}}, 10)},
+			script:    map[string][]llmRetryStep{"t1": slices.Repeat([]llmRetryStep{{code: 503, retryAfter: "31"}}, 10)},
 			timeout:   retryStep,
 			wantCode:  exitError,
 			wantTries: map[string]int{"t1": 1},
 			wantLine:  scanPrefix + "the LLM provider failed (HTTP 503); 1 tool was not classified\n",
 		},
 		retryCase{
-			// At the cap the client waits, and the step deadline ends the
-			// wait: a deadline line, not a provider line, after one
-			// request.
-			name:      "HTTP 429 with Retry-After 30 ends at the deadline",
+			// At the cap, but the step has 10 s left: the 30 s wait would end
+			// after the step deadline, so the client fails at once with the
+			// provider error. The step does not sleep until the deadline, so
+			// the line is the provider line, after one request.
+			name:      "HTTP 429 with Retry-After 30 and 10 s left: no wait",
 			tools:     []inspect.Tool{t1},
-			script:    map[string][]llmRetryStep{"t1": slices.Repeat([]llmRetryStep{{429, "30"}}, 10)},
-			timeout:   llmTestStepLimit,
+			script:    map[string][]llmRetryStep{"t1": slices.Repeat([]llmRetryStep{{code: 429, retryAfter: "30"}}, 10)},
+			timeout:   retryStep,
 			wantCode:  exitError,
 			wantTries: map[string]int{"t1": 1},
-			wantLine:  llmDeadlineLine(llmTestStepLimitText, 1),
+			wantLine:  scanPrefix + "the LLM provider failed (HTTP 429); 1 tool was not classified\n",
+		},
+		retryCase{
+			// A 2 s wait fits before the step deadline of 4 s, so the client
+			// waits and sends the retry. The retry is held, so the deadline
+			// stops it: the deadline line, after two requests. The deadline
+			// hits during a request that came after a wait. A Retry-After
+			// wait that the client takes always ends before the deadline, so
+			// the deadline cannot hit during such a wait itself.
+			name:  "HTTP 503 with Retry-After 2, then a request that the deadline stops",
+			tools: []inspect.Tool{t1, t2},
+			script: map[string][]llmRetryStep{"t1": {
+				{code: 503, retryAfter: "2"},
+				{hold: true},
+			}},
+			timeout:   4 * time.Second,
+			wantCode:  exitError,
+			wantTries: map[string]int{"t1": 2, "t2": 1},
+			wantLine:  llmDeadlineLine("4 seconds", 1),
 		},
 		retryCase{
 			// A refusal is never tried again, also with Retry-After.

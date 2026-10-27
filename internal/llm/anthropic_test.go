@@ -142,7 +142,7 @@ func TestAnthropicRequestShape(t *testing.T) {
 				t.Errorf("system = %q, want SystemPrompt", got)
 			}
 
-			wantMessage, _, err := toolMessage(shapeInput)
+			wantMessage, _, _, err := toolMessage(shapeInput)
 			if err != nil {
 				t.Fatalf("toolMessage() error = %v", err)
 			}

@@ -599,7 +599,7 @@ func truncate(text string) string {
 // one, for a remote server. Remote built ce from the expanded server, so its
 // URL, its Reason and its cause can hold the redacted expanded URL, and that
 // URL can show the values of variables: a host, a port or a path segment
-// that the redaction keeps, and values shorter than minBareSecretLen that no
+// that the redaction keeps, and values shorter than discover.MinSecretBytes that no
 // scrub removes. A port in a dial error that prints the resolved IP:port
 // stays: a port is not a secret. showDiscoveredURL sets ce.URL to the discovered URL, and
 // replaces the expanded URL in Reason and in the text of the cause with it,

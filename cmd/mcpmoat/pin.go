@@ -89,7 +89,7 @@ func (c *cli) parsePinArgs(args []string) (a pinArgs, code int, ok bool) {
 	// pin has no --llm-base-url flag, but the user can still type one, and
 	// its value can hold a password. hider hides it in the error text, as
 	// in scan (see argscrub.go).
-	hider := newArgHider(args, flagLLMBaseURL)
+	hider := newBaseURLHider(args)
 	if err := fs.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
 			pinUsage(c.stdout)

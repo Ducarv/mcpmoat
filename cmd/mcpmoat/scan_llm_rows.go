@@ -1,6 +1,8 @@
 package main
 
 import (
+	"unicode/utf8"
+
 	"github.com/Ducarv/mcpmoat/internal/llm"
 	"github.com/Ducarv/mcpmoat/internal/report"
 	"github.com/Ducarv/mcpmoat/internal/rules"
@@ -17,35 +19,39 @@ import (
 const noToolNameKey = "(no name)"
 
 // llmRow returns the finding row that the answer a of job gives, and true. It
-// returns false when a gives no row: a verdict with risk none (and no cut
-// text), or a job without an answer (see answerKind.answered).
+// returns false when a gives no row: a verdict with risk none (and no cut or
+// redacted text), or a job without an answer (see answerKind.answered).
 //
 // A verdict whose risk or category is not valid counts as an answer that
 // cannot be used, so it fails closed. parseVerdict never returns one, but a
-// classifier in a test can. A cut tool text (llm.Verdict.Truncated) gets the
-// floor row (see truncatedRow) when the model rated it none or low, or gave
-// no usable answer, or the provider refused it. So a cut tool always gets an
-// llm.RuleID row of at least medium, and never an llm.RuleIDInvalid row.
+// classifier in a test can. A tool text that was not rated in full (see
+// unrated) gets the floor row (see floorRow) when the model rated it none or
+// low, or gave no usable answer, or the provider refused it. So such a tool
+// always gets an llm.RuleID row of at least medium, and never an
+// llm.RuleIDInvalid row.
 //
-// The Key is toolKey(job.in.ToolName), as in a tool rule row: the name cut to
-// maxToolKeyRunes runes, or noToolNameKey for an empty name. All the rows
-// below start from this row, so they all get the same Key. The ignore lookup
-// in classifyPlan uses the real tool name, not the Key.
+// The Key is toolKey of the name as the request had it (see
+// llm.Input.RedactedName; the limit keeps the maxToolKeyRunes runes that
+// toolKey shows), so that a configured value in the name shows as
+// discover.Mask and not as the value. Otherwise it is as in a tool rule row:
+// the name cut to maxToolKeyRunes runes, or noToolNameKey for an empty name.
+// All the rows below start from this row, so they all get the same Key. The
+// ignore lookup in classifyPlan uses the real tool name, not the Key.
 func llmRow(job llmJob, a llmAnswer) (report.FindingRow, bool) {
 	row := report.FindingRow{
 		ServerRef: job.ref,
 		Source:    report.SourceLLM,
 		Field:     rules.FieldTool,
-		Key:       toolKey(job.in.ToolName),
+		Key:       toolKey(job.in.RedactedName(utf8.UTFMax * maxToolKeyRunes)),
 	}
 	switch a.kind {
 	case answerVerdict:
 		v := a.verdict
 		if !v.Risk.Valid() || !v.Category.Valid() {
-			return unusableRow(row, v.Truncated), true
+			return unusableRow(row, v), true
 		}
-		if v.Truncated && belowMedium(v.Risk) {
-			return truncatedRow(row), true
+		if unrated(v) && belowMedium(v.Risk) {
+			return floorRow(row, v), true
 		}
 		severity, hasRisk := llmSeverity(v.Risk)
 		if !hasRisk {
@@ -57,9 +63,9 @@ func llmRow(job llmJob, a llmAnswer) (report.FindingRow, bool) {
 		row.Related = string(v.Category)
 		return row, true
 	case answerUnusable:
-		return unusableRow(row, a.verdict.Truncated), true
+		return unusableRow(row, a.verdict), true
 	case answerRejected:
-		return rejectedRow(row, a.verdict.Truncated), true
+		return rejectedRow(row, a.verdict), true
 	default:
 		// answerNotRun, answerStopped, answerProviderFailed,
 		// answerInternalFailed and answerDeadline: the tool got no answer.
@@ -86,8 +92,17 @@ func llmSeverity(r llm.Risk) (rules.Severity, bool) {
 	}
 }
 
-// belowMedium reports whether the valid risk r of a verdict for a cut tool
-// text asks for the floor row: r is none or low.
+// unrated reports whether part of the tool text of v was not rated by the
+// model: the text was cut (llm.Verdict.Truncated), or mcpmoat removed a
+// configured value from it (llm.Verdict.Redacted). A hostile server or config
+// can choose what is cut or removed, so the rating of such a tool is not
+// trusted below medium.
+func unrated(v llm.Verdict) bool {
+	return v.Truncated || v.Redacted
+}
+
+// belowMedium reports whether the valid risk r of a verdict for an unrated
+// tool text asks for the floor row: r is none or low.
 func belowMedium(r llm.Risk) bool {
 	return r == llm.RiskNone || r == llm.RiskLow
 }
@@ -102,26 +117,28 @@ func llmRuleRow(row report.FindingRow) report.FindingRow {
 }
 
 // unusableRow fills row for an answer that cannot be used: the floor row
-// (see truncatedRow) when the tool text was cut, else an llm.RuleIDInvalid
-// row with severity medium and the fixed texts of package llm.
-func unusableRow(row report.FindingRow, truncated bool) report.FindingRow {
-	return invalidRow(row, truncated, llm.InvalidText)
+// (see floorRow) when the tool text was not rated in full (see unrated), else
+// an llm.RuleIDInvalid row with severity medium and the fixed texts of package
+// llm.
+func unusableRow(row report.FindingRow, v llm.Verdict) report.FindingRow {
+	return invalidRow(row, v, llm.InvalidText)
 }
 
 // rejectedRow fills row for a tool that the provider refused
 // (answerRejected): the same row as unusableRow, but with the risk text
-// llm.RejectedText. A cut tool gets the floor row (see truncatedRow).
-func rejectedRow(row report.FindingRow, truncated bool) report.FindingRow {
-	return invalidRow(row, truncated, llm.RejectedText)
+// llm.RejectedText. An unrated tool gets the floor row (see floorRow).
+func rejectedRow(row report.FindingRow, v llm.Verdict) report.FindingRow {
+	return invalidRow(row, v, llm.RejectedText)
 }
 
 // invalidRow fills row for a tool without a usable rating: the floor row
-// (see truncatedRow) when the tool text was cut, else an llm.RuleIDInvalid
-// row with severity medium, the fixed risk text risk and the other fixed
-// texts of package llm. risk is one of the fixed texts of package llm.
-func invalidRow(row report.FindingRow, truncated bool, risk string) report.FindingRow {
-	if truncated {
-		return truncatedRow(row)
+// (see floorRow) when the tool text was not rated in full (see unrated), else
+// an llm.RuleIDInvalid row with severity medium, the fixed risk text risk and
+// the other fixed texts of package llm. risk is one of the fixed texts of
+// package llm.
+func invalidRow(row report.FindingRow, v llm.Verdict, risk string) report.FindingRow {
+	if unrated(v) {
+		return floorRow(row, v)
 	}
 	row.RuleID = llm.RuleIDInvalid
 	row.Title = llm.InvalidTitle
@@ -131,15 +148,23 @@ func invalidRow(row report.FindingRow, truncated bool, risk string) report.Findi
 	return row
 }
 
-// truncatedRow fills row, an LLM row of a tool whose text was cut, as the
-// floor row: llm.RuleID, severity medium, the fixed text llm.TruncatedText
-// and the category other, whatever the model answered. The part after the
-// cut was not rated, and a prompt injection before the cut can ask for a low
-// rating or make the model refuse.
-func truncatedRow(row report.FindingRow) report.FindingRow {
+// floorRow fills row, an LLM row of a tool whose text was not rated in full
+// (see unrated), as the floor row: llm.RuleID, severity medium and the
+// category other, whatever the model answered. The risk text is
+// llm.TruncatedText for a cut text, and llm.RedactedText when only a
+// configured value was removed. A cut text wins when both are true: the cut
+// is the larger gap, and one row has one text.
+//
+// The part after a cut was not rated, and so was the removed text. A prompt
+// injection before the cut can ask for a low rating or make the model refuse,
+// and a hostile config can choose which text it removes.
+func floorRow(row report.FindingRow, v llm.Verdict) report.FindingRow {
 	row = llmRuleRow(row)
 	row.Severity = string(rules.SeverityMedium)
-	row.Risk = llm.TruncatedText
+	row.Risk = llm.RedactedText
+	if v.Truncated {
+		row.Risk = llm.TruncatedText
+	}
 	row.Related = string(llm.CategoryOther)
 	return row
 }

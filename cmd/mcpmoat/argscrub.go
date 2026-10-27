@@ -10,23 +10,23 @@ import (
 // This file hides secrets in the error text about command-line arguments. A
 // base URL can hold a user name and a password (--llm-base-url, FR-17), and the
 // flag package puts the whole argument in some of its errors. Every command
-// builds the argHider of its arguments (see newArgHider) and sends the text of
-// such an error, and each argument of the "unexpected arguments" list (see
-// rejectArgs), through its errorText method before it escapes the text for the
-// terminal. argErrorText does the same in one call.
+// builds the argHider of its arguments (see newBaseURLHider) and sends the
+// text of such an error, and each argument of the "unexpected arguments" list
+// (see rejectArgs), through its errorText method before it escapes the text
+// for the terminal. argErrorText does the same in one call.
 
 // hiddenArgText replaces the value of a secret flag in an error message.
 const hiddenArgText = "(hidden)"
 
 // argErrorText returns text, an error message about args, with the secrets of
 // args hidden. It hides each value that args gives to --llm-base-url (see
-// newArgHider), also a value without a scheme such as "user:pass@host". Then it
-// hides the user info of every URL in the text (see hideUserinfo), so a URL
-// with a password in any other place, for example as the value of another
-// flag, does not show either. A caller that already has the hider of args
-// (newArgHider(args, flagLLMBaseURL)) calls its errorText method instead.
+// newBaseURLHider), also a value without a scheme such as "user:pass@host".
+// Then it hides the user info of every URL in the text (see hideUserinfo), so
+// a URL with a password in any other place, for example as the value of
+// another flag, does not show either. A caller that already has the hider of
+// args calls its errorText method instead.
 func argErrorText(args []string, text string) string {
-	return newArgHider(args, flagLLMBaseURL).errorText(text)
+	return newBaseURLHider(args).errorText(text)
 }
 
 // hideUserinfo returns s with the user info of each URL in s replaced by
@@ -156,6 +156,13 @@ func newArgHider(args []string, name string) argHider {
 	return argHider{r: strings.NewReplacer(pairs...)}
 }
 
+// newBaseURLHider returns the argHider for the values that args gives to
+// --llm-base-url (flagLLMBaseURL). It is newArgHider with that flag name, so
+// every caller that hides base URL values uses the same name.
+func newBaseURLHider(args []string) argHider {
+	return newArgHider(args, flagLLMBaseURL)
+}
+
 // hide returns s with every value of the secret flag replaced by
 // hiddenArgText. The rest of s stays as it is.
 func (h argHider) hide(s string) string {
@@ -167,7 +174,7 @@ func (h argHider) hide(s string) string {
 
 // errorText returns text, an error message about the args of h, with the
 // values of the secret flag hidden (see hide) and then the user info of every
-// URL in the text hidden (see hideUserinfo). argErrorText and rejectArgs use
+// URL in the text hidden (see hideUserinfo). Every argument error path uses
 // it.
 func (h argHider) errorText(text string) string {
 	return hideUserinfo(h.hide(text))
