@@ -36,6 +36,17 @@ type acceptHint struct {
 	// storeFull is true when pins.json has no room for the new tools of the
 	// server, so "pin --accept" would fail: the hint then prints no command.
 	storeFull bool
+	// shareFull is true when the refusal comes from the share of the project
+	// servers (pins.ErrProjectShareFull), not from the whole file. shareFull
+	// implies storeFull. Only project servers count toward the share, so the
+	// note of the hint must not tell the user to remove other servers: removing
+	// a server of the user scope frees no room in the share, and that server
+	// would then be pinned again on its next scan with no alert.
+	shareFull bool
+	// snap holds the new pins of the server, the pins that "pin --accept"
+	// would save. markStoreFull checks with them that they fit in pins.json.
+	// The hint never prints them.
+	snap pins.ServerPins
 }
 
 // The notes at the end of a "To accept" line. They are fixed text.
@@ -51,6 +62,10 @@ const (
 	// hintStoreFullNote ends the line of a server whose new tools do not fit
 	// in pins.json.
 	hintStoreFullNote = " (pins.json has no room for these tools: pin --accept fails until you remove other servers from it)"
+	// hintShareFullNote ends the line of a project server whose new tools do
+	// not fit in the share of the project servers. It replaces
+	// hintStoreFullNote, because only project servers free room in the share.
+	hintShareFullNote = " (the project share of pins.json has no room for these tools: pin --accept fails until you remove project servers you no longer use from it)"
 )
 
 // writeAcceptHints writes one line on w for each hint:
@@ -75,7 +90,8 @@ const (
 // the name is escaped and cut for the terminal. The digest is made by mcpmoat
 // from hex, so it needs no escape. The line ends with hintCutNote,
 // hintIgnoredNote or hintNoTextNote for each change that the user did not see,
-// and then with hintStoreFullNote when pins.json has no room for the tools.
+// and then with hintStoreFullNote when pins.json has no room for the tools, or
+// hintShareFullNote when only the share of the project servers has no room.
 // writeAcceptHints returns the first write error: the caller must check it,
 // like for the report.
 func writeAcceptHints(w io.Writer, hints []acceptHint, configPath string, configProblem bool) error {
@@ -91,7 +107,10 @@ func writeAcceptHints(w io.Writer, hints []acceptHint, configPath string, config
 		if h.noText {
 			line += hintNoTextNote
 		}
-		if h.storeFull {
+		switch {
+		case h.shareFull:
+			line += hintShareFullNote
+		case h.storeFull:
 			line += hintStoreFullNote
 		}
 		if _, err := io.WriteString(w, line+"\n"); err != nil {
@@ -114,7 +133,9 @@ func writeAcceptHints(w io.Writer, hints []acceptHint, configPath string, config
 // no I/O.
 func acceptAdvice(h acceptHint, configPath string, configProblem bool) (text string, isCommand bool) {
 	text, ok := acceptCommand(h.name, h.project, configPath, h.digest)
-	if !ok || !h.fullyReviewed() || h.ambiguous || configProblem || h.storeFull {
+	// shareFull implies storeFull. Both are tested, so a hint with only
+	// shareFull still gives no command.
+	if !ok || !h.fullyReviewed() || h.ambiguous || configProblem || h.storeFull || h.shareFull {
 		return acceptSteps(h, configPath, configProblem), false
 	}
 	return text, true

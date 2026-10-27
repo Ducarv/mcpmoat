@@ -107,8 +107,9 @@ func (c *cli) pinsPath(cmd string) (string, bool) {
 // An error of the pins directory or its parents is a read error also when ctx
 // has ended: LoadLocked checks and opens the directory and the lock file
 // before the lock step, and only the lock step checks ctx. An error of the
-// lock file (an unsafe mode, for example) is a read error for the same reason. LoadLocked does not check ctx after it takes the lock,
-// so a read error after that point also stays a read error.
+// lock file (an unsafe mode, for example) is a read error for the same
+// reason. LoadLocked does not check ctx after it takes the lock, so a read
+// error after that point also stays a read error.
 //
 // When the file system cannot lock the lock file, LoadLocked goes on
 // without the lock. readPinsLocked then prints one warning: a parallel run can
@@ -163,20 +164,22 @@ func pinsRemovedWhileRunning(firstExisted bool, later *pins.Store) bool {
 // pinsFullText is the shared part of the three messages for a server that
 // does not fit in pins.json (pins.ErrStoreFull): "the pins file is full
 // (32 MiB)". scan uses it at report time (reasonStoreFull), and through
-// storeFullText at save time (setNewPins) and in pin (saveAccepted). The size comes from
-// pins.MaxFileSizeMiB, the limit that Set enforces, so the number is written
-// in one place.
+// storeFullText at save time (setNewPins) and in pin (saveAccepted). The size
+// comes from pins.MaxFileSizeMiB, the limit that Set enforces, so the number
+// is written in one place.
 //
 // It is a var and not a const: Go cannot turn a number into text at compile
 // time, so fmt.Sprintf builds the text once, when the program starts.
 var pinsFullText = fmt.Sprintf("the pins file is full (%d MiB)", pins.MaxFileSizeMiB)
 
-// pinsShareFullText is the text for a project server that does not fit in the
-// share of pins.json for project servers (pins.ErrProjectShareFull). Use
-// storeFullText to pick between it and pinsFullText. The size comes from
-// pins.ProjectShareMiB, the share that Set enforces. It is a var for the same
-// reason as pinsFullText.
-var pinsShareFullText = fmt.Sprintf("the project servers use all of their share of the pins file (%d MiB)", pins.ProjectShareMiB)
+// pinsShareFullText is the shared part of the three messages for a project
+// server that does not fit in the share of pins.json for project servers
+// (pins.ErrProjectShareFull): "the project share of the pins file is full
+// (16 MiB)". scan uses it at report time (reasonShareFull), and through
+// storeFullText at save time (setNewPins) and in pin (saveAccepted). The size
+// comes from pins.ProjectShareMiB, the share that Set enforces. It is a var
+// for the same reason as pinsFullText.
+var pinsShareFullText = fmt.Sprintf("the project share of the pins file is full (%d MiB)", pins.ProjectShareMiB)
 
 // storeFullText returns the text for an error of Set that wraps
 // pins.ErrStoreFull: pinsShareFullText when a project server did not fit in
@@ -187,6 +190,18 @@ func storeFullText(err error) string {
 		return pinsShareFullText
 	}
 	return pinsFullText
+}
+
+// storeFullFix returns what the user can do about an error of Set that wraps
+// pins.ErrStoreFull, to go after storeFullText. Only project servers count
+// toward the share, so for a share refusal it names them: removing a server of
+// the user scope frees no room in the share. The share check comes first, as
+// in storeFullText.
+func storeFullFix(err error) string {
+	if errors.Is(err, pins.ErrProjectShareFull) {
+		return "remove project servers you no longer use from pins.json"
+	}
+	return "remove servers you no longer use from pins.json"
 }
 
 // pinsLockedText is the line that readPinsLocked prints after the read error
@@ -202,9 +217,9 @@ const pinsLockedText = "another process is using the pins file; run the command 
 // text.
 const pinsRemovedText = "the pins file was removed while this command ran, so no pins were saved; run the command again"
 
-// saveFailure records an error of Set or Save that savePinned (scan) or
-// saveAccepted (pin) got while it held the pins lock. Neither
-// may print under the lock, so it keeps the failure here and prints it with
+// saveFailure records an error of Set or Save that setNewPins (for savePinned
+// in scan) or saveAccepted (pin) got while the pins lock was held. No output
+// may happen under the lock, so the failure is kept here and printed with
 // cmdErr after the release. what is the text before the error on that line,
 // for example "cannot save the pins file". The zero value means no failure.
 type saveFailure struct {

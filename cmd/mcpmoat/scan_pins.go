@@ -2,7 +2,6 @@ package main
 
 import (
 	"errors"
-	"fmt"
 	"path/filepath"
 
 	"github.com/Ducarv/mcpmoat/internal/discover"
@@ -200,19 +199,29 @@ func (c *cli) pinOutcomes(store *pins.Store, outcomes []inspect.Outcome, ign *sc
 	return p.res
 }
 
-// markStoreFull sets storeFull on each accept hint whose new tools do not fit
-// in pins.json (pins.ErrStoreFull, also when only the project share is full),
-// so the hint prints no command that "pin --accept" would refuse.
+// markStoreFull sets storeFull on each accept hint whose new tools (h.snap) do
+// not fit in pins.json (pins.ErrStoreFull), so the hint prints no command that
+// "pin --accept" would refuse. When only the share of the project servers is
+// full (pins.ErrProjectShareFull, which also wraps pins.ErrStoreFull), it sets
+// shareFull too, so the note of the hint names the project servers. The share
+// is tested first for that reason.
 //
-// Each hint gets its own Clone of p.budget, because pin --accept saves one
-// server at a time. Set on p.budget itself would be wrong: the budget must
-// hold only what savePinned will save, and a hint is only a proposal. Any
-// other error from Set leaves the hint as it is: pin --accept reports it.
+// Each hint is checked alone with CheckSet, because pin --accept saves one
+// server at a time. CheckSet runs the checks of Set but changes nothing, so
+// p.budget stays as it is by construction. Set on p.budget itself would be
+// wrong: the budget must hold only what savePinned will save, and a hint is
+// only a proposal. Any other error from CheckSet leaves the hint as it is:
+// pin --accept reports it.
 func (p *pinner) markStoreFull() {
 	for i := range p.res.hints {
-		err := p.budget.Clone().Set(p.res.hints[i].id, p.hintSnaps[i])
-		if errors.Is(err, pins.ErrStoreFull) {
-			p.res.hints[i].storeFull = true
+		h := &p.res.hints[i]
+		err := p.budget.CheckSet(h.id, h.snap)
+		switch {
+		case errors.Is(err, pins.ErrProjectShareFull):
+			h.storeFull = true
+			h.shareFull = true
+		case errors.Is(err, pins.ErrStoreFull):
+			h.storeFull = true
 		}
 	}
 }
@@ -229,13 +238,10 @@ type pinner struct {
 	// real store, to find a server that would make pins.json too large
 	// (pins.ErrStoreFull). The report is printed before the save, so this
 	// must be known before the save. Set on the copy never changes store, and
-	// the copy is never saved. markStoreFull checks the accept hints on clones
-	// of it, never on it.
+	// the copy is never saved. markStoreFull checks the accept hints against
+	// it with CheckSet, which never changes it.
 	budget *pins.Store
-	// hintSnaps holds the new pins of each server in res.hints, at the same
-	// index, for the budget check of markStoreFull.
-	hintSnaps []pins.ServerPins
-	res       pinReport
+	res    pinReport
 	// handled holds the servers that this run already checked or pinned. Two
 	// servers with one identity should not happen, but if they do, the second
 	// must not be compared with the pins of the first.
@@ -409,11 +415,12 @@ func (p *pinner) notInspected(s discover.Server, id pins.Identity, err error) {
 // firstPin also adds the pins to p.budget, a copy of the store. When the pins
 // would make pins.json larger than its size limit (pins.ErrStoreFull), the
 // server is not recorded either, and it gets the same high MOAT-T2-004 finding
-// with the fixed reason reasonStoreFull, or reasonShareFull when only the share
-// of the project servers is full (pins.ErrProjectShareFull). The report is printed before
-// savePinned runs, so firstPin must decide this now: otherwise the server
-// would be refused at the save with no finding in the report. The servers
-// before it stay in the budget, so the servers that fit are still pinned.
+// with the fixed reason reasonStoreFull, or reasonShareFull when only the
+// share of the project servers is full (pins.ErrProjectShareFull). The report
+// is printed before savePinned runs, so firstPin must decide this now:
+// otherwise the server would be refused at the save with no finding in the
+// report. The servers before it stay in the budget, so the servers that fit
+// are still pinned.
 func (p *pinner) firstPin(s discover.Server, id pins.Identity, tools []inspect.Tool) {
 	snap, err := pinnable(id, tools)
 	if err != nil {
@@ -446,10 +453,10 @@ func (p *pinner) firstPin(s discover.Server, id pins.Identity, tools []inspect.T
 // new tool, and a pinned tool whose pin cannot be checked, also gets a diff
 // (see appendDiff). The store is never changed. When at least one row is kept
 // (not ignored), compare also records the digest for the "--expect" hint
-// (see writeAcceptHints), and the new pins, so that markStoreFull can check
-// that they fit in pins.json. The hint says so when a kept diff was cut, or when
-// the ignore list dropped a row: the digest covers that change, but the report
-// shows no diff for it.
+// (see writeAcceptHints), and the new pins in the hint (acceptHint.snap), so
+// that markStoreFull can check that they fit in pins.json. The hint says so
+// when a kept diff was cut, or when the ignore list dropped a row: the digest
+// covers that change, but the report shows no diff for it.
 //
 // Tools that cannot be pinned (see pinnable) cannot be accepted either, so
 // they get no hint, and every row of the server gets the fix fixNotPinnable:
@@ -486,8 +493,8 @@ func (p *pinner) compare(s discover.Server, id pins.Identity, tools []inspect.To
 	}
 	if kept && pinErr == nil {
 		h.digest = pins.Digest(snap)
+		h.snap = snap
 		p.res.hints = append(p.res.hints, h)
-		p.hintSnaps = append(p.hintSnaps, snap)
 	}
 }
 
@@ -518,9 +525,10 @@ var reasonStoreFull = pinsFullText + ", so this server is not pinned"
 // reasonShareFull is the reason for a first-run project server whose pins
 // would make the project servers use more than their share of pins.json
 // (pins.ErrProjectShareFull, see firstPin). It must stay shorter than
-// report.MaxShortCellRunes, like reasonStoreFull. The size comes from
-// pins.ProjectShareMiB, so it is a var built with fmt.Sprintf.
-var reasonShareFull = fmt.Sprintf("the project share of the pins file is full (%d MiB); this server is not pinned", pins.ProjectShareMiB)
+// report.MaxShortCellRunes, like reasonStoreFull. It starts with
+// pinsShareFullText, so the size is written in one place. pinsShareFullText
+// is a var, so this is a var too.
+var reasonShareFull = pinsShareFullText + "; this server is not pinned"
 
 // Fixed risks for the MOAT-T2-004 rows that scan makes itself (see
 // addUnverified). They hold no server text.

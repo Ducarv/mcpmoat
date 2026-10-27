@@ -1,7 +1,7 @@
 package main
 
 // In-process tests of the save step of "mcpmoat scan" (savePinned): the notice
-// for a new pins file, the lock on the pins directory and its release before
+// for a new pins file, the pins lock (pins.json.lock) and its release before
 // the output, a pins file that was removed while scan ran, and the size limit
 // of pins.json (32 MiB) at report time and at save time. They use a fake
 // inspector, so no server starts, and they never call t.Setenv: each test has

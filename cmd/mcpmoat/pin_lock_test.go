@@ -1,7 +1,7 @@
 package main
 
 // In-process tests of the save step of "pin --accept": the notice for a new
-// pins file, the lock on the pins directory and its release before the
+// pins file, the pins lock (pins.json.lock) and its release before the
 // output, the size limit of pins.json (ErrStoreFull) and the share of the
 // project servers (ErrProjectShareFull), the warning when another run changed
 // the pins of the server while pin showed the diff, and a pins file that was
@@ -31,7 +31,7 @@ import (
 const pinsReadErrPrefix = "mcpmoat pin: cannot read the pins file: "
 
 // pinsLockedLine is the line that pin prints after pinsReadErrPrefix when
-// another process held the lock on the pins directory: pinsLockedText with
+// another process held the pins lock (pins.json.lock): pinsLockedText with
 // the pin prefix.
 const pinsLockedLine = pinPrefix + pinsLockedText + "\n"
 
@@ -299,14 +299,16 @@ func TestPinAcceptProjectShareFull(t *testing.T) {
 
 	got := e.pin(fake, "--accept", "projbig")
 
-	const share = "mcpmoat pin: cannot pin projbig: the project servers use all of their share of the pins file (16 MiB); " +
+	const share = "mcpmoat pin: cannot pin projbig: the project share of the pins file is full (16 MiB); " +
 		"remove project servers you no longer use from pins.json\n"
 	assertPinRun(t, got, scanWant{code: exitError, stderr: []string{share}})
 	if !strings.HasSuffix(got.stderr, share) {
 		t.Errorf("stderr = %q, want it to end with %q", got.stderr, share)
 	}
 	assertContainsNone(t, "stdout", got.stdout, []string{"accepted"})
-	assertContainsNone(t, "stderr", got.stderr, []string{"the pins file is full", "no pins file was found", "cannot save"})
+	// pinsFullText with its size: the share text also holds the words "the
+	// pins file is full", but not the size of the whole file.
+	assertContainsNone(t, "stderr", got.stderr, []string{pinsFullText, "no pins file was found", "cannot save"})
 	if after := fileDigest(t, e.pinsPath()); after != before {
 		t.Errorf("pins.json changed after a refused accept, want it byte for byte the same")
 	}
@@ -462,7 +464,7 @@ func TestPinAcceptPinsChangedDuringDiff(t *testing.T) {
 }
 
 // TestPinAcceptReleasesLockBeforeOutput checks that "pin --accept" releases the
-// lock on the pins directory right after the save, before it prints the new
+// pins lock (pins.json.lock) right after the save, before it prints the new
 // pins file notice and the "accepted" line. A slow or blocked reader of
 // stdout or stderr must not keep other runs from the pins file. The stdout
 // and the stderr of pin are lockProbeWriters: each write of one of those

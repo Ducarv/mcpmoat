@@ -181,10 +181,14 @@ func TestScanBudgetHintStoreFull(t *testing.T) {
 // first run that does not fit in the share gets one high MOAT-T2-004 row with
 // reasonShareFull and fixShareFull and is not pinned, while a server of the
 // user scope with the same tools is still pinned. The hint of a pinned project
-// server that grew past the share has storeFull.
+// server that grew past the share has storeFull and shareFull: in the text it
+// ends with hintShareFullNote, not with hintStoreFullNote, and in --json it
+// has the digest and no command.
 //
 // The table checks the budget of the hints (#220, markStoreFull): each hint
-// gets its own clone of the budget, after all first-run servers were added.
+// is checked alone against the budget, after all first-run servers were
+// added. The file itself has room, so every refusal in the table comes from
+// the share: shareFull must equal storeFull on each hint.
 func TestScanBudgetProjectShare(t *testing.T) {
 	t.Parallel()
 
@@ -231,9 +235,34 @@ func TestScanBudgetProjectShare(t *testing.T) {
 		if !slices.Equal(pinned, []string{"user-new"}) {
 			t.Errorf("pinned = %v, want [user-new]: the share does not apply to the user scope", pinned)
 		}
+		grownDigest := digestOf(t, grown...)
 		if len(pr.hints) != 1 || pr.hints[0].name != "pinned-proj" || !pr.hints[0].storeFull ||
-			pr.hints[0].digest != digestOf(t, grown...) {
-			t.Errorf("hints = %+v, want one hint for pinned-proj with storeFull and the digest of its tools", pr.hints)
+			!pr.hints[0].shareFull || pr.hints[0].digest != grownDigest {
+			// Not %+v of the hints: their snap holds bigStoreTool, many KiB.
+			var got []string
+			for _, h := range pr.hints {
+				got = append(got, fmt.Sprintf("{name %q, storeFull %v, shareFull %v, digest %s}", h.name, h.storeFull, h.shareFull, h.digest))
+			}
+			t.Fatalf("hints = %v, want one hint for pinned-proj with storeFull, shareFull and the digest %s", got, grownDigest)
+		}
+		// The text hint: the prose steps with the digest, and the share note.
+		// It must not tell the user to remove other servers (T2).
+		var b strings.Builder
+		if err := writeAcceptHints(&b, pr.hints, "", false); err != nil {
+			t.Fatalf("writeAcceptHints() error = %v, want nil", err)
+		}
+		wantLine := "To accept pinned-proj: run pin --accept with this server name and --expect " +
+			grownDigest + hintShareFullNote + "\n"
+		if got := b.String(); got != wantLine {
+			t.Errorf("accept hint = %q, want %q", got, wantLine)
+		}
+		if strings.Contains(b.String(), "remove other servers") {
+			t.Errorf("accept hint = %q tells the user to remove other servers, want only project servers", b.String())
+		}
+		// The --json accept object: the digest, and no command.
+		a := acceptOf(pinnedProj, hintsByID(pr.hints), "", false)
+		if a == nil || a.Digest != grownDigest || a.Command != "" {
+			t.Errorf("JSON accept = %+v, want the digest %q and no command", a, grownDigest)
 		}
 		for _, s := range []discover.Server{projNew, userNew} {
 			if _, found := store.Get(serverIdentity(s)); found {
@@ -316,6 +345,9 @@ func TestScanBudgetProjectShare(t *testing.T) {
 			gotFull := map[string]bool{}
 			for _, h := range pr.hints {
 				gotFull[h.name] = h.storeFull
+				if h.shareFull != h.storeFull {
+					t.Errorf("hint %s: shareFull = %v, storeFull = %v, want them equal (only the share is full)", h.name, h.shareFull, h.storeFull)
+				}
 			}
 			if !maps.Equal(gotFull, tt.wantFull) {
 				t.Errorf("storeFull of the hints = %v, want %v", gotFull, tt.wantFull)
@@ -362,7 +394,7 @@ func TestScanBudgetProjectShareAtSave(t *testing.T) {
 		t.Error("savePinned() = true, want false (a refused server gives exit code 2)")
 	}
 
-	want := scanWarnPrefix + "server proj-new not pinned: the project servers use all of their share of the pins file (16 MiB)\n" +
+	want := scanWarnPrefix + "server proj-new not pinned: the project share of the pins file is full (16 MiB)\n" +
 		pinnedLine("user-new", 1) + "\n"
 	if got := stderr.String(); got != want {
 		t.Errorf("stderr = %q, want %q", got, want)
@@ -375,5 +407,56 @@ func TestScanBudgetProjectShareAtSave(t *testing.T) {
 	slices.Sort(wantNames)
 	if names := bigPinsServerNames(t, e.pinsPath()); !slices.Equal(names, wantNames) {
 		t.Errorf("pinned servers = %v, want %v (proj-new is not pinned)", names, wantNames)
+	}
+}
+
+// TestStoreFullTexts checks the exact texts for a server that does not fit in
+// pins.json (pins.ErrStoreFull) or in the share of the project servers
+// (pins.ErrProjectShareFull, which also wraps pins.ErrStoreFull): the base
+// texts, the reasons of the report rows, and the fix of storeFullFix. The
+// docs copy these texts, so a change here must also change the docs. The
+// share error is tested in both orders of the wrap, and the share must win.
+func TestStoreFullTexts(t *testing.T) {
+	t.Parallel()
+
+	const (
+		fileText  = "the pins file is full (32 MiB)"
+		shareText = "the project share of the pins file is full (16 MiB)"
+		fileFix   = "remove servers you no longer use from pins.json"
+		shareFix  = "remove project servers you no longer use from pins.json"
+	)
+	if pinsFullText != fileText {
+		t.Errorf("pinsFullText = %q, want %q", pinsFullText, fileText)
+	}
+	if pinsShareFullText != shareText {
+		t.Errorf("pinsShareFullText = %q, want %q", pinsShareFullText, shareText)
+	}
+	if want := shareText + "; this server is not pinned"; reasonShareFull != want {
+		t.Errorf("reasonShareFull = %q, want %q", reasonShareFull, want)
+	}
+	if want := fileText + ", so this server is not pinned"; reasonStoreFull != want {
+		t.Errorf("reasonStoreFull = %q, want %q", reasonStoreFull, want)
+	}
+
+	tests := []struct {
+		name     string
+		err      error
+		wantText string
+		wantFix  string
+	}{
+		{name: "file", err: fmt.Errorf("set: %w", pins.ErrStoreFull), wantText: fileText, wantFix: fileFix},
+		{name: "share", err: fmt.Errorf("set: %w: %w", pins.ErrProjectShareFull, pins.ErrStoreFull), wantText: shareText, wantFix: shareFix},
+		{name: "share wrapped last", err: fmt.Errorf("set: %w: %w", pins.ErrStoreFull, pins.ErrProjectShareFull), wantText: shareText, wantFix: shareFix},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if got := storeFullText(tt.err); got != tt.wantText {
+				t.Errorf("storeFullText() = %q, want %q", got, tt.wantText)
+			}
+			if got := storeFullFix(tt.err); got != tt.wantFix {
+				t.Errorf("storeFullFix() = %q, want %q", got, tt.wantFix)
+			}
+		})
 	}
 }

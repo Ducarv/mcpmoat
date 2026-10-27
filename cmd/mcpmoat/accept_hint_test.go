@@ -114,6 +114,8 @@ func TestWriteAcceptHintsMatchesAdvice(t *testing.T) {
 		{name: "badproject", digest: testDigest, project: "/my p"},
 		{name: "full", digest: testDigest, storeFull: true},
 		{name: "fullcut", digest: testDigest, truncated: true, storeFull: true},
+		{name: "share", digest: testDigest, storeFull: true, shareFull: true},
+		{name: "sharecut", digest: testDigest, truncated: true, storeFull: true, shareFull: true},
 	}
 	tests := []struct {
 		name          string
@@ -149,7 +151,10 @@ func TestWriteAcceptHintsMatchesAdvice(t *testing.T) {
 				if h.noText {
 					want += hintNoTextNote
 				}
-				if h.storeFull {
+				switch {
+				case h.shareFull:
+					want += hintShareFullNote
+				case h.storeFull:
 					want += hintStoreFullNote
 				}
 				if lines[i] != want {
@@ -167,6 +172,13 @@ func TestWriteAcceptHintsMatchesAdvice(t *testing.T) {
 // see. A hint without storeFull keeps its command and gets no such note. The
 // name before the colon still goes through cutName: a name with control
 // characters is escaped, and a long name is cut.
+//
+// When only the share of the project servers is full (shareFull), the line
+// ends with hintShareFullNote instead. It must not tell the user to remove
+// other servers: removing a server of the user scope frees no room in the
+// share, and that server would then be pinned again with no alert (T2). A
+// hint with shareFull but not storeFull cannot come from markStoreFull, but
+// it must not give a command either.
 func TestWriteAcceptHintsStoreFull(t *testing.T) {
 	t.Parallel()
 
@@ -208,6 +220,26 @@ func TestWriteAcceptHintsStoreFull(t *testing.T) {
 			hint: acceptHint{name: long, digest: testDigest, storeFull: true},
 			want: "To accept " + cutName(long) + ": " + steps + hintStoreFullNote,
 		},
+		{
+			name: "project share full",
+			hint: acceptHint{name: "srv", digest: testDigest, storeFull: true, shareFull: true},
+			want: "To accept srv: " + steps + hintShareFullNote,
+		},
+		{
+			name: "project share full after the notes of unseen changes",
+			hint: acceptHint{name: "srv", digest: testDigest, truncated: true, ignored: true, noText: true, storeFull: true, shareFull: true},
+			want: "To accept srv: " + steps + hintCutNote + hintIgnoredNote + hintNoTextNote + hintShareFullNote,
+		},
+		{
+			name: "project share full alone",
+			hint: acceptHint{name: "srv", digest: testDigest, shareFull: true},
+			want: "To accept srv: " + steps + hintShareFullNote,
+		},
+		{
+			name: "project share full with control characters in the name",
+			hint: acceptHint{name: hostile, digest: testDigest, storeFull: true, shareFull: true},
+			want: "To accept " + cutName(hostile) + ": " + steps + hintShareFullNote,
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -221,13 +253,21 @@ func TestWriteAcceptHintsStoreFull(t *testing.T) {
 				t.Errorf("writeAcceptHints() = %q, want %q", got, tt.want+"\n")
 			}
 			assertTerminalSafe(t, got)
-			if tt.hint.storeFull && strings.Contains(got, "mcpmoat pin --accept") {
+			full := tt.hint.storeFull || tt.hint.shareFull
+			if full && strings.Contains(got, "mcpmoat pin --accept") {
 				t.Errorf("writeAcceptHints() = %q holds a command, want none when pins.json is full", got)
 			}
-			if n := strings.Count(got, hintStoreFullNote); n != boolCount(tt.hint.storeFull) {
-				t.Errorf("writeAcceptHints() has the full note %d times, want %d", n, boolCount(tt.hint.storeFull))
+			fileFull := tt.hint.storeFull && !tt.hint.shareFull
+			if n := strings.Count(got, hintStoreFullNote); n != boolCount(fileFull) {
+				t.Errorf("writeAcceptHints() has the full note %d times, want %d", n, boolCount(fileFull))
 			}
-			if _, isCommand := acceptAdvice(tt.hint, "", false); tt.hint.storeFull && isCommand {
+			if n := strings.Count(got, hintShareFullNote); n != boolCount(tt.hint.shareFull) {
+				t.Errorf("writeAcceptHints() has the share note %d times, want %d", n, boolCount(tt.hint.shareFull))
+			}
+			if tt.hint.shareFull && strings.Contains(got, "remove other servers") {
+				t.Errorf("writeAcceptHints() = %q tells the user to remove other servers, want only project servers when the share is full", got)
+			}
+			if _, isCommand := acceptAdvice(tt.hint, "", false); full && isCommand {
 				t.Errorf("acceptAdvice() isCommand = true, want false when pins.json is full")
 			}
 		})

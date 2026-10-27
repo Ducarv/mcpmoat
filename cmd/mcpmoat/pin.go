@@ -269,23 +269,24 @@ func (c *cli) acceptTools(ctx context.Context, server discover.Server, tools []i
 // saveAccepted writes nothing on stdout or stderr while it holds the lock, so
 // a blocked stdout or stderr never holds the lock. While it holds the lock, it
 // only notes what to print: whether the pins changed, and the error of Set or
-// Save (a saveFailure). It releases the lock right after the Save, or right after the step
-// that failed, and only then prints, in this order: the warning, the error,
-// and on success the new pins file notice and the "accepted" line.
+// Save (a saveFailure). It releases the lock right after the Save, or right
+// after the step that failed, and only then prints, in this order: the
+// warning, the error, and on success the new pins file notice and the
+// "accepted" line.
 //
 // This is the second check for a removed pins file (see acceptTools). When the
 // file existed at the read for the diffs (shown), and the locked read does not
-// find it, it was removed while pin showed the diffs: saveAccepted saves nothing, prints pinsRemovedText after the release
-// and gives exit code 2. A file that is missing at every read is a real first
-// run: the save creates it.
+// find it, it was removed while pin showed the diffs: saveAccepted saves
+// nothing, prints pinsRemovedText after the release and gives exit code 2. A
+// file that is missing at every read is a real first run: the save creates it.
 //
 // A Set that would make pins.json larger than its size limit
 // (pins.ErrStoreFull) saves nothing and gives exit code 2, with a message that
 // tells the user to remove old servers. When a project server does not fit in
 // the share of the project servers (pins.ErrProjectShareFull), the message
-// says so and tells the user to remove old project servers. When the save created a new pins file,
-// saveAccepted prints a notice before the "accepted" line (see
-// printNewPinsFile).
+// says so and tells the user to remove old project servers (see storeFullText
+// and storeFullFix). When the save created a new pins file, saveAccepted
+// prints a notice before the "accepted" line (see printNewPinsFile).
 func (c *cli) saveAccepted(ctx context.Context, name string, id pins.Identity, tools []inspect.Tool, snap pins.ServerPins, shown *pins.Store) int {
 	store, release, ok := c.readPinsLocked(ctx, "pin")
 	// release is never nil. Each path below calls release before it prints.
@@ -323,13 +324,9 @@ func (c *cli) saveAccepted(ctx context.Context, name string, id pins.Identity, t
 	// Only Set returns ErrStoreFull. It gets its own fixed line, so this check
 	// comes before the general one. A refusal for the project share also
 	// matches ErrStoreFull. Only project servers count toward the share, so
-	// its fix names them.
+	// storeFullText and storeFullFix name them then.
 	if errors.Is(fail.err, pins.ErrStoreFull) {
-		fix := "remove servers you no longer use from pins.json"
-		if errors.Is(fail.err, pins.ErrProjectShareFull) {
-			fix = "remove project servers you no longer use from pins.json"
-		}
-		c.cmdPrintf("pin", "cannot pin %s: %s; %s", name, storeFullText(fail.err), fix)
+		c.cmdPrintf("pin", "cannot pin %s: %s; %s", name, storeFullText(fail.err), storeFullFix(fail.err))
 		return exitError
 	}
 	if fail.failed() {
