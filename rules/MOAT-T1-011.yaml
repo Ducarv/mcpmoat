@@ -8,7 +8,7 @@ target: schema
 match:
   heuristic: mixed_script
 risk: Look-alike letters from another script in the input schema can hide an instruction from the pattern rules, while the model still reads the word.
-remediation: Remove the server or do not use it. Read every field of the input schema, and check the word at the offset that mcpmoat reports for letters from another script. Report the server to its author. If the word is real math or science notation (such as Delta-t), ignore this rule for that tool only. Add the line MOAT-T1-011 server/tool to .mcpmoat-ignore, using the exact server and tool names. Do not use --ignore, because it hides the rule on every server.
+remediation: Remove the server or do not use it. Read every field of the input schema, and check the word at the offset that mcpmoat reports for letters from another script. Report the server to its author. If the word is real math or science notation (such as Delta-t), ignore this rule for that tool only. Add the line MOAT-T1-011 server/tool to .mcpmoat-ignore, using the exact server and tool names, and run scan with --use-ignore-file. Do not use --ignore, because it hides the rule on every server.
 references:
   - https://invariantlabs.ai/blog/mcp-security-notification-tool-poisoning-attacks
   - https://www.unicode.org/reports/tr39/

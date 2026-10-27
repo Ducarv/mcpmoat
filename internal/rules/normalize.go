@@ -81,79 +81,56 @@ func isInvisibleFormat(r rune) bool {
 // The base forms are the forms that the regex and keyword matchers read
 // before the fold (see preparedText). A matcher reports a match when one form
 // matches. Each form is at most MaxMatchInputBytes long, and equal forms are
-// kept only once (see appendNew), so there are at most maxBaseForms forms. The conditions below look only at the part of s
-// that normalizeForMatch reads (the first maxRawScanBytes).
+// kept only once (see appendNew), so there are at most maxBaseForms forms.
+// The conditions below look only at the part of s that normalizeForMatch
+// reads (the first maxRawScanBytes).
 //
-// The forms 1 to 3 read the escape sequences with ansiSeq, which takes no C0
-// control rune inside a CSI. The forms 4 to 7 read them with ansiSeqC0,
-// which does, as a terminal does. ansiSeqC0 can take more of the text into a
-// sequence: ESC [ LF "<IMPORTANT>" is the CSI ESC [ LF < I for ansiSeqC0,
-// and the text "MPORTANT>". ansiSeq does not read it as a CSI, so the forms 1
-// to 3 keep "[" LF "<IMPORTANT>". So the forms 4 to 7 only add matches: a
-// text that the forms 1 to 3 match is not lost.
+// baseFormsCut builds one form for each formMode that s needs, in the order
+// of the formMode constants (see formFlags.modes). The comments of this
+// package name a form by its mode: the spaceInvisible form is the form that
+// spaceInvisible builds. The doc of each mode tells how its form handles the
+// invisible runes and the escape sequences, with examples. The list gives the
+// condition for each form (formFlags.modes checks it; see isInvisibleControl,
+// isInvisibleFormat, startsSeq and formFlags.hasSeqC0):
 //
-//  1. Always: normalizeForMatch(s). The invisible runes are dropped, so "ign"
-//     + ZWSP + "ore" is "ignore" (see dropInvisible).
-//  2. When s holds an invisible rune: each run of invisible runes is one
-//     space instead, so "ignore" + ZWSP + "previous" is "ignore previous"
-//     and a keyword edge next to a ZWSP still holds (see spaceInvisible).
-//  3. When s holds an invisible control rune (see isInvisibleControl): the
-//     format runes are dropped and each run of control runes is one space
-//     (see spaceControls). So "Ig" + ZWSP + "nore" + U+0001 + "previous" is
-//     "Ignore previous": the ZWSP joins a word and the control rune splits
-//     two words.
-//  4. When s holds an invisible control rune and a format rune (see
-//     isInvisibleFormat): the control runes are dropped and each run that
-//     holds a format rune is one space (see spaceFormats). So "Ig" + U+0001
-//     + "nore" + ZWSP + "all" is "Ignore all": the control rune joins a word
-//     and the ZWSP splits two words. In ESC + ZWSP + "[8mIgnore" + ZWSP +
-//     "all", the space goes before the ESC, so ESC [ 8 m is still a CSI and
-//     the form is "  Ignore all".
-//  5. When s holds ESC, U+009B (CSI) or U+009D (OSC) (see startsSeq): as
-//     the first form, but the sequences are read with ansiSeqC0 and a
-//     sequence gives back the text that it takes (see keepSeqText and
-//     seqText). A CSI whose final byte is an ASCII letter other than 'm'
-//     becomes a space, its parameter bytes < = > ? and its intermediate
-//     bytes (such as "." and "/"), and its final letter. So ESC [ "Ignore"
-//     is " Ignore", ESC [ "<IMPORTANT>" is " <IMPORTANT>" and ESC [ ".env"
-//     is " .env". Its numeric parameter bytes (digits, ";" and ":") are
-//     dropped, so ESC [ 2 K is " K". A CSI with the final 'm' is SGR (colour
-//     and bold): it becomes nothing, as a terminal shows it. So ESC [ 1 m
-//     "iPhone" is "iPhone", not "miPhone", and "Ig" + ESC [ 0 m + "nore" is
-//     "Ignore". An OSC becomes its text between two spaces, with each CSI
-//     in that text read in the same way: ESC ] "Ignore all" BEL is
-//     " Ignore all ", and ESC ] + U+009B + "8mIgnore" BEL is " Ignore ".
-//  6. When s holds ESC or U+009B and a C0 control rune of csiC0 (see
-//     formFlags.hasSeqC0): as the first form, but a CSI can hold C0 control
-//     runes (see dropSeqC0). So ESC + U+0001 + "[8mIgnore" is " Ignore": the
-//     first form keeps "[8mIgnore", which has no word edge before "Ignore".
-//  7. When s holds ESC, U+009B or U+009D (see startsSeq): the ANSI step of
-//     the fifth form with the runs of the second form (see
-//     keepSeqTextSpaced). So each run of invisible runes is a space, also
-//     inside the text that a sequence gives back: ESC ] "Ignore" + ZWSP +
-//     "all" BEL is " Ignore all ", and ESC [ "Ignore" + U+0001 + "all" is
-//     " Ignore all". An ESC or U+009D that starts no sequence is such a run
-//     too, so ESC [ "Ignore" + ESC + "all" is " Ignore all". As in the
-//     fourth form, the space of a run goes before an ESC at its end (see
-//     placeOnce), so "run" + ZWSP + ESC [ 1 m + "ning" is "run ning", not
-//     "running".
+//  1. Always: see dropInvisible.
+//  2. When s holds an invisible rune: see spaceInvisible.
+//  3. When s holds an invisible control rune: see spaceControls.
+//  4. When s holds an invisible control rune and a format rune: see spaceFormats.
+//  5. When s holds ESC, U+009B (CSI) or U+009D (OSC): see keepSeqText.
+//  6. When s holds ESC or U+009B and a C0 control rune of csiC0: see dropSeqC0.
+//  7. When s holds ESC, U+009B or U+009D: see keepSeqTextSpaced.
 //
-// In the forms 2 to 4 and 7, at most two spaces stand for a whole run of
-// invisible runes (two only in the second form, for a run that has a
-// control rune and ends with a format rune, and in the seventh form, for a
-// run that has a control rune and a format rune, see replaceRuns). So
-// invisible padding cannot push a payload out of the MaxMatchInputBytes
-// window of these forms either.
+// The dropInvisible, spaceInvisible and spaceControls forms are the
+// strict-reading forms: they read the escape sequences with ansiSeq, which
+// takes no C0 control rune inside a CSI. When the text holds more than
+// maxStrictOSCStarts U+009D, they read them with ansiSeqFast instead, which
+// differs from ansiSeq only in the text of an OSC (see ansiSeqFast and the
+// cut flag below). The other four forms are the ansiSeqC0 forms: they read
+// the sequences with ansiSeqC0, which takes C0 control runes inside a CSI, as
+// a terminal does. ansiSeqC0 can take more of the text into a sequence:
+// ESC [ LF "<IMPORTANT>" is the CSI ESC [ LF < I for ansiSeqC0, and the text
+// "MPORTANT>". ansiSeq does not read it as a CSI, so the strict-reading forms
+// keep "[" LF "<IMPORTANT>". So the ansiSeqC0 forms only add matches: a text
+// that the strict-reading forms match is not lost.
 //
-// Some texts still defeat all the forms, and the fifth form can make a
+// In the spaceInvisible, spaceControls, spaceFormats and keepSeqTextSpaced
+// forms, at most two spaces stand for a whole run of invisible runes (two
+// only in the spaceInvisible form, for a run that has a control rune and ends
+// with a format rune, and in the keepSeqTextSpaced form, for a run that has a
+// control rune and a format rune, see replaceRuns). So invisible padding
+// cannot push a payload out of the MaxMatchInputBytes window of these forms
+// either.
+//
+// Some texts still defeat all the forms, and the keepSeqText form can make a
 // token from a rare CSI that a terminal does not show (a false positive).
-// docs/writing-rules.md ("How mcpmoat prepares the text") is the one list of both,
-// with examples. The "known limit" cases of TestMatchForms pin them, and the
-// invisible_unicode heuristic flags each such text in a description.
+// docs/writing-rules.md ("How mcpmoat prepares the text") is the one list of
+// both, with examples. The "known limit" cases of TestMatchForms pin them, and
+// the invisible_unicode heuristic flags each such text in a description.
 //
-// An OSC with more than 256 runes of text is not an OSC for ansiSeq or
-// ansiSeqC0. So its ESC and its end are dropped, and its text stays in every
-// form, after its "]": the matchers read that text.
+// An OSC with more than 256 runes of text is not an OSC for ansiSeq,
+// ansiSeqFast or ansiSeqC0. So its ESC and its end are dropped, and its text
+// stays in every form, after its "]": the matchers read that text.
 //
 // A text without invisible runes and escape sequences has one form, so it
 // costs no more. A text with them is matched up to maxBaseForms times, which
@@ -165,15 +142,26 @@ func isInvisibleFormat(r rune) bool {
 // maxRawScanBytes, or when step 6 or step 9 of normalizeForMatch cuts a form
 // at MaxMatchInputBytes (see buildFormCut).
 //
-// The flag checks each form, not only the first, also a form that appendNew
-// drops because it equals an earlier one. The other forms can be longer than
-// the first: in the second form each run of invisible runes becomes a space
-// instead of nothing. So invisible padding can push a payload out of the
-// window of one form only.
+// The flag is also set when s holds more than maxStrictOSCStarts U+009D (see
+// formFlags.manyOSCStarts). Then the strict-reading forms read with
+// ansiSeqFast, and an OSC whose text holds U+009D is not one sequence for
+// them: "Ignore all previous" + ESC "]x" + U+009D + BEL + "instructions"
+// keeps "]x", so these forms can miss a match that ansiSeq gives. ansiSeq is
+// too slow for such a text (see the cost comment in match.go). No real
+// description holds so many C1 OSC starts, and without the flag an attacker
+// could add them to any text to get this miss. So match_window flags the
+// text.
 //
-// For a mode that keeps the text of escape sequences (the fifth and the
-// seventh form, see keepsSeqText), the flag checks the form without the text
-// of each OSC: baseFormsCut builds the form a second time with
+// The flag checks each form, not only the first (the dropInvisible form),
+// also a form that appendNew drops because it equals an earlier one. The
+// other forms can be longer than the dropInvisible form: in the
+// spaceInvisible form each run of invisible runes becomes a space instead of
+// nothing. So invisible padding can push a payload out of the window of one
+// form only.
+//
+// For a mode that keeps the text of escape sequences (keepSeqText and
+// keepSeqTextSpaced, see keepsSeqText), the flag checks the form without the
+// text of each OSC: baseFormsCut builds the form a second time with
 // ansiKeepCSIText, only for the cut flag. So the letters that a CSI gives
 // back and the spaces around an OSC count, and padding with ESC [ A or with
 // empty OSCs cannot push a payload out of the window of these forms. The
@@ -186,10 +174,11 @@ func isInvisibleFormat(r rune) bool {
 // build, so the forms and the flag come from one call. preparedText calls it
 // once for each text (see preparedText.buildBase).
 func baseFormsCut(s string) (forms []string, cut bool) {
-	cut = len(s) > maxRawScanBytes
+	f := rawFormFlags(s)
+	cut = len(s) > maxRawScanBytes || f.manyOSCStarts()
 	forms = make([]string, 0, maxBaseForms)
-	for _, mode := range formModes(s) {
-		form, formCut := buildFormCut(s, mode, mode.ansiStep)
+	for _, mode := range f.modes() {
+		form, formCut := buildFormCut(s, mode, mode.ansiStepFor(f))
 		if mode.keepsSeqText() {
 			_, formCut = buildFormCut(s, mode, ansiKeepCSIText)
 		}
@@ -203,13 +192,12 @@ func baseFormsCut(s string) (forms []string, cut bool) {
 // one form for each formMode, 7 in all.
 const maxBaseForms = int(keepSeqTextSpaced) + 1
 
-// formModes returns the modes of the forms that baseFormsCut builds for s:
-// dropInvisible always, and then each other mode that s needs. The order of
-// the list sets the form numbers of baseFormsCut, so it follows the order of
-// the formMode constants. It reads the part of s that normalizeForMatch reads
-// (the first maxRawScanBytes) in one loop (see scanFormFlags).
-func formModes(s string) []formMode {
-	f := scanFormFlags(cutAtRune(s, maxRawScanBytes))
+// modes returns the modes of the forms that baseFormsCut builds for a text
+// with the flags f: dropInvisible always, and then each other mode that the
+// text needs. The order of the list sets the order of the forms of
+// baseFormsCut (and the form numbers of docs/writing-rules.md), so it
+// follows the order of the formMode constants.
+func (f formFlags) modes() []formMode {
 	modes := []formMode{dropInvisible}
 	if f.control || f.format {
 		modes = append(modes, spaceInvisible)
@@ -232,47 +220,76 @@ func formModes(s string) []formMode {
 	return modes
 }
 
-// formFlags tells formModes which kinds of runes a text holds.
+// formFlags tells baseFormsCut which kinds of runes a text holds (see
+// rawFormFlags and formFlags.modes).
 //
 // seqStart is true when the text holds a rune that can start an ANSI escape
 // sequence in ansiSeqC0: ESC, U+009B (CSI) or U+009D (OSC) (see startsSeq).
-// baseFormsCut adds the fifth and the seventh form only then. Such a rune is
-// also an invisible control rune, so the seventh form can differ from the
-// fifth even when the text holds no other invisible rune: a lone ESC is
-// dropped in the fifth form and is a space in the seventh. appendNew drops
-// the seventh form when it equals another form.
+// baseFormsCut adds the keepSeqText and keepSeqTextSpaced forms only then.
+// Such a rune is also an invisible control rune, so the keepSeqTextSpaced
+// form can differ from the keepSeqText form even when the text holds no other
+// invisible rune: a lone ESC is dropped in the keepSeqText form and is a
+// space in the keepSeqTextSpaced form. appendNew drops the keepSeqTextSpaced
+// form when it equals another form.
+//
+// oscStarts counts the U+009D of the text, up to maxStrictOSCStarts+1 (see
+// manyOSCStarts). It tells baseFormsCut which regex the strict-reading forms
+// read with, and whether it sets the cut flag for that reason.
 type formFlags struct {
-	control  bool // an invisible control rune (see isInvisibleControl)
-	format   bool // an invisible format rune (see isInvisibleFormat)
-	seqStart bool // ESC, U+009B or U+009D (see startsSeq)
-	csiStart bool // ESC or U+009B (see startsCSI)
-	csiC0    bool // a C0 control rune of csiC0 (see isCSIC0)
+	control   bool // an invisible control rune (see isInvisibleControl)
+	format    bool // an invisible format rune (see isInvisibleFormat)
+	seqStart  bool // ESC, U+009B or U+009D (see startsSeq)
+	csiStart  bool // ESC or U+009B (see startsCSI)
+	csiC0     bool // a C0 control rune of csiC0 (see isCSIC0)
+	oscStarts int  // the number of U+009D, at most maxStrictOSCStarts+1
 }
 
-// allSet reports whether every flag of f is true. Then scanFormFlags can
-// stop, because more runes cannot change f.
+// allSet reports whether every flag of f is true and the count of U+009D is
+// above maxStrictOSCStarts. Then scanFormFlags can stop, because more runes
+// cannot change f.
 func (f formFlags) allSet() bool {
-	return f.control && f.format && f.seqStart && f.csiStart && f.csiC0
+	return f.control && f.format && f.seqStart && f.csiStart && f.csiC0 && f.manyOSCStarts()
+}
+
+// manyOSCStarts reports whether the text holds more than maxStrictOSCStarts
+// U+009D. Then the strict-reading forms of baseFormsCut read the sequences
+// with ansiSeqFast, not ansiSeq, and baseFormsCut sets the cut flag.
+func (f formFlags) manyOSCStarts() bool {
+	return f.oscStarts > maxStrictOSCStarts
 }
 
 // hasSeqC0 reports whether the text holds ESC or U+009B, which start a CSI,
-// and a C0 control rune of csiC0. baseFormsCut adds the sixth form only then.
-// Without both, ansiSeqC0 finds the same CSIs as ansiSeq. It is a cheap
+// and a C0 control rune of csiC0. baseFormsCut adds the dropSeqC0 form only
+// then. Without both, ansiSeqC0 finds the same CSIs as ansiSeq. It is a cheap
 // check: the two runes need not be in the same sequence, and appendNew drops
-// the sixth form when it equals another form.
+// the dropSeqC0 form when it equals another form.
 //
 // ansiSeq and ansiSeqC0 differ in one more way: in ansiSeqC0, a U+009D ends
-// the text of an OSC (see oscExprC0). So without a C0 rune, the sixth form
-// can still differ from the first, when an OSC text holds U+009D. It is not
-// built then, but the fifth and the seventh form read the same sequences
-// with ansiSeqC0 and keep more of the text, so no match is lost.
+// the text of an OSC (see oscExprC0). So without a C0 rune, the dropSeqC0
+// form can still differ from the dropInvisible form, when an OSC text holds
+// U+009D. It is not built then, but the keepSeqText and keepSeqTextSpaced
+// forms read the same sequences with ansiSeqC0 and keep more of the text, so
+// no match is lost. When the text holds more than maxStrictOSCStarts U+009D,
+// the dropInvisible form reads with ansiSeqFast, whose OSC is the OSC of
+// ansiSeqC0, so this difference goes away.
 func (f formFlags) hasSeqC0() bool {
 	return f.csiStart && f.csiC0
+}
+
+// rawFormFlags returns the flags of the part of s that normalizeForMatch
+// reads (the first maxRawScanBytes), in one loop (see scanFormFlags).
+func rawFormFlags(s string) formFlags {
+	return scanFormFlags(cutAtRune(s, maxRawScanBytes))
 }
 
 // scanFormFlags reads s one rune at a time, in one loop, and returns the
 // flags of formFlags. Invalid UTF-8 is read as U+FFFD (utf8.RuneError), as
 // strings.ContainsFunc and the regexp package read it. U+FFFD sets no flag.
+//
+// It also counts the U+009D of s, and stops the count at
+// maxStrictOSCStarts+1. It stops reading s only when all the flags are set
+// and the count is above maxStrictOSCStarts (see allSet), so the count is
+// right for every text, and the cost stays one pass over s.
 func scanFormFlags(s string) formFlags {
 	var f formFlags
 	for _, r := range s {
@@ -294,22 +311,14 @@ func scanFormFlags(s string) formFlags {
 		if isCSIC0(r) {
 			f.csiC0 = true
 		}
+		if r == '\u009d' && !f.manyOSCStarts() {
+			f.oscStarts++
+		}
 		if f.allSet() {
 			break
 		}
 	}
 	return f
-}
-
-// isCSIC0 reports whether r is a C0 control rune of csiC0: U+0000 to U+0017,
-// U+0019, U+001C to U+001F, or DEL (U+007F). It is the regex class csiC0 as a
-// plain rune check, so scanFormFlags needs no regex.
-func isCSIC0(r rune) bool {
-	switch {
-	case r >= 0x00 && r <= 0x17, r == 0x19, r >= 0x1c && r <= 0x1f, r == 0x7f:
-		return true
-	}
-	return false
 }
 
 // appendNew appends f to forms when forms does not hold it yet.
@@ -332,8 +341,13 @@ func isASCII(s string) bool {
 
 // normalizeForMatch returns the form of s that the regex and keyword matchers
 // read. So "ign" + ZWSP (U+200B) + "ore previous" still matches the keyword
-// "ignore previous". It is buildForm(s, dropInvisible), the first
-// form of baseFormsCut.
+// "ignore previous". It is buildForm(s, dropInvisible), the dropInvisible
+// form of baseFormsCut up to maxStrictOSCStarts U+009D. It always reads the
+// escape sequences with the strict ansiSeq (step 3), also above that count,
+// where the dropInvisible form of baseFormsCut reads with ansiSeqFast (see
+// formMode.ansiStepFor). Its callers are the keywords of a rule (see
+// keywordExpr), at most MaxPatternBytes each, so the cost of ansiSeq is
+// small there. The tests also call it.
 //
 // It works in nine steps:
 //
@@ -366,8 +380,8 @@ func isASCII(s string) bool {
 // [ I, which ansiSeq reads as a CSI that hides the "I". A terminal reads a
 // C0 rune inside a CSI in another way: it runs the rune and goes on with the
 // sequence, so ESC [ U+0001 8 m still hides the text after it. ansiSeq does
-// not match such a sequence, so this form keeps "[8m". The forms 4 to 7 of
-// baseFormsCut read it with ansiSeqC0 (see dropSeqC0). The invisible_unicode
+// not match such a sequence, so this form keeps "[8m". The ansiSeqC0 forms
+// of baseFormsCut read it with ansiSeqC0 (see dropSeqC0). The invisible_unicode
 // heuristic flags its ESC in a description.
 //
 // Step 2 comes before NFC, so an invisible rune cannot block composition:
@@ -389,48 +403,78 @@ func normalizeForMatch(s string) string {
 type formMode int
 
 const (
-	// dropInvisible drops every invisible rune. It builds the first form,
-	// the form of normalizeForMatch.
+	// dropInvisible drops every invisible rune. It builds the form of
+	// normalizeForMatch, which baseFormsCut always builds and puts first. So
+	// "ign" + ZWSP + "ore" is "ignore".
 	dropInvisible formMode = iota
 	// spaceInvisible replaces each run of invisible runes, of any kind, with
 	// one U+0020, or with two when the run has a control rune and ends with
-	// a format rune (see replaceRuns). It builds the second form.
+	// a format rune (see replaceRuns). So "ignore" + ZWSP + "previous" is
+	// "ignore previous", and a keyword edge next to a ZWSP still holds.
 	spaceInvisible
 	// spaceControls drops the format runes (see isInvisibleFormat), and
 	// replaces each run of invisible control runes with one U+0020. The
 	// dropped runes do not end a run, so U+0001 + ZWSP + U+0001 is one
-	// space. It builds the third form.
+	// space. So "Ig" + ZWSP + "nore" + U+0001 + "previous" is "Ignore
+	// previous": the ZWSP joins a word and the control rune splits two words.
 	spaceControls
 	// spaceFormats replaces each run of invisible runes that holds a format
 	// rune with one U+0020, and drops the control runes. A run of only
 	// control runes becomes nothing. The control runes of a run stay in the
 	// text until the ANSI step, and the space goes before them when one of
 	// them is ESC, U+009B or U+009D, so that the sequence it starts is still
-	// found (see placeOnce). Its ANSI step reads the sequences with
-	// ansiSeqC0. It builds the fourth form.
+	// found (see placeOnce). A run inside a CSI, after the ESC (or U+009B)
+	// and before the final byte, gets no space, for the same reason, except
+	// the run that holds the ESC or U+009B itself (see csiFinalIndex). Its
+	// ANSI step reads the sequences with ansiSeqC0.
+	//
+	// So "Ig" + U+0001 + "nore" + ZWSP + "all" is "Ignore all": the control
+	// rune joins a word and the ZWSP splits two words. ESC + ZWSP +
+	// "[8mIgnore" + ZWSP + "all" is "  Ignore all": the space goes before the
+	// ESC, so ESC [ 8 m is still a CSI. And ESC [ + ZWSP + "8mIgnore" + ZWSP +
+	// "all" is " Ignore all", not "[ 8mIgnore all".
 	spaceFormats
 	// keepSeqText drops every invisible rune, as dropSeqC0 does, but it
-	// keeps the text that an escape sequence takes (see seqText): a CSI
-	// whose final byte is a letter gives back that letter and its parameter
-	// bytes < = > ? and its intermediate bytes, an SGR (final 'm') becomes
-	// nothing, and an OSC becomes its text between two U+0020. Its ANSI
-	// step reads the sequences with ansiSeqC0 (see ansiKeepText). It builds
-	// the fifth form.
+	// keeps the text that an escape sequence takes (see seqText). Its ANSI
+	// step reads the sequences with ansiSeqC0 (see ansiKeepText):
+	//
+	//   - a CSI whose final byte is an ASCII letter other than 'm' becomes a
+	//     U+0020, its parameter bytes < = > ? and its intermediate bytes (such
+	//     as "." and "/"), and its final letter. So ESC [ "Ignore" is
+	//     " Ignore", ESC [ "<IMPORTANT>" is " <IMPORTANT>" and ESC [ ".env" is
+	//     " .env". Its numeric parameter bytes (digits, ";" and ":") are
+	//     dropped, so ESC [ 2 K is " K";
+	//   - an SGR (a CSI with the final byte 'm': colour and bold) becomes
+	//     nothing, as a terminal shows it. So ESC [ 1 m "iPhone" is "iPhone",
+	//     not "miPhone", and "Ig" + ESC [ 0 m + "nore" is "Ignore";
+	//   - an OSC becomes its text between two U+0020, with each CSI in that
+	//     text read in the same way. So ESC ] "Ignore all" BEL is
+	//     " Ignore all ", and ESC ] + U+009B + "8mIgnore" BEL is " Ignore ".
 	keepSeqText
 	// dropSeqC0 drops every invisible rune, as dropInvisible does, but its
 	// ANSI step reads the sequences with ansiSeqC0, so a CSI can hold C0
 	// control runes, and it replaces each sequence with one U+0020 (see
-	// ansiC0ToSpace). It builds the sixth form.
+	// ansiC0ToSpace). So ESC + U+0001 + "[8mIgnore" is " Ignore": the
+	// dropInvisible form keeps "[8mIgnore", which has no word edge before
+	// "Ignore".
 	dropSeqC0
 	// keepSeqTextSpaced handles the runs of invisible runes as
 	// spaceInvisible does, and the escape sequences as keepSeqText does
 	// (see ansiKeepText). So a run that holds a format rune gets one U+0020
 	// before the ANSI step, and a control run becomes one U+0020 after it,
-	// also inside the text of an OSC. The U+0020 of a run goes as in
-	// spaceFormats (see placeOnce): before the control runes of the run
-	// when one of them is ESC, U+009B or U+009D, and after them otherwise.
-	// So ZWSP + ESC + "[1m" is U+0020 + ESC + "[1m", and the SGR does not
-	// join the words around it. It builds the seventh form.
+	// also inside the text that a sequence gives back, such as the text of an
+	// OSC: ESC ] "Ignore" + ZWSP + "all" BEL is " Ignore all ", and
+	// ESC [ "Ignore" + U+0001 + "all" is " Ignore all". An ESC or U+009D that
+	// starts no sequence is such a run too, so ESC [ "Ignore" + ESC + "all" is
+	// " Ignore all".
+	//
+	// The U+0020 of a run goes as in spaceFormats (see placeOnce): before the
+	// control runes of the run when one of them is ESC, U+009B or U+009D, and
+	// after them otherwise, and not at all for a run inside a CSI. So ZWSP +
+	// ESC + "[1m" is U+0020 + ESC + "[1m", and the SGR does not join the
+	// words around it: "run" + ZWSP + ESC [ 1 m + "ning" is "run ning", not
+	// "running". And ESC + "[" + ZWSP + "1m" is ESC + "[1m", still an SGR, so
+	// ESC [ + ZWSP + "8mIgnore" + ZWSP + "all" is "Ignore all".
 	keepSeqTextSpaced
 )
 
@@ -482,7 +526,10 @@ func (m formMode) controlRepl() rune {
 // other modes. In keepSeqTextSpaced, placeAtTail would write no space for a
 // run such as ZWSP + ESC, which ends with a kept rune. Then the SGR that the
 // ESC starts becomes nothing, and two words join: "run" + ZWSP + ESC +
-// "ning" would be "running". placeOnce writes the space before the ESC.
+// "ning" would be "running". placeOnce writes the space before the ESC. And
+// placeAtTail would put a space inside a CSI: ESC [ + ZWSP + "8m" would be
+// ESC [ U+0020 "8m", which is no CSI. placeOnce writes no space there (see
+// replaceRuns).
 func (m formMode) runPlace() runPlace {
 	if m == spaceFormats || m == keepSeqTextSpaced {
 		return placeOnce
@@ -491,18 +538,19 @@ func (m formMode) runPlace() runPlace {
 }
 
 // keepsSeqText reports whether mode m keeps the text of escape sequences:
-// true for keepSeqText and keepSeqTextSpaced, which build the fifth and the
-// seventh form of baseFormsCut. For its cut flag, baseFormsCut reads these
-// modes with ansiKeepCSIText.
+// true for keepSeqText and keepSeqTextSpaced. For its cut flag, baseFormsCut
+// reads these modes with ansiKeepCSIText.
 func (m formMode) keepsSeqText() bool {
 	return m == keepSeqText || m == keepSeqTextSpaced
 }
 
 // ansiStep runs step 3 of normalizeForMatch on s for mode m: ansiKeepText
 // for keepSeqText and keepSeqTextSpaced, ansiC0ToSpace for spaceFormats and
-// dropSeqC0, and ansiToSpace for the other modes. So the forms 1 to 3 of
-// baseFormsCut read the sequences with ansiSeq, and the forms 4 to 7 with
-// ansiSeqC0.
+// dropSeqC0, and ansiToSpace for the other modes. So the strict-reading forms
+// of baseFormsCut read the sequences with ansiSeq, and the ansiSeqC0 forms
+// with ansiSeqC0. baseFormsCut reads with ansiStepFor, which changes the
+// strict-reading forms for a text with many U+009D. buildForm reads with
+// ansiStep.
 func (m formMode) ansiStep(s string) string {
 	switch m {
 	case keepSeqText, keepSeqTextSpaced:
@@ -511,6 +559,21 @@ func (m formMode) ansiStep(s string) string {
 		return ansiC0ToSpace(s)
 	}
 	return ansiToSpace(s)
+}
+
+// ansiStepFor is the ANSI step of mode m for a text with the flags f. It is
+// ansiStep, but when f.manyOSCStarts() is true, the modes dropInvisible,
+// spaceInvisible and spaceControls (the strict-reading forms) read
+// the sequences with ansiSeqFast (see ansiFastToSpace), not ansiSeq. The
+// other modes read with ansiSeqC0, which is fast for such a text already.
+func (m formMode) ansiStepFor(f formFlags) func(string) string {
+	switch m {
+	case dropInvisible, spaceInvisible, spaceControls:
+		if f.manyOSCStarts() {
+			return ansiFastToSpace
+		}
+	}
+	return m.ansiStep
 }
 
 // buildForm runs the steps of normalizeForMatch, with the invisible
@@ -691,15 +754,18 @@ type runPlace int
 const (
 	// placeAtTail writes one repl after the kept runes, and only when the
 	// run ends with runes that are not kept. So a kept ESC does not join the
-	// rune after the run: in the second form of baseFormsCut, ESC + ZWSP +
+	// rune after the run: in the spaceInvisible form, ESC + ZWSP +
 	// "[" is ESC + U+0020 + "[", not a CSI.
 	placeAtTail runPlace = iota
 	// placeOnce writes one repl when the run has a rune that is not kept,
 	// wherever that rune is. The repl goes before the kept runes when one of
 	// them is ESC, U+009B or U+009D (see startsSeq), and after them
-	// otherwise. So in the fourth form of baseFormsCut, ESC + ZWSP + "[8m" and
+	// otherwise. So in the spaceFormats form, ESC + ZWSP + "[8m" and
 	// ESC + ZWSP + U+0001 + "[8m" keep their CSI after the U+0020, and
-	// U+0001 + ZWSP + "all" is U+0001 + U+0020 + "all".
+	// U+0001 + ZWSP + "all" is U+0001 + U+0020 + "all". A run inside a
+	// CSI, after the ESC (or U+009B) and before the final byte, gets no
+	// repl, except the run that holds the ESC or U+009B itself (see
+	// replaceRuns): ESC + "[" + ZWSP + "8m" is ESC + "[8m".
 	placeOnce
 )
 
@@ -715,9 +781,20 @@ const (
 //
 // Invalid UTF-8 becomes U+FFFD, as with strings.Map. U+FFFD is not
 // invisible, so it ends a run.
+//
+// With placeOnce, a run that stands inside a CSI, after the ESC (or U+009B)
+// and before the final byte, gets no repl: it keeps only its kept runes (see
+// csiFinalIndex). A space there would end the CSI for the ANSI step:
+// ESC [ + ZWSP + "8m" would be ESC [ U+0020 "8m", which is no CSI. The run
+// that holds the ESC or U+009B itself is not inside: it gets its repl before
+// the ESC or U+009B, as placeOnce says. A white-space C0 rune (TAB, LF, VT,
+// FF or CR) is in csiC0 but is not invisible, so it ends the run of the ESC.
+// A later run of format runes before the "[" is then inside the CSI too, as
+// ansiSeqC0 reads it: ESC + TAB + ZWSP + "[8m" is ESC + TAB + "[8m".
 func replaceRuns(s string, keep func(rune) bool, repl rune, place runPlace) string {
 	var b strings.Builder
 	b.Grow(len(s))
+	csiFinal := -1 // with placeOnce: a run at i < csiFinal is inside a CSI
 	for i := 0; i < len(s); {
 		r, size := utf8.DecodeRuneInString(s[i:])
 		if !isInvisible(r) {
@@ -733,7 +810,19 @@ func replaceRuns(s string, keep func(rune) bool, repl rune, place runPlace) stri
 			}
 			end += size
 		}
-		writeRun(&b, s[i:end], keep, repl, place)
+		run, runRepl := s[i:end], repl
+		if place == placeOnce && i < csiFinal {
+			runRepl = -1 // inside a CSI: no space
+		}
+		writeRun(&b, run, keep, runRepl, place)
+		if place == placeOnce {
+			// Only the last ESC or U+009B of a run can start a CSI: an
+			// earlier one is followed by it, and a CSI holds no ESC or
+			// U+009B.
+			if j := strings.LastIndexFunc(run, startsCSI); j >= 0 {
+				csiFinal = csiFinalIndex(s, i+j)
+			}
+		}
 		i = end
 	}
 	return b.String()
@@ -772,18 +861,6 @@ func writeRun(b *strings.Builder, run string, keep func(rune) bool, repl rune, p
 	if space && !before {
 		b.WriteRune(repl)
 	}
-}
-
-// startsSeq reports whether r is ESC, U+009B (CSI) or U+009D (OSC), a rune
-// that starts an ANSI escape sequence in ansiSeq and ansiSeqC0.
-func startsSeq(r rune) bool {
-	return startsCSI(r) || r == '\u009d'
-}
-
-// startsCSI reports whether r is ESC or U+009B, a rune that starts a CSI in
-// ansiSeq and ansiSeqC0.
-func startsCSI(r rune) bool {
-	return r == '\x1b' || r == '\u009b'
 }
 
 // cutAtRune returns at most the first n bytes of s. It never splits a

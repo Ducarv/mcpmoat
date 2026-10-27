@@ -82,50 +82,67 @@ type pinnedServer struct {
 
 // scanIgnores holds the two ignore lists of one scan.
 //
-// A .mcpmoat-ignore file can come from a cloned repository, and the user did
-// not write it. If it could ignore a pin finding (MOAT-T2-*), a hostile
-// project could silence the rug-pull alarm for the user's own servers. If it
-// could ignore an LLM finding (MOAT-LLM-001 or MOAT-LLM-002), it could silence
-// the classifier for every server of a user who runs "scan --llm" there. If it
-// could ignore the budget finding (MOAT-T1-023), it could hide that a server
-// used up its rule time budget, so that the tools after the cut look clean.
-// If it could ignore the tool findings cap (MOAT-T1-024), it could silence the
-// summary row of the findings that scan did not list. So the file never
+// scan reads the .mcpmoat-ignore file only with --use-ignore-file (see
+// loadIgnore). Without the flag, the file gives no entries, and both lists
+// hold only the --ignore entries.
+//
+// With the flag, the file still can come from a cloned repository, and the
+// user did not write it. If it could ignore a pin finding (MOAT-T2-*), a
+// hostile project could silence the rug-pull alarm for the user's own
+// servers. If it could ignore an LLM finding (MOAT-LLM-001 or MOAT-LLM-002),
+// it could silence the classifier for every server of a user who runs
+// "scan --llm" there. If it could ignore the budget finding (MOAT-T1-023), it
+// could hide that a server used up its rule time budget, so that the tools
+// after the cut look clean. If it could ignore the tool findings cap
+// (MOAT-T1-024) or the config findings cap (MOAT-T4-005), it could silence
+// the summary row of the findings that scan did not list. So the file never
 // ignores these rules (see fileCannotIgnore). Only --ignore on the command
 // line does, because the user typed it. A cloned repository cannot hide that
 // findings were left out.
 type scanIgnores struct {
-	// all holds the entries of .mcpmoat-ignore and of --ignore. It drops
-	// the findings of the config rules and of the tool rules. It does not drop
-	// the findings of the pin rules, of the LLM rules, of the budget rule
-	// and of the tool findings cap (see ignored).
+	// all holds the entries of .mcpmoat-ignore (only with --use-ignore-file)
+	// and of --ignore. It drops the findings of the config rules and of the
+	// tool rules. It does not drop the findings of the rules in
+	// fileCannotIgnore (see ignored).
 	all rules.IgnoreList
-	// flags holds only the --ignore entries. It drops the findings of the pin
-	// rules, of the LLM rules, of the budget rule and of the tool findings
-	// cap.
+	// flags holds only the --ignore entries. It drops the findings of the
+	// rules in fileCannotIgnore.
 	flags rules.IgnoreList
 	// fileEntries is the number of entries that scan read from the
 	// .mcpmoat-ignore file: the N in the stderr line "using N entries". It
 	// counts the entries that the file cannot apply too (see
-	// fileCannotIgnore), and the ones that match no finding.
+	// fileCannotIgnore), and the ones that match no finding. It is 0 without
+	// --use-ignore-file.
 	fileEntries int
 }
 
 // fileCannotIgnore reports whether the rule id is one that .mcpmoat-ignore
-// cannot ignore: a pin rule (MOAT-T2-*), llm.RuleID, llm.RuleIDInvalid,
-// rules.RuleAnalysisBudget or rules.RuleToolFindingCap. Only --ignore drops
-// the findings of these rules (see scanIgnores).
+// cannot ignore, also with --use-ignore-file. These rules are:
+//   - the pin rules (MOAT-T2-*, see pins.IsPinRuleID);
+//   - the LLM rules llm.RuleID (MOAT-LLM-001) and llm.RuleIDInvalid
+//     (MOAT-LLM-002);
+//   - rules.RuleAnalysisBudget (MOAT-T1-023), the rule time budget;
+//   - rules.RuleToolFindingCap (MOAT-T1-024), the tool findings cap;
+//   - rules.RuleConfigFindingCap (MOAT-T4-005), the config findings cap.
+//
+// Only --ignore drops the findings of these rules (see scanIgnores). The
+// other description, schema and cross-server rules (T1 and T3) and the config
+// rules stay in the reach of the file: the user opts in to the file with
+// --use-ignore-file. A step must check its findings with scanIgnores.ignored,
+// not with the all list, or this guard does not apply to them.
 func fileCannotIgnore(id string) bool {
 	return pins.IsPinRuleID(id) || id == llm.RuleID || id == llm.RuleIDInvalid ||
-		id == rules.RuleAnalysisBudget || id == rules.RuleToolFindingCap
+		id == rules.RuleAnalysisBudget || id == rules.RuleToolFindingCap ||
+		id == rules.RuleConfigFindingCap
 }
 
-// ignored reports whether the user asked to ignore the finding k. For a pin
-// rule, an LLM rule, the budget rule or the tool findings cap (see
-// fileCannotIgnore) only the --ignore list counts.
+// ignored reports whether the user asked to ignore the finding k. For a rule
+// in fileCannotIgnore (a pin rule, an LLM rule, the budget rule, the tool
+// findings cap or the config findings cap) only the --ignore list counts.
 // The second result is true when the .mcpmoat-ignore file has an entry that
 // matches k but is not applied, so that the caller can warn about it (see
-// warnFileCannotIgnore).
+// warnFileCannotIgnore). It can be true only with --use-ignore-file, because
+// without the flag the file gives no entries.
 func (s *scanIgnores) ignored(k rules.FindingKey) (drop, fileBlocked bool) {
 	if !fileCannotIgnore(k.RuleID) {
 		return s.all.Ignored(k), false
@@ -137,8 +154,10 @@ func (s *scanIgnores) ignored(k rules.FindingKey) (drop, fileBlocked bool) {
 }
 
 // warnFileCannotIgnore prints the warning that .mcpmoat-ignore has an entry
-// for the rule ruleID that is not applied (see scanIgnores). The pin step, the
-// tool rule step and the LLM step print it once for each rule ID.
+// for the rule ruleID that is not applied (see scanIgnores). ruleID is one of
+// the IDs in fileCannotIgnore. The line names only that rule ID, never a
+// server, a tool or config text. Each step that checks such a rule prints it
+// once for each rule ID.
 func (c *cli) warnFileCannotIgnore(ruleID string) {
 	c.scanWarnf("%s cannot ignore %s; use --ignore on the command line",
 		rules.IgnoreFileName, termsafe.Quote(ruleID))

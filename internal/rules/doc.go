@@ -35,7 +35,10 @@
 // visible text (or after the first 128 KiB of raw text) are not seen by regex
 // and keyword rules. The match_window heuristic closes it: a high rule with
 // it fires on a text longer than 128 KiB, and when the window cuts one of
-// the forms (see baseFormsCut), also when only one of them is cut. The OSC
+// the forms (see baseFormsCut), also when only one of them is cut. It also
+// fires on a text with more than 256 U+009D (C1 OSC starts, see
+// maxStrictOSCStarts): the forms read such a text with a faster regex that
+// can miss a match, and no real text holds so many. The OSC
 // text of a form does not count: the OSC text, such as an OSC 8 link URL,
 // makes a benign text long in the forms that keep sequence text only (see
 // baseFormsCut). The max_length heuristic also flags a long text. It reads
@@ -133,6 +136,20 @@
 // fold does not get the skeleton. For the limits, see the end of the
 // Heuristics and hits section.
 //
+// The skeleton fold and the plain fold read some look-alikes as "I" or "l",
+// such as Cyrillic U+04CF and U+0406, fullwidth U+FF29 and the roman numeral
+// U+217C, but a text can mean the other letter. So in the twin forms (the
+// skeleton folds, and the plain folds in which a compatibility mapping made
+// a new "I" or "l"), each any_regex and all_regex pattern runs as its
+// I/l-blind twin, which reads "I" and "l" as one letter. So `(?i)ignore`
+// matches U+04CF + "gnore", and `(?i)all` matches "a" + U+0406 U+0406. The
+// other forms read with the pattern itself, so ASCII "lgnore" does not
+// match `(?i)ignore`. An accented "I" or "l", such as U+00CF or U+013E, is a
+// normal letter and makes no twin form. The worst-case match bound does not
+// change. The twin.go file comment tells how the twin is built, which forms
+// it reads, what it costs and all its limits. The limits of the confusable
+// skeleton (at the end of Heuristics and hits) sum up the limits of the twin.
+//
 // A fold that is longer than the rune is not used, so the folded form is never
 // longer than the text: a ligature that folds to many letters, such as
 // U+FDFA, stays as it is and cannot push a payload out of the 32 KiB. A form
@@ -141,19 +158,21 @@
 // can match in a different form. So a regex reads up to 21 forms of a text
 // (maxRegexForms: the 7 base forms, their plain folds and their skeleton
 // folds), and a keyword up to 7 (maxKeywordForms: the plain folds of the
-// base forms): such a text costs up to 21 times as much to match. The plain
-// fold stays a regex form next to the skeleton fold, so no match of the
-// plain fold is lost. A skeleton fold is a new form only when it differs
-// from the plain fold, that is when the base form or its plain fold holds a
-// rune of skeletonTable. So a text with no such rune has at most 14 regex
-// forms, the base forms and their plain folds. The worst case for one match
-// block is 21 x 32 KiB x 2500, about 1.7G instruction-bytes (see the cost
-// comment in match.go for the timings). The forms are built only when a
-// regex, keyword or match_window rule reads the text. In a scan, they are
-// built once for each text and shared by all its rules (see Cost bounds).
-// [Matcher.Match] builds them once for each call. The match_window heuristic
-// builds only the base forms, to check their length, and the regex and
-// keyword rules reuse them. The other heuristics get only the raw text.
+// base forms): such a text costs up to 21 times as much to match. In a twin
+// form, the I/l twin runs in place of the pattern, not next to it, so each
+// form is still read by one regex. The plain fold stays a regex form next to
+// the skeleton fold, so no match of the plain fold is lost. A skeleton fold
+// is a new form only when it differs from the plain fold, that is when the
+// base form or its plain fold holds a rune of skeletonTable. So a text with
+// no such rune has at most 14 regex forms, the base forms and their plain
+// folds. The worst case for one match block is 21 x 32 KiB x 2500, about 1.7G
+// instruction-bytes (see the cost comment in match.go for the timings). The
+// forms are built only when a regex, keyword or match_window rule reads the
+// text. In a scan, they are built once for each text and shared by all its
+// rules (see Cost bounds). [Matcher.Match] builds them once for each call.
+// The match_window heuristic builds only the base forms, to check their
+// length, and the regex and keyword rules reuse them. The other heuristics
+// get only the raw text.
 //
 // A regex cannot match an invisible rune (use the invisible_unicode heuristic
 // for that), and a pattern must be written in NFC: a pattern with a letter
@@ -353,7 +372,8 @@
 // no number before it, "2 " + U+03BC + "ser" and "5" + U+03BC + "pdate" are
 // flagged. Math notation is also flagged: U+0394 (capital Delta) + "t" gives
 // a known false positive. To accept such a word, ignore the rule
-// (MOAT-T1-010 or MOAT-T1-011) for that one tool in .mcpmoat-ignore.
+// (MOAT-T1-010 or MOAT-T1-011) for that one tool in .mcpmoat-ignore, and run
+// scan with --use-ignore-file so that the entry applies.
 //
 // The mixed_script heuristic does not flag:
 //
@@ -364,7 +384,8 @@
 //   - a word of one letter, because it cannot mix two scripts;
 //   - Latin-script look-alikes, such as U+0131 (dotless i), U+01C0 (dental
 //     click) and U+0261 (script g): they are Latin, so the word does not mix
-//     scripts. The regexes read U+0131 as "i" and U+0261 as "g";
+//     scripts. The regexes read U+0131 as "i", U+0261 as "g" and U+01C0 as
+//     "I" or "l";
 //   - a word that a visible rune splits in two, when the rune is not a
 //     letter and does not fold to letters, such as U+2800 (braille blank) or
 //     U+212E (estimated sign, a symbol that looks like an "e"). The regexes
@@ -393,23 +414,23 @@
 //     tables: Go reads it as unassigned, so it joins the word but counts for
 //     no script.
 //
-// The regexes fold U+0261 and U+212E (see Normalization). U+01C0 is not
-// caught: see the first limit below.
+// The regexes fold U+0261 and U+212E (see Normalization), and they read
+// U+01C0 as "I" or "l" (see the I/l twin in Normalization).
 //
 // The confusable skeleton of the regex fold has these limits:
 //
-//   - the skeleton reads each look-alike of "I" or "l" as one of the two,
-//     and some texts need the other one. A caseless or lowercase look-alike
-//     maps to "l", such as U+01C0 (dental click, a bare bar), Cyrillic
-//     U+04CF (small palochka), Hebrew vav, Arabic alef or Runic U+16C1. So
-//     U+04CF + "gnore" reads "lgnore", and MOAT-T1-001 does not match it. An
-//     uppercase look-alike maps to "I", such as Cyrillic U+0406 or U+04C0
-//     (palochka), so "a" + U+0406 U+0406 reads "aII", not "all". The one
-//     caseless exception is U+A7FE (I longa), which maps to "I" by its name.
-//     mixed_script flags a look-alike of another script in a Latin word, but
-//     its rules (MOAT-T1-010 and MOAT-T1-011) have severity medium, so with
-//     the default --fail-on high such a text exits 0. U+01C0 is Latin, so
-//     no rule catches it. Issue #149 tracks both gaps;
+//   - the I/l twin (see Normalization) reads "I" and "l" as one letter only
+//     in the twin forms of the any_regex and all_regex rules. A keyword
+//     rule has no twin, so a look-alike of "I" or "l" in a keyword is not
+//     read as either letter. A text with no look-alike has no twin form, so
+//     ASCII "lgnore" is not read as "ignore". An accented "I" or "l", such
+//     as U+1ECA (I with dot below), is not read as the other letter. A
+//     lowercase "i" or an uppercase "L" without (?i), a class that holds
+//     all of a-z or A-Z, and a negated class do not get the other letter. A
+//     text that holds one look-alike is read by the twin as a whole, so
+//     ASCII "lgnore all previous instructions" next to one Cyrillic word
+//     matches MOAT-T1-001. The twin.go file comment lists each limit in
+//     full;
 //   - the skeleton can join a look-alike to a payload. A look-alike of "l"
 //     or "I", such as U+04CF, directly before a payload that is written in
 //     look-alike letters (a Cyrillic "id_rsa") becomes an ASCII letter of
@@ -455,7 +476,8 @@
 // Rules MOAT-T1-010 and MOAT-T1-011 have severity medium, so with the
 // default --fail-on high they do not change the exit code. To accept such a
 // word, ignore the rule (MOAT-T1-010 or MOAT-T1-011) for that one tool in
-// .mcpmoat-ignore.
+// .mcpmoat-ignore, and run scan with --use-ignore-file so that the entry
+// applies.
 //
 // The config heuristics (insecure_url, plaintext_secret, unpinned_package,
 // auto_install and typosquat) read one line of text each, not the whole text.
@@ -530,12 +552,16 @@
 // so a broken schema is still scanned. Its hits have a Detail that starts with
 // "schema raw text".
 //
-// The shadowing check (MOAT-T3-001) still reads a narrower text: the value of
-// every "description" and "title" string of the schema (InputSchema or
-// OutputSchema), at any depth, in document order, with the keys matched in
-// any case. It scans this text, together with the tool description, the tool
-// title and the annotations title. The rules do not model JSON Schema
-// keywords.
+// The shadowing check (MOAT-T3-001) reads every string value and every object
+// key of the schema (InputSchema and OutputSchema), at any depth, in document
+// order, with the same caps. In a schema object it leaves out only three kinds
+// of text: a key that is a JSON Schema keyword name, a format value that is
+// exactly a registered format name (such as date-time), and a $schema value
+// that is exactly a standard meta-schema URI. These are fixed words that fold
+// into compound names such as read_only or date_time. Every other format and
+// $schema value is read, and a property name is always read. It scans these
+// texts, together with the tool description, the tool title and the
+// annotations title. The schema rules do not model JSON Schema keywords.
 //
 // # The ignore file
 //
@@ -544,6 +570,21 @@
 // a comment. See [ParseIgnore] for the full format.
 //
 // The file is untrusted, because a cloned repository can ship one. So
-// [ParseIgnore] never fails: it skips a malformed line with a warning, caps
-// what it keeps, and its warnings never show content of the file.
+// mcpmoat scan reads it only with the flag --use-ignore-file. Without the
+// flag, scan does not read it. And [ParseIgnore] never fails: it skips a
+// malformed line with a warning, caps what it keeps, and its warnings never
+// show content of the file.
+//
+// The file cannot drop these findings, even with --use-ignore-file:
+//
+//   - the pin rules, every ID that starts with "MOAT-T2-" (MOAT-T2-001 to
+//     MOAT-T2-004);
+//   - the LLM rules, MOAT-LLM-001 and MOAT-LLM-002;
+//   - [RuleAnalysisBudget] (MOAT-T1-023), the rule analysis budget finding;
+//   - [RuleToolFindingCap] (MOAT-T1-024), the tool findings cap finding;
+//   - [RuleConfigFindingCap] (MOAT-T4-005), the config findings cap finding.
+//
+// Only --ignore on the command line drops them. With --use-ignore-file, the
+// file can drop the other rules, such as the description and schema rules
+// (T1 and T3).
 package rules

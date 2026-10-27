@@ -776,7 +776,7 @@ func TestE2EScanIgnore(t *testing.T) {
 		// Line 2 has an invalid rule ID, so it gets a warning and is skipped.
 		writeTestFile(t, work, rules.IgnoreFileName, "MOAT-T1-003\n/onlytool\n")
 
-		stdout, stderr, code := runBin(t, home, work, "scan", "--no-connect", "--ignore", "MOAT-T1-001")
+		stdout, stderr, code := runBin(t, home, work, "scan", "--no-connect", useIgnoreFileFlag, "--ignore", "MOAT-T1-001")
 
 		if code != exitOK {
 			t.Errorf("exit code = %d, want %d\nstdout:\n%s\nstderr:\n%s", code, exitOK, stdout, stderr)
@@ -807,6 +807,79 @@ func TestE2EScanIgnore(t *testing.T) {
 		assertContainsAll(t, "stderr", stderr, []string{"mcpmoat scan: ", "-ignore", usageHint})
 		if stdout != "" {
 			t.Errorf("stdout = %q, want empty", stdout)
+		}
+	})
+}
+
+// TestE2EScanIgnoreFileOptIn checks that scan reads .mcpmoat-ignore only with
+// --use-ignore-file (#138). The working directory is a copy of the CI example
+// repo plus an ignore file that lists MOAT-T4-001, the one high finding. A
+// cloned repo must not turn exit code 1 into 0: without the flag the finding
+// stays, and stderr has only a note. With the flag the file applies.
+func TestE2EScanIgnoreFileOptIn(t *testing.T) {
+	t.Parallel()
+
+	// runRepo runs "scan --no-connect --config .mcp.json" with extra args in a
+	// copy of the CI example repo that has the ignore file.
+	runRepo := func(t *testing.T, extra ...string) (stdout, stderr string, code int) {
+		t.Helper()
+		home, work := t.TempDir(), t.TempDir()
+		if err := os.CopyFS(work, os.DirFS(testdataPath("ci", "repo"))); err != nil {
+			t.Fatal(err)
+		}
+		writeTestFile(t, work, rules.IgnoreFileName, "MOAT-T4-001\n")
+		args := append([]string{"scan", "--no-connect", "--config", ".mcp.json"}, extra...)
+		stdout, stderr, code = runBin(t, home, work, args...)
+		assertNoPinsFile(t, home)
+		return stdout, stderr, code
+	}
+
+	t.Run("without the flag", func(t *testing.T) {
+		t.Parallel()
+
+		stdout, stderr, code := runRepo(t)
+
+		assertScanResult(t, code, stdout, stderr, scanWant{code: exitFindings, stderr: []string{ignoreNoteLine + "\n"}})
+		assertFindingIDs(t, stdout, []string{"MOAT-T4-001", "MOAT-T4-003", "MOAT-T4-004"})
+		if n := stderrFileEntries(t, stderr); n != 0 {
+			t.Errorf("stderr says scan uses %d entries of the ignore file, want no such line\nstderr:\n%s", n, stderr)
+		}
+		if total, _ := stderrIgnored(t, stderr); total != 0 {
+			t.Errorf("stderr says %d findings are ignored, want none\nstderr:\n%s", total, stderr)
+		}
+	})
+
+	t.Run("with the flag", func(t *testing.T) {
+		t.Parallel()
+
+		stdout, stderr, code := runRepo(t, useIgnoreFileFlag)
+
+		assertScanResult(t, code, stdout, stderr, scanWant{code: exitOK, stderr: []string{"MOAT-T4-001 (1)"}})
+		assertFindingIDs(t, stdout, []string{"MOAT-T4-003", "MOAT-T4-004"})
+		// These are all the stderr lines, so the note is not there.
+		assertStderrLines(t, stderr, []lineWant{
+			exactLine("mcpmoat scan: using 1 entry from " + rules.IgnoreFileName),
+			exactLine("mcpmoat scan: 1 finding ignored: MOAT-T4-001 (1)"),
+		})
+	})
+
+	t.Run("JSON without the flag", func(t *testing.T) {
+		t.Parallel()
+
+		stdout, stderr, code := runRepo(t, "--json")
+
+		if code != exitFindings {
+			t.Errorf("exit code = %d, want %d\nstdout:\n%s\nstderr:\n%s", code, exitFindings, stdout, stderr)
+		}
+		if n := strings.Count(stderr, ignoreNoteLine+"\n"); n != 1 {
+			t.Errorf("stderr has the note %d times, want 1\nstderr:\n%s", n, stderr)
+		}
+		doc := decodeScanJSON(t, stdout)
+		if doc.Ignored.FileEntries != 0 || doc.Ignored.Total != 0 || len(doc.Ignored.Rules) != 0 {
+			t.Errorf("ignored = %+v, want no file entries and no ignored findings", doc.Ignored)
+		}
+		if !slices.ContainsFunc(doc.Findings, func(f report.JSONFinding) bool { return f.RuleID == "MOAT-T4-001" }) {
+			t.Errorf("findings have no MOAT-T4-001, want it\nstdout:\n%s", stdout)
 		}
 	})
 }
@@ -1755,7 +1828,7 @@ func TestE2EScanJSONIgnored(t *testing.T) {
 	// not empty, but the exit code is exitOK: the default --fail-on is high.
 	writeTestFile(t, work, rules.IgnoreFileName, "# "+e2eIgnoreSecret+"\nMOAT-T4-001\nMOAT-T4-002\n")
 
-	stdout, stderr, code := runBin(t, home, work, "scan", "--no-connect", "--json")
+	stdout, stderr, code := runBin(t, home, work, "scan", "--no-connect", useIgnoreFileFlag, "--json")
 
 	if code != exitOK {
 		t.Errorf("exit code = %d, want %d\nstdout:\n%s\nstderr:\n%s", code, exitOK, stdout, stderr)

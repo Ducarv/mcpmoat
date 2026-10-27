@@ -28,9 +28,24 @@ This page lists what mcpmoat does not do, so you know how far to trust a clean s
 - `scan` does not apply a rule from `--rules` with the target `config`. It runs only its built-in
   config checks, and prints `mcpmoat scan: rules from --rules with target config are not applied;
   scan applies only the built-in config checks` on stderr.
-- The rule analysis of each server has a time budget. A server that uses it up gets a
-  `MOAT-T1-023` finding (see [Exit codes](exit-codes.md)), and its tools that were not fully
-  checked can hide a malicious text.
+- The rule analysis has a time limit of 30 seconds for all servers together. Each server gets a
+  fair share of the time that is left, but never more than 5 seconds. A server that uses up its
+  share, or that `scan` does not analyse, gets a `MOAT-T1-023` finding (see
+  [Exit codes](exit-codes.md)), and its tools that were not fully checked can hide a malicious
+  text. `scan` does not analyse a server that it reaches after the limit or with a share under
+  1 ms, or any server after it.
+- The rule analysis step takes at most 30 seconds plus one overshoot. The overshoot is the part of
+  an analysis that cannot stop at its deadline: one build of the match forms of one text (#146)
+  and one regex on one form (the Go `regexp` package has no context). The build takes under about
+  0.2 seconds in the worst case that we measured. The whole overshoot is up to about 1 second on
+  an idle Apple M1 Pro, about 10 seconds with the race detector, and more on a loaded machine.
+  The overshoot uses the shared limit too, so servers early in the order can use up the time of
+  later servers. Those later servers get `MOAT-T1-023`, never a silent pass.
+- A text with more than 256 U+009D (C1 OSC controls) always gets `MOAT-T1-017` or `MOAT-T1-018`
+  (high), also a benign text in the wrong encoding. The reason and the example are in
+  [Contributing a rule](writing-rules.md#2-write-the-rule). With a custom rule at critical
+  severity and `--fail-on critical`, a text with more than 256 U+009D can hide the payload from
+  that rule and only `MOAT-T1-017` or `MOAT-T1-018` (high) fires.
 - `scan` keeps at most 1000 tool rule findings for each server. The limit counts the findings
   after the ignore list. `scan` keeps the most severe findings, and among findings of the same
   severity the ones of the first tools, so a server cannot push a severe finding out of the report
@@ -42,18 +57,44 @@ This page lists what mcpmoat does not do, so you know how far to trust a clean s
   limit. The number of tools for each server (at most 10,000) bounds the pin findings (at most one
   for each current tool and one for each removed tool, plus one for the server; the pinned tools
   come from an earlier scan, so they are at most 10,000 too), and the LLM tool cap of 500 bounds
-  the LLM findings. Nothing bounds the config findings except the size of the config file (32 MiB
-  for a global file, 4 MiB for a project file), and the number of servers multiplies all these
-  bounds. A cap for the config findings is planned as a follow-up (issue #213).
+  the LLM findings. The number of servers multiplies these bounds.
+- `scan` keeps at most 100 config findings (`MOAT-T4-*` and `MOAT-T5-*`) for each server and
+  10,000 for the whole scan. The config checks make one finding for each env key and each header
+  key that looks like a secret, so without the caps a hostile project `.mcp.json` with many short
+  keys could make a huge report. The caps count the findings after the ignore list. `scan` first
+  keeps the 100 most severe findings of each server. When more than 10,000 are left, it keeps the
+  10,000 most severe of the whole scan: severity first, then servers from your own files before
+  servers from a project file, then the order of the servers, then the order of the findings. A severity that mcpmoat does not know counts as critical. A server that
+  lost findings gets one `MOAT-T4-005` finding: `N more config findings are not listed; limit M`
+  (M is 100, or 10000 when the limit of the whole scan cut that server). It is high, or higher
+  when a finding that it left out is higher. It does not count toward the caps, so the report has
+  at most 10,000 config findings plus one `MOAT-T4-005` finding for each server that lost
+  findings. A `.mcpmoat-ignore` file cannot drop it, so a hostile config cannot hide that findings
+  were cut. Only `--ignore MOAT-T4-005` can. The scan stays complete, and the exit code follows
+  `--fail-on`.
+- The config caps bound the rows and the output. They do not bound the memory that `scan` uses
+  before the cut: it first turns every key into a finding. A 4 MiB project file still costs about
+  200 to 250 MiB of allocations. Measured on an Apple M1 Pro (go1.27.3, no race detector) with a
+  4 MiB project file:
+
+  | Config | Rows | `--json` output | Allocations |
+  |---|---|---|---|
+  | One server, 111,622 env keys | 101 | 71,690 bytes | 210.9 MiB |
+  | One server, 103,453 header keys | 101 | 72,104 bytes | 202.4 MiB |
+  | 921 servers, 110 env keys each | 10,921 | 8,576,786 bytes | 225.8 MiB |
+  | One server, env keys, without the caps | 111,622 | 77.6 MB | 828.9 MiB |
+  | 921 servers, without the caps | 101,310 | 71.2 MB | 762 MiB |
+
+  The terminal output is about 87.6 KB for one server and 9,765,244 bytes for 921 servers (211.5
+  and 251.2 MiB of allocations). Without the caps it was about 86 to 96 MB, with about 1.0 to
+  1.1 GiB of allocations.
+- The size of a config file has a limit: 4 MiB for a project file (`.mcp.json`,
+  `.cursor/mcp.json`) and for a `--config` file, 256 KiB for a Codex TOML file, and 32 MiB for a
+  global JSON file such as `~/.claude.json`, which holds chat history.
 - In `scan --json`, a name that is longer than 512 characters and a path that is longer than 4096
   characters are cut, and each cut ends with `...`. The top-level field `fields_truncated` is true
   when any field was cut. Two names that differ only after the cut look equal in the JSON (a fix is
-  planned as issue #223). Diffs, commands, URLs and argv are never cut. These caps and the cap of
-  1000 tool findings do not bound the size of the whole JSON document: a hostile config file with a
-  very large number of config findings can give a very large document.
-- The budget cannot stop the build of the match forms of one text. For a very hostile text (for
-  example 128 KiB of one run of invisible characters), this build can take about a second, so the
-  analysis of a server can end that much after its budget (#146).
+  planned as issue #223). Diffs, commands, URLs and argv are never cut.
 - `--llm` does not make a scan complete or reliable. A model can miss a malicious tool, and a
   hostile description can try to influence the model. Its findings are advisory, and with `--llm`
   your tool names and descriptions leave your machine.

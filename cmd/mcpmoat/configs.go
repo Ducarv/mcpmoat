@@ -49,7 +49,8 @@ func (c *cli) loadConfigs(ctx context.Context, cmd, configPath string) (discover
 // file (~/.claude.json, ~/.cursor/mcp.json or ~/.codex/config.toml). The home
 // directory is only used for that check.
 func (c *cli) readConfigFile(ctx context.Context, path string) (discover.Result, string) {
-	// The error text is not printed: the caller warns when wd is empty.
+	// The error text is not printed. Only scan --use-ignore-file warns when
+	// wd is empty (see scanConfigs); pin does not need wd.
 	wd, err := c.getwd()
 	if err != nil {
 		wd = "" // do not use a value that comes with an error

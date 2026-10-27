@@ -19,7 +19,10 @@ import (
 func TestReservedRuleIDCoversNativeIDs(t *testing.T) {
 	t.Parallel()
 
-	native := []string{rules.RuleAnalysisBudget, rules.RuleToolFindingCap, llm.RuleID, llm.RuleIDInvalid}
+	native := []string{
+		rules.RuleAnalysisBudget, rules.RuleToolFindingCap, rules.RuleConfigFindingCap,
+		llm.RuleID, llm.RuleIDInvalid,
+	}
 	for _, k := range []pins.ChangeKind{pins.KindChanged, pins.KindNew, pins.KindRemoved, pins.KindUnverified} {
 		id := k.RuleID()
 		if id == "" {
