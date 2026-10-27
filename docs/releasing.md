@@ -54,11 +54,14 @@ the tagged commit is not on the first-parent history of `main`, or if the enviro
 secret. It builds the archives with GoReleaser, creates a draft GitHub release and pushes the cask
 to the tap. Only the GoReleaser step gets the tap token. Then it attests the build provenance of
 `dist/*.tar.gz` and `dist/checksums.txt`. It checks that the build left `.github/scripts` unchanged,
-because the next step runs a script from the checkout with write permission. It checks that the
-draft release holds exactly those files. It downloads them and checks that they match `dist/`. It
-verifies each attestation with `gh attestation verify`. It checks that the tag still points at the
-commit that it built. Then it publishes the release. Last, it checks that the release is immutable,
-and checks the tag and the published files once more.
+because the next step runs a script from the checkout with write permission. The step compares the
+folder with the tagged commit, not with the index. It fails on any new file there, on a changed
+`verify-and-publish.sh` (by its hash), and on a file that is marked assume-unchanged or
+skip-worktree. This is hardening, not a boundary. It checks that the draft release holds exactly
+those files. It downloads them and checks that they match `dist/`. It verifies each attestation
+with `gh attestation verify`. It checks that the tag still points at the commit that it built.
+Then it publishes the release. Last, it checks that the release is immutable, and checks the tag
+and the published files once more.
 
 The step "Verify and publish the release" runs `.github/scripts/verify-and-publish.sh`. The script
 `.github/scripts/verify-and-publish-test.sh` tests it with a fake `gh`, with no network and no token.
@@ -123,7 +126,8 @@ schedule only from the file on `dev`.
   the newest 200 open issues with that label. If a maintainer removes the label from the open
   issue, the next failure opens a new issue. If the `security` label is deleted from the repo, the
   job fails and opens no issue: the red run is then the only signal. The job has the permission
-  `issues: write` only, and it uses the `gh` CLI. The scan job keeps `contents: read`.
+  `issues: write` only, and it uses the `gh` CLI. The scan job keeps `contents: read`. The script
+  `.github/scripts/notify-failure-test.sh` tests this job in the `tool-pins` job of `ci.yml`.
 - GitHub sends the notice of a failed scheduled run only to the maintainer who last edited the cron
   line, or who enabled the workflow again. Keep GitHub Actions notifications on for that account.
   The issue makes the failure visible to everyone.

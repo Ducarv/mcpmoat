@@ -66,11 +66,13 @@ shellcheck .github/scripts/*.sh                # lint the scripts
 .github/scripts/check-tool-pins-test.sh        # test the pin check
 .github/scripts/check-tool-pins.sh             # check the tool version pins
 .github/scripts/verify-and-publish-test.sh     # test the release script
+.github/scripts/notify-failure-test.sh         # test the failure issue job (needs jq)
 ```
 
 If you change `.goreleaser.yaml`, also run these checks. A snapshot build needs no token and
 publishes nothing. It writes the archives to `dist/`. The two scripts after the build read `dist/`
-and need `jq` and `file`. They run on Linux and macOS.
+and need `jq`, `file`, and `sha256sum` or `shasum`. The test also needs `go`. They run on Linux and
+macOS.
 
 ```sh
 go run github.com/goreleaser/goreleaser/v2@v2.19.0 check                       # config is valid
@@ -91,19 +93,27 @@ tests, golangci-lint and the version smoke test. On Linux only it also runs the 
 The `tool-pins` job also runs on every pull request. It lints the scripts with
 `shellcheck .github/scripts/*.sh`. Then it runs the test of the pin check,
 `.github/scripts/check-tool-pins-test.sh`, and the pin check, `.github/scripts/check-tool-pins.sh`.
-The pin check checks that the GoReleaser pins match. It checks that each `goreleaser/goreleaser-action`
-step in `.github/workflows/` has `version: ${{ env.GORELEASER_VERSION }}` in its `with:` block. Each
-workflow file with such a step must define `GORELEASER_VERSION` as the same full pin. The check is a
-best-effort text check, not a YAML parser. It reads block style only. It fails on a line that names
-the action in a style it cannot read, so write each step in block style. It also checks that the
-govulncheck pins in `ci.yml`, `release.yml` and `govulncheck.yml` match, and that each file runs
-govulncheck only through `$GOVULNCHECK_VERSION`.
+Last, it runs `.github/scripts/notify-failure-test.sh`. That test uses a fake `gh`. It takes the real
+`run:` block of the `notify-failure` job out of `govulncheck.yml` and runs it. It needs `bash`, `awk`
+and `jq`, and no network and no token.
+
+The pin script makes the GoReleaser pins match. In every `.github/workflows/*.yml` and `*.yaml` file,
+each line that has `goreleaser_version` (in any case) must be one of two lines. One is the pin line,
+`GORELEASER_VERSION: <full version>`, in the `env:` of a job. The other is the step input
+`version: ${{ env.GORELEASER_VERSION }}`. Any other line fails. A job with a
+`goreleaser/goreleaser-action` step needs the pin in its own `env:`. A file under `.github/actions`
+that names the action also fails, so that a new local action cannot skip the rule. The script is a
+best-effort text reader, not a YAML parser. It reads block style, and it fails on a style it cannot
+read, so write each step in block style. It also makes sure that the govulncheck pins in `ci.yml`,
+`release.yml` and `govulncheck.yml` match, and that each file runs govulncheck only through
+`$GOVULNCHECK_VERSION`.
 
 The `release-check` job runs `goreleaser check` and a snapshot build. Then it runs two tests and a
-check: `.github/scripts/check-snapshot-test.sh` (negative cases for the archive
-check), `.github/scripts/verify-and-publish-test.sh` (tests the script of the "Verify and publish
+check: `.github/scripts/check-snapshot-test.sh` (positive and negative cases for the
+archive check), `.github/scripts/verify-and-publish-test.sh` (tests the script of the "Verify and publish
 the release" step in `release.yml` with a fake `gh`, with no network and no token) and
-`.github/scripts/check-snapshot.sh`.
+`.github/scripts/check-snapshot.sh`. Only the two snapshot scripts read `dist/`. The test of the
+release script builds its own small `dist/` and needs no build.
 
 The weekly `govulncheck` workflow (`.github/workflows/govulncheck.yml`) checks `main` every Monday.
 A failed scheduled or manual run makes its `notify-failure` job open one issue, "Weekly vulnerability
