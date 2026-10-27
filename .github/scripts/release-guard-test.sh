@@ -179,7 +179,7 @@ guard_case "file outside .github/scripts edited" 0 "" good edit README.md
 guard_case "the build committed a change" 1 "The build changed .github/scripts" good edit "$p" git commit -q -am build
 guard_case "publish script edited, replace ref" 1 "The build changed .github/scripts" good replace_commit
 guard_case "publish script edited, clean filter" 1 "The build changed $p" good hide_by_filter
-guard_case "GITHUB_SHA unset" nonzero "" unset true
-guard_case "GITHUB_SHA wrong" nonzero "" wrong true
+guard_case "GITHUB_SHA unset" nonzero "GITHUB_SHA: unbound variable" unset true
+guard_case "GITHUB_SHA wrong" nonzero "The build changed .github/scripts" wrong true
 
 harness_footer release-guard-test

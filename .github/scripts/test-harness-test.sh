@@ -93,8 +93,8 @@ expect "run_setup names the inner command of a wrapper" 1 "FAIL: the case: the s
   'run_setup "the case" in_dir / false'
 expect "run_setup keeps a newline in the command on one line" 1 "the setup failed (in_dir / false a ::error::x)" \
   'GITHUB_ACTIONS=true run_setup "the case" in_dir / false $'"'"'a\n::error::x'"'"
-expect "in_dir runs the command in the directory" 0 "pwd=/." \
-  'out=$(cd "$HOME" && in_dir / pwd); echo "pwd=$out."'
+expect "in_dir runs the command in the directory" 0 "dir=/." \
+  'out=$(cd "$HOME" && in_dir / pwd); echo "dir=$out."'
 expect "in_dir passes the arguments" 0 "args=a b|c." \
   'out=$(in_dir / printf "%s|" "a b" c); echo "args=${out%|}."'
 expect "in_dir fails on a missing directory" 0 "code=1" \
