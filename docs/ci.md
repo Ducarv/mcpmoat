@@ -159,8 +159,8 @@ v0.1.0 has no `.pre-commit-hooks.yaml`, so use a newer tag. The remote hook buil
 binary with Go (`language: golang`). You do not need Go on the `PATH`. When pre-commit finds no `go`
 command, it downloads the latest stable Go toolchain into its own cache, so the first run needs
 network access and takes longer. If you want a fixed toolchain, put a Go that you chose on `PATH`.
-The remote hook has the same `entry` and `files` as the local hook: it runs only when the commit
-changes `.mcp.json` or `.mcpmoat-ignore`, it skips when `.mcp.json` is missing, and it blocks at the
+The remote hook has the same `entry` and `files` as the local hook. It runs only when the commit
+changes `.mcp.json` or `.mcpmoat-ignore`. It skips when `.mcp.json` is missing. It blocks at the
 default `--fail-on high`. It takes `args` in the same way as the local hook. Use the local hook when
 you manage the `mcpmoat` binary yourself.
 

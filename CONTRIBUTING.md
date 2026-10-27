@@ -58,9 +58,9 @@ because mcpmoat refuses to make its run directory below such a directory. To run
 to a private directory, for example `TMPDIR=$(mktemp -d ~/.cache/mcpmoat-test.XXXXXX)`. CI does this.
 
 If you change a workflow, a tool pin or a script in `.github/scripts/`, also run these checks. They
-need [ShellCheck](https://www.shellcheck.net/), no network and no token. Run them from the
-repository root. The `shellcheck` line uses a path from the root. The other scripts find the root
-themselves, so you can run them from any directory.
+need [ShellCheck](https://www.shellcheck.net/), no network and no token. Run the `shellcheck` line
+from the repository root. The scripts find the root themselves, so you can run them from any
+directory.
 
 ```sh
 shellcheck .github/scripts/*.sh                # lint the scripts
@@ -112,20 +112,19 @@ fails when the GoReleaser pins do not follow these rules:
 
 - Each `goreleaser/goreleaser-action` step must have `version: ${{ env.GORELEASER_VERSION }}` in its
   `with:` block.
-- In every `.github/workflows/*.yml` and `*.yaml` file, each line that has `goreleaser_version`
+- In every `.github/workflows/*.yml` and `*.yaml` file (also a name that starts with a dot), each line that has `goreleaser_version`
   (in any case) must be one of two lines. One is the pin line, `GORELEASER_VERSION: <full version>`,
   in the `env:` of a job. The other is the step input `version: ${{ env.GORELEASER_VERSION }}`.
 - A job with a `goreleaser/goreleaser-action` step needs the pin in its own `env:`.
 - A file under `.github/actions` that names the action fails, so that a new local action cannot
   skip the rule.
 - A workflow line that uses a YAML form the check cannot read fails: an anchor, alias or merge key,
-  a tag (`!!str`), a tab, a line with only a dash, a backslash inside a double-quoted text, a line
-  that is indented deeper than the plain value before it, or a quote that does not close on
-  its line. These forms can hide a step. If a plain value has `, *` or `{*` in it, put the value in
+  a tag (`!!str`), a tab, a line with only a dash, a backslash outside a block scalar, a line that
+  is indented deeper than the plain value before it, an `env:` key with a value on its line, or a
+  quote that does not close on its line. These forms can hide a step. If a plain value has `, *` or `{*` in it, put the value in
   quotes.
 - The check is a best-effort text reader, not a YAML parser. It reads block style and fails on a
-  style it cannot read, so write each step in block style. It also reads workflow files whose
-  names start with a dot.
+  style it cannot read, so write each step in block style.
 - It does not cover other ways to install GoReleaser, such as `docker://`, a remote reusable
   workflow, `brew install` or `go install`. Review is the control for those.
 

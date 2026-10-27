@@ -63,7 +63,9 @@ filters), and on a file that is marked assume-unchanged or skip-worktree. This i
 boundary. The script `.github/scripts/release-guard-test.sh` tests this step in the `ci-scripts`
 job. The step does not catch a build that writes a git config (the repository, global or system
 config), the index or the git object store (the files under `.git`), `$GITHUB_PATH` or
-`$GITHUB_ENV`, or that leaves a background process. A separate publish job with a fresh checkout is
+`$GITHUB_ENV`, or that leaves a background process. The runner user has passwordless `sudo` and a
+writable `$HOME`, so the build can also replace system programs (`git`, `gh`, `bash`, `cmp`) and
+tool config (the `gh` config, the sigstore cache). A separate publish job with a fresh checkout is
 the real fix, and issue #174 tracks it.
 
 The next step, "Verify and publish the release", runs `.github/scripts/verify-and-publish.sh`. It
@@ -135,7 +137,9 @@ schedule only from the file on `dev`.
   that fails every week adds comments to one issue. It does not open a new issue each week. One
   series of failures makes one issue.
 - The job looks for the open issue by title and by the `security` label, so a stranger cannot hide
-  the alert with an issue of the same title. It reads the newest 200 open issues with that label.
+  the alert with an issue of the same title. This holds while only maintainers can add the label:
+  do not let an issue form add `security` by itself, and do not label an issue from a stranger. The
+  job does not check the author. It reads the newest 200 open issues with that label.
   If a maintainer removes the label from the open issue, the next failure opens a new issue. If the
   `security` label is deleted from the repo, the job fails and opens no issue: the red run is then
   the only signal.
