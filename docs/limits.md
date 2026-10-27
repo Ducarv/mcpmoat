@@ -31,6 +31,17 @@ This page lists what mcpmoat does not do, so you know how far to trust a clean s
 - The rule analysis of each server has a time budget. A server that uses it up gets a
   `MOAT-T1-023` finding (see [Exit codes](exit-codes.md)), and its tools that were not fully
   checked can hide a malicious text.
+- `scan` keeps at most 1000 tool rule findings for each server. The limit counts the findings
+  after the ignore list. It counts the rest but does not list them, and adds one `MOAT-T1-024`
+  finding that says how many it left out. Its severity is the highest severity of the applied rules,
+  and never below high. A `.mcpmoat-ignore` file cannot drop it, and only `--ignore MOAT-T1-024`
+  can (see [Ignore findings](ignore.md)). The scan stays complete, and the exit code follows
+  `--fail-on`. The pin findings and the LLM findings are not part of this limit. The number of tools
+  for each server (at most 10,000) and the LLM tool cap of 500 bound them.
+- In `scan --json`, a name that is longer than 512 characters and a path that is longer than 4096
+  characters are cut, and each cut ends with `...`. The top-level field `fields_truncated` is true
+  when any field was cut. Two names that differ only after the cut look equal in the JSON. Diffs,
+  commands, URLs and argv are never cut.
 - The budget cannot stop the build of the match forms of one text. For a very hostile text (for
   example 128 KiB of one run of invisible characters), this build can take about a second, so the
   analysis of a server can end that much after its budget (#146).

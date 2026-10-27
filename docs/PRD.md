@@ -448,11 +448,14 @@ references:
 - `--ignore MOAT-T1-003` suppresses all findings of that rule; the flag can repeat.
 - `.mcpmoat-ignore` in the working directory supports one entry per line, comments with `#`, and
   entries scoped to a rule ID, optionally limited to a server and tool.
-- Ignored findings do not affect the exit code and are counted as "ignored" in the summary.
+- Ignored findings do not affect the exit code and are counted as "ignored" in the summary. With
+  `--json` the count is in the `ignored` object (FR-15).
 - `.mcpmoat-ignore` cannot ignore the pin rules (`MOAT-T2-001` to `MOAT-T2-004`), the LLM rules
-  (`MOAT-LLM-001` and `MOAT-LLM-002`) or the budget rule (`MOAT-T1-023`). The file can come from a
-  cloned repository, and it must not silence the rug-pull alarm, the LLM classifier (FR-17) or the
-  sign that a server used up its rule time budget for every server of the user. Only
+  (`MOAT-LLM-001` and `MOAT-LLM-002`), the budget rule (`MOAT-T1-023`) or the cap rule
+  (`MOAT-T1-024`). The file can come from a
+  cloned repository, and it must not silence the rug-pull alarm, the LLM classifier (FR-17), the
+  sign that a server used up its rule time budget or the sign that tool findings were left out
+  for every server of the user. Only
   `--ignore` on the command line ignores these rules. `scan` keeps the finding and prints a warning
   when a file entry for such a rule matches a finding.
 
@@ -610,6 +613,16 @@ with `--no-color`).
 - A JSON Schema file for the output is published in `docs/`, and a test validates sample output
   against it.
 - Field names do not change without a schema version bump.
+- The output holds the count of findings that an ignore entry dropped: `ignored` has `total`, the
+  count for each rule ID (`rules`) and the number of `.mcpmoat-ignore` entries used
+  (`file_entries`). It holds rule IDs only, never text of the ignore file.
+- The output holds the data to accept the changes of a pinned server: `accept` has the digest of the
+  terminal hint (FR-13) and, only when the hint prints a command, that command.
+- The size of the output is bounded. Names are cut to 512 characters and paths to 4096 characters,
+  and `fields_truncated` tells that a field was cut. Diffs, commands, URLs and argv are never cut.
+  A server with more than 1000 tool findings gets one summary finding, `MOAT-T1-024`: the rest is
+  counted, not listed. Its severity is the highest severity among the applied rules and never lower
+  than high. The scan stays complete, and the exit code follows `--fail-on`.
 
 **FR-16: Exit codes.** 0 no findings, 1 findings at or above `--fail-on` (default `high`),
 2 execution error.
