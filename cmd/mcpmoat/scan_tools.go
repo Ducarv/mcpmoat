@@ -209,7 +209,7 @@ func (r *toolRulesRun) checkServer(ctx context.Context, o inspect.Outcome) error
 	defer cancel()
 
 	r.pending, r.omitted = r.pending[:0], 0
-	ref := report.NewServerRef(o.Server)
+	ref := report.NewServerRef(o.Server, o.Index)
 	tools := o.Result.Tools
 	for i, t := range tools {
 		found, err := r.a.CheckTool(serverCtx, t)

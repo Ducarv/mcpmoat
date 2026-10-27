@@ -65,16 +65,23 @@ type ServerRef struct {
 	// Untrusted is true for a server from a project file, which a cloned
 	// repository can ship (discover.Server.Untrusted).
 	Untrusted bool
+	// Index is the position of the server in the scanned list. It becomes
+	// server_index in scan --json, so a JSON consumer can find the server even
+	// when two names are the same after the cut. The terminal report does not
+	// print it.
+	Index int
 }
 
-// NewServerRef returns the ServerRef of s.
-func NewServerRef(s discover.Server) ServerRef {
+// NewServerRef returns the ServerRef of s. index is the position of s in the
+// scanned list (see ServerRef.Index).
+func NewServerRef(s discover.Server, index int) ServerRef {
 	return ServerRef{
 		Name:        s.Name,
 		Client:      s.Client,
 		Scope:       s.Scope,
 		ProjectPath: s.ProjectPath,
 		Untrusted:   s.Untrusted,
+		Index:       index,
 	}
 }
 

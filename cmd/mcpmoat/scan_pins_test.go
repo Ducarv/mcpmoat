@@ -806,15 +806,17 @@ func TestScanPinsNilInspector(t *testing.T) {
 // TestScanPinsSameIdentityTwice checks that a second outcome with the same
 // identity gets a MOAT-T2-004 finding, and is not compared with the pins of the
 // first one. Discovery cannot give two servers with one identity, so the test
-// calls pinOutcomes with two outcomes.
+// calls pinOutcomes with two outcomes. The row is about the second copy, so it
+// gets the index of that copy (server_index in scan --json), not the index of
+// the first one.
 func TestScanPinsSameIdentityTwice(t *testing.T) {
 	t.Parallel()
 
 	e := newPinEnv(t, oneServer("srv"))
 	c, _, stderr := e.cli(nil)
 	srv := discover.Server{Name: "srv", Client: discover.ClientClaudeCode, Source: "/cfg/mcp.json"}
-	outcome := func(tools ...inspect.Tool) inspect.Outcome {
-		return inspect.Outcome{Server: srv, Status: inspect.StatusOK, Result: inspect.Result{Tools: tools}}
+	outcome := func(index int, tools ...inspect.Tool) inspect.Outcome {
+		return inspect.Outcome{Server: srv, Index: index, Status: inspect.StatusOK, Result: inspect.Result{Tools: tools}}
 	}
 
 	store, ok := c.readPins("scan")
@@ -822,12 +824,15 @@ func TestScanPinsSameIdentityTwice(t *testing.T) {
 		t.Fatal("readPins() = false, want true")
 	}
 	pr := c.pinOutcomes(store, []inspect.Outcome{
-		outcome(mkTool("a", "Add.")),
-		outcome(mkTool("a", "Add. Changed.")),
+		outcome(0, mkTool("a", "Add.")),
+		outcome(1, mkTool("a", "Add. Changed.")),
 	}, &scanIgnores{})
 
 	if len(pr.rows) != 1 || pr.rows[0].RuleID != "MOAT-T2-004" || pr.rows[0].Severity != "medium" || pr.rows[0].Name != "srv" {
 		t.Fatalf("rows = %+v, want one MOAT-T2-004 medium row for srv", pr.rows)
+	}
+	if got := pr.rows[0].Index; got != 1 {
+		t.Errorf("row index = %d, want 1 (the second copy, which the row is about)", got)
 	}
 	if len(pr.diffs) != 0 {
 		t.Errorf("diffs = %+v, want none", pr.diffs)
@@ -1256,7 +1261,7 @@ func TestServerStatusesByIndex(t *testing.T) {
 	outcome := func(index, tools int) outcomeStatus {
 		return outcomeStatus{
 			index:  index,
-			status: report.ServerStatus{ServerRef: report.NewServerRef(srv), Status: report.StatusOK, Tools: tools},
+			status: report.ServerStatus{ServerRef: report.NewServerRef(srv, index), Status: report.StatusOK, Tools: tools},
 		}
 	}
 	tests := []struct {
@@ -1311,6 +1316,78 @@ func TestServerStatusesByIndex(t *testing.T) {
 				line := fmt.Sprintf("%s/%d/%d", st.Status, st.Tools, st.Findings)
 				if line != tt.want[i] {
 					t.Errorf("server %d = %q, want %q", i, line, tt.want[i])
+				}
+			}
+		})
+	}
+}
+
+// TestScanPinsServerIndex checks the server_index of the pin rows and diffs in
+// scan --json for a server that is not the first one in "servers": a changed
+// tool (a row and a diff), and a pinned server that could not be inspected (a
+// MOAT-T2-004 row). The first server has no change, so a row that got index 0
+// would point to the wrong server.
+func TestScanPinsServerIndex(t *testing.T) {
+	t.Parallel()
+
+	servers := map[string]any{
+		"alpha": map[string]any{"command": "npx"},
+		"beta":  map[string]any{"command": "npx"},
+	}
+	v1 := map[string][]inspect.Tool{"alpha": {mkTool("a", "Add.")}, "beta": {mkTool("b", "Echo.")}}
+	tests := []struct {
+		name string
+		// inspector gives the tools of the second scan.
+		inspector func() inspect.Inspector
+		wantRule  string
+		wantDiffs int
+	}{
+		{
+			name: "pin diff of a later server",
+			inspector: func() inspect.Inspector {
+				return fakeServers(map[string][]inspect.Tool{"alpha": v1["alpha"], "beta": {mkTool("b", "Echo. Changed.")}})
+			},
+			wantRule:  "MOAT-T2-001",
+			wantDiffs: 1,
+		},
+		{
+			name: "pinned later server not inspected",
+			inspector: func() inspect.Inspector {
+				f := fakeServers(map[string][]inspect.Tool{"alpha": v1["alpha"]})
+				f.Errors = map[string]error{"beta": errors.New("boom")}
+				return f
+			},
+			wantRule: "MOAT-T2-004",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			e := newPinEnv(t, servers)
+			if got := e.scan(fakeServers(v1)); got.code != exitOK {
+				t.Fatalf("first scan: exit code = %d, stderr:\n%s", got.code, got.stderr)
+			}
+
+			got := e.scan(tt.inspector(), "--json")
+
+			assertScanRun(t, got, scanWant{code: exitFindings})
+			doc := decodeScanJSON(t, got.stdout)
+			beta := serverIndexOf(t, doc, "beta")
+			if beta < 1 {
+				t.Fatalf("beta is at position %d, want 1 or more: the test needs a server after the first one", beta)
+			}
+			if len(doc.Findings) != 1 || doc.Findings[0].RuleID != tt.wantRule || doc.Findings[0].Server != "beta" {
+				t.Fatalf("findings = %+v, want one %s row of beta", doc.Findings, tt.wantRule)
+			}
+			if got := doc.Findings[0].ServerIndex; got != beta {
+				t.Errorf("%s server_index = %d, want %d (the position of beta)", tt.wantRule, got, beta)
+			}
+			if len(doc.Diffs) != tt.wantDiffs {
+				t.Fatalf("diffs = %+v, want %d", doc.Diffs, tt.wantDiffs)
+			}
+			for i, d := range doc.Diffs {
+				if d.Server != "beta" || d.ServerIndex != beta {
+					t.Errorf("diffs[%d] = server %q, server_index %d; want beta, %d", i, d.Server, d.ServerIndex, beta)
 				}
 			}
 		})

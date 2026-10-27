@@ -123,7 +123,19 @@ mcpmoat scan --json | jq -r '.findings[] | "\(.rule_id) \(.server)"'
   `To accept` line, and the JSON gives both servers the same `accept` object, with the same digest.
 - **`fields_truncated`** is a required boolean. It is `true` when at least one text field was cut at
   its length cap. `scan` cuts names to 512 characters and paths to 4096 characters, and each cut
-  ends with `...`. It never cuts diffs, commands, URLs or argv.
+  ends with `...`. It never cuts diffs, commands, URLs or argv. Two server names that differ only
+  after the cut are equal in the JSON, so use `server_index` (see below) to tell such servers apart.
+- **Match a finding or diff to its server:** each finding and each diff has a required integer
+  `server_index` (0 or more). It is the position of its server in the `servers` array. Use it to
+  find the server object. Do not match by the `server` text, because a cut name can be equal for
+  two servers. The `errors` entries have no `server_index`, because a file error has no server
+  object. Do not match `errors[].server` to `servers[].name`: a cut name can be equal for two
+  servers, and a file error has no server object. Use `path`, `project_path`, `line` and `col` to
+  tell the errors apart. For example, print each finding with the client of its server:
+
+  ```sh
+  mcpmoat scan --json | jq -r '.servers as $s | .findings[] | "\(.rule_id) \($s[.server_index].client)"'
+  ```
 - **The size has limits, but the whole document is not bounded:** the field caps and the cap of 1000
   tool findings for each server bound the rows and the text of the tool findings. A server with more
   tool findings gets one `MOAT-T1-024` finding, with `"field": "tool"` and an empty `key` like
@@ -146,10 +158,10 @@ mcpmoat scan --json | jq -r '.findings[] | "\(.rule_id) \(.server)"'
   without `-r` to keep the escapes.
 - Each finding has a `source`: `rule` for a rule finding, `llm` for an advisory finding of
   `--llm`.
-- The format has a `schema_version` (now `3`; version 2 added `source`, version 3 added `ignored`,
-  `accept` and `fields_truncated`). The schema is
-  [schema/scan-output.v3.json](schema/scan-output.v3.json). Files of version 1 and 2 stay as they
-  are. See [JSON output](ARCHITECTURE.md#json-output) for the shape and the version policy.
+- The format has a `schema_version` (now `4`; version 2 added `source`, version 3 added `ignored`,
+  `accept` and `fields_truncated`, version 4 added `server_index` to each finding and each diff).
+  The schema is [schema/scan-output.v4.json](schema/scan-output.v4.json). Files of version 1, 2 and
+  3 stay as they are. See [JSON output](ARCHITECTURE.md#json-output) for the shape and the version policy.
 
 ## See also
 

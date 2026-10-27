@@ -44,7 +44,9 @@ type configChecks struct {
 func (cc configChecks) findings(ignore *rules.IgnoreList, servers []discover.Server) (rows []report.FindingRow, ignored map[string]int, perServer []int) {
 	perServer = make([]int, len(servers))
 	for i, s := range servers {
-		ref := report.NewServerRef(s)
+		// servers is res.Servers, the same slice that the --json "servers"
+		// array lists in order, so i is the server_index of every row here.
+		ref := report.NewServerRef(s, i)
 		found := rules.CheckConfig(s)
 		found = append(found, cc.typo.Check(s)...)
 		for _, f := range found {

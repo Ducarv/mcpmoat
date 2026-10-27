@@ -169,7 +169,7 @@ func llmServerJobs(outcomes []inspect.Outcome) [][]llmJob {
 		if o.Status != inspect.StatusOK || len(o.Result.Tools) == 0 {
 			continue
 		}
-		ref := report.NewServerRef(o.Server)
+		ref := report.NewServerRef(o.Server, o.Index)
 		jobs := make([]llmJob, 0, len(o.Result.Tools))
 		for _, t := range o.Result.Tools {
 			jobs = append(jobs, llmJob{

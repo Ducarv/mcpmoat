@@ -291,10 +291,10 @@ step 5 and step 6:
   which server `pin --accept <name>` would select among all servers of the scan (`selectServers`,
   the same function that `pin` uses). It sets `project` when `pin` needs `--project` to select the
   server, and `ambiguous` when the name cannot select it.
-  - The JSON `accept` object (`scan --json`, schema version 3) comes from the same hint and the same
-    decision as the terminal line. `acceptAdvice` (`cmd/mcpmoat/accept_hint.go`) returns the text
-    of the line and `isCommand`, which is true only when the text is the `pin --accept` command
-    (`acceptCommand`) and false when it is the prose steps (`acceptSteps`). The terminal prints
+  - The JSON `accept` object (`scan --json`, since schema version 3) comes from the same hint and
+    the same decision as the terminal line. `acceptAdvice` (`cmd/mcpmoat/accept_hint.go`) returns
+    the text of the line and `isCommand`, which is true only when the text is the `pin --accept`
+    command (`acceptCommand`) and false for the prose steps (`acceptSteps`). The terminal prints
     `text`. The JSON gets `digest` (the digest of the hint) and, only when `isCommand` is true,
     `command` (the same `text`). It never gets the prose, so a program cannot run a line that the
     terminal shows as steps. `acceptOf` (`cmd/mcpmoat/scan_json.go`) finds the hint of a server by
@@ -869,14 +869,15 @@ one.
 ## JSON output
 
 `mcpmoat scan --json` (FR-15) writes the report as one JSON document on stdout. The schema is
-[docs/schema/scan-output.v3.json](schema/scan-output.v3.json). The schema files of the older
-versions, [version 1](schema/scan-output.v1.json) and [version 2](schema/scan-output.v2.json), stay
-unchanged. The Go types are in `internal/report/json.go`. `cmd/mcpmoat/scan_json.go` fills them from
-the same data as the terminal report, in the same order. The one difference: `findings` keeps the
-order of the rows, and the terminal report groups them by severity. The report types hold plain
+[docs/schema/scan-output.v4.json](schema/scan-output.v4.json). The schema files of the older
+versions, [version 1](schema/scan-output.v1.json), [version 2](schema/scan-output.v2.json) and
+[version 3](schema/scan-output.v3.json), stay unchanged. The Go types are in
+`internal/report/json.go`. `cmd/mcpmoat/scan_json.go` fills them from the same data as the
+terminal report, in the same order. The one difference: `findings` keeps the order of the rows, and
+the terminal report groups them by severity. The report types hold plain
 strings, bools and ints, never a `discover` type, so a secret cannot reach the output by accident.
 
-Shape (`schema_version` 3):
+Shape (`schema_version` 4):
 
 - Top level: `schema_version`, `tool` (`name`, `version`), `mode` (`no-connect` or `connect`),
   `complete`, `fields_truncated`, `servers`, `findings`, `diffs`, `errors` and `ignored`. An empty
@@ -913,18 +914,22 @@ Shape (`schema_version` 3):
   gives a `MOAT-T2-004` finding when both copies were inspected, or when the identity is pinned
   and a copy failed. An identity that is not pinned, with one copy `ok` and one that failed, gives
   only the warning on stderr.
-- A finding has `rule_id`, `severity`, `server`, `field`, `key`, `related` and `source`. `related`
-  is a second name (a key or a server), a fixed reason text or, for `MOAT-LLM-001`, the category
-  of the verdict. It is never a value. `source` is required: `rule` for a rule finding and `llm` for
-  an advisory finding of `--llm`. It is the only finding field that is never empty.
-- A diff has `server`, `tool`, `kind` (`changed`, `new` or `unverified`), `diff`,
-  `diff_truncated` and `diff_is_note`. When `diff_is_note` is true, `diff` is a fixed note of
-  mcpmoat, not a unified diff: the diff could not be made, or the change does not show in the
-  rendered text.
+- A finding has `rule_id`, `severity`, `server`, `server_index`, `field`, `key`, `related` and
+  `source`. `server_index` is an integer (0 or more): the position of the server of the finding in
+  `servers`. A consumer finds the server object by this index, not by the `server` text, because
+  two cut names can be equal (see [Size bound](#size-bound)). `related` is a second name (a key or
+  a server), a fixed reason text or, for `MOAT-LLM-001`, the category of the verdict. It is never a
+  value. `source` is required: `rule` for a rule finding and `llm` for an advisory finding of
+  `--llm`. It is the only finding field that is never empty.
+- A diff has `server`, `server_index` (as in a finding), `tool`, `kind` (`changed`, `new` or
+  `unverified`), `diff`, `diff_truncated` and `diff_is_note`. When `diff_is_note` is true, `diff`
+  is a fixed note of mcpmoat, not a unified diff: the diff could not be made, or the change does not
+  show in the rendered text.
 - Every enum in the schema lists all the values that mcpmoat writes. The Go `String` methods have
   an `unknown` fallback for an invalid value. That value is a bug, and the schema rejects it.
 - A file problem in `errors` has `path`, `project_path`, `server`, `line`, `col`, `reason` and
-  `untrusted`. `reason` is fixed text.
+  `untrusted`. `reason` is fixed text. It has no `server_index`, because a file problem has no
+  server object.
 
 What stays on stderr: the warnings, the notices and the errors. They are byte-identical to a run
 without `--json`, with one addition: there is no summary, so `scan` writes on stderr the lines that
@@ -968,10 +973,15 @@ other fields keep their names and types. Version 3 adds the top-level `ignored` 
 counts of the findings that the ignore list dropped, so a CI job can read them: #175), the optional
 server field `accept` (the digest and the command of the "To accept" hint, so a CI job can read
 them: #169) and the top-level `fields_truncated` flag with the length caps of the text fields
-(#170, see [Size bound](#size-bound)). The other fields keep their names and types. The schema
-files of version 1 and version 2 stay as they were released.
+(#170, see [Size bound](#size-bound)). The other fields keep their names and types.
 
-Not in version 3: a summary, `pin --json` and `--fail-on` (#65).
+Version 4 adds the required integer field `server_index` to each finding and each diff (#223). The
+server names are cut (see [Size bound](#size-bound)), so two servers can have the same `server`
+text. The index tells them apart. It is an added field, so it needs a bump: every object in the
+schema sets `additionalProperties: false`. The other fields keep their names and types. The schema
+files of version 1, version 2 and version 3 stay as they were released.
+
+Not in version 4: a summary, `pin --json` and `--fail-on` (#65).
 
 ### Size bound
 
@@ -996,9 +1006,10 @@ bound the whole document: the config findings, the pin findings and the LLM find
    - `fields_truncated` is `true` when `WriteJSON` cut any field. A caller can also set it to
      `true`, and `WriteJSON` never sets it back to `false`. Each cut field has a `maxLength`
      (515 or 4099) in the schema.
-   - Limit: two names that differ only after the cut look equal in the output (issue #223 tracks a
-     fix). The cut happens only when `WriteJSON` writes. The ignore list and the pins use the real
-     names.
+   - Two names that differ only after the cut look equal in the output. `server_index` tells such
+     servers apart: a consumer matches a finding or a diff to its server by the index, not by the
+     cut text. The cut happens only when `WriteJSON` writes. The ignore list and the pins use the
+     real names.
 2. Per-server row cap (see 5d). A server keeps at most 1000 tool rule rows, then one `MOAT-T1-024`
    row. The cap counts the rows after the ignore list. The `MOAT-T1-023` row and the cap row do not
    count. The cap bounds the part that grows with the number of tools times the number of rules. It

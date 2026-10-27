@@ -241,8 +241,51 @@ func TestWriteJSONEmptyReport(t *testing.T) {
 	if raw["fields_truncated"] != false {
 		t.Errorf("fields_truncated = %#v, want false", raw["fields_truncated"])
 	}
-	if raw["schema_version"] != float64(3) {
-		t.Errorf("schema_version = %#v, want 3", raw["schema_version"])
+	if raw["schema_version"] != float64(report.SchemaVersion) {
+		t.Errorf("schema_version = %#v, want %d", raw["schema_version"], report.SchemaVersion)
+	}
+}
+
+// TestWriteJSONServerIndex checks that server_index of a finding and of a diff
+// reaches the JSON, and that index 0 is written (the key has no omitempty).
+func TestWriteJSONServerIndex(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name        string
+		findingIdx  int
+		diffIdx     int
+		wantFinding float64
+		wantDiff    float64
+	}{
+		{name: "non-zero", findingIdx: 3, diffIdx: 2, wantFinding: 3, wantDiff: 2},
+		{name: "zero is written", findingIdx: 0, diffIdx: 0, wantFinding: 0, wantDiff: 0},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			r := newReport(nil, []report.JSONDiff{
+				report.NewJSONDiff(report.ToolDiff{Server: "s", ServerIndex: tt.diffIdx, Tool: "t", Kind: report.DiffNew, Diff: "+x\n"}),
+			})
+			r.Findings = []report.JSONFinding{report.NewJSONFinding(report.FindingRow{
+				ServerRef: report.ServerRef{Name: "s", Index: tt.findingIdx}, RuleID: "MOAT-T1-001", Severity: "high",
+			})}
+			var raw struct {
+				Findings []map[string]any `json:"findings"`
+				Diffs    []map[string]any `json:"diffs"`
+			}
+			if err := json.Unmarshal(writeJSON(t, r), &raw); err != nil {
+				t.Fatalf("output is not valid JSON: %v", err)
+			}
+			if len(raw.Findings) != 1 || len(raw.Diffs) != 1 {
+				t.Fatalf("got %d findings and %d diffs, want 1 of each", len(raw.Findings), len(raw.Diffs))
+			}
+			if got, ok := raw.Findings[0]["server_index"]; !ok || got != tt.wantFinding {
+				t.Errorf("finding server_index = %#v (present %v), want %v", got, ok, tt.wantFinding)
+			}
+			if got, ok := raw.Diffs[0]["server_index"]; !ok || got != tt.wantDiff {
+				t.Errorf("diff server_index = %#v (present %v), want %v", got, ok, tt.wantDiff)
+			}
+		})
 	}
 }
 
@@ -404,8 +447,8 @@ func TestDiffKindString(t *testing.T) {
 // a literal on purpose: it is the stable name in the schema.
 func TestNewJSONDiffCopiesFields(t *testing.T) {
 	t.Parallel()
-	got := report.NewJSONDiff(report.ToolDiff{Server: "s", Tool: "t", Kind: report.DiffNew, Diff: "a note", Truncated: true, IsNote: true})
-	want := report.JSONDiff{Server: "s", Tool: "t", Kind: "new", Diff: "a note", Truncated: true, IsNote: true}
+	got := report.NewJSONDiff(report.ToolDiff{Server: "s", ServerIndex: 7, Tool: "t", Kind: report.DiffNew, Diff: "a note", Truncated: true, IsNote: true})
+	want := report.JSONDiff{Server: "s", ServerIndex: 7, Tool: "t", Kind: "new", Diff: "a note", Truncated: true, IsNote: true}
 	if got != want {
 		t.Errorf("NewJSONDiff() = %+v, want %+v", got, want)
 	}
@@ -434,12 +477,12 @@ func TestNewJSONFindingSource(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			row := report.FindingRow{
-				ServerRef: report.ServerRef{Name: "srv", Client: discover.ClientCursor, Scope: discover.ScopeGlobal},
+				ServerRef: report.ServerRef{Name: "srv", Client: discover.ClientCursor, Scope: discover.ScopeGlobal, Index: 5},
 				Source:    tt.source, RuleID: "MOAT-LLM-001", Severity: "medium", Title: "title",
 				Risk: "risk", Remediation: "fix", Field: "tool", Key: "send", Related: "rel",
 			}
 			want := report.JSONFinding{
-				RuleID: "MOAT-LLM-001", Severity: "medium", Server: "srv",
+				RuleID: "MOAT-LLM-001", Severity: "medium", Server: "srv", ServerIndex: 5,
 				Field: "tool", Key: "send", Related: "rel", Source: tt.want,
 			}
 			if got := report.NewJSONFinding(row); got != want {

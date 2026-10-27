@@ -47,8 +47,9 @@ This page lists what mcpmoat does not do, so you know how far to trust a clean s
   bounds. A cap for the config findings is planned as a follow-up (issue #213).
 - In `scan --json`, a name that is longer than 512 characters and a path that is longer than 4096
   characters are cut, and each cut ends with `...`. The top-level field `fields_truncated` is true
-  when any field was cut. Two names that differ only after the cut look equal in the JSON (a fix is
-  planned as issue #223). Diffs, commands, URLs and argv are never cut. These caps and the cap of
+  when any field was cut. Two server names that differ only after the cut are equal in the JSON,
+  but the `server_index` of each finding and each diff tells such servers apart (see
+  [Scan output](scan-output.md#json-output)). Diffs, commands, URLs and argv are never cut. These caps and the cap of
   1000 tool findings do not bound the size of the whole JSON document: a hostile config file with a
   very large number of config findings can give a very large document.
 - The budget cannot stop the build of the match forms of one text. For a very hostile text (for

@@ -211,9 +211,17 @@ func pinnable(id pins.Identity, tools []inspect.Tool) (pins.ServerPins, error) {
 }
 
 // diffOf returns the diff of one change for the report. The change must have a
-// diff (see appendDiff). server is the name that the report shows.
-func diffOf(server string, ch pins.Change) report.ToolDiff {
-	d := report.ToolDiff{Server: server, Tool: ch.Tool, Diff: ch.Diff, Truncated: ch.Truncated, IsNote: ch.DiffIsNote()}
+// diff (see appendDiff). server is the name that the report shows. index is the
+// position of the server in the scanned list (report.ToolDiff.ServerIndex).
+func diffOf(server string, index int, ch pins.Change) report.ToolDiff {
+	d := report.ToolDiff{
+		Server:      server,
+		ServerIndex: index,
+		Tool:        ch.Tool,
+		Diff:        ch.Diff,
+		Truncated:   ch.Truncated,
+		IsNote:      ch.DiffIsNote(),
+	}
 	switch ch.Kind {
 	case pins.KindNew:
 		d.Kind = report.DiffNew
@@ -232,7 +240,11 @@ func diffOf(server string, ch pins.Change) report.ToolDiff {
 // accept it. A change without a diff adds nothing. When the diff was cut at
 // the size limit, it prints one warning on stderr for the command cmd ("scan"
 // or "pin"), because the user would review only a part of the tool.
-func (c *cli) appendDiff(cmd string, diffs []report.ToolDiff, server string, ch pins.Change) []report.ToolDiff {
+//
+// index is the position of the server in the scanned list. It becomes
+// server_index in scan --json (see diffOf), and the stderr warning does not
+// use it.
+func (c *cli) appendDiff(cmd string, diffs []report.ToolDiff, server string, index int, ch pins.Change) []report.ToolDiff {
 	if ch.Diff == "" {
 		return diffs
 	}
@@ -240,7 +252,7 @@ func (c *cli) appendDiff(cmd string, diffs []report.ToolDiff, server string, ch 
 		c.warnf(cmd, "the diff of tool %s on server %s was cut at the size limit; review the full tool before you accept it",
 			cutName(ch.Tool), cutName(server))
 	}
-	return append(diffs, diffOf(server, ch))
+	return append(diffs, diffOf(server, index, ch))
 }
 
 // cutName returns an untrusted name (a server or a tool) escaped and cut for a

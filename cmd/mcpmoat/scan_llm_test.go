@@ -1018,6 +1018,25 @@ func TestScanLLMMarking(t *testing.T) {
 		if got := llmJSONRows(t, doc); !slices.Equal(got, wantLLM) {
 			t.Errorf("LLM findings = %+v, want %+v\nstdout:\n%s", got, wantLLM, r.stdout)
 		}
+		// beta is the second server, so its LLM rows carry its position in
+		// "servers" as server_index, not 0.
+		beta := serverIndexOf(t, doc, "beta")
+		if beta < 1 {
+			t.Fatalf("beta is at position %d, want 1 or more", beta)
+		}
+		betaLLM := 0
+		for _, f := range doc.Findings {
+			if f.Source != report.SourceLLM || f.Server != "beta" {
+				continue
+			}
+			betaLLM++
+			if f.ServerIndex != beta {
+				t.Errorf("%s on beta/%s server_index = %d, want %d", f.RuleID, f.Key, f.ServerIndex, beta)
+			}
+		}
+		if betaLLM != 2 {
+			t.Errorf("beta has %d LLM rows, want 2 (t4 and t5)", betaLLM)
+		}
 		ruleCount := 0
 		for _, f := range doc.Findings {
 			switch f.RuleID {

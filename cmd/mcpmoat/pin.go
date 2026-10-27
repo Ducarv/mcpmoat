@@ -554,8 +554,14 @@ func (c *cli) pinChanges(store *pins.Store, id pins.Identity, server string, too
 	// An unpinned server gives nil pins, and pins.Compare then reports every
 	// valid tool as new.
 	stored, _ := store.Get(id)
+	// pin inspects one server, as a list of one (see inspectOne), so the
+	// position of the server is always 0. Only scan --json reads the index
+	// (server_index). pin prints the diffs as text, which has no index. When
+	// pin gets a --json output (issue #65), remove this constant: add an index
+	// parameter and pass the Index of the outcome from the caller.
+	const serverIndex = 0
 	for _, ch := range pins.Compare(stored, tools) {
-		diffs = c.appendDiff("pin", diffs, server, ch)
+		diffs = c.appendDiff("pin", diffs, server, serverIndex, ch)
 	}
 	return diffs
 }
