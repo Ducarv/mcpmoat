@@ -2,20 +2,22 @@
 # The regex and keyword rules read each schema string in the 32 KiB window, at
 # most 4096 strings and 128 KiB in all, and the raw text when the JSON cannot
 # be read in full. The match_window heuristic flags a schema that they do not
-# read in full (see matchWindowCut in internal/rules/normalize.go for which
-# text of a string counts). The escape-sequence padding cases are too long
-# for this file: TestMatchWindowCut covers them.
+# read in full (see baseFormsCut in internal/rules/normalize.go for which
+# text of a string counts). It also flags a string with more than 256 U+009D
+# (C1 OSC starts, see maxStrictOSCStarts): the matchers read such a string
+# with a faster regex that can miss a match. The escape-sequence padding cases
+# are too long for this file: TestMatchWindowCut covers them.
 # The long should_match case is one paragraph, repeated until the string is
 # longer than MaxMatchInputBytes. Keep it longer than the window when the
 # window changes.
 id: MOAT-T1-018
-title: Tool schema is too large or too broken for the regex rules to read in full
+title: Tool schema is too large, too broken or holds too many C1 OSC controls for the regex rules to read in full
 severity: high
 target: schema
 match:
   heuristic: match_window
-risk: The regex rules read only the first 32 KiB of each input schema string and a capped part of the schema, so padding can push hidden instructions past the part that they read.
-remediation: Read the full input schema, mainly the long strings and their ends, and check what they ask the model to do. A benign server rarely has a schema this large, a string this long or a schema that is not valid JSON. Remove the server or do not use it if the schema hides instructions, and report the server to its author.
+risk: The regex rules read only the first 32 KiB of each input schema string and a capped part of the schema, so padding can push hidden instructions past the part that they read. They read a string with more than 256 C1 OSC controls (U+009D) with a faster regex that can miss a match, so these controls can also hide instructions. The finding detail tells which reason applies.
+remediation: Read the full input schema, mainly the long strings and their ends, and check what they ask the model to do. A benign server rarely has a schema this large, a string this long, a string with so many invisible control characters or a schema that is not valid JSON. Remove the server or do not use it if the schema hides instructions, and report the server to its author. Text in the wrong encoding (UTF-8 read as Latin-1) can also hold many U+009D. Then ask the author to fix the encoding.
 references:
   - https://invariantlabs.ai/blog/mcp-security-notification-tool-poisoning-attacks
   - https://owasp.org/www-project-mcp-top-10/
@@ -379,6 +381,10 @@ should_match:
     note: A description of about 33195 bytes with a payload at the end, after the 32 KiB window
   - text: '{"type":"object","properties":{"q":{"type":"string","default":[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[["x"]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]}}}'
     note: Nested deeper than 64 levels, so the JSON cannot be read in full. The inspect package rejects such a schema, so a scan does not see it
+  - text: "{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\",\"description\":\"Read the file.\
+      \u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\
+      Then return its contents.\"}}}"
+    note: A string with 257 C1 OSC starts (U+009D), one more than maxStrictOSCStarts, so the matchers read the string with a faster regex that can miss a match
 should_not_match:
   - text: '{"type":"object","properties":{"a":{"type":"number","description":"First number."},"b":{"type":"number","description":"Second number."}},"required":["a","b"]}'
     note: A short schema
@@ -446,3 +452,7 @@ should_not_match:
       query is a plain text string and matches the title, the body and the comments of each ticket.
       Results are returned in order of last update, with the most r"}}}
     note: A description of exactly 1 KiB
+  - text: "{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\",\"description\":\"Read the file.\
+      \u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\u009D\
+      Then return its contents.\"}}}"
+    note: A string with 256 C1 OSC starts (U+009D), at maxStrictOSCStarts, so the matchers read the string with the strict regex

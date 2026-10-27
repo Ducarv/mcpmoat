@@ -46,67 +46,116 @@ How mcpmoat prepares the text before a match. This applies to every regex and ke
   the terminal way: a CSI can hold C0 control characters, so ESC [ U+0001 8 m is one CSI. The
   terminal way can take text into a sequence: ESC [ LF "<IMPORTANT>" is the CSI ESC [ LF < I and
   the text "MPORTANT>". So a pattern sees "[" and "<IMPORTANT>" in forms 1 to 3. Forms 4 to 7 only
-  add matches.
+  add matches. The strict way is slow on many U+009D, because each U+009D can start an OSC and can
+  also sit inside OSC text. So forms 1 to 3 keep the strict way only up to 256 U+009D in the first
+  128 KiB of the raw text. Above 256, a U+009D ends the OSC text in these forms and starts a new
+  OSC, so they can miss a match. The `match_window` heuristic fires on such a text (see below).
+  A keyword itself is always prepared the strict way.
 - A regex or a keyword is matched against up to seven forms of the text. It matches when it
   matches one form. mcpmoat builds form 1 always, and each other form only when the text has the
-  characters that the form needs:
-  1. Always: the invisible characters are removed. So "Ig" + U+0001 + "nore" reads as "Ignore".
-  2. When the text has an invisible character: each run of invisible characters is one space, or
-     two when the run has a control character and ends with a format character. So "Ignore" +
-     ZWSP + "previous" reads as two words.
-  3. When the text has a control character: the format characters are removed, and each run of
-     control characters is one space. So a ZWSP inside a word and a control character between
-     words still match.
-  4. When the text has a control character and a format character: the control characters are
-     removed, and each run with a format character is one space. So a control character inside a
-     word and a ZWSP between words still match.
-  5. When the text has ESC, U+009B or U+009D: as form 1, but the sequences are read the terminal
-     way, and a sequence gives back the text that it takes. A CSI whose final byte is an ASCII
-     letter other than "m" keeps that letter, its parameter bytes `<`, `=`, `>` and `?` and its
-     intermediate bytes (such as `.` and `/`). It drops its digits, `;` and `:`. So ESC [
-     "Ignore" (the CSI ESC [ I) reads as " Ignore", ESC [ "<IMPORTANT>" reads as " <IMPORTANT>",
-     and ESC [ ".env" reads as " .env". A CSI with the final byte "m" is SGR (colour and bold), so
-     it is nothing, as a terminal shows it: ESC [ 1 m "iPhone" reads as "iPhone", and "Ig" +
-     ESC [ 0 m + "nore" reads as "Ignore". An OSC keeps its text: ESC ] "Ignore all" BEL reads as
-     " Ignore all ". A model reads OSC text, such as a window title or a link URL, so a rule can
-     match it. A CSI inside that text is read in the same way, so ESC ] + U+009B + "8mIgnore" BEL
-     reads as " Ignore ".
-  6. When the text has ESC or U+009B and a C0 control character: as form 1, but each sequence,
-     read the terminal way, is one space. So ESC + U+0001 + "[8mIgnore" reads as " Ignore".
-  7. When the text has ESC, U+009B or U+009D: as form 5, but each run of invisible characters is
-     one space, as in form 2. So ESC ] "Ignore" + ZWSP + "all" BEL reads as " Ignore all ",
-     ESC [ "Ignore" + U+0001 + "all" reads as " Ignore all", and an ESC that starts no sequence
-     is a space too: ESC [ "Ignore" + ESC + "all" reads as " Ignore all".
+  characters that the form needs. The name in parentheses is the `formMode` constant in
+  [normalize.go](../internal/rules/normalize.go) that builds the form:
+  1. Always (`dropInvisible`): the invisible characters are removed. So "Ig" + U+0001 + "nore"
+     reads as "Ignore".
+  2. When the text has an invisible character (`spaceInvisible`): each run of invisible characters
+     is one space, or two when the run has a control character and ends with a format character.
+     So "Ignore" + ZWSP + "previous" reads as two words.
+  3. When the text has a control character (`spaceControls`): the format characters are removed,
+     and each run of control characters is one space. So a ZWSP inside a word and a control
+     character between words still match.
+  4. When the text has a control character and a format character (`spaceFormats`): the control
+     characters are removed, and each run with a format character is one space, except a run
+     inside a CSI (after the "[" of ESC [ or after U+009B, before the final byte), which is dropped
+     with no space. So a control character inside a word and a ZWSP between words still match, and
+     ESC [ + ZWSP + "8mIgnore" is still the SGR ESC [ 8 m before "Ignore".
+  5. When the text has ESC, U+009B or U+009D (`keepSeqText`): as form 1, but the sequences are
+     read the terminal way, and a sequence gives back the text that it takes. A CSI whose final
+     byte is an ASCII letter other than "m" keeps that letter, its parameter bytes `<`, `=`, `>`
+     and `?` and its intermediate bytes (such as `.` and `/`). It drops its digits, `;` and `:`. So
+     ESC [ "Ignore" (the CSI ESC [ I) reads as " Ignore", ESC [ "<IMPORTANT>" reads as
+     " <IMPORTANT>", and ESC [ ".env" reads as " .env". A CSI with the final byte "m" is SGR
+     (colour and bold), so it is nothing, as a terminal shows it: ESC [ 1 m "iPhone" reads as
+     "iPhone", and "Ig" + ESC [ 0 m + "nore" reads as "Ignore". An OSC keeps its text:
+     ESC ] "Ignore all" BEL reads as " Ignore all ". A model reads OSC text, such as a window title
+     or a link URL, so a rule can match it. A CSI inside that text is read in the same way, so
+     ESC ] + U+009B + "8mIgnore" BEL reads as " Ignore ".
+  6. When the text has ESC or U+009B and a C0 control character (`dropSeqC0`): as form 1, but each
+     sequence, read the terminal way, is one space. So ESC + U+0001 + "[8mIgnore" reads as
+     " Ignore".
+  7. When the text has ESC, U+009B or U+009D (`keepSeqTextSpaced`): as form 5, but each run of
+     invisible characters is one space, as in form 2, except a run inside a CSI, which is dropped
+     as in form 4. So ESC ] "Ignore" + ZWSP + "all" BEL reads as " Ignore all ",
+     ESC [ "Ignore" + U+0001 + "all" reads as " Ignore all", and an ESC that starts no sequence is
+     a space too: ESC [ "Ignore" + ESC + "all" reads as " Ignore all".
 
-  Some texts defeat all seven forms:
-  - one kind of invisible character both inside a word and between words;
-  - a format character (such as ZWSP) inside a CSI, after the "[", with the same character between
-    words (ESC [ + ZWSP + "8mIgnore" + ZWSP + "all");
+  Some texts defeat all seven forms. Each case below is a known limit with its reason, and
+  `invisible_unicode` still flags it (see the end of this item). In forms 4 and 7, a format
+  character inside a CSI reads as if it were absent, so in these forms such a text has the same
+  limits as the text without it.
+  - a format character inside a CSI when only form 2 has all the word gaps ("Ignore" + ESC [ +
+    ZWSP + "0mall" + U+0001 + "previous" + ZWSP + "instructions."). Without the ZWSP inside the
+    CSI, form 2 reads "Ignore all previous instructions.". With it, form 2 makes the ZWSP a space,
+    which breaks the CSI ("Ignore [ 0mall previous instructions."), and no other form has all
+    three word gaps. Form 2 reads the strict way, so to drop the ZWSP it needs a strict way to find
+    the end of a CSI that takes no C0 control character. That fix is a separate change.
+  - one kind of invisible character both inside a word and between words. Each form treats every
+    run of one kind the same way, so it joins all such words or splits all of them. To tell them
+    apart would need a word list or one form for each combination of runs.
   - text that only a sequence gives back (OSC text or a CSI letter) with two kinds of invisible
     characters, one inside a word and the other between words (ESC [ "Ig" + ZWSP + "nore" +
-    U+0001 + "all");
-  - a CSI that takes a character that no form gives back: the "m" of a word (ESC [ 1 "make" reads
-    as "ake", and "you " + ESC [ "must" reads as "you ust"), a digit, `;` or `:`, or a final byte
-    that is not a letter (ESC [ "~/.ssh" reads as " /.ssh");
+    U+0001 + "all"). A fix needs two new base forms, so a regex would read up to 27 forms, not 21
+    (about 29% more worst-case cost).
+  - a CSI letter and an SGR between two words (ESC [ "Ignore" + ESC [ 0 m + "all", and "Send" +
+    ESC [ 8 m + "the" + ESC [ SP "argument"). Only forms 5 and 7 give back a CSI letter, but these
+    forms read an SGR as nothing, so the words on each side of the SGR join. No form does both.
+    A fix needs a new base form, so a regex would read up to 27 forms, not 21, the same cost as
+    for the case above.
+  - a CSI that takes the "m" of a word (ESC [ 1 "make" reads as "ake", and "you " + ESC [ "must"
+    reads as "you ust"). A terminal also runs ESC [ m and hides the "m", so the form matches the
+    screen. To give the "m" back would change how the most common benign SGR, the bare reset
+    ESC [ m, reads.
+  - a CSI that takes a digit, `;` or `:`. These are real parameters of benign cursor and SGR
+    codes, and an attack needs a word that starts with a digit or `;`.
+  - a CSI with a final byte that is not a letter (ESC [ "~/.ssh" reads as " /.ssh"). No hit is
+    lost: MOAT-T1-004 (medium) still fires on "Read the file " + ESC [ "~/.ssh".
   - a CSI with a letter final byte inside an OSC text, right before a word: forms 5 and 7 keep
     its letter, and the other forms drop the OSC text (ESC ] "0;" + U+009B + "2KIgnore" BEL reads
-    as " 0; KIgnore ");
+    as " 0; KIgnore "). One form cannot both keep the letter (U+009B "Ignore") and split it
+    ("2KIgnore"), so a fix needs a new base form. The other option, a CSI inside OSC text as one
+    space only in form 7, loses ESC ] U+009B "Ignore" + ZWSP + "all" BEL, which matches today.
   - an OSC, or a CSI with a final byte other than "m", inside a word: a terminal shows one word,
-    but every form splits it ("Ig" + ESC [ K + "nore" reads as "Ig Knore" or "Ig nore");
+    but every form splits it ("Ig" + ESC [ K + "nore" reads as "Ig Knore" or "Ig nore"). To read
+    an OSC 8 as nothing in form 5 loses the hit on a payload in an OSC 8 URL with a ZWSP inside a
+    word. To join "Ig" + ESC [ K + "nore" conflicts with ESC [ "Ignore", which needs the letter
+    back. So each fix needs a new base form or loses a hit.
   - a payload that only forms 5 and 7 show, after more than 32 KiB of OSC text. The
     `match_window` heuristic does not flag such a text (see below). The `max_length` heuristic
     (MOAT-T1-007, low) flags it when it has more than 4096 characters. Forms 5 and 7 are not
     longer than the raw text in characters, so this is true unless only the Unicode normalization
-    (NFC) makes forms 5 and 7 longer than 32 KiB.
+    (NFC) makes forms 5 and 7 longer than 32 KiB. To also match the copy of form 5 or 7 without
+    the OSC text would raise the bound to 9 base forms and 27 regex forms. To count only the text
+    outside OSC 8 links is not enough, because padding with OSC 8 links still works.
 
   Form 5 can also make a token that neither the raw text nor a terminal shows, from a rare CSI. It
-  writes a space and gives back the kept bytes and the final letter. So "<system" + ESC [ > c +
-  "-info>" reads as "<system >c-info>", ESC [ SP q + ESC [ 1 m + "iPhone" gives the word
-  "qiPhone". Such a hit can be a false positive.
+  writes a space and gives back the kept bytes and the final letter. Such a hit can be a false
+  positive at high, but only on crafted text:
+  - "<system" + ESC [ > c + "-info>" reads as "<system >c-info>" (MOAT-T1-002, and MOAT-T1-013 in
+    a schema). This CSI (DA2) is a query that a terminal answers, not output, and the raw text
+    already holds "<system". A fix gives back fewer CSI bytes and loses the hit on
+    ESC [ "<IMPORTANT>".
+  - ESC [ SP q + ESC [ 1 m + "iPhone" gives the word "qiPhone" (MOAT-T3-001), and the plain text
+    gets no hit. This CSI (DECSCUSR) is rare, and a test on realistic ANSI text found no such hit.
+    To give the final letter back only before a letter does not fix ESC [ SP + "qiPhone".
+
+  ESC [ ".env" in a schema string is not a false positive at high. It gets only MOAT-T1-012 and
+  MOAT-T1-004, both medium.
 
   The `invisible_unicode` heuristic (MOAT-T1-006 for a description, MOAT-T1-015 for a schema)
-  flags every invisible character, also every control character except white space. So it still
-  flags such a text.
+  flags nearly every invisible character, also every control character except white space. It
+  excuses only one VS15 or VS16 after a pictograph (or a keycap base) and one ZWJ between two
+  pictographs, as in an emoji. So it still flags each text above, because each one holds an
+  invisible character that it does not excuse, such as ESC, ZWSP or U+0001. Both rules are
+  medium, so the default `--fail-on high` does not fail on such a text.
 - A regex also sees a folded form of the text: fullwidth letters, mathematical letters and
   combining marks become plain letters. Only the text is folded, not the pattern. So write the
   pattern in ASCII and do not add fullwidth alternatives: `(?i)ignore` also matches "ignore" in
@@ -117,18 +166,59 @@ How mcpmoat prepares the text before a match. This applies to every regex and ke
   letters can hide. The `mixed_script` heuristic (MOAT-T1-010 for a description, MOAT-T1-011 for a
   schema) flags a word that mixes letters of look-alike scripts. The look-alike fold, the rules and
   the unit exemption of `mixed_script`, and the limits of both are in the package doc of
-  `internal/rules` ([doc.go](../internal/rules/doc.go)). A regex reads up to 21 forms: the seven forms,
-  their folds and their look-alike folds. A look-alike fold is a new form only when the text has a
-  look-alike letter, so other text has at most 14 forms. A keyword reads up to seven, because
+  `internal/rules` ([doc.go](../internal/rules/doc.go)). A regex reads up to 21 forms: the seven
+  forms, their folds and their look-alike folds. A look-alike fold is a new form only when the text
+  has a look-alike letter, so other text has at most 14 forms. A keyword reads up to seven, because
   mcpmoat matches a keyword only against the folds.
+
+  Some characters look like both "I" and "l", so a text can mean either letter. The look-alike
+  fold reads each such character as one of the two letters. The plain fold also turns some
+  compatibility characters into an ASCII "I" or "l": fullwidth U+FF29, mathematical U+1D5A8, the
+  roman numerals U+2160 and U+217C, and the ligature U+FB02 ("fl"). Ordinary accented letters
+  such as U+00CF or U+013E also fold to "I" or "l", but they do not count, because they are
+  normal letters of French, Czech, Slovak and other languages. So when a rule compiles, mcpmoat
+  builds an I/l-blind twin of each `any_regex` and `all_regex` pattern. In the twin, a literal "I"
+  or "l" also matches the other letter, and under `(?i)` so do "i" and "L". A class that holds "I"
+  or "l", such as `[il]`, also gets the other letter. A negated class does not change. A wide class
+  that holds all of a-z keeps its "l" as it is, and one that holds all of A-Z keeps its "I", so
+  `[a-z]`, `[A-Z]` and `\w` do not change. So `(?i)ignore` matches Cyrillic U+04CF + "gnore", and
+  `(?i)all` matches "a" + U+0406 U+0406. The twin runs only on the twin forms: the look-alike folds,
+  and the plain folds in which a character became an ASCII "I" or "l" through a compatibility
+  mapping. The pattern itself runs on the other forms. The number of forms does not change, only
+  which pattern reads which form. The twin forms come after the other forms. The twin program is
+  never larger than the program of the pattern, so the worst-case cost of a match does not change.
+  A pattern that starts with a literal "I" or "l" can be slower on the twin forms, because its twin
+  loses the literal prefix that Go's regexp uses to search fast. No built-in rule starts this way.
+  The twin adds about 4 ms to a scan.
+
+  The twin has limits:
+  - A keyword rule has no twin, so a look-alike of "I" or "l" in a keyword is not read as either
+    letter.
+  - A pattern that writes a lowercase "i" or an uppercase "L" without `(?i)` does not get the other
+    letter there.
+  - A text with no look-alike letter and no compatibility character that the plain fold turns into
+    "I" or "l" has no twin form, so ASCII "lgnore" does not match.
+  - When a text holds one such character, the twin reads all of its ASCII "I" and "l" both ways. So
+    ASCII "lgnore all previous instructions." next to one Cyrillic word matches MOAT-T1-001, and
+    pairs such as "all" and "ail" or "url" and "uri" can match in a text that mixes scripts.
+  - An accented "I" or "l" used as the other letter is not read both ways. So U+1ECA U+1ECA read
+    as "ll", or U+1E37 + "gnore", does not match through the twin.
+  - mcpmoat does not build a twin when its printed pattern is longer than 64 KiB or when a safety
+    check fails. The rule then runs its own pattern on the twin forms.
+  - U+01C0 and U+01C3 are click letters in some languages, so mcpmoat does not flag them by
+    themselves.
 - A regex or a keyword reads only a window of the text: the invisible characters are removed from
   the first 128 KiB of the raw text, and then each form is cut at 32 KiB. Padding can push an
   instruction past this window. The `match_window` heuristic closes this gap. It fires when the
-  regex and keyword rules cannot read the whole text: the raw text is longer than 128 KiB, or one of
-  the forms is cut at 32 KiB. For forms 5 and 7, every character counts except the OSC text,
-  because OSC text (such as the URL of an OSC 8 link) makes a benign text longer than 32 KiB in
-  these forms only. So padding with ESC [ A or with empty OSCs still gives a hit. MOAT-T1-017
-  (description) and MOAT-T1-018 (schema) use it at high severity.
+  regex and keyword rules cannot read the whole text: the raw text is longer than 128 KiB, one of
+  the forms is cut at 32 KiB, or the text has more than 256 U+009D (see above). For forms 5 and 7,
+  every character counts except the OSC text, because OSC text (such as the URL of an OSC 8 link)
+  makes a benign text longer than 32 KiB in these forms only. So padding with ESC [ A or with empty
+  OSCs still gives a hit. MOAT-T1-017 (description) and MOAT-T1-018 (schema) use it at high
+  severity. The hit detail tells the reason: `text is longer than the match window`, or
+  `text holds more than 256 C1 OSC controls (U+009D)`. A benign text can get the second reason:
+  UTF-8 read as Latin-1 turns each right double quote into three characters that end in U+009D, so
+  more than 256 such quotes give a high finding. This is by design.
 
 How mcpmoat prepares the text of a `target: schema` rule:
 
@@ -172,8 +262,20 @@ How mcpmoat prepares the text of a `target: schema` rule:
   starts with `schema raw text`.
 - For a schema, `match_window` fires when the budget cuts the strings, when one string is longer
   than its window, or when the JSON cannot be read in full.
-- The shadowing rule MOAT-T3-001 does not read a schema this way. It reads only the `description`
-  and `title` strings of the schema.
+- The shadowing rule MOAT-T3-001 does not read a schema this way. It reads every string value and
+  every object key of the input and output schema, each one alone. This includes `default`,
+  `examples`, `enum`, `const`, `$comment` and vendor keys such as `x-*` or
+  `markdownDescription`. In a schema object it leaves out three kinds of text: a key that is a JSON
+  Schema keyword (such as `readOnly`, `anyOf` or `$defs`), a `format` value that is exactly a
+  registered format name (such as `date-time`, `uuid` or `int64`), and a `$schema` value that is
+  exactly a standard meta-schema URI (such as `http://json-schema.org/draft-07/schema#`). The rule
+  turns `readOnly` into `read_only`, and that name could equal a tool of another server. Every
+  other `format` or `$schema` value is read, such as `send_email` or
+  `https://json-schema.org/send_email`. The keys of `properties`, `patternProperties`, `$defs`,
+  `definitions`, `dependentSchemas` and `dependencies` are names that the server chose, so the rule
+  always reads them. Limits: `scan` does not call the rule yet (#200). The rule skips only JSON
+  Schema keywords, so an OpenAPI or pydantic key such as `propertyName` (in `discriminator`) is
+  read as `property_name` and can rarely match a tool name of another server.
 
 ### Schema copies
 
