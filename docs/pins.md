@@ -13,9 +13,10 @@
   <path>; if this is not your first run, the old file was removed or moved`. On your first run
   this is expected. On a later run it means that the old file is gone, so every server was pinned
   again with no alert. Find out who removed the file before you trust the new pins. If the pins
-  file existed at the first read of the command, before any server starts, but a later read does
-  not find it, the run saves nothing, prints `mcpmoat <cmd>: the pins file was removed while this
-  command ran, so no pins were saved; run the command again` and exits with code 2. When
+  file existed at the first read of the command, before any server starts (or, for `pin --accept`,
+  at the read before it shows the diff), but a later read does not find it, the run saves nothing,
+  prints `mcpmoat <cmd>: the pins file was removed while this command ran, so no pins were saved;
+  run the command again` and exits with code 2. When
   `pin --accept` finds this before it shows the diff, it shows no diff. A real first run does not
   get this line. This check looks only at whether the file exists. If another run deletes the file
   and a second run creates a new one while this run is still working, this run does not notice,

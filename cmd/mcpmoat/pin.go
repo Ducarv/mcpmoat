@@ -238,8 +238,8 @@ func (c *cli) acceptTools(ctx context.Context, server discover.Server, tools []i
 // returns the exit code. name is the server name, already escaped and cut for
 // the messages. tools are the tools that snap pins. shown is the store that
 // acceptTools read for the diffs. acceptTools has already stopped when the file
-// existed at the first read of the command and was gone at that read, so
-// shown.Existed() is true whenever the file existed at the first read.
+// existed at the first read of the command and was gone at the read for the
+// diffs, so shown.Existed() is true whenever the file existed at the first read.
 //
 // saveAccepted holds the lock until the save is done. No other run that locks
 // can save between this read and this save, so the save keeps every entry that
