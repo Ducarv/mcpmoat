@@ -603,6 +603,11 @@ func TestCheckLockFileACL(t *testing.T) {
 			check := func() error {
 				f, err := os.Open(path) //nolint:gosec // G304: the test builds path under t.TempDir().
 				if err != nil {
+					// On some CI runners the deny entry for "nobody" also locks
+					// the test user out. The check under test has not run then.
+					if len(tt.entries) > 0 && !tt.refused && errors.Is(err, fs.ErrPermission) {
+						t.Skipf("the deny entry %q locks the test user out: %v", tt.entries, err)
+					}
 					t.Fatalf("Open() error = %v", err)
 				}
 				defer func() { _ = f.Close() }()
