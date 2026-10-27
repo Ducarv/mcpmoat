@@ -30,7 +30,7 @@
       "enum": ["no-connect", "connect"]
     },
     "complete": {
-      "description": "False when the report can miss results: a config file has a problem (see \"errors\"), or the inspection or the pin step failed as a whole (for example, pins.json cannot be read), or the LLM step of a --llm scan did not classify every tool: a provider failure, an internal error of the LLM step, or more tools than the --llm cap. The exit code is then 2, and the reason is on stderr. A failed save of new pins comes after the document is written, so \"complete\" can be true while the exit code is 2. Always check the exit code too.",
+      "description": "True when the report holds every result of the scan steps: the configs were read, the servers were inspected, the rules ran, and the LLM step (with --llm) classified every tool. False when the report can miss results: a config file has a problem (see \"errors\"), or the inspection or the pin step failed as a whole (for example, pins.json cannot be read), or the LLM step of a --llm scan did not classify every tool: a provider failure, an internal error of the LLM step, or more tools than the --llm cap. The exit code is then 2, and the reason is on stderr. It does not cover the save of new pins: scan saves them after it writes the document, so that the user sees the report first. So true with exit code 2 can mean that the save failed (for example, the pins lock was held, pins.json was removed during the run, a server no longer fit, or the pins directory was unsafe or changed). Always check the exit code too.",
       "type": "boolean"
     },
     "fields_truncated": {

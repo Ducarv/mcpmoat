@@ -109,21 +109,22 @@ This page lists what mcpmoat does not do, so you know how far to trust a clean s
     before the flag name, for example `--timeout=llm-base-url=user:PASS@host`.
   - The errors about the `--config` and `--project` paths are not scrubbed, because these values
     are paths, not URLs.
-- The lock on the pins directory is advisory. mcpmoat v0.1.0 does not lock, so a v0.1.0 run in
-  parallel with a newer run can lose an update. A file system that cannot lock (some network
-  mounts) and Windows run without the lock, after one warning.
-- The owner and mode check covers the pins directory, `pins.json` and each parent directory of the
-  pins directory. On macOS it also checks the ACL of the pins directory and `pins.json`, but not the
-  ACL of a parent, so an allow entry for another user on `~/.config` or `~` (for example
-  `delete_child`) is not detected. On Windows the owner, mode and parent checks are skipped.
+- The pins lock (the file `pins.json.lock` in the pins directory) is advisory. mcpmoat v0.1.0 does
+  not lock, so a v0.1.0 run in parallel with a newer run can lose an update. A file system that
+  cannot lock (some network mounts) and Windows run without the lock, after one warning.
+- You and root can still hold the pins lock, for example with a process that hangs with the lock
+  file open. Then `scan` and `pin --accept` cannot pin and exit with code 2 after 10 seconds.
+- The owner and mode check covers the pins directory, `pins.json`, the lock file and each parent
+  directory of the pins directory. On macOS it also checks the ACL of each of them. On Windows the
+  owner, mode and parent checks are skipped.
 - The check for a removed `pins.json` looks only at whether the file exists, so it can miss a file
   that another run removes and creates again (see **New pins file** in [Pins and rug
   pulls](pins.md)).
-- Another local user can hold the advisory lock on a pins directory with mode `0755`. Then `scan`
-  and `pin --accept` cannot pin and exit with code 2 after 10 seconds.
 - `pins.json` has a limit of 32 MiB, first come, first served, and mcpmoat never prunes old entries.
-  A hostile project config can fill the file. A server that does not fit is reported and not
-  pinned (see **Full pins file** in [Pins and rug pulls](pins.md)).
+  The project servers may use at most 16 MiB of it together, so a hostile project config cannot
+  fill the whole file. But all projects share these 16 MiB, so one hostile project config can use
+  them up, and the servers of other projects are then not pinned. A server that does not fit is
+  reported and not pinned (see **Full pins file** in [Pins and rug pulls](pins.md)).
 - For the detail, see [Pins and rug pulls](pins.md) and [Known
   limits](ARCHITECTURE.md#the-pinsjson-store).
 
