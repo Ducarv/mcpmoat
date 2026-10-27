@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Tests the step "Check that the build left the scripts unchanged" of
-# release.yml. The tool-pins job in ci.yml runs it. Maintainers can also run it
+# release.yml. The ci-scripts job in ci.yml runs it. Maintainers can also run it
 # on their machine, from any directory: see CONTRIBUTING.md, Checks. It needs
 # bash, awk and git. It needs no network and no token.
 #
@@ -140,11 +140,28 @@ o=.github/scripts/other.sh
 edit_p="echo '# edit' >>$p"
 edit_o="echo '# edit' >>$o"
 
+# replace_commit edits the publish script, makes a commit object with the
+# edited tree and writes a replace ref from the tagged commit to it. Then git
+# shows the edited script as the content of the tagged commit.
+replace_commit() {
+  echo '# edit' >>"$p"
+  git add "$p"
+  git replace "$sha" "$(git commit-tree "$(git write-tree)" -m evil)"
+}
+
+# hide_by_filter edits the publish script and adds a clean filter that gives
+# git the tagged content, so git diff and git hash-object see no change.
+hide_by_filter() {
+  echo '# edit' >>"$p"
+  git config filter.fake.clean "cat >/dev/null; git cat-file blob $sha:$p"
+  echo "$p filter=fake" >>.git/info/attributes
+}
+
 check_case "clean tree" 0 "" ":"
 check_case "publish script edited" 1 "The build changed .github/scripts" "$edit_p"
 check_case "publish script edited and staged" 1 "The build changed .github/scripts" "$edit_p; git add $p"
 check_case "publish script edited, assume-unchanged" 1 "The build changed $p" "$edit_p; git update-index --assume-unchanged $p"
-check_case "publish script edited, skip-worktree" 1 "Stop before the publish" "$edit_p; git update-index --skip-worktree $p"
+check_case "publish script edited, skip-worktree" 1 "The build changed $p" "$edit_p; git update-index --skip-worktree $p"
 check_case "other script edited, assume-unchanged" 1 "as hidden" "$edit_o; git update-index --assume-unchanged $o"
 check_case "other script edited, skip-worktree" 1 "as hidden" "$edit_o; git update-index --skip-worktree $o"
 check_case "new untracked file" 1 "added a file" "echo x >.github/scripts/new.sh"
@@ -152,6 +169,8 @@ check_case "new ignored file" 1 "added a file" "echo new.sh >>.git/info/exclude;
 check_case "mode change on the other script" 1 "The build changed .github/scripts" "chmod -x $o"
 check_case "file outside .github/scripts edited" 0 "" "echo more >>README.md"
 check_case "the build committed a change" 1 "The build changed .github/scripts" "$edit_p; git commit -q -am build"
+check_case "publish script edited, replace ref" 1 "The build changed .github/scripts" "replace_commit"
+check_case "publish script edited, clean filter" 1 "The build changed $p" "hide_by_filter"
 check_case "GITHUB_SHA unset" nonzero "" ":" unset
 check_case "GITHUB_SHA wrong" nonzero "" ":" wrong
 

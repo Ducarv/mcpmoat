@@ -51,7 +51,7 @@ jobs:
 
       - name: Check for known vulnerabilities
         env:
-          # The tool-pins job in ci.yml checks that ci.yml and
+          # The ci-scripts job in ci.yml checks that ci.yml and
           # govulncheck.yml pin the same version.
           GOVULNCHECK_VERSION: v1.9.0
         run: go run "golang.org/x/vuln/cmd/govulncheck@$GOVULNCHECK_VERSION" ./...
@@ -66,7 +66,7 @@ jobs:
       id-token: write # get the OIDC token that signs the attestation
       attestations: write # store the attestation
     env:
-      # Dependabot does not bump this version string. The tool-pins job
+      # Dependabot does not bump this version string. The ci-scripts job
       # in ci.yml checks that this pin matches the pins in ci.yml and
       # CONTRIBUTING.md.
       GORELEASER_VERSION: v2.19.0
@@ -154,33 +154,43 @@ jobs:
       # after the build ran repo code. This step compares .github/scripts with
       # the tagged commit, not with the index, and fails on any new file there,
       # also an ignored one. It also refuses a file marked assume-unchanged or
-      # skip-worktree. It is hardening, not a boundary: a build that rewrites
-      # the git config or the index file itself could still hide a change.
-      # It also does not cover a build that writes $GITHUB_PATH or $GITHUB_ENV
-      # (for example BASH_ENV, GIT_* or a planted git) or leaves a background
-      # process. The real fix is a separate publish job with a fresh checkout
-      # and no build code (issue #174).
+      # skip-worktree. It ignores git replace refs, and it compares the publish
+      # script byte by byte with the blob of the tagged commit, so a replace
+      # ref or an attribute filter cannot hide a change. It is hardening, not a
+      # boundary: a build that rewrites the git config or the index file itself
+      # could still hide a change. It also does not cover a build that writes
+      # $GITHUB_PATH or $GITHUB_ENV (for example BASH_ENV, GIT_* or a planted
+      # git) or leaves a background process. The real fix is a separate publish
+      # job with a fresh checkout and no build code (issue #174).
       - name: Check that the build left the scripts unchanged
         shell: bash
         run: |
+          # A replace ref in .git/refs/replace makes git show other content
+          # for the tagged commit. The build can write one.
+          export GIT_NO_REPLACE_OBJECTS=1
           if ! git diff --exit-code "$GITHUB_SHA" -- .github/scripts; then
             echo "::error::The build changed .github/scripts. Stop before the publish."
             exit 1
           fi
-          if [ -n "$(git ls-files --others -- .github/scripts)" ]; then
+          # The output goes into a variable first, so that a git error stops
+          # the step. A git error in a test or a pipe would pass the check.
+          others=$(git ls-files --others -- .github/scripts)
+          if [ -n "$others" ]; then
             echo "::error::The build added a file to .github/scripts. Stop before the publish."
             exit 1
           fi
           # git diff can skip a file that is marked assume-unchanged, so also
-          # compare the hash of the publish script with the tagged commit.
+          # compare the bytes of the publish script with the blob of the tagged
+          # commit. cmp reads the raw bytes, with no attribute filter.
           script=.github/scripts/verify-and-publish.sh
-          if [ "$(git hash-object "$script")" != "$(git rev-parse "$GITHUB_SHA:$script")" ]; then
+          if ! git cat-file blob "$GITHUB_SHA:$script" | cmp -s - "$script"; then
             echo "::error::The build changed $script. Stop before the publish."
             exit 1
           fi
           # In ls-files -v, only H means a normal file. h, S and s mean the
           # build hid a change from git diff.
-          if git ls-files -v -- .github/scripts | grep -v '^H '; then
+          flags=$(git ls-files -v -- .github/scripts)
+          if printf '%s\n' "$flags" | grep -v '^H '; then
             echo "::error::The build marked a file in .github/scripts as hidden. Stop before the publish."
             exit 1
           fi
