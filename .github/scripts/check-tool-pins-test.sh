@@ -270,6 +270,7 @@ check_case "continuation line after the call" 1 "govulncheck.yml: line uses a YA
 check_case "continuation line after the call in release.yml" 1 "release.yml: line uses a YAML form this check cannot read" after_call "$wf/release.yml" '          || true'
 check_case "govulncheck: call line at another indent" 1 "has no call line" sub "$wf/govulncheck.yml" 's/^ +(run: go run)/          \1/'
 check_case "continue-on-error in a step" 1 "uses continue-on-error" append "$wf/govulncheck.yml" '        continue-on-error: true'
+check_case "continue-on-error with a quoted key" 1 "uses continue-on-error" append "$wf/govulncheck.yml" '        "continue-on-error": true'
 check_case "continue-on-error as the first key of a step" 1 "uses continue-on-error" append "$wf/govulncheck.yml" '      - continue-on-error: true'
 check_case "govulncheck-action step" 1 "is not the pin, the call line or a name" append "$wf/govulncheck.yml" '      - uses: golang/govulncheck-action@v1'
 check_case "bare govulncheck: line after the call" 1 "govulncheck.yml: line uses a YAML form this check cannot read" after_call "$wf/govulncheck.yml" '          govulncheck:'
@@ -406,7 +407,7 @@ check_case "GoReleaser: pin in a new .yaml workflow without a step" 1 "extra.yam
 w_step="      - uses: goreleaser/goreleaser-action@x
         with:
           $ok_ver"
-refs="line uses a YAML form this check cannot read"
+unreadable_msg="line uses a YAML form this check cannot read"
 mention="mentions GORELEASER_VERSION in a form this check does not allow"
 check_case "override: job env, same pin" 0 "" job_workflow extra.yml "" "$w_step"
 check_case "override: space before the colon" 1 "$mention" job_workflow extra.yml "      GORELEASER_VERSION : latest" "$w_step"
@@ -415,7 +416,7 @@ check_case "override: single-quoted key" 1 "$mention" job_workflow extra.yml "  
 check_case "override: lower case key" 1 "$mention" job_workflow extra.yml "      goreleaser_version: latest" "$w_step"
 check_case "override: mixed case key" 1 "$mention" job_workflow extra.yml "      Goreleaser_Version: latest" "$w_step"
 check_case "override: mixed case key with the same version" 1 "$mention" job_workflow extra.yml "      Goreleaser_Version: $gr_ver" "$w_step"
-check_case "override: flow style env" 1 "$refs" job_workflow extra.yml "    env: {GORELEASER_VERSION: latest}" "$w_step"
+check_case "override: flow style env" 1 "$unreadable_msg" job_workflow extra.yml "    env: {GORELEASER_VERSION: latest}" "$w_step"
 check_case "override: run step writes GITHUB_ENV" 1 "$mention" job_workflow extra.yml "" "$w_step
       - run: echo GORELEASER_VERSION=latest >> \"\$GITHUB_ENV\""
 check_case "override: run block writes GITHUB_ENV" 1 "$mention" job_workflow extra.yml "" "      - run: |
@@ -475,44 +476,44 @@ check_case "comment: key quoted in the version input" 0 "" step_workflow extra.y
 
 # YAML anchors, aliases and merge keys are not allowed. An alias line names
 # nothing, so the checks above could not see the step that it repeats.
-check_case "yaml: anchor on the pinned step and an alias in a second job" 1 "ci.yml: $refs: \"- &gr\"" anchor_and_alias
-check_case "yaml: anchor on a key" 1 "extra.yml: $refs: \"name: &a v\"" step_workflow extra.yml "      - run: echo hi
+check_case "yaml: anchor on the pinned step and an alias in a second job" 1 "ci.yml: $unreadable_msg: \"- &gr\"" anchor_and_alias
+check_case "yaml: anchor on a key" 1 "extra.yml: $unreadable_msg: \"name: &a v\"" step_workflow extra.yml "      - run: echo hi
         name: &a v"
-check_case "yaml: anchor on a list item" 1 "$refs" step_workflow extra.yml "      - &a
+check_case "yaml: anchor on a list item" 1 "$unreadable_msg" step_workflow extra.yml "      - &a
         run: echo hi"
-check_case "yaml: alias as a list item" 1 "$refs" step_workflow extra.yml "      - *gr"
-check_case "yaml: alias as a value" 1 "$refs" step_workflow extra.yml "      - run: echo hi
+check_case "yaml: alias as a list item" 1 "$unreadable_msg" step_workflow extra.yml "      - *gr"
+check_case "yaml: alias as a value" 1 "$unreadable_msg" step_workflow extra.yml "      - run: echo hi
         env: *e"
-check_case "yaml: alias with a comment" 1 "$refs" step_workflow extra.yml "      - *gr # note"
-check_case "yaml: alias in a flow list" 1 "$refs" step_workflow extra.yml "      - run: echo hi
+check_case "yaml: alias with a comment" 1 "$unreadable_msg" step_workflow extra.yml "      - *gr # note"
+check_case "yaml: alias in a flow list" 1 "$unreadable_msg" step_workflow extra.yml "      - run: echo hi
         needs: [a, *b]"
-check_case "yaml: merge key with an alias" 1 "$refs" step_workflow extra.yml "      - run: echo hi
+check_case "yaml: merge key with an alias" 1 "$unreadable_msg" step_workflow extra.yml "      - run: echo hi
         <<: *x"
-check_case "yaml: merge key with a map" 1 "$refs" step_workflow extra.yml "      - run: echo hi
+check_case "yaml: merge key with a map" 1 "$unreadable_msg" step_workflow extra.yml "      - run: echo hi
         <<: {a: b}"
-check_case "yaml: alias after a block scalar" 1 "$refs" step_workflow extra.yml "      - run: |
+check_case "yaml: alias after a block scalar" 1 "$unreadable_msg" step_workflow extra.yml "      - run: |
           echo hi
       - *gr"
-check_case "yaml: dotted anchor name and an alias in a second job" 1 "ci.yml: $refs: \"- &gr.step\"" anchor_and_alias gr.step
-check_case "yaml: anchor on its own line" 1 "$refs: \"&l\"" step_workflow extra.yml "      &l
+check_case "yaml: dotted anchor name and an alias in a second job" 1 "ci.yml: $unreadable_msg: \"- &gr.step\"" anchor_and_alias gr.step
+check_case "yaml: anchor on its own line" 1 "$unreadable_msg: \"&l\"" step_workflow extra.yml "      &l
       - run: echo hi"
-check_case "yaml: alias on its own line" 1 "$refs: \"*l\"" step_workflow extra.yml "      - run: echo hi
+check_case "yaml: alias on its own line" 1 "$unreadable_msg: \"*l\"" step_workflow extra.yml "      - run: echo hi
       *l"
-check_case "yaml: key alias with a space before the colon" 1 "$refs" step_workflow extra.yml "      - run: echo hi
+check_case "yaml: key alias with a space before the colon" 1 "$unreadable_msg" step_workflow extra.yml "      - run: echo hi
         *k : v"
-check_case "yaml: merge key with a space before the colon" 1 "$refs" step_workflow extra.yml "      - run: echo hi
+check_case "yaml: merge key with a space before the colon" 1 "$unreadable_msg" step_workflow extra.yml "      - run: echo hi
         << : *x"
-check_case "yaml: uses value with a hex escape" 1 "$refs" step_workflow extra.yml "      - uses: \"goreleaser/goreleaser-actio\\x6e@x\"
+check_case "yaml: uses value with a hex escape" 1 "$unreadable_msg" step_workflow extra.yml "      - uses: \"goreleaser/goreleaser-actio\\x6e@x\"
         with:
           version: latest"
-check_case "yaml: uses value with an escaped line break" 1 "$refs" step_workflow extra.yml "      - uses: \"goreleaser/goreleaser-\\
+check_case "yaml: uses value with an escaped line break" 1 "$unreadable_msg" step_workflow extra.yml "      - uses: \"goreleaser/goreleaser-\\
           action@y\"
         with:
           version: latest"
-check_case "yaml: quoted uses key with an escape" 1 "$refs" step_workflow extra.yml "      - \"us\\x65s\": goreleaser/goreleaser-action@x"
+check_case "yaml: quoted uses key with an escape" 1 "$unreadable_msg" step_workflow extra.yml "      - \"us\\x65s\": goreleaser/goreleaser-action@x"
 check_case "yaml: double-quoted uses value, no escape" 0 "" step_workflow extra.yml "      - uses: \"actions/checkout@x\" # note"
-check_case "yaml: alias in govulncheck.yml" 1 "govulncheck.yml: $refs" append "$wf/govulncheck.yml" '      - *gr'
-check_case "yaml: alias in a .yaml workflow" 1 "extra.yaml: $refs" step_workflow extra.yaml "      - *gr"
+check_case "yaml: alias in govulncheck.yml" 1 "govulncheck.yml: $unreadable_msg" append "$wf/govulncheck.yml" '      - *gr'
+check_case "yaml: alias in a .yaml workflow" 1 "extra.yaml: $unreadable_msg" step_workflow extra.yaml "      - *gr"
 check_case "yaml: the line shows in the message" 1 "\"env: &e {a: b}\"" step_workflow extra.yml "      - run: echo hi
         env: &e {a: b}"
 check_case "yaml: a comment may hold an alias" 0 "" step_workflow extra.yml "      # - *gr
@@ -547,25 +548,25 @@ check_case "yaml: list item block scalar with a star" 0 "" step_workflow extra.y
 # Forms that hide the action or the pin from a reader of single lines: a flow
 # mapping with an escape, a tag, a tab, a quote that goes on in the next line.
 tab=$'\t'
-check_case "yaml: flow mapping with an escape in uses" 1 "$refs" step_workflow extra.yml "      - {uses: \"goreleaser/goreleaser-actio\\x6e@x\", with: {version: latest}}"
-check_case "yaml: tag before an escaped uses value" 1 "$refs" step_workflow extra.yml "      - uses: !!str \"goreleaser/goreleaser-actio\\x6e@x\"
+check_case "yaml: flow mapping with an escape in uses" 1 "$unreadable_msg" step_workflow extra.yml "      - {uses: \"goreleaser/goreleaser-actio\\x6e@x\", with: {version: latest}}"
+check_case "yaml: tag before an escaped uses value" 1 "$unreadable_msg" step_workflow extra.yml "      - uses: !!str \"goreleaser/goreleaser-actio\\x6e@x\"
         with:
           version: latest"
-check_case "yaml: tab after the colon of uses" 1 "$refs" step_workflow extra.yml "      - uses:${tab}\"goreleaser/goreleaser-actio\\x6e@x\"
+check_case "yaml: tab after the colon of uses" 1 "$unreadable_msg" step_workflow extra.yml "      - uses:${tab}\"goreleaser/goreleaser-actio\\x6e@x\"
         with:
           version: latest"
-check_case "yaml: tab before an anchor" 1 "$refs" step_workflow extra.yml "      - run: echo hi
+check_case "yaml: tab before an anchor" 1 "$unreadable_msg" step_workflow extra.yml "      - run: echo hi
         name:${tab}&s v"
-check_case "yaml: tag before an anchor" 1 "$refs" step_workflow extra.yml "      - !!map &gr
+check_case "yaml: tag before an anchor" 1 "$unreadable_msg" step_workflow extra.yml "      - !!map &gr
         run: echo hi"
-check_case "yaml: escaped quote moves the pairing in a flow list" 1 "$refs" step_workflow extra.yml "      - run: echo hi
+check_case "yaml: escaped quote moves the pairing in a flow list" 1 "$unreadable_msg" step_workflow extra.yml "      - run: echo hi
         needs: [{name: \"a\\\"\", run: x}, *gr, {name: \"b\"}]"
-check_case "yaml: double quote that goes on in the next line" 1 "$refs" step_workflow extra.yml "      - uses: goreleaser/goreleaser-action@x
+check_case "yaml: double quote that goes on in the next line" 1 "$unreadable_msg" step_workflow extra.yml "      - uses: goreleaser/goreleaser-action@x
         with:
           args: \"release
           version: \${{ env.GORELEASER_VERSION }}
           \""
-check_case "yaml: single quote that goes on in the next line" 1 "$refs" step_workflow extra.yml "      - run: echo hi
+check_case "yaml: single quote that goes on in the next line" 1 "$unreadable_msg" step_workflow extra.yml "      - run: echo hi
         env:
           OTHER: 'a
           GORELEASER_VERSION: $gr_ver
@@ -580,25 +581,25 @@ check_case "yaml: closed quotes at the start of a value are fine" 0 "" step_work
 
 # A dash line with nothing after it, a doubled single quote that does not close
 # the text, and a plain value that goes on in a deeper line.
-check_case "yaml: dash line with a comment only" 1 "$refs" step_workflow extra.yml "      -   # note
+check_case "yaml: dash line with a comment only" 1 "$unreadable_msg" step_workflow extra.yml "      -   # note
           name: x
           run: echo hi"
-check_case "yaml: dash line with trailing spaces only" 1 "$refs" step_workflow extra.yml "      -   
+check_case "yaml: dash line with trailing spaces only" 1 "$unreadable_msg" step_workflow extra.yml "      -   
           name: x
           run: echo hi"
-check_case "yaml: doubled single quote keeps the text open" 1 "$refs" step_workflow extra.yml "      - uses: goreleaser/goreleaser-action@x
+check_case "yaml: doubled single quote keeps the text open" 1 "$unreadable_msg" step_workflow extra.yml "      - uses: goreleaser/goreleaser-action@x
         with:
           args: 'release''
           version: \${{ env.GORELEASER_VERSION }}
           end'"
 check_case "yaml: doubled single quote inside a closed text is fine" 0 "" step_workflow extra.yml "      - name: 'it''s fine'
         run: echo hi"
-check_case "yaml: version input goes on in a deeper line" 1 "$refs" step_workflow extra.yml "      - uses: goreleaser/goreleaser-action@x
+check_case "yaml: version input goes on in a deeper line" 1 "$unreadable_msg" step_workflow extra.yml "      - uses: goreleaser/goreleaser-action@x
         with:
           version: \${{ env.GORELEASER_VERSION }}
             || >=2.0.0"
-check_case "yaml: pin line goes on in a deeper line" 1 "$refs" pin_goes_on
-check_case "yaml: plain list item goes on in a deeper line" 1 "$refs" step_workflow extra.yml "      - run: echo hi
+check_case "yaml: pin line goes on in a deeper line" 1 "$unreadable_msg" pin_goes_on
+check_case "yaml: plain list item goes on in a deeper line" 1 "$unreadable_msg" step_workflow extra.yml "      - run: echo hi
         needs:
           - a
             b"
@@ -613,7 +614,7 @@ check_case "yaml: nested keys and block scalars are fine" 0 "" step_workflow ext
           echo hi
             indented
       - run: echo done"
-check_case "yaml: backslash on a line with quotes fails closed" 1 "$refs" step_workflow extra.yml "      - run: printf \"%s\" 'a\\\\n'"
+check_case "yaml: backslash on a line with quotes fails closed" 1 "$unreadable_msg" step_workflow extra.yml "      - run: printf \"%s\" 'a\\\\n'"
 
 # GitHub may run a workflow whose name starts with a dot, and a plain * skips it.
 check_case "workflow file with a dot name" 1 "the step" step_workflow .hidden.yml "      - uses: goreleaser/goreleaser-action@x
@@ -622,10 +623,10 @@ check_case "workflow file with a dot name" 1 "the step" step_workflow .hidden.ym
 
 # A stray quote in a plain flow value must not hide an escape. The rule for a
 # backslash does not look at quotes.
-check_case "yaml: stray quote, then an escaped uses value in flow style" 1 "$refs" step_workflow extra.yml "      - {name: a\"b, uses: \"goreleaser/goreleaser-actio\\x6e@v7\", with: {version: latest}}"
-check_case "yaml: two stray quotes, then an escaped uses value" 1 "$refs" step_workflow extra.yml "      - {name: a\"b, uses: \"goreleaser/goreleaser-actio\\x6e@v7\", with: {version: latest}, env: {X: c\"d}}"
+check_case "yaml: stray quote, then an escaped uses value in flow style" 1 "$unreadable_msg" step_workflow extra.yml "      - {name: a\"b, uses: \"goreleaser/goreleaser-actio\\x6e@v7\", with: {version: latest}}"
+check_case "yaml: two stray quotes, then an escaped uses value" 1 "$unreadable_msg" step_workflow extra.yml "      - {name: a\"b, uses: \"goreleaser/goreleaser-actio\\x6e@v7\", with: {version: latest}, env: {X: c\"d}}"
 # Only the tag rule can fail this line: a tag on a value of a plain step.
-check_case "yaml: tag on a value, no other form" 1 "$refs" step_workflow extra.yml "      - name: !!str x
+check_case "yaml: tag on a value, no other form" 1 "$unreadable_msg" step_workflow extra.yml "      - name: !!str x
         run: echo hi"
 # The nested with: is in a block body. Without the column condition in
 # goreleaser_steps, it would hide the real version input after it.
@@ -636,21 +637,66 @@ check_case "goreleaser-action: nested with: in a block body" 1 "version input th
               version: \${{ env.GORELEASER_VERSION }}
           version: latest"
 # env: with a value on its line can build GORELEASER_VERSION from pieces.
-check_case "yaml: env with an expression on the step" 1 "$refs" step_workflow extra.yml "      - uses: goreleaser/goreleaser-action@x
+check_case "yaml: env with an expression on the step" 1 "$unreadable_msg" step_workflow extra.yml "      - uses: goreleaser/goreleaser-action@x
         env: \${{ matrix.env }}
         with:
           version: \${{ env.GORELEASER_VERSION }}"
-check_case "yaml: env with an expression on the job" 1 "$refs" job_workflow extra.yml "    env: \${{ matrix.env }}" "$w_step"
+check_case "yaml: env with an expression on the job" 1 "$unreadable_msg" job_workflow extra.yml "    env: \${{ matrix.env }}" "$w_step"
 # A line in the body of a block scalar is not the pin line.
-check_case "pin: pin text inside a block scalar of the job env" 1 "does not define GORELEASER_VERSION" two_jobs_workflow extra.yml "    env:
+check_case "pin: pin text inside a block scalar of the job env" 1 "$unreadable_msg" two_jobs_workflow extra.yml "    env:
       OTHER: x" "    env: >-
       GORELEASER_VERSION: $gr_ver"
 # A nested dash: the body of "- - |" is deeper than the inner dash.
-check_case "yaml: alias after a block scalar in a nested list" 1 "$refs" step_workflow extra.yml "      - - |
+check_case "yaml: alias after a block scalar in a nested list" 1 "$unreadable_msg" step_workflow extra.yml "      - - |
           text
         - *gr"
 # A name that is only .yml, with no stem.
 check_case "workflow file named .yml" 1 "the step" step_workflow .yml "      - uses: goreleaser/goreleaser-action@x
+        with:
+          version: latest"
+
+# An env: or with: key must be a plain mapping. Any other form can build the
+# name GORELEASER_VERSION or the version input from an expression.
+env_expr="\${{ fromJSON(format('{{\"{0}_VERSION\":\"latest\"}}', 'GORELEASER')) }}"
+check_case "yaml: step env as a block scalar" 1 "$unreadable_msg" step_workflow extra.yml "      - uses: goreleaser/goreleaser-action@x
+        env: >-
+          $env_expr
+        with:
+          version: \${{ env.GORELEASER_VERSION }}"
+check_case "yaml: step env as a block scalar, comment after the indicator" 1 "$unreadable_msg" step_workflow extra.yml "      - uses: goreleaser/goreleaser-action@x
+        env: >- # c
+          $env_expr
+        with:
+          version: \${{ env.GORELEASER_VERSION }}"
+check_case "yaml: step env as a plain text on the next line" 1 "$unreadable_msg" step_workflow extra.yml "      - uses: goreleaser/goreleaser-action@x
+        env:
+          $env_expr
+        with:
+          version: \${{ env.GORELEASER_VERSION }}"
+check_case "yaml: step env with a quoted key" 1 "$unreadable_msg" step_workflow extra.yml "      - uses: goreleaser/goreleaser-action@x
+        \"env\": $env_expr
+        with:
+          version: \${{ env.GORELEASER_VERSION }}"
+check_case "yaml: step env as an explicit key" 1 "$unreadable_msg" step_workflow extra.yml "      - uses: goreleaser/goreleaser-action@x
+        ? env
+        : $env_expr
+        with:
+          version: \${{ env.GORELEASER_VERSION }}"
+check_case "yaml: with as a block scalar" 1 "$unreadable_msg" step_workflow extra.yml "      - uses: goreleaser/goreleaser-action@x
+        with: >-
+          \${{ fromJSON('{\"version\":\"latest\",\"x\":\"
+          version: \${{ env.GORELEASER_VERSION }}
+          \"}') }}"
+check_case "yaml: with as a plain text on the next line" 1 "$unreadable_msg" step_workflow extra.yml "      - uses: goreleaser/goreleaser-action@x
+        with:
+          \${{ fromJSON('{\"version\":\"latest\"}') }}"
+check_case "yaml: env and with as plain mappings are fine" 0 "" step_workflow extra.yml "      - uses: goreleaser/goreleaser-action@x
+        env:
+          \"QUOTED_KEY\": x
+          OTHER: \${{ github.token }}
+        with:
+          version: \${{ env.GORELEASER_VERSION }}"
+check_case "workflow file named .yaml" 1 "the step" step_workflow .yaml "      - uses: goreleaser/goreleaser-action@x
         with:
           version: latest"
 
