@@ -182,6 +182,21 @@ const pinsLockedText = "another process is using the pins file; run the command 
 // text.
 const pinsRemovedText = "the pins file was removed while this command ran, so no pins were saved; run the command again"
 
+// saveFailure records an error of Set or Save that savePinned (scan) or
+// saveAccepted (pin) got while it held the lock on the pins directory. Neither
+// may print under the lock, so it keeps the failure here and prints it with
+// cmdErr after the release. what is the text before the error on that line,
+// for example "cannot save the pins file". The zero value means no failure.
+type saveFailure struct {
+	what string
+	err  error
+}
+
+// failed reports whether a step failed.
+func (f saveFailure) failed() bool {
+	return f.err != nil
+}
+
 // printNewPinsFile prints one line on stderr for the command cmd: the save
 // created a new pins file at path. The caller prints it after a successful
 // Save when the store did not exist (pins.Store.Existed is false), before the

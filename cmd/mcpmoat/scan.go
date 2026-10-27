@@ -701,11 +701,12 @@ func (c *cli) writeScanReport(servers []discover.Server, statuses []report.Serve
 // run wrote, and it prints no notice for it.
 //
 // savePinned writes nothing on stdout or stderr while it holds the lock, so a
-// blocked stdout or stderr never holds the lock. While it holds the lock, it
-// collects the warnings in a list of lines and keeps the error of Set or
-// Save. It releases the lock right after the Save, or right after the step
-// that failed, and only then prints, in this order: the warnings, the error,
-// and on success the new pins file notice and the "pinned" lines.
+// blocked stdout or stderr never holds the lock. The locked work is in
+// setNewPins: it collects the warnings in a list of lines and keeps the error
+// of Set or Save. savePinned releases the lock right after it, or right after
+// the step that failed, and only then prints with printPinSave, in this order:
+// the warnings, the error, and on success the new pins file notice and the
+// "pinned" lines.
 //
 // When the first read found pins.json (pr.storeExisted) but the locked read
 // does not, the file was removed while scan ran. A save would drop every older
@@ -740,22 +741,38 @@ func (c *cli) savePinned(ctx context.Context, pr pinReport) bool {
 		c.cmdPrintf("scan", "%s", pinsRemovedText)
 		return false
 	}
+	res := setNewPins(store, pr.pinned)
+	// The last step that needs the lock is done. Free the lock before the
+	// output: a blocked pipe must not keep other runs from the pins file.
+	release()
+	return c.printPinSave(store, res)
+}
 
-	// warnings holds the text of each warning, without the prefix. scanWarnf
-	// prints them after the release.
-	var warnings []string
-	var saved []pinnedServer
-	full := false // true when Set refused at least one server with ErrStoreFull
-	// failWhat and failErr hold an error of Set or Save. failErr is nil when
-	// there is no error.
-	var failWhat string
-	var failErr error
-	for _, ps := range pr.pinned {
+// pinSave is what setNewPins did while it held the lock. printPinSave prints
+// it after the release.
+type pinSave struct {
+	// saved are the servers that the save pinned, in the order of the scan.
+	saved []pinnedServer
+	// warnings holds the text of each warning, without the prefix.
+	warnings []string
+	// full is true when Set refused at least one server with
+	// pins.ErrStoreFull.
+	full bool
+	// fail is the error of Set or Save, if any.
+	fail saveFailure
+}
+
+// setNewPins adds each server of pinned to store, unless store already has an
+// entry for it, and saves store when it added at least one server. It does not
+// print: savePinned calls it with the lock held.
+func setNewPins(store *pins.Store, pinned []pinnedServer) pinSave {
+	var res pinSave
+	for _, ps := range pinned {
 		if other, found := store.Get(ps.id); found {
 			// Another run pinned the server meanwhile. Its pins stay, but
 			// this scan did not compare them with the tools that it saw.
 			if !maps.Equal(other, ps.snap) {
-				warnings = append(warnings, fmt.Sprintf("server %s was pinned by another run with other tools during this scan; run scan again", cutName(ps.name)))
+				res.warnings = append(res.warnings, fmt.Sprintf("server %s was pinned by another run with other tools during this scan; run scan again", cutName(ps.name)))
 			}
 			continue
 		}
@@ -763,42 +780,45 @@ func (c *cli) savePinned(ctx context.Context, pr pinReport) bool {
 		if errors.Is(err, pins.ErrStoreFull) {
 			// The store did not change, so the other servers can still be
 			// saved. This one is not pinned: say so, and exit with 2.
-			warnings = append(warnings, fmt.Sprintf("server %s not pinned: %s", cutName(ps.name), pinsFullText))
-			full = true
+			res.warnings = append(res.warnings, fmt.Sprintf("server %s not pinned: %s", cutName(ps.name), pinsFullText))
+			res.full = true
 			continue
 		}
 		// pinOutcomes checked the pins with the same rules, so any other error
 		// is not expected. Stop the loop and save nothing.
 		if err != nil {
-			failWhat, failErr = "cannot set the pins of a server", err
+			res.fail = saveFailure{what: "cannot set the pins of a server", err: err}
 			break
 		}
-		saved = append(saved, ps)
+		res.saved = append(res.saved, ps)
 	}
-	if failErr == nil && len(saved) > 0 {
+	if !res.fail.failed() && len(res.saved) > 0 {
 		if err := store.Save(); err != nil {
-			failWhat, failErr = "cannot save the pins file", err
+			res.fail = saveFailure{what: "cannot save the pins file", err: err}
 		}
 	}
-	// The last step that needs the lock is done. Free the lock before the
-	// output: a blocked pipe must not keep other runs from the pins file.
-	release()
+	return res
+}
 
-	for _, w := range warnings {
+// printPinSave prints the result of setNewPins after the release of the lock:
+// the warnings, the error, and on success the new pins file notice and the
+// "pinned" lines. It returns the result of savePinned.
+func (c *cli) printPinSave(store *pins.Store, res pinSave) bool {
+	for _, w := range res.warnings {
 		c.scanWarnf("%s", w)
 	}
-	if failErr != nil {
-		c.cmdErr("scan", failWhat, failErr)
+	if res.fail.failed() {
+		c.cmdErr("scan", res.fail.what, res.fail.err)
 		return false
 	}
-	if len(saved) == 0 {
-		return !full
+	if len(res.saved) == 0 {
+		return !res.full
 	}
 	if !store.Existed() {
 		c.printNewPinsFile("scan", store.Path())
 	}
-	c.printPinned(saved)
-	return !full
+	c.printPinned(res.saved)
+	return !res.full
 }
 
 // inspectAndPin reads the pins store, inspects the servers with c.inspector,

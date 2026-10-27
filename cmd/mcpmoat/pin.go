@@ -269,7 +269,7 @@ func (c *cli) acceptTools(ctx context.Context, server discover.Server, tools []i
 // saveAccepted writes nothing on stdout or stderr while it holds the lock, so
 // a blocked stdout or stderr never holds the lock. While it holds the lock, it
 // only notes what to print: whether the pins changed, and the error of Set or
-// Save. It releases the lock right after the Save, or right after the step
+// Save (a saveFailure). It releases the lock right after the Save, or right after the step
 // that failed, and only then prints, in this order: the warning, the error,
 // and on success the new pins file notice and the "accepted" line.
 //
@@ -305,10 +305,11 @@ func (c *cli) saveAccepted(ctx context.Context, name string, id pins.Identity, t
 	changed := pinsChanged(shown, store, id)
 	counts := changeCounts(store, id, tools)
 
-	setErr := store.Set(id, snap)
-	var saveErr error
-	if setErr == nil {
-		saveErr = store.Save()
+	var fail saveFailure
+	if err := store.Set(id, snap); err != nil {
+		fail = saveFailure{what: "cannot set the pins of server " + name, err: err}
+	} else if err := store.Save(); err != nil {
+		fail = saveFailure{what: "cannot save the pins file", err: err}
 	}
 	// The last step that needs the lock is done. Free the lock before the
 	// output: a blocked pipe must not keep other runs from the pins file.
@@ -317,16 +318,14 @@ func (c *cli) saveAccepted(ctx context.Context, name string, id pins.Identity, t
 	if changed {
 		c.warnf("pin", "another mcpmoat run changed the pins of server %s while pin showed the diff; the diff is against the older pins", name)
 	}
-	if errors.Is(setErr, pins.ErrStoreFull) {
+	// Only Set returns ErrStoreFull. It gets its own fixed line, so this check
+	// comes before the general one.
+	if errors.Is(fail.err, pins.ErrStoreFull) {
 		c.cmdPrintf("pin", "cannot pin %s: %s; remove servers you no longer use from pins.json", name, pinsFullText)
 		return exitError
 	}
-	if setErr != nil {
-		c.cmdErr("pin", "cannot set the pins of server "+name, setErr)
-		return exitError
-	}
-	if saveErr != nil {
-		c.cmdErr("pin", "cannot save the pins file", saveErr)
+	if fail.failed() {
+		c.cmdErr("pin", fail.what, fail.err)
 		return exitError
 	}
 	if !store.Existed() {

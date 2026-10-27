@@ -244,51 +244,26 @@ func checkParentsAs(dir string, uid int) error {
 		return fmt.Errorf("check the parent directories of the pins directory %s: %w", dir, err)
 	}
 
-	// refusal is the last unsafe entry found so far.
-	var refusal error
-	// fail returns err, unless an unsafe entry was found before (see the doc).
-	fail := func(err error) error {
-		if refusal != nil {
-			return refusal
-		}
-		return err
-	}
-
-	// checked is a set of the directories whose owner and mode are checked: a
-	// map whose values are not used. struct{} has size zero.
-	checked := make(map[string]struct{})
-	checkParentDir := func(p string, info fs.FileInfo) {
-		if _, done := checked[p]; done {
-			return
-		}
-		checked[p] = struct{}{}
-		if err := checkParentOwnerAndMode(p, info, uid); err != nil {
-			refusal = err
-		}
-	}
-
-	// resolved is the directory that the walk has reached, with no symlink in
-	// it. rest holds the components that are still to walk.
-	resolved, rest := splitRoot(abs)
-	if len(rest) > 0 {
+	w := &parentWalk{dir: dir, uid: uid, checked: make(map[string]struct{})}
+	w.resolved, w.rest = splitRoot(abs)
+	if len(w.rest) > 0 {
 		// The root directory is a parent of the pins directory too.
-		if err := checkRootDir(resolved, checkParentDir); err != nil {
-			return fail(err)
+		if err := w.checkRoot(w.resolved); err != nil {
+			return w.fail(err)
 		}
 	}
-	hops := 0
-	for len(rest) > 0 {
-		c := rest[0]
-		rest = rest[1:]
+	for len(w.rest) > 0 {
+		c := w.rest[0]
+		w.rest = w.rest[1:]
 		if c == ".." {
 			// filepath.Dir of the root directory is the root directory, as in
 			// the kernel.
-			resolved = filepath.Dir(resolved)
+			w.resolved = filepath.Dir(w.resolved)
 			continue
 		}
-		next := filepath.Join(resolved, c)
+		next := filepath.Join(w.resolved, c)
 		label := labelParent
-		if len(rest) == 0 {
+		if len(w.rest) == 0 {
 			label = labelDir
 		}
 
@@ -300,58 +275,82 @@ func checkParentsAs(dir string, uid int) error {
 			break
 		}
 		if err != nil {
-			return fail(fmt.Errorf("check the %s %s: %w", label, next, err))
+			return w.fail(fmt.Errorf("check the %s %s: %w", label, next, err))
 		}
 
 		switch {
 		case info.Mode()&fs.ModeSymlink != 0:
-			hops++
-			if hops > maxSymlinks {
-				return fail(fmt.Errorf("check the parent directories of the pins directory %s: too many symlinks (more than %d) at %s",
-					dir, maxSymlinks, next))
+			if err := w.followSymlink(next, label, info); err != nil {
+				return w.fail(err)
 			}
-			if err := checkSymlinkOwner(next, label, info, uid); err != nil {
-				refusal = err
-			}
-			target, err := os.Readlink(next)
-			if err != nil {
-				return fail(fmt.Errorf("check the %s %s: %w", label, next, err))
-			}
-			var targetRest []string
-			if filepath.IsAbs(target) {
-				// An absolute target starts again at the root.
-				resolved, targetRest = splitRoot(target)
-				if err := checkRootDir(resolved, checkParentDir); err != nil {
-					return fail(err)
-				}
-			} else {
-				// A relative target starts in the directory that holds the
-				// symlink, which is resolved.
-				targetRest = splitPath(target)
-			}
-			// Walk the target first, then the components after the symlink.
-			// slices.Concat makes a new slice, so rest and targetRest do not
-			// share memory.
-			rest = slices.Concat(targetRest, rest)
 		case info.IsDir():
-			resolved = next
-			if len(rest) > 0 {
-				// A parent of the pins directory. Lstat and Stat give the same
-				// owner and mode for a directory that is not a symlink.
-				checkParentDir(next, info)
-			}
+			w.enterDir(next, info)
 		default:
 			// Not a directory: the pins directory cannot exist below it.
-			return refusal
+			return w.refusal
 		}
 	}
-	return refusal
+	return w.refusal
 }
 
-// checkRootDir checks the root directory root (for example "/") with check,
-// the parent check of checkParentsAs. A missing root is not an error, as for
-// any other component.
-func checkRootDir(root string, check func(string, fs.FileInfo)) error {
+// parentWalk is the state of one checkParentsAs walk.
+type parentWalk struct {
+	dir string // the pins directory as the caller gave it, for the error text
+	uid int    // the user that every entry must be safe for
+
+	// resolved is the directory that the walk has reached, with no symlink
+	// in it. rest holds the components that are still to walk.
+	resolved string
+	rest     []string
+
+	hops int // the number of symlinks followed so far
+
+	// checked is a set of the directories whose owner and mode are checked:
+	// a map whose values are not used. struct{} has size zero.
+	checked map[string]struct{}
+
+	refusal error // the last unsafe entry found so far
+}
+
+// fail returns err, unless the walk found an unsafe entry before: then it
+// returns that entry, because it may have led the walk to err (see
+// checkParentsAs).
+func (w *parentWalk) fail(err error) error {
+	if w.refusal != nil {
+		return w.refusal
+	}
+	return err
+}
+
+// checkDir checks the owner and the mode of the parent directory p, once
+// for each p (checkParentOwnerAndMode). An unsafe directory becomes the
+// refusal of the walk, and the walk goes on.
+func (w *parentWalk) checkDir(p string, info fs.FileInfo) {
+	if _, done := w.checked[p]; done {
+		return
+	}
+	w.checked[p] = struct{}{}
+	if err := checkParentOwnerAndMode(p, info, w.uid); err != nil {
+		w.refusal = err
+	}
+}
+
+// enterDir moves the walk into the directory next, whose Lstat result is
+// info. When components are left after next, next is a parent of the pins
+// directory, so it checks next with checkDir. Lstat and Stat give the same
+// owner and mode for a directory that is not a symlink. The pins directory
+// itself is not checked here (see checkParentsAs).
+func (w *parentWalk) enterDir(next string, info fs.FileInfo) {
+	w.resolved = next
+	if len(w.rest) > 0 {
+		w.checkDir(next, info)
+	}
+}
+
+// checkRoot checks the root directory root (for example "/") with checkDir.
+// A missing root is not an error, as for any other component. It returns
+// only an Lstat error, without the fail rule: the caller applies it.
+func (w *parentWalk) checkRoot(root string) error {
 	info, err := os.Lstat(root)
 	if safefile.IsMissing(err) {
 		return nil
@@ -360,8 +359,45 @@ func checkRootDir(root string, check func(string, fs.FileInfo)) error {
 		return fmt.Errorf("check the %s %s: %w", labelParent, root, err)
 	}
 	if info.IsDir() {
-		check(root, info)
+		w.checkDir(root, info)
 	}
+	return nil
+}
+
+// followSymlink handles the symlink next, whose Lstat result is info. It
+// counts the hop, checks the owner of the symlink (checkSymlinkOwner), reads
+// the target and puts the components of the target in front of rest. An
+// unsafe owner becomes the refusal of the walk. It returns an error when the
+// walk must stop, without the fail rule: the caller applies it.
+func (w *parentWalk) followSymlink(next, label string, info fs.FileInfo) error {
+	w.hops++
+	if w.hops > maxSymlinks {
+		return fmt.Errorf("check the parent directories of the pins directory %s: too many symlinks (more than %d) at %s",
+			w.dir, maxSymlinks, next)
+	}
+	if err := checkSymlinkOwner(next, label, info, w.uid); err != nil {
+		w.refusal = err
+	}
+	target, err := os.Readlink(next)
+	if err != nil {
+		return fmt.Errorf("check the %s %s: %w", label, next, err)
+	}
+	var targetRest []string
+	if filepath.IsAbs(target) {
+		// An absolute target starts again at the root.
+		w.resolved, targetRest = splitRoot(target)
+		if err := w.checkRoot(w.resolved); err != nil {
+			return err
+		}
+	} else {
+		// A relative target starts in the directory that holds the symlink,
+		// which is resolved.
+		targetRest = splitPath(target)
+	}
+	// Walk the target first, then the components after the symlink.
+	// slices.Concat makes a new slice, so rest and targetRest do not share
+	// memory.
+	w.rest = slices.Concat(targetRest, w.rest)
 	return nil
 }
 
