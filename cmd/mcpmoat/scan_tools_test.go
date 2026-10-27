@@ -786,6 +786,38 @@ func TestScanToolsBudgetIgnore(t *testing.T) {
 	}
 }
 
+// TestScanToolsBudgetFileWarningOnce checks that two servers that both use up
+// their budget, with one .mcpmoat-ignore entry for the rule, keep both rows
+// and print the "cannot ignore" warning once, not once for each server.
+func TestScanToolsBudgetFileWarningOnce(t *testing.T) {
+	t.Parallel()
+
+	const budget = usedUpBudget
+	e := newPinEnv(t, twoServers())
+	writeTestFile(t, e.work, rules.IgnoreFileName, rules.RuleAnalysisBudget+"\n")
+	insp := fakeServers(map[string][]inspect.Tool{
+		"srv-a": {mkTool("add_numbers", "Add."), mkTool("sub_numbers", "Subtract.")},
+		"srv-b": {mkTool("mul_numbers", "Multiply."), mkTool("div_numbers", "Divide.")},
+	})
+
+	got := scanWithBudget(e, insp, budget)
+
+	assertScanRun(t, got, scanWant{code: exitFindings})
+	assertToolFindings(t, got.stdout,
+		toolFinding{rules.RuleAnalysisBudget, "high", "srv-a", "", quotedCell(budgetReason(2, 2))},
+		toolFinding{rules.RuleAnalysisBudget, "high", "srv-b", "", quotedCell(budgetReason(2, 2))},
+	)
+	assertStderrLines(t, got.stderr, []lineWant{
+		exactLine(scanPrefix + "using 1 entry from " + rules.IgnoreFileName),
+		exactLine(budgetWarning("srv-a", budget, 2, 2)),
+		exactLine(budgetWarning("srv-b", budget, 2, 2)),
+		exactLine(scanWarnPrefix + rules.IgnoreFileName + " cannot ignore " + rules.RuleAnalysisBudget +
+			"; use --ignore on the command line"),
+		exactLine(pinnedLine("srv-a", 2)),
+		exactLine(pinnedLine("srv-b", 2)),
+	})
+}
+
 // criticalRulesDir writes one critical description rule from --rules in a new
 // folder and returns it. The rule is valid: its should_match and
 // should_not_match cases pass. It does not match the tool texts of the

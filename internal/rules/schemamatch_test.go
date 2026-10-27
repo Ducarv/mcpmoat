@@ -1518,6 +1518,53 @@ func TestMatchSchemaPreparedDoneContext(t *testing.T) {
 	}
 }
 
+// TestMatchSeamsCapBeforeContext checks that the seam byte cap comes before
+// the context check. The context ends during the last seam that fits in
+// maxSeamBytes. The next seam does not fit, so matchSeams stops silently: no
+// error, no hit. If the context check came first, the loop would return the
+// context error, and a tool with no work left would count as not fully
+// checked.
+func TestMatchSeamsCapBeforeContext(t *testing.T) {
+	t.Parallel()
+
+	// 400 different strings of 300 bytes (schemaStrings keeps each string
+	// once). They fit in maxSchemaMatchBytes, and their seams (about 515
+	// bytes each) go over maxSeamBytes before the last one.
+	parts := make([]string, 400)
+	for i := range parts {
+		parts[i] = fmt.Sprintf(`"%03d%s"`, i, strings.Repeat("a", 297))
+	}
+	ps := prepareSchema("[" + strings.Join(parts, ",") + "]")
+
+	fits, total := 0, 0
+	for i := 1; i < ps.fit; i++ {
+		total += len(ps.seam(i).raw)
+		if total > maxSeamBytes {
+			break
+		}
+		fits++
+	}
+	if fits == 0 || fits >= ps.fit-1 {
+		t.Fatalf("test setup: %d of %d seams fit in the cap, want some but not all", fits, ps.fit-1)
+	}
+
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	f := &ctxFake{stopAt: fits, cancel: cancel}
+
+	label, hits, err := matchSeams(ctx, ps, f.match)
+
+	if err != nil {
+		t.Errorf("matchSeams() error = %v, want nil: the byte cap stops the loop before the context check", err)
+	}
+	if label != "" || hits != nil {
+		t.Errorf("matchSeams() = %q, %v, want no label and no hit", label, hits)
+	}
+	if f.calls != fits {
+		t.Errorf("match ran %d times, want %d", f.calls, fits)
+	}
+}
+
 // TestMatchSchemaPreparedCancelMidway checks that a context that ends during
 // a match call stops the loop before the next text. The hits found so far
 // stay, except in the window mode.

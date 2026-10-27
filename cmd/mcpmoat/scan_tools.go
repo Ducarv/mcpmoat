@@ -88,8 +88,9 @@ const (
 // A finding row holds the rule ID, the tool name in Key (see toolKey) and the
 // target ("description" or "schema") in Related. It never holds tool text or
 // pattern text. The ignore list ignore drops rows like the rows of the config
-// rules (see scanIgnores.ignored). It compares the real tool name, not the
-// Key. The step prints one warning for each rule ID that .mcpmoat-ignore
+// rules (see scanIgnores.ignored), apart from the rules.RuleAnalysisBudget
+// row, which only --ignore drops (see fileCannotIgnore). It compares the real
+// tool name, not the Key. The step prints one warning for each rule ID that .mcpmoat-ignore
 // cannot ignore.
 //
 // counts holds the finding counts of each server by the index of the server
@@ -268,7 +269,9 @@ func toolKey(name string) string {
 // applies, also a rule whose findings --ignore or .mcpmoat-ignore drops. This
 // is on purpose, so the severity fails closed: the budget row is the sign in
 // the report that a rule did not run, and an ignored rule cannot make it
-// less severe. To drop the budget row itself, ignore rules.RuleAnalysisBudget.
+// less severe. To drop the budget row itself, use --ignore with
+// rules.RuleAnalysisBudget: the .mcpmoat-ignore file cannot (see
+// fileCannotIgnore).
 func budgetSeverity(a *rules.Analyzer) rules.Severity {
 	if s := a.MaxSeverity(); s.Rank() > rules.SeverityHigh.Rank() {
 		return s
