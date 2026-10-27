@@ -17,7 +17,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"regexp"
 	"runtime"
 	"slices"
 	"strings"
@@ -1737,8 +1736,6 @@ func TestE2EPinsUnsafePerm(t *testing.T) {
 	})
 }
 
-var acceptDigestRe = regexp.MustCompile(`^pd1:[0-9a-f]{64}$`)
-
 // e2eIgnoreSecret is a comment line of the ignore file that the JSON report
 // must never repeat.
 const e2eIgnoreSecret = "distinctive-comment-line-of-the-ignore-file"
@@ -1822,7 +1819,7 @@ func TestE2EScanJSONAccept(t *testing.T) {
 	if acc == nil || pinRows == 0 {
 		t.Fatalf("accept = %v, pin findings = %d, want an accept object and a pin finding", acc, pinRows)
 	}
-	if !acceptDigestRe.MatchString(acc.Digest) {
+	if !pins.ValidDigest(acc.Digest) {
 		t.Errorf("accept.digest = %q, want pd1: and 64 lower case hex digits", acc.Digest)
 	}
 	// The terminal hint of the same state has the same digest.

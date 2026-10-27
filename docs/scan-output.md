@@ -124,13 +124,10 @@ mcpmoat scan --json | jq -r '.findings[] | "\(.rule_id) \(.server)"'
 - **The size has limits, but the whole document is not bounded:** the field caps and the cap of 1000
   tool findings for each server bound the rows and the text of the tool findings. A server with more
   tool findings gets one `MOAT-T1-024` finding, with `"field": "tool"` and an empty `key` like
-  `MOAT-T1-023`. The config findings, the pin findings (at most one for each current tool and one
-  for each removed tool, plus one for the server; a scan reads at most 10,000 tools for each
-  server, and the pinned tools come from an earlier scan) and the LLM findings (at most 500
-  tools) are not part of that cap. The number of config findings is limited only by the size of
-  the config file (32 MiB for a global file, 4 MiB for a project file), and the number of servers
-  multiplies the bound. A cap for the config findings is planned as a follow-up (issue #213).
-  See [Size bound](ARCHITECTURE.md#size-bound) for the limits.
+  `MOAT-T1-023`. The config findings, the pin findings and the LLM findings are not part of that
+  cap. The number of config findings is limited only by the size of the config file, so a hostile
+  config can give a very large document. See [Limits](limits.md) for the bounds of each kind of
+  finding, and [Size bound](ARCHITECTURE.md#size-bound) for the tests.
 - A tool rule finding has `"field": "tool"`, the tool name in `key`, and `description` or `schema`
   in `related`. A tool name longer than 512 characters (runes) is cut to 512 in `key` and ends
   with `...`. The `MOAT-T1-023` finding has `"field": "tool"`, an empty `key`, and the reason

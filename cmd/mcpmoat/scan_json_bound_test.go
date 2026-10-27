@@ -12,10 +12,12 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 	"unicode/utf8"
 
 	"github.com/Ducarv/mcpmoat/internal/inspect"
 	"github.com/Ducarv/mcpmoat/internal/rules"
+	"github.com/Ducarv/mcpmoat/internal/termsafe"
 )
 
 // The hostile config of TestScanJSONBound: one server in a project .mcp.json
@@ -60,10 +62,10 @@ const (
 // name several times (the file text, the decoded config, the server, the pin
 // store, the report), the 3000 tools, and it runs 25 rules and the built-in
 // rules on each tool. Those costs do not depend on the output, so they get a
-// fixed budget. On top of that,
-// writing the document may allocate at most maxJSONAllocFactor bytes for each
-// byte of output (WriteJSON streams the document; the same idea as
-// TestWriteJSONBoundsOutputAndMemory in internal/report).
+// fixed budget. On top of that, writing the document may allocate at most
+// maxJSONAllocFactor bytes for each byte of output (WriteJSON streams the
+// document; the same idea as TestWriteJSONBoundsOutputAndMemory in
+// internal/report).
 //
 // Under -race the test skips the allocation check. The Go regexp package
 // allocates a matcher state for each match when it is built with -race (the
@@ -134,6 +136,9 @@ func TestScanJSONBound(t *testing.T) {
 	c, stdoutBuf, stderrBuf := dirsCLI(t, home, work)
 	c.getenv = fakeGetenv(map[string]string{"XDG_CONFIG_HOME": xdg, "HOME": home})
 	c.inspector = insp
+	// The test checks the size of the output, not the time budget: a slow or
+	// busy machine must not cut the rule analysis and change the row count.
+	c.toolBudget = time.Hour
 	args := []string{"scan", "--json", "--rules", hostileRulesDirMatchAll(t)}
 
 	runtime.GC()
@@ -189,7 +194,8 @@ func TestScanJSONBound(t *testing.T) {
 	}
 
 	// Every server name in the document is cut: 512 characters, then "...".
-	const maxNameChars = 515
+	// 512 is jsonMaxNameRunes in internal/report, which is not exported.
+	maxNameChars := 512 + utf8.RuneCountInString(termsafe.CutMarker)
 	if len(doc.Servers) != 1 {
 		t.Fatalf("servers = %d, want 1", len(doc.Servers))
 	}

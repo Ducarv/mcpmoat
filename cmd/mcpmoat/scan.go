@@ -580,7 +580,7 @@ func (c *cli) reportScan(ctx context.Context, res discover.Result, configPath st
 	pinFailed := steps.pinFailed
 
 	configProblem := len(res.Errors) > 0
-	if writeErr := c.writeScanOutput(res, steps, setup, ignore, configPath, configProblem); writeErr != nil {
+	if writeErr := c.writeScanOutput(res, steps, setup, ignore.fileEntries, configPath, configProblem); writeErr != nil {
 		c.cmdPrintf("scan", "cannot write output")
 		// stderr can still work. The file problems are the reason for a
 		// failed scan, so the user must still see them. New pins are not
@@ -713,10 +713,10 @@ func (c *cli) runToolAndLLMSteps(ctx context.Context, setup scanSetup, outcomes 
 
 // writeScanOutput writes the report on c.stdout: the JSON document with --json,
 // or the terminal report (see writeScanReport). It returns the first write
-// error. ignore is the ignore list of the scan: the JSON report holds the
-// number of entries that came from .mcpmoat-ignore. configPath is the --config
-// value, or empty. configProblem is true when a config file has a problem.
-func (c *cli) writeScanOutput(res discover.Result, steps scanStepsResult, setup scanSetup, ignore *scanIgnores, configPath string, configProblem bool) error {
+// error. fileEntries is the number of entries that scan read from
+// .mcpmoat-ignore: the JSON report holds it. configPath is the --config value,
+// or empty. configProblem is true when a config file has a problem.
+func (c *cli) writeScanOutput(res discover.Result, steps scanStepsResult, setup scanSetup, fileEntries int, configPath string, configProblem bool) error {
 	if setup.jsonOut {
 		mode := report.ModeNoConnect
 		if setup.connect != nil {
@@ -731,7 +731,7 @@ func (c *cli) writeScanOutput(res discover.Result, steps scanStepsResult, setup 
 			rows:          steps.rows,
 			pr:            steps.pr,
 			ignored:       steps.ignored,
-			fileEntries:   ignore.fileEntries,
+			fileEntries:   fileEntries,
 			configPath:    configPath,
 			configProblem: configProblem,
 		})

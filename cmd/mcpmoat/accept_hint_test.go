@@ -5,9 +5,6 @@ import (
 	"testing"
 )
 
-// testDigest has the real digest format: "pd1:" and 64 hex characters.
-const testDigest = "pd1:" + "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
-
 // TestAcceptAdvice checks when acceptAdvice gives a command and when it gives
 // prose steps, and that the prose never holds a command line or the name.
 func TestAcceptAdvice(t *testing.T) {

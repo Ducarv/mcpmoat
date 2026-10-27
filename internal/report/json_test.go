@@ -258,7 +258,7 @@ func TestWriteJSONIgnoredKeepsCounts(t *testing.T) {
 
 func TestWriteJSONAccept(t *testing.T) {
 	t.Parallel()
-	digest := "pd1:" + strings.Repeat("0f", 32)
+	digest := testDigest
 	srv := func(name string, a *report.JSONAccept) report.JSONServer {
 		js := report.NewJSONServer(discover.Server{Name: name, Transport: discover.TransportStdio, Command: "c"}, report.InspectionOK)
 		js.Accept = a
@@ -290,29 +290,26 @@ func TestWriteJSONAccept(t *testing.T) {
 	}
 }
 
-// TestWriteJSONFieldsTruncated checks that a report with nothing over the cap
-// says fields_truncated false. The cuts themselves, and the flag set by the
-// caller, are tested in json_bound_test.go.
-func TestWriteJSONFieldsTruncated(t *testing.T) {
+// TestWriteJSONFieldsTruncatedFalse checks that a report with nothing over the
+// cap says fields_truncated false, as a key with a value (not left out). The
+// cuts themselves, and the flag set by the caller, are tested in
+// json_bound_test.go.
+func TestWriteJSONFieldsTruncatedFalse(t *testing.T) {
 	t.Parallel()
-
-	t.Run("false when nothing is over the cap", func(t *testing.T) {
-		t.Parallel()
-		out := writeJSON(t, richReport())
-		if got := decodeJSON(t, out); got.FieldsTruncated {
-			t.Error("fields_truncated = true, want false")
-		}
-		if !strings.Contains(string(out), `"fields_truncated": false`) {
-			t.Errorf("output has no \"fields_truncated\": false:\n%s", out)
-		}
-	})
+	out := writeJSON(t, richReport())
+	if got := decodeJSON(t, out); got.FieldsTruncated {
+		t.Error("fields_truncated = true, want false")
+	}
+	if !strings.Contains(string(out), `"fields_truncated": false`) {
+		t.Errorf("output has no \"fields_truncated\": false:\n%s", out)
+	}
 }
 
 // cutTestReport builds the same report each time, so a test can compare the
 // report of the caller with a twin. It has a field over the cap.
 func cutTestReport(rules map[string]int) report.ScanReport {
 	js := report.NewJSONServer(discover.Server{Name: strings.Repeat("n", 600), Source: "/s", Transport: discover.TransportStdio, Command: "c"}, report.InspectionOK)
-	js.Accept = &report.JSONAccept{Digest: "pd1:" + strings.Repeat("ab", 32), Command: "cmd"}
+	js.Accept = &report.JSONAccept{Digest: testDigest, Command: "cmd"}
 	r := newReport([]report.JSONServer{js}, []report.JSONDiff{{Server: strings.Repeat("d", 600), Tool: "t", Kind: "new"}})
 	r.Findings = []report.JSONFinding{{RuleID: "X", Severity: "low", Key: strings.Repeat("k", 600), Source: report.SourceRule}}
 	r.Errors = []report.JSONFileError{{Path: strings.Repeat("p", 5000), Reason: "invalid JSON"}}

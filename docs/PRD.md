@@ -613,7 +613,7 @@ with `--no-color`).
   against it.
 - Field names do not change without a schema version bump.
 - The output holds the count of findings that an ignore entry dropped: `ignored` has `total`, the
-  count for each rule ID (`rules`) and the number of `.mcpmoat-ignore` entries used
+  count for each rule ID (`rules`) and the number of `.mcpmoat-ignore` entries read
   (`file_entries`). It holds rule IDs only, never text of the ignore file.
 - The output holds the data to accept the changes of a pinned server: `accept` has the digest of the
   terminal hint (FR-13) and, only when the hint prints a command, that command.

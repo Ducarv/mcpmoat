@@ -88,7 +88,7 @@ type ScanReport struct {
 // number of findings dropped for that rule. Its keys are rule IDs only, never
 // text from the ignore file. Total is the sum of Rules: it is the number in the
 // "N findings ignored" line on stderr. FileEntries is the number of entries
-// used from .mcpmoat-ignore.
+// read from .mcpmoat-ignore (the N in the stderr line "using N entries").
 type JSONIgnored struct {
 	Total       int            `json:"total"`
 	Rules       map[string]int `json:"rules"`

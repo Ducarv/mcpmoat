@@ -1223,7 +1223,7 @@ func TestScanLLMTruncatedUnusable(t *testing.T) {
 // .mcpmoat-ignore entry matches a finding of the LLM rule id but is not
 // applied. It is the line of the pin rules (see ignoreFileWarning).
 func llmFileWarning(id string) string {
-	return "mcpmoat scan: warning: .mcpmoat-ignore cannot ignore " + id + "; use --ignore on the command line\n"
+	return fileCannotIgnoreWarning(id) + "\n"
 }
 
 // TestScanLLMIgnore checks that only --ignore drops LLM findings (FR-10,

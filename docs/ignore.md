@@ -63,7 +63,7 @@ the file. Ignored findings do not count for the exit code, so the file can turn 
 `scan --json` shows the same counts in the top-level field `ignored`:
 `{ "total": N, "rules": { "<rule ID>": count }, "file_entries": M }`. `rules` gives the number of
 dropped findings for each rule ID. `total` is the sum, and it is the same number as `N findings
-ignored` in the stderr line. `file_entries` is the number of entries that `scan` used from
+ignored` in the stderr line. `file_entries` is the number of entries that `scan` read from
 `.mcpmoat-ignore`, the same number as in `using N entries from .mcpmoat-ignore`. The JSON holds rule
 IDs and counts only, never text from the ignore file. A CI job that reads only stdout can see that
 findings were dropped. Check `ignored` when a repository that you did not write has a

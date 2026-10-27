@@ -745,12 +745,12 @@ func TestScanJSONEscapesUntrustedText(t *testing.T) {
 // compared with what the user sees on the terminal, not with a copy of the
 // code under test.
 var (
-	// ignoredLineRE matches "mcpmoat scan: 3 findings ignored: A (2), B (1)".
-	ignoredLineRE = regexp.MustCompile(`(?m)^mcpmoat scan: (\d+) findings? ignored: (.+)$`)
-	// ignoredPartRE matches one "RULE-ID (n)" part of that line.
-	ignoredPartRE = regexp.MustCompile(`^(\S+) \((\d+)\)$`)
-	// fileNoticeRE matches "mcpmoat scan: using 2 entries from .mcpmoat-ignore".
-	fileNoticeRE = regexp.MustCompile(`(?m)^mcpmoat scan: using (\d+) entr(?:y|ies) from \.mcpmoat-ignore$`)
+	// ignoredLinePattern matches "mcpmoat scan: 3 findings ignored: A (2), B (1)".
+	ignoredLinePattern = regexp.MustCompile(`(?m)^mcpmoat scan: (\d+) findings? ignored: (.+)$`)
+	// ignoredPartPattern matches one "RULE-ID (n)" part of that line.
+	ignoredPartPattern = regexp.MustCompile(`^(\S+) \((\d+)\)$`)
+	// fileNoticePattern matches "mcpmoat scan: using 2 entries from .mcpmoat-ignore".
+	fileNoticePattern = regexp.MustCompile(`(?m)^mcpmoat scan: using (\d+) entr(?:y|ies) from \.mcpmoat-ignore$`)
 )
 
 // stderrIgnored parses the "N findings ignored: ..." line of stderr. It returns
@@ -760,7 +760,7 @@ var (
 func stderrIgnored(t *testing.T, stderr string) (total int, byRule map[string]int) {
 	t.Helper()
 	byRule = map[string]int{}
-	lines := ignoredLineRE.FindAllStringSubmatch(stderr, -1)
+	lines := ignoredLinePattern.FindAllStringSubmatch(stderr, -1)
 	switch len(lines) {
 	case 0:
 		return 0, byRule
@@ -774,7 +774,7 @@ func stderrIgnored(t *testing.T, stderr string) (total int, byRule map[string]in
 	}
 	sum := 0
 	for _, part := range strings.Split(lines[0][2], ", ") {
-		m := ignoredPartRE.FindStringSubmatch(part)
+		m := ignoredPartPattern.FindStringSubmatch(part)
 		if m == nil {
 			t.Fatalf("part %q of the line %q is not \"RULE-ID (n)\"", part, lines[0][0])
 		}
@@ -795,7 +795,7 @@ func stderrIgnored(t *testing.T, stderr string) (total int, byRule map[string]in
 // .mcpmoat-ignore" on stderr, or 0 when there is no notice.
 func stderrFileEntries(t *testing.T, stderr string) int {
 	t.Helper()
-	m := fileNoticeRE.FindAllStringSubmatch(stderr, -1)
+	m := fileNoticePattern.FindAllStringSubmatch(stderr, -1)
 	if len(m) == 0 {
 		return 0
 	}

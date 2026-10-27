@@ -48,6 +48,9 @@ func writeJSONReference(r ScanReport) ([]byte, error) {
 	return escapeUnsafeRunes(buf.Bytes()), nil
 }
 
+// streamDigest has the real pin digest format: "pd1:" and 64 hex digits.
+var streamDigest = "pd1:" + strings.Repeat("ab", 32)
+
 // streamRichReport has data in every list, nested optional fields (Argv, URL,
 // Accept) and a filled Ignored.
 func streamRichReport() ScanReport {
@@ -62,14 +65,14 @@ func streamRichReport() ScanReport {
 				State: "enabled", Transport: "stdio", Source: "/p/.mcp.json",
 				Argv:       []string{"npx", "-y", "pkg <a&b>"},
 				Inspection: JSONInspection{Status: InspectionOK},
-				Accept:     &JSONAccept{Digest: "sha256:abc", Command: "mcpmoat accept stdio-srv"},
+				Accept:     &JSONAccept{Digest: streamDigest, Command: "mcpmoat pin --accept stdio-srv --expect " + streamDigest},
 			},
 			{
 				Name: "http-srv", Client: "cursor", Scope: "user", State: "enabled",
 				Transport: "http", Source: "/h/mcp.json", URL: "https://example.com/mcp?a=1&b=2",
 				Untrusted:  true,
 				Inspection: JSONInspection{Status: InspectionTimeout},
-				Accept:     &JSONAccept{Digest: "sha256:def"},
+				Accept:     &JSONAccept{Digest: streamDigest},
 			},
 			{
 				Name: "plain", Client: "vscode", Scope: "user", State: "disabled",

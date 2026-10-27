@@ -982,6 +982,13 @@ const scanPrefix = "mcpmoat scan: "
 // scanWarnPrefix is the start of every scan warning line.
 const scanWarnPrefix = scanPrefix + "warning: "
 
+// fileCannotIgnoreWarning returns the stderr line (without the end of line)
+// that scan prints when a .mcpmoat-ignore entry matches a finding of the rule
+// id but is not applied (see fileCannotIgnore).
+func fileCannotIgnoreWarning(id string) string {
+	return scanWarnPrefix + rules.IgnoreFileName + " cannot ignore " + id + "; use --ignore on the command line"
+}
+
 // writeFileOrSkip writes content to dir/name. The file system may refuse a file
 // name (a name with a control rune, for example). That is not a failure of
 // mcpmoat, so the test skips.

@@ -306,7 +306,7 @@ step 5 and step 6:
     and fix are fixed texts in `scan_tools.go`, `capTitle`, `capRisk` and `capRemediation`) and
     prints one warning on stderr. Its related text is `N more tool findings are not listed; limit M`
     (`capText`). The `MOAT-T1-023` row and the cap row do not count toward the limit. The cap row
-    has the severity of `budgetSeverity`, the same as the budget row, so the row fails closed (high
+    has the severity of `failClosedSeverity`, the same as the budget row, so the row fails closed (high
     with the built-in rules): a server that floods the report still fails the gate. Only
     `--ignore MOAT-T1-024` drops it, not the file (`fileCannotIgnore`), so a cloned repository
     cannot hide that findings were left out. The warning prints also when `--ignore` drops the row.
@@ -320,7 +320,7 @@ step 5 and step 6:
     which cannot be stopped (#146). A server that uses up its budget keeps the rows found so far and
     gets one finding `MOAT-T1-023` (`rules.RuleAnalysisBudget`, a native rule with no YAML file).
     Its severity is the highest severity of the description and schema rules that `scan` applies,
-    but never lower than high (`budgetSeverity`, `rules.Analyzer.MaxSeverity`). So it is high with
+    but never lower than high (`failClosedSeverity`, `rules.Analyzer.MaxSeverity`). So it is high with
     the built-in rules, and critical when a description or schema rule from `--rules` is critical.
     This severity counts every applied description or schema rule, also one that `--ignore` drops,
     on purpose: the rules that did not run could have given a finding (fail closed). Its related
@@ -879,26 +879,26 @@ bound the whole document: the config findings, the pin findings and the LLM find
    in the middle, `w` may already hold the first part of the document. `WriteJSON` returns the
    error, and `scan` reports it and exits with 2.
 
-The tests prove the bound of the writer and of the tool rows with measured numbers. The limits
-have about 2 times headroom, so a change that makes the output or the allocations grow with the
+The tests prove the bound of the writer and of the tool rows. The exact measured numbers are in the
+comments of the tests, so they stay with the code. The limits have headroom of about 2 times, so a change that makes the output or the allocations grow with the
 size of a name fails them. No test covers the config rows, because they have no cap.
 
 - `TestWriteJSONBoundsOutputAndMemory` (`internal/report/json_bound_test.go`) tests the writer
   alone. The hostile report has a server name of 1 MiB and 10,000 findings. In each finding, the
   `Server`, the `Key` and the `Related` field hold that name, so without the cut the output would
-  be about 31 GB. The output is 17,222,855 bytes. `WriteJSON` allocates about 2.3 times the output
-  (about 3.8 times with `-race`). The old whole-document encoder allocated 16 to 19 times. The test
-  limits are: output at most 32 MiB, and allocation at most 8 times the output.
+  be about 31 GB. The output is about 17 MB. `WriteJSON` allocates a small multiple of the output
+  (under 4 times, also with `-race`). The old whole-document encoder allocated 16 to 19 times. The
+  test limits are: output at most 32 MiB, and allocation at most 8 times the output.
 - `TestScanJSONBound` (`cmd/mcpmoat/scan_json_bound_test.go`) tests the whole in-process
   `scan --json`. The hostile config has a server name of 1 MiB, 3000 tools and 25 rules that match
-  every description. The output is 711,753 bytes (0.68 MiB) with 1002 rows. In a tool row the
+  every description. The output is under 1 MiB, with about 1000 rows. In a tool row the
   name is in the `server` field only: `key` is the tool name and `related` is `description`. For
-  comparison, the same 1002 rows with the version 2 encoder (no cut) would hold the name 1002
-  times, about 1.05 GB, about 1,500 times the bounded output. The test checks, in both modes
+  comparison, the same rows with the version 2 encoder (no cut) would hold the name about 1000
+  times, about 1 GB, more than 1,000 times the bounded output. The test checks, in both modes
   (with and without `-race`), the output size (at most 1.5 MiB), the number of rows, the
   `fields_truncated` flag, the `MOAT-T1-024` row and the schema. The allocation check runs only
-  without `-race`: the scan allocates about 65 MiB, and the limit is 128 MiB plus 8 times the output
-  (`maxScanAllocBytes` and `maxJSONAllocFactor`). Under `-race` the race detector makes `regexp`
+  without `-race`: the scan allocates a few tens of MiB, and the limit is 128 MiB plus 8 times the
+  output (`maxScanAllocBytes` and `maxJSONAllocFactor`). Under `-race` the race detector makes `regexp`
   allocate far more, so the check could not catch a regression there. The test skips the check and
   uses fewer tools in that mode.
 
