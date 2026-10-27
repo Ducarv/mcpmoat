@@ -627,22 +627,32 @@ a changed tool (a rug pull). `scan` writes the pins of a server on its first run
   absolute or that leaves the directory is refused before that (`safefile.ErrOutsideRoot`). A
   pins directory that is a symlink (for example a config directory on another volume), and a
   symlink in a parent, are followed: the checks see the target. A symlink on the path, the pins
-  directory included, must belong to the current user or root (`checkSymlinkOwner`). The check
-  reads each entry with `os.Lstat`, because `os.Stat` shows only the target. The sticky bit of a
-  parent such as `/tmp` does not stop another user from creating a symlink there and pointing it
-  to another directory later.
+  directory included, must belong to the current user or root (`checkSymlinkOwner`). This holds for
+  every symlink that the walk meets, also a symlink that is reached only through the target of
+  another symlink (see the next item). The check reads each entry with `os.Lstat`, because
+  `os.Stat` shows only the target. The sticky bit of a parent such as `/tmp` does not stop another
+  user from creating a symlink there and pointing it to another directory later.
 - Parent directories: `Load` and `LoadLocked` first check each parent directory of the pins
-  directory, up to `/` (`checkParents`). They walk the lexical path and the path with the symlinks
-  resolved, so when `~/.config` is a symlink to `/data/cfg`, `/data` is checked too. A parent is
-  refused when a user that is neither the current user nor root owns it, or when group or others
-  can write it, unless the sticky bit is set (as on `/tmp`), and a symlink that such a user owns is
-  refused (see the symlink rule above). The fix hint is
-  `chmod go-w -- '<path>'`, or a private `XDG_CONFIG_HOME`. A missing parent (a first run) is
-  skipped, so the nearest existing parent, in which the pins directory is made, and every
-  directory above it are still checked. Without this check, a user who can write a parent could
-  swap, rename or remove the whole `mcpmoat/` directory, and the next run would pin the current
-  tools as a first run. The check is by path, by design: when no other user can write a parent,
-  nobody but root can swap a part of the path between the check and the open.
+  directory, up to `/` (`checkParents`). `checkParentsAs` resolves the path one part at a time, as
+  the kernel does, and does not use `filepath.EvalSymlinks`. It starts at `/`. For a symlink it
+  checks the owner, reads the target with `os.Readlink` and goes on inside the target (from `/` for
+  an absolute target, from the directory that holds the link for a relative one). A `..` goes up
+  from the directory that the walk has reached, not from the written path. It stops with an error
+  after 40 symlinks, which also ends a loop. So when `~/.config` is a symlink to `/data/cfg`,
+  `/data` is checked too, and so is a link that `/data/cfg` is itself. Every directory above the
+  pins directory that the walk passes, also one that holds a symlink or lies inside a link target,
+  gets the owner and mode check once. A parent is refused when a user that is neither the current
+  user nor root owns it, or when group or others can write it, unless the sticky bit is set (as on
+  `/tmp`), and a symlink that such a user owns is refused (see the symlink rule above). When more
+  than one entry is unsafe, the error names the last one that the walk found, which is the one
+  nearest to the pins directory. The error names the real path, so on macOS it can say
+  `/private/var/...` for a path that you wrote as `/var/...`. A refusal has no `read <path>:`
+  prefix. The fix hint is `chmod go-w -- '<path>'`, or a private `XDG_CONFIG_HOME`. A missing
+  parent (a first run) stops the walk, so the nearest existing parent, in which the pins directory
+  is made, and every directory above it are still checked. Without this check, a user who can
+  write a parent could swap, rename or remove the whole `mcpmoat/` directory, and the next run
+  would pin the current tools as a first run. The check is by path, by design: when no other user
+  can write a parent, nobody but root can swap a part of the path between the check and the open.
 - ACL (macOS only): on macOS an ACL is separate from the mode bits, so `chmod +a` can let another
   user write a path that passes the mode check. `checkACL` reads the ACL of the open pins directory
   and of the open `pins.json` with the `fgetattrlist(2)` system call, as a raw syscall without cgo.

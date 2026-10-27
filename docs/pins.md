@@ -50,10 +50,13 @@
   the same directory. The hint is to replace the symlink with the file. A pins directory that is a
   symlink, for example `~/.config` on another disk, is fine when you or root own the symlink:
   mcpmoat checks its target. A symlink that another user owns is refused, on the pins directory
-  and on every parent. In a sticky directory such as `/tmp`, any user can create a symlink, and
-  that user can point it to another directory later, so the next run would see a first run. The
+  and on every parent. This includes a symlink that is only reached through the target of another
+  symlink: mcpmoat follows each link, one part of the path at a time, and checks every symlink and
+  every directory on the way. In a sticky directory such as `/tmp`, any user can create a symlink,
+  and that user can point it to another directory later, so the next run would see a first run. The
   hint is to ask the owner or root to remove or replace the symlink, or to use a private
-  `XDG_CONFIG_HOME`.
+  `XDG_CONFIG_HOME`. The error names the real path (on macOS `/private/var/...` for `/var/...`) and
+  shows the unsafe entry that is nearest to the pins directory.
 - **Later runs:** `scan` compares the tools with the pins. It reports `MOAT-T2-001` (changed tool,
   high), `MOAT-T2-002` (new tool, medium), `MOAT-T2-003` (removed tool, low) and `MOAT-T2-004` (tool
   not verified). A new tool is medium. Read the report, not only the exit code (see [Exit
