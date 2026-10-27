@@ -111,7 +111,11 @@ func isInvisibleFormat(r rune) bool {
 //     + "nore" + ZWSP + "all" is "Ignore all": the control rune joins a word
 //     and the ZWSP splits two words. In ESC + ZWSP + "[8mIgnore" + ZWSP +
 //     "all", the space goes before the ESC, so ESC [ 8 m is still a CSI and
-//     the form is "  Ignore all".
+//     the form is "  Ignore all". A run inside a CSI, after the ESC (or
+//     U+009B) and before the final byte, is dropped with no space (see
+//     csiFinalIndex), except the run that holds the ESC or U+009B itself.
+//     So ESC [ + ZWSP + "8mIgnore" + ZWSP + "all" is " Ignore all", not
+//     "[ 8mIgnore all".
 //  5. When s holds ESC, U+009B (CSI) or U+009D (OSC) (see startsSeq): as
 //     the first form, but the sequences are read with ansiSeqC0 and a
 //     sequence gives back the text that it takes (see keepSeqText and
@@ -139,7 +143,8 @@ func isInvisibleFormat(r rune) bool {
 //     too, so ESC [ "Ignore" + ESC + "all" is " Ignore all". As in the
 //     fourth form, the space of a run goes before an ESC at its end (see
 //     placeOnce), so "run" + ZWSP + ESC [ 1 m + "ning" is "run ning", not
-//     "running".
+//     "running", and a run inside a CSI gets no space, so ESC [ + ZWSP +
+//     "8mIgnore" + ZWSP + "all" is "Ignore all".
 //
 // In the forms 2 to 4 and 7, at most two spaces stand for a whole run of
 // invisible runes (two only in the second form, for a run that has a
@@ -442,8 +447,10 @@ const (
 	// control runes becomes nothing. The control runes of a run stay in the
 	// text until the ANSI step, and the space goes before them when one of
 	// them is ESC, U+009B or U+009D, so that the sequence it starts is still
-	// found (see placeOnce). Its ANSI step reads the sequences with
-	// ansiSeqC0. It builds the fourth form.
+	// found (see placeOnce). A run inside a CSI, after the ESC (or U+009B)
+	// and before the final byte, gets no space, for the same reason, except
+	// the run that holds the ESC or U+009B itself. Its ANSI step reads the
+	// sequences with ansiSeqC0. It builds the fourth form.
 	spaceFormats
 	// keepSeqText drops every invisible rune, as dropSeqC0 does, but it
 	// keeps the text that an escape sequence takes (see seqText): a CSI
@@ -464,9 +471,11 @@ const (
 	// before the ANSI step, and a control run becomes one U+0020 after it,
 	// also inside the text of an OSC. The U+0020 of a run goes as in
 	// spaceFormats (see placeOnce): before the control runes of the run
-	// when one of them is ESC, U+009B or U+009D, and after them otherwise.
-	// So ZWSP + ESC + "[1m" is U+0020 + ESC + "[1m", and the SGR does not
-	// join the words around it. It builds the seventh form.
+	// when one of them is ESC, U+009B or U+009D, and after them otherwise,
+	// and not at all for a run inside a CSI. So ZWSP + ESC + "[1m" is
+	// U+0020 + ESC + "[1m", and the SGR does not join the words around it,
+	// and ESC + "[" + ZWSP + "1m" is ESC + "[1m", still an SGR. It builds the
+	// seventh form.
 	keepSeqTextSpaced
 )
 
@@ -518,7 +527,10 @@ func (m formMode) controlRepl() rune {
 // other modes. In keepSeqTextSpaced, placeAtTail would write no space for a
 // run such as ZWSP + ESC, which ends with a kept rune. Then the SGR that the
 // ESC starts becomes nothing, and two words join: "run" + ZWSP + ESC +
-// "ning" would be "running". placeOnce writes the space before the ESC.
+// "ning" would be "running". placeOnce writes the space before the ESC. And
+// placeAtTail would put a space inside a CSI: ESC [ + ZWSP + "8m" would be
+// ESC [ U+0020 "8m", which is no CSI. placeOnce writes no space there (see
+// replaceRuns).
 func (m formMode) runPlace() runPlace {
 	if m == spaceFormats || m == keepSeqTextSpaced {
 		return placeOnce
@@ -751,7 +763,10 @@ const (
 	// them is ESC, U+009B or U+009D (see startsSeq), and after them
 	// otherwise. So in the fourth form of baseFormsCut, ESC + ZWSP + "[8m" and
 	// ESC + ZWSP + U+0001 + "[8m" keep their CSI after the U+0020, and
-	// U+0001 + ZWSP + "all" is U+0001 + U+0020 + "all".
+	// U+0001 + ZWSP + "all" is U+0001 + U+0020 + "all". A run inside a
+	// CSI, after the ESC (or U+009B) and before the final byte, gets no
+	// repl, except the run that holds the ESC or U+009B itself (see
+	// replaceRuns): ESC + "[" + ZWSP + "8m" is ESC + "[8m".
 	placeOnce
 )
 
@@ -767,9 +782,20 @@ const (
 //
 // Invalid UTF-8 becomes U+FFFD, as with strings.Map. U+FFFD is not
 // invisible, so it ends a run.
+//
+// With placeOnce, a run that stands inside a CSI, after the ESC (or U+009B)
+// and before the final byte, gets no repl: it keeps only its kept runes (see
+// csiFinalIndex). A space there would end the CSI for the ANSI step:
+// ESC [ + ZWSP + "8m" would be ESC [ U+0020 "8m", which is no CSI. The run
+// that holds the ESC or U+009B itself is not inside: it gets its repl before
+// the ESC or U+009B, as placeOnce says. A white-space C0 rune (TAB, LF, VT,
+// FF or CR) is in csiC0 but is not invisible, so it ends the run of the ESC.
+// A later run of format runes before the "[" is then inside the CSI too, as
+// ansiSeqC0 reads it: ESC + TAB + ZWSP + "[8m" is ESC + TAB + "[8m".
 func replaceRuns(s string, keep func(rune) bool, repl rune, place runPlace) string {
 	var b strings.Builder
 	b.Grow(len(s))
+	csiFinal := -1 // with placeOnce: a run at i < csiFinal is inside a CSI
 	for i := 0; i < len(s); {
 		r, size := utf8.DecodeRuneInString(s[i:])
 		if !isInvisible(r) {
@@ -785,10 +811,84 @@ func replaceRuns(s string, keep func(rune) bool, repl rune, place runPlace) stri
 			}
 			end += size
 		}
-		writeRun(&b, s[i:end], keep, repl, place)
+		run, runRepl := s[i:end], repl
+		if place == placeOnce && i < csiFinal {
+			runRepl = -1 // inside a CSI: no space
+		}
+		writeRun(&b, run, keep, runRepl, place)
+		if place == placeOnce {
+			// Only the last ESC or U+009B of a run can start a CSI: an
+			// earlier one is followed by it, and a CSI holds no ESC or
+			// U+009B.
+			if j := strings.LastIndexFunc(run, startsCSI); j >= 0 {
+				csiFinal = csiFinalIndex(s, i+j)
+			}
+		}
 		i = end
 	}
 	return b.String()
+}
+
+// csiFinalIndex returns the index in s of the final byte of the CSI that
+// starts at s[start], an ESC or a U+009B, as ansiSeqC0 reads it once the
+// format runes (see isInvisibleFormat) are gone. It returns -1 when no CSI
+// starts there. The placeOnce runs of replaceRuns use it: in spaceFormats
+// and keepSeqTextSpaced, a run of format runes inside a CSI is dropped with
+// no space, so the ANSI step still finds the CSI.
+//
+// It reads the runes of ansiSeqC0: after ESC, the C0 runes of csiC0 and "["
+// (after U+009B, nothing), then the parameter bytes (0x30 to 0x3F) and the
+// intermediate bytes (0x20 to 0x2F), with C0 runes of csiC0 among them, and
+// a final byte (0x40 to 0x7E). It skips the format runes. Any other rune,
+// such as ESC, U+009B, CAN, SUB, NEL, a non-ASCII letter or U+FFFD for
+// invalid UTF-8, or the end of s, means no CSI, and then the runs keep their
+// space. So ESC [ + ZWSP + U+00E9 keeps the space after the "[".
+//
+// The final byte rule is the rule of ansiSeqC0 and of a terminal: an ASCII
+// letter is a final byte. So in ESC [ + ZWSP + "Ignore", the CSI is
+// ESC [ I, and the ZWSP is dropped.
+//
+// It reads s from start up to the final byte or the first rune that stops
+// it, and it allocates nothing. ESC and U+009B stop it, and replaceRuns calls
+// it at most once for each run, for the last ESC or U+009B of the run. So a
+// read ends at or before the start of the next read, each rune is read at
+// most twice, and replaceRuns stays linear in len(s).
+func csiFinalIndex(s string, start int) int {
+	r, size := utf8.DecodeRuneInString(s[start:])
+	i := start + size
+	if r == '\x1b' {
+		for { // the C0 runes of csiC0 and "["
+			if i >= len(s) {
+				return -1
+			}
+			r, size := utf8.DecodeRuneInString(s[i:])
+			i += size
+			if r == '[' {
+				break
+			}
+			if !isCSIC0(r) && !isInvisibleFormat(r) {
+				return -1
+			}
+		}
+	} else if r != '\u009b' {
+		return -1
+	}
+	inter := false // an intermediate byte was read: no parameter byte now
+	for i < len(s) {
+		r, size := utf8.DecodeRuneInString(s[i:])
+		switch {
+		case isCSIC0(r), isInvisibleFormat(r):
+		case 0x30 <= r && r <= 0x3f && !inter: // parameter byte
+		case 0x20 <= r && r <= 0x2f: // intermediate byte
+			inter = true
+		case 0x40 <= r && r <= 0x7e: // final byte
+			return i
+		default:
+			return -1
+		}
+		i += size
+	}
+	return -1
 }
 
 // writeRun writes run, a run of invisible runes, to b for replaceRuns: the

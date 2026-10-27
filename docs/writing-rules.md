@@ -62,8 +62,10 @@ How mcpmoat prepares the text before a match. This applies to every regex and ke
      control characters is one space. So a ZWSP inside a word and a control character between
      words still match.
   4. When the text has a control character and a format character: the control characters are
-     removed, and each run with a format character is one space. So a control character inside a
-     word and a ZWSP between words still match.
+     removed, and each run with a format character is one space, except a run inside a CSI (after
+     the "[" of ESC [ or after U+009B, before the final byte), which is dropped with no space. So a
+     control character inside a word and a ZWSP between words still match, and ESC [ + ZWSP +
+     "8mIgnore" is still the SGR ESC [ 8 m before "Ignore".
   5. When the text has ESC, U+009B or U+009D: as form 1, but the sequences are read the terminal
      way, and a sequence gives back the text that it takes. A CSI whose final byte is an ASCII
      letter other than "m" keeps that letter, its parameter bytes `<`, `=`, `>` and `?` and its
@@ -78,39 +80,72 @@ How mcpmoat prepares the text before a match. This applies to every regex and ke
   6. When the text has ESC or U+009B and a C0 control character: as form 1, but each sequence,
      read the terminal way, is one space. So ESC + U+0001 + "[8mIgnore" reads as " Ignore".
   7. When the text has ESC, U+009B or U+009D: as form 5, but each run of invisible characters is
-     one space, as in form 2. So ESC ] "Ignore" + ZWSP + "all" BEL reads as " Ignore all ",
-     ESC [ "Ignore" + U+0001 + "all" reads as " Ignore all", and an ESC that starts no sequence
-     is a space too: ESC [ "Ignore" + ESC + "all" reads as " Ignore all".
+     one space, as in form 2, except a run inside a CSI (after the "[" of ESC [ or after U+009B,
+     before the final byte), which is dropped with no space. So ESC ] "Ignore" + ZWSP + "all" BEL
+     reads as " Ignore all ", ESC [ "Ignore" + U+0001 + "all" reads as " Ignore all", and an ESC
+     that starts no sequence is a space too: ESC [ "Ignore" + ESC + "all" reads as " Ignore all".
 
-  Some texts defeat all seven forms:
-  - one kind of invisible character both inside a word and between words;
-  - a format character (such as ZWSP) inside a CSI, after the "[", with the same character between
-    words (ESC [ + ZWSP + "8mIgnore" + ZWSP + "all");
+  Some texts defeat all seven forms. Each case below is a known limit with its reason, and
+  `invisible_unicode` still flags it (see the end of this item). A format character inside a CSI
+  reads as if it were absent, so such a text has the same limits as the text without it.
+  - one kind of invisible character both inside a word and between words. Each form treats every
+    run of one kind the same way, so it joins all such words or splits all of them. To tell them
+    apart would need a word list or one form for each combination of runs.
   - text that only a sequence gives back (OSC text or a CSI letter) with two kinds of invisible
     characters, one inside a word and the other between words (ESC [ "Ig" + ZWSP + "nore" +
-    U+0001 + "all");
-  - a CSI that takes a character that no form gives back: the "m" of a word (ESC [ 1 "make" reads
-    as "ake", and "you " + ESC [ "must" reads as "you ust"), a digit, `;` or `:`, or a final byte
-    that is not a letter (ESC [ "~/.ssh" reads as " /.ssh");
+    U+0001 + "all"). A fix needs two new base forms, so a regex would read up to 27 forms, not 21
+    (about 29% more worst-case cost).
+  - a CSI letter and an SGR between two words (ESC [ "Ignore" + ESC [ 0 m + "all", and "Send" +
+    ESC [ 8 m + "the" + ESC [ SP "argument"). Only forms 5 and 7 give back a CSI letter, but these
+    forms read an SGR as nothing, so the words on each side of the SGR join. No form does both.
+    A fix needs a new base form, so a regex would read up to 27 forms, not 21, the same cost as
+    for the case above.
+  - a CSI that takes the "m" of a word (ESC [ 1 "make" reads as "ake", and "you " + ESC [ "must"
+    reads as "you ust"). A terminal also runs ESC [ m and hides the "m", so the form matches the
+    screen. To give the "m" back would change how the most common benign SGR, the bare reset
+    ESC [ m, reads.
+  - a CSI that takes a digit, `;` or `:`. These are real parameters of benign cursor and SGR
+    codes, and an attack needs a word that starts with a digit or `;`.
+  - a CSI with a final byte that is not a letter (ESC [ "~/.ssh" reads as " /.ssh"). No hit is
+    lost: MOAT-T1-004 (medium) still fires on "Read the file " + ESC [ "~/.ssh".
   - a CSI with a letter final byte inside an OSC text, right before a word: forms 5 and 7 keep
     its letter, and the other forms drop the OSC text (ESC ] "0;" + U+009B + "2KIgnore" BEL reads
-    as " 0; KIgnore ");
+    as " 0; KIgnore "). One form cannot both keep the letter (U+009B "Ignore") and split it
+    ("2KIgnore"), so a fix needs a new base form. The other option, a CSI inside OSC text as one
+    space only in form 7, loses ESC ] U+009B "Ignore" + ZWSP + "all" BEL, which matches today.
   - an OSC, or a CSI with a final byte other than "m", inside a word: a terminal shows one word,
-    but every form splits it ("Ig" + ESC [ K + "nore" reads as "Ig Knore" or "Ig nore");
+    but every form splits it ("Ig" + ESC [ K + "nore" reads as "Ig Knore" or "Ig nore"). To read
+    an OSC 8 as nothing in form 5 loses the hit on a payload in an OSC 8 URL with a ZWSP inside a
+    word. To join "Ig" + ESC [ K + "nore" conflicts with ESC [ "Ignore", which needs the letter
+    back. So each fix needs a new base form or loses a hit.
   - a payload that only forms 5 and 7 show, after more than 32 KiB of OSC text. The
     `match_window` heuristic does not flag such a text (see below). The `max_length` heuristic
     (MOAT-T1-007, low) flags it when it has more than 4096 characters. Forms 5 and 7 are not
     longer than the raw text in characters, so this is true unless only the Unicode normalization
-    (NFC) makes forms 5 and 7 longer than 32 KiB.
+    (NFC) makes forms 5 and 7 longer than 32 KiB. To also match the copy of form 5 or 7 without
+    the OSC text would raise the bound to 9 base forms and 27 regex forms. To count only the text
+    outside OSC 8 links is not enough, because padding with OSC 8 links still works.
 
   Form 5 can also make a token that neither the raw text nor a terminal shows, from a rare CSI. It
-  writes a space and gives back the kept bytes and the final letter. So "<system" + ESC [ > c +
-  "-info>" reads as "<system >c-info>", ESC [ SP q + ESC [ 1 m + "iPhone" gives the word
-  "qiPhone". Such a hit can be a false positive.
+  writes a space and gives back the kept bytes and the final letter. Such a hit can be a false
+  positive at high, but only on crafted text:
+  - "<system" + ESC [ > c + "-info>" reads as "<system >c-info>" (MOAT-T1-002, and MOAT-T1-013 in
+    a schema). This CSI (DA2) is a query that a terminal answers, not output, and the raw text
+    already holds "<system". A fix gives back fewer CSI bytes and loses the hit on
+    ESC [ "<IMPORTANT>".
+  - ESC [ SP q + ESC [ 1 m + "iPhone" gives the word "qiPhone" (MOAT-T3-001), and the plain text
+    gets no hit. This CSI (DECSCUSR) is rare, and a test on realistic ANSI text found no such hit.
+    To give the final letter back only before a letter does not fix ESC [ SP + "qiPhone".
+
+  ESC [ ".env" in a schema string is not a false positive at high. It gets only MOAT-T1-012 and
+  MOAT-T1-004, both medium.
 
   The `invisible_unicode` heuristic (MOAT-T1-006 for a description, MOAT-T1-015 for a schema)
-  flags every invisible character, also every control character except white space. So it still
-  flags such a text.
+  flags nearly every invisible character, also every control character except white space. It
+  excuses only one VS15 or VS16 after a pictograph (or a keycap base) and one ZWJ between two
+  pictographs, as in an emoji. So it still flags each text above, because each one holds an
+  invisible character that it does not excuse, such as ESC, ZWSP or U+0001. Both rules are
+  medium, so the default `--fail-on high` does not fail on such a text.
 - A regex also sees a folded form of the text: fullwidth letters, mathematical letters and
   combining marks become plain letters. Only the text is folded, not the pattern. So write the
   pattern in ASCII and do not add fullwidth alternatives: `(?i)ignore` also matches "ignore" in
